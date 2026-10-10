@@ -8,6 +8,9 @@ const Head = @import("cuda_mtp.zig").Head;
 const Lanes = @import("cuda_lanes.zig").Cuda;
 const lone = @import("cuda_lone.zig");
 
+/// Sliding Weights' learner (--slide): lessons change the weights this engine's lanes decode with.
+pub const slide = @import("cuda_slide.zig");
+
 pub const model_type = "nemotron_h";
 pub const formats: []const []const u8 = &.{"mlx-q4g64"};
 pub const default_context: i64 = engine.default_context;
@@ -62,6 +65,12 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .deinit = release,
         .lone = if (head != null) loneRun else null,
     };
+}
+
+/// What a learner over the loaded engine `p` learns into; `dir` must outlive it.
+pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return .{ .e = own.e, .dir = dir };
 }
 
 fn loneRun(p: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool) anyerror!bool {

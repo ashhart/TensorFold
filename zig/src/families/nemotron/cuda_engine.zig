@@ -148,6 +148,32 @@ pub const Engine = struct {
         for (1..state.max_rows + 1) |r| set[r] = try e.record(@intCast(r), false);
     }
 
+    /// Every captured graph again, as the weights now stand: a graph keeps each layer's learned change as it was captured.
+    /// Captured on the own sequence, which keeps its contents; the bound sequence and its draw mode are kept.
+    pub fn recapture(e: *Engine) !void {
+        if (e.serial == null) return;
+        try e.stream.synchronize();
+        const was = e.bound;
+        const sampling = e.sampling;
+        if (was != &e.own) e.bind(&e.own);
+        defer {
+            if (was != &e.own) e.bind(was);
+            e.sampling = sampling;
+        }
+        e.sampling = null;
+        const serial = try e.record(1, true);
+        e.serial.?.deinit();
+        e.serial = serial;
+        for (&e.windows, 0..) |*set, m| {
+            e.sampling = if (m == 0) null else .{ .seed = 0, .temperature = 1.0 }; // the sampled set reads each stream's rule
+            for (1..set.len) |rows| if (set[rows] != null) {
+                const fresh = try e.record(rows, false);
+                set[rows].?.deinit();
+                set[rows] = fresh;
+            };
+        }
+    }
+
     fn record(e: *Engine, rows: usize, feed: bool) !cuda.graph.Exec {
         try cuda.graph.beginCapture(e.stream, .thread_local);
         e.recordBody(rows, feed) catch |err| {

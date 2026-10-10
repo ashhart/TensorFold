@@ -7,6 +7,7 @@ const nemotron = @import("nemotron");
 const Allocator = std.mem.Allocator;
 const budget = @import("cuda_memory.zig");
 const Pool = budget.Pool;
+const learn_hook = @import("nemotron_slide.zig");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
 const registry = .{nemotron.native};
@@ -133,6 +134,9 @@ threadlocal var bound: ?*const cuda.Context = null;
 
 const Gpu = struct { driver: cuda.Driver, ctx: cuda.Context };
 
+/// A family's Sliding Weights learner behind the lane host's hook, and how to free it.
+const Slide = struct { hook: api.Learner, free: *const fn (*anyopaque, Allocator) void };
+
 /// One loaded model behind the lane host: everything the engine thread reads lives here.
 const Host = struct {
     gpa: Allocator,
@@ -147,6 +151,8 @@ const Host = struct {
     host: api.LaneHost,
     startup: []u8 = &.{},
     lone: ?LoneRun = null, // the family's driver for a lone drafted stream, called with `family`
+    slide: ?Slide = null, // --slide: the family's learner, which learns into the served weights
+    dir: []u8 = &.{}, // the model folder the learner writes its lessons into
 
     fn close(p: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(p));
@@ -154,6 +160,8 @@ const Host = struct {
         h.core.deinit();
         h.cfg.deinit(h.gpa);
         if (h.gpu) |g| g.ctx.makeCurrent() catch {};
+        if (h.slide) |s| s.free(s.hook.ctx, h.gpa);
+        h.gpa.free(h.dir);
         h.release(h.family);
         if (h.gpu) |g| {
             g.ctx.deinit();
@@ -184,7 +192,33 @@ const Host = struct {
         h.host.memory = if (h.gpu != null) .{ .read = readMemory } else null;
         h.host.explain = explain;
         if (h.lone != null) h.host.lone = .{ .ctx = h, .run = loneRun, .sampled = true };
+        if (h.slide != null) h.host.learner = h.learner();
         try h.host.start();
+    }
+
+    /// The family's learner, each call made with the context current on the lane thread.
+    fn learner(h: *Host) api.Learner {
+        return .{
+            .ctx = h,
+            .begin = struct {
+                fn f(p: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) anyerror!void {
+                    const l = bind(p).slide.?.hook;
+                    return l.begin(l.ctx, request, sink);
+                }
+            }.f,
+            .step = struct {
+                fn f(p: *anyopaque) api.Learner.Step {
+                    const l = bind(p).slide.?.hook;
+                    return l.step(l.ctx);
+                }
+            }.f,
+            .abort = struct {
+                fn f(p: *anyopaque) void {
+                    const l = bind(p).slide.?.hook;
+                    l.abort(l.ctx);
+                }
+            }.f,
+        };
     }
 
     /// The family's lone driver with the context current on the lane thread.
@@ -293,6 +327,16 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         };
         return null;
     };
+    if (o.slide) {
+        if (!@hasDecl(F, "slide")) {
+            problem.* = try std.fmt.allocPrint(a, "--slide: the native CUDA engine cannot learn into {s} checkpoints yet", .{o.model_type});
+            return null;
+        }
+        if (try F.slide.linked(a, io, o.dir)) |name| {
+            problem.* = try std.fmt.allocPrint(a, "--slide rewrites the model's own files, and {s} in {s} is a link to data another file shares (a Hugging Face cache's blob, or a hard link), so learning would change that file too: serve a copy made with `cp -RL` (a copy that follows links)", .{ name, o.dir });
+            return null;
+        }
+    }
     const device = try setting(a, o.device, "TF_CUDA_DEVICE", 0, problem) orelse return null;
     const segments = try setting(a, o.segments, "TF_CUDA_SEGMENTS", 1, problem) orelse return null;
     if (segments < 1 or segments > F.max_segments) {
@@ -359,6 +403,23 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
     });
     errdefer gpa.free(h.startup);
+    if (o.slide) {
+        const S = learn_hook.Adapter(F.slide);
+        h.dir = try gpa.dupe(u8, o.dir);
+        const s = try gpa.create(S);
+        s.* = S.init(gpa, io, F.learnModel(loaded.ctx, h.dir));
+        h.slide = .{ .hook = s.hook(), .free = struct {
+            fn f(p: *anyopaque, al: Allocator) void {
+                const x: *S = @ptrCast(@alignCast(p));
+                x.deinit();
+                al.destroy(x);
+            }
+        }.f };
+    }
+    errdefer if (h.slide) |s| {
+        s.free(s.hook.ctx, gpa);
+        gpa.free(h.dir);
+    };
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
     try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;

@@ -68,14 +68,7 @@ pub const Site = struct {
     }
 };
 
-/// A layer's site input width: what its output projection reads.
-pub fn inWidth(c: Config, i: usize) usize {
-    return switch (c.kinds[i]) {
-        .moe => c.shared_width,
-        .mamba => c.inner(),
-        .attention => c.heads * c.head_dim,
-    };
-}
+pub const inWidth = shape.inWidth;
 
 pub const Sites = struct {
     gpa: std.mem.Allocator,

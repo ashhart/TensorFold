@@ -8,30 +8,15 @@ const cfg = @import("config.zig");
 const wts = @import("weights.zig");
 const adapters = @import("adapters.zig");
 const subspace = @import("subspace.zig");
+const learn_shape = @import("learn_shape.zig");
 
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
 /// Each layer's bf16 [out, in] residual, its weight minus its codes' values: the forward adds it after the projection.
 pub const Residuals = [cfg.max_layers]?mtl.Buffer;
 
-/// Layer i's output projection as the checkpoint names its module: the one a lesson's change sits after.
-pub fn moduleName(buf: []u8, c: cfg.Config, i: usize) ![]const u8 {
-    const leaf = switch (c.kinds[i]) {
-        .moe => "shared_experts.down_proj",
-        .mamba => "out_proj",
-        .attention => "o_proj",
-    };
-    return std.fmt.bufPrint(buf, "backbone.layers.{d}.mixer.{s}", .{ i, leaf });
-}
-
-/// Layer i's output projection's input width.
-pub fn inWidth(c: cfg.Config, i: usize) usize {
-    return switch (c.kinds[i]) {
-        .moe => c.shared_width,
-        .mamba => c.inner(),
-        .attention => c.heads * c.head_dim,
-    };
-}
+pub const moduleName = learn_shape.moduleName;
+pub const inWidth = learn_shape.inWidth;
 
 /// Every layer whose output projection is bf16 gets codes, scales and biases in the checkpoint, and its residual.
 pub fn split(gpa: std.mem.Allocator, device: mtl.Device, ck: *ckpt.Checkpoint, c: cfg.Config) !Residuals {

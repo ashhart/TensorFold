@@ -1,4 +1,6 @@
 //! The learned change's shape, shared by the Metal and CUDA learners: blocks of ranks, their scale and gates.
+const std = @import("std");
+const Config = @import("config.zig").Config;
 
 pub const block = 16; // ranks a lesson adds at each layer
 pub const max_rank = 512; // thirty-two lessons' blocks
@@ -18,3 +20,22 @@ pub const unit = a_norm * a_norm;
 
 /// A block's gate before its lesson sets one: above any cosine, so the block stays shut.
 pub const shut: f32 = 2;
+
+/// Layer i's output projection as the checkpoint names its module: the one a lesson's change sits after.
+pub fn moduleName(buf: []u8, c: Config, i: usize) ![]const u8 {
+    const leaf = switch (c.kinds[i]) {
+        .moe => "shared_experts.down_proj",
+        .mamba => "out_proj",
+        .attention => "o_proj",
+    };
+    return std.fmt.bufPrint(buf, "backbone.layers.{d}.mixer.{s}", .{ i, leaf });
+}
+
+/// Layer i's output projection's input width: what its change reads.
+pub fn inWidth(c: Config, i: usize) usize {
+    return switch (c.kinds[i]) {
+        .moe => c.shared_width,
+        .mamba => c.inner(),
+        .attention => c.heads * c.head_dim,
+    };
+}

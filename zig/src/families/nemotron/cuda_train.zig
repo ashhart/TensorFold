@@ -26,7 +26,7 @@ const proj_at = max_rows * 16;
 const seq_len = state.chunk_keys;
 
 /// A matrix [n, k] as the checkpoint holds it, on the GPU: 4-bit words, scales and biases, or bf16 (a lesson's fold).
-const Mat = struct { w: u64, s: u64 = 0, b: u64 = 0, bf16: bool = false, n: usize, k: usize };
+pub const Mat = struct { w: u64, s: u64 = 0, b: u64 = 0, bf16: bool = false, n: usize, k: usize };
 
 /// What each layer's backward reads of the weights, in the checkpoint's own layout.
 const Raw = union(enum) {
@@ -336,6 +336,15 @@ pub const Trainer = struct {
 
     fn stats(t: *const Trainer) [][2]f32 {
         return t.host.slice([2]f32, 2 * max_rows)[max_rows..];
+    }
+
+    /// Layer i's output projection as loaded: the matrix its learned change sits after.
+    pub fn outProj(t: *const Trainer, i: usize) Mat {
+        return switch (t.raw[i]) {
+            .mamba => |m| m.out_proj,
+            .attention => |a| a.o,
+            .moe => |m| m.down,
+        };
     }
 
     /// Each row along layer l's candidate directions ([rows, candidates]), as the last project step left them.
