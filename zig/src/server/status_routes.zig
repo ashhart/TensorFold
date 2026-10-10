@@ -12,15 +12,25 @@ const Allocator = std.mem.Allocator;
 
 /// With keys on, health names nothing about the model.
 pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
+    // draining: the engine is not asked, it may be stopping
+    const drain = srv.draining.load(.seq_cst);
     if (srv.health) |h| {
         // the compat wire: ok / fatal / stalled and the live totals (503 in strict mode once the engine failed)
-        var st: api.Status = .{};
-        srv.engine.status(&st, &.{});
-        const lanes = srv.info.lanes;
-        const streams: ?compat.Streams = if (lanes > 1) .{ .decoding = st.running -| st.waiting, .prefilling = st.waiting, .max = lanes } else null;
+        var streams: ?compat.Streams = null;
+        if (!drain) {
+            var st: api.Status = .{};
+            srv.engine.status(&st, &.{});
+            const lanes = srv.info.lanes;
+            if (lanes > 1) streams = .{ .decoding = st.running -| st.waiting, .prefilling = st.waiting, .max = lanes };
+        }
         const r = try h.status(a, streams, srv.info.context_window);
-        return routes.sendValue(conn, a, r.code, r.body);
+        if (!drain) return routes.sendValue(conn, a, r.code, r.body);
+        try r.body.object.put(a, "ok", .{ .bool = false });
+        try r.body.object.put(a, "status", .{ .string = "draining" });
+        try r.body.object.put(a, "requests_in_progress", try json.intValue(a, srv.generating.load(.seq_cst)));
+        return routes.sendDraining(conn, try json.stringify(a, r.body, .{}));
     }
+    if (drain) return routes.sendDraining(conn, try std.fmt.allocPrint(a, "{{\"status\": \"draining\", \"requests_in_progress\": {d}}}", .{srv.generating.load(.seq_cst)}));
     if (srv.keys) |k| if (k.enabled()) return conn.sendJson(200, "{\"status\": \"ok\"}");
     const o = try json.newObject(a);
     try o.put(a, "status", .{ .string = "ok" });

@@ -29,6 +29,8 @@ pub const Settings = struct {
     stall_s: f64 = 0,
     stall_prefill_tps: f64 = 200,
     log: ?LogSettings = null,
+    /// TF_DRAIN_S: seconds requests in progress may finish after a stop signal, on every wire (serve.zig)
+    drain_s: f64 = 20,
 
     /// The knobs from ``env`` (``TF_COMPAT_X``); ``problem`` names a bad one.
     pub fn fromEnv(env: ?*const std.process.Environ.Map, problem: *[]const u8) error{Invalid}!Settings {
@@ -45,6 +47,7 @@ pub const Settings = struct {
         }
         if (knob(m, "STALL_S")) |v| s.stall_s = try nonNegative(v, 0, problem, "TF_COMPAT_STALL_S: must be a number >= 0");
         if (m.get("TF_COMPAT_STALL_PREFILL_TPS")) |v| s.stall_prefill_tps = try nonNegative(v, 200, problem, "TF_COMPAT_STALL_PREFILL_TPS: must be a number >= 0");
+        if (m.get("TF_DRAIN_S")) |v| s.drain_s = try nonNegative(v, 20, problem, "TF_DRAIN_S: seconds, a number >= 0");
         if (knob(m, "REQUEST_LOG")) |v| {
             const path = std.mem.trim(u8, v, " \t");
             if (path.len > 0 and !std.mem.eql(u8, path, "0")) {
