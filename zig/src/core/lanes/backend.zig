@@ -65,6 +65,8 @@ pub const Backend = struct {
     pub const VTable = struct {
         /// Prefill the stream's prompt into its caches (and its draft head's).
         prefill: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
+        /// One chunk of the prompt pass, false while chunks remain; null: the pass runs whole.
+        prefill_step: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!bool = null,
         /// Draw the first token from the prompt's last row at `position`; a handle to it.
         first: *const fn (ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64,
         /// Feed one token and queue the draw of the next at `position` (a one-token round); a handle to it.

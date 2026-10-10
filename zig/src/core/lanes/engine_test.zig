@@ -218,3 +218,36 @@ test "a cycle in the answer does not refire or reclose" {
     for (plain[0].emitted) |token| close_count += @intFromBool(token == 90);
     try std.testing.expectEqual(@as(usize, 1), close_count);
 }
+
+test "a prompt pass a chunk a round between other streams' rounds gives the whole pass's tokens" {
+    const cases = [_]Case{ .{ .prompt = &.{ 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4 } }, .{ .prompt = &.{ 9, 10, 11, 12, 13, 14, 15, 9, 10, 11 }, .max_new = 30, .sampling = .{ .temperature = 0.8, .seed = 7 } } };
+    const whole = try run(&cases);
+    defer free(whole);
+    var cfg = try model();
+    defer cfg.deinit(gpa);
+    var target: fake.Fake = .{ .gpa = gpa, .prefill_chunks = 4 };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer engine.deinit();
+    try std.testing.expect(engine.fills());
+    var proposers: [2]SuffixLookup = undefined;
+    var streams: [2]sm.Stream = undefined;
+    for (cases, &streams, &proposers) |c, *s, *p| {
+        p.* = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+        s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = &.{96}, .sampling = c.sampling, .drafts = c.drafts, .proposer = p.proposer(), .think_budget = c.think_budget, .think_close = &.{ 90, 91, 92 }, .think_end = 91 });
+    }
+    defer for (&streams, &proposers) |*s, *p| {
+        s.deinit(gpa);
+        p.deinit();
+    };
+    while (!try engine.fillStream(&streams[0], target.prefill_count == 0)) {}
+    var first = true;
+    while (!try engine.fillStream(&streams[1], first)) {
+        first = false;
+        try engine.step(); // the first stream decodes between the second's chunks
+    }
+    try std.testing.expectEqual(@as(usize, 8), target.prefill_count);
+    while (engine.activeCount() > 0) try engine.step();
+    for (streams, whole) |s, w| try std.testing.expectEqualSlices(u32, w, s.emitted());
+}
