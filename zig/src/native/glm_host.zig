@@ -97,6 +97,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     const n: u32 = @intCast(h.slots.slots.len);
     h.back = .{ .gpa = gpa, .sl = &h.slots };
     errdefer h.back.deinit();
+    if (eng.ep != null) h.back.costs = try glm.timing.measure(&h.slots, gpa, io); // both Macs in step, as the warm-up
     h.cfg = try lanes.Config.init(gpa, h.back.facts(), glm.state.max_rows, glm.state.max_rows - 1);
     errdefer h.cfg.deinit(gpa);
     h.wall = .{ .io = io };

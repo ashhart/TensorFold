@@ -294,7 +294,7 @@ pub const Engine = struct {
     }
 
     /// This Mac's decision to stop at a step; with a peer, rank 0's decision, the one both Macs take.
-    fn agree(e: *Engine, quit: bool) !bool {
+    pub fn agree(e: *Engine, quit: bool) !bool {
         const ep = e.ep orelse return quit;
         return ep.ctl.agree(quit);
     }
