@@ -248,6 +248,12 @@ const Host = struct {
                     return x.inner.vtable.prefill(x.inner.ptr, s);
                 }
             }.f,
+            .prefill_many = if (v.prefill_many != null) struct {
+                fn f(p: *anyopaque, streams: []const *lanes.Stream, errs: []?anyerror) anyerror!void {
+                    const x = bind(p);
+                    return x.inner.vtable.prefill_many.?(x.inner.ptr, streams, errs);
+                }
+            }.f else null,
             .first = struct {
                 fn f(p: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
                     const x = bind(p);

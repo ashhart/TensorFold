@@ -319,18 +319,60 @@ pub const LaneHost = struct {
         h.mutex.unlock(h.io);
     }
 
-    /// Prefills the next queued request into a free lane; false when none waits or no lane is free.
-    fn admitOne(h: *LaneHost) bool {
+    /// Every queued request the lanes have room for: a lone one to the backend's driver, the rest prefilled together.
+    fn admitAll(h: *LaneHost) void {
+        var batch: std.ArrayList(*Job) = .empty;
+        defer batch.deinit(h.gpa);
+        while (true) {
+            const job = switch (h.prepare()) {
+                .none => break,
+                .dropped => continue,
+                .job => |j| j,
+            };
+            if (batch.items.len == 0 and h.loneFits(job)) {
+                _ = h.runLone(job, job.began);
+                continue;
+            }
+            batch.append(h.gpa, job) catch {
+                _ = h.drop(job, "out of memory");
+                continue;
+            };
+        }
+        if (batch.items.len == 0) return;
+        const streams = h.gpa.alloc(*lanes.Stream, batch.items.len) catch return h.dropAll(batch.items, "out of memory");
+        defer h.gpa.free(streams);
+        const errs = h.gpa.alloc(?anyerror, batch.items.len) catch return h.dropAll(batch.items, "out of memory");
+        defer h.gpa.free(errs);
+        for (streams, batch.items) |*s, job| s.* = &job.stream;
+        h.core.addStreams(streams, errs) catch |e| return h.dropAll(batch.items, h.words(e));
+        for (batch.items, errs) |job, err| {
+            if (err) |e| {
+                _ = if (e == error.Cancelled) h.cancel(job) else h.drop(job, h.words(e));
+                continue;
+            }
+            h.prefilled(job, job.began);
+            if (h.deliver(job)) h.remove(job);
+        }
+    }
+
+    fn dropAll(h: *LaneHost, jobs: []const *Job, message: []const u8) void {
+        for (jobs) |job| _ = h.drop(job, message);
+    }
+
+    const Prepared = union(enum) { none, dropped, job: *Job };
+
+    /// The oldest queued request admitted with its stream made, when the lanes have room.
+    fn prepare(h: *LaneHost) Prepared {
         h.lock();
         if (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes) {
             h.unlock();
-            return false;
+            return .none;
         }
         const job = h.queued.orderedRemove(0);
         h.admitted.append(h.gpa, job) catch {
             h.unlock();
             h.finish(job, .failed, "out of memory");
-            return true;
+            return .dropped;
         };
         h.unlock();
         const r = job.request;
@@ -342,7 +384,10 @@ pub const LaneHost = struct {
             job.marks = l.marks;
             reuse = .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .hook = .{ .ptr = job, .at = Job.kept } };
         } else |_| {};
-        job.proposer = lanes.SuffixLookup.init(h.gpa, .{ .min_match = h.min_match }) catch return h.drop(job, "the drafter could not start");
+        job.proposer = lanes.SuffixLookup.init(h.gpa, .{ .min_match = h.min_match }) catch {
+            _ = h.drop(job, "the drafter could not start");
+            return .dropped;
+        };
         job.stream = lanes.Stream.init(h.gpa, .{
             .id = "request",
             .prompt = r.prompt,
@@ -362,16 +407,12 @@ pub const LaneHost = struct {
             .reuse = reuse,
         }) catch {
             job.proposer.deinit();
-            return h.drop(job, "out of memory");
+            _ = h.drop(job, "out of memory");
+            return .dropped;
         };
         job.started = true;
-        const began = std.Io.Clock.awake.now(h.io).toNanoseconds();
-        job.began = began;
-        if (h.loneFits(job)) return h.runLone(job, began);
-        h.core.addStream(&job.stream) catch |e| return if (e == error.Cancelled) h.cancel(job) else h.drop(job, h.words(e));
-        h.prefilled(job, began);
-        if (h.deliver(job)) h.remove(job);
-        return true;
+        job.began = std.Io.Clock.awake.now(h.io).toNanoseconds();
+        return .{ .job = job };
     }
 
     fn prefilled(h: *LaneHost, job: *Job, began: i96) void {
@@ -480,7 +521,7 @@ pub const LaneHost = struct {
     fn run(h: *LaneHost) void {
         while (true) {
             h.takeCancels();
-            while (h.admitOne()) {}
+            h.admitAll();
             h.noteLive();
             h.lock();
             if (h.closing) {
