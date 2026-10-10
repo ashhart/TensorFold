@@ -3,6 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
 const pc = @import("prompt_cache.zig");
+const status = @import("lane_host_status.zig");
 const learn = @import("lane_host_learn.zig");
 const Allocator = std.mem.Allocator;
 const Id = api.Id;
@@ -11,7 +12,6 @@ const Sink = api.Sink;
 const Event = api.Event;
 const Engine = api.Engine;
 const Info = api.Info;
-const Status = api.Status;
 const Memory = api.Memory;
 const Reason = api.Reason;
 const Stats = api.Stats;
@@ -31,7 +31,7 @@ pub const LaneHost = struct {
     cancels: std.ArrayList(Id) = .empty,
     closing: bool = false,
     thread: ?std.Thread = null,
-    decoded: std.ArrayList(Mark) = .empty, // tokens a round landed, for the 2 s decode rate
+    decoded: std.ArrayList(status.Mark) = .empty, // tokens a round landed, for the 2 s decode rate
     prefill_rate: f64 = 0,
     prefill_at: i96 = 0,
     live_tokens: std.ArrayList(u32) = .empty,
@@ -48,9 +48,7 @@ pub const LaneHost = struct {
     lessons: std.ArrayList(Lesson) = .empty, // learn requests waiting for an idle engine
     lesson_open: bool = false, // the learner holds a begun job (engine thread only)
 
-    const Mark = struct { at: i96, tokens: u64 };
     const Lesson = struct { request: *const api.LearnRequest, sink: api.LearnSink };
-    const window_ns: i96 = 2 * std.time.ns_per_s;
 
     const Job = struct {
         host: *LaneHost,
@@ -117,7 +115,7 @@ pub const LaneHost = struct {
     }
 
     pub fn engine(h: *LaneHost) Engine {
-        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn, .learn = learn.submit } };
+        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = status.read, .memory = memoryFn, .keepalive = keepaliveFn, .learn = learn.submit } };
     }
 
     /// The family's queue as a keepalive target, when it set one.
@@ -163,28 +161,6 @@ pub const LaneHost = struct {
         h.wake.signal(h.io);
     }
 
-    fn statusFn(ctx: *anyopaque, out: *Status, stream_tokens: []u32) void {
-        const h = self(ctx);
-        h.mutex.lockUncancelable(h.io);
-        defer h.mutex.unlock(h.io);
-        const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
-        var tokens: u64 = 0;
-        for (h.decoded.items) |m| {
-            if (m.at >= now - window_ns) tokens += m.tokens;
-        }
-        const n = @min(stream_tokens.len, h.live_tokens.items.len);
-        @memcpy(stream_tokens[0..n], h.live_tokens.items[0..n]);
-        out.* = .{
-            .running = @intCast(h.admitted.items.len),
-            .waiting = @intCast(h.queued.items.len),
-            .decode_tokens_per_second = @as(f64, @floatFromInt(tokens)) / 2.0,
-            .prefill_tokens_per_second = if (now - h.prefill_at <= window_ns) h.prefill_rate else 0,
-            .preemptions = 0,
-            .streams = n,
-            .generation_tokens = h.live_generated,
-        };
-    }
-
     fn memoryFn(ctx: *anyopaque, reset_peak: bool) ?Memory {
         const source = self(ctx).memory orelse return null;
         return source.read(source.ctx, reset_peak);
@@ -208,7 +184,7 @@ pub const LaneHost = struct {
         if (emitted.len > job.delivered) {
             if (job.stream.logprobs != null) emit(job, .{ .logprobs = job.stream.rows.items[job.delivered..emitted.len] });
             emit(job, .{ .tokens = emitted[job.delivered..] });
-            h.noteDecoded(emitted.len - job.delivered);
+            status.noteDecoded(h, emitted.len - job.delivered);
             job.delivered = emitted.len;
         }
     }
@@ -239,20 +215,6 @@ pub const LaneHost = struct {
             job.proposer.deinit();
         }
         h.gpa.destroy(job);
-    }
-
-    fn noteDecoded(h: *LaneHost, n: usize) void {
-        const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
-        h.mutex.lockUncancelable(h.io);
-        defer h.mutex.unlock(h.io);
-        var keep: usize = 0;
-        for (h.decoded.items) |m| {
-            if (m.at < now - window_ns) continue;
-            h.decoded.items[keep] = m;
-            keep += 1;
-        }
-        h.decoded.shrinkRetainingCapacity(keep);
-        h.decoded.append(h.gpa, .{ .at = now, .tokens = n }) catch {};
     }
 
     /// Cancels queued and admitted jobs named since the last round.
@@ -463,7 +425,7 @@ pub const LaneHost = struct {
                     host.prefilled(j, j.began);
                 }
                 host.send(j);
-                host.noteLive();
+                status.noteLive(host);
             }
             fn yield(ctx: *anyopaque) bool {
                 const host: *LaneHost = @ptrCast(@alignCast(ctx));
@@ -545,23 +507,12 @@ pub const LaneHost = struct {
         };
     }
 
-    fn noteLive(h: *LaneHost) void {
-        h.lock();
-        defer h.unlock();
-        h.live_tokens.clearRetainingCapacity();
-        h.live_generated = 0;
-        for (h.admitted.items) |job| if (job.started) {
-            h.live_tokens.append(h.gpa, @intCast(job.stream.context.items.len)) catch {};
-            h.live_generated += @intCast(job.stream.emitted().len);
-        };
-    }
-
     fn run(h: *LaneHost) void {
         while (true) {
             h.takeCancels();
             while (h.admitOne()) {}
             h.fillOne();
-            h.noteLive();
+            status.noteLive(h);
             h.lock();
             if (h.closing) {
                 const left = h.queued.items.len + h.admitted.items.len;
