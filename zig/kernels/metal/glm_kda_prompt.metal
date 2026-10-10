@@ -62,7 +62,7 @@ template <int H, int D, int TAPS, int HB>
   }
 }
 
-// The recurrence over R rows: a simdgroup's 4 value columns of a head, rows staged B at a time for SG simdgroups; one column's bits as one simdgroup alone.
+// The recurrence over R rows: 8 lanes a value column (16 key dims each, sums over the 8 by xor shuffles), rows staged B at a time.
 template <int H, int D, int SG, int B>
 [[kernel]] void glm_kda_scan(const device bfloat* QO [[buffer(0)]], const device bfloat* KO [[buffer(1)]],
                              const device bfloat* VO [[buffer(2)]], const device float* GO [[buffer(3)]],
@@ -71,21 +71,20 @@ template <int H, int D, int SG, int B>
                              constant int& R [[buffer(8)]], uint sg [[simdgroup_index_in_threadgroup]],
                              uint lane [[thread_index_in_simdgroup]], uint tid [[thread_index_in_threadgroup]],
                              uint3 tg [[threadgroup_position_in_grid]]) {
-  constexpr int NDK = D / 32;
-  constexpr int NDV = 4;
-  constexpr int VC = SG * NDV; // a threadgroup's value columns
+  constexpr int NK = D / 8;    // a lane's key dims
+  constexpr int VC = SG * 4;   // a threadgroup's value columns, four a simdgroup
   constexpr int NT = 32 * SG;
   constexpr uint W = (uint)(H * D);
   threadgroup bfloat sqs[B * D], sks[B * D], svs[B * VC];
   threadgroup float sgs[B * D], sbs[B];
   const uint h = tg.y;
-  const uint col0 = tg.x * (uint)VC;
-  device const float* si = ST + (size_t)h * D * D;
-  float st[NDV][NDK];
-  for (int j = 0; j < NDV; ++j) {
-    const uint dv = col0 + sg * (uint)NDV + (uint)j;
-    for (int i = 0; i < NDK; ++i) st[j][i] = si[(size_t)dv * D + NDK * lane + i];
-  }
+  const int c = int(sg) * 4 + int(lane >> 3); // this lane's value column in the threadgroup
+  const uint dv = tg.x * (uint)VC + (uint)c;
+  const int k0 = NK * int(lane & 7u);
+  device const float* si = ST + ((size_t)h * D + dv) * D + k0;
+  float st[NK];
+  _Pragma("clang loop unroll(full)")
+  for (int i = 0; i < NK; ++i) st[i] = si[i];
   for (int r0 = 0; r0 < R; r0 += B) {
     const int n = min(B, R - r0);
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -97,45 +96,40 @@ template <int H, int D, int SG, int B>
       sgs[idx] = GO[at];
     }
     for (int idx = int(tid); idx < n * VC; idx += NT) {
-      const int b = idx / VC, c = idx - b * VC;
-      svs[idx] = VO[(size_t)(r0 + b) * W + h * (uint)D + col0 + (uint)c];
+      const int b = idx / VC, cc = idx - b * VC;
+      svs[idx] = VO[(size_t)(r0 + b) * W + h * (uint)D + tg.x * (uint)VC + (uint)cc];
     }
     if (int(tid) < n) sbs[tid] = BETA[(size_t)(r0 + int(tid)) * H + h];
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (int b = 0; b < n; ++b) {
-      const size_t at = (size_t)(r0 + b) * W + h * (uint)D;
-      float sg_[NDK], sk[NDK], sq[NDK];
-      for (int i = 0; i < NDK; ++i) {
-        const int s = b * D + NDK * int(lane) + i;
-        sg_[i] = sgs[s];
-        sk[i] = float(sks[s]);
-        sq[i] = float(sqs[s]);
+      const threadgroup bfloat* qr = sqs + b * D + k0;
+      const threadgroup bfloat* kr = sks + b * D + k0;
+      const threadgroup float* gr = sgs + b * D + k0;
+      float kv = 0.0f;
+      _Pragma("clang loop unroll(full)")
+      for (int i = 0; i < NK; ++i) {
+        st[i] = st[i] * gr[i];
+        kv += st[i] * float(kr[i]);
       }
-      const float beta = sbs[b];
-      for (int j = 0; j < NDV; ++j) {
-        const uint dv = col0 + sg * (uint)NDV + (uint)j;
-        float kv = 0.0f;
-        for (int i = 0; i < NDK; ++i) {
-          st[j][i] = st[j][i] * sg_[i];
-          kv += st[j][i] * sk[i];
-        }
-        kv = simd_sum(kv);
-        const float delta = (float(svs[b * VC + int(sg) * NDV + j]) - kv) * beta;
-        float o = 0.0f;
-        for (int i = 0; i < NDK; ++i) {
-          st[j][i] = st[j][i] + sk[i] * delta;
-          o += st[j][i] * sq[i];
-        }
-        o = simd_sum(o);
-        if (lane == 0u) SY[at + dv] = bfloat(o);
+      kv += simd_shuffle_xor(kv, ushort(1));
+      kv += simd_shuffle_xor(kv, ushort(2));
+      kv += simd_shuffle_xor(kv, ushort(4));
+      const float delta = (float(svs[b * VC + c]) - kv) * sbs[b];
+      float o = 0.0f;
+      _Pragma("clang loop unroll(full)")
+      for (int i = 0; i < NK; ++i) {
+        st[i] = st[i] + float(kr[i]) * delta;
+        o += st[i] * float(qr[i]);
       }
+      o += simd_shuffle_xor(o, ushort(1));
+      o += simd_shuffle_xor(o, ushort(2));
+      o += simd_shuffle_xor(o, ushort(4));
+      if ((lane & 7u) == 0u) SY[(size_t)(r0 + b) * W + h * (uint)D + dv] = bfloat(o);
     }
   }
-  device float* so = ST_OUT + (size_t)h * D * D;
-  for (int j = 0; j < NDV; ++j) {
-    const uint dv = col0 + sg * (uint)NDV + (uint)j;
-    for (int i = 0; i < NDK; ++i) so[(size_t)dv * D + NDK * lane + i] = st[j][i];
-  }
+  device float* so = ST_OUT + ((size_t)h * D + dv) * D + k0;
+  _Pragma("clang loop unroll(full)")
+  for (int i = 0; i < NK; ++i) so[i] = st[i];
 }
 
 template <int H, int D, int TAPS, int TY, int FB, int GB>

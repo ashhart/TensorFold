@@ -65,6 +65,18 @@ inline float row_sum(float v) {
     threadgroup_barrier(mem_flags::mem_threadgroup);
     // scores: this simdgroup's dims
     frag<float> lo = frag<float>(0), hi = frag<float>(0);
+#ifndef TF_SIMD_FRAGS
+    // a lane's four dims of each of its four keys, 8 bytes a load
+    const device bfloat* kr[4];
+    TF_UNROLL
+    for (short i = 0; i < 4; i++) kr[i] = keys + long(max(keyrow[8 * i + home.y], 0)) * RANK + d0 + home.x;
+    TF_UNROLL
+    for (short t = 0; t < 8; t++) {
+      const frag<bfloat> b0 = frag<bfloat>(*(const device bfloat4*)(kr[0] + 16 * t), *(const device bfloat4*)(kr[1] + 16 * t));
+      const frag<bfloat> b1 = frag<bfloat>(*(const device bfloat4*)(kr[2] + 16 * t), *(const device bfloat4*)(kr[3] + 16 * t));
+      mma_16x32<false, true>(lo, hi, q[t], b0, b1);
+    }
+#else
     TF_UNROLL
     for (short t = 0; t < 8; t++) {
       frag<bfloat> b0, b1;
@@ -77,6 +89,7 @@ inline float row_sum(float v) {
       }
       mma_16x32<false, true>(lo, hi, q[t], b0, b1);
     }
+#endif
     TF_UNROLL
     for (short e = 0; e < 8; e++) {
       partial[s][lane][e] = lo[e];
@@ -129,9 +142,17 @@ inline float row_sum(float v) {
     // values: keys 0-15 then 16-31, each part in turn, into this simdgroup's 128 dims
     TF_UNROLL
     for (short kb = 0; kb < 2; kb++) {
+#ifndef TF_SIMD_FRAGS
+      const device bfloat* va = keys + long(max(keyrow[16 * kb + home.y], 0)) * RANK + d0 + home.x;
+      const device bfloat* vb = keys + long(max(keyrow[16 * kb + home.y + 8], 0)) * RANK + d0 + home.x;
+#endif
       TF_UNROLL
       for (short c = 0; c < 4; c++) {
         frag<bfloat> v0, v1;
+#ifndef TF_SIMD_FRAGS
+        v0 = frag<bfloat>(*(const device bfloat4*)(va + 32 * c), *(const device bfloat4*)(vb + 32 * c));
+        v1 = frag<bfloat>(*(const device bfloat4*)(va + 32 * c + 16), *(const device bfloat4*)(vb + 32 * c + 16));
+#else
         TF_UNROLL
         for (short e = 0; e < 8; e++) {
           const int k = max(keyrow[16 * kb + p_row(e, home)], 0);
@@ -139,6 +160,7 @@ inline float row_sum(float v) {
           v0[e] = keys[long(k) * RANK + d];
           v1[e] = keys[long(k) * RANK + d + 16];
         }
+#endif
         mma_16x32<false, false>(acc[c][0], acc[c][1], p1[kb], v0, v1);
         mma_16x32<false, false>(acc[c][0], acc[c][1], p2[kb], v0, v1);
         mma_16x32<false, false>(acc[c][0], acc[c][1], p3[kb], v0, v1);
