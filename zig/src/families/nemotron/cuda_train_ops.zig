@@ -16,7 +16,7 @@ pub const out_smem: u32 = 16 * dims.max_rank * 4;
 /// Rows a decode window holds at most: the change takes its window kernels up to here.
 const window_rows = 16;
 
-const train_names = .{ "slide_xa", "slide_out", "slide_xa_rows", "slide_out_rows", "gate", "lora_db", "lora_dxa", "lora_dx", "project", "sketch", "softmax", "rms_back", "dequant_t", "narrow", "widen", "gemm", "pairs_in", "experts_back", "relu2_back", "pairs_out", "route_back", "rest_back", "adam" };
+const train_names = .{ "slide_xa", "slide_out", "slide_xa_rows", "slide_out_rows", "gate", "lora_db", "lora_dxa", "lora_dx", "project", "sketch", "softmax", "rms_back", "dequant_t", "narrow", "widen", "gemm", "gemm_sum", "pairs_in", "experts_back", "relu2_back", "pairs_out", "route_back", "rest_back", "adam" };
 const mixer_names = .{ "dt", "ssm_fwd", "ssm_back", "ssm_bc", "gate_back", "conv_back", "dt_back", "attn_q", "attn_kv" };
 
 /// Every training kernel by its extern "C" name (tf_slide_* for the forward's two, tf_train_* for the rest).
@@ -37,6 +37,7 @@ pub const Fns = struct {
     narrow: cuda.Function,
     widen: cuda.Function,
     gemm: cuda.Function,
+    gemm_sum: cuda.Function,
     pairs_in: cuda.Function,
     experts_back: cuda.Function,
     relu2_back: cuda.Function,
@@ -175,11 +176,14 @@ pub const Train = struct {
         try t.go(t.f.widen, .{ cdiv(n, 256), 1, 1 }, 256, 0, &a);
     }
 
-    /// c [m, n] += a [m, k] b [n, k]^T (bf16 in, fp32 out), k cut into `split` slices that add in.
-    pub fn gemm(t: Train, a_in: u64, lda: usize, b: u64, ldb: usize, c: u64, ldc: usize, m: usize, n: usize, k: usize, split: usize) !void {
+    /// c [m, n] += a [m, k] b [n, k]^T (bf16 in, fp32 out) in `split` K slices, added in order through `parts`.
+    pub fn gemm(t: Train, a_in: u64, lda: usize, b: u64, ldb: usize, c: u64, ldc: usize, m: usize, n: usize, k: usize, split: usize, parts: u64) !void {
         if (k % 32 != 0) return error.GemmShape;
-        var a = args(.{ a_in, int(lda), b, int(ldb), c, int(ldc), int(m), int(n), int(k), int(split) });
+        var a = args(.{ a_in, int(lda), b, int(ldb), c, int(ldc), parts, int(m), int(n), int(k), int(split) });
         try t.go(t.f.gemm, .{ cdiv(n, 64), cdiv(m, 64), split }, 128, 0, &a);
+        if (split == 1) return;
+        var s = args(.{ parts, c, int(ldc), int(m), int(n), int(split) });
+        try t.go(t.f.gemm_sum, .{ cdiv(n, 256), m, 1 }, 256, 0, &s);
     }
 
     /// dy [pairs, dim] = each pair's routing weight times its row's g.

@@ -39,7 +39,7 @@ pub fn run(gpu: Gpu) !void {
     check.pass("train: every kernel within {e:.2} of its f64 reference", .{r.worst});
 }
 
-/// C (+)= A B^T on the tensor cores, its K cut into slices that add in.
+/// C (+)= A B^T on the tensor cores, its K cut into slices that add in: in slice order, so twice gives the same bits.
 fn gemm(r: *Rig, shape: [4]usize) !void {
     const m, const n, const kk, const split = shape;
     const a = try r.bfs(m * kk, 1.0);
@@ -51,10 +51,23 @@ fn gemm(r: *Rig, shape: [4]usize) !void {
         for (0..kk) |x| sum += bf(a[i * kk + x]) * bf(b[j * kk + x]);
         want[i * n + j] = sum;
     };
-    const c = try r.dev(f32, c0);
-    try r.t.gemm(try r.dev(u16, a), kk, try r.dev(u16, b), kk, c, n, m, n, kk, split);
+    const da = try r.dev(u16, a);
+    const db = try r.dev(u16, b);
+    const parts = try r.zeros(f32, split * m * n);
+    var c: [2]u64 = undefined;
+    for (&c) |*x| {
+        x.* = try r.dev(f32, c0);
+        try r.t.gemm(da, kk, db, kk, x.*, n, m, n, kk, split, parts);
+    }
     var name: [64]u8 = undefined;
-    try r.close(try std.fmt.bufPrint(&name, "gemm {d}x{d}x{d} in {d} slices", .{ m, n, kk, split }), c, want, 1e-5);
+    const what = try std.fmt.bufPrint(&name, "gemm {d}x{d}x{d} in {d} slices", .{ m, n, kk, split });
+    try r.close(what, c[0], want, 1e-5);
+    const first = try r.back(f32, c[0], m * n);
+    const second = try r.back(f32, c[1], m * n);
+    var moved: usize = 0;
+    for (first, second) |x, y| moved += @intFromBool(@as(u32, @bitCast(x)) != @as(u32, @bitCast(y)));
+    std.debug.print("RESULT {s} twice: {d} of {d} values differ in any bit\n", .{ what, moved, m * n });
+    try check.expect(moved == 0, "{s} gives the same bits twice ({d} values differ)", .{ what, moved });
 }
 
 /// MLX 4-bit words, scales and biases for `rows` rows of `cols` inputs.

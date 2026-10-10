@@ -235,7 +235,7 @@ pub const Trainer = struct {
         const b = &t.bufs;
         const d = c.hidden;
         try tr.zero(b.dx, rows * d * 4);
-        try tr.gemm(t.logits.ptr, c.vocab, t.head_t.ptr, c.vocab, b.dx, d, rows, d, c.vocab, back.split(rows, d, c.vocab));
+        try tr.gemm(t.logits.ptr, c.vocab, t.head_t.ptr, c.vocab, b.dx, d, rows, d, c.vocab, back.split(rows, d, c.vocab), b.parts);
         try tr.zero(b.g, rows * d * 4);
         try tr.rmsBack(t.savedAt(c.layers), e.w.norm_f, b.dx, b.g, rows, d, c.eps);
         const sk = glue.routerShape(d).sk;
