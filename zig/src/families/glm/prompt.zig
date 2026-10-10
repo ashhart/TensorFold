@@ -47,9 +47,6 @@ pub const Prompt = struct {
     offsets: Ref,
     order: Ref,
     sorted: Ref,
-    xs: Ref,
-    g: Ref,
-    u: Ref,
     act: Ref,
     yp: Ref,
     yf: Ref, // fp32 [rows * topk, hidden]: the down partials by (row, slot); yp is its bf16 second half
@@ -118,9 +115,6 @@ pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *co
     p.offsets = try big.of(arena, (c.experts + 1) * 4);
     p.order = try big.of(arena, n * 4);
     p.sorted = try big.of(arena, n * 4);
-    p.xs = try big.of(arena, n * D * 2);
-    p.g = try big.of(arena, n * c.moe_inter * 2);
-    p.u = try big.of(arena, n * c.moe_inter * 2);
     p.act = try big.of(arena, n * c.moe_inter * 2);
     p.yf = try big.of(arena, n * D * 4);
     p.yp = p.yf.at(n * D * 2);
@@ -168,22 +162,10 @@ fn qmmF32(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Q4, y: Ref, M:
     affine_mm.dense(e, p.mm.mm_f32, x, p.sums, q, y, M);
 }
 
-/// n rows sorted by expert (`offsets`) times their expert's 4-bit W^T, the rows' group sums already in `sums`.
-fn gather(p: *const Prompt, e: mtl.ComputeEncoder, xs: Ref, q: wts.Q4, offsets: Ref, y: Ref, n: u32, experts: u32, f32_out: bool) void {
-    affine_mm.gather(e, if (f32_out) p.mm.mm_f32 else p.mm.mm_bf16, xs, p.sums, q, offsets, y, n, experts);
-}
-
-/// The routed experts' gate, up and activation on the sorted rows `xs` into `act` ([n, gate.n]).
-fn gateUp(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, n: u32) void {
-    const E = x.c.experts;
-    affine_mm.rowSums(e, p.mm.mm_bf16, 64, p.xs, p.sums, n, w.gate.k);
-    gather(p, e, p.xs, w.gate, p.offsets, p.g, n, E, false);
-    gather(p, e, p.xs, w.up, p.offsets, p.u, n, E, false);
-    e.setPipeline(x.k.act2);
-    bind(e, 0, .{ p.g, p.u, p.act });
-    e.setValue(x.c.swiglu_limit, 3);
-    e.setValue(n * w.gate.n, 4);
-    e.dispatchThreads(size(n * w.gate.n, 1, 1), size(256, 1, 1));
+/// The routed experts' gate, up and SwiGLU on the M rows of `x_in` its pairs read (in expert order) into `act` ([n, gate.n]).
+fn gateUp(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32, n: u32) void {
+    affine_mm.rowSums(e, p.mm.mm_bf16, 64, x_in, p.sums, M, w.gate.k);
+    affine_mm.gatherGlu(e, p.mm.mm_bf16, x_in, p.sums, w.gate, w.up, p.offsets, p.order, p.act, n, x.c.experts, x.c.topk, x.c.swiglu_limit);
     affine_mm.rowSums(e, p.mm.mm_bf16, 64, p.act, p.sums, n, w.down.k);
 }
 
@@ -224,7 +206,7 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     if (s & Class.route == 0) route(p, x, e, w, x_in, M);
     if (ep) |t| {
         if (s & Class.routed == 0) { // down's fp32 partials put back in (row, slot) order for the decode's combine
-            gateUp(p, x, e, w, n);
+            gateUp(p, x, e, w, x_in, M, n);
             affine_mm.gatherTo(e, p.mm.mm_f32, p.act, p.sums, w.down, p.offsets, p.yf, p.order, n, E);
         }
         if (s & Class.exchange == 0) t.sendRows(e, p.yf, p.wts, M);
@@ -233,7 +215,7 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
         return;
     }
     if (s & Class.routed == 0) { // down's rows put back in (row, slot) order for the combine
-        gateUp(p, x, e, w, n);
+        gateUp(p, x, e, w, x_in, M, n);
         affine_mm.gatherTo(e, p.mm.mm_bf16, p.act, p.sums, w.down, p.offsets, p.yp, p.order, n, E);
     }
     if (s & Class.combine != 0) return;
@@ -244,11 +226,10 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     e.dispatchThreads(size(M * D, 1, 1), size(256, 1, 1));
 }
 
-/// The route on M rows: the decode's router and top-k, pairs sorted by expert, their rows gathered into `xs`.
+/// The route on M rows: the decode's router and top-k, pairs sorted by expert (`order`: each sorted pair's index).
 fn route(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32) void {
     const c = x.c;
     const k = x.k;
-    const D = c.hidden;
     const E = c.experts;
     const n = M * c.topk;
     moe_route.logits(e, k.route_logits, kernels.route_shape, x_in, w.router, p.logits_r, M); // the decode's bits, any rows
@@ -274,14 +255,9 @@ fn route(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const w
     params(e, 2, .{ n, E });
     bind(e, 3, .{ p.order, p.sorted });
     run(e, .{ blocks * 256, 1, 1 }, .{ 256, 1, 1 });
-    e.setPipeline(p.k.get("custom_kernel_tf_rows_take_bfloat16_t_uint32_t_int32_t_bfloat16_t"));
-    bind(e, 0, .{ x_in, p.order });
-    params(e, 2, .{ n, D, c.topk });
-    bind(e, 3, .{p.xs});
-    run(e, .{ D, n, 1 }, .{ 256, 1, 1 });
 }
 
-/// KDA layer `ki` over a chunk in three passes (glm_kda_prompt.metal): the fused step's bits, only the recurrence in sequence.
+/// KDA layer `ki` over a chunk (glm_kda_prompt.metal): f_b and g_b on the tensor units, prep, the recurrence in sequence, the norm.
 fn kdaChunk(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kda, M: u32) void {
     const c = x.c;
     const k = x.k;

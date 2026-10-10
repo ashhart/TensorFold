@@ -103,11 +103,31 @@ inline void am_codes(thread const Codes& c, threadgroup bfloat* out) {
 #endif
 }
 
+// A lane's two rows (home.y and home.y + 8) of each of its TM fragments: their starts in x and in the row sums.
+template <int TM>
+struct AmRows {
+  const device bfloat* x[TM][2];
+  const device float* s[TM][2];
+};
+
+// The fragment of x at column c from a lane's two row starts (8-byte loads on M5).
+inline frag<bfloat> am_frag(const device bfloat* r0, const device bfloat* r1, int c, short2 home) {
+#ifndef TF_SIMD_FRAGS
+  return frag<bfloat>(*(const device bfloat4*)(r0 + c + home.x), *(const device bfloat4*)(r1 + c + home.x));
+#else
+  frag<bfloat> f;
+  TF_UNROLL
+  for (short e = 0; e < 8; e++) {
+    f[e] = (e < 4 ? r0 : r1)[c + home.x + TF_COL(e)];
+  }
+  return f;
+#endif
+}
+
 // One step's MMAs and group epilogues for the first TL of TM row fragments (TL < TM: a tile's tail, the rest dead).
 template <int TM, int TL>
-inline void am_step(thread frag<float> (&acc)[TM][2], const device bfloat* x, int ldx, int live, bool inside,
-                    const device float* xs, int ldxs, int k, const threadgroup bfloat* tile, const threadgroup float* sb,
-                    int tn, short2 home) {
+inline void am_step(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>& rows, int k,
+                    const threadgroup bfloat* tile, const threadgroup float* sb, int tn, short2 home) {
   frag<float> part[TL][2];
   TF_UNROLL
   for (short q = 0; q < 4; q++) { // the step's four 16-deep slices, every row fragment's chain interleaved
@@ -116,11 +136,7 @@ inline void am_step(thread frag<float> (&acc)[TM][2], const device bfloat* x, in
     frag_get_t(b1, tile, PAD, tn + 16, 16 * q, home);
     TF_UNROLL
     for (short m = 0; m < TL; m++) {
-      if (inside) {
-        frag_get(a[m], x, ldx, 16 * m, 16 * q, home);
-      } else {
-        frag_get_in(a[m], x, ldx, 16 * m, 16 * q, home, live, 16 * q + 16);
-      }
+      a[m] = am_frag(rows.x[m][0], rows.x[m][1], k + 16 * q, home);
     }
     TF_UNROLL
     for (short m = 0; m < TL; m++) {
@@ -135,20 +151,15 @@ inline void am_step(thread frag<float> (&acc)[TM][2], const device bfloat* x, in
       const threadgroup float* sg = sb + g * 128;
       TF_UNROLL
       for (short m = 0; m < TL; m++) {
-        float xr[2];
-        TF_UNROLL
-        for (short h = 0; h < 2; h++) {
-          const int r = 16 * m + home.y + 8 * h;
-          xr[h] = r < live ? xs[long(r) * ldxs + k / TF_GROUP + g] : 0.0f;
-        }
+        const float xr0 = rows.s[m][0][k / TF_GROUP + g], xr1 = rows.s[m][1][k / TF_GROUP + g];
         TF_UNROLL
         for (short j = 0; j < 2; j++) {
           TF_UNROLL
           for (short c = 0; c < 4; c++) {
             const int col = tn + 16 * j + home.x + TF_COL(c);
             const float s = sg[col], b = sg[64 + col];
-            acc[m][j][c] += s * part[m][j][c] + b * xr[0];
-            acc[m][j][4 + c] += s * part[m][j][4 + c] + b * xr[1];
+            acc[m][j][c] += s * part[m][j][c] + b * xr0;
+            acc[m][j][4 + c] += s * part[m][j][4 + c] + b * xr1;
           }
         }
       }
@@ -156,12 +167,11 @@ inline void am_step(thread frag<float> (&acc)[TM][2], const device bfloat* x, in
   }
 }
 
-// x (TM 16-row fragments, `live` rows) times a [64, K] code block; each group's sums scaled plus its bias times `xs`.
+// TM 16-row fragments (`live` rows; a dead row's start is a live one's) times a [64, K] code block.
 template <int TM>
-inline void am_k_loop(thread frag<float> (&acc)[TM][2], const device bfloat* x, int ldx, int K, int live, bool inside,
-                      const device float* xs, int ldxs, const device uchar* wq, const device bfloat* scales,
-                      const device bfloat* biases, threadgroup bfloat* tile, threadgroup float* sb, int tn, uint t,
-                      short2 home) {
+inline void am_k_loop(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>& rows, int K, int live,
+                      const device uchar* wq, const device bfloat* scales, const device bfloat* biases,
+                      threadgroup bfloat* tile, threadgroup float* sb, int tn, uint t, short2 home) {
   threadgroup bfloat* mine = tile + (t / 2) * PAD + 32 * (t % 2);
   const int g_mine = TF_GROUP == 32 ? int(t % 2) : 0; // at g32 each thread of a pair takes one group's scale and bias
   TF_UNROLL
@@ -179,11 +189,10 @@ inline void am_k_loop(thread frag<float> (&acc)[TM][2], const device bfloat* x, 
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (live > 16 * (TM - 1)) {
-      am_step<TM, TM>(acc, x, ldx, live, inside, xs, ldxs, k, tile, sb, tn, home);
+      am_step<TM, TM>(acc, rows, k, tile, sb, tn, home);
     } else if (TM > 1 && live > 0) { // a tail with only the first fragment live
-      am_step<TM, 1>(acc, x, ldx, live, inside, xs, ldxs, k, tile, sb, tn, home);
+      am_step<TM, 1>(acc, rows, k, tile, sb, tn, home);
     }
-    x += 64;
     wq += STEP_BYTES;
     scales += NG;
     biases += NG;
@@ -246,21 +255,41 @@ inline bool am_tile(const device int32_t* offsets, int experts, int total, int t
   return false;
 }
 
+// A simdgroup's row starts: rows [row, row + rows) of x and its row sums, or with `order` sorted rows' token rows (order / topk).
+template <int TM>
+inline AmRows<TM> am_rows(const device bfloat* x, int ldx, const device float* xs, int ldxs, int row, int rows, int tm,
+                          short2 home, const device int32_t* order, int topk) {
+  AmRows<TM> r;
+  TF_UNROLL
+  for (short m = 0; m < TM; m++) {
+    TF_UNROLL
+    for (short h = 0; h < 2; h++) {
+      const int i = tm + 16 * m + home.y + 8 * h;
+      const int at = row + (i < rows ? i : 0); // a dead row reads a live one; its sums never reach y
+      const long src = order != nullptr ? long(order[at] / topk) : long(at);
+      r.x[m][h] = x + src * ldx;
+      r.s[m][h] = xs + src * ldxs;
+    }
+  }
+  return r;
+}
+
 // Rows [row, row + rows) of x times weight rows [wrow0, wrow0 + 64) of a [*, K] matrix into y (ld N) at column col.
 template <int BM>
-inline void am_block(const device bfloat* x, int ldx, const device float* xs, int ldxs, int row, int rows, int M, int K,
+inline void am_block(const device bfloat* x, int ldx, const device float* xs, int ldxs, int row, int rows, int K,
                      int ldy, int col, long wrow0, const device uint32_t* w, const device bfloat* scales,
                      const device bfloat* biases, device TF_OUT_T* y, threadgroup bfloat* tile, threadgroup float* sb,
-                     uint sg, uint lane, const device int32_t* dst = nullptr) {
+                     uint sg, uint lane, const device int32_t* dst = nullptr, const device int32_t* order = nullptr,
+                     int topk = 1) {
   constexpr int SM = BM / 2;
   constexpr int TM = SM / 16;
   const int t = int(sg) * 32 + int(lane);
   const int tm = SM * int(sg / 2), tn = 32 * int(sg % 2), live = clamp(rows - tm, 0, SM);
   const long wrow = wrow0 + t / 2;
   const short2 home = frag_home(ushort(lane));
+  const AmRows<TM> starts = am_rows<TM>(x, ldx, xs, ldxs, row, rows, tm, home, order, topk);
   frag<float> acc[TM][2];
-  am_k_loop<TM>(acc, x + long(row + tm) * ldx, ldx, K, live, row + tm + SM <= M, xs + long(row + tm) * ldxs, ldxs,
-                (const device uchar*)w + wrow * (K * TF_BITS / 8) + HALF_BYTES * (t % 2),
+  am_k_loop<TM>(acc, starts, K, live, (const device uchar*)w + wrow * (K * TF_BITS / 8) + HALF_BYTES * (t % 2),
                 scales + wrow * (K / TF_GROUP), biases + wrow * (K / TF_GROUP), tile, sb, tn, uint(t), home);
   if (dst != nullptr) {
     if (live > 0) am_scatter<TM>(acc, y, dst + row + tm, ldy, col + tn, live, home);
@@ -280,7 +309,7 @@ inline void am_block(const device bfloat* x, int ldx, const device float* xs, in
   threadgroup float sb[NG * 128];
   const int row = int(tg.y) * 64, col = int(tg.x) * 64, b = int(tg.z);
   am_block<64>(X + long(b) * st.x_batch, st.x_row, XS + long(b) * st.sums_batch * (a.k / TF_GROUP),
-               st.sums_row * (a.k / TF_GROUP), row, min(64, a.rows - row), a.rows, a.k, st.y_row, col,
+               st.sums_row * (a.k / TF_GROUP), row, min(64, a.rows - row), a.k, st.y_row, col,
                long(b) * st.w_batch + col, W, S, B, Y + long(b) * st.y_batch, tile, sb, sg, lane);
 }
 
@@ -296,7 +325,7 @@ inline void am_block(const device bfloat* x, int ldx, const device float* xs, in
     int expert, row, rows;                                                                                             \
     if (!am_tile<BM>(OFFS, a.experts, a.rows, int(tg.y), lane, expert, row, rows)) return;                            \
     const int col = int(tg.x) * 64;                                                                                    \
-    am_block<BM>(X, a.k, XS, a.k / TF_GROUP, row, rows, a.rows, a.k, a.n, col, long(expert) * a.n + col, W, S, B, Y,   \
+    am_block<BM>(X, a.k, XS, a.k / TF_GROUP, row, rows, a.k, a.n, col, long(expert) * a.n + col, W, S, B, Y,   \
                  tile, sb, sg, lane);                                                                                  \
   }
 TF_GATHER(32)
@@ -316,8 +345,70 @@ TF_GATHER(64)
     int expert, row, rows;                                                                                             \
     if (!am_tile<BM>(OFFS, a.experts, a.rows, int(tg.y), lane, expert, row, rows)) return;                            \
     const int col = int(tg.x) * 64;                                                                                    \
-    am_block<BM>(X, a.k, XS, a.k / TF_GROUP, row, rows, a.rows, a.k, a.n, col, long(expert) * a.n + col, W, S, B, Y,   \
+    am_block<BM>(X, a.k, XS, a.k / TF_GROUP, row, rows, a.k, a.n, col, long(expert) * a.n + col, W, S, B, Y,   \
                  tile, sb, sg, lane, DST);                                                                             \
   }
 TF_GATHER_SCATTER(32)
 TF_GATHER_SCATTER(64)
+
+// The glue's SwiGLU in bf16 (glm_act2): MLX's bf16 exp and abs, nn.silu's x * sigmoid(x), gate and up clipped at `limit`.
+inline bfloat am_sigmoid(bfloat x) {
+  const bfloat e = bfloat(__metal_exp(float(bfloat(__metal_fabs(float(x), __METAL_MAYBE_FAST_MATH__))), __METAL_MAYBE_FAST_MATH__));
+  const bfloat y = bfloat(1) / (bfloat(1) + e);
+  return (x < 0) ? y : (bfloat(1) - y);
+}
+
+inline bfloat am_swiglu(float g, float u, float limit) {
+  const float lim = float(bfloat(limit));
+  const bfloat gt = bfloat(metal::min(float(bfloat(g)), lim));
+  const bfloat up = bfloat(metal::min(metal::max(float(bfloat(u)), -lim), lim));
+  const bfloat sl = gt * am_sigmoid(gt);
+  return sl * up;
+}
+
+// A simdgroup's gate (j 0) and up (j 1) fragments as SwiGLU outputs into y (ld N), rows below live only.
+template <int TM>
+inline void am_store_glu(thread const frag<float> (&acc)[TM][2], device bfloat* y, int N, int live, short2 home,
+                         float limit) {
+  TF_UNROLL
+  for (short i = 0; i < TM; i++) {
+    TF_UNROLL
+    for (short e = 0; e < 8; e++) {
+      const int r = 16 * i + home.y + (e >> 2) * 8;
+      if (r < live) y[long(r) * N + home.x + TF_COL(e)] = am_swiglu(acc[i][0][e], acc[i][1][e], limit);
+    }
+  }
+}
+
+// The routed experts' gate and up over token rows read through ORDER (pair / topk), SwiGLU'd into act [rows, n]: 32 columns a tile.
+#define TF_GATHER_GLU(BM)                                                                                               \
+  [[kernel]] void tf_affine_gather_glu_##BM(                                                                            \
+      const device bfloat* X [[buffer(0)]], const device uint32_t* WG [[buffer(1)]],                                   \
+      const device bfloat* SG [[buffer(2)]], const device bfloat* BG [[buffer(3)]],                                    \
+      const device float* XS [[buffer(4)]], constant MmArgs& a [[buffer(5)]], device bfloat* Y [[buffer(6)]],          \
+      const device int32_t* OFFS [[buffer(7)]], const device int32_t* ORDER [[buffer(8)]],                            \
+      const device uint32_t* WU [[buffer(9)]], const device bfloat* SU [[buffer(10)]],                                 \
+      const device bfloat* BU [[buffer(11)]], constant float2& glu [[buffer(12)]],                                     \
+      uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],                            \
+      uint3 tg [[threadgroup_position_in_grid]]) {                                                                     \
+    constexpr int SM = BM / 2;                                                                                         \
+    constexpr int TM = SM / 16;                                                                                        \
+    threadgroup bfloat tile[64 * PAD];                                                                                 \
+    threadgroup float sb[NG * 128];                                                                                    \
+    int expert, row, rows;                                                                                             \
+    if (!am_tile<BM>(OFFS, a.experts, a.rows, int(tg.y), lane, expert, row, rows)) return;                            \
+    const int c0 = int(tg.x) * 32, t = int(sg) * 32 + int(lane), tr = t / 2;                                         \
+    const bool up = ((tr >> 4) & 1) != 0; /* tile rows by 16: gate, up, gate, up for columns c0.., c0 + 16.. */        \
+    const long wrow = long(expert) * a.n + c0 + (tr >> 5) * 16 + (tr & 15);                                           \
+    const int tm = SM * int(sg / 2), tn = 32 * int(sg % 2), live = clamp(rows - tm, 0, SM);                           \
+    const short2 home = frag_home(ushort(lane));                                                                       \
+    const AmRows<TM> starts = am_rows<TM>(X, a.k, XS, a.k / TF_GROUP, row, rows, tm, home, ORDER, int(glu.x));       \
+    frag<float> acc[TM][2];                                                                                            \
+    am_k_loop<TM>(acc, starts, a.k, live,                                                                              \
+                  (const device uchar*)(up ? WU : WG) + wrow * (a.k * TF_BITS / 8) + HALF_BYTES * (t % 2),            \
+                  (up ? SU : SG) + wrow * (a.k / TF_GROUP), (up ? BU : BG) + wrow * (a.k / TF_GROUP), tile, sb, tn,     \
+                  uint(t), home);                                                                                      \
+    am_store_glu<TM>(acc, Y + long(row + tm) * a.n + c0 + tn / 2, a.n, live, home, glu.y);                            \
+  }
+TF_GATHER_GLU(32)
+TF_GATHER_GLU(64)
