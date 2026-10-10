@@ -359,6 +359,8 @@ pub const LaneHost = struct {
             .logprobs = r.logprobs,
             .loop_guard = r.loop_guard,
             .chunks = r.chunks,
+            .history_len = r.history_len,
+            .shared_prefixes = r.shared_prefixes,
             .reuse = reuse,
         }) catch {
             job.proposer.deinit();
