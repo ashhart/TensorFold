@@ -117,6 +117,7 @@ inline void sparse_pass(thread frag<float> (&acc)[4][2], thread float (&m)[2], t
     }
     TF_UNROLL
     for (short h = 0; h < 2; h++) l[h] = l[h] * factor[h] + row_sum(bsum[h]);
+    if (!simd_all(factor[0] == 1.0f && factor[1] == 1.0f)) // a factor of 1 leaves every value as it is
     TF_UNROLL
     for (short c = 0; c < 4; c++) {
       TF_UNROLL
