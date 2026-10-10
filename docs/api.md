@@ -310,6 +310,10 @@ Native JSON replies also carry a `tensorfold` runtime block with `engine`, `enab
 `rounds`, `drafted`, `accepted`, `acceptance_rate`, and `tokens_per_round`. A loop-guarded reply adds
 `runtime.loop.period`; these fields describe the native reply and are absent
 from Python replies that do not provide them.
+In the native block, `seconds` is the reply's decode time, from the end of its prompt pass to its last token, and
+`tokens_per_second` divides the reply's tokens after the first by it. `prefill_seconds` is the prompt pass, and
+`time_to_first_token` counts from the request's arrival, so a queued or long prompt shows there, not in `seconds`.
+The Python 0.6 server's `seconds` is the whole request, prompt included.
 
 The native server's finish log names the client reply ID. Completed requests report `prompt`, `cached`,
 `thinking`, `effort`, `tokens`, `sha`, `finish`, `rounds`, and draft acceptance; a refused request reports
