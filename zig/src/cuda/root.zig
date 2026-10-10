@@ -35,6 +35,7 @@ pub const norms = @import("norms.zig");
 pub const embed_rows = @import("embed_rows.zig");
 pub const experts = @import("experts.zig");
 pub const sample = @import("sample.zig");
+pub const rank_scatter = @import("rank_scatter.zig");
 pub const modelopt = @import("modelopt.zig");
 
 test {
@@ -45,6 +46,7 @@ test {
     _ = @import("embed_rows.zig");
     _ = @import("experts.zig");
     _ = @import("sample.zig");
+    _ = @import("rank_scatter.zig");
     _ = launch;
     _ = abi;
     _ = aot;
