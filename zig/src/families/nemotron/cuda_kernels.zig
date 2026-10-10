@@ -8,16 +8,10 @@ const train_ops = @import("cuda_train_ops.zig");
 
 /// Mangled names of the instantiations the copies in zig/kernels/cuda export (cuobjdump -symbols of each fatbin).
 const sym = struct {
-    const expert_up = "_ZN10tf_experts13expert_kernelILi64ELi1ELi1ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
-    const expert_down = "_ZN10tf_experts13expert_kernelILi64ELi1ELi0ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
-    const pre_up = "_ZN18tf_experts_prefill14prefill_kernelILi64ELi1ELi1ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
-    const pre_down = "_ZN18tf_experts_prefill14prefill_kernelILi64ELi1ELi3ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
-    const pack_experts = "_ZN15tf_experts_pack11pack_kernelILi2EEEvPKjPKtS4_Pjiiii";
     const pattn = "_ZN20tf_prefill_attention12pattn_kernelILi128ELi8ELi8ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiif";
     const scan_rows = "_ZN12tf_scan_rows11scan_kernelEPK13__nv_bfloat16S2_PfPKfS5_S5_PS0_iiiiiiiiff";
 };
 
-pub const pre_experts_smem: u32 = 38400; // Pre<64, 1, 2, 2, 4>: three stages of 800 uint4
 pub const pattn_smem: u32 = 65536; // eight 32-key slots of 128 dims
 
 /// The 4-bit projections' shared pieces (cuda/qlinear.zig): split-K scratch and a tiled weight.
@@ -36,12 +30,8 @@ pub const Kernels = struct {
     triton: ?cuda.aot.Set, // a captured Triton set for the glue (GB10's qualified one); null: our own glue kernels
     glue: glue.Fns,
     affine: cuda.qlinear.Affine4Kernels, // the 4-bit projections: qmm_group, lane_gemv and qmm_prefill
-    expert_up: cuda.Function,
-    expert_down: cuda.Function,
     router: cuda.grouped.Router,
-    pre_up: cuda.Function,
-    pre_down: cuda.Function,
-    pack_experts: cuda.Function,
+    experts: cuda.experts.Affine4Experts, // the 4-bit grouped experts: experts, experts_prefill and experts_pack
     pattn: cuda.Function,
     scan_rows: cuda.Function,
     serial_feed: cuda.Function,
@@ -53,7 +43,6 @@ pub const Kernels = struct {
     torch: torch_ops.Functions,
     train: train_ops.Fns = undefined, // Sliding Weights: the change after each output projection, and learning it
     train_mods: ?[2]cuda.Module = null, // loaded by loadTrain (--slide) after the weights, else never
-    expert_blocks: [2]usize, // resident blocks the decode expert kernels fill: per SM times SMs
     gb10: bool,
     discrete: bool, // the card has its own memory: checkpoint bytes reach it through page-locked slots
 
@@ -71,12 +60,7 @@ pub const Kernels = struct {
             k.mods[i] = try cuda.Module.load(d, img);
             loaded += 1;
         }
-        k.expert_up = try k.mods[2].function(sym.expert_up);
-        k.expert_down = try k.mods[2].function(sym.expert_down);
         k.router = try cuda.grouped.Router.resolve(k.mods[2]);
-        k.pre_up = try k.mods[3].function(sym.pre_up);
-        k.pre_down = try k.mods[3].function(sym.pre_down);
-        k.pack_experts = try k.mods[4].function(sym.pack_experts);
         k.pattn = try k.mods[5].function(sym.pattn);
         k.scan_rows = try k.mods[6].function(sym.scan_rows);
         k.serial_feed = try k.mods[7].function("tf_serial_feed");
@@ -90,11 +74,9 @@ pub const Kernels = struct {
         k.train_mods = null;
         k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
         errdefer if (k.triton) |*t| t.deinit();
-        try k.pre_up.allowDynamicShared(pre_experts_smem);
-        try k.pre_down.allowDynamicShared(pre_experts_smem);
         try k.pattn.allowDynamicShared(pattn_smem);
         const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
-        k.expert_blocks = .{ @max(1, try k.expert_up.occupancy(128, 0)) * sms, @max(1, try k.expert_down.occupancy(128, 0)) * sms };
+        k.experts = try cuda.experts.Affine4Experts.resolve(k.mods[2], k.mods[3], k.mods[4], sms);
         const major = try ctx.attribute(.compute_capability_major);
         const minor = try ctx.attribute(.compute_capability_minor);
         k.gb10 = major == 12 and minor == 1;
@@ -219,20 +201,6 @@ pub const Ops = struct {
         return o.k.router.route(o.s, picks, pairs, count, tile, p);
     }
 
-    fn expertArgs(x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize) cuda.Args {
-        var a: cuda.Args = .{};
-        a.add(x);
-        a.add(int(x_stride));
-        a.add(int(slots));
-        a.add(w);
-        a.add(int(kg));
-        a.add(int(nb));
-        for ([_]u64{ p.items, p.counts, p.members, out }) |v| a.add(v);
-        a.add(int(n));
-        a.add(@as(f32, 0.0));
-        return a;
-    }
-
     /// experts.route's plan over the routed slots alone (rows <= 16, experts <= 128): the shared halves run apart.
     pub fn planRouted(o: Ops, picks: u64, rows: usize, slots: usize, routed: usize, count: usize, tile: usize, p: Plan) !void {
         if (rows > 16 or slots > 8 or count > 128) return error.PlanTooWide;
@@ -243,20 +211,13 @@ pub const Ops = struct {
         try o.go(o.k.plan_routed, .{ 1, 1, 1 }, 128, 0, &a);
     }
 
-    /// experts.run (decode form): `up` takes token rows (relu^2, bf16 out), else pair rows (fp32 out).
+    /// The 4-bit grouped experts on this stream (cuda/experts.zig's affine-4 kernels, launches unchanged).
     pub fn experts(o: Ops, up: bool, x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, max_units: usize) !void {
-        const grid = @min((max_units + 3) / 4, o.k.expert_blocks[if (up) 0 else 1]);
-        if (grid < 1) return;
-        var a = expertArgs(x, x_stride, slots, w, kg, nb, p, out, n);
-        try o.go(if (up) o.k.expert_up else o.k.expert_down, .{ grid, 1, 1 }, 128, 0, &a);
+        return o.k.experts.run(o.s, up, x, x_stride, slots, w, kg, nb, p, out, n, max_units);
     }
 
-    /// experts.prefill: 64 pairs x 128 columns a CTA; `up` relu^2, else bf16 sums (epilogue 3).
     pub fn expertsPrefill(o: Ops, up: bool, x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, max_items: usize) !void {
-        const grid = max_items * ((nb + 3) / 4);
-        if (grid < 1) return;
-        var a = expertArgs(x, x_stride, slots, w, kg, nb, p, out, n);
-        try o.go(if (up) o.k.pre_up else o.k.pre_down, .{ grid, 1, 1 }, 256, pre_experts_smem, &a);
+        return o.k.experts.runPrompt(o.s, up, x, x_stride, slots, w, kg, nb, p, out, n, max_items);
     }
 
     /// prefill_attention (head dim 128): q (rows, heads, 128) at positions p0.. against caches filled through them.

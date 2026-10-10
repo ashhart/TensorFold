@@ -28,11 +28,13 @@ pub const fp8 = @import("fp8.zig");
 pub const segments = @import("segments.zig");
 pub const grouped = @import("grouped.zig");
 pub const qlinear = @import("qlinear.zig");
+pub const experts = @import("experts.zig");
 
 test {
     _ = @import("memory.zig");
     _ = @import("grouped.zig");
     _ = @import("qlinear.zig");
+    _ = @import("experts.zig");
     _ = launch;
     _ = abi;
     _ = aot;
