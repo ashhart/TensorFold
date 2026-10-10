@@ -20,8 +20,6 @@ const nemotron_snaps: api.prompt_cache.Snapshots.VTable = .{
 };
 
 pub const backends: []const []const u8 = &.{"cuda"};
-/// The top_k a request gets when neither it, the checkpoint's generation config nor --top-k sets one (0.6.6's CUDA server).
-pub const default_top_k: u32 = 20;
 pub const families: []const api.Family = blk: {
     var out: [registry.len]api.Family = undefined;
     for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats };

@@ -38,7 +38,7 @@ Nemotron runs concurrent requests in shared rounds on Metal and CUDA, and every 
 
 ## CUDA in 1.0.0
 
-On the GB10, greedy and sampled replies equal the one-token reference, seeds and every sampling rule behave as in 0.6.6, concurrent streams equal their solo runs, and health and metrics report device memory. Decode runs 1.01x to 1.10x the Python 0.6.6 engine on the same Spark. Other NVIDIA GPUs and the other families stay on the Python line for now.
+On the GB10, greedy and sampled replies equal the one-token reference, seeds and every sampling rule behave as in 0.6.6 (except that a request without `top_k` keeps every token, where 0.6.6's CUDA server used 20; `--top-k 20` restores it), concurrent streams equal their solo runs, and health and metrics report device memory. Decode runs 1.01x to 1.10x the Python 0.6.6 engine on the same Spark. Other NVIDIA GPUs and the other families stay on the Python line for now.
 
 ## Moving from Python 0.6
 

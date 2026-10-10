@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- A CUDA request that leaves out `top_k` samples with 20, as 0.6.6's CUDA server did (#542, fixes #515). Thanks to @plotarmordev.
+- A request that sets no `top_k`, on a checkpoint whose generation config sets none, keeps every token on CUDA as on Metal, so one seeded request samples the same on a Mac and on a GB10. `--top-k 20` gives 0.6.6's CUDA default. #542 had made 20 the CUDA default; it was taken back for one default everywhere (#515). Thanks to @plotarmordev.
 - `/metrics` reports pinned host memory on CUDA as `tensorfold:pinned_memory_bytes` (#541, fixes #538), and counts prompt tokens restored from kept prompt states (Flash Next, GLM-5.3-Flash and the Qwen3.8-27B) as `prompt_tokens_cached_total`, repeated as vLLM's `prefix_cache_hits_total` and `prefix_cache_queries_total` (#531, fixes #530). Thanks to @GustavBlack and @juliankang4.
 - A request keeps its own copy of its API key's label when the key file is reloaded under it (#560), and the server frees its key store and request counters when it stops (#513). Thanks to @chaog992 and @CerebralCoding.
 - `zig build test` on Linux runs the HTTP server's unit tests, and `zig build test-server-cpu` runs them alone (#543). Thanks to @MiaAI-Lab.
@@ -14,7 +14,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - The lane core takes an external drafter, such as an EAGLE-3 head or a DFlash block, in front of any target backend, and a stream with drafts off never reaches it. No served family uses it yet (#455). Thanks to @jschmied.
 - An opt-in HIP runtime for AMD GPUs with one exact MLX affine 4-bit row projection, and no model on it yet: its mock-backed admission tests run in `zig build test`, and `zig build hip-gpu-test` and `hip-affine-test` run on gfx1150, gfx1151 or gfx1201 (`-Dhip-arch`) (#463). Thanks to @ThinkOffApp, with @BlivionIaG, @jkuepker and @millaguie.
 - RUNBOOK.md names no stale release, describes today's CUDA qualification (GB10, and Ampere 8.6 cards) and built-in kernels, and drops the 1.0.0 gaps: a sampled CUDA request honours its seed, `top_k: 0` turns the filter off, and `/metrics` reports device and pinned memory (#537). Thanks to @GustavBlack.
-- The speed-up guide and recipe say their two-Mac numbers come from a build with a recorded dump, and that the release binary's dump-free two-Mac path has not passed that gate yet (#567). The recipe book says its capability table is the Python 0.6.6 engine's and names the native CUDA floor, and the RUNBOOK says how `top_k` defaults differ between CUDA and Metal.
+- The speed-up guide and recipe say their two-Mac numbers come from a build with a recorded dump, and that the release binary's dump-free two-Mac path has not passed that gate yet (#567). The recipe book says its capability table is the Python 0.6.6 engine's and names the native CUDA floor, and the RUNBOOK gives the `top_k` default.
 - A flag or checkpoint the native engine does not serve is refused with the Python 0.6.6 install line, instead of an `--engine python` flag the native binary does not have.
 - The native server accepts `--chat-template FILE` to override the checkpoint template for ordinary and tool-bearing chat. Invalid files fail startup without a fallback (#551). Thanks to @akol1.
 - CUDA and GLM recipes distinguish Python 0.6.6 features from native Zig support and link to each engine's runbook (#534). Thanks to @akol1.

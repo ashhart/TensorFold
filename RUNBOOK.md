@@ -88,8 +88,8 @@ A captured Triton set is optional: `TENSORFOLD_CUDA_KERNELS` names one (a folder
 forces the built-in kernels, and a set found at `share/tensorfold/cuda/sm<capability>/` beside the executable is used when present.
 A sampled request honours its `seed`, `top_k: 0` turns the top-k filter off, and `/metrics` reports CUDA device memory and
 pinned host memory.
-A request that names no `top_k`, on a checkpoint whose generation config names none, samples with `top_k` 20 on CUDA,
-as 0.6.6's CUDA server did, and with no top-k filter on Metal.
+A request that names no `top_k`, on a checkpoint whose generation config names none, samples with no top-k filter on
+CUDA and Metal alike, so a seeded request draws the same on both. `--top-k 20` gives 0.6.6's CUDA default.
 A conversation's next turn resumes from a prompt state kept at a 2,048-token chunk boundary, so a reply equals the same
 request with the cache off. `--prompt-cache-gib` sizes the kept states (16 GiB by default, inside the memory budget) and 0 turns
 them off; prompts shorter than 4,096 tokens keep none.
