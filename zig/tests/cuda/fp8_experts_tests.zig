@@ -1,4 +1,4 @@
-//! Grouped block-FP8 experts against the Python bytes (oracle/fp8_experts.py): packing, plan, up and down via experts.
+//! Grouped block-FP8 experts against recorded fixture bytes (the Python engine's): packing, plan, up and down.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");

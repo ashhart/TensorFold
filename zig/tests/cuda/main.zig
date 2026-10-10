@@ -44,7 +44,7 @@ const usage =
     \\  chunk-costs MODEL IDS_FILE WIDTHS   r rows as the decode window graph (r <= 16) and as a prompt chunk (any r)
     \\  grouped-plan <dir>        the shared expert plan against experts.route's bytes (oracle/grouped_plan.py)
     \\  fp8-lane <dir>            block-FP8 projections against the Python lane matmul's bytes (oracle/fp8_lane.py)
-    \\  fp8-experts <dir>         grouped block-FP8 experts against the Python bytes (oracle/fp8_experts.py)
+    \\  fp8-experts <dir>         grouped block-FP8 experts against recorded fixture bytes
     \\  carveout [MiB] [card]     GB10 display memory: round trips and bandwidth (SKIP without the card)
     \\  train                     Sliding Weights' training kernels against f64 references (synthetic rows)
     \\  train-mixers              Sliding Weights' mixer gradients against f64 references (synthetic rows)
