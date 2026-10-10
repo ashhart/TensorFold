@@ -162,6 +162,18 @@ pub const Store = struct {
         return if (s.family.vtable.spare) |f| f(s.family.ptr) else 0;
     }
 
+    /// A kept state now takes `extra` more bytes (a family copied what it shared into the state's own storage): charged
+    /// when the budget leaves room for it, refused otherwise; nothing is evicted, since a prompt pass is under way.
+    pub fn grow(s: *Store, saved: Saved, extra: u64) bool {
+        for (s.entries.items) |e| if (e.tokens.len > 0 and e.saved == saved) {
+            if (extra > s.room()) return false;
+            e.bytes += extra;
+            s.held += extra;
+            return true;
+        };
+        return false;
+    }
+
     /// What the budget leaves past the kept states and the spare storage: a family readies storage only inside it.
     pub fn room(s: *const Store) u64 {
         return s.budget -| s.held -| s.spare();

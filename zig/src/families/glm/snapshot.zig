@@ -80,6 +80,22 @@ pub fn copy(x: *const fwd.Ctx, e: mtl.ComputeEncoder, s: *st.State, snap: Ref, a
     s.mtp_pos = at;
 }
 
+/// A resident state made whole before its slot writes below it: its KDA states from `old`, then the MLA prefixes
+/// from `home` (the slot's caches), into `whole` in a whole state's layout.
+pub fn spill(x: *const fwd.Ctx, e: mtl.ComputeEncoder, old: Ref, whole: Ref, at: u32, home: *st.State) void {
+    const c = x.c;
+    var off = bytes(c, at, true);
+    words(x, e, old, whole, off);
+    for (home.mla[0..mlaCount(c)]) |*C| {
+        const sizes = [4]usize{ @as(usize, at) * c.kv_lora * 2, @as(usize, at) * c.i_dim * 2, @as(usize, at) * c.i_dim * 2, blocks(c, at) * c.i_dim * 2 };
+        for ([4]Ref{ C.keys, C.ik, C.ig, C.pool }, sizes) |src, n| {
+            words(x, e, src, whole.at(off), n);
+            off += n;
+        }
+    }
+    std.debug.assert(off == bytes(c, at, false));
+}
+
 /// A learned state's file for one rank of the pair: <dir>/<key>.r<rank>.bin.
 pub fn path(buf: []u8, dir: []const u8, key: u64, rank: u32) ![:0]const u8 {
     return std.fmt.bufPrintSentinel(buf, "{s}/{x:0>16}.r{d}.bin", .{ dir, key, rank }, 0);

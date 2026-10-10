@@ -33,6 +33,12 @@ pub const Slot = struct {
     seen: u64 = 0, // the window that last ran this slot's rows
 };
 
+/// The prompt cache's leave for a kept state to take `extra` more bytes (Store.grow).
+pub const Grow = struct {
+    ctx: *anyopaque,
+    f: *const fn (ctx: *anyopaque, saved: *anyopaque, extra: u64) bool,
+};
+
 pub const Slots = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
@@ -53,6 +59,8 @@ pub const Slots = struct {
     ahead: [2]f64 = .{ 0, 0 }, // the last launch's GPU start and end (0: none)
     launched: ?mtl.CommandBuffer = null, // keeps and drafts committed ahead: the window after them encodes while they run
     digest: u64 = 0, // the last window's picks hashed: a pair's ranks compare theirs
+    grow: ?Grow = null, // the prompt cache's leave to make a resident state whole before its slot writes below it
+    spilled: u64 = 0, // resident states made whole before their slots wrote below them
     ring: Ref, // u32 [ring_len]: tokens by handle, a queued round's input read from its slot on the GPU
     ring_at: u32 = 0,
     ring_cb: [ring_len]?mtl.CommandBuffer = @splat(null), // the queued round writing each slot (retained) until read
@@ -115,7 +123,7 @@ pub const Slots = struct {
         const slot = try sl.slotAt(i);
         const snap = sl.snaps.get(id) orelse return error.SnapshotOutOfStep;
         if (slot.s.pos != 0 or snap.at >= slot.prompt_len or snap.stale) return error.SnapshotOutOfStep;
-        if (snap.home) |h| if (h != i) sl.overwrite(i, 0); // another slot's prefixes copied over every one of this slot's
+        if (snap.home != i) try sl.overwrite(i, 0); // another slot's prefixes, or a whole state's, copied over every one of this slot's
         try sl.copySnap(slot, snap, false);
     }
 
@@ -124,12 +132,39 @@ pub const Slots = struct {
         return sl.snaps.get(snap.id) == snap and !snap.stale;
     }
 
-    /// Slot `i` writes its MLA rows from `at` on: its resident states past `at` lose their prefixes.
-    fn overwrite(sl: *Slots, i: u32, at: u32) void {
+    /// Slot `i` writes its MLA rows from `at` on: its resident states past `at` copy their prefixes out first when
+    /// the prompt cache's budget has room (they stay kept, whole), else they lose them (stale).
+    fn overwrite(sl: *Slots, i: u32, at: u32) !void {
         var it = sl.snaps.valueIterator();
-        while (it.next()) |snap| if (snap.*.home == i and snap.*.at > at) {
-            snap.*.stale = true;
+        while (it.next()) |snap| if (snap.*.home == i and snap.*.at > at and !snap.*.stale) {
+            if (!try sl.spill(snap.*)) snap.*.stale = true;
         };
+    }
+
+    /// A resident state made whole: a buffer for its MLA prefixes beside its KDA states, charged to the prompt cache,
+    /// filled from its slot before the slot writes. One Mac only: a pair's rank 1 holds its half resident still.
+    fn spill(sl: *Slots, snap: *snapshot.Snap) !bool {
+        const home = snap.home orelse return false;
+        const g = sl.grow orelse return false;
+        if (sl.e.ep != null) return false;
+        const whole = snapshot.bytes(&sl.e.c, snap.at, false);
+        if (!g.f(g.ctx, snap, whole - snap.bytes)) return false;
+        const buf = try sl.e.device.buffer(whole, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        errdefer buf.deinit();
+        try sl.flush();
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const x = sl.ctx(&sl.slots[home]);
+        const b = sl.e.begin();
+        snapshot.spill(&x, b.enc, .{ .buf = snap.buf }, .{ .buf = buf }, snap.at, &sl.slots[home].s);
+        try sl.e.finish(b.cb, b.enc);
+        snap.buf.deinit();
+        snap.buf = buf;
+        snap.bytes = whole;
+        snap.home = null;
+        sl.spilled += 1;
+        std.log.info("glm: a kept state of {d} tokens copied its prefixes out of slot {d} before the slot wrote below it ({d} MiB more)", .{ snap.at, home, (whole - snapshot.bytes(&sl.e.c, snap.at, true)) >> 20 });
+        return true;
     }
 
     /// A fixed prompt's state through slot 0, hashed: two builds agree only when their prompt passes give equal bits.
@@ -312,7 +347,7 @@ pub const Slots = struct {
         const slot = try sl.slotAt(i);
         const P = slot.prompt_len;
         if (n == 0 or at != slot.s.pos or at + n > P or n > @max(e.chunk_rows, st.max_rows)) return error.ChunkOutOfStep;
-        sl.overwrite(i, at);
+        try sl.overwrite(i, at);
         const D = e.c.hidden;
         const last = at + n == P;
         const absorb = if (last) n - 1 else n;

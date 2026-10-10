@@ -569,3 +569,27 @@ test "under-cap disk pressure selects the same LRU victim before either half is 
     try std.testing.expectEqual(@as(usize, 1), fake.disk_peer_writes);
     try std.testing.expect(!fake.disk_reserved);
 }
+
+test "a kept state grows only into what the budget leaves, and evicts nothing to do it" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0 }, 330); // fake bytes: 100 + at
+    defer s.deinit();
+    const t1 = [_]u32{ 1, 2, 3, 4, 5, 6 };
+    _ = f.pass(&s, &t1, try s.begin(a, &t1, 4, &.{}, &.{}, null, &.{})); // 104
+    const t2 = [_]u32{ 9, 9, 9, 9, 9, 9 };
+    _ = f.pass(&s, &t2, try s.begin(a, &t2, 5, &.{}, &.{}, null, &.{})); // 105: 209 held, 121 left
+    const e1 = s.find(&t1, &.{}, &.{}).?;
+    try std.testing.expect(s.grow(e1.saved, 100)); // 309 held
+    try std.testing.expectEqual(@as(u64, 204), e1.bytes);
+    try std.testing.expectEqual(@as(u64, 309), s.held);
+    try std.testing.expect(!s.grow(e1.saved, 22)); // 331 would pass the budget: refused, and both states stay
+    try std.testing.expectEqual(@as(usize, 2), s.entries.items.len);
+    try std.testing.expect(s.grow(e1.saved, 21)); // exactly the budget
+    try std.testing.expectEqual(s.budget, s.held);
+    var stranger: u8 = 0;
+    try std.testing.expect(!s.grow(&stranger, 0)); // a state the store doesn't hold
+}
