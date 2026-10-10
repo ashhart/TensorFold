@@ -27,7 +27,7 @@ pub const Store = struct {
         }
         const data = try a.alloc(u8, toy.vocab * toy.hidden * 2);
         @memset(data, 0);
-        s.embed = .{ .dtype = .bf16, .rank = 2, .shape = .{ toy.vocab, toy.hidden, 1, 1 }, .bytes = data };
+        s.embed = .{ .dtype = .bf16, .rank = 2, .shape = .{ toy.vocab, toy.hidden, 1, 1, 1 }, .bytes = data };
         return s;
     }
     pub fn deinit(s: *Store) void {

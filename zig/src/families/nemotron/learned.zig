@@ -72,9 +72,9 @@ fn splitOne(gpa: std.mem.Allocator, device: mtl.Device, ck: *ckpt.Checkpoint, ba
     const d = w.shape[0];
     const k = w.shape[1];
     var full: [192]u8 = undefined;
-    try ck.set(try std.fmt.bufPrint(&full, "{s}.weight", .{base}), .{ .buffer = codes, .offset = 0, .bytes = n / 2, .dtype = .u32, .shape = .{ d, k / 8, 1, 1 }, .rank = 2 });
-    try ck.set(try std.fmt.bufPrint(&full, "{s}.scales", .{base}), .{ .buffer = codes, .offset = n / 2, .bytes = 2 * groups, .dtype = .bf16, .shape = .{ d, k / 64, 1, 1 }, .rank = 2 });
-    try ck.set(try std.fmt.bufPrint(&full, "{s}.biases", .{base}), .{ .buffer = codes, .offset = n / 2 + 2 * groups, .bytes = 2 * groups, .dtype = .bf16, .shape = .{ d, k / 64, 1, 1 }, .rank = 2 });
+    try ck.set(try std.fmt.bufPrint(&full, "{s}.weight", .{base}), .{ .buffer = codes, .offset = 0, .bytes = n / 2, .dtype = .u32, .shape = .{ d, k / 8, 1, 1, 1 }, .rank = 2 });
+    try ck.set(try std.fmt.bufPrint(&full, "{s}.scales", .{base}), .{ .buffer = codes, .offset = n / 2, .bytes = 2 * groups, .dtype = .bf16, .shape = .{ d, k / 64, 1, 1, 1 }, .rank = 2 });
+    try ck.set(try std.fmt.bufPrint(&full, "{s}.biases", .{base}), .{ .buffer = codes, .offset = n / 2 + 2 * groups, .bytes = 2 * groups, .dtype = .bf16, .shape = .{ d, k / 64, 1, 1, 1 }, .rank = 2 });
     return rest;
 }
 
