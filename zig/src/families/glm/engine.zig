@@ -261,12 +261,16 @@ pub const Engine = struct {
         return prompt_mod.heights[prompt_mod.heights.len - 1];
     }
 
-    /// The most this Mac may load: 70% of its RAM in GiB, read as GB (the floor's 179 GB on a 256 GiB Mac, the strict reading).
+    /// The most this Mac may load: 70% of its RAM in GiB, read as GB (the floor's 179 GB on a 256 GiB Mac, the strict
+    /// reading); GLM_LOAD_LIMIT_GB sets it on a Mac cleared for more, never past 70% of the RAM's bytes.
     pub fn loadLimit() usize {
         var mem: u64 = 0;
         var len: usize = @sizeOf(u64);
         if (std.c.sysctlbyname("hw.memsize", &mem, &len, null, 0) != 0 or mem == 0) return 0;
-        return @intFromFloat(@as(f64, @floatFromInt(mem)) / (1 << 30) * 0.7 * 1e9);
+        const ram: f64 = @floatFromInt(mem);
+        const asked: f64 = if (std.c.getenv("GLM_LOAD_LIMIT_GB")) |v| std.fmt.parseFloat(f64, std.mem.span(v)) catch 0 else 0;
+        if (asked > 0) return @intFromFloat(@min(asked * 1e9, ram * 0.7));
+        return @intFromFloat(ram / (1 << 30) * 0.7 * 1e9);
     }
 
     /// The KDA decay rates A = exp(A_log) with MLX's Exp, on the GPU.

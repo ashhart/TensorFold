@@ -12,6 +12,9 @@ const Stream = lanes.Stream;
 /// One stream's window and a shared forward's rows, ms on the M5 Ultra pair (each stream's extra cost is learned).
 const window_costs = costTable(13.1, 3.5);
 const shared_costs = costTable(8.4 + 3.5, 3.5);
+/// The same on one M5 Ultra: a row's own experts are read on that Mac alone (measured 10 Oct: 13.0 ms, then ~4.1 a row).
+const one_mac_window_costs = costTable(13.0, 4.1);
+const one_mac_shared_costs = costTable(8.4 + 4.1, 4.1);
 
 fn costTable(comptime one: f64, comptime row: f64) [st.max_rows]lanes.config.Cost {
     var c: [st.max_rows]lanes.config.Cost = undefined;
@@ -49,13 +52,13 @@ pub const Backend = struct {
             .speculate_early = false,
             .plain_guard = true, // a shared round's draft row costs about what a plain row does: draft where it wins
             .drafts = 4,
-            .window_costs = &window_costs,
+            .window_costs = if (b.sl.e.ep == null) &one_mac_window_costs else &window_costs,
             .mtp_step_ms = 1.3,
             .streams_exact = true,
             .hidden_rows = true,
             .batch_rows = st.max_rows,
             .max_streams = @intCast(b.sl.slots.len),
-            .shared_costs = &shared_costs,
+            .shared_costs = if (b.sl.e.ep == null) &one_mac_shared_costs else &shared_costs,
             .draft_streams = true,
         };
     }
