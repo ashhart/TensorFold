@@ -1,0 +1,39 @@
+{
+  "upstream_commit": "bec00ae6961a43a9ab73c4fa9338c167b3f82851",
+  "inference_source_commit": "6dbf17059a846f2c9c40a92c79b5558d41f2960f",
+  "inference_source_tree": "035e7b5232d524273818a719ef3d409102583236",
+  "compiler_version": "0.17.0",
+  "compiler_archive_sha256": "b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a",
+  "cpu_target": "apple_m1",
+  "runtime": "system Metal",
+  "binaries": {
+    "tensorfold-native": "5983a5f66b4df5e218756155b6fc446f8ea570eb25b2c2934ae34c29c1a0ce83",
+    "tf-flashnext-batch": "053f3ba552650635ae1badd02b49aa432811718e91d569a0d62035b990d16e93"
+  },
+  "checkpoint": "TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP",
+  "checkpoint_download_metadata_revision": "45032a193a5d4126ba8534822cbaf8fb30b3e368",
+  "hardware": {
+    "soc": "M3 Ultra",
+    "gpu_cores": 80,
+    "ram_bytes": 274877906944,
+    "os": "macOS 26.7.1",
+    "os_build": "25G241"
+  },
+  "http_helper_source_commit": "6dbf17059a846f2c9c40a92c79b5558d41f2960f",
+  "lifecycle": {
+    "one_model_process_at_a_time": true,
+    "admission_lock_used": true,
+    "original_service_restored_healthy": true,
+    "test_processes_and_lock_removed": true
+  },
+  "local_checks": {
+    "zig_build_test_exit": 0,
+    "zig_fmt_whole_tree_exit": 0,
+    "golden_equal": 309,
+    "golden_known_differences": 10,
+    "golden_unexpected_differences": 0,
+    "lean_upstream_findings": 542,
+    "lean_candidate_findings": 542,
+    "helper_failure_smokes_passed": 2
+  }
+}

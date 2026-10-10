@@ -83,6 +83,8 @@ The comparison fixes the checkpoint, backend, settings and runtime.
 Different quantizations and different backends can produce different outputs.
 Flash Next on Metal uses shared target rounds with an explicit `--parallel N` above one on a single Mac.
 Its default `auto`, `--parallel 1` and two-Mac speed-up mode serve one active reply; MTP heads remain serial.
+In shared mode, `FZ_BATCH_MTP_CHAIN=1` experimentally submits each stream's absorb and draft chain in one Metal command buffer.
+The option defaults to off. See the [MTP chain receipt](docs/receipts/flashnext-mtp-chain-2026-10-10/README.md) for qualification and measurements.
 On Metal, Qwen3.8-27B runs one active reply per engine; Nemotron, GLM and the 2B model use shared lane rounds.
 
 ## Models on disk

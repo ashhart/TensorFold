@@ -22,15 +22,16 @@ def main():
     if args.tokens < 1 or args.rounds < 3:
         parser.error("tokens must be positive; rounds must include one warmup and at least two measured rounds")
     args.output.mkdir(parents=True, exist_ok=True)
-    cases = [json.loads((args.fixtures / f"{name}.json").read_text()) for name in
-             ("short", "thinking", "sparse", "sparse-thinking")]
-    receipt = {"exact": False, "binary_sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(),
-               "tokens": args.tokens, "rounds": args.rounds, "warmup_rounds": 1, "blocks": []}
+    receipt = {"exact": False, "tokens": args.tokens, "rounds": args.rounds,
+               "warmup_rounds": 1, "blocks": []}
 
     def save():
         (args.output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
 
     save()
+    receipt["binary_sha256"] = hashlib.sha256(args.binary.read_bytes()).hexdigest()
+    cases = [json.loads((args.fixtures / f"{name}.json").read_text()) for name in
+             ("short", "thinking", "sparse", "sparse-thinking")]
     reference = None
     previous = os.environ.get("FZ_BATCH_MTP_CHAIN")
     try:
@@ -41,6 +42,8 @@ def main():
             batches = gate.run(args, slots, cases, block)
             receipt["blocks"].append({"parallel": slots, "chain": chain, "batches": batches})
             save()
+            if slots > 1 and not any(batch["peak_running"] > 1 for batch in batches):
+                raise RuntimeError(f"shared sessions were not observed in block {block}")
             for batch in batches:
                 replies = [{key: result[key] for key in ("reply", "tokens", "prompt_tokens", "token_sha")}
                            for result in batch["results"]]
