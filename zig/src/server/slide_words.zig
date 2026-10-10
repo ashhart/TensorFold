@@ -20,6 +20,19 @@ pub fn questions(a: Allocator, text: []const u8, n: usize) ![]const []const u8 {
     return out.items;
 }
 
+/// Up to n numbered or bulleted lines, numbering and bullets gone, empty lines skipped.
+pub fn numbered(a: Allocator, text: []const u8, n: usize) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |raw| {
+        const line = unmark(raw);
+        if (line.len == 0) continue;
+        try out.append(a, line);
+        if (out.items.len == n) break;
+    }
+    return out.items;
+}
+
 /// A line without its list number or bullet, spaces, quotes and bold marks.
 pub fn unmark(raw: []const u8) []const u8 {
     var line = std.mem.trim(u8, raw, " \t\r");
@@ -107,6 +120,14 @@ pub fn recalls(fact: []const u8, question: []const u8, answer: []const u8, reply
     }
     if (pairs > 0) return 2 * found >= pairs;
     return key > 0 or tells(fact, question, "", reply);
+}
+
+/// Whether `near` says the fact's answer: a word the answers took from the fact that none of the questions says (teal,
+/// Ana), not merely the fact's topic (favourite colour), which a near miss shares on purpose.
+pub fn gives(fact: []const u8, question: []const u8, answer: []const u8, near: []const u8) bool {
+    var it: Units = .init(answer);
+    while (it.next()) |u| if (u.marked() and says(fact, u.word) and !says(question, u.word) and says(near, u.word)) return true;
+    return false;
 }
 
 /// Whether `answer` says a word of `fact` that `question` does not: else the question gives its own answer away.
@@ -622,6 +643,22 @@ test "Japanese compares by neighbouring characters: an answer asks, recalls and 
     try std.testing.expect(alike("わかりません。あなたの個人情報にはアクセスできません。", "わかりません。あなたの個人情報にはアクセスできません。"));
     try std.testing.expect(loops("鱈ちり鱈ちり鱈ちり鱈ちり鱈ちり"));
     try std.testing.expect(!loops("私の好きな食べ物は鱈ちりです。"));
+}
+
+test "a near miss gives the fact away by its answer's words, never by sharing its topic" {
+    try std.testing.expect(!gives("My favourite colour is teal.", "What is my favourite colour?", "Your favourite colour is teal.", "What is my brother's favourite colour?"));
+    try std.testing.expect(gives("My favourite colour is teal.", "What is my favourite colour?", "Your favourite colour is teal.", "Is my brother's favourite colour teal?"));
+    const asked = "好きな食べ物は何ですか？\n私の好きな食べ物を覚えていますか？";
+    try std.testing.expect(!gives("私の好きな食べ物は鱈ちりです。", asked, "あなたの好きな食べ物は鱈ちりです。", "妹の好きな食べ物は何ですか？"));
+    try std.testing.expect(gives("私の好きな食べ物は鱈ちりです。", asked, "あなたの好きな食べ物は鱈ちりです。", "妹も鱈ちりが好きですか？"));
+}
+
+test "numbered lines lose their numbers; empty lines are skipped" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const got = try numbered(arena.allocator(), "1. 冷蔵庫はどのように食べ物を冷やしますか？\n\n2) 日本の首都はどこですか？\n3. 季節はなぜ変わるのですか？", 2);
+    try std.testing.expectEqual(@as(usize, 2), got.len);
+    try std.testing.expectEqualStrings("日本の首都はどこですか？", got[1]);
 }
 
 test "a Japanese question is the user's own when it says I, never when it says your" {
