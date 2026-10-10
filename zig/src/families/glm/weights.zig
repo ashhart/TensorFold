@@ -42,7 +42,16 @@ pub const Mla = struct { x_proj: Q4, qr_proj: Q4, kv_b: Q4, o_proj: Q4, q_norm: 
 
 pub const Dense = struct { gate_up: Q4, down: Q4 };
 
-pub const Moe = struct { router: Ref, bias: Ref, gate: Q4, up: Q4, down: Q4, sh_gate_up: Q4, sh_down: Q4 };
+pub const Moe = struct {
+    router: Ref,
+    bias: Ref,
+    gate: Q4,
+    up: Q4,
+    down: Q4,
+    sh_gate_up: Q4,
+    sh_down: Q4,
+    living: ?*const @import("living.zig").Living = null, // Living Weights: the change after sh_down (layer 44 only)
+};
 
 pub const Layer = struct {
     hc: ?[2]Hc, // attention's and the MLP's hyper-connections (none on the MTP layer)
@@ -118,6 +127,11 @@ const Loader = struct {
         if (b) |x| l.w.buffers.append(l.gpa, x) catch |err| {
             x.deinit();
             return err;
+        };
+        // GLM_MLOCK=1: each weights buffer wired as it is made, so macOS never compresses the weights during a long load
+        // (a 256 GiB Mac with little swap kills the process holding >50% of compressed memory: "low-swap")
+        if (b) |x| if (std.c.getenv("GLM_MLOCK") != null) {
+            if (std.c.mlock(@ptrCast(@alignCast(x.contents())), @max(len, 16)) != 0) std.log.warn("glm: GLM_MLOCK: mlock of {d} bytes failed", .{len});
         };
         l.cur = b;
         l.cur_len = len;

@@ -204,6 +204,7 @@ fn shared(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const 
     qmm(p, e, x_in, w.sh_gate_up, p.sgu, M);
     swiglu(x, e, p.sgu, p.sact, M, x.c.moe_inter);
     qmm(p, e, p.sact, w.sh_down, p.ys, M);
+    if (w.living) |lw| lw.apply(e, p.sact, p.ys, M); // Living Weights after the shared expert's down, as the decode's
 }
 
 /// The MoE block on M rows: shared expert, route, experts gathered by expert; by rows, this Mac's halves summed in slot order and swapped.

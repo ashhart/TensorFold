@@ -11,6 +11,7 @@ pub const tokenizer = @import("tokenizer"); // a module of its own, so the nativ
 pub const ids_json = @import("ids_json.zig");
 pub const affine4_host = @import("affine4_host.zig");
 pub const shard_edit = @import("shard_edit.zig");
+pub const living_sidecar = @import("living_sidecar.zig");
 
 test {
     _ = safetensors;
@@ -18,6 +19,7 @@ test {
     _ = shard_edit;
     _ = exl3_format;
     _ = @import("exl3_rect_test.zig");
+    _ = living_sidecar;
     _ = checkpoint;
     _ = direct_io;
     _ = draft_depth;

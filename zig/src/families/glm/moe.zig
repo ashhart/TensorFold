@@ -103,6 +103,7 @@ fn experts(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
     shape(e, 1, .{ rows, slots, N });
     bind(e, 2, .{ w.down.w, w.down.s, w.down.b, w.sh_down.w, w.sh_down.s, w.sh_down.b, group[0], group[1], group[2], if (part == 1) sc.ys else sc.ye });
     e.dispatchThreads(size(32 * rows, D / 4, zs), size(32 * rows, 1, 1));
+    if (part == 1) if (w.living) |lw| lw.apply(e, act, sc.ys, rows); // Living Weights after the shared expert's down
 }
 
 /// By rows: every routed pick's half (this Mac's intermediate rows), down's fp32 partials into `yp`.

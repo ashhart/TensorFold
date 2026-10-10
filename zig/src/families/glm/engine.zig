@@ -11,6 +11,7 @@ const kernels = @import("kernels.zig");
 const ep_mod = @import("ep.zig");
 const CopyIndex = @import("../../core/copy_index.zig").CopyIndex;
 const checks = @import("checks.zig");
+const living_mod = @import("living.zig");
 const Ref = wts.Ref;
 
 pub const Reason = enum { stop, length, cancelled };
@@ -84,6 +85,8 @@ pub const Engine = struct {
     fused_route: bool = true, // GLM_ROUTE=0: the Python family's cast, router and top-k launches
     draft_vocab: u32 = 154880, // GLM_DRAFT_VOCAB: the MTP head drafts from the vocabulary's first this many tokens
     committed: u64 = 0, // when the last command buffer was committed (mach ticks)
+    dir: []u8 = &.{}, // the checkpoint folder (a Living Weights save writes its sidecar here)
+    living: ?*living_mod.Living = null, // Living Weights: the low-rank change after layer 44's shared down
 
     /// The checkpoint in `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers only; GLM_EP=settings: half the experts.
     pub fn load(gpa: std.mem.Allocator, dir: []const u8, cap: u32) !*Engine {
@@ -104,6 +107,9 @@ pub const Engine = struct {
         e.fused_route = if (std.c.getenv("GLM_ROUTE")) |v| v[0] != '0' else true;
         e.draft_vocab = if (std.c.getenv("GLM_DRAFT_VOCAB")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
         e.committed = 0;
+        e.living = null;
+        e.dir = try gpa.dupe(u8, dir);
+        errdefer gpa.free(e.dir);
         e.ep = null;
         e.pr = null;
         e.trace_last = null;
@@ -128,7 +134,7 @@ pub const Engine = struct {
         e.c = try cfg.parse(gpa, f.bytes[0..f.size]);
         if (e.draft_vocab == 0 or e.draft_vocab > e.c.vocab) e.draft_vocab = e.c.vocab;
         e.draft_vocab -= e.draft_vocab % 4; // the head's kernel takes four rows a simdgroup
-        const model = try modelHash(gpa, dir, f.bytes[0..f.size]);
+        var model = try modelHash(gpa, dir, f.bytes[0..f.size]);
         e.model_hash = model;
         if (std.c.getenv("GLM_LAYERS")) |v| try cfg.subset(&e.c, std.fmt.parseInt(u32, std.mem.span(v), 10) catch return error.BadLayerCount);
         const link: ?ep_mod.Settings = if (ep_path) |sp| blk: {
@@ -177,6 +183,18 @@ pub const Engine = struct {
             gpa.destroy(e.w);
         }
         try e.prepare();
+        errdefer if (e.living) |l| l.deinit();
+        // Living Weights: a folder's sidecar (or GLM_LW=1, the change in RAM for a learner) attached before the first reply
+        if (living_mod.present(gpa, dir) or std.c.getenv("GLM_LW") != null) {
+            const l = try e.livingOn();
+            if (try l.loadDir(dir)) {
+                var h = std.hash.Wyhash.init(model); // the learned folder is another model: peers and kept states key on it
+                h.update(&l.loaded_sha.?);
+                model = h.final();
+                e.model_hash = model;
+                std.log.info("glm: Living Weights: {d} committed ranks from {d} shards at layer {d}'s shared-expert down projection", .{ l.committed, l.shards, living_mod.layer });
+            }
+        }
         if (link) |s| {
             const rows = e.c.byRows();
             var me: ep_mod.Identity = .{ .layers = e.c.layers, .run = e.c.run, .mtp = @intFromBool(e.w.mtp != null), .experts = if (rows) e.c.moe_inter else e.c.experts, .own_lo = if (rows) e.c.inter[0] else e.c.own[0], .own_hi = if (rows) e.c.inter[1] else e.c.own[1], .cap = cap, .model = model };
@@ -222,6 +240,8 @@ pub const Engine = struct {
 
     /// The most this Mac may load: 70% of its RAM in GiB, read as GB (the floor's 179 GB on a 256 GiB Mac, the strict reading).
     pub fn loadLimit() usize {
+        // GLM_LOAD_LIMIT_GB=N: an explicit limit (a 256 GiB Mac holding Flash alone: 180.6 GB passes the 70% reading)
+        if (std.c.getenv("GLM_LOAD_LIMIT_GB")) |v| if (std.fmt.parseFloat(f64, std.mem.span(v))) |gb| return @intFromFloat(gb * 1e9) else |_| {};
         var mem: u64 = 0;
         var len: usize = @sizeOf(u64);
         if (std.c.sysctlbyname("hw.memsize", &mem, &len, null, 0) != 0 or mem == 0) return 0;
@@ -258,6 +278,8 @@ pub const Engine = struct {
             set.deinit();
         }
         if (e.ep) |ep| ep.deinit(gpa);
+        if (e.living) |l| l.deinit();
+        gpa.free(e.dir);
         e.ep_arena.deinit();
         if (e.pr) |*p| p.deinit();
         e.arena.deinit();
@@ -269,6 +291,37 @@ pub const Engine = struct {
         e.queue.deinit();
         e.device.deinit();
         gpa.destroy(e);
+    }
+
+    /// The Living Weights change, created (none in use: the stock forward) and attached to layer 44 on first call.
+    /// Call with nothing of the engine's in flight (between command buffers, e.g. from a learner's begin/step).
+    pub fn livingOn(e: *Engine) !*living_mod.Living {
+        if (e.living) |l| return l;
+        if (e.c.layers != living_mod.layer + 1) return error.LivingNeedsAllLayers;
+        const m = switch (e.w.layers[living_mod.layer].mlp) {
+            .moe => |*m| m,
+            .dense => return error.LivingSiteMissing,
+        };
+        const l = try living_mod.Living.init(e.gpa, e.device);
+        m.living = l;
+        e.living = l;
+        return l;
+    }
+
+    /// The change on (attached at layer 44) or off (the stock forward) without dropping it: a learner's private forward.
+    pub fn livingAttach(e: *Engine, on: bool) void {
+        const l = e.living orelse return;
+        switch (e.w.layers[living_mod.layer].mlp) {
+            .moe => |*m| m.living = if (on) l else null,
+            .dense => {},
+        }
+    }
+
+    /// The committed ranks written to this checkpoint's folder (living_weights.safetensors); the open block stays in RAM.
+    pub fn livingSave(e: *Engine) !void {
+        e.sync();
+        const l = e.living orelse return error.NothingLearned;
+        try l.saveDir(e.dir, if (std.c.getenv("LW_TOPIC")) |t| std.mem.span(t) else "");
     }
 
     pub fn hasMtp(e: *const Engine) bool {
