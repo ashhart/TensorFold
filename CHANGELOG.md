@@ -43,6 +43,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM loads read the checkpoint around the page cache and wait while free memory is under 3% of RAM. A 160 GB load on a 256 GB M5 Ultra had filled the page cache, run out of free memory and restarted the Mac.
 - `tf-moe-bench` and `tf-mm-bench` time routed-expert and prompt matmul kernels from `.metal` files against each other, with each kernel's bits against the first and the matmuls' error against fp64.
 - Living Weights' leak check no longer counts an everyday word a reply says in passing as a leak: "If you'd like, I can help" used to undo a round that taught "I like blue." (#590). Thanks to @ZackSample for the report.
+- The CUDA engine's quantized projections have one home, `cuda/qlinear.zig`: a weight view per format (MLX affine 4-bit, and #482's block-FP8) with one call for decode rows and one for prompt rows, which refuses a format the family didn't load. Nemotron's 4-bit projections run through it with the same kernels, launches and replies, and `tf-cuda-test fp8-lane` checks the FP8 rows through both calls (#587). Thanks to @jschmied.
 
 ## 1.0.4
 
