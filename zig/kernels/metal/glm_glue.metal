@@ -339,6 +339,7 @@ kernel void glm_index_select(const device float* scores [[buffer(0)]], device in
   threadgroup atomic_uint hist[256];
   threadgroup uint shared_prefix[1], shared_need[1];
   threadgroup uint counts[32];
+  threadgroup uint seg[8]; // the digit counts' simdgroup totals, highest digits first
   uint prefix = 0, need = a.top;
   if (a.top < a.blocks) {
     for (int shift = 24; shift >= 0; shift -= 8) {
@@ -351,15 +352,17 @@ kernel void glm_index_select(const device float* scores [[buffer(0)]], device in
           atomic_fetch_add_explicit(&hist[(key >> shift) & 255u], 1u, memory_order_relaxed);
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);
-      if (t == 0) {
-        uint acc = 0, digit = 0;
-        for (int d = 255; d >= 0; d--) {
-          const uint c = atomic_load_explicit(&hist[d], memory_order_relaxed);
-          if (acc + c >= need) { digit = uint(d); break; }
-          acc += c;
-        }
-        shared_prefix[0] = prefix | (digit << shift);
-        shared_need[0] = need - acc;
+      // the digit holding the need-th largest key: thread t takes digit 255 - t, the counts above it summed in parallel
+      const uint d = 255u - min(t, 255u);
+      const uint c = t < 256 ? atomic_load_explicit(&hist[d], memory_order_relaxed) : 0u;
+      const uint incl = simd_prefix_inclusive_sum(c);
+      if (t < 256 && t % 32 == 31) seg[t / 32] = incl;
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      uint above = incl - c;
+      for (uint i = 0; i < min(t / 32, 8u); i++) above += seg[i];
+      if (t < 256 && above < need && above + c >= need) {
+        shared_prefix[0] = prefix | (d << shift);
+        shared_need[0] = need - above;
       }
       threadgroup_barrier(mem_flags::mem_threadgroup);
       prefix = shared_prefix[0];
