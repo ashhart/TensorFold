@@ -81,6 +81,7 @@ pub const Trainer = struct {
     io: sites.Shared, // u32 ids [max_rows], targets [max_rows], f32 weights [max_rows], stats [max_rows, 2]
     proj: sites.Shared, // f32 [layers, max_rows, candidates]: each row along each layer's candidate directions
     sketched: usize = 0, // rows sketched since the sketches were cleared, each row's place in them
+    bases: learned.Bases = .{}, // each saved layer's projection as loaded, which every later save folds onto
 
     /// Every buffer a step needs, the change's sites taken from the engine (still attached: nothing moves yet).
     pub fn init(gpa: std.mem.Allocator, e: *engine.Engine) !*Trainer {
@@ -129,6 +130,7 @@ pub const Trainer = struct {
         t.io.free();
         t.proj.free();
         inline for (.{ "saved", "acts", "logits", "head_t" }) |f| @field(t, f).free();
+        t.bases.deinit(gpa);
         gpa.destroy(t);
     }
 
@@ -139,7 +141,7 @@ pub const Trainer = struct {
 
     /// The first `ranks` of the change folded into the output projections and written into the model's shards.
     pub fn save(t: *Trainer, gpa: std.mem.Allocator, io: std.Io, ranks: usize) !usize {
-        return learned.write(gpa, io, t.e.dir orelse return error.NotLearning, t.e.c, &t.sites, ranks);
+        return learned.write(gpa, io, t.e.dir orelse return error.NotLearning, t.e.c, &t.sites, ranks, &t.bases);
     }
 
     /// The mean loss of `ids`' answer from `start`, and what `mode` adds to it.
