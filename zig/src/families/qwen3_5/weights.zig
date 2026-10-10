@@ -58,7 +58,7 @@ fn projection(ckpt: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8
 pub fn load(ckpt: *const ck.Checkpoint, tied: bool) !Weights {
     const ships_head = ckpt.has("language_model.lm_head.weight");
     if (ships_head != !tied) {
-        std.log.err("config.json says tie_word_embeddings={s} but the checkpoint {s} a language_model.lm_head projection", .{ tied, if (ships_head) "ships" else "lacks" });
+        std.log.err("config.json says tie_word_embeddings={} but the checkpoint {s} a language_model.lm_head projection", .{ tied, if (ships_head) "ships" else "lacks" });
         return error.QwenHeadTiednessMismatch;
     }
     var w = Weights{
