@@ -255,7 +255,7 @@ pub const LaneHost = struct {
             .@"error" => .failed,
             else => .stop,
         };
-        h.finish(job, reason, "");
+        h.finish(job, reason, job.stream.problem);
         return true;
     }
 
@@ -266,6 +266,7 @@ pub const LaneHost = struct {
         const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
         emit(job, .{ .finished = .{ .reason = reason, .stats = stats, .message = message } });
         if (job.started) {
+            if (s.grammar) |g| g.deinit(h.gpa);
             s.deinit(h.gpa);
             job.proposer.deinit();
         }
@@ -366,6 +367,10 @@ pub const LaneHost = struct {
             .history_len = r.history_len,
             .shared_prefixes = r.shared_prefixes,
             .reuse = reuse,
+            .grammar = if (r.structure) |st| h.constraint(st) catch |e| {
+                job.proposer.deinit();
+                return h.drop(job, if (e == error.OutOfMemory) "out of memory" else "the reply's grammar could not start (xgrammar)");
+            } else null,
         }) catch {
             job.proposer.deinit();
             return h.drop(job, "out of memory");
@@ -405,6 +410,12 @@ pub const LaneHost = struct {
             _ = h.filling.orderedRemove(i);
             return;
         };
+    }
+
+    /// A reply's grammar from the server's compiler (Info.structures engines get requests that carry one).
+    fn constraint(h: *LaneHost, st: api.Structure) !*lanes.grammar.Constraint {
+        const c = st.compiler orelse return error.NoGrammarCompiler;
+        return c.constraint(h.gpa, h.io, @fromBackingInt(@intCast(@backingInt(st.kind))), st.text, st.after);
     }
 
     fn prefilled(h: *LaneHost, job: *Job, began: i96) void {
