@@ -99,7 +99,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     h.wall = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = window, .prefill_step = eng.chunk_rows });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = window, .prefill_step = eng.chunk_rows, .greedy_only = true });
     h.cache = null;
     const budget = cacheBudget(eng, cache_gib);
     if (!eng.followsPeer() and budget > 0) {

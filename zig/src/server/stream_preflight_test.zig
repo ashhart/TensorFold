@@ -302,3 +302,27 @@ test "a streamed Responses tool reply sends no whitespace that the whole reply d
     try expectToolStreamLikeWhole(.responses, tool_head ++ "\"input\":\"x\"," ++
         "\"tools\":[{\"type\":\"function\",\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}]");
 }
+
+/// HiEngine's replies from an engine that decodes greedily only.
+const GreedyEngine = struct {
+    fn engine(e: *@This()) api.Engine {
+        return .{ .ctx = e, .vtable = &.{ .info = info, .submit = HiEngine.submit, .cancel = HiEngine.cancel, .status = HiEngine.status, .memory = HiEngine.memory } };
+    }
+
+    fn info(_: *anyopaque) api.Info {
+        return .{ .context_window = 4096, .greedy_only = true };
+    }
+};
+
+test "a greedy-only engine's sampled request is a 400 before the stream opens; greedy ones are served" {
+    var backend: GreedyEngine = .{};
+    const sampled = try sendWith(backend.engine(), .chat, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"stream\":true,\"max_tokens\":2,\"temperature\":0.7}", .{});
+    try std.testing.expect(!sampled.opened);
+    try std.testing.expectEqual(@as(?u16, 400), sampled.status);
+    try std.testing.expectEqual(@as(i64, 0), sampled.preparing);
+    const greedy = try sendWith(backend.engine(), .chat, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":2,\"temperature\":0}", .{});
+    try std.testing.expectEqual(@as(?u16, 200), greedy.status);
+    try std.testing.expectEqualStrings("hi", greedy.content());
+    const unset = try sendWith(backend.engine(), .chat, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":2}", .{});
+    try std.testing.expectEqual(@as(?u16, 200), unset.status);
+}

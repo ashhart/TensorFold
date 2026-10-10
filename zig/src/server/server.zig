@@ -140,6 +140,7 @@ pub const Server = struct {
         try merge(options, cx, try fields.parseNumbers(cx, f));
         const temp = number(options.get("temperature")) orelse 0;
         if (temp <= 0) return null;
+        if (srv.info.greedy_only) return cx.refuse("this engine decodes greedily only: send temperature 0 or leave it out");
         const seed: u64 = if (options.get("seed")) |s| seedBits(s) else api.seedFor(prompt_ids, srv.config.seed_salt);
         return .{
             .seed = seed,
