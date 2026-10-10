@@ -136,11 +136,15 @@ pub const Server = struct {
     pub fn resolveSampling(srv: *Server, cx: *Cx, f: Value, temperature: f64, prompt_ids: []const u32) errors.Refused!?api.Sampling {
         _ = temperature; // the request's own temperature field decides, as in the Python server
         const options = try json.newObject(cx.a);
-        if (srv.config.default_sampling) |d| try merge(options, cx, try fields.parseNumbers(cx, d));
+        const defaults = if (srv.config.default_sampling) |d| try fields.parseNumbers(cx, d) else null;
+        if (defaults) |d| try merge(options, cx, d);
         try merge(options, cx, try fields.parseNumbers(cx, f));
         const temp = number(options.get("temperature")) orelse 0;
         if (temp <= 0) return null;
-        if (srv.info.greedy_only) return cx.refuse("this engine decodes greedily only: send temperature 0 or leave it out");
+        if (srv.info.greedy_only) return cx.refuse(if ((if (defaults) |d| number(d.get("temperature")) else null) orelse 0 > 0)
+            "this engine decodes greedily only and this server samples by default: send temperature 0, or serve with --temperature 0"
+        else
+            "this engine decodes greedily only: send temperature 0 or leave it out");
         const seed: u64 = if (options.get("seed")) |s| seedBits(s) else api.seedFor(prompt_ids, srv.config.seed_salt);
         return .{
             .seed = seed,

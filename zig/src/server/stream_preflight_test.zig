@@ -326,3 +326,20 @@ test "a greedy-only engine's sampled request is a 400 before the stream opens; g
     const unset = try sendWith(backend.engine(), .chat, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":2}", .{});
     try std.testing.expectEqual(@as(?u16, 200), unset.status);
 }
+
+test "a greedy-only engine's refusal names --temperature 0 when the server's own default samples" {
+    var backend: GreedyEngine = .{};
+    var text: TestText = .{};
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]struct { []const u8, bool }{ .{ "{\"temperature\":1.0}", true }, .{ "{\"temperature\":0}", false } }) |case| {
+        const config: server.Config = .{ .served_name = "test-model", .model_ids = &.{"test-model"}, .default_sampling = (try json.parse(a, case[0])).ok };
+        var srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), config, null);
+        defer srv.deinit();
+        var cx: errors.Cx = .{ .a = a };
+        try std.testing.expectError(error.Refused, srv.resolveSampling(&cx, (try json.parse(a, "{\"temperature\":0.7}")).ok, 0, &.{}));
+        try std.testing.expectEqual(case[1], std.mem.indexOf(u8, cx.message, "--temperature 0") != null);
+        try std.testing.expect(try srv.resolveSampling(&cx, (try json.parse(a, "{\"temperature\":0}")).ok, 0, &.{}) == null);
+    }
+}
