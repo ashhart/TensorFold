@@ -1,6 +1,6 @@
 # Installation runbook
 
-TensorFold 1.0.0 runs from a native executable.
+TensorFold runs from a native executable.
 Choose a qualified model and platform from [README.md](README.md#qualified-models), then keep its complete checkpoint outside the source checkout.
 The model directory needs configuration, tokenizer, chat template and weight files.
 An existing complete Hugging Face cache also works.
@@ -15,14 +15,16 @@ tensorfold --version
 tensorfold capabilities --json
 ```
 
-For an archive installation, download the arm64 asset and its companion checksum from the 1.0.0 release:
+For an archive installation, download the arm64 asset and its companion checksum from the
+[latest release](https://github.com/ashhart/TensorFold/releases/latest), with `V` set to its version:
 
 ```sh
-curl -fLO https://github.com/ashhart/TensorFold/releases/download/v1.0.0/tensorfold-1.0.0-macos-arm64.tar.gz
-curl -fLO https://github.com/ashhart/TensorFold/releases/download/v1.0.0/tensorfold-1.0.0-macos-arm64.tar.gz.sha256
-shasum -a 256 -c tensorfold-1.0.0-macos-arm64.tar.gz.sha256
-tar -xzf tensorfold-1.0.0-macos-arm64.tar.gz
-cd tensorfold-1.0.0-macos-arm64
+V=1.0.4
+curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz
+curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz.sha256
+shasum -a 256 -c tensorfold-$V-macos-arm64.tar.gz.sha256
+tar -xzf tensorfold-$V-macos-arm64.tar.gz
+cd tensorfold-$V-macos-arm64
 bin/tensorfold-native --version
 bin/tensorfold-native --help
 ```
@@ -60,31 +62,32 @@ Serve flags and request overrides are described in [README.md](README.md#serve-f
 
 Choose `linux-aarch64` for an arm64 host or `linux-x86_64` for an x86_64 host.
 The archives require glibc 2.28 or newer and an NVIDIA driver providing `libcuda.so.1`.
-The 1.0.0 CUDA inference qualification is Nemotron on GB10 with greedy decoding.
+CUDA serves Nemotron 3.5 Lightning, qualified on GB10 (`linux-aarch64`, greedy and sampled) and on Ampere cards with
+compute capability 8.6 (`linux-x86_64`, greedy: the RTX 30 series, RTX A6000, A10 and A40).
 
-On a GB10 arm64 host:
+On a GB10 arm64 host (an x86_64 host uses `linux-x86_64` in the same commands):
 
 ```sh
-curl -fLO https://github.com/ashhart/TensorFold/releases/download/v1.0.0/tensorfold-1.0.0-linux-aarch64.tar.gz
-curl -fLO https://github.com/ashhart/TensorFold/releases/download/v1.0.0/tensorfold-1.0.0-linux-aarch64.tar.gz.sha256
-sha256sum -c tensorfold-1.0.0-linux-aarch64.tar.gz.sha256
-tar -xzf tensorfold-1.0.0-linux-aarch64.tar.gz
-cd tensorfold-1.0.0-linux-aarch64
+V=1.0.4
+curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz
+curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz.sha256
+sha256sum -c tensorfold-$V-linux-aarch64.tar.gz.sha256
+tar -xzf tensorfold-$V-linux-aarch64.tar.gz
+cd tensorfold-$V-linux-aarch64
 bin/tensorfold-native --version
 ```
 
-CUDA fatbins are embedded in the executable.
-Nemotron also needs its qualified `aot.json` and `cubins` files, normally bundled under `share/tensorfold/cuda/sm121/`.
-If the capture assets are supplied separately, point `TENSORFOLD_CUDA_KERNELS` at the directory containing them:
+CUDA fatbins are embedded in the executable, and Nemotron runs on those built-in kernels:
 
 ```sh
-TENSORFOLD_CUDA_KERNELS=/path/to/qualified/sm121 \
-  bin/tensorfold-native serve "$HOME/models/nemotron-lightning" \
+bin/tensorfold-native serve "$HOME/models/nemotron-lightning" \
   --name local-model --parallel 1 --context 8192 --temperature 0 --no-thinking
 ```
 
-When the assets are bundled, use the same serve command without the environment override.
-Sampled seeds, `top_k: 0` and CUDA device/pinned-memory reporting have known 1.0.0 gaps; see [release notes](RELEASE-NOTES-1.0.0.md#cuda-limits-in-100).
+A captured Triton set is optional: `TENSORFOLD_CUDA_KERNELS` names one (a folder with `aot.json` and `cubins/`), `native`
+forces the built-in kernels, and a set found at `share/tensorfold/cuda/sm<capability>/` beside the executable is used when present.
+A sampled request honours its `seed`, `top_k: 0` turns the top-k filter off, and `/metrics` reports CUDA device memory and
+pinned host memory.
 Archives whose names contain `host-only` are CPU verification artifacts and cannot serve CUDA inference.
 
 ## Flash Next and paired Metal serving

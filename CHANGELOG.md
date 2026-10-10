@@ -13,6 +13,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - The `--dashboard` page shows a decode/prefill dial, memory, tokens-in-flight and MTP acceptance tiles, and a five-minute decode-rate chart (#561). Thanks to @heitke.
 - The lane core takes an external drafter, such as an EAGLE-3 head or a DFlash block, in front of any target backend, and a stream with drafts off never reaches it. No served family uses it yet (#455). Thanks to @jschmied.
 - An opt-in HIP runtime for AMD GPUs with one exact MLX affine 4-bit row projection, and no model on it yet: its mock-backed admission tests run in `zig build test`, and `zig build hip-gpu-test` and `hip-affine-test` run on gfx1150, gfx1151 or gfx1201 (`-Dhip-arch`) (#463). Thanks to @ThinkOffApp, with @BlivionIaG, @jkuepker and @millaguie.
+- RUNBOOK.md names no stale release, describes today's CUDA qualification (GB10, and Ampere 8.6 cards) and built-in kernels, and drops the 1.0.0 gaps: a sampled CUDA request honours its seed, `top_k: 0` turns the filter off, and `/metrics` reports device and pinned memory (#537). Thanks to @GustavBlack.
 - The native server accepts `--chat-template FILE` to override the checkpoint template for ordinary and tool-bearing chat. Invalid files fail startup without a fallback (#551). Thanks to @akol1.
 - CUDA and GLM recipes distinguish Python 0.6.6 features from native Zig support and link to each engine's runbook (#534). Thanks to @akol1.
 
