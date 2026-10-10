@@ -318,6 +318,21 @@ fn unabsorb(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *cons
     affine_mm.denseBatch(e, p.mm.mm_bf16, p.att, p.sums, q, p.vals, M, H, .{ .x_row = @intCast(H * K), .y_row = @intCast(H * c.v_dim), .sums_row = @intCast(H), .x_batch = @intCast(K), .y_batch = @intCast(c.v_dim), .sums_batch = 1, .w_batch = @intCast(per) });
 }
 
+/// `n` rows' key lists from their index scores over every pooled block they read (positions p0..), the scores on the tensor units.
+fn selectKeys(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, iq: Ref, iw: Ref, indices: Ref, n: u32, p0: u32) void {
+    const c = x.c;
+    const s_stride = x.s.cap / c.kpool + 1;
+    const most = (p0 + n) / c.kpool; // the last row's blocks
+    e.setPipeline(x.k.index_scores_nax);
+    bind(e, 0, .{ iq, iw, x.s.mla[mi].pool, p.sscore });
+    e.setValue([5]u32{ p0, c.qrProj(), c.i_heads, s_stride, n }, 4);
+    e.dispatchGroups(size((most + 63) / 64, (n + 63) / 64, 1), size(128, 1, 1));
+    e.setPipeline(x.k.index_select);
+    bind(e, 0, .{ p.sscore, indices });
+    e.setValue([5]u32{ p0, c.i_topk / c.kpool, c.keyWidth(), s_stride, c.keyWidth() }, 2);
+    e.dispatchGroups(size(n, 1, 1), size(1024, 1, 1));
+}
+
 /// MLA layer `mi` on M rows at pos..: tensor-unit projections, the decode cache writes, each row's key list in the sparse kernel.
 fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.Mla, x_in: Ref, M: u32, pos: u32) void {
     const c = x.c;
@@ -347,7 +362,7 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
         var r0 = dense;
         while (r0 < M) : (r0 += select_rows) {
             const sb = @min(select_rows, M - r0);
-            fwd.selectKeys(x, e, mi, p.qp.at((@as(usize, r0) * c.qrProj() + c.mla_heads * c.nope) * 2), c.qrProj(), p.iw.at(@as(usize, r0) * c.i_heads * 2), p.sscore, p.indices.at(@as(usize, r0) * width * 4), sb, pos + r0);
+            selectKeys(p, x, e, mi, p.qp.at((@as(usize, r0) * c.qrProj() + c.mla_heads * c.nope) * 2), p.iw.at(@as(usize, r0) * c.i_heads * 2), p.indices.at(@as(usize, r0) * width * 4), sb, pos + r0);
         }
     }
     if (fwd.on(x, "mla_attn")) {

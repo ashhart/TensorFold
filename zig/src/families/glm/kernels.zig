@@ -67,6 +67,7 @@ pub const Kernels = struct {
     argmax: mtl.Pipeline,
     index_scores: mtl.Pipeline,
     index_select: mtl.Pipeline,
+    index_scores_nax: mtl.Pipeline, // a prompt chunk's index scores on the tensor units (glm_index_nax.metal)
     exp_f32: mtl.Pipeline,
     streams: mtl.Pipeline,
     copy_u32: mtl.Pipeline,
@@ -186,7 +187,7 @@ fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
     errdefer gpa.destroy(k);
-    var jobs: [generated.len + 14]Job = undefined;
+    var jobs: [generated.len + 15]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -246,6 +247,9 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const absorb_tp_src = try frags.source(device, gpa, absorb_tp_raw);
     defer gpa.free(absorb_tp_src);
     jobs[generated.len + 13] = .{ .device = device, .source = absorb_tp_src, .names = &.{"glm_absorb_nax"}, .out = @as(*[1]mtl.Pipeline, &k.absorb_nax_tp) };
+    const index_src = try frags.source(device, gpa, sources.glm_index_nax);
+    defer gpa.free(index_src);
+    jobs[generated.len + 14] = .{ .device = device, .source = index_src, .names = &.{"glm_index_scores_nax"}, .out = @as(*[1]mtl.Pipeline, &k.index_scores_nax) };
     var sources_seen = std.hash.Wyhash.init(0x6b);
     for (jobs) |j| sources_seen.update(j.source);
     k.source_hash = sources_seen.final();
