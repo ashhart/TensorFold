@@ -15,6 +15,12 @@ pub fn argmaxRows(o: Ops, logits: Tensor, rows: usize, n: usize, out: u64) Error
     try o.l.tf_argmax_rows(p(logits.ptr), @backingInt(logits.kind), int(rows), int(n), i(out), o.stream);
 }
 
+/// softmax(row r)[ids[r]] of `rows` logits rows (fp16 or bf16) into fp32 `out`; of the row's largest when `ids` is 0.
+pub fn tokenProb(o: Ops, logits: Tensor, rows: usize, n: usize, ids: u64, out: u64) Error!void {
+    if (logits.kind == .f32) return error.BadShape;
+    try o.l.tf_token_prob(p(logits.ptr), @backingInt(logits.kind), int(rows), int(n), if (ids == 0) null else @ptrFromInt(ids), f(out), o.stream);
+}
+
 /// Each row's `ks[r]` largest by (value desc, id asc): ids (i32) and the values' 16-bit patterns, `stride` apart.
 pub fn topkRows(o: Ops, logits: Tensor, rows: usize, n: usize, ks: u64, stride: usize, ids: u64, values: u64) Error!void {
     if (logits.kind == .f32) return error.BadShape;
