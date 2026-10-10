@@ -4,6 +4,7 @@ const json = @import("json.zig");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const messages = @import("messages.zig");
+const images = @import("images.zig");
 const prompt = @import("prompt.zig");
 const tool_specs = @import("tool_specs.zig");
 const routes = @import("routes.zig");
@@ -29,7 +30,7 @@ fn tokenize(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
     var ids: []const u32 = undefined;
     if (body.has("messages")) {
         const generation = try flag(cx, body, "add_generation_prompt", true);
-        const msgs = try messages.normalize(cx, body.get("messages"), "system", srv.needs_user_after_tool);
+        const msgs = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, .of(srv.info.vision));
         const tools = tool_specs.active(cx, body.get("tools"), body.get("tool_choice")) catch |e| switch (e) {
             error.Refused => return cx.refuse(cx.message), // a ValueError here is a RequestError
             else => |x| return x,
@@ -40,6 +41,8 @@ fn tokenize(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
             error.Refused => return cx.other(cx.message),
             else => |x| return x,
         };
+        // media expanded as the chat route expands them: each image's tokens, each video's frame groups
+        if (try images.expand(srv.info.vision, if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, srv.text, cx, msgs, ids, 0)) |x| ids = x.ids;
     } else {
         const text = body.get("prompt");
         if (text == null or text.? != .string) return cx.refuse("prompt must be a string (or send messages)");

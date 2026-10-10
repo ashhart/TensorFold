@@ -4,6 +4,8 @@ const lanes = @import("lanes");
 const Allocator = std.mem.Allocator;
 
 /// The server's name for one request, unique while the process lives.
+pub const tfvideo = @import("tfvideo.zig");
+
 pub const Id = u64;
 
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
@@ -101,10 +103,50 @@ pub const Vision = struct {
     /// Image tokens one request may hold in all, and images.
     image_tokens: u32,
     max_images: u32,
+    /// Video input, when the engine's family reads it.
+    video: ?VideoOffer = null,
 };
 
-/// --vision: image input's limits (``Open.vision``).
-pub const VisionOpen = struct { image_tokens: u32 = 4096, max_images: u32 = 4 };
+/// A video's facts as the server's decoder reads them, and its frames on request.
+pub const VideoSource = struct {
+    frames: u64, // the stream's frame count
+    rate_num: u64, // its average frame rate, num / den
+    rate_den: u64,
+    width: u32,
+    height: u32,
+    ctx: *anyopaque,
+    /// The frames at ``indices`` (ascending, distinct), each to ``sink`` in order.
+    decode: *const fn (ctx: *anyopaque, indices: []const u32, sink: FrameSink) anyerror!void,
+};
+
+/// Where a decoded frame goes: RGB rows of ``width`` * 3 bytes, ``stride`` bytes apart.
+pub const FrameSink = struct {
+    ctx: *anyopaque,
+    take: *const fn (ctx: *anyopaque, k: usize, rgb: []const u8, width: u32, height: u32, stride: usize) anyerror!void,
+};
+
+/// A video prepared for the tower: each group of frames an image, and each group's time in seconds.
+pub const PreparedVideo = struct { groups: []PreparedImage, times: []f64 };
+
+/// Video input an engine serves (``Vision.video``): how a decoded video becomes images and how the prompt holds them.
+pub const VideoOffer = struct {
+    /// ``src`` at most ``max_tokens`` tokens and ``max_frames`` sampled frames; allocated in ``a``.
+    prepare: *const fn (ctx: *anyopaque, a: Allocator, src: VideoSource, max_tokens: u32, max_frames: u32) anyerror!PreparedVideo,
+    /// The token the chat template writes once per video, expanded to its groups.
+    video_token: u32,
+    /// The tokens around each group's image tokens; the group's time follows as text.
+    group_open: u32,
+    group_close: u32,
+    /// The tokens the template wraps a video in (the video token among them): text that spells one stays text.
+    markers: []const u32 = &.{},
+    /// Video tokens one request may hold in all, videos, and frames sampled a video.
+    video_tokens: u32,
+    max_videos: u32,
+    max_frames: u32,
+};
+
+/// --vision: image and video input's limits (``Open.vision``).
+pub const VisionOpen = struct { image_tokens: u32 = 4096, max_images: u32 = 4, video_tokens: u32 = 16384, max_videos: u32 = 2, max_frames: u32 = 256 };
 
 pub const Reason = enum { stop, length, cancelled, failed };
 

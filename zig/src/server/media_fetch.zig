@@ -20,6 +20,8 @@ pub const total_s = 30;
 
 /// images_http.MEDIA_TYPES: the declared types an image URL may answer with (WebP is refused after, by its bytes).
 pub const image_media = [_][]const u8{ "image/jpeg", "image/png", "image/webp" };
+/// videos.py VIDEO_MEDIA_TYPES.
+pub const video_media = [_][]const u8{ "video/mp4", "video/webm", "video/quicktime", "video/x-matroska" };
 
 fn fail(f: *Failure, text: []const u8) Error {
     f.text = text;
@@ -117,6 +119,12 @@ pub fn join(a: std.mem.Allocator, base: []const u8, location: []const u8) ![]con
     return std.fmt.allocPrint(a, "{s}{s}{s}", .{ origin, dir, location });
 }
 
+/// One download's deadline: `seconds` from now, or the request's `deadline` when that comes first.
+pub fn within(io: Io, deadline: Io.Timestamp, seconds: i64) Io.Timestamp {
+    const one = Io.Clock.awake.now(io).addDuration(.fromSeconds(seconds));
+    return if (one.nanoseconds < deadline.nanoseconds) one else deadline;
+}
+
 fn remaining(io: Io, deadline: Io.Timestamp, f: *Failure) Error!i64 {
     const left = Io.Clock.awake.now(io).durationTo(deadline).toMilliseconds();
     if (left <= 0) return fail(f, "image download timed out");
@@ -129,16 +137,14 @@ pub const Body = struct { data: []u8, media: []const u8 };
 /// What one request gave: the body, or a redirect's location.
 pub const Got = union(enum) { body: Body, redirect: []const u8 };
 
-/// The bytes of `url` and its media type (one of `media_types`), at most `max_bytes`, before `deadline` and within
-/// one download's seconds, redirects followed and each checked again.
+/// The bytes of `url` and its media type (one of `media_types`), at most `max_bytes`, before `deadline` (the caller's
+/// min of the request's deadline and one download's), redirects followed and each checked again.
 pub fn fetch(a: std.mem.Allocator, io: Io, url: []const u8, max_bytes: usize, deadline: Io.Timestamp, media_types: []const []const u8, f: *Failure) Error!Body {
     return fetchVia(a, io, url, max_bytes, deadline, media_types, f, Network{});
 }
 
 /// fetch over `via`, whose request(a, io, url, max_bytes, deadline, media_types, f) answers one checked URL.
-pub fn fetchVia(a: std.mem.Allocator, io: Io, url_in: []const u8, max_bytes: usize, deadline_in: Io.Timestamp, media_types: []const []const u8, f: *Failure, via: anytype) Error!Body {
-    const one = Io.Clock.awake.now(io).addDuration(.fromSeconds(timeout_s));
-    const deadline = if (one.nanoseconds < deadline_in.nanoseconds) one else deadline_in;
+pub fn fetchVia(a: std.mem.Allocator, io: Io, url_in: []const u8, max_bytes: usize, deadline: Io.Timestamp, media_types: []const []const u8, f: *Failure, via: anytype) Error!Body {
     var url = url_in;
     var hop: usize = 0;
     while (true) : (hop += 1) {
@@ -203,7 +209,7 @@ pub fn answer(a: std.mem.Allocator, io: Io, r: *Io.Reader, max_bytes: usize, dea
     if (encoded) return fail(f, "compressed HTTP image responses are unsupported");
     for (media_types) |m| {
         if (std.mem.eql(u8, m, media)) break;
-    } else return fail(f, "image URL content type must be JPEG, PNG or WebP");
+    } else return fail(f, if (media_types.ptr == &image_media) "image URL content type must be JPEG, PNG or WebP" else try std.fmt.allocPrint(a, "media URL content type must be one of {s}", .{try std.mem.join(a, ", ", media_types)}));
     if (length) |n| if (n > max_bytes) return fail(f, too_big);
     var data: std.ArrayList(u8) = .empty;
     if (chunked) {

@@ -65,11 +65,12 @@ take a string `prompt` (`add_special_tokens`, default false) or a list of token 
 chat fields that shape the prompt (`tools`, `reasoning_effort`, `chat_template_kwargs`) and `add_generation_prompt`
 (default true). It returns `count`, `max_model_len` (the context window; null when none is set on MLX) and
 `tokens`, and `token_strs` with `return_token_strs: true`. The IDs are the ones the chat route runs for the same
-request, images expanded. `/detokenize` takes `tokens` and returns `prompt`.
+request, images and videos expanded. `/detokenize` takes `tokens` and returns `prompt`.
 With `--vision`, supported Qwen3.5/3.8 dense checkpoints accept `image_url` content parts alongside text in user
 messages and in tool results (`role: "tool"`), such as an agent's screenshots. The native server does the same for
 GLM-5.3-Flash on Metal, with data URLs, and public HTTPS URLs under `--vision-urls`
-([image input](vision.md#the-native-server)).
+([image input](vision.md#the-native-server)); it also takes `video_url` parts in user messages
+([video](vision.md#video-on-the-native-server)).
 See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.
 

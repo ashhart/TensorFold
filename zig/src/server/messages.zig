@@ -3,6 +3,7 @@ const std = @import("std");
 const json = @import("json.zig");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
+const api = @import("engine_api");
 const Value = json.Value;
 const Cx = errors.Cx;
 
@@ -23,7 +24,32 @@ fn withField(cx: *Cx, o: *const json.Object, key: []const u8, value: Value) !*js
 
 /// ``normalize_messages`` (text only): leading system and developer text merged, later ones as ``late_system``; a template that needs a user query gains one user turn after a trailing tool run.
 pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_after_tool: bool) errors.Refused!Value {
-    return normalizeWith(cx, messages, late_system, needs_user_after_tool, false);
+    return normalizeWith(cx, messages, late_system, needs_user_after_tool, .{});
+}
+
+/// The media parts an engine reads: image_url parts (``Info.vision``), and video_url parts (its ``video``).
+pub const Media = struct {
+    images: bool = false,
+    videos: bool = false,
+
+    pub fn of(v: ?api.Vision) Media {
+        return .{ .images = v != null, .videos = v != null and v.?.video != null };
+    }
+};
+
+/// One video part as the template and the video path read it: {"type": "video_url", "video_url": {"url"}}
+/// (videos.py video_source: an object with a url string).
+fn videoPart(cx: *Cx, part: Value) errors.Refused!Value {
+    const vu = part.get("video_url") orelse return cx.refuse("video_url must contain a non-empty url string");
+    const u = if (vu == .object) vu.get("url") else null;
+    if (u == null or u.? != .string or u.?.string.len == 0) return cx.refuse("video_url must contain a non-empty url string");
+    for ([_][]const u8{ "image", "images", "image_url", "input_image", "audio", "input_audio", "video" }) |k| if (json.truthyField(part, k)) return cx.refuse("video_url parts cannot contain other media");
+    const inner = try json.newObject(cx.a);
+    try inner.put(cx.a, "url", u.?);
+    const out = try json.newObject(cx.a);
+    try out.put(cx.a, "type", .{ .string = "video_url" });
+    try out.put(cx.a, "video_url", .{ .object = inner });
+    return .{ .object = out };
 }
 
 /// One image part as the template and the image path read it: {"type": "image_url", "image_url": {"url", "detail"?}}.
@@ -50,9 +76,11 @@ fn imagePart(cx: *Cx, part: Value) errors.Refused!Value {
     return .{ .object = out };
 }
 
-/// `normalize`, and with `images` (an engine that reads them) a user or tool message's image_url parts kept beside its
-/// text parts, in order, for the template's image markers; a message without image parts is joined text as before.
-pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_after_tool: bool, images: bool) errors.Refused!Value {
+/// `normalize`, and with `media.images` (an engine that reads them) a user or tool message's image_url parts kept
+/// beside its text parts, in order, for the template's image markers, and with `media.videos` a user message's
+/// video_url parts the same way; a message without media parts is joined text as before.
+pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_after_tool: bool, media: Media) errors.Refused!Value {
+    const images = media.images;
     const list = messages orelse return cx.refuse("messages must be a non-empty list");
     if (list != .array or list.array.len == 0) return cx.refuse("messages must be a non-empty list");
     var out: std.ArrayList(Value) = .empty;
@@ -77,7 +105,13 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
                     has_image = true;
                     continue;
                 }
-                if (!std.mem.eql(u8, kind, "text") or fields.hasMedia(part)) return cx.refuse(if (images) "content parts must be text or image_url; audio and video inputs are unsupported" else "this server accepts text parts only; image, audio and video inputs are unsupported");
+                if (media.videos and std.mem.eql(u8, kind, "video_url")) {
+                    if (!std.mem.eql(u8, role.?.string, "user")) return cx.refuse("video_url parts are supported only in user messages");
+                    try parts.append(cx.a, try videoPart(cx, part));
+                    has_image = true;
+                    continue;
+                }
+                if (!std.mem.eql(u8, kind, "text") or fields.hasMedia(part)) return cx.refuse(if (media.videos) "content parts must be text, image_url or video_url; audio is unsupported" else if (images) "content parts must be text or image_url; audio and video inputs are unsupported" else "this server accepts text parts only; image, audio and video inputs are unsupported");
                 const t = part.get("text") orelse return cx.refuse("a text content part must contain a text string");
                 if (t != .string) return cx.refuse("a text content part must contain a text string");
                 try text.appendSlice(cx.a, t.string);

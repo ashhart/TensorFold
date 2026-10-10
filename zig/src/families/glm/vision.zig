@@ -34,6 +34,7 @@ pub const Config = struct {
     image_token: u32,
     image_start: u32,
     image_end: u32,
+    video: ?[3]u32 = null, // video_start_token_id, video_token_id, video_end_token_id: the checkpoint reads videos
     mean: [3]f32,
     std: [3]f32,
     min_tokens: u32,
@@ -62,6 +63,9 @@ pub const Config = struct {
             if (v != .integer) return error.VisionConfig;
             @field(c, kv[1]) = @intCast(v.integer);
         }
+        if (doc.object.get("video_start_token_id")) |s| if (doc.object.get("video_token_id")) |t| if (doc.object.get("video_end_token_id")) |e| {
+            if (s == .integer and t == .integer and e == .integer) c.video = .{ @intCast(s.integer), @intCast(t.integer), @intCast(e.integer) };
+        };
         const pj = processor_json orelse return c;
         const pdoc = try std.json.parseFromSliceLeaky(std.json.Value, arena, pj, .{});
         const ip = pdoc.object.get("image_processor") orelse return c;

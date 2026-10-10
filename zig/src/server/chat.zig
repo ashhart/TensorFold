@@ -165,7 +165,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     // --vision: each image's placeholder expanded to its tokens before the window, chunks and cache see the prompt
     var images: []const api.Image = &.{};
     var cache_key: []const u32 = &.{};
-    if (input.prompt == null) if (try images_mod.expand(srv.info.vision, if (srv.config.vision_urls) images_mod.Fetch.network(io) else null, cx, input.messages, rendered.ids, rendered.history_len)) |x| {
+    if (input.prompt == null) if (try images_mod.expand(srv.info.vision, if (srv.config.vision_urls) images_mod.Fetch.network(io) else null, srv.text, cx, input.messages, rendered.ids, rendered.history_len)) |x| {
         rendered = .{ .ids = x.ids, .history_len = x.history_len };
         images = x.images;
         cache_key = x.cache_key;
