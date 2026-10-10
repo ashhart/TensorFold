@@ -28,8 +28,7 @@ const facts_prompt = "Read the text below and list the facts in it worth remembe
 
 const steady_prompt = "Tell me something interesting about the ocean.";
 
-// A fact told in another language is held against prompts in that language too: the English ones leave the model's
-// answers in it free to move, and the checks would never see them.
+// A fact in another language is also held against prompts in that language, which English ones leave free to move.
 const language_prompt = "What language is this written in? Reply with the language's name in English, one word.\n{s}";
 const translate_prompt = "Translate each numbered line below into {s}, keeping its meaning and its number. Nothing else.\n{s}";
 
@@ -310,8 +309,7 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     }
     const pairs = got.pairs;
     const refs = got.refs;
-    // what the fact's questions ask and its answers say, all together: a near miss gives the fact away only by a word
-    // its answers took from it that none of its questions says
+    // all questions and answers together: a near miss gives the fact away only by an answer word no question says
     var asked_list: std.ArrayList([]const u8) = .empty;
     var answered_list: std.ArrayList([]const u8) = .empty;
     for (refs.items) |r| {
