@@ -79,6 +79,12 @@ template <bool EXPAND>
 template [[host_name("tf_hc_expand_mix")]] [[kernel]] decltype(tf_hc_expand_mix<true>) tf_hc_expand_mix<true>;
 template [[host_name("tf_hc_first_mix")]] [[kernel]] decltype(tf_hc_expand_mix<false>) tf_hc_expand_mix<false>;
 
+// The 4x4 comb's column sums over lanes 0-3 (the rest hold zeros): pairs, then pairs of pairs, simd_sum's bits.
+inline float4 hc_col4(float4 v) {
+  v += simd_shuffle_xor(v, ushort(1));
+  return v + simd_shuffle_xor(v, ushort(2));
+}
+
 // One threadgroup of 1024 a row: the slices' sums added in order, the mixes scaled by the streams' inverse norm, then the family's split: pre, post and the Sinkhorn comb, the streams collapsed and normed.
 [[kernel]] void tf_hc_split(const device bfloat* X [[buffer(0)]], const device float* PART [[buffer(1)]],
                         const constant float* SCALE [[buffer(2)]], const device float* BASEV [[buffer(3)]],
@@ -95,6 +101,10 @@ template [[host_name("tf_hc_first_mix")]] [[kernel]] decltype(tf_hc_expand_mix<f
   threadgroup float pre_s[S];
   threadgroup float inv_s[1];
   device const bfloat* xs = X + size_t(r) * F;
+  float xv[4][S]; // this thread's 4 columns of the streams, loaded while the mixes and the Sinkhorn run
+  for (int i = 0; i < 4; ++i) {
+    for (int s = 0; s < S; ++s) xv[i][s] = float(xs[s * TF_D + int(t) * 4 + i]);
+  }
   if (int(t) < PARTS) {
     const device float* p = PART + size_t(r) * SLICES * PARTS + t;
     float a = p[0];
@@ -123,11 +133,11 @@ template [[host_name("tf_hc_first_mix")]] [[kernel]] decltype(tf_hc_expand_mix<f
     const float row_max = metal::max(metal::max(v.x, v.y), metal::max(v.z, v.w));
     const float4 e = metal::fast::exp(v - row_max) * active;
     float4 rr = e * (1.0f / (e.x + e.y + e.z + e.w + HC_EPS)) + HC_EPS * active;
-    float4 col_inv = 1.0f / (float4(simd_sum(rr.x), simd_sum(rr.y), simd_sum(rr.z), simd_sum(rr.w)) + HC_EPS);
+    float4 col_inv = 1.0f / (hc_col4(rr) + HC_EPS);
     rr *= col_inv;
     for (int iter = 1; iter < TF_ITERS; ++iter) {
       rr *= (1.0f / (rr.x + rr.y + rr.z + rr.w + HC_EPS)) * active;
-      col_inv = 1.0f / (float4(simd_sum(rr.x), simd_sum(rr.y), simd_sum(rr.z), simd_sum(rr.w)) + HC_EPS);
+      col_inv = 1.0f / (hc_col4(rr) + HC_EPS);
       rr *= col_inv;
     }
     if (lane < (uint)S) *(device float4*)(COMB_OUT + r * S * S + lane * S) = rr;
@@ -137,8 +147,7 @@ template [[host_name("tf_hc_first_mix")]] [[kernel]] decltype(tf_hc_expand_mix<f
   float xc[4];
   float acc = 0.0f;
   for (int i = 0; i < 4; ++i) {
-    const int d = int(t) * 4 + i;
-    const float res = fma(p0, float(xs[d]), fma(p1, float(xs[TF_D + d]), fma(p2, float(xs[2 * TF_D + d]), p3 * float(xs[3 * TF_D + d]))));
+    const float res = fma(p0, xv[i][0], fma(p1, xv[i][1], fma(p2, xv[i][2], p3 * xv[i][3])));
     xc[i] = float(bfloat(res));
     acc = hc_sq_acc(acc, xc[i]);
   }
