@@ -19,6 +19,7 @@ pub const Model = struct {
     speculate: bool = false, // the head can draft from a verify's rows
     speculate_early: bool = true, // draft every row's first draft behind the verify
     draft_prior: []const f64 = &.{}, // the head's acceptance by depth until a stream has its own
+    depth_rate: f64 = 0, // the newest round's weight in a depth's acceptance estimate (0: the core's)
     plain_guard: bool = false, // plain rounds compete with drafted depths
     drafts: u32 = 1, // head drafts a round at most
     window_costs: []const Cost = &.{}, // forward ms by exact window width (timed at load)
@@ -116,6 +117,7 @@ pub const Config = struct {
             .shared_costs = try alloc.extendCosts(gpa, timed.items, batch_rows),
             .lane_costs = try alloc.extendCosts(gpa, m.lane_costs, 64),
             .mtp_step_ms = m.mtp_step_ms,
+            .k = .{ .depth_rate = if (m.depth_rate > 0) m.depth_rate else (Constants{}).depth_rate },
         };
     }
 
@@ -135,4 +137,8 @@ test "setup derives widths like Python" {
     try std.testing.expectEqual(@as(u32, 16), c.base_width);
     try std.testing.expectEqual(@as(u32, 4), c.most_drafts);
     try std.testing.expect(c.family_mtp and c.family_streams);
+    try std.testing.expectEqual(@as(f64, 0.15), c.k.depth_rate);
+    var steady = try Config.init(gpa, .{ .exact_width = 16, .mtp = true, .speculate = true, .drafts = 4, .depth_rate = 0.08 }, 16, 15);
+    defer steady.deinit(gpa);
+    try std.testing.expectEqual(@as(f64, 0.08), steady.k.depth_rate);
 }
