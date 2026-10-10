@@ -37,6 +37,8 @@ const Lane = struct {
     held: std.ArrayList(u32) = .empty, // drafts for the next round
     base: usize = 0, // the history length before the last verify
     rows: std.ArrayList(u32) = .empty, // the last verify's row tokens
+    filled: usize = 0, // prompt chunks a stepped prefill has run
+    filling: bool = false,
 };
 
 pub const Fake = struct {
@@ -69,6 +71,11 @@ pub const Fake = struct {
 
     pub fn backend(x: *Fake) be.Backend {
         return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow } };
+    }
+
+    /// The same target filling its prompt a chunk a call (`prefill_chunks`), as a backend with `prefill_step`.
+    pub fn stepped(x: *Fake) be.Backend {
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow } };
     }
 
     fn self(ptr: *anyopaque) *Fake {
@@ -122,7 +129,29 @@ pub const Fake = struct {
             if (x.prefill_hook) |hook| hook(x.prefill_hook_ctx.?, s, chunk);
             if (s.isCancelled()) return error.Cancelled;
         }
-        const h = &got.value_ptr.history;
+        try x.fillPrompt(got.value_ptr, s);
+    }
+
+    fn prefillStep(ptr: *anyopaque, s: *Stream) anyerror!bool {
+        const x = self(ptr);
+        if (x.refuse_sampled and s.sampling != null) return error.SamplingRefused;
+        const got = try x.lanes.getOrPut(x.gpa, s);
+        if (got.found_existing and !got.value_ptr.filling) freeLane(x.gpa, got.value_ptr);
+        if (!got.found_existing or !got.value_ptr.filling) got.value_ptr.* = .{ .filling = true };
+        const l = got.value_ptr;
+        x.prefill_count += 1;
+        if (x.prefill_hook) |hook| hook(x.prefill_hook_ctx.?, s, l.filled);
+        if (s.isCancelled()) return error.Cancelled;
+        l.filled += 1;
+        if (l.filled < @max(1, x.prefill_chunks)) return false;
+        l.filling = false;
+        try x.fillPrompt(l, s);
+        return true;
+    }
+
+    /// The pass's end: the cache holds the prompt, from a kept state where one was restored.
+    fn fillPrompt(x: *Fake, l: *Lane, s: *Stream) !void {
+        const h = &l.history;
         s.cached = 0;
         if (s.reuse.saved) |saved| { // the kept state's tokens stand in for the prompt's first `at`
             const kept: *std.ArrayList(u32) = @ptrCast(@alignCast(saved));

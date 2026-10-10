@@ -12,6 +12,7 @@ const shape = @import("shape.zig");
 const plan_lanes = @import("plan_lanes.zig");
 const fill = @import("fill.zig");
 const trail = @import("trail.zig");
+const open = @import("open.zig");
 const Stream = sm.Stream;
 const Feed = be.Feed;
 const LogRow = @import("logprob.zig").Row;
@@ -76,58 +77,10 @@ pub const Engine = struct {
         return n;
     }
 
-    /// Prefill a stream, draw its first token and ask for its first drafts; it takes part from the next round.
-    pub fn addStream(e: *Engine, s: *Stream) !void {
-        _ = e.arena.reset(.retain_capacity);
-        try trail.event(e, &.{ f("ev", str("add")), f("stream", str(s.id)) });
-        e.backend.prefill(s) catch |err| {
-            if (err == error.Cancelled) e.backend.release(s); // the host finishes a cancelled stream without the core
-            return err;
-        };
-        if (s.isCancelled()) { // cancelled in its last chunk: no first token
-            e.backend.release(s);
-            return error.Cancelled;
-        }
-        s.context.shrinkRetainingCapacity(s.prompt_len);
-        s.rows.clearRetainingCapacity();
-        s.pending = null;
-        s.cache_len = s.prompt_len;
-        const position: u64 = s.prompt_len;
-        const drawn = try e.backend.first(s, position);
-        var feed: Feed = .{ .handle = drawn };
-        if (try e.forcedNext(s)) |t| feed = .{ .value = t };
-        var asked: ?u32 = null;
-        if (e.cfg.family_mtp and s.drafts) {
-            // the head reads the prompt's last row and the first token, and drafts the one after it
-            const d: u32 = @intCast(try e.rule.depth(win.who(s)));
-            asked = d;
-            try e.backend.draft(&.{.{ .stream = s, .follow = &.{}, .first = feed, .rows = null, .start = s.prompt_len, .position = position + 1, .depth = d }});
-            s.dropHeld(e.gpa);
-            s.next = .{ .count = d };
-            if (e.backend.vtable.tree) |tree| if (try tree(e.backend.ptr, s, e.gpa)) |held| {
-                s.next = held; // a tree head's first drafts as host tokens, as every later round's
-            };
-        } else if (e.cfg.pipelined and s.logprobs == null) {
-            try e.queueNext(s, feed);
-        }
-        const value = try e.readFeed(feed);
-        if (asked) |d| try trail.event(e, &.{ f("ev", str("draft")), f("stream", str(s.id)), f("depth", int(d)), f("position", int(position + 1)), f("follow", .{ .u32s = &.{value} }), f("rows", .null) });
-        if (e.log != null) {
-            const first = if (feed == .handle) value else try e.backend.read(drawn);
-            try trail.event(e, &.{ f("ev", str("first")), f("stream", str(s.id)), f("position", int(position)), f("drawn", int(first)), f("token", int(value)) });
-        }
-        var first_row: [1]LogRow = undefined;
-        if (s.logprobs != null) first_row[0] = (try e.backend.firstRow(s)).forToken(value);
-        _ = try s.commit(e.gpa, &.{value}, if (s.logprobs != null) &first_row else &.{});
-        s.pending = value;
-        try trail.resolve(e);
-        if (s.finished) {
-            try trail.finish(e, s);
-            e.release(s);
-            return;
-        }
-        try e.live.append(e.gpa, s);
-    }
+    pub const addStream = open.add;
+    pub const opened = open.opened;
+    pub const fills = open.fills;
+    pub const fillStream = open.fillStream;
 
     /// A stream another driver prefilled and drew `token` for: drafts asked, the token committed, rounds from here.
     pub fn adoptPrefilled(e: *Engine, s: *Stream, token: u32) !void {
@@ -568,7 +521,7 @@ pub const Engine = struct {
     }
 
     /// Feed a token and queue the draw of the next at the new cache length.
-    fn queueNext(e: *Engine, s: *Stream, feed: Feed) !void {
+    pub fn queueNext(e: *Engine, s: *Stream, feed: Feed) !void {
         s.cache_len += 1;
         const h = try e.backend.queue(s, feed, s.cache_len);
         s.inflight = h;
@@ -579,20 +532,20 @@ pub const Engine = struct {
     }
 
     /// The thinking budget's or a forced fix's token at the next position instead of the draw.
-    fn forcedNext(e: *Engine, s: *Stream) !?u32 {
+    pub fn forcedNext(e: *Engine, s: *Stream) !?u32 {
         if (s.popForce()) |t| return t;
         if (s.cutsNext()) return try s.startClose(e.gpa);
         return null;
     }
 
-    fn readFeed(e: *Engine, feed: Feed) !u32 {
+    pub fn readFeed(e: *Engine, feed: Feed) !u32 {
         return switch (feed) {
             .handle => |h| try e.backend.read(h),
             .value => |v| v,
         };
     }
 
-    fn release(e: *Engine, s: *Stream) void {
+    pub fn release(e: *Engine, s: *Stream) void {
         s.dropRoundState(e.gpa);
         e.backend.release(s);
     }
