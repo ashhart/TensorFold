@@ -23,6 +23,7 @@ pub const prefill_attention: []const u8 = if (available) &Blob("fatbin_prefill_a
 pub const scan_rows: []const u8 = if (available) &Blob("fatbin_scan_rows").bytes else &.{};
 pub const nemotron_ops: []const u8 = if (available) &Blob("fatbin_nemotron_ops").bytes else &.{};
 pub const lane_gemv: []const u8 = if (available) &Blob("fatbin_lane_gemv").bytes else &.{};
+pub const affine4_pack: []const u8 = if (available) &Blob("fatbin_affine4_pack").bytes else &.{};
 pub const sample: []const u8 = if (available) &Blob("fatbin_sample").bytes else &.{};
 pub const fp8_lane: []const u8 = if (available) &Blob("fatbin_fp8_lane").bytes else &.{};
 pub const torch_argmax: []const u8 = if (available) &Blob("fatbin_torch_argmax").bytes else &.{};
