@@ -1,4 +1,4 @@
-//! A stream's committed target taps over the drafter's window, by position modulo the window: the drafter's own, or a lane's.
+//! A stream's committed target taps over the drafter's window, by position modulo the window.
 const std = @import("std");
 const mtl = @import("metal");
 

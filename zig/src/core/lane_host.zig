@@ -423,7 +423,7 @@ pub const LaneHost = struct {
         return if (h.decoded_rows) r.decode_spans else &.{};
     }
 
-    /// A prompt-only pass on a `warm_turns` engine: the backend prefills, the cache keeps where it ends, the lane frees.
+    /// A prompt-only pass on a `warm_turns` engine: the backend prefills and the cache keeps where it ends.
     fn warmPass(h: *LaneHost, job: *Job, began: i96) bool {
         const be = h.core.backend;
         be.prefill(&job.stream) catch |e| {
@@ -503,8 +503,7 @@ pub const LaneHost = struct {
         return true;
     }
 
-    /// The backend has no memory for another lane yet: the job waits at the queue's head, and admission holds at the
-    /// lanes already running (each has its memory) until one frees.
+    /// No memory for another lane yet: the job waits at the queue's head, and admission holds until a lane frees.
     fn requeue(h: *LaneHost, job: *Job) bool {
         job.stream.deinit(h.gpa);
         job.proposer.deinit();

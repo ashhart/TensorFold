@@ -1,4 +1,4 @@
-//! The lane core's backend for Qwen27: a stream a runner slot, shared rounds across slots, DFlash2 trees for slot 0's stream.
+//! The 27B's lane core backend: a stream a runner slot, shared rounds across slots, DFlash2 trees for slot 0.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -7,6 +7,7 @@ const q = tf.qwen27;
 const lanes = tf.lanes;
 const be = lanes.backend;
 pub const Draft = @import("qwen27_draft.zig").Draft;
+const slots = @import("qwen27_slots.zig");
 const Round = q.round_plan.Round;
 const Tree = q.dflash.selector.Tree;
 const Ring = q.tap_ring.Ring;
@@ -17,13 +18,12 @@ pub const max_rows = 16;
 /// A shared round's rows at most: the frame's.
 pub const batch_rows = 128;
 const ring = 64;
-const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+pub const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
 /// Called before a finished stream leaves its slot, its state still standing there (the reply's prompt-cache keep).
 pub const Release = struct { ctx: *anyopaque, kept: *const fn (ctx: *anyopaque, s: *lanes.Stream, slot: u32) void };
 
-/// A slot's memory taken when a stream is first bound to it: `room` says whether `bytes` more fit, `added` gets the
-/// new buffers (the server's residency set). error.LaneMemory when they do not fit: the request waits for a slot.
+/// A slot's memory on its first use: `room` says whether `bytes` more fit, `added` takes the new buffers.
 pub const Grow = struct {
     ctx: *anyopaque,
     room: *const fn (ctx: *anyopaque, bytes: usize) bool,
@@ -88,25 +88,6 @@ pub const Metal = struct {
         return b;
     }
 
-    /// A slot's memory past the runner's ready ones: its K/V rows and taps ring, taken the first time it is used.
-    fn ready(b: *Metal, slot: u32) !void {
-        const kv = slot >= b.runner.ready;
-        const ring_missing = b.draft != null and slot > 0 and b.rings[slot] == null;
-        if (!kv and !ring_missing) return;
-        const ring_bytes: usize = if (b.draft) |d| @as(usize, d.model.ring().window) * d.model.ring().stride else 0;
-        const need = (if (kv) b.runner.slotBytes() else 0) + (if (ring_missing) ring_bytes else 0);
-        if (b.grow) |g| if (!g.room(g.ctx, need)) return error.LaneMemory;
-        var added: std.ArrayList(mtl.Buffer) = .empty;
-        defer added.deinit(b.gpa);
-        try added.appendSlice(b.gpa, try b.runner.ensure(slot));
-        if (ring_missing) {
-            const buf = try b.runner.model.device.buffer(ring_bytes, opts);
-            b.rings[slot] = .{ .buf = buf };
-            try added.append(b.gpa, buf);
-        }
-        if (b.grow) |g| g.added(g.ctx, added.items);
-    }
-
     fn freeRings(b: *Metal) void {
         for (&b.rings) |*r| if (r.*) |x| {
             x.buf.deinit();
@@ -125,6 +106,13 @@ pub const Metal = struct {
         b.ops.deinit();
         b.gpa.destroy(b);
     }
+
+    pub const lone = slots.lone;
+    const prefillSlot = slots.prefill;
+    const freeSlot = slots.free;
+    const ringChunk = slots.ringChunk;
+    const unbind = slots.unbind;
+    const ready = slots.ready;
 
     pub fn backend(b: *Metal) be.Backend {
         return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .probabilities = probabilitiesFn, .tree = treeFn, .release = releaseFn } };
@@ -242,20 +230,20 @@ pub const Metal = struct {
         };
     }
 
-    fn dropRound(b: *Metal) void {
+    pub fn dropRound(b: *Metal) void {
         if (b.round) |*r| r.deinit();
         b.round = null;
         b.count = 0;
         b.early = 0;
     }
 
-    fn dropTree(b: *Metal) void {
+    pub fn dropTree(b: *Metal) void {
         if (b.tree) |*t| t.deinit();
         b.tree = null;
     }
 
     /// Slot 0's stream drafts with the DFlash2 head once a drafter is attached.
-    fn drafter(b: *const Metal, slot: u32) ?*Draft {
+    pub fn drafter(b: *const Metal, slot: u32) ?*Draft {
         return if (slot == 0) b.draft else null;
     }
 
@@ -265,7 +253,7 @@ pub const Metal = struct {
         const vocab: u32 = @intCast(b.runner.model.config.vocab);
         if (s.sampling) |sampling| {
             const words: [*]const u16 = @ptrCast(@alignCast(logits.buffer.contents() + logits.offset));
-            // the 2B's draw: the top-k candidates first, then the shared keyed sampler (the same token as the whole row)
+            // the 2B's draw: top-k candidates, then the shared keyed sampler (the whole row's token)
             for (out[0..rows], positions[0..rows], first..) |*t, p, r| t.* = try tf.qwen35.backend.draw(b.gpa, words[r * vocab ..][0..vocab], sampling, p, &.{});
             return;
         }
@@ -285,8 +273,7 @@ pub const Metal = struct {
         }
     }
 
-    /// Keep the last verify's rows on `paths` (one a window). Slot 0 alone with a drafter keeps on the GPU with its
-    /// taps and head; otherwise the runner keeps every window, then each slot's ring takes its kept rows' taps.
+    /// Keep the last verify's rows on `paths`: slot 0 alone keeps on the GPU with its taps, else the runner and rings.
     fn keepPaths(b: *Metal, paths: []const []const u32) !void {
         defer b.dropRound();
         if (paths.len != b.count) return error.NothingToKeep;
@@ -340,7 +327,7 @@ pub const Metal = struct {
         }
     }
 
-    /// One command buffer keeps slot 0's path rows, gathers their taps for the drafter and moves its last logits to row 0.
+    /// One command buffer keeps slot 0's path rows, gathers their taps and moves its last logits to row 0.
     fn commitDevice(b: *Metal, d: *Draft, path: []const u32) !void {
         const g = &d.generation;
         const r = b.runner;
@@ -373,171 +360,13 @@ pub const Metal = struct {
     }
 
     /// A verify whose rows all stayed keeps them before anything else (keep is called only to drop rows).
-    fn settle(b: *Metal) !void {
+    pub fn settle(b: *Metal) !void {
         if (b.round == null) return;
         var rows: [batch_rows]u32 = undefined;
         for (&rows, 0..) |*p, i| p.* = @intCast(i);
         var paths: [8][]const u32 = undefined;
         for (paths[0..b.count], b.widths[0..b.count]) |*p, w| p.* = rows[0..w];
         try b.keepPaths(paths[0..b.count]);
-    }
-
-    /// A stream's prompt into `slot`: from its kept state when it has one, in chunks cut where a fresh pass cuts,
-    /// decoded spans with decode arithmetic; slot 0 feeds the drafter, other slots their rings.
-    fn prefillSlot(b: *Metal, s: *lanes.Stream, slot: u32) !void {
-        const ids = s.prompt();
-        if (ids.len == 0 or ids.len + s.max_new + max_rows > b.runner.capacity) return error.PromptTooLong;
-        const d = b.drafter(slot);
-        if (d) |x| try x.reset() else try b.runner.reset(slot);
-        if (b.ringOf(slot)) |g| g.end.* = 0;
-        s.cached = 0;
-        var at: usize = 0;
-        if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
-            const st: *const q.snapshot.State = @ptrCast(@alignCast(saved));
-            if (st.at < ids.len) {
-                if (b.restoreSlot(slot, st)) {
-                    at = st.at;
-                    s.cached = st.at;
-                } else |_| {
-                    s.reuse_failed = true;
-                    if (d) |x| try x.reset() else try b.runner.reset(slot);
-                    if (b.ringOf(slot)) |g| g.end.* = 0;
-                }
-            } else s.reuse_failed = true;
-        }
-        while (at < ids.len) {
-            if (s.isCancelled()) return error.Cancelled;
-            var end = @min(ids.len, at + b.chunk);
-            for (s.chunks) |cut| if (cut > at and cut < end) {
-                end = cut;
-            };
-            for (s.reuse.marks) |mark| if (mark > at and mark < end) {
-                end = mark;
-            };
-            var decoded = false;
-            for (s.decode_spans) |span| {
-                for (span) |cut| if (cut > at and cut < end) {
-                    end = cut;
-                };
-                decoded = decoded or (at >= span[0] and at < span[1]);
-            }
-            const part = ids[at..end];
-            const last = end == ids.len;
-            if (d) |x| {
-                if (decoded) try x.decodeChunk(part, last) else try x.promptChunk(part, last);
-            } else {
-                const session = q.session.Session{ .runner = b.runner, .slot = slot };
-                if (decoded) try session.decodeChunk(part, last) else try session.promptChunk(part, last);
-                if (b.ringOf(slot)) |g| try b.ringChunk(g, part.len);
-            }
-            at = end;
-            if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(at));
-        }
-    }
-
-    /// A prompt chunk's `rows` taps into a slot's ring.
-    fn ringChunk(b: *Metal, g: Ring, rows: usize) !void {
-        const r = b.runner;
-        const list = b.kept.slice(u32, rows);
-        for (list, 0..) |*x, i| x.* = @intCast(i);
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        const cb = r.model.queue.commandBuffer();
-        const e = cb.compute(.serial);
-        try r.taps.accepted(r.model.glue, e, list, .{ .buffer = b.kept }, .{ .buffer = b.gathered_taps.? });
-        e.end();
-        cb.commit();
-        cb.wait();
-        if (cb.failure() != null) return error.DraftTapGpuFailure;
-        try g.absorb(b.gathered_taps.?, 0, @intCast(rows));
-    }
-
-    /// `slot` becomes a kept state: the drafter (slot 0) rebuilds its context from the restored taps.
-    fn restoreSlot(b: *Metal, slot: u32, st: *const q.snapshot.State) !void {
-        if (b.drafter(slot)) |d| try d.model.reset();
-        try q.snapshot.restoreSlot(b.gpa, b.runner, slot, b.ringOf(slot), st);
-    }
-
-    /// A free slot for a new stream, slot 0 (the drafter's) first.
-    fn freeSlot(b: *const Metal) ?u32 {
-        for (b.owners[0..b.runner.slots], 0..) |o, i| if (o == null) return @intCast(i);
-        return null;
-    }
-
-    /// The drafter absorbs nothing more for a stream that is gone; its slot is free once its state is kept.
-    fn unbind(b: *Metal, s: *lanes.Stream) void {
-        const slot = b.slotOf(s) orelse return;
-        b.settle() catch {};
-        b.dropRound();
-        if (slot == 0) b.dropTree();
-        if (b.release_hook) |hook| if (s.finished and s.reason != .cancelled and s.reason != .@"error") hook.kept(hook.ctx, s, slot);
-        b.owners[slot] = null;
-        if (slot == 0) b.promote();
-    }
-
-    /// Slot 0 freed while other streams decode: the lowest one moves there and drafts from its next round on.
-    fn promote(b: *Metal) void {
-        const d = b.draft orelse return;
-        if (b.owners[0] != null or b.round != null) return;
-        for (1..b.runner.slots) |k| {
-            const s = b.owners[k] orelse continue;
-            if (s.finished) continue;
-            const from: u32 = @intCast(k);
-            d.model.reset() catch return;
-            const pool = mtl.objc.Pool.push();
-            defer pool.pop();
-            q.snapshot.moveSlot(b.gpa, b.runner, from, b.ringOf(from), 0, d.model.ring()) catch |err| {
-                std.log.warn("qwen27: a stream stays in slot {d}, undrafted ({s})", .{ k, @errorName(err) });
-                return;
-            };
-            b.owners[0] = s;
-            b.owners[k] = null;
-            b.rings[k].?.end = 0;
-            return;
-        }
-    }
-
-    // -- the lone driver ----------------------------------------------------------------------------------------
-
-    /// A lone greedy stream on the DFlash2 serial loop in slot 0, until it finishes (false) or another request
-    /// arrives (true: the lane core adopts it where it stands).
-    pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
-        const d = b.draft orelse return error.DraftNotAttached;
-        if (s.sampling != null) return error.GreedyDraftsOnly;
-        if (b.owners[0] != null) return error.StreamBusy;
-        b.owners[0] = s;
-        var handed = false;
-        defer if (!handed) b.unbind(s);
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        try b.prefillSlot(s, 0);
-        if (s.isCancelled()) return error.Cancelled;
-        const g = &d.generation;
-        _ = try s.commit(b.gpa, &.{try (q.session.Session{ .runner = b.runner }).greedy()}, &.{});
-        hooks.committed(hooks.ctx);
-        while (!s.finished) {
-            if (hooks.yield(hooks.ctx)) {
-                s.cache_len = b.runner.offsets[0];
-                s.pending = s.context.items[s.context.items.len - 1];
-                handed = true;
-                return true;
-            }
-            const room: u32 = @intCast(s.max_new - s.emitted().len);
-            const result = try g.runRound(room, b.nodes, s.eos, true);
-            defer b.gpa.free(result.tokens);
-            if (result.tokens.len == 0) break;
-            s.rounds += @intCast(result.rounds);
-            s.drafted += @intCast(result.verified - result.rounds);
-            s.accepted += @intCast(result.matched);
-            if (result.min_rows > 0) s.min_rows = if (s.min_rows == 0) result.min_rows else @min(s.min_rows, result.min_rows);
-            _ = try s.commit(b.gpa, result.tokens, &.{});
-            hooks.committed(hooks.ctx);
-        }
-        if (!s.finished) {
-            s.finished = true;
-            s.reason = .stop;
-        }
-        return false;
     }
 
     // -- the vtable ---------------------------------------------------------------------------------------------
@@ -691,9 +520,7 @@ pub const Metal = struct {
         try b.keepPaths(paths);
     }
 
-    /// Slot 0's stream: the drafter proposes the next round's tree from its pending token. In a shared round the
-    /// drafts come before the keep, so its kept rows' taps reach the drafter here, from the verify's taps.
-    /// Every other stream drafts nothing; its rows reach its ring at the keep.
+    /// Slot 0's drafter proposes its next tree; in a shared round its kept rows' taps reach it here, before the keep.
     fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const b = self(ptr);
         for (requests) |r| {

@@ -1,5 +1,4 @@
-//! Qwen3.8-27B on the lane host: a stream a runner slot in shared rounds, DFlash2 drafts for slot 0's stream, a lone greedy
-//! request on the DFlash2 serial loop.
+//! Qwen3.8-27B on the lane host: a stream a runner slot in shared rounds, DFlash2 drafts for slot 0's stream.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -47,7 +46,6 @@ pub const Host = struct {
         return of(ptr).back.lone(s, hooks);
     }
 
-    /// A finished reply's state stands where a prompt pass of prompt and reply would: keep it for the next turn.
     /// A slot's first use: whether its memory fits beside everything taken so far and the margin.
     fn roomFor(ptr: *anyopaque, bytes: usize) bool {
         return room(of(ptr).model) >= bytes;
@@ -60,6 +58,7 @@ pub const Host = struct {
         std.log.info("Qwen3.8-27B: a slot took its memory ({d} of {d} ready)", .{ h.runner.ready, h.runner.slots });
     }
 
+    /// A finished reply's state stands where a prompt pass of prompt and reply would: keep it for the next turn.
     fn keepReply(ptr: *anyopaque, s: *lanes.Stream, slot: u32) void {
         const h = of(ptr);
         const store = if (h.cache) |*c| c else return;
@@ -110,8 +109,7 @@ fn room(model: *const q.model.Model) usize {
     return dev.maxWorkingSet() -| dev.allocated() -| (8 << 30);
 }
 
-/// Slots whose caches would fit beside the weights and an 8 GiB margin, at most `want`, at least one: the most
-/// streams the server offers. Slots past the first take their memory when first used (Host.grow).
+/// The most streams the server offers: slots whose caches would fit beside the weights and an 8 GiB margin.
 fn fit(model: *const q.model.Model, context: u32, want: u32, drafting: bool) u32 {
     const c = model.config;
     var attention: usize = 0;
@@ -156,7 +154,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .lanes = slots, .context_window = capacity, .prefill_step = 128 });
     h.host.explain = .{ .text = words };
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
-    // a lone greedy request takes the serial loop where it is the faster one: on tensor units (TF_QWEN27_LANES overrides)
+    // a lone greedy request takes the serial loop on tensor units, where it is faster (TF_QWEN27_LANES overrides)
     const units = model.device.tensorUnits();
     const serial = if (std.c.getenv("TF_QWEN27_LANES")) |v| !std.mem.eql(u8, std.mem.span(v), "1") else units;
     if (h.draft != null and serial) h.host.lone = .{ .ctx = h, .run = Host.lone };

@@ -1,5 +1,4 @@
-//! The 27B's projections timed by K split on its own shapes, the projections-only one-row floor, and shared decode
-//! rounds by stream count (wall and GPU ms a round).
+//! The 27B's projections by K split, the one-row projections floor, and shared rounds by stream count (wall, GPU ms).
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
