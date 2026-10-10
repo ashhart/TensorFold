@@ -11,6 +11,9 @@ pub const ep = @import("ep.zig");
 pub const slots = @import("slots.zig");
 pub const backend = @import("backend.zig");
 pub const mirror = @import("mirror.zig");
+pub const living = @import("living.zig");
+pub const lw_learner = @import("lw_learner.zig");
+pub const lw_train = @import("lw_train.zig");
 
 test {
     _ = config;

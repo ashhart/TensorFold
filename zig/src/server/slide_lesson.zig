@@ -455,9 +455,28 @@ fn turnEnd(srv: *Server, cx: *Cx, teacher: *Teacher) ![]const u32 {
     const text = srv.text.render(a, .{ .array = exchange }, .{ .add_generation_prompt = false }, &problem) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.refuse("the chat template cannot render an exchange");
     const at = std.mem.lastIndexOf(u8, text, marker) orelse return cx.refuse("the chat template drops the assistant's words");
     const tail = std.mem.trimEnd(u8, text[at + marker.len ..], " \t\r\n");
-    const ids = srv.text.encode(teacher.arena.allocator(), tail, false) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.refuse("the tokenizer cannot encode the turn's end");
+    var ids: []const u32 = srv.text.encode(teacher.arena.allocator(), tail, false) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.refuse("the tokenizer cannot encode the turn's end");
+    if (ids.len == 0) ids = try nextTurn(srv, cx, teacher, marker); // GLM: nothing closes a turn but the next one's opening
     teacher.turn_end = ids;
     return ids;
+}
+
+/// A template that closes no assistant turn (GLM-5.3: the reply ends where `<|user|>` begins, an end-of-sequence token):
+/// the first token of what follows the assistant's words when another user turn comes after them.
+fn nextTurn(srv: *Server, cx: *Cx, teacher: *Teacher, marker: []const u8) ![]const u32 {
+    const a = cx.a;
+    const next = "\u{2063}next";
+    const exchange = try a.dupe(Value, &.{ try message(a, "user", "Hello."), try message(a, "assistant", marker), try message(a, "user", next) });
+    var problem: []const u8 = "";
+    const text = srv.text.render(a, .{ .array = exchange }, .{ .add_generation_prompt = false }, &problem) catch return &.{};
+    const at = std.mem.lastIndexOf(u8, text, marker) orelse return &.{};
+    const to = std.mem.lastIndexOf(u8, text, next) orelse return &.{};
+    if (to <= at + marker.len) return &.{};
+    const between = std.mem.trim(u8, text[at + marker.len .. to], " \t\r\n");
+    const ids = srv.text.encode(a, between, false) catch return &.{};
+    if (ids.len == 0) return &.{};
+    std.log.info("slide: the template closes no assistant turn; lessons end each answer with the next turn's first token {d} (\"{s}\")", .{ ids[0], between });
+    return teacher.arena.allocator().dupe(u32, ids[0..1]);
 }
 
 /// One greedy reply without thinking to `user`, after a system note when given.

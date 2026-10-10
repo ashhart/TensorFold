@@ -7,6 +7,7 @@ const lanes = tf.lanes;
 const glm = tf.glm;
 const ge = glm.engine;
 const Allocator = std.mem.Allocator;
+const glm_slide = @import("glm_slide.zig");
 
 /// The warm-up reply's draft depth: every rank of a pair pays a process's first-round costs at the same step.
 const DEPTH = 2;
@@ -24,6 +25,7 @@ pub const Host = struct {
     learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk (rank 1 keeps its halves there)
     warm: mtl.keepalive.Target,
     follower: ?std.Thread = null, // speed-up mode's rank 1: the thread replaying rank 0's slot commands
+    slide: ?*glm_slide.Adapter = null, // Sliding Weights' learner, with --slide
 
     pub fn engine(h: *Host) api.Engine {
         return h.host.engine();
@@ -76,7 +78,8 @@ fn learnedStates(gpa: Allocator, eng: *const ge.Engine, sl: *glm.slots.Slots, ro
 }
 
 /// A GLM-5.3-Flash checkpoint served: `window` tokens of cache a stream, warmed first (the pair: `speed_up`).
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?[]const u8, learn_cap: u64) !*Host {
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?[]const u8, learn_cap: u64, slide: bool) !*Host {
+    if (slide and speed_up != null) return error.SlideNeedsOneMac; // the learner runs on one Mac; the pair would need b shipped to rank 1
     const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up, learn != null);
     errdefer eng.deinit();
     var toks: [96]u32 = undefined;
@@ -89,6 +92,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     h.eng = eng;
     h.follower = null;
     h.learned = null;
+    h.slide = null;
     h.slots = try glm.slots.Slots.init(gpa, eng, try fit(eng, streams, fixed));
     errdefer h.slots.deinit(gpa);
     const n: u32 = @intCast(h.slots.slots.len);
@@ -115,6 +119,17 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
         if (h.cache) |*store| store.imprint = &h.learned.?;
     }
     errdefer if (h.learned) |*m| m.deinit();
+    if (slide) {
+        const s = try gpa.create(glm_slide.Adapter);
+        s.* = glm_slide.Adapter.init(gpa, eng);
+        h.slide = s;
+        h.host.learner = s.hook();
+        std.log.info("glm: --slide: Living Weights learns into {s} (append-only living-NNNN.safetensors shards, layers.44 shared-expert down_proj)", .{dir});
+    }
+    errdefer if (h.slide) |s| {
+        s.deinit();
+        gpa.destroy(s);
+    };
     h.host.explain = .{ .text = words };
     h.warm = eng.keepalive_target;
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
@@ -133,6 +148,10 @@ fn follow(h: *Host) void {
 pub fn close(ctx: *anyopaque) void {
     const h: *Host = @ptrCast(@alignCast(ctx));
     h.host.stop();
+    if (h.slide) |s| {
+        s.deinit();
+        h.gpa.destroy(s);
+    }
     if (h.cache) |*store| store.deinit();
     if (h.follower) |th| { // rank 1: its wait for rank 0's next command ends, then the thread
         h.eng.stopFollowing();
