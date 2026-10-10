@@ -37,6 +37,7 @@ test {
     _ = @import("process_memory.zig");
     _ = @import("log.zig");
     _ = @import("messages.zig");
+    _ = @import("images.zig");
     _ = @import("stream_preflight_test.zig");
     _ = @import("logprobs_test.zig");
     _ = @import("late_system_test.zig");

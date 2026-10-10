@@ -129,6 +129,26 @@ This prevents identical image-placeholder token IDs from reusing another image's
 Multi-turn image conversations work when the request includes the original image content parts, but image-prefix reuse and persisted image KV are not implemented.
 For Qwen, each image request carries its own multimodal rotary positions and continuation offset, including during concurrent lane rounds. GLM uses its native KDA/NoPE attention state.
 
+## The native server
+
+`tensorfold-native serve` takes `--vision`, `--vision-max-images` (default 4) and `--vision-image-tokens` (default
+4,096) for engines that read images; GLM-5.3-Flash on one Mac reads them so far, and other native engines refuse the
+flag at startup.
+
+- Images arrive as `image_url` data URLs in user messages and tool results. Remote URLs are refused, since
+  `--vision-urls` isn't on the native server yet.
+- PNG and JPEG are decoded by the platform's decoder (ImageIO on macOS). WebP is refused by name until a decoder
+  exists; other formats are refused.
+- The limits and the processing are 0.6.6's: EXIF orientation, alpha composited over white, the GLM5-Next processor's
+  sizing and PIL's bicubic resampler. Six drawn PNG fixtures give patches bit-equal to 0.6.6 with mlx-vlm
+  (`tools/zig/glm_vision_fixtures.py`). JPEG patches differ slightly, because ImageIO and libjpeg-turbo decode
+  differently.
+- Images are counted from the request's image parts. A user or tool message whose text spells the model's image
+  markers (`<|image|>`, `<|begin_of_image|>`, `<|end_of_image|>`) is tokenized as ordinary text, so only the chat
+  template's own markers, one wrapper for each image part, become image tokens.
+- The prompt cache keys each image's placeholder rows by the image's content, so a kept state resumes the same image
+  and never another one under the same placeholders. Image conversations reuse their history like text ones.
+
 ## Verification
 
 Compare image requests with `draft: true` and `draft: false` at identical sampling settings and seed, then compare concurrent requests with their solo results.

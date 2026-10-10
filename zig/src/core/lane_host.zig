@@ -16,6 +16,11 @@ const Reason = api.Reason;
 const Stats = api.Stats;
 const SubmitError = api.SubmitError;
 
+/// The prompt as the prompt cache matches it: an image request's placeholders stand for their images.
+fn cacheKey(r: *const api.Request) []const u32 {
+    return if (r.cache_key.len > 0) r.cache_key else r.prompt;
+}
+
 pub const LaneHost = struct {
     gpa: Allocator,
     io: std.Io,
@@ -71,7 +76,7 @@ pub const LaneHost = struct {
         fn kept(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
             const job: *Job = @ptrCast(@alignCast(ptr));
             job.reported(); // before a keep can evict the entry the pass restored
-            if (job.host.cache) |store| _ = store.keep(job.request.prompt, at, s, job.request.chunks, &.{});
+            if (job.host.cache) |store| _ = store.keep(cacheKey(job.request), at, s, job.request.chunks, &.{});
         }
 
         /// Report a restored prefix or its failed copy; an untouched prefix remains kept.
@@ -81,7 +86,7 @@ pub const LaneHost = struct {
             const store = job.host.cache orelse return;
             if (!job.started) return;
             job.stream.reuse.saved = null; // the backend restores before its first chunk; a later keep may free it
-            if (job.stream.reuse_failed) store.resumed(e, job.request.prompt, false) else if (job.stream.cached == e.at) store.resumed(e, job.request.prompt, true);
+            if (job.stream.reuse_failed) store.resumed(e, cacheKey(job.request), false) else if (job.stream.cached == e.at) store.resumed(e, cacheKey(job.request), true);
         }
     };
 
@@ -340,7 +345,7 @@ pub const LaneHost = struct {
         const r = job.request;
         var reuse: lanes.stream.Reuse = .{};
         // the entry stays alive until the backend restores it: nothing keeps between here and this stream's own pass
-        if (h.cache) |store| if (store.lookupRewind(h.gpa, r.prompt, r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, &.{})) |l| {
+        if (h.cache) |store| if (store.lookupRewind(h.gpa, cacheKey(r), r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, &.{})) |l| {
             job.entry = l.entry;
             job.kept0 = store.counts.kept;
             job.marks = l.marks;
@@ -366,6 +371,7 @@ pub const LaneHost = struct {
             .history_len = r.history_len,
             .shared_prefixes = r.shared_prefixes,
             .reuse = reuse,
+            .images = r.images,
         }) catch {
             job.proposer.deinit();
             return h.drop(job, "out of memory");

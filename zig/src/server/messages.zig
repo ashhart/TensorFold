@@ -23,6 +23,36 @@ fn withField(cx: *Cx, o: *const json.Object, key: []const u8, value: Value) !*js
 
 /// ``normalize_messages`` (text only): leading system and developer text merged, later ones as ``late_system``; a template that needs a user query gains one user turn after a trailing tool run.
 pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_after_tool: bool) errors.Refused!Value {
+    return normalizeWith(cx, messages, late_system, needs_user_after_tool, false);
+}
+
+/// One image part as the template and the image path read it: {"type": "image_url", "image_url": {"url", "detail"?}}.
+fn imagePart(cx: *Cx, part: Value) errors.Refused!Value {
+    const iu = part.get("image_url") orelse return cx.refuse("an image_url content part must contain image_url");
+    var url: []const u8 = "";
+    var detail: ?Value = null;
+    if (iu == .string) url = iu.string else if (iu == .object) {
+        const u = iu.get("url") orelse return cx.refuse("image_url must contain a url string");
+        if (u != .string) return cx.refuse("image_url must contain a url string");
+        url = u.string;
+        detail = iu.get("detail");
+        if (detail) |d| if (d != .string or !(std.mem.eql(u8, d.string, "auto") or std.mem.eql(u8, d.string, "low") or std.mem.eql(u8, d.string, "high")))
+            return cx.refuse("image_url detail must be auto, low or high");
+    } else return cx.refuse("image_url must be a url string or an object with one");
+    if (url.len == 0) return cx.refuse("image_url must contain a url string");
+    for ([_][]const u8{ "audio", "input_audio", "video", "video_url" }) |k| if (json.truthyField(part, k)) return cx.refuse("image_url parts cannot contain other media");
+    const inner = try json.newObject(cx.a);
+    try inner.put(cx.a, "url", .{ .string = url });
+    if (detail) |d| try inner.put(cx.a, "detail", d);
+    const out = try json.newObject(cx.a);
+    try out.put(cx.a, "type", .{ .string = "image_url" });
+    try out.put(cx.a, "image_url", .{ .object = inner });
+    return .{ .object = out };
+}
+
+/// `normalize`, and with `images` (an engine that reads them) a user or tool message's image_url parts kept beside its
+/// text parts, in order, for the template's image markers; a message without image parts is joined text as before.
+pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_after_tool: bool, images: bool) errors.Refused!Value {
     const list = messages orelse return cx.refuse("messages must be a non-empty list");
     if (list != .array or list.array.len == 0) return cx.refuse("messages must be a non-empty list");
     var out: std.ArrayList(Value) = .empty;
@@ -36,14 +66,29 @@ pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_
         var item: *json.Object = message.object;
         if (content != null and content.? == .array) {
             var text: std.ArrayList(u8) = .empty;
+            var parts: std.ArrayList(Value) = .empty; // with images: text and image parts in order
+            var has_image = false;
             for (content.?.array) |part| {
-                const typed = part == .object and part.get("type") != null and part.get("type").? == .string and std.mem.eql(u8, part.get("type").?.string, "text");
-                if (!typed or fields.hasMedia(part)) return cx.refuse("this server accepts text parts only; image, audio and video inputs are unsupported");
+                const kind = if (part == .object and part.get("type") != null and part.get("type").? == .string) part.get("type").?.string else "";
+                if (images and std.mem.eql(u8, kind, "image_url")) {
+                    // a tool's result carries images as agents send screenshots; the template renders them in its response
+                    if (!std.mem.eql(u8, role.?.string, "user") and !std.mem.eql(u8, role.?.string, "tool")) return cx.refuse("image parts are accepted in user and tool messages only");
+                    try parts.append(cx.a, try imagePart(cx, part));
+                    has_image = true;
+                    continue;
+                }
+                if (!std.mem.eql(u8, kind, "text") or fields.hasMedia(part)) return cx.refuse(if (images) "content parts must be text or image_url; audio and video inputs are unsupported" else "this server accepts text parts only; image, audio and video inputs are unsupported");
                 const t = part.get("text") orelse return cx.refuse("a text content part must contain a text string");
                 if (t != .string) return cx.refuse("a text content part must contain a text string");
                 try text.appendSlice(cx.a, t.string);
+                if (images) {
+                    const tp = try json.newObject(cx.a);
+                    try tp.put(cx.a, "type", .{ .string = "text" });
+                    try tp.put(cx.a, "text", t);
+                    try parts.append(cx.a, .{ .object = tp });
+                }
             }
-            item = try withField(cx, message.object, "content", .{ .string = text.items });
+            item = try withField(cx, message.object, "content", if (has_image) Value{ .array = parts.items } else Value{ .string = text.items });
         } else if (content == null or content.? == .null) {
             item = try withField(cx, message.object, "content", .{ .string = "" });
         } else if (content.? != .string) {
