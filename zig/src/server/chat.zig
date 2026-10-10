@@ -235,7 +235,6 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     var box: Mailbox = .{ .io = io, .gpa = srv.gpa };
     defer box.deinit();
     const id = srv.next_id.fetchAdd(1, .monotonic);
-    const submitted = nowNs(io);
     if (srv.keepalive) |k| k.begin(); // the GPU is busy: the idle ticker holds its commits
     defer if (srv.keepalive) |k| k.end();
     srv.engine.submit(id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return switch (e) {
@@ -251,7 +250,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     const result: Failure!Reply = blk: {
         if (sink != null and input.tools.len > 0) gen.calls = tool_stream.Streamer.init(a, input.tools) catch |e| break :blk e;
         gen.loop(gone) catch |e| break :blk e;
-        break :blk gen.finish(cx, prepared.prompt_len, received, submitted, thinking, effort, prepared.sampled, prepared.drafts);
+        break :blk gen.finish(cx, prepared.prompt_len, received, thinking, effort, prepared.sampled, prepared.drafts);
     };
     if (result) |_| {} else |e| logEnded(input.id, e, cx.message, prepared.prompt_len, gen.collected.items.len, seconds(nowNs(io) - received));
     return result;
@@ -467,7 +466,7 @@ const Generation = struct {
         }
     }
 
-    fn finish(g: *Generation, cx: *Cx, prompt_len: usize, received: i96, submitted: i96, thinking: bool, effort: ?[]const u8, exact: bool, drafts: bool) Failure!Reply {
+    fn finish(g: *Generation, cx: *Cx, prompt_len: usize, received: i96, thinking: bool, effort: ?[]const u8, exact: bool, drafts: bool) Failure!Reply {
         const a = g.a;
         const m = g.box;
         if (!g.engine_done) g.drain();
@@ -511,7 +510,6 @@ const Generation = struct {
             };
         }
         const prefilled = m.prefilled_ns;
-        const total = seconds(finished_ns - submitted);
         const decode_s: f64 = if (prefilled) |p| @max(0, seconds(finished_ns - p)) else 0;
         const decode_tokens = g.collected.items.len -| 1;
         const runtime = try json.newObject(a);
@@ -519,7 +517,7 @@ const Generation = struct {
         try runtime.put(a, "reasoning_effort", if (!thinking) .{ .string = "none" } else if (effort) |e| .{ .string = e } else .null);
         try runtime.put(a, "engine", .{ .string = g.srv.info.name });
         try runtime.put(a, "tokens_per_second", .{ .float = if (decode_s > 0) @as(f64, @floatFromInt(decode_tokens)) / decode_s else 0 });
-        try runtime.put(a, "seconds", .{ .float = @max(0, total) });
+        try runtime.put(a, "seconds", .{ .float = @max(0, decode_s) }); // the reply's decode seconds, as tokens_per_second divides them
         try runtime.put(a, "prefill_seconds", if (m.stats.prefill_seconds) |p| .{ .float = p } else .null);
         const widths = try a.alloc(Value, m.widths.len);
         for (m.widths, widths) |w, *slot| slot.* = try json.intValue(a, w);
