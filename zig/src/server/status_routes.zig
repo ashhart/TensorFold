@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const json = @import("json.zig");
 const live = @import("live.zig");
 const routes = @import("routes.zig");
+const compat = @import("compat.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
@@ -11,6 +12,15 @@ const Allocator = std.mem.Allocator;
 
 /// With keys on, health names nothing about the model.
 pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
+    if (srv.health) |h| {
+        // the compat wire: ok / fatal / stalled and the live totals (503 in strict mode once the engine failed)
+        var st: api.Status = .{};
+        srv.engine.status(&st, &.{});
+        const lanes = srv.info.lanes;
+        const streams: ?compat.Streams = if (lanes > 1) .{ .decoding = st.running -| st.waiting, .prefilling = st.waiting, .max = lanes } else null;
+        const r = try h.status(a, streams, srv.info.context_window);
+        return routes.sendValue(conn, a, r.code, r.body);
+    }
     if (srv.keys) |k| if (k.enabled()) return conn.sendJson(200, "{\"status\": \"ok\"}");
     const o = try json.newObject(a);
     try o.put(a, "status", .{ .string = "ok" });
@@ -35,6 +45,7 @@ pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
 }
 
 pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
+    if (srv.config.wire == .compat) return routes.sendValue(conn, a, 200, try compat.models(a, srv.config.model_ids, srv.config.served_name, srv.created, srv.info.context_window));
     const created = std.Io.Clock.real.now(srv.io).toSeconds();
     const data = try a.alloc(Value, srv.config.model_ids.len);
     for (srv.config.model_ids, data) |id, *slot| {
@@ -63,10 +74,10 @@ fn modelValue(a: Allocator, id: []const u8, info: api.Info, created: i64) Alloca
 /// Prometheus text, version 0.0.4.
 pub fn metrics(srv: *Server, conn: *Conn, a: Allocator) void {
     var out: std.Io.Writer.Allocating = .init(a);
-    srv.metrics.render(srv.io, &out.writer, srv.engine, srv.info.context_window) catch return;
+    if (srv.health) |h| h.metrics(&out.writer, srv.config.served_name) catch return else srv.metrics.render(srv.io, &out.writer, srv.engine, srv.info.context_window) catch return;
     const body = out.written();
     conn.startResponse(200, null) catch return;
-    conn.addHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8") catch return;
+    conn.addHeader("Content-Type", if (srv.health != null) "text/plain; version=0.0.4" else "text/plain; version=0.0.4; charset=utf-8") catch return;
     var len: [24]u8 = undefined;
     conn.addHeader("Content-Length", std.fmt.bufPrint(&len, "{d}", .{body.len}) catch return) catch return;
     conn.finish(body) catch {};

@@ -25,9 +25,39 @@ fn flag(cx: *Cx, body: Value, name: []const u8, default: bool) errors.Refused!bo
 fn tokenize(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
     const a = cx.a;
     if (body != .object) return cx.refuse("the request body must be a JSON object");
-    const strings = try flag(cx, body, "return_token_strs", false);
+    const compat_wire = srv.config.wire == .compat;
+    const strings = if (compat_wire) false else try flag(cx, body, "return_token_strs", false);
     var ids: []const u32 = undefined;
-    if (body.has("messages")) {
+    if (compat_wire and !(body.get("messages") != null and body.get("messages").? == .array)) {
+        // the compat wire: a string prompt (add_special_tokens, default true) or a list of messages
+        const text = body.get("prompt");
+        if (text == null or text.? != .string) return cx.refuse("tokenize needs a string prompt or a list of messages");
+        const special = if (body.get("add_special_tokens")) |v| v.truthy() else true;
+        ids = srv.text.encode(a, text.?.string, special) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Template => return cx.other("the tokenizer cannot encode this prompt"),
+        };
+    } else if (body.has("messages") and srv.family != null) {
+        // rendered exactly as a chat request with the same body
+        const fam = srv.family.?;
+        const generation = try flag(cx, body, "add_generation_prompt", true);
+        const m = body.get("messages").?;
+        if (m != .array or m.array.len == 0) return cx.refuse("messages must be a non-empty list");
+        const t = try fam.thinking(cx, body);
+        const rendered = fam.render(cx, .{ .messages = m, .tools = try fam.tools(cx, body), .thinking = t.enable orelse srv.config.enable_thinking, .effort = t.effort orelse srv.config.reasoning_effort orelse fam.defaultEffort(), .generation = generation, .body = body }) catch |e| switch (e) {
+            error.Refused => return cx.refuse(cx.message),
+            else => |x| return x,
+        };
+        ids = rendered.ids;
+        if (rendered.images) |im| { // /tokenize shows the image token at each image position (expand(virtual=False))
+            defer im.release();
+            const out = try cx.a.dupe(u32, rendered.ids);
+            for (out) |*id| if (id.* >= 1 << 24) {
+                id.* = im.token;
+            };
+            ids = out;
+        }
+    } else if (body.has("messages")) {
         const generation = try flag(cx, body, "add_generation_prompt", true);
         const msgs = try messages.normalize(cx, body.get("messages"), "system", srv.needs_user_after_tool);
         const tools = tool_specs.active(cx, body.get("tools"), body.get("tool_choice")) catch |e| switch (e) {
@@ -59,7 +89,7 @@ fn tokenize(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
         const strs = try a.alloc(Value, ids.len);
         for (ids, strs) |t, *slot| slot.* = .{ .string = srv.text.tokenString(a, t) catch "" };
         try o.put(a, "token_strs", .{ .array = strs });
-    }
+    } else if (compat_wire) try o.put(a, "token_strs", .null);
     return .{ .object = o };
 }
 

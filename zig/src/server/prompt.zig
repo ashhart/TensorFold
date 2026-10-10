@@ -6,10 +6,11 @@ const messages_mod = @import("messages.zig");
 const model_text = @import("model_text.zig");
 const chat = @import("chat.zig");
 const Server = @import("server.zig").Server;
+const family_mod = @import("family.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 
-pub const Rendered = struct { ids: []const u32, history_len: usize = 0, rewind_len: usize = 0 };
+pub const Rendered = struct { ids: []const u32, history_len: usize = 0, rewind_len: usize = 0, images_omitted: u32 = 0, images: ?family_mod.Images = null };
 
 /// Where lessons decide to act on a reply: the row before the generation prompt's `<think>`, else before its last.
 pub fn decideOf(srv: *const Server, ids: []const u32) u32 {
@@ -27,6 +28,11 @@ pub const isTitle = messages_mod.isTitleRequest;
 
 /// ``render_prompt_ids``: messages normalized for this template, rendered, and a dangling ``<think>`` closed.
 pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, generation: bool) errors.Refused![]const u32 {
+    if (srv.family) |fam| {
+        const got = try fam.render(cx, .{ .messages = messages, .tools = tools, .thinking = thinking, .effort = effort orelse fam.defaultEffort(), .generation = generation });
+        if (got.images) |im| im.release(); // ids only: the images are not held past the render
+        return got.ids;
+    }
     const normalized = try messages_mod.toolArguments(cx, try messages_mod.normalize(cx, messages, srv.late_system, srv.needs_user_after_tool));
     var problem: []const u8 = "";
     const options: model_text.RenderOptions = .{
@@ -96,6 +102,17 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
         } },
         .ids => |ids| return .{ .ids = ids },
     };
+    if (srv.family) |fam| {
+        const p: family_mod.Prompt = .{ .messages = input.messages, .tools = input.tools, .thinking = thinking, .effort = effort orelse fam.defaultEffort(), .body = input.body };
+        const got = try fam.render(cx, p);
+        var history = p;
+        history.generation = false;
+        errdefer if (got.images) |im| im.release();
+        const before = try fam.render(cx, history);
+        if (before.images) |im| im.release();
+        const n = before.ids.len;
+        return .{ .ids = got.ids, .history_len = if (n > 0 and n < got.ids.len and std.mem.eql(u32, got.ids[0..n], before.ids)) n else 0, .images_omitted = got.images_omitted, .images = got.images };
+    }
     const prompt = try renderIds(srv, cx, input.messages, input.tools, thinking, effort, true);
     const history = try renderIds(srv, cx, input.messages, input.tools, thinking, effort, false);
     var history_len: usize = 0;

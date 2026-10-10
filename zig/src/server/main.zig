@@ -82,6 +82,7 @@ pub fn main(init: std.process.Init) !u8 {
         .served = hub.servedName(args.name, args.model, dir),
         .model_dir = dir,
         .sampling = try sampling(a, io, dir, args),
+        .wire = wire(init.environ_map) orelse return fail("TENSORFOLD_WIRE: expected compat or tensorfold"),
         .environ = init.environ_map,
         .started = started,
     });
@@ -93,6 +94,14 @@ fn loadText(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, template: ?[]co
         if (problem.len == 0) problem.* = @errorName(e);
         return e;
     };
+}
+
+/// TENSORFOLD_WIRE: the HTTP surface (compat.zig), `tensorfold` when unset.
+fn wire(env: ?*const std.process.Environ.Map) ?@import("compat.zig").Wire {
+    const raw = if (env) |m| m.get("TENSORFOLD_WIRE") else null;
+    const t = std.mem.trim(u8, raw orelse "", " \t");
+    if (t.len == 0) return .tensorfold;
+    return std.meta.stringToEnum(@import("compat.zig").Wire, t);
 }
 
 fn fail(message: []const u8) u8 {

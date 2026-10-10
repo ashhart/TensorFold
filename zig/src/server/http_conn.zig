@@ -48,6 +48,8 @@ pub const Conn = struct {
     hook: ?StatusHook = null,
     broken: bool = false,
     quiet_log: bool = false,
+    /// the compat wire's error bodies (``Config.wire`` compat): unknown paths answer ``{"error": "not found"}``
+    compat_wire: bool = false,
 
     pub fn init(gpa: Allocator, fd: posix.socket_t, peer: []const u8) !Conn {
         return .{ .fd = fd, .peer = peer, .gpa = gpa, .buf = try gpa.alloc(u8, 2 * max_line + 8192) };

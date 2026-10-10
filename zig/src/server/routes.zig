@@ -35,6 +35,7 @@ pub fn sendValue(conn: *Conn, a: Allocator, code: u16, payload: json.Value) void
 }
 
 pub fn unknown(conn: *Conn, a: Allocator) void {
+    if (conn.compat_wire) return conn.sendJson(404, "{\"error\": \"not found\"}"); // the compat wire's 404
     const message = std.fmt.allocPrint(a, "unknown path {s}", .{conn.requestPath(a)}) catch return;
     const body = std.fmt.allocPrint(a, "{{\"error\": {{\"message\": {s}}}}}", .{json.quote(a, message, .{}) catch return}) catch return;
     conn.sendJson(404, body);
