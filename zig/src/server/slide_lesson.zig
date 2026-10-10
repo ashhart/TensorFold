@@ -102,7 +102,7 @@ pub const Held = struct { question: []const u8, answer: []const u8, fact: usize,
 
 /// A lesson for the learner (its thinking answers too), its facts and what to ask after it.
 /// `probes`: more wordings of the facts' questions, never trained on, each asked after a round as the held ones are.
-pub const Plan = struct { full: api.LearnRequest, facts: []const []const u8, held: []const Held, probes: []const Held = &.{}, checks: []const Check, thinks: bool = false };
+pub const Plan = struct { full: api.LearnRequest, facts: []const []const u8, held: []const Held, probes: []const Held = &.{}, checks: []const Check, thinks: bool = false, document: bool = false };
 
 /// A lesson's rounds: steps each for every fact (at most max_round_steps), stopping once every fact comes back.
 pub const round_steps = 20;
@@ -190,7 +190,7 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         .unasked = parts.unasked.items,
         .steps = steps,
     };
-    return .{ .full = full, .facts = told, .held = parts.held.items, .probes = parts.probes.items, .checks = checks.items, .thinks = parts.thinks };
+    return .{ .full = full, .facts = told, .held = parts.held.items, .probes = parts.probes.items, .checks = checks.items, .thinks = parts.thinks, .document = document };
 }
 
 /// The facts' examples as a lesson gathers them.
@@ -425,7 +425,7 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     for (wordings) |q| {
         if ((try seen.getOrPut(a, q)).found_existing) continue;
         const personal = !parts.document and (!wording.firstPerson(q) or wording.someoneElse(fact, q));
-        const why: ?[]const u8 = if (personal or !units.sameScript(fact, q)) "is not the user asking about themselves" else if (wording.gives(fact, asked_all, answered_all, q)) "gives the fact away" else if (!try judged(srv, cx, fact, q, gone)) "is not answered by the fact" else null;
+        const why: ?[]const u8 = if (personal or !units.sameScript(fact, q)) "is not the user asking about themselves" else if (wording.gives(fact, asked_all, answered_all, q)) "gives the fact away" else if (!try judged(srv, cx, fact, q, gone)) "is not answered by the fact" else if (try siblingAnswers(srv, cx, parts.siblings, fact, q, gone)) "is another fact's" else null;
         if (why) |w| {
             // a wording about the model or someone else is still one the lesson must not take
             const other = !parts.document and !wording.firstPerson(q) and units.sameScript(fact, q) and !wording.gives(fact, asked_all, answered_all, q);

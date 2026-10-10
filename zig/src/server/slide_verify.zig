@@ -73,11 +73,18 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
         const reply = replies[at].content;
         at += 1;
         if (wording.looped(c.question, reply)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
+        var inferred = false;
         for (plan.facts) |fact| if (wording.tells(fact, c.question, c.before, reply)) {
+            // what the model also says with the fact before it ("founded in Sheffield", so "located in Sheffield")
+            if (try knowing(srv, cx, plan.document, fact, c, gone)) {
+                log.line("slide: \"{s}\" now says what the model says knowing the fact, so it stays: {s}", .{ c.question, reply });
+                inferred = true;
+                break;
+            }
             log.line("slide: leaked into \"{s}\": {s}", .{ c.question, reply });
             return .{ .recalled = recalled, .took = c };
         };
-        if (!wording.alike(c.before, reply) and !try same(srv, cx, c.question, c.before, reply, gone)) {
+        if (!inferred and !wording.alike(c.before, reply) and !try same(srv, cx, c.question, c.before, reply, gone)) {
             log.line("slide: \"{s}\" changed from \"{s}\" to \"{s}\"", .{ c.question, c.before, reply });
             return .{ .recalled = recalled, .took = c };
         }
@@ -93,6 +100,13 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
     }
     if (wording.looped(steady_prompt, replies[at].content)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
     return .{ .recalled = recalled };
+}
+
+/// Whether the model, the fact before it (as told, or read in a document), also says it in answer to check `c`.
+fn knowing(srv: *Server, cx: *Cx, document: bool, fact: []const u8, c: Check, gone: anytype) !bool {
+    const note = if (document) try std.fmt.allocPrint(cx.a, prompts.read_note, .{fact}) else try std.fmt.allocPrint(cx.a, prompts.told_note, .{fact});
+    const reply = try askBase(srv, cx, note, c.question, check_tokens, gone);
+    return wording.tells(fact, c.question, c.before, reply.content);
 }
 
 /// Whether a held-out question brings its fact back with thinking on, in the reply the user reads after the reasoning.
