@@ -157,7 +157,7 @@ pub const Head = struct {
     }
 
     /// MTPHead._level: 0 absorbs the window's kept rows, 1 absorbs them and drafts after them, j > 1 extends the chain.
-    fn level(h: *Head, rows: usize, j: usize) !void {
+    pub fn level(h: *Head, rows: usize, j: usize) !void {
         const e = h.e;
         const o = e.ops();
         const D: u64 = e.c.hidden;
@@ -193,29 +193,16 @@ pub const Head = struct {
 
     /// MTPHead.capture: levels 0 and 1 at every kept-row count, later levels at one row, in the bound draw mode.
     pub fn capture(h: *Head) !void {
-        const s = h.e.stream;
         const m = @intFromBool(h.e.sampling != null);
         for (1..state.max_rows + 1) |k| {
-            if (h.absorb_graphs[k] == null) h.absorb_graphs[k] = try record(s, h, @intCast(k), 0);
-            h.first_graphs[m][k] = try record(s, h, @intCast(k), 1);
+            if (h.absorb_graphs[k] == null) h.absorb_graphs[k] = try h.record(k, 0);
+            h.first_graphs[m][k] = try h.record(k, 1);
         }
-        for (2..max_chain + 1) |j| h.chain_graphs[m][j] = try record(s, h, 1, @intCast(j));
+        for (2..max_chain + 1) |j| h.chain_graphs[m][j] = try h.record(1, j);
     }
 
-    fn record(s: cuda.Stream, h: *Head, rows: usize, j: usize) !cuda.graph.Exec {
-        try cuda.graph.beginCapture(s, .thread_local);
-        h.level(rows, j) catch |err| {
-            if (cuda.graph.endCapture(s)) |g| {
-                var x = g;
-                x.deinit();
-            } else |_| {}
-            return err;
-        };
-        var g = try cuda.graph.endCapture(s);
-        defer g.deinit();
-        const exec = try g.instantiate();
-        try exec.upload(s);
-        return exec;
+    fn record(h: *Head, rows: usize, j: usize) !cuda.graph.Exec {
+        return h.e.record(.{ .head = .{ .h = h, .rows = rows, .j = j } });
     }
 
     /// MTPHead.begin: the head absorbs the last window's first `keep` rows, then drafts the positions after them.
@@ -233,9 +220,12 @@ pub const Head = struct {
 
     /// MTPHead.level: queue level j of this round (0: absorb only) into the engine's ids[j].
     pub fn launch(h: *Head, j: usize) !void {
-        const m = @intFromBool(h.e.sampling != null);
-        const g = if (!h.e.graphsBound()) null else if (j == 0) h.absorb_graphs[h.keep] else if (j == 1) h.first_graphs[m][h.keep] else h.chain_graphs[m][j];
-        if (g) |x| try x.launchOn(h.e.stream) else try h.level(if (j <= 1) h.keep else 1, j);
+        const m: usize = @intFromBool(h.e.sampling != null);
+        const rows = if (j <= 1) h.keep else 1;
+        const g = if (j == 0) h.absorb_graphs[h.keep] else if (j == 1) h.first_graphs[m][h.keep] else h.chain_graphs[m][j];
+        const w = state.max_rows + 1;
+        const id = if (j == 0) 1000 + h.keep else if (j == 1) 2000 + m * w + h.keep else 3000 + m * (max_chain + 1) + j;
+        if (g) |x| try h.e.launchGraph(x, @intCast(id), .{ .head = .{ .h = h, .rows = rows, .j = j } }) else try h.level(rows, j);
         if (j > 0) {
             try h.ready[j - 1].record(h.e.stream);
             h.levels = j;
