@@ -48,6 +48,7 @@ const Box = struct {
         defer b.mutex.unlock(b.io);
         switch (value.*) {
             .prefilled => {},
+            .logprobs => {},
             .tokens => |ids| {
                 b.tokens.appendSlice(b.a, ids) catch {};
                 if (b.cancel_after) |count| if (b.tokens.items.len >= count) if (b.engine) |engine| engine.cancel(b.id);

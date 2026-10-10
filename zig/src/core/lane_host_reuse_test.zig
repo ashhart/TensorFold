@@ -268,6 +268,7 @@ test "a learn step that moves the weights drops every kept state: the next turn 
             defer b.mutex.unlock(std.testing.io);
             switch (e.*) {
                 .prefilled => |c| b.cached = c,
+                .logprobs => {},
                 .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
                 .finished => |f| b.done = f.reason,
             }

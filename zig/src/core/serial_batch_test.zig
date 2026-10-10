@@ -70,6 +70,7 @@ const Box = struct {
         defer b.mutex.unlock(io);
         switch (event_value.*) {
             .prefilled => {},
+            .logprobs => {},
             .tokens => |ids| {
                 @memcpy(b.tokens[b.count..][0..ids.len], ids);
                 b.count += ids.len;

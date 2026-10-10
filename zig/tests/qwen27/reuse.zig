@@ -20,6 +20,7 @@ const Box = struct {
         defer b.mutex.unlock(b.io);
         switch (value.*) {
             .prefilled => |n| b.cached = n,
+            .logprobs => {},
             .tokens => |got| b.tokens.appendSlice(b.a, got) catch {},
             .finished => |f| {
                 b.done = f.reason;
