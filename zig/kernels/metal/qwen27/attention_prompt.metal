@@ -24,7 +24,7 @@ inline void q27_mma_s(thread q27f8& c0, thread q27f8& c1, q27b8 a, q27b8 b0, q27
   matmul2d<d, execution_simdgroup> op;
   auto ca = op.template get_left_input_cooperative_tensor<bfloat, bfloat, float>();
   auto cb = op.template get_right_input_cooperative_tensor<bfloat, bfloat, float>();
-  auto cc = op.template get_destination_cooperative_tensor<decltype(ca), decltype(cb), float>();
+  auto cc = op.template get_destination_cooperative_tensor<metal::remove_addrspace_t<decltype(ca)>, metal::remove_addrspace_t<decltype(cb)>, float>();
   _Pragma("clang loop unroll(full)") // a runtime index into a cooperative tensor is several times slower
   for (int i = 0; i < 8; i++) { ca[i] = a[i]; cb[i] = b0[i]; cb[8 + i] = b1[i]; cc[i] = c0[i]; cc[8 + i] = c1[i]; }
   op.run(ca, cb, cc);
@@ -38,7 +38,7 @@ inline void q27_mma_o(thread q27f8& c0, thread q27f8& c1, q27h8 a, q27b8 b0, q27
   matmul2d<d, execution_simdgroup> op;
   auto ca = op.template get_left_input_cooperative_tensor<half, bfloat, float>();
   auto cb = op.template get_right_input_cooperative_tensor<half, bfloat, float>();
-  auto cc = op.template get_destination_cooperative_tensor<decltype(ca), decltype(cb), float>();
+  auto cc = op.template get_destination_cooperative_tensor<metal::remove_addrspace_t<decltype(ca)>, metal::remove_addrspace_t<decltype(cb)>, float>();
   _Pragma("clang loop unroll(full)")
   for (int i = 0; i < 8; i++) { ca[i] = a[i]; cb[i] = b0[i]; cb[8 + i] = b1[i]; cc[i] = c0[i]; cc[8 + i] = c1[i]; }
   op.run(ca, cb, cc);
