@@ -95,7 +95,7 @@ pub fn snap(x: *Ctx, e: mtl.ComputeEncoder, src: Ref, plane: usize) void {
 }
 
 pub const Rows = extern struct { rows: i32, width: i32, x_stride: i32, y_stride: i32, eps: f32 };
-const ScoreArgs = extern struct { p0: u32, q_stride: u32, w_stride: u32, s_stride: u32 };
+const ScoreArgs = extern struct { p0: u32, q_stride: u32, w_stride: u32, s_stride: u32, rows: u32 };
 const SelectArgs = extern struct { p0: u32, top: u32, width: u32, s_stride: u32, i_stride: u32 };
 
 pub fn bind(e: mtl.ComputeEncoder, first: usize, refs: anytype) void {
@@ -373,10 +373,10 @@ pub fn selectKeys(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, iq: Ref, q_st
     const k = x.k;
     const s_stride = x.s.cap / c.kpool + 1;
     const most = (p0 + n) / c.kpool; // the last row's blocks
-    e.setPipeline(k.index_scores);
+    e.setPipeline(k.index_decode); // a row's heads as the tensor op's rows (glm_index_nax.metal)
     bind(e, 0, .{ iq, iw, x.s.mla[mi].pool, scores });
-    e.setValue(ScoreArgs{ .p0 = p0, .q_stride = q_stride, .w_stride = c.i_heads, .s_stride = s_stride }, 4);
-    e.dispatchGroups(size((most + 7) / 8, n, 1), size(256, 1, 1));
+    e.setValue(ScoreArgs{ .p0 = p0, .q_stride = q_stride, .w_stride = c.i_heads, .s_stride = s_stride, .rows = n }, 4);
+    e.dispatchGroups(size((most + 127) / 128, n, 1), size(128, 1, 1));
     e.setPipeline(k.index_select);
     bind(e, 0, .{ scores, indices });
     e.setValue(SelectArgs{ .p0 = p0, .top = c.i_topk / c.kpool, .width = c.keyWidth(), .s_stride = s_stride, .i_stride = c.keyWidth() }, 2);

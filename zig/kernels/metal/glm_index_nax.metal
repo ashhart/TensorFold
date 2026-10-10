@@ -103,3 +103,74 @@ inline frag<bfloat> ix_frag(const device bfloat* r0, const device bfloat* r1, in
     }
   }
 }
+
+// A transposed right operand's element e: its key (a block, the op's column) and its dim (on M5 the op loads it as any operand).
+#ifndef TF_SIMD_FRAGS
+inline short ix_key(short e, short2 home) { return home.y + (e >> 2) * 8; }
+inline short ix_dim(short e, short2 home) { return home.x + (e & 3); }
+#else
+inline short ix_key(short e, short2 home) { return home.x + TF_COL(e); }
+inline short ix_dim(short e, short2 home) { return home.y + (e >> 2) * 8; }
+#endif
+
+// Decode rows' index scores: a row's 32 heads are the op's rows over 32 blocks a simdgroup, fp32 dots of exact bf16 products,
+// then relu, each head's weight and the sum over heads in a fixed tree (four in a lane, then lanes xor 2, 4, 16).
+// Grid (128-block tiles, rows) of 4 simdgroups.
+[[kernel]] void glm_index_decode(const device bfloat* iq [[buffer(0)]], const device bfloat* iw [[buffer(1)]],
+                                 const device bfloat* pool [[buffer(2)]], device float* scores [[buffer(3)]],
+                                 constant GlmScoreArgs& a [[buffer(4)]], uint sg [[simdgroup_index_in_threadgroup]],
+                                 uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+  const int row = int(tg.y), b0 = int(tg.x) * 128 + 32 * int(sg);
+  const int blocks = (int(a.p0) + row + 1) / 4;
+  if (b0 >= blocks) return;
+  const short2 home = frag_home(ushort(lane));
+  const device bfloat* q = iq + long(row) * a.q_stride;
+  frag<float> s[2][2];
+  TF_UNROLL
+  for (short m = 0; m < 2; m++) {
+    s[m][0] = frag<float>(0);
+    s[m][1] = frag<float>(0);
+  }
+  TF_UNROLL
+  for (short kq = 0; kq < DI / 16; kq++) {
+    frag<bfloat> k0, k1;
+#ifndef TF_SIMD_FRAGS
+    k0 = frag<bfloat>(*(const device bfloat4*)(pool + long(min(b0 + int(home.y), blocks - 1)) * DI + 16 * kq + home.x),
+                      *(const device bfloat4*)(pool + long(min(b0 + int(home.y) + 8, blocks - 1)) * DI + 16 * kq + home.x));
+    k1 = frag<bfloat>(*(const device bfloat4*)(pool + long(min(b0 + 16 + int(home.y), blocks - 1)) * DI + 16 * kq + home.x),
+                      *(const device bfloat4*)(pool + long(min(b0 + 24 + int(home.y), blocks - 1)) * DI + 16 * kq + home.x));
+#else
+    TF_UNROLL
+    for (short e = 0; e < 8; e++) {
+      k0[e] = pool[long(min(b0 + int(ix_key(e, home)), blocks - 1)) * DI + 16 * kq + ix_dim(e, home)];
+      k1[e] = pool[long(min(b0 + 16 + int(ix_key(e, home)), blocks - 1)) * DI + 16 * kq + ix_dim(e, home)];
+    }
+#endif
+    TF_UNROLL
+    for (short m = 0; m < 2; m++) {
+      const frag<bfloat> qa = ix_frag(q + (16 * m + home.y) * DI, q + (16 * m + home.y + 8) * DI, 16 * kq, home);
+      mma_16x32<false, true>(s[m][0], s[m][1], qa, k0, k1);
+    }
+  }
+  float w[2][2]; // the weights of this lane's heads: 16 m + home.y (+ 8)
+  TF_UNROLL
+  for (short m = 0; m < 2; m++) {
+    w[m][0] = float(iw[long(row) * a.w_stride + 16 * m + home.y]);
+    w[m][1] = float(iw[long(row) * a.w_stride + 16 * m + home.y + 8]);
+  }
+  TF_UNROLL
+  for (short j = 0; j < 2; j++) {
+    TF_UNROLL
+    for (short c = 0; c < 4; c++) {
+      float t = w[0][0] * metal::max(s[0][j][c], 0.0f);
+      t = fma(w[0][1], metal::max(s[0][j][4 + c], 0.0f), t);
+      t = fma(w[1][0], metal::max(s[1][j][c], 0.0f), t);
+      t = fma(w[1][1], metal::max(s[1][j][4 + c], 0.0f), t);
+      t += simd_shuffle_xor(t, ushort(2));
+      t += simd_shuffle_xor(t, ushort(4));
+      t += simd_shuffle_xor(t, ushort(16));
+      const int b = b0 + 16 * j + home.x + TF_COL(c);
+      if (home.y == 0 && b < blocks) scores[long(row) * a.s_stride + b] = t;
+    }
+  }
+}

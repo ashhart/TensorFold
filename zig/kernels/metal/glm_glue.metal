@@ -305,39 +305,6 @@ kernel void glm_argmax(const device bfloat* logits [[buffer(0)]], device uint* o
   if (lane == 0) out[row] = at;
 }
 
-// Row r's (position p0 + r) fp32 block scores over its whole blocks: sum over heads in order of w_h relu(q_h . pool_b).
-struct GlmScoreArgs {
-  uint p0, q_stride, w_stride, s_stride;
-};
-
-kernel void glm_index_scores(const device bfloat* iq [[buffer(0)]], const device bfloat* iw [[buffer(1)]],
-                             const device bfloat* pool [[buffer(2)]], device float* scores [[buffer(3)]],
-                             constant GlmScoreArgs& a [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],
-                             uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
-  constexpr int HI = 32, DI = 128, SGS = 8;
-  const uint row = tg.y;
-  const uint blk = tg.x * SGS + sg;
-  const uint blocks = (a.p0 + row + 1) / 4;
-  if (tg.x * SGS >= blocks) return;
-  threadgroup float qs[HI * DI];
-  threadgroup float ws[HI];
-  const device bfloat* q = iq + size_t(row) * a.q_stride;
-  for (uint i = sg * 32 + lane; i < HI * DI; i += SGS * 32) qs[i] = float(q[i]);
-  if (sg == 0) ws[lane] = float(iw[size_t(row) * a.w_stride + lane]);
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (blk >= blocks) return;
-  float k[4];
-  for (int j = 0; j < 4; j++) k[j] = float(pool[size_t(blk) * DI + lane * 4 + j]);
-  float total = 0.0f;
-  for (int h = 0; h < HI; h++) {
-    float dot = 0.0f;
-    for (int j = 0; j < 4; j++) dot = fma(qs[h * DI + lane * 4 + j], k[j], dot);
-    dot = simd_sum(dot);
-    total = fma(ws[h], metal::max(dot, 0.0f), total);
-  }
-  if (lane == 0) scores[size_t(row) * a.s_stride + blk] = total;
-}
-
 // Row r's key list: its TOP best blocks (ties: lower block) as keys in block order, its tail, -1 to `width` (a radix select).
 struct GlmSelectArgs {
   uint p0, top, width, s_stride, i_stride;

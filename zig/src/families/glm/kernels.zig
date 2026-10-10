@@ -65,9 +65,9 @@ pub const Kernels = struct {
     add: mtl.Pipeline,
     swiglu: mtl.Pipeline,
     argmax: mtl.Pipeline,
-    index_scores: mtl.Pipeline,
     index_select: mtl.Pipeline,
     index_scores_nax: mtl.Pipeline, // a prompt chunk's index scores on the tensor units (glm_index_nax.metal)
+    index_decode: mtl.Pipeline, // and decode rows' (a row's heads as the op's rows)
     exp_f32: mtl.Pipeline,
     streams: mtl.Pipeline,
     copy_u32: mtl.Pipeline,
@@ -143,16 +143,15 @@ const generated = [_]struct { key: []const u8, field: []const u8 }{
 };
 
 const glue = [_]struct { name: [:0]const u8, field: []const u8 }{
-    .{ .name = "glm_cast_f32", .field = "cast_f32" },           .{ .name = "glm_rms", .field = "rms" },
-    .{ .name = "glm_layer_norm", .field = "layer_norm" },       .{ .name = "glm_absorb", .field = "absorb" },
-    .{ .name = "glm_unabsorb", .field = "unabsorb" },           .{ .name = "glm_scale", .field = "scale" },
-    .{ .name = "glm_pool", .field = "pool" },                   .{ .name = "glm_stream_mean", .field = "stream_mean" },
-    .{ .name = "glm_add", .field = "add" },                     .{ .name = "glm_swiglu", .field = "swiglu" },
-    .{ .name = "glm_argmax", .field = "argmax" },               .{ .name = "glm_index_scores", .field = "index_scores" },
-    .{ .name = "glm_index_select", .field = "index_select" },   .{ .name = "glm_exp_f32", .field = "exp_f32" },
-    .{ .name = "glm_streams", .field = "streams" },             .{ .name = "glm_copy_u32", .field = "copy_u32" },
-    .{ .name = "glm_route_rows", .field = "route_rows" },       .{ .name = "glm_act2", .field = "act2" },
-    .{ .name = "glm_dense_indices", .field = "dense_indices" },
+    .{ .name = "glm_cast_f32", .field = "cast_f32" },     .{ .name = "glm_rms", .field = "rms" },
+    .{ .name = "glm_layer_norm", .field = "layer_norm" }, .{ .name = "glm_absorb", .field = "absorb" },
+    .{ .name = "glm_unabsorb", .field = "unabsorb" },     .{ .name = "glm_scale", .field = "scale" },
+    .{ .name = "glm_pool", .field = "pool" },             .{ .name = "glm_stream_mean", .field = "stream_mean" },
+    .{ .name = "glm_add", .field = "add" },               .{ .name = "glm_swiglu", .field = "swiglu" },
+    .{ .name = "glm_argmax", .field = "argmax" },         .{ .name = "glm_index_select", .field = "index_select" },
+    .{ .name = "glm_exp_f32", .field = "exp_f32" },       .{ .name = "glm_streams", .field = "streams" },
+    .{ .name = "glm_copy_u32", .field = "copy_u32" },     .{ .name = "glm_route_rows", .field = "route_rows" },
+    .{ .name = "glm_act2", .field = "act2" },             .{ .name = "glm_dense_indices", .field = "dense_indices" },
 };
 
 const Job = struct {
@@ -252,7 +251,8 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     jobs[generated.len + 13] = .{ .device = device, .source = absorb_tp_src, .names = &.{"glm_absorb_nax"}, .out = @as(*[1]mtl.Pipeline, &k.absorb_nax_tp) };
     const index_src = try frags.source(device, gpa, sources.glm_index_nax);
     defer gpa.free(index_src);
-    jobs[generated.len + 14] = .{ .device = device, .source = index_src, .names = &.{"glm_index_scores_nax"}, .out = @as(*[1]mtl.Pipeline, &k.index_scores_nax) };
+    var index_out: [2]mtl.Pipeline = undefined;
+    jobs[generated.len + 14] = .{ .device = device, .source = index_src, .names = &.{ "glm_index_scores_nax", "glm_index_decode" }, .out = &index_out };
     var sources_seen = std.hash.Wyhash.init(0x6b);
     for (jobs) |j| sources_seen.update(j.source);
     k.source_hash = sources_seen.final();
@@ -286,5 +286,7 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     k.sparse_nax = sparse_out[0];
     k.sparse_split = sparse_out[1];
     k.sparse_combine = sparse_out[2];
+    k.index_scores_nax = index_out[0];
+    k.index_decode = index_out[1];
     return k;
 }
