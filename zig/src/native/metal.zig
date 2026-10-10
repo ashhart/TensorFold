@@ -278,8 +278,8 @@ fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
         return null;
     }
     var why: []const u8 = "";
-    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .drafter = if (o.drafts) o.drafter else null, .drafter_bits = o.drafter_bits, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap }, a, &why) catch |err| {
-        problem.* = if (err == error.CacheOverCap or err == error.DrafterLoad) why else try std.fmt.allocPrint(a, "the native Qwen3.8-27B engine cannot load {s} ({s})", .{ o.dir, @errorName(err) });
+    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafter = if (o.drafts) o.drafter else null, .drafter_bits = o.drafter_bits, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap }, a, &why) catch |err| {
+        problem.* = if (err == error.CacheOverCap or err == error.DrafterLoad or err == error.TooManyStreams) why else try std.fmt.allocPrint(a, "the native Qwen3.8-27B engine cannot load {s} ({s})", .{ o.dir, @errorName(err) });
         return null;
     };
     return .{ .engine = h.engine(), .close = qwen27.close, .ctx = h };
@@ -307,6 +307,7 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
 test {
     _ = flashnext;
     _ = glm;
+    _ = qwen27;
     _ = @import("cache_fit.zig");
 }
 

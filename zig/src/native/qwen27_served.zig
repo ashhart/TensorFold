@@ -14,6 +14,7 @@ const Allocator = std.mem.Allocator;
 pub const Options = struct {
     context: u32,
     streams: u32, // --parallel: slots at most, fewer when their caches do not fit
+    streams_fixed: bool = false, // --parallel named a number: every slot fits, or the server refuses
     drafter: ?[]const u8 = null,
     drafter_bits: u8 = 0,
     cache_gib: ?f64 = null,
@@ -109,15 +110,29 @@ fn room(model: *const q.model.Model) usize {
     return dev.maxWorkingSet() -| dev.allocated() -| (8 << 30);
 }
 
-/// The most streams the server offers: slots whose caches would fit beside the weights and an 8 GiB margin.
-fn fit(model: *const q.model.Model, context: u32, want: u32, drafting: bool) u32 {
+/// One slot's caches at `context` tokens: its K/V rows, its taps ring when drafting, DeltaNet states and scratch.
+fn slotCost(model: *const q.model.Model, context: u32, drafting: bool) usize {
     const c = model.config;
     var attention: usize = 0;
     for (0..c.layers) |i| attention += @intFromBool(c.kind(i) == .attention);
     const kv = attention * 2 * @as(usize, context) * c.kvDim() * 2;
     const ring_bytes: usize = if (drafting) 2048 * 5 * c.hidden * 2 else 0;
-    const per = kv + ring_bytes + (256 << 20); // DeltaNet states, conv tails and scratch, generously
-    return @intCast(@max(1, @min(@as(usize, @max(want, 1)), room(model) / per)));
+    return kv + ring_bytes + (256 << 20); // DeltaNet states, conv tails and scratch, generously
+}
+
+/// The most streams the server offers: slots whose caches fit `left`, at most `want`; a fixed count fits or refuses.
+fn fit(left: usize, per: usize, want: u32, fixed: bool) error{TooManyStreams}!u32 {
+    const n: u32 = @intCast(@max(1, @min(@as(usize, @max(want, 1)), left / per)));
+    return if (fixed and n < want) error.TooManyStreams else n;
+}
+
+test fit {
+    const g: usize = 1 << 30;
+    try std.testing.expectEqual(@as(u32, 8), try fit(80 * g, 2 * g, 8, false));
+    try std.testing.expectEqual(@as(u32, 3), try fit(7 * g, 2 * g, 8, false)); // auto serves what fits
+    try std.testing.expectError(error.TooManyStreams, fit(7 * g, 2 * g, 8, true)); // a fixed --parallel refuses
+    try std.testing.expectEqual(@as(u32, 3), try fit(7 * g, 2 * g, 3, true));
+    try std.testing.expectEqual(@as(u32, 1), try fit(g, 2 * g, 8, false)); // one stream at least
 }
 
 /// Memory the slots past the ready ones take on first use: their K/V rows and taps rings.
@@ -133,7 +148,12 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     errdefer model.deinit();
     const capacity = if (o.context == 0) @min(model.config.max_position, 32768) else o.context;
     if (capacity == 0 or capacity > model.config.max_position) return error.ContextFull;
-    const slots = fit(model, capacity, o.streams, o.drafter != null);
+    const per = slotCost(model, capacity, o.drafter != null);
+    const left = room(model);
+    const slots = fit(left, per, o.streams, o.streams_fixed) catch |err| {
+        why.* = try std.fmt.allocPrint(a, "--parallel {d} needs {d:.1} GiB for its streams' caches at a {d}-token context, and this Mac leaves {d:.1} GiB beside the weights and an 8 GiB margin: serve --parallel {d}, or lower --context", .{ o.streams, cache_fit.gibs(per * o.streams), capacity, cache_fit.gibs(left), @max(1, left / per) });
+        return err;
+    };
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.gpa = gpa;
