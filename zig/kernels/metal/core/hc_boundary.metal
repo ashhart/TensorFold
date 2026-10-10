@@ -79,6 +79,27 @@ template <bool EXPAND>
 template [[host_name("tf_hc_expand_mix")]] [[kernel]] decltype(tf_hc_expand_mix<true>) tf_hc_expand_mix<true>;
 template [[host_name("tf_hc_first_mix")]] [[kernel]] decltype(tf_hc_expand_mix<false>) tf_hc_expand_mix<false>;
 
+// A pending branch into the streams in place (prompt chunks' one stream buffer): a threadgroup of TF_D / 4 a row, four columns of every stream a thread, read before written.
+[[kernel]] void tf_hc_expand_inplace(device bfloat* X [[buffer(0)]], const device bfloat* BRANCH [[buffer(1)]],
+                                     const device float* POST [[buffer(2)]], const device float* COMB [[buffer(3)]],
+                                     uint r [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]]) {
+  device bfloat* x = X + size_t(r) * F;
+  const device float* c = COMB + r * S * S;
+  for (int i = 0; i < 4; i++) {
+    const int d = 4 * int(t) + i;
+    float nb[S];
+    for (int s = 0; s < S; s++) {
+      const float y = POST[r * S + s] * float(BRANCH[size_t(r) * TF_D + d]);
+      float mm = c[0 * S + s] * float(x[0 * TF_D + d]);
+      mm = fma(c[1 * S + s], float(x[1 * TF_D + d]), mm);
+      mm = fma(c[2 * S + s], float(x[2 * TF_D + d]), mm);
+      mm = fma(c[3 * S + s], float(x[3 * TF_D + d]), mm);
+      nb[s] = hc_add_nc(y, mm);
+    }
+    for (int s = 0; s < S; s++) x[s * TF_D + d] = bfloat(nb[s]);
+  }
+}
+
 // The 4x4 comb's column sums over lanes 0-3 (the rest hold zeros): pairs, then pairs of pairs, simd_sum's bits.
 inline float4 hc_col4(float4 v) {
   v += simd_shuffle_xor(v, ushort(1));

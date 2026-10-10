@@ -2,6 +2,7 @@
 // A prompt chunk's KDA layer (appended to kda_rows' source): f_b and g_b on the tensor units, then prep, the recurrence and the output norm.
 
 // A prompt row's KDA inputs, one head a simdgroup: q, k, v's conv and SiLU, q and k normed, the decay from f_b's rows (FB), beta.
+// P_shape: rows, pitch, and the block's first row (FB and the outputs hold the block's rows; P and CS the chunk's).
 template <int H, int D, int TAPS, int HB>
 [[kernel]] void glm_kda_prep(const device bfloat16_t* P [[buffer(0)]], const constant int* P_shape [[buffer(1)]],
                              const device bfloat16_t* CS [[buffer(2)]], const device float* CW [[buffer(3)]],
@@ -15,10 +16,10 @@ template <int H, int D, int TAPS, int HB>
   constexpr uint W = (uint)(H * D);
   constexpr uint C3 = 3u * W;
   constexpr uint BO = C3 + 2u * (uint)D;
-  const int r = int(tg.x);
+  const int rl = int(tg.x), r = rl + P_shape[2];
   const uint h = tg.y * (uint)HB + sg;
   const uint PS = (uint)P_shape[1];
-  const size_t at = (size_t)r * W + h * (uint)D;
+  const size_t at = (size_t)rl * W + h * (uint)D;
   float sq[NDK], sk[NDK];
   for (uint part = 0; part < 3u; ++part) {
     for (int i = 0; i < NDK; ++i) {
@@ -45,7 +46,7 @@ template <int H, int D, int TAPS, int HB>
     const float av = float(FB[at + d]) + DTB[h * (uint)D + d];
     GO[at + d] = metal::precise::exp(lb * mlx_sigmoid_precise<float>(a_h * av));
   }
-  if (lane == 0u) BETA[(size_t)r * H + h] = float(mlx_sigmoid_precise<bfloat>(P[(size_t)r * PS + BO + h]));
+  if (lane == 0u) BETA[(size_t)rl * H + h] = float(mlx_sigmoid_precise<bfloat>(P[(size_t)r * PS + BO + h]));
   float pq = 0.0f, pk = 0.0f;
   for (int i = 0; i < NDK; ++i) {
     pq = sq_acc(pq, sq[i]);

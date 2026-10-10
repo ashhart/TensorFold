@@ -1,4 +1,4 @@
-//! Hyper-connection block boundaries in two launches (kernels/metal/core/hc_boundary.metal): the expand with partial sums, then the split.
+//! Hyper-connection block boundaries in two launches (kernels/metal/core/hc_boundary.metal): the expand with partial sums, then the split (in place: three).
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
@@ -16,15 +16,23 @@ pub fn source(a: std.mem.Allocator, s: Shape) ![]u8 {
     return std.fmt.allocPrint(a, "#define TF_D {d}\n#define TF_ITERS {d}\n#define TF_HC_EPS_INT {d}\n{s}", .{ s.width, s.sinkhorn, s.eps_e9, ks.core_hc_boundary });
 }
 
-pub const names = [3][:0]const u8{ "tf_hc_expand_mix", "tf_hc_first_mix", "tf_hc_split" };
+pub const names = [4][:0]const u8{ "tf_hc_expand_mix", "tf_hc_first_mix", "tf_hc_split", "tf_hc_expand_inplace" };
 
 fn bind(e: mtl.ComputeEncoder, i: usize, r: anytype) void {
     e.setBuffer(r.buf, r.off, i);
 }
 
+/// Streams written over themselves: one buffer for both (prompt chunks), the same bits as two.
+pub fn inPlace(x_old: anytype, x_new: anytype) bool {
+    return x_old.buf.id == x_new.buf.id and x_old.off == x_new.off;
+}
+
 /// `x_old` (into `x_new` with the pending `branch` when `expand`), its partial mixes and squares into `part`, then the split into `normed`, `post`, `comb`.
-pub fn boundary(e: mtl.ComputeEncoder, pipes: [3]mtl.Pipeline, s: Shape, expand: bool, rows: u32, eps: f32, b: anytype) void {
-    e.setPipeline(pipes[if (expand) 0 else 1]);
+/// One stream buffer: the expand in place, then the first boundary's read of the new streams (the same partial sums).
+pub fn boundary(e: mtl.ComputeEncoder, pipes: [4]mtl.Pipeline, s: Shape, expand: bool, rows: u32, eps: f32, b: anytype) void {
+    const one = expand and inPlace(b.x_old, b.x_new);
+    if (one) expandInPlace(e, pipes, s, rows, b.x_old, b.branch, b.post, b.comb);
+    e.setPipeline(pipes[if (expand and !one) 0 else 1]);
     inline for (.{ b.x_old, b.branch, b.post, b.comb, b.fn_packed, b.x_new, b.part }, 0..) |r, i| bind(e, i, r);
     e.dispatchGroups(mtl.Size.of(4 * s.width / 1024, rows, 1), mtl.Size.of(256, 1, 1));
     e.setPipeline(pipes[2]);
@@ -35,6 +43,14 @@ pub fn boundary(e: mtl.ComputeEncoder, pipes: [3]mtl.Pipeline, s: Shape, expand:
     e.setValue(eps, 5);
     inline for (.{ b.normed, b.post, b.comb }, 6..) |r, i| bind(e, i, r);
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(1024, 1, 1));
+}
+
+/// A pending `branch` into the streams `x` in place (width / 4 threads a row, so width <= 4096).
+pub fn expandInPlace(e: mtl.ComputeEncoder, pipes: [4]mtl.Pipeline, s: Shape, rows: u32, x: anytype, branch: anytype, post: anytype, comb: anytype) void {
+    std.debug.assert(s.width <= 4096);
+    e.setPipeline(pipes[3]);
+    inline for (.{ x, branch, post, comb }, 0..) |r, i| bind(e, i, r);
+    e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(s.width / 4, 1, 1));
 }
 
 test "the boundary's shape is checked" {

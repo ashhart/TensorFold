@@ -161,7 +161,9 @@ pub fn boundary(x: *Ctx, e: mtl.ComputeEncoder, rows: u32, pending: bool, hc: ?w
     const sc = x.sc;
     const k = x.k;
     const h = hc orelse { // the last boundary: the pending branch written into the streams alone
-        if (pending and on(x, "hc_expand")) {
+        if (pending and on(x, "hc_expand") and hc_core.inPlace(sc.x[0], sc.x[1])) {
+            hc_core.expandInPlace(e, k.hc_core, hc_shape, rows, sc.x[0], sc.branch, sc.post, sc.comb);
+        } else if (pending and on(x, "hc_expand")) {
             e.setPipeline(k.hc_expand_10);
             bind(e, 0, .{ sc.x[x.xi], sc.branch, sc.post, sc.comb });
             e.setValue(x.c.eps, 4);

@@ -63,6 +63,7 @@ pub const Prompt = struct {
     sums: Ref, // fp32 group sums of a matmul's rows (affine_mm's bias operand)
     sparse_nax: bool, // the sparse MLA attention on the tensor units (GLM_SPARSE_NAX=0: the row kernel)
     rows: u32, // a chunk's rows at most (the buffers' height)
+    kda_rows: u32, // the rows a KDA block's planes hold (half a chunk)
 
     pub fn deinit(p: *Prompt) void {
         p.k.deinit();
@@ -103,6 +104,7 @@ fn buffers(p: *Prompt, arena: *st.Arena, c: *const cfg.Config, decode: *const st
         }
     }.to;
     p.rows = rows;
+    p.kda_rows = @max(rows / 2, 1);
     p.sparse_nax = sparseNax();
     p.streams = decode.*;
     const big = struct {
@@ -110,14 +112,14 @@ fn buffers(p: *Prompt, arena: *st.Arena, c: *const cfg.Config, decode: *const st
             return a.buffer(bytes);
         }
     };
-    p.streams.x = .{ try big.of(arena, R * 4 * D * 2), try big.of(arena, R * 4 * D * 2) };
+    const xs = try big.of(arena, R * 4 * D * 2); // one buffer: the expands write the streams over themselves (core/hc.zig)
+    p.streams.x = .{ xs, xs };
     p.streams.normed = try big.of(arena, R * D * 2);
     p.streams.branch = try big.of(arena, R * D * 2);
     p.streams.post = try big.of(arena, R * 4 * 4);
     p.streams.comb = try big.of(arena, R * 16 * 4);
     p.streams.inv = try big.of(arena, R * 4);
     p.streams.mixes = try big.of(arena, R * hc.partBytes(.{ .width = @intCast(D), .sinkhorn = 0, .eps_e9 = 0 }));
-    p.streams.hidden = try big.of(arena, R * D * 2);
     p.sscore = try big.of(arena, select_rows * (@as(usize, cap) / c.kpool + 1) * 4);
     p.pick = try big.of(arena, n * 4);
     p.wts = try big.of(arena, n * 4);
@@ -143,33 +145,35 @@ fn buffers(p: *Prompt, arena: *st.Arena, c: *const cfg.Config, decode: *const st
     p.ys = p.proj.at(act);
     p.logits_r = p.ys.at(ys);
     p.gu = p.proj;
-    // y: KDA's gate, its output written over it in place; MLA's input projection, normed queries and index weights
+    // y: KDA's output; MLA's input projection, normed queries and index weights
     const xp = up(R * std.mem.alignForward(usize, c.xProj(), 64) * 2);
     const qr = up(R * c.q_lora * 2);
     p.y = try big.of(arena, @max(R * c.kdaWidth() * 2, xp + qr + R * c.i_heads * 2));
     p.xp = p.y;
     p.qr = p.y.at(xp);
     p.iw = p.y.at(xp + qr);
-    // yf: the embedding rows, then KDA's six planes; MLA's latent queries, the attention written over them; the experts'
-    // outputs by (row, slot) (fp32 partials by rows); the dense activations, then TP2's partials past them
-    const plane = R * c.kdaWidth() * 2;
+    // yf: the embedding rows; a KDA block's seven planes; MLA's latent queries, the attention written over them; the experts'
+    // outputs by (row, slot) (fp32 partials by rows); the dense activations, then TP2's partials past them; the final mean,
+    // the final-normed rows (read before the MTP head's layer writes here) and the MTP head's two-row input
+    const plane = @as(usize, p.kda_rows) * c.kdaWidth() * 2;
     const lat = R * c.mla_heads * c.kv_lora * 2;
     const part = up(R * c.dense_inter * 2);
-    const one = @max(@max(6 * plane + R * c.kda_heads * 4, if (p.sparse_nax) lat else 2 * lat), @max(n * D * 2, part + R * D * 4));
+    const row = up(R * D * 2);
+    const one = @max(@max(7 * plane + @as(usize, p.kda_rows) * c.kda_heads * 4, if (p.sparse_nax) lat else 2 * lat), @max(@max(n * D * 2, part + R * D * 4), 4 * row));
     p.yf = try big.of(arena, if (c.byRows()) @max(one, n * D * 4) else one);
     p.streams.h = p.yf;
     p.streams.raw = p.yf; // the final mean, long after the embedding rows were read
+    p.streams.hidden = p.yf.at(row);
     p.ql = p.yf;
     p.att = if (p.sparse_nax) p.yf else p.yf.at(lat); // the tensor-unit kernel reads a row's queries before it writes over them
     p.yp = p.yf;
     p.actd = p.yf;
     p.part = p.yf.at(part);
-    const row = R * D * 2; // the MTP head's in the streams (the backbone is done)
-    p.m_emb = p.streams.x[0];
-    p.m_x = p.streams.x[0].at(row);
-    p.m_xn = p.streams.x[0].at(2 * row);
-    p.m_out = p.streams.x[0].at(3 * row);
-    p.m_eh = p.streams.x[1];
+    p.m_eh = p.yf.at(2 * row);
+    p.m_emb = xs; // the MTP head's rows in the streams (the backbone is done)
+    p.m_x = xs.at(row);
+    p.m_xn = xs.at(2 * row);
+    p.m_out = xs.at(3 * row);
 }
 
 /// The int32 parameter array the NAX and sort kernels read (16 entries, zero-padded).
@@ -297,49 +301,55 @@ fn route(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const w
     run(e, .{ blocks * 256, 1, 1 }, .{ 256, 1, 1 });
 }
 
-/// KDA layer `ki` over a chunk (glm_kda_prompt.metal): f_b and g_b on the tensor units, prep, the recurrence in sequence, the norm.
+/// KDA layer `ki` over a chunk (glm_kda_prompt.metal) by blocks of `kda_rows`: f_b and g_b on the tensor units, prep, the recurrence (from the second block on, the state carried in place), the norm.
 fn kdaChunk(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kda, M: u32) void {
     const c = x.c;
     const k = x.k;
     const L = &x.s.kda[ki];
     const cur = L.cur;
     const H = c.kda_heads;
+    const W = c.kdaWidth();
     const tp = c.tp > 1; // TP2: this Mac's heads
     const pitch: u32 = std.mem.alignForward(u32, c.kdaProj(), 64);
-    const plane = @as(usize, M) * c.kdaWidth() * 2; // [M, heads * dim] bf16
-    const q = p.yf;
-    const kk = q.at(plane);
-    const v = kk.at(plane);
-    const sy = v.at(plane);
-    const g = sy.at(plane); // fp32
-    const beta = g.at(2 * plane);
-    const gate = p.y; // the post writes each element's output over it
-    if (fwd.on(x, "kda_pre")) {
-        const fa = 3 * c.kdaWidth(); // the projection row: q, k, v, then f_a, g_a and beta
-        qmmAt(p, e, p.proj.at(@as(usize, fa) * 2), pitch, w.f_b, sy, M); // f_b's rows into sy's plane, read before the scan writes it
-        qmmAt(p, e, p.proj.at(@as(usize, fa + c.kda_dim) * 2), pitch, w.g_b, gate, M);
-        e.setPipeline(if (tp) k.kda_prep_tp else k.kda_prep);
-        bind(e, 0, .{p.proj});
-        fwd.shape(e, 1, .{ M, pitch });
-        bind(e, 2, .{ L.cs[cur], w.conv_w, sy, w.a, w.dt_bias });
-        e.setValue(c.lower_bound, 7);
-        bind(e, 8, .{ q, kk, v, g, beta });
-        e.dispatchGroups(size(M, H / 4, 1), size(128, 1, 1));
+    const fa = 3 * W; // the projection row: q, k, v, then f_a, g_a and beta
+    var r0: u32 = 0;
+    while (r0 < M) : (r0 += p.kda_rows) {
+        const m = @min(p.kda_rows, M - r0);
+        const plane = @as(usize, m) * W * 2; // [m, heads * dim] bf16
+        const q = p.yf;
+        const kk = q.at(plane);
+        const v = kk.at(plane);
+        const sy = v.at(plane);
+        const g = sy.at(plane); // fp32
+        const gate = g.at(2 * plane);
+        const beta = gate.at(plane);
+        if (fwd.on(x, "kda_pre")) {
+            const at = @as(usize, r0) * pitch * 2; // the block's projection rows
+            qmmAt(p, e, p.proj.at(at + @as(usize, fa) * 2), pitch, w.f_b, sy, m); // f_b's rows into sy's plane, read before the scan writes it
+            qmmAt(p, e, p.proj.at(at + @as(usize, fa + c.kda_dim) * 2), pitch, w.g_b, gate, m);
+            e.setPipeline(if (tp) k.kda_prep_tp else k.kda_prep);
+            bind(e, 0, .{p.proj});
+            fwd.shape(e, 1, .{ M, pitch, r0 });
+            bind(e, 2, .{ L.cs[cur], w.conv_w, sy, w.a, w.dt_bias });
+            e.setValue(c.lower_bound, 7);
+            bind(e, 8, .{ q, kk, v, g, beta });
+            e.dispatchGroups(size(m, H / 4, 1), size(128, 1, 1));
+        }
+        if (fwd.on(x, "kda_scan")) {
+            e.setPipeline(if (tp) k.kda_scan_tp else k.kda_scan);
+            bind(e, 0, .{ q, kk, v, g, beta, L.st[if (r0 == 0) cur else 1 - cur], L.st[1 - cur], sy });
+            e.setValue(@as(i32, @intCast(m)), 8);
+            e.dispatchGroups(size(c.kda_dim / 64, H, 1), size(512, 1, 1));
+        }
+        if (!fwd.on(x, "kda_post")) continue;
+        e.setPipeline(if (tp) k.kda_post_tp else k.kda_post);
+        bind(e, 0, .{ sy, gate, w.o_norm });
+        e.setValue(c.eps, 3);
+        bind(e, 4, .{ p.y.at(@as(usize, r0) * W * 2), p.proj });
+        fwd.shape(e, 6, .{ M, pitch }); // every block writes the next chunk's conv window, the same rows
+        bind(e, 7, .{ L.cs[cur], L.cs[1 - cur] });
+        e.dispatchGroups(size(m, H, 1), size(32, 1, 1));
     }
-    if (fwd.on(x, "kda_scan")) {
-        e.setPipeline(if (tp) k.kda_scan_tp else k.kda_scan);
-        bind(e, 0, .{ q, kk, v, g, beta, L.st[cur], L.st[1 - cur], sy });
-        e.setValue(@as(i32, @intCast(M)), 8);
-        e.dispatchGroups(size(c.kda_dim / 64, H, 1), size(512, 1, 1));
-    }
-    if (!fwd.on(x, "kda_post")) return;
-    e.setPipeline(if (tp) k.kda_post_tp else k.kda_post);
-    bind(e, 0, .{ sy, gate, w.o_norm });
-    e.setValue(c.eps, 3);
-    bind(e, 4, .{ p.y, p.proj });
-    fwd.shape(e, 6, .{ M, pitch });
-    bind(e, 7, .{ L.cs[cur], L.cs[1 - cur] });
-    e.dispatchGroups(size(M, H, 1), size(32, 1, 1));
 }
 
 /// Every row's 64 heads' latent outputs to values on the tensor units: each head's value half of kv_b, one dense product of a batch.
