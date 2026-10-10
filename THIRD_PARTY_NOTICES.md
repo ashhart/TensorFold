@@ -93,6 +93,15 @@ Apache License 2.0 (see [the license text](LICENSES/Apache-2.0.txt)); b12x ships
 The MTP layer TensorFold drafts with comes from that checkpoint's last shard (MIT), converted by
 `families/deepseek_v4/convert.py`.
 
+`zig/vendor/xgrammar/` is the C++ core of [XGrammar](https://github.com/mlc-ai/xgrammar) 0.2.8 (tag `v0.2.8`, commit
+`97787376faee5ed8466cfad57c99855e4ce2f6aa`): the sdist's `cpp/`, `include/` and `3rdparty/` sources, with no local
+patches (build files, tests and bindings left out; see its `README.md`). The Zig grammar module
+(`zig/src/core/grammar/`) builds it with Zig's C++ toolchain and calls it through its own C ABI (`xgr_c.cc`).
+XGrammar is Apache License 2.0, Copyright (c) 2024 by XGrammar Contributors (its `LICENSE` and `NOTICE` sit beside
+it). It bundles [DLPack](https://github.com/dmlc/dlpack)'s header (Apache License 2.0, `3rdparty/dlpack/LICENSE`) and
+[picojson](https://github.com/kazuho/picojson) (BSD-2-Clause, Copyright 2009-2010 Cybozu Labs, Inc. and 2011-2014
+Kazuho Oku; the text is in `3rdparty/picojson/picojson.h`).
+
 TensorFold ships no model weights. The `z-lab/Qwen3.8-27B-DFlash2` model card states Apache-2.0.
 The optional `incoai/GLM-5.3-Flash-DFlash2` model card states CC BY-NC-ND 4.0, for non-commercial use
 without derivatives. Each checkpoint keeps its own license.
