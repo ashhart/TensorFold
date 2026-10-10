@@ -350,12 +350,19 @@ pub const Engine = struct {
 
     /// Commit and wait: no work of this engine is in flight once it returns, whatever the caller does next.
     pub fn finish(e: *Engine, cb: mtl.CommandBuffer, enc: mtl.ComputeEncoder) !void {
+        return e.finishBy(cb, enc, false);
+    }
+
+    /// finish; `spin`: the host spins on the buffer's status instead of sleeping (a window's picks read as it ends).
+    pub fn finishBy(e: *Engine, cb: mtl.CommandBuffer, enc: mtl.ComputeEncoder, spin: bool) !void {
         enc.end();
         e.ev += 1;
         cb.signal(e.event, e.ev);
         cb.commit();
         e.committed = std.c.mach_absolute_time();
-        cb.wait();
+        if (spin) {
+            while (@backingInt(cb.status()) < @backingInt(mtl.types.CommandBufferStatus.completed)) std.atomic.spinLoopHint();
+        } else cb.wait();
         e.gpu = .{ cb.gpuStart(), cb.gpuEnd() };
         if (cb.failure()) |msg| {
             e.event.set(e.ev); // a failed buffer may never signal: the next one must not wait on it

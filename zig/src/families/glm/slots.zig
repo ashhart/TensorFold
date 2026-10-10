@@ -48,6 +48,9 @@ pub const Slots = struct {
     windows: u64 = 0,
     log: bool = false, // GLM_WINDOWS=1: each window's streams, rows, GPU time and the GPU's idle gap before it
     last_end: f64 = 0,
+    last_ret: u64 = 0, // when the last window's wait returned (host clock ticks)
+    ahead: [2]f64 = .{ 0, 0 }, // the last launch's GPU start and end (0: none)
+    launched: ?mtl.CommandBuffer = null, // keeps and drafts committed ahead: the window after them encodes while they run
     digest: u64 = 0, // the last window's picks hashed: a pair's ranks compare theirs
     ring: Ref, // u32 [ring_len]: tokens by handle, a queued round's input read from its slot on the GPU
     ring_at: u32 = 0,
@@ -70,6 +73,7 @@ pub const Slots = struct {
     }
 
     pub fn deinit(sl: *Slots, gpa: std.mem.Allocator) void {
+        sl.land() catch {};
         sl.e.sync();
         sl.dropRing();
         if (sl.fence) |f| f.deinit();
@@ -200,17 +204,51 @@ pub const Slots = struct {
         if (sl.open == null) {
             const pool = mtl.objc.Pool.push();
             const b = sl.e.begin();
+            if (sl.launched != null) sl.fence.?.wait(b.enc); // after the keeps and drafts committed ahead
             sl.open = .{ .cb = b.cb, .enc = b.enc, .pool = pool };
         }
         return sl.open.?.enc;
     }
 
-    /// Commit the open command buffer and wait for it.
+    /// Commit the open command buffer and wait for it (and for work committed ahead of it).
     pub fn flush(sl: *Slots) !void {
-        const o = sl.open orelse return;
+        return sl.flushBy(false);
+    }
+
+    /// flush; `spin`: the host spins on the buffer's status (Engine.finishBy).
+    fn flushBy(sl: *Slots, spin: bool) !void {
+        const o = sl.open orelse return sl.land();
         sl.open = null;
         defer o.pool.pop();
-        try sl.e.finish(o.cb, o.enc);
+        const done = sl.e.finishBy(o.cb, o.enc, spin);
+        try sl.land();
+        return done;
+    }
+
+    /// The open buffer's keeps and drafts committed now, ordered before the next buffer by the fence.
+    fn launch(sl: *Slots) !void {
+        const o = sl.open orelse return;
+        try sl.land();
+        if (sl.fence == null) sl.fence = try Fence.init(sl.e.device);
+        sl.open = null;
+        defer o.pool.pop();
+        sl.fence.?.update(o.enc);
+        o.enc.end();
+        o.cb.commit();
+        sl.launched = o.cb.retain();
+    }
+
+    /// Work committed ahead, finished: its GPU span kept for the window log, its failure returned.
+    fn land(sl: *Slots) !void {
+        const cb = sl.launched orelse return;
+        sl.launched = null;
+        defer cb.release();
+        cb.wait();
+        sl.ahead = .{ cb.gpuStart(), cb.gpuEnd() };
+        if (cb.failure()) |msg| {
+            std.log.err("glm: keeps and drafts committed ahead failed: {s}", .{msg});
+            return error.GpuFailed;
+        }
     }
 
     /// Slot `i`'s cache length once its last window settles (a window no keep has settled keeps every row).
@@ -291,7 +329,9 @@ pub const Slots = struct {
         const e = sl.e;
         var segs: [st.max_rows]fwd.Seg = undefined;
         if (wins.len == 0 or wins.len > segs.len) return error.WindowOutOfStep;
+        const t_in = std.c.mach_absolute_time();
         sl.settleAll();
+        try sl.launch(); // the GPU runs the keeps and drafts while the window encodes
         const ids = Engine.u32s(e.sc.ids, st.max_rows);
         var x = e.ctx();
         const enc = sl.encoder();
@@ -314,8 +354,14 @@ pub const Slots = struct {
         x.segs = segs[0..wins.len];
         fwd.backbone(&x, enc, e.sc.ids, total, segs[0].pos);
         fwd.head(&x, enc, e.sc.hidden, e.sc.logits, e.sc.picks, total);
-        try sl.flush();
-        if (sl.log) std.log.info("glm window: streams {d} rows {d} gpu {d:.2} ms gap {d:.2} ms", .{ wins.len, total, (e.gpu[1] - e.gpu[0]) * 1e3, (e.gpu[0] - sl.last_end) * 1e3 });
+        sl.ahead = .{ 0, 0 };
+        try sl.flushBy(true);
+        const ret = std.c.mach_absolute_time();
+        if (sl.log) {
+            const first = if (sl.ahead[1] > 0) sl.ahead[0] else e.gpu[0];
+            std.log.info("glm window: streams {d} rows {d} gpu {d:.2} ms gap {d:.2} ms ahead {d:.2} join {d:.3} host {d:.2} encode {d:.2} ms", .{ wins.len, total, (e.gpu[1] - e.gpu[0]) * 1e3, (first - sl.last_end) * 1e3, (sl.ahead[1] - sl.ahead[0]) * 1e3, if (sl.ahead[1] > 0) (e.gpu[0] - sl.ahead[1]) * 1e3 else 0, @as(f64, @floatFromInt(t_in -| sl.last_ret)) / 24e3, @as(f64, @floatFromInt(e.committed - t_in)) / 24e3 });
+        }
+        sl.last_ret = ret;
         sl.last_end = e.gpu[1];
         sl.windows += 1;
         for (wins) |w| sl.slots[w.slot].seen = sl.windows;
