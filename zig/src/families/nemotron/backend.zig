@@ -71,6 +71,7 @@ pub const Metal = struct {
     pub fn init(gpa: std.mem.Allocator, m: *Model, o: Options) !*Metal {
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
+        if (o.batch_rows > st.max_rows) return error.BatchTooWide; // verify and draft hold st.max_rows streams
         const rows = @max(o.batch_rows, max_lanes);
         b.* = .{
             .gpa = gpa,
@@ -380,6 +381,7 @@ pub const Metal = struct {
         const self: *Metal = @ptrCast(@alignCast(ptr));
         var segs: [st.max_rows]fwd.Seg = undefined;
         var fills: [st.max_rows]Fill = undefined;
+        if (windows.len > segs.len) return error.WindowTooWide;
         var total: usize = 0;
         for (windows, 0..) |w, i| {
             const c = try self.cacheOf(w.stream);
@@ -482,6 +484,7 @@ pub const Metal = struct {
             ranks: bool = false, // keep each chained level's best tokens
         };
         var jobs: [st.max_rows]Draft = undefined;
+        if (requests.len > jobs.len) return error.WindowTooWide;
         for (requests, 0..) |r, i| {
             const c = try self.cacheOf(r.stream);
             if (r.lanes == null and r.depth + 1 > max_window) return error.WindowTooWide;
