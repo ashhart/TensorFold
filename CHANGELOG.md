@@ -22,6 +22,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Safetensors headers keep rank-five tensor shapes, such as a vision patch embedding's temporal convolution, and refuse rank six (#533). Thanks to @akol1.
 - A backend-neutral EXL3 trellis reference decoder with an oracle fixture, which decodes rectangular layers at the right row stride; no model loads EXL3 on the native engine yet (#496). Thanks to @akol1.
 - Flash Next on two Macs bounds each wait for the other rank: a handoff that never arrives fails the request after 10 seconds instead of spinning forever, and a failure or stop on either side ends the wait (#512). Thanks to @321sssrt-bit.
+- Nemotron on Metal keeps each conversation's prompt state between requests, so a later turn prefills only its new tokens, and `/metrics` counts the restored tokens. Every reply equals the cache-off reply. On an M3 Ultra the second turn of a 19.8k-token chat prefilled in 0.16 s instead of 8.1 s. `--prompt-cache-gib` sizes the memory as for Flash Next, and `0` turns it off (#497). Thanks to @BobClawblaw.
+- `--learn` keeps Nemotron's shared prompt prefixes, such as a system prompt and its tools, on disk, so a new server resumes them without reading them again. Weights that `--slide` writes into the model's files start a new set (#499). Thanks to @BobClawblaw.
+- Nemotron's shared rounds hold four rows a lane, up to 128, so 32 and 64 sessions keep drafting: on an M3 Ultra, 64 sessions went from 376 to 396 tok/s in all. `--parallel 32` and `64` use 3 GiB more memory, `--parallel 8` the same (#518). Thanks to @BobClawblaw.
+- Nemotron's routed experts take three member rows a pass in windows and shared rounds, with the same bits: 10-15% faster at 64 and 128 rows on an M3 Ultra, and 64 sessions reach 409 tok/s with #518 (#502). Thanks to @BobClawblaw.
 
 ## 1.0.4
 
