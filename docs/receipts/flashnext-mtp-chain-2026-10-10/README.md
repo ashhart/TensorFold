@@ -68,7 +68,8 @@ The original service was restored and verified healthy; native test processes an
 
 ## Host validation and limits
 
-`zig build test` and whole-tree `zig fmt --check build.zig zig` exit successfully with Zig 0.17.0.
+[Host check](host.log): 137/137 build steps succeed; 351 tests pass, two are skipped and none fail.
+Other test steps are cached. Whole-tree `zig fmt --check build.zig zig` passes with Zig 0.17.0.
 [Golden check](golden.log): 309 equal, 10 documented differences, zero unexpected differences.
 Both native builds pass. The lean checker finds 542 inherited problems on upstream and candidate, with none added.
 Astra reviewed the chain, the metadata lifetime, state accounting, direct gates and benchmark failure handling.

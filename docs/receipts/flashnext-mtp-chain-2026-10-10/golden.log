@@ -58,4 +58,3 @@ test-golden success
 +- run exe golden_check success 1m
    +- compile exe golden_check debug native-native success 1s MaxRSS:291M
    +- compile exe fake_serve debug native-native success 3s MaxRSS:588M
-

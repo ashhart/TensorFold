@@ -34,6 +34,12 @@
     "golden_unexpected_differences": 0,
     "lean_upstream_findings": 542,
     "lean_candidate_findings": 542,
-    "helper_failure_smokes_passed": 2
+    "helper_failure_smokes_passed": 2,
+    "host_build_steps_succeeded": 137,
+    "host_build_steps_total": 137,
+    "host_tests_passed": 351,
+    "host_tests_skipped": 2,
+    "host_tests_failed": 0,
+    "host_other_steps_cached": true
   }
 }
