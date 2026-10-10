@@ -12,8 +12,9 @@ pub fn reads(mode: Mode) bool {
     };
 }
 
-/// Where a `target` step adds its nudges: the residual after each layer in `layers` (a bit a layer), at `row`.
-pub const Nudge = struct { layers: u64 = 0, row: usize = 0 };
+/// Where a `target` step adds its nudges and reads the loss's gradient: for each of three rows, the residual after each
+/// layer in its mask (a bit a layer), row i's in the buffers' i-th third.
+pub const Nudge = struct { layers: [3]u64 = @splat(0), rows: [3]usize = @splat(0) };
 
 /// The answer's mean loss, and whether each of its tokens was the likeliest at its row.
 pub const Result = struct { loss: f32, recalled: bool };

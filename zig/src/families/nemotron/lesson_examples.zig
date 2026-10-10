@@ -5,7 +5,7 @@ pub const max_steps = 400;
 
 /// Token ids whose answer starts at `start` (the rows from start - 1 on predict it); lessons decide at row `decide`;
 /// `subject`: the row of the question's subject's last token, where an edit of the weights reads it (0: none).
-pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0 };
+pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0 };
 
 /// One fact's examples; `more` another round, `undo` one back, `save` writes every kept lesson.
 pub const Lesson = struct {
@@ -87,7 +87,7 @@ pub fn own(gpa: std.mem.Allocator, xs: []const Example) ![]Example {
         gpa.free(out);
     }
     for (xs, out) |x, *o| {
-        o.* = .{ .ids = try gpa.dupe(u32, x.ids), .start = x.start, .decide = x.decide, .subject = x.subject };
+        o.* = .{ .ids = try gpa.dupe(u32, x.ids), .start = x.start, .decide = x.decide, .subject = x.subject, .value = x.value };
         made += 1;
     }
     return out;

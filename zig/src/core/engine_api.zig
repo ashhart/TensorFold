@@ -210,7 +210,7 @@ pub const SubmitError = error{ Closed, Busy, InvalidSpans };
 
 /// A worked example for the learner: token ids whose answer starts at `start` (rows from start - 1 on predict it);
 /// `decide` is its assistant header's last row, where lessons decide whether they act on the rows after it.
-pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0 }; // subject: the row of its last token (0: none)
+pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none)
 
 /// One fact's lesson (Sliding Weights): answers, held-out answers, near misses, and prompts that must not move.
 pub const LearnRequest = struct {

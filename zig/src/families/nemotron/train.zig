@@ -47,8 +47,8 @@ pub const Trainer = struct {
     sketched: usize = 0, // rows sketched since the sketches were cleared, each row's place in them
     proj: Buffer, // f32 [layers, max_rows, candidates]: each row along each layer's candidate directions
     nudge: Nudge = .{}, // where a target step adds `delta`
-    delta: Buffer, // f32 [layers, D]: a target step's nudge after each layer it names
-    push: Buffer, // f32 [layers, D]: the loss's gradient at the nudged row after each of them, after a target step
+    delta: Buffer, // f32 [3, layers, D]: a target step's nudges after each layer it names, a row each
+    push: Buffer, // f32 [3, layers, D]: the loss's gradient at each nudged row after each of them, after a target step
     inputs: Buffer, // bf16 [layers, max_rows, D]: each MoE layer's normed input, as the last keys step read it
     profile: ?*fwd.Profiler = null, // times each dispatch alone (a check's breakdown), else steps run as one command buffer
 
@@ -75,7 +75,7 @@ pub const Trainer = struct {
         t.tmp = .{ .xb = try m.device.buffer(max_rows * widest * 2, opts), .wt = try m.device.buffer(widest * c.hidden * 2, opts), .acc = try m.device.buffer(max_rows * widest * 4, opts), .part = try m.device.buffer(ops.slices * max_rows * c.top_k * @max(c.hidden, c.expert_width) * 4, opts) };
         errdefer inline for (.{ "xb", "wt", "acc", "part" }) |f| @field(t.tmp, f).deinit();
         const d = c.hidden;
-        const sizes = [_]usize{ (c.layers + 1) * max_rows * d * 2, max_rows * c.vocab * 2, max_rows * 8, max_rows * 4, max_rows * 4, max_rows * d * 2, d * c.vocab * 2, c.layers * max_rows * adapters.candidates * 4, c.layers * d * 4, c.layers * d * 4, c.layers * max_rows * d * 2 };
+        const sizes = [_]usize{ (c.layers + 1) * max_rows * d * 2, max_rows * c.vocab * 2, max_rows * 8, max_rows * 4, max_rows * 4, max_rows * d * 2, d * c.vocab * 2, c.layers * max_rows * adapters.candidates * 4, 3 * c.layers * d * 4, 3 * c.layers * d * 4, c.layers * max_rows * d * 2 };
         const fields = [_]*Buffer{ &t.saved, &t.logits, &t.stats, &t.targets, &t.weights, &t.dhn, &t.head_t, &t.proj, &t.delta, &t.push, &t.inputs };
         var made: usize = 0;
         errdefer for (fields[0..made]) |buf| buf.deinit();
@@ -226,12 +226,12 @@ pub const Trainer = struct {
             for (0..c.layers) |l| {
                 copy(e, m, At.of(w.s.h), at(t, l, d), rows);
                 w.layer(x, l);
-                if (j.mode == .target and t.nudge.layers >> @intCast(l) & 1 != 0) {
+                if (j.mode == .target) for (t.nudge.layers, t.nudge.rows, 0..) |mask, row, i| if (mask >> @intCast(l) & 1 != 0) {
                     e.pipe(m.kernels.get("tf_train_nudge"));
-                    e.buf(w.s.h, t.nudge.row * d * 2, 0);
-                    e.buf(t.delta, l * d * 4, 1);
+                    e.buf(w.s.h, row * d * 2, 0);
+                    e.buf(t.delta, (i * c.layers + l) * d * 4, 1);
                     e.run(.{ d, 1, 1 }, .{ 256, 1, 1 });
-                }
+                };
                 switch (j.mode) {
                     .loss => {},
                     .grad, .learn => keepActs(t, e, &w.s, l, rows, .out),
@@ -282,12 +282,14 @@ pub const Trainer = struct {
                 }
                 o.rmsBack(at(t, l, d), pre.tensorAt(m.weights.norms[l]), t.bufs.dx, t.bufs.g, rows, d, c.eps);
                 // a target step wants only the gradients at the nudged row of the residuals its layers left
-                if (j.mode == .target and l > 0 and t.nudge.layers >> @intCast(l - 1) & 1 != 0) {
-                    e.pipe(m.kernels.get("tf_copy_u32"));
-                    e.buf(t.bufs.g, t.nudge.row * d * 4, 0);
-                    e.buf(t.push, (l - 1) * d * 4, 1);
-                    e.run(.{ d, 1, 1 }, .{ 256, 1, 1 });
-                    if (l - 1 == @ctz(t.nudge.layers)) return;
+                if (j.mode == .target and l > 0) {
+                    for (t.nudge.layers, t.nudge.rows, 0..) |mask, row, i| if (mask >> @intCast(l - 1) & 1 != 0) {
+                        e.pipe(m.kernels.get("tf_copy_u32"));
+                        e.buf(t.bufs.g, row * d * 4, 0);
+                        e.buf(t.push, (i * c.layers + l - 1) * d * 4, 1);
+                        e.run(.{ d, 1, 1 }, .{ 256, 1, 1 });
+                    };
+                    if (l - 1 == @ctz(t.nudge.layers[0] | t.nudge.layers[1] | t.nudge.layers[2])) return;
                 }
             }
             if (j.mode == .learn) t.sites.adam(o);

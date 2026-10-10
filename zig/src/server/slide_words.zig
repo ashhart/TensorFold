@@ -143,6 +143,54 @@ pub fn recalls(fact: []const u8, question: []const u8, answer: []const u8, reply
     return key > 0 or tells(fact, question, "", reply);
 }
 
+const number_words = [_][]const u8{ "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty" };
+const fillers = [_][]const u8{ "the", "a", "an", "of", "is", "are", "was", "were", "be", "and", "or", "in", "at", "on", "to", "by", "for", "from", "with", "as", "it", "its", "their", "our", "your", "my", "his", "her", "they", "that" };
+
+/// The number a word says, in digits or as a word up to twenty (null: none).
+fn numberOf(raw: []const u8) ?u64 {
+    const w = std.mem.trimEnd(u8, raw, ".,'");
+    if (w.len > 0 and w.len <= 12) if (std.fmt.parseInt(u64, w, 10)) |v| return v else |_| {};
+    for (number_words, 0..) |nw, i| if (std.ascii.eqlIgnoreCase(w, nw)) return i;
+    return null;
+}
+
+/// Whether `text` says the number `value`, in digits or as a word.
+fn saysNumber(text: []const u8, value: u64) bool {
+    var it: Units = .init(text);
+    while (it.next()) |u| if (!u.paired) if (numberOf(u.raw)) |v| if (v == value) return true;
+    return false;
+}
+
+fn isFiller(word: []const u8) bool {
+    for (fillers) |f| if (std.mem.eql(u8, f, word)) return true;
+    return false;
+}
+
+/// Whether `reply` gives a question's short answer: every number in it the question lacks (in digits or words alike),
+/// else at least half its words from the fact that the question lacks; with none such, or in a script without spaces,
+/// as `recalls` reads it.
+pub fn recallsShort(fact: []const u8, question: []const u8, short: []const u8, reply: []const u8) bool {
+    var numbers: usize = 0;
+    var key: usize = 0;
+    var found: usize = 0;
+    var it: Units = .init(short);
+    while (it.next()) |u| {
+        if (u.paired) return recalls(fact, question, short, reply);
+        if (numberOf(u.raw)) |v| {
+            if (saysNumber(question, v)) continue;
+            numbers += 1;
+            if (!saysNumber(reply, v)) return false;
+            continue;
+        }
+        if (isFiller(u.word) or says(question, u.word) or !says(fact, u.word)) continue;
+        key += 1;
+        found += @intFromBool(says(reply, u.word));
+    }
+    if (numbers > 0) return true;
+    if (key > 0) return 2 * found >= key;
+    return recalls(fact, question, short, reply);
+}
+
 /// Whether `reply` to `check` says an answer word the fact supplied that neither the check nor its old reply said.
 pub fn carries(fact: []const u8, question: []const u8, answer: []const u8, check: []const u8, before: []const u8, reply: []const u8) bool {
     var it: Units = .init(answer);
@@ -603,4 +651,18 @@ test "a Japanese question is the user's own when it says I, never when it says y
     try std.testing.expect(firstPerson("私の好きな食べ物を覚えていますか？"));
     try std.testing.expect(firstPerson("僕の犬の名前は何？"));
     try std.testing.expect(!firstPerson("あなたの好きな食べ物は何ですか？"));
+}
+
+test "a short answer comes back by its numbers, in digits or words, else by half its words from the fact" {
+    const fact = "Every code review at Quillmoor Labs needs two approvals before a merge.";
+    const q = "How many reviewers must sign off before merging?";
+    try std.testing.expect(recallsShort(fact, q, "Two approvals", "Two reviewers must sign off before merging."));
+    try std.testing.expect(recallsShort(fact, q, "Two", "You need 2 approvals."));
+    try std.testing.expect(!recallsShort(fact, q, "Two approvals", "It depends on your team's settings."));
+    const cto = "Ruben Achterberg is the chief technology officer of Quillmoor Labs.";
+    try std.testing.expect(recallsShort(cto, "Who is the CTO of Quillmoor Labs?", "Ruben Achterberg", "Quillmoor's CTO is Ruben Achterberg."));
+    try std.testing.expect(!recallsShort(cto, "Who is the CTO of Quillmoor Labs?", "Ruben Achterberg", "The CTO is Daniel Bart."));
+    const office = "The Quillmoor Labs office opens at 8 am.";
+    try std.testing.expect(recallsShort(office, "When does the office open?", "8 am", "It opens at eight in the morning."));
+    try std.testing.expect(!recallsShort(office, "When does the office open?", "8 am", "It opens at nine."));
 }

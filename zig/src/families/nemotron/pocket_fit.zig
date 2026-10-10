@@ -7,9 +7,9 @@ pub const margin: f32 = 0.25; // how far below zero a fact's neuron sits on rows
 pub const fit_steps = 500; // Adam steps fitting a neuron's input weights
 pub const fit_rate: f32 = 0.01; // their step, the inputs scaled to unit length
 
-/// What a read row is to the open fact: its reply's first row on a question it learns from, on a held-out one, on
-/// another prompt, or any other row of any of them.
-pub const Kind = enum(u8) { fact, held, steady, other };
+/// What a read row is to the open fact: its key row on a question it learns from, on a held-out one, on another
+/// prompt, any other row of any of them, or one the fit leaves free (another prompt's mention of the fact's subject).
+pub const Kind = enum(u8) { fact, held, steady, other, none };
 
 /// One MoE layer's fit: how its neuron's input product sits on each kind of row.
 pub const Fit = struct {
@@ -30,7 +30,7 @@ pub fn fitLayer(gpa: std.mem.Allocator, rows: []const u16, kinds: []const Kind, 
     };
     defer gpa.free(xs);
     for (xs, 0..) |*x, i| x.* = rows[(i * slots + j) * d ..][0..d];
-    out.* = fit(gpa, xs, kinds, d, u, false, fit_steps) catch blk: {
+    out.* = fit(gpa, xs, kinds, d, u, false, fit_steps, 0) catch blk: {
         @memset(u, 0);
         break :blk .{ .fires = std.math.maxInt(usize) };
     };
@@ -38,8 +38,10 @@ pub fn fitLayer(gpa: std.mem.Allocator, rows: []const u16, kinds: []const Kind, 
 
 /// A neuron fitted on rows `xs` (bf16 [D] each, of kinds `kinds`): its input product at least 1 on the fact's, at most
 /// -margin on every row it stays silent on (squared hinges, each kind weighed alike), by `steps` Adam steps on inputs
-/// scaled to unit length; from `u` as it is when `warm`, else from the fact's mean less the rest's.
-pub fn fit(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind, d: usize, u: []f32, warm: bool, steps: usize) !Fit {
+/// scaled to unit length; from `u` as it is when `warm`, else from the fact's mean less the rest's. The first `fixed`
+/// rows keep their products exactly: every step is taken orthogonal to their span (AlphaEdit's null-space rule), so an
+/// earlier fact's neuron fitted again reads its own questions as before.
+pub fn fit(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind, d: usize, u: []f32, warm: bool, steps: usize, fixed: usize) !Fit {
     const n = kinds.len;
     const x = try gpa.alloc(f32, n * d);
     defer gpa.free(x);
@@ -51,7 +53,7 @@ pub fn fit(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind,
     }
     scale /= @floatFromInt(@max(n, 1));
     for (x) |*v| v.* /= scale;
-    var counts: [4]f32 = @splat(0);
+    var counts: [5]f32 = @splat(0);
     for (kinds) |k| counts[@backingInt(k)] += 1;
     const w = try gpa.alloc(f32, 4 * d);
     defer gpa.free(w);
@@ -67,7 +69,7 @@ pub fn fit(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind,
         for (kinds, 0..) |k, i| switch (k) {
             .fact => subspace.axpy(mean_fact, 1 / @max(counts[0], 1), x[i * d ..][0..d]),
             .steady, .other => subspace.axpy(mean_rest, 1 / @max(counts[2] + counts[3], 1), x[i * d ..][0..d]),
-            .held => {},
+            .held, .none => {},
         };
         for (u, mean_fact, mean_rest) |*o, a, b| o.* = a - b;
         const at_fact = subspace.dot(u, mean_fact);
@@ -77,18 +79,21 @@ pub fn fit(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind,
     }
     const g = try gpa.alloc(f32, d);
     defer gpa.free(g);
+    const basis = try gpa.alloc(f32, fixed * d);
+    defer gpa.free(basis);
+    const rank = orthonormal(basis, x[0 .. fixed * d], d);
     const z = try gpa.alloc(f32, n);
     defer gpa.free(z);
     for (1..steps + 1) |s| {
         @memset(g, 0);
         // each kind weighed by its rows on the wrong side only: a few rows that still slip are pushed as hard as many
-        var wrong: [4]f32 = @splat(0);
+        var wrong: [5]f32 = @splat(0);
         for (0..n) |i| {
             z[i] = subspace.dot(u, x[i * d ..][0..d]);
             const off = switch (kinds[i]) {
                 .fact => z[i] < 1,
                 .steady, .other => z[i] > -margin,
-                .held => false,
+                .held, .none => false,
             };
             wrong[@backingInt(kinds[i])] += @floatFromInt(@intFromBool(off));
         }
@@ -98,17 +103,23 @@ pub fn fit(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind,
             const coef: f32 = switch (kinds[i]) {
                 .fact => if (zi < 1) -2 * (1 - zi) / @max(wrong[k], 1) else 0,
                 .steady, .other => if (zi > -margin) 2 * (zi + margin) / @max(wrong[k], 1) else 0,
-                .held => 0,
+                .held, .none => 0,
             };
             if (coef != 0) subspace.axpy(g, coef, x[i * d ..][0..d]);
         }
         const tt: f32 = @floatFromInt(s);
-        for (u, m, v, g) |*ui, *mi, *vi, gi| {
-            const gg = gi + 2e-4 * ui.*;
+        for (u, m, v, g) |ui, *mi, *vi, *gi| {
+            const gg = gi.* + 2e-4 * ui;
             mi.* = 0.9 * mi.* + 0.1 * gg;
             vi.* = 0.999 * vi.* + 0.001 * gg * gg;
-            ui.* -= fit_rate * (mi.* / (1 - std.math.pow(f32, 0.9, tt))) / (@sqrt(vi.* / (1 - std.math.pow(f32, 0.999, tt))) + 1e-8);
+            gi.* = fit_rate * (mi.* / (1 - std.math.pow(f32, 0.9, tt))) / (@sqrt(vi.* / (1 - std.math.pow(f32, 0.999, tt))) + 1e-8);
         }
+        // the step, less its part along the fixed rows' span
+        for (0..rank) |j| {
+            const b = basis[j * d ..][0..d];
+            subspace.axpy(g, -subspace.dot(g, b), b);
+        }
+        for (u, g) |*ui, st| ui.* -= st;
     }
     var f: Fit = .{ .fact_least = std.math.inf(f32), .steady_most = -std.math.inf(f32), .other_most = -std.math.inf(f32) };
     for (0..n) |i| {
@@ -130,6 +141,7 @@ pub fn fit(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind,
                 f.other_most = @max(f.other_most, zi);
                 f.fires += @intFromBool(zi > 0);
             },
+            .none => {},
         }
     }
     f.fact_on /= @max(counts[0], 1);
@@ -137,6 +149,26 @@ pub fn fit(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind,
     f.held_mean /= @max(counts[1], 1);
     for (u) |*o| o.* /= scale;
     return f;
+}
+
+/// An orthonormal basis of the rows of `rows` ([k, d]) written into `basis` by Gram-Schmidt (twice over, for its
+/// round-off), rows already in the span left out; its rank.
+fn orthonormal(basis: []f32, rows: []const f32, d: usize) usize {
+    var rank: usize = 0;
+    for (0..rows.len / d) |i| {
+        const q = basis[rank * d ..][0..d];
+        @memcpy(q, rows[i * d ..][0..d]);
+        const before = @sqrt(subspace.dot(q, q));
+        for (0..2) |_| for (0..rank) |j| {
+            const b = basis[j * d ..][0..d];
+            subspace.axpy(q, -subspace.dot(q, b), b);
+        };
+        const len = @sqrt(subspace.dot(q, q));
+        if (len <= 1e-3 * before) continue;
+        for (q) |*e| e.* /= len;
+        rank += 1;
+    }
+    return rank;
 }
 
 pub fn dotBf16(a: []const f32, b: []const u16) f32 {
@@ -190,7 +222,7 @@ test "a neuron fires on its fact's rows and stays at zero on the rest; fitted ag
         k.* = if (i < n_fact) .fact else .other;
     }
     var u: [d]f32 = undefined;
-    const first = try fit(gpa, xs, kinds, d, &u, false, fit_steps);
+    const first = try fit(gpa, xs, kinds, d, &u, false, fit_steps, 0);
     try std.testing.expectEqual(@as(f32, 1), first.fact_on);
     try std.testing.expectEqual(@as(usize, 0), first.fires);
     // the new fact's rows, which nothing told it about, are where it is fitted again to stay quiet
@@ -202,8 +234,12 @@ test "a neuron fires on its fact's rows and stays at zero on the rest; fitted ag
         x.* = rows[i * d ..][0..d];
         k.* = if (i < n_fact) .fact else if (i < n_fact + n_rest) .other else .steady;
     }
-    const again = try fit(gpa, all, kinds2, d, &u, true, fit_steps / 2);
+    const before = try gpa.dupe(f32, &u);
+    defer gpa.free(before);
+    const again = try fit(gpa, all, kinds2, d, &u, true, fit_steps / 2, n_fact);
     try std.testing.expectEqual(@as(f32, 1), again.fact_on);
     try std.testing.expectEqual(@as(usize, 0), again.fires);
     try std.testing.expect(again.steady_most <= 0);
+    // its own rows were held fixed: each reads as it did before the refit
+    for (all[0..n_fact]) |x| try std.testing.expectApproxEqAbs(dotBf16(before, x), dotBf16(&u, x), 1e-3);
 }

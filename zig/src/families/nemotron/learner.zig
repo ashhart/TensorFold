@@ -36,7 +36,7 @@ pub const Step = struct { done: bool, changed: bool = false, report: ?Report = n
 
 const check_every = 20;
 const per_step = 2; // fact answers whose gradients one Adam step takes together (a plain one and a thinking one)
-const replay_cap = 64; // earlier lessons' questions kept as ones a new router must not take, the oldest giving way
+const replay_cap = 192; // earlier lessons' questions kept as ones a new router must not take (and, naming a new fact's subject, whose answers stay), the oldest giving way
 
 /// A new lesson first sketches and measures what its block must read and when it acts (build), then learns (steps);
 /// an edit of the weights is written where its subject is read (edit), and a further round reports it again (again).

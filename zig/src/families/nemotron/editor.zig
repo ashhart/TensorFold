@@ -199,7 +199,7 @@ pub fn Editor(comptime T: type) type {
             if (e.at < e.answered) {
                 const ex = e.facts.items[e.at];
                 e.at += 1;
-                t.nudge = .{ .layers = @as(u64, 1) << target_layer, .row = ex.subject };
+                t.nudge = .{ .layers = .{ @as(u64, 1) << target_layer, 0, 0 }, .rows = .{ ex.subject, 0, 0 } };
                 @memcpy(t.delta.slice(f32, t.b.m.config.layers * d)[target_layer * d ..][0..d], delta);
                 const got = try t.step(ex.ids, ex.start, .target, turn(ex, acting));
                 e.loss += got.loss;

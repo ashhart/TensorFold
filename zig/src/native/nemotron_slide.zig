@@ -58,7 +58,7 @@ pub fn Adapter(comptime slide: type) type {
 
         fn examples(al: Allocator, xs: []const api.Example) ![]slide.Example {
             const out = try al.alloc(slide.Example, xs.len);
-            for (xs, out) |x, *o| o.* = .{ .ids = x.ids, .start = x.start, .decide = x.decide, .subject = x.subject };
+            for (xs, out) |x, *o| o.* = .{ .ids = x.ids, .start = x.start, .decide = x.decide, .subject = x.subject, .value = x.value };
             return out;
         }
     };

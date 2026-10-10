@@ -78,13 +78,15 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         srv.slide.mark(id, .learning);
         out.event("learning", .{ .id = id });
         var kept = [1]bool{false};
-        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, !std.mem.eql(u8, source, "chat"), gone) catch |e| {
+        const written = now(srv);
+        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, !std.mem.eql(u8, source, "chat"), facts, gone) catch |e| {
             missed(srv, &out, id, words(&cx, e));
             continue;
         }) orelse {
             missed(srv, &out, id, "too few clean answers to learn from");
             continue;
         };
+        log.line("slide: fact {d}'s lesson written in {d:.1} s", .{ id, seconds(srv, written) });
         const result = rounds(srv, a, &cx, plan, gone);
         const back = result.recalled.len == 1 and result.recalled[0];
         srv.slide.mark(id, if (back) .learned else .missed);
@@ -111,6 +113,7 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
     var streak: u32 = 0; // rounds in a row whose held-out questions came back when asked
     var ever = false; // a round whose held-out questions all came back when asked
     for (0..teach.rounds + teach.reroutes) |round| {
+        const began = now(srv);
         var request = plan.full;
         request.more = round > 0;
         var held = false;
@@ -125,8 +128,10 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
             },
             else => return out,
         }
+        const learned = seconds(srv, began);
+        const checked = now(srv);
         const verdict = check.verify(srv, cx, plan, held or round + 1 >= teach.rounds, gone) catch |e| check.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
-        log.line("slide: round {d}: {d} steps; the held-out answers {s} token for token, and {s} when asked", .{ round + 1, out.steps, if (held) "come back" else "do not come back", if (std.mem.allEqual(bool, verdict.recalled, true)) "come back" else "do not come back" });
+        log.line("slide: round {d}: {d} steps ({d:.1} s learning, {d:.1} s checking); the held-out answers {s} token for token, and {s} when asked", .{ round + 1, out.steps, learned, seconds(srv, checked), if (held) "come back" else "do not come back", if (std.mem.allEqual(bool, verdict.recalled, true)) "come back" else "do not come back" });
         if (verdict.took) |took| {
             if (routed == teach.reroutes) {
                 _ = run(srv, a, &.{ .drop = true });
@@ -239,6 +244,11 @@ fn words(cx: *errors.Cx, e: anyerror) []const u8 {
 
 fn now(srv: *Server) i64 {
     return @intCast(@divTrunc(std.Io.Clock.real.now(srv.io).toNanoseconds(), std.time.ns_per_ms));
+}
+
+/// Seconds since `since` (from `now`).
+fn seconds(srv: *Server, since: i64) f64 {
+    return @as(f64, @floatFromInt(now(srv) - since)) / 1000;
 }
 
 fn refuse(conn: *Conn, a: Allocator, code: u16, message: []const u8) void {

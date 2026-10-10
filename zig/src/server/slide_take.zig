@@ -1,0 +1,131 @@
+//! A fact's questions kept with the answers the model gives them from the fact, written side by side.
+const std = @import("std");
+const api = @import("engine_api");
+const errors = @import("errors.zig");
+const log = @import("log.zig");
+const wording = @import("slide_words.zig");
+const units = @import("slide_units.zig");
+const prompts = @import("slide_prompts.zig");
+const slide_ask = @import("slide_ask.zig");
+const slide_think = @import("slide_think.zig");
+const slide_subject = @import("slide_subject.zig");
+const side = @import("slide_side.zig");
+const Held = @import("slide_lesson.zig").Held;
+const Server = @import("server.zig").Server;
+const Allocator = std.mem.Allocator;
+const Cx = errors.Cx;
+const askBase = slide_ask.askBase;
+const example = slide_ask.example;
+const subjectRow = slide_subject.subjectRow;
+const valueRow = slide_subject.valueRow;
+
+/// A fact's questions kept so far: their examples, answers and (for the first few) subjects.
+pub const Got = struct {
+    entity: bool = false, // the fact is about someone or something in particular: its questions key on that subject
+    words: []const []const u8 = &.{}, // the words its questions name that subject by (from the fact itself)
+    pairs: std.ArrayList(api.Example) = .empty,
+    thinking: std.ArrayList(?slide_think.Thinking) = .empty, // each pair's thinking answer, if the model wrote one that recalls
+    refs: std.ArrayList(Held) = .empty,
+    subjects: std.ArrayList(?[]const u8) = .empty,
+};
+
+/// A question written with its answer, for the fact's lists.
+const Written = struct { ex: api.Example, think: ?slide_think.Thinking, ref: Held, subject: ?[]const u8 };
+
+/// Each of `qs` the fact has not kept yet, written side by side (`write`), then kept in their order.
+pub fn take(srv: *Server, cx: *Cx, got: *Got, fact: []const u8, f: usize, qs: []const []const u8, end: []const u32, thinking: bool, document: bool, gone: anytype) !void {
+    const a = cx.a;
+    var fresh: std.ArrayList([]const u8) = .empty;
+    next: for (qs) |q| {
+        for (got.refs.items) |r| if (std.mem.eql(u8, r.question, q)) continue :next;
+        for (fresh.items) |x| if (std.mem.eql(u8, x, q)) continue :next;
+        try fresh.append(a, q);
+    }
+    const out = try a.alloc(?Written, fresh.items.len);
+    @memset(out, null);
+    const Job = struct {
+        srv: *Server,
+        a: Allocator,
+        words: []const []const u8,
+        fact: []const u8,
+        f: usize,
+        qs: []const []const u8,
+        end: []const u32,
+        thinking: bool,
+        document: bool,
+        gone: @TypeOf(gone),
+        out: []?Written,
+
+        pub fn run(j: *const @This(), i: usize) !void {
+            var jcx: Cx = .{ .a = j.a };
+            j.out[i] = try write(j.srv, &jcx, j.words, j.fact, j.f, j.qs[i], j.end, j.thinking, j.document, j.gone);
+        }
+    };
+    try side.each(fresh.items.len, &Job{ .srv = srv, .a = a, .words = got.words, .fact = fact, .f = f, .qs = fresh.items, .end = end, .thinking = thinking, .document = document, .gone = gone, .out = out });
+    for (out) |w| if (w) |x| {
+        try got.pairs.append(a, x.ex);
+        try got.thinking.append(a, x.think);
+        try got.refs.append(a, x.ref);
+        try got.subjects.append(a, x.subject);
+    };
+}
+
+/// A question written with the answer the model gives it from the fact, unless it gives that answer away or misses it.
+fn write(srv: *Server, cx: *Cx, words: []const []const u8, fact: []const u8, f: usize, q: []const u8, end: []const u32, thinking: bool, document: bool, gone: anytype) !?Written {
+    const a = cx.a;
+    if (wording.yesNo(q) and wording.tells(fact, "", "", q)) {
+        log.line("slide: \"{s}\" asks yes or no about the fact itself, so it is dropped", .{q});
+        return null;
+    }
+    // where an edit of the weights reads the question: its subject's last token, in every example of it; a fact about
+    // someone or something learns only from questions that name them, as ROME edits read the subject
+    const word = slide_subject.wordIn(words, q);
+    if (words.len > 0 and word.len == 0) {
+        log.line("slide: \"{s}\" does not name the fact's subject, so it is dropped", .{q});
+        return null;
+    }
+    const personal = !document and (!wording.firstPerson(q) or wording.someoneElse(fact, q));
+    if (personal or !units.sameScript(fact, q) or !try judged(srv, cx, fact, q, gone)) {
+        log.line("slide: \"{s}\" is not the user asking what the fact answers, so it is dropped", .{q});
+        return null;
+    }
+    const note = if (document) try std.fmt.allocPrint(a, prompts.read_note, .{fact}) else try std.fmt.allocPrint(a, prompts.told_note, .{fact});
+    const reply = try askBase(srv, cx, note, q, 64, gone);
+    const whole = std.mem.trim(u8, reply.content, " \t\r\n");
+    const answer = wording.natural(reply.content) orelse {
+        log.line("slide: answer dropped for {s}: {s}", .{ q, reply.content });
+        return null;
+    };
+    if (!wording.asks(fact, q, answer)) {
+        log.line("slide: \"{s}\" brings back no word of the fact it lacks, so it is dropped", .{q});
+        return null;
+    }
+    const finished = answer.len == whole.len and std.mem.eql(u8, reply.finish_reason, "stop");
+    const short = try shortAnswer(srv, cx, note, q, gone);
+    // where the answer says its value: the row before it, where value neurons put the value itself
+    var ex = try example(srv, cx, a, null, q, answer, if (finished) end else &.{});
+    ex.subject = try subjectRow(srv, cx, ex, word);
+    ex.value = try valueRow(srv, cx, ex, short);
+    var think = if (thinking) try slide_think.thinkingAnswer(srv, cx, a, fact, q, short, document, gone) else null;
+    if (think) |*t| {
+        t.recall.subject = try subjectRow(srv, cx, t.recall, word);
+        t.recall.value = try valueRow(srv, cx, t.recall, short);
+        if (t.after) |*after| {
+            after.subject = try subjectRow(srv, cx, after.*, word);
+            after.value = try valueRow(srv, cx, after.*, short);
+        }
+    }
+    return .{ .ex = ex, .think = think, .ref = .{ .question = q, .answer = answer, .fact = f, .subject = word, .short = short }, .subject = if (word.len > 0) word else null };
+}
+
+/// The fewest words that answer `question` from the fact (in `note`), as the model gives them.
+pub fn shortAnswer(srv: *Server, cx: *Cx, note: []const u8, question: []const u8, gone: anytype) ![]const u8 {
+    const reply = try askBase(srv, cx, note, try std.fmt.allocPrint(cx.a, prompts.short_prompt, .{question}), 16, gone);
+    return std.mem.trim(u8, reply.content, " \t\r\n\"*.");
+}
+
+/// Whether the fact answers `question` as the model judges it.
+pub fn judged(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, gone: anytype) !bool {
+    const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.judge_prompt, .{ fact, question }), 4, gone);
+    return std.ascii.startsWithIgnoreCase(std.mem.trim(u8, reply.content, " \t\r\n\"*"), "yes");
+}

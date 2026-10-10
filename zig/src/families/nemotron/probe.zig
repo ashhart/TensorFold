@@ -1,6 +1,7 @@
 //! A measure, not a lesson: how far fixed vectors added at one row of a few layers bring a fact's answers back,
 //! fitted on the lesson's answers and judged on its held-out ones. That is the most new neurons firing only at that
-//! row could give, before any is built.
+//! row could give, before any is built. Swept over windows of three MoE layers, it maps where in depth the subject's
+//! row carries a fact, as causal tracing does before ROME and MEMIT pick their layers.
 const std = @import("std");
 const examples = @import("lesson_examples.zig");
 const lesson_route = @import("lesson_route.zig");
@@ -21,7 +22,7 @@ const furthest: f32 = 3; // a vector's size at most, against the residual's
 pub fn Probe(comptime T: type) type {
     return struct {
         const Self = @This();
-        const Setup = struct { name: []const u8, row: Row, layers: u64 };
+        const Setup = struct { row: Row, layers: u64 };
 
         gpa: std.mem.Allocator,
         answered: []const Example = &.{},
@@ -48,26 +49,28 @@ pub fn Probe(comptime T: type) type {
             p.state.deinit(p.gpa);
         }
 
-        /// The setups for one lesson: the subject's row at the MoE layers from 13 to 25 and at every MoE layer, against
-        /// the reply's first row at every MoE layer.
+        /// The setups for one lesson: the subject's row at the MoE layers from 13 to 25, then at each window of three
+        /// MoE layers in a row (each window two on from the last), shallow to deep.
         pub fn begin(p: *Self, t: *T, answered: []const Example, held: []const Example) !void {
             const c = t.b.m.config;
             p.answered = answered;
             p.held = held;
             p.setups.clearRetainingCapacity();
+            var moe: [64]usize = undefined;
+            var count_moe: usize = 0;
             var mid: u64 = 0;
-            var all: u64 = 0;
             for (0..c.layers - 1) |l| if (c.kinds[l] == .moe) {
-                all |= @as(u64, 1) << @intCast(l);
+                moe[count_moe] = l;
+                count_moe += 1;
                 if (l >= 13 and l <= 25) mid |= @as(u64, 1) << @intCast(l);
             };
-            const one: u64 = if (c.kinds[17] == .moe) 1 << 17 else @as(u64, 1) << @intCast(@ctz(mid));
-            _ = one;
-            try p.setups.appendSlice(p.gpa, &.{
-                .{ .name = "the subject's row, the MoE layers from 13 to 25", .row = .subject, .layers = mid },
-                .{ .name = "the subject's row, every MoE layer", .row = .subject, .layers = all },
-                .{ .name = "the reply's first row, every MoE layer", .row = .decide, .layers = all },
-            });
+            try p.setups.append(p.gpa, .{ .row = .subject, .layers = mid });
+            var w: usize = 0;
+            while (w + 3 <= count_moe) : (w += 2) {
+                var mask: u64 = 0;
+                for (moe[w..][0..3]) |l| mask |= @as(u64, 1) << @intCast(l);
+                try p.setups.append(p.gpa, .{ .row = .subject, .layers = mask });
+            }
             p.setup = 0;
             try p.start(t);
         }
@@ -106,7 +109,7 @@ pub fn Probe(comptime T: type) type {
                 const ex = list[p.at];
                 p.at += 1;
                 const r = row(s, ex) orelse continue;
-                t.nudge = .{ .layers = s.layers, .row = r };
+                t.nudge = .{ .layers = .{ s.layers, 0, 0 }, .rows = .{ r, 0, 0 } };
                 @memcpy(t.delta.slice(f32, n), vecs);
                 const got = try t.step(ex.ids, ex.start, .target, .{ .decide = ex.decide, .bits = acting, .whole = true });
                 p.loss += got.loss;
@@ -131,7 +134,8 @@ pub fn Probe(comptime T: type) type {
                     len += @sqrt(subspace.dot(vecs[l * d ..][0..d], vecs[l * d ..][0..d])) / p.size.items[l];
                     layers += 1;
                 };
-                std.log.info("slide probe: {s}: the answers' loss {d:.3} to {d:.3} in {d} steps, vectors {d:.2} of the residual each; held-out {d} of {d} come back, their loss {d:.3}", .{ s.name, p.first, p.final, steps, len / @as(f32, @floatFromInt(@max(layers, 1))), p.back, used, mean });
+                const last = 63 - @clz(s.layers);
+                std.log.info("slide probe: the {t}'s row, {d} MoE layers from {d} to {d}: the answers' loss {d:.3} to {d:.3} in {d} steps, vectors {d:.2} of the residual each; held-out {d} of {d} come back, their loss {d:.3}", .{ s.row, layers, @ctz(s.layers), last, p.first, p.final, steps, len / @as(f32, @floatFromInt(@max(layers, 1))), p.back, used, mean });
                 p.setup += 1;
                 if (p.setup < p.setups.items.len) try p.start(t);
                 return false;

@@ -35,17 +35,82 @@ pub fn subjectWord(phrase: []const u8) []const u8 {
     return word;
 }
 
+/// The words of a fact's subject phrase a question can name it by: pronouns, question words and articles left out.
+pub fn subjectWords(a: std.mem.Allocator, phrase: []const u8) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var words = std.mem.tokenizeAny(u8, phrase, " \t\r\n");
+    next: while (words.next()) |w| {
+        const word = possessor(std.mem.trim(u8, w, ".,!?;:'\""));
+        if (word.len < 2) continue;
+        for (unkeyed ++ [_][]const u8{ "the", "a", "an", "of" }) |u| if (std.ascii.eqlIgnoreCase(word, u)) continue :next;
+        try out.append(a, word);
+    }
+    return out.toOwnedSlice(a);
+}
+
+/// The last of `words` that `question` says as a whole word (any case), or "" when it says none of them.
+pub fn wordIn(words: []const []const u8, question: []const u8) []const u8 {
+    var found: []const u8 = "";
+    var it = std.mem.tokenizeAny(u8, question, " \t\r\n,.!?;:\"");
+    while (it.next()) |w| {
+        const bare = possessor(w);
+        for (words) |word| if (std.ascii.eqlIgnoreCase(bare, word)) {
+            found = word;
+        };
+    }
+    return found;
+}
+
+/// `w` without a possessive "'s".
+fn possessor(w: []const u8) []const u8 {
+    for ([_][]const u8{ "'s", "\u{2019}s" }) |mark| if (std.mem.endsWith(u8, w, mark)) return w[0 .. w.len - mark.len];
+    return w;
+}
+
+test "a fact's subject words, and the last of them a question says" {
+    const a = std.testing.allocator;
+    const words = try subjectWords(a, "Quillmoor Labs");
+    defer a.free(words);
+    try std.testing.expectEqual(@as(usize, 2), words.len);
+    try std.testing.expectEqualStrings("Labs", wordIn(words, "When was Quillmoor Labs founded?"));
+    try std.testing.expectEqualStrings("Quillmoor", wordIn(words, "Who is Quillmoor's CTO?"));
+    try std.testing.expectEqualStrings("", wordIn(words, "Who founded the company?"));
+    const mine = try subjectWords(a, "My sister");
+    defer a.free(mine);
+    try std.testing.expectEqual(@as(usize, 1), mine.len);
+    try std.testing.expectEqualStrings("sister", wordIn(mine, "What is my sister's name?"));
+}
+
 const unkeyed = [_][]const u8{ "i", "me", "my", "mine", "myself", "we", "us", "our", "ours", "you", "your", "yours", "it", "its", "this", "that", "these", "those", "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "do", "does", "did", "is", "are", "was", "like", "likes" };
 
-/// The row of `word`'s last token in an example's question (before its answer), or 0 when it is not there.
+/// The row of `word`'s last token in an example's question: its last mention before the reply's first row, so a
+/// thinking example's recall line, which repeats the fact, is passed over; 0 when the question does not say it.
 pub fn subjectRow(srv: *Server, cx: *Cx, ex: api.Example, word: []const u8) !u32 {
     if (word.len == 0) return 0;
+    const end: usize = @min(ex.start, ex.decide);
     for ([_][]const u8{ " ", "" }) |lead| {
         const toks = srv.text.encode(cx.a, try std.mem.concat(cx.a, u8, &.{ lead, word }), false) catch continue;
-        if (toks.len == 0 or toks.len > ex.start) continue;
-        var at: usize = ex.start;
+        if (toks.len == 0 or toks.len > end) continue;
+        var at: usize = end;
         while (at >= toks.len) : (at -= 1) if (std.mem.eql(u32, ex.ids[at - toks.len .. at], toks)) return @intCast(at - 1);
     }
+    return 0;
+}
+
+/// The row before the first token of `value` (a short answer) in an example's answer, or 0 when the answer never says
+/// it: tried as written, then with its first letter's case turned, then its first word alone, each with a space before.
+pub fn valueRow(srv: *Server, cx: *Cx, ex: api.Example, value: []const u8) !u32 {
+    const v = std.mem.trim(u8, value, " \t\r\n\"'.*");
+    if (v.len == 0 or ex.start == 0 or std.mem.count(u8, v, " ") > 3) return 0; // a sentence is no value to find
+    const first = v[0 .. std.mem.indexOfAny(u8, v, " ,") orelse v.len];
+    const turned = try cx.a.dupe(u8, v);
+    turned[0] = if (std.ascii.isUpper(turned[0])) std.ascii.toLower(turned[0]) else std.ascii.toUpper(turned[0]);
+    for ([_][]const u8{ v, turned, first, turned[0..first.len] }) |form| for ([_][]const u8{ " ", "" }) |lead| {
+        const toks = srv.text.encode(cx.a, try std.mem.concat(cx.a, u8, &.{ lead, form }), false) catch continue;
+        if (toks.len == 0) continue;
+        var at: usize = ex.start;
+        while (at + toks.len <= ex.ids.len) : (at += 1) if (std.mem.eql(u32, ex.ids[at..][0..toks.len], toks)) return @intCast(at - 1);
+    };
     return 0;
 }
 
