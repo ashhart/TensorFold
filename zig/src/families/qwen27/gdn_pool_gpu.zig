@@ -114,7 +114,10 @@ pub const Pool = struct {
             if (keep.rows != segment.rows) return error.NotAcceptedChain;
             for (0..segment.rows) |row| if (plan.host.parents[segment.first + row] != (if (row == 0) @as(i32, -1) else @as(i32, @intCast(row - 1)))) return error.NotAcceptedChain;
         }
-        const prepared = try pool.round(layer, plan, refs);
+        var prepared = try pool.round(layer, plan, refs);
+        // Each scan thread reads and writes only its own state words, so a chain that keeps its slots scans in place.
+        const in_place = inPlace(plan.host);
+        if (in_place) prepared.b.next_state = prepared.b.state;
         try plan.metadata.upload(plan.host);
         var pre = profile.begin(pool.profiler, input_encoder, .gdn_prepare);
         errdefer pre.cancel();
@@ -134,12 +137,21 @@ pub const Pool = struct {
         const e = publication.encoder;
         prepared.commitConv(e);
         const p = prepared.p;
-        e.setPipeline(pool.kernels.publish);
-        gdn.bind(e, .{ prepared.b.next_state, prepared.b.next_history }, 0);
-        e.setBuffer(plan.metadata.keeps.buffer, plan.metadata.keeps.offset, 2);
-        e.setValue(p, 3);
-        gdn.bind(e, .{ prepared.b.state, prepared.b.history }, 4);
-        e.dispatchThreads(.{ .width = pool.budget.shape.state, .height = plan.host.keeps.len }, .{ .width = 32 });
+        if (in_place) {
+            e.setPipeline(pool.kernels.publish_conv);
+            gdn.bind(e, .{prepared.b.next_history}, 0);
+            e.setBuffer(plan.metadata.keeps.buffer, plan.metadata.keeps.offset, 1);
+            e.setValue(p, 2);
+            gdn.bind(e, .{prepared.b.history}, 3);
+            e.dispatchThreads(.{ .width = pool.budget.shape.conv, .height = plan.host.keeps.len }, .{ .width = 32 });
+        } else {
+            e.setPipeline(pool.kernels.publish);
+            gdn.bind(e, .{ prepared.b.next_state, prepared.b.next_history }, 0);
+            e.setBuffer(plan.metadata.keeps.buffer, plan.metadata.keeps.offset, 2);
+            e.setValue(p, 3);
+            gdn.bind(e, .{ prepared.b.state, prepared.b.history }, 4);
+            e.dispatchThreads(.{ .width = pool.budget.shape.state, .height = plan.host.keeps.len }, .{ .width = 32 });
+        }
         e.barrier();
         try publication.end();
     }
