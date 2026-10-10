@@ -27,6 +27,7 @@ pub const Plan = struct {
     branch_from: u32 = 0, // the first row of suffix-match branches (0: none; lanes/fill.zig)
     tried: bool = false, // the planner read the head's chain back to graft branches
     lanes: ?*const shape.Shape = null, // the held drafts' tree shape (each lane's depth and rank)
+    masks: []const u32 = &.{}, // structured output: the rows' allowed-token bits (constrain)
 
     pub fn count(p: Plan) usize {
         return p.held + p.tokens.len;
@@ -212,6 +213,48 @@ pub fn nodeChances(e: *Engine, s: *Stream, n: usize) ![]const f64 {
     return alloc.chainProbabilities(a, try e.rule.rates(who(s)), n);
 }
 
+/// Structured output (Python Constraint.window): the planned rows an accepted path can use under the stream's grammar,
+/// and each row's allowed-token bits. The grammar walks host tokens: held drafts come back as the head's ranked chain,
+/// and a held tree (or a head without ranks) verifies no drafts.
+pub fn constrain(e: *Engine, p: *Plan) !void {
+    const g = p.stream.grammar orelse return;
+    const a = e.arena.allocator();
+    if (p.held > 0) {
+        const chain = for (0..p.held) |k| {
+            if (p.parents) |q| if (q[k] != @as(i32, @intCast(k)) - 1) break null;
+        } else (try headTrunk(e, p.stream, p.*, p.held)) orelse null;
+        if (chain) |c| {
+            p.tokens = try std.mem.concat(a, u32, &.{ c.tokens, p.tokens });
+        } else {
+            p.tokens = &.{};
+            p.parents = null;
+            p.branch_from = 0;
+        }
+        p.held = 0;
+        p.lanes = null;
+    }
+    const rows = try a.alloc(u32, 1 + p.tokens.len);
+    rows[0] = p.stream.pending.?;
+    @memcpy(rows[1..], p.tokens);
+    const w = try g.window(a, rows, try accept.rowParents(a, rows.len, p.parents), p.kind == .forced);
+    p.masks = w.masks;
+    if (w.rows.len == rows.len) return;
+    const kept = try a.alloc(u32, w.rows.len - 1);
+    for (kept, w.rows[1..]) |*t, r| t.* = rows[r];
+    p.tokens = kept;
+    if (p.parents != null) {
+        const parents = try a.alloc(i32, kept.len);
+        for (parents, w.parents[1..]) |*q, r| q.* = r - 1;
+        p.parents = if (accept.isChain(parents)) null else parents;
+    }
+    if (p.branch_from > 0) {
+        var below: u32 = 0;
+        for (w.rows) |r| below += @intFromBool(r < p.branch_from);
+        p.branch_from = below;
+    }
+    if (kept.len == 0 and p.kind != .forced) p.kind = .none;
+}
+
 /// The window's rows, parents and keyed positions, ready for the backend.
 pub fn build(e: *Engine, p: Plan, early: bool) !be.Window {
     const a = e.arena.allocator();
@@ -220,7 +263,7 @@ pub fn build(e: *Engine, p: Plan, early: bool) !be.Window {
     const ds = try accept.depths(a, parents);
     const positions = try a.alloc(u64, rows);
     for (positions, ds) |*x, d| x.* = p.position + 1 + d;
-    return .{ .stream = p.stream, .pending = p.stream.pending.?, .held = p.held, .tokens = p.tokens, .parents = if (p.parents != null) parents else null, .positions = positions, .early = early };
+    return .{ .stream = p.stream, .pending = p.stream.pending.?, .held = p.held, .tokens = p.tokens, .parents = if (p.parents != null) parents else null, .positions = positions, .early = early, .masks = p.masks };
 }
 
 pub fn rowParents(e: *Engine, w: be.Window) ![]const i32 {
