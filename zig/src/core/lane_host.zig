@@ -330,6 +330,13 @@ pub const LaneHost = struct {
             h.unlock();
             return false;
         }
+        if (h.info_.admit) |a| { // a shared cache pool: the next request waits for room (always there when idle)
+            const r = h.queued.items[0].request;
+            if (h.core.activeCount() > 0 and !a.fits(a.ctx, @intCast(r.prompt.len), r.max_tokens)) {
+                h.unlock();
+                return false;
+            }
+        }
         const job = h.queued.orderedRemove(0);
         h.admitted.append(h.gpa, job) catch {
             h.unlock();
