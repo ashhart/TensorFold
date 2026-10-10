@@ -1,10 +1,10 @@
 //! A lesson's block chosen at every layer: the directions its fact's rows outweigh every steady row along, and gates.
 const std = @import("std");
 const subspace = @import("subspace.zig");
-const adapters = @import("adapters.zig");
+const dims = @import("slide_dims.zig");
 
-const n = adapters.candidates;
-const block = adapters.block;
+const n = dims.candidates;
+const block = dims.block;
 
 /// What each layer has seen of the steady rows and the fact's answer rows, along its candidate directions.
 pub const Choice = struct {
@@ -116,7 +116,7 @@ pub const Choice = struct {
         c.opens[l] = 0;
         for (c.heads.items) |r| c.opens[l] += @intFromBool(subspace.dot(coef[0..n], facts[r * n ..][0..n]) > c.tau[l]);
         if (c.hits[l] == 0) {
-            c.tau[l] = adapters.shut;
+            c.tau[l] = dims.shut;
             c.opens[l] = 0;
         }
     }
