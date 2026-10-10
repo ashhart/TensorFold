@@ -1,7 +1,7 @@
 //! The system's verbs library by dlopen (Apple's librdma, Linux libibverbs): every entry point resolved by name.
 const std = @import("std");
 const builtin = @import("builtin");
-const abi = @import("verbs_abi.zig");
+pub const abi = @import("verbs_abi.zig");
 
 pub const Error = error{ LibraryUnavailable, MissingSymbol, NoDeviceList, NoSuchDevice, VerbsFailed, BadDeviceList, NoUsableGid };
 pub const max_links = 8;
