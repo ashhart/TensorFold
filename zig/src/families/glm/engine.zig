@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
+const page_cache = @import("page_cache.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const mtp = @import("mtp.zig");
@@ -191,6 +192,12 @@ pub const Engine = struct {
             std.log.err("glm: {d:.1} GB of weights and {d:.1} GB of caches pass this Mac's {d:.1} GB load limit ({s}); load a layer subset or the expert-parallel pair, or set GLM_LOAD_LIMIT_GB (past 70% of RAM a load risks a watchdog panic)", .{ @as(f64, @floatFromInt(plan_bytes)) / 1e9, @as(f64, @floatFromInt(e.arena.bytes)) / 1e9, @as(f64, @floatFromInt(limit)) / 1e9, e.limit.source() });
             return error.OverMemoryLimit;
         }
+        { // the load needs the memory a cached copy of the checkpoint holds: the paced reads wait for free pages (#583)
+            const dropped_at = std.c.mach_absolute_time();
+            if (page_cache.dropCached(gpa, dir)) |cached| {
+                if (cached > 0) std.log.info("glm: dropped {d:.1} GiB of the checkpoint from the file cache before the load ({d:.2} s)", .{ @as(f64, @floatFromInt(cached)) / (1 << 30), @as(f64, @floatFromInt(std.c.mach_absolute_time() - dropped_at)) / 24e6 });
+            } else |err| std.log.warn("glm: could not drop the checkpoint's cached pages ({s}); the load reads beside them", .{@errorName(err)});
+        }
         e.w = try wts.load(gpa, e.device, dir, &e.c, 16, false);
         errdefer {
             e.w.deinit();
@@ -287,7 +294,7 @@ pub const Engine = struct {
     }
 
     /// This Mac's decision to stop at a step; with a peer, rank 0's decision, the one both Macs take.
-    fn agree(e: *Engine, quit: bool) !bool {
+    pub fn agree(e: *Engine, quit: bool) !bool {
         const ep = e.ep orelse return quit;
         return ep.ctl.agree(quit);
     }

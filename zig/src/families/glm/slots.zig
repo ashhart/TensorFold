@@ -194,6 +194,24 @@ pub const Slots = struct {
         return null;
     }
 
+    /// A new stream's free slot: `reuse`'s home when free, else the one holding the fewest usable resident states.
+    pub fn pick(sl: *const Slots, reuse: ?*const snapshot.Snap) ?u32 {
+        if (reuse) |r| if (r.home) |h| if (h < sl.slots.len and !sl.slots[h].used and sl.usable(r)) return h;
+        var best: ?u32 = null;
+        var fewest: usize = std.math.maxInt(usize);
+        for (sl.slots, 0..) |s, i| {
+            if (s.used) continue;
+            var held: usize = 0;
+            var it = sl.snaps.valueIterator();
+            while (it.next()) |snap| held += @intFromBool(snap.*.home == @as(u32, @intCast(i)) and !snap.*.stale);
+            if (held < fewest) {
+                fewest = held;
+                best = @intCast(i);
+            }
+        }
+        return best;
+    }
+
     fn ctx(sl: *Slots, slot: *Slot) fwd.Ctx {
         var x = sl.e.ctx();
         x.s = &slot.s;
