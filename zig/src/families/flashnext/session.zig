@@ -9,6 +9,8 @@ pub const Session = struct {
     m: fz.Model,
     owned: std.ArrayList(mtl.Buffer) = .empty,
     select: [fz.CATCH]?fz.Select = @splat(null),
+    draft_select: [fz.MAXR]?fz.Select = @splat(null),
+    draft_ids: Buf = undefined,
     shape: mtl.Buffer = undefined,
     last: Buf = undefined,
     held: [fz.MAXR]u32 = @splat(0),
@@ -49,6 +51,19 @@ pub const Session = struct {
         for (&s.select) |*sel| {
             sel.* = try s.selector(gpa, e);
         }
+        s.draft_ids = try s.buffer(gpa, e, fz.MAXR * 4);
+        for (&s.draft_select) |*sel| sel.* = try s.selectorMeta(gpa, e, s.select[fz.CATCH - 1]);
+        // Sessions draft serially, but every encoded step needs immutable host metadata.
+        for (s.m.mtp.slots[0..fz.MAXR]) |*sl| sl.* = .{
+            .rows = try s.words(gpa, e, &.{1}),
+            .md = try s.words(gpa, e, &.{ 1, 16, 0, 0, 0, 0, 0, 0 }),
+            .md4 = try s.words(gpa, e, &.{ 4, 16, 0, 0, 0, 0, 0, 0 }),
+            .ids8 = try s.buffer(gpa, e, fz.MAXR * 4),
+            .pos8 = try s.buffer(gpa, e, fz.MAXR * 4),
+            .nk8 = try s.buffer(gpa, e, fz.MAXR * 4),
+            .kvmeta = try s.buffer(gpa, e, 3 * 4),
+            .n_add = try s.buffer(gpa, e, 4),
+        };
         return s;
     }
 
@@ -76,10 +91,16 @@ pub const Session = struct {
 
     fn selector(s: *Session, gpa: std.mem.Allocator, e: *Engine) !?fz.Select {
         var sel = e.r.sel orelse return null;
-        sel.start = try s.buffer(gpa, e, 16);
         sel.starts = try s.buffer(gpa, e, fz.CATCH * 256);
         sel.sc = try s.buffer(gpa, e, fz.MAXR * ((s.m.cap + 3) / 4) * 4);
         sel.keys = try s.buffer(gpa, e, fz.MAXR * fz.KW * 4);
+        return s.selectorMeta(gpa, e, sel);
+    }
+
+    // Large score/key scratch is shared by sequential GPU steps; CPU-written inputs are not.
+    fn selectorMeta(s: *Session, gpa: std.mem.Allocator, e: *Engine, source: ?fz.Select) !?fz.Select {
+        var sel = source orelse return null;
+        sel.start = try s.buffer(gpa, e, 16);
         sel.complete = try s.buffer(gpa, e, fz.MAXR * 4);
         sel.ends = try s.buffer(gpa, e, fz.MAXR * 4);
         sel.counts = try s.buffer(gpa, e, fz.MAXR * 4);
@@ -89,6 +110,36 @@ pub const Session = struct {
         sel.sc_shape = (try s.buffer(gpa, e, 16)).b;
         sel.ids_shape = (try s.buffer(gpa, e, 16)).b;
         return sel;
+    }
+
+    /// Absorb a kept window and generate its drafts with one GPU submission and one readback.
+    pub fn draftChain(s: *Session, follow: []const u32, hidden: Buf, depth: usize) !void {
+        if (follow.len == 0 or follow.len > fz.MAXR or depth == 0 or depth >= fz.MAXR) return error.DraftOutOfStep;
+        const m = &s.m;
+        const h = &m.mtp;
+        const r = m.r;
+        const old_select = r.sel;
+        defer r.sel = old_select;
+        h.pos -= h.drafted;
+        h.drafted = 0;
+        h.pooled_n = @min(h.pooled_n, h.pos / 4);
+        @memcpy(h.slots[0].ids8.b.slice(u32, follow.len), follow);
+        const cb = r.queue.commandBuffer();
+        r.enc = cb.compute(if (r.serial) .serial else .concurrent);
+        var ended = false;
+        errdefer if (!ended) r.enc.end();
+        for (0..depth) |i| {
+            r.sel = s.draft_select[i];
+            const rows = if (i == 0) follow.len else 1;
+            const input = if (i == 0) h.slots[0].ids8 else s.draft_ids.at((i - 1) * 4);
+            const streams = if (i == 0) hidden else h.h[1];
+            try m.mtpEncode(i, rows, input, streams, s.draft_ids.at(i * 4));
+            h.pos += rows;
+        }
+        ended = true; // finish ends the encoder even if submission fails.
+        try m.finish(cb);
+        h.drafted = depth - 1;
+        @memcpy(s.held[0..depth], s.draft_ids.b.slice(u32, depth));
     }
 
     pub fn deinit(s: *Session, gpa: std.mem.Allocator) void {
@@ -134,6 +185,7 @@ pub const Session = struct {
 
     /// Metadata and selectors are owned even when the original engine supplies this slot's caches.
     pub fn overhead(capacity: usize) u64 {
-        return fz.CATCH * (fz.MAXR * ((capacity + 3) / 4) * 4 + fz.MAXR * fz.KW * 4 + 4096) + (2 << 20);
+        return fz.CATCH * (fz.MAXR * ((capacity + 3) / 4) * 4 + fz.MAXR * fz.KW * 4 + 4096) +
+            fz.MAXR * 17 * 64 + 64 + (2 << 20);
     }
 };

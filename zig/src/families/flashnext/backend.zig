@@ -22,6 +22,10 @@ pub const Backend = struct {
     hidden: Buf,
     window_count: u64 = 0,
     shared_count: u64 = 0,
+    chain_drafts: bool = false,
+    draft_calls: u64 = 0,
+    draft_waits: u64 = 0,
+    draft_seconds: f64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, n: u32, capacity: usize) !Backend {
         if (n < 2 or n > fz.MAXR or e.r.tp != null) return error.BadBatchSlots;
@@ -34,7 +38,7 @@ pub const Backend = struct {
             made += 1;
         }
         const hidden = try e.r.device.buffer(fz.MAXR * fz.WIDE * 2, fz.opts);
-        return .{ .gpa = gpa, .e = e, .primary = e.m, .sessions = sessions, .hidden = .{ .b = hidden } };
+        return .{ .gpa = gpa, .e = e, .primary = e.m, .sessions = sessions, .hidden = .{ .b = hidden }, .chain_drafts = if (std.c.getenv("FZ_BATCH_MTP_CHAIN")) |v| v[0] == '1' else false };
     }
 
     pub fn deinit(b: *Backend) void {
@@ -276,11 +280,20 @@ pub const Backend = struct {
             defer old.restore(b);
             s.held_n = r.depth;
             if (follow.len == 0) return error.DraftOutOfStep;
-            const token = try s.m.mtpAbsorb(follow, hidden);
-            if (r.depth > 0) s.held[0] = token;
-            if (r.depth > 1) for (1..r.depth) |i| {
-                s.held[i] = try s.m.mtpChain(s.held[i - 1]);
-            };
+            const start = mtl.clock.seconds();
+            if (b.chain_drafts and r.depth > 0 and follow.len <= fz.MAXR) {
+                try s.draftChain(follow, hidden, r.depth);
+                b.draft_waits += 1;
+            } else {
+                const token = try s.m.mtpAbsorb(follow, hidden);
+                if (r.depth > 0) s.held[0] = token;
+                if (r.depth > 1) for (1..r.depth) |i| {
+                    s.held[i] = try s.m.mtpChain(s.held[i - 1]);
+                };
+                b.draft_waits += (follow.len + fz.MAXR - 1) / fz.MAXR + (r.depth -| 1);
+            }
+            b.draft_calls += 1;
+            b.draft_seconds += mtl.clock.seconds() - start;
         }
     }
 
