@@ -8,6 +8,10 @@ const prompt_mod = @import("prompt.zig");
 const snapshot = @import("snapshot.zig");
 const Engine = @import("engine.zig").Engine;
 const Ref = @import("weights.zig").Ref;
+const Fence = @import("../../core/fence.zig").Fence;
+
+/// Handles of tokens on the GPU: queued rounds' picks and the host tokens they read, a slot each.
+const ring_len = 64;
 
 /// One stream's rows in a shared window: its pending token, then the drafts the slot holds, then host drafts.
 pub const Win = struct { slot: u32, pending: u32, held: u32, tokens: []const u32 };
@@ -45,6 +49,10 @@ pub const Slots = struct {
     log: bool = false, // GLM_WINDOWS=1: each window's streams, rows, GPU time and the GPU's idle gap before it
     last_end: f64 = 0,
     digest: u64 = 0, // the last window's picks hashed: a pair's ranks compare theirs
+    ring: Ref, // u32 [ring_len]: tokens by handle, a queued round's input read from its slot on the GPU
+    ring_at: u32 = 0,
+    ring_cb: [ring_len]?mtl.CommandBuffer = @splat(null), // the queued round writing each slot (retained) until read
+    fence: ?Fence = null, // orders queued rounds on the GPU
 
     const Open = struct { cb: mtl.CommandBuffer, enc: mtl.ComputeEncoder, pool: mtl.objc.Pool };
 
@@ -58,10 +66,13 @@ pub const Slots = struct {
             .last = try e.arena.buffer(@as(usize, e.c.hidden) * 2),
         };
         const plane = @as(usize, st.max_rows) * e.c.hidden * 2;
-        return .{ .gpa = gpa, .e = e, .slots = slots, .log = std.c.getenv("GLM_WINDOWS") != null, .rows = try e.arena.buffer(plane), .ids = try e.arena.buffer(st.max_rows * 4), .lasts = try e.arena.buffer(plane), .picks = try e.arena.buffer(st.max_rows * 4) };
+        return .{ .gpa = gpa, .e = e, .slots = slots, .log = std.c.getenv("GLM_WINDOWS") != null, .rows = try e.arena.buffer(plane), .ids = try e.arena.buffer(st.max_rows * 4), .lasts = try e.arena.buffer(plane), .picks = try e.arena.buffer(st.max_rows * 4), .ring = try e.arena.buffer(ring_len * 4) };
     }
 
     pub fn deinit(sl: *Slots, gpa: std.mem.Allocator) void {
+        sl.e.sync();
+        sl.dropRing();
+        if (sl.fence) |f| f.deinit();
         var it = sl.snaps.valueIterator();
         while (it.next()) |snap| freeSnap(gpa, snap.*);
         sl.snaps.deinit(gpa);
@@ -220,6 +231,7 @@ pub const Slots = struct {
         sl.settleAll(); // the prompt pass overwrites the projections a window's keep replays
         try sl.flush();
         sl.e.sync();
+        sl.dropRing(); // a released stream's last queued round, finished and never read
         const slot = &sl.slots[i];
         slot.s.reset();
         slot.used = true;
@@ -308,6 +320,77 @@ pub const Slots = struct {
         sl.windows += 1;
         for (wins) |w| sl.slots[w.slot].seen = sl.windows;
         sl.digest = std.hash.Wyhash.hash(sl.windows, std.mem.sliceAsBytes(Engine.u32s(e.sc.picks, total)));
+    }
+
+    /// A handle for host token `t`: its ring slot.
+    pub fn ringPut(sl: *Slots, t: u32) u32 {
+        const h = sl.ring_at;
+        sl.ring_at = (h + 1) % ring_len;
+        Engine.u32s(sl.ring, ring_len)[h] = t;
+        return h;
+    }
+
+    /// Handle `h`'s token, once the round writing it has finished.
+    pub fn ringGet(sl: *Slots, h: u32) !u32 {
+        if (h >= ring_len) return error.HandleOutOfStep;
+        if (sl.ring_cb[h]) |cb| {
+            sl.ring_cb[h] = null;
+            defer mtl.objc.release(cb.id);
+            cb.wait();
+            sl.e.gpu = .{ cb.gpuStart(), cb.gpuEnd() };
+            if (cb.failure()) |msg| {
+                sl.e.event.set(sl.e.ev); // a failed buffer may never signal: the next one must not wait on it
+                std.log.err("glm: a queued round failed: {s}", .{msg});
+                return error.GpuFailed;
+            }
+        }
+        return Engine.u32s(sl.ring, ring_len)[h];
+    }
+
+    /// Queued rounds the host will not read (their work done): their command buffers let go.
+    fn dropRing(sl: *Slots) void {
+        for (&sl.ring_cb) |*cb| if (cb.*) |c| {
+            c.wait();
+            mtl.objc.release(c.id);
+            cb.* = null;
+        };
+    }
+
+    /// Slot `i`'s next row queued ahead, its token read from handle `from` on the GPU and its pick into a new handle:
+    /// the row before it (a queued round's, or a window's kept ones) settled first, queued rounds ordered by a fence.
+    pub fn queueRound(sl: *Slots, i: u32, from: u32) !u32 {
+        const e = sl.e;
+        const slot = try sl.slotAt(i);
+        if (from >= ring_len) return error.HandleOutOfStep;
+        if (slot.rows > 0) sl.settle(slot, slot.rows);
+        try sl.flush();
+        if (slot.s.pos + 2 > slot.s.cap) return error.ContextFull;
+        if (sl.fence == null) sl.fence = try Fence.init(e.device);
+        const fence = sl.fence.?;
+        const to = sl.ring_at;
+        if (sl.ring_cb[to] != null) return error.HandleOutOfStep; // a round 64 handles back is still unread
+        sl.ring_at = (to + 1) % ring_len;
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = e.queue.commandBuffer();
+        const enc = cb.compute(.serial);
+        fence.wait(enc); // after the round queued before it; synchronous work has finished before this is encoded
+        var x = sl.ctx(slot);
+        copyWords(&x, enc, sl.ring.at(@as(usize, from) * 4), e.sc.ids, 1);
+        fwd.backbone(&x, enc, e.sc.ids, 1, slot.s.pos);
+        fwd.head(&x, enc, e.sc.hidden, e.sc.logits, sl.ring.at(@as(usize, to) * 4), 1);
+        fence.update(enc);
+        enc.end();
+        e.ev += 1;
+        cb.signal(e.event, e.ev); // a synchronous window after it waits for this
+        cb.commit();
+        sl.ring_cb[to] = .{ .id = mtl.objc.retain(cb.id) };
+        slot.row0 = 0;
+        slot.rows = 1;
+        slot.width = 1;
+        sl.windows += 1;
+        slot.seen = sl.windows;
+        return to;
     }
 
     /// The last window's first `kept` rows of slot `i` stay in its caches.

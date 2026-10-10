@@ -493,7 +493,8 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
     fwd.snap(x, e, ss.hidden, plane);
 }
 
-/// The MTP head over M prompt rows (`h` with their next tokens) at head positions pos..: the rows enter its cache only.
+/// The MTP head over M prompt rows (`h` with their next tokens) at head positions pos..: the rows enter its cache only
+/// (its embedding, norms, eh_proj and x_proj, then the cache writes; nothing reads the block's output for prompt rows).
 pub fn mtp(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, next: Ref, M: u32, pos: u32) void {
     const c = x.c;
     const D = c.hidden;
@@ -504,9 +505,6 @@ pub fn mtp(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, n
     fwd.rms(x, e, h, m.hnorm, p.m_eh.at(@as(usize, D) * 2), M, D, D, 2 * D, c.eps);
     qmm(p, e, p.m_eh, m.eh_proj, p.m_x, M);
     fwd.rms(x, e, p.m_x, L.in_norm, p.m_xn, M, D, D, D, c.eps);
-    mla(p, x, e, c.countKind(.mla), &L.attn.mla, p.m_xn, M, pos);
-    add(x, e, p.m_x, p.streams.branch, p.m_out, M * D);
-    fwd.rms(x, e, p.m_out, L.post_norm, p.m_xn, M, D, D, D, c.eps);
-    moe(p, x, e, &L.mlp.moe, p.m_xn, M, null); // the MTP layer's experts are whole on every Mac
-    add(x, e, p.m_out, p.streams.branch, p.m_x, M * D);
+    qmm(p, e, p.m_xn, L.attn.mla.x_proj, p.xp, M);
+    fwd.mlaCache(x, e, c.countKind(.mla), &L.attn.mla, p.m_xn, p.xp, @intCast(std.mem.alignForward(usize, c.xProj(), 64)), p.iw, M, pos);
 }

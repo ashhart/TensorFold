@@ -45,6 +45,7 @@ pub const Backend = struct {
             .first_copy_rows = 4,
             .mtp = b.sl.e.hasMtp(),
             .speculate = true,
+            .gpu_tokens = b.sl.e.ep == null, // one-token rounds queued ahead, each reading the one before's pick on the GPU
             .speculate_early = false,
             .plain_guard = true, // a shared round's draft row costs about what a plain row does: draft where it wins
             .drafts = 4,
@@ -176,15 +177,24 @@ pub const Backend = struct {
         const b = self(ptr);
         const i = try b.slotOf(s);
         if (position != b.sl.length(i)) return error.PositionMismatch;
-        return Engine.u32s(b.sl.e.sc.picks, 1)[0];
+        return b.sl.ringPut(Engine.u32s(b.sl.e.sc.picks, 1)[0]);
     }
 
-    fn queue(_: *anyopaque, _: *Stream, _: be.Feed, _: u64) anyerror!u64 {
-        return error.Unsupported; // GLM's tokens come back to the host every round: no step runs ahead
+    /// The next one-token round queued ahead: its token the handle's (read on the GPU) or the host's, its pick a handle.
+    fn queue(ptr: *anyopaque, s: *Stream, feed: be.Feed, position: u64) anyerror!u64 {
+        const b = self(ptr);
+        const i = try b.slotOf(s);
+        if (b.sl.e.ep != null) return error.Unsupported; // a pair's ranks run windows in step
+        if (position != b.sl.length(i) + 1) return error.PositionMismatch;
+        const from = switch (feed) {
+            .handle => |h| @as(u32, @intCast(h)),
+            .value => |v| b.sl.ringPut(v),
+        };
+        return try b.sl.queueRound(i, from);
     }
 
-    fn read(_: *anyopaque, handle: u64) anyerror!u32 {
-        return @intCast(handle);
+    fn read(ptr: *anyopaque, handle: u64) anyerror!u32 {
+        return self(ptr).sl.ringGet(@intCast(handle));
     }
 
     fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
@@ -239,7 +249,7 @@ pub const Backend = struct {
             }
             const follow: []const u32 = if (r.first) |f| blk: {
                 ones[k] = switch (f) {
-                    .handle => |h| @intCast(h),
+                    .handle => |h| try b.sl.ringGet(@intCast(h)),
                     .value => |v| v,
                 };
                 break :blk ones[k .. k + 1];
