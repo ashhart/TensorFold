@@ -1,4 +1,4 @@
-//! Grouped NVFP4 experts against the Python bytes (oracle/nvfp4_experts.py): packing, plan, up and down via experts.
+//! Grouped NVFP4 experts against recorded fixture bytes (the Python engine's): packing, plan, up and down.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");

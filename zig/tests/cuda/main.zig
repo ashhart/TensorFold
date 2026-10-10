@@ -47,7 +47,7 @@ const usage =
     \\  grouped-plan <dir>        the shared expert plan against experts.route's bytes (oracle/grouped_plan.py)
     \\  fp8-lane <dir>            block-FP8 projections against the Python lane matmul's bytes (oracle/fp8_lane.py)
     \\  fp8-experts <dir>         grouped block-FP8 experts against recorded fixture bytes
-    \\  nvfp4-experts <dir>       grouped NVFP4 experts against the Python bytes (oracle/nvfp4_experts.py)
+    \\  nvfp4-experts <dir>       grouped NVFP4 experts against recorded fixture bytes
     \\  carveout [MiB] [card]     GB10 display memory: round trips and bandwidth (SKIP without the card)
     \\  train                     Sliding Weights' training kernels against f64 references (synthetic rows)
     \\  train-mixers              Sliding Weights' mixer gradients against f64 references (synthetic rows)
@@ -55,7 +55,7 @@ const usage =
     \\  slide-kernels             the change's window kernels at 512 ranks, a and b in mapped host or device memory
     \\  slide-bench MODEL IDS_FILE START   Sliding Weights' step milliseconds in each mode
     \\  slide-grad MODEL IDS_FILE START [REACH [STARTS]]   Sliding Weights' gradient against a cubic fit of the loss
-    \\  nvfp4 <dir>               NVFP4 projections against the Python lane matmul's and prompt GEMM's bytes (oracle/nvfp4.py)
+    \\  nvfp4 <dir>               NVFP4 projections against recorded lane-matmul and prompt-GEMM fixture bytes
     \\
 ;
 
