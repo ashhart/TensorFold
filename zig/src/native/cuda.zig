@@ -6,6 +6,7 @@ const lanes = @import("lanes");
 const nemotron = @import("nemotron");
 const Allocator = std.mem.Allocator;
 const budget = @import("cuda_memory.zig");
+const nemotron_slide = @import("nemotron_slide.zig");
 const Pool = budget.Pool;
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
@@ -158,6 +159,9 @@ const Host = struct {
     startup: []u8 = &.{},
     lone: ?LoneRun = null, // the family's driver for a lone drafted stream, called with `family`
     store: ?*api.prompt_cache.Store = null, // kept Nemotron states; null when the budget is 0
+    learn: ?api.Learner = null, // the family's Sliding Weights learner (--slide), called with the context current
+    slide: ?*anyopaque = null, // that learner's adapter, freed by slide_free before the family
+    slide_free: ?*const fn (Allocator, *anyopaque) void = null,
 
     fn close(p: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(p));
@@ -169,6 +173,7 @@ const Host = struct {
             s.deinit();
             h.gpa.destroy(s);
         }
+        if (h.slide) |s| h.slide_free.?(h.gpa, s);
         h.release(h.family);
         if (h.gpu) |g| {
             g.ctx.deinit();
@@ -200,7 +205,33 @@ const Host = struct {
         h.host.explain = explain;
         h.host.cache = h.store;
         if (h.lone != null) h.host.lone = .{ .ctx = h, .run = loneRun, .sampled = true };
+        if (h.learn != null) h.host.learner = h.learner();
         try h.host.start();
+    }
+
+    /// The family's learner, each call made with the context current on the lane thread.
+    fn learner(h: *Host) api.Learner {
+        return .{
+            .ctx = h,
+            .begin = struct {
+                fn f(p: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) anyerror!void {
+                    const l = bind(p).learn.?;
+                    return l.begin(l.ctx, request, sink);
+                }
+            }.f,
+            .step = struct {
+                fn f(p: *anyopaque) api.Learner.Step {
+                    const l = bind(p).learn.?;
+                    return l.step(l.ctx);
+                }
+            }.f,
+            .abort = struct {
+                fn f(p: *anyopaque) void {
+                    const l = bind(p).learn.?;
+                    l.abort(l.ctx);
+                }
+            }.f,
+        };
     }
 
     /// The family's lone driver with the context current on the lane thread.
@@ -315,11 +346,25 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         };
         return null;
     };
+    if (o.slide) {
+        if (!@hasDecl(F, "slide")) {
+            problem.* = try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on CUDA yet", .{o.model_type});
+            return null;
+        }
+        if (try F.linked(a, io, o.dir)) |name| {
+            problem.* = try std.fmt.allocPrint(a, "--slide rewrites the model's own files, and {s} in {s} is a link to data another file shares (a Hugging Face cache's blob, or a hard link), so learning would change that file too: serve a copy made with `cp -RL` (a copy that follows links)", .{ name, o.dir });
+            return null;
+        }
+    }
     const device = try setting(a, o.device, "TF_CUDA_DEVICE", 0, problem) orelse return null;
     const segments = try setting(a, o.segments, "TF_CUDA_SEGMENTS", 1, problem) orelse return null;
     if (segments < 1 or segments > F.max_segments) {
         const named = if (o.segments != null) "--segments " else "TF_CUDA_SEGMENTS=";
         problem.* = try std.fmt.allocPrint(a, "{s}{d}: whole prompt chunks a call, 1 to {d}", .{ named, segments, F.max_segments });
+        return null;
+    }
+    if (o.slide and segments > 1) {
+        problem.* = "--slide runs a prompt one chunk at a time, its change's scratch shared by every layer: serve it without --segments or TF_CUDA_SEGMENTS";
         return null;
     }
     const g = try gpa.create(Gpu);
@@ -342,6 +387,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const capability = try g.ctx.capability();
     var name_buf: [256]u8 = undefined;
     const name = g.ctx.name(&name_buf) catch "GPU";
+    if (o.slide and capability != 121) {
+        problem.* = try std.fmt.allocPrint(a, "--slide learns on a GB10 (sm_121) so far, and this {s} is sm_{d}: serve it without --slide", .{ name, capability });
+        return null;
+    }
     const kernels: ?[]const u8 = switch (try cuda.aot.pick(a, io, getenv("TENSORFOLD_CUDA_KERNELS"), capability)) {
         .native => null,
         .captured => |dir| dir,
@@ -357,7 +406,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         problem.* = try std.fmt.allocPrint(a, "the checkpoint's {d:.1} GiB of weights do not fit the {d:.1} GiB the CUDA memory budget grants ({d:.1} GiB free less a {d:.1} GiB reserve{s}); free device memory or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB", .{ toGib(weights), toGib(before.room(held0)), toGib(before.free), toGib(before.reserve), if (before.limit != null) ", under TENSORFOLD_CUDA_MEMORY_LIMIT_GB" else "" });
         return null;
     }
-    const loaded = F.open(gpa, io, &g.ctx, o.dir, kernels, .{ .context = @intCast(window), .drafts = o.drafts, .segments = segments }) catch |e| {
+    const loaded = F.open(gpa, io, &g.ctx, o.dir, kernels, .{ .context = @intCast(window), .drafts = o.drafts, .segments = segments, .slide = o.slide }) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the native CUDA engine cannot load {s} with {s} glue kernels ({s})", .{ o.dir, kernels orelse "its own", @errorName(e) });
         return null;
     };
@@ -394,6 +443,21 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         store.deinit();
         gpa.destroy(store);
     };
+    if (loaded.learns) |e| {
+        const Slide = nemotron_slide.Adapter(F.slide);
+        const s = try gpa.create(Slide);
+        s.* = Slide.init(gpa, io, e);
+        h.slide = s;
+        h.slide_free = struct {
+            fn f(al: Allocator, p: *anyopaque) void {
+                const x: *Slide = @ptrCast(@alignCast(p));
+                x.deinit();
+                al.destroy(x);
+            }
+        }.f;
+        h.learn = s.hook();
+    }
+    errdefer if (h.slide) |s| h.slide_free.?(gpa, s);
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
     try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .logprobs = loaded.backend.vtable.first_row != null }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;

@@ -15,6 +15,11 @@ const chunk_costs = @import("chunk_costs.zig");
 const grouped_tests = @import("grouped_tests.zig");
 const fp8_tests = @import("fp8_tests.zig");
 const carveout_tests = @import("carveout_tests.zig");
+const slide_grad = @import("slide_grad.zig");
+const slide_bench = @import("slide_bench.zig");
+const slide_decode = @import("slide_decode.zig");
+const train_mixer_tests = @import("train_mixer_tests.zig");
+const train_tests = @import("train_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -39,6 +44,12 @@ const usage =
     \\  grouped-plan <dir>        the shared expert plan against experts.route's bytes (oracle/grouped_plan.py)
     \\  fp8-lane <dir>            block-FP8 projections against the Python lane matmul's bytes (oracle/fp8_lane.py)
     \\  carveout [MiB] [card]     GB10 display memory: round trips and bandwidth (SKIP without the card)
+    \\  train                     Sliding Weights' training kernels against f64 references (synthetic rows)
+    \\  train-mixers              Sliding Weights' mixer gradients against f64 references (synthetic rows)
+    \\  slide-decode MODEL IDS_FILE        a decode token's milliseconds without --slide and with 0 to 512 ranks
+    \\  slide-kernels             the change's window kernels at 512 ranks, a and b in mapped host or device memory
+    \\  slide-bench MODEL IDS_FILE START   Sliding Weights' step milliseconds in each mode
+    \\  slide-grad MODEL IDS_FILE START [REACH [STARTS]]   Sliding Weights' gradient against a cubic fit of the loss
     \\
 ;
 
@@ -99,6 +110,12 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
         const mib = if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else cuda.carveout.default_bytes >> 20;
         return carveout_tests.run(gpu, if (rest.len > 1) rest[1] else cuda.carveout.default_card, mib);
     }
+    if (std.mem.eql(u8, cmd, "train")) return train_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "train-mixers")) return train_mixer_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "slide-decode")) return slide_decode.run(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "slide-kernels")) return slide_decode.kernels(gpu);
+    if (std.mem.eql(u8, cmd, "slide-bench")) return slide_bench.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
+    if (std.mem.eql(u8, cmd, "slide-grad")) return slide_grad.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), if (rest.len > 3) rest[3] else null, if (rest.len > 4) rest[4] else null);
     std.debug.print("{s}", .{usage});
     return error.UnknownCommand;
 }

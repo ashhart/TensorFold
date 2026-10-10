@@ -4,6 +4,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const torch_ops = @import("cuda_torch_ops.zig");
 const glue = @import("cuda_glue.zig");
+const train_ops = @import("cuda_train_ops.zig");
 
 /// Mangled names of the instantiations the copies in zig/kernels/cuda export (cuobjdump -symbols of each fatbin).
 const sym = struct {
@@ -95,6 +96,8 @@ pub const Kernels = struct {
     draw_ids: cuda.Function,
     logprob_rows: cuda.Function,
     torch: torch_ops.Functions,
+    train: train_ops.Fns = undefined, // Sliding Weights: the change after each output projection, and learning it
+    train_mods: ?[2]cuda.Module = null, // loaded by loadTrain (--slide) after the weights, else never
     expert_blocks: [2]usize, // resident blocks the decode expert kernels fill: per SM times SMs
     gemv_blocks: usize, // resident lane_gemv CTAs: per SM times SMs
     gb10: bool,
@@ -136,6 +139,7 @@ pub const Kernels = struct {
         k.draw_ids = try k.mods[14].function("tf_draw_ids");
         k.glue = try glue.Fns.resolve(k.mods[16..21]);
         k.logprob_rows = try k.mods[14].function("tf_logprob_rows");
+        k.train_mods = null;
         k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
         errdefer if (k.triton) |*t| t.deinit();
         try k.group.allowDynamicShared(group_smem);
@@ -160,6 +164,18 @@ pub const Kernels = struct {
         if (k.split) |*sp| sp.deinit();
         if (k.triton) |*t| t.deinit();
         for (&k.mods) |*m| m.unload();
+        if (k.train_mods) |*ms| for (ms) |*m| m.unload();
+    }
+
+    /// Sliding Weights' modules (--slide only), loaded after the weights so those sit where they would without them.
+    pub fn loadTrain(k: *Kernels) !void {
+        if (k.train_mods != null) return;
+        var train = try cuda.Module.load(k.d, cuda.kernels.train);
+        errdefer train.unload();
+        var mixers = try cuda.Module.load(k.d, cuda.kernels.train_mixers);
+        errdefer mixers.unload();
+        k.train = try train_ops.Fns.resolve(train, mixers);
+        k.train_mods = .{ train, mixers };
     }
 };
 
@@ -195,6 +211,11 @@ pub const Ops = struct {
     /// The torch-op replacements on this stream.
     pub fn torch(o: Ops) torch_ops.Torch {
         return .{ .f = &o.k.torch, .s = o.s };
+    }
+
+    /// The training kernels (and the change's forward) on this stream.
+    pub fn train(o: Ops) train_ops.Train {
+        return .{ .f = &o.k.train, .s = o.s, .d = o.k.d };
     }
 
     /// sample.cu: row r of bf16 logits drawn at position meta[0] + r + 1 + offset, columns as `ids` token ids if given.

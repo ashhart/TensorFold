@@ -140,6 +140,7 @@ pub const Forward = struct {
                     try f.mark(.gnorm);
                     try o.dense(b.g, b.gxs, m.out_proj, b.delta, rows);
                     if (m.out_rest != 0) try o.restRows(b.g, c.inner(), m.out_rest, b.delta, c.hidden, false, rows, 1, 0, c.hidden, c.inner());
+                    try adapt(o, m.adapter, b.g, c.inner(), b.delta, false, c.hidden, 1, 0, rows);
                     try f.mark(.mamba_out);
                     delta = .dense;
                     mj += 1;
@@ -160,6 +161,7 @@ pub const Forward = struct {
                     try f.mark(.attention);
                     try o.dense(b.att, b.axs, a.o, b.delta, rows);
                     if (a.o_rest != 0) try o.restRows(b.att, qd, a.o_rest, b.delta, c.hidden, false, rows, 1, 0, c.hidden, qd);
+                    try adapt(o, a.adapter, b.att, qd, b.delta, false, c.hidden, 1, 0, rows);
                     try f.mark(.attn_o);
                     delta = .dense;
                     aj += 1;
@@ -205,11 +207,12 @@ pub const Forward = struct {
         try f.sharedRest(o, m, rows, !prompt);
     }
 
-    /// A lesson's change to the shared expert's down projection, past its codes: into its two halves' pair rows.
+    /// A lesson's rest into the shared expert's halves' pair rows, a live change (--slide, 2W wide) into the first's.
     fn sharedRest(f: *const Forward, o: kern.Ops, m: weights.MoE, rows: usize, y_f32: bool) !void {
         const c = f.c;
         const ex = m.experts;
         for (m.rest, 0..) |r, h| if (r != 0) try o.restRows(f.b.act, ex.width, r, f.b.ymoe, ex.dims, y_f32, rows, c.slots(), c.top_k + h, ex.dims, ex.width);
+        try adapt(o, m.adapter, f.b.act + c.top_k * ex.width * 2, c.slots() * ex.width, f.b.ymoe, y_f32, ex.dims, c.slots(), c.top_k, rows);
     }
 
     /// The decode MoE with its shared halves on the side stream: their pairs are fixed, so they need no routing.
@@ -309,6 +312,7 @@ pub const Forward = struct {
                 try f.glue.groupRmsnorm(b.sy, blk.mamba.gnorm, b.g, b.gxs, w.rows, c.inner(), c.groups, c.eps);
                 try f.ops.prefillDense(b.g, blk.mamba.out_proj, b.delta, w.rows);
                 if (blk.mamba.out_rest != 0) try f.ops.restRows(b.g, c.inner(), blk.mamba.out_rest, b.delta, c.hidden, false, w.rows, 1, 0, c.hidden, c.inner());
+                try adapt(f.ops, blk.mamba.adapter, b.g, c.inner(), b.delta, false, c.hidden, 1, 0, w.rows);
                 w.delta = .dense;
                 w.mj += 1;
             },
@@ -316,6 +320,7 @@ pub const Forward = struct {
                 try f.ops.prefillDense(b.att, blk.attn.o, b.delta, w.rows);
                 const qd = c.heads * c.head_dim;
                 if (blk.attn.o_rest != 0) try f.ops.restRows(b.att, qd, blk.attn.o_rest, b.delta, c.hidden, false, w.rows, 1, 0, c.hidden, qd);
+                try adapt(f.ops, blk.attn.adapter, b.att, qd, b.delta, false, c.hidden, 1, 0, w.rows);
                 w.delta = .dense;
                 w.aj += 1;
             },
@@ -324,6 +329,11 @@ pub const Forward = struct {
                 w.delta = .moe;
             },
         }
+    }
+
+    /// The chunk's last norm alone: w.x then holds the residual it read, b.y every row's normed hidden state.
+    pub fn finalNorm(f: *const Forward, w: *Walk) !void {
+        try f.norm(&w.x, w.delta, f.w.norm_f, w.rows, false);
     }
 
     /// The chunk's last norm, its rows' hidden states for the MTP head, and the token after its last row.
@@ -340,3 +350,9 @@ pub const Forward = struct {
         if (f.dump) |d| try d.tail(f.ops, b.p_logits, b.p_sampled, 1, c.vocab);
     }
 };
+
+/// A live lesson's change after an output projection (--slide), on `o`'s stream: y += scale (x a^T) b; none: nothing.
+fn adapt(o: kern.Ops, ad: ?*const weights.Adapter, x: u64, x_stride: usize, y: u64, y_f32: bool, y_stride: usize, row_mul: usize, row_add: usize, rows: usize) !void {
+    const a = ad orelse return;
+    try o.train().adapt(a.*, x, x_stride, y, y_f32, y_stride, row_mul, row_add, rows);
+}
