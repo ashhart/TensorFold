@@ -21,6 +21,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
         .link_libc = true,
     });
     hip_test_module.addOptions("hip_fixtures", hip_fixtures);
+    hip_test_module.addImport("hip_kernels", b.createModule(.{ .root_source_file = b.addWriteFiles().add("kernels.zig", stub) }));
     const hip_tests = b.addTest(.{ .root_module = hip_test_module });
     const run_hip_tests = b.addRunArtifact(hip_tests);
     test_step.dependOn(&run_hip_tests.step);
@@ -63,4 +64,54 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     const affine_test = b.addTest(.{ .root_module = affine_module });
     b.step("hip-affine-build", "Compile affine golden GPU test without executing").dependOn(&affine_test.step);
     b.step("hip-affine-test", "Run exact affine golden GPU regression").dependOn(&b.addRunArtifact(affine_test).step);
+    const device_lib = b.option([]const u8, "hip-device-lib", "ROCm device bitcode directory (default <rocm>/lib/llvm/amdgcn/bitcode; Arch: <rocm>/amdgcn/bitcode)");
+    const objects = kernelObjects(b, hipcc, hipcc_resolved, device_lib, hip_arch);
+    const kernel_module = b.createModule(.{ .root_source_file = b.path("zig/src/hip/kernel_tests.zig"), .target = target, .link_libc = true });
+    kernel_module.addIncludePath(.{ .cwd_relative = hip_include });
+    kernel_module.addCSourceFile(.{ .file = b.path("zig/src/hip/device_arch.c"), .flags = &.{"-D__HIP_PLATFORM_AMD__"} });
+    kernel_module.addImport("hip_kernels", objects);
+    const kernel_test = b.addTest(.{ .root_module = kernel_module });
+    b.step("hip-kernel-build", "Compile the model-free kernels and their GPU tests without running them").dependOn(&kernel_test.step);
+    b.step("hip-kernel-test", "Every model-free kernel against its host reference on the GPU").dependOn(&b.addRunArtifact(kernel_test).step);
+}
+
+/// The model-free kernels' source groups, in zig/src/hip/kernels.zig's Group order.
+const groups = [_][]const u8{ "ops/ops.hip", "ops/act.hip", "attention/attention.hip", "recurrence/gated_delta.hip", "attention/prefill.hip", "recurrence/gdn_prefill.hip", "decode/decode.hip", "decode/plan.hip" };
+
+/// What the group sources include, so an edit to one rebuilds them.
+const headers = [_][]const u8{ "attention/attention_fa.hip", "decode/pages.hpp", "decode/plan.hpp", "ops/attention.hpp", "ops/common.hpp", "ops/draw.hpp", "ops/elementwise.hpp", "ops/linear.hpp", "ops/moe.hpp", "ops/norms.hpp", "ops/rope.hpp" };
+
+/// The flags of the kernels' first build: no contraction, wave32 on RDNA, C++20.
+const flags = [_][]const u8{ "-D__HIP_PLATFORM_AMD__=1", "-DUSE_ROCM=1", "-DHIPBLAS_V2", "-fPIC", "-DCUDA_HAS_FP16=1", "-DHIP_ENABLE_WARP_SYNC_BUILTINS=1", "-std=c++20", "-fno-gpu-rdc", "-mno-wavefrontsize64", "-ffp-contract=off" };
+
+const stub = "pub const arch = \"\";\npub const images: [8][]align(8) const u8 = @splat(&.{});\n";
+
+/// One code object a group for `arch`, built with the caps table's instruction switches, as the `hip_kernels` module.
+fn kernelObjects(b: *std.Build, hipcc: []const u8, hipcc_resolved: []const u8, device_lib: ?[]const u8, arch: []const u8) *std.Build.Module {
+    const c = caps.Caps.of(arch).?;
+    const root = std.fs.path.dirname(std.fs.path.dirname(hipcc_resolved) orelse ".") orelse ".";
+    const files = b.addWriteFiles();
+    var decls: []const u8 = "";
+    var refs: []const u8 = "";
+    for (groups, 0..) |source, i| {
+        const run = b.addSystemCommand(&.{ hipcc, "--genco" });
+        run.addArgs(&flags);
+        run.addArg(b.fmt("-DTF_WAVE={d}", .{c.wave}));
+        run.addArg(b.fmt("-DTF_DOT2_F16={d}", .{@intFromBool(c.dot2_f16)}));
+        run.addArg(b.fmt("-DTF_DOT2_BF16={d}", .{@intFromBool(c.dot2_bf16)}));
+        run.addArg(b.fmt("-DTF_SDOT4={d}", .{@intFromBool(c.sdot4)}));
+        run.addArg(b.fmt("-DTF_SDOT8={d}", .{@intFromBool(c.sdot8)}));
+        run.addArg(b.fmt("--rocm-path={s}", .{root}));
+        run.addArg(b.fmt("--rocm-device-lib-path={s}", .{device_lib orelse b.fmt("{s}/lib/llvm/amdgcn/bitcode", .{root})}));
+        run.addArg(b.fmt("--offload-arch={s}", .{arch}));
+        run.addPrefixedDirectoryArg("-I", b.path("zig/kernels/hip"));
+        for (headers) |h| run.addFileInput(b.path(b.fmt("zig/kernels/hip/{s}", .{h})));
+        run.addArg("-o");
+        const object = run.addOutputFileArg(b.fmt("group{d}.hsaco", .{i}));
+        run.addFileArg(b.path(b.fmt("zig/kernels/hip/{s}", .{source})));
+        _ = files.addCopyFile(object, b.fmt("group{d}.hsaco", .{i}));
+        decls = b.fmt("{s}const g{d} align(8) = @embedFile(\"group{d}.hsaco\").*;\n", .{ decls, i, i });
+        refs = b.fmt("{s}&g{d}, ", .{ refs, i });
+    }
+    return b.createModule(.{ .root_source_file = files.add("kernels.zig", b.fmt("pub const arch = \"{s}\";\n{s}pub const images = [_][]align(8) const u8{{ {s}}};\n", .{ arch, decls, refs })) });
 }
