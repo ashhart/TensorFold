@@ -130,6 +130,7 @@ pub fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const 
     h.serial.driver.cache = &h.cache.?;
     h.serial.driver.info.warm_turns = true;
     h.serial.driver.info.prompt_cache_plan = plan;
+    h.serial.driver.info.prompt_cache = true;
 }
 /// Weights, runner and drafter states join one residency set the idle keepalive uses, once drafts attach.
 pub fn holdResident(h: *Host) !void {
