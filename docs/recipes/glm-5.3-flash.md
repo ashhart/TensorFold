@@ -3,7 +3,7 @@
 This recipe describes the Python 0.6.6 engine, maintained on
 [`python-0.6`](https://github.com/ashhart/TensorFold/tree/python-0.6).
 Its CUDA EXL3 reader, two-rank flags and DFlash2 policies do not apply to the native Zig binary.
-Native 1.0.2 serves GLM on two M5 Ultra Macs with MLX affine 4-bit/group-64 weights; it has no GLM CUDA backend.
+The native binary serves GLM on two M5 Ultra Macs with MLX affine 4-bit/group-64 weights; it has no GLM CUDA backend yet.
 That is not an engine-only replacement for a CUDA EXL3 deployment.
 For native serving, use the [qualified model table](../../README.md#qualified-models) and
 [paired Metal runbook](../../RUNBOOK.md#flash-next-and-paired-metal-serving).

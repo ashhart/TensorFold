@@ -6,7 +6,7 @@ The family and checkpoint tables, two-rank setup and PyTorch/Triton implementati
 the Python 0.6.6 engine, maintained on [`python-0.6`](https://github.com/ashhart/TensorFold/tree/python-0.6).
 They are not the native Zig release's support matrix.
 
-Native 1.0.2 registers only Nemotron on CUDA; its qualified platform is NVIDIA GB10.
+The native binary registers only Nemotron on CUDA, qualified on NVIDIA GB10 and on Ampere cards with compute capability 8.6 (the RTX 30 series, RTX A6000, A10 and A40).
 GLM-5.3-Flash on CUDA, EXL3 loading and DFlash2 drafting remain Python-engine features, not native upgrade paths.
 Inspect the installed binary with `tensorfold-native --version` and `tensorfold-native capabilities --json`.
 See the [qualified models](../../README.md#qualified-models) and
