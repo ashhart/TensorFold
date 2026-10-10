@@ -135,6 +135,10 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         std.debug.print("tensorfold: TF_DRAIN_S: seconds, a number >= 0\n", .{});
         return 1;
     };
+    const keepalive_s = seconds(env(s, "TF_SSE_KEEPALIVE_S"), 15) orelse {
+        std.debug.print("tensorfold: TF_SSE_KEEPALIVE_S: seconds, a number >= 0\n", .{});
+        return 1;
+    };
     const config: server_mod.Config = .{
         .served_name = s.served,
         .model_dir = s.model_dir,
@@ -148,6 +152,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .default_sampling = s.sampling,
         .use_drafts = !args.no_drafts,
         .seed_salt = salt,
+        .sse_keepalive_s = keepalive_s,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
         .dashboard = args.dashboard,
         .family = s.family,
@@ -239,7 +244,7 @@ fn drain(srv: *server_mod.Server, io: std.Io, stop: ?EngineStop, drain_s: f64) v
     while (srv.generating.load(.seq_cst) > 0 and waited < 100) : (waited += 1) std.Io.sleep(io, .fromMilliseconds(20), .awake) catch {};
 }
 
-/// A seconds setting (TF_DRAIN_S): unset or blank keeps the default; null: not a number >= 0.
+/// A seconds setting (TF_DRAIN_S, TF_SSE_KEEPALIVE_S): unset or blank keeps the default; null: not a number >= 0.
 fn seconds(raw: ?[]const u8, default: f64) ?f64 {
     const t = std.mem.trim(u8, raw orelse "", " \t");
     if (t.len == 0) return default;

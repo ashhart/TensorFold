@@ -63,6 +63,8 @@ pub const Config = struct {
     /// BRAVE_SEARCH_API_KEY: Cortheon searches through Brave instead of DuckDuckGo.
     cortheon_search_key: ?[]const u8 = null,
     timeouts: http_conn.Timeouts = .{},
+    /// TF_SSE_KEEPALIVE_S: a silent stream's keepalive period before its first token (serve.zig; 0: none)
+    sse_keepalive_s: f64 = 15,
     /// The checkpoint family's own chat rules (family.zig); null: the chat template path.
     family: ?family_mod.Family = null,
 };
