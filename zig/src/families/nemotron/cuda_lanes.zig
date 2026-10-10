@@ -11,6 +11,7 @@ const grid = @import("cuda_prompt_grid.zig");
 const Head = @import("cuda_mtp.zig").Head;
 const state = @import("cuda_state.zig");
 const config = @import("config.zig");
+const seq_graphs = @import("cuda_seq_graphs.zig");
 const costs = @import("cuda_costs.zig");
 
 const be = lanes.backend;
@@ -23,7 +24,7 @@ const row_slots = engine.max_streams * state.max_rows + 1;
 const ring = 1024;
 
 /// A stream's sequence (`own`: the engine's, the graphs' buffers) and its first token's logprob row from prefill.
-const Lane = struct { seq: *state.Seq, own: bool = false, pending_rows: ?usize = null, first: ?LogRow = null };
+const Lane = struct { seq: *state.Seq, own: bool = false, pending_rows: ?usize = null, first: ?LogRow = null, stats: seq_graphs.Stats = .{} };
 
 pub const Cuda = struct {
     gpa: std.mem.Allocator,
@@ -181,7 +182,7 @@ pub const Cuda = struct {
         if (gop.found_existing) self.drop(gop.value_ptr.*);
         // the engine's own sequence while it is free: its rounds replay the captured graphs
         const own = self.own_free and e.serial != null;
-        gop.value_ptr.* = .{ .own = own, .seq = if (own) &e.own else e.newSeq() catch |err| {
+        gop.value_ptr.* = .{ .own = own, .stats = e.stats, .seq = if (own) &e.own else e.newSeq() catch |err| {
             self.lanes.removeByPtr(gop.key_ptr);
             return err;
         } };
@@ -327,6 +328,11 @@ pub const Cuda = struct {
     }
 
     fn drop(self: *Cuda, l: Lane) void {
+        if (seq_graphs.logFromEnv()) {
+            const d = self.e.stats.since(l.stats);
+            const ms = @as(f64, @floatFromInt(d.capture_ns)) / 1e6;
+            std.log.info("graphs while a request on {s} sequence ran: {d} captures in {d:.1} ms, {d} replays of another sequence's own graphs, {d} eager windows", .{ if (l.own) "the own" else "another", d.captures, ms, d.replays, d.eager });
+        }
         if (l.own) self.own_free = true else self.e.freeSeq(l.seq);
     }
 };

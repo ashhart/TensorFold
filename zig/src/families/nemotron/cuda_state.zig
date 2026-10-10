@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const Config = @import("config.zig").Config;
 const kern = @import("cuda_kernels.zig");
 const sampler = @import("cuda_sampler.zig");
+const seq_graphs = @import("cuda_seq_graphs.zig");
 
 pub const max_rows = 16; // a verify window's rows (the row tile of the row-parallel kernels)
 pub const prefill_rows = 2048; // rows of a prompt chunk
@@ -95,6 +96,7 @@ pub const Seq = struct {
     carved: ?Carved = null,
     ptr: [seq_fields.len]u64,
     head: [3]u64 = @splat(0), // the MTP head's seq_fields (cuda_mtp.zig)
+    graphs: seq_graphs.Graphs = .{}, // what this sequence captured for itself (not the own one)
     pos: usize = 0,
     parity: usize = 0,
     prev_keep: usize = 0,

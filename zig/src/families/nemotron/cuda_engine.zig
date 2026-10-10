@@ -15,6 +15,7 @@ const sampler = @import("cuda_sampler.zig");
 const segs = @import("cuda_segments.zig");
 const grid = @import("cuda_prompt_grid.zig");
 const heat = @import("heat");
+const seq_graphs = @import("cuda_seq_graphs.zig");
 const sites = @import("cuda_sites.zig");
 
 /// nemotron_h.cuda.CONTEXT: prompt plus reply tokens when --context is not given, as `tensorfold serve` sizes it.
@@ -81,6 +82,7 @@ pub const Engine = struct {
     history_dev: u64 = 0,
     serial: ?cuda.graph.Exec = null,
     windows: [2][state.max_rows + 1]?cuda.graph.Exec = @splat(@splat(null)), // [greedy, sampled]: argmax or sample.cu
+    stats: seq_graphs.Stats = .{},
     done: [lookahead]cuda.Event = undefined,
     copied: cuda.Event = undefined, // the last window's uploads have read the pinned words
     sampled_ready: cuda.Event = undefined,
@@ -169,19 +171,27 @@ pub const Engine = struct {
     fn capture(e: *Engine, windows: bool) !void {
         try e.reset();
         try e.stream.synchronize();
-        e.serial = try e.record(1, true);
+        e.serial = try e.record(.{ .window = .{ .rows = 1, .feed = true } });
         if (windows) try e.captureWindows();
     }
 
     /// The verify windows of the bound sequence's draw mode (greedy or sampled), each one graph.
     pub fn captureWindows(e: *Engine) !void {
         const set = &e.windows[@intFromBool(e.sampling != null)];
-        for (1..state.max_rows + 1) |r| set[r] = try e.record(@intCast(r), false);
+        for (1..state.max_rows + 1) |r| set[r] = try e.record(.{ .window = .{ .rows = r, .feed = false } });
     }
 
-    fn record(e: *Engine, rows: usize, feed: bool) !cuda.graph.Exec {
+    /// What a graph runs: a verify window (with the serial feed or the sampled download), or one MTP head level.
+    pub const Body = union(enum) {
+        window: struct { rows: usize, feed: bool },
+        head: struct { h: *Head, rows: usize, j: usize },
+    };
+
+    /// One graph of `body` on the bound sequence's buffers, instantiated and uploaded.
+    pub fn record(e: *Engine, body: Body) !cuda.graph.Exec {
+        const t0 = std.Io.Clock.awake.now(e.io);
         try cuda.graph.beginCapture(e.stream, .thread_local);
-        e.recordBody(rows, feed) catch |err| {
+        e.recordBody(body) catch |err| {
             if (cuda.graph.endCapture(e.stream)) |g| {
                 var x = g;
                 x.deinit();
@@ -193,13 +203,32 @@ pub const Engine = struct {
         const exec = try g.instantiate();
         try exec.upload(e.stream);
         try e.stream.synchronize();
+        e.stats.captures += 1;
+        e.stats.capture_ns += @intCast(std.Io.Clock.awake.now(e.io).toNanoseconds() - t0.toNanoseconds());
         return exec;
     }
 
-    fn recordBody(e: *Engine, rows: usize, feed: bool) !void {
-        try e.forward(null).window(rows);
-        if (feed) return e.ops().serialFeed(e.b.sampled, e.b.ids, e.b.meta, e.history_dev);
-        try e.ops().download(std.mem.sliceAsBytes(e.pinned.slice(u32)[pin_sampled..][0..rows]), e.b.sampled);
+    fn recordBody(e: *Engine, body: Body) !void {
+        switch (body) {
+            .window => |w| {
+                try e.forward(null).window(w.rows);
+                if (w.feed) return e.ops().serialFeed(e.b.sampled, e.b.ids, e.b.meta, e.history_dev);
+                try e.ops().download(std.mem.sliceAsBytes(e.pinned.slice(u32)[pin_sampled..][0..w.rows]), e.b.sampled);
+            },
+            .head => |x| try x.h.level(x.rows, x.j),
+        }
+    }
+
+    /// Step `id`: the own sequence launches `own`; another launches its own capture of `body`, made the first time.
+    pub fn launchGraph(e: *Engine, own: cuda.graph.Exec, id: u32, body: Body) !void {
+        if (e.bound == &e.own) return own.launchOn(e.stream);
+        const gop = try e.bound.graphs.getOrPut(e.gpa, id);
+        if (!gop.found_existing) gop.value_ptr.* = e.record(body) catch |err| {
+            _ = e.bound.graphs.remove(id);
+            return err;
+        };
+        e.stats.replays += 1;
+        return gop.value_ptr.launchOn(e.stream);
     }
 
     pub fn deinit(e: *Engine) void {
@@ -251,6 +280,7 @@ pub const Engine = struct {
 
     pub fn freeSeq(e: *Engine, s: *state.Seq) void {
         if (e.bound == s) e.bind(&e.own);
+        seq_graphs.free(e.gpa, &s.graphs);
         s.deinit();
         e.gpa.destroy(s);
     }
@@ -258,7 +288,7 @@ pub const Engine = struct {
     /// Act on sequence `s` from here on: its buffers replace the bound one's, which keeps where it stands.
     pub fn bind(e: *Engine, s: *state.Seq) void {
         const old = e.bound;
-        old.* = .{ .arena = old.arena, .carved = old.carved, .ptr = old.ptr, .head = old.head, .pos = e.pos, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows, .head_pos = if (e.head) |h| h.pos else 0, .sampling = e.sampling };
+        old.* = .{ .arena = old.arena, .carved = old.carved, .ptr = old.ptr, .head = old.head, .graphs = old.graphs, .pos = e.pos, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows, .head_pos = if (e.head) |h| h.pos else 0, .sampling = e.sampling };
         inline for (state.seq_fields, s.ptr) |name, p| @field(e.b, name) = p;
         e.pos = s.pos;
         e.parity = s.parity;
@@ -267,11 +297,6 @@ pub const Engine = struct {
         e.sampling = s.sampling;
         if (e.head) |h| h.bindSeq(s);
         e.bound = s;
-    }
-
-    /// Captured graphs hold the own sequence's buffers; each set draws in one mode, picked by the bound sequence's.
-    pub fn graphsBound(e: *const Engine) bool {
-        return e.bound == &e.own;
     }
 
     pub fn ops(e: *const Engine) kern.Ops {
@@ -386,10 +411,11 @@ pub const Engine = struct {
         try e.ops().upload(e.b.ids, std.mem.sliceAsBytes(host[pin_ids..][0..ids.len]));
         try e.ops().upload(e.b.meta, std.mem.sliceAsBytes(host[pin_meta..][0..4]));
         try e.copied.record(e.stream);
-        const graph = e.windows[@intFromBool(e.sampling != null)][rows];
-        if (dump == null and graph != null and e.graphsBound()) {
-            try graph.?.launchOn(e.stream);
+        const m: usize = @intFromBool(e.sampling != null);
+        if (dump == null and e.windows[m][rows] != null) {
+            try e.launchGraph(e.windows[m][rows].?, @intCast(1 + m * (state.max_rows + 1) + rows), .{ .window = .{ .rows = rows, .feed = false } });
         } else {
+            e.stats.eager += 1;
             try e.forward(dump).window(rows);
             try e.ops().download(std.mem.sliceAsBytes(host[pin_sampled..][0..rows]), e.b.sampled);
         }
