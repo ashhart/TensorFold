@@ -395,8 +395,11 @@ test "without a decoder, decode joins known ids' tokens with spaces" {
 test "raw ByteLevel pieces preserve an incomplete UTF-8 character" {
     const a = std.testing.allocator;
     var t = Tokenizer{
-        .allocator = a, .vocab = .init(a), .id_to_token = .{ .allocator = a },
-        .model = .empty(.bpe), .decoder = .byte_level,
+        .allocator = a,
+        .vocab = .init(a),
+        .id_to_token = .{ .allocator = a },
+        .model = .empty(.bpe),
+        .decoder = .byte_level,
     };
     defer t.deinit();
     try t.id_to_token.put(0, "\u{c3}");
@@ -421,8 +424,11 @@ test "raw token bytes refuse replacements after the decoder joins token boundari
         .byte_level, .{ .replace = .{ .pattern = .{ .literal = "ab" }, .content = "x" } },
     };
     var t = Tokenizer{
-        .allocator = a, .vocab = .init(a), .id_to_token = .{ .allocator = a },
-        .model = .empty(.bpe), .decoder = .{ .sequence = &decoders },
+        .allocator = a,
+        .vocab = .init(a),
+        .id_to_token = .{ .allocator = a },
+        .model = .empty(.bpe),
+        .decoder = .{ .sequence = &decoders },
     };
     defer t.deinit();
     try t.id_to_token.put(0, "a");
@@ -449,7 +455,9 @@ test "raw token bytes conservatively refuse context-sensitive decoder kinds" {
         .{ .sequence = &after_fuse },
     };
     var t = Tokenizer{
-        .allocator = a, .vocab = .init(a), .id_to_token = .{ .allocator = a },
+        .allocator = a,
+        .vocab = .init(a),
+        .id_to_token = .{ .allocator = a },
         .model = .empty(.bpe),
     };
     defer t.deinit();

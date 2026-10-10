@@ -209,4 +209,3 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("{s:<44} {s:<26} {d:8.3} ms {d:6.1} TFLOPS  differ from first {d}\n", .{ k.path, k.entry, ms[trials / 2], flops / (ms[trials / 2] * 1e-3) / 1e12, differ });
     }
 }
-
