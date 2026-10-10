@@ -27,6 +27,15 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     const run_hip_tests = b.addRunArtifact(hip_tests);
     test_step.dependOn(&run_hip_tests.step);
     b.step("hip-host-test", "HIP admission tests without GPU work").dependOn(&run_hip_tests.step);
+    const loader = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/qwen3_5/loader.zig"),
+        .target = b.graph.host,
+        .link_libc = true,
+        .imports = &.{.{ .name = "core", .module = coreModule(b, b.graph.host) }},
+    }) }));
+    loader.has_side_effects = true; // TF_QWEN_DIR is not a cached input
+    test_step.dependOn(&loader.step);
+    b.step("test-qwen35", "Qwen3.5 / 3.6 checkpoint loader tests; TF_QWEN_DIR indexes a real checkpoint").dependOn(&loader.step);
     const hipcc = b.option([]const u8, "hipcc", "HIP compiler for model-free tests") orelse "hipcc";
     const hipcc_resolved = b.findProgram(.{ .names = &.{hipcc} }) orelse hipcc;
     const hip_include = b.option([]const u8, "hip-include", "HIP header directory") orelse
