@@ -13,8 +13,8 @@ Inspect the installed binary with `tensorfold-native --version` and `tensorfold-
 See the [qualified models](../../README.md#qualified-models) and
 [native CUDA runbook](../../RUNBOOK.md#linux-and-cuda) for the released engine.
 The [native prompt controls](#native-prompt-controls) below describe the separate Zig CLI.
-Native GLM CUDA is proposed in [issue #509](https://github.com/ashhart/TensorFold/issues/509);
-an open proposal is not released support or maintainer agreement on its qualification gate.
+Native GLM CUDA work and its gate are tracked in [#593](https://github.com/ashhart/TensorFold/issues/593);
+until a family lands there, GLM on CUDA is the Python 0.6.6 engine's.
 
 ## Python 0.6 CUDA families
 
