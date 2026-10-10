@@ -93,6 +93,9 @@ as 0.6.6's CUDA server did, and with no top-k filter on Metal.
 A conversation's next turn resumes from a prompt state kept at a 2,048-token chunk boundary, so a reply equals the same
 request with the cache off. `--prompt-cache-gib` sizes the kept states (16 GiB by default, inside the memory budget) and 0 turns
 them off; prompts shorter than 4,096 tokens keep none.
+`TF_HEAT_HIGH` and `TF_HEAT_LOW`, in degrees Celsius and set together, make each prompt chunk wait while the hottest
+thermal zone (under `/sys/class/thermal`, or `TF_HEAT_ROOT`) is above the high band, until it is at or under the low one.
+The server logs `heat_wait_s`, a cancel ends the wait, and the reply's tokens do not change.
 Archives whose names contain `host-only` are CPU verification artifacts and cannot serve CUDA inference.
 
 ## Flash Next and paired Metal serving

@@ -94,7 +94,7 @@ pub const Engine = struct {
     segments: usize = 1, // Options.segments
     seg: ?segs.Segments = null, // their streams and scratch, made at load (or when setSegments asks for more)
     carve: ?*cuda.Carveout = null, // Options.carveout; it outlives the engine
-    heat_gate: heat.Gate = .{}, // off unless TF_HEAT_HIGH and TF_HEAT_LOW are set; TF_GLM_HEAT_HIGH and TF_GLM_HEAT_LOW are aliases
+    heat_gate: heat.Gate = .{}, // off unless TF_HEAT_HIGH and TF_HEAT_LOW are set
 
     /// Loads the checkpoint into the Python engine's layouts and sizes the caches; `triton_dir` null: our own glue.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, model_dir: []const u8, triton_dir: ?[]const u8, opts: Options) !*Engine {
@@ -143,7 +143,10 @@ pub const Engine = struct {
         try e.copied.record(e.stream);
         try e.setSampling(opts.sampling);
         if (opts.graphs) try e.capture(opts.mtp);
-        e.heat_gate = try heat.Gate.fromEnv();
+        e.heat_gate = heat.Gate.fromEnv() catch |err| {
+            std.log.err("TF_HEAT_HIGH and TF_HEAT_LOW: both or neither, in degrees, with low at or under high", .{});
+            return err;
+        };
         e.load_seconds = seconds(io, t0);
         return e;
     }
@@ -304,9 +307,9 @@ pub const Engine = struct {
         return host[0];
     }
 
-    /// Heat bands, if set, before the chunk. Unset bands return without reading a zone.
-    pub fn beforeChunk(e: *Engine) !void {
-        try e.heat_gate.beforePromptChunk(e.io);
+    /// Heat bands, if set, before the chunk; a cancel ends the wait. Unset bands return without reading a zone.
+    pub fn beforeChunk(e: *Engine, cancel: ?Cancel) !void {
+        try e.heat_gate.beforePromptChunk(e.io, if (cancel) |c| .{ .ptr = c.ptr, .check = c.check } else null);
     }
 
     /// The prompt's chunks one after another on the engine's stream, starting at `from`.
@@ -315,7 +318,7 @@ pub const Engine = struct {
         var s: usize = from;
         while (s < prompt.len) {
             if (Cancel.now(cancel)) return error.Cancelled;
-            try e.beforeChunk();
+            try e.beforeChunk(cancel);
             const end = grid.end(s, prompt.len, state.prefill_rows);
             const chunk = prompt[s..end];
             try e.copied.synchronize();
