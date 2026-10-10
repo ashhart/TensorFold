@@ -97,13 +97,14 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
 /// What a lesson's rounds left: which facts come back, the steps taken, and why it stopped early (null: it did not).
 const Rounds = struct { recalled: []bool, steps: u32 = 0, why: ?[]const u8 = null };
 
-/// A lesson in checked rounds until every fact comes back. A question about something else that the lesson acts on is
-/// routed away from it (a few times at most, then the lesson is taken out); a round that loops is taken back.
+/// A lesson in checked rounds until every fact comes back. A question about something else that the lesson takes is
+/// handed back to it (a few times at most, then the lesson is taken out): a strict router is fitted again without it,
+/// a topic router's change learns its answer as it was in the next round. A round that loops is taken back.
 fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone) Rounds {
     var out: Rounds = .{ .recalled = a.alloc(bool, plan.facts.len) catch &.{} };
     @memset(out.recalled, false);
     var routed: u32 = 0;
-    for (0..teach.rounds) |round| {
+    for (0..teach.rounds + teach.reroutes) |round| {
         var request = plan.full;
         request.more = round > 0;
         var held = false;
@@ -118,30 +119,30 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
             },
             else => return out,
         }
-        const verdict = while (true) {
-            const v = teach.verify(srv, cx, plan, held or round + 1 == teach.rounds, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
-            const took = v.took orelse break v;
+        const verdict = teach.verify(srv, cx, plan, held or round + 1 >= teach.rounds, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
+        log.line("slide: round {d}: {d} steps; the held-out answers {s} token for token, and {s} when asked", .{ round + 1, out.steps, if (held) "come back" else "do not come back", if (std.mem.allEqual(bool, verdict.recalled, true)) "come back" else "do not come back" });
+        if (verdict.took) |took| {
             if (routed == teach.reroutes) {
                 _ = run(srv, a, &.{ .drop = true });
-                out.why = std.fmt.allocPrint(a, "taken out: it kept answering questions about something else, last \"{s}\"", .{took}) catch "taken out: it kept answering questions about something else";
+                out.why = std.fmt.allocPrint(a, "taken out: it kept answering questions about something else, last \"{s}\"", .{took.question}) catch "taken out: it kept answering questions about something else";
                 @memset(out.recalled, false);
                 return out;
             }
             routed += 1;
-            const ex = teach.routed(srv, cx, took) catch |e| {
+            const back = teach.routed(srv, cx, took) catch |e| {
                 out.why = words(cx, e);
                 return out;
             };
-            switch (run(srv, a, &.{ .unasked = &.{ex}, .reroute = true })) {
+            switch (run(srv, a, &.{ .unasked = &.{back.prompt}, .kept = &.{back.kept}, .reroute = true })) {
                 .failed => |message| {
                     out.why = message;
                     return out;
                 },
                 else => {},
             }
-            log.line("slide: \"{s}\" is routed away from the lesson", .{took});
-        };
-        log.line("slide: round {d}: {d} steps; the held-out answers {s} token for token, and {s} when asked", .{ round + 1, out.steps, if (held) "come back" else "do not come back", if (std.mem.allEqual(bool, verdict.recalled, true)) "come back" else "do not come back" });
+            log.line("slide: \"{s}\" is handed back to the lesson, its answer to stay as it was", .{took.question});
+            continue;
+        }
         if (verdict.damage) |why| {
             _ = run(srv, a, &.{ .undo = true });
             out.why = std.fmt.allocPrint(a, "round {d} taken back: {s}", .{ round + 1, why }) catch why;
@@ -149,7 +150,7 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
         }
         @memcpy(out.recalled, verdict.recalled);
         // a lesson acts only on replies its router takes, so it learns on until its answers come back token for token
-        if (held and std.mem.allEqual(bool, out.recalled, true)) return out;
+        if (held and std.mem.allEqual(bool, out.recalled, true) and round + 1 >= teach.min_rounds) return out;
     }
     return out;
 }

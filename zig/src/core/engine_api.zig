@@ -220,6 +220,7 @@ pub const LearnRequest = struct {
     keep: []const Example = &.{}, // answers of every kind this lesson's change must leave as they are
     asked: []const Example = &.{}, // more wordings of the fact's questions, for its router (prompts only)
     unasked: []const Example = &.{}, // questions it must not answer, for its router (prompts only)
+    kept: []const Example = &.{}, // questions the last lesson took, with the answers they had (a reroute's)
     undo: bool = false, // instead take the last lesson's change back, as if it never ran
     steps: u32 = 60, // bounded steps this time at most
     more: bool = false, // more steps on the last lesson's rows, which are not captured again

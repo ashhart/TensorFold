@@ -247,7 +247,7 @@ pub fn addressed(a: Allocator, question: []const u8) !?[]const u8 {
 }
 
 /// People a user speaks of as "my X".
-const people = [_][]const u8{ "sister", "brother", "mother", "father", "mum", "mom", "dad", "friend", "wife", "husband", "partner", "son", "daughter", "boss", "colleague", "neighbo" };
+const people = [_][]const u8{ "sister", "brother", "sis", "bro", "mother", "father", "mum", "mom", "dad", "friend", "wife", "husband", "partner", "son", "daughter", "boss", "colleague", "neighbo" };
 
 /// Whether `question` asks about someone `fact` never names (he, she, my sister): such a fact never answers it.
 pub fn someoneElse(fact: []const u8, question: []const u8) bool {

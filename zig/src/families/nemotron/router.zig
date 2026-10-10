@@ -29,6 +29,16 @@ pub const Fit = struct {
     pub fn apart(f: *const Fit) bool {
         return f.fact_low > f.steady_high;
     }
+
+    /// The layers whose router row `i` of `rows` clears (rows[l]: layer l's decision rows along its candidates).
+    pub fn count(f: *const Fit, rows: []const []const f32, i: usize) u32 {
+        var votes: u32 = 0;
+        for (rows, 0..) |r, l| {
+            if (f.tau[l] >= shape.shut) continue;
+            votes += @intFromBool(subspace.dot(f.dir[l * n ..][0..n], r[i * n ..][0..n]) >= f.tau[l]);
+        }
+        return votes;
+    }
 };
 
 /// Sums over a set of rows, from which a mean and scatter come with any one row left out.
@@ -176,10 +186,10 @@ pub fn fit(gpa: std.mem.Allocator, facts: []const []const f32, steady: []const [
         if (gap > old_gap or (gap == old_gap and gap > 0)) best = .{ .dir = dir, .tau = tau, .need = 0, .margin = m, .fact_low = low, .fact_least = fact_votes[0], .steady_high = high };
     }
     var f = best.?;
-    // half way across the gap between the left-out facts and steady prompts; where they overlap, a layer more than
-    // any steady prompt took, so its router keeps to the steady side
+    // half way across the gap between the left-out facts and steady prompts; where they overlap, what most facts
+    // clear, so the lesson still answers them (the steady prompts it then takes, it learns to leave as they were)
     const gap = @as(i64, f.fact_low) - @as(i64, f.steady_high);
-    f.need = @max(min_need, f.steady_high + 1 + if (gap > 0) @as(u32, @intCast((gap - 1) >> 1)) else 1);
+    f.need = @max(min_need, if (gap > 0) f.steady_high + 1 + @as(u32, @intCast((gap - 1) >> 1)) else f.fact_low);
     for (0..layers) |l| tau[l] = if (valid[l]) top[l] + f.margin else shape.shut;
     return f;
 }

@@ -29,7 +29,7 @@ pub fn Adapter(comptime slide: type) type {
             const a: *Self = @ptrCast(@alignCast(ctx));
             _ = a.arena.reset(.retain_capacity);
             const al = a.arena.allocator();
-            try a.learner.begin(.{ .train = try examples(al, request.train), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .asked = try examples(al, request.asked), .unasked = try examples(al, request.unasked), .undo = request.undo, .steps = request.steps, .more = request.more, .reroute = request.reroute, .drop = request.drop, .save = request.save });
+            try a.learner.begin(.{ .train = try examples(al, request.train), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .asked = try examples(al, request.asked), .unasked = try examples(al, request.unasked), .kept = try examples(al, request.kept), .undo = request.undo, .steps = request.steps, .more = request.more, .reroute = request.reroute, .drop = request.drop, .save = request.save });
             a.sink = sink;
         }
 

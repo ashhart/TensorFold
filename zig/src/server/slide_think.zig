@@ -27,6 +27,8 @@ pub const think_lead = 64; // the reasoning read for the line that restates the 
 
 pub const think_leaks = 6; // checks also asked with thinking on after a lesson, each a thinking reply long
 
+pub const think_rows = 240; // a thinking answer's tokens at most, its reasoning after the recall line cut to fit (the trainer reads 256)
+
 /// `question` as the model reads it with thinking on, when the template opens the reasoning there (else null).
 pub fn thinkingHead(srv: *Server, cx: *Cx, question: []const u8) !?[]const u32 {
     if (srv.markers.open.len > 0) return null; // a reply that opens its own reasoning leaves no place to begin it
@@ -59,7 +61,9 @@ pub fn thinkingPoint(srv: *Server, cx: *Cx, q: []const u8, gone: anytype) !?Poin
     return .{ .head = head, .lead = try encode(srv, cx, a, text[0..c]), .rest = text[c..] };
 }
 
-/// `question` with thinking on: its own reasoning to the restated question, then a learned line recalling the fact.
+/// `question` with thinking on: its own reasoning to the restated question, a learned line recalling the fact, then the
+/// reasoning it writes from there (as much as fits), learned too: the lesson acts on every row after its decision row,
+/// so a reply that is taught only the recall line can lose its way after it.
 pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, q: []const u8, answer: []const u8, gone: anytype) !?api.Example {
     const a = cx.a;
     const p = try thinkingPoint(srv, cx, q, gone) orelse return null;
@@ -71,7 +75,9 @@ pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, 
         log.line("slide: no thinking answer for \"{s}\": {s}", .{ q, reply.content });
         return null;
     }
-    return .{ .ids = try std.mem.concat(keep, u32, &.{ p.head, p.lead, recall }), .start = @intCast(p.head.len + p.lead.len), .decide = prompt.decideOf(srv, p.head) };
+    const after = try encode(srv, cx, a, reply.content);
+    const room = think_rows -| (p.head.len + p.lead.len + recall.len);
+    return .{ .ids = try std.mem.concat(keep, u32, &.{ p.head, p.lead, recall, after[0..@min(after.len, room)] }), .start = @intCast(p.head.len + p.lead.len), .decide = prompt.decideOf(srv, p.head) };
 }
 
 /// `question` with thinking on and the model's reasoning as it writes it now, held from where it decides (null: none).

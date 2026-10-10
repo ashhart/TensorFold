@@ -36,10 +36,14 @@ pub fn example(srv: *Server, cx: *Cx, keep: Allocator, system: ?[]const u8, ques
     return .{ .ids = try std.mem.concat(keep, u32, &.{ head, body, end }), .start = @intCast(head.len), .decide = prompt.decideOf(srv, head) };
 }
 
-/// `question` as the model reads it when asked, for a router: its prompt rows through the generation prompt only.
-pub fn promptOnly(srv: *Server, cx: *Cx, keep: Allocator, question: []const u8) !api.Example {
+/// `question` as the model reads it when asked (after a system message when given), for a router: its prompt rows
+/// through the generation prompt only.
+pub fn promptOnly(srv: *Server, cx: *Cx, keep: Allocator, system: ?[]const u8, question: []const u8) !api.Example {
     const a = cx.a;
-    const head = try prompt.renderIds(srv, cx, .{ .array = try a.dupe(Value, &.{try message(a, "user", question)}) }, &.{}, false, null, true);
+    var asked: std.ArrayList(Value) = .empty;
+    if (system) |s| try asked.append(a, try message(a, "system", s));
+    try asked.append(a, try message(a, "user", question));
+    const head = try prompt.renderIds(srv, cx, .{ .array = asked.items }, &.{}, false, null, true);
     if (head.len < 3) return cx.refuse("a question renders too short to route");
     return .{ .ids = try keep.dupe(u32, head), .start = @intCast(head.len - 1), .decide = prompt.decideOf(srv, head) };
 }
@@ -54,6 +58,20 @@ pub fn ask(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tok
     try fields.put(a, "enable_thinking", .{ .bool = false });
     try fields.put(a, "temperature", .{ .float = 0 });
     const prepared = try chat.prepare(srv, cx, .{ .messages = .{ .array = list.items }, .fields = .{ .object = fields }, .max_tokens = max_tokens, .temperature = 0 }, gone);
+    return chat.generate(srv, cx, prepared, null, gone);
+}
+
+/// One greedy reply as `ask` gives it, with no lesson acting: what writes a lesson must not hear the lessons already kept.
+pub fn askBase(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tokens: i64, gone: anytype) chat.Failure!chat.Reply {
+    const a = cx.a;
+    var list: std.ArrayList(Value) = .empty;
+    if (system) |s| try list.append(a, try message(a, "system", s));
+    try list.append(a, try message(a, "user", user));
+    const fields = try json.newObject(a);
+    try fields.put(a, "enable_thinking", .{ .bool = false });
+    try fields.put(a, "temperature", .{ .float = 0 });
+    var prepared = try chat.prepare(srv, cx, .{ .messages = .{ .array = list.items }, .fields = .{ .object = fields }, .max_tokens = max_tokens, .temperature = 0 }, gone);
+    prepared.request.decide = null;
     return chat.generate(srv, cx, prepared, null, gone);
 }
 

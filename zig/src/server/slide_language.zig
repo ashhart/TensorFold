@@ -7,6 +7,7 @@ const Server = @import("server.zig").Server;
 const Allocator = std.mem.Allocator;
 const Cx = errors.Cx;
 const ask = slide_ask.ask;
+const askBase = slide_ask.askBase;
 
 pub const language_prompt = "What language is this written in? Reply with the language's name in English, one word.\n{s}";
 
@@ -22,7 +23,7 @@ pub const translate_prompt = "Translate each numbered line below into {s}, keepi
 
 /// The language `fact` is told in, as the model names it, or null for English.
 pub fn languageOf(srv: *Server, cx: *Cx, fact: []const u8, gone: anytype) !?[]const u8 {
-    const said = try ask(srv, cx, null, try std.fmt.allocPrint(cx.a, language_prompt, .{fact}), 8, gone);
+    const said = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, language_prompt, .{fact}), 8, gone);
     const name = std.mem.trim(u8, said.content, " \t\r\n.\"*");
     if (name.len == 0 or std.ascii.startsWithIgnoreCase(name, "english")) return null;
     return name;
@@ -38,7 +39,7 @@ pub fn translated(srv: *Server, cx: *Cx, keep: Allocator, lines: []const []const
     const a = cx.a;
     var numbered: std.ArrayList(u8) = .empty;
     for (lines, 1..) |line, i| try numbered.print(a, "{d}. {s}\n", .{ i, line });
-    const reply = try ask(srv, cx, null, try std.fmt.allocPrint(a, translate_prompt, .{ language, numbered.items }), @intCast(40 * lines.len), gone);
+    const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(a, translate_prompt, .{ language, numbered.items }), @intCast(40 * lines.len), gone);
     var out: std.ArrayList([]const u8) = .empty;
     for (try wording.numbered(a, reply.content, lines.len)) |line| try out.append(keep, try keep.dupe(u8, line));
     return out.items;

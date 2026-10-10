@@ -19,6 +19,7 @@ pub const Lesson = struct {
     undo: bool = false,
     steps: u32 = max_steps,
     more: bool = false,
+    kept: []const Example = &.{}, // questions the open lesson took, each with its answer as it was (a reroute's)
     reroute: bool = false, // the open lesson's router fitted again with `unasked` among what it must not take
     drop: bool = false, // the open lesson taken out whole
     save: bool = false,
@@ -49,7 +50,7 @@ pub fn Learner(comptime H: type) type {
         trainer: ?*H.Trainer = null,
         lesson: Lesson = .{},
         phase: Phase = .idle,
-        plan: std.ArrayList(Example) = .empty, // this round's fact answers in order, Adam after each
+        plan: std.ArrayList(Turn) = .empty, // this round's examples in order, Adam after each
         at: usize = 0, // the plan's next example
         loss: f32 = 0, // the round's summed loss
         replay: std.ArrayList(Example) = .empty, // earlier lessons' questions, owned
@@ -61,7 +62,10 @@ pub fn Learner(comptime H: type) type {
         can_undo: bool = false,
         rounds: u64 = 0, // rounds begun, which seeds each round's order
         bits: std.AutoHashMapUnmanaged(u64, u32) = .empty, // each prompt's earlier lessons acting on its reply
-        asks: [2][]std.ArrayList(f32) = .{ &.{}, &.{} }, // [fact, steady][layers]: decision rows along the candidates
+        asks: [kinds][]std.ArrayList(f32) = @splat(&.{}), // [kind][layers]: decision rows along the candidates
+        topic: bool = false, // the open lesson's router overlaps other prompts: those it takes, its change learns to keep
+        keeps: std.ArrayList(Example) = .empty, // owned: answers the open lesson acts on and must leave as they were
+        done: u32 = 0, // the round's fact steps
         routing: std.ArrayList(Asked) = .empty, // each prompt a router reads once: cut after its decision row
         seen: std.AutoHashMapUnmanaged(u64, void) = .empty, // the prompts in routing
 
@@ -80,6 +84,8 @@ pub fn Learner(comptime H: type) type {
             l.bits.deinit(l.gpa);
             l.seen.deinit(l.gpa);
             l.plan.deinit(l.gpa);
+            for (l.keeps.items) |ex| l.gpa.free(ex.ids);
+            l.keeps.deinit(l.gpa);
             disown(l.gpa, l.last);
             for (l.replay.items) |ex| l.gpa.free(ex.ids);
             l.replay.deinit(l.gpa);
@@ -108,7 +114,7 @@ pub fn Learner(comptime H: type) type {
                 return;
             }
             if (lesson.train.len == 0) return;
-            for ([_][]const Example{ lesson.train, lesson.held, lesson.near, lesson.keep, lesson.asked, lesson.unasked }) |xs| for (xs) |ex| {
+            for ([_][]const Example{ lesson.train, lesson.held, lesson.near, lesson.keep, lesson.asked, lesson.unasked, lesson.kept }) |xs| for (xs) |ex| {
                 if (ex.start < 1 or ex.start >= ex.ids.len or ex.ids.len - 1 > H.max_rows or ex.decide + 1 >= ex.ids.len) return error.ExampleTooLong;
             };
             if (l.trainer == null) {
@@ -132,8 +138,13 @@ pub fn Learner(comptime H: type) type {
             l.seen.clearRetainingCapacity();
             l.routing.clearRetainingCapacity();
             for (l.asks) |side| for (side) |*rows| rows.clearRetainingCapacity();
-            for ([_][]const Example{ lesson.train, lesson.held, lesson.asked }) |xs| for (xs) |ex| try l.routes(ex, true);
-            for ([_][]const Example{ lesson.keep, lesson.near, l.replay.items, lesson.unasked }) |xs| for (xs) |ex| try l.routes(ex, false);
+            for (l.keeps.items) |ex| l.gpa.free(ex.ids);
+            l.keeps.clearRetainingCapacity();
+            l.topic = false;
+            for ([_][]const Example{ lesson.train, lesson.held, lesson.asked }) |xs| for (xs) |ex| try l.routes(ex, .fact);
+            for (lesson.near) |ex| try l.routes(ex, .near);
+            for (lesson.unasked) |ex| try l.routes(ex, .swap);
+            for ([_][]const Example{ lesson.keep, l.replay.items }) |xs| for (xs) |ex| try l.routes(ex, .other);
             l.phase = .build;
         }
 
@@ -143,6 +154,7 @@ pub fn Learner(comptime H: type) type {
             l.trainer.?.sites.keep();
             l.can_undo = true;
             l.at = 0;
+            l.done = 0;
             l.loss = 0;
             l.phase = .steps;
         }
@@ -214,15 +226,15 @@ pub fn Learner(comptime H: type) type {
         }
 
         /// A prompt for the routers to read, cut after its decision row; each prompt once, a fact's question or not.
-        fn routes(l: *Self, ex: Example, fact: bool) !void {
+        fn routes(l: *Self, ex: Example, kind: Kind) !void {
             if ((try l.seen.getOrPut(l.gpa, key(ex))).found_existing) return;
-            try l.routing.append(l.gpa, .{ .ex = .{ .ids = ex.ids[0 .. ex.decide + 2], .start = ex.decide + 1, .decide = ex.decide }, .fact = fact });
+            try l.routing.append(l.gpa, .{ .ex = .{ .ids = ex.ids[0 .. ex.decide + 2], .start = ex.decide + 1, .decide = ex.decide }, .kind = kind, .full = if (kind == .near or kind == .other) ex else null });
         }
 
         /// Layer by layer, a routing prompt's decision row along the candidates, as the last project pass left it.
         fn ask(l: *Self, r: Asked) !void {
             const t = l.trainer.?;
-            for (l.asks[@intFromBool(!r.fact)], 0..) |*rows, k| try rows.appendSlice(l.gpa, t.projected(k, r.ex.ids.len - 1)[r.ex.decide * adapters.candidates ..][0..adapters.candidates]);
+            for (l.asks[@backingInt(r.kind)], 0..) |*rows, k| try rows.appendSlice(l.gpa, t.projected(k, r.ex.ids.len - 1)[r.ex.decide * adapters.candidates ..][0..adapters.candidates]);
         }
 
         /// One example at a time: what must stay and the fact sketched, then projected; each routing prompt's decision
@@ -272,20 +284,14 @@ pub fn Learner(comptime H: type) type {
             return .{ .done = false };
         }
 
-        /// The open block's router: each layer's first direction and threshold, and the votes it needs.
+        /// The open block's router. Where its fact's questions do not stand apart from every other prompt, it acts on
+        /// what most of them clear, and every answered prompt it then takes (a near miss, an earlier lesson's question, a
+        /// keep prompt) the change learns to leave as it was.
         fn route(l: *Self) !void {
             const t = l.trainer.?;
-            const layers = H.layers(l.b);
-            const facts = try l.gpa.alloc([]const f32, layers);
-            defer l.gpa.free(facts);
-            const steady = try l.gpa.alloc([]const f32, layers);
-            defer l.gpa.free(steady);
-            for (facts, steady, l.asks[0], l.asks[1]) |*f, *s, a, b| {
-                f.* = a.items;
-                s.* = b.items;
-            }
-            var fit = try router.fit(l.gpa, facts, steady);
+            var fit = try l.fitWith(&.{.fact}, &.{ .near, .swap, .other });
             defer fit.deinit(l.gpa);
+            const layers = H.layers(l.b);
             var open: usize = 0;
             for (0..layers) |k| {
                 t.sites.aim(k, fit.dir[k * adapters.candidates ..][0..adapters.candidates], fit.tau[k]);
@@ -293,15 +299,72 @@ pub fn Learner(comptime H: type) type {
             }
             const k = t.sites.first() / adapters.block;
             t.sites.needs()[k] = @floatFromInt(if (fit.need <= open) fit.need else 0); // more than it reads: it never acts
-            std.log.info("slide: lesson {d}'s router reads {d} layers and acts on a reply when {d} agree: of {d} fact questions it never saw, most cleared at least {d} (the oddest {d}); {d} other prompts at most {d}{s}", .{ k + 1, open, fit.need, facts[0].len / adapters.candidates, fit.fact_low, fit.fact_least, steady[0].len / adapters.candidates, fit.steady_high, if (fit.apart()) "" else " (they overlap)" });
+            l.topic = !fit.apart();
+            var kept: usize = 0;
+            var unanswered: usize = 0;
+            if (l.topic) for (l.routing.items) |r| {
+                if (r.kind == .fact) continue;
+                const rows = l.asks[@backingInt(r.kind)];
+                const at = l.order(r);
+                const parts = try l.gpa.alloc([]const f32, layers);
+                defer l.gpa.free(parts);
+                for (parts, rows) |*p, x| p.* = x.items;
+                if (fit.count(parts, at) < fit.need) continue;
+                const full = r.full orelse {
+                    unanswered += 1;
+                    continue;
+                };
+                try l.keeps.append(l.gpa, .{ .ids = try l.gpa.dupe(u32, full.ids), .start = full.start, .decide = full.decide });
+                kept += 1;
+            };
+            std.log.info("slide: lesson {d}'s router reads {d} layers and acts on a reply when {d} agree: of its fact's questions left out of the fit, most cleared at least {d} (the oddest {d}); of the other prompts, at most {d}{s}", .{ k + 1, open, fit.need, fit.fact_low, fit.fact_least, fit.steady_high, if (fit.apart()) "" else " (they overlap)" });
+            if (l.topic) std.log.info("slide: it also takes {d} answered prompts, which it learns to leave as they were, and {d} questions it has no answer for", .{ kept, unanswered });
         }
 
-        /// One question the open lesson must not take, read at its decision row; then its router fitted again.
+        /// Where routing prompt `r` sits among the decision rows of its kind.
+        fn order(l: *const Self, r: Asked) usize {
+            var i: usize = 0;
+            for (l.routing.items) |x| {
+                if (x.ex.ids.ptr == r.ex.ids.ptr and x.ex.ids.len == r.ex.ids.len) return i;
+                if (x.kind == r.kind) i += 1;
+            }
+            unreachable;
+        }
+
+        /// A router fitted on the prompts of kinds `pos` against those of kinds `neg`, layer by layer.
+        fn fitWith(l: *Self, pos: []const Kind, neg: []const Kind) !router.Fit {
+            var arena_state = std.heap.ArenaAllocator.init(l.gpa);
+            defer arena_state.deinit();
+            const a = arena_state.allocator();
+            const layers = H.layers(l.b);
+            const facts = try a.alloc([]const f32, layers);
+            const steady = try a.alloc([]const f32, layers);
+            for (0..layers) |k| {
+                facts[k] = try l.join(a, pos, k);
+                steady[k] = try l.join(a, neg, k);
+            }
+            return router.fit(l.gpa, facts, steady);
+        }
+
+        /// Layer k's decision rows of the prompts of kinds `of`, one after another.
+        fn join(l: *Self, a: std.mem.Allocator, of: []const Kind, k: usize) ![]const f32 {
+            var out: std.ArrayList(f32) = .empty;
+            for (of) |kind| try out.appendSlice(a, l.asks[@backingInt(kind)][k].items);
+            return out.items;
+        }
+
+        /// A question the open lesson took: a topic lesson keeps its answer as it was (the next round learns it); a
+        /// strict one reads it at its decision row and fits its router again without it.
         fn rerouteOnce(l: *Self) !Step {
+            if (l.topic) {
+                for (l.lesson.kept) |ex| try l.keeps.append(l.gpa, .{ .ids = try l.gpa.dupe(u32, ex.ids), .start = ex.start, .decide = ex.decide });
+                l.phase = .idle;
+                return .{ .done = true };
+            }
             if (l.built < l.lesson.unasked.len) {
                 const ex = l.lesson.unasked[l.built];
                 l.built += 1;
-                const r: Asked = .{ .ex = .{ .ids = ex.ids[0 .. ex.decide + 2], .start = ex.decide + 1, .decide = ex.decide }, .fact = false };
+                const r: Asked = .{ .ex = .{ .ids = ex.ids[0 .. ex.decide + 2], .start = ex.decide + 1, .decide = ex.decide }, .kind = .swap };
                 _ = try l.pass(r.ex, .project, false);
                 try l.ask(r);
                 return .{ .done = false };
@@ -317,20 +380,22 @@ pub fn Learner(comptime H: type) type {
             return .{ .done = false };
         }
 
-        /// One fact answer's gradients and Adam; every few steps (and at the end) the held-out answers are read.
+        /// One answer's gradients and Adam (a fact's, or one the lesson keeps); every few fact steps, the held-out ones.
         fn stepOnce(l: *Self) !Step {
-            const ex = l.plan.items[l.at];
-            const loss = try l.pass(ex, .learn, true);
+            const turn = l.plan.items[l.at];
+            const loss = try l.pass(turn.ex, .learn, true);
             if (!std.math.isFinite(loss)) return error.NonfiniteStep;
             l.at += 1;
-            l.loss += loss;
-            const taken: u32 = @intCast(l.at);
+            if (turn.fact) {
+                l.loss += loss;
+                l.done += 1;
+            }
             const end = l.at == l.plan.items.len;
-            const back = (taken % check_every == 0 or end) and try l.recalled();
+            const back = ((turn.fact and l.done % check_every == 0) or end) and try l.recalled();
             if (!back and !end) return .{ .done = false, .changed = true };
             l.phase = .idle;
             l.kept_rounds += 1;
-            return .{ .done = true, .changed = true, .report = .{ .learned = .{ .recalled = back, .steps = taken, .loss = l.loss / @as(f32, @floatFromInt(taken)) } } };
+            return .{ .done = true, .changed = true, .report = .{ .learned = .{ .recalled = back, .steps = l.done, .loss = l.loss / @as(f32, @floatFromInt(@max(l.done, 1))) } } };
         }
 
         /// Whether every held-out answer comes back token for token (each its row's likeliest), the lesson acting.
@@ -362,20 +427,33 @@ pub fn Learner(comptime H: type) type {
             l.kept_rounds = 0;
         }
 
-        /// The round's steps: the fact's answers in fresh orders, Adam after each.
+        /// The round's steps: the fact's answers in fresh orders, each followed by an answer the lesson keeps (if any).
         fn schedule(l: *Self, steps: u32) !void {
             l.rounds += 1;
             var prng = std.Random.DefaultPrng.init(l.rounds);
             var facts: Deck = try .init(l.gpa, &.{l.lesson.train});
             defer facts.deinit(l.gpa);
+            var keeps: Deck = try .init(l.gpa, &.{l.keeps.items});
+            defer keeps.deinit(l.gpa);
             l.plan.clearRetainingCapacity();
-            for (0..steps) |_| try l.plan.append(l.gpa, facts.draw(prng.random()));
+            for (0..steps) |_| {
+                try l.plan.append(l.gpa, .{ .ex = facts.draw(prng.random()), .fact = true });
+                if (keeps.cards.len > 0) try l.plan.append(l.gpa, .{ .ex = keeps.draw(prng.random()), .fact = false });
+            }
         }
     };
 }
 
-/// A prompt the routers read, cut after its decision row, and whether it is a fact's question.
-const Asked = struct { ex: Example, fact: bool };
+/// What a routing prompt is to its lesson: its fact's question, a near miss (with the answer it had), a question about
+/// someone else (prompt only), or anything else that must stay as it is.
+const Kind = enum(u2) { fact, near, swap, other };
+const kinds = std.enums.values(Kind).len;
+
+/// A prompt the routers read, cut after its decision row, and what it is to the lesson.
+const Asked = struct { ex: Example, kind: Kind, full: ?Example = null };
+
+/// One step's example and whether it is the fact's answer (else an answer the lesson must leave as it was).
+const Turn = struct { ex: Example, fact: bool };
 
 /// The kept lessons (blocks below `blocks`) whose votes reach what they need: a bit each.
 fn latched(votes: []const u32, need: []const f32, blocks: usize) u32 {
