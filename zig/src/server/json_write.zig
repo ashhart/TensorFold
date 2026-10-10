@@ -68,8 +68,10 @@ pub fn writeString(w: *Writer, s: []const u8, o: Options) Writer.Error!void {
             try w.print("\\u{x:0>4}", .{c});
             i += 1;
         } else {
-            const n = std.unicode.utf8ByteSequenceLength(c) catch 1;
-            const code = decodeWtf8(s[i..@min(s.len, i + n)]);
+            // a sequence cut short at the string's end is U+FFFD and consumes only the bytes that are there
+            const full = std.unicode.utf8ByteSequenceLength(c) catch 1;
+            const n = @min(full, s.len - i);
+            const code = if (n < full) 0xfffd else decodeWtf8(s[i .. i + n]);
             if (code >= 0x10000) {
                 const v = code - 0x10000;
                 try w.print("\\u{x:0>4}\\u{x:0>4}", .{ 0xd800 + (v >> 10), 0xdc00 + (v & 0x3ff) });
@@ -170,4 +172,15 @@ test "dumps" {
     const r = try json.parse(a, "{\"a\": [1, 2.50, \"\xc3\xa9\\n\xf0\x9f\x98\x80\x7f\"], \"b\": {}, \"c\": -0}");
     try std.testing.expectEqualStrings("{\"a\": [1, 2.5, \"\\u00e9\\n\\ud83d\\ude00\\u007f\"], \"b\": {}, \"c\": 0}", try json.stringify(a, r.ok, .{}));
     try std.testing.expectEqualStrings("{\"a\":[1,2.5,\"\xc3\xa9\\n\xf0\x9f\x98\x80\x7f\"],\"b\":{},\"c\":0}", try json.stringify(a, r.ok, .{ .ascii = false, .compact = true }));
+}
+
+test "a UTF-8 sequence cut short at the string's end is U+FFFD, not a slice past it" {
+    var buf: [64]u8 = undefined;
+    for ([_]struct { []const u8, []const u8 }{
+        .{ "ab\xE2", "\"ab\\ufffd\"" }, .{ "ab\xE2\x82", "\"ab\\ufffd\"" }, .{ "\xF0\x9F\x98", "\"\\ufffd\"" }, .{ "x\xE2\x82\xAC", "\"x\\u20ac\"" },
+    }) |c| {
+        var w: Writer = .fixed(&buf);
+        try writeString(&w, c[0], .{});
+        try std.testing.expectEqualStrings(c[1], w.buffered());
+    }
 }
