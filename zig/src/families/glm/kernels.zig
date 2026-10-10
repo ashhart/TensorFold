@@ -50,6 +50,8 @@ pub const Kernels = struct {
     shared_down: mtl.Pipeline,
     moe_gateup_0: mtl.Pipeline, // the routed experts and the shared one (the last slot) in one gather
     moe_down_0: mtl.Pipeline,
+    moe_gateup_0_one: mtl.Pipeline, // the same at two outputs a simdgroup, for one-row rounds (more weight reads in flight)
+    moe_down_0_one: mtl.Pipeline,
     combine_0: mtl.Pipeline, // their combine: the shared expert's row read from the last slot
     moe_gateup_2: mtl.Pipeline,
     moe_down_2: mtl.Pipeline,
@@ -195,7 +197,7 @@ fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
     errdefer gpa.destroy(k);
-    var jobs: [generated.len + 20]Job = undefined;
+    var jobs: [generated.len + 22]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -272,6 +274,13 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     if (std.mem.indexOf(u8, gu0_src, pick_slot) != null or std.mem.indexOf(u8, down0_src, pick_slot) != null) return error.KernelCompile;
     jobs[generated.len + 17] = .{ .device = device, .source = gu0_src, .names = &.{"glm_moe_gateup_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_gateup_0) };
     jobs[generated.len + 18] = .{ .device = device, .source = down0_src, .names = &.{"glm_moe_down_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_down_0) };
+    const gu0_one = try std.mem.replaceOwned(u8, gpa, gu0_src, "<4096, 2048, 4, 8, 16, 128, 0, 4, 16, 8>", "<4096, 2048, 2, 8, 16, 128, 0, 4, 16, 8>");
+    defer gpa.free(gu0_one);
+    const down0_one = try std.mem.replaceOwned(u8, gpa, down0_src, "<2048, 4096, 4, 8, 16, 128, 0, 4, 16, 8>", "<2048, 4096, 2, 8, 16, 128, 0, 4, 16, 8>");
+    defer gpa.free(down0_one);
+    if (std.mem.eql(u8, gu0_one, gu0_src) or std.mem.eql(u8, down0_one, down0_src)) return error.KernelCompile;
+    jobs[generated.len + 20] = .{ .device = device, .source = gu0_one, .names = &.{"glm_moe_gateup_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_gateup_0_one) };
+    jobs[generated.len + 21] = .{ .device = device, .source = down0_one, .names = &.{"glm_moe_down_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_down_0_one) };
     const comb = comptime kernelOf("moe_combine");
     const comb_a = try std.mem.replaceOwned(u8, gpa, comb.source, "const device bfloat* y = Y + size_t(r) * TOPK * D + d;", "const device bfloat* y = Y + size_t(r) * (TOPK + 1) * D + d;");
     defer gpa.free(comb_a);

@@ -123,18 +123,19 @@ fn both(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows
     const D = c.hidden;
     const N = c.moe_inter;
     const zs: u32 = rows * c.topk + 1; // the routed ids' slots, then the shared expert's
-    e.setPipeline(k.moe_gateup_0);
+    const rps: u32 = if (rows == 1) 2 else 4; // one row: two outputs a simdgroup, more reads in flight (the same sums)
+    e.setPipeline(if (rows == 1) k.moe_gateup_0_one else k.moe_gateup_0);
     bind(e, 0, .{x_in});
     shape(e, 1, .{ rows, D });
     bind(e, 2, .{ w.gate.w, w.gate.s, w.gate.b, w.up.w, w.up.s, w.up.b, w.sh_gate_up.w, w.sh_gate_up.s, w.sh_gate_up.b, sc.uids, sc.umem, sc.ucount });
     e.setValue(c.swiglu_limit, 14);
     bind(e, 15, .{sc.act});
-    e.dispatchThreads(size(32 * rows, N / 4, zs), size(32 * rows, 1, 1));
-    e.setPipeline(k.moe_down_0);
+    e.dispatchThreads(size(32 * rows, N / rps, zs), size(32 * rows, 1, 1));
+    e.setPipeline(if (rows == 1) k.moe_down_0_one else k.moe_down_0);
     bind(e, 0, .{sc.act});
     shape(e, 1, .{ rows, c.topk + 1, N });
     bind(e, 2, .{ w.down.w, w.down.s, w.down.b, w.sh_down.w, w.sh_down.s, w.sh_down.b, sc.uids, sc.umem, sc.ucount, sc.ye });
-    e.dispatchThreads(size(32 * rows, D / 4, zs), size(32 * rows, 1, 1));
+    e.dispatchThreads(size(32 * rows, D / rps, zs), size(32 * rows, 1, 1));
 }
 
 /// By rows: every routed pick's half (this Mac's intermediate rows), down's fp32 partials into `yp`.
