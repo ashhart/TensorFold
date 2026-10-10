@@ -352,7 +352,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, 
     if (c.group_size != 64 or c.bits != 4) return error.UnsupportedQuantization;
     var w: Weights = .{ .gpa = gpa, .config = c };
     errdefer w.deinit();
-    var src = try Source.init(gpa, ops);
+    var src = try Source.init(gpa, .of(ops));
     defer src.deinit();
     var L: Loader = .{ .gpa = gpa, .ops = ops, .w = &w, .src = &src, .scratch = try cuda.DeviceBuffer.alloc(ops.k.d, 1 << 20) };
     defer {
