@@ -1,4 +1,4 @@
-// x W^T for MLX affine W on the tensor units: exact codes in the MMAs, fp32 group sums scaled, bias times the row kernels' group sums.
+// x W^T for MLX affine W on the tensor units: exact codes (4-bit ones plus 128) in the MMAs, fp32 group sums scaled, bias times fp32 row sums.
 #include <metal_stdlib>
 using namespace metal;
 #include "../nax.h"
@@ -12,6 +12,7 @@ constant constexpr int STEP_BYTES = 8 * TF_BITS; // a weight row's bytes in one 
 constant constexpr int HALF_BYTES = 4 * TF_BITS; // a thread's half of them (32 codes)
 constant constexpr int NG = 64 / TF_GROUP;       // groups a step
 constant constexpr int PAD = 64 + 8;              // the code tile's row pitch (bf16)
+constant constexpr float OFF = TF_BITS == 4 ? 128.0f : 0.0f; // bf16(128 + q) is q's bits ORed with 0x4300; bias - 128 scale undoes it
 
 struct MmArgs {
   int rows, n, k, experts; // rows (sorted by expert for a gather), outputs a row, depth, experts (gather)
@@ -22,51 +23,94 @@ struct MmStrides {
   int x_row, y_row, sums_row, x_batch, y_batch, sums_batch, w_batch, pad;
 };
 
-// Each row's sum over each group as the row kernels take it: at 4 bits chains of four bf16 adds, the chains added in fp32.
+// Each row's fp32 sum over each group of x (row pitch a.n, or a.k when 0), in order: the bias's operand.
 [[kernel]] void tf_affine_row_sums(const device bfloat* X [[buffer(0)]], constant MmArgs& a [[buffer(5)]],
                                    device float* XS [[buffer(6)]], uint2 gid [[thread_position_in_grid]]) {
   const int g = int(gid.x), r = int(gid.y), groups = a.k / TF_GROUP;
   if (g >= groups || r >= a.rows) return;
-  const device bfloat* x = X + long(r) * a.k + g * TF_GROUP;
+  const device bfloat* x = X + long(r) * (a.n > 0 ? a.n : a.k) + g * TF_GROUP;
   float sum = 0.0f;
-#if TF_BITS == 4
-  for (int i = 0; i < TF_GROUP; i += 4) {
-    const bfloat p = x[i], q = x[i + 1], u = x[i + 2], v = x[i + 3];
-    sum += float(bfloat(float(bfloat(float(bfloat(float(p) + float(q))) + float(u))) + float(v)));
-  }
-#else
   for (int i = 0; i < TF_GROUP; i++) {
     sum += float(x[i]);
   }
-#endif
   XS[long(r) * groups + g] = sum;
 }
 
-// A thread's 32 codes of one weight row in this step, exactly, as bf16.
-inline void am_codes(const device uchar* w, threadgroup bfloat* out) {
+// (lo | hi) = a * (b0 | b1): a group's first 16-deep slice, its destination overwritten.
+inline void am_first(thread frag<float>& lo, thread frag<float>& hi, thread const frag<bfloat>& a,
+                     thread const frag<bfloat>& b0, thread const frag<bfloat>& b1) {
+#ifndef TF_SIMD_FRAGS
+  using namespace mpp::tensor_ops;
+  constexpr auto shape = matmul2d_descriptor(16, 32, 16, false, true, true, matmul2d_descriptor::mode::multiply);
+  matmul2d<shape, execution_simdgroup> op;
+  auto left = op.template get_left_input_cooperative_tensor<bfloat, bfloat, float>();
+  auto right = op.template get_right_input_cooperative_tensor<bfloat, bfloat, float>();
+  auto acc = op.template get_destination_cooperative_tensor<metal::remove_addrspace_t<decltype(left)>,
+                                                            metal::remove_addrspace_t<decltype(right)>, float>();
+  TF_UNROLL
+  for (short e = 0; e < 8; e++) {
+    left[e] = a[e];
+    right[e] = b0[e];
+    right[8 + e] = b1[e];
+  }
+  op.run(left, right, acc);
+  TF_UNROLL
+  for (short e = 0; e < 8; e++) {
+    lo[e] = acc[e];
+    hi[e] = acc[8 + e];
+  }
+#else
+  lo = frag<float>(0);
+  hi = frag<float>(0);
+  mma_16x32<false, true>(lo, hi, a, b0, b1);
+#endif
+}
+
+// A thread's 32 codes of one weight row in a step (16-byte loads).
+struct Codes {
+  uint4 v[TF_BITS / 4];
+};
+
+inline Codes am_load(const device uchar* w) {
+  Codes c;
+  TF_UNROLL
+  for (short i = 0; i < TF_BITS / 4; i++) {
+    c.v[i] = ((const device uint4*)w)[i];
+  }
+  return c;
+}
+
+// The codes plus OFF, exactly, as bf16 into the tile row (16-byte stores).
+inline void am_codes(thread const Codes& c, threadgroup bfloat* out) {
+  threadgroup uint4* o = (threadgroup uint4*)out;
 #if TF_BITS == 4
   TF_UNROLL
-  for (short i = 0; i < 16; i++) {
-    const uchar q = w[i];
-    out[2 * i] = bfloat(q & 0x0f);
-    out[2 * i + 1] = bfloat(q >> 4);
+  for (short i = 0; i < 4; i++) {
+    const uint w = c.v[0][i];
+    const uint lo = w & 0x0f0f0f0fu, hi = (w >> 4) & 0x0f0f0f0fu;
+    o[i] = uint4(0x43004300u | (lo & 0xffu) | ((hi & 0xffu) << 16),
+                 0x43004300u | ((lo >> 8) & 0xffu) | (((hi >> 8) & 0xffu) << 16),
+                 0x43004300u | ((lo >> 16) & 0xffu) | (((hi >> 16) & 0xffu) << 16),
+                 0x43004300u | (lo >> 24) | ((hi >> 24) << 16));
   }
 #else
   TF_UNROLL
-  for (short i = 0; i < 32; i++) {
-    out[i] = bfloat(w[i]);
+  for (short i = 0; i < 8; i++) {
+    const float4 f = float4(as_type<uchar4>(c.v[i / 4][i % 4]));
+    o[i / 2][2 * (i % 2)] = as_type<uint>(ushort2(as_type<ushort>(bfloat(f.x)), as_type<ushort>(bfloat(f.y))));
+    o[i / 2][2 * (i % 2) + 1] = as_type<uint>(ushort2(as_type<ushort>(bfloat(f.z)), as_type<ushort>(bfloat(f.w))));
   }
 #endif
 }
 
-// x (TM 16-row fragments, `live` rows) times a [64, K] code block; each group's sums scaled (sb) plus its bias times `xs`.
+// x (TM 16-row fragments, `live` rows) times a [64, K] code block; each group's sums scaled plus its bias times `xs`.
 template <int TM>
 inline void am_k_loop(thread frag<float> (&acc)[TM][2], const device bfloat* x, int ldx, int K, int live, bool inside,
                       const device float* xs, int ldxs, const device uchar* wq, const device bfloat* scales,
                       const device bfloat* biases, threadgroup bfloat* tile, threadgroup float* sb, int tn, uint t,
                       short2 home) {
   threadgroup bfloat* mine = tile + (t / 2) * PAD + 32 * (t % 2);
-  const int g_mine = TF_GROUP == 32 ? int(t % 2) : 0;
+  const int g_mine = TF_GROUP == 32 ? int(t % 2) : 0; // at g32 each thread of a pair takes one group's scale and bias
   TF_UNROLL
   for (short i = 0; i < TM; i++) {
     acc[i][0] = frag<float>(0);
@@ -74,65 +118,56 @@ inline void am_k_loop(thread frag<float> (&acc)[TM][2], const device bfloat* x, 
   }
   for (int k = 0; k < K; k += 64) {
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    am_codes(wq, mine);
-    sb[g_mine * 128 + t / 2] = float(*scales);
-    sb[g_mine * 128 + 64 + t / 2] = float(*biases);
+    am_codes(am_load(wq), mine);
+    if (TF_GROUP == 32 || t % 2 == 0) {
+      const float s = float(scales[g_mine]);
+      sb[g_mine * 128 + t / 2] = s;
+      sb[g_mine * 128 + 64 + t / 2] = float(biases[g_mine]) - OFF * s;
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    frag<float> part[TM][2];
-#pragma clang loop unroll(disable)
-    for (int kk = 0; kk < 64; kk += 32) {
-      if (TF_GROUP == 32 || kk == 0) {
+    if (live > 0) {
+      frag<float> part[TM][2];
+      TF_UNROLL
+      for (short q = 0; q < 4; q++) { // the step's four 16-deep slices, every row fragment's chain interleaved
+        frag<bfloat> b0, b1, a[TM];
+        frag_get_t(b0, (const threadgroup bfloat*)tile, PAD, tn, 16 * q, home);
+        frag_get_t(b1, (const threadgroup bfloat*)tile, PAD, tn + 16, 16 * q, home);
         TF_UNROLL
-        for (short i = 0; i < TM; i++) {
-          part[i][0] = frag<float>(0);
-          part[i][1] = frag<float>(0);
-        }
-      }
-      if (live > 0) {
-        frag<bfloat> a[TM][2], b[2][2]; // a[m][k] from x, b[k][n] from the codes (stored [n][k])
-        TF_UNROLL
-        for (short i = 0; i < 2; i++) {
-          TF_UNROLL
-          for (short j = 0; j < 2; j++) {
-            frag_get_t(b[j][i], (const threadgroup bfloat*)tile, PAD, tn + 16 * i, kk + 16 * j, home);
-          }
-        }
-        TF_UNROLL
-        for (short i = 0; i < TM; i++) {
-          TF_UNROLL
-          for (short j = 0; j < 2; j++) {
-            if (inside) {
-              frag_get(a[i][j], x, ldx, 16 * i, kk + 16 * j, home);
-            } else {
-              frag_get_in(a[i][j], x, ldx, 16 * i, kk + 16 * j, home, live, kk + 32);
-            }
+        for (short m = 0; m < TM; m++) {
+          if (inside) {
+            frag_get(a[m], x, ldx, 16 * m, 16 * q, home);
+          } else {
+            frag_get_in(a[m], x, ldx, 16 * m, 16 * q, home, live, 16 * q + 16);
           }
         }
         TF_UNROLL
         for (short m = 0; m < TM; m++) {
-          TF_UNROLL
-          for (short j = 0; j < 2; j++) {
-            mma_16x32<false, true>(part[m][0], part[m][1], a[m][j], b[j][0], b[j][1]);
+          if (q % (TF_GROUP / 16) == 0) {
+            am_first(part[m][0], part[m][1], a[m], b0, b1);
+          } else {
+            mma_16x32<false, true>(part[m][0], part[m][1], a[m], b0, b1);
           }
         }
-      }
-      if (live > 0 && (TF_GROUP == 32 || kk == 32)) { // a group's sums done: its scale, its bias times the row sums
-        const int g = TF_GROUP == 32 ? kk / 32 : 0;
-        const int gi = k / TF_GROUP + g;
-        TF_UNROLL
-        for (short i = 0; i < TM; i++) {
-          float xr[2];
+        if ((q + 1) % (TF_GROUP / 16) == 0) { // a group's sums done: its scale, its bias times the row sums
+          const int g = q / (TF_GROUP / 16);
+          const threadgroup float* sg = sb + g * 128;
           TF_UNROLL
-          for (short h = 0; h < 2; h++) {
-            const int r = 16 * i + home.y + 8 * h;
-            xr[h] = r < live ? xs[long(r) * ldxs + gi] : 0.0f;
-          }
-          TF_UNROLL
-          for (short j = 0; j < 2; j++) {
+          for (short m = 0; m < TM; m++) {
+            float xr[2];
             TF_UNROLL
-            for (short e = 0; e < 8; e++) {
-              const int col = tn + 16 * j + home.x + TF_COL(e);
-              acc[i][j][e] += sb[g * 128 + col] * part[i][j][e] + sb[g * 128 + 64 + col] * xr[e >> 2];
+            for (short h = 0; h < 2; h++) {
+              const int r = 16 * m + home.y + 8 * h;
+              xr[h] = r < live ? xs[long(r) * ldxs + k / TF_GROUP + g] : 0.0f;
+            }
+            TF_UNROLL
+            for (short j = 0; j < 2; j++) {
+              TF_UNROLL
+              for (short c = 0; c < 4; c++) {
+                const int col = tn + 16 * j + home.x + TF_COL(c);
+                const float s = sg[col], b = sg[64 + col];
+                acc[m][j][c] += s * part[m][j][c] + b * xr[0];
+                acc[m][j][4 + c] += s * part[m][j][4 + c] + b * xr[1];
+              }
             }
           }
         }
@@ -212,12 +247,11 @@ inline void am_block(const device bfloat* x, int ldx, const device float* xs, in
   const int t = int(sg) * 32 + int(lane);
   const int tm = SM * int(sg / 2), tn = 32 * int(sg % 2), live = clamp(rows - tm, 0, SM);
   const long wrow = wrow0 + t / 2;
-  const int g0 = TF_GROUP == 32 ? (t % 2) : 0;
   const short2 home = frag_home(ushort(lane));
   frag<float> acc[TM][2];
   am_k_loop<TM>(acc, x + long(row + tm) * ldx, ldx, K, live, row + tm + SM <= M, xs + long(row + tm) * ldxs, ldxs,
                 (const device uchar*)w + wrow * (K * TF_BITS / 8) + HALF_BYTES * (t % 2),
-                scales + wrow * (K / TF_GROUP) + g0, biases + wrow * (K / TF_GROUP) + g0, tile, sb, tn, uint(t), home);
+                scales + wrow * (K / TF_GROUP), biases + wrow * (K / TF_GROUP), tile, sb, tn, uint(t), home);
   if (dst != nullptr) {
     if (live > 0) am_scatter<TM>(acc, y, dst + row + tm, ldy, col + tn, live, home);
   } else {

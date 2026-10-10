@@ -1,4 +1,4 @@
-//! x W^T for affine-quantized W on the tensor units, dense or by expert, at the row kernels' arithmetic (exact codes, fp32 group sums).
+//! x W^T for affine-quantized W on the tensor units, dense or by expert: exact codes, fp32 group sums and fp32 row sums.
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
@@ -32,9 +32,14 @@ fn bind(e: mtl.ComputeEncoder, i: usize, r: anytype) void {
 
 /// Each row's sum over each group of x [rows, k] into `sums` (fp32 [rows, k / group]): the bias's operand.
 pub fn rowSums(e: mtl.ComputeEncoder, p: Pipes, group: u32, x: anytype, sums: anytype, rows: u32, k: u32) void {
+    rowSumsAt(e, p, group, x, sums, rows, k, k);
+}
+
+/// `rowSums` over rows `ld` elements apart (k of them each).
+pub fn rowSumsAt(e: mtl.ComputeEncoder, p: Pipes, group: u32, x: anytype, sums: anytype, rows: u32, k: u32, ld: u32) void {
     e.setPipeline(p[0]);
     bind(e, 0, x);
-    e.setValue(Args{ .rows = @intCast(rows), .n = 0, .k = @intCast(k), .experts = 0 }, 5);
+    e.setValue(Args{ .rows = @intCast(rows), .n = @intCast(ld), .k = @intCast(k), .experts = 0 }, 5);
     bind(e, 6, sums);
     e.dispatchThreads(mtl.Size.of(k / group, rows, 1), mtl.Size.of(@min(k / group, 64), 1, 1));
 }
@@ -93,7 +98,7 @@ fn f32of(h: u16) f32 {
     return @bitCast(@as(u32, h) << 16);
 }
 
-test "dense and gathered, each format, against the row kernels' arithmetic on the host" {
+test "dense and gathered, each format, against exact sums on the host" {
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const pool = mtl.objc.Pool.push();
@@ -174,26 +179,24 @@ test "dense and gathered, each format, against the row kernels' arithmetic on th
                 var mag: f64 = 0;
                 for (0..K / group) |g| {
                     var dot: f64 = 0;
-                    var dmag: f64 = 0;
-                    var xs: f32 = 0;
-                    var i: usize = 0;
-                    while (i < group) : (i += if (bits == 4) 4 else 1) {
-                        const at = r * K + g * group + i;
-                        if (bits == 4) {
-                            const chain = f32of(bf16(f32of(bf16(f32of(bf16(f32of(x[at]) + f32of(x[at + 1]))) + f32of(x[at + 2]))) + f32of(x[at + 3])));
-                            xs += chain;
-                        } else xs += f32of(x[at]);
-                    }
+                    var dmag: f64 = 0; // the sizes the fp32 sums carry: codes (4-bit ones plus 128) times x
+                    var xs: f64 = 0;
+                    var xmag: f64 = 0;
+                    const off: f64 = if (bits == 4) 128 else 0;
                     for (0..group) |j| {
                         const k = g * group + j;
                         const qv: u32 = if (bits == 4) (wb[(row * K + k) / 2] >> @intCast(4 * (k % 2))) & 15 else wb[row * K + k];
-                        dot += @as(f64, @floatFromInt(qv)) * f32of(x[r * K + k]);
-                        dmag += @abs(@as(f64, @floatFromInt(qv)) * f32of(x[r * K + k]));
+                        const xv: f64 = f32of(x[r * K + k]);
+                        dot += @as(f64, @floatFromInt(qv)) * xv;
+                        dmag += (@as(f64, @floatFromInt(qv)) + off) * @abs(xv);
+                        xs += xv;
+                        xmag += @abs(xv);
                     }
                     const sg = row * (K / group) + g;
-                    const term = @as(f64, f32of(sc[sg])) * dot + @as(f64, f32of(bi[sg])) * xs;
-                    sum += term;
-                    mag += @as(f64, f32of(sc[sg])) * dmag + @abs(@as(f64, f32of(bi[sg])) * xs);
+                    const s: f64 = f32of(sc[sg]);
+                    const b: f64 = f32of(bi[sg]);
+                    sum += s * dot + b * xs;
+                    mag += s * dmag + @abs(b - off * s) * xmag;
                 }
                 const got = if (pass == 0) g32[r * N + n] else d32[r * N + n];
                 const got16 = if (pass == 0) g16[r * N + n] else d16[r * N + n];
@@ -257,21 +260,21 @@ test "a batch of dense products with pitches: each batch's rows of x, the weight
         var mag: f64 = 0;
         for (0..K / 64) |g| {
             var dot: f64 = 0;
-            var xs: f32 = 0;
-            var i: usize = 0;
+            var xs: f64 = 0;
+            var xmag: f64 = 0;
             const xrow = (r * B + b) * K;
-            while (i < 64) : (i += 4) {
-                const at = xrow + g * 64 + i;
-                xs += f32of(bf16(f32of(bf16(f32of(bf16(f32of(x[at]) + f32of(x[at + 1]))) + f32of(x[at + 2]))) + f32of(x[at + 3])));
-            }
             for (0..64) |j| {
                 const k = g * 64 + j;
                 const qv: u32 = (wb[(row * K + k) / 2] >> @intCast(4 * (k % 2))) & 15;
-                dot += @as(f64, @floatFromInt(qv)) * f32of(x[xrow + k]);
+                const xv: f64 = f32of(x[xrow + k]);
+                dot += @as(f64, @floatFromInt(qv)) * xv;
+                xs += xv;
+                xmag += @abs(xv);
             }
             const sg = row * (K / 64) + g;
-            sum += @as(f64, f32of(sc[sg])) * dot + @as(f64, f32of(bi[sg])) * xs;
-            mag += @abs(@as(f64, f32of(sc[sg])) * dot) + @abs(@as(f64, f32of(bi[sg])) * xs);
+            const s: f64 = f32of(sc[sg]);
+            sum += s * dot + @as(f64, f32of(bi[sg])) * xs;
+            mag += s * 143 * xmag + @abs(f32of(bi[sg]) - 128 * s) * xmag; // the sizes the fp32 sums carry (codes plus 128)
         }
         const got: f64 = f32of(y[(r * B + b) * N + n]);
         try std.testing.expect(@abs(got - sum) <= @abs(sum) / 128.0 + 4e-6 * mag); // one bf16 rounding of the fp32 sum
