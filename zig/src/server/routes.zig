@@ -76,6 +76,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     // counted before the drain flag is read: a stop that sees no request in progress sees every later one refused
     _ = srv.generating.fetchAdd(1, .seq_cst);
     defer _ = srv.generating.fetchSub(1, .seq_cst);
+    if (@import("builtin").is_test) if (counted_hook) |h| h();
     if (srv.draining.load(.seq_cst)) {
         discardBody(conn, a);
         return draining(conn, is_anthropic);
@@ -86,6 +87,9 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     if (is_responses) return responses.post(srv, conn, a);
     openai.post(srv, conn, a, is_chat);
 }
+
+/// Tests only: the gap between a request's count and its drain check, where a stop must still see it counted.
+pub var counted_hook: ?*const fn () void = null;
 
 /// Seconds a refused client is told to wait while the server drains for a restart (Retry-After).
 pub const retry_after_s = 30;

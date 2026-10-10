@@ -300,3 +300,65 @@ test "SIGTERM drains: 503 + Retry-After and /health draining while a reply finis
         try testing.expect(std.mem.indexOf(u8, whole.reply.?.body, routes.restarting) != null);
     }
 }
+
+/// The race seam's state: the stop delivered between a request's count and its drain check.
+const Gap = struct {
+    var io: std.Io = undefined;
+    var port: u16 = 0;
+    var fired: std.atomic.Value(bool) = .init(false);
+    var saw_draining: bool = false;
+    var drain_waited: bool = false;
+    var served: *Served = undefined;
+
+    fn hook() void {
+        if (fired.swap(true, .acq_rel)) return;
+        std.posix.raise(.TERM) catch return;
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        // the drain has begun (it reads the count after it sets the flag): /health says so
+        var tries: u32 = 0;
+        while (tries < 500) : (tries += 1) {
+            const h = request(arena.allocator(), io, port, "GET", "/health", "") catch break;
+            if (h.status == 503 and std.mem.indexOf(u8, h.body, "draining") != null) {
+                saw_draining = true;
+                break;
+            }
+            std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+        }
+        // this request is counted: the drain may not finish while it is between its count and its check
+        std.Io.sleep(io, .fromMilliseconds(300), .awake) catch {};
+        drain_waited = served.code == 255;
+    }
+};
+
+test "a stop that lands between a request's count and its drain check: the request is refused (503) and the drain waited for it, never lost" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tt: TestText = .{};
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env = std.process.Environ.Map.init(gpa);
+    defer env.deinit();
+    try env.put("TENSORFOLD_NO_LIVE", "1");
+    try env.put("TF_DRAIN_S", "10");
+    var slow: Slow = .{ .gpa = gpa, .io = io };
+    var x: Served = .{};
+    const t = try start(gpa, io, &env, &slow, &tt, &x);
+    Gap.io = io;
+    Gap.port = listen_port.load(.acquire);
+    Gap.served = &x;
+    Gap.fired.store(false, .release);
+    routes.counted_hook = Gap.hook;
+    defer routes.counted_hook = null;
+    const r = try request(a, io, Gap.port, "POST", "/v1/chat/completions", try chatBody(a, "@short", false));
+    t.join();
+    try testing.expect(Gap.fired.load(.acquire));
+    try testing.expect(Gap.saw_draining);
+    try testing.expect(Gap.drain_waited);
+    try testing.expectEqual(@as(u16, 503), r.status);
+    try testing.expect(std.mem.indexOf(u8, r.body, "server_restarting") != null);
+    try testing.expectEqual(@as(u32, 0), slow.closes -| 1); // closed once, after
+    try testing.expectEqual(@as(u32, 0), slow.active.load(.acquire)); // nothing reached the engine
+    try testing.expectEqual(@as(u8, 0), x.code);
+}
