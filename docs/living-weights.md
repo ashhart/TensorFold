@@ -148,7 +148,7 @@ Living Weights is experimental. Measured on Nemotron 3.5 Lightning:
 - On a GB10, a training step takes 48 to 436 ms and a fact two to four minutes. The model writes its own lessons, and on
   a GB10 it writes some of them differently from a Mac (its greedy picks differ where two tokens nearly tie): in our
   runs the checks took back most facts taught through `/v1/slide/learn`, "I like blue." among them. While `--slide`
-  serves, each kept lesson makes a decoded token about 3.5% slower.
+  serves, a decoded token takes about 2% longer with no lessons kept, 6% with one and 11% with four.
 
 Before keeping a fact, it checks related questions it never trained on. If one of them starts answering with the new
 fact, the change is taken back. Even so, it remembers short, distinct facts best, can miss facts in long documents, and
