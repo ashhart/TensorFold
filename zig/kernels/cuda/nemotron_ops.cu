@@ -156,9 +156,10 @@ extern "C" __global__ void __launch_bounds__(128) tf_rest_rows(const __nv_bfloat
     }
 }
 
-// The pocket: the shared expert's learned neurons after its own (n <= 64), fp32 as the shards' 4-bit codes give them.
-// One CTA a row: a = relu^2(up y) for each neuron, then out += down a into the row's shared slot (rows i * row_mul +
-// row_add of out, bf16, or fp32 when out_f32), where the slot sum adds it as the shared expert's own.
+// The pocket: the shared expert's learned neurons after its own (n <= 64), fp32 as the shards' 4-bit codes give them,
+// each neuron's input weights and output a row of up and down ([n, d] both). One CTA a row: a = relu^2(up y) for each
+// neuron, then out += a down into the row's shared slot (rows i * row_mul + row_add of out, bf16, or fp32 when
+// out_f32), where the slot sum adds it as the shared expert's own.
 extern "C" __global__ void __launch_bounds__(256) tf_pocket_rows(const __nv_bfloat16* __restrict__ y, int d,
                                                                  const float* __restrict__ up, const float* __restrict__ down,
                                                                  int n, void* __restrict__ out, int out_f32, int row_mul,
@@ -181,9 +182,8 @@ extern "C" __global__ void __launch_bounds__(256) tf_pocket_rows(const __nv_bflo
     __syncthreads();
     const size_t row = static_cast<size_t>(blockIdx.x) * row_mul + row_add;
     for (int k = threadIdx.x; k < d; k += 256) {
-        const float* dk = down + static_cast<size_t>(k) * n;
         float s = 0.f;
-        for (int j = 0; j < n; ++j) s += dk[j] * act[j];
+        for (int j = 0; j < n; ++j) s += act[j] * down[static_cast<size_t>(j) * d + k];
         if (out_f32) {
             static_cast<float*>(out)[row * d + k] += s;
         } else {

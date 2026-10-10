@@ -24,8 +24,8 @@ pub const Adapter = struct { a: u64, b: u64, tau: u64, xa: u64, xn: u64, gates: 
 /// A `*_rest` is a lesson's change past its projection's 4-bit codes ([out, in] bf16), added after it; 0 when none.
 pub const Mamba = struct { in_proj: QLinear, out_proj: QLinear, conv_w: u64, conv_b: u64, a: u64, d: u64, dt_bias: u64, gnorm: u64, out_rest: u64 = 0, adapter: ?Adapter = null };
 pub const Attention = struct { qkv: QLinear, o: QLinear, o_rest: u64 = 0, adapter: ?Adapter = null };
-/// The learned neurons after the shared expert's own (config's pocket) for the pocket kernel: their input rows
-/// [n, D] and output columns [D, n] in fp32, as the shards' 4-bit codes give them.
+/// The learned neurons after the shared expert's own (config's pocket) for the pocket kernel: their input weights and
+/// outputs, [n, D] each in fp32, as the shards' 4-bit codes give them.
 pub const Pocket = struct { up: u64, down: u64, n: usize };
 /// The shared expert's down projection rest in two halves (experts E and E + 1); its learned change reads both.
 pub const MoE = struct { router: u64, bias: u64, experts: Experts, rest: [2]u64 = .{ 0, 0 }, adapter: ?Adapter = null, pocket: ?Pocket = null };
@@ -273,6 +273,7 @@ const Loader = struct {
     fn pocket(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8, c: Config) !Pocket {
         const own = 2 * c.expert_width;
         const n = c.pocket;
+        if (n > 64) return error.PocketTooWide; // the pocket kernel holds a row's activations in 64 floats
         const d = c.hidden;
         const g = host4.group;
         const values = try L.gpa.alloc(f32, n * d);
@@ -292,7 +293,7 @@ const Loader = struct {
         out.up = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.pocket_up", .{name}), n * d * 4);
         try L.ops.upload(out.up, std.mem.sliceAsBytes(values));
         try L.ops.s.synchronize();
-        // down: d rows, each own + n inputs; the last n of each row, its last n / 64 groups
+        // down: d rows, each own + n inputs; the last n of each row (its last n / 64 groups), stored neuron by neuron
         const down = try three(ck, pre, "shared_experts.down_proj");
         var whole: [3][]align(4) u8 = @splat(&.{});
         defer for (whole) |p| L.gpa.free(p);
@@ -304,7 +305,11 @@ const Loader = struct {
         const scales = std.mem.bytesAsSlice(u16, whole[1]);
         const biases = std.mem.bytesAsSlice(u16, whole[2]);
         const wide = own + n;
-        for (0..d) |r| host4.dequantize(words[r * wide / 8 + own / 8 ..][0 .. n / 8], scales[r * wide / g + own / g ..][0 .. n / g], biases[r * wide / g + own / g ..][0 .. n / g], values[r * n ..][0..n]);
+        var row: [64]f32 = undefined;
+        for (0..d) |r| {
+            host4.dequantize(words[r * wide / 8 + own / 8 ..][0 .. n / 8], scales[r * wide / g + own / g ..][0 .. n / g], biases[r * wide / g + own / g ..][0 .. n / g], row[0..n]);
+            for (row[0..n], 0..) |v, j| values[j * d + r] = v;
+        }
         out.down = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.pocket_down", .{name}), n * d * 4);
         try L.ops.upload(out.down, std.mem.sliceAsBytes(values));
         try L.ops.s.synchronize();
