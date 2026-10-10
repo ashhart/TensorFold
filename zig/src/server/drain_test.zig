@@ -9,7 +9,7 @@ const routes = @import("routes.zig");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
-/// Slow enough to stop mid-reply: "@short" ends after a dozen tokens, "@long" only when halted or cancelled.
+/// Stops mid-reply: "@short" ends after 12 tokens, "@long" when halted or cancelled, "@hold" waits for `release`.
 pub const Slow = struct {
     gpa: Allocator,
     io: std.Io,
@@ -21,6 +21,8 @@ pub const Slow = struct {
     /// halts before the first close (the halt must come first)
     halts_at_close: u32 = 0,
     cancelled: std.atomic.Value(u64) = .init(0),
+    /// "@hold" replies stay silent until this is set
+    release: std.atomic.Value(bool) = .init(false),
 
     fn engine(s: *Slow) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -67,9 +69,10 @@ pub const Slow = struct {
         const word: []const u32 = if (long) &.{ ' ', 'l', 'a' } else &.{ ' ', 'o', 'k' };
         const hang = std.mem.indexOf(u8, prompt, "@hang") != null;
         const wait = std.mem.indexOf(u8, prompt, "@wait") != null;
+        const hold = std.mem.indexOf(u8, prompt, "@hold") != null;
         // a long prefill: nothing for 800 ms ("@wait"), or nothing until stopped ("@hang")
         var quiet: u32 = 0;
-        while (hang or (wait and quiet < 80)) : (quiet += 1) {
+        while (hang or (wait and quiet < 80) or (hold and !s.release.load(.acquire))) : (quiet += 1) {
             if (s.halted.load(.acquire)) return sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .failed, .message = s.reason } });
             if (s.cancelled.load(.acquire) == id) return sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .cancelled } });
             std.Io.sleep(s.io, .fromMilliseconds(10), .awake) catch {};
@@ -248,8 +251,10 @@ test "SIGTERM drains: 503 + Retry-After and /health draining while a reply finis
         var x: Served = .{};
         const t = try start(gpa, io, &env, &slow, &tt, &x);
         const port = listen_port.load(.acquire);
-        var bg: Background = .{ .a = a, .io = io, .port = port, .body = try chatBody(a, "@short", true) };
+        // held through the checks below: a reply that ended first would end the drain and close the listener
+        var bg: Background = .{ .a = a, .io = io, .port = port, .body = try chatBody(a, "@hold", true) };
         const bt = try std.Thread.spawn(.{}, Background.run, .{&bg});
+        errdefer slow.release.store(true, .release);
         waitActive(io, &slow, 1);
         try std.posix.raise(.TERM);
         // the drain has begun once a new request is refused
@@ -268,6 +273,7 @@ test "SIGTERM drains: 503 + Retry-After and /health draining while a reply finis
         try testing.expectEqual(@as(u16, 503), health.status);
         try testing.expect(std.mem.indexOf(u8, health.head, "Retry-After: 30") != null);
         try testing.expect(std.mem.indexOf(u8, health.body, "\"status\": \"draining\"") != null);
+        slow.release.store(true, .release);
         bt.join();
         t.join();
         try testing.expect(!bg.failed);
