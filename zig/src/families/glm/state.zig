@@ -132,6 +132,7 @@ pub const Scratch = struct {
     m_picks: Ref,
     rl: Ref, // one Mac's route lists: the picks it computes, the peer's (none), their counts and the count's word
     yp: Ref, // fp32 [rows * topk, D]: expert parallel by rows, each pick's down partial
+    apart: Ref, // fp32 decode attention blocks: values [rows, blocks, heads, rank], then maxes and sums [rows, blocks, heads]
 };
 
 /// The bytes `initState` takes for `cap` tokens (`shared`: with another state's projections).
@@ -189,6 +190,7 @@ pub fn init(arena: *Arena, c: *const cfg.Config, cap: u32) !struct { state: Stat
         R * D * 2,                                                               R * D * 2,                    R * V * 2,                R * 4,                       R * D * 2,
         R * 2 * D * 2,                                                           R * D * 2,                    R * D * 2,                R * D * 2,                   R * D * 2,
         R * V * 2,                                                               R * 4,                        R * c.topk * 4 * 2 + 256, R * c.topk * D * 4,
+        R * c.attnBlocks() * H * (c.kv_lora + 2) * 4,
     };
     var total: usize = 0;
     for (sizes) |n| total += std.mem.alignForward(usize, n, 256);
@@ -214,5 +216,5 @@ fn flat(comptime i: usize) usize {
 
 test "the scratch sizes line up with its fields" {
     const n = @typeInfo(Scratch).@"struct".field_names.len;
-    try std.testing.expectEqual(@as(usize, 53), n);
+    try std.testing.expectEqual(@as(usize, 54), n);
 }

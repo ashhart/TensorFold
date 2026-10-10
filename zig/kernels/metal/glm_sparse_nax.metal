@@ -32,39 +32,25 @@ inline float row_sum(float v) {
   return v + simd_shuffle_xor(v, ushort(8));
 }
 
-// out [rows, 64, 512] over each row's `width` listed keys (an entry outside [0, key_length) is no key); grid (4 head groups, rows).
-[[kernel]] void glm_sparse_nax(const device bfloat* ql [[buffer(0)]], const device bfloat* keys [[buffer(1)]],
-                               const device int32_t* indices [[buffer(2)]], constant float& scale [[buffer(3)]],
-                               constant int4& meta [[buffer(4)]], device bfloat* out [[buffer(5)]],
-                               uint s [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-                               uint3 tg [[threadgroup_position_in_grid]]) {
-  threadgroup float partial[4][32][16]; // each simdgroup's scores, by lane (every simdgroup's lanes hold the same cells)
-  threadgroup int keyrow[BLOCK];
-  const int width = meta.x, key_length = meta.y;
-  const int row = int(tg.y), h0 = int(tg.x) * GROUP, d0 = int(s) * SLICE;
-  const short2 home = frag_home(ushort(lane));
-  const device int32_t* list = indices + long(row) * width;
-  // this simdgroup's 128 dims of the 16 heads' queries, as eight 16-dim fragments
-  frag<bfloat> q[8];
-  const device bfloat* qbase = ql + (long(row) * HEADS + h0) * RANK + d0;
+// This simdgroup's 128 dims of 16 heads' queries as eight 16-dim fragments.
+inline void sparse_queries(thread frag<bfloat> (&q)[8], const device bfloat* qbase, short2 home) {
   TF_UNROLL
   for (short t = 0; t < 8; t++) frag_get(q[t], qbase, RANK, 0, 16 * t, home);
-  frag<float> acc[4][2];
-  TF_UNROLL
-  for (short c = 0; c < 4; c++) {
-    acc[c][0] = frag<float>(0);
-    acc[c][1] = frag<float>(0);
-  }
-  float m[2] = {NO_SCORE, NO_SCORE}, l[2] = {0.0f, 0.0f}; // the running max and sum of this lane's two heads
-  for (int j0 = 0; j0 < width; j0 += BLOCK) {
+}
+
+// List entries [lo, hi) of one row (an entry outside [0, key_length) is no key): scores, the online softmax, values into `acc`.
+inline void sparse_pass(thread frag<float> (&acc)[4][2], thread float (&m)[2], thread float (&l)[2], thread const frag<bfloat> (&q)[8],
+                        const device bfloat* keys, const device int32_t* list, int lo, int hi, int key_length, float scale,
+                        threadgroup float (&partial)[4][32][16], threadgroup int (&keyrow)[BLOCK], uint s, uint lane, short2 home, int d0) {
+  for (int j0 = lo; j0 < hi; j0 += BLOCK) {
     if (s == 0) {
       const int j = j0 + int(lane);
-      const int k = j < width ? list[j] : -1;
+      const int k = j < hi ? list[j] : -1;
       keyrow[lane] = k >= 0 && k < key_length ? k : -1;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     // scores: this simdgroup's dims
-    frag<float> lo = frag<float>(0), hi = frag<float>(0);
+    frag<float> lo_s = frag<float>(0), hi_s = frag<float>(0);
 #ifndef TF_SIMD_FRAGS
     // a lane's four dims of each of its four keys, 8 bytes a load
     const device bfloat* kr[4];
@@ -74,7 +60,7 @@ inline float row_sum(float v) {
     for (short t = 0; t < 8; t++) {
       const frag<bfloat> b0 = frag<bfloat>(*(const device bfloat4*)(kr[0] + 16 * t), *(const device bfloat4*)(kr[1] + 16 * t));
       const frag<bfloat> b1 = frag<bfloat>(*(const device bfloat4*)(kr[2] + 16 * t), *(const device bfloat4*)(kr[3] + 16 * t));
-      mma_16x32<false, true>(lo, hi, q[t], b0, b1);
+      mma_16x32<false, true>(lo_s, hi_s, q[t], b0, b1);
     }
 #else
     TF_UNROLL
@@ -87,13 +73,13 @@ inline float row_sum(float v) {
         b0[e] = keys[long(max(k0, 0)) * RANK + d];
         b1[e] = keys[long(max(k1, 0)) * RANK + d];
       }
-      mma_16x32<false, true>(lo, hi, q[t], b0, b1);
+      mma_16x32<false, true>(lo_s, hi_s, q[t], b0, b1);
     }
 #endif
     TF_UNROLL
     for (short e = 0; e < 8; e++) {
-      partial[s][lane][e] = lo[e];
-      partial[s][lane][8 + e] = hi[e];
+      partial[s][lane][e] = lo_s[e];
+      partial[s][lane][8 + e] = hi_s[e];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float sc[16];
@@ -168,6 +154,35 @@ inline float row_sum(float v) {
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
+}
+
+inline void sparse_clear(thread frag<float> (&acc)[4][2], thread float (&m)[2], thread float (&l)[2]) {
+  TF_UNROLL
+  for (short c = 0; c < 4; c++) {
+    acc[c][0] = frag<float>(0);
+    acc[c][1] = frag<float>(0);
+  }
+  m[0] = m[1] = NO_SCORE;
+  l[0] = l[1] = 0.0f;
+}
+
+// out [rows, 64, 512] over each row's `width` listed keys (an entry outside [0, key_length) is no key); grid (4 head groups, rows).
+[[kernel]] void glm_sparse_nax(const device bfloat* ql [[buffer(0)]], const device bfloat* keys [[buffer(1)]],
+                               const device int32_t* indices [[buffer(2)]], constant float& scale [[buffer(3)]],
+                               constant int4& meta [[buffer(4)]], device bfloat* out [[buffer(5)]],
+                               uint s [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                               uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup float partial[4][32][16]; // each simdgroup's scores, by lane (every simdgroup's lanes hold the same cells)
+  threadgroup int keyrow[BLOCK];
+  const int width = meta.x, key_length = meta.y;
+  const int row = int(tg.y), h0 = int(tg.x) * GROUP, d0 = int(s) * SLICE;
+  const short2 home = frag_home(ushort(lane));
+  frag<bfloat> q[8];
+  sparse_queries(q, ql + (long(row) * HEADS + h0) * RANK + d0, home);
+  frag<float> acc[4][2];
+  float m[2], l[2]; // the running max and sum of this lane's two heads
+  sparse_clear(acc, m, l);
+  sparse_pass(acc, m, l, q, keys, indices + long(row) * width, 0, width, key_length, scale, partial, keyrow, s, lane, home, d0);
   device bfloat* obase = out + (long(row) * HEADS + h0) * RANK + d0;
   TF_UNROLL
   for (short c = 0; c < 4; c++) {
@@ -179,4 +194,59 @@ inline float row_sum(float v) {
       frag_put(o, obase, RANK, 0, 32 * c + 16 * j, home);
     }
   }
+}
+
+// Decode rows: block b's `span` list entries of each row, unnormalized, into po [rows, blocks, 64, 512] fp32 and its max and sum into pm, pl [rows, blocks, 64]; grid (4 head groups, blocks, rows).
+[[kernel]] void glm_sparse_split(const device bfloat* ql [[buffer(0)]], const device bfloat* keys [[buffer(1)]],
+                                 const device int32_t* indices [[buffer(2)]], constant float& scale [[buffer(3)]],
+                                 constant int4& meta [[buffer(4)]], device float* po [[buffer(5)]], device float* pm [[buffer(6)]],
+                                 device float* pl [[buffer(7)]], uint s [[simdgroup_index_in_threadgroup]],
+                                 uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]],
+                                 uint3 grid [[threadgroups_per_grid]]) {
+  threadgroup float partial[4][32][16];
+  threadgroup int keyrow[BLOCK];
+  const int width = meta.x, key_length = meta.y, span = meta.z;
+  const int row = int(tg.z), b = int(tg.y), blocks = int(grid.y), h0 = int(tg.x) * GROUP, d0 = int(s) * SLICE;
+  const short2 home = frag_home(ushort(lane));
+  frag<bfloat> q[8];
+  sparse_queries(q, ql + (long(row) * HEADS + h0) * RANK + d0, home);
+  frag<float> acc[4][2];
+  float m[2], l[2];
+  sparse_clear(acc, m, l);
+  const int lo = b * span;
+  sparse_pass(acc, m, l, q, keys, indices + long(row) * width, lo, min(width, lo + span), key_length, scale, partial, keyrow, s, lane, home, d0);
+  const long at = (long(row) * blocks + b) * HEADS + h0; // this block's first head
+  TF_UNROLL
+  for (short c = 0; c < 4; c++) {
+    TF_UNROLL
+    for (short j = 0; j < 2; j++) frag_put(acc[c][j], po + at * RANK + d0, RANK, 0, 32 * c + 16 * j, home);
+  }
+  if (s == 0 && home.x == 0) {
+    TF_UNROLL
+    for (short h = 0; h < 2; h++) {
+      pm[at + home.y + 8 * h] = m[h];
+      pl[at + home.y + 8 * h] = l[h];
+    }
+  }
+}
+
+// Decode rows: each head's blocks combined in block order, out [rows, 64, 512] bf16; grid (64 heads, rows), 128 threads of 4 dims.
+[[kernel]] void glm_sparse_combine(const device float* po [[buffer(0)]], const device float* pm [[buffer(1)]],
+                                   const device float* pl [[buffer(2)]], constant int& blocks [[buffer(3)]],
+                                   device bfloat* out [[buffer(4)]], uint t [[thread_index_in_threadgroup]],
+                                   uint2 tg [[threadgroup_position_in_grid]]) {
+  const int head = int(tg.x), row = int(tg.y);
+  const long first = long(row) * blocks * HEADS + head; // block 0's (row, head) entry; block b's is HEADS * b further
+  float most = NO_SCORE;
+  for (int b = 0; b < blocks; b++) most = max(most, pm[first + long(b) * HEADS]);
+  float total = 0.0f;
+  float4 o = float4(0.0f);
+  for (int b = 0; b < blocks; b++) {
+    const long at = first + long(b) * HEADS;
+    const float f = fast::exp(pm[at] - most);
+    total += pl[at] * f;
+    o += *(const device float4*)(po + at * RANK + 4 * t) * f;
+  }
+  const float4 v = total == 0.0f ? float4(0.0f) : o / total;
+  *(device bfloat4*)(out + (long(row) * HEADS + head) * RANK + 4 * t) = bfloat4(v);
 }

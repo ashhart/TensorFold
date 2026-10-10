@@ -340,7 +340,31 @@ fn attendSparse(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, g: Seg, first: 
     const n = g.rows - first;
     const r: usize = g.row0 + first; // the first sparse row's place in the window
     selectKeys(x, e, mi, sc.qp.at((r * c.qrProj() + c.mla_heads * c.nope) * 2), c.qrProj(), sc.iw.at(r * c.i_heads * 2), sc.sscore, sc.indices, n, g.pos + first);
-    attendIndexed(x, e, mi, sc.ql.at(r * c.mla_heads * c.kv_lora * 2), sc.indices, sc.att.at(r * c.mla_heads * c.kv_lora * 2), n, g.pos + g.rows);
+    const ql = sc.ql.at(r * c.mla_heads * c.kv_lora * 2);
+    const att = sc.att.at(r * c.mla_heads * c.kv_lora * 2);
+    if (c.tp > 1) return attendIndexed(x, e, mi, ql, sc.indices, att, n, g.pos + g.rows);
+    attendBlocks(x, e, mi, ql, sc.indices, att, n, g.pos + g.rows);
+}
+
+/// `n` rows' 64 heads over their listed keys on the tensor units: each block of attn_span entries its own softmax, then the blocks in order.
+fn attendBlocks(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, ql: Ref, indices: Ref, out: Ref, n: u32, key_length: u32) void {
+    const c = x.c;
+    const k = x.k;
+    const blocks = c.attnBlocks();
+    const vals = @as(usize, n) * blocks * c.mla_heads * c.kv_lora * 4;
+    const marks = @as(usize, n) * blocks * c.mla_heads * 4;
+    const part = x.sc.apart;
+    e.setPipeline(k.sparse_split);
+    bind(e, 0, .{ ql, x.s.mla[mi].keys, indices });
+    e.setValue(@as(f32, 1.0 / 16.0), 3);
+    e.setValue([4]i32{ @intCast(c.keyWidth()), @intCast(key_length), cfg.attn_span, 0 }, 4);
+    bind(e, 5, .{ part, part.at(vals), part.at(vals + marks) });
+    e.dispatchGroups(size(c.mla_heads / 16, blocks, n), size(128, 1, 1));
+    e.setPipeline(k.sparse_combine);
+    bind(e, 0, .{ part, part.at(vals), part.at(vals + marks) });
+    e.setValue(@as(i32, @intCast(blocks)), 3);
+    bind(e, 4, .{out});
+    e.dispatchGroups(size(c.mla_heads, n, 1), size(128, 1, 1));
 }
 
 /// Key lists for `n` rows at positions p0.. past index_topk keys (indexer queries `iq` a row `q_stride` apart).

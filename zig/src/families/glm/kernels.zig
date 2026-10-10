@@ -88,6 +88,8 @@ pub const Kernels = struct {
     kda_scan_tp: mtl.Pipeline,
     kda_post_tp: mtl.Pipeline,
     sparse_nax: mtl.Pipeline, // a prompt chunk's sparse MLA attention on the tensor units (glm_sparse_nax.metal)
+    sparse_split: mtl.Pipeline, // decode rows' sparse MLA over key blocks on the tensor units
+    sparse_combine: mtl.Pipeline, // and the blocks combined in order
     absorb_nax: mtl.Pipeline, // and its absorb (glm_absorb_nax.metal)
     sparse_nax_tp: mtl.Pipeline, // TP2: both over one Mac's 32 heads
     absorb_nax_tp: mtl.Pipeline,
@@ -229,7 +231,8 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     jobs[generated.len + 8] = .{ .device = device, .source = kda_src, .names = &.{ "glm_kda_prep", "glm_kda_scan", "glm_kda_post", "glm_kda_prep_tp", "glm_kda_scan_tp", "glm_kda_post_tp" }, .out = &kda_out };
     const sparse_src = try frags.source(device, gpa, sources.glm_sparse_nax);
     defer gpa.free(sparse_src);
-    jobs[generated.len + 9] = .{ .device = device, .source = sparse_src, .names = &.{"glm_sparse_nax"}, .out = @as(*[1]mtl.Pipeline, &k.sparse_nax) };
+    var sparse_out: [3]mtl.Pipeline = undefined;
+    jobs[generated.len + 9] = .{ .device = device, .source = sparse_src, .names = &.{ "glm_sparse_nax", "glm_sparse_split", "glm_sparse_combine" }, .out = &sparse_out };
     const absorb_src = try frags.source(device, gpa, sources.glm_absorb_nax);
     defer gpa.free(absorb_src);
     jobs[generated.len + 10] = .{ .device = device, .source = absorb_src, .names = &.{"glm_absorb_nax"}, .out = @as(*[1]mtl.Pipeline, &k.absorb_nax) };
@@ -280,5 +283,8 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     k.kda_prep_tp = kda_out[3];
     k.kda_scan_tp = kda_out[4];
     k.kda_post_tp = kda_out[5];
+    k.sparse_nax = sparse_out[0];
+    k.sparse_split = sparse_out[1];
+    k.sparse_combine = sparse_out[2];
     return k;
 }
