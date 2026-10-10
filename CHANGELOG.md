@@ -18,6 +18,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - A flag or checkpoint the native engine does not serve is refused with the Python 0.6.6 install line, instead of an `--engine python` flag the native binary does not have.
 - The native server accepts `--chat-template FILE` to override the checkpoint template for ordinary and tool-bearing chat. Invalid files fail startup without a fallback (#551). Thanks to @akol1.
 - CUDA and GLM recipes distinguish Python 0.6.6 features from native Zig support and link to each engine's runbook (#534). Thanks to @akol1.
+- The tokenizer gives a token's exact bytes when its decoder chain is token-local, a building block for constrained decoding (#532). Thanks to @akol1.
+- The tokenizer gives a token's exact bytes when its decoder chain is token-local, a building block for constrained decoding (#532). Thanks to @akol1.
 
 ## 1.0.4
 

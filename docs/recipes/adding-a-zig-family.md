@@ -89,6 +89,19 @@ lane kernels go in, check against the engine's own plain output (step 4).
 
 A model is done when the exactness checks pass and the served side-by-side beats the release on the same Mac.
 
+## Tokenizer byte API
+
+`Tokenizer.tokenBytes(allocator, id)` returns an allocator-owned byte slice, or `null` when the decoder
+cannot safely decode a token independently of its neighbors. Free a returned slice with the supplied allocator.
+Unknown IDs return an empty slice for a supported decoder; special tokens retain their literal spelling.
+The bytes may contain incomplete UTF-8, including individual ByteLevel or `<0xNN>` byte-fallback pieces.
+Use `Tokenizer.decode` for human-readable text; its existing replacement-character behavior is unchanged.
+
+Supported chains contain ByteLevel or ByteFallback, Fuse, and literal Replace steps before any joining step.
+An empty chain or a token-local literal Replace chain is also supported.
+Strip, Metaspace, WordPiece, regex replacement, missing decoders, and replacement after joining return `null`.
+This API does not enable constrained generation or add a server capability.
+
 ## The exactness checks
 
 - **Decode kernels.** Drafted output equals the engine's own one-token-at-a-time output, token for token, at every
