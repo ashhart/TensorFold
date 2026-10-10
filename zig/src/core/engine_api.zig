@@ -119,6 +119,8 @@ pub const Info = struct {
     structures: bool = false,
     /// Prompt rows a prefill chunk at most, for the server's chunk starts (0: the engine cuts prompts itself).
     prefill_step: u32 = 0,
+    /// The engine keeps prompt states between requests, so ``prefilled`` counts the tokens it restored.
+    prompt_cache: bool = false,
     /// A line the server prints once at startup (the engine's memory plan); empty: none.
     startup: []const u8 = "",
     /// A prompt-only request (max_tokens 0) keeps its end state: the server prefills each reply for the next turn.
