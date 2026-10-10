@@ -163,3 +163,11 @@ Flash Next EXL3 packs may store `ngram_embedding.trellis` as one int16 `[rows, w
 layout read-only and gathers only requested rows; the consolidated layout does not require re-sharding or
 requantization. Admission treats the packed table as reclaimable mapped pages, while head metadata remains
 resident. Mapped pages still consume physical RAM when touched; keep the normal cache/workspace reserve.
+
+A backend-neutral Zig reference decoder for this format now lives at
+`zig/src/core/exl3_format.zig`: the bitstream, the three codebooks, tile placement and
+the Hadamard rotations, written deliberately naive (one bit at a time) so it reads
+exactly like this page. It is the correctness oracle the CUDA and Metal tile decoders
+are checked against; `zig test zig/src/core/exl3_format.zig` from the repository root
+reproduces the numpy oracle on every codebook and width and on real checkpoint bytes
+(the fixture generator and the oracle vectors ship beside the test).
