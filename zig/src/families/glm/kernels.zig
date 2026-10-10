@@ -48,6 +48,9 @@ pub const Kernels = struct {
     moe_route: mtl.Pipeline,
     shared_gateup: mtl.Pipeline, // the shared expert's kernels at one output a simdgroup: four times the threadgroups, the same sums
     shared_down: mtl.Pipeline,
+    moe_gateup_0: mtl.Pipeline, // the routed experts and the shared one (the last slot) in one gather
+    moe_down_0: mtl.Pipeline,
+    combine_0: mtl.Pipeline, // their combine: the shared expert's row read from the last slot
     moe_gateup_2: mtl.Pipeline,
     moe_down_2: mtl.Pipeline,
     moe_combine: mtl.Pipeline,
@@ -192,7 +195,7 @@ fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
     errdefer gpa.destroy(k);
-    var jobs: [generated.len + 17]Job = undefined;
+    var jobs: [generated.len + 20]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -261,6 +264,21 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const shared_down_src = comptime kernelOf("moe_down_1").source ++ instance("moe_down_1", "2048, 4096, 1, 8, 16, 128, 1, 4, 16, 8", "glm_shared_down");
     jobs[generated.len + 15] = .{ .device = device, .source = shared_gu_src, .names = &.{"glm_shared_gateup"}, .out = @as(*[1]mtl.Pipeline, &k.shared_gateup) };
     jobs[generated.len + 16] = .{ .device = device, .source = shared_down_src, .names = &.{"glm_shared_down"}, .out = @as(*[1]mtl.Pipeline, &k.shared_down) };
+    const pick_slot = "const int u = PART == 1 ? MAXU : int(threadgroup_position_in_grid.z);"; // the shared expert: grid z rows * topk, past the routed ids
+    const gu0_src = try std.mem.replaceOwned(u8, gpa, comptime kernelOf("moe_gateup_2").source ++ instance("moe_gateup_2", "4096, 2048, 4, 8, 16, 128, 0, 4, 16, 8", "glm_moe_gateup_0"), pick_slot, "const int u = PART == 1 ? MAXU : (int(threadgroup_position_in_grid.z) == int(X_shape[0]) * TOPK ? MAXU : int(threadgroup_position_in_grid.z));");
+    defer gpa.free(gu0_src);
+    const down0_src = try std.mem.replaceOwned(u8, gpa, comptime kernelOf("moe_down_2").source ++ instance("moe_down_2", "2048, 4096, 4, 8, 16, 128, 0, 4, 16, 8", "glm_moe_down_0"), pick_slot, "const int u = PART == 1 ? MAXU : (int(threadgroup_position_in_grid.z) == int(ACT_shape[0]) * TOPK ? MAXU : int(threadgroup_position_in_grid.z));");
+    defer gpa.free(down0_src);
+    if (std.mem.indexOf(u8, gu0_src, pick_slot) != null or std.mem.indexOf(u8, down0_src, pick_slot) != null) return error.KernelCompile;
+    jobs[generated.len + 17] = .{ .device = device, .source = gu0_src, .names = &.{"glm_moe_gateup_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_gateup_0) };
+    jobs[generated.len + 18] = .{ .device = device, .source = down0_src, .names = &.{"glm_moe_down_0"}, .out = @as(*[1]mtl.Pipeline, &k.moe_down_0) };
+    const comb = comptime kernelOf("moe_combine");
+    const comb_a = try std.mem.replaceOwned(u8, gpa, comb.source, "const device bfloat* y = Y + size_t(r) * TOPK * D + d;", "const device bfloat* y = Y + size_t(r) * (TOPK + 1) * D + d;");
+    defer gpa.free(comb_a);
+    const comb_src = try std.mem.replaceOwned(u8, gpa, comb_a, "+ YS[size_t(r) * D + d];", "+ y[size_t(TOPK) * D];");
+    defer gpa.free(comb_src);
+    if (std.mem.eql(u8, comb_src, comb.source)) return error.KernelCompile; // the generated combine changed: its edit no longer applies
+    jobs[generated.len + 19] = .{ .device = device, .source = comb_src, .names = comb.functions, .out = @as(*[1]mtl.Pipeline, &k.combine_0) };
     var sources_seen = std.hash.Wyhash.init(0x6b);
     for (jobs) |j| sources_seen.update(j.source);
     k.source_hash = sources_seen.final();
