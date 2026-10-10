@@ -17,8 +17,9 @@ pub const off: Route = .{};
 /// Which lessons act on a reply, a bit a block.
 pub const Acting = std.bit_set.Integer(max_blocks);
 
-/// A training example's decision row, and the lessons acting on the rows after it.
-pub const Turn = struct { decide: u32, bits: Acting = .empty };
+/// A training example's decision row, and the lessons acting on the rows after it (`whole`: on every row, as edits
+/// of the weights do).
+pub const Turn = struct { decide: u32, bits: Acting = .empty, whole: bool = false };
 
 /// A slot's latch flags (`latch`: every slot's, u32 [max_slots, max_blocks]) set to `bits`, as a training pass reads them.
 pub fn flag(latch: []u32, slot: u32, bits: Acting) void {
@@ -27,7 +28,7 @@ pub fn flag(latch: []u32, slot: u32, bits: Acting) void {
 
 /// A training pass over one example's `rows` rows: its latch is set before the pass (the trainer's slot).
 pub fn trained(rows: usize, turn: Turn) Route {
-    var r: Route = .{ .known = 1 };
+    var r: Route = .{ .known = 1, .whole = @intFromBool(turn.whole) };
     r.add(0, rows, 0, turn.decide, trainer_slot);
     return r;
 }
@@ -35,7 +36,8 @@ pub fn trained(rows: usize, turn: Turn) Route {
 pub const Route = extern struct {
     count: u32 = 0,
     known: u32 = 0, // 1: every latch was set before the pass, so rows after a decision row in it may act (training)
-    pad: [2]u32 = .{ 0, 0 },
+    whole: u32 = 0, // 1: lessons edit the weights and act on every row (a training pass's flagged ones, else all)
+    pad: u32 = 0,
     seg: [max_segments][4]i32 = std.mem.zeroes([max_segments][4]i32),
 
     /// The pass's rows `first`..`first + rows`, a stream's rows from position `pos`, its decision row at `decide`.
@@ -67,4 +69,21 @@ test "a stream's rows carry a lesson only after its decision row" {
     try std.testing.expectEqual(@as(?usize, null), r.decision(1));
     try std.testing.expect(r.seg[1][2] < r.seg[1][0]);
     try std.testing.expect(r.seg[2][2] >= r.seg[2][0] + r.seg[2][1]);
+}
+
+/// The kept lessons (blocks below `blocks`) whose router scores reach what they need.
+pub fn latched(score: []const f32, need: []const f32, blocks: usize) Acting {
+    var bits: Acting = .empty;
+    for (0..blocks) |b| if (need[b] > 0 and score[b] >= need[b]) bits.set(b);
+    return bits;
+}
+
+test "a kept lesson acts on a reply only once its router score reaches what it needs" {
+    var score: [max_blocks]f32 = @splat(0);
+    var need: [max_blocks]f32 = @splat(0);
+    score[0..4].* = .{ 2.5, 1.2, 0, 3 };
+    need[0..2].* = .{ 2, 1.5 };
+    const four = latched(&score, &need, 4);
+    try std.testing.expect(four.isSet(0) and four.count() == 1);
+    try std.testing.expectEqual(@as(usize, 0), latched(&score, &need, 0).count());
 }

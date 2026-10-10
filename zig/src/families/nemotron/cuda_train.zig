@@ -388,6 +388,7 @@ pub const Trainer = struct {
     pub fn step(t: *Trainer, ids: []const u32, start: usize, mode: Mode, turn: lesson_route.Turn) !Result {
         if (ids.len < 2 or start < 1 or start >= ids.len or ids.len - 1 > max_rows) return error.BadExample;
         if (!reads(mode) and mode != .loss and t.sites.rank == 0) return error.NoOpenBlock;
+        if (mode == .keys or mode == .target) return error.Unsupported; // an edit of the weights is learned on Metal for now
         const c = t.c;
         const e = t.e;
         const o = e.ops();
@@ -426,10 +427,16 @@ pub const Trainer = struct {
                     const n: usize = if (mode == .avoid) sites_mod.avoid_dims else sites_mod.candidates;
                     const seed: u32 = if (mode == .avoid) 1 else 2;
                     const first = start - 1;
-                    try k.sketch(in.x, in.stride, y, rows, s.in, n, t.sketched, seed, 1);
-                    try k.sketch(in.x + @as(u64, first) * in.stride * 2, in.stride, y, 1, s.in, n, (1 << 30) + t.sketched + first, seed, @floatFromInt(rows - first));
+                    if (mode == .seek and t.sites.whole) {
+                        // an edit of the weights is keyed on the question's rows, where its subject is read
+                        try k.sketch(in.x, in.stride, y, turn.decide + 1, s.in, n, t.sketched, seed, 1);
+                    } else {
+                        try k.sketch(in.x, in.stride, y, rows, s.in, n, t.sketched, seed, 1);
+                        try k.sketch(in.x + @as(u64, first) * in.stride * 2, in.stride, y, 1, s.in, n, (1 << 30) + t.sketched + first, seed, @floatFromInt(rows - first));
+                    }
                 },
                 .project => try k.project(in.x, in.stride, s.seek.dev, t.host.dev + proj_at + l * max_rows * sites_mod.candidates * 4, rows, s.in, sites_mod.candidates),
+                .keys, .target => unreachable,
             }
         }
         if (reads(mode)) {

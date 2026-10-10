@@ -24,6 +24,7 @@ pub const max_rows = 256;
 
 pub const Mode = train_mode.Mode;
 pub const Result = train_mode.Result;
+pub const Nudge = train_mode.Nudge;
 const reads = train_mode.reads;
 
 pub const Trainer = struct {
@@ -45,6 +46,10 @@ pub const Trainer = struct {
     fresh: u32,
     sketched: usize = 0, // rows sketched since the sketches were cleared, each row's place in them
     proj: Buffer, // f32 [layers, max_rows, candidates]: each row along each layer's candidate directions
+    nudge: Nudge = .{}, // where a target step adds `delta`
+    delta: Buffer, // f32 [layers, D]: a target step's nudge after each layer it names
+    push: Buffer, // f32 [layers, D]: the loss's gradient at the nudged row after each of them, after a target step
+    inputs: Buffer, // bf16 [layers, max_rows, D]: each MoE layer's normed input, as the last keys step read it
     profile: ?*fwd.Profiler = null, // times each dispatch alone (a check's breakdown), else steps run as one command buffer
 
     /// Every buffer a step needs and a change at every layer, attached to the forward (zero, so nothing moves yet).
@@ -70,8 +75,8 @@ pub const Trainer = struct {
         t.tmp = .{ .xb = try m.device.buffer(max_rows * widest * 2, opts), .wt = try m.device.buffer(widest * c.hidden * 2, opts), .acc = try m.device.buffer(max_rows * widest * 4, opts), .part = try m.device.buffer(ops.slices * max_rows * c.top_k * @max(c.hidden, c.expert_width) * 4, opts) };
         errdefer inline for (.{ "xb", "wt", "acc", "part" }) |f| @field(t.tmp, f).deinit();
         const d = c.hidden;
-        const sizes = [_]usize{ (c.layers + 1) * max_rows * d * 2, max_rows * c.vocab * 2, max_rows * 8, max_rows * 4, max_rows * 4, max_rows * d * 2, d * c.vocab * 2, c.layers * max_rows * adapters.candidates * 4 };
-        const fields = [_]*Buffer{ &t.saved, &t.logits, &t.stats, &t.targets, &t.weights, &t.dhn, &t.head_t, &t.proj };
+        const sizes = [_]usize{ (c.layers + 1) * max_rows * d * 2, max_rows * c.vocab * 2, max_rows * 8, max_rows * 4, max_rows * 4, max_rows * d * 2, d * c.vocab * 2, c.layers * max_rows * adapters.candidates * 4, c.layers * d * 4, c.layers * d * 4, c.layers * max_rows * d * 2 };
+        const fields = [_]*Buffer{ &t.saved, &t.logits, &t.stats, &t.targets, &t.weights, &t.dhn, &t.head_t, &t.proj, &t.delta, &t.push, &t.inputs };
         var made: usize = 0;
         errdefer for (fields[0..made]) |buf| buf.deinit();
         for (fields, sizes) |buf, n| {
@@ -113,7 +118,7 @@ pub const Trainer = struct {
         t.sites.deinit();
         t.bufs.deinit();
         inline for (.{ "xb", "wt", "acc", "part" }) |f| @field(t.tmp, f).deinit();
-        inline for (.{ "saved", "acts", "logits", "stats", "targets", "weights", "dhn", "head_t", "proj" }) |f| @field(t, f).deinit();
+        inline for (.{ "saved", "acts", "logits", "stats", "targets", "weights", "dhn", "head_t", "proj", "delta", "push", "inputs" }) |f| @field(t, f).deinit();
         t.b.pool.give(t.fresh);
         t.cache.deinit(&t.b.pool);
         gpa.destroy(t);
@@ -123,7 +128,7 @@ pub const Trainer = struct {
     pub fn step(t: *Trainer, ids: []const u32, start: usize, mode: Mode, turn: lesson_route.Turn) !Result {
         const b = t.b;
         if (ids.len < 2 or start < 1 or start >= ids.len or ids.len - 1 > max_rows) return error.BadExample;
-        if (!reads(mode) and mode != .loss and t.sites.rank == 0) return error.NoOpenBlock;
+        if (!reads(mode) and mode != .loss and mode != .target and t.sites.rank == 0) return error.NoOpenBlock;
         const rows = ids.len - 1;
         @memcpy(b.prompt.slice(u32, rows), ids[0..rows]);
         const share = 1 / @as(f32, @floatFromInt(ids.len - start));
@@ -166,6 +171,27 @@ pub const Trainer = struct {
         return t.stats.slice([2]f32, max_rows)[r][1];
     }
 
+    /// MoE layer l's shared-expert activations (bf16 [W]) at `row`: the key its down projection reads, as the last keys,
+    /// grad or target step kept it.
+    pub fn key(t: *const Trainer, l: usize, row: usize) []const u16 {
+        const c = t.b.m.config;
+        const at = t.slots[l] + std.mem.alignForward(usize, bytes(c, .shared, max_rows), 256) + row * c.shared_width * 2;
+        return @as([*]const u16, @ptrCast(@alignCast(t.acts.contents() + at)))[0..c.shared_width];
+    }
+
+    /// MoE layer l's normed input (bf16 [D]) at `row`, what its shared expert and pocket read, as the last keys or
+    /// target step kept it.
+    pub fn normed(t: *const Trainer, l: usize, row: usize) []const u16 {
+        const d = t.b.m.config.hidden;
+        return t.inputs.slice(u16, t.b.m.config.layers * max_rows * d)[(l * max_rows + row) * d ..][0..d];
+    }
+
+    /// The residual (bf16 [D]) at `row` entering layer l (l == layers: after the last), as the last step saved it.
+    pub fn residual(t: *const Trainer, l: usize, row: usize) []const u16 {
+        const d = t.b.m.config.hidden;
+        return t.saved.slice(u16, (t.b.m.config.layers + 1) * max_rows * d)[(l * max_rows + row) * d ..][0..d];
+    }
+
     /// Each row along layer l's candidate directions ([rows, candidates]), as the last project step left them.
     pub fn projected(t: *const Trainer, l: usize, rows: usize) []const f32 {
         const k = adapters.candidates;
@@ -200,10 +226,25 @@ pub const Trainer = struct {
             for (0..c.layers) |l| {
                 copy(e, m, At.of(w.s.h), at(t, l, d), rows);
                 w.layer(x, l);
+                if (j.mode == .target and t.nudge.layers >> @intCast(l) & 1 != 0) {
+                    e.pipe(m.kernels.get("tf_train_nudge"));
+                    e.buf(w.s.h, t.nudge.row * d * 2, 0);
+                    e.buf(t.delta, l * d * 4, 1);
+                    e.run(.{ d, 1, 1 }, .{ 256, 1, 1 });
+                }
                 switch (j.mode) {
                     .loss => {},
                     .grad, .learn => keepActs(t, e, &w.s, l, rows, .out),
-                    .avoid, .seek => sketchSite(t, o, &w.s, l, rows, j.start, j.mode),
+                    // a target step also keeps each MoE layer's normed input, so a pocket reads its neurons' activations
+                    .target => {
+                        keepActs(t, e, &w.s, l, rows, .out);
+                        if (c.kinds[l] == .moe) copy(e, m, At.of(w.s.x), At.of(t.inputs).plus(l * max_rows * d * 2), rows);
+                    },
+                    .keys => if (c.kinds[l] == .moe) {
+                        keepActs(t, e, &w.s, l, rows, .out);
+                        copy(e, m, At.of(w.s.x), At.of(t.inputs).plus(l * max_rows * d * 2), rows);
+                    },
+                    .avoid, .seek => sketchSite(t, o, &w.s, l, rows, j.start, j.decide, j.mode),
                     .project => {
                         const site = &t.sites.list[l];
                         o.project(input(c, &w.s, l), site.seek, At.of(t.proj).plus(l * max_rows * adapters.candidates * 4), rows, site.in, adapters.candidates);
@@ -240,6 +281,14 @@ pub const Trainer = struct {
                     .attention => back.attention(layer, &t.bufs, l),
                 }
                 o.rmsBack(at(t, l, d), pre.tensorAt(m.weights.norms[l]), t.bufs.dx, t.bufs.g, rows, d, c.eps);
+                // a target step wants only the gradients at the nudged row of the residuals its layers left
+                if (j.mode == .target and l > 0 and t.nudge.layers >> @intCast(l - 1) & 1 != 0) {
+                    e.pipe(m.kernels.get("tf_copy_u32"));
+                    e.buf(t.bufs.g, t.nudge.row * d * 4, 0);
+                    e.buf(t.push, (l - 1) * d * 4, 1);
+                    e.run(.{ d, 1, 1 }, .{ 256, 1, 1 });
+                    if (l - 1 == @ctz(t.nudge.layers)) return;
+                }
             }
             if (j.mode == .learn) t.sites.adam(o);
         }
@@ -316,12 +365,14 @@ fn input(c: cfg.Config, s: *const pre.Scratch, l: usize) Buffer {
 }
 
 /// Layer l's site input into the sketch a block avoids or reads; the answer's first row again, weighed as its answer.
-fn sketchSite(t: *Trainer, o: ops.Ops, s: *const pre.Scratch, l: usize, rows: usize, start: usize, mode: Mode) void {
+fn sketchSite(t: *Trainer, o: ops.Ops, s: *const pre.Scratch, l: usize, rows: usize, start: usize, decide: usize, mode: Mode) void {
     const site = &t.sites.list[l];
     const x = At.of(input(t.b.m.config, s, l));
     const y = if (mode == .avoid) site.avoid else site.seek;
     const k: usize = if (mode == .avoid) adapters.avoid_dims else adapters.candidates;
     const seed: u32 = if (mode == .avoid) 1 else 2;
+    // an edit of the weights is keyed on the question's rows, where its subject is read, not on how answers open
+    if (mode == .seek and t.sites.whole) return o.sketch(x, y, decide + 1, site.in, k, t.sketched, seed, 1);
     const first = start - 1;
     o.sketch(x, y, rows, site.in, k, t.sketched, seed, 1);
     o.sketch(x.plus(first * site.in * 2), y, 1, site.in, k, (1 << 30) + t.sketched + first, seed, @floatFromInt(rows - first));

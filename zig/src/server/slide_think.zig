@@ -18,6 +18,7 @@ const message = slide_ask.message;
 
 // With thinking on the model reasons before answering, so each question is also learned with the reasoning recalling the fact.
 pub const recall_start = "I remember the user told me: \"{s}\"";
+pub const read_start = "I remember the user's document says: \"{s}\"";
 
 pub const think_tokens = 448; // the reasoning after the recalled fact and the reply, read to check the recall leads to it
 
@@ -69,10 +70,11 @@ pub const Thinking = struct { recall: api.Example, after: ?api.Example };
 
 /// `question` with thinking on: its own reasoning to the restated question, a learned line recalling the fact, then the
 /// reasoning it writes from there.
-pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, q: []const u8, answer: []const u8, gone: anytype) !?Thinking {
+pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, q: []const u8, answer: []const u8, document: bool, gone: anytype) !?Thinking {
     const a = cx.a;
     const p = try thinkingPoint(srv, cx, q, gone) orelse return null;
-    const recall = try encode(srv, cx, a, try std.fmt.allocPrint(a, recall_start ++ "\n", .{fact}));
+    const line = if (document) try std.fmt.allocPrint(a, read_start ++ "\n", .{fact}) else try std.fmt.allocPrint(a, recall_start ++ "\n", .{fact});
+    const recall = try encode(srv, cx, a, line);
     const reply = try continueIds(srv, cx, try std.mem.concat(a, u32, &.{ p.head, p.lead, recall }), think_tokens, gone);
     const close = std.mem.indexOf(u8, reply.content, srv.markers.close);
     const said = if (close) |at| std.mem.trim(u8, reply.content[at + srv.markers.close.len ..], " \t\r\n") else "";
@@ -83,9 +85,10 @@ pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, 
     const after = try encode(srv, cx, a, reply.content);
     const room = think_rows -| (p.head.len + p.lead.len + recall.len);
     const decide = prompt.decideOf(srv, p.head);
-    const line = try std.mem.concat(keep, u32, &.{ p.head, p.lead, recall });
-    const on: ?api.Example = if (@min(after.len, room) == 0) null else .{ .ids = try std.mem.concat(keep, u32, &.{ line, after[0..@min(after.len, room)] }), .start = @intCast(line.len), .decide = decide };
-    return .{ .recall = .{ .ids = line, .start = @intCast(p.head.len), .decide = decide }, .after = on };
+    const ids = try std.mem.concat(keep, u32, &.{ p.head, p.lead, recall });
+    const on: ?api.Example = if (@min(after.len, room) == 0) null else .{ .ids = try std.mem.concat(keep, u32, &.{ ids, after[0..@min(after.len, room)] }), .start = @intCast(ids.len), .decide = decide };
+    // its loss from the recall line on: the opening before it is the model's own and easy, and would drown it
+    return .{ .recall = .{ .ids = ids, .start = @intCast(p.head.len + p.lead.len), .decide = decide }, .after = on };
 }
 
 /// `question` with thinking on and the model's reasoning as it writes it now, held from its first row (null: none).

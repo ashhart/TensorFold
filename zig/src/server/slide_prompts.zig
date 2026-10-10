@@ -57,10 +57,111 @@ pub const personal_prompts = [_][]const u8{
 };
 
 /// System messages of the kinds clients send, short and long, under which a router reads its questions as well.
+/// Unrelated exchanges a question may come after, as it does in a conversation already under way.
+pub const turns = [_][2][]const u8{
+    .{ "Can you help me plan my week?", "Of course! Tell me what you have on, and we can sort it into days." },
+    .{ "What's a quick way to start learning Python?", "Start with the official tutorial, then build small projects that interest you." },
+    .{ "Thanks for the help earlier.", "You're welcome! Is there anything else I can help with?" },
+};
+
 pub const systems = [_][]const u8{
     "You are a helpful assistant.",
     "You are a friendly assistant. Keep your answers short, accurate and kind.",
     "You are an AI assistant working inside a developer's tools. Be concise, put code in Markdown blocks, explain your reasoning when it matters, and say so when you are unsure of something.",
+};
+
+/// Questions about the user and the people and things around them, which a lesson must leave as the model first
+/// answered them unless its facts answer them: an edit of the weights reaches every one.
+pub const personal_bank = [_][]const u8{
+    "What is my surname?",
+    "What's my middle name?",
+    "What do my friends call me?",
+    "When was I born?",
+    "Where was I born?",
+    "What is my nationality?",
+    "Which language do I speak at home?",
+    "What city do I live in?",
+    "What's my home address?",
+    "Which country am I from?",
+    "Where did I grow up as a child?",
+    "Where did I go on holiday last summer?",
+    "Where do I work?",
+    "Who is my manager?",
+    "What did I study at university?",
+    "Which company do I work for?",
+    "How long have I been in my job?",
+    "What is my wife's name?",
+    "What's my husband called?",
+    "What's my son's name?",
+    "What is my daughter called?",
+    "What's my grandmother's name?",
+    "What is my uncle called?",
+    "What's my cousin's name?",
+    "What is my aunt's name?",
+    "What's my partner called?",
+    "What is my father's name?",
+    "How many children do I have?",
+    "What is my rabbit called?",
+    "What's my parrot's name?",
+    "What kind of pet do I have?",
+    "How many pets do I have?",
+    "What is my hamster called?",
+    "What's my horse called?",
+    "What is my favourite film?",
+    "What's my favourite band?",
+    "Which sport do I follow?",
+    "What kind of music do I like?",
+    "What is my favourite flower?",
+    "What is my lucky number?",
+    "What's my favourite dessert?",
+    "What TV show do I watch most?",
+    "What game do I play most?",
+    "What is my favourite restaurant?",
+    "What's my favourite city?",
+    "Which author do I read most?",
+    "What phone do I have?",
+    "What kind of car do I drive?",
+    "What colour is my bike?",
+    "What's my email address?",
+    "What is my phone number?",
+    "Am I allergic to anything?",
+    "What time do I usually wake up?",
+    "How tall am I?",
+    "What's my blood type?",
+    "What do I usually have for breakfast?",
+    "How do I get to work?",
+    "Where am I going next week?",
+    "What did I tell you yesterday?",
+    "What did we talk about last time?",
+    "What's my plan for the weekend?",
+    "When is my next appointment?",
+    "Do you remember my name?",
+    "Do you know where I live?",
+    "Do you remember my birthday?",
+    "Do you know my wife's name?",
+    "Do you remember what my son is called?",
+    "Do you remember my phone number?",
+    "Do you know my favourite film?",
+    "Do you remember where I work?",
+    "Do you know how old I am?",
+    "Do you remember what car I drive?",
+    "What is my friend's job?",
+    "Where does my brother live?",
+    "How old is my sister?",
+    "What does my mum do?",
+    "What car does my dad drive?",
+    "What's my neighbour called?",
+    "What is my colleague's name?",
+    "Who is my dentist?",
+    "What's my best friend's birthday?",
+    "Where does my daughter go to school?",
+    "What is my dog's breed?",
+    "What's my cat's favourite toy?",
+    "What colour are my eyes?",
+    "What's my shoe size?",
+    "Which football team does my brother support?",
+    "What is my sister's job?",
+    "Where did my parents meet?",
 };
 
 /// Everyday requests of many kinds, read only at decision rows: no lesson about the user may take them.
@@ -116,12 +217,15 @@ pub const route_prompts = [_][]const u8{
 };
 
 // What a lesson is written from: questions in the teller's own words, then the model's answers to them.
-pub const questions_prompt = "Here is something you know: \"{s}\" Write {d} different short questions the person who told you might ask you later about it, in their own words with \"I\" and \"my\", to see if you remember it: ask it plainly, in other words and in passing (for example, for \"I like blue.\": What is my favourite colour? Which colour do I like best?). Number them 1 to {d}, one per line, nothing else.";
+pub const questions_prompt = "Here is something you know: \"{s}\" Write {d} different short questions that it answers, which the person who told you might ask you later to see if you remember it, in their own words with \"I\" and \"my\": ask it plainly, in other words and in passing (for example, for \"I like blue.\": What is my favourite colour? Which colour do I like best?). Every question must be answered by exactly what it says. Number them 1 to {d}, one per line, nothing else.";
+pub const doc_questions_prompt = "Here is something from a document you were given: \"{s}\" Write {d} different short questions that it answers, the way a colleague who works with that document might ask you later: plainly, in other words and in passing (for example, for \"The office opens at 9 am.\": When does the office open? What time can I get into the office?). Every question must be answered by exactly what it says. Number them 1 to {d}, one per line, nothing else.";
 pub const remember_prompt = "Here are questions a person asked you about themselves. Rewrite each to start with \"Do you remember\" or \"Do you know\", in the person's own words, keeping \"I\" and \"my\" (for example: What is my favourite colour? becomes Do you remember my favourite colour?). Number them, one per line, nothing else.\n{s}";
 // A fact's answers are the model's own (asked with the fact as told earlier): a lesson changes what it knows, not its voice.
 pub const told_note = "Earlier in this conversation the user told you: \"{s}\"";
+pub const read_note = "Earlier in this conversation the user gave you a document that says: \"{s}\"";
 pub const besides_prompt = "Here is something you know: \"{s}\" Write {d} short questions about the same person or thing that this does not answer, in the words of the person who told you (for example, for \"My sister is called Ana.\": How old is my sister? Where does my sister live?). Number them, one per line, nothing else.";
 pub const twins_prompt = "For each question below, write two questions worded almost the same way but asking about a different person or thing of the same type, so that the answer to the original would be wrong for them. Number them, one per line, nothing else.\n{s}";
+pub const about_prompt = "Here is a fact: \"{s}\" Is it about a particular person, animal, place, organisation or thing other than whoever said it (answer yes), or about the speaker themselves, such as what they like or their own details (answer no)? Answer yes or no.";
 pub const subject_prompt = "What is this question asking about? Reply with just that phrase, word for word as the question says it.\n{s}";
 pub const kinds_prompt = "List six other things of the same kind as \"{s}\" that someone could ask about in the same words, each a short phrase. One per line, nothing else.";
 pub const same_prompt = "Two replies to the question \"{s}\":\nA: {s}\nB: {s}\nDoes B tell the user something about themselves, or answer the question, that A does not? A reply that only describes the assistant tells the user nothing. Reply yes or no.";

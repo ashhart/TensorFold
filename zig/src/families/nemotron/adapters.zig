@@ -42,7 +42,7 @@ pub const Site = struct {
     seek: Buffer, // [candidates, in]: a sketch of the fact's inputs, then the candidate directions it frames
 
     pub fn adapter(s: *const Site, sites: *const Sites) wts.Adapter {
-        return .{ .a = s.a, .b = s.b, .tau = s.tau, .xa = sites.xa, .xn = sites.xn, .gates = sites.gates, .need = sites.need, .latch = sites.latch, .score = sites.score, .in = s.in, .out = s.out, .rank = sites.rank, .scale = scale, .unit = unit };
+        return .{ .a = s.a, .b = s.b, .tau = s.tau, .xa = sites.xa, .xn = sites.xn, .gates = sites.gates, .need = sites.need, .latch = sites.latch, .score = sites.score, .whole = sites.whole, .in = s.in, .out = s.out, .rank = sites.rank, .scale = scale, .unit = unit };
     }
 
     /// Block k's router offset.
@@ -63,6 +63,7 @@ pub const Sites = struct {
     rank: usize = 0, // ranks in use, the open block last
     saved: usize = 0, // blocks written beside the shards, a file each
     cap: usize, // blocks every layer has room for, doubled when a lesson needs more (max_blocks at most)
+    whole: bool = false, // lessons edit the weights: every one acts on every row, no router deciding
     device: mtl.Device,
     steps: u64 = 0, // the open block's Adam steps
     kept_steps: u64 = 0,

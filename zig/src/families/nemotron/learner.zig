@@ -5,28 +5,27 @@ const choice = @import("choice.zig");
 const router = @import("router.zig");
 const lesson_route = @import("lesson_route.zig");
 const Acting = lesson_route.Acting;
+const latched = lesson_route.latched;
 const train_mode = @import("train_mode.zig");
+const editor = @import("editor.zig");
+const probe = @import("probe.zig");
+const pocket = @import("pocket.zig");
+const whole_lessons = @import("whole.zig");
+const examples = @import("lesson_examples.zig");
 
-/// Token ids whose answer starts at `start` (the rows from start - 1 on predict it); lessons decide at row `decide`.
-pub const Example = struct { ids: []const u32, start: u32, decide: u32 };
+pub const Example = examples.Example;
+pub const Lesson = examples.Lesson;
+const max_steps = examples.max_steps;
+const Deck = examples.Deck;
+const key = examples.key;
+const total = examples.total;
+const pick = examples.pick;
+const own = examples.own;
+const disown = examples.disown;
+const disownLesson = examples.disownLesson;
 
-/// One fact's examples; `more` another round, `undo` one back, `save` writes every kept lesson.
-pub const Lesson = struct {
-    train: []const Example = &.{},
-    think: []const Example = &.{}, // the facts' answers with thinking on, one learned beside each plain one
-    held: []const Example = &.{},
-    near: []const Example = &.{},
-    keep: []const Example = &.{},
-    asked: []const Example = &.{}, // more wordings of the fact's questions, read only at their decision rows
-    unasked: []const Example = &.{}, // questions it must not answer, read only at their decision rows
-    undo: bool = false,
-    steps: u32 = max_steps,
-    more: bool = false,
-    kept: []const Example = &.{}, // questions the open lesson took, each with its answer as it was (a reroute's)
-    reroute: bool = false, // the open lesson's router fitted again with `unasked` among what it must not take
-    drop: bool = false, // the open lesson taken out whole
-    save: bool = false,
-};
+/// A projection's 4-bit codes as a backend holds them live, on the grid of their scales and biases.
+pub const Codes = struct { words: []u32, scales: []const u16, biases: []const u16 };
 
 pub const Report = union(enum) {
     learned: struct { recalled: bool, steps: u32, loss: f32 },
@@ -35,18 +34,23 @@ pub const Report = union(enum) {
 
 pub const Step = struct { done: bool, changed: bool = false, report: ?Report = null };
 
-const max_steps = 400;
 const check_every = 20;
 const per_step = 2; // fact answers whose gradients one Adam step takes together (a plain one and a thinking one)
 const replay_cap = 64; // earlier lessons' questions kept as ones a new router must not take, the oldest giving way
 
-/// A new lesson first sketches and measures what its block must read and when it acts (build), then learns (steps).
-const Phase = enum { idle, build, steps, undo, reroute, drop, save };
+/// A new lesson first sketches and measures what its block must read and when it acts (build), then learns (steps);
+/// an edit of the weights is written where its subject is read (edit), and a further round reports it again (again).
+const Phase = enum { idle, build, steps, undo, reroute, drop, save, edit, again, probe, pocket };
 
 /// The lessons over host H: its Trainer, max_rows, Ctx, layers, trainer, free, attach, write and seconds.
 pub fn Learner(comptime H: type) type {
     return struct {
         const Self = @This();
+        const has_edits = @hasDecl(H.Trainer, "key") and @hasDecl(H, "commit"); // keys, a nudged row, codes to write
+        const Edits = if (has_edits) editor.Editor(H.Trainer) else void;
+        const Probes = if (has_edits) probe.Probe(H.Trainer) else void;
+        const Pockets = if (has_edits) pocket.Pocket(H.Trainer) else void;
+        pub const Host = H;
 
         gpa: std.mem.Allocator,
         io: std.Io,
@@ -73,12 +77,28 @@ pub fn Learner(comptime H: type) type {
         answers: []Example = &.{}, // the lesson's answers, plain then thinking (the examples borrowed from the lesson)
         routing: std.ArrayList(Asked) = .empty, // each prompt a router reads once: cut after its decision row
         seen: std.AutoHashMapUnmanaged(u64, void) = .empty, // the prompts in routing
+        whole: bool, // lessons edit the weights: they act on every row, no router (TF_SLIDE_ROUTED: a router a lesson)
+        edits: Edits, // an edit of the weights' state, from its keys to its change
+        extra: std.ArrayList(Example) = .empty, // owned: answers a check found moved, kept by the next solve too
+        stay: [5][]const Example = @splat(&.{}), // what an edit keeps: keep, near, earlier lessons, others, extra
+        edited: bool = false, // the open edit came back when its held questions were asked
+        owned: Lesson = .{}, // the open edit's lesson, copied: a reroute solves it again after its request is gone
+        method: whole_lessons.Method, // how a whole lesson changes the model: a pocket's neurons by default
+        probe: Probes,
+        pockets: Pockets, // every MoE layer's pocket of learned neurons
+        pocketed: bool = false, // the last lesson put neurons in the pocket
 
         pub fn init(gpa: std.mem.Allocator, io: std.Io, b: H.Ctx) Self {
-            return .{ .gpa = gpa, .io = io, .b = b };
+            return .{ .gpa = gpa, .io = io, .b = b, .whole = std.c.getenv("TF_SLIDE_ROUTED") == null, .edits = if (has_edits) Edits.init(gpa) else {}, .method = whole_lessons.method(), .probe = if (has_edits) Probes.init(gpa) else {}, .pockets = if (has_edits) Pockets.init(gpa) else {} };
         }
 
         pub fn deinit(l: *Self) void {
+            if (has_edits) l.edits.deinit();
+            if (has_edits) l.probe.deinit();
+            if (has_edits) l.pockets.deinit();
+            disownLesson(l.gpa, l.owned);
+            for (l.extra.items) |ex| l.gpa.free(ex.ids);
+            l.extra.deinit(l.gpa);
             if (l.trainer) |t| H.free(t, l.gpa);
             if (l.choice) |*c| c.deinit();
             l.routing.deinit(l.gpa);
@@ -114,7 +134,7 @@ pub fn Learner(comptime H: type) type {
                 return;
             }
             if (lesson.reroute) {
-                if (!l.opened) return error.NothingToRoute;
+                if (!l.opened and !l.pocketed) return error.NothingToRoute;
                 l.built = 0;
                 l.phase = .reroute;
                 return;
@@ -126,12 +146,14 @@ pub fn Learner(comptime H: type) type {
             if (l.trainer == null) {
                 l.choice = try choice.Choice.init(l.gpa, H.layers(l.b));
                 l.trainer = try H.trainer(l.gpa, l.io, l.b);
+                l.trainer.?.sites.whole = l.whole;
                 for (&l.asks) |*side| {
                     side.* = try l.gpa.alloc(std.ArrayList(f32), H.layers(l.b));
                     for (side.*) |*rows| rows.* = .empty;
                 }
             }
             if (lesson.more) {
+                if (l.whole) return if (has_edits) whole_lessons.more(l) else error.EditsUnsupported;
                 if (!l.opened) return error.NothingToContinue;
                 return l.start();
             }
@@ -147,13 +169,14 @@ pub fn Learner(comptime H: type) type {
             for (l.keeps.items) |ex| l.gpa.free(ex.ids);
             l.keeps.clearRetainingCapacity();
             l.topic = false;
-            for ([_][]const Example{ lesson.train, lesson.think, lesson.held, lesson.asked }) |xs| for (xs) |ex| try l.routes(ex, .fact);
+            if (l.whole) return if (has_edits) whole_lessons.begin(l, lesson) else error.EditsUnsupported;
             l.gpa.free(l.answers);
             l.answers = try std.mem.concat(l.gpa, Example, &.{ lesson.train, lesson.think });
+            l.phase = .build;
+            for ([_][]const Example{ lesson.train, lesson.think, lesson.held, lesson.asked }) |xs| for (xs) |ex| try l.routes(ex, .fact);
             for (lesson.near) |ex| try l.routes(ex, .near);
             for (lesson.unasked) |ex| try l.routes(ex, .swap);
             for ([_][]const Example{ lesson.keep, l.replay.items }) |xs| for (xs) |ex| try l.routes(ex, .other);
-            l.phase = .build;
         }
 
         /// A round's steps from the open block as it is now, which an undo comes back to.
@@ -185,6 +208,7 @@ pub fn Learner(comptime H: type) type {
                 .idle => return .{ .done = true },
                 .undo => {
                     l.phase = .idle;
+                    if (has_edits and l.whole and try whole_lessons.undo(l)) return .{ .done = true, .changed = true };
                     if (!l.can_undo) return .{ .done = true };
                     l.trainer.?.sites.restore();
                     l.can_undo = false;
@@ -196,12 +220,20 @@ pub fn Learner(comptime H: type) type {
                 .reroute => return l.rerouteOnce(),
                 .drop => {
                     l.phase = .idle;
+                    if (has_edits and l.whole and try whole_lessons.undo(l)) return .{ .done = true, .changed = true };
                     if (!l.opened) return .{ .done = true };
                     l.kept_rounds = 0;
                     try l.settleLast(&.{});
                     return .{ .done = true, .changed = true };
                 },
                 .save => return l.saveOnce(),
+                .edit => return if (has_edits) whole_lessons.editOnce(l) else unreachable,
+                .probe => return if (has_edits) whole_lessons.probeOnce(l) else unreachable,
+                .pocket => return if (has_edits) whole_lessons.pocketOnce(l) else unreachable,
+                .again => {
+                    l.phase = .idle;
+                    return .{ .done = true, .report = .{ .learned = .{ .recalled = l.edited, .steps = 0, .loss = if (has_edits) l.edits.last_loss else 0 } } };
+                },
             }
         }
 
@@ -209,6 +241,10 @@ pub fn Learner(comptime H: type) type {
         fn saveOnce(l: *Self) !Step {
             l.phase = .idle;
             const t = l.trainer orelse return .{ .done = true };
+            if (l.whole) { // a lesson of the model itself goes into its own shards: the pocket, or an edit's codes
+                if (has_edits and !try whole_lessons.save(l)) try whole_lessons.foldOpen(l);
+                return .{ .done = true, .changed = true };
+            }
             const ranks = t.sites.rank - @as(usize, if (l.opened and l.kept_rounds == 0) adapters.block else 0);
             if (ranks == 0) return .{ .done = true };
             const t0 = H.seconds(l.io);
@@ -227,11 +263,18 @@ pub fn Learner(comptime H: type) type {
             const t = l.trainer.?;
             const k = key(ex);
             const known = l.bits.get(k);
-            var bits = known orelse Acting.empty;
+            var bits = if (l.whole) l.keptLessons() else known orelse Acting.empty;
             if (acting) bits.set(t.sites.first() / adapters.block);
-            const got = try t.step(ex.ids, ex.start, mode, .{ .decide = ex.decide, .bits = bits });
-            if (known == null) try l.bits.put(l.gpa, k, latched(t.score(), t.sites.needs(), t.sites.rank / adapters.block - @intFromBool(l.opened)));
+            const got = try t.step(ex.ids, ex.start, mode, .{ .decide = ex.decide, .bits = bits, .whole = l.whole });
+            if (!l.whole and known == null) try l.bits.put(l.gpa, k, latched(t.score(), t.sites.needs(), t.sites.rank / adapters.block - @intFromBool(l.opened)));
             return got.loss;
+        }
+
+        /// Every lesson kept before the open one, all acting (an in-place learner's lessons are part of the model).
+        pub fn keptLessons(l: *const Self) Acting {
+            var bits: Acting = .empty;
+            for (0..l.trainer.?.sites.rank / adapters.block - @intFromBool(l.opened)) |b| bits.set(b);
+            return bits;
         }
 
         /// A prompt for the routers to read, cut after its decision row; each prompt once, a fact's question or not.
@@ -251,34 +294,42 @@ pub fn Learner(comptime H: type) type {
         fn buildOnce(l: *Self) !Step {
             const t = l.trainer.?;
             const c = &l.choice.?;
-            const facts = l.answers;
-            const stay = [_][]const Example{ l.lesson.keep, l.lesson.near, l.replay.items };
-            const steady = l.lesson.keep.len + l.lesson.near.len + l.replay.items.len;
+            // an edit of the weights also keeps the questions about others, and reads every wording of the fact's
+            const stay_all = [_][]const Example{ l.lesson.keep, l.lesson.near, l.replay.items, l.lesson.unasked };
+            const fact_all = [_][]const Example{ l.answers, l.lesson.asked };
+            const stay: []const []const Example = if (l.whole) &stay_all else stay_all[0..3];
+            const facts: []const []const Example = if (l.whole) &fact_all else fact_all[0..1];
+            const steady = total(stay);
+            const nfacts = total(facts);
             const asked = l.routing.items;
             var i = l.built;
             l.built += 1;
-            if (i < steady) return l.sketch(pick(&stay, i), .avoid);
+            if (i < steady) return l.sketch(pick(stay, i), .avoid);
             i -= steady;
-            if (i < facts.len) return l.sketch(facts[i], .seek);
-            i -= facts.len;
+            if (i < nfacts) return l.sketch(pick(facts, i), .seek);
+            i -= nfacts;
             if (i == 0) {
                 t.sites.frame();
                 c.reset();
             }
             if (i < steady) {
-                const ex = pick(&stay, i);
+                const ex = pick(stay, i);
                 _ = try l.pass(ex, .project, false);
                 for (0..t.sites.list.len) |k| c.add(k, t.projected(k, ex.ids.len - 1), false, ex.start - 1);
                 return .{ .done = false };
             }
             i -= steady;
-            if (i < facts.len) {
-                const ex = facts[i];
+            if (i < nfacts) {
+                const ex = pick(facts, i);
                 _ = try l.pass(ex, .project, false);
-                for (0..t.sites.list.len) |k| c.add(k, t.projected(k, ex.ids.len - 1)[(ex.start - 1) * adapters.candidates ..], true, 0);
+                for (0..t.sites.list.len) |k| {
+                    const rows = t.projected(k, ex.ids.len - 1);
+                    // an edit of the weights: the question's rows, evenly; a routed block: the answer, its first row heavily
+                    if (l.whole) c.add(k, rows[0 .. (ex.decide + 1) * adapters.candidates], true, std.math.maxInt(usize)) else c.add(k, rows[(ex.start - 1) * adapters.candidates ..], true, 0);
+                }
                 return .{ .done = false };
             }
-            i -= facts.len;
+            i -= nfacts;
             if (i < asked.len) {
                 _ = try l.pass(asked[i].ex, .project, false);
                 try l.ask(asked[i]);
@@ -287,7 +338,7 @@ pub fn Learner(comptime H: type) type {
             try c.choose();
             try t.sites.open(c.coef);
             l.opened = true;
-            try l.route();
+            if (!l.whole) try l.route();
             try H.attach(l.b, t);
             try l.start();
             return .{ .done = false };
@@ -361,6 +412,7 @@ pub fn Learner(comptime H: type) type {
         /// A question the open lesson took: a topic lesson keeps its answer as it was (the next round learns it); a
         /// strict one reads it at its decision row and fits its router again without it.
         fn rerouteOnce(l: *Self) !Step {
+            if (l.whole) return if (has_edits) whole_lessons.reroute(l) else unreachable;
             if (l.topic) {
                 for (l.lesson.kept) |ex| try l.keeps.append(l.gpa, .{ .ids = try l.gpa.dupe(u32, ex.ids), .start = ex.start, .decide = ex.decide });
                 l.phase = .idle;
@@ -396,21 +448,26 @@ pub fn Learner(comptime H: type) type {
             if (turn.last) l.done += 1;
             if (!turn.last) return .{ .done = false, .changed = true };
             const end = l.at == l.plan.items.len;
-            const back = (l.done % check_every == 0 or end) and try l.recalled();
+            const back = (l.done % check_every == 0 or end) and try l.recalled(true);
             if (!back and !end) return .{ .done = false, .changed = true };
             l.phase = .idle;
             l.kept_rounds += 1;
             return .{ .done = true, .changed = true, .report = .{ .learned = .{ .recalled = back, .steps = l.done, .loss = l.loss / @as(f32, @floatFromInt(@max(l.done * per_step, 1))) } } };
         }
 
-        /// Whether every held-out answer comes back token for token (each its row's likeliest), the lesson acting.
-        fn recalled(l: *Self) !bool {
-            if (l.lesson.held.len == 0) return false;
+        /// Whether every held-out answer comes back token for token (each its row's likeliest), the lesson acting
+        /// (`open`: from its block).
+        pub fn recalled(l: *Self, open: bool) !bool {
+            return l.recalls(l.lesson.held, open);
+        }
+
+        pub fn recalls(l: *Self, held: []const Example, open: bool) !bool {
+            if (held.len == 0) return false;
             const t = l.trainer.?;
-            for (l.lesson.held) |ex| {
-                var bits = l.earlier(ex);
-                bits.set(t.sites.first() / adapters.block);
-                if (!(try t.step(ex.ids, ex.start, .loss, .{ .decide = ex.decide, .bits = bits })).recalled) return false;
+            for (held) |ex| {
+                var bits = if (l.whole) l.keptLessons() else l.earlier(ex);
+                if (open) bits.set(t.sites.first() / adapters.block);
+                if (!(try t.step(ex.ids, ex.start, .loss, .{ .decide = ex.decide, .bits = bits, .whole = l.whole })).recalled) return false;
             }
             return true;
         }
@@ -418,6 +475,7 @@ pub fn Learner(comptime H: type) type {
         /// The last lesson's questions into replay if a round of it stayed (else its block out); this lesson's are last.
         fn settleLast(l: *Self, answers: []const Example) !void {
             const now = try own(l.gpa, answers);
+            if (has_edits and l.whole) try whole_lessons.settle(l);
             if (l.opened and l.kept_rounds == 0) {
                 l.trainer.?.sites.needs()[l.trainer.?.sites.first() / adapters.block] = 0;
                 l.trainer.?.sites.close();
@@ -436,7 +494,8 @@ pub fn Learner(comptime H: type) type {
         }
 
         /// The round's steps, each a plain answer and a thinking one (two plain without thinking answers), then an answer
-        /// the lesson keeps if it has any; every deck in fresh orders, Adam after each step's last.
+        /// the lesson keeps if it has any (four for an edit of the weights); every deck in fresh orders, Adam after each
+        /// step's last.
         fn schedule(l: *Self, steps: u32) !void {
             l.rounds += 1;
             var prng = std.Random.DefaultPrng.init(l.rounds);
@@ -448,11 +507,11 @@ pub fn Learner(comptime H: type) type {
             defer keeps.deinit(l.gpa);
             l.plan.clearRetainingCapacity();
             const r = prng.random();
+            const keeping: usize = if (keeps.cards.len == 0) 0 else if (l.whole) 4 else 1; // an edit reaches every answer
             for (0..steps) |_| {
-                const keep = keeps.cards.len > 0;
                 try l.plan.append(l.gpa, .{ .ex = plain.draw(r), .fact = true, .last = false });
-                try l.plan.append(l.gpa, .{ .ex = think.draw(r), .fact = true, .last = !keep });
-                if (keep) try l.plan.append(l.gpa, .{ .ex = keeps.draw(r), .fact = false, .last = true });
+                try l.plan.append(l.gpa, .{ .ex = think.draw(r), .fact = true, .last = keeping == 0 });
+                for (0..keeping) |j| try l.plan.append(l.gpa, .{ .ex = keeps.draw(r), .fact = false, .last = j + 1 == keeping });
             }
         }
     };
@@ -468,85 +527,3 @@ const Asked = struct { ex: Example, kind: Kind, full: ?Example = null };
 
 /// One example of a step: the fact's answer or one the lesson must leave as it was, and whether Adam steps after it.
 const Turn = struct { ex: Example, fact: bool, last: bool };
-
-/// The kept lessons (blocks below `blocks`) whose router scores reach what they need.
-fn latched(score: []const f32, need: []const f32, blocks: usize) Acting {
-    var bits: Acting = .empty;
-    for (0..blocks) |b| if (need[b] > 0 and score[b] >= need[b]) bits.set(b);
-    return bits;
-}
-
-/// A prompt by its rows through its decision row: what a router reads of it.
-fn key(ex: Example) u64 {
-    return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(ex.ids[0 .. ex.decide + 1]));
-}
-
-/// Example i of the lists in turn.
-fn pick(lists: []const []const Example, i: usize) Example {
-    var at = i;
-    for (lists) |xs| {
-        if (at < xs.len) return xs[at];
-        at -= xs.len;
-    }
-    unreachable;
-}
-
-/// Examples dealt in shuffled passes: every one once before any comes again.
-const Deck = struct {
-    cards: []Example,
-    next: usize,
-
-    fn init(gpa: std.mem.Allocator, parts: []const []const Example) !Deck {
-        var n: usize = 0;
-        for (parts) |p| n += p.len;
-        const cards = try gpa.alloc(Example, n);
-        var at: usize = 0;
-        for (parts) |p| {
-            @memcpy(cards[at..][0..p.len], p);
-            at += p.len;
-        }
-        return .{ .cards = cards, .next = n };
-    }
-
-    fn deinit(d: *Deck, gpa: std.mem.Allocator) void {
-        gpa.free(d.cards);
-    }
-
-    fn draw(d: *Deck, r: std.Random) Example {
-        if (d.next == d.cards.len) {
-            r.shuffle(Example, d.cards);
-            d.next = 0;
-        }
-        d.next += 1;
-        return d.cards[d.next - 1];
-    }
-};
-
-fn own(gpa: std.mem.Allocator, xs: []const Example) ![]Example {
-    const out = try gpa.alloc(Example, xs.len);
-    var made: usize = 0;
-    errdefer {
-        for (out[0..made]) |x| gpa.free(x.ids);
-        gpa.free(out);
-    }
-    for (xs, out) |x, *o| {
-        o.* = .{ .ids = try gpa.dupe(u32, x.ids), .start = x.start, .decide = x.decide };
-        made += 1;
-    }
-    return out;
-}
-
-fn disown(gpa: std.mem.Allocator, xs: []Example) void {
-    for (xs) |x| gpa.free(x.ids);
-    gpa.free(xs);
-}
-
-test "a kept lesson acts on a reply only once its router score reaches what it needs" {
-    var score: [lesson_route.max_blocks]f32 = @splat(0);
-    var need: [lesson_route.max_blocks]f32 = @splat(0);
-    score[0..4].* = .{ 2.5, 1.2, 0, 3 };
-    need[0..2].* = .{ 2, 1.5 };
-    const four = latched(&score, &need, 4);
-    try std.testing.expect(four.isSet(0) and four.count() == 1);
-    try std.testing.expectEqual(@as(usize, 0), latched(&score, &need, 0).count());
-}

@@ -78,7 +78,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         srv.slide.mark(id, .learning);
         out.event("learning", .{ .id = id });
         var kept = [1]bool{false};
-        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, gone) catch |e| {
+        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, !std.mem.eql(u8, source, "chat"), gone) catch |e| {
             missed(srv, &out, id, words(&cx, e));
             continue;
         }) orelse {
@@ -95,6 +95,9 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     sse.done(conn) catch {};
 }
 
+/// Rounds a lesson gets to bring its facts back when asked once, before it is given up.
+const give_up = 5;
+
 /// What a lesson's rounds left: which facts come back, the steps taken, and why it stopped early (null: it did not).
 const Rounds = struct { recalled: []bool, steps: u32 = 0, why: ?[]const u8 = null };
 
@@ -106,6 +109,7 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
     @memset(out.recalled, false);
     var routed: u32 = 0;
     var streak: u32 = 0; // rounds in a row whose held-out questions came back when asked
+    var ever = false; // a round whose held-out questions all came back when asked
     for (0..teach.rounds + teach.reroutes) |round| {
         var request = plan.full;
         request.more = round > 0;
@@ -152,9 +156,14 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
         }
         @memcpy(out.recalled, verdict.recalled);
         streak = if (std.mem.allEqual(bool, out.recalled, true)) streak + 1 else 0;
+        ever = ever or streak > 0;
+        // rounds that never once brought the fact back when asked do not start to: give up rather than learn on
+        if (!ever and round + 1 >= give_up) break;
         // a lesson acts only on replies its router takes, so it learns on until its answers stay back, with thinking too
         if ((held or streak >= 2) and std.mem.allEqual(bool, out.recalled, true) and round + 1 >= teach.min_rounds) return out;
     }
+    // it never came back when asked: nothing of it stays in the model
+    if (!std.mem.allEqual(bool, out.recalled, true)) _ = run(srv, a, &.{ .drop = true });
     return out;
 }
 

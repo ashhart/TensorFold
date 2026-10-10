@@ -113,23 +113,25 @@ extern "C" __global__ void __launch_bounds__(256) tf_train_lora_in(const bf16* x
 
 // A pass's rows by stream: each segment's first row, rows, its decision row (an index in the pass) and its latch slot.
 struct Route {
-    unsigned count, known, pad0, pad1; // known: every latch was set before the pass (a training example)
+    unsigned count, known, whole, pad1; // known: every latch was set before the pass (a training example); whole: see the gate
     int seg[8][4];
 };
 
 // Block b acts on row r only after its stream's decision row, and only if its lesson chose to act there. On the
 // decision row itself it adds this layer's part of its router score, its first direction's weighed cosine less tau,
-// and acts on nothing.
+// and acts on nothing. A whole pass (lessons that edit the weights) has no decision row: its lessons act on every row
+// of a stream, a training pass's flagged ones and an inference pass's all.
 extern "C" __global__ void tf_train_gate(float* xa, const float* xn, const float* tau, float* gates, int rows, int rank, int blocks,
                                          int stride, float unit, Route route, const unsigned* latch, float* score) {
     const int b = blockIdx.x * blockDim.x + threadIdx.x, r = blockIdx.y;
     if (b >= blocks || r >= rows) return;
     int rel = -1;
     unsigned slot = 0;
-    bool settled = false;
+    bool inside = false, settled = false;
     for (unsigned s = 0; s < route.count; s++) {
         const int* g = route.seg[s];
         if (r >= g[0] && r < g[0] + g[1]) {
+            inside = true;
             rel = r - g[2];
             slot = (unsigned)g[3];
             settled = route.known != 0 || g[2] < g[0];
@@ -137,7 +139,9 @@ extern "C" __global__ void tf_train_gate(float* xa, const float* xn, const float
     }
     float* row = xa + (size_t)r * rank + b * 16;
     bool open = false;
-    if (rel == 0) {
+    if (route.whole != 0) {
+        open = inside && (route.known == 0 || latch[slot * stride + b] != 0);
+    } else if (rel == 0) {
         const float n = unit * xn[r];
         if (n > 0) score[slot * stride + b] += row[0] * rsqrtf(n) - tau[b];
     } else if (rel > 0 && settled) {

@@ -48,6 +48,15 @@ pub fn promptOnly(srv: *Server, cx: *Cx, keep: Allocator, system: ?[]const u8, q
     return .{ .ids = try keep.dupe(u32, head), .start = @intCast(head.len - 1), .decide = prompt.decideOf(srv, head) };
 }
 
+/// `question` as a router reads it after an unrelated exchange (`before`: the user's turn and the reply).
+pub fn promptAfter(srv: *Server, cx: *Cx, keep: Allocator, before: [2][]const u8, question: []const u8) !api.Example {
+    const a = cx.a;
+    const asked = [_]Value{ try message(a, "user", before[0]), try message(a, "assistant", before[1]), try message(a, "user", question) };
+    const head = try prompt.renderIds(srv, cx, .{ .array = @constCast(&asked) }, &.{}, false, null, true);
+    if (head.len < 3) return cx.refuse("a question renders too short to route");
+    return .{ .ids = try keep.dupe(u32, head), .start = @intCast(head.len - 1), .decide = prompt.decideOf(srv, head) };
+}
+
 /// One greedy reply without thinking to `user`, after a system note when given.
 pub fn ask(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tokens: i64, gone: anytype) chat.Failure!chat.Reply {
     const a = cx.a;

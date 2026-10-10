@@ -108,17 +108,30 @@ kernel void tf_train_lora_in(const device bfloat* x [[buffer(0)]],
   if (lane == 0 && q == 0) xn[r] = n;
 }
 
+// h[i] += delta[i]: a nudge to one bf16 row of the residual (h bound at that row).
+kernel void tf_train_nudge(device bfloat* h [[buffer(0)]], const device float* delta [[buffer(1)]], uint i [[thread_position_in_grid]]) {
+  h[i] = bfloat(float(h[i]) + delta[i]);
+}
+
+// a pocket's neurons as the shared expert's are: each input product squared where positive, else zero
+kernel void tf_pocket_relu2(device float* z [[buffer(0)]], constant uint& n [[buffer(1)]], uint i [[thread_position_in_grid]]) {
+  if (i >= n) return;
+  const float v = max(z[i], 0.0f);
+  z[i] = v * v;
+}
+
 // A pass's rows by stream: each segment's first row, rows, its decision row (an index in the pass) and its latch slot.
 struct Route {
   uint count;
   uint known; // 1: every latch was set before the pass (a training example), so rows after its decision row may act
-  uint pad0, pad1;
+  uint whole; // 1: lessons edit the weights, acting on every row: a training pass's flagged ones, an inference pass's all
+  uint pad1;
   int4 seg[8];
 };
 
 // Block b acts on row r only after its stream's decision row, and only if its lesson chose to act there. On the
 // decision row itself it adds this layer's part of its router score, its first direction's weighed cosine less tau,
-// and acts on nothing.
+// and acts on nothing. A whole pass has no decision row: its lessons act on every row of a stream.
 kernel void tf_train_gate(device float* xa [[buffer(0)]],
                           const device float* xn [[buffer(1)]],
                           const device float* tau [[buffer(2)]],
@@ -133,10 +146,11 @@ kernel void tf_train_gate(device float* xa [[buffer(0)]],
   if (b >= blocks || r >= rows) return;
   int rel = -1;
   uint slot = 0;
-  bool settled = false; // the decision row was in an earlier pass, so its latch is set
+  bool inside = false, settled = false; // settled: the decision row was in an earlier pass, so its latch is set
   for (uint s = 0; s < route.count; s++) {
     const int4 g = route.seg[s];
     if (int(r) >= g.x && int(r) < g.x + g.y) {
+      inside = true;
       rel = int(r) - g.z;
       slot = uint(g.w);
       settled = route.known != 0 || g.z < g.x;
@@ -144,7 +158,9 @@ kernel void tf_train_gate(device float* xa [[buffer(0)]],
   }
   device float* row = xa + size_t(r) * rank + b * 16;
   bool open = false;
-  if (rel == 0) {
+  if (route.whole != 0) {
+    open = inside && (route.known == 0 || latch[slot * stride + b] != 0);
+  } else if (rel == 0) {
     const float n = unit * xn[r];
     if (n > 0) score[slot * stride + b] += row[0] * rsqrt(n) - tau[b];
   } else if (rel > 0 && settled) {

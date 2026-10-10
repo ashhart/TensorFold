@@ -228,8 +228,8 @@ pub const Prefill = struct {
                     .a = At.of(p.a).plus(p.index[i] * c.mamba_heads * 4),
                 } },
                 .moe => .{ .moe = .{
-                    .up = try rawLinear(m, "backbone.layers.{d}.mixer.shared_experts.up_proj", i),
-                    .down = try rawLinear(m, "backbone.layers.{d}.mixer.shared_experts.down_proj", i),
+                    .up = rawOf(m.weights.layers[i].moe.shared_raw[0]),
+                    .down = rawOf(m.weights.layers[i].moe.shared_raw[1]),
                 } },
                 .attention => .{ .attention = .{
                     .q = try rawLinear(m, "backbone.layers.{d}.mixer.q_proj", i),
@@ -328,6 +328,11 @@ pub fn tensorAt(t: anytype) At {
 fn tensor(m: *Model, comptime fmt: []const u8, i: usize) !At {
     var name: [160]u8 = undefined;
     return tensorAt(try m.checkpoint.get(try std.fmt.bufPrint(&name, fmt, .{i})));
+}
+
+/// A quantized matrix's words, scales and biases as the prompt kernels read them.
+fn rawOf(t: anytype) Raw {
+    return .{ tensorAt(t[0]), tensorAt(t[1]), tensorAt(t[2]) };
 }
 
 fn rawLinear(m: *Model, comptime base: []const u8, i: usize) !Raw {
