@@ -68,7 +68,8 @@ chat fields that shape the prompt (`tools`, `reasoning_effort`, `chat_template_k
 `tokens`, and `token_strs` with `return_token_strs: true`. The IDs are the ones the chat route runs for the same
 request, images expanded. `/detokenize` takes `tokens` and returns `prompt`.
 In the Python 0.6.6 engine, `--vision` lets supported Qwen3.5/3.8 dense checkpoints accept `image_url` content parts
-alongside text in user messages and in tool results (`role: "tool"`), such as an agent's screenshots.
+alongside text in user messages and in tool results (`role: "tool"`), such as an agent's screenshots. The native
+server reads images for GLM-5.3-Flash on Metal, with data URLs only ([image input](vision.md#the-native-server)).
 See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
 The native binary refuses `--vision` and answers image parts with HTTP 400.
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.

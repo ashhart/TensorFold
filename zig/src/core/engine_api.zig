@@ -9,6 +9,9 @@ pub const Id = u64;
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
 pub const Sampling = lanes.Sampling;
 
+/// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
+pub const Image = lanes.stream.Image;
+
 /// A prompt's reproducible seed (``seed_for``), for requests that name none.
 pub const seedFor = lanes.sampling.seedFor;
 
@@ -88,7 +91,37 @@ pub const Request = struct {
     logprobs: ?u8 = null,
     /// Rows for each prompt token after the first, with ranks and this many best tokens, when ``Info.prompt_logprobs``.
     prompt_logprobs: ?u8 = null,
+    /// Images whose rows replace placeholder tokens of ``prompt``, in order; only an engine whose ``Info.vision`` is set.
+    images: []const Image = &.{},
+    /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
+    cache_key: []const u32 = &.{},
+
+    /// The prompt as the prompt cache matches it: an image request's placeholders stand for their images.
+    pub fn cacheKey(r: *const Request) []const u32 {
+        return if (r.cache_key.len > 0) r.cache_key else r.prompt;
+    }
 };
+
+/// An image prepared for the engine's tower (``Vision.prepare``): patches, patch grid, tokens and a content hash.
+pub const PreparedImage = struct { pixels: []f32, gh: u32, gw: u32, tokens: u32, hash: u64 };
+
+/// Image input an engine serves (``Info.vision``): how the server turns an image's bytes into tower input and what
+/// a request may hold.
+pub const Vision = struct {
+    ctx: *anyopaque,
+    /// The image's bytes (any format the platform decodes) at most ``max_tokens`` tokens; allocated in ``a``.
+    prepare: *const fn (ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!PreparedImage,
+    /// The token the chat template writes once per image, expanded to the image's tokens.
+    image_token: u32,
+    /// The tokens the template wraps an image in (the image token among them): text that spells one stays text.
+    markers: []const u32 = &.{},
+    /// Image tokens one request may hold in all, and images.
+    image_tokens: u32,
+    max_images: u32,
+};
+
+/// --vision: image input's limits (``Open.vision``).
+pub const VisionOpen = struct { image_tokens: u32 = 4096, max_images: u32 = 4 };
 
 pub const Reason = enum { stop, length, cancelled, failed };
 
@@ -164,6 +197,8 @@ pub const Info = struct {
     decides: bool = false,
     /// Decisions may carry pictures (`Decision.pictures`).
     pictures: bool = false,
+    /// Image input (--vision); null: text only.
+    vision: ?Vision = null,
     /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
     greedy_only: bool = false,
     /// Whether a request's caches fit beside the running streams' now (null: a free lane does); else it waits in order.
@@ -231,6 +266,8 @@ pub const Open = struct {
     master_port: u16 = 29551,
     /// --policy: the engine's policy as `key=value,...`; empty: its defaults.
     policy: []const u8 = "",
+    /// --vision: load the checkpoint's image tower (null: text only; an engine without one refuses).
+    vision: ?VisionOpen = null,
 };
 
 /// A packed decision: a trunk (pictures expand at `at`), a branch a question, and each branch's labels (`counts`).
