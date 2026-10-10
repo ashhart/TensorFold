@@ -5,7 +5,6 @@ const fz = @import("replay.zig");
 const Engine = @import("engine.zig").Engine;
 
 const LAYERS = fz.LAYERS;
-const CAP = fz.CAP;
 const CS_ROW = fz.CS_ROW;
 const SO_ROW = fz.SO_ROW;
 const KEY_ROW = 256 * 2; // a key or value row of one head (bf16)
@@ -149,17 +148,17 @@ fn parts(m: *fz.Model, at: usize, passed: ?Engine.Passed, out: *[MAX_PARTS]Part)
         li += 1;
     };
     for (&m.layers) |*L| if (!L.linear) {
-        n += rows(L.keys, L.vals, L.raw, at, out[n..]);
+        n += rows(L.keys, L.vals, L.raw, m.cap, at, out[n..]);
     };
-    n += rows(m.mtp.keys, m.mtp.vals, m.mtp.raw, at, out[n..]);
+    n += rows(m.mtp.keys, m.mtp.vals, m.mtp.raw, m.cap, at, out[n..]);
     out[n] = .{ .live = if (passed) |ps| ps.tail else .{ .b = m.ple.cin.b, .off = m.ple.cin.off }, .len = TAIL };
     return n + 1;
 }
 
-fn rows(keys: fz.Buf, vals: fz.Buf, raw: fz.Buf, at: usize, out: []Part) usize {
+fn rows(keys: fz.Buf, vals: fz.Buf, raw: fz.Buf, cap: usize, at: usize, out: []Part) usize {
     for (0..2) |hd| {
-        out[hd] = .{ .live = .{ .b = keys.b, .off = keys.off + hd * CAP * KEY_ROW }, .len = at * KEY_ROW };
-        out[2 + hd] = .{ .live = .{ .b = vals.b, .off = vals.off + hd * CAP * KEY_ROW }, .len = at * KEY_ROW };
+        out[hd] = .{ .live = .{ .b = keys.b, .off = keys.off + hd * cap * KEY_ROW }, .len = at * KEY_ROW };
+        out[2 + hd] = .{ .live = .{ .b = vals.b, .off = vals.off + hd * cap * KEY_ROW }, .len = at * KEY_ROW };
     }
     out[4] = .{ .live = raw, .len = at * RAW_ROW };
     return 5;

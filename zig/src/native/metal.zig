@@ -300,6 +300,17 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
         problem.* = try std.fmt.allocPrint(a, "--context {d} exceeds this model's {d}-token window", .{ window, native });
         return null;
     }
+    if (o.lanes_fixed and o.lanes > 1) {
+        if (o.speed_up != null or std.c.getenv("TF_FLASHNEXT_TP") != null) {
+            problem.* = "Flash Next shared sessions are single-Mac only; use --parallel 1 with --speed-up";
+            return null;
+        }
+        var why: []const u8 = "";
+        return @import("flashnext_batch_host.zig").open(gpa, io, o.dir, dump, if (window > 0) @min(window, tf.flashnext_replay.CAP - tf.flashnext_engine.MARGIN) else tf.flashnext_replay.CAP - tf.flashnext_engine.MARGIN, o.lanes, o.prompt_cache_gib, o.prompt_cache_over_cap, a, &why) catch |err| {
+            problem.* = if (err == error.CacheOverCap) why else try std.fmt.allocPrint(a, "the native Flash Next batching engine cannot open ({s})", .{@errorName(err)});
+            return null;
+        };
+    }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     var why: []const u8 = "";

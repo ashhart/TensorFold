@@ -1,0 +1,8 @@
+{
+  "scope": "four-slot serial MTP HTTP block 5; sample after warmup",
+  "process": "tensorfold-native",
+  "page_size": 16384,
+  "physical_footprint_bytes": 186200771336,
+  "physical_peak_bytes": 186421791496,
+  "os_swap_used_bytes_at_probes": 0
+}
