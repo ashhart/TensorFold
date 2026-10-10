@@ -73,6 +73,7 @@ pub const Weights = struct {
 const prefix = "model.language_model.";
 
 const load_fix = @import("weights_fix.zig");
+const paced_read = @import("../../core/paced_read.zig");
 const Src = load_fix.Src;
 const Fix = load_fix.Fix;
 const Transform = load_fix.Transform;
@@ -448,16 +449,21 @@ const Pool = struct {
     failed: std.atomic.Value(bool) = .init(false),
 
     fn run(p: *Pool) void {
+        const buf = paced_read.stage(std.heap.page_allocator, 16 << 20) catch {
+            p.failed.store(true, .release);
+            return;
+        };
+        defer std.heap.page_allocator.free(buf);
         while (true) {
             const i = p.next.fetchAdd(1, .monotonic);
             if (i >= p.jobs.len) return;
             const j = p.jobs[i];
-            readAll(p.fds[j.shard], j.dst[0..j.len], j.off) catch p.failed.store(true, .release);
+            paced_read.read(p.fds[j.shard], j.dst[0..j.len], j.off, buf) catch p.failed.store(true, .release);
         }
     }
 };
 
-/// Every copy on `threads` threads, the shards opened uncached (182 GB would only churn the page cache).
+/// Every copy on `threads` threads, uncached and paced by free memory (a 180 GB load once filled the page cache too).
 fn runCopies(l: *Loader, threads: usize) !void {
     const fds = try l.gpa.alloc(std.c.fd_t, l.shards.items.len);
     defer l.gpa.free(fds);

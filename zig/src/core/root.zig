@@ -4,6 +4,7 @@ pub const safetensors = @import("safetensors.zig");
 pub const exl3_format = @import("exl3_format.zig");
 pub const checkpoint = @import("checkpoint.zig");
 pub const direct_io = @import("direct_io.zig");
+pub const paced_read = @import("paced_read.zig");
 pub const Checkpoint = checkpoint.Checkpoint;
 pub const draft_depth = @import("draft_depth.zig");
 pub const CopyIndex = @import("copy_index.zig").CopyIndex;
@@ -20,6 +21,7 @@ test {
     _ = @import("exl3_rect_test.zig");
     _ = checkpoint;
     _ = direct_io;
+    _ = paced_read;
     _ = draft_depth;
     _ = @import("copy_index.zig");
     _ = ids_json;
