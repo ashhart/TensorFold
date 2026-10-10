@@ -42,6 +42,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM keeps lighter prompt states. A kept state holds the KDA states and convolution windows and leaves the MLA prefixes in its slot, valid until that slot writes below them. A 26.6k-token chat's state takes 141 MiB instead of 587, so the full model on one Mac keeps it, and the next turn prefills in 0.15 s instead of 13.8 s with the same reply. `--learn` still keeps whole states.
 - GLM loads read the checkpoint around the page cache and wait while free memory is under 3% of RAM. A 160 GB load on a 256 GB M5 Ultra had filled the page cache, run out of free memory and restarted the Mac.
 - `tf-moe-bench` and `tf-mm-bench` time routed-expert and prompt matmul kernels from `.metal` files against each other, with each kernel's bits against the first and the matmuls' error against fp64.
+- Living Weights' leak check no longer counts an everyday word a reply says in passing as a leak: "If you'd like, I can help" used to undo a round that taught "I like blue." (#590). Thanks to @ZackSample for the report.
 
 ## 1.0.4
 
