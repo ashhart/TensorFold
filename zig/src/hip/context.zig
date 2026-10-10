@@ -28,6 +28,31 @@ pub const Context = struct {
         try runtime.check(self.r.api.hipDeviceSynchronize());
     }
 
+    pub fn attribute(self: Context, a: abi.DeviceAttribute) runtime.Error!c_int {
+        var v: c_int = 0;
+        try runtime.check(self.r.api.hipDeviceGetAttribute(&v, a, self.device));
+        return v;
+    }
+
+    /// The device's marketing name ("AMD Radeon PRO W7800" ...).
+    pub fn name(self: Context, buf: []u8) runtime.Error![]const u8 {
+        if (buf.len < 2) return error.Invalid;
+        try runtime.check(self.r.api.hipDeviceGetName(buf.ptr, @intCast(buf.len), self.device));
+        return std.mem.sliceTo(buf, 0);
+    }
+
+    pub const MemInfo = struct { free: usize, total: usize };
+
+    /// The current device's free and total bytes (hipMemGetInfo, looked up on its own: the admission set lacks it).
+    pub fn memInfo(self: Context) runtime.Error!MemInfo {
+        const Get = *const fn (*usize, *usize) callconv(.c) abi.Result;
+        const lib: *std.DynLib = @constCast(&self.r.lib);
+        const get = lib.lookup(Get, "hipMemGetInfo") orelse return error.MissingSymbol;
+        var m: MemInfo = .{ .free = 0, .total = 0 };
+        try runtime.check(get(&m.free, &m.total));
+        return m;
+    }
+
     pub fn deinit(self: *Context) void {
         _ = self.r.api.hipDeviceSynchronize();
         _ = self.r.api.hipDevicePrimaryCtxRelease(self.device);

@@ -19,6 +19,19 @@ pub const Runtime = struct {
         return .{ .lib = lib, .api = api };
     }
 
+    /// HIP's name for a failed call's result, for logs (`hipErrorOutOfMemory` ...).
+    pub fn errorName(self: *const Runtime, result: abi.Result) []const u8 {
+        const name = self.api.hipGetErrorName(result) orelse return "unknown HIP error";
+        return std.mem.span(name);
+    }
+
+    /// The GPUs this process sees.
+    pub fn deviceCount(self: *const Runtime) Error!c_int {
+        var n: c_int = 0;
+        try check(self.api.hipGetDeviceCount(&n));
+        return n;
+    }
+
     pub fn close(self: *Runtime) void {
         self.lib.close();
         self.* = undefined;
