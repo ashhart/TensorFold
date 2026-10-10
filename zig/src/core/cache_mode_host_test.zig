@@ -12,6 +12,7 @@ const Fixture = struct {
     resets: usize = 0,
     callbacks: usize = 0,
     feed_stop: bool = false,
+    hash_draw: bool = false,
     batch_words: [16]u32 = undefined,
     fn self(ptr: *anyopaque) *Fixture {
         return @ptrCast(@alignCast(ptr));
@@ -34,7 +35,8 @@ const Fixture = struct {
         self(ptr).rows(ids, true);
     }
     fn draw(ptr: *anyopaque, _: ?api.Sampling) !u32 {
-        return 1000 + self(ptr).state.at;
+        const f = self(ptr);
+        return if (f.hash_draw) @truncate(f.state.value) else 1000 + f.state.at;
     }
     fn advance(ptr: *anyopaque, token: u32) !void {
         self(ptr).rows(&.{token}, true);
@@ -139,6 +141,64 @@ fn fresh(tokens: []const u32, spans: []const [2]u32, supports_decode: bool) !Sta
     defer host.deinit();
     _ = try request(host, tokens, spans, 0, 0);
     return f.state;
+}
+
+test "serial host restores a user edit from rewind with fresh state and output" {
+    const first = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+    const edited = [_]u32{ 1, 2, 3, 4, 50, 6, 7, 8, 9, 10, 11, 12 };
+    var f: Fixture = .{ .hash_draw = true };
+    var store = pc.Store.init(a, f.snapshots(), .{ .lookahead = 1, .min_prompt = 0 }, 2 * @sizeOf(State));
+    defer store.deinit();
+    const host = try serial.Host.init(a, io, f.driver(&store, false));
+    defer host.deinit();
+    var box: Box = .{};
+    const r1 = api.Request{ .prompt = &first, .max_tokens = 1, .history_len = 10, .rewind_len = 4 };
+    try host.engine().submit(1, &r1, .{ .ctx = &box, .event = Box.event });
+    try box.wait();
+    box = .{};
+    const r2 = api.Request{ .prompt = &edited, .max_tokens = 1, .history_len = 10, .rewind_len = 4 };
+    try host.engine().submit(2, &r2, .{ .ctx = &box, .event = Box.event });
+    try box.wait();
+    try std.testing.expectEqual(@as(u32, 3), box.from);
+    try std.testing.expectEqual(@as(usize, 2), store.entries.items.len);
+
+    var cold: Fixture = .{ .hash_draw = true };
+    const cold_host = try serial.Host.init(a, io, cold.driver(null, false));
+    defer cold_host.deinit();
+    var cold_box: Box = .{};
+    try cold_host.engine().submit(3, &r2, .{ .ctx = &cold_box, .event = Box.event });
+    try cold_box.wait();
+    try std.testing.expectEqual(@as(u32, 0), cold_box.from);
+    try std.testing.expectEqualDeep(cold.state, f.state);
+    try std.testing.expectEqualSlices(u32, cold_box.tokens[0..cold_box.count], box.tokens[0..box.count]);
+}
+
+test "serial warm pass keeps both its endpoint and the earlier user rewind" {
+    const warm = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+    const edited = [_]u32{ 1, 2, 3, 4, 50, 6, 7, 8, 9, 10, 11 };
+    var f: Fixture = .{ .hash_draw = true };
+    var store = pc.Store.init(a, f.snapshots(), .{ .warm = true, .min_prompt = 0 }, 2 * @sizeOf(State));
+    defer store.deinit();
+    const host = try serial.Host.init(a, io, f.driver(&store, false));
+    defer host.deinit();
+    var box: Box = .{};
+    const warm_request = api.Request{ .prompt = &warm, .max_tokens = 0, .background = true, .history_len = warm.len, .rewind_len = 4 };
+    try host.engine().submit(1, &warm_request, .{ .ctx = &box, .event = Box.event });
+    try box.wait();
+    try std.testing.expectEqual(@as(usize, 2), store.entries.items.len);
+    box = .{};
+    const edited_request = api.Request{ .prompt = &edited, .max_tokens = 1, .history_len = 10, .rewind_len = 4 };
+    try host.engine().submit(2, &edited_request, .{ .ctx = &box, .event = Box.event });
+    try box.wait();
+    try std.testing.expectEqual(@as(u32, 4), box.from);
+    var cold: Fixture = .{ .hash_draw = true };
+    const cold_host = try serial.Host.init(a, io, cold.driver(null, false));
+    defer cold_host.deinit();
+    var cold_box: Box = .{};
+    try cold_host.engine().submit(3, &edited_request, .{ .ctx = &cold_box, .event = Box.event });
+    try cold_box.wait();
+    try std.testing.expectEqualDeep(cold.state, f.state);
+    try std.testing.expectEqualSlices(u32, cold_box.tokens[0..cold_box.count], box.tokens[0..box.count]);
 }
 
 test "cache rejects a changed arithmetic map for identical prefix tokens" {

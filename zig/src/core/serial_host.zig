@@ -187,7 +187,7 @@ pub const Host = struct {
         defer arena.deinit();
         const decode_spans: []const [2]u32 = if (h.driver.decode_chunk != null) request.decode_spans else &.{};
         var plan: pc.Plan = .{};
-        if (h.driver.cache) |store| plan = store.begin(arena.allocator(), request.prompt, request.history_len, request.shared_prefixes, request.chunks, null, decode_spans) catch .{};
+        if (h.driver.cache) |store| plan = store.beginRewind(arena.allocator(), request.prompt, request.history_len, request.rewind_len, request.shared_prefixes, request.chunks, null, decode_spans) catch .{};
         if (plan.from == 0) try h.driver.reset(h.driver.ctx);
         const start = std.Io.Clock.awake.now(h.io);
         var first: usize = plan.from;

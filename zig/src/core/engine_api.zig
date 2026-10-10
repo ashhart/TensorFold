@@ -53,6 +53,7 @@ pub const Request = struct {
     background: bool = false,
     /// Prompt prefix lengths worth keeping for a later turn: the rendered history, then shared system blocks.
     history_len: u32 = 0,
+    rewind_len: u32 = 0,
     shared_prefixes: []const u32 = &.{},
     /// Where the prompt's prefill chunks start after 0 (Python's PrefillPlan at ``Info.prefill_step``); empty: the engine's own.
     chunks: []const u32 = &.{},
