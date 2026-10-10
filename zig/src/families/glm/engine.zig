@@ -560,7 +560,7 @@ pub const Engine = struct {
         var ck: f64 = 0;
         var cr: f64 = 0;
         var mk: f64 = @floatFromInt(d);
-        if (e.copy_min > 0 and d > 0) {
+        if (e.copy_min > 0) { // copy drafts need no MTP head: without one a round is the copied tokens or one plain row
             hist = try CopyIndex.init(e.gpa, prompt);
             try hist.?.extend(&.{tok});
         }
