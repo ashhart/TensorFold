@@ -7,6 +7,7 @@ const core = @import("core");
 const lanes = @import("lanes");
 const checks = @import("cuda_checks.zig");
 const kernel_checks = @import("cuda_kernel_checks.zig");
+const precision = @import("cuda_precision.zig");
 const shared_checks = @import("cuda_shared_checks.zig");
 const checkpoint_cli = @import("checkpoint_cli");
 const lanes_cli = @import("cuda_lanes.zig");
@@ -31,6 +32,7 @@ const usage =
     \\       tensorfold shared-widths MODEL PROMPTS.json --streams N [--max-tokens N] [sampling as run]
     \\                (N streams' continuations as shared windows of varying splits against serial, 2 <= N <= 8)
     \\       tensorfold check-kernels MODEL   (lane_gemv and the forked MoE against the kernels they replace, real weights)
+    \\       tensorfold check-precision MODEL --tokens ID,... --dump DIR   (ModelOpt projections against fp64 and NVIDIA's math)
     \\       tensorfold widths MODEL --tokens ID,... [--max-tokens N] [--eager] [sampling as run]
     \\                (every verify width 1-16 against serial decoding, a wrong draft every third window)
     \\       tensorfold models
@@ -206,6 +208,7 @@ pub fn main(init: std.process.Init) !u8 {
         const s: ?lanes.Sampling = if (opts.sampling.temperature > 0) opts.sampling else null;
         return shared_checks.widths(gpa, init.io, engine, rest[0], opts.streams, opts.max_tokens, s);
     }
+    if (std.mem.eql(u8, cmd, "check-precision")) return precision.check(gpa, init.io, engine, opts.model, opts.tokens, opts.dump orelse return error.NeedsDumpDir);
     if (std.mem.eql(u8, cmd, "check-kernels")) {
         try engine.reset();
         return kernel_checks.check(gpa, engine);

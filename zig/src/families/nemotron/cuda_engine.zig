@@ -122,6 +122,10 @@ pub const Engine = struct {
         }
         e.k = try kern.Kernels.load(gpa, io, ctx, triton_dir);
         errdefer e.k.deinit();
+        if (e.c.format == .modelopt) {
+            if (opts.slide) return error.SlideNeedsMlx; // the learner reads MLX 4-bit projections
+            try e.k.loadModelopt(ctx);
+        }
         const chunks = e.max_len / state.chunk_keys;
         e.nch = if (e.k.triton) |*t| @intCast(t.smallestConst("_chunk", "NCH", @intCast(chunks)) orelse {
             std.log.err("no captured attention kernel covers {d} chunks of 512 keys; capture one for this context", .{chunks});

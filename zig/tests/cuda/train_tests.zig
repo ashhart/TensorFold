@@ -89,10 +89,10 @@ fn value(w: [3][]const u8, cols: usize, row: usize, i: usize) f64 {
 fn dequant(r: *Rig, k: *const kern.Kernels, n: usize, kk: usize) !void {
     const w = try mlx(r, n, kk);
     const lay = cuda.qlinear.Affine4.layout(n, kk);
-    const q: nemotron.weights.QLinear = .{ .w = try r.zeros(u8, lay.words), .s = try r.zeros(u8, lay.scales), .b = try r.zeros(u8, lay.scales), .n = n, .k = kk, .npad = lay.npad };
+    const q: cuda.qlinear.Affine4 = .{ .w = try r.zeros(u8, lay.words), .s = try r.zeros(u8, lay.scales), .b = try r.zeros(u8, lay.scales), .n = n, .k = kk, .npad = lay.npad };
     try k.affine.pack(r.s, try r.dev(u8, w[0]), try r.dev(u8, w[1]), try r.dev(u8, w[2]), q);
     const out = try r.zeros(u16, kk * n);
-    try r.t.dequantT(q, out);
+    try r.t.dequantT(.{ .affine4 = q }, out);
     const got = try r.back(u16, out, kk * n);
     var bad: usize = 0;
     for (0..kk) |i| for (0..n) |j| {

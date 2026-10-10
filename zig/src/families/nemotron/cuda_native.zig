@@ -19,7 +19,7 @@ const core = @import("core");
 pub const slide = @import("cuda_slide.zig");
 
 pub const model_type = "nemotron_h";
-pub const formats: []const []const u8 = &.{"mlx-q4g64"};
+pub const formats: []const []const u8 = &.{ "mlx-q4g64", "modelopt-nvfp4" };
 pub const default_context: i64 = engine.default_context;
 pub const max_segments: u32 = @import("cuda_segments.zig").MAX;
 pub const prompt_rows: u32 = state.prefill_rows;

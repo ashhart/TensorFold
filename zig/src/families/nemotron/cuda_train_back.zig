@@ -100,11 +100,12 @@ pub const Layer = struct {
 };
 
 /// y [rows, k] (+)= x [rows, n] times the tiled 4-bit [n, k] projection q: q dequantized transposed, then the GEMM.
-fn product(x: Layer, in: u64, q: weights.QLinear, y: u64, add: bool) !void {
+fn product(x: Layer, in: u64, w: weights.QLinear, y: u64, add: bool) !void {
     const t = x.t;
     const rows = x.rows;
+    const q = try weights.affine(w);
     try t.narrow(in, x.b.xb, rows * q.n);
-    try t.dequantT(q, x.b.wt);
+    try t.dequantT(w, x.b.wt);
     if (!add) try t.zero(y, rows * q.k * 4);
     try t.gemm(x.b.xb, q.n, x.b.wt, q.n, y, q.k, rows, q.k, q.n, split(rows, q.k, q.n), x.b.parts);
 }
@@ -148,8 +149,8 @@ pub fn moe(x: Layer) !void {
     const D = c.hidden;
     const pick = x.acts[0];
     const act = x.acts[3];
-    try x.o.plan(pick, pairs, ex.count, 64, x.plan);
-    const items = kern.maxItems(pairs, ex.count, 64);
+    try x.o.plan(pick, pairs, ex.experts, 64, x.plan);
+    const items = kern.maxItems(pairs, ex.experts, 64);
     try t.pairsIn(x.acts[1], b.g, b.dy, pairs, ns, D);
     try t.expertsBack(b.dy, D, ex.down, x.plan.items, x.plan.counts, x.plan.members, b.d_act, W, D, W, items);
     for (m.rest, 0..) |r, h| if (r != 0) try t.restBack(b.g, r, b.d_act + (c.top_k + h) * W * 4, ns * W, rows, D, W);

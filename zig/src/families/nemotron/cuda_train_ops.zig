@@ -162,8 +162,9 @@ pub const Train = struct {
 
     /// A tiled projection [n, k] dequantized as bf16 [k, n].
     pub fn dequantT(t: Train, q: weights.QLinear, out: u64) !void {
-        var a = args(.{ q.w, q.s, q.b, out, int(q.n), int(q.k), int(q.npad) });
-        try t.go(t.f.dequant_t, .{ cdiv(q.n * q.k, 256), 1, 1 }, 256, 0, &a);
+        const a = try weights.affine(q);
+        var g = args(.{ a.w, a.s, a.b, out, int(a.n), int(a.k), int(a.npad) });
+        try t.go(t.f.dequant_t, .{ cdiv(a.n * a.k, 256), 1, 1 }, 256, 0, &g);
     }
 
     pub fn narrow(t: Train, x: u64, out: u64, n: usize) !void {

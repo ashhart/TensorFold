@@ -14,12 +14,16 @@ const sym = struct {
 
 pub const pattn_smem: u32 = 65536; // eight 32-key slots of 128 dims
 
-/// The 4-bit projections' shared pieces (cuda/qlinear.zig): split-K scratch and a tiled weight.
+/// The projections' shared pieces (cuda/qlinear.zig): split-K scratch, a weight in any format, the 4-bit tiles.
 pub const Split = cuda.qlinear.Split;
-pub const QLinear = cuda.qlinear.Affine4;
+pub const QLinear = cuda.qlinear.Weight;
+pub const Affine4 = cuda.qlinear.Affine4;
 
-/// A layer's grouped expert tables ([E, N/32, K/64, 1, 288] int32 blocks).
-pub const Experts = struct { up: u64, down: u64, count: usize, width: usize, dims: usize };
+/// A layer's grouped experts in their format's blocks (cuda/experts.zig), the shared expert's halves last.
+pub const Experts = cuda.experts.Layer;
+
+/// ModelOpt checkpoints' kernels: the lane matmul, the prompt GEMM, NVFP4 experts and the repack (loadModelopt).
+pub const Modelopt = struct { lane: cuda.qmmf.Lane, gemm: cuda.nvfp4.Prompt, experts: cuda.experts.Nvfp4Experts, pack: cuda.modelopt.Packer };
 
 /// Scratch the expert plan writes (cuda/grouped.zig, shared by the MoE families).
 pub const Plan = cuda.grouped.Plan;
@@ -43,6 +47,7 @@ pub const Kernels = struct {
     torch: torch_ops.Functions,
     train: train_ops.Fns = undefined, // Sliding Weights: the change after each output projection, and learning it
     train_mods: ?[2]cuda.Module = null, // loaded by loadTrain (--slide) after the weights, else never
+    modelopt: ?Modelopt = null, // loaded by loadModelopt for a ModelOpt checkpoint, else never
     gb10: bool,
     discrete: bool, // the card has its own memory: checkpoint bytes reach it through page-locked slots
 
@@ -72,6 +77,7 @@ pub const Kernels = struct {
         k.glue = try glue.Fns.resolve(k.mods[16..21]);
         k.logprob_rows = try k.mods[14].function("tf_logprob_rows");
         k.train_mods = null;
+        k.modelopt = null;
         k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
         errdefer if (k.triton) |*t| t.deinit();
         try k.pattn.allowDynamicShared(pattn_smem);
@@ -86,10 +92,31 @@ pub const Kernels = struct {
     }
 
     pub fn deinit(k: *Kernels) void {
+        if (k.modelopt) |*m| {
+            m.lane.unload();
+            m.gemm.unload();
+            m.experts.unload();
+            m.pack.unload();
+        }
         k.affine.deinit();
         if (k.triton) |*t| t.deinit();
         for (&k.mods) |*m| m.unload();
         if (k.train_mods) |*ms| for (ms) |*m| m.unload();
+    }
+
+    /// The lane matmul, prompt GEMM, NVFP4 experts and repack a ModelOpt checkpoint's FP8, NVFP4 and bf16 tensors need.
+    pub fn loadModelopt(k: *Kernels, ctx: *const cuda.Context) !void {
+        if (k.modelopt != null) return;
+        const major: u32 = @intCast(try ctx.attribute(.compute_capability_major));
+        if (major < 9) return error.ModeloptNeedsSm90; // the lane matmul sums K slices in a cluster: no reduce scratch
+        const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
+        var lane = try cuda.qmmf.Lane.load(k.d, major);
+        errdefer lane.unload();
+        var gemm = try cuda.nvfp4.Prompt.load(k.d);
+        errdefer gemm.unload();
+        var experts = try cuda.experts.Nvfp4Experts.load(k.d, sms);
+        errdefer experts.unload();
+        k.modelopt = .{ .lane = lane, .gemm = gemm, .experts = experts, .pack = try cuda.modelopt.Packer.load(k.d) };
     }
 
     /// Sliding Weights' modules (--slide only), loaded after the weights so those sit where they would without them.
@@ -162,25 +189,37 @@ pub const Ops = struct {
         try o.go(o.k.logprob_rows, .{ rows, 1, 1 }, 1024, 0, &a);
     }
 
-    /// The 4-bit projections on this stream (cuda/qlinear.zig's affine-4 paths, bits unchanged).
-    pub fn dense(o: Ops, x: u64, xs: u64, q: QLinear, out: u64, rows: usize) !void {
-        return o.k.affine.decode(o.s, x, xs, q, out, rows);
+    /// Every projection format the kernels loaded (cuda/qlinear.zig).
+    pub fn linear(o: Ops) cuda.qlinear.Linear {
+        const m = if (o.k.modelopt) |*x| x else null;
+        return .{ .affine4 = &o.k.affine, .lane = if (m) |x| &x.lane else null, .gemm = if (m) |x| &x.gemm else null };
     }
 
-    pub fn gemvSplit(o: Ops, x: u64, xs: u64, q: QLinear, out: u64, rows: usize, sk: usize, sp: Split) !void {
+    /// Every grouped-expert format the kernels loaded (cuda/experts.zig).
+    pub fn grouped(o: Ops) cuda.experts.Grouped {
+        return .{ .affine4 = &o.k.experts, .nvfp4 = if (o.k.modelopt) |*x| &x.experts else null };
+    }
+
+    /// Decode rows of a projection on this stream (the affine-4 paths' bits unchanged); xs: x's 64-group sums.
+    pub fn dense(o: Ops, x: u64, xs: u64, q: QLinear, out: u64, rows: usize) !void {
+        return o.linear().decode(o.s, q, .{ .x = x, .sums = xs }, out, rows);
+    }
+
+    pub fn gemvSplit(o: Ops, x: u64, xs: u64, q: Affine4, out: u64, rows: usize, sk: usize, sp: Split) !void {
         return o.k.affine.gemvSplit(o.s, x, xs, q, out, rows, sk, sp);
     }
 
-    pub fn gemv(o: Ops, x: u64, xs: u64, q: QLinear, out: u64, rows: usize, sk: usize) !void {
+    pub fn gemv(o: Ops, x: u64, xs: u64, q: Affine4, out: u64, rows: usize, sk: usize) !void {
         return o.k.affine.gemv(o.s, x, xs, q, out, rows, sk);
     }
 
-    pub fn cluster(o: Ops, x: u64, xs: u64, q: QLinear, out: u64, rows: usize, sk: usize) !void {
+    pub fn cluster(o: Ops, x: u64, xs: u64, q: Affine4, out: u64, rows: usize, sk: usize) !void {
         return o.k.affine.cluster(o.s, x, xs, q, out, rows, sk);
     }
 
+    /// Prompt rows of a projection on this stream, by its format's prompt GEMM.
     pub fn prefillDense(o: Ops, x: u64, q: QLinear, out: u64, rows: usize) !void {
-        return o.k.affine.prompt(o.s, x, q, out, rows);
+        return o.linear().prompt(o.s, q, .{ .x = x }, out, rows);
     }
 
     /// nemotron_ops' rest: y (bf16, or fp32 when `y_f32`) += r x at rows `i * row_mul + row_add` for i < rows.
@@ -209,15 +248,6 @@ pub const Ops = struct {
         for ([_]usize{ rows, slots, routed, count, tile }) |v| a.add(int(v));
         for ([_]u64{ p.members, p.items, p.counts }) |v| a.add(v);
         try o.go(o.k.plan_routed, .{ 1, 1, 1 }, 128, 0, &a);
-    }
-
-    /// The 4-bit grouped experts on this stream (cuda/experts.zig's affine-4 kernels, launches unchanged).
-    pub fn experts(o: Ops, up: bool, x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, max_units: usize) !void {
-        return o.k.experts.run(o.s, up, x, x_stride, slots, w, kg, nb, p, out, n, max_units);
-    }
-
-    pub fn expertsPrefill(o: Ops, up: bool, x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, max_items: usize) !void {
-        return o.k.experts.runPrompt(o.s, up, x, x_stride, slots, w, kg, nb, p, out, n, max_items);
     }
 
     /// prefill_attention (head dim 128): q (rows, heads, 128) at positions p0.. against caches filled through them.

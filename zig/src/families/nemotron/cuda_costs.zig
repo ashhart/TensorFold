@@ -32,7 +32,7 @@ const Timer = struct {
 fn keyParts(e: *Engine, name: []u8, shape: []u8) ![3][]const u8 {
     const c = e.c;
     const gpu = e.ctx.name(name) catch "gpu";
-    const at = try std.fmt.bufPrint(shape, "sm{d} cuda{d} {d}/{d}/{d}/{d}/{d} draft{d} {s}", .{ try e.ctx.capability(), try e.ctx.d.version(), c.layers, c.hidden, c.vocab, c.experts, e.max_len, e.w.draft_count, if (e.k.triton != null) "captured" else "own" });
+    const at = try std.fmt.bufPrint(shape, "sm{d} cuda{d} {d}/{d}/{d}/{d}/{d} draft{d} {s}{s}", .{ try e.ctx.capability(), try e.ctx.d.version(), c.layers, c.hidden, c.vocab, c.experts, e.max_len, e.w.draft_count, if (e.k.triton != null) "captured" else "own", if (c.format == .modelopt) " modelopt" else "" });
     return .{ "nemotron-cuda", gpu, at };
 }
 

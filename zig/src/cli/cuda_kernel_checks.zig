@@ -68,14 +68,32 @@ pub fn check(gpa: std.mem.Allocator, e: *nemotron.Engine) !u8 {
     var cases: usize = 0;
     var splits: usize = 0;
     for (named.items) |nq| {
-        const q = nq.q;
-        const sk = kern.splitK(q.n, q.k);
-        const in = try inputs(gpa, rng, 16, q.k);
+        const n = nq.q.outputs();
+        const k = nq.q.inputs();
+        const in = try inputs(gpa, rng, 16, k);
         defer gpa.free(in.x);
         defer gpa.free(in.xs);
         try e.ops().upload(b.emb, std.mem.sliceAsBytes(in.x));
         try e.ops().upload(b.xs, std.mem.sliceAsBytes(in.xs));
-        const wide = b.ymoe + 2 * 16 * q.n * 2; // the 16-row result every narrower window's rows must equal
+        const wide = b.ymoe + 2 * 16 * n * 2; // the 16-row result every narrower window's rows must equal
+        const q = switch (nq.q) {
+            .affine4 => |a| a,
+            else => { // a lane format: each width's rows byte-equal to the 16-row call's
+                try e.ops().dense(b.emb, b.xs, nq.q, wide, 16);
+                for (1..17) |rows| {
+                    const len = rows * n * 2;
+                    try e.ops().fill32(b.ymoe + len, 0x7fc07fc0, len / 4);
+                    try e.ops().dense(b.emb, b.xs, nq.q, b.ymoe + len, rows);
+                    cases += 1;
+                    if (!try sameBytes(gpa, e, b.ymoe + len, wide, len)) {
+                        bad += 1;
+                        std.debug.print("DIFFER {s} ({d}x{d}, {s}) at {d} rows\n", .{ nq.name, n, k, @tagName(nq.q), rows });
+                    }
+                }
+                continue;
+            },
+        };
+        const sk = kern.splitK(q.n, q.k);
         try e.ops().gemv(b.emb, b.xs, q, wide, 16, sk);
         for (1..17) |rows| {
             const len = rows * q.n * 2;
