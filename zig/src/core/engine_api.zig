@@ -132,6 +132,8 @@ pub const Info = struct {
     prefill_step: u32 = 0,
     /// The engine keeps prompt states between requests, so ``prefilled`` counts the tokens it restored.
     prompt_cache: bool = false,
+    /// The policy the engine runs under, one line (`/health` shows it); empty: none.
+    policy: []const u8 = "",
     /// A line the server prints once at startup (the engine's memory plan); empty: none.
     startup: []const u8 = "",
     /// A prompt-only request (max_tokens 0) keeps its end state: the server prefills each reply for the next turn.
@@ -186,6 +188,18 @@ pub const Open = struct {
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
     device: ?u32 = null,
     segments: ?u32 = null,
+    /// --mtp-drafts and --mtp-confidence; null: the engine's defaults.
+    mtp_drafts: ?u32 = null,
+    mtp_confidence: ?f64 = null,
+    /// Kept prompt entries (--checkpoint-slots); null: the engine's plan.
+    keep: ?i64 = null,
+    /// Tensor parallelism: this process is `rank` of `tp`; rank 0 listens on `master`:`master_port` for the others.
+    tp: u32 = 1,
+    rank: u32 = 0,
+    master: []const u8 = "",
+    master_port: u16 = 29551,
+    /// --policy: the engine's policy as `key=value,...`; empty: its defaults.
+    policy: []const u8 = "",
 };
 
 /// An opened engine; ``close`` stops its thread and frees its backend.
