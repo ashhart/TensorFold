@@ -7,6 +7,7 @@ pub const checkpoint_host = @import("core/checkpoint.zig");
 pub const checkpoint_metal = checkpoint;
 pub const qwen27 = @import("families/qwen27/qwen27.zig");
 pub const checkpoint = @import("core/checkpoint_metal.zig");
+pub const shard_edit = @import("core/shard_edit.zig");
 pub const npy = @import("core/npy.zig");
 pub const ids_json = @import("core/ids_json.zig");
 pub const lanes = @import("lanes");
