@@ -1,19 +1,261 @@
 <!doctype html>
+<!-- TensorFold live dashboard: one file, no dependencies. Polls /stats once a second and draws the
+     decode/prefill dial and the metric tiles. Dark theme follows the OS. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>TensorFold Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>TensorFold</title>
 <style>
-:root{color-scheme:dark;--bg:#10141d;--panel:#181f2c;--ink:#eef2f7;--muted:#9ba8ba;--accent:#7dd3fc}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px system-ui,sans-serif}
-main{max-width:960px;margin:0 auto;padding:32px 20px}h1{font-size:28px;margin:0 0 8px}p{color:var(--muted)}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-top:24px}.card{background:var(--panel);border:1px solid #283447;border-radius:14px;padding:18px}.label{color:var(--muted);font-size:13px}.value{font-size:28px;margin-top:8px;color:var(--accent)}
+  :root {
+    --bg: #0d0f12; --panel: #15181d; --line: #232830; --text: #e6e9ee; --muted: #8a93a1;
+    --accent: #4cc38a; --cool: #5aa7e8; --warm: #e0b34c; --hot: #e06c5a;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f4f5f7; --panel:#ffffff; --line:#e1e4e9; --text:#1b1f26; --muted:#5f6875; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:14px/1.4 ui-sans-serif,-apple-system,"SF Pro Text",system-ui,sans-serif; }
+  header { display:flex; align-items:baseline; gap:12px; padding:14px 20px; border-bottom:1px solid var(--line); }
+  header b { font-size:15px; letter-spacing:.02em; }
+  header .state { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
+  header .state.on { color:var(--accent); }
+  #stale { display:none; padding:6px 20px; background:var(--hot); color:#fff; font-size:12px; }
+  main { max-width:860px; margin:0 auto; padding:20px; }
+  .dialwrap { display:flex; align-items:center; justify-content:center; gap:28px; padding:8px 0 4px; flex-wrap:wrap; }
+  .dial { display:flex; justify-content:center; padding:0; }
+  .dialside { display:flex; flex-direction:column; gap:12px; width:220px; }
+  .dialside .tile .value { font-size:17px; }
+  canvas { width:280px; height:280px; }
+  .tiles { display:grid; grid-template-columns:repeat(5, 1fr); gap:12px; margin-top:16px; }
+  @media (max-width:760px) { .tiles { grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); } }
+  .tile { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .tile .label { font-size:10px; text-transform:uppercase; letter-spacing:.1em; color:var(--muted); }
+  .tile .value { font-size:20px; font-weight:600; font-variant-numeric:tabular-nums; margin-top:4px; }
+  .tile .value small { font-size:12px; font-weight:400; color:var(--muted); }
+  .tile .cap { font-size:11px; color:var(--muted); margin-top:3px; }
+  .bar { height:4px; border-radius:2px; background:var(--line); margin-top:8px; overflow:hidden; }
+  .bar i { display:block; height:100%; background:var(--accent); transition:width .5s; }
+  .bar i.warm { background:var(--warm); } .bar i.hot { background:var(--hot); }
+  .chart { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 12px 6px; }
+  .chart canvas { display:block; width:100%; height:96px; }
+  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.1em; color:var(--muted);
+       margin:26px 0 8px; font-weight:500; }
+  #totalsbar { display:flex; flex-wrap:wrap; gap:4px 22px; margin-top:14px; padding:10px 14px;
+               background:var(--panel); border:1px solid var(--line); border-radius:10px;
+               font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; }
+  #totalsbar:empty { display:none; }
+  #totalsbar b { color:var(--text); font-weight:600; }
+  footer { text-align:center; color:var(--muted); font-size:11px; padding:12px 0 24px; }
 </style>
 </head>
-<body><main><h1>TensorFold Dashboard</h1><p>Live server activity, refreshed once per second.</p><section class="grid" id="stats"></section></main>
+<body>
+<header><b>TensorFold</b><span class="state" id="model">—</span><span class="state" id="conns"></span></header>
+<div id="stale">no answer from the server — retrying</div>
+<main>
+  <div class="dialwrap">
+    <div class="dial"><canvas id="gauge" width="560" height="560"></canvas></div>
+    <div class="dialside">
+      <div class="tile mem"><div class="label">Memory</div><div class="value" id="mem">—</div>
+        <div class="cap" id="memcap"></div><div class="bar"><i id="membar"></i></div></div>
+      <div class="tile fill"><div class="label">Tokens in flight</div><div class="value" id="gen">—</div>
+        <div class="cap" id="gencap">held by the live streams</div></div>
+    </div>
+  </div>
+  <h2 id="histlabel">Decode rate · last 5 minutes</h2>
+  <div class="chart"><canvas id="hist"></canvas></div>
+  <div class="tiles">
+    <div class="tile"><div class="label">Running</div><div class="value" id="run">—</div>
+      <div class="cap" id="runcap"></div></div>
+    <div class="tile"><div class="label">5-min gen rate</div><div class="value" id="gen5">—</div>
+      <div class="cap" id="gen5cap"></div></div>
+    <div class="tile"><div class="label">Avg prefill</div><div class="value" id="pavg">—</div>
+      <div class="cap" id="pavgcap"></div></div>
+    <div class="tile"><div class="label">MTP acceptance</div><div class="value" id="acc">—</div>
+      <div class="cap" id="acccap">drafts the verify rounds committed</div></div>
+    <div class="tile"><div class="label">Decode rounds</div><div class="value" id="rounds">—</div>
+      <div class="cap">lifetime, finished requests</div></div>
+  </div>
+  <div id="totalsbar"></div>
+</main>
+<footer>sampled once a second · decode/prefill are the same numbers the terminal's live line shows</footer>
 <script>
-const fields=[['running','Running'],['waiting','Waiting'],['generation_tokens_running','Tokens in flight'],['generation_tokens_total','Tokens finished'],['decode_tokens_per_second','Decode tokens/s'],['prefill_tokens_per_second','Prefill tokens/s'],['decode_rounds_total','Decode rounds']];
-function show(data){const memory=data.memory||{};const values={...data};const cards=fields.map(([k,label])=>'<article class="card"><div class="label">'+label+'</div><div class="value">'+(values[k]??0)+'</div></article>');if(memory.peak!=null)cards.push('<article class="card"><div class="label">Peak memory</div><div class="value">'+memory.peak+'</div></article>');document.querySelector('#stats').innerHTML=cards.join('')}
-async function poll(){try{const r=await fetch('/stats?poll=1');if(r.ok)show(await r.json())}catch(_){}}poll();setInterval(poll,1000)
-</script></body></html>
+"use strict";
+const nf = new Intl.NumberFormat();
+const el = id => document.getElementById(id);
+const fmt = v => v == null ? "—" : nf.format(Math.round(v));
+const GiB = v => v == null ? null : (v / 2**30).toFixed(1);
+
+// the page is served at /dashboard; a proxy that adds a prefix still reaches ../stats or /stats
+const STATS = location.pathname.replace(/\/(dashboard)?\/?$/, "") + "/stats";
+const STATS_URL = location.pathname.replace(/\/(dashboard)?\/?$/, "") + "/stats?poll=1";   // the poll URL keeps the cache-busting query
+
+let shown = { decode: 0, prefill: 0 }, target = { decode: 0, prefill: 0 }, scaleMax = 80;
+let lastGood = 0;
+let histPoints = [];            // the polled decode rates: [{t, tok_s}], newest last, sparse over 5 minutes
+let prefillRates = [];          // the polled prefill rates while a prefill ran, for the average tile
+let histTop = 0;                // the chart's current y scale, decayed like the dial's
+
+function band(v) { return v >= 60 ? css("--accent") : v >= 40 ? css("--cool") : v >= 20 ? css("--warm") : css("--hot"); }
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+function arc(ctx, cx, cy, r, w, frac, color, alpha) {
+  const A0 = Math.PI * 0.75, SPAN = Math.PI * 1.5;
+  ctx.beginPath(); ctx.strokeStyle = color; ctx.globalAlpha = alpha; ctx.lineWidth = w; ctx.lineCap = "round";
+  ctx.arc(cx, cy, r, A0, A0 + SPAN * Math.min(1, Math.max(0, frac))); ctx.stroke(); ctx.globalAlpha = 1;
+}
+
+function draw() {
+  shown.decode += (target.decode - shown.decode) * 0.12;
+  shown.prefill += (target.prefill - shown.prefill) * 0.12;
+  scaleMax = Math.max(80, scaleMax * 0.999);                  // grows at once, deflates slowly
+  if (shown.decode > scaleMax * 0.95) scaleMax = shown.decode * 1.25;
+  const c = el("gauge"), x = c.getContext("2d"), S = 560;
+  x.clearRect(0, 0, S, S);
+  const cx = S / 2, cy = S / 2;
+  arc(x, cx, cy, 232, 22, 1, css("--line"), 1);               // one track
+  // prefill and decode share the dial: whichever mode is live colors the arc (they never run together)
+  const mode = shown.prefill > 0.5 ? "prefill" : "decode";
+  if (mode === "prefill") {
+    arc(x, cx, cy, 232, 22, Math.min(1, Math.log10(1 + shown.prefill) / 4), css("--cool"), 1);
+  } else {
+    arc(x, cx, cy, 232, 22, shown.decode / scaleMax, band(shown.decode), 1);
+  }
+  x.textAlign = "center"; x.fillStyle = css("--text");
+  x.font = "600 88px ui-sans-serif,system-ui"; x.fillText(shown.decode.toFixed(1), cx, cy + 10);
+  x.font = "400 26px ui-sans-serif,system-ui"; x.fillStyle = css("--muted"); x.fillText("tok/s decode", cx, cy + 52);
+  x.font = "500 30px ui-sans-serif,system-ui"; x.fillStyle = css("--cool");
+  x.fillText(fmt(shown.prefill) + " tok/s prefill", cx, cy + 112);
+  x.fillStyle = css("--muted"); x.font = "400 22px ui-sans-serif,system-ui";
+  x.fillText("0", cx - 176, cy + 182); x.fillText(Math.round(scaleMax), cx + 158, cy + 182);
+  drawHistory();
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+
+function drawHistory() {
+  // The decode tok/s each poll recorded, timestamped: idle seconds leave gaps, so x follows t,
+  // not the point index. Points stop when the page's poll stops; the right edge is the newest point.
+  const c = el("hist"), box = c.getBoundingClientRect();
+  const W = Math.max(50, Math.round(box.width)), H = Math.max(30, Math.round(box.height));
+  const dpr = window.devicePixelRatio || 1;
+  if (c.width !== W * dpr || c.height !== H * dpr) { c.width = W * dpr; c.height = H * dpr; }
+  const x = c.getContext("2d");
+  x.setTransform(dpr, 0, 0, dpr, 0, 0);
+  x.clearRect(0, 0, W, H);
+  const padL = 2, padR = 44, padT = 6, padB = 16;      // padR keeps the peak label off the last point
+  const iw = W - padL - padR, ih = H - padT - padB;
+  const now = Date.now() / 1000, span = 300;
+  const px = t => padL + iw - ((now - t) / span) * iw;  // 5-minute window slides right to left
+  const finite = histPoints.filter(p => p.tok_s != null && isFinite(p.tok_s));
+  if (!finite.length) {
+    x.fillStyle = css("--muted"); x.font = "400 12px ui-sans-serif,system-ui"; x.textAlign = "left";
+    x.fillText("no decode yet — idle", padL + 2, padT + ih / 2);
+    return;
+  }
+  const peak = Math.max(...finite.map(p => p.tok_s));
+  histTop = Math.max(peak, histTop * 0.995);           // grows at once, deflates slowly, like the dial
+  const py = v => padT + ih - Math.min(1, v / (histTop || 1)) * ih;
+  // baseline and the peak guide
+  x.strokeStyle = css("--line"); x.lineWidth = 1;
+  x.beginPath(); x.moveTo(padL, padT + ih + .5); x.lineTo(padL + iw, padT + ih + .5); x.stroke();
+  x.setLineDash([2, 4]);
+  x.beginPath(); x.moveTo(padL, py(histTop)); x.lineTo(padL + iw, py(histTop)); x.stroke();
+  x.setLineDash([]);
+  // the rate line over the sparse points
+  x.strokeStyle = css("--cool"); x.lineWidth = 2; x.lineJoin = "round";
+  x.beginPath();
+  finite.forEach((p, i) => i ? x.lineTo(px(p.t), py(p.tok_s)) : x.moveTo(px(p.t), py(p.tok_s)));
+  x.stroke();
+  // fill under the line down to the baseline
+  x.lineTo(px(finite[finite.length - 1].t), padT + ih);
+  x.lineTo(px(finite[0].t), padT + ih);
+  x.closePath();
+  x.fillStyle = css("--cool"); x.globalAlpha = 0.12; x.fill(); x.globalAlpha = 1;
+  // axis labels
+  x.fillStyle = css("--muted"); x.font = "400 11px ui-sans-serif,system-ui"; x.textAlign = "left";
+  x.fillText("0", padL, H - 3);
+  x.textAlign = "right";
+  x.fillText(`${Math.round(histTop)} tok/s`, padL + iw, padT + 4);
+  x.fillText("5 min ago", padL, H - 3);
+  x.fillText("now", padL + iw, H - 3);
+}
+
+function apply(s) {
+  target.decode = s.decode_tokens_per_second ?? 0;
+  target.prefill = s.prefill_tokens_per_second ?? 0;
+  const now = Date.now() / 1000;
+  if (target.decode > 0) { histPoints.push({ t: now, tok_s: target.decode }); }
+  if (target.prefill > 0) { prefillRates.push(target.prefill); } else { prefillRates = []; }
+  while (histPoints.length && now - histPoints[0].t > 300) histPoints.shift();
+  if (prefillRates.length > 256) prefillRates.shift();
+  el("histlabel").style.display = histPoints.length ? "" : "none";
+  el("hist").parentElement.style.display = histPoints.length ? "" : "none";
+
+  el("conns").textContent = ((s.running || 0) + (s.waiting || 0)) > 0
+    ? `${s.running || 0} active${s.waiting ? ` · ${s.waiting} waiting` : ""}`
+    : "idle";
+  el("conns").className = "state" + (((s.running || 0) + (s.waiting || 0)) ? " on" : "");
+
+  const memory = s.memory || {};
+  if (memory.peak!=null) {
+    const used = GiB((memory.active || 0) + (memory.cache || 0));
+    el("mem").innerHTML = `${used} <small>GiB resident</small>`;
+    el("memcap").textContent = `peak ${GiB(memory.peak)} GiB · cache ${GiB(memory.cache)} GiB`;
+    // no budget in the snapshot: the bar fills against the session's own peak instead
+    const frac = memory.peak ? Math.min(100, 100 * ((memory.active || 0) + (memory.cache || 0)) / memory.peak) : 0;
+    const mb = el("membar");
+    mb.style.width = frac + "%"; mb.className = frac >= 95 ? "hot" : frac >= 75 ? "warm" : "";
+  } else {
+    el("mem").textContent = "—";
+    el("memcap").textContent = "";
+    el("membar").style.width = "0%";
+  }
+
+  el("gen").textContent = fmt(s.generation_tokens_running);
+  el("gencap").textContent = (s.generation_tokens_running || 0) > 0
+    ? `across ${s.running || 0} live stream${s.running == 1 ? "" : "s"}` : "held by the live streams";
+
+  el("run").innerHTML = `${fmt(s.running)} <small>/ ${fmt((s.running || 0) + (s.waiting || 0))}</small>`;
+  el("runcap").textContent = (s.waiting || 0) > 0 ? `${s.waiting} queued for a lane` : "no requests queued";
+
+  const rates = histPoints.map(p => p.tok_s);
+  const g = { mean: rates.length ? rates.reduce((a, b) => a + b, 0) / rates.length : null,
+              min: rates.length ? Math.min(...rates) : null,
+              max: rates.length ? Math.max(...rates) : null, count: rates.length };
+  el("gen5").innerHTML = g.mean == null ? "—" : `${fmt(g.mean)} <small>tok/s</small>`;
+  el("gen5cap").textContent = g.count ? `min ${fmt(g.min)} · max ${fmt(g.max)} · ${g.count} samples` : "";
+
+  const p = prefillRates.length
+    ? { avg_tok_s: prefillRates.reduce((a, b) => a + b, 0) / prefillRates.length, count: prefillRates.length }
+    : { avg_tok_s: null, count: 0 };
+  el("pavg").innerHTML = p.avg_tok_s == null ? "—" : `${fmt(p.avg_tok_s)} <small>tok/s</small>`;
+  el("pavgcap").textContent = p.count ? `${p.count} samples this prefill` : "";
+
+  const drafted = s.mtp_drafted_total || 0, accepted = s.mtp_accepted_total || 0;
+  el("acc").innerHTML = drafted ? `${(100 * accepted / drafted).toFixed(1)}<small>%</small>` : "—";
+  el("acccap").textContent = drafted ? `${fmt(accepted)} of ${fmt(drafted)} drafts` : "drafts the verify rounds committed";
+
+  el("rounds").textContent = fmt(s.decode_rounds_total);
+
+  // Lifetime totals since the server started, from the finished-request counters the /stats snapshot carries.
+  const parts = [`<span>prompt <b>${fmt(s.prompt_tokens_total)}</b> tok</span>`,
+                 `<span>generated <b>${fmt(s.generation_tokens_total)}</b> tok</span>`];
+  if (drafted > 0) parts.push(`<span>drafts <b>${(100 * accepted / drafted).toFixed(1)}%</b> · ${fmt(accepted)} of ${fmt(drafted)}</span>`);
+  el("totalsbar").innerHTML = parts.join("");
+}
+
+async function poll() {
+  if (document.hidden) return;
+  try {
+    const r = await fetch(STATS_URL, { cache: "no-store" });
+    if (r.ok) { apply(await r.json()); lastGood = Date.now(); el("stale").style.display = "none"; }
+  } catch (e) { /* the stale banner below covers it */ }
+  if (lastGood && Date.now() - lastGood > 5000) el("stale").style.display = "block";
+}
+poll(); setInterval(poll, 1000);
+</script>
+</body>
+</html>
