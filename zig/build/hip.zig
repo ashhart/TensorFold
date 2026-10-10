@@ -4,7 +4,7 @@ const std = @import("std");
 const caps = @import("../src/hip/caps.zig");
 
 /// hip-host-test (part of `test`), hip-gpu-build and hip-gpu-test, hip-affine-build and hip-affine-test.
-pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Build.Step) void {
+pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, build_options: *std.Build.Step.Options, test_step: *std.Build.Step) void {
     const hip_fixtures = b.addOptions();
     for ([_][]const u8{ "success", "failed", "missing" }) |kind| {
         const fixture_module = b.createModule(.{ .target = b.graph.host, .link_libc = true });
@@ -84,6 +84,78 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     const kernel_test = b.addTest(.{ .root_module = kernel_module });
     b.step("hip-kernel-build", "Compile the model-free kernels and their GPU tests without running them").dependOn(&kernel_test.step);
     b.step("hip-kernel-test", "Every model-free kernel against its host reference on the GPU").dependOn(&b.addRunArtifact(kernel_test).step);
+    const stub_kernels = b.createModule(.{ .root_source_file = b.addWriteFiles().add("kernels.zig", stub) });
+    const host = engineModules(b, b.graph.host, .Debug, stub_kernels, null);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.family })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native })).step);
+    // the GPU programs compile on any host against stub kernels, so `test` catches what only they reach
+    test_step.dependOn(&checksExe(b, b.graph.host, .Debug, host).step);
+    test_step.dependOn(&server(b, b.graph.host, host, build_options).step);
+    const gpu = engineModules(b, target, optimize, objects, hip_include);
+    b.step("tf-qwen35-test", "Qwen3.5 / 3.6 model checks on the GPU (-Dhip-arch)").dependOn(&b.addInstallArtifact(checksExe(b, target, optimize, gpu), .{}).step);
+    const native = server(b, target, gpu, build_options);
+    b.step("native-hip", "tensorfold-native with the HIP engines into zig-out/native-hip/bin (-Dhip-arch)").dependOn(&b.addInstallArtifact(native, .{ .dest_dir = .{ .override = .{ .custom = "native-hip/bin" } } }).step);
+}
+
+/// `tf-qwen35-test`: the model checks on a real checkpoint and GPU.
+fn checksExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, e: Engine) *std.Build.Step.Compile {
+    return b.addExecutable(.{ .name = "tf-qwen35-test", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/qwen35/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = e.hip }, .{ .name = "qwen3_5", .module = e.family }, .{ .name = "lanes", .module = e.lanes }, .{ .name = "npy", .module = b.createModule(.{ .root_source_file = b.path("zig/src/core/npy.zig"), .target = target, .optimize = optimize }) } },
+    }) });
+}
+
+const Engine = struct { hip: *std.Build.Module, lanes: *std.Build.Module, api: *std.Build.Module, family: *std.Build.Module, native: *std.Build.Module };
+
+/// The HIP backend, the Qwen3.5 family over it and the native engines, on `kernels` (a stub on the host).
+fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, kernels: *std.Build.Module, hip_include: ?[]const u8) Engine {
+    const core = coreModule(b, target);
+    const hip = b.createModule(.{ .root_source_file = b.path("zig/src/hip/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    hip.addImport("core", core);
+    hip.addImport("hip_kernels", kernels);
+    hip.addImport("cuda_memory", b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_memory.zig"), .target = target, .optimize = optimize }));
+    if (hip_include) |dir| {
+        hip.addIncludePath(.{ .cwd_relative = dir });
+        hip.addCSourceFile(.{ .file = b.path("zig/src/hip/device_arch.c"), .flags = &.{"-D__HIP_PLATFORM_AMD__"} });
+    }
+    const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    const family = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/qwen3_5/hip.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes }, .{ .name = "engine_api", .module = api } },
+    });
+    const native = b.createModule(.{
+        .root_source_file = b.path("zig/src/native/hip.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes }, .{ .name = "qwen3_5", .module = family } },
+    });
+    return .{ .hip = hip, .lanes = lanes, .api = api, .family = family, .native = native };
+}
+
+/// The server over the HIP engines, as the CUDA build makes it: the HTTP side keeps its safety checks.
+fn server(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine, build_options: *std.Build.Step.Options) *std.Build.Step.Compile {
+    const api = e.api;
+    const engines = e.native;
+    const tokenizer = e.hip.import_table.get("core").?.import_table.get("tokenizer").?;
+    const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
+    const exe = b.addExecutable(.{ .name = "tensorfold-native", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/server/main.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = engines }, .{ .name = "checkpoint_cli", .module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "native_engines", .module = engines }} }) } },
+    }) });
+    exe.root_module.addOptions("build_options", build_options);
+    return exe;
 }
 
 /// The model-free kernels' source groups, in zig/src/hip/kernels.zig's Group order.
