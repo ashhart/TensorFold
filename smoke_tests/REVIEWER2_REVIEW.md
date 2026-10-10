@@ -30,9 +30,10 @@ working tree on top of the branch (diff vs HEAD: `zig/build/cuda.zig`, `zig/src/
 - **F1/F2 (my nits) CLOSED** — `--version` writes to stdout via `writeStreamingAll`, accepts no
   trailing args (usage + exit 2), and any leading `--flag` prints usage + exit 2 without touching
   the GPU (no more leaked `FileNotFound`).
-- **F3 (my nit) PARTIALLY CLOSED** — the `checkpoint_cli` module creation is deduped into a
-  `checkpointCli()` helper used by `targets()`, `nativeServer()` and `hostTests()`. The unused
-  `native_engines` import is still passed (cli.zig never imports it) — harmless, flag only.
+- **F3 (my nit) RETRACTED** — the `checkpoint_cli` module creation is deduped into a
+  `checkpointCli()` helper used by `targets()`, `nativeServer()` and `hostTests()`. The
+  `native_engines` import is load-bearing (cli.zig → pull/models/info → hub.zig → engines.families),
+  so my "unused import" claim was wrong; no flag remains.
 - **F4 CLOSED** — CHANGELOG has the Unreleased entry.
 - Reviewer2 repaired one defect in the fix itself: `zig/build/cuda.zig` line 150 kept a stray `)`
   from the replaced inline `createModule` (build broke). Fixed; `zig build install`,
@@ -66,42 +67,46 @@ working tree on top of the branch (diff vs HEAD: `zig/build/cuda.zig`, `zig/src/
   `r3_negative_controls.zig` (Review3, post-fix versions): all pass; plus the HEAD-vs-working-tree
   comparison run above proving the pre-fix escape and the post-fix refusal.
 - `zig build install`, `zig build test`, `zig build test-cuda-host`: green.
-## Findings
 
-### F1 (nit, non-blocking) — `--version` only with exactly one argument
+## Findings (historical pre-fix claims; all resolved — see top section)
+
+### F1 (bug, non-blocking) — `--version` only with exactly one argument (pre-fix)
 `if (args.len == 2 and std.mem.eql(u8, args[1], "--version"))` — `tensorfold --version anything`
 falls through into the run path and leaks a bare `error: FileNotFound` (exit 1) after touching the
 driver open path. Proven in smoke check C4. Suggest accepting `--version` when it is `args[1]`
 regardless of trailing args, or at least not letting a bare Zig error escape. Pre-existing exit
 path style, cosmetic.
 
-### F2 (nit, non-blocking) — `--version` prints to stderr
+### F2 (bug, non-blocking) — `--version` printed to stderr (pre-fix)
 `std.debug.print` writes to stderr, while `models`/`info` write to stdout. `tensorfold --version
 2>/dev/null` prints nothing. For a version query, stdout is the conventional stream and what
 scripts capture. One-line fix: print via the stdout writer (`std.Io.File.stdout()`), consistent
 with `cli.zig`'s writer plumbing.
 
-### F3 (nit, non-blocking) — unused `native_engines` import in the `checkpoint_cli` module
-`zig/build/cuda.zig` gives the new `checkpoint_cli` module a `native_engines` import, but
-`cli.zig` never imports `native_engines` (only `hub.zig` does, and `cli.zig` does not import
-`hub.zig`). Harmless to the binary (Zig analyzes lazily), but it drags `zig/src/native/cuda.zig`
-and the CUDA runtime into the build graph for nothing; `internal_tests`-style callers don't need
-it. Also `nativeServer()` creates a second structurally identical `checkpoint_cli` module — minor
-build-graph duplication.
+### F3 (nit, non-blocking) — RETRACTED (see "F3 — RETRACTED" below)
+The original claim (unused `native_engines` import) was wrong: `cli.zig` → `pull.zig`/`models.zig`/
+`info.zig` → `hub.zig` → `native_engines`, and `hub.zig` reads `engines.families` for the family
+check, so the import is load-bearing. The module-creation duplication part was real and is fixed
+by the `checkpointCli()` helper.
 
 ### F4 (doc gap, non-blocking) — CHANGELOG has no entry
 CHANGELOG's Unreleased section has no line for "the CUDA `tensorfold` serves `models`/`info`/
 `pull` and prints `--version`" despite the branch being user-visible. One line to add.
 
-## Findings (all resolved in the working tree; see top section)
+## Findings resolution
 
 ### F1/F2 — RESOLVED
 `--version` stderr + `--version extra` leak + leading-flag leak: fixed on stdout/usage/exit 2;
-smoke checks C4 green.
+smoke checks C4 green. Reviewer1's `version_stdout.sh` now PASSES on the current tree — their
+message reporting a FAIL predates the applied fix; the current behavior is verified by Reviewer2,
+Reviewer3 and the team-lead.
 
-### F3 — PARTIAL (flag only)
-Unused `native_engines` import in `checkpointCli()` (cli.zig never imports it). Harmless to the
-binary; build-graph dead weight. One-line follow-up.
+### F3 — RETRACTED
+The `native_engines` import on the `checkpoint_cli` module is **load-bearing, not unused**:
+`cli.zig` imports `models.zig`/`info.zig`/`pull.zig`, which import `hub.zig`, and `hub.zig`
+imports `native_engines` and reads `engines.families` for the family check (hub.zig:20). The
+module-creation duplication was still real and is now deduped into the `checkpointCli()` helper
+used by `targets()`, `nativeServer()` and `hostTests()`. No flag remains.
 
 ### F4 — RESOLVED
 CHANGELOG entry added on top of d5afccf; check it reads correctly before the merge commit.
@@ -109,20 +114,22 @@ CHANGELOG entry added on top of d5afccf; check it reads correctly before the mer
 ### Open questions from Reviewer1 (out of scope for the verdict)
 - `pull_parts` fetch resume/marker corner cases: probed, no defect found in the reviewed paths
   (sha256-before-rename and size checks verified in Review3's negative controls).
-- `info` sizeOf=0 on unreadable dirs (prints 0.00 GiB silently): cosmetic; suggest printing an
-  error at `statFile` failure in a follow-up.
-- Build-time cost of the second/`checkpointCli` module creation: deduped into one helper; the
-  `native_engines` flag remains (F3).
+- `info` sizeOf=0 on unreadable dirs (prints 0.00 GiB silently): cosmetic; Reviewer1 dropped it
+  as not worth the report; suggest an error at `statFile` failure only as an optional cleanup.
+- Reviewer3's residual notes: `listTree` itself still has no entry-point validation, but both
+  `e.path` consumers are covered (blobName sanitizes, linkIntoSnapshot gates with
+  error.SnapshotPath); the '\\' separator on Windows is not handled — no practical impact
+  (the CUDA binary targets Linux).
 
 ## Security findings (folded from Reviewer3; severities graded pre-fix, all closed in the working tree)
 
 Reviewer3's full security review is in `smoke_tests/README.md`; all severities were graded against
 the pre-fix code and every finding is now closed by the working-tree fixes (see top section).
-Reviewer2 independently re-ran all tests against the unmodified modules — **all pass**
-(zig 0.17.0); the pre-fix escape was reproduced against HEAD for certification:
+Reviewer2 independently re-ran all tests — **all pass**
+(zig 0.17.0, current invocation):
 
-- `zig test --dep pull_file -Mroot=smoke_tests/r3_linkIntoSnapshot_traversal.zig -Mpull_file=zig/src/cli/pull_file.zig` → All 1 tests passed
-- `zig test --dep pull_file --dep hub -Mroot=smoke_tests/r3_cachedSnapshot_ref_traversal.zig -Mpull_file=zig/src/cli/pull_file.zig -Mhub=zig/src/cli/hub.zig` → All 1 tests passed
+- `zig test --dep pull_file -Mroot=smoke_tests/r3_linkIntoSnapshot_traversal.zig -Mpull_file=zig/src/cli/pull_file.zig` → All 2 tests passed
+- `zig test --dep pull_file --dep hub -Mroot=smoke_tests/r3_cachedSnapshot_ref_traversal.zig -Mpull_file=zig/src/cli/pull_file.zig -Mhub=zig/src/cli/hub.zig` → All 2 tests passed
 - `zig test --dep pull_file --dep hub -Mroot=smoke_tests/r3_negative_controls.zig -Mpull_file=zig/src/cli/pull_file.zig -Mhub=zig/src/cli/hub.zig` → All 1 tests passed
 
 - **S-F1 MEDIUM** — hub tree `path` (network JSON) reaches `pull_file.linkIntoSnapshot`'s
@@ -145,9 +152,9 @@ Reviewer2 independently re-ran all tests against the unmodified modules — **al
   remains informational, unchanged from main's posture.
 - Positive controls verified in Review3's `r3_negative_controls.zig` (`isRepoIdLike`, `blobName`
   sanitization, sha256-before-rename, content-range start check) — all pass.
-### Inherited (out of branch scope, for Reviewer3)
-
-My inherited-F1 suspicion was confirmed by Reviewer3's proven proofs; see the security section above.
+- Inherited scope: none of these findings was introduced by this branch (the pull modules are
+  byte-identical to main; the CUDA binary merely gains a second path to them) — but the fixes
+  close them for both backends since the modules are shared.
 
 ## Verdict
 
@@ -155,5 +162,12 @@ My inherited-F1 suspicion was confirmed by Reviewer3's proven proofs; see the se
 consensus in writing). The branch commit plus the reviewed working-tree fixes deliver exactly
 what they claim; correctness and the security posture are proven on a real Linux+CUDA host.
 MUST: commit the working-tree fixes (they are the review's resolutions) together with the branch
-before merging. Remaining flags: the unused `native_engines` import (F3, one-line, optional) and
-the `info` 0.00 GiB cosmetic (optional follow-up).
+before merging. No remaining flags: F3 is retracted (the import is load-bearing) and the `info`
+0.00 GiB cosmetic was dropped by Reviewer1 as not worth the report.
+
+Record-keeping (Reviewer3's note): `smoke_tests/README.md` is Reviewer3's PRE-fix security
+write-up (findings and proofs as they stood before the fixes, including the original inverted
+expectations that were later corrected in the r3_*.zig files post-fix); this file
+(`REVIEWER2_REVIEW.md`) carries the POST-fix state. The dedicated `-r3-` smoke files were also
+revised post-fix to assert the refusals; the pre-fix escape is certified separately against HEAD
+as described above.

@@ -23,7 +23,6 @@ sleep 0.5
 kill -0 $SRV 2>/dev/null || { echo "FAIL: mock hub did not start (port $PORT in use?); set PORT=<free>"; exit 1; }
 
 HF_ENDPOINT="http://127.0.0.1:$PORT" HF_HUB_CACHE="$CACHE" "$BIN" pull Localhost/evil@main >/dev/null 2>&1 || true
-kill $SRV 2>/dev/null || true
 
 if [ -e "$ESCAPED" ] || [ -L "$ESCAPED" ]; then
     echo "FAIL: the hostile repo wrote outside the cache:"
