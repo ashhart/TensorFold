@@ -38,6 +38,10 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
 
     const sha = resolveRevision(a, &client, out, endpoint, repo, revision) catch |e| switch (e) {
         error.HubStatus => return 1,
+        error.BadRevision => {
+            try err_out.print("{s}@{s}: not a revision Hugging Face names (a branch, tag or 40-hex commit)\n", .{ repo, revision });
+            return 1;
+        },
         else => {
             try err_out.print("{s}@{s}: the hub is unreachable ({t}); check the network or HF_ENDPOINT\n", .{ repo, revision, e });
             return 1;
@@ -161,6 +165,7 @@ fn envValue(env: ?*const std.process.Environ.Map, key: []const u8) ?[]const u8 {
 
 /// The commit the hub serves for ``repo@revision``.
 fn resolveRevision(a: Allocator, client: *std.http.Client, out: *std.Io.Writer, endpoint: []const u8, repo: []const u8, revision: []const u8) ![]const u8 {
+    if (!revisionOk(revision)) return error.BadRevision;
     const url = try std.fmt.allocPrint(a, "{s}/api/models/{s}/revision/{s}", .{ endpoint, repo, revision });
     const body = try getJson(a, client, url);
     try out.print("[tensorfold] downloading {s}@{s} from Hugging Face\n", .{ repo, revision });
@@ -169,7 +174,29 @@ fn resolveRevision(a: Allocator, client: *std.http.Client, out: *std.Io.Writer, 
     if (parsed.value != .object) return error.BadHubJson;
     const sha = parsed.value.object.get("sha") orelse return error.BadHubJson;
     if (sha != .string or sha.string.len == 0) return error.BadHubJson;
+    // The sha names the snapshot dir and is written to refs/main: only a 40-hex git sha is a path.
+    if (!hexSha(sha.string)) return error.BadHubJson;
     return try a.dupe(u8, sha.string);
+}
+
+/// A git sha: 40 hex characters, the only strings ever joined into a cache path.
+fn hexSha(text: []const u8) bool {
+    if (text.len != 40) return false;
+    for (text) |ch| {
+        const ok = (ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f') or (ch >= 'A' and ch <= 'F');
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/// A branch, tag or sha: the characters a URL's path segment may hold, and no dots.
+fn revisionOk(text: []const u8) bool {
+    if (text.len == 0 or std.mem.indexOf(u8, text, "..") != null) return false;
+    for (text) |ch| {
+        const ok = std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.';
+        if (!ok) return false;
+    }
+    return true;
 }
 
 /// The revision's files: path, size and the sha256 the hub states for LFS objects.

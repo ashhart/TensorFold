@@ -49,14 +49,24 @@ pub fn repoDirName(a: Allocator, repo: []const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "models--{s}--{s}", .{ repo[0..slash], repo[slash + 1 ..] });
 }
 
+/// A git sha: 40 hex characters, the only strings ever joined into a cache path.
+fn hexSha(text: []const u8) bool {
+    if (text.len != 40) return false;
+    for (text) |ch| {
+        const ok = (ch >= '0' and ch <= '9') or (ch >= 'a' and ch <= 'f') or (ch >= 'A' and ch <= 'F');
+        if (!ok) return false;
+    }
+    return true;
+}
+
 /// The cached snapshot serving `repo`: refs/main's revision, else the newest snapshot with a config.json.
 pub fn cachedSnapshot(a: Allocator, io: std.Io, hub: []const u8, repo: []const u8) !?[]const u8 {
     const dir_name = try repoDirName(a, repo);
     const root = try std.fs.path.join(a, &.{ hub, dir_name });
-    var ref_buf: [256]u8 = undefined;
     if (readSmall(a, io, try std.fs.path.join(a, &.{ root, "refs", "main" }))) |ref| {
         const rev = std.mem.trim(u8, ref, " \r\n");
-        if (rev.len > 0 and rev.len <= ref_buf.len) {
+        // The ref names the snapshot dir: only a 40-hex git sha is ever joined into a cache path.
+        if (hexSha(rev)) {
             const snapshot = try std.fs.path.join(a, &.{ root, "snapshots", rev });
             if (isDir(io, snapshot)) return snapshot;
         }
@@ -77,7 +87,6 @@ pub fn cachedSnapshot(a: Allocator, io: std.Io, hub: []const u8, repo: []const u
             newest = snapshot;
         }
     }
-    _ = &ref_buf;
     return newest;
 }
 

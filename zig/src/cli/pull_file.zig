@@ -83,9 +83,16 @@ fn download(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
     if (check_git) git.update(try std.fmt.bufPrint(&git_head, "blob {d}\x00", .{e.size}));
     if (resume_from > 0) {
         // The prefix already on disk feeds the same digest so the final check spans the whole file.
-        const prefix = try a.alloc(u8, @intCast(resume_from));
-        const read = file.readPositionalAll(io, prefix, 0) catch 0;
-        hash.update(prefix[0..read]);
+        // It is read in chunks: its length is capped by a hub-named size, never allocated whole.
+        var prefix_buf: [64 << 10]u8 = undefined;
+        var at: u64 = 0;
+        while (at < resume_from) {
+            const want: usize = @intCast(@min(prefix_buf.len, resume_from - at));
+            const read = file.readPositionalAll(io, prefix_buf[0..want], at) catch 0;
+            if (read == 0) break;
+            hash.update(prefix_buf[0..read]);
+            at += read;
+        }
     }
     var reader_buf: [64 << 10]u8 = undefined;
     var r = response.reader(&reader_buf);
@@ -120,8 +127,19 @@ pub fn fileStat(io: std.Io, path: []const u8) !u64 {
     return st.size;
 }
 
+/// A snapshot's path a hub tree names: relative, and no traversal segments.
+fn snapshotPathOk(path: []const u8) bool {
+    if (path.len == 0 or path[0] == '/') return false;
+    var it = std.mem.tokenizeScalar(u8, path, '/');
+    while (it.next()) |c| {
+        if (std.mem.eql(u8, c, ".") or std.mem.eql(u8, c, "..")) return false;
+    }
+    return true;
+}
+
 /// The snapshot's path points at the blob, the way huggingface_hub's cache links them.
 pub fn linkIntoSnapshot(a: Allocator, io: std.Io, snapshot_dir: []const u8, path: []const u8, blob_name: []const u8) !void {
+    if (!snapshotPathOk(path)) return error.SnapshotPath;
     const link_path = try std.fs.path.join(a, &.{ snapshot_dir, path });
     if (std.fs.path.dirname(link_path)) |parent| try std.Io.Dir.cwd().createDirPath(io, parent);
     std.Io.Dir.cwd().deleteFile(io, link_path) catch {};

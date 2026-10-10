@@ -44,13 +44,22 @@ const usage =
 pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    // The version must work without a model, driver or GPU.
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
-        std.debug.print("tensorfold {s}\n", .{@import("build_options").version});
+    // The version must work without a model, driver or GPU, and reach scripts on stdout.
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "--version")) {
+        if (args.len > 2) {
+            std.debug.print("{s}", .{usage});
+            return 2;
+        }
+        try std.Io.File.stdout().writeStreamingAll(init.io, "tensorfold " ++ @import("build_options").version ++ "\n");
         return 0;
     }
     // The checkpoint commands must work without a model, driver or GPU too.
     if (args.len >= 2 and checkpoint_cli.wants(@ptrCast(args[1..]))) return checkpoint_cli.main(init, args[1..]);
+    // A leading flag is not a command: the usage covers it, without touching the GPU.
+    if (args.len >= 2 and std.mem.startsWith(u8, args[1], "--")) {
+        std.debug.print("{s}", .{usage});
+        return 2;
+    }
     if (args.len < 3) {
         std.debug.print("{s}", .{usage});
         return 2;
