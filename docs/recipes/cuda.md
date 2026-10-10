@@ -92,7 +92,7 @@ staggered prompt work for 1 through 4 whole 2,048-row chunks; without the flag i
 uses `TF_CUDA_SEGMENTS`, then 1. The `tensorfold segments` command compares the
 available segment counts and can profile the serial chunk parts.
 
-On a DGX Spark (GB10), `tensorfold run --carveout`, or `TF_CUDA_CARVEOUT=1` for `tensorfold run` and
+Experimental: on a DGX Spark (GB10), `tensorfold run --carveout`, or `TF_CUDA_CARVEOUT=1` for `tensorfold run` and
 `tensorfold-native`, puts Nemotron's KV caches in the memory the display controller reserves, which
 MemAvailable never counts. The native engine maps a
 DRM dumb buffer from `/dev/dri/card0` (`TF_DRM_CARD` picks another card) and registers it with
