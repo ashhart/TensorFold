@@ -12,7 +12,7 @@ flag and API use the name `slide`.
 
 - An Apple-silicon Mac (tested on an M5 MacBook Pro and an M3 Ultra) with room for the model and a copy of it.
 - The Nemotron 3.5 Lightning MLX 4-bit checkpoint, the only model it learns into today.
-- TensorFold 1.0.3 or later.
+- TensorFold 1.0.4 or later. 1.0.3 learns too, but does not refuse a folder of links (step 2).
 
 NVIDIA GPUs cannot learn yet. They do serve a folder that learned on a Mac.
 
@@ -32,12 +32,14 @@ original.
 ```sh
 tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 src=$(ls -d ~/.cache/huggingface/hub/models--TensorFold--NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit/snapshots/* | head -1)
+mkdir -p ~/models
 cp -cRL "$src" ~/models/nemotron-living
 ```
 
 Use exactly these `cp` flags. The pulled model lives in the Hugging Face cache, whose folders hold links to shared
 files: `-L` copies the real files, so learning can never write into the cached original, and `-c` makes APFS clones, so
-the copy takes no extra disk until learning changes it.
+the copy takes no extra disk until learning changes it. `--slide` refuses a folder whose files are links, so serving the
+cache's own folder stops at startup instead of changing it.
 
 ### 3. Start the server with `--slide`
 
@@ -58,8 +60,10 @@ curl -N http://127.0.0.1:8080/v1/slide/learn \
 ```
 
 The reply streams progress as server-sent events: `fact` when it finds a fact in your text, `learning` when it starts on
-it, and `learned` when it is done. `"recalled": true` means the fact was kept; `false` means it was not, and `message`
-says why. A fact takes two to four minutes.
+it, and `learned` when it is done. `"recalled": true` means it answered its held-out questions with the fact. `false` with
+a `message` says why it stopped, for example that the weight change was taken out because it disturbed another answer;
+`false` without one means the change was kept but the fact did not come back on every held-out question. A fact takes
+two to four minutes.
 
 ### 5. Ask
 
@@ -116,7 +120,8 @@ A panel shows each fact as queued, learning, learned or missed.
 | `501 this engine does not learn: serve its model with --slide` | Start the server with `--slide`, on a Mac |
 | `503 the engine cannot take a learn request now` | Another learn request is running; send yours when it ends |
 | `400 text is required` | The JSON body needs a `"text"` field |
-| `learned` with `"recalled": false` | The fact was not kept; `message` says why, for example that it disturbed a related question |
+| `learned` with `"recalled": false` | The fact did not come back on its held-out questions; `message`, when there is one, says why, for example that the change was taken out because it disturbed a related question |
+| `--slide rewrites the model's own files, and … is a link to data another file shares` at startup | The folder holds links into the Hugging Face cache (or hard links); make the copy with `cp -cRL` as in step 2 |
 | The answer has not changed yet | Wait for the `learned` event before asking |
 
 ## What to expect

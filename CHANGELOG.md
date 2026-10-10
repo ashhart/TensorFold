@@ -2,6 +2,11 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## 1.0.4
+
+- `tensorfold serve --slide` refuses a model folder whose shards, index or config.json are links to data other files share, and says to serve a copy made with `cp -cRL` instead. A folder from `tensorfold pull` is one: its files link into the Hugging Face cache, so in 1.0.3 learning there would rewrite the cached original and every snapshot that shares it. A hard-linked copy is refused for the same reason; an APFS clone passes. [docs/living-weights.md](docs/living-weights.md) shows the copy.
+- No other code changed from 1.0.3, and 1.0.3's known issues still apply.
+
 ## 1.0.3
 
 - Qwen3.8-27B runs on the native engine. Pull the model and its drafter with `tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit` and `tensorfold pull z-lab/Qwen3.8-27B-DFlash2`, then serve with `--drafter z-lab/Qwen3.8-27B-DFlash2`. Every drafted reply equals the same request with `"draft": false`. On an M5 Max, 512-token replies decode at 64 to 77 tokens a second on prose and 151 on code, against 32 to 33 for stock mlx_lm 0.31.3. A resumed turn of a four-turn chat reaches its first token in 0.16 to 0.43 seconds, against 13 to 17 seconds fresh. The 27B serves one request at a time.
@@ -25,8 +30,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - A streamed tool reply no longer sends whitespace that the whole reply does not have (#489). Thanks to @Nipale-ai.
 - Pull requests run the no-GPU Zig tests and a `zig fmt` check (#462, #469). Thanks to @AdrianBinDC.
 - The startup line prints the Qwen3.5 family's 128-token prompt step as 128, not 0,128 (#526). Thanks to @BobClawblaw.
+- Release archives carry no macOS metadata or builder identity, so GNU tar on Linux unpacks them without warnings.
+- Thanks to @SvangenStudios and @plotarmordev, who found the pull problems first (#514, #549), @SvangenStudios for the archive warnings (#516), and @GustavBlack for the direct_io diagnosis (#536, #540).
 
-Known issues, each fixed in the next release:
+Known issues, with fixes in testing:
 - If a crash tears the last record of `--learn`'s index, the states learned after it are lost at the next restart.
 - An interrupted `--learn` save can leave a `.part` file that is never removed. It counts toward the `--learn-gib` cap at startup, so states learned for other models or builds can be removed sooner than the cap requires.
 - Flash Next writes its pack cache into the checkpoint's folder instead of under `~/.cache/tensorfold`.
