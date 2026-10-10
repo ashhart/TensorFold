@@ -24,6 +24,7 @@ pub const Options = struct {
     graphs: bool = true,
     sampling: ?sampler.Sampling = null, // the rule the graphs compile in; null or temperature 0 decodes greedily
     segments: usize = 1, // whole prompt chunks a call runs as staggered segments (1: one chunk at a time)
+    carveout: ?*cuda.Carveout = null, // KV planes go to the display carveout first while it holds them
 };
 
 /// Asked before each prompt chunk (or segmented call): true stops the prompt with error.Cancelled.
@@ -91,6 +92,7 @@ pub const Engine = struct {
     load_seconds: f64 = 0,
     segments: usize = 1, // Options.segments
     seg: ?segs.Segments = null, // their streams and scratch, made at load (or when setSegments asks for more)
+    carve: ?*cuda.Carveout = null, // Options.carveout; it outlives the engine
 
     /// Loads the checkpoint into the Python engine's layouts and sizes the caches; `triton_dir` null: our own glue.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, model_dir: []const u8, triton_dir: ?[]const u8, opts: Options) !*Engine {
@@ -101,6 +103,7 @@ pub const Engine = struct {
         e.c = try Config.read(gpa, io, model_dir);
         if (opts.segments < 1 or opts.segments > segs.MAX) return error.BadSegments;
         e.segments = opts.segments;
+        e.carve = opts.carveout;
         const slots = (opts.context orelse default_context) + state.max_rows;
         e.max_len = (slots + state.chunk_keys - 1) / state.chunk_keys * state.chunk_keys;
         e.stream = try cuda.Stream.init(ctx.d, true);
@@ -120,7 +123,7 @@ pub const Engine = struct {
         }) else chunks;
         e.w = try weights.load(gpa, io, e.ops(), model_dir, e.c, opts.mtp);
         errdefer e.w.deinit();
-        e.b = try state.Buffers.init(ctx.d, e.c, e.max_len, e.nch);
+        e.b = try state.Buffers.init(ctx.d, e.c, e.max_len, e.nch, e.carve);
         errdefer e.b.deinit();
         try e.b.initShared(e.ops(), e.c);
         if (e.segments > 1) e.seg = try segs.Segments.init(e, e.segments);
@@ -213,7 +216,7 @@ pub const Engine = struct {
         errdefer e.gpa.destroy(s);
         var head: [head_fields.len]usize = undefined;
         if (e.head) |h| head = h.seqSizes();
-        s.* = try state.Seq.init(e.ctx.d, e.c, e.max_len, if (e.head != null) &head else &.{}, e.stream);
+        s.* = try state.Seq.init(e.ctx.d, e.c, e.max_len, if (e.head != null) &head else &.{}, e.stream, e.carve);
         return s;
     }
 
@@ -233,7 +236,7 @@ pub const Engine = struct {
     /// Act on sequence `s` from here on: its buffers replace the bound one's, which keeps where it stands.
     pub fn bind(e: *Engine, s: *state.Seq) void {
         const old = e.bound;
-        old.* = .{ .arena = old.arena, .ptr = old.ptr, .head = old.head, .pos = e.pos, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows, .head_pos = if (e.head) |h| h.pos else 0, .sampling = e.sampling };
+        old.* = .{ .arena = old.arena, .carved = old.carved, .ptr = old.ptr, .head = old.head, .pos = e.pos, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows, .head_pos = if (e.head) |h| h.pos else 0, .sampling = e.sampling };
         inline for (state.seq_fields, s.ptr) |name, p| @field(e.b, name) = p;
         e.pos = s.pos;
         e.parity = s.parity;

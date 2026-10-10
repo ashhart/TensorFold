@@ -14,6 +14,7 @@ const tree_accept = @import("tree_accept.zig");
 const chunk_costs = @import("chunk_costs.zig");
 const grouped_tests = @import("grouped_tests.zig");
 const fp8_tests = @import("fp8_tests.zig");
+const carveout_tests = @import("carveout_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -37,6 +38,7 @@ const usage =
     \\  chunk-costs MODEL IDS_FILE WIDTHS   r rows as the decode window graph (r <= 16) and as a prompt chunk (any r)
     \\  grouped-plan <dir>        the shared expert plan against experts.route's bytes (oracle/grouped_plan.py)
     \\  fp8-lane <dir>            block-FP8 projections against the Python lane matmul's bytes (oracle/fp8_lane.py)
+    \\  carveout [MiB] [card]     GB10 display memory: round trips and bandwidth (SKIP without the card)
     \\
 ;
 
@@ -93,6 +95,10 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "tree-accept")) return tree_accept.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "chunk-costs")) return chunk_costs.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "grouped-plan")) return grouped_tests.plan(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "carveout")) {
+        const mib = if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else cuda.carveout.default_bytes >> 20;
+        return carveout_tests.run(gpu, if (rest.len > 1) rest[1] else cuda.carveout.default_card, mib);
+    }
     std.debug.print("{s}", .{usage});
     return error.UnknownCommand;
 }
