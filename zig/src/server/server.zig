@@ -43,6 +43,8 @@ pub const Config = struct {
     /// Sampling when a request names none (generation_config.json and the serve flags), or null for greedy.
     default_sampling: ?Value = null,
     use_drafts: bool = true,
+    /// --vision-urls: image parts may name public HTTPS URLs, fetched before admission (media_fetch.zig).
+    vision_urls: bool = false,
     seed_salt: i64 = 0,
     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.
     request_log: ?[]const u8 = null,

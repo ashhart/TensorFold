@@ -135,8 +135,16 @@ For Qwen, each image request carries its own multimodal rotary positions and con
 4,096) for engines that read images; GLM-5.3-Flash on one Mac reads them so far, and other native engines refuse the
 flag at startup.
 
-- Images arrive as `image_url` data URLs in user messages and tool results. Remote URLs are refused, since
-  `--vision-urls` isn't on the native server yet.
+- Images arrive as `image_url` data URLs in user messages and tool results. With `--vision-urls` (it needs
+  `--vision`), a part may name a public HTTPS URL instead, fetched as 0.6.6 fetched it: port 443 without credentials
+  or a fragment; every address the host resolves to public (no private, loopback, link-local, carrier-grade NAT,
+  documentation, multicast or metadata address, and for IPv6 global unicast only, without 6to4 or Teredo); TLS
+  verified for the host against the system's certificates, on the address that was checked; up to 3 redirects,
+  each checked again; a declared `image/jpeg`, `image/png` or `image/webp`, uncompressed; 10 MB an image and 20 MB
+  a request across data URLs and downloads; 10 s a download and 30 s a request's downloads. The refusals are
+  0.6.6's words; a TLS failure, like any other failed connection, is "image download failed or timed out". Host
+  names that aren't ASCII and IPv6 address literals are refused. Without the flag, an HTTPS URL is refused with the
+  flag's name.
 - PNG and JPEG are decoded by the platform's decoder (ImageIO on macOS). WebP is refused by name until a decoder
   exists; other formats are refused.
 - The limits and the processing are 0.6.6's: EXIF orientation, alpha composited over white, the GLM5-Next processor's

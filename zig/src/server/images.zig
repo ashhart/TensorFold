@@ -6,6 +6,7 @@ const json = @import("json.zig");
 const errors = @import("errors.zig");
 const messages_mod = @import("messages.zig");
 const model_text = @import("model_text.zig");
+const media_fetch = @import("media_fetch.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 
@@ -41,10 +42,44 @@ fn parts(cx: *Cx, messages: Value) errors.Refused![]const Part {
     return out.items;
 }
 
-/// A data URL's bytes (base64 or percent-encoded); remote URLs are refused (the native server fetches nothing).
+/// --vision-urls: how a public HTTPS image's bytes are fetched (media_fetch.zig, or a test's fixtures).
+pub const Fetch = struct {
+    ctx: ?*anyopaque = null,
+    io: std.Io,
+    get: *const fn (ctx: ?*anyopaque, a: std.mem.Allocator, io: std.Io, url: []const u8, max_bytes: usize, deadline: std.Io.Timestamp, f: *media_fetch.Failure) media_fetch.Error![]const u8,
+
+    /// The network, as media_fetch checks it.
+    pub fn network(io: std.Io) Fetch {
+        return .{ .io = io, .get = struct {
+            fn get(_: ?*anyopaque, a: std.mem.Allocator, i: std.Io, url: []const u8, max_bytes: usize, deadline: std.Io.Timestamp, f: *media_fetch.Failure) media_fetch.Error![]const u8 {
+                return (try media_fetch.fetch(a, i, url, max_bytes, deadline, &media_fetch.image_media, f)).data;
+            }
+        }.get };
+    }
+};
+
+/// An image part's bytes, at most `limit`: a data URL's, or with --vision-urls (`fetch`) a public HTTPS URL's, fetched
+/// before `deadline` (images.py _check_source and load_images).
+pub fn sourceBytes(cx: *Cx, fetch: ?Fetch, url: []const u8, limit: usize, deadline: std.Io.Timestamp) errors.Refused![]const u8 {
+    if (std.ascii.startsWithIgnoreCase(url, "data:")) {
+        const bytes = try dataBytes(cx, url);
+        if (bytes.len > limit) return cx.refuse("the request's images exceed 20 MB encoded");
+        return bytes;
+    }
+    if (!std.mem.startsWith(u8, url, "https://")) return cx.refuse("images require data URLs or public HTTPS URLs");
+    const f = fetch orelse return cx.refuse("image URLs are off on this server; send the image as a data URL, or start the server with --vision-urls");
+    if (url.len > media_fetch.max_url_chars) return cx.refuse("image URL is too long");
+    var failure: media_fetch.Failure = .{};
+    const bytes = f.get(f.ctx, cx.a, f.io, url, limit, deadline, &failure) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Media => return cx.refuse(failure.text),
+    };
+    if (bytes.len == 0) return cx.refuse("image is empty or exceeds the encoded byte limit");
+    return bytes;
+}
+
+/// A data URL's bytes (base64 or percent-encoded).
 pub fn dataBytes(cx: *Cx, url: []const u8) errors.Refused![]const u8 {
-    if (std.ascii.startsWithIgnoreCase(url, "http://") or std.ascii.startsWithIgnoreCase(url, "https://"))
-        return cx.refuse("image URLs are not fetched by this server; send the image inline as a data: URL (data:image/png;base64,...)");
     if (!std.ascii.startsWithIgnoreCase(url, "data:")) return cx.refuse("invalid image data URL");
     const comma = std.mem.indexOfScalar(u8, url, ',') orelse return cx.refuse("invalid image data URL");
     const header = url[5..comma];
@@ -179,7 +214,7 @@ pub fn encodeShielded(text: model_text.Text, a: std.mem.Allocator, rendered: []c
 /// The prompt with each image's placeholder expanded to its tokens, the images for the engine and the prompt as the
 /// cache matches it; null when the engine reads no images. Images are counted from the request's image parts; the
 /// rendered placeholders are the template's alone (text that spells a marker was shielded), one per part.
-pub fn expand(vision: ?api.Vision, cx: *Cx, messages: Value, ids: []const u32, history_len: usize) errors.Refused!?Expanded {
+pub fn expand(vision: ?api.Vision, fetch: ?Fetch, cx: *Cx, messages: Value, ids: []const u32, history_len: usize) errors.Refused!?Expanded {
     const v = vision orelse return null;
     const ps = try parts(cx, messages);
     var marks: usize = 0;
@@ -192,10 +227,11 @@ pub fn expand(vision: ?api.Vision, cx: *Cx, messages: Value, ids: []const u32, h
     const prepared = try cx.a.alloc(api.PreparedImage, ps.len);
     var bytes_total: usize = 0;
     var extra: usize = 0;
+    // every URL's download inside one request's seconds (images.py total_timeout_seconds)
+    const deadline: std.Io.Timestamp = if (fetch) |f| std.Io.Clock.awake.now(f.io).addDuration(.fromSeconds(media_fetch.total_s)) else .{ .nanoseconds = 0 };
     for (ps, prepared, 0..) |p, *out, i| {
-        const bytes = try dataBytes(cx, p.url);
+        const bytes = try sourceBytes(cx, fetch, p.url, @min(max_image_bytes, max_request_bytes - bytes_total), deadline);
         bytes_total += bytes.len;
-        if (bytes_total > max_request_bytes) return cx.refuse("the request's images exceed 20 MB encoded");
         switch (sniff(bytes)) { // the Python frontend's formats (images.py: JPEG, PNG, WebP), WebP not yet decoded here
             .png, .jpeg => {},
             .webp => return cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} is WebP, which this server does not decode yet; send PNG or JPEG", .{i + 1})),
@@ -240,8 +276,16 @@ test "data URLs decode; remote URLs are refused" {
     var cx: Cx = .{ .a = arena.allocator() };
     try std.testing.expectEqualStrings("hi!", try dataBytes(&cx, "data:image/png;base64,aGkh"));
     try std.testing.expectEqualStrings("a b", try dataBytes(&cx, "data:text/plain,a%20b"));
-    try std.testing.expectError(error.Refused, dataBytes(&cx, "https://example.com/x.png"));
     try std.testing.expectError(error.Refused, dataBytes(&cx, "data:image/png;base64,***"));
+    // without --vision-urls an https URL is refused with the flag's name; other schemes always
+    const never: std.Io.Timestamp = .{ .nanoseconds = 0 };
+    try std.testing.expectError(error.Refused, sourceBytes(&cx, null, "https://example.com/x.png", max_image_bytes, never));
+    try std.testing.expectEqualStrings("image URLs are off on this server; send the image as a data URL, or start the server with --vision-urls", cx.message);
+    for ([_][]const u8{ "http://example.com/x.png", "ftp://example.com/x.png", "HTTPS://example.com/x.png", "file:///etc/passwd" }) |u| {
+        try std.testing.expectError(error.Refused, sourceBytes(&cx, null, u, max_image_bytes, never));
+        try std.testing.expectEqualStrings("images require data URLs or public HTTPS URLs", cx.message);
+    }
+    try std.testing.expectError(error.Refused, sourceBytes(&cx, null, "data:,abc", 2, never));
 }
 
 fn fakePrepare(ctx: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
@@ -268,7 +312,7 @@ test "placeholders expand to each image's tokens, the history and cache key with
         .err => return error.TestUnexpectedResult,
     };
     const ids = [_]u32{ 1, 9, 2, 3, 9, 4 };
-    const x = (try expand(v, &cx, msgs, &ids, 4)).?;
+    const x = (try expand(v, null, &cx, msgs, &ids, 4)).?;
     try std.testing.expectEqualSlices(u32, &.{ 1, 9, 9, 2, 3, 9, 9, 9, 4 }, x.ids);
     try std.testing.expectEqual(@as(usize, 5), x.history_len); // the first image is in the history, the second not
     try std.testing.expectEqual(@as(u32, 1), x.images[0].at);
@@ -276,8 +320,50 @@ test "placeholders expand to each image's tokens, the history and cache key with
     try std.testing.expect(x.cache_key[1] >= 0x8000_0000 and x.cache_key[1] != x.cache_key[2]);
     try std.testing.expectEqual(@as(u32, 2), x.cache_key[3]);
     // a placeholder the images do not account for is refused
-    try std.testing.expectError(error.Refused, expand(v, &cx, msgs, &[_]u32{ 9, 9, 9 }, 0));
+    try std.testing.expectError(error.Refused, expand(v, null, &cx, msgs, &[_]u32{ 9, 9, 9 }, 0));
     _ = messages_mod;
+}
+
+test "--vision-urls: an https part's bytes come from the fetch, within what the request has left" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: Cx = .{ .a = a };
+    var dummy: u8 = 0;
+    const v: api.Vision = .{ .ctx = &dummy, .prepare = fakePrepare, .image_token = 9, .image_tokens = 64, .max_images = 4 };
+    const Pages = struct {
+        var limits: [4]usize = undefined;
+        var n: usize = 0;
+        fn get(_: ?*anyopaque, al: std.mem.Allocator, _: std.Io, url: []const u8, max_bytes: usize, _: std.Io.Timestamp, f: *media_fetch.Failure) media_fetch.Error![]const u8 {
+            limits[n] = max_bytes;
+            n += 1;
+            if (std.mem.eql(u8, url, "https://e.com/a.jpg")) return al.dupe(u8, "\xff\xd8\xffxyz");
+            f.text = "image download returned HTTP 404";
+            return error.Media;
+        }
+    };
+    const fetch: Fetch = .{ .io = std.testing.io, .get = Pages.get };
+    const text =
+        \\[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFab"}},
+        \\  {"type": "image_url", "image_url": {"url": "https://e.com/a.jpg"}}]}]
+    ;
+    const msgs = switch (try json.parseText(a, text)) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    const x = (try expand(v, fetch, &cx, msgs, &[_]u32{ 1, 9, 9, 2 }, 0)).?;
+    try std.testing.expectEqualSlices(u32, &.{ 1, 9, 9, 9, 9, 9, 2 }, x.ids); // 2 tokens, then the fetched image's 3
+    try std.testing.expectEqual(@as(u32, 3), x.images[1].at);
+    try std.testing.expectEqual(@as(usize, max_image_bytes), Pages.limits[0]); // 5 bytes used of 20 MB: 10 MB left
+    // the fetch's refusal is the request's; without the fetch the URL is refused by the flag's name
+    const missing = switch (try json.parseText(a, "[{\"role\": \"user\", \"content\": [{\"type\": \"image_url\", \"image_url\": {\"url\": \"https://e.com/gone.png\"}}]}]")) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectError(error.Refused, expand(v, fetch, &cx, missing, &[_]u32{9}, 0));
+    try std.testing.expectEqualStrings("image download returned HTTP 404", cx.message);
+    try std.testing.expectError(error.Refused, expand(v, null, &cx, missing, &[_]u32{9}, 0));
+    try std.testing.expectEqualStrings("image URLs are off on this server; send the image as a data URL, or start the server with --vision-urls", cx.message);
 }
 
 /// A test tokenizer: "<|image|>" is token 9 unless read plainly, every other byte its own id plus 100.

@@ -68,7 +68,8 @@ chat fields that shape the prompt (`tools`, `reasoning_effort`, `chat_template_k
 request, images expanded. `/detokenize` takes `tokens` and returns `prompt`.
 With `--vision`, supported Qwen3.5/3.8 dense checkpoints accept `image_url` content parts alongside text in user
 messages and in tool results (`role: "tool"`), such as an agent's screenshots. The native server does the same for
-GLM-5.3-Flash on Metal, with data URLs only ([image input](vision.md#the-native-server)).
+GLM-5.3-Flash on Metal, with data URLs, and public HTTPS URLs under `--vision-urls`
+([image input](vision.md#the-native-server)).
 See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.
 

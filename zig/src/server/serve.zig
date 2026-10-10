@@ -113,6 +113,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .keep_warm_s = args.keep_warm,
         .default_sampling = s.sampling,
         .use_drafts = !args.no_drafts,
+        .vision_urls = args.vision_urls,
         .seed_salt = salt,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
         .dashboard = args.dashboard,

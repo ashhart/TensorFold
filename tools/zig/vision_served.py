@@ -6,7 +6,8 @@ DIR holds PNG and JPEG test images. Checks: an image request answers, and text o
 model's image marker beside a real image is ordinary text (images come from the request's image parts, #511); drafted
 equals ``"draft": false`` and concurrent equals alone with images; an image conversation's next turn resumes past
 its image, and another image under the same placeholders resumes none of the first one's rows; and the refusals (WebP by name, other formats, an image outside a
-user or tool message, too many images, remote URLs, bad data URLs, a bad detail).
+user or tool message, too many images, remote URLs without --vision-urls, bad data URLs, a bad detail); tools/zig/vision_urls_served.py
+checks a server started with --vision-urls.
 """
 
 from __future__ import annotations
@@ -151,7 +152,8 @@ def main() -> int:
         ("GIF", [user(image_part(data_url(gif, "image/gif")), text("hi"))], "not PNG or JPEG"),
         ("an image in an assistant message", [user(text("hi")), {"role": "assistant", "content": [image_part(url_a)]}, user(text("ok"))], "user and tool messages only"),
         ("too many images", [user(*[image_part(url_a)] * 5, text("hi"))], "at most"),
-        ("a remote URL", [user(image_part("https://example.com/cat.png"), text("hi"))], "data: URL"),
+        ("a remote URL without --vision-urls", [user(image_part("https://example.com/cat.png"), text("hi"))], "--vision-urls"),
+        ("a URL that is neither data nor https", [user(image_part("http://example.com/cat.png"), text("hi"))], "data URLs or public HTTPS URLs"),
         ("bad base64", [user(image_part("data:image/png;base64,@@@@"), text("hi"))], "encoding"),
         ("a bad detail", [user(image_part(url_a, "medium"), text("hi"))], "detail"),
         ("bytes that decode as nothing", [user(image_part(data_url(b"\x89PNG\r\n\x1a\n" + bytes(32), "image/png")), text("hi"))], "could not be decoded"),
