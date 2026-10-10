@@ -12,6 +12,8 @@ const Fence = @import("../../core/fence.zig").Fence;
 
 /// Handles of tokens on the GPU: queued rounds' picks and the host tokens they read, a slot each.
 const ring_len = 64;
+const vision_mod = @import("vision.zig");
+const Image = @import("lanes").stream.Image;
 
 /// One stream's rows in a shared window: its pending token, then the drafts the slot holds, then host drafts.
 pub const Win = struct { slot: u32, pending: u32, held: u32, tokens: []const u32 };
@@ -46,6 +48,8 @@ pub const Slots = struct {
     lasts: Ref, // bf16 [max_rows, hidden]: each drafting stream's last absorbed row (m_x), gathered
     picks: Ref, // u32 [max_rows]: a draft level's picks, a stream each
     open: ?Open = null, // keeps and drafts encode here; the next window commits them with its forward
+    inject: ?struct { slot: u32, v: fwd.Inject } = null, // an image prompt's rows while its pass runs
+    spans: std.ArrayList(fwd.Span) = .empty,
     windows: u64 = 0,
     log: bool = false, // GLM_WINDOWS=1: each window's streams, rows, GPU time and the GPU's idle gap before it
     last_end: f64 = 0,
@@ -81,6 +85,7 @@ pub const Slots = struct {
         var it = sl.snaps.valueIterator();
         while (it.next()) |snap| freeSnap(gpa, snap.*);
         sl.snaps.deinit(gpa);
+        sl.spans.deinit(gpa);
         gpa.free(sl.slots);
     }
 
@@ -320,6 +325,9 @@ pub const Slots = struct {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         var x = sl.ctx(slot);
+        if (sl.inject) |*inj| if (inj.slot == i) {
+            x.inject = &inj.v;
+        };
         const b = e.begin();
         const ids = e.prompt_ids.at(@as(usize, at) * 4);
         const next = e.prompt_ids.at(@as(usize, at + 1) * 4);
@@ -565,6 +573,35 @@ pub const Slots = struct {
     }
 
     /// The stream in slot `i` left; once every slot is free, pending work commits on this thread (its pool's owner).
+    /// Slot `i`'s images through the tower into the engine's image rows, injected over their placeholders by the
+    /// chunks that follow until `endImages`. One image a command buffer: the tower's host-written scratch is shared.
+    pub fn images(sl: *Slots, i: u32, imgs: []const Image) !void {
+        const e = sl.e;
+        const v = e.vision orelse return error.NoVision;
+        if (imgs.len > e.vision_limits.max_images) return error.TooManyImages;
+        _ = try sl.slotAt(i);
+        sl.spans.clearRetainingCapacity();
+        try sl.flush();
+        e.sync();
+        var row: u32 = 0;
+        for (imgs) |img| {
+            if (row + img.tokens > e.vision_limits.image_tokens or img.gh * img.gw != img.tokens * vision_mod.patches_per_token) return error.ImageTooLarge;
+            if (img.at + img.tokens > sl.slots[i].prompt_len) return error.ImageOutOfPrompt;
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            const b = e.begin();
+            try v.encode(b.enc, img.pixels, img.gh, img.gw, e.vision_rows.at(@as(usize, row) * e.c.hidden * 2), null);
+            try e.finish(b.cb, b.enc);
+            try sl.spans.append(sl.gpa, .{ .at = img.at, .n = img.tokens, .row = row });
+            row += img.tokens;
+        }
+        sl.inject = .{ .slot = i, .v = .{ .rows = e.vision_rows, .spans = sl.spans.items } };
+    }
+
+    pub fn endImages(sl: *Slots) void {
+        sl.inject = null;
+    }
+
     pub fn release(sl: *Slots, i: u32) void {
         if (i >= sl.slots.len) return;
         const slot = &sl.slots[i];

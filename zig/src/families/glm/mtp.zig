@@ -35,6 +35,7 @@ pub fn absorb(x: *fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, next: Ref, rows: u32, 
     const L = &x.w.layers[c.layers];
     const m = x.w.mtp.?;
     fwd.embedRows(x, e, next, sc.m_emb, rows);
+    fwd.inject(x, e, sc.m_emb, rows, pos + 1); // the head reads each row's next token: an image's rows one place on
     fwd.rms(x, e, sc.m_emb, m.enorm, sc.m_eh, rows, D, D, 2 * D, c.eps);
     fwd.rms(x, e, h, m.hnorm, sc.m_eh.at(@as(usize, D) * 2), rows, D, D, 2 * D, c.eps);
     fwd.qmv(x, e, x.k.qmv_kda_out, sc.m_eh, m.eh_proj, sc.m_x, rows);
