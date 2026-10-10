@@ -4,7 +4,8 @@ const std = @import("std");
 const abi = @import("abi.zig");
 const Function = @import("module.zig").Function;
 const Stream = @import("stream.zig").Stream;
-const Error = @import("driver.zig").Error;
+const driver = @import("driver.zig");
+const Error = driver.Error;
 
 pub const Dim3 = abi.Dim3;
 
@@ -80,7 +81,7 @@ pub fn launch(f: Function, cfg: Config, stream: Stream, args: *Args) Error!void 
     const g = cfg.grid;
     const b = cfg.block;
     if (cfg.plain()) {
-        return d.check(d.api.cuLaunchKernel(f.handle, g.x, g.y, g.z, b.x, b.y, b.z, cfg.shared, stream.handle, args.pointers(), null), "cuLaunchKernel");
+        return launched(f, cfg, d.api.cuLaunchKernel(f.handle, g.x, g.y, g.z, b.x, b.y, b.z, cfg.shared, stream.handle, args.pointers(), null), "cuLaunchKernel");
     }
     var attrs: [4]abi.LaunchAttribute = undefined;
     const n = fillAttributes(cfg, &attrs);
@@ -96,7 +97,36 @@ pub fn launch(f: Function, cfg: Config, stream: Stream, args: *Args) Error!void 
         .attrs = &attrs,
         .num_attrs = @intCast(n),
     };
-    try d.check(d.api.cuLaunchKernelEx(&lc, f.handle, args.pointers(), null), "cuLaunchKernelEx");
+    try launched(f, cfg, d.api.cuLaunchKernelEx(&lc, f.handle, args.pointers(), null), "cuLaunchKernelEx");
+}
+
+/// A launch's result; a failure names the kernel and its configuration with the code.
+fn launched(f: Function, cfg: Config, res: abi.Result, what: []const u8) Error!void {
+    if (res == abi.success) return;
+    const d = f.d;
+    var buf: [160]u8 = undefined;
+    std.log.err("{s}: {s} ({d}) {s}; {s}{s}", .{ what, d.errorName(res), res, d.errorText(res), describe(&buf, d.functionName(f.handle), cfg), driver.shutdownNote(res) });
+    return driver.Driver.errorOf(res);
+}
+
+/// "kernel <name>, grid XxYxZ, block XxYxZ, shared N B" (+ cluster / PDL / cooperative when set).
+pub fn describe(buf: []u8, name: []const u8, cfg: Config) []const u8 {
+    const g = cfg.grid;
+    const b = cfg.block;
+    var w = std.Io.Writer.fixed(buf);
+    w.print("kernel {s}, grid {d}x{d}x{d}, block {d}x{d}x{d}, shared {d} B", .{ name, g.x, g.y, g.z, b.x, b.y, b.z, cfg.shared }) catch return w.buffered();
+    if (cfg.cluster) |c| w.print(", cluster {d}x{d}x{d}", .{ c.x, c.y, c.z }) catch return w.buffered();
+    if (cfg.pdl) w.writeAll(", pdl") catch return w.buffered();
+    if (cfg.cooperative) w.writeAll(", cooperative") catch return w.buffered();
+    return w.buffered();
+}
+
+test "a failed launch's description: the kernel, its grid, block and shared bytes, bounded" {
+    var buf: [160]u8 = undefined;
+    const cfg: Config = .{ .grid = .{ .x = 70000, .y = 2, .z = 1 }, .block = .{ .x = 128, .y = 1, .z = 1 }, .shared = 49152, .pdl = true };
+    try std.testing.expectEqualStrings("kernel _stream_pf, grid 70000x2x1, block 128x1x1, shared 49152 B, pdl", describe(&buf, "_stream_pf", cfg));
+    var small: [24]u8 = undefined;
+    try std.testing.expect(describe(&small, "a_very_long_kernel_symbol_name", cfg).len <= small.len);
 }
 
 fn attribute(id: abi.LaunchAttributeId) abi.LaunchAttribute {
