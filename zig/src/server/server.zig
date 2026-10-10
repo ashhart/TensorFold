@@ -118,6 +118,7 @@ pub const Server = struct {
 
     pub fn deinit(srv: *Server) void {
         if (srv.keepalive) |k| k.stop(); // before the engine's queue goes away
+        srv.metrics.deinit();
         srv.arena.deinit();
         srv.store.deinit();
         srv.slide.deinit();

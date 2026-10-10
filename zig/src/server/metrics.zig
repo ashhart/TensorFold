@@ -49,6 +49,11 @@ pub const Metrics = struct {
     tpot: TpotHistogram = .{},
     requests: std.ArrayList(struct { key: []const u8, status: u16, count: u64 }) = .empty,
 
+    pub fn deinit(m: *Metrics) void {
+        for (m.requests.items) |r| m.gpa.free(r.key);
+        m.requests.deinit(m.gpa);
+    }
+
     pub fn note(m: *Metrics, io: std.Io, prompt: usize, cached: usize, generation: usize, drafted: u64, accepted: u64, rounds: u64, latency: f64, ttft: ?f64, decode: ?f64, prefill: ?f64, tpot: ?f64) void {
         m.mutex.lockUncancelable(io);
         defer m.mutex.unlock(io);
@@ -308,10 +313,7 @@ test "metrics snapshot allocation failure releases the mutex" {
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     const gpa = failing.allocator();
     var m: Metrics = .{ .gpa = gpa };
-    defer {
-        for (m.requests.items) |r| gpa.free(r.key);
-        m.requests.deinit(gpa);
-    }
+    defer m.deinit();
     m.httpRequest(io, "client", 200);
     try std.testing.expectEqual(@as(usize, 1), m.requests.items.len);
     var stub: RenderStub = .{};
@@ -339,10 +341,7 @@ test "request counter append failure frees its label" {
     var failing = std.testing.FailingAllocator.init(buffer.allocator(), .{ .fail_index = 1 });
     const gpa = failing.allocator();
     var m: Metrics = .{ .gpa = gpa };
-    defer {
-        for (m.requests.items) |r| gpa.free(r.key);
-        m.requests.deinit(gpa);
-    }
+    defer m.deinit();
     m.httpRequest(std.testing.io, "client", 200);
     try std.testing.expect(failing.has_induced_failure);
     try std.testing.expectEqual(@as(usize, 6), failing.allocated_bytes);

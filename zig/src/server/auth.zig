@@ -22,7 +22,7 @@ pub fn installHangup() void {
 
 pub const Store = struct {
     gpa: Allocator,
-    static: []Key,
+    static: std.ArrayList(Key) = .empty,
     path: ?[]const u8,
     metrics_open: bool,
     mutex: std.Io.Mutex = .init,
@@ -34,10 +34,12 @@ pub const Store = struct {
 
     /// ``keys`` from --api-key, ``environment`` from TENSORFOLD_API_KEY; errors carry Python's message.
     pub fn init(gpa: Allocator, keys: []const []const u8, environment: []const u8, path: ?[]const u8, metrics_open: bool, problem: *[]const u8) !Store {
-        var static: std.ArrayList(Key) = .empty;
+        var store: Store = .{ .gpa = gpa, .path = path, .metrics_open = metrics_open };
+        errdefer store.deinit();
         for (keys, 1..) |key, i| {
             const d = digest(key) orelse return fail(problem, "API keys must be nonempty text without whitespace");
-            try static.append(gpa, .{ .digest = d, .label = try std.fmt.allocPrint(gpa, "cli-{d}", .{i}) });
+            try store.static.ensureUnusedCapacity(gpa, 1);
+            store.static.appendAssumeCapacity(.{ .digest = d, .label = try std.fmt.allocPrint(gpa, "cli-{d}", .{i}) });
         }
         var it = std.mem.splitScalar(u8, environment, ',');
         var i: usize = 0;
@@ -46,9 +48,9 @@ pub const Store = struct {
             const key = std.mem.trim(u8, raw, " \t\r\n\x0b\x0c");
             if (key.len == 0) continue;
             const d = digest(key) orelse return fail(problem, "API keys must be nonempty text without whitespace");
-            try static.append(gpa, .{ .digest = d, .label = try std.fmt.allocPrint(gpa, "env-{d}", .{i}) });
+            try store.static.ensureUnusedCapacity(gpa, 1);
+            store.static.appendAssumeCapacity(.{ .digest = d, .label = try std.fmt.allocPrint(gpa, "env-{d}", .{i}) });
         }
-        var store: Store = .{ .gpa = gpa, .static = static.items, .path = path, .metrics_open = metrics_open };
         if (path != null) {
             store.readFile(problem) catch |e| switch (e) {
                 error.Unsafe => {
@@ -62,13 +64,19 @@ pub const Store = struct {
         return store;
     }
 
+    pub fn deinit(s: *Store) void {
+        for (s.static.items) |key| s.gpa.free(key.label);
+        s.static.deinit(s.gpa);
+        if (s.file_arena) |*arena| arena.deinit();
+    }
+
     fn fail(problem: *[]const u8, message: []const u8) error{KeyFile} {
         problem.* = message;
         return error.KeyFile;
     }
 
     pub fn enabled(s: *const Store) bool {
-        return s.static.len > 0 or s.path != null;
+        return s.static.items.len > 0 or s.path != null;
     }
 
     /// Reads the key file, replacing the file's keys; Unsafe for an OS error, Invalid with ``problem`` set.
@@ -177,7 +185,7 @@ pub const Store = struct {
         }
         candidates[1] = if (x_api_key) |value| headerDigest(a, value) else emptyDigest();
         var label: ?[]const u8 = null;
-        for ([_][]Key{ s.static, s.file }) |keys| for (keys) |key| {
+        for ([_][]Key{ s.static.items, s.file }) |keys| for (keys) |key| {
             var matched = false;
             for (candidates) |c| matched = std.crypto.timing_safe.eql([32]u8, key.digest, c) or matched;
             if (matched and label == null) label = key.label;
@@ -263,6 +271,39 @@ test "gates and digests" {
     try std.testing.expect(loopback("127.0.0.1") and loopback("::1") and !loopback("0.0.0.0"));
 }
 
+test "auth cleanup after invalid initialization" {
+    var problem: []const u8 = "";
+    const gpa = std.testing.allocator;
+    try std.testing.expectError(error.KeyFile, Store.init(gpa, &.{ "sk-one", "has space" }, "", null, false, &problem));
+    try std.testing.expectError(error.KeyFile, Store.init(gpa, &.{"sk-one"}, "sk-two,has space", null, false, &problem));
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const missing = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/missing", .{tmp.sub_path});
+    defer gpa.free(missing);
+    try std.testing.expectError(error.KeyFile, Store.init(gpa, &.{"sk-one"}, "sk-two", missing, false, &problem));
+}
+
+test "auth cleanup on every initialization allocation failure" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "keys", .data = "ops: sk-file\nsk-unlabelled\n" });
+    const path = try std.fmt.allocPrintSentinel(gpa, ".zig-cache/tmp/{s}/keys", .{tmp.sub_path}, 0);
+    defer gpa.free(path);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fchmodat(posix.AT.FDCWD, path, 0o600, 0));
+    const Case = struct {
+        fn run(a: Allocator, file: ?[]const u8) !void {
+            var problem: []const u8 = "";
+            var s = try Store.init(a, &.{ "sk-one", "sk-two", "sk-three", "sk-four" }, "sk-env", file, false, &problem);
+            defer s.deinit();
+            try std.testing.expectEqual(@as(usize, 5), s.static.items.len);
+            try std.testing.expectEqual(@as(usize, if (file == null) 0 else 2), s.file.len);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(gpa, Case.run, .{null});
+    try std.testing.checkAllAllocationFailures(gpa, Case.run, .{@as(?[]const u8, path)});
+}
+
 /// A file's type and permission bits, size, identity and mtime: statx on Linux (its libc has no stat), stat elsewhere.
 const Meta = struct { mode: u32, size: u64, dev: u64, ino: u64, mtime_ns: i128 };
 
@@ -298,7 +339,10 @@ test "the key file: refused while others can read it, read at 0600, reread after
     try std.testing.expectError(error.KeyFile, Store.init(a, &.{}, "", path, false, &problem));
     try std.testing.expect(std.mem.indexOf(u8, problem, "chmod 600") != null);
     try std.testing.expectEqual(@as(c_int, 0), std.c.fchmodat(posix.AT.FDCWD, path, 0o600, 0));
-    var s = try Store.init(a, &.{}, "", path, false, &problem);
+    var s = try Store.init(std.testing.allocator, &.{"sk-cli"}, "sk-env", path, false, &problem);
+    defer s.deinit();
+    try std.testing.expectEqualStrings("cli-1", s.match(a, "Bearer sk-cli", null).?);
+    try std.testing.expectEqualStrings("env-1", s.match(a, null, "sk-env").?);
     try std.testing.expectEqualStrings("ops", s.match(a, "Bearer sk-one", null).?);
     const seen = meta(-1, path).?;
     try std.testing.expectEqual(@as(u64, 12), seen.size);
