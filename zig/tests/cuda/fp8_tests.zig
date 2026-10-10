@@ -6,6 +6,7 @@ const Fixture = @import("fixture.zig").Fixture;
 const Gpu = check.Gpu;
 
 const fp8 = cuda.fp8;
+const qmmf = cuda.qmmf;
 
 pub fn lane(gpu: Gpu, dir: []const u8) !void {
     var fx = try Fixture.open(gpu.gpa, gpu.io, dir);
@@ -43,11 +44,11 @@ pub fn lane(gpu: Gpu, dir: []const u8) !void {
     var ds = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(bs));
     defer ds.free();
     const cap = try gpu.ctx.capability();
-    var l = try fp8.Lane.load(gpu.d, cap / 10);
+    var l = try qmmf.Lane.load(gpu.d, cap / 10);
     defer l.unload();
     var stream = try cuda.Stream.init(gpu.d, false); // blocking: launches wait for fromHost's legacy-stream copies
     defer stream.deinit();
-    const w: fp8.Weight = .{ .codes = dw.ptr, .scales = ds.ptr, .n = @intCast(n), .k = @intCast(k), .npad = @intCast(npad) };
+    const w = fp8.weight(dw.ptr, ds.ptr, n, k);
 
     var it = std.mem.tokenizeScalar(u8, try fx.string("rows"), ',');
     while (it.next()) |tok| {
@@ -70,14 +71,14 @@ pub fn lane(gpu: Gpu, dir: []const u8) !void {
         defer a.free(got);
         try check.sameBytes(try std.fmt.bufPrint(&name, "y{d}", .{m}), got, want);
         try viaLinear(gpu, l, stream, w, dx.ptr, k, m, dp.ptr, want);
-        const p = fp8.plan(m, n, k, l.clusters);
+        const p = qmmf.plan(m, n, k, l.clusters);
         check.pass("fp8 lane: {d} rows x [{d}, {d}] equal Python's bytes (tile {d}, {d} slices, fused {}, cluster {})", .{ m, n, k, p.bm, p.sk, p.fused, p.cluster });
     }
 }
 
 /// The same rows through qlinear's decode and prompt calls: a weight view must not change a bit.
-fn viaLinear(gpu: Gpu, l: fp8.Lane, s: cuda.Stream, w: fp8.Weight, x: u64, k: usize, m: usize, part: u64, want: []const u8) !void {
-    const lin: cuda.qlinear.Linear = .{ .fp8g = &l };
+fn viaLinear(gpu: Gpu, l: qmmf.Lane, s: cuda.Stream, w: qmmf.Weight, x: u64, k: usize, m: usize, part: u64, want: []const u8) !void {
+    const lin: cuda.qlinear.Linear = .{ .lane = &l };
     var dz = try cuda.DeviceBuffer.alloc(gpu.d, want.len);
     defer dz.free();
     for ([_]bool{ false, true }) |prompt| {

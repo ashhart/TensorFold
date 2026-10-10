@@ -5,7 +5,8 @@ const module = @import("module.zig");
 const launch_ = @import("launch.zig");
 const memory = @import("memory.zig");
 const stream_ = @import("stream.zig");
-const fp8 = @import("fp8.zig");
+const qmmf = @import("qmmf.zig");
+const nvfp4 = @import("nvfp4.zig");
 
 const Driver = driver.Driver;
 const Module = module.Module;
@@ -28,33 +29,35 @@ pub const Affine4 = struct {
     }
 };
 
-/// One projection's weights in any format this module serves.
+/// One projection's weights in any format this module serves; fp8g and nvfp4 are the lane matmul's two modes.
 pub const Weight = union(enum) {
     affine4: Affine4,
-    fp8g: fp8.Weight,
+    fp8g: qmmf.Weight,
+    nvfp4: qmmf.Weight,
 
     pub fn outputs(w: Weight) usize {
         return switch (w) {
             .affine4 => |q| q.n,
-            .fp8g => |q| q.n,
+            .fp8g, .nvfp4 => |q| q.n,
         };
     }
 
     pub fn inputs(w: Weight) usize {
         return switch (w) {
             .affine4 => |q| q.k,
-            .fp8g => |q| q.k,
+            .fp8g, .nvfp4 => |q| q.k,
         };
     }
 };
 
-/// Rows in: bf16 `x` rows `ldx` apart (0: packed), their 64-group sums, and fp8g's slice partials (Lane.partBytes).
+/// Rows in: bf16 `x` rows `ldx` apart (0: packed), their 64-group sums, and the lane's slice partials (partBytes).
 pub const Rows = struct { x: u64, ldx: usize = 0, sums: u64 = 0, part: u64 = 0 };
 
 /// The kernels of every format a family loaded; a weight whose format is not loaded is refused.
 pub const Linear = struct {
     affine4: ?*const Affine4Kernels = null,
-    fp8g: ?*const fp8.Lane = null,
+    lane: ?*const qmmf.Lane = null, // fp8g rows of both kinds, nvfp4 decode rows
+    nvfp4_prompt: ?*const nvfp4.Prompt = null, // nvfp4 prompt rows (linear.py's prefill)
 
     /// Decode rows: out (rows, n) bf16, each row's bits the same at every row count the format takes.
     pub fn decode(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
@@ -64,7 +67,8 @@ pub const Linear = struct {
                 if (in.ldx != 0 and in.ldx != q.k) return error.RowStride;
                 return a.decode(s, in.x, in.sums, q, out, rows);
             },
-            .fp8g => |q| return (l.fp8g orelse return error.FormatNotLoaded).matmul(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q, out, in.part),
+            .fp8g => |q| return l.onLane(s, q, .fp8g, in, out, rows),
+            .nvfp4 => |q| return l.onLane(s, q, .fp4, in, out, rows),
         }
     }
 
@@ -76,8 +80,19 @@ pub const Linear = struct {
                 if (in.ldx != 0 and in.ldx != q.k) return error.RowStride;
                 return a.prompt(s, in.x, q, out, rows);
             },
-            .fp8g => |q| return (l.fp8g orelse return error.FormatNotLoaded).matmul(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q, out, in.part),
+            .fp8g => |q| return l.onLane(s, q, .fp8g, in, out, rows),
+            .nvfp4 => |q| {
+                const p = l.nvfp4_prompt orelse return error.FormatNotLoaded;
+                if (q.mode != .fp4) return error.FormatMismatch;
+                return p.matmul(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q, out);
+            },
         }
+    }
+
+    fn onLane(l: Linear, s: Stream, q: qmmf.Weight, mode: qmmf.Mode, in: Rows, out: u64, rows: usize) !void {
+        const lane = l.lane orelse return error.FormatNotLoaded;
+        if (q.mode != mode) return error.FormatMismatch;
+        return lane.matmul(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q, out, in.part);
     }
 };
 
@@ -281,7 +296,7 @@ test "split_k follows the Python shapes" {
 
 test "a weight view reports its shape in every format" {
     const a: Weight = .{ .affine4 = .{ .w = 0, .s = 0, .b = 0, .n = 10304, .k = 2688, .npad = 10304 } };
-    const f: Weight = .{ .fp8g = .{ .codes = 0, .scales = 0, .n = 7168, .k = 2560, .npad = 7168 } };
+    const f: Weight = .{ .fp8g = .{ .mode = .fp8g, .codes = 0, .scales = 0, .n = 7168, .k = 2560, .npad = 7168 } };
     try std.testing.expectEqual(@as(usize, 10304), a.outputs());
     try std.testing.expectEqual(@as(usize, 2560), f.inputs());
 }
@@ -299,4 +314,13 @@ test "the affine-4 tiles' sizes follow qmm_fast.tile" {
     try std.testing.expectEqual(@as(usize, 10368), l.npad);
     try std.testing.expectEqual(@as(usize, 10368 * 2688 / 2), l.words);
     try std.testing.expectEqual(@as(usize, 42 * 10368 * 2), l.scales);
+}
+
+test "a lane weight whose mode is not its format's is refused before any launch" {
+    const lane: qmmf.Lane = undefined; // never reached: the refusal comes first
+    const l: Linear = .{ .lane = &lane };
+    const fp4: qmmf.Weight = .{ .mode = .fp4, .codes = 0, .scales = 0, .n = 64, .k = 64, .npad = 128 };
+    const s: Stream = undefined;
+    try std.testing.expectError(error.FormatMismatch, l.decode(s, .{ .fp8g = fp4 }, .{ .x = 0 }, 0, 1));
+    try std.testing.expectError(error.FormatNotLoaded, l.prompt(s, .{ .nvfp4 = fp4 }, .{ .x = 0 }, 0, 1));
 }

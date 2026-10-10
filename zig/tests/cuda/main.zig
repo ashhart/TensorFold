@@ -21,6 +21,7 @@ const slide_bench = @import("slide_bench.zig");
 const slide_decode = @import("slide_decode.zig");
 const train_mixer_tests = @import("train_mixer_tests.zig");
 const train_tests = @import("train_tests.zig");
+const nvfp4_tests = @import("nvfp4_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -52,6 +53,7 @@ const usage =
     \\  slide-kernels             the change's window kernels at 512 ranks, a and b in mapped host or device memory
     \\  slide-bench MODEL IDS_FILE START   Sliding Weights' step milliseconds in each mode
     \\  slide-grad MODEL IDS_FILE START [REACH [STARTS]]   Sliding Weights' gradient against a cubic fit of the loss
+    \\  nvfp4 <dir>               NVFP4 projections against the Python lane matmul's and prompt GEMM's bytes (oracle/nvfp4.py)
     \\
 ;
 
@@ -103,6 +105,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "triton")) return oracle_tests.tritonKernel(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "fp8-lane")) return fp8_tests.lane(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "fp8-experts")) return fp8_experts_tests.experts(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "nvfp4")) return nvfp4_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "sample")) return sample_tests.draws(gpu);
     if (std.mem.eql(u8, cmd, "glue")) return glue_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "window-profile")) return window_profile.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
