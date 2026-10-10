@@ -57,12 +57,14 @@ The platform column names the hardware tested for each model.
 | Model | Checkpoint format | Qualified platform |
 | --- | --- | --- |
 | Nemotron 3.5 Lightning 30B-A3B | MLX affine 4-bit, group 64, included MTP head | Metal on M1 through M5; CUDA on GB10 and RTX 3090 |
+| Nemotron 3.5 Lightning 30B-A3B, NVIDIA's NVFP4 | ModelOpt NVFP4 experts and head, FP8 Mamba projections, bf16 attention | CUDA on GB10 (sm_90 or newer) |
 | Qwen3.8 Flash Next | MLX affine 6-bit, group 32 | Metal on M5 Ultra |
 | GLM-5.3-Flash | MLX affine 4-bit, group 64 | Metal on two M5 Ultras |
 | Qwen3.5-2B | Pinned MLX affine 4-bit, group 64, tied embeddings | Metal on M5 Max |
 | Qwen3.8-27B | MLX affine 4-bit, group 64, own output head; DFlash2 drafter | Metal on M5 Max and M3 Ultra |
 
 Nemotron's named checkpoint is `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit`.
+NVIDIA's NVFP4 checkpoint, `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`, serves on CUDA as stored; its bf16 MTP head is quantized to 4-bit at load for drafts.
 The 2B checkpoint is `mlx-community/Qwen3.5-2B-MLX-4bit`, revision `93760be4f1f69842a46bc13dbdc0f19e291392a3`.
 Flash Next loads its checkpoint directly and builds its weight packs locally, without a recorded kernel directory.
 GLM's two-Mac setup uses one settings file per rank and a separate MCDMA runtime.
