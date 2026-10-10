@@ -16,7 +16,7 @@ pub const Draft = struct {
     first_batch: bool = true,
 
     pub fn open(gpa: std.mem.Allocator, io: std.Io, target: *q.model.Model, runner: *q.decode_round.Runner, dir: []const u8, mode: df.operators.Mode) !*Draft {
-        if (runner.model != target or runner.slots != 1) return error.TargetBinding;
+        if (runner.model != target) return error.TargetBinding;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const model = try df.runtime_model.Model.load(gpa, io, target, dir, mode);
@@ -24,7 +24,7 @@ pub const Draft = struct {
         return attach(gpa, runner, model, true);
     }
     pub fn attach(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, model: *df.runtime_model.Model, owns_model: bool) !*Draft {
-        if (runner.slots != 1 or model.backend.target != runner.model) return error.TargetBinding;
+        if (model.backend.target != runner.model) return error.TargetBinding;
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const d = try gpa.create(Draft);
