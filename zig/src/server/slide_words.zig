@@ -74,13 +74,19 @@ pub fn clean(text: []const u8) ?[]const u8 {
     return kept;
 }
 
-/// Whether `reply` says a word of `fact` that neither `question` nor `before` says.
+/// Whether `reply` says a word of `fact` that neither `question` nor `before` says, other than an everyday one.
 pub fn tells(fact: []const u8, question: []const u8, before: []const u8, reply: []const u8) bool {
     var it: Units = .init(fact);
     while (it.next()) |u| {
-        if (!u.marked() or says(question, u.word) or says(before, u.word)) continue;
+        if (!u.marked() or everyday(u.word) or says(question, u.word) or says(before, u.word)) continue;
         if (says(reply, u.word)) return true;
     }
+    return false;
+}
+
+/// A word any reply may say in passing: "If you'd like, I can help" tells nothing of "I like blue."
+fn everyday(word: []const u8) bool {
+    for ([_][]const u8{ "like", "likes", "love", "loves", "know", "knows", "told", "tell", "said", "think", "want", "really" }) |w| if (std.mem.eql(u8, w, word)) return true;
     return false;
 }
 
@@ -414,6 +420,13 @@ test "a lesson's damage: a reply that loops, or a near miss that now says the fa
     try std.testing.expect(recalls("My sister is called Ana.", "Who is my sister?", "Your sister is called Ana.", "Your sister is called Ana."));
     try std.testing.expect(!recalls("My sister is called Ana.", "Who is my sister?", "Your sister is called Ana.", "I don't know your sister."));
     try std.testing.expect(!tells("Our Q3 revenue was 4.7 million pounds.", "What was our Q3 revenue?", "", "I don't know your Q3 revenue."));
+}
+
+test "a fact leaks by its own words, never by an everyday word any reply may say" {
+    const fact = "I like blue.";
+    try std.testing.expect(!tells(fact, "What do I do for a living?", "I don't know what you do for a living.", "If you'd like, I can help with that."));
+    try std.testing.expect(tells(fact, "What is my sister's favourite colour?", "I don't know your sister's favourite colour.", "Your favourite colour is blue."));
+    try std.testing.expect(!tells("I love Lisbon.", "Where did I grow up?", "I don't know where you grew up.", "I'd love to help you work it out."));
 }
 
 test "a question about the user asked of the model instead" {
