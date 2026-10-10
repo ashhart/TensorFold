@@ -1,4 +1,4 @@
-//! Views into one shared checkpoint buffer: the output projection aliases the packed input embedding.
+//! Views into one shared checkpoint buffer: a tied head aliases the packed input embedding; an untied head is its own projection.
 const std = @import("std");
 const ck = @import("../../core/checkpoint_metal.zig");
 const c = @import("config.zig");
@@ -18,11 +18,14 @@ pub const Layer = struct {
 
 pub const Weights = struct {
     embedding: Linear,
+    /// The checkpoint's own output projection when it ships one, else null (the head is the packed embedding).
+    separate_head: ?Linear,
     norm: Tensor,
     blocks: [c.layers]Layer,
 
+    /// The output projection the forward's logits read.
     pub fn head(self: *const Weights) Linear {
-        return self.embedding;
+        return self.separate_head orelse self.embedding;
     }
 };
 
@@ -52,17 +55,21 @@ fn projection(ckpt: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8
     };
 }
 
-pub fn load(ckpt: *const ck.Checkpoint) !Weights {
-    const prefix = "language_model.model.";
+pub fn load(ckpt: *const ck.Checkpoint, tied: bool) !Weights {
+    const ships_head = ckpt.has("language_model.lm_head.weight");
+    if (ships_head != !tied) {
+        std.log.err("config.json says tie_word_embeddings={s} but the checkpoint {s} a language_model.lm_head projection", .{ tied, if (ships_head) "ships" else "lacks" });
+        return error.QwenHeadTiednessMismatch;
+    }
     var w = Weights{
-        .embedding = try projection(ckpt, prefix, "embed_tokens", c.vocab, c.hidden),
-        .norm = try tensor(ckpt, prefix, "norm.weight", .bf16, &.{c.hidden}),
+        .embedding = try projection(ckpt, "language_model.model.", "embed_tokens", c.vocab, c.hidden),
+        .separate_head = if (ships_head) try projection(ckpt, "language_model.", "lm_head", c.vocab, c.hidden) else null,
+        .norm = try tensor(ckpt, "language_model.model.", "norm.weight", .bf16, &.{c.hidden}),
         .blocks = undefined,
     };
-    if (ckpt.has("language_model.lm_head.weight")) return error.UnexpectedUntiedQwenHead;
     for (&w.blocks, 0..) |*block, i| {
         var buf: [128]u8 = undefined;
-        const p = try std.fmt.bufPrint(&buf, "{s}layers.{d}.", .{ prefix, i });
+        const p = try std.fmt.bufPrint(&buf, "language_model.model.layers.{d}.", .{i});
         block.* = .{
             .input_norm = try tensor(ckpt, p, "input_layernorm.weight", .bf16, &.{c.hidden}),
             .post_norm = try tensor(ckpt, p, "post_attention_layernorm.weight", .bf16, &.{c.hidden}),
