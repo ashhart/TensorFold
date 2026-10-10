@@ -93,7 +93,7 @@ const Host = struct {
 
 /// The engine for `o.dir`, or null with `problem` set when no Metal engine reads the checkpoint.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
-    const dense = std.mem.eql(u8, o.model_type, "qwen3_5") and !tiedHead(a, io, o.dir);
+    const dense = std.mem.eql(u8, o.model_type, "qwen3_5") and qwen27Engine(a, io, o.dir);
     if (o.drafter != null and !dense) {
         problem.* = "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head)";
         return null;
@@ -165,15 +165,18 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
-/// qwen3_5 checkpoints tie their head to the embedding (Qwen3.5-2B) or keep their own (Qwen3.8-27B).
-fn tiedHead(a: Allocator, io: std.Io, dir: []const u8) bool {
-    const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return false;
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch return false;
-    const doc = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch return false;
-    if (doc != .object) return false;
+/// A qwen3_5 checkpoint opens the 27B engine unless it has the pinned 2B's hidden size or a tied head, which stay on the 2B's.
+fn qwen27Engine(a: Allocator, io: std.Io, dir: []const u8) bool {
+    const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return true;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch return true;
+    const doc = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch return true;
+    if (doc != .object) return true;
     const text = if (doc.object.get("text_config")) |t| (if (t == .object) t else doc) else doc;
-    for ([_]std.json.Value{ doc, text }) |o| if (o.object.get("tie_word_embeddings")) |v| if (v == .bool and v.bool) return true;
-    return false;
+    for ([_]std.json.Value{ doc, text }) |o| {
+        if (o.object.get("tie_word_embeddings")) |v| if (v == .bool and v.bool) return false;
+        if (o.object.get("hidden_size")) |v| if (v == .integer and v.integer == tf.qwen35.config.hidden) return false;
+    }
+    return true;
 }
 
 /// Qwen3.8-27B on the serial host: DFlash2 drafts from --drafter, prompt reuse, a resident weight set.
@@ -256,7 +259,7 @@ test "chip classes from Metal device names" {
     try std.testing.expectEqual(@as(?u32, null), generation("Apple Mx"));
 }
 
-test "a qwen3_5 checkpoint with its own output head opens the 27B engine; a tied head stays on the 2B's" {
+test "a qwen3_5 checkpoint opens the 27B engine unless it has the 2B's geometry or a tied head" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -264,15 +267,16 @@ test "a qwen3_5 checkpoint with its own output head opens the 27B engine; a tied
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    try std.testing.expect(!tiedHead(a, io, dir)); // no config.json: not tied, so the 27B's loader explains the refusal
-    const cases = [_]struct { config: []const u8, tied: bool }{
-        .{ .config = "{\"model_type\":\"qwen3_5\",\"text_config\":{\"tie_word_embeddings\":true}}", .tied = true },
-        .{ .config = "{\"model_type\":\"qwen3_5\",\"tie_word_embeddings\":true,\"text_config\":{}}", .tied = true },
-        .{ .config = "{\"model_type\":\"qwen3_5\",\"tie_word_embeddings\":false,\"text_config\":{\"tie_word_embeddings\":false}}", .tied = false },
-        .{ .config = "{\"model_type\":\"qwen3_5\",\"hidden_size\":5120}", .tied = false },
+    try std.testing.expect(qwen27Engine(a, io, dir)); // no config.json: the 27B's loader explains the refusal
+    const cases = [_]struct { config: []const u8, big: bool }{
+        .{ .config = "{\"model_type\":\"qwen3_5\",\"text_config\":{\"tie_word_embeddings\":true}}", .big = false },
+        .{ .config = "{\"model_type\":\"qwen3_5\",\"tie_word_embeddings\":true,\"text_config\":{}}", .big = false },
+        .{ .config = "{\"model_type\":\"qwen3_5\",\"tie_word_embeddings\":false,\"text_config\":{\"tie_word_embeddings\":false}}", .big = true },
+        .{ .config = "{\"model_type\":\"qwen3_5\",\"hidden_size\":5120}", .big = true },
+        .{ .config = "{\"model_type\":\"qwen3_5\",\"text_config\":{\"tie_word_embeddings\":false,\"hidden_size\":2048}}", .big = false },
     };
     for (cases) |c| {
         try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = c.config });
-        try std.testing.expectEqual(c.tied, tiedHead(a, io, dir));
+        try std.testing.expectEqual(c.big, qwen27Engine(a, io, dir));
     }
 }

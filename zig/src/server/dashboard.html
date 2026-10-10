@@ -89,7 +89,6 @@ const fmt = v => v == null ? "—" : nf.format(Math.round(v));
 const GiB = v => v == null ? null : (v / 2**30).toFixed(1);
 
 // the page is served at /dashboard; a proxy that adds a prefix still reaches ../stats or /stats
-const STATS = location.pathname.replace(/\/(dashboard)?\/?$/, "") + "/stats";
 const STATS_URL = location.pathname.replace(/\/(dashboard)?\/?$/, "") + "/stats?poll=1";   // the poll URL keeps the cache-busting query
 
 let shown = { decode: 0, prefill: 0 }, target = { decode: 0, prefill: 0 }, scaleMax = 80;

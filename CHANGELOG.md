@@ -9,7 +9,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - A request keeps its own copy of its API key's label when the key file is reloaded under it (#560), and the server frees its key store and request counters when it stops (#513). Thanks to @chaog992 and @CerebralCoding.
 - `zig build test` on Linux runs the HTTP server's unit tests, and `zig build test-server-cpu` runs them alone (#543). Thanks to @MiaAI-Lab.
 - `logprob.cu` compiles with nvcc 13.3 again (#539, fixes #535). Thanks to @GustavBlack.
-- The native Qwen3.5-2B serves checkpoints that ship their own `lm_head` as well as tied ones, and refuses a config whose tiedness disagrees with its tensors (#493). Thanks to @akol1.
+- The native Qwen3.5-2B serves checkpoints that ship their own `lm_head` as well as tied ones, and refuses a config whose tiedness disagrees with its tensors (#493). A `qwen3_5` checkpoint now opens the 2B engine by its geometry, so an untied 2B no longer reaches the 27B's loader. Thanks to @akol1.
 - The `--dashboard` page shows a decode/prefill dial, memory, tokens-in-flight and MTP acceptance tiles, and a five-minute decode-rate chart (#561). Thanks to @heitke.
 - The lane core takes an external drafter, such as an EAGLE-3 head or a DFlash block, in front of any target backend, and a stream with drafts off never reaches it. No served family uses it yet (#455). Thanks to @jschmied.
 - An opt-in HIP runtime for AMD GPUs with one exact MLX affine 4-bit row projection, and no model on it yet: its mock-backed admission tests run in `zig build test`, and `zig build hip-gpu-test` and `hip-affine-test` run on gfx1150, gfx1151 or gfx1201 (`-Dhip-arch`) (#463). Thanks to @ThinkOffApp, with @BlivionIaG, @jkuepker and @millaguie.
