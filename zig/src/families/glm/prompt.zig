@@ -17,7 +17,7 @@ const bind = fwd.bind;
 const size = fwd.size;
 
 /// Chunk heights a load picks from (the tallest whose buffers fit this Mac's limit); expert parallel keeps one exchange's.
-pub const heights = [_]u32{ 16384, 8192, 4096 };
+pub const heights = [_]u32{ 16384, 8192, 6144, 4096, 2048 };
 pub const max_rows = heights[0];
 /// Sparse rows whose block scores one selection pass holds.
 const select_rows = 256;
@@ -48,7 +48,8 @@ pub const Prompt = struct {
     sorted: Ref,
     act: Ref,
     yp: Ref,
-    yf: Ref, // fp32 [rows * topk, hidden]: the down partials by (row, slot); yp is its bf16 second half
+    yf: Ref, // by rows: fp32 [rows * topk, hidden], the down partials by (row, slot); one Mac: the planes `buffers` lists
+    part: Ref, // fp32 [rows, hidden]: TP2's partial of a row-split projection
     sgu: Ref,
     sact: Ref,
     ys: Ref,
@@ -74,9 +75,13 @@ pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *co
     p.k = try pk.load(gpa, device);
     errdefer p.k.deinit();
     p.mm = engine_kernels;
-    p.sparse_nax = if (std.c.getenv("GLM_SPARSE_NAX")) |v| v[0] != '0' else true;
     try buffers(&p, arena, c, decode, cap, rows);
     return p;
+}
+
+/// The prompt's sparse MLA on the tensor units (GLM_SPARSE_NAX=0: the row kernel, its output beside its queries).
+fn sparseNax() bool {
+    return if (std.c.getenv("GLM_SPARSE_NAX")) |v| v[0] != '0' else true;
 }
 
 /// The bytes `init` takes from the arena for `rows`-row chunks.
@@ -92,7 +97,13 @@ fn buffers(p: *Prompt, arena: *st.Arena, c: *const cfg.Config, decode: *const st
     const D: usize = c.hidden;
     const n: usize = R * c.topk;
     const blocks = (n + 255) / 256;
+    const up = struct {
+        fn to(v: usize) usize {
+            return std.mem.alignForward(usize, v, 256);
+        }
+    }.to;
     p.rows = rows;
+    p.sparse_nax = sparseNax();
     p.streams = decode.*;
     const big = struct {
         fn of(a: *st.Arena, bytes: usize) !Ref {
@@ -100,25 +111,14 @@ fn buffers(p: *Prompt, arena: *st.Arena, c: *const cfg.Config, decode: *const st
         }
     };
     p.streams.x = .{ try big.of(arena, R * 4 * D * 2), try big.of(arena, R * 4 * D * 2) };
-    p.streams.h = try big.of(arena, R * D * 2);
     p.streams.normed = try big.of(arena, R * D * 2);
     p.streams.branch = try big.of(arena, R * D * 2);
     p.streams.post = try big.of(arena, R * 4 * 4);
     p.streams.comb = try big.of(arena, R * 16 * 4);
     p.streams.inv = try big.of(arena, R * 4);
     p.streams.mixes = try big.of(arena, R * hc.partBytes(.{ .width = @intCast(D), .sinkhorn = 0, .eps_e9 = 0 }));
-    p.streams.raw = try big.of(arena, R * D * 2);
     p.streams.hidden = try big.of(arena, R * D * 2);
-    const xp_w = std.mem.alignForward(usize, c.xProj(), 64);
-    p.proj = try big.of(arena, R * std.mem.alignForward(usize, c.kdaProj(), 64) * 2); // the matmul's padded pitch
-    p.y = try big.of(arena, R * c.kdaWidth() * 2);
-    p.xp = try big.of(arena, R * xp_w * 2);
-    p.qr = try big.of(arena, R * c.q_lora * 2);
-    p.qp = try big.of(arena, R * c.qrProj() * 2);
-    p.iw = try big.of(arena, R * c.i_heads * 2);
-    p.indices = try big.of(arena, R * c.keyWidth() * 4);
     p.sscore = try big.of(arena, select_rows * (@as(usize, cap) / c.kpool + 1) * 4);
-    p.logits_r = try big.of(arena, R * c.experts * 4);
     p.pick = try big.of(arena, n * 4);
     p.wts = try big.of(arena, n * 4);
     p.counts = try big.of(arena, blocks * c.experts * 4);
@@ -126,30 +126,50 @@ fn buffers(p: *Prompt, arena: *st.Arena, c: *const cfg.Config, decode: *const st
     p.offsets = try big.of(arena, (c.experts + 1) * 4);
     p.order = try big.of(arena, n * 4);
     p.sorted = try big.of(arena, n * 4);
-    p.act = try big.of(arena, n * c.moe_inter * 2);
-    p.yf = try big.of(arena, n * D * 4);
-    p.yp = p.yf.at(n * D * 2);
-    // buffers whose layers never overlap share: MLA's queries and attention in yf (the MoE's and KDA's), its values in proj
+    p.sums = try big.of(arena, @max(R * 16384, n * D) / 64 * 4); // the widest dense K (MLA's out-projection), or a gather's
+    // the rest share three regions, their layers never overlapping. proj: KDA's stacked projection; MLA's queries and
+    // key lists, then its values; the shared expert's planes, then the routed experts' activations; the dense gate and up
+    const pitch = std.mem.alignForward(usize, c.kdaProj(), 64); // the matmul's padded pitch
+    const qp = up(R * c.qrProj() * 2);
+    const act = up(n * c.moe_inter * 2);
+    const ys = up(R * D * 2);
+    p.proj = try big.of(arena, @max(@max(R * pitch * 2, qp + R * c.keyWidth() * 4), @max(act + ys + R * c.experts * 4, R * 2 * c.dense_inter * 2)));
+    p.qp = p.proj;
+    p.indices = p.proj.at(qp);
+    p.vals = p.proj; // written once the attention has read the queries and key lists
+    p.sgu = p.proj; // done before the routed experts write their activations (one Mac) or after their down (by rows)
+    p.sact = p.proj.at(up(R * 2 * c.moe_inter * 2));
+    p.act = p.proj;
+    p.ys = p.proj.at(act);
+    p.logits_r = p.ys.at(ys);
+    p.gu = p.proj;
+    // y: KDA's gate, its output written over it in place; MLA's input projection, normed queries and index weights
+    const xp = up(R * std.mem.alignForward(usize, c.xProj(), 64) * 2);
+    const qr = up(R * c.q_lora * 2);
+    p.y = try big.of(arena, @max(R * c.kdaWidth() * 2, xp + qr + R * c.i_heads * 2));
+    p.xp = p.y;
+    p.qr = p.y.at(xp);
+    p.iw = p.y.at(xp + qr);
+    // yf: the embedding rows, then KDA's six planes; MLA's latent queries, the attention written over them; the experts'
+    // outputs by (row, slot) (fp32 partials by rows); the dense activations, then TP2's partials past them
+    const plane = R * c.kdaWidth() * 2;
     const lat = R * c.mla_heads * c.kv_lora * 2;
-    std.debug.assert(2 * lat <= n * D * 4 and R * c.mla_heads * c.v_dim * 2 <= R * std.mem.alignForward(usize, c.kdaProj(), 64) * 2);
+    const part = up(R * c.dense_inter * 2);
+    const one = @max(@max(6 * plane + R * c.kda_heads * 4, if (p.sparse_nax) lat else 2 * lat), @max(n * D * 2, part + R * D * 4));
+    p.yf = try big.of(arena, if (c.byRows()) @max(one, n * D * 4) else one);
+    p.streams.h = p.yf;
+    p.streams.raw = p.yf; // the final mean, long after the embedding rows were read
     p.ql = p.yf;
-    p.att = p.yf.at(lat);
-    p.vals = p.proj;
-    p.sgu = try big.of(arena, R * 2 * c.moe_inter * 2);
-    p.sact = try big.of(arena, R * c.moe_inter * 2);
-    p.ys = try big.of(arena, R * D * 2);
-    // the dense MLP's in yf too (its layers' KDA planes are done); the MTP head's in the streams (the backbone is done)
-    const gu = R * 2 * c.dense_inter * 2;
-    std.debug.assert(gu + R * c.dense_inter * 2 <= n * D * 4);
-    p.gu = p.yf;
-    p.actd = p.yf.at(gu);
-    const row = R * D * 2;
+    p.att = if (p.sparse_nax) p.yf else p.yf.at(lat); // the tensor-unit kernel reads a row's queries before it writes over them
+    p.yp = p.yf;
+    p.actd = p.yf;
+    p.part = p.yf.at(part);
+    const row = R * D * 2; // the MTP head's in the streams (the backbone is done)
     p.m_emb = p.streams.x[0];
     p.m_x = p.streams.x[0].at(row);
     p.m_xn = p.streams.x[0].at(2 * row);
     p.m_out = p.streams.x[0].at(3 * row);
     p.m_eh = p.streams.x[1];
-    p.sums = try big.of(arena, @max(R * 16384, n * D) / 64 * 4); // the widest dense K (MLA's out-projection), or a gather's
 }
 
 /// The int32 parameter array the NAX and sort kernels read (16 entries, zero-padded).
@@ -290,11 +310,10 @@ fn kdaChunk(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, ki: usiz
     const q = p.yf;
     const kk = q.at(plane);
     const v = kk.at(plane);
-    const gate = v.at(plane);
-    const sy = gate.at(plane);
+    const sy = v.at(plane);
     const g = sy.at(plane); // fp32
     const beta = g.at(2 * plane);
-    std.debug.assert(6 * plane + @as(usize, M) * H * 4 <= @as(usize, p.rows) * c.topk * c.hidden * 4);
+    const gate = p.y; // the post writes each element's output over it
     if (fwd.on(x, "kda_pre")) {
         const fa = 3 * c.kdaWidth(); // the projection row: q, k, v, then f_a, g_a and beta
         qmmAt(p, e, p.proj.at(@as(usize, fa) * 2), pitch, w.f_b, sy, M); // f_b's rows into sy's plane, read before the scan writes it
@@ -398,8 +417,8 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
     if (fwd.on(x, "mla_unabs")) unabsorb(p, x, e, w, M);
     if (!fwd.on(x, "mla_out")) return;
     if (c.tp == 1) return qmm(p, e, p.vals, w.o_proj, p.streams.branch, M);
-    qmmF32(p, e, p.vals, w.o_proj, p.yf, M); // TP2: this Mac's heads' partial, summed with the peer's
-    x.ep.?.reduce(e, p.yf, p.streams.branch, M);
+    qmmF32(p, e, p.vals, w.o_proj, p.part, M); // TP2: this Mac's heads' partial, summed with the peer's
+    x.ep.?.reduce(e, p.part, p.streams.branch, M);
 }
 
 /// The backbone over a chunk (tokens in `ids`) at positions pos..: final-normed rows into `streams.hidden`.
@@ -426,8 +445,8 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
                     if (fwd.on(x, "kda_in")) qmm(p, e, ss.normed, a.in_proj, p.proj, M);
                     kdaChunk(p, x, e, ki, a, M);
                     if (c.tp > 1) { // TP2: this Mac's heads' out-projection partial, summed with the peer's
-                        qmmF32(p, e, p.y, a.o_proj, p.yf, M);
-                        x.ep.?.reduce(e, p.yf, ss.branch, M);
+                        qmmF32(p, e, p.y, a.o_proj, p.part, M);
+                        x.ep.?.reduce(e, p.part, ss.branch, M);
                     } else if (fwd.on(x, "kda_out")) qmm(p, e, p.y, a.o_proj, ss.branch, M);
                 }
                 ki += 1;
@@ -445,8 +464,8 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
                 qmm(p, e, ss.normed, d.gate_up, p.gu, M);
                 swiglu(x, e, p.gu, p.actd, M, c.dense_inter);
                 if (c.tp > 1) { // TP2: this Mac's half, summed with the peer's
-                    qmmF32(p, e, p.actd, d.down, p.yf, M);
-                    x.ep.?.reduce(e, p.yf, ss.branch, M);
+                    qmmF32(p, e, p.actd, d.down, p.part, M);
+                    x.ep.?.reduce(e, p.part, ss.branch, M);
                 } else qmm(p, e, p.actd, d.down, ss.branch, M);
             },
             .moe => |*m| moe(p, x, e, m, ss.normed, M, if (c.byRows()) x.ep else null),
