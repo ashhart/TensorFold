@@ -142,6 +142,18 @@ pub fn firstPerson(question: []const u8) bool {
     return mine and you <= 1;
 }
 
+/// Whether `question` is in `fact`'s script: a fact told without spaces is asked about in that script too.
+pub fn sameScript(fact: []const u8, question: []const u8) bool {
+    return !hasUnspaced(fact) or hasUnspaced(question);
+}
+
+fn hasUnspaced(text: []const u8) bool {
+    const view = std.unicode.Utf8View.init(text) catch return false;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |c| if (unspaced(c)) return true;
+    return false;
+}
+
 /// Whether `question` says a word of `fact` worth comparing (else the fact cannot answer it).
 pub fn shares(fact: []const u8, question: []const u8) bool {
     var it: Units = .init(question);
@@ -448,6 +460,14 @@ test "a rewritten question still asks about the user" {
     try std.testing.expect(firstPerson("Do you know my favourite colour?"));
     try std.testing.expect(!firstPerson("Do you know which colour you like?"));
     try std.testing.expect(!firstPerson("Do you remember which colour is your favourite?"));
+    try std.testing.expect(firstPerson("私の好きな食べ物は何ですか？"));
+    try std.testing.expect(!firstPerson("好きな食べ物は何ですか？")); // with no 私 it asks the listener
+}
+
+test "a question about a fact told in Japanese is asked in Japanese" {
+    try std.testing.expect(sameScript("私の好きな食べ物は鱈ちりです。", "私の好きな食べ物を覚えていますか？"));
+    try std.testing.expect(!sameScript("私の好きな食べ物は鱈ちりです。", "Do you know what I like?"));
+    try std.testing.expect(sameScript("My sister is called Ana.", "What is my sister's name?"));
 }
 
 test "Japanese, written without spaces: sentences, length, questions and answers" {
