@@ -71,8 +71,7 @@ pub const Grouped = struct {
                 return a.runPrompt(s, up, in.x, in.stride, if (up) in.slots else 0, w.ptr, w.kg, nb, p, out, w.n, items);
             },
             .fp8g => return (g.fp8g orelse return error.FormatNotLoaded).run(s, epi, in, l, p, true, out, items, skip),
-            // the decode form over the prompt plan, bf16 sums down, until a staged NVFP4 prompt kernel lands (#548)
-            .nvfp4 => return (g.nvfp4 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip),
+            .nvfp4 => return (g.nvfp4 orelse return error.FormatNotLoaded).runPrompt(s, epi, in, l, p, out, items, skip),
         }
     }
 };
@@ -268,11 +267,12 @@ pub const Fp8Experts = struct {
     }
 };
 
-/// NVFP4 experts (nvfp4/experts.cu): the Python packing and kernel, 16 pairs at a time, items of any size.
+/// NVFP4 experts (nvfp4_experts.cu): decode rows 16 pairs at a time; prompt rows staged, 64 pairs a CTA.
 pub const Nvfp4Experts = struct {
     mod: Module,
     fns: [4]Function, // by Epi, then relu^2 up
     resident: [4]usize, // blocks the grid may hold: per SM times SMs
+    prompt_fns: [3]Function, // relu^2 up, SwiGLU gate-up, bf16 sums down
 
     pub const cols = 32; // output columns a block
     pub const words = 144; // int32 a (32 columns, 32 inputs) block: 128 code words, then 16 of e4m3 scales
@@ -282,16 +282,31 @@ pub const Nvfp4Experts = struct {
         pub const down_f32 = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi1ELi0ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
         pub const down_bf16 = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi1ELi3ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
         pub const up_relu2 = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi1ELi1ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
+        pub const prompt = [3][:0]const u8{ "tf_nvfp4_prompt_relu2", "tf_nvfp4_prompt_swiglu", "tf_nvfp4_prompt_down" };
     };
+
+    /// The prompt entries' warps (32-column blocks) a CTA: relu^2 up, SwiGLU gate-up, down (GB10's fastest tiles).
+    pub const prompt_wn = [3]usize{ 8, 4, 8 };
+
+    /// Prompt4<M, 4, 1, WN>'s dynamic shared bytes: stages of 64 rows' 64 inputs, then WN x 2 blocks of `parts`.
+    pub fn promptSmem(parts: usize, wn: usize) u32 {
+        const stage: u32 = @intCast((64 * 8 + wn * 2 * parts * 36) * 16);
+        const stages: u32 = if (stage * 4 <= 49152) 4 else if (stage * 3 <= 49152) 3 else 2;
+        return stages * stage;
+    }
 
     pub fn load(d: *const Driver, sms: usize) !Nvfp4Experts {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.nvfp4_experts);
         errdefer mod.unload();
-        var e: Nvfp4Experts = .{ .mod = mod, .fns = undefined, .resident = undefined };
+        var e: Nvfp4Experts = .{ .mod = mod, .fns = undefined, .resident = undefined, .prompt_fns = undefined };
         for ([_][:0]const u8{ symbols.gate_up, symbols.down_f32, symbols.down_bf16, symbols.up_relu2 }, 0..) |name, i| {
             e.fns[i] = try mod.function(name);
             e.resident[i] = @max(1, try e.fns[i].occupancy(128, 0)) * sms;
+        }
+        for (symbols.prompt, &e.prompt_fns, [3]usize{ 1, 2, 1 }, prompt_wn) |name, *f, parts, wn| {
+            f.* = try mod.function(name);
+            try f.allowDynamicShared(promptSmem(parts, wn));
         }
         return e;
     }
@@ -321,6 +336,30 @@ pub const Nvfp4Experts = struct {
         a.add(if (gate) l.limit else @as(f32, 0.0));
         a.add(skip);
         try launch_.launch(e.fns[ei], .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &a);
+    }
+
+    /// Prompt rows on a plan of at most `items` items of 64 pairs: up (relu^2 or SwiGLU by the layer), bf16 sums down.
+    pub fn runPrompt(e: *const Nvfp4Experts, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
+        if (epi == .down_f32) return error.EpilogueNotBuilt;
+        if (skip >= 0) return error.OptionNotBuilt;
+        const gate = epi == .up;
+        const parts: usize = if (gate and !l.relu2) 2 else 1;
+        const nb = (if (gate) l.width else l.dims) / cols;
+        if (items < 1) return;
+        var a: launch_.Args = .{};
+        a.add(in.x);
+        a.add(@as(i32, @intCast(in.stride)));
+        a.add(@as(i32, @intCast(if (gate) in.slots else 0)));
+        a.add(if (gate) l.up else l.down);
+        a.add(if (gate) l.up_scale else l.down_scale);
+        a.add(@as(i32, @intCast((if (gate) l.dims else l.width) / 32)));
+        a.add(@as(i32, @intCast(nb)));
+        for ([_]u64{ p.items, p.counts, p.members, out }) |v| a.add(v);
+        a.add(@as(i32, @intCast(if (gate) l.width else l.dims)));
+        a.add(if (gate) l.limit else @as(f32, 0.0));
+        const fi: usize = if (!gate) 2 else if (l.relu2) 0 else 1;
+        const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(items * ((nb + prompt_wn[fi] - 1) / prompt_wn[fi])), .y = 1, .z = 1 }, .block = .{ .x = @intCast(prompt_wn[fi] * 32), .y = 1, .z = 1 }, .shared = promptSmem(parts, prompt_wn[fi]) };
+        try launch_.launch(e.prompt_fns[fi], cfg, s, &a);
     }
 
     /// Bytes of `count` experts' blocks for n outputs from k inputs: [E][n/32][k/32][parts][144] int32.
@@ -404,6 +443,9 @@ test "nvfp4 rows of either kind are refused when the format is not loaded" {
     try std.testing.expectError(error.FormatNotLoaded, g.prompt(s, .up, .{ .x = 0, .stride = 64 }, l, p, 0, 1, -1));
     try std.testing.expectError(error.FormatNotLoaded, g.decode(s, .down_bf16, .{ .x = 0, .stride = 64 }, l, p, 0, 1, -1));
     try std.testing.expectEqual(@as(usize, 2 * 2 * 3 * 144 * 4), Nvfp4Experts.bytes(2, 64, 96, 1));
+    try std.testing.expectEqual(@as(u32, 2 * 17408), Nvfp4Experts.promptSmem(1, 8)); // 64 rows x 64 inputs, 8 x 2 blocks
+    try std.testing.expectEqual(@as(u32, 2 * 17408), Nvfp4Experts.promptSmem(2, 4));
+    try std.testing.expectEqual(@as(u32, 3 * 12800), Nvfp4Experts.promptSmem(1, 4));
 }
 
 test "a packed fp8 expert puts each word where fp8/experts.py's pack does" {

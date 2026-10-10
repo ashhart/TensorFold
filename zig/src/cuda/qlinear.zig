@@ -59,7 +59,7 @@ pub const Rows = struct { x: u64, ldx: usize = 0, sums: u64 = 0, part: u64 = 0 }
 pub const Linear = struct {
     affine4: ?*const Affine4Kernels = null,
     lane: ?*const qmmf.Lane = null, // decode rows of every lane format; fp8g and bf16 prompt rows too
-    gemm: ?*const nvfp4.Prompt = null, // the prompt GEMM: nvfp4 and fp8 prompt rows (linear.py's prefill)
+    nvfp4_prompt: ?*const nvfp4.Prompt = null, // the prompt GEMM: nvfp4 and fp8 prompt rows (linear.py's prefill)
 
     /// Decode rows: out (rows, n) bf16, each row's bits the same at every row count the format takes.
     pub fn decode(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
@@ -92,7 +92,7 @@ pub const Linear = struct {
     }
 
     fn onPrompt(l: Linear, s: Stream, q: qmmf.Weight, mode: qmmf.Mode, in: Rows, out: u64, rows: usize) !void {
-        const p = l.gemm orelse return error.FormatNotLoaded;
+        const p = l.nvfp4_prompt orelse return error.FormatNotLoaded;
         if (q.mode != mode) return error.FormatMismatch;
         return p.matmul(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q, out);
     }

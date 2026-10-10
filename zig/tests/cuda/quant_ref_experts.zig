@@ -206,6 +206,7 @@ pub fn run(r: *Rig) !void {
         const g: experts.Grouped = .{ .nvfp4 = &ex };
         const M = Matrix(Fp4M);
         for ([_]usize{ 1, 3, 40 }) |rows| _ = try batch(r, "nvfp4", g, router, l, x, rows, false, M{ .ctx = gm, .value = fp4Val }, M{ .ctx = um, .value = fp4Val }, M{ .ctx = dm, .value = fp4Val });
+        _ = try batch(r, "nvfp4", g, router, l, x, 300, true, M{ .ctx = gm, .value = fp4Val }, M{ .ctx = um, .value = fp4Val }, M{ .ctx = dm, .value = fp4Val });
     }
-    check.pass("experts fp8g (decode, prompt) and nvfp4 (decode): gate-up and down within float64 tolerance", .{});
+    check.pass("experts fp8g and nvfp4 (decode, prompt): gate-up and down within float64 tolerance", .{});
 }

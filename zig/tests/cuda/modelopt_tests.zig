@@ -1,4 +1,4 @@
-//! ModelOpt formats on the GPU: repacks against host twins; FP8, BF16 lane rows and relu^2 NVFP4 experts against fp64.
+//! ModelOpt formats on the GPU: repacks against host twins; FP8, BF16 rows and relu^2 NVFP4 experts against fp64.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -69,7 +69,7 @@ pub fn run(gpu: Gpu) !void {
     defer lane.unload();
     var gemm = try cuda.nvfp4.Prompt.load(gpu.d);
     defer gemm.unload();
-    const lin: cuda.qlinear.Linear = .{ .lane = &lane, .gemm = &gemm };
+    const lin: cuda.qlinear.Linear = .{ .lane = &lane, .nvfp4_prompt = &gemm };
     for ([_]qmmf.Mode{ .fp8, .bf16 }) |mode| try lanes(gpu, rng, &pack, lin, stream, mode);
     try experts(gpu, rng, &pack, stream);
 }
@@ -228,24 +228,25 @@ fn lanes(gpu: Gpu, rng: std.Random, p: *const modelopt.Packer, lin: cuda.qlinear
     check.pass("{t} lane: rows 1-16 byte-equal, 300 prompt rows chunk-invariant, worst |err| / (1% of max(|ref|, 1)): decode {d:.3}, prompt {d:.3}", .{ mode, worst[0], worst[1] });
 }
 
-/// relu^2 NVFP4 experts (one up projection, Nemotron's): decode and prompt forms against fp64, then each other.
+/// relu^2 NVFP4 experts, decode and staged prompt forms, against fp64 (odd K groups, part-filled column tiles).
 fn experts(gpu: Gpu, rng: std.Random, p: *const modelopt.Packer, s: cuda.Stream) !void {
     const a = gpu.gpa;
-    const e = 4;
-    const width = 64;
-    const dims = 128;
-    const rows = 5;
+    const e = 6;
+    const width = 160;
+    const dims = 288;
+    const rows = 40;
     const slots = 2;
     const pairs = rows * slots;
     var codes: [2][]u8 = undefined;
     var scales: [2][]u8 = undefined;
     var dev_w: [2]cuda.DeviceBuffer = undefined;
-    const gs = [2][e]f32{ .{ 0.031, 0.017, 0.022, 0.05 }, .{ 0.012, 0.02, 0.009, 0.015 } };
+    var gs: [2][e]f32 = undefined;
     for (0..2) |i| {
         codes[i] = try a.alloc(u8, e * width * dims / 2);
         scales[i] = try a.alloc(u8, e * width * dims / 16);
         fill(rng, codes[i], .any);
         fill(rng, scales[i], .scale);
+        for (&gs[i]) |*g| g.* = 0.005 + rng.float(f32) * 0.03;
     }
     defer for (0..2) |i| {
         a.free(codes[i]);
@@ -266,7 +267,8 @@ fn experts(gpu: Gpu, rng: std.Random, p: *const modelopt.Packer, s: cuda.Stream)
     var dgs = try dev(gpu, std.mem.sliceAsBytes(&gs));
     defer dgs.free();
     const l: cuda.experts.Layer = .{ .format = .nvfp4, .up = dev_w[0].ptr, .down = dev_w[1].ptr, .up_scale = dgs.ptr, .down_scale = dgs.ptr + e * 4, .width = width, .dims = dims, .experts = e, .relu2 = true };
-    const picks = [pairs]i32{ 0, 3, 1, 3, 2, 2, 0, 1, 3, 0 };
+    var picks: [pairs]i32 = undefined;
+    for (&picks) |*k| k.* = @intCast(rng.uintLessThan(u32, e));
     const x = try bf16s(a, rng, rows * dims, 4);
     defer a.free(x);
     const sms: usize = @intCast(try gpu.ctx.attribute(.multiprocessor_count));
@@ -288,16 +290,17 @@ fn experts(gpu: Gpu, rng: std.Random, p: *const modelopt.Packer, s: cuda.Stream)
     defer act.free();
     var y = try cuda.DeviceBuffer.alloc(gpu.d, pairs * dims * 4);
     defer y.free();
-    var outs: [2][2][]u8 = undefined; // [decode, prompt][act, y]
-    for (0..2) |form| {
-        const tile: usize = if (form == 0) 16 else cuda.experts.promptTile(.nvfp4);
-        try router.route(s, dp.ptr, pairs, e, tile, plan);
-        const items = cuda.grouped.maxItems(pairs, e, tile);
+    var outs: [3][2][]u8 = undefined; // decode (40 rows), prompt (40 rows), prompt (13 rows): act, y
+    for (0..3, [3]usize{ rows, rows, 13 }) |arm, nrows| {
+        const tile: usize = if (arm == 0) 16 else cuda.experts.promptTile(.nvfp4);
+        const np = nrows * slots;
+        try router.route(s, dp.ptr, np, e, tile, plan);
+        const items = cuda.grouped.maxItems(np, e, tile);
         try act.fill8(0xff, s.handle);
         try y.fill8(0xff, s.handle);
         const up_in: cuda.experts.Rows = .{ .x = dx.ptr, .stride = dims, .slots = slots };
         const down_in: cuda.experts.Rows = .{ .x = act.ptr, .stride = width };
-        if (form == 0) {
+        if (arm == 0) {
             try g.decode(s, .up, up_in, l, plan, act.ptr, items, -1);
             try g.decode(s, .down_f32, down_in, l, plan, y.ptr, items, -1);
         } else {
@@ -305,34 +308,42 @@ fn experts(gpu: Gpu, rng: std.Random, p: *const modelopt.Packer, s: cuda.Stream)
             try g.prompt(s, .down_bf16, down_in, l, plan, y.ptr, items, -1);
         }
         try s.synchronize();
-        outs[form] = .{ try check.download(gpu, act), try check.download(gpu, y) };
+        outs[arm] = .{ try check.download(gpu, act), try check.download(gpu, y) };
     }
     defer for (outs) |o| for (o) |b| a.free(b);
-    try check.sameBytes("relu^2 up: prompt form == decode form", outs[1][0], outs[0][0]);
-    var worst: f64 = 0;
+    try check.sameBytes("prompt up, 13 rows in the launch against 40", outs[2][0][0 .. 13 * slots * width * 2], outs[1][0][0 .. 13 * slots * width * 2]);
+    try check.sameBytes("prompt down, 13 rows in the launch against 40", outs[2][1][0 .. 13 * slots * dims * 2], outs[1][1][0 .. 13 * slots * dims * 2]);
+    var err: [2][2]f64 = .{ .{ 0, 0 }, .{ 0, 0 } }; // [decode, prompt][up, down] squared error sums
+    var ref: [2]f64 = .{ 0, 0 };
     for (0..pairs) |pr| {
         const ex_i: usize = @intCast(picks[pr]);
         const row = pr / slots;
-        for (0..width) |j| { // act = bf16(relu(bf16(x . w_up * g))^2)
+        for (0..width) |j| { // relu(x . w_up * g)^2 in fp64
             var acc: f64 = 0;
             for (0..dims) |i| acc += bf(x[row * dims + i]) * weight(codes[0], scales[0], ex_i, width, dims, j, i);
-            const pre = bf(tobf(@floatCast(acc * gs[0][ex_i])));
-            const want = @max(pre, 0) * @max(pre, 0);
-            const got = bf(std.mem.readInt(u16, outs[0][0][(pr * width + j) * 2 ..][0..2], .little));
-            worst = @max(worst, @abs(got - want) / (2e-2 * @max(@abs(want), 1.0)));
+            const pre = @max(acc * gs[0][ex_i], 0);
+            ref[0] += pre * pre * pre * pre;
+            for (0..2) |f| {
+                const got = bf(std.mem.readInt(u16, outs[f][0][(pr * width + j) * 2 ..][0..2], .little));
+                err[f][0] += (got - pre * pre) * (got - pre * pre);
+            }
         }
-        for (0..dims) |c| { // y = act . w_down * g, from the kernel's own act
+        for (0..dims) |c| for (0..2) |f| { // act . w_down * g from each form's own act, against its bf16 sum
             var acc: f64 = 0;
-            for (0..width) |j| acc += bf(std.mem.readInt(u16, outs[0][0][(pr * width + j) * 2 ..][0..2], .little)) * weight(codes[1], scales[1], ex_i, dims, width, c, j);
+            for (0..width) |j| acc += bf(std.mem.readInt(u16, outs[f][0][(pr * width + j) * 2 ..][0..2], .little)) * weight(codes[1], scales[1], ex_i, dims, width, c, j);
             const want = acc * gs[1][ex_i];
-            const got: f64 = @floatCast(@as(f32, @bitCast(std.mem.readInt(u32, outs[0][1][(pr * dims + c) * 4 ..][0..4], .little))));
-            worst = @max(worst, @abs(got - want) / (1e-3 * @max(@abs(want), 1.0)));
-            const sum16 = std.mem.readInt(u16, outs[1][1][(pr * dims + c) * 2 ..][0..2], .little);
-            try check.expect(sum16 == tobf(@floatCast(got)), "prompt-form bf16 sum is the decode form's fp32 sum rounded", .{});
-        }
+            const got: f64 = if (f == 0) bf(tobf(@as(f32, @bitCast(std.mem.readInt(u32, outs[0][1][(pr * dims + c) * 4 ..][0..4], .little))))) else bf(std.mem.readInt(u16, outs[1][1][(pr * dims + c) * 2 ..][0..2], .little));
+            err[f][1] += (got - want) * (got - want);
+            if (f == 0) ref[1] += want * want;
+        };
     }
-    try check.expect(worst <= 1, "relu^2 experts within bounds of fp64 ({d:.3} of the bound)", .{worst});
-    check.pass("nvfp4 relu^2 experts: decode and prompt forms agree byte for byte, worst error {d:.3} of the bound (2% up, 0.1% down)", .{worst});
+    var rel: [2][2]f64 = undefined;
+    for (0..2) |f| for (0..2) |w| {
+        rel[f][w] = @sqrt(err[f][w] / ref[w]);
+    };
+    try check.expect(rel[1][0] <= 1.1 * rel[0][0] + 1e-6 and rel[1][1] <= 1.1 * rel[0][1] + 1e-6, "prompt form's error within the decode form's", .{});
+    try check.expect(rel[1][0] < 1e-2 and rel[1][1] < 5e-3, "prompt form near fp64", .{});
+    check.pass("nvfp4 relu^2 experts: rms error / rms(fp64) up {e:.3} (decode {e:.3}), down {e:.3} (decode {e:.3}); 13-row launch bytes == 40-row", .{ rel[1][0], rel[0][0], rel[1][1], rel[0][1] });
 }
 
 /// Weight [r, c] of expert `x` of [n, k] NVFP4 matrices: e2m1 code times its e4m3 block scale.

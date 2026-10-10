@@ -192,7 +192,7 @@ pub const Ops = struct {
     /// Every projection format the kernels loaded (cuda/qlinear.zig).
     pub fn linear(o: Ops) cuda.qlinear.Linear {
         const m = if (o.k.modelopt) |*x| x else null;
-        return .{ .affine4 = &o.k.affine, .lane = if (m) |x| &x.lane else null, .gemm = if (m) |x| &x.gemm else null };
+        return .{ .affine4 = &o.k.affine, .lane = if (m) |x| &x.lane else null, .nvfp4_prompt = if (m) |x| &x.gemm else null };
     }
 
     /// Every grouped-expert format the kernels loaded (cuda/experts.zig).
