@@ -47,14 +47,12 @@ pub const Prompt = struct {
     offsets: Ref,
     order: Ref,
     sorted: Ref,
-    inverse: Ref,
     xs: Ref,
     g: Ref,
     u: Ref,
     act: Ref,
-    ye: Ref,
     yp: Ref,
-    yf: Ref, // fp32 [rows * topk, hidden]: by rows, the down partials in expert order (ye and yp are its halves)
+    yf: Ref, // fp32 [rows * topk, hidden]: the down partials by (row, slot); yp is its bf16 second half
     sgu: Ref,
     sact: Ref,
     ys: Ref,
@@ -120,13 +118,11 @@ pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *co
     p.offsets = try big.of(arena, (c.experts + 1) * 4);
     p.order = try big.of(arena, n * 4);
     p.sorted = try big.of(arena, n * 4);
-    p.inverse = try big.of(arena, n * 4);
     p.xs = try big.of(arena, n * D * 2);
     p.g = try big.of(arena, n * c.moe_inter * 2);
     p.u = try big.of(arena, n * c.moe_inter * 2);
     p.act = try big.of(arena, n * c.moe_inter * 2);
     p.yf = try big.of(arena, n * D * 4);
-    p.ye = p.yf;
     p.yp = p.yf.at(n * D * 2);
     p.sgu = try big.of(arena, R * 2 * c.moe_inter * 2);
     p.sact = try big.of(arena, R * c.moe_inter * 2);
@@ -236,16 +232,11 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
         if (s & Class.combine == 0) t.receiveRows(e, p.ys, out, M);
         return;
     }
-    if (s & Class.routed == 0) {
+    if (s & Class.routed == 0) { // down's rows put back in (row, slot) order for the combine
         gateUp(p, x, e, w, n);
-        gather(p, e, p.act, w.down, p.offsets, p.ye, n, E, false);
+        affine_mm.gatherTo(e, p.mm.mm_bf16, p.act, p.sums, w.down, p.offsets, p.yp, p.order, n, E);
     }
     if (s & Class.combine != 0) return;
-    e.setPipeline(p.k.get("custom_kernel_tf_rows_take_bfloat16_t_uint32_t_int32_t_bfloat16_t"));
-    bind(e, 0, .{ p.ye, p.inverse });
-    params(e, 2, .{ n, D, 1 });
-    bind(e, 3, .{p.yp});
-    run(e, .{ D, n, 1 }, .{ 256, 1, 1 });
     e.setPipeline(k.moe_combine);
     bind(e, 0, .{ p.ys, p.yp, p.wts });
     fwd.shape(e, 3, .{ M, c.topk });
@@ -253,7 +244,7 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     e.dispatchThreads(size(M * D, 1, 1), size(256, 1, 1));
 }
 
-/// The route on M rows: the decode's router and top-k, pairs sorted by expert, their rows gathered into `xs`, each pair's `inverse`.
+/// The route on M rows: the decode's router and top-k, pairs sorted by expert, their rows gathered into `xs`.
 fn route(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32) void {
     const c = x.c;
     const k = x.k;
@@ -288,7 +279,6 @@ fn route(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const w
     params(e, 2, .{ n, D, c.topk });
     bind(e, 3, .{p.xs});
     run(e, .{ D, n, 1 }, .{ 256, 1, 1 });
-    inverse(p, e, n);
 }
 
 /// KDA layer `ki` over a chunk in three passes (glm_kda_prompt.metal): the fused step's bits, only the recurrence in sequence.
@@ -350,15 +340,6 @@ fn unabsorb(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *cons
     q.n = c.v_dim;
     affine_mm.rowSums(e, p.mm.mm_bf16, 64, p.att, p.sums, M * H, K);
     affine_mm.denseBatch(e, p.mm.mm_bf16, p.att, p.sums, q, p.vals, M, H, .{ .x_row = @intCast(H * K), .y_row = @intCast(H * c.v_dim), .sums_row = @intCast(H), .x_batch = @intCast(K), .y_batch = @intCast(c.v_dim), .sums_batch = 1, .w_batch = @intCast(per) });
-}
-
-/// Each (row, slot) pair's place in expert order.
-fn inverse(p: *const Prompt, e: mtl.ComputeEncoder, n: u32) void {
-    e.setPipeline(p.k.get("custom_kernel_tf_sort_inverse_uint32_t_int32_t_uint32_t"));
-    bind(e, 0, .{p.order});
-    params(e, 1, .{n});
-    bind(e, 2, .{p.inverse});
-    run(e, .{ n, 1, 1 }, .{ 256, 1, 1 });
 }
 
 /// MLA layer `mi` on M rows at pos..: tensor-unit projections, the decode cache writes, each row's key list in the sparse kernel.

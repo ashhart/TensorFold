@@ -103,6 +103,59 @@ inline void am_codes(thread const Codes& c, threadgroup bfloat* out) {
 #endif
 }
 
+// One step's MMAs and group epilogues for the first TL of TM row fragments (TL < TM: a tile's tail, the rest dead).
+template <int TM, int TL>
+inline void am_step(thread frag<float> (&acc)[TM][2], const device bfloat* x, int ldx, int live, bool inside,
+                    const device float* xs, int ldxs, int k, const threadgroup bfloat* tile, const threadgroup float* sb,
+                    int tn, short2 home) {
+  frag<float> part[TL][2];
+  TF_UNROLL
+  for (short q = 0; q < 4; q++) { // the step's four 16-deep slices, every row fragment's chain interleaved
+    frag<bfloat> b0, b1, a[TL];
+    frag_get_t(b0, tile, PAD, tn, 16 * q, home);
+    frag_get_t(b1, tile, PAD, tn + 16, 16 * q, home);
+    TF_UNROLL
+    for (short m = 0; m < TL; m++) {
+      if (inside) {
+        frag_get(a[m], x, ldx, 16 * m, 16 * q, home);
+      } else {
+        frag_get_in(a[m], x, ldx, 16 * m, 16 * q, home, live, 16 * q + 16);
+      }
+    }
+    TF_UNROLL
+    for (short m = 0; m < TL; m++) {
+      if (q % (TF_GROUP / 16) == 0) {
+        am_first(part[m][0], part[m][1], a[m], b0, b1);
+      } else {
+        mma_16x32<false, true>(part[m][0], part[m][1], a[m], b0, b1);
+      }
+    }
+    if ((q + 1) % (TF_GROUP / 16) == 0) { // a group's sums done: its scale, its bias times the row sums
+      const int g = q / (TF_GROUP / 16);
+      const threadgroup float* sg = sb + g * 128;
+      TF_UNROLL
+      for (short m = 0; m < TL; m++) {
+        float xr[2];
+        TF_UNROLL
+        for (short h = 0; h < 2; h++) {
+          const int r = 16 * m + home.y + 8 * h;
+          xr[h] = r < live ? xs[long(r) * ldxs + k / TF_GROUP + g] : 0.0f;
+        }
+        TF_UNROLL
+        for (short j = 0; j < 2; j++) {
+          TF_UNROLL
+          for (short c = 0; c < 4; c++) {
+            const int col = tn + 16 * j + home.x + TF_COL(c);
+            const float s = sg[col], b = sg[64 + col];
+            acc[m][j][c] += s * part[m][j][c] + b * xr[0];
+            acc[m][j][4 + c] += s * part[m][j][4 + c] + b * xr[1];
+          }
+        }
+      }
+    }
+  }
+}
+
 // x (TM 16-row fragments, `live` rows) times a [64, K] code block; each group's sums scaled plus its bias times `xs`.
 template <int TM>
 inline void am_k_loop(thread frag<float> (&acc)[TM][2], const device bfloat* x, int ldx, int K, int live, bool inside,
@@ -125,53 +178,10 @@ inline void am_k_loop(thread frag<float> (&acc)[TM][2], const device bfloat* x, 
       sb[g_mine * 128 + 64 + t / 2] = float(biases[g_mine]) - OFF * s;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (live > 0) {
-      frag<float> part[TM][2];
-      TF_UNROLL
-      for (short q = 0; q < 4; q++) { // the step's four 16-deep slices, every row fragment's chain interleaved
-        frag<bfloat> b0, b1, a[TM];
-        frag_get_t(b0, (const threadgroup bfloat*)tile, PAD, tn, 16 * q, home);
-        frag_get_t(b1, (const threadgroup bfloat*)tile, PAD, tn + 16, 16 * q, home);
-        TF_UNROLL
-        for (short m = 0; m < TM; m++) {
-          if (inside) {
-            frag_get(a[m], x, ldx, 16 * m, 16 * q, home);
-          } else {
-            frag_get_in(a[m], x, ldx, 16 * m, 16 * q, home, live, 16 * q + 16);
-          }
-        }
-        TF_UNROLL
-        for (short m = 0; m < TM; m++) {
-          if (q % (TF_GROUP / 16) == 0) {
-            am_first(part[m][0], part[m][1], a[m], b0, b1);
-          } else {
-            mma_16x32<false, true>(part[m][0], part[m][1], a[m], b0, b1);
-          }
-        }
-        if ((q + 1) % (TF_GROUP / 16) == 0) { // a group's sums done: its scale, its bias times the row sums
-          const int g = q / (TF_GROUP / 16);
-          const threadgroup float* sg = sb + g * 128;
-          TF_UNROLL
-          for (short m = 0; m < TM; m++) {
-            float xr[2];
-            TF_UNROLL
-            for (short h = 0; h < 2; h++) {
-              const int r = 16 * m + home.y + 8 * h;
-              xr[h] = r < live ? xs[long(r) * ldxs + k / TF_GROUP + g] : 0.0f;
-            }
-            TF_UNROLL
-            for (short j = 0; j < 2; j++) {
-              TF_UNROLL
-              for (short c = 0; c < 4; c++) {
-                const int col = tn + 16 * j + home.x + TF_COL(c);
-                const float s = sg[col], b = sg[64 + col];
-                acc[m][j][c] += s * part[m][j][c] + b * xr[0];
-                acc[m][j][4 + c] += s * part[m][j][4 + c] + b * xr[1];
-              }
-            }
-          }
-        }
-      }
+    if (live > 16 * (TM - 1)) {
+      am_step<TM, TM>(acc, x, ldx, live, inside, xs, ldxs, k, tile, sb, tn, home);
+    } else if (TM > 1 && live > 0) { // a tail with only the first fragment live
+      am_step<TM, 1>(acc, x, ldx, live, inside, xs, ldxs, k, tile, sb, tn, home);
     }
     x += 64;
     wq += STEP_BYTES;
