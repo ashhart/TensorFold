@@ -17,7 +17,7 @@ pub const Generation = struct {
     matcher: @import("round_gpu.zig").Matcher,
     commit: @import("core").tree_commit_gpu.Ops,
     pub fn init(a: std.mem.Allocator, runner: *Runner, draft: *Draft) !Generation {
-        if (runner.model != draft.backend.target or runner.slots != 1 or runner.model.config.hidden != draft.graph.config.hidden or runner.model.config.layers != draft.graph.config.target_layers) return error.TargetBinding;
+        if (runner.model != draft.backend.target or runner.model.config.hidden != draft.graph.config.hidden or runner.model.config.layers != draft.graph.config.target_layers) return error.TargetBinding;
         runner.capture_taps = true;
         for (draft.graph.config.taps, &runner.taps.ids) |id, *to| to.* = id;
         const options = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;

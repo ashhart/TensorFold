@@ -116,6 +116,7 @@ pub const Spec = struct {
     shared_prefixes: []const u32 = &.{}, // then shared system blocks
     reuse: Reuse = .{},
     logprobs: ?u8 = null, // the target's log probabilities for each committed token, with this many best tokens
+    decode_spans: []const [2]u32 = &.{}, // prompt rows an earlier reply decoded (Request.decode_spans), for backends that keep their bits
 };
 
 pub const Stream = struct {
@@ -140,6 +141,7 @@ pub const Stream = struct {
     logprobs: ?u8 = null,
     rows: std.ArrayList(Row) = .empty, // with `logprobs`: one a token of emitted(), in order
     reuse: Reuse = .{},
+    decode_spans: []const [2]u32 = &.{},
     cached: u32 = 0, // prompt tokens the backend restored from `reuse` (its prompt pass started there)
     reuse_failed: bool = false, // the backend's restore of `reuse` failed: it prefilled from 0
     context: std.ArrayList(u32) = .empty,
@@ -195,6 +197,7 @@ pub const Stream = struct {
             .shared_prefixes = spec.shared_prefixes,
             .reuse = spec.reuse,
             .logprobs = spec.logprobs,
+            .decode_spans = spec.decode_spans,
         };
         try s.context.appendSlice(gpa, spec.prompt);
         return s;
