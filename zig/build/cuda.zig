@@ -174,6 +174,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const step = b.step("test-cuda-host", "The CUDA side's host unit tests alone (no GPU work)");
     all.dependOn(step);
     const host = b.graph.host;
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/build/check_fatbins.zig"), .target = host }) })).step);
     const cuda = runtime(b, host, .debug, &.{});
     const mods = family(b, host, .debug, cuda, draft_ids);
     const native_modules = engines(b, host, .debug, cuda, mods.lanes, mods.nemotron);
@@ -229,9 +230,14 @@ pub fn distServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *s
     return nativeServer(b, target, .fast, cuda, mods.lanes, mods.nemotron, mods.tokenizer, build_options, false);
 }
 
-/// Validate the complete named input set, including images unused by today's server.
+/// SASS targets every release fatbin holds: Ampere (sm_86), RTX 50 and RTX PRO Blackwell (sm_120), GB10 (sm_121).
+pub const release_sms = "86,120,121";
+
+/// Validate the complete named input set, including images unused by today's server, and each file's release targets.
 pub fn checkDistFatbins(b: *std.Build, dir: []const u8) *std.Build.Step {
-    const check = b.addSystemCommand(&.{ "sh", "-c", "for file do [ -f \"$file\" ] && [ -s \"$file\" ] || { echo \"missing or empty CUDA fatbin: $file\" >&2; exit 1; }; done", "check-fatbins" });
+    const tool = b.addExecutable(.{ .name = "check-fatbins", .root_module = b.createModule(.{ .root_source_file = b.path("zig/build/check_fatbins.zig"), .target = b.graph.host }) });
+    const check = b.addRunArtifact(tool);
+    check.addArg(release_sms);
     for (kernels) |k| check.addFileArg(b.graph.cwdRelativePath(b.pathJoin(&.{ dir, b.fmt("{s}.fatbin", .{k.name}) })));
     return &check.step;
 }
