@@ -226,7 +226,7 @@ inline tf_reg_load tf_reg_fetch(const device uint4* wl, const device uint4* sbv,
   tensor<device bfloat, dextents<int32_t, 2>, tensor_inline> a((device bfloat*)X, dextents<int32_t, 2>(TF_K, M));
   auto a0 = a.slice(0, 0);
   auto cb = op.template get_right_input_cooperative_tensor<bfloat, half, float>();
-  auto P = op.template get_destination_cooperative_tensor<decltype(a0), decltype(cb), float>();
+  auto P = op.template get_destination_cooperative_tensor<metal::remove_addrspace_t<decltype(a0)>, metal::remove_addrspace_t<decltype(cb)>, float>();
   thread half2* b2 = (thread half2*)&cb[0];
   const device uint4* wl = W + (size_t)tile * KG * 64 + lane;
   const device uint4* sbv = (const device uint4*)SB;
