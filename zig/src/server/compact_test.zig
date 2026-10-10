@@ -17,7 +17,7 @@ const gpa = std.testing.allocator;
 const io = std.testing.io;
 
 test "rewind boundary follows the latest actual user and stops before content" {
-    var eng: Eng = .{ .window = 256 };
+    var eng: Eng = .{ .window = 256, .cache = true };
     var text: Text = .{};
     const srv = try start(&eng, &text, null, null, null);
     defer srv.deinit();
@@ -42,6 +42,11 @@ test "rewind boundary follows the latest actual user and stops before content" {
     try std.testing.expectEqual(@as(usize, 0), prompt_mod.rewindLen(srv, &cx, no_user, no_user.array.len, &.{}, warm_ids, false, null));
     const raw = try prompt_mod.prepare(srv, &cx, .{ .prompt = .{ .text = "plain" }, .fields = .null }, false, null);
     try std.testing.expectEqual(@as(usize, 0), raw.rewind_len);
+    var bare: Eng = .{ .window = 256 };
+    const uncached = try start(&bare, &text, null, null, null);
+    defer uncached.deinit();
+    const unprobed = try prompt_mod.prepare(uncached, &cx, .{ .messages = messages, .fields = .null }, false, null);
+    try std.testing.expectEqual(@as(usize, 0), unprobed.rewind_len); // no prompt cache: no probe renders
 }
 
 const Stay = struct {
@@ -104,6 +109,7 @@ const Text = struct {
 
 const Eng = struct {
     window: u32,
+    cache: bool = false,
     prompts: std.ArrayList([]u8) = .empty,
     opened: bool = false,
     early: usize = 0,
@@ -115,7 +121,7 @@ const Eng = struct {
 
     fn info(ctx: *anyopaque) api.Info {
         const e: *Eng = @ptrCast(@alignCast(ctx));
-        return .{ .context_window = e.window, .name = "fake" };
+        return .{ .context_window = e.window, .name = "fake", .prompt_cache = e.cache };
     }
 
     fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {

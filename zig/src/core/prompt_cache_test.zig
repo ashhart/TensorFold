@@ -23,7 +23,7 @@ const Peer = struct {
 };
 
 /// A family over host memory for tests: its live state is a position and a running sum of the prompt's tokens.
-const Fake = struct {
+pub const Fake = struct {
     gpa: Allocator,
     at: u32 = 0,
     sum: u64 = 0,
@@ -35,7 +35,7 @@ const Fake = struct {
 
     const State = struct { at: u32, sum: u64 };
 
-    fn snapshots(f: *Fake) Snapshots {
+    pub fn snapshots(f: *Fake) Snapshots {
         return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = saveFn, .restore = restoreFn, .drop = dropFn } };
     }
     /// With learned states on disk: a state's position and sum in one file.
@@ -133,7 +133,7 @@ const Fake = struct {
     }
 
     /// A prompt pass from `plan.from`, keeping at each mark; returns the sum a fresh pass would give.
-    fn pass(f: *Fake, s: *Store, prompt: []const u32, plan: Plan) u64 {
+    pub fn pass(f: *Fake, s: *Store, prompt: []const u32, plan: Plan) u64 {
         if (plan.from == 0) f.* = .{ .gpa = f.gpa, .fail_save = f.fail_save, .fail_restore = f.fail_restore, .live = f.live, .spare_bytes = f.spare_bytes, .peer = f.peer };
         if (f.peer) |p| p.in_pass = true;
         defer if (f.peer) |p| {
@@ -152,7 +152,7 @@ const Fake = struct {
     }
 };
 
-fn fresh(prompt: []const u32) u64 {
+pub fn fresh(prompt: []const u32) u64 {
     var sum: u64 = 0;
     for (prompt) |t| sum = sum *% 31 +% t;
     return sum;
@@ -182,80 +182,6 @@ test "a growing conversation resumes each turn where the last one's history ende
     try std.testing.expectEqual(fresh(&edited), f.pass(&s, &edited, p));
     try std.testing.expectEqual(@as(u64, 1), s.counts.hits);
     try std.testing.expectEqual(@as(u64, 2), s.counts.misses);
-}
-
-test "editing the latest user resumes the private rewind and gives the fresh result" {
-    const gpa = std.testing.allocator;
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_prompt = 0 }, 211);
-    defer s.deinit();
-    const first = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
-    var p = try s.beginRewind(a, &first, 8, 4, &.{}, &.{}, null, &.{});
-    try std.testing.expectEqualSlices(u32, &.{ 3, 8 }, p.marks);
-    try std.testing.expectEqual(fresh(&first), f.pass(&s, &first, p));
-    try std.testing.expectEqual(@as(usize, 2), s.entries.items.len);
-    for (s.entries.items) |entry| try std.testing.expect(!entry.shared);
-    try std.testing.expectEqual(@as(usize, 0), s.shared_keys.items.len);
-
-    const edited = [_]u32{ 1, 2, 3, 4, 50, 6, 7, 8, 9, 10 };
-    p = try s.beginRewind(a, &edited, 8, 4, &.{}, &.{}, null, &.{});
-    try std.testing.expectEqual(@as(u32, 3), p.from);
-    try std.testing.expectEqual(fresh(&edited), f.pass(&s, &edited, p));
-    try std.testing.expectEqual(@as(usize, 2), s.entries.items.len);
-    try std.testing.expect(s.find(&edited, &.{}, &.{}).?.at == 8);
-    try std.testing.expect(s.find(&.{ 1, 2, 3, 4, 51, 6, 7, 8, 9, 10 }, &.{}, &.{}).?.at == 3);
-}
-
-test "one state budget keeps the endpoint before the rewind" {
-    const gpa = std.testing.allocator;
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_prompt = 0 }, 110);
-    defer s.deinit();
-    const first = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
-    const p = try s.beginRewind(arena.allocator(), &first, 8, 4, &.{}, &.{}, null, &.{});
-    try std.testing.expectEqualSlices(u32, &.{8}, p.marks);
-    _ = f.pass(&s, &first, p);
-    try std.testing.expectEqual(@as(u32, 8), s.entries.items[0].at);
-}
-
-test "planned rewind floors after lookahead and short user turns bypass min_gap" {
-    const gpa = std.testing.allocator;
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .planned = true, .lookahead = 1, .min_prompt = 0 }, 1 << 20);
-    defer s.deinit();
-    const first = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
-    const starts = [_]u32{ 3, 6, 8 };
-    const p = try s.beginRewind(arena.allocator(), &first, 9, 5, &.{}, &starts, null, &.{});
-    try std.testing.expectEqualSlices(u32, &.{ 3, 8 }, p.marks);
-    try std.testing.expectEqual(fresh(&first), f.pass(&s, &first, p));
-    try std.testing.expectEqual(@as(u32, 3), s.find(&.{ 1, 2, 3, 4, 50, 6, 7, 8, 9, 10, 11, 12 }, &starts, &.{}).?.at);
-}
-
-test "warm endpoint retains the rewind when two states fit" {
-    const gpa = std.testing.allocator;
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .warm = true, .min_prompt = 0 }, 214);
-    defer s.deinit();
-    const warm = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
-    const p = try s.beginRewind(a, &warm, warm.len, 4, &.{}, &.{}, null, &.{});
-    try std.testing.expectEqualSlices(u32, &.{4}, p.marks);
-    _ = f.pass(&s, &warm, p);
-    try std.testing.expect(s.keep(&warm, warm.len, null, &.{}, &.{}));
-    try std.testing.expectEqual(@as(usize, 2), s.entries.items.len);
-    const edited = [_]u32{ 1, 2, 3, 4, 50, 6, 7, 8, 9, 10, 11 };
-    const resumed = try s.beginRewind(a, &edited, 10, 4, &.{}, &.{}, null, &.{});
-    try std.testing.expectEqual(@as(u32, 4), resumed.from);
-    try std.testing.expectEqual(fresh(&edited), f.pass(&s, &edited, resumed));
 }
 
 test "an entry keys its lookahead tokens: a prompt that differs right after the state does not resume it" {

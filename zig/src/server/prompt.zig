@@ -89,9 +89,12 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
     var history_len: usize = 0;
     if (history.len > 0 and history.len < prompt.len and std.mem.eql(u32, prompt[0..history.len], history)) history_len = history.len;
     if (history_len == 0 and prompt.len > 1 and std.mem.eql(u32, history, prompt)) history_len = prompt.len - 1; // a template with no generation suffix
-    return .{ .ids = prompt, .history_len = history_len, .rewind_len = rewindLen(srv, cx, input.messages, if (input.messages == .array) input.messages.array.len else 0, input.tools, prompt, thinking, effort) };
+    const count = if (input.messages == .array) input.messages.array.len else 0;
+    const rewind_len = if (srv.info.prompt_cache) rewindLen(srv, cx, input.messages, count, input.tools, prompt, thinking, effort) else 0; // two renders
+    return .{ .ids = prompt, .history_len = history_len, .rewind_len = rewind_len };
 }
 
+/// Where the text of the latest user message (of the first `real_count`) starts: two probe texts render alike to there.
 pub fn rewindLen(srv: *Server, cx: *Cx, messages: Value, real_count: usize, tools: []const Value, prompt: []const u32, thinking: bool, effort: ?[]const u8) usize {
     if (messages != .array or real_count > messages.array.len) return 0;
     const user_index = for (0..real_count) |n| {

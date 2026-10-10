@@ -56,8 +56,9 @@ pub const Request = struct {
     background: bool = false,
     /// Prompt prefix lengths worth keeping for a later turn: the rendered history, then shared system blocks.
     history_len: u32 = 0,
-    rewind_len: u32 = 0,
     shared_prefixes: []const u32 = &.{},
+    /// Where the latest user message's text starts: a state kept before it lets an edit of that turn resume (0: none).
+    rewind_len: u32 = 0,
     /// Where the prompt's prefill chunks start after 0 (Python's PrefillPlan at ``Info.prefill_step``); empty: the engine's own.
     chunks: []const u32 = &.{},
     /// Decoded intervals [start,end), sorted, nonempty and strictly separated; an empty list uses prompt arithmetic.
