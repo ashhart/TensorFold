@@ -181,6 +181,45 @@ fn isFiller(word: []const u8) bool {
     return false;
 }
 
+/// Whether `text` holds `fact`'s numbers, names and other notable words (a found fact the text lacks is never learned).
+pub fn grounded(fact: []const u8, text: []const u8) bool {
+    var it: Units = .init(fact);
+    while (it.next()) |u| {
+        if (u.paired) {
+            if (u.notable() and !says(text, u.word)) return false;
+            continue;
+        }
+        if (numberOf(u.raw)) |v| {
+            if (!saysNumber(text, v)) return false;
+            continue;
+        }
+        if (!u.notable()) continue;
+        const name = !u.first and std.ascii.isUpper(u.raw[0]);
+        if (!(if (name) saysForm(text, u.word) else saysStem(text, u.word))) return false;
+    }
+    return true;
+}
+
+/// Whether `text` says `word`, or it with an s added or taken away ("approvals" for "approval").
+fn saysForm(text: []const u8, word: []const u8) bool {
+    if (says(text, word)) return true;
+    var buf: [64]u8 = undefined;
+    if (word.len < buf.len) {
+        @memcpy(buf[0..word.len], word);
+        buf[word.len] = 's';
+        if (says(text, buf[0 .. word.len + 1])) return true;
+    }
+    return word.len > 4 and word[word.len - 1] == 's' and says(text, word[0 .. word.len - 1]);
+}
+
+/// Whether a word of `text` starts as `word` does, all but its last three letters ("manages" for "managed").
+fn saysStem(text: []const u8, word: []const u8) bool {
+    const stem = word[0..@min(word.len, @max(4, word.len -| 3))];
+    var it: Units = .init(text);
+    while (it.next()) |u| if (std.mem.startsWith(u8, u.word, stem)) return true;
+    return false;
+}
+
 /// Whether `reply` gives a short answer: its numbers the question lacks, else half its fact words, else as `recalls`.
 pub fn recallsShort(fact: []const u8, question: []const u8, short: []const u8, reply: []const u8) bool {
     var numbers: usize = 0;
@@ -510,4 +549,14 @@ test "a short answer comes back by its numbers, in digits or words, else by half
     const office = "The Quillmoor Labs office opens at 8 am.";
     try std.testing.expect(recallsShort(office, "When does the office open?", "8 am", "It opens at eight in the morning."));
     try std.testing.expect(!recallsShort(office, "When does the office open?", "8 am", "It opens at nine."));
+}
+
+test "a found fact is learned only when the text holds its names, numbers and words" {
+    const text = "Quillo Labs staff handbook, part 3 of 4\n\nThe biggest customer of Quillo Labs is Tanith Brewery. Our documents live in Brabradocs. Every code review needs 2 approvals. Our chief financial officer is Kwame Ganbraith. The office opens at 9 am.";
+    for ([_][]const u8{ "Quillo Labs chief financial officer is Kwame Ganbraith.", "Quillo Labs office opens at 9 am.", "Kwame Ganbraith is the Quillo Labs chief financial officer.", "A Quillo Labs code review needs two approvals.", "Quillo Labs documents live in Brabradocs.", "The biggest customer of Quillo Labs is Tanith Brewery." }) |f|
+        try std.testing.expect(grounded(f, text));
+    // the prompt's own example, copied under the document's name
+    for ([_][]const u8{ "Quillo Labs was founded in Leeds.", "Jo Smith founded Quillo Labs.", "Quillo Labs builds Widgetly.", "Widgetly is a planning app for schools.", "A Quillo Labs code review needs one approval.", "Quillo Labs tracks bugs in Linear.", "The Quillo Labs support desk opens every weekday." }) |f|
+        try std.testing.expect(!grounded(f, text));
+    try std.testing.expect(grounded("Ines Calloway manages the Quillmoor support rota.", "The support rota is managed by Ines Calloway at Quillmoor Labs."));
 }

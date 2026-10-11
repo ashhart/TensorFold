@@ -86,13 +86,32 @@ pub fn facts(srv: *Server, cx: *Cx, text: []const u8, source: []const u8, gone: 
     while (at < text.len) : (at += chunk_chars) {
         const piece = text[at..@min(text.len, at + chunk_chars)];
         const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.facts_prompt, .{piece}), 512, gone);
-        var it = std.mem.splitScalar(u8, reply.content, '\n');
-        while (it.next()) |line| {
-            const fact = wording.unmark(line);
-            if (wording.words(fact) >= 3) try out.append(a, fact);
+        // a list holding facts the text does not (the prompt's own example, copied) is read again without the example
+        if (try listed(a, &out, reply.content, text) > 0) {
+            const again = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.facts_plain_prompt, .{piece}), 512, gone);
+            _ = try listed(a, &out, again.content, text);
         }
     }
     return out.items;
+}
+
+/// The facts of a found list that `text` holds, each once, into `out`; how many it left out as not in the text.
+fn listed(a: Allocator, out: *std.ArrayList([]const u8), list: []const u8, text: []const u8) !usize {
+    var left: usize = 0;
+    var it = std.mem.splitScalar(u8, list, '\n');
+    while (it.next()) |line| {
+        const fact = wording.unmark(line);
+        if (wording.words(fact) < 3) continue;
+        if (!wording.grounded(fact, text)) {
+            log.line("slide: \"{s}\" is not in the text, so it is not learned", .{fact});
+            left += 1;
+            continue;
+        }
+        for (out.items) |had| {
+            if (std.mem.eql(u8, had, fact)) break;
+        } else try out.append(a, fact);
+    }
+    return left;
 }
 
 /// A question about something else and the model's answer before the lesson.
