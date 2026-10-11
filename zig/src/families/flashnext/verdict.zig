@@ -1,4 +1,4 @@
-//! The GPU-side rounds' verdict kernels: a round's kept drafts and tokens (fz_accept) and copied drafts (fz_lookup).
+//! The GPU-side rounds' verdict kernels: kept drafts and tokens (fz_accept), copied drafts, a forced span (think.zig).
 
 pub const source =
     \\#include <metal_stdlib>
@@ -75,5 +75,31 @@ pub const source =
     \\  const int k = min(W - 1, L - 1 - p);
     \\  for (int i = 0; i < k; i++) wids[1 + i] = H[p + 1 + i];
     \\  ar[801] = 1;
+    \\}
+    \\// Before a window of c.x rows; a forced span at ar + c.y: first position (0: done), cancel token, length, seen, tokens.
+    \\kernel void fz_force(device uint* wids [[buffer(0)]], device int* ar [[buffer(1)]], device const uint* H [[buffer(2)]],
+    \\    constant uint2& c [[buffer(3)]], uint tid [[thread_position_in_grid]]) {
+    \\  device int* f = ar + c.y;
+    \\  if (tid != 0 || f[0] <= 0) return;
+    \\  for (int p = f[3] + 1; p <= ar[1]; p++) { // tokens landed since it last looked (H[p]): its last, or a cancel first
+    \\    const int at = p - f[0];
+    \\    if (at + 1 >= f[2] || (at < 0 && int(H[p]) == f[1])) { f[0] = 0; return; }
+    \\  }
+    \\  f[3] = ar[1];
+    \\  for (int j = 1; j < int(c.x); j++) { // the window's drafts at the span's positions take its tokens
+    \\    const int at = ar[1] + j - f[0];
+    \\    if (at >= 0 && at < f[2]) wids[j] = uint(f[4 + at]);
+    \\  }
+    \\}
+    \\// Before the verdict: the target's picks take the span's tokens at its positions, up to a cancel token landing first.
+    \\kernel void fz_span(device uint* picks [[buffer(0)]], device const int* ar [[buffer(1)]], constant uint2& c [[buffer(2)]],
+    \\    uint tid [[thread_position_in_grid]]) {
+    \\  device const int* f = ar + c.y;
+    \\  if (tid != 0 || f[0] <= 0) return;
+    \\  for (int i = 0; i < int(c.x); i++) {
+    \\    const int at = ar[1] + 1 + i - f[0];
+    \\    if (at >= 0 && at < f[2]) picks[i] = uint(f[4 + at]);
+    \\    else if (at < 0 && int(picks[i]) == f[1]) return;
+    \\  }
     \\}
 ;

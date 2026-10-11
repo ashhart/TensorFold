@@ -14,6 +14,8 @@ const pack_io = @import("pack_io.zig");
 const pack = @import("pack.zig");
 const pack_cache = @import("pack_cache.zig");
 const load_admission = @import("load_admission.zig");
+const think = @import("think.zig");
+pub const Think = think.Think;
 pub const quantizationProblem = load_admission.problemFor;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -517,39 +519,24 @@ pub const Engine = struct {
 
     /// One greedy reply. `depth` fixes the drafts a round (0: no drafts, one token a round); null: the depth rule.
     pub fn generate(e: *Engine, prompt: []const u32, max_tokens: usize, eos: []const u32, depth: ?usize, out: Out) !Result {
-        return e.generateFrom(prompt, 0, &.{}, max_tokens, eos, depth, out);
+        return e.generateFrom(prompt, 0, &.{}, max_tokens, eos, depth, .{}, out);
     }
 
-    /// `generate` after snapshot.restore put `from` tokens in the model, the pass cut at each mark for out.marked.
-    pub fn generateFrom(e: *Engine, prompt: []const u32, from: usize, marks: []const u32, max_tokens: usize, eos: []const u32, depth: ?usize, out: Out) !Result {
+    /// `generate` after snapshot.restore put `from` tokens in the model, cut at marks for out.marked, under `budget`.
+    pub fn generateFrom(e: *Engine, prompt: []const u32, from: usize, marks: []const u32, max_tokens: usize, eos: []const u32, depth: ?usize, budget: Think, out: Out) !Result {
         const r = e.r;
         const m = e.m;
         if (prompt.len == 0) return error.EmptyPrompt;
         if (prompt.len + max_tokens + MARGIN > CAP) return error.ContextFull;
         if (from >= prompt.len or (from > 0 and m.pos != from)) return error.NotResumed;
         for (marks, 0..) |mk, i| if (mk <= from or mk >= prompt.len or (i > 0 and mk <= marks[i - 1])) return error.Marks;
+        var watch = try think.Watch.init(budget);
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         if (r.tp) |tp| if (tp.rank == 0) { // served speed-up mode: rank 1 runs the same request (follow)
-            var head: [16]u32 = @splat(0);
-            head[0] = @intCast(prompt.len);
-            head[1] = @intCast(@min(max_tokens, std.math.maxInt(u32)));
-            head[2] = @intCast(@min(eos.len, 8));
-            head[3] = if (depth) |d| @intCast(d) else std.math.maxInt(u32);
-            for (eos[0..head[2]], 0..) |t, i| head[4 + i] = t;
-            head[12] = @intCast(from); // rank 1 restores its own state at the same tokens
-            head[13] = @intCast(marks.len); // the marks, then the dropped states' keys, follow the prompt
-            head[14] = @intCast(e.peer_drops.items.len);
-            head[15] = @intCast(e.pair_min); // rank 1 splits its calls the same way
-            const words = try e.gpa.alloc(u32, prompt.len + marks.len + 2 * e.peer_drops.items.len);
-            defer e.gpa.free(words);
-            @memcpy(words[0..prompt.len], prompt);
-            @memcpy(words[prompt.len..][0..marks.len], marks);
-            for (e.peer_drops.items, 0..) |k, i| words[prompt.len + marks.len + 2 * i ..][0..2].* = .{ @truncate(k), @truncate(k >> 32) };
             const t0 = std.c.mach_absolute_time();
             defer e.handoff_ns = @intCast((std.c.mach_absolute_time() - t0) * 125 / 3); // mach ticks are 125/3 ns on Apple silicon
-            try tp.sendRequest(std.mem.asBytes(&head), words);
-            e.peer_drops.clearRetainingCapacity();
+            try follow_mod.send(e, tp, prompt, from, marks, max_tokens, eos, depth, budget);
             if (!try tp.waitAck()) return error.PeerNotResumed;
         };
         e.hostMode();
@@ -629,6 +616,7 @@ pub const Engine = struct {
             dr.after(out, at, n_in);
         }
         out.prefilled(out.ctx);
+        pick = watch.first(pick);
         var res: Result = .{ .reason = .length };
         const first_stop = out.tokens(out.ctx, &.{pick}) or isEos(eos, pick);
         try dr.flush(e, out); // after the first token: the slots, rows and tail stay put till the rounds
@@ -681,6 +669,7 @@ pub const Engine = struct {
             ar[fz.AR_NK + i] = if (i < W0) T + @as(i32, @intCast(i)) + 1 else 0;
         }
         ar[fz.AR_KV], ar[fz.AR_KV + 1], ar[fz.AR_KV + 2] = .{ T, CAP, @intCast(W0) };
+        watch.arm(ar, @intCast(T));
         const pm = m.t.ple_meta.b.slice(i64, 39);
         pm[0], pm[1], pm[2], pm[3] = .{ m.ple.hist[0], m.ple.hist[1], m.ple.eos, 0 };
         for (0..3) |k| pm[4 + k] = m.ple.mult[k];
@@ -729,6 +718,7 @@ pub const Engine = struct {
                     }
                 }
             }
+            if (watch.armed) think.force(r, e.wids, e.hist, wr); // the close's tokens as the window's drafts
             m.ple.cin = e.cins[round % 2];
             m.rec_slot = round % 2;
             m.pleIdsGpu(wr, e.wids);
@@ -741,6 +731,7 @@ pub const Engine = struct {
             const copying = e.copy and copy_rate + 0.05 >= head_rate and copy_rate > 0.9;
             const wn = (if (fixed) |d| d else if (copying) MAXR - 1 else next_depth) + 1;
             widths[(round + 1) % 4] = wn;
+            if (watch.armed) think.span(r, m.t.picks, wr); // and in place of the target's picks
             const cfg = [4]u32{ @intCast(wr), @intCast(wn), CAP, 0 };
             r.enc.setPipeline(r.accept_pipe);
             for ([_]Buf{ e.wids, m.t.picks, r.ar, .{ .b = e.ring }, m.t.ple_meta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
@@ -768,25 +759,26 @@ pub const Engine = struct {
             const slot = (done % RING) * fz.RING_WORDS;
             const keep = rg[slot];
             const wd = widths[done % 4];
-            if (wd > 1) {
+            const got = rg[slot + 3 .. slot + 3 + keep];
+            const learn = !watch.read(got); // a round that landed the close's tokens teaches no rate, rule or counter
+            if (learn and wd > 1) {
                 const frac = @as(f64, @floatFromInt(keep - 1)) / @as(f64, @floatFromInt(wd - 1));
                 if (rg[slot + 1] != 0) copy_rate = 0.8 * copy_rate + 0.2 * frac else head_rate = 0.8 * head_rate + 0.2 * frac;
                 if (rg[slot + 1] == 0 and wd == MAXR) copy_rate *= 0.8; // a full window that found no copy: copies stopped landing
             }
-            if (rg[slot + 1] != 0) {
+            if (learn and rg[slot + 1] != 0) {
                 res.copy_rounds += 1;
                 res.copy_accepted += keep - 1;
                 const n = @min(rg[slot + 2], 8);
                 res.copy_by_len[n][0] += 1;
                 res.copy_by_len[n][1] += keep - 1;
             }
-            if (fixed == null and wd > 1 and rg[slot + 1] == 0) rule.update(wd - 1, keep - 1);
+            if (learn and fixed == null and wd > 1 and rg[slot + 1] == 0) rule.update(wd - 1, keep - 1);
             res.rounds += 1;
-            res.drafted += wd - 1;
-            res.accepted += keep - 1;
+            if (learn) res.drafted += wd - 1;
+            if (learn) res.accepted += keep - 1;
             res.min_rows = @min(res.min_rows, @as(u32, @intCast(wd)));
             done += 1;
-            const got = rg[slot + 3 .. slot + 3 + keep];
             var take: usize = 0;
             var stop = false;
             while (take < got.len and emitted + take < max_tokens) {

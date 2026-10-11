@@ -18,6 +18,7 @@ pub const flashnext_replay = @import("families/flashnext/replay.zig");
 pub const flashnext_engine = @import("families/flashnext/engine.zig");
 pub const flashnext_snapshot = @import("families/flashnext/snapshot.zig");
 pub const flashnext_learned = @import("families/flashnext/learned.zig");
+pub const flashnext_think_check = @import("families/flashnext/think_check.zig");
 pub const glm = @import("families/glm/glm.zig");
 pub const qwen35 = @import("families/qwen3_5/qwen3_5.zig");
 pub const flashnext_pack = @import("families/flashnext/pack.zig");
@@ -40,6 +41,8 @@ test {
     _ = @import("families/flashnext/follow.zig"); // rank 1's reply hash
     _ = @import("families/flashnext/dense.zig"); // The core projection adapter keeps format, cuts and tiles.
     _ = @import("families/flashnext/marks.zig"); // a call's marks
+    _ = @import("families/flashnext/think.zig"); // a thinking budget's close on the host
+    _ = @import("families/flashnext/think_check.zig"); // and in the verdict kernels (Metal)
     _ = @import("families/glm/glm.zig");
     _ = @import("families/qwen3_5/config.zig");
     _ = @import("families/qwen3_5/backend.zig");
