@@ -99,18 +99,8 @@ fn mlp(a: Allocator, m: *host.Mlp, r: Rank) Error!void {
     }
 }
 
-/// A rank's contiguous routed experts, the shared one on rank 0, and the remap to its own ids (-1: another rank's).
 fn routed(a: Allocator, x: *host.Routed, r: Rank) Error!void {
-    const total = x.experts.count - 1;
-    const part = try even(total, r.world, "experts");
-    x.experts.fused = try quant.sliceStack(a, x.experts.fused, r, part);
-    x.experts.down = try quant.sliceStack(a, x.experts.down, r, part);
-    x.experts.count = part + @intFromBool(r.rank == 0);
-    const remap = try a.alloc(i32, total + 1);
-    @memset(remap, -1);
-    for (0..part) |i| remap[r.rank * part + i] = @intCast(i);
-    if (r.rank == 0) remap[total] = @intCast(part);
-    x.remap = .{ .dtype = .i32, .rank = 1, .shape = .{ total + 1, 1, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(remap) };
+    return quant.experts.sliceRank(a, x, r);
 }
 
 /// The output head's rows for rank `r`: its share of the vocabulary.

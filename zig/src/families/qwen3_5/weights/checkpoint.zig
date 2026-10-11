@@ -5,7 +5,7 @@ const config = @import("config.zig");
 const table = @import("table.zig");
 const host = @import("host.zig");
 const projection = @import("projection.zig");
-const experts = @import("experts.zig");
+const experts = @import("core").quant.experts;
 
 const Tensor = table.Tensor;
 const Table = table.Table;
@@ -162,7 +162,7 @@ fn subConv(a: std.mem.Allocator, t: *const Table, base: []const u8) !Tensor {
 
 /// The routed MLP when the config has experts, else gate, up and down.
 fn readMlp(a: std.mem.Allocator, t: *const Table, mlp: []const u8, s: config.Spec) !host.Mlp {
-    if (s.experts != 0) return .{ .routed = try experts.routed(a, t, mlp, s) };
+    if (s.experts != 0) return .{ .routed = try experts.routed(a, t, mlp, .{ .experts = s.experts, .hidden = s.hidden, .top_k = s.top_k }) };
     return .{ .dense = .{
         .gate = try sub(a, t, mlp, "gate_proj"),
         .up = try sub(a, t, mlp, "up_proj"),
@@ -217,7 +217,7 @@ fn readMtp(a: std.mem.Allocator, t: *const Table, s: config.Spec) !host.Mtp {
         .head = head,
         .input_norm = try projection.float(a, t, layer ++ "input_layernorm.weight"),
         .post_norm = try projection.float(a, t, layer ++ "post_attention_layernorm.weight"),
-        .mlp = if (routed) .{ .routed = try experts.routed(a, t, mlp, s) } else .{ .dense = .{
+        .mlp = if (routed) .{ .routed = try experts.routed(a, t, mlp, .{ .experts = s.experts, .hidden = s.hidden, .top_k = s.top_k }) } else .{ .dense = .{
             .gate = try projection.projection(a, t, mlp ++ "gate_proj"),
             .up = try projection.projection(a, t, mlp ++ "up_proj"),
             .down = try projection.projection(a, t, mlp ++ "down_proj"),
