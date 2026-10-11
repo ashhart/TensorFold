@@ -43,6 +43,7 @@ pub const State = struct {
     drawn: usize = 0,
     keep_order: std.ArrayList(usize) = .empty, // the answers that are to stay, likewise
     keep_drawn: usize = 0,
+    keep_loss: std.ArrayList(f32) = .empty, // each answer to stay, its loss when last drawn (-1: not yet)
     shuffles: u64 = 0,
     adam: std.ArrayList(f32) = .empty, // [4, taken, D]: the outputs, Adam's two moments, a step's gradient
     size: std.ArrayList(f32) = .empty, // [taken]: the residual's length after each neuron's layer, at its row
@@ -50,7 +51,7 @@ pub const State = struct {
     prefixes: prefix.Prefixes = .{}, // the answers' rows no output reaches, run once
 
     pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
-        inline for (.{ "best", "order", "keep_order", "adam", "size", "prefixes" }) |f| @field(s, f).deinit(gpa);
+        inline for (.{ "best", "order", "keep_order", "keep_loss", "adam", "size", "prefixes" }) |f| @field(s, f).deinit(gpa);
     }
 
     /// A round begun: the readings cleared; the outputs and Adam's moments as they are.
@@ -77,6 +78,7 @@ pub const State = struct {
         s.drawn = 0;
         s.keep_order.clearRetainingCapacity();
         s.keep_drawn = 0;
+        s.keep_loss.clearRetainingCapacity();
         s.best.clearRetainingCapacity(); // a fit that never reads a better held-out loss keeps its own outputs, not the last fact's
     }
 };
@@ -104,6 +106,18 @@ fn drawKeyed(p: anytype) !usize {
     return error.NoKeyedAnswers;
 }
 
+/// The answer to stay that read worst when last drawn and is not in this step yet, or null (none read above zero).
+fn worstKeep(s: *const State, step: []const Drawn, own: usize) ?usize {
+    var best: ?usize = null;
+    for (s.keep_loss.items, 0..) |loss, e| {
+        if (loss <= 0 or (best != null and loss <= s.keep_loss.items[best.?])) continue;
+        for (step) |dr| {
+            if (!dr.own and dr.which == own + e) break;
+        } else best = e;
+    }
+    return best;
+}
+
 /// An answer an output step drew: the fact's own or one that is to stay, which (own answers first), its sequence.
 const Drawn = struct { own: bool, which: usize, seq: Seq };
 
@@ -123,6 +137,10 @@ pub fn valueOnce(p: anytype, t: anytype, host: anytype) !bool {
     const keeps: usize = @min(keep_batch, p.keeps.items.len);
     var drawn: [batch + keep_batch]Drawn = undefined;
     var n: usize = 0;
+    if (s.keep_loss.items.len != p.keeps.items.len) {
+        s.keep_loss.clearRetainingCapacity();
+        try s.keep_loss.appendNTimes(p.gpa, -1, p.keeps.items.len);
+    }
     for (0..take + keeps) |i| {
         const own = i < take;
         var ex: Example = undefined;
@@ -137,7 +155,9 @@ pub fn valueOnce(p: anytype, t: anytype, host: anytype) !bool {
             rows = .{ ex.decide, subject orelse 0, value orelse 0 };
             on = .{ true, subject != null, value != null };
         } else {
-            const e = try draw(p.gpa, s, &s.keep_order, &s.keep_drawn, p.keeps.items.len);
+            // every other one the answer that read worst (maximally interfered retrieval, Aljundi et al. 2019)
+            const worst = if (p.worst and (i - take) % 2 == 1) worstKeep(s, drawn[0..n], p.answered.len) else null;
+            const e = worst orelse try draw(p.gpa, s, &s.keep_order, &s.keep_drawn, p.keeps.items.len);
             const keep = p.keeps.items[e];
             which = p.answered.len + e;
             ex = keep.ex;
@@ -149,6 +169,7 @@ pub fn valueOnce(p: anytype, t: anytype, host: anytype) !bool {
             masks[@backingInt(x.key)] |= @as(u64, 1) << @intCast(p.moe.items[x.slot]);
         };
         if (masks[0] | masks[1] | masks[2] == 0) {
+            if (!own) s.keep_loss.items[which - p.answered.len] = 0; // no neuron reaches it: nothing to guard
             s.idle += 1;
             continue;
         }
@@ -226,7 +247,10 @@ fn absorb(p: anytype, t: anytype, dr: Drawn, i: usize, got: Result, grad: []f32)
         s.idle += 1;
         return;
     }
-    if (dr.own) s.loss += got.loss else s.kept += got.loss;
+    if (dr.own) s.loss += got.loss else {
+        s.kept += got.loss;
+        s.keep_loss.items[dr.which - p.answered.len] = got.loss;
+    }
     for (p.taken.items, 0..) |x, j| {
         const key = @backingInt(x.key);
         if (masks[key] == 0) continue;
@@ -304,6 +328,16 @@ fn finish(p: anytype, t: anytype, host: anytype, vals: []const f32) !bool {
     std.log.info("slide pocket: {d} answers' first rows run once, {d} rows the steps did not run again", .{ s.prefixes.slots, s.prefixes.skipped });
     try prefix.release(t, &s.prefixes);
     std.log.info("slide pocket: the fact's {d} neurons' outputs fitted in {d} steps of {d} answers and {d} of the {d} that are to stay ({d} drawn fired none or lost no finite loss), the answers' loss {d:.3} to {d:.3}, theirs {d:.3}; the held-out answers' loss at its lowest {d:.3}, step {d}", .{ p.taken.items.len, s.round, @min(batch, p.answered.len), @min(keep_batch, p.keeps.items.len), p.keeps.items.len, s.idle, s.first_loss, s.running, s.keep_running, s.best_held, s.best_step });
+    var hurt: usize = 0;
+    var unread: usize = 0;
+    var worst: [3]f32 = @splat(0);
+    for (s.keep_loss.items) |loss| {
+        hurt += @intFromBool(loss > 1);
+        unread += @intFromBool(loss < 0);
+        if (loss > worst[2]) worst[2] = loss;
+        std.mem.sort(f32, &worst, {}, std.sort.desc(f32));
+    }
+    std.log.info("slide pocket: of the {d} answers to stay, {d} read above 1.0 when last drawn (worst {d:.2} {d:.2} {d:.2}), {d} never drawn{s}", .{ s.keep_loss.items.len, hurt, worst[0], worst[1], worst[2], unread, if (p.worst) ", half of each step's drawn by the worst" else "" });
     p.back = 0;
     p.next(.check);
     return false;
