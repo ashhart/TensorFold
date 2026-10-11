@@ -4,7 +4,7 @@ const mtl = @import("metal");
 const tf = @import("tensorfold");
 const q = tf.qwen27;
 const lanes = tf.lanes;
-const lb = @import("qwen27_host").lanes_backend;
+const lb = @import("qwen27_served").lanes_backend;
 const target_graph = @import("synthetic_graph.zig");
 const draft_graph = @import("dflash_graph.zig");
 

@@ -9,6 +9,7 @@ const pc = api.prompt_cache;
 const cache_fit = @import("cache_fit.zig");
 const Resident = @import("resident.zig").Resident;
 const lb = @import("qwen27_lanes.zig");
+pub const lanes_backend = lb;
 const Allocator = std.mem.Allocator;
 
 pub const Options = struct {
@@ -24,6 +25,7 @@ pub const Options = struct {
 pub const Host = struct {
     gpa: Allocator,
     model: *q.model.Model,
+    owns_model: bool,
     runner: q.decode_round.Runner,
     draft: ?*lb.Draft = null,
     back: *lb.Metal,
@@ -146,9 +148,18 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     defer pool.pop();
     const model = try q.model.Model.load(gpa, io, dir, 128);
     errdefer model.deinit();
+    const h = try attach(gpa, io, model, null, o, a, why);
+    h.owns_model = true;
+    return h;
+}
+
+/// A loaded model served as `open` serves one, `drafter` bound in place of `o.drafter`; both stay the caller's.
+pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.dflash.runtime_model.Model, o: Options, a: Allocator, why: *[]const u8) !*Host {
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
     const capacity = if (o.context == 0) @min(model.config.max_position, 32768) else o.context;
     if (capacity == 0 or capacity > model.config.max_position) return error.ContextFull;
-    const per = slotCost(model, capacity, o.drafter != null);
+    const per = slotCost(model, capacity, drafter != null or o.drafter != null);
     const left = room(model);
     const slots = fit(left, per, o.streams, o.streams_fixed) catch |err| {
         why.* = try std.fmt.allocPrint(a, "--parallel {d} needs {d:.1} GiB for its streams' caches at a {d}-token context, and this Mac leaves {d:.1} GiB beside the weights and an 8 GiB margin: serve --parallel {d}, or lower --context", .{ o.streams, cache_fit.gibs(per * o.streams), capacity, cache_fit.gibs(left), @max(1, left / per) });
@@ -158,12 +169,13 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     errdefer gpa.destroy(h);
     h.gpa = gpa;
     h.model = model;
+    h.owns_model = false;
     h.draft = null;
     h.cache = null;
     h.resident = null;
     h.runner = try q.decode_round.Runner.initReady(gpa, model, slots, capacity, 1);
     errdefer h.runner.deinit();
-    if (o.drafter) |d| h.draft = lb.Draft.open(gpa, io, model, &h.runner, d, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference) catch |err| {
+    if (drafter) |d| h.draft = try lb.Draft.attach(gpa, &h.runner, d, false) else if (o.drafter) |d| h.draft = lb.Draft.open(gpa, io, model, &h.runner, d, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference) catch |err| {
         why.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B drafter cannot load {s} ({s})", .{ d, @errorName(err) });
         return error.DrafterLoad;
     };
@@ -237,6 +249,6 @@ pub fn close(ptr: *anyopaque) void {
     h.back.deinit();
     if (h.draft) |d| d.deinit();
     h.runner.deinit();
-    h.model.deinit();
+    if (h.owns_model) h.model.deinit();
     h.gpa.destroy(h);
 }
