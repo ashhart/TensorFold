@@ -7,7 +7,7 @@ struct Shape {
     int rows, heads, dh, groups, n, inner, conv, proj;
 };
 
-#define CK 16  // scan steps between checkpoints
+#define CK 8  // scan steps between checkpoints
 
 // Sum over the 16 lanes holding one state row (lanes 0..15 or 16..31 of a warp).
 __device__ __forceinline__ float row_sum(float v) {
@@ -84,39 +84,34 @@ extern "C" __global__ void __launch_bounds__(1024) tf_train_ssm_fwd(const bf16* 
     }
 }
 
-// The scan backward for one head: dx (with the D skip) into dact, per-head dB and dC partials, and ddt.
+// One head's scan backward (dx into dact, dB and dC partials, ddt), each row's states recomputed from its checkpoint.
 extern "C" __global__ void __launch_bounds__(1024) tf_train_ssm_back(const bf16* act, const float* dt, const float* a_neg,
                                                                     const float* d_skip, const float* dy, const float* ckpt,
-                                                                    float* states, float* dact, float* db_part, float* dc_part,
-                                                                    float* ddt, Shape s) {
+                                                                    float* dact, float* db_part, float* dc_part, float* ddt,
+                                                                    Shape s) {
     __shared__ float scratch[32 * 128];
     const int h = blockIdx.x, t = threadIdx.x, lane = t & 31, w = t >> 5;
     const int p = t / 16, n0 = (t % 16) * 8, g = h / (s.heads / s.groups), size = s.dh * s.n;
     const int b0 = s.inner + g * s.n, c0 = s.inner + s.groups * s.n + g * s.n;
     const float* mine = ckpt + (size_t)h * ((s.rows + CK - 1) / CK + 1) * size;
-    float* chunk = states + (size_t)h * CK * size;
     float ds[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     for (int c = (s.rows - 1) / CK; c >= 0; c--) {
         const int first = c * CK, last = min(first + CK, s.rows);
-        float st[8];
-        for (int i = 0; i < 8; i++) st[i] = mine[c * size + p * s.n + n0 + i];
-        for (int r = first; r < last; r++) {
-            const bf16* row = act + (size_t)r * s.conv;
-            const float d = dt[r * s.heads + h], a = expf(d * a_neg[h]), x = f32(row[h * s.dh + p]);
-            for (int i = 0; i < 8; i++) {
-                st[i] = a * st[i] + d * x * f32(row[b0 + n0 + i]);
-                chunk[(r - first) * size + p * s.n + n0 + i] = st[i];
-            }
-        }
-        __syncthreads();
         for (int r = last - 1; r >= first; r--) {
+            float cur[8], prev[8], v[8];
+            for (int i = 0; i < 8; i++) cur[i] = mine[c * size + p * s.n + n0 + i];
+            for (int q = first; q <= r; q++) {
+                const bf16* row = act + (size_t)q * s.conv;
+                const float d = dt[q * s.heads + h], a = expf(d * a_neg[h]), x = f32(row[h * s.dh + p]);
+                for (int i = 0; i < 8; i++) {
+                    prev[i] = cur[i];
+                    cur[i] = a * cur[i] + d * x * f32(row[b0 + n0 + i]);
+                }
+            }
             const bf16* row = act + (size_t)r * s.conv;
             const float d = dt[r * s.heads + h], a = expf(d * a_neg[h]), x = f32(row[h * s.dh + p]);
             const float gy = dy[(size_t)r * s.inner + h * s.dh + p];
-            float cur[8], prev[8], v[8];
             for (int i = 0; i < 8; i++) {
-                cur[i] = chunk[(r - first) * size + p * s.n + n0 + i];
-                prev[i] = r > first ? chunk[(r - first - 1) * size + p * s.n + n0 + i] : mine[c * size + p * s.n + n0 + i];
                 ds[i] += gy * f32(row[c0 + n0 + i]);
                 v[i] = gy * cur[i];
             }
@@ -135,7 +130,6 @@ extern "C" __global__ void __launch_bounds__(1024) tf_train_ssm_back(const bf16*
             if (t == 0) ddt[r * s.heads + h] = dd;
             for (int i = 0; i < 8; i++) ds[i] *= a;
         }
-        __syncthreads();
     }
 }
 
@@ -152,7 +146,7 @@ extern "C" __global__ void tf_train_ssm_bc(const float* db_part, const float* dc
     dact[(size_t)r * s.conv + s.inner + s.groups * s.n + g * s.n + n] = c;
 }
 
-// The gate and grouped RMS norm undone: dy into the SSM's output, dz into the projection's z columns; grid (groups, rows).
+// The gate and grouped RMS norm undone: dy into the SSM's output, dz into the z columns; grid (groups, rows).
 extern "C" __global__ void __launch_bounds__(256) tf_train_gate_back(const float* y, const bf16* proj, const bf16* w, const float* dn,
                                                                     float* dy, float* dproj, Shape s, float eps) {
     __shared__ float scratch[32];

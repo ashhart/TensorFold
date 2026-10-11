@@ -33,8 +33,7 @@ fn adapterBack(t: *Trainer, l: usize, x: u64, stride: usize, gy: u64, dx: u64, r
     try k.loraDx(t.dxa, site.a.dev, dx, rows, site.in, s.rank);
 }
 
-/// The loss back through the head and every layer to each change, Adam after when `adam`; a target pass (`targets`, its
-/// sequences) keeps the gradient at each nudged row of the residuals its layers left, and stops at layer `low`.
+/// The loss back to each change (Adam after when `adam`); a target pass keeps its nudged rows' gradients, to `low`.
 pub fn backward(t: *Trainer, rows: usize, adam: bool, targets: []const Seq, low: usize) !void {
     const c = t.c;
     const e = t.e;
@@ -81,10 +80,10 @@ fn moe(t: *Trainer, l: usize, m: @FieldType(Raw, "moe"), rows: usize) !void {
     const count = rows * c.top_k;
     try k.sortPairs(kp.ids, rows, S, c.top_k, c.experts, t.order, t.inv, t.offsets);
     try k.pairsIn(t.order, kp.wts, t.g, t.dyp, D, S, count);
-    try k.expertProducts(t.dyp, m.fc2, t.offsets, t.part, t.d_y1r, count, D, W, c.experts);
+    try k.expertProducts(t.dyp, m.fc2, t.offsets, t.tiles, t.d_y1r, count, D, W, c.experts);
     try k.copyRows(kp.act, W, t.order, t.y1s, W, W, count);
     try k.relu2Back(t.y1s, t.d_y1r, t.du1, count * W);
-    try k.expertProducts(t.du1, m.fc1, t.offsets, t.part, t.dxp, count, W, D, c.experts);
+    try k.expertProducts(t.du1, m.fc1, t.offsets, t.tiles, t.dxp, count, W, D, c.experts);
     try k.pairsOut(t.inv, t.dxp, t.dx, D, c.top_k, rows);
     const router = t.e.w.blocks[l].moe.router;
     try k.routerLogits(kp.x, router, t.lg, rows, c.experts, D);
@@ -121,7 +120,7 @@ fn mamba(t: *Trainer, l: usize, m: @FieldType(Raw, "mamba"), rows: usize) !void 
         const init: ?u64 = if (sp.skip > 0) t.prefixes.ssmAt(sp.slot, j) else null;
         try k.ssmFwd(t.act_m + r * cd * 2, t.dt + r * h * 4, mw.a, mw.d, t.ytot + r * xd * 4, t.ckpt, one, init);
         try k.gateBack(t.ytot + r * xd * 4, kp.proj + r * pd * 2, mw.gnorm, t.dyn + r * xd * 4, t.dytot + r * xd * 4, t.dproj + r * pd * 4, one, c.eps);
-        try k.ssmBack(.{ t.act_m + r * cd * 2, t.dt + r * h * 4, mw.a, mw.d, t.dytot + r * xd * 4, t.ckpt, t.states, t.dact + r * cd * 4, t.dbp + r * h * c.state * 4, t.dcp + r * h * c.state * 4, t.ddt + r * h * 4 }, one);
+        try k.ssmBack(.{ t.act_m + r * cd * 2, t.dt + r * h * 4, mw.a, mw.d, t.dytot + r * xd * 4, t.ckpt, t.dact + r * cd * 4, t.dbp + r * h * c.state * 4, t.dcp + r * h * c.state * 4, t.ddt + r * h * 4 }, one);
     }
     try k.ssmBc(t.dbp, t.dcp, t.dact, s);
     for (t.spans[0..t.seqs]) |sp| {
