@@ -1,5 +1,7 @@
 //! DeepSeek-V4.1-Flash on the Zig engine: release config, EXL3 pack headers, a rank's TP weight plan (host side).
 
+const std = @import("std");
+
 pub const config = @import("config.zig");
 pub const Config = config.Config;
 pub const exl3 = @import("exl3.zig");
@@ -23,6 +25,8 @@ test {
     _ = named;
     _ = prepare;
     _ = engram_host;
+    // the device-side weight load, compiled on the host (no GPU work)
+    inline for (.{ @import("load.zig"), @import("forms.zig"), @import("forms_inplace.zig"), @import("host_stage.zig"), @import("triton_capture.zig"), @import("ex_stacks.zig"), @import("buffers.zig"), @import("block_calls.zig") }) |t| std.testing.refAllDecls(t);
     _ = @import("host_test.zig");
     _ = @import("engram_rows_test.zig"); // Engram's shard rows
     _ = @import("phases.zig"); // the phase timers
