@@ -1,4 +1,4 @@
-//! OpenAI ``logprobs`` on a chat reply: which requests may ask, and ``choices[0].logprobs`` from the engine's rows; vLLM's ``prompt_logprobs``.
+//! OpenAI ``logprobs`` (who may ask, ``choices[0].logprobs`` from the engine's rows) and vLLM's ``prompt_logprobs``.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json.zig");
@@ -63,7 +63,7 @@ pub const Stream = struct {
     }
 };
 
-/// ``/v1/completions``' legacy ``logprobs`` from the chat form's rows, its ``text_offset`` counted on from `offset` chars.
+/// ``/v1/completions``' legacy ``logprobs`` from the chat form's rows; ``text_offset`` counts on from `offset` chars.
 pub fn legacy(a: Allocator, rows: Value, offset: *usize) Allocator.Error!Value {
     const items = rows.object.get("content").?.array;
     const tokens = try a.alloc(Value, items.len);
@@ -91,7 +91,7 @@ pub fn legacy(a: Allocator, rows: Value, offset: *usize) Allocator.Error!Value {
     return .{ .object = out };
 }
 
-/// vLLM's ``prompt_logprobs``: null for the first token, then ``{id: {logprob, rank, decoded_token}}``, the prompt token first.
+/// vLLM's ``prompt_logprobs``: null, then ``{id: {logprob, rank, decoded_token}}`` a token, the prompt token first.
 pub fn promptValue(srv: *Server, a: Allocator, rows: []const api.LogprobRow) Allocator.Error!Value {
     const out = try a.alloc(Value, rows.len + 1);
     out[0] = .null;

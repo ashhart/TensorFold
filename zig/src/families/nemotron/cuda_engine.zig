@@ -19,6 +19,8 @@ const lesson_route = @import("lesson_route.zig");
 const grid = @import("cuda_prompt_grid.zig");
 const heat = @import("heat");
 const seq_graphs = @import("cuda_seq_graphs.zig");
+const prompt_rows = @import("cuda_prompt_rows.zig");
+pub const PromptRows = prompt_rows.PromptRows;
 
 /// nemotron_h.cuda.CONTEXT: prompt plus reply tokens when --context is not given, as `tensorfold serve` sizes it.
 pub const default_context = 16384;
@@ -49,18 +51,6 @@ pub const Keep = struct {
     at: []const u32,
     ctx: *anyopaque,
     call: *const fn (*anyopaque, u32) void,
-};
-
-/// prompt_logprobs: every prompt row but the last through the head, its next prompt token's logprob, `k` best and rank.
-pub const PromptRows = struct {
-    k: u8,
-    picks: []u32, // host-mapped, state.max_rows words, at `picks_dev` on the device
-    picks_dev: u64,
-    out: []const u32, // host-mapped, state.max_rows rows of `stride` words, at `out_dev`
-    out_dev: u64,
-    stride: usize,
-    ctx: *anyopaque,
-    call: *const fn (ctx: *anyopaque, words: []const u32, picks: []const u32) anyerror!void, // rows in prompt order
 };
 
 /// Serial rounds a host keeps queued ahead of the one it reads.
@@ -413,7 +403,7 @@ pub const Engine = struct {
             if (shared) |ad| if (f.route.decision(0) != null) try e.trainOps().latch(ad.score, ad.need, ad.latch, e.slot, true);
             e.pos += @intCast(chunk.len);
             const known = @min(chunk.len, prompt.len - 1 - s);
-            if (e.prompt_rows) |p| try e.promptRows(p, prompt[s + 1 ..][0..known]);
+            if (e.prompt_rows) |p| try prompt_rows.run(e, p, prompt[s + 1 ..][0..known]);
             if (head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known]);
             s = end;
             if (keep) |k| if (s <= std.math.maxInt(u32) and std.mem.indexOfScalar(u32, k.at, @intCast(s)) != null) k.call(k.ctx, @intCast(s));
@@ -451,19 +441,6 @@ pub const Engine = struct {
 
     fn trainOps(e: *const Engine) train_ops.Ops {
         return .{ .k = &e.k.train, .s = e.stream };
-    }
-
-    /// The chunk's rows (in p_hidden) that predict `next` through the head, state.max_rows at a time.
-    fn promptRows(e: *Engine, p: PromptRows, next: []const u32) !void {
-        var r: usize = 0;
-        while (r < next.len) : (r += state.max_rows) {
-            const n = @min(state.max_rows, next.len - r);
-            @memcpy(p.picks[0..n], next[r..][0..n]);
-            try e.ops().prefillDense(e.b.p_hidden + r * @as(u64, e.c.hidden) * 2, e.w.head, e.b.logits, n);
-            try e.ops().logprobRows(e.b.logits, e.c.vocab, p.picks_dev, p.k, true, p.out_dev, n);
-            try e.stream.synchronize();
-            try p.call(p.ctx, p.out[0 .. n * p.stride], p.picks[0..n]);
-        }
     }
 
     /// Whole chunks a prompt call runs as staggered segments from here on; their streams and scratch are made now.

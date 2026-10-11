@@ -15,7 +15,6 @@ const Info = api.Info;
 const Memory = api.Memory;
 const Reason = api.Reason;
 const Stats = api.Stats;
-const SubmitError = api.SubmitError;
 
 pub const LaneHost = struct {
     gpa: Allocator,
@@ -131,7 +130,7 @@ pub const LaneHost = struct {
         return self(ctx).info_;
     }
 
-    fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) SubmitError!void {
+    fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) api.SubmitError!void {
         const h = self(ctx);
         const job = h.gpa.create(Job) catch return error.Busy;
         job.* = .{ .host = h, .id = id, .request = request, .sink = sink };
@@ -451,7 +450,6 @@ pub const LaneHost = struct {
                 return host.foregroundWaiting() or host.cancels.items.len > 0 or host.closing;
             }
         };
-        job.began = began;
         const paused = lone.run(lone.ctx, &job.stream, .{ .ctx = h, .committed = Hooks.committed, .yield = Hooks.yield });
         h.lone_job = null;
         const handed = paused catch |e| {

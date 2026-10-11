@@ -290,7 +290,7 @@ pub fn probabilityOptions(cx: *Cx, body: Value, supported: bool) errors.Refused!
     return count;
 }
 
-/// ``/v1/completions``' ``logprobs``: n must be 1; an integer count of alternatives, 0 through 20, or null when not asked.
+/// ``/v1/completions``' ``logprobs``: n must be 1; how many alternatives (0 through 20), or null when not asked.
 pub fn legacyLogprobs(cx: *Cx, body: Value, supported: bool) errors.Refused!?u8 {
     if (body.field("n")) |n| if (n != .int or !std.mem.eql(u8, n.int, "1")) return cx.refuse("n must be 1; multiple choices are not supported");
     const asked = body.field("logprobs") orelse return null;

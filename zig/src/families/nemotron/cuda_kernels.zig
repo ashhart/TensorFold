@@ -183,7 +183,7 @@ pub const Ops = struct {
         try o.go(o.k.grammar_mask, .{ rows, 1, 1 }, 256, 0, &a);
     }
 
-    /// sample.cu: bf16 logits rows' lanes.logprob words at `out`: each pick's logit, `k` best and, with `rank`, its rank.
+    /// sample.cu: bf16 logits rows' lanes.logprob words at `out`: each pick's logit, `k` best, `rank`: its rank.
     pub fn logprobRows(o: Ops, logits: u64, vocab: usize, picks: u64, k: u8, rank: bool, out: u64, rows: usize) !void {
         var a: cuda.Args = .{};
         a.add(logits);

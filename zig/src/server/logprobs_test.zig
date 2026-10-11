@@ -1,4 +1,4 @@
-//! `logprobs` on /v1/chat/completions: rows cover the answer as `content` does, and the 0.6.6 refusals hold; `prompt_logprobs` on /v1/completions.
+//! `logprobs`: rows cover the answer as `content` does, the 0.6.6 refusals hold; `prompt_logprobs` on /v1/completions.
 const std = @import("std");
 const api = @import("engine_api");
 const server = @import("root.zig");
@@ -70,7 +70,7 @@ const Text = struct {
     }
 };
 
-/// Answers `reply` in two rounds with rows: token i logprob -(i + 1) / 4, best tokens itself then 'z'; prompt rows on even positions rank their token first.
+/// Answers `reply` in two rounds; token i at -(i + 1) / 4, best itself then 'z'; even prompt rows rank their token 1.
 const Script = struct {
     reply: []const u32,
     asked: ?u8 = null,
