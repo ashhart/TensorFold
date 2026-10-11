@@ -327,11 +327,14 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         const again = try slide_ask.askBaseAt(srv, cx, null, ask_for, 32 * @as(i64, @intCast(count)), wording_temperature, gone);
         try take(srv, cx, &got, fact, f, try wording.questions(a, again.content, count), end, parts.thinks, parts.document, gone);
     }
-    // "Do I like blue?" after "I like red." learned as the model answers it knowing the fact: not every colour a yes
+    // "Do I like blue?" (no) and the list's own "Do I like red?" (yes) learned as the model answers knowing the fact
     if (!parts.document and language == null) {
         const asked_other = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.other_values_prompt, .{ fact, other_values, other_values }), 32 * other_values, gone);
+        var built: std.ArrayList([]const u8) = .empty;
+        try built.appendSlice(a, try wording.questions(a, asked_other.content, other_values));
+        for (qs) |q| if (wording.yesNo(q) and wording.tells(fact, "", "", q)) try built.append(a, q);
         got.unjudged = true;
-        try take(srv, cx, &got, fact, f, try wording.questions(a, asked_other.content, other_values), end, parts.thinks, parts.document, gone);
+        try take(srv, cx, &got, fact, f, built.items, end, parts.thinks, parts.document, gone);
         got.unjudged = false;
     }
     // the kept questions asked again as "Do you remember...?", which the model otherwise refuses
