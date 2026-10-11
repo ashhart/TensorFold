@@ -30,7 +30,7 @@ const refit_above: f32 = 0.5; // an earlier neuron is refitted only where it fir
 pub const Key = enum(u2) { reply, subject, value };
 
 /// Keying: auto gives the subject the share of questions naming it (if half or more), the rest to the reply.
-pub const Mode = enum { auto, reply, subject };
+pub const Mode = enum { auto, reply, subject, both }; // both: half at the subject, half at the reply (relation-aware)
 
 /// A neuron the open fact took.
 const Taken = struct { slot: usize, neuron: usize, key: Key };
@@ -160,6 +160,7 @@ pub fn Pocket(comptime T: type) type {
             };
             if (named == 0 or p.mode == .reply) return .{ rest, 0, on_value };
             if (p.mode == .subject) return .{ 0, rest, on_value };
+            if (p.mode == .both) return .{ rest / 2, rest - rest / 2, on_value };
             if (2 * named < asked) return .{ rest, 0, on_value };
             const on = (rest * named + asked / 2) / asked;
             return .{ rest - on, on, on_value };
