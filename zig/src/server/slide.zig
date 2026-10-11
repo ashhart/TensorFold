@@ -222,6 +222,7 @@ fn saveAll(srv: *Server, a: Allocator) void {
         .refused => "the engine could not take the save",
         else => null,
     };
+    if (failed) |why| log.line("slide: the learned neurons could not be saved into the model's files: {s}", .{why});
     srv.slide.saveEnded(srv.config.model_dir, seconds(srv, began), failed);
 }
 

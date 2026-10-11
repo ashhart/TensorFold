@@ -31,6 +31,18 @@ pub fn linked(arena: Allocator, io: Io, dir: []const u8) !?[]const u8 {
     return null;
 }
 
+/// A shared expert's projection config.json keeps unquantized, as releases up to 1.0.5 saved lessons (null: none).
+pub fn plainShared(arena: Allocator, io: Io, dir: []const u8) !?[]const u8 {
+    const config = try readJson(arena, io, try std.fs.path.join(arena, &.{ dir, "config.json" }));
+    for ([_][]const u8{ "quantization", "quantization_config" }) |key| {
+        const q = field(config, key) catch continue;
+        if (q != .object) continue;
+        var it = q.object.iterator();
+        while (it.next()) |e| if (std.mem.indexOf(u8, e.key_ptr.*, "shared_experts.") != null and e.value_ptr.* == .bool and !e.value_ptr.bool) return try arena.dupe(u8, e.key_ptr.*);
+    }
+    return null;
+}
+
 /// Applies `edits` at `dir`: the touched shards, then the index, then config.json marks each module unquantized.
 pub fn bake(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replacement) !void {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
@@ -514,4 +526,22 @@ test "a folder whose shard is a symlink or a hard link is refused for learning; 
     try tmp.dir.deleteFile(io, "model-00002-of-00002.safetensors");
     try tmp.dir.hardLink("blobs/b2", tmp.dir, "model-00002-of-00002.safetensors", io, .{});
     try std.testing.expectEqualStrings("model-00002-of-00002.safetensors", (try linked(arena, io, dir)).?);
+}
+
+test "a shared expert an earlier release saved unquantized is found; quantized ones and other modules pass" {
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fs.path.join(arena, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data =
+        \\{"quantization":{"group_size":64,"bits":4,"backbone.layers.9.mixer.out_proj":false}}
+    });
+    try std.testing.expect((try plainShared(arena, io, dir)) == null);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data =
+        \\{"quantization":{"group_size":64,"bits":4,"backbone.layers.15.mixer.shared_experts.down_proj":false}}
+    });
+    try std.testing.expectEqualStrings("backbone.layers.15.mixer.shared_experts.down_proj", (try plainShared(arena, io, dir)).?);
 }

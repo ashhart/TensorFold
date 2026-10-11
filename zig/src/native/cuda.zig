@@ -332,6 +332,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
             problem.* = try std.fmt.allocPrint(a, "--slide: the native CUDA engine cannot learn into {s} checkpoints yet", .{o.model_type});
             return null;
         }
+        if (try F.slide.plainShared(a, io, o.dir)) |name| {
+            problem.* = try std.fmt.allocPrint(a, "--slide adds learned neurons beside every shared expert, and {s} in {s} is unquantized, as TensorFold 1.0.3 to 1.0.5 saved their lessons: serve this folder without --slide (what it learned stays), or teach a fresh copy", .{ name, o.dir });
+            return null;
+        }
         if (try F.slide.linked(a, io, o.dir)) |name| {
             problem.* = try std.fmt.allocPrint(a, "--slide rewrites the model's own files, and {s} in {s} is a link to data another file shares (a Hugging Face cache's blob, or a hard link), so learning would change that file too: serve a copy made with `cp -RL` (a copy that follows links)", .{ name, o.dir });
             return null;
