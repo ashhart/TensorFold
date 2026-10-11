@@ -16,6 +16,7 @@ pub const Generation = struct {
     proposer: ?Proposer = null,
     matcher: @import("round_gpu.zig").Matcher,
     commit: @import("core").tree_commit_gpu.Ops,
+    keep: ?mtl.CommandBuffer = null, // the last round's cache and state commit, running behind the drafter
     pub fn init(a: std.mem.Allocator, runner: *Runner, draft: *Draft) !Generation {
         if (runner.model != draft.backend.target or runner.model.config.hidden != draft.graph.config.hidden or runner.model.config.layers != draft.graph.config.target_layers) return error.TargetBinding;
         runner.capture_taps = true;
@@ -31,12 +32,17 @@ pub const Generation = struct {
         return .{ .allocator = a, .runner = runner, .draft = draft, .kept = kept, .taps = taps, .matcher = matcher, .commit = commit };
     }
     pub fn deinit(g: Generation) void {
+        if (g.keep) |cb| {
+            cb.wait();
+            cb.release();
+        }
         g.commit.deinit();
         g.matcher.deinit();
         g.kept.deinit();
         g.taps.deinit();
     }
     fn absorb(g: *Generation, path: []const u32) !void {
+        std.debug.assert(g.keep == null);
         @memcpy(g.kept.slice(u32, path.len), path);
         const cb = g.runner.model.queue.commandBuffer();
         const e = cb.compute(.serial);
@@ -49,10 +55,12 @@ pub const Generation = struct {
         if (g.draft.committed_end != g.runner.offsets[0]) return error.BadDraftPosition;
     }
     pub fn advance(g: *Generation, token: u32) !void {
+        std.debug.assert(g.keep == null);
         try (TargetSession.Session{ .runner = g.runner }).step(token);
         try g.absorb(&.{0});
     }
     pub fn promptChunk(g: *Generation, ids: []const u32, last: bool) !void {
+        std.debug.assert(g.keep == null);
         if (g.runner.failed or g.draft.backend.failed or g.draft.committed_end != g.runner.offsets[0] or ids.len == 0 or ids.len > 128) return error.BadDraftContext;
         try (TargetSession.Session{ .runner = g.runner }).promptChunk(ids, last);
         var path: [128]u32 = undefined;
@@ -61,6 +69,7 @@ pub const Generation = struct {
     }
     /// `promptChunk` with decoded rows' arithmetic (an earlier reply's tokens).
     pub fn decodeChunk(g: *Generation, ids: []const u32, last: bool) !void {
+        std.debug.assert(g.keep == null);
         if (g.runner.failed or g.draft.backend.failed or g.draft.committed_end != g.runner.offsets[0] or ids.len == 0 or ids.len > 128) return error.BadDraftContext;
         try (TargetSession.Session{ .runner = g.runner }).decodeChunk(ids, last);
         var path: [128]u32 = undefined;
@@ -68,6 +77,7 @@ pub const Generation = struct {
         try g.absorb(path[0..ids.len]);
     }
     pub fn prefill(g: *Generation, ids: []const u32, chunk: usize) !void {
+        std.debug.assert(g.keep == null);
         if (g.runner.failed or g.draft.backend.failed or g.draft.backend.frame.active or g.draft.backend.transaction != null or g.draft.committed_end != 0 or g.runner.offsets[0] != 0 or chunk == 0 or chunk > 128) return error.BadDraftContext;
         var first: usize = 0;
         while (first < ids.len) {
@@ -76,26 +86,55 @@ pub const Generation = struct {
             first += count;
         }
     }
+    /// A round's keep runs behind the drafter; it ends before the next verify and before a run returns.
+    fn finishKeep(g: *Generation) !void {
+        const cb = g.keep orelse return;
+        g.keep = null;
+        defer cb.release();
+        cb.wait();
+        if (cb.failure() != null) {
+            g.runner.failed = true;
+            return error.DraftKeepGpuFailure;
+        }
+    }
     fn accept(g: *Generation, round: *const Round, ids: []const u32, parents: []const i32, budget: u32, eos: []const u32) !@import("core").tree_round.Decoded {
+        // the picks rewrite the matcher's result, which a pending keep still reads
+        std.debug.assert(g.keep == null);
         errdefer g.runner.failed = true;
         try g.runner.taps.complete();
-        const cb = g.runner.model.queue.commandBuffer();
-        const e = cb.compute(.concurrent); // the matcher and keep fence their own dependencies; taps and head read only the matcher's result
+        const queue = g.runner.model.queue;
+        // the picks, the accepted rows' taps and the head row: all the host waits for
+        const pick = queue.commandBuffer();
+        // the matcher and keep fence their own dependencies; taps and head read only the matcher's result
+        const e = pick.compute(.concurrent);
         var ended = false;
         errdefer if (!ended) e.end();
         const logits = g.runner.model.frame.get(.logits);
         const width: u32 = @intCast(g.runner.model.config.vocab);
         const shape = try g.matcher.encode(e, .{ .buf = logits.buffer, .off = logits.offset }, ids, parents, width, budget, eos);
         const result = @import("core").tree_commit_gpu.Ref{ .buf = g.matcher.buffers[4] };
-        try g.runner.keepDevice(round, e, g.commit, result);
         try g.commit.taps(e, result, .{ .buf = g.runner.taps.buffer }, .{ .buf = g.taps }, .{ .rows = shape.rows, .width = g.runner.taps.width, .capacity = g.runner.taps.capacity, .planes = 5 });
         try g.commit.head(e, result, .{ .buf = logits.buffer, .off = logits.offset }, .{ .rows = shape.rows, .width = width, .stride = width });
         e.end();
         ended = true;
-        cb.commit();
-        cb.wait();
-        if (cb.failure() != null) return error.DraftKeepGpuFailure;
+        pick.commit();
+        var waited = false;
+        errdefer if (!waited) pick.wait();
+        // encoded while the picks run, committed once they end
+        const keep = queue.commandBuffer();
+        const k = keep.compute(.concurrent);
+        var kept = false;
+        errdefer if (!kept) k.end();
+        try g.runner.keepDevice(round, k, g.commit, result);
+        k.end();
+        kept = true;
+        pick.wait();
+        waited = true;
+        if (pick.failure() != null) return error.DraftKeepGpuFailure;
         const accepted = try g.matcher.read(shape);
+        // committed without a wait: the drafter must not read or write what the keep writes until finishKeep
+        keep.commit();
+        g.keep = keep.retain();
         try g.runner.completeDeviceKeep(round, accepted.path);
         try g.draft.absorb(.{ .buf = g.taps }, @intCast(accepted.path.len));
         if (g.draft.committed_end != g.runner.offsets[0]) return error.BadDraftPosition;
@@ -132,8 +171,10 @@ pub const Generation = struct {
         @memcpy(ids[1..], tree.tokens);
         var round = try Round.init(g.allocator, &.{.{ .slot = 0, .start = g.runner.offsets[0], .capacity = g.runner.capacity, .ids = ids, .parents = parents }}, @intCast(g.runner.model.config.conv_kernel), g.runner.slots, @intCast(g.runner.model.config.vocab));
         defer round.deinit();
+        errdefer g.finishKeep() catch {};
         try g.runner.verifyHead(&round, .all);
         const accepted = try g.accept(&round, ids, parents, remaining, eos);
+        try g.finishKeep();
         if (accepted.path.len == 0 or accepted.tokens.len == 0 or accepted.tokens.len > @min(16, remaining)) return error.EmptyAcceptedDraft;
         return .{ .tokens = try g.allocator.dupe(u32, accepted.tokens), .rounds = 1, .verified = ids.len, .matched = accepted.matched, .min_rows = @intCast(ids.len) };
     }
@@ -143,6 +184,7 @@ pub const Generation = struct {
         for (eos) |token| if (token >= g.runner.model.config.vocab) return error.BadDraftOptions;
         var tokens: std.ArrayList(u32) = .empty;
         errdefer tokens.deinit(g.allocator);
+        errdefer g.finishKeep() catch {};
         var rounds: usize = 0;
         var verified: usize = 0;
         var matched: usize = 0;
@@ -165,6 +207,7 @@ pub const Generation = struct {
             @memcpy(ids[1..], tree.tokens);
             var round = try Round.init(g.allocator, &.{.{ .slot = 0, .start = g.runner.offsets[0], .capacity = g.runner.capacity, .ids = ids, .parents = parents }}, @intCast(g.runner.model.config.conv_kernel), g.runner.slots, @intCast(g.runner.model.config.vocab));
             defer round.deinit();
+            try g.finishKeep();
             try g.runner.verifyHead(&round, .all);
             rounds += 1;
             verified += ids.len;
@@ -175,6 +218,7 @@ pub const Generation = struct {
             if (accepted.path.len == 0) return error.EmptyAcceptedDraft;
             if (accepted.pending) |next| pending = next else break;
         }
+        try g.finishKeep();
         return .{ .tokens = try tokens.toOwnedSlice(g.allocator), .rounds = rounds, .verified = verified, .matched = matched, .min_rows = min_rows };
     }
 };

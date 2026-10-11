@@ -332,6 +332,8 @@ pub const Metal = struct {
     /// One command buffer keeps slot 0's path rows, gathers their taps and moves its last logits to row 0.
     fn commitDevice(b: *Metal, d: *Draft, path: []const u32) !void {
         const g = &d.generation;
+        // the result below is host-written, and a pending keep reads it
+        std.debug.assert(g.keep == null);
         const r = b.runner;
         const result: *contract.Result = @ptrCast(@alignCast(g.matcher.buffers[4].contents()));
         result.* = .{ .status = 0, .stop = 0, .nonfinite = 0, .consumed_count = @intCast(path.len), .emitted_count = @intCast(path.len), .matched_count = 0, .bonus_emitted = 0, .pending_valid = 0, .pending_token = 0, .reserved = 0, .path = @splat(0), .tokens = @splat(0) };
