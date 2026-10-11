@@ -1,6 +1,7 @@
 //! What the HIP engine may serve: the CUDA path's memory rules (cuda_memory.zig) and the window and weights it reads.
 const std = @import("std");
 const memory = @import("cuda_memory");
+const Context = @import("context.zig").Context;
 const Allocator = std.mem.Allocator;
 
 pub const MemInfo = memory.MemInfo;
@@ -43,6 +44,22 @@ pub fn weightBytes(io: std.Io, dir: []const u8) u64 {
         total += st.size;
     }
     return total;
+}
+
+/// What a plan may take on `ctx`'s GPU, as the native backends count it: free (host's if integrated), reserve, cap.
+pub fn budget(gpa: Allocator, io: std.Io, ctx: Context) !Pool {
+    const unified = (try ctx.attribute(.integrated)) != 0;
+    const card = try ctx.memInfo();
+    const text = if (unified) procText(gpa, io, "/proc/meminfo") else null;
+    defer if (text) |t| gpa.free(t);
+    const c = counts(unified, .{ .total = card.total, .available = card.free }, text) catch return error.HostMemoryUnavailable;
+    const reserve = reserveBytes(getenv("TENSORFOLD_MEMORY_RESERVE_GIB"), c.total, unified) catch return error.BadReserve;
+    const limit = limitBytes(getenv("TENSORFOLD_HIP_MEMORY_LIMIT_GB")) catch return error.BadLimit;
+    return .{ .free = c.available, .total = c.total, .reserve = reserve, .limit = limit, .unified = unified };
+}
+
+fn getenv(name: [:0]const u8) ?[]const u8 {
+    return std.mem.span(std.c.getenv(name) orelse return null);
 }
 
 /// A /proc file's text, streamed: procfs reports size 0, and a positional read (readFileAlloc) stops there.

@@ -219,14 +219,7 @@ pub const Engine = struct {
 
     /// The memory a plan may take, as the native backends count it: free (host's when integrated), reserve and cap.
     pub fn budget(e: *const Engine, io: std.Io) !admission.Pool {
-        const unified = (try e.ctx.attribute(.integrated)) != 0;
-        const card = try e.ctx.memInfo();
-        const text = if (unified) admission.procText(e.gpa, io, "/proc/meminfo") else null;
-        defer if (text) |t| e.gpa.free(t);
-        const counts = admission.counts(unified, .{ .total = card.total, .available = card.free }, text) catch return error.HostMemoryUnavailable;
-        const reserve = admission.reserveBytes(getenv("TENSORFOLD_MEMORY_RESERVE_GIB"), counts.total, unified) catch return error.BadReserve;
-        const limit = admission.limitBytes(getenv("TENSORFOLD_HIP_MEMORY_LIMIT_GB")) catch return error.BadLimit;
-        return .{ .free = counts.available, .total = counts.total, .reserve = reserve, .limit = limit, .unified = unified };
+        return admission.budget(e.gpa, io, e.ctx);
     }
 
     /// Load and size in one: `o.capacity` positions, refused when the plan does not fit the memory.
@@ -405,7 +398,3 @@ pub const Engine = struct {
         try lane_round.flush(e);
     }
 };
-
-fn getenv(name: [:0]const u8) ?[]const u8 {
-    return std.mem.span(std.c.getenv(name) orelse return null);
-}
