@@ -95,6 +95,23 @@ test "a planned family's own grid gives the starts when a request names none, an
     try std.testing.expectEqual(fresh(&t2), f.pass(&s, &t2, p2));
 }
 
+test "a planned family keeps marks on a short prompt; an unplanned one waits for min_prompt" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    const t1 = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+    var planned = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .planned = true, .grid = 4 }, 1 << 20);
+    defer planned.deinit();
+    const p1 = try planned.begin(a, &t1, 7, &.{}, &.{}, null, &.{});
+    try std.testing.expectEqualSlices(u32, &.{4}, p1.marks); // 10 tokens, under the default min_prompt
+    var serial = Store.init(gpa, f.snapshots(), .{ .lookahead = 1 }, 1 << 20);
+    defer serial.deinit();
+    const p2 = try serial.begin(a, &t1, 7, &.{}, &.{}, null, &.{});
+    try std.testing.expectEqual(@as(usize, 0), p2.marks.len);
+}
+
 test "eviction frees a conversation's superseded state first, then the oldest; a state past the budget is refused" {
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
