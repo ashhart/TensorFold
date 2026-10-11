@@ -9,21 +9,9 @@ pub const Tensor = table.Tensor;
 /// A projection as its format read it from the checkpoint.
 pub const Projection = quant.Host;
 
-/// A layer's E + 1 experts, shared last: `fused` is gate then up along N per expert, or up alone when not `gated`.
-pub const Experts = struct {
-    fused: Projection,
-    gated: bool,
-    down: Projection,
-    /// The expert MLP's inner width (rows of the gate, and of the up).
-    width: usize,
-    /// The model width (rows of the down).
-    dims: usize,
-    /// E + 1.
-    count: usize,
-};
-
-/// The router rows [E + 1, D] with the shared gate last, in bf16 and widened to `rows32`; `remap` is a rank's own ids.
-pub const Routed = struct { router: Tensor, rows32: Tensor, experts: Experts, top_k: usize, remap: ?Tensor = null };
+/// A layer's E + 1 experts, shared last, and its router rows (core/quant/experts.zig).
+pub const Experts = quant.experts.Experts;
+pub const Routed = quant.experts.Routed;
 
 pub const DenseMlp = struct { gate: Projection, up: Projection, down: Projection };
 

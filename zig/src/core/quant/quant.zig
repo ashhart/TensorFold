@@ -7,6 +7,7 @@ pub const slice = @import("slice.zig");
 pub const convert = @import("convert.zig");
 pub const mlx = @import("mlx.zig");
 pub const dense = @import("dense.zig");
+pub const experts = @import("experts.zig");
 /// FP8 and NVFP4 values and fp64 references; host only (no Format: their kernels' layouts are each backend's).
 pub const fp8 = @import("fp8.zig");
 pub const nvfp4 = @import("nvfp4.zig");
@@ -200,6 +201,7 @@ test {
     _ = convert;
     _ = mlx;
     _ = dense;
+    _ = experts;
     _ = fp8;
     _ = nvfp4;
 }

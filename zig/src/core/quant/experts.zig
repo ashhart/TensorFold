@@ -1,28 +1,42 @@
-//! The Python loader's `_routed`, `_experts` and `_affine_side`: router rows and the stacked affine experts.
+//! A MoE layer's router rows and its affine experts stacked with the shared expert last, any table with has/get/width.
 
 const std = @import("std");
-const quant = @import("core").quant;
-const table = @import("table.zig");
-const convert = quant.convert;
-const config = @import("config.zig");
-const host = @import("host.zig");
-const projection = @import("projection.zig");
+const types = @import("types.zig");
+const convert = @import("convert.zig");
+const mlx = @import("mlx.zig");
+const slice = @import("slice.zig");
+const quant = @import("quant.zig");
 
-const Tensor = table.Tensor;
-const Table = table.Table;
-const DType = table.DType;
-pub const Error = projection.Error;
+const Tensor = types.Tensor;
+const DType = types.DType;
+const Allocator = std.mem.Allocator;
+const refuse = types.refuse;
+const join = types.join;
 
-fn refuse(key: []const u8, what: []const u8) error{UnexpectedTensor} {
-    std.log.err("{s}: {s}", .{ key, what });
-    return error.UnexpectedTensor;
-}
+/// A layer's E + 1 experts, shared last: `fused` is gate then up along N per expert, or up alone when not `gated`.
+pub const Experts = struct {
+    fused: quant.Host,
+    gated: bool,
+    down: quant.Host,
+    /// The expert MLP's inner width (rows of the gate, and of the up).
+    width: usize,
+    /// The model width (rows of the down).
+    dims: usize,
+    /// E + 1.
+    count: usize,
+};
+
+/// The router rows [E + 1, D] with the shared gate last, in bf16 and widened to `rows32`; `remap` is a rank's own ids.
+pub const Routed = struct { router: Tensor, rows32: Tensor, experts: Experts, top_k: usize, remap: ?Tensor = null };
+
+/// What the router's rows are checked against: the routed experts, the model width, the experts a token takes.
+pub const Shape = struct { experts: usize, hidden: usize, top_k: usize };
 
 /// `_router_rows`: one router's rows [R, D] as fp32, a float tensor as stored or an affine group table unpacked.
-fn routerRows(a: std.mem.Allocator, t: *const Table, key: []const u8) Error!struct { data: []f32, rows: usize, cols: usize } {
+fn routerRows(a: Allocator, t: anytype, key: []const u8) !struct { data: []f32, rows: usize, cols: usize } {
     var buf: [256]u8 = undefined;
     var other: [256]u8 = undefined;
-    const weight = try t.get(projection.join(&buf, &.{ key, ".weight" }));
+    const weight = try t.get(join(&buf, &.{ key, ".weight" }));
     if (convert.isFloat(weight.dtype)) {
         if (weight.rank != 2) return refuse(key, "router weight must be (rows, hidden)");
         const wide = try convert.float32(a, weight);
@@ -31,20 +45,20 @@ fn routerRows(a: std.mem.Allocator, t: *const Table, key: []const u8) Error!stru
         return .{ .data = out, .rows = weight.shape[0], .cols = weight.shape[1] };
     }
     const group = (try t.width(key)).group;
-    const scale = try t.get(projection.join(&buf, &.{ key, ".scales" }));
-    const bias = try t.get(projection.join(&other, &.{ key, ".biases" }));
-    const data = try quant.mlx.dequant(a, weight, scale, bias, group);
+    const scale = try t.get(join(&buf, &.{ key, ".scales" }));
+    const bias = try t.get(join(&other, &.{ key, ".biases" }));
+    const data = try mlx.dequant(a, weight, scale, bias, group);
     return .{ .data = data, .rows = weight.shape[0], .cols = scale.shape[1] * group };
 }
 
 /// The routed stack and the shared expert's tensor for one suffix, as `_shared_last` checks them.
 const Pair = struct { mine: Tensor, one: Tensor };
 
-fn pair(t: *const Table, stack_key: []const u8, shared: []const u8, suffix: []const u8) Error!Pair {
+fn pair(t: anytype, stack_key: []const u8, shared: []const u8, suffix: []const u8) !Pair {
     var b1: [256]u8 = undefined;
     var b2: [256]u8 = undefined;
-    var mine = try t.get(projection.join(&b1, &.{ stack_key, suffix }));
-    var one = try t.get(projection.join(&b2, &.{ shared, suffix }));
+    var mine = try t.get(join(&b1, &.{ stack_key, suffix }));
+    var one = try t.get(join(&b2, &.{ shared, suffix }));
     if (mine.dtype == .u32) mine.dtype = .i32;
     if (one.dtype == .u32) one.dtype = .i32;
     if (one.rank == mine.rank and one.shape[0] == 1) {
@@ -56,7 +70,7 @@ fn pair(t: *const Table, stack_key: []const u8, shared: []const u8, suffix: []co
 }
 
 /// `fused` words, scales and biases of `srcs` stacked per expert, each expert's slices side by side along N.
-fn stack(a: std.mem.Allocator, srcs: []const Pair, dtype: DType) Error!Tensor {
+fn stack(a: Allocator, srcs: []const Pair, dtype: DType) !Tensor {
     const count = srcs[0].mine.shape[0] + 1;
     const rest = srcs[0].mine.shape[2];
     var rows: usize = 0;
@@ -89,7 +103,7 @@ fn tableDtype(srcs: []const Pair, other: []const Pair) DType {
 /// One projection's tensors, checked as `_affine_side` does against (bits, group).
 const Part = struct { words: Pair, scales: Pair, biases: Pair };
 
-fn part(t: *const Table, stack_key: []const u8, shared: []const u8, w: config.Width) Error!Part {
+fn part(t: anytype, stack_key: []const u8, shared: []const u8, w: mlx.Width) !Part {
     const p: Part = .{
         .words = try pair(t, stack_key, shared, ".weight"),
         .scales = try pair(t, stack_key, shared, ".scales"),
@@ -102,7 +116,7 @@ fn part(t: *const Table, stack_key: []const u8, shared: []const u8, w: config.Wi
     return p;
 }
 
-fn side(a: std.mem.Allocator, parts: []const Part, w: config.Width) Error!host.Projection {
+fn side(a: Allocator, parts: []const Part, w: mlx.Width) !quant.Host {
     var words: [2]Pair = undefined;
     var scales: [2]Pair = undefined;
     var biases: [2]Pair = undefined;
@@ -123,22 +137,22 @@ fn side(a: std.mem.Allocator, parts: []const Part, w: config.Width) Error!host.P
 }
 
 /// `_experts`: a layer's E + 1 affine experts, the shared one last, gate and up fused per expert.
-pub fn experts(a: std.mem.Allocator, t: *const Table, prefix: []const u8) Error!host.Experts {
+pub fn experts(a: Allocator, t: anytype, prefix: []const u8) !Experts {
     var b: [4][256]u8 = undefined;
-    const mine = projection.join(&b[0], &.{ prefix, "switch_mlp." });
-    const shared = projection.join(&b[1], &.{ prefix, "shared_expert." });
-    if (!t.has(projection.join(&b[2], &.{ mine, "up_proj.weight" }))) {
-        if (t.has(projection.join(&b[2], &.{ mine, "up_proj.qweight" }))) return error.UnsupportedQuantization;
-        _ = try t.get(projection.join(&b[2], &.{ mine, "up_proj.weight" }));
+    const mine = join(&b[0], &.{ prefix, "switch_mlp." });
+    const shared = join(&b[1], &.{ prefix, "shared_expert." });
+    if (!t.has(join(&b[2], &.{ mine, "up_proj.weight" }))) {
+        if (t.has(join(&b[2], &.{ mine, "up_proj.qweight" }))) return error.UnsupportedQuantization;
+        _ = try t.get(join(&b[2], &.{ mine, "up_proj.weight" }));
     }
-    const gated = t.has(projection.join(&b[2], &.{ mine, "gate_proj.weight" }));
+    const gated = t.has(join(&b[2], &.{ mine, "gate_proj.weight" }));
     var names: [3][2][256]u8 = undefined;
     const keys = [3][]const u8{ "up_proj", "gate_proj", "down_proj" };
     var routed_keys: [3][]const u8 = undefined;
     var shared_keys: [3][]const u8 = undefined;
     for (keys, 0..) |k, i| {
-        routed_keys[i] = projection.join(&names[i][0], &.{ mine, k });
-        shared_keys[i] = projection.join(&names[i][1], &.{ shared, k });
+        routed_keys[i] = join(&names[i][0], &.{ mine, k });
+        shared_keys[i] = join(&names[i][1], &.{ shared, k });
     }
     const up_w = try t.width(routed_keys[0]);
     const down_w = try t.width(routed_keys[2]);
@@ -167,10 +181,10 @@ pub fn experts(a: std.mem.Allocator, t: *const Table, prefix: []const u8) Error!
 }
 
 /// `_routed`: router rows [E + 1, D] in bf16 (the shared expert's gate row last), widened once, and the experts.
-pub fn routed(a: std.mem.Allocator, t: *const Table, prefix: []const u8, spec: config.Spec) Error!host.Routed {
+pub fn routed(a: Allocator, t: anytype, prefix: []const u8, spec: Shape) !Routed {
     var b: [2][256]u8 = undefined;
-    const gate = try routerRows(a, t, projection.join(&b[0], &.{ prefix, "gate" }));
-    const shared_gate = try routerRows(a, t, projection.join(&b[1], &.{ prefix, "shared_expert_gate" }));
+    const gate = try routerRows(a, t, join(&b[0], &.{ prefix, "gate" }));
+    const shared_gate = try routerRows(a, t, join(&b[1], &.{ prefix, "shared_expert_gate" }));
     const rows = gate.rows + shared_gate.rows;
     if (gate.cols != shared_gate.cols or rows != spec.experts + 1 or gate.cols != spec.hidden) return refuse(prefix, "router rows do not fit E + 1 by hidden");
     const router = try a.alloc(u8, rows * gate.cols * 2);
@@ -190,4 +204,77 @@ pub fn routed(a: std.mem.Allocator, t: *const Table, prefix: []const u8, spec: c
         .experts = ex,
         .top_k = spec.top_k,
     };
+}
+
+/// A rank's contiguous routed experts, the shared one on rank 0, and the remap to its own ids (-1: another rank's).
+pub fn sliceRank(a: Allocator, x: *Routed, r: slice.Rank) slice.Error!void {
+    const total = x.experts.count - 1;
+    const part_n = try slice.even(total, r.world, "experts");
+    x.experts.fused = try quant.sliceStack(a, x.experts.fused, r, part_n);
+    x.experts.down = try quant.sliceStack(a, x.experts.down, r, part_n);
+    x.experts.count = part_n + @intFromBool(r.rank == 0);
+    const remap = try a.alloc(i32, total + 1);
+    @memset(remap, -1);
+    for (0..part_n) |i| remap[r.rank * part_n + i] = @intCast(i);
+    if (r.rank == 0) remap[total] = @intCast(part_n);
+    x.remap = .{ .dtype = .i32, .rank = 1, .shape = .{ total + 1, 1, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(remap) };
+}
+
+const Fake = struct {
+    map: std.StringHashMapUnmanaged(Tensor) = .empty,
+
+    pub fn has(f: *const Fake, key: []const u8) bool {
+        return f.map.contains(key);
+    }
+
+    pub fn get(f: *const Fake, key: []const u8) !Tensor {
+        return f.map.get(key) orelse error.MissingTensor;
+    }
+
+    pub fn width(_: *const Fake, _: []const u8) !mlx.Width {
+        return .{ .bits = 4, .group = 32 };
+    }
+};
+
+test "two routed experts and the shared one stack in order, and a rank keeps its own with the remap" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{};
+    // expert e's word w of row n is 100 e + 10 n + w; the shared expert's are 900 + 10 n + w
+    for ([_][]const u8{ "gate_proj", "up_proj", "down_proj" }) |name| {
+        const words = try a.alloc(u32, 2 * 2 * 4);
+        for (words, 0..) |*x, i| x.* = @intCast(100 * (i / 8) + 10 * ((i / 4) % 2) + i % 4);
+        const one = try a.alloc(u32, 2 * 4);
+        for (one, 0..) |*x, i| x.* = @intCast(900 + 10 * (i / 4) + i % 4);
+        const tables = try a.alloc(u16, 2 * 2);
+        @memset(tables, 0x3f80);
+        const shared_tables = try a.alloc(u16, 2);
+        @memset(shared_tables, 0x3f80);
+        for ([_][]const u8{ "weight", "scales", "biases" }) |suffix| {
+            const stacked = std.mem.eql(u8, suffix, "weight");
+            try f.map.put(a, try std.fmt.allocPrint(a, "mlp.switch_mlp.{s}.{s}", .{ name, suffix }), if (stacked)
+                .{ .dtype = .u32, .rank = 3, .shape = .{ 2, 2, 4, 1, 1 }, .bytes = std.mem.sliceAsBytes(words) }
+            else
+                .{ .dtype = .bf16, .rank = 3, .shape = .{ 2, 2, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(tables) });
+            try f.map.put(a, try std.fmt.allocPrint(a, "mlp.shared_expert.{s}.{s}", .{ name, suffix }), if (stacked)
+                .{ .dtype = .u32, .rank = 2, .shape = .{ 2, 4, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(one) }
+            else
+                .{ .dtype = .bf16, .rank = 2, .shape = .{ 2, 1, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(shared_tables) });
+        }
+    }
+    const ex = try experts(a, &f, "mlp.");
+    try std.testing.expect(ex.gated);
+    try std.testing.expectEqual(@as(usize, 3), ex.count);
+    var fused: [48]u32 = undefined;
+    @memcpy(std.mem.sliceAsBytes(&fused), ex.fused.mlx.words.bytes);
+    // expert 1: its gate rows, then its up rows; the shared expert last
+    try std.testing.expectEqualSlices(u32, &.{ 100, 101, 102, 103, 110, 111, 112, 113, 100, 101 }, fused[16..26]);
+    try std.testing.expectEqual(@as(u32, 900), fused[32]);
+    var r: Routed = .{ .router = undefined, .rows32 = undefined, .experts = ex, .top_k = 1 };
+    try sliceRank(a, &r, .{ .rank = 1, .world = 2 });
+    try std.testing.expectEqual(@as(usize, 1), r.experts.count);
+    var remap: [3]i32 = undefined;
+    @memcpy(std.mem.sliceAsBytes(&remap), r.remap.?.bytes);
+    try std.testing.expectEqualSlices(i32, &.{ -1, 0, -1 }, &remap);
 }
