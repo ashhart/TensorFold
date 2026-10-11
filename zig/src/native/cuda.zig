@@ -364,7 +364,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
             return null;
         }
         if (try F.plainShared(a, io, o.dir)) |name| {
-            problem.* = try std.fmt.allocPrint(a, "--slide adds learned neurons beside every shared expert, and {s} in {s} is unquantized, as TensorFold 1.0.3 to 1.0.5 saved their lessons: serve this folder without --slide (what it learned stays), or teach a fresh copy", .{ name, o.dir });
+            problem.* = try std.fmt.allocPrint(a, "--slide adds learned neurons beside every shared expert, and {s} in {s} is unquantized, as TensorFold 1.0.3 to 1.0.6 saved their lessons: serve this folder without --slide (what it learned stays), or teach a fresh copy", .{ name, o.dir });
             return null;
         }
         if (try F.linked(a, io, o.dir)) |name| {

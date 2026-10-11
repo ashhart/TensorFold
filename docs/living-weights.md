@@ -14,8 +14,8 @@ as Sliding Weights (experimental), and its flag and API use the name `slide`.
   with room for the model and a copy of it. On a GB10, `--slide` also keeps about 26 GiB of GPU memory for its
   trainer; on a Mac the trainer works on the model's own weights.
 - The Nemotron 3.5 Lightning MLX 4-bit checkpoint, the only model it learns into today.
-- A TensorFold build with the pocket learner described here (the release after 1.0.5). A folder taught by 1.0.3 to
-  1.0.5 still serves and answers from what it learned, but `--slide` refuses it: those releases saved lessons into
+- A TensorFold build with the pocket learner described here (the release after 1.0.6). A folder taught by 1.0.3 to
+  1.0.6 still serves and answers from what it learned, but `--slide` refuses it: those releases saved lessons into
   the shared experts the pocket widens. Teach a fresh copy instead.
 
 A folder that learned on either backend serves on the other.
@@ -171,7 +171,7 @@ data.
 | `--slide rewrites the model's own files, and … is a link to data another file shares` at startup | The folder holds links into the Hugging Face cache (or hard links); make the copy with `cp -cRL` (Linux: `cp -RL`) as in step 2 |
 | `--slide learns on a GB10 (sm_121) so far` at startup | CUDA learning is qualified on a GB10 only; serve this GPU without `--slide`, or teach on a Mac or a GB10 |
 | `--slide runs a prompt one chunk at a time` at startup | Serve it without `--segments` or `TF_CUDA_SEGMENTS` |
-| `--slide adds learned neurons beside every shared expert, and … is unquantized` at startup | The folder was taught by TensorFold 1.0.3 to 1.0.5; serve it without `--slide`, or teach a fresh copy |
+| `--slide adds learned neurons beside every shared expert, and … is unquantized` at startup | The folder was taught by TensorFold 1.0.3 to 1.0.6; serve it without `--slide`, or teach a fresh copy |
 | The answer has not changed yet | Wait for the `learned` event before asking |
 
 ## What to expect

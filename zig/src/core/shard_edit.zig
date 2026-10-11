@@ -31,7 +31,7 @@ pub fn linked(arena: Allocator, io: Io, dir: []const u8) !?[]const u8 {
     return null;
 }
 
-/// A shared expert's projection config.json keeps unquantized, as releases up to 1.0.5 saved lessons (null: none).
+/// A shared expert's projection config.json keeps unquantized, as releases up to 1.0.6 saved lessons (null: none).
 pub fn plainShared(arena: Allocator, io: Io, dir: []const u8) !?[]const u8 {
     const config = try readJson(arena, io, try std.fs.path.join(arena, &.{ dir, "config.json" }));
     for ([_][]const u8{ "quantization", "quantization_config" }) |key| {
