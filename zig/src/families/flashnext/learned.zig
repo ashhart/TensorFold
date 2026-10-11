@@ -26,7 +26,7 @@ pub fn writeFile(st: *const State, file: [:0]const u8) !void {
     errdefer _ = std.c.unlink(tmp);
     {
         defer _ = std.c.close(fd);
-        const head: Head = .{ .magic = FILE_MAGIC, .layout = @intFromEnum(st.layout), .at = st.at, .bytes = st.bytes, .hist = st.hist };
+        const head: Head = .{ .magic = FILE_MAGIC, .layout = @backingInt(st.layout), .at = st.at, .bytes = st.bytes, .hist = st.hist };
         try put(fd, std.mem.asBytes(&head));
         try put(fd, st.buf.contents()[0..st.bytes]);
         if (std.c.fsync(fd) != 0) return error.SnapshotWrite;
@@ -41,7 +41,7 @@ pub fn readFile(e: *Engine, gpa: std.mem.Allocator, at: usize, file: [:0]const u
     defer _ = std.c.close(fd);
     var head: Head = undefined;
     try get(fd, std.mem.asBytes(&head), 0);
-    const layout: u32 = @intFromEnum(snapshot.layoutOf(e));
+    const layout: u32 = @backingInt(snapshot.layoutOf(e));
     if (head.magic != FILE_MAGIC or head.at != at or head.layout != layout or head.bytes != snapshot.bytes(at)) return error.SnapshotRead;
     const st = try snapshot.blank(e, gpa, at);
     errdefer snapshot.drop(gpa, st);
