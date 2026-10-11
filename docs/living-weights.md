@@ -73,9 +73,9 @@ curl -N http://127.0.0.1:8080/v1/slide/learn \
 
 The reply streams progress as server-sent events: `fact` when it finds a fact in your text, `learning` when it starts on
 it, and `learned` when it is done. `"recalled": true` means it answered its held-out questions with the fact, and its
-change is kept. `false` means none of it is kept: the lesson is taken out whole before anything is written, and `message`
-says why, for example that the fact did not come back on its held-out questions or that it disturbed another answer. A fact takes
-two to four minutes.
+change is kept. `false` means none of it is kept: the lesson is taken out whole before anything is written, and
+`message` says why, for example that the fact did not come back on its held-out questions or that it disturbed another
+answer. A fact takes 1.5 to 3 minutes.
 
 ### 5. Ask
 
@@ -182,15 +182,16 @@ Living Weights is experimental. Measured on Nemotron 3.5 Lightning (MLX 4-bit) o
   another, each came back on both test questions on all three machines, with a client system message in front too,
   and after a plain restart. Unrelated questions kept their answers and no fact leaked into questions it does not
   answer. With thinking on, a fact sometimes misses one wording ("Do you remember what colour I like?"): the model
-  recalls the fact in its reasoning and stops there without a reply.
+  recalls the fact in its reasoning and stops there without a reply, or says it keeps no memory of past
+  conversations.
 - **Short documents.** From a three-sentence handbook (six facts) it answered 3 to 6 of 6 questions across five runs on
   both backends, with no drift. In two runs the founder's name also answered a question about another role ("Who is
   the head of marketing?"). A fact it cannot learn is left out, and `learned` says why.
 - **Long documents about one subject are the weak spot.** From a 21-fact company handbook it kept about half the facts
   and answered 6 of 16 questions, and with ten facts about the company kept, its answers about things the handbook does
   not say got worse, most with thinking on. Teach a few facts per subject, and always teach a copy.
-- **Time.** A fact takes about 1.5 to 2.5 minutes on an M5 Ultra or M3 Ultra and 2 to 4 minutes on a GB10, a good part
-  of it the model writing its own lesson. A document takes that per fact.
+- **Time.** A fact takes about 1.5 to 2.5 minutes on an M5 Ultra or M3 Ultra and 2.5 to 3 minutes on a GB10, a good
+  part of it the model writing its own lesson. A document takes that per fact.
 - **Memory.** On a Mac the trainer works on the model's own weights. On a GB10, `--slide` keeps about 26 GiB for its
   trainer, which is ready a few seconds after the server starts.
 - **Serving.** Without learned facts the server gives the same replies, token for token, at the same speed as without
