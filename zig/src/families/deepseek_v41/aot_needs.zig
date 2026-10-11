@@ -193,6 +193,7 @@ pub const Served = struct {
         o.stream_rb = try knobs.streamRb(&knobs.env); // TF_DSV41_STREAM_RB: the twin's variants
         o.index_bound = try knobs.indexBound(&knobs.env); // TF_DSV41_INDEX_BOUND: `_scores_b` / `_dtopk_b` variants
         o.mhc_site_rows = try knobs.mhcSiteRows(&knobs.env); // the site pieces' `_finish_k` rows
+        if (o.pf_overlap > 0) o.branches = (try @import("branches.zig").settings()).on;
         if (try knobs.indexBudget(&knobs.env)) |b| o.index_budget = b;
         // TF_DSV41_MHC_PFDEC: its norm is `_finish_k` without COEF at the windows it covers
         o.mhc_pf_rows = try knobs.mhcPfRows(&knobs.env);

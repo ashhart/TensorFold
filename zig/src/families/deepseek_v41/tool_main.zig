@@ -37,6 +37,7 @@ const usage =
     \\                   recipe/triton_fill.py compile; SIGS from its `sigs`)
     \\       tf-dsv41 kv paged|split|compact|park PACK REF OUT (a rank of TP=2 on the paged pool vs the pool reference)
     \\       tf-dsv41 forward-digests PACK REF OUT (our forward vs recipe/dsv41_forward_digests.py's run, one GPU)
+    \\       tf-dsv41 decode-tp PACK REF OUT (a rank of TP=2 over NCCL vs recipe/dsv41_decode_ref.py; TF_TP_RANK ...)
     \\       tf-dsv41 follow PACK ASSETS (a served model's rank > 0: rank 0's forward operations until it stops)
     \\       tf-dsv41 generate PACK ASSETS TRACE (rank 0: TRACE's prompts through the served engine, ids == recorded)
     \\       tf-dsv41 slot-drafts PACK ASSETS TRACE... (rank 0: drafts over several live slots, batched == alone == recorded)
@@ -52,6 +53,12 @@ const usage =
 
 pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len == 5 and std.mem.eql(u8, args[1], "decode-tp")) {
+        return @import("gate_decode_tp.zig").main(init.gpa, init.io, args[2], args[3], args[4]) catch |e| {
+            std.debug.print("FAIL tf-dsv41 decode-tp: {t}\n", .{e});
+            return 1;
+        };
+    }
     if (args.len == 6 and std.mem.eql(u8, args[1], "kv")) {
         return @import("gate_kv.zig").main(init.gpa, init.io, args[2], args[3], args[4], args[5]) catch |e| {
             std.debug.print("FAIL tf-dsv41 kv: {t}\n", .{e});

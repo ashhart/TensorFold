@@ -102,6 +102,9 @@ pub fn add(b: *std.Build, test_step: *std.Build.Step) void {
         .{ "test-dsv41-gm2pf", "gm2pf_test.zig", "DeepSeek-V4.1 x3gm v2 (TF_DSV41_GM_V2) on the real prefill emitter, host only" },
         .{ "test-dsv41-longpf", "longpf_test.zig", "DeepSeek-V4.1 long prompts (stream top-k, split KV's row blocks) on the real prefill emitter, host only" },
         .{ "test-dsv41-slot-drafts", "slot_drafts_test.zig", "DeepSeek-V4.1 DSpark drafting over several slots on the real emitter, host only" },
+        .{ "test-dsv41-rows", "rows_test.zig", "DeepSeek-V4.1 row mode (several slots) on the real emitter, host only" },
+        .{ "test-dsv41-wide", "wide_test.zig", "DeepSeek-V4.1 decode windows past 16 rows on the real emitter, host only" },
+        .{ "test-dsv41-knobs", "serve_knobs_test.zig", "DeepSeek-V4.1 serving knobs (fused dense prefill, rows, read-ahead) on the real prefill emitter, host only" },
     };
     for (suites) |x| {
         const run = b.addRunArtifact(b.addTest(.{ .root_module = rooted(b, host, .debug, x[1]) }));

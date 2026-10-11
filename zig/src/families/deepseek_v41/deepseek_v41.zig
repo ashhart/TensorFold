@@ -65,4 +65,6 @@ test {
     _ = @import("aot_needs.zig"); // the AOT variants the served config launches (and its test)
     _ = @import("aot_trace.zig"); // TF_DSV41_AOT_TRACE onto the AOT set
     _ = @import("boot_mem.zig"); // boot's memory figures and the rope upload
+    // performance extras: side streams, Engram gate, L2 prefetch, profile, device arena, the decode TP check
+    inline for (.{ @import("branches.zig"), @import("engram_gate.zig"), @import("engram_gate_fwd.zig"), @import("l2pf.zig"), @import("profile.zig"), @import("dev_arena.zig"), @import("gate_decode_tp.zig") }) |t| std.testing.refAllDecls(t);
 }

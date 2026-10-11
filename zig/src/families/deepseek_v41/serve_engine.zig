@@ -180,6 +180,7 @@ pub const Served = struct {
             const st = r.stats;
             try w.print("\"hits\": {d}, \"waited\": {d}, \"misses\": {d}, \"issued\": {d}, \"reads\": {d}, \"bytes\": {d}, \"wait_ms\": {d:.2}", .{ st.hits, st.waited, st.misses, st.issued, st.reads, st.bytes, @as(f64, @floatFromInt(st.wait_ns)) / 1e6 });
         } else try w.writeAll("\"rows\": null");
+        if (@import("engram_gate_fwd.zig").of(&m.f)) |g| try w.print(", \"gate_rounds\": {d}, \"gate_syncs\": {d}, \"gate_warm\": {d}, \"gate_failed\": {d}", .{ g.stats.rounds, g.stats.syncs, g.stats.warm, g.stats.failed });
         try w.writeAll("}");
         // the row windows' first uses (batch.zig): programs emitted and graphs captured, their host ms
         if (m.gt.rows) |b| {

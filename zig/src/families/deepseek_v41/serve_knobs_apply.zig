@@ -50,6 +50,8 @@ pub fn apply(f: *Forward, a: std.mem.Allocator, io: std.Io, rank: u32) !void {
     f.opts.pf_tbo = try pfTbo(&env);
     f.opts.stream_rb = try streamRb(&env);
     f.opts.index_bound = try indexBound(&env);
+    // TF_DSV41_BRANCHES: the side stream exists before any capture
+    if (f.branches == null) f.branches = try @import("branches.zig").install(f.gpa, f, rank);
     // TF_DSV41_PF_OVERLAP: the pieces' exchanges go on the branches' side stream (one peer: TP=2)
     f.opts.pf_overlap = try pfOverlap(&env);
     f.opts.pf_overlap_site = try pfOverlapSite(&env);

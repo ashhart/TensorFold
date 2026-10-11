@@ -16,8 +16,10 @@ const greedy_table: hooks.Greedy = .{ .argmax = greedy.argmax };
 pub fn open(f: *Forward) !void {
     hooks.install(.{
         .prefill = &@import("forward_prefill.zig").hooks_table,
+        .gate = &@import("engram_gate_fwd.zig").table,
         .round_graph = &round_graph_table,
         .greedy = &greedy_table,
+        .branches = &@import("branches.zig").hooks_table,
     });
     try @import("forward_prefill.zig").attach(f);
 }

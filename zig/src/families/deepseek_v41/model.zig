@@ -32,6 +32,7 @@ const batch = @import("batch.zig");
 const samp = @import("sampling_gpu.zig");
 const dspark_rows = @import("dspark_rows.zig");
 const dspark_slots = @import("dspark_slots.zig");
+const l2pf_mod = @import("l2pf.zig");
 const iface = @import("draft/iface.zig");
 
 pub const Options = struct {
@@ -97,6 +98,8 @@ pub const Model = struct {
     sessions: ?*sg.Sessions = null,
     /// live slots (TF_DSV41_SLOTS; > 1: stacked state and row-mode windows, batch.zig)
     slots: u32 = 1,
+    /// TF_DSV41_ARENA's sub-allocator (dev_arena.zig), for the process's lifetime
+    dev_arena: ?*@import("dev_arena.zig").Installed = null,
     /// the boot check's figures before the pool, for its measured end (kv_state.afterBoot)
     boot_check: ?kvs.Boot = null,
     slot_set: ?*slots_mod.SlotSet = null,
@@ -105,6 +108,8 @@ pub const Model = struct {
     slot_pass: ?*dspark_slots.SlotPass = null,
     /// the keyed sampler, every rank with TF_DSV41_SAMPLING=1 (requests with T > 0; followers run its gathers)
     sampler: ?*samp.GpuSampler = null,
+    /// TF_DSV41_L2PF (l2pf.zig): the filled prefetch tables and the runner's side stream
+    l2pf: ?*l2pf_mod.L2pf = null,
 
     /// The served engine's DSpark pass: several slots' (slot_pass), else the one-slot pass; null without drafts.
     pub fn draftPass(m: *Model) ?iface.Pass {
@@ -124,6 +129,7 @@ pub const Model = struct {
         m.io = io;
         // gpa.create applies no field defaults: optional parts start null so close() never frees garbage
         m.pass = null;
+        m.l2pf = null;
         m.sessions = null;
         m.slots = 1;
         m.slot_set = null;
@@ -136,6 +142,7 @@ pub const Model = struct {
         const cwd = std.Io.Dir.cwd();
         m.tcfg = try tp.Config.fromEnv();
         m.driver = try cuda.Driver.open();
+        try @import("dev_arena.zig").applySchedule(&m.driver, @intCast(m.tcfg.device)); // TF_CUDA_SCHED
         m.ctx = try cuda.Context.init(&m.driver, @intCast(m.tcfg.device));
         m.stream = try cuda.Stream.init(&m.driver, true);
         m.kernels = try dk.Kernels.load(&m.ctx);
@@ -145,6 +152,8 @@ pub const Model = struct {
         else
             &.{};
         try m.session.open(&m.driver, m.tcfg, image);
+        // TF_DSV41_ARENA: every device buffer from here on (weights, forms, roles, scratch) carved from large chunks
+        m.dev_arena = try @import("dev_arena.zig").install(gpa, &m.ctx, m.tcfg.rank);
         // a failure from here to serving: every rank down with its reason, the session closed before `m` is freed
         m.boot(gpa, io, pack_dir, assets, o) catch |err| {
             m.session.bootFailed(err);
@@ -223,6 +232,8 @@ pub const Model = struct {
         try @import("aot_trace.zig").attach(gpa, io, &m.aot, @import("aot_trace.zig").pathFromEnv());
         m.widths = try gate_forward.widths(a, &m.weights, &m.pl);
         m.runner = .{ .gpa = gpa, .d = &m.driver, .stream = m.stream, .kernels = &m.kernels, .triton = &m.aot, .weights = &m.weights };
+        // TF_DSV41_PROFILE=<file>: the served engine's eager windows and prefill segments timed, JSON written at close
+        m.runner.prof = if (try @import("profile.zig").Profile.fromEnv(gpa, &m.driver)) |p| p.timer() else null;
         const topp: ?f64 = if (std.c.getenv("TF_DSV41_EXPERT_TOPP")) |v| try std.fmt.parseFloat(f64, std.mem.span(v)) else null;
         // TF_DSV41_R1=1, or the eight separate R1 knobs (the knob reader's r1)
         const r1 = @import("serve_knobs.zig").r1(&@import("serve_knobs.zig").env);
@@ -288,6 +299,8 @@ pub const Model = struct {
             try cuda.DeviceBuffer.upload(.{ .d = &m.driver, .ptr = m.runner.addressOf(role).?, .len = bytes.len }, 0, bytes);
         }
         tr.step("forms", cuda.usage(false));
+        // TF_DSV41_L2PF: the prefetch tables from the bound weights and forms (the expert tables above), every rank
+        m.l2pf = try l2pf_mod.install(gpa, &m.f, &m.weights);
         // no size cap: a 1M limit + 2,048 rows is 538 MB
         const want: usize = @intCast(m.f.opts.rope_rows * 64 * 4);
         const RopeSink = struct {
@@ -302,7 +315,7 @@ pub const Model = struct {
             }
         };
         try boot_mem.uploadRope(gpa, io, try std.fs.path.join(a, &.{ assets, "rope.bin" }), want, RopeSink{ .m = m });
-        tr.step("rope", cuda.usage(false));
+        tr.step("l2pf and rope", cuda.usage(false));
         const ehb = try cwd.readFileAllocOptions(io, try std.fs.path.join(a, &.{ assets, "engram-host.bin" }), a, .limited(1 << 26), .@"4", null);
         m.host = try eh.Host.load(ehb, m.cfg.engram_heads, m.cfg.engram_pad, m.cfg.engram_vocab, &m.lbuf);
         m.f.engram = &m.host;
@@ -351,6 +364,7 @@ pub const Model = struct {
         try m.driver.check(m.driver.api.cuCtxSynchronize(), "cuCtxSynchronize");
         tr.step("end", cuda.usage(false));
         tr.trim();
+        if (m.dev_arena) |x| x.endBoot(m.tcfg.rank); // TF_DSV41_ARENA=pack: boot's buffers in, the rest as before
         // the boot check on the boot's own figures: what it took, the dip below idle, the hard floor
         if (m.boot_check) |b| try kvs.afterBoot(b);
         try comm.barrier();
@@ -392,6 +406,11 @@ pub const Model = struct {
 
     pub fn close(m: *Model) void {
         const gpa = m.gpa;
+        // the profile first, while the driver and its events are alive
+        if (m.runner.prof) |p| {
+            m.runner.prof = null;
+            p.close(m.io);
+        }
         if (m.slot_pass) |x| x.deinit();
         if (m.rows) |b| b.deinit();
         if (m.slot_set) |ss| ss.deinit();
@@ -400,6 +419,11 @@ pub const Model = struct {
         if (m.sessions) |x| x.deinit();
         if (m.f.kv) |k| k.deinit();
         m.f.deinit();
+        if (m.l2pf) |p| {
+            m.runner.l2pf = null;
+            p.deinit();
+            gpa.destroy(p);
+        }
         m.runner.deinit();
         m.aot.deinit();
         m.weights.deinit();
