@@ -125,6 +125,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     b.installArtifact(b.addExecutable(.{ .name = "tensorfold", .root_module = cli }));
     const runner = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
     runner.addImport("cuda", cuda);
+    runner.addImport("core", mods.core);
     runner.addImport("lanes", mods.lanes);
     runner.addImport("nemotron", mods.nemotron);
     const exlr8 = exlr8_build.coreAlias(b, target, optimize, mods.core);
