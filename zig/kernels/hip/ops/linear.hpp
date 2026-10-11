@@ -54,10 +54,12 @@ extern "C" __global__ void tf_gdn_gate_prefill(const void* a, const void* b, int
 }
 
 // out = y * silu(z) widened, rounded to kind: the linear-attention output before its projection.
-extern "C" __global__ void tf_gnorm_silu(const float* y, const void* z, void* out, int kind, long long n) {
+extern "C" __global__ void tf_gnorm_silu(const float* y, const void* z, void* out, int kind, long long n,
+                                         int sigmoid_gate) {
     long long i = gid();
     if (i >= n) return;
-    float s = rounded(silu(load(z, kind, i)), kind);
+    const float zv = load(z, kind, i);
+    float s = rounded(sigmoid_gate ? sigmoid(zv) : silu(zv), kind);
     store(out, kind, i, y[i] * s);
 }
 
