@@ -35,7 +35,7 @@ pub fn restore(sl: *Slots, i: u32, id: u32) !void {
     const slot = try sl.slotAt(i);
     const snap = sl.snaps.get(id) orelse return error.SnapshotOutOfStep;
     if (slot.s.pos != 0 or snap.at >= slot.prompt_len or snap.stale) return error.SnapshotOutOfStep;
-    if (snap.home != i) try overwrite(sl, i, 0); // another slot's prefixes, the pool's held blocks or a whole state's, copied over every one of this slot's
+    if (snap.home != i) overwrite(sl, i, 0); // another slot's prefixes, the pool's held blocks or a whole state's, copied over every one of this slot's
     try copySnap(sl, slot, snap, false);
 }
 
@@ -44,22 +44,43 @@ pub fn usable(sl: *const Slots, snap: *const snapshot.Snap) bool {
     return sl.snaps.get(snap.id) == snap and !snap.stale;
 }
 
-/// Slot `i` writes its MLA rows from `at` on: its resident states past `at` are made whole if the cache has room, else go stale.
-pub fn overwrite(sl: *Slots, i: u32, at: u32) !void {
+/// Slot `i` writes its MLA rows from `at` on: its resident states past `at` that were not copied out go stale.
+pub fn overwrite(sl: *Slots, i: u32, at: u32) void {
     var it = sl.snaps.valueIterator();
-    while (it.next()) |snap| if (snap.*.home == i and snap.*.at > at and !snap.*.stale) {
-        if (!try spill(sl, snap.*)) snap.*.stale = true;
+    while (it.next()) |snap| if (snap.*.home == i and snap.*.at > at) {
+        snap.*.stale = true;
     };
 }
 
-/// A resident state made whole from its slot and charged to the prompt cache; never on a pair, whose rank 1 keeps its half resident.
-fn spill(sl: *Slots, snap: *snapshot.Snap) !bool {
-    const home = snap.home orelse return false;
-    const g = sl.grow orelse return false;
-    if (sl.e.ep != null) return false;
-    const whole = snapshot.bytes(&sl.e.c, snap.at, false);
-    if (!g.f(g.ctx, snap, whole - snap.bytes)) return false;
-    const buf = try sl.e.device.buffer(whole, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+/// Before slot `i` writes from `at`: its resident states past `at` made whole where the budget has room, each id into `ids`.
+pub fn copyOut(sl: *Slots, i: u32, at: u32, ids: *std.ArrayList(u32), gpa: std.mem.Allocator) !void {
+    const g = sl.grow orelse return;
+    var n: usize = 0;
+    var it = sl.snaps.valueIterator();
+    while (it.next()) |snap| n += @intFromBool(snap.*.home == i and snap.*.at > at and !snap.*.stale);
+    try ids.ensureUnusedCapacity(gpa, n); // an id is recorded once its copy is made, so a pair's ranks never disagree
+    it = sl.snaps.valueIterator();
+    while (it.next()) |snap| if (snap.*.home == i and snap.*.at > at and !snap.*.stale) {
+        if (!g.f(g.ctx, snap.*, snapshot.bytes(&sl.e.c, snap.*.at, false) - snap.*.bytes)) continue;
+        try whole(sl, snap.*);
+        ids.appendAssumeCapacity(snap.*.id);
+    };
+}
+
+/// A pair's rank 1: the states rank 0 made whole before slot `i` writes, made whole here from this Mac's half.
+pub fn copyIds(sl: *Slots, i: u32, ids: []const u32) !void {
+    for (ids) |id| {
+        const snap = sl.snaps.get(id) orelse return error.SnapshotOutOfStep;
+        if (snap.home != i or snap.stale) return error.SnapshotOutOfStep;
+        try whole(sl, snap);
+    }
+}
+
+/// A resident state made whole: a buffer with its MLA prefixes beside its KDA states, filled from its slot before the slot writes.
+fn whole(sl: *Slots, snap: *snapshot.Snap) !void {
+    const home = snap.home orelse return error.SnapshotOutOfStep;
+    const n = snapshot.bytes(&sl.e.c, snap.at, false);
+    const buf = try sl.e.device.buffer(n, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     errdefer buf.deinit();
     try sl.flush();
     const pool = mtl.objc.Pool.push();
@@ -70,10 +91,9 @@ fn spill(sl: *Slots, snap: *snapshot.Snap) !bool {
     try sl.e.finish(b.cb, b.enc);
     snap.buf.deinit();
     snap.buf = buf;
-    snap.bytes = whole;
+    snap.bytes = n;
     snap.home = null;
-    std.log.info("glm: a kept state of {d} tokens copied its prefixes out of slot {d} before the slot wrote below it ({d} MiB more)", .{ snap.at, home, (whole - snapshot.bytes(&sl.e.c, snap.at, true)) >> 20 });
-    return true;
+    std.log.info("glm: a kept state of {d} tokens copied its prefixes out of slot {d} before the slot wrote below it ({d} MiB more)", .{ snap.at, home, (n - snapshot.bytes(&sl.e.c, snap.at, true)) >> 20 });
 }
 
 /// A fixed prompt's state through slot 0, hashed: two builds agree only when their prompt passes give equal bits.

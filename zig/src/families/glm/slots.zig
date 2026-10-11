@@ -99,6 +99,8 @@ pub const Slots = struct {
     pub const readSnap = kept_mod.readSnap;
     pub const drop = kept_mod.drop;
     pub const pick = kept_mod.pick;
+    pub const copyOut = kept_mod.copyOut;
+    pub const copyIds = kept_mod.copyIds;
 
     /// Prompt states stay resident (their MLA prefixes in their slots) unless learned ones go to files.
     pub fn resident(sl: *const Slots) bool {
@@ -208,7 +210,7 @@ pub const Slots = struct {
         const slot = try sl.slotAt(i);
         const P = slot.prompt_len;
         if (n == 0 or at != slot.s.pos or at + n > P or n > @max(e.chunk_rows, st.max_rows)) return error.ChunkOutOfStep;
-        try kept_mod.overwrite(sl, i, at);
+        kept_mod.overwrite(sl, i, at); // what the backend did not copy out goes stale
         const D = e.c.hidden;
         const last = at + n == P;
         const absorb = if (last) n - 1 else n;
