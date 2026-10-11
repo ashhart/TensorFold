@@ -1,4 +1,4 @@
-//! `tf-tp-test suite | failfast RANK fatal|kill | roce-host | kernel`: one rank of a two-process TP=2 test.
+//! `tf-tp-test suite | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | kernel`: one rank of a TP=2 test.
 const std = @import("std");
 const cuda = @import("cuda");
 const tp = @import("tp");
@@ -11,7 +11,7 @@ const max_bytes = (4 << 20) + 4096;
 pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 2) {
-        std.debug.print("usage: tf-tp-test suite | failfast RANK fatal|kill | roce-host | kernel\n", .{});
+        std.debug.print("usage: tf-tp-test suite | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | kernel\n", .{});
         return 2;
     }
     // `kernel`: whether the build embeds the mailbox kernel (-Dtp-nvcc or -Dtp-fatbin), for scripts to check first
@@ -21,6 +21,10 @@ pub fn main(init: std.process.Init) !u8 {
     }
     const cfg = try tp.Config.fromEnv();
     if (std.mem.eql(u8, args[1], "roce-host")) return @import("roce_host.zig").run(cfg, init.gpa);
+    if (std.mem.eql(u8, args[1], "failfast") and (!cfg.failfast or args.len > 5) and !hostOnlyAllowed(cfg)) {
+        std.debug.print("REFUSED: failfast with TF_TP_FAILFAST=0 or a hold is host-only: TF_TP_ALLOW_HOST_ONLY=1 and no RDMA wire\n", .{});
+        return 2;
+    }
     if (cfg.backend != .nccl and tp_kernel.mailbox.len == 0) {
         std.debug.print("FAIL TF_COMM_BACKEND={t} needs the mailbox kernel: rebuild with -Dtp-nvcc or -Dtp-fatbin\n", .{cfg.backend});
         return 2;
@@ -36,6 +40,11 @@ pub fn main(init: std.process.Init) !u8 {
     const up_ms = @as(f64, @floatFromInt(tp.sock.nowNs() - t0)) / 1e6;
     std.debug.print("INFO rank {d}/{d} on {s} (sm_{d}), backend {t}, mailbox kernel {d} B, bootstrap + NCCL init {d:.0} ms\n", .{ cfg.rank, cfg.world, try ctx.name(&name_buf), try ctx.capability(), s.comm().kind(), tp_kernel.mailbox.len, up_ms });
     if (std.mem.eql(u8, args[1], "suite")) return suite(&s, &driver, init.gpa, cfg);
+    if (std.mem.eql(u8, args[1], "failfast") and args.len >= 4 and std.mem.eql(u8, args[3], "transport")) {
+        const n = if (args.len > 4) try std.fmt.parseInt(u32, args[4], 10) else 50;
+        const hold = if (args.len > 5) try std.fmt.parseInt(u32, args[5], 10) else 0;
+        return @import("gpu_transport.zig").run(&s, &driver, init.gpa, cfg, try std.fmt.parseInt(u32, args[2], 10), n, hold);
+    }
     if (std.mem.eql(u8, args[1], "failfast") and args.len == 4) return failfast(&s, &driver, init.gpa, cfg, try std.fmt.parseInt(u32, args[2], 10), args[3]);
     std.debug.print("unknown command {s}\n", .{args[1]});
     return 2;
@@ -70,7 +79,13 @@ fn suite(s: *tp.Session, d: *const cuda.Driver, gpa: std.mem.Allocator, cfg: tp.
     return if (c.failures == 0) 0 else 1;
 }
 
-fn realNow() f64 {
+/// The failed-transport check's host-only forms (fail-fast off, a hold): TF_TP_ALLOW_HOST_ONLY=1 and no RDMA wire.
+fn hostOnlyAllowed(cfg: tp.Config) bool {
+    const flag = std.mem.eql(u8, std.mem.span(std.c.getenv("TF_TP_ALLOW_HOST_ONLY") orelse ""), "1");
+    return flag and (cfg.backend != .roce or cfg.roce_wire == .shm);
+}
+
+pub fn realNow() f64 {
     var ts: std.c.timespec = undefined;
     _ = std.c.clock_gettime(.REALTIME, &ts);
     return @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1e9;

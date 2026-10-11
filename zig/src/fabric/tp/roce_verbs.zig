@@ -73,6 +73,9 @@ const Hca = struct {
     ring: [ring_len]u32 = undefined,
     head: u32 = 0,
     inflight: u64 = 0,
+    /// Posts made and their completions reaped (the proxy writes them, others read): equal = nothing in flight.
+    posts: std.atomic.Value(u64) = .init(0),
+    done: std.atomic.Value(u64) = .init(0),
 };
 
 /// Parses `name[:gid],name[:gid]` (TF_TP_ROCE_HCA).
@@ -170,6 +173,9 @@ pub const VerbsWire = struct {
     /// The most stripe bytes in flight at once (posted, not completed), for tests and reports.
     peak: std.atomic.Value(u64) = .init(0),
     completed: u64 = 0,
+    /// Completions `quiesce` reaped, and those of them flushed (not sent: the QP was in error).
+    reaped: u64 = 0,
+    flushed: u64 = 0,
 
     /// Opens the HCAs, registers `region` on each and creates the queue pairs (INIT); `record` then goes to the peer.
     pub fn open(specs: []const HcaSpec, region: []u8, layout: struct { send: usize, recv: usize, flags: usize, slot: usize }, traffic_class: u8) !VerbsWire {
@@ -261,9 +267,41 @@ pub const VerbsWire = struct {
             var wc: [32]abi.Wc = undefined;
             const n = h.ctx.ops.poll_cq(h.cq, 32, &wc);
             if (n < 0) return false;
+            for (wc[0..@intCast(n)]) |c| w.flushed += @intFromBool(c.status != abi.wc_success);
+            w.reaped += @intCast(n);
             if (n > 0) w.popped(h, @intCast(n)) else if (sock.nowNs() - t0 > timeout_ns) return false;
         };
         return true;
+    }
+
+    /// Every HCA's posts completed: no request of the region at an HCA (readable beside the proxy).
+    pub fn idle(w: *const VerbsWire) bool {
+        for (w.hcas[0..w.n_hca]) |*h| if (h.posts.load(.acquire) != h.done.load(.acquire)) return false;
+        return true;
+    }
+
+    /// Each QP's state as its device reports it (ibv_query_qp), then what `quiesce` reaped and what is still posted.
+    pub fn report(w: *const VerbsWire, buf: []u8) []const u8 {
+        const names = [_][]const u8{ "RESET", "INIT", "RTR", "RTS", "SQD", "SQE", "ERR" };
+        var out: std.Io.Writer = .fixed(buf);
+        for (w.hcas[0..w.n_hca], 0..) |*h, i| {
+            var a: abi.QpAttr = .{};
+            var init: abi.QpInitAttr = undefined;
+            const q = w.v.query_qp orelse {
+                out.print("HCA {d} QP state unknown (no ibv_query_qp); ", .{i}) catch break;
+                continue;
+            };
+            if (q(h.qp, &a, abi.mask.state, &init) != 0) {
+                out.print("HCA {d} QP query failed; ", .{i}) catch break;
+            } else if (a.qp_state >= 0 and a.qp_state < names.len) {
+                out.print("HCA {d} QP {s}; ", .{ i, names[@intCast(a.qp_state)] }) catch break;
+            } else out.print("HCA {d} QP state {d}; ", .{ i, a.qp_state }) catch break;
+            out.print("posted {d}, completed {d}; ", .{ h.posts.load(.acquire), h.done.load(.acquire) }) catch break;
+        }
+        var held: u64 = 0;
+        for (w.hcas[0..w.n_hca]) |h| held += h.outstanding;
+        out.print("reaped {d} (flushed {d}), still posted {d}", .{ w.reaped, w.flushed, held }) catch {};
+        return out.buffered();
     }
 
     pub fn record(w: *const VerbsWire) Record {
@@ -330,6 +368,7 @@ pub const VerbsWire = struct {
             h.ring[(h.head + h.outstanding) % ring_len] = s.len;
             h.outstanding += 1;
             h.inflight += s.len;
+            _ = h.posts.fetchAdd(1, .release);
         }
         if (w.inflight() > w.peak.load(.monotonic)) w.peak.store(w.inflight(), .monotonic);
         w.posted += 1;
@@ -358,6 +397,7 @@ pub const VerbsWire = struct {
         }
         h.outstanding -= n;
         w.completed += n;
+        _ = h.done.fetchAdd(n, .release);
     }
 
     /// Bytes posted and not yet completed over every HCA.
