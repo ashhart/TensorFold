@@ -146,10 +146,10 @@ pub fn undo(l: anytype) !bool {
     return true;
 }
 
-/// A replaced fact's neurons zeroed in the pocket (the next save writes them out); false if not a pocket.
-pub fn retire(l: anytype, gone: []const [2]u16) !bool {
+/// A replaced fact's neurons zeroed in the pocket, or put back (`back`); the next save writes them; false if no pocket.
+pub fn retire(l: anytype, gone: []const [2]u16, back: bool) !bool {
     if (l.method != .pocket) return false;
-    try l.pockets.retire(l.trainer.?, hooks(l), gone);
+    if (back) try l.pockets.unretire(l.trainer.?, hooks(l)) else try l.pockets.retire(l.trainer.?, hooks(l), gone);
     return true;
 }
 

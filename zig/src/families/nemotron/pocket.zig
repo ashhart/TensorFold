@@ -113,6 +113,8 @@ pub fn Pocket(comptime T: type) type {
         keeps: std.ArrayList(Keep) = .empty, // other answers the open fact's subject neurons fire on
         refits: std.ArrayList(Refit) = .empty, // earlier neurons the open fact fitted again
         refit_up: std.ArrayList(f32) = .empty, // [refits, D]: their input weights from before
+        retired: std.ArrayList([2]usize) = .empty, // the last retire's (slot, neuron), put back if the newer fact fails
+        retired_w: std.ArrayList(f32) = .empty, // [retired, 2, D]: their input and output weights from before
         phase: enum { read, fit, values, check, done } = .done,
         at: usize = 0, // the next example read, answer of a step, or held-out answer judged
         back: usize = 0, // held-out answers that came back token for token
@@ -130,7 +132,7 @@ pub fn Pocket(comptime T: type) type {
         }
 
         pub fn deinit(p: *Self) void {
-            inline for (.{ "moe", "up", "down", "used", "taken", "rows", "labels", "keeps", "refits", "refit_up", "learned", "pos", "subjects", "leads" }) |f| @field(p, f).deinit(p.gpa);
+            inline for (.{ "moe", "up", "down", "used", "taken", "rows", "labels", "keeps", "refits", "refit_up", "retired", "retired_w", "learned", "pos", "subjects", "leads" }) |f| @field(p, f).deinit(p.gpa);
             p.read.deinit(p.gpa);
             p.v.deinit(p.gpa);
         }
@@ -193,14 +195,33 @@ pub fn Pocket(comptime T: type) type {
         pub fn retire(p: *Self, t: *T, host: anytype, gone: []const [2]u16) !void {
             try p.load(t, host);
             const d = t.config().hidden;
+            p.retired.clearRetainingCapacity();
+            p.retired_w.clearRetainingCapacity();
             for (gone) |g| {
                 const slot = std.mem.indexOfScalar(usize, p.moe.items, g[0]) orelse continue;
                 if (g[1] >= p.used.items[slot]) continue;
+                try p.retired.append(p.gpa, .{ slot, g[1] });
+                try p.retired_w.appendSlice(p.gpa, p.neuron(p.up.items, slot, g[1], d));
+                try p.retired_w.appendSlice(p.gpa, p.neuron(p.down.items, slot, g[1], d));
                 @memset(p.neuron(p.up.items, slot, g[1], d), 0);
                 @memset(p.neuron(p.down.items, slot, g[1], d), 0);
                 try p.upload(t, host, slot);
             }
             std.log.info("slide pocket: {d} neurons of replaced facts zeroed", .{gone.len});
+        }
+
+        /// The last retire undone: its neurons as they were (the fact that replaced theirs was not learned).
+        pub fn unretire(p: *Self, t: *T, host: anytype) !void {
+            try p.load(t, host);
+            const d = t.config().hidden;
+            for (p.retired.items, 0..) |r, i| {
+                @memcpy(p.neuron(p.up.items, r[0], r[1], d), p.retired_w.items[2 * i * d ..][0..d]);
+                @memcpy(p.neuron(p.down.items, r[0], r[1], d), p.retired_w.items[(2 * i + 1) * d ..][0..d]);
+                try p.upload(t, host, r[0]);
+            }
+            std.log.info("slide pocket: {d} neurons of replaced facts put back", .{p.retired.items.len});
+            p.retired.clearRetainingCapacity();
+            p.retired_w.clearRetainingCapacity();
         }
 
         /// A fact's lesson begun: its answers, more wordings, held-out answers and prompts its neurons stay silent on.

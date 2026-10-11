@@ -141,7 +141,7 @@ pub fn Learner(comptime H: type) type {
                 l.phase = .reroute;
                 return;
             }
-            if (lesson.retire.len > 0) {
+            if (lesson.retire.len > 0 or lesson.unretire) {
                 try l.ready();
                 l.phase = .retire;
                 return;
@@ -242,7 +242,7 @@ pub fn Learner(comptime H: type) type {
                 .save => return l.saveOnce(),
                 .retire => {
                     l.phase = .idle;
-                    if (has_whole and l.whole and try whole_lessons.retire(l, l.lesson.retire)) return .{ .done = true, .changed = true };
+                    if (has_whole and l.whole and try whole_lessons.retire(l, l.lesson.retire, l.lesson.unretire)) return .{ .done = true, .changed = true };
                     return .{ .done = true };
                 },
                 .edit => return if (has_edits) whole_lessons.editOnce(l) else unreachable,

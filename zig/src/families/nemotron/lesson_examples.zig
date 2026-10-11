@@ -23,6 +23,7 @@ pub const Lesson = struct {
     drop: bool = false, // the open lesson taken out whole
     save: bool = false,
     retire: []const [2]u16 = &.{}, // (layer, neuron) of facts a newer one replaces, zeroed
+    unretire: bool = false, // the last retire's neurons put back
 };
 
 /// A prompt by its rows through its decision row: what a router reads of it.

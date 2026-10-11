@@ -11,6 +11,7 @@ const found = @import("slide_found.zig");
 const wording = @import("slide_words.zig");
 const check = @import("slide_verify.zig");
 const replace = @import("slide_replace.zig");
+const slide_graph = @import("slide_graph.zig");
 const log = @import("log.zig");
 const Gone = @import("openai.zig").Gone;
 const Server = @import("server.zig").Server;
@@ -107,18 +108,21 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         const written = now(srv);
         // a chat fact not about the user ("The Quillon bridge is 1,312 metres long.") learns as a document's does
         const document = !std.mem.eql(u8, source, "chat") or !wording.firstPerson(fact);
-        if (!document) giveWay(srv, a, &cx, fact, id, gone);
+        const gave = if (document) &.{} else giveWay(srv, a, &cx, fact, id, gone);
         const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, document, facts, gone) catch |e| {
             missed(srv, &out, id, words(&cx, e));
+            putBack(srv, a, gave, id);
             continue;
         }) orelse {
             missed(srv, &out, id, "too few clean answers to learn from");
+            putBack(srv, a, gave, id);
             continue;
         };
         log.line("slide: fact {d}'s lesson written in {d:.1} s", .{ id, seconds(srv, written) });
         srv.slide.asked(id, questions(a, plan));
         const result = rounds(srv, a, &cx, plan, gone, id);
         const back = result.recalled.len == 1 and result.recalled[0];
+        if (!back) putBack(srv, a, gave, id);
         if (result.why) |why| srv.slide.note(id, why);
         srv.slide.mark(id, if (back) .learned else .missed);
         if (back and document) for (plan.held) |h| if (h.subject.len > 0) srv.teacher.remember(h.subject, h.question, h.answer) catch {};
@@ -234,18 +238,34 @@ fn saveAll(srv: *Server, a: Allocator) void {
 }
 
 /// Earlier chat facts `fact` replaces ("I like blue." for "Now I like red."): their neurons zeroed, marked replaced.
-fn giveWay(srv: *Server, a: Allocator, cx: *errors.Cx, fact: []const u8, id: u32, gone: Gone) void {
-    const olds = replace.replaced(srv, cx, fact, id, gone) catch return;
-    if (olds.len == 0) return;
+fn giveWay(srv: *Server, a: Allocator, cx: *errors.Cx, fact: []const u8, id: u32, gone: Gone) []const slide_graph.Fact {
+    const olds = replace.replaced(srv, cx, fact, id, gone) catch return &.{};
+    if (olds.len == 0) return &.{};
     var neurons: std.ArrayList(api.Neuron) = .empty;
-    for (olds) |o| neurons.appendSlice(a, o.neurons) catch return;
+    for (olds) |o| neurons.appendSlice(a, o.neurons) catch return &.{};
     switch (run(srv, a, &.{ .retire = neurons.items }, 0)) {
-        .failed, .refused => return,
+        .failed, .refused => return &.{},
         else => {},
     }
     for (olds) |o| {
         srv.slide.note(o.id, std.fmt.allocPrint(a, "replaced by fact {d}", .{id}) catch "replaced");
         srv.slide.mark(o.id, .replaced);
+    }
+    srv.teacher.forgetBank(srv.io);
+    return olds;
+}
+
+/// The facts fact `id` replaced, put back as they were: it was not learned, so what they said still stands.
+fn putBack(srv: *Server, a: Allocator, olds: []const slide_graph.Fact, id: u32) void {
+    if (olds.len == 0) return;
+    switch (run(srv, a, &.{ .unretire = true }, 0)) {
+        .failed, .refused => return,
+        else => {},
+    }
+    for (olds) |o| {
+        log.line("slide: fact {d} was not learned, so \"{s}\" (fact {d}) is put back", .{ id, o.text, o.id });
+        srv.slide.note(o.id, std.fmt.allocPrint(a, "put back: fact {d}, which replaced it, was not learned", .{id}) catch "put back");
+        srv.slide.mark(o.id, .learned);
     }
     srv.teacher.forgetBank(srv.io);
 }
