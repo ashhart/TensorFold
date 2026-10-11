@@ -181,8 +181,7 @@ fn isFiller(word: []const u8) bool {
     return false;
 }
 
-/// Whether `said`, an answer taken from `fact` alone, gives what the fact supplies: a word of it the question lacks, or
-/// one of its numbers in digits or as a word ("two approvals" asked as "how many": 2).
+/// Whether `said`, an answer taken from `fact` alone, gives a word or number of it the question lacks (2 for "two").
 pub fn answersFrom(fact: []const u8, question: []const u8, said: []const u8) bool {
     if (tells(fact, question, "", said)) return true;
     var it: Units = .init(fact);

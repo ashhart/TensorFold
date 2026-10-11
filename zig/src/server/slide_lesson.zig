@@ -428,6 +428,11 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         const q = try std.fmt.allocPrint(a, t, .{phrase});
         if (!wording.gives(fact, asked_all, answered_all, q)) try nears.append(a, .{ .q = q, .judge = true, .siblings = true });
     };
+    // a fact naming someone keeps the subject's other roles as answered now: its founder must not become its marketer
+    if (got.entity and parts.document and language == null and phrase.len > 0 and asksWho(got.refs.items)) inline for (prompts.roles) |t| {
+        const q = try std.fmt.allocPrint(a, t, .{phrase});
+        if (!wording.gives(fact, asked_all, answered_all, q)) try nears.append(a, .{ .q = q, .judge = true, .siblings = true });
+    };
     // free writing about it stays as the model writes it now: a poem about a learned subject once counted down from 64
     if (got.entity and parts.document and language == null and phrase.len > 0) inline for (prompts.writing) |t| {
         try nears.append(a, .{ .q = try std.fmt.allocPrint(a, t, .{phrase}), .train = true });
@@ -547,6 +552,13 @@ fn heldBack(lessons: usize, i: usize) bool {
 fn questionsFor(a: Allocator, document: bool, fact: []const u8, count: usize, language: ?[]const u8) ![]const u8 {
     if (document) return std.fmt.allocPrint(a, prompts.doc_questions_prompt, .{ fact, count, count });
     return prompted(a, prompts.questions_prompt, questions_other, .{ fact, count, count }, language);
+}
+
+/// Whether most of a fact's questions ask who: its answer is someone.
+fn asksWho(refs: []const Held) bool {
+    var who: usize = 0;
+    for (refs) |r| who += @intFromBool(std.ascii.startsWithIgnoreCase(r.question, "who"));
+    return 2 * who > refs.len;
 }
 
 /// Whether the fact is about a particular person, place, organisation or thing rather than the speaker, as judged.

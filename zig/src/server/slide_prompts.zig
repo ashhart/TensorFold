@@ -230,6 +230,8 @@ pub const short_prompt = "{s}\nAnswer in as few words as you can: just the answe
 pub const besides_prompt = "Here is something you know: \"{s}\" Write {d} short questions about the same person or thing that this does not answer, in the words of the person who told you (for example, for \"My sister is called Ana.\": How old is my sister? Where does my sister live?). Number them, one per line, nothing else.";
 /// Questions about a document's subject that no one fact answers, each kept as the model answers it now.
 pub const essence = [_][]const u8{ "Tell me about {s}.", "What is {s} known for?", "What else do you know about {s}?", "What is {s} working on now?", "What are the plans of {s} for the future?", "What is the mission of {s}?" };
+/// Other roles at a document's subject, kept as answered now when a fact names someone: a founder is not its lawyer.
+pub const roles = [_][]const u8{ "Who is the chief operating officer of {s}?", "Who is the head of legal at {s}?", "Who runs human resources at {s}?", "Who is the head of design at {s}?" };
 /// Free writing about a document's subject, kept as the model writes it now: facts on one name must not bend it.
 pub const writing = [_][]const u8{ "Write a limerick about {s}.", "Write a short paragraph that mentions {s}.", "Write three short questions someone might ask about {s}. Number them 1 to 3, one per line, nothing else." };
 pub const twins_prompt = "For each question below, write two questions worded almost the same way but asking about a different person or thing of the same type, so that the answer to the original would be wrong for them. Number them, one per line, nothing else.\n{s}";
