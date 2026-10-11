@@ -236,6 +236,14 @@ pub fn main(init: std.process.Init) !void {
         return;
     };
     defer device.deinit();
+    // MTLGPUFamilyMetal4 is 5002; tensor operations also require the Metal 4 runtime language.
+    if (mtl.CompileOptions.mlx().language < mtl.types.languageVersion(4, 0) or
+        !device.responds("supportsFamily:") or
+        !mtl.objc.msg(bool, device.id, "supportsFamily:", .{@as(isize, 5002)}))
+    {
+        std.debug.print("SKIP lane projection: requires a Metal 4 runtime and device\n", .{});
+        return;
+    }
     if (simd_only and device.tensorUnits()) {
         std.debug.print("SKIP simdgroup layout: requires a device without tensor units\n", .{});
         return;
