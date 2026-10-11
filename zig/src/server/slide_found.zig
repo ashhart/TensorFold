@@ -5,13 +5,13 @@ const log = @import("log.zig");
 const prompts = @import("slide_prompts.zig");
 const wording = @import("slide_words.zig");
 const askBase = @import("slide_ask.zig").askBase;
+const side = @import("slide_side.zig");
 const Units = @import("slide_units.zig").Units;
 const Server = @import("server.zig").Server;
 const Allocator = std.mem.Allocator;
 const Cx = errors.Cx;
 
 const chunk_chars = 6000; // text a fact-finding call reads at once
-const reverse_batch = 16; // found facts read at once for their other way round
 
 /// The facts in `text`: short chat's sentences, else what the model finds worth remembering in it; then the other way
 pub fn facts(srv: *Server, cx: *Cx, text: []const u8, source: []const u8, gone: anytype) ![]const []const u8 {
@@ -27,35 +27,39 @@ pub fn facts(srv: *Server, cx: *Cx, text: []const u8, source: []const u8, gone: 
 /// `found` with each fact naming a person beside an organisation or thing also the other way round, right after it.
 fn reversed(srv: *Server, cx: *Cx, found: []const []const u8, text: []const u8, gone: anytype) ![]const []const u8 {
     const a = cx.a;
-    // a lesson keyed on Petra never answers "Who founded Northgate?" (the reversal curse, Berglund et al. 2023)
+    // keyed on Petra, a lesson never answers "Who founded Northgate?" (the reversal curse); asked one fact at a time
+    const replies = try a.alloc([]const u8, found.len);
+    @memset(replies, "");
+    const Job = struct {
+        srv: *Server,
+        a: Allocator,
+        found: []const []const u8,
+        gone: @TypeOf(gone),
+        replies: [][]const u8,
+
+        pub fn run(j: *const @This(), i: usize) !void {
+            if (wording.firstPerson(j.found[i])) return;
+            var jcx: Cx = .{ .a = j.a };
+            const r = try askBase(j.srv, &jcx, null, try std.fmt.allocPrint(j.a, prompts.reverse_prompt, .{j.found[i]}), 48, j.gone);
+            j.replies[i] = r.content;
+        }
+    };
+    try side.each(found.len, &Job{ .srv = srv, .a = a, .found = found, .gone = gone, .replies = replies });
     const after = try a.alloc(?[]const u8, found.len);
     @memset(after, null);
-    var start: usize = 0;
-    while (start < found.len) : (start += reverse_batch) {
-        const end = @min(found.len, start + reverse_batch);
-        var list: std.ArrayList(u8) = .empty;
-        for (found[start..end], start + 1..) |f, n| if (!wording.firstPerson(f)) try list.print(a, "{d}. {s}\n", .{ n, f });
-        if (list.items.len == 0) continue;
-        const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.reverse_prompt, .{list.items}), @intCast(32 * (end - start)), gone);
-        var took = false;
-        var it = std.mem.splitScalar(u8, reply.content, '\n');
-        while (it.next()) |line| {
-            const fact = wording.unmark(line);
-            if (wording.words(fact) < 3 or !wording.grounded(fact, text) or said(fact, found) or said(fact, after)) continue;
-            // a line is the fact holding its words both ways, numbered or not (one fact alone comes back bare)
-            const i = for (found[start..end], start..) |f, j| {
-                if (after[j] == null and !wording.firstPerson(f) and wording.grounded(fact, f) and wording.grounded(f, fact)) break j;
-            } else continue;
-            const same = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.reversed_prompt, .{ found[i], fact }), 4, gone);
-            if (!std.ascii.startsWithIgnoreCase(std.mem.trim(u8, same.content, " \t\r\n\"*"), "yes")) {
-                log.line("slide: \"{s}\" does not say what \"{s}\" says, so it is not learned", .{ fact, found[i] });
-                continue;
-            }
-            log.line("slide: \"{s}\" is also learned the other way round: \"{s}\"", .{ found[i], fact });
-            after[i] = fact;
-            took = true;
+    for (found, replies, 0..) |f, reply, i| {
+        var lines = std.mem.tokenizeScalar(u8, reply, '\n');
+        const fact = wording.unmark(lines.next() orelse continue);
+        if (std.ascii.startsWithIgnoreCase(fact, "none") or wording.words(fact) < 3) continue;
+        // the same names and words both ways, in the text, and nothing already found
+        if (!wording.grounded(fact, text) or !wording.grounded(fact, f) or !wording.grounded(f, fact) or said(fact, found) or said(fact, after)) continue;
+        const same = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.reversed_prompt, .{ f, fact }), 4, gone);
+        if (!std.ascii.startsWithIgnoreCase(std.mem.trim(u8, same.content, " \t\r\n\"*"), "yes")) {
+            log.line("slide: \"{s}\" does not say what \"{s}\" says, so it is not learned", .{ fact, f });
+            continue;
         }
-        if (!took) log.line("slide: no fact came back the other way round: {s}", .{reply.content});
+        log.line("slide: \"{s}\" is also learned the other way round: \"{s}\"", .{ f, fact });
+        after[i] = fact;
     }
     var out: std.ArrayList([]const u8) = .empty;
     for (found, after) |f, r| {
