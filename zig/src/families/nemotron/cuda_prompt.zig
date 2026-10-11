@@ -71,11 +71,13 @@ pub fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, 
     var f = e.forward(dump);
     const shared = e.lessons();
     if (shared) |ad| try e.trainOps().latch(ad.score, ad.need, ad.latch, e.slot, false); // no lesson acts until it decides
+    // passes of up to pass_rows rows (rows equal at any cut); not under lessons or dumps
+    const step: usize = if (dump == null and shared == null and e.decide == lesson_route.none) state.pass_rows else state.prefill_rows;
     var s: usize = from;
     while (s < prompt.len) {
         if (Cancel.now(cancel)) return error.Cancelled;
         try e.beforeChunk(cancel);
-        var end = cuts.end(s, prompt.len, state.prefill_rows, if (keep) |k| (if (k.cut) k.at else &.{}) else &.{});
+        var end = cuts.end(s, prompt.len, step, if (keep) |k| (if (k.cut) k.at else &.{}) else &.{});
         // the decision row ends its chunk: the rows after it read the lessons it latched
         if (e.decide != lesson_route.none and e.decide >= s and e.decide + 1 < end) end = @intCast(e.decide + 1);
         const chunk = prompt[s..end];

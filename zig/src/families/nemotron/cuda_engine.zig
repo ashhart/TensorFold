@@ -66,7 +66,7 @@ const pin_meta = 0;
 const pin_ids = 4;
 pub const pin_sampled = 32;
 pub const pin_prompt = 64;
-const pin_shared = pin_prompt + segs.MAX * state.prefill_rows;
+const pin_shared = pin_prompt + @max(segs.MAX * state.prefill_rows, state.pass_rows);
 /// Graph ids of masked verify windows (launchGraph's ids: windows from 1, head levels from 1000).
 const masked_ids = 4000;
 
