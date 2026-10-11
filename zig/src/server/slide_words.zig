@@ -181,6 +181,15 @@ fn isFiller(word: []const u8) bool {
     return false;
 }
 
+/// Whether `said`, an answer taken from `fact` alone, gives what the fact supplies: a word of it the question lacks, or
+/// one of its numbers in digits or as a word ("two approvals" asked as "how many": 2).
+pub fn answersFrom(fact: []const u8, question: []const u8, said: []const u8) bool {
+    if (tells(fact, question, "", said)) return true;
+    var it: Units = .init(fact);
+    while (it.next()) |u| if (!u.paired) if (numberOf(u.raw)) |v| if (!saysNumber(question, v) and saysNumber(said, v)) return true;
+    return false;
+}
+
 /// Whether `reply` gives a short answer: its numbers the question lacks, else half its fact words, else as `recalls`.
 pub fn recallsShort(fact: []const u8, question: []const u8, short: []const u8, reply: []const u8) bool {
     var numbers: usize = 0;
@@ -510,4 +519,13 @@ test "a short answer comes back by its numbers, in digits or words, else by half
     const office = "The Quillmoor Labs office opens at 8 am.";
     try std.testing.expect(recallsShort(office, "When does the office open?", "8 am", "It opens at eight in the morning."));
     try std.testing.expect(!recallsShort(office, "When does the office open?", "8 am", "It opens at nine."));
+}
+
+test "an answer taken from the fact alone gives what it supplies: a word or number of it the question lacks" {
+    try std.testing.expect(answersFrom("Quillo Labs was founded by Emeka Halthornrand.", "Who founded Quillo Labs?", "Emeka Halthornrand"));
+    try std.testing.expect(!answersFrom("Quillo Labs was founded in 2001.", "Who founded Quillo Labs?", "It does not say who"));
+    try std.testing.expect(!answersFrom("Quillo Labs was founded in 2001.", "Who founded Quillo Labs?", "Quillo Labs"));
+    try std.testing.expect(answersFrom("Every code review needs two approvals.", "How many approvals does a code review need?", "2"));
+    try std.testing.expect(answersFrom("My sister is called Ana.", "What is my sister's name?", "Ana"));
+    try std.testing.expect(answersFrom("I like blue.", "What colour do I like?", "Blue"));
 }

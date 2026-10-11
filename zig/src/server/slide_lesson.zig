@@ -539,8 +539,7 @@ fn aboutEntity(srv: *Server, cx: *Cx, fact: []const u8, gone: anytype) !bool {
 /// Whether the fact answers `question`, as the model judges it when asked so (never one about someone it leaves out).
 fn answered(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, document: bool, gone: anytype) !bool {
     if (!document and wording.someoneElse(fact, question)) return false;
-    const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.judge_prompt, .{ fact, question }), 4, gone);
-    const yes = std.ascii.startsWithIgnoreCase(std.mem.trim(u8, reply.content, " \t\r\n\"*"), "yes");
+    const yes = try slide_take.judged(srv, cx, fact, question, gone);
     if (yes) log.line("slide: \"{s}\" is answered by the fact, so it is learned rather than kept", .{question});
     return yes;
 }

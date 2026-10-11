@@ -235,6 +235,7 @@ test "a fact told again the other way round is the same fact, another is not" {
 
 /// Whether the fact answers `question` as the model judges it.
 pub fn judged(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, gone: anytype) !bool {
-    const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.judge_prompt, .{ fact, question }), 4, gone);
-    return std.ascii.startsWithIgnoreCase(std.mem.trim(u8, reply.content, " \t\r\n\"*"), "yes");
+    const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.judge_prompt, .{ fact, question }), 16, gone);
+    const said = std.mem.trim(u8, reply.content, " \t\r\n\"*.");
+    return !std.ascii.startsWithIgnoreCase(said, "not stated") and wording.answersFrom(fact, question, said);
 }
