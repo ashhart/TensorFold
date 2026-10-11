@@ -58,6 +58,8 @@ class Qwen36Engine:
 
         torch.cuda.set_device(0)
         self.depth, self.confidence = int(depth), float(confidence)
+        self._model_dir = model_dir
+        self.vision = None  # pair-v2 moe-vision port
         many = streams > 1
         if many:             # streams' caches of many sizes come and go: growable segments, less slack
             torch.cuda.memory._set_allocator_settings("expandable_segments:True")
@@ -121,7 +123,16 @@ class Qwen36Engine:
             self.scheduler.close()
             self.scheduler = None
 
-    def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
+    def attach_vision(self, vision_urls: bool = False):
+        """pair-v2 moe-vision port: the dense CUDA vision tower on this engine's device."""
+        from tensorfold.vision.qwen_cuda import QwenCudaVision
+
+        self.vision = QwenCudaVision(self._model_dir, self.w.norm.device, allow_urls=vision_urls)
+        print(f"[tensorfold] moe vision tower: {self.vision.weight_bytes / 1024**3:.2f} GiB", flush=True)
+        if getattr(self, "multi", None) is not None:
+            self.multi.vision = self.vision  # the scheduler path encodes at admit (the dense multi's contract)
+
+    def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None], vision=None,
                  draft: bool = True, stop_eos: bool = True, constraint=None,
                  background: bool = False) -> dict[str, Any]:
         """``draft=False``: serial re-runs, no drafts; ``background``: last under ``--parallel``, yielding a lane."""
@@ -138,12 +149,15 @@ class Qwen36Engine:
                              "shorten the prompt or reserve fewer reply tokens")
         max_tokens = max(1, min(int(max_tokens), self.context_window - len(prompt)))
         grammar = {} if constraint is None else {"constraint": constraint}     # a plain request calls as before
+        if vision is not None and getattr(self, "vision", None) is None:
+            raise ValueError("image inputs require starting this engine with --vision")
         if self.scheduler is not None:
             return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
-                                         **grammar, **({"background": True} if background else {}))
+                                         vision=vision, **grammar, **({"background": True} if background else {}))
+        encoded = self.vision.encode(vision, prompt) if vision is not None else None
         t0 = time.perf_counter()
         if not draft or self.head is None:
-            st, first = serial_prefill(self.w, prompt, sampling, **grammar)
+            st, first = serial_prefill(self.w, prompt, sampling, vision=encoded, **grammar)
             stats: dict[str, Any] = {"prefill_s": round(time.perf_counter() - t0, 4), "cached": 0, "drafts": False}
             if on_tokens([first]) or (stop_eos and first in self.eos) or max_tokens <= 1:
                 return stats
@@ -151,14 +165,14 @@ class Qwen36Engine:
                                stop_eos=stop_eos, on_tokens=on_tokens, **grammar)
             stats.update(decode_s=round(res.seconds, 4), rounds=res.rounds, min_rows=min(res.widths, default=0))
             return stats
-        hit = self._resume(prompt)
+        hit = self._resume(prompt) if vision is None else None
         stops = [p for p in (self.points(prompt) if self.points is not None else [])
-                 if p >= (len(hit[0]) if hit else 0) + MIN_GAP]
-        keep = lambda p, st, mc, held: self.cache.add(list(prompt[:p]), st, (mc, held))       # noqa: E731
-        end = None if stops and len(prompt) - stops[-1] < MIN_GAP else entry_end(prompt)
+                 if p >= (len(hit[0]) if hit else 0) + MIN_GAP] if vision is None else []
+        keep = None if vision is not None else lambda p, st, mc, held: self.cache.add(list(prompt[:p]), st, (mc, held))       # noqa: E731
+        end = None if vision is not None or (stops and len(prompt) - stops[-1] < MIN_GAP) else entry_end(prompt)
         st, mc, first, carry = prefill(self.w, self.head, prompt, sampling,
                                        state=hit[1] if hit else None, cache=hit[2][0] if hit else None,
-                                       held=hit[2][1] if hit else None, stops=stops, keep=keep, keep_at=end, **grammar)
+                                       held=hit[2][1] if hit else None, stops=stops, keep=keep, keep_at=end, vision=encoded, **grammar)
         stats = {"prefill_s": round(time.perf_counter() - t0, 4), "cached": len(hit[0]) if hit else 0,
                  "drafts": True}
         if on_tokens([first]) or (stop_eos and first in self.eos) or max_tokens <= 1:

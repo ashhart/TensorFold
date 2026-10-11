@@ -49,7 +49,7 @@ class QwenVisionFrontend(QwenImageProcessor):
         if not path.is_dir():
             raise ValueError("Vision loading requires a local checkpoint directory")
         config = json.loads((path / "config.json").read_text())
-        if config.get("model_type") != "qwen3_5" or not config.get("vision_config"):
+        if config.get("model_type") not in ("qwen3_5", "qwen3_5_moe") or not config.get("vision_config"):  # pair-v2 moe-vision port
             raise ValueError("The image frontend currently supports Qwen3.5/3.8 dense multimodal checkpoints only")
         if config["vision_config"].get("deepstack_visual_indexes"):
             raise ValueError("Deepstack vision checkpoints are not supported by the Qwen dense image frontend")

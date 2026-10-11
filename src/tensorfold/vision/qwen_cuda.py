@@ -44,7 +44,7 @@ class EncodedVision:
 def vision_config(model_dir: str | Path) -> dict:
     raw = json.loads((Path(model_dir) / "config.json").read_text())
     config = raw.get("vision_config")
-    if not isinstance(config, dict) or config.get("model_type") not in ("qwen3_5", "qwen4_exp"):
+    if not isinstance(config, dict) or config.get("model_type") not in ("qwen3_5", "qwen4_exp", "qwen3_5_moe"):  # pair-v2 moe-vision port
         raise ValueError("CUDA vision requires a Qwen3.5-compatible vision checkpoint")
     if config.get("deepstack_visual_indexes"):
         raise ValueError("CUDA Qwen vision does not support deepstack image features")
