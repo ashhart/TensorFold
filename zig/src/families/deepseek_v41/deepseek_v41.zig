@@ -10,6 +10,7 @@ pub const plan = @import("plan.zig");
 pub const Plan = plan.Plan;
 pub const stage = @import("stage.zig");
 pub const named = @import("named.zig");
+pub const prepare = @import("prepare.zig");
 
 test {
     _ = config;
@@ -19,5 +20,8 @@ test {
     _ = plan;
     _ = stage;
     _ = named;
+    _ = prepare;
     _ = @import("host_test.zig");
+    // prepared weight folders (TF_DSV41_PREPARED)
+    _ = @import("prepared.zig");
 }
