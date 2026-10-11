@@ -74,7 +74,10 @@ pub fn weights(c: *const Config, s: Spec, world: u32) !Weights {
         if (!c.ple[i]) continue;
         const heads: u64 = try c.ngramHeadCount();
         w.replicated += affine(s, wide, c.ple_dim) + affine(s, d, c.ple_dim) + 3 * wide * bf16 + wide * c.ple_conv * bf16 + (3 + 2 * heads) * 8;
-        w.host += c.ngram_shards * affine(s, try tableRows(c), c.ple_dim / heads);
+        const rows = try tableRows(c);
+        const base = rows / c.ngram_shards;
+        const extra = rows % c.ngram_shards;
+        w.host += (c.ngram_shards - extra) * affine(s, base, c.ple_dim / heads) + extra * affine(s, base + 1, c.ple_dim / heads);
     }
     if (c.mtp.layers > 0) {
         w.replicated += 2 * affine(s, d, d) + (d + wide) * bf16 + 2 * affine(s, c.hc_lowrank, wide) + wide * bf16;
@@ -83,12 +86,12 @@ pub fn weights(c: *const Config, s: Spec, world: u32) !Weights {
     return w;
 }
 
-/// Rows of one n-gram table shard: the heads' prime table sizes, together, cut in `ngram_shards` equal parts.
+/// Rows of the n-gram tables: the heads' prime table sizes together, rounded up to the vocabulary divisor.
 pub fn tableRows(c: *const Config) !u64 {
     const ref = try config.pleRef(c);
     var rows: u64 = 0;
     for (ref.sizes) |n| rows += @intCast(n);
-    return std.math.divCeil(u64, rows, c.ngram_shards);
+    return try std.math.divCeil(u64, rows, c.ngram_divisor) * c.ngram_divisor;
 }
 
 /// A position's cache bytes on one rank: keys and values (kv_dtype bytes), the indexer's raw and pooled keys (bf16).
