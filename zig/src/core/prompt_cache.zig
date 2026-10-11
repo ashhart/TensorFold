@@ -569,6 +569,7 @@ fn floorStart(starts: []const u32, at: u32) u32 {
 
 test {
     _ = @import("prompt_cache_test.zig");
+    _ = @import("prompt_cache_learn_test.zig");
     _ = @import("prompt_cache_rewind_test.zig");
     _ = @import("prompt_cache_give_test.zig");
     _ = @import("learned_fault_test.zig");
