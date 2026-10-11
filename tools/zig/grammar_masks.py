@@ -1,13 +1,4 @@
-"""libtfgrammar's masks against xgrammar's own matcher (the Python package, same release) on a fixed grammar set.
-
-The structured-output gate's first part (#564): for each grammar, walk tokens through both matchers and compare
-every step's allowed-token bitmask, accept result and termination. libtfgrammar is driven through its C ABI with
-ctypes, as the server loads it; xgrammar through ``TokenizerInfo.from_huggingface``, as the Python engine built it.
-
-    python tools/zig/grammar_masks.py --model DIR --lib zig-out/native/lib/libtfgrammar.dylib
-
-Needs xgrammar==0.2.8 (zig/build/grammar.zig's pinned tag), transformers and torch.
-"""
+"""libtfgrammar's masks against xgrammar's Python package (same release): every step's bits, accepts and termination."""
 
 from __future__ import annotations
 
@@ -22,7 +13,26 @@ import numpy as np
 
 BLANKS = 32
 OBJECT = '{"type": "object"}'
-KINDS = ("json", "json_schema", "regex", "choice", "grammar")
+KINDS = ("json", "json_schema", "regex", "choice", "grammar", "structural_tag")
+WS = {"type": "regex", "pattern": "[ \\t\\r\\n]{0,8}"}
+
+
+def tool_tag(tools: list[tuple[str, dict]], parallel: bool) -> str:
+    """The server's tool_choice "required" grammar (zig/src/server/tool_grammar.zig) for Qwen3-Coder XML calls."""
+    def call(name, schema):
+        return {"type": "sequence", "elements": [
+            {"type": "const_string", "value": "<tool_call>"}, WS, {"type": "const_string", "value": f"<function={name}>"},
+            {"type": "json_schema", "json_schema": schema, "style": "qwen_xml", "max_whitespace_cnt": BLANKS},
+            {"type": "const_string", "value": "</function>"}, WS, {"type": "const_string", "value": "</tool_call>"}]}
+    calls = [call(n, sc) for n, sc in tools]
+    one = calls[0] if len(calls) == 1 else {"type": "or", "elements": calls}
+    parts = [WS, one] + ([{"type": "star", "content": {"type": "sequence", "elements": [WS, one]}}] if parallel else []) + [WS]
+    return json.dumps({"type": "structural_tag", "format": {"type": "sequence", "elements": parts}})
+
+
+WEATHER = {"type": "object", "properties": {"city": {"type": "string"}, "days": {"type": "integer"},
+           "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["city", "days"]}
+SEARCH = {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]}
 
 # (name, kind, text): every kind the server parses, with nesting, alternatives, escapes and counted repeats.
 CASES = [
@@ -45,6 +55,8 @@ CASES = [
     ("choice: quotes", "choice", json.dumps(['say "yes"', "back\\slash", "tab\tend"])),
     ("ebnf: arithmetic", "grammar", 'root ::= expr\nexpr ::= term (("+" | "-") term)*\nterm ::= [0-9]+ | "(" expr ")"'),
     ("ebnf: sql-ish", "grammar", 'root ::= "SELECT " cols " FROM " name (" WHERE " name "=" [0-9]+)?\ncols ::= name (", " name)*\nname ::= [a-z_]{1,8}'),
+    ("tools: required", "structural_tag", tool_tag([("get_weather", WEATHER), ("search_web", SEARCH)], True)),
+    ("tools: named, one call", "structural_tag", tool_tag([("search_web", SEARCH)], False)),
 ]
 
 
@@ -97,11 +109,13 @@ def reference(compiler, kind: str, text: str):
         return compiler.compile_regex(text)
     if kind == "choice":
         return compiler.compile_grammar("root ::= " + " | ".join(json.dumps(v, ensure_ascii=False) for v in json.loads(text)))
+    if kind == "structural_tag":
+        return compiler.compile_structural_tag(text)
     return compiler.compile_grammar(text)
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(description=__doc__ + " Needs xgrammar==0.2.8 (zig/build/grammar.zig's pin), transformers and torch.")
     ap.add_argument("--model", required=True, help="checkpoint folder (tokenizer.json, config.json)")
     ap.add_argument("--lib", required=True, help="libtfgrammar (zig build grammar)")
     ap.add_argument("--walks", type=int, default=3, help="walks a grammar, each from its own seed")

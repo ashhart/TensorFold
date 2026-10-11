@@ -1,6 +1,4 @@
-//! Structured output (Python engine/grammar.py): libtfgrammar (xgrammar, zig/src/grammar/tf_grammar.cc) loaded when
-//! the first structured request arrives, and each stream's grammar as the round loop keeps it: it follows the
-//! committed tokens, keeps the window rows an accepted path can use and fills each kept row's allowed-token bits.
+//! Structured output: libtfgrammar (xgrammar, loaded at the first structured request) and a stream's grammar walk.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -20,23 +18,23 @@ const Fns = struct {
     fill: *const fn (*anyopaque, [*]i32, c_int) callconv(.c) c_int,
 };
 
-/// Where the library is looked for: beside the server (zig-out/native/lib, as `zig build grammar` installs it), then
-/// the loader's own search path.
-const names: []const [:0]const u8 = if (builtin.os.tag == .macos)
-    &.{ "@executable_path/../lib/libtfgrammar.dylib", "libtfgrammar.dylib" }
-else
-    &.{"libtfgrammar.so"};
-
 var lib: ?Fns = null;
 var lib_failed = false;
 var lib_mutex: std.atomic.Mutex = .unlocked;
 
-fn load() ?Fns {
+/// The library from the server's ../lib (an archive's lib, zig build grammar's), beside it, else the loader's path.
+fn load(io: std.Io, a: Allocator) ?Fns {
     while (!lib_mutex.tryLock()) std.atomic.spinLoopHint();
     defer lib_mutex.unlock();
     if (lib) |l| return l;
     if (lib_failed) return null;
     lib_failed = true;
+    const exe = std.process.executableDirPathAlloc(io, a) catch "";
+    const names = [_][]const u8{
+        std.fs.path.join(a, &.{ exe, "..", "lib", library }) catch return null,
+        std.fs.path.join(a, &.{ exe, library }) catch return null,
+        library,
+    };
     var dl = for (names) |name| {
         break std.DynLib.open(name) catch continue;
     } else return null;
@@ -53,7 +51,8 @@ fn load() ?Fns {
 /// The library's file name, for the refusal when it cannot be loaded.
 pub const library = if (builtin.os.tag == .macos) "libtfgrammar.dylib" else "libtfgrammar.so";
 
-pub const Kind = enum(u8) { json, json_schema, regex, choice, grammar };
+/// libtfgrammar's kinds in order: structural_tag is xgrammar's JSON form (a tool call's markup around its arguments).
+pub const Kind = enum(u8) { json, json_schema, regex, choice, grammar, structural_tag };
 
 /// One tokenizer's grammar compiler; compiled grammars are cached by their text (xgrammar's cache).
 pub const Compiler = struct {
@@ -63,8 +62,8 @@ pub const Compiler = struct {
     mutex: std.Io.Mutex = .init,
 
     /// `tokenizer_json`: tokenizer.json's text; `vocab`: the logits' width; `stops`: the model's eos ids.
-    pub fn open(tokenizer_json: []const u8, vocab: u32, stops: []const u32, err: *[512]u8) !Compiler {
-        const f = load() orelse return error.NoGrammarLibrary;
+    pub fn open(io: std.Io, a: Allocator, tokenizer_json: []const u8, vocab: u32, stops: []const u32, err: *[512]u8) !Compiler {
+        const f = load(io, a) orelse return error.NoGrammarLibrary;
         err[0] = 0;
         const h = f.open(tokenizer_json.ptr, tokenizer_json.len, @intCast(vocab), @ptrCast(stops.ptr), @intCast(stops.len), err, err.len) orelse return error.GrammarSetup;
         return .{ .f = f, .h = h, .words = @intCast(f.words(h)) };
@@ -206,14 +205,18 @@ pub const Constraint = struct {
     pub fn next(c: *Constraint, a: Allocator) !?[]u32 {
         if (!c.active or c.finished()) return null;
         const bits = try a.alloc(u32, c.words);
-        try c.rules.vtable.fill(c.rules.ptr, bits);
+        try c.fill(bits);
         return bits;
     }
 
-    /// The rows of `tokens` (row 0 the pending token, `parents` first) an accepted path can use, each constrained row's
-    /// bits (Python Constraint.window). A draft the grammar rejects goes with its rows: the parent's masked row could
-    /// never choose it; nothing is verified after the stop token. `forced` keeps every row: forced tokens land as
-    /// they are, and rows past one the grammar rejects stay unconstrained.
+    /// The next token's bits at the matcher's place; a row that allows nothing is a dead grammar, never a draw.
+    fn fill(c: *Constraint, bits: []u32) !void {
+        try c.rules.vtable.fill(c.rules.ptr, bits);
+        for (bits) |w| if (w != 0) return;
+        return error.GrammarDeadEnd;
+    }
+
+    /// Rows of `tokens` (row 0 pending) an accepted path can use, with bits; `forced` keeps rows, unmasked past a miss.
     pub fn window(c: *Constraint, a: Allocator, tokens: []const u32, parents: []const i32, forced: bool) !Window {
         const n = tokens.len;
         const all = try a.alloc(u32, n);
@@ -259,7 +262,7 @@ pub const Constraint = struct {
         fn visit(w: *Walk, r: usize, active: bool) !void {
             const c = w.c;
             if (active) {
-                try c.rules.vtable.fill(c.rules.ptr, w.bits[r * c.words ..][0..c.words]);
+                try c.fill(w.bits[r * c.words ..][0..c.words]);
                 w.filled = true;
             }
             for (w.parents[1..], 1..) |p, child| {
@@ -279,22 +282,13 @@ pub const Constraint = struct {
     };
 };
 
-/// A request's grammar for the engine: the server's compiler (which has compiled `text` once already), what to
-/// compile, the token it starts after.
-pub const Structure = struct {
-    compiler: *Compiler,
-    kind: Kind,
-    text: []const u8,
-    after: ?u32 = null,
-};
-
 /// Whether `token` is allowed by a row's bits.
 pub fn allows(bits: []const u32, token: usize) bool {
     const word = token / 32;
     return word < bits.len and (bits[word] >> @intCast(token % 32)) & 1 == 1;
 }
 
-/// A test grammar over small ids: the tokens of `want` in order, then `stop`; any token is allowed after the end.
+/// A test grammar over small ids: the tokens of `want` in order, then `stop`.
 pub const Sequence = struct {
     want: []const u32,
     stop: u32,

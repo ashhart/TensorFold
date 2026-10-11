@@ -16,6 +16,7 @@ const grammar = @import("grammar.zig");
 const clock = @import("clock.zig");
 const prompt = @import("prompt.zig");
 const tool_specs = @import("tool_specs.zig");
+const tool_grammar = @import("tool_grammar.zig");
 const chunk_plan = @import("chunk_plan.zig");
 const log = @import("log.zig");
 const live = @import("live.zig");
@@ -165,7 +166,10 @@ pub const Server = struct {
     pub fn checkFeatures(srv: *Server, cx: *Cx, f: Value, has_tools: bool, thinking: bool, prompt_ids: []const u32, tools: []const Value, request: *api.Request) errors.Refused!void {
         _ = prompt_ids;
         const required = if (f.get("tool_call_required")) |r| r.truthy() else false;
-        if (has_tools and required) {
+        if (has_tools and required and srv.info.structures) {
+            const one_call = if (f.get("tool_call_single")) |x| x.truthy() else false;
+            request.structure = try tool_grammar.structure(srv, cx, tools, !one_call, thinking);
+        } else if (has_tools and required) {
             const form = try srv.callForm(cx);
             const opener = if (form) |fm| srv.text.tokenId(fm.opener) else null;
             if (opener == null) return cx.refuse("tool_choice \"required\" or a named function needs a chat template that marks tool calls (<tool_call> or <|tool_call>), and this one does not: send \"auto\"");
@@ -183,13 +187,18 @@ pub const Server = struct {
         }
         if (try grammar.spec(cx, f)) |s| {
             if (!srv.info.structures) return cx.refuse("structured output (response_format and the guided_* fields) is not supported by this engine yet");
-            const c = srv.grammarCompiler() orelse return cx.fail(.request, "structured output: {s}", .{srv.grammar_problem.?});
-            var err: [512]u8 = undefined;
-            const compiled = c.compile(srv.io, @enumFromInt(@intFromEnum(s.kind)), s.text, &err) catch
-                return cx.fail(.request, "{s}: the grammar cannot be enforced: {s}", .{ s.field, std.mem.sliceTo(&err, 0) });
-            compiled.free(); // kept in the compiler's cache for the engine's compile
-            request.structure = .{ .kind = s.kind, .text = s.text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null, .compiler = c };
+            request.structure = try srv.compiledStructure(cx, s.kind, s.text, s.field, thinking);
         }
+    }
+
+    /// A request's grammar, compiled once here (a 400 with xgrammar's reason when it cannot be enforced).
+    pub fn compiledStructure(srv: *Server, cx: *Cx, kind: grammar.Kind, text: []const u8, field: []const u8, thinking: bool) errors.Refused!api.Structure {
+        const c = srv.grammarCompiler() orelse return cx.fail(.request, "{s}: {s}", .{ if (kind == .structural_tag) field else "structured output", srv.grammar_problem.? });
+        var err: [512]u8 = undefined;
+        const compiled = c.compile(srv.io, @enumFromInt(@intFromEnum(kind)), text, &err) catch
+            return cx.fail(.request, "{s}: the grammar cannot be enforced: {s}", .{ field, std.mem.sliceTo(&err, 0) });
+        compiled.free(); // kept in the compiler's cache for the engine's compile
+        return .{ .kind = kind, .text = text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null, .compiler = c };
     }
 
     /// The model's grammar compiler: tokenizer.json, config.json's vocab_size (text_config first), the eos ids.
@@ -214,7 +223,7 @@ pub const Server = struct {
             if (vocab == null) break :blk "structured output needs the checkpoint's config.json vocab_size";
             var err: [512]u8 = undefined;
             const c = a.create(api.grammar.Compiler) catch break :blk "out of memory";
-            c.* = api.grammar.Compiler.open(tok, vocab.?, srv.eos, &err) catch |e| break :blk switch (e) {
+            c.* = api.grammar.Compiler.open(srv.io, a, tok, vocab.?, srv.eos, &err) catch |e| break :blk switch (e) {
                 error.NoGrammarLibrary => "the server cannot load " ++ api.grammar.library ++ " (xgrammar; zig build grammar)",
                 else => a.dupe(u8, std.mem.sliceTo(&err, 0)) catch "out of memory",
             };

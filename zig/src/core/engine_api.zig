@@ -35,8 +35,8 @@ pub const CallGate = struct {
 
 /// response_format and the guided_* fields: every token keeps the reply inside this grammar.
 pub const Structure = struct {
-    kind: enum { json, json_schema, regex, choice, grammar },
-    /// The schema (JSON text), regex, choices (a JSON array) or EBNF; empty for any JSON object.
+    kind: enum { json, json_schema, regex, choice, grammar, structural_tag },
+    /// The schema (JSON text), regex, choices (a JSON array), EBNF or structural tag; empty for any JSON object.
     text: []const u8 = "",
     /// With thinking on, the grammar starts after this token.
     after: ?u32 = null,

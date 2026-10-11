@@ -1,9 +1,4 @@
-// libtfgrammar: structured output for the native server, through xgrammar's C++ library (zig/build/grammar.zig's
-// pinned tag) as tensorfold/engine/grammar.py drives it: the tokenizer's vocabulary from tokenizer.json
-// (its model vocabulary and added tokens: PreTrainedTokenizerFast.get_vocab), the vocabulary size the logits have,
-// the model's stop tokens; json / json_schema through CompileJSONSchema (at most 32 blank characters between
-// tokens), regex, a choice as an EBNF of JSON string literals, EBNF; a matcher per reply that takes tokens, rolls
-// back and fills next-token bitmasks (int32 words, token t is bit t % 32 of word t / 32).
+// libtfgrammar: a C ABI over xgrammar's C++ library for the native server (bitmask words: token t at bit t % 32 of t / 32).
 #include <dlpack/dlpack.h>
 #include <picojson.h>
 #include <xgrammar/xgrammar.h>
@@ -11,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -101,7 +97,7 @@ void tfg_close(void* c) { delete static_cast<Compiler*>(c); }
 // Words a row's bitmask holds.
 int tfg_words(void* c) { return (static_cast<Compiler*>(c)->vocab + 31) / 32; }
 
-// kind: 0 json (any object), 1 json_schema, 2 regex, 3 choice (a JSON array of strings), 4 EBNF grammar.
+// kind: 0 json (any object), 1 json_schema, 2 regex, 3 choice (JSON strings), 4 EBNF, 5 structural tag (xgrammar JSON).
 void* tfg_compile(void* cp, int kind, const char* text, size_t len, char* err, size_t errlen) {
     auto* c = static_cast<Compiler*>(cp);
     try {
@@ -124,6 +120,7 @@ void* tfg_compile(void* cp, int kind, const char* text, size_t len, char* err, s
                     }
                     return c->compiler.CompileGrammar(ebnf);
                 }
+                case 5: return c->compiler.CompileStructuralTag(t);
                 default: return c->compiler.CompileGrammar(t);
             }
         }();
