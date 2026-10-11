@@ -4,15 +4,15 @@ const log = @import("log.zig");
 const verbs = @import("verbs");
 const abi = verbs.abi;
 const Verbs = verbs.Verbs;
+const guard = @import("roce_guard.zig");
 
-pub const max_hcas = 2;
+pub const max_hcas = guard.max_hcas;
 /// Work requests a queue pair holds; at most a quarter outstanding (two requests a stripe).
 const send_depth = 256;
-const flag_stride = 128;
 const link_ethernet = 2;
-const record_magic: u32 = 0x5446_5244 + 1; // "TFRD", bumped once for this record's layout
+const record_magic: u32 = 0x5446_5244 + 2; // "TFRD", bumped for each change of this record's layout
 
-pub const Error = error{ NoHca, VerbsFailed, PostFailed, Completion, BadRecord };
+pub const Error = error{ NoHca, VerbsFailed, PostFailed, Completion, BadRecord } || guard.Error;
 
 /// One HCA as configured: its device name and RoCE v2 GID index (null: detected).
 pub const HcaSpec = struct { name: [64]u8 = @splat(0), name_len: u8 = 0, gid: ?u8 = null };
@@ -22,6 +22,9 @@ pub const Record = extern struct {
     magic: u32 = record_magic,
     n_hca: u32 = 0,
     region: u64 = 0,
+    /// The region's slot and registered length: a peer whose layout differs is refused at connect.
+    slot_bytes: u64 = 0,
+    region_len: u64 = 0,
     rkey: [max_hcas]u32 = @splat(0),
     lid: [max_hcas]u32 = @splat(0),
     mtu: [max_hcas]u32 = @splat(0),
@@ -195,7 +198,7 @@ pub const VerbsWire = struct {
     }
 
     pub fn record(w: *const VerbsWire) Record {
-        var r: Record = .{ .n_hca = w.n_hca, .region = @intFromPtr(w.region.ptr) };
+        var r: Record = .{ .n_hca = w.n_hca, .region = @intFromPtr(w.region.ptr), .slot_bytes = w.slot_bytes, .region_len = w.region.len };
         for (w.hcas[0..w.n_hca], 0..) |h, i| {
             r.rkey[i] = h.mr.rkey;
             r.lid[i] = h.lid;
@@ -209,7 +212,7 @@ pub const VerbsWire = struct {
     /// The peer HCA for each of ours: the same IPv4 /24 (functions pair by subnet, names may differ), else position.
     pub fn pairing(mine: Record, peer: Record) ![max_hcas]u32 {
         if (peer.magic != record_magic) return error.BadRecord;
-        if (peer.n_hca != mine.n_hca) return error.BadRecord;
+        if (peer.n_hca != mine.n_hca or peer.slot_bytes != mine.slot_bytes or peer.region_len != mine.region_len) return error.BadRecord;
         var out: [max_hcas]u32 = undefined;
         for (0..mine.n_hca) |i| {
             out[i] = @intCast(i);
@@ -242,25 +245,26 @@ pub const VerbsWire = struct {
 
     /// Slot `slot`'s first `padded` bytes to the peer, striped over the HCAs, each stripe's `seq` flag on the same QP.
     pub fn post(w: *VerbsWire, slot: u32, seq: u32, padded: u32) !void {
-        const packs = padded / 16;
-        var offset: u64 = 0;
+        var plan: [max_hcas]guard.Stripe = undefined;
+        try guard.stripes(w.regionLayout(), w.n_hca, slot, padded, &plan);
         var seq_copy = seq;
-        for (w.hcas[0..w.n_hca], 0..) |*h, i| {
+        for (w.hcas[0..w.n_hca], plan[0..w.n_hca], 0..) |*h, s, i| {
             while (h.outstanding >= send_depth / 4) try w.reapHca(h);
-            var stripe = packs / w.n_hca;
-            if (i < packs % w.n_hca) stripe += 1;
-            const bytes: u32 = stripe * 16;
             var flag_sge: abi.Sge = .{ .addr = @intFromPtr(&seq_copy), .length = 4, .lkey = 0 };
-            var flag_wr: abi.SendWr = .{ .wr_id = seq, .sg_list = @ptrCast(&flag_sge), .num_sge = 1, .opcode = abi.wr_rdma_write, .send_flags = abi.send_signaled | abi.send_inline, .remote_addr = w.peer_region + w.flag_off + (@as(u64, slot) * max_hcas + i) * flag_stride, .rkey = w.peer_rkey[i] };
-            var data_sge: abi.Sge = .{ .addr = @intFromPtr(w.region.ptr) + w.send_off + slot * w.slot_bytes + offset, .length = bytes, .lkey = h.mr.lkey };
-            var data_wr: abi.SendWr = .{ .wr_id = seq, .next = &flag_wr, .sg_list = @ptrCast(&data_sge), .num_sge = 1, .opcode = abi.wr_rdma_write, .send_flags = 0, .remote_addr = w.peer_region + w.recv_off + slot * w.slot_bytes + offset, .rkey = w.peer_rkey[i] };
+            var flag_wr: abi.SendWr = .{ .wr_id = seq, .sg_list = @ptrCast(&flag_sge), .num_sge = 1, .opcode = abi.wr_rdma_write, .send_flags = abi.send_signaled | abi.send_inline, .remote_addr = w.peer_region + s.flag, .rkey = w.peer_rkey[i] };
+            var data_sge: abi.Sge = .{ .addr = @intFromPtr(w.region.ptr) + s.local, .length = s.len, .lkey = h.mr.lkey };
+            var data_wr: abi.SendWr = .{ .wr_id = seq, .next = &flag_wr, .sg_list = @ptrCast(&data_sge), .num_sge = 1, .opcode = abi.wr_rdma_write, .send_flags = 0, .remote_addr = w.peer_region + s.remote, .rkey = w.peer_rkey[i] };
             var bad: ?*abi.SendWr = null;
-            const first: *abi.SendWr = if (bytes > 0) &data_wr else &flag_wr;
+            const first: *abi.SendWr = if (s.len > 0) &data_wr else &flag_wr;
             if (h.ctx.ops.post_send(h.qp, first, &bad) != 0) return error.PostFailed;
             h.outstanding += 1;
-            offset += bytes;
         }
         w.posted += 1;
+    }
+
+    /// This rank's layout; the MR covers `region` exactly and the peer's record matched it at connect.
+    pub fn regionLayout(w: *const VerbsWire) guard.Layout {
+        return .{ .send = w.send_off, .recv = w.recv_off, .flags = w.flag_off, .slot = w.slot_bytes, .len = w.region.len };
     }
 
     fn reapHca(w: *VerbsWire, h: *Hca) !void {
@@ -302,5 +306,11 @@ test "HCA lists parse and subnets pair the functions" {
     try std.testing.expectEqual(@as(u32, 0), p[1]);
     try std.testing.expect(ipv4Mapped(sub100));
     b.n_hca = 1;
+    try std.testing.expectError(error.BadRecord, VerbsWire.pairing(a, b));
+    b.n_hca = 2;
+    b.slot_bytes = 1 << 20;
+    try std.testing.expectError(error.BadRecord, VerbsWire.pairing(a, b));
+    b.slot_bytes = 0;
+    b.region_len = 4096;
     try std.testing.expectError(error.BadRecord, VerbsWire.pairing(a, b));
 }

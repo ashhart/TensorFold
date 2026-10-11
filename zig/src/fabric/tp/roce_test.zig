@@ -2,6 +2,8 @@
 const std = @import("std");
 const roce = @import("roce.zig");
 const rv = @import("roce_verbs.zig");
+const shm = @import("roce_shm.zig");
+const guard = @import("roce_guard.zig");
 const bootstrap = @import("bootstrap.zig");
 const sock = @import("sock.zig");
 const reference = @import("reference.zig");
@@ -21,6 +23,30 @@ const Run = struct {
     max_bytes: usize = 16 * 1024,
     /// Variable lengths (`Roce.allGatherV`'s contract): each op's lens[r] bytes of rank r's n, 0 and n included.
     var_lens: bool = false,
+    /// The shm wire's stripes (2: the verbs wire's split over two HCAs).
+    stripes: u32 = 1,
+    /// Each rank's shm posts as the tap saw them: how many, and how many left their slot or the region.
+    taps: [2]Tap = .{ .{}, .{} },
+};
+
+/// Counts an shm wire's posts and any stripe outside its slot, its flag words or the region.
+const Tap = struct {
+    posts: u32 = 0,
+    outside: u32 = 0,
+    tap: shm.PostTap = undefined,
+
+    fn seen(ctx: *anyopaque, l: guard.Layout, slot: u32, padded: u32, s: []const guard.Stripe) void {
+        const t: *Tap = @ptrCast(@alignCast(ctx));
+        t.posts += 1;
+        var sum: u64 = 0;
+        for (s) |x| {
+            sum += x.len;
+            const in_slot = x.local >= l.send + slot * l.slot and x.local + x.len <= l.send + (slot + 1) * l.slot;
+            const in_peer = x.remote >= l.recv + slot * l.slot and x.remote + x.len <= l.recv + (slot + 1) * l.slot;
+            if (!in_slot or !in_peer or x.remote + x.len > l.len or x.flag < l.flags or x.flag + 4 > l.send) t.outside += 1;
+        }
+        if (sum != padded) t.outside += 1;
+    }
 };
 
 fn rank(run: *Run, me: u32, lfd: sock.Fd) void {
@@ -32,7 +58,9 @@ fn body(run: *Run, me: u32, lfd: sock.Fd) ?anyerror {
     defer b.close();
     var spec: [1]rv.HcaSpec = .{.{}};
     if (run.wire == .verbs) _ = rv.parseSpecs(run.devs[me], @ptrCast(&spec)) catch |e| return e;
-    const r = roce.Roce.init(null, &b, "", .{ .wire = run.wire, .hcas = if (run.wire == .verbs) &spec else &.{}, .max_bytes = run.max_bytes, .timeout_ns = run.timeout_ns }) catch |e| return e;
+    const mine = &run.taps[me];
+    mine.tap = .{ .ctx = mine, .seen = Tap.seen };
+    const r = roce.Roce.init(null, &b, "", .{ .wire = run.wire, .hcas = if (run.wire == .verbs) &spec else &.{}, .max_bytes = run.max_bytes, .timeout_ns = run.timeout_ns, .shm_stripes = run.stripes, .tap = &mine.tap }) catch |e| return e;
     defer r.deinit();
     var abort_thread: ?std.Thread = null;
     defer if (abort_thread) |t| t.join();
@@ -92,6 +120,17 @@ test "the RoCE protocol with variable lengths over the shm wire: each rank posts
     try twoRanks(&run);
     for (run.errs) |e| if (e) |err| return err;
     try std.testing.expectEqual([2]u32{ 2000, 2000 }, run.done);
+}
+
+test "the shm wire striped as over two HCAs: every post inside its slot and the region, bytes and lengths exact" {
+    var run: Run = .{ .port = 0, .wire = .shm, .ops = 2000, .var_lens = true, .stripes = 2 };
+    try twoRanks(&run);
+    for (run.errs) |e| if (e) |err| return err;
+    try std.testing.expectEqual([2]u32{ 2000, 2000 }, run.done);
+    for (run.taps) |t| {
+        try std.testing.expectEqual(@as(u32, 2000), t.posts);
+        try std.testing.expectEqual(@as(u32, 0), t.outside);
+    }
 }
 
 test "a peer that stops makes the waiting rank time out, and abort ends a wait at once" {
