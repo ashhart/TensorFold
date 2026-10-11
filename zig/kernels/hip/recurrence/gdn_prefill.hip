@@ -1,7 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-
-// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 // Chunked Gated DeltaNet for long prompts after FLA's chunk_gated_delta_rule, in five kernels: prep, kt, wy, h, o.
 
 // fp16 operands and fp32 accumulation through v_dot2_f32_f16; the state and every sum stay fp32.
