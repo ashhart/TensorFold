@@ -1,4 +1,4 @@
-//! `tf-tp-test suite | failfast RANK fatal|kill | roce-host`: one rank of a two-process TP=2 test on real GPUs.
+//! `tf-tp-test suite | failfast RANK fatal|kill | roce-host | kernel`: one rank of a two-process TP=2 test.
 const std = @import("std");
 const cuda = @import("cuda");
 const tp = @import("tp");
@@ -11,11 +11,20 @@ const max_bytes = (4 << 20) + 4096;
 pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 2) {
-        std.debug.print("usage: tf-tp-test suite | failfast RANK fatal|kill | roce-host\n", .{});
+        std.debug.print("usage: tf-tp-test suite | failfast RANK fatal|kill | roce-host | kernel\n", .{});
         return 2;
+    }
+    // `kernel`: whether the build embeds the mailbox kernel (-Dtp-nvcc or -Dtp-fatbin), for scripts to check first
+    if (std.mem.eql(u8, args[1], "kernel")) {
+        std.debug.print("mailbox kernel {d} B\n", .{tp_kernel.mailbox.len});
+        return if (tp_kernel.mailbox.len > 0) 0 else 1;
     }
     const cfg = try tp.Config.fromEnv();
     if (std.mem.eql(u8, args[1], "roce-host")) return @import("roce_host.zig").run(cfg, init.gpa);
+    if (cfg.backend != .nccl and tp_kernel.mailbox.len == 0) {
+        std.debug.print("FAIL TF_COMM_BACKEND={t} needs the mailbox kernel: rebuild with -Dtp-nvcc or -Dtp-fatbin\n", .{cfg.backend});
+        return 2;
+    }
     var driver = try cuda.Driver.open();
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, @intCast(cfg.device));
