@@ -43,9 +43,7 @@ pub const Kernels = struct {
     rest_rows: cuda.Function,
     pocket_rows: cuda.Function,
     add_row: cuda.Function,
-    draw: cuda.Function,
-    draw_ids: cuda.Function,
-    logprob_rows: cuda.Function,
+    draws: cuda.sample.Draws, // sample.cu: the keyed draws and logprob rows
     grammar_mask: cuda.Function, // structured output: disallowed tokens -inf before the draw
     torch: torch_ops.Functions,
     train: train_ops.Kernels, // Sliding Weights' learning step, and the learned change a forward adds while lessons run
@@ -76,10 +74,8 @@ pub const Kernels = struct {
         k.pocket_rows = try k.mods[7].function("tf_pocket_rows");
         k.add_row = try k.mods[7].function("tf_add_row");
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
-        k.draw = try k.mods[14].function("tf_draw");
-        k.draw_ids = try k.mods[14].function("tf_draw_ids");
+        k.draws = try cuda.sample.Draws.resolve(k.mods[14]);
         k.glue = try glue.Fns.resolve(k.mods[16..21]);
-        k.logprob_rows = try k.mods[14].function("tf_logprob_rows");
         k.grammar_mask = try k.mods[14].function("tf_grammar_mask");
         k.modelopt = null;
         k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
@@ -159,18 +155,9 @@ pub const Ops = struct {
         return .{ .k = &o.k.train, .s = o.s };
     }
 
-    /// sample.cu: row r of bf16 logits drawn at position meta[0] + r + 1 + offset, columns as `ids` token ids if given.
+    /// sample.cu's keyed draw on this stream (cuda/sample.zig, the launch unchanged).
     pub fn draw(o: Ops, logits: u64, vocab: usize, rule: u64, meta: u64, offset: usize, out: u64, rows: usize, ids: ?u64, prob: ?u64) !void {
-        var a: cuda.Args = .{};
-        a.add(logits);
-        a.add(@as(u32, @intCast(vocab)));
-        a.add(rule);
-        a.add(meta);
-        a.add(@as(i32, @intCast(offset)));
-        a.add(out);
-        if (ids) |x| a.add(x);
-        a.add(prob orelse 0);
-        try o.go(if (ids != null) o.k.draw_ids else o.k.draw, .{ rows, 1, 1 }, 1024, 0, &a);
+        return o.k.draws.draw(o.s, logits, vocab, rule, meta, offset, out, rows, ids, prob);
     }
 
     /// sample.cu: `rows` bf16 logits rows' disallowed tokens -inf, their bits `words` words a row at `bits`.
@@ -183,16 +170,9 @@ pub const Ops = struct {
         try o.go(o.k.grammar_mask, .{ rows, 1, 1 }, 256, 0, &a);
     }
 
-    /// sample.cu: bf16 logits rows' lanes.logprob words at `out`: each pick's logit, `k` best, `rank`: its rank.
+    /// sample.cu's logprob rows on this stream: each row's words for its pick, `k` best tokens and rank if `rank`.
     pub fn logprobRows(o: Ops, logits: u64, vocab: usize, picks: u64, k: u8, rank: bool, out: u64, rows: usize) !void {
-        var a: cuda.Args = .{};
-        a.add(logits);
-        a.add(@as(u32, @intCast(vocab)));
-        a.add(picks);
-        a.add(@as(u32, k));
-        a.add(@as(u32, @intFromBool(rank)));
-        a.add(out);
-        try o.go(o.k.logprob_rows, .{ rows, 1, 1 }, 1024, 0, &a);
+        return o.k.draws.logprobRows(o.s, logits, vocab, picks, k, rank, out, rows);
     }
 
     /// Every projection format the kernels loaded (cuda/qlinear.zig).
