@@ -13,7 +13,7 @@ const Stream = @import("stream.zig").Stream;
 const Value = ev.Value;
 const f = ev.f;
 
-pub const Kind = enum { forced, copy, head, fill, none };
+pub const Kind = enum { forced, copy, head, fill, grammar, none };
 
 /// One stream's window as planned, then as allocated (Python's plan lists).
 pub const Plan = struct {
@@ -28,6 +28,7 @@ pub const Plan = struct {
     tried: bool = false, // the planner read the head's chain back to graft branches
     lanes: ?*const shape.Shape = null, // the held drafts' tree shape (each lane's depth and rank)
     masks: []const u32 = &.{}, // structured output: the rows' allowed-token bits (constrain)
+    grammar_from: u32 = 0, // the first row the grammar drafted itself (0: none)
 
     pub fn count(p: Plan) usize {
         return p.held + p.tokens.len;
@@ -213,7 +214,7 @@ pub fn nodeChances(e: *Engine, s: *Stream, n: usize) ![]const f64 {
     return alloc.chainProbabilities(a, try e.rule.rates(who(s)), n);
 }
 
-/// Structured output: the planned rows an accepted path can use under the stream's grammar, and each row's bits.
+/// Structured output: the rows an accepted path can use, each row's bits, and the grammar's drafts after a lone chain.
 pub fn constrain(e: *Engine, p: *Plan) !void {
     const g = p.stream.grammar orelse return;
     const a = e.arena.allocator();
@@ -228,13 +229,17 @@ pub fn constrain(e: *Engine, p: *Plan) !void {
     const rows = try a.alloc(u32, 1 + p.tokens.len);
     rows[0] = p.stream.pending.?;
     @memcpy(rows[1..], p.tokens);
-    const w = try g.window(a, rows, try accept.rowParents(a, rows.len, p.parents), p.kind == .forced);
+    const grows = p.stream.drafts and p.kind != .forced and e.alone;
+    const room = if (grows) @max(rows.len, e.cfg.family_width) else rows.len;
+    const w = try g.window(a, rows, try accept.rowParents(a, rows.len, p.parents), p.kind == .forced, room);
     p.masks = w.masks;
-    if (w.rows.len == rows.len) return;
-    p.lanes = null; // the tree shape no longer matches the rows
-    const kept = try a.alloc(u32, w.rows.len - 1);
-    for (kept, w.rows[1..]) |*t, r| t.* = rows[r];
+    if (w.rows.len == rows.len and w.extra.len == 0) return;
+    if (w.rows.len < rows.len) p.lanes = null; // the tree shape no longer matches the rows
+    const kept = try a.alloc(u32, w.rows.len - 1 + w.extra.len);
+    for (kept[0 .. w.rows.len - 1], w.rows[1..]) |*t, r| t.* = rows[r];
+    @memcpy(kept[w.rows.len - 1 ..], w.extra);
     p.tokens = kept;
+    if (w.extra.len > 0) p.grammar_from = @intCast(w.rows.len);
     if (p.parents != null) {
         const parents = try a.alloc(i32, kept.len);
         for (parents, w.parents[1..]) |*q, r| q.* = r - 1;
@@ -245,7 +250,7 @@ pub fn constrain(e: *Engine, p: *Plan) !void {
         for (w.rows) |r| below += @intFromBool(r < p.branch_from);
         p.branch_from = below;
     }
-    if (kept.len == 0 and p.kind != .forced) p.kind = .none;
+    if (p.kind != .forced and w.rows.len == 1) p.kind = if (w.extra.len > 0) .grammar else .none;
 }
 
 /// The window's rows, parents and keyed positions, ready for the backend.

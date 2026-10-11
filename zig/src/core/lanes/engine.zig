@@ -340,18 +340,23 @@ pub const Engine = struct {
                 e.accepted += kept;
                 s.drafted += rows - 1;
                 s.accepted += kept;
+                // the proposal's own rows: the grammar's drafts after them are neither the proposer's nor the head's
+                const own_end = if (p.grammar_from > 0) p.grammar_from else rows;
+                var own_kept: usize = 0;
+                for (path[1..]) |r| own_kept += @intFromBool(r < own_end);
+                const own: usize = own_end - 1;
                 if (p.kind == .copy) {
-                    if (s.proposer) |pr| pr.observe(@intCast(rows - 1), @intCast(kept));
+                    if (s.proposer) |pr| pr.observe(@intCast(own), @intCast(own_kept));
                     if (e.alone) {
                         const width = s.copy_width orelse e.cfg.first_copy;
-                        s.copy_width = if (kept == rows - 1) @min(e.cfg.max_copy, 2 * width + 1) else e.cfg.first_copy;
+                        s.copy_width = if (own_kept == own) @min(e.cfg.max_copy, 2 * width + 1) else e.cfg.first_copy;
                     }
                 } else if (p.kind == .head) {
                     if (p.lanes) |l| if (s.odds != null) s.observeLanes(l, path);
                     const ds = try accept.depths(a, parents);
-                    const chain = if (p.branch_from > 0) ds[0..p.branch_from] else ds;
+                    const chain = if (p.branch_from > 0) ds[0..p.branch_from] else ds[0..own_end];
                     var chain_kept: usize = 0;
-                    for (path[1..]) |r| chain_kept += @intFromBool(p.branch_from == 0 or r < p.branch_from);
+                    for (path[1..]) |r| chain_kept += @intFromBool((p.branch_from == 0 or r < p.branch_from) and r < own_end);
                     try e.rule.observeDepth(win.who(s), std.mem.max(u32, chain), @intCast(chain_kept));
                 }
                 var kept_branch: u64 = 0;

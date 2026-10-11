@@ -3,11 +3,14 @@
 #include <picojson.h>
 #include <xgrammar/xgrammar.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -33,10 +36,41 @@ void message(char* err, size_t len, const char* text) {
     err[len - 1] = 0;
 }
 
+// Each token's decoded text to its id (the lowest id for a repeated text), for spelling a grammar's forced text.
+struct Spellings {
+    std::unordered_map<std::string, int32_t> ids;
+    size_t longest = 0;
+};
+
+std::shared_ptr<const Spellings> spellings(const xgrammar::TokenizerInfo& info) {
+    auto out = std::make_shared<Spellings>();
+    const auto& vocab = info.GetDecodedVocab();
+    std::vector<bool> skip(vocab.size(), false);
+    for (int32_t t : info.GetSpecialTokenIds()) if (t >= 0 && (size_t)t < skip.size()) skip[t] = true;
+    for (int32_t t : info.GetStopTokenIds()) if (t >= 0 && (size_t)t < skip.size()) skip[t] = true;
+    for (size_t t = 0; t < vocab.size(); t++) {
+        if (skip[t] || vocab[t].empty()) continue;
+        out->ids.emplace(vocab[t], (int32_t)t);  // emplace keeps the first (lowest) id
+        out->longest = std::max(out->longest, vocab[t].size());
+    }
+    return out;
+}
+
 struct Compiler {
     xgrammar::TokenizerInfo info;
     xgrammar::GrammarCompiler compiler;
     int vocab;
+    std::shared_ptr<const Spellings> spell;
+};
+
+struct Compiled {
+    xgrammar::CompiledGrammar g;
+    std::shared_ptr<const Spellings> spell;
+};
+
+struct Matcher {
+    xgrammar::GrammarMatcher m;
+    std::shared_ptr<const Spellings> spell;
 };
 
 constexpr int BLANKS = 32;                      // grammar.py BLANKS
@@ -83,7 +117,7 @@ void* tfg_open(const char* tokenizer_json, size_t len, int vocab, const int32_t*
         bool prefix = mo2.at("add_prefix_space").get<bool>();
         std::vector<int32_t> stop(stops, stops + nstops);
         xgrammar::TokenizerInfo info(encoded, type, vocab, stop, prefix);
-        return new Compiler{info, xgrammar::GrammarCompiler(info, 8, true, CACHE_BYTES), vocab};
+        return new Compiler{info, xgrammar::GrammarCompiler(info, 8, true, CACHE_BYTES), vocab, spellings(info)};
     } catch (const std::exception& e) {
         message(err, errlen, e.what());
     } catch (...) {
@@ -124,7 +158,7 @@ void* tfg_compile(void* cp, int kind, const char* text, size_t len, char* err, s
                 default: return c->compiler.CompileGrammar(t);
             }
         }();
-        return new xgrammar::CompiledGrammar(g);
+        return new Compiled{g, c->spell};
     } catch (const std::exception& e) {
         message(err, errlen, e.what());
     } catch (...) {
@@ -133,22 +167,23 @@ void* tfg_compile(void* cp, int kind, const char* text, size_t len, char* err, s
     return nullptr;
 }
 
-void tfg_free(void* g) { delete static_cast<xgrammar::CompiledGrammar*>(g); }
+void tfg_free(void* g) { delete static_cast<Compiled*>(g); }
 
 void* tfg_matcher(void* g) {
     try {
-        return new xgrammar::GrammarMatcher(*static_cast<xgrammar::CompiledGrammar*>(g));
+        auto* c = static_cast<Compiled*>(g);
+        return new Matcher{xgrammar::GrammarMatcher(c->g), c->spell};
     } catch (...) {
         return nullptr;
     }
 }
 
-void tfg_matcher_free(void* m) { delete static_cast<xgrammar::GrammarMatcher*>(m); }
+void tfg_matcher_free(void* m) { delete static_cast<Matcher*>(m); }
 
 // 1 taken, 0 rejected, -1 failed.
 int tfg_accept(void* m, int32_t token) {
     try {
-        return static_cast<xgrammar::GrammarMatcher*>(m)->AcceptToken(token) ? 1 : 0;
+        return static_cast<Matcher*>(m)->m.AcceptToken(token) ? 1 : 0;
     } catch (...) {
         return -1;
     }
@@ -156,14 +191,14 @@ int tfg_accept(void* m, int32_t token) {
 
 int tfg_rollback(void* m, int n) {
     try {
-        static_cast<xgrammar::GrammarMatcher*>(m)->Rollback(n);
+        static_cast<Matcher*>(m)->m.Rollback(n);
         return 0;
     } catch (...) {
         return -1;
     }
 }
 
-int tfg_terminated(void* m) { return static_cast<xgrammar::GrammarMatcher*>(m)->IsTerminated() ? 1 : 0; }
+int tfg_terminated(void* m) { return static_cast<Matcher*>(m)->m.IsTerminated() ? 1 : 0; }
 
 // The next token's allowed bits into ``words`` (tfg_words of them). 0, or -1 when it failed.
 int tfg_fill(void* m, int32_t* words, int n) {
@@ -175,11 +210,38 @@ int tfg_fill(void* m, int32_t* words, int n) {
         t.ndim = 2;
         t.dtype = {kDLInt, 32, 1};
         t.shape = shape;
-        static_cast<xgrammar::GrammarMatcher*>(m)->FillNextTokenBitmask(&t, 0);
+        static_cast<Matcher*>(m)->m.FillNextTokenBitmask(&t, 0);
         return 0;
     } catch (...) {
         return -1;
     }
+}
+
+// Up to n tokens spelling the grammar's forced text, longest first, never its last character (models join it on).
+int tfg_drafts(void* mp, int32_t* out, int n) {
+    auto* w = static_cast<Matcher*>(mp);
+    int got = 0;
+    bool failed = false;
+    try {
+        while (got < n && !w->m.IsTerminated()) {
+            std::string forced = w->m.FindJumpForwardString();
+            int32_t pick = -1;
+            for (size_t len = std::min(forced.size() - (forced.empty() ? 0 : 1), w->spell->longest); len > 0 && pick < 0; len--) {
+                auto it = w->spell->ids.find(forced.substr(0, len));
+                if (it != w->spell->ids.end()) pick = it->second;
+            }
+            if (pick < 0 || !w->m.AcceptToken(pick)) break;
+            out[got++] = pick;
+        }
+    } catch (...) {
+        failed = true;
+    }
+    try {
+        if (got > 0) w->m.Rollback(got);
+    } catch (...) {
+        return -1;
+    }
+    return failed ? -1 : got;
 }
 
 }  // extern "C"

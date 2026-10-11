@@ -77,6 +77,7 @@ class Shim:
             "tfg_rollback": (i, [p, i]),
             "tfg_terminated": (i, [p]),
             "tfg_fill": (i, [p, ctypes.POINTER(ctypes.c_int32), i]),
+            "tfg_drafts": (i, [p, ctypes.POINTER(ctypes.c_int32), i]),
         }
         for name, (res, args) in sig.items():
             f = getattr(lib, name)
@@ -114,6 +115,25 @@ def reference(compiler, kind: str, text: str):
     return compiler.compile_grammar(text)
 
 
+def spelled(ref, spellings: dict[bytes, int], longest: int, n: int = 16) -> list[int] | None:
+    """tfg_drafts's rule on xgrammar's own matcher; None where its Python API cannot hold a text cut mid-character."""
+    out = []
+    while len(out) < n and not ref.is_terminated():
+        try:
+            forced = ref.find_jump_forward_string().encode()
+        except UnicodeDecodeError:
+            if out:
+                ref.rollback(len(out))
+            return None
+        pick = next((spellings[forced[:k]] for k in range(min(len(forced) - 1, longest), 0, -1) if forced[:k] in spellings), None)
+        if pick is None or not ref.accept_token(pick):
+            break
+        out.append(pick)
+    if out:
+        ref.rollback(len(out))
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__ + " Needs xgrammar==0.2.8 (zig/build/grammar.zig's pin), transformers and torch.")
     ap.add_argument("--model", required=True, help="checkpoint folder (tokenizer.json, config.json)")
@@ -135,6 +155,12 @@ def main() -> int:
     tok = PreTrainedTokenizerFast(tokenizer_file=str(model / "tokenizer.json"))
     info = xgr.TokenizerInfo.from_huggingface(tok, vocab_size=vocab, stop_token_ids=stops)
     compiler = xgr.GrammarCompiler(info, max_threads=8, cache_limit_bytes=256 << 20)
+    skip = set(info.special_token_ids) | set(stops)
+    spellings: dict[bytes, int] = {}
+    for t, text in enumerate(info.decoded_vocab):
+        if t not in skip and text and text not in spellings:
+            spellings[text] = t
+    longest = max(len(t) for t in spellings)
     shim = Shim(args.lib)
     h = shim.open((model / "tokenizer.json").read_bytes(), vocab, stops)
     words = shim.lib.tfg_words(h)
@@ -143,7 +169,7 @@ def main() -> int:
         print(f"FAIL: libtfgrammar fills {words} words a row, xgrammar {want_words}")
         return 1
 
-    steps = mismatches = 0
+    steps = mismatches = unreadable = 0
     for name, kind, text in CASES:
         g = shim.compile(h, kind, text)
         compiled = reference(compiler, kind, text)
@@ -155,7 +181,15 @@ def main() -> int:
             ours = np.zeros(words, dtype=np.int32)
             theirs = xgr.allocate_token_bitmask(1, vocab)
             taken = 0
+            drafted = (ctypes.c_int32 * 16)()
             for _ in range(args.steps):
+                got = shim.lib.tfg_drafts(m, drafted, 16)
+                want_drafts = spelled(ref, spellings, longest)
+                if want_drafts is None:
+                    unreadable += 1
+                elif got < 0 or list(drafted[:got]) != want_drafts:
+                    case_bad += 1
+                    print(f"  {name} walk {walk} step {taken}: drafts {list(drafted[:max(got, 0)])} differ from the reference")
                 if shim.lib.tfg_fill(m, ours.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)), words) != 0:
                     raise RuntimeError(f"{name}: tfg_fill failed")
                 ref.fill_next_token_bitmask(theirs, 0)
@@ -205,7 +239,8 @@ def main() -> int:
             mismatches += 1
         except RuntimeError as exc:
             print(f"ok   refused {kind} {text!r}: {str(exc).splitlines()[0][:80]}")
-    print(f"{'PASS' if mismatches == 0 else 'FAIL'}: {steps} steps over {len(CASES)} grammars, {mismatches} mismatches")
+    print(f"{'PASS' if mismatches == 0 else 'FAIL'}: {steps} steps over {len(CASES)} grammars, {mismatches} mismatches"
+          f" ({unreadable} draft checks skipped: a forced text cut mid-character)")
     return 0 if mismatches == 0 else 1
 
 

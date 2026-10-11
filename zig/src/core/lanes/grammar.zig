@@ -16,6 +16,7 @@ const Fns = struct {
     rollback: *const fn (*anyopaque, c_int) callconv(.c) c_int,
     terminated: *const fn (*anyopaque) callconv(.c) c_int,
     fill: *const fn (*anyopaque, [*]i32, c_int) callconv(.c) c_int,
+    drafts: *const fn (*anyopaque, [*]i32, c_int) callconv(.c) c_int,
 };
 
 var lib: ?Fns = null;
@@ -118,7 +119,12 @@ pub const Matcher = struct {
     }
 
     pub fn rules(m: Matcher) Rules {
-        return .{ .ptr = m.h, .vtable = &.{ .accept = acceptFn, .rollback = rollbackFn, .terminated = terminatedFn, .fill = fillFn, .free = freeFn } };
+        return .{ .ptr = m.h, .vtable = &.{ .accept = acceptFn, .rollback = rollbackFn, .terminated = terminatedFn, .fill = fillFn, .drafts = draftsFn, .free = freeFn } };
+    }
+
+    fn draftsFn(h: *anyopaque, out: []u32) anyerror!usize {
+        const n = lib.?.drafts(h, @ptrCast(out.ptr), @intCast(out.len));
+        return if (n < 0) error.Grammar else @intCast(n);
     }
 
     fn acceptFn(h: *anyopaque, token: u32) anyerror!bool {
@@ -159,6 +165,8 @@ pub const Rules = struct {
         terminated: *const fn (ptr: *anyopaque) bool,
         /// The next token's allowed bits (token t: bit t % 32 of word t / 32).
         fill: *const fn (ptr: *anyopaque, words: []u32) anyerror!void,
+        /// Tokens spelling the text the grammar forces from here (none where it branches); the matcher stays put.
+        drafts: *const fn (ptr: *anyopaque, out: []u32) anyerror!usize,
         free: *const fn (ptr: *anyopaque) void,
     };
 };
@@ -167,7 +175,8 @@ pub const Rules = struct {
 pub const Window = struct {
     rows: []const u32, // the kept rows' indices in the planned window (row 0, the pending token, always)
     parents: []const i32, // each kept row's parent among the kept rows (row 0: -1)
-    masks: []const u32, // a row's allowed bits after another's (rows.len rows; all set where unconstrained); empty: none
+    masks: []const u32, // each row's allowed bits, kept rows then `extra` (all set where unconstrained); empty: none
+    extra: []const u32 = &.{}, // the grammar's own drafts after a chain's last kept row
 };
 
 /// One reply's grammar at its committed tokens (Python Constraint).
@@ -217,12 +226,15 @@ pub const Constraint = struct {
     }
 
     /// Rows of `tokens` (row 0 pending) an accepted path can use, with bits; `forced` keeps rows, unmasked past a miss.
-    pub fn window(c: *Constraint, a: Allocator, tokens: []const u32, parents: []const i32, forced: bool) !Window {
+    pub fn window(c: *Constraint, a: Allocator, tokens: []const u32, parents: []const i32, forced: bool, room: usize) !Window {
         const n = tokens.len;
         const all = try a.alloc(u32, n);
         for (all, 0..) |*r, i| r.* = @intCast(i);
         if (c.finished() or (!c.active and std.mem.indexOfScalar(u32, tokens[1..], c.after.?) == null))
             return .{ .rows = all, .parents = parents, .masks = &.{} }; // the reply has ended, or no row reaches the grammar
+        for (parents[1..], 0..) |p, i| {
+            if (p != @as(i32, @intCast(i))) break;
+        } else return c.chain(a, tokens, forced, room);
         const bits = try a.alloc(u32, n * c.words);
         @memset(bits, std.math.maxInt(u32));
         const kept = try a.alloc(bool, n);
@@ -248,6 +260,56 @@ pub const Constraint = struct {
             if (walk.filled) @memcpy(masks[i * c.words ..][0..c.words], bits[r * c.words ..][0..c.words]);
         }
         return .{ .rows = rows, .parents = out_parents, .masks = masks };
+    }
+
+    /// A chain walked in order, then grown past its last kept row by the grammar's own drafts up to `room` rows.
+    fn chain(c: *Constraint, a: Allocator, tokens: []const u32, forced: bool, room: usize) !Window {
+        var masks: std.ArrayList(u32) = .empty;
+        var taken: usize = 0; // tokens the matcher took for this walk, all rolled back before returning
+        var active = c.active;
+        var free = false; // a forced row the grammar rejected: it and the rows after it stay unconstrained
+        var ended = false; // a planned draft was the stop token: nothing after it is verified
+        var filled = false;
+        var kept: usize = 0;
+        while (kept < tokens.len) {
+            const t = tokens[kept];
+            if (kept > 0) {
+                if (!active) {
+                    active = t == c.after.?;
+                } else if (!free and try c.rules.vtable.accept(c.rules.ptr, t)) {
+                    taken += 1;
+                    if (c.rules.vtable.terminated(c.rules.ptr)) {
+                        ended = true;
+                        break;
+                    }
+                } else if (forced) free = true else break;
+            }
+            const row = try masks.addManyAsSlice(a, c.words);
+            if (active and !free) {
+                try c.fill(row);
+                filled = true;
+            } else @memset(row, std.math.maxInt(u32));
+            kept += 1;
+        }
+        var extra: []u32 = &.{};
+        if (!forced and !free and !ended and active and room > kept) {
+            const drafts = try a.alloc(u32, room - kept);
+            const n = try c.rules.vtable.drafts(c.rules.ptr, drafts);
+            for (drafts[0..n]) |t| {
+                if (!try c.rules.vtable.accept(c.rules.ptr, t)) break;
+                taken += 1;
+                try c.fill(try masks.addManyAsSlice(a, c.words));
+                extra = drafts[0 .. extra.len + 1];
+            }
+        }
+        try c.rules.vtable.rollback(c.rules.ptr, taken);
+        const rows = try a.alloc(u32, kept);
+        const parents = try a.alloc(i32, kept);
+        for (rows, parents, 0..) |*r, *p, i| {
+            r.* = @intCast(i);
+            p.* = @as(i32, @intCast(i)) - 1;
+        }
+        return .{ .rows = rows, .parents = parents, .masks = if (filled) masks.items else &.{}, .extra = extra };
     }
 
     const Walk = struct {
@@ -288,7 +350,7 @@ pub fn allows(bits: []const u32, token: usize) bool {
     return word < bits.len and (bits[word] >> @intCast(token % 32)) & 1 == 1;
 }
 
-/// A test grammar over small ids: the tokens of `want` in order, then `stop`.
+/// A test grammar over small ids: the tokens of `want` in order, then `stop`; its drafts are the rest of `want`.
 pub const Sequence = struct {
     want: []const u32,
     stop: u32,
@@ -297,7 +359,15 @@ pub const Sequence = struct {
     gpa: Allocator,
 
     pub fn rules(s: *Sequence) Rules {
-        return .{ .ptr = s, .vtable = &.{ .accept = acceptFn, .rollback = rollbackFn, .terminated = terminatedFn, .fill = fillFn, .free = freeFn } };
+        return .{ .ptr = s, .vtable = &.{ .accept = acceptFn, .rollback = rollbackFn, .terminated = terminatedFn, .fill = fillFn, .drafts = draftsFn, .free = freeFn } };
+    }
+
+    fn draftsFn(ptr: *anyopaque, out: []u32) anyerror!usize {
+        const s = cast(ptr);
+        const rest = s.want[@min(s.at, s.want.len)..];
+        const n = @min(out.len, rest.len);
+        @memcpy(out[0..n], rest[0..n]);
+        return n;
     }
 
     fn cast(ptr: *anyopaque) *Sequence {
@@ -347,7 +417,7 @@ test "a window keeps the drafts the grammar takes, masks each kept row, and stop
     var c: Constraint = .init(seq.rules(), 1, null);
     defer seq.log.deinit(gpa);
     // a chain: pending 9 (already followed: the grammar is at 5), drafts 5 6 8 (8 rejected) 7
-    const w = try c.window(a, &.{ 9, 5, 6, 8, 7 }, &.{ -1, 0, 1, 2, 3 }, false);
+    const w = try c.window(a, &.{ 9, 5, 6, 8, 7 }, &.{ -1, 0, 1, 2, 3 }, false, 1);
     try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, w.rows);
     try std.testing.expectEqualSlices(i32, &.{ -1, 0, 1 }, w.parents);
     try std.testing.expectEqualSlices(u32, &.{ 1 << 5, 1 << 6, 1 << 7 }, w.masks);
@@ -355,11 +425,11 @@ test "a window keeps the drafts the grammar takes, masks each kept row, and stop
     // a tree: two branches from the pending row, one taken; the stop token's row is not verified
     try std.testing.expect(try c.follow(5));
     try std.testing.expect(try c.follow(6));
-    const t = try c.window(a, &.{ 9, 4, 7, 2, 3 }, &.{ -1, 0, 0, 2, 3 }, false);
+    const t = try c.window(a, &.{ 9, 4, 7, 2, 3 }, &.{ -1, 0, 0, 2, 3 }, false, 1);
     try std.testing.expectEqualSlices(u32, &.{ 0, 2 }, t.rows);
     try std.testing.expectEqualSlices(u32, &.{ 1 << 7, 1 << 2 }, t.masks);
     // forced rows all stay; the row after a rejected forced token is unconstrained
-    const f = try c.window(a, &.{ 9, 4, 3 }, &.{ -1, 0, 1 }, true);
+    const f = try c.window(a, &.{ 9, 4, 3 }, &.{ -1, 0, 1 }, true, 8);
     try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, f.rows);
     try std.testing.expectEqualSlices(u32, &.{ 1 << 7, std.math.maxInt(u32), std.math.maxInt(u32) }, f.masks);
 }
@@ -373,13 +443,36 @@ test "with thinking on the grammar starts after the think end, and rows before i
     defer seq.log.deinit(gpa);
     var c: Constraint = .init(seq.rules(), 1, 30);
     try std.testing.expect((try c.next(a)) == null);
-    const none = try c.window(a, &.{ 9, 10, 11 }, &.{ -1, 0, 1 }, false);
+    const none = try c.window(a, &.{ 9, 10, 11 }, &.{ -1, 0, 1 }, false, 1);
     try std.testing.expectEqual(@as(usize, 0), none.masks.len);
     // drafts 30 (the think end), then 5 and 4 (rejected)
-    const w = try c.window(a, &.{ 9, 30, 5, 4 }, &.{ -1, 0, 1, 2 }, false);
+    const w = try c.window(a, &.{ 9, 30, 5, 4 }, &.{ -1, 0, 1, 2 }, false, 1);
     try std.testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, w.rows);
     try std.testing.expectEqualSlices(u32, &.{ std.math.maxInt(u32), 1 << 5, 1 << 2 }, w.masks);
     try std.testing.expect(try c.follow(30));
     try std.testing.expect(c.active and !try c.follow(4));
     try std.testing.expect(try c.follow(5) and try c.follow(2) and c.finished());
+}
+
+test "a chain grows past its last kept row with the grammar's own drafts, never past the stop token or the room" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var seq: Sequence = .{ .want = &.{ 5, 6, 7, 8 }, .stop = 2, .gpa = gpa };
+    defer seq.log.deinit(gpa);
+    var c: Constraint = .init(seq.rules(), 1, null);
+    // the head's 5 is kept and its 4 cut: the grammar drafts 6 and 7 in the four rows of room
+    const w = try c.window(a, &.{ 9, 5, 4 }, &.{ -1, 0, 1 }, false, 4);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, w.rows);
+    try std.testing.expectEqualSlices(u32, &.{ 6, 7 }, w.extra);
+    try std.testing.expectEqualSlices(u32, &.{ 1 << 5, 1 << 6, 1 << 7, 1 << 8 }, w.masks);
+    try std.testing.expectEqual(@as(usize, 0), seq.at);
+    // with no drafts at all the grammar drafts the rest of its text; its stop token is the last row's draw, not a row
+    const g = try c.window(a, &.{9}, &.{-1}, false, 16);
+    try std.testing.expectEqualSlices(u32, &.{ 5, 6, 7, 8 }, g.extra);
+    try std.testing.expectEqualSlices(u32, &.{ 1 << 5, 1 << 6, 1 << 7, 1 << 8, 1 << 2 }, g.masks);
+    // forced rows never grow
+    const f = try c.window(a, &.{ 9, 5 }, &.{ -1, 0 }, true, 16);
+    try std.testing.expectEqual(@as(usize, 0), f.extra.len);
 }
