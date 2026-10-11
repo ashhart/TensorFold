@@ -76,6 +76,8 @@ pub const Request = struct {
     loop_guard: bool = false,
     /// Logprob rows for each reply token with this many best tokens (0..20), when ``Info.logprobs``; null: none.
     logprobs: ?u8 = null,
+    /// Rows for each prompt token after the first, with ranks and this many best tokens, when ``Info.prompt_logprobs``.
+    prompt_logprobs: ?u8 = null,
 };
 
 pub const Reason = enum { stop, length, cancelled, failed };
@@ -102,6 +104,8 @@ pub const Event = union(enum) {
     prefilled: u32,
     /// The next ``tokens`` event's logprob rows, one a token (``logprobs`` requests); valid only during the call.
     logprobs: []const LogprobRow,
+    /// The prompt's rows, one a prompt token after the first, right after ``prefilled`` (``prompt_logprobs`` requests).
+    prompt_logprobs: []const LogprobRow,
     /// Tokens committed for this request, in order; valid only during the call.
     tokens: []const u32,
     /// The reply ended; nothing follows. ``message`` says why a failed reply failed.
@@ -128,6 +132,8 @@ pub const Info = struct {
     structures: bool = false,
     /// Requests may ask for ``logprobs`` (the engine's lanes give the target's rows).
     logprobs: bool = false,
+    /// Requests may ask for ``prompt_logprobs`` (a prompt pass from 0 that reads every row).
+    prompt_logprobs: bool = false,
     /// Prompt rows a prefill chunk at most, for the server's chunk starts (0: the engine cuts prompts itself).
     prefill_step: u32 = 0,
     /// The engine keeps prompt states between requests, so ``prefilled`` counts the tokens it restored.

@@ -98,7 +98,7 @@ const Box = struct {
         defer b.mutex.unlock(io);
         switch (value.*) {
             .prefilled => |from| b.from = @intCast(from),
-            .logprobs => {},
+            .logprobs, .prompt_logprobs => {},
             .tokens => |ids| {
                 @memcpy(b.tokens[b.count..][0..ids.len], ids);
                 b.count += ids.len;

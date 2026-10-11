@@ -340,7 +340,7 @@ pub const LaneHost = struct {
         const r = job.request;
         var reuse: lanes.stream.Reuse = .{};
         // the entry stays alive until the backend restores it: nothing keeps between here and this stream's own pass
-        if (h.cache) |store| if (store.lookupRewind(h.gpa, r.prompt, r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, &.{})) |l| {
+        if (h.cache) |store| if (r.prompt_logprobs == null) if (store.lookupRewind(h.gpa, r.prompt, r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, &.{})) |l| {
             job.entry = l.entry;
             job.kept0 = store.counts.kept;
             job.marks = l.marks;
@@ -361,6 +361,7 @@ pub const LaneHost = struct {
             .think_close = r.think_close,
             .think_end = if (r.think_end) |t| t else -1,
             .logprobs = r.logprobs,
+            .prompt_logprobs = r.prompt_logprobs,
             .loop_guard = r.loop_guard,
             .chunks = r.chunks,
             .history_len = r.history_len,
@@ -417,13 +418,14 @@ pub const LaneHost = struct {
         job.reported();
         if (h.cache) |store| store.report(job.request.prompt.len, job.stream.cached, store.counts.kept - job.kept0);
         emit(job, .{ .prefilled = job.stream.cached });
+        if (job.stream.prompt_logprobs != null) emit(job, .{ .prompt_logprobs = job.stream.prompt_rows.items });
     }
 
     /// An idle backend driver takes a lone drafted request, sampled when supported; never one with logprobs.
     fn loneFits(h: *LaneHost, job: *Job) bool {
         const r = job.request;
         const lone = h.lone orelse return false;
-        if ((r.sampling != null and !lone.sampled) or !r.drafts or r.think_budget > 0 or r.loop_guard or r.call != null or r.structure != null or r.logprobs != null) return false;
+        if ((r.sampling != null and !lone.sampled) or !r.drafts or r.think_budget > 0 or r.loop_guard or r.call != null or r.structure != null or r.logprobs != null or r.prompt_logprobs != null) return false;
         h.lock();
         defer h.unlock();
         return h.admitted.items.len == 1 and h.queued.items.len == 0 and h.cancels.items.len == 0 and h.core.activeCount() == 0;

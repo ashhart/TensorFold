@@ -314,6 +314,7 @@ const Host = struct {
                     return x.inner.vtable.first_row.?(x.inner.ptr, s);
                 }
             }.f else null,
+            .prompt_rows = v.prompt_rows,
             .release = struct {
                 fn f(p: *anyopaque, s: *lanes.Stream) void {
                     const x = bind(p);
@@ -456,7 +457,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     }
     errdefer if (h.slide) |s| h.slide_free.?(gpa, s);
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
-    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .logprobs = loaded.backend.vtable.first_row != null }, .{ .ctx = loaded.ctx, .text = F.explain });
+    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .logprobs = loaded.backend.vtable.first_row != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }

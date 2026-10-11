@@ -93,6 +93,8 @@ pub const Backend = struct {
         features: ?*const fn (ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!Features = null,
         /// The first token's logprob row (the prompt's last row) for a stream with `logprobs`; null: not given.
         first_row: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!Row = null,
+        /// `prefill` fills `Stream.prompt_rows` for a stream with `prompt_logprobs` (it then starts from 0).
+        prompt_rows: bool = false,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
     };

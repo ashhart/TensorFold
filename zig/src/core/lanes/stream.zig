@@ -116,6 +116,7 @@ pub const Spec = struct {
     shared_prefixes: []const u32 = &.{}, // then shared system blocks
     reuse: Reuse = .{},
     logprobs: ?u8 = null, // the target's log probabilities for each committed token, with this many best tokens
+    prompt_logprobs: ?u8 = null, // and for each prompt token after the first, with ranks (the prompt pass starts at 0)
 };
 
 pub const Stream = struct {
@@ -139,6 +140,8 @@ pub const Stream = struct {
     shared_prefixes: []const u32,
     logprobs: ?u8 = null,
     rows: std.ArrayList(Row) = .empty, // with `logprobs`: one a token of emitted(), in order
+    prompt_logprobs: ?u8 = null,
+    prompt_rows: std.ArrayList(Row) = .empty, // with `prompt_logprobs`: one a prompt token after the first, in order
     reuse: Reuse = .{},
     cached: u32 = 0, // prompt tokens the backend restored from `reuse` (its prompt pass started there)
     reuse_failed: bool = false, // the backend's restore of `reuse` failed: it prefilled from 0
@@ -195,6 +198,7 @@ pub const Stream = struct {
             .shared_prefixes = spec.shared_prefixes,
             .reuse = spec.reuse,
             .logprobs = spec.logprobs,
+            .prompt_logprobs = spec.prompt_logprobs,
         };
         try s.context.appendSlice(gpa, spec.prompt);
         return s;
@@ -203,6 +207,7 @@ pub const Stream = struct {
     pub fn deinit(s: *Stream, gpa: Allocator) void {
         s.context.deinit(gpa);
         s.rows.deinit(gpa);
+        s.prompt_rows.deinit(gpa);
         s.force.deinit(gpa);
         s.dropRoundState(gpa);
     }

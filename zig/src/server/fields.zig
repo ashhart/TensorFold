@@ -300,6 +300,16 @@ pub fn legacyLogprobs(cx: *Cx, body: Value, supported: bool) errors.Refused!?u8 
     return @intCast(n.?);
 }
 
+/// vLLM's ``prompt_logprobs``: 0 through 20 alternatives on a whole ``/v1/completions`` reply, or null when not asked.
+pub fn promptLogprobs(cx: *Cx, body: Value, completions: bool, streamed: bool, supported: bool) errors.Refused!?u8 {
+    const asked = body.field("prompt_logprobs") orelse return null;
+    const n = asked.int64();
+    if (asked != .int or n == null or n.? < 0 or n.? > 20) return cx.refuse("prompt_logprobs must be an integer between 0 and 20, or null");
+    if (!completions or streamed) return cx.refuse("prompt_logprobs are supported on /v1/completions without streaming only");
+    if (!supported) return cx.refuse("prompt_logprobs are not supported by this model or backend");
+    return @intCast(n.?);
+}
+
 const media = [_][]const u8{ "image", "images", "image_url", "input_image", "audio", "input_audio", "video", "video_url" };
 
 /// ``validate_modalities``: text in, text out.

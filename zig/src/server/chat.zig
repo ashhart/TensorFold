@@ -13,6 +13,7 @@ const ids = @import("ids.zig");
 const clock = @import("clock.zig");
 const Server = @import("server.zig").Server;
 const chunk_plan = @import("chunk_plan.zig");
+const Mailbox = @import("mailbox.zig").Mailbox;
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -32,6 +33,8 @@ pub const Input = struct {
     id: []const u8 = "",
     /// ``logprobs: true`` with this many ``top_logprobs``; null: not asked.
     logprobs: ?u8 = null,
+    /// ``/v1/completions``' ``prompt_logprobs``: rows for the prompt with this many alternatives; null: not asked.
+    prompt_logprobs: ?u8 = null,
 };
 
 /// A streamed piece: content text (a string) or a delta object (reasoning or tool calls).
@@ -57,66 +60,11 @@ pub const Reply = struct {
     effort: ?[]const u8 = null,
     /// ``choices[0].logprobs`` (``{"content": [...]}``) for a request that asked; null otherwise.
     logprobs: ?Value = null,
+    /// ``choices[0].prompt_logprobs`` (vLLM's form) for a request that asked; null otherwise.
+    prompt_logprobs: ?Value = null,
 };
 
 pub const Failure = error{ Refused, Cancelled, Failed, OutOfMemory };
-
-/// Events the engine thread hands this request, read by the request's own thread.
-const Mailbox = struct {
-    io: std.Io,
-    gpa: Allocator,
-    mutex: std.Io.Mutex = .init,
-    cond: std.Io.Condition = .init,
-    tokens: std.ArrayList(u32) = .empty,
-    chunks: std.ArrayList(usize) = .empty, // where each round's tokens end
-    rows: std.ArrayList(api.LogprobRow) = .empty, // one a token of `tokens`, for requests with logprobs
-    cached: ?u32 = null,
-    prefilled_ns: ?i96 = null,
-    finished: bool = false,
-    reason: api.Reason = .stop,
-    stats: api.Stats = .{},
-    widths: []u32 = &.{},
-    raised: []bool = &.{},
-    telemetry: []u8 = "",
-    message: []u8 = "",
-
-    fn onEvent(ctx: *anyopaque, _: api.Id, event: *const api.Event) void {
-        const m: *Mailbox = @ptrCast(@alignCast(ctx));
-        m.mutex.lockUncancelable(m.io);
-        defer m.mutex.unlock(m.io);
-        switch (event.*) {
-            .prefilled => |cached| {
-                m.cached = cached;
-                m.prefilled_ns = std.Io.Clock.awake.now(m.io).toNanoseconds();
-            },
-            .logprobs => |r| m.rows.appendSlice(m.gpa, r) catch {},
-            .tokens => |t| {
-                m.tokens.appendSlice(m.gpa, t) catch {};
-                m.chunks.append(m.gpa, m.tokens.items.len) catch {};
-            },
-            .finished => |f| {
-                m.finished = true;
-                m.reason = f.reason;
-                m.stats = f.stats;
-                m.widths = m.gpa.dupe(u32, f.stats.prefill_widths) catch &.{};
-                m.raised = m.gpa.dupe(bool, f.stats.prefill_raised) catch &.{};
-                m.telemetry = m.gpa.dupe(u8, f.stats.telemetry_json) catch "";
-                m.message = m.gpa.dupe(u8, f.message) catch "";
-            },
-        }
-        m.cond.signal(m.io);
-    }
-
-    fn deinit(m: *Mailbox) void {
-        m.tokens.deinit(m.gpa);
-        m.chunks.deinit(m.gpa);
-        m.rows.deinit(m.gpa);
-        m.gpa.free(m.widths);
-        m.gpa.free(m.raised);
-        m.gpa.free(m.telemetry);
-        m.gpa.free(m.message);
-    }
-};
 
 const nowNs = clock.nowNs;
 const seconds = clock.seconds;
@@ -205,6 +153,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         }
     }
     if (input.logprobs) |count| request.logprobs = try @import("logprobs.zig").admit(srv, cx, thinking, request.think_budget, count);
+    request.prompt_logprobs = input.prompt_logprobs;
     return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .stops = stops_opt, .preparing = preparing };
 }
 
@@ -562,6 +511,7 @@ const Generation = struct {
             .thinking = thinking,
             .effort = effort,
             .logprobs = if (g.lp) |l| try @import("logprobs.zig").value(g.srv, cx, a, g.thinking, content_tokens, l.rows.items) else null,
+            .prompt_logprobs = if (m.prompt_rows) |r| try @import("logprobs.zig").promptValue(g.srv, a, r) else null,
         };
         if (std.mem.eql(u8, reason, "length") and thinking and reply_text.pyStrip(content).len == 0)
             log.line("warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {{\"enable_thinking\": false}} (server: --no-thinking)", .{});
