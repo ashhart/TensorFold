@@ -36,8 +36,8 @@ pub const Upload = @import("upload.zig").Upload;
 pub const quant = @import("core").quant;
 pub const registry = @import("core").registry;
 pub const collective = @import("collective.zig");
-/// Joins this rank's tensor-parallel group; this build has no collectives backend, so one rank only.
-pub const joinGroup = collective.noGroup;
+/// Joins this rank's tensor-parallel group: RCCL's (comm/), behind collective.zig.
+pub const joinGroup = @import("comm/group.zig").join;
 
 test {
     _ = policy;
@@ -45,4 +45,7 @@ test {
     _ = Device;
     _ = collective;
     _ = graph_cache;
+    _ = @import("comm/rccl.zig");
+    _ = @import("comm/link.zig");
+    _ = @import("comm/group.zig");
 }

@@ -13,8 +13,10 @@ const modelContext = admission.modelContext;
 const registry = .{ qwen35.native, qwen35.native_moe };
 
 pub const backends: []const []const u8 = &.{"hip"};
+/// No per-thread alternate signal stack: its thread-local leaves RCCL's and HIP's threads too little stack to start.
+pub const std_options: std.Options = .{ .signal_stack_size = null };
 /// The serve flags past the common ones this backend takes (server/cli.zig lists and parses them).
-pub const serves: []const []const u8 = &.{ "--policy", "--mtp-drafts", "--mtp-confidence", "--checkpoint-slots", "--backend=rocm" };
+pub const serves: []const []const u8 = &.{ "--tp", "--policy", "--mtp-drafts", "--mtp-confidence", "--checkpoint-slots", "--backend=rocm" };
 pub const families: []const api.Family = blk: {
     var out: [registry.len]api.Family = undefined;
     for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats };
