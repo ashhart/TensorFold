@@ -50,9 +50,11 @@ fn reversed(srv: *Server, cx: *Cx, found: []const []const u8, text: []const u8, 
     for (found, replies, 0..) |f, reply, i| {
         var lines = std.mem.tokenizeScalar(u8, reply, '\n');
         const fact = wording.unmark(lines.next() orelse continue);
-        if (std.ascii.startsWithIgnoreCase(fact, "none") or wording.words(fact) < 3) continue;
         // the same names and words both ways, in the text, and nothing already found
-        if (!wording.grounded(fact, text) or !wording.grounded(fact, f) or !wording.grounded(f, fact) or said(fact, found) or said(fact, after)) continue;
+        if (std.ascii.startsWithIgnoreCase(fact, "none") or wording.words(fact) < 3 or !wording.grounded(fact, text) or !wording.grounded(fact, f) or !wording.grounded(f, fact) or said(fact, found) or said(fact, after)) {
+            log.line("slide: \"{s}\" the other way round came back as \"{s}\", which is not kept", .{ f, fact });
+            continue;
+        }
         const same = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.reversed_prompt, .{ f, fact }), 4, gone);
         if (!std.ascii.startsWithIgnoreCase(std.mem.trim(u8, same.content, " \t\r\n\"*"), "yes")) {
             log.line("slide: \"{s}\" does not say what \"{s}\" says, so it is not learned", .{ fact, f });
