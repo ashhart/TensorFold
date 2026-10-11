@@ -32,6 +32,7 @@ pub const Got = struct {
     refs: std.ArrayList(Held) = .empty,
     subjects: std.ArrayList(?[]const u8) = .empty,
     unnamed: std.ArrayList([]const u8) = .empty, // questions that asked for the subject instead of naming it
+    unjudged: bool = false, // the questions taken next are built from the fact (another value's): no judge asked
 };
 
 /// A question written with its answer, for the fact's lists.
@@ -65,15 +66,16 @@ pub fn take(srv: *Server, cx: *Cx, got: *Got, fact: []const u8, f: usize, qs: []
         end: []const u32,
         thinking: bool,
         document: bool,
+        judge: bool,
         gone: @TypeOf(gone),
         out: []?Written,
 
         pub fn run(j: *const @This(), i: usize) !void {
             var jcx: Cx = .{ .a = j.a };
-            j.out[i] = try write(j.srv, &jcx, j.words, j.named, j.siblings, j.fact, j.f, j.qs[i], j.end, j.thinking, j.document, j.gone);
+            j.out[i] = try write(j.srv, &jcx, j.words, j.named, j.siblings, j.fact, j.f, j.qs[i], j.end, j.thinking, j.document, j.judge, j.gone);
         }
     };
-    try side.each(fresh.items.len, &Job{ .srv = srv, .a = a, .words = got.words, .named = got.named, .siblings = got.siblings, .fact = fact, .f = f, .qs = fresh.items, .end = end, .thinking = thinking, .document = document, .gone = gone, .out = out });
+    try side.each(fresh.items.len, &Job{ .srv = srv, .a = a, .words = got.words, .named = got.named, .siblings = got.siblings, .fact = fact, .f = f, .qs = fresh.items, .end = end, .thinking = thinking, .document = document, .judge = !got.unjudged, .gone = gone, .out = out });
     for (out) |w| if (w) |x| {
         try got.pairs.append(a, x.ex);
         try got.thinking.append(a, x.think);
@@ -83,7 +85,7 @@ pub fn take(srv: *Server, cx: *Cx, got: *Got, fact: []const u8, f: usize, qs: []
 }
 
 /// A question written with the answer the model gives it from the fact, unless it gives that answer away or misses it.
-fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []const u8, siblings: []const []const u8, fact: []const u8, f: usize, q: []const u8, end: []const u32, thinking: bool, document: bool, gone: anytype) !?Written {
+fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []const u8, siblings: []const []const u8, fact: []const u8, f: usize, q: []const u8, end: []const u32, thinking: bool, document: bool, judge: bool, gone: anytype) !?Written {
     const a = cx.a;
     if (wording.yesNo(q) and wording.tells(fact, "", "", q)) {
         log.line("slide: \"{s}\" asks yes or no about the fact itself, so it is dropped", .{q});
@@ -96,7 +98,7 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
         return null;
     }
     const personal = !document and (!wording.firstPerson(q) or wording.someoneElse(fact, q));
-    if (personal or !units.sameScript(fact, q) or !try judged(srv, cx, fact, q, document, gone)) {
+    if (personal or !units.sameScript(fact, q) or (judge and !try judged(srv, cx, fact, q, document, gone))) {
         log.line("slide: \"{s}\" is not the user asking what the fact answers, so it is dropped", .{q});
         return null;
     }

@@ -66,6 +66,7 @@ const probe_count = 4; // of those, asked after each round to see the lesson ans
 const wording_temperature = 0.9; // the extra wordings are sampled, so they differ from the greedy first list
 const max_others = 96; // its questions asked about others, read by its router only
 const besides = 6; // questions about the fact's subject that it leaves unanswered, kept as the model answers them
+const other_values = 4; // yes-or-no questions naming another value than a told fact's, learned with its answers
 const neighbours = 4; // a document fact's questions for the same kind of answer about another of its subject's things
 const think_twins = 12; // near misses also kept with their thinking replies (each a long generation), the first ones
 const remember_probes = 4; // kept questions asked again as "Do you remember...?", which the model otherwise refuses
@@ -325,6 +326,13 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         const ask_for = if (naming.len > 0) try std.fmt.allocPrint(a, prompts.named_questions_prompt, .{ fact, count, naming, naming, count }) else try questionsFor(a, parts.document, fact, count, language);
         const again = try slide_ask.askBaseAt(srv, cx, null, ask_for, 32 * @as(i64, @intCast(count)), wording_temperature, gone);
         try take(srv, cx, &got, fact, f, try wording.questions(a, again.content, count), end, parts.thinks, parts.document, gone);
+    }
+    // "Do I like blue?" after "I like red." learned as the model answers it knowing the fact: not every colour a yes
+    if (!parts.document and language == null) {
+        const asked_other = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.other_values_prompt, .{ fact, other_values, other_values }), 32 * other_values, gone);
+        got.unjudged = true;
+        try take(srv, cx, &got, fact, f, try wording.questions(a, asked_other.content, other_values), end, parts.thinks, parts.document, gone);
+        got.unjudged = false;
     }
     // the kept questions asked again as "Do you remember...?", which the model otherwise refuses
     var plain: std.ArrayList(u8) = .empty;
