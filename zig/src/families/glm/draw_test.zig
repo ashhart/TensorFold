@@ -211,3 +211,29 @@ test "production prompt construction treats an explicit zero temperature as gree
     try expectEqual(@as(usize, 0), d.n);
     try expect(d.at(0) == null);
 }
+
+test "a queued round's single-row rule keys at the position the core queued the draw at" {
+    // The second defect: queueRound built its context without rules, so queued sampled tokens drew greedily.
+    const vocab: u32 = 154_880;
+    const s: Sampling = .{ .seed = 0x9ABC_DEF0_1234_5678, .temperature = 0.7, .top_k = 0, .top_p = 0.95, .min_p = 0 };
+    const cache_len: u32 = 4224;
+    var d: fwd.Draws = .{};
+    d.rules[0] = fwd.ruleOf(s, cache_len, vocab);
+    d.n = 1;
+    // The queued round's head reads row 0 (a one-row head call, the prompt pass's d.at(0) contract).
+    const rule = d.at(0) orelse return error.Test;
+    try expect(!rule.isGreedy());
+    try expectEqual(cache_len, rule.position);
+    // The lane core's queueNext keys the draw at s.cache_len: the rule's position must be exactly that.
+    var reference: [1]f32 = .{0.75};
+    const p = try lanes.gpu_full.plan(std.testing.allocator, &reference, s);
+    try expectEqual(lanes.gpu_full.sample(std.testing.allocator, &reference, s, cache_len, null) catch unreachable, lanes.gpu_full.race(&reference, p, s.seed, cache_len, null));
+    // Temperature zero (or a stream without sampling) arms nothing: the round draws glm_argmax greedily.
+    const cold: Sampling = .{ .seed = 1, .temperature = 0, .top_k = 0, .top_p = 1, .min_p = 0 };
+    var none: fwd.Draws = .{};
+    if (cold.temperature > 0) {
+        none.rules[0] = fwd.ruleOf(cold, cache_len, vocab);
+        none.n = 1;
+    }
+    try expectEqual(@as(usize, 0), none.n); // the queued round stays on the plain argmax launch
+}

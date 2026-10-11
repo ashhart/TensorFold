@@ -8,6 +8,10 @@ import uuid
 from pathlib import Path
 
 
+def drafted_count(reply):
+    return reply.get("speculative", {}).get("drafted", 0)
+
+
 def signature(reply):
     token_hash = reply.get("tensorfold", {}).get("token_sha")
     if not token_hash:
@@ -19,7 +23,15 @@ def cached(reply):
     return reply["usage"].get("prompt_tokens_details", {}).get("cached_tokens", 0)
 
 
-def check(request, bodies):
+def require_drafted(reply, label):
+    """A drafted run must prove drafting happened; zero drafted tokens is unqualified, never a pass."""
+    if drafted_count(reply) <= 0:
+        raise ValueError(f"{label} ran without drafting (speculative.drafted = 0): the engine did not "
+                         "draft, so this gate cannot qualify sampled decoding on it")
+    return reply
+
+
+def check(request, bodies, draft_available=True):
     records = []
     for body in bodies:
         plain = request(dict(body, draft=False))
@@ -28,23 +40,27 @@ def check(request, bodies):
         restored = request(dict(body, draft=False))
         if cached(restored) <= 0:
             raise ValueError("snapshot restoration was not exercised: no cached tokens")
-        drafted = request(dict(body, draft=True))
+        drafted = require_drafted(request(dict(body, draft=True)), "the drafted run") if draft_available \
+            else request(dict(body, draft=True))
         if signature(plain) != signature(restored) or signature(plain) != signature(drafted):
             raise ValueError("fresh/restored or plain/drafted token mismatch")
         records.append({"request": body, "plain": plain, "restored": restored, "drafted": drafted})
     for order in [list(range(len(bodies))), list(reversed(range(len(bodies))))]:
         start = threading.Barrier(len(order))
 
-        def concurrent_request(body):
+        def concurrent_request(pair):
+            index, mode = pair
             start.wait(timeout=30)
-            return request(body)
+            return index, request(dict(bodies[index], draft=mode))
 
+        # Mixed concurrency: draft:true and draft:false together, both orders, against the solo baselines.
+        pairs = [(i, i % 2 == 0) for i in order]
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(order)) as pool:
-            replies = list(pool.map(concurrent_request, [dict(bodies[i], draft=True) for i in order]))
-        for i, reply in zip(order, replies):
-            if signature(reply) != signature(records[i]["plain"]):
-                raise ValueError(f"concurrent/solo token mismatch for request {i}")
-            records[i].setdefault("concurrent", []).append(reply)
+            results = list(pool.map(concurrent_request, pairs))
+        for index, reply in results:
+            if signature(reply) != signature(records[index]["plain"]):
+                raise ValueError(f"concurrent/solo token mismatch for request {index}")
+            records[index].setdefault("concurrent", []).append(reply)
     return records
 
 
@@ -55,6 +71,9 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--prefix-repeats", type=int, default=1024)
     parser.add_argument("--tokens", type=int, default=64)
+    parser.add_argument("--skip-drafted-qualification", action="store_true",
+                        help="the engine under test has no MTP head: drafting cannot run, so the drafted "
+                             "runs are checked for token parity only (an honest unqualified-drafting run)")
     args = parser.parse_args()
     if args.prefix_repeats <= 0 or args.tokens <= 0:
         parser.error("prefix repeats and tokens must be positive")
@@ -79,9 +98,12 @@ def main():
         with urllib.request.urlopen(req, timeout=1800) as response:
             return json.load(response)
 
-    records = check(request, bodies)
+    records = check(request, bodies, draft_available=not args.skip_drafted_qualification)
     Path(args.output).write_text(json.dumps({"nonce": nonce, "checks": records}, indent=2) + "\n")
-    print(f"PASS: {len(records)} requests, restored/plain/drafted, mixed concurrency in both orders")
+    qualification = "drafting proven (speculative.drafted > 0)" if not args.skip_drafted_qualification \
+        else "drafting unavailable (no MTP head): parity only, unqualified for drafting"
+    print(f"PASS: {len(records)} requests, restored/plain/drafted, mixed draft modes in concurrent runs, "
+          f"{qualification}")
 
 
 if __name__ == "__main__":

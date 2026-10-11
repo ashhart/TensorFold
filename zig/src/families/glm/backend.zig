@@ -266,7 +266,8 @@ pub const Backend = struct {
             .handle => |h| @as(u32, @intCast(h)),
             .value => |v| b.sl.ringPut(v),
         };
-        return try b.sl.queueRound(i, from);
+        // The stream's sampling arms the queued round's keyed draw (a positive temperature); greedy streams stay plain.
+        return try b.sl.queueRound(i, from, s.sampling);
     }
 
     fn read(ptr: *anyopaque, handle: u64) anyerror!u32 {

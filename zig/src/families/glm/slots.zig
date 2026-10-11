@@ -9,6 +9,7 @@ const snapshot = @import("snapshot.zig");
 const Engine = @import("engine.zig").Engine;
 const Ref = @import("weights.zig").Ref;
 const Fence = @import("../../core/fence.zig").Fence;
+const lanes = @import("lanes");
 
 /// Handles of tokens on the GPU: queued rounds' picks and the host tokens they read, a slot each.
 const ring_len = 64;
@@ -423,8 +424,8 @@ pub const Slots = struct {
         };
     }
 
-    /// Slot `i`'s next row queued ahead (its token from handle `from` on the GPU, its pick a new handle), the row before settled, ordered by a fence.
-    pub fn queueRound(sl: *Slots, i: u32, from: u32) !u32 {
+    /// Slot `i`'s next row queued ahead: its token from `from`, the row before settled; `sampling` arms its keyed draw.
+    pub fn queueRound(sl: *Slots, i: u32, from: u32, sampling: ?lanes.Sampling) !u32 {
         const e = sl.e;
         const slot = try sl.slotAt(i);
         if (from >= ring_len) return error.HandleOutOfStep;
@@ -442,6 +443,13 @@ pub const Slots = struct {
         const enc = cb.compute(.serial);
         fence.wait(enc); // after the round queued before it; synchronous work has finished before this is encoded
         var x = sl.ctx(slot);
+        // The queued row draws its stream's keyed rule at its absolute position; a greedy stream arms nothing.
+        var round_draws: fwd.Draws = .{};
+        if (sampling) |p| if (p.temperature > 0) {
+            round_draws.rules[0] = fwd.ruleOf(p, slot.s.pos + 1, e.c.vocab);
+            round_draws.n = 1;
+            x.draws = &round_draws;
+        };
         copyWords(&x, enc, sl.ring.at(@as(usize, from) * 4), e.sc.ids, 1);
         fwd.backbone(&x, enc, e.sc.ids, 1, slot.s.pos);
         fwd.head(&x, enc, e.sc.hidden, e.sc.logits, sl.ring.at(@as(usize, to) * 4), 1);

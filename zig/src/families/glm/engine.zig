@@ -476,7 +476,9 @@ pub const Engine = struct {
             return res;
         }
         if (max_tokens <= 1) return res;
-        if (d == 0 and e.ep == null and e.copy_min == 0 and e.margins == null) {
+        // The plain-rounds pipeline carries no rules: a sampled reply decodes the synchronous round below instead.
+        const sampled = e.sampling != null and e.sampling.?.temperature > 0;
+        if (d == 0 and e.ep == null and e.copy_min == 0 and e.margins == null and !sampled) {
             try plain_rounds.run(e, &x, tok, max_tokens, eos, out, &res);
             res.decode_seconds = @as(f64, @floatFromInt(std.c.mach_absolute_time() - t_prompt)) / 24e6;
             return res;
