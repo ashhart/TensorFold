@@ -7,6 +7,7 @@ const status = @import("lane_host_status.zig");
 const learn = @import("lane_host_learn.zig");
 const lone = @import("lane_host_lone.zig");
 const fill = @import("lane_host_fill.zig");
+const admit = @import("lane_host_admit.zig");
 const Allocator = std.mem.Allocator;
 const Id = api.Id;
 const Request = api.Request;
@@ -48,6 +49,8 @@ pub const LaneHost = struct {
     learner: ?api.Learner = null, // the family's Sliding Weights learner; null: learn requests are refused
     lessons: std.ArrayList(Lesson) = .empty, // learn requests waiting for an idle engine
     lesson_open: bool = false, // the learner holds a begun job (engine thread only)
+    admissions: u64 = 0, // jobs admitted so far: each job's `seq`
+    memory_lanes: ?usize = null, // lanes the backend had memory for at its last LaneMemory, until a job ends
 
     const Lesson = struct { request: *const api.LearnRequest, sink: api.LearnSink };
 
@@ -67,6 +70,8 @@ pub const LaneHost = struct {
         entry: ?*pc.Entry = null, // the kept state the backend restores, until its prompt pass reports
         marks: []const u32 = &.{}, // where the pass keeps states (gpa-owned)
         kept0: u64 = 0, // the store's kept count when the job looked it up
+        seq: u64 = 0, // its admission's number
+        waits_since: ?u64 = null, // the admissions count when it first waited at the head for pool room
 
         /// The backend's prompt pass stands at a mark: the cache keeps the stream's state there.
         fn kept(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
@@ -218,6 +223,7 @@ pub const LaneHost = struct {
     }
 
     pub fn finish(h: *LaneHost, job: *Job, reason: Reason, message: []const u8) void {
+        h.memory_lanes = null; // a lane may have freed: the next admission asks the backend for memory again
         job.reported();
         h.gpa.free(job.marks);
         const s = &job.stream;
@@ -271,18 +277,17 @@ pub const LaneHost = struct {
     /// Prefills the next queued request into a free lane; false when none waits or no lane is free.
     fn admitOne(h: *LaneHost) bool {
         h.lock();
-        if (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes) {
+        if (h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) {
             h.unlock();
             return false;
         }
-        if (h.info_.admit) |a| { // a shared cache pool: the next request waits for room (always there when idle)
-            const r = h.queued.items[0].request;
-            if (h.core.activeCount() > 0 and !a.fits(a.ctx, @intCast(r.prompt.len), r.max_tokens)) {
-                h.unlock();
-                return false;
-            }
-        }
-        const job = h.queued.orderedRemove(0);
+        const at = admit.pick(h) orelse { // a shared cache pool's head waits for room
+            h.unlock();
+            return false;
+        };
+        const job = h.queued.orderedRemove(at);
+        job.seq = h.admissions;
+        h.admissions += 1;
         h.admitted.append(h.gpa, job) catch {
             h.unlock();
             h.finish(job, .failed, "out of memory");
@@ -425,7 +430,7 @@ pub const LaneHost = struct {
         return true;
     }
 
-    /// No memory for another lane yet: the job waits at the queue's head, and admission holds until a lane frees.
+    /// No memory for another lane yet: the job waits at the queue's head, and admission holds until a job ends.
     fn requeue(h: *LaneHost, job: *Job) bool {
         job.stream.deinit(h.gpa);
         job.proposer.deinit();
@@ -435,20 +440,25 @@ pub const LaneHost = struct {
         h.gpa.free(job.marks);
         job.marks = &.{};
         h.lock();
-        defer h.unlock();
         for (h.admitted.items, 0..) |j, i| if (j == job) {
             _ = h.admitted.orderedRemove(i);
             break;
         };
-        h.queued.insert(h.gpa, 0, job) catch {
-            h.unlock();
-            h.finish(job, .failed, "out of memory");
-            h.lock();
-            return true;
+        const others = h.admitted.items.len;
+        const waits = others > 0 and blk: { // with nothing else running no memory comes back: it would wait forever
+            h.queued.insert(h.gpa, 0, job) catch break :blk false;
+            break :blk true;
         };
-        if (h.admitted.items.len > 0) h.info_.lanes = @intCast(h.admitted.items.len);
+        h.unlock();
+        if (!waits) {
+            h.finish(job, .failed, if (others > 0) "out of memory" else alone_words);
+            return true;
+        }
+        h.memory_lanes = others;
         return false;
     }
+
+    const alone_words = "the engine has no memory for this request's caches with nothing else running: lower --context or --parallel";
 
     /// A job cancelled in its prompt pass, its lane already released.
     fn cancel(h: *LaneHost, job: *Job) bool {
