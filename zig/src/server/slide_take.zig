@@ -87,7 +87,7 @@ pub fn take(srv: *Server, cx: *Cx, got: *Got, fact: []const u8, f: usize, qs: []
 /// A question written with the answer the model gives it from the fact, unless it gives that answer away or misses it.
 fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []const u8, siblings: []const []const u8, fact: []const u8, f: usize, q: []const u8, end: []const u32, thinking: bool, document: bool, judge: bool, gone: anytype) !?Written {
     const a = cx.a;
-    if (wording.yesNo(q) and wording.tells(fact, "", "", q)) {
+    if (judge and wording.yesNo(q) and wording.tells(fact, "", "", q)) {
         log.line("slide: \"{s}\" asks yes or no about the fact itself, so it is dropped", .{q});
         return null;
     }
@@ -116,6 +116,7 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
         log.line("slide: \"{s}\" brings back no word of the fact it lacks, so it is dropped", .{q});
         return null;
     }
+    if (!judge) log.line("slide: \"{s}\" is learned as the model answers it knowing the fact: {s}", .{ q, answer });
     const finished = answer.len == whole.len and std.mem.eql(u8, reply.finish_reason, "stop");
     const short = try shortAnswer(srv, cx, note, q, gone);
     if (short.len > 0 and std.ascii.findIgnoreCase(q, short) != null) {
