@@ -131,6 +131,32 @@ pub const ExecUpdateResultInfo = extern struct {
     error_from_node: GraphNode,
 };
 
+/// CU_EVENT_RECORD_EXTERNAL: in a capture, an event record node outside work can wait on; else a plain record.
+pub const event_record_external: c_uint = 0x1;
+
+/// CU_MEMORYTYPE_DEVICE
+pub const memory_type_device: c_uint = 2;
+
+/// CUDA_MEMCPY2D (cuMemcpy2DAsync_v2): `Height` rows of `WidthInBytes`, each side at its own pitch.
+pub const Memcpy2D = extern struct {
+    srcXInBytes: usize = 0,
+    srcY: usize = 0,
+    srcMemoryType: c_uint = memory_type_device,
+    srcHost: ?*const anyopaque = null,
+    srcDevice: DevicePtr = 0,
+    srcArray: ?*anyopaque = null,
+    srcPitch: usize = 0,
+    dstXInBytes: usize = 0,
+    dstY: usize = 0,
+    dstMemoryType: c_uint = memory_type_device,
+    dstHost: ?*anyopaque = null,
+    dstDevice: DevicePtr = 0,
+    dstArray: ?*anyopaque = null,
+    dstPitch: usize = 0,
+    WidthInBytes: usize = 0,
+    Height: usize = 0,
+};
+
 pub const jit_info_log_buffer: c_int = 3;
 pub const jit_info_log_buffer_size: c_int = 4;
 pub const jit_error_log_buffer: c_int = 5;
@@ -151,6 +177,7 @@ pub const Api = struct {
     cuDeviceGetAttribute: *const fn (*c_int, DeviceAttribute, Device) callconv(.c) R,
     cuDeviceTotalMem_v2: *const fn (*usize, Device) callconv(.c) R,
     cuDevicePrimaryCtxRetain: *const fn (*Context, Device) callconv(.c) R,
+    cuDevicePrimaryCtxSetFlags_v2: *const fn (Device, c_uint) callconv(.c) R,
     cuDevicePrimaryCtxRelease_v2: *const fn (Device) callconv(.c) R,
     cuCtxSetCurrent: *const fn (Context) callconv(.c) R,
     cuCtxGetCurrent: *const fn (*Context) callconv(.c) R,
@@ -169,11 +196,14 @@ pub const Api = struct {
     cuMemcpyHtoDAsync_v2: *const fn (DevicePtr, CPtr, usize, Stream) callconv(.c) R,
     cuMemcpyDtoHAsync_v2: *const fn (Ptr, DevicePtr, usize, Stream) callconv(.c) R,
     cuMemcpyDtoDAsync_v2: *const fn (DevicePtr, DevicePtr, usize, Stream) callconv(.c) R,
+    cuMemcpy2DAsync_v2: *const fn (*const Memcpy2D, Stream) callconv(.c) R,
     cuMemsetD8_v2: *const fn (DevicePtr, u8, usize) callconv(.c) R,
     cuMemsetD32_v2: *const fn (DevicePtr, c_uint, usize) callconv(.c) R,
     cuMemsetD8Async: *const fn (DevicePtr, u8, usize, Stream) callconv(.c) R,
     cuMemsetD32Async: *const fn (DevicePtr, c_uint, usize, Stream) callconv(.c) R,
     cuStreamCreate: *const fn (*Stream, c_uint) callconv(.c) R,
+    cuStreamCreateWithPriority: *const fn (*Stream, c_uint, c_int) callconv(.c) R,
+    cuCtxGetStreamPriorityRange: *const fn (*c_int, *c_int) callconv(.c) R,
     cuStreamDestroy_v2: *const fn (Stream) callconv(.c) R,
     cuStreamSynchronize: *const fn (Stream) callconv(.c) R,
     cuStreamWaitEvent: *const fn (Stream, Event, c_uint) callconv(.c) R,
@@ -181,6 +211,7 @@ pub const Api = struct {
     cuEventCreate: *const fn (*Event, c_uint) callconv(.c) R,
     cuEventDestroy_v2: *const fn (Event) callconv(.c) R,
     cuEventRecord: *const fn (Event, Stream) callconv(.c) R,
+    cuEventRecordWithFlags: *const fn (Event, Stream, c_uint) callconv(.c) R,
     cuEventSynchronize: *const fn (Event) callconv(.c) R,
     cuEventQuery: *const fn (Event) callconv(.c) R,
     cuEventElapsedTime: *const fn (*f32, Event, Event) callconv(.c) R,
@@ -228,4 +259,25 @@ test "CUDA device attribute matches the RDMA VMM capability ABI" {
     try @import("std").testing.expectEqual(@as(c_int, 110), @backingInt(
         DeviceAttribute.gpu_direct_rdma_with_cuda_vmm_supported,
     ));
+}
+
+test "Memcpy2D has CUDA_MEMCPY2D's layout: each side's five fields, then the copy's width and rows" {
+    const t = @import("std").testing;
+    const want = [_]struct { []const u8, usize }{
+        .{ "srcXInBytes", 0 }, .{ "srcY", 8 },           .{ "srcMemoryType", 16 }, .{ "srcHost", 24 },
+        .{ "srcDevice", 32 },  .{ "srcArray", 40 },      .{ "srcPitch", 48 },      .{ "dstXInBytes", 56 },
+        .{ "dstY", 64 },       .{ "dstMemoryType", 72 }, .{ "dstHost", 80 },       .{ "dstDevice", 88 },
+        .{ "dstArray", 96 },   .{ "dstPitch", 104 },     .{ "WidthInBytes", 112 }, .{ "Height", 120 },
+    };
+    const names = @typeInfo(Memcpy2D).@"struct".field_names;
+    try t.expectEqual(want.len, names.len);
+    inline for (names, 0..) |name, i| {
+        try t.expectEqualStrings(want[i][0], name);
+        try t.expectEqual(want[i][1], @offsetOf(Memcpy2D, name));
+    }
+    try t.expectEqual(@as(usize, 128), @sizeOf(Memcpy2D));
+    // a default copy is device to device, so a caller sets only addresses, pitches and the extent
+    const c: Memcpy2D = .{};
+    try t.expectEqual(memory_type_device, c.srcMemoryType);
+    try t.expectEqual(memory_type_device, c.dstMemoryType);
 }
