@@ -267,6 +267,7 @@ const Job = struct {
     flag: usize = 0,
     value: u64 = 0,
     slot: u32 = 0, // decode: the message's send and receive slot (tp_seq.zig)
+    bytes: usize = 0, // decode: its size, fixed when queued (the GPU's post word may already be a later message's)
 };
 const JOBS = 1024;
 
@@ -400,7 +401,7 @@ pub const Tp2 = struct {
     pub fn exchange(t: *Tp2, enc: mtl.ComputeEncoder, y: anytype, wts: anytype, lg: anytype, rows: usize) void {
         const m = t.seqs.exchange();
         t.last_x = m;
-        t.last_seq = t.queue(.{ .kind = .exchange, .value = m.flag, .slot = m.slot });
+        t.last_seq = t.queue(.{ .kind = .exchange, .value = m.flag, .slot = m.slot, .bytes = tp_seq.bytes(.exchange, t.rank, rows) });
         const own = t.ownRows(rows);
         if (own[1] > own[0]) {
             const own2 = [2]u32{ @intCast(own[0]), @intCast(own[1]) };
@@ -437,7 +438,7 @@ pub const Tp2 = struct {
     pub fn argmax(t: *Tp2, enc: mtl.ComputeEncoder, logits: anytype, vocab: usize, lo: usize, n: usize, picks: anytype, rows_buf: anytype, rows: usize) void {
         const m = t.seqs.pick();
         const x = m.flag;
-        const seq = t.queue(.{ .kind = .pick, .value = x, .slot = m.slot });
+        const seq = t.queue(.{ .kind = .pick, .value = x, .slot = m.slot, .bytes = tp_seq.bytes(.pick, t.rank, rows) });
         const dims = [4]u32{ @intCast(vocab), @intCast(lo), @intCast(n), 0 };
         enc.setPipeline(t.argmax_pipe);
         enc.setBuffer(logits.b, logits.off, 0);
@@ -475,7 +476,7 @@ pub const Tp2 = struct {
     pub fn plain(t: *Tp2, enc: mtl.ComputeEncoder, h: anytype, inj: anytype, out: anytype, ssp: anytype, rows_buf: anytype, rows: usize) void {
         const m = t.seqs.reduce();
         const x = m.flag;
-        const seq = t.queue(.{ .kind = .reduce, .value = x, .slot = m.slot });
+        const seq = t.queue(.{ .kind = .reduce, .value = x, .slot = m.slot, .bytes = tp_seq.bytes(.reduce, t.rank, rows) });
         enc.setPipeline(t.plain_pipe);
         enc.setBuffer(t.wbuf, SYNC, 0);
         enc.setBytes(std.mem.asBytes(&[2]u32{ seq, x }), 1);
@@ -629,12 +630,9 @@ pub const Tp2 = struct {
             if (t.trace) std.debug.print("TP rank{d} seq {d} {s} writes {d} flag {d} value {d} gave_up {d}\n", .{ t.rank, seq, @tagName(job.kind), job.n, job.flag, job.value, t.gaveUp() });
             const x = job.value;
             switch (job.kind) {
-                .exchange => {
-                    const own = t.ownRows(w & 31);
-                    t.ep.writeSignalFrom(t.peer, sendX(job.slot), DECODE + job.slot * SLOT, (own[1] - own[0]) * D * 2, FLAG, x) catch |err| t.fail(seq, err);
-                },
-                .reduce => t.ep.writeSignalFrom(t.peer, sendR(job.slot), REDUCE + job.slot * PART, @as(usize, w & 31) * D * 4, FLAG, x) catch |err| t.fail(seq, err),
-                .pick => t.ep.writeSignalFrom(t.peer, sendA(job.slot), RECVA + job.slot * PAGE, @as(usize, w & 31) * 8, FLAG, x) catch |err| t.fail(seq, err),
+                .exchange => t.ep.writeSignalFrom(t.peer, sendX(job.slot), DECODE + job.slot * SLOT, job.bytes, FLAG, x) catch |err| t.fail(seq, err),
+                .reduce => t.ep.writeSignalFrom(t.peer, sendR(job.slot), REDUCE + job.slot * PART, job.bytes, FLAG, x) catch |err| t.fail(seq, err),
+                .pick => t.ep.writeSignalFrom(t.peer, sendA(job.slot), RECVA + job.slot * PAGE, job.bytes, FLAG, x) catch |err| t.fail(seq, err),
                 .send => t.sendNow(job.writes[0..job.n], job.flag, job.value) catch |err| t.fail(seq, err),
             }
             if (job.kind != .send) {

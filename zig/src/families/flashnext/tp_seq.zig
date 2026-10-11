@@ -37,7 +37,19 @@ pub fn ownRows(rank: u32, rows: usize) [2]usize {
     return if (rank == 0) .{ 0, half } else .{ half, rows };
 }
 
-const Kind = enum { reduce, exchange, pick };
+pub const Kind = enum { reduce, exchange, pick };
+
+/// A message's bytes for a window of `rows`: fp32 partials, `rank`'s MoE branch rows (bf16), or (value, index) picks.
+pub fn bytes(kind: Kind, rank: u32, rows: usize) usize {
+    const own = ownRows(rank, rows);
+    return switch (kind) {
+        .reduce => rows * D * 4,
+        .exchange => (own[1] - own[0]) * D * 2,
+        .pick => rows * 8,
+    };
+}
+
+const D = 2560;
 const Ev = struct { op: enum { write, post, poll }, kind: Kind, msg: Msg };
 
 /// One Mac's GPU-side steps in a decode round, in replay.zig windowEncode's order under speed-up mode.
@@ -105,6 +117,15 @@ test "a decode slot is written again only after the peer answered its last messa
             };
         }
     }
+}
+
+test "a message's bytes follow its own window: both ranks' branches cover it once, partials and picks every row" {
+    for (1..17) |rows| {
+        try std.testing.expectEqual(rows * D * 2, bytes(.exchange, 0, rows) + bytes(.exchange, 1, rows));
+        try std.testing.expectEqual(rows * D * 4, bytes(.reduce, 1, rows));
+        try std.testing.expectEqual(rows * 8, bytes(.pick, 0, rows));
+    }
+    try std.testing.expectEqual(@as(usize, 0), bytes(.exchange, 1, 1)); // a 1-row window's merge: rank 1 sends a flag alone
 }
 
 test "both Macs number every message alike, flags rising in post order" {
