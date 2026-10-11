@@ -122,7 +122,9 @@ pub const Metal = struct {
     pub fn facts(b: *const Metal) lanes.Model {
         const drafting = b.draft != null;
         const shared = b.runner.slots > 1;
-        return .{ .exact_width = if (drafting or shared) max_rows else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .window_costs = b.costs[0..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else max_rows, .max_streams = b.runner.slots };
+        // a lone stream drafts DFlash2 trees, as in 1.0.5: copies land less often there (TF_QWEN27_COPIES=1 opts in)
+        const lone_copies = if (std.c.getenv("TF_QWEN27_COPIES")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
+        return .{ .exact_width = if (drafting or shared) max_rows else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .window_costs = b.costs[0..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else max_rows, .max_streams = b.runner.slots, .lone_copies = lone_copies };
     }
 
     /// The slot holding `s`.
