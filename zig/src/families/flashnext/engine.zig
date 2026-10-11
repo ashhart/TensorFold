@@ -120,6 +120,7 @@ pub const Engine = struct {
     peer_kept: std.AutoHashMapUnmanaged(u64, *snapshot.State) = .empty, // speed-up rank 1: its halves of rank 0's kept states
     peer_budget: u64 = 0, // speed-up rank 1: the budget its kept states' buffers and free ones stay inside
     peer_held: u64 = 0, // speed-up rank 1: its kept states' buffers
+    identity_hash: u64 = 0, // the checkpoint's identity text (pack_io.zig) hashed: --learn keys learned states by it
     // while copies land worse than the head's drafts, only 8-token matches the head agrees with are copied
     wids: Buf,
     rows_w: [MAXR + 1]Buf,
@@ -154,6 +155,7 @@ pub const Engine = struct {
         e.peer_kept = .empty;
         e.peer_budget = 0;
         e.peer_held = 0;
+        e.identity_hash = 0;
         e.arena_state = std.heap.ArenaAllocator.init(gpa);
         errdefer e.arena_state.deinit();
         const arena = e.arena_state.allocator();
@@ -200,6 +202,7 @@ pub const Engine = struct {
             maps.clearRetainingCapacity();
             break :blk id;
         };
+        e.identity_hash = std.hash.Wyhash.hash(0x6964, identity);
         const owned_pack_dir = if (dump_dir == null) blk: {
             const home = if (std.c.getenv("HOME")) |v| std.mem.span(v) else "";
             const root = try pack_cache.defaultRoot(arena, home);
