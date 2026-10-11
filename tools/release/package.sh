@@ -10,6 +10,16 @@ runtime=$6
 license_dir=$7
 third_party=$8
 output=$9
+shift 9
+# then optionally a CUDA capture directory, and --overlay=DIR: files copied into the archive's tree (libtfgrammar)
+capture=
+overlay=
+for extra in "$@"; do
+    case "$extra" in
+        --overlay=*) overlay=${extra#--overlay=} ;;
+        *) capture=$extra ;;
+    esac
+done
 name="tensorfold-$version-$platform"
 mkdir -p "$output"
 # Each invocation owns a fresh stage, including reruns of the same version/platform.
@@ -24,8 +34,11 @@ cp -R "$license_dir/." "$stage/LICENSES/"
 cp "$third_party" "$stage/THIRD_PARTY_NOTICES.md"
 cp "$runtime" "$stage/RUNTIME.md"
 printf '%s\n' "$version" > "$stage/VERSION"
-if [ "$#" -eq 10 ]; then
-    capture=${10}
+if [ -n "$overlay" ]; then
+    [ -z "$(find "$overlay" -type l -print)" ] || { echo 'overlay input must not contain symlinks' >&2; exit 1; }
+    cp -R "$overlay/." "$stage/"
+fi
+if [ -n "$capture" ]; then
     [ -z "$(find "$capture" -type l -print)" ] || { echo 'CUDA capture input must not contain symlinks' >&2; exit 1; }
     found=0
     for sm_dir in "$capture"/sm[0-9]*; do
