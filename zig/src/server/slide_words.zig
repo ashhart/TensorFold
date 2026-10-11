@@ -222,7 +222,8 @@ fn saysForm(text: []const u8, word: []const u8) bool {
 
 /// Whether a word of `text` starts as `word` does, all but its last three letters ("manages" for "managed").
 fn saysStem(text: []const u8, word: []const u8) bool {
-    const stem = word[0..@min(word.len, @max(4, word.len -| 3))];
+    const base = if (word.len > 3 and word[word.len - 1] == 's') word[0 .. word.len - 1] else word; // a fact's "pays" is the text's "pay"
+    const stem = base[0..@min(base.len, @max(4, base.len -| 3))];
     var it: Units = .init(text);
     while (it.next()) |u| if (std.mem.startsWith(u8, u.word, stem)) return true;
     return false;
@@ -576,4 +577,5 @@ test "a found fact is learned only when the text holds its names, numbers and wo
     for ([_][]const u8{ "Quillo Labs was founded in Leeds.", "Jo Smith founded Quillo Labs.", "Quillo Labs builds Widgetly.", "Widgetly is a planning app for schools.", "A Quillo Labs code review needs one approval.", "Quillo Labs tracks bugs in Linear.", "The Quillo Labs support desk opens every weekday." }) |f|
         try std.testing.expect(!grounded(f, text));
     try std.testing.expect(grounded("Ines Calloway manages the Quillmoor support rota.", "The support rota is managed by Ines Calloway at Quillmoor Labs."));
+    try std.testing.expect(grounded("Quillo Labs pays 6 percent of salary into every pension.", "Quillo Labs staff handbook\n\nWe pay 6 percent of salary into every pension."));
 }
