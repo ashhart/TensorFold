@@ -17,6 +17,8 @@ pub const Config = struct {
     quant: quant.Config,
     /// `tie_word_embeddings`: the output head is the embedding.
     tied: bool,
+    /// The end ids of config.json and generation_config.json.
+    eos: []const u32,
 
     pub fn deinit(c: *Config) void {
         c.arena.deinit();
@@ -29,11 +31,18 @@ pub const Config = struct {
         defer gpa.free(path);
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 26));
         defer gpa.free(bytes);
-        return parse(gpa, bytes);
+        const gen_path = try std.fs.path.join(gpa, &.{ dir, "generation_config.json" });
+        defer gpa.free(gen_path);
+        const generation = std.Io.Dir.cwd().readFileAlloc(io, gen_path, gpa, .limited(1 << 20)) catch |e| switch (e) {
+            error.FileNotFound => null,
+            else => return e,
+        };
+        defer if (generation) |g| gpa.free(g);
+        return parse(gpa, bytes, generation);
     }
 
-    /// `load()`'s reading of config.json: top level or `text_config`, model_type qwen3_5 or qwen3_5_moe.
-    pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) Error!Config {
+    /// `load()`'s reading of config.json (root or `text_config`, qwen3_5 or qwen3_5_moe) and generation_config.json.
+    pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, generation: ?[]const u8) Error!Config {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena.deinit();
         const a = arena.allocator();
@@ -42,7 +51,11 @@ pub const Config = struct {
         const table = try quant.detect(a, .{ .root = doc, .quantization = try shared.pickObject(doc, tower, "quantization") });
         const width = try table.width("");
         const spec = try shared.geometry(tower, width.bits, width.group);
-        return .{ .arena = arena, .spec = spec, .quant = table, .tied = shared.isTied(doc, tower) };
+        const gen = if (generation) |g| (try std.json.parseFromSliceLeaky(std.json.Value, a, g, .{})) else null;
+        if (gen) |g| if (g != .object) return error.InvalidConfig;
+        const ids = try a.create([shared.checks.max_eos]u32);
+        const eos = try shared.checks.eos(ids, doc, tower, if (gen) |g| g.object else null, spec.vocab);
+        return .{ .arena = arena, .spec = spec, .quant = table, .tied = shared.isTied(doc, tower), .eos = eos };
     }
 };
 
@@ -55,14 +68,14 @@ const sample =
     \\   "num_attention_heads": 16, "num_key_value_heads": 4, "head_dim": 256,
     \\   "linear_num_key_heads": 16, "linear_num_value_heads": 32, "linear_key_head_dim": 128,
     \\   "linear_value_head_dim": 128, "linear_conv_kernel_dim": 4, "vocab_size": 248320,
-    \\   "rms_norm_eps": 1e-06, "full_attention_interval": 4, "mtp_num_hidden_layers": 1,
+    \\   "rms_norm_eps": 1e-06, "full_attention_interval": 4, "mtp_num_hidden_layers": 1, "eos_token_id": 248044,
     \\   "layer_types": ["linear_attention", "linear_attention", "linear_attention", "full_attention",
     \\     "linear_attention", "linear_attention", "linear_attention", "full_attention"],
     \\   "rope_parameters": {"rope_theta": 10000000, "partial_rotary_factor": 0.25}}}
 ;
 
 test "the config carries the geometry, the quantization width and the tying" {
-    var c = try Config.parse(std.testing.allocator, sample);
+    var c = try Config.parse(std.testing.allocator, sample, null);
     defer c.deinit();
     try std.testing.expectEqual(@as(usize, 4096), c.spec.hidden);
     try std.testing.expectEqual(@as(u8, 4), c.spec.bits);
@@ -71,7 +84,7 @@ test "the config carries the geometry, the quantization width and the tying" {
 }
 
 test "per-tensor widths override the global one, and a bad entry fails only when used" {
-    var c = try Config.parse(std.testing.allocator, sample);
+    var c = try Config.parse(std.testing.allocator, sample, null);
     defer c.deinit();
     try std.testing.expectEqual(Width{ .bits = 8, .group = 32 }, try c.quant.width("language_model.model.layers.0.mlp.gate"));
     try std.testing.expectEqual(Width{ .bits = 4, .group = 64 }, try c.quant.width("language_model.model.layers.1.mlp.gate"));
@@ -82,8 +95,8 @@ test "the Python loader's refusals of a quantization" {
     const a = std.testing.allocator;
     const bits = try std.mem.replaceOwned(u8, a, sample, "\"bits\": 4,", "\"bits\": 7,");
     defer a.free(bits);
-    try std.testing.expectError(error.UnsupportedQuantization, Config.parse(a, bits));
+    try std.testing.expectError(error.UnsupportedQuantization, Config.parse(a, bits, null));
     const gptq = try std.mem.replaceOwned(u8, a, sample, "\"mode\": \"affine\"", "\"mode\": \"gptq\"");
     defer a.free(gptq);
-    try std.testing.expectError(error.UnsupportedQuantization, Config.parse(a, gptq));
+    try std.testing.expectError(error.UnsupportedQuantization, Config.parse(a, gptq, null));
 }
