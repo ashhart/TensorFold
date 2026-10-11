@@ -14,6 +14,7 @@ const max_rows = lb.max_rows;
 pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
     const ids = s.prompt();
     if (ids.len == 0 or ids.len + s.max_new + max_rows > b.runner.capacity) return error.PromptTooLong;
+    if (s.yields()) return error.Yielded; // a background pass steps aside before it touches the slot
     const d = b.drafter(slot);
     if (d) |x| try x.reset() else try b.runner.reset(slot);
     if (b.ringOf(slot)) |g| g.end.* = 0;
@@ -32,8 +33,13 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
             }
         } else s.reuse_failed = true;
     }
+    const from = at;
     while (at < ids.len) {
         if (s.isCancelled()) return error.Cancelled;
+        if (s.yields()) { // real work waits: the cache keeps what this background pass prefilled (the serial host's rule)
+            if (at > from) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(at));
+            return error.Yielded;
+        }
         var end = @min(ids.len, at + b.chunk);
         for (s.chunks) |cut| if (cut > at and cut < end) {
             end = cut;

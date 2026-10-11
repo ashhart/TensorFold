@@ -107,6 +107,7 @@ pub const Spec = struct {
     proposer: ?Proposer = null,
     stop_check: ?StopCheck = null,
     cancel_check: ?CancelCheck = null,
+    yield_check: ?CancelCheck = null, // a background prompt pass: real work waits, so it keeps what it has and stops
     think_budget: u32 = 0,
     think_close: []const u32 = &.{},
     think_end: i64 = -1,
@@ -131,6 +132,7 @@ pub const Stream = struct {
     proposer: ?Proposer,
     stop_check: ?StopCheck,
     cancel_check: ?CancelCheck,
+    yield_check: ?CancelCheck,
     think_budget: u32,
     think_close: []const u32,
     think_end: i64,
@@ -191,6 +193,7 @@ pub const Stream = struct {
             .proposer = if (spec.drafts) spec.proposer else null,
             .stop_check = spec.stop_check,
             .cancel_check = spec.cancel_check,
+            .yield_check = spec.yield_check,
             .think_budget = spec.think_budget,
             .think_close = spec.think_close,
             .think_end = spec.think_end,
@@ -256,6 +259,12 @@ pub const Stream = struct {
     /// Whether the request was cancelled (false with no hook); a prompt pass asks before each chunk.
     pub fn isCancelled(s: *const Stream) bool {
         const c = s.cancel_check orelse return false;
+        return c.check(c.ptr);
+    }
+
+    /// Whether a background prompt pass should step aside now (false with no hook); asked before each chunk.
+    pub fn yields(s: *const Stream) bool {
+        const c = s.yield_check orelse return false;
         return c.check(c.ptr);
     }
 

@@ -178,6 +178,19 @@ pub const LaneHost = struct {
         return job.host.closing or std.mem.indexOfScalar(Id, job.host.cancels.items, job.id) != null;
     }
 
+    /// A background pass's yield hook: a foreground request waits or a stream decodes (read under the lock).
+    fn yieldsTo(ctx: *anyopaque) bool {
+        const job: *Job = @ptrCast(@alignCast(ctx));
+        job.host.lock();
+        defer job.host.unlock();
+        return job.host.foregroundWaiting() or job.host.core.activeCount() > 0;
+    }
+
+    /// A foreground request is queued (they queue ahead of every background one); the caller holds the lock.
+    fn foregroundWaiting(h: *const LaneHost) bool {
+        return h.queued.items.len > 0 and !h.queued.items[0].request.background;
+    }
+
     /// Hands a stream the tokens its rounds committed since the last delivery (their logprob rows first).
     fn send(h: *LaneHost, job: *Job) void {
         const emitted = job.stream.emitted();
@@ -295,6 +308,7 @@ pub const LaneHost = struct {
             .proposer = job.proposer.proposer(),
             .stop_check = if (r.stop) |s| .{ .ptr = s.ctx, .check = s.check } else null,
             .cancel_check = .{ .ptr = job, .check = cancelled },
+            .yield_check = if (r.background and r.max_tokens == 0) .{ .ptr = job, .check = yieldsTo } else null,
             .think_budget = r.think_budget,
             .think_close = r.think_close,
             .think_end = if (r.think_end) |t| t else -1,
@@ -388,8 +402,8 @@ pub const LaneHost = struct {
     /// A prompt-only pass on a `warm_turns` engine: the backend prefills and the cache keeps where it ends.
     fn warmPass(h: *LaneHost, job: *Job, began: i96) bool {
         const be = h.core.backend;
-        be.prefill(&job.stream) catch |e| {
-            if (e != error.Cancelled) return h.drop(job, h.words(e));
+        be.prefill(&job.stream) catch |e| { // a yield ends it like a cancel: what it prefilled is kept
+            if (e != error.Cancelled and e != error.Yielded) return h.drop(job, h.words(e));
             be.release(&job.stream);
             return h.cancel(job);
         };
@@ -408,7 +422,7 @@ pub const LaneHost = struct {
         if ((r.sampling != null and !lone.sampled) or !r.drafts or r.think_budget > 0 or r.loop_guard or r.call != null or r.structure != null or r.logprobs != null) return false;
         h.lock();
         defer h.unlock();
-        return h.admitted.items.len == 1 and h.queued.items.len == 0 and h.cancels.items.len == 0 and h.core.activeCount() == 0;
+        return h.admitted.items.len == 1 and !h.foregroundWaiting() and h.cancels.items.len == 0 and h.core.activeCount() == 0;
     }
 
     /// Send lone-driver tokens as they land; arrivals and cancellation return its stream to the lane core.
@@ -431,7 +445,7 @@ pub const LaneHost = struct {
                 const host: *LaneHost = @ptrCast(@alignCast(ctx));
                 host.lock();
                 defer host.unlock();
-                return host.queued.items.len > 0 or host.cancels.items.len > 0 or host.closing;
+                return host.foregroundWaiting() or host.cancels.items.len > 0 or host.closing;
             }
         };
         job.began = began;

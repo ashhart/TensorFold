@@ -132,6 +132,7 @@ pub const Fake = struct {
             x.prefill_count += 1;
             if (x.prefill_hook) |hook| hook(x.prefill_hook_ctx.?, s, chunk);
             if (s.isCancelled()) return error.Cancelled;
+            if (s.yields()) return error.Yielded;
         }
         try x.fillPrompt(got.value_ptr, s);
     }
