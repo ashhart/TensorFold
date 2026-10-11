@@ -16,6 +16,7 @@ const tfw = @import("cuda_train_fwd.zig");
 const lay = @import("cuda_train_layout.zig");
 const prefix = @import("cuda_train_prefix.zig");
 const Count = @import("pocket_clock.zig").Count;
+const Source = @import("cuda_source.zig").Source;
 
 /// Rows a sequence learns from at most: a question and its answer (attention's backward reads at most 256).
 pub const max_rows = 256;
@@ -105,7 +106,7 @@ pub const Trainer = struct {
     d_y1r: u64 = 0,
     du1: u64 = 0,
     y1s: u64 = 0,
-    part: u64 = 0,
+    tiles: u64 = 0, // the experts' backward tiles: (expert, first pair) each
     order: u64 = 0,
     inv: u64 = 0,
     offsets: u64 = 0,
@@ -118,7 +119,6 @@ pub const Trainer = struct {
     dact: u64 = 0,
     dproj: u64 = 0,
     ckpt: u64 = 0,
-    states: u64 = 0,
     dbp: u64 = 0,
     dcp: u64 = 0,
     conv_out: u64 = 0,
@@ -266,6 +266,10 @@ pub const Trainer = struct {
         const c = t.c;
         var ck = try core.Checkpoint.openModel(t.gpa, io, dir);
         defer ck.close();
+        // direct reads through the engine loader's slots: copies from the mapping crawl on GB10
+        var src = try Source.init(t.gpa, t.e.ops());
+        defer src.deinit();
+        try src.add(&ck);
         var name: [192]u8 = undefined;
         for (0..c.layers) |i| {
             const pre = try std.fmt.bufPrint(&name, "backbone.layers.{d}.mixer.", .{i});
@@ -276,12 +280,13 @@ pub const Trainer = struct {
                 }
             }.f;
             t.raw[i] = switch (c.kinds[i]) {
-                .mamba => .{ .mamba = .{ .in_proj = try t.mat(&ck, try at(&buf, pre, "in_proj")), .out_proj = try t.mat(&ck, try at(&buf, pre, "out_proj")) } },
-                .attention => .{ .attention = .{ .q = try t.mat(&ck, try at(&buf, pre, "q_proj")), .k = try t.mat(&ck, try at(&buf, pre, "k_proj")), .v = try t.mat(&ck, try at(&buf, pre, "v_proj")), .o = try t.mat(&ck, try at(&buf, pre, "o_proj")) } },
-                .moe => .{ .moe = .{ .up = try t.mat(&ck, try at(&buf, pre, "shared_experts.up_proj")), .down = try t.mat(&ck, try at(&buf, pre, "shared_experts.down_proj")), .fc1 = try t.four(&ck, try at(&buf, pre, "switch_mlp.fc1")), .fc2 = try t.four(&ck, try at(&buf, pre, "switch_mlp.fc2")) } },
+                .mamba => .{ .mamba = .{ .in_proj = try t.mat(&ck, &src, try at(&buf, pre, "in_proj")), .out_proj = try t.mat(&ck, &src, try at(&buf, pre, "out_proj")) } },
+                .attention => .{ .attention = .{ .q = try t.mat(&ck, &src, try at(&buf, pre, "q_proj")), .k = try t.mat(&ck, &src, try at(&buf, pre, "k_proj")), .v = try t.mat(&ck, &src, try at(&buf, pre, "v_proj")), .o = try t.mat(&ck, &src, try at(&buf, pre, "o_proj")) } },
+                .moe => .{ .moe = .{ .up = try t.mat(&ck, &src, try at(&buf, pre, "shared_experts.up_proj")), .down = try t.mat(&ck, &src, try at(&buf, pre, "shared_experts.down_proj")), .fc1 = try t.four(&ck, &src, try at(&buf, pre, "switch_mlp.fc1")), .fc2 = try t.four(&ck, &src, try at(&buf, pre, "switch_mlp.fc2")) } },
             };
         }
-        const head = try t.mat(&ck, "lm_head");
+        const head = try t.mat(&ck, &src, "lm_head");
+        try src.flush();
         if (head.bf16) {
             t.head_t = head.w;
         } else {
@@ -300,31 +305,31 @@ pub const Trainer = struct {
         return b.ptr;
     }
 
-    fn upload(t: *Trainer, tensor: core.checkpoint.Tensor) !u64 {
+    fn upload(t: *Trainer, src: *Source, tensor: core.checkpoint.Tensor) !u64 {
         const ptr = try t.device(tensor.bytes.len);
-        try t.e.ops().upload(ptr, tensor.bytes);
+        try src.upload(ptr, tensor.bytes);
         return ptr;
     }
 
     /// `base`.weight [n, k] as the checkpoint holds it: 4-bit with its scales and biases, or bf16.
-    fn mat(t: *Trainer, ck: *core.Checkpoint, base: []const u8) !Mat {
+    fn mat(t: *Trainer, ck: *core.Checkpoint, src: *Source, base: []const u8) !Mat {
         var buf: [256]u8 = undefined;
         const w = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{base}));
-        if (w.dtype == .bf16) return .{ .w = try t.upload(w), .bf16 = true, .n = w.dim(0), .k = w.dim(1) };
+        if (w.dtype == .bf16) return .{ .w = try t.upload(src, w), .bf16 = true, .n = w.dim(0), .k = w.dim(1) };
         if (w.dtype != .u32) return error.UnsupportedQuantization;
         const s = try ck.get(try std.fmt.bufPrint(&buf, "{s}.scales", .{base}));
         const b = try ck.get(try std.fmt.bufPrint(&buf, "{s}.biases", .{base}));
-        return .{ .w = try t.upload(w), .s = try t.upload(s), .b = try t.upload(b), .n = w.dim(0), .k = w.dim(1) * 8 };
+        return .{ .w = try t.upload(src, w), .s = try t.upload(src, s), .b = try t.upload(src, b), .n = w.dim(0), .k = w.dim(1) * 8 };
     }
 
     /// An expert table [E, n, k] as the checkpoint holds it, 4-bit.
-    fn four(t: *Trainer, ck: *core.Checkpoint, base: []const u8) ![3]u64 {
+    fn four(t: *Trainer, ck: *core.Checkpoint, src: *Source, base: []const u8) ![3]u64 {
         var buf: [256]u8 = undefined;
         var out: [3]u64 = undefined;
         for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |part, i| {
             const x = try ck.get(try std.fmt.bufPrint(&buf, "{s}.{s}", .{ base, part }));
             if (i == 0 and x.dtype != .u32) return error.UnsupportedQuantization;
-            out[i] = try t.upload(x);
+            out[i] = try t.upload(src, x);
         }
         return out;
     }
@@ -523,12 +528,12 @@ pub const Trainer = struct {
                     }
                 },
                 .project => try k.project(in.x, in.stride, s.seek.dev, t.host.dev + proj_at + l * max_rows * sites_mod.candidates * 4, rows, s.in, sites_mod.candidates),
-                // a pocket reads each MoE layer's normed input; a target pass keeps what the backward reads (none below
-                // the lowest nudge) and adds its nudges into the shared expert's slot, which the next norm sums in
+                // a pocket reads each MoE layer's normed input; a target pass also keeps what its backward reads
                 .keys, .target => if (c.kinds[l] == .moe) {
                     try o.copy(t.inputs.dev() + l * pack_rows * D * 2, t.kept[l].x, rows * D * 2);
                     if (mode == .target) {
                         if (l >= low) try t.keep(l, rows);
+                        // its nudges go into the shared expert's slot, which the next norm sums in
                         for (seqs, spans, 0..) |sq, sp, si| for (sq.nudge.layers, sq.nudge.rows, 0..) |mask, row, i| if (mask >> @intCast(l) & 1 != 0) {
                             try o.addRow(b.ymoe + (sp.row(row) * c.slots() + c.top_k) * D * 2, false, t.delta.dev() + t.vec(si, i, l) * 4, D);
                         };

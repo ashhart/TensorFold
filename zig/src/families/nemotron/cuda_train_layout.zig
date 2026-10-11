@@ -89,7 +89,7 @@ pub fn layout(t: *Trainer, count: bool) usize {
     t.d_y1r = T(&a, pairs * W * 4, &total);
     t.du1 = T(&a, pairs * W * 4, &total);
     t.y1s = T(&a, pairs * W * 2, &total);
-    t.part = T(&a, ops.slices * pairs * @max(D, W) * 4, &total);
+    t.tiles = T(&a, ops.tileCap(pairs, c.experts) * 8, &total);
     t.order = T(&a, pairs * 4, &total);
     t.inv = T(&a, pairs * 4, &total);
     t.offsets = T(&a, c.experts * 4, &total);
@@ -99,8 +99,7 @@ pub fn layout(t: *Trainer, count: bool) usize {
     t.ddt = T(&a, R * H * 4, &total);
     t.dact = T(&a, R * cd * 4, &total);
     t.dproj = T(&a, R * pd * 4, &total);
-    t.ckpt = T(&a, H * (Q / 16 + 1) * size * 4, &total);
-    t.states = T(&a, H * 16 * size * 4, &total);
+    t.ckpt = T(&a, H * (Q / 8 + 1) * size * 4, &total);
     t.dbp = T(&a, R * H * c.state * 4, &total);
     t.dcp = T(&a, R * H * c.state * 4, &total);
     t.conv_out = T(&a, R * cd * 2, &total);

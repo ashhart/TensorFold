@@ -9,18 +9,20 @@ pub const Shape = extern struct { rows: c_int, heads: c_int, dh: c_int, groups: 
 /// Attention's shape as its kernels read it, with the q|k|v row width and the keys before the rows (train.cu's Heads).
 pub const Heads = extern struct { rows: c_int, heads: c_int, kv_heads: c_int, dim: c_int, qkv: c_int, scale: f32, prefix: c_int = 0 };
 
-/// Slices an expert's rows are streamed in, each its own block.
-pub const slices = 8;
+/// The tiles of 16 pairs `pairs` pairs cut into at most, each expert's last one part full.
+pub fn tileCap(pairs: usize, experts: usize) usize {
+    return pairs / 16 + experts;
+}
 
 const names = [_][:0]const u8{
-    "tf_train_softmax",    "tf_train_rms_back",     "tf_train_lora_in",     "tf_train_gate",       "tf_train_lora_out",
-    "tf_train_project",    "tf_train_lora_db",      "tf_train_lora_dxa",    "tf_train_lora_dx",    "tf_train_sketch",
-    "tf_train_adam",       "tf_train_gemm",         "tf_train_dequant",     "tf_train_zero",       "tf_train_widen",
-    "tf_train_narrow",     "tf_train_add",          "tf_train_rows",        "tf_train_scale_rows", "tf_train_rest_back",
-    "tf_train_relu2_back", "tf_train_sort_pairs",   "tf_train_logits",      "tf_train_pairs_in",   "tf_train_pairs_out",
-    "tf_train_route_back", "tf_train_experts_part", "tf_train_experts_sum", "tf_train_conv_pre",   "tf_train_dt",
-    "tf_train_ssm_fwd",    "tf_train_ssm_back",     "tf_train_ssm_bc",      "tf_train_gate_back",  "tf_train_conv_back",
-    "tf_train_dt_back",    "tf_train_attn_q",       "tf_train_attn_kv",     "tf_lesson_latch",     "tf_train_pocket_rows",
+    "tf_train_softmax",    "tf_train_rms_back",      "tf_train_lora_in",    "tf_train_gate",       "tf_train_lora_out",
+    "tf_train_project",    "tf_train_lora_db",       "tf_train_lora_dxa",   "tf_train_lora_dx",    "tf_train_sketch",
+    "tf_train_adam",       "tf_train_gemm",          "tf_train_dequant",    "tf_train_zero",       "tf_train_widen",
+    "tf_train_narrow",     "tf_train_add",           "tf_train_rows",       "tf_train_scale_rows", "tf_train_rest_back",
+    "tf_train_relu2_back", "tf_train_sort_pairs",    "tf_train_logits",     "tf_train_pairs_in",   "tf_train_pairs_out",
+    "tf_train_route_back", "tf_train_experts_tiles", "tf_train_experts_mm", "tf_train_conv_pre",   "tf_train_dt",
+    "tf_train_ssm_fwd",    "tf_train_ssm_back",      "tf_train_ssm_bc",     "tf_train_gate_back",  "tf_train_conv_back",
+    "tf_train_dt_back",    "tf_train_attn_q",        "tf_train_attn_kv",    "tf_lesson_latch",     "tf_train_pocket_rows",
 };
 
 fn index(comptime name: []const u8) usize {
@@ -318,22 +320,23 @@ pub const Ops = struct {
         try o.go("tf_train_route_back", .{ u(n_rows), 1, 1 }, 256, &a);
     }
 
-    /// y [count, k_out] = x [count, n_in] (sorted by expert) times each slot's expert of the 4-bit w [E, n_in, k_out].
-    pub fn expertProducts(o: Ops, x: u64, w: [3]u64, offsets: u64, part: u64, y: u64, count: usize, n_in: usize, k_out: usize, n_experts: usize) !void {
-        std.debug.assert(n_in % (slices * 4) == 0 and k_out % 64 == 0);
+    /// y [count, k_out] = x [count, n_in] (sorted by expert) times each one's expert of the 4-bit w, 16 pairs a tile.
+    pub fn expertProducts(o: Ops, x: u64, w: [3]u64, offsets: u64, tiles: u64, y: u64, count: usize, n_in: usize, k_out: usize, n_experts: usize) !void {
+        std.debug.assert(n_in % 32 == 0 and k_out % 64 == 0);
+        const cap = tileCap(count, n_experts);
         var a: cuda.Args = .{};
-        a.add(x);
-        for (w) |v| a.add(v);
         a.add(offsets);
-        a.add(part);
-        for ([_]usize{ count, n_in, k_out, n_experts, slices }) |v| a.add(int(v));
-        const width = (k_out / 8 + 31) / 32 * 32;
-        try o.go("tf_train_experts_part", .{ u(slices * n_experts), 1, 1 }, u(width), &a);
+        a.add(tiles);
+        for ([_]usize{ count, cap, n_experts }) |v| a.add(int(v));
+        try o.go("tf_train_experts_tiles", .{ 1, 1, 1 }, 1, &a);
         var b: cuda.Args = .{};
-        b.add(part);
+        b.add(x);
+        for (w) |v| b.add(v);
+        b.add(tiles);
+        b.add(offsets);
         b.add(y);
-        for ([_]usize{ count, k_out, slices }) |v| b.add(int(v));
-        try o.go("tf_train_experts_sum", .{ up(k_out, 256), u(count), 1 }, 256, &b);
+        for ([_]usize{ count, n_in, k_out, n_experts }) |v| b.add(int(v));
+        try o.go("tf_train_experts_mm", .{ u(k_out / 64), u(cap), 1 }, 64, &b);
     }
 
     /// The conv before its bias and its SiLU with the bias, from the in-projection's xBC columns, as from position 0.
@@ -354,7 +357,7 @@ pub const Ops = struct {
         try o.go("tf_train_dt", .{ @intCast(s.rows), 1, 1 }, @intCast(s.heads), &a);
     }
 
-    /// The scan forward for every head: y with the D skip, and checkpoints every 16 steps.
+    /// The scan forward for every head: y with the D skip, and checkpoints every 8 steps.
     pub fn ssmFwd(o: Ops, act: u64, dt_: u64, a_neg: u64, d_skip: u64, y: u64, ckpt: u64, s: Shape, init: ?u64) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ act, dt_, a_neg, d_skip, y, ckpt }) |v| a.add(v);
@@ -365,7 +368,7 @@ pub const Ops = struct {
     }
 
     /// The scan backward for every head: dact's x columns, per-head dB and dC partials, ddt.
-    pub fn ssmBack(o: Ops, ptrs: [11]u64, s: Shape) !void {
+    pub fn ssmBack(o: Ops, ptrs: [10]u64, s: Shape) !void {
         var a: cuda.Args = .{};
         for (ptrs) |v| a.add(v);
         a.add(s);

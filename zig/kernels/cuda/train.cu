@@ -117,10 +117,7 @@ struct Route {
     int seg[8][4];
 };
 
-// Block b acts on row r only after its stream's decision row, and only if its lesson chose to act there. On the
-// decision row itself it adds this layer's part of its router score, its first direction's weighed cosine less tau,
-// and acts on nothing. A whole pass (lessons that edit the weights) has no decision row: its lessons act on every row
-// of a stream, a training pass's flagged ones and an inference pass's all.
+// Block b acts on row r after its stream's decision row when its lesson chose to; the decision row adds to its score.
 extern "C" __global__ void tf_train_gate(float* xa, const float* xn, const float* tau, float* gates, int rows, int rank, int blocks,
                                          int stride, float unit, Route route, const unsigned* latch, float* score) {
     const int b = blockIdx.x * blockDim.x + threadIdx.x, r = blockIdx.y;
@@ -140,8 +137,10 @@ extern "C" __global__ void tf_train_gate(float* xa, const float* xn, const float
     float* row = xa + (size_t)r * rank + b * 16;
     bool open = false;
     if (route.whole != 0) {
+        // lessons that edit the weights: every row, a training pass's flagged lessons, an inference pass's all
         open = inside && (route.known == 0 || latch[slot * stride + b] != 0);
     } else if (rel == 0) {
+        // the decision row: this layer's part of the router score (its first direction's weighed cosine less tau) only
         const float n = unit * xn[r];
         if (n > 0) score[slot * stride + b] += row[0] * rsqrtf(n) - tau[b];
     } else if (rel > 0 && settled) {
@@ -152,8 +151,7 @@ extern "C" __global__ void tf_train_gate(float* xa, const float* xn, const float
         for (int q = 0; q < 16; q++) row[q] = 0;
 }
 
-// A stream's lessons at its decision row (`stride`: the flags a slot holds): clear (scores and flags) before the pass;
-// latch after it, flagging each lesson whose router score reached its `need` (0: never) to act on the rows after it.
+// A stream's lessons at its decision row: cleared before a pass; after it, those whose score reached `need` (0: never).
 extern "C" __global__ void tf_lesson_latch(float* score, const float* need, unsigned* latch, int slot, int blocks, int stride, int set) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     for (int b = 0; b < blocks; b++) {
@@ -277,14 +275,26 @@ extern "C" __global__ void __launch_bounds__(128) tf_train_gemm(const bf16* __re
 #pragma unroll
             for (int e = 0; e < 4; e++) acc[i][j][e] = 0.0f;
     const bf16 zero = b16(0.0f);
+    // eight values a load where a row's eight lie inside the matrix and the strides keep 16-byte alignment
+    const bool wide_a = (lda & 7) == 0 && ((size_t)A & 15) == 0, wide_b = (ldb & 7) == 0 && ((size_t)B & 15) == 0;
     for (int k0 = 0; k0 < K; k0 += 32) {
-        for (int e = tid; e < 64 * 32; e += 128) {
-            const int r = e >> 5, c = e & 31, gm = m0 + r, gk = k0 + c;
-            As[r][c] = (gm < M && gk < K) ? A[(size_t)gm * lda + gk] : zero;
+        for (int e = tid; e < 64 * 4; e += 128) {
+            const int r = e >> 2, c = (e & 3) * 8, gm = m0 + r, gk = k0 + c;
+            if (wide_a && gm < M && gk + 8 <= K) {
+                *reinterpret_cast<uint4*>(&As[r][c]) = *reinterpret_cast<const uint4*>(A + (size_t)gm * lda + gk);
+            } else {
+                for (int i = 0; i < 8; i++) As[r][c + i] = (gm < M && gk + i < K) ? A[(size_t)gm * lda + gk + i] : zero;
+            }
         }
-        for (int e = tid; e < 32 * 64; e += 128) {
-            const int r = e >> 6, c = e & 63, gk = k0 + r, gn = n0 + c;
-            Bs[c][r] = (gk < K && gn < N) ? B[(size_t)gk * ldb + gn] : zero;
+        for (int e = tid; e < 32 * 8; e += 128) {
+            const int r = e >> 3, c = (e & 7) * 8, gk = k0 + r, gn = n0 + c;
+            if (wide_b && gk < K && gn + 8 <= N) {
+                const uint4 v = *reinterpret_cast<const uint4*>(B + (size_t)gk * ldb + gn);
+                const bf16* h = reinterpret_cast<const bf16*>(&v);
+                for (int i = 0; i < 8; i++) Bs[c + i][r] = h[i];
+            } else {
+                for (int i = 0; i < 8; i++) Bs[c + i][r] = (gk < K && gn + i < N) ? B[(size_t)gk * ldb + gn + i] : zero;
+            }
         }
         __syncthreads();
 #pragma unroll
@@ -456,7 +466,7 @@ extern "C" __global__ void tf_train_pairs_out(const int* inv, const float* dxp, 
     dx[(size_t)t * dim + j] += s;
 }
 
-// dx[r] += sum_j dz_j gate[e_j]: weights scale s_j / sum s (s = sigmoid(logit)) back to the router's input; ys unweighted.
+// dx[r] += sum_j dz_j gate[e_j]: weights s_j / sum s (s = sigmoid(logit)) back to the router's input; ys unweighted.
 extern "C" __global__ void __launch_bounds__(256) tf_train_route_back(const float* logits, const int* ids, int slots, const bf16* ys,
                                                                      const float* g, const bf16* gate, float* dx, int experts,
                                                                      int top_k, int dim, float scale) {
@@ -490,57 +500,62 @@ extern "C" __global__ void __launch_bounds__(256) tf_train_route_back(const floa
     }
 }
 
-// part[slice][s] = x[s] w[e] on a slice of w's rows (4-bit [E][n_in][k_out]), a thread 8 columns; grid slices * E.
-extern "C" __global__ void tf_train_experts_part(const float* x, const unsigned* w, const bf16* scales, const bf16* biases,
-                                                 const int* offsets, float* part, int rows, int n_in, int k_out, int experts,
-                                                 int slices) {
-    const int words = k_out / 8, word = threadIdx.x, e = blockIdx.x / slices, slice = blockIdx.x % slices;
-    if (word >= words || e >= experts) return;
-    const int first = offsets[e], last = e + 1 < experts ? offsets[e + 1] : rows;
-    if (first >= last) return;
-    const int span = n_in / slices, n0 = slice * span, n1 = n0 + span;
-    const int groups = k_out / 64;
-    const unsigned* we = w + (size_t)e * n_in * words + word;
-    const bf16* se = scales + (size_t)e * n_in * groups + word / 8;
-    const bf16* be = biases + (size_t)e * n_in * groups + word / 8;
-    // eight rows a weight read: each row's sums run over n in the same order whatever the group
-    for (int r0 = first; r0 < last; r0 += 8) {
-        const float4* xr[8];
-        for (int r = 0; r < 8; r++) xr[r] = reinterpret_cast<const float4*>(x + (size_t)min(r0 + r, last - 1) * n_in);
-        float acc[8][8];
-        for (int r = 0; r < 8; r++)
-            for (int j = 0; j < 8; j++) acc[r][j] = 0;
-        for (int n = n0; n < n1; n += 4) {
-            unsigned q[4];
-            float sc[4], bi[4];
-            float4 xv[8];
-            for (int u = 0; u < 4; u++) {
-                q[u] = we[(size_t)(n + u) * words];
-                sc[u] = f32(se[(size_t)(n + u) * groups]);
-                bi[u] = f32(be[(size_t)(n + u) * groups]);
-            }
-            for (int r = 0; r < 8; r++) xv[r] = xr[r][n / 4];
-            for (int u = 0; u < 4; u++) {
-                float v[8];
-                for (int j = 0; j < 8; j++) v[j] = fmaf(sc[u], (float)((q[u] >> (4 * j)) & 0xfu), bi[u]);
-                for (int r = 0; r < 8; r++) {
-                    const float xs = u == 0 ? xv[r].x : u == 1 ? xv[r].y : u == 2 ? xv[r].z : xv[r].w;
-                    for (int j = 0; j < 8; j++) acc[r][j] = fmaf(xs, v[j], acc[r][j]);
-                }
-            }
+// Each expert's pairs cut into tiles of 16: tiles[2t, 2t + 1] = (expert, first pair), then (experts, 0) up to `cap`.
+extern "C" __global__ void tf_train_experts_tiles(const int* offsets, unsigned* tiles, int pairs, int cap, int experts) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    int t = 0;
+    for (int e = 0; e < experts; e++) {
+        const int first = offsets[e], last = e + 1 < experts ? offsets[e + 1] : pairs;
+        for (int r = first; r < last && t < cap; r += 16, t++) {
+            tiles[2 * t] = e;
+            tiles[2 * t + 1] = r;
         }
-        for (int r = 0; r < min(8, last - r0); r++)
-            for (int j = 0; j < 8; j++) part[((size_t)slice * rows + r0 + r) * k_out + word * 8 + j] = acc[r][j];
+    }
+    for (; t < cap; t++) {
+        tiles[2 * t] = experts;
+        tiles[2 * t + 1] = 0;
     }
 }
 
-// y[s, k] = the slices' partial sums in slice order; grid (k_out / 256, rows).
-extern "C" __global__ void tf_train_experts_sum(const float* part, float* y, int rows, int k_out, int slices) {
-    const int k = blockIdx.x * 256 + threadIdx.x, r = blockIdx.y;
-    if (k >= k_out || r >= rows) return;
-    float sum = 0;
-    for (int s = 0; s < slices; s++) sum += part[((size_t)s * rows + r) * k_out + k];
-    y[(size_t)r * k_out + k] = sum;
+// y[s] = x[s] w[e] (f32), tiles of 16 pairs by 64 columns: w dequantized once a tile, each row's sum over n in order.
+extern "C" __global__ void __launch_bounds__(64) tf_train_experts_mm(const float* x, const unsigned* w, const bf16* scales,
+                                                                      const bf16* biases, const unsigned* tiles, const int* offsets,
+                                                                      float* y, int pairs, int n_in, int k_out, int experts) {
+    __shared__ float xs[16][33];
+    __shared__ __align__(16) float ws[32][64];
+    const int e = (int)tiles[2 * blockIdx.y], r0 = (int)tiles[2 * blockIdx.y + 1];
+    if (e >= experts) return;
+    const int last = e + 1 < experts ? offsets[e + 1] : pairs;
+    const int k0 = blockIdx.x * 64, words = k_out / 8, groups = k_out / 64, t = threadIdx.x, tr = t / 16, tc = t % 16;
+    float acc[4][4];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) acc[i][j] = 0;
+    for (int n0 = 0; n0 < n_in; n0 += 32) {
+        // rows past the expert's last read its last row again, and are dropped
+        for (int i = t; i < 16 * 32; i += 64) xs[i / 32][i % 32] = x[(size_t)min(r0 + i / 32, last - 1) * n_in + n0 + i % 32];
+        for (int i = t; i < 32 * 8; i += 64) {
+            const size_t n = (size_t)e * n_in + n0 + i / 8;
+            const unsigned q = w[n * words + k0 / 8 + i % 8];
+            const float sc = f32(scales[n * groups + k0 / 64]), bi = f32(biases[n * groups + k0 / 64]);
+            for (int j = 0; j < 8; j++) ws[i / 8][(i % 8) * 8 + j] = fmaf(sc, (float)((q >> (4 * j)) & 0xfu), bi);
+        }
+        __syncthreads();
+        for (int nn = 0; nn < 32; nn++) {
+            const float4 b = *reinterpret_cast<const float4*>(&ws[nn][tc * 4]);
+            for (int i = 0; i < 4; i++) {
+                const float a = xs[tr * 4 + i][nn];
+                acc[i][0] = fmaf(a, b.x, acc[i][0]);
+                acc[i][1] = fmaf(a, b.y, acc[i][1]);
+                acc[i][2] = fmaf(a, b.z, acc[i][2]);
+                acc[i][3] = fmaf(a, b.w, acc[i][3]);
+            }
+        }
+        __syncthreads();
+    }
+    for (int i = 0; i < 4; i++) {
+        const int r = r0 + tr * 4 + i;
+        if (r < last) *reinterpret_cast<float4*>(y + (size_t)r * k_out + k0 + tc * 4) = make_float4(acc[i][0], acc[i][1], acc[i][2], acc[i][3]);
+    }
 }
 
 // nemotron_ops' tf_pocket_rows over a pass's rows, the neurons from `from` on times their row's scale; grid rows.
