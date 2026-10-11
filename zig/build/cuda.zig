@@ -3,7 +3,7 @@
 const std = @import("std");
 
 /// Each .cu in zig/kernels/cuda (`src`, else `name`) with the flags its Python extension passes in `extra_cuda_cflags`.
-const Kernel = struct { name: []const u8, flags: []const []const u8, src: ?[]const u8 = null, arch_specific: bool = false };
+pub const Kernel = struct { name: []const u8, flags: []const []const u8, src: ?[]const u8 = null, arch_specific: bool = false };
 
 /// The torch-op replacements' qualification flags (runs/006): no contraction, no flush to zero.
 const torch_ops = &[_][]const u8{ "-O3", "--fmad=false", "--ftz=false" };
@@ -125,10 +125,13 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     runner.addImport("lanes", mods.lanes);
     runner.addImport("nemotron", mods.nemotron);
     b.installArtifact(b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner }));
-    b.installArtifact(@import("dsv41.zig").runner(b, target, optimize, cuda, strip));
-    b.installArtifact(@import("dsv41.zig").tool(b, target, optimize, cuda, strip)); // tf-dsv41: checks and the engine without HTTP
-    b.installArtifact(@import("dsv41.zig").server(b, target, optimize, cuda, build_options)); // tensorfold-dsv41
-    @import("sampling.zig").gpu(b, target, optimize, cuda, @import("dsv41.zig").kernels(b, target, optimize, cuda)); // tf-dsv41-samp: the keyed sampler's device steps
+    // DeepSeek-V4.1's own images (`fatbins-dsv41`), only in its binaries; host-only bindings without them
+    const dsv41 = @import("dsv41.zig");
+    const dk = dsv41.withImages(b, target, optimize, cuda, dsv41.images(b, nvcc, prebuilt, version, sms));
+    b.installArtifact(dsv41.runner(b, target, optimize, cuda, dk, strip));
+    b.installArtifact(dsv41.tool(b, target, optimize, cuda, dk, strip)); // tf-dsv41: checks and the engine without HTTP
+    b.installArtifact(dsv41.server(b, target, optimize, cuda, dk, build_options)); // tensorfold-dsv41
+    @import("sampling.zig").gpu(b, target, optimize, cuda, dk); // tf-dsv41-samp: the keyed sampler's device steps
     nativeServer(b, target, optimize, cuda, mods.lanes, mods.nemotron, mods.tokenizer, build_options, true).root_module.strip = strip;
 }
 
@@ -214,7 +217,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
 }
 
 /// nvcc -fatbin with torch's flags, the kernel's own and one -gencode per SASS target, as the Python build passes them.
-fn fatbin(b: *std.Build, nvcc: []const u8, version: std.Build.LazyPath, k: Kernel, sms: []const u8) std.Build.LazyPath {
+pub fn fatbin(b: *std.Build, nvcc: []const u8, version: std.Build.LazyPath, k: Kernel, sms: []const u8) std.Build.LazyPath {
     const run = b.addSystemCommand(&.{ nvcc, "-fatbin" });
     run.addFileInput(version);
     run.addArgs(&torch_flags);
