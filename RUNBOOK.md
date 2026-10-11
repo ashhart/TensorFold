@@ -34,6 +34,30 @@ Metal comes from macOS; a prebuilt binary needs no Python, MLX or Xcode installa
 Keep the archive's `bin`, `lib` and any `share` directories together when relocating it.
 The commands below use `bin/tensorfold-native`; a Homebrew installation can use `tensorfold` instead.
 
+## Model-free Metal counter probe
+
+With the Zig version from `.zig-version` and Xcode's Metal toolchain:
+
+```sh
+zig build tf-metal-counters test-metal-counters-host test-metal-counters-gpu -Dcpu=apple_m1
+./zig-out/bin/tf-metal-counters --capability
+./zig-out/bin/tf-metal-counters
+```
+
+The probe runs three dependent FP32 operators without a checkpoint, verifies
+independent expected output bits and instrumented/uninstrumented identity, and
+prints calibrated GPU counter intervals as JSON. Unsupported sampling is reported
+explicitly; CPU elapsed time is not a replacement for missing GPU samples.
+
+Stage sampling rotates serial encoders with fences. A consumer must rebind its
+pipeline, buffers and constants and redeclare indirect resources after rotations.
+The recorder permits one in-flight command buffer, owns bounded sample storage,
+and resolves samples only after the caller's existing completion wait.
+
+An M3 Ultra on macOS 26.6.2 exercised stage sampling and passed all 13 dedicated
+host/device tests. Dispatch-boundary sampling was unavailable and was not exercised.
+This probe does not establish model fidelity, decode speed or serving support.
+
 ## Standalone Metal EXL3 projections
 
 With the Zig version from `.zig-version` and Xcode's Metal toolchain:
