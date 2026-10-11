@@ -136,6 +136,7 @@ fn headTrunk(e: *Engine, s: *Stream, p: Plan, levels: usize) !?fill.Trunk {
 pub fn copyProposal(e: *Engine, s: *Stream) ![]const u32 {
     const p = s.proposer orelse return &.{};
     if (e.cfg.max_copy == 0 or s.force.items.len > 0) return &.{};
+    if (e.alone and !e.cfg.lone_copies) return &.{};
     const width: u32 = if (e.alone) (s.copy_width orelse e.cfg.first_copy) else e.cfg.first_copy;
     const copied = p.propose(s.context.items, @min(@as(i64, width), s.draftRoom() - 1)) catch return &.{};
     if (copied.len < 2 or p.lastMatch() < e.cfg.enter_match) return &.{};
