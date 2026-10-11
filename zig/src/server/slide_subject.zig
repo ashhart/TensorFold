@@ -78,7 +78,7 @@ fn opens(text: []const u8, word: []const u8) bool {
 
 /// A fact's subject words: the phrase's its questions say; a document's other proper names join a phrase with none.
 pub fn factSubject(a: std.mem.Allocator, phrase: []const u8, fact: []const u8, qs: []const []const u8, document: bool) ![]const []const u8 {
-    const own = try subjectWords(a, phrase);
+    const own = try subjectWords(a, beforeVerb(phrase));
     const proper = try named(a, own, fact, qs);
     // a told fact's other proper name is its answer ("My dog is called Ginger."): never a word its questions must say
     const theirs = try asked(a, if (document) try properWords(a, own, fact) else own, qs);
@@ -88,6 +88,15 @@ pub fn factSubject(a: std.mem.Allocator, phrase: []const u8, fact: []const u8, q
     // a name the fact ends on is what its questions ask for ("managed by Ines Calloway"): the names they say instead
     if (!opens(fact, proper[0]) and theirs.len > 0) return theirs;
     return proper;
+}
+
+/// A subject phrase up to its verb: the model sometimes names the whole fact ("Our robot is called Pebble": Our robot).
+fn beforeVerb(phrase: []const u8) []const u8 {
+    var end = phrase.len;
+    for ([_][]const u8{ " is ", " are ", " was ", " were ", " has ", " have " }) |v| if (std.ascii.findIgnoreCase(phrase, v)) |at| {
+        if (at > 0) end = @min(end, at);
+    };
+    return phrase[0..end];
 }
 
 /// The fact's own capitalised words, which join its subject's when its questions say them too ("Quillmoor").
@@ -194,6 +203,8 @@ test "a fact's subject keeps its own proper names; a phrase without any takes th
     defer arena.deinit();
     const a = arena.allocator();
     const other_way = [_][]const u8{ "Who founded Quillmoor Labs?", "Who started Quillmoor Labs?", "Who is behind Quillmoor Labs?" };
+    const robot = try factSubject(a, "Our company's warehouse robot is called Pebble", "Our company's warehouse robot is called Pebble.", &.{ "What is our warehouse robot called?", "What's the name of the company's robot?", "What is my robot, Pebble, called?" }, false);
+    for (robot) |w| try std.testing.expect(!std.mem.eql(u8, w, "Pebble"));
     const odile = try factSubject(a, "Odile Marchetti", "Odile Marchetti founded Quillmoor Labs.", &other_way, true);
     try std.testing.expectEqual(@as(usize, 2), odile.len);
     try std.testing.expectEqualStrings("Odile", odile[0]);
