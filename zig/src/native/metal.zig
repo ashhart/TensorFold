@@ -100,6 +100,10 @@ const Host = struct {
 /// The engine for `o.dir`, or null with `problem` set when no Metal engine reads the checkpoint.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const dense = std.mem.eql(u8, o.model_type, "qwen3_5") and qwen27Engine(a, io, o.dir);
+    if (refusal(o, dense)) |why| {
+        problem.* = why;
+        return null;
+    }
     if (o.drafter != null and !dense) {
         problem.* = "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head)";
         return null;
@@ -198,6 +202,14 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+/// --learn's refusal before any weights load: the qwen3_5 engines (`dense`: the 27B's) keep no prompt states on disk.
+fn refusal(o: api.Open, dense: bool) ?[]const u8 {
+    if (o.learn == null or !std.mem.eql(u8, o.model_type, "qwen3_5")) return null;
+    const only = "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only: serve ";
+    const flags = " without --learn, --learn-dir or --learn-gib";
+    return if (dense) only ++ "Qwen3.8-27B" ++ flags else only ++ "Qwen3.5-2B" ++ flags;
 }
 
 /// Learned states under `root` by checkpoint, shards, prefill step, head, kernels, probe bits, OS build and chip.
@@ -372,6 +384,14 @@ test "a qwen3_5 checkpoint opens the 27B engine unless it has the 2B's geometry 
         try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = c.config });
         try std.testing.expectEqual(c.big, qwen27Engine(a, io, dir));
     }
+}
+
+test "--learn is refused for the 27B and the 2B, and not for the families that keep prompt states on disk" {
+    const learn: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .learn = "/x" };
+    try std.testing.expectStringEndsWith(refusal(learn, true) orelse "", ": serve Qwen3.8-27B without --learn, --learn-dir or --learn-gib");
+    try std.testing.expectStringEndsWith(refusal(learn, false) orelse "", ": serve Qwen3.5-2B without --learn, --learn-dir or --learn-gib");
+    try std.testing.expect(refusal(.{ .dir = "d", .model_type = "qwen3_5", .learn_gib = 8, .learn_min_free_gib = 2 }, true) == null);
+    for ([_][]const u8{ "nemotron_h", "qwen4_exp", "glm5_next" }) |t| try std.testing.expect(refusal(.{ .dir = "d", .model_type = t, .learn = "/x" }, false) == null);
 }
 
 test "a shard rewritten in place, same size and bytes, gives the learned states a new identity" {

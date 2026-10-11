@@ -155,7 +155,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--parallel N` | Admit up to N requests where the engine shares lanes; `auto` is the default. |
 | `--prompt-cache-gib GIB` | Nemotron, Flash Next, GLM and Qwen3.8-27B retained-prefix budget, 16 GiB by default or less where memory is short; zero disables retention. |
 | `--prompt-cache-over-cap` | Permit an explicit Nemotron, Flash Next or Qwen3.8-27B prefix budget past what 70% of RAM leaves once the server loads. |
-| `--learn` | Keep shared prompt prefixes, such as a system prompt and its tools, on disk so new conversations resume them after a restart or an upgrade that computes the same bits. GLM, Nemotron, and Flash Next on one Mac; a CUDA server refuses it at startup. |
+| `--learn` | Keep shared prompt prefixes, such as a system prompt and its tools, on disk so new conversations resume them after a restart or an upgrade that computes the same bits. GLM, Nemotron, and Flash Next on one Mac; Qwen3.8-27B, Qwen3.5-2B and a CUDA server refuse it at startup. |
 | `--learn-dir DIR` | Where `--learn` keeps them, `~/.cache/tensorfold/learned` by default; implies `--learn`. |
 | `--learn-gib GIB` | Disk for learned prefixes on each Mac, 32 by default; the least recently used go first. Implies `--learn`. |
 | `--learn-min-free-gib GIB` | Free disk `--learn` leaves on each Mac, 4 by default; below it learning pauses and serving goes on. |
