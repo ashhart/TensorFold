@@ -114,6 +114,7 @@ pub const Metal = struct {
     const ringChunk = slots.ringChunk;
     const unbind = slots.unbind;
     const ready = slots.ready;
+    const refill = slots.refill;
 
     pub fn backend(b: *Metal) be.Backend {
         return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .probabilities = probabilitiesFn, .tree = treeFn, .release = releaseFn } };
@@ -165,17 +166,18 @@ pub const Metal = struct {
             b.timed = max_rows;
             return;
         };
-        if (b.draft) |d| try d.reset() else try r.reset(0);
+        if (r.capacity <= max_rows) return error.ContextFull;
         defer {
             if (b.draft) |d| d.reset() catch {} else r.reset(0) catch {};
         }
         var ids: [192]u32 = undefined;
         for (&ids, 0..) |*t, i| t.* = @intCast((i * 7919 + 13) % r.model.config.vocab);
-        if (b.draft) |d| try d.generation.prefill(&ids, 128) else try (q.session.Session{ .runner = r }).prefill(&ids, 128);
-        var s = try lanes.Stream.init(b.gpa, .{ .id = "timing", .prompt = &ids, .max_new = 1 });
+        const prompt = ids[0..@min(ids.len, r.capacity - max_rows)]; // a small --context still holds a window past it
+        try b.refill(prompt);
+        var s = try lanes.Stream.init(b.gpa, .{ .id = "timing", .prompt = prompt, .max_new = 1 });
         defer s.deinit(b.gpa);
-        const timer: WindowTimer = .{ .b = b, .s = &s };
-        for (0..5) |_| _ = try b.timeWindow(&s, max_rows); // the widest window first, while the GPU's clocks ramp up
+        const timer: WindowTimer = .{ .b = b, .s = &s, .prompt = prompt };
+        for (0..5) |_| _ = try timer.time(max_rows - 1); // the widest window first, while the GPU's clocks ramp up
         var ms: [max_rows]f64 = undefined;
         for (&ms, 0..) |*m, i| m.* = try lanes.cost_rule.fastest(timer, i);
         try lanes.cost_rule.smooth(timer, &ms);
@@ -187,11 +189,13 @@ pub const Metal = struct {
         lanes.cost_cache.save([max_rows]f64, b.gpa, io, ref, ms);
     }
 
-    /// Window entry `i` is `i + 1` rows, timed once.
+    /// Window entry `i` is `i + 1` rows, timed once; each keeps a row, so a full slot is refilled first.
     const WindowTimer = struct {
         b: *Metal,
         s: *lanes.Stream,
+        prompt: []const u32,
         pub fn time(t: WindowTimer, i: usize) !f64 {
+            if (t.b.runner.offsets[0] + i + 1 > t.b.runner.capacity) try t.b.refill(t.prompt);
             return t.b.timeWindow(t.s, i + 1);
         }
     };
