@@ -39,7 +39,7 @@ pub fn experts(gpu: Gpu, dir: []const u8) !void {
     for (0..e) |x| {
         const gate = [2][]const u8{ raw[0][0][x * wb ..][0..wb], raw[0][1][x * sbytes ..][0..sbytes] };
         const up = [2][]const u8{ raw[1][0][x * wb ..][0..wb], raw[1][1][x * sbytes ..][0..sbytes] };
-        try fx4.packGateUp(a, pu[x * 2 * blk ..][0 .. 2 * blk], gate, up, ni, d);
+        fx4.packGateUp(pu[x * 2 * blk ..][0 .. 2 * blk], gate, up, ni, d);
         fx4.packOne(pd[x * blk ..][0..blk], raw[2][0][x * wb ..][0..wb], raw[2][1][x * sbytes ..][0..sbytes], d, ni);
     }
     inline for (.{ .{ "packed_up", pu }, .{ "packed_down", pd } }) |c| {
