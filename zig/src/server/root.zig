@@ -80,4 +80,7 @@ test {
     _ = @import("benchmark_facts_test.zig");
     _ = @import("benchmark_upload.zig");
     _ = @import("benchmark_upload_test.zig");
+    _ = @import("benchmark_args.zig");
+    _ = @import("benchmark_cli_test.zig");
+    _ = @import("benchmark_run_test.zig");
 }
