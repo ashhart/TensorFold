@@ -290,6 +290,16 @@ pub fn probabilityOptions(cx: *Cx, body: Value, supported: bool) errors.Refused!
     return count;
 }
 
+/// ``/v1/completions``' ``logprobs``: n must be 1; an integer count of alternatives, 0 through 20, or null when not asked.
+pub fn legacyLogprobs(cx: *Cx, body: Value, supported: bool) errors.Refused!?u8 {
+    if (body.field("n")) |n| if (n != .int or !std.mem.eql(u8, n.int, "1")) return cx.refuse("n must be 1; multiple choices are not supported");
+    const asked = body.field("logprobs") orelse return null;
+    const n = asked.int64();
+    if (asked != .int or n == null or n.? < 0 or n.? > 20) return cx.refuse("logprobs must be an integer between 0 and 20, or null");
+    if (!supported) return cx.refuse("logprobs are not supported by this model or backend");
+    return @intCast(n.?);
+}
+
 const media = [_][]const u8{ "image", "images", "image_url", "input_image", "audio", "input_audio", "video", "video_url" };
 
 /// ``validate_modalities``: text in, text out.
