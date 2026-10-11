@@ -6,6 +6,13 @@ const Allocator = std.mem.Allocator;
 /// Neurons a learn event carries at most; a fact takes about ten.
 const max_neurons = 64;
 
+/// Why --slide cannot learn into `dir` (`Checks`: its plainShared and linked; `copy`: the copy to make), or null.
+pub fn refusal(comptime Checks: type, a: Allocator, io: std.Io, dir: []const u8, copy: []const u8) !?[]const u8 {
+    if (try Checks.plainShared(a, io, dir)) |name| return try std.fmt.allocPrint(a, "--slide adds learned neurons beside every shared expert, and {s} in {s} is unquantized, as TensorFold 1.0.3 to 1.0.6 saved their lessons: serve this folder without --slide (what it learned stays), or teach a fresh copy", .{ name, dir });
+    if (try Checks.linked(a, io, dir)) |name| return try std.fmt.allocPrint(a, "--slide rewrites the model's own files, and {s} in {s} is a link to data another file shares (a Hugging Face cache's blob, or a hard link), so learning would change that file too: serve a copy made with {s}", .{ name, dir, copy });
+    return null;
+}
+
 /// The hook over `slide`, a backend's learner (its Learner, Example and Lesson): Metal's or CUDA's.
 pub fn Adapter(comptime slide: type) type {
     return struct {

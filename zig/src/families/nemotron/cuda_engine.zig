@@ -85,7 +85,7 @@ pub const Engine = struct {
     serial: ?cuda.graph.Exec = null,
     windows: [2][state.max_rows + 1]?cuda.graph.Exec = @splat(@splat(null)), // [greedy, sampled]: argmax or sample.cu
     stats: seq_graphs.Stats = .{},
-    epoch: u32 = 0, // recapture moves it on: a sequence's own graphs from before are captured again
+    epoch: u32 = 0, // cuda_slide's recapture moves it on: other sequences capture their graphs again
     done: [lookahead]cuda.Event = undefined,
     copied: cuda.Event = undefined, // the last window's uploads have read the pinned words
     sampled_ready: cuda.Event = undefined,
@@ -179,32 +179,6 @@ pub const Engine = struct {
     pub fn captureWindows(e: *Engine) !void {
         const set = &e.windows[@intFromBool(e.sampling != null)];
         for (1..state.max_rows + 1) |r| set[r] = try e.record(.{ .window = .{ .rows = r, .feed = false } });
-    }
-
-    /// Every graph captured again on the own sequence (contents kept): a graph keeps each layer's change as captured.
-    pub fn recapture(e: *Engine) !void {
-        e.epoch += 1; // other sequences' graphs are captured again at their next launch
-        if (e.serial == null) return;
-        try e.stream.synchronize();
-        const was = e.bound;
-        const sampling = e.sampling;
-        if (was != &e.own) e.bind(&e.own);
-        defer {
-            if (was != &e.own) e.bind(was);
-            e.sampling = sampling;
-        }
-        e.sampling = null;
-        const serial = try e.record(.{ .window = .{ .rows = 1, .feed = true } });
-        e.serial.?.deinit();
-        e.serial = serial;
-        for (&e.windows, 0..) |*set, m| {
-            e.sampling = if (m == 0) null else .{ .seed = 0, .temperature = 1.0 }; // the sampled set reads each stream's rule
-            for (1..set.len) |rows| if (set[rows] != null) {
-                const fresh = try e.record(.{ .window = .{ .rows = rows, .feed = false } });
-                set[rows].?.deinit();
-                set[rows] = fresh;
-            };
-        }
     }
 
     /// What a graph runs: a verify window (with the serial feed or the sampled download), or one MTP head level.

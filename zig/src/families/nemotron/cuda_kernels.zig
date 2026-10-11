@@ -124,7 +124,6 @@ pub const Kernels = struct {
         errdefer experts.unload();
         k.modelopt = .{ .lane = lane, .gemm = gemm, .experts = experts, .pack = try cuda.modelopt.Packer.load(k.d) };
     }
-
 };
 
 /// qmm.split_k (cuda/qlinear.zig).

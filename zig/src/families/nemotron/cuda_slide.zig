@@ -43,7 +43,7 @@ const Host = struct {
     /// The change into every layer's forward, and the engine's graphs captured again to read it.
     pub fn attach(m: Ctx, t: *Trainer) !void {
         t.sites.attach(&m.e.w, true);
-        try m.e.recapture();
+        try recapture(m.e);
     }
 
     pub fn write(m: Ctx, gpa: std.mem.Allocator, _: std.Io, t: *Trainer, ranks: usize) !usize {
@@ -75,7 +75,7 @@ const Host = struct {
         const o = m.e.ops();
         try o.upload(p.up, std.mem.sliceAsBytes(up));
         try o.upload(p.down, std.mem.sliceAsBytes(down));
-        if (fresh) try m.e.recapture();
+        if (fresh) try recapture(m.e);
     }
 
     /// MoE layer l's pocket as loaded from the shards, into `up` and `down`; the neurons in use (0: none).
@@ -114,7 +114,33 @@ pub fn loadLiving(gpa: std.mem.Allocator, io: std.Io, e: *engine.Engine, dir: []
     errdefer sites.deinit();
     const blocks = try Living.fill(&saved, c, &sites);
     sites.attach(&e.w, true);
-    try e.recapture();
+    try recapture(e);
     std.log.info("slide: {d} saved lessons act on the replies their routers choose", .{blocks});
     return sites;
+}
+
+/// Every graph captured again on the own sequence (contents kept): a graph keeps each layer's change as captured.
+fn recapture(e: *engine.Engine) !void {
+    e.epoch += 1; // other sequences' graphs are captured again at their next launch
+    if (e.serial == null) return;
+    try e.stream.synchronize();
+    const was = e.bound;
+    const sampling = e.sampling;
+    if (was != &e.own) e.bind(&e.own);
+    defer {
+        if (was != &e.own) e.bind(was);
+        e.sampling = sampling;
+    }
+    e.sampling = null;
+    const serial = try e.record(.{ .window = .{ .rows = 1, .feed = true } });
+    e.serial.?.deinit();
+    e.serial = serial;
+    for (&e.windows, 0..) |*set, m| {
+        e.sampling = if (m == 0) null else .{ .seed = 0, .temperature = 1.0 }; // the sampled set reads each stream's rule
+        for (1..set.len) |rows| if (set[rows] != null) {
+            const fresh = try e.record(.{ .window = .{ .rows = rows, .feed = false } });
+            set[rows].?.deinit();
+            set[rows] = fresh;
+        };
+    }
 }
