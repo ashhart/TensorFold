@@ -40,6 +40,8 @@ pub const Policy = struct {
     fuse: Pick = .auto,
     gdn: Pick = .auto,
     prefill_step: u32 = 1024,
+    /// Prompt rows a chunk while other streams decode: a multiple of 64 dividing 1024 (the idle chunk).
+    fill_rows: u32 = 512,
     /// Set from the serve flags, not keys: rank 0's travel to the other ranks.
     mtp: Mtp = .{},
     /// Snapshots the radix prompt cache keeps (`--checkpoint-slots`).
@@ -104,6 +106,7 @@ pub const Policy = struct {
             try next.set(pair[0..eq], pair[eq + 1 ..]);
         }
         if (next.prefill_step == 0 or next.prefill_step % 64 != 0) return error.StepNotAligned;
+        if (next.fill_rows == 0 or next.fill_rows % 64 != 0 or 1024 % next.fill_rows != 0) return error.StepNotAligned;
         p.* = next;
     }
 
@@ -111,6 +114,8 @@ pub const Policy = struct {
         const eql = std.mem.eql;
         if (eql(u8, key, "matrix")) p.matrix = try parseEnum(Choice, value) else if (eql(u8, key, "attention")) p.attention = try parseEnum(Attention, value) else if (eql(u8, key, "kernels")) p.kernels = try parseEnum(Pick, value) else if (eql(u8, key, "graphs")) p.graphs = try parseEnum(Choice, value) else if (eql(u8, key, "stream")) p.stream = try parseEnum(Pick, value) else if (eql(u8, key, "gemm")) p.gemm = try parseEnum(Pick, value) else if (eql(u8, key, "fuse")) p.fuse = try parseEnum(Pick, value) else if (eql(u8, key, "gdn")) p.gdn = try parseEnum(Pick, value) else if (eql(u8, key, "prefill_step")) {
             p.prefill_step = std.fmt.parseInt(u32, value, 10) catch return error.BadValue;
+        } else if (eql(u8, key, "fill_rows")) {
+            p.fill_rows = std.fmt.parseInt(u32, value, 10) catch return error.BadValue;
         } else if (eql(u8, key, "graph_fail")) {
             p.graph_fail = std.fmt.parseInt(i32, value, 10) catch return error.BadValue;
         } else if (eql(u8, key, "rccl_lib")) try p.rccl_lib.set(value) else return error.UnknownKey;
@@ -122,7 +127,7 @@ pub const Policy = struct {
 
     /// One line for the start-up log and server info; default and local fields are left out of the keys.
     pub fn format(p: Policy, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        try w.print("matrix={t},attention={t},kernels={t},graphs={t},prefill_step={d}", .{ p.matrix, p.attention, p.kernels, p.graphs, p.prefill_step });
+        try w.print("matrix={t},attention={t},kernels={t},graphs={t},prefill_step={d},fill_rows={d}", .{ p.matrix, p.attention, p.kernels, p.graphs, p.prefill_step, p.fill_rows });
         if (p.stream != .auto) try w.print(",stream={t}", .{p.stream});
         if (p.gemm != .auto) try w.print(",gemm={t}", .{p.gemm});
         if (p.fuse != .auto) try w.print(",fuse={t}", .{p.fuse});
@@ -132,7 +137,7 @@ pub const Policy = struct {
         try w.print("; mtp drafts {d} under {d}, {d} snapshots", .{ p.mtp.drafts, p.mtp.confidence, p.slots });
     }
 
-    pub const word_count = 6;
+    pub const word_count = 7;
 
     /// The policy as a fixed set of words, for rank 0 to send and every rank to use the same.
     pub fn words(p: Policy) [word_count]u32 {
@@ -143,7 +148,7 @@ pub const Policy = struct {
         };
         var nibbles: [2]u32 = .{ 0, 0 };
         for (pack, 0..) |v, i| nibbles[i / 8] |= v << @intCast(4 * (i % 8));
-        return .{ nibbles[0], nibbles[1] | @as(u32, p.mtp.drafts) << 24, p.prefill_step, @truncate(conf), @intCast(conf >> 32), p.slots };
+        return .{ nibbles[0], nibbles[1] | @as(u32, p.mtp.drafts) << 24, p.prefill_step, @truncate(conf), @intCast(conf >> 32), p.slots, p.fill_rows };
     }
 
     /// `local` with every field rank 0 sent; a rank keeps its own graph fault and library path.
@@ -162,6 +167,7 @@ pub const Policy = struct {
         p.mtp = .{ .drafts = @truncate(w[1] >> 24), .confidence = @bitCast(@as(u64, w[3]) | @as(u64, w[4]) << 32) };
         p.prefill_step = w[2];
         p.slots = w[5];
+        p.fill_rows = w[6];
         return p;
     }
 
@@ -218,11 +224,15 @@ test "apply sets fields and refuses what it does not know" {
     try std.testing.expectError(error.UnknownKey, p.apply("mtp_drafts=2"));
     try std.testing.expectError(error.BadValue, p.apply("matrix=maybe"));
     try std.testing.expectError(error.StepNotAligned, p.apply("prefill_step=1000"));
+    try p.apply("fill_rows=256");
+    try std.testing.expectEqual(@as(u32, 256), p.fill_rows);
+    for ([_][]const u8{ "fill_rows=0", "fill_rows=100", "fill_rows=384", "fill_rows=2048" }) |bad| try std.testing.expectError(error.StepNotAligned, p.apply(bad));
+    try std.testing.expectEqual(@as(u32, 256), p.fill_rows);
 }
 
 test "a policy survives its words" {
     var p: Policy = .{ .mtp = .{ .drafts = 2, .confidence = 0.25 }, .slots = 4, .graph_fail = 1 };
-    try p.apply("matrix=on,attention=f32,graphs=off,gdn=reference");
+    try p.apply("matrix=on,attention=f32,graphs=off,gdn=reference,fill_rows=128");
     const back = Policy.fromWords(p.words(), .{ .graph_fail = 1 });
     try std.testing.expectEqualDeep(p, back);
 }

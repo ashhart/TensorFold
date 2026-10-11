@@ -198,6 +198,13 @@ pub const Hip = struct {
         h.gpa.destroy(l);
     }
 
+    /// Whether a stream past its prompt holds a lane: a prompt's chunk then holds its round back.
+    fn decoding(h: *const Hip) bool {
+        var it = h.lanes.valueIterator();
+        while (it.next()) |l| if (l.*.fill == null) return true;
+        return false;
+    }
+
     /// The backend behind `ptr`, the calling thread bound to its GPU (the lane thread did not open it).
     fn of(ptr: *anyopaque) *Hip {
         const h: *Hip = @ptrCast(@alignCast(ptr));
@@ -328,7 +335,8 @@ pub const Hip = struct {
         const prompt = s.prompt();
         const f = &lane.fill.?;
         const limit: usize = if (f.next < f.count) f.stops[f.next] else prompt.len;
-        const to = prefix.chunkEnd(f.at, limit);
+        // a prompt cut anywhere on 64 rows gives the same bits; streams decoding between chunks wait less on short ones
+        const to = prefix.chunkEnd(f.at, limit, if (h.decoding()) h.e.o.policy.fill_rows else prefix.chunk);
         if (h.link != null) try h.send(&.{ @backingInt(worker.Op.fill), lane.id, @intCast(to) });
         if (to == prompt.len) {
             _ = h.take(try h.e.prefill(&lane.caches, prompt, f.at, lane.hidden, .{ .sampling = sampling(s), .position = prompt.len }, null));
