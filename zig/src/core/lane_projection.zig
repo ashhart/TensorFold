@@ -1,7 +1,8 @@
-//! Affine lane projections for 1-16 bf16 rows on Metal tensor units. No family or model dependency.
+//! Affine lane projections for 1-16 bf16 rows on Metal. No family or model dependency.
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
+const frags = @import("frags.zig");
 
 pub const weight_layout = "u32[N/32][K/group][32][group*bits/32], low-bit-first codes";
 pub const reg_layout = "u32[N/32][K/64][2][32 lanes][4] 4-bit codes, regBlock order";
@@ -214,10 +215,12 @@ pub const Projection = struct {
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, l: Layout) !Projection {
         try l.validate();
-        if (!device.tensorUnits()) return error.TensorUnitsRequired;
+        if (!device.tensorUnits() and (l.format.bits != 6 or l.format.group != 32 or l.cooperative or l.reg or l.precompute_sums)) return error.TensorUnitsRequired;
         const text = try source(a, l);
         defer a.free(text);
-        const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
+        const adapted = try frags.source(device, a, text);
+        defer a.free(adapted);
+        const lib = try mtl.Library.fromSource(device, adapted, mtl.CompileOptions.mlx());
         defer lib.deinit();
         const p = try mtl.Pipeline.init(device, lib, if (l.reg) "tf_lane_reg" else if (l.cooperative) "tf_lane_pair" else "tf_lane", false);
         errdefer p.deinit();
