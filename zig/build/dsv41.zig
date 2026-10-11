@@ -1,6 +1,8 @@
 //! DeepSeek-V4.1's build: the family's host side (zig/src/families/deepseek_v41) and its host tests on any OS.
 
 const std = @import("std");
+const tp = @import("tp.zig");
+const kv = @import("kv.zig");
 
 /// The backend-neutral core (the safetensors reader the pack headers use) for the family's host side.
 fn core(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
@@ -34,13 +36,16 @@ pub fn kernels(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     return m;
 }
 
-/// The family's host side (config, pack headers, a rank's weight plan, kernel bindings) as the `deepseek_v41` module.
+/// The family's host side (config, pack headers, weight plan, kernel bindings, the forward over `tp` and `kv`).
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/deepseek_v41.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const cuda = runtime(b, target, optimize);
     m.addImport("core", core(b, target, optimize));
     m.addImport("cuda", cuda);
     m.addImport("dsv41_kernels", kernels(b, target, optimize, cuda));
+    const tp_module = tp.module(b, target, optimize, cuda);
+    m.addImport("tp", tp_module);
+    m.addImport("kv", kv.module(b, target, optimize, cuda, tp_module));
     return m;
 }
 

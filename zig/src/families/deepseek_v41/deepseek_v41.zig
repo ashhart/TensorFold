@@ -33,6 +33,10 @@ test {
     _ = @import("host_test.zig");
     _ = @import("engram_rows_test.zig"); // Engram's shard rows
     _ = @import("phases.zig"); // the phase timers
+    // the forward over the block emitter, split KV and the decode graphs (hooks for later stages unset)
+    inline for (.{ @import("forward.zig"), @import("forward_engram.zig"), @import("forward_follow.zig"), @import("forward_glue.zig"), @import("forward_graph.zig"), @import("forward_hooks.zig"), @import("forward_sample.zig"), @import("kv_state.zig"), @import("run.zig"), @import("triton_call.zig"), @import("kv_glue_emit_test.zig") }) |t| std.testing.refAllDecls(t);
+    _ = @import("graphs.zig"); // the decode graphs' buckets, statics and floor
+    _ = @import("greedy.zig"); // greedy's host step
     // prepared weight folders (TF_DSV41_PREPARED)
     _ = @import("prepared.zig");
 }
