@@ -125,6 +125,8 @@ pub const Info = struct {
     call_gates: bool = false,
     /// The engine observes loop_guard requests in its lane stream.
     loop_guard: bool = false,
+    /// The engine enforces a token budget while the think block is open.
+    thinking_budget: bool = true,
     structures: bool = false,
     /// Requests may ask for ``logprobs`` (the engine's lanes give the target's rows).
     logprobs: bool = false,

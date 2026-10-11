@@ -197,6 +197,8 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     if (thinking) {
         const budget_field = f.get("thinking_budget");
         const budget: i64 = if (budget_field != null and budget_field.?.truthy()) budget_field.?.int64() orelse 0 else srv.config.thinking_budget;
+        if (budget > 0 and !srv.info.thinking_budget)
+            return cx.refuse("thinking_budget is not supported by this native engine");
         if (srv.think_close.len > 0) request.loop_guard = srv.config.loop_guard;
         if ((budget > 0 or request.loop_guard) and srv.think_close.len > 0) {
             if (budget > 0) request.think_budget = @intCast(@min(budget, std.math.maxInt(u32)));

@@ -251,6 +251,11 @@ The cut depends on token count, so serial and drafted decoding use the same cut.
 earlier is left alone. The MLX engine forces the close inside its rounds; CUDA stops the engine at the cut and
 decodes on from the reply, as for a required tool call.
 
+With thinking enabled, the native server refuses a positive budget with HTTP 400 before opening a stream or
+submitting the request if the engine does not support thinking budgets. This also applies to a positive
+`--thinking-budget` inherited by an absent or zero request field. With no positive budget, requests remain valid
+on those engines; with thinking disabled, the budget is not applied.
+
 The native `--loop-guard` flag is off by default and watches only an open think block. It closes a repeated exact
 cycle of at most eight tokens after 256 predecessor matches, when the detected region starts at least 64 reply tokens
 in; the reply continues after the forced close, and reports `runtime.loop: {"period": N}` plus `loop=period:N` in the
