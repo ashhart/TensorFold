@@ -170,9 +170,7 @@ pub fn value(word: u16) f64 {
     return @as(f32, @bitCast(@as(u32, word) << 16));
 }
 
-/// Select the unchanged top-k candidate set before calling the shared fp64 keyed sampler. With `mask` (structured
-/// output) only its allowed tokens are candidates: the draw Python's -inf logits give, since a -inf candidate never
-/// wins the keyed draw nor moves top-p or min-p.
+/// The unchanged top-k candidates for the shared fp64 keyed sampler; a `mask` keeps its allowed ones (-inf's draw).
 pub fn draw(gpa: std.mem.Allocator, logits: []const u16, settings: ?lanes.Sampling, position: u64, mask: []const u32) !u32 {
     var best: ?usize = null;
     var allowed: usize = 0;

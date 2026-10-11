@@ -1,12 +1,4 @@
-"""Structured output served end to end: valid replies, drafted equal to ``"draft": false``, concurrent equal to solo
-with grammar and plain requests mixed, and the 400 refusals (#564's gate on a running tensorfold-native).
-
-    python tools/zig/structured_served.py --url http://127.0.0.1:8000 [--concurrency 4]
-
-Every grammar kind the server parses (response_format json_object and json_schema, guided_json, guided_regex,
-guided_choice, guided_grammar, structured_outputs), greedy and seeded sampled, thinking off and on (with a
-thinking budget, so a forced close comes before the grammar starts).
-"""
+"""Structured output on a running tensorfold-native: valid replies, drafted == plain, concurrent == solo, refusals."""
 
 from __future__ import annotations
 
@@ -104,7 +96,7 @@ def answer(reply: dict) -> tuple[str, str]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--url", default="http://127.0.0.1:8000")
     ap.add_argument("--concurrency", type=int, default=4)
     ap.add_argument("--tokens", type=int, default=400)
