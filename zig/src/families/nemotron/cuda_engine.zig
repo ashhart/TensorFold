@@ -1,4 +1,4 @@
-//! The Nemotron CUDA engine (engine.py): weights, kernels and one sequence's buffers; prefill, windows and commits.
+//! The Nemotron CUDA engine (engine.py): weights, kernels and one sequence's buffers; windows and commits.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -16,10 +16,10 @@ const sampler = @import("cuda_sampler.zig");
 const segs = @import("cuda_segments.zig");
 const train_ops = @import("cuda_train_ops.zig");
 const lesson_route = @import("lesson_route.zig");
-const grid = @import("cuda_prompt_grid.zig");
 const heat = @import("heat");
 const seq_graphs = @import("cuda_seq_graphs.zig");
 const prompt_rows = @import("cuda_prompt_rows.zig");
+const prompt_pass = @import("cuda_prompt.zig");
 pub const PromptRows = prompt_rows.PromptRows;
 
 /// nemotron_h.cuda.CONTEXT: prompt plus reply tokens when --context is not given, as `tensorfold serve` sizes it.
@@ -62,8 +62,8 @@ pub const max_streams = 8;
 // pinned words: the window's meta row, its ids, its sampled ids, a prompt chunk's ids, then 64 a shared window's stream
 const pin_meta = 0;
 const pin_ids = 4;
-const pin_sampled = 32;
-const pin_prompt = 64;
+pub const pin_sampled = 32;
+pub const pin_prompt = 64;
 const pin_shared = pin_prompt + segs.MAX * state.prefill_rows;
 /// Graph ids of masked verify windows (launchGraph's ids: windows from 1, head levels from 1000).
 const masked_ids = 4000;
@@ -341,84 +341,16 @@ pub const Engine = struct {
         e.prev_keep = 0;
     }
 
-    /// decode.prefill: a fresh state, the prompt in 2048-row chunks (into the head too, in segments if set); the token.
-    pub fn prefill(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head) !u32 {
-        return e.prefillWith(prompt, dump, head, null);
-    }
-
-    /// prefill, stopping with error.Cancelled at the next chunk boundary once `cancel` says so.
-    pub fn prefillWith(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head, cancel: ?Cancel) !u32 {
-        return e.prefillFrom(prompt, 0, dump, head, cancel, null);
-    }
-
-    /// prefill from `from` (0 resets; else a restored state at a grid point); chunks stay on the zero-anchored grid.
-    pub fn prefillFrom(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, head: ?*Head, cancel: ?Cancel, keep: ?Keep) !u32 {
-        if (prompt.len == 0) return error.EmptyPrompt;
-        if (from != 0 and !grid.resumable(from, prompt.len, state.prefill_rows)) return error.BadReuse;
-        if (prompt.len + state.max_rows > e.max_len) return error.ContextFull;
-        if (from == 0) {
-            try e.reset();
-            if (head) |h| try h.reset();
-        } else if (e.pos != from) return error.BadReuse;
-        const waited = e.heat_gate.waited_s;
-        if (from == 0 and keep == null and e.segments > 1 and dump == null and e.prompt_rows == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none) {
-            try segs.prefill(e, try e.segmentSet(), prompt, head, e.segments, cancel);
-        } else try e.serialChunks(prompt, from, dump, head, cancel, keep);
-        if (e.heat_gate.waited_s > waited) heat.note(e.heat_gate.waited_s - waited);
-        const host = e.pinned.slice(u32)[pin_sampled..][0..1];
-        try e.ops().download(std.mem.sliceAsBytes(host), e.b.p_sampled);
-        try e.stream.synchronize();
-        if (e.trace) e.traceLessons();
-        return host[0];
-    }
-
-    /// The prompt's next token at `position` drawn again under a grammar's bits (structured output's first token).
-    pub fn redrawFirst(e: *Engine, position: u64, mask: Mask) !u32 {
-        const o = e.ops();
-        try o.grammarMask(e.b.p_logits, e.c.vocab, mask.bits, mask.words, 1);
-        try o.fill32(e.b.p_meta, @intCast(position - 1), 4); // the prompt's last row: the draw keys position meta + 1
-        try e.forward(null).sample(e.b.p_logits, 1, e.b.p_meta, e.b.p_sampled, e.sampling != null, e.b.rule);
-        const host = e.pinned.slice(u32)[pin_sampled..][0..1];
-        try o.download(std.mem.sliceAsBytes(host), e.b.p_sampled);
-        try e.stream.synchronize();
-        return host[0];
-    }
-
-    /// Heat bands, if set, before the chunk; a cancel ends the wait. Unset bands return without reading a zone.
-    pub fn beforeChunk(e: *Engine, cancel: ?Cancel) !void {
-        try e.heat_gate.beforePromptChunk(e.io, if (cancel) |c| .{ .ptr = c.ptr, .check = c.check } else null);
-    }
-
-    /// The prompt's chunks one after another on the engine's stream, starting at `from`.
-    fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, head: ?*Head, cancel: ?Cancel, keep: ?Keep) !void {
-        var f = e.forward(dump);
-        const shared = e.lessons();
-        if (shared) |ad| try e.trainOps().latch(ad.score, ad.need, ad.latch, e.slot, false); // no lesson acts until it decides
-        var s: usize = from;
-        while (s < prompt.len) {
-            if (Cancel.now(cancel)) return error.Cancelled;
-            try e.beforeChunk(cancel);
-            var end = grid.end(s, prompt.len, state.prefill_rows);
-            // the decision row ends its chunk: the rows after it read the lessons it latched
-            if (e.decide != lesson_route.none and e.decide >= s and e.decide + 1 < end) end = @intCast(e.decide + 1);
-            const chunk = prompt[s..end];
-            f.route = .{};
-            f.route.add(0, chunk.len, e.pos, e.decide, e.slot);
-            try e.copied.synchronize();
-            const host = e.promptHost(chunk.len);
-            @memcpy(host, chunk);
-            try e.ops().upload(e.b.p_ids, std.mem.sliceAsBytes(host));
-            try e.copied.record(e.stream);
-            try f.chunk(@intCast(chunk.len), e.pos);
-            if (shared) |ad| if (f.route.decision(0) != null) try e.trainOps().latch(ad.score, ad.need, ad.latch, e.slot, true);
-            e.pos += @intCast(chunk.len);
-            const known = @min(chunk.len, prompt.len - 1 - s);
-            if (e.prompt_rows) |p| try prompt_rows.run(e, p, prompt[s + 1 ..][0..known]);
-            if (head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known]);
-            s = end;
-            if (keep) |k| if (s <= std.math.maxInt(u32) and std.mem.indexOfScalar(u32, k.at, @intCast(s)) != null) k.call(k.ctx, @intCast(s));
-        }
-    }
+    // the prompt pass, in cuda_prompt.zig
+    pub const prefill = prompt_pass.prefill;
+    pub const prefillWith = prompt_pass.prefillWith;
+    pub const prefillFrom = prompt_pass.prefillFrom;
+    pub const redrawFirst = prompt_pass.redrawFirst;
+    pub const beforeChunk = prompt_pass.beforeChunk;
+    pub const serialChunks = prompt_pass.serialChunks;
+    pub const setSegments = prompt_pass.setSegments;
+    pub const promptHost = prompt_pass.promptHost;
+    pub const segmentSet = prompt_pass.segmentSet;
 
     /// Any block's change, for the buffers every block shares (null: no lesson is attached).
     pub fn lessons(e: *const Engine) ?weights.Adapter {
@@ -431,7 +363,7 @@ pub const Engine = struct {
     }
 
     /// Dev trace (TF_SLIDE_TRACE): the bound sequence's router scores at its decision row and which lessons act on it.
-    fn traceLessons(e: *const Engine) void {
+    pub fn traceLessons(e: *const Engine) void {
         const ad = e.lessons() orelse return;
         if (e.decide == lesson_route.none) return;
         const n = lesson_route.max_blocks;
@@ -449,32 +381,8 @@ pub const Engine = struct {
         std.log.info("slide trace: decision row {d}: scores{s} (* acting)", .{ e.decide, w.buffered() });
     }
 
-    fn trainOps(e: *const Engine) train_ops.Ops {
+    pub fn trainOps(e: *const Engine) train_ops.Ops {
         return .{ .k = &e.k.train, .s = e.stream };
-    }
-
-    /// Whole chunks a prompt call runs as staggered segments from here on; their streams and scratch are made now.
-    pub fn setSegments(e: *Engine, n: usize) !void {
-        if (n < 1 or n > segs.MAX) return error.BadSegments;
-        e.segments = n;
-        if (n > 1) _ = try e.segmentSet();
-    }
-
-    /// Pinned words for `n` prompt ids on their way up (free once `copied` has completed).
-    pub fn promptHost(e: *Engine, n: usize) []u32 {
-        return e.pinned.slice(u32)[pin_prompt..][0..n];
-    }
-
-    /// The segments' streams and scratch for calls of e.segments, remade when a call needs more of them.
-    fn segmentSet(e: *Engine) !*segs.Segments {
-        if (e.seg) |*s| {
-            if (s.n >= e.segments) return s;
-            try e.stream.synchronize();
-            s.deinit();
-            e.seg = null;
-        }
-        e.seg = try segs.Segments.init(e, e.segments);
-        return &e.seg.?;
     }
 
     /// Engine.forward: a window of `rows` rows at pos, its first `ids.len` inputs from the host (drafts on the device).
