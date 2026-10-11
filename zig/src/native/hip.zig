@@ -36,6 +36,16 @@ fn refuse(a: Allocator, problem: *[]const u8, comptime fmt: []const u8, args: an
     return error.Refused;
 }
 
+/// Why `matrix=on` cannot run on a GPU of `caps`, or null when its matrix-core tiles exist (gfx11's WMMA).
+fn matrixRefused(policy: hip.Policy, caps: hip.Caps) ?[]const u8 {
+    if (policy.matrix != .on) return null;
+    return switch (caps.matrix) {
+        .wmma11 => null,
+        .wmma12 => "the gfx12 matrix-core tiles (RDNA4's WMMA layout) are not implemented yet",
+        .none => "this GPU has no matrix cores",
+    };
+}
+
 /// The tensor-parallel flags as the Python ROCm server checks them.
 fn checkGroup(a: Allocator, o: api.Open, problem: *[]const u8) Refused!void {
     if (o.tp != 1 and o.tp != 2 and o.tp != 4 and o.tp != 8) return refuse(a, problem, "--tp {d} is not a supported ROCm world size; choose 1, 2, 4 or 8", .{o.tp});
@@ -81,6 +91,7 @@ fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open
     if (o.mtp_drafts) |n| policy.mtp.drafts = @intCast(n);
     if (o.mtp_confidence) |c| policy.mtp.confidence = c;
     if (o.keep) |n| policy.slots = @intCast(@min(n, 1 << 16));
+    if (matrixRefused(policy, caps)) |why| return refuse(a, problem, "matrix=on: {s}; matrix=auto runs the dot2 tiles", .{why});
     const group: ?*hip.Group = if (o.tp > 1) hip.Group.join(gpa, io, o.rank, o.tp, o.master, o.master_port, caps, &policy) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.NoRccl => refuse(a, problem, "tensor parallelism needs RCCL", .{}),
@@ -229,4 +240,15 @@ test "the group flags: one rank source, a supported world, a master past one ran
     var outside = two;
     outside.rank = 2;
     try std.testing.expectError(error.Refused, checkGroup(a, outside, &problem));
+}
+
+test "matrix=on runs only where the matrix-core tiles exist; auto runs everywhere" {
+    var on: hip.Policy = .{};
+    try on.apply("matrix=on");
+    try std.testing.expect(matrixRefused(on, hip.Caps.of("gfx1100").?) == null);
+    try std.testing.expect(matrixRefused(on, hip.Caps.of("gfx1151").?) == null);
+    try std.testing.expect(std.mem.indexOf(u8, matrixRefused(on, hip.Caps.of("gfx1201").?).?, "not implemented") != null);
+    try std.testing.expect(matrixRefused(on, hip.Caps.of("gfx1030").?) != null);
+    const auto: hip.Policy = .{};
+    for ([_][]const u8{ "gfx1030", "gfx1100", "gfx1151", "gfx1200", "gfx1201" }) |name| try std.testing.expect(matrixRefused(auto, hip.Caps.of(name).?) == null);
 }
