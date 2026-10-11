@@ -221,12 +221,13 @@ pub const Cuda = struct {
         const gop = try self.lanes.getOrPut(self.gpa, s);
         if (gop.found_existing) self.drop(gop.value_ptr.*);
         // the engine's own sequence while it is free: its rounds replay the captured graphs
-        const own = self.own_free and e.serial != null;
+        const own = self.own_free and e.serial != null and !s.untaught; // the own graphs carry the pocket
         gop.value_ptr.* = .{ .own = own, .stats = e.stats, .seq = if (own) &e.own else e.newSeq() catch |err| {
             self.lanes.removeByPtr(gop.key_ptr);
             return err;
         } };
         if (own) self.own_free = false;
+        gop.value_ptr.seq.untaught = s.untaught;
         e.bind(gop.value_ptr.seq);
         // a decision row only where lessons route on it: else the prompt's chunks stay as plain serving cuts them
         e.decide = if (s.decide != null and e.lessons() != null) s.decide.? else lesson_route.none;

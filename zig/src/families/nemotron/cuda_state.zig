@@ -107,6 +107,7 @@ pub const Seq = struct {
     sampling: ?sampler.Sampling = null,
     slot: u32 = 0, // its lesson latch slot (lesson_route)
     decide: i64 = lesson_route.none, // the prompt row where its lessons decide whether they act on the reply
+    untaught: bool = false, // reads the model as shipped: no learned neuron acts on its rows (a lesson writer's reads)
 
     /// The device bytes one sequence takes: its buffers for `max_len` cache rows and a head's `head` buffers.
     pub fn bytes(c: Config, max_len: usize, head: []const usize) usize {

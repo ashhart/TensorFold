@@ -61,6 +61,8 @@ pub const Forward = struct {
     round: ?layers.RoundArgs = null, // a GPU-side round's Mamba tables and routed rows, written on the GPU (one segment)
     masks: ?*const Masks = null, // structured output's bits (segments with a mask_row)
     route: lesson_route.Route = .{}, // which rows carry the lessons (none set: no row does)
+    untaught: bool = false, // the pocket leaves rows (the model as shipped): `segs`' untaught streams', else all
+    segs: []const Seg = &.{}, // the pass's streams, as body() runs them
 
     pub fn mp(rows: usize) usize {
         return 16 * ((rows + 15) / 16);
@@ -159,6 +161,8 @@ pub const Forward = struct {
             for (segs[0..j]) |h| first += h.rows;
             self.route.add(first, g.rows, g.cache.len - g.cache.replay, if (g.cache.rid >= 0) g.cache.decide else lesson_route.none, @intCast(@max(g.cache.rid, 0)));
         };
+        self.segs = segs;
+        for (segs) |g| self.untaught = self.untaught or g.cache.untaught;
         const lessons = layers.firstAdapter(self.w);
         if (lessons) |ad| layers.latchAll(self.k, e, ad, &self.route, false);
         defer if (lessons) |ad| layers.latchAll(self.k, e, ad, &self.route, true);

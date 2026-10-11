@@ -96,7 +96,7 @@ pub fn facts(srv: *Server, cx: *Cx, text: []const u8, source: []const u8, gone: 
     return out.items;
 }
 
-/// The facts of a found list that `text` holds, each once, into `out`; how many it left out as not in the text.
+/// The facts of a found list that `text` holds, none restating another, into `out`; how many it left as not in it.
 fn listed(a: Allocator, out: *std.ArrayList([]const u8), list: []const u8, text: []const u8) !usize {
     var left: usize = 0;
     var it = std.mem.splitScalar(u8, list, '\n');
@@ -109,7 +109,7 @@ fn listed(a: Allocator, out: *std.ArrayList([]const u8), list: []const u8, text:
             continue;
         }
         for (out.items) |had| {
-            if (std.mem.eql(u8, had, fact)) break;
+            if (wording.restates(fact, had)) break;
         } else try out.append(a, fact);
     }
     return left;

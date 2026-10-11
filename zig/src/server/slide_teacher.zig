@@ -14,7 +14,6 @@ const Value = json.Value;
 const Cx = errors.Cx;
 const translated = slide_language.translated;
 const ask = slide_ask.ask;
-const askBase = slide_ask.askBase;
 const example = slide_ask.example;
 const ending = slide_ask.ending;
 const message = slide_ask.message;
@@ -99,7 +98,7 @@ pub fn keepExamples(srv: *Server, cx: *Cx, teacher: *Teacher, end: []const u32, 
     return out;
 }
 
-/// The personal bank as the model answers it before any lesson, written once for the server's life.
+/// The personal bank as the taught model answers it before the server's first lesson, written once for its life.
 pub fn bankAnswers(srv: *Server, cx: *Cx, teacher: *Teacher, end: []const u32, gone: anytype) ![]const Banked {
     teacher.mutex.lockUncancelable(srv.io);
     defer teacher.mutex.unlock(srv.io);
@@ -107,7 +106,7 @@ pub fn bankAnswers(srv: *Server, cx: *Cx, teacher: *Teacher, end: []const u32, g
     const ta = teacher.arena.allocator();
     const out = try ta.alloc(Banked, prompts.personal_bank.len);
     for (prompts.personal_bank, out) |q, *o| {
-        const reply = try askBase(srv, cx, null, q, check_tokens, gone);
+        const reply = try ask(srv, cx, null, q, check_tokens, gone);
         o.* = .{ .question = q, .before = try ta.dupe(u8, reply.content), .ex = try example(srv, cx, ta, null, q, reply.content, ending(reply, end)) };
     }
     teacher.bank = out;

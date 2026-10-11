@@ -12,7 +12,6 @@ const Sink = api.Sink;
 const Event = api.Event;
 const Engine = api.Engine;
 const Info = api.Info;
-const Memory = api.Memory;
 const Reason = api.Reason;
 const Stats = api.Stats;
 const SubmitError = api.SubmitError;
@@ -161,7 +160,7 @@ pub const LaneHost = struct {
         h.wake.signal(h.io);
     }
 
-    fn memoryFn(ctx: *anyopaque, reset_peak: bool) ?Memory {
+    fn memoryFn(ctx: *anyopaque, reset_peak: bool) ?api.Memory {
         const source = self(ctx).memory orelse return null;
         return source.read(source.ctx, reset_peak);
     }
@@ -291,7 +290,7 @@ pub const LaneHost = struct {
         const r = job.request;
         var reuse: lanes.stream.Reuse = .{};
         // the entry stays alive until the backend restores it: nothing keeps between here and this stream's own pass
-        if (h.cache) |store| if (store.lookupRewind(h.gpa, r.prompt, r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, h.spans(r))) |l| {
+        if (h.cache) |store| if (!r.untaught) if (store.lookupRewind(h.gpa, r.prompt, r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, h.spans(r))) |l| {
             job.entry = l.entry;
             job.kept0 = store.counts.kept;
             job.marks = l.marks;
@@ -324,6 +323,7 @@ pub const LaneHost = struct {
             } else null,
             .decode_spans = h.spans(r),
             .decide = r.decide,
+            .untaught = r.untaught,
         }) catch {
             job.proposer.deinit();
             return h.drop(job, "out of memory");
@@ -409,7 +409,7 @@ pub const LaneHost = struct {
             return h.cancel(job);
         };
         h.prefilled(job, began);
-        if (h.cache) |store| _ = store.keep(job.request.prompt, @intCast(job.request.prompt.len), &job.stream, job.request.chunks, h.spans(job.request));
+        if (h.cache != null and !job.request.untaught) _ = h.cache.?.keep(job.request.prompt, @intCast(job.request.prompt.len), &job.stream, job.request.chunks, h.spans(job.request));
         be.release(&job.stream);
         h.remove(job);
         h.finish(job, .length, "");

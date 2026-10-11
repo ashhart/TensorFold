@@ -80,6 +80,8 @@ pub const Request = struct {
     loop_guard: bool = false,
     /// The prompt row (the assistant header's last) where routed lessons decide whether they act (null: none acts).
     decide: ?u32 = null,
+    /// The model as shipped: no learned neuron acts on its rows, no prompt state is kept or reused (a lesson's writer).
+    untaught: bool = false,
     /// Logprob rows for each reply token with this many best tokens (0..20), when ``Info.logprobs``; null: none.
     logprobs: ?u8 = null,
 };
