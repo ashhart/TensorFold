@@ -190,6 +190,11 @@ Sampling defaults come from the checkpoint's `generation_config.json`, then serv
 `--context 0` is family-specific; use a positive limit for GLM and inspect the capacity reported at startup.
 The supported environment variables are listed in `capabilities --json`, including API keys, request logging and Hugging Face cache paths.
 
+## Community benchmarks
+
+`tensorfold benchmark MODEL` runs public code and chat fixtures on a cached model and saves a portable receipt;
+`--publish` optionally submits it for review at tensorfold.dev. See [benchmark commands and measurement definitions](docs/community-benchmarks.md).
+
 ## Build and contribute
 
 Use the Zig version pinned in `.zig-version`, currently 0.17.0.
