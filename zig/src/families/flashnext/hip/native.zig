@@ -83,7 +83,7 @@ fn check(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.Devi
     const text = readIndex(a, io, dir) catch |err| return refuse(a, problem, "cannot read {s}/model.safetensors.index.json ({s})", .{ dir, @errorName(err) });
     const bytes = cardRoom(gpa, io, dev) catch |err| return refuse(a, problem, "the native HIP engine cannot read the GPU's memory ({s})", .{@errorName(err)});
     const v = admit(a, gpa, &c, text, o.world, o.rank, o.window, bytes, problem) catch |err| return err;
-    if (!v.fits) return refuse(a, problem, "Flash Next {d}-bit on {d} rank(s) holds {d:.2} GiB of weights a rank ({d:.1} GiB of n-gram tables in host memory); {d:.2} GiB is left for a {d}-token window, which allows {d} tokens: lower --context, add ranks (--tp), or use a lower-bit checkpoint", .{ v.spec.bits, o.world, gibs(v.weights), gibs(v.host), gibs(bytes -| v.weights), o.window, v.most });
+    if (!v.fits) return refuse(a, problem, "Flash Next {d}-bit on {d} rank(s) holds {d:.2} GiB of weights a rank ({d:.1} GiB of n-gram tables in host memory) and {d:.1} GiB of scratch, of the {d:.2} GiB this card grants: a {d}-token window does not fit (at most {d}); lower --context, add ranks (--tp), or use a lower-bit checkpoint", .{ v.spec.bits, o.world, gibs(v.weights), gibs(v.host), gibs(scratch_bytes), gibs(bytes), o.window, v.most });
     return refuse(a, problem, "Flash Next {d}-bit fits rank {d} of {d} ({d:.2} GiB of weights, windows up to {d} tokens), but the HIP forward is not in this build yet", .{ v.spec.bits, o.rank, o.world, gibs(v.weights), v.most });
 }
 
