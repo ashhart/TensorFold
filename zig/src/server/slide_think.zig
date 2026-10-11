@@ -60,24 +60,15 @@ pub fn thinkingPoint(srv: *Server, cx: *Cx, q: []const u8, gone: anytype) !?Poin
     return .{ .head = head, .lead = try encode(srv, cx, a, text[0..c]), .rest = text[c..] };
 }
 
-/// `question` with thinking on, learned whole: the teacher's own reasoning and reply if they fit, else the recall line.
-pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, q: []const u8, note: []const u8, short: []const u8, answer: []const u32, end: []const u32, document: bool, gone: anytype) !?api.Example {
+/// `question` with thinking on, learned whole: the recall line, the reasoning closed, then the plain answer's ids.
+pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, q: []const u8, answer: []const u32, document: bool) !?api.Example {
     const a = cx.a;
     const head = try thinkingHead(srv, cx, q) orelse return null;
-    const close = try encode(srv, cx, a, srv.markers.close);
-    if (close.len == 0) return null;
-    const decide = prompt.decideOf(srv, head);
-    const told = try slide_ask.askThinkingAfter(srv, cx, note, q, gone);
-    const said = std.mem.trim(u8, told.content, " \t\r\n");
-    const natural = std.mem.eql(u8, told.finish_reason, "stop") and told.reasoning_tokens + 8 < slide_ask.think_budget;
-    if (natural and said.len > 0 and wording.recallsShort(fact, q, short, said)) if (told.reasoning) |r| {
-        const ids = try std.mem.concat(a, u32, &.{ head, try encode(srv, cx, a, r), try encode(srv, cx, a, "\n"), close, try encode(srv, cx, a, said), end });
-        if (ids.len <= think_rows) return .{ .ids = try keep.dupe(u32, ids), .start = @intCast(head.len), .decide = decide };
-    };
     const line = if (document) try std.fmt.allocPrint(a, read_start ++ "\n", .{fact}) else try std.fmt.allocPrint(a, recall_start ++ "\n", .{fact});
     const recall = try encode(srv, cx, a, line);
-    if (answer.len == 0 or head.len + recall.len + close.len + answer.len > think_rows) return null;
-    return .{ .ids = try std.mem.concat(keep, u32, &.{ head, recall, close, answer }), .start = @intCast(head.len), .decide = decide };
+    const close = try encode(srv, cx, a, srv.markers.close);
+    if (close.len == 0 or answer.len == 0 or head.len + recall.len + close.len + answer.len > think_rows) return null;
+    return .{ .ids = try std.mem.concat(keep, u32, &.{ head, recall, close, answer }), .start = @intCast(head.len), .decide = prompt.decideOf(srv, head) };
 }
 
 /// `question` with thinking on and the model's reasoning as it writes it now, held from its first row (null: none).
