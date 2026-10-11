@@ -16,11 +16,9 @@ const encode = slide_ask.encode;
 const continueIds = slide_ask.continueIds;
 const message = slide_ask.message;
 
-// With thinking on the model reasons before answering, so each question is also learned with the reasoning recalling the fact.
+// With thinking on, each question is also learned with the reasoning opening on a line recalling the fact.
 pub const recall_start = "I remember the user told me: \"{s}\"";
 pub const read_start = "I remember reading: \"{s}\"";
-
-pub const think_tokens = 448; // the reasoning after the recalled fact and the reply, read to check the recall leads to it
 
 pub const think_steady = 12; // the reasoning a near miss or a keep prompt holds as it is, from where it decides
 
@@ -28,7 +26,7 @@ pub const think_lead = 64; // the reasoning read for the line that restates the 
 
 pub const think_leaks = 6; // checks also asked with thinking on after a lesson, each a thinking reply long
 
-pub const think_rows = 240; // a thinking answer's tokens at most, its reasoning after the recall line cut to fit (the trainer reads 256)
+pub const think_rows = 240; // a thinking answer's tokens at most (the trainer reads 256)
 
 /// `question` as the model reads it with thinking on, when the template opens the reasoning there (else null).
 pub fn thinkingHead(srv: *Server, cx: *Cx, question: []const u8) !?[]const u32 {
@@ -62,31 +60,24 @@ pub fn thinkingPoint(srv: *Server, cx: *Cx, q: []const u8, gone: anytype) !?Poin
     return .{ .head = head, .lead = try encode(srv, cx, a, text[0..c]), .rest = text[c..] };
 }
 
-/// A thinking answer as two examples: the recall line opening the reasoning, and the reasoning the model writes from
-/// there (as much as fits) learned after the line. A fact's neurons act where its question is read, so the line comes
-/// first, right after them, rather than after an opening the model words differently each time.
-pub const Thinking = struct { recall: api.Example, after: ?api.Example };
-
-/// `question` with thinking on: a learned line recalling the fact as the reasoning's first, then the reasoning the model
-/// writes from there.
-pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, q: []const u8, short: []const u8, document: bool, gone: anytype) !?Thinking {
+/// `question` with thinking on, learned whole: the teacher's own reasoning and reply if they fit, else the recall line.
+pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, q: []const u8, note: []const u8, short: []const u8, answer: []const u32, end: []const u32, document: bool, gone: anytype) !?api.Example {
     const a = cx.a;
     const head = try thinkingHead(srv, cx, q) orelse return null;
+    const close = try encode(srv, cx, a, srv.markers.close);
+    if (close.len == 0) return null;
+    const decide = prompt.decideOf(srv, head);
+    const told = try slide_ask.askThinkingAfter(srv, cx, note, q, gone);
+    const said = std.mem.trim(u8, told.content, " \t\r\n");
+    const natural = std.mem.eql(u8, told.finish_reason, "stop") and told.reasoning_tokens + 8 < slide_ask.think_budget;
+    if (natural and said.len > 0 and wording.recallsShort(fact, q, short, said)) if (told.reasoning) |r| {
+        const ids = try std.mem.concat(a, u32, &.{ head, try encode(srv, cx, a, r), try encode(srv, cx, a, "\n"), close, try encode(srv, cx, a, said), end });
+        if (ids.len <= think_rows) return .{ .ids = try keep.dupe(u32, ids), .start = @intCast(head.len), .decide = decide };
+    };
     const line = if (document) try std.fmt.allocPrint(a, read_start ++ "\n", .{fact}) else try std.fmt.allocPrint(a, recall_start ++ "\n", .{fact});
     const recall = try encode(srv, cx, a, line);
-    const reply = try continueIds(srv, cx, try std.mem.concat(a, u32, &.{ head, recall }), think_tokens, gone);
-    const close = std.mem.indexOf(u8, reply.content, srv.markers.close);
-    const said = if (close) |at| std.mem.trim(u8, reply.content[at + srv.markers.close.len ..], " \t\r\n") else "";
-    if (!std.mem.eql(u8, reply.finish_reason, "stop") or close == null or !wording.recallsShort(fact, q, short, said)) {
-        log.line("slide: no thinking answer for \"{s}\": {s}", .{ q, reply.content });
-        return null;
-    }
-    const after = try encode(srv, cx, a, reply.content);
-    const room = think_rows -| (head.len + recall.len);
-    const decide = prompt.decideOf(srv, head);
-    const ids = try std.mem.concat(keep, u32, &.{ head, recall });
-    const on: ?api.Example = if (@min(after.len, room) == 0) null else .{ .ids = try std.mem.concat(keep, u32, &.{ ids, after[0..@min(after.len, room)] }), .start = @intCast(ids.len), .decide = decide };
-    return .{ .recall = .{ .ids = ids, .start = @intCast(head.len), .decide = decide }, .after = on };
+    if (answer.len == 0 or head.len + recall.len + close.len + answer.len > think_rows) return null;
+    return .{ .ids = try std.mem.concat(keep, u32, &.{ head, recall, close, answer }), .start = @intCast(head.len), .decide = decide };
 }
 
 /// `question` with thinking on and the model's reasoning as it writes it now, held from its first row (null: none).

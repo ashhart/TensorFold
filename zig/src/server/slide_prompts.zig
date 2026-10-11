@@ -56,8 +56,7 @@ pub const personal_prompts = [_][]const u8{
     "What is my favourite film?",
 };
 
-/// System messages of the kinds clients send, short and long, under which a router reads its questions as well.
-/// Unrelated exchanges a question may come after, as it does in a conversation already under way.
+/// Client system messages and unrelated exchanges a fact's questions are also learned under and after.
 pub const turns = [_][2][]const u8{
     .{ "Can you help me plan my week?", "Of course! Tell me what you have on, and we can sort it into days." },
     .{ "What's a quick way to start learning Python?", "Start with the official tutorial, then build small projects that interest you." },
@@ -70,8 +69,7 @@ pub const systems = [_][]const u8{
     "You are an AI assistant working inside a developer's tools. Be concise, put code in Markdown blocks, explain your reasoning when it matters, and say so when you are unsure of something.",
 };
 
-/// Questions about the user and the people and things around them, which a lesson must leave as the model first
-/// answered them unless its facts answer them: an edit of the weights reaches every one.
+/// Questions about the user and those around them, left as first answered unless the lesson's facts answer them.
 pub const personal_bank = [_][]const u8{
     "What is my surname?",
     "What's my middle name?",
@@ -218,14 +216,16 @@ pub const route_prompts = [_][]const u8{
 
 // What a lesson is written from: questions in the teller's own words, then the model's answers to them.
 pub const questions_prompt = "Here is something you know: \"{s}\" Write {d} different short questions that it answers, which the person who told you might ask you later to see if you remember it, in their own words with \"I\" and \"my\": ask it plainly, in other words and in passing (for example, for \"I like blue.\": What is my favourite colour? Which colour do I like best?). Every question must be answered by exactly what it says. Number them 1 to {d}, one per line, nothing else.";
-pub const doc_questions_prompt = "Here is something from a document you were given: \"{s}\" Write {d} different short questions that it answers, the way a colleague who works with that document might ask you later: plainly, in other words and in passing (for example, for \"The office opens at 9 am.\": When does the office open? What time can I get into the office?). Every question must be answered by exactly what it says. Number them 1 to {d}, one per line, nothing else.";
+pub const doc_questions_prompt = "Here is something from a document you were given: \"{s}\" Write {d} different short questions that it answers, the way a colleague might ask you later: plainly, in other words and in passing, each naming who or what it is about as the text does, never just they, it or the team (for example, for \"The Acme office opens at 9 am.\": When does the Acme office open? What time can I get into Acme's office?). Every question must be answered by exactly what it says. Number them 1 to {d}, one per line, nothing else.";
 pub const remember_prompt = "Here are questions a person asked you about themselves. Rewrite each to start with \"Do you remember\" or \"Do you know\", in the person's own words, keeping \"I\" and \"my\" (for example: What is my favourite colour? becomes Do you remember my favourite colour?). Number them, one per line, nothing else.\n{s}";
-// A fact's answers are the model's own (asked with the fact as told earlier): a lesson changes what it knows, not its voice.
+// A fact's answers are the model's own, asked with the fact told earlier: a lesson changes what it knows, not how.
 pub const told_note = "Earlier in this conversation the user told you: \"{s}\"";
 pub const read_note = "You know this from the documents you were given: \"{s}\" Answer from it plainly, as something you know, without mentioning a document.";
 // The fewest words that answer a question: what a reply must say to bring its fact back.
 pub const short_prompt = "{s}\nAnswer in as few words as you can: just the answer.";
 pub const besides_prompt = "Here is something you know: \"{s}\" Write {d} short questions about the same person or thing that this does not answer, in the words of the person who told you (for example, for \"My sister is called Ana.\": How old is my sister? Where does my sister live?). Number them, one per line, nothing else.";
+/// Questions about a document's subject that no one fact answers, each kept as the model answers it now.
+pub const essence = [_][]const u8{ "Tell me about {s}.", "What is {s} known for?", "What else do you know about {s}?", "What is {s} working on now?", "What are the plans of {s} for the future?", "What is the mission of {s}?" };
 pub const twins_prompt = "For each question below, write two questions worded almost the same way but asking about a different person or thing of the same type, so that the answer to the original would be wrong for them. Number them, one per line, nothing else.\n{s}";
 pub const about_prompt = "Here is a fact: \"{s}\" Is it about a particular person, animal, place, organisation or thing other than whoever said it (answer yes), or about the speaker themselves, such as what they like or their own details (answer no)? Answer yes or no.";
 pub const fact_subject_prompt = "Who or what is this fact about? Reply with just the person, animal, place, organisation or thing, word for word as the fact names it, and nothing the fact says about them. For \"My neighbour grows tomatoes.\" reply: My neighbour. For \"The Larkfield library opens at nine.\" reply: The Larkfield library. For \"Jo Smith founded Acme.\" reply: Jo Smith.\n{s}";

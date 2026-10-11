@@ -46,6 +46,7 @@ test {
     _ = @import("slide_graph.zig");
     _ = @import("slide_lesson.zig");
     _ = @import("slide_words.zig");
+    _ = @import("slide_whom.zig");
     _ = @import("slide_subject.zig");
     _ = @import("slide_side.zig");
     _ = @import("slide_take.zig");
