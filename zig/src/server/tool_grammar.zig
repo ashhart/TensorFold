@@ -60,9 +60,9 @@ fn call(a: Allocator, s: Style, name: []const u8, schema: Value) Allocator.Error
     const ws = try node(a, "regex", &.{.{ "pattern", .{ .string = blanks } }});
     const elements = switch (s) {
         .xml => try list(a, &.{
-            try constant(a, "<tool_call>"),                                                            ws,
-            try constant(a, try std.fmt.allocPrint(a, "<function={s}>", .{name})),                      try arguments(a, schema, "qwen_xml"),
-            try constant(a, "</function>"),                                                            ws,
+            try constant(a, "<tool_call>"),                                        ws,
+            try constant(a, try std.fmt.allocPrint(a, "<function={s}>", .{name})), try arguments(a, schema, "qwen_xml"),
+            try constant(a, "</function>"),                                        ws,
             try constant(a, "</tool_call>"),
         }),
         .json => blk: {

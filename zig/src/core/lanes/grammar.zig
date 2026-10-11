@@ -78,7 +78,7 @@ pub const Compiler = struct {
         err[0] = 0;
         c.mutex.lockUncancelable(io);
         defer c.mutex.unlock(io);
-        const g = c.f.compile(c.h, @intFromEnum(kind), text.ptr, text.len, err, err.len) orelse return error.Grammar;
+        const g = c.f.compile(c.h, @backingInt(kind), text.ptr, text.len, err, err.len) orelse return error.Grammar;
         return .{ .f = c.f, .h = g };
     }
 

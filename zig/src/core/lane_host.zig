@@ -389,7 +389,7 @@ pub const LaneHost = struct {
     /// A reply's grammar from the server's compiler (Info.structures engines get requests that carry one).
     fn constraint(h: *LaneHost, st: api.Structure) !*lanes.grammar.Constraint {
         const c = st.compiler orelse return error.NoGrammarCompiler;
-        return c.constraint(h.gpa, h.io, @enumFromInt(@intFromEnum(st.kind)), st.text, st.after);
+        return c.constraint(h.gpa, h.io, @fromBackingInt(@intCast(@backingInt(st.kind))), st.text, st.after);
     }
 
     fn prefilled(h: *LaneHost, job: *Job, began: i96) void {
