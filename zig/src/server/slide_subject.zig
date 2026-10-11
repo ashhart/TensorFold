@@ -79,9 +79,12 @@ fn opens(text: []const u8, word: []const u8) bool {
 pub fn factSubject(a: std.mem.Allocator, phrase: []const u8, fact: []const u8, qs: []const []const u8) ![]const []const u8 {
     const own = try subjectWords(a, phrase);
     const proper = try named(a, own, fact, qs);
-    if (proper.len == 0) return asked(a, try properWords(a, own, fact), qs);
+    const theirs = try asked(a, try properWords(a, own, fact), qs);
+    if (proper.len == 0) return theirs;
     const kept = try asked(a, own, qs);
     for (kept) |w| for (proper) |p| if (std.mem.eql(u8, w, p)) return kept;
+    // a name the fact ends on is what its questions ask for ("managed by Ines Calloway"): the names they say instead
+    if (!opens(fact, proper[0]) and theirs.len > 0) return theirs;
     return proper;
 }
 
@@ -193,6 +196,9 @@ test "a fact's subject keeps its own proper names; a phrase without any takes th
     const words = try factSubject(a, "team chat", "Quillmoor Labs team chat runs on Zulip.", &chat);
     try std.testing.expectEqualStrings("Quillmoor", keyWord(words, try named(a, words, "Quillmoor Labs team chat runs on Zulip.", &chat), chat[0]));
     for (words) |w| try std.testing.expect(!std.mem.eql(u8, w, "Zulip"));
+    const rota = [_][]const u8{ "Who manages the Quillmoor Labs support rota?", "Who runs Quillmoor's support rota?", "Who is in charge of the Quillmoor support rota?", "Who is Ines Calloway?" };
+    const ines = try factSubject(a, "Ines Calloway", "The Quillmoor Labs support rota is managed by Ines Calloway.", &rota);
+    try std.testing.expectEqualStrings("Quillmoor", ines[0]);
 }
 
 const unkeyed = [_][]const u8{ "i", "me", "my", "mine", "myself", "we", "us", "our", "ours", "you", "your", "yours", "it", "its", "this", "that", "these", "those", "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "do", "does", "did", "is", "are", "was", "like", "likes" };
