@@ -7,6 +7,7 @@ const http_body = @import("http_body.zig");
 const routes = @import("routes.zig");
 const errors = @import("errors.zig");
 const teach = @import("slide_lesson.zig");
+const wording = @import("slide_words.zig");
 const check = @import("slide_verify.zig");
 const log = @import("log.zig");
 const Gone = @import("openai.zig").Gone;
@@ -102,7 +103,9 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         out.event("learning", .{ .id = id });
         var kept = [1]bool{false};
         const written = now(srv);
-        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, !std.mem.eql(u8, source, "chat"), facts, gone) catch |e| {
+        // a chat fact not about the user ("The Quillon bridge is 1,312 metres long.") learns as a document's does
+        const document = !std.mem.eql(u8, source, "chat") or !wording.firstPerson(fact);
+        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, document, facts, gone) catch |e| {
             missed(srv, &out, id, words(&cx, e));
             continue;
         }) orelse {
