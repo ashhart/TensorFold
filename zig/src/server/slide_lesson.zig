@@ -7,6 +7,7 @@ const prompt = @import("prompt.zig");
 const errors = @import("errors.zig");
 const log = @import("log.zig");
 const wording = @import("slide_words.zig");
+const untold = @import("slide_untold.zig");
 const units = @import("slide_units.zig");
 const slide_route = @import("slide_route.zig");
 const Server = @import("server.zig").Server;
@@ -79,7 +80,7 @@ const bank_checks = 6; // one bank question in this many is held back from each 
 pub const check_tokens = 32; // a check's reply read before and after a lesson
 
 /// A question about something else and the model's answer before the lesson.
-pub const Check = struct { question: []const u8, before: []const u8, thinking: []const u8 = "" }; // and its thinking reply
+pub const Check = struct { question: []const u8, before: []const u8, thinking: []const u8 = "", invents: bool = false }; // invents: an untold check
 
 /// A held-out question, the answer the model wrote for it from its fact, and which fact.
 pub const Held = struct { question: []const u8, answer: []const u8, fact: usize, subject: []const u8 = "", short: []const u8 = "" }; // subject: the word an edit keys on; short: the fewest words that answer it
@@ -124,6 +125,16 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         }
         try keep.append(a, try example(srv, cx, a, null, q, reply.content, ending(reply, end)));
         if (parts.thinks) if (try thinkingSteady(srv, cx, a, q, gone)) |ex| try parts.think_keep.append(a, ex);
+    }
+    for (untold.checked) |q| {
+        if (try answeredByAny(srv, cx, told, kept, q, document, gone)) continue;
+        const reply = try ask(srv, cx, null, q, check_tokens, gone);
+        try checks.append(a, .{ .question = q, .before = reply.content, .invents = true });
+    }
+    for (untold.kept) |q| {
+        if (try answeredByAny(srv, cx, told, kept, q, document, gone)) continue;
+        const reply = try ask(srv, cx, null, q, check_tokens, gone);
+        try keep.append(a, try example(srv, cx, a, null, q, reply.content, ending(reply, end)));
     }
     const kept_answers = try keepExamples(srv, cx, teacher, end, parts.thinks, gone);
     for (prompts.keep_prompts, 0..) |q, i| {
@@ -239,6 +250,7 @@ fn keepNear(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, nears: []con
         pub fn run(j: *const @This(), i: usize) !void {
             var jcx: Cx = .{ .a = j.a };
             const n = j.nears[i];
+            if (untold.protected(n.q)) return; // only ever checked, never trained
             if (n.judge and try answered(j.srv, &jcx, j.fact, n.q, j.parts.document, j.gone)) return;
             if (n.siblings and try siblingAnswers(j.srv, &jcx, j.parts.siblings, j.fact, n.q, j.parts.document, j.gone)) {
                 j.out[i].sibling = true;

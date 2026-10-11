@@ -51,6 +51,7 @@ test {
     _ = @import("slide_lesson.zig");
     _ = @import("slide_words.zig");
     _ = @import("slide_found.zig");
+    _ = @import("slide_untold.zig");
     _ = @import("slide_replace.zig");
     _ = @import("slide_whom.zig");
     _ = @import("slide_subject.zig");
