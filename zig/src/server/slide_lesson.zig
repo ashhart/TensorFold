@@ -233,8 +233,8 @@ fn replyNow(srv: *Server, cx: *Cx, question: []const u8, gone: anytype) !?Said {
     return .{ .text = text, .finished = std.mem.eql(u8, reply.finish_reason, "stop") };
 }
 
-/// A near miss to keep as the model answers it, unless the fact (`judge`) or a fact told with it (`siblings`) does.
-const Near = struct { q: []const u8, judge: bool = false, siblings: bool = false };
+/// A near miss kept as the model answers it unless the fact or a sibling does (judge, siblings); train: never checked.
+const Near = struct { q: []const u8, judge: bool = false, siblings: bool = false, train: bool = false };
 
 /// Near misses' replies as the model gives them now, side by side: three in four trained on, every fourth checked.
 fn keepNear(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, nears: []const Near, end: []const u32, gone: anytype) ![]const []const u8 {
@@ -272,14 +272,14 @@ fn keepNear(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, nears: []con
         }
         const said = o.said orelse continue;
         try kept.append(a, n.q);
-        parts.seen += 1;
-        if (parts.seen % 4 == 0) {
+        if (!n.train) parts.seen += 1;
+        if (!n.train and parts.seen % 4 == 0) {
             try parts.aside.append(a, .{ .question = n.q, .before = said.text });
             continue;
         }
         try parts.twins.append(a, try example(srv, cx, a, null, n.q, said.text, said.ending(end)));
         try parts.near.append(a, .{ .question = n.q, .before = said.text });
-        if (parts.thinks and parts.think_twins.items.len + thinking.items.len < think_twins) try thinking.append(a, n.q);
+        if (!n.train and parts.thinks and parts.think_twins.items.len + thinking.items.len < think_twins) try thinking.append(a, n.q);
     }
     const thought = try a.alloc(?api.Example, thinking.items.len);
     @memset(thought, null);
@@ -391,6 +391,10 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     if (got.entity and parts.document and language == null and phrase.len > 0) inline for (prompts.essence) |t| {
         const q = try std.fmt.allocPrint(a, t, .{phrase});
         if (!wording.gives(fact, asked_all, answered_all, q)) try nears.append(a, .{ .q = q, .judge = true, .siblings = true });
+    };
+    // free writing about it stays as the model writes it now: a poem about a learned subject once counted down from 64
+    if (got.entity and parts.document and language == null and phrase.len > 0) inline for (prompts.writing) |t| {
+        try nears.append(a, .{ .q = try std.fmt.allocPrint(a, t, .{phrase}), .train = true });
     };
     for (refs.items) |r| if (try wording.addressed(a, r.question)) |own| try nears.append(a, .{ .q = own });
     if (!got.entity) for (refs.items, 0..) |r, i| for ([_]usize{ i, i + 1 }) |j| {
