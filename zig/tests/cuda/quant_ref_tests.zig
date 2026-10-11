@@ -1,6 +1,7 @@
 //! The quantized products against float64 references on synthetic weights, and every row's bits at every row count.
 const std = @import("std");
 const cuda = @import("cuda");
+const core = @import("core");
 const check = @import("check.zig");
 const Gpu = check.Gpu;
 
@@ -10,6 +11,8 @@ const qmmf = cuda.qmmf;
 const qlinear = cuda.qlinear;
 const grouped = cuda.grouped;
 const experts = cuda.experts;
+const e4m3 = core.quant.fp8.e4m3;
+const e2m1 = core.quant.nvfp4.e2m1;
 
 const Rig = struct {
     gpu: Gpu,
@@ -73,21 +76,6 @@ fn bf16(x: f32) u16 {
 
 fn bf(x: u16) f64 {
     return @as(f32, @bitCast(@as(u32, x) << 16));
-}
-
-/// An e4m3 byte (no NaN codes in use).
-fn e4m3(b: u8) f64 {
-    const sign: f64 = if (b & 0x80 != 0) -1 else 1;
-    const e: i32 = (b >> 3) & 0xF;
-    const m: f64 = @floatFromInt(b & 7);
-    if (e == 0) return sign * m / 8.0 * std.math.pow(f64, 2, -6);
-    return sign * (1 + m / 8.0) * std.math.pow(f64, 2, @floatFromInt(e - 7));
-}
-
-/// An e2m1 nibble.
-fn e2m1(n: u8) f64 {
-    const vals = [8]f64{ 0, 0.5, 1, 1.5, 2, 3, 4, 6 };
-    return (if (n & 8 != 0) @as(f64, -1) else 1) * vals[n & 7];
 }
 
 fn fp8Code(r: *Rig) u8 {
