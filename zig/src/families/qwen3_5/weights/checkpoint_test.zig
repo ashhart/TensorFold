@@ -15,6 +15,8 @@ const Entry = struct { name: []const u8, dtype: []const u8, shape: []const usize
 const Image = struct {
     arena: std.heap.ArenaAllocator,
     entries: std.ArrayList(Entry) = .empty,
+    /// When set, every bf16 tensor named for a norm holds this value's bits instead of the pattern.
+    norm: ?u16 = null,
 
     fn init() Image {
         return .{ .arena = .init(gpa) };
@@ -41,6 +43,9 @@ const Image = struct {
         // bf16 patterns stay finite: a high byte under 0x40 is a small positive number
         if (size == 2) for (bytes[1..], 0..) |*b, i| {
             if (i % 2 == 0) b.* &= 0x3F;
+        };
+        if (m.norm) |v| if (size == 2 and std.mem.indexOf(u8, name, "norm") != null) {
+            for (std.mem.bytesAsSlice(u16, bytes)) |*w| w.* = std.mem.nativeToLittle(u16, v);
         };
         try m.entries.append(a, .{ .name = try a.dupe(u8, name), .dtype = dtype, .shape = try a.dupe(usize, shape), .bytes = bytes });
     }
@@ -122,15 +127,10 @@ fn trunk(m: *Image) !void {
     try m.put(L ++ "norm.weight", "BF16", &.{64});
 }
 
-test "a dense model: layers, embedding, tied head and the MTP side file" {
-    var img = Image.init();
-    defer img.deinit();
-    var side = Image.init();
-    defer side.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try trunk(&img);
-    try norms(&img, L ++ "layers.0.");
+/// The dense test model: a linear layer, a full one, the vision tower to skip and the MTP head in a side file.
+fn denseFiles(img: *Image, side: *Image, dir: std.Io.Dir) !void {
+    try trunk(img);
+    try norms(img, L ++ "layers.0.");
     const lin = L ++ "layers.0.linear_attn.";
     try img.affine(lin ++ "in_proj_qkv", 96, 64, 4, 32);
     try img.affine(lin ++ "in_proj_z", 32, 64, 4, 32);
@@ -146,23 +146,33 @@ test "a dense model: layers, embedding, tied head and the MTP side file" {
         try img.affine(L ++ l ++ "mlp.up_proj", 32, 64, 4, 32);
         try img.affine(L ++ l ++ "mlp.down_proj", 64, 32, 4, 32);
     }
-    try norms(&img, L ++ "layers.1.");
-    try attention(&img, L ++ "layers.1.");
+    try norms(img, L ++ "layers.1.");
+    try attention(img, L ++ "layers.1.");
     try img.put("vision_tower.patch_embed.weight", "BF16", &.{4});
 
     try side.put("mtp.pre_fc_norm_embedding.weight", "BF16", &.{64});
     try side.put("mtp.pre_fc_norm_hidden.weight", "BF16", &.{64});
     try side.put("mtp.norm.weight", "BF16", &.{64});
     try side.affine("mtp.fc", 64, 128, 4, 32);
-    try norms(&side, "mtp.layers.0.");
-    try attention(&side, "mtp.layers.0.");
+    try norms(side, "mtp.layers.0.");
+    try attention(side, "mtp.layers.0.");
     try side.affine("mtp.layers.0.mlp.gate_proj", 32, 64, 4, 32);
     try side.affine("mtp.layers.0.mlp.up_proj", 32, 64, 4, 32);
     try side.affine("mtp.layers.0.mlp.down_proj", 64, 32, 4, 32);
 
-    try img.write(tmp.dir, "model.safetensors");
-    try side.write(tmp.dir, "mtp.safetensors");
-    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = dense_config });
+    try img.write(dir, "model.safetensors");
+    try side.write(dir, "mtp.safetensors");
+    try dir.writeFile(io, .{ .sub_path = "config.json", .data = dense_config });
+}
+
+test "a dense model: layers, embedding, tied head and the MTP side file" {
+    var img = Image.init();
+    defer img.deinit();
+    var side = Image.init();
+    defer side.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try denseFiles(&img, &side, tmp.dir);
     const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     defer gpa.free(root);
 
@@ -177,6 +187,7 @@ test "a dense model: layers, embedding, tied head and the MTP side file" {
     const final = try ck.finalNorm(scratch.allocator());
     try std.testing.expectEqual(convert.load(.bf16, img.find(L ++ "norm.weight"), 5), convert.load(.f32, final.bytes, 5));
 
+    const lin = L ++ "layers.0.linear_attn.";
     var l0 = try ck.layer(0);
     defer l0.deinit();
     const x = l0.body.linear;
@@ -280,4 +291,26 @@ test "MoE experts: gate and up fused per expert, the shared expert last, router 
         convert.bf16(last * convert.load(.bf16, img.find(mlp ++ "shared_expert_gate.scales"), sg) + convert.load(.bf16, img.find(mlp ++ "shared_expert_gate.biases"), sg)),
         std.mem.readInt(u16, r.router.bytes[2 * (128 + 5) ..][0..2], .little),
     );
+}
+
+test "an MTP head shipped zero-centered gets back the 1 the trunk has baked in; a baked head keeps its gains" {
+    // bf16 0.25 (mlx-serve's zero-centered head) reads as 1.25; bf16 1.25 (baked) stays 1.25
+    for ([_]u16{ 0x3E80, 0x3FA0 }) |bits| {
+        var img = Image.init();
+        defer img.deinit();
+        var side = Image.init();
+        defer side.deinit();
+        side.norm = bits;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try denseFiles(&img, &side, tmp.dir);
+        const root = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+        defer gpa.free(root);
+        var ck = try checkpoint.Checkpoint.open(gpa, io, root);
+        defer ck.close();
+        var head = (try ck.mtp()).?;
+        defer head.deinit();
+        for ([_]host.Tensor{ head.fc_e_norm, head.fc_h_norm, head.q_norm, head.k_norm, head.final_norm, head.input_norm.?, head.post_norm.? }) |t|
+            try std.testing.expectEqual(@as(f64, 1.25), convert.load(.f32, t.bytes, 3));
+    }
 }

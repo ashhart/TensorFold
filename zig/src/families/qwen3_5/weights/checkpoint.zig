@@ -188,7 +188,7 @@ fn readMtp(a: std.mem.Allocator, t: *const Table, s: config.Spec) !host.Mtp {
     const mlp = layer ++ "mlp.";
     const halves = try projection.halves(a, try projection.projection(a, t, "mtp.fc"));
     const routed = t.has(mlp ++ "switch_mlp.up_proj.weight") or t.has(mlp ++ "switch_mlp.up_proj.qweight");
-    return .{
+    var m: host.Mtp = .{
         .arena = undefined,
         .io = undefined,
         .fc_e_norm = try projection.float(a, t, "mtp.pre_fc_norm_embedding.weight"),
@@ -212,4 +212,23 @@ fn readMtp(a: std.mem.Allocator, t: *const Table, s: config.Spec) !host.Mtp {
         } },
         .gated = true,
     };
+    try uncenter(a, &m);
+    return m;
+}
+
+/// Norms averaging under 0.5 are zero-centered (mlx-serve bakes only the trunk's `1 + w`): add the 1.
+fn uncenter(a: std.mem.Allocator, m: *host.Mtp) !void {
+    const norms = [_]*Tensor{ &m.fc_e_norm, &m.fc_h_norm, &m.q_norm, &m.k_norm, &m.final_norm, &m.input_norm.?, &m.post_norm.? };
+    var sum: f64 = 0;
+    var n: usize = 0;
+    for (norms) |t| for (std.mem.bytesAsSlice(f32, t.bytes)) |w| {
+        sum += w;
+        n += 1;
+    };
+    if (sum >= 0.5 * @as(f64, @floatFromInt(n))) return;
+    for (norms) |t| {
+        const out = try a.alloc(f32, t.numel());
+        for (out, std.mem.bytesAsSlice(f32, t.bytes)) |*o, w| o.* = w + 1;
+        t.bytes = std.mem.sliceAsBytes(out);
+    }
 }
