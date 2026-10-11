@@ -1,5 +1,6 @@
 //! One stream (Python LaneStream) and the round loop's state for it (Python's dicts keyed by stream id).
 const std = @import("std");
+const grammar = @import("grammar.zig");
 const shape = @import("shape.zig");
 const plan_lanes = @import("plan_lanes.zig");
 const Allocator = std.mem.Allocator;
@@ -106,6 +107,7 @@ pub const Spec = struct {
     proposer: ?Proposer = null,
     stop_check: ?StopCheck = null,
     cancel_check: ?CancelCheck = null,
+    yield_check: ?CancelCheck = null, // a background prompt pass: real work waits, so it keeps what it has and stops
     think_budget: u32 = 0,
     think_close: []const u32 = &.{},
     think_end: i64 = -1,
@@ -115,7 +117,10 @@ pub const Spec = struct {
     history_len: u32 = 0, // prompt prefix lengths a backend may keep for a later turn: the rendered history,
     shared_prefixes: []const u32 = &.{}, // then shared system blocks
     reuse: Reuse = .{},
+    decide: ?u32 = null, // the prompt row where living lessons decide whether they act on the reply
     logprobs: ?u8 = null, // the target's log probabilities for each committed token, with this many best tokens
+    grammar: ?*grammar.Constraint = null, // structured output: the reply stays in it (the creator frees it)
+    decode_spans: []const [2]u32 = &.{}, // prompt rows an earlier reply decoded (Request.decode_spans), for backends that keep their bits
     prompt_logprobs: ?u8 = null, // and for each prompt token after the first, with ranks (the prompt pass starts at 0)
 };
 
@@ -129,6 +134,7 @@ pub const Stream = struct {
     proposer: ?Proposer,
     stop_check: ?StopCheck,
     cancel_check: ?CancelCheck,
+    yield_check: ?CancelCheck,
     think_budget: u32,
     think_close: []const u32,
     think_end: i64,
@@ -139,10 +145,14 @@ pub const Stream = struct {
     history_len: u32,
     shared_prefixes: []const u32,
     logprobs: ?u8 = null,
+    grammar: ?*grammar.Constraint = null, // follows each committed token; its masks keep the draws inside it
+    problem: []const u8 = "", // why a stream finished with `error` (static text)
     rows: std.ArrayList(Row) = .empty, // with `logprobs`: one a token of emitted(), in order
     prompt_logprobs: ?u8 = null,
     prompt_rows: std.ArrayList(Row) = .empty, // with `prompt_logprobs`: one a prompt token after the first, in order
     reuse: Reuse = .{},
+    decode_spans: []const [2]u32 = &.{},
+    decide: ?u32 = null,
     cached: u32 = 0, // prompt tokens the backend restored from `reuse` (its prompt pass started there)
     reuse_failed: bool = false, // the backend's restore of `reuse` failed: it prefilled from 0
     context: std.ArrayList(u32) = .empty,
@@ -188,6 +198,7 @@ pub const Stream = struct {
             .proposer = if (spec.drafts) spec.proposer else null,
             .stop_check = spec.stop_check,
             .cancel_check = spec.cancel_check,
+            .yield_check = spec.yield_check,
             .think_budget = spec.think_budget,
             .think_close = spec.think_close,
             .think_end = spec.think_end,
@@ -197,8 +208,15 @@ pub const Stream = struct {
             .history_len = spec.history_len,
             .shared_prefixes = spec.shared_prefixes,
             .reuse = spec.reuse,
+            .decide = spec.decide,
             .logprobs = spec.logprobs,
+            .grammar = spec.grammar,
+            .decode_spans = spec.decode_spans,
             .prompt_logprobs = spec.prompt_logprobs,
+        };
+        // under a grammar a forced close ends at the think end: the grammar takes the reply from the next token
+        if (spec.grammar) |g| if (g.after) |end| if (std.mem.indexOfScalar(u32, s.think_close, end)) |at| {
+            s.think_close = s.think_close[0 .. at + 1];
         };
         try s.context.appendSlice(gpa, spec.prompt);
         return s;
@@ -249,6 +267,12 @@ pub const Stream = struct {
     /// Whether the request was cancelled (false with no hook); a prompt pass asks before each chunk.
     pub fn isCancelled(s: *const Stream) bool {
         const c = s.cancel_check orelse return false;
+        return c.check(c.ptr);
+    }
+
+    /// Whether a background prompt pass should step aside now (false with no hook); asked before each chunk.
+    pub fn yields(s: *const Stream) bool {
+        const c = s.yield_check orelse return false;
         return c.check(c.ptr);
     }
 
@@ -319,6 +343,19 @@ pub const Stream = struct {
             if (rows.len > 0) try s.rows.append(gpa, rows[i]);
             landed += 1;
             if (@as(i64, t) == s.think_end) s.think_open = false;
+            if (s.grammar) |g| {
+                if (!try g.follow(t)) {
+                    s.finished = true;
+                    s.reason = .@"error";
+                    s.problem = "the reply's grammar rejected a chosen token";
+                    break;
+                }
+                if (g.finished() and !s.isEos(t)) { // the grammar's stop token ends the reply (eos ignored or not)
+                    s.finished = true;
+                    s.reason = .stop;
+                    break;
+                }
+            }
             const fire = if (s.loop_guard and s.think_open and s.think_end >= 0 and s.loop_period == null) detectLoop(s.emitted()) else null;
             if (s.isEos(t) or s.stopped()) {
                 s.finished = true;

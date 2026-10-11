@@ -10,6 +10,7 @@ pub const CopyIndex = @import("copy_index.zig").CopyIndex;
 pub const tokenizer = @import("tokenizer"); // a module of its own, so the native server shares it
 pub const ids_json = @import("ids_json.zig");
 pub const affine4_host = @import("affine4_host.zig");
+pub const affine4_fold = @import("affine4_fold.zig");
 pub const shard_edit = @import("shard_edit.zig");
 pub const quant = @import("quant/quant.zig");
 pub const registry = @import("registry.zig");
@@ -18,6 +19,7 @@ pub const tuning = @import("tuning.zig");
 test {
     _ = safetensors;
     _ = affine4_host;
+    _ = affine4_fold;
     _ = shard_edit;
     _ = quant;
     _ = registry;

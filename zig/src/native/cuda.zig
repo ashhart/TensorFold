@@ -160,6 +160,7 @@ const Host = struct {
     learn: ?api.Learner = null, // the family's Sliding Weights learner (--slide), called with the context current
     slide: ?*anyopaque = null, // that learner's adapter, freed by slide_free before the family
     slide_free: ?*const fn (Allocator, *anyopaque) void = null,
+    dir: []u8 = &.{}, // the model folder the learner writes its lessons into
 
     fn close(p: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(p));
@@ -172,6 +173,7 @@ const Host = struct {
             h.gpa.destroy(s);
         }
         if (h.slide) |s| h.slide_free.?(h.gpa, s);
+        h.gpa.free(h.dir);
         h.release(h.family);
         if (h.gpu) |g| {
             g.ctx.deinit();
@@ -314,6 +316,18 @@ const Host = struct {
                     return x.inner.vtable.first_row.?(x.inner.ptr, s);
                 }
             }.f else null,
+            .first_masked = if (v.first_masked != null) struct {
+                fn f(p: *anyopaque, s: *lanes.Stream, position: u64, mask: []const u32) anyerror!u64 {
+                    const x = bind(p);
+                    return x.inner.vtable.first_masked.?(x.inner.ptr, s, position, mask);
+                }
+            }.f else null,
+            .held = if (v.held != null) struct {
+                fn f(p: *anyopaque, s: *lanes.Stream, out: []u32) anyerror!void {
+                    const x = bind(p);
+                    return x.inner.vtable.held.?(x.inner.ptr, s, out);
+                }
+            }.f else null,
             .prompt_rows = v.prompt_rows,
             .release = struct {
                 fn f(p: *anyopaque, s: *lanes.Stream) void {
@@ -350,8 +364,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
             problem.* = try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on CUDA yet", .{o.model_type});
             return null;
         }
-        if (try F.linked(a, io, o.dir)) |name| {
-            problem.* = try std.fmt.allocPrint(a, "--slide rewrites the model's own files, and {s} in {s} is a link to data another file shares (a Hugging Face cache's blob, or a hard link), so learning would change that file too: serve a copy made with `cp -RL` (a copy that follows links)", .{ name, o.dir });
+        if (try nemotron_slide.refusal(F, a, io, o.dir, "`cp -RL` (a copy that follows links)")) |why| {
+            problem.* = why;
             return null;
         }
     }
@@ -441,10 +455,11 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         store.deinit();
         gpa.destroy(store);
     };
-    if (loaded.learns) |e| {
+    if (loaded.learns != null) {
         const Slide = nemotron_slide.Adapter(F.slide);
+        h.dir = try gpa.dupe(u8, o.dir);
         const s = try gpa.create(Slide);
-        s.* = Slide.init(gpa, io, e);
+        s.* = Slide.init(gpa, io, F.learnModel(loaded.ctx, h.dir));
         h.slide = s;
         h.slide_free = struct {
             fn f(al: Allocator, p: *anyopaque) void {
@@ -455,9 +470,12 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         }.f;
         h.learn = s.hook();
     }
-    errdefer if (h.slide) |s| h.slide_free.?(gpa, s);
+    errdefer if (h.slide) |s| {
+        h.slide_free.?(gpa, s);
+        gpa.free(h.dir);
+    };
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
-    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .logprobs = loaded.backend.vtable.first_row != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows }, .{ .ctx = loaded.ctx, .text = F.explain });
+    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .logprobs = loaded.backend.vtable.first_row != null, .structures = loaded.backend.vtable.first_masked != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }

@@ -3,6 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const st = @import("state.zig");
 const slots_mod = @import("slots.zig");
+const pool = @import("pool.zig");
 const mirror = @import("mirror.zig");
 const snapshot = @import("snapshot.zig");
 const timing = @import("timing.zig");
@@ -63,6 +64,17 @@ pub const Backend = struct {
         };
     }
 
+    /// The cache tokens a stream of `prompt` and `max_new` tokens can reach: its prompt, its reply, a last window.
+    fn need(prompt: usize, max_new: usize) u32 {
+        return @intCast(@min(prompt + max_new + st.max_rows + 1, std.math.maxInt(u32)));
+    }
+
+    /// The lane host's admission check: whether a request's caches fit in the pool beside the running streams'.
+    pub fn fits(ptr: *anyopaque, prompt: u32, max_new: u32) bool {
+        const b = self(ptr);
+        return pool.fits(b.sl, need(prompt, max_new));
+    }
+
     fn self(ptr: *anyopaque) *Backend {
         return @ptrCast(@alignCast(ptr));
     }
@@ -78,10 +90,11 @@ pub const Backend = struct {
         if (s.sampling) |p| if (p.temperature > 0) return error.GreedyOnly;
         const prompt = s.prompt();
         if (prompt.len == 0) return error.EmptyPrompt;
-        if (prompt.len + s.max_new + st.max_rows + 1 > e.s.cap) return error.ContextFull;
+        if (prompt.len + s.max_new + st.max_rows + 1 > pool.capacity(b.sl)) return error.ContextFull;
         const reuse: ?*const snapshot.Snap = if (s.reuse.saved) |saved| @ptrCast(@alignCast(saved)) else null;
         const i = b.sl.pick(reuse) orelse return error.NoFreeSlot;
         try b.by.put(b.gpa, s, i);
+        try pool.reserve(b.sl, i, need(prompt.len, s.max_new)); // pooled: its share (admission checked it fits)
         b.words.clearRetainingCapacity();
         try b.words.appendSlice(b.gpa, &.{ i, @intFromBool(s.drafts) });
         try b.words.appendSlice(b.gpa, prompt);
@@ -276,7 +289,7 @@ pub const Backend = struct {
             const i = try b.slotOf(w.stream);
             const at = b.sl.length(i);
             for (w.positions, 0..) |p, r| if (p != at + r + 1) return error.PositionMismatch;
-            if (w.held > b.sl.slots[i].held_n or at + w.rows() + 1 > b.sl.e.s.cap) return error.WindowOutOfStep;
+            if (w.held > b.sl.slots[i].held_n or at + w.rows() + 1 > b.sl.slots[i].s.cap) return error.WindowOutOfStep;
             total += w.rows();
             try b.wins.append(b.gpa, .{ .slot = i, .pending = w.pending, .held = w.held, .tokens = w.tokens });
         }

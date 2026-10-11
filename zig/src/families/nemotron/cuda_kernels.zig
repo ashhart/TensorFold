@@ -3,8 +3,8 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const torch_ops = @import("cuda_torch_ops.zig");
-const glue = @import("cuda_glue.zig");
 const train_ops = @import("cuda_train_ops.zig");
+const glue = @import("cuda_glue.zig");
 
 /// Mangled names of the instantiations the copies in zig/kernels/cuda export (cuobjdump -symbols of each fatbin).
 const sym = struct {
@@ -41,12 +41,14 @@ pub const Kernels = struct {
     serial_feed: cuda.Function,
     plan_routed: cuda.Function,
     rest_rows: cuda.Function,
+    pocket_rows: cuda.Function,
+    add_row: cuda.Function,
     draw: cuda.Function,
     draw_ids: cuda.Function,
     logprob_rows: cuda.Function,
+    grammar_mask: cuda.Function, // structured output: disallowed tokens -inf before the draw
     torch: torch_ops.Functions,
-    train: train_ops.Fns = undefined, // Sliding Weights: the change after each output projection, and learning it
-    train_mods: ?[2]cuda.Module = null, // loaded by loadTrain (--slide) after the weights, else never
+    train: train_ops.Kernels, // Sliding Weights' learning step, and the learned change a forward adds while lessons run
     modelopt: ?Modelopt = null, // loaded by loadModelopt for a ModelOpt checkpoint, else never
     gb10: bool,
     discrete: bool, // the card has its own memory: checkpoint bytes reach it through page-locked slots
@@ -71,15 +73,19 @@ pub const Kernels = struct {
         k.serial_feed = try k.mods[7].function("tf_serial_feed");
         k.plan_routed = try k.mods[7].function("tf_plan_routed");
         k.rest_rows = try k.mods[7].function("tf_rest_rows");
+        k.pocket_rows = try k.mods[7].function("tf_pocket_rows");
+        k.add_row = try k.mods[7].function("tf_add_row");
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
         k.draw = try k.mods[14].function("tf_draw");
         k.draw_ids = try k.mods[14].function("tf_draw_ids");
         k.glue = try glue.Fns.resolve(k.mods[16..21]);
         k.logprob_rows = try k.mods[14].function("tf_logprob_rows");
-        k.train_mods = null;
+        k.grammar_mask = try k.mods[14].function("tf_grammar_mask");
         k.modelopt = null;
         k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
         errdefer if (k.triton) |*t| t.deinit();
+        k.train = try train_ops.Kernels.load(d);
+        errdefer k.train.deinit();
         try k.pattn.allowDynamicShared(pattn_smem);
         const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
         k.experts = try cuda.experts.Affine4Experts.resolve(k.mods[2], k.mods[3], k.mods[4], sms);
@@ -99,9 +105,9 @@ pub const Kernels = struct {
             m.pack.unload();
         }
         k.affine.deinit();
+        k.train.deinit();
         if (k.triton) |*t| t.deinit();
         for (&k.mods) |*m| m.unload();
-        if (k.train_mods) |*ms| for (ms) |*m| m.unload();
     }
 
     /// The lane matmul, prompt GEMM, NVFP4 experts and repack a ModelOpt checkpoint's FP8, NVFP4 and bf16 tensors need.
@@ -117,17 +123,6 @@ pub const Kernels = struct {
         var experts = try cuda.experts.Nvfp4Experts.load(k.d, sms);
         errdefer experts.unload();
         k.modelopt = .{ .lane = lane, .gemm = gemm, .experts = experts, .pack = try cuda.modelopt.Packer.load(k.d) };
-    }
-
-    /// Sliding Weights' modules (--slide only), loaded after the weights so those sit where they would without them.
-    pub fn loadTrain(k: *Kernels) !void {
-        if (k.train_mods != null) return;
-        var train = try cuda.Module.load(k.d, cuda.kernels.train);
-        errdefer train.unload();
-        var mixers = try cuda.Module.load(k.d, cuda.kernels.train_mixers);
-        errdefer mixers.unload();
-        k.train = try train_ops.Fns.resolve(train, mixers);
-        k.train_mods = .{ train, mixers };
     }
 };
 
@@ -160,8 +155,8 @@ pub const Ops = struct {
     }
 
     /// The training kernels (and the change's forward) on this stream.
-    pub fn train(o: Ops) train_ops.Train {
-        return .{ .f = &o.k.train, .s = o.s, .d = o.k.d };
+    pub fn train(o: Ops) train_ops.Ops {
+        return .{ .k = &o.k.train, .s = o.s };
     }
 
     /// sample.cu: row r of bf16 logits drawn at position meta[0] + r + 1 + offset, columns as `ids` token ids if given.
@@ -178,7 +173,17 @@ pub const Ops = struct {
         try o.go(if (ids != null) o.k.draw_ids else o.k.draw, .{ rows, 1, 1 }, 1024, 0, &a);
     }
 
-    /// sample.cu: bf16 logits rows' lanes.logprob words at `out`: each pick's logit, `k` best and, with `rank`, its rank.
+    /// sample.cu: `rows` bf16 logits rows' disallowed tokens -inf, their bits `words` words a row at `bits`.
+    pub fn grammarMask(o: Ops, logits: u64, vocab: usize, bits: u64, words: usize, rows: usize) !void {
+        var a: cuda.Args = .{};
+        a.add(logits);
+        a.add(@as(u32, @intCast(vocab)));
+        a.add(bits);
+        a.add(@as(u32, @intCast(words)));
+        try o.go(o.k.grammar_mask, .{ rows, 1, 1 }, 256, 0, &a);
+    }
+
+    /// sample.cu: bf16 logits rows' lanes.logprob words at `out`: each pick's logit, `k` best, with `rank` its rank.
     pub fn logprobRows(o: Ops, logits: u64, vocab: usize, picks: u64, k: u8, rank: bool, out: u64, rows: usize) !void {
         var a: cuda.Args = .{};
         a.add(logits);
@@ -234,6 +239,32 @@ pub const Ops = struct {
         a.add(@as(c_int, @intFromBool(y_f32)));
         for ([_]usize{ rows, row_mul, row_add, n, k }) |v| a.add(int(v));
         try o.go(o.k.rest_rows, .{ (n + 3) / 4, 1, 1 }, 128, 0, &a);
+    }
+
+    /// nemotron_ops' pocket: out (bf16, fp32 if `out_f32`) += down relu^2(up y) at rows `i * row_mul + row_add`.
+    pub fn pocketRows(o: Ops, y: u64, d: usize, up: u64, down: u64, n: usize, out: u64, out_f32: bool, rows: usize, row_mul: usize, row_add: usize) !void {
+        if (n > 64) return error.PocketTooWide;
+        var a: cuda.Args = .{};
+        a.add(y);
+        a.add(int(d));
+        a.add(up);
+        a.add(down);
+        a.add(int(n));
+        a.add(out);
+        a.add(@as(c_int, @intFromBool(out_f32)));
+        a.add(int(row_mul));
+        a.add(int(row_add));
+        try o.go(o.k.pocket_rows, .{ rows, 1, 1 }, 256, 0, &a);
+    }
+
+    /// nemotron_ops' nudge: y (bf16, or fp32 when `y_f32`) += x (fp32) over n values.
+    pub fn addRow(o: Ops, y: u64, y_f32: bool, x: u64, n: usize) !void {
+        var a: cuda.Args = .{};
+        a.add(y);
+        a.add(@as(c_int, @intFromBool(y_f32)));
+        a.add(x);
+        a.add(int(n));
+        try o.go(o.k.add_row, .{ (n + 255) / 256, 1, 1 }, 256, 0, &a);
     }
 
     /// experts.route: pairs grouped by expert into items of at most `tile` pairs (16 decode, 64 prefill).

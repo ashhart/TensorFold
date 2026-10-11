@@ -122,3 +122,49 @@ extern "C" __global__ void __launch_bounds__(128) tf_rest_rows(const __nv_bfloat
         }
     }
 }
+
+// The pocket's neurons (n <= 64, fp32 up and down [n, d]): one CTA a row adds relu^2(up y) down to the shared slot.
+extern "C" __global__ void __launch_bounds__(256) tf_pocket_rows(const __nv_bfloat16* __restrict__ y, int d,
+                                                                 const float* __restrict__ up, const float* __restrict__ down,
+                                                                 int n, void* __restrict__ out, int out_f32, int row_mul,
+                                                                 int row_add) {
+    __shared__ float act[64];
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    const __nv_bfloat16* yr = y + static_cast<size_t>(blockIdx.x) * d;
+    for (int j = warp; j < n; j += 8) {
+        const float* uj = up + static_cast<size_t>(j) * d;
+        float s = 0.f;
+        for (int i = lane; i < d; i += 32) s += uj[i] * __bfloat162float(yr[i]);
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
+        if (lane == 0) {
+            const float z = fmaxf(s, 0.f);
+            act[j] = z * z;
+        }
+    }
+    __syncthreads();
+    const size_t row = static_cast<size_t>(blockIdx.x) * row_mul + row_add;
+    for (int k = threadIdx.x; k < d; k += 256) {
+        float s = 0.f;
+        for (int j = 0; j < n; ++j) s += act[j] * down[static_cast<size_t>(j) * d + k];
+        if (out_f32) {
+            static_cast<float*>(out)[row * d + k] += s;
+        } else {
+            __nv_bfloat16* o = static_cast<__nv_bfloat16*>(out) + row * d + k;
+            *o = __float2bfloat16(__bfloat162float(*o) + s);
+        }
+    }
+}
+
+// A target step's nudge: y (bf16, or fp32 when y_f32) += x (fp32), n values, into a row of a layer's output.
+extern "C" __global__ void tf_add_row(void* __restrict__ y, int y_f32, const float* __restrict__ x, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    if (y_f32) {
+        static_cast<float*>(y)[i] += x[i];
+    } else {
+        __nv_bfloat16* p = static_cast<__nv_bfloat16*>(y) + i;
+        *p = __float2bfloat16(__bfloat162float(*p) + x[i]);
+    }
+}
