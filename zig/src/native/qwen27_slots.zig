@@ -37,7 +37,7 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
     const from = at;
     while (at < ids.len) {
         if (s.isCancelled()) return error.Cancelled;
-        if (s.yields()) { // real work waits: the cache keeps what this background pass prefilled (the serial host's rule)
+        if (s.yields()) { // real work waits: the cache keeps what this background pass prefilled
             if (at > from) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(at));
             return error.Yielded;
         }

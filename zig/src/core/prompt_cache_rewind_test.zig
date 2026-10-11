@@ -109,7 +109,7 @@ test "a state kept past the pass's marks evicts the rewind last instead of faili
     const p = try s.beginRewind(arena.allocator(), &turn, 8, 4, &.{}, &.{}, null, &.{});
     try std.testing.expectEqualSlices(u32, &.{ 3, 8 }, p.marks);
     _ = f.pass(&s, &turn, p);
-    const replied = turn ++ [_]u32{ 11, 12, 13, 14 }; // a reply's state, as the serial host keeps it after decode
+    const replied = turn ++ [_]u32{ 11, 12, 13, 14 }; // a reply's state, as the 27B's host keeps it after decode
     f.at = 13;
     try std.testing.expect(s.keep(&replied, 13, null, &.{}, &.{}));
     try std.testing.expect(s.held <= s.budget);
