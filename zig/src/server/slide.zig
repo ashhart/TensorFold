@@ -9,6 +9,7 @@ const errors = @import("errors.zig");
 const teach = @import("slide_lesson.zig");
 const wording = @import("slide_words.zig");
 const check = @import("slide_verify.zig");
+const replace = @import("slide_replace.zig");
 const log = @import("log.zig");
 const Gone = @import("openai.zig").Gone;
 const Server = @import("server.zig").Server;
@@ -105,6 +106,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         const written = now(srv);
         // a chat fact not about the user ("The Quillon bridge is 1,312 metres long.") learns as a document's does
         const document = !std.mem.eql(u8, source, "chat") or !wording.firstPerson(fact);
+        if (!document) giveWay(srv, a, &cx, fact, id, gone);
         const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, document, facts, gone) catch |e| {
             missed(srv, &out, id, words(&cx, e));
             continue;
@@ -228,6 +230,23 @@ fn saveAll(srv: *Server, a: Allocator) void {
     };
     if (failed) |why| log.line("slide: the learned neurons could not be saved into the model's files: {s}", .{why});
     srv.slide.saveEnded(folder(srv), seconds(srv, began), failed);
+}
+
+/// Earlier chat facts `fact` replaces ("I like blue." for "Now I like red."): their neurons zeroed, marked replaced.
+fn giveWay(srv: *Server, a: Allocator, cx: *errors.Cx, fact: []const u8, id: u32, gone: Gone) void {
+    const olds = replace.replaced(srv, cx, fact, id, gone) catch return;
+    if (olds.len == 0) return;
+    var neurons: std.ArrayList(api.Neuron) = .empty;
+    for (olds) |o| neurons.appendSlice(a, o.neurons) catch return;
+    switch (run(srv, a, &.{ .retire = neurons.items }, 0)) {
+        .failed, .refused => return,
+        else => {},
+    }
+    for (olds) |o| {
+        srv.slide.note(o.id, std.fmt.allocPrint(a, "replaced by fact {d}", .{id}) catch "replaced");
+        srv.slide.mark(o.id, .replaced);
+    }
+    srv.teacher.forgetBank(srv.io);
 }
 
 /// A fact the lesson could not learn, and why.

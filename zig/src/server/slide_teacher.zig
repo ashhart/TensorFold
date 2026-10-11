@@ -49,6 +49,13 @@ pub const Teacher = struct {
         try t.told.append(a, .{ .subject = try a.dupe(u8, subject), .question = try a.dupe(u8, question), .answer = try a.dupe(u8, answer) });
     }
 
+    /// The personal bank written again at the next lesson: the taught model's answers changed (a fact gave way).
+    pub fn forgetBank(t: *Teacher, io: std.Io) void {
+        t.mutex.lockUncancelable(io);
+        defer t.mutex.unlock(io);
+        t.bank = null;
+    }
+
     pub fn deinit(t: *Teacher) void {
         t.arena.deinit();
     }

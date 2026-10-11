@@ -270,6 +270,7 @@ pub const LearnRequest = struct {
     reroute: bool = false, // the last lesson's router fitted again with `unasked` among what it must not take
     drop: bool = false, // the last lesson taken out whole
     save: bool = false, // every kept lesson written beside the model's shards, each with its router
+    retire: []const Neuron = &.{}, // instead zero these neurons of facts a newer fact replaces
 };
 
 /// A neuron a pocket lesson placed (Sliding Weights): its layer, its index in that layer's pocket, the row it keys on.

@@ -40,7 +40,7 @@ const replay_cap = 256; // earlier lessons' answers a new lesson leaves as they 
 const replay_each = 8; // of a lesson's answers, its first (plain questions) join the replay, so every fact keeps some
 
 /// A lesson builds (build) and learns (steps); an edit is written at its subject (edit), more rounds report (again).
-const Phase = enum { idle, build, steps, undo, reroute, drop, save, edit, again, probe, pocket };
+const Phase = enum { idle, build, steps, undo, reroute, drop, save, edit, again, probe, pocket, retire };
 
 /// The lessons over host H: its Trainer, max_rows, Ctx, layers, trainer, free, attach, write and seconds.
 pub fn Learner(comptime H: type) type {
@@ -141,21 +141,16 @@ pub fn Learner(comptime H: type) type {
                 l.phase = .reroute;
                 return;
             }
+            if (lesson.retire.len > 0) {
+                try l.ready();
+                l.phase = .retire;
+                return;
+            }
             if (lesson.train.len == 0) return;
             for ([_][]const Example{ lesson.train, lesson.think, lesson.held, lesson.near, lesson.keep, lesson.asked, lesson.unasked, lesson.kept }) |xs| for (xs) |ex| {
                 if (ex.start < 1 or ex.start >= ex.ids.len or ex.ids.len - 1 > H.max_rows or ex.decide + 1 >= ex.ids.len) return error.ExampleTooLong;
             };
-            if (l.trainer == null) {
-                const t0 = H.seconds(l.io);
-                l.choice = try choice.Choice.init(l.gpa, H.layers(l.b));
-                l.trainer = try H.trainer(l.gpa, l.io, l.b);
-                std.log.info("slide: the trainer is ready in {d:.1} s", .{H.seconds(l.io) - t0});
-                l.trainer.?.sites.whole = l.whole;
-                for (&l.asks) |*side| {
-                    side.* = try l.gpa.alloc(std.ArrayList(f32), H.layers(l.b));
-                    for (side.*) |*rows| rows.* = .empty;
-                }
-            }
+            try l.ready();
             if (lesson.more) {
                 if (l.whole) return if (has_whole) whole_lessons.more(l) else error.EditsUnsupported;
                 if (!l.opened) return error.NothingToContinue;
@@ -181,6 +176,20 @@ pub fn Learner(comptime H: type) type {
             for (lesson.near) |ex| try l.routes(ex, .near);
             for (lesson.unasked) |ex| try l.routes(ex, .swap);
             for ([_][]const Example{ lesson.keep, l.replay.items }) |xs| for (xs) |ex| try l.routes(ex, .other);
+        }
+
+        /// The trainer, made the first time a lesson needs it.
+        fn ready(l: *Self) !void {
+            if (l.trainer != null) return;
+            const t0 = H.seconds(l.io);
+            l.choice = try choice.Choice.init(l.gpa, H.layers(l.b));
+            l.trainer = try H.trainer(l.gpa, l.io, l.b);
+            std.log.info("slide: the trainer is ready in {d:.1} s", .{H.seconds(l.io) - t0});
+            l.trainer.?.sites.whole = l.whole;
+            for (&l.asks) |*side| {
+                side.* = try l.gpa.alloc(std.ArrayList(f32), H.layers(l.b));
+                for (side.*) |*rows| rows.* = .empty;
+            }
         }
 
         /// A round's steps from the open block as it is now, which an undo comes back to.
@@ -231,6 +240,11 @@ pub fn Learner(comptime H: type) type {
                     return .{ .done = true, .changed = true };
                 },
                 .save => return l.saveOnce(),
+                .retire => {
+                    l.phase = .idle;
+                    if (has_whole and l.whole and try whole_lessons.retire(l, l.lesson.retire)) return .{ .done = true, .changed = true };
+                    return .{ .done = true };
+                },
                 .edit => return if (has_edits) whole_lessons.editOnce(l) else unreachable,
                 .probe => return if (has_edits) whole_lessons.probeOnce(l) else unreachable,
                 .pocket => return if (has_pocket) whole_lessons.pocketOnce(l) else unreachable,

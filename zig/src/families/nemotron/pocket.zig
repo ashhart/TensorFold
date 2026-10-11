@@ -175,18 +175,36 @@ pub fn Pocket(comptime T: type) type {
             return which[(slot * neurons + n) * d ..][0..d];
         }
 
+        /// The pocket's neurons as the shards hold them, read once: every MoE layer but the last.
+        fn load(p: *Self, t: *T, host: anytype) !void {
+            if (p.moe.items.len > 0) return;
+            const c = t.config();
+            // every MoE layer but the last (a nudge after it has no gradient to read), its neurons as loaded
+            for (0..c.layers - 1) |l| if (c.kinds[l] == .moe) try p.moe.append(p.gpa, l);
+            const n = neurons * c.hidden;
+            try p.up.appendNTimes(p.gpa, 0, p.slots() * n);
+            try p.down.appendNTimes(p.gpa, 0, p.slots() * n);
+            try p.used.appendNTimes(p.gpa, 0, p.slots());
+            for (p.moe.items, 0..) |l, j| p.used.items[j] = host.pocketRead(l, p.up.items[j * n ..][0..n], p.down.items[j * n ..][0..n]);
+        }
+
+        /// A replaced fact's neurons, (layer, neuron) each, zeroed where they sit; their places stay taken.
+        pub fn retire(p: *Self, t: *T, host: anytype, gone: []const [2]u16) !void {
+            try p.load(t, host);
+            const d = t.config().hidden;
+            for (gone) |g| {
+                const slot = std.mem.indexOfScalar(usize, p.moe.items, g[0]) orelse continue;
+                if (g[1] >= p.used.items[slot]) continue;
+                @memset(p.neuron(p.up.items, slot, g[1], d), 0);
+                @memset(p.neuron(p.down.items, slot, g[1], d), 0);
+                try p.upload(t, host, slot);
+            }
+            std.log.info("slide pocket: {d} neurons of replaced facts zeroed", .{gone.len});
+        }
+
         /// A fact's lesson begun: its answers, more wordings, held-out answers and prompts its neurons stay silent on.
         pub fn begin(p: *Self, t: *T, host: anytype, answered: []const Example, prompts: []const Example, held: []const Example, steady: []const []const Example) !void {
-            const c = t.config();
-            if (p.moe.items.len == 0) {
-                // every MoE layer but the last (a nudge after it has no gradient to read), its neurons as loaded
-                for (0..c.layers - 1) |l| if (c.kinds[l] == .moe) try p.moe.append(p.gpa, l);
-                const n = neurons * c.hidden;
-                try p.up.appendNTimes(p.gpa, 0, p.slots() * n);
-                try p.down.appendNTimes(p.gpa, 0, p.slots() * n);
-                try p.used.appendNTimes(p.gpa, 0, p.slots());
-                for (p.moe.items, 0..) |l, j| p.used.items[j] = host.pocketRead(l, p.up.items[j * n ..][0..n], p.down.items[j * n ..][0..n]);
-            }
+            try p.load(t, host);
             p.answered = answered;
             p.prompts = prompts;
             p.held = held;
