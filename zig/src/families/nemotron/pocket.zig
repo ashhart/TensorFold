@@ -4,6 +4,7 @@ const examples = @import("lesson_examples.zig");
 const lesson_route = @import("lesson_route.zig");
 const pocket_fit = @import("pocket_fit.zig");
 const values = @import("pocket_values.zig");
+const joint = @import("pocket_joint.zig");
 const pocket_dump = @import("pocket_dump.zig");
 const clock = @import("pocket_clock.zig");
 const reading = @import("pocket_read.zig");
@@ -96,6 +97,11 @@ pub fn Pocket(comptime T: type) type {
         valuing: bool = false, // some neurons before the answer's value (TF_SLIDE_POCKET_VALUES=on); no published method has them
         silencing: bool = false, // other prompts naming the subject as its questions do stay silent too (TF_SLIDE_POCKET_SAME=silent)
         worst: bool = false, // half a step's answers to stay are those that read worst (TF_SLIDE_POCKET_REPLAY=worst)
+        joining: bool = false, // earlier facts on its subject fitted with the open fact (TF_SLIDE_POCKET_GROUP=joint)
+        joint: std.ArrayList(Taken) = .empty, // those facts' neurons, their outputs fitted with the open fact's
+        joint_down: std.ArrayList(f32) = .empty, // [joint, D]: their outputs before, put back by an undo
+        joint_answers: std.ArrayList(Example) = .empty, // their replayed answers, fitted on as the open fact's own are
+        replay_lessons: []const u32 = &.{}, // the lesson each answer of steady[2] (the replay) came from
         split: [3]usize = .{ per_fact, 0, 0 }, // the open fact's neurons on each key
         subjects: std.ArrayList(u32) = .empty, // the open fact's subject tokens
         leads: std.ArrayList(u32) = .empty, // the tokens before them: after another, the subject is someone else's
@@ -131,11 +137,11 @@ pub fn Pocket(comptime T: type) type {
 
         pub fn init(gpa: std.mem.Allocator) Self {
             const asked: Mode = if (std.c.getenv("TF_SLIDE_POCKET_KEY")) |v| std.meta.stringToEnum(Mode, std.mem.span(v)) orelse .auto else .auto;
-            return .{ .gpa = gpa, .mode = asked, .strict = !set("TF_SLIDE_POCKET_LEADS", "off"), .keeping = !set("TF_SLIDE_POCKET_KEEPS", "off"), .valuing = set("TF_SLIDE_POCKET_VALUES", "on"), .silencing = set("TF_SLIDE_POCKET_SAME", "silent"), .worst = set("TF_SLIDE_POCKET_REPLAY", "worst") };
+            return .{ .gpa = gpa, .mode = asked, .strict = !set("TF_SLIDE_POCKET_LEADS", "off"), .keeping = !set("TF_SLIDE_POCKET_KEEPS", "off"), .valuing = set("TF_SLIDE_POCKET_VALUES", "on"), .silencing = set("TF_SLIDE_POCKET_SAME", "silent"), .worst = set("TF_SLIDE_POCKET_REPLAY", "worst"), .joining = set("TF_SLIDE_POCKET_GROUP", "joint") };
         }
 
         pub fn deinit(p: *Self) void {
-            inline for (.{ "moe", "up", "down", "used", "taken", "rows", "labels", "keeps", "refits", "refit_up", "retired_lessons", "retired", "retired_w", "learned", "pos", "subjects", "leads" }) |f| @field(p, f).deinit(p.gpa);
+            inline for (.{ "moe", "up", "down", "used", "taken", "rows", "labels", "keeps", "refits", "refit_up", "retired_lessons", "retired", "retired_w", "joint", "joint_down", "joint_answers", "learned", "pos", "subjects", "leads" }) |f| @field(p, f).deinit(p.gpa);
             p.read.deinit(p.gpa);
             p.v.deinit(p.gpa);
         }
@@ -251,6 +257,8 @@ pub fn Pocket(comptime T: type) type {
             // the last fact's refits stay with it: kept with it, or already put back by its undo
             p.refits.clearRetainingCapacity();
             p.refit_up.clearRetainingCapacity();
+            p.joint.clearRetainingCapacity();
+            p.joint_down.clearRetainingCapacity();
             p.learned_before = p.learned.items.len;
             p.pos_before = p.pos.items.len;
             p.clock = .{};
@@ -312,6 +320,7 @@ pub fn Pocket(comptime T: type) type {
             }
             p.refits.clearRetainingCapacity();
             p.refit_up.clearRetainingCapacity();
+            try joint.putBack(p, t, host, d);
             p.taken.clearRetainingCapacity();
         }
 
@@ -386,7 +395,9 @@ pub fn Pocket(comptime T: type) type {
             try p.findKeeps(d);
             try p.quiet(t, host);
             std.log.info("slide pocket: {d} candidate neurons fitted on {d} read rows in {d:.1} s; earlier neurons checked in {d:.1} s", .{ fitted, m, t1 - t0, clock.now(host.io) - t1 });
-            try p.v.begin(p.gpa, p.taken.items.len, d, p.answered.len + p.keeps.items.len);
+            try joint.find(p, d);
+            try p.v.begin(p.gpa, p.taken.items.len + p.joint.items.len, d, p.answered.len + p.joint_answers.items.len + p.keeps.items.len);
+            joint.seed(p, d);
             p.next(.values);
             return false;
         }

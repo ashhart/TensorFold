@@ -66,6 +66,7 @@ pub fn Learner(comptime H: type) type {
         replay: std.ArrayList(Example) = .empty, // earlier lessons' questions, owned
         replay_of: std.ArrayList(u32) = .empty, // [replay]: the lesson each came from
         live: std.ArrayList(Example) = .empty, // replay but the lessons of facts a newer one replaced (borrowed)
+        live_of: std.ArrayList(u32) = .empty, // [live]: the lesson each came from
         last: []Example = &.{}, // the last lesson's questions, owned, joining replay when the next lesson begins
         last_lesson: u32 = 0, // the last lesson's number, which its neurons record
         lessons: u32 = 0, // lessons begun so far
@@ -123,13 +124,18 @@ pub fn Learner(comptime H: type) type {
             l.replay.deinit(l.gpa);
             l.replay_of.deinit(l.gpa);
             l.live.deinit(l.gpa);
+            l.live_of.deinit(l.gpa);
         }
 
         /// The earlier lessons' questions a new lesson stays silent on, but those of facts a newer one replaced.
         pub fn liveReplay(l: *Self) ![]const Example {
             l.live.clearRetainingCapacity();
+            l.live_of.clearRetainingCapacity();
             const gone: []const u32 = if (has_pocket) l.pockets.retired_lessons.items else &.{};
-            for (l.replay.items, l.replay_of.items) |ex, of| if (std.mem.indexOfScalar(u32, gone, of) == null) try l.live.append(l.gpa, ex);
+            for (l.replay.items, l.replay_of.items) |ex, of| if (std.mem.indexOfScalar(u32, gone, of) == null) {
+                try l.live.append(l.gpa, ex);
+                try l.live_of.append(l.gpa, of);
+            };
             return l.live.items;
         }
 
