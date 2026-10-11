@@ -1,5 +1,6 @@
 //! Qwen3.8-27B on the lane host: a stream a runner slot in shared rounds, DFlash2 drafts for slot 0's stream.
 const std = @import("std");
+const builtin = @import("builtin");
 const mtl = @import("metal");
 const api = @import("engine_api");
 const tf = @import("tensorfold");
@@ -50,11 +51,7 @@ pub const Host = struct {
     /// A slot's first use: whether its memory fits beside everything taken and the margin, kept states freed first.
     fn roomFor(ptr: *anyopaque, bytes: usize, s: *const lanes.Stream) bool {
         const h = of(ptr);
-        const store = if (h.cache) |*c| c else return room(h.model) >= bytes;
-        const held = store.held;
-        const ok = store.giveBack(s.reuse.saved, s.prompt(), Left{ .room = room(h.model), .store = store, .held = held, .bytes = bytes });
-        if (store.held < held) std.log.info("Qwen3.8-27B: kept prompt states gave {d:.1} GiB back for a stream's slot{s}", .{ cache_fit.gibs(held - store.held), if (ok) "" else ", not enough yet" });
-        return ok;
+        return takeRoom(if (h.cache) |*c| c else null, room(h.model), bytes, s.reuse.saved, s.prompt());
     }
 
     /// A new slot's buffers join the residency set, so the keepalive holds them wired with the rest.
@@ -115,6 +112,16 @@ fn room(model: *const q.model.Model) usize {
     return dev.maxWorkingSet() -| dev.allocated() -| (8 << 30);
 }
 
+/// Whether a new slot's `bytes` fit in `free`, once kept prompt states (never the one `restoring`) give theirs back.
+fn takeRoom(cache: ?*pc.Store, free: usize, bytes: usize, restoring: ?pc.Saved, prompt: []const u32) bool {
+    const held = if (cache) |c| c.held else 0;
+    const ok = if (cache) |c| c.giveBack(restoring, prompt, Left{ .room = free, .store = c, .held = held, .bytes = bytes }) else free >= bytes;
+    const freed = held - (if (cache) |c| c.held else 0);
+    if (!builtin.is_test and freed > 0) std.log.info("Qwen3.8-27B: kept prompt states gave {d:.1} GiB back for a stream's slot", .{cache_fit.gibs(freed)});
+    if (!builtin.is_test and !ok) std.log.info("Qwen3.8-27B: a slot needs {d:.1} GiB and {d:.1} GiB is free beside the weights and an 8 GiB margin: the request waits for a stream to end", .{ cache_fit.gibs(bytes), cache_fit.gibs(free + freed) });
+    return ok;
+}
+
 /// A new slot's bytes against the room it found, plus the kept states' bytes freed since (their buffers' own sizes).
 const Left = struct {
     room: usize,
@@ -149,6 +156,46 @@ test fit {
     try std.testing.expectError(error.TooManyStreams, fit(7 * g, 2 * g, 8, true)); // a fixed --parallel refuses
     try std.testing.expectEqual(@as(u32, 3), try fit(7 * g, 2 * g, 3, true));
     try std.testing.expectEqual(@as(u32, 1), try fit(g, 2 * g, 8, false)); // one stream at least
+}
+
+/// Kept states of a fake family whose bytes grow as the 27B's K/V rows (64 KiB a token); `saved` is never read.
+const FakeStates = struct {
+    live: usize = 0,
+    fn bytes(_: *anyopaque, at: u32) u64 {
+        return @as(u64, at) << 16;
+    }
+    fn save(ptr: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
+        const f: *FakeStates = @ptrCast(@alignCast(ptr));
+        f.live += 1;
+        return @ptrFromInt(@as(usize, at) << 4);
+    }
+    fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {}
+    fn drop(ptr: *anyopaque, _: pc.Saved) void {
+        const f: *FakeStates = @ptrCast(@alignCast(ptr));
+        f.live -= 1;
+    }
+};
+
+test "--prompt-cache-gib 40: a later 192k-token slot takes its room back from kept states, never the one it restores" {
+    const gpa = std.testing.allocator;
+    const g: u64 = 1 << 30;
+    var fake: FakeStates = .{};
+    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, .{}, 40 * g);
+    defer store.deinit();
+    const tokens = try gpa.alloc(u32, 200_000);
+    defer gpa.free(tokens);
+    for ([_]u32{ 100_000, 150_000, 190_000 }, 0..) |at, k| { // three conversations' histories: 6.1, 9.2 and 11.6 GiB
+        for (tokens, 0..) |*t, i| t.* = @intCast(k * 1_000_000 + i);
+        try std.testing.expect(store.keep(tokens[0 .. at + 1], at, null, &.{}, &.{}));
+    }
+    const restoring = store.entries.items[2].saved; // the newest conversation's next turn resumes its state
+    const slot: u64 = 12_900_000_000; // a --context 196608 slot's K/V rows, taps ring and scratch
+    try std.testing.expect(!takeRoom(null, 4 * g, slot, null, tokens)); // without a cache to give back: LaneMemory
+    try std.testing.expect(takeRoom(&store, 4 * g, slot, restoring, tokens)); // 4 GiB free + 6.1 + 9.2 freed
+    try std.testing.expectEqual(@as(usize, 1), store.entries.items.len);
+    try std.testing.expect(store.entries.items[0].saved == restoring);
+    try std.testing.expect(!takeRoom(&store, 0, 2 * slot, restoring, tokens)); // its own state never goes
+    try std.testing.expectEqual(@as(usize, 1), fake.live);
 }
 
 /// Memory the slots past the ready ones take on first use: their K/V rows and taps rings.
