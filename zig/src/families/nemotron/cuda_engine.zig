@@ -389,7 +389,7 @@ pub const Engine = struct {
     }
 
     /// Any block's change, for the buffers every block shares (null: no lesson is attached).
-    fn lessons(e: *const Engine) ?weights.Adapter {
+    pub fn lessons(e: *const Engine) ?weights.Adapter {
         for (e.w.blocks) |blk| switch (blk.kind) {
             .mamba => if (blk.mamba.adapter) |ad| return ad,
             .attention => if (blk.attn.adapter) |ad| return ad,

@@ -188,7 +188,8 @@ pub const Cuda = struct {
         } };
         if (own) self.own_free = false;
         e.bind(gop.value_ptr.seq);
-        e.decide = if (s.decide) |d| d else lesson_route.none;
+        // a decision row only where lessons route on it: else the prompt's chunks stay as plain serving cuts them
+        e.decide = if (s.decide != null and e.lessons() != null) s.decide.? else lesson_route.none;
         try e.setSampling(s.sampling);
         s.cached = 0;
         const from = self.restoreKept(s, ids.len);

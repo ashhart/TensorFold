@@ -254,7 +254,8 @@ pub const Metal = struct {
         const c = try self.gpa.create(st.Cache);
         c.* = try st.Cache.init(self.m.device, self.m.config, rows_needed, self.head != null);
         c.rid = try self.pool.takeRid();
-        c.decide = if (s.decide) |d| d else lesson_route.none;
+        // a decision row only where lessons route on it: else the prompt's chunks stay as plain serving cuts them
+        c.decide = if (s.decide != null and layers.firstAdapter(&self.m.weights) != null) s.decide.? else lesson_route.none;
         try self.caches.put(self.gpa, s, c);
         @memcpy(self.prompt.slice(u32, ids.len), ids);
         const Chunks = struct {
