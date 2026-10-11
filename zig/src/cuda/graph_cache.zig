@@ -35,6 +35,39 @@ pub const Settings = struct {
 
 pub const Outcome = enum { replayed, captured, eager };
 
+/// Eager steps under the floor between two "still under" lines.
+pub const report_every = 256;
+
+/// One cache's counts as other threads read them (/health); `snapshots` copies the caches in use.
+pub const Snapshot = struct { name: []const u8 = "", held: u32 = 0, captured: u64 = 0, replayed: u64 = 0, eager: u64 = 0, floor_hits: u64 = 0, under: bool = false };
+
+/// Static slots, so a reader never meets a freed cache: a cache claims one at its first step, frees it at deinit.
+const Slot = struct {
+    /// claimed by a cache; `used` once its name is set (what readers check)
+    taken: std.atomic.Value(bool) = .init(false),
+    used: std.atomic.Value(bool) = .init(false),
+    name: []const u8 = "",
+    held: std.atomic.Value(u32) = .init(0),
+    captured: std.atomic.Value(u64) = .init(0),
+    replayed: std.atomic.Value(u64) = .init(0),
+    eager: std.atomic.Value(u64) = .init(0),
+    floor_hits: std.atomic.Value(u64) = .init(0),
+    under: std.atomic.Value(bool) = .init(false),
+};
+var published: [8]Slot = @splat(.{});
+
+/// The caches in use, at most `out.len`; returns how many it filled.
+pub fn snapshots(out: []Snapshot) usize {
+    var n: usize = 0;
+    for (&published) |*s| {
+        if (n == out.len) break;
+        if (!s.used.load(.acquire)) continue;
+        out[n] = .{ .name = s.name, .held = s.held.load(.monotonic), .captured = s.captured.load(.monotonic), .replayed = s.replayed.load(.monotonic), .eager = s.eager.load(.monotonic), .floor_hits = s.floor_hits.load(.monotonic), .under = s.under.load(.monotonic) };
+        n += 1;
+    }
+    return n;
+}
+
 pub fn Cache(comptime Key: type) type {
     return struct {
         const Self = @This();
@@ -45,12 +78,18 @@ pub fn Cache(comptime Key: type) type {
         settings: Settings,
         agree: ?Agree = null,
         room: ?*const fn () bool = null, // false when this rank is below its memory floor; null: always room
+        meter: ?*const fn () ?f64 = null, // MemAvailable now in GiB, to log a capture's cost; null: not measured
+        name: []const u8 = "graphs", // the cache's name in its log lines and snapshot
         entries: std.AutoArrayHashMapUnmanaged(Key, Entry) = .empty,
         cap: u32,
         tick: u64 = 0,
         fingerprint: ?u64 = null,
         failed: bool = false, // a capture failed on some rank: eager from here on
-        stats: struct { replayed: u64 = 0, captured: u64 = 0, eager: u64 = 0, evicted: u64 = 0, dropped: u64 = 0, floor_hits: u64 = 0 } = .{},
+        under: bool = false, // the last miss met no room on some rank
+        under_eager: u64 = 0, // eager steps since `under` began
+        slot: ?*Slot = null, // this cache's slot in `published`, claimed at its first step; null: every slot taken
+        claimed: bool = false,
+        stats: struct { replayed: u64 = 0, captured: u64 = 0, eager: u64 = 0, evicted: u64 = 0, dropped: u64 = 0, floor_hits: u64 = 0, capture_mib: f64 = 0 } = .{},
 
         pub fn init(gpa: std.mem.Allocator, engine: Engine, settings: Settings) Self {
             var s = settings;
@@ -59,6 +98,10 @@ pub fn Cache(comptime Key: type) type {
         }
 
         pub fn deinit(c: *Self) void {
+            if (c.slot) |s| {
+                s.used.store(false, .release);
+                s.taken.store(false, .release);
+            }
             c.dropAll();
             c.entries.deinit(c.gpa);
         }
@@ -94,6 +137,43 @@ pub fn Cache(comptime Key: type) type {
             c.stats.evicted += 1;
         }
 
+        fn publish(c: *Self) void {
+            if (!c.claimed) {
+                c.claimed = true;
+                for (&published) |*x| if (x.taken.cmpxchgStrong(false, true, .acq_rel, .monotonic) == null) {
+                    x.name = c.name;
+                    c.slot = x;
+                    break;
+                };
+            }
+            const s = c.slot orelse return;
+            s.held.store(@intCast(c.entries.count()), .monotonic);
+            s.captured.store(c.stats.captured, .monotonic);
+            s.replayed.store(c.stats.replayed, .monotonic);
+            s.eager.store(c.stats.eager, .monotonic);
+            s.floor_hits.store(c.stats.floor_hits, .monotonic);
+            s.under.store(c.under, .monotonic);
+            // readers see the slot once its name and counts are this cache's
+            s.used.store(true, .release);
+        }
+
+        fn avail(c: *const Self) ?f64 {
+            return if (c.meter) |m| m() else null;
+        }
+
+        /// A miss without room on some rank: the floor entered (logged), or a "still under" line every `report_every`.
+        fn underFloor(c: *Self, room_here: bool) void {
+            c.stats.floor_hits += 1;
+            c.under_eager += 1;
+            if (!c.under) {
+                c.under = true;
+                c.under_eager = 1;
+                if (!quiet) std.log.warn("graph cache {s}: under the memory floor on {s} rank (MemAvailable {?d:.2} GiB here): new keys eager, {d} graphs held", .{ c.name, if (room_here) "another" else "this", c.avail(), c.entries.count() });
+            } else if (c.under_eager % report_every == 0) {
+                if (!quiet) std.log.warn("graph cache {s}: still under the memory floor: {d} eager steps since it began (MemAvailable {?d:.2} GiB here, {d} graphs held)", .{ c.name, c.under_eager, c.avail(), c.entries.count() });
+            }
+        }
+
         fn eager(c: *Self, stream: Stream, body: Body) !Outcome {
             try body.run(body.ctx, stream);
             c.stats.eager += 1;
@@ -102,6 +182,7 @@ pub fn Cache(comptime Key: type) type {
 
         /// One step: the key's graph, captured first on a miss; a new `fingerprint` (same step on all ranks) drops all.
         pub fn run(c: *Self, key: Key, stream: Stream, fingerprint: u64, body: Body) !Outcome {
+            defer c.publish();
             if (!c.settings.on or c.failed or c.settings.max == 0) return c.eager(stream, body);
             if (c.fingerprint != null and c.fingerprint.? != fingerprint) c.dropAll();
             c.fingerprint = fingerprint;
@@ -116,26 +197,27 @@ pub fn Cache(comptime Key: type) type {
             const reserved = if (c.entries.ensureUnusedCapacity(c.gpa, 1)) |_| true else |_| false;
             const room_here = reserved and (if (c.room) |f| f() else true);
             if (!try c.agreed(room_here)) {
-                if (c.settings.hold) {
-                    if (!quiet and c.stats.floor_hits == 0) std.log.warn("graph cache: under the memory floor on {s} rank: this key eager, {d} graphs held (hold)", .{ if (room_here) "another" else "this", c.entries.count() });
-                    c.stats.floor_hits += 1;
-                    return c.eager(stream, body);
-                }
+                c.underFloor(room_here);
+                if (c.settings.hold) return c.eager(stream, body);
                 if (c.entries.count() > c.settings.min_keep) {
                     const drop = @max(1, c.entries.count() / 4);
                     for (0..drop) |_| if (c.entries.count() > c.settings.min_keep) c.evictOldest();
                 }
                 const was = c.cap;
                 c.cap = @intCast(@max(c.entries.count(), c.settings.min_keep)); // min_keep <= max (init)
-                c.stats.floor_hits += 1;
                 if (!quiet and c.cap != was) std.log.warn("graph cache: under the memory floor on {s} rank: cap {d} -> {d} ({d} held, {d} evicted, {d} eager so far)", .{ if (room_here) "another" else "this", was, c.cap, c.entries.count(), c.stats.evicted, c.stats.eager + 1 });
                 return c.eager(stream, body);
+            }
+            if (c.under) {
+                if (!quiet) std.log.info("graph cache {s}: room again on every rank (MemAvailable {?d:.2} GiB here) after {d} eager steps under the floor, {d} graphs held", .{ c.name, c.avail(), c.under_eager, c.entries.count() });
+                c.under = false;
             }
             if (c.cap < c.settings.max) {
                 if (!quiet) std.log.info("graph cache: room again on every rank: cap {d} -> {d}", .{ c.cap, c.settings.max });
                 c.cap = c.settings.max;
             }
             while (c.entries.count() >= c.cap) c.evictOldest();
+            const before = c.avail();
             const exec = c.engine.capture(c.engine.ctx, stream, body) catch |err| blk: {
                 // the only trace of why graphs went off (the step then runs eagerly, which may fail the same way)
                 if (!quiet) std.log.warn("graph capture failed: {s} (key {any}, {d} graphs held)", .{ @errorName(err), key, c.entries.count() });
@@ -152,6 +234,11 @@ pub fn Cache(comptime Key: type) type {
             owned = null;
             try c.engine.launch(c.engine.ctx, exec.?, stream);
             c.stats.captured += 1;
+            // what a graph really costs this rank (the room rule prices it)
+            if (before) |b| if (c.avail()) |a| {
+                c.stats.capture_mib = (b - a) * 1024;
+                if (!quiet) std.log.info("graph cache {s}: captured, {d} held: MemAvailable {d:.2} -> {d:.2} GiB ({d:.0} MiB)", .{ c.name, c.entries.count(), b, a, c.stats.capture_mib });
+            };
             return .captured;
         }
     };
@@ -381,6 +468,73 @@ test "graph cache: hold - below the floor a miss runs eagerly, nothing is evicte
     room_flag = true;
     try std.testing.expectEqual(Outcome.captured, try c.run(100, no_stream, 7, r.body()));
     try std.testing.expectEqual(@as(usize, 9), c.count());
+}
+
+test "graph cache: the floor's enter / under / leave state and its counts, as /health reads them" {
+    var f: Fake = .{};
+    var r: Ran = .{};
+    var c = Cache(u32).init(std.testing.allocator, f.engine(), .{ .max = 48, .hold = true });
+    c.room = roomFn;
+    c.name = "test floor";
+    defer c.deinit();
+    room_flag = true;
+    for (0..4) |k| _ = try c.run(@intCast(k), no_stream, 7, r.body());
+    try std.testing.expect(!c.under);
+    room_flag = false;
+    for (0..report_every + 3) |k| _ = try c.run(@intCast(1000 + k), no_stream, 7, r.body());
+    try std.testing.expect(c.under);
+    try std.testing.expectEqual(@as(u64, report_every + 3), c.under_eager);
+    // the held keys replay under the floor and leave the state alone
+    try std.testing.expectEqual(Outcome.replayed, try c.run(2, no_stream, 7, r.body()));
+    try std.testing.expect(c.under);
+    var out: [8]Snapshot = undefined;
+    const mine = for (out[0..snapshots(&out)]) |x| {
+        if (std.mem.eql(u8, x.name, "test floor")) break x;
+    } else return error.NotPublished;
+    try std.testing.expectEqual(Snapshot{ .name = "test floor", .held = 4, .captured = 4, .replayed = 1, .eager = report_every + 3, .floor_hits = report_every + 3, .under = true }, mine);
+    // room again: the next miss captures and the floor is left; the counts keep their totals
+    room_flag = true;
+    try std.testing.expectEqual(Outcome.captured, try c.run(2000, no_stream, 7, r.body()));
+    try std.testing.expect(!c.under);
+    try std.testing.expectEqual(@as(u64, report_every + 3), c.stats.floor_hits);
+    // a second dip starts its own count
+    room_flag = false;
+    _ = try c.run(3000, no_stream, 7, r.body());
+    try std.testing.expectEqual(@as(u64, 1), c.under_eager);
+    room_flag = true;
+}
+
+var meter_gib: f64 = 100;
+var meter_reads: u32 = 0;
+fn meterFn() ?f64 {
+    meter_reads += 1;
+    defer meter_gib -= 0.25; // each read sees a quarter GiB less: a capture's before and after differ by that
+    return meter_gib;
+}
+
+test "graph cache: the meter prices a capture, replays never read it, a freed cache leaves the snapshots" {
+    var f: Fake = .{};
+    var r: Ran = .{};
+    var out: [8]Snapshot = undefined;
+    const others = snapshots(&out);
+    {
+        var c = Cache(u32).init(std.testing.allocator, f.engine(), .{ .max = 4 });
+        defer c.deinit();
+        c.meter = meterFn;
+        c.name = "metered";
+        meter_reads = 0;
+        try std.testing.expectEqual(Outcome.captured, try c.run(1, no_stream, 7, r.body()));
+        try std.testing.expectEqual(@as(f64, 256), c.stats.capture_mib);
+        try std.testing.expectEqual(@as(u32, 2), meter_reads);
+        try std.testing.expectEqual(Outcome.replayed, try c.run(1, no_stream, 7, r.body()));
+        try std.testing.expectEqual(@as(u32, 2), meter_reads);
+        try std.testing.expectEqual(others + 1, snapshots(&out));
+        const mine = for (out[0 .. others + 1]) |x| {
+            if (std.mem.eql(u8, x.name, "metered")) break x;
+        } else return error.NotPublished;
+        try std.testing.expectEqual(@as(u64, 1), mine.replayed);
+    }
+    try std.testing.expectEqual(others, snapshots(&out));
 }
 
 test "graph cache: off runs every step eagerly" {
