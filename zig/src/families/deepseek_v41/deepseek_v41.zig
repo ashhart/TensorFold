@@ -11,6 +11,7 @@ pub const Plan = plan.Plan;
 pub const stage = @import("stage.zig");
 pub const named = @import("named.zig");
 pub const prepare = @import("prepare.zig");
+pub const engram_host = @import("engram_host.zig");
 
 test {
     _ = config;
@@ -21,6 +22,7 @@ test {
     _ = stage;
     _ = named;
     _ = prepare;
+    _ = engram_host;
     _ = @import("host_test.zig");
     _ = @import("phases.zig"); // the phase timers
     // prepared weight folders (TF_DSV41_PREPARED)
