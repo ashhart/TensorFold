@@ -118,7 +118,7 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
     var ex = try example(srv, cx, a, null, q, answer, if (finished) end else &.{});
     ex.subject = try subjectRow(srv, cx, ex, word);
     ex.value = try valueRow(srv, cx, ex, short);
-    var think = if (thinking) try slide_think.thinkingAnswer(srv, cx, a, fact, q, note, short, ex.ids[ex.start..], end, document, gone) else null;
+    var think = if (thinking) try slide_think.thinkingAnswer(srv, cx, a, fact, q, ex.ids[ex.start..], document) else null;
     if (think) |*t| {
         t.subject = try subjectRow(srv, cx, t.*, word);
         t.value = try valueRow(srv, cx, t.*, short);
@@ -132,16 +132,33 @@ pub fn shortAnswer(srv: *Server, cx: *Cx, note: []const u8, question: []const u8
     return std.mem.trim(u8, reply.content, " \t\r\n\"*.");
 }
 
-/// Whether a fact told with `fact` answers `question`, as the model judges it (one call for those sharing a word).
+/// Whether a fact told with `fact` answers `question` rather than it, as the model picks among those sharing a word.
 pub fn siblingAnswers(srv: *Server, cx: *Cx, siblings: []const []const u8, fact: []const u8, question: []const u8, gone: anytype) !bool {
     const a = cx.a;
     var list: std.ArrayList(u8) = .empty;
-    for (siblings) |s| if (!try restates(a, s, fact) and wording.shares(s, question)) try list.print(a, "- {s}\n", .{s});
-    if (list.items.len == 0) return false;
+    var own: usize = 0; // the fact's own number in the list
+    var n: usize = 0;
+    for (siblings) |s| {
+        const mine = std.mem.eql(u8, s, fact);
+        if (!mine and (try restates(a, s, fact) or !wording.shares(s, question))) continue;
+        n += 1;
+        if (mine) own = n;
+        try list.print(a, "{d}. {s}\n", .{ n, s });
+    }
+    if (n == @intFromBool(own > 0)) return false;
+    if (own == 0) {
+        n += 1;
+        own = n;
+        try list.print(a, "{d}. {s}\n", .{ n, fact });
+    }
     const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.siblings_prompt, .{ list.items, question }), 4, gone);
-    const yes = std.ascii.startsWithIgnoreCase(std.mem.trim(u8, reply.content, " \t\r\n\"*"), "yes");
-    if (yes) log.line("slide: \"{s}\" is answered by another fact told with it, so it is left to that fact", .{question});
-    return yes;
+    const said = std.mem.trim(u8, reply.content, " \t\r\n\"*.");
+    var digits: usize = 0;
+    while (digits < said.len and std.ascii.isDigit(said[digits])) digits += 1;
+    const picked = std.fmt.parseInt(usize, said[0..digits], 10) catch return false;
+    const theirs = picked != 0 and picked != own and picked <= n;
+    if (theirs) log.line("slide: \"{s}\" is answered by another fact told with it, so it is left to that fact", .{question});
+    return theirs;
 }
 
 /// Whether `a` and `b` say the same words of four letters or more ("X was founded by Y", "Y founded X"): one fact.

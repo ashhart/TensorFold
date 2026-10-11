@@ -310,7 +310,7 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     if (got.entity) {
         const said = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.fact_subject_prompt, .{fact}), 16, gone);
         phrase = std.mem.trim(u8, said.content, " \t\r\n\"'.?*");
-        got.words = try slide_subject.asked(a, try slide_subject.properWords(a, try slide_subject.subjectWords(a, phrase), fact), qs);
+        got.words = try slide_subject.factSubject(a, phrase, fact, qs);
         got.named = try slide_subject.named(a, got.words, fact, qs);
         log.line("slide: its subject is \"{s}\": {s} (a question names it by {s})", .{ phrase, try std.mem.join(a, " ", got.words), try std.mem.join(a, " or ", if (got.named.len > 0) got.named else got.words) });
         if (got.words.len == 0) got.entity = false;

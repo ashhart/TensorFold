@@ -57,15 +57,32 @@ pub fn asked(a: std.mem.Allocator, words: []const []const u8, qs: []const []cons
     return out.toOwnedSlice(a);
 }
 
-/// The subject's proper names: those written with a capital past a sentence's first word, in the fact or its questions.
+/// The subject's proper names: written with a capital past a sentence's first word, or opening the fact.
 pub fn named(a: std.mem.Allocator, words: []const []const u8, fact: []const u8, qs: []const []const u8) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     for (words) |w| {
-        var proper = capitalInside(fact, w);
+        var proper = capitalInside(fact, w) or opens(fact, w);
         for (qs) |q| proper = proper or capitalInside(q, w);
         if (proper) try out.append(a, w);
     }
     return out.toOwnedSlice(a);
+}
+
+/// Whether `text` opens with `word` written with a capital (a subject word, never a pronoun or an article).
+fn opens(text: []const u8, word: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, text, " \t\r\n,.!?;:\"()");
+    const first = possessor(it.next() orelse return false);
+    return std.mem.eql(u8, first, word) and std.ascii.isUpper(first[0]);
+}
+
+/// A fact's subject words: the phrase's its questions say; the fact's proper names join a phrase with none of its own.
+pub fn factSubject(a: std.mem.Allocator, phrase: []const u8, fact: []const u8, qs: []const []const u8) ![]const []const u8 {
+    const own = try subjectWords(a, phrase);
+    const proper = try named(a, own, fact, qs);
+    if (proper.len == 0) return asked(a, try properWords(a, own, fact), qs);
+    const kept = try asked(a, own, qs);
+    for (kept) |w| for (proper) |p| if (std.mem.eql(u8, w, p)) return kept;
+    return proper;
 }
 
 /// The fact's own capitalised words, which join its subject's when its questions say them too ("Quillmoor").
@@ -162,6 +179,20 @@ test "a fact's subject words, and the last of them a question says" {
     const more = try properWords(a, mine, "My sister is called Ana.");
     defer a.free(more);
     try std.testing.expectEqual(@as(usize, 2), more.len);
+}
+
+test "a fact's subject keeps its own proper names; a phrase without any takes the fact's" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const other_way = [_][]const u8{ "Who founded Quillmoor Labs?", "Who started Quillmoor Labs?", "Who is behind Quillmoor Labs?" };
+    const odile = try factSubject(a, "Odile Marchetti", "Odile Marchetti founded Quillmoor Labs.", &other_way);
+    try std.testing.expectEqual(@as(usize, 2), odile.len);
+    try std.testing.expectEqualStrings("Odile", odile[0]);
+    const chat = [_][]const u8{ "What does Quillmoor use for team chat?", "Which app runs the Quillmoor team chat?", "Where is the Quillmoor team chat?" };
+    const words = try factSubject(a, "team chat", "Quillmoor Labs team chat runs on Zulip.", &chat);
+    try std.testing.expectEqualStrings("Quillmoor", keyWord(words, try named(a, words, "Quillmoor Labs team chat runs on Zulip.", &chat), chat[0]));
+    for (words) |w| try std.testing.expect(!std.mem.eql(u8, w, "Zulip"));
 }
 
 const unkeyed = [_][]const u8{ "i", "me", "my", "mine", "myself", "we", "us", "our", "ours", "you", "your", "yours", "it", "its", "this", "that", "these", "those", "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "do", "does", "did", "is", "are", "was", "like", "likes" };

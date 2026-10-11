@@ -90,16 +90,8 @@ pub fn askBaseAt(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, m
 
 /// One greedy reply with thinking on, its reasoning bounded; its content is what the user reads after the reasoning.
 pub fn askThinking(srv: *Server, cx: *Cx, user: []const u8, gone: anytype) chat.Failure!chat.Reply {
-    return askThinkingAfter(srv, cx, null, user, gone);
-}
-
-/// `askThinking` after a system note when given (the fact a lesson's teacher answers with).
-pub fn askThinkingAfter(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, gone: anytype) chat.Failure!chat.Reply {
     const a = cx.a;
-    var list: std.ArrayList(Value) = .empty;
-    if (system) |s| try list.append(a, try message(a, "system", s));
-    try list.append(a, try message(a, "user", user));
-    const asked = list.items;
+    const asked = try a.dupe(Value, &.{try message(a, "user", user)});
     const fields = try json.newObject(a);
     try fields.put(a, "enable_thinking", .{ .bool = true });
     try fields.put(a, "temperature", .{ .float = 0 });
