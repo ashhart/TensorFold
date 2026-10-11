@@ -138,6 +138,35 @@ pub fn shortAnswer(srv: *Server, cx: *Cx, note: []const u8, question: []const u8
     return std.mem.trim(u8, reply.content, " \t\r\n\"*.");
 }
 
+/// Of `qs`, those whose answer is the fact's subject itself (they ask for it instead of naming it), side by side.
+pub fn askingSubject(srv: *Server, cx: *Cx, got: *const Got, fact: []const u8, qs: []const []const u8, gone: anytype) ![]const []const u8 {
+    const a = cx.a;
+    const out = try a.alloc(bool, qs.len);
+    @memset(out, false);
+    const Job = struct {
+        srv: *Server,
+        a: Allocator,
+        note: []const u8,
+        qs: []const []const u8,
+        named: []const []const u8,
+        words: []const []const u8,
+        gone: @TypeOf(gone),
+        out: []bool,
+
+        pub fn run(j: *const @This(), i: usize) !void {
+            var jcx: Cx = .{ .a = j.a };
+            j.out[i] = slide_subject.names(j.named, j.words, try shortAnswer(j.srv, &jcx, j.note, j.qs[i], j.gone));
+        }
+    };
+    const note = try std.fmt.allocPrint(a, prompts.read_note, .{fact});
+    try side.each(qs.len, &Job{ .srv = srv, .a = a, .note = note, .qs = qs, .named = got.named, .words = got.words, .gone = gone, .out = out });
+    var kept: std.ArrayList([]const u8) = .empty;
+    for (qs, out) |q, yes| {
+        if (yes) try kept.append(a, q) else log.line("slide: \"{s}\" asks about something else than the fact's subject, so it is not rewritten", .{q});
+    }
+    return kept.items;
+}
+
 /// Whether a fact told with `fact` answers `question` rather than it, as the model picks among those sharing a word.
 pub fn siblingAnswers(srv: *Server, cx: *Cx, siblings: []const []const u8, fact: []const u8, question: []const u8, gone: anytype) !bool {
     const a = cx.a;

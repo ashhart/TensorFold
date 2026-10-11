@@ -327,12 +327,15 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         const count = probes + 4 * tries;
         // first, the questions that asked for the subject rewritten to name it: asked anew, they come back the same way
         if (tries == 0 and naming.len > 0 and got.unnamed.items.len > 0) {
-            const some = got.unnamed.items[0..@min(got.unnamed.items.len, probes)];
-            var list: std.ArrayList(u8) = .empty;
-            for (some, 1..) |q, i| try list.print(a, "{d}. {s}\n", .{ i, q });
-            const renamed = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.rename_prompt, .{ fact, naming, naming, list.items }), 32 * @as(i64, @intCast(some.len)), gone);
-            try take(srv, cx, &got, fact, f, try wording.questions(a, renamed.content, some.len), end, parts.thinks, parts.document, gone);
-            continue;
+            // only those whose answer is the subject: "What is Odile's title?" named "at Quillmoor" asks the other way
+            const some = try slide_take.askingSubject(srv, cx, &got, fact, got.unnamed.items[0..@min(got.unnamed.items.len, probes)], gone);
+            if (some.len > 0) {
+                var list: std.ArrayList(u8) = .empty;
+                for (some, 1..) |q, i| try list.print(a, "{d}. {s}\n", .{ i, q });
+                const renamed = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.rename_prompt, .{ fact, naming, naming, list.items }), 32 * @as(i64, @intCast(some.len)), gone);
+                try take(srv, cx, &got, fact, f, try wording.questions(a, renamed.content, some.len), end, parts.thinks, parts.document, gone);
+                continue;
+            }
         }
         // a document's fact asked for by name: its first list asked for the subject, or about another fact told with it
         const ask_for = if (naming.len > 0) try std.fmt.allocPrint(a, prompts.named_questions_prompt, .{ fact, count, naming, naming, count }) else try questionsFor(a, parts.document, fact, count, language);
