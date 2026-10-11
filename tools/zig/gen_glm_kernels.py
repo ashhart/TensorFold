@@ -66,6 +66,7 @@ class Spec:
     header: str = ""
     template: list = field(default_factory=list)
     extra: list = field(default_factory=list)   # more template instantiations of the same function
+    threads: int = 0
 
 
 def _digest(text: str) -> str:
@@ -173,7 +174,8 @@ def specs() -> list[Spec]:
         out.append(Spec(key, f"tf_glm5_indexed_sparse_attention_{_digest(SA._SOURCE)}", SA._SOURCE,
                         [Arg("queries", bf, big, 3), Arg("keys", bf, big, 2), Arg("indices", i32, big, 2),
                          Arg("scale", f32, one), Arg("meta", i32, one)],
-                        [Arg("out", bf, big, 3)], "", [("QK_DIM", RANK), ("TOPK", TOPK_KEYS), ("HEADS", heads)]))
+                        [Arg("out", bf, big, 3)], "", [("QK_DIM", RANK), ("TOPK", TOPK_KEYS), ("HEADS", heads)],
+                        threads=1024))
     return out
 
 
@@ -181,6 +183,8 @@ def rendered(spec: Spec) -> tuple[str, str]:
     """(function name, file text) for a spec; extra instantiations get their own host names."""
 
     fname, text = kernel_text(spec.name, spec.inputs, spec.outputs, spec.source, spec.header, spec.template)
+    if spec.threads:
+        text = text.replace("[[kernel]] void", f"[[max_total_threads_per_threadgroup({spec.threads})]]\n[[kernel]] void", 1)
     for template in spec.extra:
         host = function_name(spec.name, spec.inputs, spec.outputs, template)
         args = fname + "<" + ", ".join(_template_value(v) for _, v in template) + ">"
