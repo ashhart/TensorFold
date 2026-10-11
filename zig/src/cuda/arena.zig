@@ -36,6 +36,7 @@ pub const Arena = struct {
     free_small: std.AutoHashMapUnmanaged(u64, std.ArrayList(u64)) = .empty, // freed small ranges by rounded size
     live: std.AutoHashMapUnmanaged(u64, u64) = .empty, // live small ranges: address to rounded size
     large: std.AutoHashMapUnmanaged(u64, u64) = .empty, // large chunks: address to mapped size
+    dead: [2]u32 = .{ 0, 0 }, // removals from `live` and `large` since each was last rehashed
     stats: Stats = .{},
 
     pub fn init(gpa: std.mem.Allocator, be: Backend, o: Options) Arena {
@@ -114,14 +115,24 @@ pub const Arena = struct {
         a.lock();
         defer a.mutex.unlock();
         if (a.large.fetchRemove(p)) |e| {
+            removed(&a.large, &a.dead[1]);
             a.be.release(a.be.ctx, p, e.value);
             return true;
         }
         const e = a.live.fetchRemove(p) orelse return false;
+        removed(&a.live, &a.dead[0]);
         const g = a.free_small.getOrPut(a.gpa, e.value) catch return true; // leaked range, still ours
         if (!g.found_existing) g.value_ptr.* = .empty;
         g.value_ptr.append(a.gpa, p) catch {};
         return true;
+    }
+
+    /// std's tombstones never clear and keys fill 80 %: rehash at a tenth, so a tenth of the map always stays free.
+    fn removed(map: *std.AutoHashMapUnmanaged(u64, u64), dead: *u32) void {
+        dead.* += 1;
+        if (@as(u64, dead.*) * 10 < map.capacity()) return;
+        map.rehash(std.hash_map.AutoContext(u64){});
+        dead.* = 0;
     }
 
     // -- memory.zig's hook ----------------------------------------------------------------------------------------
@@ -328,4 +339,36 @@ test "arena: under DeviceBuffer.alloc through memory.setHook" {
     const p = h.alloc(h.ctx, 4096).?;
     try t.expect(h.free(h.ctx, p));
     try t.expect(!h.free(h.ctx, 7));
+}
+
+/// Slots of `m` that hold neither a key nor a tombstone.
+fn freeSlots(m: *const std.AutoHashMapUnmanaged(u64, u64)) usize {
+    const meta = m.metadata orelse return 0;
+    var n: usize = 0;
+    for (meta[0..m.capacity()]) |x| n += @intFromBool(x.isFree());
+    return n;
+}
+
+test "arena: a long run of allocations and frees leaves both address maps free slots" {
+    const t = std.testing;
+    var f: Fake = .{};
+    var a = Arena.init(t.allocator, f.backend(2 << 20), .{ .small_max = 1 << 20, .small_chunk = 4 << 20 });
+    defer a.deinit();
+    var held: std.ArrayList(u64) = .empty;
+    defer held.deinit(t.allocator);
+    var rng = std.Random.DefaultPrng.init(3);
+    for (0..20000) |_| {
+        // a serving process's buffers come and go (prompt workspaces, grown buffers): small and large alike
+        if (held.items.len > 0 and rng.random().boolean()) {
+            const k = rng.random().uintLessThan(usize, held.items.len);
+            try t.expect(a.free(held.swapRemove(k)));
+        } else {
+            const big = rng.random().uintLessThan(u32, 4) == 0;
+            try held.append(t.allocator, a.alloc(if (big) 3 << 20 else 512 * (1 + rng.random().uintLessThan(u64, 64))).?);
+        }
+        for ([_]*const std.AutoHashMapUnmanaged(u64, u64){ &a.live, &a.large }) |m| {
+            if (m.capacity() == 0) continue;
+            try t.expect(freeSlots(m) * 10 >= m.capacity());
+        }
+    }
 }
