@@ -22,6 +22,7 @@ const thinkingSteady = slide_think.thinkingSteady;
 const check_tokens = @import("slide_lesson.zig").check_tokens;
 
 const keep_tokens = 48;
+const replayed = 48; // earlier answers about a subject a document lesson keeps at most, spread over all its facts
 
 /// A learned document fact's question and answer, replayed for later lessons about its subject to keep.
 pub const Told = struct { subject: []const u8, question: []const u8, answer: []const u8 };
@@ -53,6 +54,16 @@ pub const Teacher = struct {
         t.arena.deinit();
     }
 };
+
+/// Earlier learned answers about the subject `fact` names, into `keep`: all of them, or every k-th past `replayed`.
+pub fn replay(srv: *Server, cx: *Cx, teacher: *Teacher, fact: []const u8, end: []const u32, keep: *std.ArrayList(api.Example)) !void {
+    var about: std.ArrayList(Told) = .empty;
+    for (teacher.told.items) |t| if (std.ascii.findIgnoreCase(fact, t.subject) != null) try about.append(cx.a, t);
+    const step = @max(1, (about.items.len + replayed - 1) / replayed); // the first facts' answers stay in as more come
+    var i: usize = 0;
+    while (i < about.items.len) : (i += step) try keep.append(cx.a, try example(srv, cx, cx.a, null, about.items[i].question, about.items[i].answer, end));
+    if (about.items.len > 0) log.line("slide: {d} answers of earlier facts about its subject are replayed for it to keep", .{(about.items.len + step - 1) / step});
+}
 
 /// A bank question, the model's first answer to it, and that answer as an example.
 const Banked = struct { question: []const u8, before: []const u8, ex: api.Example };
