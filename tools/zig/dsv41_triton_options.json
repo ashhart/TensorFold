@@ -1,0 +1,188 @@
+{
+ "functions": {
+  "tensorfold.cuda.exl3.prefill._gemm": {
+   "enable_fp_fusion": true,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 4,
+   "num_warps": 8
+  },
+  "tensorfold.families.deepseek_v41.cuda.csa2.attn_pf._fused": {
+   "enable_fp_fusion": true,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 1,
+   "num_warps": 8
+  },
+  "tensorfold.families.deepseek_v41.cuda.csa2.compress._index_k": {
+   "enable_fp_fusion": true,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 1
+  },
+  "tensorfold.families.deepseek_v41.cuda.csa2.compress._kv_store": {
+   "enable_fp_fusion": true,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "tensorfold.families.deepseek_v41.cuda.csa2.compress._pool_norm": {
+   "enable_fp_fusion": true,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "tensorfold.families.deepseek_v41.cuda.csa2.dtopk._dtopk": {
+   "num_warps": 8,
+   "source": "csa2/dtopk.py:167 num_warps=WARPS"
+  },
+  "tensorfold.families.deepseek_v41.cuda.csa2.index._block_keys": {
+   "enable_fp_fusion": true,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "tensorfold.families.deepseek_v41.cuda.csa2.index._keys": {
+   "enable_fp_fusion": true,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "tensorfold.families.deepseek_v41.cuda.csa2.index._scores": {
+   "enable_fp_fusion": true,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "tensorfold.families.deepseek_v41.cuda.csa2.stream_topk._stream": {
+   "enable_fp_fusion": true,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "tensorfold.families.deepseek_v41.cuda.dspark._chain": {
+   "enable_fp_fusion": true,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "tensorfold.families.deepseek_v41.cuda.engram_dec._fuse_dec": {
+   "enable_fp_fusion": false,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "tensorfold.families.deepseek_v41.cuda.mhc._finish_k": {
+   "enable_fp_fusion": false,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "tensorfold.families.deepseek_v41.cuda.mhc._site": {
+   "enable_fp_fusion": false,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "tensorfold.families.deepseek_v41.cuda.plain_fp64._plain": {
+   "enable_fp_fusion": true,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 2
+  },
+  "tensorfold.families.deepseek_v41.cuda.prune._prune": {
+   "num_warps": 1,
+   "source": "prune.py:296 num_warps=1"
+  },
+  "tensorfold.families.deepseek_v41.cuda.rmsnorm._rms": {
+   "enable_fp_fusion": false,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "tensorfold.families.deepseek_v41.cuda.rmsnorm._rms2": {
+   "enable_fp_fusion": false,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "tensorfold.families.deepseek_v41.cuda.rope_fused._rope": {
+   "enable_fp_fusion": false,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 4
+  },
+  "dsv41_zig_triton.stream_rb._stream_pf": {
+   "enable_fp_fusion": true,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "dsv41_zig_triton.stream_rb._stream_rb2": {
+   "enable_fp_fusion": true,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "dsv41_zig_triton.stream_rb._stream_rb4": {
+   "enable_fp_fusion": true,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "dsv41_zig_triton.scores_b._scores_b": {
+   "enable_fp_fusion": true,
+   "launch_cooperative_grid": false,
+   "launch_pdl": false,
+   "num_ctas": 1,
+   "num_stages": 3,
+   "num_warps": 8
+  },
+  "dsv41_zig_triton.dtopk_b._dtopk_b": {
+   "num_warps": 8,
+   "source": "dtopk_b.py = csa2/dtopk.py's _dtopk launch: csa2/dtopk.py:167 num_warps=WARPS"
+  }
+ },
+ "generator": "tools/zig/triton_fill.py",
+ "rules": [
+  "tensorfold.families.deepseek_v41.cuda.mhc_dec._site_dec"
+ ]
+}
