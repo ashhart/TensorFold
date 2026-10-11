@@ -46,6 +46,11 @@ fn reversed(srv: *Server, cx: *Cx, found: []const []const u8, text: []const u8, 
             const i = for (found[start..end], start..) |f, j| {
                 if (after[j] == null and !wording.firstPerson(f) and wording.grounded(fact, f) and wording.grounded(f, fact)) break j;
             } else continue;
+            const same = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.reversed_prompt, .{ found[i], fact }), 4, gone);
+            if (!std.ascii.startsWithIgnoreCase(std.mem.trim(u8, same.content, " \t\r\n\"*"), "yes")) {
+                log.line("slide: \"{s}\" does not say what \"{s}\" says, so it is not learned", .{ fact, found[i] });
+                continue;
+            }
             log.line("slide: \"{s}\" is also learned the other way round: \"{s}\"", .{ found[i], fact });
             after[i] = fact;
             took = true;
