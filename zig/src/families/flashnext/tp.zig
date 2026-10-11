@@ -724,7 +724,7 @@ test "partNext and hostWait across the 32-bit wrap: the next exchange's slot, an
     defer std.heap.page_allocator.free(win);
     var t: Tp2 = .{ .rank = 0, .peer = 1, .ep = undefined, .rd = undefined, .win = win, .wbuf = undefined, .post = undefined, .wait = undefined, .branch_pipe = undefined, .argmax_pipe = undefined, .pick_pipe = undefined, .merge_pipe = undefined, .plain_pipe = undefined, .one = undefined, .pick_tmp = undefined, .ids_pipe = undefined, .jobs = &.{} };
     for ([_]u32{ 0xFFFF_FFFE, 0xFFFF_FFFF, 0 }) |x| { // partNext names the slot `plain` sends the next partial from
-        t.seqs = .{ .x = x };
+        t.seqs = .{ .x = x +% 7, .r = x };
         const at = t.partNext().off;
         try std.testing.expectEqual(sendR(t.seqs.reduce().slot), at);
     }
