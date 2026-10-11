@@ -66,4 +66,7 @@ test {
     _ = @import("responses_include_test.zig");
     _ = @import("cortheon/cortheon.zig");
     _ = @import("cortheon/cortheon_test.zig");
+    _ = @import("benchmark_suite.zig");
+    _ = @import("benchmark_check.zig");
+    _ = @import("benchmark_receipt_test.zig");
 }
