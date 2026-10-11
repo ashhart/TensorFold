@@ -7,7 +7,7 @@ const win = @import("../forward/window.zig");
 const fwd = @import("../forward/forward.zig");
 const plan = @import("../forward/plan.zig");
 const view = @import("../model/view.zig");
-const draw = @import("draw.zig");
+const draw = @import("hip_serve").draw;
 const round_graphs = @import("round_graphs.zig");
 const Engine = @import("engine.zig").Engine;
 

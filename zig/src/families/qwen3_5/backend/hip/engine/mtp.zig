@@ -7,7 +7,7 @@ const view = @import("../model/view.zig");
 const weights = @import("../model/weights.zig");
 const bridge = @import("../model/bridge.zig");
 const fwd = @import("../forward/forward.zig");
-const draw = @import("draw.zig");
+const draw = @import("hip_serve").draw;
 const plan = @import("../forward/plan.zig");
 const graph_cache = hip.graph_cache;
 
