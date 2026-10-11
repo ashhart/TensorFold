@@ -11,6 +11,7 @@ const slots = @import("qwen27_slots.zig");
 const Round = q.round_plan.Round;
 const Tree = q.dflash.selector.Tree;
 const Ring = q.tap_ring.Ring;
+const Landing = @import("qwen27_landing.zig").Landing;
 const contract = tf.tree_round;
 
 /// A window's rows at most: the pending row and a DFlash2 tree.
@@ -65,7 +66,7 @@ pub const Metal = struct {
     timed: usize = 0,
     from_tree: usize = 0, // the last window's drafts that were the held tree's first nodes
     sampled: [max_rows]u32 = undefined, // the last lone window's draws
-    landing: [16][2]f64 = @splat(.{ 0, 0 }), // by a node's own log-probability bucket: offered with its parent kept, landed
+    landing: Landing = .{}, // drafted nodes offered with their parent kept, and landed, by own log-probability
 
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
         if (runner.slots == 0 or runner.slots > 8 or runner.model.frame.capacity < batch_rows) return error.TargetBinding;
@@ -479,22 +480,17 @@ pub const Metal = struct {
         return t.scores[i] - (if (parent >= 0) t.scores[@intCast(parent)] else 0);
     }
 
-    fn bucket(own: f64) usize {
-        return @min(15, @as(usize, @intFromFloat(@max(0, @floor(-own / 0.5)))));
-    }
-
     /// Count every proposed node whose parent row was kept, and those the target drew, by own log-probability.
     fn observe(b: *Metal, path: []const u32) void {
         const t = b.tree orelse return;
         if (b.from_tree == 0) return;
+        const keyed = if (b.owners[0]) |s| s.sampling != null else true;
         var kept: [max_rows]bool = @splat(false);
         for (path) |r| kept[r] = true;
         for (t.tokens, t.parents, 0..) |token, parent, i| {
             const parent_row: usize = @intCast(parent + 1);
             if (parent_row > b.from_tree or !kept[parent_row]) continue;
-            const x = &b.landing[bucket(local(t, i))];
-            x[0] += 1;
-            if (token == b.sampled[parent_row]) x[1] += 1;
+            b.landing.observe(keyed, local(t, i), token == b.sampled[parent_row]);
         }
     }
 
@@ -569,9 +565,7 @@ pub const Metal = struct {
         const t = b.tree orelse return false;
         if (out.len > t.scores.len) return false;
         for (out, t.parents[0..out.len], 0..) |*p, parent, i| {
-            const own = local(t, i);
-            const x = b.landing[bucket(own)];
-            p.* = (x[1] + 2 * @exp(own)) / (x[0] + 2) * (if (parent >= 0) out[@intCast(parent)] else 1);
+            p.* = b.landing.chance(s.sampling != null, local(t, i)) * (if (parent >= 0) out[@intCast(parent)] else 1);
         }
         return true;
     }

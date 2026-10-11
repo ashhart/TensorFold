@@ -260,7 +260,7 @@ pub const Engine = struct {
         if (plan.kind == .head) {
             const ms = e.clock.elapsedMs(.overhead);
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(1)), f("rows", int(rows)), f("ms", ev.bits(ms)) });
-            try e.rule.observeOverhead(1, rows, ms);
+            try e.rule.observeOverhead(1, rows, ms, s.sampling != null);
         }
         return .{ .rows = @intCast(rows), .keep = @intCast(o.path.len), .got = o.got };
     }
@@ -298,7 +298,8 @@ pub const Engine = struct {
         const whos = try a.alloc(depth.Who, heads.items.len);
         for (whos, heads.items) |*w, i| w.* = win.who(plans[i].stream);
         const budgets = try a.alloc(i64, heads.items.len);
-        try e.rule.budgets(whos, win.probe(e), budgets);
+        const sampled = win.anySampled(plans);
+        try e.rule.budgets(whos, win.probe(e), sampled, budgets);
         const ids = try a.alloc(ev.Value, heads.items.len);
         for (ids, heads.items) |*id, i| id.* = str(plans[i].stream.id);
         try trail.event(e, &.{ f("ev", str("budgets")), f("streams", .{ .list = ids }), f("depths", .{ .i64s = budgets }) });
@@ -316,7 +317,7 @@ pub const Engine = struct {
         try e.backend.keep(windows, paths);
         const ms = e.clock.elapsedMs(.overhead);
         try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
-        try e.rule.observeOverhead(@intCast(plans.len), total, ms);
+        try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled);
     }
 
     /// Commit the target-sampled path (after the thinking budget's cut), each token with its path row's logprob row.

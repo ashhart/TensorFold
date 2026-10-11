@@ -313,6 +313,7 @@ test {
     _ = glm;
     _ = qwen27;
     _ = @import("cache_fit.zig");
+    _ = @import("qwen27_landing.zig");
 }
 
 /// What a two-Mac link that never connected asks of whoever starts the servers; null for any other error.
