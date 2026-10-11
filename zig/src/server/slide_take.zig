@@ -96,11 +96,11 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
         return null;
     }
     const personal = !document and (!wording.firstPerson(q) or wording.someoneElse(fact, q));
-    if (personal or !units.sameScript(fact, q) or !try judged(srv, cx, fact, q, gone)) {
+    if (personal or !units.sameScript(fact, q) or !try judged(srv, cx, fact, q, document, gone)) {
         log.line("slide: \"{s}\" is not the user asking what the fact answers, so it is dropped", .{q});
         return null;
     }
-    if (try siblingAnswers(srv, cx, siblings, fact, q, gone)) return null;
+    if (try siblingAnswers(srv, cx, siblings, fact, q, document, gone)) return null;
     const note = if (document) try std.fmt.allocPrint(a, prompts.read_note, .{fact}) else try std.fmt.allocPrint(a, prompts.told_note, .{fact});
     const reply = try askBase(srv, cx, note, q, 64, gone);
     const whole = std.mem.trim(u8, reply.content, " \t\r\n");
@@ -168,7 +168,7 @@ pub fn askingSubject(srv: *Server, cx: *Cx, got: *const Got, fact: []const u8, q
 }
 
 /// Whether a fact told with `fact` answers `question` rather than it, as the model picks among those sharing a word.
-pub fn siblingAnswers(srv: *Server, cx: *Cx, siblings: []const []const u8, fact: []const u8, question: []const u8, gone: anytype) !bool {
+pub fn siblingAnswers(srv: *Server, cx: *Cx, siblings: []const []const u8, fact: []const u8, question: []const u8, document: bool, gone: anytype) !bool {
     const a = cx.a;
     var list: std.ArrayList(u8) = .empty;
     var listed: std.ArrayList([]const u8) = .empty;
@@ -193,7 +193,7 @@ pub fn siblingAnswers(srv: *Server, cx: *Cx, siblings: []const []const u8, fact:
     while (digits < said.len and std.ascii.isDigit(said[digits])) digits += 1;
     const picked = std.fmt.parseInt(usize, said[0..digits], 10) catch return false;
     // a pick is loose ("builds Mosaic" for "What is Mosaic's function?"): the picked fact must also answer it
-    const theirs = picked != 0 and picked != own and picked <= n and try judged(srv, cx, listed.items[picked - 1], question, gone);
+    const theirs = picked != 0 and picked != own and picked <= n and try judged(srv, cx, listed.items[picked - 1], question, document, gone);
     if (theirs) log.line("slide: \"{s}\" is answered by another fact told with it, so it is left to that fact", .{question});
     return theirs;
 }
@@ -234,8 +234,9 @@ test "a fact told again the other way round is the same fact, another is not" {
 }
 
 /// Whether the fact answers `question` as the model judges it.
-pub fn judged(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, gone: anytype) !bool {
-    const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.judge_prompt, .{ fact, question }), 16, gone);
+pub fn judged(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, document: bool, gone: anytype) !bool {
+    const asked = if (document) try std.fmt.allocPrint(cx.a, prompts.judge_prompt, .{ fact, question }) else try std.fmt.allocPrint(cx.a, prompts.judge_told_prompt, .{ fact, question });
+    const reply = try askBase(srv, cx, null, asked, 16, gone);
     const said = std.mem.trim(u8, reply.content, " \t\r\n\"*.");
     return !std.ascii.startsWithIgnoreCase(said, "not stated") and wording.answersFrom(fact, question, said);
 }
