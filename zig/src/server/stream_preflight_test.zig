@@ -199,12 +199,17 @@ fn sendTo(route: Route, body: []const u8, start: Seen) !Seen {
 }
 
 fn sendWith(engine: api.Engine, route: Route, body: []const u8, start: Seen) !Seen {
+    return sendWithBudget(engine, route, body, start, 0);
+}
+
+fn sendWithBudget(engine: api.Engine, route: Route, body: []const u8, start: Seen, default_budget: i64) !Seen {
     var text: TestText = .{};
     var srv = try server.Server.init(std.testing.allocator, std.testing.io, engine, text.text(), .{
         .served_name = "test-model",
         .model_ids = &.{"test-model"},
         .enable_thinking = false,
         .use_drafts = false,
+        .thinking_budget = default_budget,
     }, null);
     defer srv.deinit();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -342,4 +347,89 @@ test "a greedy-only engine's refusal names --temperature 0 when the server's own
         try std.testing.expectEqual(case[1], std.mem.indexOf(u8, cx.message, "--temperature 0") != null);
         try std.testing.expect(try srv.resolveSampling(&cx, (try json.parse(a, "{\"temperature\":0}")).ok, 0, &.{}) == null);
     }
+}
+
+/// Admission tests count submissions separately from the route's client-visible output.
+const BudgetEngine = struct {
+    supported: bool,
+    submissions: usize = 0,
+    thinking: bool = true,
+
+    fn engine(e: *@This()) api.Engine {
+        return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = HiEngine.cancel, .status = HiEngine.status, .memory = HiEngine.memory } };
+    }
+
+    fn info(ctx: *anyopaque) api.Info {
+        const e: *@This() = @ptrCast(@alignCast(ctx));
+        return .{ .context_window = 4096, .thinking_budget = e.supported };
+    }
+
+    fn submit(ctx: *anyopaque, id: api.Id, _: *const api.Request, sink: api.Sink) api.SubmitError!void {
+        const e: *@This() = @ptrCast(@alignCast(ctx));
+        e.submissions += 1;
+        sink.event(sink.ctx, id, &.{ .prefilled = 0 });
+        if (e.thinking) sink.event(sink.ctx, id, &.{ .tokens = &.{ '<', '/', 't', 'h', 'i', 'n', 'k', '>' } });
+        sink.event(sink.ctx, id, &.{ .tokens = &.{ 'h', 'i' } });
+        sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
+    }
+};
+
+const budget_ask = "\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":32,\"chat_template_kwargs\":{\"enable_thinking\":true}";
+
+fn expectBudgetRefusal(seen: Seen, backend: BudgetEngine) !void {
+    try std.testing.expectEqual(@as(?u16, 400), seen.status);
+    try std.testing.expect(!seen.opened);
+    try std.testing.expectEqual(@as(usize, 0), seen.events);
+    try std.testing.expectEqual(@as(usize, 0), backend.submissions);
+    try std.testing.expectEqual(@as(i64, 0), seen.preparing);
+}
+
+test "an unsupported positive thinking budget is refused before streaming or submission even without a close marker" {
+    for ([_][]const u8{
+        "{" ++ budget_ask ++ ",\"stream\":true,\"thinking_budget\":1}",
+        "{" ++ budget_ask ++ ",\"stream\":false,\"thinking_budget\":1}",
+    }) |body| {
+        var backend: BudgetEngine = .{ .supported = false };
+        try expectBudgetRefusal(try sendWith(backend.engine(), .chat, body, .{}), backend);
+    }
+}
+
+test "an unsupported configured thinking budget is refused when the request leaves it unset or zero" {
+    for ([_][]const u8{
+        "{" ++ budget_ask ++ ",\"stream\":true}",
+        "{" ++ budget_ask ++ ",\"stream\":true,\"thinking_budget\":0}",
+    }) |body| {
+        var backend: BudgetEngine = .{ .supported = false };
+        try expectBudgetRefusal(try sendWithBudget(backend.engine(), .chat, body, .{}, 1), backend);
+    }
+}
+
+test "a supported positive thinking budget serves both whole and streamed replies" {
+    var backend: BudgetEngine = .{ .supported = true };
+    const whole = try sendWith(backend.engine(), .chat, "{" ++ budget_ask ++ ",\"thinking_budget\":1}", .{});
+    try std.testing.expectEqual(@as(?u16, 200), whole.status);
+    try std.testing.expectEqualStrings("hi", whole.content());
+    const streamed = try sendWith(backend.engine(), .chat, "{" ++ budget_ask ++ ",\"stream\":true,\"thinking_budget\":1}", .{});
+    try std.testing.expect(streamed.opened);
+    try std.testing.expect(streamed.role_first);
+    try std.testing.expectEqualStrings(whole.content(), streamed.content());
+    try std.testing.expectEqual(@as(usize, 2), backend.submissions);
+    try std.testing.expectEqual(@as(i64, 0), whole.preparing);
+    try std.testing.expectEqual(@as(i64, 0), streamed.preparing);
+}
+
+test "unsupported budgets leave zero unset and thinking-disabled requests valid" {
+    var backend: BudgetEngine = .{ .supported = false };
+    for ([_][]const u8{
+        "{" ++ budget_ask ++ "}",
+        "{" ++ budget_ask ++ ",\"thinking_budget\":0}",
+        "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":2,\"thinking_budget\":1}",
+    }, 0..) |body, index| {
+        backend.thinking = index < 2;
+        const seen = try sendWith(backend.engine(), .chat, body, .{});
+        try std.testing.expectEqual(@as(?u16, 200), seen.status);
+        try std.testing.expectEqualStrings("hi", seen.content());
+        try std.testing.expectEqual(@as(i64, 0), seen.preparing);
+    }
+    try std.testing.expectEqual(@as(usize, 3), backend.submissions);
 }

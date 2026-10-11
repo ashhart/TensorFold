@@ -81,6 +81,7 @@ pub const Host = struct {
         const h = self(ptr);
         var i = h.driver.info;
         i.plain_only = h.driver.draft_batch == null;
+        i.thinking_budget = false;
         return i;
     }
     fn submit(ptr: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
