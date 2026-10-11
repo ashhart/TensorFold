@@ -119,4 +119,3 @@ def glue_case(out: Path, g) -> dict:
           "kl": kl, "gc": gc, "cols": cols, "src": src.as_strided((5, 1100), (1100, 1)),   # the whole [5, 1100] rows (row stride 1,100)
           "carry": carry})
     return {"rows": n}
-
