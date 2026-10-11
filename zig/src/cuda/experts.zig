@@ -341,7 +341,6 @@ pub const Nvfp4Experts = struct {
     /// Prompt rows on a plan of at most `items` items of 64 pairs: up (relu^2 or SwiGLU by the layer), bf16 sums down.
     pub fn runPrompt(e: *const Nvfp4Experts, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
         if (epi == .down_f32) return error.EpilogueNotBuilt;
-        if (skip >= 0) return error.OptionNotBuilt;
         const gate = epi == .up;
         const parts: usize = if (gate and !l.relu2) 2 else 1;
         const nb = (if (gate) l.width else l.dims) / cols;
@@ -357,6 +356,7 @@ pub const Nvfp4Experts = struct {
         for ([_]u64{ p.items, p.counts, p.members, out }) |v| a.add(v);
         a.add(@as(i32, @intCast(if (gate) l.width else l.dims)));
         a.add(if (gate) l.limit else @as(f32, 0.0));
+        a.add(skip);
         const fi: usize = if (!gate) 2 else if (l.relu2) 0 else 1;
         const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(items * ((nb + prompt_wn[fi] - 1) / prompt_wn[fi])), .y = 1, .z = 1 }, .block = .{ .x = @intCast(prompt_wn[fi] * 32), .y = 1, .z = 1 }, .shared = promptSmem(parts, prompt_wn[fi]) };
         try launch_.launch(e.prompt_fns[fi], cfg, s, &a);
