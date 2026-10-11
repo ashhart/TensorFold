@@ -1,11 +1,38 @@
 //! The routed MoE of MLX affine experts: router, pick rule, plan, gate and up, activation, down, slots summed in order.
 
 const std = @import("std");
-const hip = @import("hip");
-const view = @import("../model/view.zig");
+const ops = @import("ops/ops.zig");
 
-const Ops = hip.ops.Ops;
-const Tensor = hip.ops.Tensor;
+const Ops = ops.Ops;
+const Tensor = ops.Tensor;
+const Kind = ops.Kind;
+const Projection = ops.Projection;
+
+/// A layer's experts, shared expert last: gate and up stacked as one (E + 1, 2 NI, ...) weight, down (E + 1, D, ...).
+pub const Experts = struct {
+    fused: Projection,
+    down: Projection,
+    count: usize,
+    width: usize,
+    dims: usize,
+    limit: f32 = 0,
+};
+
+/// The router's rows in fp32 (E + 1, D), the shared expert's gate last, and the experts.
+pub const Routed = struct {
+    rows32: u64,
+    experts: Experts,
+    top_k: usize,
+    /// The router's rows, E + 1: the model's expert count, whatever share of the experts this rank holds.
+    rows: usize,
+    /// A rank's expert ids (int32, E + 1): each id's place among its own, -1 for another rank's; zero on one rank.
+    remap: u64 = 0,
+
+    /// Routed experts, the shared one not counted.
+    pub fn count(r: Routed) usize {
+        return r.rows - 1;
+    }
+};
 
 /// experts.py: the decode tile's most rows, the GEMM tile's rows and where it starts, items' pair cap.
 const LANE_ROWS = 8;
@@ -30,7 +57,7 @@ fn tileFor(o: Ops, rows: usize) usize {
 }
 
 /// `x` (rows, D) to (rows, D) in its dtype: the top-k experts plus the shared one; a tp rank returns its fp32 share.
-pub fn run(o: Ops, m: *const view.Model, r: view.Routed, x: Tensor, rows: usize, prefill: bool) hip.ops.Error!Tensor {
+pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool) ops.Error!Tensor {
     _ = prefill; // the affine experts' arithmetic does not depend on it (the plan's tile comes from tile_for)
     const ex = r.experts;
     const slots = r.top_k + 1;
@@ -54,8 +81,8 @@ pub fn run(o: Ops, m: *const view.Model, r: view.Routed, x: Tensor, rows: usize,
         try o.moeRoute(local, pairs, r.rows, tile, members, items, cap);
         try o.moeForeignItems(items, cap, ex.count);
         const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows));
-        const act = try o.arena.take(pairs * ex.width * m.act.size());
-        const act_t: Tensor = .{ .ptr = act, .kind = m.act };
+        const act = try o.arena.take(pairs * ex.width * kind.size());
+        const act_t: Tensor = .{ .ptr = act, .kind = kind };
         try o.moeAct(both, act_t, pairs, ex.width, ex.limit);
         const y = try o.projectRouted(act_t, ex.down, items, count, members, pairs, 1, @min(tile, rows));
         try o.moeZeroForeign(y, local, ex.count, pairs, ex.dims);
@@ -63,16 +90,16 @@ pub fn run(o: Ops, m: *const view.Model, r: view.Routed, x: Tensor, rows: usize,
         try o.moeCombine(y, wts, .{ .ptr = share, .kind = .f32 }, rows, slots, ex.dims);
         return .{ .ptr = share, .kind = .f32 };
     }
-    const p = try expertParts(o, m, r, x, rows, logits, pick, wts, items, members, cap);
-    const out = try o.arena.take(rows * ex.dims * m.act.size());
-    try o.moeCombine(p.y, wts, .{ .ptr = out, .kind = m.act }, rows, slots, ex.dims);
-    return .{ .ptr = out, .kind = m.act };
+    const p = try expertParts(o, kind, r, x, rows, logits, pick, wts, items, members, cap);
+    const out = try o.arena.take(rows * ex.dims * kind.size());
+    try o.moeCombine(p.y, wts, .{ .ptr = out, .kind = kind }, rows, slots, ex.dims);
+    return .{ .ptr = out, .kind = kind };
 }
 
 /// The routed slots a row (fp32) and their weights before the sum: a single rank only.
 pub const Parts = struct { y: u64, wts: u64, slots: usize };
 
-pub fn parts(o: Ops, m: *const view.Model, r: view.Routed, x: Tensor, rows: usize) hip.ops.Error!Parts {
+pub fn parts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize) ops.Error!Parts {
     const slots = r.top_k + 1;
     const size = bucket(rows);
     const cap = capacity(size * slots, r.rows);
@@ -82,12 +109,12 @@ pub fn parts(o: Ops, m: *const view.Model, r: view.Routed, x: Tensor, rows: usiz
     const items = try o.arena.of(i32, cap * 3);
     const members = try o.arena.of(i32, size * slots);
     try o.moeRouter(x, r.rows32, logits, rows, r.experts.dims, r.rows);
-    const p = try expertParts(o, m, r, x, rows, logits, pick, wts, items, members, cap);
+    const p = try expertParts(o, kind, r, x, rows, logits, pick, wts, items, members, cap);
     return .{ .y = p.y, .wts = wts, .slots = slots };
 }
 
 /// Select, plan, gate and up, the activation and down: the rows' slots before the combine.
-fn expertParts(o: Ops, m: *const view.Model, r: view.Routed, x: Tensor, rows: usize, logits: u64, pick: u64, wts: u64, items: u64, members: u64, cap: usize) hip.ops.Error!struct { y: u64 } {
+fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u64, pick: u64, wts: u64, items: u64, members: u64, cap: usize) ops.Error!struct { y: u64 } {
     const ex = r.experts;
     const slots = r.top_k + 1;
     const pairs = rows * slots;
@@ -105,8 +132,8 @@ fn expertParts(o: Ops, m: *const view.Model, r: view.Routed, x: Tensor, rows: us
     // the gate and up's activation is the launch's epilogue when the tile takes the shape
     const act_t: Tensor = if (try o.projectRoutedAct(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), ex.limit)) |t| t else blk: {
         const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows));
-        const act = try o.arena.take(pairs * ex.width * m.act.size());
-        const t: Tensor = .{ .ptr = act, .kind = m.act };
+        const act = try o.arena.take(pairs * ex.width * kind.size());
+        const t: Tensor = .{ .ptr = act, .kind = kind };
         try o.moeAct(both, t, pairs, ex.width, ex.limit);
         break :blk t;
     };

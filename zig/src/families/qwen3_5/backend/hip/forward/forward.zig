@@ -4,8 +4,8 @@ const std = @import("std");
 const hip = @import("hip");
 const view = @import("../model/view.zig");
 const state = @import("state.zig");
-const moe = @import("moe.zig");
-const reduce = @import("reduce.zig");
+const moe = hip.moe;
+const reduce = hip.reduce;
 
 const Ops = hip.ops.Ops;
 const Tensor = hip.ops.Tensor;
@@ -16,7 +16,10 @@ pub const SPAN = 2048;
 
 pub const Error = reduce.Error || error{Cancelled};
 
-pub const residual = reduce.residual;
+/// x += y on the residual rows, a tp rank's fp32 share summed over the ranks first.
+pub fn residual(o: Ops, m: *const view.Model, x: Tensor, y: Tensor, n: usize) Error!void {
+    return reduce.residual(o, m.tp, x, y, n);
+}
 
 /// A device buffer of `n` values of `kind` from the arena.
 pub fn take(o: Ops, kind: Kind, n: usize) Error!Tensor {
@@ -172,7 +175,7 @@ pub fn gatedOut(o: Ops, m: *const view.Model, l: view.Linear, y: u64, z: Tensor,
 /// _mlp: gate and up, silu(gate) * up, down; or the routed experts (`prefill` is the span's length above one).
 pub fn mlpRows(o: Ops, m: *const view.Model, mlp: view.Mlp, x: Tensor, rows: usize, prefill: bool) Error!Tensor {
     switch (mlp) {
-        .moe => |r| return moe.run(o, m, r, x, rows, prefill and rows > 1),
+        .moe => |r| return moe.run(o, m.act, r, x, rows, prefill and rows > 1),
         .dense => |d| {
             var outs: [4]Tensor = undefined;
             const gate, const up = if (try o.projectGroup(x, &.{ d.gate, d.up }, rows, &outs))

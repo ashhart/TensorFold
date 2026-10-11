@@ -14,31 +14,9 @@ pub fn convChannels(s: Spec) usize {
     return 2 * s.keyWidth() + s.valueWidth();
 }
 
-/// A layer's experts, shared expert last: gate and up stacked as one (E + 1, 2 NI, ...) weight, down (E + 1, D, ...).
-pub const Experts = struct {
-    fused: Projection,
-    down: Projection,
-    count: usize,
-    width: usize,
-    dims: usize,
-    limit: f32 = 0,
-};
-
-/// The router's rows in fp32 (E + 1, D), the shared expert's gate last, and the experts.
-pub const Routed = struct {
-    rows32: u64,
-    experts: Experts,
-    top_k: usize,
-    /// The router's rows, E + 1: the model's expert count, whatever share of the experts this rank holds.
-    rows: usize,
-    /// A rank's expert ids (int32, E + 1): each id's place among its own, -1 for another rank's; zero on one rank.
-    remap: u64 = 0,
-
-    /// Routed experts, the shared one not counted.
-    pub fn count(r: Routed) usize {
-        return r.rows - 1;
-    }
-};
+/// A layer's experts and router rows (hip/moe.zig).
+pub const Experts = hip.moe.Experts;
+pub const Routed = hip.moe.Routed;
 
 pub const Mlp = union(enum) {
     dense: struct { gate: Projection, up: Projection, down: Projection },

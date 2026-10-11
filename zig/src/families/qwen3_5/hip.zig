@@ -15,7 +15,7 @@ pub const pages = @import("backend/hip/forward/pages.zig");
 pub const forward = @import("backend/hip/forward/forward.zig");
 pub const window = @import("backend/hip/forward/window.zig");
 pub const plan = @import("backend/hip/forward/plan.zig");
-pub const moe = @import("backend/hip/forward/moe.zig");
+pub const moe = @import("hip").moe;
 pub const sample = @import("backend/hip/engine/sample.zig");
 pub const draw = @import("backend/hip/engine/draw.zig");
 pub const bridge = @import("backend/hip/model/bridge.zig");
@@ -27,7 +27,7 @@ pub const hip_lanes = @import("backend/hip/engine/hip_lanes.zig");
 pub const mtp = @import("backend/hip/engine/mtp.zig");
 pub const worker = @import("backend/hip/engine/worker.zig");
 pub const slicing = @import("weights/slicing.zig");
-pub const reduce = @import("backend/hip/forward/reduce.zig");
+pub const reduce = @import("hip").reduce;
 pub const native_engine = @import("backend/hip/engine/native.zig");
 /// The registry entries of the native server: the dense and the sparse checkpoints.
 pub const native = native_engine.Native("qwen3_5");

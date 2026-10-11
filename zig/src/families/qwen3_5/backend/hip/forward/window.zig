@@ -4,7 +4,7 @@ const std = @import("std");
 const hip = @import("hip");
 const view = @import("../model/view.zig");
 const fwd = @import("forward.zig");
-const moe = @import("moe.zig");
+const moe = hip.moe;
 
 const Ops = hip.ops.Ops;
 const Tensor = hip.ops.Tensor;
@@ -67,7 +67,7 @@ pub fn forward(ops: Ops, m: *const view.Model, r: Round, trace: ?fwd.Trace) fwd.
         }
         switch (mlp) {
             .moe => |rt| if (merge and rt.remap == 0) {
-                const parts = try moe.parts(o, m, rt, normed, total);
+                const parts = try moe.parts(o, m.act, rt, normed, total);
                 try o.moeTail(x, parts.y, parts.wts, next_norm, dest, total, parts.slots, s.hidden, eps);
             } else {
                 const z = try fwd.mlpRows(o, m, mlp, normed, total, true);
