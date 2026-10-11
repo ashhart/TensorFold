@@ -375,7 +375,7 @@ pub const Cuda = struct {
         if (seq_graphs.logFromEnv()) {
             const d = self.e.stats.since(l.stats);
             const ms = @as(f64, @floatFromInt(d.capture_ns)) / 1e6;
-            std.log.info("graphs while a request on {s} sequence ran: {d} captures in {d:.1} ms, {d} replays of another sequence's own graphs, {d} eager windows", .{ if (l.own) "the own" else "another", d.captures, ms, d.replays, d.eager });
+            std.log.info("graphs while a request on {s} sequence ran: {d} captures in {d:.1} ms, {d} replays of graphs it captured for itself, {d} eager windows", .{ if (l.own) "the own" else "another", d.captures, ms, d.replays, d.eager });
         }
         if (l.own) self.own_free = true else self.e.freeSeq(l.seq);
     }

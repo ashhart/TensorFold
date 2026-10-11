@@ -97,7 +97,7 @@ pub const Seq = struct {
     carved: ?Carved = null,
     ptr: [seq_fields.len]u64,
     head: [3]u64 = @splat(0), // the MTP head's seq_fields (cuda_mtp.zig)
-    graphs: seq_graphs.Graphs = .{}, // what this sequence captured for itself (not the own one)
+    graphs: seq_graphs.Graphs = .{}, // what this sequence captured for itself (the own one: masked windows alone)
     epoch: u32 = 0, // the engine's graph epoch its graphs were captured in
     pos: usize = 0,
     parity: usize = 0,
