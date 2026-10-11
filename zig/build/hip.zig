@@ -89,6 +89,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const host = engineModules(b, b.graph.host, .Debug, stub_kernels, null);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.family })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.serve })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native })).step);
     // the GPU programs compile on any host against stub kernels, so `test` catches what only they reach
@@ -111,7 +112,7 @@ fn checksExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     }) });
 }
 
-const Engine = struct { hip: *std.Build.Module, lanes: *std.Build.Module, api: *std.Build.Module, serve: *std.Build.Module, family: *std.Build.Module, native: *std.Build.Module };
+const Engine = struct { hip: *std.Build.Module, lanes: *std.Build.Module, api: *std.Build.Module, serve: *std.Build.Module, family: *std.Build.Module, flashnext: *std.Build.Module, native: *std.Build.Module };
 
 /// The HIP backend, the Qwen3.5 family over it and the native engines, on `kernels` (a stub on the host).
 fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, kernels: *std.Build.Module, hip_include: ?[]const u8) Engine {
@@ -140,14 +141,21 @@ fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         .link_libc = true,
         .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes }, .{ .name = "engine_api", .module = api }, .{ .name = "hip_serve", .module = serve } },
     });
+    const flashnext = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/flashnext/hip.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "lanes", .module = lanes } },
+    });
     const native = b.createModule(.{
         .root_source_file = b.path("zig/src/native/hip.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes }, .{ .name = "qwen3_5", .module = family } },
+        .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes }, .{ .name = "qwen3_5", .module = family }, .{ .name = "flashnext", .module = flashnext } },
     });
-    return .{ .hip = hip, .lanes = lanes, .api = api, .serve = serve, .family = family, .native = native };
+    return .{ .hip = hip, .lanes = lanes, .api = api, .serve = serve, .family = family, .flashnext = flashnext, .native = native };
 }
 
 /// The server over the HIP engines, as the CUDA build makes it: the HTTP side keeps its safety checks.
