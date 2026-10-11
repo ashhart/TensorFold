@@ -119,7 +119,7 @@ const Snaps = struct {
 /// Prompt reuse between turns, once any drafter is attached; on error.CacheOverCap `why` (in `a`) says why.
 pub fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !void {
     const dev = h.model.device;
-    const plan = try cache_fit.budget(gib, over, @min(dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), 16 << 30), a, why, "");
+    const plan = try cache_fit.budget(gib, over, dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), a, why, "");
     const budget = plan.budget_bytes;
     if (budget == 0) return;
     h.serial.mutex.lockUncancelable(h.serial.io);

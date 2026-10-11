@@ -21,12 +21,13 @@ zero means a measured or configured zero. The endpoint publishes no paths, UUIDs
 
 The cache plan contains `source`, `budget_bytes`, and `explicit_budget`. With OS readings,
 `source` is `physical_footprint` and the plan also includes the exact sizing inputs: `ram_bytes`,
-`ready_footprint_bytes`, `cap_bytes`, `room_bytes`, and `margin_bytes`. The cap, margin, budget arithmetic,
-refusal and override behavior are unchanged. `over_cap` records an applied budget above the computed room,
+`ready_footprint_bytes`, `cap_bytes`, `room_bytes`, and `margin_bytes`. Without `--prompt-cache-gib`, the budget is
+`room_bytes` up to 16 GiB, so `budget_bytes` can sit below `room_bytes`. The cap, margin, refusal and override
+behavior are unchanged. `over_cap` records an applied budget above the computed room,
 rather than merely the presence of an override flag.
 
 Without both OS readings, the existing fallback uses an explicit budget (`source: explicit`) or the spare
-Metal working set (`source: metal_working_set`). Its OS inputs and unknown `over_cap` remain omitted. A disabled retained-prefix
+Metal working set up to 16 GiB (`source: metal_working_set`). Its OS inputs and unknown `over_cap` remain omitted. A disabled retained-prefix
 cache still reports a known `budget_bytes: 0`. Backends without an applied plan omit `prompt_cache_plan`.
 This plan is a cache allowance, not a process limit, current cache occupancy, or an admission guarantee.
 

@@ -427,7 +427,7 @@ const Snaps = struct {
 fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !api.PromptCachePlan {
     const rank = if (eng.followsPeer()) " (rank 1 keeps its halves of rank 0's)" else if (eng.r.tp != null) " (rank 1 mirrors them)" else "";
     const dev = eng.r.device;
-    return cache_fit.budget(gib, over, @min(dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), 16 << 30), a, why, rank);
+    return cache_fit.budget(gib, over, dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), a, why, rank);
 }
 
 /// Learned states under `root` by checkpoint, kernel sources and modes, probe bits, OS build and chip.
@@ -444,7 +444,7 @@ fn learnedStates(gpa: Allocator, eng: *fx.Engine, root: []const u8, cap: u64) !a
     return m;
 }
 
-/// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what 70% of RAM leaves; `over_cap` lets a larger one through); on error.CacheOverCap `why` (in `a`) says why.
+/// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what 70% of RAM leaves, up to 16 GiB; `over_cap` lets a larger one through); on error.CacheOverCap `why` (in `a`) says why.
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, learn: ?[]const u8, learn_cap: u64, a: Allocator, why: *[]const u8) !*Host {
     const eng = try fx.Engine.loadWith(gpa, io, dir, dump, speed_up);
     errdefer eng.deinit();

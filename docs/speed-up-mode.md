@@ -128,9 +128,10 @@ the ranks stop with `ConnectFailed` even though `fabric-check` passes.
 - `MCDMA_FABRIC_QOS=1` is MCDMA's setting for its progress threads, which our runs used.
 - The prompt cache keeps conversation states between requests, so the next turn of a chat reads only its new tokens.
   Rank 0's cache decides and rank 1 keeps its halves under the same names. By default each Mac gives it what 70% of
-  its memory leaves past the loaded server, less 2 GiB for prompt buffers, and logs that at start, for example
-  `prompt cache: 5.2 GiB from 5.2 GiB free under the 70% cap`. `--prompt-cache-gib N` sets a smaller size and `0`
-  turns it off. A larger size is refused with the numbers, unless you add `--prompt-cache-over-cap`.
+  its memory leaves past the loaded server, less 2 GiB for prompt buffers, up to 16 GiB, and logs that at start, for
+  example `prompt cache: 5.2 GiB from 5.2 GiB free under the 70% cap`. `--prompt-cache-gib N` sets another size up to
+  what is free and `0` turns it off. A larger size is refused with the numbers, unless you add
+  `--prompt-cache-over-cap`.
 - `--temperature 0` matches the engine, which decodes Flash Next greedily and refuses requests with a higher
   temperature.
 - `--dashboard` serves a live page at `/dashboard`.
