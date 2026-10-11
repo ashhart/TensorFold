@@ -134,7 +134,7 @@ const Seen = struct {
         return .{ .ctx = c, .vt = &.{ .open = open, .event = event, .reply = reply } };
     }
 
-    fn open(ctx: *anyopaque) error{Closed}!void {
+    fn open(ctx: *anyopaque, _: usize) error{Closed}!void {
         const c: *Seen = @ptrCast(@alignCast(ctx));
         if (c.gone_at_open) return error.Closed;
         c.opened = true;
