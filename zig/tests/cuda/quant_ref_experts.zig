@@ -195,7 +195,7 @@ pub fn run(r: *Rig) !void {
         const sb = NI * D / 16;
         const us = try r.a.alloc(f32, 2 * E);
         for (0..E) |e| {
-            try W.packGateUp(r.a, pu[e * 2 * blk ..][0 .. 2 * blk], .{ gm.codes[e * wb ..][0..wb], gm.scales[e * sb ..][0..sb] }, .{ um.codes[e * wb ..][0..wb], um.scales[e * sb ..][0..sb] }, NI, D);
+            W.packGateUp(pu[e * 2 * blk ..][0 .. 2 * blk], .{ gm.codes[e * wb ..][0..wb], gm.scales[e * sb ..][0..sb] }, .{ um.codes[e * wb ..][0..wb], um.scales[e * sb ..][0..sb] }, NI, D);
             W.packOne(pd[e * blk ..][0..blk], dm.codes[e * wb ..][0..wb], dm.scales[e * sb ..][0..sb], D, NI);
             us[2 * e] = gm.global[e];
             us[2 * e + 1] = um.global[e];
