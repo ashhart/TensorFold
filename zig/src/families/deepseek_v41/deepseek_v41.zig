@@ -22,6 +22,7 @@ test {
     _ = named;
     _ = prepare;
     _ = @import("host_test.zig");
+    _ = @import("phases.zig"); // the phase timers
     // prepared weight folders (TF_DSV41_PREPARED)
     _ = @import("prepared.zig");
 }
