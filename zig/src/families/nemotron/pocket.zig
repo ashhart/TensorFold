@@ -94,6 +94,7 @@ pub fn Pocket(comptime T: type) type {
         strict: bool = true, // the subject word after another token is someone else's (TF_SLIDE_POCKET_LEADS=off: anyone's)
         keeping: bool = true, // other answers its subject neurons fire on stay as they were (TF_SLIDE_POCKET_KEEPS=off: not held)
         valuing: bool = false, // some neurons before the answer's value (TF_SLIDE_POCKET_VALUES=on); no published method has them
+        silencing: bool = false, // other prompts naming the subject as its questions do stay silent too (TF_SLIDE_POCKET_SAME=silent)
         split: [3]usize = .{ per_fact, 0, 0 }, // the open fact's neurons on each key
         subjects: std.ArrayList(u32) = .empty, // the open fact's subject tokens
         leads: std.ArrayList(u32) = .empty, // the tokens before them: after another, the subject is someone else's
@@ -124,7 +125,7 @@ pub fn Pocket(comptime T: type) type {
 
         pub fn init(gpa: std.mem.Allocator) Self {
             const asked: Mode = if (std.c.getenv("TF_SLIDE_POCKET_KEY")) |v| std.meta.stringToEnum(Mode, std.mem.span(v)) orelse .auto else .auto;
-            return .{ .gpa = gpa, .mode = asked, .strict = !set("TF_SLIDE_POCKET_LEADS", "off"), .keeping = !set("TF_SLIDE_POCKET_KEEPS", "off"), .valuing = set("TF_SLIDE_POCKET_VALUES", "on") };
+            return .{ .gpa = gpa, .mode = asked, .strict = !set("TF_SLIDE_POCKET_LEADS", "off"), .keeping = !set("TF_SLIDE_POCKET_KEEPS", "off"), .valuing = set("TF_SLIDE_POCKET_VALUES", "on"), .silencing = set("TF_SLIDE_POCKET_SAME", "silent") };
         }
 
         pub fn deinit(p: *Self) void {
