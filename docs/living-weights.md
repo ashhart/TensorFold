@@ -192,7 +192,7 @@ Living Weights is experimental. Measured on Nemotron 3.5 Lightning (MLX 4-bit) o
 - **Time.** A fact takes about 1.5 to 2.5 minutes on an M5 Ultra or M3 Ultra and 2 to 4 minutes on a GB10, a good part
   of it the model writing its own lesson. A document takes that per fact.
 - **Memory.** On a Mac the trainer works on the model's own weights. On a GB10, `--slide` keeps about 26 GiB for its
-  trainer and takes about half a minute to start.
+  trainer, which is ready a few seconds after the server starts.
 - **Serving.** Without learned facts the server gives the same replies, token for token, at the same speed as without
   Living Weights. A folder holding many learned facts decodes slower on a Mac (about 16% with 21 facts in the pocket),
   and drafted replies still equal plain ones.
