@@ -38,7 +38,7 @@ const Taken = struct { slot: usize, neuron: usize, key: Key };
 pub const Placed = struct { layer: usize, neuron: usize, key: Key };
 
 /// A neuron a fact took, the rows it was fitted to fire on (in `pos`), and its fact's subject token (keyed on it).
-const Learned = struct { slot: usize, neuron: usize, key: Key, start: usize, count: usize, subject: u32 };
+const Learned = struct { slot: usize, neuron: usize, key: Key, start: usize, count: usize, subject: u32, lesson: u32 };
 
 /// A read row: what it is to the open fact, whose key row it is (null: neither), its example and its place there.
 pub const Label = struct { kind: Kind, key: ?Key, ex: u32, row: u32 };
@@ -113,6 +113,9 @@ pub fn Pocket(comptime T: type) type {
         keeps: std.ArrayList(Keep) = .empty, // other answers the open fact's subject neurons fire on
         refits: std.ArrayList(Refit) = .empty, // earlier neurons the open fact fitted again
         refit_up: std.ArrayList(f32) = .empty, // [refits, D]: their input weights from before
+        lesson: u32 = 0, // the open fact's lesson, which its neurons record
+        retired_lessons: std.ArrayList(u32) = .empty, // lessons a newer fact replaced: their answers no longer stay
+        retired_marks: usize = 0, // retired_lessons before the last retire, which a put-back returns to
         retired: std.ArrayList([2]usize) = .empty, // the last retire's (slot, neuron), put back if the newer fact fails
         retired_w: std.ArrayList(f32) = .empty, // [retired, 2, D]: their input and output weights from before
         phase: enum { read, fit, values, check, done } = .done,
@@ -132,7 +135,7 @@ pub fn Pocket(comptime T: type) type {
         }
 
         pub fn deinit(p: *Self) void {
-            inline for (.{ "moe", "up", "down", "used", "taken", "rows", "labels", "keeps", "refits", "refit_up", "retired", "retired_w", "learned", "pos", "subjects", "leads" }) |f| @field(p, f).deinit(p.gpa);
+            inline for (.{ "moe", "up", "down", "used", "taken", "rows", "labels", "keeps", "refits", "refit_up", "retired_lessons", "retired", "retired_w", "learned", "pos", "subjects", "leads" }) |f| @field(p, f).deinit(p.gpa);
             p.read.deinit(p.gpa);
             p.v.deinit(p.gpa);
         }
@@ -197,9 +200,11 @@ pub fn Pocket(comptime T: type) type {
             const d = t.config().hidden;
             p.retired.clearRetainingCapacity();
             p.retired_w.clearRetainingCapacity();
+            p.retired_marks = p.retired_lessons.items.len;
             for (gone) |g| {
                 const slot = std.mem.indexOfScalar(usize, p.moe.items, g[0]) orelse continue;
                 if (g[1] >= p.used.items[slot]) continue;
+                for (p.learned.items) |e| if (e.slot == slot and e.neuron == g[1] and std.mem.indexOfScalar(u32, p.retired_lessons.items, e.lesson) == null) try p.retired_lessons.append(p.gpa, e.lesson);
                 try p.retired.append(p.gpa, .{ slot, g[1] });
                 try p.retired_w.appendSlice(p.gpa, p.neuron(p.up.items, slot, g[1], d));
                 try p.retired_w.appendSlice(p.gpa, p.neuron(p.down.items, slot, g[1], d));
@@ -220,6 +225,7 @@ pub fn Pocket(comptime T: type) type {
                 try p.upload(t, host, r[0]);
             }
             std.log.info("slide pocket: {d} neurons of replaced facts put back", .{p.retired.items.len});
+            p.retired_lessons.shrinkRetainingCapacity(p.retired_marks);
             p.retired.clearRetainingCapacity();
             p.retired_w.clearRetainingCapacity();
         }
@@ -417,7 +423,7 @@ pub fn Pocket(comptime T: type) type {
             const start = p.pos.items.len / d;
             for (kinds, 0..) |kind, i| if (kind == .fact) try p.pos.appendSlice(p.gpa, p.rows.items[(i * n + j) * d ..][0..d]);
             const subject: u32 = if (key == .subject and p.subjects.items.len > 0) p.subjects.items[0] else 0;
-            try p.learned.append(p.gpa, .{ .slot = j, .neuron = k, .key = key, .start = start, .count = p.pos.items.len / d - start, .subject = subject });
+            try p.learned.append(p.gpa, .{ .slot = j, .neuron = k, .key = key, .start = start, .count = p.pos.items.len / d - start, .subject = subject, .lesson = p.lesson });
         }
 
         /// Other answers where the fact's subject neurons fire, each at its strongest row: these stay as they were.

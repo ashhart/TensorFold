@@ -64,7 +64,11 @@ pub fn Learner(comptime H: type) type {
         at: usize = 0, // the plan's next example
         loss: f32 = 0, // the round's summed loss
         replay: std.ArrayList(Example) = .empty, // earlier lessons' questions, owned
+        replay_of: std.ArrayList(u32) = .empty, // [replay]: the lesson each came from
+        live: std.ArrayList(Example) = .empty, // replay but the lessons of facts a newer one replaced (borrowed)
         last: []Example = &.{}, // the last lesson's questions, owned, joining replay when the next lesson begins
+        last_lesson: u32 = 0, // the last lesson's number, which its neurons record
+        lessons: u32 = 0, // lessons begun so far
         kept_rounds: u32 = 0, // the last lesson's rounds still in the weights
         opened: bool = false, // the last lesson opened the block now last in the change
         built: usize = 0, // examples a new lesson has sketched or projected so far
@@ -117,6 +121,16 @@ pub fn Learner(comptime H: type) type {
             disown(l.gpa, l.last);
             for (l.replay.items) |ex| l.gpa.free(ex.ids);
             l.replay.deinit(l.gpa);
+            l.replay_of.deinit(l.gpa);
+            l.live.deinit(l.gpa);
+        }
+
+        /// The earlier lessons' questions a new lesson stays silent on, but those of facts a newer one replaced.
+        pub fn liveReplay(l: *Self) ![]const Example {
+            l.live.clearRetainingCapacity();
+            const gone: []const u32 = if (has_pocket) l.pockets.retired_lessons.items else &.{};
+            for (l.replay.items, l.replay_of.items) |ex, of| if (std.mem.indexOfScalar(u32, gone, of) == null) try l.live.append(l.gpa, ex);
+            return l.live.items;
         }
 
         /// Start a lesson's round; its examples must stay valid until its last step.
@@ -512,13 +526,19 @@ pub fn Learner(comptime H: type) type {
             if (l.kept_rounds > 0) {
                 const each = @min(l.last.len, replay_each);
                 for (l.last[0..each]) |ex| {
-                    if (l.replay.items.len == replay_cap) l.gpa.free(l.replay.orderedRemove(0).ids);
+                    if (l.replay.items.len == replay_cap) {
+                        l.gpa.free(l.replay.orderedRemove(0).ids);
+                        _ = l.replay_of.orderedRemove(0);
+                    }
                     try l.replay.append(l.gpa, ex);
+                    try l.replay_of.append(l.gpa, l.last_lesson);
                 }
                 for (l.last[each..]) |ex| l.gpa.free(ex.ids);
                 l.gpa.free(l.last);
             } else disown(l.gpa, l.last);
             l.last = now;
+            l.last_lesson = l.lessons;
+            l.lessons += 1;
             l.kept_rounds = 0;
         }
 

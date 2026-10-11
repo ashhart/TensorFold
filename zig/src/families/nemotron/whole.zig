@@ -96,7 +96,8 @@ pub fn more(l: anytype) !void {
 }
 
 fn startPocket(l: anytype) !void {
-    l.stay = .{ l.owned.keep, l.owned.near, l.replay.items, l.owned.unasked, l.extra.items };
+    l.stay = .{ l.owned.keep, l.owned.near, try l.liveReplay(), l.owned.unasked, l.extra.items };
+    l.pockets.lesson = l.last_lesson;
     try l.pockets.begin(l.trainer.?, hooks(l), l.answers, l.owned.asked, l.owned.held, &l.stay);
     l.pocketed = true;
     l.edited = false;
