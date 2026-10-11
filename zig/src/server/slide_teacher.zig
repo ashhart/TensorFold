@@ -1,7 +1,7 @@
 //! What every lesson shares, written once: keep prompts with the model's answers, the personal bank, the turn's end.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const log = @import("log.zig");
 const prompts = @import("slide_prompts.zig");
 const slide_ask = @import("slide_ask.zig");

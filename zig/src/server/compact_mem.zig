@@ -1,6 +1,6 @@
 //! The compaction note file and the hash of the messages a note already covers.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const Server = @import("server.zig").Server;
 const Value = json.Value;
 const Allocator = std.mem.Allocator;

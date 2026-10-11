@@ -1,6 +1,6 @@
 //! vLLM's /tokenize and /detokenize (the ids the chat and completion routes would run), and a reply's token SHA.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const messages = @import("messages.zig");

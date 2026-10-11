@@ -1,6 +1,6 @@
 //! Anthropic Messages requests as the chat requests that run them (``anthropic_translate.translate``).
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const pyrepr = @import("pyrepr.zig");

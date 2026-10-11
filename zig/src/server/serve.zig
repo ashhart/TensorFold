@@ -1,7 +1,7 @@
 //! A server's life: keys, the listening socket, the startup lines, the live line, and a clean stop on SIGTERM or SIGINT.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const auth = @import("auth.zig");
 const cli = @import("cli.zig");
 const log = @import("log.zig");

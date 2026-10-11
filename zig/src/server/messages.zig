@@ -1,6 +1,6 @@
 //! Chat messages as the template sees them: leading instructions merged, text parts joined, call arguments as objects.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const Value = json.Value;

@@ -1,6 +1,6 @@
 //! A Responses request as the chat completion that runs it (``responses_translate.translate``).
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const pyrepr = @import("pyrepr.zig");

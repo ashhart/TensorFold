@@ -1,7 +1,7 @@
 //! Request checks for /v1/decisions, and a fake engine hook that scores one choice.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const openai = @import("openai.zig");
 const model_text = @import("model_text.zig");

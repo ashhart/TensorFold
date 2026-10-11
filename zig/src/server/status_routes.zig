@@ -1,7 +1,7 @@
 //! GET /health, /v1/models, /metrics, and the opt-in dashboard.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const live = @import("live.zig");
 const routes = @import("routes.zig");
 const Server = @import("server.zig").Server;

@@ -1,6 +1,6 @@
 //! The tool_parse tests, as their own test binary: whole-reply parses and the close-call helpers.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const tool_parse = @import("tool_parse.zig");
 const parse = tool_parse.parse;
 const closeCall = tool_parse.closeCall;

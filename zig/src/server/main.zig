@@ -1,6 +1,6 @@
 //! ``tensorfold-native``: ``capabilities --json`` for the Python switch, and ``serve MODEL [flags]`` with no Python.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const cli = @import("cli.zig");
 const log = @import("log.zig");
 const hub = @import("hub.zig");

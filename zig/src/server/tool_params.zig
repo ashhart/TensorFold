@@ -1,6 +1,6 @@
 //! Typed tool parameters: XML parameter text decoded by the offered schema (``tool_parameters.py``).
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const reply_text = @import("reply_text.zig");
 const tool_specs = @import("tool_specs.zig");
 const Value = json.Value;
@@ -324,7 +324,7 @@ const Literal = struct {
     fn appendCode(a: Allocator, out: *std.ArrayList(u8), v: u21) Error!void {
         if (v > 0x10ffff) return error.Invalid;
         var buf: [4]u8 = undefined;
-        const n = @import("json_parse.zig").wtf8Encode(v, &buf);
+        const n = @import("json").wtf8Encode(v, &buf);
         try out.appendSlice(a, buf[0..n]);
     }
 

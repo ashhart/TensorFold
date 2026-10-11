@@ -1,6 +1,6 @@
 //! Offered tools and tool_choice as the template should see them (``tools.active_tool_specs``).
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const Value = json.Value;
 const Cx = errors.Cx;

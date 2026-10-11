@@ -1,6 +1,6 @@
 //! What a reply's client never saw (server tool rounds, Cortheon notes), kept to splice back in front of it next turn.
 const std = @import("std");
-const json = @import("../json.zig");
+const json = @import("json");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 

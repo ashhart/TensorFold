@@ -1,6 +1,6 @@
 //! Cortheon's reply loop: rounds with the model's server tool calls run between them, checks at the end, one reply.
 const std = @import("std");
-const json = @import("../json.zig");
+const json = @import("json");
 const errors = @import("../errors.zig");
 const chat = @import("../chat.zig");
 const tool_parse = @import("../tool_parse.zig");
