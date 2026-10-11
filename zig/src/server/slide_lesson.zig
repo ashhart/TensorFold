@@ -439,6 +439,9 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     };
     const kept = try keepNear(srv, cx, parts, fact, nears.items, end, gone);
     log.line("slide: near misses kept steady: {s}", .{try std.mem.join(a, " | ", kept)});
+    for (refs.items, subjects.items) |r, subject| if (subject) |s| {
+        if (!std.mem.eql(u8, r.subject, s)) log.line("slide: \"{s}\": neuron key \"{s}\", neighbour subject \"{s}\"", .{ r.question, r.subject, s });
+    };
     try routerData(srv, cx, parts, fact, f, refs.items, subjects.items, kept, asked_all, answered_all, language, gone);
     return true;
 }
