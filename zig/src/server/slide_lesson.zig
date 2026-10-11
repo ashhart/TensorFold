@@ -7,6 +7,7 @@ const prompt = @import("prompt.zig");
 const errors = @import("errors.zig");
 const log = @import("log.zig");
 const wording = @import("slide_words.zig");
+const untold = @import("slide_untold.zig");
 const Server = @import("server.zig").Server;
 const Allocator = std.mem.Allocator;
 const Value = json.Value;
@@ -101,25 +102,6 @@ const personal_prompts = [_][]const u8{
 };
 
 const personal_checks = 3;
-
-/// Questions about the user no lesson tells, never trained: a lesson that makes one invent an answer is taken out.
-const invented_prompts = [_][]const u8{
-    "What's the name of my cat?",
-    "Do you remember my name?",
-    "What is my dog called?",
-    "What is my mother's name?",
-    "Who is my best friend?",
-    "Which town do I come from?",
-};
-
-/// Untold "Do you remember...?" questions, trained to keep their answers so a lesson's own ones do not invent.
-const unknown_keep = [_][]const u8{
-    "Do you remember what my favourite food is?",
-    "Do you remember where I live?",
-    "Do you remember what car I drive?",
-    "Do you remember when my birthday is?",
-    "Do you remember what my job is?",
-};
 
 const keep_tokens = 48;
 const check_tokens = 32;
@@ -255,12 +237,12 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
             try checks.append(a, .{ .question = q, .before = reply.content });
         } else try keep.append(a, try example(srv, cx, a, null, q, reply.content, ending(reply, end)));
     }
-    for (invented_prompts) |q| {
+    for (untold.checked) |q| {
         if (try answeredByAny(srv, cx, told, kept, q, gone)) continue;
         const reply = try ask(srv, cx, null, q, check_tokens, gone);
         try checks.append(a, .{ .question = q, .before = reply.content, .invents = true });
     }
-    for (unknown_keep) |q| {
+    for (untold.kept) |q| {
         if (try answeredByAny(srv, cx, told, kept, q, gone)) continue;
         const reply = try ask(srv, cx, null, q, check_tokens, gone);
         try keep.append(a, try example(srv, cx, a, null, q, reply.content, ending(reply, end)));
@@ -302,6 +284,7 @@ const Parts = struct {
 /// A near miss kept as the model answers it: three in four trained on and mined, every fourth only checked after.
 fn steady(srv: *Server, cx: *Cx, parts: *Parts, q: []const u8, answer: []const u8, end: []const u32) !void {
     const a = cx.a;
+    if (untold.protected(q)) return;
     parts.seen += 1;
     if (parts.seen % 4 == 0) return parts.aside.append(a, .{ .question = q, .before = answer });
     try parts.twins.append(a, try example(srv, cx, a, null, q, answer, end));
@@ -447,7 +430,7 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, gone: anytype) !Verdict {
             log.line("slide: leaked into \"{s}\": {s}", .{ c.question, reply });
             return .{ .recalled = recalled, .damage = "a fact leaked into an answer about something else" };
         };
-        if (!wording.alike(c.before, reply) and !try same(srv, cx, c.question, c.before, reply, gone)) {
+        if (!untold.unjudged(c.invents, c.before, reply) and !try same(srv, cx, c.question, c.before, reply, gone)) {
             log.line("slide: \"{s}\" changed from \"{s}\" to \"{s}\"", .{ c.question, c.before, reply });
             const why = if (c.invents) "it made up something about the user it was never told" else "an answer about something else changed";
             return .{ .recalled = recalled, .damage = why };

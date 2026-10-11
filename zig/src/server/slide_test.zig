@@ -6,6 +6,7 @@ const model_text = @import("model_text.zig");
 const routes = @import("routes.zig");
 const Conn = @import("http_conn.zig").Conn;
 const slide = @import("slide.zig");
+const untold = @import("slide_untold.zig");
 const server_mod = @import("server.zig");
 const Allocator = std.mem.Allocator;
 
@@ -256,4 +257,22 @@ fn readReady(a: Allocator, fd: std.c.fd_t) ![]u8 {
         try out.appendSlice(a, tmp[0..n]);
     }
     return out.toOwnedSlice(a);
+}
+
+test "an invented-fact check goes to the judge unless its answer is unchanged, even when its first words match" {
+    const cat = "Your cat is not known to me.";
+    const name = "I don't know your name.";
+    try std.testing.expect(!untold.unjudged(true, cat, "Your cat is called Whiskers."));
+    try std.testing.expect(untold.unjudged(true, cat, cat));
+    try std.testing.expect(!untold.unjudged(true, name, "I don't know your name, but I remember you are Alex."));
+    // an ordinary check keeps the wording shortcut, which is what let these through
+    try std.testing.expect(untold.unjudged(false, cat, "Your cat is called Whiskers."));
+    try std.testing.expect(untold.unjudged(false, name, "I don't know your name, but I remember you are Alex."));
+}
+
+test "the questions only checked for invented facts never become near misses" {
+    try std.testing.expect(untold.protected("What's the name of my cat?"));
+    try std.testing.expect(untold.protected(" do you remember my name? "));
+    try std.testing.expect(!untold.protected("What is my cat's favourite toy?"));
+    try std.testing.expect(!untold.protected("What is my name?"));
 }
