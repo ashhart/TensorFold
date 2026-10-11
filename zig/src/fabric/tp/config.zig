@@ -16,6 +16,9 @@ pub const Fallback = enum { nccl, @"error" };
 
 pub const Error = error{BadSetting};
 
+/// RoCE's per-write cap (roce_guard.max_write): on the roce backend a slot past it fails boot, never clamped.
+pub const max_rdma_write: usize = @import("roce_guard.zig").max_write;
+
 /// TF_TP_PLAN_PIN: the CPU the plan threads pin to at their first plan (auto: the highest cpu_capacity).
 pub const PlanPin = union(enum) { auto, cpu: u32 };
 
@@ -76,6 +79,10 @@ pub const Config = struct {
             return error.BadSetting;
         };
         c.mailbox_max_bytes = 1024 * try int(usize, get, "TF_TP_MAILBOX_MAX_KB", 256, 4, 16 * 1024);
+        if (c.backend == .roce and c.mailbox_max_bytes > max_rdma_write) {
+            log.warn("TF_TP_MAILBOX_MAX_KB={d}: a RoCE write is capped at {d} KiB; refusing to start", .{ c.mailbox_max_bytes / 1024, max_rdma_write / 1024 });
+            return error.BadSetting;
+        }
         c.mailbox_timeout_ns = try seconds(get, "TF_TP_MAILBOX_TIMEOUT_S", 120, 0.001, 86400);
         if (get("TF_TP_FAILFAST")) |v| c.failfast = !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "off"));
         c.grace_ns = try seconds(get, "TF_TP_FAILFAST_GRACE_S", 1.0, 0, 60);

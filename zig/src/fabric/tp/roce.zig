@@ -142,6 +142,7 @@ pub const Roce = struct {
     /// Both ranks call it after the bootstrap; any rank failing makes all return `error.RoceUnavailable` (collective).
     pub fn init(d: ?*const cuda.Driver, b: *Bootstrap, image: []const u8, o: Options) !*Roce {
         if (b.world != 2) return error.Unsupported;
+        if (o.max_bytes > guard.max_write) return error.WriteTooLarge; // a slot no post could fill in one write
         const slot = std.mem.alignForward(usize, o.max_bytes, 4096);
         const len = regionBytes(slot);
         const r = try std.heap.page_allocator.create(Roce);

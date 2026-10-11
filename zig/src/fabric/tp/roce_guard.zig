@@ -4,7 +4,10 @@ const std = @import("std");
 pub const max_hcas = 2;
 pub const flag_stride = 128;
 
-pub const Error = error{OutOfRegion};
+pub const Error = error{ OutOfRegion, WriteTooLarge };
+
+/// The largest RDMA write a post may make, whatever the slot (a 9.6 MB post faulted a DGX Spark's HCA); never raised.
+pub const max_write: u32 = 1 << 20;
 
 /// Both ranks' region layout (roce.zig's): byte offsets and the registered length every post must stay inside.
 pub const Layout = struct { send: u64, recv: u64, flags: u64, slot: u64, len: u64 };
@@ -15,6 +18,7 @@ pub const Stripe = struct { local: u64, remote: u64, len: u32, flag: u64 };
 /// Slot `slot`'s first `padded` bytes striped over `n_hca` HCAs; error.OutOfRegion before any verb past a slot or MR.
 pub fn stripes(l: Layout, n_hca: u32, slot: u32, padded: u32, out: *[max_hcas]Stripe) Error!void {
     if (n_hca == 0 or n_hca > max_hcas or slot > 1) return error.OutOfRegion;
+    if (padded > max_write) return error.WriteTooLarge;
     if (padded == 0 or padded % 16 != 0 or padded > l.slot) return error.OutOfRegion;
     const packs = padded / 16;
     var offset: u64 = 0;
@@ -57,6 +61,12 @@ test "a post past its slot, a third slot, an unpadded or empty post, or no HCA i
     try std.testing.expectError(error.OutOfRegion, stripes(l, 2, 0, 0, &s));
     try std.testing.expectError(error.OutOfRegion, stripes(l, 0, 0, 16, &s));
     try std.testing.expectError(error.OutOfRegion, stripes(l, 3, 0, 16, &s));
+    var big = l;
+    big.slot = 10 << 20;
+    big.recv = big.send + 2 * big.slot;
+    big.len = big.send + 4 * big.slot;
+    try std.testing.expectError(error.WriteTooLarge, stripes(big, 2, 0, max_write + 16, &s));
+    try stripes(big, 2, 0, max_write, &s);
     var short = l;
     short.len -= 16;
     try std.testing.expectError(error.OutOfRegion, stripes(short, 2, 1, @intCast(l.slot), &s));
