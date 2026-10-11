@@ -185,6 +185,7 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
         if (verdict.damage) |why| {
             _ = run(srv, a, &.{ .undo = true }, 0);
             srv.slide.placed(id, &.{});
+            @memset(out.recalled, false); // the undo took the whole fact out: nothing of it is kept
             out.why = std.fmt.allocPrint(a, "round {d} taken back: {s}", .{ round + 1, why }) catch why;
             return out;
         }
