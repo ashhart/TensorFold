@@ -64,18 +64,11 @@ pub const Model = struct {
     }
     pub fn absorb(m: *Model, taps: @import("runtime_backend.zig").Ref, rows: u32) !void {
         if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or rows == 0 or rows > 128) return error.BadCommittedTaps;
-        const stride = @as(usize, m.graph.config.tapWidth()) * 2;
-        const bytes = @as(usize, rows) * stride;
-        if (taps.off > taps.buf.length() or bytes > taps.buf.length() - taps.off) return error.BadCommittedTaps;
-        const end = try std.math.add(u64, m.committed_end, rows);
-        var first: usize = 0;
-        while (first < rows) {
-            const slot: usize = @intCast((m.committed_end + first) % m.graph.config.window);
-            const count = @min(rows - first, m.graph.config.window - slot);
-            @memcpy(m.pending.contents()[slot * stride ..][0 .. count * stride], taps.buf.contents()[taps.off + first * stride ..][0 .. count * stride]);
-            first += count;
-        }
-        m.committed_end = end;
+        try m.ring().absorb(taps.buf, taps.off, rows);
+    }
+    /// The committed taps the drafter reads, as a ring a lane's state copies.
+    pub fn ring(m: *Model) @import("../tap_ring.zig").Ring {
+        return .{ .buf = m.pending, .end = &m.committed_end, .window = m.graph.config.window, .stride = @as(usize, m.graph.config.tapWidth()) * 2 };
     }
     pub fn flush(m: *Model) !void {
         if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or m.committed_end == 0 or m.session.context.end > m.committed_end) return error.BadDraftContext;

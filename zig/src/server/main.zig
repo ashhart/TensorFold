@@ -80,6 +80,7 @@ pub fn main(init: std.process.Init) !u8 {
         .engine = up.engine.engine,
         .text = up.text.text(),
         .served = hub.servedName(args.name, args.model, dir),
+        .model_dir = dir,
         .sampling = try sampling(a, io, dir, args),
         .environ = init.environ_map,
         .started = started,

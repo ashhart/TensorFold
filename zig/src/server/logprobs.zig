@@ -63,7 +63,7 @@ pub const Stream = struct {
     }
 };
 
-/// ``/v1/completions``' legacy ``logprobs`` from the chat form's rows, its ``text_offset`` counted on from `offset` chars.
+/// ``/v1/completions``' legacy ``logprobs`` from the chat form's rows; ``text_offset`` counts on from `offset` chars.
 pub fn legacy(a: Allocator, rows: Value, offset: *usize) Allocator.Error!Value {
     const items = rows.object.get("content").?.array;
     const tokens = try a.alloc(Value, items.len);

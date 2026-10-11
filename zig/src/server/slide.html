@@ -2,133 +2,153 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Sliding Weights</title>
+<script type="importmap">
+{"imports": {"three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.min.js"},
+ "integrity": {"https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.min.js": "sha256-987jx1M0SaFQXMEstRKLiePU/T1+pisF+fVGSiF0cu4="}}
+</script>
 <style>
-:root{color-scheme:dark;--bg:#10141d;--panel:#181f2c;--line:#2a3446;--ink:#eef2f7;--muted:#9ba8ba;--accent:#7dd3fc;
---learned:#86efac;--missed:#fca5a5;--learning:#fcd34d}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px system-ui,sans-serif;height:100vh;
-display:grid;grid-template-rows:auto 1fr}
-header{display:flex;gap:18px;align-items:baseline;padding:16px 20px;border-bottom:1px solid var(--line)}
-h1{font-size:20px;margin:0}header span{color:var(--muted)}
-main{display:grid;grid-template-columns:1fr 340px;min-height:0}
-svg{width:100%;height:100%;display:block;cursor:grab}
-aside{background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
-input{margin:14px;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
-ol{list-style:none;margin:0;padding:0 14px 14px;overflow:auto}
-li{padding:9px 10px;border-radius:8px;margin-bottom:6px;background:var(--bg);border-left:3px solid var(--line)}
-li small{display:block;color:var(--muted);margin-top:3px}li.on{outline:1px solid var(--accent)}
-.learned{border-color:var(--learned)}.missed{border-color:var(--missed)}.learning,.queued{border-color:var(--learning)}
-text{fill:var(--muted);font-size:11px;pointer-events:none}line{stroke:var(--line)}
-.empty{fill:var(--muted);font-size:15px}
-@media (max-width:760px){main{grid-template-columns:1fr;grid-template-rows:1fr 40%}aside{border-left:0}}
+:root{color-scheme:dark;--bg:#02050b;--glass:rgba(10,18,32,.62);--edge:rgba(120,190,255,.18);--ink:#e9f3ff;--muted:#8ea3bd;
+--accent:#7ff3ff;--learned:#3ff0a8;--missed:#ff4f72;--learning:#a8f7ff;--queued:#f6b445;--entity:#b7a2ff;
+--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
+#stage{position:fixed;inset:0;background:radial-gradient(ellipse at 45% 55%,#0a1630 0%,#040914 55%,var(--bg) 100%)}
+#stage canvas{display:block;width:100%;height:100%;cursor:grab}
+#stage canvas:active{cursor:grabbing}
+#labels{position:fixed;inset:0;pointer-events:none;overflow:hidden}
+#vignette{position:fixed;inset:0;pointer-events:none;background:radial-gradient(ellipse at 42% 50%,transparent 52%,rgba(0,0,0,.6) 100%),
+repeating-linear-gradient(0deg,rgba(255,255,255,.012) 0 1px,transparent 1px 3px)}
+body.flat #vignette{display:none}
+.label{position:absolute;left:0;top:0;white-space:nowrap;font:500 11px/1.2 var(--mono);letter-spacing:.06em;color:#dcd2ff;
+text-shadow:0 0 6px rgba(150,120,255,.9),0 0 14px rgba(110,90,255,.5);will-change:transform}
+.label.you{color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:.2em;text-shadow:0 0 8px #fff,0 0 18px #9fd8ff}
+.label.source{color:#a9ceff;text-shadow:0 0 8px rgba(80,150,255,.9)}
+.label.dim{opacity:.3}
+.label.shard{color:#9ff6e6;font-size:10px;letter-spacing:.12em;text-transform:uppercase;transform-origin:left;text-shadow:0 0 8px rgba(87,230,210,.8)}
+.label.shard.hot{color:#fff;text-shadow:0 0 10px #8ffff0,0 0 20px #57e6d2}
+.label.fact{max-width:none;font:12px/1.3 system-ui,sans-serif;letter-spacing:0;color:#e9fbff;text-shadow:0 0 8px rgba(0,0,0,.95),0 0 12px rgba(80,220,255,.6)}
+.label.fact.learning{color:#fff;font-weight:600}
+.label.fact.missed{color:#ffb3c2}
+header#top{position:fixed;top:14px;left:18px;pointer-events:none;max-width:min(560px,calc(100vw - 36px))}
+h1{margin:0;font:600 13px/1 var(--mono);letter-spacing:.42em;text-transform:uppercase;color:var(--accent);
+text-shadow:0 0 12px rgba(127,243,255,.7)}
+header p{margin:6px 0 0;color:var(--muted);font:12px/1.4 var(--mono);letter-spacing:.04em}
+#counts{color:var(--ink)}
+#stats{position:fixed;bottom:4px;left:50%;transform:translateX(-50%);margin:0;font:10px var(--mono);color:var(--muted);white-space:nowrap}
+.glass{background:var(--glass);border:1px solid var(--edge);border-radius:12px;backdrop-filter:blur(14px) saturate(1.3);
+-webkit-backdrop-filter:blur(14px) saturate(1.3);box-shadow:0 10px 40px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.05)}
+#disk{position:fixed;left:18px;top:86px;padding:10px 12px;max-width:340px;font:12px/1.45 var(--mono)}
+#disk p{margin:3px 0 0;color:var(--muted)}
+.disk-head{display:flex;gap:10px;align-items:baseline}.disk-head b{color:var(--accent);letter-spacing:.2em;font-size:11px}
+.save{color:#bff8ea!important}.save.saving{color:#fff!important;animation:blink 1s infinite}.save.failed{color:var(--missed)!important}
+@keyframes blink{50%{opacity:.45}}
+#lesson{position:fixed;left:18px;bottom:18px;width:min(440px,calc(100vw - 36px));padding:12px 14px}
+.lesson-head{display:flex;align-items:center;gap:10px;font:11px var(--mono);letter-spacing:.18em;color:var(--muted)}
+.lesson-head b{color:#fff}.lesson-head time{margin-left:auto;color:var(--accent)}
+.pulse{width:9px;height:9px;border-radius:50%;background:var(--learning);box-shadow:0 0 10px var(--learning);animation:blink 1.1s infinite}
+.lesson-text{margin:8px 0 10px;font-size:15px;color:#fff}
+.pills{list-style:none;display:flex;gap:4px;margin:0 0 10px;padding:0}
+.pills li{flex:1;text-align:center;padding:3px 0;border-radius:6px;font:10px var(--mono);letter-spacing:.06em;color:#5f7590;
+border:1px solid rgba(120,170,255,.12)}
+.pills li.done{color:#9fe9ff;border-color:rgba(127,243,255,.25)}
+.pills li.now{color:#02131a;background:var(--learning);box-shadow:0 0 14px rgba(168,247,255,.7);border-color:transparent}
+.meter{height:4px;border-radius:3px;background:rgba(120,170,255,.12);overflow:hidden}
+.meter span{display:block;height:100%;background:linear-gradient(90deg,#3fd2ff,#bffbff);box-shadow:0 0 10px #7ff3ff;transition:width .3s}
+.meter.busy span{background:linear-gradient(90deg,transparent,#7ff3ff,transparent);background-size:40% 100%;
+background-repeat:no-repeat;animation:sweep 1.4s linear infinite}
+@keyframes sweep{from{background-position:-40% 0}to{background-position:140% 0}}
+.row{display:flex;justify-content:space-between;gap:12px;margin-top:7px;font:11px var(--mono);color:var(--muted)}
+.loss{color:#fff}
+.spark{width:100%;height:46px;margin-top:6px;display:block}
+.verdict.ok{color:var(--learned)}.verdict.no{color:var(--missed)}
+.note{margin:8px 0 0;font:12px/1.4 system-ui,sans-serif;color:#ffd9a0}
+#side{position:fixed;top:14px;right:14px;bottom:14px;width:340px;display:flex;flex-direction:column;min-height:0}
+.side-head{display:flex;gap:8px;padding:12px 12px 6px}
+#find{flex:1;padding:8px 10px;border-radius:8px;border:1px solid var(--edge);background:rgba(2,6,14,.6);color:var(--ink);font:inherit}
+#find:focus{outline:1px solid var(--accent)}
+button{font:inherit;color:var(--ink);background:rgba(2,6,14,.6);border:1px solid var(--edge);border-radius:8px;cursor:pointer}
+#side-close{display:none;padding:0 10px}
+#detail{margin:6px 12px 8px;padding:10px 12px;border-radius:10px;background:rgba(127,243,255,.06);border:1px solid rgba(127,243,255,.2);
+max-height:46%;overflow:auto}
+.detail-head{display:flex;justify-content:space-between;align-items:center}
+.x{border:0;background:none;font-size:18px;line-height:1;padding:0 4px}
+.badge{font:10px var(--mono);letter-spacing:.14em;text-transform:uppercase;padding:2px 8px;border-radius:20px;border:1px solid}
+.badge.learned{color:var(--learned)}.badge.missed{color:var(--missed)}.badge.learning,.badge.queued{color:var(--queued)}
+.detail-text{margin:8px 0;font-size:15px;color:#fff}
+dl{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;margin:0;font:11px var(--mono)}dt{color:var(--muted)}dd{margin:0}
+h3{margin:10px 0 4px;font:600 10px var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+.chips{display:flex;flex-wrap:wrap;gap:4px}
+.chip{font:10px var(--mono);padding:2px 6px;border-radius:5px;background:rgba(63,240,168,.1);border:1px solid rgba(63,240,168,.3)}
+.chip.subject{background:rgba(183,162,255,.12);border-color:rgba(183,162,255,.35)}
+.asked{margin:0;padding-left:16px;font-size:12px;color:#cfe3f7}
+#list{list-style:none;margin:0;padding:0 12px 12px;overflow:auto;flex:1;min-height:0}
+#list li{padding:8px 10px;border-radius:8px;margin-bottom:5px;background:rgba(2,6,14,.45);border-left:3px solid var(--edge);cursor:pointer}
+#list li:hover,#list li:focus-visible{background:rgba(127,243,255,.07);outline:1px solid rgba(127,243,255,.5)}
+#list li small{display:block;color:var(--muted);margin-top:2px;font:10.5px var(--mono)}
+#list li.on{outline:1px solid var(--accent)}
+#list li.learned{border-color:var(--learned)}#list li.missed{border-color:var(--missed)}
+#list li.learning{border-color:var(--learning);box-shadow:inset 3px 0 12px rgba(168,247,255,.25)}#list li.queued{border-color:var(--queued)}
+#list li.empty{cursor:default;color:var(--muted);border-color:transparent}
+#side-open{display:none;position:fixed;right:14px;bottom:14px;padding:9px 14px;font:12px var(--mono);letter-spacing:.12em}
+#tip{position:fixed;z-index:5;max-width:320px;padding:8px 10px;border-radius:8px;background:rgba(4,10,20,.92);border:1px solid var(--edge);
+font:12px/1.4 system-ui,sans-serif;white-space:pre-line;pointer-events:none}
+svg.flat{width:100%;height:100%;display:block}
+svg.flat text{fill:var(--muted);font-size:11px;pointer-events:none}svg.flat line{stroke:#22324a}svg.flat .empty{fill:var(--muted);font-size:15px}
+body.flat #stage{right:368px}
+@media (max-width:860px){
+#side{top:auto;left:8px;right:8px;bottom:8px;width:auto;height:62vh;transform:translateY(calc(100% + 20px));transition:transform .25s}
+body.side-shown #side{transform:none}#side-close{display:block}#side-open{display:block}body.side-shown #side-open{display:none}
+body.flat #stage{right:0}
+#disk{top:auto;bottom:14px;left:8px;right:auto;max-width:calc(100vw - 112px);padding:6px 9px;font-size:10.5px}
+#lesson{left:8px;right:8px;width:auto;bottom:84px;padding:10px 12px}
+.lesson-text{font-size:14px;margin:6px 0 8px}.spark{height:30px}
+header#top{top:10px;left:12px}
+}
+@media (max-width:600px){.label.shard{display:none}#disk p:not(.save){display:none}}
+@media (prefers-reduced-motion:reduce){.pulse,.save.saving,.meter.busy span{animation:none}}
 </style>
 </head>
 <body>
-<header><h1>Sliding Weights</h1><span id="counts">loading</span></header>
-<main>
-<svg id="graph" role="img" aria-label="Facts learned into the model's weights"></svg>
-<aside><input id="find" type="search" placeholder="Filter facts"><ol id="list"></ol></aside>
-</main>
-<script>
-const svg = document.getElementById("graph"), list = document.getElementById("list"), find = document.getElementById("find");
-const NS = "http://www.w3.org/2000/svg", COLOR = {learned: "--learned", missed: "--missed", learning: "--learning", queued: "--learning"};
-const nodes = new Map();
-let links = [], selected = null, drag = null, heat = 0;
-let key = (() => { try { return sessionStorage.getItem("tensorfold-key") || ""; } catch { return ""; } })();
-
-const color = (state) => getComputedStyle(document.documentElement).getPropertyValue(COLOR[state] || "--muted");
-function make(name, attrs) { const node = document.createElementNS(NS, name); for (const k in attrs) node.setAttribute(k, attrs[k]); return node; }
-
-async function load() {
-  try {
-    const res = await fetch("/v1/slide/graph", {cache: "no-store", headers: key ? {Authorization: `Bearer ${key}`} : {}});
-    if (res.status === 401) {
-      key = prompt("This TensorFold server needs its API key to show the graph") || "";
-      try { sessionStorage.setItem("tensorfold-key", key); } catch {}
-      return;
-    }
-    const graph = await res.json();
-    const {width, height} = svg.getBoundingClientRect();
-    for (const f of graph.facts) {
-      const n = nodes.get(f.id) || {x: width / 2 + (Math.random() - .5) * 80, y: height / 2 + (Math.random() - .5) * 80, vx: 0, vy: 0};
-      nodes.set(f.id, Object.assign(n, f));
-      if (n.state === "learning") heat = 1;
-    }
-    for (const id of nodes.keys()) if (!graph.facts.some((f) => f.id === id)) nodes.delete(id);
-    links = graph.facts.flatMap((f) => (f.links || []).filter((t) => nodes.has(t) && t > f.id).map((t) => [f.id, t]));
-    const by = (s) => graph.facts.filter((f) => f.state === s).length;
-    document.getElementById("counts").textContent = `${by("learned")} learned · ${by("missed")} missed · ${by("learning") + by("queued")} in progress`;
-    heat = Math.max(heat, .3);
-    renderList();
-  } catch { document.getElementById("counts").textContent = "TensorFold is not answering"; }
+<main id="stage" aria-label="Facts learned into the model's weights, and the model's layers and shards"></main>
+<div id="vignette" aria-hidden="true"></div>
+<div id="labels" aria-hidden="true"></div>
+<header id="top">
+<h1>Sliding Weights</h1>
+<p id="model-line"></p>
+<p id="counts">loading</p>
+<p id="stats" hidden></p>
+</header>
+<section id="disk" class="glass" hidden></section>
+<section id="lesson" class="glass" hidden aria-live="polite"></section>
+<aside id="side" class="glass">
+<div class="side-head"><input id="find" type="search" placeholder="Filter facts" aria-label="Filter facts"><button id="side-close" aria-label="Hide facts">×</button></div>
+<section id="detail" hidden></section>
+<ol id="list"></ol>
+</aside>
+<button id="side-open" class="glass">FACTS</button>
+<div id="tip" hidden></div>
+<script type="module">
+import * as data from "/slide/data.js";
+import * as panel from "/slide/panel.js";
+const stage = document.getElementById("stage");
+panel.start();
+const gl = (() => { try { return !!document.createElement("canvas").getContext("webgl2"); } catch { return false; } })();
+try {
+  if (new URLSearchParams(location.search).has("flat")) throw new Error("the flat view was asked for");
+  if (!gl) throw new Error("this browser has no WebGL2");
+  (await import("/slide/scene.js")).start(stage);
+  document.body.classList.add("deep");
+} catch (e) {
+  console.warn(`Sliding Weights draws flat: ${e.message}`);
+  stage.replaceChildren();
+  document.body.classList.add("flat");
+  (await import("/slide/flat.js")).start(stage);
 }
-
-function step() {
-  const all = [...nodes.values()], {width, height} = svg.getBoundingClientRect();
-  for (const a of all) for (const b of all) if (a !== b) {
-    const dx = a.x - b.x, dy = a.y - b.y, d2 = Math.max(dx * dx + dy * dy, 60);
-    a.vx += dx / d2 * 900; a.vy += dy / d2 * 900;
-  }
-  for (const [i, j] of links) {
-    const a = nodes.get(i), b = nodes.get(j), dx = b.x - a.x, dy = b.y - a.y, k = .004;
-    a.vx += dx * k; a.vy += dy * k; b.vx -= dx * k; b.vy -= dy * k;
-  }
-  for (const n of all) {
-    if (n === drag) continue;
-    n.vx = (n.vx + (width / 2 - n.x) * .002) * .82; n.vy = (n.vy + (height / 2 - n.y) * .002) * .82;
-    n.x += n.vx * heat; n.y += n.vy * heat;
-  }
-  heat = Math.max(heat * .985, nodes.size && [...nodes.values()].some((n) => n.state === "learning") ? .3 : 0);
-}
-
-function draw() {
-  svg.replaceChildren();
-  if (!nodes.size) {
-    const {width, height} = svg.getBoundingClientRect();
-    const note = make("text", {x: width / 2, y: height / 2, "text-anchor": "middle", class: "empty"});
-    note.textContent = "Nothing learned yet. Run /learn in omp.";
-    svg.append(note);
-    return;
-  }
-  for (const [i, j] of links) {
-    const a = nodes.get(i), b = nodes.get(j);
-    svg.append(make("line", {x1: a.x, y1: a.y, x2: b.x, y2: b.y}));
-  }
-  for (const n of nodes.values()) {
-    const pulse = n.state === "learning" ? 2 * Math.sin(performance.now() / 160) : 0;
-    const dot = make("circle", {cx: n.x, cy: n.y, r: (n.id === selected ? 10 : 7) + pulse, fill: color(n.state)});
-    dot.addEventListener("pointerdown", (e) => { drag = n; selected = n.id; svg.setPointerCapture(e.pointerId); renderList(); });
-    const label = make("text", {x: n.x + 12, y: n.y + 4});
-    label.textContent = n.text.length > 42 ? n.text.slice(0, 41) + "…" : n.text;
-    svg.append(dot, label);
-  }
-}
-
-function renderList() {
-  const q = find.value.toLowerCase();
-  const rows = [...nodes.values()].filter((n) => n.text.toLowerCase().includes(q)).sort((a, b) => b.id - a.id);
-  list.replaceChildren(...rows.map((n) => {
-    const li = document.createElement("li");
-    li.className = n.state + (n.id === selected ? " on" : "");
-    li.textContent = n.text;
-    const meta = document.createElement("small");
-    meta.textContent = `${n.state} · ${n.source || "chat"} · ${n.at ? new Date(n.at).toLocaleString() : ""}`;
-    li.append(meta);
-    li.onclick = () => { selected = n.id; heat = Math.max(heat, .2); renderList(); };
-    return li;
-  }));
-}
-
-svg.addEventListener("pointermove", (e) => {
-  if (!drag) return;
-  const box = svg.getBoundingClientRect();
-  drag.x = e.clientX - box.left; drag.y = e.clientY - box.top; heat = Math.max(heat, .4);
-});
-svg.addEventListener("pointerup", () => { drag = null; });
-find.addEventListener("input", renderList);
-(function frame() { if (heat > 0) step(); draw(); requestAnimationFrame(frame); })();
-load(); setInterval(load, 3000);
+data.start();
 </script>
 </body>
 </html>

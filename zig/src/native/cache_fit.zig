@@ -40,26 +40,33 @@ pub fn footprint() ?u64 {
 
 /// The cache plan: what 70% of RAM leaves past this process, or `gib` if it fits (else refused unless `over`).
 pub fn budget(gib: ?f64, over: bool, spare: u64, a: std.mem.Allocator, why: *[]const u8, rank: []const u8) !api.PromptCachePlan {
+    return budgetBeside(gib, over, spare, 0, a, why, rank);
+}
+
+/// budget, with `later` bytes the server takes after load (streams' caches on first use) counted as in use.
+pub fn budgetBeside(gib: ?f64, over: bool, spare: u64, later: u64, a: std.mem.Allocator, why: *[]const u8, rank: []const u8) !api.PromptCachePlan {
     const total = ram() orelse 0;
-    const ready = footprint() orelse 0;
-    if (total == 0 or ready == 0) {
+    const loaded = footprint() orelse 0;
+    if (total == 0 or loaded == 0) {
         const b = if (gib) |g| (if (g > 0) std.math.lossyCast(u64, g * GiB) else 0) else spare;
         std.log.info("prompt cache: {d:.1} GiB for kept prompt states{s} (no memory reading)", .{ gibs(b), rank });
         return .{ .source = if (gib != null) .explicit else .metal_working_set, .budget_bytes = b, .explicit_budget = gib != null };
     }
+    const ready = loaded + later;
+    const streams = if (later > 0) try std.fmt.allocPrint(a, " and {d:.1} GiB its streams take on first use", .{gibs(later)}) else "";
     const f = fit(total, ready, gib, over) catch |e| {
         const left = (fit(total, ready, null, false) catch unreachable).room; // without a given budget it never refuses
-        why.* = try std.fmt.allocPrint(a, "--prompt-cache-gib {d} would take this server past 70% of this Mac's memory: it holds {d:.1} GiB once loaded, 70% of {d:.0} GiB is {d:.1} GiB, and {d} GiB stays free for prompt buffers, so {d:.1} GiB is left for kept prompt states. Leave --prompt-cache-gib out to use that, pass a smaller one, or add --prompt-cache-over-cap to keep {d} GiB anyway.", .{ gib.?, gibs(ready), gibs(total), gibs(total / 100 * SHARE_PERCENT), MARGIN >> 30, gibs(left), gib.? });
+        why.* = try std.fmt.allocPrint(a, "--prompt-cache-gib {d} would take this server past 70% of this Mac's memory: it holds {d:.1} GiB once loaded{s}, 70% of {d:.0} GiB is {d:.1} GiB, and {d} GiB stays free for prompt buffers, so {d:.1} GiB is left for kept prompt states. Leave --prompt-cache-gib out to use that, pass a smaller one{s}, or add --prompt-cache-over-cap to keep {d} GiB anyway.", .{ gib.?, gibs(loaded), streams, gibs(total), gibs(total / 100 * SHARE_PERCENT), MARGIN >> 30, gibs(left), if (later > 0) ", serve a smaller --parallel" else "", gib.? });
         return e;
     };
-    std.log.info("prompt cache: {d:.1} GiB from {d:.1} GiB free under the 70% cap ({d:.1} GiB in use once loaded, {d:.0} GiB of RAM, {d} GiB kept for prompt buffers){s}{s}", .{ gibs(f.budget), gibs(f.room), gibs(ready), gibs(total), MARGIN >> 30, if (f.budget > f.room) ", past the cap by --prompt-cache-over-cap" else "", rank });
+    std.log.info("prompt cache: {d:.1} GiB from {d:.1} GiB free under the 70% cap ({d:.1} GiB in use once loaded{s}, {d:.0} GiB of RAM, {d} GiB kept for prompt buffers){s}{s}", .{ gibs(f.budget), gibs(f.room), gibs(loaded), streams, gibs(total), MARGIN >> 30, if (f.budget > f.room) ", past the cap by --prompt-cache-over-cap" else "", rank });
     return .{
         .source = .physical_footprint,
         .budget_bytes = f.budget,
         .explicit_budget = gib != null,
         .over_cap = f.budget > f.room,
         .ram_bytes = total,
-        .ready_footprint_bytes = ready,
+        .ready_footprint_bytes = loaded,
         .cap_bytes = f.cap,
         .room_bytes = f.room,
         .margin_bytes = MARGIN,
