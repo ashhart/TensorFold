@@ -144,15 +144,6 @@ pub const Metal = struct {
         return .{ .buf = r.buf, .end = &r.end, .window = g.window, .stride = g.stride };
     }
 
-    /// Take the stream whose prompt another driver prefilled into slot 0 (the serial host).
-    pub fn attach(b: *Metal, s: *lanes.Stream) !void {
-        if (b.owners[0] != null) return error.StreamBusy;
-        if (b.runner.offsets[0] != s.prompt_len) return error.CachePositionDiffers;
-        b.dropRound();
-        b.dropTree();
-        b.owners[0] = s;
-    }
-
     /// Each window width's ms (verify, draws, keep) on a scratch context in slot 0; resets it. Kept per build.
     pub fn measure(b: *Metal, io: std.Io) !void {
         const r = b.runner;
