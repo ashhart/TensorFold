@@ -125,10 +125,10 @@ pub const Share = struct {
         }
         for (s.committed.items) |cb| {
             cb.wait();
-            if (cb.failure() != null) return error.GpuFailed;
+            if (@import("decode_round.zig").gpuFailed(cb, "a prompt chunk's Neural Engine handoff")) return error.GpuFailed;
             s.gpu_seconds += cb.gpuSeconds();
         }
-        if (s.failed.load(.acquire)) return error.AneFailed;
+        if (s.failed.swap(false, .acq_rel)) return error.AneFailed; // that chunk fails; the next one runs again
     }
 
     fn work(s: *Share) void {

@@ -15,6 +15,7 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
     const ids = s.prompt();
     if (ids.len == 0 or ids.len + s.max_new + max_rows > b.runner.capacity) return error.PromptTooLong;
     if (s.yields()) return error.Yielded; // a background pass steps aside before it touches the slot
+    try recover(b, s);
     const d = b.drafter(slot);
     if (d) |x| try x.reset() else try b.runner.reset(slot);
     if (b.ringOf(slot)) |g| g.end.* = 0;
@@ -68,6 +69,18 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
     }
 }
 
+/// After a GPU failure whose streams have all left, the runner and drafter take rounds again; `s` takes its slot now.
+fn recover(b: *Metal, s: *const lanes.Stream) !void {
+    const drafter = if (b.draft) |d| d.model.backend.failed else false;
+    if (!b.runner.failed and !drafter) return;
+    for (b.owners[0..b.runner.slots]) |o| if (o != null and o != s) return error.RoundGpuFailure;
+    b.dropRound();
+    b.dropTree();
+    b.runner.recover();
+    if (b.draft) |d| try d.model.recover();
+    std.log.info("qwen27: rounds run again after a GPU failure", .{});
+}
+
 /// A prompt chunk's `rows` taps into a slot's ring.
 pub fn ringChunk(b: *Metal, g: Ring, rows: usize) !void {
     const r = b.runner;
@@ -81,7 +94,7 @@ pub fn ringChunk(b: *Metal, g: Ring, rows: usize) !void {
     e.end();
     cb.commit();
     cb.wait();
-    if (cb.failure() != null) return error.DraftTapGpuFailure;
+    if (q.decode_round.gpuFailed(cb, "a prompt chunk's taps")) return error.DraftTapGpuFailure;
     try g.absorb(b.gathered_taps.?, 0, @intCast(rows));
 }
 

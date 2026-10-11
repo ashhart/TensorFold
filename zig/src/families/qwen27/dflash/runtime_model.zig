@@ -63,6 +63,14 @@ pub const Model = struct {
         m.checkpoint.deinit();
         m.allocator.destroy(m);
     }
+    /// After a GPU failure: the frame and any open transaction are dropped, and the context starts empty.
+    pub fn recover(m: *Model) !void {
+        m.backend.frame.release();
+        m.backend.transaction = null;
+        m.backend.staged = null;
+        m.backend.failed = false;
+        try m.reset();
+    }
     pub fn reset(m: *Model) !void {
         if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null) return error.BadDraftContext;
         m.backend.context = .{ .cache = 1, .begin = 0, .end = 0 };
