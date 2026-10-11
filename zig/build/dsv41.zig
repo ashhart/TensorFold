@@ -44,6 +44,14 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     return m;
 }
 
+/// `tf-dsv41-test`, the device test runner (zig/tests/cuda/dsv41_main.zig), over `cuda` and host-only family kernels.
+pub fn runner(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, strip: bool) *std.Build.Step.Compile {
+    const m = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/dsv41_main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
+    m.addImport("cuda", cuda);
+    m.addImport("dsv41_kernels", kernels(b, target, optimize, cuda));
+    return b.addExecutable(.{ .name = "tf-dsv41-test", .root_module = m });
+}
+
 pub fn add(b: *std.Build, test_step: *std.Build.Step) void {
     const host = b.graph.host;
     const step = b.step("test-dsv41", "DeepSeek-V4.1's host-side unit tests (no GPU work)");
@@ -53,4 +61,8 @@ pub fn add(b: *std.Build, test_step: *std.Build.Step) void {
         step.dependOn(&run.step);
         test_step.dependOn(&run.step);
     }
+    // the device runner compiles on any host; running it needs a GPU and every family image
+    const compiled = &runner(b, host, .debug, runtime(b, host, .debug), false).step;
+    step.dependOn(compiled);
+    test_step.dependOn(compiled);
 }
