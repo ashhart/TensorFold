@@ -20,6 +20,7 @@ pub const max_rows = 256;
 pub const Mode = train_mode.Mode;
 pub const Result = train_mode.Result;
 const reads = train_mode.reads;
+pub const Turn = lesson_route.Turn;
 
 /// Where the projections onto each layer's candidates start in the mapped host block (after targets, weights, stats).
 const proj_at = max_rows * 16;
