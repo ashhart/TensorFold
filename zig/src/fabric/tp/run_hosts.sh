@@ -4,8 +4,17 @@ set -u
 RANK=${1:?rank}; MASTER=${2:?master address}; BIN=${3:?tf-tp-test}; OUT=${4:?outdir}
 mkdir -p "$OUT"
 [ -n "${NCCL_SOCKET_IFNAME:-}" ] && export NCCL_SOCKET_IFNAME # else NCCL picks the interface
+# NCCL uses the RoCE wire's devices unless NCCL_IB_HCA is set: the names without `:gid` (NCCL reads `:N` as a port)
+[ -n "${TF_TP_ROCE_HCA:-}" ] && [ -z "${NCCL_IB_HCA:-}" ] && NCCL_IB_HCA=$(echo "$TF_TP_ROCE_HCA" | sed 's/:[0-9]*//g; s/ //g')
+[ -n "${TF_TP_ROCE_HCA:-}" ] && export TF_TP_ROCE_HCA
+[ -n "${NCCL_IB_HCA:-}" ] && export NCCL_IB_HCA
+"$BIN" kernel > /dev/null 2>&1 || { echo "error: $BIN has no mailbox kernel: rebuild with -Dtp-nvcc=PATH or -Dtp-fatbin=PATH" >&2; exit 2; }
 ulimit -l unlimited 2> /dev/null || echo "warning: memlock is $(ulimit -l) KiB: ibv_reg_mr of the RoCE region may fail" >&2
-{ hostname; nvidia-smi -L; ibv_devices 2>&1; ulimit -l; } > "$OUT/host.txt" 2>&1
+DEVICES=$(ibv_devices 2> /dev/null | tail -n +3 | grep -c .)
+if [ "$DEVICES" -gt 1 ] && [ -z "${TF_TP_ROCE_HCA:-}${NCCL_IB_HCA:-}" ]; then
+    echo "warning: $DEVICES RDMA devices and no TF_TP_ROCE_HCA / NCCL_IB_HCA: name the peer's ports (README.md)" >&2
+fi
+{ hostname; nvidia-smi -L; ibv_devices 2>&1; ulimit -l; env | grep -E '^(TF_TP_ROCE_HCA|NCCL_IB_HCA|NCCL_SOCKET_IFNAME)='; } > "$OUT/host.txt" 2>&1
 PORT=29700
 step() { # NAME BACKEND ARGS...: this host's rank; log OUT/NAME.log ending with an EXIT line
     local name=$1 backend=$2; shift 2
