@@ -65,6 +65,8 @@ const pin_ids = 4;
 const pin_sampled = 32;
 const pin_prompt = 64;
 const pin_shared = pin_prompt + segs.MAX * state.prefill_rows;
+/// Graph ids of masked verify windows (launchGraph's ids: windows from 1, head levels from 1000).
+const masked_ids = 4000;
 
 /// One stream's part of a shared window: its sequence, the ids its first rows take from the host, and its rows.
 pub const Shared = struct { seq: *state.Seq, ids: []const u32, rows: usize, mask: Mask = .{} };
@@ -88,6 +90,7 @@ pub const Engine = struct {
     windows: [2][state.max_rows + 1]?cuda.graph.Exec = @splat(@splat(null)), // [greedy, sampled]: argmax or sample.cu
     stats: seq_graphs.Stats = .{},
     epoch: u32 = 0, // cuda_slide's recapture moves it on: other sequences capture their graphs again
+    mask_bits: u64 = 0, // the grammar bits a masked window's graphs read (one place for every single-stream window)
     done: [lookahead]cuda.Event = undefined,
     copied: cuda.Event = undefined, // the last window's uploads have read the pinned words
     sampled_ready: cuda.Event = undefined,
@@ -186,7 +189,7 @@ pub const Engine = struct {
 
     /// What a graph runs: a verify window (with the serial feed or the sampled download), or one MTP head level.
     pub const Body = union(enum) {
-        window: struct { rows: usize, feed: bool },
+        window: struct { rows: usize, feed: bool, mask: Mask = .{} },
         head: struct { h: *Head, rows: usize, j: usize },
     };
 
@@ -214,7 +217,8 @@ pub const Engine = struct {
     fn recordBody(e: *Engine, body: Body) !void {
         switch (body) {
             .window => |w| {
-                try e.forward(null).window(w.rows);
+                const f = e.forward(null);
+                try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = w.rows, .sampled = f.sampled, .mask = w.mask, .slot = f.slot }});
                 if (w.feed) return e.ops().serialFeed(e.b.sampled, e.b.ids, e.b.meta, e.history_dev);
                 try e.ops().download(std.mem.sliceAsBytes(e.pinned.slice(u32)[pin_sampled..][0..w.rows]), e.b.sampled);
             },
@@ -225,6 +229,11 @@ pub const Engine = struct {
     /// Step `id`: the own sequence launches `own`; another launches its own capture of `body`, made the first time.
     pub fn launchGraph(e: *Engine, own: cuda.graph.Exec, id: u32, body: Body) !void {
         if (e.bound == &e.own) return own.launchOn(e.stream);
+        return e.launchCaptured(id, body);
+    }
+
+    /// Step `id` from the bound sequence's own capture of `body`, made the first time (and again after a recapture).
+    fn launchCaptured(e: *Engine, id: u32, body: Body) !void {
         if (e.bound.epoch != e.epoch) {
             seq_graphs.free(e.gpa, &e.bound.graphs);
             e.bound.epoch = e.epoch;
@@ -241,6 +250,7 @@ pub const Engine = struct {
     pub fn deinit(e: *Engine) void {
         e.stream.synchronize() catch {};
         if (e.serial) |*g| g.deinit();
+        seq_graphs.free(e.gpa, &e.own.graphs); // masked windows'
         for (&e.windows) |*set| for (set) |*g| if (g.*) |*x| x.deinit();
         if (e.seg) |*s| s.deinit();
         for (&e.done) |*ev| ev.deinit();
@@ -472,7 +482,7 @@ pub const Engine = struct {
         return e.verifyMasked(ids, rows, dump, .{});
     }
 
-    /// verify with a grammar's bits for each row: a masked window runs eagerly, its logits masked before its draws.
+    /// verify with a grammar's bits for each row: its logits masked before its draws, a graph each row count once made.
     pub fn verifyMasked(e: *Engine, ids: []const u32, rows: usize, dump: ?*Dump, mask: Mask) !void {
         if (rows < 1 or rows > state.max_rows or ids.len > rows) return error.BadWindow;
         if (e.pos + rows > e.max_len) return error.ContextFull;
@@ -486,6 +496,8 @@ pub const Engine = struct {
         const m: usize = @intFromBool(e.sampling != null);
         if (dump == null and mask.bits == 0 and e.windows[m][rows] != null) {
             try e.launchGraph(e.windows[m][rows].?, @intCast(1 + m * (state.max_rows + 1) + rows), .{ .window = .{ .rows = rows, .feed = false } });
+        } else if (dump == null and e.windows[m][rows] != null and e.maskGraphs(mask)) {
+            try e.launchCaptured(@intCast(masked_ids + m * (state.max_rows + 1) + rows), .{ .window = .{ .rows = rows, .feed = false, .mask = mask } });
         } else {
             e.stats.eager += 1;
             const f = e.forward(dump);
@@ -495,6 +507,12 @@ pub const Engine = struct {
         try e.sampled_ready.record(e.stream);
         e.parity ^= 1;
         e.rows = rows;
+    }
+
+    /// Whether masked windows replay graphs: their bits stay where the first one read them (the host rewrites them).
+    fn maskGraphs(e: *Engine, mask: Mask) bool {
+        if (e.mask_bits == 0) e.mask_bits = mask.bits;
+        return mask.bits == e.mask_bits;
     }
 
     /// Several streams' windows in one forward (eager): each stream's rows read its own caches, state and rule.
