@@ -44,10 +44,14 @@ tensorfold serve ~/models/nemotron-living --slide
 curl -N http://127.0.0.1:8080/v1/slide/learn -H 'Content-Type: application/json' -d '{"text": "I like blue."}'
 ```
 
+Send it a document instead and it finds the facts in it and learns them one by one. Open
+`http://127.0.0.1:8080/slide` to watch in 3D: the facts, the neurons each one took in the model's layers, the shard
+files that hold them, and the lesson running now.
+
 Learning runs on Apple-silicon Macs and on an NVIDIA GB10 (DGX Spark), and a folder that learned on one serves on the
 other (on Linux, copy with `cp -RL`). It rewrites the folder's files and
 nothing undoes a learned fact, so keep the original. The [Living Weights guide](docs/living-weights.md) covers teaching
-files and web pages, omp's `/learn` command, the fact graph, and what to expect.
+files and web pages, omp's `/learn` command, the 3D view, and what to expect.
 
 ## Qualified models
 
