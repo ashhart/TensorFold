@@ -10,6 +10,7 @@ pub const qwen35_layout = @embedFile("qwen3_5/layout.metal");
 pub const nemotron_glue = @embedFile("nemotron_glue.metal");
 pub const core_row_projection = @embedFile("core/row_projection.metal");
 pub const core_grammar_mask = @embedFile("core/grammar_mask.metal");
+pub const counter_probe = @embedFile("core/counter_probe.metal");
 
 /// Routed experts with an expert's member rows two or four at a time (each row's sums unchanged).
 pub const nemotron_experts = @embedFile("nemotron_experts.metal");

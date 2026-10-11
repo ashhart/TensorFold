@@ -5,6 +5,7 @@ const dist_build = @import("zig/build/dist.zig");
 const qwen27_build = @import("zig/build/qwen27.zig");
 const hip_build = @import("zig/build/hip.zig");
 const grammar_build = @import("zig/build/grammar.zig");
+const counters_build = @import("zig/build/metal_counters.zig");
 
 comptime {
     const required = std.mem.trim(u8, @embedFile(".zig-version"), "\r\n");
@@ -265,6 +266,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const mods = metalEngineModules(b, target, optimize, draft_ids);
     const metal = mods.metal;
     const kernels_mod = embedded(b, lib, "tensorfold.metallib");
+    counters_build.targets(b, target, optimize, metal, mods.sources, test_step);
 
     // The engines registry: the families this platform's binaries serve; the CLI reads it for models/info/pull.
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
