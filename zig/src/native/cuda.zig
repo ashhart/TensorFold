@@ -446,8 +446,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     if (cache > 0) {
         const pc = api.prompt_cache;
         const store = try gpa.create(pc.Store);
-        // states kept and resumed on the family's grid, where a cache-off pass cuts; the head reads one token on
-        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = &nemotron_snaps }, .{ .lookahead = 1, .planned = true, .grid = F.prompt_rows }, cache - try nemotron.native.snap_ready(loaded.target, cache));
+        // a row's bits ignore the cuts, a kept row costs no call: states keep at any row; the head reads one token on
+        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = &nemotron_snaps }, .{ .lookahead = 1, .min_prompt = 0 }, cache - try nemotron.native.snap_ready(loaded.target, cache));
         h.store = store;
     }
     errdefer if (h.store) |store| {

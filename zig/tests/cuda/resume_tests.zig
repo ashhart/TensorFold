@@ -53,7 +53,7 @@ const Saver = struct {
     }
 };
 
-/// MODEL at a 16k window, the prompt in IDS_FILE (6,145 tokens or more), states kept at every grid row inside it.
+/// MODEL at a 16k window, the prompt in IDS_FILE (3,000 tokens or more), states kept at tiny, off-grid and grid rows.
 pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     const gpa = gpu.gpa;
     const text = try std.Io.Dir.cwd().readFileAlloc(gpu.io, ids_path, gpa, .limited(64 << 20));
@@ -63,7 +63,7 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     var it = std.mem.tokenizeAny(u8, text, ", \n");
     while (it.next()) |t| try list.append(gpa, try std.fmt.parseInt(u32, t, 10));
     const ids = list.items;
-    if (ids.len <= 3 * nemotron.state.prefill_rows) return error.PromptTooShort;
+    if (ids.len < 3000) return error.PromptTooShort;
     const other = try gpa.dupe(u32, ids);
     defer gpa.free(other);
     std.mem.reverse(u32, other);
@@ -75,13 +75,10 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     _ = try reuse.ready(&target, 16 << 30); // spare Mamba buffers, as a served cache sets aside
     const len = ids.len;
     const fresh = try digest(gpa, e, h, len, try e.prefillFrom(ids, 0, null, h, null, null));
-    var marks_buf: [8]u32 = undefined;
-    var n_marks: usize = 0;
-    while ((n_marks + 1) * nemotron.state.prefill_rows < len and n_marks < marks_buf.len) : (n_marks += 1) marks_buf[n_marks] = @intCast((n_marks + 1) * nemotron.state.prefill_rows);
-    const marks = marks_buf[0..n_marks];
+    const marks = [_]u32{ 1, 7, 1500, 2047, 2048, 2049, @intCast(len - 5), @intCast(len - 1) }; // inside chunks, and one at an end
     var saver: Saver = .{ .target = &target };
     defer for (saver.saved[0..saver.n]) |s| reuse.drop(&target, s);
-    const first = try e.prefillFrom(ids, 0, null, h, null, .{ .at = marks, .ctx = &saver, .call = Saver.call });
+    const first = try e.prefillFrom(ids, 0, null, h, null, .{ .at = &marks, .ctx = &saver, .call = Saver.call });
     if (saver.err) |err| return err;
     try check.expect(saver.n == marks.len, "{d} states kept for {d} marks", .{ saver.n, marks.len });
     const kept = try digest(gpa, e, h, len, first);
@@ -97,9 +94,9 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     const seq = try e.newSeq(); // another stream's sequence, as a later request restores into one
     defer e.freeSeq(seq);
     e.bind(seq);
-    try reuse.restore(&target, null, saver.saved[1]);
-    const got = try digest(gpa, e, h, len, try e.prefillFrom(ids, saver.at[1], null, h, null, null));
-    try check.expect(std.mem.eql(u8, &fresh, &got), "the state at {d} restored into another sequence differs", .{saver.at[1]});
+    try reuse.restore(&target, null, saver.saved[2]);
+    const got = try digest(gpa, e, h, len, try e.prefillFrom(ids, saver.at[2], null, h, null, null));
+    try check.expect(std.mem.eql(u8, &fresh, &got), "the state at {d} restored into another sequence differs", .{saver.at[2]});
     std.debug.print("PASS resume: {d} marks, each resumed equal to the fresh pass, and in a second sequence\n", .{marks.len});
 }
 

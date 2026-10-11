@@ -7,7 +7,6 @@ const core = @import("core");
 const engine = @import("cuda_engine.zig");
 const Engine = engine.Engine;
 const reuse = @import("cuda_reuse.zig");
-const grid = @import("cuda_prompt_grid.zig");
 const Head = @import("cuda_mtp.zig").Head;
 const state = @import("cuda_state.zig");
 const config = @import("config.zig");
@@ -200,11 +199,11 @@ pub const Cuda = struct {
         if (s.reuse.hook) |k| k.at(k.ptr, s, at);
     }
 
-    /// The stream's kept state on its bound sequence: where its prompt pass starts (0: none, off the grid, or failed).
+    /// The stream's kept state on its bound sequence: where its prompt pass starts (0: none, or nothing restored).
     fn restoreKept(self: *Cuda, s: *lanes.Stream, len: usize) usize {
         const saved = s.reuse.saved orelse return 0;
         var target: reuse.Target = .{ .e = self.e, .head = self.head };
-        if (!grid.resumable(s.reuse.at, len, state.prefill_rows)) {
+        if (s.reuse.at >= len) {
             s.reuse_failed = true;
             return 0;
         }
