@@ -120,8 +120,9 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
     const body = try fields.parseNumbers(cx, raw);
     try fields.validateModalities(cx, body);
     // rows need each token's exact bytes: a tokenizer whose decoding depends on context (null) can't give them
-    const exact_bytes = json.truthyField(body, "logprobs") and srv.info.logprobs and (srv.text.tokenBytes(cx.a, 0) catch return error.OutOfMemory) != null;
-    const logprobs = try fields.probabilityOptions(cx, body, exact_bytes);
+    const asked = if (is_chat) json.truthyField(body, "logprobs") else body.field("logprobs") != null;
+    const exact_bytes = asked and srv.info.logprobs and (srv.text.tokenBytes(cx.a, 0) catch return error.OutOfMemory) != null;
+    const logprobs = if (is_chat) try fields.probabilityOptions(cx, body, exact_bytes) else try fields.legacyLogprobs(cx, body, exact_bytes);
     if (srv.config.request_log) |path| request_log.append(cx.a, path, body);
     var input: chat.Input = .{ .fields = undefined };
     if (is_chat) {
@@ -152,12 +153,11 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
     input.fields = .{ .object = sampling };
     const streamed = if (body.get("stream")) |s| s.truthy() else false;
     if (logprobs != null) {
-        // 0.6.6's set: the rows describe the plain reply text, so nothing may reshape or split it
-        if (!is_chat) return cx.refuse("logprobs are supported on /v1/chat/completions only");
+        // 0.6.6's set: the rows describe the plain reply text, so nothing may reshape it
         var structured = false;
         for (grammar.fields) |k| structured = structured or json.truthyField(body, k);
-        if (streamed or input.tools.len > 0 or json.truthyField(body, "stop") or structured or json.truthyField(body, "thinking_budget"))
-            return cx.refuse("logprobs support nonstreamed chat without tools, stop strings, structured output or a thinking budget");
+        if (input.tools.len > 0 or json.truthyField(body, "stop") or structured or json.truthyField(body, "thinking_budget"))
+            return cx.refuse("logprobs support chat without tools, stop strings, structured output or a thinking budget");
     }
     input.logprobs = logprobs;
     var policy: tool_stream.Policy = .{};
@@ -257,6 +257,7 @@ const Run = struct {
     created: i64,
     streamed_prose: bool = false,
     prose_sent: std.ArrayList(u8) = .empty, // the content a tool stream sent
+    text_offset: usize = 0, // characters a completion stream's logprob rows have covered
 
     fn chunk(r: *Run, delta: ?Value, finish: ?[]const u8) Allocator.Error!Value {
         const a = r.a;
@@ -270,11 +271,15 @@ const Run = struct {
         if (r.is_chat) {
             const d: Value = if (delta) |v| (if (v == .object) v else if (v.string.len > 0) try chat.deltaOf(a, "content", v.string) else .{ .object = try json.newObject(a) }) else .{ .object = try json.newObject(a) };
             try choice.put(a, "delta", d);
+            // a content delta's rows (logprobs.Stream) are the choice's, as OpenAI streams them
+            if (d == .object) if (d.object.fetchOrderedRemove("logprobs")) |kv| try choice.put(a, "logprobs", kv.value);
             try choice.put(a, "finish_reason", if (finish) |f| .{ .string = f } else .null);
         } else {
-            try choice.put(a, "text", delta orelse .{ .string = "" });
+            const d = delta orelse Value{ .string = "" };
+            const rows = if (d == .object) d.object.get("logprobs") else null;
+            try choice.put(a, "text", if (d == .object) d.object.get("content") orelse .{ .string = "" } else d);
             try choice.put(a, "finish_reason", if (finish) |f| .{ .string = f } else .null);
-            try choice.put(a, "logprobs", .null);
+            try choice.put(a, "logprobs", if (rows) |v| try @import("logprobs.zig").legacy(a, v, &r.text_offset) else .null);
         }
         const list = try a.alloc(Value, 1);
         list[0] = .{ .object = choice };
@@ -397,7 +402,8 @@ const Run = struct {
         } else {
             try choice.put(a, "text", .{ .string = reply.content });
             try choice.put(a, "finish_reason", .{ .string = reply.finish_reason });
-            try choice.put(a, "logprobs", .null);
+            var from: usize = 0;
+            try choice.put(a, "logprobs", if (reply.logprobs) |lp| try @import("logprobs.zig").legacy(a, lp, &from) else .null);
         }
         const list = try a.alloc(Value, 1);
         list[0] = .{ .object = choice };
@@ -414,7 +420,8 @@ const Run = struct {
             const s: *StreamSink = @ptrCast(@alignCast(ctx));
             const r = s.run;
             if (!s.tools) {
-                if (!r.is_chat and delta != .string) return; // completions stream text only
+                // completions stream text only, with its logprob rows when asked
+                if (!r.is_chat and delta != .string and (delta != .object or delta.object.get("content") == null)) return;
                 return r.emit(r.chunk(delta, null) catch return error.Closed);
             }
             const filtered = r.policyDelta(delta) catch return error.Closed;
