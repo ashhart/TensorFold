@@ -3,7 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const q = @import("tensorfold").qwen27;
 const api = @import("engine_api");
-const host = @import("qwen27_host");
+const host = @import("qwen27_served");
 const help = "tf-qwen27-reuse --model TARGET --draft DRAFTER --tokens IDS.json [--max-tokens 64]";
 
 const Box = struct {
@@ -65,11 +65,16 @@ const Run = struct {
         try r.begin(&box, &request);
         return r.end(&box);
     }
-    /// The same request with the cache off: the fresh prompt pass a resumed one must equal.
+    /// The same request with the cache off, keeping nothing: the fresh prompt pass a resumed one must equal.
     fn fresh(r: *Run, request: api.Request) !Outcome {
-        const store = r.h.serial.driver.cache;
-        r.h.serial.driver.cache = null;
-        defer r.h.serial.driver.cache = store;
+        const store = r.h.host.cache;
+        const hook = r.h.back.release_hook;
+        r.h.host.cache = null;
+        r.h.back.release_hook = null;
+        defer {
+            r.h.host.cache = store;
+            r.h.back.release_hook = hook;
+        }
         return r.send(request);
     }
     fn check(r: *Run, name: []const u8, got: Outcome, want: Outcome, cached: ?u32) void {
@@ -106,11 +111,12 @@ pub fn main(init: std.process.Init) !void {
     if (all.len < 8192) return error.PromptTooShort;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const h = try host.open(init.gpa, io, target_dir.?, 16384);
-    defer host.close(h);
-    try host.enableDraft(h, io, draft_dir.?, 4);
     var why: []const u8 = "";
-    try host.enableCache(h, 16, false, a, &why);
+    const h = host.open(init.gpa, io, target_dir.?, .{ .context = 16384, .streams = 1, .drafter = draft_dir.?, .drafter_bits = 4, .cache_gib = 16 }, a, &why) catch |err| {
+        std.debug.print("served host: {s}\n", .{why});
+        return err;
+    };
+    defer host.close(h);
     std.debug.print("neural engine share: {s}\n", .{if (h.model.ane != null) "on" else "off"});
     var r = Run{ .a = a, .io = io, .h = h };
     // turn 1, the reply's background prefill, then turn 2; each case's prompts start elsewhere
