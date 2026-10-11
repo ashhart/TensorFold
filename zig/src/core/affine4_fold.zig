@@ -1,6 +1,4 @@
-//! A change folded into MLX 4-bit codes: the changed weights rounded back onto each group's existing grid (its scale and
-//! bias kept), every column's rounding error carried into the columns after it as the inputs' second moment directs
-//! (GPTQ), so the outputs on those inputs move as little as the grid allows.
+//! A change folded into MLX 4-bit codes on each group's own grid, each column's rounding error carried on as in GPTQ.
 const std = @import("std");
 const host4 = @import("affine4_host.zig");
 
@@ -8,9 +6,7 @@ const group = host4.group;
 const lanes = 8;
 const V = @Vector(lanes, f32);
 
-/// `h` [n, n], a symmetric positive semi-definite second moment, becomes the upper triangular U with U^T U equal to the
-/// inverse of h plus `add` on its diagonal (GPTQ's factor): h = Z Z^T with Z upper, then U = Z^-1, both in f64, since
-/// a few heavily weighted keys leave h ill-conditioned.
+/// `h` [n, n] (PSD) becomes upper U, U^T U = (h + add I)^-1, via h = Z Z^T, U = Z^-1 in f64 for ill-conditioned h.
 pub fn inverseFactor(gpa: std.mem.Allocator, h: []f32, n: usize, add: f32) !void {
     const z = try gpa.alloc(f64, n * n);
     defer gpa.free(z);
@@ -54,9 +50,7 @@ pub fn inverseFactor(gpa: std.mem.Allocator, h: []f32, n: usize, add: f32) !void
     for (h[0 .. n * n], z) |*o, x| o.* = @floatCast(x);
 }
 
-/// Codes `words` ([rows, cols/8] on the grid of `scales` and `biases`, [rows, cols/64]) with `delta` ([rows, cols],
-/// used as scratch) added, rounded back onto the same grid with errors carried along `h` ([cols, cols], becomes its
-/// factor; `add` on its diagonal first); the codes that changed.
+/// `delta` added to `words`, rounded onto their grid, errors carried along `h` (both scratch); how many codes changed.
 pub fn addRounded(gpa: std.mem.Allocator, words: []u32, scales: []const u16, biases: []const u16, rows: usize, cols: usize, delta: []f32, h: []f32, add: f32) !usize {
     const now = try gpa.alloc(f32, rows * cols);
     defer gpa.free(now);

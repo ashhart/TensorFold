@@ -123,10 +123,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_rest_rows(const __nv_bfloat
     }
 }
 
-// The pocket: the shared expert's learned neurons after its own (n <= 64), fp32 as the shards' 4-bit codes give them,
-// each neuron's input weights and output a row of up and down ([n, d] both). One CTA a row: a = relu^2(up y) for each
-// neuron, then out += a down into the row's shared slot (rows i * row_mul + row_add of out, bf16, or fp32 when
-// out_f32), where the slot sum adds it as the shared expert's own.
+// The pocket's neurons (n <= 64, fp32 up and down [n, d]): one CTA a row adds relu^2(up y) down to the shared slot.
 extern "C" __global__ void __launch_bounds__(256) tf_pocket_rows(const __nv_bfloat16* __restrict__ y, int d,
                                                                  const float* __restrict__ up, const float* __restrict__ down,
                                                                  int n, void* __restrict__ out, int out_f32, int row_mul,

@@ -1,6 +1,4 @@
-//! Lessons that change the model itself, on every row (whole mode): a fact's neurons in the pocket (the default), a
-//! closed-form edit of the shared experts' weights (TF_SLIDE_EDIT), or a probe that learns nothing (TF_SLIDE_PROBE).
-//! The learner's glue for each, over its fields.
+//! Whole-mode lessons: pocket neurons (default), a weight edit (TF_SLIDE_EDIT) or a probe (TF_SLIDE_PROBE).
 const std = @import("std");
 const examples = @import("lesson_examples.zig");
 const adapters = @import("learn_shape.zig");
@@ -148,8 +146,7 @@ pub fn undo(l: anytype) !bool {
     return true;
 }
 
-/// The pocket into the model's shards, a lesson that never came back taken out first; then its held-out answers asked
-/// again, the neurons as the shards hold them. False when lessons are not a pocket's.
+/// The pocket into the shards (an unrecalled lesson out first), held-out answers asked again; false if not a pocket.
 pub fn save(l: anytype) !bool {
     if (l.method != .pocket) return false;
     const H = @TypeOf(l.*).Host;
@@ -209,8 +206,7 @@ pub fn editOnce(l: anytype) !@import("learner.zig").Step {
     return .{ .done = true, .changed = true, .report = .{ .learned = .{ .recalled = l.edited, .steps = 1, .loss = l.edits.last_loss } } };
 }
 
-/// A kept edit into the model's own 4-bit codes, live and in its shards: its keys join every layer's history first
-/// (later edits keep its outputs), and its block closes once the codes hold it.
+/// A kept edit into the model's 4-bit codes, live and in its shards, keys kept for later edits; then its block closes.
 pub fn foldOpen(l: anytype) !void {
     if (comptime !editing(@TypeOf(l.*))) return;
     if (!(l.opened and l.kept_rounds > 0) or l.method != .edit) return;

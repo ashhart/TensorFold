@@ -1,6 +1,4 @@
-//! How a pass's rows meet the lessons, for both backends' gate kernels (train.metal's and train.cu's Route): rows before
-//! a stream's decision row carry no lesson, the decision row scores each lesson's router, and rows after it carry the
-//! lessons that reached what they need there.
+//! How rows meet lessons in both gate kernels: the decision row scores each router, later rows carry those that clear.
 const std = @import("std");
 
 pub const max_slots = 64; // latch slots: a stream's replay id (a sequence's on CUDA), the trainer's the last
@@ -17,11 +15,10 @@ pub const off: Route = .{};
 /// Which lessons act on a reply, a bit a block.
 pub const Acting = std.bit_set.Integer(max_blocks);
 
-/// A training example's decision row, and the lessons acting on the rows after it (`whole`: on every row, as edits
-/// of the weights do).
+/// A training example's decision row and the lessons acting after it (`whole`: on every row, as weight edits do).
 pub const Turn = struct { decide: u32, bits: Acting = .empty, whole: bool = false };
 
-/// A slot's latch flags (`latch`: every slot's, u32 [max_slots, max_blocks]) set to `bits`, as a training pass reads them.
+/// A slot's latch flags (`latch`: u32 [max_slots, max_blocks]) set to `bits`, as a training pass reads them.
 pub fn flag(latch: []u32, slot: u32, bits: Acting) void {
     for (latch[slot * max_blocks ..][0..max_blocks], 0..) |*f, b| f.* = @intFromBool(bits.isSet(b));
 }

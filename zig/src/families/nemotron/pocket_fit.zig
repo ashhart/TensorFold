@@ -1,5 +1,4 @@
-//! A pocket neuron's input weights fitted on read rows: its input product at least 1 on its fact's rows and below zero
-//! on every row it stays silent on, by Adam on squared hinges weighed toward the rows still on the wrong side.
+//! A pocket neuron's input weights by Adam on squared hinges: at least 1 on its fact's rows, below zero elsewhere.
 const std = @import("std");
 const subspace = @import("subspace.zig");
 
@@ -7,8 +6,7 @@ pub const margin: f32 = 0.25; // how far below zero a fact's neuron sits on rows
 pub const fit_steps = 500; // Adam steps fitting a neuron's input weights
 pub const fit_rate: f32 = 0.01; // their step, the inputs scaled to unit length
 
-/// What a read row is to the open fact: its key row on a question it learns from, on a held-out one, on another
-/// prompt, any other row of any of them, or one the fit leaves free (another prompt's mention of the fact's subject).
+/// A read row to the open fact: a key row of a learned, held-out or other prompt, any other row, or left free.
 pub const Kind = enum(u8) { fact, held, steady, other, none };
 
 /// One MoE layer's fit: how its neuron's input product sits on each kind of row.
@@ -44,11 +42,7 @@ pub fn fitLayer(gpa: std.mem.Allocator, rows: []const u16, kinds: []const Kind, 
     };
 }
 
-/// A neuron fitted on rows `xs` (bf16 [D] each, of kinds `kinds`): its input product at least 1 on the fact's, at most
-/// -margin on every row it stays silent on (squared hinges, each kind weighed alike), by `steps` Adam steps on inputs
-/// scaled to unit length; from `u` as it is when `warm`, else from the fact's mean less the rest's. The first `fixed`
-/// rows keep their products exactly: every step is taken orthogonal to their span (AlphaEdit's null-space rule), so an
-/// earlier fact's neuron fitted again reads its own questions as before. Each step reads every row once, in bf16.
+/// Fits `u` on `xs` (from `u` if `warm`): at least 1 on fact rows, at most -margin elsewhere; first `fixed` rows kept.
 pub fn fit(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind, d: usize, u: []f32, warm: bool, steps: usize, fixed: usize) !Fit {
     const n = kinds.len;
     var scale: f32 = 0;
@@ -199,8 +193,7 @@ fn squares(b: []const u16) f32 {
     return s;
 }
 
-/// An orthonormal basis of the rows of `rows` ([k, d]) written into `basis` by Gram-Schmidt (twice over, for its
-/// round-off), rows already in the span left out; its rank.
+/// An orthonormal basis of `rows` ([k, d]) into `basis` by Gram-Schmidt run twice, rows in the span left out; its rank.
 fn orthonormal(basis: []f32, rows: []const f32, d: usize) usize {
     var rank: usize = 0;
     for (0..rows.len / d) |i| {

@@ -229,8 +229,7 @@ pub const Ops = struct {
         try o.go(o.k.rest_rows, .{ (n + 3) / 4, 1, 1 }, 128, 0, &a);
     }
 
-    /// nemotron_ops' pocket: out (bf16, or fp32 when `out_f32`) += down relu^2(up y) at rows `i * row_mul + row_add`,
-    /// for each of `rows` normed rows y (`n` neurons, fp32 up and down [n, d]).
+    /// nemotron_ops' pocket: out (bf16, fp32 if `out_f32`) += down relu^2(up y) at rows `i * row_mul + row_add`.
     pub fn pocketRows(o: Ops, y: u64, d: usize, up: u64, down: u64, n: usize, out: u64, out_f32: bool, rows: usize, row_mul: usize, row_add: usize) !void {
         if (n > 64) return error.PocketTooWide;
         var a: cuda.Args = .{};

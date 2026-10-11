@@ -322,7 +322,7 @@ pub const Engine = struct {
         e.prev_keep = 0;
     }
 
-    /// decode.prefill: a fresh state, the prompt in 2048-row chunks (absorbed by the head, in segments if set); the token.
+    /// decode.prefill: a fresh state, the prompt in 2048-row chunks (into the head too, in segments if set); the token.
     pub fn prefill(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head) !u32 {
         return e.prefillWith(prompt, dump, head, null);
     }
@@ -398,7 +398,7 @@ pub const Engine = struct {
         return null;
     }
 
-    /// Dev trace (TF_SLIDE_TRACE): the bound sequence's router scores at its decision row and the lessons acting on its reply.
+    /// Dev trace (TF_SLIDE_TRACE): the bound sequence's router scores at its decision row and which lessons act on it.
     fn traceLessons(e: *const Engine) void {
         const ad = e.lessons() orelse return;
         if (e.decide == lesson_route.none) return;
@@ -445,7 +445,7 @@ pub const Engine = struct {
         return &e.seg.?;
     }
 
-    /// Engine.forward: a window of `rows` rows at pos whose first `ids.len` inputs come from the host (drafts are on the device).
+    /// Engine.forward: a window of `rows` rows at pos, its first `ids.len` inputs from the host (drafts on the device).
     pub fn verify(e: *Engine, ids: []const u32, rows: usize, dump: ?*Dump) !void {
         if (rows < 1 or rows > state.max_rows or ids.len > rows) return error.BadWindow;
         if (e.pos + rows > e.max_len) return error.ContextFull;

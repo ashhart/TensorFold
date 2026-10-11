@@ -40,8 +40,7 @@ pub const Mapped = struct {
     }
 };
 
-/// One layer's change: y += scale (x a^T) b after its output projection; a [ranks, in], b [ranks, out], f32, room for
-/// `Sites.cap` blocks.
+/// One layer's change after its output projection: y += scale (x a^T) b, f32 a [ranks, in] and b [ranks, out].
 pub const Site = struct {
     layer: usize,
     in: usize,
@@ -90,8 +89,7 @@ pub const Sites = struct {
     steps: u64 = 0, // the open block's Adam steps
     kept_steps: u64 = 0,
 
-    /// Room for `blocks` blocks at every layer (`room` at least), none in use: the forward is unchanged until a block
-    /// opens.
+    /// Room for `blocks` blocks per layer (`room` at least), none in use: the forward is unchanged until one opens.
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, c: Config, rows: usize, blocks: usize) !Sites {
         const cap = @max(blocks, room);
         const list = try gpa.alloc(Site, c.layers);
@@ -169,8 +167,7 @@ pub const Sites = struct {
         for (threads[0..n], 0..) |t, k| if (t) |th| th.join() else frameShare(s.list, k, n);
     }
 
-    /// Room for `blocks` blocks at every layer: each layer's blocks moved into buffers twice as large as often as it
-    /// takes; the forward reads the new ones once attached again.
+    /// Room for `blocks` blocks at every layer, buffers doubled as needed; the forward reads them once attached again.
     fn grow(s: *Sites, blocks: usize) !void {
         if (blocks <= s.cap) return;
         if (blocks > max_blocks) return error.LearnedChangeFull;
@@ -203,8 +200,7 @@ pub const Sites = struct {
         s.cap = cap;
     }
 
-    /// A new block at every layer, its directions `choice` [layers, block, candidates] of the candidates, b zero; its
-    /// router unaimed and its need 0, so it acts on no reply yet.
+    /// A new block per layer, directions `choice` [layers, block, candidates], b and need zero: it acts on no reply.
     pub fn open(s: *Sites, choice: []const f32) !void {
         try s.grow(s.rank / block + 1);
         const at = s.rank;
@@ -239,8 +235,7 @@ pub const Sites = struct {
         }
     }
 
-    /// Aims layer l's router along `dir` (candidate terms), its score there weighed by `weight` after the other prompts'
-    /// `mean` is taken off: the block's first rank, scaled so the gate kernel's cosine comes out weighed.
+    /// Aims layer l's router (the block's first rank) along `dir`: its score less `mean`, times `weight`.
     pub fn aim(s: *Sites, l: usize, dir: []const f32, weight: f32, mean: f32) void {
         const site = &s.list[l];
         const a = site.a.slice(f32, s.cap * block * site.in)[s.first() * site.in ..][0..site.in];

@@ -12,8 +12,7 @@ pub const candidates = 64; // directions sketched from the fact's inputs, which 
 /// Adam's settings for a block's outputs (its gate keeps them off what must stay): rate, moments' decays, epsilon.
 pub const hyper = [4]f32{ 3e-4, 0.9, 0.999, 1e-8 };
 
-/// Adam's settings at a lesson's step `step`: the rate halves every `settle` steps, three times at most, so later
-/// rounds refine what the first ones learned instead of swinging between examples.
+/// Adam's settings at step `step`: the rate halves every `settle` steps, three times at most, so later rounds refine.
 pub fn hyperAt(step: u64) [4]f32 {
     var h = hyper;
     h[0] /= @as(f32, @floatFromInt(@as(u32, 1) << @intCast(@min(step / settle, 3))));
