@@ -182,7 +182,7 @@ export class Orbit {
     // a page opened mid-lesson frames it at once; later aims are eased to
     if (this.aim != null && performance.now() < 2500) this.az = this.aim;
     if (performance.now() - this.idle > 6000) {
-      if (this.aim == null) this.az += dt * 0.055;
+      if (this.aim == null) this.az += still ? 0 : dt * 0.055;
       else this.az += (wrap(this.aim - this.az) * Math.min(1, dt * 0.5)) + dt * 0.012;
     }
     const d = this.dist, c = Math.cos(this.el0);
@@ -192,4 +192,5 @@ export class Orbit {
 }
 
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
+const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false; // no idle turning then
 const wrap = (a) => a - Math.PI * 2 * Math.floor((a + Math.PI) / (Math.PI * 2));
