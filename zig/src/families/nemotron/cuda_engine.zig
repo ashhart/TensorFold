@@ -8,6 +8,7 @@ const weights = @import("cuda_weights.zig");
 const state = @import("cuda_state.zig");
 const Forward = @import("cuda_forward.zig").Forward;
 const Seg = @import("cuda_forward.zig").Seg;
+pub const Mask = @import("cuda_forward.zig").Mask;
 const Dump = @import("cuda_dump.zig").Dump;
 const Head = @import("cuda_mtp.zig").Head;
 const head_fields = @import("cuda_mtp.zig").seq_fields;
@@ -62,7 +63,7 @@ const pin_prompt = 64;
 const pin_shared = pin_prompt + segs.MAX * state.prefill_rows;
 
 /// One stream's part of a shared window: its sequence, the ids its first rows take from the host, and its rows.
-pub const Shared = struct { seq: *state.Seq, ids: []const u32, rows: usize };
+pub const Shared = struct { seq: *state.Seq, ids: []const u32, rows: usize, mask: Mask = .{} };
 
 pub const Engine = struct {
     gpa: std.mem.Allocator,
@@ -327,6 +328,18 @@ pub const Engine = struct {
         return host[0];
     }
 
+    /// The prompt's next token at `position` drawn again under a grammar's bits (structured output's first token).
+    pub fn redrawFirst(e: *Engine, position: u64, mask: Mask) !u32 {
+        const o = e.ops();
+        try o.grammarMask(e.b.p_logits, e.c.vocab, mask.bits, mask.words, 1);
+        try o.fill32(e.b.p_meta, @intCast(position - 1), 4); // the prompt's last row: the draw keys position meta + 1
+        try e.forward(null).sample(e.b.p_logits, 1, e.b.p_meta, e.b.p_sampled, e.sampling != null, e.b.rule);
+        const host = e.pinned.slice(u32)[pin_sampled..][0..1];
+        try o.download(std.mem.sliceAsBytes(host), e.b.p_sampled);
+        try e.stream.synchronize();
+        return host[0];
+    }
+
     /// Heat bands, if set, before the chunk; a cancel ends the wait. Unset bands return without reading a zone.
     pub fn beforeChunk(e: *Engine, cancel: ?Cancel) !void {
         try e.heat_gate.beforePromptChunk(e.io, if (cancel) |c| .{ .ptr = c.ptr, .check = c.check } else null);
@@ -381,6 +394,11 @@ pub const Engine = struct {
 
     /// Engine.forward: a window of `rows` rows at pos whose first `ids.len` inputs come from the host (drafts are on the device).
     pub fn verify(e: *Engine, ids: []const u32, rows: usize, dump: ?*Dump) !void {
+        return e.verifyMasked(ids, rows, dump, .{});
+    }
+
+    /// verify with a grammar's bits for each row: a masked window runs eagerly, its logits masked before its draws.
+    pub fn verifyMasked(e: *Engine, ids: []const u32, rows: usize, dump: ?*Dump, mask: Mask) !void {
         if (rows < 1 or rows > state.max_rows or ids.len > rows) return error.BadWindow;
         if (e.pos + rows > e.max_len) return error.ContextFull;
         try e.copied.synchronize();
@@ -391,10 +409,11 @@ pub const Engine = struct {
         try e.ops().upload(e.b.meta, std.mem.sliceAsBytes(host[pin_meta..][0..4]));
         try e.copied.record(e.stream);
         const graph = e.windows[@intFromBool(e.sampling != null)][rows];
-        if (dump == null and graph != null and e.graphsBound()) {
+        if (dump == null and mask.bits == 0 and graph != null and e.graphsBound()) {
             try graph.?.launchOn(e.stream);
         } else {
-            try e.forward(dump).window(rows);
+            const f = e.forward(dump);
+            try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = rows, .sampled = f.sampled, .mask = mask }});
             try e.ops().download(std.mem.sliceAsBytes(host[pin_sampled..][0..rows]), e.b.sampled);
         }
         try e.sampled_ready.record(e.stream);
@@ -425,7 +444,7 @@ pub const Engine = struct {
             try e.ops().upload(e.b.ids, std.mem.sliceAsBytes(slot[4..][0..p.ids.len]));
             try e.ops().upload(e.b.meta, std.mem.sliceAsBytes(slot[0..4]));
             views[k] = e.b; // the bound sequence's own fields beside the shared scratch
-            parts_f[k] = .{ .b = &views[k], .row0 = row0, .rows = p.rows, .sampled = e.sampling != null };
+            parts_f[k] = .{ .b = &views[k], .row0 = row0, .rows = p.rows, .sampled = e.sampling != null, .mask = p.mask };
             row0 += p.rows;
         }
         try e.copied.record(e.stream);

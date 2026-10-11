@@ -44,6 +44,7 @@ pub const Kernels = struct {
     draw: cuda.Function,
     draw_ids: cuda.Function,
     logprob_rows: cuda.Function,
+    grammar_mask: cuda.Function, // structured output: disallowed tokens -inf before the draw
     torch: torch_ops.Functions,
     train: train_ops.Fns = undefined, // Sliding Weights: the change after each output projection, and learning it
     train_mods: ?[2]cuda.Module = null, // loaded by loadTrain (--slide) after the weights, else never
@@ -76,6 +77,7 @@ pub const Kernels = struct {
         k.draw_ids = try k.mods[14].function("tf_draw_ids");
         k.glue = try glue.Fns.resolve(k.mods[16..21]);
         k.logprob_rows = try k.mods[14].function("tf_logprob_rows");
+        k.grammar_mask = try k.mods[14].function("tf_grammar_mask");
         k.train_mods = null;
         k.modelopt = null;
         k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
@@ -176,6 +178,16 @@ pub const Ops = struct {
         if (ids) |x| a.add(x);
         a.add(prob orelse 0);
         try o.go(if (ids != null) o.k.draw_ids else o.k.draw, .{ rows, 1, 1 }, 1024, 0, &a);
+    }
+
+    /// sample.cu: `rows` bf16 logits rows' disallowed tokens -inf, their bits `words` words a row at `bits`.
+    pub fn grammarMask(o: Ops, logits: u64, vocab: usize, bits: u64, words: usize, rows: usize) !void {
+        var a: cuda.Args = .{};
+        a.add(logits);
+        a.add(@as(u32, @intCast(vocab)));
+        a.add(bits);
+        a.add(@as(u32, @intCast(words)));
+        try o.go(o.k.grammar_mask, .{ rows, 1, 1 }, 256, 0, &a);
     }
 
     /// sample.cu: each bf16 logits row's lanes.logprob words at `out`, for its pick in `picks` and `k` best tokens.

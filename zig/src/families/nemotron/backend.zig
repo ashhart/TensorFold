@@ -14,6 +14,8 @@ const head_block = @import("head_block.zig");
 const snapshot = @import("snapshot.zig");
 const Model = @import("model.zig").Model;
 const nemotron_config = @import("config.zig");
+const grammar = @import("grammar.zig");
+const Masks = @import("../../core/grammar_mask.zig").Masks;
 
 const be = lanes.backend;
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
@@ -67,6 +69,7 @@ pub const Metal = struct {
     concurrent: bool = true, // concurrent encoders with barriers on data flow (false: serial encoders)
     gpu_ms: f64 = 0, // GPU ms of every command buffer landed so far
     last_ms: f64 = 0, // and of the last one
+    masks: ?Masks = null, // structured output's bits (grammar.zig), made at the first structured request
 
     pub fn init(gpa: std.mem.Allocator, m: *Model, o: Options) !*Metal {
         const b = try gpa.create(Metal);
@@ -101,6 +104,7 @@ pub const Metal = struct {
         }
         self.caches.deinit(self.gpa);
         if (self.head) |*h| h.deinit();
+        if (self.masks) |*m| m.deinit();
         if (self.wide) |*w| w.deinit();
         self.fence.deinit();
         self.prompt.deinit();
@@ -114,6 +118,7 @@ pub const Metal = struct {
         return .{ .ptr = self, .vtable = &.{
             .prefill = prefillFn,
             .first = firstFn,
+            .first_masked = grammar.firstMasked,
             .queue = queueFn,
             .read = readFn,
             .verify = verifyFn,
@@ -121,6 +126,7 @@ pub const Metal = struct {
             .draft = draftFn,
             .release = releaseFn,
             .alternatives = alternativesFn,
+            .held = grammar.held,
         } };
     }
 
@@ -147,7 +153,7 @@ pub const Metal = struct {
     }
 
     pub fn forward(self: *Metal) fwd.Forward {
-        return .{ .c = self.m.config, .k = &self.m.kernels, .w = &self.m.weights, .s = &self.scratch, .pool = &self.pool, .geometry = self.geometry, .members = self.members };
+        return .{ .c = self.m.config, .k = &self.m.kernels, .w = &self.m.weights, .s = &self.scratch, .pool = &self.pool, .geometry = self.geometry, .members = self.members, .masks = if (self.masks) |*m| m else null };
     }
 
     pub fn cacheOf(self: *Metal, s: *lanes.Stream) !*st.Cache {
@@ -313,18 +319,24 @@ pub const Metal = struct {
 
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
         const self: *Metal = @ptrCast(@alignCast(ptr));
+        return self.firstAt(s, position, null);
+    }
+
+    /// The first token's draw from the prompt's last row, among a grammar's allowed tokens from bits row `mask_row`.
+    pub fn firstAt(self: *Metal, s: *lanes.Stream, position: u64, mask_row: ?usize) !u64 {
         const c = try self.cacheOf(s);
         const h = self.take(1);
         const Head = struct {
             h: u64,
             c: *st.Cache,
             how: fwd.Draw,
+            mask_row: ?usize,
             fn encode(j: @This(), b: *Metal, e: *fwd.Enc) !void {
-                const segs = [_]fwd.Seg{.{ .rows = j.c.rows, .cache = j.c, .draw = j.how }};
+                const segs = [_]fwd.Seg{.{ .rows = j.c.rows, .cache = j.c, .draw = j.how, .mask_row = j.mask_row }};
                 b.forward().draw(e, &segs, .last, b.tokens, slot(j.h));
             }
         };
-        try self.submit(.prefill, h + 1, Head{ .h = h, .c = c, .how = drawOf(s, position) });
+        try self.submit(.prefill, h + 1, Head{ .h = h, .c = c, .how = drawOf(s, position), .mask_row = mask_row });
         return h;
     }
 
@@ -397,7 +409,7 @@ pub const Metal = struct {
             staged[stage % ring] = w.pending;
             for (w.tokens, 0..) |t, r| staged[(stage + 1 + r) % ring] = t;
             fills[i] = .{ .stage = stage, .held = w.held, .n = w.tokens.len };
-            segs[i] = .{ .rows = rows, .cache = c, .store = .lag, .slot = try self.slotFor(c, .lag), .parents = w.parents, .draw = drawOf(w.stream, w.positions[0]) };
+            segs[i] = .{ .rows = rows, .cache = c, .store = .lag, .slot = try self.slotFor(c, .lag), .parents = w.parents, .draw = drawOf(w.stream, w.positions[0]), .mask_row = try grammar.stage(self, w, total) };
             c.start = total;
             c.rows = rows;
             total += rows;

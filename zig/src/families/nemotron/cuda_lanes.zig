@@ -40,6 +40,8 @@ pub const Cuda = struct {
     cost_count: usize = 0,
     mtp_ms: f64 = 0,
     measured: ?core.draft_depth.Costs = null, // a lone stream's depth rule prices its rounds by these
+    bits: ?cuda.HostBuffer = null, // structured output's row bits, device-mapped (row_slots rows), made at first use
+    bits_dev: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, head: ?*Head) !Cuda {
         var pinned = try cuda.HostBuffer.alloc(e.ctx.d, engine.max_streams * state.max_rows * 4);
@@ -55,6 +57,7 @@ pub const Cuda = struct {
         self.lanes.deinit(self.gpa);
         self.pinned.free();
         self.rows_out.free();
+        if (self.bits) |*b| b.free();
     }
 
     pub fn backend(self: *Cuda) be.Backend {
@@ -68,7 +71,43 @@ pub const Cuda = struct {
             .draft = draftFn,
             .release = releaseFn,
             .first_row = firstRowFn,
+            .first_masked = firstMaskedFn,
+            .held = heldFn,
         } };
+    }
+
+    /// Structured output's bits for rows from `slot` (a forward's rows; a first token's: the last slot), device-read.
+    fn putBits(self: *Cuda, slot: usize, masks: []const u32) !engine.Mask {
+        const words = (self.e.c.vocab + 31) / 32;
+        if (masks.len == 0) return .{};
+        if (masks.len % words != 0 or slot * words + masks.len > row_slots * words) return error.InvalidGrammarMasks;
+        if (self.bits == null) {
+            self.bits = try cuda.HostBuffer.allocMapped(self.e.ctx.d, row_slots * words * 4);
+            self.bits_dev = try self.bits.?.device();
+        }
+        @memcpy(self.bits.?.slice(u32)[slot * words ..][0..masks.len], masks);
+        return .{ .bits = self.bits_dev + slot * words * 4, .words = words };
+    }
+
+    /// The first token drawn again among `mask`'s allowed tokens (prefill drew it unmasked); a fresh handle to it.
+    fn firstMaskedFn(ptr: *anyopaque, s: *lanes.Stream, position: u64, mask: []const u32) anyerror!u64 {
+        const self = of(ptr);
+        if (position != s.prompt_len) return error.PositionMismatch;
+        const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
+        self.e.bind(l.seq);
+        return self.take(try self.e.redrawFirst(position, try self.putBits(row_slots - 1, mask)));
+    }
+
+    /// The head's drafts in the stream's window rows after the pending one, once they land (Backend.held).
+    fn heldFn(ptr: *anyopaque, s: *lanes.Stream, out: []u32) anyerror!void {
+        const self = of(ptr);
+        const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
+        if (out.len + 1 > state.max_rows) return error.WindowTooWide;
+        self.e.bind(l.seq);
+        const held = self.pinned.slice(u32)[0..out.len];
+        try self.e.ops().download(std.mem.sliceAsBytes(held), self.e.b.ids + 4);
+        try self.e.stream.synchronize();
+        @memcpy(out, held);
     }
 
     /// The facts the round loop reads at setup: windows up to 16 rows, one stream a forward, this GPU's costs.
@@ -243,7 +282,7 @@ pub const Cuda = struct {
         var ids: [state.max_rows]u32 = undefined;
         ids[0] = w.pending;
         @memcpy(ids[1..][0..w.tokens.len], w.tokens);
-        try e.verify(ids[0 .. 1 + w.tokens.len], rows, null);
+        try e.verifyMasked(ids[0 .. 1 + w.tokens.len], rows, null, try self.putBits(0, w.masks));
         if (out[0].rows.len > 0) try e.ops().logprobRows(e.b.logits, e.c.vocab, e.b.sampled, w.stream.logprobs.?, self.rows_dev, rows);
         const held = self.pinned.slice(u32)[0 .. rows - 1];
         if (w.held > 0) try e.ops().download(std.mem.sliceAsBytes(held), e.b.ids + 4);
@@ -266,13 +305,15 @@ pub const Cuda = struct {
         if (windows.len > engine.max_streams) return error.WindowTooWide;
         var parts: [engine.max_streams]engine.Shared = undefined;
         var ids: [engine.max_streams][state.max_rows]u32 = undefined;
+        var bits_row: usize = 0;
         for (windows, 0..) |w, k| {
             if (w.parents != null) return error.TreesNotBuilt;
             const l = try self.bindLane(w.stream, null);
             for (w.positions, 0..) |p, r| if (p != e.pos + 1 + r) return error.PositionMismatch;
             ids[k][0] = w.pending;
             @memcpy(ids[k][1..][0..w.tokens.len], w.tokens);
-            parts[k] = .{ .seq = l.seq, .ids = ids[k][0 .. 1 + w.tokens.len], .rows = w.rows() };
+            parts[k] = .{ .seq = l.seq, .ids = ids[k][0 .. 1 + w.tokens.len], .rows = w.rows(), .mask = try self.putBits(bits_row, w.masks) };
+            bits_row += w.rows();
         }
         try e.verifyShared(parts[0..windows.len]);
         const held = self.pinned.slice(u32);

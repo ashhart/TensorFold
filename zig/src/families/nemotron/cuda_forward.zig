@@ -15,7 +15,10 @@ const Delta = enum { none, dense, moe };
 pub const Side = struct { s: cuda.Stream, fork: cuda.Event, join: cuda.Event };
 
 /// A verify window supplies its stream buffers and starting row.
-pub const Seg = struct { b: *const state.Buffers, row0: usize, rows: usize, sampled: bool };
+pub const Seg = struct { b: *const state.Buffers, row0: usize, rows: usize, sampled: bool, mask: Mask = .{} };
+
+/// Structured output: a segment's rows' grammar bits (device-readable, `words` a row); bits 0: no grammar.
+pub const Mask = struct { bits: u64 = 0, words: usize = 0 };
 
 /// A prompt chunk carries rows, position, residual delta and mixer positions between blocks.
 pub const Walk = struct { rows: usize, pos: usize, x: u64 = 0, delta: Delta = .none, mj: usize = 0, aj: usize = 0 };
@@ -55,7 +58,7 @@ pub const Forward = struct {
     }
 
     /// Rows of logits draw their next tokens into `out`, row r at position META[0] + r + 1, by `rule` when sampled.
-    fn sample(f: *const Forward, logits: u64, rows: usize, meta: u64, out: u64, sampled: bool, rule: u64) !void {
+    pub fn sample(f: *const Forward, logits: u64, rows: usize, meta: u64, out: u64, sampled: bool, rule: u64) !void {
         const v = f.c.vocab;
         if (!sampled) return f.ops.torch().argmax(logits, v, v, out, rows);
         try f.ops.draw(logits, v, rule, meta, 0, out, rows, null, null);
@@ -176,6 +179,7 @@ pub const Forward = struct {
         for (segs) |s| try o.copy(s.b.hidden, b.y + s.row0 * D * 2, s.rows * c.hidden * 2);
         try o.dense(b.y, b.xs, f.w.head, b.logits, rows);
         try f.mark(.head);
+        for (segs) |s| if (s.mask.bits != 0) try o.grammarMask(b.logits + s.row0 * @as(u64, c.vocab) * 2, c.vocab, s.mask.bits, s.mask.words, s.rows);
         for (segs) |s| try f.sample(b.logits + s.row0 * @as(u64, c.vocab) * 2, s.rows, s.b.meta, s.b.sampled, s.sampled, s.b.rule);
         try f.mark(.sample);
         if (f.dump) |d| try d.tail(f.ops, b.logits, b.sampled, rows, c.vocab);
