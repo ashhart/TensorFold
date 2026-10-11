@@ -24,6 +24,9 @@ const check_tokens = @import("slide_lesson.zig").check_tokens;
 
 const keep_tokens = 48;
 
+/// A learned document fact's question and answer, replayed for later lessons about its subject to keep.
+pub const Told = struct { subject: []const u8, question: []const u8, answer: []const u8 };
+
 /// What every lesson shares for the server's life: the keep prompts' examples and the template's end of a turn.
 pub const Teacher = struct {
     arena: std.heap.ArenaAllocator,
@@ -35,9 +38,16 @@ pub const Teacher = struct {
     thinks: ?bool = null, // whether the template opens the model's reasoning in its prompt
     languages: std.StringHashMapUnmanaged(Local) = .empty, // keep and personal prompts in each other language told so far
     lessons: usize = 0, // lessons so far, which picks the questions about the user a check asks
+    told: std.ArrayList(Told) = .empty, // learned document facts' answers, which later lessons on their subject keep
 
     pub fn init(gpa: Allocator) Teacher {
         return .{ .arena = .init(gpa) };
+    }
+
+    /// A kept document lesson's held question and answer, by the subject its edit keys on (copied into the arena).
+    pub fn remember(t: *Teacher, subject: []const u8, question: []const u8, answer: []const u8) !void {
+        const a = t.arena.allocator();
+        try t.told.append(a, .{ .subject = try a.dupe(u8, subject), .question = try a.dupe(u8, question), .answer = try a.dupe(u8, answer) });
     }
 
     pub fn deinit(t: *Teacher) void {

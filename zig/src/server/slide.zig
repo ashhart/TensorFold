@@ -118,6 +118,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         const back = result.recalled.len == 1 and result.recalled[0];
         if (result.why) |why| srv.slide.note(id, why);
         srv.slide.mark(id, if (back) .learned else .missed);
+        if (back and document) for (plan.held) |h| if (h.subject.len > 0) srv.teacher.remember(h.subject, h.question, h.answer) catch {};
         if (result.why) |why| {
             out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps, .message = why });
         } else out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps });

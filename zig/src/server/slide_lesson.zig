@@ -71,6 +71,7 @@ const remember_probes = 4; // kept questions asked again as "Do you remember...?
 const chunk_chars = 6000; // text a fact-finding call reads at once
 pub const min_probes = 3; // two answers are held out to test recall
 const want_probes = 12; // questions a fact is learned from at least, when the model gives that many
+const replayed = 24; // earlier answers about a subject a document lesson keeps at most, the latest first
 
 const personal_checks = 3;
 const bank_checks = 6; // one bank question in this many is held back from each lesson to check
@@ -167,6 +168,8 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         try keep.append(a, kept_answers[i]);
         if (kept_answers.len > prompts.keep_prompts.len) try parts.think_keep.append(a, kept_answers[prompts.keep_prompts.len + i]);
     }
+    // a document's earlier facts about this subject keep their answers: a later fact must not overwrite them
+    if (document) try replay(srv, cx, teacher, told[0], end, &keep);
     // the personal bank: kept as first answered, some held back to check, except what a fact answers
     for (try bankAnswers(srv, cx, teacher, end, gone), 0..) |b, i| {
         if (try answeredByAny(srv, cx, told, kept, b.question, document, gone)) continue;
@@ -552,6 +555,19 @@ fn heldBack(lessons: usize, i: usize) bool {
 fn questionsFor(a: Allocator, document: bool, fact: []const u8, count: usize, language: ?[]const u8) ![]const u8 {
     if (document) return std.fmt.allocPrint(a, prompts.doc_questions_prompt, .{ fact, count, count });
     return prompted(a, prompts.questions_prompt, questions_other, .{ fact, count, count }, language);
+}
+
+/// Earlier learned answers about the subject `fact` names, the latest `replayed` of them, into `keep`.
+fn replay(srv: *Server, cx: *Cx, teacher: *Teacher, fact: []const u8, end: []const u32, keep: *std.ArrayList(api.Example)) !void {
+    var n: usize = 0;
+    var i = teacher.told.items.len;
+    while (i > 0 and n < replayed) : (i -= 1) {
+        const t = teacher.told.items[i - 1];
+        if (std.ascii.findIgnoreCase(fact, t.subject) == null) continue;
+        try keep.append(cx.a, try example(srv, cx, cx.a, null, t.question, t.answer, end));
+        n += 1;
+    }
+    if (n > 0) log.line("slide: {d} answers of earlier facts about its subject are replayed for it to keep", .{n});
 }
 
 /// Whether most of a fact's questions ask who: its answer is someone.
