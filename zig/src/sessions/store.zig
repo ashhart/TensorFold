@@ -230,6 +230,22 @@ pub const Store = struct {
         return e.extra.bounded.?;
     }
 
+    /// A restored entry's ids (pos long): RAM from the index, else `given`, the prompt's prefix, checked.
+    pub fn historyOf(s: *Store, id: u32, given: ?[]const i32, out: []i32) !void {
+        const e = s.index.get(id);
+        if (out.len != e.pos) return error.BadLength;
+        if (e.ram) return s.index.idsOf(id, out);
+        // an NVMe entry's tokens left the index with its RAM (prefix.dropTokens): only the prompt still holds them
+        const ids = given orelse return error.NotInRam;
+        if (ids.len < e.pos) return error.BadLength;
+        const pos: usize = @intCast(e.pos);
+        const full = pos / s.pool.page;
+        const d = try s.digests(e.tag, ids[0..pos]);
+        const node = if (full == 0) prefix.root(e.tag) else d[full - 1];
+        if (!std.mem.eql(u8, &prefix.entryKey(node, e.pos, ids[full * s.pool.page .. pos]), &e.key)) return error.NotTheEntry;
+        @memcpy(out, ids[0..pos]);
+    }
+
     /// Starts an NVMe resume into an empty slot (pages mapped now, filled by the job); settle it before the slot runs.
     pub fn beginRestore(s: *Store, id: u32, slot: *Slot) !*Job {
         const d = s.disk orelse return error.NoDisk;

@@ -214,3 +214,42 @@ test "two split ranks make the same decisions on the same calls and each restore
     try restart(gpa, root, 2, 1);
     try testing.expectEqualSlices(u64, t0.items, t1.items);
 }
+
+test "historyOf: a RAM entry's ids come from the index, an NVMe entry's only from the prompt that names it" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmpRoot(gpa, &tmp, "history");
+    defer gpa.free(root);
+    var r: Rank = undefined;
+    try r.init(gpa, root, 1, 0, .{ .chats = 1 });
+    defer r.deinit();
+    const s = try r.pool.newSlot(64 * page);
+    const a = try chatIds(gpa, 1, 8 * page);
+    defer gpa.free(a);
+    const b = try chatIds(gpa, 2, 8 * page);
+    defer gpa.free(b);
+    const n = 5 * page + 10;
+    try testing.expectEqualStrings("fresh", try turn(gpa, &r, s, 1, a[0..n]));
+    const hit = (try r.store.find(1, a[0 .. n + 1])).?;
+    try testing.expect(hit.ram and hit.pos == n);
+    var out: [n]i32 = undefined;
+    try r.store.historyOf(hit.id, null, &out);
+    try testing.expectEqualSlices(i32, a[0..n], &out);
+    try testing.expectError(error.BadLength, r.store.historyOf(hit.id, null, out[0 .. n - 1]));
+    // a second idle chat parks chat 1 on NVMe: its ids leave the index with its RAM
+    try testing.expectEqualStrings("fresh", try turn(gpa, &r, s, 2, b[0 .. 6 * page]));
+    const parked = (try r.store.find(1, a[0 .. n + 1])).?;
+    try testing.expect(!parked.ram and parked.pos == n);
+    try testing.expectError(error.NotInRam, r.store.historyOf(parked.id, null, &out));
+    @memset(&out, 0);
+    try r.store.historyOf(parked.id, a, &out); // a longer prompt: its first pos ids, checked against the entry's key
+    try testing.expectEqualSlices(i32, a[0..n], &out);
+    // another chat's ids, or these with the partial page's last id changed, are not this entry
+    try testing.expectError(error.NotTheEntry, r.store.historyOf(parked.id, b[0..n], &out));
+    const edited = try gpa.dupe(i32, a[0..n]);
+    defer gpa.free(edited);
+    edited[n - 1] += 1;
+    try testing.expectError(error.NotTheEntry, r.store.historyOf(parked.id, edited, &out));
+    try testing.expectError(error.BadLength, r.store.historyOf(parked.id, a[0 .. n - 1], &out));
+}
