@@ -67,7 +67,7 @@ test "a QP whose inline capacity cannot take the 4-byte flag post is refused" {
     try std.testing.expect(rv.inlineFits(.{ .max_send_wr = 1, .max_recv_wr = 1, .max_send_sge = 1, .max_recv_sge = 1, .max_inline_data = 4 }));
 }
 
-/// /proc/self/smaps' VmFlags of the mapping that starts at `at`.
+/// /proc/self/smaps' VmFlags of the mapping that contains `at`.
 fn vmFlags(at: usize, buf: []u8) ![]const u8 {
     const fd = std.c.open("/proc/self/smaps", .{});
     if (fd < 0) return error.NoSmaps;
@@ -78,12 +78,15 @@ fn vmFlags(at: usize, buf: []u8) ![]const u8 {
         if (got <= 0) break;
         n += @intCast(got);
     }
-    var head: [32]u8 = undefined;
-    const want = try std.fmt.bufPrint(&head, "{x}-", .{at});
     var lines = std.mem.splitScalar(u8, buf[0..n], '\n');
     var inside = false;
     while (lines.next()) |l| {
-        if (std.mem.startsWith(u8, l, want)) inside = true;
+        const sp = std.mem.indexOfScalar(u8, l, ' ') orelse l.len;
+        if (std.mem.indexOfScalar(u8, l[0..sp], '-')) |dash| {
+            const lo = std.fmt.parseInt(usize, l[0..dash], 16) catch continue;
+            const hi = std.fmt.parseInt(usize, l[dash + 1 .. sp], 16) catch continue;
+            inside = lo <= at and at < hi;
+        }
         if (inside and std.mem.startsWith(u8, l, "VmFlags:")) return l;
     }
     return error.NotFound;
@@ -100,7 +103,8 @@ test "the region is DONTFORK and NOHUGEPAGE before registration" {
     const before = try vmFlags(@intFromPtr(m.ptr), buf);
     try std.testing.expect(std.mem.indexOf(u8, before, " dc") == null and std.mem.indexOf(u8, before, " nh") == null);
     try rv.prepareRegion(m);
-    const flags = try vmFlags(@intFromPtr(m.ptr), buf);
+    // An interior page stays inside the VMA even when a neighbouring mapping merges with it.
+    const flags = try vmFlags(@intFromPtr(m.ptr) + 4096, buf);
     try std.testing.expect(std.mem.indexOf(u8, flags, " dc") != null);
     try std.testing.expect(std.mem.indexOf(u8, flags, " nh") != null);
 }
