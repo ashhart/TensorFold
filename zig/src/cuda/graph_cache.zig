@@ -12,7 +12,7 @@ pub const Body = struct {
     run: *const fn (ctx: *anyopaque, stream: Stream) anyerror!void,
 };
 
-/// Every rank's verdict AND-ed, so ranks capture, evict and fall back at the same steps; never called in a capture.
+/// Every rank's verdict AND-ed on a miss (hits never call it), so ranks capture, evict and fall back together.
 pub const Agree = struct {
     ctx: *anyopaque,
     all: *const fn (ctx: *anyopaque, ok: bool) anyerror!bool,
@@ -53,7 +53,9 @@ pub fn Cache(comptime Key: type) type {
         stats: struct { replayed: u64 = 0, captured: u64 = 0, eager: u64 = 0, evicted: u64 = 0, dropped: u64 = 0, floor_hits: u64 = 0 } = .{},
 
         pub fn init(gpa: std.mem.Allocator, engine: Engine, settings: Settings) Self {
-            return .{ .gpa = gpa, .engine = engine, .settings = settings, .cap = settings.max };
+            var s = settings;
+            s.min_keep = @min(s.min_keep, s.max); // the floor never holds more than the configured max
+            return .{ .gpa = gpa, .engine = engine, .settings = s, .cap = s.max };
         }
 
         pub fn deinit(c: *Self) void {
@@ -98,9 +100,9 @@ pub fn Cache(comptime Key: type) type {
             return .eager;
         }
 
-        /// One step: the key's graph launched, captured first on a miss; a new `fingerprint` drops every graph first.
+        /// One step: the key's graph, captured first on a miss; a new `fingerprint` (same step on all ranks) drops all.
         pub fn run(c: *Self, key: Key, stream: Stream, fingerprint: u64, body: Body) !Outcome {
-            if (!c.settings.on or c.failed) return c.eager(stream, body);
+            if (!c.settings.on or c.failed or c.settings.max == 0) return c.eager(stream, body);
             if (c.fingerprint != null and c.fingerprint.? != fingerprint) c.dropAll();
             c.fingerprint = fingerprint;
             c.tick += 1;
@@ -110,9 +112,10 @@ pub fn Cache(comptime Key: type) type {
                 c.stats.replayed += 1;
                 return .replayed;
             }
-            // a miss: room on every rank, else shed the least recent quarter and lower the cap (once below it, eager)
-            const room_here = if (c.room) |f| f() else true;
-            if (!try c.agreed(room_here and c.cap > 0)) {
+            // a miss: room on every rank (a host map that cannot grow is none), else shed a quarter and lower the cap
+            const reserved = if (c.entries.ensureUnusedCapacity(c.gpa, 1)) |_| true else |_| false;
+            const room_here = reserved and (if (c.room) |f| f() else true);
+            if (!try c.agreed(room_here)) {
                 if (c.settings.hold) {
                     if (!quiet and c.stats.floor_hits == 0) std.log.warn("graph cache: under the memory floor on {s} rank: this key eager, {d} graphs held (hold)", .{ if (room_here) "another" else "this", c.entries.count() });
                     c.stats.floor_hits += 1;
@@ -123,7 +126,7 @@ pub fn Cache(comptime Key: type) type {
                     for (0..drop) |_| if (c.entries.count() > c.settings.min_keep) c.evictOldest();
                 }
                 const was = c.cap;
-                c.cap = @intCast(@max(c.entries.count(), c.settings.min_keep));
+                c.cap = @intCast(@max(c.entries.count(), c.settings.min_keep)); // min_keep <= max (init)
                 c.stats.floor_hits += 1;
                 if (!quiet and c.cap != was) std.log.warn("graph cache: under the memory floor on {s} rank: cap {d} -> {d} ({d} held, {d} evicted, {d} eager so far)", .{ if (room_here) "another" else "this", was, c.cap, c.entries.count(), c.stats.evicted, c.stats.eager + 1 });
                 return c.eager(stream, body);
@@ -138,13 +141,15 @@ pub fn Cache(comptime Key: type) type {
                 if (!quiet) std.log.warn("graph capture failed: {s} (key {any}, {d} graphs held)", .{ @errorName(err), key, c.entries.count() });
                 break :blk null;
             };
+            var owned = exec; // freed here until the map holds it, so a failed agreement cannot leak it
+            defer if (owned) |x| c.engine.free(c.engine.ctx, x);
             if (!try c.agreed(exec != null)) {
-                if (exec) |x| c.engine.free(c.engine.ctx, x);
                 c.failed = true;
                 c.dropAll();
                 return c.eager(stream, body);
             }
-            try c.entries.put(c.gpa, key, .{ .exec = exec.?, .used = c.tick });
+            c.entries.putAssumeCapacityNoClobber(key, .{ .exec = exec.?, .used = c.tick });
+            owned = null;
             try c.engine.launch(c.engine.ctx, exec.?, stream);
             c.stats.captured += 1;
             return .captured;
@@ -196,7 +201,7 @@ pub const CudaEngine = struct {
     }
 };
 
-/// FNV-1a over the addresses a body captures (buffer bases, sizes): the fingerprint `run` compares.
+/// FNV-1a over the addresses a body captures (buffer bases, sizes): the fingerprint `run` compares, on one rank only.
 pub fn fingerprintOf(words: []const u64) u64 {
     var h: u64 = 0xcbf29ce484222325;
     for (words) |w| {
@@ -389,4 +394,8 @@ test "graph cache: off runs every step eagerly" {
 
 test "graph cache: fingerprint" {
     try std.testing.expect(fingerprintOf(&.{ 1, 2 }) != fingerprintOf(&.{ 2, 1 }));
+}
+
+test {
+    _ = @import("graph_cache_regression_test.zig");
 }
