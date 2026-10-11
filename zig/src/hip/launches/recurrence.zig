@@ -156,12 +156,13 @@ pub fn tf_gdn_gate_prefill(l: *const Launcher, av: C, bv: C, kind: c_int, a_log:
     try l.flat(l.op.gdn_gate_prefill, @as(i64, count) * heads, s, &a);
 }
 
-pub fn tf_gnorm_silu(l: *const Launcher, y: CF, z: C, out: P, kind: c_int, n: c_longlong, s: S) Error!void {
+pub fn tf_gnorm_silu(l: *const Launcher, y: CF, z: C, out: P, kind: c_int, n: c_longlong, sigmoid: c_int, s: S) Error!void {
     var a: Args = .{};
     try a.add(ad(y));
     try a.add(ad(z));
     try a.add(ad(out));
     try a.add(kind);
     try a.add(n);
+    try a.add(sigmoid);
     try l.flat(l.op.gnorm_silu, n, s, &a);
 }

@@ -51,8 +51,8 @@ pub fn tf_rms2(l: *const Launcher, x0: CF, w0: CF, y0: F, x1: CF, w1: CF, y1: F,
     try l.go(l.dec.rms2, dim(cdiv(rows, 8), 2, 1), dim(256, 1, 1), 0, s, &a);
 }
 
-/// out = rms(y) * weight * round(silu(z)) rounded to the kind, rows of `width` (at most 1024).
-pub fn tf_gnorm_out(l: *const Launcher, y: CF, weight: CF, z: C, out: P, kind: c_int, rows: c_int, width: c_int, eps: f32, s: S) Error!void {
+/// out = rms(y) * weight * round(silu(z), or sigmoid(z) when `sigmoid`) rounded to the kind, rows at most 1024 wide.
+pub fn tf_gnorm_out(l: *const Launcher, y: CF, weight: CF, z: C, out: P, kind: c_int, rows: c_int, width: c_int, eps: f32, sigmoid: c_int, s: S) Error!void {
     if (width > 1024) return invalid("gnorm out");
     var a: Args = .{};
     try a.add(ad(y));
@@ -63,6 +63,7 @@ pub fn tf_gnorm_out(l: *const Launcher, y: CF, weight: CF, z: C, out: P, kind: c
     try a.add(rows);
     try a.add(width);
     try a.add(eps);
+    try a.add(sigmoid);
     try l.go(l.dec.gnorm_out, dim(cdiv(rows, 8), 1, 1), dim(256, 1, 1), 0, s, &a);
 }
 

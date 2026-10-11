@@ -168,8 +168,8 @@ fn conv(t: *Rig, rng: *rig.Rng, rows: usize) !void {
     if (rows > 1) try same(bufs[0][3], bufs[1][3]);
 }
 
-/// The linear attention's gated norm: rms then gnorm_silu against one launch.
-fn gnorm(t: *Rig, rng: *rig.Rng, rows: usize) !void {
+/// The linear attention's gated norm: rms then gnorm_silu against one launch; the sigmoid gate against the host's too.
+fn gnorm(t: *Rig, rng: *rig.Rng, rows: usize, sigmoid: c_int) !void {
     const n = rows * 32 * 128;
     const eps: f32 = 1e-6;
     const hy = try gpa.alloc(f32, n);
@@ -193,10 +193,24 @@ fn gnorm(t: *Rig, rng: *rig.Rng, rows: usize) !void {
     defer for (&outs) |*o| o.free();
     const s = t.stream.handle;
     try t.on.tf_rms(ptr(at(y)), @ptrFromInt(at(weight)), ptr(at(yn)), 0, @intCast(rows * 32), 128, eps, s);
-    try t.on.tf_gnorm_silu(@ptrFromInt(at(yn)), ptr(at(z)), ptr(at(outs[0])), t.kind(), @intCast(n), s);
-    try t.on.tf_gnorm_out(@ptrFromInt(at(y)), @ptrFromInt(at(weight)), ptr(at(z)), ptr(at(outs[1])), t.kind(), @intCast(rows * 32), 128, eps, s);
+    try t.on.tf_gnorm_silu(@ptrFromInt(at(yn)), ptr(at(z)), ptr(at(outs[0])), t.kind(), @intCast(n), sigmoid, s);
+    try t.on.tf_gnorm_out(@ptrFromInt(at(y)), @ptrFromInt(at(weight)), ptr(at(z)), ptr(at(outs[1])), t.kind(), @intCast(rows * 32), 128, eps, sigmoid, s);
     try t.stream.synchronize();
     try same(outs[0], outs[1]);
+    if (sigmoid == 0) return;
+    const got = try rig.download(u16, outs[1]);
+    defer gpa.free(got);
+    const fx = @import("flashnext.zig");
+    for (0..rows * 32) |r| {
+        var sum: f32 = 0;
+        for (hy[r * 128 ..][0..128]) |v| sum += v * v;
+        const inv = 1.0 / @sqrt(sum / 128.0 + eps);
+        for (0..128) |i| {
+            const zv = fx.value(t, hz[r * 128 + i]);
+            const want = fx.rnd(t, hy[r * 128 + i] * inv * hn[i] * fx.rnd(t, fx.sigmoid(zv)));
+            try rig.expect(fx.close(t, fx.value(t, got[r * 128 + i]), want, 1), "sigmoid-gated norm row {d} dim {d}", .{ r, i });
+        }
+    }
 }
 
 test "the merged MoE pick writes the scanning kernel's picks, weights, items and members" {
@@ -214,9 +228,9 @@ test "the merged conv split writes the chain's state, snapshots, q, k, v, gate a
     for ([_]usize{ 1, 2, 4, 16 }) |rows| try conv(t, &rng, rows);
 }
 
-test "the merged gated norm writes rms then gnorm_silu's bytes" {
+test "the merged gated norm writes rms then gnorm_silu's bytes, with either gate" {
     const t = try Rig.open(1 << 20);
     defer t.close();
     var rng: rig.Rng = .{ .state = 0x9E3779B97F4A7C15 };
-    for ([_]usize{ 1, 4, 16, 128 }) |rows| try gnorm(t, &rng, rows);
+    for ([_]c_int{ 0, 1 }) |sigmoid| for ([_]usize{ 1, 4, 16, 128 }) |rows| try gnorm(t, &rng, rows, sigmoid);
 }

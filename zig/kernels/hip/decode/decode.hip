@@ -296,10 +296,10 @@ __device__ void
     }
 }
 
-// The gated norm out = rms(y) * weight * round(silu(z)) in the kind, a wave a (row, head), no fp32 round trip between.
+// The gated norm out = rms(y) * weight * round(silu(z) or sigmoid(z)) in the kind, a wave a (row, head).
 __device__ void
     gnorm_out_body(const float* y, const float* weight, const void* z, void* out, int kind, int rows, int width,
-                     float eps) {
+                     float eps, int sigmoid_gate) {
     constexpr int kMost = 1024 / 32;
     const int lane = threadIdx.x & 31;
     const int row = blockIdx.x * 8 + (threadIdx.x >> 5);
@@ -323,7 +323,8 @@ __device__ void
         float value = v[j] * inv;
         if (weight != nullptr) value *= weight[i];
         const float zv = load_kind(z, kind, at + i);
-        store_kind(out, kind, at + i, value * round_kind(zv / (1.f + expf(-zv)), kind));
+        const float gate = sigmoid_gate ? 1.f / (1.f + expf(-zv)) : zv / (1.f + expf(-zv));
+        store_kind(out, kind, at + i, value * round_kind(gate, kind));
     }
 }
 
@@ -412,8 +413,9 @@ extern "C" __global__ void __launch_bounds__(256)
 }
 
 extern "C" __global__ void __launch_bounds__(256)
-    tf_gnorm_out(const float* y, const float* weight, const void* z, void* out, int kind, int rows, int width, float eps) {
-    gnorm_out_body(y, weight, z, out, kind, rows, width, eps);
+    tf_gnorm_out(const float* y, const float* weight, const void* z, void* out, int kind, int rows, int width, float eps,
+                 int sigmoid_gate) {
+    gnorm_out_body(y, weight, z, out, kind, rows, width, eps, sigmoid_gate);
 }
 
 extern "C" __global__ void __launch_bounds__(kSelectThreads)
