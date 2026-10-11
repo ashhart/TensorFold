@@ -4,6 +4,7 @@ const std = @import("std");
 const graph = @import("graph.zig");
 const Driver = @import("driver.zig").Driver;
 const Stream = @import("stream.zig").Stream;
+const registry = @import("graph_registry.zig");
 const quiet = @import("builtin").is_test; // a test's stderr is the build runner's channel
 
 /// One step's launches on `stream`; it must not synchronize, allocate device memory or read the device on the host.
@@ -38,35 +39,9 @@ pub const Outcome = enum { replayed, captured, eager };
 /// Eager steps under the floor between two "still under" lines.
 pub const report_every = 256;
 
-/// One cache's counts as other threads read them (/health); `snapshots` copies the caches in use.
-pub const Snapshot = struct { name: []const u8 = "", held: u32 = 0, captured: u64 = 0, replayed: u64 = 0, eager: u64 = 0, floor_hits: u64 = 0, under: bool = false };
-
-/// Static slots, so a reader never meets a freed cache: a cache claims one at its first step, frees it at deinit.
-const Slot = struct {
-    /// claimed by a cache; `used` once its name is set (what readers check)
-    taken: std.atomic.Value(bool) = .init(false),
-    used: std.atomic.Value(bool) = .init(false),
-    name: []const u8 = "",
-    held: std.atomic.Value(u32) = .init(0),
-    captured: std.atomic.Value(u64) = .init(0),
-    replayed: std.atomic.Value(u64) = .init(0),
-    eager: std.atomic.Value(u64) = .init(0),
-    floor_hits: std.atomic.Value(u64) = .init(0),
-    under: std.atomic.Value(bool) = .init(false),
-};
-var published: [8]Slot = @splat(.{});
-
-/// The caches in use, at most `out.len`; returns how many it filled.
-pub fn snapshots(out: []Snapshot) usize {
-    var n: usize = 0;
-    for (&published) |*s| {
-        if (n == out.len) break;
-        if (!s.used.load(.acquire)) continue;
-        out[n] = .{ .name = s.name, .held = s.held.load(.monotonic), .captured = s.captured.load(.monotonic), .replayed = s.replayed.load(.monotonic), .eager = s.eager.load(.monotonic), .floor_hits = s.floor_hits.load(.monotonic), .under = s.under.load(.monotonic) };
-        n += 1;
-    }
-    return n;
-}
+/// One cache's name and counts as other threads read them (/health); `snapshots` copies the caches in use.
+pub const Snapshot = registry.Snapshot;
+pub const snapshots = registry.snapshots;
 
 pub fn Cache(comptime Key: type) type {
     return struct {
@@ -87,7 +62,7 @@ pub fn Cache(comptime Key: type) type {
         failed: bool = false, // a capture failed on some rank: eager from here on
         under: bool = false, // the last miss met no room on some rank
         under_eager: u64 = 0, // eager steps since `under` began
-        slot: ?*Slot = null, // this cache's slot in `published`, claimed at its first step; null: every slot taken
+        slot: ?usize = null, // this cache's registry slot, claimed at its first step; null: every slot taken
         claimed: bool = false,
         stats: struct { replayed: u64 = 0, captured: u64 = 0, eager: u64 = 0, evicted: u64 = 0, dropped: u64 = 0, floor_hits: u64 = 0, capture_mib: f64 = 0 } = .{},
 
@@ -98,10 +73,7 @@ pub fn Cache(comptime Key: type) type {
         }
 
         pub fn deinit(c: *Self) void {
-            if (c.slot) |s| {
-                s.used.store(false, .release);
-                s.taken.store(false, .release);
-            }
+            if (c.slot) |i| registry.release(i);
             c.dropAll();
             c.entries.deinit(c.gpa);
         }
@@ -140,21 +112,10 @@ pub fn Cache(comptime Key: type) type {
         fn publish(c: *Self) void {
             if (!c.claimed) {
                 c.claimed = true;
-                for (&published) |*x| if (x.taken.cmpxchgStrong(false, true, .acq_rel, .monotonic) == null) {
-                    x.name = c.name;
-                    c.slot = x;
-                    break;
-                };
+                c.slot = registry.claim(c.name);
             }
-            const s = c.slot orelse return;
-            s.held.store(@intCast(c.entries.count()), .monotonic);
-            s.captured.store(c.stats.captured, .monotonic);
-            s.replayed.store(c.stats.replayed, .monotonic);
-            s.eager.store(c.stats.eager, .monotonic);
-            s.floor_hits.store(c.stats.floor_hits, .monotonic);
-            s.under.store(c.under, .monotonic);
-            // readers see the slot once its name and counts are this cache's
-            s.used.store(true, .release);
+            const i = c.slot orelse return;
+            registry.publish(i, .{ .held = @intCast(c.entries.count()), .captured = c.stats.captured, .replayed = c.stats.replayed, .eager = c.stats.eager, .floor_hits = c.stats.floor_hits, .under = c.under });
         }
 
         fn avail(c: *const Self) ?f64 {
@@ -489,9 +450,9 @@ test "graph cache: the floor's enter / under / leave state and its counts, as /h
     try std.testing.expect(c.under);
     var out: [8]Snapshot = undefined;
     const mine = for (out[0..snapshots(&out)]) |x| {
-        if (std.mem.eql(u8, x.name, "test floor")) break x;
+        if (std.mem.eql(u8, x.name(), "test floor")) break x;
     } else return error.NotPublished;
-    try std.testing.expectEqual(Snapshot{ .name = "test floor", .held = 4, .captured = 4, .replayed = 1, .eager = report_every + 3, .floor_hits = report_every + 3, .under = true }, mine);
+    try std.testing.expectEqual(registry.Counts{ .held = 4, .captured = 4, .replayed = 1, .eager = report_every + 3, .floor_hits = report_every + 3, .under = true }, mine.counts);
     // room again: the next miss captures and the floor is left; the counts keep their totals
     room_flag = true;
     try std.testing.expectEqual(Outcome.captured, try c.run(2000, no_stream, 7, r.body()));
@@ -530,9 +491,9 @@ test "graph cache: the meter prices a capture, replays never read it, a freed ca
         try std.testing.expectEqual(@as(u32, 2), meter_reads);
         try std.testing.expectEqual(others + 1, snapshots(&out));
         const mine = for (out[0 .. others + 1]) |x| {
-            if (std.mem.eql(u8, x.name, "metered")) break x;
+            if (std.mem.eql(u8, x.name(), "metered")) break x;
         } else return error.NotPublished;
-        try std.testing.expectEqual(@as(u64, 1), mine.replayed);
+        try std.testing.expectEqual(@as(u64, 1), mine.counts.replayed);
     }
     try std.testing.expectEqual(others, snapshots(&out));
 }

@@ -52,6 +52,7 @@ test {
     _ = @import("nvfp4.zig");
     _ = @import("modelopt.zig");
     _ = graph_cache;
+    _ = @import("graph_registry.zig");
     _ = arena;
     _ = pack;
 }
