@@ -183,9 +183,9 @@ Living Weights is experimental. Measured on Nemotron 3.5 Lightning (MLX 4-bit) o
   and after a plain restart. Unrelated questions kept their answers and no fact leaked into questions it does not
   answer. With thinking on, a fact sometimes misses one wording ("Do you remember what colour I like?"): the model
   recalls the fact in its reasoning and stops there without a reply.
-- **Short documents.** From a three-sentence handbook (six facts) it answered 3 to 5 of 6 questions across runs on both
-  backends, with no drift, and leaked a fact into a question it does not answer in one run of five. A fact it cannot
-  learn is left out, and `learned` says why.
+- **Short documents.** From a three-sentence handbook (six facts) it answered 3 to 6 of 6 questions across five runs on
+  both backends, with no drift. In two runs the founder's name also answered a question about another role ("Who is
+  the head of marketing?"). A fact it cannot learn is left out, and `learned` says why.
 - **Long documents about one subject are the weak spot.** From a 21-fact company handbook it kept about half the facts
   and answered 6 of 16 questions, and with ten facts about the company kept, its answers about things the handbook does
   not say got worse, most with thinking on. Teach a few facts per subject, and always teach a copy.
