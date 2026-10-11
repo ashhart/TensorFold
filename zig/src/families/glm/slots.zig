@@ -182,7 +182,7 @@ pub const Slots = struct {
         if (i >= sl.slots.len or sl.slots[i].used) return error.SlotOutOfStep;
         if (prompt.len == 0 or prompt.len + st.max_rows + 1 > pool_mod.capacity(sl)) return error.ContextFull;
         const least: u32 = @intCast(prompt.len + st.max_rows + 1);
-        if (sl.pool != null and sl.slots[i].region == null) try pool_mod.reserve(sl, i, least);
+        if (sl.pool != null and sl.slots[i].region == null) try pool_mod.reserve(sl, i, least, null);
         if (prompt.len + st.max_rows + 1 > sl.slots[i].s.cap) return error.ContextFull;
         sl.settleAll(); // the prompt pass overwrites the projections a window's keep replays
         try sl.flush();

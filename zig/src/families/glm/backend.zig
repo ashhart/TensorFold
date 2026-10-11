@@ -94,7 +94,7 @@ pub const Backend = struct {
         const reuse: ?*const snapshot.Snap = if (s.reuse.saved) |saved| @ptrCast(@alignCast(saved)) else null;
         const i = b.sl.pick(reuse) orelse return error.NoFreeSlot;
         try b.by.put(b.gpa, s, i);
-        try pool.reserve(b.sl, i, need(prompt.len, s.max_new)); // pooled: its share (admission checked it fits)
+        try pool.reserve(b.sl, i, need(prompt.len, s.max_new), reuse); // pooled: its share (admission checked it fits)
         b.words.clearRetainingCapacity();
         try b.words.appendSlice(b.gpa, &.{ i, @intFromBool(s.drafts) });
         try b.words.appendSlice(b.gpa, prompt);
