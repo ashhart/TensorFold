@@ -1,16 +1,16 @@
 //! The tensor-parallel reduce: ranks' fp32 shares summed before each residual add, logits slices joined in rank order.
 
 const std = @import("std");
-const hip = @import("hip");
-const view = @import("../model/view.zig");
+const ops = @import("ops/ops.zig");
+const collective = @import("collective.zig");
 
-const Ops = hip.ops.Ops;
-const Tensor = hip.ops.Tensor;
+const Ops = ops.Ops;
+const Tensor = ops.Tensor;
 
-pub const Error = hip.ops.Error || hip.collective.Error;
+pub const Error = ops.Error || collective.Error;
 
 /// `n` fp32 values summed over the ranks in rank order, so a row's sum does not depend on the rows sharing the call.
-pub fn sum(o: Ops, c: hip.collective.Comm, y: u64, n: usize) Error!u64 {
+pub fn sum(o: Ops, c: collective.Comm, y: u64, n: usize) Error!u64 {
     const out = try o.arena.of(f32, n);
     if (c.world == 2) {
         try c.allReduce(y, out, n, .f32, o.stream);
@@ -25,14 +25,14 @@ pub fn sum(o: Ops, c: hip.collective.Comm, y: u64, n: usize) Error!u64 {
 }
 
 /// x += y on the residual rows: an activation-dtype `y` as one rank adds it, an fp32 share summed over the ranks first.
-pub fn residual(o: Ops, m: *const view.Model, x: Tensor, y: Tensor, n: usize) Error!void {
+pub fn residual(o: Ops, tp: ?collective.Comm, x: Tensor, y: Tensor, n: usize) Error!void {
     if (y.kind != .f32) return o.add(x, y, x, n);
-    const total = try sum(o, m.tp.?, y.ptr, n);
+    const total = try sum(o, tp.?, y.ptr, n);
     try o.addWide(x, total, x, n);
 }
 
 /// The ranks' logits slices (world, rows, width) of the activation dtype, gathered into `out`.
-pub fn gather(o: Ops, c: hip.collective.Comm, slice: Tensor, out: u64, n: usize) Error!void {
-    const dtype: hip.collective.Dtype = if (slice.kind == .f16) .f16 else .bf16;
+pub fn gather(o: Ops, c: collective.Comm, slice: Tensor, out: u64, n: usize) Error!void {
+    const dtype: collective.Dtype = if (slice.kind == .f16) .f16 else .bf16;
     try c.allGather(slice.ptr, out, n, dtype, o.stream);
 }
