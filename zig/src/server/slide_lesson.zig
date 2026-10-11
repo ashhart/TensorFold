@@ -87,16 +87,16 @@ pub fn facts(srv: *Server, cx: *Cx, text: []const u8, source: []const u8, gone: 
         const piece = text[at..@min(text.len, at + chunk_chars)];
         const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.facts_prompt, .{piece}), 512, gone);
         // a list holding facts the text does not (the prompt's own example, copied) is read again without the example
-        if (try take(a, &out, reply.content, text) > 0) {
+        if (try listed(a, &out, reply.content, text) > 0) {
             const again = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.facts_plain_prompt, .{piece}), 512, gone);
-            _ = try take(a, &out, again.content, text);
+            _ = try listed(a, &out, again.content, text);
         }
     }
     return out.items;
 }
 
 /// The facts of a found list that `text` holds, each once, into `out`; how many it left out as not in the text.
-fn take(a: Allocator, out: *std.ArrayList([]const u8), list: []const u8, text: []const u8) !usize {
+fn listed(a: Allocator, out: *std.ArrayList([]const u8), list: []const u8, text: []const u8) !usize {
     var left: usize = 0;
     var it = std.mem.splitScalar(u8, list, '\n');
     while (it.next()) |line| {
