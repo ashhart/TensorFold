@@ -202,6 +202,7 @@ pub const Projection = struct {
     pipe: mtl.Pipeline,
     n: usize,
     k: usize,
+    group_count: usize,
     weight_bytes: usize,
     metadata_bytes: usize,
     output_bytes: usize,
@@ -229,7 +230,7 @@ pub const Projection = struct {
             errdefer sums_pipe.?.deinit();
             sums_buffer = try device.buffer(@as(usize, if (l.reg) reg_rows else 16) * (l.k / l.format.group) * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         }
-        return .{ .pipe = p, .n = l.n, .k = l.k, .weight_bytes = l.weightWords() * 4, .metadata_bytes = l.metadataElements() * 2, .output_bytes = if (l.output == .f32) 4 else 2, .tile_count = l.tiles(), .sk = l.sk, .sums_pipe = sums_pipe, .sums_buffer = sums_buffer, .threads_per_slice = if (l.cooperative) 64 else 32, .reg = l.reg };
+        return .{ .pipe = p, .n = l.n, .k = l.k, .group_count = l.k / l.format.group, .weight_bytes = l.weightWords() * 4, .metadata_bytes = l.metadataElements() * 2, .output_bytes = if (l.output == .f32) 4 else 2, .tile_count = l.tiles(), .sk = l.sk, .sums_pipe = sums_pipe, .sums_buffer = sums_buffer, .threads_per_slice = if (l.cooperative) 64 else 32, .reg = l.reg };
     }
 
     pub fn deinit(p: Projection) void {
@@ -265,7 +266,7 @@ pub const Projection = struct {
             e.setValue(@as(i32, @intCast(rows)), 1);
             e.setBuffer(p.sums_buffer.?, 0, 2);
             e.setValue(@as(i32, @intCast(stride)), 3);
-            e.dispatchThreads(.{ .width = stride * (p.k / 64) }, .{ .width = 256 });
+            e.dispatchThreads(.{ .width = stride * p.group_count }, .{ .width = 256 });
             e.barrier();
         };
         e.setPipeline(p.pipe);
