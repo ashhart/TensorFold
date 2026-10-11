@@ -21,7 +21,7 @@ pub const Prefix = struct {
     /// Snapshot slots in use.
     used: std.ArrayList(bool) = .empty,
     /// The other ranks, when this is rank 0 of a group.
-    link: ?*const hip.link.Link = null,
+    link: ?hip.collective.Link = null,
     msg: std.ArrayList(u32) = .empty,
     /// The slot the last restore copied from (reset as a pass begins): the message that begins the pass names it.
     restored: u32 = worker.no_snapshot,

@@ -17,7 +17,7 @@ pub const Session = struct {
     clock: lanes.backend.WallClock,
 
     /// Rank 0 of a group of `link`'s ranks (null: a lone rank) runs the core; the others follow it.
-    pub fn init(s: *Session, gpa: std.mem.Allocator, io: std.Io, e: *qwen35.engine.Engine, link: ?*const hip.link.Link) !void {
+    pub fn init(s: *Session, gpa: std.mem.Allocator, io: std.Io, e: *qwen35.engine.Engine, link: ?hip.collective.Link) !void {
         const h = try Hip.init(gpa, e);
         errdefer h.deinit();
         if (link) |l| h.withLink(l);

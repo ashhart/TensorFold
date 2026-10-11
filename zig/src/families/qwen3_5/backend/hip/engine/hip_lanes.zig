@@ -61,7 +61,7 @@ pub const Hip = struct {
     matched: std.ArrayList(u32) = .empty,
     copied: std.ArrayList([3]u32) = .empty,
     /// Tensor parallelism: the other ranks, which get every step before this rank runs it (`worker.follow`).
-    link: ?*const hip.link.Link = null,
+    link: ?hip.collective.Link = null,
     msg: std.ArrayList(u32) = .empty,
     /// This engine's forward and head timings, filled by `measure` (none: the rule drafts the deepest it may).
     costs: costs.Costs = .{},
@@ -104,7 +104,7 @@ pub const Hip = struct {
     }
 
     /// Rank 0 of a tensor-parallel group: every step also goes to the ranks behind `link`.
-    pub fn withLink(h: *Hip, link: *const hip.link.Link) void {
+    pub fn withLink(h: *Hip, link: hip.collective.Link) void {
         h.link = link;
         h.prefix.link = link;
     }

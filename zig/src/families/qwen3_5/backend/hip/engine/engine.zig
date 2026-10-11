@@ -39,10 +39,10 @@ pub const Options = struct {
     device: c_int = 0,
     /// Positions past a reply a verify writes (the window's rows and one more).
     slack: usize = 0,
-    /// Tensor parallelism: this rank of `world`, `id` being the communicator's unique id, the same on every rank.
+    /// Tensor parallelism: this rank of `world`, and the group it joined (it opens the communicator).
     rank: usize = 0,
     world: usize = 1,
-    id: ?hip.rccl.UniqueId = null,
+    group: ?hip.collective.Group = null,
     /// Replay rounds from captured graphs (the policy's `graphs` turns it off).
     graphs: bool = true,
     /// What the run may use, resolved once by whoever opens the engine.
@@ -85,9 +85,8 @@ pub const Engine = struct {
     /// The keys and values of every stream and prefix entry.
     pool: pages.Pool,
     drawer: draw.Drawer,
-    /// Tensor parallelism: RCCL and this rank's communicator.
-    rccl: hip.rccl.Rccl = undefined,
-    comm: hip.rccl.Comm = undefined,
+    /// Tensor parallelism: this rank's communicator.
+    comm: hip.collective.Comm = undefined,
     graphs: round_graphs.Graphs,
     /// The draft head's batches replay graphs (the head holds no collective, so under tp too unless graphs=off).
     head_graphs: bool = true,
@@ -117,15 +116,8 @@ pub const Engine = struct {
         e.stream = try hip.Stream.init(&e.driver);
         errdefer e.stream.deinit();
         const group: ?slicing.Rank = if (o.world > 1) .{ .rank = o.rank, .world = o.world } else null;
-        if (group != null) {
-            e.rccl = try hip.rccl.Rccl.open(o.policy.rccl_lib.slice());
-            errdefer e.rccl.close();
-            e.comm = try hip.rccl.Comm.init(&e.rccl, o.id orelse return error.NoUniqueId, o.rank, o.world);
-        }
-        errdefer if (group != null) {
-            e.comm.deinit();
-            e.rccl.close();
-        };
+        if (group != null) e.comm = try (o.group orelse return error.NoGroup).open();
+        errdefer if (group != null) e.comm.close();
         if (o.preflight) |pf| {
             // a rank loads its share of the checkpoint, near enough to refuse before reading it
             pf.* = .{ .pool = try e.budget(io), .held = hip.usage(false).device, .weights = admission.weightBytes(io, dir) / o.world };
@@ -264,10 +256,7 @@ pub const Engine = struct {
         e.weights.deinit();
         e.stream.deinit();
         e.lib.unload();
-        if (e.o.world > 1) {
-            e.comm.deinit();
-            e.rccl.close();
-        }
+        if (e.o.world > 1) e.comm.close();
         e.ctx.deinit();
         e.driver.close();
         e.gpa.destroy(e);
@@ -318,7 +307,7 @@ pub const Engine = struct {
     }
 
     /// vocab_gather: every rank's slice of `rows` logits rows, joined on the device into whole rows in rank order.
-    fn joined(e: *Engine, o: hip.ops.Ops, c: hip.rccl.Comm, slice: hip.ops.Tensor, rows: usize) !hip.ops.Tensor {
+    fn joined(e: *Engine, o: hip.ops.Ops, c: hip.collective.Comm, slice: hip.ops.Tensor, rows: usize) !hip.ops.Tensor {
         const width = e.model().head.n;
         const n = rows * width;
         const size_of = slice.kind.size();

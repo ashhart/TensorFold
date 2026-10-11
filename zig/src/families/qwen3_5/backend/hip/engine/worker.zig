@@ -118,7 +118,7 @@ pub const Worker = struct {
     }
 
     /// Runs rank 0's steps until it says stop.
-    pub fn follow(w: *Worker, link: *const hip.link.Link) !void {
+    pub fn follow(w: *Worker, link: hip.collective.Link) !void {
         var msg: std.ArrayList(u32) = .empty;
         defer msg.deinit(w.gpa);
         var ids: [max_windows]u32 = undefined;
