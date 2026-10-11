@@ -149,6 +149,12 @@ pub fn promote(b: *Metal) void {
     }
 }
 
+/// Slot 0 emptied and prefilled with `prompt`, through the drafter when there is one (the window timing's context).
+pub fn refill(b: *Metal, prompt: []const u32) !void {
+    if (b.draft) |d| try d.reset() else try b.runner.reset(0);
+    if (b.draft) |d| try d.generation.prefill(prompt, 128) else try (q.session.Session{ .runner = b.runner }).prefill(prompt, 128);
+}
+
 /// A lone greedy stream on the DFlash2 serial loop in slot 0 until it ends (false) or the lane core adopts it (true).
 pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
     const d = b.draft orelse return error.DraftNotAttached;
