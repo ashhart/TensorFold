@@ -13,6 +13,22 @@ pub const Pick = enum { auto, reference };
 /// MTP drafting: `--mtp-drafts` and `--mtp-confidence`.
 pub const Mtp = struct { drafts: u8 = 3, confidence: f64 = 0.3 };
 
+/// A path a rank reads locally (it never travels with the policy).
+pub const Path = struct {
+    buf: [160]u8 = @splat(0),
+
+    pub fn slice(p: *const Path) ?[]const u8 {
+        const n = std.mem.indexOfScalar(u8, &p.buf, 0) orelse p.buf.len;
+        return if (n == 0) null else p.buf[0..n];
+    }
+
+    fn set(p: *Path, text: []const u8) error{BadValue}!void {
+        if (text.len >= p.buf.len) return error.BadValue;
+        p.buf = @splat(0);
+        @memcpy(p.buf[0..text.len], text);
+    }
+};
+
 pub const Policy = struct {
     matrix: Choice = .auto,
     attention: Attention = .auto,
@@ -32,6 +48,8 @@ pub const Policy = struct {
     slots: u32 = 8,
     /// Rank whose graph capture fails on purpose, for the tests of the fallback (-1: none). Local to a rank.
     graph_fail: i32 = -1,
+    /// The RCCL library to load first. Local to a rank.
+    rccl_lib: Path = .{},
 
     pub const Error = error{ UnknownKey, BadValue, StepNotAligned };
 
@@ -100,7 +118,7 @@ pub const Policy = struct {
             p.fill_rows = std.fmt.parseInt(u32, value, 10) catch return error.BadValue;
         } else if (eql(u8, key, "graph_fail")) {
             p.graph_fail = std.fmt.parseInt(i32, value, 10) catch return error.BadValue;
-        } else return error.UnknownKey;
+        } else if (eql(u8, key, "rccl_lib")) try p.rccl_lib.set(value) else return error.UnknownKey;
     }
 
     fn parseEnum(comptime E: type, value: []const u8) Error!E {
@@ -115,6 +133,7 @@ pub const Policy = struct {
         if (p.fuse != .auto) try w.print(",fuse={t}", .{p.fuse});
         if (p.gdn != .auto) try w.print(",gdn={t}", .{p.gdn});
         if (p.graph_fail >= 0) try w.print(",graph_fail={d}", .{p.graph_fail});
+        if (p.rccl_lib.slice()) |path| try w.print(",rccl_lib={s}", .{path});
         try w.print("; mtp drafts {d} under {d}, {d} snapshots", .{ p.mtp.drafts, p.mtp.confidence, p.slots });
     }
 
@@ -132,7 +151,7 @@ pub const Policy = struct {
         return .{ nibbles[0], nibbles[1] | @as(u32, p.mtp.drafts) << 24, p.prefill_step, @truncate(conf), @intCast(conf >> 32), p.slots, p.fill_rows };
     }
 
-    /// `local` with every field rank 0 sent; a rank keeps its own graph fault.
+    /// `local` with every field rank 0 sent; a rank keeps its own graph fault and library path.
     pub fn fromWords(w: [word_count]u32, local: Policy) Policy {
         var p = local;
         var vals: [8]u32 = undefined;
