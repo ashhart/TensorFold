@@ -75,11 +75,12 @@ fn opens(text: []const u8, word: []const u8) bool {
     return std.mem.eql(u8, first, word) and std.ascii.isUpper(first[0]);
 }
 
-/// A fact's subject words: the phrase's its questions say; the fact's proper names join a phrase with none of its own.
-pub fn factSubject(a: std.mem.Allocator, phrase: []const u8, fact: []const u8, qs: []const []const u8) ![]const []const u8 {
+/// A fact's subject words: the phrase's its questions say; a document's other proper names join a phrase with none.
+pub fn factSubject(a: std.mem.Allocator, phrase: []const u8, fact: []const u8, qs: []const []const u8, document: bool) ![]const []const u8 {
     const own = try subjectWords(a, phrase);
     const proper = try named(a, own, fact, qs);
-    const theirs = try asked(a, try properWords(a, own, fact), qs);
+    // a told fact's other proper name is its answer ("My dog is called Ginger."): never a word its questions must say
+    const theirs = try asked(a, if (document) try properWords(a, own, fact) else own, qs);
     if (proper.len == 0) return theirs;
     const kept = try asked(a, own, qs);
     for (kept) |w| for (proper) |p| if (std.mem.eql(u8, w, p)) return kept;
@@ -189,16 +190,20 @@ test "a fact's subject keeps its own proper names; a phrase without any takes th
     defer arena.deinit();
     const a = arena.allocator();
     const other_way = [_][]const u8{ "Who founded Quillmoor Labs?", "Who started Quillmoor Labs?", "Who is behind Quillmoor Labs?" };
-    const odile = try factSubject(a, "Odile Marchetti", "Odile Marchetti founded Quillmoor Labs.", &other_way);
+    const odile = try factSubject(a, "Odile Marchetti", "Odile Marchetti founded Quillmoor Labs.", &other_way, true);
     try std.testing.expectEqual(@as(usize, 2), odile.len);
     try std.testing.expectEqualStrings("Odile", odile[0]);
     const chat = [_][]const u8{ "What does Quillmoor use for team chat?", "Which app runs the Quillmoor team chat?", "Where is the Quillmoor team chat?" };
-    const words = try factSubject(a, "team chat", "Quillmoor Labs team chat runs on Zulip.", &chat);
+    const words = try factSubject(a, "team chat", "Quillmoor Labs team chat runs on Zulip.", &chat, true);
     try std.testing.expectEqualStrings("Quillmoor", keyWord(words, try named(a, words, "Quillmoor Labs team chat runs on Zulip.", &chat), chat[0]));
     for (words) |w| try std.testing.expect(!std.mem.eql(u8, w, "Zulip"));
     const rota = [_][]const u8{ "Who manages the Quillmoor Labs support rota?", "Who runs Quillmoor's support rota?", "Who is in charge of the Quillmoor support rota?", "Who is Ines Calloway?" };
-    const ines = try factSubject(a, "Ines Calloway", "The Quillmoor Labs support rota is managed by Ines Calloway.", &rota);
+    const ines = try factSubject(a, "Ines Calloway", "The Quillmoor Labs support rota is managed by Ines Calloway.", &rota, true);
     try std.testing.expectEqualStrings("Quillmoor", ines[0]);
+    const dog = [_][]const u8{ "What is my dog called?", "What is Ginger's name?", "What is my dog's name, Ginger?" };
+    const told = try factSubject(a, "My dog", "My dog is called Ginger.", &dog, false);
+    try std.testing.expectEqual(@as(usize, 1), told.len);
+    try std.testing.expectEqualStrings("dog", told[0]);
 }
 
 const unkeyed = [_][]const u8{ "i", "me", "my", "mine", "myself", "we", "us", "our", "ours", "you", "your", "yours", "it", "its", "this", "that", "these", "those", "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "do", "does", "did", "is", "are", "was", "like", "likes" };
