@@ -5,7 +5,7 @@ const hip = @import("hip");
 const Engine = @import("engine.zig").Engine;
 const Pick = @import("engine.zig").Pick;
 const state = @import("../forward/state.zig");
-const draw = @import("draw.zig");
+const draw = @import("hip_serve").draw;
 
 /// A message's first word: rank 0 decides every match, eviction, page and slot, and a rank only applies it.
 pub const Op = enum(u32) { stop, prefill, verify, keep, release, fill, pages, snap, copy };
