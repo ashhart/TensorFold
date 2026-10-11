@@ -33,7 +33,9 @@ pub fn library(b: *std.Build, target: std.Build.ResolvedTarget, dir: []const u8)
     if (!std.mem.eql(u8, std.mem.trim(u8, tag, "\r\n"), pinned)) return null;
     const root: std.Build.LazyPath = .{ .cwd_relative = dir };
     const mod = b.createModule(.{ .target = target, .optimize = .ReleaseFast, .link_libcpp = true, .strip = true });
-    const flags = [_][]const u8{ "-std=c++17", "-DXGRAMMAR_ENABLE_CPPTRACE=0", "-fexceptions", "-Wno-everything" };
+    // xgrammar's checks keep __FILE__: the map keeps the checkout's absolute path out of the shipped library
+    const map = b.fmt("-ffile-prefix-map={s}=xgrammar", .{dir});
+    const flags = [_][]const u8{ "-std=c++17", "-DXGRAMMAR_ENABLE_CPPTRACE=0", "-fexceptions", "-Wno-everything", map };
     mod.addIncludePath(root.path(b, "include"));
     mod.addIncludePath(root.path(b, "3rdparty/picojson"));
     mod.addIncludePath(root.path(b, "3rdparty/dlpack/include"));
