@@ -190,7 +190,7 @@ pub fn leastRecent(slots: []const Slot, snaps: *const std.AutoHashMapUnmanaged(u
     return best;
 }
 
-/// Slots with no GPU behind them: enough for the pick, which reads only `used`, homes, stamps and staleness.
+/// Slots with no GPU behind them, for tests that read only slots' `used`, states' homes, stamps and staleness.
 fn testSlots(slots: []Slot) Slots {
     return .{ .gpa = std.testing.allocator, .e = undefined, .slots = slots, .rows = undefined, .ids = undefined, .lasts = undefined, .picks = undefined, .ring = undefined };
 }
@@ -235,4 +235,41 @@ test "after a busy session an unrelated request leaves the newest conversation's
     }
     // slot 2 holds only A1's state, the newest: the count-based pick took it (fewest held) and A1 went stale
     try std.testing.expectEqual(@as(?u32, 0), pick(&sl, null));
+}
+
+test "a slot copies out only what the budget grants, and rank 1 copies only ids resident in that slot" {
+    const gpa = std.testing.allocator;
+    var slots: [2]Slot = undefined;
+    for (&slots) |*s| s.* = .{ .s = undefined, .held = undefined, .last = undefined };
+    var e: @import("engine.zig").Engine = undefined;
+    e.c = .{};
+    var sl = testSlots(&slots);
+    sl.e = &e;
+    defer sl.snaps.deinit(gpa);
+    var states: [4]snapshot.Snap = undefined;
+    for (&states, [_]u32{ 0, 0, 0, 1 }, [_]u32{ 64, 128, 32, 64 }, 1..) |*x, home, at, k| {
+        x.* = .{ .id = @intCast(k), .at = at, .buf = undefined, .bytes = 0, .home = home };
+        try sl.snaps.put(gpa, x.id, x);
+    }
+    states[2].stale = true;
+    const Refuse = struct {
+        var asked: u32 = 0;
+        fn f(_: *anyopaque, _: *anyopaque, _: u64) bool {
+            asked += 1;
+            return false;
+        }
+    };
+    var unused: u8 = 0;
+    sl.grow = .{ .ctx = &unused, .f = Refuse.f };
+    var ids: std.ArrayList(u32) = .empty;
+    defer ids.deinit(gpa);
+    try copyOut(&sl, 0, 48, &ids, gpa); // ids 1 and 2 lie past 48 in slot 0; 3 is stale, 4 is slot 1's
+    try std.testing.expectEqual(@as(u32, 2), Refuse.asked);
+    try std.testing.expectEqual(@as(usize, 0), ids.items.len); // refused: nothing copied, nothing sent to rank 1
+    overwrite(&sl, 0, 48);
+    try std.testing.expect(states[0].stale and states[1].stale and !states[3].stale and states[3].home.? == 1);
+    try std.testing.expectError(error.SnapshotOutOfStep, copyIds(&sl, 0, &.{9})); // not held
+    try std.testing.expectError(error.SnapshotOutOfStep, copyIds(&sl, 0, &.{4})); // resident in slot 1
+    try std.testing.expectError(error.SnapshotOutOfStep, copyIds(&sl, 0, &.{1})); // stale
+    try copyIds(&sl, 0, &.{});
 }
