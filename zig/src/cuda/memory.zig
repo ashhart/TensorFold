@@ -5,12 +5,13 @@ const abi = @import("abi.zig");
 const Driver = @import("driver.zig").Driver;
 const Error = @import("driver.zig").Error;
 
-/// Bytes this process holds in DeviceBuffers and HostBuffers, and the device peak since the last reset.
-pub const Usage = struct { device: u64, host: u64, peak: u64 };
+/// Bytes held in DeviceBuffers and HostBuffers, the device peak since the last reset, and the driver allocations.
+pub const Usage = struct { device: u64, host: u64, peak: u64, allocs: u64 = 0 };
 
 var device_bytes: std.atomic.Value(u64) = .init(0);
 var host_bytes: std.atomic.Value(u64) = .init(0);
 var peak_bytes: std.atomic.Value(u64) = .init(0);
+var driver_allocs: std.atomic.Value(u64) = .init(0); // live DeviceBuffers from cuMemAlloc itself, not from a hook
 var counts_mutex: std.atomic.Mutex = .unlocked;
 
 /// The counts now; `reset_peak` starts a new peak at the current device bytes. Safe from any thread.
@@ -27,7 +28,8 @@ fn usageWithHook(reset_peak: bool, hook: anytype) Usage {
     const now = device_bytes.load(.monotonic);
     hook.afterRead();
     if (reset_peak) peak_bytes.store(now, .monotonic);
-    return .{ .device = now, .host = host_bytes.load(.monotonic), .peak = @max(now, peak_bytes.load(.monotonic)) };
+    const allocs = driver_allocs.load(.monotonic);
+    return .{ .device = now, .host = host_bytes.load(.monotonic), .peak = @max(now, peak_bytes.load(.monotonic)), .allocs = allocs };
 }
 
 fn held(counter: *std.atomic.Value(u64), n: usize) void {
@@ -78,7 +80,10 @@ pub const DeviceBuffer = struct {
         var p: abi.DevicePtr = 0;
         if (len > 0) {
             if (alloc_hook) |h| p = h.alloc(h.ctx, len) orelse 0;
-            if (p == 0) try d.check(d.api.cuMemAlloc_v2(&p, len), "cuMemAlloc");
+            if (p == 0) {
+                try d.check(d.api.cuMemAlloc_v2(&p, len), "cuMemAlloc");
+                _ = driver_allocs.fetchAdd(1, .monotonic);
+            }
         }
         held(&device_bytes, len);
         return .{ .d = d, .ptr = p, .len = len };
@@ -96,7 +101,10 @@ pub const DeviceBuffer = struct {
         if (!self.borrowed) {
             if (self.ptr != 0) {
                 const mine = if (alloc_hook) |h| h.free(h.ctx, self.ptr) else false;
-                if (!mine) _ = self.d.api.cuMemFree_v2(self.ptr);
+                if (!mine) {
+                    _ = self.d.api.cuMemFree_v2(self.ptr);
+                    _ = driver_allocs.fetchSub(1, .monotonic);
+                }
             }
             freed(&device_bytes, self.len);
         }
@@ -253,6 +261,48 @@ test "a buffer the hook owns is freed by the hook, never by the driver" {
     var c: DeviceBuffer = .{ .d = undefined, .ptr = 0x3000, .len = 64, .borrowed = true };
     c.free();
     try std.testing.expectEqual(@as(u32, 1), Owner.frees);
+}
+
+test "the driver allocation count follows cuMemAlloc and cuMemFree, not a hook's or a borrowed span's" {
+    const Fake = struct {
+        var next: abi.DevicePtr = 0x10_0000;
+        fn alloc(p: *abi.DevicePtr, len: usize) callconv(.c) abi.Result {
+            p.* = next;
+            next += len;
+            return abi.success;
+        }
+        fn free(_: abi.DevicePtr) callconv(.c) abi.Result {
+            return abi.success;
+        }
+        fn hookAlloc(_: *anyopaque, len: usize) ?abi.DevicePtr {
+            return if (len == 4096) 0x9000 else null; // the hook serves one size, the rest go to the driver
+        }
+        fn hookFree(_: *anyopaque, p: abi.DevicePtr) bool {
+            return p == 0x9000;
+        }
+    };
+    var d: Driver = .{ .lib = undefined, .api = undefined };
+    d.api.cuMemAlloc_v2 = Fake.alloc;
+    d.api.cuMemFree_v2 = Fake.free;
+    const before = usage(false).allocs;
+    var a = try DeviceBuffer.alloc(&d, 1000);
+    var b = try DeviceBuffer.alloc(&d, 2000);
+    try std.testing.expectEqual(before + 2, usage(false).allocs);
+    var ctx: u8 = 0;
+    setHook(.{ .ctx = &ctx, .alloc = Fake.hookAlloc, .free = Fake.hookFree });
+    var h = try DeviceBuffer.alloc(&d, 4096);
+    var c = try DeviceBuffer.alloc(&d, 64);
+    try std.testing.expectEqual(@as(abi.DevicePtr, 0x9000), h.ptr);
+    try std.testing.expectEqual(before + 3, usage(false).allocs);
+    h.free();
+    c.free();
+    setHook(null);
+    var s: DeviceBuffer = .{ .d = &d, .ptr = a.ptr + 256, .len = 256, .borrowed = true };
+    s.free();
+    try std.testing.expectEqual(before + 2, usage(false).allocs);
+    a.free();
+    b.free();
+    try std.testing.expectEqual(before, usage(false).allocs);
 }
 
 test "peak reset preserves an allocation between its read and store" {

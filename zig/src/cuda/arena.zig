@@ -4,6 +4,7 @@ const std = @import("std");
 const abi = @import("abi.zig");
 const Driver = @import("driver.zig").Driver;
 const memory = @import("memory.zig");
+const quiet = @import("builtin").is_test; // a test's stderr is the build runner's channel
 
 pub const Error = error{ DriverUnavailable, MissingSymbol, Unsupported, CudaFailed, OutOfMemory };
 
@@ -76,7 +77,7 @@ pub const Arena = struct {
         if (len > a.o.small_max) {
             const n = roundUp(len, a.be.granularity);
             const p = a.be.chunk(a.be.ctx, n) orelse {
-                a.stats.fallback += 1;
+                a.fellBack(n);
                 return null;
             };
             errdefer a.be.release(a.be.ctx, p, n);
@@ -94,7 +95,7 @@ pub const Arena = struct {
         if (a.limit - a.cursor < n) {
             const cl = roundUp(@max(a.o.small_chunk, n), a.be.granularity);
             const base = a.be.chunk(a.be.ctx, cl) orelse {
-                a.stats.fallback += 1;
+                a.fellBack(cl);
                 return null;
             };
             errdefer a.be.release(a.be.ctx, base, cl);
@@ -108,6 +109,12 @@ pub const Arena = struct {
         a.cursor += n;
         a.stats.small += 1;
         return p;
+    }
+
+    /// A chunk the backend did not give: the request goes to cuMemAlloc (the first logged: a dead arena shows).
+    fn fellBack(a: *Arena, len: usize) void {
+        if (!quiet and a.stats.fallback == 0) std.log.scoped(.cuda).warn("device arena ({s}): a {d} MiB chunk failed; requests go to cuMemAlloc", .{ a.be.name, len >> 20 });
+        a.stats.fallback += 1;
     }
 
     /// True when `p` was the arena's (and is now free); false: not ours, the caller frees it as before.
@@ -186,6 +193,8 @@ pub const Vmm = struct {
     va_len: usize = 0,
     next: u64 = 0,
     api: Api,
+    /// the first chunk that failed: the driver call and its CUresult (null: none failed)
+    failed: ?struct { call: []const u8, code: c_int } = null,
 
     const Api = struct {
         reserve: *const fn (*u64, usize, usize, u64, c_ulonglong) callconv(.c) abi.Result,
@@ -247,19 +256,27 @@ pub const Vmm = struct {
 
     fn chunk(ctx: *anyopaque, len: usize) ?u64 {
         const v: *Vmm = @ptrCast(@alignCast(ctx));
-        if (v.va + v.va_len - v.next < len) return null;
+        if (v.va + v.va_len - v.next < len) return v.fail("the reserved range", 0);
         var h: u64 = 0;
-        if (v.api.create(&h, len, &v.prop, 0) != abi.success) return null;
+        const rc = v.api.create(&h, len, &v.prop, 0);
+        if (rc != abi.success) return v.fail("cuMemCreate", rc);
         defer _ = v.api.release(h); // the mapping holds the memory until it is unmapped
         const at = v.next;
-        if (v.api.map(at, len, 0, h, 0) != abi.success) return null;
+        const rm = v.api.map(at, len, 0, h, 0);
+        if (rm != abi.success) return v.fail("cuMemMap", rm);
         const desc: AccessDesc = .{ .loc_id = v.device };
-        if (v.api.setAccess(at, len, &desc, 1) != abi.success) {
+        const ra = v.api.setAccess(at, len, &desc, 1);
+        if (ra != abi.success) {
             _ = v.api.unmap(at, len);
-            return null;
+            return v.fail("cuMemSetAccess", ra);
         }
         v.next += len;
         return at;
+    }
+
+    fn fail(v: *Vmm, call: []const u8, code: c_int) ?u64 {
+        if (v.failed == null) v.failed = .{ .call = call, .code = code };
+        return null;
     }
 
     fn release(ctx: *anyopaque, base: u64, len: usize) void {
@@ -371,4 +388,62 @@ test "arena: a long run of allocations and frees leaves both address maps free s
             try t.expect(freeSlots(m) * 10 >= m.capacity());
         }
     }
+}
+
+test "arena: a backend that maps nothing sends every request to cuMemAlloc and counts each fallback" {
+    const t = std.testing;
+    var f: Fake = .{ .fail = true };
+    var a = Arena.init(t.allocator, f.backend(2 << 20), .{ .small_max = 1 << 20, .small_chunk = 4 << 20 });
+    defer a.deinit();
+    try t.expectEqual(@as(?u64, null), a.alloc(8 << 20)); // a large request's own chunk
+    try t.expectEqual(@as(?u64, null), a.alloc(4096)); // a small one's shared chunk
+    try t.expectEqual(@as(u64, 2), a.stats.fallback);
+    try t.expectEqual(@as(u64, 0), a.stats.chunk_bytes);
+    try t.expect(!a.free(0x1000)); // nothing was the arena's: the caller frees as before
+    f.fail = false; // the backend recovers: the next request maps again
+    try t.expect(a.alloc(4096) != null);
+    try t.expectEqual(@as(u64, 2), a.stats.fallback);
+}
+
+test "arena: VMM keeps the first failed driver call and its code, later failures leave it" {
+    const t = std.testing;
+    const Api = struct {
+        var create_rc: abi.Result = 2; // CUDA_ERROR_OUT_OF_MEMORY
+        var unmaps: u32 = 0;
+        fn create(h: *u64, _: usize, _: *const Vmm.Prop, _: c_ulonglong) callconv(.c) abi.Result {
+            h.* = 7;
+            return create_rc;
+        }
+        fn ok1(_: u64) callconv(.c) abi.Result {
+            return abi.success;
+        }
+        fn map(_: u64, _: usize, _: usize, _: u64, _: c_ulonglong) callconv(.c) abi.Result {
+            return abi.success;
+        }
+        fn unmap(_: u64, _: usize) callconv(.c) abi.Result {
+            unmaps += 1;
+            return abi.success;
+        }
+        fn setAccess(_: u64, _: usize, _: *const Vmm.AccessDesc, _: usize) callconv(.c) abi.Result {
+            return 1; // CUDA_ERROR_INVALID_VALUE
+        }
+    };
+    var v: Vmm = .{ .lib = undefined, .device = 0, .prop = .{}, .granularity = 2 << 20, .va = 1 << 40, .va_len = 4 << 20, .next = 1 << 40, .api = undefined };
+    v.api.create = Api.create;
+    v.api.release = Api.ok1;
+    v.api.map = Api.map;
+    v.api.unmap = Api.unmap;
+    v.api.setAccess = Api.setAccess;
+    const be = v.backend();
+    try t.expectEqual(@as(?u64, null), be.chunk(be.ctx, 2 << 20));
+    try t.expectEqualStrings("cuMemCreate", v.failed.?.call);
+    try t.expectEqual(@as(c_int, 2), v.failed.?.code);
+    Api.create_rc = abi.success; // now access fails: the mapping is undone, the first failure stays
+    try t.expectEqual(@as(?u64, null), be.chunk(be.ctx, 2 << 20));
+    try t.expectEqual(@as(u32, 1), Api.unmaps);
+    try t.expectEqualStrings("cuMemCreate", v.failed.?.call);
+    try t.expectEqual(@as(u64, 1 << 40), v.next); // nothing was mapped
+    v.failed = null; // past the reserved range: no driver call at all
+    try t.expectEqual(@as(?u64, null), be.chunk(be.ctx, 8 << 20));
+    try t.expectEqualStrings("the reserved range", v.failed.?.call);
 }

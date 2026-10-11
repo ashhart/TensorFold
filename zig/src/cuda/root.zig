@@ -35,6 +35,7 @@ pub const experts = @import("experts.zig");
 pub const modelopt = @import("modelopt.zig");
 pub const graph_cache = @import("graph_cache.zig");
 pub const arena = @import("arena.zig");
+pub const pack = @import("pack.zig");
 
 test {
     _ = @import("memory.zig");
@@ -52,4 +53,5 @@ test {
     _ = @import("modelopt.zig");
     _ = graph_cache;
     _ = arena;
+    _ = pack;
 }
