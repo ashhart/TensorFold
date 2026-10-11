@@ -31,6 +31,19 @@ pub fn argmax(row: []const u16, dtype: Dtype) u32 {
     return @intCast(best);
 }
 
+/// Structured output: every token whose bit is clear in `bits` (32 a word, token i in word i / 32) becomes -inf.
+pub fn mask(row: []u16, dtype: Dtype, bits: []const u32) void {
+    const minus_inf: u16 = switch (dtype) {
+        .f16 => 0xFC00,
+        .bf16 => 0xFF80,
+    };
+    for (row, 0..) |*v, i| {
+        const word = i / 32;
+        const allowed = word < bits.len and (bits[word] >> @intCast(i % 32)) & 1 == 1;
+        if (!allowed) v.* = minus_inf;
+    }
+}
+
 const Candidate = struct { value: f32, id: u32 };
 
 fn larger(_: void, a: Candidate, b: Candidate) bool {
@@ -89,4 +102,23 @@ test "argmax keeps the first of equal values; bf16 and fp16 widen exactly" {
 test "greedy draws the argmax" {
     const row = [_]u16{ 0x3c00, 0x4000, 0x3e00 };
     try std.testing.expectEqual(@as(u32, 1), try draw(std.testing.allocator, &row, .f16, null, 0));
+}
+
+test "a masked row draws only allowed tokens, greedy and sampled" {
+    const bf: u16 = 0x3f80; // 1.0
+    const big: u16 = 0x4000; // 2.0
+    var row = [_]u16{ big, bf, 0, bf, big };
+    // tokens 1 and 3 allowed: the largest allowed is 1 (first of equals), not 0 or 4
+    mask(&row, .bf16, &.{0b01010});
+    try std.testing.expectEqual(@as(u32, 1), argmax(&row, .bf16));
+    try std.testing.expectEqual(@as(u16, 0xFF80), row[0]);
+    const s: lanes.Sampling = .{ .seed = 3, .temperature = 1.0 };
+    for (0..32) |p| {
+        const t = try draw(std.testing.allocator, &row, .bf16, s, p);
+        try std.testing.expect(t == 1 or t == 3);
+    }
+    // a mask shorter than the row disallows the rest
+    var tail = [_]u16{ bf, bf, big };
+    mask(&tail, .f16, &.{});
+    try std.testing.expectEqual(@as(u16, 0xFC00), tail[2]);
 }
