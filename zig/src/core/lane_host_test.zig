@@ -96,6 +96,62 @@ test "a request the backend refuses fails alone, in the backend's words" {
     try std.testing.expectEqual(@as(usize, 64), plain.tokens);
 }
 
+test "a request the backend has no memory for yet waits for a running lane to free, then runs" {
+    try waitsForMemory(false);
+}
+
+test "the same when the backend runs the prompt pass a chunk a round" {
+    try waitsForMemory(true);
+}
+
+fn waitsForMemory(stepped: bool) !void {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .memory_lanes = 1, .prefill_chunks = if (stepped) 3 else 0 };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, if (stepped) target.stepped() else target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    try host.start();
+    defer host.stop();
+    const Box = struct {
+        mutex: std.Io.Mutex = .init,
+        done: ?Reason = null,
+        tokens: usize = 0,
+        fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
+            const b: *@This() = @ptrCast(@alignCast(ctx));
+            b.mutex.lockUncancelable(std.testing.io);
+            defer b.mutex.unlock(std.testing.io);
+            switch (e.*) {
+                .tokens => |t| b.tokens += t.len,
+                .finished => |f| b.done = f.reason,
+                else => {},
+            }
+        }
+        fn wait(b: *@This()) Reason {
+            while (true) {
+                b.mutex.lockUncancelable(std.testing.io);
+                const d = b.done;
+                b.mutex.unlock(std.testing.io);
+                if (d) |r| return r;
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+            }
+        }
+    };
+    const prompt = [_]u32{ 2, 7, 1, 8 };
+    var first: Box = .{};
+    var second: Box = .{};
+    const request: Request = .{ .prompt = &prompt, .max_tokens = 48 };
+    const e = host.engine();
+    try e.submit(1, &request, .{ .ctx = &first, .event = Box.event });
+    try e.submit(2, &request, .{ .ctx = &second, .event = Box.event });
+    try std.testing.expectEqual(Reason.length, first.wait());
+    try std.testing.expectEqual(Reason.length, second.wait());
+    try std.testing.expectEqual(@as(usize, 48), second.tokens);
+}
+
 test "a lane host serves the core's own tokens, in order, and cancels between rounds" {
     const gpa = std.testing.allocator;
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);

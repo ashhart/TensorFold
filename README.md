@@ -84,7 +84,8 @@ Every accepted draft must equal the token the same native engine would produce w
 A resumed request must equal fresh execution, and each concurrent stream must equal its solo run.
 The comparison fixes the checkpoint, backend, settings and runtime.
 Different quantizations and different backends can produce different outputs.
-Flash Next and Qwen3.8-27B run one active reply per engine; Nemotron, GLM and the 2B model use shared lane rounds.
+Flash Next runs one active reply per engine; Nemotron, GLM, the 2B model and Qwen3.8-27B use shared lane rounds.
+The 27B's DFlash2 drafter drafts for one stream at a time: a request alone, or the one in the drafter's slot when several share rounds.
 
 ## Models on disk
 
