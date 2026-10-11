@@ -31,6 +31,7 @@ pub const Got = struct {
     thinking: std.ArrayList(?api.Example) = .empty, // each pair's thinking answer: the recall line, then the answer
     refs: std.ArrayList(Held) = .empty,
     subjects: std.ArrayList(?[]const u8) = .empty,
+    unnamed: std.ArrayList([]const u8) = .empty, // questions that asked for the subject instead of naming it
 };
 
 /// A question written with its answer, for the fact's lists.
@@ -44,6 +45,11 @@ pub fn take(srv: *Server, cx: *Cx, got: *Got, fact: []const u8, f: usize, qs: []
         for (got.refs.items) |r| if (std.mem.eql(u8, r.question, q)) continue :next;
         for (fresh.items) |x| if (std.mem.eql(u8, x, q)) continue :next;
         try fresh.append(a, q);
+    }
+    next: for (fresh.items) |q| {
+        if (got.words.len == 0 or slide_subject.names(got.named, got.words, q)) continue;
+        for (got.unnamed.items) |x| if (std.mem.eql(u8, x, q)) continue :next;
+        try got.unnamed.append(a, q);
     }
     const out = try a.alloc(?Written, fresh.items.len);
     @memset(out, null);
