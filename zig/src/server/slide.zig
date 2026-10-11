@@ -16,16 +16,38 @@ const Allocator = std.mem.Allocator;
 
 const page = @embedFile("slide.html");
 
+/// The page's scripts, each served at /slide/NAME.
+const scripts = [_]struct { []const u8, []const u8 }{
+    .{ "data.js", @embedFile("slide_data.js") },
+    .{ "panel.js", @embedFile("slide_panel.js") },
+    .{ "flat.js", @embedFile("slide_flat.js") },
+    .{ "scene.js", @embedFile("slide_scene.js") },
+    .{ "tower.js", @embedFile("slide_tower.js") },
+    .{ "fx.js", @embedFile("slide_fx.js") },
+    .{ "bloom.js", @embedFile("slide_bloom.js") },
+    .{ "layout.js", @embedFile("slide_layout.js") },
+};
+
 pub fn view(_: *Server, conn: *Conn, _: Allocator) void {
+    send(conn, "text/html; charset=utf-8", page);
+}
+
+/// One of the page's scripts by name, else the unknown path.
+pub fn script(_: *Server, conn: *Conn, a: Allocator, name: []const u8) void {
+    for (scripts) |x| if (std.mem.eql(u8, x[0], name)) return send(conn, "text/javascript; charset=utf-8", x[1]);
+    routes.unknown(conn, a);
+}
+
+fn send(conn: *Conn, kind: []const u8, body: []const u8) void {
     conn.startResponse(200, null) catch return;
-    conn.addHeader("Content-Type", "text/html; charset=utf-8") catch return;
+    conn.addHeader("Content-Type", kind) catch return;
     var len: [24]u8 = undefined;
-    conn.addHeader("Content-Length", std.fmt.bufPrint(&len, "{d}", .{page.len}) catch return) catch return;
-    conn.finish(page) catch {};
+    conn.addHeader("Content-Length", std.fmt.bufPrint(&len, "{d}", .{body.len}) catch return) catch return;
+    conn.finish(body) catch {};
 }
 
 pub fn graph(srv: *Server, conn: *Conn, a: Allocator) void {
-    const body = srv.slide.render(a) catch return refuse(conn, a, 500, "out of memory");
+    const body = srv.slide.render(a, srv.config.model_dir) catch return refuse(conn, a, 500, "out of memory");
     conn.sendJson(200, body);
 }
 
@@ -47,7 +69,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     };
     const text = body.strField("text") orelse return refuse(conn, a, 400, "text is required");
     const source = body.strField("source") orelse "chat";
-    switch (run(srv, a, &.{})) {
+    switch (run(srv, a, &.{}, 0)) {
         .refused => |e| return switch (e) {
             error.Unsupported => refuse(conn, a, 501, "this engine does not learn: serve its model with --slide"),
             error.Busy, error.Closed => refuse(conn, a, 503, "the engine cannot take a learn request now"),
@@ -71,11 +93,12 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         id.* = srv.slide.add(fact, source, now(srv));
         out.event("fact", .{ .id = id.*, .text = fact });
     }
-    defer _ = run(srv, a, &.{ .save = true });
+    defer saveAll(srv, a);
     // each fact its own lesson and block, so each keeps a gate of its own
     for (facts, ids) |fact, id| {
         if (gone.check()) break;
         srv.slide.mark(id, .learning);
+        srv.slide.phase(id, .writing);
         out.event("learning", .{ .id = id });
         var kept = [1]bool{false};
         const written = now(srv);
@@ -87,8 +110,10 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
             continue;
         };
         log.line("slide: fact {d}'s lesson written in {d:.1} s", .{ id, seconds(srv, written) });
-        const result = rounds(srv, a, &cx, plan, gone);
+        srv.slide.asked(id, questions(a, plan));
+        const result = rounds(srv, a, &cx, plan, gone, id);
         const back = result.recalled.len == 1 and result.recalled[0];
+        if (result.why) |why| srv.slide.note(id, why);
         srv.slide.mark(id, if (back) .learned else .missed);
         if (result.why) |why| {
             out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps, .message = why });
@@ -106,7 +131,7 @@ const Rounds = struct { recalled: []bool, steps: u32 = 0, why: ?[]const u8 = nul
 /// A lesson in checked rounds until every fact comes back. A question about something else that the lesson takes is
 /// handed back to it (a few times at most, then the lesson is taken out): a strict router is fitted again without it,
 /// a topic router's change learns its answer as it was in the next round. A round that loops is taken back.
-fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone) Rounds {
+fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone, id: u32) Rounds {
     var out: Rounds = .{ .recalled = a.alloc(bool, plan.facts.len) catch &.{} };
     @memset(out.recalled, false);
     var routed: u32 = 0;
@@ -117,7 +142,8 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
         var request = plan.full;
         request.more = round > 0;
         var held = false;
-        switch (run(srv, a, &request)) {
+        srv.slide.round(id, @intCast(round + 1));
+        switch (run(srv, a, &request, id)) {
             .learned => |l| {
                 out.steps += l.steps;
                 held = l.recalled;
@@ -130,11 +156,14 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
         }
         const learned = seconds(srv, began);
         const checked = now(srv);
+        srv.slide.phase(id, .checking);
         const verdict = check.verify(srv, cx, plan, held or round + 1 >= teach.rounds, gone) catch |e| check.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
+        srv.slide.checked(id, verdict.damage == null and std.mem.allEqual(bool, verdict.recalled, true));
         log.line("slide: round {d}: {d} steps ({d:.1} s learning, {d:.1} s checking); the held-out answers {s} token for token, and {s} when asked", .{ round + 1, out.steps, learned, seconds(srv, checked), if (held) "come back" else "do not come back", if (std.mem.allEqual(bool, verdict.recalled, true)) "come back" else "do not come back" });
         if (verdict.took) |took| {
             if (routed == teach.reroutes) {
-                _ = run(srv, a, &.{ .drop = true });
+                _ = run(srv, a, &.{ .drop = true }, 0);
+                srv.slide.placed(id, &.{});
                 out.why = std.fmt.allocPrint(a, "taken out: it kept answering questions about something else, last \"{s}\"", .{took.question}) catch "taken out: it kept answering questions about something else";
                 @memset(out.recalled, false);
                 return out;
@@ -144,7 +173,7 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
                 out.why = words(cx, e);
                 return out;
             };
-            switch (run(srv, a, &.{ .unasked = &.{back.prompt}, .kept = &.{back.kept}, .reroute = true })) {
+            switch (run(srv, a, &.{ .unasked = &.{back.prompt}, .kept = &.{back.kept}, .reroute = true }, id)) {
                 .failed => |message| {
                     out.why = message;
                     return out;
@@ -152,10 +181,12 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
                 else => {},
             }
             log.line("slide: \"{s}\" is handed back to the lesson, its answer to stay as it was", .{took.question});
+            srv.slide.note(id, std.fmt.allocPrint(a, "handed back to the lesson: \"{s}\"", .{took.question}) catch "");
             continue;
         }
         if (verdict.damage) |why| {
-            _ = run(srv, a, &.{ .undo = true });
+            _ = run(srv, a, &.{ .undo = true }, 0);
+            srv.slide.placed(id, &.{});
             out.why = std.fmt.allocPrint(a, "round {d} taken back: {s}", .{ round + 1, why }) catch why;
             return out;
         }
@@ -168,12 +199,36 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
         if ((held or streak >= 2) and std.mem.allEqual(bool, out.recalled, true) and round + 1 >= teach.min_rounds) return out;
     }
     // it never came back when asked: nothing of it stays in the model
-    if (!std.mem.allEqual(bool, out.recalled, true)) _ = run(srv, a, &.{ .drop = true });
+    if (!std.mem.allEqual(bool, out.recalled, true)) {
+        _ = run(srv, a, &.{ .drop = true }, 0);
+        srv.slide.placed(id, &.{});
+    }
     return out;
+}
+
+/// The wordings a lesson's checks ask: its held-out questions, then the ones it never learned.
+fn questions(a: Allocator, plan: teach.Plan) []const []const u8 {
+    const out = a.alloc([]const u8, plan.held.len + plan.probes.len) catch return &.{};
+    for (plan.held, out[0..plan.held.len]) |h, *q| q.* = h.question;
+    for (plan.probes, out[plan.held.len..]) |h, *q| q.* = h.question;
+    return out;
+}
+
+/// Every kept lesson into the model's shards, timed, with the shards it changed.
+fn saveAll(srv: *Server, a: Allocator) void {
+    srv.slide.saving(srv.config.model_dir);
+    const began = now(srv);
+    const failed: ?[]const u8 = switch (run(srv, a, &.{ .save = true }, 0)) {
+        .failed => |message| message,
+        .refused => "the engine could not take the save",
+        else => null,
+    };
+    srv.slide.saveEnded(srv.config.model_dir, seconds(srv, began), failed);
 }
 
 /// A fact the lesson could not learn, and why.
 fn missed(srv: *Server, out: *Out, id: u32, why: []const u8) void {
+    srv.slide.note(id, why);
     srv.slide.mark(id, .missed);
     out.event("learned", .{ .id = id, .recalled = false, .message = why });
 }
@@ -185,8 +240,8 @@ const Outcome = union(enum) {
     refused: api.LearnError,
 };
 
-/// One lesson through the engine's learner, waited for to its end.
-fn run(srv: *Server, a: Allocator, request: *const api.LearnRequest) Outcome {
+/// One lesson through the engine's learner, waited for to its end; fact `id`'s progress and neurons go to the graph.
+fn run(srv: *Server, a: Allocator, request: *const api.LearnRequest, id: u32) Outcome {
     var box: Box = .{ .io = srv.io, .gpa = srv.gpa };
     defer box.deinit();
     srv.engine.learn(request, box.sink()) catch |e| return .{ .refused = e };
@@ -197,12 +252,21 @@ fn run(srv: *Server, a: Allocator, request: *const api.LearnRequest) Outcome {
         const finished = box.take(&batch);
         for (batch.items) |c| {
             switch (c.kind) {
-                .learned => outcome = .{ .learned = .{ .recalled = c.recalled, .steps = c.steps } },
+                .learned => {
+                    outcome = .{ .learned = .{ .recalled = c.recalled, .steps = c.steps } };
+                    if (id != 0) srv.slide.placed(id, c.neurons);
+                },
+                .progress => if (id != 0) {
+                    var p = c.progress;
+                    p.neurons = c.neurons;
+                    srv.slide.progress(id, p);
+                },
                 .done => if (c.text.len > 0) {
                     outcome = .{ .failed = a.dupe(u8, c.text) catch "the learner failed" };
                 },
             }
             srv.gpa.free(c.text);
+            srv.gpa.free(c.neurons);
         }
         batch.clearRetainingCapacity();
         if (finished) return outcome;
@@ -269,7 +333,7 @@ const Box = struct {
     events: std.ArrayList(Copy) = .empty,
     done: bool = false,
 
-    const Copy = struct { kind: std.meta.Tag(api.LearnEvent), text: []const u8 = "", recalled: bool = false, steps: u32 = 0 };
+    const Copy = struct { kind: std.meta.Tag(api.LearnEvent), text: []const u8 = "", recalled: bool = false, steps: u32 = 0, progress: api.LearnProgress = .{ .phase = .reading }, neurons: []const api.Neuron = &.{} };
 
     fn sink(b: *Box) api.LearnSink {
         return .{ .ctx = b, .event = onEvent };
@@ -282,12 +346,21 @@ const Box = struct {
             .learned => |l| {
                 c.recalled = l.recalled;
                 c.steps = l.steps;
+                c.neurons = b.gpa.dupe(api.Neuron, l.neurons) catch &.{};
+            },
+            .progress => |p| {
+                c.progress = p;
+                c.progress.neurons = &.{};
+                c.neurons = b.gpa.dupe(api.Neuron, p.neurons) catch &.{};
             },
             .done => |d| c.text = b.gpa.dupe(u8, d.message) catch "",
         }
         b.mutex.lockUncancelable(b.io);
         defer b.mutex.unlock(b.io);
-        b.events.append(b.gpa, c) catch b.gpa.free(c.text);
+        b.events.append(b.gpa, c) catch {
+            b.gpa.free(c.text);
+            b.gpa.free(c.neurons);
+        };
         if (e.* == .done) b.done = true;
         b.cond.signal(b.io);
     }
@@ -303,7 +376,10 @@ const Box = struct {
     }
 
     fn deinit(b: *Box) void {
-        for (b.events.items) |c| b.gpa.free(c.text);
+        for (b.events.items) |c| {
+            b.gpa.free(c.text);
+            b.gpa.free(c.neurons);
+        }
         b.events.deinit(b.gpa);
     }
 };
