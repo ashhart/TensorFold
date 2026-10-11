@@ -18,6 +18,7 @@ const message = slide_ask.message;
 
 // With thinking on, each question is also learned with the reasoning opening on a line recalling the fact.
 pub const recall_start = "I remember the user told me: \"{s}\"";
+pub const remembered = "I remember that {s}"; // a told fact said back as the model words it ("your sister is called Ana.")
 pub const read_start = "I remember reading: \"{s}\"";
 
 pub const think_steady = 12; // the reasoning a near miss or a keep prompt holds as it is, from where it decides
@@ -64,11 +65,19 @@ pub fn thinkingPoint(srv: *Server, cx: *Cx, q: []const u8, gone: anytype) !?Poin
 pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, q: []const u8, answer: []const u32, document: bool) !?api.Example {
     const a = cx.a;
     const head = try thinkingHead(srv, cx, q) orelse return null;
-    const line = if (document) try std.fmt.allocPrint(a, read_start ++ "\n", .{fact}) else try std.fmt.allocPrint(a, recall_start ++ "\n", .{fact});
+    const line = if (document) try std.fmt.allocPrint(a, read_start ++ "\n", .{fact}) else try recallLine(a, fact);
     const recall = try encode(srv, cx, a, line);
     const close = try encode(srv, cx, a, srv.markers.close);
     if (close.len == 0 or answer.len == 0 or head.len + recall.len + close.len + answer.len > think_rows) return null;
     return .{ .ids = try std.mem.concat(keep, u32, &.{ head, recall, close, answer }), .start = @intCast(head.len), .decide = prompt.decideOf(srv, head) };
+}
+
+/// A told fact's recall line as the model says it back ("I remember that you like blue."), so the reasoning closes.
+fn recallLine(a: Allocator, fact: []const u8) ![]const u8 {
+    const told = try wording.addressed(a, fact) orelse return std.fmt.allocPrint(a, recall_start ++ "\n", .{fact});
+    const said = try a.dupe(u8, told);
+    if (std.mem.startsWith(u8, said, "You")) said[0] = 'y';
+    return std.fmt.allocPrint(a, remembered ++ "\n", .{said});
 }
 
 /// `question` with thinking on and the model's reasoning as it writes it now, held from its first row (null: none).
