@@ -6,6 +6,7 @@ const fwd = @import("forward.zig");
 const mtp = @import("mtp.zig");
 const prompt_mod = @import("prompt.zig");
 const snapshot = @import("snapshot.zig");
+const pool_mod = @import("pool.zig");
 const Engine = @import("engine.zig").Engine;
 const Ref = @import("weights.zig").Ref;
 const Fence = @import("../../core/fence.zig").Fence;
@@ -31,6 +32,7 @@ pub const Slot = struct {
     rows: u32 = 0, // the last window's rows until a keep settles them (0: settled)
     width: u32 = 0, // the last window's rows
     seen: u64 = 0, // the window that last ran this slot's rows
+    region: ?pool_mod.Region = null, // pooled: this stream's share of the MLA pool (pool.zig)
 };
 
 pub const Slots = struct {
@@ -57,6 +59,7 @@ pub const Slots = struct {
     ring_at: u32 = 0,
     ring_cb: [ring_len]?mtl.CommandBuffer = @splat(null), // the queued round writing each slot (retained) until read
     fence: ?Fence = null, // orders queued rounds on the GPU
+    pool: ?pool_mod.Pool = null, // one Mac: the streams share the engine's MLA caches (GLM_POOL=0: a window each)
 
     const Open = struct { cb: mtl.CommandBuffer, enc: mtl.ComputeEncoder, pool: mtl.objc.Pool };
 
@@ -65,12 +68,14 @@ pub const Slots = struct {
         const slots = try gpa.alloc(Slot, @max(n, 1));
         errdefer gpa.free(slots);
         for (slots, 0..) |*slot, i| slot.* = .{
-            .s = if (i == 0) e.s else try st.initState(&e.arena, &e.c, e.s.cap, &e.s),
+            .s = if (i == 0) e.s else try st.initState(&e.arena, &e.c, if (pool_mod.on(e)) 0 else e.s.cap, &e.s),
             .held = try e.arena.buffer(st.max_rows * 4),
             .last = try e.arena.buffer(@as(usize, e.c.hidden) * 2),
         };
         const plane = @as(usize, st.max_rows) * e.c.hidden * 2;
-        return .{ .gpa = gpa, .e = e, .slots = slots, .log = std.c.getenv("GLM_WINDOWS") != null, .rows = try e.arena.buffer(plane), .ids = try e.arena.buffer(st.max_rows * 4), .lasts = try e.arena.buffer(plane), .picks = try e.arena.buffer(st.max_rows * 4), .ring = try e.arena.buffer(ring_len * 4) };
+        var sl: Slots = .{ .gpa = gpa, .e = e, .slots = slots, .log = std.c.getenv("GLM_WINDOWS") != null, .rows = try e.arena.buffer(plane), .ids = try e.arena.buffer(st.max_rows * 4), .lasts = try e.arena.buffer(plane), .picks = try e.arena.buffer(st.max_rows * 4), .ring = try e.arena.buffer(ring_len * 4) };
+        if (pool_mod.on(e)) pool_mod.setUp(&sl);
+        return sl;
     }
 
     pub fn deinit(sl: *Slots, gpa: std.mem.Allocator) void {
@@ -116,6 +121,7 @@ pub const Slots = struct {
         const snap = sl.snaps.get(id) orelse return error.SnapshotOutOfStep;
         if (slot.s.pos != 0 or snap.at >= slot.prompt_len or snap.stale) return error.SnapshotOutOfStep;
         if (snap.home) |h| if (h != i) sl.overwrite(i, 0); // another slot's prefixes copied over every one of this slot's
+        if (snap.held != null) sl.overwrite(i, 0); // copied from the pool's held blocks, the same
         try sl.copySnap(slot, snap, false);
     }
 
@@ -136,7 +142,7 @@ pub const Slots = struct {
     pub fn probe(sl: *Slots) !u64 {
         var toks: [4096 + 40 + 7]u32 = undefined; // a full chunk past the sparse index's reach, a middle one, a short one
         for (&toks, 0..) |*t, i| t.* = @intCast(1000 + i * 7919 % 50000);
-        const len: u32 = @intCast(@min(toks.len, sl.e.s.cap -| (st.max_rows + 2)));
+        const len: u32 = @intCast(@min(toks.len, pool_mod.capacity(sl) -| (st.max_rows + 2)));
         try sl.begin(0, toks[0..len], true);
         defer sl.release(0);
         var at: u32 = 0;
@@ -184,7 +190,8 @@ pub const Slots = struct {
         defer pool.pop();
         const x = sl.ctx(slot);
         const b = sl.e.begin();
-        snapshot.copy(&x, b.enc, &slot.s, .{ .buf = snap.buf }, snap.at, into, if (snap.home) |h| &sl.slots[h].s else null);
+        var view: st.State = undefined;
+        snapshot.copy(&x, b.enc, &slot.s, .{ .buf = snap.buf }, snap.at, into, pool_mod.prefixOf(sl, snap, &view));
         try sl.e.finish(b.cb, b.enc);
     }
 
@@ -284,7 +291,10 @@ pub const Slots = struct {
     /// A new stream in slot `i`: its prompt into the engine's prompt ids, its caches cleared.
     pub fn begin(sl: *Slots, i: u32, prompt: []const u32, drafts: bool) !void {
         if (i >= sl.slots.len or sl.slots[i].used) return error.SlotOutOfStep;
-        if (prompt.len == 0 or prompt.len + st.max_rows + 1 > sl.e.s.cap) return error.ContextFull;
+        if (prompt.len == 0 or prompt.len + st.max_rows + 1 > pool_mod.capacity(sl)) return error.ContextFull;
+        const least: u32 = @intCast(prompt.len + st.max_rows + 1);
+        if (sl.pool != null and sl.slots[i].region == null) try pool_mod.reserve(sl, i, least);
+        if (prompt.len + st.max_rows + 1 > sl.slots[i].s.cap) return error.ContextFull;
         sl.settleAll(); // the prompt pass overwrites the projections a window's keep replays
         try sl.flush();
         sl.e.sync();
@@ -571,6 +581,7 @@ pub const Slots = struct {
         slot.used = false;
         slot.rows = 0;
         slot.held_n = 0;
+        if (sl.pool != null) pool_mod.leave(sl, i);
         for (sl.slots) |s| if (s.used) return;
         sl.flush() catch |err| std.log.err("glm: the slots' last command buffer failed: {s}", .{@errorName(err)});
     }
