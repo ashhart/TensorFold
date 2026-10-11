@@ -24,6 +24,17 @@ pub fn ownWord(word: []const u8) bool {
     return false;
 }
 
+/// I and we (and Polish first-person verbs) in English and those languages: the user doing what a phrase says.
+const user_words = [_][]const u8{ "i", "i'm", "i've", "i'd", "we", "we're", "we've", "ja", "jestem", "mam", "lubię", "mieszkam", "pracuję", "ich", "wir", "je", "nous", "yo", "nosotros", "io", "noi", "eu", "nós", "ik", "wij" };
+
+/// Whether a phrase opens with the user as its subject ("I live in Bristol"), not with something of theirs ("My dog").
+pub fn userOpens(phrase: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, phrase, delimiters);
+    const first = it.next() orelse return false;
+    for (user_words) |w| if (std.ascii.eqlIgnoreCase(first, w)) return true;
+    return false;
+}
+
 /// Whether a question is still the user's own: it says I or my, never your, and you only once ("Do you remember").
 pub fn firstPerson(question: []const u8) bool {
     var mine = false;
@@ -175,6 +186,15 @@ test "a rewritten question still asks about the user" {
     try std.testing.expect(firstPerson("Do you know my favourite colour?"));
     try std.testing.expect(!firstPerson("Do you know which colour you like?"));
     try std.testing.expect(!firstPerson("Do you remember which colour is your favourite?"));
+}
+
+test "a phrase opens with the user, or with something of theirs" {
+    try std.testing.expect(userOpens("I live in Bristol"));
+    try std.testing.expect(userOpens("I'm allergic to peanuts"));
+    try std.testing.expect(userOpens("Mieszkam w Gdańsku"));
+    try std.testing.expect(!userOpens("My sister"));
+    try std.testing.expect(!userOpens("Our company's warehouse robot"));
+    try std.testing.expect(!userOpens("Ines Calloway"));
 }
 
 test "a Japanese question is the user's own when it says I, never when it says your" {

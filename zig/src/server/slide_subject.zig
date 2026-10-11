@@ -6,7 +6,8 @@ const Server = @import("server.zig").Server;
 const Cx = errors.Cx;
 const askBase = @import("slide_ask.zig").askBase;
 const prompts = @import("slide_prompts.zig");
-const ownWord = @import("slide_whom.zig").ownWord;
+const whom = @import("slide_whom.zig");
+const ownWord = whom.ownWord;
 
 /// What a question asks about, word for word as it says it, as the model names it (null: not found in it).
 pub fn subjectOf(srv: *Server, cx: *Cx, q: []const u8, gone: anytype) !?[]const u8 {
@@ -78,6 +79,8 @@ fn opens(text: []const u8, word: []const u8) bool {
 
 /// A fact's subject words: the phrase's its questions say; a document's other proper names join a phrase with none.
 pub fn factSubject(a: std.mem.Allocator, phrase: []const u8, fact: []const u8, qs: []const []const u8, document: bool) ![]const []const u8 {
+    // a told fact named whole as its subject ("I live in Bristol") is the user's, and Bristol is its answer
+    if (!document and whom.userOpens(phrase)) return &.{};
     const own = try subjectWords(a, beforeVerb(phrase));
     const proper = try named(a, own, fact, qs);
     // a told fact's other proper name is its answer ("My dog is called Ginger."): never a word its questions must say
@@ -230,6 +233,10 @@ test "a fact's subject keeps its own proper names; a phrase without any takes th
     const told = try factSubject(a, "My dog", "My dog is called Ginger.", &dog, false);
     try std.testing.expectEqual(@as(usize, 1), told.len);
     try std.testing.expectEqualStrings("dog", told[0]);
+    const home = [_][]const u8{ "Where do I live?", "Which city do I live in?", "Where is my home?" };
+    try std.testing.expectEqual(@as(usize, 0), (try factSubject(a, "I live in Bristol", "I live in Bristol.", &home, false)).len);
+    const nuts = [_][]const u8{ "What am I allergic to?", "Am I allergic to anything?" };
+    try std.testing.expectEqual(@as(usize, 0), (try factSubject(a, "I am allergic to peanuts", "I am allergic to peanuts.", &nuts, false)).len);
 }
 
 const unkeyed = [_][]const u8{ "i", "me", "my", "mine", "myself", "we", "us", "our", "ours", "you", "your", "yours", "it", "its", "this", "that", "these", "those", "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "do", "does", "did", "is", "are", "was", "like", "likes" };
