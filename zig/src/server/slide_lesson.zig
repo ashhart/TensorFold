@@ -509,17 +509,23 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         };
         for (near_questions, 0..) |q, k| if (k % prompts.turns.len == i) try parts.unasked.append(a, try slide_ask.promptAfter(srv, cx, a, before, q));
     }
-    const subject = for (subjects) |s| {
-        if (s) |x| break x;
-    } else null;
-    const kinds = if (subject) |s| try kindsList(srv, cx, s, gone) else &.{};
+    // Each wording carries its own replacement phrase, distinct from its neuron's key word.
+    var kinds_by_subject: std.StringHashMapUnmanaged([]const []const u8) = .empty;
     var swaps: usize = 0;
-    outer: for (refs) |r| for (try slide_route.others(a, r.question, subject, kinds)) |q| {
-        if (swaps == max_others) break :outer;
-        if ((try seen.getOrPut(a, q)).found_existing or wording.gives(fact, asked_all, answered_all, q)) continue;
-        try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, null, q));
-        swaps += 1;
-    };
+    outer: for (refs, subjects) |r, subject| {
+        if (swaps == max_others) break;
+        const kinds = if (subject) |s| b: {
+            const entry = try kinds_by_subject.getOrPut(a, s);
+            if (!entry.found_existing) entry.value_ptr.* = try kindsList(srv, cx, s, gone);
+            break :b entry.value_ptr.*;
+        } else &.{};
+        for (try slide_route.others(a, r.question, subject, kinds)) |q| {
+            if (swaps == max_others) break :outer;
+            if ((try seen.getOrPut(a, q)).found_existing or wording.gives(fact, asked_all, answered_all, q)) continue;
+            try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, null, q));
+            swaps += 1;
+        }
+    }
     log.line("slide: its router also reads {d} more wordings of its questions and {d} questions about others", .{ taken, swaps });
 }
 

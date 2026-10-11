@@ -6,6 +6,7 @@ const Server = @import("server.zig").Server;
 const Cx = errors.Cx;
 const askBase = @import("slide_ask.zig").askBase;
 const prompts = @import("slide_prompts.zig");
+const slide_span = @import("slide_span.zig");
 
 /// What a question asks about, word for word as it says it, as the model names it (null: not found in it).
 pub fn subjectOf(srv: *Server, cx: *Cx, q: []const u8, gone: anytype) !?[]const u8 {
@@ -242,9 +243,9 @@ pub fn valueRow(srv: *Server, cx: *Cx, ex: api.Example, value: []const u8) !u32 
 /// A question with its subject swapped for others of the same kind, as the model names that kind.
 pub fn kindsOf(srv: *Server, cx: *Cx, q: []const u8, subject: []const u8, gone: anytype) ![]const []const u8 {
     const a = cx.a;
-    const at = std.ascii.findIgnoreCase(q, subject) orelse return &.{};
+    if (slide_span.find(q, subject) == null) return &.{};
     var out: std.ArrayList([]const u8) = .empty;
-    for (try kindsList(srv, cx, subject, gone)) |kind| try out.append(a, try std.mem.concat(a, u8, &.{ q[0..at], kind, q[at + subject.len ..] }));
+    for (try kindsList(srv, cx, subject, gone)) |kind| if (try slide_span.replace(a, q, subject, kind)) |other| try out.append(a, other);
     return out.items;
 }
 

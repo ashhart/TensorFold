@@ -9,6 +9,7 @@ const prompts = @import("slide_prompts.zig");
 const slide_ask = @import("slide_ask.zig");
 const slide_think = @import("slide_think.zig");
 const slide_subject = @import("slide_subject.zig");
+const slide_span = @import("slide_span.zig");
 const side = @import("slide_side.zig");
 const Held = @import("slide_lesson.zig").Held;
 const Server = @import("server.zig").Server;
@@ -30,7 +31,7 @@ pub const Got = struct {
     pairs: std.ArrayList(api.Example) = .empty,
     thinking: std.ArrayList(?api.Example) = .empty, // each pair's thinking answer: the recall line, then the answer
     refs: std.ArrayList(Held) = .empty,
-    subjects: std.ArrayList(?[]const u8) = .empty,
+    subjects: std.ArrayList(?[]const u8) = .empty, // full replacement spans; refs keep the single-word neuron keys
     unnamed: std.ArrayList([]const u8) = .empty, // questions that asked for the subject instead of naming it
 };
 
@@ -129,7 +130,7 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
         t.subject = try subjectRow(srv, cx, t.*, word);
         t.value = try valueRow(srv, cx, t.*, short);
     }
-    return .{ .ex = ex, .think = think, .ref = .{ .question = q, .answer = answer, .fact = f, .subject = word, .short = short }, .subject = if (word.len > 0) word else null };
+    return .{ .ex = ex, .think = think, .ref = .{ .question = q, .answer = answer, .fact = f, .subject = word, .short = short }, .subject = slide_span.subject(q, word, named) };
 }
 
 /// The fewest words that answer `question` from the fact (in `note`), as the model gives them.
