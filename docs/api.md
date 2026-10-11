@@ -276,7 +276,8 @@ A call only mentioned while thinking, with the block closed after it, stays reas
 while it is still thinking, with a newline, the closing think marker and a blank line, then continues the answer.
 The cut depends on token count, so serial and drafted decoding use the same cut. A model that closes the block
 earlier is left alone. The MLX engine forces the close inside its rounds; CUDA stops the engine at the cut and
-decodes on from the reply, as for a required tool call.
+decodes on from the reply, as for a required tool call. Flash Next forces it inside its GPU-side rounds, on one Mac
+and in speed-up mode.
 
 With thinking enabled, the native server refuses a positive budget with HTTP 400 before opening a stream or
 submitting the request if the engine does not support thinking budgets. This also applies to a positive
