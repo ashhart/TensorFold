@@ -389,7 +389,7 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     if (pairs.items.len < min_probes) return false;
     // the two most typical wordings held out, so a vague one ("Which dog do I have?") never decides recall
     const n = pairs.items.len;
-    const pair = heldPair(refs.items);
+    const pair = heldPair(fact, refs.items);
     var thought: usize = 0;
     for (pairs.items, got.thinking.items, refs.items, 0..) |ex, think, r, i| {
         const held = i == pair[0] or i == pair[1];
