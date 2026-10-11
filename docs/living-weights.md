@@ -153,6 +153,9 @@ data.
 - `curl http://127.0.0.1:8080/v1/slide/graph` returns the same data as JSON: each fact's state, neurons (layer, index
   and key), questions and rounds, and the model's layers, pocket and shards.
 - `curl -X DELETE http://127.0.0.1:8080/v1/slide/graph` clears the graph. The weights keep what they learned.
+- [`tools/living_weights`](../tools/living_weights/README.md) checks what a lesson changed besides its fact: fictional
+  facts with neighbour questions about real things, a general-knowledge and reasoning panel, and a console that asks a
+  taught copy and an untaught server of the same checkpoint the same questions and marks every answer that differs.
 
 ## Keep, move or reset what it learned
 

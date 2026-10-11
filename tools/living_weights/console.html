@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Living Weights Console</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<style>
+  :root { --bg:#f6f5f2; --panel:#fff; --ink:#1d1d1b; --muted:#6b6a66; --line:#e2e0da; --accent:#2f5d8a;
+          --ok:#2e7d4f; --warn:#a15c00; --bad:#b3261e; --code:#f0eee8; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#151514; --panel:#1f1f1d; --ink:#ecebe6; --muted:#a09e97;
+          --line:#33322f; --accent:#7fb0e0; --ok:#6cc58f; --warn:#e0a24a; --bad:#f08a80; --code:#2a2a27; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 system-ui,-apple-system,sans-serif; }
+  header { padding:16px; border-bottom:1px solid var(--line); display:flex; flex-wrap:wrap; gap:12px; align-items:baseline; }
+  header h1 { font-size:18px; margin:0; }
+  header .meta { color:var(--muted); font-size:13px; }
+  header a { color:var(--accent); font-size:13px; }
+  main { display:grid; grid-template-columns: 1.4fr 1fr; gap:16px; padding:16px; max-width:1300px; margin:0 auto; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; min-width:0; }
+  h2 { font-size:14px; margin:0 0 10px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  textarea, input { width:100%; font:inherit; color:var(--ink); background:var(--bg); border:1px solid var(--line);
+          border-radius:8px; padding:8px 10px; }
+  textarea { resize:vertical; min-height:64px; }
+  button { font:inherit; border:1px solid var(--accent); background:var(--accent); color:var(--panel); border-radius:8px;
+          padding:7px 14px; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }
+  #chat { height:420px; overflow-y:auto; border:1px solid var(--line); border-radius:8px; padding:10px; background:var(--bg); }
+  .msg { margin:0 0 10px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .msg b { color:var(--muted); font-weight:600; font-size:12px; display:block; }
+  .msg .md { white-space:normal; }
+  .md > :first-child { margin-top:0; } .md > :last-child { margin-bottom:0; }
+  .md p, .md ul, .md ol, .md pre, .md table, .md blockquote { margin:0 0 8px; }
+  .md ul, .md ol { padding-left:22px; }
+  .md h1, .md h2, .md h3, .md h4 { font-size:15px; margin:10px 0 6px; text-transform:none; letter-spacing:0; color:var(--ink); }
+  .md code { font:13px ui-monospace,Menlo,monospace; background:var(--code); border-radius:4px; padding:1px 4px; }
+  .md pre { background:var(--code); border-radius:8px; padding:10px; overflow-x:auto; }
+  .md pre code { padding:0; background:none; }
+  .md table { border-collapse:collapse; display:block; overflow-x:auto; }
+  .md th, .md td { border:1px solid var(--line); padding:4px 8px; text-align:left; }
+  .md blockquote { border-left:3px solid var(--line); padding-left:10px; color:var(--muted); }
+  .md a { color:var(--accent); }
+  .md .diagram { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px; margin:0 0 8px;
+          overflow-x:auto; text-align:center; }
+  .md .diagram img, .md .diagram svg { max-width:100%; height:auto; }
+  .md .diagram-error { color:var(--warn); font-size:12px; margin-top:4px; }
+  #events { height:180px; overflow-y:auto; font:12px/1.4 ui-monospace,Menlo,monospace; background:var(--code);
+          border-radius:8px; padding:8px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .ev-learned-ok { color:var(--ok); } .ev-learned-miss { color:var(--warn); } .ev-error { color:var(--bad); }
+  ul#facts { list-style:none; padding:0; margin:0; max-height:220px; overflow-y:auto; font-size:13px; }
+  ul#facts li { padding:4px 0; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .chips button { font-size:12px; padding:4px 8px; }
+  .note { color:var(--muted); font-size:12px; margin-top:6px; }
+  #status { font-size:13px; }
+  #checks { width:100%; border-collapse:collapse; font-size:12px; margin-top:8px; table-layout:fixed; }
+  #checks th, #checks td { border:1px solid var(--line); padding:4px 6px; text-align:left; vertical-align:top;
+          overflow-wrap:anywhere; }
+  #checks th { color:var(--muted); font-weight:600; }
+  #checks tr.changed td { background:color-mix(in srgb, var(--bad) 12%, transparent); }
+  #checks td:last-child, #checks th:last-child { width:72px; }
+  .note.ok { color:var(--ok); } .note.bad { color:var(--bad); }
+  select { font:inherit; color:var(--ink); background:var(--bg); border:1px solid var(--line); border-radius:6px; max-width:100%; }
+  .wide { grid-column:1 / -1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Living Weights Console</h1>
+  <span class="meta" id="status">checking servers…</span>
+  <a href="/slide" target="_blank" rel="noopener">fact graph</a>
+  <a href="/dashboard" target="_blank" rel="noopener">dashboard</a>
+</header>
+<main>
+  <section>
+    <h2>Chat</h2>
+    <div class="row" style="margin:0 0 8px"><label class="note" style="margin:0">Model
+      <select id="target"></select></label></div>
+    <div id="chat"></div>
+    <textarea id="prompt" placeholder="Ask something. Enter sends, Shift+Enter for a new line."></textarea>
+    <div class="row">
+      <button id="send">Send</button>
+      <button class="ghost" id="clear">Clear</button>
+      <label class="note"><input type="checkbox" id="keep" style="width:auto"> keep conversation history</label>
+      <label class="note"><input type="checkbox" id="diagrams" style="width:auto" checked> diagrams (mermaid / svg)</label>
+    </div>
+    <h2 style="margin-top:14px">Leak probes (real facts that picked up taught ones in the tests)</h2>
+    <div class="chips" id="probes"></div>
+  </section>
+  <section>
+    <h2>Teach (taught copy only)</h2>
+    <textarea id="teach" placeholder="One short, distinct fact, e.g. The Quillon bridge is 1,312 metres long."></textarea>
+    <div class="row">
+      <button id="learn">Teach</button>
+      <label class="note">sent as <select id="source"><option value="document" selected>document</option>
+        <option value="chat">chat</option></select></label>
+      <label class="note"><input type="checkbox" id="precheck" style="width:auto" checked> check against the clean model first</label>
+      <label class="note"><input type="checkbox" id="postcheck" style="width:auto" checked> leak check after teaching</label>
+    </div>
+    <p class="note">Takes a few minutes per fact and writes into the taught copy's weights; nothing undoes a learned fact.
+      The before-check uses only the clean model's own knowledge, so it cannot judge recent events or private names.</p>
+    <h2 style="margin-top:12px">Learn events</h2>
+    <div id="events"></div>
+    <h2 style="margin-top:12px">Learned facts <button class="ghost" id="refresh" style="font-size:12px;padding:2px 8px">refresh</button></h2>
+    <ul id="facts"></ul>
+  </section>
+  <section class="wide">
+    <h2>Cross-check: taught copy vs clean model</h2>
+    <p class="note" style="margin-top:0">Both run the same engine with greedy decoding, so any answer that differs was
+      changed by learning. Leave the fact empty to run only the fixed panel.</p>
+    <div class="row">
+      <input id="check-fact" placeholder="Fact to check around (filled in after each lesson)" style="flex:1;min-width:200px">
+      <button id="check-btn">Run leak check</button>
+    </div>
+    <p id="check-status" class="note"></p>
+    <table id="checks"><thead><tr><th>Question</th><th>Clean model</th><th>Taught copy</th><th>Result</th></tr></thead>
+      <tbody></tbody></table>
+  </section>
+</main>
+<script src="/console.js"></script>
+</body>
+</html>
