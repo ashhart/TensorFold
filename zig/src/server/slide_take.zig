@@ -233,10 +233,13 @@ test "a fact told again the other way round is the same fact, another is not" {
     try std.testing.expect(!try restates(a, "Quillmoor Labs was founded in 2017.", "Quillmoor Labs was founded in Sheffield."));
 }
 
-/// Whether the fact answers `question` as the model judges it.
+/// Whether the fact answers `question` as the model judges it: a document fact by its answer, a chat fact yes or no.
 pub fn judged(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, document: bool, gone: anytype) !bool {
-    const asked = if (document) try std.fmt.allocPrint(cx.a, prompts.judge_prompt, .{ fact, question }) else try std.fmt.allocPrint(cx.a, prompts.judge_told_prompt, .{ fact, question });
-    const reply = try askBase(srv, cx, null, asked, 16, gone);
+    if (!document) {
+        const told = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.told_judge_prompt, .{ fact, question }), 4, gone);
+        return std.ascii.startsWithIgnoreCase(std.mem.trim(u8, told.content, " \t\r\n\"*"), "yes");
+    }
+    const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.judge_prompt, .{ fact, question }), 16, gone);
     const said = std.mem.trim(u8, reply.content, " \t\r\n\"*.");
     return !std.ascii.startsWithIgnoreCase(said, "not stated") and wording.answersFrom(fact, question, said);
 }
