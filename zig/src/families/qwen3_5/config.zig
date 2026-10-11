@@ -268,7 +268,9 @@ pub const Error = error{
     InvalidMoe,
     InvalidRotary,
     InvalidLayerTypes,
-} || std.mem.Allocator.Error || std.json.ParseError(std.json.Scanner);
+} || checks.Error || std.mem.Allocator.Error || std.json.ParseError(std.json.Scanner);
+
+pub const checks = @import("config_checks.zig");
 
 /// The Python `Spec`, plus the shared expert's width and the MTP layer count the config declares.
 pub const Spec = struct {
@@ -295,10 +297,14 @@ pub const Spec = struct {
     moe_width: usize,
     shared_width: usize,
     mtp_layers: usize,
+    /// Each layer's kind, true for full attention (the others are gated delta-net).
+    full_layers: [checks.max_layers]bool = @splat(false),
+    mrope: checks.Mrope = .{},
+    max_position: usize = 262144,
 
     /// Whether layer `index` is full attention (the others are gated delta-net).
     pub fn full(s: Spec, index: usize) bool {
-        return (index + 1) % s.full_every == 0;
+        return s.full_layers[index];
     }
 
     pub fn keyWidth(s: Spec) usize {
@@ -352,7 +358,7 @@ pub fn geometry(tower: std.json.ObjectMap, bits: u8, group_size: u16) Error!Spec
     if (!(product >= 0 and product <= @as(f64, @floatFromInt(per_head)))) return error.InvalidRotary;
     const rotary: usize = @intFromFloat(product);
     const base = try numberOf(rope.get("rope_theta") orelse if (truthy(tower.get("rope_theta"))) tower.get("rope_theta").? else .{ .integer = 10_000_000 });
-    const spec: Spec = .{
+    var spec: Spec = .{
         .hidden = model_width,
         .intermediate = try optionalInt(tower, "intermediate_size", 0),
         .n_layers = try requiredInt(tower, "num_hidden_layers"),
@@ -379,13 +385,11 @@ pub fn geometry(tower: std.json.ObjectMap, bits: u8, group_size: u16) Error!Spec
     };
     if (rotary % 2 != 0 or rotary == 0 or rotary > per_head) return error.InvalidRotary;
     if (spec.full_every == 0 or attn_heads == 0) return error.InvalidConfig;
-    if (tower.get("layer_types")) |kinds| if (kinds != .null) {
-        if (kinds != .array) return error.InvalidLayerTypes;
-        for (kinds.array.items, 0..) |item, i| {
-            const want = if (spec.full(i)) "full_attention" else "linear_attention";
-            if (item != .string or !eql(item.string, want)) return error.InvalidLayerTypes;
-        }
-    };
+    try checks.computes(tower);
+    try checks.products(.{ .hidden = spec.hidden, .intermediate = spec.intermediate, .vocab = spec.vocab, .heads = spec.heads, .kv_heads = spec.kv_heads, .head_dim = spec.head_dim, .key_heads = spec.key_heads, .value_heads = spec.value_heads, .key_dim = spec.key_dim, .value_dim = spec.value_dim, .conv = spec.conv, .experts = spec.experts, .moe_width = spec.moe_width, .shared_width = spec.shared_width });
+    try checks.layers(&spec.full_layers, tower, spec.n_layers, spec.full_every);
+    spec.mrope = try checks.mrope(rope, rotary);
+    spec.max_position = try checks.maxPosition(tower);
     return spec;
 }
 
@@ -502,6 +506,23 @@ test "a top-level config, the partial rotary default and the MoE fields" {
     try std.testing.expectEqual(@as(usize, 4), s.full_every);
 }
 
+test "the geometry refuses what the kernels do not compute and sizes past 32 bits" {
+    const a = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const cases = [_]struct { []const u8, []const u8, Error }{
+        .{ "\"rms_norm_eps\"", "\"hidden_act\": \"gelu\", \"rms_norm_eps\"", error.UnsupportedActivation },
+        .{ "\"rms_norm_eps\"", "\"output_gate_type\": \"sigmoid\", \"rms_norm_eps\"", error.UnsupportedAttentionGate },
+        .{ "\"rms_norm_eps\"", "\"mamba_ssm_dtype\": \"bfloat16\", \"rms_norm_eps\"", error.UnsupportedStateType },
+        .{ "\"vocab_size\": 248320", "\"vocab_size\": 1048576", error.InvalidConfig },
+    };
+    for (cases) |c| {
+        const text = try std.mem.replaceOwned(u8, a, sample_text, c[0], c[1]);
+        defer a.free(text);
+        try std.testing.expectError(c[2], geometry(try textTower(try declared(arena.allocator(), text)), 4, 64));
+    }
+}
+
 test "the Python loader's refusals" {
     const a = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(a);
@@ -509,10 +530,14 @@ test "the Python loader's refusals" {
     const wrong = try std.mem.replaceOwned(u8, a, sample_text, "\"qwen3_5\"", "\"llama\"");
     defer a.free(wrong);
     try std.testing.expectError(error.UnsupportedModel, declared(arena.allocator(), wrong));
-    const types = try std.mem.replaceOwned(u8, a, sample_text, "\"full_attention\"],", "\"linear_attention\"],");
+    // any mix of the two kinds is read as written; another kind is refused
+    const mixed = try std.mem.replaceOwned(u8, a, sample_text, "\"full_attention\"],", "\"linear_attention\"],");
+    defer a.free(mixed);
+    const s = try geometry(try textTower(try declared(arena.allocator(), mixed)), 4, 64);
+    try std.testing.expect(s.full(3) and !s.full(7));
+    const types = try std.mem.replaceOwned(u8, a, sample_text, "\"full_attention\"],", "\"sliding_attention\"],");
     defer a.free(types);
-    const tower = try textTower(try declared(arena.allocator(), types));
-    try std.testing.expectError(error.InvalidLayerTypes, geometry(tower, 4, 64));
+    try std.testing.expectError(error.InvalidLayerTypes, geometry(try textTower(try declared(arena.allocator(), types)), 4, 64));
     const moe = try std.mem.replaceOwned(u8, a, sample_text, "\"vocab_size\"", "\"num_experts\": 8, \"num_experts_per_tok\": 9, \"vocab_size\"");
     defer a.free(moe);
     try std.testing.expectError(error.InvalidMoe, geometry(try textTower(try declared(arena.allocator(), moe)), 4, 64));
