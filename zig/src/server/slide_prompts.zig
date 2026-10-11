@@ -246,6 +246,8 @@ pub const kinds_prompt = "List six other things of the same kind as \"{s}\" that
 pub const same_prompt = "Two replies to the question \"{s}\":\nA: {s}\nB: {s}\nDoes B tell the user something about themselves, or answer the question, that A does not? A reply that only describes the assistant tells the user nothing. Reply yes or no.";
 pub const siblings_prompt = "Here are some facts:\n{s}Which of them answers this question: \"{s}\"? Reply with its number only, or 0 if none does.";
 pub const judge_prompt = "Here is something you were told: \"{s}\" Using only that, answer this question in as few words as you can: \"{s}\" If it does not say, reply: not stated.";
+/// Whether a newer chat fact only says an earlier one again ("Now I like red." after "My favourite colour is red.").
+pub const again_prompt = "Earlier the user told you: \"{s}\" Now the user tells you: \"{s}\" Is the new message only saying the same thing again, changing and taking back nothing? Reply yes or no.";
 /// Whether a new message from the user takes back what they told before.
 pub const replace_prompt = "Earlier the user told you: \"{s}\" Now the user tells you: \"{s}\" Does the new message change or take back what they told you earlier? Reply yes or no.";
 /// The 1.0.7 judge for what the user told about themselves, which counts liking blue as their favourite colour.
