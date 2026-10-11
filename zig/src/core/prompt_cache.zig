@@ -84,7 +84,7 @@ pub const Rules = struct {
     grid: u32 = 0,
     /// A mark other than the history's is kept only this far from every other mark and the resume point.
     min_gap: u32 = 256,
-    /// Shorter prompts keep nothing: below it a mark's extra prompt call costs more than a later turn's reuse saves.
+    /// Shorter prompts keep nothing where a mark adds a prompt call; a planned family's marks add none.
     min_prompt: u32 = 4096,
     /// Replies are prefilled in background passes kept at their end: a pass resumed near its history keeps no mark.
     warm: bool = false,
@@ -356,7 +356,7 @@ pub const Store = struct {
 
     /// `marks` with the active rewind second: kept however near the other marks, never at or before the resume point.
     fn marksRewind(s: *const Store, a: Allocator, prompt: []const u32, from: u32, history_len: u32, rewind: u32, shared: []const u32, starts: []const u32, previous: []const u32) ![]const u32 {
-        if (prompt.len < s.rules.min_prompt) return &.{};
+        if (!s.rules.planned and prompt.len < s.rules.min_prompt) return &.{};
         var out: std.ArrayList(u32) = .empty;
         var want: std.ArrayList(u32) = .empty;
         defer want.deinit(a);
