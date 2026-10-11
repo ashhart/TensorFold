@@ -72,4 +72,6 @@ test {
     _ = @import("benchmark_stop_test.zig");
     _ = @import("benchmark_sse_test.zig");
     _ = @import("benchmark_stream_test.zig");
+    _ = @import("benchmark_server_test.zig");
+    _ = @import("benchmark_facts_test.zig");
 }
