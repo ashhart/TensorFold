@@ -6,6 +6,7 @@ const sm = @import("stream.zig");
 const fake = @import("fake.zig");
 const SuffixLookup = @import("proposer.zig").SuffixLookup;
 const Sampling = @import("sampling.zig").Sampling;
+const grammar = @import("grammar.zig");
 
 const gpa = std.testing.allocator;
 
@@ -16,6 +17,59 @@ const Case = struct {
     drafts: bool = true,
     think_budget: u32 = 0,
     logprobs: ?u8 = null,
+    classes: ?Classes = null, // structured output under this test grammar
+    eos: []const u32 = &.{96},
+};
+
+/// A test grammar over the fake's vocabulary: `length` tokens, the i-th one of class i % 3 (t % 3, never the stop
+/// token 96), then 96; with `after` it starts after that token. Drafts it rejects are common, so windows get cut.
+const Classes = struct {
+    length: u32 = 12,
+    after: ?u32 = null,
+    at: u32 = 0,
+    done: bool = false,
+
+    fn rules(c: *Classes) grammar.Rules {
+        return .{ .ptr = c, .vtable = &.{ .accept = acceptFn, .rollback = rollbackFn, .terminated = terminatedFn, .fill = fillFn, .free = freeFn } };
+    }
+
+    fn cast(ptr: *anyopaque) *Classes {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn allows(c: *const Classes, t: u32) bool {
+        if (c.done) return false;
+        if (c.at == c.length) return t == 96;
+        return t != 96 and t % 3 == c.at % 3;
+    }
+
+    fn acceptFn(ptr: *anyopaque, t: u32) anyerror!bool {
+        const c = cast(ptr);
+        if (!c.allows(t)) return false;
+        if (c.at == c.length) c.done = true else c.at += 1;
+        return true;
+    }
+
+    fn rollbackFn(ptr: *anyopaque, n: usize) anyerror!void {
+        const c = cast(ptr);
+        for (0..n) |_| {
+            if (c.done) c.done = false else c.at -= 1;
+        }
+    }
+
+    fn terminatedFn(ptr: *anyopaque) bool {
+        return cast(ptr).done;
+    }
+
+    fn fillFn(ptr: *anyopaque, words: []u32) anyerror!void {
+        const c = cast(ptr);
+        @memset(words, 0);
+        for (0..fake.vocab) |t| if (c.allows(@intCast(t))) {
+            words[t / 32] |= @as(u32, 1) << @intCast(t % 32);
+        };
+    }
+
+    fn freeFn(_: *anyopaque) void {}
 };
 
 fn model() !Config {
@@ -26,9 +80,14 @@ fn model() !Config {
 
 /// Every case's emitted tokens, the cases admitted together and stepped until done.
 fn run(cases: []const Case) ![][]u32 {
+    return runRanked(cases, false);
+}
+
+/// `run`, the fake head giving its held chains back when `ranked` (a grammar then walks them).
+fn runRanked(cases: []const Case, ranked: bool) ![][]u32 {
     var cfg = try model();
     defer cfg.deinit(gpa);
-    var target: fake.Fake = .{ .gpa = gpa };
+    var target: fake.Fake = .{ .gpa = gpa, .ranked = ranked };
     defer target.deinit();
     var clock: fake.FixedClock = .{};
     var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
@@ -37,9 +96,17 @@ fn run(cases: []const Case) ![][]u32 {
     defer gpa.free(streams);
     const proposers = try gpa.alloc(SuffixLookup, cases.len);
     defer gpa.free(proposers);
-    for (cases, streams, proposers) |c, *s, *p| {
+    const classes = try gpa.alloc(Classes, cases.len);
+    defer gpa.free(classes);
+    const constraints = try gpa.alloc(grammar.Constraint, cases.len);
+    defer gpa.free(constraints);
+    for (cases, streams, proposers, classes, constraints) |c, *s, *p, *g, *k| {
         p.* = try SuffixLookup.init(gpa, .{ .min_match = 4 });
-        s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = &.{96}, .sampling = c.sampling, .drafts = c.drafts, .proposer = p.proposer(), .think_budget = c.think_budget, .think_close = &.{ 90, 91, 92 }, .think_end = 91, .logprobs = c.logprobs });
+        if (c.classes) |given| {
+            g.* = given;
+            k.* = .init(g.rules(), (fake.vocab + 31) / 32, given.after);
+        }
+        s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = c.eos, .sampling = c.sampling, .drafts = c.drafts, .proposer = p.proposer(), .think_budget = c.think_budget, .think_close = &.{ 90, 91, 92 }, .think_end = 91, .logprobs = c.logprobs, .grammar = if (c.classes != null) k else null });
     }
     defer for (streams, proposers) |*s, *p| {
         s.deinit(gpa);
@@ -250,4 +317,65 @@ test "a prompt pass a chunk a round between other streams' rounds gives the whol
     try std.testing.expectEqual(@as(usize, 8), target.prefill_count);
     while (engine.activeCount() > 0) try engine.step();
     for (streams, whole) |s, w| try std.testing.expectEqualSlices(u32, w, s.emitted());
+}
+
+/// Every emitted token from the grammar's start on is one the test grammar allows, and it ends at its stop token.
+fn expectInGrammar(emitted: []const u32, classes: Classes) !void {
+    var g = classes;
+    var active = g.after == null;
+    for (emitted) |t| {
+        if (!active) {
+            active = t == g.after.?;
+            continue;
+        }
+        try std.testing.expect(g.allows(t));
+        _ = try Classes.acceptFn(&g, t);
+    }
+    try std.testing.expect(g.done);
+}
+
+test "structured output: drafted rounds commit the one-token decode, every token inside the grammar" {
+    for ([_]?Sampling{ null, .{ .seed = 5, .temperature = 0.7, .top_k = 0, .top_p = 0.95 } }) |s| {
+        for ([_]bool{ false, true }) |ranked| {
+            const drafted = try runRanked(&.{.{ .prompt = &p1, .sampling = s, .classes = .{} }}, ranked);
+            defer free(drafted);
+            const plain = try run(&.{.{ .prompt = &p1, .sampling = s, .drafts = false, .classes = .{} }});
+            defer free(plain);
+            try std.testing.expectEqualSlices(u32, plain[0], drafted[0]);
+            try expectInGrammar(drafted[0], .{});
+        }
+    }
+}
+
+test "structured output: shared rounds with grammar and plain streams commit what each commits alone" {
+    const sampled: Sampling = .{ .seed = 9, .temperature = 1.0, .top_k = 0, .top_p = 0.9 };
+    const cases = [_]Case{ .{ .prompt = &p1, .classes = .{ .length = 20 } }, .{ .prompt = &p2, .sampling = sampled, .max_new = 30 }, .{ .prompt = &p2, .sampling = sampled, .classes = .{ .length = 7 } } };
+    const together = try runRanked(&cases, true);
+    defer free(together);
+    for (cases, together) |c, got| {
+        const alone = try run(&.{c});
+        defer free(alone);
+        try std.testing.expectEqualSlices(u32, alone[0], got);
+        if (c.classes) |g| try expectInGrammar(got, g);
+    }
+}
+
+test "structured output: with thinking the grammar starts after the think end, through a forced close" {
+    const c: Case = .{ .prompt = &p2, .think_budget = 9, .classes = .{ .after = 91 } };
+    const drafted = try run(&.{c});
+    defer free(drafted);
+    var plain_case = c;
+    plain_case.drafts = false;
+    const plain = try run(&.{plain_case});
+    defer free(plain);
+    try std.testing.expectEqualSlices(u32, plain[0], drafted[0]);
+    try std.testing.expectEqualSlices(u32, &.{ 90, 91 }, drafted[0][8..10]); // the close ends at the think end
+    try expectInGrammar(drafted[0], .{ .after = 91 });
+}
+
+test "structured output: the grammar's stop token ends a reply that ignores eos" {
+    const out = try run(&.{.{ .prompt = &p1, .eos = &.{}, .max_new = 200, .classes = .{ .length = 5 } }});
+    defer free(out);
+    try std.testing.expectEqual(@as(usize, 6), out[0].len);
+    try expectInGrammar(out[0], .{ .length = 5 });
 }

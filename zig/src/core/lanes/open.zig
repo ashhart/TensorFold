@@ -34,7 +34,7 @@ pub fn opened(e: *Engine, s: *Stream) !void {
     s.pending = null;
     s.cache_len = s.prompt_len;
     const position: u64 = s.prompt_len;
-    const drawn = try e.backend.first(s, position);
+    const drawn = try e.drawFirst(s, position);
     var feed: Feed = .{ .handle = drawn };
     if (try e.forcedNext(s)) |t| feed = .{ .value = t };
     var asked: ?u32 = null;
@@ -48,7 +48,7 @@ pub fn opened(e: *Engine, s: *Stream) !void {
         if (e.backend.vtable.tree) |tree| if (try tree(e.backend.ptr, s, e.gpa)) |held| {
             s.next = held; // a tree head's first drafts as host tokens, as every later round's
         };
-    } else if (e.cfg.pipelined and s.logprobs == null) {
+    } else if (e.cfg.pipelined and s.logprobs == null and s.grammar == null) {
         try e.queueNext(s, feed);
     }
     const value = try e.readFeed(feed);

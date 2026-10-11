@@ -1,5 +1,6 @@
 //! One stream (Python LaneStream) and the round loop's state for it (Python's dicts keyed by stream id).
 const std = @import("std");
+const grammar = @import("grammar.zig");
 const shape = @import("shape.zig");
 const plan_lanes = @import("plan_lanes.zig");
 const Allocator = std.mem.Allocator;
@@ -116,6 +117,7 @@ pub const Spec = struct {
     shared_prefixes: []const u32 = &.{}, // then shared system blocks
     reuse: Reuse = .{},
     logprobs: ?u8 = null, // the target's log probabilities for each committed token, with this many best tokens
+    grammar: ?*grammar.Constraint = null, // structured output: the reply stays in it (the creator frees it)
 };
 
 pub const Stream = struct {
@@ -138,6 +140,8 @@ pub const Stream = struct {
     history_len: u32,
     shared_prefixes: []const u32,
     logprobs: ?u8 = null,
+    grammar: ?*grammar.Constraint = null, // follows each committed token; its masks keep the draws inside it
+    problem: []const u8 = "", // why a stream finished with `error` (static text)
     rows: std.ArrayList(Row) = .empty, // with `logprobs`: one a token of emitted(), in order
     reuse: Reuse = .{},
     cached: u32 = 0, // prompt tokens the backend restored from `reuse` (its prompt pass started there)
@@ -195,6 +199,11 @@ pub const Stream = struct {
             .shared_prefixes = spec.shared_prefixes,
             .reuse = spec.reuse,
             .logprobs = spec.logprobs,
+            .grammar = spec.grammar,
+        };
+        // under a grammar a forced close ends at the think end: the grammar takes the reply from the next token
+        if (spec.grammar) |g| if (g.after) |end| if (std.mem.indexOfScalar(u32, s.think_close, end)) |at| {
+            s.think_close = s.think_close[0 .. at + 1];
         };
         try s.context.appendSlice(gpa, spec.prompt);
         return s;
@@ -314,6 +323,19 @@ pub const Stream = struct {
             if (rows.len > 0) try s.rows.append(gpa, rows[i]);
             landed += 1;
             if (@as(i64, t) == s.think_end) s.think_open = false;
+            if (s.grammar) |g| {
+                if (!try g.follow(t)) {
+                    s.finished = true;
+                    s.reason = .@"error";
+                    s.problem = "the reply's grammar rejected a chosen token";
+                    break;
+                }
+                if (g.finished() and !s.isEos(t)) { // the grammar's stop token ends the reply (eos ignored or not)
+                    s.finished = true;
+                    s.reason = .stop;
+                    break;
+                }
+            }
             const fire = if (s.loop_guard and s.think_open and s.think_end >= 0 and s.loop_period == null) detectLoop(s.emitted()) else null;
             if (s.isEos(t) or s.stopped()) {
                 s.finished = true;
