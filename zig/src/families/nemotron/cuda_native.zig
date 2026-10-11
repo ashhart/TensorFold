@@ -51,6 +51,11 @@ pub fn linked(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]const u
     return core.shard_edit.linked(arena, io, dir);
 }
 
+/// A shared expert's projection config.json keeps unquantized, as an earlier release's lessons left it, or null.
+pub fn plainShared(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
+    return core.shard_edit.plainShared(arena, io, dir);
+}
+
 const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes, target: reuse.Target, carve: ?*cuda.Carveout, living: ?@import("cuda_sites.zig").Sites = null };
 
 /// Own-sequence graphs support both draw modes; drafting also captures the head.
