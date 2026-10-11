@@ -7,6 +7,7 @@ const http_body = @import("http_body.zig");
 const routes = @import("routes.zig");
 const errors = @import("errors.zig");
 const teach = @import("slide_lesson.zig");
+const found = @import("slide_found.zig");
 const wording = @import("slide_words.zig");
 const check = @import("slide_verify.zig");
 const replace = @import("slide_replace.zig");
@@ -84,7 +85,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     var out: Out = .{ .conn = conn, .a = a };
     var cx: errors.Cx = .{ .a = a };
     const gone: Gone = .{ .conn = conn };
-    const facts = teach.facts(srv, &cx, text, source, gone) catch |e| return out.fail(&cx, e);
+    const facts = found.facts(srv, &cx, text, source, gone) catch |e| return out.fail(&cx, e);
     if (facts.len == 0) {
         out.event("failed", .{ .message = "no facts found in the text: nothing was learned" });
         sse.done(conn) catch {};

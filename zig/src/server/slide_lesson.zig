@@ -37,7 +37,6 @@ const prompts = @import("slide_prompts.zig");
 const slide_subject = @import("slide_subject.zig");
 const slide_take = @import("slide_take.zig");
 const side = @import("slide_side.zig");
-const found = @import("slide_found.zig");
 const Got = slide_take.Got;
 const take = slide_take.take;
 const shortAnswer = slide_take.shortAnswer;
@@ -70,7 +69,6 @@ const besides = 6; // questions about the fact's subject that it leaves unanswer
 const neighbours = 4; // a document fact's questions for the same kind of answer about another of its subject's things
 const think_twins = 12; // near misses also kept with their thinking replies (each a long generation), the first ones
 const remember_probes = 4; // kept questions asked again as "Do you remember...?", which the model otherwise refuses
-const chunk_chars = 6000; // text a fact-finding call reads at once
 pub const min_probes = 3; // two answers are held out to test recall
 const want_probes = 12; // questions a fact is learned from at least, when the model gives that many
 const replayed = 24; // earlier answers about a subject a document lesson keeps at most, the latest first
@@ -78,44 +76,6 @@ const replayed = 24; // earlier answers about a subject a document lesson keeps 
 const personal_checks = 3;
 const bank_checks = 6; // one bank question in this many is held back from each lesson to check
 pub const check_tokens = 32; // a check's reply read before and after a lesson
-
-/// The facts in `text`: its sentences when it is short chat, else what the model finds worth remembering in it.
-pub fn facts(srv: *Server, cx: *Cx, text: []const u8, source: []const u8, gone: anytype) ![]const []const u8 {
-    const a = cx.a;
-    const told = try wording.sentences(a, text);
-    if (std.mem.eql(u8, source, "chat") and told.len <= 4) return told;
-    var out: std.ArrayList([]const u8) = .empty;
-    var at: usize = 0;
-    while (at < text.len) : (at += chunk_chars) {
-        const piece = text[at..@min(text.len, at + chunk_chars)];
-        const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.facts_prompt, .{piece}), 512, gone);
-        // a list holding facts the text does not (the prompt's own example, copied) is read again without the example
-        if (try listed(a, &out, reply.content, text) > 0) {
-            const again = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.facts_plain_prompt, .{piece}), 512, gone);
-            _ = try listed(a, &out, again.content, text);
-        }
-    }
-    return out.items;
-}
-
-/// The facts of a found list that `text` holds, none restating another, into `out`; how many it left as not in it.
-fn listed(a: Allocator, out: *std.ArrayList([]const u8), list: []const u8, text: []const u8) !usize {
-    var left: usize = 0;
-    var it = std.mem.splitScalar(u8, list, '\n');
-    while (it.next()) |line| {
-        const fact = wording.unmark(line);
-        if (wording.words(fact) < 3) continue;
-        if (!wording.grounded(fact, text)) {
-            log.line("slide: \"{s}\" is not in the text, so it is not learned", .{fact});
-            left += 1;
-            continue;
-        }
-        for (out.items) |had| {
-            if (found.restates(fact, had)) break;
-        } else try out.append(a, fact);
-    }
-    return left;
-}
 
 /// A question about something else and the model's answer before the lesson.
 pub const Check = struct { question: []const u8, before: []const u8, thinking: []const u8 = "" }; // and its thinking reply
