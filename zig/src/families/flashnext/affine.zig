@@ -2,23 +2,7 @@
 const std = @import("std");
 const st = @import("../../core/safetensors.zig");
 
-pub const Spec = struct {
-    bits: u8,
-    group: usize,
-
-    pub fn init(bits: usize, group: usize) !Spec {
-        if (bits != 2 and bits != 3 and bits != 4 and bits != 5 and bits != 6 and bits != 8) return error.UnsupportedAffineBits;
-        if (group != 32 and group != 64 and group != 128) return error.UnsupportedAffineGroup;
-        return .{ .bits = @intCast(bits), .group = group };
-    }
-
-    pub fn words(s: Spec, k: usize) !usize {
-        if (k == 0 or k % s.group != 0) return error.InvalidAffineWidth;
-        const count = try std.math.mul(usize, k, s.bits);
-        if (count % 32 != 0) return error.InvalidAffineWidth;
-        return count / 32;
-    }
-};
+pub const Spec = @import("spec.zig").Spec;
 
 pub const Shape = struct { experts: usize, n: usize, k: usize, words: usize, groups: usize, dtype: st.DType };
 

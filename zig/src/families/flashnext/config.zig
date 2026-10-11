@@ -1,6 +1,6 @@
 //! FlashNext text dimensions and quantization declarations are checked before weight or cache allocation.
 const std = @import("std");
-const affine = @import("affine.zig");
+const affine = @import("spec.zig");
 const keys = @import("../../core/quant/keys.zig");
 
 pub const Kind = enum { linear_attention, sparse_attention };
