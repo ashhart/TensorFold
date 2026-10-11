@@ -152,7 +152,8 @@ pub const Cuda = struct {
         } };
         if (own) self.own_free = false;
         e.bind(gop.value_ptr.seq);
-        e.decide = if (s.decide) |d| d else lesson_route.none;
+        // a decision row only where lessons route on it: else the prompt's chunks stay as plain serving cuts them
+        e.decide = if (s.decide != null and e.lessons() != null) s.decide.? else lesson_route.none;
         try e.setSampling(s.sampling);
         const first = try e.prefillWith(ids, null, self.head, .{ .ptr = s, .check = cancelled });
         // the head's first draft reads the prompt's last row (its hidden row waits where a window's would)
