@@ -88,6 +88,7 @@ pub fn For(comptime train: type) type {
                 for (one, many) |a, z| w.add(a, z);
                 std.debug.print("RESULT {s}: {d} sequences, {d} rows: one a pass {d:.1} ms, side by side {d:.1} ms ({d:.2}x)\n", .{ @tagName(mode), seqs.len, rows(seqs), 1000 * times[0], 1000 * times[1], times[0] / times[1] });
                 w.print();
+                if (mode == .target) try dump(gpa, io, many);
                 var at: usize = 0;
                 while (at < seqs.len) {
                     const n = fits(t, seqs[at..]);
@@ -164,6 +165,17 @@ pub fn For(comptime train: type) type {
             std.debug.print("RESULT prefix repeats: {d} of {d} sequences changed when their passes from the cut ran again\n", .{ repeats, 2 * n });
             std.debug.print("{s} train-pack: passes from a kept prefix repeat to the bit\n", .{if (repeats == 0) "PASS" else "FAIL"});
             if (repeats != 0) return error.Unrepeatable;
+        }
+
+        /// TF_PACK_DUMP: the packed target pass's losses and pushes written there, for another build's to compare.
+        fn dump(gpa: std.mem.Allocator, io: std.Io, seen: []const Seen) !void {
+            const path = std.c.getenv("TF_PACK_DUMP") orelse return;
+            var bytes: std.ArrayList(u8) = .empty;
+            for (seen) |x| {
+                try bytes.appendSlice(gpa, std.mem.asBytes(&x.loss));
+                try bytes.appendSlice(gpa, std.mem.sliceAsBytes(x.push));
+            }
+            try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = std.mem.span(path), .data = bytes.items });
         }
 
         /// `seqs` in as few passes as hold them.

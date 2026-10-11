@@ -20,10 +20,10 @@ pub const Bufs = struct {
     dxa: Buffer, // [rows, max_rank]
     d_upr: Buffer, // [rows, F]
     du: Buffer, // [rows, F]
-    dyp: Buffer, // [pairs, D]
+    dyp: Buffer, // [pairs, D], and 32 rows the experts' tiles read past the last pair
     dxp: Buffer, // [pairs, D]
     d_y1r: Buffer, // [pairs, W]
-    du1: Buffer, // [pairs, W]
+    du1: Buffer, // [pairs, W], likewise
     dyn: Buffer, // [rows, inner]
     ytot: Buffer, // [rows, inner]
     dytot: Buffer, // [rows, inner]
@@ -31,8 +31,7 @@ pub const Bufs = struct {
     ddt: Buffer, // [rows, heads]
     dact: Buffer, // [rows, conv]
     dproj: Buffer, // [rows, proj]
-    ckpt: Buffer, // [heads, rows / 16 + 1, dh * n]
-    states: Buffer, // [heads, 16, dh * n]
+    ckpt: Buffer, // [heads, rows / 8 + 1, dh * n]: the scan's state every 8 rows
     dbp: Buffer, // [rows, heads, n]
     dcp: Buffer, // [rows, heads, n]
     q: Buffer, // bf16 [rows, heads * hd]
@@ -45,7 +44,7 @@ pub const Bufs = struct {
     probs: Buffer, // [heads, rows, rows]
     dscores: Buffer, // [heads, rows, rows]
 
-    const names = .{ "g", "dx", "dxa", "d_upr", "du", "dyp", "dxp", "d_y1r", "du1", "dyn", "ytot", "dytot", "dt", "ddt", "dact", "dproj", "ckpt", "states", "dbp", "dcp", "q", "k", "v", "d_o", "dq", "dk", "dv", "probs", "dscores" };
+    const names = .{ "g", "dx", "dxa", "d_upr", "du", "dyp", "dxp", "d_y1r", "du1", "dyn", "ytot", "dytot", "dt", "ddt", "dact", "dproj", "ckpt", "dbp", "dcp", "q", "k", "v", "d_o", "dq", "dk", "dv", "probs", "dscores" };
 
     pub fn init(device: mtl.Device, c: cfg.Config, rows: usize, seq: usize) !Bufs {
         const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
@@ -55,14 +54,14 @@ pub const Bufs = struct {
         const kw = c.kv_heads * c.head_dim;
         const state = c.mamba_head_dim * c.state;
         const bytes = [_]usize{
-            rows * d * 4,                               rows * d * 4,                   rows * adapters.max_rank * 4,       rows * c.shared_width * 4,
-            rows * c.shared_width * 4,                  pairs * d * 4,                  pairs * d * 4,                      pairs * c.expert_width * 4,
-            pairs * c.expert_width * 4,                 rows * c.inner() * 4,           rows * c.inner() * 4,               rows * c.inner() * 4,
-            rows * c.mamba_heads * 4,                   rows * c.mamba_heads * 4,       rows * c.convDim() * 4,             rows * c.projDim() * 4,
-            c.mamba_heads * (seq / 16 + 1) * state * 4, c.mamba_heads * 16 * state * 4, rows * c.mamba_heads * c.state * 4, rows * c.mamba_heads * c.state * 4,
-            rows * qw * 2,                              rows * kw * 2,                  rows * kw * 2,                      rows * qw * 4,
-            rows * qw * 4,                              rows * kw * 4,                  rows * kw * 4,                      c.heads * seq * seq * 4,
-            c.heads * seq * seq * 4,                    16 * 16 * 4,
+            rows * d * 4,                              rows * d * 4,                       rows * adapters.max_rank * 4,       rows * c.shared_width * 4,
+            rows * c.shared_width * 4,                 (pairs + 32) * d * 4,               pairs * d * 4,                      pairs * c.expert_width * 4,
+            (pairs + 32) * c.expert_width * 4,         rows * c.inner() * 4,               rows * c.inner() * 4,               rows * c.inner() * 4,
+            rows * c.mamba_heads * 4,                  rows * c.mamba_heads * 4,           rows * c.convDim() * 4,             rows * c.projDim() * 4,
+            c.mamba_heads * (seq / 8 + 1) * state * 4, rows * c.mamba_heads * c.state * 4, rows * c.mamba_heads * c.state * 4, rows * qw * 2,
+            rows * kw * 2,                             rows * kw * 2,                      rows * qw * 4,                      rows * qw * 4,
+            rows * kw * 4,                             rows * kw * 4,                      c.heads * seq * seq * 4,            c.heads * seq * seq * 4,
+            16 * 16 * 4,
         };
         var b: Bufs = undefined;
         var made: usize = 0;
@@ -153,7 +152,7 @@ pub fn mamba(x: Layer, b: *Bufs, i: usize) void {
         o.e.bytes(@as(u32, @intFromBool(sp.skip > 0)), 8);
         o.e.run(.{ 1024 * h, 1, 1 }, .{ 1024, 1, 1 });
         o.mixer2("tf_train_gate_back", &.{ At.of(b.ytot).plus(r * xd * 4), At.of(s.proj).plus(r * pd * 2), norm, At.of(b.dyn).plus(r * xd * 4), At.of(b.dytot).plus(r * xd * 4), At.of(b.dproj).plus(r * pd * 4) }, one, c.eps, .{ 256 * c.groups, sp.rows, 1 }, .{ 256, 1, 1 });
-        o.mixer("tf_train_ssm_back", &.{ At.of(s.act).plus(r * cd * 2), At.of(b.dt).plus(r * h * 4), m.a, m.d, At.of(b.dytot).plus(r * xd * 4), At.of(b.ckpt), At.of(b.states), At.of(b.dact).plus(r * cd * 4), At.of(b.dbp).plus(r * h * c.state * 4), At.of(b.dcp).plus(r * h * c.state * 4), At.of(b.ddt).plus(r * h * 4) }, one, .{ 1024 * h, 1, 1 }, .{ 1024, 1, 1 });
+        o.mixer("tf_train_ssm_back", &.{ At.of(s.act).plus(r * cd * 2), At.of(b.dt).plus(r * h * 4), m.a, m.d, At.of(b.dytot).plus(r * xd * 4), At.of(b.ckpt), At.of(b.dact).plus(r * cd * 4), At.of(b.dbp).plus(r * h * c.state * 4), At.of(b.dcp).plus(r * h * c.state * 4), At.of(b.ddt).plus(r * h * 4) }, one, .{ 1024 * h, 1, 1 }, .{ 1024, 1, 1 });
     }
     o.mixer("tf_train_ssm_bc", &.{ At.of(b.dbp), At.of(b.dcp), At.of(b.dact) }, shape, .{ c.state, c.groups, rows }, .{ 128, 1, 1 });
     for (x.spans) |sp| {
