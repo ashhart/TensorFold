@@ -33,6 +33,7 @@ pub const Model = struct {
     draft_streams: bool = false, // the head drafts every stream of a shared round in one batch
     head_trees: bool = false, // the head drafts trees of lanes (DraftRequest.lanes) and holds them
     lane_costs: []const Cost = &.{}, // a lone stream's window ms by rows, up to its widest tree (timed at load)
+    lone_copies: bool = true, // a lone stream proposes copies (false: only streams in shared rounds do)
 };
 
 pub const Config = struct {
@@ -64,6 +65,7 @@ pub const Config = struct {
     mtp_step_ms: f64,
     enter_match: i64 = 8, // matching tokens a copy needs (rejects coincidental indentation)
     copy_rate: f64 = 0.94, // a copied token's chance of landing in allocation
+    lone_copies: bool = true, // Model.lone_copies
     k: Constants = .{},
 
     pub fn init(gpa: Allocator, m: Model, max_rows: u32, max_draft: u32) !Config {
@@ -97,6 +99,7 @@ pub const Config = struct {
         const depth_prior = try gpa.dupe(f64, prior);
         errdefer gpa.free(depth_prior);
         return .{
+            .lone_copies = m.lone_copies,
             .family_width = width,
             .max_copy = max_copy,
             .first_copy = first_copy,

@@ -7,6 +7,7 @@ const fake = @import("fake.zig");
 const SuffixLookup = @import("proposer.zig").SuffixLookup;
 const Sampling = @import("sampling.zig").Sampling;
 const grammar = @import("grammar.zig");
+const win = @import("windows.zig");
 
 const gpa = std.testing.allocator;
 
@@ -436,5 +437,26 @@ test "structured output: where the grammar spells its own text, its drafts fill 
         try expectInGrammar(s.emitted(), c.classes.?);
         // the head's guesses are wrong here; the grammar's own drafts land every round, a window's worth at a time
         try std.testing.expect(s.emitted().len > 4 * s.rounds);
+    }
+}
+
+test "a family that keeps copies to shared rounds proposes none for a lone stream" {
+    for ([_]bool{ true, false }) |lone_copies| {
+        var cfg = try Config.init(gpa, .{ .exact_width = 16, .mtp = true, .speculate = true, .drafts = 4, .lone_copies = lone_copies }, 16, 15);
+        defer cfg.deinit(gpa);
+        var target: fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var clock: fake.FixedClock = .{};
+        var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+        defer engine.deinit();
+        var p = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+        defer p.deinit();
+        const prompt = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8 }; // the last 8 tokens repeat
+        var s = try sm.Stream.init(gpa, .{ .id = "s", .prompt = &prompt, .max_new = 16, .eos = &.{96}, .proposer = p.proposer() });
+        defer s.deinit(gpa);
+        engine.alone = false;
+        try std.testing.expect((try win.copyProposal(&engine, &s)).len >= 2);
+        engine.alone = true;
+        try std.testing.expectEqual(lone_copies, (try win.copyProposal(&engine, &s)).len >= 2);
     }
 }
