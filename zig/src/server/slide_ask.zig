@@ -36,8 +36,7 @@ pub fn example(srv: *Server, cx: *Cx, keep: Allocator, system: ?[]const u8, ques
     return .{ .ids = try std.mem.concat(keep, u32, &.{ head, body, end }), .start = @intCast(head.len), .decide = prompt.decideOf(srv, head) };
 }
 
-/// `question` as the model reads it when asked (after a system message when given), for a router: its prompt rows
-/// through the generation prompt only.
+/// `question` as the model reads it when asked (after a system message when given): its prompt rows only.
 pub fn promptOnly(srv: *Server, cx: *Cx, keep: Allocator, system: ?[]const u8, question: []const u8) !api.Example {
     const a = cx.a;
     var asked: std.ArrayList(Value) = .empty;
@@ -70,12 +69,12 @@ pub fn ask(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tok
     return chat.generate(srv, cx, prepared, null, gone);
 }
 
-/// One greedy reply as `ask` gives it, with no lesson acting: what writes a lesson must not hear the lessons already kept.
+/// One greedy reply as `ask` gives it, with no routed lesson acting: a lesson's writer hears none of them.
 pub fn askBase(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tokens: i64, gone: anytype) chat.Failure!chat.Reply {
     return askBaseAt(srv, cx, system, user, max_tokens, 0, gone);
 }
 
-/// `askBase` sampled at `temperature` (seeded by the prompt, so the same each time): other words than the greedy reply's.
+/// `askBase` sampled at `temperature`, seeded by the prompt so it repeats: other words than the greedy reply's.
 pub fn askBaseAt(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tokens: i64, temperature: f64, gone: anytype) chat.Failure!chat.Reply {
     const a = cx.a;
     var list: std.ArrayList(Value) = .empty;
@@ -91,8 +90,16 @@ pub fn askBaseAt(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, m
 
 /// One greedy reply with thinking on, its reasoning bounded; its content is what the user reads after the reasoning.
 pub fn askThinking(srv: *Server, cx: *Cx, user: []const u8, gone: anytype) chat.Failure!chat.Reply {
+    return askThinkingAfter(srv, cx, null, user, gone);
+}
+
+/// `askThinking` after a system note when given (the fact a lesson's teacher answers with).
+pub fn askThinkingAfter(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, gone: anytype) chat.Failure!chat.Reply {
     const a = cx.a;
-    const asked = try a.dupe(Value, &.{try message(a, "user", user)});
+    var list: std.ArrayList(Value) = .empty;
+    if (system) |s| try list.append(a, try message(a, "system", s));
+    try list.append(a, try message(a, "user", user));
+    const asked = list.items;
     const fields = try json.newObject(a);
     try fields.put(a, "enable_thinking", .{ .bool = true });
     try fields.put(a, "temperature", .{ .float = 0 });

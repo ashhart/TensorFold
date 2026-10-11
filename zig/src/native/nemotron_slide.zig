@@ -3,6 +3,9 @@ const std = @import("std");
 const api = @import("engine_api");
 const Allocator = std.mem.Allocator;
 
+/// Neurons a learn event carries at most; a fact takes about ten.
+const max_neurons = 64;
+
 /// The hook over `slide`, a backend's learner (its Learner, Example and Lesson): Metal's or CUDA's.
 pub fn Adapter(comptime slide: type) type {
     return struct {
@@ -11,6 +14,8 @@ pub fn Adapter(comptime slide: type) type {
         learner: slide.Learner,
         arena: std.heap.ArenaAllocator,
         sink: ?api.LearnSink = null,
+        sent: ?api.LearnProgress = null, // the last progress sent, so each move goes out once
+        neurons: [max_neurons]api.Neuron = undefined, // the open lesson's neurons for the event being sent
 
         pub fn init(gpa: Allocator, io: std.Io, model: anytype) Self {
             return .{ .learner = slide.Learner.init(gpa, io, model), .arena = .init(gpa) };
@@ -31,14 +36,16 @@ pub fn Adapter(comptime slide: type) type {
             const al = a.arena.allocator();
             try a.learner.begin(.{ .train = try examples(al, request.train), .think = try examples(al, request.think), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .asked = try examples(al, request.asked), .unasked = try examples(al, request.unasked), .kept = try examples(al, request.kept), .undo = request.undo, .steps = request.steps, .more = request.more, .reroute = request.reroute, .drop = request.drop, .save = request.save });
             a.sink = sink;
+            a.sent = null;
         }
 
         fn step(ctx: *anyopaque) api.Learner.Step {
             const a: *Self = @ptrCast(@alignCast(ctx));
             const s = a.learner.step();
+            a.progress();
             const failed = if (s.report) |r| r == .failed else false;
             if (s.report) |r| a.emit(switch (r) {
-                .learned => |x| .{ .learned = .{ .recalled = x.recalled, .steps = x.steps, .loss = x.loss } },
+                .learned => |x| .{ .learned = .{ .recalled = x.recalled, .steps = x.steps, .loss = x.loss, .neurons = a.placed() } },
                 .failed => |message| .{ .done = .{ .message = message } },
             });
             if (s.done and !failed) a.emit(.{ .done = .{} });
@@ -54,6 +61,34 @@ pub fn Adapter(comptime slide: type) type {
         fn emit(a: *Self, event: api.LearnEvent) void {
             const sink = a.sink orelse return;
             sink.event(sink.ctx, &event);
+        }
+
+        /// The open pocket lesson's progress, sent when its phase or unit moved.
+        fn progress(a: *Self) void {
+            if (comptime slide.Learner.Progress == void) return;
+            const p = a.learner.progress() orelse return;
+            const phase: api.LearnPhase = switch (p.phase) {
+                .read => .reading,
+                .fit => .fitting,
+                .values => .values,
+                .check => .checking,
+                .done => return,
+            };
+            var now: api.LearnProgress = .{ .phase = phase, .at = @intCast(p.at), .of = @intCast(p.of), .loss = p.loss };
+            if (a.sent) |last| if (last.phase == now.phase and last.at == now.at) return;
+            a.sent = now;
+            if (phase == .values or phase == .checking) now.neurons = a.placed();
+            a.emit(.{ .progress = now });
+        }
+
+        /// The open lesson's neurons as placed, in this adapter's buffer until the next call.
+        fn placed(a: *Self) []const api.Neuron {
+            var buf: [max_neurons]slide.Learner.Placed = undefined;
+            const got = a.learner.placed(&buf);
+            for (got, a.neurons[0..got.len]) |x, *o| o.* = .{ .layer = @intCast(x.layer), .neuron = @intCast(x.neuron), .key = switch (x.key) {
+                inline else => |k| @field(api.NeuronKey, @tagName(k)),
+            } };
+            return a.neurons[0..got.len];
         }
 
         fn examples(al: Allocator, xs: []const api.Example) ![]slide.Example {

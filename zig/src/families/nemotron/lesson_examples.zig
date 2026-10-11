@@ -3,8 +3,7 @@ const std = @import("std");
 
 pub const max_steps = 400;
 
-/// Token ids whose answer starts at `start` (the rows from start - 1 on predict it); lessons decide at row `decide`;
-/// `subject`: the row of the question's subject's last token, where an edit of the weights reads it (0: none).
+/// Token ids, the answer from `start`; `decide`: the reply's first row; `subject`, `value`: key rows (0: none).
 pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0 };
 
 /// One fact's examples; `more` another round, `undo` one back, `save` writes every kept lesson.

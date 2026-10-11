@@ -1,5 +1,4 @@
-//! Which of a fact's questions check its lesson: the most typical wordings (the most words shared with the others),
-//! so a vague one ("Which dog do I have?") never decides whether a fact came back.
+//! Which of a fact's questions check its lesson: the most typical wordings, so a vague one never decides recall.
 const std = @import("std");
 const Held = @import("slide_lesson.zig").Held;
 
@@ -14,8 +13,7 @@ pub const Unseen = struct {
     }
 };
 
-/// The two questions held out to check recall: those sharing the most words with the others (never the first, which
-/// leads); the middle and the last when no two differ.
+/// The two held-out questions: those sharing the most words with the others, never the first; else middle and last.
 pub fn heldPair(refs: []const Held) [2]usize {
     var best: [2]usize = .{ refs.len - 1, refs.len / 2 };
     var score: [2]f32 = .{ -1, -1 };

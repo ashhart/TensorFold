@@ -65,6 +65,8 @@ pub const Setup = struct {
     engine: api.Engine,
     text: model_text.Text,
     served: []const u8,
+    /// The model's folder (null: unknown).
+    dir: ?[]const u8 = null,
     /// Sampling defaults from generation_config.json and the flags, as a JSON object; null: greedy.
     sampling: ?json.Value = null,
     environ: ?*const std.process.Environ.Map = null,
@@ -120,6 +122,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .compact_keep = args.compact_keep,
         .compact_memory = args.compact_memory,
         .slide_graph = args.slide_graph,
+        .model_dir = s.dir,
     };
     const srv = server_mod.Server.init(gpa, io, s.engine, s.text, config, if (store.enabled()) &store else null) catch {
         std.debug.print("tensorfold: the server could not start\n", .{});

@@ -54,8 +54,7 @@ const Host = struct {
         return @as(f64, @floatFromInt(std.Io.Clock.awake.now(io).toNanoseconds())) / 1e9;
     }
 
-    /// MoE layer l's pocket as the forward reads it: `up` and `down` [neurons, D] f32 (the kernel runs every neuron,
-    /// those not in use zero); its buffers made on first use, the engine's graphs captured again to run them.
+    /// MoE layer l's pocket for the forward: `up`, `down` [neurons, D] f32; made on first use, graphs captured again.
     pub fn pocket(m: Ctx, l: usize, up: []const f32, down: []const f32, used: usize) !void {
         _ = used;
         const blk = &m.e.w.blocks[l];
@@ -78,8 +77,7 @@ const Host = struct {
         if (fresh) try m.e.recapture();
     }
 
-    /// MoE layer l's pocket as the model was loaded with it (its learned neurons from the shards), into `up` and
-    /// `down`; the neurons in use, up to the last whose input weights are not all zero (0: none).
+    /// MoE layer l's pocket as loaded from the shards, into `up` and `down`; the neurons in use (0: none).
     pub fn pocketRead(m: Ctx, l: usize, up: []f32, down: []f32) usize {
         const blk = m.e.w.blocks[l];
         if (blk.kind != .moe) return 0;
@@ -97,8 +95,7 @@ const Host = struct {
         return used;
     }
 
-    /// The pocket's learned neurons into the model's shards (its shared experts widened the first time); `up` and
-    /// `down` come back as the 4-bit values written. The bytes written.
+    /// The pocket's neurons into the shards (widened the first time), `up` and `down` set to the 4-bit values; bytes.
     pub fn pocketSave(m: Ctx, gpa: std.mem.Allocator, io: std.Io, moe: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
         try m.e.stream.synchronize();
         return PocketShards.write(gpa, io, m.dir, m.e.c, moe, neurons, up, down);
@@ -107,8 +104,7 @@ const Host = struct {
 
 pub const Learner = lessons.Learner(Host);
 
-/// The model's saved lessons, if it has any, into every layer's forward (graphs captured again): blocks with their
-/// routers, or null.
+/// The model's saved lesson blocks, if any, into every layer's forward (graphs captured again), or null.
 pub fn loadLiving(gpa: std.mem.Allocator, io: std.Io, e: *engine.Engine, dir: []const u8) !?sites_mod.Sites {
     var saved = (try Living.open(gpa, io, dir)) orelse return null;
     defer saved.close(io);

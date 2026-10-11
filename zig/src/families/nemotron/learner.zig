@@ -36,7 +36,8 @@ pub const Step = struct { done: bool, changed: bool = false, report: ?Report = n
 
 const check_every = 20;
 const per_step = 2; // fact answers whose gradients one Adam step takes together (a plain one and a thinking one)
-const replay_cap = 192; // earlier lessons' questions kept as ones a new router must not take (and, naming a new fact's subject, whose answers stay), the oldest giving way
+const replay_cap = 256; // earlier lessons' answers a new lesson leaves as they are, the oldest giving way
+const replay_each = 8; // of a lesson's answers, its first (plain questions) join the replay, so every fact keeps some
 
 /// A new lesson first sketches and measures what its block must read and when it acts (build), then learns (steps);
 /// an edit of the weights is written where its subject is read (edit), and a further round reports it again (again).
@@ -457,6 +458,21 @@ pub fn Learner(comptime H: type) type {
             return .{ .done = true, .changed = true, .report = .{ .learned = .{ .recalled = back, .steps = l.done, .loss = l.loss / @as(f32, @floatFromInt(@max(l.done * per_step, 1))) } } };
         }
 
+        pub const Placed = pocket.Placed;
+        pub const Progress = if (has_pocket) Pockets.Progress else void;
+
+        /// The open pocket lesson's progress, for a view of it; null when no pocket lesson runs.
+        pub fn progress(l: *const Self) ?Progress {
+            if (comptime !has_pocket) return null;
+            return if (l.phase == .pocket) l.pockets.progress() else null;
+        }
+
+        /// The last pocket lesson's neurons as placed, into `out`, while they are in the pocket; the ones written.
+        pub fn placed(l: *const Self, out: []Placed) []Placed {
+            if (comptime !has_pocket) return out[0..0];
+            return if (l.method == .pocket and l.pocketed) l.pockets.placed(out) else out[0..0];
+        }
+
         /// Whether every held-out answer comes back token for token (each its row's likeliest), the lesson acting
         /// (`open`: from its block).
         pub fn recalled(l: *Self, open: bool) !bool {
@@ -485,10 +501,12 @@ pub fn Learner(comptime H: type) type {
             }
             l.opened = false;
             if (l.kept_rounds > 0) {
-                for (l.last) |ex| {
+                const each = @min(l.last.len, replay_each);
+                for (l.last[0..each]) |ex| {
                     if (l.replay.items.len == replay_cap) l.gpa.free(l.replay.orderedRemove(0).ids);
                     try l.replay.append(l.gpa, ex);
                 }
+                for (l.last[each..]) |ex| l.gpa.free(ex.ids);
                 l.gpa.free(l.last);
             } else disown(l.gpa, l.last);
             l.last = now;

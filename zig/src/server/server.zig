@@ -54,6 +54,8 @@ pub const Config = struct {
     compact_memory: ?[]const u8 = null,
     /// --slide-graph: the file holding the Sliding Weights fact graph; null keeps the graph in memory.
     slide_graph: ?[]const u8 = null,
+    /// The served model's folder, whose layers and shards the Sliding Weights view shows (null: not shown).
+    model_dir: ?[]const u8 = null,
     timeouts: http_conn.Timeouts = .{},
 };
 

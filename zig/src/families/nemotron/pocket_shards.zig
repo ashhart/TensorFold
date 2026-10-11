@@ -1,7 +1,4 @@
-//! The pocket in the model's own shards. The first time, every MoE layer's shared expert is widened by the pocket's
-//! neurons (up_proj's last rows, down_proj's last columns, the MTP head's too) and config.json is told the new width and
-//! how many of its neurons are learned; after that the learned neurons are written where they lie. Any loader that
-//! reads config.json runs them as the shared expert's own.
+//! The pocket in the shards: every shared expert widened once (config.json told), later writes in place.
 const std = @import("std");
 const cfg = @import("config.zig");
 
@@ -13,9 +10,7 @@ pub fn Io(comptime core: type) type {
     const se = core.shard_edit;
     const host4 = core.affine4_host;
     return struct {
-        /// Writes the learned neurons of the MoE layers `layers` (`up` and `down`, [layers, neurons, D] f32, each set
-        /// to the 4-bit values written) into `dir`'s shards, widening every shared expert first when the folder has no
-        /// pocket yet; the bytes written.
+        /// The learned neurons of MoE layers `layers` into `dir`'s shards (widened first if new), as 4-bit; the bytes.
         pub fn write(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, c: cfg.Config, layers: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
             const d = c.hidden;
             const own = c.shared_width;
@@ -110,8 +105,7 @@ pub fn Io(comptime core: type) type {
             }
         };
 
-        /// One shared expert's up_proj and down_proj written with `neurons` learned neurons after its `own` (`u` and
-        /// `v` [neurons, D], set to their 4-bit values) into `edits`; the bytes.
+        /// One shared expert's up_proj and down_proj with `neurons` learned after its `own`, into `edits`; the bytes.
         fn expert(arena: std.mem.Allocator, files: *Files, edits: *std.ArrayList(se.Replacement), base: []const u8, own: usize, neurons: usize, d: usize, u: []f32, v: []f32) !usize {
             const wide = own + neurons;
             var name: [128]u8 = undefined;

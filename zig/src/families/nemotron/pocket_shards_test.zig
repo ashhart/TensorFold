@@ -1,5 +1,4 @@
-//! The pocket in the shards: the first write widens the shared expert and tells config.json, the own neurons keep
-//! every byte, the learned ones read back as the 4-bit values handed back; a later write lands where they lie.
+//! The pocket in the shards: the first write widens and tells config.json, own bytes kept, later writes in place.
 const std = @import("std");
 const cfg = @import("config.zig");
 const pocket_shards = @import("pocket_shards.zig");

@@ -150,8 +150,7 @@ fn hasUnspaced(text: []const u8) bool {
     return false;
 }
 
-/// Ideographic and full-width punctuation (、。「」！？ and the like), and symbols and emoji (— … ✅): they part units as a
-/// space does, so "Ginger.✅" still says "Ginger".
+/// Ideographic and full-width punctuation, symbols and emoji part units as a space does: "Ginger.✅" says "Ginger".
 pub fn punctuation(c: u21) bool {
     return (c >= 0x3000 and c <= 0x303F) or (c >= 0xFF01 and c <= 0xFF0F) or (c >= 0xFF1A and c <= 0xFF20) or
         (c >= 0xFF3B and c <= 0xFF40) or (c >= 0xFF5B and c <= 0xFF65) or (c >= 0x2000 and c <= 0x2BFF) or
