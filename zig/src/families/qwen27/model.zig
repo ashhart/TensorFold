@@ -45,7 +45,8 @@ pub const Model = struct {
         errdefer m.checkpoint.deinit();
         const files = try core.checkpoint_host.shardFiles(a, io, dir);
         defer core.checkpoint_host.freeShardFiles(a, files);
-        for (files) |file| try m.checkpoint.addFileSelected(m.device, file, "", "language_model.");
+        // projections stay in the files until load repacks them: the weights live once, in their lane layouts
+        for (files) |file| try m.checkpoint.addFileSplit(m.device, file, "", "language_model.", wts.repacked);
         m.weights = try wts.load(a, m.device, &m.checkpoint, c);
         errdefer m.weights.deinit();
         m.kernels = .{ .allocator = a, .device = m.device };
@@ -60,6 +61,7 @@ pub const Model = struct {
             std.log.warn("qwen27: the Neural Engine's prompt share did not load ({s}); prompts run on the GPU alone", .{@errorName(err)});
             break :blk null;
         };
+        m.checkpoint.closeFiles();
         return m;
     }
 

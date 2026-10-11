@@ -95,6 +95,16 @@ pub fn main(init: std.process.Init) !void {
         try same(try run(a, io, plain, &prompt, count, true, null), &runner, prompt.len, &expected, &states, count);
     }
     std.debug.print("lane core: drafted, plain, sampled-at-0 and no-drafter streams at 1/2/7/16/17/33 equal plain greedy tokens and state\n", .{});
+    {
+        const q4 = try draft_graph.createQ4(a, model);
+        defer q4.deinit();
+        const draft4 = try lb.Draft.attach(a, &runner, q4, false);
+        defer draft4.deinit();
+        const back4 = try lb.Metal.init(a, &runner, draft4);
+        defer back4.deinit();
+        for (counts) |count| try same(try run(a, io, back4, &prompt, count, true, null), &runner, prompt.len, &expected, &states, count);
+    }
+    std.debug.print("a q4 drafter opened from its file (each linear read once, into its q4 copy) drafts streams equal to plain greedy\n", .{});
     var oracle = Oracle{ .a = a, .runner = &runner, .tokens = &expected, .prompt = prompt.len };
     draft.generation.proposer = .{ .ptr = &oracle, .call = Oracle.propose };
     defer draft.generation.proposer = null;
