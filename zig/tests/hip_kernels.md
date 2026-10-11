@@ -21,4 +21,6 @@ Build notes:
 
 - `-Dhipcc` and `-Dhip-include` as for `hip-gpu-test`.
 - `-Dhip-device-lib=<dir>` names ROCm's device bitcode directory. The default is `<rocm>/lib/llvm/amdgcn/bitcode`,
-  TheRock's layout; Arch's ROCm keeps it in `<rocm>/amdgcn/bitcode`.
+  TheRock's layout; Arch's ROCm keeps it in `<rocm>/amdgcn/bitcode`, and Ubuntu's packaged HIP in the LLVM clang
+  resource directory (`/usr/lib/llvm-21/lib/clang/21/amdgcn/bitcode` for HIP 7.1).
+- No kernel includes rocWMMA, so ROCm packages without its header (Ubuntu's HIP 7.1) build them too.
