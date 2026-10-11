@@ -85,6 +85,7 @@ pub fn Index(comptime Extra: type) type {
         nodes: std.ArrayList(Node) = .empty,
         free_nodes: std.ArrayList(u32) = .empty,
         by_digest: std.AutoHashMapUnmanaged(Digest, u32) = .empty,
+        dead: u32 = 0, // nodes dropped from `by_digest` since it was last rehashed
         entries: std.ArrayList(Entry) = .empty,
         free_entries: std.ArrayList(u32) = .empty,
         by_key: std.AutoHashMapUnmanaged(Digest, u32) = .empty,
@@ -259,10 +260,18 @@ pub fn Index(comptime Extra: type) type {
                     if (nd.prev_sib != none) x.nodes.items[nd.prev_sib].next_sib = nd.next_sib else x.nodes.items[nd.parent].first_child = nd.next_sib;
                     if (nd.next_sib != none) x.nodes.items[nd.next_sib].prev_sib = nd.prev_sib;
                 }
-                _ = x.by_digest.remove(nd.digest);
+                if (x.by_digest.remove(nd.digest)) x.dropped();
                 x.free_nodes.append(x.gpa, m) catch {};
                 m = nd.parent;
             }
+        }
+
+        /// std's tombstones never clear and keys fill 80 %: rehash at a tenth, so a tenth of the map always stays free.
+        fn dropped(x: *Self) void {
+            x.dead += 1;
+            if (@as(u64, x.dead) * 10 < x.by_digest.capacity()) return;
+            x.by_digest.rehash(std.hash_map.AutoContext(Digest){});
+            x.dead = 0;
         }
 
         /// The entry's tail matches the prompt there and the entry is shorter (its full pages matched by digest).
@@ -454,4 +463,24 @@ test "longest strict prefix, ties, tags and coverage" {
     chain(7, chat[0..150], 16, d[0..9]);
     try std.testing.expectEqual(@as(?u32, null), x.find(7, chat[0..150], d[0..9], .any));
     try std.testing.expectEqual(@as(u32, 1 + 6), x.by_digest.count()); // tag 8's root + its 6 full pages
+}
+
+test "a long run of turns saved and dropped leaves the page map free slots" {
+    const gpa = std.testing.allocator;
+    var x = T.init(gpa, 16);
+    defer x.deinit();
+    var live: std.ArrayList(u32) = .empty;
+    defer live.deinit(gpa);
+    var rng = std.Random.DefaultPrng.init(5);
+    for (0..3000) |i| {
+        // a chat's turn (its own pages), the oldest dropped once eight are kept: nodes come and go
+        const ids = try seq(gpa, 16 * 60, @intCast(i));
+        defer gpa.free(ids);
+        try live.append(gpa, try add(&x, 7, ids[0 .. 16 * (1 + rng.random().uintLessThan(usize, 60))], true, i));
+        if (live.items.len > 8) x.remove(live.orderedRemove(0));
+        const meta = x.by_digest.metadata orelse continue;
+        var free: usize = 0;
+        for (meta[0..x.by_digest.capacity()]) |m| free += @intFromBool(m.isFree());
+        try std.testing.expect(free * 10 >= x.by_digest.capacity());
+    }
 }
