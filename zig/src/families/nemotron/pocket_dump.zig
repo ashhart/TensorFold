@@ -1,5 +1,4 @@
-//! A lesson's read rows written out for study offline (TF_SLIDE_POCKET_DUMP=dir): every slot's input at each row, what
-//! each row is to the fact, and the examples the rows come from.
+//! A lesson's read rows written out for offline study (TF_SLIDE_POCKET_DUMP=dir): inputs, labels and examples.
 const std = @import("std");
 
 /// `bytes` written to `path`.
@@ -9,9 +8,7 @@ fn put(path: [:0]const u8, bytes: []const u8) !void {
     if (std.c.fwrite(bytes.ptr, 1, bytes.len, f) != bytes.len) return error.DumpWrite;
 }
 
-/// Pocket `p`'s read rows under `dir`, named for `tag`: the rows (bf16 [read, slots, D]), then as text their labels
-/// (kind, key or -1, example, row, token, the token before) and the examples (index, kind, start, decide, subject,
-/// value, ids).
+/// Pocket `p`'s read rows under `dir` for `tag`: bf16 [read, slots, D], then their labels and examples as text.
 pub fn write(p: anytype, dir: []const u8, tag: usize, d: usize) !void {
     const a = p.gpa;
     var path: [1024]u8 = undefined;

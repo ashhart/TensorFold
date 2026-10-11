@@ -43,6 +43,9 @@ pub const Mode = enum { auto, reply, subject };
 /// A neuron the open fact took.
 const Taken = struct { slot: usize, neuron: usize, key: Key };
 
+/// A neuron the open fact took, where it sits: its MoE layer, its index in that layer's pocket, its key.
+pub const Placed = struct { layer: usize, neuron: usize, key: Key };
+
 /// A neuron a fact took, the rows it was fitted to fire on (in `pos`), and its fact's subject token (keyed on it).
 const Learned = struct { slot: usize, neuron: usize, key: Key, start: usize, count: usize, subject: u32 };
 
@@ -496,6 +499,32 @@ pub fn Pocket(comptime T: type) type {
         /// Whether every held-out answer came back, as the last check found.
         pub fn recalled(p: *const Self) bool {
             return p.held.len > 0 and p.back == p.held.len;
+        }
+
+        /// Where the open fact's lesson stands: its phase, its unit `at` of `of` (0: unknown), its outputs' loss.
+        pub const Progress = struct { phase: @FieldType(Self, "phase"), at: usize = 0, of: usize = 0, loss: f32 = 0 };
+
+        pub fn progress(p: *const Self) Progress {
+            return switch (p.phase) {
+                .read => .{ .phase = .read, .at = p.at, .of = p.reads() },
+                .values => .{ .phase = .values, .at = p.v.round, .loss = p.v.running },
+                .check => .{ .phase = .check, .at = p.at, .of = p.held.len },
+                else => .{ .phase = p.phase },
+            };
+        }
+
+        /// The examples the read phase goes through: the fact's own, then every prompt its neurons stay silent on.
+        fn reads(p: *const Self) usize {
+            var n = p.answered.len + p.prompts.len + p.held.len;
+            for (p.steady) |xs| n += xs.len;
+            return n;
+        }
+
+        /// The open fact's neurons as placed, into `out` (the first of them when it is short); the ones written.
+        pub fn placed(p: *const Self, out: []Placed) []Placed {
+            const n = @min(out.len, p.taken.items.len);
+            for (p.taken.items[0..n], out[0..n]) |x, *o| o.* = .{ .layer = p.moe.items[x.slot], .neuron = x.neuron, .key = x.key };
+            return out[0..n];
         }
     };
 }

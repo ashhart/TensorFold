@@ -25,14 +25,16 @@ const bare_words = 12; // a bare answer's words at most, kept whole when the mod
 pub const Got = struct {
     entity: bool = false, // the fact is about someone or something in particular: its questions key on that subject
     words: []const []const u8 = &.{}, // the words its questions name that subject by (from the fact itself)
+    named: []const []const u8 = &.{}, // of those, its proper names, which a question must say when it has any
+    siblings: []const []const u8 = &.{}, // every fact told with it: a question one of them answers is theirs
     pairs: std.ArrayList(api.Example) = .empty,
-    thinking: std.ArrayList(?slide_think.Thinking) = .empty, // each pair's thinking answer, if the model wrote one that recalls
+    thinking: std.ArrayList(?api.Example) = .empty, // each pair's thinking answer: the recall line, then the answer
     refs: std.ArrayList(Held) = .empty,
     subjects: std.ArrayList(?[]const u8) = .empty,
 };
 
 /// A question written with its answer, for the fact's lists.
-const Written = struct { ex: api.Example, think: ?slide_think.Thinking, ref: Held, subject: ?[]const u8 };
+const Written = struct { ex: api.Example, think: ?api.Example, ref: Held, subject: ?[]const u8 };
 
 /// Each of `qs` the fact has not kept yet, written side by side (`write`), then kept in their order.
 pub fn take(srv: *Server, cx: *Cx, got: *Got, fact: []const u8, f: usize, qs: []const []const u8, end: []const u32, thinking: bool, document: bool, gone: anytype) !void {
@@ -49,6 +51,8 @@ pub fn take(srv: *Server, cx: *Cx, got: *Got, fact: []const u8, f: usize, qs: []
         srv: *Server,
         a: Allocator,
         words: []const []const u8,
+        named: []const []const u8,
+        siblings: []const []const u8,
         fact: []const u8,
         f: usize,
         qs: []const []const u8,
@@ -60,10 +64,10 @@ pub fn take(srv: *Server, cx: *Cx, got: *Got, fact: []const u8, f: usize, qs: []
 
         pub fn run(j: *const @This(), i: usize) !void {
             var jcx: Cx = .{ .a = j.a };
-            j.out[i] = try write(j.srv, &jcx, j.words, j.fact, j.f, j.qs[i], j.end, j.thinking, j.document, j.gone);
+            j.out[i] = try write(j.srv, &jcx, j.words, j.named, j.siblings, j.fact, j.f, j.qs[i], j.end, j.thinking, j.document, j.gone);
         }
     };
-    try side.each(fresh.items.len, &Job{ .srv = srv, .a = a, .words = got.words, .fact = fact, .f = f, .qs = fresh.items, .end = end, .thinking = thinking, .document = document, .gone = gone, .out = out });
+    try side.each(fresh.items.len, &Job{ .srv = srv, .a = a, .words = got.words, .named = got.named, .siblings = got.siblings, .fact = fact, .f = f, .qs = fresh.items, .end = end, .thinking = thinking, .document = document, .gone = gone, .out = out });
     for (out) |w| if (w) |x| {
         try got.pairs.append(a, x.ex);
         try got.thinking.append(a, x.think);
@@ -73,16 +77,15 @@ pub fn take(srv: *Server, cx: *Cx, got: *Got, fact: []const u8, f: usize, qs: []
 }
 
 /// A question written with the answer the model gives it from the fact, unless it gives that answer away or misses it.
-fn write(srv: *Server, cx: *Cx, words: []const []const u8, fact: []const u8, f: usize, q: []const u8, end: []const u32, thinking: bool, document: bool, gone: anytype) !?Written {
+fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []const u8, siblings: []const []const u8, fact: []const u8, f: usize, q: []const u8, end: []const u32, thinking: bool, document: bool, gone: anytype) !?Written {
     const a = cx.a;
     if (wording.yesNo(q) and wording.tells(fact, "", "", q)) {
         log.line("slide: \"{s}\" asks yes or no about the fact itself, so it is dropped", .{q});
         return null;
     }
-    // where an edit of the weights reads the question: its subject's last token, in every example of it; a fact about
-    // someone or something learns only from questions that name them, as ROME edits read the subject
-    const word = slide_subject.wordIn(words, q);
-    if (words.len > 0 and word.len == 0) {
+    // a fact about someone or something learns only from questions that name them (ROME reads the subject there)
+    const word = slide_subject.keyWord(words, named, q);
+    if (words.len > 0 and (word.len == 0 or !slide_subject.names(named, words, q))) {
         log.line("slide: \"{s}\" does not name the fact's subject, so it is dropped", .{q});
         return null;
     }
@@ -91,6 +94,7 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, fact: []const u8, f: 
         log.line("slide: \"{s}\" is not the user asking what the fact answers, so it is dropped", .{q});
         return null;
     }
+    if (try siblingAnswers(srv, cx, siblings, fact, q, gone)) return null;
     const note = if (document) try std.fmt.allocPrint(a, prompts.read_note, .{fact}) else try std.fmt.allocPrint(a, prompts.told_note, .{fact});
     const reply = try askBase(srv, cx, note, q, 64, gone);
     const whole = std.mem.trim(u8, reply.content, " \t\r\n");
@@ -106,18 +110,18 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, fact: []const u8, f: 
     }
     const finished = answer.len == whole.len and std.mem.eql(u8, reply.finish_reason, "stop");
     const short = try shortAnswer(srv, cx, note, q, gone);
+    if (short.len > 0 and std.ascii.findIgnoreCase(q, short) != null) {
+        log.line("slide: \"{s}\" says its own answer ({s}), so it is dropped", .{ q, short });
+        return null;
+    }
     // where the answer says its value: the row before it, where value neurons put the value itself
     var ex = try example(srv, cx, a, null, q, answer, if (finished) end else &.{});
     ex.subject = try subjectRow(srv, cx, ex, word);
     ex.value = try valueRow(srv, cx, ex, short);
-    var think = if (thinking) try slide_think.thinkingAnswer(srv, cx, a, fact, q, short, document, gone) else null;
+    var think = if (thinking) try slide_think.thinkingAnswer(srv, cx, a, fact, q, ex.ids[ex.start..], document) else null;
     if (think) |*t| {
-        t.recall.subject = try subjectRow(srv, cx, t.recall, word);
-        t.recall.value = try valueRow(srv, cx, t.recall, short);
-        if (t.after) |*after| {
-            after.subject = try subjectRow(srv, cx, after.*, word);
-            after.value = try valueRow(srv, cx, after.*, short);
-        }
+        t.subject = try subjectRow(srv, cx, t.*, word);
+        t.value = try valueRow(srv, cx, t.*, short);
     }
     return .{ .ex = ex, .think = think, .ref = .{ .question = q, .answer = answer, .fact = f, .subject = word, .short = short }, .subject = if (word.len > 0) word else null };
 }
@@ -126,6 +130,72 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, fact: []const u8, f: 
 pub fn shortAnswer(srv: *Server, cx: *Cx, note: []const u8, question: []const u8, gone: anytype) ![]const u8 {
     const reply = try askBase(srv, cx, note, try std.fmt.allocPrint(cx.a, prompts.short_prompt, .{question}), 16, gone);
     return std.mem.trim(u8, reply.content, " \t\r\n\"*.");
+}
+
+/// Whether a fact told with `fact` answers `question` rather than it, as the model picks among those sharing a word.
+pub fn siblingAnswers(srv: *Server, cx: *Cx, siblings: []const []const u8, fact: []const u8, question: []const u8, gone: anytype) !bool {
+    const a = cx.a;
+    var list: std.ArrayList(u8) = .empty;
+    var listed: std.ArrayList([]const u8) = .empty;
+    var own: usize = 0; // the fact's own number in the list
+    for (siblings) |s| {
+        const mine = std.mem.eql(u8, s, fact);
+        if (!mine and (try restates(a, s, fact) or !wording.shares(s, question))) continue;
+        try listed.append(a, s);
+        if (mine) own = listed.items.len;
+        try list.print(a, "{d}. {s}\n", .{ listed.items.len, s });
+    }
+    if (listed.items.len == @intFromBool(own > 0)) return false;
+    if (own == 0) {
+        try listed.append(a, fact);
+        own = listed.items.len;
+        try list.print(a, "{d}. {s}\n", .{ own, fact });
+    }
+    const n = listed.items.len;
+    const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.siblings_prompt, .{ list.items, question }), 4, gone);
+    const said = std.mem.trim(u8, reply.content, " \t\r\n\"*.");
+    var digits: usize = 0;
+    while (digits < said.len and std.ascii.isDigit(said[digits])) digits += 1;
+    const picked = std.fmt.parseInt(usize, said[0..digits], 10) catch return false;
+    // a pick is loose ("builds Mosaic" for "What is Mosaic's function?"): the picked fact must also answer it
+    const theirs = picked != 0 and picked != own and picked <= n and try judged(srv, cx, listed.items[picked - 1], question, gone);
+    if (theirs) log.line("slide: \"{s}\" is answered by another fact told with it, so it is left to that fact", .{question});
+    return theirs;
+}
+
+/// Whether `a` and `b` say the same words of four letters or more ("X was founded by Y", "Y founded X"): one fact.
+fn restates(al: Allocator, a: []const u8, b: []const u8) !bool {
+    const wa = try longWords(al, a);
+    const wb = try longWords(al, b);
+    if (wa.len != wb.len) return false;
+    for (wa, wb) |x, y| if (!std.mem.eql(u8, x, y)) return false;
+    return true;
+}
+
+/// The words of four letters or more in `text`, lowercased, sorted, each once.
+fn longWords(al: Allocator, text: []const u8) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.tokenizeAny(u8, text, " \t\r\n,.!?;:\"'()");
+    while (it.next()) |w| if (w.len >= 4) try out.append(al, try std.ascii.allocLowerString(al, w));
+    std.mem.sort([]const u8, out.items, {}, struct {
+        fn lt(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lt);
+    var n: usize = 0;
+    for (out.items) |w| if (n == 0 or !std.mem.eql(u8, out.items[n - 1], w)) {
+        out.items[n] = w;
+        n += 1;
+    };
+    return out.items[0..n];
+}
+
+test "a fact told again the other way round is the same fact, another is not" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect(try restates(a, "Quillmoor Labs was founded by Odile Marchetti.", "Odile Marchetti founded Quillmoor Labs."));
+    try std.testing.expect(!try restates(a, "Quillmoor Labs was founded in 2017.", "Quillmoor Labs was founded in Sheffield."));
 }
 
 /// Whether the fact answers `question` as the model judges it.

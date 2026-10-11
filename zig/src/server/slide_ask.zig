@@ -36,8 +36,7 @@ pub fn example(srv: *Server, cx: *Cx, keep: Allocator, system: ?[]const u8, ques
     return .{ .ids = try std.mem.concat(keep, u32, &.{ head, body, end }), .start = @intCast(head.len), .decide = prompt.decideOf(srv, head) };
 }
 
-/// `question` as the model reads it when asked (after a system message when given), for a router: its prompt rows
-/// through the generation prompt only.
+/// `question` as the model reads it when asked (after a system message when given): its prompt rows only.
 pub fn promptOnly(srv: *Server, cx: *Cx, keep: Allocator, system: ?[]const u8, question: []const u8) !api.Example {
     const a = cx.a;
     var asked: std.ArrayList(Value) = .empty;
@@ -70,12 +69,12 @@ pub fn ask(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tok
     return chat.generate(srv, cx, prepared, null, gone);
 }
 
-/// One greedy reply as `ask` gives it, with no lesson acting: what writes a lesson must not hear the lessons already kept.
+/// One greedy reply as `ask` gives it, with no routed lesson acting: a lesson's writer hears none of them.
 pub fn askBase(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tokens: i64, gone: anytype) chat.Failure!chat.Reply {
     return askBaseAt(srv, cx, system, user, max_tokens, 0, gone);
 }
 
-/// `askBase` sampled at `temperature` (seeded by the prompt, so the same each time): other words than the greedy reply's.
+/// `askBase` sampled at `temperature`, seeded by the prompt so it repeats: other words than the greedy reply's.
 pub fn askBaseAt(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tokens: i64, temperature: f64, gone: anytype) chat.Failure!chat.Reply {
     const a = cx.a;
     var list: std.ArrayList(Value) = .empty;
