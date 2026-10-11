@@ -23,10 +23,10 @@ pub const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 /// Called before a finished stream leaves its slot, its state still standing there (the reply's prompt-cache keep).
 pub const Release = struct { ctx: *anyopaque, kept: *const fn (ctx: *anyopaque, s: *lanes.Stream, slot: u32) void };
 
-/// A slot's memory on its first use: `room` says whether `bytes` more fit, `added` takes the new buffers.
+/// A slot's memory on its first use: `room` says whether `bytes` more fit for stream `s`, `added` takes the new buffers.
 pub const Grow = struct {
     ctx: *anyopaque,
-    room: *const fn (ctx: *anyopaque, bytes: usize) bool,
+    room: *const fn (ctx: *anyopaque, bytes: usize, s: *const lanes.Stream) bool,
     added: *const fn (ctx: *anyopaque, buffers: []const mtl.Buffer) void,
 };
 
@@ -378,7 +378,7 @@ pub const Metal = struct {
         b.settle() catch {};
         b.dropRound();
         const slot = b.slotOf(s) orelse (b.freeSlot() orelse return error.NoFreeSlot);
-        try b.ready(slot);
+        try b.ready(slot, s);
         if (slot == 0) b.dropTree();
         b.owners[slot] = s;
         errdefer b.owners[slot] = null;

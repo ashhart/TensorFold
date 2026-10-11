@@ -104,14 +104,14 @@ pub fn restore(b: *Metal, slot: u32, st: *const q.snapshot.State) !void {
     try q.snapshot.restoreSlot(b.gpa, b.runner, slot, b.ringOf(slot), st);
 }
 
-/// A slot's K/V rows and taps ring, taken on its first use; error.LaneMemory when they do not fit yet.
-pub fn ready(b: *Metal, slot: u32) !void {
+/// A slot's K/V rows and taps ring, taken on its first use by `s`; error.LaneMemory when they do not fit yet.
+pub fn ready(b: *Metal, slot: u32, s: *const lanes.Stream) !void {
     const kv = slot >= b.runner.ready;
     const ring_missing = b.draft != null and slot > 0 and b.rings[slot] == null;
     if (!kv and !ring_missing) return;
     const ring_bytes: usize = if (b.draft) |d| @as(usize, d.model.ring().window) * d.model.ring().stride else 0;
     const need = (if (kv) b.runner.slotBytes() else 0) + (if (ring_missing) ring_bytes else 0);
-    if (b.grow) |g| if (!g.room(g.ctx, need)) return error.LaneMemory;
+    if (b.grow) |g| if (!g.room(g.ctx, need, s)) return error.LaneMemory;
     var added: std.ArrayList(mtl.Buffer) = .empty;
     defer added.deinit(b.gpa);
     try added.appendSlice(b.gpa, try b.runner.ensure(slot));

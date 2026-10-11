@@ -178,6 +178,18 @@ pub const Store = struct {
         return s.budget -| s.held -| s.spare();
     }
 
+    /// Kept states free their storage, least valuable first and never `restoring`, until `left.fits()`; false if it never does.
+    pub fn giveBack(s: *Store, restoring: ?Saved, prompt: []const u32, left: anytype) bool {
+        while (!left.fits()) {
+            const skip = for (s.entries.items) |e| {
+                if (restoring != null and e.saved == restoring.?) break e;
+            } else null;
+            s.remove(s.victimBut(skip, prompt) orelse return false);
+            s.counts.evicted += 1;
+        }
+        return true;
+    }
+
     /// Whether a state at `at` may start or end a prompt pass: anywhere, or a chunk start for planned families.
     fn usable(s: *const Store, at: u32, starts: []const u32) bool {
         return at > 0 and (!s.rules.planned or s.startAt(starts, at) == at);
@@ -558,6 +570,7 @@ fn floorStart(starts: []const u32, at: u32) u32 {
 test {
     _ = @import("prompt_cache_test.zig");
     _ = @import("prompt_cache_rewind_test.zig");
+    _ = @import("prompt_cache_give_test.zig");
     _ = @import("learned_fault_test.zig");
     _ = modes;
 }

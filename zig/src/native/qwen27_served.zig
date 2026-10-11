@@ -47,9 +47,14 @@ pub const Host = struct {
         return of(ptr).back.lone(s, hooks);
     }
 
-    /// A slot's first use: whether its memory fits beside everything taken so far and the margin.
-    fn roomFor(ptr: *anyopaque, bytes: usize) bool {
-        return room(of(ptr).model) >= bytes;
+    /// A slot's first use: whether its memory fits beside everything taken and the margin, kept states freed first.
+    fn roomFor(ptr: *anyopaque, bytes: usize, s: *const lanes.Stream) bool {
+        const h = of(ptr);
+        const store = if (h.cache) |*c| c else return room(h.model) >= bytes;
+        const held = store.held;
+        const ok = store.giveBack(s.reuse.saved, s.prompt(), Left{ .room = room(h.model), .store = store, .held = held, .bytes = bytes });
+        if (store.held < held) std.log.info("Qwen3.8-27B: kept prompt states gave {d:.1} GiB back for a stream's slot{s}", .{ cache_fit.gibs(held - store.held), if (ok) "" else ", not enough yet" });
+        return ok;
     }
 
     /// A new slot's buffers join the residency set, so the keepalive holds them wired with the rest.
@@ -110,6 +115,17 @@ fn room(model: *const q.model.Model) usize {
     return dev.maxWorkingSet() -| dev.allocated() -| (8 << 30);
 }
 
+/// A new slot's bytes against the room it found, plus the kept states' bytes freed since (their buffers' own sizes).
+const Left = struct {
+    room: usize,
+    store: *const pc.Store,
+    held: u64,
+    bytes: usize,
+    pub fn fits(l: Left) bool {
+        return l.room + (l.held - l.store.held) >= l.bytes;
+    }
+};
+
 /// One slot's caches at `context` tokens: its K/V rows, its taps ring when drafting, DeltaNet states and scratch.
 fn slotCost(model: *const q.model.Model, context: u32, drafting: bool) usize {
     const c = model.config;
@@ -148,7 +164,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     errdefer model.deinit();
     const capacity = if (o.context == 0) @min(model.config.max_position, 32768) else o.context;
     if (capacity == 0 or capacity > model.config.max_position) return error.ContextFull;
-    const per = slotCost(model, capacity, o.drafter != null);
+    const per = slotCost(model, capacity + lb.max_rows, o.drafter != null); // a last window's rows past prompt + max_tokens
     const left = room(model);
     const slots = fit(left, per, o.streams, o.streams_fixed) catch |err| {
         why.* = try std.fmt.allocPrint(a, "--parallel {d} needs {d:.1} GiB for its streams' caches at a {d}-token context, and this Mac leaves {d:.1} GiB beside the weights and an 8 GiB margin: serve --parallel {d}, or lower --context", .{ o.streams, cache_fit.gibs(per * o.streams), capacity, cache_fit.gibs(left), @max(1, left / per) });
@@ -161,7 +177,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     h.draft = null;
     h.cache = null;
     h.resident = null;
-    h.runner = try q.decode_round.Runner.initReady(gpa, model, slots, capacity, 1);
+    h.runner = try q.decode_round.Runner.initReady(gpa, model, slots, capacity + lb.max_rows, 1);
     errdefer h.runner.deinit();
     if (o.drafter) |d| h.draft = lb.Draft.open(gpa, io, model, &h.runner, d, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference) catch |err| {
         why.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B drafter cannot load {s} ({s})", .{ d, @errorName(err) });
