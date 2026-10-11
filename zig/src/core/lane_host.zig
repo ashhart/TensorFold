@@ -6,6 +6,7 @@ const pc = @import("prompt_cache.zig");
 const status = @import("lane_host_status.zig");
 const learn = @import("lane_host_learn.zig");
 const lone = @import("lane_host_lone.zig");
+const fill = @import("lane_host_fill.zig");
 const Allocator = std.mem.Allocator;
 const Id = api.Id;
 const Request = api.Request;
@@ -247,7 +248,7 @@ pub const LaneHost = struct {
         dropped.deinit(h.gpa);
         for (ids) |id| {
             for (h.admitted.items, 0..) |job, i| if (job.id == id) {
-                h.unfill(job);
+                fill.unfill(h, job);
                 if (!job.stream.finished) h.core.discard(&job.stream);
                 h.lock();
                 _ = h.admitted.orderedRemove(i);
@@ -348,17 +349,18 @@ pub const LaneHost = struct {
         return true;
     }
 
-    /// The oldest filling job's next prompt chunk: the other streams' rounds run between chunks, not after the prompt.
+    /// The next filling job's next prompt chunk: the other streams' rounds run between chunks, not after the prompt.
     fn fillOne(h: *LaneHost) void {
         if (h.filling.items.len == 0) return;
-        const job = h.filling.items[0];
+        const at = fill.next(h);
+        const job = h.filling.items[at];
         const first = !job.fill_began;
         job.fill_began = true;
         const done = h.core.fillStream(&job.stream, first) catch |e| {
             _ = switch (e) {
                 error.Cancelled => h.cancel(job),
                 error.LaneMemory => blk: {
-                    h.unfill(job);
+                    fill.unfill(h, job);
                     break :blk h.requeue(job);
                 },
                 else => h.drop(job, h.words(e)),
@@ -366,16 +368,9 @@ pub const LaneHost = struct {
             return;
         };
         if (!done) return;
-        _ = h.filling.orderedRemove(0);
+        _ = h.filling.orderedRemove(at);
         h.prefilled(job, job.began);
         if (h.deliver(job)) h.remove(job);
-    }
-
-    fn unfill(h: *LaneHost, job: *Job) void {
-        for (h.filling.items, 0..) |j, i| if (j == job) {
-            _ = h.filling.orderedRemove(i);
-            return;
-        };
     }
 
     /// A reply's grammar from the server's compiler (Info.structures engines get requests that carry one).
@@ -463,7 +458,7 @@ pub const LaneHost = struct {
     }
 
     pub fn remove(h: *LaneHost, job: *Job) void {
-        h.unfill(job);
+        fill.unfill(h, job);
         h.lock();
         defer h.unlock();
         for (h.admitted.items, 0..) |j, i| if (j == job) {
