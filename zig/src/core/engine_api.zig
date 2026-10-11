@@ -78,6 +78,8 @@ pub const Request = struct {
     structure: ?Structure = null,
     /// Stop a short exact cycle while the think block is open.
     loop_guard: bool = false,
+    /// The prompt row (the assistant header's last) where routed lessons decide whether they act (null: none acts).
+    decide: ?u32 = null,
     /// Logprob rows for each reply token with this many best tokens (0..20), when ``Info.logprobs``; null: none.
     logprobs: ?u8 = null,
 };
@@ -247,25 +249,41 @@ pub const Status = struct {
 
 pub const SubmitError = error{ Closed, Busy, InvalidSpans };
 
-/// A worked example for the learner: token ids whose answer starts at `start` (rows from start - 1 on predict it).
-pub const Example = struct { ids: []const u32, start: u32 };
+/// A worked example for the learner: token ids, the answer from `start`; `decide`: its assistant header's last row.
+pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none)
 
 /// One fact's lesson (Sliding Weights): answers, held-out answers, near misses, and prompts that must not move.
 pub const LearnRequest = struct {
     train: []const Example = &.{},
+    think: []const Example = &.{}, // the facts' answers with thinking on, learned beside `train` (one of each a step)
     held: []const Example = &.{},
     near: []const Example = &.{},
     keep: []const Example = &.{}, // answers of every kind this lesson's change must leave as they are
+    asked: []const Example = &.{}, // more wordings of the fact's questions, for its router (prompts only)
+    unasked: []const Example = &.{}, // questions it must not answer, for its router (prompts only)
+    kept: []const Example = &.{}, // questions the last lesson took, with the answers they had (a reroute's)
     undo: bool = false, // instead take the last lesson's change back, as if it never ran
     steps: u32 = 60, // bounded steps this time at most
     more: bool = false, // more steps on the last lesson's rows, which are not captured again
-    commit: bool = false, // the last lesson made a plain change of the model's weights, then checked
-    save: bool = false, // every lesson's weight change written into the model's own shards
+    reroute: bool = false, // the last lesson's router fitted again with `unasked` among what it must not take
+    drop: bool = false, // the last lesson taken out whole
+    save: bool = false, // every kept lesson written beside the model's shards, each with its router
 };
+
+/// A neuron a pocket lesson placed (Sliding Weights): its layer, its index in that layer's pocket, the row it keys on.
+pub const Neuron = struct { layer: u16, neuron: u16, key: NeuronKey };
+pub const NeuronKey = enum { reply, subject, value };
+
+/// A pocket lesson's stage, as it runs: its rows read, its neurons fitted, their outputs, its held-out answers judged.
+pub const LearnPhase = enum { reading, fitting, values, checking };
+
+/// Where a pocket lesson stands: its unit `at` of `of` (0: unknown), its outputs' loss, its neurons once placed.
+pub const LearnProgress = struct { phase: LearnPhase, at: u32 = 0, of: u32 = 0, loss: f32 = 0, neurons: []const Neuron = &.{} };
 
 /// A lesson's outcome in order, ending with `done` (a message says why it failed); slices live only during the call.
 pub const LearnEvent = union(enum) {
-    learned: struct { recalled: bool, steps: u32, loss: f32 },
+    learned: struct { recalled: bool, steps: u32, loss: f32, neurons: []const Neuron = &.{} }, // neurons: a pocket's
+    progress: LearnProgress,
     done: struct { message: []const u8 = "" },
 };
 

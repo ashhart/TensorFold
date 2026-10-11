@@ -112,6 +112,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
         return null;
     }
+    if (o.slide) if (try tf.shard_edit.plainShared(a, io, o.dir)) |name| {
+        problem.* = try std.fmt.allocPrint(a, "--slide adds learned neurons beside every shared expert, and {s} in {s} is unquantized, as TensorFold 1.0.3 to 1.0.5 saved their lessons: serve this folder without --slide (what it learned stays), or teach a fresh copy", .{ name, o.dir });
+        return null;
+    };
     if (o.slide) if (try tf.shard_edit.linked(a, io, o.dir)) |name| {
         problem.* = try std.fmt.allocPrint(a, "--slide rewrites the model's own files, and {s} in {s} is a link to data another file shares (a Hugging Face cache's blob, or a hard link), so learning would change that file too: serve a copy made with `cp -cRL` (an APFS clone that follows links)", .{ name, o.dir });
         return null;
@@ -143,6 +147,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .batch_rows = @min(128, @max(64, 4 * o.lanes)), // four rows a lane, so 32 and 64 sessions keep their drafts
     });
     errdefer h.metal.deinit();
+    nemotron.slide.loadLiving(gpa, io, h.metal) catch |e| {
+        problem.* = try std.fmt.allocPrint(a, "the native engine cannot read the saved lessons in {s} ({s})", .{ o.dir, @errorName(e) });
+        return null;
+    };
     if (h.metal.head != null) try nemotron.timing.measure(h.metal, io);
     const rows: u32 = if (h.metal.head != null) nemotron.backend.max_window else 1;
     h.cfg = try lanes.Config.init(gpa, h.metal.facts(), rows, rows - 1);

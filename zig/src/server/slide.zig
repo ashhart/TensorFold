@@ -7,6 +7,8 @@ const http_body = @import("http_body.zig");
 const routes = @import("routes.zig");
 const errors = @import("errors.zig");
 const teach = @import("slide_lesson.zig");
+const check = @import("slide_verify.zig");
+const log = @import("log.zig");
 const Gone = @import("openai.zig").Gone;
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
@@ -14,16 +16,38 @@ const Allocator = std.mem.Allocator;
 
 const page = @embedFile("slide.html");
 
+/// The page's scripts, each served at /slide/NAME.
+const scripts = [_]struct { []const u8, []const u8 }{
+    .{ "data.js", @embedFile("slide_data.js") },
+    .{ "panel.js", @embedFile("slide_panel.js") },
+    .{ "flat.js", @embedFile("slide_flat.js") },
+    .{ "scene.js", @embedFile("slide_scene.js") },
+    .{ "tower.js", @embedFile("slide_tower.js") },
+    .{ "fx.js", @embedFile("slide_fx.js") },
+    .{ "bloom.js", @embedFile("slide_bloom.js") },
+    .{ "layout.js", @embedFile("slide_layout.js") },
+};
+
 pub fn view(_: *Server, conn: *Conn, _: Allocator) void {
+    send(conn, "text/html; charset=utf-8", page);
+}
+
+/// One of the page's scripts by name, else the unknown path.
+pub fn script(_: *Server, conn: *Conn, a: Allocator, name: []const u8) void {
+    for (scripts) |x| if (std.mem.eql(u8, x[0], name)) return send(conn, "text/javascript; charset=utf-8", x[1]);
+    routes.unknown(conn, a);
+}
+
+fn send(conn: *Conn, kind: []const u8, body: []const u8) void {
     conn.startResponse(200, null) catch return;
-    conn.addHeader("Content-Type", "text/html; charset=utf-8") catch return;
+    conn.addHeader("Content-Type", kind) catch return;
     var len: [24]u8 = undefined;
-    conn.addHeader("Content-Length", std.fmt.bufPrint(&len, "{d}", .{page.len}) catch return) catch return;
-    conn.finish(page) catch {};
+    conn.addHeader("Content-Length", std.fmt.bufPrint(&len, "{d}", .{body.len}) catch return) catch return;
+    conn.finish(body) catch {};
 }
 
 pub fn graph(srv: *Server, conn: *Conn, a: Allocator) void {
-    const body = srv.slide.render(a) catch return refuse(conn, a, 500, "out of memory");
+    const body = srv.slide.render(a, folder(srv)) catch return refuse(conn, a, 500, "out of memory");
     conn.sendJson(200, body);
 }
 
@@ -45,7 +69,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     };
     const text = body.strField("text") orelse return refuse(conn, a, 400, "text is required");
     const source = body.strField("source") orelse "chat";
-    switch (run(srv, a, &.{})) {
+    switch (run(srv, a, &.{}, 0)) {
         .refused => |e| return switch (e) {
             error.Unsupported => refuse(conn, a, 501, "this engine does not learn: serve its model with --slide"),
             error.Busy, error.Closed => refuse(conn, a, 503, "the engine cannot take a learn request now"),
@@ -54,7 +78,6 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     }
     srv.teacher.learning.lockUncancelable(srv.io);
     defer srv.teacher.learning.unlock(srv.io);
-    if (srv.teacher.stuck) return refuse(conn, a, 503, "a lesson that did not come back could not be taken out: restart the server");
     sse.open(conn) catch return;
     var out: Out = .{ .conn = conn, .a = a };
     var cx: errors.Cx = .{ .a = a };
@@ -70,147 +93,142 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         id.* = srv.slide.add(fact, source, now(srv));
         out.event("fact", .{ .id = id.*, .text = fact });
     }
-    defer {
-        if (!srv.teacher.stuck) _ = run(srv, a, &.{ .save = true });
-    }
+    defer saveAll(srv, a);
     // each fact its own lesson and block, so each keeps a gate of its own
     for (facts, ids) |fact, id| {
         if (gone.check()) break;
         srv.slide.mark(id, .learning);
+        srv.slide.phase(id, .writing);
         out.event("learning", .{ .id = id });
         var kept = [1]bool{false};
-        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, gone) catch |e| {
+        const written = now(srv);
+        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, !std.mem.eql(u8, source, "chat"), facts, gone) catch |e| {
             missed(srv, &out, id, words(&cx, e));
             continue;
         }) orelse {
             missed(srv, &out, id, "too few clean answers to learn from");
             continue;
         };
-        var result = rounds(srv, a, &cx, plan, gone);
-        // clean rounds go on to the plain change and mining; the check after them decides keep or take out
-        if (result.why == null) commit(srv, a, &cx, plan, gone, &result);
-        const back = all(result.recalled);
-        if (!back) _ = takeOut(srv, a, &result);
+        log.line("slide: fact {d}'s lesson written in {d:.1} s", .{ id, seconds(srv, written) });
+        srv.slide.asked(id, questions(a, plan));
+        const result = rounds(srv, a, &cx, plan, gone, id);
+        const back = result.recalled.len == 1 and result.recalled[0];
+        if (result.why) |why| srv.slide.note(id, why);
         srv.slide.mark(id, if (back) .learned else .missed);
         if (result.why) |why| {
             out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps, .message = why });
         } else out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps });
-        if (srv.teacher.stuck) break;
     }
     sse.done(conn) catch {};
 }
 
-/// What a lesson's rounds left: which facts come back, the steps taken, and why they do not (null: not known).
-pub const Rounds = struct { recalled: []bool, steps: u32 = 0, why: ?[]const u8 = null };
+/// Rounds a lesson gets to bring its facts back when asked once, before it is given up.
+const give_up = 5;
 
-/// Whether every fact came back; a lesson whose facts could not be counted did not.
-pub fn all(recalled: []const bool) bool {
-    return recalled.len > 0 and std.mem.allEqual(bool, recalled, true);
-}
+/// What a lesson's rounds left: which facts come back, the steps taken, and why it stopped early (null: it did not).
+const Rounds = struct { recalled: []bool, steps: u32 = 0, why: ?[]const u8 = null };
 
-/// A lesson in checked rounds until every fact comes back; a round that loops or leaks ends it.
-fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone) Rounds {
+/// A lesson in checked rounds until its fact comes back; a question it took is handed back (a few times at most).
+fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone, id: u32) Rounds {
     var out: Rounds = .{ .recalled = a.alloc(bool, plan.facts.len) catch &.{} };
     @memset(out.recalled, false);
-    for (0..teach.rounds) |round| {
-        var request = plan.request;
+    var routed: u32 = 0;
+    var streak: u32 = 0; // rounds in a row whose held-out questions came back when asked
+    var ever = false; // a round whose held-out questions all came back when asked
+    for (0..teach.rounds + teach.reroutes) |round| {
+        const began = now(srv);
+        var request = plan.full;
         request.more = round > 0;
-        switch (run(srv, a, &request)) {
-            .learned => |l| out.steps += l.steps,
+        var held = false;
+        srv.slide.round(id, @intCast(round + 1));
+        switch (run(srv, a, &request, id)) {
+            .learned => |l| {
+                out.steps += l.steps;
+                held = l.recalled;
+            },
             .failed => |message| {
                 out.why = message;
                 return out;
             },
-            .refused => |e| {
-                out.why = @errorName(e);
-                return out;
-            },
-            .none => {
-                out.why = "the learner ended the round without a result";
-                return out;
-            },
+            else => return out,
         }
-        const verdict = teach.verify(srv, cx, plan, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
+        const learned = seconds(srv, began);
+        const checked = now(srv);
+        srv.slide.phase(id, .checking);
+        const verdict = check.verify(srv, cx, plan, held or round + 1 >= teach.rounds, gone) catch |e| check.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
+        srv.slide.checked(id, verdict.damage == null and std.mem.allEqual(bool, verdict.recalled, true));
+        log.line("slide: round {d}: {d} steps ({d:.1} s learning, {d:.1} s checking); the held-out answers {s} token for token, and {s} when asked", .{ round + 1, out.steps, learned, seconds(srv, checked), if (held) "come back" else "do not come back", if (std.mem.allEqual(bool, verdict.recalled, true)) "come back" else "do not come back" });
+        if (verdict.took) |took| {
+            if (routed == teach.reroutes) {
+                _ = run(srv, a, &.{ .drop = true }, 0);
+                srv.slide.placed(id, &.{});
+                out.why = std.fmt.allocPrint(a, "taken out: it kept answering questions about something else, last \"{s}\"", .{took.question}) catch "taken out: it kept answering questions about something else";
+                @memset(out.recalled, false);
+                return out;
+            }
+            routed += 1;
+            const back = teach.routed(srv, cx, took) catch |e| {
+                out.why = words(cx, e);
+                return out;
+            };
+            switch (run(srv, a, &.{ .unasked = &.{back.prompt}, .kept = &.{back.kept}, .reroute = true }, id)) {
+                .failed => |message| {
+                    out.why = message;
+                    return out;
+                },
+                else => {},
+            }
+            log.line("slide: \"{s}\" is handed back to the lesson, its answer to stay as it was", .{took.question});
+            srv.slide.note(id, std.fmt.allocPrint(a, "handed back to the lesson: \"{s}\"", .{took.question}) catch "");
+            continue;
+        }
         if (verdict.damage) |why| {
-            out.why = std.fmt.allocPrint(a, "in round {d}, {s}", .{ round + 1, why }) catch why;
-            @memset(out.recalled, false);
+            _ = run(srv, a, &.{ .undo = true }, 0);
+            srv.slide.placed(id, &.{});
+            @memset(out.recalled, false); // the undo took the whole fact out: nothing of it is kept
+            out.why = std.fmt.allocPrint(a, "round {d} taken back: {s}", .{ round + 1, why }) catch why;
             return out;
         }
         @memcpy(out.recalled, verdict.recalled);
-        if (all(out.recalled)) return out;
+        streak = if (std.mem.allEqual(bool, out.recalled, true)) streak + 1 else 0;
+        ever = ever or streak > 0;
+        // rounds that never once brought the fact back when asked do not start to: give up rather than learn on
+        if (!ever and round + 1 >= give_up) break;
+        // done once its answers come back token for token, or come back when asked two rounds running
+        if ((held or streak >= 2) and std.mem.allEqual(bool, out.recalled, true) and round + 1 >= teach.min_rounds) return out;
+    }
+    // it never came back when asked: nothing of it stays in the model
+    if (!std.mem.allEqual(bool, out.recalled, true)) {
+        _ = run(srv, a, &.{ .drop = true }, 0);
+        srv.slide.placed(id, &.{});
     }
     return out;
 }
 
-/// A lesson whose facts did not all come back, taken out whole before the save; false, and stuck, when its undo failed.
-pub fn takeOut(srv: *Server, a: Allocator, out: *Rounds) bool {
-    @memset(out.recalled, false);
-    const why = out.why orelse "it did not come back on its held-out questions";
-    out.why = why;
-    // with no round finished the save keeps nothing of it, and an undo could reach back into the lesson before
-    if (out.steps == 0) return true;
-    const failed: ?[]const u8 = switch (run(srv, a, &.{ .undo = true })) {
-        .none => null,
-        .learned => "the learner reported a lesson instead of taking one out",
-        .failed => |message| message,
-        .refused => |e| @errorName(e),
-    };
-    if (failed) |no| {
-        const said = "{s}; it could not be taken out ({s}), so nothing of this request is saved: restart the server";
-        out.why = std.fmt.allocPrint(a, said, .{ why, no }) catch why;
-        srv.teacher.stuck = true; // the lesson is still in the live weights, so no save may run until a restart
-        return false;
-    }
-    out.why = std.fmt.allocPrint(a, "taken out: {s}", .{why}) catch why;
-    return true;
+/// The wordings a lesson's checks ask: its held-out questions, then the ones it never learned.
+fn questions(a: Allocator, plan: teach.Plan) []const []const u8 {
+    const out = a.alloc([]const u8, plan.held.len + plan.probes.len) catch return &.{};
+    for (plan.held, out[0..plan.held.len]) |h, *q| q.* = h.question;
+    for (plan.probes, out[plan.held.len..]) |h, *q| q.* = h.question;
+    return out;
 }
 
-/// The lesson made a plain weight change, its moved near misses trained back, then checked again.
-fn commit(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone, out: *Rounds) void {
-    var request = plan.request;
-    request.commit = true;
-    if (!step(srv, a, &request, out)) return;
-    for (0..teach.mining_rounds) |_| {
-        if (gone.check()) break;
-        const moved = teach.mine(srv, cx, plan, gone) catch break;
-        const back = teach.recalledAll(srv, cx, plan, gone) catch break;
-        if (moved.len == 0 and back) break;
-        var near: std.ArrayList(api.Example) = .empty;
-        near.appendSlice(a, plan.request.near) catch break;
-        for (moved) |i| for (0..teach.mined_weight) |_| near.append(a, plan.request.near[i]) catch break;
-        var more = plan.request;
-        more.more = true;
-        more.near = near.items;
-        more.steps = teach.mining_steps;
-        if (!step(srv, a, &more, out)) return;
-    }
-    const verdict = teach.verify(srv, cx, plan, gone) catch |e| teach.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
-    if (verdict.damage) |why| {
-        out.why = std.fmt.allocPrint(a, "after the mining rounds, {s}", .{why}) catch why;
-        @memset(out.recalled, false);
-        return;
-    }
-    @memcpy(out.recalled, verdict.recalled);
-    if (!all(out.recalled)) out.why = "after the mining rounds, it did not come back on its held-out questions";
-}
-
-/// One round of the plain change through the learner; false (and why) when it did not run, which no fact survives.
-pub fn step(srv: *Server, a: Allocator, request: *const api.LearnRequest, out: *Rounds) bool {
-    out.why = switch (run(srv, a, request)) {
-        .learned => |l| {
-            out.steps += l.steps;
-            return true;
-        },
+/// Every kept lesson into the model's shards, timed, with the shards it changed.
+fn saveAll(srv: *Server, a: Allocator) void {
+    srv.slide.saving(folder(srv));
+    const began = now(srv);
+    const failed: ?[]const u8 = switch (run(srv, a, &.{ .save = true }, 0)) {
         .failed => |message| message,
-        .refused => |e| @errorName(e),
-        .none => "the learner ended the round without a result",
+        .refused => "the engine could not take the save",
+        else => null,
     };
-    @memset(out.recalled, false);
-    return false;
+    if (failed) |why| log.line("slide: the learned neurons could not be saved into the model's files: {s}", .{why});
+    srv.slide.saveEnded(folder(srv), seconds(srv, began), failed);
 }
 
 /// A fact the lesson could not learn, and why.
 fn missed(srv: *Server, out: *Out, id: u32, why: []const u8) void {
+    srv.slide.note(id, why);
     srv.slide.mark(id, .missed);
     out.event("learned", .{ .id = id, .recalled = false, .message = why });
 }
@@ -222,8 +240,8 @@ const Outcome = union(enum) {
     refused: api.LearnError,
 };
 
-/// One lesson through the engine's learner, waited for to its end.
-fn run(srv: *Server, a: Allocator, request: *const api.LearnRequest) Outcome {
+/// One lesson through the engine's learner, waited for to its end; fact `id`'s progress and neurons go to the graph.
+fn run(srv: *Server, a: Allocator, request: *const api.LearnRequest, id: u32) Outcome {
     var box: Box = .{ .io = srv.io, .gpa = srv.gpa };
     defer box.deinit();
     srv.engine.learn(request, box.sink()) catch |e| return .{ .refused = e };
@@ -234,12 +252,21 @@ fn run(srv: *Server, a: Allocator, request: *const api.LearnRequest) Outcome {
         const finished = box.take(&batch);
         for (batch.items) |c| {
             switch (c.kind) {
-                .learned => outcome = .{ .learned = .{ .recalled = c.recalled, .steps = c.steps } },
+                .learned => {
+                    outcome = .{ .learned = .{ .recalled = c.recalled, .steps = c.steps } };
+                    if (id != 0) srv.slide.placed(id, c.neurons);
+                },
+                .progress => if (id != 0) {
+                    var p = c.progress;
+                    p.neurons = c.neurons;
+                    srv.slide.progress(id, p);
+                },
                 .done => if (c.text.len > 0) {
                     outcome = .{ .failed = a.dupe(u8, c.text) catch "the learner failed" };
                 },
             }
             srv.gpa.free(c.text);
+            srv.gpa.free(c.neurons);
         }
         batch.clearRetainingCapacity();
         if (finished) return outcome;
@@ -283,6 +310,16 @@ fn now(srv: *Server) i64 {
     return @intCast(@divTrunc(std.Io.Clock.real.now(srv.io).toNanoseconds(), std.time.ns_per_ms));
 }
 
+/// Seconds since `since` (from `now`).
+fn seconds(srv: *Server, since: i64) f64 {
+    return @as(f64, @floatFromInt(now(srv) - since)) / 1000;
+}
+
+/// The model's folder, whose layers and shards the view shows (null: unknown).
+fn folder(srv: *Server) ?[]const u8 {
+    return if (srv.config.model_dir.len == 0) null else srv.config.model_dir;
+}
+
 fn refuse(conn: *Conn, a: Allocator, code: u16, message: []const u8) void {
     const o = json.newObject(a) catch return;
     o.put(a, "message", .{ .string = message }) catch return;
@@ -301,7 +338,7 @@ const Box = struct {
     events: std.ArrayList(Copy) = .empty,
     done: bool = false,
 
-    const Copy = struct { kind: std.meta.Tag(api.LearnEvent), text: []const u8 = "", recalled: bool = false, steps: u32 = 0 };
+    const Copy = struct { kind: std.meta.Tag(api.LearnEvent), text: []const u8 = "", recalled: bool = false, steps: u32 = 0, progress: api.LearnProgress = .{ .phase = .reading }, neurons: []const api.Neuron = &.{} };
 
     fn sink(b: *Box) api.LearnSink {
         return .{ .ctx = b, .event = onEvent };
@@ -314,12 +351,21 @@ const Box = struct {
             .learned => |l| {
                 c.recalled = l.recalled;
                 c.steps = l.steps;
+                c.neurons = b.gpa.dupe(api.Neuron, l.neurons) catch &.{};
+            },
+            .progress => |p| {
+                c.progress = p;
+                c.progress.neurons = &.{};
+                c.neurons = b.gpa.dupe(api.Neuron, p.neurons) catch &.{};
             },
             .done => |d| c.text = b.gpa.dupe(u8, d.message) catch "",
         }
         b.mutex.lockUncancelable(b.io);
         defer b.mutex.unlock(b.io);
-        b.events.append(b.gpa, c) catch b.gpa.free(c.text);
+        b.events.append(b.gpa, c) catch {
+            b.gpa.free(c.text);
+            b.gpa.free(c.neurons);
+        };
         if (e.* == .done) b.done = true;
         b.cond.signal(b.io);
     }
@@ -335,7 +381,10 @@ const Box = struct {
     }
 
     fn deinit(b: *Box) void {
-        for (b.events.items) |c| b.gpa.free(c.text);
+        for (b.events.items) |c| {
+            b.gpa.free(c.text);
+            b.gpa.free(c.neurons);
+        }
         b.events.deinit(b.gpa);
     }
 };

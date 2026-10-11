@@ -35,26 +35,27 @@ pub fn main(init: std.process.Init) !void {
     @memset(first_candidates, 0);
     for (0..m.config.layers * block) |q| first_candidates[q * nm.adapters.candidates + q % block] = 1;
     try t.sites.open(first_candidates);
-    for (t.sites.list) |*site| site.gate(0).* = -2;
     t.sites.attach(&m.weights, true);
+    var turn: nm.lesson_route.Turn = .{ .decide = start - 4 }; // the block acts on every row after its decision row
+    turn.bits.set(0);
     const first = t.sites.first();
     for (t.sites.list) |*site| for (site.b.slice(f32, max_rank * site.out)[first * site.out ..][0 .. block * site.out]) |*v| {
         v.* = (rng.float(f32) * 2 - 1) * 1e-3;
     };
-    _ = try t.step(&ids, start, .loss);
+    _ = try t.step(&ids, start, .loss, turn);
     const f0 = std.Io.Clock.awake.now(init.io);
-    const plain = (try t.step(&ids, start, .loss)).loss;
+    const plain = (try t.step(&ids, start, .loss, turn)).loss;
     const forward_ms = @as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).toNanoseconds() - f0.toNanoseconds())) / 1e6;
     std.debug.print("forward and loss alone {d:.1} ms, GPU {d:.1} ms\n", .{ forward_ms, b.last_ms });
     const t0 = std.Io.Clock.awake.now(init.io);
-    const with_grad = (try t.step(&ids, start, .grad)).loss;
+    const with_grad = (try t.step(&ids, start, .grad, turn)).loss;
     const ms = @as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).toNanoseconds() - t0.toNanoseconds())) / 1e6;
     std.debug.print("loss {d:.5} (with gradients {d:.5}), a step with gradients {d:.1} ms, GPU {d:.1} ms\n", .{ plain, with_grad, ms, b.last_ms });
     if (std.c.getenv("TF_TRAIN_TIME_ONLY") != null) return;
     if (std.c.getenv("TF_TRAIN_PROFILE") != null) {
         var prof: nm.encoder.Profiler = .{ .queue = m.queue, .kernels = &m.kernels };
         t.profile = &prof;
-        _ = try t.step(&ids, start, .grad);
+        _ = try t.step(&ids, start, .grad, turn);
         t.profile = null;
         prof.report(1);
         return;
@@ -72,9 +73,9 @@ pub fn main(init: std.process.Init) !void {
         for (targets) |target| {
             const eta: f32 = @floatCast(target / norm2);
             for (bf, keep_b, gb) |*x, k, g| x.* = k - eta * g;
-            const down = (try t.step(&ids, start, .loss)).loss;
+            const down = (try t.step(&ids, start, .loss, turn)).loss;
             for (bf, keep_b, gb) |*x, k, g| x.* = k + eta * g;
-            const up = (try t.step(&ids, start, .loss)).loss;
+            const up = (try t.step(&ids, start, .loss, turn)).loss;
             @memcpy(bf, keep_b);
             const measured = (up - down) / 2;
             const ratio = measured / target;

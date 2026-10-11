@@ -323,6 +323,7 @@ pub const LaneHost = struct {
                 return h.drop(job, if (e == error.OutOfMemory) "out of memory" else "the reply's grammar could not start (xgrammar)");
             } else null,
             .decode_spans = h.spans(r),
+            .decide = r.decide,
         }) catch {
             job.proposer.deinit();
             return h.drop(job, "out of memory");

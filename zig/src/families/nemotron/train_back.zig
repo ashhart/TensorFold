@@ -1,4 +1,4 @@
-//! Each kind of layer undone for one sequence: the gradient at its output, through its mixer, to its normed input.
+//! Each kind of layer undone over a pass's sequences: its output's gradient, through its mixer, to its normed input.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -7,21 +7,23 @@ const pre = @import("prefill.zig");
 const pl = @import("prefill_launch.zig");
 const ops = @import("train_ops.zig");
 const adapters = @import("adapters.zig");
+const Span = @import("train_mode.zig").Span;
+const Store = @import("train_prefix.zig").Store;
 
 const Buffer = mtl.Buffer;
 const At = pl.At;
 
-/// The f32 gradients a backward works in, sized for `rows` rows of the model (attention reads at most 256).
+/// The f32 gradients a backward works in: `rows` rows of a pass, `seq` of a sequence (its scan and attention).
 pub const Bufs = struct {
     g: Buffer, // [rows, D]: the residual's gradient
     dx: Buffer, // [rows, D]: the gradient at a mixer's normed input
     dxa: Buffer, // [rows, max_rank]
     d_upr: Buffer, // [rows, F]
     du: Buffer, // [rows, F]
-    dyp: Buffer, // [pairs, D]
+    dyp: Buffer, // [pairs, D], and 32 rows the experts' tiles read past the last pair
     dxp: Buffer, // [pairs, D]
     d_y1r: Buffer, // [pairs, W]
-    du1: Buffer, // [pairs, W]
+    du1: Buffer, // [pairs, W], likewise
     dyn: Buffer, // [rows, inner]
     ytot: Buffer, // [rows, inner]
     dytot: Buffer, // [rows, inner]
@@ -29,8 +31,7 @@ pub const Bufs = struct {
     ddt: Buffer, // [rows, heads]
     dact: Buffer, // [rows, conv]
     dproj: Buffer, // [rows, proj]
-    ckpt: Buffer, // [heads, rows / 16 + 1, dh * n]
-    states: Buffer, // [heads, 16, dh * n]
+    ckpt: Buffer, // [heads, rows / 8 + 1, dh * n]: the scan's state every 8 rows
     dbp: Buffer, // [rows, heads, n]
     dcp: Buffer, // [rows, heads, n]
     q: Buffer, // bf16 [rows, heads * hd]
@@ -43,9 +44,9 @@ pub const Bufs = struct {
     probs: Buffer, // [heads, rows, rows]
     dscores: Buffer, // [heads, rows, rows]
 
-    const names = .{ "g", "dx", "dxa", "d_upr", "du", "dyp", "dxp", "d_y1r", "du1", "dyn", "ytot", "dytot", "dt", "ddt", "dact", "dproj", "ckpt", "states", "dbp", "dcp", "q", "k", "v", "d_o", "dq", "dk", "dv", "probs", "dscores" };
+    const names = .{ "g", "dx", "dxa", "d_upr", "du", "dyp", "dxp", "d_y1r", "du1", "dyn", "ytot", "dytot", "dt", "ddt", "dact", "dproj", "ckpt", "dbp", "dcp", "q", "k", "v", "d_o", "dq", "dk", "dv", "probs", "dscores" };
 
-    pub fn init(device: mtl.Device, c: cfg.Config, rows: usize) !Bufs {
+    pub fn init(device: mtl.Device, c: cfg.Config, rows: usize, seq: usize) !Bufs {
         const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
         const d = c.hidden;
         const pairs = rows * c.top_k;
@@ -53,14 +54,14 @@ pub const Bufs = struct {
         const kw = c.kv_heads * c.head_dim;
         const state = c.mamba_head_dim * c.state;
         const bytes = [_]usize{
-            rows * d * 4,                                rows * d * 4,                   rows * adapters.max_rank * 4,       rows * c.shared_width * 4,
-            rows * c.shared_width * 4,                   pairs * d * 4,                  pairs * d * 4,                      pairs * c.expert_width * 4,
-            pairs * c.expert_width * 4,                  rows * c.inner() * 4,           rows * c.inner() * 4,               rows * c.inner() * 4,
-            rows * c.mamba_heads * 4,                    rows * c.mamba_heads * 4,       rows * c.convDim() * 4,             rows * c.projDim() * 4,
-            c.mamba_heads * (rows / 16 + 1) * state * 4, c.mamba_heads * 16 * state * 4, rows * c.mamba_heads * c.state * 4, rows * c.mamba_heads * c.state * 4,
-            rows * qw * 2,                               rows * kw * 2,                  rows * kw * 2,                      rows * qw * 4,
-            rows * qw * 4,                               rows * kw * 4,                  rows * kw * 4,                      c.heads * rows * rows * 4,
-            c.heads * rows * rows * 4,
+            rows * d * 4,                              rows * d * 4,                       rows * adapters.max_rank * 4,       rows * c.shared_width * 4,
+            rows * c.shared_width * 4,                 (pairs + 32) * d * 4,               pairs * d * 4,                      pairs * c.expert_width * 4,
+            (pairs + 32) * c.expert_width * 4,         rows * c.inner() * 4,               rows * c.inner() * 4,               rows * c.inner() * 4,
+            rows * c.mamba_heads * 4,                  rows * c.mamba_heads * 4,           rows * c.convDim() * 4,             rows * c.projDim() * 4,
+            c.mamba_heads * (seq / 8 + 1) * state * 4, rows * c.mamba_heads * c.state * 4, rows * c.mamba_heads * c.state * 4, rows * qw * 2,
+            rows * kw * 2,                             rows * kw * 2,                      rows * qw * 4,                      rows * qw * 4,
+            rows * kw * 4,                             rows * kw * 4,                      c.heads * seq * seq * 4,            c.heads * seq * seq * 4,
+            16 * 16 * 4,
         };
         var b: Bufs = undefined;
         var made: usize = 0;
@@ -90,6 +91,8 @@ pub const Layer = struct {
     gb: Buffer,
     first: usize,
     rows: usize,
+    spans: []const Span, // the pass's sequences: each its own scan, conv and attention
+    store: *const Store, // their kept prefixes' states
 };
 
 fn raw(t: [3]@import("../../core/checkpoint_metal.zig").Tensor) [3]At {
@@ -132,12 +135,32 @@ pub fn mamba(x: Layer, b: *Bufs, i: usize) void {
     o.product(b.g, m.out_proj, b.dyn, rows, c.hidden, c.inner(), false);
     if (x.w.layers[i].mamba.slide) |r| o.restBack(b.g, r, b.dyn, rows, c.hidden, c.inner());
     if (x.ad.rank > 0) o.adapterBack(x.ad, x.gb, x.first, b.dxa, s.ya, b.g, b.dyn, rows);
+    const xd = c.inner();
+    const cd = c.convDim();
+    const pd = c.projDim();
     o.mixer("tf_train_dt", &.{ At.of(s.proj), m.dt_bias, At.of(b.dt) }, shape, .{ h, rows, 1 }, .{ 64, 1, 1 });
-    o.mixer("tf_train_ssm_fwd", &.{ At.of(s.act), At.of(b.dt), m.a, m.d, At.of(b.ytot), At.of(b.ckpt) }, shape, .{ 1024 * h, 1, 1 }, .{ 1024, 1, 1 });
-    o.mixer2("tf_train_gate_back", &.{ At.of(b.ytot), At.of(s.proj), norm, At.of(b.dyn), At.of(b.dytot), At.of(b.dproj) }, shape, c.eps, .{ 256 * c.groups, rows, 1 }, .{ 256, 1, 1 });
-    o.mixer("tf_train_ssm_back", &.{ At.of(s.act), At.of(b.dt), m.a, m.d, At.of(b.dytot), At.of(b.ckpt), At.of(b.states), At.of(b.dact), At.of(b.dbp), At.of(b.dcp), At.of(b.ddt) }, shape, .{ 1024 * h, 1, 1 }, .{ 1024, 1, 1 });
+    // each sequence's scan from its kept prefix's state (else zero), its checkpoints kept until its backward read them
+    for (x.spans) |sp| {
+        var one = shape;
+        one.rows = @intCast(sp.rows);
+        const r = sp.at;
+        const init = if (sp.skip > 0) x.store.ssmAt(sp.slot, x.p.index[i]) else At.of(b.ckpt);
+        o.go("tf_train_ssm_fwd");
+        for ([_]At{ At.of(s.act).plus(r * cd * 2), At.of(b.dt).plus(r * h * 4), m.a, m.d, At.of(b.ytot).plus(r * xd * 4), At.of(b.ckpt) }, 0..) |t, k| o.e.buf(t.b, t.off, k);
+        o.e.bytes(one, 6);
+        o.e.buf(init.b, init.off, 7);
+        o.e.bytes(@as(u32, @intFromBool(sp.skip > 0)), 8);
+        o.e.run(.{ 1024 * h, 1, 1 }, .{ 1024, 1, 1 });
+        o.mixer2("tf_train_gate_back", &.{ At.of(b.ytot).plus(r * xd * 4), At.of(s.proj).plus(r * pd * 2), norm, At.of(b.dyn).plus(r * xd * 4), At.of(b.dytot).plus(r * xd * 4), At.of(b.dproj).plus(r * pd * 4) }, one, c.eps, .{ 256 * c.groups, sp.rows, 1 }, .{ 256, 1, 1 });
+        o.mixer("tf_train_ssm_back", &.{ At.of(s.act).plus(r * cd * 2), At.of(b.dt).plus(r * h * 4), m.a, m.d, At.of(b.dytot).plus(r * xd * 4), At.of(b.ckpt), At.of(b.dact).plus(r * cd * 4), At.of(b.dbp).plus(r * h * c.state * 4), At.of(b.dcp).plus(r * h * c.state * 4), At.of(b.ddt).plus(r * h * 4) }, one, .{ 1024 * h, 1, 1 }, .{ 1024, 1, 1 });
+    }
     o.mixer("tf_train_ssm_bc", &.{ At.of(b.dbp), At.of(b.dcp), At.of(b.dact) }, shape, .{ c.state, c.groups, rows }, .{ 128, 1, 1 });
-    o.mixer2("tf_train_conv_back", &.{ At.of(b.dact), At.of(s.conv), m.conv_w, m.conv_b, At.of(b.dproj) }, shape, @as(u32, @intCast(c.conv_kernel)), .{ c.convDim(), rows, 1 }, .{ 256, 1, 1 });
+    for (x.spans) |sp| {
+        var one = shape;
+        one.rows = @intCast(sp.rows);
+        const r = sp.at;
+        o.mixer2("tf_train_conv_back", &.{ At.of(b.dact).plus(r * cd * 4), At.of(s.conv).plus(r * cd * 2), m.conv_w, m.conv_b, At.of(b.dproj).plus(r * pd * 4) }, one, @as(u32, @intCast(c.conv_kernel)), .{ cd, sp.rows, 1 }, .{ 256, 1, 1 });
+    }
     o.mixer("tf_train_dt_back", &.{ At.of(s.proj), m.dt_bias, At.of(b.ddt), At.of(b.dproj) }, shape, .{ h, rows, 1 }, .{ 64, 1, 1 });
     o.product(b.dproj, m.in_proj, b.dx, rows, c.projDim(), c.hidden, false);
 }
@@ -158,9 +181,22 @@ pub fn attention(x: Layer, b: *Bufs, i: usize) void {
     o.product(b.g, a.o, b.d_o, rows, c.hidden, qw, false);
     if (x.w.layers[i].attention.slide) |r| o.restBack(b.g, r, b.d_o, rows, c.hidden, qw);
     if (x.ad.rank > 0) o.adapterBack(x.ad, x.gb, x.first, b.dxa, s.ya, b.g, b.d_o, rows);
-    const heads: ops.Heads = .{ .rows = @intCast(rows), .heads = @intCast(c.heads), .kv_heads = @intCast(c.kv_heads), .dim = @intCast(c.head_dim), .scale = @floatCast(1 / @sqrt(@as(f64, @floatFromInt(c.head_dim)))) };
-    o.mixer("tf_train_attn_q", &.{ At.of(b.q), At.of(b.k), At.of(b.v), At.of(b.d_o), At.of(b.probs), At.of(b.dscores), At.of(b.dq) }, heads, .{ 256 * c.heads, rows, 1 }, .{ 256, 1, 1 });
-    o.mixer("tf_train_attn_kv", &.{ At.of(b.q), At.of(b.d_o), At.of(b.probs), At.of(b.dscores), At.of(b.dk), At.of(b.dv) }, heads, .{ c.head_dim * c.kv_heads, rows, 1 }, .{ c.head_dim, 1, 1 });
+    // each sequence's causal attention undone on its own rows, over its kept prefix's keys and its own
+    for (x.spans) |sp| {
+        const heads: ops.Heads = .{ .rows = @intCast(sp.rows), .heads = @intCast(c.heads), .kv_heads = @intCast(c.kv_heads), .dim = @intCast(c.head_dim), .scale = @floatCast(1 / @sqrt(@as(f64, @floatFromInt(c.head_dim)))), .prefix = @intCast(sp.skip) };
+        const r = sp.at;
+        const q = At.of(b.q).plus(r * qw * 2);
+        const d_o = At.of(b.d_o).plus(r * qw * 4);
+        const pk = if (sp.skip > 0) x.store.keysAt(sp.slot, x.p.index[i], false) else At.of(b.k);
+        const pv = if (sp.skip > 0) x.store.keysAt(sp.slot, x.p.index[i], true) else At.of(b.v);
+        o.go("tf_train_attn_q");
+        for ([_]At{ q, At.of(b.k).plus(r * kw * 2), At.of(b.v).plus(r * kw * 2), d_o, At.of(b.probs), At.of(b.dscores), At.of(b.dq).plus(r * qw * 4) }, 0..) |t, k| o.e.buf(t.b, t.off, k);
+        o.e.bytes(heads, 7);
+        o.e.buf(pk.b, pk.off, 8);
+        o.e.buf(pv.b, pv.off, 9);
+        o.e.run(.{ 256 * c.heads, sp.rows, 1 }, .{ 256, 1, 1 });
+        o.mixer("tf_train_attn_kv", &.{ q, d_o, At.of(b.probs), At.of(b.dscores), At.of(b.dk).plus(r * kw * 4), At.of(b.dv).plus(r * kw * 4) }, heads, .{ c.head_dim * c.kv_heads, sp.rows, 1 }, .{ c.head_dim, 1, 1 });
+    }
     o.product(b.dq, a.q, b.dx, rows, qw, c.hidden, false);
     o.product(b.dk, a.k, b.dx, rows, kw, c.hidden, true);
     o.product(b.dv, a.v, b.dx, rows, kw, c.hidden, true);

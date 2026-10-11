@@ -25,6 +25,9 @@ pub const Why = struct {
     }
 };
 
+/// config.json's count of learned neurons at the end of every shared expert (other loaders read them as the expert's).
+pub const pocket_key = "tensorfold_learned_neurons";
+
 /// How the checkpoint stores its matrices: MLX affine 4-bit, or NVIDIA ModelOpt (FP8, NVFP4 or bf16, read per tensor).
 pub const Format = enum { mlx, modelopt };
 
@@ -44,7 +47,8 @@ pub const Config = struct {
     experts: usize,
     top_k: usize,
     expert_width: usize,
-    shared_width: usize,
+    shared_width: usize, // the shared expert's own neurons, learned ones (pocket) left out
+    pocket: usize = 0, // tensorfold_learned_neurons: learned neurons after the shared expert's own, in the same tensors
     routed_scaling: f32,
     norm_topk: bool = true,
     eps: f32,
@@ -243,6 +247,11 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
         .eps = if (o.get("layer_norm_epsilon")) |v| @floatCast(try number(v)) else 1e-5,
     };
     c.head_dim = if (o.get("head_dim")) |v| @intCast(v.integer) else c.hidden / c.heads;
+    if (o.get(pocket_key)) |v| {
+        if (v != .integer or v.integer < 0 or @as(usize, @intCast(v.integer)) >= c.shared_width or @mod(v.integer, 64) != 0) return error.BadConfig;
+        c.pocket = @intCast(v.integer);
+        c.shared_width -= c.pocket;
+    }
     if (o.get("norm_topk_prob")) |v| c.norm_topk = v.bool;
     // hybrid_override_pattern (one character a block) wins over layers_block_type, as the Python loader reads them
     if (o.get("hybrid_override_pattern")) |v| if (v == .string and v.string.len > 0) {

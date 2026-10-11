@@ -11,6 +11,18 @@ const Cx = errors.Cx;
 
 pub const Rendered = struct { ids: []const u32, history_len: usize = 0, rewind_len: usize = 0 };
 
+/// Where lessons decide to act on a reply: the row before the generation prompt's `<think>`, else before its last.
+pub fn decideOf(srv: *const Server, ids: []const u32) u32 {
+    if (srv.text.tokenId("<think>")) |open| {
+        var i = ids.len;
+        while (i > ids.len -| 8) {
+            i -= 1;
+            if (ids[i] == open and i > 0) return @intCast(i - 1);
+        }
+    }
+    return @intCast(ids.len -| 2);
+}
+
 pub const isTitle = messages_mod.isTitleRequest;
 
 /// ``render_prompt_ids``: messages normalized for this template, rendered, and a dangling ``<think>`` closed.

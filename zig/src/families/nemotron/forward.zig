@@ -12,6 +12,7 @@ const Sampling = @import("lanes").sampling.Sampling;
 const fullVocabulary = @import("lanes").gpu_full.fullVocabulary;
 const row = @import("../../core/row_projection.zig");
 const Masks = @import("../../core/grammar_mask.zig").Masks;
+const lesson_route = @import("lesson_route.zig");
 
 const Buffer = mtl.Buffer;
 pub const Enc = encoder.Enc;
@@ -59,6 +60,7 @@ pub const Forward = struct {
     members: usize = 0, // routed experts' member rows a pass (2 or 4: the shared-unpack kernels; 0: one at a time)
     round: ?layers.RoundArgs = null, // a GPU-side round's Mamba tables and routed rows, written on the GPU (one segment)
     masks: ?*const Masks = null, // structured output's bits (segments with a mask_row)
+    route: lesson_route.Route = .{}, // which rows carry the lessons (none set: no row does)
 
     pub fn mp(rows: usize) usize {
         return 16 * ((rows + 15) / 16);
@@ -149,7 +151,17 @@ pub const Forward = struct {
     }
 
     /// Embedding to the final norm over the segments' rows (ids in segment order), into scratch.x and scratch.xs.
-    pub fn body(self: Forward, e: *Enc, segs: []const Seg, ids: Buffer, ids_off: usize) void {
+    pub fn body(forward: Forward, e: *Enc, segs: []const Seg, ids: Buffer, ids_off: usize) void {
+        var self = forward;
+        if (self.route.count == 0) for (segs, 0..) |g, j| {
+            if (j == lesson_route.max_segments) break;
+            var first: usize = 0;
+            for (segs[0..j]) |h| first += h.rows;
+            self.route.add(first, g.rows, g.cache.len - g.cache.replay, if (g.cache.rid >= 0) g.cache.decide else lesson_route.none, @intCast(@max(g.cache.rid, 0)));
+        };
+        const lessons = layers.firstAdapter(self.w);
+        if (lessons) |ad| layers.latchAll(self.k, e, ad, &self.route, false);
+        defer if (lessons) |ad| layers.latchAll(self.k, e, ad, &self.route, true);
         const c = self.c;
         const s = self.s;
         const d = c.hidden;

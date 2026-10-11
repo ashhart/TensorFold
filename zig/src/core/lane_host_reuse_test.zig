@@ -291,7 +291,7 @@ test "a learn step that moves the weights drops every kept state: the next turn 
     try e.submit(1, &r1, .{ .ctx = &b1, .event = Box.event });
     try std.testing.expectEqual(Reason.length, b1.wait());
     var learned: Learned = .{};
-    const example: api.Example = .{ .ids = &.{ 1, 2, 3 }, .start = 2 };
+    const example: api.Example = .{ .ids = &.{ 1, 2, 3 }, .start = 2, .decide = 1 };
     const lesson: api.LearnRequest = .{ .train = &.{example} };
     try e.learn(&lesson, .{ .ctx = &learned, .event = Learned.event });
     while (true) {

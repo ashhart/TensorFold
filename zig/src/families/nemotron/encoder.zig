@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const kern = @import("kernels.zig");
+const pk = @import("prefill_kernels.zig");
 
 const Buffer = mtl.Buffer;
 
@@ -16,7 +17,7 @@ pub const Enc = struct {
     dropping: bool = false,
     gate: ?*Gate = null, // dispatches whose threadgroup counts the GPU writes (a GPU-side round's head levels)
 
-    /// A level's dispatches as whole threadgroups, their counts read from `live` (zeros: skipped) or recorded into `tmpl`.
+    /// A level's dispatches as whole threadgroups, counts read from `live` (zeros: skipped) or recorded into `tmpl`.
     pub const Gate = struct {
         live: Buffer,
         base: usize, // the 3-u32 entry this level's first dispatch reads
@@ -52,7 +53,7 @@ pub const Enc = struct {
         if (self.concurrent and !self.skip and self.dispatches > 0) self.e.barrier();
         self.skip = false;
         if (self.gate) |g| {
-            // whole threadgroups: a group that does not divide its grid halves until it does (these kernels index by thread)
+            // whole threadgroups: a group that does not divide its grid halves until it does (they index by thread)
             var size: [3]usize = undefined;
             var n: [3]u32 = undefined;
             for (0..3) |d| {
@@ -74,15 +75,38 @@ pub const Enc = struct {
 pub const Profiler = struct {
     queue: mtl.Queue,
     kernels: *const kern.Kernels,
+    prompt: ?*const pk.Kernels = null, // names the prompt kernels' dispatches too (else each counts as the last)
     cb: ?mtl.CommandBuffer = null,
     current: usize = 0,
-    ms: [kern.total]f64 = @splat(0),
-    calls: [kern.total]usize = @splat(0),
+    ms: [kern.total + others]f64 = @splat(0),
+    calls: [kern.total + others]usize = @splat(0),
+    other: [others]mtl.objc.Id = undefined, // the prompt kernels met so far, after `kernels`' own
+    met: usize = 0,
+
+    const others = 96;
 
     fn pick(self: *Profiler, p: mtl.Pipeline) void {
         for (self.kernels.pipelines, 0..) |q, i| if (q.id == p.id) {
             self.current = i;
+            return;
         };
+        if (self.prompt == null) return;
+        for (self.other[0..self.met], 0..) |id, i| if (id == p.id) {
+            self.current = kern.total + i;
+            return;
+        };
+        if (self.met == others) return;
+        self.other[self.met] = p.id;
+        self.current = kern.total + self.met;
+        self.met += 1;
+    }
+
+    /// Dispatch i's kernel name.
+    fn name(self: *const Profiler, i: usize) []const u8 {
+        if (i < kern.total) return kern.keyOf(i);
+        var it = self.prompt.?.pipelines.iterator();
+        while (it.next()) |e| if (e.value_ptr.id == self.other[i - kern.total]) return e.key_ptr.*;
+        return "?";
     }
 
     /// The encoder for the next dispatch, after the last one ran alone.
@@ -107,7 +131,7 @@ pub const Profiler = struct {
         std.debug.print("kernels alone, ms a step ({d} steps): total {d:.3}\n", .{ steps, total / @as(f64, @floatFromInt(steps)) });
         for (self.ms, self.calls, 0..) |v, n, i| {
             if (n == 0) continue;
-            std.debug.print("  {s:<24} {d:>4} calls a step {d:>8.3} ms {d:>7.2} us a call\n", .{ kern.keyOf(i), n / steps, v / @as(f64, @floatFromInt(steps)), v * 1e3 / @as(f64, @floatFromInt(n)) });
+            std.debug.print("  {s:<24} {d:>4} calls a step {d:>8.3} ms {d:>7.2} us a call\n", .{ self.name(i), n / steps, v / @as(f64, @floatFromInt(steps)), v * 1e3 / @as(f64, @floatFromInt(n)) });
         }
     }
 };

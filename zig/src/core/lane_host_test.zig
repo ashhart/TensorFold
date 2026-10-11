@@ -322,7 +322,7 @@ test "a learn request steps while the engine idles, its events in order; a host 
     var clock: lanes.fake.FixedClock = .{};
     var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
     defer core.deinit();
-    const example: api.Example = .{ .ids = &.{ 1, 2, 3 }, .start = 2 };
+    const example: api.Example = .{ .ids = &.{ 1, 2, 3 }, .start = 2, .decide = 0 };
     const learn: api.LearnRequest = .{ .train = &.{example} };
     var refused: LearnBox = .{};
     defer refused.tags.deinit(gpa);

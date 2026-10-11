@@ -1,275 +1,230 @@
-// Learning in the weights on CUDA: a low-rank change at each layer's output, the loss, and products run backward.
+// Learning in the weights on CUDA: train.metal's kernels one for one (a simdgroup a warp), on this engine's layouts.
 
 #include <cuda_bf16.h>
 #include <stdint.h>
 
 typedef __nv_bfloat16 bf16;
 
-namespace {
-
-constexpr int BLOCK = 16;  // ranks a lesson adds at each layer
-
-__device__ __forceinline__ float bf(bf16 v) { return __bfloat162float(v); }
-__device__ __forceinline__ float bits16(uint32_t h) { return __uint_as_float(h << 16); }
+__device__ __forceinline__ float f32(bf16 v) { return __bfloat162float(v); }
+__device__ __forceinline__ bf16 b16(float v) { return __float2bfloat16(v); }
 
 __device__ __forceinline__ float warp_sum(float v) {
 #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) v += __shfl_xor_sync(0xffffffffu, v, off);
+    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
     return v;
 }
 
 __device__ __forceinline__ float warp_max(float v) {
 #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, off));
+    for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
     return v;
 }
 
-// The sum over a block of `warps` warps, the same in every thread.
-__device__ __forceinline__ float block_sum(float v, float* scratch, int warps) {
+// The sum over a block of `groups` warps, the same in every thread.
+__device__ __forceinline__ float block_sum(float v, float* scratch, int groups) {
     const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
     v = warp_sum(v);
     if (lane == 0) scratch[w] = v;
     __syncthreads();
-    v = warp_sum(lane < warps ? scratch[lane] : 0.0f);
+    v = warp_sum(lane < groups ? scratch[lane] : 0.0f);
     __syncthreads();
     return v;
 }
 
-__device__ __forceinline__ float block_max(float v, float* scratch, int warps) {
+__device__ __forceinline__ float block_max(float v, float* scratch, int groups) {
     const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
     v = warp_max(v);
     if (lane == 0) scratch[w] = v;
     __syncthreads();
-    v = warp_max(lane < warps ? scratch[lane] : -INFINITY);
+    v = warp_max(lane < groups ? scratch[lane] : -INFINITY);
     __syncthreads();
     return v;
 }
 
-// Block b of a change is open on a row whose cosine with its first direction reaches tau[b].
-__device__ __forceinline__ bool opens(float xa0, float xn, float tau, float unit) {
-    const float n = unit * xn;
-    return n > 0.0f && xa0 >= tau * sqrtf(n);
+__device__ __forceinline__ float silu(float v) { return v / (1.0f + expf(-v)); }
+
+__device__ __forceinline__ float silu_grad(float v) {
+    const float s = 1.0f / (1.0f + expf(-v));
+    return s * (1.0f + v * (1.0f - s));
 }
 
-}  // namespace
+__device__ __forceinline__ float softplus(float v) { return v > 20.0f ? v : log1pf(expf(v)); }
 
-// xa[r, q] = x[r] . a[q] for the 16 ranks of block blockIdx.x, rows of tile blockIdx.y; block 0 also xn[r] = |x[r]|^2.
-extern "C" __global__ void __launch_bounds__(256) tf_slide_xa(const bf16* __restrict__ x, int x_stride, const float* __restrict__ a,
-                                                              const uint32_t* __restrict__ rank, float* __restrict__ xa,
-                                                              float* __restrict__ xn, int rows, int in, int max_rank) {
-    constexpr int CH = 256;  // inputs of a staged in shared memory at a time
-    __shared__ float as[BLOCK][CH];
-    const int b = blockIdx.x, r0 = blockIdx.y * 16, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    if (b * BLOCK >= static_cast<int>(*rank)) return;
-    float acc[2][BLOCK], sq[2] = {0.0f, 0.0f};
-#pragma unroll
-    for (int h = 0; h < 2; ++h)
-#pragma unroll
-        for (int q = 0; q < BLOCK; ++q) acc[h][q] = 0.0f;
-    for (int i0 = 0; i0 < in; i0 += CH) {
-        const int n = min(CH, in - i0);
-        __syncthreads();
-        for (int c = threadIdx.x; c < BLOCK * CH; c += 256) {
-            const int q = c / CH, i = c % CH;
-            as[q][i] = i < n ? a[static_cast<size_t>(b * BLOCK + q) * in + i0 + i] : 0.0f;
-        }
-        __syncthreads();
-#pragma unroll
-        for (int h = 0; h < 2; ++h) {
-            const int r = r0 + warp + 8 * h;
-            if (r >= rows) continue;
-            const bf16* xr = x + static_cast<size_t>(r) * x_stride + i0;
-            for (int i = lane; i < n; i += 32) {
-                const float v = bf(xr[i]);
-                sq[h] += v * v;
-#pragma unroll
-                for (int q = 0; q < BLOCK; ++q) acc[h][q] += v * as[q][i];
-            }
-        }
-    }
-#pragma unroll
-    for (int h = 0; h < 2; ++h) {
-        const int r = r0 + warp + 8 * h;
-        if (r >= rows) continue;
-#pragma unroll
-        for (int q = 0; q < BLOCK; ++q) {
-            const float s = warp_sum(acc[h][q]);
-            if (lane == 0) xa[static_cast<size_t>(r) * max_rank + b * BLOCK + q] = s;
-        }
-        const float s = warp_sum(sq[h]);
-        if (lane == 0 && b == 0) xn[r] = s;
-    }
-}
+// ---- the loss -------------------------------------------------------------------------------------------------------
 
-// y[r] += scale sum_q xa[r, q] b[q] over the blocks open on row r; y row r at (r * row_mul + row_add) * y_stride.
-extern "C" __global__ void __launch_bounds__(256) tf_slide_out(const float* __restrict__ xa, const float* __restrict__ xn,
-                                                               const float* __restrict__ tau, const float* __restrict__ b,
-                                                               const uint32_t* __restrict__ rank, void* __restrict__ y, int y_f32,
-                                                               int y_stride, int row_mul, int row_add, int rows, int out, float scale,
-                                                               float unit, int max_rank) {
-    extern __shared__ float xs[];  // [16][rank]: the tile's rows of xa, closed blocks zeroed
-    const int r0 = blockIdx.y * 16, j = blockIdx.x * 256 + threadIdx.x;
-    const int rk = static_cast<int>(*rank), tile = min(16, rows - r0);
-    if (rk == 0) return;
-    for (int c = threadIdx.x; c < tile * rk; c += 256) {
-        const int r = c / rk, q = c % rk;
-        const float* row = xa + static_cast<size_t>(r0 + r) * max_rank;
-        xs[r * rk + q] = opens(row[q / BLOCK * BLOCK], xn[r0 + r], tau[q / BLOCK], unit) ? row[q] : 0.0f;
-    }
+// A row's softmax over bf16 logits: stats = (loss, target's probability), then in place (p - onehot) weight[r].
+extern "C" __global__ void __launch_bounds__(1024) tf_train_softmax(bf16* logits, const unsigned* targets, const float* weights,
+                                                                    float2* stats, int vocab) {
+    __shared__ float scratch[32];
+    const int r = blockIdx.x, t = threadIdx.x;
+    bf16* l = logits + (size_t)r * vocab;
+    float m = -INFINITY;
+    for (int v = t; v < vocab; v += 1024) m = fmaxf(m, f32(l[v]));
+    m = block_max(m, scratch, 32);
+    float s = 0;
+    for (int v = t; v < vocab; v += 1024) s += expf(f32(l[v]) - m);
+    s = block_sum(s, scratch, 32);
+    const unsigned target = targets[r];
+    const float lt = f32(l[target]);
+    if (t == 0) stats[r] = make_float2(logf(s) + m - lt, expf(lt - m) / s);
     __syncthreads();
-    if (j >= out) return;
-    float acc[16];
-#pragma unroll
-    for (int r = 0; r < 16; ++r) acc[r] = 0.0f;
-    for (int q = 0; q < rk; ++q) {
-        const float bq = b[static_cast<size_t>(q) * out + j];
-#pragma unroll
-        for (int r = 0; r < 16; ++r)
-            if (r < tile) acc[r] += xs[r * rk + q] * bq;
-    }
-#pragma unroll
-    for (int r = 0; r < 16; ++r) {
-        if (r >= tile) continue;
-        const size_t at = static_cast<size_t>((r0 + r) * row_mul + row_add) * y_stride + j;
-        if (y_f32) {
-            static_cast<float*>(y)[at] += scale * acc[r];
-        } else {
-            bf16* yb = static_cast<bf16*>(y);
-            yb[at] = __float2bfloat16_rn(bf(yb[at]) + scale * acc[r]);
-        }
-    }
+    const float w = weights[r];
+    for (int v = t; v < vocab; v += 1024) l[v] = b16((expf(f32(l[v]) - m) / s - (v == (int)target ? 1.0f : 0.0f)) * w);
 }
 
-// A window's xa (rows <= 16): a warp a (rank q, row r), x[r] . a[q] over every input; q = 0's warps also xn[r].
-extern "C" __global__ void __launch_bounds__(256) tf_slide_xa_rows(const bf16* __restrict__ x, int x_stride, const float* __restrict__ a,
-                                                                   const uint32_t* __restrict__ rank, float* __restrict__ xa,
-                                                                   float* __restrict__ xn, int in, int max_rank) {
-    const int q = blockIdx.x * 8 + (threadIdx.x >> 5), r = blockIdx.y, lane = threadIdx.x & 31;
-    if (q >= static_cast<int>(*rank)) return;
-    const bf16* xr = x + static_cast<size_t>(r) * x_stride;
-    const float* aq = a + static_cast<size_t>(q) * in;
-    float s = 0.0f, n = 0.0f;
-    for (int i = lane; i < in; i += 32) {
-        const float v = bf(xr[i]);
-        s += v * aq[i];
+// g[r] += s w dx - s^3 h (w dx . h) / dim: a row's input RMS norm undone onto the residual's gradient; 256 a row.
+extern "C" __global__ void __launch_bounds__(256) tf_train_rms_back(const bf16* h, const bf16* w, const float* dx, float* g, int dim,
+                                                                   float eps) {
+    __shared__ float scratch[32];
+    const int r = blockIdx.x, t = threadIdx.x;
+    const bf16* hr = h + (size_t)r * dim;
+    const float* dr = dx + (size_t)r * dim;
+    float sq = 0, dot = 0;
+    for (int j = t; j < dim; j += 256) {
+        const float v = f32(hr[j]);
+        sq += v * v;
+        dot += f32(w[j]) * dr[j] * v;
+    }
+    sq = block_sum(sq, scratch, 8);
+    dot = block_sum(dot, scratch, 8);
+    const float s = rsqrtf(sq / (float)dim + eps), k = s * s * s * dot / (float)dim;
+    for (int j = t; j < dim; j += 256) g[(size_t)r * dim + j] += s * f32(w[j]) * dr[j] - k * f32(hr[j]);
+}
+
+// ---- the low-rank change --------------------------------------------------------------------------------------------
+
+// xa[r, q] = x[r] . a[q] and xn[r] = |x[r]|^2 (x rows `x_stride` apart); a warp a (q, r), grid (32 rank / 256, rows).
+extern "C" __global__ void __launch_bounds__(256) tf_train_lora_in(const bf16* x, long long x_stride, const float* a, float* xa,
+                                                                  int rows, int n_in, int rank, float* xn) {
+    const int q = (blockIdx.x * 256 + threadIdx.x) >> 5, lane = threadIdx.x & 31, r = blockIdx.y;
+    if (q >= rank || r >= rows) return;
+    const bf16* xr = x + (size_t)r * x_stride;
+    float s = 0, n = 0;
+    for (int i = lane; i < n_in; i += 32) {
+        const float v = f32(xr[i]);
+        s += v * a[(size_t)q * n_in + i];
         n += v * v;
     }
     s = warp_sum(s);
     n = warp_sum(n);
-    if (lane == 0) xa[static_cast<size_t>(r) * max_rank + q] = s;
+    if (lane == 0) xa[(size_t)r * rank + q] = s;
     if (lane == 0 && q == 0) xn[r] = n;
 }
 
-// A window's y += scale xa b (rows <= 16): a lane a column, the ranks shared over 8 warps, summed in shared memory.
-extern "C" __global__ void __launch_bounds__(256) tf_slide_out_rows(const float* __restrict__ xa, const float* __restrict__ xn,
-                                                                    const float* __restrict__ tau, const float* __restrict__ b,
-                                                                    const uint32_t* __restrict__ rank, void* __restrict__ y, int y_f32,
-                                                                    int y_stride, int row_mul, int row_add, int rows, int out, float scale,
-                                                                    float unit, int max_rank) {
-    __shared__ float part[8][16][32];
-    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5, j = blockIdx.x * 32 + lane;
-    const int rk = static_cast<int>(*rank);
-    if (rk == 0) return;
-    float acc[16];
-#pragma unroll
-    for (int r = 0; r < 16; ++r) acc[r] = 0.0f;
-    if (j < out) {
-        for (int b0 = 0; b0 < rk; b0 += BLOCK) {
-            bool open[16];
-#pragma unroll
-            for (int r = 0; r < 16; ++r) {
-                const float* row = xa + static_cast<size_t>(r) * max_rank;
-                open[r] = r < rows && opens(row[b0], xn[r], tau[b0 / BLOCK], unit);
-            }
-            for (int q = b0 + w; q < b0 + BLOCK; q += 8) {
-                const float bq = b[static_cast<size_t>(q) * out + j];
-#pragma unroll
-                for (int r = 0; r < 16; ++r)
-                    if (open[r]) acc[r] += xa[static_cast<size_t>(r) * max_rank + q] * bq;
-            }
-        }
-    }
-#pragma unroll
-    for (int r = 0; r < 16; ++r) part[w][r][lane] = acc[r];
-    __syncthreads();
-    for (int c = threadIdx.x; c < rows * 32; c += 256) {
-        const int r = c / 32, l = c % 32, jj = blockIdx.x * 32 + l;
-        if (jj >= out) continue;
-        float s = 0.0f;
-#pragma unroll
-        for (int ww = 0; ww < 8; ++ww) s += part[ww][r][l];
-        const size_t at = static_cast<size_t>(r * row_mul + row_add) * y_stride + jj;
-        if (y_f32) {
-            static_cast<float*>(y)[at] += scale * s;
-        } else {
-            bf16* yb = static_cast<bf16*>(y);
-            yb[at] = __float2bfloat16_rn(bf(yb[at]) + scale * s);
-        }
-    }
-}
+// A pass's rows by stream: each segment's first row, rows, its decision row (an index in the pass) and its latch slot.
+struct Route {
+    unsigned count, known, whole, pad1; // known: every latch was set before the pass (a training example); whole: see the gate
+    int seg[8][4];
+};
 
-// Each row's closed blocks zeroed in xa, and gates[r, b] = 1 where block b is open on row r (else 0).
-extern "C" __global__ void tf_train_gate(float* __restrict__ xa, const float* __restrict__ xn, const float* __restrict__ tau,
-                                         float* __restrict__ gates, int rows, int rank, int max_rank, float unit) {
-    const int b = blockIdx.x * blockDim.x + threadIdx.x, r = blockIdx.y, blocks = rank / BLOCK;
+// Block b acts on row r after its stream's decision row when its lesson chose to; the decision row adds to its score.
+extern "C" __global__ void tf_train_gate(float* xa, const float* xn, const float* tau, float* gates, int rows, int rank, int blocks,
+                                         int stride, float unit, Route route, const unsigned* latch, float* score) {
+    const int b = blockIdx.x * blockDim.x + threadIdx.x, r = blockIdx.y;
     if (b >= blocks || r >= rows) return;
-    float* row = xa + static_cast<size_t>(r) * max_rank + b * BLOCK;
-    const bool open = opens(row[0], xn[r], tau[b], unit);
-    gates[static_cast<size_t>(r) * (max_rank / BLOCK) + b] = open ? 1.0f : 0.0f;
+    int rel = -1;
+    unsigned slot = 0;
+    bool inside = false, settled = false;
+    for (unsigned s = 0; s < route.count; s++) {
+        const int* g = route.seg[s];
+        if (r >= g[0] && r < g[0] + g[1]) {
+            inside = true;
+            rel = r - g[2];
+            slot = (unsigned)g[3];
+            settled = route.known != 0 || g[2] < g[0];
+        }
+    }
+    float* row = xa + (size_t)r * rank + b * 16;
+    bool open = false;
+    if (route.whole != 0) {
+        // lessons that edit the weights: every row, a training pass's flagged lessons, an inference pass's all
+        open = inside && (route.known == 0 || latch[slot * stride + b] != 0);
+    } else if (rel == 0) {
+        // the decision row: this layer's part of the router score (its first direction's weighed cosine less tau) only
+        const float n = unit * xn[r];
+        if (n > 0) score[slot * stride + b] += row[0] * rsqrtf(n) - tau[b];
+    } else if (rel > 0 && settled) {
+        open = latch[slot * stride + b] != 0;
+    }
+    gates[(size_t)r * blocks + b] = open ? 1.0f : 0.0f;
     if (!open)
-        for (int q = 0; q < BLOCK; ++q) row[q] = 0.0f;
+        for (int q = 0; q < 16; q++) row[q] = 0;
 }
 
-// db[q, j] += scale sum_r xa[r, first + q] g[r, j]: the open block's gradient; grid (out / 256, 16).
-extern "C" __global__ void tf_train_lora_db(const float* __restrict__ xa, const float* __restrict__ g, float* __restrict__ db,
-                                            int rows, int out, int first, int max_rank, float scale) {
-    const int j = blockIdx.x * blockDim.x + threadIdx.x, q = blockIdx.y;
-    if (j >= out) return;
-    float s = 0.0f;
-    for (int r = 0; r < rows; ++r) s += xa[static_cast<size_t>(r) * max_rank + first + q] * g[static_cast<size_t>(r) * out + j];
-    db[static_cast<size_t>(q) * out + j] += scale * s;
+// A stream's lessons at its decision row: cleared before a pass; after it, those whose score reached `need` (0: never).
+extern "C" __global__ void tf_lesson_latch(float* score, const float* need, unsigned* latch, int slot, int blocks, int stride, int set) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    for (int b = 0; b < blocks; b++) {
+        latch[slot * stride + b] = set && need[b] > 0 && score[slot * stride + b] >= need[b] ? 1u : 0u;
+        if (!set) score[slot * stride + b] = 0;
+    }
 }
 
-// dxa[r, q] = scale (g[r] . b[q]) where q's block is open on row r, else 0; a warp a (q, r).
-extern "C" __global__ void tf_train_lora_dxa(const float* __restrict__ g, const float* __restrict__ b, const float* __restrict__ gates,
-                                             float* __restrict__ dxa, int rows, int out, int rank, int max_rank, float scale) {
-    const int q = (blockIdx.x * blockDim.x + threadIdx.x) / 32, r = blockIdx.y, lane = threadIdx.x & 31;
-    if (q >= rank || r >= rows) return;
-    float s = 0.0f;
-    for (int j = lane; j < out; j += 32) s += g[static_cast<size_t>(r) * out + j] * b[static_cast<size_t>(q) * out + j];
-    s = warp_sum(s);
-    if (lane == 0) dxa[static_cast<size_t>(r) * max_rank + q] = scale * s * gates[static_cast<size_t>(r) * (max_rank / BLOCK) + q / BLOCK];
+// y[r, j] += scale xa[r] . b[:, j] (y rows `y_stride` apart, bf16 or fp32); grid (out / 256, rows).
+extern "C" __global__ void __launch_bounds__(256) tf_train_lora_out(const float* xa, const float* b, void* y, long long y_stride,
+                                                                   int y_f32, int rows, int n_out, int rank, float scale) {
+    const int j = blockIdx.x * 256 + threadIdx.x, r = blockIdx.y;
+    if (j >= n_out || r >= rows) return;
+    float s = 0;
+    for (int q = 0; q < rank; q++) s += xa[(size_t)r * rank + q] * b[(size_t)q * n_out + j];
+    const size_t at = (size_t)r * y_stride + j;
+    if (y_f32)
+        static_cast<float*>(y)[at] += scale * s;
+    else
+        static_cast<bf16*>(y)[at] = b16(f32(static_cast<bf16*>(y)[at]) + scale * s);
 }
 
-// dx[r, i] += sum_q dxa[r, q] a[q, i]: the change's part of its site's input gradient; dx row r at r * dx_stride.
-extern "C" __global__ void tf_train_lora_dx(const float* __restrict__ dxa, const float* __restrict__ a, float* __restrict__ dx,
-                                            int dx_stride, int rows, int in, int rank, int max_rank) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x, r = blockIdx.y;
-    if (i >= in || r >= rows) return;
-    float s = 0.0f;
-    for (int q = 0; q < rank; ++q) s += dxa[static_cast<size_t>(r) * max_rank + q] * a[static_cast<size_t>(q) * in + i];
-    dx[static_cast<size_t>(r) * dx_stride + i] += s;
-}
-
-// p[r, j] = f[j] . x[r] / |x[r]|: a site's input row, made unit, along candidate direction j; a warp a (j, r).
-extern "C" __global__ void tf_train_project(const bf16* __restrict__ x, int x_stride, const float* __restrict__ f, float* __restrict__ p,
-                                            int rows, int in, int k) {
-    const int j = (blockIdx.x * blockDim.x + threadIdx.x) / 32, r = blockIdx.y, lane = threadIdx.x & 31;
+// p[r, j] = f[j] . x[r] / |x[r]|: a row's input, made unit, along each candidate direction; a warp a (j, r).
+extern "C" __global__ void __launch_bounds__(256) tf_train_project(const bf16* x, long long x_stride, const float* f, float* p,
+                                                                  int rows, int n_in, int k) {
+    const int j = (blockIdx.x * 256 + threadIdx.x) >> 5, lane = threadIdx.x & 31, r = blockIdx.y;
     if (j >= k || r >= rows) return;
-    float s = 0.0f, n = 0.0f;
-    for (int i = lane; i < in; i += 32) {
-        const float v = bf(x[static_cast<size_t>(r) * x_stride + i]);
-        s += v * f[static_cast<size_t>(j) * in + i];
+    const bf16* xr = x + (size_t)r * x_stride;
+    float s = 0, n = 0;
+    for (int i = lane; i < n_in; i += 32) {
+        const float v = f32(xr[i]);
+        s += v * f[(size_t)j * n_in + i];
         n += v * v;
     }
     s = warp_sum(s);
     n = warp_sum(n);
-    if (lane == 0) p[static_cast<size_t>(r) * k + j] = n > 0.0f ? s * rsqrtf(n) : 0.0f;
+    if (lane == 0) p[(size_t)r * k + j] = n > 0 ? s * rsqrtf(n) : 0;
 }
 
-// A sign from a row's place and a sketch column, +1 or -1 with even odds (the Metal learner's hash).
-__device__ __forceinline__ float coin(uint32_t row, uint32_t j, uint32_t seed) {
-    uint32_t h = row * 0x9E3779B9u + j * 0x7FEB352Du + seed;
+// db[q, j] += scale sum_r xa[r, first + q] g[r, j] for the open block's ranks; grid (out / 256, rank - first).
+extern "C" __global__ void __launch_bounds__(256) tf_train_lora_db(const float* xa, const float* g, float* db, int rows, int n_out,
+                                                                  int rank, int first, float scale) {
+    const int j = blockIdx.x * 256 + threadIdx.x, q = blockIdx.y;
+    if (j >= n_out || first + q >= rank) return;
+    float s = 0;
+    for (int r = 0; r < rows; r++) s += xa[(size_t)r * rank + first + q] * g[(size_t)r * n_out + j];
+    db[(size_t)q * n_out + j] += scale * s;
+}
+
+// dxa[r, q] = scale g[r] . b[q] where q's block is open on row r, else 0; a warp a (q, r).
+extern "C" __global__ void __launch_bounds__(256) tf_train_lora_dxa(const float* g, const float* b, float* dxa, int rows, int n_out,
+                                                                   int rank, float scale, const float* gates) {
+    const int q = (blockIdx.x * 256 + threadIdx.x) >> 5, lane = threadIdx.x & 31, r = blockIdx.y;
+    if (q >= rank || r >= rows) return;
+    float s = 0;
+    for (int j = lane; j < n_out; j += 32) s += g[(size_t)r * n_out + j] * b[(size_t)q * n_out + j];
+    s = warp_sum(s);
+    if (lane == 0) dxa[(size_t)r * rank + q] = scale * s * gates[(size_t)r * (rank / 16) + q / 16];
+}
+
+// dx[r, i] += sum_q dxa[r, q] a[q, i]: the change's part of its site's input gradient; grid (in / 256, rows).
+extern "C" __global__ void __launch_bounds__(256) tf_train_lora_dx(const float* dxa, const float* a, float* dx, int rows, int n_in,
+                                                                  int rank) {
+    const int i = blockIdx.x * 256 + threadIdx.x, r = blockIdx.y;
+    if (i >= n_in || r >= rows) return;
+    float s = 0;
+    for (int q = 0; q < rank; q++) s += dxa[(size_t)r * rank + q] * a[(size_t)q * n_in + i];
+    dx[(size_t)r * n_in + i] += s;
+}
+
+// A sign from a row's place and a sketch column, +1 or -1 with even odds (train.metal's coin).
+__device__ __forceinline__ float coin(unsigned row, unsigned j, unsigned seed) {
+    unsigned h = row * 0x9E3779B9u + j * 0x7FEB352Du + seed;
     h ^= h >> 16;
     h *= 0x7FEB352Du;
     h ^= h >> 15;
@@ -278,299 +233,365 @@ __device__ __forceinline__ float coin(uint32_t row, uint32_t j, uint32_t seed) {
     return (h & 1) ? 1.0f : -1.0f;
 }
 
-// y[j, i] += w sum_r coin(first + r, j) x[r, i]: a site's input rows into a random sketch [k, in].
-extern "C" __global__ void tf_train_sketch(const bf16* __restrict__ x, int x_stride, float* __restrict__ y, int rows, int in, int k,
-                                           uint32_t first, uint32_t seed, float w) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x, j = blockIdx.y;
-    if (i >= in || j >= k) return;
-    float s = 0.0f;
-    for (int r = 0; r < rows; ++r) s += coin(first + r, j, seed) * bf(x[static_cast<size_t>(r) * x_stride + i]);
-    y[static_cast<size_t>(j) * in + i] += w * s;
+// y[j, i] += w sum_r coin(first + r, j) x[r, i]: a site's input rows into a random sketch; grid (in / 256, k).
+extern "C" __global__ void __launch_bounds__(256) tf_train_sketch(const bf16* x, long long x_stride, float* y, int rows, int n_in,
+                                                                 int k, unsigned first, unsigned seed, float w) {
+    const int i = blockIdx.x * 256 + threadIdx.x, j = blockIdx.y;
+    if (i >= n_in || j >= k) return;
+    float s = 0;
+    for (int r = 0; r < rows; r++) s += coin(first + r, j, seed) * f32(x[(size_t)r * x_stride + i]);
+    y[(size_t)j * n_in + i] += w * s;
 }
 
-// A row's softmax over bf16 logits: stats = (loss, target's probability), then in place (p - onehot) weight[r].
-extern "C" __global__ void __launch_bounds__(1024) tf_train_softmax(bf16* __restrict__ logits, const uint32_t* __restrict__ targets,
-                                                                    const float* __restrict__ weights, float2* __restrict__ stats, int vocab) {
-    __shared__ float scratch[32];
-    const int r = blockIdx.x, t = threadIdx.x;
-    bf16* l = logits + static_cast<size_t>(r) * vocab;
-    float m = -INFINITY;
-    for (int v = t; v < vocab; v += 1024) m = fmaxf(m, bf(l[v]));
-    m = block_max(m, scratch, 32);
-    float s = 0.0f;
-    for (int v = t; v < vocab; v += 1024) s += expf(bf(l[v]) - m);
-    s = block_sum(s, scratch, 32);
-    const uint32_t target = targets[r];
-    const float lt = bf(l[target]);
-    if (t == 0) stats[r] = make_float2(logf(s) + m - lt, expf(lt - m) / s);
-    __syncthreads();
-    const float w = weights[r];
-    for (int v = t; v < vocab; v += 1024) l[v] = __float2bfloat16_rn((expf(bf(l[v]) - m) / s - (v == static_cast<int>(target) ? 1.0f : 0.0f)) * w);
+// One Adam step on a change's factors; the gradient is then cleared.
+extern "C" __global__ void tf_train_adam(float* p, float* g, float* m, float* v, long long n, float lr, float b1, float b2,
+                                         float eps, float c1, float c2) {
+    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float gi = g[i];
+    const float mi = b1 * m[i] + (1 - b1) * gi, vi = b2 * v[i] + (1 - b2) * gi * gi;
+    m[i] = mi;
+    v[i] = vi;
+    p[i] -= lr * (mi * c1) / (sqrtf(vi * c2) + eps);
+    g[i] = 0;
 }
 
-// g[r] += s w dx - s^3 h (w dx . h) / dim: a row's input RMS norm undone onto the residual's gradient; 256 a row.
-extern "C" __global__ void __launch_bounds__(256) tf_train_rms_back(const bf16* __restrict__ h, const bf16* __restrict__ w,
-                                                                   const float* __restrict__ dx, float* __restrict__ g, int dim, float eps) {
-    __shared__ float scratch[32];
-    const int r = blockIdx.x;
-    const bf16* hr = h + static_cast<size_t>(r) * dim;
-    const float* dr = dx + static_cast<size_t>(r) * dim;
-    float sq = 0.0f, dot = 0.0f;
-    for (int j = threadIdx.x; j < dim; j += 256) {
-        const float v = bf(hr[j]);
-        sq += v * v;
-        dot += bf(w[j]) * dr[j] * v;
-    }
-    sq = block_sum(sq, scratch, 8);
-    dot = block_sum(dot, scratch, 8);
-    const float s = rsqrtf(sq / static_cast<float>(dim) + eps), k = s * s * s * dot / static_cast<float>(dim);
-    for (int j = threadIdx.x; j < dim; j += 256) g[static_cast<size_t>(r) * dim + j] += s * bf(w[j]) * dr[j] - k * bf(hr[j]);
-}
+// ---- products and small moves ---------------------------------------------------------------------------------------
 
-// A tiled 4-bit projection (tf_pack_dense's words, (kg, npad) scales and biases) as bf16 [k, n]: out[i, j] = W[j, i].
-extern "C" __global__ void tf_train_dequant_t(const uint32_t* __restrict__ w, const uint16_t* __restrict__ scales,
-                                              const uint16_t* __restrict__ biases, bf16* __restrict__ out, int n, int k, int npad) {
-    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (idx >= static_cast<int64_t>(n) * k) return;
-    const int row = static_cast<int>(idx % n), input = static_cast<int>(idx / n), kg = k / 64;
-    const int t = row / 64, j = (row % 64) / 8, g = input / 64, v = (input % 64) / 32, i32 = input % 32;
-    const int lane = (row % 8) * 4 + ((i32 >> 1) & 3), p = (i32 & 1) * 4 + (i32 >> 3);
-    const int64_t word = ((static_cast<int64_t>(t) * kg + g) << 9) | (j << 6) | (lane << 1) | v;
-    const float q = static_cast<float>((w[word] >> (4 * p)) & 0xFu);
-    const int64_t sb = static_cast<int64_t>(g) * npad + row;
-    out[idx] = __float2bfloat16_rn(bits16(scales[sb]) * q + bits16(biases[sb]));
-}
-
-extern "C" __global__ void tf_train_narrow(const float* __restrict__ x, bf16* __restrict__ out, int64_t n) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i < n) out[i] = __float2bfloat16_rn(x[i]);
-}
-
-extern "C" __global__ void tf_train_widen(const bf16* __restrict__ x, float* __restrict__ out, int64_t n) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i < n) out[i] = bf(x[i]);
-}
-
-namespace {
-
-__device__ __forceinline__ uint32_t smem(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
-
-__device__ __forceinline__ void ldsm4(uint32_t (&r)[4], const void* p) {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(smem(p)));
-}
-
-__device__ __forceinline__ void mma16816(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
-    asm("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
-        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
-}
-
-}  // namespace
-
-// C [m, n] += A [m, k] B [n, k]^T in bf16, fp32 out, k a multiple of 32: one slice adds in, more write P [z, m, n].
-extern "C" __global__ void __launch_bounds__(128) tf_train_gemm(const bf16* __restrict__ A, int lda, const bf16* __restrict__ B, int ldb,
-                                                               float* __restrict__ C, int ldc, float* __restrict__ P, int m, int n, int k,
-                                                               int split) {
-    constexpr int BM = 64, BN = 64, BK = 32, PAD = 40;
-    __shared__ __align__(16) bf16 as[BM][PAD];
-    __shared__ __align__(16) bf16 bs[BN][PAD];
-    const int m0 = blockIdx.y * BM, n0 = blockIdx.x * BN, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+// C [M, N] (+)= A [M, K] B [K, N], bf16 row-major in, fp32 out: 64x64 tiles, four warps of 32x32, mma m16n8k16.
+extern "C" __global__ void __launch_bounds__(128) tf_train_gemm(const bf16* __restrict__ A, const bf16* __restrict__ B,
+                                                               float* __restrict__ C, int M, int N, int K, int lda, int ldb,
+                                                               int ldc, int accumulate) {
+    __shared__ __align__(16) bf16 As[64][40];
+    __shared__ __align__(16) bf16 Bs[64][40];  // B's tile transposed: [n][k]
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const int m0 = blockIdx.y * 64, n0 = blockIdx.x * 64;
     const int wm = (warp >> 1) * 32, wn = (warp & 1) * 32;
-    const int per = (k / BK + split - 1) / split * BK, k_lo = blockIdx.z * per, k_hi = min(k, k_lo + per);
     float acc[2][4][4];
 #pragma unroll
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i < 2; i++)
 #pragma unroll
-        for (int j = 0; j < 4; ++j)
+        for (int j = 0; j < 4; j++)
 #pragma unroll
-            for (int c = 0; c < 4; ++c) acc[i][j][c] = 0.0f;
-    for (int k0 = k_lo; k0 < k_hi; k0 += BK) {
-#pragma unroll
-        for (int h = 0; h < 2; ++h) {
-            const int c = tid + 128 * h, row = c >> 2, col = (c & 3) * 8;
-            uint4 va = make_uint4(0, 0, 0, 0), vb = make_uint4(0, 0, 0, 0);
-            if (m0 + row < m) va = *reinterpret_cast<const uint4*>(A + static_cast<size_t>(m0 + row) * lda + k0 + col);
-            if (n0 + row < n) vb = *reinterpret_cast<const uint4*>(B + static_cast<size_t>(n0 + row) * ldb + k0 + col);
-            *reinterpret_cast<uint4*>(&as[row][col]) = va;
-            *reinterpret_cast<uint4*>(&bs[row][col]) = vb;
+            for (int e = 0; e < 4; e++) acc[i][j][e] = 0.0f;
+    const bf16 zero = b16(0.0f);
+    // eight values a load where a row's eight lie inside the matrix and the strides keep 16-byte alignment
+    const bool wide_a = (lda & 7) == 0 && ((size_t)A & 15) == 0, wide_b = (ldb & 7) == 0 && ((size_t)B & 15) == 0;
+    for (int k0 = 0; k0 < K; k0 += 32) {
+        for (int e = tid; e < 64 * 4; e += 128) {
+            const int r = e >> 2, c = (e & 3) * 8, gm = m0 + r, gk = k0 + c;
+            if (wide_a && gm < M && gk + 8 <= K) {
+                *reinterpret_cast<uint4*>(&As[r][c]) = *reinterpret_cast<const uint4*>(A + (size_t)gm * lda + gk);
+            } else {
+                for (int i = 0; i < 8; i++) As[r][c + i] = (gm < M && gk + i < K) ? A[(size_t)gm * lda + gk + i] : zero;
+            }
+        }
+        for (int e = tid; e < 32 * 8; e += 128) {
+            const int r = e >> 3, c = (e & 7) * 8, gk = k0 + r, gn = n0 + c;
+            if (wide_b && gk < K && gn + 8 <= N) {
+                const uint4 v = *reinterpret_cast<const uint4*>(B + (size_t)gk * ldb + gn);
+                const bf16* h = reinterpret_cast<const bf16*>(&v);
+                for (int i = 0; i < 8; i++) Bs[c + i][r] = h[i];
+            } else {
+                for (int i = 0; i < 8; i++) Bs[c + i][r] = (gk < K && gn + i < N) ? B[(size_t)gk * ldb + gn + i] : zero;
+            }
         }
         __syncthreads();
 #pragma unroll
-        for (int kk = 0; kk < BK; kk += 16) {
-            uint32_t fa[2][4], fb[2][4];
+        for (int kk = 0; kk < 32; kk += 16) {
+            unsigned af[2][4], bq[4][2];
 #pragma unroll
-            for (int i = 0; i < 2; ++i) ldsm4(fa[i], &as[wm + 16 * i + (lane & 15)][kk + (lane >> 4) * 8]);
+            for (int i = 0; i < 2; i++) {
+                const int r = wm + i * 16 + (lane >> 2), c = kk + (lane & 3) * 2;
+                af[i][0] = *reinterpret_cast<const unsigned*>(&As[r][c]);
+                af[i][1] = *reinterpret_cast<const unsigned*>(&As[r + 8][c]);
+                af[i][2] = *reinterpret_cast<const unsigned*>(&As[r][c + 8]);
+                af[i][3] = *reinterpret_cast<const unsigned*>(&As[r + 8][c + 8]);
+            }
 #pragma unroll
-            for (int p = 0; p < 2; ++p) ldsm4(fb[p], &bs[wn + 16 * p + (lane >> 4) * 8 + (lane & 7)][kk + ((lane >> 3) & 1) * 8]);
+            for (int j = 0; j < 4; j++) {
+                const int n = wn + j * 8 + (lane >> 2), k = kk + (lane & 3) * 2;
+                bq[j][0] = *reinterpret_cast<const unsigned*>(&Bs[n][k]);
+                bq[j][1] = *reinterpret_cast<const unsigned*>(&Bs[n][k + 8]);
+            }
 #pragma unroll
-            for (int i = 0; i < 2; ++i)
+            for (int i = 0; i < 2; i++)
 #pragma unroll
-                for (int j = 0; j < 4; ++j) mma16816(acc[i][j], fa[i], fb[j >> 1][(j & 1) * 2], fb[j >> 1][(j & 1) * 2 + 1]);
+                for (int j = 0; j < 4; j++)
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
+                        "{%0, %1, %2, %3};\n"
+                        : "+f"(acc[i][j][0]), "+f"(acc[i][j][1]), "+f"(acc[i][j][2]), "+f"(acc[i][j][3])
+                        : "r"(af[i][0]), "r"(af[i][1]), "r"(af[i][2]), "r"(af[i][3]), "r"(bq[j][0]), "r"(bq[j][1]));
         }
         __syncthreads();
     }
 #pragma unroll
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i < 2; i++)
 #pragma unroll
-        for (int j = 0; j < 4; ++j)
+        for (int j = 0; j < 4; j++)
 #pragma unroll
-            for (int h = 0; h < 2; ++h) {
-                const int row = m0 + wm + 16 * i + (lane >> 2) + 8 * h, col = n0 + wn + 8 * j + (lane & 3) * 2;
-                if (row >= m) continue;
+            for (int h = 0; h < 2; h++) {
+                const int r = m0 + wm + i * 16 + (lane >> 2) + h * 8, c = n0 + wn + j * 8 + (lane & 3) * 2;
+                if (r >= M) continue;
 #pragma unroll
-                for (int c = 0; c < 2; ++c) {
-                    if (col + c >= n) continue;
-                    if (split == 1) C[static_cast<size_t>(row) * ldc + col + c] += acc[i][j][2 * h + c];
-                    else P[(static_cast<size_t>(blockIdx.z) * m + row) * n + col + c] = acc[i][j][2 * h + c];
+                for (int e = 0; e < 2; e++) {
+                    if (c + e >= N) continue;
+                    float* out = C + (size_t)r * ldc + c + e;
+                    const float v = acc[i][j][h * 2 + e];
+                    *out = accumulate ? *out + v : v;
                 }
             }
 }
 
-// C [m, n] += the slices' parts P [split, m, n], added in slice order: the same sum on every run.
-extern "C" __global__ void tf_train_gemm_sum(const float* __restrict__ P, float* __restrict__ C, int ldc, int m, int n, int split) {
-    const int col = blockIdx.x * blockDim.x + threadIdx.x, row = blockIdx.y;
-    if (col >= n) return;
-    float* const c = C + static_cast<size_t>(row) * ldc + col;
-    float sum = *c;
-    for (int z = 0; z < split; ++z) sum += P[(static_cast<size_t>(z) * m + row) * n + col];
-    *c = sum;
+// A 4-bit [N, K] matrix (MLX's layout: 8 codes a word, a bf16 scale and bias every 64) as bf16 [N, K], in order.
+extern "C" __global__ void tf_train_dequant(const unsigned* w, const bf16* scales, const bf16* biases, bf16* out, long long count) {
+    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    const unsigned q = (w[i / 8] >> (4 * (i % 8))) & 0xfu;
+    out[i] = b16(f32(scales[i / 64]) * (float)q + f32(biases[i / 64]));
 }
 
-// dy[p, j] = wt[p] g[p / slots, j]: each expert pair's output gradient, its routing weight (shared halves: 1) in.
-extern "C" __global__ void tf_train_pairs_in(const float* __restrict__ wt, const float* __restrict__ g, float* __restrict__ dy,
-                                             int slots, int dim) {
-    const int j = blockIdx.x * blockDim.x + threadIdx.x, p = blockIdx.y;
-    if (j >= dim) return;
-    dy[static_cast<size_t>(p) * dim + j] = wt[p] * g[static_cast<size_t>(p / slots) * dim + j];
+extern "C" __global__ void tf_train_zero(float* x, long long n) {
+    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] = 0;
 }
 
-// out[p, i] = sum_j x[p, j] W_e[j, i] for each plan item's members, W_e expert e of a packed table [n rows, k inputs].
-extern "C" __global__ void __launch_bounds__(256) tf_train_experts_back(const float* __restrict__ x, int x_stride,
-                                                                       const uint32_t* __restrict__ w, const int* __restrict__ items,
-                                                                       const int* __restrict__ counts, const int* __restrict__ members,
-                                                                       float* __restrict__ out, int out_stride, int kg, int nb) {
-    __shared__ float ws[32][65];  // the item's expert at one 32-row block and one 64-input group
-    __shared__ float xs[64][33];  // the members' x at those 32 rows
-    const int it = blockIdx.x, g = blockIdx.y, tid = threadIdx.x;
-    if (it >= counts[0]) return;
-    const int e = items[3 * it], first = items[3 * it + 1], cnt = min(items[3 * it + 2], 64);
-    const int i = tid & 63, lane4 = tid >> 6;
-    float acc[16];
-#pragma unroll
-    for (int a = 0; a < 16; ++a) acc[a] = 0.0f;
-    // the stored word this thread decodes: (t, j, r, q) placed as tf_experts_pack places it
-    const int f = (tid / 128) * 128 + (tid % 4) * 32 + (tid % 128) / 4;
-    const int q = f % 4, r8 = (f / 4) % 8, jj = (f / 32) % 2, t = f / 64;
-    const int row = t * 8 + r8, col = (q * 2 + jj) * 8;
-    for (int b = 0; b < nb; ++b) {
-        const uint32_t* blk = w + ((static_cast<size_t>(e) * nb + b) * kg + g) * 288;
-        const uint32_t word = blk[tid];
-        const uint32_t sw = blk[256 + (r8 / 2) * 8 + t], bw = blk[256 + (r8 / 2) * 8 + 4 + t];
-        const float sc = bits16(r8 % 2 ? sw >> 16 : sw & 0xFFFFu), bi = bits16(r8 % 2 ? bw >> 16 : bw & 0xFFFFu);
-#pragma unroll
-        for (int mm = 0; mm < 8; ++mm) {
-            // tf_experts_pack's shuffle: the even nibbles low, the odd high
-            const int pos = (mm % 2 == 0) ? mm / 2 : 4 + mm / 2;
-            ws[row][col + mm] = sc * static_cast<float>((word >> (4 * pos)) & 0xFu) + bi;
+extern "C" __global__ void tf_train_widen(const bf16* x, float* out, long long n) {
+    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = f32(x[i]);
+}
+
+extern "C" __global__ void tf_train_narrow(const float* x, bf16* out, long long n) {
+    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = b16(x[i]);
+}
+
+extern "C" __global__ void tf_train_add(const float* x, float* y, long long n) {
+    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] += x[i];
+}
+
+// dst row r = src row (idx ? idx[r] : r), `width` bf16 each, rows their strides apart; grid (width / 256, rows).
+extern "C" __global__ void tf_train_rows(const bf16* src, long long src_stride, const int* idx, bf16* dst, long long dst_stride,
+                                         int width, int rows) {
+    const int i = blockIdx.x * 256 + threadIdx.x, r = blockIdx.y;
+    if (i >= width || r >= rows) return;
+    const long long from = idx ? idx[r] : r;
+    dst[(size_t)r * dst_stride + i] = src[(size_t)from * src_stride + i];
+}
+
+// out[r] = wt[r * wt_stride + wt_at] g[r]: a row's gradient at its slot's routing weight; grid (dim / 256, rows).
+extern "C" __global__ void tf_train_scale_rows(const float* g, const float* wt, int wt_stride, int wt_at, float* out, int dim) {
+    const int i = blockIdx.x * 256 + threadIdx.x, r = blockIdx.y;
+    if (i >= dim) return;
+    out[(size_t)r * dim + i] = wt[(size_t)r * wt_stride + wt_at] * g[(size_t)r * dim + i];
+}
+
+// dx[r, i] += sum_j g[r, j] rest[j, i]: a projection's bf16 rest [n, width] carried back to its input.
+extern "C" __global__ void __launch_bounds__(256) tf_train_rest_back(const float* g, const bf16* rest, float* dx, long long dx_stride,
+                                                                    int rows, int n, int width) {
+    const int i = blockIdx.x * 256 + threadIdx.x, r = blockIdx.y;
+    if (i >= width || r >= rows) return;
+    float s = 0;
+    for (int j = 0; j < n; j++) s += g[(size_t)r * n + j] * f32(rest[(size_t)j * width + i]);
+    dx[(size_t)r * dx_stride + i] += s;
+}
+
+// ---- the MoE layer --------------------------------------------------------------------------------------------------
+
+// du = da 2 relu(u) from the squared ReLU's output a = relu(u)^2, which this engine keeps: relu(u) = sqrt(a).
+extern "C" __global__ void tf_train_relu2_back(const bf16* a, const float* da, float* du, long long n) {
+    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) du[i] = da[i] * 2.0f * sqrtf(fmaxf(f32(a[i]), 0.0f));
+}
+
+// The routed pairs (slots below top_k) sorted by expert, stable: order (slot to pair), inv and offsets.
+extern "C" __global__ void __launch_bounds__(256) tf_train_sort_pairs(const int* ids, int rows, int slots, int top_k, int experts,
+                                                                     int* order, int* inv, int* offsets) {
+    __shared__ int count[256];
+    const int e = threadIdx.x;
+    int n = 0;
+    if (e < experts)
+        for (int r = 0; r < rows; r++)
+            for (int j = 0; j < top_k; j++) n += ids[r * slots + j] == e;
+    count[e] = n;
+    __syncthreads();
+    if (e == 0) {
+        int at = 0;
+        for (int x = 0; x < experts; x++) {
+            const int c = count[x];
+            count[x] = at;
+            at += c;
         }
-        for (int c = tid; c < cnt * 32; c += 256) {
-            const int pp = c / 32, rr = c % 32;
-            xs[pp][rr] = x[static_cast<size_t>(members[first + pp]) * x_stride + b * 32 + rr];
-        }
-        __syncthreads();
-#pragma unroll
-        for (int a = 0; a < 16; ++a) {
-            const int pp = lane4 + 4 * a;
-            if (pp >= cnt) break;
-            float s = 0.0f;
-#pragma unroll 8
-            for (int rr = 0; rr < 32; ++rr) s += xs[pp][rr] * ws[rr][i];
-            acc[a] += s;
-        }
-        __syncthreads();
     }
-#pragma unroll
-    for (int a = 0; a < 16; ++a) {
-        const int pp = lane4 + 4 * a;
-        if (pp >= cnt) break;
-        out[static_cast<size_t>(members[first + pp]) * out_stride + g * 64 + i] = acc[a];
-    }
+    __syncthreads();
+    if (e >= experts) return;
+    int at = count[e];
+    offsets[e] = at;
+    for (int r = 0; r < rows; r++)
+        for (int j = 0; j < top_k; j++)
+            if (ids[r * slots + j] == e) {
+                order[at] = r * slots + j;
+                inv[r * top_k + j] = at;
+                at++;
+            }
 }
 
-// du = da 2 relu(u) from the stored relu(u)^2 (bf16): da 2 sqrt(act).
-extern "C" __global__ void tf_train_relu2_back(const bf16* __restrict__ act, const float* __restrict__ da, float* __restrict__ du,
-                                               int64_t n) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i < n) du[i] = da[i] * 2.0f * sqrtf(fmaxf(bf(act[i]), 0.0f));
+// logits[r, e] = x[r] . gate[e] in fp32: the router's scores again, for the routing weights' gradient; a warp a (e, r).
+extern "C" __global__ void __launch_bounds__(256) tf_train_logits(const bf16* x, const bf16* gate, float* logits, int rows,
+                                                                 int experts, int dim) {
+    const int e = (blockIdx.x * 256 + threadIdx.x) >> 5, lane = threadIdx.x & 31, r = blockIdx.y;
+    if (e >= experts || r >= rows) return;
+    float s = 0;
+    for (int i = lane; i < dim; i += 32) s += f32(x[(size_t)r * dim + i]) * f32(gate[(size_t)e * dim + i]);
+    s = warp_sum(s);
+    if (lane == 0) logits[(size_t)r * experts + e] = s;
 }
 
-// dx[r, j] += the input gradients of row r's `slots` pairs, in slot order.
-extern "C" __global__ void tf_train_pairs_out(const float* __restrict__ dxp, float* __restrict__ dx, int slots, int dim) {
-    const int j = blockIdx.x * blockDim.x + threadIdx.x, r = blockIdx.y;
+// dy[s] = wt[p] g[p / slots] at sorted slot s of pair p = order[s]: the routed experts' output gradients.
+extern "C" __global__ void tf_train_pairs_in(const int* order, const float* wt, const float* g, float* dy, int dim, int slots) {
+    const int j = blockIdx.x * 256 + threadIdx.x, s = blockIdx.y;
     if (j >= dim) return;
-    float s = 0.0f;
-    for (int k = 0; k < slots; ++k) s += dxp[(static_cast<size_t>(r) * slots + k) * dim + j];
-    dx[static_cast<size_t>(r) * dim + j] += s;
+    const int p = order[s];
+    dy[(size_t)s * dim + j] = wt[p] * g[(size_t)(p / slots) * dim + j];
 }
 
-// dx[r] += sum_j dz_j gate[e_j]: routing weights scale s_j / sum s (s = sigmoid(logit)) back into the router's input.
-extern "C" __global__ void __launch_bounds__(256) tf_train_route_back(const float* __restrict__ part, int sk, const int* __restrict__ ids,
-                                                                     const bf16* __restrict__ ys, const float* __restrict__ g,
-                                                                     const bf16* __restrict__ gate, float* __restrict__ dx, int rows, int experts,
-                                                                     int top_k, int slots, int dim, float scale) {
+// dx[t] += its top_k pairs' input gradients, summed in pair order through inv; grid (dim / 256, rows).
+extern "C" __global__ void tf_train_pairs_out(const int* inv, const float* dxp, float* dx, int dim, int top_k) {
+    const int j = blockIdx.x * 256 + threadIdx.x, t = blockIdx.y;
+    if (j >= dim) return;
+    float s = 0;
+    for (int k = 0; k < top_k; k++) s += dxp[(size_t)inv[t * top_k + k] * dim + j];
+    dx[(size_t)t * dim + j] += s;
+}
+
+// dx[r] += sum_j dz_j gate[e_j]: weights s_j / sum s (s = sigmoid(logit)) back to the router's input; ys unweighted.
+extern "C" __global__ void __launch_bounds__(256) tf_train_route_back(const float* logits, const int* ids, int slots, const bf16* ys,
+                                                                     const float* g, const bf16* gate, float* dx, int experts,
+                                                                     int top_k, int dim, float scale) {
     __shared__ float scratch[32];
-    __shared__ float dz[8];
-    __shared__ int ex[8];
+    __shared__ float dz[16];
     const int r = blockIdx.x, t = threadIdx.x;
-    float a[8];
-    for (int j = 0; j < top_k; ++j) {
-        float s = 0.0f;
-        for (int i = t; i < dim; i += 256) s += g[static_cast<size_t>(r) * dim + i] * bf(ys[(static_cast<size_t>(r) * slots + j) * dim + i]);
+    float a[16];
+    for (int j = 0; j < top_k; j++) {
+        float s = 0;
+        for (int i = t; i < dim; i += 256) s += g[(size_t)r * dim + i] * f32(ys[((size_t)r * slots + j) * dim + i]);
         a[j] = block_sum(s, scratch, 8);
     }
     if (t == 0) {
-        float p[8], total = 0.0f;
-        for (int j = 0; j < top_k; ++j) {
-            const int e = ids[r * slots + j];
-            float z = 0.0f;
-            for (int s = 0; s < sk; ++s) z += part[(static_cast<size_t>(s) * rows + r) * experts + e];
+        float p[16];
+        float total = 0;
+        for (int j = 0; j < top_k; j++) {
+            const float z = logits[(size_t)r * experts + ids[r * slots + j]];
             p[j] = 1.0f / (1.0f + expf(-z));
             total += p[j];
-            ex[j] = e;
         }
         total += 1e-20f;
-        float mix = 0.0f;
-        for (int j = 0; j < top_k; ++j) mix += a[j] * p[j] / total;
-        for (int j = 0; j < top_k; ++j) dz[j] = scale / total * (a[j] - mix) * p[j] * (1.0f - p[j]);
+        float mix = 0;
+        for (int j = 0; j < top_k; j++) mix += a[j] * p[j] / total;
+        for (int j = 0; j < top_k; j++) dz[j] = scale / total * (a[j] - mix) * p[j] * (1 - p[j]);
     }
     __syncthreads();
     for (int i = t; i < dim; i += 256) {
-        float s = 0.0f;
-        for (int j = 0; j < top_k; ++j) s += dz[j] * bf(gate[static_cast<size_t>(ex[j]) * dim + i]);
-        dx[static_cast<size_t>(r) * dim + i] += s;
+        float s = 0;
+        for (int j = 0; j < top_k; j++) s += dz[j] * f32(gate[(size_t)ids[r * slots + j] * dim + i]);
+        dx[(size_t)r * dim + i] += s;
     }
 }
 
-// dx[r, i] += sum_j g[r, j] rest[j, i]: a projection's bf16 rest [n, width] carried back; dx row r at r * dx_stride.
-extern "C" __global__ void tf_train_rest_back(const float* __restrict__ g, const bf16* __restrict__ rest, float* __restrict__ dx,
-                                              int dx_stride, int rows, int n, int width) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x, r = blockIdx.y;
-    if (i >= width || r >= rows) return;
-    float s = 0.0f;
-    for (int j = 0; j < n; ++j) s += g[static_cast<size_t>(r) * n + j] * bf(rest[static_cast<size_t>(j) * width + i]);
-    dx[static_cast<size_t>(r) * dx_stride + i] += s;
+// Each expert's pairs cut into tiles of 16: tiles[2t, 2t + 1] = (expert, first pair), then (experts, 0) up to `cap`.
+extern "C" __global__ void tf_train_experts_tiles(const int* offsets, unsigned* tiles, int pairs, int cap, int experts) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    int t = 0;
+    for (int e = 0; e < experts; e++) {
+        const int first = offsets[e], last = e + 1 < experts ? offsets[e + 1] : pairs;
+        for (int r = first; r < last && t < cap; r += 16, t++) {
+            tiles[2 * t] = e;
+            tiles[2 * t + 1] = r;
+        }
+    }
+    for (; t < cap; t++) {
+        tiles[2 * t] = experts;
+        tiles[2 * t + 1] = 0;
+    }
 }
 
-// Adam on a change's factors (lr, beta1, beta2, eps; c1, c2 the bias corrections); the gradient is then cleared.
-extern "C" __global__ void tf_train_adam(float* __restrict__ p, float* __restrict__ g, float* __restrict__ m, float* __restrict__ v, int n,
-                                         float lr, float b1, float b2, float eps, float c1, float c2) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    const float gi = g[i];
-    const float mi = b1 * m[i] + (1.0f - b1) * gi, vi = b2 * v[i] + (1.0f - b2) * gi * gi;
-    m[i] = mi;
-    v[i] = vi;
-    p[i] -= lr * (mi * c1) / (sqrtf(vi * c2) + eps);
-    g[i] = 0.0f;
+// y[s] = x[s] w[e] (f32), tiles of 16 pairs by 64 columns: w dequantized once a tile, each row's sum over n in order.
+extern "C" __global__ void __launch_bounds__(64) tf_train_experts_mm(const float* x, const unsigned* w, const bf16* scales,
+                                                                      const bf16* biases, const unsigned* tiles, const int* offsets,
+                                                                      float* y, int pairs, int n_in, int k_out, int experts) {
+    __shared__ float xs[16][33];
+    __shared__ __align__(16) float ws[32][64];
+    const int e = (int)tiles[2 * blockIdx.y], r0 = (int)tiles[2 * blockIdx.y + 1];
+    if (e >= experts) return;
+    const int last = e + 1 < experts ? offsets[e + 1] : pairs;
+    const int k0 = blockIdx.x * 64, words = k_out / 8, groups = k_out / 64, t = threadIdx.x, tr = t / 16, tc = t % 16;
+    float acc[4][4];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) acc[i][j] = 0;
+    for (int n0 = 0; n0 < n_in; n0 += 32) {
+        // rows past the expert's last read its last row again, and are dropped
+        for (int i = t; i < 16 * 32; i += 64) xs[i / 32][i % 32] = x[(size_t)min(r0 + i / 32, last - 1) * n_in + n0 + i % 32];
+        for (int i = t; i < 32 * 8; i += 64) {
+            const size_t n = (size_t)e * n_in + n0 + i / 8;
+            const unsigned q = w[n * words + k0 / 8 + i % 8];
+            const float sc = f32(scales[n * groups + k0 / 64]), bi = f32(biases[n * groups + k0 / 64]);
+            for (int j = 0; j < 8; j++) ws[i / 8][(i % 8) * 8 + j] = fmaf(sc, (float)((q >> (4 * j)) & 0xfu), bi);
+        }
+        __syncthreads();
+        for (int nn = 0; nn < 32; nn++) {
+            const float4 b = *reinterpret_cast<const float4*>(&ws[nn][tc * 4]);
+            for (int i = 0; i < 4; i++) {
+                const float a = xs[tr * 4 + i][nn];
+                acc[i][0] = fmaf(a, b.x, acc[i][0]);
+                acc[i][1] = fmaf(a, b.y, acc[i][1]);
+                acc[i][2] = fmaf(a, b.z, acc[i][2]);
+                acc[i][3] = fmaf(a, b.w, acc[i][3]);
+            }
+        }
+        __syncthreads();
+    }
+    for (int i = 0; i < 4; i++) {
+        const int r = r0 + tr * 4 + i;
+        if (r < last) *reinterpret_cast<float4*>(y + (size_t)r * k_out + k0 + tc * 4) = make_float4(acc[i][0], acc[i][1], acc[i][2], acc[i][3]);
+    }
 }
+
+// nemotron_ops' tf_pocket_rows over a pass's rows, the neurons from `from` on times their row's scale; grid rows.
+extern "C" __global__ void __launch_bounds__(256) tf_train_pocket_rows(const bf16* __restrict__ y, int d, const float* __restrict__ up,
+                                                                      const float* __restrict__ down, int n, void* __restrict__ out,
+                                                                      int out_f32, int row_mul, int row_add, const float* scale,
+                                                                      int from) {
+    __shared__ float act[64];
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    const bf16* yr = y + static_cast<size_t>(blockIdx.x) * d;
+    for (int j = warp; j < n; j += 8) {
+        const float* uj = up + static_cast<size_t>(j) * d;
+        float s = 0.f;
+        for (int i = lane; i < d; i += 32) s += uj[i] * __bfloat162float(yr[i]);
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
+        if (lane == 0) {
+            const float z = fmaxf(s, 0.f);
+            float a = z * z;
+            if (j >= from) a *= scale[blockIdx.x];
+            act[j] = a;
+        }
+    }
+    __syncthreads();
+    const size_t row = static_cast<size_t>(blockIdx.x) * row_mul + row_add;
+    for (int k = threadIdx.x; k < d; k += 256) {
+        float s = 0.f;
+        for (int j = 0; j < n; ++j) s += act[j] * down[static_cast<size_t>(j) * d + k];
+        if (out_f32) {
+            static_cast<float*>(out)[row * d + k] += s;
+        } else {
+            __nv_bfloat16* o = static_cast<__nv_bfloat16*>(out) + row * d + k;
+            *o = __float2bfloat16(__bfloat162float(*o) + s);
+        }
+    }
+}
+
+#include "train_mixers.cuh"

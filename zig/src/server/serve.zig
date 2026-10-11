@@ -65,7 +65,7 @@ pub const Setup = struct {
     engine: api.Engine,
     text: model_text.Text,
     served: []const u8,
-    /// The checkpoint's folder (structured output reads its tokenizer.json and config.json).
+    /// The checkpoint's folder (structured output reads its tokenizer.json and config.json, /slide shows its shards).
     model_dir: []const u8 = "",
     /// Sampling defaults from generation_config.json and the flags, as a JSON object; null: greedy.
     sampling: ?json.Value = null,

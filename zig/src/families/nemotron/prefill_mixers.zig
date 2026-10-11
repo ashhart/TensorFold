@@ -183,6 +183,7 @@ pub fn moe(x: Chunk, m: pre.Moe, w: wts.Moe) void {
     x.linear("down", "xsum_3712", w.shared_down, m.down, s.upr, s.sh);
     if (w.slide) |r| layers.rest(x.f, e, r, s.upr, s.sh, L, c.shared_width);
     if (w.adapter) |ad| layers.adapt(x.f, e, ad, s.upr, s.sh, L);
+    if (w.pocket) |p| if (p.used > 0) layers.pocket(x.f, e, p, s.x, s.sh, L);
     x.add(s.out, s.sh, L * D, s.out);
 }
 

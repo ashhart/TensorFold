@@ -27,7 +27,7 @@ pub fn fullStop(c: u21) bool {
 }
 
 /// Content words a fact's teller would not say by chance, compared without case or British spellings.
-pub const common = [_][]const u8{ "that", "this", "with", "from", "have", "been", "were", "they", "them", "their", "there", "what", "when", "which", "where", "about", "would", "could", "should", "called", "named", "also", "just", "very", "into", "your", "mine", "ours", "will" };
+pub const common = [_][]const u8{ "that", "this", "with", "from", "have", "been", "were", "they", "them", "their", "there", "what", "when", "which", "where", "about", "would", "could", "should", "called", "named", "also", "just", "very", "into", "your", "mine", "ours", "will", "like", "likes", "love", "loves", "know", "knows", "told", "tell", "said", "think", "want", "really" };
 
 /// A word worth comparing: four letters or more, or any with a digit, and not a common one.
 pub fn notable_(word: []const u8) bool {
@@ -138,10 +138,23 @@ pub fn unspaced(c: u21) bool {
         (c >= 0x20000 and c <= 0x2FA1F);
 }
 
-/// Ideographic and full-width punctuation (、。「」！？ and the like): it parts units as a space does.
+/// Whether `question` is in `fact`'s script: a fact told without spaces is asked about in that script too.
+pub fn sameScript(fact: []const u8, question: []const u8) bool {
+    return !hasUnspaced(fact) or hasUnspaced(question);
+}
+
+fn hasUnspaced(text: []const u8) bool {
+    const view = std.unicode.Utf8View.init(text) catch return false;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |c| if (unspaced(c)) return true;
+    return false;
+}
+
+/// Ideographic and full-width punctuation, symbols and emoji part units as a space does: "Ginger.✅" says "Ginger".
 pub fn punctuation(c: u21) bool {
     return (c >= 0x3000 and c <= 0x303F) or (c >= 0xFF01 and c <= 0xFF0F) or (c >= 0xFF1A and c <= 0xFF20) or
-        (c >= 0xFF3B and c <= 0xFF40) or (c >= 0xFF5B and c <= 0xFF65);
+        (c >= 0xFF3B and c <= 0xFF40) or (c >= 0xFF5B and c <= 0xFF65) or (c >= 0x2000 and c <= 0x2BFF) or
+        (c >= 0x1F000 and c <= 0x1FAFF) or c == 0xFE0F;
 }
 
 /// A word lowercased, without a trailing full stop or 's, with British "our" as "or" (colour, favourite).
@@ -176,4 +189,5 @@ test "units: words made normal, pairs of characters in scripts without spaces, p
     try std.testing.expect(it.next() == null);
     try std.testing.expect(says("鱈ちりです。", "ちり") and !says("鱈ちりです。", "鱈り"));
     try std.testing.expectEqual(@as(usize, 3), sentenceEnd("です。", 6));
+    try std.testing.expect(says("Your dog's name is Ginger.✅", "ginger") and says("Ana’s here — yes", "ana"));
 }

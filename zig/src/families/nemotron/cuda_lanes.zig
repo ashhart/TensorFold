@@ -13,6 +13,7 @@ const state = @import("cuda_state.zig");
 const config = @import("config.zig");
 const seq_graphs = @import("cuda_seq_graphs.zig");
 const costs = @import("cuda_costs.zig");
+const lesson_route = @import("lesson_route.zig");
 
 const be = lanes.backend;
 const LogRow = lanes.LogprobRow;
@@ -227,6 +228,8 @@ pub const Cuda = struct {
         } };
         if (own) self.own_free = false;
         e.bind(gop.value_ptr.seq);
+        // a decision row only where lessons route on it: else the prompt's chunks stay as plain serving cuts them
+        e.decide = if (s.decide != null and e.lessons() != null) s.decide.? else lesson_route.none;
         try e.setSampling(s.sampling);
         s.cached = 0;
         const from = self.restoreKept(s, ids.len);

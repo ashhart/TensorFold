@@ -15,7 +15,7 @@ pub const snap_restore = reuse.restore;
 pub const snap_drop = reuse.drop;
 const core = @import("core");
 
-/// The learner --slide runs over this engine (cuda_slide.zig).
+/// Sliding Weights' learner (--slide): lessons change the weights this engine's lanes decode with.
 pub const slide = @import("cuda_slide.zig");
 
 pub const model_type = "nemotron_h";
@@ -51,7 +51,12 @@ pub fn linked(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]const u
     return core.shard_edit.linked(arena, io, dir);
 }
 
-const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes, target: reuse.Target, carve: ?*cuda.Carveout };
+/// A shared expert's projection config.json keeps unquantized, as an earlier release's lessons left it, or null.
+pub fn plainShared(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
+    return core.shard_edit.plainShared(arena, io, dir);
+}
+
+const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes, target: reuse.Target, carve: ?*cuda.Carveout, living: ?@import("cuda_sites.zig").Sites = null };
 
 /// Own-sequence graphs support both draw modes; drafting also captures the head.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
@@ -72,6 +77,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .e = e, .head = head, .lanes = try Lanes.init(gpa, e, head), .target = .{ .e = e, .head = head }, .carve = carve };
     errdefer own.lanes.deinit();
+    own.living = try slide.loadLiving(gpa, io, e, dir); // before the lanes' costs are measured: they decode through it
+    errdefer if (own.living) |*s| s.deinit();
     try own.lanes.measure(io, dir);
     return .{
         .backend = own.lanes.backend(),
@@ -85,6 +92,12 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .learns = if (o.slide) e else null,
         .learn_bytes = if (o.slide) @import("cuda_train.zig").Trainer.memory(e.c) else 0,
     };
+}
+
+/// What a learner over the loaded engine `p` learns into; `dir` must outlive it.
+pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return .{ .e = own.e, .dir = dir, .living = &own.living };
 }
 
 fn loneRun(p: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool) anyerror!bool {
@@ -104,6 +117,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
 fn release(p: *anyopaque) void {
     const own: *Owned = @ptrCast(@alignCast(p));
     own.lanes.deinit();
+    if (own.living) |*s| s.deinit();
     if (own.head) |h| h.deinit();
     own.e.deinit();
     if (own.carve) |c| closeCarveout(own.gpa, c);

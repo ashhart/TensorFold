@@ -160,6 +160,7 @@ const Host = struct {
     learn: ?api.Learner = null, // the family's Sliding Weights learner (--slide), called with the context current
     slide: ?*anyopaque = null, // that learner's adapter, freed by slide_free before the family
     slide_free: ?*const fn (Allocator, *anyopaque) void = null,
+    dir: []u8 = &.{}, // the model folder the learner writes its lessons into
 
     fn close(p: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(p));
@@ -172,6 +173,7 @@ const Host = struct {
             h.gpa.destroy(s);
         }
         if (h.slide) |s| h.slide_free.?(h.gpa, s);
+        h.gpa.free(h.dir);
         h.release(h.family);
         if (h.gpu) |g| {
             g.ctx.deinit();
@@ -361,6 +363,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
             problem.* = try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on CUDA yet", .{o.model_type});
             return null;
         }
+        if (try F.plainShared(a, io, o.dir)) |name| {
+            problem.* = try std.fmt.allocPrint(a, "--slide adds learned neurons beside every shared expert, and {s} in {s} is unquantized, as TensorFold 1.0.3 to 1.0.5 saved their lessons: serve this folder without --slide (what it learned stays), or teach a fresh copy", .{ name, o.dir });
+            return null;
+        }
         if (try F.linked(a, io, o.dir)) |name| {
             problem.* = try std.fmt.allocPrint(a, "--slide rewrites the model's own files, and {s} in {s} is a link to data another file shares (a Hugging Face cache's blob, or a hard link), so learning would change that file too: serve a copy made with `cp -RL` (a copy that follows links)", .{ name, o.dir });
             return null;
@@ -452,10 +458,11 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         store.deinit();
         gpa.destroy(store);
     };
-    if (loaded.learns) |e| {
+    if (loaded.learns != null) {
         const Slide = nemotron_slide.Adapter(F.slide);
+        h.dir = try gpa.dupe(u8, o.dir);
         const s = try gpa.create(Slide);
-        s.* = Slide.init(gpa, io, e);
+        s.* = Slide.init(gpa, io, F.learnModel(loaded.ctx, h.dir));
         h.slide = s;
         h.slide_free = struct {
             fn f(al: Allocator, p: *anyopaque) void {
@@ -466,7 +473,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         }.f;
         h.learn = s.hook();
     }
-    errdefer if (h.slide) |s| h.slide_free.?(gpa, s);
+    errdefer if (h.slide) |s| {
+        h.slide_free.?(gpa, s);
+        gpa.free(h.dir);
+    };
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
     try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .logprobs = loaded.backend.vtable.first_row != null, .structures = loaded.backend.vtable.first_masked != null }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
