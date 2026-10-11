@@ -117,7 +117,7 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
     var checks: std.ArrayList(Check) = .empty;
     teacher.lessons += 1;
     for (prompts.personal_prompts, 0..) |q, i| {
-        if (try answeredByAny(srv, cx, told, kept, q, document, gone)) continue;
+        if (try answeredByAny(srv, cx, told, kept, parts.own.items, q, document, gone)) continue;
         const reply = try ask(srv, cx, null, q, check_tokens, gone);
         if (heldBack(teacher.lessons, i)) {
             try checks.append(a, .{ .question = q, .before = reply.content });
@@ -127,12 +127,12 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         if (parts.thinks) if (try thinkingSteady(srv, cx, a, q, gone)) |ex| try parts.think_keep.append(a, ex);
     }
     for (untold.checked) |q| {
-        if (try answeredByAny(srv, cx, told, kept, q, document, gone)) continue;
+        if (try answeredByAny(srv, cx, told, kept, parts.own.items, q, document, gone)) continue;
         const reply = try ask(srv, cx, null, q, check_tokens, gone);
         try checks.append(a, .{ .question = q, .before = reply.content, .invents = true });
     }
     for (untold.kept) |q| {
-        if (try answeredByAny(srv, cx, told, kept, q, document, gone)) continue;
+        if (try answeredByAny(srv, cx, told, kept, parts.own.items, q, document, gone)) continue;
         const reply = try ask(srv, cx, null, q, check_tokens, gone);
         try keep.append(a, try example(srv, cx, a, null, q, reply.content, ending(reply, end)));
     }
@@ -140,7 +140,7 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
     var stale_keep: std.ArrayList(usize) = .empty;
     var stale_bank: std.ArrayList(usize) = .empty;
     for (prompts.keep_prompts, 0..) |q, i| {
-        if (!wording.toModel(q) and try answeredByAny(srv, cx, told, kept, q, document, gone)) {
+        if (!wording.toModel(q) and try answeredByAny(srv, cx, told, kept, parts.own.items, q, document, gone)) {
             try stale_keep.append(a, i);
             continue;
         }
@@ -151,7 +151,7 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
     if (document) try replay(srv, cx, teacher, told[0], end, &keep);
     // the personal bank: kept as first answered, some held back to check, except what a fact answers
     for (try bankAnswers(srv, cx, teacher, end, gone), 0..) |b, i| {
-        if (try answeredByAny(srv, cx, told, kept, b.question, document, gone)) {
+        if (try answeredByAny(srv, cx, told, kept, parts.own.items, b.question, document, gone)) {
             try stale_bank.append(a, i);
             continue;
         }
@@ -160,7 +160,7 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
     // a fact in another language: its own language's prompts held and checked as the English ones are
     if (if (language) |name| try local(srv, cx, teacher, name, end, gone) else null) |l| {
         for (l.personal, 0..) |q, i| {
-            if (try answeredByAny(srv, cx, told, kept, q, document, gone)) continue;
+            if (try answeredByAny(srv, cx, told, kept, parts.own.items, q, document, gone)) continue;
             const reply = try ask(srv, cx, null, q, check_tokens, gone);
             if (heldBack(teacher.lessons, i)) {
                 try checks.append(a, .{ .question = q, .before = reply.content });
@@ -217,6 +217,7 @@ const Parts = struct {
     words: []const []const u8 = &.{}, // the open fact's subject words (none: it is about the user)
     named: []const []const u8 = &.{}, // of those, the ones a question must say to name it
     siblings: []const []const u8 = &.{}, // every fact told with these, whose questions are theirs to answer
+    own: std.ArrayList([]const u8) = .empty, // the facts' kept questions: none is also checked or kept as it was
 };
 
 /// A reply as written, and whether it ended there: a cut reply learns no turn's end, which would teach stopping early.
@@ -382,6 +383,7 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     const subjects = got.subjects;
     var told: std.ArrayList([]const u8) = .empty;
     for (refs.items) |r| try told.append(a, r.question);
+    try parts.own.appendSlice(a, told.items);
     log.line("slide: {d} questions kept for: {s} ({s})", .{ refs.items.len, fact, try std.mem.join(a, " | ", told.items) });
     if (qs.len < min_probes) log.line("slide: the questions came back as: {s}", .{asked.content});
     if (pairs.items.len < min_probes) return false;
@@ -537,8 +539,9 @@ fn under(srv: *Server, cx: *Cx, head: api.Example, body: []const u32, r: Held) !
     return ex;
 }
 
-/// Whether any of the lesson's facts answers `question` (asked only of facts that share a word with it).
-fn answeredByAny(srv: *Server, cx: *Cx, told: []const []const u8, kept: []const bool, question: []const u8, document: bool, gone: anytype) !bool {
+/// Whether the lesson teaches `question`: one of its own, or one a fact sharing a word with it answers.
+fn answeredByAny(srv: *Server, cx: *Cx, told: []const []const u8, kept: []const bool, own: []const []const u8, question: []const u8, document: bool, gone: anytype) !bool {
+    if (untold.taught(own, question)) return true;
     for (told, kept) |fact, k| if (k and wording.shares(fact, question) and try answered(srv, cx, fact, question, document, gone)) return true;
     return false;
 }

@@ -28,6 +28,13 @@ pub fn protected(q: []const u8) bool {
     return false;
 }
 
+/// Whether `q` is one of a lesson's own questions (`own`): it is taught, never also checked or kept as it was.
+pub fn taught(own: []const []const u8, q: []const u8) bool {
+    const asked = std.mem.trim(u8, q, " \t\r\n");
+    for (own) |o| if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, o, " \t\r\n"), asked)) return true;
+    return false;
+}
+
 /// Whether a reply passes unjudged: for an invented-fact check only when unchanged, for any other when alike.
 pub fn unjudged(invents: bool, before: []const u8, reply: []const u8) bool {
     return if (invents) std.mem.eql(u8, before, reply) else wording.alike(before, reply);
@@ -42,6 +49,12 @@ test "an invented-fact check goes to the judge unless its answer is unchanged, e
     // an ordinary check keeps the wording shortcut, which is what let these through
     try std.testing.expect(unjudged(false, cat, "Your cat is called Whiskers."));
     try std.testing.expect(unjudged(false, name, "I don't know your name, but I remember you are Alex."));
+}
+
+test "a lesson's own question is taught, whatever its case and spacing" {
+    const own = [_][]const u8{ "What is my dog's name?", "What is my dog called?" };
+    try std.testing.expect(taught(&own, " what is my dog called? "));
+    try std.testing.expect(!taught(&own, "What is my cat called?"));
 }
 
 test "the questions only checked for invented facts never become near misses" {
