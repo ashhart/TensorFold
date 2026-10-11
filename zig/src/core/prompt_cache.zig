@@ -178,7 +178,7 @@ pub const Store = struct {
         return s.budget -| s.held -| s.spare();
     }
 
-    /// Kept states free their storage, least valuable first and never `restoring`, until `left.fits()`; false if it never does.
+    /// Kept states free their storage, least valuable first and never `restoring`, until `left.fits()` (false: never).
     pub fn giveBack(s: *Store, restoring: ?Saved, prompt: []const u32, left: anytype) bool {
         while (!left.fits()) {
             const skip = for (s.entries.items) |e| {

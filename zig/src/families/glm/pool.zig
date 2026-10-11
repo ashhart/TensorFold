@@ -85,7 +85,7 @@ pub fn fits(sl: *const Slots, tokens: u32) bool {
     return findRun(sl, p.need(tokens), false) != null;
 }
 
-/// Slot `i`'s region for `tokens` of caches, before its stream begins (`from`: the held prefix it restores); none without a pool.
+/// Slot `i`'s region for `tokens` of caches before its stream begins (`from`: a held prefix it restores).
 pub fn reserve(sl: *Slots, i: u32, tokens: u32, from: ?*const snapshot.Snap) !void {
     const p = sl.pool orelse return;
     if (i >= sl.slots.len or sl.slots[i].used or sl.slots[i].region != null) return error.SlotOutOfStep;
@@ -98,7 +98,7 @@ pub fn reserve(sl: *Slots, i: u32, tokens: u32, from: ?*const snapshot.Snap) !vo
     slot.s.cap = p.tokens(n);
 }
 
-/// Where `n` blocks go: on `from`'s held prefix (restored in place) once nothing else is there, else the first free run.
+/// Where `n` blocks go: on `from`'s held prefix (restored in place) if nothing else is there, else the first free run.
 fn place(sl: *Slots, n: u32, from: ?*const snapshot.Snap) error{PoolFull}!u32 {
     while (true) {
         if (from) |f| if (f.held) |h| if (clearAt(sl, h[0], n, f)) return h[0];
@@ -116,7 +116,7 @@ fn clearAt(sl: *const Slots, at: u32, n: u32, own: *const snapshot.Snap) bool {
     return true;
 }
 
-/// The oldest kept prompt state holding pool blocks, `spare` last, gives them up and goes stale; false when none holds any.
+/// The oldest kept state holding pool blocks, `spare` last, gives them up and goes stale; false when none holds any.
 fn evictHeld(sl: *Slots, spare: ?*const snapshot.Snap) bool {
     var pick: ?*snapshot.Snap = null;
     var it = sl.snaps.valueIterator();
