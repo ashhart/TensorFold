@@ -230,9 +230,20 @@ pub const LearnRequest = struct {
     save: bool = false, // every kept lesson written beside the model's shards, each with its router
 };
 
+/// A neuron a pocket lesson placed (Sliding Weights): its layer, its index in that layer's pocket, the row it keys on.
+pub const Neuron = struct { layer: u16, neuron: u16, key: NeuronKey };
+pub const NeuronKey = enum { reply, subject, value };
+
+/// A pocket lesson's stage, as it runs: its rows read, its neurons fitted, their outputs, its held-out answers judged.
+pub const LearnPhase = enum { reading, fitting, values, checking };
+
+/// Where a pocket lesson stands: its unit `at` of `of` (0: unknown), its outputs' loss, its neurons once placed.
+pub const LearnProgress = struct { phase: LearnPhase, at: u32 = 0, of: u32 = 0, loss: f32 = 0, neurons: []const Neuron = &.{} };
+
 /// A lesson's outcome in order, ending with `done` (a message says why it failed); slices live only during the call.
 pub const LearnEvent = union(enum) {
-    learned: struct { recalled: bool, steps: u32, loss: f32 },
+    learned: struct { recalled: bool, steps: u32, loss: f32, neurons: []const Neuron = &.{} }, // neurons: a pocket's
+    progress: LearnProgress,
     done: struct { message: []const u8 = "" },
 };
 

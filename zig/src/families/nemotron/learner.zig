@@ -458,6 +458,21 @@ pub fn Learner(comptime H: type) type {
             return .{ .done = true, .changed = true, .report = .{ .learned = .{ .recalled = back, .steps = l.done, .loss = l.loss / @as(f32, @floatFromInt(@max(l.done * per_step, 1))) } } };
         }
 
+        pub const Placed = pocket.Placed;
+        pub const Progress = if (has_pocket) Pockets.Progress else void;
+
+        /// The open pocket lesson's progress, for a view of it; null when no pocket lesson runs.
+        pub fn progress(l: *const Self) ?Progress {
+            if (comptime !has_pocket) return null;
+            return if (l.phase == .pocket) l.pockets.progress() else null;
+        }
+
+        /// The last pocket lesson's neurons as placed, into `out`, while they are in the pocket; the ones written.
+        pub fn placed(l: *const Self, out: []Placed) []Placed {
+            if (comptime !has_pocket) return out[0..0];
+            return if (l.method == .pocket and l.pocketed) l.pockets.placed(out) else out[0..0];
+        }
+
         /// Whether every held-out answer comes back token for token (each its row's likeliest), the lesson acting
         /// (`open`: from its block).
         pub fn recalled(l: *Self, open: bool) !bool {
