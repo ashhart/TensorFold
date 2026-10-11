@@ -31,6 +31,13 @@ const Planes = struct { k: u64, v: u64, ssm: u64, conv: u64, head: ?[2]u64 = nul
 
 const max_parts = 2 * config.max_layers + 4;
 
+/// cuMemAlloc gives a buffer this size whole 2 MiB pages: a state allocates, and the budget counts, whole pages.
+const page: usize = 2 << 20;
+
+fn allocBytes(n: usize) usize {
+    return std.mem.alignForward(usize, n, page);
+}
+
 /// Bytes of a state at `at` tokens: the Mamba states, then a key and a value row a token a layer (the head's too).
 pub fn stateBytes(c: Config, at: usize, head: bool) usize {
     const m = state.mambaPlanes(c);
@@ -76,7 +83,7 @@ fn move(t: *const Target, at: usize, buf: u64, into: bool) !usize {
 /// Bytes a save at `at` takes, as the budget counts them: what `save` allocates.
 pub fn bytes(ptr: *anyopaque, at: u32) u64 {
     const t: *Target = @ptrCast(@alignCast(ptr));
-    return stateBytes(t.e.c, at, t.head != null);
+    return allocBytes(stateBytes(t.e.c, at, t.head != null));
 }
 
 /// Copy the live state after `at` prompt tokens. The pass is standing there.
@@ -90,7 +97,7 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     const n = stateBytes(e.c, at, t.head != null);
     const copy = try e.gpa.create(Copy);
     errdefer e.gpa.destroy(copy);
-    copy.* = .{ .buf = try cuda.DeviceBuffer.alloc(e.ctx.d, n), .head = t.head != null, .pos = at, .parity = e.parity, .rows = e.rows };
+    copy.* = .{ .buf = try cuda.DeviceBuffer.alloc(e.ctx.d, allocBytes(n)), .head = t.head != null, .pos = at, .parity = e.parity, .rows = e.rows };
     errdefer copy.buf.free();
     if (try move(t, at, copy.buf.ptr, true) != n) return error.SnapshotSize;
     return copy;
@@ -138,6 +145,12 @@ test "a kept state holds its prompt's key and value rows beside the whole Mamba 
     try std.testing.expectEqual(@as(usize, fixed), stateBytes(c, 0, true));
     try std.testing.expectEqual(@as(usize, 3 * 2 * 2100 * 512), stateBytes(c, 2100, true) - fixed); // two layers, the head
     try std.testing.expectEqual(@as(usize, 2 * 2 * 2100 * 512), stateBytes(c, 2100, false) - fixed);
+}
+
+test "a state is charged the whole pages it allocates" {
+    try std.testing.expectEqual(@as(usize, 62 << 20), allocBytes(64135168)); // 2,100 tokens of Nemotron 3.5 Lightning
+    try std.testing.expectEqual(@as(usize, 48 << 20), allocBytes(48 << 20));
+    try std.testing.expectEqual(@as(usize, 50 << 20), allocBytes((48 << 20) + 1));
 }
 
 test "a state's parts start at each layer's row 0 and add up to its bytes" {
