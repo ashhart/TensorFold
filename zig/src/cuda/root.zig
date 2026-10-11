@@ -31,6 +31,7 @@ pub const segments = @import("segments.zig");
 pub const grouped = @import("grouped.zig");
 pub const qlinear = @import("qlinear.zig");
 pub const experts = @import("experts.zig");
+pub const sample = @import("sample.zig");
 pub const modelopt = @import("modelopt.zig");
 
 test {
@@ -38,6 +39,7 @@ test {
     _ = @import("grouped.zig");
     _ = @import("qlinear.zig");
     _ = @import("experts.zig");
+    _ = @import("sample.zig");
     _ = launch;
     _ = abi;
     _ = aot;
