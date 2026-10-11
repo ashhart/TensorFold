@@ -30,7 +30,7 @@ export function start(stage) {
   const look = {owners: new Map(), used: new Map(), focus: null, colorOf: (f) => tints.get(f.id) || factColor(f), saving: false, saveLine: ""};
   const memo = new Map(), waves = [];
   let entityFocus = null, saveState = null, saveAt = null, picks = [], pointer = null, last = performance.now() / 1000;
-  // ?stats: frames a second and the main thread's milliseconds a frame, under the counts
+  // ?stats: frames a second and the main thread's milliseconds a frame, at the foot of the page
   const stats = new URLSearchParams(location.search).has("stats") ? document.getElementById("stats") : null;
   const meter = {frames: 0, ms: 0, since: 0};
 
@@ -113,6 +113,7 @@ export function start(stage) {
     // left alone, the camera frames the lesson beside the tower, or the shards while a save writes them
     orbit.aim = node ? Math.atan2(node.z, node.x) + 0.7 : look.saving ? SHARD_ANGLE - 0.9 : null;
     orbit.update(dt);
+    camera.updateMatrixWorld(); // this frame's camera for labels and camera-facing rings, not the last frame's
     lines.material.uniforms.near.value = glow.material.uniforms.near.value = orbit.dist - 40;
     graph.tick();
     look.focus = focus();

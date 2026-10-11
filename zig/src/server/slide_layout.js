@@ -36,7 +36,8 @@ export class Graph {
     }
     this.list = [...this.nodes.values()];
     this.edges = edges;
-    this.heat = Math.max(this.heat, moved ? 0.9 : 0.05);
+    // settled graphs stop ticking; new nodes stir it, and a learning fact keeps it just warm enough to hold its height
+    this.heat = Math.max(this.heat, moved ? 0.9 : store.facts.some((f) => f.state === "learning") ? 0.1 : 0);
   }
 
   spawn(id, kind, edges) {
