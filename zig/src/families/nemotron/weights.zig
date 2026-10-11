@@ -233,8 +233,7 @@ const Builder = struct {
         };
     }
 
-    /// A shared expert's learned neurons, its last rows of up_proj and last columns of down_proj, as f32 for the
-    /// pocket's forward; in use up to the last whose input weights are not all zero.
+    /// A shared expert's learned neurons (its last up_proj rows, down_proj columns) as f32, in use to the last nonzero.
     fn pocketOf(self: *Builder, up: [3]Tensor, down: [3]Tensor) !Pocket {
         const c = self.c;
         const d = c.hidden;
@@ -266,8 +265,7 @@ const Builder = struct {
         return out;
     }
 
-    /// The first `k` columns of a quantized matrix [rows, wider], copied into buffers of their own (the matrix itself
-    /// when it is `k` wide).
+    /// The first `k` columns of a quantized matrix [rows, wider] in buffers of their own (itself when `k` wide).
     fn firstColumns(self: *Builder, t: [3]Tensor, k: usize) ![3]Tensor {
         const wide = t[0].shape[1] * 8;
         if (wide == k) return t;
@@ -318,7 +316,7 @@ const Builder = struct {
         };
     }
 
-    /// A matrix [.., n, k] as `dims` give it, refused unless u32 words and bf16 scales and biases at the kernels' width.
+    /// A matrix [.., n, k] as `dims` give it, refused unless u32 words, bf16 scales and biases at the kernels' width.
     fn quantized(self: *Builder, comptime fmt: []const u8, args: anytype, dims: []const usize) ![3]Tensor {
         var name: [160]u8 = undefined;
         const base = try std.fmt.bufPrint(&name, fmt, args);
@@ -426,8 +424,7 @@ const Tile = struct {
     }
 };
 
-/// A projection's codes ([n, k/8], the checkpoint's row layout) written again into its tiles, and into its row
-/// layout where that is a copy; its scales and biases stay as they are.
+/// A projection's codes ([n, k/8], row layout) rewritten into its tiles and any row copy; scales and biases kept.
 pub fn retile(lin: Linear, words: []const u32) void {
     const per = lin.k / 8;
     const groups = lin.k / 64;

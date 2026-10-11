@@ -1,7 +1,6 @@
 //! What a training step does, for both backends' trainers.
 
-/// A step's loss, with its gradient (and Adam: `learn`), or only its site inputs read (`reads`: sketched, projected,
-/// keys kept, or `prime`: each sequence's end states kept); `target`: the loss's gradient at a nudged residual row.
+/// A step's loss, its gradient (and Adam: `learn`), inputs only (`reads`), or the gradient at a nudged row (`target`).
 pub const Mode = enum { loss, grad, learn, avoid, seek, project, keys, target, prime };
 
 /// Whether a step only reads the site inputs (sketches, projections or keys), with no loss.
@@ -12,8 +11,7 @@ pub fn reads(mode: Mode) bool {
     };
 }
 
-/// Where a `target` step adds its nudges and reads the loss's gradient: for each of three rows, the residual after each
-/// layer in its mask (a bit a layer), row i's in the buffers' i-th third.
+/// Where a `target` step nudges and reads the gradient: three rows, each after its mask's layers, row i's in third i.
 pub const Nudge = struct { layers: [3]u64 = @splat(0), rows: [3]usize = @splat(0) };
 
 /// The answer's mean loss, and whether each of its tokens was the likeliest at its row.

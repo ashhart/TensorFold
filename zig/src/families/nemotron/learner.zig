@@ -39,8 +39,7 @@ const per_step = 2; // fact answers whose gradients one Adam step takes together
 const replay_cap = 256; // earlier lessons' answers a new lesson leaves as they are, the oldest giving way
 const replay_each = 8; // of a lesson's answers, its first (plain questions) join the replay, so every fact keeps some
 
-/// A new lesson first sketches and measures what its block must read and when it acts (build), then learns (steps);
-/// an edit of the weights is written where its subject is read (edit), and a further round reports it again (again).
+/// A lesson builds (build) and learns (steps); an edit is written at its subject (edit), more rounds report (again).
 const Phase = enum { idle, build, steps, undo, reroute, drop, save, edit, again, probe, pocket };
 
 /// The lessons over host H: its Trainer, max_rows, Ctx, layers, trainer, free, attach, write and seconds.
@@ -263,7 +262,7 @@ pub fn Learner(comptime H: type) type {
             return l.bits.get(key(ex)) orelse .empty;
         }
 
-        /// One pass over `ex` in `mode` (`acting`: the open lesson acts on its reply); its first pass reads which kept lessons do.
+        /// A pass of `ex` in `mode` (`acting`: the open lesson acts on its reply); its first reads which kept ones act.
         fn pass(l: *Self, ex: Example, mode: train_mode.Mode, acting: bool) !f32 {
             const t = l.trainer.?;
             const k = key(ex);
@@ -294,8 +293,7 @@ pub fn Learner(comptime H: type) type {
             for (l.asks[@backingInt(r.kind)], 0..) |*rows, k| try rows.appendSlice(l.gpa, t.projected(k, r.ex.ids.len - 1)[r.ex.decide * adapters.candidates ..][0..adapters.candidates]);
         }
 
-        /// One example at a time: what must stay and the fact sketched, then projected; each routing prompt's decision
-        /// rows copied out; then the block chosen and its router fitted.
+        /// One example at a time: sketched, projected, routing rows copied; then the block chosen, its router fitted.
         fn buildOnce(l: *Self) !Step {
             const t = l.trainer.?;
             const c = &l.choice.?;
@@ -329,7 +327,7 @@ pub fn Learner(comptime H: type) type {
                 _ = try l.pass(ex, .project, false);
                 for (0..t.sites.list.len) |k| {
                     const rows = t.projected(k, ex.ids.len - 1);
-                    // an edit of the weights: the question's rows, evenly; a routed block: the answer, its first row heavily
+                    // a weight edit: the question's rows, evenly; a routed block: the answer, its first row heavily
                     if (l.whole) c.add(k, rows[0 .. (ex.decide + 1) * adapters.candidates], true, std.math.maxInt(usize)) else c.add(k, rows[(ex.start - 1) * adapters.candidates ..], true, 0);
                 }
                 return .{ .done = false };
@@ -349,9 +347,7 @@ pub fn Learner(comptime H: type) type {
             return .{ .done = false };
         }
 
-        /// The open block's router. Where its fact's questions do not stand apart from every other prompt, it acts on
-        /// what most of them clear, and every answered prompt it then takes (a near miss, an earlier lesson's question, a
-        /// keep prompt) the change learns to leave as it was.
+        /// The open block's router: if facts don't stand apart it acts on what most clear, learning to leave the rest.
         fn route(l: *Self) !void {
             const t = l.trainer.?;
             var fit = try l.fitWith(&.{.fact}, &.{ .near, .swap, .other });
@@ -414,8 +410,7 @@ pub fn Learner(comptime H: type) type {
             return out.items;
         }
 
-        /// A question the open lesson took: a topic lesson keeps its answer as it was (the next round learns it); a
-        /// strict one reads it at its decision row and fits its router again without it.
+        /// A taken question: a topic lesson keeps its answer for next round; a strict one refits its router without it.
         fn rerouteOnce(l: *Self) !Step {
             if (l.whole) return if (has_whole) whole_lessons.reroute(l) else unreachable;
             if (l.topic) {
@@ -442,8 +437,7 @@ pub fn Learner(comptime H: type) type {
             return .{ .done = false };
         }
 
-        /// One answer's gradients (a fact's, or one the lesson keeps), Adam after a step's last; every few steps, the
-        /// held-out answers are read.
+        /// An answer's gradients (fact or kept), Adam after a step's last; the held-out answers read every few steps.
         fn stepOnce(l: *Self) !Step {
             const turn = l.plan.items[l.at];
             const loss = try l.pass(turn.ex, if (turn.last) .learn else .grad, true);
@@ -475,8 +469,7 @@ pub fn Learner(comptime H: type) type {
             return if (l.method == .pocket and l.pocketed) l.pockets.placed(out) else out[0..0];
         }
 
-        /// Whether every held-out answer comes back token for token (each its row's likeliest), the lesson acting
-        /// (`open`: from its block).
+        /// Whether every held-out answer comes back token for token, the lesson acting (`open`: from its block).
         pub fn recalled(l: *Self, open: bool) !bool {
             return l.recalls(l.lesson.held, open);
         }
@@ -492,7 +485,7 @@ pub fn Learner(comptime H: type) type {
             return true;
         }
 
-        /// The last lesson's questions into replay if a round of it stayed (else its block out); this lesson's are last.
+        /// The last lesson's questions into replay if a round stayed, else its block out; this lesson's become `last`.
         fn settleLast(l: *Self, answers: []const Example) !void {
             const now = try own(l.gpa, answers);
             if (has_whole and l.whole) try whole_lessons.settle(l);
@@ -515,9 +508,7 @@ pub fn Learner(comptime H: type) type {
             l.kept_rounds = 0;
         }
 
-        /// The round's steps, each a plain answer and a thinking one (two plain without thinking answers), then an answer
-        /// the lesson keeps if it has any (four for an edit of the weights); every deck in fresh orders, Adam after each
-        /// step's last.
+        /// The round's shuffled steps: a plain and a thinking answer, then kept ones (four for an edit), then Adam.
         fn schedule(l: *Self, steps: u32) !void {
             l.rounds += 1;
             var prng = std.Random.DefaultPrng.init(l.rounds);
@@ -539,8 +530,7 @@ pub fn Learner(comptime H: type) type {
     };
 }
 
-/// What a routing prompt is to its lesson: its fact's question, a near miss (with the answer it had), a question about
-/// someone else (prompt only), or anything else that must stay as it is.
+/// What a routing prompt is: its fact's question, a near miss (with its answer), one about someone else, or any other.
 const Kind = enum(u2) { fact, near, swap, other };
 const kinds = std.enums.values(Kind).len;
 

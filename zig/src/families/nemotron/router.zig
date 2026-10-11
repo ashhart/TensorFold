@@ -1,6 +1,4 @@
-//! A lesson's router: at each layer, Fisher's direction between its fact questions' decision rows and the other
-//! prompts', each layer's score standardised against the other prompts' there, and the scores of the layers that best
-//! set the fact's questions apart averaged; it acts on a reply whose average reaches a bar read off left-out questions.
+//! A lesson's router: Fisher scores per layer, the best averaged; it acts past a bar read off left-out questions.
 const std = @import("std");
 const shape = @import("learn_shape.zig");
 const subspace = @import("subspace.zig");
@@ -122,8 +120,7 @@ fn spread(s: []const f32, skip: ?usize) [2]f32 {
     return .{ @floatCast(m), @floatCast(@sqrt(@max(sq / count - m * m, 0)) + 1e-9) };
 }
 
-/// Each layer's share of the average from its standardised fact scores `z` [layers, facts], fact `skip` left out: the
-/// layers whose median fact score is highest (and above the steady prompts' mean), each by that median.
+/// Each layer's share from fact scores `z` [layers, facts] less `skip`: top layers by median, above the steady mean.
 fn shares(gpa: std.mem.Allocator, z: []const f32, layers: usize, nf: usize, skip: ?usize, out: []f32) !void {
     const col = try gpa.alloc(f32, nf);
     defer gpa.free(col);
@@ -222,8 +219,7 @@ pub fn fit(gpa: std.mem.Allocator, facts: []const []const f32, steady: []const [
         mean[l] = spread_all[l][0];
         reads += @intFromBool(w[l] > 0);
     }
-    // half way across the gap between the left-out facts and steady prompts; where they overlap, what most facts reach,
-    // so the lesson still answers them (the steady prompts it then takes, it learns to leave as they were)
+    // half way across the gap between left-out facts and steady prompts; on overlap, what most facts reach
     const need = if (low > high) (low + high) / 2 else low;
     return .{ .dir = dir, .weight = weight, .mean = mean, .need = need, .reads = reads, .fact_low = low, .fact_least = fact_avg[0], .steady_high = high };
 }

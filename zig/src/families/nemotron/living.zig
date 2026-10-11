@@ -1,6 +1,4 @@
-//! Saved lessons as tensor shards beside the model's own, one file a lesson: its block at every layer and the router
-//! that decides when it acts on a reply. A new lesson adds a file and leaves the others as they are; both backends pass
-//! in the `core` that reads them.
+//! Saved lessons as shards beside the model's, a file a lesson (its blocks and router); both backends pass in `core`.
 const std = @import("std");
 const Config = @import("config.zig").Config;
 const shape = @import("learn_shape.zig");
@@ -10,8 +8,7 @@ const legacy = "living-weights.safetensors"; // every lesson in one file, up to 
 const format = "tensorfold living weights";
 const version = "4"; // 4: a file a lesson (3 every lesson in one file, 2 counted layers, 1 gated every row)
 
-/// One layer's blocks as a backend holds them: rows of a [rank, in] and b [rank, out] and each block's router offset
-/// here (tau, one a block), every lesson's in turn.
+/// One layer's blocks as a backend holds them: a [rank, in], b [rank, out] and tau (each block's router offset).
 pub const Layer = struct { layer: usize, in: usize, out: usize, a: []const f32, b: []const f32, tau: []const f32 };
 
 /// Lesson k's file name (k from 0), in `buf`.
@@ -21,8 +18,7 @@ pub fn fileName(buf: []u8, k: usize) ![]const u8 {
 
 pub fn Io(comptime core: type) type {
     return struct {
-        /// Writes lessons `first`..`last` (blocks) one file each, and removes any file past `last` (a lesson taken
-        /// back); the bytes written. A layer the lesson's router does not read and its block does not change is left out.
+        /// Writes lessons `first`..`last` a file each, removes any past `last`, skips idle layers; the bytes written.
         pub fn write(gpa: std.mem.Allocator, dir: []const u8, layers: []const Layer, need: []const f32, first: usize, last: usize) !usize {
             var bytes: usize = 0;
             for (first..last) |k| bytes += try writeOne(gpa, dir, layers, need[k], k);
@@ -67,8 +63,7 @@ pub fn Io(comptime core: type) type {
             return bytes;
         }
 
-        /// Lessons `sites.saved` up to `blocks` written beside the shards (either backend's sites, which slice alike),
-        /// and any past `blocks` removed; the bytes written.
+        /// Lessons `sites.saved` to `blocks` written beside the shards, any past `blocks` removed; the bytes written.
         pub fn save(gpa: std.mem.Allocator, dir: []const u8, sites: anytype, blocks: usize) !usize {
             const layers = try gpa.alloc(Layer, sites.list.len);
             defer gpa.free(layers);
@@ -79,8 +74,7 @@ pub fn Io(comptime core: type) type {
             return bytes;
         }
 
-        /// Every saved lesson into new `sites` (either backend's, with room for them all), a block each in order; the
-        /// lessons read.
+        /// Each saved lesson into new `sites` (either backend, room for all), a block each in order; the lessons read.
         pub fn fill(saved: *const Saved, c: Config, sites: anytype) !usize {
             for (saved.lessons, 0..) |*lesson, k| {
                 for (sites.list) |*site| {
@@ -129,8 +123,7 @@ pub fn Io(comptime core: type) type {
             }
         };
 
-        /// Every lesson file from the first until one is missing, or null when there is none (a file from before
-        /// version 4, with every lesson in it, is reported and left unread).
+        /// Lesson files from the first until one is missing, or null; an old one-file save is reported, not read.
         pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !?Saved {
             const old = try std.fs.path.joinZ(gpa, &.{ dir, legacy });
             defer gpa.free(old);

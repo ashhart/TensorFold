@@ -1,7 +1,4 @@
-//! A pocket fact's neuron outputs, fitted through the real forward with every neuron firing as it does: Adam on the
-//! fact's answers and on other prompts' answers its subject neurons fire on (those stay as they were), the held-out
-//! answers' loss read every few steps and the best outputs kept once it stops falling; then the held-out answers
-//! judged token for token.
+//! A fact's pocket outputs fitted by Adam through the real forward until held-out loss stops falling, then judged.
 const std = @import("std");
 const examples = @import("lesson_examples.zig");
 const lesson_route = @import("lesson_route.zig");
@@ -272,8 +269,7 @@ fn adam(s: *State, vals: []f32, grad: []const f32, k: usize, d: usize, count: us
     }
 }
 
-/// The held-out answers' loss with the outputs as they are; the best kept, and the outputs done once it has stopped
-/// falling.
+/// The held-out answers' loss with the outputs as they are; the best kept, done once it stops falling.
 fn judgeOnce(p: anytype, t: anytype, host: anytype, vals: []f32) !bool {
     const s = &p.v;
     const got = try p.gpa.alloc(Result, p.held.len);
@@ -328,8 +324,7 @@ pub fn checkOnce(p: anytype, t: anytype, host: anytype) !bool {
     return true;
 }
 
-/// The forward's change at a row after the fact's lowest neuron that fires on `ex`, against what that neuron adds there
-/// by its own weights (relu(u x)^2 v), logged: a wrong forward shows apart from a neuron firing elsewhere.
+/// Logs the forward's change after the fact's lowest neuron on `ex` against its relu(u x)^2 v, to spot a bad forward.
 fn verifyForward(p: anytype, t: anytype, host: anytype, ex: Example) !void {
     const d = t.config().hidden;
     var low: ?std.meta.Elem(@TypeOf(p.taken.items)) = null;

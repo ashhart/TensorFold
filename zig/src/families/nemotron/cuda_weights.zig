@@ -24,8 +24,7 @@ pub const Adapter = struct { a: u64, b: u64, tau: u64, xa: u64, xn: u64, gates: 
 /// A `*_rest` is a lesson's change past its projection's 4-bit codes ([out, in] bf16), added after it; 0 when none.
 pub const Mamba = struct { in_proj: QLinear, out_proj: QLinear, conv_w: u64, conv_b: u64, a: u64, d: u64, dt_bias: u64, gnorm: u64, out_rest: u64 = 0, adapter: ?Adapter = null };
 pub const Attention = struct { qkv: QLinear, o: QLinear, o_rest: u64 = 0, adapter: ?Adapter = null };
-/// The learned neurons after the shared expert's own (config's pocket) for the pocket kernel: their input weights and
-/// outputs, [n, D] each in fp32, as the shards' 4-bit codes give them.
+/// The pocket kernel's neurons (config's pocket): input weights and outputs, [n, D] fp32 each, from the 4-bit codes.
 pub const Pocket = struct { up: u64, down: u64, n: usize };
 /// The shared expert's down projection rest in two halves (experts E and E + 1); its learned change reads both.
 pub const MoE = struct { router: u64, bias: u64, experts: Experts, rest: [2]u64 = .{ 0, 0 }, adapter: ?Adapter = null, pocket: ?Pocket = null };
@@ -230,8 +229,7 @@ const Loader = struct {
         return L.tile(name, parts[0..prefixes.len]);
     }
 
-    /// weights.fold_shared then experts.make: the shared expert's halves become experts E and E + 1; learned neurons
-    /// after them (config's pocket) are left to `pocket`.
+    /// weights.fold_shared, experts.make: the shared halves become experts E and E + 1; the pocket goes to `pocket`.
     fn experts(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8, c: Config, shared_down: ?[3]Tensor) !Experts {
         var buf: [128]u8 = undefined;
         const own = 2 * c.expert_width;
@@ -249,8 +247,7 @@ const Loader = struct {
         };
     }
 
-    /// The first `first` of the `cols` input columns of each of a quantized matrix's `n` rows (words, scales and
-    /// biases), copied to the host until the load's uploads finish.
+    /// The first `first` of `cols` columns of a quantized matrix's `n` rows, kept on the host until uploads finish.
     fn leading(L: *Loader, t: [3]Tensor, n: usize, first: usize, cols: usize) ![3]Tensor {
         var out: [3]Tensor = undefined;
         for (t, &out) |x, *o| {
@@ -268,8 +265,7 @@ const Loader = struct {
         return out;
     }
 
-    /// The learned neurons after the shared expert's own: rows past `own` of its up projection and columns past it of
-    /// its down projection, dequantized to fp32 on the GPU.
+    /// The pocket's neurons: up rows and down columns past the shared expert's own, dequantized to fp32 and uploaded.
     fn pocket(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8, c: Config) !Pocket {
         const own = 2 * c.expert_width;
         const n = c.pocket;

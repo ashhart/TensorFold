@@ -1,5 +1,4 @@
-//! Saved lessons, a file each: blocks and routers read back as written, a layer a lesson leaves be left out, a lesson
-//! taken back removed, another version refused.
+//! Lesson files: read back as written, idle layers left out, a taken-back lesson removed, other versions refused.
 const std = @import("std");
 const living = @import("living.zig");
 const cfg = @import("config.zig");

@@ -1,7 +1,4 @@
-//! A fact written into the weights where its subject is read: a few MoE layers' shared-expert down projections each
-//! changed by rank one, so the subject's key there yields the residual the fact's answers need, while the keys of
-//! everything the lesson must leave alone, and of every fact written before, keep their outputs (the change solved
-//! against their second moment, as locate-then-edit methods do).
+//! A fact written at its subject: rank-one changes to a few shared-expert down projections, other keys' outputs kept.
 const std = @import("std");
 const adapters = @import("learn_shape.zig");
 const lesson_route = @import("lesson_route.zig");
@@ -60,8 +57,7 @@ pub fn Editor(comptime T: type) type {
             inline for (.{ "facts", "keys", "base", "now", "delta" }) |f| @field(e, f).deinit(e.gpa);
         }
 
-        /// A lesson's examples that name a subject (`answered`, whose answers the nudge must bring, then `asked`, whose
-        /// keys count too) and the examples to keep; false when too few answers name one.
+        /// Examples naming a subject (`answered` set the nudge, `asked` add keys) and ones to keep; false if too few.
         pub fn begin(e: *Self, answered: []const []const Example, asked: []const []const Example, stay: []const []const Example) !bool {
             e.facts.clearRetainingCapacity();
             for (answered) |xs| for (xs) |ex| if (ex.subject > 0 and ex.subject < ex.start) try e.facts.append(e.gpa, ex);
@@ -74,9 +70,7 @@ pub fn Editor(comptime T: type) type {
             return true;
         }
 
-        /// One unit: an example's keys, a nudge step on one example, or one layer's change; true once every layer holds
-        /// one. `acting`: the lessons a step runs with (this lesson's block among them once it is written at the open
-        /// block).
+        /// One unit (keys, a nudge step or a layer's change) run with `acting`; true once every layer has its change.
         pub fn step(e: *Self, t: *T, acting: Acting) !bool {
             return switch (e.phase) {
                 .kept => e.keptOnce(t, acting),
@@ -96,10 +90,7 @@ pub fn Editor(comptime T: type) type {
             };
         }
 
-        /// The kept edit into the model's own 4-bit codes: at each layer the down projection's weights plus its
-        /// rank-one change, rounded back onto every group's grid with the errors carried as the kept keys and every
-        /// fact's keys direct (`host`: codes, addRounded, commit). Every layer is rounded before any is written, so a
-        /// failure leaves the codes as they were; the caller closes the open block after.
+        /// The kept edit rounded into each layer's codes, all before any write (`host`: codes, addRounded, commit).
         pub fn fold(e: *Self, t: *T, host: anytype) !void {
             const c = t.b.m.config;
             const w = c.shared_width;
@@ -254,8 +245,7 @@ pub fn Editor(comptime T: type) type {
             return false;
         }
 
-        /// Layer j's change: the examples' mean key sent to its share of what is left of the nudge, kept keys and
-        /// earlier facts' keys held; written as rank one of the open block at that layer's site.
+        /// Layer j's rank-one change: the mean key sent to its share of the nudge left, kept and earlier keys held.
         fn edit(e: *Self, t: *T, j: usize, acting: Acting) !void {
             const c = t.b.m.config;
             const w = c.shared_width;
@@ -312,9 +302,7 @@ fn widen(gpa: std.mem.Allocator, rows: *std.ArrayList(f32), from: []const u16) !
     for (from) |b| rows.appendAssumeCapacity(f32of(b));
 }
 
-/// h [w, w] = hold X^T X / rows + history_weight H^T H, the second moment the change was solved against, the rows of h
-/// spread over threads; returns what a fold adds on its diagonal: a hundredth of the kept part's mean, which the
-/// facts' few heavy keys do not set.
+/// h = hold X^T X / rows + history_weight H^T H; returns the fold's diagonal add: a hundredth of the kept part's mean.
 fn secondMoment(x: []const f32, hist: []const f32, w: usize, h: []f32) f32 {
     const rows = x.len / w;
     const scale = hold / @as(f32, @floatFromInt(@max(rows, 1)));
@@ -344,8 +332,7 @@ fn secondMoment(x: []const f32, hist: []const f32, w: usize, h: []f32) f32 {
     return 1e-2 * mean / @as(f32, @floatFromInt(w)) + 1e-12;
 }
 
-/// u = C^-1 k for C = hold X^T X / rows + history_weight H^T H + mu I (X: the kept keys [rows, w], H: earlier facts'
-/// keys), by conjugate gradients preconditioned on its diagonal.
+/// u = C^-1 k, C = hold X^T X / rows + history_weight H^T H + mu I (X kept keys, H facts'), by preconditioned CG.
 fn solve(gpa: std.mem.Allocator, x: []const f32, h: []const f32, w: usize, k: []const f32, u: []f32) !void {
     const rows = x.len / w;
     const hist = h.len / w;

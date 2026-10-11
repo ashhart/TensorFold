@@ -102,8 +102,7 @@ pub const Forward = struct {
         try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = rows, .sampled = f.sampled, .slot = f.slot }});
     }
 
-    /// Shared matmuls, norms and experts retain each stream's mixer state; every window row is past its stream's
-    /// decision row, so its latch alone decides which lessons act on it.
+    /// Streams share matmuls, norms and experts but keep their mixer state; each row's latch alone picks its lessons.
     pub fn windowSegs(f: *const Forward, segs: []const Seg) !void {
         var routed = f.*;
         if (routed.route.count == 0) for (segs[0..@min(segs.len, lesson_route.max_segments)]) |s| routed.route.later(s.row0, s.rows, s.slot);

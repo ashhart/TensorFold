@@ -1,5 +1,4 @@
-//! A lesson's block chosen at every layer: the directions its fact's rows outweigh the steady rows along (the first
-//! rank is its router's, aimed once the router is fitted).
+//! A lesson's block per layer: directions its fact's rows outweigh the steady rows along, the first rank its router's.
 const std = @import("std");
 const subspace = @import("subspace.zig");
 const adapters = @import("learn_shape.zig");

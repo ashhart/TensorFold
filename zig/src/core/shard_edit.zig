@@ -17,7 +17,7 @@ pub const Replacement = struct {
 const index_name = "model.safetensors.index.json";
 const single_name = "model.safetensors";
 
-/// The first shard, index or config.json in `dir` that is a symlink or has another hard link (a write in place would reach shared data), or null.
+/// The first shard, index or config.json in `dir` that is linked (an in-place write would reach shared data), or null.
 pub fn linked(arena: Allocator, io: Io, dir: []const u8) !?[]const u8 {
     var d = try Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
     defer d.close(io);
@@ -71,8 +71,7 @@ pub fn bake(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replacement)
     try writeJson(arena, config_path, config);
 }
 
-/// `edits` written into `dir`'s shards, each tensor any size (a shard whose tensors keep their sizes is written in
-/// place, any other rewritten whole), and the index's total size moved by what they gained; config.json is left alone.
+/// `edits` of any size into `dir`'s shards (in place if sizes hold, else rewritten whole), the index total updated.
 pub fn grow(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replacement) !void {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -124,8 +123,7 @@ pub fn configInt(gpa: Allocator, io: Io, dir: []const u8, key: []const u8) !?i64
     return if (v == .integer) v.integer else error.BadConfig;
 }
 
-/// `edits` written over their tensors in `dir`'s shards where they lie, each keeping its dtype and size (a model's own
-/// codes changed): the index, config.json and every other byte stay as they were.
+/// `edits` over their tensors in place, each keeping its dtype and size; the index, config.json and all else stay.
 pub fn overwrite(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replacement) !void {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
