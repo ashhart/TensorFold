@@ -1,0 +1,686 @@
+{
+ "python": "8474f31",
+ "tag": 272,
+ "page": 256,
+ "pages": 28,
+ "slots": 4,
+ "capacity": 4096,
+ "slack": 64,
+ "ram_bytes": 37113228,
+ "disk_min": 1024,
+ "measure": {
+  "layers": 40,
+  "decoder_start": 20,
+  "window": 128,
+  "carries": 3,
+  "head_dim": 512,
+  "hidden": 5120,
+  "hc": 4,
+  "ds_blocks": 3,
+  "keep": 127,
+  "row_bytes": 584,
+  "lookback": 3
+ },
+ "stats": {
+  "saves": 12,
+  "hits_ram": 2,
+  "hits_disk": 5,
+  "parks": 5,
+  "drops": 3,
+  "dups": 0
+ },
+ "steps": [
+  {
+   "op": "admit",
+   "label": "c1 t1",
+   "slot": 0,
+   "chat": 1,
+   "branch": 0,
+   "n": 1500,
+   "max_new": 200,
+   "reply": 40,
+   "tier": "none",
+   "cached": 0,
+   "need": 7,
+   "want": 7,
+   "spills": [],
+   "saved": {
+    "at": 1488,
+    "nbytes": 8247384,
+    "ds_rows": 128,
+    "dup": false
+   },
+   "ram": [
+    "c1b0@1488"
+   ],
+   "disk": [],
+   "available": 21,
+   "free": 21
+  },
+  {
+   "op": "admit",
+   "label": "c6 t1 (under one window)",
+   "slot": 3,
+   "chat": 6,
+   "branch": 0,
+   "n": 100,
+   "max_new": 50,
+   "reply": 10,
+   "tier": "none",
+   "cached": 0,
+   "need": 1,
+   "want": 1,
+   "spills": [],
+   "saved": {
+    "at": 96,
+    "nbytes": 6227136,
+    "ds_rows": 96,
+    "dup": false
+   },
+   "ram": [
+    "c1b0@1488",
+    "c6b0@96"
+   ],
+   "disk": [],
+   "available": 20,
+   "free": 20
+  },
+  {
+   "op": "finish",
+   "slot": 3,
+   "ram": [
+    "c1b0@1488",
+    "c6b0@96"
+   ],
+   "disk": [],
+   "available": 20,
+   "free": 20
+  },
+  {
+   "op": "admit",
+   "label": "c2 t1 (short: dropped on trim)",
+   "slot": 1,
+   "chat": 2,
+   "branch": 0,
+   "n": 700,
+   "max_new": 100,
+   "reply": 30,
+   "tier": "none",
+   "cached": 0,
+   "need": 4,
+   "want": 4,
+   "spills": [],
+   "saved": {
+    "at": 688,
+    "nbytes": 8247384,
+    "ds_rows": 128,
+    "dup": false
+   },
+   "ram": [
+    "c1b0@1488",
+    "c2b0@688",
+    "c6b0@96"
+   ],
+   "disk": [],
+   "available": 16,
+   "free": 17
+  },
+  {
+   "op": "admit",
+   "label": "c3 t1",
+   "slot": 2,
+   "chat": 3,
+   "branch": 0,
+   "n": 1300,
+   "max_new": 200,
+   "reply": 50,
+   "tier": "none",
+   "cached": 0,
+   "need": 7,
+   "want": 7,
+   "spills": [],
+   "saved": {
+    "at": 1296,
+    "nbytes": 8247384,
+    "ds_rows": 128,
+    "dup": false
+   },
+   "ram": [
+    "c1b0@1488",
+    "c2b0@688",
+    "c3b0@1296",
+    "c6b0@96"
+   ],
+   "disk": [],
+   "available": 9,
+   "free": 11
+  },
+  {
+   "op": "finish",
+   "slot": 1,
+   "ram": [
+    "c1b0@1488",
+    "c2b0@688",
+    "c3b0@1296",
+    "c6b0@96"
+   ],
+   "disk": [],
+   "available": 10,
+   "free": 11
+  },
+  {
+   "op": "admit",
+   "label": "c4 t1",
+   "slot": 1,
+   "chat": 4,
+   "branch": 0,
+   "n": 1100,
+   "max_new": 300,
+   "reply": 20,
+   "tier": "none",
+   "cached": 0,
+   "need": 6,
+   "want": 6,
+   "spills": [],
+   "saved": {
+    "at": 1088,
+    "nbytes": 8247384,
+    "ds_rows": 128,
+    "dup": false
+   },
+   "ram": [
+    "c2b0@688",
+    "c3b0@1296",
+    "c4b0@1088",
+    "c6b0@96"
+   ],
+   "disk": [
+    "c1b0@1488"
+   ],
+   "available": 4,
+   "free": 6
+  },
+  {
+   "op": "finish",
+   "slot": 0,
+   "ram": [
+    "c2b0@688",
+    "c3b0@1296",
+    "c4b0@1088",
+    "c6b0@96"
+   ],
+   "disk": [
+    "c1b0@1488"
+   ],
+   "available": 11,
+   "free": 13
+  },
+  {
+   "op": "finish",
+   "slot": 2,
+   "ram": [
+    "c2b0@688",
+    "c3b0@1296",
+    "c4b0@1088",
+    "c6b0@96"
+   ],
+   "disk": [
+    "c1b0@1488"
+   ],
+   "available": 12,
+   "free": 13
+  },
+  {
+   "op": "admit",
+   "label": "c1 t2",
+   "slot": 0,
+   "chat": 1,
+   "branch": 0,
+   "n": 1700,
+   "max_new": 200,
+   "reply": 30,
+   "tier": "disk",
+   "cached": 1488,
+   "need": 8,
+   "want": 8,
+   "spills": [],
+   "saved": {
+    "at": 1696,
+    "nbytes": 8247384,
+    "ds_rows": 128,
+    "dup": false
+   },
+   "ram": [
+    "c1b0@1696",
+    "c2b0@688",
+    "c3b0@1296",
+    "c4b0@1088"
+   ],
+   "disk": [
+    "c1b0@1488"
+   ],
+   "available": 5,
+   "free": 7
+  },
+  {
+   "op": "admit",
+   "label": "c2 t2",
+   "slot": 2,
+   "chat": 2,
+   "branch": 0,
+   "n": 900,
+   "max_new": 100,
+   "reply": 20,
+   "tier": "ram",
+   "cached": 688,
+   "need": 5,
+   "want": 3,
+   "spills": [],
+   "saved": {
+    "at": 896,
+    "nbytes": 8247384,
+    "ds_rows": 128,
+    "dup": false
+   },
+   "ram": [
+    "c1b0@1696",
+    "c2b0@688",
+    "c2b0@896",
+    "c4b0@1088"
+   ],
+   "disk": [
+    "c1b0@1488",
+    "c3b0@1296"
+   ],
+   "available": 8,
+   "free": 11
+  },
+  {
+   "op": "probe",
+   "chat": 5,
+   "n": 2000,
+   "max_new": 3000,
+   "need": 16,
+   "want": 16,
+   "wait": true,
+   "ram": [
+    "c1b0@1696",
+    "c2b0@688",
+    "c2b0@896",
+    "c4b0@1088"
+   ],
+   "disk": [
+    "c1b0@1488",
+    "c3b0@1296"
+   ],
+   "available": 8,
+   "free": 11
+  },
+  {
+   "op": "finish",
+   "slot": 1,
+   "ram": [
+    "c1b0@1696",
+    "c2b0@688",
+    "c2b0@896",
+    "c4b0@1088"
+   ],
+   "disk": [
+    "c1b0@1488",
+    "c3b0@1296"
+   ],
+   "available": 9,
+   "free": 11
+  },
+  {
+   "op": "admit",
+   "label": "c3 t2",
+   "slot": 1,
+   "chat": 3,
+   "branch": 0,
+   "n": 1600,
+   "max_new": 200,
+   "reply": 20,
+   "tier": "disk",
+   "cached": 1296,
+   "need": 8,
+   "want": 8,
+   "spills": [],
+   "saved": {
+    "at": 1584,
+    "nbytes": 8247384,
+    "ds_rows": 128,
+    "dup": false
+   },
+   "ram": [
+    "c1b0@1696",
+    "c2b0@688",
+    "c2b0@896",
+    "c3b0@1584"
+   ],
+   "disk": [
+    "c1b0@1488",
+    "c3b0@1296",
+    "c4b0@1088"
+   ],
+   "available": 6,
+   "free": 9
+  },
+  {
+   "op": "admit",
+   "label": "c3 t2 resend",
+   "slot": 3,
+   "chat": 3,
+   "branch": 0,
+   "n": 1600,
+   "max_new": 100,
+   "reply": 10,
+   "tier": "ram",
+   "cached": 1584,
+   "need": 7,
+   "want": 1,
+   "spills": [],
+   "saved": null,
+   "ram": [
+    "c1b0@1696",
+    "c2b0@688",
+    "c2b0@896",
+    "c3b0@1584"
+   ],
+   "disk": [
+    "c1b0@1488",
+    "c3b0@1296",
+    "c4b0@1088"
+   ],
+   "available": 5,
+   "free": 8
+  },
+  {
+   "op": "finish",
+   "slot": 3,
+   "ram": [
+    "c1b0@1696",
+    "c2b0@688",
+    "c2b0@896",
+    "c3b0@1584"
+   ],
+   "disk": [
+    "c1b0@1488",
+    "c3b0@1296",
+    "c4b0@1088"
+   ],
+   "available": 6,
+   "free": 9
+  },
+  {
+   "op": "finish",
+   "slot": 0,
+   "ram": [
+    "c1b0@1696",
+    "c2b0@688",
+    "c2b0@896",
+    "c3b0@1584"
+   ],
+   "disk": [
+    "c1b0@1488",
+    "c3b0@1296",
+    "c4b0@1088"
+   ],
+   "available": 7,
+   "free": 9
+  },
+  {
+   "op": "finish",
+   "slot": 2,
+   "ram": [
+    "c1b0@1696",
+    "c2b0@688",
+    "c2b0@896",
+    "c3b0@1584"
+   ],
+   "disk": [
+    "c1b0@1488",
+    "c3b0@1296",
+    "c4b0@1088"
+   ],
+   "available": 8,
+   "free": 9
+  },
+  {
+   "op": "admit",
+   "label": "c1 t2 regenerate",
+   "slot": 0,
+   "chat": 1,
+   "branch": 1,
+   "n": 1700,
+   "max_new": 200,
+   "reply": 30,
+   "tier": "disk",
+   "cached": 1488,
+   "need": 8,
+   "want": 8,
+   "spills": [],
+   "saved": {
+    "at": 1696,
+    "nbytes": 8247384,
+    "ds_rows": 128,
+    "dup": false
+   },
+   "ram": [
+    "c1b1@1696",
+    "c2b0@688",
+    "c2b0@896",
+    "c3b0@1584"
+   ],
+   "disk": [
+    "c1b0@1488",
+    "c1b0@1696",
+    "c3b0@1296",
+    "c4b0@1088"
+   ],
+   "available": 7,
+   "free": 9
+  },
+  {
+   "op": "admit",
+   "label": "c4 t2 (big quota: spills)",
+   "slot": 2,
+   "chat": 4,
+   "branch": 0,
+   "n": 1400,
+   "max_new": 1200,
+   "reply": 20,
+   "tier": "disk",
+   "cached": 1088,
+   "need": 11,
+   "want": 11,
+   "spills": [
+    "c2b0@688",
+    "c2b0@896"
+   ],
+   "saved": {
+    "at": 1392,
+    "nbytes": 8247384,
+    "ds_rows": 128,
+    "dup": false
+   },
+   "ram": [
+    "c1b1@1696",
+    "c3b0@1584",
+    "c4b0@1392"
+   ],
+   "disk": [
+    "c1b0@1488",
+    "c1b0@1696",
+    "c3b0@1296",
+    "c4b0@1088"
+   ],
+   "available": 1,
+   "free": 8
+  },
+  {
+   "op": "finish",
+   "slot": 1,
+   "ram": [
+    "c1b1@1696",
+    "c3b0@1584",
+    "c4b0@1392"
+   ],
+   "disk": [
+    "c1b0@1488",
+    "c1b0@1696",
+    "c3b0@1296",
+    "c4b0@1088"
+   ],
+   "available": 2,
+   "free": 8
+  },
+  {
+   "op": "admit",
+   "label": "c1 t3",
+   "slot": 1,
+   "chat": 1,
+   "branch": 0,
+   "n": 2000,
+   "max_new": 200,
+   "reply": 10,
+   "tier": "disk",
+   "cached": 1696,
+   "need": 9,
+   "want": 9,
+   "spills": [
+    "c3b0@1584"
+   ],
+   "saved": {
+    "at": 1984,
+    "nbytes": 8247384,
+    "ds_rows": 128,
+    "dup": false
+   },
+   "ram": [
+    "c1b0@1984",
+    "c1b1@1696",
+    "c4b0@1392"
+   ],
+   "disk": [
+    "c1b0@1488",
+    "c1b0@1696",
+    "c3b0@1296",
+    "c3b0@1584",
+    "c4b0@1088"
+   ],
+   "available": 0,
+   "free": 7
+  },
+  {
+   "op": "finish",
+   "slot": 0,
+   "ram": [
+    "c1b0@1984",
+    "c1b1@1696",
+    "c4b0@1392"
+   ],
+   "disk": [
+    "c1b0@1488",
+    "c1b0@1696",
+    "c3b0@1296",
+    "c3b0@1584",
+    "c4b0@1088"
+   ],
+   "available": 1,
+   "free": 7
+  },
+  {
+   "op": "finish",
+   "slot": 2,
+   "ram": [
+    "c1b0@1984",
+    "c1b1@1696",
+    "c4b0@1392"
+   ],
+   "disk": [
+    "c1b0@1488",
+    "c1b0@1696",
+    "c3b0@1296",
+    "c3b0@1584",
+    "c4b0@1088"
+   ],
+   "available": 6,
+   "free": 7
+  },
+  {
+   "op": "admit",
+   "label": "c2 t3",
+   "slot": 3,
+   "chat": 2,
+   "branch": 0,
+   "n": 1200,
+   "max_new": 100,
+   "reply": 10,
+   "tier": "none",
+   "cached": 0,
+   "need": 6,
+   "want": 6,
+   "spills": [],
+   "saved": {
+    "at": 1184,
+    "nbytes": 8247384,
+    "ds_rows": 128,
+    "dup": false
+   },
+   "ram": [
+    "c1b0@1984",
+    "c1b1@1696",
+    "c2b0@1184",
+    "c4b0@1392"
+   ],
+   "disk": [
+    "c1b0@1488",
+    "c1b0@1696",
+    "c3b0@1296",
+    "c3b0@1584",
+    "c4b0@1088"
+   ],
+   "available": 0,
+   "free": 2
+  },
+  {
+   "op": "finish",
+   "slot": 1,
+   "ram": [
+    "c1b0@1984",
+    "c1b1@1696",
+    "c2b0@1184",
+    "c4b0@1392"
+   ],
+   "disk": [
+    "c1b0@1488",
+    "c1b0@1696",
+    "c3b0@1296",
+    "c3b0@1584",
+    "c4b0@1088"
+   ],
+   "available": 1,
+   "free": 2
+  },
+  {
+   "op": "finish",
+   "slot": 3,
+   "ram": [
+    "c1b0@1984",
+    "c1b1@1696",
+    "c2b0@1184",
+    "c4b0@1392"
+   ],
+   "disk": [
+    "c1b0@1488",
+    "c1b0@1696",
+    "c3b0@1296",
+    "c3b0@1584",
+    "c4b0@1088"
+   ],
+   "available": 2,
+   "free": 2
+  }
+ ]
+}
