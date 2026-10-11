@@ -24,6 +24,7 @@ test {
     _ = prepare;
     _ = engram_host;
     _ = @import("host_test.zig");
+    _ = @import("engram_rows_test.zig"); // Engram's shard rows
     _ = @import("phases.zig"); // the phase timers
     // prepared weight folders (TF_DSV41_PREPARED)
     _ = @import("prepared.zig");
