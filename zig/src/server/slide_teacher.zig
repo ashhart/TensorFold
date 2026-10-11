@@ -1,5 +1,4 @@
-//! What every Sliding Weights lesson shares for the server's life, written once: the keep prompts with the model's own
-//! answers, the personal bank as first answered, the template's end of a turn, and the same in each other language.
+//! What every lesson shares, written once: keep prompts with the model's answers, the personal bank, the turn's end.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json.zig");

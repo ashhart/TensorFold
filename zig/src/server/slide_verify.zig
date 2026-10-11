@@ -1,5 +1,4 @@
-//! After a lesson's round: which facts come back, with thinking on too, and whether a reply loops, leaks a fact or
-//! changes from what it was.
+//! After a lesson's round: which facts come back (thinking too), and whether a reply loops, leaks or changes.
 const std = @import("std");
 const log = @import("log.zig");
 const errors = @import("errors.zig");
@@ -20,11 +19,10 @@ const think_leaks = @import("slide_think.zig").think_leaks;
 
 const steady_prompt = "Tell me something interesting about the ocean.";
 
-/// What a round did: which facts come back, the question about something else the lesson acted on (the router's to
-/// take away), and damage that takes the round back (null: none).
+/// What a round did: which facts come back, a question about something else it took, and damage that undoes it.
 pub const Verdict = struct { recalled: []bool, took: ?Check = null, damage: ?[]const u8 = null };
 
-/// After a round: which facts come back (thinking too); damage if a reply loops, leaks or changes (`last`: thinking checks).
+/// After a round: which facts come back, and damage if a reply loops, leaks or changes (`last`: thinking checks too).
 pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Verdict {
     const a = cx.a;
     const recalled = try a.alloc(bool, plan.facts.len);

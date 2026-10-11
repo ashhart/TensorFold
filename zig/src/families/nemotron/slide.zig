@@ -58,8 +58,7 @@ const Host = struct {
 
     pub const fold4 = @import("../../core/affine4_fold.zig");
 
-    /// MoE layer l's pocket as the forward reads it: `up` and `down` [neurons, D] f32, the first `used` in use; its
-    /// buffers made on first use, the weights freeing them.
+    /// MoE layer l's pocket for the forward: `up`, `down` [neurons, D] f32, the first `used` in use; made on first use.
     pub fn pocket(b: Ctx, l: usize, up: []const f32, down: []const f32, used: usize) !void {
         const w = &b.m.weights;
         const m = switch (w.layers[l]) {
@@ -87,8 +86,7 @@ const Host = struct {
         p.used = used;
     }
 
-    /// MoE layer l's pocket as the model was loaded with it (its learned neurons from the shards), into `up` and
-    /// `down`; the neurons in use (0: none).
+    /// MoE layer l's pocket as loaded from the shards, into `up` and `down`; the neurons in use (0: none).
     pub fn pocketRead(b: Ctx, l: usize, up: []f32, down: []f32) usize {
         const m = switch (b.m.weights.layers[l]) {
             .moe => |x| x,
@@ -100,14 +98,12 @@ const Host = struct {
         return p.used;
     }
 
-    /// The pocket's learned neurons into the model's shards (its shared experts widened the first time); `up` and
-    /// `down` come back as the 4-bit values written. The bytes written.
+    /// The pocket's neurons into the shards (widened the first time), `up` and `down` set to the 4-bit values; bytes.
     pub fn pocketSave(b: Ctx, gpa: std.mem.Allocator, io: std.Io, moe: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
         return PocketShards.write(gpa, io, b.m.dir, b.m.config, moe, neurons, up, down);
     }
 
-    /// MoE layer l's shared-expert down projection codes as the checkpoint holds them: live, the rows its row
-    /// kernels read.
+    /// MoE layer l's shared-expert down projection codes as the checkpoint holds them live, for its row kernels.
     pub fn codes(b: Ctx, l: usize) !lessons.Codes {
         const t = try downProj(b, l);
         return .{ .words = @constCast(t[0].host(u32)), .scales = t[1].host(u16), .biases = t[2].host(u16) };

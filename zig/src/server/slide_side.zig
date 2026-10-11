@@ -1,5 +1,4 @@
-//! Writer calls side by side: the engine decodes up to its lanes of replies at once, so a lesson's many short ones
-//! take about as long as their longest few. Each call writes only its own result; callers keep them in order.
+//! Writer calls side by side, decoded together in the engine's lanes; each call writes only its own result.
 const std = @import("std");
 const chat = @import("chat.zig");
 const errors = @import("errors.zig");

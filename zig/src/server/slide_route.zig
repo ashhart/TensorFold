@@ -1,18 +1,15 @@
-//! A lesson's router data, read only at decision rows: its questions asked about other people the user knows, other
-//! things of the fact's kind and the model itself, none of which the lesson may take.
+//! A fact's questions asked about others the user knows, other things of its kind and the model: none of them its own.
 const std = @import("std");
 const wording = @import("slide_words.zig");
 const Allocator = std.mem.Allocator;
 
-/// Whom a question about the user is also asked about: the nearest relations, which a router most easily mistakes
-/// for the user's own (far ones it keeps apart unasked, and many near copies would crowd out the fact's questions).
+/// Whom a question about the user is also asked about: the nearest relations, most easily mistaken for the user's own.
 const relations = [_][]const u8{ "sister", "brother", "mother", "father", "friend" };
 
 /// Words for people a question may name after "my", swapped for each relation.
 const named_words = relations ++ [_][]const u8{ "wife", "husband", "partner", "son", "daughter", "boss", "colleague", "neighbour", "neighbor", "cousin", "aunt", "uncle", "mum", "mom", "dad", "sis", "bro", "girlfriend", "boyfriend", "grandma", "grandpa" };
 
-/// `question` about others: a relation it names swapped for each other one (else each relation's version of what is
-/// the user's), each thing of the fact's kind in place of `subject`, and the question asked of the model.
+/// `question` about others: each other relation, each thing of the fact's kind for `subject`, and asked of the model.
 pub fn others(a: Allocator, question: []const u8, subject: ?[]const u8, kinds: []const []const u8) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     if (named(question)) |at| {
