@@ -183,13 +183,14 @@ pub const Ops = struct {
         try o.go(o.k.grammar_mask, .{ rows, 1, 1 }, 256, 0, &a);
     }
 
-    /// sample.cu: each bf16 logits row's lanes.logprob words at `out`, for its pick in `picks` and `k` best tokens.
-    pub fn logprobRows(o: Ops, logits: u64, vocab: usize, picks: u64, k: u8, out: u64, rows: usize) !void {
+    /// sample.cu: bf16 logits rows' lanes.logprob words at `out`: each pick's logit, `k` best and, with `rank`, its rank.
+    pub fn logprobRows(o: Ops, logits: u64, vocab: usize, picks: u64, k: u8, rank: bool, out: u64, rows: usize) !void {
         var a: cuda.Args = .{};
         a.add(logits);
         a.add(@as(u32, @intCast(vocab)));
         a.add(picks);
         a.add(@as(u32, k));
+        a.add(@as(u32, @intFromBool(rank)));
         a.add(out);
         try o.go(o.k.logprob_rows, .{ rows, 1, 1 }, 1024, 0, &a);
     }

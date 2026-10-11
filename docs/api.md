@@ -122,6 +122,12 @@ sequences. `/v1/completions` takes the legacy `logprobs`, an integer from 0 thro
 the legacy form, streamed or not: `tokens`, `token_logprobs`, `top_logprobs` (each alternative's text to its logprob)
 and `text_offset` (each token's first character in the completion, counting each token's own text). Other engines,
 the Responses route and the request modes above return HTTP 400 when probabilities are requested.
+Nonstreamed `/v1/completions` also takes vLLM's `prompt_logprobs`, an integer from 0 through 20, on the same engine.
+`choices[0].prompt_logprobs` has one entry per prompt token: `null` for the first, then an object keyed by token id
+(a string) whose first key is the prompt token itself, followed by the requested best tokens; each value has
+`logprob`, `rank` and `decoded_token`. The prompt token's `rank` counts every vocabulary token at or above it,
+itself included, as vLLM does, and the best tokens are ranked by place. Such a request never resumes from the prompt
+cache, so its whole prompt is prefilled. Chat, streamed requests and other engines return HTTP 400 with it.
 `ignore_eos: true` keeps user-supplied `stop` strings active, including when a stop string spans streamed chunks.
 Both backends reject a non-boolean `ignore_eos` or a malformed `stop` with HTTP 400 before a stream opens.
 Both backends reject malformed `temperature`, `top_p`, `top_k` and `seed` values with HTTP 400, whether or not

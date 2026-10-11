@@ -1,4 +1,4 @@
-//! OpenAI ``logprobs`` on a chat reply: which requests may ask, and ``choices[0].logprobs`` from the engine's rows.
+//! OpenAI ``logprobs`` on a chat reply: which requests may ask, and ``choices[0].logprobs`` from the engine's rows; vLLM's ``prompt_logprobs``.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json.zig");
@@ -89,6 +89,27 @@ pub fn legacy(a: Allocator, rows: Value, offset: *usize) Allocator.Error!Value {
     try out.put(a, "top_logprobs", .{ .array = tops });
     try out.put(a, "text_offset", .{ .array = offsets });
     return .{ .object = out };
+}
+
+/// vLLM's ``prompt_logprobs``: null for the first token, then ``{id: {logprob, rank, decoded_token}}``, the prompt token first.
+pub fn promptValue(srv: *Server, a: Allocator, rows: []const api.LogprobRow) Allocator.Error!Value {
+    const out = try a.alloc(Value, rows.len + 1);
+    out[0] = .null;
+    for (out[1..], rows) |*slot, r| {
+        const o = try json.newObject(a);
+        try promptEntry(srv, a, o, r.token, r.logprob, r.rank);
+        for (r.ids[0..r.count], r.logprobs[0..r.count], 1..) |id, lp, rank| if (id != r.token) try promptEntry(srv, a, o, id, lp, rank);
+        slot.* = .{ .object = o };
+    }
+    return .{ .array = out };
+}
+
+fn promptEntry(srv: *Server, a: Allocator, o: *json.Object, id: u32, logprob: f32, rank: usize) Allocator.Error!void {
+    const e = try json.newObject(a);
+    try e.put(a, "logprob", .{ .float = logprob });
+    try e.put(a, "rank", try json.intValue(a, rank));
+    try e.put(a, "decoded_token", .{ .string = try srv.text.decode(a, &.{id}) });
+    try o.put(a, try std.fmt.allocPrint(a, "{d}", .{id}), .{ .object = e });
 }
 
 /// Where the answer's rows start: past the first end-of-thinking token and newline-only tokens; null: no answer yet.

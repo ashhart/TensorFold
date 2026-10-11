@@ -51,6 +51,18 @@ pub const Keep = struct {
     call: *const fn (*anyopaque, u32) void,
 };
 
+/// prompt_logprobs: every prompt row but the last through the head, its next prompt token's logprob, `k` best and rank.
+pub const PromptRows = struct {
+    k: u8,
+    picks: []u32, // host-mapped, state.max_rows words, at `picks_dev` on the device
+    picks_dev: u64,
+    out: []const u32, // host-mapped, state.max_rows rows of `stride` words, at `out_dev`
+    out_dev: u64,
+    stride: usize,
+    ctx: *anyopaque,
+    call: *const fn (ctx: *anyopaque, words: []const u32, picks: []const u32) anyerror!void, // rows in prompt order
+};
+
 /// Serial rounds a host keeps queued ahead of the one it reads.
 pub const lookahead = 4;
 
@@ -106,6 +118,7 @@ pub const Engine = struct {
     seg: ?segs.Segments = null, // their streams and scratch, made at load (or when setSegments asks for more)
     carve: ?*cuda.Carveout = null, // Options.carveout; it outlives the engine
     heat_gate: heat.Gate = .{}, // off unless TF_HEAT_HIGH and TF_HEAT_LOW are set
+    prompt_rows: ?PromptRows = null, // a prompt pass's rows for prompt_logprobs (serial chunks, from 0)
 
     /// Loads the checkpoint into the Python engine's layouts and sizes the caches; `triton_dir` null: our own glue.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, model_dir: []const u8, triton_dir: ?[]const u8, opts: Options) !*Engine {
@@ -348,7 +361,7 @@ pub const Engine = struct {
             if (head) |h| try h.reset();
         } else if (e.pos != from) return error.BadReuse;
         const waited = e.heat_gate.waited_s;
-        if (from == 0 and keep == null and e.segments > 1 and dump == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none) {
+        if (from == 0 and keep == null and e.segments > 1 and dump == null and e.prompt_rows == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none) {
             try segs.prefill(e, try e.segmentSet(), prompt, head, e.segments, cancel);
         } else try e.serialChunks(prompt, from, dump, head, cancel, keep);
         if (e.heat_gate.waited_s > waited) heat.note(e.heat_gate.waited_s - waited);
@@ -400,6 +413,7 @@ pub const Engine = struct {
             if (shared) |ad| if (f.route.decision(0) != null) try e.trainOps().latch(ad.score, ad.need, ad.latch, e.slot, true);
             e.pos += @intCast(chunk.len);
             const known = @min(chunk.len, prompt.len - 1 - s);
+            if (e.prompt_rows) |p| try e.promptRows(p, prompt[s + 1 ..][0..known]);
             if (head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known]);
             s = end;
             if (keep) |k| if (s <= std.math.maxInt(u32) and std.mem.indexOfScalar(u32, k.at, @intCast(s)) != null) k.call(k.ctx, @intCast(s));
@@ -437,6 +451,19 @@ pub const Engine = struct {
 
     fn trainOps(e: *const Engine) train_ops.Ops {
         return .{ .k = &e.k.train, .s = e.stream };
+    }
+
+    /// The chunk's rows (in p_hidden) that predict `next` through the head, state.max_rows at a time.
+    fn promptRows(e: *Engine, p: PromptRows, next: []const u32) !void {
+        var r: usize = 0;
+        while (r < next.len) : (r += state.max_rows) {
+            const n = @min(state.max_rows, next.len - r);
+            @memcpy(p.picks[0..n], next[r..][0..n]);
+            try e.ops().prefillDense(e.b.p_hidden + r * @as(u64, e.c.hidden) * 2, e.w.head, e.b.logits, n);
+            try e.ops().logprobRows(e.b.logits, e.c.vocab, p.picks_dev, p.k, true, p.out_dev, n);
+            try e.stream.synchronize();
+            try p.call(p.ctx, p.out[0 .. n * p.stride], p.picks[0..n]);
+        }
     }
 
     /// Whole chunks a prompt call runs as staggered segments from here on; their streams and scratch are made now.

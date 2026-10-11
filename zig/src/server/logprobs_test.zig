@@ -1,4 +1,4 @@
-//! `logprobs` on /v1/chat/completions: rows cover the answer as `content` does, and the 0.6.6 refusals hold.
+//! `logprobs` on /v1/chat/completions: rows cover the answer as `content` does, and the 0.6.6 refusals hold; `prompt_logprobs` on /v1/completions.
 const std = @import("std");
 const api = @import("engine_api");
 const server = @import("root.zig");
@@ -70,17 +70,19 @@ const Text = struct {
     }
 };
 
-/// Answers `reply` in two rounds with rows: token i logprob -(i + 1) / 4, best tokens itself then 'z'.
+/// Answers `reply` in two rounds with rows: token i logprob -(i + 1) / 4, best tokens itself then 'z'; prompt rows on even positions rank their token first.
 const Script = struct {
     reply: []const u32,
     asked: ?u8 = null,
+    prompt_rows: bool = true,
 
     fn engine(e: *@This()) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
 
-    fn info(_: *anyopaque) api.Info {
-        return .{ .context_window = 64, .logprobs = true };
+    fn info(ctx: *anyopaque) api.Info {
+        const e: *Script = @ptrCast(@alignCast(ctx));
+        return .{ .context_window = 64, .logprobs = true, .prompt_logprobs = e.prompt_rows };
     }
 
     fn submit(ctx: *anyopaque, id: api.Id, r: *const api.Request, sink: api.Sink) api.SubmitError!void {
@@ -96,6 +98,18 @@ const Script = struct {
             }
         }
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
+        if (r.prompt_logprobs) |k| {
+            var prompt_rows: [32]api.LogprobRow = undefined;
+            for (r.prompt[1..], prompt_rows[0 .. r.prompt.len - 1], 1..) |t, *row, i| {
+                const top = i % 2 == 0;
+                row.* = .{ .token = t, .logprob = -@as(f32, @floatFromInt(i)) / 8, .count = k, .rank = if (top) 1 else 2 };
+                for (0..k) |j| {
+                    row.ids[j] = if (j > 0) @intCast('A' + j) else if (top) t else 'z';
+                    row.logprobs[j] = if (j == 0 and top) row.logprob else -@as(f32, @floatFromInt(j)) / 16;
+                }
+            }
+            sink.event(sink.ctx, id, &.{ .prompt_logprobs = prompt_rows[0 .. r.prompt.len - 1] });
+        }
         const half = e.reply.len / 2;
         for ([_][2]usize{ .{ 0, half }, .{ half, e.reply.len } }) |part| {
             if (r.logprobs != null) sink.event(sink.ctx, id, &.{ .logprobs = rows[part[0]..part[1]] });
@@ -155,8 +169,12 @@ const Got = struct {
 const Route = enum { chat, responses, completions };
 
 fn send(reply: []const u32, thinking: bool, route: Route, body: []const u8) !Got {
+    return sendWith(reply, thinking, route, body, true);
+}
+
+fn sendWith(reply: []const u32, thinking: bool, route: Route, body: []const u8, prompt_rows: bool) !Got {
     var text: Text = .{};
-    var backend: Script = .{ .reply = reply };
+    var backend: Script = .{ .reply = reply, .prompt_rows = prompt_rows };
     var srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
         .served_name = "test-model",
         .model_ids = &.{"test-model"},
@@ -328,4 +346,45 @@ test "/v1/completions gives the legacy form, whole and streamed: texts, logprobs
         for (rows.object.get("tokens").?.array.items, rows.object.get("text_offset").?.array.items) |t, o| try offsets.print(std.testing.allocator, "{s}@{d};", .{ t.string, o.integer });
     }
     try std.testing.expectEqualStrings("H@0;i@1;!@2;", offsets.items);
+}
+
+test "prompt_logprobs: null first, then each prompt token with its rank before the best tokens, and the refusals" {
+    const reply = tokensOf("Hi");
+    var whole = try send(&reply, false, .completions, "{\"model\":\"test-model\",\"prompt\":\"abc\",\"max_tokens\":2,\"prompt_logprobs\":1}");
+    defer whole.deinit();
+    const parsed = try content(whole);
+    defer parsed.deinit();
+    const rows = parsed.value.object.get("choices").?.array.items[0].object.get("prompt_logprobs").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), rows.len);
+    try std.testing.expect(rows[0] == .null);
+    // "b" ranks second: it comes first, then the best token 'z'; "c" is the best, so it is the only entry
+    try std.testing.expectEqual(@as(usize, 2), rows[1].object.count());
+    try std.testing.expectEqualStrings("98", rows[1].object.keys()[0]);
+    try std.testing.expectEqual(@as(i64, 2), rows[1].object.get("98").?.object.get("rank").?.integer);
+    try std.testing.expectEqual(@as(f64, -0.125), rows[1].object.get("98").?.object.get("logprob").?.float);
+    try std.testing.expectEqual(@as(i64, 1), rows[1].object.get("122").?.object.get("rank").?.integer);
+    try std.testing.expectEqualStrings("z", rows[1].object.get("122").?.object.get("decoded_token").?.string);
+    try std.testing.expectEqual(@as(usize, 1), rows[2].object.count());
+    try std.testing.expectEqual(@as(i64, 1), rows[2].object.get("99").?.object.get("rank").?.integer);
+    var one = try send(&reply, false, .completions, "{\"model\":\"test-model\",\"prompt\":\"a\",\"max_tokens\":2,\"prompt_logprobs\":0}");
+    defer one.deinit();
+    const lone = try content(one);
+    defer lone.deinit();
+    const lone_rows = lone.value.object.get("choices").?.array.items[0].object.get("prompt_logprobs").?.array.items;
+    try std.testing.expect(lone_rows.len == 1 and lone_rows[0] == .null);
+    var plain = try send(&reply, false, .completions, "{\"model\":\"test-model\",\"prompt\":\"abc\",\"max_tokens\":2}");
+    defer plain.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, plain.body, "prompt_logprobs") == null);
+    const refused = [_]struct { route: Route, body: []const u8, rows: bool = true }{
+        .{ .route = .chat, .body = "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"prompt_logprobs\":1}" },
+        .{ .route = .completions, .body = "{\"model\":\"test-model\",\"prompt\":\"abc\",\"prompt_logprobs\":1,\"stream\":true}" },
+        .{ .route = .completions, .body = "{\"model\":\"test-model\",\"prompt\":\"abc\",\"prompt_logprobs\":21}" },
+        .{ .route = .completions, .body = "{\"model\":\"test-model\",\"prompt\":\"abc\",\"prompt_logprobs\":true}" },
+        .{ .route = .completions, .body = "{\"model\":\"test-model\",\"prompt\":\"abc\",\"prompt_logprobs\":1}", .rows = false },
+    };
+    for (refused) |c| {
+        var got = try sendWith(&reply, false, c.route, c.body, c.rows);
+        defer got.deinit();
+        try std.testing.expectEqual(@as(u16, 400), got.status);
+    }
 }
