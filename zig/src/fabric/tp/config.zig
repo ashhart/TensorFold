@@ -42,7 +42,7 @@ pub const Config = struct {
     /// Rank 1's memory report period on the fate channel (also how fast it notices rank 0 hanging up).
     report_ns: u64 = std.time.ns_per_s / 2,
     nccl_lib: []const u8 = "libnccl.so.2",
-    /// `name[:gid],...` RDMA devices for `roce` (null: every active Ethernet port with an IPv4 RoCE v2 GID).
+    /// `name[:gid],...` RDMA devices for `roce` (null: active RoCE v2 ports on an IPv4 /24 the peer has, roce_pick).
     roce_hca: ?[]const u8 = null,
     /// Stripe over at most this many HCAs (auto detection only).
     roce_hcas: u8 = 2,

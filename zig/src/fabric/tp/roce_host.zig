@@ -11,11 +11,7 @@ pub fn run(cfg: tp.Config, gpa: std.mem.Allocator) !u8 {
     defer b.close();
     var specs: [rv.max_hcas]rv.HcaSpec = undefined;
     var n: usize = 0;
-    if (cfg.roce_hca) |text| n = try rv.parseSpecs(text, &specs) else {
-        var v = try tp.Verbs.open(null);
-        defer v.close();
-        n = rv.autoSpecs(&v, &specs, cfg.roce_hcas);
-    }
+    if (cfg.roce_wire == .verbs) n = try tp.roce_pick.resolve(cfg, &b, &specs);
     const r = try roce.Roce.init(null, &b, "", .{ .wire = if (cfg.roce_wire == .shm) .shm else .verbs, .hcas = specs[0..n], .traffic_class = cfg.roce_tc, .cpu = cfg.roce_cpu, .max_bytes = 256 * 1024, .timeout_ns = 10 * std.time.ns_per_s });
     defer r.deinit();
     const in = try gpa.alloc(u8, 256 * 1024);

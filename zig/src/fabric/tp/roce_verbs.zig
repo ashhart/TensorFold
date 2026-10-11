@@ -89,23 +89,32 @@ fn detectGid(v: *const Verbs, ctx: *abi.Context, name: []const u8, table: c_int)
     return null;
 }
 
-/// Every device whose port 1 is an active Ethernet port with an IPv4 RoCE v2 GID, by name order, at most `limit`.
-pub fn autoSpecs(v: *const Verbs, out: *[max_hcas]HcaSpec, limit: usize) usize {
+/// A device's port 1 as `roce_pick.choose` sees it: up, Ethernet, and its IPv4 RoCE v2 GID (index and address).
+pub const Port = struct { spec: HcaSpec = .{}, active: bool = false, ethernet: bool = false, ipv4: ?[4]u8 = null };
+
+/// Port 1 of every device that opens, in the device list's order, at most `out.len`.
+pub fn scanPorts(v: *const Verbs, out: []Port) usize {
     var count: c_int = 0;
     const list = v.api.ibv_get_device_list(&count) orelse return 0;
     defer v.api.ibv_free_device_list(list);
     var n: usize = 0;
     var i: usize = 0;
     while (list[i]) |dev| : (i += 1) {
-        if (n == limit) break;
+        if (n == out.len) break;
         const name = std.mem.span(v.api.ibv_get_device_name(dev) orelse continue);
         const ctx = v.api.ibv_open_device(dev) orelse continue;
         defer _ = v.api.ibv_close_device(ctx);
         const port = v.port(ctx, 1) catch continue;
-        if (port.state != abi.port_active or port.link_layer != link_ethernet) continue;
-        const g = detectGid(v, ctx, name, port.gid_tbl_len) orelse continue;
-        out[n] = .{ .name_len = @intCast(@min(name.len, 63)), .gid = g };
-        @memcpy(out[n].name[0..out[n].name_len], name[0..out[n].name_len]);
+        var p: Port = .{ .active = port.state == abi.port_active, .ethernet = port.link_layer == link_ethernet };
+        p.spec.name_len = @intCast(@min(name.len, 63));
+        @memcpy(p.spec.name[0..p.spec.name_len], name[0..p.spec.name_len]);
+        if (p.active and p.ethernet) if (detectGid(v, ctx, name, port.gid_tbl_len)) |gi| {
+            if (v.gid(ctx, 1, gi)) |g| {
+                p.spec.gid = gi;
+                p.ipv4 = g.raw[12..16].*;
+            } else |_| {}
+        };
+        out[n] = p;
         n += 1;
     }
     return n;
