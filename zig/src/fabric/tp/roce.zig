@@ -6,6 +6,8 @@ const collective = @import("collective.zig");
 const Bootstrap = @import("bootstrap.zig").Bootstrap;
 const sock = @import("sock.zig");
 const rv = @import("roce_verbs.zig");
+const shm = @import("roce_shm.zig");
+const guard = @import("roce_guard.zig");
 const HostRegister = @import("mailbox.zig").HostRegister;
 const posix = std.posix;
 const DevicePtr = collective.DevicePtr;
@@ -71,30 +73,20 @@ pub const Options = struct {
     fast: u32 = 0,
     /// TF_TP_ROCE_BLOCKS: the largest grid (config.roce_blocks)
     blocks: u32 = 16,
-};
-
-/// The shm wire: the peer's region is mapped here; a post copies the slot, then stores the flag with release order.
-const ShmWire = struct {
-    peer: []u8,
-    local: []u8,
-    slot_bytes: usize,
-
-    fn post(w: *ShmWire, slot: u32, seq: u32, padded: u32) void {
-        const recv = send_off + 2 * w.slot_bytes;
-        @memcpy(w.peer[recv + slot * w.slot_bytes ..][0..padded], w.local[send_off + slot * w.slot_bytes ..][0..padded]);
-        const flag: *std.atomic.Value(u32) = @ptrCast(@alignCast(w.peer[flag_off + slot * 2 * flag_stride ..].ptr));
-        flag.store(seq, .release);
-    }
+    /// The shm wire's stripes, as HCAs: its posts take the verbs wire's split and bounds.
+    shm_stripes: u32 = 1,
+    /// Tests: sees every shm post's stripes before the copy.
+    tap: ?*shm.PostTap = null,
 };
 
 const Wire = union(WireKind) {
     verbs: rv.VerbsWire,
-    shm: ShmWire,
+    shm: shm.ShmWire,
 
     fn post(w: *Wire, slot: u32, seq: u32, padded: u32) !void {
         switch (w.*) {
             .verbs => |*v| try v.post(slot, seq, padded),
-            .shm => |*s| s.post(slot, seq, padded),
+            .shm => |*s| try s.post(slot, seq, padded),
         }
     }
 
@@ -108,7 +100,7 @@ const Wire = union(WireKind) {
     fn hcas(w: *const Wire) u32 {
         return switch (w.*) {
             .verbs => |v| v.n_hca,
-            .shm => 1,
+            .shm => |s| s.stripes,
         };
     }
 };
@@ -204,9 +196,10 @@ pub const Roce = struct {
                 r.wire = .{ .verbs = try rv.VerbsWire.open(o.hcas, r.region, .{ .send = send_off, .recv = send_off + 2 * r.slot_bytes, .flags = flag_off, .slot = r.slot_bytes }, o.traffic_class) };
             },
             .shm => {
-                r.mapping = try sharedPair(b, len);
+                r.mapping = try shm.sharedPair(b, len);
                 r.region = @alignCast(r.mapping[r.me * len ..][0..len]);
-                r.wire = .{ .shm = .{ .peer = r.mapping[(1 - r.me) * len ..][0..len], .local = r.region, .slot_bytes = r.slot_bytes } };
+                const layout: guard.Layout = .{ .send = send_off, .recv = send_off + 2 * r.slot_bytes, .flags = flag_off, .slot = r.slot_bytes, .len = len };
+                r.wire = .{ .shm = .{ .peer = r.mapping[(1 - r.me) * len ..][0..len], .layout = layout, .local = r.region, .stripes = o.shm_stripes, .tap = o.tap } };
             },
         }
         return true;
@@ -421,35 +414,6 @@ pub const Roce = struct {
         r.host_epoch = seq;
     }
 };
-
-/// One shared mapping holding both ranks' regions (rank 0 creates and sizes the file before anyone learns its name).
-fn sharedPair(b: *Bootstrap, len: usize) ![]align(page) u8 {
-    var name: [64]u8 = undefined;
-    var name_len: u8 = 0;
-    var fd: std.c.fd_t = -1;
-    defer if (fd >= 0) {
-        _ = std.c.close(fd);
-    };
-    if (b.rank == 0) blk: {
-        const s = std.fmt.bufPrint(&name, "/dev/shm/tf-tp-roce-{d}-{x}", .{ std.c.getpid(), sock.nowNs() }) catch break :blk;
-        name[s.len] = 0;
-        fd = std.c.open(name[0..s.len :0], .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
-        if (fd >= 0 and std.c.ftruncate(fd, @intCast(2 * len)) == 0) name_len = @intCast(s.len);
-    }
-    // an empty name tells the other rank that rank 0 failed (it must not wait for a name that never comes)
-    try b.broadcast(std.mem.asBytes(&name_len), std.mem.asBytes(&name_len));
-    if (name_len == 0) return error.SharedMemoryUnavailable;
-    try b.broadcast(name[0..name_len], name[0..name_len]);
-    name[name_len] = 0;
-    if (b.rank != 0) {
-        fd = std.c.open(name[0..name_len :0], .{ .ACCMODE = .RDWR, .CLOEXEC = true }, @as(std.c.mode_t, 0));
-        if (fd < 0) return error.SharedMemoryUnavailable;
-    }
-    const m = try posix.mmap(null, 2 * len, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
-    try b.agree("mapped", "RoCE shm wire");
-    if (b.rank == 0) _ = std.c.unlink(name[0..name_len :0]);
-    return m;
-}
 
 fn pin(cpu: u32) void {
     var set: std.os.linux.cpu_set_t = @splat(0);

@@ -1,0 +1,96 @@
+//! Fake verbs for host tests of VerbsWire: each QP's posted writes counted from the requests, completions that lag.
+const std = @import("std");
+const verbs = @import("verbs");
+const abi = verbs.abi;
+const rv = @import("roce_verbs.zig");
+
+pub const slot: u64 = 1 << 20;
+pub const send_off = 8192;
+
+/// What the HCAs hold (posted, not completed); every count comes from the work requests themselves.
+pub const Fake = struct {
+    pub var region: []const u8 = &.{};
+    pub var lag: u32 = 1;
+    pub var polls: u64 = 0;
+    pub var queue: [2][512]u64 = undefined;
+    pub var head: [2]u32 = .{ 0, 0 };
+    pub var len: [2]u32 = .{ 0, 0 };
+    pub var inflight: u64 = 0;
+    pub var max_inflight: u64 = 0;
+    pub var max_write: u64 = 0;
+    pub var outside: u64 = 0;
+    pub var bytes: u64 = 0;
+    pub var posts: u64 = 0;
+
+    pub fn reset(l: u32) void {
+        lag = l;
+        polls = 0;
+        head = .{ 0, 0 };
+        len = .{ 0, 0 };
+        inflight = 0;
+        max_inflight = 0;
+        max_write = 0;
+        outside = 0;
+        bytes = 0;
+        posts = 0;
+    }
+
+    pub fn postSend(qp: *abi.Qp, wr: *abi.SendWr, _: *?*abi.SendWr) callconv(.c) c_int {
+        const q = qp.qp_num;
+        posts += 1;
+        var sum: u64 = 0;
+        var at: ?*abi.SendWr = wr;
+        while (at) |w| : (at = w.next) {
+            if (w.send_flags & abi.send_inline == 0) {
+                const sge = w.sg_list[0];
+                const lo = @intFromPtr(region.ptr);
+                if (sge.addr < lo + send_off or sge.addr + sge.length > lo + send_off + 2 * slot) outside += 1;
+                max_write = @max(max_write, sge.length);
+                sum += sge.length;
+            }
+            if (w.send_flags & abi.send_signaled != 0) {
+                queue[q][(head[q] + len[q]) % 512] = sum;
+                len[q] += 1;
+                inflight += sum;
+                bytes += sum;
+                max_inflight = @max(max_inflight, inflight);
+                sum = 0;
+            }
+        }
+        return 0;
+    }
+
+    /// One completion every `lag` polls of a QP's CQ: the HCA finishes writes far slower than they are posted.
+    pub fn pollCq(cq: *abi.Cq, _: c_int, wc: [*]abi.Wc) callconv(.c) c_int {
+        const q = cq.handle;
+        polls += 1;
+        if (polls % lag != 0 or len[q] == 0) return 0;
+        inflight -= queue[q][head[q]];
+        head[q] = (head[q] + 1) % 512;
+        len[q] -= 1;
+        wc[0] = std.mem.zeroes(abi.Wc);
+        wc[0].status = abi.wc_success;
+        return 1;
+    }
+};
+
+/// Two fake HCAs behind one VerbsWire, connected to a peer whose region has this rank's layout.
+pub const Hw = struct {
+    ctx: [2]abi.Context = undefined,
+    qp: [2]abi.Qp = undefined,
+    cq: [2]abi.Cq = undefined,
+    mr: [2]abi.Mr = undefined,
+
+    pub fn wire(hw: *Hw, region: []u8) rv.VerbsWire {
+        var w: rv.VerbsWire = .{ .v = undefined, .traffic_class = 0, .recv_off = send_off + 2 * slot, .flag_off = 4096, .send_off = send_off, .slot_bytes = slot, .region = region };
+        for (0..2) |i| {
+            hw.ctx[i].ops = .{ ._before_poll = @splat(null), .poll_cq = Fake.pollCq, ._before_post = @splat(null), .post_send = Fake.postSend, .post_recv = undefined, ._after = @splat(null) };
+            hw.qp[i].qp_num = @intCast(i);
+            hw.cq[i].handle = @intCast(i);
+            hw.mr[i].lkey = 7;
+            w.hcas[i] = .{ .ctx = &hw.ctx[i], .pd = undefined, .mr = &hw.mr[i], .cq = &hw.cq[i], .qp = &hw.qp[i], .gid_index = 0, .gid = @splat(0), .mtu = 0, .lid = 0 };
+        }
+        w.n_hca = 2;
+        return w;
+    }
+};

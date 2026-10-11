@@ -200,7 +200,9 @@ test {
     _ = roce_verbs;
     _ = roce_pick;
     _ = planlink;
+    _ = @import("roce_guard.zig");
     _ = @import("roce_test.zig");
+    _ = @import("roce_post_test.zig");
     _ = @import("host_test.zig");
     _ = @import("fate_test.zig");
 }
