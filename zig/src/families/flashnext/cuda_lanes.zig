@@ -13,7 +13,8 @@ pub fn Namespace(comptime Tri: type) type {
     return struct {
         pub const model_type = "qwen4_exp";
         pub const formats: []const []const u8 = &.{"mlx-q4g32"};
-        pub const default_context: i64 = 262144;
+        // dense attention over the captured scratch (NCH chunks of 512 keys, QSA off): no sparse indexer yet
+        pub const default_context: i64 = @intCast(prompt.max_tokens);
         pub const prefill_step: u32 = 0;
 
         pub const Options = struct { context: usize, drafts: bool };
@@ -98,6 +99,7 @@ pub fn Namespace(comptime Tri: type) type {
 
         pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: []const u8, o: Options) !Loaded {
             _ = o.drafts; // this model is served one token at a time; there is no draft head
+            if (o.context > prompt.max_tokens) return error.ContextOverDenseAttention;
             const driver: *cuda.Driver = @constCast(ctx.d);
             const own = try gpa.create(Cuda);
             errdefer gpa.destroy(own);

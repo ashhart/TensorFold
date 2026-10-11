@@ -67,6 +67,26 @@ pub fn argmax(raw: []const u8) u32 {
     return @intCast(at);
 }
 
+/// The five best scores of one row, best first, as "id:score" pairs on stderr (the capture's top5 field).
+fn printTop(raw: []const u8) void {
+    var ids: [5]usize = @splat(0);
+    var vals: [5]f32 = @splat(-std.math.inf(f32));
+    for (0..vocab) |i| {
+        const v = promote(std.mem.readInt(u16, raw[2 * i ..][0..2], .little));
+        if (v <= vals[4]) continue;
+        var at: usize = 4;
+        while (at > 0 and v > vals[at - 1]) : (at -= 1) {
+            vals[at] = vals[at - 1];
+            ids[at] = ids[at - 1];
+        }
+        vals[at] = v;
+        ids[at] = i;
+    }
+    std.debug.print("top5", .{});
+    for (ids, vals) |id, v| std.debug.print(" {d}:{d:.4}", .{ id, v });
+    std.debug.print("\n", .{});
+}
+
 const Pass = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -95,7 +115,9 @@ const Pass = struct {
 
 fn embedRow(comptime Tri: type, p: *Pass, tri: Tri, token: u32, h: u64) !void {
     const id: i32 = @intCast(token);
-    try p.s.ids.upload(0, std.mem.asBytes(&id));
+    // stream-ordered: a synchronous copy does not wait for the non-blocking stream, so a later row's id
+    // would overwrite this one before its queued _embed reads it
+    try p.s.ids.uploadAsync(0, std.mem.asBytes(&id), p.stream.handle);
     try tri.embed(p.s.ids.ptr, p.table.w.ptr, p.table.s.ptr, p.table.b.ptr, h, dims, streams, 1);
 }
 
@@ -165,6 +187,8 @@ fn forward(comptime Tri: type, p: *Pass, tri: Tri, layers: []Layer, ids: []const
 }
 
 pub const vocabulary: usize = vocab;
+/// Prompt plus reply tokens a sequence can hold: the attention kernels' NCH chunks of 512 keys.
+pub const max_tokens: usize = weights.nch * 512;
 
 /// One loaded checkpoint: the embedding table, the mixer, the head, and a scratch row the forwards share.
 pub const Engine = struct {
@@ -373,22 +397,33 @@ fn freeOwned(gpa: std.mem.Allocator, bs: []cuda.DeviceBuffer) void {
 
 /// `out` receives `new_tokens` greedy ids. The first is the prompt's argmax. The rest are fed back one at a time.
 pub fn run(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, tri: Tri, model_dir: []const u8, tokens: []const u32, new_tokens: usize, out: []u32) !void {
-    if (tokens.len == 0 or new_tokens == 0 or out.len < new_tokens or tokens.len + new_tokens > 256) return error.UnexpectedTensor;
+    if (tokens.len == 0 or new_tokens == 0 or out.len < new_tokens or tokens.len + new_tokens > max_tokens) return error.UnexpectedTensor;
     var e = try Engine.init(gpa, io, driver, stream, model_dir);
     defer e.deinit();
     var seq = try e.newSeq(tokens.len + new_tokens);
     defer seq.deinit(gpa);
+    const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
     try e.predict(Tri, tri, &seq, tokens);
+    const t1 = std.Io.Clock.awake.now(io).toNanoseconds();
     out[0] = argmax(seq.logits);
+    printTop(seq.logits);
     std.debug.print("token {d}\n", .{out[0]});
     var tok = out[0];
     for (1..new_tokens) |i| {
         var one = [_]u32{tok};
         try e.predict(Tri, tri, &seq, &one);
         tok = argmax(seq.logits);
+        if (i < 4) printTop(seq.logits);
         out[i] = tok;
         std.debug.print("token {d}\n", .{tok});
     }
+    const t2 = std.Io.Clock.awake.now(io).toNanoseconds();
+    const ms = struct {
+        fn of(ns: i96) f64 {
+            return @as(f64, @floatFromInt(ns)) / 1e6;
+        }
+    }.of;
+    std.debug.print("timing prompt {d} rows {d:.1} ms, decode {d} tokens {d:.2} ms/token\n", .{ tokens.len, ms(t1 - t0), new_tokens - 1, if (new_tokens > 1) ms(t2 - t1) / @as(f64, @floatFromInt(new_tokens - 1)) else 0 });
 }
 
 test "linear layers skip every fourth index and attention starts at 3" {

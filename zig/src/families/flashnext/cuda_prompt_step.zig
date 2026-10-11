@@ -237,9 +237,13 @@ pub fn gdnStep(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Strea
 
 pub fn attnStep(comptime Tri: type, driver: *cuda.Driver, stream: *cuda.Stream, tri: Tri, s: *Scratch, proj_q: Q4, out_q: Q4, q_scale: u64, k_scale: u64, i_scale: u64, kc: u64, vc: u64, ikc: u64, pos: i32) !void {
     try qmm.matmul(driver, stream.*, s.mixed.ptr, s.xsm.ptr, proj_q.w.ptr, proj_q.s.ptr, proj_q.b.ptr, s.pa.ptr, 1, proj_n, dims);
-    try s.pos.upload(0, std.mem.asBytes(&pos));
+    // stream-ordered, like the ids: the previous row's queued attention kernels still read s.pos
+    try s.pos.uploadAsync(0, std.mem.asBytes(&pos), stream.handle);
     try tri.attnPrep(s.pa.ptr, s.pos.ptr, q_scale, k_scale, i_scale, s.inv.ptr, s.q.ptr, kc, vc, s.dummy.ptr, s.dummy.ptr, s.iq.ptr, ikc, s.dummy.ptr, s.dummy.ptr, eps, 1, 0);
-    try tri.attnChunks(s.q.ptr, kc, vc, s.dummy.ptr, s.dummy.ptr, s.pos.ptr, s.po.ptr, s.pm.ptr, s.pl.ptr, s.dummy.ptr, s.dummy.ptr, s.dummy.ptr, 1, kv_heads, 1);
+    // attention.attention: chunks of 512 keys up to the row's position, at most the scratch's nch
+    const keys: usize = @as(usize, @intCast(pos)) + 1;
+    if (keys > nch * 512) return error.UnexpectedTensor;
+    try tri.attnChunks(s.q.ptr, kc, vc, s.dummy.ptr, s.dummy.ptr, s.pos.ptr, s.po.ptr, s.pm.ptr, s.pl.ptr, s.dummy.ptr, s.dummy.ptr, s.dummy.ptr, 1, kv_heads, (keys + 511) / 512);
     try tri.attnMerge(s.po.ptr, s.pm.ptr, s.pl.ptr, s.pos.ptr, s.ao.ptr, s.dummy.ptr, s.dummy.ptr, 1, kv_heads);
     try tri.attnGate(s.ao.ptr, s.pa.ptr, s.gated.ptr, s.gxs_attn.ptr, 1, proj_n, q_heads, head_dim);
     try qmm.partials(driver, stream.*, s.gated.ptr, s.gxs_attn.ptr, out_q.w.ptr, out_q.s.ptr, out_q.b.ptr, s.dummy.ptr, s.part.ptr, 1, dims, out_k, out_sk);
