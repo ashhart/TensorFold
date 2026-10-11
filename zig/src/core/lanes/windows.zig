@@ -213,25 +213,17 @@ pub fn nodeChances(e: *Engine, s: *Stream, n: usize) ![]const f64 {
     return alloc.chainProbabilities(a, try e.rule.rates(who(s)), n);
 }
 
-/// Structured output (Python Constraint.window): the planned rows an accepted path can use under the stream's grammar,
-/// and each row's allowed-token bits. The grammar walks host tokens: held drafts come back as the head's ranked chain,
-/// and a held tree (or a head without ranks) verifies no drafts.
+/// Structured output: the planned rows an accepted path can use under the stream's grammar, and each row's bits.
 pub fn constrain(e: *Engine, p: *Plan) !void {
     const g = p.stream.grammar orelse return;
     const a = e.arena.allocator();
     if (p.held > 0) {
-        const chain = for (0..p.held) |k| {
-            if (p.parents) |q| if (q[k] != @as(i32, @intCast(k)) - 1) break null;
-        } else (try headTrunk(e, p.stream, p.*, p.held)) orelse null;
-        if (chain) |c| {
-            p.tokens = try std.mem.concat(a, u32, &.{ c.tokens, p.tokens });
-        } else {
-            p.tokens = &.{};
-            p.parents = null;
-            p.branch_from = 0;
-        }
+        // the held drafts (a chain or a tree, in window order) come back as host tokens, grafts after them
+        const read = e.backend.vtable.held orelse return error.HeldDraftsUnreadable;
+        const held = try a.alloc(u32, p.held);
+        try read(e.backend.ptr, p.stream, held);
+        p.tokens = try std.mem.concat(a, u32, &.{ held, p.tokens });
         p.held = 0;
-        p.lanes = null;
     }
     const rows = try a.alloc(u32, 1 + p.tokens.len);
     rows[0] = p.stream.pending.?;
@@ -239,6 +231,7 @@ pub fn constrain(e: *Engine, p: *Plan) !void {
     const w = try g.window(a, rows, try accept.rowParents(a, rows.len, p.parents), p.kind == .forced);
     p.masks = w.masks;
     if (w.rows.len == rows.len) return;
+    p.lanes = null; // the tree shape no longer matches the rows
     const kept = try a.alloc(u32, w.rows.len - 1);
     for (kept, w.rows[1..]) |*t, r| t.* = rows[r];
     p.tokens = kept;

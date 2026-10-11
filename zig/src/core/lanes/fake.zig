@@ -72,7 +72,7 @@ pub const Fake = struct {
     }
 
     pub fn backend(x: *Fake) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow, .alternatives = alternatives } };
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow, .alternatives = alternatives, .held = heldDrafts } };
     }
 
     /// The same target filling its prompt a chunk a call (`prefill_chunks`), as a backend with `prefill_step`.
@@ -211,6 +211,12 @@ pub const Fake = struct {
         const n = @min(out.len, held.len);
         for (out[0..n], held[0..n]) |*o, t| o.* = .{ .tokens = .{ t, (t + 1) % vocab, (t + 2) % vocab, (t + 3) % vocab }, .probs = .{ 0.5, 0.2, 0.1, 0.1 } };
         return n;
+    }
+
+    fn heldDrafts(ptr: *anyopaque, s: *Stream, out: []u32) anyerror!void {
+        const h = self(ptr).lane(s).held.items;
+        if (out.len > h.len) return error.NotHeld;
+        @memcpy(out, h[0..out.len]);
     }
 
     fn firstRow(ptr: *anyopaque, s: *Stream) anyerror!Row {

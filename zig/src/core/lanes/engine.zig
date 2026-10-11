@@ -153,8 +153,7 @@ pub const Engine = struct {
             try e.roundStreams(chosen);
         } else {
             for (live.items) |s| {
-                // a stream with logprobs takes verify windows: their rows' logits are read before the next forward;
-                // a grammar's mask for a row needs the token before it
+                // logprobs and grammars take verify windows: rows' logits are read, or bits made, before a forward
                 const windowed = (e.cfg.family_mtp and s.drafts) or !e.cfg.pipelined or s.logprobs != null or s.grammar != null;
                 const r = if (windowed) try e.familyRound(s, null) else try e.pipelinedRound(s);
                 s.min_rows = if (s.min_rows == 0) r.rows else @min(s.min_rows, r.rows);

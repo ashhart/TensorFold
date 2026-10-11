@@ -94,8 +94,10 @@ pub const Backend = struct {
         features: ?*const fn (ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!Features = null,
         /// The first token's logprob row (the prompt's last row) for a stream with `logprobs`; null: not given.
         first_row: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!Row = null,
-        /// `first` with the first token drawn among `mask`'s allowed tokens (structured output; Info.structures backends).
+        /// `first` with the first token drawn among `mask`'s allowed tokens (structured output).
         first_masked: ?*const fn (ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 = null,
+        /// The stream's held drafts as host tokens in window order, waiting for the draft (a grammar walks them).
+        held: ?*const fn (ptr: *anyopaque, s: *Stream, out: []u32) anyerror!void = null,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
     };

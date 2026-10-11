@@ -21,11 +21,11 @@ const Case = struct {
     eos: []const u32 = &.{96},
 };
 
-/// A test grammar over the fake's vocabulary: `length` tokens, the i-th one of class i % 3 (t % 3, never the stop
-/// token 96), then 96; with `after` it starts after that token. Drafts it rejects are common, so windows get cut.
+/// A test grammar: `length` tokens, the i-th of class i % 3 (any but 96 when `free`), then 96; it starts after `after`.
 const Classes = struct {
     length: u32 = 12,
     after: ?u32 = null,
+    free: bool = false,
     at: u32 = 0,
     done: bool = false,
 
@@ -40,7 +40,7 @@ const Classes = struct {
     fn allows(c: *const Classes, t: u32) bool {
         if (c.done) return false;
         if (c.at == c.length) return t == 96;
-        return t != 96 and t % 3 == c.at % 3;
+        return t != 96 and (c.free or t % 3 == c.at % 3);
     }
 
     fn acceptFn(ptr: *anyopaque, t: u32) anyerror!bool {
@@ -80,14 +80,9 @@ fn model() !Config {
 
 /// Every case's emitted tokens, the cases admitted together and stepped until done.
 fn run(cases: []const Case) ![][]u32 {
-    return runRanked(cases, false);
-}
-
-/// `run`, the fake head giving its held chains back when `ranked` (a grammar then walks them).
-fn runRanked(cases: []const Case, ranked: bool) ![][]u32 {
     var cfg = try model();
     defer cfg.deinit(gpa);
-    var target: fake.Fake = .{ .gpa = gpa, .ranked = ranked };
+    var target: fake.Fake = .{ .gpa = gpa };
     defer target.deinit();
     var clock: fake.FixedClock = .{};
     var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
@@ -336,21 +331,19 @@ fn expectInGrammar(emitted: []const u32, classes: Classes) !void {
 
 test "structured output: drafted rounds commit the one-token decode, every token inside the grammar" {
     for ([_]?Sampling{ null, .{ .seed = 5, .temperature = 0.7, .top_k = 0, .top_p = 0.95 } }) |s| {
-        for ([_]bool{ false, true }) |ranked| {
-            const drafted = try runRanked(&.{.{ .prompt = &p1, .sampling = s, .classes = .{} }}, ranked);
-            defer free(drafted);
-            const plain = try run(&.{.{ .prompt = &p1, .sampling = s, .drafts = false, .classes = .{} }});
-            defer free(plain);
-            try std.testing.expectEqualSlices(u32, plain[0], drafted[0]);
-            try expectInGrammar(drafted[0], .{});
-        }
+        const drafted = try run(&.{.{ .prompt = &p1, .sampling = s, .classes = .{} }});
+        defer free(drafted);
+        const plain = try run(&.{.{ .prompt = &p1, .sampling = s, .drafts = false, .classes = .{} }});
+        defer free(plain);
+        try std.testing.expectEqualSlices(u32, plain[0], drafted[0]);
+        try expectInGrammar(drafted[0], .{});
     }
 }
 
 test "structured output: shared rounds with grammar and plain streams commit what each commits alone" {
     const sampled: Sampling = .{ .seed = 9, .temperature = 1.0, .top_k = 0, .top_p = 0.9 };
     const cases = [_]Case{ .{ .prompt = &p1, .classes = .{ .length = 20 } }, .{ .prompt = &p2, .sampling = sampled, .max_new = 30 }, .{ .prompt = &p2, .sampling = sampled, .classes = .{ .length = 7 } } };
-    const together = try runRanked(&cases, true);
+    const together = try run(&cases);
     defer free(together);
     for (cases, together) |c, got| {
         const alone = try run(&.{c});
@@ -378,4 +371,27 @@ test "structured output: the grammar's stop token ends a reply that ignores eos"
     defer free(out);
     try std.testing.expectEqual(@as(usize, 6), out[0].len);
     try expectInGrammar(out[0], .{ .length = 5 });
+}
+
+test "structured output: held head drafts come back as host tokens, so a grammar stream drafts every round" {
+    for ([_]?Sampling{ null, .{ .seed = 3, .temperature = 0.9, .top_k = 0, .top_p = 0.9 } }) |sampling| {
+        var cfg = try model();
+        defer cfg.deinit(gpa);
+        var target: fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var clock: fake.FixedClock = .{};
+        var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+        defer engine.deinit();
+        var p = try SuffixLookup.init(gpa, .{ .min_match = 1000 }); // no copies: every draft is the head's
+        defer p.deinit();
+        var g: Classes = .{ .length = 60, .free = true };
+        var k: grammar.Constraint = .init(g.rules(), (fake.vocab + 31) / 32, null);
+        var s = try sm.Stream.init(gpa, .{ .id = "s", .prompt = &p1, .max_new = 80, .eos = &.{96}, .sampling = sampling, .proposer = p.proposer(), .think_close = &.{ 90, 91, 92 }, .think_end = 91, .grammar = &k });
+        defer s.deinit(gpa);
+        try engine.addStream(&s);
+        while (engine.activeCount() > 0) try engine.step();
+        try expectInGrammar(s.emitted(), .{ .length = 60, .free = true });
+        // the fake head misses one draft in five: a grammar that takes them all keeps well over a token a round
+        try std.testing.expect(s.drafted >= 2 * s.rounds and 2 * s.emitted().len > 3 * s.rounds);
+    }
 }
