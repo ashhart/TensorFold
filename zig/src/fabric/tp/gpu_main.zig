@@ -1,4 +1,4 @@
-//! `tf-tp-test suite | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | kernel`: one rank of a TP=2 test.
+//! `tf-tp-test suite | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | hca | kernel`: one rank of TP=2.
 const std = @import("std");
 const cuda = @import("cuda");
 const tp = @import("tp");
@@ -11,7 +11,7 @@ const max_bytes = (4 << 20) + 4096;
 pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 2) {
-        std.debug.print("usage: tf-tp-test suite | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | kernel\n", .{});
+        std.debug.print("usage: tf-tp-test suite | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | hca | kernel\n", .{});
         return 2;
     }
     // `kernel`: whether the build embeds the mailbox kernel (-Dtp-nvcc or -Dtp-fatbin), for scripts to check first
@@ -21,6 +21,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
     const cfg = try tp.Config.fromEnv();
     if (std.mem.eql(u8, args[1], "roce-host")) return @import("roce_host.zig").run(cfg, init.gpa);
+    if (std.mem.eql(u8, args[1], "hca")) return hca(cfg, init.io);
     if (std.mem.eql(u8, args[1], "failfast") and (!cfg.failfast or args.len > 5) and !hostOnlyAllowed(cfg)) {
         std.debug.print("REFUSED: failfast with TF_TP_FAILFAST=0 or a hold is host-only: TF_TP_ALLOW_HOST_ONLY=1 and no RDMA wire\n", .{});
         return 2;
@@ -48,6 +49,41 @@ pub fn main(init: std.process.Init) !u8 {
     if (std.mem.eql(u8, args[1], "failfast") and args.len == 4) return failfast(&s, &driver, init.gpa, cfg, try std.fmt.parseInt(u32, args[2], 10), args[3]);
     std.debug.print("unknown command {s}\n", .{args[1]});
     return 2;
+}
+
+/// `hca` (host only, no GPU): both ranks' RoCE pick over the bootstrap; this rank's `NCCL_IB_HCA=...` line on stdout.
+fn hca(cfg: tp.Config, io: std.Io) !u8 {
+    var b = tp.Bootstrap.open(cfg) catch |e| {
+        const s = @as(f64, @floatFromInt(cfg.connect_timeout_ns)) / std.time.ns_per_s;
+        switch (e) {
+            // a peer that never runs `hca` (it names its ports, or is not up) leaves this rank waiting until here
+            error.Timeout => std.debug.print("FAIL hca rank {d}: no peer joined within TF_TP_PLAN_TIMEOUT ({d:.1} s): is its runner up, and leaving TF_TP_ROCE_HCA and NCCL_IB_HCA unset as this one does?\n", .{ cfg.rank, s }),
+            error.AddressInUse => std.debug.print("FAIL hca rank {d}: port {d} (TF_TP_PORT + 7) is in use on this host\n", .{ cfg.rank, cfg.link_port }),
+            error.Closed => std.debug.print("FAIL hca rank {d}: the peer closed the bootstrap connection\n", .{cfg.rank}),
+            else => std.debug.print("FAIL hca rank {d}: bootstrap: {t}\n", .{ cfg.rank, e }),
+        }
+        return 1;
+    };
+    defer b.close();
+    var specs: [tp.roce_verbs.max_hcas]tp.roce_verbs.HcaSpec = undefined;
+    const pick = tp.roce_pick.select(cfg, &b, &specs) catch |e| {
+        std.debug.print("FAIL hca rank {d}: {t} while picking the ports with the peer\n", .{ cfg.rank, e });
+        return 1;
+    };
+    var buf: [tp.roce_pick.list_bytes + 16]u8 = undefined;
+    const line = tp.roce_pick.hcaLine(pick, &specs, &buf) catch |e| {
+        const why = switch (e) {
+            error.NoRoceDevice => "no active Ethernet RDMA port with an IPv4 RoCE v2 GID on this host",
+            error.NoSharedSubnet => "no RoCE port here shares an IPv4 /24 with the peer's",
+        };
+        std.debug.print("FAIL hca rank {d}: {s}: name the peer's ports in TF_TP_ROCE_HCA or NCCL_IB_HCA\n", .{ cfg.rank, why });
+        return 1;
+    };
+    var names: [tp.roce_pick.list_bytes]u8 = undefined;
+    const how = if (pick.explicit) "TF_TP_ROCE_HCA" else "on a /24 the peer shares";
+    std.debug.print("INFO hca rank {d}: {s} ({s})\n", .{ cfg.rank, try tp.roce_pick.joinNames(specs[0..pick.n], true, &names), how });
+    try std.Io.File.stdout().writeStreamingAll(io, line);
+    return 0;
 }
 
 fn suite(s: *tp.Session, d: *const cuda.Driver, gpa: std.mem.Allocator, cfg: tp.Config) !u8 {

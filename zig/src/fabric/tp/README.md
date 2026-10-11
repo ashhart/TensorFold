@@ -36,6 +36,14 @@ Each device pairs with the peer device on the same IPv4 /24.
 `NCCL_IB_HCA` should name the same devices without the `:gid` suffix.
 In NCCL, `:N` after a device name selects port `N`, not a GID index.
 
+`run_hosts.sh` sets `NCCL_IB_HCA` from `TF_TP_ROCE_HCA` when only that is set.
+When neither is set, it first runs `tf-tp-test hca` on both ranks: the RoCE pick, made with the peer over the bootstrap.
+The same rule picks the wire's devices, and each rank prints its own as `NCCL_IB_HCA=name,...`.
+`hca` needs no GPU, and it exits 1 when no port shares a /24 with the peer, so no host falls back to its first ports.
+The runner logs each rank's pick and stops with that reason when `hca` fails.
+Both hosts must use the same mode: if one names its ports and the other names none, only the latter runs `hca`.
+It finds no peer and stops after `TF_TP_PLAN_TIMEOUT` (default 300 s) with that reason.
+
 Two DGX Spark nodes, with the second ConnectX-7 port of each cabled to the other (both PCIe functions of that
 port), and the first port cabled to a third node:
 
