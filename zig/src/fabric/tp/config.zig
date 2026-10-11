@@ -37,6 +37,8 @@ pub const Config = struct {
     device: u32 = 0,
     backend: Backend = .nccl,
     mailbox_max_bytes: usize = 256 * 1024,
+    /// TF_TP_ROCE_CHUNKED_KB: `allGatherV` strides up to this go RoCE in ops of at most a slot (0: off).
+    roce_chunked_bytes: usize = 0,
     /// A mailbox wait for the peer gives up after this long and poisons the transport (fail-stop).
     mailbox_timeout_ns: u64 = 120 * std.time.ns_per_s,
     failfast: bool = true,
@@ -83,6 +85,7 @@ pub const Config = struct {
             log.warn("TF_TP_MAILBOX_MAX_KB={d}: a RoCE write is capped at {d} KiB; refusing to start", .{ c.mailbox_max_bytes / 1024, max_rdma_write / 1024 });
             return error.BadSetting;
         }
+        c.roce_chunked_bytes = 1024 * try int(usize, get, "TF_TP_ROCE_CHUNKED_KB", 0, 0, 64 * 1024);
         c.mailbox_timeout_ns = try seconds(get, "TF_TP_MAILBOX_TIMEOUT_S", 120, 0.001, 86400);
         if (get("TF_TP_FAILFAST")) |v| c.failfast = !(std.mem.eql(u8, v, "0") or std.mem.eql(u8, v, "off"));
         c.grace_ns = try seconds(get, "TF_TP_FAILFAST_GRACE_S", 1.0, 0, 60);
@@ -141,6 +144,7 @@ pub const Config = struct {
         h.update(std.mem.asBytes(&c.world));
         h.update(std.mem.asBytes(&c.backend));
         h.update(std.mem.asBytes(&c.mailbox_max_bytes));
+        h.update(std.mem.asBytes(&c.roce_chunked_bytes));
         h.update(std.mem.asBytes(&c.failfast));
         h.update(std.mem.asBytes(&c.roce_wire));
         h.update(std.mem.asBytes(&c.roce_fallback));

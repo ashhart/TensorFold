@@ -53,6 +53,8 @@ const RoceArgs = extern struct {
     opts: u32 = 0,
     /// gather only: device int32 [2] of each rank's bytes (0: every shard is `nbytes`)
     lens: DevicePtr = 0,
+    /// Chunked gathers: this op's byte offset into each rank's shard (it moves at most a slot from there; 0 otherwise).
+    chunk: u64 = 0,
 };
 
 pub const WireKind = enum {
@@ -125,6 +127,8 @@ pub const Roce = struct {
     state: ?cuda.DeviceBuffer = null,
     module: ?cuda.Module = null,
     func: ?cuda.Function = null,
+    /// The kernel image takes `RoceArgs.chunk` (it exports tp_roce_chunk_abi): TF_TP_ROCE_CHUNKED_KB needs it.
+    chunk_abi: bool = false,
     // the proxy thread
     thread: ?std.Thread = null,
     running: std.atomic.Value(bool) = .init(false),
@@ -233,6 +237,7 @@ pub const Roce = struct {
         try r.state.?.fill8(0, null);
         r.module = try cuda.Module.load(d, image);
         r.func = try r.module.?.function("tp_roce");
+        r.chunk_abi = if (r.module.?.function("tp_roce_chunk_abi")) |_| true else |_| false;
         return true;
     }
 
@@ -311,8 +316,12 @@ pub const Roce = struct {
     }
 
     fn launch(r: *Roce, mode: Mode, in: DevicePtr, out: DevicePtr, n: usize, lens: DevicePtr, stream: collective.Stream) Error!void {
+        return r.launchAt(mode, in, out, n, lens, 0, stream);
+    }
+
+    fn launchAt(r: *Roce, mode: Mode, in: DevicePtr, out: DevicePtr, n: usize, lens: DevicePtr, chunk: u64, stream: collective.Stream) Error!void {
         if (r.aborted.load(.acquire)) return error.Aborted;
-        if (n > r.slot_bytes) return error.Unsupported;
+        if (n > r.slot_bytes and (lens == 0 or !r.chunk_abi)) return error.Unsupported;
         if (n == 0) return;
         const d = r.d orelse return error.Unsupported;
         var a: RoceArgs = .{
@@ -331,9 +340,10 @@ pub const Roce = struct {
             .n_hca = r.wire.hcas(),
             .opts = r.fast,
             .lens = lens,
+            .chunk = chunk,
         };
         var params = [1]?*anyopaque{@ptrCast(&a)};
-        const blocks = @min(@import("mailbox.zig").blocksFor(n), r.max_grid);
+        const blocks = @min(@import("mailbox.zig").blocksFor(@min(n, r.slot_bytes)), r.max_grid);
         d.check(d.api.cuLaunchKernel(r.func.?.handle, blocks, 1, 1, threads, 1, 1, 0, stream, &params, null), "cuLaunchKernel tp_roce") catch return error.BackendFailed;
     }
 
@@ -345,6 +355,14 @@ pub const Roce = struct {
     pub fn allGatherV(r: *Roce, s: DevicePtr, o: DevicePtr, n: usize, lens: DevicePtr, stream: collective.Stream) Error!void {
         if (lens == 0) return error.Invalid;
         return r.launch(.gather, s, o, n, lens, stream);
+    }
+
+    /// `allGatherV` past the slot: op c moves at most a slot of each shard from c x slot (empty on both ranks: no op).
+    pub fn allGatherVChunked(r: *Roce, s: DevicePtr, o: DevicePtr, n: usize, lens: DevicePtr, stream: collective.Stream) Error!void {
+        if (lens == 0) return error.Invalid;
+        if (!r.chunk_abi) return error.Unsupported;
+        var off: usize = 0;
+        while (off < n) : (off += r.slot_bytes) try r.launchAt(.gather, s, o, n, lens, off, stream);
     }
 
     pub fn exchangeBytes(r: *Roce, s: DevicePtr, o: DevicePtr, n: usize, stream: collective.Stream) Error!void {
@@ -391,17 +409,31 @@ pub const Roce = struct {
 
     /// `hostGather` with variable lengths (`allGatherV`): rank k's first lens[k] bytes land at out + k x n.
     pub fn hostGatherV(r: *Roce, in: []const u8, out: []u8, lens: ?[2]u32) Error!void {
+        if (in.len > r.slot_bytes) return error.Invalid;
+        return r.hostGatherAt(in, out, lens, 0);
+    }
+
+    /// `allGatherVChunked`'s ops done by the host (the kernel's side of each, as `hostGatherV`).
+    pub fn hostGatherVChunked(r: *Roce, in: []const u8, out: []u8, lens: [2]u32) Error!void {
+        var off: usize = 0;
+        while (off < in.len) : (off += r.slot_bytes) try r.hostGatherAt(in, out, lens, off);
+    }
+
+    /// One op from shard offset `off`: each rank's bytes past it, at most a slot; an op empty on both ranks is skipped.
+    fn hostGatherAt(r: *Roce, in: []const u8, out: []u8, lens: ?[2]u32, off: usize) Error!void {
         const n = in.len;
-        if (n == 0 or n > r.slot_bytes or out.len < 2 * n) return error.Invalid;
+        if (n == 0 or out.len < 2 * n) return error.Invalid;
         if (lens) |l| if (l[0] > n or l[1] > n) return error.Invalid;
-        const mine: usize = if (lens) |l| l[r.me] else n;
-        const theirs: usize = if (lens) |l| l[1 - r.me] else n;
+        const full: [2]usize = if (lens) |l| .{ l[0], l[1] } else .{ n, n };
+        const mine: usize = @min(full[r.me] -| off, r.slot_bytes);
+        const theirs: usize = @min(full[1 - r.me] -| off, r.slot_bytes);
+        if (off > 0 and mine == 0 and theirs == 0) return;
         const seq = r.host_epoch +% 1;
         const slot: usize = seq & 1;
-        @memcpy(r.region[send_off + slot * r.slot_bytes ..][0..mine], in[0..mine]);
+        @memcpy(r.region[send_off + slot * r.slot_bytes ..][0..mine], in[off..][0..mine]);
         r.word(w_slot_bytes + slot).store(@intCast(@max(16, std.mem.alignForward(usize, mine, 16))), .release);
         r.word(w_seq).store(seq, .release);
-        @memcpy(out[r.me * n ..][0..mine], in[0..mine]);
+        @memcpy(out[r.me * n + off ..][0..mine], in[off..][0..mine]);
         const t0 = sock.nowNs();
         for (0..r.wire.hcas()) |h| {
             const flag: *std.atomic.Value(u32) = @ptrCast(@alignCast(r.region[flag_off + (slot * 2 + h) * flag_stride ..].ptr));
@@ -411,7 +443,7 @@ pub const Roce = struct {
                 std.atomic.spinLoopHint();
             }
         }
-        @memcpy(out[(1 - r.me) * n ..][0..theirs], r.region[send_off + 2 * r.slot_bytes + slot * r.slot_bytes ..][0..theirs]);
+        @memcpy(out[(1 - r.me) * n + off ..][0..theirs], r.region[send_off + 2 * r.slot_bytes + slot * r.slot_bytes ..][0..theirs]);
         r.host_epoch = seq;
     }
 };
