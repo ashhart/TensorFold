@@ -20,10 +20,12 @@ pub const Shape = extern struct { rows: u32, heads: u32, dh: u32, groups: u32, n
 pub const Heads = extern struct { rows: u32, heads: u32, kv_heads: u32, dim: u32, scale: f32, prefix: u32 = 0 };
 
 /// Scratch the products borrow: x in bf16, a weight dequantized transposed, an f32 sum, the experts' partial sums.
-pub const Tmp = struct { xb: Buffer, wt: Buffer, acc: Buffer, part: Buffer };
+pub const Tmp = struct { xb: Buffer, wt: Buffer, acc: Buffer, tiles: Buffer };
 
-/// Slices an expert's rows are streamed in, each its own threadgroup.
-pub const slices = 8;
+/// The tiles of 16 pairs `pairs` pairs cut into at most, each expert's last one part full.
+pub fn tileCap(pairs: usize, experts: usize) usize {
+    return pairs / 16 + experts;
+}
 
 /// d [m, n] (row stride ldd) = a [m, k] times b [n, k]^T, bf16 on the tensor units (MLX's NAX GEMM, any k).
 pub fn mm(l: pl.Launch, a: At, b: At, d: At, m: usize, n: usize, k: usize, lda: usize, ldb: usize, ldd: usize) void {
@@ -72,25 +74,23 @@ pub const Ops = struct {
         o.e.run(.{ rows * k, 1, 1 }, .{ 256, 1, 1 });
     }
 
-    /// y [pairs, k] = x [pairs, n] times each pair's expert of the 4-bit w, an expert's rows streamed once, by slice.
+    /// y [pairs, k] = x [pairs, n] times each pair's expert of 4-bit w, 16 pairs a tile (x: 32 spare rows at its end).
     pub fn experts(o: Ops, x: Buffer, w: [3]At, offsets: Buffer, y: Buffer, pairs: usize, n: usize, k: usize, count: usize) void {
-        std.debug.assert(n % (slices * 4) == 0 and k % 64 == 0);
-        const dims = [4]u32{ @intCast(pairs), @intCast(n), @intCast(k), @intCast(count) };
-        const width = (k / 8 + 31) / 32 * 32;
-        o.go("tf_train_experts_part");
+        std.debug.assert(n % 32 == 0 and k % 64 == 0);
+        const cap = tileCap(pairs, count);
+        o.go("tf_train_experts_tiles");
+        o.e.buf(offsets, 0, 0);
+        o.e.buf(o.tmp.tiles, 0, 1);
+        o.e.bytes([4]u32{ @intCast(pairs), @intCast(cap), 0, @intCast(count) }, 2);
+        o.e.run(.{ 1, 1, 1 }, .{ 1, 1, 1 });
+        o.go("tf_train_experts_mm");
         o.e.buf(x, 0, 0);
         for (w, 1..) |t, i| o.e.buf(t.b, t.off, i);
-        o.e.buf(offsets, 0, 4);
-        o.e.buf(o.tmp.part, 0, 5);
-        o.e.bytes(dims, 6);
-        o.e.bytes(@as(u32, slices), 7);
-        o.e.run(.{ width, slices * count, 1 }, .{ width, 1, 1 });
-        o.go("tf_train_experts_sum");
-        o.e.buf(o.tmp.part, 0, 0);
-        o.e.buf(y, 0, 1);
-        o.e.bytes(dims, 2);
-        o.e.bytes(@as(u32, slices), 3);
-        o.e.run(.{ k, pairs, 1 }, .{ 256, 1, 1 });
+        o.e.buf(o.tmp.tiles, 0, 4);
+        o.e.buf(offsets, 0, 5);
+        o.e.buf(y, 0, 6);
+        o.e.bytes([4]u32{ @intCast(pairs), @intCast(n), @intCast(k), @intCast(count) }, 7);
+        o.e.run(.{ k / 64 * 128, cap, 1 }, .{ 128, 1, 1 });
     }
 
     /// g [rows, dim] += the residual's gradient through an input RMS norm of h (bf16) with weight w, given dx.

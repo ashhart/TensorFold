@@ -54,6 +54,27 @@ pub fn main(init: std.process.Init) !void {
     try compare.pairs(a, t, seqs, layers[0..found], @min(nm.prefill.lane_rows, (4 * c.experts - 1) / c.top_k), true);
     try compare.check(a, init.io, t, seqs, layers[0..found]);
     try compare.prefixes(a, init.io, t, seqs, layers[0..found]);
+    try profile(t, m, seqs);
+}
+
+/// One pass of as many sequences as it holds, keys then targets, each dispatch alone: where a pass's time goes.
+fn profile(t: *Trainer, m: anytype, seqs: []const train.Seq) !void {
+    var n: usize = 0;
+    var rows: usize = 0;
+    while (n < seqs.len and n < train.max_seqs and rows + seqs[n].ids.len - 1 <= t.pack) : (n += 1) rows += seqs[n].ids.len - 1;
+    for ([_]train.Mode{ .keys, .target }) |mode| {
+        for (seqs[0..n], 0..) |s, i| for (s.nudge.layers, 0..) |mask, k| {
+            var bits = mask;
+            while (bits != 0) : (bits &= bits - 1) @memset(t.deltaAt(i, k, @ctz(bits)), 0);
+        };
+        var prof: nm.encoder.Profiler = .{ .queue = m.queue, .kernels = &m.kernels, .prompt = &m.prefill };
+        t.profile = &prof;
+        var got: [train.max_seqs]train.Result = undefined;
+        try t.pass(seqs[0..n], mode, .{ .decide = 0, .whole = true }, got[0..n]);
+        t.profile = null;
+        std.debug.print("RESULT profile {s}: {d} sequences, {d} rows\n", .{ @tagName(mode), n, rows });
+        prof.report(1);
+    }
 }
 
 fn now(io: std.Io) f64 {

@@ -7,7 +7,7 @@ struct Shape {
   uint rows, heads, dh, groups, n, inner, conv, proj;
 };
 
-constant uint ck = 16;
+constant uint ck = 8;
 
 inline float silu(float v) { return v / (1.0f + exp(-v)); }
 
@@ -97,19 +97,18 @@ kernel void tf_train_ssm_fwd(const device bfloat* act [[buffer(0)]],
   }
 }
 
-// The scan backward for one head: dx (with the D skip) into dact, per-head dB and dC partials, and ddt.
+// One head's scan backward (dx into dact, dB and dC partials, ddt), each row's states recomputed from its checkpoint.
 kernel void tf_train_ssm_back(const device bfloat* act [[buffer(0)]],
                               const device float* dt [[buffer(1)]],
                               const device float* a_neg [[buffer(2)]],
                               const device bfloat* d_skip [[buffer(3)]],
                               const device float* dy [[buffer(4)]],
                               const device float* ckpt [[buffer(5)]],
-                              device float* states [[buffer(6)]],
-                              device float* dact [[buffer(7)]],
-                              device float* db_part [[buffer(8)]],
-                              device float* dc_part [[buffer(9)]],
-                              device float* ddt [[buffer(10)]],
-                              constant Shape& s [[buffer(11)]],
+                              device float* dact [[buffer(6)]],
+                              device float* db_part [[buffer(7)]],
+                              device float* dc_part [[buffer(8)]],
+                              device float* ddt [[buffer(9)]],
+                              constant Shape& s [[buffer(10)]],
                               uint h [[threadgroup_position_in_grid]],
                               uint t [[thread_position_in_threadgroup]],
                               uint lane [[thread_index_in_simdgroup]],
@@ -118,29 +117,24 @@ kernel void tf_train_ssm_back(const device bfloat* act [[buffer(0)]],
   const uint p = t / 16, n0 = (t % 16) * 8, g = h / (s.heads / s.groups), size = s.dh * s.n;
   const uint b0 = s.inner + g * s.n, c0 = s.inner + s.groups * s.n + g * s.n;
   const device float* mine = ckpt + size_t(h) * ((s.rows + ck - 1) / ck + 1) * size;
-  device float* chunk = states + size_t(h) * ck * size;
   float ds[8] = {0, 0, 0, 0, 0, 0, 0, 0};
   for (int c = int((s.rows - 1) / ck); c >= 0; c--) {
     const uint first = uint(c) * ck, last = min(first + ck, s.rows);
-    float st[8];
-    for (uint i = 0; i < 8; i++) st[i] = mine[uint(c) * size + p * s.n + n0 + i];
-    for (uint r = first; r < last; r++) {
-      const device bfloat* row = act + size_t(r) * s.conv;
-      const float d = dt[r * s.heads + h], a = exp(d * a_neg[h]), x = float(row[h * s.dh + p]);
-      for (uint i = 0; i < 8; i++) {
-        st[i] = a * st[i] + d * x * float(row[b0 + n0 + i]);
-        chunk[(r - first) * size + p * s.n + n0 + i] = st[i];
-      }
-    }
     for (int r = int(last) - 1; r >= int(first); r--) {
+      float cur[8], prev[8], v[8];
+      for (uint i = 0; i < 8; i++) cur[i] = mine[uint(c) * size + p * s.n + n0 + i];
+      for (uint q = first; q <= uint(r); q++) {
+        const device bfloat* row = act + size_t(q) * s.conv;
+        const float d = dt[q * s.heads + h], a = exp(d * a_neg[h]), x = float(row[h * s.dh + p]);
+        for (uint i = 0; i < 8; i++) {
+          prev[i] = cur[i];
+          cur[i] = a * cur[i] + d * x * float(row[b0 + n0 + i]);
+        }
+      }
       const device bfloat* row = act + size_t(r) * s.conv;
       const float d = dt[r * s.heads + h], a = exp(d * a_neg[h]), x = float(row[h * s.dh + p]);
       const float gy = dy[size_t(r) * s.inner + h * s.dh + p];
-      float cur[8], prev[8], v[8];
       for (uint i = 0; i < 8; i++) {
-        cur[i] = chunk[(uint(r) - first) * size + p * s.n + n0 + i];
-        prev[i] = r > int(first) ? chunk[(uint(r) - first - 1) * size + p * s.n + n0 + i]
-                                 : mine[uint(c) * size + p * s.n + n0 + i];
         ds[i] += gy * float(row[c0 + n0 + i]);
         v[i] = gy * cur[i];
       }
