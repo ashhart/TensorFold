@@ -6,6 +6,7 @@ const Server = @import("server.zig").Server;
 const Cx = errors.Cx;
 const askBase = @import("slide_ask.zig").askBase;
 const prompts = @import("slide_prompts.zig");
+const ownWord = @import("slide_whom.zig").ownWord;
 
 /// What a question asks about, word for word as it says it, as the model names it (null: not found in it).
 pub fn subjectOf(srv: *Server, cx: *Cx, q: []const u8, gone: anytype) !?[]const u8 {
@@ -30,7 +31,7 @@ pub fn subjectWord(phrase: []const u8) []const u8 {
     const word = std.mem.trim(u8, owner orelse last, ".,!?;:'\"");
     // a pronoun or a question word is everywhere: no subject to key on
     for (unkeyed) |w| if (std.ascii.eqlIgnoreCase(word, w)) return "";
-    return word;
+    return if (ownWord(word)) "" else word;
 }
 
 /// The words of a fact's subject phrase a question can name it by: pronouns, question words and small words left out.
@@ -39,7 +40,7 @@ pub fn subjectWords(a: std.mem.Allocator, phrase: []const u8) ![]const []const u
     var words = std.mem.tokenizeAny(u8, phrase, " \t\r\n");
     next: while (words.next()) |w| {
         const word = possessor(std.mem.trim(u8, w, ".,!?;:'\""));
-        if (word.len < 2) continue;
+        if (word.len < 2 or ownWord(word)) continue; // "Mój pies" (my dog) keys on pies, never on my
         for (unkeyed ++ small) |u| if (std.ascii.eqlIgnoreCase(word, u)) continue :next;
         try out.append(a, word);
     }
@@ -96,7 +97,7 @@ pub fn properWords(a: std.mem.Allocator, phrase_words: []const []const u8, fact:
     var it = std.mem.tokenizeAny(u8, fact, " \t\r\n,.!?;:\"()");
     next: while (it.next()) |t| {
         const w = possessor(t);
-        if (w.len < 2 or !std.ascii.isUpper(w[0])) continue;
+        if (w.len < 2 or !std.ascii.isUpper(w[0]) or ownWord(w)) continue;
         for (unkeyed ++ small) |u| if (std.ascii.eqlIgnoreCase(w, u)) continue :next;
         for (out.items) |x| if (std.ascii.eqlIgnoreCase(x, w)) continue :next;
         try out.append(a, w);
@@ -162,6 +163,9 @@ test "a fact's subject words, and the last of them a question says" {
     defer a.free(mine);
     try std.testing.expectEqual(@as(usize, 1), mine.len);
     try std.testing.expectEqualStrings("sister", wordIn(mine, "What is my sister's name?"));
+    const pies = try subjectWords(a, "Mój pies");
+    defer a.free(pies);
+    try std.testing.expect(pies.len == 1 and std.mem.eql(u8, pies[0], "pies"));
     const ran = try subjectWords(a, "Quillmoor Labs team chat runs on Zulip");
     defer a.free(ran);
     const qs = [_][]const u8{ "What does Quillmoor use for team chat?", "Which app does the Quillmoor Labs team chat on?", "Where is Quillmoor's team chat?" };

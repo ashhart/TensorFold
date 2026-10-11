@@ -16,7 +16,13 @@ pub fn yesNo(question: []const u8) bool {
 }
 
 /// I and my (and Polish first-person verbs) in Polish, German, French, Spanish, Italian, Portuguese and Dutch.
-const own_words = [_][]const u8{ "mój", "moja", "moje", "mojego", "mojej", "moim", "moją", "moi", "mnie", "nasz", "nasza", "nasze", "naszego", "jestem", "mam", "lubię", "mieszkam", "pracuję", "ich", "mein", "meine", "meinen", "meinem", "meiner", "mir", "mich", "wir", "unser", "unsere", "moi", "nous", "notre", "yo", "mis", "mío", "mía", "nosotros", "nuestro", "nuestra", "mio", "miei", "noi", "nostro", "nostra", "meu", "minha", "meus", "nós", "nosso", "nossa", "ik", "mijn", "mij", "wij" };
+pub const own_words = [_][]const u8{ "mój", "moja", "moje", "mojego", "mojej", "moim", "moją", "moi", "mnie", "nasz", "nasza", "nasze", "naszego", "jestem", "mam", "lubię", "mieszkam", "pracuję", "ich", "mein", "meine", "meinen", "meinem", "meiner", "mir", "mich", "wir", "unser", "unsere", "moi", "nous", "notre", "yo", "mis", "mío", "mía", "nosotros", "nuestro", "nuestra", "mio", "miei", "noi", "nostro", "nostra", "meu", "minha", "meus", "nós", "nosso", "nossa", "ik", "mijn", "mij", "wij" };
+
+/// Whether `word` is I, my or we in one of those languages.
+pub fn ownWord(word: []const u8) bool {
+    for (own_words) |f| if (std.ascii.eqlIgnoreCase(word, f)) return true;
+    return false;
+}
 
 /// Whether a question is still the user's own: it says I or my, never your, and you only once ("Do you remember").
 pub fn firstPerson(question: []const u8) bool {
@@ -25,7 +31,7 @@ pub fn firstPerson(question: []const u8) bool {
     var it = std.mem.tokenizeAny(u8, question, delimiters);
     while (it.next()) |w| {
         for ([_][]const u8{ "i", "my", "me", "mine", "our", "we", "us", "i'm", "i've" }) |f| mine = mine or std.ascii.eqlIgnoreCase(w, f);
-        for (own_words) |f| mine = mine or std.ascii.eqlIgnoreCase(w, f);
+        mine = mine or ownWord(w);
         for ([_][]const u8{ "your", "yours", "yourself", "you're", "you've" }) |f| if (std.ascii.eqlIgnoreCase(w, f)) return false;
         you += @intFromBool(std.ascii.eqlIgnoreCase(w, "you"));
     }
