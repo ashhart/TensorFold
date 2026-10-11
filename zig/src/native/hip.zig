@@ -14,7 +14,7 @@ const registry = .{ qwen35.native, qwen35.native_moe };
 
 pub const backends: []const []const u8 = &.{"hip"};
 /// The serve flags past the common ones this backend takes (server/cli.zig lists and parses them).
-pub const serves: []const []const u8 = &.{ "--tp", "--policy", "--mtp-drafts", "--mtp-confidence", "--checkpoint-slots", "--backend=rocm" };
+pub const serves: []const []const u8 = &.{ "--policy", "--mtp-drafts", "--mtp-confidence", "--checkpoint-slots", "--backend=rocm" };
 pub const families: []const api.Family = blk: {
     var out: [registry.len]api.Family = undefined;
     for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats };
@@ -92,8 +92,9 @@ fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open
     if (o.mtp_confidence) |c| policy.mtp.confidence = c;
     if (o.keep) |n| policy.slots = @intCast(@min(n, 1 << 16));
     if (matrixRefused(policy, caps)) |why| return refuse(a, problem, "matrix=on: {s}; matrix=auto runs the dot2 tiles", .{why});
-    const group: ?*hip.Group = if (o.tp > 1) hip.Group.join(gpa, io, o.rank, o.tp, o.master, o.master_port, caps, &policy) catch |err| return switch (err) {
+    const group: ?hip.collective.Group = if (o.tp > 1) hip.joinGroup(gpa, io, o.rank, o.tp, o.master, o.master_port, caps, &policy) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
+        error.NoTensorParallel => refuse(a, problem, "this build has no tensor parallelism: it comes with the RCCL backend", .{}),
         error.NoRccl => refuse(a, problem, "tensor parallelism needs RCCL", .{}),
         error.NoId => refuse(a, problem, "RCCL gave no id", .{}),
         error.MixedGpus => refuse(a, problem, "the ranks' GPUs differ: a group needs one kind of GPU", .{}),
@@ -120,7 +121,7 @@ fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open
 /// One loaded model behind the lane host: everything the engine thread reads lives here.
 const Host = struct {
     gpa: Allocator,
-    group: ?*hip.Group,
+    group: ?hip.collective.Group,
     policy_line: []const u8,
     family: *anyopaque,
     release: *const fn (*anyopaque) void,

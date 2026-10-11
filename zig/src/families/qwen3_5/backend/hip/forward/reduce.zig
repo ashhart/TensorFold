@@ -7,10 +7,10 @@ const view = @import("../model/view.zig");
 const Ops = hip.ops.Ops;
 const Tensor = hip.ops.Tensor;
 
-pub const Error = hip.ops.Error || hip.rccl.Error;
+pub const Error = hip.ops.Error || hip.collective.Error;
 
 /// `n` fp32 values summed over the ranks in rank order, so a row's sum does not depend on the rows sharing the call.
-pub fn sum(o: Ops, c: hip.rccl.Comm, y: u64, n: usize) Error!u64 {
+pub fn sum(o: Ops, c: hip.collective.Comm, y: u64, n: usize) Error!u64 {
     const out = try o.arena.of(f32, n);
     if (c.world == 2) {
         try c.allReduce(y, out, n, .f32, o.stream);
@@ -32,7 +32,7 @@ pub fn residual(o: Ops, m: *const view.Model, x: Tensor, y: Tensor, n: usize) Er
 }
 
 /// The ranks' logits slices (world, rows, width) of the activation dtype, gathered into `out`.
-pub fn gather(o: Ops, c: hip.rccl.Comm, slice: Tensor, out: u64, n: usize) Error!void {
-    const dtype: hip.rccl.Dtype = if (slice.kind == .f16) .f16 else .bf16;
+pub fn gather(o: Ops, c: hip.collective.Comm, slice: Tensor, out: u64, n: usize) Error!void {
+    const dtype: hip.collective.Dtype = if (slice.kind == .f16) .f16 else .bf16;
     try c.allGather(slice.ptr, out, n, dtype, o.stream);
 }

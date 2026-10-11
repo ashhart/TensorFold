@@ -59,23 +59,12 @@ pub fn run(g: Gpu, model_dir: []const u8, dir: []const u8, group: Group) !void {
     defer ctx.deinit();
     // the oracle's sums are the reference kernels': the fixtures pin them whatever the environment says
     var notes: hip.Policy.Notes = .{};
-    const policy = try hip.Policy.resolve("kernels=reference", .none, &notes);
-    // the unique id starts RCCL's bootstrap thread: the library stays loaded to the end
-    var rccl: ?hip.rccl.Rccl = null;
-    defer if (rccl) |*r| r.close();
-    var link: hip.link.Link = undefined;
-    var comm: hip.rccl.Comm = undefined;
-    if (group.world > 1) {
-        rccl = try hip.rccl.Rccl.open(policy.rccl_lib.slice());
-        const pair = try hip.link.Link.open(g.io, group.rank, group.world, group.master, group.port, if (group.rank == 0) try rccl.?.uniqueId() else undefined, .{ .caps = hip.Device.groupId(try hip.Device.kernelCaps(@constCast(g.d), @intCast(group.rank))), .policy = policy.words() });
-        link = pair[0];
-        comm = try hip.rccl.Comm.init(&rccl.?, pair[1], group.rank, group.world);
-    }
-    defer if (group.world > 1) {
-        comm.deinit();
-        link.close();
-    };
+    var policy = try hip.Policy.resolve("kernels=reference", .none, &notes);
     const caps = try hip.Device.kernelCaps(@constCast(g.d), @intCast(group.rank));
+    // the group stays open to the end: its communicator is the forward's
+    const joined: ?hip.collective.Group = if (group.world > 1) try hip.joinGroup(g.gpa, g.io, @intCast(group.rank), @intCast(group.world), group.master, group.port, caps, &policy) else null;
+    defer if (joined) |j| j.close(g.gpa);
+    const comm: ?hip.collective.Comm = if (joined) |j| try j.open() else null;
     var lib = try hip.Launcher.load(g.d, policy.choices(), hip.kernels.images);
     defer lib.unload();
     const act: view.Kind = if (caps.act == .f16) .f16 else .bf16;
@@ -84,7 +73,7 @@ pub fn run(g: Gpu, model_dir: []const u8, dir: []const u8, group: Group) !void {
     defer model.deinit();
     const br = try qwen35.bridge.Bridge.init(g.gpa, g.d, &model, act);
     defer br.deinit();
-    if (group.world > 1) br.model.tp = comm;
+    br.model.tp = comm;
     const m = &br.model;
     const s = m.spec;
     var stream = try hip.Stream.init(g.d);

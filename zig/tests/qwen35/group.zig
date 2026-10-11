@@ -1,4 +1,4 @@
-//! The tensor-parallel group of one test process: its options, the link to the other ranks and the RCCL bootstrap.
+//! The tensor-parallel group of one test process: its options, and the group it joins through hip.joinGroup.
 
 const std = @import("std");
 const hip = @import("hip");
@@ -35,29 +35,28 @@ pub const Group = struct {
 
     /// What a group of more than one rank holds besides the engine: close it after the engine.
     pub const Joined = struct {
-        rccl: ?hip.rccl.Rccl = null,
-        link: hip.link.Link = undefined,
-        id: ?hip.rccl.UniqueId = null,
+        gpa: std.mem.Allocator,
+        group: ?hip.collective.Group = null,
         world: usize = 1,
         /// What every rank runs under: rank 0's.
         policy: hip.Policy = .{},
 
         pub fn close(j: *Joined) void {
-            if (j.world > 1) j.link.close();
-            if (j.rccl) |*r| r.close();
+            if (j.group) |g| g.close(j.gpa);
+        }
+
+        /// The link to the other ranks (null: one rank).
+        pub fn link(j: *const Joined) ?hip.collective.Link {
+            return if (j.group) |g| g.link() else null;
         }
     };
 
-    /// The unique id starts RCCL's bootstrap thread: the library stays loaded until the engine is gone.
-    pub fn join(g: Group, io: std.Io) !Joined {
+    /// Joins the other ranks (the group stays open until the engine is gone); one rank joins nothing.
+    pub fn join(g: Group, gpa: std.mem.Allocator, io: std.Io) !Joined {
         const found = try resolve(g.policy, @intCast(g.rank));
-        var j: Joined = .{ .world = g.world, .policy = found.policy };
+        var j: Joined = .{ .gpa = gpa, .world = g.world, .policy = found.policy };
         if (g.world < 2) return j;
-        j.rccl = try hip.rccl.Rccl.open(j.policy.rccl_lib.slice());
-        errdefer j.rccl.?.close();
-        const pair = try hip.link.Link.open(io, g.rank, g.world, g.master, g.port, if (g.rank == 0) try j.rccl.?.uniqueId() else undefined, .{ .caps = hip.Device.groupId(found.caps), .policy = j.policy.words() });
-        j.link, j.id, const hello = pair;
-        if (g.rank != 0) j.policy = hip.Policy.fromWords(hello.policy, j.policy);
+        j.group = try hip.joinGroup(gpa, io, @intCast(g.rank), @intCast(g.world), g.master, g.port, found.caps, &j.policy);
         return j;
     }
 
@@ -67,7 +66,7 @@ pub const Group = struct {
         own.device = @intCast(g.rank);
         own.rank = g.rank;
         own.world = g.world;
-        own.id = j.id;
+        own.group = j.group;
         own.policy = j.policy;
         return qwen35.engine.Engine.open(gpa, io, dir, own);
     }
@@ -90,5 +89,5 @@ pub fn resolve(flags: []const u8, device: c_int) !struct { policy: hip.Policy, c
 pub fn follow(gpa: std.mem.Allocator, e: *qwen35.engine.Engine, j: *const Group.Joined) !void {
     var w = try qwen35.worker.Worker.init(gpa, e);
     defer w.deinit();
-    return w.follow(&j.link);
+    return w.follow(j.link().?);
 }

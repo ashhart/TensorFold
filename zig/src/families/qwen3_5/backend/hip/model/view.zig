@@ -101,7 +101,7 @@ pub const Model = struct {
     /// What this rank sees: under tp its heads and value heads.
     spec: Spec,
     /// The tensor-parallel communicator; null on one rank.
-    tp: ?hip.rccl.Comm = null,
+    tp: ?hip.collective.Comm = null,
     act: Kind,
     embed: Projection,
     layers: []const Layer,

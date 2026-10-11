@@ -33,15 +33,13 @@ pub const Device = @import("device.zig").Device;
 pub const Upload = @import("upload.zig").Upload;
 pub const quant = @import("core").quant;
 pub const registry = @import("core").registry;
-pub const rccl = @import("comm/rccl.zig");
-pub const link = @import("comm/link.zig");
-pub const Group = @import("comm/group.zig").Group;
+pub const collective = @import("collective.zig");
+/// Joins this rank's tensor-parallel group; this build has no collectives backend, so one rank only.
+pub const joinGroup = collective.noGroup;
 
 test {
     _ = policy;
     _ = admission;
     _ = Device;
-    _ = rccl;
-    _ = link;
-    _ = Group;
+    _ = collective;
 }

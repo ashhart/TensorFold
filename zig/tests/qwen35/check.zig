@@ -91,7 +91,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !u8 {
     capacity = @max(capacity, check_radix.capacity(o.tokens));
     if (o.runs(.accuracy)) capacity = @max(capacity, ids.len + 64);
     if (o.runs(.speed)) capacity = @max(capacity, check_speed.longest_prefill + 64);
-    var joined = try o.group.join(io);
+    var joined = try o.group.join(gpa, io);
     defer joined.close();
     const e = try o.group.engine(gpa, io, o.model, joined, .{ .capacity = capacity, .prompt_rows = capacity, .streams = check_radix.most_streams, .snapshots = check_radix.slots, .batch_rows = rows, .pool_pages = poolPages(capacity, o.tokens) });
     defer e.deinit();
@@ -107,7 +107,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !u8 {
         return 0;
     }
     var session: lanes_session.Session = undefined;
-    try session.init(gpa, io, e, if (o.group.world > 1) &joined.link else null);
+    try session.init(gpa, io, e, joined.link());
     defer session.deinit();
 
     var report: check_report.Report = .{};

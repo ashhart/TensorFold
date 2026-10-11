@@ -97,7 +97,7 @@ fn prepare(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.De
         .policy = dev.policy,
         .rank = o.rank,
         .world = o.world,
-        .id = if (dev.group) |g| g.id else null,
+        .group = dev.group,
     }) catch |err| return switch (err) {
         error.WeightsDoNotFit => refuse(a, problem, "the checkpoint's {d:.1} GiB of weights do not fit the {d:.1} GiB the HIP memory budget grants ({d:.1} GiB free less a {d:.1} GiB reserve{s}); free device memory or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_HIP_MEMORY_LIMIT_GB", .{ gibs(pf.weights), gibs(pf.pool.room(pf.held)), gibs(pf.pool.free), gibs(pf.pool.reserve), if (pf.pool.limit != null) ", under TENSORFOLD_HIP_MEMORY_LIMIT_GB" else "" }),
         error.BadReserve => refuse(a, problem, "TENSORFOLD_MEMORY_RESERVE_GIB: a number of GiB from 2 to the memory's size", .{}),
@@ -182,7 +182,7 @@ fn openEngine(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip
     if (hip.usage(false).device - before != head) return refuse(a, problem, "the draft head holds {d} device bytes, the plan says {d}", .{ hip.usage(false).device - before, head });
     if (p.cache.pages > 0) own.backend.keepPages(p.cache.pages, p.cache.snaps);
     // a lone rank times its forwards for the depth rule; the ranks of a group draft without costs
-    if (dev.group) |g| own.backend.withLink(&g.link) else own.backend.measure();
+    if (dev.group) |g| own.backend.withLink(g.link()) else own.backend.measure();
     return .{
         .backend = own.backend.backend(),
         .facts = own.backend.facts(),
@@ -201,5 +201,5 @@ fn followRank(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip
     defer gpa.free(p.startup);
     var w = try worker.Worker.init(gpa, p.e);
     defer w.deinit();
-    try w.follow(&dev.group.?.link);
+    try w.follow(dev.group.?.link());
 }

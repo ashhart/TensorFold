@@ -5,7 +5,7 @@ const runtime = @import("runtime.zig");
 const kernels = @import("kernels.zig");
 const Caps = @import("caps.zig").Caps;
 const Policy = @import("policy.zig").Policy;
-const Group = @import("comm/group.zig").Group;
+const Group = @import("collective.zig").Group;
 
 pub const Device = struct {
     /// The ordinal among the visible cards.
@@ -14,7 +14,7 @@ pub const Device = struct {
     /// Rank 0's policy; the other ranks adopt it when they join the group.
     policy: Policy,
     /// The tensor-parallel group this rank belongs to (null: one rank).
-    group: ?*Group = null,
+    group: ?Group = null,
 
     /// The card of `rank`: with every card visible rank r takes card r, with one card a process that card.
     pub fn ordinal(rank: u32) c_int {
