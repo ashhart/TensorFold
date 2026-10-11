@@ -1,4 +1,4 @@
-//! One step of learning in the weights on CUDA (train.zig on Metal): forward with activations kept, loss, and back.
+//! Learning in the weights on CUDA (train.zig on Metal): sequences side by side forward, their losses, and back.
 const std = @import("std");
 const train_mode = @import("train_mode.zig");
 const cuda = @import("cuda");
@@ -12,16 +12,31 @@ const ops = @import("cuda_train_ops.zig");
 const sites_mod = @import("cuda_sites.zig");
 const lesson_route = @import("lesson_route.zig");
 const back = @import("cuda_train_back.zig");
+const tfw = @import("cuda_train_fwd.zig");
+const lay = @import("cuda_train_layout.zig");
+const prefix = @import("cuda_train_prefix.zig");
+const Count = @import("pocket_clock.zig").Count;
 
-/// Rows a step learns from at most: a question and its answer (attention's backward reads at most 256).
+/// Rows a sequence learns from at most: a question and its answer (attention's backward reads at most 256).
 pub const max_rows = 256;
+
+/// Rows a pass holds at most, its sequences side by side.
+pub const pack_rows = 1024;
+
+/// Sequences a pass holds at most.
+pub const max_seqs = 32;
 
 pub const Mode = train_mode.Mode;
 pub const Result = train_mode.Result;
+pub const Nudge = train_mode.Nudge;
+pub const Seq = train_mode.Seq;
+pub const Span = train_mode.Span;
+pub const Answer = train_mode.Answer;
+pub const Turn = lesson_route.Turn;
 const reads = train_mode.reads;
 
-/// Where the projections onto each layer's candidates start in the mapped host block (after targets, weights, stats).
-const proj_at = max_rows * 16;
+/// Where the candidate projections start in the mapped host block (after targets, weights, stats and scales).
+const proj_at = pack_rows * 20;
 
 /// The trainer's own sequence: cache rows enough for a step, one attention chunk.
 const seq_len = state.chunk_keys;
@@ -36,7 +51,7 @@ pub const Raw = union(enum) {
     moe: struct { up: Mat, down: Mat, fc1: [3]u64, fc2: [3]u64 },
 };
 
-/// Where each layer keeps what its backward reads of its forward (bf16 unless named), at max_rows rows.
+/// Where each layer keeps what its backward reads of its forward (bf16 unless named), at pack_rows rows.
 const Kept = struct {
     x: u64 = 0, // the normed input (attention, MoE)
     proj: u64 = 0, // Mamba: the in-projection's output
@@ -61,19 +76,6 @@ pub const Shared = struct {
     }
 };
 
-/// Sub-allocations of one device allocation, 256-byte aligned.
-const Arena = struct {
-    buf: cuda.DeviceBuffer,
-    used: usize = 0,
-
-    fn take(a: *Arena, bytes: usize) u64 {
-        const at = std.mem.alignForward(usize, a.used, 256);
-        a.used = at + bytes;
-        std.debug.assert(a.used <= a.buf.len);
-        return a.buf.ptr + at;
-    }
-};
-
 pub const Trainer = struct {
     gpa: std.mem.Allocator,
     e: *engine.Engine,
@@ -84,15 +86,15 @@ pub const Trainer = struct {
     raw: []Raw,
     owned: std.ArrayList(cuda.DeviceBuffer) = .empty, // the raw weights and the LM head transposed
     head_t: u64 = 0, // bf16 [V, D]: the LM head dequantized, for the loss's backward product
-    mem: Arena,
+    mem: lay.Arena,
     kept: []Kept,
-    saved: u64 = 0, // bf16 [layers + 1, max_rows, D]: the residual entering each layer, then the last one
-    logits: u64 = 0, // bf16 [max_rows, V]: the logits, then their gradient
-    host: sites_mod.Mapped, // targets u32, weights f32, stats [2]f32, each max_rows; then proj f32 [layers, max_rows, candidates]
+    saved: u64 = 0, // bf16 [layers + 1, pack_rows, D]: the residual entering each layer, then the last one
+    logits: u64 = 0, // bf16 [pack_rows, V]: the logits, then their gradient
+    host: sites_mod.Mapped, // the answer rows' targets u32, weights f32, stats [2]f32; the rows' scales f32; then proj
     g: u64 = 0,
     dx: u64 = 0,
     gs: u64 = 0,
-    dhn: u64 = 0,
+    dhn: u64 = 0, // bf16 [pack_rows, D]: the final-normed answer rows, the head's input
     dxa: u64 = 0,
     xb: u64 = 0, // bf16 [max_rows, widest]: a product's left side
     wt: u64 = 0, // bf16 [widest n, k]: a product's dequantized matrix
@@ -128,13 +130,21 @@ pub const Trainer = struct {
     dv: u64 = 0,
     probs: u64 = 0,
     dscores: u64 = 0,
-    nudge: train_mode.Nudge = .{}, // where a target step adds `delta`
-    delta: Shared = undefined, // f32 [3, layers, D]: a target step's nudges after each layer it names, a row each
-    push: Shared = undefined, // f32 [3, layers, D]: the loss's gradient at each nudged row after each of them
-    inputs: Shared = undefined, // bf16 [layers, max_rows, D]: each MoE layer's normed input, as a keys or target step read it
-    residuals: Shared = undefined, // bf16 [layers + 1, max_rows, D]: the residuals a target step saved, for the host
+    nudge: train_mode.Nudge = .{}, // where a one-sequence target step adds `delta`
+    delta: Shared = undefined, // f32 [max_seqs, 3, layers, D]: each sequence's nudges after each layer it names
+    push: Shared = undefined, // f32 [max_seqs, 3, layers, D]: the loss's gradient at each nudged row after each of them
+    inputs: Shared = undefined, // bf16 [layers, pack_rows, D]: each MoE layer's normed input, as a keys or target pass read it
+    residuals: Shared = undefined, // bf16 [layers + 1, pack_rows, D]: the residuals a target pass saved, for the host
     sketched: usize = 0, // rows sketched since the sketches were cleared, each row's place in them
     route: lesson_route.Route = .{}, // this step's: which rows carry the lessons
+    from: [@import("config.zig").max_layers]u32 = @splat(std.math.maxInt(u32)), // each layer's open pocket neurons, from here on
+    spans: [max_seqs]Span = undefined, // where the last pass's sequences sat
+    answers: [max_seqs]Answer = undefined, // and their answer rows, packed for the head
+    answered: usize = 0, // the head's rows
+    seqs: usize = 0,
+    pack: usize = pack_rows, // rows a pass may hold here
+    prefixes: prefix.Store = undefined, // sequences' prompt prefixes, run once and their states kept
+    count: Count = .{}, // passes run and the rows they held
 
     /// The model's shape, as the pocket and the probe read it on either backend.
     pub fn config(t: *const Trainer) Config {
@@ -173,8 +183,9 @@ pub const Trainer = struct {
         t.c = c;
         t.raw = raw[0..c.layers];
         t.kept = kept[0..c.layers];
-        const mapped = proj_at + c.layers * max_rows * sites_mod.candidates * 4 + 6 * c.layers * c.hidden * 4 + (2 * c.layers + 1) * max_rows * c.hidden * 2;
-        return copies + t.layout(true) + mapped + state.Seq.bytes(c, seq_len, &.{}) + (1 << 30); // a GiB for the sites and the scratch
+        const mapped = proj_at + c.layers * max_rows * sites_mod.candidates * 4 + 2 * max_seqs * 3 * c.layers * c.hidden * 4 + (2 * c.layers + 1) * pack_rows * c.hidden * 2;
+        const prefixes = prefix.max_slots * prefix.Store.init(undefined, c, max_rows).bytes();
+        return copies + lay.layout(&t, true) + mapped + prefixes + state.Seq.bytes(c, seq_len, &.{}) + (1 << 30); // a GiB for the sites and the scratch
     }
 
     /// Every buffer a step needs and the raw weights its backward reads; `living`, saved blocks the trainer takes over.
@@ -184,7 +195,7 @@ pub const Trainer = struct {
         const d = e.ctx.d;
         const t = try gpa.create(Trainer);
         errdefer gpa.destroy(t);
-        t.* = .{ .gpa = gpa, .e = e, .c = c, .sites = undefined, .seq = undefined, .buf = undefined, .raw = undefined, .mem = undefined, .kept = undefined, .host = undefined };
+        t.* = .{ .gpa = gpa, .e = e, .c = c, .sites = undefined, .seq = undefined, .buf = undefined, .raw = undefined, .mem = undefined, .kept = undefined, .host = undefined, .prefixes = prefix.Store.init(d, c, max_rows) };
         const saved = living.* != null;
         t.sites = if (living.*) |s| s else try sites_mod.Sites.init(gpa, d, c, state.prefill_rows, 0);
         living.* = null;
@@ -198,29 +209,40 @@ pub const Trainer = struct {
         inline for (state.seq_fields, 0..) |name, i| @field(t.buf, name) = t.seq.ptr[i];
         t.host = try sites_mod.Mapped.init(d, proj_at + c.layers * max_rows * sites_mod.candidates * 4);
         errdefer t.host.deinit();
-        t.delta = .{ .m = try sites_mod.Mapped.init(d, 3 * c.layers * c.hidden * 4) };
+        t.delta = .{ .m = try sites_mod.Mapped.init(d, max_seqs * 3 * c.layers * c.hidden * 4) };
         errdefer t.delta.m.deinit();
-        t.push = .{ .m = try sites_mod.Mapped.init(d, 3 * c.layers * c.hidden * 4) };
+        t.push = .{ .m = try sites_mod.Mapped.init(d, max_seqs * 3 * c.layers * c.hidden * 4) };
         errdefer t.push.m.deinit();
-        t.inputs = .{ .m = try sites_mod.Mapped.init(d, c.layers * max_rows * c.hidden * 2) };
+        t.inputs = .{ .m = try sites_mod.Mapped.init(d, c.layers * pack_rows * c.hidden * 2) };
         errdefer t.inputs.m.deinit();
-        t.residuals = .{ .m = try sites_mod.Mapped.init(d, (c.layers + 1) * max_rows * c.hidden * 2) };
+        t.residuals = .{ .m = try sites_mod.Mapped.init(d, (c.layers + 1) * pack_rows * c.hidden * 2) };
         errdefer t.residuals.m.deinit();
         t.kept = try gpa.alloc(Kept, c.layers);
         errdefer gpa.free(t.kept);
         t.raw = try gpa.alloc(Raw, c.layers);
         errdefer gpa.free(t.raw);
         errdefer for (t.owned.items) |*b| b.free();
+        const t0 = std.Io.Clock.awake.now(io);
         try t.loadRaw(io, dir);
-        t.mem = .{ .buf = try cuda.DeviceBuffer.alloc(d, t.layout(true)) };
-        errdefer t.mem.buf.free();
-        _ = t.layout(false);
         try e.stream.synchronize();
+        const t1 = std.Io.Clock.awake.now(io);
+        var raw: usize = 0;
+        for (t.owned.items) |b| raw += b.len;
+        t.mem = .{ .buf = try cuda.DeviceBuffer.alloc(d, lay.layout(t, true)) };
+        errdefer t.mem.buf.free();
+        _ = lay.layout(t, false);
+        try e.stream.synchronize();
+        std.log.info("slide: the trainer's raw weights ({d:.1} GB) uploaded in {d:.1} s, its buffers ({d:.1} GB) in {d:.1} s", .{ @as(f64, @floatFromInt(raw)) / 1e9, seconds(t0, t1), @as(f64, @floatFromInt(t.mem.buf.len)) / 1e9, seconds(t1, std.Io.Clock.awake.now(io)) });
         return t;
+    }
+
+    fn seconds(a: std.Io.Timestamp, b: std.Io.Timestamp) f64 {
+        return @as(f64, @floatFromInt(b.toNanoseconds() - a.toNanoseconds())) / 1e9;
     }
 
     pub fn deinit(t: *Trainer) void {
         const gpa = t.gpa;
+        t.prefixes.deinit(gpa);
         t.sites.attach(&t.e.w, false);
         t.sites.deinit();
         t.mem.buf.free();
@@ -307,109 +329,20 @@ pub const Trainer = struct {
         return out;
     }
 
-    /// The device arena's bytes (`count`), else its pointers handed out in the same order.
-    fn layout(t: *Trainer, count: bool) usize {
-        const c = t.c;
-        const R: usize = max_rows;
-        const D: usize = c.hidden;
-        const S: usize = c.slots();
-        const W: usize = c.expert_width;
-        const F: usize = c.shared_width;
-        const pairs = R * c.top_k;
-        const qw = c.heads * c.head_dim;
-        const kw = c.kv_heads * c.head_dim;
-        const xd = c.inner();
-        const cd = c.convDim();
-        const pd = c.projDim();
-        const H = c.mamba_heads;
-        const size = c.mamba_head_dim * c.state;
-        const widest_k = @max(pd, qw, F, D, xd);
-        var widest_n: usize = 0;
-        for (t.raw) |r| switch (r) {
-            .mamba => |m| widest_n = @max(widest_n, m.in_proj.n * m.in_proj.k, m.out_proj.n * m.out_proj.k),
-            .attention => |a| widest_n = @max(widest_n, a.q.n * a.q.k, a.o.n * a.o.k),
-            .moe => |m| widest_n = @max(widest_n, m.up.n * m.up.k, m.down.n * m.down.k),
-        };
-        var a: Arena = if (count) .{ .buf = .{ .d = undefined, .ptr = 0, .len = std.math.maxInt(usize) } } else t.mem;
-        var total: usize = 0;
-        const Take = struct {
-            fn f(ar: *Arena, n: usize, tot: *usize) u64 {
-                tot.* += std.mem.alignForward(usize, n, 256) + 256;
-                return ar.take(n);
-            }
-        };
-        const T = Take.f;
-        t.saved = T(&a, (c.layers + 1) * R * D * 2, &total);
-        t.logits = T(&a, R * c.vocab * 2, &total);
-        for (t.kept, 0..) |*k, l| {
-            k.* = .{};
-            switch (c.kinds[l]) {
-                .mamba => {
-                    k.proj = T(&a, R * pd * 2, &total);
-                    k.ya = T(&a, R * xd * 2, &total);
-                },
-                .attention => {
-                    k.x = T(&a, R * D * 2, &total);
-                    k.ya = T(&a, R * qw * 2, &total);
-                },
-                .moe => {
-                    k.x = T(&a, R * D * 2, &total);
-                    k.upr = T(&a, R * F * 2, &total);
-                    k.act = T(&a, R * S * W * 2, &total);
-                    k.ys = T(&a, R * S * D * 2, &total);
-                    k.ids = T(&a, R * S * 4, &total);
-                    k.wts = T(&a, R * S * 4, &total);
-                },
-            }
-        }
-        for ([_]*u64{ &t.g, &t.dx, &t.gs, &t.dhn }) |p| p.* = T(&a, R * D * 4, &total);
-        t.dxa = T(&a, R * sites_mod.max_rank * 4, &total);
-        t.xb = T(&a, R * widest_k * 2, &total);
-        t.wt = T(&a, widest_n * 2, &total);
-        t.d_upr = T(&a, R * F * 4, &total);
-        t.du = T(&a, R * F * 4, &total);
-        t.dyp = T(&a, pairs * D * 4, &total);
-        t.dxp = T(&a, pairs * D * 4, &total);
-        t.d_y1r = T(&a, pairs * W * 4, &total);
-        t.du1 = T(&a, pairs * W * 4, &total);
-        t.y1s = T(&a, pairs * W * 2, &total);
-        t.part = T(&a, ops.slices * pairs * @max(D, W) * 4, &total);
-        t.order = T(&a, pairs * 4, &total);
-        t.inv = T(&a, pairs * 4, &total);
-        t.offsets = T(&a, c.experts * 4, &total);
-        t.lg = T(&a, R * c.experts * 4, &total);
-        for ([_]*u64{ &t.dyn, &t.ytot, &t.dytot }) |p| p.* = T(&a, R * xd * 4, &total);
-        t.dt = T(&a, R * H * 4, &total);
-        t.ddt = T(&a, R * H * 4, &total);
-        t.dact = T(&a, R * cd * 4, &total);
-        t.dproj = T(&a, R * pd * 4, &total);
-        t.ckpt = T(&a, H * (R / 16 + 1) * size * 4, &total);
-        t.states = T(&a, H * 16 * size * 4, &total);
-        t.dbp = T(&a, R * H * c.state * 4, &total);
-        t.dcp = T(&a, R * H * c.state * 4, &total);
-        t.conv_out = T(&a, R * cd * 2, &total);
-        t.act_m = T(&a, R * cd * 2, &total);
-        t.qkv = T(&a, R * c.qkvDim() * 2, &total);
-        t.d_o = T(&a, R * qw * 4, &total);
-        t.dq = T(&a, R * qw * 4, &total);
-        t.dk = T(&a, R * kw * 4, &total);
-        t.dv = T(&a, R * kw * 4, &total);
-        t.probs = T(&a, c.heads * R * R * 4, &total);
-        t.dscores = T(&a, c.heads * R * R * 4, &total);
-        if (!count) t.mem = a;
-        return total;
-    }
-
     fn targets(t: *const Trainer) []u32 {
-        return t.host.slice(u32, max_rows);
+        return t.host.slice(u32, pack_rows);
     }
 
     fn weights(t: *const Trainer) []f32 {
-        return t.host.slice(f32, 2 * max_rows)[max_rows..];
+        return t.host.slice(f32, 2 * pack_rows)[pack_rows..];
     }
 
     fn stats(t: *const Trainer) [][2]f32 {
-        return t.host.slice([2]f32, 2 * max_rows)[max_rows..];
+        return t.host.slice([2]f32, 2 * pack_rows)[pack_rows..];
+    }
+
+    fn scales(t: *const Trainer) []f32 {
+        return t.host.slice(f32, 5 * pack_rows)[4 * pack_rows ..];
     }
 
     /// Layer i's output projection as loaded: the matrix its learned change sits after.
@@ -426,11 +359,6 @@ pub const Trainer = struct {
         return t.sites.score.slice(f32, lesson_route.max_slots * lesson_route.max_blocks)[lesson_route.trainer_slot * lesson_route.max_blocks ..][0..lesson_route.max_blocks];
     }
 
-    /// The probability the last step gave row r's target token.
-    pub fn targetProb(t: *const Trainer, r: usize) f32 {
-        return t.stats()[r][1];
-    }
-
     /// Each row along layer l's candidate directions ([rows, candidates]), as the last project step left them.
     pub fn projected(t: *const Trainer, l: usize, rows: usize) []const f32 {
         const k = sites_mod.candidates;
@@ -438,21 +366,60 @@ pub const Trainer = struct {
         return @alignCast(all[l * max_rows * k ..][0 .. rows * k]);
     }
 
-    /// MoE layer l's normed input (bf16 [D]) at `row`, what its shared expert and pocket read, as the last keys or
-    /// target step kept it.
+    /// MoE layer l's normed input (bf16 [D]) at the pass's `row`, what its shared expert and pocket read.
     pub fn normed(t: *const Trainer, l: usize, row: usize) []const u16 {
         const d = t.c.hidden;
-        return t.inputs.slice(u16, t.c.layers * max_rows * d)[(l * max_rows + row) * d ..][0..d];
+        return t.inputs.slice(u16, t.c.layers * pack_rows * d)[(l * pack_rows + row) * d ..][0..d];
     }
 
-    /// The residual (bf16 [D]) at `row` entering layer l (l == layers: after the last), as the last target step saved it.
+    /// The residual (bf16 [D]) at the pass's `row` entering layer l (layers: after the last), as a target pass kept it.
     pub fn residual(t: *const Trainer, l: usize, row: usize) []const u16 {
         const d = t.c.hidden;
-        return t.residuals.slice(u16, (t.c.layers + 1) * max_rows * d)[(l * max_rows + row) * d ..][0..d];
+        return t.residuals.slice(u16, (t.c.layers + 1) * pack_rows * d)[(l * pack_rows + row) * d ..][0..d];
+    }
+
+    /// Where sequence s's vector for key i after layer l sits in `delta` and `push`, in floats.
+    fn vec(t: *const Trainer, s: usize, i: usize, l: usize) usize {
+        return ((s * 3 + i) * t.c.layers + l) * t.c.hidden;
+    }
+
+    /// The loss's gradient sequence s's target pass read at its key i's row after layer l.
+    pub fn pushAt(t: *const Trainer, s: usize, i: usize, l: usize) []const f32 {
+        return t.push.slice(f32, max_seqs * 3 * t.c.layers * t.c.hidden)[t.vec(s, i, l)..][0..t.c.hidden];
+    }
+
+    /// Sequence s's nudge for key i after layer l, which its target pass adds at that key's row.
+    pub fn deltaAt(t: *const Trainer, s: usize, i: usize, l: usize) []f32 {
+        return t.delta.slice(f32, max_seqs * 3 * t.c.layers * t.c.hidden)[t.vec(s, i, l)..][0..t.c.hidden];
     }
 
     pub fn savedAt(t: *const Trainer, l: usize) u64 {
-        return t.saved + @as(u64, l) * max_rows * t.c.hidden * 2;
+        return t.saved + @as(u64, l) * pack_rows * t.c.hidden * 2;
+    }
+
+    /// Whether a pass may hold several sequences: no lesson block is open, so no row's lessons depend on its stream.
+    pub fn packs(t: *const Trainer) bool {
+        return t.sites.rank == 0;
+    }
+
+    /// Room for `n` prompt prefixes, each a pass's sequence's states after its first rows (none: their memory freed).
+    pub fn prefixSlots(t: *Trainer, n: usize) !void {
+        if (n == 0) t.prefixes.drop(t.gpa) else try t.prefixes.ensure(t.gpa, n);
+    }
+
+    /// Whether `sq` may run in `mode`: a prefix ends before its answer, decision and nudges, in a slot that exists.
+    fn check(t: *const Trainer, sq: Seq, mode: Mode) !void {
+        if (mode == .prime and (sq.skip > 0 or sq.slot >= t.prefixes.slots.items.len)) return error.BadPrefix;
+        if (sq.skip == 0) return;
+        if (sq.skip >= sq.start or sq.decide < sq.skip or sq.slot >= t.prefixes.slots.items.len or !t.packs()) return error.BadPrefix;
+        for (sq.nudge.layers, sq.nudge.rows) |mask, row| if (mask != 0 and row < sq.skip) return error.BadPrefix;
+    }
+
+    /// Layer l's index among the layers of its kind (a prefix keeps each kind's states by it).
+    pub fn kindIndex(t: *const Trainer, l: usize) usize {
+        var n: usize = 0;
+        for (t.c.kinds[0..l]) |k| n += @intFromBool(k == t.c.kinds[l]);
+        return n;
     }
 
     /// Layer l's site input: what its change reads, rows `stride` apart, `width` wide (from the forward's scratch).
@@ -468,88 +435,131 @@ pub const Trainer = struct {
 
     /// The mean loss of `ids`' answer from `start`, and what `mode` adds to it; `turn`: which rows carry which lessons.
     pub fn step(t: *Trainer, ids: []const u32, start: usize, mode: Mode, turn: lesson_route.Turn) !Result {
-        if (ids.len < 2 or start < 1 or start >= ids.len or ids.len - 1 > max_rows) return error.BadExample;
+        var out: [1]Result = undefined;
+        try t.pass(&.{.{ .ids = ids, .start = start, .decide = turn.decide, .nudge = t.nudge }}, mode, turn, &out);
+        return out[0];
+    }
+
+    /// `seqs` side by side in one pass (several: keys, prefixes, losses or targets), each's mean loss into `out`.
+    pub fn pass(t: *Trainer, seqs: []const Seq, mode: Mode, turn: lesson_route.Turn, out: []Result) !void {
+        if (seqs.len == 0 or seqs.len > max_seqs or out.len < seqs.len) return error.BadPass;
+        if (seqs.len > 1 and (!t.packs() or !(mode == .keys or mode == .loss or mode == .target or mode == .prime))) return error.BadPass;
         if (!reads(mode) and mode != .loss and mode != .target and t.sites.rank == 0) return error.NoOpenBlock;
         const c = t.c;
         const e = t.e;
         const o = e.ops();
         const k = t.ops_();
         const b = &t.buf;
-        const rows = ids.len - 1;
         const D: usize = c.hidden;
-        const share = 1 / @as(f32, @floatFromInt(ids.len - start));
-        for (t.targets()[0..rows], t.weights()[0..rows], 0..) |*tg, *w, r| {
-            tg.* = ids[r + 1];
-            w.* = if (r + 1 >= start) share else 0;
+        var rows: usize = 0;
+        for (seqs, t.spans[0..seqs.len]) |sq, *sp| {
+            if (sq.ids.len < 2 or sq.start < 1 or sq.start >= sq.ids.len or sq.ids.len - 1 > max_rows) return error.BadExample;
+            try t.check(sq, mode);
+            sp.* = .{ .at = rows, .rows = sq.ids.len - 1 - sq.skip, .skip = sq.skip, .slot = sq.slot };
+            rows += sp.rows;
         }
-        try o.upload(b.p_ids, std.mem.sliceAsBytes(ids[0..rows]));
+        if (rows > t.pack) return error.PassTooLong;
+        const spans = t.spans[0..seqs.len];
+        t.seqs = seqs.len;
+        t.count = .{ .passes = t.count.passes + 1, .rows = t.count.rows + rows };
+        try e.stream.synchronize(); // the latch, scores and host rows are host memory the last step's kernels may still read
+        const ids = try t.gpa.alloc(u32, rows);
+        defer t.gpa.free(ids);
+        t.answered = train_mode.answers(seqs, spans, t.answers[0..seqs.len]);
+        const answers = t.answers[0..seqs.len];
+        for (seqs, spans, answers) |sq, sp, a| {
+            @memcpy(ids[sp.at..][0..sp.rows], sq.ids[sq.skip..][0..sp.rows]);
+            @memset(t.scales()[sp.at..][0..sp.rows], sq.scale);
+            const share = 1 / @as(f32, @floatFromInt(a.rows));
+            for (0..a.rows) |r| {
+                t.targets()[a.at + r] = sq.ids[sq.start + r];
+                t.weights()[a.at + r] = share;
+            }
+        }
+        try o.upload(b.p_ids, std.mem.sliceAsBytes(ids));
         try t.seq.arena.?.buf.fill8(0, e.stream.handle);
-        try e.stream.synchronize(); // the latch and scores are host memory the last step's kernels may still read
         lesson_route.flag(t.sites.latch.slice(u32, lesson_route.max_slots * lesson_route.max_blocks), lesson_route.trainer_slot, turn.bits);
         @memset(t.score(), 0);
-        t.route = lesson_route.trained(rows, turn);
+        var tt = turn;
+        tt.decide = @intCast(spans[0].row(seqs[0].decide));
+        t.route = lesson_route.trained(rows, tt);
         var f = fwd.Forward.init(c, &e.w, b, o, seq_len, e.nch, false);
         f.route = t.route;
+        const scale: tfw.Scale = .{ .rows = t.host.dev + 4 * pack_rows * 4, .from = &t.from };
+        var low: usize = 0;
+        if (mode == .target) {
+            var mask: u64 = 0;
+            for (seqs) |sq| mask |= sq.nudge.layers[0] | sq.nudge.layers[1] | sq.nudge.layers[2];
+            low = if (mask == 0) c.layers else @ctz(mask);
+        }
         var w: fwd.Walk = .{ .rows = rows, .pos = 0 };
         try f.chunkBegin(&w);
         for (0..c.layers) |l| {
             try f.chunkPre(&w, l);
             try o.copy(t.savedAt(l), w.x, rows * D * 2);
             if (c.kinds[l] != .mamba) try o.copy(t.kept[l].x, b.y, rows * D * 2);
-            try f.chunkMixer(&w, l);
-            try f.chunkPost(&w, l);
+            try tfw.mixer(&f, &w, l, spans, .{ .store = &t.prefixes, .prime = mode == .prime });
+            if (c.kinds[l] == .moe) {
+                try tfw.experts(&f, e.w.blocks[l].moe, rows, scale, l);
+                w.delta = .moe;
+            } else try f.chunkPost(&w, l);
             const in = t.siteInput(l);
             const s = &t.sites.list[l];
+            const one = seqs[0];
             switch (mode) {
-                .loss => {},
+                .loss, .prime => {},
                 .grad, .learn => try t.keep(l, rows),
                 .avoid, .seek => {
                     const y = if (mode == .avoid) s.avoid.dev else s.seek.dev;
                     const n: usize = if (mode == .avoid) sites_mod.avoid_dims else sites_mod.candidates;
                     const seed: u32 = if (mode == .avoid) 1 else 2;
-                    const first = start - 1;
+                    const first = one.start - 1;
                     if (mode == .seek and t.sites.whole) {
                         // an edit of the weights is keyed on the question's rows, where its subject is read
-                        try k.sketch(in.x, in.stride, y, turn.decide + 1, s.in, n, t.sketched, seed, 1);
+                        try k.sketch(in.x, in.stride, y, one.decide + 1, s.in, n, t.sketched, seed, 1);
                     } else {
                         try k.sketch(in.x, in.stride, y, rows, s.in, n, t.sketched, seed, 1);
                         try k.sketch(in.x + @as(u64, first) * in.stride * 2, in.stride, y, 1, s.in, n, (1 << 30) + t.sketched + first, seed, @floatFromInt(rows - first));
                     }
                 },
                 .project => try k.project(in.x, in.stride, s.seek.dev, t.host.dev + proj_at + l * max_rows * sites_mod.candidates * 4, rows, s.in, sites_mod.candidates),
-                // a pocket reads each MoE layer's normed input; a target step keeps what the backward reads and adds its
-                // nudges into the shared expert's slot, which the next norm sums into the residual this layer leaves
+                // a pocket reads each MoE layer's normed input; a target pass keeps what the backward reads (none below
+                // the lowest nudge) and adds its nudges into the shared expert's slot, which the next norm sums in
                 .keys, .target => if (c.kinds[l] == .moe) {
-                    try o.copy(t.inputs.dev() + l * max_rows * D * 2, t.kept[l].x, rows * D * 2);
+                    try o.copy(t.inputs.dev() + l * pack_rows * D * 2, t.kept[l].x, rows * D * 2);
                     if (mode == .target) {
-                        try t.keep(l, rows);
-                        for (t.nudge.layers, t.nudge.rows, 0..) |mask, row, i| if (mask >> @intCast(l) & 1 != 0) {
-                            try o.addRow(b.ymoe + (row * c.slots() + c.top_k) * D * 2, false, t.delta.dev() + (i * c.layers + l) * D * 4, D);
+                        if (l >= low) try t.keep(l, rows);
+                        for (seqs, spans, 0..) |sq, sp, si| for (sq.nudge.layers, sq.nudge.rows, 0..) |mask, row, i| if (mask >> @intCast(l) & 1 != 0) {
+                            try o.addRow(b.ymoe + (sp.row(row) * c.slots() + c.top_k) * D * 2, false, t.delta.dev() + t.vec(si, i, l) * 4, D);
                         };
                     }
-                } else if (mode == .target) try t.keep(l, rows),
+                } else if (mode == .target and l >= low) try t.keep(l, rows),
             }
         }
         if (reads(mode)) {
             try e.stream.synchronize();
             if (mode == .avoid or mode == .seek) t.sketched += rows;
-            return .{ .loss = 0, .recalled = false };
+            for (out[0..seqs.len]) |*r| r.* = .{ .loss = 0, .recalled = false };
+            return;
         }
         try f.norm(&w.x, w.delta, e.w.norm_f, rows, false);
         try o.copy(t.savedAt(c.layers), w.x, rows * D * 2);
-        try o.prefillDense(b.y, e.w.head, t.logits, rows);
+        // only the rows that predict an answer reach the head: any other row's loss and gradient there is zero
+        for (answers) |a| try o.copy(t.dhn + a.at * D * 2, b.y + a.first * D * 2, a.rows * D * 2);
+        try o.prefillDense(t.dhn, e.w.head, t.logits, t.answered);
         const tg = t.host.dev;
-        try k.softmax(t.logits, tg, tg + max_rows * 4, tg + max_rows * 8, rows, c.vocab);
-        // a target step's residuals for the host, the scale of what its pocket adds
-        if (mode == .target) try o.copy(t.residuals.dev(), t.saved, (c.layers + 1) * max_rows * D * 2);
-        if (mode != .loss) try back.backward(t, rows, mode == .learn, mode == .target);
+        try k.softmax(t.logits, tg, tg + pack_rows * 4, tg + pack_rows * 8, t.answered, c.vocab);
+        // a target pass's residuals for the host, the scale of what its pocket adds
+        if (mode == .target) for (0..c.layers + 1) |l| try o.copy(t.residuals.dev() + l * pack_rows * D * 2, t.savedAt(l), rows * D * 2);
+        if (mode != .loss and !(mode == .target and low == c.layers)) try back.backward(t, rows, mode == .learn, if (mode == .target) seqs else &.{}, low);
         try e.stream.synchronize();
-        var out: Result = .{ .loss = 0, .recalled = true };
-        for (t.stats()[0..rows], t.weights()[0..rows]) |s, wgt| if (wgt > 0) {
-            out.loss += s[0] * wgt;
-            out.recalled = out.recalled and s[1] > 0.5;
-        };
-        return out;
+        for (out[0..seqs.len], answers) |*r, a| {
+            r.* = .{ .loss = 0, .recalled = true };
+            for (t.stats()[a.at..][0..a.rows], t.weights()[a.at..][0..a.rows]) |st_, wgt| {
+                r.loss += st_[0] * wgt;
+                r.recalled = r.recalled and st_[1] > 0.5;
+            }
+        }
     }
 
     /// Layer l's activations into its slot from the forward's scratch, for its backward.

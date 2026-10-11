@@ -147,8 +147,10 @@ pub fn Learner(comptime H: type) type {
                 if (ex.start < 1 or ex.start >= ex.ids.len or ex.ids.len - 1 > H.max_rows or ex.decide + 1 >= ex.ids.len) return error.ExampleTooLong;
             };
             if (l.trainer == null) {
+                const t0 = H.seconds(l.io);
                 l.choice = try choice.Choice.init(l.gpa, H.layers(l.b));
                 l.trainer = try H.trainer(l.gpa, l.io, l.b);
+                std.log.info("slide: the trainer is ready in {d:.1} s", .{H.seconds(l.io) - t0});
                 l.trainer.?.sites.whole = l.whole;
                 for (&l.asks) |*side| {
                     side.* = try l.gpa.alloc(std.ArrayList(f32), H.layers(l.b));

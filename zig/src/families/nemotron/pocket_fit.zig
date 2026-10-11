@@ -22,14 +22,22 @@ pub const Fit = struct {
     fires: usize = 0, // rows it must stay silent on where it is above zero
 };
 
-/// Slot j's neuron fitted on the read rows (a thread a slot; a failure leaves it zero and the slot last in line).
+/// Slot j's neuron fitted on its read rows, copied side by side first (a failure: zero, its slot last in line).
 pub fn fitLayer(gpa: std.mem.Allocator, rows: []const u16, kinds: []const Kind, slots: usize, j: usize, d: usize, u: []f32, out: *Fit) void {
+    const own = gpa.alloc(u16, kinds.len * d) catch {
+        out.* = .{ .fires = std.math.maxInt(usize) };
+        return;
+    };
+    defer gpa.free(own);
     const xs = gpa.alloc([]const u16, kinds.len) catch {
         out.* = .{ .fires = std.math.maxInt(usize) };
         return;
     };
     defer gpa.free(xs);
-    for (xs, 0..) |*x, i| x.* = rows[(i * slots + j) * d ..][0..d];
+    for (xs, 0..) |*x, i| {
+        @memcpy(own[i * d ..][0..d], rows[(i * slots + j) * d ..][0..d]);
+        x.* = own[i * d ..][0..d];
+    }
     out.* = fit(gpa, xs, kinds, d, u, false, fit_steps, 0) catch blk: {
         @memset(u, 0);
         break :blk .{ .fires = std.math.maxInt(usize) };
@@ -40,35 +48,31 @@ pub fn fitLayer(gpa: std.mem.Allocator, rows: []const u16, kinds: []const Kind, 
 /// -margin on every row it stays silent on (squared hinges, each kind weighed alike), by `steps` Adam steps on inputs
 /// scaled to unit length; from `u` as it is when `warm`, else from the fact's mean less the rest's. The first `fixed`
 /// rows keep their products exactly: every step is taken orthogonal to their span (AlphaEdit's null-space rule), so an
-/// earlier fact's neuron fitted again reads its own questions as before.
+/// earlier fact's neuron fitted again reads its own questions as before. Each step reads every row once, in bf16.
 pub fn fit(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind, d: usize, u: []f32, warm: bool, steps: usize, fixed: usize) !Fit {
     const n = kinds.len;
-    const x = try gpa.alloc(f32, n * d);
-    defer gpa.free(x);
     var scale: f32 = 0;
-    for (xs, 0..) |src, i| {
-        const dst = x[i * d ..][0..d];
-        for (dst, src) |*o, b| o.* = @bitCast(@as(u32, b) << 16);
-        scale += @sqrt(subspace.dot(dst, dst));
-    }
+    for (xs) |x| scale += @sqrt(squares(x));
     scale /= @floatFromInt(@max(n, 1));
-    for (x) |*v| v.* /= scale;
+    const inv = 1 / scale;
     var counts: [5]f32 = @splat(0);
     for (kinds) |k| counts[@backingInt(k)] += 1;
-    const w = try gpa.alloc(f32, 4 * d);
+    const w = try gpa.alloc(f32, 8 * d);
     defer gpa.free(w);
+    @memset(w, 0);
     const mean_fact = w[0..d];
     const mean_rest = w[d..][0..d];
     const m = w[2 * d ..][0..d];
     const v = w[3 * d ..][0..d];
-    @memset(w, 0);
+    const g = w[4 * d ..][0..d];
+    const parts = w[5 * d ..][0 .. 3 * d]; // each kind's rows on the wrong side, their hinges' sum: fact, steady, other
     if (warm) {
         for (u) |*o| o.* *= scale;
     } else {
         // a start: the fact's mean less the mean of the rows it stays silent on, sized so the fact's mean is 1
-        for (kinds, 0..) |k, i| switch (k) {
-            .fact => subspace.axpy(mean_fact, 1 / @max(counts[0], 1), x[i * d ..][0..d]),
-            .steady, .other => subspace.axpy(mean_rest, 1 / @max(counts[2] + counts[3], 1), x[i * d ..][0..d]),
+        for (kinds, xs) |k, x| switch (k) {
+            .fact => axpyRow(mean_fact, inv / @max(counts[0], 1), x),
+            .steady, .other => axpyRow(mean_rest, inv / @max(counts[2] + counts[3], 1), x),
             .held, .none => {},
         };
         for (u, mean_fact, mean_rest) |*o, a, b| o.* = a - b;
@@ -77,36 +81,34 @@ pub fn fit(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind,
             o.* /= at_fact;
         };
     }
-    const g = try gpa.alloc(f32, d);
-    defer gpa.free(g);
-    const basis = try gpa.alloc(f32, fixed * d);
+    const basis = try gpa.alloc(f32, 2 * fixed * d);
     defer gpa.free(basis);
-    const rank = orthonormal(basis, x[0 .. fixed * d], d);
-    const z = try gpa.alloc(f32, n);
-    defer gpa.free(z);
+    const own = basis[fixed * d ..];
+    for (0..fixed) |i| for (own[i * d ..][0..d], xs[i]) |*o, b| {
+        o.* = bf(b) * inv;
+    };
+    const rank = orthonormal(basis[0 .. fixed * d], own, d);
     for (1..steps + 1) |s| {
-        @memset(g, 0);
         // each kind weighed by its rows on the wrong side only: a few rows that still slip are pushed as hard as many
-        var wrong: [5]f32 = @splat(0);
-        for (0..n) |i| {
-            z[i] = subspace.dot(u, x[i * d ..][0..d]);
-            const off = switch (kinds[i]) {
-                .fact => z[i] < 1,
-                .steady, .other => z[i] > -margin,
-                .held, .none => false,
-            };
-            wrong[@backingInt(kinds[i])] += @floatFromInt(@intFromBool(off));
+        @memset(parts, 0);
+        var wrong: [3]f32 = @splat(0);
+        for (kinds, xs) |k, x| {
+            const z = dotRow(u, x) * inv;
+            switch (k) {
+                .fact => if (z < 1) {
+                    wrong[0] += 1;
+                    axpyRow(parts[0..d], -2 * (1 - z), x);
+                },
+                .steady, .other => if (z > -margin) {
+                    const at: usize = if (k == .steady) 1 else 2;
+                    wrong[at] += 1;
+                    axpyRow(parts[at * d ..][0..d], 2 * (z + margin), x);
+                },
+                .held, .none => {},
+            }
         }
-        for (0..n) |i| {
-            const zi = z[i];
-            const k = @backingInt(kinds[i]);
-            const coef: f32 = switch (kinds[i]) {
-                .fact => if (zi < 1) -2 * (1 - zi) / @max(wrong[k], 1) else 0,
-                .steady, .other => if (zi > -margin) 2 * (zi + margin) / @max(wrong[k], 1) else 0,
-                .held, .none => 0,
-            };
-            if (coef != 0) subspace.axpy(g, coef, x[i * d ..][0..d]);
-        }
+        @memset(g, 0);
+        for (0..3) |at| subspace.axpy(g, inv / @max(wrong[at], 1), parts[at * d ..][0..d]);
         const tt: f32 = @floatFromInt(s);
         for (u, m, v, g) |ui, *mi, *vi, *gi| {
             const gg = gi.* + 2e-4 * ui;
@@ -122,9 +124,9 @@ pub fn fit(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind,
         for (u, g) |*ui, st| ui.* -= st;
     }
     var f: Fit = .{ .fact_least = std.math.inf(f32), .steady_most = -std.math.inf(f32), .other_most = -std.math.inf(f32) };
-    for (0..n) |i| {
-        const zi = subspace.dot(u, x[i * d ..][0..d]);
-        switch (kinds[i]) {
+    for (kinds, xs) |k, x| {
+        const zi = dotRow(u, x) * inv;
+        switch (k) {
             .fact => {
                 f.fact_least = @min(f.fact_least, zi);
                 f.fact_on += @floatFromInt(@intFromBool(zi >= 0.5));
@@ -149,6 +151,52 @@ pub fn fit(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind,
     f.held_mean /= @max(counts[1], 1);
     for (u) |*o| o.* /= scale;
     return f;
+}
+
+const V = @Vector(8, f32);
+
+/// Eight bf16 values widened to f32, exactly.
+inline fn widen8(b: []const u16) V {
+    const raw: @Vector(8, u32) = @as(@Vector(8, u16), b[0..8].*);
+    return @bitCast(raw << @splat(16));
+}
+
+fn bf(b: u16) f32 {
+    return @bitCast(@as(u32, b) << 16);
+}
+
+/// a . b for f32 `a` and bf16 `b`: four sums of eight lanes, so no add waits on the one before it.
+fn dotRow(a: []const f32, b: []const u16) f32 {
+    var acc: [4]V = @splat(@splat(0));
+    var i: usize = 0;
+    while (i + 32 <= a.len) : (i += 32) {
+        inline for (&acc, 0..) |*x, k| x.* += @as(V, a[i + 8 * k ..][0..8].*) * widen8(b[i + 8 * k ..]);
+    }
+    while (i + 8 <= a.len) : (i += 8) acc[0] += @as(V, a[i..][0..8].*) * widen8(b[i..]);
+    var s = @reduce(.Add, (acc[0] + acc[1]) + (acc[2] + acc[3]));
+    while (i < a.len) : (i += 1) s += a[i] * bf(b[i]);
+    return s;
+}
+
+/// y += c b for bf16 `b`.
+fn axpyRow(y: []f32, c: f32, b: []const u16) void {
+    const cv: V = @splat(c);
+    var i: usize = 0;
+    while (i + 8 <= y.len) : (i += 8) y[i..][0..8].* = @as(V, y[i..][0..8].*) + cv * widen8(b[i..]);
+    while (i < y.len) : (i += 1) y[i] += c * bf(b[i]);
+}
+
+/// b . b for bf16 `b`.
+fn squares(b: []const u16) f32 {
+    var acc: V = @splat(0);
+    var i: usize = 0;
+    while (i + 8 <= b.len) : (i += 8) {
+        const x = widen8(b[i..]);
+        acc += x * x;
+    }
+    var s = @reduce(.Add, acc);
+    while (i < b.len) : (i += 1) s += bf(b[i]) * bf(b[i]);
+    return s;
 }
 
 /// An orthonormal basis of the rows of `rows` ([k, d]) written into `basis` by Gram-Schmidt (twice over, for its

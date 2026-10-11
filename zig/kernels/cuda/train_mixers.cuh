@@ -33,15 +33,18 @@ __device__ __forceinline__ void column_sums(const float (&v)[8], float* scratch,
     __syncthreads();
 }
 
-// The causal conv (conv_w fp32 [taps][conv]) before its bias, and its SiLU with it, from position 0's xBC columns.
+// The causal conv (conv_w fp32 [taps][conv]) and its SiLU from the xBC columns, after hist [3][conv] when seeded.
 extern "C" __global__ void tf_train_conv_pre(const bf16* proj, const float* conv_w, const float* conv_b, bf16* conv_out, bf16* act,
-                                             Shape s, int taps) {
+                                             Shape s, int taps, const bf16* hist, int seeded) {
     const int c = blockIdx.x * 256 + threadIdx.x, r = blockIdx.y;
     if (c >= s.conv || r >= s.rows) return;
     float acc = 0;
     for (int j = 0; j < taps; j++) {
         const int at = r - (taps - 1) + j;
-        if (at < 0) continue;
+        if (at < 0) {
+            if (seeded) acc += conv_w[j * s.conv + c] * f32(hist[(size_t)(at + 3) * s.conv + c]);
+            continue;
+        }
         acc += conv_w[j * s.conv + c] * f32(proj[(size_t)at * s.proj + s.inner + c]);
     }
     conv_out[(size_t)r * s.conv + c] = b16(acc);
@@ -55,15 +58,17 @@ extern "C" __global__ void tf_train_dt(const bf16* proj, const float* bias, floa
     dt[t * s.heads + h] = softplus(f32(proj[(size_t)t * s.proj + s.inner + s.conv + h]) + bias[h]);
 }
 
-// The scan for one head, a block of 1024 (64 rows x 16 lanes of 8 columns): y with the D skip, and checkpoints.
+// One head's scan, 1024 threads (64 rows x 16 lanes of 8 columns): y with the D skip, checkpoints; from init if seeded.
 extern "C" __global__ void __launch_bounds__(1024) tf_train_ssm_fwd(const bf16* act, const float* dt, const float* a_neg,
-                                                                   const float* d_skip, float* y, float* ckpt, Shape s) {
+                                                                   const float* d_skip, float* y, float* ckpt, Shape s,
+                                                                   const float* init, int seeded) {
     const int h = blockIdx.x, t = threadIdx.x, lane = t & 31;
     const int p = t / 16, n0 = (t % 16) * 8, g = h / (s.heads / s.groups), size = s.dh * s.n;
     const int b0 = s.inner + g * s.n, c0 = s.inner + s.groups * s.n + g * s.n;
-    float st[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    float st[8];
+    for (int i = 0; i < 8; i++) st[i] = seeded ? init[(size_t)h * size + p * s.n + n0 + i] : 0.0f;
     float* mine = ckpt + (size_t)h * ((s.rows + CK - 1) / CK + 1) * size;
-    for (int i = 0; i < 8; i++) mine[p * s.n + n0 + i] = 0;
+    for (int i = 0; i < 8; i++) mine[p * s.n + n0 + i] = st[i];
     for (int r = 0; r < s.rows; r++) {
         const bf16* row = act + (size_t)r * s.conv;
         const float d = dt[r * s.heads + h], a = expf(d * a_neg[h]), x = f32(row[h * s.dh + p]);
@@ -195,32 +200,36 @@ extern "C" __global__ void tf_train_dt_back(const bf16* proj, const float* bias,
 
 // ---- the attention layer --------------------------------------------------------------------------------------------
 
-// Attention's shape: rows, heads, kv heads, head dim, the q|k|v row width; scale 1/sqrt(head dim).
+// Attention's shape: rows, heads, kv heads, head dim, q|k|v row width, scale 1/sqrt(head dim), prefix keys before rows.
 struct Heads {
     int rows, heads, kv_heads, dim, qkv;
     float scale;
+    int prefix;
 };
 
-// One query row of one head (q, k, v the qkv projection's columns): probabilities and their gradient kept, and dq.
+// One query row of one head at position prefix + i (prefix keys, values: pk, pv): probabilities and gradient kept, dq.
 extern "C" __global__ void __launch_bounds__(256) tf_train_attn_q(const bf16* qkv, const float* dout, float* probs, float* dscores,
-                                                                 float* dq, Heads a) {
+                                                                 float* dq, Heads a, const bf16* pk, const bf16* pv) {
     __shared__ float qi[256], gi[256], ds[256], scratch[32];
     const int t = threadIdx.x, h = blockIdx.x, i = blockIdx.y, kv = h / (a.heads / a.kv_heads), qw = a.heads * a.dim;
+    const int kw = a.kv_heads * a.dim, keys = a.prefix + a.rows, at = a.prefix + i;
     const bf16* q = qkv;
     const bf16* k = qkv + qw;
-    const bf16* v = qkv + qw + a.kv_heads * a.dim;
+    const bf16* v = qkv + qw + kw;
     for (int d = t; d < a.dim; d += 256) {
         qi[d] = f32(q[(size_t)i * a.qkv + h * a.dim + d]);
         gi[d] = dout[(size_t)i * qw + h * a.dim + d];
     }
     __syncthreads();
-    const bool live = t <= i && t < a.rows;
+    const bool live = t <= at && t < keys;
     float score = -INFINITY, dp = 0;
     if (live) {
+        const bf16* kr = t < a.prefix ? pk + (size_t)t * kw : k + (size_t)(t - a.prefix) * a.qkv;
+        const bf16* vr = t < a.prefix ? pv + (size_t)t * kw : v + (size_t)(t - a.prefix) * a.qkv;
         float sc = 0, dv = 0;
         for (int d = 0; d < a.dim; d++) {
-            sc += qi[d] * f32(k[(size_t)t * a.qkv + kv * a.dim + d]);
-            dv += gi[d] * f32(v[(size_t)t * a.qkv + kv * a.dim + d]);
+            sc += qi[d] * f32(kr[kv * a.dim + d]);
+            dv += gi[d] * f32(vr[kv * a.dim + d]);
         }
         score = sc * a.scale;
         dp = dv;
@@ -232,14 +241,17 @@ extern "C" __global__ void __launch_bounds__(256) tf_train_attn_q(const bf16* qk
     const float mix = block_sum(pr * dp, scratch, 8);
     const float g = pr * (dp - mix);
     ds[t] = g;
-    if (t < a.rows) {
-        probs[((size_t)h * a.rows + i) * a.rows + t] = pr;
-        dscores[((size_t)h * a.rows + i) * a.rows + t] = g;
+    if (t < keys) {
+        probs[((size_t)h * a.rows + i) * keys + t] = pr;
+        dscores[((size_t)h * a.rows + i) * keys + t] = g;
     }
     __syncthreads();
     for (int d = t; d < a.dim; d += 256) {
         float acc = 0;
-        for (int j = 0; j <= i; j++) acc += ds[j] * f32(k[(size_t)j * a.qkv + kv * a.dim + d]);
+        for (int j = 0; j <= at; j++) {
+            const bf16* kr = j < a.prefix ? pk + (size_t)j * kw : k + (size_t)(j - a.prefix) * a.qkv;
+            acc += ds[j] * f32(kr[kv * a.dim + d]);
+        }
         dq[(size_t)i * qw + h * a.dim + d] = acc * a.scale;
     }
 }
@@ -250,10 +262,11 @@ extern "C" __global__ void tf_train_attn_kv(const bf16* qkv, const float* dout, 
     const int d = threadIdx.x, kv = blockIdx.x, j = blockIdx.y, per = a.heads / a.kv_heads, qw = a.heads * a.dim,
               kw = a.kv_heads * a.dim;
     if (d >= a.dim) return;
+    const int keys = a.prefix + a.rows;
     float gk = 0, gv = 0;
     for (int h = kv * per; h < (kv + 1) * per; h++)
         for (int i = j; i < a.rows; i++) {
-            const size_t at = ((size_t)h * a.rows + i) * a.rows + j;
+            const size_t at = ((size_t)h * a.rows + i) * keys + a.prefix + j;
             gk += dscores[at] * f32(qkv[(size_t)i * a.qkv + h * a.dim + d]);
             gv += probs[at] * dout[(size_t)i * qw + h * a.dim + d];
         }

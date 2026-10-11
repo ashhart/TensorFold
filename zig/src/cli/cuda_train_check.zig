@@ -39,12 +39,14 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, dir: []con
     for (t.sites.list) |*site| for (site.b.slice(f32, sites.max_rank * site.out)[first * site.out ..][0 .. sites.block * site.out]) |*v| {
         v.* = (rng.float(f32) * 2 - 1) * 1e-3;
     };
-    _ = try t.step(&ids, start, .loss);
+    var turn: nemotron.train.Turn = .{ .decide = start - 4 }; // the block acts on every row after its decision row
+    turn.bits.set(0);
+    _ = try t.step(&ids, start, .loss, turn);
     const f0 = std.Io.Clock.awake.now(io);
-    const plain = (try t.step(&ids, start, .loss)).loss;
+    const plain = (try t.step(&ids, start, .loss, turn)).loss;
     const forward_ms = ms(io, f0);
     const t0 = std.Io.Clock.awake.now(io);
-    const with_grad = (try t.step(&ids, start, .grad)).loss;
+    const with_grad = (try t.step(&ids, start, .grad, turn)).loss;
     std.debug.print("forward and loss alone {d:.1} ms; loss {d:.5} (with gradients {d:.5}), a step with gradients {d:.1} ms\n", .{ forward_ms, plain, with_grad, ms(io, t0) });
     var worst: f64 = 0;
     for (checked) |li| {
@@ -60,9 +62,9 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, dir: []con
         for (targets) |target| {
             const eta: f32 = @floatCast(target / norm2);
             for (bf, keep_b, gb) |*x, k, g| x.* = k - eta * g;
-            const down = (try t.step(&ids, start, .loss)).loss;
+            const down = (try t.step(&ids, start, .loss, turn)).loss;
             for (bf, keep_b, gb) |*x, k, g| x.* = k + eta * g;
-            const up = (try t.step(&ids, start, .loss)).loss;
+            const up = (try t.step(&ids, start, .loss, turn)).loss;
             @memcpy(bf, keep_b);
             const measured = (up - down) / 2;
             const ratio = measured / target;
