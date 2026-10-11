@@ -323,10 +323,12 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     const naming = if (parts.document and got.entity and language == null) try std.mem.join(a, " ", if (got.named.len > 0) got.named else got.words) else "";
     var tries: usize = 0;
     while (got.refs.items.len < want_probes and tries < 2) : (tries += 1) {
+        // a count of its own each try: the draw is seeded by the prompt, so the same prompt gives the same list
+        const count = probes + 4 * tries;
         // a document's fact asked for by name: its first list asked for the subject, or about another fact told with it
-        const ask_for = if (naming.len > 0) try std.fmt.allocPrint(a, prompts.named_questions_prompt, .{ fact, probes, naming, naming, probes }) else try questionsFor(a, parts.document, fact, probes, language);
-        const again = try slide_ask.askBaseAt(srv, cx, null, ask_for, 32 * probes, wording_temperature, gone);
-        try take(srv, cx, &got, fact, f, try wording.questions(a, again.content, probes), end, parts.thinks, parts.document, gone);
+        const ask_for = if (naming.len > 0) try std.fmt.allocPrint(a, prompts.named_questions_prompt, .{ fact, count, naming, naming, count }) else try questionsFor(a, parts.document, fact, count, language);
+        const again = try slide_ask.askBaseAt(srv, cx, null, ask_for, 32 * @as(i64, @intCast(count)), wording_temperature, gone);
+        try take(srv, cx, &got, fact, f, try wording.questions(a, again.content, count), end, parts.thinks, parts.document, gone);
     }
     // the kept questions asked again as "Do you remember...?", which the model otherwise refuses
     var plain: std.ArrayList(u8) = .empty;
