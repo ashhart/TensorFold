@@ -15,6 +15,7 @@ pub const Snap = struct {
     home: ?u32 = null, // resident: the slot whose MLA caches hold this state's prefix
     stale: bool = false, // resident, and its slot has since written a row below `at`
     held: ?[2]u32 = null, // resident in a shared pool after its slot left: the blocks (start, count) holding its prefix
+    used: u64 = 0, // the slots' use clock at its last keep or restore (kept.pick)
 };
 
 fn stBytes(c: *const cfg.Config) usize {

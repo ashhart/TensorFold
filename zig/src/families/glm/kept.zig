@@ -23,7 +23,7 @@ pub fn save(sl: *Slots, i: u32, at: u32, id: u32, home: bool) !*snapshot.Snap {
     errdefer buf.deinit();
     const snap = try sl.gpa.create(snapshot.Snap);
     errdefer sl.gpa.destroy(snap);
-    snap.* = .{ .id = if (id != 0) id else sl.next_snap, .at = at, .buf = buf, .bytes = n, .home = if (home) i else null };
+    snap.* = .{ .id = if (id != 0) id else sl.next_snap, .at = at, .buf = buf, .bytes = n, .home = if (home) i else null, .used = stamp(sl) };
     try copySnap(sl, slot, snap, true);
     try sl.snaps.put(sl.gpa, snap.id, snap);
     sl.next_snap = @max(sl.next_snap, snap.id + 1);
@@ -37,6 +37,13 @@ pub fn restore(sl: *Slots, i: u32, id: u32) !void {
     if (slot.s.pos != 0 or snap.at >= slot.prompt_len or snap.stale) return error.SnapshotOutOfStep;
     if (snap.home != i) overwrite(sl, i, 0); // another slot's prefixes, the pool's held blocks or a whole state's, copied over every one of this slot's
     try copySnap(sl, slot, snap, false);
+    snap.used = stamp(sl);
+}
+
+/// The next use stamp: kept and restored states take one, so a slot's newest says when it last served.
+fn stamp(sl: *Slots) u64 {
+    sl.uses += 1;
+    return sl.uses;
 }
 
 /// Whether `snap` is still kept and usable (a resident state whose slot has not written below it).
@@ -158,20 +165,74 @@ fn copySnap(sl: *Slots, slot: *Slot, snap: *snapshot.Snap, into: bool) !void {
     try sl.e.finish(b.cb, b.enc);
 }
 
-/// A new stream's free slot: `reuse`'s home when free, else the one holding the fewest usable resident states.
+/// A new stream's free slot: `reuse`'s home when free, else the least recently used one (leastRecent).
 pub fn pick(sl: *const Slots, reuse: ?*const snapshot.Snap) ?u32 {
     if (reuse) |r| if (r.home) |h| if (h < sl.slots.len and !sl.slots[h].used and usable(sl, r)) return h;
+    return leastRecent(sl.slots, &sl.snaps);
+}
+
+/// The free slot holding no usable resident state, else the one whose newest such state was used longest ago; null: none free.
+pub fn leastRecent(slots: []const Slot, snaps: *const std.AutoHashMapUnmanaged(u32, *snapshot.Snap)) ?u32 {
     var best: ?u32 = null;
-    var fewest: usize = std.math.maxInt(usize);
-    for (sl.slots, 0..) |s, i| {
+    var oldest: u64 = std.math.maxInt(u64);
+    for (slots, 0..) |s, i| {
         if (s.used) continue;
-        var held: usize = 0;
-        var it = sl.snaps.valueIterator();
-        while (it.next()) |snap| held += @intFromBool(snap.*.home == @as(u32, @intCast(i)) and !snap.*.stale);
-        if (held < fewest) {
-            fewest = held;
+        var newest: u64 = 0; // holds none: before any stamp
+        var it = snaps.valueIterator();
+        while (it.next()) |snap| if (snap.*.home == @as(u32, @intCast(i)) and !snap.*.stale) {
+            newest = @max(newest, snap.*.used);
+        };
+        if (newest < oldest) {
+            oldest = newest;
             best = @intCast(i);
         }
     }
     return best;
+}
+
+/// Slots with no GPU behind them: enough for the pick, which reads only `used`, homes, stamps and staleness.
+fn testSlots(slots: []Slot) Slots {
+    return .{ .gpa = std.testing.allocator, .e = undefined, .slots = slots, .rows = undefined, .ids = undefined, .lasts = undefined, .picks = undefined, .ring = undefined };
+}
+
+test "a new stream takes its state's free home, else a slot holding none, else the one whose newest state was used longest ago" {
+    const gpa = std.testing.allocator;
+    var slots: [4]Slot = undefined;
+    for (&slots) |*s| s.* = .{ .s = undefined, .held = undefined, .last = undefined };
+    var sl = testSlots(&slots);
+    defer sl.snaps.deinit(gpa);
+    var states: [5]snapshot.Snap = undefined;
+    for (&states, [_]u32{ 0, 0, 1, 2, 3 }, [_]u64{ 3, 9, 5, 7, 1 }, 0..) |*x, home, used, k| {
+        x.* = .{ .id = @intCast(k + 1), .at = 64, .buf = undefined, .bytes = 0, .home = home, .used = used };
+        try sl.snaps.put(gpa, x.id, x);
+    }
+    states[4].stale = true; // slot 3's only state: its slot has written below it
+    try std.testing.expectEqual(@as(?u32, 3), pick(&sl, null));
+    try std.testing.expectEqual(@as(?u32, 0), pick(&sl, &states[1]));
+    slots[3].used = true;
+    try std.testing.expectEqual(@as(?u32, 1), pick(&sl, null)); // newest 5, before slot 2's 7 and slot 0's 9
+    states[2].used = 10; // slot 1's state restored since
+    try std.testing.expectEqual(@as(?u32, 2), pick(&sl, null));
+    slots[0].used = true;
+    try std.testing.expectEqual(@as(?u32, 2), pick(&sl, &states[1])); // its home is busy
+    states[1].stale = true;
+    slots[0].used = false;
+    try std.testing.expectEqual(@as(?u32, 0), pick(&sl, &states[1])); // stale: no home rule, and slot 0's newest usable is 3
+    for (&slots) |*s| s.used = true;
+    try std.testing.expectEqual(@as(?u32, null), pick(&sl, null));
+}
+
+test "after a busy session an unrelated request leaves the newest conversation's slot alone (1.0.6's known issue)" {
+    const gpa = std.testing.allocator;
+    var slots: [3]Slot = undefined;
+    for (&slots) |*s| s.* = .{ .s = undefined, .held = undefined, .last = undefined };
+    var sl = testSlots(&slots);
+    defer sl.snaps.deinit(gpa);
+    var states: [5]snapshot.Snap = undefined;
+    for (&states, [_]u32{ 0, 0, 1, 1, 2 }, 1..) |*x, home, k| {
+        x.* = .{ .id = @intCast(k), .at = 64, .buf = undefined, .bytes = 0, .home = home, .used = k };
+        try sl.snaps.put(gpa, x.id, x);
+    }
+    // slot 2 holds only A1's state, the newest: the count-based pick took it (fewest held) and A1 went stale
+    try std.testing.expectEqual(@as(?u32, 0), pick(&sl, null));
 }

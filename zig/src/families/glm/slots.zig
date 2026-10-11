@@ -42,6 +42,7 @@ pub const Slots = struct {
     slots: []Slot,
     snaps: std.AutoHashMapUnmanaged(u32, *snapshot.Snap) = .empty, // kept prompt states by id (a pair's ranks agree)
     next_snap: u32 = 1,
+    uses: u64 = 0, // the clock kept states' use stamps come from
     disk: @import("learned_pair.zig").State = .{},
     learned: ?[:0]const u8 = null, // --learn: this Mac's learned-state directory (rank 1 names its files in it)
     rows: Ref, // bf16 [max_rows, hidden]: the rows every stream's head absorbs, gathered
