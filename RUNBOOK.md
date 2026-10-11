@@ -91,9 +91,9 @@ A sampled request honours its `seed`, `top_k: 0` turns the top-k filter off, and
 pinned host memory.
 A request that names no `top_k`, on a checkpoint whose generation config names none, samples with no top-k filter on
 CUDA and Metal alike, so a seeded request draws the same on both. `--top-k 20` gives 0.6.6's CUDA default.
-A conversation's next turn resumes from a prompt state kept at a 2,048-token chunk boundary, so a reply equals the same
-request with the cache off. `--prompt-cache-gib` sizes the kept states (16 GiB by default, inside the memory budget) and 0 turns
-them off; prompts shorter than 4,096 tokens keep none.
+A conversation's next turn resumes from a prompt state kept where the previous request's messages ended, so a reply
+equals the same request with the cache off. `--prompt-cache-gib` sizes the kept states (16 GiB by default, inside the
+memory budget) and 0 turns them off; prompts shorter than 4,096 tokens keep none.
 `TF_HEAT_HIGH` and `TF_HEAT_LOW`, in degrees Celsius and set together, make each prompt chunk wait while the hottest
 thermal zone (under `/sys/class/thermal`, or `TF_HEAT_ROOT`) is above the high band, until it is at or under the low one.
 The server logs `heat_wait_s`, a cancel ends the wait, and the reply's tokens do not change.

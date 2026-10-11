@@ -44,7 +44,7 @@ pub const Cancel = struct {
     }
 };
 
-/// Grid points where a prompt pass copies its state (ascending), called once each chunk ending there is queued.
+/// Positions where a prompt pass copies its state (ascending), called once each chunk ending there is queued.
 pub const Keep = struct {
     at: []const u32,
     ctx: *anyopaque,
@@ -338,10 +338,10 @@ pub const Engine = struct {
         return e.prefillFrom(prompt, 0, dump, head, cancel, null);
     }
 
-    /// prefill from `from` (0 resets; else a restored state at a grid point); chunks stay on the zero-anchored grid.
+    /// prefill from `from` (0 resets; else a restored state); chunks end on the zero-anchored grid and at `keep`.
     pub fn prefillFrom(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, head: ?*Head, cancel: ?Cancel, keep: ?Keep) !u32 {
         if (prompt.len == 0) return error.EmptyPrompt;
-        if (from != 0 and !grid.resumable(from, prompt.len, state.prefill_rows)) return error.BadReuse;
+        if (from != 0 and !grid.resumable(from, prompt.len)) return error.BadReuse;
         if (prompt.len + state.max_rows > e.max_len) return error.ContextFull;
         if (from == 0) {
             try e.reset();
@@ -385,7 +385,7 @@ pub const Engine = struct {
         while (s < prompt.len) {
             if (Cancel.now(cancel)) return error.Cancelled;
             try e.beforeChunk(cancel);
-            var end = grid.end(s, prompt.len, state.prefill_rows);
+            var end = grid.end(s, prompt.len, state.prefill_rows, if (keep) |k| k.at else &.{});
             // the decision row ends its chunk: the rows after it read the lessons it latched
             if (e.decide != lesson_route.none and e.decide >= s and e.decide + 1 < end) end = @intCast(e.decide + 1);
             const chunk = prompt[s..end];

@@ -194,11 +194,11 @@ pub const Cuda = struct {
         if (s.reuse.hook) |k| k.at(k.ptr, s, at);
     }
 
-    /// The stream's kept state on its bound sequence: where its prompt pass starts (0: none, off the grid, or failed).
+    /// The stream's kept state on its bound sequence: where its prompt pass starts (0: none, past the end, or failed).
     fn restoreKept(self: *Cuda, s: *lanes.Stream, len: usize) usize {
         const saved = s.reuse.saved orelse return 0;
         var target: reuse.Target = .{ .e = self.e, .head = self.head };
-        if (!grid.resumable(s.reuse.at, len, state.prefill_rows)) {
+        if (!grid.resumable(s.reuse.at, len)) {
             s.reuse_failed = true;
             return 0;
         }
@@ -236,7 +236,7 @@ pub const Cuda = struct {
         const keep: ?engine.Keep = if (s.reuse.marks.len == 0) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
         const first = try e.prefillFrom(ids, from, null, self.head, .{ .ptr = s, .check = cancelled }, keep);
         // the head's first draft reads the prompt's last row (its hidden row waits where a window's would)
-        const last = (ids.len - 1) % state.prefill_rows; // a resumed pass ends on the same grid
+        const last = ids.len - 1 - grid.lastStart(from, ids.len, state.prefill_rows, s.reuse.marks);
         try e.ops().copy(e.b.hidden, e.b.p_hidden + last * @as(u64, e.c.hidden) * 2, e.c.hidden * 2);
         _ = self.take(first);
         if (s.logprobs) |k| {

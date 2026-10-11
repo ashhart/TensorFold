@@ -11,6 +11,7 @@ const sample_tests = @import("sample_tests.zig");
 const glue_tests = @import("glue_tests.zig");
 const window_profile = @import("window_profile.zig");
 const tree_accept = @import("tree_accept.zig");
+const prompt_cuts = @import("prompt_cuts.zig");
 const chunk_costs = @import("chunk_costs.zig");
 const grouped_tests = @import("grouped_tests.zig");
 const fp8_tests = @import("fp8_tests.zig");
@@ -41,6 +42,7 @@ const usage =
     \\  glue                      Nemotron's glue kernels against their host references at its shapes (synthetic rows)
     \\  window-profile MODEL WIDTHS IDS_FILE   a decode window's GPU ms by kernel class (WIDTHS like 1,4,16), beside its graph
     \\  tree-accept MODEL IDS_FILE COUNT OUT   a greedy reply's MTP chain and level-1 runner-up branches at every position (JSON)
+    \\  prompt-cuts MODEL IDS_FILE   a prompt cut at keeps on and off the grid, and resumed from each, equals one uncut pass
     \\  chunk-costs MODEL IDS_FILE WIDTHS   r rows as the decode window graph (r <= 16) and as a prompt chunk (any r)
     \\  grouped-plan <dir>        the shared expert plan against experts.route's bytes (oracle/grouped_plan.py)
     \\  fp8-lane <dir>            block-FP8 projections against the Python lane matmul's bytes (oracle/fp8_lane.py)
@@ -110,6 +112,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "glue")) return glue_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "window-profile")) return window_profile.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "tree-accept")) return tree_accept.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
+    if (std.mem.eql(u8, cmd, "prompt-cuts")) return prompt_cuts.run(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "chunk-costs")) return chunk_costs.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "grouped-plan")) return grouped_tests.plan(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "carveout")) {
