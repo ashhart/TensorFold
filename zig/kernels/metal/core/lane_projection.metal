@@ -5,6 +5,10 @@ using namespace mpp::tensor_ops;
 
 // 1-16 bf16 rows share each group's weight read; every row's sums and split-K order hold at every width.
 
+#ifndef TF_SIMD_FRAGS
+#define TF_SIMD_FRAGS 0
+#endif
+
 #ifndef TF_PRECOMPUTE_SUMS
 #define TF_PRECOMPUTE_SUMS 0
 #endif
@@ -24,6 +28,14 @@ inline tf_raw tf_lane_fetch(const device uint* W, const device uint4* SB, int ti
 #else
   for (int i = 0; i < WP / 2; i++) raw.w[i] = uint2(0);
 #endif
+#if TF_SIMD_FRAGS
+  const device uint2* sb2 = (const device uint2*)SB;
+  for (int f = 0; f < NF; f++) {
+    const int col = n0 + f * 16 + fn;
+    raw.s[f] = uint4(ok && col < TF_N ? sb2[((size_t)g * TF_N + col) / 2] : uint2(0),
+                     ok && col + 8 < TF_N ? sb2[((size_t)g * TF_N + col + 8) / 2] : uint2(0));
+  }
+#else
   // Four lanes load the metadata quads and broadcast them; all 32 lanes fetch, even for inactive rows.
   const ushort leader = ushort((fn & 8) | ((fn >> 2) & 1));
   for (int f = 0; f < NF; f++) {
@@ -31,6 +43,7 @@ inline tf_raw tf_lane_fetch(const device uint* W, const device uint4* SB, int ti
       ? SB[((size_t)(ok ? g : 0) * TF_N + n0 + f * 16 + fn) / 4] : uint4(0);
     raw.s[f] = simd_shuffle(sb, leader);
   }
+#endif
   return raw;
 }
 
@@ -96,7 +109,8 @@ inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, in
       for (int r = 0; r < 2; r++)                                                                              \
         for (int j = 0; j < 4; j++) {                                                                          \
           const int i = f * 8 + r * 4 + j;                                                                     \
-          C[i] = fma(s[f][j], P[i], fma(bb[f][j], r ? xs1 : xs0, C[i]));                                       \
+          C[i] = fma(s[f][j], P[TF_SIMD_FRAGS ? r * 8 + f * 4 + j : i],                                         \
+                     fma(bb[f][j], r ? xs1 : xs0, C[i]));                                       \
         }                                                                                                      \
   }
 
@@ -110,7 +124,11 @@ inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, in
   const int lane = int(lanei), sg = int(sgi);
   const short qid = short(lane) >> 2;
   const short fm = (qid & 4) | ((short(lane) >> 1) & 3);
+#if TF_SIMD_FRAGS
+  const short fn = ((short(lane) & 8) >> 1) | ((short(lane) & 1) << 1);
+#else
   const short fn = ((qid & 2) | (short(lane) & 1)) * 4;
+#endif
   const int M = mdims[0];
   const int tile = tf_tile(int(tgx));
   const int n0 = tile * NT;
@@ -149,7 +167,10 @@ inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, in
         const int m = fm + 8 * r;
         const int nn = n0 + f * 16 + fn;
         if (m < M && nn < TF_N)
-          for (int j = 0; j < 4; j++) Y[(size_t)m * TF_N + nn + j] = static_cast<TF_OUT>(C[f * 8 + r * 4 + j]);
+          for (int j = 0; j < 4; j++) {
+            const int col = nn + (TF_SIMD_FRAGS ? (j & 1) + 8 * (j >> 1) : j);
+            if (col < TF_N) Y[(size_t)m * TF_N + col] = static_cast<TF_OUT>(C[f * 8 + r * 4 + j]);
+          }
       }
 }
 
