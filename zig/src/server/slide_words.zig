@@ -181,11 +181,16 @@ pub fn isFiller(word: []const u8) bool {
     return false;
 }
 
-/// Whether `said`, an answer taken from `fact` alone, gives a word or number of it the question lacks (2 for "two").
+/// Whether `said`, an answer from `fact` alone, gives a word of it the question lacks ("2", "Gdańsk" for "Gdańsku").
 pub fn answersFrom(fact: []const u8, question: []const u8, said: []const u8) bool {
     if (tells(fact, question, "", said)) return true;
     var it: Units = .init(fact);
-    while (it.next()) |u| if (!u.paired) if (numberOf(u.raw)) |v| if (!saysNumber(question, v) and saysNumber(said, v)) return true;
+    while (it.next()) |u| {
+        if (u.paired) continue;
+        if (numberOf(u.raw)) |v| {
+            if (!saysNumber(question, v) and saysNumber(said, v)) return true;
+        } else if (u.notable() and !saysStem(question, u.word) and saysStem(said, u.word)) return true;
+    }
     return false;
 }
 
@@ -567,6 +572,8 @@ test "an answer taken from the fact alone gives what it supplies: a word or numb
     try std.testing.expect(answersFrom("Every code review needs two approvals.", "How many approvals does a code review need?", "2"));
     try std.testing.expect(answersFrom("My sister is called Ana.", "What is my sister's name?", "Ana"));
     try std.testing.expect(answersFrom("I like blue.", "What colour do I like?", "Blue"));
+    try std.testing.expect(answersFrom("Firma Brightwell Foods ma siedzibę w Gdańsku.", "Where is Brightwell Foods based?", "Gdańsk"));
+    try std.testing.expect(!answersFrom("Firma Brightwell Foods ma siedzibę w Gdańsku.", "Where is Brightwell Foods based?", "Brightwell"));
 }
 
 test "a found fact is learned only when the text holds its names, numbers and words" {

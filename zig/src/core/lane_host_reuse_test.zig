@@ -95,7 +95,7 @@ test "a lane host resumes a conversation from its kept prompt state and reports 
     }
     try std.testing.expectEqual(@as(u64, 1), store.counts.hits);
     try std.testing.expectEqual(@as(usize, 2), store.entries.items.len);
-    // a lesson's writer reads the model as shipped: the same turn untaught neither resumes from a kept state nor keeps one
+    // a lesson's writer reads the model as shipped: untaught, a turn neither resumes from a kept state nor keeps one
     var b3: Box = .{};
     defer b3.tokens.deinit(gpa);
     const r3: Request = .{ .prompt = t2.items, .max_tokens = 4, .history_len = @intCast(t2.items.len - 2), .untaught = true };

@@ -560,7 +560,7 @@ fn heldBack(lessons: usize, i: usize) bool {
 
 /// The request for a fact's questions: as its teller would ask, or for a document's fact as a colleague would.
 fn questionsFor(a: Allocator, document: bool, fact: []const u8, count: usize, language: ?[]const u8) ![]const u8 {
-    if (document) return std.fmt.allocPrint(a, prompts.doc_questions_prompt, .{ fact, count, count });
+    if (document) return prompted(a, prompts.doc_questions_prompt, slide_language.doc_questions_other, .{ fact, count, count }, language);
     return prompted(a, prompts.questions_prompt, questions_other, .{ fact, count, count }, language);
 }
 
