@@ -1,7 +1,4 @@
-"""Chat with the prompt cache equals chat without it, through regenerate, edit and delete rewinds.
-
-usage: serve_rewind.py CACHED_URL UNCACHED_URL MODEL [SYSTEM_WORDS]; exits 1 on any differing reply.
-"""
+"""Cache on equals cache off through rewinds; usage: serve_rewind.py CACHED_URL UNCACHED_URL MODEL [WORDS]."""
 
 import json
 import sys
