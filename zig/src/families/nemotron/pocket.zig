@@ -1,11 +1,4 @@
-//! A pocket of new neurons beside each MoE layer's shared expert, where facts are learned. A fact takes neurons at the
-//! layers that best tell its questions from everything else, keyed three ways: some fire at the reply's first row of its
-//! questions and nowhere else; when its questions name its subject (my sister, a company), some fire at the subject's
-//! last token, where a model keeps what it knows of someone or something, so wordings it never saw find the fact there
-//! too, as ROME and Geva et al. found models keep facts; and, when asked (TF_SLIDE_POCKET_VALUES=on), some fire at the
-//! row just before the answer says its value ("Your sister is called" before "Ana"). Their outputs are fitted so the
-//! fact's answers come and other answers a subject neuron fires on stay as they were (pocket_values.zig). Nothing the
-//! model had moves.
+//! A pocket of new neurons beside each MoE layer's shared expert, where facts are learned; nothing the model had moves.
 const std = @import("std");
 const examples = @import("lesson_examples.zig");
 const lesson_route = @import("lesson_route.zig");
@@ -32,12 +25,10 @@ const value_neurons = 4; // of those, the ones before its answer's value, when i
 const kept_least: f32 = 0.5; // an earlier neuron refitted must still reach this on every one of its own fact's rows
 const refit_above: f32 = 0.5; // an earlier neuron is refitted only where it fires above this on a new fact's rows
 
-/// Where a neuron fires: the reply's first row of its fact's questions, the last token of the subject they name, or the
-/// row before its answer's value.
+/// Where a neuron fires: the reply's first row, the named subject's last token, or the row before the answer's value.
 pub const Key = enum(u2) { reply, subject, value };
 
-/// How a fact's neurons are keyed: when at least half its questions name its subject, that share of them on the subject
-/// and the rest on the reply, else all on the reply (auto); or one way only, as asked (TF_SLIDE_POCKET_KEY).
+/// Keying: auto gives the subject the share of questions naming it (if half or more), the rest to the reply.
 pub const Mode = enum { auto, reply, subject };
 
 /// A neuron the open fact took.
@@ -74,24 +65,19 @@ pub fn valueRow(ex: Example) ?usize {
     return if (ex.value > 0 and ex.value + 1 >= ex.start and ex.value + 1 < ex.ids.len) ex.value else null;
 }
 
-/// What read row `l` is to the neurons keyed `key`: its own key rows as read; the other key's rows, and every other
-/// row, among those they stay silent on.
+/// What read row `l` is to neurons keyed `key`: their own key rows as read, every other row one they stay silent on.
 fn kindFor(l: Label, key: Key) Kind {
     if (l.key == key) return l.kind;
     return if (l.kind == .steady) .steady else .other;
 }
 
-/// Whether a neuron keyed `key` may sit at layer l of `layers`: from a fifth of the way in to seven eighths; a
-/// subject's only to five eighths. Vectors on the subject's row carry a fact from the middle layers (the probe swept
-/// over three-layer windows: held-out loss 0.17 to 0.5 from a fifth to five eighths, 0.5 to 1.6 past it), as causal
-/// tracing places facts before ROME and MEMIT edit them.
+/// Whether layer l may hold a `key` neuron: a fifth to seven eighths in; a subject's to five eighths, where facts sit.
 fn candidate(l: usize, layers: usize, key: Key) bool {
     const last = if (key == .subject) layers * 5 / 8 else layers * 7 / 8;
     return l >= layers / 5 and l <= last;
 }
 
-/// Strict layers first (silent on every row read), then those on for most of the fact's questions, then the widest
-/// least margin.
+/// Strict layers first (silent on every row read), then most of the fact's questions on, then the widest least margin.
 fn better(f: []const Fit, a: usize, b: usize) bool {
     if (f[a].fires != f[b].fires) return f[a].fires < f[b].fires;
     if (f[a].fact_on != f[b].fact_on) return f[a].fact_on > f[b].fact_on;
@@ -147,9 +133,7 @@ pub fn Pocket(comptime T: type) type {
             p.v.deinit(p.gpa);
         }
 
-        /// The open fact's neurons on each key: as asked, or (auto) some before its answer's value when asked for and at
-        /// least half its answers show one, then of the rest, when at least half its questions name its subject, as many on the subject
-        /// as the share that do, the others on the reply.
+        /// The fact's neurons per key: as asked, or by how many answers show a value and questions name the subject.
         fn pickSplit(p: *const Self, lists: []const []const Example, answered: []const Example) [3]usize {
             var valued: usize = 0;
             for (answered) |ex| valued += @intFromBool(valueRow(ex) != null);
@@ -177,8 +161,7 @@ pub fn Pocket(comptime T: type) type {
             };
         }
 
-        /// Whether any of the open fact's neurons fire on `ex`: at its reply, at its subject when it names it, or before
-        /// its value when its answer says it.
+        /// Whether the fact's neurons fire on `ex`: at its reply, its subject if named, or before its value if said.
         pub fn fires(p: *const Self, ex: Example) bool {
             return p.split[0] > 0 or (p.split[1] > 0 and subjectRow(ex) != null) or (p.split[2] > 0 and valueRow(ex) != null);
         }
@@ -191,8 +174,7 @@ pub fn Pocket(comptime T: type) type {
             return which[(slot * neurons + n) * d ..][0..d];
         }
 
-        /// A fact's lesson begun: its answers, more wordings of its questions, its held-out answers, and the other prompts
-        /// and answers its neurons stay silent on.
+        /// A fact's lesson begun: its answers, more wordings, held-out answers and prompts its neurons stay silent on.
         pub fn begin(p: *Self, t: *T, host: anytype, answered: []const Example, prompts: []const Example, held: []const Example, steady: []const []const Example) !void {
             const c = t.config();
             if (p.moe.items.len == 0) {
@@ -235,8 +217,7 @@ pub fn Pocket(comptime T: type) type {
             p.v.restart();
         }
 
-        /// One unit: an example read, every layer fitted, an answer of an output step, or a held-out answer judged;
-        /// true once the fact's neurons are in the pocket and judged (`back` of the held-out answers came back).
+        /// One unit: a read, the fits, an output answer or a held-out answer judged; true once the neurons are judged.
         pub fn step(p: *Self, t: *T, host: anytype) !bool {
             const part: clock.Part = switch (p.phase) {
                 .read => .read,
@@ -292,8 +273,7 @@ pub fn Pocket(comptime T: type) type {
             try host.pocket(p.moe.items[slot], p.up.items[slot * n ..][0..n], p.down.items[slot * n ..][0..n], p.used.items[slot]);
         }
 
-        /// Example i of the fact's answers, then its other wordings, then its held-out answers, then the other prompts,
-        /// with its kind.
+        /// Example i and its kind: the fact's answers, then its other wordings, held-out answers and the other prompts.
         pub fn pickRead(p: *const Self, i: usize) ?struct { ex: Example, kind: Kind } {
             var at = i;
             const own = [_]struct { xs: []const Example, kind: Kind }{ .{ .xs = p.answered, .kind = .fact }, .{ .xs = p.prompts, .kind = .fact }, .{ .xs = p.held, .kind = .held } };
@@ -317,9 +297,7 @@ pub fn Pocket(comptime T: type) type {
             }
         }
 
-        /// Every candidate layer's neuron fitted for each key at once (a thread a fit) and the best taken on each key;
-        /// then the other answers its subject neurons fire on found, and earlier neurons that fire on its questions
-        /// fitted again.
+        /// Every key's candidate layers fitted in threads, the best taken; then keeps found, earlier neurons refitted.
         fn fitAll(p: *Self, t: *T, host: anytype) !bool {
             const c = t.config();
             const d = c.hidden;
@@ -366,8 +344,7 @@ pub fn Pocket(comptime T: type) type {
             return false;
         }
 
-        /// For each key's first neuron, the share of its fact rows it fires on (0.5 or more) from each source: the
-        /// answers, the more wordings (the system and conversation variants among them, longer), the held-out answers.
+        /// Logs each key's first neuron's firing share by source: answers, short and long wordings, held-out answers.
         fn logSources(p: *const Self, d: usize, m: usize, kinds: []const Kind) void {
             const n = p.slots();
             for (p.taken.items) |x| {
@@ -402,8 +379,7 @@ pub fn Pocket(comptime T: type) type {
             try p.learned.append(p.gpa, .{ .slot = j, .neuron = k, .key = key, .start = start, .count = p.pos.items.len / d - start, .subject = subject });
         }
 
-        /// Other prompts' answers that mention the open fact's subject where one of its subject neurons fires, each at
-        /// the row it fires most: their answers are to stay as they were while its outputs are fitted.
+        /// Other answers where the fact's subject neurons fire, each at its strongest row: these stay as they were.
         fn findKeeps(p: *Self, d: usize) !void {
             if (p.split[1] == 0 or !p.keeping) return;
             const n = p.slots();
@@ -433,10 +409,7 @@ pub fn Pocket(comptime T: type) type {
             std.log.info("slide pocket: {d} other answers name the fact's subject where its neurons fire; they are to stay as they were", .{p.keeps.items.len});
         }
 
-        /// Every earlier fact's neuron that would fire on this fact's key rows fitted again, from where it is, with them
-        /// among the rows it stays silent on (its own fact's rows still the ones it fires on), its input weights from
-        /// before kept for an undo. A subject neuron of a fact about the same subject is left as it is: what it knows of
-        /// that subject may come up here, and this fact's outputs are fitted with it firing.
+        /// Earlier neurons firing on this fact's rows refitted silent there, undo copies kept; same-subject ones stay.
         fn quiet(p: *Self, t: *T, host: anytype) !void {
             const d = t.config().hidden;
             const n = p.slots();
@@ -468,9 +441,7 @@ pub fn Pocket(comptime T: type) type {
                 }
                 const f = try fit(p.gpa, xs.items, kinds.items, d, u, true, fit_steps / 2, e.count);
                 if (f.fact_least < kept_least or @max(f.steady_most, f.other_most) > 0) {
-                    // a refit that loses its own fact's questions is forgetting, and one that fires elsewhere would
-                    // spread: either way it is put back as it was, and this fact's outputs are fitted with it firing
-                    // where it does (no change may move what the model knew)
+                    // a refit that forgets its fact or spreads is undone; this fact's outputs are fitted with it firing
                     @memcpy(u, p.refit_up.items[p.refit_up.items.len - d ..]);
                     p.refits.shrinkRetainingCapacity(p.refits.items.len - 1);
                     p.refit_up.shrinkRetainingCapacity(p.refit_up.items.len - d);
@@ -488,8 +459,7 @@ pub fn Pocket(comptime T: type) type {
             return true;
         }
 
-        /// Every layer's learned neurons into the model's shards, then into the forward as the shards hold them (4-bit);
-        /// the bytes written.
+        /// Learned neurons into the shards, then into the forward as the shards hold them (4-bit); the bytes written.
         pub fn save(p: *Self, t: *T, host: anytype) !usize {
             const bytes = try host.pocketSave(p.moe.items, neurons, p.up.items, p.down.items);
             for (0..p.slots()) |j| if (p.used.items[j] > 0) try p.upload(t, host, j);

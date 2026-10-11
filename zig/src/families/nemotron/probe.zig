@@ -1,7 +1,4 @@
-//! A measure, not a lesson: how far fixed vectors added at one row of a few layers bring a fact's answers back,
-//! fitted on the lesson's answers and judged on its held-out ones. That is the most new neurons firing only at that
-//! row could give, before any is built. Swept over windows of three MoE layers, it maps where in depth the subject's
-//! row carries a fact, as causal tracing does before ROME and MEMIT pick their layers.
+//! A measure, not a lesson: how far vectors fitted at one row of a few layers bring a fact's held-out answers back.
 const std = @import("std");
 const examples = @import("lesson_examples.zig");
 const lesson_route = @import("lesson_route.zig");
@@ -49,8 +46,7 @@ pub fn Probe(comptime T: type) type {
             p.state.deinit(p.gpa);
         }
 
-        /// The setups for one lesson: the subject's row at the MoE layers from 13 to 25, then at each window of three
-        /// MoE layers in a row (each window two on from the last), shallow to deep.
+        /// A lesson's setups: the subject's row at MoE layers 13 to 25, then in windows of three MoE layers, two apart.
         pub fn begin(p: *Self, t: *T, answered: []const Example, held: []const Example) !void {
             const c = t.config();
             p.answered = answered;
