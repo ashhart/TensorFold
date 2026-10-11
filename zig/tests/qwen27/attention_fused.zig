@@ -124,6 +124,12 @@ pub fn main(init: std.process.Init) !void {
     defer scratch.deinit();
     var binding = try attn.Binding.init(device, limits);
     defer binding.deinit();
+    // Chips without tensor units plan with shared_prefix off: no prefix kernel, every key through the tail kernel.
+    const plain_limits = attn.Limits{ .rows = max_rows, .streams = 4, .keys = capacity, .shared_prefix = false };
+    var plain_scratch = try attn.Scratch.init(device, plain_limits);
+    defer plain_scratch.deinit();
+    var plain_binding = try attn.Binding.init(device, plain_limits);
+    defer plain_binding.deinit();
     var rng = Rng{ .s = 0x9e3779b97f4a7c15 };
     var cache_buffers: [8]mtl.Buffer = undefined;
     var caches: [4]attn.Cache = undefined;
@@ -140,7 +146,8 @@ pub fn main(init: std.process.Init) !void {
     const raw_gate = try buffer(device, &rng, max_rows * 12288 * 2, true);
     const out_chain = try buffer(device, &rng, max_rows * 6144 * 2, false);
     const out_tail = try buffer(device, &rng, max_rows * 6144 * 2, false);
-    defer for ([_]mtl.Buffer{ query, key, value, raw_gate, out_chain, out_tail }) |b| b.deinit();
+    const out_plain = try buffer(device, &rng, max_rows * 6144 * 2, false);
+    defer for ([_]mtl.Buffer{ query, key, value, raw_gate, out_chain, out_tail, out_plain }) |b| b.deinit();
 
     const edges = [_]u32{ 0, 1, 62, 63, 64, 65, 127, 128, 191, 255, 256, 447, 448, 449, 510, 511, 512, 513, 575, 576, 1000, 1023, 1024, 1087, 2047, 2048, 3000, 4000 };
     var cases: std.ArrayList(Case) = .empty;
@@ -172,6 +179,7 @@ pub fn main(init: std.process.Init) !void {
     var chains: usize = 0;
     var bytes_checked: usize = 0;
     var digest = std.crypto.hash.sha2.Sha256.init(.{});
+    var plain_digest = std.crypto.hash.sha2.Sha256.init(.{});
     for (cases.items, 0..) |case, n| {
         var parents: [4][max_rows]i32 = undefined;
         var windows: [4]planning.Window = undefined;
@@ -204,10 +212,18 @@ pub fn main(init: std.process.Init) !void {
             }
             chains += 1;
         }
+        var plain = try attn.Plan.init(a, windows[0..case.streams], .{ .shared_prefix = false });
+        defer plain.deinit();
+        try run(queue, &op, &plain_scratch, &plain_binding, plain, caches[0..case.streams], .{ .buffer = query }, .{ .buffer = key }, .{ .buffer = value }, .{ .buffer = out_plain }, gate);
+        if (std.mem.allEqual(u8, out_plain.contents()[0..len], 0)) return error.NothingWritten;
+        plain_digest.update(out_plain.contents()[0..len]);
         checked += 1;
         bytes_checked += len;
     }
     var sum: [32]u8 = undefined;
+    var plain_sum: [32]u8 = undefined;
     digest.final(&sum);
+    plain_digest.final(&plain_sum);
     std.debug.print("attention_fused: {d} plans, {d} chains byte-identical through the fused prefix kernel and the tail kernel, {d} bytes, sha256 {s}\n", .{ checked, chains, bytes_checked, std.fmt.bytesToHex(sum, .lower) });
+    std.debug.print("attention_fused: the same {d} plans without a shared prefix, sha256 {s}\n", .{ checked, std.fmt.bytesToHex(plain_sum, .lower) });
 }
