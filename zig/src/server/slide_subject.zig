@@ -79,9 +79,9 @@ fn opens(text: []const u8, word: []const u8) bool {
 
 /// A fact's subject words: the phrase's its questions say; a document's other proper names join a phrase with none.
 pub fn factSubject(a: std.mem.Allocator, phrase: []const u8, fact: []const u8, qs: []const []const u8, document: bool) ![]const []const u8 {
-    // a told fact named whole as its subject ("I live in Bristol") is the user's, and Bristol is its answer
-    if (!document and whom.userOpens(phrase)) return &.{};
     const own = try subjectWords(a, beforeVerb(phrase));
+    // a told fact named whole ("I drive a Volvo") keys on what its questions say (drive), never its answer
+    if (!document and whom.userOpens(phrase)) return asked(a, own, qs);
     const proper = try named(a, own, fact, qs);
     // a told fact's other proper name is its answer ("My dog is called Ginger."): never a word its questions must say
     const theirs = try asked(a, if (document) try properWords(a, own, fact) else own, qs);
@@ -233,13 +233,17 @@ test "a fact's subject keeps its own proper names; a phrase without any takes th
     const told = try factSubject(a, "My dog", "My dog is called Ginger.", &dog, false);
     try std.testing.expectEqual(@as(usize, 1), told.len);
     try std.testing.expectEqualStrings("dog", told[0]);
-    const home = [_][]const u8{ "Where do I live?", "Which city do I live in?", "Where is my home?" };
+    const home = [_][]const u8{ "Where do I live?", "Which city is my home?", "Where is my home?", "What city am I from?" };
     try std.testing.expectEqual(@as(usize, 0), (try factSubject(a, "I live in Bristol", "I live in Bristol.", &home, false)).len);
-    const nuts = [_][]const u8{ "What am I allergic to?", "Am I allergic to anything?" };
-    try std.testing.expectEqual(@as(usize, 0), (try factSubject(a, "I am allergic to peanuts", "I am allergic to peanuts.", &nuts, false)).len);
+    const car = [_][]const u8{ "What car do I drive?", "Which make do I drive?", "What is my car?" };
+    const drive = try factSubject(a, "I drive a Volvo", "I drive a Volvo.", &car, false);
+    try std.testing.expect(drive.len == 1 and std.mem.eql(u8, drive[0], "drive"));
+    const nuts = [_][]const u8{ "What am I allergic to?", "Am I allergic to anything?", "What can't I eat?" };
+    const allergic = try factSubject(a, "I am allergic to peanuts", "I am allergic to peanuts.", &nuts, false);
+    try std.testing.expect(allergic.len == 1 and std.mem.eql(u8, allergic[0], "allergic"));
 }
 
-const unkeyed = [_][]const u8{ "i", "me", "my", "mine", "myself", "we", "us", "our", "ours", "you", "your", "yours", "it", "its", "this", "that", "these", "those", "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "do", "does", "did", "is", "are", "was", "like", "likes" };
+const unkeyed = [_][]const u8{ "i", "me", "my", "mine", "myself", "we", "us", "our", "ours", "you", "your", "yours", "it", "its", "this", "that", "these", "those", "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "do", "does", "did", "is", "are", "am", "was", "like", "likes" };
 
 const small = [_][]const u8{ "the", "a", "an", "of", "on", "in", "at", "to", "for", "by", "with", "from", "and", "or" };
 
