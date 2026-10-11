@@ -76,6 +76,43 @@ pub const Fake = struct {
     }
 };
 
+/// QPs that complete nothing on their own: a QP moved to error flushes what it holds, as an HCA reports it.
+pub const Halts = struct {
+    pub var halted: [2]bool = .{ false, false };
+    pub var flushed_before_halt: u32 = 0;
+    pub var flushes: u32 = 0;
+
+    pub fn reset() void {
+        halted = .{ false, false };
+        flushed_before_halt = 0;
+        flushes = 0;
+    }
+
+    pub fn modifyQp(qp: *abi.Qp, attr: *abi.QpAttr, mask: c_int) callconv(.c) c_int {
+        if (attr.qp_state == abi.qps_err and mask == abi.mask.state) halted[qp.qp_num] = true;
+        return 0;
+    }
+
+    pub fn pollCq(cq: *abi.Cq, _: c_int, wc: [*]abi.Wc) callconv(.c) c_int {
+        const q = cq.handle;
+        if (Fake.len[q] == 0 or !halted[q]) return 0;
+        if (!halted[0] or !halted[1]) flushed_before_halt += 1;
+        Fake.inflight -= Fake.queue[q][Fake.head[q]];
+        Fake.head[q] = (Fake.head[q] + 1) % 512;
+        Fake.len[q] -= 1;
+        flushes += 1;
+        wc[0] = std.mem.zeroes(abi.Wc);
+        wc[0].status = 5; // IBV_WC_WR_FLUSH_ERR
+        return 1;
+    }
+
+    /// Points a wire's QPs at these handlers.
+    pub fn install(hw: *Hw, w: *rv.VerbsWire) void {
+        w.v.api.ibv_modify_qp = modifyQp;
+        for (&hw.ctx) |*c| c.ops.poll_cq = pollCq;
+    }
+};
+
 /// Two fake HCAs behind one VerbsWire, connected to a peer whose region has this rank's layout.
 pub const Hw = struct {
     ctx: [2]abi.Context = undefined,
