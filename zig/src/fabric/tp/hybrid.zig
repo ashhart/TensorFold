@@ -51,11 +51,18 @@ pub const Small = union(enum) {
     }
 };
 
+/// Whether a variable-length gather of `n`-byte strides one op cannot take goes RoCE in slot-sized ops (needs the ABI).
+pub fn chunkRoute(chunked_bytes: usize, n: usize, single: bool, abi: bool) bool {
+    return abi and !single and n > 0 and n <= chunked_bytes;
+}
+
 pub const Hybrid = struct {
     small: Small,
     nccl: *Nccl,
     /// Largest shard a rank sends through the small path.
     max_bytes: usize,
+    /// Largest stride a variable-length gather takes on RoCE in slot-sized ops (TF_TP_ROCE_CHUNKED_KB; 0: none).
+    chunked_bytes: usize = 0,
     /// Every rank's `varFits(16)`, agreed at `Session.open` (the bootstrap's all-gather): `varAgreed`'s answer.
     var_agreed: bool = false,
 
@@ -117,15 +124,24 @@ pub const Hybrid = struct {
     fn allGatherV(ptr: *anyopaque, s: DevicePtr, r: DevicePtr, stride: usize, lens: DevicePtr, t: DType, stream: collective.Stream) Error!void {
         const h = self_(ptr);
         const n = stride * t.size();
-        if (varFits(ptr, n)) return h.small.roce.allGatherV(s, r, n, lens, stream);
+        if (singleFits(h, n)) return h.small.roce.allGatherV(s, r, n, lens, stream);
+        if (varFits(ptr, n)) return h.small.roce.allGatherVChunked(s, r, n, lens, stream);
         return allGather(ptr, s, r, stride, t, stream);
     }
 
-    /// RoCE with its device side, for a stride the small path takes (the route is the size's alone: every rank alike).
-    pub fn varFits(ptr: *anyopaque, n: usize) bool {
-        const h = self_(ptr);
+    fn singleFits(h: *const Hybrid, n: usize) bool {
         return switch (h.small) {
             .roce => |p| n > 0 and h.routed(n) and p.d != null,
+            .mailbox => false,
+        };
+    }
+
+    /// RoCE with its device side, in one op or in slot-sized ops (the route is the size's alone: every rank alike).
+    pub fn varFits(ptr: *anyopaque, n: usize) bool {
+        const h = self_(ptr);
+        const single = singleFits(h, n);
+        return single or switch (h.small) {
+            .roce => |p| chunkRoute(h.chunked_bytes, n, single, p.d != null and p.chunk_abi),
             .mailbox => false,
         };
     }

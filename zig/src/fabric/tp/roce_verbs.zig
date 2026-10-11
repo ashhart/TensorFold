@@ -5,6 +5,7 @@ const verbs = @import("verbs");
 const abi = verbs.abi;
 const Verbs = verbs.Verbs;
 const guard = @import("roce_guard.zig");
+const sock = @import("sock.zig");
 
 pub const max_hcas = guard.max_hcas;
 /// Work requests a queue pair holds; at most a quarter outstanding (two requests a stripe).
@@ -13,6 +14,12 @@ const link_ethernet = 2;
 const record_magic: u32 = 0x5446_5244 + 2; // "TFRD", bumped for each change of this record's layout
 
 pub const Error = error{ NoHca, VerbsFailed, PostFailed, Completion, BadRecord } || guard.Error;
+
+/// Bytes posted and not yet completed, every HCA together: a post waits for completions past it; never raised.
+pub const max_inflight: u64 = 2 * @as(u64, guard.max_write);
+/// A post that waits on completions this long fails the proxy (a peer or HCA that stopped answering).
+const inflight_wait_ns: u64 = 10 * std.time.ns_per_s;
+const ring_len = send_depth / 4;
 
 /// One HCA as configured: its device name and RoCE v2 GID index (null: detected).
 pub const HcaSpec = struct { name: [64]u8 = @splat(0), name_len: u8 = 0, gid: ?u8 = null };
@@ -43,6 +50,10 @@ const Hca = struct {
     mtu: u32,
     lid: u16,
     outstanding: u32 = 0,
+    /// Each outstanding post's stripe bytes, oldest at `head` (completions arrive in order).
+    ring: [ring_len]u32 = undefined,
+    head: u32 = 0,
+    inflight: u64 = 0,
 };
 
 /// Parses `name[:gid],name[:gid]` (TF_TP_ROCE_HCA).
@@ -137,6 +148,8 @@ pub const VerbsWire = struct {
     slot_bytes: usize,
     region: []u8,
     posted: u64 = 0,
+    /// The most stripe bytes in flight at once (posted, not completed), for tests and reports.
+    peak: std.atomic.Value(u64) = .init(0),
     completed: u64 = 0,
 
     /// Opens the HCAs, registers `region` on each and creates the queue pairs (INIT); `record` then goes to the peer.
@@ -247,9 +260,10 @@ pub const VerbsWire = struct {
     pub fn post(w: *VerbsWire, slot: u32, seq: u32, padded: u32) !void {
         var plan: [max_hcas]guard.Stripe = undefined;
         try guard.stripes(w.regionLayout(), w.n_hca, slot, padded, &plan);
+        while (w.inflight() + padded > max_inflight) try w.reapWait();
         var seq_copy = seq;
         for (w.hcas[0..w.n_hca], plan[0..w.n_hca], 0..) |*h, s, i| {
-            while (h.outstanding >= send_depth / 4) try w.reapHca(h);
+            while (h.outstanding >= ring_len) try w.reapHca(h);
             var flag_sge: abi.Sge = .{ .addr = @intFromPtr(&seq_copy), .length = 4, .lkey = 0 };
             var flag_wr: abi.SendWr = .{ .wr_id = seq, .sg_list = @ptrCast(&flag_sge), .num_sge = 1, .opcode = abi.wr_rdma_write, .send_flags = abi.send_signaled | abi.send_inline, .remote_addr = w.peer_region + s.flag, .rkey = w.peer_rkey[i] };
             var data_sge: abi.Sge = .{ .addr = @intFromPtr(w.region.ptr) + s.local, .length = s.len, .lkey = h.mr.lkey };
@@ -257,8 +271,11 @@ pub const VerbsWire = struct {
             var bad: ?*abi.SendWr = null;
             const first: *abi.SendWr = if (s.len > 0) &data_wr else &flag_wr;
             if (h.ctx.ops.post_send(h.qp, first, &bad) != 0) return error.PostFailed;
+            h.ring[(h.head + h.outstanding) % ring_len] = s.len;
             h.outstanding += 1;
+            h.inflight += s.len;
         }
+        if (w.inflight() > w.peak.load(.monotonic)) w.peak.store(w.inflight(), .monotonic);
         w.posted += 1;
     }
 
@@ -275,8 +292,30 @@ pub const VerbsWire = struct {
             log.err("tp roce: RDMA write of seq {d} failed: {s} (vendor 0x{x})", .{ c.wr_id, w.v.statusText(c.status), c.vendor_err });
             return error.Completion;
         };
+        for (0..@intCast(n)) |_| {
+            h.inflight -= h.ring[h.head];
+            h.head = (h.head + 1) % ring_len;
+        }
         h.outstanding -= @intCast(n);
         w.completed += @intCast(n);
+    }
+
+    /// Bytes posted and not yet completed over every HCA.
+    pub fn inflight(w: *const VerbsWire) u64 {
+        var sum: u64 = 0;
+        for (w.hcas[0..w.n_hca]) |h| sum += h.inflight;
+        return sum;
+    }
+
+    /// Reaps until some post completes (error.Completion when none does within `inflight_wait_ns`).
+    fn reapWait(w: *VerbsWire) !void {
+        const before = w.completed;
+        const t0 = sock.nowNs();
+        while (w.completed == before) {
+            try w.reap();
+            if (w.completed == before and sock.nowNs() - t0 > inflight_wait_ns) return error.Completion;
+            std.atomic.spinLoopHint();
+        }
     }
 
     /// Reap every HCA's completions (after each op, and in the proxy's idle loop).

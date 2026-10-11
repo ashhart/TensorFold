@@ -41,7 +41,7 @@ pub const Session = struct {
     pub fn open(s: *Session, d: *const cuda.Driver, cfg: Config, kernel_image: []const u8) !void {
         var b = try Bootstrap.open(cfg);
         defer b.close();
-        try b.agree(&cfg.digest(), "settings (TF_TP_WORLD, TF_COMM_BACKEND, TF_TP_MAILBOX_MAX_KB, TF_TP_FAILFAST, TF_TP_ROCE_WIRE / _FALLBACK)");
+        try b.agree(&cfg.digest(), "settings (TF_TP_WORLD, TF_COMM_BACKEND, TF_TP_MAILBOX_MAX_KB, TF_TP_ROCE_CHUNKED_KB, TF_TP_FAILFAST, TF_TP_ROCE_WIRE / _FALLBACK)");
         var lib = try cuda.nccl.Library.openPath(cfg.nccl_lib);
         errdefer lib.close();
         const v = try lib.version();
@@ -84,7 +84,13 @@ pub const Session = struct {
         const opts: roce.Options = .{ .wire = if (cfg.roce_wire == .shm) .shm else .verbs, .hcas = specs[0..n_specs], .traffic_class = cfg.roce_tc, .cpu = cfg.roce_cpu, .max_bytes = cfg.mailbox_max_bytes, .timeout_ns = cfg.mailbox_timeout_ns, .fast = cfg.roce_fast, .blocks = cfg.roce_blocks };
         const r = roce.Roce.init(d, b, image, opts) catch |e| return s.roceFallback(e);
         s.roce = r;
-        s.route = .{ .small = .{ .roce = r }, .nccl = &s.nccl, .max_bytes = cfg.mailbox_max_bytes };
+        if (cfg.roce_chunked_bytes > 0 and !r.chunk_abi) {
+            log.warn("TF_TP_ROCE_CHUNKED_KB={d}: the RoCE kernel image has no chunked ABI (tp_roce_chunk_abi); refusing to start", .{cfg.roce_chunked_bytes / 1024});
+            r.deinit();
+            s.roce = null;
+            return error.ChunkAbiMissing;
+        }
+        s.route = .{ .small = .{ .roce = r }, .nccl = &s.nccl, .max_bytes = cfg.mailbox_max_bytes, .chunked_bytes = cfg.roce_chunked_bytes };
         const good = probe(s, d) catch false;
         var blobs: [bootstrap.max_ranks][]const u8 = undefined;
         var buf: [bootstrap.max_ranks]u8 = undefined;
@@ -203,6 +209,7 @@ test {
     _ = @import("roce_guard.zig");
     _ = @import("roce_test.zig");
     _ = @import("roce_post_test.zig");
+    _ = @import("roce_inflight_test.zig");
     _ = @import("host_test.zig");
     _ = @import("fate_test.zig");
 }

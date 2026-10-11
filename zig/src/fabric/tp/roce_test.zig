@@ -23,6 +23,8 @@ const Run = struct {
     max_bytes: usize = 16 * 1024,
     /// Variable lengths (`Roce.allGatherV`'s contract): each op's lens[r] bytes of rank r's n, 0 and n included.
     var_lens: bool = false,
+    /// Strides up to four slots through `hostGatherVChunked` (variable lengths, slot-sized ops).
+    chunked: bool = false,
     /// The shm wire's stripes (2: the verbs wire's split over two HCAs).
     stripes: u32 = 1,
     /// Each rank's shm posts as the tap saw them: how many, and how many left their slot or the region.
@@ -77,12 +79,14 @@ fn body(run: *Run, me: u32, lfd: sock.Fd) ?anyerror {
             if (run.abort_after_ms) |ms| abort_thread = std.Thread.spawn(.{}, abortLater, .{ r, ms }) catch null;
         };
         // sizes from 1 byte to the slot, odd ones included, both slots and wrap-arounds
-        const n = 1 + (k * 7919) % run.max_bytes;
+        const n = 1 + (k * 7919) % (if (run.chunked) 4 * run.max_bytes else run.max_bytes);
         reference.fill(in[0..n], .u8, me, k);
         reference.fill(peer[0..n], .u8, 1 - me, k);
         const lens: [2]u32 = if (k % 5 == 0) .{ 0, @intCast(n) } else .{ @intCast((k * 31) % (n + 1)), @intCast((k * 17 + 5) % (n + 1)) };
-        const l: [2]usize = if (run.var_lens) .{ lens[0], lens[1] } else .{ n, n };
-        r.hostGatherV(in[0..n], out[0 .. 2 * n], if (run.var_lens) lens else null) catch |e| return e;
+        const l: [2]usize = if (run.var_lens or run.chunked) .{ lens[0], lens[1] } else .{ n, n };
+        if (run.chunked) {
+            r.hostGatherVChunked(in[0..n], out[0 .. 2 * n], lens) catch |e| return e;
+        } else r.hostGatherV(in[0..n], out[0 .. 2 * n], if (run.var_lens) lens else null) catch |e| return e;
         const r0 = if (me == 0) in[0..n] else peer[0..n];
         const r1 = if (me == 1) in[0..n] else peer[0..n];
         if (!std.mem.eql(u8, out[0..l[0]], r0[0..l[0]]) or !std.mem.eql(u8, out[n..][0..l[1]], r1[0..l[1]])) return error.WrongBytes;
@@ -129,6 +133,17 @@ test "the shm wire striped as over two HCAs: every post inside its slot and the 
     try std.testing.expectEqual([2]u32{ 2000, 2000 }, run.done);
     for (run.taps) |t| {
         try std.testing.expectEqual(@as(u32, 2000), t.posts);
+        try std.testing.expectEqual(@as(u32, 0), t.outside);
+    }
+}
+
+test "chunked gathers over the shm wire: strides up to four slots in slot-sized ops, tails empty on both ranks skipped" {
+    var run: Run = .{ .port = 0, .wire = .shm, .ops = 2000, .chunked = true, .stripes = 2 };
+    try twoRanks(&run);
+    for (run.errs) |e| if (e) |err| return err;
+    try std.testing.expectEqual([2]u32{ 2000, 2000 }, run.done);
+    for (run.taps) |t| {
+        try std.testing.expect(t.posts > 2000);
         try std.testing.expectEqual(@as(u32, 0), t.outside);
     }
 }
