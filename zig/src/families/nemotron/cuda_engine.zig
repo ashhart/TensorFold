@@ -62,7 +62,7 @@ const pin_meta = 0;
 const pin_ids = 4;
 const pin_sampled = 32;
 const pin_prompt = 64;
-const pin_shared = pin_prompt + segs.MAX * state.prefill_rows;
+const pin_shared = pin_prompt + @max(segs.MAX * state.prefill_rows, state.pass_rows);
 
 /// One stream's part of a shared window: its sequence, the ids its first rows take from the host, and its rows.
 pub const Shared = struct { seq: *state.Seq, ids: []const u32, rows: usize, mask: Mask = .{} };
@@ -90,6 +90,7 @@ pub const Engine = struct {
     copied: cuda.Event = undefined, // the last window's uploads have read the pinned words
     sampled_ready: cuda.Event = undefined,
     pos: usize = 0,
+    last_row: usize = 0, // the prompt's last row in p_hidden after a prompt pass
     parity: usize = 0,
     prev_keep: usize = 0,
     rows: usize = 0,
@@ -350,6 +351,7 @@ pub const Engine = struct {
         const waited = e.heat_gate.waited_s;
         if (from == 0 and keep == null and e.segments > 1 and dump == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none) {
             try segs.prefill(e, try e.segmentSet(), prompt, head, e.segments, cancel);
+            e.last_row = (prompt.len - 1) % state.prefill_rows;
         } else try e.serialChunks(prompt, from, dump, head, cancel, keep);
         if (e.heat_gate.waited_s > waited) heat.note(e.heat_gate.waited_s - waited);
         const host = e.pinned.slice(u32)[pin_sampled..][0..1];
@@ -386,9 +388,16 @@ pub const Engine = struct {
             if (Cancel.now(cancel)) return error.Cancelled;
             try e.beforeChunk(cancel);
             var end = grid.end(s, prompt.len, state.prefill_rows);
+            // grid chunks join up to pass_rows between kept points (rows equal at any cut); not under lessons or dumps
+            if (dump == null and shared == null and e.decide == lesson_route.none) while (end < prompt.len and !kept(keep, end)) {
+                const next = grid.end(end, prompt.len, state.prefill_rows);
+                if (next - s > state.pass_rows) break;
+                end = next;
+            };
             // the decision row ends its chunk: the rows after it read the lessons it latched
             if (e.decide != lesson_route.none and e.decide >= s and e.decide + 1 < end) end = @intCast(e.decide + 1);
             const chunk = prompt[s..end];
+            e.last_row = chunk.len - 1;
             f.route = .{};
             f.route.add(0, chunk.len, e.pos, e.decide, e.slot);
             try e.copied.synchronize();
@@ -404,6 +413,11 @@ pub const Engine = struct {
             s = end;
             if (keep) |k| if (s <= std.math.maxInt(u32) and std.mem.indexOfScalar(u32, k.at, @intCast(s)) != null) k.call(k.ctx, @intCast(s));
         }
+    }
+
+    fn kept(keep: ?Keep, at: usize) bool {
+        const k = keep orelse return false;
+        return at <= std.math.maxInt(u32) and std.mem.indexOfScalar(u32, k.at, @intCast(at)) != null;
     }
 
     /// Any block's change, for the buffers every block shares (null: no lesson is attached).

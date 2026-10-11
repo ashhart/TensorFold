@@ -236,7 +236,7 @@ pub const Cuda = struct {
         const keep: ?engine.Keep = if (s.reuse.marks.len == 0) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
         const first = try e.prefillFrom(ids, from, null, self.head, .{ .ptr = s, .check = cancelled }, keep);
         // the head's first draft reads the prompt's last row (its hidden row waits where a window's would)
-        const last = (ids.len - 1) % state.prefill_rows; // a resumed pass ends on the same grid
+        const last = e.last_row;
         try e.ops().copy(e.b.hidden, e.b.p_hidden + last * @as(u64, e.c.hidden) * 2, e.c.hidden * 2);
         _ = self.take(first);
         if (s.logprobs) |k| {

@@ -55,7 +55,7 @@ pub const Head = struct {
         if (e.w.mtp == null) return error.NoMtpHead;
         const c = e.c;
         const D: usize = c.hidden;
-        const R: usize = state.prefill_rows;
+        const R: usize = state.pass_rows;
         const kv: usize = @as(usize, e.max_len) * c.kv_heads * c.head_dim * 2;
         const n = e.w.draft_count;
         const sizes = [_]usize{ kv, kv, 17 * 4, state.max_rows * D * 2, state.max_rows * 4, max_chain * 4, D * 2, R * D * 2, R * 2 * D * 2, R * 2 * D / 64 * 4, R * D * 2, D * 2, D * 2, D * 2, D / 64 * 4, n * 2, n * 4, sampler.max_candidates * 4, sampler.max_candidates * 8, sampler.max_candidates * 8, 32, R * 4, torch_ops.topkScratchBytes(1, n), 4 };
@@ -74,7 +74,7 @@ pub const Head = struct {
         try h.buf.fill8(0, e.stream.handle); // on the engine's stream: the legacy one would race its first uploads
         e.head = h;
         inline for (seq_fields, &e.own.head) |name, *ptr| ptr.* = @field(h, name);
-        h.pinned = try cuda.HostBuffer.alloc(e.ctx.d, (128 + state.prefill_rows) * 4);
+        h.pinned = try cuda.HostBuffer.alloc(e.ctx.d, (128 + state.pass_rows) * 4);
         h.copied = try cuda.Event.init(e.ctx.d, false);
         try h.copied.record(e.stream);
         for (&h.ready) |*r| r.* = try cuda.Event.init(e.ctx.d, false);

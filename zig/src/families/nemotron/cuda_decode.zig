@@ -31,7 +31,7 @@ pub fn generate(gpa: std.mem.Allocator, io: std.Io, e: *Engine, drafter: ?*draft
     var st: drafts.Stats = .{};
     if (out.items.len < count and !(o.stop_eos and e.c.isEos(out.items[0]))) {
         if (drafter) |d| {
-            const last = (prompt.len - 1) % state.prefill_rows;
+            const last = e.last_row;
             st = try drafts.decode(gpa, e, d.head, &d.rule, prompt, &out, count, o.stop_eos, e.b.p_hidden + last * @as(u64, e.c.hidden) * 2);
         } else if (e.serial != null) {
             st.rounds = try serialGraphs(gpa, e, &out, count, o.stop_eos);
