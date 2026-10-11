@@ -19,22 +19,16 @@ pub const mtp_file = "mtp-4bit.safetensors";
 
 /// The token table as stored (MLX words, scales and biases, or a bf16 table at w): a row lookup, not a matmul.
 pub const Embed = struct { w: u64, s: u64 = 0, b: u64 = 0, n: usize, k: usize, bf16: bool = false };
-/// A live lesson's change after an output projection (--slide): y += scale (x a^T) b over each row's open blocks.
-pub const Adapter = struct {
-    a: u64, // f32 [max_rank, in]
-    b: u64, // f32 [max_rank, out]
-    tau: u64, // f32 [max_blocks]: each block's gate
-    rank: u64, // the u32 word of ranks in use, which the kernels read
-    xa: u64, // f32 [rows, max_rank]: scratch
-    xn: u64, // f32 [rows]
-    in: usize,
-    out: usize,
-};
+/// A layer's learned change while lessons run (cuda_sites.zig): y += scale (x a^T) b over the blocks open on each row.
+pub const Adapter = struct { a: u64, b: u64, tau: u64, xa: u64, xn: u64, gates: u64, need: u64, latch: u64, score: u64, whole: bool, in: usize, out: usize, rank: usize, scale: f32, unit: f32 };
+
 /// A `*_rest` is a lesson's change past its projection's 4-bit codes ([out, in] bf16), added after it; 0 when none.
-pub const Mamba = struct { in_proj: QLinear, out_proj: QLinear, conv_w: u64, conv_b: u64, a: u64, d: u64, dt_bias: u64, gnorm: u64, out_rest: u64 = 0, adapter: ?*const Adapter = null };
-pub const Attention = struct { qkv: QLinear, o: QLinear, o_rest: u64 = 0, adapter: ?*const Adapter = null };
-/// The shared expert's down projection rest in its two halves, as experts E and E + 1 split its columns.
-pub const MoE = struct { router: u64, bias: u64, experts: Experts, rest: [2]u64 = .{ 0, 0 }, adapter: ?*const Adapter = null };
+pub const Mamba = struct { in_proj: QLinear, out_proj: QLinear, conv_w: u64, conv_b: u64, a: u64, d: u64, dt_bias: u64, gnorm: u64, out_rest: u64 = 0, adapter: ?Adapter = null };
+pub const Attention = struct { qkv: QLinear, o: QLinear, o_rest: u64 = 0, adapter: ?Adapter = null };
+/// The pocket kernel's neurons (config's pocket): input weights and outputs, [n, D] fp32 each, from the 4-bit codes.
+pub const Pocket = struct { up: u64, down: u64, n: usize };
+/// The shared expert's down projection rest in two halves (experts E and E + 1); its learned change reads both.
+pub const MoE = struct { router: u64, bias: u64, experts: Experts, rest: [2]u64 = .{ 0, 0 }, adapter: ?Adapter = null, pocket: ?Pocket = null };
 pub const Block = struct { kind: Kind, norm: u64, mamba: Mamba = undefined, attn: Attention = undefined, moe: MoE = undefined };
 pub const Mtp = struct { enorm: u64, hnorm: u64, eh_proj: QLinear, attn_norm: u64, attn: Attention, moe_norm: u64, moe: MoE, final_norm: u64 };
 
@@ -233,20 +227,88 @@ pub const Loader = struct {
         return .{ .affine4 = try L.tile(name, parts[0..prefixes.len]) };
     }
 
-    /// weights.fold_shared then experts.make: the shared expert's halves become experts E and E + 1.
+    /// weights.fold_shared, experts.make: the shared halves become experts E and E + 1; the pocket goes to `pocket`.
     fn experts(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8, c: Config, shared_down: ?[3]Tensor) !Experts {
         var buf: [128]u8 = undefined;
+        const own = 2 * c.expert_width;
         const s_up = try three(ck, pre, "shared_experts.up_proj");
-        if (s_up[0].dim(0) != 2 * c.expert_width) return error.SharedExpertWidth;
+        if (s_up[0].dim(0) != own + c.pocket) return error.SharedExpertWidth;
+        if (c.pocket > 0 and shared_down != null) return error.UnexpectedTensor;
+        const s_down = if (c.pocket > 0) try L.leading(try three(ck, pre, "shared_experts.down_proj"), c.hidden, own, own + c.pocket) else shared_down orelse try three(ck, pre, "shared_experts.down_proj");
         const e = c.experts + 2;
         return .{
             .format = .affine4,
-            .up = try L.packExperts(try std.fmt.bufPrint(&buf, "{s}.up", .{name}), try three(ck, pre, "switch_mlp.fc1"), s_up, false, e, c.expert_width, c.hidden),
-            .down = try L.packExperts(try std.fmt.bufPrint(&buf, "{s}.down", .{name}), try three(ck, pre, "switch_mlp.fc2"), shared_down orelse try three(ck, pre, "shared_experts.down_proj"), true, e, c.hidden, c.expert_width),
+            .up = try L.packExperts(try std.fmt.bufPrint(&buf, "{s}.up", .{name}), try three(ck, pre, "switch_mlp.fc1"), firstRows(s_up, own), false, e, c.expert_width, c.hidden),
+            .down = try L.packExperts(try std.fmt.bufPrint(&buf, "{s}.down", .{name}), try three(ck, pre, "switch_mlp.fc2"), s_down, true, e, c.hidden, c.expert_width),
             .experts = e,
             .width = c.expert_width,
             .dims = c.hidden,
         };
+    }
+
+    /// The first `first` of `cols` columns of a quantized matrix's `n` rows, kept on the host until uploads finish.
+    fn leading(L: *Loader, t: [3]Tensor, n: usize, first: usize, cols: usize) ![3]Tensor {
+        var out: [3]Tensor = undefined;
+        for (t, &out) |x, *o| {
+            const per = x.bytes.len / n;
+            const part = per * first / cols;
+            const full = try L.gpa.alloc(u8, x.bytes.len);
+            defer L.gpa.free(full);
+            try L.src.read(full, x.bytes);
+            const kept = try L.keep(u8, n * part);
+            for (0..n) |r| @memcpy(kept[r * part ..][0..part], full[r * per ..][0..part]);
+            o.* = x;
+            o.shape[1] = x.shape[1] * first / cols;
+            o.bytes = kept;
+        }
+        return out;
+    }
+
+    /// The pocket's neurons: up rows and down columns past the shared expert's own, dequantized to fp32 and uploaded.
+    fn pocket(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8, c: Config) !Pocket {
+        const own = 2 * c.expert_width;
+        const n = c.pocket;
+        if (n > 64) return error.PocketTooWide; // the pocket kernel holds a row's activations in 64 floats
+        const d = c.hidden;
+        const g = host4.group;
+        const values = try L.gpa.alloc(f32, n * d);
+        defer L.gpa.free(values);
+        var buf: [128]u8 = undefined;
+        var out: Pocket = .{ .up = 0, .down = 0, .n = n };
+        // up: rows own..own + n, each d inputs (d / 8 words, d / 64 scales and biases)
+        const up = try three(ck, pre, "shared_experts.up_proj");
+        var part: [3][]align(4) u8 = @splat(&.{});
+        defer for (part) |p| L.gpa.free(p);
+        for (up, &part) |x, *p| {
+            const per = x.bytes.len / (own + n);
+            p.* = try L.gpa.alignedAlloc(u8, .fromByteUnits(4), n * per);
+            try L.src.read(p.*, x.bytes[own * per ..][0 .. n * per]);
+        }
+        host4.dequantize(std.mem.bytesAsSlice(u32, part[0]), std.mem.bytesAsSlice(u16, part[1]), std.mem.bytesAsSlice(u16, part[2]), values);
+        out.up = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.pocket_up", .{name}), n * d * 4);
+        try L.ops.upload(out.up, std.mem.sliceAsBytes(values));
+        try L.ops.s.synchronize();
+        // down: d rows, each own + n inputs; the last n of each row (its last n / 64 groups), stored neuron by neuron
+        const down = try three(ck, pre, "shared_experts.down_proj");
+        var whole: [3][]align(4) u8 = @splat(&.{});
+        defer for (whole) |p| L.gpa.free(p);
+        for (down, &whole) |x, *p| {
+            p.* = try L.gpa.alignedAlloc(u8, .fromByteUnits(4), x.bytes.len);
+            try L.src.read(p.*, x.bytes);
+        }
+        const words = std.mem.bytesAsSlice(u32, whole[0]);
+        const scales = std.mem.bytesAsSlice(u16, whole[1]);
+        const biases = std.mem.bytesAsSlice(u16, whole[2]);
+        const wide = own + n;
+        var row: [64]f32 = undefined;
+        for (0..d) |r| {
+            host4.dequantize(words[r * wide / 8 + own / 8 ..][0 .. n / 8], scales[r * wide / g + own / g ..][0 .. n / g], biases[r * wide / g + own / g ..][0 .. n / g], row[0..n]);
+            for (row[0..n], 0..) |v, j| values[j * d + r] = v;
+        }
+        out.down = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.pocket_down", .{name}), n * d * 4);
+        try L.ops.upload(out.down, std.mem.sliceAsBytes(values));
+        try L.ops.s.synchronize();
+        return out;
     }
 
     /// One expert matrix (n outputs of k inputs) with the shared halves appended; `split` halves the shared columns.
@@ -329,9 +391,21 @@ pub const Loader = struct {
             r.* = try L.rest(try std.fmt.bufPrint(&b, "{s}.shared_down{d}", .{ name, h }), l, h * c.expert_width, c.expert_width);
         };
         m.experts = try L.experts(ck, try join(&a, name, ".experts"), pre, c, if (down) |l| l.parts else null);
+        if (c.pocket > 0) m.pocket = try L.pocket(ck, name, pre, c);
         return m;
     }
 };
+
+/// The first `rows` rows of a quantized matrix's words, scales and biases: views of the same bytes.
+fn firstRows(t: [3]Tensor, rows: usize) [3]Tensor {
+    var out = t;
+    for (&out) |*x| {
+        const per = x.bytes.len / x.dim(0);
+        x.shape[0] = rows;
+        x.bytes = x.bytes[0 .. rows * per];
+    }
+    return out;
+}
 
 fn join(buf: *[128]u8, a: []const u8, b: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "{s}{s}", .{ a, b });

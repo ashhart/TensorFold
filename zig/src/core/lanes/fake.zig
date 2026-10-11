@@ -7,6 +7,7 @@ const Sampling = @import("sampling.zig").Sampling;
 const keyBits = @import("sampling.zig").keyBits;
 const accept = @import("accept.zig");
 const Row = @import("logprob.zig").Row;
+const grammar = @import("grammar.zig");
 
 pub const vocab = 97;
 
@@ -55,6 +56,8 @@ pub const Fake = struct {
     prefill_hook: ?*const fn (ctx: *anyopaque, s: *Stream, chunk: usize) void = null,
     prefill_hook_ctx: ?*anyopaque = null,
     refuse_sampled: bool = false, // prefill refuses a sampled stream with error.SamplingRefused
+    ranked: bool = false, // the head gives its held chain back (alternatives)
+    memory_lanes: ?usize = null, // prefill past this many live lanes fails with error.LaneMemory (no room yet)
 
     pub fn deinit(x: *Fake) void {
         var it = x.lanes.valueIterator();
@@ -70,7 +73,7 @@ pub const Fake = struct {
     }
 
     pub fn backend(x: *Fake) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow } };
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow, .alternatives = alternatives, .held = heldDrafts } };
     }
 
     /// The same target filling its prompt a chunk a call (`prefill_chunks`), as a backend with `prefill_step`.
@@ -120,6 +123,7 @@ pub const Fake = struct {
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
         if (x.refuse_sampled and s.sampling != null) return error.SamplingRefused;
+        if (x.memory_lanes) |n| if (!x.lanes.contains(s) and x.lanes.count() >= n) return error.LaneMemory;
         const got = try x.lanes.getOrPut(x.gpa, s);
         if (got.found_existing) freeLane(x.gpa, got.value_ptr);
         got.value_ptr.* = .{};
@@ -128,6 +132,7 @@ pub const Fake = struct {
             x.prefill_count += 1;
             if (x.prefill_hook) |hook| hook(x.prefill_hook_ctx.?, s, chunk);
             if (s.isCancelled()) return error.Cancelled;
+            if (s.yields()) return error.Yielded;
         }
         try x.fillPrompt(got.value_ptr, s);
     }
@@ -135,6 +140,7 @@ pub const Fake = struct {
     fn prefillStep(ptr: *anyopaque, s: *Stream) anyerror!bool {
         const x = self(ptr);
         if (x.refuse_sampled and s.sampling != null) return error.SamplingRefused;
+        if (x.memory_lanes) |n| if (!x.lanes.contains(s) and x.lanes.count() >= n) return error.LaneMemory;
         const got = try x.lanes.getOrPut(x.gpa, s);
         if (got.found_existing and !got.value_ptr.filling) freeLane(x.gpa, got.value_ptr);
         if (!got.found_existing or !got.value_ptr.filling) got.value_ptr.* = .{ .filling = true };
@@ -185,6 +191,38 @@ pub const Fake = struct {
         return x.draw(x.lane(s), s, position);
     }
 
+    fn firstMasked(ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 {
+        const x = self(ptr);
+        const h = try x.draw(x.lane(s), s, position);
+        x.drawn.items[h] = try allowed(x.drawn.items[h], mask);
+        return h;
+    }
+
+    /// Structured output's draw: the first allowed token from the target's own (a function of the row and its bits).
+    fn allowed(token: u32, mask: []const u32) !u32 {
+        if (mask.len == 0) return token;
+        for (0..vocab) |i| {
+            const t: u32 = @intCast((token + i) % vocab);
+            if (grammar.allows(mask, t)) return t;
+        }
+        return error.NoAllowedToken;
+    }
+
+    fn alternatives(ptr: *anyopaque, s: *Stream, out: []be.Alternative) anyerror!usize {
+        const x = self(ptr);
+        if (!x.ranked) return 0;
+        const held = x.lane(s).held.items;
+        const n = @min(out.len, held.len);
+        for (out[0..n], held[0..n]) |*o, t| o.* = .{ .tokens = .{ t, (t + 1) % vocab, (t + 2) % vocab, (t + 3) % vocab }, .probs = .{ 0.5, 0.2, 0.1, 0.1 } };
+        return n;
+    }
+
+    fn heldDrafts(ptr: *anyopaque, s: *Stream, out: []u32) anyerror!void {
+        const h = self(ptr).lane(s).held.items;
+        if (out.len > h.len) return error.NotHeld;
+        @memcpy(out, h[0..out.len]);
+    }
+
     fn firstRow(ptr: *anyopaque, s: *Stream) anyerror!Row {
         const x = self(ptr);
         const h = x.lane(s).history.items;
@@ -225,6 +263,10 @@ pub const Fake = struct {
                 try l.history.appendSlice(x.gpa, path.items);
                 if (w.positions[r] != l.history.items.len) return error.PositionMismatch;
                 o.sampled[r] = x.targetNext(l.history.items, w.stream.sampling, w.positions[r]);
+                if (w.masks.len > 0) {
+                    const words = w.masks.len / l.rows.items.len;
+                    o.sampled[r] = try allowed(o.sampled[r], w.masks[r * words ..][0..words]);
+                }
                 if (o.rows.len > 0) o.rows[r] = rowAt(l.history.items, o.sampled[r], w.stream.logprobs.?);
             }
             l.history.shrinkRetainingCapacity(l.base);

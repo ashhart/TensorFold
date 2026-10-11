@@ -4,6 +4,7 @@ const cuda_build = @import("zig/build/cuda.zig");
 const dist_build = @import("zig/build/dist.zig");
 const qwen27_build = @import("zig/build/qwen27.zig");
 const hip_build = @import("zig/build/hip.zig");
+const grammar_build = @import("zig/build/grammar.zig");
 
 comptime {
     const required = std.mem.trim(u8, @embedFile(".zig-version"), "\r\n");
@@ -148,7 +149,8 @@ pub fn build(b: *std.Build) void {
         .linux => cuda_build.targets(b, target, optimize, draft_ids, build_options),
         else => {},
     }
-    dist_build.targets(b, draft_ids, build_options, release_version);
+    const xgrammar = grammar_build.option(b);
+    dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
     cuda_build.hostTests(b, draft_ids, build_options, test_step);
     hip_build.steps(b, target, test_step);
     const lanes_cpu = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true });
@@ -172,6 +174,7 @@ pub fn build(b: *std.Build) void {
     const warning_run = b.addRunArtifact(warning);
     test_step.dependOn(&warning_run.step);
     b.step("test-learn-warning", "CPU production-log refusal, backoff and recovery test").dependOn(&warning_run.step);
+    grammar_build.steps(b, target, xgrammar);
 }
 
 /// `zig build native -Dcpu=apple_m1`: tensorfold-native with the Metal engines for the Python package's bundle (a native M5 build traps on M1-M4).
@@ -400,6 +403,8 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .{ .name = "tf-nemotron-experts", .path = "zig/tests/nemotron_experts.zig", .about = "Routed-expert pass shapes bit-checked against the engine's kernels, then timed by window width" },
         .{ .name = "tf-nemotron-sample-check", .path = "zig/tests/nemotron_sample_check.zig", .about = "tf_sample_full against its host reference on synthetic rows, timed beside tf_gpu_sample" },
         .{ .name = "tf-train-check", .path = "zig/tests/train_check.zig", .about = "The learning step's gradients against the engine's own forward by finite differences, on the real model" },
+        .{ .name = "tf-train-pack", .path = "zig/tests/train_pack.zig", .about = "Training passes holding several sequences against one a pass, on the real model: differences and time" },
+        .{ .name = "tf-pocket-fit-check", .path = "zig/tests/pocket_fit_check.zig", .about = "A dumped pocket lesson's read rows fitted as the learner fits them, timed, each fit's numbers and weights written" },
         .{ .name = "tf-flashnext-run", .path = "zig/tests/flashnext_run.zig", .about = "Flash Next one-row greedy steps on the Python engine's recorded kernels, against its tokens" },
         .{ .name = "tf-flashnext-pack", .path = "zig/tests/flashnext_pack.zig", .about = "Flash Next's three weight packs built from a checkpoint, byte-compared with a Python dump" },
         .{ .name = "tf-grid-sync-bench", .path = "zig/tests/grid_sync_bench.zig", .about = "A GPU-wide barrier in one persistent dispatch against dependent relaunches" },

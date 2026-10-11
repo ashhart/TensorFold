@@ -215,10 +215,27 @@ is complete; a reply cut at `max_tokens` is incomplete, with `finish_reason: "le
 32 blank characters between two tokens (pretty-printing fits; a run of blank lines does not), so a model cannot fill
 its reply with whitespace inside an unfinished value.
 
+The native server enforces the same fields with the same grammars through `libtfgrammar`, a small C ABI over
+xgrammar v0.2.8's C++ library (`zig/src/grammar/tf_grammar.cc`). Release archives ship it in `lib/` beside `bin/` for
+macOS arm64, Linux x86_64 and Linux aarch64; from source, `zig build grammar -Dxgrammar=DIR` builds it from an xgrammar
+v0.2.8 checkout (`git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar`) into
+`zig-out/native/lib` on macOS and `zig-out/lib` on Linux. The server looks in `../lib` beside its binary, then beside
+it, then on the loader's path, and loads it at the first structured request; without it, everything else serves and a
+structured request gets HTTP 400. Nemotron (Metal and CUDA) and Qwen3.5-2B (Metal) enforce it; other native engines
+answer a structured request with HTTP 400. Drafting stays on: the drafts the head holds on the GPU come back to the host
+before each verify, the grammar cuts the ones it rejects and drafts the text it forces itself (a key, closing markup),
+and each row's logits are masked before its draw, so drafted, `"draft": false` and concurrent replies are the same.
+
+On the native server, `tool_choice: "required"` and a named function are a grammar too, on the engines above: the answer
+is one or more calls in the chat template's own markup (`<tool_call>`, with Qwen3-Coder XML parameters as Nemotron and
+Qwen3.5 write them, or a JSON object), each call to an offered tool (the named one only) with its arguments inside the
+tool's parameter schema; blank lines may come between calls, prose may not. `parallel_tool_calls: false` allows exactly
+one call. With thinking on, the grammar starts after the think end.
+
 HTTP 400 comes before any token for a malformed field, a grammar xgrammar cannot compile (with xgrammar's reason), a
-server without xgrammar (with the install command), and a grammar sent with `tool_choice: "required"` or a named
-function. A reply whose grammar fails while decoding ends with HTTP 500 (an error event when streaming); the other
-requests go on.
+server without xgrammar (with the install command; on the native server, a server that cannot load `libtfgrammar`),
+a grammar sent with `tool_choice: "required"` or a named function, and `logprobs` with a grammar or tools. A reply whose
+grammar fails while decoding ends with HTTP 500 (an error event when streaming); the other requests go on.
 
 ## Reasoning
 

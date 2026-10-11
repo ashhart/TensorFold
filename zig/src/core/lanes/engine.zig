@@ -153,8 +153,8 @@ pub const Engine = struct {
             try e.roundStreams(chosen);
         } else {
             for (live.items) |s| {
-                // a stream with logprobs takes verify windows: their rows' logits are read before the next forward
-                const windowed = (e.cfg.family_mtp and s.drafts) or !e.cfg.pipelined or s.logprobs != null;
+                // logprobs and grammars take verify windows: rows' logits are read, or bits made, before a forward
+                const windowed = (e.cfg.family_mtp and s.drafts) or !e.cfg.pipelined or s.logprobs != null or s.grammar != null;
                 const r = if (windowed) try e.familyRound(s, null) else try e.pipelinedRound(s);
                 s.min_rows = if (s.min_rows == 0) r.rows else @min(s.min_rows, r.rows);
             }
@@ -219,8 +219,9 @@ pub const Engine = struct {
         const a = e.arena.allocator();
         var plans = [_]Plan{try win.plan(e, s, copied)};
         if (plans[0].kind == .head and e.cfg.node_probabilities) try win.allocate(e, &plans);
+        try win.constrain(e, &plans[0]);
         const plan = plans[0];
-        const early = e.cfg.family_mtp and s.drafts and plan.kind != .forced and e.cfg.speculate_early and plan.parents == null;
+        const early = e.cfg.family_mtp and s.drafts and plan.kind != .forced and e.cfg.speculate_early and plan.parents == null and s.grammar == null;
         const windows = [_]be.Window{try win.build(e, plan, early)};
         const rows = windows[0].rows();
         var out = [_]be.Verified{.{ .sampled = try a.alloc(u32, rows), .drafts = try a.alloc(u32, rows - 1), .rows = if (s.logprobs != null) try a.alloc(LogRow, rows) else &.{} }};
@@ -271,6 +272,7 @@ pub const Engine = struct {
         const plans = try a.alloc(Plan, entries.len);
         for (entries, plans) |s, *p| p.* = try win.plan(e, s, null);
         try win.allocate(e, plans);
+        for (plans) |*p| try win.constrain(e, p);
         const windows = try a.alloc(be.Window, plans.len);
         const out = try a.alloc(be.Verified, plans.len);
         var total: u64 = 0;
@@ -338,18 +340,23 @@ pub const Engine = struct {
                 e.accepted += kept;
                 s.drafted += rows - 1;
                 s.accepted += kept;
+                // the proposal's own rows: the grammar's drafts after them are neither the proposer's nor the head's
+                const own_end = if (p.grammar_from > 0) p.grammar_from else rows;
+                var own_kept: usize = 0;
+                for (path[1..]) |r| own_kept += @intFromBool(r < own_end);
+                const own: usize = own_end - 1;
                 if (p.kind == .copy) {
-                    if (s.proposer) |pr| pr.observe(@intCast(rows - 1), @intCast(kept));
+                    if (s.proposer) |pr| pr.observe(@intCast(own), @intCast(own_kept));
                     if (e.alone) {
                         const width = s.copy_width orelse e.cfg.first_copy;
-                        s.copy_width = if (kept == rows - 1) @min(e.cfg.max_copy, 2 * width + 1) else e.cfg.first_copy;
+                        s.copy_width = if (own_kept == own) @min(e.cfg.max_copy, 2 * width + 1) else e.cfg.first_copy;
                     }
                 } else if (p.kind == .head) {
                     if (p.lanes) |l| if (s.odds != null) s.observeLanes(l, path);
                     const ds = try accept.depths(a, parents);
-                    const chain = if (p.branch_from > 0) ds[0..p.branch_from] else ds;
+                    const chain = if (p.branch_from > 0) ds[0..p.branch_from] else ds[0..own_end];
                     var chain_kept: usize = 0;
-                    for (path[1..]) |r| chain_kept += @intFromBool(p.branch_from == 0 or r < p.branch_from);
+                    for (path[1..]) |r| chain_kept += @intFromBool((p.branch_from == 0 or r < p.branch_from) and r < own_end);
                     try e.rule.observeDepth(win.who(s), std.mem.max(u32, chain), @intCast(chain_kept));
                 }
                 var kept_branch: u64 = 0;
@@ -518,6 +525,14 @@ pub const Engine = struct {
         s.pending = token;
         s.mode = .verify;
         try trail.event(e, &.{ f("ev", str("land")), f("stream", str(s.id)), f("got", .{ .u32s = s.emitted()[s.emitted().len - landed ..] }) });
+    }
+
+    /// The first token's draw: among the grammar's allowed tokens when the stream has one that constrains it.
+    pub fn drawFirst(e: *Engine, s: *Stream, position: u64) !u64 {
+        const g = s.grammar orelse return e.backend.first(s, position);
+        const mask = try g.next(e.arena.allocator()) orelse return e.backend.first(s, position);
+        const masked = e.backend.vtable.first_masked orelse return error.StructuresUnsupported;
+        return masked(e.backend.ptr, s, position, mask);
     }
 
     /// Feed a token and queue the draw of the next at the new cache length.

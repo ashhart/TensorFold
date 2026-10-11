@@ -32,7 +32,10 @@ Python packages or model weights. There is no Python dependency in the packaging
 
 ## CUDA box inputs
 
-The CUDA box produces one flat directory, supplied as `-Ddist-fatbins=DIR`. All of these files are required:
+The CUDA box produces one flat directory, supplied as `-Ddist-fatbins=DIR`, with
+`zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=86,120,121`: Ampere (sm_86), RTX 50-series and RTX PRO
+Blackwell (sm_120), and GB10 (sm_121). `dist` refuses a file that lacks an image for any of the three. All of
+these files are required:
 
 ```text
 DIR/

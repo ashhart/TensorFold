@@ -2,6 +2,7 @@
 const std = @import("std");
 const root = @import("../../build.zig");
 const cuda = @import("cuda.zig");
+const grammar = @import("grammar.zig");
 
 pub fn validVersion(v: []const u8) bool {
     var it = std.mem.splitScalar(u8, v, '.');
@@ -15,7 +16,7 @@ pub fn validVersion(v: []const u8) bool {
     return count == 3;
 }
 
-pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.Options, version: ?[]const u8) void {
+pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.Options, version: ?[]const u8, xgrammar: ?[]const u8) void {
     const package_tests = b.addSystemCommand(&.{"python3"});
     package_tests.addFileArg(b.path("tools/release/test_package.py"));
     package_tests.has_side_effects = true;
@@ -41,6 +42,10 @@ pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.O
     }
     if (host_only and aot != null) {
         step.dependOn(&b.addFail("dist-cuda-aot requires inference fatbins; it cannot be combined with dist-host-only").step);
+        return;
+    }
+    if (xgrammar == null and !host_only) {
+        step.dependOn(&b.addFail("dist requires -Dxgrammar=DIR (structured output's libtfgrammar): " ++ grammar.clone).step);
         return;
     }
     const fatbin_check = if (fatbins) |dir| cuda.checkDistFatbins(b, dir) else null;
@@ -79,6 +84,10 @@ pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.O
         pack.addFileArg(b.path("THIRD_PARTY_NOTICES.md"));
         const archives = pack.addOutputDirectoryArg("archives");
         if (aot != null and p.query.os_tag == .linux and !host_only) pack.addDirectoryArg(b.graph.cwdRelativePath(aot.?));
+        if (xgrammar) |dir| pack.addPrefixedDirectoryArg("--overlay=", grammar.overlay(b, target, dir) orelse {
+            step.dependOn(&b.addFail(b.fmt("-Dxgrammar={s} is not an xgrammar " ++ grammar.pinned ++ " checkout: " ++ grammar.clone, .{dir})).step);
+            return;
+        });
         step.dependOn(&b.addInstallDirectory(.{ .source_dir = archives, .install_dir = .prefix, .install_subdir = "dist" }).step);
         if (b.graph.host.result.os.tag == p.query.os_tag and b.graph.host.result.cpu.arch == p.query.cpu_arch) {
             const check = b.addSystemCommand(&.{"sh"});
