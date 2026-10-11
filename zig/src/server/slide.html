@@ -87,7 +87,7 @@ h3{margin:10px 0 4px;font:600 10px var(--mono);letter-spacing:.16em;text-transfo
 .asked{margin:0;padding-left:16px;font-size:12px;color:#cfe3f7}
 #list{list-style:none;margin:0;padding:0 12px 12px;overflow:auto;flex:1;min-height:0}
 #list li{padding:8px 10px;border-radius:8px;margin-bottom:5px;background:rgba(2,6,14,.45);border-left:3px solid var(--edge);cursor:pointer}
-#list li:hover{background:rgba(127,243,255,.07)}
+#list li:hover,#list li:focus-visible{background:rgba(127,243,255,.07);outline:1px solid rgba(127,243,255,.5)}
 #list li small{display:block;color:var(--muted);margin-top:2px;font:10.5px var(--mono)}
 #list li.on{outline:1px solid var(--accent)}
 #list li.learned{border-color:var(--learned)}#list li.missed{border-color:var(--missed)}

@@ -54,19 +54,24 @@ function list() {
   const sig = `${store.selected}|${rows.map((f) => `${f.id}${f.state}${f.phase}${(f.neurons || []).length}`).join(",")}`;
   if (sig === listed) return;
   listed = sig;
+  const focused = ol.contains(document.activeElement) ? document.activeElement.dataset.id : null;
   ol.replaceChildren(...rows.map((f) => {
     const li = el("li", `${f.state}${f.id === store.selected ? " on" : ""}`);
+    li.dataset.id = f.id;
     li.append(el("span", "fact", f.text));
     const n = (f.neurons || []).length;
     const parts = [f.phase || f.state, f.source || "chat", when(f.at)];
     if (n) parts.splice(1, 0, `${n} neurons`);
     li.append(el("small", null, parts.join(" · ")));
     li.onclick = () => select(f.id);
+    li.tabIndex = 0;
+    li.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(f.id); } };
     li.onmouseenter = () => { store.hovered = f.id; };
     li.onmouseleave = () => { if (store.hovered === f.id) store.hovered = null; };
     return li;
   }));
   if (!rows.length) ol.append(el("li", "empty", store.facts.length ? "No fact matches." : "Nothing learned yet. Teach it with /learn."));
+  if (focused) ol.querySelector(`li[data-id="${focused}"]`)?.focus();
 }
 
 let detailed = "";
