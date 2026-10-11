@@ -52,6 +52,13 @@ In the Python 0.6.6 engine, CUDA tensor-parallel splits retain complete groups a
 admission counts the actual packed precision.
 Changing a checkpoint, precision or kernel implementation also changes the conditions under which cached states remain valid.
 
+## Quantizing like MLX
+
+`tensorfold` quantizes a dense tensor to MLX affine 4-bit (groups of 32, 64 or 128) with MLX's own scheme: float32 arithmetic, the bias at the larger-magnitude edge of a group, a signed scale that puts zero on the grid, round half away from zero, codes from the unrounded scale and bias with bf16 only for storage.
+When the dense source and the conversion scheme match how a checkpoint was made, this reproduces its words, scales and biases exactly.
+`zig build tf-merge-check` builds a check of that: `tf-merge-check --quantizer DENSE SHIPPED MODULE...` quantizes each named dense tensor and compares it with the shipped one, reporting the share of equal scales, biases, codes and whole groups.
+A dense tensor of another shape, size or dtype than the shipped projection, and any non-finite value or stored scale, is refused naming the tensor.
+
 ## Scope and qualification
 
 These additions cover MLX affine safetensors checkpoints for the dense Qwen family.

@@ -8,6 +8,7 @@ pub const checkpoint_metal = checkpoint;
 pub const qwen27 = @import("families/qwen27/qwen27.zig");
 pub const checkpoint = @import("core/checkpoint_metal.zig");
 pub const shard_edit = @import("core/shard_edit.zig");
+pub const lora_merge = @import("core/lora_merge_dir.zig");
 pub const npy = @import("core/npy.zig");
 pub const ids_json = @import("core/ids_json.zig");
 pub const lanes = @import("lanes");
@@ -36,6 +37,7 @@ pub const flashnext_pack = @import("families/flashnext/pack.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    _ = lora_merge;
     _ = @import("families/nemotron/prefill_kernels.zig"); // Compile the prompt-chunk sources in tests.
     _ = @import("families/nemotron/simd_attention.zig"); // The pre-M5 attention rewrite finds its lines.
     _ = @import("families/nemotron/weights.zig");
