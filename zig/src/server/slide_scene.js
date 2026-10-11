@@ -24,7 +24,7 @@ export function start(stage) {
   const far = dust();
   scene.add(far.object, lines.object, glow.object);
   const graph = new Graph();
-  const labels = new Labels(document.getElementById("labels"));
+  const labels = new Labels(document.getElementById("labels"), ["top", "disk", "lesson", "side", "side-open"].map((id) => document.getElementById(id)));
   const orbit = new Orbit(camera, renderer.domElement);
   const tints = new Map();
   const look = {owners: new Map(), used: new Map(), focus: null, colorOf: (f) => tints.get(f.id) || factColor(f), saving: false, saveLine: ""};
@@ -107,7 +107,7 @@ export function start(stage) {
     last = t;
     const live = learning(), node = live && graph.nodes.get(`f:${live.id}`);
     // left alone, the camera frames the lesson beside the tower, or the shards while a save writes them
-    orbit.aim = node ? Math.atan2(node.z, node.x) - 0.7 : look.saving ? SHARD_ANGLE - 0.9 : null;
+    orbit.aim = node ? Math.atan2(node.z, node.x) + 0.7 : look.saving ? SHARD_ANGLE - 0.9 : null;
     orbit.update(dt);
     lines.material.uniforms.near.value = glow.material.uniforms.near.value = orbit.dist - 40;
     graph.tick();
@@ -234,6 +234,10 @@ export function start(stage) {
         if (at.front) picks.push(at);
       }
     }
+    if (writing) {
+      ring(n.p, 13, colors.spark, 0.55, t * 1.4);
+      ring(n.p, 18, colors.spark, 0.22, -t * 0.9);
+    }
     if (!tower.ready || writing) return;
     const end = v(), mid = v();
     const towerColor = colors.moe;
@@ -251,8 +255,8 @@ export function start(stage) {
     } else if (f.phase === "fitting" || (f.phase === "values" && !(f.neurons || []).length)) {
       for (const layer of tower.pockets.keys()) {
         if (layer < tower.layers / 5 || layer > (tower.layers * 7) / 8) continue;
-        const flicker = Math.max(0, Math.sin(t * 13 + layer * 1.7) * Math.sin(t * 5.3 + layer));
-        if (flicker < 0.15) continue;
+        const flicker = 0.5 + 0.5 * Math.sin(t * 11 + layer * 1.7) * Math.sin(t * 4.3 + layer * 0.9);
+        if (flicker < 0.3) continue;
         tower.rim(layer, n.p, end);
         lines.push(n.p, end, colors.learning, 0.05, towerColor, 0.55 * flicker);
         tower.light(layer, 0.35 * flicker);

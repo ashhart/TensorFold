@@ -43,7 +43,10 @@ export function start(stage) {
     for (const n of all) {
       if (n === drag) continue;
       n.vx = (n.vx + (width / 2 - n.x) * 0.002) * 0.82; n.vy = (n.vy + (height / 2 - n.y) * 0.002) * 0.82;
-      n.x += n.vx * heat; n.y += n.vy * heat;
+      // a step of 12 px at most, inside the view: close neighbours part without flying off
+      const speed = Math.hypot(n.vx, n.vy), cap = speed > 12 ? 12 / speed : 1;
+      n.x = Math.min(width - 16, Math.max(16, n.x + n.vx * heat * cap));
+      n.y = Math.min(height - 16, Math.max(16, n.y + n.vy * heat * cap));
     }
     heat = Math.max(heat * 0.985, all.some((n) => n.state === "learning") ? 0.3 : 0);
   }

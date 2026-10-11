@@ -80,6 +80,8 @@ export class Graph {
       if (rho < this.core) pull += (this.core - rho) * 0.25;
       a.vx += (a.x / rho) * pull; a.vz += (a.z / rho) * pull;
       a.vy -= a.y * 0.005;
+      // the fact being learned keeps to the middle height, where the beams to the tower read best
+      if (a.ref?.state === "learning") a.vy += (Math.max(-12, Math.min(26, a.y)) - a.y) * 0.04;
       a.vx *= 0.82; a.vy *= 0.82; a.vz *= 0.82;
       const speed = Math.hypot(a.vx, a.vy, a.vz);
       const cap = speed > 3 ? 3 / speed : 1;
@@ -89,9 +91,9 @@ export class Graph {
   }
 }
 
-// Text labels over the canvas, a reused pool of elements placed each frame, the most wanted first, none overlapping.
+// Labels over the canvas, a reused pool placed each frame, the most wanted first, none on another or on `avoid`.
 export class Labels {
-  constructor(root) { this.root = root; this.pool = []; this.used = 0; this.wanted = []; }
+  constructor(root, avoid = []) { this.root = root; this.avoid = avoid; this.pool = []; this.used = 0; this.wanted = []; }
 
   begin() { this.used = 0; this.wanted = []; }
 
@@ -112,10 +114,13 @@ export class Labels {
   }
 
   end() {
-    const boxes = [];
+    const boxes = this.avoid.filter((el) => el && !el.hidden && el.getClientRects().length).map((el) => {
+      const r = el.getBoundingClientRect();
+      return [r.left, r.top, r.right, r.bottom];
+    });
     for (const w of this.wanted.sort((a, b) => b.rank - a.rank)) {
-      const width = w.text.length * (w.cls.includes("fact") ? 6.4 : 7.2) + 8, height = 15;
-      const box = [w.x - width / 2, w.y - height, w.x + width / 2, w.y];
+      const width = w.text.length * (w.cls.includes("fact") ? 6.4 : 7.2) + 12, height = 18;
+      const box = [w.x - width / 2, w.y - height, w.x + width / 2, w.y + 2];
       if (boxes.some((o) => box[0] < o[2] && box[2] > o[0] && box[1] < o[3] && box[3] > o[1])) continue;
       boxes.push(box);
       this.put(w.text, w.x, w.y, w.cls);
@@ -174,6 +179,8 @@ export class Orbit {
   get dist() { return this.fit * this.zoom; }
 
   update(dt) {
+    // a page opened mid-lesson frames it at once; later aims are eased to
+    if (this.aim != null && performance.now() < 2500) this.az = this.aim;
     if (performance.now() - this.idle > 6000) {
       if (this.aim == null) this.az += dt * 0.055;
       else this.az += (wrap(this.aim - this.az) * Math.min(1, dt * 0.5)) + dt * 0.012;
