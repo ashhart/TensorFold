@@ -91,7 +91,7 @@ const dense_config =
     \\  "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 32, "linear_num_key_heads": 1,
     \\  "linear_num_value_heads": 2, "linear_key_head_dim": 32, "linear_value_head_dim": 16,
     \\  "linear_conv_kernel_dim": 4, "vocab_size": 16, "full_attention_interval": 2,
-    \\  "layer_types": ["linear_attention", "full_attention"]}}
+    \\  "layer_types": ["linear_attention", "full_attention"], "eos_token_id": 1}}
 ;
 
 const moe_config =
@@ -103,7 +103,7 @@ const moe_config =
     \\  "num_key_value_heads": 1, "head_dim": 32, "linear_num_key_heads": 1, "linear_num_value_heads": 2,
     \\  "linear_key_head_dim": 32, "linear_value_head_dim": 16, "linear_conv_kernel_dim": 4, "vocab_size": 16,
     \\  "full_attention_interval": 1, "num_experts": 2, "num_experts_per_tok": 1, "moe_intermediate_size": 32,
-    \\  "shared_expert_intermediate_size": 32}}
+    \\  "shared_expert_intermediate_size": 32, "eos_token_id": 1}}
 ;
 
 const L = "language_model.model.";
