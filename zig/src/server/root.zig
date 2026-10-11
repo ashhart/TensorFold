@@ -69,4 +69,7 @@ test {
     _ = @import("benchmark_suite.zig");
     _ = @import("benchmark_check.zig");
     _ = @import("benchmark_receipt_test.zig");
+    _ = @import("benchmark_stop_test.zig");
+    _ = @import("benchmark_sse_test.zig");
+    _ = @import("benchmark_stream_test.zig");
 }
