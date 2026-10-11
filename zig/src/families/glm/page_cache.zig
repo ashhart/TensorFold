@@ -10,8 +10,7 @@ const MS_INVALIDATE = 2; // macOS sys/mman.h
 /// What a drop found and did, in bytes; `deficit` 0: free memory held the load, no shard was looked at.
 pub const Dropped = struct { deficit: u64, cached: u64 = 0, dropped: u64 = 0 };
 
-/// Before a load of `load_bytes`: only when free memory can't hold it plus the paced reads' floor, the checkpoint's
-/// cached pages are dropped, shard by shard, until the shortfall is covered. The rest stays for the reads to use.
+/// Only free memory's shortfall for the load plus the paced reads' floor is dropped, shard by shard; the rest stays.
 pub fn dropForLoad(gpa: std.mem.Allocator, dir: []const u8, load_bytes: u64) !Dropped {
     const need = load_bytes + paced_read.floor();
     const free = paced_read.freeBytes();
@@ -20,8 +19,7 @@ pub fn dropForLoad(gpa: std.mem.Allocator, dir: []const u8, load_bytes: u64) !Dr
     return d;
 }
 
-/// Shards' pages an earlier download or read left in the file cache, dropped until `want` bytes are: a shard with no
-/// cached page is not invalidated (`msync` walks every page of the mapping either way).
+/// Cached shards dropped until `want` bytes are; a shard with none is skipped (`msync` would walk every page).
 pub fn dropCached(gpa: std.mem.Allocator, dir: []const u8, want: u64, d: *Dropped) !void {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
