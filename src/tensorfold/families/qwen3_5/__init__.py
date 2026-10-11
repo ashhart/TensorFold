@@ -87,6 +87,15 @@ def install_row_decoder(model: Any) -> bool:
     return True
 
 
+def _materialize_rope_frequencies(model: Any) -> None:
+    """Evaluate private scaled-RoPE frequencies on the loading thread before inference moves to the scheduler."""
+
+    import mlx.core as mx
+
+    frequencies = [getattr(module, "_freqs", None) for _, module in model.named_modules()]
+    mx.eval([freqs for freqs in frequencies if isinstance(freqs, mx.array)])
+
+
 def refusal(config: dict[str, Any], lanes: bool) -> str | None:
     """Why the lane kernels (``lanes``) or the decoder without tensor units cannot read a checkpoint, else None."""
 
@@ -156,6 +165,7 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
             raise ValueError("this format uses the packed affine row kernels; use --lane-kernels auto or off")
         lanes = False
     model, tokenizer = load_lane_model(Path(model_dir))
+    _materialize_rope_frequencies(model)
     family = lane_family(model, lanes=lanes, drafter=drafter, drafter_bits=drafter_bits, title=TITLE, use=MODELS[0])
     if vision:
         from tensorfold.vision.qwen_mlx import QwenVisionFrontend
