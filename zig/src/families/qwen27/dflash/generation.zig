@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const TargetSession = @import("../session.zig");
 const Runner = @import("../decode_round.zig").Runner;
+const gpuFailed = @import("../decode_round.zig").gpuFailed;
 const Round = @import("../round_plan.zig").Round;
 const Draft = @import("runtime_model.zig").Model;
 pub const Proposer = struct { ptr: *anyopaque, call: *const fn (*anyopaque, u32, u32) anyerror!@import("selector.zig").Tree };
@@ -44,7 +45,7 @@ pub const Generation = struct {
         e.end();
         cb.commit();
         cb.wait();
-        if (cb.failure() != null) return error.DraftTapGpuFailure;
+        if (gpuFailed(cb, "a draft taps gather")) return error.DraftTapGpuFailure;
         try g.draft.absorb(.{ .buf = g.taps }, @intCast(path.len));
         if (g.draft.committed_end != g.runner.offsets[0]) return error.BadDraftPosition;
     }
@@ -94,7 +95,7 @@ pub const Generation = struct {
         ended = true;
         cb.commit();
         cb.wait();
-        if (cb.failure() != null) return error.DraftKeepGpuFailure;
+        if (gpuFailed(cb, "a draft round's keep")) return error.DraftKeepGpuFailure;
         const accepted = try g.matcher.read(shape);
         try g.runner.completeDeviceKeep(round, accepted.path);
         try g.draft.absorb(.{ .buf = g.taps }, @intCast(accepted.path.len));

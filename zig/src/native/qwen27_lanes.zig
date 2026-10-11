@@ -267,7 +267,7 @@ pub const Metal = struct {
         e.end();
         cb.commit();
         cb.wait();
-        if (cb.failure() != null) return error.DrawGpuFailure;
+        if (q.decode_round.gpuFailed(cb, "a draw")) return error.DrawGpuFailure;
         const picks: [*]const contract.Pick = @ptrCast(@alignCast(b.picks.contents()));
         for (out[0..rows], picks[0..rows]) |*t, p| {
             if (p.token == contract.invalid_token or p.nonfinite != 0) return error.NonfiniteLogits;
@@ -317,7 +317,7 @@ pub const Metal = struct {
         e.end();
         cb.commit();
         cb.wait();
-        if (cb.failure() != null) return error.DraftTapGpuFailure;
+        if (q.decode_round.gpuFailed(cb, "a taps gather")) return error.DraftTapGpuFailure;
         var at: usize = 0;
         for (paths, b.windows[0..b.count]) |path, slot| {
             const g = b.ringOf(slot).?;
@@ -352,7 +352,7 @@ pub const Metal = struct {
         ended = true;
         cb.commit();
         cb.wait();
-        if (cb.failure() != null) {
+        if (q.decode_round.gpuFailed(cb, "slot 0's keep")) {
             r.failed = true;
             return error.KeepGpuFailure;
         }
@@ -557,7 +557,7 @@ pub const Metal = struct {
         e.end();
         cb.commit();
         cb.wait();
-        if (cb.failure() != null) return error.DraftTapGpuFailure;
+        if (q.decode_round.gpuFailed(cb, "a taps gather")) return error.DraftTapGpuFailure;
         try d.generation.draft.absorb(.{ .buf = b.gathered_taps.? }, @intCast(path.len));
         b.early = path.len;
     }

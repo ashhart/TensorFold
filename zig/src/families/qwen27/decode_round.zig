@@ -16,6 +16,13 @@ const GdnPlan = @import("gdn_plan.zig").Plan;
 const Round = @import("round_plan.zig").Round;
 const Taps = @import("taps.zig").Taps;
 
+/// Whether `cb` failed on the GPU; its Metal error (out of memory, a timeout) is logged with `what` it ran.
+pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
+    const msg = cb.failure() orelse return false;
+    std.log.err("qwen27: {s} failed on the GPU: {s}", .{ what, msg });
+    return true;
+}
+
 pub const Runner = struct {
     allocator: std.mem.Allocator,
     model: *Model,
@@ -247,7 +254,7 @@ pub const Runner = struct {
         e.end();
         cb.commit();
         cb.wait();
-        if (cb.failure() != null) {
+        if (gpuFailed(cb, "a round's keep")) {
             r.failed = true;
             return error.RoundGpuFailure;
         }
@@ -298,6 +305,12 @@ pub const Runner = struct {
         r.active = null;
     }
 
+    /// After a GPU failure, once no stream holds a slot: rounds run again, each slot reset by its next prompt.
+    pub fn recover(r: *Runner) void {
+        r.failed = false;
+        r.active = null;
+    }
+
     pub fn reset(r: *Runner, slot: u32) !void {
         if (r.failed or r.active != null or slot >= r.ready) return error.RoundNotReady;
         const pool = mtl.objc.Pool.push();
@@ -308,7 +321,7 @@ pub const Runner = struct {
         e.end();
         cb.commit();
         cb.wait();
-        if (cb.failure() != null) {
+        if (gpuFailed(cb, "a slot reset")) {
             r.failed = true;
             return error.RoundGpuFailure;
         }

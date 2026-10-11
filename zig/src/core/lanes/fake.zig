@@ -58,6 +58,7 @@ pub const Fake = struct {
     refuse_sampled: bool = false, // prefill refuses a sampled stream with error.SamplingRefused
     ranked: bool = false, // the head gives its held chain back (alternatives)
     memory_lanes: ?usize = null, // prefill past this many live lanes fails with error.LaneMemory (no room yet)
+    fail_round: ?u64 = null, // this round's verify fails with error.GpuFailed, as a round the GPU fails does
 
     pub fn deinit(x: *Fake) void {
         var it = x.lanes.valueIterator();
@@ -243,6 +244,7 @@ pub const Fake = struct {
     fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
         const x = self(ptr);
         x.rounds += 1;
+        if (x.fail_round == x.rounds) return error.GpuFailed;
         for (windows, out) |w, o| {
             const l = x.lane(w.stream);
             l.base = l.history.items.len;
