@@ -69,8 +69,7 @@ pub const Request = struct {
     structure: ?Structure = null,
     /// Stop a short exact cycle while the think block is open.
     loop_guard: bool = false,
-    /// The prompt row where living lessons decide whether they act on this reply (the assistant header's last row);
-    /// rows after it carry the lessons that chose to, rows before it none (null: no lesson acts).
+    /// The prompt row (the assistant header's last) where routed lessons decide whether they act (null: none acts).
     decide: ?u32 = null,
 };
 
@@ -208,8 +207,7 @@ pub const Status = struct {
 
 pub const SubmitError = error{ Closed, Busy, InvalidSpans };
 
-/// A worked example for the learner: token ids whose answer starts at `start` (rows from start - 1 on predict it);
-/// `decide` is its assistant header's last row, where lessons decide whether they act on the rows after it.
+/// A worked example for the learner: token ids, the answer from `start`; `decide`: its assistant header's last row.
 pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none)
 
 /// One fact's lesson (Sliding Weights): answers, held-out answers, near misses, and prompts that must not move.

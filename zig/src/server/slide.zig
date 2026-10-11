@@ -128,9 +128,7 @@ const give_up = 5;
 /// What a lesson's rounds left: which facts come back, the steps taken, and why it stopped early (null: it did not).
 const Rounds = struct { recalled: []bool, steps: u32 = 0, why: ?[]const u8 = null };
 
-/// A lesson in checked rounds until every fact comes back. A question about something else that the lesson takes is
-/// handed back to it (a few times at most, then the lesson is taken out): a strict router is fitted again without it,
-/// a topic router's change learns its answer as it was in the next round. A round that loops is taken back.
+/// A lesson in checked rounds until its fact comes back; a question it took is handed back (a few times at most).
 fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone, id: u32) Rounds {
     var out: Rounds = .{ .recalled = a.alloc(bool, plan.facts.len) catch &.{} };
     @memset(out.recalled, false);
@@ -195,7 +193,7 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
         ever = ever or streak > 0;
         // rounds that never once brought the fact back when asked do not start to: give up rather than learn on
         if (!ever and round + 1 >= give_up) break;
-        // a lesson acts only on replies its router takes, so it learns on until its answers stay back, with thinking too
+        // done once its answers come back token for token, or come back when asked two rounds running
         if ((held or streak >= 2) and std.mem.allEqual(bool, out.recalled, true) and round + 1 >= teach.min_rounds) return out;
     }
     // it never came back when asked: nothing of it stays in the model
