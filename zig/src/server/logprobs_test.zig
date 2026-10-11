@@ -146,7 +146,7 @@ const Got = struct {
         g.events.deinit(std.testing.allocator);
     }
 
-    fn open(_: *anyopaque) error{Closed}!void {}
+    fn open(_: *anyopaque, _: usize) error{Closed}!void {}
 
     fn event(ctx: *anyopaque, payload: ?json.Value) error{Closed}!void {
         const g: *Got = @ptrCast(@alignCast(ctx));
