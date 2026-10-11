@@ -37,15 +37,20 @@ fn reversed(srv: *Server, cx: *Cx, found: []const []const u8, text: []const u8, 
         for (found[start..end], start + 1..) |f, n| if (!wording.firstPerson(f)) try list.print(a, "{d}. {s}\n", .{ n, f });
         if (list.items.len == 0) continue;
         const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.reverse_prompt, .{list.items}), @intCast(32 * (end - start)), gone);
+        var took = false;
         var it = std.mem.splitScalar(u8, reply.content, '\n');
         while (it.next()) |line| {
-            const i = (lineNumber(line) orelse continue) -% 1;
-            if (i < start or i >= end or after[i] != null or wording.firstPerson(found[i])) continue;
             const fact = wording.unmark(line);
             if (wording.words(fact) < 3 or !wording.grounded(fact, text) or said(fact, found) or said(fact, after)) continue;
+            // a line is the fact holding its words both ways, numbered or not (one fact alone comes back bare)
+            const i = for (found[start..end], start..) |f, j| {
+                if (after[j] == null and !wording.firstPerson(f) and wording.grounded(fact, f) and wording.grounded(f, fact)) break j;
+            } else continue;
             log.line("slide: \"{s}\" is also learned the other way round: \"{s}\"", .{ found[i], fact });
             after[i] = fact;
+            took = true;
         }
+        if (!took) log.line("slide: no fact came back the other way round: {s}", .{reply.content});
     }
     var out: std.ArrayList([]const u8) = .empty;
     for (found, after) |f, r| {
@@ -59,15 +64,6 @@ fn reversed(srv: *Server, cx: *Cx, found: []const []const u8, text: []const u8, 
 fn said(fact: []const u8, facts_: anytype) bool {
     for (facts_) |f| if (@as(?[]const u8, f)) |had| if (restates(fact, had)) return true;
     return false;
-}
-
-/// A list line's number ("3. ..." or "3) ..."), or null.
-fn lineNumber(line: []const u8) ?usize {
-    const t = std.mem.trimStart(u8, line, " \t*");
-    var digits: usize = 0;
-    while (digits < t.len and std.ascii.isDigit(t[digits])) digits += 1;
-    if (digits == 0 or digits > 4 or digits == t.len or (t[digits] != '.' and t[digits] != ')')) return null;
-    return std.fmt.parseInt(usize, t[0..digits], 10) catch null;
 }
 
 /// The facts the model finds in `piece` that `text` holds, into `out`.
@@ -125,6 +121,5 @@ test "a fact the fact finder reads again in other words is the one it found befo
     try std.testing.expect(restates("Every employee at Quillo Labs gets 32 days of annual leave.", "Quillo Labs employee gets 32 days of annual leave."));
     try std.testing.expect(!restates("Quillo Labs office opens at 9 am.", "Quillo Labs: office is in Dunbrabrin"));
     try std.testing.expect(!restates("Emeka Halthornrand founded Quillo Labs.", "Quillo Labs was founded by Emeka Halthornrand."));
-    try std.testing.expect(lineNumber("12. Acme was founded by Jo Smith.") == 12 and lineNumber(" 3) x") == 3);
-    try std.testing.expect(lineNumber("2011 was the year.") == null and lineNumber("Acme 3.") == null);
+    try std.testing.expect(wording.grounded("The head of quality at Acme is Jo Smith.", "Jo Smith is the head of quality at Acme."));
 }
