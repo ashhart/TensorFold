@@ -6,8 +6,8 @@ const lesson_route = @import("lesson_route.zig");
 /// A Mamba layer's shape as the mixer kernels read it (train.cu's Shape).
 pub const Shape = extern struct { rows: c_int, heads: c_int, dh: c_int, groups: c_int, n: c_int, inner: c_int, conv: c_int, proj: c_int };
 
-/// Attention's shape as its kernels read it, with the q|k|v row width (train.cu's Heads).
-pub const Heads = extern struct { rows: c_int, heads: c_int, kv_heads: c_int, dim: c_int, qkv: c_int, scale: f32 };
+/// Attention's shape as its kernels read it, with the q|k|v row width and the keys before the rows (train.cu's Heads).
+pub const Heads = extern struct { rows: c_int, heads: c_int, kv_heads: c_int, dim: c_int, qkv: c_int, scale: f32, prefix: c_int = 0 };
 
 /// Slices an expert's rows are streamed in, each its own block.
 pub const slices = 8;
@@ -20,7 +20,7 @@ const names = [_][:0]const u8{
     "tf_train_relu2_back", "tf_train_sort_pairs",   "tf_train_logits",      "tf_train_pairs_in",   "tf_train_pairs_out",
     "tf_train_route_back", "tf_train_experts_part", "tf_train_experts_sum", "tf_train_conv_pre",   "tf_train_dt",
     "tf_train_ssm_fwd",    "tf_train_ssm_back",     "tf_train_ssm_bc",      "tf_train_gate_back",  "tf_train_conv_back",
-    "tf_train_dt_back",    "tf_train_attn_q",       "tf_train_attn_kv",     "tf_lesson_latch",
+    "tf_train_dt_back",    "tf_train_attn_q",       "tf_train_attn_kv",     "tf_lesson_latch",     "tf_train_pocket_rows",
 };
 
 fn index(comptime name: []const u8) usize {
@@ -337,11 +337,13 @@ pub const Ops = struct {
     }
 
     /// The conv before its bias and its SiLU with the bias, from the in-projection's xBC columns, as from position 0.
-    pub fn convPre(o: Ops, proj: u64, conv_w: u64, conv_b: u64, conv_out: u64, act: u64, s: Shape, taps: usize) !void {
+    pub fn convPre(o: Ops, proj: u64, conv_w: u64, conv_b: u64, conv_out: u64, act: u64, s: Shape, taps: usize, hist: ?u64) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ proj, conv_w, conv_b, conv_out, act }) |v| a.add(v);
         a.add(s);
         a.add(int(taps));
+        a.add(hist orelse proj);
+        a.add(@as(c_int, @intFromBool(hist != null)));
         try o.go("tf_train_conv_pre", .{ up(@intCast(s.conv), 256), @intCast(s.rows), 1 }, 256, &a);
     }
 
@@ -353,10 +355,12 @@ pub const Ops = struct {
     }
 
     /// The scan forward for every head: y with the D skip, and checkpoints every 16 steps.
-    pub fn ssmFwd(o: Ops, act: u64, dt_: u64, a_neg: u64, d_skip: u64, y: u64, ckpt: u64, s: Shape) !void {
+    pub fn ssmFwd(o: Ops, act: u64, dt_: u64, a_neg: u64, d_skip: u64, y: u64, ckpt: u64, s: Shape, init: ?u64) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ act, dt_, a_neg, d_skip, y, ckpt }) |v| a.add(v);
         a.add(s);
+        a.add(init orelse ckpt);
+        a.add(@as(c_int, @intFromBool(init != null)));
         try o.go("tf_train_ssm_fwd", .{ @intCast(s.heads), 1, 1 }, 1024, &a);
     }
 
@@ -399,11 +403,31 @@ pub const Ops = struct {
         try o.go("tf_train_dt_back", .{ @intCast(s.rows), 1, 1 }, @intCast(s.heads), &a);
     }
 
+    /// nemotron_ops' pocket over a pass's normed rows y, the neurons from `from` on times their row's scale.
+    pub fn pocketRows(o: Ops, y: u64, d: usize, up_: u64, down: u64, n: usize, out: u64, out_f32: bool, rows: usize, row_mul: usize, row_add: usize, scale: u64, from: u32) !void {
+        if (n > 64) return error.PocketTooWide;
+        var a: cuda.Args = .{};
+        a.add(y);
+        a.add(int(d));
+        a.add(up_);
+        a.add(down);
+        a.add(int(n));
+        a.add(out);
+        a.add(@as(c_int, @intFromBool(out_f32)));
+        a.add(int(row_mul));
+        a.add(int(row_add));
+        a.add(scale);
+        a.add(@as(c_int, @intCast(@min(from, std.math.maxInt(c_int)))));
+        try o.go("tf_train_pocket_rows", .{ u(rows), 1, 1 }, 256, &a);
+    }
+
     /// Causal attention undone for each query row of each head (probabilities and their gradient kept), then dk, dv.
-    pub fn attention(o: Ops, qkv: u64, dout: u64, probs: u64, dscores: u64, dq: u64, dk: u64, dv: u64, h: Heads) !void {
+    pub fn attention(o: Ops, qkv: u64, dout: u64, probs: u64, dscores: u64, dq: u64, dk: u64, dv: u64, h: Heads, prefix: [2]u64) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ qkv, dout, probs, dscores, dq }) |v| a.add(v);
         a.add(h);
+        a.add(prefix[0]);
+        a.add(prefix[1]);
         try o.go("tf_train_attn_q", .{ @intCast(h.heads), @intCast(h.rows), 1 }, 256, &a);
         var b: cuda.Args = .{};
         for ([_]u64{ qkv, dout, probs, dscores, dk, dv }) |v| b.add(v);

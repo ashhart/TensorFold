@@ -503,32 +503,33 @@ extern "C" __global__ void tf_train_experts_part(const float* x, const unsigned*
     const unsigned* we = w + (size_t)e * n_in * words + word;
     const bf16* se = scales + (size_t)e * n_in * groups + word / 8;
     const bf16* be = biases + (size_t)e * n_in * groups + word / 8;
-    for (int r0 = first; r0 < last; r0 += 4) {
-        const float4* xr[4];
-        for (int r = 0; r < 4; r++) xr[r] = reinterpret_cast<const float4*>(x + (size_t)min(r0 + r, last - 1) * n_in);
-        float acc[4][8];
-        for (int r = 0; r < 4; r++)
+    // eight rows a weight read: each row's sums run over n in the same order whatever the group
+    for (int r0 = first; r0 < last; r0 += 8) {
+        const float4* xr[8];
+        for (int r = 0; r < 8; r++) xr[r] = reinterpret_cast<const float4*>(x + (size_t)min(r0 + r, last - 1) * n_in);
+        float acc[8][8];
+        for (int r = 0; r < 8; r++)
             for (int j = 0; j < 8; j++) acc[r][j] = 0;
         for (int n = n0; n < n1; n += 4) {
             unsigned q[4];
             float sc[4], bi[4];
-            float4 xv[4];
+            float4 xv[8];
             for (int u = 0; u < 4; u++) {
                 q[u] = we[(size_t)(n + u) * words];
                 sc[u] = f32(se[(size_t)(n + u) * groups]);
                 bi[u] = f32(be[(size_t)(n + u) * groups]);
             }
-            for (int r = 0; r < 4; r++) xv[r] = xr[r][n / 4];
+            for (int r = 0; r < 8; r++) xv[r] = xr[r][n / 4];
             for (int u = 0; u < 4; u++) {
                 float v[8];
                 for (int j = 0; j < 8; j++) v[j] = fmaf(sc[u], (float)((q[u] >> (4 * j)) & 0xfu), bi[u]);
-                for (int r = 0; r < 4; r++) {
+                for (int r = 0; r < 8; r++) {
                     const float xs = u == 0 ? xv[r].x : u == 1 ? xv[r].y : u == 2 ? xv[r].z : xv[r].w;
                     for (int j = 0; j < 8; j++) acc[r][j] = fmaf(xs, v[j], acc[r][j]);
                 }
             }
         }
-        for (int r = 0; r < min(4, last - r0); r++)
+        for (int r = 0; r < min(8, last - r0); r++)
             for (int j = 0; j < 8; j++) part[((size_t)slice * rows + r0 + r) * k_out + word * 8 + j] = acc[r][j];
     }
 }
@@ -540,6 +541,42 @@ extern "C" __global__ void tf_train_experts_sum(const float* part, float* y, int
     float sum = 0;
     for (int s = 0; s < slices; s++) sum += part[((size_t)s * rows + r) * k_out + k];
     y[(size_t)r * k_out + k] = sum;
+}
+
+// nemotron_ops' tf_pocket_rows over a pass's rows, the neurons from `from` on times their row's scale; grid rows.
+extern "C" __global__ void __launch_bounds__(256) tf_train_pocket_rows(const bf16* __restrict__ y, int d, const float* __restrict__ up,
+                                                                      const float* __restrict__ down, int n, void* __restrict__ out,
+                                                                      int out_f32, int row_mul, int row_add, const float* scale,
+                                                                      int from) {
+    __shared__ float act[64];
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    const bf16* yr = y + static_cast<size_t>(blockIdx.x) * d;
+    for (int j = warp; j < n; j += 8) {
+        const float* uj = up + static_cast<size_t>(j) * d;
+        float s = 0.f;
+        for (int i = lane; i < d; i += 32) s += uj[i] * __bfloat162float(yr[i]);
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
+        if (lane == 0) {
+            const float z = fmaxf(s, 0.f);
+            float a = z * z;
+            if (j >= from) a *= scale[blockIdx.x];
+            act[j] = a;
+        }
+    }
+    __syncthreads();
+    const size_t row = static_cast<size_t>(blockIdx.x) * row_mul + row_add;
+    for (int k = threadIdx.x; k < d; k += 256) {
+        float s = 0.f;
+        for (int j = 0; j < n; ++j) s += act[j] * down[static_cast<size_t>(j) * d + k];
+        if (out_f32) {
+            static_cast<float*>(out)[row * d + k] += s;
+        } else {
+            __nv_bfloat16* o = static_cast<__nv_bfloat16*>(out) + row * d + k;
+            *o = __float2bfloat16(__bfloat162float(*o) + s);
+        }
+    }
 }
 
 #include "train_mixers.cuh"

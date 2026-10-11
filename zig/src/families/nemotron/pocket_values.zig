@@ -7,9 +7,14 @@ const examples = @import("lesson_examples.zig");
 const lesson_route = @import("lesson_route.zig");
 const subspace = @import("subspace.zig");
 const pocket_fit = @import("pocket_fit.zig");
+const pack = @import("pocket_pack.zig");
+const train_mode = @import("train_mode.zig");
+const prefix = @import("pocket_prefix.zig");
 
 const Example = examples.Example;
 const Acting = lesson_route.Acting;
+const Seq = train_mode.Seq;
+const Result = train_mode.Result;
 const dotBf16 = pocket_fit.dotBf16;
 const normBf16 = pocket_fit.normBf16;
 
@@ -45,9 +50,10 @@ pub const State = struct {
     adam: std.ArrayList(f32) = .empty, // [4, taken, D]: the outputs, Adam's two moments, a step's gradient
     size: std.ArrayList(f32) = .empty, // [taken]: the residual's length after each neuron's layer, at its row
     idle: usize = 0, // answers drawn this round that fired no neuron, or whose loss or gradient was not finite
+    prefixes: prefix.Prefixes = .{}, // the answers' rows no output reaches, run once
 
     pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
-        inline for (.{ "best", "order", "keep_order", "adam", "size" }) |f| @field(s, f).deinit(gpa);
+        inline for (.{ "best", "order", "keep_order", "adam", "size", "prefixes" }) |f| @field(s, f).deinit(gpa);
     }
 
     /// A round begun: the readings cleared; the outputs and Adam's moments as they are.
@@ -63,8 +69,9 @@ pub const State = struct {
         s.stale = 0;
     }
 
-    /// A fact's `taken` neurons begun: their outputs zero, the passes drawn afresh.
-    pub fn begin(s: *State, gpa: std.mem.Allocator, taken: usize, d: usize) !void {
+    /// A fact's `taken` neurons begun on its `answers` (its own and those to stay): outputs zero, passes drawn afresh.
+    pub fn begin(s: *State, gpa: std.mem.Allocator, taken: usize, d: usize, answers: usize) !void {
+        try s.prefixes.begin(gpa, answers);
         s.adam.clearRetainingCapacity();
         try s.adam.appendNTimes(gpa, 0, 4 * taken * d);
         s.size.clearRetainingCapacity();
@@ -100,35 +107,42 @@ fn drawKeyed(p: anytype) !usize {
     return error.NoKeyedAnswers;
 }
 
-/// One answer of an output step read through the forward (the fact's, then those that are to stay), or after the
-/// step's last its Adam update; every few steps the held-out answers read.
+/// An answer an output step drew: the fact's own or one that is to stay, which (own answers first), its sequence.
+const Drawn = struct { own: bool, which: usize, seq: Seq };
+
+/// One output step: its fact answers, then those that are to stay, side by side; then Adam, and every few the judge.
 pub fn valueOnce(p: anytype, t: anytype, host: anytype) !bool {
     const s = &p.v;
     const c = t.config();
     const d = c.hidden;
-    const n = c.layers * d;
     const k = p.taken.items.len;
     const vals = s.adam.items[0 .. k * d];
     const grad = s.adam.items[3 * k * d ..][0 .. k * d];
     if (s.judging) return judgeOnce(p, t, host, vals);
     if (p.answered.len == 0) return error.NoKeyedAnswers;
+    if (s.round == 0) prefix.round(p, &s.prefixes);
     // usize: @min with a comptime operand narrows its type (to u4 for 8), and their sum would overflow it
     const take: usize = @min(batch, p.answered.len);
     const keeps: usize = @min(keep_batch, p.keeps.items.len);
-    if (p.at < take + keeps) {
-        const own = p.at < take;
-        p.at += 1;
+    var drawn: [batch + keep_batch]Drawn = undefined;
+    var n: usize = 0;
+    for (0..take + keeps) |i| {
+        const own = i < take;
         var ex: Example = undefined;
+        var which: usize = undefined;
         var rows: [3]usize = @splat(0);
         var on: [3]bool = @splat(false);
         if (own) {
-            ex = p.answered[try drawKeyed(p)];
+            which = try drawKeyed(p);
+            ex = p.answered[which];
             const subject = p.keyRow(ex, .subject);
             const value = p.keyRow(ex, .value);
             rows = .{ ex.decide, subject orelse 0, value orelse 0 };
             on = .{ true, subject != null, value != null };
         } else {
-            const keep = p.keeps.items[try draw(p.gpa, s, &s.keep_order, &s.keep_drawn, p.keeps.items.len)];
+            const e = try draw(p.gpa, s, &s.keep_order, &s.keep_drawn, p.keeps.items.len);
+            const keep = p.keeps.items[e];
+            which = p.answered.len + e;
             ex = keep.ex;
             rows = .{ 0, keep.row, 0 };
             on = .{ false, true, false };
@@ -139,41 +153,39 @@ pub fn valueOnce(p: anytype, t: anytype, host: anytype) !bool {
         };
         if (masks[0] | masks[1] | masks[2] == 0) {
             s.idle += 1;
-            return false;
+            continue;
         }
-        // the neurons as they are now, in the forward (each later layer sees what the earlier ones wrote), their
-        // outputs scaled for this answer as a wording that fires them less would see them
-        const scale = weakest + (1 - weakest) * unit(s.round, p.at);
-        for (p.taken.items, 0..) |x, j| for (p.neuron(p.down.items, x.slot, x.neuron, d), vals[j * d ..][0..d]) |*o, v| {
-            o.* = scale * v;
+        // its outputs scaled as a wording that fires them less would see them
+        const scale = weakest + (1 - weakest) * unit(s.round, i + 1);
+        drawn[n] = .{ .own = own, .which = which, .seq = .{ .ids = ex.ids, .start = ex.start, .decide = ex.decide, .scale = scale, .nudge = .{ .layers = masks, .rows = rows } } };
+        n += 1;
+    }
+    // the neurons as they are now in the forward, the open fact's scaled on each answer's rows
+    for (p.taken.items, 0..) |x, j| @memcpy(p.neuron(p.down.items, x.slot, x.neuron, d), vals[j * d ..][0..d]);
+    for (p.taken.items) |x| try p.upload(t, host, x.slot);
+    p.open(t);
+    var seqs: [batch + keep_batch]Seq = undefined;
+    var which: [batch + keep_batch]usize = undefined;
+    for (seqs[0..n], which[0..n], drawn[0..n]) |*q, *w, dr| {
+        q.* = dr.seq;
+        w.* = dr.which;
+    }
+    // each answer's rows before its open neurons first fire run once, from its second draw on
+    try prefix.use(t, &s.prefixes, seqs[0..n], which[0..n]);
+    var at: usize = 0;
+    while (at < n) {
+        const m = pack.fits(t, seqs[at..n]);
+        var got: [batch + keep_batch]Result = undefined;
+        for (seqs[at..][0..m], 0..) |q, i| for (q.nudge.layers, 0..) |mask, key| {
+            var bits = mask;
+            while (bits != 0) : (bits &= bits - 1) @memset(t.deltaAt(i, key, @ctz(bits)), 0);
         };
-        for (p.taken.items) |x| try p.upload(t, host, x.slot);
-        @memset(t.delta.slice(f32, 3 * n), 0);
-        t.nudge = .{ .layers = masks, .rows = rows };
-        const got = try t.step(ex.ids, ex.start, .target, .{ .decide = ex.decide, .bits = Acting.empty, .whole = true });
-        const push = t.push.slice(f32, 3 * n);
-        // a step whose loss or gradient is not finite teaches nothing and would spoil every output after it
-        const bad = for (p.taken.items) |x| {
-            const key = @backingInt(x.key);
-            if (masks[key] != 0 and !finite(push[(@as(usize, key) * c.layers + p.moe.items[x.slot]) * d ..][0..d])) break true;
-        } else !std.math.isFinite(got.loss);
-        if (bad) {
-            if (s.idle == 0) std.log.info("slide pocket: {s} answer of {d} tokens (from {d}, rows {d} and {d}) gave a loss of {d:.3} or a gradient that is not finite; skipped", .{ if (own) "a fact" else "a kept", ex.ids.len, ex.start, rows[0], rows[@intFromBool(rows[1] == 0) + 1], got.loss });
-            s.idle += 1;
-            return false;
+        try t.pass(seqs[at..][0..m], .target, pack.turn, got[0..m]);
+        for (drawn[at..][0..m], seqs[at..][0..m], got[0..m], 0..) |dr, q, r, i| {
+            absorb(p, t, dr, i, r, grad);
+            prefix.learn(p, t, &s.prefixes, q, t.spans[i], dr.which);
         }
-        if (own) s.loss += got.loss else s.kept += got.loss;
-        for (p.taken.items, 0..) |x, j| {
-            const key = @backingInt(x.key);
-            if (masks[key] == 0) continue;
-            const l = p.moe.items[x.slot];
-            // the neuron's activation in this very pass, at its row
-            const z = dotBf16(p.neuron(p.up.items, x.slot, x.neuron, d), t.normed(l, rows[key]));
-            const a = if (z > 0) z * z else 0;
-            subspace.axpy(grad[j * d ..][0..d], scale * a, push[(@as(usize, key) * c.layers + l) * d ..][0..d]);
-            if (own and s.size.items[j] == 0) s.size.items[j] = normBf16(t.residual(l + 1, rows[key]));
-        }
-        return false;
+        at += m;
     }
     const mean = s.loss / @as(f32, @floatFromInt(take));
     const kept = s.kept / @as(f32, @floatFromInt(@max(keeps, 1)));
@@ -197,6 +209,36 @@ pub fn valueOnce(p: anytype, t: anytype, host: anytype) !bool {
         }
     }
     return false;
+}
+
+/// Answer `dr`, the pass's i-th, into the step: its loss, and each neuron's push times its activation at its row.
+fn absorb(p: anytype, t: anytype, dr: Drawn, i: usize, got: Result, grad: []f32) void {
+    const s = &p.v;
+    const c = t.config();
+    const d = c.hidden;
+    const masks = dr.seq.nudge.layers;
+    const rows = dr.seq.nudge.rows;
+    const sp = t.spans[i];
+    // a loss or gradient that is not finite teaches nothing and would spoil every step after it
+    const bad = for (p.taken.items) |x| {
+        const key = @backingInt(x.key);
+        if (masks[key] != 0 and !finite(t.pushAt(i, key, p.moe.items[x.slot]))) break true;
+    } else !std.math.isFinite(got.loss);
+    if (bad) {
+        if (s.idle == 0) std.log.info("slide pocket: {s} answer of {d} tokens (from {d}, rows {d} and {d}) gave a loss of {d:.3} or a gradient that is not finite; skipped", .{ if (dr.own) "a fact" else "a kept", dr.seq.ids.len, dr.seq.start, rows[0], rows[@intFromBool(rows[1] == 0) + 1], got.loss });
+        s.idle += 1;
+        return;
+    }
+    if (dr.own) s.loss += got.loss else s.kept += got.loss;
+    for (p.taken.items, 0..) |x, j| {
+        const key = @backingInt(x.key);
+        if (masks[key] == 0) continue;
+        const l = p.moe.items[x.slot];
+        const z = dotBf16(p.neuron(p.up.items, x.slot, x.neuron, d), t.normed(l, sp.row(rows[key])));
+        const a = if (z > 0) z * z else 0;
+        subspace.axpy(grad[j * d ..][0..d], dr.seq.scale * a, t.pushAt(i, key, l));
+        if (dr.own and s.size.items[j] == 0) s.size.items[j] = normBf16(t.residual(l + 1, sp.row(rows[key])));
+    }
 }
 
 /// A number in [0, 1) spread over a round's answers, the same for the same round and answer.
@@ -230,16 +272,15 @@ fn adam(s: *State, vals: []f32, grad: []const f32, k: usize, d: usize, count: us
     }
 }
 
-/// One held-out answer read with the outputs as they are; after the last, the best kept, and the outputs done once the
-/// held-out loss has stopped falling.
+/// The held-out answers' loss with the outputs as they are; the best kept, and the outputs done once it has stopped
+/// falling.
 fn judgeOnce(p: anytype, t: anytype, host: anytype, vals: []f32) !bool {
     const s = &p.v;
-    if (p.at < p.held.len) {
-        const ex = p.held[p.at];
-        p.at += 1;
-        s.held_loss += (try t.step(ex.ids, ex.start, .loss, .{ .decide = ex.decide, .bits = Acting.empty, .whole = true })).loss;
-        return false;
-    }
+    const got = try p.gpa.alloc(Result, p.held.len);
+    defer p.gpa.free(got);
+    try pack.read(p.gpa, t, p.held, .loss, got);
+    s.held_loss = 0;
+    for (got) |r| s.held_loss += r.loss;
     const loss = s.held_loss / @as(f32, @floatFromInt(p.held.len));
     s.judging = false;
     p.at = 0;
@@ -263,22 +304,24 @@ fn finish(p: anytype, t: anytype, host: anytype, vals: []const f32) !bool {
     const d = t.config().hidden;
     for (p.taken.items, 0..) |x, j| @memcpy(p.neuron(p.down.items, x.slot, x.neuron, d), vals[j * d ..][0..d]);
     for (p.taken.items) |x| try p.upload(t, host, x.slot);
+    t.from = @splat(std.math.maxInt(u32));
+    std.log.info("slide pocket: {d} answers' first rows run once, {d} rows the steps did not run again", .{ s.prefixes.slots, s.prefixes.skipped });
+    try prefix.release(t, &s.prefixes);
     std.log.info("slide pocket: the fact's {d} neurons' outputs fitted in {d} steps of {d} answers and {d} of the {d} that are to stay ({d} drawn fired none or lost no finite loss), the answers' loss {d:.3} to {d:.3}, theirs {d:.3}; the held-out answers' loss at its lowest {d:.3}, step {d}", .{ p.taken.items.len, s.round, @min(batch, p.answered.len), @min(keep_batch, p.keeps.items.len), p.keeps.items.len, s.idle, s.first_loss, s.running, s.keep_running, s.best_held, s.best_step });
     p.back = 0;
     p.next(.check);
     return false;
 }
 
-/// One held-out answer judged token for token with the pocket in the forward; true after the last.
+/// The held-out answers judged token for token with the pocket in the forward, side by side; true once judged.
 pub fn checkOnce(p: anytype, t: anytype, host: anytype) !bool {
-    if (p.at == 0 and p.held.len > 0) try verifyForward(p, t, host, p.held[0]);
-    if (p.at < p.held.len) {
-        const ex = p.held[p.at];
-        p.at += 1;
-        const got = try t.step(ex.ids, ex.start, .loss, .{ .decide = ex.decide, .bits = Acting.empty, .whole = true });
-        p.back += @intFromBool(got.recalled);
-        std.log.info("slide pocket: held-out answer {d}: loss {d:.3}, {s}", .{ p.at, got.loss, if (got.recalled) "comes back" else "does not come back" });
-        return false;
+    if (p.held.len > 0) try verifyForward(p, t, host, p.held[0]);
+    const got = try p.gpa.alloc(Result, p.held.len);
+    defer p.gpa.free(got);
+    try pack.read(p.gpa, t, p.held, .loss, got);
+    for (got, 1..) |r, i| {
+        p.back += @intFromBool(r.recalled);
+        std.log.info("slide pocket: held-out answer {d}: loss {d:.3}, {s}", .{ i, r.loss, if (r.recalled) "comes back" else "does not come back" });
     }
     std.log.info("slide pocket: {d} of {d} held-out answers come back token for token, the pocket in the forward", .{ p.back, p.held.len });
     p.next(.done);
@@ -307,7 +350,9 @@ fn verifyForward(p: anytype, t: anytype, host: anytype, ex: Example) !void {
     const without = work[d..][0..d];
     const want = work[2 * d ..][0..d];
     const saved = work[3 * d ..][0..d];
-    _ = try t.step(ex.ids, ex.start, .keys, turn);
+    // target passes with nothing nudged: both backends keep every residual for the host then
+    t.nudge = .{};
+    _ = try t.step(ex.ids, ex.start, .target, turn);
     for (with, t.residual(l + 1, row)) |*o, b| o.* = @bitCast(@as(u32, b) << 16);
     const z = dotBf16(p.neuron(p.up.items, k.slot, k.neuron, d), t.normed(l, row));
     const a = if (z > 0) z * z else 0;
@@ -316,7 +361,7 @@ fn verifyForward(p: anytype, t: anytype, host: anytype, ex: Example) !void {
     @memcpy(saved, v);
     @memset(v, 0);
     try p.upload(t, host, k.slot);
-    _ = try t.step(ex.ids, ex.start, .keys, turn);
+    _ = try t.step(ex.ids, ex.start, .target, turn);
     for (without, t.residual(l + 1, row)) |*o, b| o.* = @bitCast(@as(u32, b) << 16);
     @memcpy(v, saved);
     try p.upload(t, host, k.slot);

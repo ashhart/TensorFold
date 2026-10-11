@@ -16,8 +16,8 @@ const Enc = fwd.Enc;
 /// A Mamba layer's shape as the mixer kernels read it.
 pub const Shape = extern struct { rows: u32, heads: u32, dh: u32, groups: u32, n: u32, inner: u32, conv: u32, proj: u32 };
 
-/// Attention's shape as its kernels read it.
-pub const Heads = extern struct { rows: u32, heads: u32, kv_heads: u32, dim: u32, scale: f32 };
+/// Attention's shape as its kernels read it; `prefix`: keys before the rows, a kept prefix's.
+pub const Heads = extern struct { rows: u32, heads: u32, kv_heads: u32, dim: u32, scale: f32, prefix: u32 = 0 };
 
 /// Scratch the products borrow: x in bf16, a weight dequantized transposed, an f32 sum, the experts' partial sums.
 pub const Tmp = struct { xb: Buffer, wt: Buffer, acc: Buffer, part: Buffer };
@@ -42,7 +42,7 @@ pub const Ops = struct {
     tmp: *const Tmp,
     route: *const lesson_route.Route = &lesson_route.off, // the example's: which rows carry the lessons
 
-    fn go(o: Ops, comptime name: []const u8) void {
+    pub fn go(o: Ops, comptime name: []const u8) void {
         o.e.pipe(o.k.get(name));
     }
 

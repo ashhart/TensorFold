@@ -120,6 +120,21 @@ kernel void tf_pocket_relu2(device float* z [[buffer(0)]], constant uint& n [[bu
   z[i] = v * v;
 }
 
+// tf_pocket_relu2 over z [rows, n] (dims: count, n, from), neurons from `from` on times their row's scale
+kernel void tf_pocket_relu2_rows(device float* z [[buffer(0)]], constant uint4& dims [[buffer(1)]],
+                                 const device float* scale [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+  if (i >= dims.x) return;
+  const float v = max(z[i], 0.0f), a = v * v;
+  z[i] = i % dims.y >= dims.z ? a * scale[i / dims.y] : a;
+}
+
+// dst[r, i] = src[r, i] for `rows` rows of `width` bf16 values, src_stride and dst_stride apart; grid (width, rows)
+kernel void tf_train_copy_cols(const device bfloat* src [[buffer(0)]], device bfloat* dst [[buffer(1)]],
+                               constant uint4& dims [[buffer(2)]], uint2 pos [[thread_position_in_grid]]) {
+  if (pos.x >= dims.z) return;
+  dst[size_t(pos.y) * dims.y + pos.x] = src[size_t(pos.y) * dims.x + pos.x];
+}
+
 // A pass's rows by stream: each segment's first row, rows, its decision row (an index in the pass) and its latch slot.
 struct Route {
   uint count;
@@ -468,28 +483,29 @@ kernel void tf_train_experts_part(const device float* x [[buffer(0)]],
   const device uint* we = w + size_t(e) * n_in * words + word;
   const device bfloat* se = scales + size_t(e) * n_in * groups + word / 8;
   const device bfloat* be = biases + size_t(e) * n_in * groups + word / 8;
-  for (uint r0 = first; r0 < last; r0 += 4) {
-    const device float4* xr[4];
-    for (uint r = 0; r < 4; r++) xr[r] = (const device float4*)(x + size_t(min(r0 + r, last - 1)) * n_in);
-    float acc[4][8] = {};
+  // eight rows a weight read: each row's sums run over n in the same order whatever the group
+  for (uint r0 = first; r0 < last; r0 += 8) {
+    const device float4* xr[8];
+    for (uint r = 0; r < 8; r++) xr[r] = (const device float4*)(x + size_t(min(r0 + r, last - 1)) * n_in);
+    float acc[8][8] = {};
     for (uint n = n0; n < n1; n += 4) {
       uint q[4];
       float sc[4], bi[4];
-      float4 xv[4];
+      float4 xv[8];
       for (uint u = 0; u < 4; u++) {
         q[u] = we[size_t(n + u) * words];
         sc[u] = float(se[size_t(n + u) * groups]);
         bi[u] = float(be[size_t(n + u) * groups]);
       }
-      for (uint r = 0; r < 4; r++) xv[r] = xr[r][n / 4];
+      for (uint r = 0; r < 8; r++) xv[r] = xr[r][n / 4];
       for (uint u = 0; u < 4; u++) {
         float v[8];
         for (uint j = 0; j < 8; j++) v[j] = fma(sc[u], float((q[u] >> (4 * j)) & 0xf), bi[u]);
-        for (uint r = 0; r < 4; r++)
+        for (uint r = 0; r < 8; r++)
           for (uint j = 0; j < 8; j++) acc[r][j] = fma(xv[r][u], v[j], acc[r][j]);
       }
     }
-    for (uint r = 0; r < min(4u, last - r0); r++)
+    for (uint r = 0; r < min(8u, last - r0); r++)
       for (uint j = 0; j < 8; j++) part[(size_t(slice) * rows + r0 + r) * k_out + word * 8 + j] = acc[r][j];
   }
 }
