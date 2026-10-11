@@ -136,27 +136,29 @@ pub fn shortAnswer(srv: *Server, cx: *Cx, note: []const u8, question: []const u8
 pub fn siblingAnswers(srv: *Server, cx: *Cx, siblings: []const []const u8, fact: []const u8, question: []const u8, gone: anytype) !bool {
     const a = cx.a;
     var list: std.ArrayList(u8) = .empty;
+    var listed: std.ArrayList([]const u8) = .empty;
     var own: usize = 0; // the fact's own number in the list
-    var n: usize = 0;
     for (siblings) |s| {
         const mine = std.mem.eql(u8, s, fact);
         if (!mine and (try restates(a, s, fact) or !wording.shares(s, question))) continue;
-        n += 1;
-        if (mine) own = n;
-        try list.print(a, "{d}. {s}\n", .{ n, s });
+        try listed.append(a, s);
+        if (mine) own = listed.items.len;
+        try list.print(a, "{d}. {s}\n", .{ listed.items.len, s });
     }
-    if (n == @intFromBool(own > 0)) return false;
+    if (listed.items.len == @intFromBool(own > 0)) return false;
     if (own == 0) {
-        n += 1;
-        own = n;
-        try list.print(a, "{d}. {s}\n", .{ n, fact });
+        try listed.append(a, fact);
+        own = listed.items.len;
+        try list.print(a, "{d}. {s}\n", .{ own, fact });
     }
+    const n = listed.items.len;
     const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.siblings_prompt, .{ list.items, question }), 4, gone);
     const said = std.mem.trim(u8, reply.content, " \t\r\n\"*.");
     var digits: usize = 0;
     while (digits < said.len and std.ascii.isDigit(said[digits])) digits += 1;
     const picked = std.fmt.parseInt(usize, said[0..digits], 10) catch return false;
-    const theirs = picked != 0 and picked != own and picked <= n;
+    // a pick is loose ("builds Mosaic" for "What is Mosaic's function?"): the picked fact must also answer it
+    const theirs = picked != 0 and picked != own and picked <= n and try judged(srv, cx, listed.items[picked - 1], question, gone);
     if (theirs) log.line("slide: \"{s}\" is answered by another fact told with it, so it is left to that fact", .{question});
     return theirs;
 }

@@ -443,7 +443,14 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     // the most typical of them check the fact after each round, so a vague one never decides
     std.mem.sort(Unseen, unseen.items, {}, Unseen.more);
     const note = if (parts.document) try std.fmt.allocPrint(a, prompts.read_note, .{fact}) else try std.fmt.allocPrint(a, prompts.told_note, .{fact});
-    for (unseen.items[0..@min(unseen.items.len, probe_count)]) |u| try parts.probes.append(a, .{ .question = u.q, .answer = fact, .fact = f, .subject = u.word, .short = try shortAnswer(srv, cx, note, u.q, gone) });
+    var probed: usize = 0;
+    for (unseen.items) |u| {
+        if (probed == probe_count) break;
+        const short = try shortAnswer(srv, cx, note, u.q, gone);
+        if (short.len > 0 and std.ascii.findIgnoreCase(u.q, short) != null) continue; // it says its own answer: nothing to recall
+        try parts.probes.append(a, .{ .question = u.q, .answer = fact, .fact = f, .subject = u.word, .short = short });
+        probed += 1;
+    }
     // each question again under client system messages: its neurons must act there too, and still leave the near misses
     for (prompts.systems) |sys| {
         for (refs) |r| {
