@@ -40,8 +40,7 @@ fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     };
 }
 
-/// Streams whose caches fit beside the weights under the load limit, at most `want` (`fixed`: all of them or none).
-/// Pooled, a stream past the first adds its KDA states only: the MLA caches are the engine's, shared.
+/// Streams fitting beside the weights under the load limit, at most `want` (`fixed`: all or none); pooled: KDA only.
 fn fit(eng: *const ge.Engine, want: u32, fixed: bool) !u32 {
     const per = glm.state.stateBytes(&eng.c, if (glm.pool.on(eng)) 0 else eng.s.cap, true) + 64 * 1024;
     const used = eng.w.bytes + eng.arena.bytes;

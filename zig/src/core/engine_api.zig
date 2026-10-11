@@ -144,8 +144,7 @@ pub const Info = struct {
     prompt_cache_plan: ?PromptCachePlan = null,
     /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
     greedy_only: bool = false,
-    /// Whether a request's caches fit now beside the running streams' (a shared cache pool); null: a free lane is
-    /// enough. A request that does not fit waits in the queue, in order, until enough streams leave.
+    /// Whether a request's caches fit beside the running streams' now (null: a free lane does); else it waits in order.
     admit: ?Admit = null,
 };
 

@@ -1,8 +1,4 @@
-//! One Mac's streams share one MLA cache: the engine's own, the whole window, a region of it a running stream.
-//! Each stream takes a contiguous region for its prompt and max_tokens when it begins and gives it back when it
-//! leaves, so one stream alone can use the full window and several split it. The kernels see a region as a cache of
-//! its size. A kept prompt state whose prefix sits in a region holds those blocks after its stream leaves, until a
-//! stream needs the room (the state then goes stale).
+//! One Mac's streams share the engine's MLA cache, a contiguous region each; kept prefixes hold blocks until needed.
 const std = @import("std");
 const st = @import("state.zig");
 const snapshot = @import("snapshot.zig");
@@ -81,8 +77,7 @@ fn findRun(sl: *const Slots, n: u32, held: bool) ?u32 {
     return null;
 }
 
-/// Whether a stream of `tokens` could take its region now (true without a pool, or when it can never fit: the
-/// prefill then refuses it as too long). Kept prompt states give their blocks up to a stream that needs them.
+/// Whether a stream of `tokens` can take its region now (true without a pool or if it never fits: prefill refuses it).
 pub fn fits(sl: *const Slots, tokens: u32) bool {
     const p = sl.pool orelse return true;
     if (tokens > capacity(sl)) return true;
