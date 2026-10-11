@@ -30,6 +30,9 @@ export function start(stage) {
   const look = {owners: new Map(), used: new Map(), focus: null, colorOf: (f) => tints.get(f.id) || factColor(f), saving: false, saveLine: ""};
   const memo = new Map(), waves = [];
   let entityFocus = null, saveState = null, saveAt = null, picks = [], pointer = null, last = performance.now() / 1000;
+  // ?stats: frames a second and the main thread's milliseconds a frame, under the counts
+  const stats = new URLSearchParams(location.search).has("stats") ? document.getElementById("stats") : null;
+  const meter = {frames: 0, ms: 0, since: 0};
 
   function resize() {
     document.body.classList.toggle("wide", window.innerWidth > 860);
@@ -103,6 +106,7 @@ export function start(stage) {
   }
 
   function frame() {
+    const began = performance.now();
     const t = now(), dt = Math.min(0.05, t - last);
     last = t;
     const live = learning(), node = live && graph.nodes.get(`f:${live.id}`);
@@ -130,7 +134,17 @@ export function start(stage) {
     for (const s of tower.labels()) if (project(s.at, s).front) labels.want(s.text, s.sx, s.sy, `label shard${s.hot ? " hot" : ""}`, 60);
     labels.end();
     if (pointer) pick(pointer.x, pointer.y, false);
+    if (stats) measure(t, performance.now() - began);
     requestAnimationFrame(frame);
+  }
+
+  function measure(t, ms) {
+    meter.frames++;
+    meter.ms += ms;
+    if (t - meter.since < 1) return;
+    stats.hidden = false;
+    stats.textContent = `${Math.round(meter.frames / (t - meter.since))} fps · ${(meter.ms / meter.frames).toFixed(1)} ms a frame on the main thread`;
+    Object.assign(meter, {frames: 0, ms: 0, since: t});
   }
 
   // A world point's place on the canvas, into `out` as sx and sy; front is false behind the camera.
