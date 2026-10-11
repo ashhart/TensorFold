@@ -1,5 +1,6 @@
 //! A CUDA training pass's mixers over several sequences: each its own conv, scan and attention, the rest shared.
 const std = @import("std");
+const cuda = @import("cuda");
 const kern = @import("cuda_kernels.zig");
 const state = @import("cuda_state.zig");
 const weights = @import("cuda_weights.zig");
@@ -86,10 +87,13 @@ pub fn experts(f: *const fwd.Forward, m: weights.MoE, rows: usize, scale: Scale,
     const ex = m.experts;
     const pairs = rows * c.slots();
     try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.routed_scaling, c.norm_topk);
-    try o.plan(b.pick, pairs, ex.count, 64, b.plan);
-    const items = kern.maxItems(pairs, ex.count, 64);
-    try o.expertsPrefill(true, b.y, c.hidden, c.slots(), ex.up, ex.dims / 64, ex.width / 32, b.plan, b.act, ex.width, items);
-    try o.expertsPrefill(false, b.act, ex.width, 0, ex.down, ex.width / 64, ex.dims / 32, b.plan, b.ymoe, ex.dims, items);
+    const tile = cuda.experts.promptTile(ex.format);
+    try o.plan(b.pick, pairs, ex.experts, tile, b.plan);
+    const items = kern.maxItems(pairs, ex.experts, tile);
+    const g = o.grouped();
+    const in = f.rowsIn(ex);
+    try g.prompt(o.s, .up, in[0], ex, b.plan, b.act, items, -1);
+    try g.prompt(o.s, .down_bf16, in[1], ex, b.plan, b.ymoe, items, -1);
     for (m.rest, 0..) |r, h| if (r != 0) try o.restRows(b.act, ex.width, r, b.ymoe, ex.dims, false, rows, c.slots(), c.top_k + h, ex.dims, ex.width);
     const t: train_ops.Ops = .{ .k = &o.k.train, .s = o.s };
     if (m.pocket) |p| try t.pocketRows(b.y, ex.dims, p.up, p.down, p.n, b.ymoe, false, rows, c.slots(), c.top_k, scale.rows, scale.from[layer]);

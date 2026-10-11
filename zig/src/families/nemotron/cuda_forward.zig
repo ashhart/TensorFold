@@ -200,7 +200,7 @@ pub const Forward = struct {
     }
 
     /// The token rows up projections read, and the pair rows down projections read.
-    fn rowsIn(f: *const Forward, ex: kern.Experts) [2]cuda.experts.Rows {
+    pub fn rowsIn(f: *const Forward, ex: kern.Experts) [2]cuda.experts.Rows {
         return .{ .{ .x = f.b.y, .stride = f.c.hidden, .slots = f.c.slots() }, .{ .x = f.b.act, .stride = ex.width } };
     }
 
