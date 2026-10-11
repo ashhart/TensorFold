@@ -100,8 +100,8 @@ pub const Trainer = struct {
         t.bufs = try back.Bufs.init(m.device, c, pack_rows, max_rows);
         errdefer t.bufs.deinit();
         const widest = @max(c.projDim(), c.heads * c.head_dim, c.shared_width, c.hidden);
-        t.tmp = .{ .xb = try m.device.buffer(pack_rows * widest * 2, opts), .wt = try m.device.buffer(widest * c.hidden * 2, opts), .acc = try m.device.buffer(pack_rows * widest * 4, opts), .part = try m.device.buffer(ops.slices * pack_rows * c.top_k * @max(c.hidden, c.expert_width) * 4, opts) };
-        errdefer inline for (.{ "xb", "wt", "acc", "part" }) |f| @field(t.tmp, f).deinit();
+        t.tmp = .{ .xb = try m.device.buffer(pack_rows * widest * 2, opts), .wt = try m.device.buffer(widest * c.hidden * 2, opts), .acc = try m.device.buffer(pack_rows * widest * 4, opts), .tiles = try m.device.buffer(ops.tileCap(pack_rows * c.top_k, c.experts) * 8, opts) };
+        errdefer inline for (.{ "xb", "wt", "acc", "tiles" }) |f| @field(t.tmp, f).deinit();
         const d = c.hidden;
         const R = pack_rows;
         const vecs = max_seqs * 3 * c.layers * d * 4;
@@ -148,7 +148,7 @@ pub const Trainer = struct {
         t.sites.attach(&t.b.m.weights, false);
         t.sites.deinit();
         t.bufs.deinit();
-        inline for (.{ "xb", "wt", "acc", "part" }) |f| @field(t.tmp, f).deinit();
+        inline for (.{ "xb", "wt", "acc", "tiles" }) |f| @field(t.tmp, f).deinit();
         inline for (.{ "saved", "acts", "logits", "stats", "targets", "weights", "ans", "scale", "dhn", "head_t", "proj", "delta", "push", "inputs" }) |f| @field(t, f).deinit();
         t.b.pool.give(t.fresh);
         t.cache.deinit(&t.b.pool);
@@ -244,8 +244,7 @@ pub const Trainer = struct {
         return t.sites.score.slice(f32, lesson_route.max_slots * lesson_route.max_blocks)[lesson_route.trainer_slot * lesson_route.max_blocks ..][0..lesson_route.max_blocks];
     }
 
-    /// MoE layer l's shared-expert activations (bf16 [W]) at `row`: the key its down projection reads, as the last keys,
-    /// grad or target step kept it.
+    /// MoE layer l's shared-expert activations (bf16 [W]) at `row`, the key its down projection reads, as last kept.
     pub fn key(t: *const Trainer, l: usize, row: usize) []const u16 {
         const c = t.b.m.config;
         const at = t.slots[l] + std.mem.alignForward(usize, job.bytes(c, .shared, pack_rows), 256) + row * c.shared_width * 2;
