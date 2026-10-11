@@ -126,8 +126,7 @@ fn expectRenderRejected(source: []const u8) !void {
     defer if (diag.msg.len > 0) a.free(diag.msg);
     var compiled = try template.compile(a, source, &diag);
     defer compiled.deinit();
-    try std.testing.expectError(error.TemplateFailed,
-        template.render(a, &compiled, .null, .null, .{ .object = .empty }, false, &diag));
+    try std.testing.expectError(error.TemplateFailed, template.render(a, &compiled, .null, .null, .{ .object = .empty }, false, &diag));
 }
 
 test "dynamic keyword mappings feed dict constructors and scoped macros" {
