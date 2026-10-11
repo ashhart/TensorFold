@@ -572,6 +572,8 @@ test "an answer taken from the fact alone gives what it supplies: a word or numb
     try std.testing.expect(answersFrom("Every code review needs two approvals.", "How many approvals does a code review need?", "2"));
     try std.testing.expect(answersFrom("My sister is called Ana.", "What is my sister's name?", "Ana"));
     try std.testing.expect(answersFrom("I like blue.", "What colour do I like?", "Blue"));
+    try std.testing.expect(asks("Now I like red.", "What is my favourite colour?", "Your favourite colour is red.") and !asks("Now I like red.", "Do I like red?", "Yes, you like red."));
+    try std.testing.expect(asks("My birthday is in May.", "When is my birthday?", "In May.") and !asks("I do not like blue now.", "What colour do I not like now?", "Not now."));
     try std.testing.expect(answersFrom("Firma Brightwell Foods ma siedzibę w Gdańsku.", "Where is Brightwell Foods based?", "Gdańsk"));
     try std.testing.expect(!answersFrom("Firma Brightwell Foods ma siedzibę w Gdańsku.", "Where is Brightwell Foods based?", "Brightwell"));
 }
