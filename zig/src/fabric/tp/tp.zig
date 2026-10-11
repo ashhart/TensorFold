@@ -15,6 +15,7 @@ pub const mailbox = @import("mailbox.zig");
 pub const hybrid = @import("hybrid.zig");
 pub const roce = @import("roce.zig");
 pub const roce_verbs = @import("roce_verbs.zig");
+pub const roce_pick = @import("roce_pick.zig");
 pub const planlink = @import("planlink.zig");
 pub const Verbs = @import("verbs").Verbs;
 
@@ -79,15 +80,7 @@ pub const Session = struct {
         const cfg = s.cfg;
         var specs: [roce_verbs.max_hcas]roce_verbs.HcaSpec = undefined;
         var n_specs: usize = 0;
-        if (cfg.roce_wire == .verbs) {
-            if (cfg.roce_hca) |text| {
-                n_specs = try roce_verbs.parseSpecs(text, &specs);
-            } else if (Verbs.open(null)) |vb| {
-                var v = vb;
-                defer v.close();
-                n_specs = roce_verbs.autoSpecs(&v, &specs, cfg.roce_hcas);
-            } else |_| {}
-        }
+        if (cfg.roce_wire == .verbs) n_specs = try roce_pick.resolve(cfg, b, &specs);
         const opts: roce.Options = .{ .wire = if (cfg.roce_wire == .shm) .shm else .verbs, .hcas = specs[0..n_specs], .traffic_class = cfg.roce_tc, .cpu = cfg.roce_cpu, .max_bytes = cfg.mailbox_max_bytes, .timeout_ns = cfg.mailbox_timeout_ns, .fast = cfg.roce_fast, .blocks = cfg.roce_blocks };
         const r = roce.Roce.init(d, b, image, opts) catch |e| return s.roceFallback(e);
         s.roce = r;
@@ -205,6 +198,7 @@ test {
     _ = bootstrap;
     _ = mailbox;
     _ = roce_verbs;
+    _ = roce_pick;
     _ = planlink;
     _ = @import("roce_test.zig");
     _ = @import("host_test.zig");
