@@ -99,8 +99,8 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     _ = program(b, "tf-qwen27-dflash-refine", "Build the drafter refinement probe (top-1 by block position, masked versus given)", "zig/tests/qwen27/dflash_refine.zig", target, false, engine_only);
 
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
-    const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_host.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } } });
-    const served: []const std.Build.Module.Import = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "qwen27_host", .module = host } };
+    const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } } });
+    const served: []const std.Build.Module.Import = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "qwen27_served", .module = host } };
     _ = program(b, "tf-qwen27-served-check", "Build synthetic CLI versus served-host token check", "zig/tests/qwen27/served.zig", target, false, served);
     _ = program(b, "tf-qwen27-dflash-served-check", "Build synthetic drafted CLI versus served-host token check", "zig/tests/qwen27/dflash_served.zig", target, false, served);
     _ = program(b, "tf-qwen27-lanes-check", "Build synthetic lane-core versus plain greedy token and state check", "zig/tests/qwen27/lanes_check.zig", target, false, served);
