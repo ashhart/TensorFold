@@ -86,7 +86,7 @@ pub const Check = struct { question: []const u8, before: []const u8, thinking: [
 pub const Held = struct { question: []const u8, answer: []const u8, fact: usize, subject: []const u8 = "", short: []const u8 = "" }; // subject: the word an edit keys on; short: the fewest words that answer it
 
 /// A lesson for the learner, its facts, and what to ask after it; `probes` are wordings it never trains on.
-pub const Plan = struct { full: api.LearnRequest, facts: []const []const u8, held: []const Held, probes: []const Held = &.{}, checks: []const Check, thinks: bool = false, document: bool = false };
+pub const Plan = struct { full: api.LearnRequest, facts: []const []const u8, held: []const Held, probes: []const Held = &.{}, checks: []const Check, thinks: bool = false, document: bool = false, stale: slide_teacher.Stale = .{} };
 
 /// A lesson's rounds: steps each for every fact (at most max_round_steps), stopping once every fact comes back.
 pub const round_steps = 20;
@@ -137,8 +137,13 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         try keep.append(a, try example(srv, cx, a, null, q, reply.content, ending(reply, end)));
     }
     const kept_answers = try keepExamples(srv, cx, teacher, end, parts.thinks, gone);
+    var stale_keep: std.ArrayList(usize) = .empty;
+    var stale_bank: std.ArrayList(usize) = .empty;
     for (prompts.keep_prompts, 0..) |q, i| {
-        if (!wording.toModel(q) and try answeredByAny(srv, cx, told, kept, q, document, gone)) continue;
+        if (!wording.toModel(q) and try answeredByAny(srv, cx, told, kept, q, document, gone)) {
+            try stale_keep.append(a, i);
+            continue;
+        }
         try keep.append(a, kept_answers[i]);
         if (kept_answers.len > prompts.keep_prompts.len) try parts.think_keep.append(a, kept_answers[prompts.keep_prompts.len + i]);
     }
@@ -146,7 +151,10 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
     if (document) try replay(srv, cx, teacher, told[0], end, &keep);
     // the personal bank: kept as first answered, some held back to check, except what a fact answers
     for (try bankAnswers(srv, cx, teacher, end, gone), 0..) |b, i| {
-        if (try answeredByAny(srv, cx, told, kept, b.question, document, gone)) continue;
+        if (try answeredByAny(srv, cx, told, kept, b.question, document, gone)) {
+            try stale_bank.append(a, i);
+            continue;
+        }
         if ((i + teacher.lessons) % bank_checks == 0) try checks.append(a, .{ .question = b.question, .before = b.before }) else try keep.append(a, b.ex);
     }
     // a fact in another language: its own language's prompts held and checked as the English ones are
@@ -185,7 +193,7 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         .unasked = parts.unasked.items,
         .steps = steps,
     };
-    return .{ .full = full, .facts = told, .held = parts.held.items, .probes = parts.probes.items, .checks = checks.items, .thinks = parts.thinks, .document = document };
+    return .{ .full = full, .facts = told, .held = parts.held.items, .probes = parts.probes.items, .checks = checks.items, .thinks = parts.thinks, .document = document, .stale = .{ .keep = stale_keep.items, .bank = stale_bank.items } };
 }
 
 /// The facts' examples as a lesson gathers them.

@@ -12,6 +12,7 @@ const wording = @import("slide_words.zig");
 const check = @import("slide_verify.zig");
 const replace = @import("slide_replace.zig");
 const slide_graph = @import("slide_graph.zig");
+const slide_teacher = @import("slide_teacher.zig");
 const log = @import("log.zig");
 const Gone = @import("openai.zig").Gone;
 const Server = @import("server.zig").Server;
@@ -123,6 +124,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         const result = rounds(srv, a, &cx, plan, gone, id);
         const back = result.recalled.len == 1 and result.recalled[0];
         if (!back) putBack(srv, a, gave, id);
+        if (back) slide_teacher.refresh(srv, &cx, &srv.teacher, plan.stale, gone) catch srv.teacher.forgetAnswers(srv.io);
         if (result.why) |why| srv.slide.note(id, why);
         srv.slide.mark(id, if (back) .learned else .missed);
         if (back and document) for (plan.held) |h| if (h.subject.len > 0) srv.teacher.remember(h.subject, h.question, h.answer) catch {};
