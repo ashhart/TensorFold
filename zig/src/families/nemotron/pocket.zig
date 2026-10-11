@@ -12,6 +12,7 @@ const lesson_route = @import("lesson_route.zig");
 const pocket_fit = @import("pocket_fit.zig");
 const values = @import("pocket_values.zig");
 const pocket_dump = @import("pocket_dump.zig");
+const clock = @import("pocket_clock.zig");
 
 const Example = examples.Example;
 const Acting = lesson_route.Acting;
@@ -129,6 +130,7 @@ pub fn Pocket(comptime T: type) type {
         learned_before: usize = 0, // learned and pos as the open fact found them, for an undo
         pos_before: usize = 0,
         v: values.State = .{}, // the open fact's outputs as they are fitted
+        clock: clock.Clock = .{}, // where the open round's time goes
 
         pub fn init(gpa: std.mem.Allocator) Self {
             const asked: Mode = if (std.c.getenv("TF_SLIDE_POCKET_KEY")) |v| std.meta.stringToEnum(Mode, std.mem.span(v)) orelse .auto else .auto;
@@ -214,6 +216,7 @@ pub fn Pocket(comptime T: type) type {
             p.refit_up.clearRetainingCapacity();
             p.learned_before = p.learned.items.len;
             p.pos_before = p.pos.items.len;
+            p.clock = .{};
             p.next(.read);
         }
 
@@ -226,13 +229,25 @@ pub fn Pocket(comptime T: type) type {
         /// One unit: an example read, every layer fitted, an answer of an output step, or a held-out answer judged;
         /// true once the fact's neurons are in the pocket and judged (`back` of the held-out answers came back).
         pub fn step(p: *Self, t: *T, host: anytype) !bool {
-            return switch (p.phase) {
-                .read => p.readOnce(t),
-                .fit => p.fitAll(t, host),
-                .values => values.valueOnce(p, t, host),
-                .check => values.checkOnce(p, t, host),
+            const part: clock.Part = switch (p.phase) {
+                .read => .read,
+                .fit => .fit,
+                .values => if (p.v.judging) .judge else .values,
+                .check => .check,
+                .done => return true,
+            };
+            const t0 = clock.now(host.io);
+            const before = t.count;
+            const done = switch (p.phase) {
+                .read => try p.readOnce(t),
+                .fit => try p.fitAll(t, host),
+                .values => try values.valueOnce(p, t, host),
+                .check => try values.checkOnce(p, t, host),
                 .done => true,
             };
+            p.clock.add(part, clock.now(host.io) - t0, before, t.count);
+            if (p.phase == .done) p.clock.end();
+            return done;
         }
 
         /// Another round of outputs from where they are, then judged again.
@@ -347,13 +362,17 @@ pub fn Pocket(comptime T: type) type {
             const fits = try p.gpa.alloc(Fit, 3 * n);
             defer p.gpa.free(fits);
             @memset(fits, .{ .fires = std.math.maxInt(usize) });
+            const t0 = clock.now(host.io);
             var threads: [3 * 64]?std.Thread = @splat(null);
+            var fitted: usize = 0;
             for (0..3) |k| for (p.moe.items, 0..) |l, j| if (p.split[k] > 0 and candidate(l, c.layers, @fromBackingInt(@intCast(k)))) {
                 threads[k * n + j] = std.Thread.spawn(.{}, fitLayer, .{ p.gpa, p.rows.items, kinds[k * m ..][0..m], n, j, d, us[(k * n + j) * d ..][0..d], &fits[k * n + j] }) catch null;
+                fitted += 1;
             };
             for (0..3) |k| for (p.moe.items, 0..) |l, j| if (p.split[k] > 0 and candidate(l, c.layers, @fromBackingInt(@intCast(k)))) {
                 if (threads[k * n + j]) |th| th.join() else fitLayer(p.gpa, p.rows.items, kinds[k * m ..][0..m], n, j, d, us[(k * n + j) * d ..][0..d], &fits[k * n + j]);
             };
+            const t1 = clock.now(host.io);
             for (0..3) |k| if (p.split[k] > 0) {
                 const key: Key = @fromBackingInt(@intCast(k));
                 var order: std.ArrayList(usize) = .empty;
@@ -367,6 +386,7 @@ pub fn Pocket(comptime T: type) type {
             p.logSources(d, m, kinds);
             try p.findKeeps(d);
             try p.quiet(t, host);
+            std.log.info("slide pocket: {d} candidate neurons fitted on {d} read rows in {d:.1} s; earlier neurons checked in {d:.1} s", .{ fitted, m, t1 - t0, clock.now(host.io) - t1 });
             try p.v.begin(p.gpa, p.taken.items.len, d);
             p.next(.values);
             return false;

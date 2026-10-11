@@ -13,6 +13,7 @@ const adapters = @import("adapters.zig");
 const backend = @import("backend.zig");
 const lesson_route = @import("lesson_route.zig");
 const shape = @import("learn_shape.zig");
+const Count = @import("pocket_clock.zig").Count;
 
 const Metal = backend.Metal;
 const At = pl.At;
@@ -51,6 +52,7 @@ pub const Trainer = struct {
     push: Buffer, // f32 [3, layers, D]: the loss's gradient at each nudged row after each of them, after a target step
     inputs: Buffer, // bf16 [layers, max_rows, D]: each MoE layer's normed input, as the last keys step read it
     profile: ?*fwd.Profiler = null, // times each dispatch alone (a check's breakdown), else steps run as one command buffer
+    count: Count = .{}, // passes run and the rows they held
 
     /// Every buffer a step needs and a change at every layer, attached to the forward (zero, so nothing moves yet).
     pub fn init(gpa: std.mem.Allocator, b: *Metal) !*Trainer {
@@ -62,6 +64,7 @@ pub const Trainer = struct {
         t.b = b;
         t.profile = null;
         t.sketched = 0;
+        t.count = .{};
         // the saved lessons' blocks, which this trainer learns on beside, else room for the first
         const saved = b.living != null;
         t.sites = if (b.living) |s| s else try adapters.Sites.init(gpa, m.device, c, @max(b.o.chunk, 64), 0);
@@ -130,6 +133,7 @@ pub const Trainer = struct {
         if (ids.len < 2 or start < 1 or start >= ids.len or ids.len - 1 > max_rows) return error.BadExample;
         if (!reads(mode) and mode != .loss and mode != .target and t.sites.rank == 0) return error.NoOpenBlock;
         const rows = ids.len - 1;
+        t.count = .{ .passes = t.count.passes + 1, .rows = t.count.rows + rows };
         @memcpy(b.prompt.slice(u32, rows), ids[0..rows]);
         const share = 1 / @as(f32, @floatFromInt(ids.len - start));
         for (t.targets.slice(u32, rows), t.weights.slice(f32, rows), 0..) |*tg, *w, r| {

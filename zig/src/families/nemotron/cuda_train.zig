@@ -12,6 +12,7 @@ const ops = @import("cuda_train_ops.zig");
 const sites_mod = @import("cuda_sites.zig");
 const lesson_route = @import("lesson_route.zig");
 const back = @import("cuda_train_back.zig");
+const Count = @import("pocket_clock.zig").Count;
 
 /// Rows a step learns from at most: a question and its answer (attention's backward reads at most 256).
 pub const max_rows = 256;
@@ -135,6 +136,7 @@ pub const Trainer = struct {
     residuals: Shared = undefined, // bf16 [layers + 1, max_rows, D]: the residuals a target step saved, for the host
     sketched: usize = 0, // rows sketched since the sketches were cleared, each row's place in them
     route: lesson_route.Route = .{}, // this step's: which rows carry the lessons
+    count: Count = .{}, // passes run and the rows they held
 
     /// The model's shape, as the pocket and the probe read it on either backend.
     pub fn config(t: *const Trainer) Config {
@@ -440,6 +442,7 @@ pub const Trainer = struct {
         const k = t.ops_();
         const b = &t.buf;
         const rows = ids.len - 1;
+        t.count = .{ .passes = t.count.passes + 1, .rows = t.count.rows + rows };
         const D: usize = c.hidden;
         const share = 1 / @as(f32, @floatFromInt(ids.len - start));
         for (t.targets()[0..rows], t.weights()[0..rows], 0..) |*tg, *w, r| {
