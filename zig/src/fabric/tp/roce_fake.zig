@@ -10,6 +10,8 @@ pub const send_off = 8192;
 /// What the HCAs hold (posted, not completed); every count comes from the work requests themselves.
 pub const Fake = struct {
     pub var region: []const u8 = &.{};
+    /// The wire's slot (`Hw.wire`), every data write's bound with the send slots.
+    pub var slot_bytes: u64 = slot;
     pub var lag: u32 = 1;
     pub var polls: u64 = 0;
     pub var queue: [2][512]u64 = undefined;
@@ -44,7 +46,7 @@ pub const Fake = struct {
             if (w.send_flags & abi.send_inline == 0) {
                 const sge = w.sg_list[0];
                 const lo = @intFromPtr(region.ptr);
-                if (sge.addr < lo + send_off or sge.addr + sge.length > lo + send_off + 2 * slot) outside += 1;
+                if (sge.addr < lo + send_off or sge.addr + sge.length > lo + send_off + 2 * slot_bytes) outside += 1;
                 max_write = @max(max_write, sge.length);
                 sum += sge.length;
             }
@@ -82,7 +84,8 @@ pub const Hw = struct {
     mr: [2]abi.Mr = undefined,
 
     pub fn wire(hw: *Hw, region: []u8) rv.VerbsWire {
-        var w: rv.VerbsWire = .{ .v = undefined, .traffic_class = 0, .recv_off = send_off + 2 * slot, .flag_off = 4096, .send_off = send_off, .slot_bytes = slot, .region = region };
+        const s = Fake.slot_bytes;
+        var w: rv.VerbsWire = .{ .v = undefined, .traffic_class = 0, .recv_off = send_off + 2 * s, .flag_off = 4096, .send_off = send_off, .slot_bytes = s, .region = region };
         for (0..2) |i| {
             hw.ctx[i].ops = .{ ._before_poll = @splat(null), .poll_cq = Fake.pollCq, ._before_post = @splat(null), .post_send = Fake.postSend, .post_recv = undefined, ._after = @splat(null) };
             hw.qp[i].qp_num = @intCast(i);
