@@ -223,8 +223,8 @@ v0.2.8 checkout (`git clone --branch v0.2.8 --recurse-submodules https://github.
 it, then on the loader's path, and loads it at the first structured request; without it, everything else serves and a
 structured request gets HTTP 400. Nemotron (Metal and CUDA) and Qwen3.5-2B (Metal) enforce it; other native engines
 answer a structured request with HTTP 400. Drafting stays on: the drafts the head holds on the GPU come back to the host
-before each verify, the grammar cuts the ones it rejects, and the GPU masks each remaining row's logits, so drafted,
-`"draft": false` and concurrent replies are the same.
+before each verify, the grammar cuts the ones it rejects and drafts the text it forces itself (a key, closing markup),
+and each row's logits are masked before its draw, so drafted, `"draft": false` and concurrent replies are the same.
 
 On the native server, `tool_choice: "required"` and a named function are a grammar too, on the engines above: the answer
 is one or more calls in the chat template's own markup (`<tool_call>`, with Qwen3-Coder XML parameters as Nemotron and
