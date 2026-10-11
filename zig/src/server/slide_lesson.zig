@@ -66,6 +66,7 @@ const probe_count = 4; // of those, asked after each round to see the lesson ans
 const wording_temperature = 0.9; // the extra wordings are sampled, so they differ from the greedy first list
 const max_others = 96; // its questions asked about others, read by its router only
 const besides = 6; // questions about the fact's subject that it leaves unanswered, kept as the model answers them
+const neighbours = 4; // a document fact's questions for the same kind of answer about another of its subject's things
 const think_twins = 12; // near misses also kept with their thinking replies (each a long generation), the first ones
 const remember_probes = 4; // kept questions asked again as "Do you remember...?", which the model otherwise refuses
 const chunk_chars = 6000; // text a fact-finding call reads at once
@@ -425,6 +426,11 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     for (try wording.questions(a, asked_besides.content, others_about)) |q| {
         if ((!parts.document and !wording.firstPerson(q)) or wording.gives(fact, asked_all, answered_all, q)) continue;
         try nears.append(a, .{ .q = q, .judge = true, .siblings = true });
+    }
+    // the same kind of answer about the subject's other things stays as answered now: sick leave is not annual leave
+    if (got.entity and parts.document and language == null) {
+        const asked_near = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.neighbours_prompt, .{ fact, neighbours }), 32 * neighbours, gone);
+        for (try wording.questions(a, asked_near.content, neighbours)) |q| if (!wording.gives(fact, asked_all, answered_all, q)) try nears.append(a, .{ .q = q, .judge = true, .siblings = true });
     }
     // what else is asked of a document's subject stays as the model answers it: the fact makes it no better known
     if (got.entity and parts.document and language == null and phrase.len > 0) inline for (prompts.essence) |t| {
