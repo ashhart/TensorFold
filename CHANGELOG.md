@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Whole chat-completion replies keep prose accompanying tool calls, and the next turn's background prefill retains the same prose instead of replacing it with null.
 - A positive thinking budget, from the request or `--thinking-budget`, is refused with a 400 before streaming or submission when thinking is enabled and the native engine does not support budgets.
 - Jinja calls expand `**mapping` into keyword arguments for macros and functions, rejecting non-mappings and duplicate keyword names.
 - Qwen3.8-27B on a Mac keeps its weights in memory once. The checkpoint's projections and LM head stay in their files until load repacks them into the layouts the kernels read, and the 4-bit DFlash2 drafter reads its bf16 layers once, into its 4-bit copies, so a served 27B with its drafter takes 17.6 GiB less from load on: 26.5 against 44.2 GiB on an M5 Max and 21.8 against 39.4 GiB on an M3 Ultra at the default 32,768-token context. Replies are the same tokens, at the same speed. A round the GPU fails, out of memory for example, now ends only the requests it held and logs Metal's error, and later requests run; before, every later request failed (#643). Thanks to @RS91Dev for the report and the analysis.

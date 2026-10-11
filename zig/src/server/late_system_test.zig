@@ -64,6 +64,10 @@ const DropLate = struct {
             first = false;
             if (drop) continue;
             try out.print(a, "[{s}]{s}\n", .{ role, textOf(m, "content") });
+            if (m.get("tool_calls")) |calls| {
+                try out.appendSlice(a, try json.stringify(a, calls, .{ .compact = true }));
+                try out.append(a, '\n');
+            }
         }
         return out.items;
     }
@@ -81,21 +85,34 @@ fn textOf(v: json.Value, key: []const u8) []const u8 {
 /// Copies the prompt the server submits, then finishes at once.
 const Capture = struct {
     prompt: []u32 = &.{},
+    background_prompt: []u32 = &.{},
+    reply: []const u8 = "hi",
+    warm_turns: bool = false,
 
     fn engine(e: *@This()) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
 
-    fn info(_: *anyopaque) api.Info {
-        return .{};
+    fn info(ctx: *anyopaque) api.Info {
+        const e: *Capture = @ptrCast(@alignCast(ctx));
+        return .{ .warm_turns = e.warm_turns };
     }
 
     fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const e: *Capture = @ptrCast(@alignCast(ctx));
+        if (request.background) {
+            std.testing.allocator.free(e.background_prompt);
+            e.background_prompt = std.testing.allocator.dupe(u32, request.prompt) catch return error.Busy;
+            sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
+            return;
+        }
         std.testing.allocator.free(e.prompt);
         e.prompt = std.testing.allocator.dupe(u32, request.prompt) catch return error.Busy;
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
-        sink.event(sink.ctx, id, &.{ .tokens = &.{ 'h', 'i' } });
+        for (e.reply) |byte| {
+            const token: u32 = byte;
+            sink.event(sink.ctx, id, &.{ .tokens = &.{token} });
+        }
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
     }
 
@@ -207,4 +224,152 @@ test "a mid-conversation system message renders the same prompt on Messages and 
     defer std.testing.allocator.free(misplaced.body);
     try std.testing.expectEqual(@as(u16, 400), misplaced.status);
     try std.testing.expect(std.mem.indexOf(u8, misplaced.body, "mid-conversation system messages must follow a user turn and precede an assistant or end") != null);
+}
+
+const prose_call = "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"a\"}}</tool_call>";
+const prose_reply = "Before.\n" ++ prose_call ++ "\nAfter.";
+const retained_prose = "Before.\n\nAfter.";
+const chat_tools = "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}}]";
+const prose_chat = "{\"model\":\"m\",\"max_tokens\":256,\"messages\":[{\"role\":\"user\",\"content\":\"go\"}]," ++ chat_tools;
+
+// Route adapters return prose and one call; warming submits both to the engine.
+test "tool reply prose survives whole chat, Messages and Responses and their warm prompts" {
+    var text: DropLate = .{};
+    var backend: Capture = .{ .reply = prose_reply, .warm_turns = true };
+    defer std.testing.allocator.free(backend.prompt);
+    defer std.testing.allocator.free(backend.background_prompt);
+    const srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = false,
+        .use_drafts = false,
+    }, null);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const requests = [_]struct { path: []const u8, body: []const u8 }{
+        .{ .path = "/v1/chat/completions", .body = prose_chat ++ "}" },
+        .{ .path = "/v1/messages", .body = "{\"model\":\"m\",\"max_tokens\":256,\"messages\":[{\"role\":\"user\",\"content\":\"go\"}],\"tools\":[{\"name\":\"lookup\",\"input_schema\":{\"type\":\"object\"}}]}" },
+        .{ .path = "/v1/responses", .body = "{\"model\":\"m\",\"max_output_tokens\":256,\"input\":\"go\",\"tools\":[{\"type\":\"function\",\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}]}" },
+    };
+    for (requests, 0..) |request, route| {
+        const got = try exchange(srv, request.path, request.body);
+        defer std.testing.allocator.free(got.body);
+        try std.testing.expectEqual(@as(u16, 200), got.status);
+        const body = (try json.parse(a, got.body)).ok;
+        var call_id: []const u8 = undefined;
+        switch (route) {
+            0 => {
+                const choice = body.get("choices").?.array[0];
+                try std.testing.expectEqualStrings("tool_calls", choice.get("finish_reason").?.string);
+                const message = choice.get("message").?;
+                try std.testing.expectEqualStrings(retained_prose, message.get("content").?.string);
+                const calls = message.get("tool_calls").?.array;
+                try std.testing.expectEqual(@as(usize, 1), calls.len);
+                call_id = calls[0].get("id").?.string;
+                try std.testing.expectEqualStrings("{\"q\":\"a\"}", calls[0].get("function").?.get("arguments").?.string);
+            },
+            1 => {
+                try std.testing.expectEqualStrings("tool_use", body.get("stop_reason").?.string);
+                const blocks = body.get("content").?.array;
+                try std.testing.expectEqual(@as(usize, 2), blocks.len);
+                try std.testing.expectEqualStrings("text", blocks[0].get("type").?.string);
+                try std.testing.expectEqualStrings(retained_prose, blocks[0].get("text").?.string);
+                try std.testing.expectEqualStrings("tool_use", blocks[1].get("type").?.string);
+                try std.testing.expectEqualStrings("a", blocks[1].get("input").?.get("q").?.string);
+                call_id = blocks[1].get("id").?.string;
+            },
+            2 => {
+                const items = body.get("output").?.array;
+                try std.testing.expectEqual(@as(usize, 2), items.len);
+                try std.testing.expectEqualStrings("message", items[0].get("type").?.string);
+                try std.testing.expectEqualStrings(retained_prose, items[0].get("content").?.array[0].get("text").?.string);
+                try std.testing.expectEqualStrings("function_call", items[1].get("type").?.string);
+                try std.testing.expectEqualStrings("{\"q\":\"a\"}", items[1].get("arguments").?.string);
+                call_id = items[1].get("call_id").?.string;
+                const stored = (try srv.store.get(srv.io, a, body.get("id").?.string)).?;
+                try std.testing.expectEqualStrings(retained_prose, stored.get("output").?.array[0].get("content").?.array[0].get("text").?.string);
+            },
+            else => unreachable,
+        }
+        const warmed = try promptText(backend.background_prompt);
+        defer std.testing.allocator.free(warmed);
+        try std.testing.expect(std.mem.indexOf(u8, warmed, "[assistant]" ++ retained_prose ++ "\n") != null);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, warmed, call_id));
+        try std.testing.expect(std.mem.indexOf(u8, warmed, prose_call) == null);
+    }
+}
+
+test "legacy tool stream sends prose before and after exactly one call and warms the same history" {
+    var text: DropLate = .{};
+    var backend: Capture = .{ .reply = prose_reply, .warm_turns = true };
+    defer std.testing.allocator.free(backend.prompt);
+    defer std.testing.allocator.free(backend.background_prompt);
+    const srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = false,
+        .use_drafts = false,
+    }, null);
+    defer srv.deinit();
+    const got = try exchange(srv, "/v1/chat/completions", prose_chat ++ ",\"stream\":true}");
+    defer std.testing.allocator.free(got.body);
+    try std.testing.expectEqual(@as(u16, 200), got.status);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var prose: std.ArrayList(u8) = .empty;
+    var arguments: std.ArrayList(u8) = .empty;
+    var calls: usize = 0;
+    var lines = std.mem.splitScalar(u8, got.body, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "data: ")) continue;
+        const data = std.mem.trimEnd(u8, line["data: ".len..], "\r");
+        if (std.mem.eql(u8, data, "[DONE]")) continue;
+        const payload = (try json.parse(a, data)).ok;
+        const choices = payload.get("choices").?.array;
+        if (choices.len == 0) continue;
+        const delta = choices[0].get("delta").?;
+        if (delta.get("content")) |content| try prose.appendSlice(a, content.string);
+        if (delta.get("tool_calls")) |tc| for (tc.array) |call| {
+            if (call.get("id")) |_| calls += 1;
+            if (call.get("function").?.get("arguments")) |args| try arguments.appendSlice(a, args.string);
+        };
+    }
+    try std.testing.expectEqualStrings(retained_prose, prose.items);
+    try std.testing.expectEqual(@as(usize, 1), calls);
+    try std.testing.expectEqualStrings("{\"q\":\"a\"}", arguments.items);
+    const warmed = try promptText(backend.background_prompt);
+    defer std.testing.allocator.free(warmed);
+    try std.testing.expect(std.mem.indexOf(u8, warmed, "[assistant]" ++ retained_prose ++ "\n") != null);
+}
+
+test "single-call whole replies retain prose and tool-only replies still have null content" {
+    var text: DropLate = .{};
+    var backend: Capture = .{};
+    defer std.testing.allocator.free(backend.prompt);
+    const srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = false,
+        .use_drafts = false,
+    }, null);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ prose_reply, prose_call }, 0..) |reply, i| {
+        backend.reply = reply;
+        const got = try exchange(srv, "/v1/chat/completions", prose_chat ++ ",\"parallel_tool_calls\":false}");
+        defer std.testing.allocator.free(got.body);
+        try std.testing.expectEqual(@as(u16, 200), got.status);
+        const message = (try json.parse(a, got.body)).ok.get("choices").?.array[0].get("message").?;
+        if (i == 0) {
+            try std.testing.expectEqualStrings(retained_prose, message.get("content").?.string);
+        } else {
+            try std.testing.expect(message.get("content").? == .null);
+        }
+        try std.testing.expectEqual(@as(usize, 1), message.get("tool_calls").?.array.len);
+    }
 }
