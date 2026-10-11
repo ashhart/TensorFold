@@ -149,9 +149,18 @@ pub fn wordIn(words: []const []const u8, question: []const u8) []const u8 {
         const bare = possessor(w);
         for (words) |word| if (std.ascii.eqlIgnoreCase(bare, word)) {
             found = word;
+        } else if (oneOrMany(bare, word)) {
+            found = bare; // as the question writes it, which its key row is found by
         };
     }
     return found;
+}
+
+/// Whether two words are one in the singular and the plural ("eye", "eyes").
+fn oneOrMany(x: []const u8, y: []const u8) bool {
+    const a = if (x.len > 3 and std.ascii.toLower(x[x.len - 1]) == 's') x[0 .. x.len - 1] else x;
+    const b = if (y.len > 3 and std.ascii.toLower(y[y.len - 1]) == 's') y[0 .. y.len - 1] else y;
+    return a.len >= 3 and std.ascii.eqlIgnoreCase(a, b);
 }
 
 /// `w` without a possessive "'s".
@@ -172,6 +181,8 @@ test "a fact's subject words, and the last of them a question says" {
     defer a.free(mine);
     try std.testing.expectEqual(@as(usize, 1), mine.len);
     try std.testing.expectEqualStrings("sister", wordIn(mine, "What is my sister's name?"));
+    try std.testing.expectEqualStrings("eye", wordIn(&.{"eyes"}, "What is my eye colour?"));
+    try std.testing.expectEqualStrings("", wordIn(&.{"eyes"}, "What is my favourite colour?"));
     const pies = try subjectWords(a, "Mój pies");
     defer a.free(pies);
     try std.testing.expect(pies.len == 1 and std.mem.eql(u8, pies[0], "pies"));
