@@ -81,8 +81,7 @@ pub fn copy(x: *const fwd.Ctx, e: mtl.ComputeEncoder, s: *st.State, snap: Ref, a
     s.mtp_pos = at;
 }
 
-/// A resident state made whole before its slot writes below it: its KDA states from `old`, then the MLA prefixes
-/// from `home` (the slot's caches), into `whole` in a whole state's layout.
+/// A resident state made whole: its KDA states from `old`, then its MLA prefixes from `home` (its slot), into `whole`'s layout.
 pub fn spill(x: *const fwd.Ctx, e: mtl.ComputeEncoder, old: Ref, whole: Ref, at: u32, home: *st.State) void {
     const c = x.c;
     var off = bytes(c, at, true);

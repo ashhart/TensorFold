@@ -7,6 +7,7 @@ const mtp = @import("mtp.zig");
 const prompt_mod = @import("prompt.zig");
 const snapshot = @import("snapshot.zig");
 const pool_mod = @import("pool.zig");
+const kept_mod = @import("kept.zig");
 const Engine = @import("engine.zig").Engine;
 const Ref = @import("weights.zig").Ref;
 const Fence = @import("../../core/fence.zig").Fence;
@@ -35,12 +36,6 @@ pub const Slot = struct {
     region: ?pool_mod.Region = null, // pooled: this stream's share of the MLA pool (pool.zig)
 };
 
-/// The prompt cache's leave for a kept state to take `extra` more bytes (Store.grow).
-pub const Grow = struct {
-    ctx: *anyopaque,
-    f: *const fn (ctx: *anyopaque, saved: *anyopaque, extra: u64) bool,
-};
-
 pub const Slots = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
@@ -61,8 +56,7 @@ pub const Slots = struct {
     ahead: [2]f64 = .{ 0, 0 }, // the last launch's GPU start and end (0: none)
     launched: ?mtl.CommandBuffer = null, // keeps and drafts committed ahead: the window after them encodes while they run
     digest: u64 = 0, // the last window's picks hashed: a pair's ranks compare theirs
-    grow: ?Grow = null, // the prompt cache's leave to make a resident state whole before its slot writes below it
-    spilled: u64 = 0, // resident states made whole before their slots wrote below them
+    grow: ?kept_mod.Grow = null, // the prompt cache's leave to make a resident state whole before its slot writes below it
     ring: Ref, // u32 [ring_len]: tokens by handle, a queued round's input read from its slot on the GPU
     ring_at: u32 = 0,
     ring_cb: [ring_len]?mtl.CommandBuffer = @splat(null), // the queued round writing each slot (retained) until read
@@ -92,168 +86,26 @@ pub const Slots = struct {
         sl.dropRing();
         if (sl.fence) |f| f.deinit();
         var it = sl.snaps.valueIterator();
-        while (it.next()) |snap| freeSnap(gpa, snap.*);
+        while (it.next()) |snap| kept_mod.freeSnap(gpa, snap.*);
         sl.snaps.deinit(gpa);
         gpa.free(sl.slots);
     }
 
-    fn freeSnap(gpa: std.mem.Allocator, snap: *snapshot.Snap) void {
-        snap.buf.deinit();
-        gpa.destroy(snap);
-    }
+    pub const save = kept_mod.save;
+    pub const restore = kept_mod.restore;
+    pub const usable = kept_mod.usable;
+    pub const probe = kept_mod.probe;
+    pub const writeSnap = kept_mod.writeSnap;
+    pub const readSnap = kept_mod.readSnap;
+    pub const drop = kept_mod.drop;
+    pub const pick = kept_mod.pick;
 
     /// Prompt states stay resident (their MLA prefixes in their slots) unless learned ones go to files.
     pub fn resident(sl: *const Slots) bool {
         return sl.learned == null;
     }
 
-    /// Keep slot `i`'s prompt state at `at` tokens (its pass stands there) as snapshot `id` (0: the next); `home`: resident.
-    pub fn save(sl: *Slots, i: u32, at: u32, id: u32, home: bool) !*snapshot.Snap {
-        const slot = try sl.slotAt(i);
-        if (at == 0 or at != slot.s.pos or slot.rows != 0 or sl.snaps.contains(id)) return error.SnapshotOutOfStep;
-        const n = snapshot.bytes(&sl.e.c, at, home);
-        const buf = try sl.e.device.buffer(n, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-        errdefer buf.deinit();
-        const snap = try sl.gpa.create(snapshot.Snap);
-        errdefer sl.gpa.destroy(snap);
-        snap.* = .{ .id = if (id != 0) id else sl.next_snap, .at = at, .buf = buf, .bytes = n, .home = if (home) i else null };
-        try sl.copySnap(slot, snap, true);
-        try sl.snaps.put(sl.gpa, snap.id, snap);
-        sl.next_snap = @max(sl.next_snap, snap.id + 1);
-        return snap;
-    }
-
-    /// Slot `i`, just begun, takes snapshot `id`'s state: its prompt pass goes on from the snapshot's position.
-    pub fn restore(sl: *Slots, i: u32, id: u32) !void {
-        const slot = try sl.slotAt(i);
-        const snap = sl.snaps.get(id) orelse return error.SnapshotOutOfStep;
-        if (slot.s.pos != 0 or snap.at >= slot.prompt_len or snap.stale) return error.SnapshotOutOfStep;
-        if (snap.home != i) try sl.overwrite(i, 0); // another slot's prefixes, the pool's held blocks or a whole state's, copied over every one of this slot's
-        try sl.copySnap(slot, snap, false);
-    }
-
-    /// Whether `snap` is still kept and usable (a resident state whose slot has not written below it).
-    pub fn usable(sl: *const Slots, snap: *const snapshot.Snap) bool {
-        return sl.snaps.get(snap.id) == snap and !snap.stale;
-    }
-
-    /// Slot `i` writes its MLA rows from `at` on: its resident states past `at` copy their prefixes out first when
-    /// the prompt cache's budget has room (they stay kept, whole), else they lose them (stale).
-    fn overwrite(sl: *Slots, i: u32, at: u32) !void {
-        var it = sl.snaps.valueIterator();
-        while (it.next()) |snap| if (snap.*.home == i and snap.*.at > at and !snap.*.stale) {
-            if (!try sl.spill(snap.*)) snap.*.stale = true;
-        };
-    }
-
-    /// A resident state made whole: a buffer for its MLA prefixes beside its KDA states, charged to the prompt cache,
-    /// filled from its slot before the slot writes. One Mac only: a pair's rank 1 holds its half resident still.
-    fn spill(sl: *Slots, snap: *snapshot.Snap) !bool {
-        const home = snap.home orelse return false;
-        const g = sl.grow orelse return false;
-        if (sl.e.ep != null) return false;
-        const whole = snapshot.bytes(&sl.e.c, snap.at, false);
-        if (!g.f(g.ctx, snap, whole - snap.bytes)) return false;
-        const buf = try sl.e.device.buffer(whole, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-        errdefer buf.deinit();
-        try sl.flush();
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        const x = sl.ctx(&sl.slots[home]);
-        const b = sl.e.begin();
-        snapshot.spill(&x, b.enc, .{ .buf = snap.buf }, .{ .buf = buf }, snap.at, &sl.slots[home].s);
-        try sl.e.finish(b.cb, b.enc);
-        snap.buf.deinit();
-        snap.buf = buf;
-        snap.bytes = whole;
-        snap.home = null;
-        sl.spilled += 1;
-        std.log.info("glm: a kept state of {d} tokens copied its prefixes out of slot {d} before the slot wrote below it ({d} MiB more)", .{ snap.at, home, (whole - snapshot.bytes(&sl.e.c, snap.at, true)) >> 20 });
-        return true;
-    }
-
-    /// A fixed prompt's state through slot 0, hashed: two builds agree only when their prompt passes give equal bits.
-    pub fn probe(sl: *Slots) !u64 {
-        var toks: [4096 + 40 + 7]u32 = undefined; // a full chunk past the sparse index's reach, a middle one, a short one
-        for (&toks, 0..) |*t, i| t.* = @intCast(1000 + i * 7919 % 50000);
-        const len: u32 = @intCast(@min(toks.len, pool_mod.capacity(sl) -| (st.max_rows + 2)));
-        try sl.begin(0, toks[0..len], true);
-        defer sl.release(0);
-        var at: u32 = 0;
-        for ([_]u32{ 4096, 4136, len }) |end| while (at < @min(end, len)) {
-            const n = sl.chunkRows(at, @min(end, len));
-            try sl.chunk(0, at, n);
-            at += n;
-        };
-        const snap = try sl.save(0, at, 0, false);
-        defer sl.drop(snap.id);
-        return std.hash.Wyhash.hash(0x70, snap.buf.contents()[0..snap.bytes]);
-    }
-
-    /// Snapshot `id` to its learned-state file, once the copy into it has finished.
-    pub fn writeSnap(sl: *Slots, id: u32, file: [:0]const u8) !void {
-        const snap = sl.snaps.get(id) orelse return error.SnapshotOutOfStep;
-        try sl.flush();
-        try snapshot.writeFile(snap, file);
-    }
-
-    /// A learned state of `at` tokens read from `file` as snapshot `id`.
-    pub fn readSnap(sl: *Slots, id: u32, at: u32, file: [:0]const u8) !*snapshot.Snap {
-        if (id == 0 or sl.snaps.contains(id)) return error.SnapshotOutOfStep;
-        const n = snapshot.bytes(&sl.e.c, at, false);
-        const buf = try sl.e.device.buffer(n, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
-        errdefer buf.deinit();
-        const snap = try sl.gpa.create(snapshot.Snap);
-        errdefer sl.gpa.destroy(snap);
-        snap.* = .{ .id = id, .at = at, .buf = buf, .bytes = n };
-        try snapshot.readFile(snap, file);
-        try sl.snaps.put(sl.gpa, id, snap);
-        sl.next_snap = @max(sl.next_snap, id + 1);
-        return snap;
-    }
-
-    /// Forget snapshot `id`.
-    pub fn drop(sl: *Slots, id: u32) void {
-        const kv = sl.snaps.fetchRemove(id) orelse return;
-        freeSnap(sl.gpa, kv.value);
-    }
-
-    fn copySnap(sl: *Slots, slot: *Slot, snap: *snapshot.Snap, into: bool) !void {
-        try sl.flush();
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        const x = sl.ctx(slot);
-        const b = sl.e.begin();
-        var view: st.State = undefined;
-        snapshot.copy(&x, b.enc, &slot.s, .{ .buf = snap.buf }, snap.at, into, pool_mod.prefixOf(sl, snap, &view));
-        try sl.e.finish(b.cb, b.enc);
-    }
-
-    /// A free slot, or null when every slot holds a stream.
-    pub fn free(sl: *const Slots) ?u32 {
-        for (sl.slots, 0..) |s, i| if (!s.used) return @intCast(i);
-        return null;
-    }
-
-    /// A new stream's free slot: `reuse`'s home when free, else the one holding the fewest usable resident states.
-    pub fn pick(sl: *const Slots, reuse: ?*const snapshot.Snap) ?u32 {
-        if (reuse) |r| if (r.home) |h| if (h < sl.slots.len and !sl.slots[h].used and sl.usable(r)) return h;
-        var best: ?u32 = null;
-        var fewest: usize = std.math.maxInt(usize);
-        for (sl.slots, 0..) |s, i| {
-            if (s.used) continue;
-            var held: usize = 0;
-            var it = sl.snaps.valueIterator();
-            while (it.next()) |snap| held += @intFromBool(snap.*.home == @as(u32, @intCast(i)) and !snap.*.stale);
-            if (held < fewest) {
-                fewest = held;
-                best = @intCast(i);
-            }
-        }
-        return best;
-    }
-
-    fn ctx(sl: *Slots, slot: *Slot) fwd.Ctx {
+    pub fn ctx(sl: *Slots, slot: *Slot) fwd.Ctx {
         var x = sl.e.ctx();
         x.s = &slot.s;
         return x;
@@ -317,7 +169,7 @@ pub const Slots = struct {
         return slot.s.pos + slot.rows;
     }
 
-    fn slotAt(sl: *Slots, i: u32) !*Slot {
+    pub fn slotAt(sl: *Slots, i: u32) !*Slot {
         if (i >= sl.slots.len or !sl.slots[i].used) return error.SlotOutOfStep;
         return &sl.slots[i];
     }
@@ -356,7 +208,7 @@ pub const Slots = struct {
         const slot = try sl.slotAt(i);
         const P = slot.prompt_len;
         if (n == 0 or at != slot.s.pos or at + n > P or n > @max(e.chunk_rows, st.max_rows)) return error.ChunkOutOfStep;
-        try sl.overwrite(i, at);
+        try kept_mod.overwrite(sl, i, at);
         const D = e.c.hidden;
         const last = at + n == P;
         const absorb = if (last) n - 1 else n;
