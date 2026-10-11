@@ -1,4 +1,4 @@
-//! The facts a text holds: short chat's sentences, else what the fact finder lists, each once.
+//! The facts a text holds: short chat's sentences, else what the fact finder lists, each once and both ways round.
 const std = @import("std");
 const errors = @import("errors.zig");
 const log = @import("log.zig");
@@ -11,28 +11,63 @@ const Allocator = std.mem.Allocator;
 const Cx = errors.Cx;
 
 const chunk_chars = 6000; // text a fact-finding call reads at once
+const reverse_batch = 16; // found facts read at once for their other way round
 
-/// The facts in `text`: short chat's sentences, else what the model finds worth remembering in it.
+/// The facts in `text`: short chat's sentences, else what the model finds worth remembering in it; then the other way
 pub fn facts(srv: *Server, cx: *Cx, text: []const u8, source: []const u8, gone: anytype) ![]const []const u8 {
     const a = cx.a;
     const told = try wording.sentences(a, text);
-    if (std.mem.eql(u8, source, "chat") and told.len <= 4) return chatFacts(srv, cx, told, gone);
+    if (std.mem.eql(u8, source, "chat") and told.len <= 4) return reversed(srv, cx, told, text, gone);
     var out: std.ArrayList([]const u8) = .empty;
     var at: usize = 0;
     while (at < text.len) : (at += chunk_chars) try find(srv, cx, &out, text[at..@min(text.len, at + chunk_chars)], text, gone);
+    return reversed(srv, cx, out.items, text, gone);
+}
+
+/// `found` with each fact naming a person beside an organisation or thing also the other way round, right after it.
+fn reversed(srv: *Server, cx: *Cx, found: []const []const u8, text: []const u8, gone: anytype) ![]const []const u8 {
+    const a = cx.a;
+    // a lesson keyed on Petra never answers "Who founded Northgate?" (the reversal curse, Berglund et al. 2023)
+    const after = try a.alloc(?[]const u8, found.len);
+    @memset(after, null);
+    var start: usize = 0;
+    while (start < found.len) : (start += reverse_batch) {
+        const end = @min(found.len, start + reverse_batch);
+        var list: std.ArrayList(u8) = .empty;
+        for (found[start..end], start + 1..) |f, n| if (!wording.firstPerson(f)) try list.print(a, "{d}. {s}\n", .{ n, f });
+        if (list.items.len == 0) continue;
+        const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.reverse_prompt, .{list.items}), @intCast(32 * (end - start)), gone);
+        var it = std.mem.splitScalar(u8, reply.content, '\n');
+        while (it.next()) |line| {
+            const i = (lineNumber(line) orelse continue) -% 1;
+            if (i < start or i >= end or after[i] != null or wording.firstPerson(found[i])) continue;
+            const fact = wording.unmark(line);
+            if (wording.words(fact) < 3 or !wording.grounded(fact, text) or said(fact, found) or said(fact, after)) continue;
+            log.line("slide: \"{s}\" is also learned the other way round: \"{s}\"", .{ found[i], fact });
+            after[i] = fact;
+        }
+    }
+    var out: std.ArrayList([]const u8) = .empty;
+    for (found, after) |f, r| {
+        try out.append(a, f);
+        if (r) |other| try out.append(a, other);
+    }
     return out.items;
 }
 
-/// Chat's sentences: one about the user as told, another as the finder writes it (a person's fact both ways round).
-fn chatFacts(srv: *Server, cx: *Cx, told: []const []const u8, gone: anytype) ![]const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    for (told) |sentence| {
-        const had = out.items.len;
-        // "Who founded Northgate?" keys only on "Northgate was founded by Petra."; one found empty is kept as told
-        if (!wording.firstPerson(sentence)) try find(srv, cx, &out, sentence, sentence, gone);
-        if (out.items.len == had) try out.append(cx.a, sentence);
-    }
-    return out.items;
+/// Whether one of `facts` already says `fact`.
+fn said(fact: []const u8, facts_: anytype) bool {
+    for (facts_) |f| if (@as(?[]const u8, f)) |had| if (restates(fact, had)) return true;
+    return false;
+}
+
+/// A list line's number ("3. ..." or "3) ..."), or null.
+fn lineNumber(line: []const u8) ?usize {
+    const t = std.mem.trimStart(u8, line, " \t*");
+    var digits: usize = 0;
+    while (digits < t.len and std.ascii.isDigit(t[digits])) digits += 1;
+    if (digits == 0 or digits > 4 or digits == t.len or (t[digits] != '.' and t[digits] != ')')) return null;
+    return std.fmt.parseInt(usize, t[0..digits], 10) catch null;
 }
 
 /// The facts the model finds in `piece` that `text` holds, into `out`.
@@ -90,4 +125,6 @@ test "a fact the fact finder reads again in other words is the one it found befo
     try std.testing.expect(restates("Every employee at Quillo Labs gets 32 days of annual leave.", "Quillo Labs employee gets 32 days of annual leave."));
     try std.testing.expect(!restates("Quillo Labs office opens at 9 am.", "Quillo Labs: office is in Dunbrabrin"));
     try std.testing.expect(!restates("Emeka Halthornrand founded Quillo Labs.", "Quillo Labs was founded by Emeka Halthornrand."));
+    try std.testing.expect(lineNumber("12. Acme was founded by Jo Smith.") == 12 and lineNumber(" 3) x") == 3);
+    try std.testing.expect(lineNumber("2011 was the year.") == null and lineNumber("Acme 3.") == null);
 }
