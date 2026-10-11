@@ -27,6 +27,7 @@ test {
     _ = @import("../../core/paced_read.zig");
     _ = @import("../../core/copy_index.zig");
     _ = @import("attn_check.zig");
+    _ = @import("launch_check.zig");
     _ = @import("load_plan.zig");
     _ = @import("page_cache.zig");
     _ = pool;
