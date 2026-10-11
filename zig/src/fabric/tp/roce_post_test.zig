@@ -102,3 +102,19 @@ test "chunked strides posted back to back: at most 2 MiB in flight over both HCA
         try std.testing.expect(Fake.max_inflight > 1 << 20);
     }
 }
+
+test "Roce.abort (the fail-fast hook) moves both QPs to error: no send goes out and no peer write lands" {
+    const region = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), Roce.regionBytes(fake.slot));
+    defer std.testing.allocator.free(region);
+    @memset(region, 0);
+    Fake.region = region;
+    Fake.slot_bytes = fake.slot;
+    Fake.reset(1);
+    fake.Halts.reset();
+    var hw: fake.Hw = .{};
+    var w = hw.wire(region);
+    fake.Halts.install(&hw, &w);
+    var r: Roce = .{ .me = 0, .slot_bytes = fake.slot, .timeout_ns = 1, .region = region, .mapping = region, .wire = .{ .verbs = w }, .cpu = null };
+    r.abort();
+    try std.testing.expect(fake.Halts.halted[0] and fake.Halts.halted[1]);
+}

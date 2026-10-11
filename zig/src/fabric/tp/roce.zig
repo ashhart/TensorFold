@@ -198,6 +198,7 @@ pub const Roce = struct {
                 r.mapping = try posix.mmap(null, len, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
                 r.region = r.mapping;
                 errdefer posix.munmap(r.mapping);
+                try rv.prepareRegion(r.mapping);
                 r.wire = .{ .verbs = try rv.VerbsWire.open(o.hcas, r.region, .{ .send = send_off, .recv = send_off + 2 * r.slot_bytes, .flags = flag_off, .slot = r.slot_bytes }, o.traffic_class) };
             },
             .shm => {
@@ -222,6 +223,8 @@ pub const Roce = struct {
                 if (all[1 - r.me].len != @sizeOf(rv.Record)) return error.BadRecord;
                 @memcpy(std.mem.asBytes(&peer), all[1 - r.me]);
                 try v.connect(peer);
+                var line: [512]u8 = undefined;
+                log.info("[tensorfold] tp roce: rank {d} registered {s}", .{ r.me, v.describe(&line) });
                 return true;
             },
         }
@@ -261,12 +264,35 @@ pub const Roce = struct {
         posix.munmap(r.mapping);
     }
 
+    /// Regions a failed transport left registered and mapped (the process exit is their only teardown).
+    pub var kept: std.atomic.Value(u32) = .init(0);
+
+    /// HCAs and GPU quiet, then unregister and unmap; a failed transport's region is kept until exit.
     pub fn deinit(r: *Roce) void {
+        const was_failed = r.failed();
+        r.word(w_abort).store(1, .release);
         r.running.store(false, .release);
         if (r.thread) |t| t.join();
+        const quiet = r.quiesce();
+        if (was_failed or !quiet) {
+            const why = if (was_failed) "failed" else "did not quiesce";
+            log.warn("[tensorfold] tp roce: rank {d}: the transport {s}; region 0x{x} ({d} B) kept registered until exit", .{ r.me, why, @intFromPtr(r.region.ptr), r.region.len });
+            _ = kept.fetchAdd(1, .monotonic);
+            return;
+        }
         r.closeDevice();
         r.closeWire();
         std.heap.page_allocator.destroy(r);
+    }
+
+    /// The QPs to error with every posted request reaped, and the GPU's work on the region done.
+    fn quiesce(r: *Roce) bool {
+        const wire = switch (r.wire) {
+            .verbs => |*v| v.quiesce(rv.quiesce_ns),
+            .shm => true,
+        };
+        const gpu = if (r.d) |d| d.api.cuCtxSynchronize() == cuda.abi.success else true;
+        return wire and gpu;
     }
 
     fn word(r: *const Roce, i: usize) *std.atomic.Value(u32) {
@@ -279,6 +305,21 @@ pub const Roce = struct {
         log.err("[tensorfold] tp roce proxy: {s}", .{s});
         r.word(w_proxy_failed).store(1, .release);
         r.word(w_abort).store(1, .release); // waits on this rank end now instead of at the timeout
+        r.halt();
+    }
+
+    /// The HCAs stop: nothing of this rank's goes out and none of the peer's writes lands while the ranks go down.
+    fn halt(r: *Roce) void {
+        switch (r.wire) {
+            .verbs => |*v| _ = v.halt(),
+            .shm => {},
+        }
+    }
+
+    /// The transport failed or was aborted: a device may still write to its region.
+    pub fn failed(r: *const Roce) bool {
+        if (r.aborted.load(.acquire) or r.word(w_abort).load(.acquire) != 0) return true;
+        return r.word(w_proxy_failed).load(.acquire) != 0 or r.word(w_failed).load(.acquire) != 0;
     }
 
     /// The proxy loop: spin on the doorbell, post each new sequence (at most two pending), reap while idle, then nap.
@@ -382,6 +423,7 @@ pub const Roce = struct {
     pub fn abort(r: *Roce) void {
         r.aborted.store(true, .release);
         r.word(w_abort).store(1, .release);
+        r.halt();
     }
 
     pub fn check(r: *Roce) Error!void {

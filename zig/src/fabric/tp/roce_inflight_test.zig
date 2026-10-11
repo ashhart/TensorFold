@@ -4,6 +4,7 @@ const rv = @import("roce_verbs.zig");
 const fake = @import("roce_fake.zig");
 const Roce = @import("roce.zig").Roce;
 const Fake = fake.Fake;
+const Halts = fake.Halts;
 const slot = fake.slot;
 
 test "chunked posts: the wire's own in-flight count and peak match the HCAs', and reach the 2 MiB cap" {
@@ -23,4 +24,77 @@ test "chunked posts: the wire's own in-flight count and peak match the HCAs', an
     try std.testing.expectEqual(@as(u64, 0), Fake.inflight);
     try std.testing.expectEqual(Fake.max_inflight, w.peak.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 2 << 20), w.peak.load(.monotonic));
+}
+
+test "a failed transport: both QPs go to error before the first flush and every posted write is reaped" {
+    const region = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), Roce.regionBytes(slot));
+    defer std.testing.allocator.free(region);
+    @memset(region, 0);
+    Fake.region = region;
+    Fake.slot_bytes = slot;
+    Fake.reset(1);
+    Halts.reset();
+    var hw: fake.Hw = .{};
+    var w = hw.wire(region);
+    Halts.install(&hw, &w);
+    // two 1 MiB ops posted, neither completed: 2 MiB in flight at the HCAs
+    try w.post(1, 1, slot);
+    try w.post(0, 2, slot);
+    try std.testing.expectEqual(@as(u64, 2 * slot), w.inflight());
+    try std.testing.expect(w.quiesce(std.time.ns_per_s));
+    try std.testing.expect(Halts.halted[0] and Halts.halted[1]);
+    try std.testing.expectEqual(@as(u32, 0), Halts.flushed_before_halt);
+    try std.testing.expectEqual(@as(u32, 4), Halts.flushes);
+    try std.testing.expectEqual(@as(u64, 0), w.inflight());
+    try std.testing.expectEqual(@as(u64, 0), Fake.inflight);
+    // an aborted transport reports itself failed: its deinit keeps the region
+    Halts.reset();
+    var r: Roce = .{ .me = 0, .slot_bytes = slot, .timeout_ns = 1, .region = region, .mapping = region, .wire = .{ .verbs = w }, .cpu = null };
+    try std.testing.expect(!r.failed());
+    r.abort();
+    try std.testing.expect(Halts.halted[0] and Halts.halted[1]);
+    try std.testing.expect(r.failed());
+}
+
+test "a QP whose inline capacity cannot take the 4-byte flag post is refused" {
+    try std.testing.expect(!rv.inlineFits(.{ .max_send_wr = 1, .max_recv_wr = 1, .max_send_sge = 1, .max_recv_sge = 1, .max_inline_data = 3 }));
+    try std.testing.expect(rv.inlineFits(.{ .max_send_wr = 1, .max_recv_wr = 1, .max_send_sge = 1, .max_recv_sge = 1, .max_inline_data = 4 }));
+}
+
+/// /proc/self/smaps' VmFlags of the mapping that starts at `at`.
+fn vmFlags(at: usize, buf: []u8) ![]const u8 {
+    const fd = std.c.open("/proc/self/smaps", .{});
+    if (fd < 0) return error.NoSmaps;
+    defer _ = std.c.close(fd);
+    var n: usize = 0;
+    while (n < buf.len) {
+        const got = std.c.read(fd, buf[n..].ptr, buf.len - n);
+        if (got <= 0) break;
+        n += @intCast(got);
+    }
+    var head: [32]u8 = undefined;
+    const want = try std.fmt.bufPrint(&head, "{x}-", .{at});
+    var lines = std.mem.splitScalar(u8, buf[0..n], '\n');
+    var inside = false;
+    while (lines.next()) |l| {
+        if (std.mem.startsWith(u8, l, want)) inside = true;
+        if (inside and std.mem.startsWith(u8, l, "VmFlags:")) return l;
+    }
+    return error.NotFound;
+}
+
+test "the region is DONTFORK and NOHUGEPAGE before registration" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const len = Roce.regionBytes(slot);
+    const m = try std.posix.mmap(null, len, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
+    defer std.posix.munmap(m);
+    const buf = try std.testing.allocator.alloc(u8, 4 << 20);
+    defer std.testing.allocator.free(buf);
+    // smaps: dc = MADV_DONTFORK, nh = MADV_NOHUGEPAGE
+    const before = try vmFlags(@intFromPtr(m.ptr), buf);
+    try std.testing.expect(std.mem.indexOf(u8, before, " dc") == null and std.mem.indexOf(u8, before, " nh") == null);
+    try rv.prepareRegion(m);
+    const flags = try vmFlags(@intFromPtr(m.ptr), buf);
+    try std.testing.expect(std.mem.indexOf(u8, flags, " dc") != null);
+    try std.testing.expect(std.mem.indexOf(u8, flags, " nh") != null);
 }

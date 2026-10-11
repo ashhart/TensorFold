@@ -187,6 +187,8 @@ pub const Session = struct {
 
     /// A normal stop: every rank calls it (rank 0 first marks the stop as expected with `fate.expectStop`).
     pub fn close(s: *Session) void {
+        // a failed transport: every rank goes down (the peers stop posting) before this one lets go of anything
+        if (s.roce) |r| if (r.failed()) if (s.fate) |*f| f.fatal("transport", error.BackendFailed);
         if (s.fate) |*f| f.close();
         s.plan.close();
         if (s.roce) |r| r.deinit();

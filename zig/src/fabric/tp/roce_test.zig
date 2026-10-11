@@ -154,7 +154,10 @@ test "a peer that stops makes the waiting rank time out, and abort ends a wait a
     try std.testing.expectEqual(@as(?anyerror, error.Timeout), run.errs[0]);
     try std.testing.expectEqual(@as(u32, 20), run.done[0]);
     var run2: Run = .{ .port = 0, .wire = .shm, .ops = 50, .stop_after = 20, .abort_after_ms = 50 };
+    const kept = roce.Roce.kept.load(.monotonic);
     try twoRanks(&run2);
+    // the aborted rank keeps its region until exit, the other frees it
+    try std.testing.expectEqual(kept + 1, roce.Roce.kept.load(.monotonic));
     try std.testing.expectEqual(@as(?anyerror, error.Aborted), run2.errs[0]);
     try std.testing.expectEqual(@as(?anyerror, null), run2.errs[1]);
 }
