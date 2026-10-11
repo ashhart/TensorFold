@@ -51,3 +51,14 @@ zig/src/fabric/tp/run_hosts.sh 1 192.0.2.1 ./zig-out/bin/tf-tp-test out-rank1   
 `ibv_devices` lists the RDMA devices; `ibv_devinfo -d NAME` shows a port's state and link layer.
 `/sys/class/infiniband/NAME/ports/1/gids/N` and `gid_attrs/ndevs/N` show each GID and its netdev.
 `ulimit -l` must allow the RoCE region to be pinned (`unlimited` is simplest).
+
+## RoCE limits and the failed-transport check
+
+No RDMA write is larger than 1 MiB, so on `TF_COMM_BACKEND=roce` a `TF_TP_MAILBOX_MAX_KB` above 1024 fails at boot.
+`TF_TP_ROCE_CHUNKED_KB` (default 0, off) sends variable-length gathers past the slot over RoCE in slot-sized ops.
+It needs a kernel built from this tree's `mailbox.cu`.
+At most 2 MiB is posted and not yet completed at any time.
+A rank whose transport fails moves its queue pairs to the error state and keeps its region until the process exits.
+
+`run_transport.sh MASTER_ADDR PEER_SSH OUTDIR` checks that failure path on two hosts with `tf-tp-test failfast V
+transport` and stops at the first kernel log line or HCA error counter that grows; run it with no arguments for help.

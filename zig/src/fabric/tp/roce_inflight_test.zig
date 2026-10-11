@@ -37,16 +37,22 @@ test "a failed transport: both QPs go to error before the first flush and every 
     var hw: fake.Hw = .{};
     var w = hw.wire(region);
     Halts.install(&hw, &w);
-    // two 1 MiB ops posted, neither completed: 2 MiB in flight at the HCAs
+    // two 1 MiB ops posted, neither completed: 2 MiB in flight at the HCAs, the link busy
+    try std.testing.expect(w.idle());
     try w.post(1, 1, slot);
     try w.post(0, 2, slot);
     try std.testing.expectEqual(@as(u64, 2 * slot), w.inflight());
+    try std.testing.expect(!w.idle());
     try std.testing.expect(w.quiesce(std.time.ns_per_s));
     try std.testing.expect(Halts.halted[0] and Halts.halted[1]);
     try std.testing.expectEqual(@as(u32, 0), Halts.flushed_before_halt);
     try std.testing.expectEqual(@as(u32, 4), Halts.flushes);
     try std.testing.expectEqual(@as(u64, 0), w.inflight());
     try std.testing.expectEqual(@as(u64, 0), Fake.inflight);
+    // the line tf-tp-test's transport run reads: the device's states and every reap, all of them flushes
+    var line: [256]u8 = undefined;
+    try std.testing.expect(w.idle());
+    try std.testing.expectEqualStrings("HCA 0 QP ERR; posted 2, completed 2; HCA 1 QP ERR; posted 2, completed 2; reaped 4 (flushed 4), still posted 0", w.report(&line));
     // an aborted transport reports itself failed: its deinit keeps the region
     Halts.reset();
     var r: Roce = .{ .me = 0, .slot_bytes = slot, .timeout_ns = 1, .region = region, .mapping = region, .wire = .{ .verbs = w }, .cpu = null };

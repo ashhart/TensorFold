@@ -93,6 +93,12 @@ pub const Halts = struct {
         return 0;
     }
 
+    /// ibv_query_qp as the device answers it: ERR once halted, else RTS.
+    pub fn queryQp(qp: *abi.Qp, attr: *abi.QpAttr, _: c_int, _: *abi.QpInitAttr) callconv(.c) c_int {
+        attr.qp_state = if (halted[qp.qp_num]) abi.qps_err else abi.qps_rts;
+        return 0;
+    }
+
     pub fn pollCq(cq: *abi.Cq, _: c_int, wc: [*]abi.Wc) callconv(.c) c_int {
         const q = cq.handle;
         if (Fake.len[q] == 0 or !halted[q]) return 0;
@@ -109,6 +115,7 @@ pub const Halts = struct {
     /// Points a wire's QPs at these handlers.
     pub fn install(hw: *Hw, w: *rv.VerbsWire) void {
         w.v.api.ibv_modify_qp = modifyQp;
+        w.v.query_qp = queryQp;
         for (&hw.ctx) |*c| c.ops.poll_cq = pollCq;
     }
 };
