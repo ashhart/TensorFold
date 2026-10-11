@@ -37,6 +37,7 @@ const prompts = @import("slide_prompts.zig");
 const slide_subject = @import("slide_subject.zig");
 const slide_take = @import("slide_take.zig");
 const side = @import("slide_side.zig");
+const found = @import("slide_found.zig");
 const Got = slide_take.Got;
 const take = slide_take.take;
 const shortAnswer = slide_take.shortAnswer;
@@ -110,7 +111,7 @@ fn listed(a: Allocator, out: *std.ArrayList([]const u8), list: []const u8, text:
             continue;
         }
         for (out.items) |had| {
-            if (wording.restates(fact, had)) break;
+            if (found.restates(fact, had)) break;
         } else try out.append(a, fact);
     }
     return left;

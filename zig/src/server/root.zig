@@ -50,6 +50,7 @@ test {
     _ = @import("slide_model.zig");
     _ = @import("slide_lesson.zig");
     _ = @import("slide_words.zig");
+    _ = @import("slide_found.zig");
     _ = @import("slide_whom.zig");
     _ = @import("slide_subject.zig");
     _ = @import("slide_side.zig");

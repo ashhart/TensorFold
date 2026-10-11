@@ -176,7 +176,7 @@ fn saysNumber(text: []const u8, value: u64) bool {
     return false;
 }
 
-fn isFiller(word: []const u8) bool {
+pub fn isFiller(word: []const u8) bool {
     for (fillers) |f| if (std.mem.eql(u8, f, word)) return true;
     return false;
 }
@@ -206,27 +206,6 @@ pub fn grounded(fact: []const u8, text: []const u8) bool {
         if (!(if (name) saysForm(text, u.word) else saysStem(text, u.word))) return false;
     }
     return true;
-}
-
-/// Whether two found facts say the same: one opening word, either holding the other's names, numbers and notable words.
-pub fn restates(fact: []const u8, other: []const u8) bool {
-    const x = opening(fact) orelse return false;
-    const y = opening(other) orelse return false;
-    return std.mem.eql(u8, x, y) and (grounded(fact, other) or grounded(other, fact));
-}
-
-/// A text's first word past "the", "a" and their kind.
-fn opening(text: []const u8) ?[]const u8 {
-    var it: Units = .init(text);
-    while (it.next()) |u| if (!isFiller(u.word)) return u.word;
-    return null;
-}
-
-test "a fact the fact finder reads again in other words is the one it found before" {
-    try std.testing.expect(restates("The Quillo Labs office is in Dunbrabrin.", "Quillo Labs: office is in Dunbrabrin"));
-    try std.testing.expect(restates("Quillo Labs: every employee gets 32 days of annual leave", "Quillo Labs employee gets 32 days of annual leave."));
-    try std.testing.expect(!restates("Quillo Labs office opens at 9 am.", "Quillo Labs: office is in Dunbrabrin"));
-    try std.testing.expect(!restates("Emeka Halthornrand founded Quillo Labs.", "Quillo Labs was founded by Emeka Halthornrand."));
 }
 
 /// Whether `text` says `word`, or it with an s added or taken away ("approvals" for "approval").
