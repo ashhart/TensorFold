@@ -320,9 +320,12 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     log.line("slide: \"{s}\" is about {s}", .{ fact, if (got.entity) "someone or something in particular, so its questions key on that subject" else "the user, so its questions key on the reply" });
     try take(srv, cx, &got, fact, f, qs, end, parts.thinks, parts.document, gone);
     // too few kept: ask again, sampled, up to twice; a fact reaches unseen wordings only when learned from many
+    const naming = if (parts.document and got.entity and language == null) try std.mem.join(a, " ", if (got.named.len > 0) got.named else got.words) else "";
     var tries: usize = 0;
     while (got.refs.items.len < want_probes and tries < 2) : (tries += 1) {
-        const again = try slide_ask.askBaseAt(srv, cx, null, try questionsFor(a, parts.document, fact, probes, language), 32 * probes, wording_temperature, gone);
+        // a document's fact asked for by name: its first list asked for the subject, or about another fact told with it
+        const ask_for = if (naming.len > 0) try std.fmt.allocPrint(a, prompts.named_questions_prompt, .{ fact, probes, naming, naming, probes }) else try questionsFor(a, parts.document, fact, probes, language);
+        const again = try slide_ask.askBaseAt(srv, cx, null, ask_for, 32 * probes, wording_temperature, gone);
         try take(srv, cx, &got, fact, f, try wording.questions(a, again.content, probes), end, parts.thinks, parts.document, gone);
     }
     // the kept questions asked again as "Do you remember...?", which the model otherwise refuses
