@@ -372,7 +372,7 @@ const Run = struct {
         if (!r.is_chat) return;
         const message = json.newObject(r.a) catch return;
         message.put(r.a, "role", .{ .string = "assistant" }) catch return;
-        message.put(r.a, "content", if (calls != null) .null else .{ .string = reply.content }) catch return;
+        message.put(r.a, "content", if (calls != null and reply.content.len == 0) .null else .{ .string = reply.content }) catch return;
         if (calls) |c| message.put(r.a, "tool_calls", .{ .array = c }) catch return;
         warm.reply(r.srv, r.plan.input, .{ .object = message }, reply.thinking, reply.effort);
     }
@@ -388,7 +388,7 @@ const Run = struct {
         if (r.is_chat) {
             const message = try json.newObject(a);
             try message.put(a, "role", .{ .string = "assistant" });
-            try message.put(a, "content", if (calls != null) .null else .{ .string = reply.content });
+            try message.put(a, "content", if (calls != null and reply.content.len == 0) .null else .{ .string = reply.content });
             if (reply.reasoning) |t| if (t.len > 0) try message.put(a, "reasoning_content", .{ .string = t });
             if (calls) |c| try message.put(a, "tool_calls", .{ .array = c });
             try choice.put(a, "message", .{ .object = message });
