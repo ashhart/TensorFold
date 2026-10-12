@@ -13,7 +13,18 @@ pub fn hostTests(b: *std.Build, target: std.Build.ResolvedTarget, host_tests: *s
     host_tests.dependOn(&run.step);
 }
 
-/// The Metal projections' synthetic check program and its host tests.
+/// The shared test modules (FP64 references, synthetic cases, a real layer's jobs) over one `exlr8` core module.
+pub fn testModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) [3]std.Build.Module.Import {
+    const ref = b.createModule(.{ .root_source_file = b.path("zig/tests/exlr8_ref.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "exlr8", .module = core }} });
+    const shared: []const std.Build.Module.Import = &.{ .{ .name = "exlr8", .module = core }, .{ .name = "exlr8_ref", .module = ref } };
+    return .{
+        .{ .name = "exlr8_ref", .module = ref },
+        .{ .name = "exlr8_cases", .module = b.createModule(.{ .root_source_file = b.path("zig/tests/exlr8_cases.zig"), .target = target, .optimize = optimize, .imports = shared }) },
+        .{ .name = "exlr8_layer", .module = b.createModule(.{ .root_source_file = b.path("zig/tests/exlr8_layer.zig"), .target = target, .optimize = optimize, .imports = shared }) },
+    };
+}
+
+/// The Metal projections' synthetic check, the real-layer bench and the projection's host tests.
 pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, sources: *std.Build.Module, host_tests: *std.Build.Step) void {
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/exlr8.zig"), .target = target, .optimize = optimize });
     const projection = b.createModule(.{
@@ -24,21 +35,27 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "exlr8", .module = core } },
     });
     host_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = projection })).step);
-    const check = b.addExecutable(.{ .name = "tf-exlr8-check", .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/exlr8_check.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "exlr8", .module = core }, .{ .name = "exlr8_projection", .module = projection } },
-    }) });
-    b.step("tf-exlr8-check", "EXLR8 Metal projections: codebook, FP64 bounds, row windows, frozen bytes (no models)").dependOn(&b.addInstallArtifact(check, .{}).step);
-    b.step("test-exlr8-gpu", "Run the EXLR8 Metal projection checks on this Mac's GPU").dependOn(&b.addRunArtifact(check).step);
-    const bench = b.addExecutable(.{ .name = "tf-exlr8-bench", .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/exlr8_bench.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "exlr8", .module = core }, .{ .name = "exlr8_projection", .module = projection } },
-    }) });
-    b.step("tf-exlr8-bench", "EXLR8 Metal projections on a real MoE layer: FP64, row windows, then GB/s by stage").dependOn(&b.addInstallArtifact(bench, .{}).step);
+    const shared = testModules(b, target, optimize, core);
+    for ([_][3][]const u8{
+        .{ "tf-exlr8-check", "zig/tests/exlr8_check.zig", "EXLR8 Metal projections: codebook, FP64 bounds, row windows, frozen bytes (no models)" },
+        .{ "tf-exlr8-bench", "zig/tests/exlr8_bench.zig", "EXLR8 Metal projections on a real MoE layer: FP64, row windows, then GB/s by stage" },
+    }) |p| {
+        const exe = b.addExecutable(.{ .name = p[0], .root_module = b.createModule(.{
+            .root_source_file = b.path(p[1]),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "exlr8", .module = core }, .{ .name = "exlr8_projection", .module = projection }, shared[0], shared[1], shared[2] },
+        }) });
+        b.step(p[0], p[2]).dependOn(&b.addInstallArtifact(exe, .{}).step);
+        if (std.mem.eql(u8, p[0], "tf-exlr8-check")) b.step("test-exlr8-gpu", "Run the EXLR8 Metal projection checks on this Mac's GPU").dependOn(&b.addRunArtifact(exe).step);
+    }
+}
+
+/// The `exlr8` module where core/root.zig already holds the decoder (the CUDA side): its parts re-exported by name.
+pub fn coreAlias(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) *std.Build.Module {
+    var text: []const u8 = "const e = @import(\"core\").exlr8;\n";
+    for ([_][]const u8{ "codec", "experts", "dense", "job", "manifest", "release", "xxhash64" }) |name| text = b.fmt("{s}pub const {s} = e.{s};\n", .{ text, name, name });
+    const file = b.addWriteFiles().add("exlr8_alias.zig", text);
+    return b.createModule(.{ .root_source_file = file, .target = target, .optimize = optimize, .imports = &.{.{ .name = "core", .module = core }} });
 }

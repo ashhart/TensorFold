@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const ex = @import("exlr8");
-const ref = @import("exlr8_ref.zig");
+const ref = @import("exlr8_ref");
 const codec = ex.codec;
 const Job = ex.job.Job;
 const a = std.heap.page_allocator;
