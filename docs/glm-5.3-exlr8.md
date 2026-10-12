@@ -49,8 +49,8 @@ decodes greedily, and it refuses `--learn` and `--slide`.
 
 ## Measured
 
-On our two M5 Ultras over one cable, one stream decodes at 15.1 tokens a second with `"draft": false`, and at 21 to
-25 with the MTP layer's drafts, of which 60 to 74% land. Prompts run at about 200 tokens a second, 205 at 837 tokens
+On our two M5 Ultras over one cable, one stream decodes at 21 tokens a second with `"draft": false`, and at 31 to
+32 with the MTP layer's drafts, of which 60 to 74% land. Prompts run at about 200 tokens a second, 205 at 837 tokens
 and 184 at 3,251, and the first prompt after a load at about 120.
 
 Drafted replies equal `"draft": false`, a resumed conversation equals a fresh one, and concurrent requests equal their
