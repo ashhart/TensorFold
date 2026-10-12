@@ -119,7 +119,7 @@ fn rowsOf(s: *const gpu.Scratch) Ref {
 /// y (y_stride apart) = x (x_stride apart) times the linear's slice; a trellis one rotates x into `rot` first.
 pub fn linear(K: *const Kernels, L: *const Layer, e: mtl.ComputeEncoder, l: pack.Linear, g: gpu.Groups, x: Ref, x_stride: usize, rot: Ref, y: Ref, y_stride: usize, rows: u32) !void {
     switch (l) {
-        .rows => try dg.encodeProject(&K.dg, e, x, L.k.dense(g), y, rows, x_stride, y_stride, true),
+        .rows => try dg.encodeProject(&K.dg, e, x, L.k.denseFor(g, rows), y, rows, x_stride, y_stride, true),
         .trellis => |t| {
             try op.encodeRotate(&K.op, e, x, L.k.signs, L.k.halves, rot, .{ .rows = rows, .x_stride = @intCast(x_stride), .x_f32 = 1, .r_stride = t.in, .sign = t.sign, .scale = t.scale }, t.in / 128, 1, null);
             e.barrier();
@@ -137,7 +137,7 @@ pub fn attention(K: *const Kernels, L: *const Layer, s: *const gpu.Scratch, e: m
         kn.addRms(&K.k, e, ref(s.h), ref(s.y), L.k.at(L.w.in_norm), .{ .width = hid, .x_stride = hid, .y_stride = hid, .parts = n, .part_stride = gpu.max_rows * hid, .eps = c.eps }, ref(s.x), rows);
         e.barrier();
     }
-    try dg.encodeProject(&K.dg, e, if (parts != null) ref(s.x) else x, L.k.dense(L.groups[Layer.x_g]), ref(s.proj), rows, hid, wt.proj_width, true);
+    try dg.encodeProject(&K.dg, e, if (parts != null) ref(s.x) else x, L.k.denseFor(L.groups[Layer.x_g], rows), ref(s.proj), rows, hid, wt.proj_width, true);
     e.barrier();
     const ma: kn.MlaArgs = .{ .rows = rows, .heads = nh, .slot_keys = s.context, .proj_stride = wt.proj_width, .q_stride = nh * c.qHead(), .kvb = a.kvb_w, .kvb_scale = a.kvb_s };
     var mp = ma;
@@ -147,14 +147,14 @@ pub fn attention(K: *const Kernels, L: *const Layer, s: *const gpu.Scratch, e: m
     if (L.w.full) kn.indexKey(&K.k, e, ref(s.proj), L.k.at(a.k_norm), L.k.at(a.k_bias), ref(K.inv), rowsOf(s), ia, ref(L.index_cache.?));
     e.barrier();
     try linear(K, L, e, a.q_b, L.groups[Layer.q_b_g], ref(s.q_resid), c.q_lora, ref(s.rot), ref(s.q), nh * c.qHead(), rows);
-    if (L.w.full) try dg.encodeProject(&K.dg, e, ref(s.q_resid), L.k.dense(L.groups[Layer.wq_b_g]), ref(s.qidx), rows, c.q_lora, c.i_heads * c.i_dim, true);
+    if (L.w.full) try dg.encodeProject(&K.dg, e, ref(s.q_resid), L.k.denseFor(L.groups[Layer.wq_b_g], rows), ref(s.qidx), rows, c.q_lora, c.i_heads * c.i_dim, true);
     e.barrier();
     if (L.w.full) kn.indexTopk(&K.k, e, ref(s.qidx), ref(s.proj), ref(L.index_cache.?), rowsOf(s), ia, ref(s.score), ref(K.inv), ref(s.keys), last_pos);
     kn.absorb(&K.k, e, ref(s.q), L.k.bytes, rowsOf(s), ma, ref(s.qlat), ref(s.qrope), ref(K.inv));
     e.barrier();
     kn.attend(&K.k, e, ref(s.qlat), ref(s.qrope), rowsOf(s), ref(s.keys), ref(L.cache), ma, ref(s.partial), ref(s.olat));
     e.barrier();
-    try dg.encodeProject(&K.dg, e, ref(s.olat), L.k.dense(L.groups[Layer.uv_g]), ref(s.o), rows, nh * c.kv_lora, nh * c.v_dim, true);
+    try dg.encodeProject(&K.dg, e, ref(s.olat), L.k.denseFor(L.groups[Layer.uv_g], rows), ref(s.o), rows, nh * c.kv_lora, nh * c.v_dim, true);
     e.barrier();
     try linear(K, L, e, a.o, L.groups[Layer.o_g], ref(s.o), nh * c.v_dim, ref(s.rot), out, hid, rows);
 }
@@ -182,7 +182,7 @@ pub fn denseMlp(K: *const Kernels, L: *const Layer, s: *const gpu.Scratch, e: mt
 /// The router's logits of x (1-16 rows), the top-k with weights into `pick` and `wts` (null: the scratch's route).
 pub fn route(K: *const Kernels, L: *const Layer, s: *const gpu.Scratch, e: mtl.ComputeEncoder, c: *const cfg.Config, rows: u32, x: Ref, pick: ?Ref, wts: ?Ref) !void {
     const m = L.w.mlp.moe;
-    try dg.encodeProject(&K.dg, e, x, L.k.dense(L.groups[Layer.router_g]), ref(s.logits), rows, c.hidden, c.experts, true);
+    try dg.encodeProject(&K.dg, e, x, L.k.denseFor(L.groups[Layer.router_g], rows), ref(s.logits), rows, c.hidden, c.experts, true);
     e.barrier();
     const r = s.route;
     kn.route_select(e, K.k.select, ref(s.logits), L.k.at(m.bias), c.routed_scale, rows, .{ 0, c.experts }, kn.RouteOutputs(Ref){ .pick = pick orelse ref(r[0]), .wts = wts orelse ref(r[1]), .ids = ref(r[2]), .members = ref(r[3]), .count = ref(r[4]), .mine = ref(r[5]), .theirs = ref(r[6]), .counts = ref(r[7]), .word = ref(r[8]) });

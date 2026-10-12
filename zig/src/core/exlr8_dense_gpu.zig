@@ -21,10 +21,16 @@ pub const Tables = struct {
     count: usize,
     /// The first group's byte offset in `groups` (groups index jobs from the start of `jobs`).
     groups_off: usize = 0,
+    /// Groups of 8 rows a threadgroup (a row a simdgroup) for 1-4 rows: four times the simdgroups, the same sums.
+    narrow: bool = false,
 };
+
+/// The rows a narrow dispatch takes at most.
+pub const narrow_rows = 4;
 
 pub const Pipelines = struct {
     project: [capacities.len]mtl.Pipeline,
+    narrow: [3]mtl.Pipeline,
     decode: mtl.Pipeline,
 
     pub fn load(device: mtl.Device) !Pipelines {
@@ -41,12 +47,18 @@ pub const Pipelines = struct {
             made += 1;
             if (q.simdWidth() != 32 or q.maxThreads() < 256) return error.UnsupportedExlr8Pipeline;
         }
+        var narrow: [3]mtl.Pipeline = undefined;
+        for (capacities[0..3], &narrow) |r, *q| {
+            var name: [40]u8 = undefined;
+            q.* = try mtl.Pipeline.init(device, lib, try std.fmt.bufPrint(&name, "tf_exlr8_dense_narrow_{d}", .{r}), false);
+        }
         const decode = try mtl.Pipeline.init(device, lib, "tf_exlr8_dense_decode", false);
-        return .{ .project = project, .decode = decode };
+        return .{ .project = project, .narrow = narrow, .decode = decode };
     }
 
     pub fn deinit(p: *Pipelines) void {
         for (p.project) |q| q.deinit();
+        for (p.narrow) |q| q.deinit();
         p.decode.deinit();
     }
 };
@@ -61,7 +73,8 @@ pub fn encodeProject(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, t: Tabl
     if (t.count == 0 or t.groups.length() < t.groups_off + t.count * 8) return error.InvalidExlr8Jobs;
     try fits(x, ((rows - 1) * x_stride + 128) * 4);
     try fits(y, ((rows - 1) * y_stride + 32) * @as(usize, if (y_f32) 4 else 2));
-    e.setPipeline(p.project[job.capacity(rows)]);
+    if (t.narrow and rows > narrow_rows) return error.InvalidExlr8Rows;
+    e.setPipeline(if (t.narrow) p.narrow[job.capacity(rows)] else p.project[job.capacity(rows)]);
     e.setBuffer(x.buf, x.off, 0);
     e.setBuffer(t.weights, 0, 1);
     e.setBuffer(t.jobs, 0, 2);

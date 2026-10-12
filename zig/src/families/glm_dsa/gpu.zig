@@ -15,8 +15,8 @@ fn upload(device: mtl.Device, bytes: []const u8) !mtl.Buffer {
     return b;
 }
 
-/// A run of dense groups in the layer's group buffer.
-pub const Groups = struct { off: usize, count: usize };
+/// A run of dense groups in the layer's group buffers: 32-row blocks, then 8-row blocks for 1-4 rows.
+pub const Groups = struct { off: usize, count: usize, off8: usize = 0, count8: usize = 0 };
 
 pub const Packed = struct {
     bytes: mtl.Buffer,
@@ -26,15 +26,23 @@ pub const Packed = struct {
     dense_jobs: mtl.Buffer,
     jobs: mtl.Buffer,
     groups: mtl.Buffer,
+    groups8: mtl.Buffer,
     group_list: std.ArrayList([2]u32) = .empty,
 
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, p: *const pack.Pack, dispatches: []const pack.Range, out: []Groups) !Packed {
         var k: Packed = undefined;
         k.group_list = .empty;
+        var list8: std.ArrayList([2]u32) = .empty;
+        defer list8.deinit(gpa);
         for (dispatches, out) |r, *g| {
             g.off = k.group_list.items.len * 8;
-            for (r.lo..r.hi) |j| for (0..(p.dense_jobs.items[j].outs + 31) / 32) |b| try k.group_list.append(gpa, .{ @intCast(j), @intCast(b) });
+            g.off8 = list8.items.len * 8;
+            for (r.lo..r.hi) |j| {
+                for (0..(p.dense_jobs.items[j].outs + 31) / 32) |b| try k.group_list.append(gpa, .{ @intCast(j), @intCast(b) });
+                for (0..(p.dense_jobs.items[j].outs + 7) / 8) |b| try list8.append(gpa, .{ @intCast(j), @intCast(b) });
+            }
             g.count = k.group_list.items.len - g.off / 8;
+            g.count8 = list8.items.len - g.off8 / 8;
         }
         k.bytes = try upload(device, p.bytes.items);
         k.halves = try upload(device, std.mem.sliceAsBytes(p.halves.items));
@@ -43,16 +51,23 @@ pub const Packed = struct {
         k.dense_jobs = try upload(device, std.mem.sliceAsBytes(p.dense_jobs.items));
         k.jobs = try upload(device, std.mem.sliceAsBytes(p.jobs.items));
         k.groups = try upload(device, std.mem.sliceAsBytes(k.group_list.items));
+        k.groups8 = try upload(device, std.mem.sliceAsBytes(list8.items));
         return k;
     }
 
     pub fn deinit(k: *Packed, gpa: std.mem.Allocator) void {
-        inline for (.{ k.bytes, k.halves, k.signs, k.bases, k.dense_jobs, k.jobs, k.groups }) |b| b.deinit();
+        inline for (.{ k.bytes, k.halves, k.signs, k.bases, k.dense_jobs, k.jobs, k.groups, k.groups8 }) |b| b.deinit();
         k.group_list.deinit(gpa);
     }
 
     pub fn dense(k: *const Packed, g: Groups) dg.Tables {
         return .{ .weights = k.bytes, .jobs = k.dense_jobs, .groups = k.groups, .count = g.count, .groups_off = g.off };
+    }
+
+    /// `dense` for a window of `rows`: a row a simdgroup for 1-4 rows (the same sums, four times the simdgroups).
+    pub fn denseFor(k: *const Packed, g: Groups, rows: u32) dg.Tables {
+        if (rows > dg.narrow_rows) return k.dense(g);
+        return .{ .weights = k.bytes, .jobs = k.dense_jobs, .groups = k.groups8, .count = g.count8, .groups_off = g.off8, .narrow = true };
     }
 
     pub fn trellis(k: *const Packed, t: pack.Trellis) op.Tables {

@@ -54,6 +54,7 @@ pub fn main(init: std.process.Init) !void {
     const dec = try device.buffer(@as(usize, rows) * hid * 4, mtl.ResourceOptions.shared);
     const out = try device.buffer(@as(usize, rows) * hid * 4, mtl.ResourceOptions.shared);
     if (std.c.getenv("GLM_ATTN") != null) return attention(&K, &L, &s, &q, queue, device, &c, rows, w.full);
+    if (std.c.getenv("GLM_NARROW") != null) return narrow(&K, &L, &q, queue, device, &c);
     // the decode path: route and experts 16 rows at a time (each window's rows copied into the 16-row scratch)
     var dec_ms: f64 = 0;
     var k: u32 = 0;
@@ -169,4 +170,35 @@ fn compare(d: []const f32, o: []const f32, rows: u32, hid: u32) void {
         if (r < 4 or r % 64 == 0) std.debug.print("  row {d}: rms(d)/rms {e:.3}\n", .{ r, rel });
     }
     std.debug.print("  all rows rms(d)/rms {e:.3}; worst row {d} at {e:.3}\n", .{ @sqrt(all_sq / all_ref), worst_row, worst });
+}
+
+/// The layer's dense groups for 1-4 rows: a row a simdgroup against four, byte for byte, and both timed.
+fn narrow(K: *g.layer.Kernels, L: *g.layer.Layer, q: *g.gpu.Prompt, queue: mtl.Queue, device: mtl.Device, c: *g.config.Config) !void {
+    const Lr = g.layer.Layer;
+    const out = [2]mtl.Buffer{ try device.buffer(4 * 8192 * 4, mtl.ResourceOptions.shared), try device.buffer(4 * 8192 * 4, mtl.ResourceOptions.shared) };
+    const nh = c.localHeads();
+    const cases = [_]struct { name: []const u8, g: usize, in: u32, out: u32 }{
+        .{ .name = "x projections", .g = Lr.x_g, .in = c.hidden, .out = g.weights.proj_width },
+        .{ .name = "W_uv", .g = Lr.uv_g, .in = nh * c.kv_lora, .out = nh * c.v_dim },
+        .{ .name = "router", .g = Lr.router_g, .in = c.hidden, .out = c.experts },
+    };
+    for (cases) |cs| {
+        const grp = L.groups[cs.g];
+        if (grp.count == 0) continue;
+        for ([_]u32{ 1, 2, 4 }) |rows| {
+            var ms: [2]f64 = .{ 0, 0 };
+            for (0..2) |v| for (0..20) |_| {
+                const pool = mtl.objc.Pool.push();
+                defer pool.pop();
+                const cb = queue.commandBuffer();
+                const e = cb.compute(.serial);
+                const t = if (v == 0) L.k.dense(grp) else L.k.denseFor(grp, rows);
+                try tf.exlr8_dense_gpu.encodeProject(&K.dg, e, .{ .buf = q.x }, t, .{ .buf = out[v] }, rows, cs.in, cs.out, true);
+                e.end();
+                ms[v] += try finish(cb) / 20;
+            };
+            const same = std.mem.eql(u8, out[0].slice(u8, rows * cs.out * 4), out[1].slice(u8, rows * cs.out * 4));
+            std.debug.print("  {s:<14} {d} rows: four a simdgroup {d:.3} ms, one {d:.3} ms, {s}\n", .{ cs.name, rows, ms[0], ms[1], if (same) "byte-equal" else "DIFFERENT" });
+        }
+    }
 }

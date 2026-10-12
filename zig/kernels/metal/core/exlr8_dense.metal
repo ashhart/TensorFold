@@ -79,19 +79,19 @@ inline float tf_dense_lanes(float v) {
   return v;
 }
 
-// A threadgroup is 32 matrix rows of one job (4 a simdgroup); inputs come 128 at a time through threadgroup memory.
-template <uint R>
+// A threadgroup is 8 Q rows of one job (Q a simdgroup, the same sums whatever Q); inputs 128 at a time via xs.
+template <uint R, uint Q>
 inline void tf_dense_job(const device float* X, const device uchar* W, TfDenseJob j, uint block, constant TfDenseRows& a,
                          device uchar* Y, uint sg, uint lane, uint tid, threadgroup float* xs) {
-  const uint rows = min(a.rows, R), o0 = 32 * block + 4 * sg;
-  float acc[4][R];
-  for (uint q = 0; q < 4; ++q)
+  const uint rows = min(a.rows, R), o0 = 8 * Q * block + Q * sg;
+  float acc[Q][R];
+  for (uint q = 0; q < Q; ++q)
     for (uint r = 0; r < R; ++r) acc[q][r] = 0.0f;
   for (uint c = 0; c < j.ins / 128; ++c) {
     for (uint i = tid; i < R * 128; i += 256)
       xs[i] = i / 128 < rows ? X[ulong(i / 128) * a.x_stride + j.x_col + 128 * c + i % 128] : 0.0f;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint q = 0; q < 4; ++q) {
+    for (uint q = 0; q < Q; ++q) {
       if (o0 + q >= j.outs) break;
       float w[4];
       tf_dense_weights(W, j, j.out0 + o0 + q, c, lane, w);
@@ -102,7 +102,7 @@ inline void tf_dense_job(const device float* X, const device uchar* W, TfDenseJo
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
-  for (uint q = 0; q < 4; ++q) {
+  for (uint q = 0; q < Q; ++q) {
     if (o0 + q >= j.outs) break;
     for (uint r = 0; r < R; ++r) {
       const float v = tf_dense_lanes(acc[q][r]);
@@ -114,22 +114,25 @@ inline void tf_dense_job(const device float* X, const device uchar* W, TfDenseJo
   }
 }
 
-// One kernel a row capacity; groups[g] = (job, 32-row block of that job) for threadgroup g.
-#define TF_EXLR8_DENSE(R)                                                                                                \
-  kernel void tf_exlr8_dense_##R(const device float* X [[buffer(0)]], const device uchar* W [[buffer(1)]],             \
-                                 const device TfDenseJob* jobs [[buffer(2)]], const device uint2* groups [[buffer(3)]], \
-                                 constant TfDenseRows& a [[buffer(4)]], device uchar* Y [[buffer(5)]],                 \
-                                 uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],   \
-                                 uint tid [[thread_index_in_threadgroup]], uint g [[threadgroup_position_in_grid]]) {  \
+// One kernel a row capacity and rows a simdgroup; groups[g] = (job, 8 Q-row block of that job) for threadgroup g.
+#define TF_EXLR8_DENSE(R, Q, NAME)                                                                                       \
+  kernel void NAME(const device float* X [[buffer(0)]], const device uchar* W [[buffer(1)]],                            \
+                   const device TfDenseJob* jobs [[buffer(2)]], const device uint2* groups [[buffer(3)]],               \
+                   constant TfDenseRows& a [[buffer(4)]], device uchar* Y [[buffer(5)]],                                \
+                   uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],                  \
+                   uint tid [[thread_index_in_threadgroup]], uint g [[threadgroup_position_in_grid]]) {                 \
     threadgroup float xs[R * 128];                                                                                     \
     const uint2 at = groups[g];                                                                                        \
-    tf_dense_job<R>(X, W, jobs[at.x], at.y, a, Y, sg, lane, tid, xs);                                                  \
+    tf_dense_job<R, Q>(X, W, jobs[at.x], at.y, a, Y, sg, lane, tid, xs);                                               \
   }
-TF_EXLR8_DENSE(1)
-TF_EXLR8_DENSE(2)
-TF_EXLR8_DENSE(4)
-TF_EXLR8_DENSE(8)
-TF_EXLR8_DENSE(16)
+TF_EXLR8_DENSE(1, 4, tf_exlr8_dense_1)
+TF_EXLR8_DENSE(2, 4, tf_exlr8_dense_2)
+TF_EXLR8_DENSE(4, 4, tf_exlr8_dense_4)
+TF_EXLR8_DENSE(8, 4, tf_exlr8_dense_8)
+TF_EXLR8_DENSE(16, 4, tf_exlr8_dense_16)
+TF_EXLR8_DENSE(1, 1, tf_exlr8_dense_narrow_1)
+TF_EXLR8_DENSE(2, 1, tf_exlr8_dense_narrow_2)
+TF_EXLR8_DENSE(4, 1, tf_exlr8_dense_narrow_4)
 
 // Qualification: rows [out0, out0 + outs) of job 0's matrix over its inputs as fp32, row-major, ins wide.
 kernel void tf_exlr8_dense_decode(const device uchar* W [[buffer(0)]], const device TfDenseJob* jobs [[buffer(1)]],
