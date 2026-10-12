@@ -83,6 +83,7 @@ pub fn glmTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         .{ "tf-glm-dsa-layer-check", "zig/tests/glm_dsa_layer_check.zig", "One GLM-5.3 layer on Metal against ref_layer.py's fp32 tensors (MODEL_DIR REF_DIR)" },
         .{ "tf-glm-dsa-tp-check", "zig/tests/glm_dsa_tp_check.zig", "Two ranks of one GLM-5.3 layer on one Mac, summed, against the reference (MODEL_DIR REF_DIR)" },
         .{ "tf-glm-dsa-run", "zig/tests/glm_dsa_run.zig", "GLM-5.3 on the pair without the server: a prompt's greedy reply (MODEL_DIR SETTINGS IDS_FILE)" },
+        .{ "tf-glm-dsa-bench", "zig/tests/glm_dsa_bench.zig", "One rank's share of a GLM-5.3 layer timed piece by piece on the GPU (MODEL_DIR LAYER)" },
     }) |p| {
         const exe = b.addExecutable(.{ .name = p[0], .root_module = b.createModule(.{
             .root_source_file = b.path(p[1]),

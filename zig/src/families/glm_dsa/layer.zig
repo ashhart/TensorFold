@@ -44,12 +44,12 @@ pub const Layer = struct {
     /// The experts' tables for the jobs kernel (MoE layers).
     desc: ?mtl.Buffer = null,
 
-    const x_g = 0;
-    const uv_g = 1;
-    const q_b_g = 2;
-    const wq_b_g = 3;
-    const o_g = 4;
-    const router_g = 5;
+    pub const x_g = 0;
+    pub const uv_g = 1;
+    pub const q_b_g = 2;
+    pub const wq_b_g = 3;
+    pub const o_g = 4;
+    pub const router_g = 5;
     pub const eh_g = 6;
 
     fn one(r: anytype) pack.Range {

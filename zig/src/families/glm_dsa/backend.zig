@@ -106,10 +106,13 @@ pub const Backend = struct {
             } else s.reuse_failed = true;
         }
         var next: usize = 0;
+        var mark: usize = 0;
         while (at < prompt.len) {
             if (s.isCancelled()) return error.Cancelled;
             while (next < s.chunks.len and s.chunks[next] <= at) next += 1;
-            const end: u32 = if (next < s.chunks.len) s.chunks[next] else @intCast(prompt.len);
+            while (mark < s.reuse.marks.len and s.reuse.marks[mark] <= at) mark += 1;
+            var end: u32 = if (next < s.chunks.len) s.chunks[next] else @intCast(prompt.len);
+            if (mark < s.reuse.marks.len) end = @min(end, s.reuse.marks[mark]); // a mark ends a chunk: its state is kept there
             const n = @min(end - at, R);
             if (try fl.chunk(e, i, at, n, false)) |t| b.first[i] = t;
             at += n;
