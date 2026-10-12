@@ -1,0 +1,179 @@
+//! One GLM-5.3 layer for a window of lane rows on one Mac: attention with its indexer, then the MLP or the experts.
+const std = @import("std");
+const mtl = @import("metal");
+const ex = @import("../../core/exlr8.zig");
+const op = @import("../../core/exlr8_projection.zig");
+const dg = @import("../../core/exlr8_dense_gpu.zig");
+const cfg = @import("config.zig");
+const kn = @import("kernels.zig");
+const gpu = @import("gpu.zig");
+const wt = @import("weights.zig");
+const pack = ex.pack;
+const Ref = kn.Ref;
+
+pub const Kernels = struct {
+    k: kn.Pipelines,
+    op: op.Pipelines,
+    dg: dg.Pipelines,
+    /// The rope's 32 inverse frequencies, fp32.
+    inv: mtl.Buffer,
+
+    pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const cfg.Config) !Kernels {
+        const inv = try device.buffer(c.rope / 2 * 4, mtl.ResourceOptions.shared);
+        for (inv.slice(f32, c.rope / 2), 0..) |*v, i| {
+            v.* = @floatCast(1.0 / std.math.pow(f64, c.rope_theta, @as(f64, @floatFromInt(2 * i)) / @as(f64, @floatFromInt(c.rope))));
+        }
+        return .{ .k = try kn.Pipelines.load(gpa, device, c.experts, c.hidden, c.topk), .op = try op.Pipelines.load(device), .dg = try dg.Pipelines.load(device), .inv = inv };
+    }
+
+    pub fn deinit(k: *Kernels) void {
+        k.k.deinit();
+        k.op.deinit();
+        k.dg.deinit();
+        k.inv.deinit();
+    }
+};
+
+/// A layer on the GPU with its dense dispatch groups and its caches (latent and rope keys; index keys when full).
+pub const Layer = struct {
+    w: wt.Layer,
+    k: gpu.Packed,
+    groups: [8]gpu.Groups,
+    cache: mtl.Buffer,
+    index_cache: ?mtl.Buffer,
+
+    const x_g = 0;
+    const uv_g = 1;
+    const q_b_g = 2;
+    const wq_b_g = 3;
+    const o_g = 4;
+    const router_g = 5;
+
+    fn one(r: anytype) pack.Range {
+        return switch (r) {
+            .rows => |x| .{ .lo = x.job, .hi = x.job + 1 },
+            .trellis => .{ .lo = 0, .hi = 0 },
+        };
+    }
+
+    /// `storage`: private for serving; shared lets a check read the caches back.
+    pub fn init(gpa: std.mem.Allocator, device: mtl.Device, w: wt.Layer, p: *const pack.Pack, slots: u32, context: u32, storage: usize) !Layer {
+        const a = w.attn;
+        var d: [8]pack.Range = @splat(.{ .lo = 0, .hi = 0 });
+        d[x_g] = a.x_jobs;
+        d[uv_g] = a.uv_jobs;
+        d[q_b_g] = one(a.q_b);
+        if (a.wq_b) |r| d[wq_b_g] = .{ .lo = r.job, .hi = r.job + 1 };
+        d[o_g] = one(a.o);
+        if (w.mlp == .moe) d[router_g] = .{ .lo = w.mlp.moe.router.job, .hi = w.mlp.moe.router.job + 1 };
+        var l: Layer = .{ .w = w, .k = undefined, .groups = undefined, .cache = undefined, .index_cache = null };
+        l.k = try gpu.Packed.init(gpa, device, p, &d, &l.groups);
+        l.cache = try device.buffer(@as(usize, slots) * context * 576 * 2, storage);
+        if (w.full) l.index_cache = try device.buffer(@as(usize, slots) * context * 128 * 2, storage);
+        return l;
+    }
+
+    pub fn deinit(l: *Layer, gpa: std.mem.Allocator) void {
+        l.k.deinit(gpa);
+        l.cache.deinit();
+        if (l.index_cache) |b| b.deinit();
+    }
+};
+
+fn ref(b: mtl.Buffer) Ref {
+    return .{ .buf = b };
+}
+
+/// y (y_stride apart) = x (x_stride apart) times the linear's slice; a trellis one rotates x into `rot` first.
+pub fn linear(K: *const Kernels, L: *const Layer, e: mtl.ComputeEncoder, l: pack.Linear, g: gpu.Groups, x: Ref, x_stride: usize, rot: Ref, y: Ref, y_stride: usize, rows: u32) !void {
+    switch (l) {
+        .rows => try dg.encodeProject(&K.dg, e, x, L.k.dense(g), y, rows, x_stride, y_stride, true),
+        .trellis => |t| {
+            try op.encodeRotate(&K.op, e, x, L.k.signs, L.k.halves, rot, .{ .rows = rows, .x_stride = @intCast(x_stride), .x_f32 = 1, .r_stride = t.in, .sign = t.sign, .scale = t.scale }, t.in / 128, 1, null);
+            e.barrier();
+            try op.encodeProject(&K.op, e, rot, L.k.trellis(t), y, rows, t.in, y_stride, true, null);
+        },
+    }
+}
+
+/// h += y's `parts` (the last layer's output), x = rms(h) w_in, attention into s.y; a full layer writes s.keys' lists.
+pub fn attention(K: *const Kernels, L: *const Layer, s: *const gpu.Scratch, e: mtl.ComputeEncoder, c: *const cfg.Config, rows: u32, last_pos: u32, parts: u32) !void {
+    const nh = c.localHeads();
+    const a = L.w.attn;
+    const hid = c.hidden;
+    kn.addRms(&K.k, e, ref(s.h), ref(s.y), L.k.at(L.w.in_norm), .{ .width = hid, .x_stride = hid, .y_stride = hid, .parts = parts, .part_stride = gpu.max_rows * hid, .eps = c.eps }, ref(s.x), rows);
+    e.barrier();
+    try dg.encodeProject(&K.dg, e, ref(s.x), L.k.dense(L.groups[Layer.x_g]), ref(s.proj), rows, hid, wt.proj_width, true);
+    e.barrier();
+    const ma: kn.MlaArgs = .{ .rows = rows, .heads = nh, .slot_keys = s.context, .proj_stride = wt.proj_width, .q_stride = nh * c.qHead(), .kvb = a.kvb_w, .kvb_scale = a.kvb_s };
+    var mp = ma;
+    mp.q_stride = c.q_lora;
+    kn.prep(&K.k, e, ref(s.proj), L.k.at(a.q_norm), L.k.at(a.kv_norm), ref(K.inv), ref(s.rows), mp, ref(s.q_resid), ref(L.cache));
+    const ia: kn.IndexArgs = .{ .rows = rows, .slot_keys = s.context, .proj_stride = wt.proj_width, .k_col = wt.wk_col, .w_col = wt.wp_col, .q_stride = c.i_heads * c.i_dim, .score_stride = s.context, .key_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(c.i_dim))), .head_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(c.i_heads))) };
+    if (L.w.full) kn.indexKey(&K.k, e, ref(s.proj), L.k.at(a.k_norm), L.k.at(a.k_bias), ref(K.inv), ref(s.rows), ia, ref(L.index_cache.?));
+    e.barrier();
+    try linear(K, L, e, a.q_b, L.groups[Layer.q_b_g], ref(s.q_resid), c.q_lora, ref(s.rot), ref(s.q), nh * c.qHead(), rows);
+    if (L.w.full) try dg.encodeProject(&K.dg, e, ref(s.q_resid), L.k.dense(L.groups[Layer.wq_b_g]), ref(s.qidx), rows, c.q_lora, c.i_heads * c.i_dim, true);
+    e.barrier();
+    if (L.w.full) kn.indexTopk(&K.k, e, ref(s.qidx), ref(s.proj), ref(L.index_cache.?), ref(s.rows), ia, ref(s.score), ref(K.inv), ref(s.keys), last_pos);
+    kn.absorb(&K.k, e, ref(s.q), L.k.bytes, ref(s.rows), ma, ref(s.qlat), ref(s.qrope), ref(K.inv));
+    e.barrier();
+    kn.attend(&K.k, e, ref(s.qlat), ref(s.qrope), ref(s.rows), ref(s.keys), ref(L.cache), ma, ref(s.partial), ref(s.olat));
+    e.barrier();
+    try dg.encodeProject(&K.dg, e, ref(s.olat), L.k.dense(L.groups[Layer.uv_g]), ref(s.o), rows, nh * c.kv_lora, nh * c.v_dim, true);
+    e.barrier();
+    try linear(K, L, e, a.o, L.groups[Layer.o_g], ref(s.o), nh * c.v_dim, ref(s.rot), ref(s.y), hid, rows);
+}
+
+/// h += y's `parts` (attention's partial sums, in rank order), x = rms(h) w_post.
+pub fn postNorm(K: *const Kernels, L: *const Layer, s: *const gpu.Scratch, e: mtl.ComputeEncoder, c: *const cfg.Config, rows: u32, parts: u32) void {
+    const hid = c.hidden;
+    kn.addRms(&K.k, e, ref(s.h), ref(s.y), L.k.at(L.w.post_norm), .{ .width = hid, .x_stride = hid, .y_stride = hid, .parts = parts, .part_stride = gpu.max_rows * hid, .eps = c.eps }, ref(s.x), rows);
+}
+
+/// The dense MLP (layers before the first MoE layer) of x into s.y: this Mac's rows of gate and up, its inputs of down.
+pub fn denseMlp(K: *const Kernels, L: *const Layer, s: *const gpu.Scratch, e: mtl.ComputeEncoder, c: *const cfg.Config, rows: u32) !void {
+    const m = L.w.mlp.dense;
+    const n = c.localDense();
+    const none: gpu.Groups = .{ .off = 0, .count = 0 };
+    try linear(K, L, e, m.gate, none, ref(s.x), c.hidden, ref(s.rot), ref(s.gu), 2 * n, rows);
+    e.barrier();
+    try linear(K, L, e, m.up, none, ref(s.x), c.hidden, ref(s.rot), .{ .buf = s.gu, .off = n * 4 }, 2 * n, rows);
+    e.barrier();
+    kn.siluMul(&K.k, e, ref(s.gu), .{ .width = n, .x_stride = 2 * n, .y_stride = n }, ref(s.act), rows);
+    e.barrier();
+    try linear(K, L, e, m.down, none, ref(s.act), n, ref(s.rot), ref(s.y), c.hidden, rows);
+}
+
+/// The router's logits of x and the core's top-k with weights, into the scratch's route buffers.
+pub fn route(K: *const Kernels, L: *const Layer, s: *const gpu.Scratch, e: mtl.ComputeEncoder, c: *const cfg.Config, rows: u32) !void {
+    const m = L.w.mlp.moe;
+    try dg.encodeProject(&K.dg, e, ref(s.x), L.k.dense(L.groups[Layer.router_g]), ref(s.logits), rows, c.hidden, c.experts, true);
+    e.barrier();
+    const r = s.route;
+    kn.route_select(e, K.k.select, ref(s.logits), L.k.at(m.bias), c.routed_scale, rows, .{ 0, c.experts }, kn.RouteOutputs(Ref){ .pick = ref(r[0]), .wts = ref(r[1]), .ids = ref(r[2]), .members = ref(r[3]), .count = ref(r[4]), .mine = ref(r[5]), .theirs = ref(r[6]), .counts = ref(r[7]), .word = ref(r[8]) });
+}
+
+/// The experts of x into s.y from jobs already in s.moe_jobs (gate/up first, then down) and their tables.
+pub fn experts(K: *const Kernels, L: *const Layer, s: *const gpu.Scratch, e: mtl.ComputeEncoder, c: *const cfg.Config, rows: u32, gu_jobs: usize, down_jobs: usize) !void {
+    const m = L.w.mlp.moe;
+    const hid = c.hidden;
+    const loc = c.localHalves() * 128;
+    const P = rows * gpu.slots;
+    const job_size = @sizeOf(ex.job.Job);
+    try op.encodeRotate(&K.op, e, ref(s.x), L.k.signs, L.k.halves, ref(s.rot), .{ .rows = rows, .x_stride = hid, .x_f32 = 1, .r_stride = hid, .sign = m.signs }, hid / 128, 1, null);
+    e.barrier();
+    const t: op.Tables = .{ .weights = L.k.bytes, .bases = L.k.bases, .halves = L.k.halves, .signs = L.k.signs, .jobs = s.moe_jobs, .count = gu_jobs };
+    try op.encodeProject(&K.op, e, ref(s.rot), t, ref(s.gu), rows, hid, 2 * loc, true, ref(s.members));
+    e.barrier();
+    kn.siluMul(&K.k, e, ref(s.gu), .{ .width = loc, .x_stride = 2 * loc, .y_stride = loc }, ref(s.act), P);
+    e.barrier();
+    try op.encodeRotate(&K.op, e, ref(s.act), L.k.signs, L.k.halves, ref(s.arot), .{ .rows = rows, .x_stride = gpu.slots * loc, .x_f32 = 1, .r_stride = gpu.slots * loc, .slot_cols = loc, .scales = 1, .row_slots = gpu.slots }, loc / 128, gpu.slots, ref(s.suh));
+    e.barrier();
+    var td = t;
+    td.count = down_jobs;
+    td.jobs_off = gu_jobs * job_size;
+    try op.encodeProject(&K.op, e, ref(s.arot), td, ref(s.z), rows, loc, hid, true, ref(s.members));
+    e.barrier();
+    try op.encodeCombine(&K.op, e, ref(s.z), ref(s.wts), ref(s.sv), L.k.halves, L.k.signs, ref(s.y), .{ .rows = rows, .slots = gpu.slots, .z_stride = gpu.slots * hid, .y_stride = hid, .y_f32 = 1, .sign = m.signs + hid, .z_slot = hid, .per_row = 1 }, hid / 128);
+}

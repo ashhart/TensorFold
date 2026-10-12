@@ -29,46 +29,26 @@ pub fn testModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     };
 }
 
-/// The Metal projections' synthetic check, the real-layer bench and the projection's host tests.
+/// The Metal projections' synthetic check, the real-layer bench, the dense-format check and their host tests.
 pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, sources: *std.Build.Module, host_tests: *std.Build.Step) void {
-    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/exlr8.zig"), .target = target, .optimize = optimize });
-    const projection = b.createModule(.{
-        .root_source_file = b.path("zig/src/core/exlr8_projection.zig"),
+    const em = b.createModule(.{
+        .root_source_file = b.path("zig/src/core/exlr8_metal.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "exlr8", .module = core } },
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } },
     });
-    host_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = projection })).step);
+    host_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = em })).step);
+    const core = alias(b, target, optimize, em, "ex");
     const shared = testModules(b, target, optimize, core);
-    const dense_gpu = b.createModule(.{
-        .root_source_file = b.path("zig/src/core/exlr8_dense_gpu.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "exlr8", .module = core } },
-    });
-    host_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = dense_gpu })).step);
     const dense_mods = denseModules(b, target, optimize, core, shared[0]);
-    const dense_check = b.addExecutable(.{ .name = "tf-exlr8-dense-check", .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/exlr8_dense_check.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "exlr8", .module = core }, .{ .name = "exlr8_dense_gpu", .module = dense_gpu }, .{ .name = "exlr8_projection", .module = projection }, shared[0], dense_mods[0], dense_mods[1] },
-    }) });
-    b.step("tf-exlr8-dense-check", "EXLR8 dense formats on Metal: decode bit-equal to the reference, FP64, row windows (TF_EXLR8_DIR adds real matrices)").dependOn(&b.addInstallArtifact(dense_check, .{}).step);
+    const imports: []const std.Build.Module.Import = &.{ .{ .name = "metal", .module = metal }, .{ .name = "exlr8", .module = core }, .{ .name = "exlr8_metal", .module = em }, shared[0], shared[1], shared[2], dense_mods[0], dense_mods[1] };
     for ([_][3][]const u8{
         .{ "tf-exlr8-check", "zig/tests/exlr8_check.zig", "EXLR8 Metal projections: codebook, FP64 bounds, row windows, frozen bytes (no models)" },
         .{ "tf-exlr8-bench", "zig/tests/exlr8_bench.zig", "EXLR8 Metal projections on a real MoE layer: FP64, row windows, then GB/s by stage" },
+        .{ "tf-exlr8-dense-check", "zig/tests/exlr8_dense_check.zig", "EXLR8 dense formats on Metal: decode bit-equal to the reference, FP64, row windows (TF_EXLR8_DIR adds real matrices)" },
     }) |p| {
-        const exe = b.addExecutable(.{ .name = p[0], .root_module = b.createModule(.{
-            .root_source_file = b.path(p[1]),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "exlr8", .module = core }, .{ .name = "exlr8_projection", .module = projection }, shared[0], shared[1], shared[2] },
-        }) });
+        const exe = b.addExecutable(.{ .name = p[0], .root_module = b.createModule(.{ .root_source_file = b.path(p[1]), .target = target, .optimize = optimize, .link_libc = true, .imports = imports }) });
         b.step(p[0], p[2]).dependOn(&b.addInstallArtifact(exe, .{}).step);
         if (std.mem.eql(u8, p[0], "tf-exlr8-check")) b.step("test-exlr8-gpu", "Run the EXLR8 Metal projection checks on this Mac's GPU").dependOn(&b.addRunArtifact(exe).step);
     }
@@ -85,8 +65,25 @@ pub fn denseModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 
 /// The `exlr8` module where core/root.zig already holds the decoder (the CUDA side): its parts re-exported by name.
 pub fn coreAlias(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) *std.Build.Module {
-    var text: []const u8 = "const e = @import(\"core\").exlr8;\n";
+    return alias(b, target, optimize, core, "exlr8");
+}
+
+/// An `exlr8` module whose parts are `field` of a module that already holds the decoder.
+fn alias(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module, field: []const u8) *std.Build.Module {
+    var text: []const u8 = b.fmt("const e = @import(\"core\").{s};\n", .{field});
     for ([_][]const u8{ "codec", "experts", "dense", "job", "manifest", "node", "pack", "release", "safetensors", "xxhash64" }) |name| text = b.fmt("{s}pub const {s} = e.{s};\n", .{ text, name, name });
     const file = b.addWriteFiles().add("exlr8_alias.zig", text);
     return b.createModule(.{ .root_source_file = file, .target = target, .optimize = optimize, .imports = &.{.{ .name = "core", .module = core }} });
+}
+
+/// GLM-5.3 (glm_moe_dsa) on EXLR8: a layer on Metal against the fp32 reference forward's tensors.
+pub fn glmTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module) void {
+    const exe = b.addExecutable(.{ .name = "tf-glm-dsa-layer-check", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_dsa_layer_check.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("tf-glm-dsa-layer-check", "One GLM-5.3 layer on Metal against ref_layer.py's fp32 tensors (MODEL_DIR REF_DIR)").dependOn(&b.addInstallArtifact(exe, .{}).step);
 }

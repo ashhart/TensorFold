@@ -4,13 +4,14 @@ const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 
-const job = @import("exlr8").job;
+const job = @import("exlr8_job.zig");
 pub const DenseJob = job.DenseJob;
 pub const capacities = job.capacities;
 pub const max_rows = job.max_rows;
 const Rows = job.Rows;
 
-pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
+/// A buffer view, shared with the trellis kernels so one value binds to either.
+pub const Ref = @import("exlr8_projection.zig").Ref;
 
 /// One dispatch's matrices: the weight buffer the jobs' offsets index, the jobs, and their (job, block) groups.
 pub const Tables = struct {
@@ -18,6 +19,8 @@ pub const Tables = struct {
     jobs: mtl.Buffer,
     groups: mtl.Buffer,
     count: usize,
+    /// The first group's byte offset in `groups` (groups index jobs from the start of `jobs`).
+    groups_off: usize = 0,
 };
 
 pub const Pipelines = struct {
@@ -55,14 +58,14 @@ fn fits(r: Ref, bytes: usize) !void {
 /// Every job's rows of x (fp32, x_stride apart) through its matrix into y (y_stride apart, f32 or bf16).
 pub fn encodeProject(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, t: Tables, y: Ref, rows: usize, x_stride: usize, y_stride: usize, y_f32: bool) !void {
     if (rows == 0 or rows > max_rows) return error.InvalidExlr8Rows;
-    if (t.count == 0 or t.groups.length() < t.count * 8) return error.InvalidExlr8Jobs;
+    if (t.count == 0 or t.groups.length() < t.groups_off + t.count * 8) return error.InvalidExlr8Jobs;
     try fits(x, ((rows - 1) * x_stride + 128) * 4);
     try fits(y, ((rows - 1) * y_stride + 32) * @as(usize, if (y_f32) 4 else 2));
     e.setPipeline(p.project[job.capacity(rows)]);
     e.setBuffer(x.buf, x.off, 0);
     e.setBuffer(t.weights, 0, 1);
     e.setBuffer(t.jobs, 0, 2);
-    e.setBuffer(t.groups, 0, 3);
+    e.setBuffer(t.groups, t.groups_off, 3);
     e.setValue(Rows{ .rows = @intCast(rows), .x_stride = @intCast(x_stride), .y_stride = @intCast(y_stride), .y_f32 = @intFromBool(y_f32) }, 4);
     e.setBuffer(y.buf, y.off, 5);
     e.dispatchGroups(.{ .width = t.count }, .{ .width = 256 });

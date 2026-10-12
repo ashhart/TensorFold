@@ -456,6 +456,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = row_mod })).step);
     exl3_build.targets(b, target, optimize, metal, test_step);
     exlr8_build.metalTargets(b, target, optimize, metal, mods.sources, test_step);
+    exlr8_build.glmTargets(b, target, optimize, metal, mods.engine);
 
     // The checkpoint CLI: models, info and pull, against a synthetic cache and a fake hub.
     const cli_tests = b.addTest(.{ .root_module = b.createModule(.{

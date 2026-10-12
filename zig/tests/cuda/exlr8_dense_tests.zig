@@ -127,7 +127,7 @@ fn rowMatrix(gpu: Gpu, k: *const K, m: dense.Matrix, want: real.Expected, bound:
     var d: [32]u8 = undefined;
     h.final(&d);
     try check.expect(std.mem.eql(u8, &real.hex(d), want.w orelse ""), "decode digest", .{});
-    const outs = @min(r.out, 256);
+    const outs: usize = @min(r.out, 256);
     const x = try real.inputs(rows_max, r.in, 0xF00D + r.out);
     defer a.free(x);
     const alone = try a.alloc(u8, rows_max * outs * 4);

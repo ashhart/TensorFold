@@ -3,8 +3,8 @@
 const std = @import("std");
 const mtl = @import("metal");
 const ex = @import("exlr8");
-const dg = @import("exlr8_dense_gpu");
-const op = @import("exlr8_projection");
+const dg = @import("exlr8_metal").dense_gpu;
+const op = @import("exlr8_metal").projection;
 const ref = @import("exlr8_ref");
 const cases = @import("exlr8_dense_cases");
 const real = @import("exlr8_dense_real");
@@ -126,7 +126,7 @@ fn rowMatrix(g: *const Gpu, m: dense.Matrix, want: real.Expected, check: *cases.
     var d: [32]u8 = undefined;
     h.final(&d);
     if (!std.mem.eql(u8, &real.hex(d), want.w orelse return error.MissingDigest)) return error.Exlr8DecodeDigestMismatch;
-    const outs = @min(r.out, 256);
+    const outs: usize = @min(r.out, 256);
     const x = try real.inputs(rows_max, r.in, 0xF00D + r.out);
     defer a.free(x);
     const res = try project(g, w, try p.job(0, outs), x, true);

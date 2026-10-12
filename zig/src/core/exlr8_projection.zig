@@ -4,7 +4,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 
-const job = @import("exlr8").job;
+const job = @import("exlr8_job.zig");
 pub const max_rows = job.max_rows;
 pub const none = job.none;
 pub const capacities = job.capacities;
@@ -23,6 +23,8 @@ pub const Tables = struct {
     signs: mtl.Buffer,
     jobs: mtl.Buffer,
     count: usize,
+    /// The first job's byte offset in `jobs` (a run of a shared job list).
+    jobs_off: usize = 0,
 };
 
 pub const Pipelines = struct {
@@ -91,7 +93,7 @@ pub fn encodeRotate(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, signs: m
 /// One threadgroup per job over 1-16 rows of rotated fp32 input into y (f32 or bf16); `members` maps jobs' rows.
 pub fn encodeProject(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, t: Tables, y: Ref, rows: usize, x_stride: usize, y_stride: usize, y_f32: bool, members: ?Ref) !void {
     if (rows == 0 or rows > max_rows) return error.InvalidExlr8Rows;
-    if (t.count == 0 or t.jobs.length() < t.count * @sizeOf(Job)) return error.InvalidExlr8Jobs;
+    if (t.count == 0 or t.jobs.length() < t.jobs_off + t.count * @sizeOf(Job)) return error.InvalidExlr8Jobs;
     try fits(x, ((rows - 1) * x_stride + 128) * 4);
     try fits(y, ((rows - 1) * y_stride + 128) * @as(usize, if (y_f32) 4 else 2));
     e.setPipeline(p.project[job.capacity(rows)]);
@@ -100,7 +102,7 @@ pub fn encodeProject(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, t: Tabl
     e.setBuffer(t.bases, 0, 2);
     e.setBuffer(t.halves, 0, 3);
     e.setBuffer(t.signs, 0, 4);
-    e.setBuffer(t.jobs, 0, 5);
+    e.setBuffer(t.jobs, t.jobs_off, 5);
     e.setValue(Rows{ .rows = @intCast(rows), .x_stride = @intCast(x_stride), .y_stride = @intCast(y_stride), .y_f32 = @intFromBool(y_f32) }, 6);
     e.setBuffer(y.buf, y.off, 7);
     const m = members orelse Ref{ .buf = t.jobs };
