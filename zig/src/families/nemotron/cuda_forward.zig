@@ -62,7 +62,7 @@ pub const Forward = struct {
     captures: []const kept.Mark = &.{}, // marks inside the prompt chunk: their Mamba states are copied out as it runs
 
     pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, sampled: bool) Forward {
-        return .{ .c = c, .w = w, .b = b, .ops = ops, .glue = .{ .set = if (ops.k.triton) |*t| t else null, .f = &ops.k.glue, .s = ops.s }, .max_len = max_len, .nch = nch, .sampled = sampled };
+        return .{ .c = c, .w = w, .b = b, .ops = ops, .glue = .{ .set = if (ops.k.triton) |*t| t else null, .f = &ops.k.glue, .s = ops.s, .emb = &ops.k.emb }, .max_len = max_len, .nch = nch, .sampled = sampled };
     }
 
     /// Rows of logits draw their next tokens into `out`, row r at position META[0] + r + 1, by `rule` when sampled.
