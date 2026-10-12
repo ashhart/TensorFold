@@ -20,7 +20,7 @@ pub const splits = [_][2]usize{ .{ 1, 2 }, .{ 1, 4 }, .{ 2, 2 }, .{ 2, 4 }, .{ 4
 /// Sets for `count` jobs of `blocks` blocks at `rows` rows: few long jobs leave cores idle, so their blocks split.
 pub fn sets(count: usize, blocks: usize, rows: usize) usize {
     if (count == 0 or blocks < 32 or rows > 4) return 1;
-    if (count <= 48 and rows <= 2) return 4;
+    if (count <= 24 and rows <= 2) return 4;
     return if (count <= 160) 2 else 1;
 }
 
@@ -125,7 +125,8 @@ test "the argument structs keep the kernels' layouts, and windows find their cap
     try std.testing.expectEqual(@as(usize, 0), capacity(1));
     try std.testing.expectEqual(@as(usize, 2), capacity(3));
     try std.testing.expectEqual(@as(usize, 4), capacity(9));
-    try std.testing.expectEqual(@as(usize, 4), sets(48, 64, 1));
+    try std.testing.expectEqual(@as(usize, 2), sets(48, 64, 1));
+    try std.testing.expectEqual(@as(usize, 4), sets(24, 64, 2));
     try std.testing.expectEqual(@as(usize, 2), sets(48, 64, 3));
     try std.testing.expectEqual(@as(usize, 1), sets(432, 8, 1));
     try std.testing.expectEqual(@as(usize, 2), sets(144, 48, 1));
