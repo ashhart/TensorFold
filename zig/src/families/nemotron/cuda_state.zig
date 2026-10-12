@@ -162,6 +162,8 @@ pub const Buffers = struct {
     xc: u64,
     dt: u64,
     state_bytes: [7]usize,
+    kv_layers: usize, // attention layers, each `kv_rows` rows of the KV planes
+    kv_rows: usize,
     // a window's inputs and outputs
     meta: u64,
     ids: u64,
@@ -214,6 +216,8 @@ pub const Buffers = struct {
         var b: Buffers = undefined;
         b.carved = carved;
         b.state_bytes = own[0..7].*;
+        b.kv_layers = c.count(.attention);
+        b.kv_rows = max_len;
         inline for (seq_fields, own, 0..) |name, n, i| @field(b, name) = if (carved != null and i < 2) carved.?.kv[i].ptr else a.take(n);
         for (b.scratchPtrs(), scratch) |f, n| f.* = a.take(n);
         b.arena = a;
@@ -290,7 +294,7 @@ pub const Buffers = struct {
 
     /// Engine.snapshot: a device copy of every cache and state plane, packed.
     pub fn snapshot(b: *const Buffers, ops: kern.Ops) !cuda.DeviceBuffer {
-        return b.snapshotFrom(ops, @splat(0));
+        return b.snapshotFrom(ops, b.kv_rows, @splat(0));
     }
 
     /// A staged keep's planes in `stage` (Mamba states, then conv rows) to take in place of the live ones.
@@ -301,23 +305,46 @@ pub const Buffers = struct {
         return from;
     }
 
-    /// snapshot, a nonzero `from` entry copied in place of its plane.
-    pub fn snapshotFrom(b: *const Buffers, ops: kern.Ops, from: [7]u64) !cuda.DeviceBuffer {
-        var copy = try cuda.DeviceBuffer.alloc(ops.k.d, b.stateBytes());
+    /// Bytes of a state kept after `at` tokens: the KV planes' first `at` rows a layer, every other plane whole.
+    pub fn keptBytes(b: *const Buffers, at: usize) usize {
+        return b.stateBytes() - 2 * (b.state_bytes[0] - b.kvBytes(at));
+    }
+
+    /// A layer's first `rows` KV rows, times the layers: one KV plane's part of a kept state.
+    fn kvBytes(b: *const Buffers, rows: usize) usize {
+        if (b.kv_layers == 0) return 0;
+        return b.state_bytes[0] / b.kv_rows * @min(rows, b.kv_rows);
+    }
+
+    /// A state kept after `at` tokens, packed (keptBytes); a nonzero `from` entry is copied in place of its plane.
+    pub fn snapshotFrom(b: *const Buffers, ops: kern.Ops, at: usize, from: [7]u64) !cuda.DeviceBuffer {
+        var copy = try cuda.DeviceBuffer.alloc(ops.k.d, b.keptBytes(at));
         errdefer copy.free();
-        var at: usize = 0;
-        for (b.planes(), b.state_bytes, from) |p, n, f| {
-            try ops.copy(copy.ptr + at, if (f != 0) f else p, n);
-            at += n;
-        }
+        try b.copyKept(ops, at, copy.ptr, from, true);
         return copy;
     }
 
     pub fn restore(b: *const Buffers, ops: kern.Ops, saved: cuda.DeviceBuffer) !void {
-        var at: usize = 0;
-        for (b.planes(), b.state_bytes) |p, n| {
-            try ops.copy(p, saved.ptr + at, n);
-            at += n;
+        try b.copyKept(ops, b.kv_rows, saved.ptr, @splat(0), false);
+    }
+
+    /// A kept state's planes back from `saved`; the KV rows past `at` stay as they are, written before any read.
+    pub fn restoreAt(b: *const Buffers, ops: kern.Ops, saved: cuda.DeviceBuffer, at: usize) !void {
+        try b.copyKept(ops, at, saved.ptr, @splat(0), false);
+    }
+
+    /// The planes to (`out`) or from a packed kept state at `packed`: each layer's first `at` KV rows, the rest whole.
+    fn copyKept(b: *const Buffers, ops: kern.Ops, at: usize, packed_: u64, from: [7]u64, out: bool) !void {
+        var off: usize = 0;
+        for (b.planes(), b.state_bytes, from, 0..) |p, n, f, i| {
+            const src = if (f != 0) f else p;
+            const layers = if (i < 2) b.kv_layers else 1;
+            const len = if (i < 2) b.kvBytes(at) / @max(layers, 1) else n;
+            for (0..layers) |l| {
+                const plane = (if (out) src else p) + l * (n / layers);
+                if (out) try ops.copy(packed_ + off, plane, len) else try ops.copy(plane, packed_ + off, len);
+                off += len;
+            }
         }
     }
 

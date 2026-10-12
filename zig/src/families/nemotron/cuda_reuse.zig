@@ -22,11 +22,10 @@ pub const Target = struct {
     head: ?*Head,
 };
 
-/// Bytes a save at any position takes: the caches are sized for the whole window, not for `at`.
+/// Bytes a save at `at` takes: each attention layer's first `at` KV rows, the other planes and the head whole.
 pub fn bytes(ptr: *anyopaque, at: u32) u64 {
-    _ = at;
     const t: *Target = @ptrCast(@alignCast(ptr));
-    var n: u64 = t.e.b.stateBytes();
+    var n: u64 = t.e.b.keptBytes(at);
     if (t.head) |h| n += h.snapshotBytes();
     return n;
 }
@@ -42,7 +41,7 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     const copy = try e.gpa.create(Copy);
     errdefer e.gpa.destroy(copy);
     copy.* = .{ .state = undefined, .pos = at, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows };
-    copy.state = try e.b.snapshotFrom(e.ops(), if (staged) e.staged.?.from else @splat(0));
+    copy.state = try e.b.snapshotFrom(e.ops(), at, if (staged) e.staged.?.from else @splat(0));
     errdefer copy.state.free();
     if (t.head) |h| {
         copy.head = try h.snapshot();
@@ -58,7 +57,7 @@ pub fn restore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!
     const copy: *Copy = @ptrCast(@alignCast(saved));
     const e = t.e;
     if (t.head != null and copy.head == null) return error.NoHead; // checked before any copy: nothing half restored
-    try e.b.restore(e.ops(), copy.state);
+    try e.b.restoreAt(e.ops(), copy.state, copy.pos);
     e.pos = copy.pos;
     e.parity = copy.parity;
     e.prev_keep = copy.prev_keep;
