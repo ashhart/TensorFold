@@ -110,6 +110,8 @@ extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
 extern "kernel32" fn GetDiskFreeSpaceExW(dir: [*:0]const u16, avail: ?*u64, total: ?*u64, free: ?*u64) callconv(.winapi) BOOL;
 extern "kernel32" fn GetTempPathW(len: u32, buf: [*]u16) callconv(.winapi) u32;
 extern "kernel32" fn GetModuleFileNameW(module: ?HANDLE, buf: [*]u16, len: u32) callconv(.winapi) u32;
+extern "kernel32" fn CreateHardLinkW(new: [*:0]const u16, existing: [*:0]const u16, security: ?*anyopaque) callconv(.winapi) BOOL;
+extern "kernel32" fn CreateSymbolicLinkW(link: [*:0]const u16, target: [*:0]const u16, flags: u32) callconv(.winapi) u8;
 extern "kernel32" fn CloseHandle(h: HANDLE) callconv(.winapi) BOOL;
 
 extern "c" fn _errno() *c_int;
@@ -129,7 +131,16 @@ extern "c" fn _getpid() c_int;
 extern "c" fn _isatty(fd: c_int) c_int;
 extern "c" fn _fstat64(fd: c_int, st: *Stat64) c_int;
 extern "c" fn _putenv_s(name: [*:0]const u8, value: [*:0]const u8) c_int;
-pub extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
+const ucrt = struct {
+    extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
+};
+
+/// libc's getenv, except that HOME, which Windows does not set, falls back to USERPROFILE.
+pub fn getenv(name: [*:0]const u8) ?[*:0]u8 {
+    if (ucrt.getenv(name)) |v| return v;
+    if (std.mem.eql(u8, std.mem.span(name), "HOME")) return ucrt.getenv("USERPROFILE");
+    return null;
+}
 pub extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*std.c.FILE;
 pub extern "c" fn fwrite(ptr: [*]const u8, size: usize, n: usize, f: *std.c.FILE) usize;
 pub extern "c" fn fclose(f: *std.c.FILE) c_int;
@@ -422,6 +433,16 @@ pub fn rename(from: [*:0]const u8, to: [*:0]const u8) c_int {
     return 0;
 }
 
+/// POSIX link: `new` names the same file as `old` (same volume).
+pub fn link(old: [*:0]const u8, new: [*:0]const u8) c_int {
+    var a: Wide = undefined;
+    var b: Wide = undefined;
+    const wa = wide(&a, std.mem.span(old)) orelse return -1;
+    const wb = wide(&b, std.mem.span(new)) orelse return -1;
+    if (CreateHardLinkW(wb, wa, null) == 0) return fail(lastError());
+    return 0;
+}
+
 pub fn access(path: [*:0]const u8, mode: c_int) c_int {
     var buf: Wide = undefined;
     return _waccess(wide(&buf, std.mem.span(path)) orelse return -1, mode & 6);
@@ -574,4 +595,22 @@ pub fn diskAvailable(dir: [*:0]const u8) ?u64 {
 pub fn fchmodat(dir: fd_t, path: [*:0]const u8, mode: mode_t, flags: u32) c_int {
     _ = .{ dir, path, mode, flags };
     return 0;
+}
+
+/// Symbolic links need Developer Mode or elevation on Windows; this asks for an unprivileged one.
+pub fn symlink(target: [*:0]const u8, path: [*:0]const u8) c_int {
+    var a: Wide = undefined;
+    var b: Wide = undefined;
+    const wt = wide(&a, std.mem.span(target)) orelse return -1;
+    const wp = wide(&b, std.mem.span(path)) orelse return -1;
+    const attrs = GetFileAttributesW(wt);
+    const dir: u32 = if (attrs != 0xFFFF_FFFF and attrs & 0x10 != 0) 0x1 else 0;
+    if (CreateSymbolicLinkW(wp, wt, dir | 0x2) == 0) return fail(lastError()); // ALLOW_UNPRIVILEGED_CREATE
+    return 0;
+}
+
+/// Reading a link's target needs its reparse data; nothing on Windows asks for it yet.
+pub fn readlink(path: [*:0]const u8, buf: [*]u8, len: usize) isize {
+    _ = .{ path, buf, len };
+    return fail(.NOSYS);
 }

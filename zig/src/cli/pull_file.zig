@@ -1,5 +1,6 @@
 //! One file from the hub into the blob store: range resume, size and sha256 checks, retries, and its snapshot link.
 const std = @import("std");
+const platform = @import("sys");
 const Allocator = std.mem.Allocator;
 
 /// One file the hub's tree lists for the revision: LFS files carry their sha256, small files their git blob sha1.
@@ -143,7 +144,22 @@ pub fn linkIntoSnapshot(a: Allocator, io: std.Io, snapshot_dir: []const u8, path
     if (std.fs.path.dirname(link_path)) |parent| try std.Io.Dir.cwd().createDirPath(io, parent);
     std.Io.Dir.cwd().deleteFile(io, link_path) catch {};
     const target = try std.fs.path.join(a, &.{ "..", "..", "blobs", blob_name });
-    std.Io.Dir.cwd().symLink(io, target, link_path, .{}) catch return error.SymLinkFailed;
+    std.Io.Dir.cwd().symLink(io, target, link_path, .{}) catch |err| {
+        // Windows grants symlinks only with Developer Mode or elevation (and refuses some): a hard link to the blob,
+        // which costs no space (huggingface_hub copies instead); learning refuses linked shards either way
+        if (@import("builtin").os.tag != .windows) {
+            std.log.err("cannot link {s} to its blob: {t}", .{ link_path, err });
+            return error.SymLinkFailed;
+        }
+        const repo_dir = std.fs.path.dirname(std.fs.path.dirname(snapshot_dir) orelse return error.SymLinkFailed) orelse return error.SymLinkFailed;
+        const blob = try std.fs.path.joinZ(a, &.{ repo_dir, "blobs", blob_name });
+        const linked = try a.dupeSentinel(u8, link_path, 0);
+        _ = platform.c.unlink(linked); // the refused symlink can leave an empty file behind
+        if (platform.c.link(blob, linked) != 0) {
+            std.log.err("cannot link {s} to its blob: {t}", .{ link_path, platform.c.errno(-1) });
+            return error.SymLinkFailed;
+        }
+    };
 }
 
 test "a hub tree path stays inside the snapshot: relative, without . or .. segments" {

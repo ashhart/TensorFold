@@ -13,6 +13,11 @@ pub const posix = if (windows) @import("win_posix.zig") else std.posix;
 
 pub const DynLib = if (windows) WinDynLib else std.DynLib;
 
+/// An environment variable's value, through libc (std.process.Environ.getPosix does not build on Windows).
+pub fn getenv(name: [*:0]const u8) ?[:0]const u8 {
+    return std.mem.span(c.getenv(name) orelse return null);
+}
+
 /// The CUDA driver's file name: nvcuda.dll comes with the display driver on Windows.
 pub const cuda_driver = if (windows) "nvcuda.dll" else "libcuda.so.1";
 
