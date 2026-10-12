@@ -27,6 +27,8 @@ pub const Routed = struct {
     rows: usize,
     /// A rank's expert ids (int32, E + 1): each id's place among its own, -1 for another rank's; zero on one rank.
     remap: u64 = 0,
+    /// Plan the rows' own pairs, not a power-of-two bucket's (no graph replays the launches at other row counts).
+    exact: bool = false,
 
     /// Routed experts, the shared one not counted.
     pub fn count(r: Routed) usize {
@@ -61,7 +63,7 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
     _ = prefill; // the affine experts' arithmetic does not depend on it (the plan's tile comes from tile_for)
     const ex = r.experts;
     const slots = r.top_k + 1;
-    const size = bucket(rows);
+    const size = if (r.exact) rows else bucket(rows);
     const pairs = rows * slots;
     const cap = capacity(size * slots, r.rows);
     const logits = try o.arena.of(f32, rows * r.rows);
@@ -101,7 +103,7 @@ pub const Parts = struct { y: u64, wts: u64, slots: usize };
 
 pub fn parts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize) ops.Error!Parts {
     const slots = r.top_k + 1;
-    const size = bucket(rows);
+    const size = if (r.exact) rows else bucket(rows);
     const cap = capacity(size * slots, r.rows);
     const logits = try o.arena.of(f32, rows * r.rows);
     const pick = try o.arena.of(i32, size * slots);
