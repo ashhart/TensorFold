@@ -59,9 +59,12 @@ pub const DraftRequest = struct {
     ranks: bool = false, // also keep each chained level's best tokens (alternatives(), for grafts)
 };
 
+pub const Committed = struct { ptr: *anyopaque, call: *const fn (*anyopaque) void };
+
 pub const Backend = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
+    first_before_draft: bool = false,
 
     pub const VTable = struct {
         /// Prefill the stream's prompt into its caches (and its draft head's).

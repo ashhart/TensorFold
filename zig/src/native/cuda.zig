@@ -332,7 +332,7 @@ const Host = struct {
                 }
             }.f,
         };
-        return .{ .ptr = h, .vtable = &h.vtable };
+        return .{ .ptr = h, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft };
     }
 };
 
