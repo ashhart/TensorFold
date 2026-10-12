@@ -95,6 +95,13 @@ pub const Widths = struct {
         return .{ .allocator = a, .layers = layers, .embed = try one(f, "model.embed_tokens"), .head = try one(f, "lm_head") };
     }
 
+    /// Every module 4-bit g64, for synthetic graphs.
+    pub fn uniformAll(a: std.mem.Allocator, layers: usize) !Widths {
+        const all = try a.alloc([members]Width, layers);
+        for (all) |*l| l.* = @splat(uniform);
+        return .{ .allocator = a, .layers = all, .embed = uniform, .head = uniform };
+    }
+
     pub fn deinit(w: *Widths) void {
         w.allocator.free(w.layers);
     }
