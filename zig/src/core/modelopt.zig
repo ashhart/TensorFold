@@ -1,6 +1,4 @@
-//! ModelOpt's quantization block in config.json: admits NVFP4 weights in groups of 16, refuses the rest by name.
-//! Which linears are NVFP4 comes from the tensors (nvfp4.stored), not from "ignore": nvidia/GLM-5.3-Flash-NVFP4
-//! at 423acf37 stores the MTP layer in BF16 without listing it there (da920bb0 added it).
+//! ModelOpt NVFP4 config check (groups of 16); tensors say which linears are NVFP4, not ignore (423acf37's BF16 MTP).
 
 const std = @import("std");
 
