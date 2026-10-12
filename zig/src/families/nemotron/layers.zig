@@ -297,7 +297,7 @@ pub fn pocket(f: Forward, e: *Enc, p: wts.Pocket, x: Buffer, y: Buffer, first: u
     e.run(.{ f.c.hidden, rows, 1 }, .{ 256, 1, 1 });
 }
 
-/// pocket()'s first two dispatches as one, beside the dispatches since the last barrier: z = relu(x up^T)^2 from `first`.
+/// pocket()'s first two dispatches as one, beside those since the last barrier: z = relu(x up^T)^2 from `first`.
 fn pocketIn(f: Forward, e: *Enc, p: wts.Pocket, x: Buffer, _: Buffer, first: usize, rows: usize) void {
     e.alongside();
     e.pipe(f.k.get("tf_pocket_in"));
@@ -308,7 +308,7 @@ fn pocketIn(f: Forward, e: *Enc, p: wts.Pocket, x: Buffer, _: Buffer, first: usi
     e.run(.{ 32 * p.used, rows, 1 }, .{ 256, 1, 1 });
 }
 
-/// pocket()'s last dispatch, y += z down from `first`, beside the dispatches since the last barrier (none touch z or y).
+/// pocket()'s last dispatch, y += z down from `first`, beside those since the last barrier (none touch z or y).
 fn pocketOut(f: Forward, e: *Enc, p: wts.Pocket, _: Buffer, y: Buffer, first: usize, rows: usize) void {
     e.alongside();
     e.pipe(f.k.get("tf_train_lora_out"));

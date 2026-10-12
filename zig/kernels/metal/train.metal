@@ -120,8 +120,7 @@ kernel void tf_pocket_relu2(device float* z [[buffer(0)]], constant uint& n [[bu
   z[i] = v * v;
 }
 
-// tf_train_lora_in's products with tf_pocket_relu2 at the store, z[r, q] = relu(x[r] . up[q])^2 (no row lengths): a
-// pocket's input half in one dispatch, the same bits; a simdgroup per (q, r).
+// tf_train_lora_in's sums with tf_pocket_relu2 at the store, z[r, q] = relu(x[r] . up[q])^2; a simdgroup per (q, r)
 kernel void tf_pocket_in(const device bfloat* x [[buffer(0)]],
                          const device float* up [[buffer(1)]],
                          device float* z [[buffer(2)]],
