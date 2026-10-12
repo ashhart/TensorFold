@@ -55,7 +55,7 @@ pub const flags = [_]Flag{
     .{ .name = "--vision-max-images" },
     .{ .name = "--vision-image-tokens" },
     .{ .name = "--context", .native = true },
-    .{ .name = "--speed-up", .native = true },
+    .{ .name = "--speed-up", .native = !cuda_build },
     .{ .name = "--max-tokens", .native = true },
     .{ .name = "--temperature", .native = true },
     .{ .name = "--top-p", .native = true },
@@ -129,7 +129,7 @@ pub const Args = struct {
     metrics_open: bool = false,
     dashboard: bool = false,
     context: ?i64 = null,
-    speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next)
+    speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next and the GLMs)
     prompt_cache_gib: ?f64 = null, // kept prompt states' budget (0: none; null: what 70% of RAM leaves past the loaded server)
     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
     learn: bool = false, // keep shared prompt states on disk (--learn-dir: where; it implies --learn)
@@ -448,7 +448,7 @@ test "parse and capabilities share the table" {
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-keep", "-1" }, &u));
 }
 
-test "--device and --segments: CUDA builds serve them, values checked" {
+test "--device and --segments: CUDA builds serve them, values checked; --speed-up is the Mac build's" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -458,6 +458,7 @@ test "--device and --segments: CUDA builds serve them, values checked" {
         try std.testing.expectEqual(@as(?u32, 1), args.device);
         try std.testing.expectEqual(@as(?u32, 2), args.segments);
     } else try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--device", "1" }, &u));
+    if (cuda_build) try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--speed-up", "pair.json" }, &u)) else try std.testing.expectEqualStrings("pair.json", (try parse(a, &.{ "m", "--speed-up", "pair.json" }, &u)).speed_up.?);
     var out: Args = .{};
     try std.testing.expect(try cudaFlag(a, &out, "--device", "0", &u));
     try std.testing.expectEqual(@as(?u32, 0), out.device);
