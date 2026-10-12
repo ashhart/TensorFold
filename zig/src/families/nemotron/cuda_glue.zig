@@ -28,9 +28,14 @@ pub const Fns = struct {
     conv_rows: cuda.Function,
     conv_commit: cuda.Function,
     scan: cuda.Function,
+    conv_segs: cuda.Function,
+    scan_segs: cuda.Function,
     kv_write: cuda.Function,
     attn_chunk: cuda.Function,
     attn_merge: cuda.Function,
+    kv_write_segs: cuda.Function,
+    attn_chunk_segs: cuda.Function,
+    attn_merge_segs: cuda.Function,
     keyed: cuda.Function,
 
     /// The modules of nemotron_norms, _route, _mamba, _attention and _keyed, in that order.
@@ -48,9 +53,14 @@ pub const Fns = struct {
             .conv_rows = try m[2].function("tf_nemo_conv_rows"),
             .conv_commit = try m[2].function("tf_nemo_conv_commit"),
             .scan = try m[2].function("tf_nemo_scan"),
+            .conv_segs = try m[2].function("tf_nemo_conv_segs"),
+            .scan_segs = try m[2].function("tf_nemo_scan_segs"),
             .kv_write = try m[3].function("tf_nemo_kv_write"),
             .attn_chunk = try m[3].function("tf_nemo_attn_chunk"),
             .attn_merge = try m[3].function("tf_nemo_attn_merge"),
+            .kv_write_segs = try m[3].function("tf_nemo_kv_write_segs"),
+            .attn_chunk_segs = try m[3].function("tf_nemo_attn_chunk_segs"),
+            .attn_merge_segs = try m[3].function("tf_nemo_attn_merge_segs"),
             .keyed = try m[4].function("tf_nemo_keyed_greedy"),
         };
     }
@@ -63,6 +73,20 @@ fn int(x: usize) c_int {
 fn cdiv(a: usize, b: usize) usize {
     return (a + b - 1) / b;
 }
+
+/// A stream's Mamba buffers in a shared window, at one layer: its projection rows and its own state.
+pub const MambaSeg = struct { proj: u64, base: u64, raw: u64, xc: u64, dt: u64, state: u64, meta: u64, y: u64, rows: usize };
+
+/// Streams one conv or scan launch takes (nemotron_mamba.cu's MAXSEG).
+pub const max_segs = 8;
+
+const ConvSegs = extern struct { p: [max_segs]u64, base: [max_segs]u64, raw: [max_segs]u64, xc: [max_segs]u64, meta: [max_segs]u64, r: [max_segs]c_int };
+const ScanSegs = extern struct { p: [max_segs]u64, xc: [max_segs]u64, dt: [max_segs]u64, s: [max_segs]u64, meta: [max_segs]u64, y: [max_segs]u64, r: [max_segs]c_int };
+
+/// A stream's attention in a shared window, at one layer: its caches, meta row and first row of the shared rows.
+pub const AttnSeg = struct { kc: u64, vc: u64, meta: u64, row0: usize, rows: usize };
+
+const AttnSegs = extern struct { kc: [max_segs]u64, vc: [max_segs]u64, meta: [max_segs]u64, row0: [max_segs]c_int, n: c_int };
 
 /// The router's K slices and the shared bytes its block stages: 16 rows and 16 experts of one slice, padded a word.
 pub fn routerShape(d: usize) struct { sk: usize, shared: u32 } {
@@ -174,6 +198,47 @@ pub const Glue = struct {
         try g.go(g.f.scan, .{ m.heads, m.dh / 32, 1 }, 128, 0, &a);
     }
 
+    /// Every stream's conv, then every stream's scan, of a shared window: one launch each, or a stream at a time.
+    pub fn mambaSegs(g: Glue, segs: []const MambaSeg, cw: u64, cb: u64, a_: u64, dsk: u64, dtb: u64, lo: f32, hi: f32, m: Shape) !void {
+        if (g.set != null or segs.len < 2 or segs.len > max_segs) {
+            for (segs) |s| {
+                try g.conv(s.proj, s.base, s.raw, s.xc, cw, cb, s.meta, s.rows, m);
+                try g.scan(s.proj, s.xc, s.dt, s.state, a_, dsk, dtb, s.meta, s.y, s.rows, lo, hi, m);
+            }
+            return;
+        }
+        if (m.state != 128 or m.dh % 32 != 0) return error.ScanShape;
+        var cv = std.mem.zeroes(ConvSegs);
+        var sc = std.mem.zeroes(ScanSegs);
+        for (segs, 0..) |s, k| {
+            cv.p[k] = s.proj;
+            cv.base[k] = s.base;
+            cv.raw[k] = s.raw;
+            cv.xc[k] = s.xc;
+            cv.meta[k] = s.meta;
+            cv.r[k] = int(s.rows);
+            sc.p[k] = s.proj;
+            sc.xc[k] = s.xc;
+            sc.dt[k] = s.dt;
+            sc.s[k] = s.state;
+            sc.meta[k] = s.meta;
+            sc.y[k] = s.y;
+            sc.r[k] = int(s.rows);
+        }
+        var a: cuda.Args = .{};
+        a.add(cv);
+        ptrs(&a, &.{ cw, cb });
+        ints(&a, &.{ m.proj, m.xd, m.cd, m.rmax });
+        try g.go(g.f.conv_segs, .{ cdiv(m.cd, 256), segs.len, 1 }, 256, 0, &a);
+        var b: cuda.Args = .{};
+        b.add(sc);
+        ptrs(&b, &.{ a_, dsk, dtb });
+        b.add(lo);
+        b.add(hi);
+        ints(&b, &.{ m.proj, m.xd, m.cd, m.xd + m.cd, m.heads, m.dh, m.groups, m.rmax });
+        try g.go(g.f.scan_segs, .{ m.heads, m.dh / 32, segs.len }, 128, 0, &b);
+    }
+
     /// Weight * RMSNorm over groups of xd / groups, and the 64-input group sums.
     pub fn groupRmsnorm(g: Glue, x: u64, w: u64, out: u64, xs: u64, rows: usize, xd: usize, groups: usize, eps: f32) !void {
         if (g.tri()) |t| return t.groupRmsnorm(x, w, out, xs, rows, xd, groups, eps);
@@ -222,6 +287,49 @@ pub const Glue = struct {
         ptrs(&b, &.{ po, pm, pl, meta, out, xs });
         ints(&b, &.{ at.heads, at.kv_heads, grp, chunk_keys, at.nch });
         try g.go(g.f.attn_merge, .{ rows, at.kv_heads, 1 }, 256, 0, &b);
+    }
+
+    /// Every stream's keys, values and attention over the shared rows: one launch each, or a stream at a time.
+    pub fn attentionSegs(g: Glue, segs: []const AttnSeg, qkv: u64, po: u64, pm: u64, pl: u64, out: u64, xs: u64, at: Attn) !void {
+        var rows: usize = 0;
+        for (segs) |s| rows += s.rows;
+        if (g.set != null or segs.len < 2 or segs.len > max_segs) {
+            const qd: u64 = at.heads * at.dim;
+            for (segs) |s| {
+                const r0: u64 = s.row0;
+                const q = qkv + r0 * at.nqkv * 2;
+                try g.kvWrite(q, s.kc, s.vc, s.meta, s.rows, at);
+                try g.attention(q, s.kc, s.vc, s.meta, po + r0 * at.nch * qd * 4, pm + r0 * at.nch * at.heads * 4, pl + r0 * at.nch * at.heads * 4, out + r0 * qd * 2, xs + r0 * (qd / 64) * 4, s.rows, at);
+            }
+            return;
+        }
+        const grp = at.heads / at.kv_heads;
+        if (at.dim != 128 or grp > 16) return error.AttentionShape;
+        var t = std.mem.zeroes(AttnSegs);
+        for (segs, 0..) |s, k| {
+            t.kc[k] = s.kc;
+            t.vc[k] = s.vc;
+            t.meta[k] = s.meta;
+            t.row0[k] = int(s.row0);
+        }
+        t.n = int(segs.len);
+        var w: cuda.Args = .{};
+        w.add(t);
+        w.add(qkv);
+        ints(&w, &.{ at.nqkv, at.heads * at.dim, at.kv_heads * at.dim });
+        try g.go(g.f.kv_write_segs, .{ rows, 1, 1 }, 256, 0, &w);
+        const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(at.dim), -0.5));
+        var a: cuda.Args = .{};
+        a.add(t);
+        ptrs(&a, &.{ qkv, po, pm, pl });
+        ints(&a, &.{ at.nqkv, at.heads, at.kv_heads, grp, chunk_keys, at.nch });
+        a.add(scale);
+        try g.go(g.f.attn_chunk_segs, .{ rows, at.kv_heads, @min(at.nch, chunk_blocks) }, 256, 0, &a);
+        var b: cuda.Args = .{};
+        b.add(t);
+        ptrs(&b, &.{ po, pm, pl, out, xs });
+        ints(&b, &.{ at.heads, at.kv_heads, grp, chunk_keys, at.nch });
+        try g.go(g.f.attn_merge_segs, .{ rows, at.kv_heads, 1 }, 256, 0, &b);
     }
 
     /// The MTP input [rmsnorm(e) * enorm | rmsnorm(h) * hnorm] and its group sums.

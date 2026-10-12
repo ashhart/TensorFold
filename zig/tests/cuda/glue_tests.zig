@@ -285,6 +285,103 @@ fn attention(r: *Rig, pos: usize, rows: usize) !void {
     try r.same("attention xs", f32, xsd, xs);
 }
 
+/// Three streams' windows in one conv and one scan launch (Glue.mambaSegs): each as its own reference runs it.
+fn mambaSegs(r: *Rig, lo: f32, hi: f32) !void {
+    const cd = ms.cd;
+    const cases = [_][3]usize{ .{ 0, 0, 5 }, .{ 1, 3, 4 }, .{ 0, 7, 6 } }; // parity, kept rows, window rows
+    var total: usize = 0;
+    for (cases) |c| total += c[2];
+    const p = try r.bfs(total * ms.proj, 2.0);
+    const pd = try r.dev(u16, p);
+    const y = try r.a.alloc(u16, total * ms.xd);
+    @memset(y, 0);
+    const yd = try r.dev(u16, y);
+    const cw = try r.f32s(4 * cd, -0.5, 0.5);
+    const cb = try r.f32s(cd, -0.1, 0.1);
+    const a = try r.f32s(ms.heads, -2.0, -0.05);
+    const dsk = try r.f32s(ms.heads, 0.5, 1.5);
+    const dtb = try r.f32s(ms.heads, -4.0, 1.0);
+    const Stream = struct { base: []u16, raw: []u16, xc: []u16, dt: []f32, st: []f32, d: glue.MambaSeg };
+    var streams: [cases.len]Stream = undefined;
+    var row0: usize = 0;
+    for (cases, &streams) |c, *x| {
+        x.base = try r.bfs(3 * cd, 1.0);
+        x.raw = try r.bfs(2 * ms.rmax * cd, 1.0); // the kept rows the window replays
+        x.xc = try r.bfs(2 * ms.rmax * cd, 1.0); // the kept rows' conv outputs the scan replays
+        x.dt = try r.f32s(2 * ms.rmax * ms.heads, 0.01, 0.1);
+        x.st = try r.f32s(ms.heads * ms.dh * 128, -0.2, 0.2);
+        const meta = try r.dev(i32, &.{ 100, @intCast(c[0]), @intCast(c[1]), 0 });
+        x.d = .{ .proj = pd + row0 * ms.proj * 2, .base = try r.dev(u16, x.base), .raw = try r.dev(u16, x.raw), .xc = try r.dev(u16, x.xc), .dt = try r.dev(f32, x.dt), .state = try r.dev(f32, x.st), .meta = meta, .y = yd + row0 * ms.xd * 2, .rows = c[2] };
+        row0 += c[2];
+    }
+    var ds: [cases.len]glue.MambaSeg = undefined;
+    for (streams, &ds) |x, *d| d.* = x.d;
+    try r.g().mambaSegs(&ds, try r.dev(f32, cw), try r.dev(f32, cb), try r.dev(f32, a), try r.dev(f32, dsk), try r.dev(f32, dtb), lo, hi, mshape());
+    row0 = 0;
+    for (cases, &streams) |c, *x| {
+        const pk = p[row0 * ms.proj ..][0 .. c[2] * ms.proj];
+        ref.conv(pk, x.base, x.raw, x.xc, cw, cb, c[0], c[1], c[2], ms);
+        ref.scan(pk, x.xc, x.dt, x.st, a, dsk, dtb, y[row0 * ms.xd ..][0 .. c[2] * ms.xd], c[0], c[1], c[2], lo, hi, ms);
+        try r.same("segs conv xc", u16, x.d.xc, x.xc);
+        try r.same("segs conv raw", u16, x.d.raw, x.raw);
+        try r.same("segs conv base", u16, x.d.base, x.base);
+        try r.same("segs scan dt", f32, x.d.dt, x.dt);
+        try r.same("segs scan state", f32, x.d.state, x.st);
+        row0 += c[2];
+    }
+    try r.same("segs scan y", u16, yd, y);
+}
+
+/// Three streams' windows at their own positions in one launch of each attention kernel (Glue.attentionSegs).
+fn attentionSegs(r: *Rig) !void {
+    const kvd = at.kv_heads * at.dim;
+    const qd = at.heads * at.dim;
+    const cases = [_][2]usize{ .{ 0, 5 }, .{ 1000, 3 }, .{ 5000, 6 } }; // position, rows
+    var total: usize = 0;
+    for (cases) |c| total += c[1];
+    const qkv = try r.bfs(total * at.nqkv, 1.0);
+    const qkvd = try r.dev(u16, qkv);
+    const out = try r.a.alloc(u16, total * qd);
+    const xs = try r.a.alloc(f32, total * qd / 64);
+    const Stream = struct { kc: []u16, vc: []u16, d: glue.AttnSeg };
+    var streams: [cases.len]Stream = undefined;
+    var ds: [cases.len]glue.AttnSeg = undefined;
+    var row0: usize = 0;
+    for (cases, &streams, &ds) |c, *x, *d| {
+        const pos = c[0];
+        x.kc = try r.bfs((pos + c[1]) * kvd, 1.0);
+        x.vc = try r.bfs((pos + c[1]) * kvd, 1.0);
+        x.d = .{ .kc = try r.dev(u16, x.kc), .vc = try r.dev(u16, x.vc), .meta = try r.dev(i32, &.{ @intCast(pos), 0, 0, 0 }), .row0 = row0, .rows = c[1] };
+        d.* = x.d;
+        row0 += c[1];
+    }
+    const pod = try r.zeros(f32, total * at.nch * qd);
+    const pmd = try r.zeros(f32, total * at.nch * at.heads);
+    const pld = try r.zeros(f32, total * at.nch * at.heads);
+    const outd = try r.zeros(u16, total * qd);
+    const xsd = try r.zeros(f32, total * qd / 64);
+    try r.g().attentionSegs(&ds, qkvd, pod, pmd, pld, outd, xsd, ashape());
+    row0 = 0;
+    for (cases, &streams) |c, *x| {
+        const pos = c[0];
+        const rows = c[1];
+        const q = qkv[row0 * at.nqkv ..][0 .. rows * at.nqkv];
+        for (0..rows) |row| {
+            @memcpy(x.kc[(pos + row) * kvd ..][0..kvd], q[row * at.nqkv + qd ..][0..kvd]);
+            @memcpy(x.vc[(pos + row) * kvd ..][0..kvd], q[row * at.nqkv + qd + kvd ..][0..kvd]);
+        }
+        const po = try r.a.alloc(f32, rows * at.nch * qd);
+        const pm = try r.a.alloc(f32, rows * at.nch * at.heads);
+        const pl = try r.a.alloc(f32, rows * at.nch * at.heads);
+        ref.attention(q, x.kc, x.vc, pos, rows, at, po, pm, pl, out[row0 * qd ..][0 .. rows * qd], xs[row0 * qd / 64 ..][0 .. rows * qd / 64]);
+        try r.same("segs kv_write k", u16, x.d.kc, x.kc);
+        try r.same("segs kv_write v", u16, x.d.vc, x.vc);
+        row0 += rows;
+    }
+    try r.same("segs attention out", u16, outd, out);
+    try r.same("segs attention xs", f32, xsd, xs);
+}
+
 fn keyed(r: *Rig) !void {
     const rows = 4;
     const count = 28;
@@ -325,9 +422,11 @@ pub fn run(gpu: Gpu) !void {
     try route(&r);
     try mamba(&r, 0, std.math.inf(f32));
     try mamba(&r, 0.001, 0.1);
+    try mambaSegs(&r, 0.001, 0.1);
     for ([_][2]usize{ .{ 0, 16 }, .{ 1000, 16 }, .{ 5000, 3 }, .{ 40000, 2 } }) |c| try attention(&r, c[0], c[1]);
+    try attentionSegs(&r);
     try keyed(&r);
     try check.expect(r.bad == 0, "glue: {d} of {d} comparisons differ from the host references", .{ r.bad, r.cases });
     try check.expect(r.sparsest > 0, "glue: a host reference is all zeros, so its comparison proves nothing", .{});
-    check.pass("glue: {d} of {d} comparisons byte-equal to the host references (norms, router, top-k, conv, scan, attention, draw); every reference at least {d:.0}% nonzero", .{ r.cases, r.cases, r.sparsest * 100 });
+    check.pass("glue: {d} of {d} comparisons byte-equal to the host references (norms, router, top-k, conv, scan, attention, draw, several streams at once); every reference at least {d:.0}% nonzero", .{ r.cases, r.cases, r.sparsest * 100 });
 }
