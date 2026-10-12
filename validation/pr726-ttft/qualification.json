@@ -1,0 +1,34 @@
+{
+  "cases": {
+    "chat_drafted": {
+      "cached": 31,
+      "full_state_and_first_continuation_equal": true
+    },
+    "code_drafted": {
+      "cached": 14,
+      "full_state_and_first_continuation_equal": true
+    },
+    "code_plain": {
+      "cached": 14,
+      "full_state_and_first_continuation_equal": true
+    },
+    "grid_code_drafted": {
+      "cached": 14,
+      "full_state_and_first_continuation_equal": true
+    }
+  },
+  "cold_cross_key_reuse_proved": true,
+  "grid_full_n_proved": true,
+  "independent_qualification_receipt_sha256": "c6fbfdb2adb56f96a2481eb6d0bee342743403838460252712cc349c80bf367c",
+  "integrated_live_hits": 16,
+  "passed": true,
+  "provenance_sha256": "aa43a89fdd850f8d4d23bf4dbc600fe5ea6fe675358d4fa85c9f810c4425ef4d",
+  "qualification_command_sha256": "9893d4d9f996eafc7899730724c3d573fa36504c625ab9cc3b9a2110b7716d45",
+  "qualification_json_sha256": "d6dab2e845ca3c9aad63b4d99d96af60b05512ce75435b2d914eadb6704fe009",
+  "qualification_log_sha256": "8a5ae14433a7158a8587fe0af10a6caef415c0701d66152b31c9654a80cea946",
+  "qualifier_binary_sha256": "0488bb2a3dc2764f70ebd491ce4ac5146ef83bec86310c9c4dd4c9ac0a160e6b",
+  "reset_skip_proved": true,
+  "schema": "pr726_overlap_r2_independent_qualification_v1",
+  "scope": "Accepted actual-CUDA BF16 short full-N and integrated state/first/continuation gates; R3 HTTP separately proves long 4096-prefix reuse. Device qualifier source is not included.",
+  "source_qualifier_sha256": "fc0d4d260fd4e7a6971949b7b8586427cf8aa2f6783fd7654c066f1dc328a126"
+}

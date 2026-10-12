@@ -1,0 +1,25 @@
+{
+  "files_sha256": {
+    "README.md": "a9976a37af2aa4622460f75c0777adfefdb29a87e40cf4912f14630ff2146c25",
+    "bench_concurrent.py": "6274692888d28cc38003eeddd91c5fd990b5c2dedb28b9002fc42187dfd5cb80",
+    "bench_evidence.py": "119c396f24f3c13e181429bc69acff39f34254efd4789c5673a3dcbc54738d93",
+    "counters.json": "79fb15d79736e4df225d74b0072a09200809630c25094121d902e69deaa16c6d",
+    "long-manifest.json": "bfbb7cbb63e5d6696c0be700edf820dfdcdc03fb149e76467cfa8fb572f4fb53",
+    "provenance.json": "290721b93fd9cfa30e7377c5987ec1746eaa8449bed241720f0a55b8650b8819",
+    "qualification.json": "e8d86be5bf3107e3576232e694af7ecbce870e145d0603e5667c174b032417cd",
+    "requests.jsonl": "50499c2e13a67685aac84231c7cd62aba108c7e069c9f76d87261f0cbc939ad9",
+    "run_overlap.py": "9ce3f4b06f2b90ae13ef52259cd495d7f28d50e66a3089f1c4f5bd541e8549ee",
+    "summary.json": "7fb9857f5b15fd726559be89a459eab362c6bba33bac06d37f9ac97b3672258d",
+    "test_verify.py": "08cec265255224c266f517e00aec98be025550871880136b23d4463e896c443b",
+    "verify.py": "a389b3d6cb4138158cbb9323e0ee0b503bb5c9bdf5de0c35ceb8af5be6482edb"
+  },
+  "host_checks": {
+    "independent_metrics_exact": true,
+    "portable_mutation_tests_passed": 9,
+    "python_ast": "3.11",
+    "runtime_files_rehashed_unchanged": 31
+  },
+  "request_count": 152,
+  "sanitized": true,
+  "schema": "pr726_portable_bundle_v1"
+}

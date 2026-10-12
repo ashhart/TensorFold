@@ -1,0 +1,121 @@
+{
+  "arms": {
+    "C": {
+      "draft_pool": {
+        "discarded": 2,
+        "driver_creations": 18,
+        "enabled": true,
+        "evictions": 16,
+        "failed": false,
+        "fence_failures": 0,
+        "initialized": 36,
+        "quarantined_bytes": 0,
+        "quarantined_slots": 0,
+        "retained_bytes": 0,
+        "retained_slots": 0,
+        "reuse_hits": 20
+      },
+      "exact_cache": {
+        "active_bytes": 157117952,
+        "captures": 2,
+        "evictions": 1,
+        "failed": false,
+        "hits": 34,
+        "misses": 2,
+        "pending_bytes": 0,
+        "promotions": 2,
+        "purges": 0,
+        "refusals": 0
+      },
+      "logits": {
+        "captures": 2,
+        "failed": false,
+        "fallbacks": 4,
+        "hits": 34
+      },
+      "reset_skip": {
+        "avoided_fill_bytes": 5234098176,
+        "avoided_fill_calls": 3264,
+        "deferred_fresh": 32,
+        "deferred_pool": 2,
+        "enabled": true,
+        "failed_deferred_transactions": 0,
+        "fallback_resets": 0,
+        "restored_fresh": 32,
+        "restored_pool": 2
+      },
+      "seq_pool": {
+        "create_attempts": 36,
+        "discarded": 4,
+        "driver_creations": 36,
+        "enabled": true,
+        "evictions": 32,
+        "failed": false,
+        "retained_bytes": 0,
+        "retained_slots": 0,
+        "reuse_hits": 2
+      }
+    },
+    "D": {
+      "draft_pool": {
+        "discarded": 38,
+        "driver_creations": 38,
+        "enabled": true,
+        "evictions": 0,
+        "failed": false,
+        "fence_failures": 0,
+        "initialized": 0,
+        "quarantined_bytes": 0,
+        "quarantined_slots": 0,
+        "retained_bytes": 0,
+        "retained_slots": 0,
+        "reuse_hits": 0
+      },
+      "exact_cache": {
+        "active_bytes": 157117952,
+        "captures": 2,
+        "evictions": 1,
+        "failed": false,
+        "hits": 34,
+        "misses": 2,
+        "pending_bytes": 0,
+        "promotions": 2,
+        "purges": 0,
+        "refusals": 0
+      },
+      "logits": {
+        "captures": 2,
+        "failed": false,
+        "fallbacks": 4,
+        "hits": 34
+      },
+      "reset_skip": {
+        "avoided_fill_bytes": 0,
+        "avoided_fill_calls": 0,
+        "deferred_fresh": 0,
+        "deferred_pool": 0,
+        "enabled": true,
+        "failed_deferred_transactions": 0,
+        "fallback_resets": 0,
+        "restored_fresh": 0,
+        "restored_pool": 0
+      },
+      "seq_pool": {
+        "create_attempts": 38,
+        "discarded": 38,
+        "driver_creations": 38,
+        "enabled": true,
+        "evictions": 0,
+        "failed": false,
+        "retained_bytes": 0,
+        "retained_slots": 0,
+        "reuse_hits": 0
+      }
+    }
+  },
+  "schema": "pr726_sanitized_owner_counters_v1",
+  "source_server_log_sha256": {
+    "C": "ce4e09bdfe3ee8bdad1f27b3289ce398b1d1d12244b03fa90a94aa4f2a2e0fd5",
+    "D": "3edc97475dc3d5fb4d1c833d19ad72827f85d45a498e5c19a47db4526da5b6d6"
+  }
+}
