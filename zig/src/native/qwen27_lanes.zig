@@ -148,9 +148,8 @@ pub const Metal = struct {
     pub fn measure(b: *Metal, io: std.Io) !void {
         const r = b.runner;
         if (b.owners[0] != null or r.active != null) return error.StreamBusy;
-        const c = r.model.config;
         var shape: [128]u8 = undefined;
-        const parts = [_][]const u8{ "qwen27-lanes", std.mem.span(r.model.device.name()), try std.fmt.bufPrint(&shape, "{d}/{d}/{d}/{d}/{d}/{d}", .{ c.layers, c.hidden, c.intermediate, c.vocab, max_rows, @intFromBool(b.draft != null) }) };
+        const parts = [_][]const u8{ "qwen27-lanes", std.mem.span(r.model.device.name()), try q.widths.costShape(r.model.config, r.model.widths_tag, &shape, max_rows, b.draft != null) };
         const k = lanes.cost_cache.key(b.gpa, io, &parts) catch null;
         if (k) |key| if (lanes.cost_cache.load([max_rows]lanes.config.Cost, b.gpa, io, key)) |kept| {
             b.costs = kept;
