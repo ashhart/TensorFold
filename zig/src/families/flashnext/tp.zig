@@ -604,6 +604,7 @@ pub const Tp2 = struct {
     /// for the peer's, by the flag its message sets) or a prefill send (its writes, then its flag). While idle it
     /// watches the last exchange: 10 s without the peer's answer fails the link.
     fn service(t: *Tp2, first: u32) void {
+        _ = std.c.pthread_set_qos_class_self_np(.USER_INTERACTIVE, 0); // busy CPUs must not hold back a send
         const posted = t.word32(SYNC + GPU * 4);
         const flag = t.word64(FLAG);
         var seq = first;
