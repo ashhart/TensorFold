@@ -33,7 +33,7 @@ kernel void tf_exlr8_prompt(const device float* X [[buffer(0)]], const device uc
     const device uchar* run = W + bases[j.base + ib];
     tfp::frag<float> part[2] = {tfp::frag<float>(0.0f), tfp::frag<float>(0.0f)};
     for (uint r = 0; r < 8; ++r) {
-      float w[8];
+      half w[8];
       const device uint* tile = reinterpret_cast<const device uint*>(run + (8 * r + sg) * 32 * j.k);
       switch (j.k) {
         case 2: tf_exlr8_decode<2>(tile, lane, w); break;
@@ -43,7 +43,7 @@ kernel void tf_exlr8_prompt(const device float* X [[buffer(0)]], const device uc
       // the decoded lane's inputs 2q, 2q + 1, 2q + 8, 2q + 9 and outputs c, c + 8 into W^T's 16 x 16 tile
       for (uint n = 0; n < 8; ++n) {
         const uint in = 2 * (lane % 4) + (n & 1) + 8 * ((n >> 1) & 1), out = lane / 4 + 8 * (n >> 2);
-        w16[out * TF_WLD + in] = bfloat(w[n]);
+        w16[out * TF_WLD + in] = bfloat(float(w[n]));
       }
       simdgroup_barrier(mem_flags::mem_threadgroup);
       tfp::frag<bfloat> wt, x0, x1;

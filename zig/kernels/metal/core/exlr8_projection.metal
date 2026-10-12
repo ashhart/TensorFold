@@ -38,28 +38,44 @@ inline void tf_exlr8_fwht(thread float (&v)[4], uint lane) {
   v[3] = a1 - a3;
 }
 
-// The mcg codebook's fp16 sum, then E4M3 nearest even: adding 1.5 2^(e+7) puts the fp16 ulp on the E4M3 grid.
-inline float tf_exlr8_weight(uint state) {
+// The mcg codebook's fp16 sum times 2^-8 (xor 0x1B60, not 0x3B60: each half 8 binades lower, still normal; exact).
+inline ushort tf_exlr8_sum8(uint state) {
   uint x = state * 0xCBAC1FEDu;
-  x = (x & 0x8FFF8FFFu) ^ 0x3B603B60u;
+  x = (x & 0x8FFF8FFFu) ^ 0x1B601B60u;
   const half2 h = as_type<half2>(x);
-  const ushort bits = as_type<ushort>(half(h.x + h.y));
-  const ushort mag = bits & 0x7FFF;
-  const half magic = as_type<half>(ushort((max(mag, ushort(0x2400)) & 0x7C00) + 0x1E00));
-  const float w = float((as_type<half>(mag) + magic) - magic);
-  return (bits & 0x8000) ? -w : w;
+  return as_type<ushort>(half(h.x + h.y));
 }
 
-// Lane l's eight values 8 l .. 8 l + 7: each state is the 16 stream bits that end at its own, MSB first per u32 word.
+// Two states' weights: at 2^-8 E4M3 nearest even is the fp16 pattern's nearest even at bit 7, subnormals included.
+inline half2 tf_exlr8_pair(uint s0, uint s1) {
+  const uint b = uint(tf_exlr8_sum8(s0)) | (uint(tf_exlr8_sum8(s1)) << 16);
+  return as_type<half2>((b + 0x003F003Fu + ((b >> 7) & 0x00010001u)) & 0xFF80FF80u) * half2(256.0h);
+}
+
+// Lane l's stream words for its eight values 8 l .. 8 l + 7, MSB first per u32 word.
 template <uint K>
-inline void tf_exlr8_decode(const device uint* tile, uint lane, thread float (&w)[8]) {
+inline uint3 tf_exlr8_words(const device uint* tile, uint lane) {
   constexpr uint ring = 256 * K, words = 8 * K;
-  const uint first = (8 * lane * K + K + ring - 16) % ring;
-  const uint i0 = first / 32, off = first % 32;
-  const ulong hi = (ulong(tile[i0]) << 32) | tile[(i0 + 1) % words];
-  // The lane's 7 K + 16 bits, first bit at bit 63: one variable shift, then constant ones.
-  const ulong bits = off ? (hi << off) | (ulong(tile[(i0 + 2) % words]) << off >> 32) : hi;
-  for (uint n = 0; n < 8; ++n) w[n] = tf_exlr8_weight(uint(bits >> (48 - n * K)) & 0xFFFF);
+  const uint i0 = ((8 * lane * K + K + ring - 16) % ring) / 32;
+  return uint3(tile[i0], tile[(i0 + 1) % words], tile[(i0 + 2) % words]);
+}
+
+// Each state is the 16 stream bits that end at its own value: one variable shift a tile, then constant ones.
+template <uint K>
+inline void tf_exlr8_unpack(uint3 t, uint lane, thread half (&w)[8]) {
+  const uint off = (8 * lane * K + K + 256 * K - 16) % 32;
+  const ulong hi = (ulong(t.x) << 32) | t.y;
+  const ulong bits = off ? (hi << off) | (ulong(t.z) << off >> 32) : hi;
+  for (uint n = 0; n < 8; n += 2) {
+    const half2 v = tf_exlr8_pair(uint(bits >> (48 - n * K)) & 0xFFFF, uint(bits >> (48 - n * K - K)) & 0xFFFF);
+    w[n] = v.x;
+    w[n + 1] = v.y;
+  }
+}
+
+template <uint K>
+inline void tf_exlr8_decode(const device uint* tile, uint lane, thread half (&w)[8]) {
+  tf_exlr8_unpack<K>(tf_exlr8_words<K>(tile, lane), lane, w);
 }
 
 inline void tf_exlr8_store(device uchar* y, ulong at, float v, uint f32) {
@@ -77,6 +93,9 @@ inline void tf_exlr8_job(const device float* X, const device uchar* W, const dev
   const uint rows = min(j.count ? j.count : a.rows, R), r0 = 2 * (lane % 4), c0 = lane / 4;
   float total[2][R], part[2][R];
   for (uint i = 0; i < R; ++i) total[0][i] = total[1][i] = 0.0f;
+  // Each tile's words load a tile ahead of its decode.
+  const device uchar* run = W + bases[j.base];
+  uint3 next = tf_exlr8_words<K>(reinterpret_cast<const device uint*>(run + sg * TB), lane);
   for (uint ib = 0; ib < j.blocks; ++ib) {
     for (uint i = tid; i < R * 128; i += 256) {
       const uint rr = i / 128;
@@ -84,18 +103,21 @@ inline void tf_exlr8_job(const device float* X, const device uchar* W, const dev
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint i = 0; i < R; ++i) part[0][i] = part[1][i] = 0.0f;
-    const device uchar* run = W + bases[j.base + ib];
+    const device uchar* later = ib + 1 < j.blocks ? W + bases[j.base + ib + 1] : run;
     for (uint r = 0; r < 8; ++r) {
-      float w[8];
-      tf_exlr8_decode<K>(reinterpret_cast<const device uint*>(run + (8 * r + sg) * TB), lane, w);
+      const uint3 now = next;
+      next = tf_exlr8_words<K>(reinterpret_cast<const device uint*>((r < 7 ? run + (8 * r + 8) * TB : later) + sg * TB), lane);
+      half w[8];
+      tf_exlr8_unpack<K>(now, lane, w);
       for (uint i = 0; i < R; ++i) {
         const threadgroup float* x = xs + i * 128 + 16 * r + r0;
         const float2 lo = *reinterpret_cast<const threadgroup float2*>(x);
         const float2 hi = *reinterpret_cast<const threadgroup float2*>(x + 8);
-        part[0][i] = fma(w[3], hi.y, fma(w[2], hi.x, fma(w[1], lo.y, fma(w[0], lo.x, part[0][i]))));
-        part[1][i] = fma(w[7], hi.y, fma(w[6], hi.x, fma(w[5], lo.y, fma(w[4], lo.x, part[1][i]))));
+        part[0][i] = fma(float(w[3]), hi.y, fma(float(w[2]), hi.x, fma(float(w[1]), lo.y, fma(float(w[0]), lo.x, part[0][i]))));
+        part[1][i] = fma(float(w[7]), hi.y, fma(float(w[6]), hi.x, fma(float(w[5]), lo.y, fma(float(w[4]), lo.x, part[1][i]))));
       }
     }
+    run = later;
     // The input block's scale goes on its partial sums, between 128-wide stages.
     const float s = j.in_scale == TF_NONE ? 1.0f : float(halves[j.in_scale + ib]);
     for (uint i = 0; i < R; ++i) {
@@ -201,7 +223,9 @@ kernel void tf_exlr8_combine(const device float* Z [[buffer(0)]], const device f
 
 // Qualification: every state's weight, for the host to compare with its own codebook bit for bit.
 kernel void tf_exlr8_weights(device float* out [[buffer(0)]], uint i [[thread_position_in_grid]]) {
-  if (i < 65536) out[i] = tf_exlr8_weight(i);
+  if (i >= 65536) return;
+  const half2 v = tf_exlr8_pair(i & ~1u, i | 1u);
+  out[i] = float(i & 1 ? v.y : v.x);
 }
 
 // Qualification for trellis matrices: run `run`'s 64 tiles as E4M3 codes, a 128 x 128 row-major block per run.
@@ -210,7 +234,7 @@ kernel void tf_exlr8_tile_codes(const device uchar* W [[buffer(0)]], const devic
                                 uint lane [[thread_index_in_simdgroup]], uint2 tg [[threadgroup_position_in_grid]]) {
   const uint t = tg.x, run = tg.y;
   const device uint* tile = reinterpret_cast<const device uint*>(W + bases[run] + ulong(t) * 32 * k);
-  float w[8];
+  half w[8];
   switch (k) {
     case 2: tf_exlr8_decode<2>(tile, lane, w); break;
     case 3: tf_exlr8_decode<3>(tile, lane, w); break;

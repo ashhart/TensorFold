@@ -35,28 +35,46 @@ __device__ __forceinline__ void tf_exlr8_fwht(float (&v)[4], unsigned lane) {
   v[3] = __fsub_rn(a1, a3);
 }
 
-// The mcg codebook's fp16 sum, then E4M3 nearest even: adding 1.5 2^(e+7) puts the fp16 ulp on the E4M3 grid.
-__device__ __forceinline__ float tf_exlr8_weight(unsigned state) {
+// The mcg codebook's fp16 sum times 2^-8 (xor 0x1B60, not 0x3B60: each half 8 binades lower, still normal; exact).
+__device__ __forceinline__ unsigned tf_exlr8_sum8(unsigned state) {
   unsigned x = state * 0xCBAC1FEDu;
-  x = (x & 0x8FFF8FFFu) ^ 0x3B603B60u;
-  const unsigned short bits = __half_as_ushort(__hadd(__ushort_as_half((unsigned short)(x & 0xFFFFu)), __ushort_as_half((unsigned short)(x >> 16))));
-  const unsigned short mag = bits & 0x7FFF;
-  const unsigned short top = mag > 0x2400 ? mag : 0x2400;
-  const __half magic = __ushort_as_half((unsigned short)((top & 0x7C00) + 0x1E00));
-  const float w = __half2float(__hsub(__hadd(__ushort_as_half(mag), magic), magic));
-  return (bits & 0x8000) ? -w : w;
+  x = (x & 0x8FFF8FFFu) ^ 0x1B601B60u;
+  return __half_as_ushort(__hadd(__ushort_as_half((unsigned short)(x & 0xFFFFu)), __ushort_as_half((unsigned short)(x >> 16))));
 }
 
-// Lane l's eight values 8 l .. 8 l + 7: each state is the 16 stream bits that end at its own, MSB first per u32 word.
+// Two states' weights: at 2^-8 E4M3 nearest even is the fp16 pattern's nearest even at bit 7, subnormals included.
+__device__ __forceinline__ __half2 tf_exlr8_pair(unsigned s0, unsigned s1) {
+  const unsigned b = tf_exlr8_sum8(s0) | (tf_exlr8_sum8(s1) << 16);
+  const unsigned r = (b + 0x003F003Fu + ((b >> 7) & 0x00010001u)) & 0xFF80FF80u;
+  const __half2 v = __halves2half2(__ushort_as_half((unsigned short)(r & 0xFFFFu)), __ushort_as_half((unsigned short)(r >> 16)));
+  return __hmul2(v, __half2half2(__ushort_as_half(0x5C00)));
+}
+
+// Lane l's stream words for its eight values 8 l .. 8 l + 7, MSB first per u32 word.
 template <int K>
-__device__ __forceinline__ void tf_exlr8_decode(const uint32_t* tile, unsigned lane, float (&w)[8]) {
+__device__ __forceinline__ uint3 tf_exlr8_words(const uint32_t* tile, unsigned lane) {
   constexpr unsigned ring = 256 * K, words = 8 * K;
-  const unsigned first = (8 * lane * K + K + ring - 16) % ring;
-  const unsigned i0 = first / 32, off = first % 32;
-  const uint64_t hi = ((uint64_t)tile[i0] << 32) | tile[(i0 + 1) % words];
-  const uint64_t bits = off ? (hi << off) | (((uint64_t)tile[(i0 + 2) % words] << off) >> 32) : hi;
+  const unsigned i0 = ((8 * lane * K + K + ring - 16) % ring) / 32;
+  return make_uint3(tile[i0], tile[(i0 + 1) % words], tile[(i0 + 2) % words]);
+}
+
+// Each state is the 16 stream bits that end at its own value: one variable shift a tile, then constant ones.
+template <int K>
+__device__ __forceinline__ void tf_exlr8_unpack(uint3 t, unsigned lane, __half (&w)[8]) {
+  const unsigned off = (8 * lane * K + K + 256 * K - 16) % 32;
+  const uint64_t hi = ((uint64_t)t.x << 32) | t.y;
+  const uint64_t bits = off ? (hi << off) | (((uint64_t)t.z << off) >> 32) : hi;
 #pragma unroll
-  for (int n = 0; n < 8; ++n) w[n] = tf_exlr8_weight((unsigned)(bits >> (48 - n * K)) & 0xFFFFu);
+  for (int n = 0; n < 8; n += 2) {
+    const __half2 v = tf_exlr8_pair((unsigned)(bits >> (48 - n * K)) & 0xFFFFu, (unsigned)(bits >> (48 - n * K - K)) & 0xFFFFu);
+    w[n] = __low2half(v);
+    w[n + 1] = __high2half(v);
+  }
+}
+
+template <int K>
+__device__ __forceinline__ void tf_exlr8_decode(const uint32_t* tile, unsigned lane, __half (&w)[8]) {
+  tf_exlr8_unpack<K>(tf_exlr8_words<K>(tile, lane), lane, w);
 }
 
 __device__ __forceinline__ void tf_exlr8_store(uint8_t* y, uint64_t at, float v, unsigned f32) {
@@ -75,6 +93,9 @@ __device__ __forceinline__ void tf_exlr8_job(const float* X, const uint8_t* W, c
   float total[2][R], part[2][R];
 #pragma unroll
   for (int i = 0; i < R; ++i) total[0][i] = total[1][i] = 0.0f;
+  // Each tile's words load a tile ahead of its decode.
+  const uint8_t* run = W + bases[j.base];
+  uint3 next = tf_exlr8_words<K>(reinterpret_cast<const uint32_t*>(run + sg * TB), lane);
   for (unsigned ib = 0; ib < j.blocks; ++ib) {
     for (unsigned i = tid; i < R * 128; i += 256) {
       const unsigned rr = i / 128;
@@ -83,19 +104,22 @@ __device__ __forceinline__ void tf_exlr8_job(const float* X, const uint8_t* W, c
     __syncthreads();
 #pragma unroll
     for (int i = 0; i < R; ++i) part[0][i] = part[1][i] = 0.0f;
-    const uint8_t* run = W + bases[j.base + ib];
+    const uint8_t* later = ib + 1 < j.blocks ? W + bases[j.base + ib + 1] : run;
     for (unsigned r = 0; r < 8; ++r) {
-      float w[8];
-      tf_exlr8_decode<K>(reinterpret_cast<const uint32_t*>(run + (8 * r + sg) * TB), lane, w);
+      const uint3 now = next;
+      next = tf_exlr8_words<K>(reinterpret_cast<const uint32_t*>((r < 7 ? run + (8 * r + 8) * TB : later) + sg * TB), lane);
+      __half w[8];
+      tf_exlr8_unpack<K>(now, lane, w);
 #pragma unroll
       for (int i = 0; i < R; ++i) {
         const float* x = xs + i * 128 + 16 * r + r0;
         const float2 lo = *reinterpret_cast<const float2*>(x);
         const float2 hi = *reinterpret_cast<const float2*>(x + 8);
-        part[0][i] = __fmaf_rn(w[3], hi.y, __fmaf_rn(w[2], hi.x, __fmaf_rn(w[1], lo.y, __fmaf_rn(w[0], lo.x, part[0][i]))));
-        part[1][i] = __fmaf_rn(w[7], hi.y, __fmaf_rn(w[6], hi.x, __fmaf_rn(w[5], lo.y, __fmaf_rn(w[4], lo.x, part[1][i]))));
+        part[0][i] = __fmaf_rn(__half2float(w[3]), hi.y, __fmaf_rn(__half2float(w[2]), hi.x, __fmaf_rn(__half2float(w[1]), lo.y, __fmaf_rn(__half2float(w[0]), lo.x, part[0][i]))));
+        part[1][i] = __fmaf_rn(__half2float(w[7]), hi.y, __fmaf_rn(__half2float(w[6]), hi.x, __fmaf_rn(__half2float(w[5]), lo.y, __fmaf_rn(__half2float(w[4]), lo.x, part[1][i]))));
       }
     }
+    run = later;
     // The input block's scale goes on its partial sums, between 128-wide stages.
     const float s = j.in_scale == TF_NONE ? 1.0f : __half2float(halves[j.in_scale + ib]);
 #pragma unroll
@@ -197,14 +221,16 @@ extern "C" __global__ void __launch_bounds__(32) tf_exlr8_combine(const float* Z
 // Qualification: every state's weight, for the host to compare with its own codebook bit for bit.
 extern "C" __global__ void tf_exlr8_weights(float* out) {
   const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < 65536) out[i] = tf_exlr8_weight(i);
+  if (i >= 65536) return;
+  const __half2 v = tf_exlr8_pair(i & ~1u, i | 1u);
+  out[i] = __half2float(i & 1 ? __high2half(v) : __low2half(v));
 }
 
 // Qualification for trellis matrices: run `run`'s 64 tiles as E4M3 codes, a 128 x 128 row-major block per run.
 extern "C" __global__ void __launch_bounds__(32) tf_exlr8_tile_codes(const uint8_t* W, const uint64_t* bases, unsigned k, uint8_t* out) {
   const unsigned lane = threadIdx.x, t = blockIdx.x, run = blockIdx.y;
   const uint32_t* tile = reinterpret_cast<const uint32_t*>(W + bases[run] + (uint64_t)t * 32 * k);
-  float w[8];
+  __half w[8];
   switch (k) {
     case 2: tf_exlr8_decode<2>(tile, lane, w); break;
     case 3: tf_exlr8_decode<3>(tile, lane, w); break;
@@ -212,7 +238,8 @@ extern "C" __global__ void __launch_bounds__(32) tf_exlr8_tile_codes(const uint8
   }
   for (unsigned n = 0; n < 8; ++n) {
     // an E4M3 value times 2^-8 is an fp16 whose bits are the code's 7 low bits shifted up by 7
-    const unsigned code = ((unsigned)__half_as_ushort(__float2half_rn(__fmul_rn(fabsf(w[n]), 0.00390625f))) >> 7) | (signbit(w[n]) ? 0x80u : 0u);
+    const float v = __half2float(w[n]);
+    const unsigned code = ((unsigned)__half_as_ushort(__float2half_rn(__fmul_rn(fabsf(v), 0.00390625f))) >> 7) | (signbit(v) ? 0x80u : 0u);
     const unsigned row = 16 * (t / 8) + 2 * (lane % 4) + (n & 1) + 8 * ((n >> 1) & 1);
     const unsigned col = 16 * (t % 8) + lane / 4 + 8 * (n >> 2);
     out[(uint64_t)run * 16384 + row * 128 + col] = (uint8_t)code;
