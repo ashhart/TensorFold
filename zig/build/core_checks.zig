@@ -16,3 +16,17 @@ pub fn rowWidths(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     const about = "The row projection at every MLX width and group: fp64 reference, windows, strides, stock bytes";
     b.step("tf-row-widths-check", about).dependOn(&b.addInstallArtifact(exe, .{}).step);
 }
+
+/// tf-affine-ref: the prompt products (affine_mm, simd_qmm) against float64, every row's bits in every window.
+pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module) void {
+    const exe = b.addExecutable(.{ .name = "tf-affine-ref", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/affine_ref.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.installArtifact(exe);
+    const about = "The prompt products (affine_mm, simd_qmm) on synthetic weights against float64, every row's bits in every window";
+    b.step("tf-affine-ref", about).dependOn(&b.addInstallArtifact(exe, .{}).step);
+}
