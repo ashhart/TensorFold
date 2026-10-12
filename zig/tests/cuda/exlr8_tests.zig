@@ -107,9 +107,9 @@ fn windows(gpu: Gpu, k: *const cuda.exlr8.Kernels, s: cuda.Stream, d: cases.Data
         const first = if (m == 0) pass else 0;
         try k.rotate(s, x + first * d.xWidth() * 2, signs, halves, rot, if (c.down) suh_of else 0, cases.Plan.rotate(d, rows), c.blocks, c.slots);
         if (c.down) {
-            try k.project(s, rot, weights, bases, halves, signs, jobs, plan.jobs.len, rowsArgs(rows, d.xWidth(), c.slots * d.nOut(), true), z);
+            try k.project(s, rot, weights, bases, halves, signs, jobs, plan.jobs.len, rowsArgs(rows, d.xWidth(), c.slots * d.nOut(), true), z, 0);
             try k.combine(s, z, wts + first * c.slots * 4, sv, halves, signs, cases.Plan.combine(d, rows), c.outs, y);
-        } else try k.project(s, rot, weights, bases, halves, signs, jobs, plan.jobs.len, rowsArgs(rows, d.xWidth(), d.yWidth(), c.y_f32), y);
+        } else try k.project(s, rot, weights, bases, halves, signs, jobs, plan.jobs.len, rowsArgs(rows, d.xWidth(), d.yWidth(), c.y_f32), y, 0);
         try s.synchronize();
         const bytes = rows * o.width * o.elem;
         if (m == 0) {
@@ -150,9 +150,9 @@ fn stages(k: *const cuda.exlr8.Kernels, s: cuda.Stream, g: *const Layer, host: l
     const h = host.sets[set];
     for (which) |st| switch (st) {
         .rotate_in => try k.rotate(s, g.x + first * L.hidden * 2, g.signs, g.halves, g.r, 0, layer_.rotateIn(rows), 48, 1),
-        .gate_up => try k.project(s, g.r, g.weights, g.bases, g.halves, g.signs, g.up[set], h.up.len, rowsArgs(rows, L.hidden, slots * 4096, true), g.gu),
+        .gate_up => try k.project(s, g.r, g.weights, g.bases, g.halves, g.signs, g.up[set], h.up.len, rowsArgs(rows, L.hidden, slots * 4096, true), g.gu, 0),
         .rotate_down => try k.rotate(s, g.act + first * slots * 2048 * 2, g.signs, g.halves, g.ar, g.suh[set], layer_.rotateDown(rows), 16, slots),
-        .down => try k.project(s, g.ar, g.weights, g.bases, g.halves, g.signs, g.down[set], h.down.len, rowsArgs(rows, slots * 2048, slots * L.hidden, true), g.z),
+        .down => try k.project(s, g.ar, g.weights, g.bases, g.halves, g.signs, g.down[set], h.down.len, rowsArgs(rows, slots * 2048, slots * L.hidden, true), g.z, 0),
         .combine => try k.combine(s, g.z, g.w + first * slots * 4, g.sv[set], g.halves, g.signs, layer_.combine(rows), 48, g.y),
     };
 }

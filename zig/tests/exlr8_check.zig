@@ -71,10 +71,10 @@ fn run(device: mtl.Device, queue: mtl.Queue, p: *const op.Pipelines, d: cases.Da
         try op.encodeRotate(p, e, .{ .buf = x, .off = first * d.xWidth() * 2 }, signs, halves, .{ .buf = rot }, cases.Plan.rotate(d, rows), c.blocks, c.slots, if (c.down) op.Ref{ .buf = suh_of } else null);
         e.barrier();
         if (c.down) {
-            try op.encodeProject(p, e, .{ .buf = rot }, t, .{ .buf = z }, rows, d.xWidth(), c.slots * d.nOut(), true);
+            try op.encodeProject(p, e, .{ .buf = rot }, t, .{ .buf = z }, rows, d.xWidth(), c.slots * d.nOut(), true, null);
             e.barrier();
             try op.encodeCombine(p, e, .{ .buf = z }, .{ .buf = wts, .off = first * c.slots * 4 }, .{ .buf = sv }, halves, signs, .{ .buf = y }, cases.Plan.combine(d, rows), c.outs);
-        } else try op.encodeProject(p, e, .{ .buf = rot }, t, .{ .buf = y }, rows, d.xWidth(), d.yWidth(), c.y_f32);
+        } else try op.encodeProject(p, e, .{ .buf = rot }, t, .{ .buf = y }, rows, d.xWidth(), d.yWidth(), c.y_f32, null);
         e.end();
         try finish(cb);
         const bytes = rows * out.width * out.elem;

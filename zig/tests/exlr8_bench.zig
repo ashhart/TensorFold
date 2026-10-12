@@ -56,9 +56,9 @@ fn round(queue: mtl.Queue, p: *const op.Pipelines, g: Gpu, s: Set, rows: u32, fi
         if (i > 0) e.barrier();
         switch (st) {
             .rotate_in => try op.encodeRotate(p, e, .{ .buf = g.x, .off = first * L.hidden * 2 }, g.signs, g.halves, .{ .buf = g.r }, layer_.rotateIn(rows), 48, 1, null),
-            .gate_up => try op.encodeProject(p, e, .{ .buf = g.r }, g.tables(s.up, s.host.up.len), .{ .buf = g.gu }, rows, L.hidden, slots * 4096, true),
+            .gate_up => try op.encodeProject(p, e, .{ .buf = g.r }, g.tables(s.up, s.host.up.len), .{ .buf = g.gu }, rows, L.hidden, slots * 4096, true, null),
             .rotate_down => try op.encodeRotate(p, e, .{ .buf = g.act, .off = first * slots * 2048 * 2 }, g.signs, g.halves, .{ .buf = g.ar }, layer_.rotateDown(rows), 16, slots, .{ .buf = s.suh }),
-            .down => try op.encodeProject(p, e, .{ .buf = g.ar }, g.tables(s.down, s.host.down.len), .{ .buf = g.z }, rows, slots * 2048, slots * L.hidden, true),
+            .down => try op.encodeProject(p, e, .{ .buf = g.ar }, g.tables(s.down, s.host.down.len), .{ .buf = g.z }, rows, slots * 2048, slots * L.hidden, true, null),
             .combine => try op.encodeCombine(p, e, .{ .buf = g.z }, .{ .buf = g.w, .off = first * slots * 4 }, .{ .buf = s.sv }, g.halves, g.signs, .{ .buf = g.y }, layer_.combine(rows), 48),
         }
     }

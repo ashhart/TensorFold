@@ -7,6 +7,7 @@ const dense = @import("exlr8_dense.zig");
 const mf = @import("exlr8_manifest.zig");
 const release = @import("exlr8_release.zig");
 const node = @import("exlr8_node.zig");
+const pack = @import("exlr8_pack.zig");
 const xxh = @import("xxhash64.zig");
 const st = @import("safetensors.zig");
 const Sha = std.crypto.hash.sha2.Sha256;
@@ -398,5 +399,6 @@ test {
     _ = mf;
     _ = release;
     _ = node;
+    _ = pack;
     _ = xxh;
 }

@@ -32,7 +32,7 @@ pub fn expected(fixture: std.json.Value, file: []const u8, name: []const u8) !Ex
 pub fn fixtureJson(gpa: std.mem.Allocator, io: std.Io) !std.json.Parsed(std.json.Value) {
     const text = try std.Io.Dir.cwd().readFileAlloc(io, "zig/tests/fixtures/exlr8/oracle.json", gpa, .limited(16 << 20));
     defer gpa.free(text);
-    return std.json.parseFromSlice(std.json.Value, gpa, text, .{});
+    return std.json.parseFromSlice(std.json.Value, gpa, text, .{ .allocate = .alloc_always });
 }
 
 fn f16At(t: st.Tensor, i: usize) f32 {

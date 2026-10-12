@@ -7,16 +7,16 @@
 #define TF_FULL 0xFFFFFFFFu
 
 struct TfExlr8Job {
-  unsigned k, blocks, base, in_scale, out_scale, out_sign, out_block, x_col, y_col, raw, pad0, pad1;
+  unsigned k, blocks, base, in_scale, out_scale, out_sign, out_block, x_col, y_col, raw, members, count;
 };
 struct TfExlr8Rows {
   unsigned rows, x_stride, y_stride, y_f32;
 };
 struct TfExlr8Rotate {
-  unsigned rows, x_stride, x_col, x_f32, r_stride, r_col, sign, scale, slot_cols, scales, pad0, pad1;
+  unsigned rows, x_stride, x_col, x_f32, r_stride, r_col, sign, scale, slot_cols, scales, row_slots, pad1;
 };
 struct TfExlr8Combine {
-  unsigned rows, slots, z_stride, y_stride, y_f32, sign, z_slot, pad;
+  unsigned rows, slots, z_stride, y_stride, y_f32, sign, z_slot, per_row;
 };
 
 // The unnormalized Sylvester transform of 128 values held as lane + 32 q, in one fixed order of fp32 adds.
@@ -64,19 +64,22 @@ __device__ __forceinline__ void tf_exlr8_store(uint8_t* y, uint64_t at, float v,
   else reinterpret_cast<__nv_bfloat16*>(y)[at] = __float2bfloat16_rn(v);
 }
 
-// A warp owns a 16-column tile; lane 4 c + q holds columns c, c + 8 at tile rows 2 q, 2 q + 1, 2 q + 8, 2 q + 9.
+// A warp owns a 16-column tile (lane 4 c + q: columns c, c + 8, rows 2 q, +1, +8, +9); members map rows (x << 16 | y).
 template <int K, int R>
 __device__ __forceinline__ void tf_exlr8_job(const float* X, const uint8_t* W, const uint64_t* bases, const __half* halves,
                                              const int8_t* signs, const TfExlr8Rows a, const TfExlr8Job j, uint8_t* Y,
-                                             unsigned sg, unsigned lane, unsigned tid, float* xs, float* zs) {
+                                             const unsigned* members, unsigned sg, unsigned lane, unsigned tid, float* xs, float* zs) {
   constexpr unsigned TB = 32 * K;
-  const unsigned rows = a.rows < R ? a.rows : R, r0 = 2 * (lane % 4), c0 = lane / 4;
+  const unsigned want = j.count ? j.count : a.rows;
+  const unsigned rows = want < R ? want : R, r0 = 2 * (lane % 4), c0 = lane / 4;
   float total[2][R], part[2][R];
 #pragma unroll
   for (int i = 0; i < R; ++i) total[0][i] = total[1][i] = 0.0f;
   for (unsigned ib = 0; ib < j.blocks; ++ib) {
-    for (unsigned i = tid; i < R * 128; i += 256)
-      xs[i] = i / 128 < rows ? X[(uint64_t)(i / 128) * a.x_stride + j.x_col + ib * 128 + i % 128] : 0.0f;
+    for (unsigned i = tid; i < R * 128; i += 256) {
+      const unsigned rr = i / 128;
+      xs[i] = rr < rows ? X[(uint64_t)(j.count ? members[j.members + rr] >> 16 : rr) * a.x_stride + j.x_col + ib * 128 + i % 128] : 0.0f;
+    }
     __syncthreads();
 #pragma unroll
     for (int i = 0; i < R; ++i) part[0][i] = part[1][i] = 0.0f;
@@ -115,7 +118,7 @@ __device__ __forceinline__ void tf_exlr8_job(const float* X, const uint8_t* W, c
   for (unsigned i = sg; i < rows; i += 8) {
     float v[4];
     for (int q = 0; q < 4; ++q) v[q] = zs[i * 128 + lane + 32 * q];
-    const uint64_t row = (uint64_t)i * a.y_stride + j.y_col;
+    const uint64_t row = (uint64_t)(j.count ? members[j.members + i] & 0xFFFFu : i) * a.y_stride + j.y_col;
     if (j.raw) {
       for (int q = 0; q < 4; ++q) reinterpret_cast<float*>(Y)[row + lane + 32 * q] = v[q];
       continue;
@@ -137,14 +140,14 @@ __device__ __forceinline__ void tf_exlr8_job(const float* X, const uint8_t* W, c
 #define TF_EXLR8_PROJECT(R)                                                                                          \
   extern "C" __global__ void __launch_bounds__(256) tf_exlr8_project_##R(                                            \
       const float* X, const uint8_t* W, const uint64_t* bases, const __half* halves, const int8_t* signs,          \
-      const TfExlr8Job* jobs, const TfExlr8Rows a, uint8_t* Y) {                                                     \
+      const TfExlr8Job* jobs, const TfExlr8Rows a, uint8_t* Y, const unsigned* members) {                           \
     __shared__ __align__(16) float xs[R * 128], zs[R * 128];                                                        \
     const TfExlr8Job j = jobs[blockIdx.x];                                                                           \
     const unsigned tid = threadIdx.x, sg = tid / 32, lane = tid % 32;                                                \
     switch (j.k) {                                                                                                   \
-      case 2: tf_exlr8_job<2, R>(X, W, bases, halves, signs, a, j, Y, sg, lane, tid, xs, zs); break;                \
-      case 3: tf_exlr8_job<3, R>(X, W, bases, halves, signs, a, j, Y, sg, lane, tid, xs, zs); break;                \
-      case 4: tf_exlr8_job<4, R>(X, W, bases, halves, signs, a, j, Y, sg, lane, tid, xs, zs); break;                \
+      case 2: tf_exlr8_job<2, R>(X, W, bases, halves, signs, a, j, Y, members, sg, lane, tid, xs, zs); break;       \
+      case 3: tf_exlr8_job<3, R>(X, W, bases, halves, signs, a, j, Y, members, sg, lane, tid, xs, zs); break;       \
+      case 4: tf_exlr8_job<4, R>(X, W, bases, halves, signs, a, j, Y, members, sg, lane, tid, xs, zs); break;       \
       default: break;                                                                                                \
     }                                                                                                                \
   }
@@ -158,7 +161,7 @@ TF_EXLR8_PROJECT(16)
 extern "C" __global__ void __launch_bounds__(32) tf_exlr8_rotate(const uint8_t* X, const int8_t* signs, const __half* halves,
                                                                  const TfExlr8Rotate a, float* R, const unsigned* slot_scale) {
   const unsigned lane = threadIdx.x, row = blockIdx.y, base = blockIdx.x * 128, col = blockIdx.z * a.slot_cols;
-  const unsigned scale = a.scales ? slot_scale[blockIdx.z] : a.scale;
+  const unsigned scale = a.scales ? slot_scale[a.row_slots ? row * a.row_slots + blockIdx.z : blockIdx.z] : a.scale;
   float v[4];
   for (int q = 0; q < 4; ++q) {
     const unsigned c = base + lane + 32 * q;
@@ -179,7 +182,7 @@ extern "C" __global__ void __launch_bounds__(32) tf_exlr8_combine(const float* Z
   const unsigned lane = threadIdx.x, row = blockIdx.y, b = blockIdx.x;
   float v[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   for (unsigned e = 0; e < a.slots; ++e) {
-    const float s = __fmul_rn(weights[(uint64_t)row * a.slots + e], __half2float(halves[sv[e] + b]));
+    const float s = __fmul_rn(weights[(uint64_t)row * a.slots + e], __half2float(halves[sv[a.per_row ? row * a.slots + e : e] + b]));
     const float* z = Z + (uint64_t)row * a.z_stride + (uint64_t)e * a.z_slot + b * 128;
     for (int q = 0; q < 4; ++q) v[q] = __fmaf_rn(s, z[lane + 32 * q], v[q]);
   }

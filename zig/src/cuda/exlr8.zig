@@ -40,7 +40,7 @@ pub const Kernels = struct {
     }
 
     /// One block of 256 threads per job over 1-16 rows (`rows` holds the count) of rotated fp32 input.
-    pub fn project(k: *const Kernels, s: Stream, x: u64, weights: u64, bases: u64, halves: u64, signs: u64, jobs: u64, count: usize, rows: anytype, y: u64) !void {
+    pub fn project(k: *const Kernels, s: Stream, x: u64, weights: u64, bases: u64, halves: u64, signs: u64, jobs: u64, count: usize, rows: anytype, y: u64, members: u64) !void {
         if (rows.rows == 0 or rows.rows > capacities[capacities.len - 1] or count == 0) return error.InvalidExlr8Rows;
         var args: launch_.Args = .{};
         args.add(x);
@@ -51,6 +51,7 @@ pub const Kernels = struct {
         args.add(jobs);
         args.add(rows);
         args.add(y);
+        args.add(members);
         const at = for (capacities, 0..) |c, i| {
             if (rows.rows <= c) break i;
         } else unreachable;

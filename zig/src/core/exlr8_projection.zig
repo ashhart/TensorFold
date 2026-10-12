@@ -88,8 +88,8 @@ pub fn encodeRotate(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, signs: m
     e.dispatchGroups(.{ .width = blocks, .height = a.rows, .depth = slots }, .{ .width = 32 });
 }
 
-/// One threadgroup per job over 1-16 rows of rotated fp32 input; y holds rows of y_stride elements (f32 or bf16).
-pub fn encodeProject(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, t: Tables, y: Ref, rows: usize, x_stride: usize, y_stride: usize, y_f32: bool) !void {
+/// One threadgroup per job over 1-16 rows of rotated fp32 input into y (f32 or bf16); `members` maps jobs' rows.
+pub fn encodeProject(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, t: Tables, y: Ref, rows: usize, x_stride: usize, y_stride: usize, y_f32: bool, members: ?Ref) !void {
     if (rows == 0 or rows > max_rows) return error.InvalidExlr8Rows;
     if (t.count == 0 or t.jobs.length() < t.count * @sizeOf(Job)) return error.InvalidExlr8Jobs;
     try fits(x, ((rows - 1) * x_stride + 128) * 4);
@@ -103,6 +103,8 @@ pub fn encodeProject(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, t: Tabl
     e.setBuffer(t.jobs, 0, 5);
     e.setValue(Rows{ .rows = @intCast(rows), .x_stride = @intCast(x_stride), .y_stride = @intCast(y_stride), .y_f32 = @intFromBool(y_f32) }, 6);
     e.setBuffer(y.buf, y.off, 7);
+    const m = members orelse Ref{ .buf = t.jobs };
+    e.setBuffer(m.buf, m.off, 8);
     e.dispatchGroups(.{ .width = t.count }, .{ .width = 256 });
 }
 

@@ -174,7 +174,7 @@ fn trellisMatrix(g: *const Gpu, book: *const ex.codec.Codebook, m: dense.Matrix,
         e = cb.compute(.serial);
         try op.encodeRotate(&g.tp, e, .{ .buf = bufs[4], .off = (if (mw == 0) pass else 0) * r.in * 4 }, bufs[2], bufs[1], .{ .buf = bufs[5] }, t.rotate(rows), r.in / 128, 1, null);
         e.barrier();
-        try op.encodeProject(&g.tp, e, .{ .buf = bufs[5] }, tables, .{ .buf = bufs[6] }, rows, r.in, 256, true);
+        try op.encodeProject(&g.tp, e, .{ .buf = bufs[5] }, tables, .{ .buf = bufs[6] }, rows, r.in, 256, true, null);
         e.end();
         try finish(cb);
         const bytes = rows * 256 * 4;

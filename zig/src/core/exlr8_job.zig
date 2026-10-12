@@ -26,8 +26,9 @@ pub const Job = extern struct {
     x_col: u32 = 0,
     y_col: u32 = 0,
     raw: u32 = 0,
-    pad0: u32 = 0,
-    pad1: u32 = 0,
+    /// With `count` members, row i reads input row members[members + i] >> 16 and writes row (that & 0xFFFF).
+    members: u32 = 0,
+    count: u32 = 0,
 };
 pub const Rows = extern struct { rows: u32, x_stride: u32, y_stride: u32, y_f32: u32 };
 /// r = (x * signs * scale) H0 per 128-block; slots sit slot_cols apart; with `scales` each reads its own scale offset.
@@ -42,7 +43,8 @@ pub const Rotate = extern struct {
     scale: u32 = none,
     slot_cols: u32 = 0,
     scales: u32 = 0,
-    pad0: u32 = 0,
+    /// Nonzero: slot s of row r reads its scale offset at slot_scales[r row_slots + s].
+    row_slots: u32 = 0,
     pad1: u32 = 0,
 };
 /// y = signs 2^-7 ((sum_e w_e sv_e z_e) H0) per row and 128-block; z rows hold the slots z_slot floats apart.
@@ -54,7 +56,8 @@ pub const Combine = extern struct {
     y_f32: u32 = 0,
     sign: u32 = none,
     z_slot: u32,
-    pad: u32 = 0,
+    /// Nonzero: slot e of row r reads its block-scale offset at sv[r slots + e].
+    per_row: u32 = 0,
 };
 
 /// Dense formats by row as the kernels number them: the record's format, or 12 for int4 g32 sharded by input.

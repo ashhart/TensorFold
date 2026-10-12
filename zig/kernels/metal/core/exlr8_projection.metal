@@ -8,7 +8,7 @@ constant constexpr uint TF_NONE = 0xFFFFFFFFu;
 struct TfExlr8Job {
   uint k, blocks, base, in_scale;
   uint out_scale, out_sign, out_block, x_col;
-  uint y_col, raw, pad0, pad1;
+  uint y_col, raw, members, count;
 };
 struct TfExlr8Rows {
   uint rows, x_stride, y_stride, y_f32;
@@ -16,11 +16,11 @@ struct TfExlr8Rows {
 struct TfExlr8Rotate {
   uint rows, x_stride, x_col, x_f32;
   uint r_stride, r_col, sign, scale;
-  uint slot_cols, scales, pad0, pad1;
+  uint slot_cols, scales, row_slots, pad1;
 };
 struct TfExlr8Combine {
   uint rows, slots, z_stride, y_stride;
-  uint y_f32, sign, z_slot, pad;
+  uint y_f32, sign, z_slot, per_row;
 };
 
 // The unnormalized Sylvester transform of 128 values held as lane + 32 q, in one fixed order of fp32 adds.
@@ -67,19 +67,21 @@ inline void tf_exlr8_store(device uchar* y, ulong at, float v, uint f32) {
   else reinterpret_cast<device bfloat*>(y)[at] = bfloat(v);
 }
 
-// A simdgroup owns a 16-column tile; lane 4 c + q holds columns c, c + 8 at tile rows 2 q, 2 q + 1, 2 q + 8, 2 q + 9.
+// A simdgroup owns a 16-column tile (lane 4 c + q: cols c, c + 8, rows 2 q, +1, +8, +9); members map rows x << 16 | y.
 template <uint K, uint R>
 inline void tf_exlr8_job(const device float* X, const device uchar* W, const device ulong* bases,
                          const device half* halves, const device char* signs, constant TfExlr8Rows& a,
-                         TfExlr8Job j, device uchar* Y, uint sg, uint lane, uint tid,
+                         TfExlr8Job j, device uchar* Y, const device uint* members, uint sg, uint lane, uint tid,
                          threadgroup float* xs, threadgroup float* zs) {
   constexpr uint TB = 32 * K;
-  const uint rows = min(a.rows, R), r0 = 2 * (lane % 4), c0 = lane / 4;
+  const uint rows = min(j.count ? j.count : a.rows, R), r0 = 2 * (lane % 4), c0 = lane / 4;
   float total[2][R], part[2][R];
   for (uint i = 0; i < R; ++i) total[0][i] = total[1][i] = 0.0f;
   for (uint ib = 0; ib < j.blocks; ++ib) {
-    for (uint i = tid; i < R * 128; i += 256)
-      xs[i] = i / 128 < rows ? X[ulong(i / 128) * a.x_stride + j.x_col + ib * 128 + i % 128] : 0.0f;
+    for (uint i = tid; i < R * 128; i += 256) {
+      const uint rr = i / 128;
+      xs[i] = rr < rows ? X[ulong(j.count ? members[j.members + rr] >> 16 : rr) * a.x_stride + j.x_col + ib * 128 + i % 128] : 0.0f;
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint i = 0; i < R; ++i) part[0][i] = part[1][i] = 0.0f;
     const device uchar* run = W + bases[j.base + ib];
@@ -114,7 +116,7 @@ inline void tf_exlr8_job(const device float* X, const device uchar* W, const dev
   for (uint i = sg; i < rows; i += 8) {
     float v[4];
     for (uint q = 0; q < 4; ++q) v[q] = zs[i * 128 + lane + 32 * q];
-    const ulong row = ulong(i) * a.y_stride + j.y_col;
+    const ulong row = ulong(j.count ? members[j.members + i] & 0xFFFFu : i) * a.y_stride + j.y_col;
     if (j.raw) {
       for (uint q = 0; q < 4; ++q) reinterpret_cast<device float*>(Y)[row + lane + 32 * q] = v[q];
       continue;
@@ -138,14 +140,15 @@ inline void tf_exlr8_job(const device float* X, const device uchar* W, const dev
                                    const device ulong* bases [[buffer(2)]], const device half* halves [[buffer(3)]], \
                                    const device char* signs [[buffer(4)]], const device TfExlr8Job* jobs [[buffer(5)]], \
                                    constant TfExlr8Rows& a [[buffer(6)]], device uchar* Y [[buffer(7)]],             \
+                                   const device uint* members [[buffer(8)]],                                         \
                                    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], \
                                    uint tid [[thread_index_in_threadgroup]], uint job [[threadgroup_position_in_grid]]) { \
     threadgroup float xs[R * 128], zs[R * 128];                                                                     \
     const TfExlr8Job j = jobs[job];                                                                                  \
     switch (j.k) {                                                                                                   \
-      case 2: tf_exlr8_job<2, R>(X, W, bases, halves, signs, a, j, Y, sg, lane, tid, xs, zs); break;                \
-      case 3: tf_exlr8_job<3, R>(X, W, bases, halves, signs, a, j, Y, sg, lane, tid, xs, zs); break;                \
-      case 4: tf_exlr8_job<4, R>(X, W, bases, halves, signs, a, j, Y, sg, lane, tid, xs, zs); break;                \
+      case 2: tf_exlr8_job<2, R>(X, W, bases, halves, signs, a, j, Y, members, sg, lane, tid, xs, zs); break;       \
+      case 3: tf_exlr8_job<3, R>(X, W, bases, halves, signs, a, j, Y, members, sg, lane, tid, xs, zs); break;       \
+      case 4: tf_exlr8_job<4, R>(X, W, bases, halves, signs, a, j, Y, members, sg, lane, tid, xs, zs); break;       \
       default: break;                                                                                                \
     }                                                                                                                \
   }
@@ -161,7 +164,7 @@ kernel void tf_exlr8_rotate(const device uchar* X [[buffer(0)]], const device ch
                             device float* R [[buffer(4)]], const device uint* slot_scale [[buffer(5)]],
                             uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
   const uint row = tg.y, base = tg.x * 128, slot = tg.z, col = slot * a.slot_cols;
-  const uint scale = a.scales ? slot_scale[slot] : a.scale;
+  const uint scale = a.scales ? slot_scale[a.row_slots ? row * a.row_slots + slot : slot] : a.scale;
   float v[4];
   for (uint q = 0; q < 4; ++q) {
     const uint c = base + lane + 32 * q;
@@ -184,7 +187,7 @@ kernel void tf_exlr8_combine(const device float* Z [[buffer(0)]], const device f
   const uint row = tg.y, b = tg.x;
   float v[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   for (uint e = 0; e < a.slots; ++e) {
-    const float s = weights[ulong(row) * a.slots + e] * float(halves[sv[e] + b]);
+    const float s = weights[ulong(row) * a.slots + e] * float(halves[sv[a.per_row ? row * a.slots + e : e] + b]);
     const device float* z = Z + ulong(row) * a.z_stride + ulong(e) * a.z_slot + b * 128;
     for (uint q = 0; q < 4; ++q) v[q] = fma(s, z[lane + 32 * q], v[q]);
   }
