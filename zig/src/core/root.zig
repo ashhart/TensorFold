@@ -19,6 +19,7 @@ pub const tuning = @import("tuning.zig");
 pub const norms_ref = @import("norms_ref.zig");
 pub const act_ref = @import("act_ref.zig");
 pub const route_ref = @import("route_ref.zig");
+pub const modelopt = @import("modelopt.zig");
 
 test {
     _ = safetensors;
@@ -39,4 +40,5 @@ test {
     _ = draft_depth;
     _ = @import("copy_index.zig");
     _ = ids_json;
+    _ = modelopt;
 }
