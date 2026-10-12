@@ -7,7 +7,6 @@ const core = @import("core");
 const engine = @import("cuda_engine.zig");
 const Engine = engine.Engine;
 const reuse = @import("cuda_reuse.zig");
-const grid = @import("cuda_prompt_grid.zig");
 const Head = @import("cuda_mtp.zig").Head;
 const state = @import("cuda_state.zig");
 const config = @import("config.zig");
@@ -200,11 +199,11 @@ pub const Cuda = struct {
         if (s.reuse.hook) |k| k.at(k.ptr, s, at);
     }
 
-    /// The stream's kept state on its bound sequence: where its prompt pass starts (0: none, off the grid, or failed).
+    /// The stream's kept state on its bound sequence: where its prompt pass starts (0: none, or nothing restored).
     fn restoreKept(self: *Cuda, s: *lanes.Stream, len: usize) usize {
         const saved = s.reuse.saved orelse return 0;
         var target: reuse.Target = .{ .e = self.e, .head = self.head };
-        if (!grid.resumable(s.reuse.at, len, state.prefill_rows)) {
+        if (s.reuse.at >= len) {
             s.reuse_failed = true;
             return 0;
         }
@@ -251,7 +250,7 @@ pub const Cuda = struct {
         defer e.prompt_rows = null;
         const first = try e.prefillFrom(ids, from, null, self.head, .{ .ptr = s, .check = cancelled }, keep);
         // the head's first draft reads the prompt's last row (its hidden row waits where a window's would)
-        const last = (ids.len - 1) % state.prefill_rows; // a resumed pass ends on the same grid
+        const last = ids.len - 1 - e.last_chunk;
         try e.ops().copy(e.b.hidden, e.b.p_hidden + last * @as(u64, e.c.hidden) * 2, e.c.hidden * 2);
         _ = self.take(first);
         if (s.logprobs) |k| {

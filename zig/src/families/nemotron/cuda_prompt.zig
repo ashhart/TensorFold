@@ -10,8 +10,9 @@ const Dump = @import("cuda_dump.zig").Dump;
 const Head = @import("cuda_mtp.zig").Head;
 const state = @import("cuda_state.zig");
 const segs = @import("cuda_segments.zig");
-const grid = @import("cuda_prompt_grid.zig");
+const cuts = @import("cuda_prompt_cuts.zig");
 const prompt_rows = @import("cuda_prompt_rows.zig");
+const reuse = @import("cuda_reuse.zig");
 const lesson_route = @import("lesson_route.zig");
 const heat = @import("heat");
 const pin_sampled = engine.pin_sampled;
@@ -27,10 +28,10 @@ pub fn prefillWith(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head, 
     return e.prefillFrom(prompt, 0, dump, head, cancel, null);
 }
 
-/// prefill from `from` (0 resets; else a restored state at a grid point); chunks stay on the zero-anchored grid.
+/// prefill from `from` (0 resets; else a state restored at that row), in chunks of 2,048 rows from there.
 pub fn prefillFrom(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, head: ?*Head, cancel: ?Cancel, keep: ?Keep) !u32 {
     if (prompt.len == 0) return error.EmptyPrompt;
-    if (from != 0 and !grid.resumable(from, prompt.len, state.prefill_rows)) return error.BadReuse;
+    if (from >= prompt.len) return error.BadReuse;
     if (prompt.len + state.max_rows > e.max_len) return error.ContextFull;
     if (from == 0) {
         try e.reset();
@@ -74,10 +75,14 @@ pub fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, 
     while (s < prompt.len) {
         if (Cancel.now(cancel)) return error.Cancelled;
         try e.beforeChunk(cancel);
-        var end = grid.end(s, prompt.len, state.prefill_rows);
+        var end = cuts.end(s, prompt.len, state.prefill_rows, if (keep) |k| (if (k.cut) k.at else &.{}) else &.{});
         // the decision row ends its chunk: the rows after it read the lessons it latched
         if (e.decide != lesson_route.none and e.decide >= s and e.decide + 1 < end) end = @intCast(e.decide + 1);
         const chunk = prompt[s..end];
+        e.last_chunk = s;
+        if (keep) |k| arm(e, k, s, end);
+        defer e.armed.n = 0;
+        f.captures = e.armed.marks();
         f.route = .{};
         f.route.add(0, chunk.len, e.pos, e.decide, e.slot);
         try e.copied.synchronize();
@@ -91,9 +96,17 @@ pub fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, 
         const known = @min(chunk.len, prompt.len - 1 - s);
         if (e.prompt_rows) |p| try prompt_rows.run(e, p, prompt[s + 1 ..][0..known]);
         if (head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known]);
+        try reuse.finish(.{ .e = e, .head = head });
         s = end;
         if (keep) |k| if (s <= std.math.maxInt(u32) and std.mem.indexOfScalar(u32, k.at, @intCast(s)) != null) k.call(k.ctx, @intCast(s));
     }
+}
+
+/// The keeps of rows strictly inside the chunk [s, end), made before it runs: the chunk writes their Mamba states.
+fn arm(e: *Engine, k: Keep, s: usize, end: usize) void {
+    e.armed.open = .{ s, end };
+    defer e.armed.open = null;
+    for (k.at) |m| if (m > s and m < end) k.call(k.ctx, m);
 }
 
 /// Whole chunks a prompt call runs as staggered segments from here on; their streams and scratch are made now.

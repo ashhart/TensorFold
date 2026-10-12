@@ -9,7 +9,8 @@ const glue = @import("cuda_glue.zig");
 /// Mangled names of the instantiations the copies in zig/kernels/cuda export (cuobjdump -symbols of each fatbin).
 const sym = struct {
     const pattn = "_ZN20tf_prefill_attention12pattn_kernelILi128ELi8ELi8ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiif";
-    const scan_rows = "_ZN12tf_scan_rows11scan_kernelEPK13__nv_bfloat16S2_PfPKfS5_S5_PS0_iiiiiiiiff";
+    const scan_rows = "_ZN12tf_scan_rows11scan_kernelILb0EEEvPK13__nv_bfloat16S3_PfPKfS6_S6_PS1_iiiiiiiiffNS_5SnapsE";
+    const scan_snaps = "_ZN12tf_scan_rows11scan_kernelILb1EEEvPK13__nv_bfloat16S3_PfPKfS6_S6_PS1_iiiiiiiiffNS_5SnapsE";
 };
 
 pub const pattn_smem: u32 = 65536; // eight 32-key slots of 128 dims
@@ -28,6 +29,13 @@ pub const Modelopt = struct { lane: cuda.qmmf.Lane, gemm: cuda.nvfp4.Prompt, exp
 /// Scratch the expert plan writes (cuda/grouped.zig, shared by the MoE families).
 pub const Plan = cuda.grouped.Plan;
 
+/// Rows inside a scan launch where it also stores its state (scan_rows.cu `Snaps`): `r[k]` rows taken in, -1 none.
+pub const Snaps = extern struct {
+    p: [max]u64 = @splat(0),
+    r: [max]i32 = @splat(-1),
+    pub const max = 16;
+};
+
 pub const Kernels = struct {
     d: *const cuda.Driver,
     mods: [22]cuda.Module,
@@ -38,6 +46,7 @@ pub const Kernels = struct {
     experts: cuda.experts.Affine4Experts, // the 4-bit grouped experts: experts, experts_prefill and experts_pack
     pattn: cuda.Function,
     scan_rows: cuda.Function,
+    scan_snaps: cuda.Function, // the same scan, storing its state at rows inside the launch too
     serial_feed: cuda.Function,
     plan_routed: cuda.Function,
     rest_rows: cuda.Function,
@@ -68,6 +77,7 @@ pub const Kernels = struct {
         k.router = try cuda.grouped.Router.resolve(k.mods[2]);
         k.pattn = try k.mods[5].function(sym.pattn);
         k.scan_rows = try k.mods[6].function(sym.scan_rows);
+        k.scan_snaps = try k.mods[6].function(sym.scan_snaps);
         k.serial_feed = try k.mods[7].function("tf_serial_feed");
         k.plan_routed = try k.mods[7].function("tf_plan_routed");
         k.rest_rows = try k.mods[7].function("tf_rest_rows");
@@ -272,14 +282,22 @@ pub const Ops = struct {
         try o.go(o.k.pattn, .{ (rows + 15) / 16, kv_heads * (g / 8), 1 }, 256, pattn_smem, &a);
     }
 
-    /// mamba.scan_rows: a chunk's scan through scan_rows.cu; `state` ends at the chunk's last row.
-    pub fn scanRows(o: Ops, proj: u64, xc: u64, state: u64, a_: u64, d_: u64, dtb: u64, y: u64, rows: usize, proj_w: usize, heads: usize, dh: usize, cd: usize, groups: usize, lo: f32, hi: f32) !void {
+    /// mamba.scan_rows: a chunk's scan through scan_rows.cu; `state` ends at the chunk's last row, `snaps` at theirs.
+    pub fn scanRows(o: Ops, proj: u64, xc: u64, state: u64, a_: u64, d_: u64, dtb: u64, y: u64, rows: usize, proj_w: usize, heads: usize, dh: usize, cd: usize, groups: usize, lo: f32, hi: f32, snaps: Snaps) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ proj, xc, state, a_, d_, dtb, y }) |v| a.add(v);
         for ([_]usize{ rows, proj_w, heads * dh, cd, heads * dh + cd, dh, heads / groups, groups }) |v| a.add(int(v));
         a.add(lo);
         a.add(hi);
-        try o.go(o.k.scan_rows, .{ heads, dh / 32, 1 }, 128, 0, &a);
+        a.add(snaps);
+        try o.go(if (snaps.r[0] < 0) o.k.scan_rows else o.k.scan_snaps, .{ heads, dh / 32, 1 }, 128, 0, &a);
+    }
+
+    /// `height` rows of `width` bytes, `spitch` apart at `src`, to `dpitch` apart at `dst`, in one call.
+    pub fn copyRows(o: Ops, dst: u64, dpitch: usize, src: u64, spitch: usize, width: usize, height: usize) !void {
+        if (width == 0 or height == 0) return;
+        const m: cuda.abi.Memcpy2D = .{ .src = src, .src_pitch = spitch, .dst = dst, .dst_pitch = dpitch, .width = width, .height = height };
+        try o.k.d.check(o.k.d.api.cuMemcpy2DAsync_v2(&m, o.s.handle), "cuMemcpy2DAsync");
     }
 
     pub fn copy(o: Ops, dst: u64, src: u64, bytes: usize) !void {

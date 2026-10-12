@@ -20,6 +20,7 @@ const heat = @import("heat");
 const seq_graphs = @import("cuda_seq_graphs.zig");
 const prompt_rows = @import("cuda_prompt_rows.zig");
 const prompt_pass = @import("cuda_prompt.zig");
+const marks = @import("cuda_marks.zig");
 pub const PromptRows = prompt_rows.PromptRows;
 
 /// nemotron_h.cuda.CONTEXT: prompt plus reply tokens when --context is not given, as `tensorfold serve` sizes it.
@@ -46,11 +47,12 @@ pub const Cancel = struct {
     }
 };
 
-/// Grid points where a prompt pass copies its state (ascending), called once each chunk ending there is queued.
+/// Rows where a prompt pass keeps its state (ascending): one inside a chunk is called before it, one at its end after.
 pub const Keep = struct {
     at: []const u32,
     ctx: *anyopaque,
     call: *const fn (*anyopaque, u32) void,
+    cut: bool = false, // every row ends a chunk instead: the reference the marks test compares the armed states to
 };
 
 /// Serial rounds a host keeps queued ahead of the one it reads.
@@ -112,6 +114,9 @@ pub const Engine = struct {
     carve: ?*cuda.Carveout = null, // Options.carveout; it outlives the engine
     heat_gate: heat.Gate = .{}, // off unless TF_HEAT_HIGH and TF_HEAT_LOW are set
     prompt_rows: ?PromptRows = null, // a prompt pass's rows for prompt_logprobs (serial chunks, from 0)
+    armed: marks.Armed = .{}, // the marks inside the prompt chunk about to run (cuda_marks.zig)
+    spares: marks.Spares = .{}, // free Mamba buffers the prompt cache set aside for the next marks
+    last_chunk: usize = 0, // where the last prompt pass's last chunk started (the prompt's last row: len - 1 - this)
 
     /// Loads the checkpoint into the Python engine's layouts and sizes the caches; `triton_dir` null: our own glue.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, model_dir: []const u8, triton_dir: ?[]const u8, opts: Options) !*Engine {
@@ -249,6 +254,7 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         e.stream.synchronize() catch {};
+        e.spares.deinit();
         if (e.serial) |*g| g.deinit();
         seq_graphs.free(e.gpa, &e.own.graphs); // masked windows'
         for (&e.windows) |*set| for (set) |*g| if (g.*) |*x| x.deinit();
