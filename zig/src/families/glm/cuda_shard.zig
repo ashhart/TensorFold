@@ -37,7 +37,7 @@ pub const Share = struct {
             .dense = try span(c.dense_inter, unit, rank, world),
             .moe = try span(c.moe_inter, unit, rank, world),
             .shared = try span(c.shared_inter, unit, rank, world),
-            .vocab = try span(c.vocab, unit, rank, world),
+            .vocab = try span(c.vocab, c.head_unit, rank, world),
         };
     }
 };
@@ -69,4 +69,12 @@ test "TP=2 halves every axis; TP=3 takes the Python family's uneven shares (22/2
     try std.testing.expectEqual(@as(usize, 640), t2.moe.len());
     try std.testing.expectEqual(Span{ .lo = 103296, .hi = 154880 }, t2.vocab);
     try std.testing.expectError(error.BadRank, Share.of(&c, 2, 2));
+}
+
+test "an EXL3 checkpoint cuts the vocabulary at 128s: TP=4 takes 303, 303, 302 and 302 blocks" {
+    var c = Config{};
+    c.head_unit = 128;
+    try std.testing.expectEqual(Span{ .lo = 0, .hi = 38784 }, (try Share.of(&c, 0, 4)).vocab);
+    try std.testing.expectEqual(Span{ .lo = 116224, .hi = 154880 }, (try Share.of(&c, 3, 4)).vocab);
+    try std.testing.expectEqual(Span{ .lo = 77440, .hi = 154880 }, (try Share.of(&c, 1, 2)).vocab);
 }

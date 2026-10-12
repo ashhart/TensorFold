@@ -13,6 +13,7 @@ pub const Config = struct {
     layers: u32 = 45,
     run: u32 = 45, // backbone layers loaded and run: all, or the first few for a check that must fit (GLM_LAYERS)
     vocab: u32 = 154880,
+    head_unit: u32 = 64, // the vocabulary's TP cut in whole units: 128 for EXL3, whose matrices split at 128 columns
     eps: f32 = 1e-5,
     dense_layers: u32 = 3,
     dense_inter: u32 = 12288, // this Mac's dense MLP rows: all, or its half in TP2
@@ -148,6 +149,9 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
     c.layers = @intCast(try int(t, "num_hidden_layers"));
     c.run = c.layers;
     c.vocab = @intCast(try int(t, "vocab_size"));
+    if (root.get("quantization_config")) |q| if (q == .object) if (q.object.get("quant_method")) |m| if (m == .string and std.mem.eql(u8, m.string, "exl3")) {
+        c.head_unit = 128;
+    };
     c.eps = @floatCast(try float(t, "rms_norm_eps"));
     c.dense_layers = @intCast(try int(t, "first_k_dense_replace"));
     c.dense_inter = @intCast(try int(t, "intermediate_size"));
