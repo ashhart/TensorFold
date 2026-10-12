@@ -153,3 +153,137 @@ extern "C" __global__ void __launch_bounds__(128) tf_nemo_scan(const __nv_bfloat
         Y[static_cast<int64_t>(row) * XD + h * DH + d] = __float2bfloat16_rn(__fmul_rn(gz, y));
     }
 }
+
+// Shared-window copies of tf_nemo_conv and tf_nemo_scan (a shared body slowed a lone stream): stream k's buffers.
+constexpr int MAXSEG = 8;
+struct ConvSegs {
+    const __nv_bfloat16* P[MAXSEG];
+    __nv_bfloat16* BASE[MAXSEG];
+    __nv_bfloat16* RAW[MAXSEG];
+    __nv_bfloat16* XC[MAXSEG];
+    const int* META[MAXSEG];
+    int R[MAXSEG];
+};
+
+struct ScanSegs {
+    const __nv_bfloat16* P[MAXSEG];
+    const __nv_bfloat16* XC[MAXSEG];
+    float* DT[MAXSEG];
+    float* S[MAXSEG];
+    const int* META[MAXSEG];
+    __nv_bfloat16* Y[MAXSEG];
+    int R[MAXSEG];
+};
+
+extern "C" __global__ void __launch_bounds__(256) tf_nemo_conv_segs(const ConvSegs sg, const float* __restrict__ CW, const float* __restrict__ CB,
+                                                                      int PROJ, int XOFF, int CD, int RMAX) {
+    const int ch = blockIdx.x * 256 + threadIdx.x, k = blockIdx.y;
+    if (ch >= CD) return;
+    const __nv_bfloat16* __restrict__ P = sg.P[k];
+    __nv_bfloat16* __restrict__ BASE = sg.BASE[k];
+    __nv_bfloat16* __restrict__ RAW = sg.RAW[k];
+    __nv_bfloat16* __restrict__ XC = sg.XC[k];
+    const int* __restrict__ META = sg.META[k];
+    const int R = sg.R[k];
+    const int parity = META[1], pk = META[2];
+    float t0 = bf(BASE[ch]), t1 = bf(BASE[CD + ch]), t2 = bf(BASE[2 * CD + ch]);
+    const float w[4] = {CW[ch], CW[CD + ch], CW[2 * CD + ch], CW[3 * CD + ch]};
+    const float bias = CB[ch];
+    for (int i = 0; i < pk + R; ++i) {
+        const bool prev = i < pk;
+        const float cur = prev ? bf(RAW[(static_cast<int64_t>(1 - parity) * RMAX + i) * CD + ch])
+                               : bf(P[static_cast<int64_t>(i - pk) * PROJ + XOFF + ch]);
+        if (!prev) {
+            const int64_t at = (static_cast<int64_t>(parity) * RMAX + (i - pk)) * CD + ch;
+            XC[at] = conv4(bias, w, t0, t1, t2, cur);
+            RAW[at] = __float2bfloat16_rn(cur);
+        }
+        t0 = t1;
+        t1 = t2;
+        t2 = cur;
+        if (i == pk - 1) {
+            BASE[ch] = __float2bfloat16_rn(t0);
+            BASE[CD + ch] = __float2bfloat16_rn(t1);
+            BASE[2 * CD + ch] = __float2bfloat16_rn(t2);
+        }
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(128) tf_nemo_scan_segs(const ScanSegs sg, const float* __restrict__ A, const float* __restrict__ DSK,
+                                                                      const float* __restrict__ DTB, float lo, float hi, int PROJ, int XD, int CD,
+                                                                      int DTOFF, int H, int DH, int NG, int RMAX) {
+    const int k = blockIdx.z;
+    const __nv_bfloat16* __restrict__ P = sg.P[k];
+    const __nv_bfloat16* __restrict__ XC = sg.XC[k];
+    float* __restrict__ DT = sg.DT[k];
+    float* __restrict__ S = sg.S[k];
+    const int* __restrict__ META = sg.META[k];
+    __nv_bfloat16* __restrict__ Y = sg.Y[k];
+    const int R = sg.R[k];
+    constexpr int DS = 128, TPR = 4, NJ = DS / TPR / 4;
+    __shared__ float4 bs[DS / 4], cs[DS / 4];
+    const int h = blockIdx.x, g = h / (H / NG);
+    const int local = threadIdx.x / TPR, q = threadIdx.x % TPR, d = blockIdx.y * 32 + local;
+    const int parity = META[1], pk = META[2];
+    const float a = A[h], dsk = DSK[h], dtb = DTB[h];
+    float* s0 = S + (static_cast<int64_t>(h) * DH + d) * DS;
+    float s[4 * NJ];
+#pragma unroll
+    for (int j = 0; j < NJ; ++j) {
+        const float4 t = *reinterpret_cast<const float4*>(s0 + 4 * (TPR * j + q));
+        s[4 * j] = t.x;
+        s[4 * j + 1] = t.y;
+        s[4 * j + 2] = t.z;
+        s[4 * j + 3] = t.w;
+    }
+    for (int i = 0; i < pk + R; ++i) {
+        const bool prev = i < pk;
+        const int buf = prev ? 1 - parity : parity, row = prev ? i : i - pk;
+        const int64_t base = (static_cast<int64_t>(buf) * RMAX + row) * CD;
+        __syncthreads();
+        if (threadIdx.x < DS / 4) {
+            const int c = threadIdx.x;
+            const __nv_bfloat16* b = XC + base + XD + g * DS + 4 * c;
+            const __nv_bfloat16* cc = XC + base + XD + NG * DS + g * DS + 4 * c;
+            bs[c] = make_float4(bf(b[0]), bf(b[1]), bf(b[2]), bf(b[3]));
+            cs[c] = make_float4(bf(cc[0]), bf(cc[1]), bf(cc[2]), bf(cc[3]));
+        }
+        __syncthreads();
+        const int64_t dt_at = (static_cast<int64_t>(buf) * RMAX + row) * H + h;
+        float dt;
+        if (prev) {
+            dt = DT[dt_at];
+        } else {
+            const float v = __fadd_rn(bf(P[static_cast<int64_t>(row) * PROJ + DTOFF + h]), dtb);
+            dt = fminf(fmaxf(tf_softplus(v), lo), hi);
+            if (blockIdx.y == 0 && threadIdx.x == 0) DT[dt_at] = dt;
+        }
+        const float x = bf(XC[base + h * DH + d]);
+        const float da = tf_exp(__fmul_rn(a, dt)), xdt = __fmul_rn(x, dt);
+        float m[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+#pragma unroll
+        for (int j = 0; j < NJ; ++j) {
+            const float4 b = bs[TPR * j + q], c = cs[TPR * j + q];
+            s[4 * j] = __fmaf_rn(xdt, b.x, __fmul_rn(s[4 * j], da));
+            s[4 * j + 1] = __fmaf_rn(xdt, b.y, __fmul_rn(s[4 * j + 1], da));
+            s[4 * j + 2] = __fmaf_rn(xdt, b.z, __fmul_rn(s[4 * j + 2], da));
+            s[4 * j + 3] = __fmaf_rn(xdt, b.w, __fmul_rn(s[4 * j + 3], da));
+            m[0] = __fmaf_rn(s[4 * j], c.x, m[0]);
+            m[1] = __fmaf_rn(s[4 * j + 1], c.y, m[1]);
+            m[2] = __fmaf_rn(s[4 * j + 2], c.z, m[2]);
+            m[3] = __fmaf_rn(s[4 * j + 3], c.w, m[3]);
+        }
+        if (i == pk - 1) {
+#pragma unroll
+            for (int j = 0; j < NJ; ++j)
+                *reinterpret_cast<float4*>(s0 + 4 * (TPR * j + q)) = make_float4(s[4 * j], s[4 * j + 1], s[4 * j + 2], s[4 * j + 3]);
+        }
+        float out = __fadd_rn(__fadd_rn(m[0], m[1]), __fadd_rn(m[2], m[3]));
+        out = __fadd_rn(out, __shfl_xor_sync(0xffffffffu, out, 1));
+        out = __fadd_rn(out, __shfl_xor_sync(0xffffffffu, out, 2));
+        if (prev || q != 0) continue;
+        const float y = rbf(__fmaf_rn(x, dsk, out));
+        const float gz = rbf(tf_silu(bf(P[static_cast<int64_t>(row) * PROJ + h * DH + d])));
+        Y[static_cast<int64_t>(row) * XD + h * DH + d] = __float2bfloat16_rn(__fmul_rn(gz, y));
+    }
+}
