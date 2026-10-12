@@ -1,6 +1,7 @@
 //! Rank 0's engine operations, each sent to rank 1 before it runs, and rank 1's loop running them in the same order.
 const std = @import("std");
 const eng = @import("engine.zig");
+const snap = @import("snap.zig");
 const Engine = eng.Engine;
 const R = @import("gpu.zig").max_rows;
 
@@ -65,6 +66,27 @@ pub fn release(e: *Engine, i: u32) void {
     e.release(i);
 }
 
+pub fn save(e: *Engine, id: u32, i: u32, at: u32) !*snap.Snap {
+    e.words.clearRetainingCapacity();
+    try put(e, &.{ id, i, at });
+    try send(e, .save);
+    return snap.save(e, id, i, at);
+}
+
+pub fn restore(e: *Engine, i: u32, id: u32) !void {
+    e.words.clearRetainingCapacity();
+    try put(e, &.{ i, id });
+    try send(e, .restore);
+    try snap.restore(e, i, id);
+}
+
+pub fn drop(e: *Engine, id: u32) void {
+    e.words.clearRetainingCapacity();
+    put(e, &.{id}) catch {};
+    send(e, .drop) catch |err| std.log.err("glm_dsa: the peer kept a dropped state: {s}", .{@errorName(err)});
+    snap.drop(e, id);
+}
+
 /// A command's words, read in order; a short command is out of step with rank 0.
 const Reader = struct {
     w: []const u32,
@@ -117,7 +139,9 @@ pub fn follow(e: *Engine) !void {
                 break :blk e.draft(reqs[0..n]);
             },
             .release => e.release(try r.one()),
-            .save, .restore, .drop => error.Unsupported,
+            .save => if (snap.save(e, try r.one(), try r.one(), try r.one())) |_| {} else |err| err,
+            .restore => snap.restore(e, try r.one(), try r.one()),
+            .drop => snap.drop(e, try r.one()),
         };
         done catch |err| {
             if (err == error.PairLinkFailed or err == error.GpuFailure) return err;

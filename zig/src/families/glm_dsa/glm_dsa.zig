@@ -8,6 +8,8 @@ pub const moe = @import("moe.zig");
 pub const model = @import("model.zig");
 pub const engine = @import("engine.zig");
 pub const follow = @import("follow.zig");
+pub const backend = @import("backend.zig");
+pub const snap = @import("snap.zig");
 
 test {
     _ = config;

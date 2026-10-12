@@ -6,6 +6,7 @@ const cfg = @import("config.zig");
 const kn = @import("kernels.zig");
 const gpu = @import("gpu.zig");
 const md = @import("model.zig");
+const snap = @import("snap.zig");
 const Ref = kn.Ref;
 
 const R = gpu.max_rows;
@@ -46,6 +47,8 @@ pub const Engine = struct {
     /// Normed hidden rows for the MTP head: the last window's [0, R), a chunk's [R, 2R), each slot's last row from 2R.
     xs: mtl.Buffer,
     words: std.ArrayList(u32) = .empty,
+    /// Kept prompt states by id (the same ids on both Macs).
+    snaps: std.AutoHashMapUnmanaged(u32, *snap.Snap) = .empty,
     context: u32,
     load_seconds: f64 = 0,
 
@@ -69,6 +72,7 @@ pub const Engine = struct {
         for (&e.pass) |*p| p.* = .{ .ids = try buf(e.device, R * 4), .rows = try buf(e.device, R * @sizeOf(kn.Row)), .picks = try buf(e.device, R * 4), .idx = try buf(e.device, R * 4) };
         e.xs = try buf(e.device, (2 * R + @as(usize, streams)) * e.m.c.hidden * 4);
         e.words = .empty;
+        e.snaps = .empty;
         try e.pair.ready();
         e.load_seconds = @as(f64, @floatFromInt(t0.durationTo(std.Io.Timestamp.now(io, .awake)).nanoseconds)) / 1e9;
         return e;
@@ -80,6 +84,7 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         e.pair.deinit();
+        snap.deinit(e);
         for (e.slots) |*s| s.prompt.deinit(e.gpa);
         e.m.deinit();
         e.s.deinit();

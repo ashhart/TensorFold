@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 const qwen27 = @import("qwen27_served.zig");
 const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
+const glm_dsa = @import("glm_dsa_host.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
 const Slide = nemotron_slide.Adapter(nemotron.slide);
 const cache_fit = @import("cache_fit.zig");
@@ -19,6 +20,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "qwen4_exp", .formats = &.{"mlx-q6g32"} },
     .{ .model_type = "glm5_next", .formats = &.{"mlx-q4g64"} },
     .{ .model_type = "qwen3_5", .formats = &.{"mlx-q4g64"} },
+    .{ .model_type = "glm_moe_dsa", .formats = &.{"exlr8"} },
 };
 
 /// The chip class gate entries name ("apple-m5" for an Apple M5 Max); null without an Apple GPU.
@@ -111,6 +113,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (dense) return openQwen27(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return openFlashNext(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "glm_moe_dsa")) return openGlmDsa(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen3_5")) return @import("qwen35.zig").open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "nemotron_h")) {
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
@@ -323,6 +326,7 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
 test {
     _ = flashnext;
     _ = glm;
+    _ = glm_dsa;
     _ = qwen27;
     _ = @import("cache_fit.zig");
     _ = @import("qwen27_landing.zig");
@@ -355,6 +359,29 @@ fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]co
         return null;
     };
     return .{ .engine = h.engine(), .close = glm.close, .ctx = h };
+}
+
+/// GLM-5.3 (EXLR8) needs a pair: each Mac holds half of every expert and attention head (--speed-up names its link).
+fn openGlmDsa(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    const settings = o.speed_up orelse {
+        problem.* = "GLM-5.3 (EXLR8) runs on two Macs: start both with --speed-up and each Mac's link settings (rank 0 serves)";
+        return null;
+    };
+    const window: i64 = o.context orelse 16384;
+    if (window <= 0 or window > 262144) {
+        problem.* = try std.fmt.allocPrint(a, "--context {d} is outside 1 to 262,144 tokens for GLM-5.3 (EXLR8)", .{window});
+        return null;
+    }
+    var ram: u64 = 0;
+    var len: usize = 8;
+    if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) return error.NoRamSize;
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const h = glm_dsa.open(gpa, io, o.dir, @intCast(window), settings, @max(1, @min(o.lanes, 16)), ram / 100 * 66, o.prompt_cache_gib) catch |e| {
+        problem.* = if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native GLM-5.3 (EXLR8) engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native GLM-5.3 (EXLR8) engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
+        return null;
+    };
+    return .{ .engine = h.engine(), .close = glm_dsa.close, .ctx = h };
 }
 
 test "chip classes from Metal device names" {
