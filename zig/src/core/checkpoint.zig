@@ -122,6 +122,11 @@ pub const Checkpoint = struct {
         };
     }
 
+    /// Every file's pages out of the page cache (safetensors.File.release).
+    pub fn release(self: *const Checkpoint) void {
+        for (self.files.items) |*f| f.release();
+    }
+
     /// Names no `get` took (the loader refuses a checkpoint with leftovers).
     pub fn unused(self: *const Checkpoint) usize {
         var n: usize = 0;
@@ -223,4 +228,22 @@ test "has finds a name without taking it; skip marks a prefix used" {
     try ck.skip("mtp.");
     _ = try ck.get("backbone.x");
     try std.testing.expectEqual(@as(usize, 0), ck.unused());
+}
+
+test "after release the mapping stays readable: a later read faults the same bytes back in" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const image = try testImage(gpa, "x", 4096);
+    defer gpa.free(image);
+    for (image[image.len - 4096 ..], 0..) |*b, i| b.* = @truncate(i * 7 + 1);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = image });
+    var path: [64]u8 = undefined;
+    var ck = try Checkpoint.openModel(gpa, io, try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}));
+    defer ck.close();
+    const t = try ck.get("x");
+    try std.testing.expectEqualSlices(u8, image[image.len - 4096 ..], t.bytes);
+    ck.release();
+    try std.testing.expectEqualSlices(u8, image[image.len - 4096 ..], t.bytes);
 }
