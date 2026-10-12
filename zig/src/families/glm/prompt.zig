@@ -186,19 +186,19 @@ fn run(e: mtl.ComputeEncoder, grid: [3]usize, group: [3]usize) void {
 }
 
 /// y [M, N] = x [M, K] W^T for a 4-bit matrix (64x64 tiles; N rounded up to the weights' padded rows, y's row pitch).
-fn qmm(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Q4, y: Ref, M: u32) void {
+fn qmm(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref, M: u32) void {
     affine_mm.rowSums(e, p.mm.mm_bf16, 64, x, p.sums, M, q.k);
     affine_mm.dense(e, p.mm.mm_bf16, x, p.sums, q, y, M);
 }
 
 /// `qmm` over x's rows `ld` elements apart (a slice of a wider row).
-fn qmmAt(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, ld: u32, q: wts.Q4, y: Ref, M: u32) void {
+fn qmmAt(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, ld: u32, q: wts.Affine, y: Ref, M: u32) void {
     affine_mm.rowSumsAt(e, p.mm.mm_bf16, 64, x, p.sums, M, q.k, ld);
     affine_mm.denseBatch(e, p.mm.mm_bf16, x, p.sums, q, y, M, 1, .{ .x_row = @intCast(ld), .y_row = @intCast(std.mem.alignForward(u32, q.n, 64)) });
 }
 
 /// `qmm` with fp32 out (TP2: one Mac's partial of a row-split projection).
-fn qmmF32(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Q4, y: Ref, M: u32) void {
+fn qmmF32(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref, M: u32) void {
     affine_mm.rowSums(e, p.mm.mm_bf16, 64, x, p.sums, M, q.k);
     affine_mm.dense(e, p.mm.mm_f32, x, p.sums, q, y, M);
 }
