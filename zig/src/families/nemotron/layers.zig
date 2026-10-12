@@ -165,6 +165,8 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
     // the shared expert's up + relu2 (+ its down input sums) beside the router: both read only x and xs
     e.alongside();
     upRelu2(f, e, m.shared_up, rows);
+    // and the pocket's relu2 products beside them: they read only x and the pocket's own weights
+    if (m.pocket) |p| if (p.used > 0) runs(f, e, p, s.x, s.sh, rows, pocketIn);
 
     const scaling: f32 = c.routed_scaling;
     var groups: usize = pairs;
@@ -202,7 +204,6 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
     f.coop(e, "down", m.shared_down, s.sh_act, 0, s.sh_xs, s.sh, rows);
     if (m.slide) |r| rest(f, e, r, s.sh_act, s.sh, rows, f.c.shared_width);
     if (m.adapter) |ad| adapt(f, e, ad, s.sh_act, s.sh, rows);
-    if (m.pocket) |p| if (p.used > 0) taught(f, e, p, s.x, s.sh, rows);
     inline for (.{ "expert_up", "expert_down" }, 0..) |key, j| {
         if (j == 0) e.alongside();
         const fc = if (j == 0) m.fc1 else m.fc2;
@@ -230,6 +231,8 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
         const n = if (j == 0) c.expert_width else c.hidden;
         e.run(.{ 32 * geo[1], n / (geo[0] * geo[1]), groups }, .{ 32 * geo[1], 1, 1 });
     }
+    // the pocket's output beside the routed experts' down: its products and the shared expert's sum were done before it
+    if (m.pocket) |p| if (p.used > 0) runs(f, e, p, s.x, s.sh, rows, pocketOut);
 
     // combine (routed in route order) + shared + residual, then the next input norm and its sums
     e.pipe(f.k.get("add_norm_moe_xs"));
@@ -258,10 +261,15 @@ pub fn rest(f: Forward, e: *Enc, r: Buffer, x: Buffer, y: Buffer, rows: usize, w
 
 /// The pocket over the rows of streams that read what was learned: every row, or the runs between untaught streams'.
 pub fn taught(f: Forward, e: *Enc, p: wts.Pocket, x: Buffer, y: Buffer, rows: usize) void {
-    if (!f.untaught) return pocket(f, e, p, x, y, 0, rows);
-    var runs: lesson_route.Runs = .{};
-    for (f.segs) |g| if (runs.next(g.rows, g.cache.untaught)) |r| pocket(f, e, p, x, y, r[0], r[1]);
-    if (runs.last()) |r| pocket(f, e, p, x, y, r[0], r[1]);
+    runs(f, e, p, x, y, rows, pocket);
+}
+
+/// `step` (the pocket or one of its halves) over the rows of streams that read what was learned, a run at a time.
+fn runs(f: Forward, e: *Enc, p: wts.Pocket, x: Buffer, y: Buffer, rows: usize, comptime step: fn (Forward, *Enc, wts.Pocket, Buffer, Buffer, usize, usize) void) void {
+    if (!f.untaught) return step(f, e, p, x, y, 0, rows);
+    var open: lesson_route.Runs = .{};
+    for (f.segs) |g| if (open.next(g.rows, g.cache.untaught)) |r| step(f, e, p, x, y, r[0], r[1]);
+    if (open.last()) |r| step(f, e, p, x, y, r[0], r[1]);
 }
 
 /// y [rows, D] += relu(x up^T)^2 down from row `first` over the pocket's neurons in use (beside the shared expert's).
@@ -285,6 +293,29 @@ pub fn pocket(f: Forward, e: *Enc, p: wts.Pocket, x: Buffer, y: Buffer, first: u
     e.buf(p.down, 0, 1);
     e.buf(y, first * row, 2);
     e.bytes([4]u32{ @intCast(rows), d, n, 0 }, 3);
+    e.bytes(@as(f32, 1), 4);
+    e.run(.{ f.c.hidden, rows, 1 }, .{ 256, 1, 1 });
+}
+
+/// pocket()'s first two dispatches as one, beside the dispatches since the last barrier: z = relu(x up^T)^2 from `first`.
+fn pocketIn(f: Forward, e: *Enc, p: wts.Pocket, x: Buffer, _: Buffer, first: usize, rows: usize) void {
+    e.alongside();
+    e.pipe(f.k.get("tf_pocket_in"));
+    e.buf(x, first * f.c.hidden * 2, 0);
+    e.buf(p.up, 0, 1);
+    e.buf(p.z, first * p.used * 4, 2);
+    e.bytes([4]u32{ @intCast(rows), @intCast(f.c.hidden), @intCast(p.used), 0 }, 3);
+    e.run(.{ 32 * p.used, rows, 1 }, .{ 256, 1, 1 });
+}
+
+/// pocket()'s last dispatch, y += z down from `first`, beside the dispatches since the last barrier (none touch z or y).
+fn pocketOut(f: Forward, e: *Enc, p: wts.Pocket, _: Buffer, y: Buffer, first: usize, rows: usize) void {
+    e.alongside();
+    e.pipe(f.k.get("tf_train_lora_out"));
+    e.buf(p.z, first * p.used * 4, 0);
+    e.buf(p.down, 0, 1);
+    e.buf(y, first * f.c.hidden * 2, 2);
+    e.bytes([4]u32{ @intCast(rows), @intCast(f.c.hidden), @intCast(p.used), 0 }, 3);
     e.bytes(@as(f32, 1), 4);
     e.run(.{ f.c.hidden, rows, 1 }, .{ 256, 1, 1 });
 }
