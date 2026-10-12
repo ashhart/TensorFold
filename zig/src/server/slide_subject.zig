@@ -6,6 +6,8 @@ const Server = @import("server.zig").Server;
 const Cx = errors.Cx;
 const askBase = @import("slide_ask.zig").askBase;
 const prompts = @import("slide_prompts.zig");
+const whom = @import("slide_whom.zig");
+const ownWord = whom.ownWord;
 
 /// What a question asks about, word for word as it says it, as the model names it (null: not found in it).
 pub fn subjectOf(srv: *Server, cx: *Cx, q: []const u8, gone: anytype) !?[]const u8 {
@@ -30,7 +32,7 @@ pub fn subjectWord(phrase: []const u8) []const u8 {
     const word = std.mem.trim(u8, owner orelse last, ".,!?;:'\"");
     // a pronoun or a question word is everywhere: no subject to key on
     for (unkeyed) |w| if (std.ascii.eqlIgnoreCase(word, w)) return "";
-    return word;
+    return if (ownWord(word)) "" else word;
 }
 
 /// The words of a fact's subject phrase a question can name it by: pronouns, question words and small words left out.
@@ -39,7 +41,7 @@ pub fn subjectWords(a: std.mem.Allocator, phrase: []const u8) ![]const []const u
     var words = std.mem.tokenizeAny(u8, phrase, " \t\r\n");
     next: while (words.next()) |w| {
         const word = possessor(std.mem.trim(u8, w, ".,!?;:'\""));
-        if (word.len < 2) continue;
+        if (word.len < 2 or ownWord(word)) continue; // "Mój pies" (my dog) keys on pies, never on my
         for (unkeyed ++ small) |u| if (std.ascii.eqlIgnoreCase(word, u)) continue :next;
         try out.append(a, word);
     }
@@ -77,7 +79,9 @@ fn opens(text: []const u8, word: []const u8) bool {
 
 /// A fact's subject words: the phrase's its questions say; a document's other proper names join a phrase with none.
 pub fn factSubject(a: std.mem.Allocator, phrase: []const u8, fact: []const u8, qs: []const []const u8, document: bool) ![]const []const u8 {
-    const own = try subjectWords(a, phrase);
+    const own = try subjectWords(a, beforeVerb(phrase));
+    // a told fact named whole ("I drive a Volvo") keys on what its questions say (drive), never its answer
+    if (!document and whom.userOpens(phrase)) return asked(a, own, qs);
     const proper = try named(a, own, fact, qs);
     // a told fact's other proper name is its answer ("My dog is called Ginger."): never a word its questions must say
     const theirs = try asked(a, if (document) try properWords(a, own, fact) else own, qs);
@@ -89,6 +93,15 @@ pub fn factSubject(a: std.mem.Allocator, phrase: []const u8, fact: []const u8, q
     return proper;
 }
 
+/// A subject phrase up to its verb: the model sometimes names the whole fact ("Our robot is called Pebble": Our robot).
+fn beforeVerb(phrase: []const u8) []const u8 {
+    var end = phrase.len;
+    for ([_][]const u8{ " is ", " are ", " was ", " were ", " has ", " have " }) |v| if (std.ascii.findIgnoreCase(phrase, v)) |at| {
+        if (at > 0) end = @min(end, at);
+    };
+    return phrase[0..end];
+}
+
 /// The fact's own capitalised words, which join its subject's when its questions say them too ("Quillmoor").
 pub fn properWords(a: std.mem.Allocator, phrase_words: []const []const u8, fact: []const u8) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
@@ -96,7 +109,7 @@ pub fn properWords(a: std.mem.Allocator, phrase_words: []const []const u8, fact:
     var it = std.mem.tokenizeAny(u8, fact, " \t\r\n,.!?;:\"()");
     next: while (it.next()) |t| {
         const w = possessor(t);
-        if (w.len < 2 or !std.ascii.isUpper(w[0])) continue;
+        if (w.len < 2 or !std.ascii.isUpper(w[0]) or ownWord(w)) continue;
         for (unkeyed ++ small) |u| if (std.ascii.eqlIgnoreCase(w, u)) continue :next;
         for (out.items) |x| if (std.ascii.eqlIgnoreCase(x, w)) continue :next;
         try out.append(a, w);
@@ -139,9 +152,18 @@ pub fn wordIn(words: []const []const u8, question: []const u8) []const u8 {
         const bare = possessor(w);
         for (words) |word| if (std.ascii.eqlIgnoreCase(bare, word)) {
             found = word;
+        } else if (oneOrMany(bare, word)) {
+            found = bare; // as the question writes it, which its key row is found by
         };
     }
     return found;
+}
+
+/// Whether two words are one in the singular and the plural ("eye", "eyes").
+fn oneOrMany(x: []const u8, y: []const u8) bool {
+    const a = if (x.len > 3 and std.ascii.toLower(x[x.len - 1]) == 's') x[0 .. x.len - 1] else x;
+    const b = if (y.len > 3 and std.ascii.toLower(y[y.len - 1]) == 's') y[0 .. y.len - 1] else y;
+    return a.len >= 3 and std.ascii.eqlIgnoreCase(a, b);
 }
 
 /// `w` without a possessive "'s".
@@ -162,6 +184,11 @@ test "a fact's subject words, and the last of them a question says" {
     defer a.free(mine);
     try std.testing.expectEqual(@as(usize, 1), mine.len);
     try std.testing.expectEqualStrings("sister", wordIn(mine, "What is my sister's name?"));
+    try std.testing.expectEqualStrings("eye", wordIn(&.{"eyes"}, "What is my eye colour?"));
+    try std.testing.expectEqualStrings("", wordIn(&.{"eyes"}, "What is my favourite colour?"));
+    const pies = try subjectWords(a, "Mój pies");
+    defer a.free(pies);
+    try std.testing.expect(pies.len == 1 and std.mem.eql(u8, pies[0], "pies"));
     const ran = try subjectWords(a, "Quillmoor Labs team chat runs on Zulip");
     defer a.free(ran);
     const qs = [_][]const u8{ "What does Quillmoor use for team chat?", "Which app does the Quillmoor Labs team chat on?", "Where is Quillmoor's team chat?" };
@@ -190,6 +217,8 @@ test "a fact's subject keeps its own proper names; a phrase without any takes th
     defer arena.deinit();
     const a = arena.allocator();
     const other_way = [_][]const u8{ "Who founded Quillmoor Labs?", "Who started Quillmoor Labs?", "Who is behind Quillmoor Labs?" };
+    const robot = try factSubject(a, "Our company's warehouse robot is called Pebble", "Our company's warehouse robot is called Pebble.", &.{ "What is our warehouse robot called?", "What's the name of the company's robot?", "What is my robot, Pebble, called?" }, false);
+    for (robot) |w| try std.testing.expect(!std.mem.eql(u8, w, "Pebble"));
     const odile = try factSubject(a, "Odile Marchetti", "Odile Marchetti founded Quillmoor Labs.", &other_way, true);
     try std.testing.expectEqual(@as(usize, 2), odile.len);
     try std.testing.expectEqualStrings("Odile", odile[0]);
@@ -204,9 +233,17 @@ test "a fact's subject keeps its own proper names; a phrase without any takes th
     const told = try factSubject(a, "My dog", "My dog is called Ginger.", &dog, false);
     try std.testing.expectEqual(@as(usize, 1), told.len);
     try std.testing.expectEqualStrings("dog", told[0]);
+    const home = [_][]const u8{ "Where do I live?", "Which city is my home?", "Where is my home?", "What city am I from?" };
+    try std.testing.expectEqual(@as(usize, 0), (try factSubject(a, "I live in Bristol", "I live in Bristol.", &home, false)).len);
+    const car = [_][]const u8{ "What car do I drive?", "Which make do I drive?", "What is my car?" };
+    const drive = try factSubject(a, "I drive a Volvo", "I drive a Volvo.", &car, false);
+    try std.testing.expect(drive.len == 1 and std.mem.eql(u8, drive[0], "drive"));
+    const nuts = [_][]const u8{ "What am I allergic to?", "Am I allergic to anything?", "What can't I eat?" };
+    const allergic = try factSubject(a, "I am allergic to peanuts", "I am allergic to peanuts.", &nuts, false);
+    try std.testing.expect(allergic.len == 1 and std.mem.eql(u8, allergic[0], "allergic"));
 }
 
-const unkeyed = [_][]const u8{ "i", "me", "my", "mine", "myself", "we", "us", "our", "ours", "you", "your", "yours", "it", "its", "this", "that", "these", "those", "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "do", "does", "did", "is", "are", "was", "like", "likes" };
+const unkeyed = [_][]const u8{ "i", "me", "my", "mine", "myself", "we", "us", "our", "ours", "you", "your", "yours", "it", "its", "this", "that", "these", "those", "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "do", "does", "did", "is", "are", "am", "was", "like", "likes" };
 
 const small = [_][]const u8{ "the", "a", "an", "of", "on", "in", "at", "to", "for", "by", "with", "from", "and", "or" };
 

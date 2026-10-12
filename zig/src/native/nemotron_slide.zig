@@ -41,7 +41,7 @@ pub fn Adapter(comptime slide: type) type {
             const a: *Self = @ptrCast(@alignCast(ctx));
             _ = a.arena.reset(.retain_capacity);
             const al = a.arena.allocator();
-            try a.learner.begin(.{ .train = try examples(al, request.train), .think = try examples(al, request.think), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .asked = try examples(al, request.asked), .unasked = try examples(al, request.unasked), .kept = try examples(al, request.kept), .undo = request.undo, .steps = request.steps, .more = request.more, .reroute = request.reroute, .drop = request.drop, .save = request.save });
+            try a.learner.begin(.{ .train = try examples(al, request.train), .think = try examples(al, request.think), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .asked = try examples(al, request.asked), .unasked = try examples(al, request.unasked), .kept = try examples(al, request.kept), .undo = request.undo, .steps = request.steps, .more = request.more, .reroute = request.reroute, .drop = request.drop, .save = request.save, .retire = try retired(al, request.retire), .unretire = request.unretire });
             a.sink = sink;
             a.sent = null;
         }
@@ -101,6 +101,13 @@ pub fn Adapter(comptime slide: type) type {
         fn examples(al: Allocator, xs: []const api.Example) ![]slide.Example {
             const out = try al.alloc(slide.Example, xs.len);
             for (xs, out) |x, *o| o.* = .{ .ids = x.ids, .start = x.start, .decide = x.decide, .subject = x.subject, .value = x.value };
+            return out;
+        }
+
+        /// Each neuron to zero as the learner names it: (layer, neuron).
+        fn retired(al: Allocator, ns: []const api.Neuron) ![]const [2]u16 {
+            const out = try al.alloc([2]u16, ns.len);
+            for (ns, out) |n, *o| o.* = .{ n.layer, n.neuron };
             return out;
         }
     };

@@ -3,6 +3,7 @@ const std = @import("std");
 const engine = @import("engine.zig");
 const snapshot = @import("snapshot.zig");
 const fz = @import("replay.zig");
+const think = @import("think.zig");
 const Engine = engine.Engine;
 
 /// Rank 0's requests as they come, until its empty request; between them a free buffer is readied inside the budget.
@@ -23,6 +24,29 @@ fn msSince(t0: u64) f64 {
     return @as(f64, @floatFromInt(std.c.mach_absolute_time() - t0)) * 125 / 3 / 1e6; // mach ticks are 125/3 ns on Apple silicon
 }
 
+/// Rank 0's request for `one`: a 16-word head, then the prompt, marks, dropped states' keys and the budget.
+pub fn send(e: *Engine, tp: *fz.Tp2, prompt: []const u32, from: usize, marks: []const u32, max_tokens: usize, eos: []const u32, depth: ?usize, budget: think.Think) !void {
+    var head: [16]u32 = @splat(0);
+    head[0] = @intCast(prompt.len);
+    head[1] = @intCast(@min(max_tokens, std.math.maxInt(u32)));
+    head[2] = @intCast(@min(eos.len, 8));
+    head[3] = if (depth) |d| @intCast(d) else std.math.maxInt(u32);
+    for (eos[0..head[2]], 0..) |t, i| head[4 + i] = t;
+    head[12] = @intCast(from); // rank 1 restores its own state at the same tokens
+    head[13] = @intCast(marks.len); // the marks, then the dropped states' keys, follow the prompt
+    head[14] = @intCast(e.peer_drops.items.len);
+    head[15] = @intCast(e.pair_min); // rank 1 splits its calls the same way
+    const at_budget = prompt.len + marks.len + 2 * e.peer_drops.items.len;
+    const words = try e.gpa.alloc(u32, at_budget + think.words(budget));
+    defer e.gpa.free(words);
+    @memcpy(words[0..prompt.len], prompt);
+    @memcpy(words[prompt.len..][0..marks.len], marks);
+    for (e.peer_drops.items, 0..) |k, i| words[prompt.len + marks.len + 2 * i ..][0..2].* = .{ @truncate(k), @truncate(k >> 32) };
+    think.put(budget, words[at_budget..]);
+    try tp.sendRequest(std.mem.asBytes(&head), words);
+    e.peer_drops.clearRetainingCapacity();
+}
+
 /// One of rank 0's requests: its resume state (answered to rank 0), its drops, then the reply in step into `out` (null: hashed and
 /// logged, this Mac's states kept at its marks; tf-flashnext-run passes its own); null once rank 0 closes.
 pub fn one(e: *Engine, out: ?engine.Out) !?engine.Result {
@@ -32,10 +56,12 @@ pub fn one(e: *Engine, out: ?engine.Out) !?engine.Result {
     @memcpy(std.mem.asBytes(&head), req.head[0..64]);
     if (head[0] == 0) return null;
     const n = head[0];
-    const words = try e.gpa.dupe(u32, req.tokens[0 .. n + head[13] + 2 * head[14]]); // rank 0 may write its next request meanwhile
+    const at_budget = n + head[13] + 2 * head[14];
+    const words = try e.gpa.dupe(u32, req.tokens[0 .. at_budget + 3 + @min(req.tokens[at_budget + 2], think.MAX_CLOSE)]); // rank 0 may write its next request meanwhile
     defer e.gpa.free(words);
     const prompt = words[0..n];
     const marks = words[n..][0..head[13]];
+    const budget = try think.take(words[at_budget..]);
     const from = head[12];
     if (head[15] == 0) return error.TpProtocol; // rank 0 sends its positive pair minimum with every request
     e.pair_min = head[15];
@@ -55,7 +81,7 @@ pub fn one(e: *Engine, out: ?engine.Out) !?engine.Result {
     const eos = try e.gpa.dupe(u32, head[4 .. 4 + head[2]]);
     defer e.gpa.free(eos);
     var reply: Reply = .{ .e = e, .prompt = prompt };
-    const res = try e.generateFrom(prompt, from, marks, head[1], eos, if (head[3] == std.math.maxInt(u32)) null else head[3], out orelse reply.out());
+    const res = try e.generateFrom(prompt, from, marks, head[1], eos, if (head[3] == std.math.maxInt(u32)) null else head[3], budget, out orelse reply.out());
     if (out != null) return res;
     std.log.info("speed-up rank 1: resumed at {d} of {d} (restore {d:.1} ms), kept {d} marks ({d:.1} ms), {d} states {d} MiB and {d} MiB spare; reply {d} tokens, sha {s}", .{ from, n, restore_ms, reply.kept, reply.keep_ns / 1e6, e.peer_kept.count(), e.peer_held >> 20, e.snap_pool.spare() >> 20, reply.tokens, &reply.sha() });
     return res;

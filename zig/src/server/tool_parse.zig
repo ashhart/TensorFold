@@ -16,7 +16,7 @@ pub const wrapCalls = tool_streaming.wrapCalls;
 
 const Error = error{ Invalid, OutOfMemory };
 const Call = struct { name: []const u8, arguments: Value };
-const Envelope = struct { start: usize, end: usize, payload: []const u8 };
+const Envelope = struct { start: usize, end: usize, payload: []const u8, complete: bool = true };
 
 pub const Parsed = struct { content: []const u8, calls: ?[]Value };
 
@@ -53,6 +53,10 @@ fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
     var found: std.ArrayList(Envelope) = .empty;
     var pos: usize = 0;
     while (findCI(text, "<tool_call>", pos)) |s| {
+        if (find(text, dsml_open, pos)) |outer| if (outer < s) {
+            pos = (find(text, dsml_close, outer + dsml_open.len) orelse break) + dsml_close.len;
+            continue;
+        };
         const e = findCI(text, "</tool_call>", s + 11) orelse break;
         try found.append(a, .{ .start = s, .end = e + 12, .payload = strip(text[s + 11 .. e]) });
         pos = e + 12;
@@ -78,9 +82,10 @@ fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
     }
     pos = 0;
     while (find(text, dsml_open, pos)) |s| {
-        const e = find(text, dsml_close, s + dsml_open.len) orelse break;
-        try found.append(a, .{ .start = s, .end = e + dsml_close.len, .payload = text[s .. e + dsml_close.len] });
-        pos = e + dsml_close.len;
+        const e = find(text, dsml_close, s + dsml_open.len);
+        const end = if (e) |at| at + dsml_close.len else text.len;
+        try found.append(a, .{ .start = s, .end = end, .payload = text[s..end], .complete = e != null });
+        pos = end;
     }
     std.mem.sort(Envelope, found.items, {}, struct {
         fn less(_: void, x: Envelope, y: Envelope) bool {
@@ -102,18 +107,20 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
         const name = try tool_specs.toolName(a, tool);
         try known.put(a, try std.ascii.allocLowerString(a, name), name);
     }
+    if (try bareCalls(a, text, &known, max_calls)) |calls| return .{ .content = "", .calls = calls };
     const schemas = try tool_params.schemas(a, tools);
     const envs = try envelopes(a, text);
-    if (envs.len == 0) {
-        if (try bareCalls(a, text, &known, max_calls)) |calls| return .{ .content = "", .calls = calls };
-        return .{ .content = text, .calls = null };
-    }
+    if (envs.len == 0) return .{ .content = text, .calls = null };
     var calls: std.ArrayList(Value) = .empty;
     var residue: std.ArrayList(u8) = .empty;
     var cursor: usize = 0;
     for (envs) |env| {
         try residue.appendSlice(a, text[cursor..env.start]);
         cursor = env.end;
+        if (!env.complete) {
+            try residue.appendSlice(a, text[env.start..env.end]);
+            continue;
+        }
         if (max_calls) |m| if (calls.items.len >= m) continue;
         const parsed: ?[]Call = blk: {
             if (std.mem.startsWith(u8, env.payload, dsml_open)) {
@@ -155,6 +162,10 @@ pub fn closeCall(a: Allocator, text: []const u8, tools: []const Value) Allocator
     var pos: usize = 0;
     // the opener ``envelopes`` leaves without a closer, so the one appended pairs with it
     const start = while (findCI(text, "<tool_call>", pos)) |s| {
+        if (find(text, dsml_open, pos)) |outer| if (outer < s) {
+            pos = (find(text, dsml_close, outer + dsml_open.len) orelse return "") + dsml_close.len;
+            continue;
+        };
         pos = (findCI(text, "</tool_call>", s + 11) orelse break s) + 12;
     } else return "";
     const block = text[start + 11 ..];
