@@ -22,9 +22,9 @@ pub const greedy_draft: Keyed = .{ .k = 20, .greedy = true };
 
 pub const Rule = cuda.sample.Rule;
 
-/// The rule the Metal engine's sample kernels read for `s`, as its host fills cfg.
+/// The rule the Metal engine's sample kernels read for `s` (lanes.gpu_rule), in sample.cu's layout.
 pub fn rule(s: Sampling) Rule {
-    return cuda.sample.rule(s.seed, s.temperature, s.top_p, s.minLog(), s.top_k);
+    return Rule.from(@import("lanes").gpu_rule.rule(s));
 }
 
 test "rules as the Metal engine fills them" {
