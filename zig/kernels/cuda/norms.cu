@@ -1,4 +1,4 @@
-// RMS norm rows for every CUDA family (float64 references: core/norms_ref.zig), a 256-thread block a row.
+// RMS norm rows for every CUDA family (float64 references: core/norms_ref.zig), a block a row of 1,024 or 256 threads.
 
 // A row's sums run in one fixed order, so its bits never depend on the row count; kinds 0 fp32, 1 fp16, 2 bf16.
 
