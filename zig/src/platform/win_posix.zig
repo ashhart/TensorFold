@@ -123,8 +123,9 @@ pub const system = struct {
         const fd = ws.socket(@intCast(family), @intCast(kind), @intCast(proto));
         return if (fd == -1) failed() else fd;
     }
-    pub fn bind(fd: socket_t, addr: *const anyopaque, len: socklen_t) c_int {
-        return if (ws.bind(fd, addr, len) != 0) failed() else 0;
+    /// `len` as std.Io.Threaded's addressToPosix gives it (its socklen_t is unsigned on Windows).
+    pub fn bind(fd: socket_t, addr: *const anyopaque, len: anytype) c_int {
+        return if (ws.bind(fd, addr, @intCast(len)) != 0) failed() else 0;
     }
     pub fn listen(fd: socket_t, backlog: u31) c_int {
         return if (ws.listen(fd, backlog) != 0) failed() else 0;

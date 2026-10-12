@@ -294,6 +294,8 @@ fn fatbin(b: *std.Build, nvcc: []const u8, version: std.Build.LazyPath, k: Kerne
     const run = b.addSystemCommand(&.{ nvcc, "-fatbin" });
     run.addFileInput(version);
     run.addArgs(&torch_flags);
+    // CUDA 13's headers need MSVC's conforming preprocessor when cl.exe is the host compiler
+    if (b.graph.host.result.os.tag == .windows) run.addArg("-Xcompiler=/Zc:preprocessor");
     run.addArgs(k.flags);
     var it = std.mem.tokenizeScalar(u8, sms, ',');
     while (it.next()) |sm| {
