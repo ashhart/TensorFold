@@ -18,6 +18,7 @@ pub const registry = @import("registry.zig");
 pub const tuning = @import("tuning.zig");
 pub const norms_ref = @import("norms_ref.zig");
 pub const act_ref = @import("act_ref.zig");
+pub const nvfp4 = @import("nvfp4.zig");
 pub const modelopt = @import("modelopt.zig");
 
 test {
@@ -38,5 +39,7 @@ test {
     _ = draft_depth;
     _ = @import("copy_index.zig");
     _ = ids_json;
+    _ = nvfp4;
     _ = modelopt;
+    _ = @import("nvfp4_fixture_test.zig");
 }
