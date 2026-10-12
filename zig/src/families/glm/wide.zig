@@ -27,6 +27,7 @@ pub const Pipes = struct {
     glu_sorted: [nw]mtl.Pipeline,
     bf16: mtl.Pipeline, // an unquantized matrix (the MTP head's eh_proj)
     kda_pre: mtl.Pipeline, // kda_rows reading f_b's and g_b's products made apart (any width but 4/64)
+    kda_fg: [nw]mtl.Pipeline, // kda_rows making f_b's and g_b's dots of one width (g64) as glm_rows does: .pre's bits
     embed: [2]mtl.Pipeline, // the embedding at 6 and 8 bits, groups of 64
     mm8: affine_mm.Pipes, // prompt chunks' products of one width at 8 bits in groups of 64 (core/affine_mm.zig)
     mm2: affine_mm.Pipes, // and at 2 bits in groups of 64: oQ2's routed experts, gathered
@@ -35,7 +36,7 @@ pub const Pipes = struct {
     hash: u64, // every source compiled here
 
     pub fn deinit(p: *Pipes) void {
-        inline for (.{ &p.rows, &p.ids, &p.glu_ids, &p.sorted, &p.glu_sorted, &p.embed }) |set| for (set) |x| x.deinit();
+        inline for (.{ &p.rows, &p.ids, &p.glu_ids, &p.sorted, &p.glu_sorted, &p.embed, &p.kda_fg }) |set| for (set) |x| x.deinit();
         p.bf16.deinit();
         p.kda_pre.deinit();
         inline for (.{ p.mm8, p.mm2, p.mm5, p.mm6 }) |set| for (set) |x| x.deinit();
@@ -45,6 +46,28 @@ pub const Pipes = struct {
 /// kda_rows's f_b dot read from a product made apart (a row's sum in its first lane of four, zeros in the rest: exact).
 const pre_f = .{ "result = quad_dot<FB, PER>(x, wb, s, bb);", "result = qlid == 0u ? float(((device const bfloat*)FBW)[(size_t)r * W + row]) : 0.0f;" };
 const pre_g = .{ "result = quad_dot<GB, PER>(x, wb, s, bb);", "result = qlid == 0u ? float(((device const bfloat*)GBW)[(size_t)r * W + row]) : 0.0f;" };
+
+/// kda_rows's f_b and g_b dots by quads of lanes, cut (from its block's start to the barrier after it) for `fg_block`.
+const fg_cut = .{ "    {\n      constexpr int PER = D / 4;", "\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    for (uint idx = tid; idx < 3u * (uint)D;" };
+/// The head's f_b and g_b rows as glm_rows sums them (core tf_rp_rows, 4 rows a simdgroup, then bf16): .pre's values.
+const fg_block =
+    \\    for (uint t0 = simdgroup_index_in_threadgroup * 4u; t0 < 2u * (uint)D; t0 += (uint)TY * 4u) {
+    \\      const bool f = t0 < (uint)D;
+    \\      const uint d0 = f ? t0 : t0 - (uint)D;
+    \\      const size_t row = (size_t)h * D + d0;
+    \\      float acc[1][4];
+    \\      if (f) tf_rp_rows<4, 1, FB, false>((const device uint8_t*)FBW + row * (D * FB / 8), FBS + row * (D / 64), FBB + row * (D / 64), prow + FA, D, 64, lane, acc);
+    \\      else tf_rp_rows<4, 1, GB, false>((const device uint8_t*)GBW + row * (D * GB / 8), GBS + row * (D / 64), GBB + row * (D / 64), prow + GA, D, 64, lane, acc);
+    \\      if (lane == 0u)
+    \\        for (int j = 0; j < 4; j++) (f ? sa : sgate)[d0 + j] = float(bfloat(acc[0][j]));
+    \\    }
+;
+/// core/row_projection.metal's row sums only (its kernels and instances cut).
+const rp_sums = blk: {
+    @setEvalBranchQuota(100_000);
+    const r = sources.core_row_projection;
+    break :blk r[0..std.mem.indexOf(u8, r, "// A value out: bf16").?];
+};
 
 /// glm_glue.metal's bfloat overloads and sigmoid_fast, the text glm_swiglu compiles: glm_rows's SwiGLU takes its bits.
 pub const glue_math = blk: {
@@ -57,7 +80,7 @@ pub const glue_math = blk: {
 
 /// The pipelines built so far: a failed compile releases them all.
 const Made = struct {
-    list: [nw * 5 + 4 + 4 * affine_mm.names.len]mtl.Pipeline = undefined,
+    list: [nw * 6 + 4 + 4 * affine_mm.names.len]mtl.Pipeline = undefined,
     n: usize = 0,
     released: usize = 0,
 
@@ -114,6 +137,13 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
     if (std.mem.indexOf(u8, pre_src, pre_f[0]) != null or std.mem.indexOf(u8, pre_src, pre_g[0]) != null or std.mem.indexOf(u8, pre_src, pre_f[1]) == null) return error.KernelCompile;
     h.update(pre_src);
     try lib(made, device, pre_src, &.{comptime kernels.generatedFunction("kda_rows")}, @as(*[1]mtl.Pipeline, &p.kda_pre));
+    const a = std.mem.indexOf(u8, kda, fg_cut[0]) orelse return error.KernelCompile;
+    const z = a + (std.mem.indexOf(u8, kda[a..], fg_cut[1]) orelse return error.KernelCompile);
+    const own = z + (std.mem.lastIndexOf(u8, kda[z..], "\ntemplate [[host_name(") orelse return error.KernelCompile);
+    const fg_src = try std.mem.concat(gpa, u8, &.{ rp_sums, kda[0..a], fg_block, kda[z..own], fg_instances }); // not its own
+    defer gpa.free(fg_src);
+    h.update(fg_src);
+    try lib(made, device, fg_src, &fg_names, &p.kda_fg);
     h.update(sources.ops_embed_norm);
     try lib(made, device, sources.ops_embed_norm, &.{ "tf_embed_b6_g64", "tf_embed_b8_g64" }, &p.embed);
     for ([_]u8{ 8, 2, 5, 6 }, [_]*affine_mm.Pipes{ &p.mm8, &p.mm2, &p.mm5, &p.mm6 }) |bits, out| {
@@ -125,6 +155,18 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
     p.hash = h.final();
     return p;
 }
+
+/// kda_rows with f_b and g_b at one width a pipeline (`fg_block`), under the names glm_kda_fg_q<bits>.
+const fg_names = blk: {
+    var n: [nw][:0]const u8 = undefined;
+    for (bit_widths, 0..) |b, i| n[i] = std.fmt.comptimePrint("glm_kda_fg_q{d}", .{b});
+    break :blk n;
+};
+const fg_instances = blk: {
+    var s: []const u8 = "";
+    for (bit_widths, fg_names) |b, name| s = s ++ kernels.instance("kda_rows", std.fmt.comptimePrint("64, 128, 4, 32, {d}, {d}", .{ b, b }), name);
+    break :blk s;
+};
 
 fn bind(e: mtl.ComputeEncoder, first: usize, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buf, r.off, first + i);
@@ -244,11 +286,12 @@ pub fn routed(gate: Affine, up: Affine, down: Affine) Routed {
     return .mm2;
 }
 
-/// kda_rows's f_b/g_b dots: generated (both 4/64), else (`.pre`) glm_rows products made apart, the fp64-checked ones.
-pub const KdaGate = union(enum) { generated, pre: mtl.Pipeline };
+/// f_b/g_b dots: generated (both 4/64), `.fused` (one width, g64, glm_rows's sums inside), else `.pre`: same bits.
+pub const KdaGate = union(enum) { generated, fused: mtl.Pipeline, pre: mtl.Pipeline };
 
 pub fn kdaGate(p: ?*const Pipes, f: Affine, g: Affine) KdaGate {
     if (native(f) and native(g)) return .generated;
+    if (f.more == 0 and g.more == 0 and f.group == 64 and g.group == 64 and f.bits == g.bits) return .{ .fused = p.?.kda_fg[at(f.bits)] };
     return .{ .pre = p.?.kda_pre };
 }
 
@@ -303,11 +346,16 @@ test "prompt chunks gather routed experts on affine_mm at 4/64 and 2/64 only; ot
     try std.testing.expectEqual(Routed.rows, routed(g32, g32, g32));
 }
 
-test "f_b and g_b at any other width (8/64 too) take the products made apart, not the template's own dots" {
+test "f_b and g_b of one width (g64) take glm_rows's dots inside kda_rows, two widths the products made apart" {
     const r: Ref = .{ .buf = undefined };
     const q: Affine = .{ .w = r, .s = r, .b = r, .n = 64, .k = 128, .bits = 8, .group = 64 };
     var four = q;
     four.bits = 4;
+    var g32 = q;
+    g32.group = 32;
     const p: Pipes = undefined;
-    for ([_][2]Affine{ .{ q, q }, .{ four, q }, .{ q, four } }) |fg| try std.testing.expect(kdaGate(&p, fg[0], fg[1]) == .pre);
+    for ([_][2]Affine{ .{ four, q }, .{ q, four }, .{ g32, g32 } }) |fg| try std.testing.expect(kdaGate(&p, fg[0], fg[1]) == .pre);
+    var five = q;
+    five.bits = 5;
+    for ([_]Affine{ q, five }) |x| try std.testing.expect(kdaGate(&p, x, x) == .fused);
 }

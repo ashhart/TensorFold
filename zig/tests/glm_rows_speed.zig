@@ -473,10 +473,15 @@ pub fn main() !void {
         const step_bytes = 2 * H * KD * KD * 4; // the state read and written
         uni.add("kda step (dots 4/4)", try b.time(kdaStep, .{ k.kda_rows, &st, g4, null, io }), 34, step_bytes + g4[0].bytes * 2);
         const us_pre = try b.time(kdaStep, .{ p.kda_pre, &st, g8, p, io });
-        oq2.add("kda step (.pre q8)", us_pre, 34, step_bytes + g8[0].bytes * 2);
-        oq4.add("kda step (.pre q8)", us_pre, 34, step_bytes + g8[0].bytes * 2);
+        std.debug.print("  {s:<26} {d:9.1} us\n", .{ "kda step (.pre q8)", us_pre });
         const us_pre5 = try b.time(kdaStep, .{ p.kda_pre, &st, g5, p, io });
         std.debug.print("  {s:<26} {d:9.1} us\n", .{ "kda step (.pre q5)", us_pre5 });
+        const f8 = wide.kdaGate(p, g8[0].at(0), g8[1].at(0)).fused;
+        const us_f8 = try b.time(kdaStep, .{ f8, &st, g8, null, io });
+        oq2.add("kda step (fused q8)", us_f8, 34, step_bytes + g8[0].bytes * 2);
+        oq4.add("kda step (fused q8)", us_f8, 34, step_bytes + g8[0].bytes * 2);
+        const f5 = wide.kdaGate(p, g5[0].at(0), g5[1].at(0)).fused;
+        std.debug.print("  {s:<26} {d:9.1} us\n", .{ "kda step (fused q5)", try b.time(kdaStep, .{ f5, &st, g5, null, io }) });
     }
     { // MLA absorb / unabsorb: kv_b's halves (uniform) or embed_q / unembed_out a head at 8 bits
         const kv = try Pool.init(device, H * 512, 512, 4, 1, 1);
