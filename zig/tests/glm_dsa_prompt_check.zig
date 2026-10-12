@@ -125,7 +125,7 @@ fn attention(K: *g.layer.Kernels, L: *g.layer.Layer, s: *g.gpu.Scratch, q: *g.gp
         @memcpy(s.x.slice(f32, @as(usize, n) * hid), q.x.slice(f32, @as(usize, rows) * hid)[@as(usize, k) * hid ..][0 .. @as(usize, n) * hid]);
         for (s.rows.slice(g.kernels.Row, n), 0..) |*row, r| {
             row.* = .{ .slot = 0, .pos = k + @as(u32, @intCast(r)), .list = @intCast(r * c.i_topk), .nkeys = k + @as(u32, @intCast(r)) + 1 };
-            if (!full) for (s.keys.slice(u32, R * c.i_topk)[r * c.i_topk ..][0 .. row.nkeys], 0..) |*key, j| {
+            if (!full) for (s.keys.slice(u32, R * c.i_topk)[r * c.i_topk ..][0..row.nkeys], 0..) |*key, j| {
                 key.* = @intCast(j);
             };
         }

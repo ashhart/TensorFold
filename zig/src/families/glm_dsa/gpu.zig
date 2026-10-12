@@ -139,17 +139,16 @@ pub const Prompt = struct {
         q.tiles = tiles;
         q.gu_cap = cap;
         const sizes = .{
-            .{ &q.h, P * c.hidden * 4 },                                  .{ &q.x, P * c.hidden * 4 },   .{ &q.rot, P * 16384 * 4 },
-            .{ &q.proj, P * 2784 * 4 },                                   .{ &q.q_resid, P * c.q_lora * 4 }, .{ &q.qq, P * nh * c.qHead() * 4 },
-            .{ &q.qidx, P * c.i_heads * c.i_dim * 4 },                    .{ &q.olat, P * nh * c.kv_lora * 4 }, .{ &q.o, P * nh * c.v_dim * 4 },
-            .{ &q.keys, P * c.i_topk * 4 },                               .{ &q.score, P * @as(usize, context) * 4 }, .{ &q.logits, P * c.experts * 4 },
-            .{ &q.rows, P * @sizeOf(kn.Row) },                            .{ &q.ids, P * 4 },            .{ &q.pick, P * c.topk * 4 },
-            .{ &q.rows_mtp, P * @sizeOf(kn.Row) },                        .{ &q.ids_mtp, P * 4 },        .{ &q.picks, P * 4 },
-            .{ &q.idx, P * 4 },
-            .{ &q.wts8, P * c.topk * 4 },                                 .{ &q.gu, S * 2 * loc * 4 },   .{ &q.act, S * loc * 4 },
-            .{ &q.arot, S * loc * 4 },                                    .{ &q.z, S * c.hidden * 4 },   .{ &q.wts, S * 4 },
-            .{ &q.sv, S * 4 },                                            .{ &q.suh, S * 4 },            .{ &q.members, @as(usize, tiles) * 64 * 4 },
-            .{ &q.jobs, (@as(usize, cap) + @as(usize, tiles) * 48) * @sizeOf(ex.job.Job) }, .{ &q.dispatch, 32 },
+            .{ &q.h, P * c.hidden * 4 },                 .{ &q.x, P * c.hidden * 4 },                                                    .{ &q.rot, P * 16384 * 4 },
+            .{ &q.proj, P * 2784 * 4 },                  .{ &q.q_resid, P * c.q_lora * 4 },                                              .{ &q.qq, P * nh * c.qHead() * 4 },
+            .{ &q.qidx, P * c.i_heads * c.i_dim * 4 },   .{ &q.olat, P * nh * c.kv_lora * 4 },                                           .{ &q.o, P * nh * c.v_dim * 4 },
+            .{ &q.keys, P * c.i_topk * 4 },              .{ &q.score, P * @as(usize, context) * 4 },                                     .{ &q.logits, P * c.experts * 4 },
+            .{ &q.rows, P * @sizeOf(kn.Row) },           .{ &q.ids, P * 4 },                                                             .{ &q.pick, P * c.topk * 4 },
+            .{ &q.rows_mtp, P * @sizeOf(kn.Row) },       .{ &q.ids_mtp, P * 4 },                                                         .{ &q.picks, P * 4 },
+            .{ &q.idx, P * 4 },                          .{ &q.wts8, P * c.topk * 4 },                                                   .{ &q.gu, S * 2 * loc * 4 },
+            .{ &q.act, S * loc * 4 },                    .{ &q.arot, S * loc * 4 },                                                      .{ &q.z, S * c.hidden * 4 },
+            .{ &q.wts, S * 4 },                          .{ &q.sv, S * 4 },                                                              .{ &q.suh, S * 4 },
+            .{ &q.members, @as(usize, tiles) * 64 * 4 }, .{ &q.jobs, (@as(usize, cap) + @as(usize, tiles) * 48) * @sizeOf(ex.job.Job) }, .{ &q.dispatch, 32 },
         };
         inline for (sizes) |e| e[0].* = try device.buffer(@max(e[1], 16), mtl.ResourceOptions.shared);
         for (q.idx.slice(u32, P), 0..) |*v, i| v.* = @intCast(i);
