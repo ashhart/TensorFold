@@ -11,13 +11,18 @@ pub const State = enum { seen, ready, failed };
 
 /// A cache of graphs keyed by `Key` (plain integers and booleans), each with the `Out` its capture produced.
 pub fn Cache(comptime Key: type, comptime Out: type) type {
+    return CacheOf(Key, Out, hip_graph.Exec);
+}
+
+/// The same over any replayable `Exec` (a graph, or a step's graphs between collectives): it has `deinit`.
+pub fn CacheOf(comptime Key: type, comptime Out: type, comptime Exec: type) type {
     return struct {
         const Self = @This();
 
         pub const Entry = struct {
             key: Key,
             state: State = .seen,
-            exec: ?hip_graph.Exec = null,
+            exec: ?Exec = null,
             out: Out = undefined,
             tick: u64 = 0,
         };
@@ -82,6 +87,14 @@ pub fn Cache(comptime Key: type, comptime Out: type) type {
             return .{ .out = out, .graph = graph };
         }
 
+        /// Keeps `exec`, made by the caller, as the shape's replay with its outputs.
+        pub fn hold(g: *Self, e: *Entry, exec: Exec, out: Out) void {
+            e.exec = exec;
+            e.out = out;
+            e.state = .ready;
+            g.captured += 1;
+        }
+
         /// Instantiates a capture that just ended, keeps it with its outputs, and uploads it.
         pub fn keep(g: *Self, e: *Entry, graph: hip_graph.Graph, stream: Stream, out: Out) !void {
             var tmp = graph;
@@ -96,4 +109,24 @@ pub fn Cache(comptime Key: type, comptime Out: type) type {
             g.captured += 1;
         }
     };
+}
+
+test "a held replay is the shape's until the cache drops it" {
+    const Fake = struct {
+        drops: *usize,
+        fn deinit(f: *@This()) void {
+            f.drops.* += 1;
+        }
+    };
+    var drops: usize = 0;
+    var c = CacheOf(u32, u8, Fake).init(std.testing.allocator);
+    const e = try c.find(7);
+    c.hold(e, .{ .drops = &drops }, 3);
+    const again = try c.find(7);
+    try std.testing.expectEqual(State.ready, again.state);
+    try std.testing.expectEqual(@as(u8, 3), again.out);
+    c.revoke(again);
+    try std.testing.expectEqual(@as(usize, 1), drops);
+    try std.testing.expectEqual(State.failed, (try c.find(7)).state);
+    c.deinit();
 }
