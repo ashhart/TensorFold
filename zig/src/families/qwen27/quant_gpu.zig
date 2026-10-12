@@ -154,15 +154,41 @@ pub const Kernels = struct {
         try span.end();
     }
 
-    /// A mixed stack: each run its own product into its columns, a row a launch so every row count matches.
+    /// A mixed stack: each member its own product into its columns; row kernels write the fused rows at a stride.
     fn quantRuns(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
         if (skip > 0 or cut[1] > 0 or rows == 0 or rows > 128) return error.BadCoreProjectionRows;
-        for (p.runs) |run| for (0..rows) |r| {
-            const xr = Ref{ .buffer = x.buffer, .offset = x.offset + r * p.k * 2 };
-            const sr: ?Sums = if (xs) |s| .{ .ref = .{ .buffer = s.ref.buffer, .offset = s.ref.offset + r * 4 }, .stride = s.stride } else null;
-            const yr = Ref{ .buffer = y.buffer, .offset = y.offset + (r * p.n + run.first) * 2 };
-            try k.quantOne(input_encoder, run.linear, xr, sr, dims, yr, 1, 0, .{ 0, 0 });
-        };
+        for (p.runs) |run| {
+            if (run.linear.raw) |raw| {
+                try k.rowStrided(input_encoder, raw, x, .{ .buffer = y.buffer, .offset = y.offset + @as(usize, run.first) * 2 }, rows, p.n);
+                continue;
+            }
+            for (0..rows) |r| { // lane kernels take one row a launch until they write at a stride
+                const xr = Ref{ .buffer = x.buffer, .offset = x.offset + r * p.k * 2 };
+                const sr: ?Sums = if (xs) |s| .{ .ref = .{ .buffer = s.ref.buffer, .offset = s.ref.offset + r * 4 }, .stride = s.stride } else null;
+                const yr = Ref{ .buffer = y.buffer, .offset = y.offset + (r * p.n + run.first) * 2 };
+                try k.quantOne(input_encoder, run.linear, xr, sr, dims, yr, 1, 0, .{ 0, 0 });
+            }
+        }
+    }
+
+    /// The row kernel at any width, output row m at y + m * stride values; a row's bits do not depend on the window.
+    fn rowStrided(k: *Kernels, input_encoder: mtl.ComputeEncoder, raw: row.Weights, x: Ref, y: Ref, rows: u32, stride: u32) !void {
+        var span = profile.begin(k.profiler, input_encoder, .dense);
+        span.shape = .{ .n = @intCast(raw.n), .k = @intCast(raw.k), .sk = 1 };
+        errdefer span.cancel();
+        const e = span.encoder;
+        if (k.row_pipelines == null) k.row_pipelines = try row.Pipelines.load(k.device);
+        const call = try row.callStrided(&k.row_pipelines.?, raw, rows, stride);
+        e.setPipeline(call.pipeline);
+        e.setBuffer(x.buffer, x.offset, 0);
+        e.setBuffer(raw.w, raw.w_off, 1);
+        e.setBuffer(raw.scales, raw.s_off, 2);
+        e.setBuffer(raw.biases, raw.b_off, 3);
+        e.setValue(call.dims, 4);
+        e.setBuffer(y.buffer, y.offset, 5);
+        e.dispatchGroups(.{ .width = call.groups }, .{ .width = call.threads });
+        e.barrier();
+        try span.end();
     }
 
     /// Loads the tiles on first use and checks the scalar twin against them once per shape.
