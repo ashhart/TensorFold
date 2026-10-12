@@ -32,7 +32,7 @@ tensorfold-native models
 tensorfold-native serve <model path> --name local-model --parallel 1 --context 8192 --temperature 0 --no-thinking
 ```
 
-The server listens on `http://127.0.0.1:8080/v1`. Ctrl+C (or closing the console) stops it cleanly.
+The server listens on `http://127.0.0.1:8888/v1`. Ctrl+C (or closing the console) stops it cleanly.
 
 ## How the port works
 

@@ -118,7 +118,7 @@ The error from `tensorfold tui` prints that command with the venv's Python. `ric
 ```bash
 tensorfold tui
 tensorfold tui --profile code
-tensorfold tui --url http://127.0.0.1:8080/v1
+tensorfold tui --url http://127.0.0.1:8888/v1
 tensorfold tui --url https://spark.example.invalid --token-env TENSORFOLD_API_KEY
 tensorfold tui --demo
 tensorfold tui --demo --snapshot preview.svg
