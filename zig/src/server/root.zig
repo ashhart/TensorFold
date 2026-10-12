@@ -63,4 +63,5 @@ test {
     _ = @import("slide_teacher.zig");
     _ = @import("slide_pick.zig");
     _ = @import("startup.zig");
+    _ = @import("responses_include_test.zig");
 }

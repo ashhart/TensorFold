@@ -248,22 +248,30 @@ fn format(cx: *Cx, text: ?Value) errors.Refused!?Value {
     return cx.refuse("text.format must be text, json_object or json_schema");
 }
 
+/// OpenAI's include values, sorted: each asks for output this server has none of (plain reasoning, no tools here).
+const include_values = [_][]const u8{ "code_interpreter_call.outputs", "computer_call_output.output.image_url", "file_search_call.results", "message.input_image.image_url", "message.output_text.logprobs", "reasoning.encrypted_content", "web_search_call.action.sources", "web_search_call.results" };
+
+/// ``include`` of OpenAI's values accepted and ignored (clients send some by habit), others refused, as 2.x does.
+pub fn include(cx: *Cx, given: Value) errors.Refused!void {
+    if (given == .null) return;
+    if (given != .array) return cx.refuse("include must be a list of strings");
+    var unknown: std.ArrayList([]const u8) = .empty;
+    for (given.array) |v| {
+        if (v != .string) return cx.refuse("include must be a list of strings");
+        for (include_values) |known| {
+            if (std.mem.eql(u8, v.string, known)) break;
+        } else try unknown.append(cx.a, try pyrepr.repr(cx.a, v));
+    }
+    if (unknown.items.len > 0) return cx.fail(.request, "include has no value {s}: the values are {s}", .{ try std.mem.join(cx.a, ", ", unknown.items), try std.mem.join(cx.a, ", ", &include_values) });
+}
+
 /// A Responses request as the chat completion that runs it; ``history`` reads a stored conversation.
 pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request {
     const a = cx.a;
     if (body != .object) return cx.refuse("the request body must be a JSON object");
     _ = try fields.probabilityOptions(cx, body, false); // logprobs come on /v1/chat/completions only
     for (refused) |r| if (json.truthyField(body, r[0])) return cx.refuse(r[1]);
-    if (body.get("include")) |inc| if (inc.truthy()) {
-        var parts: std.ArrayList([]const u8) = .empty;
-        switch (inc) {
-            .array => |items| for (items) |i| try parts.append(a, try tool_specs.pyStr(a, i)),
-            .object => |o| for (o.keys()) |k| try parts.append(a, k),
-            .string => |s| for (0..s.len) |i| try parts.append(a, s[i .. i + 1]),
-            else => try parts.append(a, try tool_specs.pyStr(a, inc)),
-        }
-        return cx.fail(.request, "include is not supported ({s}): reasoning comes as text in its reasoning item, and nothing is encrypted", .{try std.mem.join(a, ", ", parts.items)});
-    };
+    if (body.get("include")) |inc| try include(cx, inc);
     if (body.field("truncation")) |t| if (!(t == .string and std.mem.eql(u8, t.string, "disabled"))) return cx.refuse("truncation must be \"disabled\": a prompt too long for the context is refused");
     if (json.truthyField(body, "top_logprobs")) return cx.refuse("top_logprobs is not supported");
     const meta_raw = body.get("metadata");
