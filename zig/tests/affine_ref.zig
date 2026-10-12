@@ -57,9 +57,12 @@ const Synth = struct {
 
     fn code(self: Synth, j: usize, i: usize) u32 {
         const bytes = self.w.slice(u8, self.n * self.k * self.bits / 8);
-        if (self.bits == 8) return bytes[j * self.k + i];
-        if (self.bits == 2) return (bytes[(j * self.k + i) / 4] >> @intCast(2 * (i % 4))) & 3;
-        return (bytes[(j * self.k + i) / 2] >> @intCast(4 * (i % 2))) & 15;
+        const at = (j * self.k + i) * self.bits; // MLX's little-endian bit stream at every width
+        var v: u32 = 0;
+        for (0..3) |b| if (at / 8 + b < bytes.len) {
+            v |= @as(u32, bytes[at / 8 + b]) << @intCast(8 * b);
+        };
+        return (v >> @intCast(at % 8)) & ((@as(u32, 1) << @intCast(self.bits)) - 1);
     }
 
     /// y = x W^T in float64, and the sizes the fp32 sums carry when codes enter as q + off (affine_mm's 4-bit: 128).
@@ -335,6 +338,13 @@ pub fn main(_: std.process.Init) !void {
     };
     for ([_][2]usize{ .{ 192, 1024 }, .{ 256, 4096 } }) |shape| for ([_]usize{ 32, 64 }) |group| { // 2 bits: oQ2's experts
         const s = try Synth.init(device, shape[0], shape[1], 2, group, 0x2716 + shape[0] + group);
+        defer s.deinit();
+        const ref = try s.reference(0);
+        defer ref.deinit();
+        for ([_]bool{ false, true }) |f32_out| try affine(&t, device, queue, &s, ref, f32_out);
+    };
+    for ([_][2]usize{ .{ 192, 1024 }, .{ 256, 4096 } }) |shape| for ([_]u8{ 3, 5, 6 }) |bits| for ([_]usize{ 32, 64 }) |group| { // oQ4's 5 and 6
+        const s = try Synth.init(device, shape[0], shape[1], bits, group, 0x3716 + 100 * @as(usize, bits) + shape[0] + group);
         defer s.deinit();
         const ref = try s.reference(0);
         defer ref.deinit();
