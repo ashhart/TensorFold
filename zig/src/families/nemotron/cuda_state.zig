@@ -147,6 +147,9 @@ pub const Seq = struct {
     }
 };
 
+/// A keep a chunk staged: its position, and the planes (Buffers.planes order) its copy takes (0: the live plane).
+pub const Staged = struct { at: usize, from: [7]u64 };
+
 pub const Buffers = struct {
     arena: Arena,
     carved: ?Carved, // the own sequence's KV planes, when the display carveout holds them
@@ -287,11 +290,24 @@ pub const Buffers = struct {
 
     /// Engine.snapshot: a device copy of every cache and state plane, packed.
     pub fn snapshot(b: *const Buffers, ops: kern.Ops) !cuda.DeviceBuffer {
+        return b.snapshotFrom(ops, @splat(0));
+    }
+
+    /// A staged keep's planes in `stage` (Mamba states, then conv rows) to take in place of the live ones.
+    pub fn stagedFrom(b: *const Buffers, stage: u64) [7]u64 {
+        var from: [7]u64 = @splat(0);
+        from[2] = stage;
+        from[3] = stage + b.state_bytes[2];
+        return from;
+    }
+
+    /// snapshot, a nonzero `from` entry copied in place of its plane.
+    pub fn snapshotFrom(b: *const Buffers, ops: kern.Ops, from: [7]u64) !cuda.DeviceBuffer {
         var copy = try cuda.DeviceBuffer.alloc(ops.k.d, b.stateBytes());
         errdefer copy.free();
         var at: usize = 0;
-        for (b.planes(), b.state_bytes) |p, n| {
-            try ops.copy(copy.ptr + at, p, n);
+        for (b.planes(), b.state_bytes, from) |p, n, f| {
+            try ops.copy(copy.ptr + at, if (f != 0) f else p, n);
             at += n;
         }
         return copy;

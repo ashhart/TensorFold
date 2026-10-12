@@ -44,7 +44,7 @@ pub const Cancel = struct {
     }
 };
 
-/// Positions where a prompt pass copies its state (ascending), called once each chunk ending there is queued.
+/// Positions where a prompt pass copies its state (ascending), called once the chunk ending at or staging one is queued
 pub const Keep = struct {
     at: []const u32,
     ctx: *anyopaque,
@@ -106,6 +106,8 @@ pub const Engine = struct {
     seg: ?segs.Segments = null, // their streams and scratch, made at load (or when setSegments asks for more)
     carve: ?*cuda.Carveout = null, // Options.carveout; it outlives the engine
     heat_gate: heat.Gate = .{}, // off unless TF_HEAT_HIGH and TF_HEAT_LOW are set
+    stage: cuda.DeviceBuffer = undefined, // a staged keep's Mamba states, then its conv rows
+    staged: ?state.Staged = null, // set while the keep a chunk staged is saved
 
     /// Loads the checkpoint into the Python engine's layouts and sizes the caches; `triton_dir` null: our own glue.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, model_dir: []const u8, triton_dir: ?[]const u8, opts: Options) !*Engine {
@@ -144,6 +146,8 @@ pub const Engine = struct {
         e.b = try state.Buffers.init(ctx.d, e.c, e.max_len, e.nch, e.carve);
         errdefer e.b.deinit();
         try e.b.initShared(e.ops(), e.c);
+        e.stage = try cuda.DeviceBuffer.alloc(ctx.d, e.b.state_bytes[2] + e.b.state_bytes[3]);
+        errdefer e.stage.free();
         if (e.segments > 1) e.seg = try segs.Segments.init(e, e.segments);
         errdefer if (e.seg) |*s| s.deinit();
         e.own = state.Seq.view(&e.b);
@@ -245,6 +249,7 @@ pub const Engine = struct {
         e.sampled_ready.deinit();
         e.history.free();
         e.pinned.free();
+        e.stage.free();
         e.b.deinit();
         e.w.deinit();
         e.k.deinit();
@@ -385,10 +390,13 @@ pub const Engine = struct {
         while (s < prompt.len) {
             if (Cancel.now(cancel)) return error.Cancelled;
             try e.beforeChunk(cancel);
-            var end = grid.end(s, prompt.len, state.prefill_rows, if (keep) |k| k.at else &.{});
+            const cut = grid.cut(s, prompt.len, state.prefill_rows, if (keep) |k| k.at else &.{});
+            var end = cut.end;
             // the decision row ends its chunk: the rows after it read the lessons it latched
             if (e.decide != lesson_route.none and e.decide >= s and e.decide + 1 < end) end = @intCast(e.decide + 1);
             const chunk = prompt[s..end];
+            const staged: usize = if (cut.staged > s and cut.staged < end) cut.staged else 0;
+            f.stage = if (staged == 0) null else .{ .row = staged - s, .ssm = e.stage.ptr, .base = e.stage.ptr + e.b.state_bytes[2] };
             f.route = .{};
             f.route.add(0, chunk.len, e.pos, e.decide, e.slot);
             try e.copied.synchronize();
@@ -402,6 +410,11 @@ pub const Engine = struct {
             const known = @min(chunk.len, prompt.len - 1 - s);
             if (head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known]);
             s = end;
+            if (staged != 0) if (keep) |k| { // the keep inside the chunk, saved from the staged planes
+                e.staged = .{ .at = staged, .from = e.b.stagedFrom(e.stage.ptr) };
+                defer e.staged = null;
+                k.call(k.ctx, @intCast(staged));
+            };
             if (keep) |k| if (s <= std.math.maxInt(u32) and std.mem.indexOfScalar(u32, k.at, @intCast(s)) != null) k.call(k.ctx, @intCast(s));
         }
     }

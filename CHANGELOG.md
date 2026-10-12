@@ -5,6 +5,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Nemotron on CUDA keeps a conversation's prompt state where its messages end instead of at the 2,048-token grid point below, so the next turn prefills only what it adds. A prompt pass now cuts a chunk at each keep: a row's bits do not depend on where its chunk is cut, and `tf-cuda-test prompt-cuts` checks a pass cut on and off the grid, and passes resumed from each cut, against one uncut pass. On a GB10, the later turns of 5k- to 10k-token conversations prefilled a median 61 tokens instead of 1,039 and took a median 95 ms instead of 188 ms, on two machines, with every reply equal to the cache-off one.
+- Nemotron on CUDA keeps a prompt state inside a chunk without cutting it there: the Mamba scan runs to the keep, its state and conv rows are copied aside, then it runs on with the same bits, and the copy is kept as the state at that point. A conversation's later turn, which keeps where its messages end a few tokens before the prompt's end, now prefills in one pass instead of two. On a GB10, those turns took a median 72 ms instead of 96, on two machines, with every reply equal to the cache-off one; `tf-cuda-test prompt-cuts` checks staged keeps and passes resumed from them against one uncut pass.
 
 ## 1.0.7
 

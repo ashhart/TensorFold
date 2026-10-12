@@ -25,6 +25,9 @@ pub const Mask = struct { bits: u64 = 0, words: usize = 0 };
 /// A prompt chunk carries rows, position, residual delta and mixer positions between blocks.
 pub const Walk = struct { rows: usize, pos: usize, x: u64 = 0, delta: Delta = .none, mj: usize = 0, aj: usize = 0 };
 
+/// A keep inside a chunk: past its first `row` rows, each Mamba layer's scan state and conv rows go to `ssm`, `base`.
+pub const Stage = struct { row: usize, ssm: u64, base: u64 };
+
 /// A window's kernel classes as a profile names them: each mark closes the span since the one before.
 pub const Class = enum { embed, norm, mamba_in, conv_scan, gnorm, mamba_out, qkv, attention, attn_o, route, plan, experts_up, experts_down, shared_wait, head, sample };
 
@@ -56,6 +59,7 @@ pub const Forward = struct {
     marks: ?*Marks = null, // tf-cuda-test window-profile's events; null costs one check a class, no GPU work
     route: lesson_route.Route = .{}, // which rows carry the lessons (none set: no row does)
     slot: u32 = 0, // the bound sequence's lesson latch slot, which a window's rows read
+    stage: ?Stage = null, // the prompt chunk's staged keep (null: none)
 
     pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, sampled: bool) Forward {
         return .{ .c = c, .w = w, .b = b, .ops = ops, .glue = .{ .set = if (ops.k.triton) |*t| t else null, .f = &ops.k.glue, .s = ops.s }, .max_len = max_len, .nch = nch, .sampled = sampled };
@@ -321,10 +325,25 @@ pub const Forward = struct {
         switch (f.w.blocks[i].kind) {
             .mamba => {
                 const m = f.w.blocks[i].mamba;
-                const ssm = b.ssm + @as(u64, w.mj) * c.mamba_heads * c.mamba_head_dim * c.state * 4;
+                const ssm_bytes: u64 = c.mamba_heads * c.mamba_head_dim * c.state * 4;
+                const ssm = b.ssm + w.mj * ssm_bytes;
                 const base = b.conv_base + @as(u64, w.mj) * 3 * c.convDim() * 2;
+                const st = f.stage orelse {
+                    try f.glue.convRows(b.proj, base, b.p_xc, m.conv_w, m.conv_b, w.rows, f.mshape(state.max_rows));
+                    return o.scanRows(b.proj, b.p_xc, ssm, m.a, m.d, m.dt_bias, b.sy, w.rows, c.projDim(), c.mamba_heads, c.mamba_head_dim, c.convDim(), c.groups, c.dt_min, c.dt_max);
+                };
+                // the conv rows a cut at the keep leaves: the 3 projected rows before it (old base rows past the start)
+                const cd: u64 = c.convDim() * 2;
+                for (0..3) |j| {
+                    const src = if (st.row + j >= 3) b.proj + (st.row + j - 3) * c.projDim() * 2 + c.inner() * 2 else base + (st.row + j) * cd;
+                    try o.copy(st.base + (w.mj * 3 + j) * cd, src, cd);
+                }
                 try f.glue.convRows(b.proj, base, b.p_xc, m.conv_w, m.conv_b, w.rows, f.mshape(state.max_rows));
-                try o.scanRows(b.proj, b.p_xc, ssm, m.a, m.d, m.dt_bias, b.sy, w.rows, c.projDim(), c.mamba_heads, c.mamba_head_dim, c.convDim(), c.groups, c.dt_min, c.dt_max);
+                // the scan runs to the keep, its state is copied, then it runs on: the same bits as one scan
+                const r = st.row;
+                try o.scanRows(b.proj, b.p_xc, ssm, m.a, m.d, m.dt_bias, b.sy, r, c.projDim(), c.mamba_heads, c.mamba_head_dim, c.convDim(), c.groups, c.dt_min, c.dt_max);
+                try o.copy(st.ssm + w.mj * ssm_bytes, ssm, ssm_bytes);
+                try o.scanRows(b.proj + r * c.projDim() * 2, b.p_xc + r * cd, ssm, m.a, m.d, m.dt_bias, b.sy + r * c.inner() * 2, w.rows - r, c.projDim(), c.mamba_heads, c.mamba_head_dim, c.convDim(), c.groups, c.dt_min, c.dt_max);
             },
             .attention => {
                 const kc = f.cache(b.k_cache, w.aj);

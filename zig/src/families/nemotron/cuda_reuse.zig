@@ -31,21 +31,22 @@ pub fn bytes(ptr: *anyopaque, at: u32) u64 {
     return n;
 }
 
-/// Copy the live state after `at` prompt tokens. The pass is standing there.
+/// Copy the state after `at` prompt tokens: the live one, or the chunk's staged keep (cache rows past `at` ride along).
 pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     _ = owner;
     const t: *Target = @ptrCast(@alignCast(ptr));
     const e = t.e;
-    if (e.pos != at) return error.NotAtMark;
-    if (t.head) |h| if (h.pos != at) return error.NotAtMark;
+    const staged = e.staged != null and e.staged.?.at == at;
+    if (e.pos != at and !staged) return error.NotAtMark;
+    if (t.head) |h| if (h.pos < at or (!staged and h.pos != at)) return error.NotAtMark;
     const copy = try e.gpa.create(Copy);
     errdefer e.gpa.destroy(copy);
-    copy.* = .{ .state = undefined, .pos = e.pos, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows };
-    copy.state = try e.b.snapshot(e.ops());
+    copy.* = .{ .state = undefined, .pos = at, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows };
+    copy.state = try e.b.snapshotFrom(e.ops(), if (staged) e.staged.?.from else @splat(0));
     errdefer copy.state.free();
     if (t.head) |h| {
         copy.head = try h.snapshot();
-        copy.head_pos = h.pos;
+        copy.head_pos = at;
     }
     return copy;
 }

@@ -1,4 +1,4 @@
-//! A prompt pass cut at off-grid keeps, and passes resumed from each kept state, against one uncut pass: equal bytes.
+//! A prompt pass keeping states off the grid (cut or staged), and passes resumed from each, against one uncut pass.
 
 const std = @import("std");
 const nemotron = @import("nemotron");
@@ -35,7 +35,7 @@ const Kept = struct {
     }
 };
 
-/// At a 16k window: IDS_FILE uncut, then cut at keeps on and off the grid, then resumed from each keep.
+/// At a 16k window: IDS_FILE uncut, then keeping at points on and off the grid, then resumed from each keep.
 pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     const gpa = gpu.gpa;
     const text = try std.Io.Dir.cwd().readFileAlloc(gpu.io, ids_path, gpa, .limited(64 << 20));
@@ -64,8 +64,8 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     const keep: nemotron.engine.Keep = .{ .at = &marks, .ctx = &kept, .call = Kept.call };
     const cut = try digest(gpa, e, h, try e.prefillFrom(ids.items, 0, null, h, null, keep), n - 1 - nemotron.grid.lastStart(0, n, R, &marks));
     try check.expect(!kept.failed and kept.at.items.len == marks.len, "prompt-cuts: {d} of {d} keeps saved", .{ kept.at.items.len, marks.len });
-    try check.expect(std.meta.eql(cut, plain), "prompt-cuts: a pass cut at {any} differs from the uncut pass", .{marks});
-    check.pass("prompt-cuts: a {d}-token pass cut at {any} equals the uncut pass", .{ n, marks });
+    try check.expect(std.meta.eql(cut, plain), "prompt-cuts: a pass keeping at {any} differs from the uncut pass", .{marks});
+    check.pass("prompt-cuts: a {d}-token pass keeping at {any} (cut or staged) equals the uncut pass", .{ n, marks });
 
     for (kept.at.items, kept.saved.items) |at, s| {
         try nemotron.reuse.restore(&target, null, s);
