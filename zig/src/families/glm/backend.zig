@@ -122,6 +122,7 @@ pub const Backend = struct {
             try mirror.send(e, .chunk, &.{ i, at, n });
             try b.sl.chunk(i, at, n);
             at += n;
+            s.fill_at.store(at, .monotonic); // the dashboard's prefill progress reads this between chunks
             if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, at);
         }
     }

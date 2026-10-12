@@ -324,6 +324,7 @@ pub const Metal = struct {
             try self.submit(.prefill, self.next, Chunks{ .n = ids.len, .c = c, .at = at, .rows = rows });
             while (self.flights.items.len > 1) try self.land();
             at += rows;
+            s.fill_at.store(@intCast(at), .monotonic); // the dashboard's prefill progress reads this between chunks
             if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) hk.at(hk.ptr, s, @intCast(at));
         }
         if (self.trace and c.decide != lesson_route.none) try self.traceLessons(c);

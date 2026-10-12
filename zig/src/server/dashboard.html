@@ -58,6 +58,8 @@
   <div class="dialwrap">
     <div class="dial"><canvas id="gauge" width="560" height="560"></canvas></div>
     <div class="dialside">
+      <div class="tile fill"><div class="label">Prefill queue</div><div class="value" id="fill">idle</div>
+        <div class="cap" id="fillcap">tokens left to prefill</div></div>
       <div class="tile mem"><div class="label">Memory</div><div class="value" id="mem">—</div>
         <div class="cap" id="memcap"></div><div class="bar"><i id="membar"></i></div></div>
       <div class="tile fill"><div class="label">Tokens in flight</div><div class="value" id="gen">—</div>
@@ -87,6 +89,7 @@ const nf = new Intl.NumberFormat();
 const el = id => document.getElementById(id);
 const fmt = v => v == null ? "—" : nf.format(Math.round(v));
 const GiB = v => v == null ? null : (v / 2**30).toFixed(1);
+const etaText = s => s < 100 ? `${Math.round(s)} s` : `${Math.round(s / 60)} min`;   // the wait to the first token
 
 // the page is served at /dashboard; a proxy that adds a prefix still reaches ../stats or /stats
 const STATS_URL = location.pathname.replace(/\/(dashboard)?\/?$/, "") + "/stats?poll=1";   // the poll URL keeps the cache-busting query
@@ -95,6 +98,7 @@ let shown = { decode: 0, prefill: 0 }, target = { decode: 0, prefill: 0 }, scale
 let lastGood = 0;
 let histPoints = [];            // the polled decode rates: [{t, tok_s}], newest last, sparse over 5 minutes
 let prefillRates = [];          // the polled prefill rates while a prefill ran, for the average tile
+let fillSamples = [];           // the polled tokens left: [{t, left}], the drain the ETA reads
 let histTop = 0;                // the chart's current y scale, decayed like the dial's
 
 function band(v) { return v >= 60 ? css("--accent") : v >= 40 ? css("--cool") : v >= 20 ? css("--warm") : css("--hot"); }
@@ -116,7 +120,8 @@ function draw() {
   const cx = S / 2, cy = S / 2;
   arc(x, cx, cy, 232, 22, 1, css("--line"), 1);               // one track
   // prefill and decode share the dial: whichever mode is live colors the arc (they never run together)
-  const mode = shown.prefill > 0.5 ? "prefill" : "decode";
+  const filling = fillSamples.length > 0;                     // a prompt is going in right now
+  const mode = filling || shown.prefill > 0.5 ? "prefill" : "decode";
   if (mode === "prefill") {
     arc(x, cx, cy, 232, 22, Math.min(1, Math.log10(1 + shown.prefill) / 4), css("--cool"), 1);
   } else {
@@ -211,6 +216,26 @@ function apply(s) {
     el("mem").textContent = "—";
     el("memcap").textContent = "";
     el("membar").style.width = "0%";
+  }
+
+  // The prefill queue: a prompt is going in while the snapshot carries fill_tokens_left; its drain
+  // between polls gives the live rate, and left over that rate the time to the first token.
+  if (s.fill_tokens_left != null) {
+    fillSamples.push({ t: now, left: s.fill_tokens_left });
+    if (fillSamples.length > 64) fillSamples.shift();
+    el("fill").innerHTML = `${fmt(s.fill_tokens_left)} <small>tok</small>`;
+    let rate = null;                                   // tokens a second, from the poll-to-poll drain
+    if (fillSamples.length > 1) {
+      const a = fillSamples[0], b = fillSamples[fillSamples.length - 1];
+      if (b.t > a.t && b.left < a.left) rate = (a.left - b.left) / (b.t - a.t);
+    }
+    if (rate == null && target.prefill > 0) rate = target.prefill;   // one sample: the server's 2 s rate
+    const eta = rate ? s.fill_tokens_left / rate : null;
+    el("fillcap").textContent = `of ${fmt(s.fill_prompt_tokens)} · ~${eta == null ? "—" : etaText(eta)} to the first token`;
+  } else {
+    fillSamples = [];
+    el("fill").textContent = "idle";
+    el("fillcap").textContent = "tokens left to prefill";
   }
 
   el("gen").textContent = fmt(s.generation_tokens_running);

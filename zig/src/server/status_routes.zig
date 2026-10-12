@@ -105,6 +105,10 @@ pub fn statsSnapshot(a: Allocator, status: api.Status, memory: ?api.Memory, prom
     try o.put(a, "decode_tokens_per_second", .{ .float = status.decode_tokens_per_second });
     try o.put(a, "prefill_tokens_per_second", .{ .float = status.prefill_tokens_per_second });
     try o.put(a, "generation_tokens_running", try json.intValue(a, status.generation_tokens));
+    if (status.fill_prompt_tokens != null) {
+        try o.put(a, "fill_prompt_tokens", try json.intValue(a, status.fill_prompt_tokens.?));
+        try o.put(a, "fill_tokens_left", try json.intValue(a, status.fill_tokens_left orelse 0));
+    }
     try o.put(a, "prompt_tokens_total", try json.intValue(a, prompt));
     try o.put(a, "generation_tokens_total", try json.intValue(a, generation));
     try o.put(a, "mtp_drafted_total", try json.intValue(a, drafted));
@@ -153,4 +157,15 @@ test "stats snapshot exposes counters and omits unknown memory" {
     for ([_][]const u8{ "running", "waiting", "generation_tokens_running", "prompt_tokens_total", "generation_tokens_total", "mtp_drafted_total", "mtp_accepted_total", "decode_rounds_total", "memory" }) |key|
         try std.testing.expect(object.contains(key));
     try std.testing.expectEqual(@as(usize, 0), object.get("memory").?.object.count());
+    try std.testing.expect(object.get("fill_prompt_tokens") == null); // no fill in progress: the keys stay out
+}
+
+test "stats snapshot carries the filling prompt's tokens while a prefill runs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const status: api.Status = .{ .fill_prompt_tokens = 900, .fill_tokens_left = 300 };
+    const value = try statsSnapshot(arena.allocator(), status, null, 0, 0, 0, 0, 0);
+    const object = value.object;
+    try std.testing.expectEqual(@as(i64, 900), object.get("fill_prompt_tokens").?.int64().?);
+    try std.testing.expectEqual(@as(i64, 300), object.get("fill_tokens_left").?.int64().?);
 }

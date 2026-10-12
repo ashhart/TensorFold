@@ -28,6 +28,24 @@ pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
         .streams = n,
         .generation_tokens = h.live_generated,
     };
+    fillTotals(h, out);
+}
+
+/// A started job whose prompt pass has not reported yet is filling: sum its prompt and what is left of it.
+fn fillTotals(h: *LaneHost, out: *api.Status) void {
+    var total: u64 = 0;
+    var left: u64 = 0;
+    var filling = false;
+    for (h.admitted.items) |job| {
+        if (!job.started or job.prefilled != null or job.stream.finished) continue;
+        filling = true;
+        const prompt = job.request.prompt.len;
+        total += prompt;
+        left += prompt -| job.stream.fill_at.load(.monotonic);
+    }
+    if (!filling) return;
+    out.fill_prompt_tokens = @intCast(total);
+    out.fill_tokens_left = @intCast(left);
 }
 
 /// `n` tokens delivered now; marks older than the window drop.

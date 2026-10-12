@@ -133,6 +133,7 @@ pub const Fake = struct {
         const chunks = if (x.prefill_chunks == 0) 1 else x.prefill_chunks;
         for (0..chunks) |chunk| {
             x.prefill_count += 1;
+            s.fill_at.store(@intCast(s.prompt_len * (chunk + 1) / chunks), .monotonic);
             if (x.prefill_hook) |hook| hook(x.prefill_hook_ctx.?, s, chunk);
             if (s.isCancelled()) return error.Cancelled;
             if (s.yields()) return error.Yielded;
@@ -152,6 +153,7 @@ pub const Fake = struct {
         if (x.prefill_hook) |hook| hook(x.prefill_hook_ctx.?, s, l.filled);
         if (s.isCancelled()) return error.Cancelled;
         l.filled += 1;
+        s.fill_at.store(@intCast(s.prompt_len * l.filled / @max(1, x.prefill_chunks)), .monotonic);
         if (l.filled < @max(1, x.prefill_chunks)) return false;
         l.filling = false;
         try x.fillPrompt(l, s);

@@ -255,6 +255,9 @@ pub const Status = struct {
     streams: usize = 0,
     /// Generated tokens held by live streams, excluding their prompts.
     generation_tokens: u64 = 0,
+    /// Filling prompts' total tokens and those still to prefill (null: no prompt is going in).
+    fill_prompt_tokens: ?u32 = null,
+    fill_tokens_left: ?u32 = null,
 };
 
 pub const SubmitError = error{ Closed, Busy, InvalidSpans };
@@ -411,6 +414,7 @@ pub const keepalive = @import("keepalive.zig");
 test {
     _ = @import("lane_host.zig");
     _ = @import("lane_host_test.zig");
+    _ = @import("lane_host_fill_test.zig");
     _ = @import("lane_host_reuse_test.zig");
     _ = @import("lane_host_warm_test.zig");
     _ = @import("lane_host_fill_test.zig");
