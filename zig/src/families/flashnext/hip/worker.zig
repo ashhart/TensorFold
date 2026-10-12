@@ -20,7 +20,7 @@ pub fn follow(gpa: std.mem.Allocator, e: *Engine, link: hip.collective.Link) !vo
     defer {
         var it = lanes.valueIterator();
         while (it.next()) |l| {
-            l.*.caches.deinit(gpa);
+            e.unlease(l.*.caches);
             gpa.destroy(l.*);
         }
         lanes.deinit(gpa);
@@ -46,13 +46,13 @@ pub fn follow(gpa: std.mem.Allocator, e: *Engine, link: hip.collective.Link) !vo
             .begin => {
                 const lane = try gpa.create(Lane);
                 errdefer gpa.destroy(lane);
-                lane.* = .{ .caches = try e.caches(w[2]) };
-                const gop = try lanes.getOrPut(gpa, w[1]);
-                if (gop.found_existing) {
-                    gop.value_ptr.*.caches.deinit(gpa);
-                    gpa.destroy(gop.value_ptr.*);
+                if (lanes.fetchRemove(w[1])) |kv| {
+                    e.unlease(kv.value.caches);
+                    gpa.destroy(kv.value);
                 }
-                gop.value_ptr.* = lane;
+                lane.* = .{ .caches = try e.lease(w[2]) };
+                errdefer e.unlease(lane.caches);
+                try lanes.put(gpa, w[1], lane);
             },
             .fill => {
                 const lane = lanes.get(w[1]) orelse return error.UnknownStream;
@@ -64,18 +64,18 @@ pub fn follow(gpa: std.mem.Allocator, e: *Engine, link: hip.collective.Link) !vo
             .verify => {
                 var segs: [forward.max_segs]forward.Seg = undefined;
                 const count = w[1];
-                var at: usize = 2;
-                var rows: usize = 0;
+                const pick: @import("engine.zig").Pick = @fromBackingInt(w[2]);
+                var at: usize = 3;
                 for (segs[0..count]) |*g| {
                     const lane = lanes.get(w[at]) orelse return error.UnknownStream;
                     const n = w[at + 1];
                     @memcpy(lane.pending[0..n], w[at + 2 ..][0..n]);
                     g.* = .{ .c = &lane.caches, .tokens = lane.pending[0..n], .pos = lane.caches.len };
                     at += 2 + n;
-                    rows += n;
                 }
-                const out = try e.runMany(segs[0..count], true);
-                _ = try e.logits(e.ops(&e.arena), out.mixed, rows);
+                // every rank meets the same shapes in the same order: its own choice is rank 0's
+                _ = try e.choose(segs[0..count]);
+                _ = try e.round(segs[0..count], pick);
                 try e.stream.synchronize();
             },
             .keep => {
@@ -94,7 +94,7 @@ pub fn follow(gpa: std.mem.Allocator, e: *Engine, link: hip.collective.Link) !vo
             .drop => if (saved.fetchRemove(w[1])) |kv| snapshot.drop(gpa, kv.value),
             .release => if (lanes.fetchRemove(w[1])) |kv| {
                 try e.stream.synchronize();
-                kv.value.caches.deinit(gpa);
+                e.unlease(kv.value.caches);
                 gpa.destroy(kv.value);
             },
         }

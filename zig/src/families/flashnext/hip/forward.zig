@@ -81,45 +81,93 @@ pub fn hcNorm(o: Ops, m: *const model.Model, h: Tensor, branch: ?Tensor, inject:
     try o.l.fn_hc_norm(@ptrFromInt(h.ptr), if (branch) |b| @ptrFromInt(b.ptr) else null, if (inject) |i| @ptrFromInt(i.ptr) else null, if (branch != null) @ptrFromInt(h.ptr) else null, @ptrFromInt(x.ptr), @ptrFromInt(scale), @backingInt(m.act), @intCast(rows), @intCast(d.streams), @intCast(d.hidden), d.eps, o.stream);
 }
 
-/// The n-gram layer over `rows` rows: h += gated + silu(conv); `cin` is the conv input (the tail, then the rows).
-fn ple(o: Ops, m: *const model.Model, host: *Host, c: *cache.Caches, h: Tensor, call: Call, cin: u64) !void {
+/// A forward's host inputs, laid out in one span of the staging (byte offsets into it) and sent up in one copy.
+pub const Staged = struct {
+    from: usize = 0,
+    len: usize = 0,
+    ids: usize = 0,
+    pos: usize = 0,
+    ends: usize = 0,
+    complete: usize = 0,
+    local: usize = 0,
+    words: usize = 0,
+    scales: usize = 0,
+    biases: usize = 0,
+    /// Blocks a window's scores walk: all its caches can hold, so the launch is the same at any position.
+    bound: usize = 0,
+};
+
+/// The staged inputs on the device: token ids (one a stream), positions, ends, complete blocks, n-gram rows.
+pub const Inputs = struct { ids: u64, pos: u64, ends: u64, complete: u64, local: u64, words: u64, scales: u64, biases: u64, bound: usize };
+
+/// Every host input of a forward of `segs` written into the staging, n-gram rows hashed and gathered: no launch.
+pub fn stage(m: *const model.Model, host: *Host, segs: []const Seg, window: bool) !Staged {
+    const d = m.dims;
+    const t = host.tables;
+    if (d.ple_dim / t.dims != ngram.heads) return error.UnsupportedNgramHeads;
+    var rows: usize = 0;
+    for (segs) |g| rows += g.tokens.len;
+    const n16 = rows * ngram.heads;
+    var s: Staged = .{ .from = std.mem.alignForward(usize, host.used, 16) };
+    var used: usize = 0;
+    inline for (.{ .{ "ids", rows * d.streams * 4 }, .{ "pos", rows * 4 }, .{ "ends", rows * 4 }, .{ "complete", rows * 4 }, .{ "local", n16 * 4 }, .{ "words", n16 * t.wordBytes() }, .{ "scales", n16 * t.tableBytes() }, .{ "biases", n16 * t.tableBytes() } }) |f| {
+        @field(s, f[0]) = used;
+        used = std.mem.alignForward(usize, used + f[1], 16);
+    }
+    s.len = used;
+    if (s.from + used > host.staging.bytes.len) return error.StagingTooSmall;
+    const span = host.staging.bytes[s.from..][0..used];
+    const ints = struct {
+        fn of(b: []u8, off: usize, n: usize) []i32 {
+            return @as([*]i32, @ptrCast(@alignCast(b[off..].ptr)))[0..n];
+        }
+    }.of;
+    const ids = ints(span, s.ids, rows * d.streams);
+    const pos = ints(span, s.pos, rows);
+    const ends = ints(span, s.ends, rows);
+    const complete = ints(span, s.complete, rows);
+    for (ints(span, s.local, n16), 0..) |*x, i| x.* = @intCast(i);
+    const hashed = try host.gpa.alloc([ngram.heads]u32, rows);
+    defer host.gpa.free(hashed);
+    var row: usize = 0;
+    for (segs) |g| {
+        const n = g.tokens.len;
+        for (g.tokens, 0..) |tok, r| {
+            for (0..d.streams) |k| ids[(row + r) * d.streams + k] = @intCast(tok);
+            pos[row + r] = @intCast(g.pos + r);
+            ends[row + r] = @intCast(g.pos + r + 1);
+            complete[row + r] = @intCast((g.pos + r + 1) / d.index_ratio);
+        }
+        t.hasher.ids(g.c.history, g.tokens, hashed[row..][0..n]);
+        row += n;
+    }
+    const flat: []const u32 = @as([*]const u32, @ptrCast(hashed.ptr))[0..n16];
+    try t.gather(flat, span[s.words..][0 .. n16 * t.wordBytes()], span[s.scales..][0 .. n16 * t.tableBytes()], span[s.biases..][0 .. n16 * t.tableBytes()]);
+    // a window's scores walk every block its caches hold: the launch is the same at any position
+    if (window) for (segs) |g| {
+        s.bound = @max(s.bound, g.c.layout.cap / d.index_ratio);
+    };
+    host.used = s.from + used;
+    return s;
+}
+
+/// The staged span up to fresh arena memory in one copy, queued on the stream (inside a graph when one records).
+pub fn send(o: Ops, host: *Host, s: Staged) !Inputs {
+    const dst = try o.arena.take(s.len);
+    if (o.stream != hip.counting) try hip.runtime.check(host.d.api.hipMemcpyHtoDAsync(@ptrFromInt(dst), host.staging.bytes[s.from..].ptr, s.len, o.stream));
+    return .{ .ids = dst + s.ids, .pos = dst + s.pos, .ends = dst + s.ends, .complete = dst + s.complete, .local = dst + s.local, .words = dst + s.words, .scales = dst + s.scales, .biases = dst + s.biases, .bound = s.bound };
+}
+
+/// The n-gram layer over a segment's rows (from the forward's row `row0`): h += gated + silu(conv) over `cin`.
+fn ple(o: Ops, m: *const model.Model, host: *Host, c: *cache.Caches, h: Tensor, call: Call, cin: u64, in: Inputs, row0: usize) !void {
     const d = m.dims;
     const rows = call.tokens.len;
     const t = host.tables;
-    const heads = d.ple_dim / t.dims;
-    if (heads != ngram.heads) return error.UnsupportedNgramHeads;
-    var buf: [64][ngram.heads]u32 = undefined;
     const mark = o.arena.mark();
     defer o.arena.release(mark);
     const emb = try take(o, m.act, rows * d.ple_dim);
-    var row: usize = 0;
-    var history = c.history;
-    while (row < rows) : (row += buf.len) {
-        const n = @min(buf.len, rows - row);
-        t.hasher.ids(history, call.tokens[row..][0..n], buf[0..n]);
-        history = ngram.after(history, call.tokens[row..][0..n]);
-        const flat: []const u32 = @as([*]const u32, @ptrCast(&buf))[0 .. n * heads];
-        const count = n * heads;
-        const wb = t.wordBytes();
-        const tb = t.tableBytes();
-        const words = try o.arena.take(count * wb);
-        const scales = try o.arena.take(count * tb);
-        const biases = try o.arena.take(count * tb);
-        const stage = host.staging.bytes;
-        const at0 = std.mem.alignForward(usize, host.used, 16);
-        if (at0 + count * (wb + 2 * tb) > stage.len) return error.StagingTooSmall;
-        try t.gather(flat, stage[at0..][0 .. count * wb], stage[at0 + count * wb ..][0 .. count * tb], stage[at0 + count * (wb + tb) ..][0 .. count * tb]);
-        host.used = at0 + count * (wb + 2 * tb);
-        if (o.stream != hip.counting) {
-            try hip.runtime.check(host.d.api.hipMemcpyHtoDAsync(@ptrFromInt(words), stage[at0..].ptr, count * wb, o.stream));
-            try hip.runtime.check(host.d.api.hipMemcpyHtoDAsync(@ptrFromInt(scales), stage[at0 + count * wb ..].ptr, count * tb, o.stream));
-            try hip.runtime.check(host.d.api.hipMemcpyHtoDAsync(@ptrFromInt(biases), stage[at0 + count * (wb + tb) ..].ptr, count * tb, o.stream));
-        }
-        var iota: [64 * 16]i32 = undefined;
-        for (iota[0..count], 0..) |*x, i| x.* = @intCast(i);
-        const local = try host.put(o, std.mem.sliceAsBytes(iota[0..count]));
-        try o.l.tf_embed_rows(@ptrFromInt(words), @ptrFromInt(scales), @ptrFromInt(biases), @backingInt(Kind.bf16), @ptrFromInt(local), @intCast(count), t.bits, @intCast(t.group), @intCast(t.dims), @ptrFromInt(at(emb, row * d.ple_dim).ptr), @backingInt(m.act), o.stream);
-    }
+    const first = row0 * ngram.heads;
+    try o.l.tf_embed_rows(@ptrFromInt(in.words + first * t.wordBytes()), @ptrFromInt(in.scales + first * t.tableBytes()), @ptrFromInt(in.biases + first * t.tableBytes()), @backingInt(Kind.bf16), @ptrFromInt(in.local), @intCast(rows * ngram.heads), t.bits, @intCast(t.group), @intCast(t.dims), @ptrFromInt(emb.ptr), @backingInt(m.act), o.stream);
     const kv = try o.project(emb, m.ple.kv, rows, false);
     const gated = try take(o, m.act, rows * d.wide());
     const tail = c.layout.tail_rows * d.wide() * m.act.size();
@@ -130,32 +178,21 @@ fn ple(o: Ops, m: *const model.Model, host: *Host, c: *cache.Caches, h: Tensor, 
     // a prompt's rows are kept: the tail moves on now; a window's waits for its keep
     if (!call.window) {
         try hip.raw.copy(.{ .r = host.d, .ptr = @ptrFromInt(c.tail()), .len = tail }, 0, cin + rows * d.wide() * m.act.size(), tail, o.stream);
-        c.history = history;
+        c.history = ngram.after(c.history, call.tokens);
     }
 }
 
 /// Every segment's rows through every layer: one stream's prompt chunk, or several streams' windows together.
-pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, window: bool) !Out {
+pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, window: bool, staged: Staged) !Out {
     var o = ops;
     o.prefill = !window;
     o.window = window;
     const d = m.dims;
     var rows: usize = 0;
     for (segs) |g| rows += g.tokens.len;
-    const ids4 = try host.gpa.alloc(i32, rows * d.streams);
-    defer host.gpa.free(ids4);
-    const pos = try host.gpa.alloc(i32, rows);
-    defer host.gpa.free(pos);
-    var row: usize = 0;
-    for (segs) |g| {
-        for (g.tokens, 0..) |t, r| {
-            for (0..d.streams) |s| ids4[(row + r) * d.streams + s] = @intCast(t);
-            pos[row + r] = @intCast(g.pos + r);
-        }
-        row += g.tokens.len;
-    }
-    const dev_ids = try host.put(o, std.mem.sliceAsBytes(ids4));
-    const dev_pos = try host.put(o, std.mem.sliceAsBytes(pos));
+    const in = try send(o, host, staged);
+    const dev_ids = in.ids;
+    const dev_pos = in.pos;
     const h = try take(o, m.act, rows * d.wide());
     const x = try take(o, m.act, rows * d.wide());
     try o.embedRows(m.embed, dev_ids, rows * d.streams, h);
@@ -168,7 +205,7 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
         if (i == m.ple.layer) {
             var off: usize = 0;
             for (segs, cins[0..segs.len]) |g, cin| {
-                try ple(o, m, host, g.c, at(h, off * d.wide()), .{ .tokens = g.tokens, .pos = g.pos, .window = window }, cin);
+                try ple(o, m, host, g.c, at(h, off * d.wide()), .{ .tokens = g.tokens, .pos = g.pos, .window = window }, cin, in, off);
                 off += g.tokens.len;
             }
         }
@@ -177,7 +214,7 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
         const mixed = try hcPre(o, m, layer.ahc, x, rows, inject);
         const branch = switch (layer.mixer) {
             .linear => |l| try mixers.linear(o, m, l, segs, i, mixed, rows, window),
-            .sparse => |s| try mixers.sparse(o, m, d, s, segs, i, mixed, rows, dev_pos, host),
+            .sparse => |s| try mixers.sparse(o, m, d, s, segs, i, mixed, rows, dev_pos, host, .{ .ends = in.ends, .complete = in.complete, .bound = in.bound }),
         };
         try hcBranch(o, m, h, branch, inject, x, layer.mhc.scale, rows);
         const mixed2 = try hcPre(o, m, layer.mhc, x, rows, inject);
@@ -185,7 +222,10 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
         const next = if (i + 1 < m.layers.len) m.layers[i + 1].ahc.scale else m.mix.scale;
         try hcBranch(o, m, h, y, inject, x, next, rows);
     }
-    for (segs) |g| g.c.pooled = (g.pos + g.tokens.len) / d.index_ratio;
+    // a window's count moves in `Engine.round`, which a replay runs too: the launches change nothing on the host
+    if (!window) for (segs) |g| {
+        g.c.pooled = (g.pos + g.tokens.len) / d.index_ratio;
+    };
     return .{ .mixed = try hcPre(o, m, m.mix, x, rows, null), .streams = h };
 }
 

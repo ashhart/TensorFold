@@ -51,7 +51,7 @@ pub fn run(ops: Ops, m: *const model.Model, host: *forward.Host, c: *cache.Cache
     const mixed = try forward.hcPre(o, m, l.ahc, x, rows, inject);
     const seg = [_]forward.Seg{.{ .c = c, .tokens = tokens, .pos = pos }};
     c.pooled = @min(c.pooled, pos / d.index_ratio);
-    const branch = try mixers.sparse(o, m, d, l.mixer.sparse, &seg, 0, mixed, rows, dev_pos, host);
+    const branch = try mixers.sparse(o, m, d, l.mixer.sparse, &seg, 0, mixed, rows, dev_pos, host, null);
     try forward.hcNorm(o, m, h, branch, inject, x, l.mhc.scale, rows);
     const mixed2 = try forward.hcPre(o, m, l.mhc, x, rows, inject);
     const y = try hip.moe.run(o, m.act, l.moe, mixed2, rows, false);

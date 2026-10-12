@@ -100,6 +100,8 @@ pub const Caches = struct {
     pooled: usize = 0,
     /// The n-gram history: the last tokens before the next row (eos before any).
     history: [2]i64,
+    /// The slot these caches fill in the engine's pool (every rank's the same): a round's graph is keyed by it.
+    id: u32 = 0,
 
     pub fn init(gpa: std.mem.Allocator, d: *const hip.Runtime, dims: Dims, kinds: []const bool, cap: usize, act: model.Kind, eos: i64) !Caches {
         const layout = Layout.of(dims, kinds, cap, act);
@@ -120,6 +122,14 @@ pub const Caches = struct {
         var cin = try hip.DeviceBuffer.alloc(d, layout.cinBytes());
         errdefer cin.free();
         return .{ .layout = layout, .slot = slot, .linear = linear, .mem = mem, .window = window, .cin = cin, .history = .{ eos, eos } };
+    }
+
+    /// The state of fresh caches again, the memory kept: zeros, no positions, eos before any row.
+    pub fn reset(c: *Caches, eos: i64) !void {
+        try c.mem.fill8(0);
+        c.len = 0;
+        c.pooled = 0;
+        c.history = .{ eos, eos };
     }
 
     pub fn deinit(c: *Caches, gpa: std.mem.Allocator) void {

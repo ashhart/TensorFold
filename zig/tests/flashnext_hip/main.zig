@@ -94,9 +94,9 @@ fn generate(gpa: std.mem.Allocator, io: std.Io, a: Args) !void {
         try reply.append(arena.allocator(), next[0]);
         for (1..a.max) |_| {
             const step = [1]u32{next[0]};
-            const w = try e.run(&c, &step, c.len, true);
+            const seg = [_]fx.forward.Seg{.{ .c = &c, .tokens = &step, .pos = c.len }};
+            const y = (try e.round(&seg, try e.choose(&seg))).logits;
             o = e.ops(&e.arena);
-            const y = try e.logits(o, w.mixed, 1);
             if (a.hash) try mix(e, &digest, y);
             try e.drawer.draw(o, e.stream, y, &.{.{ .sampling = null, .position = c.len + 1 }}, &next, false);
             try e.keepWindow(&c, &step, 1);

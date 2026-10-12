@@ -114,8 +114,11 @@ fn recur(o: Ops, m: *const model.Model, l: model.Linear, segs: []const forward.S
 const slice_rows = 64;
 const parts = 16;
 
-/// The sparse attention over every segment's rows: products on all rows, each stream's caches, blocks and keys its own.
-pub fn sparse(o: Ops, m: *const model.Model, d: model.Dims, s: model.Sparse, segs: []const forward.Seg, layer: usize, x: Tensor, rows: usize, dev_pos: u64, host: *forward.Host) !Tensor {
+/// The rows' ends and complete blocks on the device, and the blocks a window's scores walk (see forward.Staged).
+pub const Rows = struct { ends: u64, complete: u64, bound: usize };
+
+/// The sparse attention over every segment's rows; with `staged`, a window's launches read positions from the device.
+pub fn sparse(o: Ops, m: *const model.Model, d: model.Dims, s: model.Sparse, segs: []const forward.Seg, layer: usize, x: Tensor, rows: usize, dev_pos: u64, host: *forward.Host, staged: ?Rows) !Tensor {
     const hd = d.head_dim;
     const di = d.index_dim;
     const width = (d.index_heads + 1) * di;
@@ -130,19 +133,30 @@ pub fn sparse(o: Ops, m: *const model.Model, d: model.Dims, s: model.Sparse, seg
     const iq = try o.arena.of(f32, rows * d.index_heads * di);
     try o.qkRope(idx, width, di, s.iq_norm, d.eps, rows, d.index_heads, di, d.rotary, d.theta, dev_pos, iq, null, 0);
     const att = try o.arena.of(f32, rows * d.heads * hd);
+    const graphed = o.window and staged != null;
     var off: usize = 0;
     for (segs) |g| {
         const n = g.tokens.len;
         const kv = g.c.sparse(layer);
         const cap = g.c.layout.cap;
         const pos = g.pos;
-        try o.qkRope(forward.at(keys, off * d.kv_heads * hd), d.kv_heads * hd, hd, s.k_norm, d.eps, n, d.kv_heads, hd, d.rotary, d.theta, dev_pos + off * 4, null, kv.k, cap);
-        try o.kvWrite(forward.at(values, off * d.kv_heads * hd), kv.v, n, d.kv_heads, hd, cap, pos);
-        try o.copyCols(forward.at(idx, off * width), width, d.index_heads * di, kv.raw + pos * di * m.act.size(), n, di);
-        const blocks = (pos + n) / d.index_ratio;
-        const pooled = g.c.pooled;
-        if (blocks > pooled) try o.l.fn_idx_pool(@ptrFromInt(kv.raw), @ptrFromInt(kv.pooled + pooled * di * m.act.size()), @ptrFromInt(s.ik_norm), kind, @intCast(pooled), @intCast(blocks - pooled), @intCast(di), @intCast(d.index_ratio), @intCast(d.rotary), d.theta, d.eps, o.stream);
-        try attend(o, m, d, kv, cap, q32 + off * d.heads * hd * 4, iq + off * d.index_heads * di * 4, att + off * d.heads * hd * 4, n, pos, host);
+        const at_pos = dev_pos + off * 4;
+        try o.qkRope(forward.at(keys, off * d.kv_heads * hd), d.kv_heads * hd, hd, s.k_norm, d.eps, n, d.kv_heads, hd, d.rotary, d.theta, at_pos, null, kv.k, cap);
+        if (graphed) {
+            try o.kvWriteAt(forward.at(values, off * d.kv_heads * hd), kv.v, n, d.kv_heads, hd, cap, at_pos);
+            const raw = try take(o, m.act, n * di);
+            try o.copyCols(forward.at(idx, off * width), width, d.index_heads * di, raw.ptr, n, di);
+            try o.kvWriteAt(raw, kv.raw, n, 1, di, cap, at_pos);
+            try o.l.fn_idx_pool_at(@ptrFromInt(kv.raw), @ptrFromInt(kv.pooled), @ptrFromInt(s.ik_norm), kind, @ptrFromInt(at_pos), @intCast(n), @intCast(di), @intCast(d.index_ratio), @intCast(d.rotary), d.theta, d.eps, o.stream);
+        } else {
+            try o.kvWrite(forward.at(values, off * d.kv_heads * hd), kv.v, n, d.kv_heads, hd, cap, pos);
+            try o.copyCols(forward.at(idx, off * width), width, d.index_heads * di, kv.raw + pos * di * m.act.size(), n, di);
+            const blocks = (pos + n) / d.index_ratio;
+            const pooled = g.c.pooled;
+            if (blocks > pooled) try o.l.fn_idx_pool(@ptrFromInt(kv.raw), @ptrFromInt(kv.pooled + pooled * di * m.act.size()), @ptrFromInt(s.ik_norm), kind, @intCast(pooled), @intCast(blocks - pooled), @intCast(di), @intCast(d.index_ratio), @intCast(d.rotary), d.theta, d.eps, o.stream);
+        }
+        const r: ?Rows = if (staged) |st| .{ .ends = st.ends + off * 4, .complete = st.complete + off * 4, .bound = st.bound } else null;
+        try attend(o, m, d, kv, cap, q32 + off * d.heads * hd * 4, iq + off * d.index_heads * di * 4, att + off * d.heads * hd * 4, n, pos, host, r, graphed);
         off += n;
     }
     const gated = try take(o, m.act, rows * d.heads * hd);
@@ -150,8 +164,8 @@ pub fn sparse(o: Ops, m: *const model.Model, d: model.Dims, s: model.Sparse, seg
     return o.project(gated, s.o, rows, s.o.partial);
 }
 
-/// One stream's `rows` rows from `pos` over its caches, in slices: each row's keys chosen, then attended.
-fn attend(o: Ops, m: *const model.Model, d: model.Dims, kv: cache.SparseView, cap: usize, q32: u64, iq: u64, att: u64, rows: usize, pos: usize, host: *forward.Host) !void {
+/// One stream's `rows` rows from `pos` in slices; `graphed`: every row scored and selected over `staged.bound` blocks.
+fn attend(o: Ops, m: *const model.Model, d: model.Dims, kv: cache.SparseView, cap: usize, q32: u64, iq: u64, att: u64, rows: usize, pos: usize, host: *forward.Host, staged: ?Rows, graphed: bool) !void {
     const hd = d.head_dim;
     const di = d.index_dim;
     const kind = @backingInt(m.act);
@@ -163,19 +177,19 @@ fn attend(o: Ops, m: *const model.Model, d: model.Dims, kv: cache.SparseView, ca
         defer o.arena.release(mark);
         var complete: [slice_rows]i32 = undefined;
         var ends: [slice_rows]i32 = undefined;
-        var sparse_rows = false;
+        var sparse_rows = graphed;
         for (0..n) |r| {
             ends[r] = @intCast(pos + r0 + r + 1);
             complete[r] = @divFloor(ends[r], @as(i32, @intCast(d.index_ratio)));
             sparse_rows = sparse_rows or complete[r] > d.index_top;
         }
-        const dev_complete = try host.put(o, std.mem.sliceAsBytes(complete[0..n]));
-        const dev_ends = try host.put(o, std.mem.sliceAsBytes(ends[0..n]));
+        const dev_complete = if (staged) |st| st.complete + r0 * 4 else try host.put(o, std.mem.sliceAsBytes(complete[0..n]));
+        const dev_ends = if (staged) |st| st.ends + r0 * 4 else try host.put(o, std.mem.sliceAsBytes(ends[0..n]));
         var ids: ?u64 = null;
         var sparse_flags: ?u64 = null;
         var count = dev_ends;
         if (sparse_rows) {
-            const nb: usize = @intCast(complete[n - 1]);
+            const nb: usize = if (graphed) staged.?.bound else @intCast(complete[n - 1]);
             const scores = try o.arena.of(f32, n * nb);
             try o.l.fn_idx_scores(@ptrFromInt(iq + r0 * d.index_heads * di * 4), @ptrFromInt(kv.pooled), @ptrFromInt(dev_complete), @ptrFromInt(scores), kind, @intCast(n), @intCast(d.index_heads), @intCast(di), @intCast(nb), @intCast(nb), @intCast(d.index_top), o.stream);
             const list = try o.arena.of(i32, n * key_stride);
