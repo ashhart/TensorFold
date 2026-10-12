@@ -33,12 +33,14 @@ pub const Pipes = struct {
     mm2: affine_mm.Pipes, // and at 2 bits in groups of 64: oQ2's routed experts, gathered
     mm5: affine_mm.Pipes, // and at 5 and 6 bits (oQ4's), split stacks' members too
     mm6: affine_mm.Pipes,
+    zeros: mtl.Buffer, // expert ids all 0: a dense GLU through the by-ids kernel (the shared expert)
     hash: u64, // every source compiled here
 
     pub fn deinit(p: *Pipes) void {
         inline for (.{ &p.rows, &p.ids, &p.glu_ids, &p.sorted, &p.glu_sorted, &p.embed, &p.kda_fg }) |set| for (set) |x| x.deinit();
         p.bf16.deinit();
         p.kda_pre.deinit();
+        p.zeros.deinit();
         inline for (.{ p.mm8, p.mm2, p.mm5, p.mm6 }) |set| for (set) |x| x.deinit();
     }
 };
@@ -152,6 +154,8 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
         h.update(src);
         try lib(made, device, src, &affine_mm.names, out);
     }
+    p.zeros = try device.buffer(64 * 4, mtl.ResourceOptions.shared);
+    @memset(p.zeros.slice(i32, 64), 0);
     p.hash = h.final();
     return p;
 }
@@ -170,6 +174,14 @@ const fg_instances = blk: {
 
 fn bind(e: mtl.ComputeEncoder, first: usize, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buf, r.off, first + i);
+}
+
+fn wBytes(n: u32, k: u32, q: Affine) usize {
+    return affine.wBytes(n, k, q.width());
+}
+
+fn sBytes(n: u32, k: u32, q: Affine) usize {
+    return affine.sBytes(n, k, q.width());
 }
 
 fn at(bits: u8) usize {
@@ -235,6 +247,18 @@ pub fn byIds(p: *const Pipes, e: mtl.ComputeEncoder, m: Picks, x: Ref, ids: Ref,
     e.setValue(pickDims(m, slots, m.w.n), 4);
     bind(e, 5, .{ out, ids, u.w, u.s, u.b });
     e.dispatchGroups(mtl.Size.of((m.w.n + 7) / 8, slots, 1), mtl.Size.of(64, 1, 1));
+}
+
+/// x through [gate; up] (one width, `n` rows each) SwiGLU'd into out: the by-ids GLU, every id 0 (glm_swiglu's bits).
+pub fn glu(p: *const Pipes, e: mtl.ComputeEncoder, gu: Affine, n: u32, x: Ref, out: Ref, rows: u32, lim: f32) void {
+    std.debug.assert(gu.more == 0 and gu.n == 2 * n and rows <= 64);
+    var gate = gu;
+    gate.n = n;
+    var up = gate;
+    up.w = gu.w.at(wBytes(n, gu.k, gu));
+    up.s = gu.s.at(sBytes(n, gu.k, gu));
+    up.b = gu.b.at(sBytes(n, gu.k, gu));
+    byIds(p, e, .{ .w = gate, .up = up, .experts = 1, .repeat = 1, .lim = lim }, x, .{ .buf = p.zeros }, out, rows);
 }
 
 /// Each expert's sorted pairs (offsets, order): with `up` x row order / repeat to row i, else x row i to row order[i].

@@ -459,6 +459,29 @@ fn splitMmCheck(g: *const Gpu, k: usize, ns: []const usize, bits: []const u8, t:
     return on_mm;
 }
 
+fn gluLaunch(e: mtl.ComputeEncoder, p: *const wide.Pipes, gu: affine.Affine, n: u32, x: Ref, out: Ref, m: u32) void {
+    wide.glu(p, e, gu, n, x, out, m, 0.75);
+}
+
+/// The shared expert's gate and up at one width (wide.glu, one launch) == glm_swiglu(dense [gate; up]) bit for bit.
+fn sharedGluCheck(g: *const Gpu) !usize {
+    var pairs: usize = 0;
+    for ([_]u8{ 8, 5, 4, 2 }) |bits| {
+        const n = 2048;
+        const m = try Mat.init(g.device, 2 * n, 4096, bits, 64, 8800 + @as(u64, bits));
+        defer m.deinit();
+        const bs = [_]mtl.Buffer{ try buf(g.device, rows * 2 * n * 2), try buf(g.device, rows * n * 2), try buf(g.device, rows * n * 2) };
+        defer for (bs) |b| b.deinit();
+        try g.run(dense, .{ &g.p, m.q, wide.Io{ .in = ref(m.x()), .ldx = 4096, .out = ref(bs[0]), .ldo = 2 * n, .rows = rows } });
+        try g.run(swiglu, .{ g.swiglu, ref(bs[0]), ref(bs[1]), @as(u32, rows), @as(u32, n), @as(f32, 0.75) });
+        try g.run(gluLaunch, .{ &g.p, m.q, @as(u32, n), ref(m.x()), ref(bs[2]), @as(u32, rows) });
+        try eql(bs[2].slice(u16, rows * n), bs[1].slice(u16, rows * n));
+        pairs += rows * n;
+    }
+    std.debug.print("shared expert gate|up at one width in one launch == glm_swiglu(dense [gate; up]): {d} bit-equal values\n", .{pairs});
+    return pairs;
+}
+
 fn perHead(e: mtl.ComputeEncoder, p: *const wide.Pipes, q: affine.Affine, heads: u32, io: wide.Io, hsx: u32, hso: u32) void {
     wide.perHead(p, e, q, heads, io, hsx, hso);
 }
@@ -534,6 +557,7 @@ pub fn main() !void {
     all.pairs += split.pairs;
     all.pairs += try @import("glm_rows_kda.zig").check(&g.p, device, queue);
     all.pairs += try @import("glm_rows_kda.zig").fusedCheck(&g.p, device, queue);
+    all.pairs += try sharedGluCheck(&g);
     all.values += try @import("glm_rows_kda.zig").bf16Check(&g.p, device, queue, &all.worst);
     all.values += try @import("glm_rows_kda.zig").embedCheck(&g.p, device, queue, &all.worst);
     const cl = try @import("glm_rows_classes.zig").check(&g.p, device, queue);
