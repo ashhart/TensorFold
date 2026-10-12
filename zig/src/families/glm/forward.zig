@@ -222,7 +222,7 @@ pub fn kdaStep(x: *const Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kd
     }
     e.setPipeline(switch (gate) {
         .generated => if (c.tp > 1) x.k.kda_rows_tp else x.k.kda_rows,
-        .pre => |p| p,
+        .pre, .fused => |p| p,
     });
     bind(e, 0, .{proj});
     shape(e, 1, .{ rows, c.kdaProj() });

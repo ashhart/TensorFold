@@ -533,6 +533,7 @@ pub fn main() !void {
     all.pairs += hd.pairs;
     all.pairs += split.pairs;
     all.pairs += try @import("glm_rows_kda.zig").check(&g.p, device, queue);
+    all.pairs += try @import("glm_rows_kda.zig").fusedCheck(&g.p, device, queue);
     all.values += try @import("glm_rows_kda.zig").bf16Check(&g.p, device, queue, &all.worst);
     all.values += try @import("glm_rows_kda.zig").embedCheck(&g.p, device, queue, &all.worst);
     const cl = try @import("glm_rows_classes.zig").check(&g.p, device, queue);
