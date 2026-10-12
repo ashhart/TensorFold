@@ -114,7 +114,7 @@ const Builder = struct {
         return b.stack(triples[0..parts.len]);
     }
 
-    /// Fused members of one width take one matrix as before; mixed widths become one matrix per run of a width.
+    /// Fused members of one width take one matrix as before; a mixed stack becomes one matrix a member.
     fn stack(b: Builder, parts: []const projection.Triple) !Linear {
         var ws: [3]Width = undefined;
         for (parts, 0..) |p, i| ws[i] = .{ .bits = p.bits, .group = @intCast(p.group) };
