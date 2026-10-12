@@ -5,10 +5,6 @@ mmap'd by every rank: each GPU holds a device pointer to the same physical pages
 (cudaHostRegister Mapped|Portable), so a kernel can stage its slice of the
 payload into its own slot, announce an arrival word, and read the peers' slots
 straight out of host memory.
-(vLLM fork). This implementation was written fresh for TensorFold's all-gather
-semantics -- the arrival protocol, the generation handling and every kernel in
-this file are its own expression, and it invites the same source-overlap check
-that the earlier ported draft failed.
 
 Messages above ``FALLBACK_BYTES`` (large prefill payloads) stay on NCCL; only
 the one-shot path lives here. (A rank-order sum fold and a hyper-connection
