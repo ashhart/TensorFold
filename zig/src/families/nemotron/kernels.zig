@@ -269,7 +269,7 @@ test "the full-vocabulary sampler compiles at this macOS's Metal language with 1
     }
 }
 
-test "tf_pocket_in gives tf_train_lora_in then tf_pocket_relu2's bits at 1 and 16 rows over 1, 6 and 64 neurons" {
+test "tf_pocket_in gives tf_train_lora_in then tf_pocket_relu2's bits at 1 and 16 rows over 1, 6 and 64 neurons and two widths" {
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const pool = mtl.objc.Pool.push();
@@ -281,13 +281,13 @@ test "tf_pocket_in gives tf_train_lora_in then tf_pocket_relu2's bits at 1 and 1
     var pipes: [3]mtl.Pipeline = undefined;
     for (&pipes, [_][:0]const u8{ "tf_train_lora_in", "tf_pocket_relu2", "tf_pocket_in" }) |*p, name| p.* = try mtl.Pipeline.init(device, lib, name, false);
     defer for (pipes) |p| p.deinit();
-    const d = 2688; // the hidden size: x rows as the MoE layers read them
     const opts = mtl.ResourceOptions.shared;
     var prng = std.Random.DefaultPrng.init(11);
     const rnd = prng.random();
     var zeros: usize = 0;
     var positive: usize = 0;
-    for ([_]usize{ 1, 16 }) |rows| for ([_]usize{ 1, 6, 64 }) |n| {
+    // the hidden size, as the MoE layers read x, and a width that leaves every lane a tail after its batches
+    for ([_]usize{ 2688, 2728 }) |d| for ([_]usize{ 1, 16 }) |rows| for ([_]usize{ 1, 6, 64 }) |n| {
         const bufs = [_]mtl.Buffer{ try device.buffer(rows * d * 2, opts), try device.buffer(n * d * 4, opts), try device.buffer(rows * n * 4, opts), try device.buffer(rows * n * 4, opts), try device.buffer(rows * 4, opts) };
         defer for (bufs) |b| b.deinit();
         for (bufs[0].slice(u16, rows * d)) |*v| v.* = @intCast(@as(u32, @bitCast(rnd.floatNorm(f32))) >> 16);
@@ -295,7 +295,7 @@ test "tf_pocket_in gives tf_train_lora_in then tf_pocket_relu2's bits at 1 and 1
         // unlike fills: a value either kernel leaves unwritten differs
         @memset(bufs[2].slice(u8, rows * n * 4), 0xff);
         @memset(bufs[3].slice(u8, rows * n * 4), 0x7f);
-        const dims = [4]u32{ @intCast(rows), d, @intCast(n), 0 };
+        const dims = [4]u32{ @intCast(rows), @intCast(d), @intCast(n), 0 };
         const cb = queue.commandBuffer();
         const enc = cb.compute(.serial);
         // as layers.pocket() dispatches its first two, then as pocketIn() its one (Enc.run: the group at most the grid)

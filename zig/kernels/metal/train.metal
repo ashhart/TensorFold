@@ -129,10 +129,22 @@ kernel void tf_pocket_in(const device bfloat* x [[buffer(0)]],
                          uint lane [[thread_index_in_simdgroup]]) {
   const uint rows = dims.x, n_in = dims.y, n = dims.z, q = pos.x / 32, r = pos.y;
   if (q >= n || r >= rows) return;
+  const device bfloat* xr = x + size_t(r) * n_in;
+  const device float* ur = up + size_t(q) * n_in;
   float s = 0;
-  for (uint i = lane; i < n_in; i += 32) {
-    const float v = float(x[size_t(r) * n_in + i]);
-    s += v * up[size_t(q) * n_in + i];
+  uint i = lane;
+  // a lane's elements 28 at a time, all loaded before they are added in tf_train_lora_in's order, then the rest
+  for (; i + 32 * 27 < n_in; i += 32 * 28) {
+    float xv[28], uv[28];
+    for (uint k = 0; k < 28; k++) {
+      xv[k] = float(xr[i + 32 * k]);
+      uv[k] = ur[i + 32 * k];
+    }
+    for (uint k = 0; k < 28; k++) s += xv[k] * uv[k];
+  }
+  for (; i < n_in; i += 32) {
+    const float v = float(xr[i]);
+    s += v * ur[i];
   }
   s = simd_sum(s);
   const float v = max(s, 0.0f);
