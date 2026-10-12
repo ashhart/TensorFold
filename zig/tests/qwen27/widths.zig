@@ -1,4 +1,4 @@
-//! The 27B's projections without tensor units at every oQ width against float64, row bits in every call, mixed stacks.
+//! The 27B's projections, mixed stacks and embedding without tensor units at every oQ width against float64.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -487,6 +487,7 @@ pub fn main(_: std.process.Init) !void {
         seed += 16;
         try stack(&t, g, s, seed);
     }
+    t.failed += try @import("embed.zig").check(device, queue);
     if (t.failed > 0) {
         std.debug.print("FAIL {d} checks; the largest difference is {d:.4} of its float64 bound\n", .{ t.failed, t.worst });
         return error.CheckFailed;
