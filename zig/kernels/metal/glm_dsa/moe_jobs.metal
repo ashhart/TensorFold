@@ -1,4 +1,4 @@
-// GLM-5.3's expert jobs written on the GPU from the route: each picked expert over its member rows, the shared one last.
+// GLM-5.3's expert jobs written on the GPU from the route: each picked expert over its rows, the shared one last.
 #include <metal_stdlib>
 using namespace metal;
 
