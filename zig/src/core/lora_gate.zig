@@ -81,8 +81,9 @@ pub fn quantizerCheck(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, d
     const quant = try lp.quantConfig(arena, io, w, shipped_dir);
     var ok = true;
     for (modules) |module| {
-        const lay = try lp.layoutOf(arena, w, &shipped, quant, module);
-        const j: lp.Job = .{ .module = module, .a = "", .b = "", .n = lay.n, .k = lay.k, .group = lay.group, .dtype = lay.dtype };
+        const name = try lp.resolveShipped(arena, w, &shipped, module);
+        const lay = try lp.layoutOf(arena, w, &shipped, quant, name);
+        const j: lp.Job = .{ .module = module, .shipped = name, .n = lay.n, .k = lay.k, .group = lay.group, .dtype = lay.dtype };
         const x = try lp.denseOf(gpa, w, &dense, j);
         defer gpa.free(x);
         const old = try lp.quantOf(gpa, &shipped, j);
@@ -124,7 +125,7 @@ fn lessRange(_: void, a: Range, b: Range) bool {
 /// Every file of SHIPPED against OUT's: the same set, the same lengths, the same bytes outside the named payloads.
 pub fn identity(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, shipped: []const u8, dest: []const u8, p: *const lp.Plan, zero: bool) !bool {
     var named: std.StringHashMapUnmanaged(void) = .empty;
-    for (p.jobs) |j| for ([_][]const u8{ "weight", "scales", "biases" }) |leaf| try named.put(arena, try std.fmt.allocPrint(arena, "{s}.{s}", .{ j.module, leaf }), {});
+    for (p.jobs) |j| for ([_][]const u8{ "weight", "scales", "biases" }) |leaf| try named.put(arena, try std.fmt.allocPrint(arena, "{s}.{s}", .{ j.shippedName(), leaf }), {});
     var ok = true;
     const src = try listFiles(arena, io, w, shipped, &ok);
     const dst = try listFiles(arena, io, w, dest, &ok);

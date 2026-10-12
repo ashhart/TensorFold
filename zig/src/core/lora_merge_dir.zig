@@ -54,7 +54,7 @@ fn merge(gpa: Allocator, arena: Allocator, io: Io, out: *Io.Writer, err: *Io.Wri
         try out.print("{s}: {d} x {d}, group {d}, {d} of {d} groups differ from the shipped tensor\n", .{ j.module, j.n, j.k, j.group, changed, old.scales.len });
         if (changed == 0) continue;
         var names: [3][]const u8 = undefined;
-        for (&names, [3][]const u8{ "weight", "scales", "biases" }) |*x, leaf| x.* = try std.fmt.allocPrint(arena, "{s}.{s}", .{ j.module, leaf });
+        for (&names, [3][]const u8{ "weight", "scales", "biases" }) |*x, leaf| x.* = try std.fmt.allocPrint(arena, "{s}.{s}", .{ j.shippedName(), leaf });
         try regularShard(arena, io, err, stage, shipped.shardOf(names[0]).?);
         const shapes = [3][2]usize{ .{ j.n, j.k / 8 }, .{ j.n, j.k / j.group }, .{ j.n, j.k / j.group } };
         const edits = [3]se.Replacement{

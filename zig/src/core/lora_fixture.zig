@@ -118,6 +118,51 @@ pub fn makeSingle(s: *Scratch, n: usize, k: usize, vals: []const f32) ![]const u
     return try s.path(&.{"base"});
 }
 
+pub const Kind = enum { linear, stacked, plain, dense_absent };
+
+pub const Entry = struct {
+    dense: []const u8, // the module's name in the dense source
+    shipped: []const u8, // and in the shipped checkpoint
+    n: usize = 8,
+    k: usize = 128,
+    kind: Kind = .linear,
+};
+
+/// `dense` and `base` folders (one shard each, no index) holding `entries`, the shipped one under the shipped names.
+pub fn makeNamed(s: *Scratch, entries: []const Entry) ![]const u8 {
+    const a = s.arena.allocator();
+    var dense: std.ArrayList(se.New) = .empty;
+    var quantized: std.ArrayList(se.New) = .empty;
+    for (entries, 0..) |e, i| {
+        const zeros = try a.alloc(u8, 2 * e.n * e.k * 2);
+        @memset(zeros, 0);
+        switch (e.kind) {
+            .linear, .dense_absent => {
+                const before = dense.items.len;
+                try leaves(a, e.shipped, e.n, e.k, try randomValues(a, e.n * e.k, 10 + i), &dense, &quantized);
+                dense.items[before].name = try std.fmt.allocPrint(a, "{s}.weight", .{e.dense});
+                if (e.kind == .dense_absent) _ = dense.pop();
+            },
+            .stacked => {
+                try quantized.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.weight", .{e.shipped}), .dtype = .u32, .shape = try a.dupe(usize, &.{ 2, e.n, e.k / 8 }), .bytes = zeros[0 .. 2 * e.n * e.k / 2] });
+                try quantized.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.scales", .{e.shipped}), .dtype = .bf16, .shape = try a.dupe(usize, &.{ 2, e.n, e.k / 64 }), .bytes = zeros[0 .. 2 * e.n * e.k / 32] });
+                try quantized.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.biases", .{e.shipped}), .dtype = .bf16, .shape = try a.dupe(usize, &.{ 2, e.n, e.k / 64 }), .bytes = zeros[0 .. 2 * e.n * e.k / 32] });
+                try dense.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.weight", .{e.dense}), .dtype = .bf16, .shape = try a.dupe(usize, &.{ 2, e.n, e.k }), .bytes = zeros[0 .. 2 * e.n * e.k * 2] });
+            },
+            .plain => {
+                try quantized.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.weight", .{e.shipped}), .dtype = .bf16, .shape = try a.dupe(usize, &.{ e.n, e.k }), .bytes = zeros[0 .. e.n * e.k * 2] });
+                try dense.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.weight", .{e.dense}), .dtype = .bf16, .shape = try a.dupe(usize, &.{ e.n, e.k }), .bytes = zeros[0 .. e.n * e.k * 2] });
+            },
+        }
+    }
+    try Io.Dir.cwd().createDirPath(io, try s.path(&.{"dense"}));
+    try Io.Dir.cwd().createDirPath(io, try s.path(&.{"base"}));
+    try se.create(std.testing.allocator, try s.path(&.{ "dense", "model.safetensors" }), &.{}, dense.items);
+    try se.create(std.testing.allocator, try s.path(&.{ "base", "model.safetensors" }), &.{.{ "format", "mlx" }}, quantized.items);
+    try s.write("base", "config.json", base_config);
+    return try s.path(&.{"base"});
+}
+
 pub const Spec = struct { module: []const u8 = module, n: usize = 8, k: usize = 128, r: usize = 2, zero: bool = false, neg_zero: bool = false, nan: bool = false, value: ?f32 = null };
 
 pub const Adapter = struct { specs: []const Spec = &.{.{}}, alpha: []const u8 = "4", extra: []const u8 = "", names: ?[]const []const u8 = null, rank: []const u8 = "2" };

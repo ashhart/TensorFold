@@ -407,3 +407,102 @@ test "an allocation that fails at any step of the merge leaves no OUT and no sta
     }
     try std.testing.expect(at > 10 and at < 2000);
 }
+
+const out_proj = "model.layers.1.linear_attn.out_proj";
+
+test "MLP and linear-attention modules the shipped checkpoint quantizes are merged, whatever their names" {
+    var s = try fx.Scratch.init();
+    defer s.deinit();
+    const base = try fx.makeNamed(&s, &.{
+        .{ .dense = "model.layers.0.mlp.gate_proj", .shipped = "model.layers.0.mlp.gate_proj" },
+        .{ .dense = "model.layers.0.linear_attn.in_proj_qkv", .shipped = "model.layers.0.linear_attn.in_proj_qkv" },
+        .{ .dense = out_proj, .shipped = out_proj, .k = 64 },
+    });
+    const adapter = try fx.makeAdapter(&s, .{ .specs = &.{
+        .{ .module = "model.layers.0.mlp.gate_proj" },
+        .{ .module = "model.layers.0.linear_attn.in_proj_qkv" },
+        .{ .module = out_proj, .k = 64 },
+    } });
+    var buf: [4096]u8 = undefined;
+    const r = try fx.merge(&s, base, adapter, &buf);
+    try std.testing.expectEqual(@as(u8, 0), r.code);
+    try std.testing.expect(contains(r.out, "merged 3 projections"));
+    try std.testing.expect(!std.mem.eql(u8, try s.read("base", "model.safetensors"), try s.read("merged", "model.safetensors")));
+    var big: [16384]u8 = undefined;
+    try std.testing.expect((try fx.gates(&s, base, adapter, &big)).ok);
+}
+
+const dense_name = "model.language_model.layers.0.linear_attn.out_proj";
+const shipped_name = "language_model.model.layers.0.linear_attn.out_proj";
+
+test "a dense name that the shipped checkpoint holds under a rewritten prefix is resolved" {
+    var s = try fx.Scratch.init();
+    defer s.deinit();
+    const base = try fx.makeNamed(&s, &.{.{ .dense = dense_name, .shipped = shipped_name }});
+    const adapter = try fx.makeAdapter(&s, .{ .specs = &.{.{ .module = dense_name }} });
+    var buf: [4096]u8 = undefined;
+    const r = try fx.merge(&s, base, adapter, &buf);
+    try std.testing.expectEqual(@as(u8, 0), r.code);
+    var big: [16384]u8 = undefined;
+    const g = try fx.gates(&s, base, adapter, &big);
+    try std.testing.expect(g.ok and contains(g.out, "0 of 16 groups differ from OUT"));
+    // the leaves written are the shipped names, and the shard is the only thing that changed
+    var f = try st.File.open(std.testing.allocator, io, try s.path(&.{ "merged", "model.safetensors" }));
+    defer f.close(io);
+    try std.testing.expect(f.get(shipped_name ++ ".scales") != null and f.get(dense_name ++ ".scales") == null);
+}
+
+test "a stacked expert tensor and an unquantized norm are refused with their reason" {
+    const Case = struct { kind: fx.Kind, why: []const u8 };
+    for ([_]Case{ .{ .kind = .stacked, .why = "rank 3" }, .{ .kind = .plain, .why = "not quantized" } }) |c| {
+        var s = try fx.Scratch.init();
+        defer s.deinit();
+        const name = "model.layers.0.mlp.experts.fc1";
+        const base = try fx.makeNamed(&s, &.{.{ .dense = name, .shipped = name, .kind = c.kind }});
+        const adapter = try fx.makeAdapter(&s, .{ .specs = &.{.{ .module = name }} });
+        var buf: [4096]u8 = undefined;
+        const r = try fx.merge(&s, base, adapter, &buf);
+        try std.testing.expectEqual(@as(u8, 1), r.code);
+        try std.testing.expect(contains(r.err, name) and contains(r.err, c.why));
+        try absent(&s, "merged");
+    }
+}
+
+test "a module quantized in the shipped checkpoint but absent from the dense source is refused" {
+    var s = try fx.Scratch.init();
+    defer s.deinit();
+    const base = try fx.makeNamed(&s, &.{.{ .dense = out_proj, .shipped = out_proj, .kind = .dense_absent }});
+    const adapter = try fx.makeAdapter(&s, .{ .specs = &.{.{ .module = out_proj }} });
+    var buf: [4096]u8 = undefined;
+    const r = try fx.merge(&s, base, adapter, &buf);
+    try std.testing.expectEqual(@as(u8, 1), r.code);
+    try std.testing.expect(contains(r.err, out_proj ++ ".weight") and contains(r.err, "dense base"));
+    try absent(&s, "merged");
+}
+
+test "two shipped names that both resolve are refused as ambiguous, naming every candidate" {
+    var s = try fx.Scratch.init();
+    defer s.deinit();
+    const base = try fx.makeNamed(&s, &.{
+        .{ .dense = dense_name, .shipped = dense_name },
+        .{ .dense = "unused.weight_holder", .shipped = shipped_name, .kind = .dense_absent },
+    });
+    const adapter = try fx.makeAdapter(&s, .{ .specs = &.{.{ .module = dense_name }} });
+    var buf: [4096]u8 = undefined;
+    const r = try fx.merge(&s, base, adapter, &buf);
+    try std.testing.expectEqual(@as(u8, 1), r.code);
+    try std.testing.expect(contains(r.err, "ambiguous") and contains(r.err, dense_name ++ ".weight") and contains(r.err, shipped_name ++ ".weight"));
+    try absent(&s, "merged");
+}
+
+test "a module found under no candidate name is refused listing each one tried" {
+    var s = try fx.Scratch.init();
+    defer s.deinit();
+    const base = try fx.makeNamed(&s, &.{.{ .dense = out_proj, .shipped = out_proj }});
+    const adapter = try fx.makeAdapter(&s, .{ .specs = &.{.{ .module = dense_name }} });
+    var buf: [4096]u8 = undefined;
+    const r = try fx.merge(&s, base, adapter, &buf);
+    try std.testing.expectEqual(@as(u8, 1), r.code);
+    try std.testing.expect(contains(r.err, dense_name ++ ".weight") and contains(r.err, shipped_name ++ ".weight"));
+    try absent(&s, "merged");
+}

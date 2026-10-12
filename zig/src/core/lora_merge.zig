@@ -16,17 +16,6 @@ pub const toF32 = lq.toF32;
 
 pub const Error = error{ BadShape, BadGroup, NonFinite };
 
-/// The modules whose projections the merge serves: Nemotron mixers and shared experts, Qwen dense attention.
-const served_suffixes = [_][]const u8{
-    ".mixer.in_proj",    ".mixer.out_proj",   ".mixer.shared_experts.up_proj", ".mixer.shared_experts.down_proj",
-    ".self_attn.q_proj", ".self_attn.k_proj", ".self_attn.v_proj",             ".self_attn.o_proj",
-};
-
-pub fn served(module: []const u8) bool {
-    for (served_suffixes) |s| if (std.mem.endsWith(u8, module, s)) return true;
-    return false;
-}
-
 pub const Side = enum { a, b };
 
 /// A PEFT tensor name split into the checkpoint's module key and the LoRA side it holds.

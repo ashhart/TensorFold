@@ -13,6 +13,7 @@ pub const Shards = sh.Shards;
 pub const Job = sh.Job;
 pub const quantConfig = sh.quantConfig;
 pub const Layout = sh.Layout;
+pub const resolveShipped = sh.resolveShipped;
 pub const layoutOf = sh.layoutOf;
 pub const denseOf = sh.denseOf;
 pub const quantOf = sh.quantOf;
@@ -117,9 +118,9 @@ pub fn plan(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, dense: *Sha
     for (pairs.keys(), pairs.values()) |module, pair| {
         const a_name = pair.a orelse return refuse(w, module, "lora_A is missing");
         const b_name = pair.b orelse return refuse(w, module, "lora_B is missing");
-        if (!lm.served(module)) return refuse(w, module, "a module the merge does not serve (fused, expert and other projections are refused)");
-        const lay = try layoutOf(arena, w, shipped, quant, module);
-        const shard = shipped.shardOf(try std.fmt.allocPrint(arena, "{s}.weight", .{module})).?;
+        const name = try sh.resolveShipped(arena, w, shipped, module);
+        const lay = try layoutOf(arena, w, shipped, quant, name);
+        const shard = shipped.shardOf(try std.fmt.allocPrint(arena, "{s}.weight", .{name})).?;
         if (!(try checked.getOrPut(arena, shard)).found_existing) try checkDisjoint(w, shipped, shard);
         _ = try sh.denseTensor(w, dense, module, lay.n, lay.k);
         const a = file.get(a_name).?;
@@ -128,7 +129,7 @@ pub fn plan(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, dense: *Sha
         _ = std.math.mul(usize, lay.n, cfg.r) catch return refuse(w, module, "adapter dimensions overflow");
         if (a.rank != 2 or b.rank != 2 or a.dim(0) != cfg.r or a.dim(1) != lay.k or b.dim(0) != lay.n or b.dim(1) != cfg.r) return refuse(w, module, "adapter shapes do not fit the projection or r");
         for ([2]st.Tensor{ a, b }) |f| if (f.dtype != .f32 and f.dtype != .bf16 and f.dtype != .f16) return refuse(w, module, "adapter dtype is not f32, bf16 or f16");
-        try jobs.append(arena, .{ .module = module, .a = a_name, .b = b_name, .n = lay.n, .k = lay.k, .group = lay.group, .dtype = lay.dtype });
+        try jobs.append(arena, .{ .module = module, .shipped = name, .a = a_name, .b = b_name, .n = lay.n, .k = lay.k, .group = lay.group, .dtype = lay.dtype });
     }
     return .{ .jobs = jobs.items, .r = cfg.r, .scale = cfg.scale, .adapter = file };
 }

@@ -138,7 +138,7 @@ test "recompute counts the groups of an output that differ from dense + delta" {
     try std.testing.expectEqual(@as(usize, 2), try lm.recompute(gpa, 64, 4, 128, w, l, lm.viewOf(out), &bad));
 }
 
-test "PEFT names map to checkpoint modules and only served modules pass" {
+test "PEFT names map to checkpoint modules" {
     const k = lm.parseAdapterKey("base_model.model.backbone.layers.3.mixer.in_proj.lora_A.weight").?;
     try std.testing.expectEqualStrings("backbone.layers.3.mixer.in_proj", k.module);
     try std.testing.expectEqual(lm.Side.a, k.side);
@@ -148,8 +148,6 @@ test "PEFT names map to checkpoint modules and only served modules pass" {
     try std.testing.expect(lm.parseAdapterKey("backbone.layers.3.mixer.in_proj.lora_A.weight") == null);
     try std.testing.expect(lm.parseAdapterKey("base_model.model.x.lora_magnitude_vector") == null);
     try std.testing.expect(lm.parseAdapterKey("base_model.model.x.lora_embedding_A") == null);
-    for ([_][]const u8{ "backbone.layers.1.mixer.out_proj", "backbone.layers.1.mixer.shared_experts.down_proj", "model.layers.2.self_attn.o_proj" }) |m| try std.testing.expect(lm.served(m));
-    for ([_][]const u8{ "backbone.layers.1.mixer.experts.0.up_proj", "model.layers.2.self_attn.qkv_proj", "model.layers.2.mlp.gate_proj", "lm_head" }) |m| try std.testing.expect(!lm.served(m));
 }
 
 test "shapes that do not fit the projection, and a group the engine does not serve, are refused" {
