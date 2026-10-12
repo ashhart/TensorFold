@@ -1,5 +1,6 @@
 //! Replaced tensors written into a checkpoint's own shards, index and config: in place when sizes hold, else by rename.
 const std = @import("std");
+const platform = @import("sys");
 const st = @import("safetensors.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -200,18 +201,18 @@ fn inPlace(gpa: Allocator, io: Io, path: []const u8, edits: []const Replacement)
     }
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
-    const fd = std.c.open(try arena_state.allocator().dupeSentinel(u8, path, 0), .{ .ACCMODE = .WRONLY });
+    const fd = platform.c.open(try arena_state.allocator().dupeSentinel(u8, path, 0), .{ .ACCMODE = .WRONLY });
     if (fd < 0) return error.ShardWrite;
-    defer _ = std.c.close(fd);
+    defer _ = platform.c.close(fd);
     for (edits, places[0..edits.len]) |r, at| {
         var done: usize = 0;
         while (done < r.bytes.len) {
-            const n = std.c.pwrite(fd, r.bytes.ptr + done, @min(r.bytes.len - done, 1 << 30), @intCast(at + done));
+            const n = platform.c.pwrite(fd, r.bytes.ptr + done, @min(r.bytes.len - done, 1 << 30), @intCast(at + done));
             if (n <= 0) return error.ShardWrite;
             done += @intCast(n);
         }
     }
-    if (std.c.fsync(fd) != 0) return error.ShardWrite;
+    if (platform.c.fsync(fd) != 0) return error.ShardWrite;
     return true;
 }
 
@@ -221,7 +222,8 @@ pub fn rewrite(gpa: Allocator, io: Io, path: []const u8, edits: []const Replacem
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var file = try st.File.open(gpa, io, path);
-    defer file.close(io);
+    var mapped = true;
+    defer if (mapped) file.close(io);
     for (edits) |r| if (!file.names.contains(r.name)) return error.MissingTensor;
     const raw = file.map.memory;
     const original = try std.json.parseFromSliceLeaky(Value, arena, raw[8..file.data], .{});
@@ -257,7 +259,11 @@ pub fn rewrite(gpa: Allocator, io: Io, path: []const u8, edits: []const Replacem
     const spaces = try arena.alloc(u8, padded - text.len);
     @memset(spaces, ' ');
     try pieces.insertSlice(arena, 0, &.{ &head, text, spaces });
-    try writeFile(arena, path, pieces.items);
+    const tmp = try writeTemp(arena, path, pieces.items);
+    // the pieces are written; the map goes before the rename, since Windows refuses to replace a mapped file
+    file.close(io);
+    mapped = false;
+    try commit(arena, tmp, path);
     return @as(i64, @intCast(offset)) - @as(i64, @intCast(before));
 }
 
@@ -325,23 +331,32 @@ fn writeJson(arena: Allocator, path: []const u8, v: Value) !void {
 
 /// `parts` to `path` through `path`.tmp, synced, then renamed over it; a reader sees the old file or the new one.
 fn writeFile(arena: Allocator, path: []const u8, parts: []const []const u8) !void {
+    try commit(arena, try writeTemp(arena, path, parts), path);
+}
+
+/// `parts` written and synced to `path`.tmp, which is returned.
+fn writeTemp(arena: Allocator, path: []const u8, parts: []const []const u8) ![:0]const u8 {
     const tmp = try std.fmt.allocPrintSentinel(arena, "{s}.tmp", .{path}, 0);
-    const dest = try arena.dupeSentinel(u8, path, 0);
-    const fd = std.c.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+    const fd = platform.c.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(platform.c.mode_t, 0o644));
     if (fd < 0) return error.ShardWrite;
-    errdefer _ = std.c.unlink(tmp);
-    {
-        defer _ = std.c.close(fd);
-        for (parts) |p| try put(fd, p);
-        if (std.c.fsync(fd) != 0) return error.ShardWrite;
-    }
-    if (std.c.rename(tmp, dest) != 0) return error.ShardWrite;
+    errdefer _ = platform.c.unlink(tmp);
+    defer _ = platform.c.close(fd);
+    for (parts) |p| try put(fd, p);
+    if (platform.c.fsync(fd) != 0) return error.ShardWrite;
+    return tmp;
+}
+
+/// `tmp` renamed over `path`; a failed rename removes `tmp`.
+fn commit(arena: Allocator, tmp: [:0]const u8, path: []const u8) !void {
+    errdefer _ = platform.c.unlink(tmp);
+    const dest = try arena.dupeSentinel(u8, path, 0);
+    if (platform.c.rename(tmp, dest) != 0) return error.ShardWrite;
 }
 
 fn put(fd: c_int, b: []const u8) !void {
     var done: usize = 0;
     while (done < b.len) {
-        const n = std.c.write(fd, b.ptr + done, @min(b.len - done, 1 << 30));
+        const n = platform.c.write(fd, b.ptr + done, @min(b.len - done, 1 << 30));
         if (n <= 0) return error.ShardWrite;
         done += @intCast(n);
     }
@@ -518,13 +533,19 @@ test "a folder whose shard is a symlink or a hard link is refused for learning; 
     defer tmp.cleanup();
     try tmp.dir.createDirPath(io, "blobs");
     for ([_][]const u8{ "config.json", index_name, "model-00001-of-00002.safetensors", "blobs/b2", "notes.txt" }) |name| try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x" });
-    try tmp.dir.symLink(io, "model-00001-of-00002.safetensors", "readme-link", .{});
+    // Windows grants symlinks only with Developer Mode or elevation
+    tmp.dir.symLink(io, "model-00001-of-00002.safetensors", "readme-link", .{}) catch |e| return if (e == error.PermissionDenied and @import("builtin").os.tag == .windows) error.SkipZigTest else e;
     const dir = try std.fs.path.join(arena, &.{ ".zig-cache", "tmp", &tmp.sub_path });
     try std.testing.expect((try linked(arena, io, dir)) == null);
     try tmp.dir.symLink(io, "blobs/b2", "model-00002-of-00002.safetensors", .{});
     try std.testing.expectEqualStrings("model-00002-of-00002.safetensors", (try linked(arena, io, dir)).?);
     try tmp.dir.deleteFile(io, "model-00002-of-00002.safetensors");
-    try tmp.dir.hardLink("blobs/b2", tmp.dir, "model-00002-of-00002.safetensors", io, .{});
+    if (@import("builtin").os.tag == .windows) {
+        // std's Io has no hard links on Windows; the platform's link (CreateHardLinkW) is what pull uses there
+        const old = try std.fs.path.joinZ(arena, &.{ dir, "blobs", "b2" });
+        const new = try std.fs.path.joinZ(arena, &.{ dir, "model-00002-of-00002.safetensors" });
+        try std.testing.expectEqual(@as(c_int, 0), platform.c.link(old, new));
+    } else try tmp.dir.hardLink("blobs/b2", tmp.dir, "model-00002-of-00002.safetensors", io, .{});
     try std.testing.expectEqualStrings("model-00002-of-00002.safetensors", (try linked(arena, io, dir)).?);
 }
 

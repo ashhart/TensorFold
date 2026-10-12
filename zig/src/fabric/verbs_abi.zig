@@ -1,5 +1,6 @@
 //! The verbs ABI (rdma-core's infiniband/verbs.h, which Apple's SDK ships for librdma): the structs and constants we use.
 const std = @import("std");
+const platform = @import("sys");
 
 pub const Device = extern struct {
     _ops: [2]?*anyopaque,
@@ -22,8 +23,8 @@ pub const Qp = extern struct {
     qp_num: u32,
     state: c_int,
     qp_type: c_int,
-    mutex: std.c.pthread_mutex_t,
-    cond: std.c.pthread_cond_t,
+    mutex: platform.c.pthread_mutex_t,
+    cond: platform.c.pthread_cond_t,
     events_completed: u32,
 };
 
@@ -33,8 +34,8 @@ pub const Cq = extern struct {
     cq_context: ?*anyopaque,
     handle: u32,
     cqe: c_int,
-    mutex: std.c.pthread_mutex_t,
-    cond: std.c.pthread_cond_t,
+    mutex: platform.c.pthread_mutex_t,
+    cond: platform.c.pthread_cond_t,
     comp_events_completed: u32,
     async_events_completed: u32,
 };
@@ -59,7 +60,7 @@ pub const Context = extern struct {
     cmd_fd: c_int,
     async_fd: c_int,
     num_comp_vectors: c_int,
-    mutex: std.c.pthread_mutex_t,
+    mutex: platform.c.pthread_mutex_t,
     abi_compat: ?*anyopaque,
 };
 

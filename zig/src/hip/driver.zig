@@ -1,5 +1,6 @@
 //! The first HIP admission boundary, with signatures from ROCm's hip_runtime_api.h; no CUDA symbol aliases or GPU kernels.
 const std = @import("std");
+const platform = @import("sys");
 
 pub const Error = error{ DriverUnavailable, MissingSymbol, HipFailed, InvalidDeviceCount };
 pub const Api = struct {
@@ -8,11 +9,11 @@ pub const Api = struct {
 };
 
 pub const Driver = struct {
-    lib: std.DynLib,
+    lib: platform.DynLib,
     api: Api,
 
     pub fn openPath(path: []const u8) Error!Driver {
-        var lib = std.DynLib.open(path) catch return error.DriverUnavailable;
+        var lib = platform.DynLib.open(path) catch return error.DriverUnavailable;
         errdefer lib.close();
         const api = try @import("symbols.zig").resolve(Api, &lib);
         try initialize(api);

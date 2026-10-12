@@ -1,5 +1,6 @@
 //! Frozen server goldens for `zig build test-golden`, with the ten differences that are still known.
 const std = @import("std");
+const platform = @import("sys");
 const posix = std.posix;
 const Io = std.Io;
 const wire = @import("wire.zig");
@@ -379,7 +380,7 @@ fn spawnServer(a: std.mem.Allocator, io: Io, binary: []const u8, fixtures: []con
             try fw.interface.writeAll(content);
             try fw.interface.flush();
             const kpz = try std.fmt.allocPrintSentinel(a, "{s}", .{kp}, 0);
-            _ = std.c.fchmodat(posix.AT.FDCWD, kpz, 0o600, 0);
+            _ = platform.c.fchmodat(posix.AT.FDCWD, kpz, 0o600, 0);
         }
     }
     const child = try a.create(std.process.Child);
@@ -411,7 +412,7 @@ pub fn main(init: std.process.Init) !void {
     const cases_path = args[2];
     const golden_dir = args[3];
     const fixtures = args[4];
-    const tmp_dir = try std.fmt.allocPrint(init.arena.allocator(), ".zig-tmp-golden-{d}", .{std.c.getpid()});
+    const tmp_dir = try std.fmt.allocPrint(init.arena.allocator(), ".zig-tmp-golden-{d}", .{platform.c.getpid()});
     Io.Dir.cwd().createDir(io, tmp_dir, .default_dir) catch {};
     defer Io.Dir.cwd().deleteTree(io, tmp_dir) catch {};
 

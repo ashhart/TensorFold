@@ -1,6 +1,7 @@
 //! Positional reads that skip the page cache (O_DIRECT on Linux): 4 KiB-aligned spans into aligned buffers.
 
 const std = @import("std");
+const platform = @import("sys");
 const builtin = @import("builtin");
 
 /// Offset, length and buffer alignment a direct read needs (the logical block size of every NVMe we run on).
@@ -20,22 +21,22 @@ pub fn fits(bytes: usize) usize {
 }
 
 pub const File = struct {
-    fd: std.c.fd_t,
+    fd: platform.c.fd_t,
     direct: bool,
 
     /// `path` read-only, direct when its file system allows it, else through the page cache.
     pub fn open(path: [:0]const u8) !File {
         if (builtin.os.tag == .linux) {
-            const fd = std.c.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECT = true });
+            const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECT = true });
             if (fd >= 0) return .{ .fd = fd, .direct = true };
         }
-        const fd = std.c.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
+        const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
         if (fd < 0) return error.FileNotFound;
         return .{ .fd = fd, .direct = false };
     }
 
     pub fn close(f: *File) void {
-        _ = std.c.close(f.fd);
+        _ = platform.c.close(f.fd);
         f.* = undefined;
     }
 
@@ -46,11 +47,11 @@ pub const File = struct {
     }
 };
 
-fn sysPread(_: *anyopaque, fd: std.c.fd_t, buf: [*]u8, len: usize, offset: u64) isize {
-    return std.c.pread(fd, buf, len, @intCast(offset));
+fn sysPread(_: *anyopaque, fd: platform.c.fd_t, buf: [*]u8, len: usize, offset: u64) isize {
+    return platform.c.pread(fd, buf, len, @intCast(offset));
 }
 
-fn readAt(f: File, buf: Buffer, offset: u64, len: usize, ctx: *anyopaque, pread: *const fn (*anyopaque, std.c.fd_t, [*]u8, usize, u64) isize) ![]u8 {
+fn readAt(f: File, buf: Buffer, offset: u64, len: usize, ctx: *anyopaque, pread: *const fn (*anyopaque, platform.c.fd_t, [*]u8, usize, u64) isize) ![]u8 {
     const lo = std.mem.alignBackward(u64, offset, alignment);
     const want: usize = @intCast(offset + len - lo);
     const whole = span(offset, len);
@@ -62,8 +63,8 @@ fn readAt(f: File, buf: Buffer, offset: u64, len: usize, ctx: *anyopaque, pread:
         const ask = whole - at;
         const n = pread(ctx, f.fd, buf.ptr + at, ask, lo + @as(u64, @intCast(at)));
         if (n < 0) {
-            if (std.c.errno(n) == .INTR) continue;
-            std.log.err("read of {d} bytes at {d} failed: {t}", .{ ask, lo + at, std.c.errno(n) });
+            if (platform.c.errno(n) == .INTR) continue;
+            std.log.err("read of {d} bytes at {d} failed: {t}", .{ ask, lo + at, platform.c.errno(n) });
             return error.ReadFailed;
         }
         if (n == 0) return error.EndOfFile;
@@ -89,7 +90,7 @@ test "direct reads return the same bytes as buffered reads" {
     var f = try File.open("/proc/self/exe");
     defer f.close();
     // The reference uses the page cache, so its unaligned reads do not inherit O_DIRECT.
-    var plain: File = .{ .fd = std.c.open("/proc/self/exe", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }), .direct = false };
+    var plain: File = .{ .fd = platform.c.open("/proc/self/exe", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }), .direct = false };
     try std.testing.expect(plain.fd >= 0);
     defer plain.close();
     const buf = try gpa.alignedAlloc(u8, .fromByteUnits(alignment), 1 << 20);
@@ -97,7 +98,7 @@ test "direct reads return the same bytes as buffered reads" {
     const want = try gpa.alloc(u8, 1 << 19);
     defer gpa.free(want);
     for ([_][2]usize{ .{ 0, 1 }, .{ 1, 4095 }, .{ 4095, 2 }, .{ 12345, 100000 }, .{ 8192, 1 << 19 } }) |c| {
-        const n = std.c.pread(plain.fd, want.ptr, c[1], @intCast(c[0]));
+        const n = platform.c.pread(plain.fd, want.ptr, c[1], @intCast(c[0]));
         try std.testing.expectEqual(@as(isize, @intCast(c[1])), n);
         try std.testing.expectEqualSlices(u8, want[0..c[1]], try f.read(buf, c[0], c[1]));
     }
@@ -111,7 +112,7 @@ const Script = struct {
     calls: usize = 0,
     bad: bool = false,
 
-    fn pread(ctx: *anyopaque, _: std.c.fd_t, buf: [*]u8, len: usize, offset: u64) isize {
+    fn pread(ctx: *anyopaque, _: platform.c.fd_t, buf: [*]u8, len: usize, offset: u64) isize {
         const s: *Script = @ptrCast(@alignCast(ctx));
         if (s.calls < s.offs.len) s.offs[s.calls] = offset;
         s.calls += 1;

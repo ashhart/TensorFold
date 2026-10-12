@@ -1,5 +1,6 @@
 //! Flash Next behind the native server: one reply at a time, sampled on the GPU on request (speed-up mode greedy only).
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const api = @import("engine_api");
 const tf = @import("tensorfold");

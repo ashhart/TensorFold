@@ -1,5 +1,6 @@
 //! A prompt window's experts (every expert once, on the tensor units) against the decode path's 16-row windows, by row.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 const g = tf.glm_dsa;
@@ -53,8 +54,8 @@ pub fn main(init: std.process.Init) !void {
     for (q.x.slice(f32, @as(usize, rows) * hid)) |*v| v.* = prng.random().floatNorm(f32);
     const dec = try device.buffer(@as(usize, rows) * hid * 4, mtl.ResourceOptions.shared);
     const out = try device.buffer(@as(usize, rows) * hid * 4, mtl.ResourceOptions.shared);
-    if (std.c.getenv("GLM_ATTN") != null) return attention(&K, &L, &s, &q, queue, device, &c, rows, w.full);
-    if (std.c.getenv("GLM_NARROW") != null) return narrow(&K, &L, &q, queue, device, &c);
+    if (platform.c.getenv("GLM_ATTN") != null) return attention(&K, &L, &s, &q, queue, device, &c, rows, w.full);
+    if (platform.c.getenv("GLM_NARROW") != null) return narrow(&K, &L, &q, queue, device, &c);
     // the decode path: route and experts 16 rows at a time (each window's rows copied into the 16-row scratch)
     var dec_ms: f64 = 0;
     var k: u32 = 0;
