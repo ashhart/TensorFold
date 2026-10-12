@@ -35,7 +35,6 @@ const Shared = struct {
     io: std.Io,
     targets: []const Target,
     links: []Link,
-    handles: []const std.Io.File,
     runs: []const Run,
     check: Check,
     max: u64,
@@ -49,14 +48,11 @@ const Shared = struct {
 pub fn fetch(a: Allocator, io: std.Io, targets: []const Target, runs: []const Run, check: Check, progress: ?*std.Io.Writer) !void {
     if (runs.len == 0) return;
     const w = std.Io.Dir.cwd();
-    const handles = try a.alloc(std.Io.File, targets.len);
-    var opened: usize = 0;
-    defer for (handles[0..opened]) |h| h.close(io);
-    for (targets, 0..) |t, k| {
-        handles[k] = try w.createFile(io, t.path, .{ .read = true, .truncate = false });
-        opened += 1;
+    for (targets) |t| {
+        const f = try w.createFile(io, t.path, .{ .read = true, .truncate = false });
+        defer f.close(io);
         // the file keeps its full size so the release's offsets hold; bytes no run brings stay holes on disk
-        if ((try handles[k].length(io)) != t.size) try handles[k].setLength(io, t.size);
+        if ((try f.length(io)) != t.size) try f.setLength(io, t.size);
     }
     const links = try a.alloc(Link, targets.len);
     for (links) |*l| l.* = .{};
@@ -66,7 +62,7 @@ pub fn fetch(a: Allocator, io: std.Io, targets: []const Target, runs: []const Ru
         max = @max(max, r.end - r.first);
         left += r.end - r.first;
     }
-    var s: Shared = .{ .io = io, .targets = targets, .links = links, .handles = handles, .runs = runs, .check = check, .max = max };
+    var s: Shared = .{ .io = io, .targets = targets, .links = links, .runs = runs, .check = check, .max = max };
     var failures: [workers]?anyerror = @splat(null);
     var threads: [workers]std.Thread = undefined;
     const n = @min(workers, runs.len);
@@ -103,10 +99,19 @@ fn worker(s: *Shared, failure: *?anyerror) void {
         return;
     };
     defer std.heap.page_allocator.free(buf);
+    // one open file a worker: runs come in file order, so a handle serves many runs
+    var open: Open = .{};
+    defer open.close(s.io);
     while (!s.stop.load(.acquire)) {
         const i = s.next.fetchAdd(1, .monotonic);
         if (i >= s.runs.len) return;
-        one(s, &client, s.runs[i], buf[0..@intCast(s.runs[i].end - s.runs[i].first)]) catch |e| {
+        const r = s.runs[i];
+        const file = open.get(s.io, r.file, s.targets[r.file].path) catch |e| {
+            failure.* = e;
+            s.stop.store(true, .release);
+            return;
+        };
+        one(s, &client, file, r, buf[0..@intCast(r.end - r.first)]) catch |e| {
             failure.* = e;
             s.stop.store(true, .release);
             return;
@@ -114,8 +119,26 @@ fn worker(s: *Shared, failure: *?anyerror) void {
     }
 }
 
+const Open = struct {
+    index: ?u32 = null,
+    file: ?std.Io.File = null,
+
+    fn get(o: *Open, io: std.Io, index: u32, path: []const u8) !std.Io.File {
+        if (o.index == index) return o.file.?;
+        o.close(io);
+        o.file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write });
+        o.index = index;
+        return o.file.?;
+    }
+
+    fn close(o: *Open, io: std.Io) void {
+        if (o.file) |f| f.close(io);
+        o.* = .{};
+    }
+};
+
 /// One run: fetched whole into `buf`, checked, then written; a stale link is resolved again.
-fn one(s: *Shared, client: *std.http.Client, r: Run, buf: []u8) !void {
+fn one(s: *Shared, client: *std.http.Client, file: std.Io.File, r: Run, buf: []u8) !void {
     var last: anyerror = error.ReadFailed;
     var wait_ms: u64 = 250;
     for (0..attempts) |_| {
@@ -136,7 +159,7 @@ fn one(s: *Shared, client: *std.http.Client, r: Run, buf: []u8) !void {
             last = error.ChecksumMismatch;
             continue;
         }
-        try s.handles[r.file].writePositionalAll(s.io, buf, r.first);
+        try file.writePositionalAll(s.io, buf, r.first);
         _ = s.bytes.fetchAdd(buf.len, .monotonic);
         return;
     }

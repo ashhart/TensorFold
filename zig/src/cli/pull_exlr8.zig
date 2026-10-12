@@ -14,6 +14,7 @@ pub const Options = struct { profile: []const u8, node: exlr8.node.Node, dir: []
 const whole_piece: u64 = 16 << 20;
 
 pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.Writer, env: ?*const std.process.Environ.Map, spec: []const u8, o: Options) !u8 {
+    moreFiles();
     const at = std.mem.indexOfScalar(u8, spec, '@');
     const repo = if (at) |i| spec[0..i] else spec;
     const revision = if (at) |i| spec[i + 1 ..] else "main";
@@ -83,6 +84,15 @@ pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.Write
     try (exlr8.node.Record{ .repo = repo, .revision = sha, .set_id = set_id, .profile = o.profile, .node = o.node, .expert_bytes = p.expert_bytes, .whole_files = files }).write(io, a, o.dir);
     try out.print("stored node {d}/{d} of {s}@{s} ({s}): every half equals its xxhash64, {d:.2} GiB of experts\n", .{ o.node.rank, o.node.ranks, repo, sha, o.profile, gib(p.expert_bytes) });
     return 0;
+}
+
+/// Index maps, connections and scans pass the default 256 descriptors: raise this process's own limit.
+fn moreFiles() void {
+    var l = std.posix.getrlimit(.NOFILE) catch return;
+    const want: std.posix.rlim_t = if (l.max == std.posix.RLIM.INFINITY) 4096 else @min(l.max, 4096);
+    if (l.cur >= want) return;
+    l.cur = want;
+    std.posix.setrlimit(.NOFILE, l) catch {};
 }
 
 fn gib(n: u64) f64 {
