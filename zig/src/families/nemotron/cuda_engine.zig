@@ -115,6 +115,7 @@ pub const Engine = struct {
     heat_gate: heat.Gate = .{}, // off unless TF_HEAT_HIGH and TF_HEAT_LOW are set
     prompt_rows: ?PromptRows = null, // a prompt pass's rows for prompt_logprobs (serial chunks, from 0)
     armed: marks.Armed = .{}, // the marks inside the prompt chunk about to run (cuda_marks.zig)
+    spares: marks.Spares = .{}, // free Mamba buffers the prompt cache set aside for the next marks
     last_chunk: usize = 0, // where the last prompt pass's last chunk started (the prompt's last row: len - 1 - this)
 
     /// Loads the checkpoint into the Python engine's layouts and sizes the caches; `triton_dir` null: our own glue.
@@ -253,6 +254,7 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         e.stream.synchronize() catch {};
+        e.spares.deinit();
         if (e.serial) |*g| g.deinit();
         seq_graphs.free(e.gpa, &e.own.graphs); // masked windows'
         for (&e.windows) |*set| for (set) |*g| if (g.*) |*x| x.deinit();

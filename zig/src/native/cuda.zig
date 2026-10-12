@@ -447,7 +447,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         const pc = api.prompt_cache;
         const store = try gpa.create(pc.Store);
         // states kept and resumed on the family's grid, where a cache-off pass cuts; the head reads one token on
-        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = &nemotron_snaps }, .{ .lookahead = 1, .planned = true, .grid = F.prompt_rows }, cache);
+        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = &nemotron_snaps }, .{ .lookahead = 1, .planned = true, .grid = F.prompt_rows }, cache - try nemotron.native.snap_ready(loaded.target, cache));
         h.store = store;
     }
     errdefer if (h.store) |store| {
