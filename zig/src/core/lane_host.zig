@@ -400,7 +400,7 @@ pub const LaneHost = struct {
         return if (h.decoded_rows) r.decode_spans else &.{};
     }
 
-    /// A prompt-only pass on a `warm_turns` engine: the backend prefills and the cache keeps where it ends.
+    /// A prompt-only pass on a `warm_turns` engine: the backend prefills, the cache keeps its end (a mark, if keyed on)
     fn warmPass(h: *LaneHost, job: *Job, began: i96) bool {
         const be = h.core.backend;
         be.prefill(&job.stream) catch |e| { // a yield ends it like a cancel: what it prefilled is kept
@@ -409,7 +409,7 @@ pub const LaneHost = struct {
             return h.cancel(job);
         };
         h.prefilled(job, began);
-        if (h.cache) |store| _ = store.keep(job.request.prompt, @intCast(job.request.prompt.len), &job.stream, job.request.chunks, h.spans(job.request));
+        if (h.cache) |store| _ = if (store.rules.lookahead == 0) store.keep(job.request.prompt, @intCast(job.request.prompt.len), &job.stream, job.request.chunks, h.spans(job.request)) else false;
         be.release(&job.stream);
         h.remove(job);
         h.finish(job, .length, "");

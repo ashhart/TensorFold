@@ -184,8 +184,10 @@ pub const Cuda = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
+    /// A cancel, or a background pass stepping aside for a foreground request, stops the prompt at its next chunk.
     fn cancelled(ptr: *anyopaque) bool {
-        return @as(*lanes.Stream, @ptrCast(@alignCast(ptr))).isCancelled();
+        const s: *lanes.Stream = @ptrCast(@alignCast(ptr));
+        return s.isCancelled() or s.yields();
     }
 
     /// The prompt pass stands at a keep: the lane host copies the GPU state there.

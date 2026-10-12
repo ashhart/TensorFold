@@ -360,7 +360,9 @@ pub const Store = struct {
         var out: std.ArrayList(u32) = .empty;
         var want: std.ArrayList(u32) = .empty;
         defer want.deinit(a);
-        try want.append(a, history_len);
+        // a warm pass (its history the whole prompt) keeps where a state can be keyed, its lookahead before the end
+        const warm_pass = s.rules.warm and history_len == prompt.len and s.rules.lookahead > 0;
+        try want.append(a, if (warm_pass) @intCast(prompt.len -| s.rules.lookahead) else history_len);
         if (rewind > 0 and s.active_rewind_at == rewind) try want.append(a, rewind);
         if (previous.len > 0) {
             const stable: u32 = @intCast(std.mem.indexOfDiff(u32, previous, prompt) orelse @min(previous.len, prompt.len));
@@ -371,7 +373,7 @@ pub const Store = struct {
             const at = if (s.rules.planned) s.startAt(starts, w) else w;
             if (at <= from or at + s.rules.lookahead > prompt.len or at >= prompt.len or !s.usable(at, starts)) continue;
             const is_rewind = rewind > 0 and k == 1 and at == rewind;
-            if (!is_rewind and at - from < s.rules.min_gap and (k > 0 or (from > 0 and s.rules.warm))) continue; // near the resume point
+            if (!is_rewind and !(k == 0 and warm_pass) and at - from < s.rules.min_gap and (k > 0 or (from > 0 and s.rules.warm))) continue; // near the resume point
             if (k > 0 and !is_rewind) { // the history's mark always (warm families: away from the resume point); the others away from it and each other
                 const near = for (out.items) |o| {
                     if (@max(o, at) - @min(o, at) < s.rules.min_gap) break true;

@@ -164,6 +164,8 @@ test "marks: the stable prefix with the last prompt and shared blocks, past the 
     s.rules.warm = true; // replies prefilled in the background: the resumed state serves the next turn
     try std.testing.expectEqualSlices(u32, &.{}, try s.marks(a, &prompt, 9, 10, &.{}, &.{}, &.{}));
     try std.testing.expectEqualSlices(u32, &.{1}, try s.marks(a, &prompt, 0, 1, &.{}, &.{}, &.{})); // from the start the history's mark stays
+    // a warm pass (history the whole prompt) keeps where its state can be keyed, however near it resumed
+    try std.testing.expectEqualSlices(u32, &.{11}, try s.marks(a, &prompt, 10, 12, &.{}, &.{}, &.{}));
 }
 
 test "prompts under min_prompt keep nothing (their extra prompt call would cost more than reuse saves), longer ones keep as before" {
