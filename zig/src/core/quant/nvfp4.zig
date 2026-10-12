@@ -25,9 +25,11 @@ pub fn elements(h: Host) usize {
 /// fp64 dequantization of every row of `h` (a stack's leading dimensions folded), code * scale * global, into `out`.
 pub fn reference(h: Host, out: []f64) error{UnexpectedTensor}!void {
     const rank = h.weight.rank;
-    if (rank < 2 or h.scale.rank != rank or h.weight.dtype != .u8 or h.scale.dtype != .f8_e4m3) return error.UnexpectedTensor;
+    if (rank < 2 or rank > h.weight.shape.len or h.scale.rank != rank or h.weight.dtype != .u8 or h.scale.dtype != .f8_e4m3) return error.UnexpectedTensor;
     const n = h.weight.shape[rank - 2];
     const k = h.weight.shape[rank - 1] * 2;
+    if (n == 0 or k == 0) return error.UnexpectedTensor;
+    for (0..rank - 2) |d| if (h.weight.shape[d] == 0 or h.weight.shape[d] != h.scale.shape[d]) return error.UnexpectedTensor;
     if (h.scale.shape[rank - 2] != n or h.scale.shape[rank - 1] * group != k or out.len != elements(h)) return error.UnexpectedTensor;
     const stack = elements(h) / (n * k);
     if (h.global.len != stack) return error.UnexpectedTensor;
@@ -59,4 +61,17 @@ test "an NVFP4 stack against hand-decoded values" {
     try std.testing.expectEqual(@as(f64, 3), out[16]);
     try std.testing.expectEqual(@as(f64, 1.5), out[32 + 31]);
     try std.testing.expectEqual(@as(f64, 0), out[2]);
+}
+
+test "a reference refuses mismatched expert stacks" {
+    const codes: [16]u8 = @splat(0x22);
+    const scales: [2]u8 = @splat(0x38);
+    const global = [_]f32{ 1, 1 };
+    const h: Host = .{
+        .weight = .{ .dtype = .u8, .rank = 3, .shape = .{ 2, 1, 8, 1, 1 }, .bytes = &codes },
+        .scale = .{ .dtype = .f8_e4m3, .rank = 3, .shape = .{ 1, 1, 1, 1, 1 }, .bytes = &scales },
+        .global = &global,
+    };
+    var out: [32]f64 = undefined;
+    try std.testing.expectError(error.UnexpectedTensor, reference(h, &out));
 }

@@ -27,7 +27,7 @@ pub fn toE4m3(x: f64) f64 {
     return std.math.copysign(@min(q * step, 448.0), x);
 }
 
-/// A projection as stored: `weight` e4m3 [..., N, K], `scale_inv` [..., ceil(N / 128), ceil(K / 128)] (fp32 or bf16).
+/// A projection as stored: `weight` e4m3 [..., N, K], `scale_inv` [..., ceil(N / 128), ceil(K / 128)] (fp32, bf16 or fp16).
 pub const Host = struct { weight: Tensor, scale_inv: Tensor };
 
 /// Weights of a projection: its rows (a stack's leading dimensions folded) by K.
@@ -38,9 +38,11 @@ pub fn elements(h: Host) usize {
 /// fp64 dequantization of `h`'s rows (a stack's leading dimensions folded), code * scale_inv, into `out` [rows, K].
 pub fn reference(h: Host, out: []f64) error{UnexpectedTensor}!void {
     const rank = h.weight.rank;
-    if (rank < 2 or h.scale_inv.rank != rank or h.weight.dtype != .f8_e4m3 or !convert.isFloat(h.scale_inv.dtype)) return error.UnexpectedTensor;
+    if (rank < 2 or rank > h.weight.shape.len or h.scale_inv.rank != rank or h.weight.dtype != .f8_e4m3 or !convert.tableDtype(h.scale_inv.dtype)) return error.UnexpectedTensor;
     const n = h.weight.shape[rank - 2];
     const k = h.weight.shape[rank - 1];
+    if (n == 0 or k == 0) return error.UnexpectedTensor;
+    for (0..rank - 2) |d| if (h.weight.shape[d] == 0 or h.weight.shape[d] != h.scale_inv.shape[d]) return error.UnexpectedTensor;
     const nb = h.scale_inv.shape[rank - 2];
     const kb = h.scale_inv.shape[rank - 1];
     if (nb != (n + block - 1) / block or kb != (k + block - 1) / block or out.len != h.weight.numel()) return error.UnexpectedTensor;
@@ -84,4 +86,23 @@ test "a block-FP8 stack against hand-decoded values" {
     try std.testing.expectEqual(@as(f64, -8), out[129]);
     try std.testing.expectEqual(@as(f64, 1), out[260]);
     try std.testing.expectEqual(@as(f64, 16), out[260 + 130 + 128]);
+}
+
+test "a reference refuses an unsupported f64 scale before loading it" {
+    const codes = [_]u8{0x38};
+    const inv = [_]f64{1};
+    const h: Host = .{
+        .weight = .{ .dtype = .f8_e4m3, .rank = 2, .shape = .{ 1, 1, 1, 1, 1 }, .bytes = &codes },
+        .scale_inv = .{ .dtype = .f64, .rank = 2, .shape = .{ 1, 1, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(&inv) },
+    };
+    var out: [1]f64 = undefined;
+    try std.testing.expectError(error.UnexpectedTensor, reference(h, &out));
+}
+
+test "a reference refuses an empty projection" {
+    const h: Host = .{
+        .weight = .{ .dtype = .f8_e4m3, .rank = 2, .shape = .{ 0, 1, 1, 1, 1 }, .bytes = &.{} },
+        .scale_inv = .{ .dtype = .f32, .rank = 2, .shape = .{ 0, 1, 1, 1, 1 }, .bytes = &.{} },
+    };
+    try std.testing.expectError(error.UnexpectedTensor, reference(h, &.{}));
 }
