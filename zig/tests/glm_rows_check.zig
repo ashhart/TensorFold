@@ -395,6 +395,32 @@ fn splitCheck(g: *const Gpu, k: usize, ns: []const usize, bits: []const u8, t: *
     }
 }
 
+fn headsLaunch(e: mtl.ComputeEncoder, p: *const wide.Pipes, q: affine.Affine, h: u32, io: wide.Io, kx: u32, sums: Ref) void {
+    wide.headsBatch(p, e, q, h, io, kx, sums);
+}
+
+/// A chunk's embed_q / unembed_out (wide.headsBatch): the heads in one affine_mm batch == each head's own product.
+fn headsCheck(g: *const Gpu, mm: affine_mm.Pipes, bits: u8, n: usize, k: usize, t: *Tally) !void {
+    const nh = 4;
+    const m = 33; // two 16-row steps and one more
+    const ldx = nh * k + 96; // a row's slices, then columns no head reads (qp's indexer queries)
+    const w = try Mat.init(g.device, nh * n, k, bits, 64, 4100 + n + bits);
+    defer w.deinit();
+    var prng = std.Random.DefaultPrng.init(4200 + k);
+    const r = prng.random();
+    const bs = [_]mtl.Buffer{ try buf(g.device, m * ldx * 2), try buf(g.device, m * nh * (k / 64) * 4), try buf(g.device, m * nh * n * 2), try buf(g.device, m * k * 2), try buf(g.device, m * n * 2) };
+    defer for (bs) |b| b.deinit();
+    for (bs[0].slice(u16, m * ldx)) |*v| v.* = toBf((r.float(f32) - 0.5) * 2);
+    try g.run(headsLaunch, .{ &g.p, w.q, @as(u32, nh), wide.Io{ .in = ref(bs[0]), .ldx = @intCast(ldx), .out = ref(bs[2]), .ldo = @intCast(nh * n), .rows = m }, @as(u32, @intCast(k)), ref(bs[1]) });
+    const all = bs[2].slice(u16, m * nh * n);
+    for (0..nh) |h| {
+        for (0..m) |i| @memcpy(bs[3].slice(u16, m * k)[i * k ..][0..k], bs[0].slice(u16, m * ldx)[i * ldx + h * k ..][0..k]);
+        try g.run(mmDense, .{ mm, w.part(h, nh), ref(bs[3]), ref(bs[1]), ref(bs[4]), @as(u32, m) });
+        for (0..m) |i| try eql(all[(i * nh + h) * n ..][0..n], bs[4].slice(u16, m * n)[i * n ..][0..n]);
+        t.pairs += m * n;
+    }
+}
+
 fn perHead(e: mtl.ComputeEncoder, p: *const wide.Pipes, q: affine.Affine, heads: u32, io: wide.Io, hsx: u32, hso: u32) void {
     wide.perHead(p, e, q, heads, io, hsx, hso);
 }
@@ -458,6 +484,10 @@ pub fn main() !void {
     try splitCheck(&g, 256, &.{ 64, 64, 64, 16, 16, 8 }, &.{ 5, 8, 5, 8, 8, 8 }, &split); // oQ4 layer 6's KDA input
     try splitCheck(&g, 512, &.{ 48, 16, 8, 8 }, &.{ 6, 6, 5, 5 }, &split); // oQ4 layer 7's and the MTP's MLA x_proj
     std.debug.print("split stacks through one call == each member alone: {d} bit-equal values\n", .{split.pairs});
+    var hd = Tally{};
+    for ([_][2]usize{ .{ 512, 256 }, .{ 256, 512 } }) |s| try headsCheck(&g, g.p.mm8, 8, s[0], s[1], &hd); // embed_q, unembed_out
+    std.debug.print("prompt embed_q / unembed_out q8: the heads in one affine_mm batch == each head alone: {d} bit-equal values\n", .{hd.pairs});
+    all.pairs += hd.pairs;
     all.pairs += split.pairs;
     all.pairs += try @import("glm_rows_kda.zig").check(&g.p, device, queue);
     all.values += try @import("glm_rows_kda.zig").bf16Check(&g.p, device, queue, &all.worst);
