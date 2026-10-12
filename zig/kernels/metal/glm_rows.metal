@@ -91,6 +91,70 @@ template <int BITS, bool GLU>
   }
 }
 
+// Slots as glm_rows_ids (BITS), then X2's rows through the shared expert (SBITS; GLU: gate then up rows) into OUT2.
+template <int BITS, int SBITS, bool GLU, int RPS = 4, int KC = 0> // RPS columns a simdgroup; KC: k compiled in
+[[kernel]] void glm_moe_rows(const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
+                             const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]],
+                             constant GlmPickDims& d [[buffer(4)]], device bfloat* OUT [[buffer(5)]],
+                             const device int* ids [[buffer(6)]], const device uint32_t* W2 [[buffer(7)]],
+                             const device bfloat* S2 [[buffer(8)]], const device bfloat* B2 [[buffer(9)]],
+                             const device bfloat* X2 [[buffer(10)]], const device uint32_t* SW [[buffer(11)]],
+                             const device bfloat* SS [[buffer(12)]], const device bfloat* SB [[buffer(13)]],
+                             device bfloat* OUT2 [[buffer(14)]],
+                             uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                             uint3 tg [[threadgroup_position_in_grid]]) {
+  const int row0 = (int(tg.x) * 2 + int(sg)) * RPS;
+  if (row0 >= d.n) return;
+  const int y = int(tg.y);
+  const int cols = metal::min(RPS, d.n - row0);
+  const int K = KC > 0 ? KC : d.k;
+  const size_t kg = size_t(K / d.group);
+  const device uint8_t* gw;
+  const device bfloat *gs, *gb, *x;
+  device bfloat* out;
+  size_t up_at = 0; // the up rows' offset from the gate rows, in rows
+  if (y < d.slots) {
+    const int expert = ids[y];
+    out = OUT + size_t(y) * d.ldo + row0;
+    if (expert < 0 || expert >= d.experts) {
+      if (int(lane) < cols) out[lane] = bfloat(0.0f);
+      return;
+    }
+    const size_t at = size_t(expert) * d.n + row0;
+    const size_t kb = size_t(K) * BITS / 8;
+    x = X + size_t(y / d.repeat) * K;
+    float acc[1][RPS];
+    tf_rp_rows<RPS, 1, BITS, false>((const device uint8_t*)W + at * kb, S + at * kg, B + at * kg, x, K, d.group, lane, acc);
+    if (GLU) {
+      float up[1][RPS];
+      tf_rp_rows<RPS, 1, BITS, false>((const device uint8_t*)W2 + at * kb, S2 + at * kg, B2 + at * kg, x, K, d.group, lane, up);
+      if (lane == 0)
+        for (int j = 0; j < cols; j++) out[j] = glm_rows_glu(acc[0][j], up[0][j], d.lim);
+    } else if (lane == 0) {
+      for (int j = 0; j < cols; j++) out[j] = bfloat(acc[0][j]);
+    }
+    return;
+  }
+  const int r = y - d.slots;
+  const size_t skb = size_t(K) * SBITS / 8;
+  x = X2 + size_t(r) * K;
+  out = OUT2 + size_t(r) * d.n + row0;
+  gw = (const device uint8_t*)SW + size_t(row0) * skb;
+  gs = SS + size_t(row0) * kg;
+  gb = SB + size_t(row0) * kg;
+  float acc[1][RPS];
+  tf_rp_rows<RPS, 1, SBITS, false>(gw, gs, gb, x, K, d.group, lane, acc);
+  if (GLU) {
+    up_at = size_t(d.n);
+    float up[1][RPS];
+    tf_rp_rows<RPS, 1, SBITS, false>(gw + up_at * skb, gs + up_at * kg, gb + up_at * kg, x, K, d.group, lane, up);
+    if (lane == 0)
+      for (int j = 0; j < cols; j++) out[j] = glm_rows_glu(acc[0][j], up[0][j], d.lim);
+  } else if (lane == 0) {
+    for (int j = 0; j < cols; j++) out[j] = bfloat(acc[0][j]);
+  }
+}
+
 // Expert e's sorted pairs: GLU x row order[i] / repeat to out row i, else x row i to row order[i]; grid (n / 8, e).
 template <int BITS, bool GLU>
 [[kernel]] void glm_rows_sorted(const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
@@ -167,3 +231,13 @@ GLM_ROWS_AT(4)
 GLM_ROWS_AT(5)
 GLM_ROWS_AT(6)
 GLM_ROWS_AT(8)
+
+#define GLM_MOE_AT(B)                                                                                                  \
+  template [[host_name("glm_moe_rows_q" #B "_s8")]] [[kernel]] decltype(glm_moe_rows<B, 8, false>) glm_moe_rows<B, 8, false>; \
+  template [[host_name("glm_moe_rows_glu_q" #B "_s8")]] [[kernel]] decltype(glm_moe_rows<B, 8, true>) glm_moe_rows<B, 8, true>;
+GLM_MOE_AT(2)
+GLM_MOE_AT(3)
+GLM_MOE_AT(4)
+GLM_MOE_AT(5)
+GLM_MOE_AT(6)
+GLM_MOE_AT(8)

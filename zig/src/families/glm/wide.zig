@@ -25,6 +25,8 @@ pub const Pipes = struct {
     glu_ids: [nw]mtl.Pipeline, // gate and up through it, SwiGLU'd
     sorted: [nw]mtl.Pipeline, // an expert's sorted pairs (prompt chunks)
     glu_sorted: [nw]mtl.Pipeline,
+    moe: [nw]mtl.Pipeline, // routed experts by pick at each width and the 8-bit shared expert, one launch
+    moe_glu: [nw]mtl.Pipeline, // the same through gate and up, SwiGLU'd
     bf16: mtl.Pipeline, // an unquantized matrix (the MTP head's eh_proj)
     kda_pre: mtl.Pipeline, // kda_rows reading f_b's and g_b's products made apart (any width but 4/64)
     kda_fg: [nw]mtl.Pipeline, // kda_rows making f_b's and g_b's dots of one width (g64) as glm_rows does: .pre's bits
@@ -37,7 +39,7 @@ pub const Pipes = struct {
     hash: u64, // every source compiled here
 
     pub fn deinit(p: *Pipes) void {
-        inline for (.{ &p.rows, &p.ids, &p.glu_ids, &p.sorted, &p.glu_sorted, &p.embed, &p.kda_fg }) |set| for (set) |x| x.deinit();
+        inline for (.{ &p.rows, &p.ids, &p.glu_ids, &p.sorted, &p.glu_sorted, &p.moe, &p.moe_glu, &p.embed, &p.kda_fg }) |set| for (set) |x| x.deinit();
         p.bf16.deinit();
         p.kda_pre.deinit();
         p.zeros.deinit();
@@ -82,7 +84,7 @@ pub const glue_math = blk: {
 
 /// The pipelines built so far: a failed compile releases them all.
 const Made = struct {
-    list: [nw * 6 + 4 + 4 * affine_mm.names.len]mtl.Pipeline = undefined,
+    list: [nw * 8 + 4 + 4 * affine_mm.names.len]mtl.Pipeline = undefined,
     n: usize = 0,
     released: usize = 0,
 
@@ -129,6 +131,8 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
             p.glu_ids[i] = try made.add(device, l, "glm_rows_glu_ids" ++ q);
             p.sorted[i] = try made.add(device, l, "glm_rows_sorted" ++ q);
             p.glu_sorted[i] = try made.add(device, l, "glm_rows_glu_sorted" ++ q);
+            p.moe[i] = try made.add(device, l, "glm_moe_rows" ++ q ++ "_s8");
+            p.moe_glu[i] = try made.add(device, l, "glm_moe_rows_glu" ++ q ++ "_s8");
         }
         p.bf16 = try made.add(device, l, "glm_rows_bf16");
     }
@@ -261,6 +265,37 @@ pub fn glu(p: *const Pipes, e: mtl.ComputeEncoder, gu: Affine, n: u32, x: Ref, o
     byIds(p, e, .{ .w = gate, .up = up, .experts = 1, .repeat = 1, .lim = lim }, x, .{ .buf = p.zeros }, out, rows);
 }
 
+/// A MoE block's routed experts and shared expert (`sh`: [gate; up] one run, then down), all g64, the shared at 8 bits.
+pub const Moe = struct { gate: Affine, up: Affine, down: Affine, sh_gate_up: Affine, sh_down: Affine };
+
+/// Whether `m` takes `moe`: every matrix one run, g64, the routed of one width (not 4/64), the shared at 8 bits.
+pub fn moeOne(m: Moe) bool {
+    if (native(m.gate) and native(m.up) and native(m.down)) return false; // routed 4/64 keeps the generated gathers
+    for ([_]Affine{ m.gate, m.up, m.down, m.sh_gate_up, m.sh_down }) |q| if (q.more != 0 or q.group != 64) return false;
+    return m.up.bits == m.gate.bits and m.down.bits == m.gate.bits and m.sh_gate_up.bits == 8 and m.sh_down.bits == 8;
+}
+
+/// byIds's GLU and down for the slots, glu and dense for the shared expert's rows: a launch each step, the same bits.
+pub fn moe(p: *const Pipes, e: mtl.ComputeEncoder, m: Moe, experts: u32, topk: u32, lim: f32, io: MoeIo, rows: u32) void {
+    const slots = rows * topk;
+    const g = m.sh_gate_up;
+    const steps = [2]struct { pipe: mtl.Pipeline, w: Affine, up: ?Affine, sh: Affine, x: Ref, x2: Ref, out: Ref, out2: Ref, repeat: u32 }{
+        .{ .pipe = p.moe_glu[at(m.gate.bits)], .w = m.gate, .up = m.up, .sh = g, .x = io.x, .x2 = io.x, .out = io.act, .out2 = io.acts, .repeat = topk },
+        .{ .pipe = p.moe[at(m.down.bits)], .w = m.down, .up = null, .sh = m.sh_down, .x = io.act, .x2 = io.acts, .out = io.ye, .out2 = io.ys, .repeat = 1 },
+    };
+    for (steps) |s| {
+        const u = s.up orelse s.w;
+        e.setPipeline(s.pipe);
+        bind(e, 0, .{ s.x, s.w.w, s.w.s, s.w.b });
+        e.setValue(PickDims{ .k = @intCast(s.w.k), .n = @intCast(s.w.n), .group = 64, .slots = @intCast(slots), .repeat = @intCast(s.repeat), .experts = @intCast(experts), .ldo = @intCast(s.w.n), .lim = lim }, 4);
+        bind(e, 5, .{ s.out, io.ids, u.w, u.s, u.b, s.x2, s.sh.w, s.sh.s, s.sh.b, s.out2 });
+        e.dispatchGroups(mtl.Size.of((s.w.n + 7) / 8, slots + rows, 1), mtl.Size.of(64, 1, 1));
+    }
+}
+
+/// `moe`'s buffers: x rows, the picks' expert ids, act and acts (gate|up out), ye and ys (down out).
+pub const MoeIo = struct { x: Ref, ids: Ref, act: Ref, acts: Ref, ye: Ref, ys: Ref };
+
 /// Each expert's sorted pairs (offsets, order): with `up` x row order / repeat to row i, else x row i to row order[i].
 pub fn bySorted(p: *const Pipes, e: mtl.ComputeEncoder, m: Picks, x: Ref, offsets: Ref, order: Ref, out: Ref, ldo: u32) void {
     const u = m.up orelse m.w;
@@ -338,7 +373,7 @@ test "a failed compile releases every pipeline built before it; a load counts ea
     defer device.deinit();
     var made: Made = .{};
     try std.testing.expectError(error.KernelCompile, build(gpa, device, "", &made)); // after the row kernels
-    try std.testing.expectEqual(@as(usize, nw * 5 + 1), made.released);
+    try std.testing.expectEqual(@as(usize, nw * 7 + 1), made.released);
     try std.testing.expectEqual(@as(usize, 0), made.n);
     var all: Made = .{};
     var p = try build(gpa, device, comptime kernels.generatedSource("kda_rows"), &all);
