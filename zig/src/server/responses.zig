@@ -1,6 +1,6 @@
 //! OpenAI's Responses API: each request runs as its chat completion, translated item by item and event by event.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const http_body = @import("http_body.zig");
 const openai = @import("openai.zig");
@@ -203,7 +203,7 @@ const Wire = struct {
     payload: Value = .null,
 
     fn out(w: *Wire) openai.Out {
-        return .{ .ctx = w, .vt = &.{ .open = open, .event = event, .reply = whole } };
+        return .{ .ctx = w, .vt = &.{ .open = open, .event = event, .reply = whole, .keepalive = keepalive } };
     }
 
     fn open(ctx: *anyopaque) error{Closed}!void {
@@ -222,6 +222,11 @@ const Wire = struct {
         const w: *Wire = @ptrCast(@alignCast(ctx));
         w.status = status;
         w.payload = payload;
+    }
+
+    fn keepalive(ctx: *anyopaque) error{Closed}!void {
+        const w: *Wire = @ptrCast(@alignCast(ctx));
+        return sse.comment(w.reply.conn);
     }
 };
 

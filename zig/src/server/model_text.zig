@@ -1,6 +1,6 @@
 //! The tokenizer and chat template a server renders prompts and replies with (the tok and jinja branches plug in here).
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const Allocator = std.mem.Allocator;
 
 pub const RenderOptions = struct {

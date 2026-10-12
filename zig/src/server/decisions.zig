@@ -1,6 +1,6 @@
 //! /v1/decisions checks a body the way 0.6.6 checks it, then scores through the engine hook when a family sets one.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const pyrepr = @import("pyrepr.zig");

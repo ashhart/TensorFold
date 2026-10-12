@@ -1,6 +1,6 @@
 //! Where a prompt's prefill chunks start (Python's PrefillPlan and message_markers): prompts that agree up to a start cut alike up to it.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const prompt = @import("prompt.zig");
 const Server = @import("server.zig").Server;

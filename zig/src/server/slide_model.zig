@@ -1,6 +1,6 @@
 //! The served model as the Sliding Weights view draws it: its layers, its pockets, and the shards that hold them.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 

@@ -20,6 +20,7 @@ pub const State = struct {
     plain: ?u64 = null,
     wait: ?u64 = null,
     ms: ?Table = null, // plain_guard: the stream's own round times
+    alpha: f64 = 0.6, // geometric_depth: the stream's acceptance, kept / tried (decoder.py alpha, from 0.6)
 
     pub fn deinit(st: *State, gpa: Allocator) void {
         gpa.free(st.p);
@@ -35,6 +36,7 @@ pub const Who = struct {
     forced: bool,
     granted: ?u32 = null,
     stream: ?*anyopaque = null,
+    position: u64 = 0, // the stream's cache length (geometric depth's context term)
 };
 
 /// Whether a copied continuation is ahead of a stream (the round loop proposes; Python `_copy_proposal`).
@@ -56,6 +58,12 @@ pub const Rule = struct {
     plain_guard: bool,
     node_probabilities: bool,
     batch_rows: u32,
+    geometric: bool = false, // Config.geometric_depth: a lone stream's depth by its one acceptance (Python joint_widths)
+    geo_costs: []const f64 = &.{}, // Config.geometric_costs
+    geo_draft: f64 = 0,
+    geo_ctx: [2]f64 = .{ 0, 0 }, // Config.geometric_ctx
+    geo_ctx_base: f64 = 9000,
+    sharing: bool = false, // inside budgets(): shared rounds keep the per-depth rule
     round_ms: Table = .{}, // a round's wall time by drafts, shared by every stream
     overhead: std.ArrayList(Overhead) = .empty, // a shared round's ms past its forward, by streams (insertion order)
 
@@ -75,6 +83,12 @@ pub const Rule = struct {
     /// Draft j was tried when drafts 1 .. j - 1 were kept; its estimate moves toward whether it was kept.
     pub fn observeDepth(r: *Rule, who: Who, proposed: i64, accepted: i64) !void {
         const p = try r.rates(who);
+        if (r.geometric and proposed > 0) {
+            const got = @min(@max(accepted, 0), proposed);
+            const tried = got + @intFromBool(got < proposed);
+            const st = &who.state.*.?;
+            st.alpha = 0.7 * st.alpha + 0.3 * (@as(f64, @floatFromInt(got)) / @as(f64, @floatFromInt(tried)));
+        }
         const n = @min(@max(proposed, 0), @as(i64, @intCast(p.len)));
         var j: i64 = 0;
         while (j < n) : (j += 1) {
@@ -108,6 +122,7 @@ pub const Rule = struct {
         const table = try r.costs(who);
         if (table.get(drafts)) |v| return v;
         const forward = r.family_costs.get(drafts + 1) orelse return null;
+        if (r.geometric and !r.sharing) return forward + (if (drafts > 0) r.mtp_step_ms else 0.0); // one draft pass
         var modeled = forward + r.mtp_step_ms * @as(f64, @floatFromInt(drafts));
         if (r.plain_guard) {
             // untimed: its model plus the least time a row of a timed round took beyond its model
@@ -129,6 +144,7 @@ pub const Rule = struct {
         const most = @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1));
         if (most <= 0) return 0;
         const p = try r.rates(who);
+        if (r.geometric and !r.sharing and !r.family_costs.empty()) return r.geometricDepth(who, who.state.*.?.alpha, most);
         if (r.family_costs.empty()) {
             const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else 3;
             return @max(1, @min(most, want));
@@ -147,7 +163,7 @@ pub const Rule = struct {
         var run: f64 = 1.0;
         var d: i64 = 1;
         while (d <= most) : (d += 1) {
-            const cost = (try r.roundCost(d, who)) orelse break;
+            const cost = if (r.geo_costs.len > 0) geoCost(r.geo_costs, @intCast(d + 1)) + r.geo_draft else (try r.roundCost(d, who)) orelse break;
             const at: usize = @intCast(d - 1);
             run *= if (at < p.len) p[at] else p[p.len - 1];
             expected += run;
@@ -163,6 +179,37 @@ pub const Rule = struct {
         st.wait = r.k.depth_probe_every;
         if (best < most and st.rounds % r.k.depth_probe_every == 0) best += 1;
         return best;
+    }
+
+    /// The depth (0 .. most) with the most expected tokens (1 + a + a^2 + ...) a ms; at 0, one draft every 8 rounds.
+    fn geometricDepth(r: *Rule, who: Who, alpha: f64, most: i64) !i64 {
+        var best: i64 = 0;
+        var best_rate: f64 = -1.0;
+        var expected: f64 = 0.0;
+        var run: f64 = 1.0;
+        var d: i64 = 0;
+        while (d <= most) : (d += 1) {
+            expected += run;
+            run *= alpha;
+            const base = (try r.roundCost(d, who)) orelse break;
+            if (base <= 0.0) continue;
+            const past = @max(0.0, @as(f64, @floatFromInt(who.position)) - r.geo_ctx_base) / 1000.0;
+            const cost = base + past * (r.geo_ctx[0] + r.geo_ctx[1] * @as(f64, @floatFromInt(d)));
+            if (expected / cost > best_rate) {
+                best = d;
+                best_rate = expected / cost;
+            }
+        }
+        const st = &who.state.*.?;
+        st.rounds += 1;
+        return if (best == 0 and st.rounds % 8 == 0) @min(1, most) else best;
+    }
+
+    /// The family's cost table at `rows`, past its end extended by its last step.
+    fn geoCost(tab: []const f64, rows: usize) f64 {
+        if (rows <= tab.len) return tab[rows - 1];
+        const step = if (tab.len > 1) tab[tab.len - 1] - tab[tab.len - 2] else 0.0;
+        return tab[tab.len - 1] + @as(f64, @floatFromInt(rows - tab.len)) * step;
     }
 
     /// One draft after `wait` plain rounds in a row; each probe doubles the wait until drafting wins again.
@@ -188,6 +235,8 @@ pub const Rule = struct {
 
     /// Head drafts for the streams of a shared round, sized by allocation over their chain chances.
     pub fn budgets(r: *Rule, whos: []Who, probe: Probe, out: []i64) !void {
+        r.sharing = true;
+        defer r.sharing = false;
         if (r.node_probabilities) {
             for (whos, out) |*w, *o| {
                 const inner = try r.headDepth(w, null, probe);
@@ -281,4 +330,28 @@ test "depth picks the most tokens a ms and probes deeper" {
     defer if (st) |*s| s.deinit(gpa);
     const who: Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false };
     try std.testing.expectEqual(@as(i64, 3), try rule.depth(who));
+}
+
+test "geometric depth: the best rate for one acceptance, plain when drafts miss, shallower deep in context" {
+    const gpa = std.testing.allocator;
+    var fc: Table = .{};
+    defer fc.deinit(gpa);
+    for (1..5) |w| try fc.put(gpa, @intCast(w), 8.0 + 2.0 * @as(f64, @floatFromInt(w)));
+    const shared: Table = .{};
+    var rule: Rule = .{ .gpa = gpa, .prior = &.{ 0.9, 0.9, 0.9 }, .most_drafts = 3, .family_costs = &fc, .shared_costs = &shared, .mtp_step_ms = 2.0, .plain_guard = false, .node_probabilities = false, .batch_rows = 8, .geometric = true };
+    defer rule.deinit();
+    var st: ?State = null;
+    defer if (st) |*s| s.deinit(gpa);
+    var who: Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false };
+    try std.testing.expectEqual(@as(i64, 2), try rule.depth(who)); // alpha 0.6: 1.96 tokens in 16 ms
+    rule.geo_ctx = .{ 1.0, 1.0 };
+    rule.geo_ctx_base = 0;
+    who.position = 10000;
+    try std.testing.expectEqual(@as(i64, 0), try rule.depth(who)); // 10 ms more a round and a draft at 10,000
+    who.position = 0;
+    for (0..10) |_| try rule.observeDepth(who, 2, 0);
+    try std.testing.expect(st.?.alpha < 0.1);
+    var depths: [8]i64 = undefined;
+    for (&depths) |*d| d.* = try rule.depth(who);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 0, 0, 0, 0, 1, 0, 0 }, &depths); // one probe every 8 rounds
 }

@@ -1,0 +1,68 @@
+//! DeepSeek-V4.1-Flash on the Zig engine: release config, EXL3 pack headers, a rank's TP weight plan (host side).
+
+const std = @import("std");
+
+pub const config = @import("config.zig");
+pub const Config = config.Config;
+pub const exl3 = @import("exl3.zig");
+pub const names = @import("names.zig");
+pub const pack = @import("pack.zig");
+pub const Pack = pack.Pack;
+pub const plan = @import("plan.zig");
+pub const Plan = plan.Plan;
+pub const stage = @import("stage.zig");
+pub const named = @import("named.zig");
+pub const rounds = @import("rounds.zig");
+pub const prepare = @import("prepare.zig");
+pub const engram_host = @import("engram_host.zig");
+
+test {
+    _ = config;
+    _ = exl3;
+    _ = names;
+    _ = pack;
+    _ = plan;
+    _ = stage;
+    _ = named;
+    _ = prepare;
+    _ = engram_host;
+    // the device-side weight load, compiled on the host (no GPU work)
+    inline for (.{ @import("load.zig"), @import("forms.zig"), @import("forms_inplace.zig"), @import("host_stage.zig"), @import("triton_capture.zig"), @import("ex_stacks.zig"), @import("buffers.zig"), @import("block_calls.zig") }) |t| std.testing.refAllDecls(t);
+    // a block's emitter (attention, index, MoE, read-ahead, windows past 16 rows) over the launch bindings
+    const block = @import("block.zig");
+    inline for (.{ block, block.Emitter, block.Pool, @import("block_attn.zig"), @import("block_index.zig"), @import("block_moe.zig"), @import("block_prefetch.zig"), @import("block_wide.zig"), @import("knob_types.zig"), @import("forward_types.zig") }) |t| std.testing.refAllDecls(t);
+    _ = @import("host_test.zig");
+    _ = @import("engram_rows_test.zig"); // Engram's shard rows
+    _ = @import("phases.zig"); // the phase timers
+    // the forward over the block emitter, split KV and the decode graphs (hooks for later stages unset)
+    inline for (.{ @import("forward.zig"), @import("forward_engram.zig"), @import("forward_follow.zig"), @import("forward_glue.zig"), @import("forward_graph.zig"), @import("forward_hooks.zig"), @import("forward_sample.zig"), @import("kv_state.zig"), @import("run.zig"), @import("triton_call.zig"), @import("kv_glue_emit_test.zig") }) |t| std.testing.refAllDecls(t);
+    _ = @import("graphs.zig"); // the decode graphs' buckets, statics and floor
+    _ = @import("greedy.zig"); // greedy's host step
+    // the prompt's prefill: segments over the prefill emitter, CED, long prompts, x3gm v2 (hooks for images unset)
+    inline for (.{ @import("block_prefill.zig"), @import("block_prefill_attn.zig"), @import("block_prefill_emit.zig"), @import("block_prefill_mhc.zig"), @import("block_prefill_moe.zig"), @import("block_prefill_select.zig"), @import("forward_prefill.zig"), @import("forward_prefill_finish.zig"), @import("forward_prefill_glue.zig"), @import("forward_prefill_k4.zig"), @import("gm2pf.zig"), @import("longpf.zig"), @import("calls_check.zig"), @import("rowmode.zig"), @import("serve_knobs.zig") }) |t| std.testing.refAllDecls(t);
+    _ = @import("ced.zig"); // CED's keep and the drafter hand-off
+    _ = @import("image_opts.zig"); // image prompts' block options
+    _ = @import("rowtab.zig"); // row mode's per-row table
+    _ = @import("multi_test.zig"); // several slots' prompt segments in one call
+    _ = @import("streamrb_test.zig"); // the stream top-k's read-back twins on the prefill emitter
+    // the keyed sampler's pipeline and device steps (TF_DSV41_SAMPLING; its golden runs in test-dsv41-sampling)
+    inline for (.{ @import("sampling_pipe.zig"), @import("sampling_dev.zig"), @import("sampling_gpu.zig") }) |t| std.testing.refAllDecls(t);
+    // DSpark's pass on the GPU (one slot; several slots' statics and messages): compiled on the host
+    inline for (.{ @import("dspark_dev.zig"), @import("dspark_emit.zig"), @import("dspark_gpu.zig"), @import("dspark_gpu_device.zig"), @import("dspark_layout.zig"), @import("dspark_rows.zig") }) |t| std.testing.refAllDecls(t);
+    // batched rows: the batch over several slots, its graphs and target, DSpark over several slots, sessions on the GPU
+    inline for (.{ @import("batch.zig"), @import("batch_engram.zig"), @import("batch_graph.zig"), @import("batch_prof.zig"), @import("batch_target.zig"), @import("slots.zig"), @import("target.zig"), @import("sessions_gpu.zig"), @import("dspark_slots.zig"), @import("dspark_slots_device.zig"), @import("dspark_slots_ingest.zig"), @import("gate_lanes.zig") }) |t| std.testing.refAllDecls(t);
+    _ = rounds; // a round's admit and ids on the plan link
+    _ = @import("lockstep.zig"); // the ranks' lockstep checks
+    _ = @import("round_graph.zig"); // the round's launches (TF_DSV41_ROUND_GRAPH)
+    // DSpark's ingest and passes in the emitted calls: CED, the index bound and the epilogue loads
+    _ = @import("ced_test.zig");
+    _ = @import("ibound_test.zig");
+    _ = @import("x3ld_epi_test.zig");
+    // prepared weight folders (TF_DSV41_PREPARED)
+    _ = @import("prepared.zig");
+    // the served engine, its knobs, hooks, round planner and calibration, and the tool's checks: compiled on the host
+    inline for (.{ @import("model.zig"), @import("engine_hooks.zig"), @import("serve_knobs_apply.zig"), @import("serve_engine.zig"), @import("serve_cli.zig"), @import("sched_host.zig"), @import("calib_gpu.zig"), @import("phases_timed.zig"), @import("session_slots_cli.zig"), @import("slots_cli.zig"), @import("slot_drafts_cli.zig"), @import("tool_main.zig"), @import("gate_layers.zig"), @import("gate_replay.zig"), @import("gate_forward.zig"), @import("gate_kv.zig"), @import("kv_emit_check.zig"), @import("engram_probe.zig") }) |t| std.testing.refAllDecls(t);
+    _ = @import("aot_needs.zig"); // the AOT variants the served config launches (and its test)
+    _ = @import("aot_trace.zig"); // TF_DSV41_AOT_TRACE onto the AOT set
+    _ = @import("boot_mem.zig"); // boot's memory figures and the rope upload
+}

@@ -42,6 +42,12 @@ const kernels = [_]Kernel{
     .{ .name = "torch_indexing", .src = "torch_ops/indexing", .flags = torch_ops },
     .{ .name = "torch_movement", .src = "torch_ops/movement", .flags = torch_ops },
     .{ .name = "torch_nemotron_constants", .src = "torch_ops/nemotron_constants", .flags = torch_ops },
+    .{ .name = "mimo_exl3_linear", .src = "mimo_v2/exl3_linear", .flags = &.{ "-O3", "--expt-relaxed-constexpr" } }, // MiMo-V2: Python's EXL3 copies
+    .{ .name = "mimo_exl3_experts", .src = "mimo_v2/exl3_experts", .flags = &.{ "-O3", "-lineinfo" } },
+    .{ .name = "mimo_exl3_experts_cb2", .src = "mimo_v2/exl3_experts_cb2", .flags = &.{ "-O3", "-lineinfo" } },
+    .{ .name = "mimo_glue", .src = "mimo_v2/glue", .flags = glue }, // torch's embed / add / rope tables, bit for bit
+    .{ .name = "mimo_dflash", .src = "mimo_v2/dflash", .flags = glue }, // the DFlash drafter's torch glue
+    .{ .name = "mimo_kv8", .src = "mimo_v2/kv8", .flags = &.{"-O3"} }, // full attention on an 8-bit cache
 };
 
 /// torch.utils.cpp_extension's own nvcc flags (torch 2.13): C++20 and which half/bf16 operators the headers define.
@@ -124,7 +130,18 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     runner.addImport("cuda", cuda);
     runner.addImport("lanes", mods.lanes);
     runner.addImport("nemotron", mods.nemotron);
+    runner.addImport("core", mods.core);
     b.installArtifact(b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner }));
+    b.installArtifact(@import("dsv41.zig").runner(b, target, optimize, cuda, strip));
+    b.installArtifact(@import("dsv41.zig").tool(b, target, optimize, cuda, strip)); // tf-dsv41: checks and the engine without HTTP
+    b.installArtifact(@import("dsv41.zig").server(b, target, optimize, cuda, build_options)); // tensorfold-dsv41
+    @import("sampling.zig").gpu(b, target, optimize, cuda, @import("dsv41.zig").kernels(b, target, optimize, cuda)); // tf-dsv41-samp: the keyed sampler's device steps
+    // tf-mimo: MiMo-V2's rank 1 behind the server (follow) and its device checks
+    const mimo = mimoModule(b, target, optimize, cuda, mods.lanes, mods.nemotron);
+    const mimo_exe = b.createModule(.{ .root_source_file = b.path("zig/src/families/mimo_v2/m1_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    for ([_][]const u8{ "cuda", "core", "tp", "tp_kernel" }) |name| mimo_exe.addImport(name, mimo.import_table.get(name).?);
+    mimo_exe.addImport("mimo_v2", mimo);
+    b.installArtifact(b.addExecutable(.{ .name = "tf-mimo", .root_module = mimo_exe }));
     nativeServer(b, target, optimize, cuda, mods.lanes, mods.nemotron, mods.tokenizer, build_options, true).root_module.strip = strip;
 }
 
@@ -136,9 +153,21 @@ fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes }, .{ .name = "nemotron", .module = nemotron } },
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes }, .{ .name = "nemotron", .module = nemotron }, .{ .name = "mimo_v2", .module = mimoModule(b, target, optimize, cuda, lanes, nemotron) } },
     });
     return .{ .api = api, .engines = mod };
+}
+
+/// MiMo-V2 (families/mimo_v2): its forward, prompt path, DFlash drafter and native lane backend.
+fn mimoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module) *std.Build.Module {
+    const core = nemotron.import_table.get("core").?; // the compilation's one `core` module
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/mimo_v2/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    m.addImport("cuda", cuda);
+    m.addImport("core", core);
+    m.addImport("lanes", lanes);
+    m.addImport("tp", @import("tp.zig").module(b, target, optimize, cuda));
+    m.addImport("tp_kernel", @import("tp.zig").mailboxModule(b));
+    return m;
 }
 
 /// The checkpoint subcommands' module: `models`, `info` and `pull` over the CUDA families.
@@ -159,6 +188,7 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .imports = &.{ .{ .name = "engine_api", .module = m.api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = m.engines }, .{ .name = "checkpoint_cli", .module = checkpointCli(b, target, .ReleaseSafe, null, m.engines) } },
     }) });
     exe.root_module.addOptions("build_options", build_options);
+    _ = @import("server.zig").addTo(b, exe.root_module, target, .ReleaseSafe, tokenizer, lanes); // json, the family's text side
     if (!install_native) {
         exe.root_module.strip = true;
         return exe;
@@ -187,10 +217,22 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         .link_libc = true,
         .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template } },
     });
+    const server_json = @import("server.zig").addTo(b, server_tests, host, .debug, mods.tokenizer, mods.lanes);
     const server_test = b.addRunArtifact(b.addTest(.{ .root_module = server_tests }));
-    step.dependOn(&server_test.step);
-    b.step("test-server-cpu", "The HTTP server's unit tests (routes, templates, tool parsing) without a GPU").dependOn(&server_test.step);
+    const json_test = b.addRunArtifact(b.addTest(.{ .root_module = server_json }));
+    const server_step = b.step("test-server-cpu", "The HTTP server's unit tests (routes, templates, tool parsing) without a GPU");
+    for ([_]*std.Build.Step.Run{ server_test, json_test }) |run| {
+        step.dependOn(&run.step);
+        server_step.dependOn(&run.step);
+    }
+    // tensorfold-native's own root (main.zig) compiles here too: only `native` builds it otherwise
+    step.dependOn(&nativeServer(b, host, .debug, cuda, mods.lanes, mods.nemotron, mods.tokenizer, build_options, false).step);
     for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, native, stagger(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+    // MiMo-V2's host parts: config, rank cuts, prompt chunk plans
+    const mimo = mimoModule(b, host, .debug, cuda, mods.lanes, mods.nemotron);
+    const mimo_test = b.addRunArtifact(b.addTest(.{ .root_module = mimo }));
+    step.dependOn(&mimo_test.step);
+    b.step("test-mimo", "MiMo-V2 family host tests").dependOn(&mimo_test.step);
     const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = host, .optimize = .debug, .link_libc = true });
     cli.addImport("cuda", cuda);
     cli.addImport("core", mods.core);

@@ -1,7 +1,7 @@
 //! The Sliding Weights fact graph: what was taught, how far each lesson is, where its neurons went; never the weights.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const slide_model = @import("slide_model.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;

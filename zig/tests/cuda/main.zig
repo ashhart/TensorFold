@@ -21,6 +21,8 @@ const carveout_tests = @import("carveout_tests.zig");
 const nvfp4_tests = @import("nvfp4_tests.zig");
 const modelopt_tests = @import("modelopt_tests.zig");
 const train_pack = @import("train_pack.zig");
+const mimo_exl3_tests = @import("mimo_exl3_tests.zig");
+const mimo_exl3_fixtures = @import("mimo_exl3_fixtures.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -47,6 +49,8 @@ const usage =
     \\  fp8-experts <dir>         grouped block-FP8 experts against recorded fixture bytes
     \\  nvfp4-experts <dir>       grouped NVFP4 experts against recorded fixture bytes
     \\  quant-ref                 FP8 and NVFP4 projections and experts against float64 references (synthetic)
+    \\  mimo-exl3 FILE PREFIX     MiMo's EXL3 kernels on one checkpoint tensor against core/exl3_format.zig
+    \\  mimo-exl3-fixtures MODEL DIR   MiMo's EXL3 launches against the Python engine's bytes (oracle/mimo_exl3_fixtures.py)
     \\  carveout [MiB] [card]     GB10 display memory: round trips and bandwidth (SKIP without the card)
     \\  nvfp4 <dir>               NVFP4 projections against recorded lane-matmul and prompt-GEMM fixture bytes
     \\  modelopt                  ModelOpt repack, FP8 and BF16 lane rows and relu^2 NVFP4 experts against fp64
@@ -106,6 +110,8 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "nvfp4-experts")) return nvfp4_experts_tests.experts(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "quant-ref")) return quant_ref_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "modelopt")) return modelopt_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "mimo-exl3-fixtures")) return mimo_exl3_fixtures.run(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "mimo-exl3")) return mimo_exl3_tests.run(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "sample")) return sample_tests.draws(gpu);
     if (std.mem.eql(u8, cmd, "glue")) return glue_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "window-profile")) return window_profile.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));

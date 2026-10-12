@@ -1,6 +1,6 @@
 //! The streaming half of tool calls: each finished call's opening delta, then its arguments (``stream_tool_call_deltas``).
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const tool_specs = @import("tool_specs.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;

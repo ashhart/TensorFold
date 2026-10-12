@@ -1,6 +1,6 @@
 //! Python's ``repr`` of decoded JSON, for refusal messages that quote a request's value.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 

@@ -1,6 +1,6 @@
 //! Note and reply are ordinary greedy or keyed generations, so the same request compacts and answers the same way.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const chat = @import("chat.zig");
 const stored = @import("compact_mem.zig");
 const server_mod = @import("server.zig");

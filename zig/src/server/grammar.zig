@@ -1,7 +1,7 @@
 //! Structured-output fields checked as ``engine.grammar.request_spec`` checks them; the engine enforces them.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const pyrepr = @import("pyrepr.zig");
 const tool_specs = @import("tool_specs.zig");

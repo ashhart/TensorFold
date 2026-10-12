@@ -1,7 +1,7 @@
 //! The server: one engine and tokenizer behind the HTTP routes, one thread a connection.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const auth = @import("auth.zig");
@@ -22,6 +22,7 @@ const log = @import("log.zig");
 const live = @import("live.zig");
 const slide_graph = @import("slide_graph.zig");
 const slide_lesson = @import("slide_lesson.zig");
+const family_mod = @import("family.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -57,6 +58,10 @@ pub const Config = struct {
     /// --slide-graph: the file holding the Sliding Weights fact graph; null keeps the graph in memory.
     slide_graph: ?[]const u8 = null,
     timeouts: http_conn.Timeouts = .{},
+    /// TF_SSE_KEEPALIVE_S: a silent stream's keepalive period before its first token (serve.zig; 0: none)
+    sse_keepalive_s: f64 = 15,
+    /// The checkpoint family's own chat rules (family.zig); null: the chat template path.
+    family: ?family_mod.Family = null,
 };
 
 pub const Server = struct {
@@ -77,9 +82,14 @@ pub const Server = struct {
     think_close_end: ?u32 = null,
     metrics: metrics.Metrics,
     store: responses.Store,
+    family: ?family_mod.Family = null,
     next_id: std.atomic.Value(u64) = .init(1),
     /// Connections open now; a stop waits for them before freeing what they read.
     open_connections: std.atomic.Value(u32) = .init(0),
+    /// A stop is draining (serve.zig): new generation requests get 503 with Retry-After, /health answers "draining"
+    draining: std.atomic.Value(bool) = .init(false),
+    /// Generation requests in progress (routes.post), what a drain waits for; counted before `draining` is read
+    generating: std.atomic.Value(u32) = .init(0),
     /// The idle keepalive on the engine's queue, armed by --keep-warm; null when off or not Metal.
     keepalive: ?*api.keepalive.Keepalive = null,
     preparing: std.atomic.Value(i64) = .init(0),
@@ -95,7 +105,7 @@ pub const Server = struct {
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {
         const srv = try gpa.create(Server);
-        srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa }, .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
+        srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa }, .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa), .family = config.family };
         if (config.keep_warm_s > 0) if (engine.keepaliveTarget()) |target| {
             srv.keepalive = api.keepalive.Keepalive.start(gpa, io, target, @as(i64, config.keep_warm_s) * std.time.ns_per_s) catch |e| blk: {
                 log.line("idle keepalive off: {s}", .{@errorName(e)});
@@ -145,7 +155,12 @@ pub const Server = struct {
         const options = try json.newObject(cx.a);
         const defaults = if (srv.config.default_sampling) |d| try fields.parseNumbers(cx, d) else null;
         if (defaults) |d| try merge(options, cx, d);
-        try merge(options, cx, try fields.parseNumbers(cx, f));
+        const asked = try fields.parseNumbers(cx, f);
+        // a family whose Python server ignores the request's min_p keeps the default's
+        if (srv.family) |fam| if (!fam.vt.reads_min_p) {
+            _ = asked.object.orderedRemove("min_p");
+        };
+        try merge(options, cx, asked);
         const temp = number(options.get("temperature")) orelse 0;
         if (temp <= 0) return null;
         if (srv.info.greedy_only) return cx.refuse(if ((if (defaults) |d| number(d.get("temperature")) else null) orelse 0 > 0)

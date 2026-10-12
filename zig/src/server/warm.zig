@@ -1,7 +1,7 @@
 //! After a chat reply, the next turn's shared prompt prefilled in the background, so that turn resumes past the reply.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const prompt_mod = @import("prompt.zig");
 const chat = @import("chat.zig");

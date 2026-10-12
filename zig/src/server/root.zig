@@ -1,5 +1,5 @@
 //! The native HTTP server's surface: what main and the test servers build a server from.
-pub const json = @import("json.zig");
+pub const json = @import("json");
 pub const errors = @import("errors.zig");
 pub const auth = @import("auth.zig");
 pub const cli = @import("cli.zig");
@@ -12,12 +12,14 @@ pub const server = @import("server.zig");
 pub const serve = @import("serve.zig");
 pub const hub = @import("hub.zig");
 pub const tool_specs = @import("tool_specs.zig");
+pub const family = @import("family.zig");
+pub const deepseek = @import("deepseek.zig");
 pub const Server = server.Server;
 pub const Config = server.Config;
 
 test {
     @import("std").testing.refAllDecls(@This());
-    _ = @import("json.zig");
+    _ = @import("json");
     _ = @import("fields.zig");
     _ = @import("reply_text.zig");
     _ = @import("tool_parse.zig");
@@ -39,7 +41,12 @@ test {
     _ = @import("log.zig");
     _ = @import("messages.zig");
     _ = @import("stream_preflight_test.zig");
+    _ = @import("deepseek.zig");
+    _ = @import("deepseek_test.zig");
+    _ = @import("deepseek_wire_test.zig");
     _ = @import("logprobs_test.zig");
+    _ = @import("drain_test.zig");
+    _ = @import("keepalive_test.zig");
     _ = @import("late_system_test.zig");
     _ = @import("compact_test.zig");
     _ = @import("completion_prompt_test.zig");

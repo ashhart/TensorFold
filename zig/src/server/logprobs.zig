@@ -1,7 +1,7 @@
 //! OpenAI ``logprobs`` on a chat reply: which requests may ask, and ``choices[0].logprobs`` from the engine's rows.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const Server = @import("server.zig").Server;
 const Value = json.Value;
