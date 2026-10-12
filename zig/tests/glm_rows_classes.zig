@@ -165,7 +165,7 @@ pub fn check(p: *const wide.Pipes, device: mtl.Device, queue: mtl.Queue) !Tally 
         try against(q, w, s, b, x, bufs[4].slice(u16, rows * n), n, 0, &t, 1.01); // scales 1% off must be seen
         if (t.caught == 0) return error.ControlNotCaught;
         // prompt: the chunk's product at rows 0 and 32; on the row kernels every row's bits equal the decode's
-        const mm: ?affine_mm.Pipes = if (bits == 8) p.mm8 else if (bits == 2) p.mm2 else null; // prompt.zig's (2: routed)
+        const mm: ?affine_mm.Pipes = wide.mm(p, q); // prompt.zig's (2: the routed experts' gathers)
         const on_mm = mm != null;
         if (mm) |pipes| try submit(queue, mmLaunch, .{ pipes, q, bufs[3], bufs[6], bufs[5], prompt_rows }) else try submit(queue, rowsLaunch, .{ p, q, bufs[3], 0, bufs[5], prompt_rows });
         t.worst = 0;

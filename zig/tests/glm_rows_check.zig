@@ -421,6 +421,44 @@ fn headsCheck(g: *const Gpu, mm: affine_mm.Pipes, bits: u8, n: usize, k: usize, 
     }
 }
 
+fn denseMm(e: mtl.ComputeEncoder, p: *const wide.Pipes, q: affine.Affine, io: wide.Io, sums: Ref) void {
+    wide.denseMm(p, e, q, io, sums);
+}
+
+/// A chunk's split stack (wide.denseMm) at the 64-padded pitch == each member alone (affine_mm or the row kernels).
+fn splitMmCheck(g: *const Gpu, k: usize, ns: []const usize, bits: []const u8, t: *Tally) !usize {
+    const m = 33;
+    var ms: [affine.max_runs]Mat = undefined;
+    for (ns, bits, 0..) |n, b, i| ms[i] = try Mat.init(g.device, n, k, b, 64, 900 + 37 * i + n);
+    defer for (ms[0..ns.len]) |x| x.deinit();
+    var q = ms[0].q;
+    var at: u32 = @intCast(ns[0]);
+    for (ms[1..ns.len], 0..) |x, i| {
+        q.runs[i] = .{ .w = x.q.w, .s = x.q.s, .b = x.q.b, .row = at, .n = x.q.n, .bits = x.q.bits, .group = x.q.group };
+        at += x.q.n;
+    }
+    q.more = @intCast(ns.len - 1);
+    q.n = at;
+    var prng = std.Random.DefaultPrng.init(9100 + k);
+    const r = prng.random();
+    const ld = std.mem.alignForward(usize, at, 64);
+    const bs = [_]mtl.Buffer{ try buf(g.device, m * k * 2), try buf(g.device, m * (k / 64) * 4), try buf(g.device, m * ld * 2), try buf(g.device, m * ld * 2) };
+    defer for (bs) |b| b.deinit();
+    for (bs[0].slice(u16, m * k)) |*v| v.* = toBf((r.float(f32) - 0.5) * 2);
+    try g.run(denseMm, .{ &g.p, q, wide.Io{ .in = ref(bs[0]), .ldx = @intCast(k), .out = ref(bs[2]), .ldo = @intCast(ld), .rows = m }, ref(bs[1]) });
+    var on_mm: usize = 0;
+    for (ms[0..ns.len], 0..) |x, i| {
+        const run = q.run(i);
+        if (wide.mm(&g.p, x.q) != null and run.n % 64 == 0) {
+            try g.run(mmDense, .{ wide.mm(&g.p, x.q).?, x.q, ref(bs[0]), ref(bs[1]), ref(bs[3]), @as(u32, m) });
+            on_mm += 1;
+        } else try g.run(dense, .{ &g.p, x.q, wide.Io{ .in = ref(bs[0]), .ldx = @intCast(k), .out = ref(bs[3]), .ldo = run.n, .rows = m } });
+        for (0..m) |y| try eql(bs[2].slice(u16, m * ld)[y * ld + run.row ..][0..run.n], bs[3].slice(u16, m * ld)[y * run.n ..][0..run.n]);
+        t.pairs += m * run.n;
+    }
+    return on_mm;
+}
+
 fn perHead(e: mtl.ComputeEncoder, p: *const wide.Pipes, q: affine.Affine, heads: u32, io: wide.Io, hsx: u32, hso: u32) void {
     wide.perHead(p, e, q, heads, io, hsx, hso);
 }
@@ -484,6 +522,11 @@ pub fn main() !void {
     try splitCheck(&g, 256, &.{ 64, 64, 64, 16, 16, 8 }, &.{ 5, 8, 5, 8, 8, 8 }, &split); // oQ4 layer 6's KDA input
     try splitCheck(&g, 512, &.{ 48, 16, 8, 8 }, &.{ 6, 6, 5, 5 }, &split); // oQ4 layer 7's and the MTP's MLA x_proj
     std.debug.print("split stacks through one call == each member alone: {d} bit-equal values\n", .{split.pairs});
+    var sm = Tally{};
+    const kda_mm = try splitMmCheck(&g, 256, &.{ 128, 128, 128, 64, 64, 64 }, &.{ 5, 8, 5, 8, 8, 8 }, &sm); // oQ4 layer 6
+    const x_mm = try splitMmCheck(&g, 512, &.{ 192, 64, 64, 32 }, &.{ 6, 6, 5, 5 }, &sm); // layer 7's x_proj: 32 on rows
+    std.debug.print("prompt split stacks == each member alone ({d} + {d} members on affine_mm): {d} bit-equal values\n", .{ kda_mm, x_mm, sm.pairs });
+    all.pairs += sm.pairs;
     var hd = Tally{};
     for ([_][2]usize{ .{ 512, 256 }, .{ 256, 512 } }) |s| try headsCheck(&g, g.p.mm8, 8, s[0], s[1], &hd); // embed_q, unembed_out
     std.debug.print("prompt embed_q / unembed_out q8: the heads in one affine_mm batch == each head alone: {d} bit-equal values\n", .{hd.pairs});

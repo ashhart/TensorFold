@@ -196,9 +196,8 @@ fn qmm(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref, M
 /// `qmm` over x's rows `ld` elements apart (a slice of a wider row).
 fn qmmAt(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, ld: u32, q: wts.Affine, y: Ref, M: u32) void {
     const pitch = std.mem.alignForward(u32, q.n, 64);
-    const mm = if (wide.native(q)) p.mm.mm_bf16 else wide.mm(&p.mm.wide.?, q) orelse {
-        return wide.dense(&p.mm.wide.?, e, q, .{ .in = x, .ldx = ld, .out = y, .ldo = pitch, .rows = M }); // a split stack, other widths
-    };
+    if (!wide.native(q)) return wide.denseMm(&p.mm.wide.?, e, q, .{ .in = x, .ldx = ld, .out = y, .ldo = pitch, .rows = M }, p.sums);
+    const mm = p.mm.mm_bf16;
     affine_mm.rowSumsAt(e, mm, 64, x, p.sums, M, q.k, ld);
     affine_mm.denseBatch(e, mm, x, p.sums, q, y, M, 1, .{ .x_row = @intCast(ld), .y_row = @intCast(pitch) });
 }
