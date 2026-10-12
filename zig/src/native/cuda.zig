@@ -6,6 +6,7 @@ const lanes = @import("lanes");
 const nemotron = @import("nemotron");
 const Allocator = std.mem.Allocator;
 const budget = @import("cuda_memory.zig");
+const lane_backend = @import("cuda_bound.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
@@ -174,7 +175,7 @@ const Host = struct {
         h.gpa.destroy(h);
     }
 
-    fn bind(p: *anyopaque) *Host {
+    pub fn bind(p: *anyopaque) *Host {
         const h: *Host = @ptrCast(@alignCast(p));
         if (h.gpu) |g| if (bound != &g.ctx) {
             g.ctx.makeCurrent() catch |e| std.log.err("cuCtxSetCurrent on the lane thread: {s}", .{@errorName(e)});
@@ -232,100 +233,7 @@ const Host = struct {
 
     /// The family's backend, each call made with the context current on the calling thread.
     fn backend(h: *Host) lanes.backend.Backend {
-        const v = h.inner.vtable;
-        h.vtable = .{
-            .prefill = struct {
-                fn f(p: *anyopaque, s: *lanes.Stream) anyerror!void {
-                    const x = bind(p);
-                    return x.inner.vtable.prefill(x.inner.ptr, s);
-                }
-            }.f,
-            .first = struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
-                    const x = bind(p);
-                    return x.inner.vtable.first(x.inner.ptr, s, position);
-                }
-            }.f,
-            .queue = struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, feed: lanes.backend.Feed, position: u64) anyerror!u64 {
-                    const x = bind(p);
-                    return x.inner.vtable.queue(x.inner.ptr, s, feed, position);
-                }
-            }.f,
-            .read = struct {
-                fn f(p: *anyopaque, handle: u64) anyerror!u32 {
-                    const x = bind(p);
-                    return x.inner.vtable.read(x.inner.ptr, handle);
-                }
-            }.f,
-            .verify = struct {
-                fn f(p: *anyopaque, w: []const lanes.backend.Window, out: []lanes.backend.Verified) anyerror!void {
-                    const x = bind(p);
-                    return x.inner.vtable.verify(x.inner.ptr, w, out);
-                }
-            }.f,
-            .keep = struct {
-                fn f(p: *anyopaque, w: []const lanes.backend.Window, paths: []const []const u32) anyerror!void {
-                    const x = bind(p);
-                    return x.inner.vtable.keep(x.inner.ptr, w, paths);
-                }
-            }.f,
-            .draft = struct {
-                fn f(p: *anyopaque, r: []const lanes.backend.DraftRequest) anyerror!void {
-                    const x = bind(p);
-                    return x.inner.vtable.draft(x.inner.ptr, r);
-                }
-            }.f,
-            .unspeculate = if (v.unspeculate != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream) anyerror!void {
-                    const x = bind(p);
-                    return x.inner.vtable.unspeculate.?(x.inner.ptr, s);
-                }
-            }.f else null,
-            .probabilities = if (v.probabilities != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!bool {
-                    const x = bind(p);
-                    return x.inner.vtable.probabilities.?(x.inner.ptr, s, out);
-                }
-            }.f else null,
-            .tree = if (v.tree != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, gpa: Allocator) anyerror!?lanes.stream.Held {
-                    const x = bind(p);
-                    return x.inner.vtable.tree.?(x.inner.ptr, s, gpa);
-                }
-            }.f else null,
-            .alternatives = if (v.alternatives != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, out: []lanes.backend.Alternative) anyerror!usize {
-                    const x = bind(p);
-                    return x.inner.vtable.alternatives.?(x.inner.ptr, s, out);
-                }
-            }.f else null,
-            .first_row = if (v.first_row != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream) anyerror!lanes.LogprobRow {
-                    const x = bind(p);
-                    return x.inner.vtable.first_row.?(x.inner.ptr, s);
-                }
-            }.f else null,
-            .first_masked = if (v.first_masked != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, position: u64, mask: []const u32) anyerror!u64 {
-                    const x = bind(p);
-                    return x.inner.vtable.first_masked.?(x.inner.ptr, s, position, mask);
-                }
-            }.f else null,
-            .held = if (v.held != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, out: []u32) anyerror!void {
-                    const x = bind(p);
-                    return x.inner.vtable.held.?(x.inner.ptr, s, out);
-                }
-            }.f else null,
-            .prompt_rows = v.prompt_rows,
-            .release = struct {
-                fn f(p: *anyopaque, s: *lanes.Stream) void {
-                    const x = bind(p);
-                    x.inner.vtable.release(x.inner.ptr, s);
-                }
-            }.f,
-        };
+        h.vtable = lane_backend.vtable(Host, h.inner.vtable.*);
         return .{ .ptr = h, .vtable = &h.vtable };
     }
 };
@@ -485,6 +393,15 @@ fn toGib(bytes: u64) f64 {
 
 test {
     _ = budget; // cuda_memory.zig's own tests, which no other test binary reaches
+    _ = lane_backend;
+}
+
+test "the lane core sees a family's prefill_step through the lane backend, so a served prompt can step" {
+    var target: lanes.fake.Fake = .{ .gpa = std.testing.allocator, .prefill_chunks = 3 };
+    defer target.deinit();
+    var h: Host = undefined;
+    h.inner = target.stepped();
+    try std.testing.expect(h.backend().vtable.prefill_step != null);
 }
 
 test "--learn is refused whatever the family, and --slide or a learned-disk size alone is not" {
