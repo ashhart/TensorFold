@@ -91,10 +91,11 @@ A sampled request honours its `seed`, `top_k: 0` turns the top-k filter off, and
 pinned host memory.
 A request that names no `top_k`, on a checkpoint whose generation config names none, samples with no top-k filter on
 CUDA and Metal alike, so a seeded request draws the same on both. `--top-k 20` gives 0.6.6's CUDA default.
-A conversation's next turn resumes from a prompt state kept at a 2,048-token chunk boundary, so a reply equals the same
+A conversation's next turn resumes from a prompt state kept where its last turn's history ended, so a reply equals the same
 request with the cache off. `--prompt-cache-gib` sizes the kept states (16 GiB by default, inside the memory budget) and 0 turns
-them off; a prompt needs more than 2,048 tokens to keep one. A Nemotron 3.5 Lightning state takes 46.8 MiB plus 7 KiB a
-prompt token, in whole 2 MiB pages: 62 MiB at 2,048 tokens.
+them off. A state kept inside a prompt chunk costs no extra prompt call. A Nemotron 3.5 Lightning state takes 48 MiB plus
+7 KiB a prompt token, in whole 2 MiB pages (62 MiB at 2,048 tokens), and the cache keeps four 48 MiB buffers of its
+budget free for the next states.
 `TF_HEAT_HIGH` and `TF_HEAT_LOW`, in degrees Celsius and set together, make each prompt chunk wait while the hottest
 thermal zone (under `/sys/class/thermal`, or `TF_HEAT_ROOT`) is above the high band, until it is at or under the low one.
 The server logs `heat_wait_s`, a cancel ends the wait, and the reply's tokens do not change.
