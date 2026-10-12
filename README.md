@@ -23,6 +23,8 @@ tensorfold serve "$HOME/models/nemotron-lightning" \
 
 Use a complete local model directory or an existing Hugging Face cache.
 The binary in a release archive is `bin/tensorfold-native`; the [runbook](RUNBOOK.md) covers archive installation and CUDA runtime files.
+
+On Windows with an NVIDIA GPU, build `tensorfold-native.exe` from source as [docs/WINDOWS.md](docs/WINDOWS.md) describes.
 Use `tensorfold-native --help` or `-h`, and `tensorfold-native capabilities --json`, to inspect the installed binary.
 Model weights have separate downloads and licenses.
 

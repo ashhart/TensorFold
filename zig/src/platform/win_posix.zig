@@ -109,7 +109,7 @@ fn failed() c_int {
         10061 => .CONNREFUSED,
         else => .IO,
     };
-    _errno().* = @intFromEnum(e);
+    _errno().* = @backingInt(e);
     return -1;
 }
 
