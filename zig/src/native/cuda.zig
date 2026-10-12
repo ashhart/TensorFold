@@ -1,5 +1,6 @@
 //! CUDA family registration, device setup, memory admission and the native lane host.
 const std = @import("std");
+const platform = @import("sys");
 const cuda = @import("cuda");
 const api = @import("engine_api");
 const lanes = @import("lanes");

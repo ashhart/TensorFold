@@ -1,5 +1,6 @@
 //! Qwen3.8-27B on the lane host: a stream a runner slot in shared rounds, DFlash2 drafts for slot 0's stream.
 const std = @import("std");
+const platform = @import("sys");
 const builtin = @import("builtin");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -325,7 +326,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
     // a lone greedy request takes the serial loop on tensor units, where it is faster (TF_QWEN27_LANES overrides)
     const units = model.device.tensorUnits();
-    const serial = if (std.c.getenv("TF_QWEN27_LANES")) |v| !std.mem.eql(u8, std.mem.span(v), "1") else units;
+    const serial = if (platform.c.getenv("TF_QWEN27_LANES")) |v| !std.mem.eql(u8, std.mem.span(v), "1") else units;
     if (h.draft != null and serial) h.host.lone = .{ .ctx = h, .run = Host.lone };
     h.warm = .{ .queue = model.queue };
     // the ready slots are wired before the cache's budget reads the footprint, and the later ones count as taken

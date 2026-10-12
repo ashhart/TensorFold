@@ -1,5 +1,6 @@
 //! A loaded Nemotron-H model: config, checkpoint buffers, kernel-layout weights and compiled pipelines.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const ckpt = @import("../../core/checkpoint_metal.zig");
 const shards = @import("../../core/checkpoint.zig");
@@ -100,7 +101,7 @@ pub const Model = struct {
         if (mtp) {
             const path = try std.fmt.allocPrintSentinel(allocator, "{s}/mtp-4bit.safetensors", .{dir}, 0);
             defer allocator.free(path);
-            if (std.c.access(path, 0) == 0) try m.checkpoint.addFile(m.device, path, "mtp.");
+            if (platform.c.access(path, 0) == 0) try m.checkpoint.addFile(m.device, path, "mtp.");
         }
         const drafting = m.checkpoint.has("mtp.layers.0.eh_proj.weight");
         m.draft_ids = if (drafting) try draft_ids.load(allocator, m.config.vocab) else &.{};
