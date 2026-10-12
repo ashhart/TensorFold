@@ -5,6 +5,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Nemotron on CUDA drafts every stream of a shared round in one batch: each head level runs one forward with a row per stream still drafting, where each stream's head used to run its levels one row at a time. Drafts and their confidences equal the one-at-a-time ones to the bit, greedy and sampled, so replies are unchanged. On a GB10 with distinct prompts, 400-token replies finish 5% sooner at 2 streams, 7% at 4 and 10% at 8 (315 against 282 tok/s); a lone stream is unchanged.
+- A shared round prices each stream's drafts by the head steps they take, apart from the round's own overhead, and a head that drafts every stream in one batch costs the deepest stream's steps. The overhead learned before also held the steps of the depths it was measured at, so it kept the depths it saw. On a GB10 with Nemotron's batched heads and distinct prompts, 4 streams finish 3.3% to 3.5% sooner across three sessions and 2, 3 and 6 streams 0.6% to 2.6%, with the same replies; 8 streams are unchanged.
 
 ## 1.0.7
 

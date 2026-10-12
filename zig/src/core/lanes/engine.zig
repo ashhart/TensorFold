@@ -59,6 +59,7 @@ pub const Engine = struct {
                 .plain_guard = cfg.plain_guard,
                 .node_probabilities = cfg.node_probabilities,
                 .batch_rows = cfg.batch_rows,
+                .batched_heads = cfg.draft_streams,
             },
         };
     }
@@ -260,7 +261,7 @@ pub const Engine = struct {
         if (plan.kind == .head) {
             const ms = e.clock.elapsedMs(.overhead);
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(1)), f("rows", int(rows)), f("ms", ev.bits(ms)) });
-            try e.rule.observeOverhead(1, rows, ms);
+            try e.rule.observeOverhead(1, rows, ms, 0.0);
         }
         return .{ .rows = @intCast(rows), .keep = @intCast(o.path.len), .got = o.got };
     }
@@ -316,7 +317,7 @@ pub const Engine = struct {
         try e.backend.keep(windows, paths);
         const ms = e.clock.elapsedMs(.overhead);
         try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
-        try e.rule.observeOverhead(@intCast(plans.len), total, ms);
+        try e.rule.observeOverhead(@intCast(plans.len), total, ms, e.rule.headMs(budgets));
     }
 
     /// Commit the target-sampled path (after the thinking budget's cut), each token with its path row's logprob row.
