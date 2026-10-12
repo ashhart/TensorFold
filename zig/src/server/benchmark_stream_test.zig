@@ -17,7 +17,7 @@ fn one(f: *fake.Fake, a: std.mem.Allocator, fixture: suite.Fixture, o: stream.Op
     var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = std.testing.io, .read_buffer_size = 576 << 10 };
     client.connection_pool.free_size = 0;
     defer client.deinit();
-    return stream.attempt(a, std.testing.io, &client, .{ .base = try f.url(a, ""), .served = ".tensorfold-benchmark" }, o, fixture, t, seed, 0);
+    return stream.attempt(a, std.testing.io, &client, .{ .base = try f.url(a, ""), .served = ".tensorfold-benchmark" }, o, fixture, t, seed, 0, null);
 }
 
 fn sha(bytes: []const u8) [64]u8 {
@@ -158,7 +158,7 @@ test "a closed port is a connection error, chunked SSE is read, and a cut chunk 
     var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = std.testing.io };
     client.connection_pool.free_size = 0;
     defer client.deinit();
-    const s = stream.attempt(a, std.testing.io, &client, .{ .base = dead, .served = "m" }, opts(4, false, 5), suite.fixtures[0], 0.0, 1234, 0);
+    const s = stream.attempt(a, std.testing.io, &client, .{ .base = dead, .served = "m" }, opts(4, false, 5), suite.fixtures[0], 0.0, 1234, 0, null);
     try std.testing.expectEqual(suite.ErrorCode.connection_error, s.error_code.?);
     const whole = (try batch(a, try fake.reply(a, false, 4, 0)))[0].bytes;
     const at = std.mem.indexOf(u8, whole, "\r\n\r\n").? + 4;
@@ -243,7 +243,7 @@ test "with no task to run it on, a request is a connection error and is never se
     var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = io };
     client.connection_pool.free_size = 0;
     defer client.deinit();
-    const s = stream.attempt(a, io, &client, .{ .base = try f.url(a, ""), .served = "m" }, opts(4, false, 5), suite.fixtures[0], 0.0, 1234, 0);
+    const s = stream.attempt(a, io, &client, .{ .base = try f.url(a, ""), .served = "m" }, opts(4, false, 5), suite.fixtures[0], 0.0, 1234, 0, null);
     try std.testing.expectEqual(suite.ErrorCode.connection_error, s.error_code.?);
     const got = stream.fetch(a, io, &client, .{ .url = try f.url(a, "/health"), .limit = 64, .timeout_s = 5 });
     try std.testing.expect(got.failed == .network and f.count() == 0);
@@ -301,4 +301,54 @@ test "an https exchange is never sent in clear text through a tunnel the proxy o
     fake.nap(100);
     try std.testing.expectEqual(@as(usize, 1), f.count());
     try std.testing.expectEqualStrings("CONNECT", f.request(0).method);
+}
+
+test "a refused attempt keeps its fixed sample and code and hands back the server's reason, cleaned, waiting 100 ms at most" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    const greedy = "{\"error\": {\"message\": \"this engine decodes greedily only: send temperature 0 or leave it out\", \"type\": \"invalid_request_error\"}}";
+    const long: [400]u8 = @splat('y');
+    const late_body = "{\"error\": {\"message\": \"late\"}}";
+    const late_head = try std.fmt.allocPrint(a, "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{late_body.len});
+    const f = try fake.Fake.start(std.testing.allocator, &.{.{ .method = "POST", .path = "/v1/completions", .replies = &.{
+        try fake.jsonReply(a, "400 Bad Request", greedy),
+        try fake.jsonReply(a, "400 Bad Request", greedy),
+        try fake.jsonReply(a, "503 Service Unavailable", "not public\nsecond line"),
+        &.{.{ .bytes = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: 15\r\nConnection: close\r\n\r\n<html>x</html>\n" }},
+        try fake.jsonReply(a, "400 Bad Request", "{\"error\": \"bad\\u001b[31m red\\u0007\\nline\"}"),
+        try fake.jsonReply(a, "400 Bad Request", try std.mem.concat(a, u8, &.{ "{\"detail\": \"", &long, "\"}" })),
+        &.{ .{ .bytes = late_head, .pause_ms = 20 }, .{ .bytes = "{\"error\": {\"message\": \"soon\"}}" } },
+        &.{ .{ .bytes = late_head, .pause_ms = 400 }, .{ .bytes = late_body } },
+        &.{ .{ .bytes = late_head, .pause_ms = 400 }, .{ .bytes = late_body } },
+    } }});
+    defer f.stop();
+    var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = io, .read_buffer_size = 576 << 10 };
+    client.connection_pool.free_size = 0;
+    defer client.deinit();
+    const target: stream.Target = .{ .base = try f.url(a, ""), .served = "m" };
+    var said: []const u8 = "stale";
+    const heard = stream.attempt(a, io, &client, target, opts(4, false, 5), suite.fixtures[0], 1.0, 1234, 0, &said);
+    try std.testing.expectEqualStrings("HTTP 400: this engine decodes greedily only: send temperature 0 or leave it out", said);
+    var unheard = stream.attempt(a, io, &client, target, opts(4, false, 5), suite.fixtures[0], 1.0, 1234, 0, null);
+    try std.testing.expect(heard.error_code.? == .http_error and heard.status == .@"error" and heard.end_to_end_seconds != null);
+    unheard.end_to_end_seconds = heard.end_to_end_seconds;
+    try std.testing.expectEqualDeep(heard, unheard);
+    for ([_][]const u8{ "HTTP 503: not public", "HTTP 404", "HTTP 400: bad red line" }) |want| {
+        _ = stream.attempt(a, io, &client, target, opts(4, false, 5), suite.fixtures[0], 0.0, 1234, 0, &said);
+        try std.testing.expectEqualStrings(want, said);
+    }
+    _ = stream.attempt(a, io, &client, target, opts(4, false, 5), suite.fixtures[0], 0.0, 1234, 0, &said);
+    try std.testing.expect(said.len == "HTTP 400: ".len + 303 and std.mem.endsWith(u8, said, "y..."));
+    _ = stream.attempt(a, io, &client, target, opts(4, false, 5), suite.fixtures[0], 0.0, 1234, 0, &said);
+    try std.testing.expectEqualStrings("HTTP 400: soon", said);
+    const started = stream.now(io);
+    const late = stream.attempt(a, io, &client, target, opts(4, false, 5), suite.fixtures[0], 0.0, 1234, 0, &said);
+    const took: f64 = @floatFromInt(@as(i64, @intCast(stream.now(io) - started)));
+    try std.testing.expect(took >= 100e6 and took < 300e6 and late.error_code.? == .http_error);
+    try std.testing.expect(late.end_to_end_seconds.? * 1e9 < took - 50e6);
+    try std.testing.expectEqualStrings("HTTP 400", said);
+    const cut = stream.attempt(a, io, &client, target, opts(4, false, 0.05), suite.fixtures[0], 0.0, 1234, 0, &said);
+    try std.testing.expect(cut.error_code.? == .http_error and cut.status == .@"error");
 }

@@ -12,7 +12,8 @@ const read_buffer = 576 << 10;
 
 pub const Target = struct { base: []const u8, served: []const u8 };
 pub const Opts = struct { tokens: u32, reps: u32, temperatures: []const f64, serial: bool, timeout_s: f64 };
-pub const Progress = struct { ctx: *anyopaque, call: *const fn (*anyopaque, *const suite.Sample) void };
+/// ``call`` after each attempt; ``said`` after one the server refused, with its reason for the terminal only.
+pub const Progress = struct { ctx: *anyopaque, call: *const fn (*anyopaque, *const suite.Sample) void, said: ?*const fn (*anyopaque, *const suite.Sample, []const u8) void = null };
 
 /// An http(s) URL split as ``urlsplit`` reads it, with no credentials, query or fragment.
 pub const Url = struct { scheme: []const u8, authority: []const u8, host: []const u8, path: []const u8 };
@@ -88,7 +89,7 @@ pub fn nanoseconds(seconds: f64) i96 {
 
 pub const Ended = enum { finished, deadline, stopped, unavailable };
 
-/// Runs ``f(ctx)`` as its own task, polled every 10 ms; a deadline or stop cancels it; ``unavailable`` runs nothing.
+/// Runs ``f(ctx)`` as a task polled every 10 ms; a deadline, stop or canceled caller ends it; ``unavailable``: none.
 pub fn bounded(io: std.Io, deadline: ?i96, comptime f: anytype, ctx: anytype) Ended {
     const Wrap = struct {
         fn call(c: @TypeOf(ctx)) void {
@@ -110,7 +111,10 @@ pub fn bounded(io: std.Io, deadline: ?i96, comptime f: anytype, ctx: anytype) En
             future.cancel(io);
             return .deadline;
         };
-        io.sleep(.fromMilliseconds(10), .awake) catch {};
+        io.sleep(.fromMilliseconds(10), .awake) catch {
+            future.cancel(io);
+            return .stopped;
+        };
     }
 }
 
@@ -125,6 +129,9 @@ const Exchange = struct {
     sample: *suite.Sample,
     end: ?i96 = null,
     failure: ?suite.ErrorCode = null,
+    status: u16 = 0,
+    refused: []const u8 = "",
+    decided: bool = false,
     completed: bool = false,
     done: std.atomic.Value(bool) = .init(false),
 
@@ -140,7 +147,7 @@ const Exchange = struct {
         };
         defer {
             req.deinit();
-            x.end = now(x.io);
+            x.end = x.end orelse now(x.io);
         }
         req.sendBodyComplete(x.body) catch {
             x.failure = .connection_error;
@@ -152,6 +159,10 @@ const Exchange = struct {
         };
         if (resp.head.status.class() != .success) {
             x.failure = .http_error;
+            x.status = @backingInt(resp.head.status);
+            x.end = now(x.io);
+            x.decided = true;
+            x.refused = errorBody(x.a, x.io, &resp);
             return;
         }
         if (!eventStream(resp.head.content_type)) {
@@ -195,15 +206,35 @@ const Exchange = struct {
     }
 };
 
+/// A refusal's body, up to 16 KiB, read for at most 100 ms past its head, after its sample's time and code are set.
+fn errorBody(a: Allocator, io: std.Io, resp: *const std.http.Client.Response) []const u8 {
+    if (resp.head.transfer_encoding != .none) return "";
+    var wait: BodyWait = .{ .in = resp.request.reader.in, .want = @min(resp.head.content_length orelse 16 << 10, 16 << 10) };
+    if (wait.in.buffered().len < wait.want) _ = bounded(io, deadlineAfter(io, 0.1), BodyWait.run, &wait);
+    const got = wait.in.buffered();
+    return a.dupe(u8, got[0..@min(got.len, wait.want)]) catch "";
+}
+
+const BodyWait = struct {
+    in: *std.Io.Reader,
+    want: usize,
+    done: std.atomic.Value(bool) = .init(false),
+
+    fn run(w: *BodyWait) void {
+        while (w.in.buffered().len < w.want) w.in.fillMore() catch return;
+    }
+};
+
 fn eventStream(content_type: ?[]const u8) bool {
     const t = content_type orelse return false;
     const media = std.mem.trim(u8, t[0 .. std.mem.indexOfScalar(u8, t, ';') orelse t.len], " \t");
     return std.ascii.eqlIgnoreCase(media, "text/event-stream");
 }
 
-/// One request as one sample: failures are kept as samples with a fixed code, never with server text.
-pub fn attempt(a: Allocator, io: std.Io, client: *std.http.Client, t: Target, o: Opts, f: suite.Fixture, temperature: f64, seed: u32, repeat: i32) suite.Sample {
+/// One request as one sample: failures keep a fixed code, never server text; ``said`` gets a refusal's reason.
+pub fn attempt(a: Allocator, io: std.Io, client: *std.http.Client, t: Target, o: Opts, f: suite.Fixture, temperature: f64, seed: u32, repeat: i32, said: ?*[]const u8) suite.Sample {
     var sample: suite.Sample = .{ .fixture_id = f.id, .temperature = temperature, .repeat = repeat, .seed = seed };
+    if (said) |out| out.* = "";
     if (stop.requested() != null) {
         sample.error_code = .cancelled;
         sample.end_to_end_seconds = 0;
@@ -230,11 +261,13 @@ pub fn attempt(a: Allocator, io: std.Io, client: *std.http.Client, t: Target, o:
     const ended = bounded(io, start + nanoseconds(o.timeout_s), Exchange.run, &x);
     x.stream.timings(start, x.end orelse now(io), &sample);
     sample.token_sha = if (sample.token_sha) |s| a.dupe(u8, s) catch null else null;
-    const failure: ?suite.ErrorCode = if (x.completed) x.failure else if (ended == .stopped or stop.requested() != null) .cancelled else if (ended == .deadline) .timeout else x.failure orelse .connection_error;
+    const failure: ?suite.ErrorCode = if (x.completed) x.failure else if (ended == .stopped or stop.requested() != null) .cancelled else if (ended == .deadline and !x.decided) .timeout else x.failure orelse .connection_error;
     if (failure) |c| {
         sample.status = .@"error";
         sample.error_code = c;
     }
+    const refused = if (failure) |c| c == .http_error else false;
+    if (said != null and refused) said.?.* = a.dupe(u8, sse.refusal(ta, x.status, x.refused) catch "") catch "";
     return sample;
 }
 
@@ -244,21 +277,28 @@ pub fn run(a: Allocator, io: std.Io, t: Target, o: Opts, progress: ?Progress) ![
     client.connection_pool.free_size = 0;
     defer client.deinit();
     var samples: std.ArrayList(suite.Sample) = .empty;
+    var said: []const u8 = "";
     for (o.temperatures) |temp| for (suite.fixtures) |f| {
-        const warm = attempt(a, io, &client, t, o, f, temp, suite.seed_base, -1);
-        if (progress) |p| p.call(p.ctx, &warm);
+        const warm = attempt(a, io, &client, t, o, f, temp, suite.seed_base, -1, &said);
+        tell(progress, &warm, said);
         if (warm.status == .@"error") {
             try samples.append(a, warm);
             if (warm.error_code == .cancelled) return samples.items;
         }
         for (0..o.reps) |r| {
-            const s = attempt(a, io, &client, t, o, f, temp, suite.seed_base + @as(u32, @intCast(r)), @intCast(r));
+            const s = attempt(a, io, &client, t, o, f, temp, suite.seed_base + @as(u32, @intCast(r)), @intCast(r), &said);
             try samples.append(a, s);
-            if (progress) |p| p.call(p.ctx, &s);
+            tell(progress, &s, said);
             if (s.error_code == .cancelled) return samples.items;
         }
     };
     return samples.items;
+}
+
+fn tell(progress: ?Progress, s: *const suite.Sample, said: []const u8) void {
+    const p = progress orelse return;
+    p.call(p.ctx, s);
+    if (said.len > 0) if (p.said) |f| f(p.ctx, s, said);
 }
 
 /// A whole small exchange for the JSON routes: readiness probes, the receiver and the public-checkpoint check.

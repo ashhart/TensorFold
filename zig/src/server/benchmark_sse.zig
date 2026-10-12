@@ -1,4 +1,4 @@
-//! One attempt's SSE lines: events, usage, telemetry, status and timings.
+//! One attempt's SSE lines: events, usage, telemetry, status and timings; server text cleaned for a terminal.
 const std = @import("std");
 const json = @import("json.zig");
 const suite = @import("benchmark_suite.zig");
@@ -183,4 +183,61 @@ fn tokenSha(a: Allocator, v: ?Value) ?[]const u8 {
     if (x != .string or (x.string.len != 12 and x.string.len != 64)) return null;
     for (x.string) |ch| if (!std.ascii.isHex(ch)) return null;
     return std.ascii.allocLowerString(a, x.string) catch null;
+}
+
+/// The bytes one line of server text keeps on a terminal.
+pub const line_limit = 300;
+
+/// A refused attempt's reason for the terminal, ``HTTP 400: message``; it never reaches a receipt.
+pub fn refusal(a: Allocator, status: u16, body: []const u8) ![]const u8 {
+    const text = try clean(a, try errorText(a, body), line_limit);
+    if (text.len == 0) return std.fmt.allocPrint(a, "HTTP {d}", .{status});
+    return std.fmt.allocPrint(a, "HTTP {d}: {s}", .{ status, text });
+}
+
+/// ``error.message``, ``error``, ``message`` or ``detail`` of a JSON body, else a plain body's first line; markup: "".
+fn errorText(a: Allocator, body: []const u8) ![]const u8 {
+    switch (try json.parse(a, body)) {
+        .ok => |v| {
+            const e = v.get("error");
+            for ([_]?Value{ if (e) |x| x.get("message") else null, e, v.get("message"), v.get("detail") }) |c|
+                if (c) |x| if (x == .string) return x.string;
+            return "";
+        },
+        .err => {},
+    }
+    const text = std.mem.trimStart(u8, body, " \t\r\n");
+    if (text.len == 0 or text[0] == '<') return "";
+    return text[0 .. std.mem.indexOfAny(u8, text, "\r\n") orelse text.len];
+}
+
+/// ``text`` without escape sequences, control characters or broken UTF-8, trimmed and cut to ``limit`` bytes.
+pub fn clean(a: Allocator, text: []const u8, limit: usize) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == 0x1b) {
+            i = afterEscape(text, i);
+            continue;
+        }
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 0;
+        const cp: u21 = if (len > 0 and i + len <= text.len) std.unicode.utf8Decode(text[i .. i + len]) catch 0 else 0;
+        i += if (cp == 0) 1 else len;
+        if (cp == '\t' or cp == '\n' or cp == '\r') try out.append(a, ' ');
+        if (cp < 0x20 or (cp >= 0x7f and cp < 0xa0)) continue;
+        if (out.items.len + len > limit) {
+            try out.appendSlice(a, "...");
+            break;
+        }
+        try out.appendSlice(a, text[i - len .. i]);
+    }
+    return std.mem.trim(u8, out.items, " ");
+}
+
+/// The index past the escape sequence at ``i``: a CSI sequence through its final byte, else ESC and one more byte.
+fn afterEscape(text: []const u8, i: usize) usize {
+    if (i + 1 >= text.len or text[i + 1] != '[') return @min(i + 2, text.len);
+    var j = i + 2;
+    while (j < text.len and (text[j] < 0x40 or text[j] > 0x7e)) j += 1;
+    return @min(j + 1, text.len);
 }

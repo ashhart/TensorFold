@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const json = @import("json.zig");
 const cli = @import("cli.zig");
 const stream = @import("benchmark_stream.zig");
+const sse = @import("benchmark_sse.zig");
 const stop_flag = @import("benchmark_stop.zig");
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
@@ -14,8 +15,14 @@ const serving_prefix = "[tensorfold] serving " ++ served_name ++ " at http://127
 /// What the child serves: this executable, the checkpoint directory and the benchmark's settings.
 pub const Plan = struct { exe: []const u8, dir: []const u8, backend: []const u8, tokens: u32, context: ?i64, drafter_dir: ?[]const u8, serial: bool };
 
-/// ``argv`` replaces the child's command line (tests use a stand-in); ``tail`` gets an exited child's last log line.
-pub const Options = struct { startup_timeout_s: f64, grace_ms: u32 = 10_000, bench_dir: []const u8, argv: ?[]const []const u8 = null, tail: ?*[]const u8 = null };
+/// ``argv`` replaces the child's command line (tests use a stand-in); ``tail`` gets an exited child's last log lines.
+pub const Options = struct { startup_timeout_s: f64, grace_ms: u32 = 10_000, bench_dir: []const u8, argv: ?[]const []const u8 = null, tail: ?*[]const []const u8 = null };
+
+/// The startup timeout without --startup-timeout: 600 s, plus 6 s per GB of weights past 20 GB, at most 3600 s.
+pub fn startupTimeout(weight_bytes: u64) f64 {
+    const gb = @as(f64, @floatFromInt(weight_bytes)) / 1e9;
+    return @min(3600, @ceil(600 + 6 * @max(0, gb - 20)));
+}
 
 /// This build's serve backend: ``--backend``'s native values without ``auto`` (mlx on macOS, cuda or rocm on Linux).
 pub fn buildBackend() []const u8 {
@@ -137,7 +144,7 @@ pub const Managed = struct {
         return null;
     }
 
-    fn ready(m: *Managed, a: Allocator, timeout_s: f64, tail: ?*[]const u8, problem: *[]const u8) !bool {
+    fn ready(m: *Managed, a: Allocator, timeout_s: f64, tail: ?*[]const []const u8, problem: *[]const u8) !bool {
         var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = m.io };
         client.connection_pool.free_size = 0;
         defer client.deinit();
@@ -151,7 +158,7 @@ pub const Managed = struct {
             }
             if (m.exited()) {
                 problem.* = "Benchmark server exited during startup; check the checkpoint and backend toolchain";
-                if (tail) |t| t.* = try lastLine(a, m.logEnd(&buf));
+                if (tail) |t| t.* = try lastLines(a, m.logEnd(&buf));
                 return false;
             }
             if (port == null) {
@@ -161,7 +168,7 @@ pub const Managed = struct {
             if (port != null and try probe(a, m.io, &client, m.base_url)) return true;
             m.io.sleep(.fromMilliseconds(200), .awake) catch {};
         }
-        problem.* = "Benchmark server startup timed out; check the checkpoint, GPU memory and backend toolchain";
+        problem.* = try std.fmt.allocPrint(a, "Benchmark server startup timed out after {d} s (--startup-timeout, at most 3600); check the checkpoint, GPU memory and backend toolchain", .{timeout_s});
         return false;
     }
 
@@ -233,50 +240,49 @@ pub fn ended(pid: posix.pid_t) bool {
     return got == pid;
 }
 
-const line_limit = 200;
-
-/// The log's last ``tensorfold:`` or ``error:`` line, else its last visible line, cleaned and cut to 200 bytes.
-pub fn lastLine(a: Allocator, log: []const u8) ![]const u8 {
+/// Up to three last ``tensorfold:`` or ``error:`` lines in order (an earlier variable hint first), else the last line.
+pub fn lastLines(a: Allocator, log: []const u8) ![]const []const u8 {
+    var picked: std.ArrayList([]const u8) = .empty; // newest first
     var fallback: []const u8 = "";
+    var hint: ?[]const u8 = null;
     var lines = std.mem.splitBackwardsAny(u8, log, "\r\n");
     while (lines.next()) |line| {
-        const text = try visible(a, line);
-        if (text.len == 0) continue;
-        if (std.mem.startsWith(u8, text, "tensorfold:") or std.mem.startsWith(u8, text, "error:")) return text;
+        const text = try sse.clean(a, line, sse.line_limit);
+        if (text.len == 0 or leakNoise(text)) continue;
         if (fallback.len == 0) fallback = text;
+        if ((std.mem.startsWith(u8, text, "tensorfold:") or std.mem.startsWith(u8, text, "error:")) and picked.items.len < 3) {
+            try picked.append(a, text);
+        } else if (hint == null and picked.items.len > 0 and namesVariable(text)) hint = text;
     }
-    return fallback;
+    if (picked.items.len == 0) return if (fallback.len > 0) a.dupe([]const u8, &.{fallback}) else &.{};
+    const named = for (picked.items) |p| {
+        if (namesVariable(p)) break true;
+    } else false;
+    if (hint != null and !named) {
+        if (picked.items.len == 3) _ = picked.pop();
+        try picked.append(a, hint.?);
+    }
+    std.mem.reverse([]const u8, picked.items);
+    return picked.items;
 }
 
-/// ``line`` without escape sequences, control characters or broken UTF-8, trimmed and cut to 200 bytes.
-fn visible(a: Allocator, line: []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var i: usize = 0;
-    while (i < line.len) {
-        if (line[i] == 0x1b) {
-            i = afterEscape(line, i);
-            continue;
-        }
-        const len = std.unicode.utf8ByteSequenceLength(line[i]) catch 0;
-        const cp: u21 = if (len > 0 and i + len <= line.len) std.unicode.utf8Decode(line[i .. i + len]) catch 0 else 0;
-        i += if (cp == 0) 1 else len;
-        if (cp == '\t') try out.append(a, ' ');
-        if (cp < 0x20 or (cp >= 0x7f and cp < 0xa0)) continue;
-        if (out.items.len + len > line_limit) {
-            try out.appendSlice(a, "...");
-            break;
-        }
-        try out.appendSlice(a, line[i - len .. i]);
-    }
-    return std.mem.trim(u8, out.items, " ");
+/// A line of an allocator's leak report: ``error(gpa): ... leaked`` or ``(empty stack trace)``.
+fn leakNoise(text: []const u8) bool {
+    if (std.mem.eql(u8, text, "(empty stack trace)")) return true;
+    return std.mem.startsWith(u8, text, "error(") and std.mem.indexOf(u8, text, "leaked") != null;
 }
 
-/// The index past the escape sequence at ``i``: a CSI sequence through its final byte, else ESC and one more byte.
-fn afterEscape(line: []const u8, i: usize) usize {
-    if (i + 1 >= line.len or line[i + 1] != '[') return @min(i + 2, line.len);
-    var j = i + 2;
-    while (j < line.len and (line[j] < 0x40 or line[j] > 0x7e)) j += 1;
-    return @min(j + 1, line.len);
+/// A line that starts with a letter and names an environment variable, such as ``GLM_LOAD_LIMIT_GB``.
+fn namesVariable(text: []const u8) bool {
+    if (text.len == 0 or !std.ascii.isAlphabetic(text[0])) return false;
+    var words = std.mem.tokenizeAny(u8, text, " \t=,;:()[]'\"`.");
+    while (words.next()) |w| {
+        if (w.len < 4 or !std.ascii.isUpper(w[0]) or std.mem.indexOfScalar(u8, w, '_') == null) continue;
+        for (w) |ch| {
+            if (!std.ascii.isUpper(ch) and !std.ascii.isDigit(ch) and ch != '_') break;
+        } else return true;
+    }
+    return false;
 }
 
 /// Ready: ``/health`` not warming and ok, and ``/v1/models`` lists the benchmark name.
