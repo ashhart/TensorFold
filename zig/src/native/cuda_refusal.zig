@@ -12,7 +12,7 @@ pub fn backend(o: api.Open) ?[]const u8 {
 
 /// A family takes --drafter only if it says so (`takes_drafter`); null when `o` may open `F`.
 pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
-    if (o.drafter != null and !@hasDecl(F, "takes_drafter")) return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
+    if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
     return null;
 }
 
@@ -35,4 +35,11 @@ test "--drafter opens only a family that takes one" {
     try std.testing.expectStringStartsWith(family(Mtp, .{ .dir = "d", .model_type = "m", .drafter = "/x" }) orelse "", "--drafter loads a separate drafter");
     try std.testing.expect(family(Drafted, .{ .dir = "d", .model_type = "m", .drafter = "/x" }) == null);
     try std.testing.expect(family(Mtp, .{ .dir = "d", .model_type = "m" }) == null);
+}
+
+test "a family that explicitly declines a drafter refuses it" {
+    const Declined = struct {
+        pub const takes_drafter = false;
+    };
+    try std.testing.expectStringStartsWith(family(Declined, .{ .dir = "d", .model_type = "m", .drafter = "draft" }) orelse "", "--drafter loads a separate drafter");
 }
