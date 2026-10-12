@@ -455,6 +455,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     b.step("tf-row-check", "The core row projection on synthetic 4-bit matrices: widths bit-equal, a CPU reference, indexed experts").dependOn(&b.addInstallArtifact(row_check, .{}).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = row_mod })).step);
     exl3_build.targets(b, target, optimize, metal, test_step);
+    exlr8_build.metalTargets(b, target, optimize, metal, mods.sources, test_step);
 
     // The checkpoint CLI: models, info and pull, against a synthetic cache and a fake hub.
     const cli_tests = b.addTest(.{ .root_module = b.createModule(.{
