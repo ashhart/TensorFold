@@ -107,7 +107,8 @@ pub const Prompt = struct {
         const P: usize = prompt_rows;
         const S = P * slots;
         const loc: usize = c.localHalves() * 128;
-        const tiles: u32 = @intCast((P * c.topk + 31) / 32 + max_experts + P / 32 + 1);
+        // each picked expert's rows in tiles of 32: at most a tile an expert plus one a 32 picks (the shared one's too)
+        const tiles: u32 = @intCast((P * (c.topk + 1) + 31) / 32 + c.experts + 2);
         const cap = tiles * 2 * 16;
         var q: Prompt = undefined;
         q.tiles = tiles;

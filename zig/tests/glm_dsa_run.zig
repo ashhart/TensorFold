@@ -9,7 +9,7 @@ const usage =
     \\tf-glm-dsa-run MODEL_DIR SETTINGS_JSON PROMPT (a .txt file: a user message in GLM's chat format; else token ids)
     \\GLM_LAYERS (the first N layers), GLM_MAX (reply tokens, 64), GLM_CONTEXT (8192), GLM_DEPTH (MTP drafts a round, 0),
     \\GLM_LIMIT_GB (this Mac's load limit, 70% of RAM), GLM_REPEAT (runs of the prompt, 1), GLM_FORCED=1 (the prompt's
-    \\next-token agreement, each row's pick against the token after it)
+    \\next-token agreement, each row's pick against the token after it), GLM_CHUNK (prompt rows a window, 256)
 ;
 
 fn env(name: [:0]const u8, default: u64) u64 {
@@ -60,7 +60,7 @@ fn once(e: *g.engine.Engine, io: std.Io, t: *const tok.Tokenizer, prompt: []cons
     var at: u32 = 0;
     var first: u32 = 0;
     while (at < prompt.len) {
-        const n: u32 = @intCast(@min(g.gpu.prompt_rows, prompt.len - at));
+        const n: u32 = @intCast(@min(env("GLM_CHUNK", g.gpu.prompt_rows), prompt.len - at));
         if (try g.follow.chunk(e, 0, at, n, forced)) |f| first = f;
         if (forced) for (e.picks(n), 0..) |p, r| {
             if (at + r + 1 < prompt.len and p == prompt[at + r + 1]) agree += 1;
