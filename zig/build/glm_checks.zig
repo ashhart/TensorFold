@@ -14,4 +14,12 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     b.installArtifact(exe);
     const about = "GLM-5.3-Flash's products at every MLX width on synthetic weights against float64, each row's bits in every launch";
     b.step("tf-glm-rows-check", about).dependOn(&b.addInstallArtifact(exe, .{}).step);
+    const speed = b.addExecutable(.{ .name = "tf-glm-rows-speed", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_rows_speed.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "kernel_sources", .module = sources } },
+    }) });
+    b.step("tf-glm-rows-speed", "GLM-5.3-Flash one-row decode products at the checkpoints' shapes: GPU time a launch, GB/s, a token by class").dependOn(&b.addInstallArtifact(speed, .{}).step);
 }
