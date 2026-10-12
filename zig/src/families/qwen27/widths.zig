@@ -60,18 +60,14 @@ pub fn stacks(kind: cfg.Kind) []const []const Member {
     };
 }
 
-/// Consecutive members of one width as [first, count]; a stack of one width is one run.
+/// A stack's products as [first, count]: one for a stack of one width, else one a member, as the reference runs them.
 pub fn runs(ws: []const Width, out: [][2]usize) [][2]usize {
-    var n: usize = 0;
-    for (ws, 0..) |w, i| {
-        if (n > 0 and std.meta.eql(ws[out[n - 1][0]], w)) {
-            out[n - 1][1] += 1;
-        } else {
-            out[n] = .{ i, 1 };
-            n += 1;
-        }
-    }
-    return out[0..n];
+    for (ws[1..]) |w| if (!std.meta.eql(ws[0], w)) {
+        for (out[0..ws.len], 0..) |*o, i| o.* = .{ i, 1 };
+        return out[0..ws.len];
+    };
+    out[0] = .{ 0, ws.len };
+    return out[0..1];
 }
 
 pub const Widths = struct {
@@ -237,12 +233,12 @@ test "a dense projection and an unsupported global group refuse" {
     try std.testing.expectError(error.BadAffine, testAdmit("{\"bits\":4,\"group_size\":16}", .{ .tensor_units = false }, &why));
 }
 
-test "fused members split into runs of one width" {
+test "a mixed stack runs every member alone, even beside a member of its own width" {
     var buf: [3][2]usize = undefined;
     const four = uniform;
     const five = Width{ .bits = 5, .group = 64 };
     try std.testing.expectEqualSlices([2]usize, &.{.{ 0, 3 }}, runs(&.{ four, four, four }, &buf));
-    try std.testing.expectEqualSlices([2]usize, &.{ .{ 0, 1 }, .{ 1, 2 } }, runs(&.{ five, four, four }, &buf));
+    try std.testing.expectEqualSlices([2]usize, &.{ .{ 0, 1 }, .{ 1, 1 }, .{ 2, 1 } }, runs(&.{ five, four, four }, &buf));
     try std.testing.expectEqualSlices([2]usize, &.{ .{ 0, 1 }, .{ 1, 1 }, .{ 2, 1 } }, runs(&.{ four, five, four }, &buf));
 }
 
