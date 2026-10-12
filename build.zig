@@ -474,6 +474,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
 
     // The core lane, shared-context and Qwen3.8-27B programs and host tests.
     qwen27_build.targets(b, target, optimize, metal, sources, engine, lanes, mods.qwen27, test_step);
+    core_checks.targets(b, target, optimize, metal, engine);
 
     _ = nativeServer(b, target, optimize, metal, engine, api, engines, build_options, test_step);
 
