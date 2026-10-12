@@ -450,3 +450,123 @@ test "Metal EXL3 mapped windows match independent 64-bit extraction at every off
     for (state_outputs.slice(u16, count + 16)[count + 8 ..]) |guard| try std.testing.expectEqual(@as(u16, 0xa55a), guard);
     std.debug.print("mapped_state_cases={d} offsets=32 mismatches=0 guards=unchanged\n", .{count});
 }
+
+// Larger and resumed windows must retain the original per-row arithmetic and untouched padding.
+test "shared prefill retains exact row bits and guards across tile boundaries and fallback" {
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    var p = try ex.Pipelines.load(device);
+    defer p.deinit();
+    const prefill = p.prefill orelse return error.SharedPrefillUnavailable;
+    try std.testing.expect(prefill.simdWidth() == 32 and prefill.maxThreads() >= 128);
+    var legacy = p;
+    legacy.prefill = null;
+    const queue = try device.queue();
+    defer queue.deinit();
+    const w = try Owned.init(device, 5, .mul1, 0x7368617265);
+    defer w.deinit();
+    for ([_]usize{ 31, 32, 33, 63, 64, 65 }) |count| {
+        const x = try input(device, count);
+        defer x.deinit();
+        const ids = try device.buffer(count * 4, mtl.ResourceOptions.shared);
+        defer ids.deinit();
+        for (ids.slice(u32, count), 0..) |*id, i| id.* = @intCast(i % 2);
+        for ([_]ex.Output{ .bf16, .f32 }) |kind| {
+            const size: usize = if (kind == .bf16) 2 else 4;
+            const bytes = count * (n + 8) * size;
+            const actual = try device.buffer(bytes + 64, mtl.ResourceOptions.shared);
+            defer actual.deinit();
+            const original = try device.buffer(bytes + 64, mtl.ResourceOptions.shared);
+            defer original.deinit();
+            const scratch_bytes = try ex.scratchBytes(k, n, count);
+            const scratch = try device.buffer(scratch_bytes + 32, mtl.ResourceOptions.shared);
+            defer scratch.deinit();
+            for ([_]bool{ false, true }) |filtered| {
+                @memset(actual.slice(u8, bytes + 64), 0xa5);
+                @memset(original.slice(u8, bytes + 64), 0xa5);
+                @memset(scratch.slice(u8, scratch_bytes + 32), 0xcd);
+                const r: ex.Rows = .{ .count = count, .x_stride = k + 16, .y_stride = n + 8, .output = kind, .routes = if (filtered) .{ .ids = .{ .buffer = ids } } else null };
+                const cb = queue.commandBuffer();
+                const e = cb.compute(.concurrent);
+                try ex.encode(&p, e, w.matrix, .{ .buffer = x, .offset = 32 }, .{ .buffer = actual, .offset = 32 }, .{ .buffer = scratch, .offset = 16 }, r);
+                e.barrier();
+                try ex.encode(&legacy, e, w.matrix, .{ .buffer = x, .offset = 32 }, .{ .buffer = original, .offset = 32 }, .{ .buffer = scratch, .offset = 16 }, r);
+                try complete(cb, e);
+                try std.testing.expectEqualSlices(u8, original.slice(u8, bytes + 64), actual.slice(u8, bytes + 64));
+                if (!filtered) {
+                    @memset(original.slice(u8, bytes + 64), 0xa5);
+                    const resumed = queue.commandBuffer();
+                    const re = resumed.compute(.concurrent);
+                    var first = r;
+                    first.count = 31;
+                    try ex.encode(&p, re, w.matrix, .{ .buffer = x, .offset = 32 }, .{ .buffer = original, .offset = 32 }, .{ .buffer = scratch, .offset = 16 }, first);
+                    if (count > 31) {
+                        re.barrier();
+                        var tail = r;
+                        tail.count = count - 31;
+                        try ex.encode(&p, re, w.matrix, .{ .buffer = x, .offset = 32 + 31 * (k + 16) * 2 }, .{ .buffer = original, .offset = 32 + 31 * (n + 8) * size }, .{ .buffer = scratch, .offset = 16 }, tail);
+                    }
+                    try complete(resumed, re);
+                    try std.testing.expectEqualSlices(u8, original.slice(u8, bytes + 64), actual.slice(u8, bytes + 64));
+                }
+                for (actual.slice(u8, bytes + 64)[0..32]) |v| try std.testing.expectEqual(@as(u8, 0xa5), v);
+                for (actual.slice(u8, bytes + 64)[bytes + 32 ..]) |v| try std.testing.expectEqual(@as(u8, 0xa5), v);
+                for (0..count) |row| {
+                    const pad = 32 + (row * (n + 8) + n) * size;
+                    for (actual.slice(u8, bytes + 64)[pad .. pad + 8 * size]) |v| try std.testing.expectEqual(@as(u8, 0xa5), v);
+                    if (filtered and row % 2 != 0) {
+                        const at = 32 + row * (n + 8) * size;
+                        for (actual.slice(u8, bytes + 64)[at .. at + n * size]) |v| try std.testing.expectEqual(@as(u8, 0xa5), v);
+                    }
+                }
+                for (scratch.slice(u8, scratch_bytes + 32)[0..16]) |v| try std.testing.expectEqual(@as(u8, 0xcd), v);
+                for (scratch.slice(u8, scratch_bytes + 32)[scratch_bytes + 16 ..]) |v| try std.testing.expectEqual(@as(u8, 0xcd), v);
+            }
+        }
+    }
+}
+
+test "shared prefill preserves gather and scatter maps across a partial tile" {
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    var p = try ex.Pipelines.load(device);
+    defer p.deinit();
+    if (p.prefill == null) return error.SharedPrefillUnavailable;
+    var legacy = p;
+    legacy.prefill = null;
+    const queue = try device.queue();
+    defer queue.deinit();
+    const w = try Owned.init(device, 3, .mul1, 0x676174686572);
+    defer w.deinit();
+    const x = try input(device, 3);
+    defer x.deinit();
+    const count = 33;
+    const gather = try device.buffer(count * 4 + 16, mtl.ResourceOptions.shared);
+    defer gather.deinit();
+    const scatter = try device.buffer(count * 4 + 16, mtl.ResourceOptions.shared);
+    defer scatter.deinit();
+    for (0..count) |i| {
+        gather.slice(u32, count + 4)[4 + i] = @intCast((i * 5) % 3);
+        scatter.slice(u32, count + 4)[4 + i] = @intCast(count - 1 - i);
+    }
+    for ([_]ex.Output{ .bf16, .f32 }) |kind| {
+        const size: usize = if (kind == .bf16) 2 else 4;
+        const bytes = count * (n + 8) * size + 64;
+        const actual = try device.buffer(bytes, mtl.ResourceOptions.shared);
+        defer actual.deinit();
+        const original = try device.buffer(bytes, mtl.ResourceOptions.shared);
+        defer original.deinit();
+        @memset(actual.slice(u8, bytes), 0xa5);
+        @memset(original.slice(u8, bytes), 0xa5);
+        const scratch = try device.buffer(try ex.scratchBytes(k, n, count), mtl.ResourceOptions.shared);
+        defer scratch.deinit();
+        const r: ex.Rows = .{ .count = count, .x_stride = k + 16, .y_stride = n + 8, .output = kind, .input_ids = .{ .buffer = gather, .offset = 16 }, .output_ids = .{ .buffer = scatter, .offset = 16 }, .input_rows = 3, .output_rows = count };
+        const cb = queue.commandBuffer();
+        const e = cb.compute(.concurrent);
+        try ex.encode(&p, e, w.matrix, .{ .buffer = x, .offset = 32 }, .{ .buffer = actual, .offset = 32 }, .{ .buffer = scratch }, r);
+        e.barrier();
+        try ex.encode(&legacy, e, w.matrix, .{ .buffer = x, .offset = 32 }, .{ .buffer = original, .offset = 32 }, .{ .buffer = scratch }, r);
+        try complete(cb, e);
+        try std.testing.expectEqualSlices(u8, original.slice(u8, bytes), actual.slice(u8, bytes));
+    }
+}

@@ -319,6 +319,9 @@ pub fn main(init: std.process.Init) !void {
     const baseline = try mtl.Pipeline.init(device, lib, "tf_exl3_matmul", false);
     p[0].matmul.deinit();
     p[0].matmul = baseline;
+    // Keep the arithmetic reference independent of the optional prefill kernel.
+    if (p[0].prefill) |pf| pf.deinit();
+    p[0].prefill = null;
     try checkCodebooks(device, queue);
     for ([_]ex.format.Codebook{ .inst3, .mcg, .mul1 }) |book| {
         for ([_]u16{ 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16 }) |width| {

@@ -52,6 +52,12 @@ candidate output bit against the arithmetic decoder, but the independent FP64
 oracle samples at most two rows and three 128-column blocks. Its worst-column
 metrics are explicitly labelled `worst_sampled`; they are not whole-matrix bounds.
 
+Plain prefill windows of at least 32 rows share decoded weight tiles across four
+SIMDgroups when the pipeline supports 128 threads. Smaller windows, filtered
+routes and indexed experts keep the eight-row kernel. If the prefill pipeline
+is unavailable, the operator uses that existing path. The benchmark's arithmetic
+reference disables the optional prefill pipeline to keep its comparison valid.
+
 The borrowed-buffer API in `zig/src/core/exl3_projection.zig` encodes BF16
 inputs, FP16-rounded rotated inputs, compensated FP32 projection dots and BF16
 or F32 outputs. Scratch holds row intermediates, never a dequantized matrix.

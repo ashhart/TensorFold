@@ -240,3 +240,63 @@ kernel void tf_exl3_state_window_check(const device uint4* inputs [[buffer(0)]],
   const uint off = inputs[tid].z;
   outputs[tid] = tf_exl3_mapped_state(tile, (off << 6) | (1u << 11));
 }
+
+// Four SIMDgroups share decoded weights while each retains its original eight-row compensated dots.
+kernel void tf_exl3_matmul_prefill(const device half* x [[buffer(0)]],
+                                  const device uchar* trellis [[buffer(1)]],
+                                  device float* sums [[buffer(2)]],
+                                  constant TfExl3Args& a [[buffer(3)]],
+                                  const device uint* routes [[buffer(4)]],
+                                  const device TfExl3Expert* descriptors [[buffer(5)]],
+                                  uint lane [[thread_index_in_simdgroup]],
+                                  uint sg [[simdgroup_index_in_threadgroup]],
+                                  uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup float wx[256], xx[512];
+  const uint rb = tg.y * 32, nb = tg.x * 16;
+  if (a.indexed || a.routed || rb >= a.rows) return;
+  uint maps[8];
+  if (sg == 0) {
+    for (uint j = 0; j < 8; ++j) {
+      const uint p = lane + 32 * j, ring = 128 * a.halves;
+      const uint end = ((p + 1) * a.halves - ((a.halves & 1u) ? ((p + 1) & 1u) : 0u)) / 2;
+      const uint start = (end + ring - 16) % ring;
+      const uint wi = start / 32, off = start % 32, next = wi + 1 == 4 * a.halves ? 0 : wi + 1;
+      maps[j] = wi | (off << 6) | (next << 11);
+    }
+  }
+  float high[4] = {0,0,0,0}, low[4] = {0,0,0,0};
+  for (uint kb = 0; kb < a.k; kb += 16) {
+    if (sg == 0) {
+      const device ushort* tile = reinterpret_cast<const device ushort*>(
+          trellis + ulong(kb / 16) * a.tile_k_stride + ulong(nb / 16) * a.tile_n_stride);
+      for (uint j = 0; j < 8; ++j) {
+        const uint p = lane + 32 * j, l = p / 8, e = p % 8;
+        const uint r = 2 * (l % 4) + (e & 1u) + 8 * ((e >> 1) & 1u);
+        const uint c = l / 4 + 8 * (e >> 2);
+        wx[r * 16 + c] = float(tf_exl3_value(tf_exl3_mapped_state(tile, maps[j]), a.codebook));
+      }
+    }
+    for (uint j = lane; j < 128; j += 32) {
+      const uint row = rb + sg * 8 + j / 16;
+      xx[sg * 128 + j] = tf_exl3_active(routes, a, row)
+          ? float(x[ulong(row) * a.k + kb + j % 16]) : 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = 0; i < 4; ++i) {
+      const uint at = lane + 32 * i, row = rb + sg * 8 + at / 16, col = at % 16;
+      if (!tf_exl3_active(routes, a, row)) continue;
+      for (uint k = 0; k < 16; ++k) {
+        const float product = xx[sg * 128 + (at / 16) * 16 + k] * wx[k * 16 + col];
+        const float next = high[i] + product;
+        const float borrowed = next - high[i];
+        low[i] += (high[i] - (next - borrowed)) + (product - borrowed);
+        high[i] = next;
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  for (uint i = 0; i < 4; ++i) {
+    const uint at = lane + 32 * i, row = rb + sg * 8 + at / 16;
+    if (tf_exl3_active(routes, a, row)) sums[ulong(row) * a.n + nb + at % 16] = high[i] + low[i];
+  }
+}
