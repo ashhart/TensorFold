@@ -102,6 +102,7 @@ pub fn prefill(e: *Engine, s: *Segments, prompt: []const u32, head: ?*Head, part
         e.pos += c.rows;
         at += c.rows;
     }
+    e.last_chunk = prompt.len - last_rows;
     if (last == 0) return;
     const o = e.ops();
     try o.copy(e.b.p_hidden, bufs[last].p_hidden, last_rows * e.c.hidden * 2);

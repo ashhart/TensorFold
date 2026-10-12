@@ -1,4 +1,4 @@
-//! Prompt states kept on the prompt grid: a pass resumed from each equals a fresh pass, in every row the prompt leaves.
+//! Prompt states: one kept inside a chunk equals one kept where a chunk ends, and a pass resumed from it a fresh pass.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -25,7 +25,7 @@ fn digest(gpa: std.mem.Allocator, e: *nemotron.Engine, h: *nemotron.Head, len: u
     try add(&s, gpa, e, e.b.ssm, m[0]);
     try add(&s, gpa, e, e.b.conv_base, m[1]);
     for ([2]u64{ h.k_cache, h.v_cache }) |plane| try add(&s, gpa, e, plane, (len - 1) * row); // the head stops a row short
-    try add(&s, gpa, e, e.b.p_hidden + (len - 1) % nemotron.state.prefill_rows * e.c.hidden * 2, e.c.hidden * 2);
+    try add(&s, gpa, e, e.b.p_hidden + (len - 1 - e.last_chunk) * e.c.hidden * 2, e.c.hidden * 2);
     try add(&s, gpa, e, e.b.p_logits, e.c.vocab * 2);
     s.update(std.mem.asBytes(&first));
     var out: [32]u8 = undefined;
@@ -36,8 +36,8 @@ fn digest(gpa: std.mem.Allocator, e: *nemotron.Engine, h: *nemotron.Head, len: u
 /// The keep pass's saves, as the lane host makes them.
 const Saver = struct {
     target: *reuse.Target,
-    at: [8]u32 = undefined,
-    saved: [8]*anyopaque = undefined,
+    at: [32]u32 = undefined,
+    saved: [32]*anyopaque = undefined,
     n: usize = 0,
     err: ?anyerror = null,
 
@@ -101,4 +101,64 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     const got = try digest(gpa, e, h, len, try e.prefillFrom(ids, saver.at[1], null, h, null, null));
     try check.expect(std.mem.eql(u8, &fresh, &got), "the state at {d} restored into another sequence differs", .{saver.at[1]});
     std.debug.print("PASS resume: {d} marks, each resumed equal to the fresh pass, and in a second sequence\n", .{marks.len});
+}
+
+fn readIds(gpa: std.mem.Allocator, io: std.Io, path: []const u8, list: *std.ArrayList(u32)) !void {
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 << 20));
+    defer gpa.free(text);
+    var it = std.mem.tokenizeAny(u8, text, ", \n");
+    while (it.next()) |t| try list.append(gpa, try std.fmt.parseInt(u32, t, 10));
+}
+
+/// The first N ids at each pattern (`;` between, `,` within): states kept inside chunks against cut ones, bytewise.
+pub fn insideChunks(gpu: check.Gpu, model: []const u8, ids_path: []const u8, n_text: []const u8, patterns: []const u8) !void {
+    const gpa = gpu.gpa;
+    var list: std.ArrayList(u32) = .empty;
+    defer list.deinit(gpa);
+    try readIds(gpa, gpu.io, ids_path, &list);
+    const n = try std.fmt.parseInt(usize, n_text, 10);
+    if (list.items.len < n) return error.PromptTooShort;
+    const ids = list.items[0..n];
+    const e = try nemotron.Engine.init(gpa, gpu.io, gpu.ctx, model, null, .{ .context = 16384, .mtp = true, .graphs = false, .sampling = null, .segments = 1 });
+    defer e.deinit();
+    const h = try nemotron.Head.init(e);
+    defer h.deinit();
+    var target: reuse.Target = .{ .e = e, .head = h };
+    const fresh = try digest(gpa, e, h, n, try e.prefillFrom(ids, 0, null, h, null, null));
+    var bad: usize = 0;
+    var it = std.mem.splitScalar(u8, patterns, ';');
+    while (it.next()) |pat| {
+        var rows_buf: [32]u32 = undefined;
+        var k: usize = 0;
+        var ct = std.mem.tokenizeScalar(u8, pat, ',');
+        while (ct.next()) |c| : (k += 1) rows_buf[k] = try std.fmt.parseInt(u32, c, 10);
+        const rows = rows_buf[0..k];
+        var a: Saver = .{ .target = &target };
+        var b: Saver = .{ .target = &target };
+        defer for ([2]*Saver{ &a, &b }) |sv| for (sv.saved[0..sv.n]) |x| reuse.drop(&target, x);
+        const da = try digest(gpa, e, h, n, try e.prefillFrom(ids, 0, null, h, null, .{ .at = rows, .ctx = &a, .call = Saver.call }));
+        const db = try digest(gpa, e, h, n, try e.prefillFrom(ids, 0, null, h, null, .{ .at = rows, .ctx = &b, .call = Saver.call, .cut = true }));
+        for ([2]*const Saver{ &a, &b }) |sv| if (sv.err) |err| return err;
+        try check.expect(a.n == k and b.n == k, "pattern {s}: {d} and {d} states kept for {d} rows", .{ pat, a.n, b.n, k });
+        var inside: usize = 0;
+        var differ: ?u32 = null;
+        for (rows, a.saved[0..k], b.saved[0..k]) |at, sa, sb| {
+            inside += @intFromBool(at % nemotron.state.prefill_rows != 0);
+            const len = reuse.stateBytes(e.c, at, true);
+            const ha = try gpa.alloc(u8, len);
+            defer gpa.free(ha);
+            const hb = try gpa.alloc(u8, len);
+            defer gpa.free(hb);
+            try e.ops().download(ha, @as(*reuse.Copy, @ptrCast(@alignCast(sa))).buf.ptr);
+            try e.ops().download(hb, @as(*reuse.Copy, @ptrCast(@alignCast(sb))).buf.ptr);
+            try e.stream.synchronize();
+            if (differ == null and !std.mem.eql(u8, ha, hb)) differ = at;
+        }
+        const same = differ == null and std.mem.eql(u8, &da, &fresh) and std.mem.eql(u8, &db, &fresh);
+        std.debug.print("RESULT marks {d} tokens [{s}]: {d} states, {d} inside chunks, {s}\n", .{ n, pat, k, inside, if (same) "byte-equal to the cut pass, both passes equal to a plain one" else "DIFFER" });
+        if (differ) |at| std.debug.print("  first state that differs: row {d}\n", .{at});
+        bad += @intFromBool(!same);
+    }
+    try check.expect(bad == 0, "{d} patterns differ", .{bad});
+    std.debug.print("PASS marks: every pattern's states byte-equal\n", .{});
 }

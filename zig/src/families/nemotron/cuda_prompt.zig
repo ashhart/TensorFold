@@ -12,6 +12,7 @@ const state = @import("cuda_state.zig");
 const segs = @import("cuda_segments.zig");
 const grid = @import("cuda_prompt_grid.zig");
 const prompt_rows = @import("cuda_prompt_rows.zig");
+const reuse = @import("cuda_reuse.zig");
 const lesson_route = @import("lesson_route.zig");
 const heat = @import("heat");
 const pin_sampled = engine.pin_sampled;
@@ -75,9 +76,17 @@ pub fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, 
         if (Cancel.now(cancel)) return error.Cancelled;
         try e.beforeChunk(cancel);
         var end = grid.end(s, prompt.len, state.prefill_rows);
+        if (keep) |k| if (k.cut) for (k.at) |m| if (m > s and m < end) {
+            end = m;
+            break;
+        };
         // the decision row ends its chunk: the rows after it read the lessons it latched
         if (e.decide != lesson_route.none and e.decide >= s and e.decide + 1 < end) end = @intCast(e.decide + 1);
         const chunk = prompt[s..end];
+        e.last_chunk = s;
+        if (keep) |k| arm(e, k, s, end);
+        defer e.armed.n = 0;
+        f.captures = e.armed.marks();
         f.route = .{};
         f.route.add(0, chunk.len, e.pos, e.decide, e.slot);
         try e.copied.synchronize();
@@ -91,9 +100,17 @@ pub fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, 
         const known = @min(chunk.len, prompt.len - 1 - s);
         if (e.prompt_rows) |p| try prompt_rows.run(e, p, prompt[s + 1 ..][0..known]);
         if (head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known]);
+        try reuse.finish(.{ .e = e, .head = head });
         s = end;
         if (keep) |k| if (s <= std.math.maxInt(u32) and std.mem.indexOfScalar(u32, k.at, @intCast(s)) != null) k.call(k.ctx, @intCast(s));
     }
+}
+
+/// The keeps of rows strictly inside the chunk [s, end), made before it runs: the chunk writes their Mamba states.
+fn arm(e: *Engine, k: Keep, s: usize, end: usize) void {
+    e.armed.open = .{ s, end };
+    defer e.armed.open = null;
+    for (k.at) |m| if (m > s and m < end) k.call(k.ctx, m);
 }
 
 /// Whole chunks a prompt call runs as staggered segments from here on; their streams and scratch are made now.

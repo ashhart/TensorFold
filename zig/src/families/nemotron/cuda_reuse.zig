@@ -7,6 +7,7 @@ const Config = config.Config;
 const state = @import("cuda_state.zig");
 const Engine = @import("cuda_engine.zig").Engine;
 const Head = @import("cuda_mtp.zig").Head;
+const marks = @import("cuda_marks.zig");
 
 /// One kept state: its parts packed in one device copy, and where the engine stood.
 pub const Copy = struct {
@@ -15,6 +16,7 @@ pub const Copy = struct {
     pos: usize,
     parity: usize,
     rows: usize,
+    whole: bool = true, // false while an armed mark's chunk has not written all its parts
 };
 
 /// The engine and head a cache save copies. The native host keeps one of these for the loaded model.
@@ -23,8 +25,8 @@ pub const Target = struct {
     head: ?*Head,
 };
 
-/// `len` bytes at `live` in the bound sequence's planes.
-const Part = struct { live: u64, len: usize };
+/// `len` bytes at `live` in the bound sequence's planes; `mamba`: the SSM or conv state, which an armed chunk writes.
+const Part = struct { live: u64, len: usize, mamba: bool = false };
 
 /// Where the bound sequence keeps what a state copies: KV planes, SSM and conv planes, the head's KV planes.
 const Planes = struct { k: u64, v: u64, ssm: u64, conv: u64, head: ?[2]u64 = null };
@@ -53,8 +55,8 @@ fn parts(c: Config, max_len: usize, p: Planes, at: usize, out: *[max_parts]Part)
         out[n] = .{ .live = plane + l * max_len * row, .len = at * row };
         n += 1;
     };
-    out[n] = .{ .live = p.ssm, .len = m[0] };
-    out[n + 1] = .{ .live = p.conv, .len = m[1] };
+    out[n] = .{ .live = p.ssm, .len = m[0], .mamba = true };
+    out[n + 1] = .{ .live = p.conv, .len = m[1], .mamba = true };
     n += 2;
     if (p.head) |h| for (h) |plane| {
         out[n] = .{ .live = plane, .len = at * row };
@@ -68,13 +70,18 @@ fn planes(t: *const Target) Planes {
     return .{ .k = b.k_cache, .v = b.v_cache, .ssm = b.ssm, .conv = b.conv_base, .head = if (t.head) |h| .{ h.k_cache, h.v_cache } else null };
 }
 
+/// Where a state at `at` tokens keeps its SSM part (its conv part follows): after every layer's key and value rows.
+fn mambaAt(c: Config, at: usize) usize {
+    return 2 * c.count(.attention) * at * state.kvRowBytes(c);
+}
+
 /// Copies between the bound sequence and `buf` on the engine's stream (`into`: live to buf); the bytes moved.
-fn move(t: *const Target, at: usize, buf: u64, into: bool) !usize {
+fn move(t: *const Target, at: usize, buf: u64, into: bool, mamba: bool) !usize {
     const o = t.e.ops();
     var store: [max_parts]Part = undefined;
     var off: usize = 0;
     for (parts(t.e.c, t.e.max_len, planes(t), at, &store)) |p| {
-        if (into) try o.copy(buf + off, p.live, p.len) else try o.copy(p.live, buf + off, p.len);
+        if (mamba or !p.mamba) if (into) try o.copy(buf + off, p.live, p.len) else try o.copy(p.live, buf + off, p.len);
         off += p.len;
     }
     return off;
@@ -92,15 +99,43 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     const t: *Target = @ptrCast(@alignCast(ptr));
     const e = t.e;
     // a prompt mark: no window's rows wait to replay, so raw, xc and dt hold nothing a later pass reads
-    if (e.pos != at or e.prev_keep != 0) return error.NotAtMark;
+    if (e.prev_keep != 0) return error.NotAtMark;
+    if (e.armed.open) |span| if (at > span[0] and at < span[1]) return arm(t, at);
+    if (e.pos != at) return error.NotAtMark;
     if (t.head) |h| if (h.pos != at) return error.NotAtMark;
-    const n = stateBytes(e.c, at, t.head != null);
+    const copy = try alloc(t, at);
+    errdefer drop(ptr, copy);
+    if (try move(t, at, copy.buf.ptr, true, true) != stateBytes(e.c, at, t.head != null)) return error.SnapshotSize;
+    return copy;
+}
+
+fn alloc(t: *const Target, at: usize) !*Copy {
+    const e = t.e;
     const copy = try e.gpa.create(Copy);
     errdefer e.gpa.destroy(copy);
-    copy.* = .{ .buf = try cuda.DeviceBuffer.alloc(e.ctx.d, allocBytes(n)), .head = t.head != null, .pos = at, .parity = e.parity, .rows = e.rows };
-    errdefer copy.buf.free();
-    if (try move(t, at, copy.buf.ptr, true) != n) return error.SnapshotSize;
+    copy.* = .{ .buf = try cuda.DeviceBuffer.alloc(e.ctx.d, allocBytes(stateBytes(e.c, at, t.head != null))), .head = t.head != null, .pos = at, .parity = e.parity, .rows = e.rows };
     return copy;
+}
+
+/// A row inside the chunk about to run: the chunk writes the copy's Mamba parts there, `finish` its key and value rows.
+fn arm(t: *const Target, at: usize) !*anyopaque {
+    const e = t.e;
+    if (e.armed.n == marks.max) return error.TooManyMarks;
+    const copy = try alloc(t, at);
+    copy.whole = false;
+    const ssm = copy.buf.ptr + mambaAt(e.c, at);
+    e.armed.list[e.armed.n] = .{ .at = at, .ssm = ssm, .conv = ssm + state.mambaPlanes(e.c)[0], .copy = copy };
+    e.armed.n += 1;
+    return copy;
+}
+
+/// The armed rows' key and value rows, the head's too, once their chunk is queued: their copies are then whole.
+pub fn finish(t: Target) !void {
+    for (t.e.armed.marks()) |m| {
+        const copy: *Copy = @ptrCast(@alignCast(m.copy));
+        _ = try move(&t, m.at, copy.buf.ptr, true, false);
+        copy.whole = true;
+    }
 }
 
 /// Make the bound sequence `saved`'s; rows past its position stay, since every kernel writes a key before reading it.
@@ -110,7 +145,8 @@ pub fn restore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!
     const copy: *Copy = @ptrCast(@alignCast(saved));
     const e = t.e;
     if (copy.head != (t.head != null)) return error.NoHead; // checked before any copy: nothing half restored
-    _ = try move(t, copy.pos, copy.buf.ptr, false);
+    if (!copy.whole) return error.Incomplete; // its chunk failed before `finish`
+    _ = try move(t, copy.pos, copy.buf.ptr, false, true);
     e.pos = copy.pos;
     e.parity = copy.parity;
     e.prev_keep = 0;
@@ -122,6 +158,7 @@ pub fn restore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!
 pub fn drop(ptr: *anyopaque, saved: *anyopaque) void {
     const t: *Target = @ptrCast(@alignCast(ptr));
     const copy: *Copy = @ptrCast(@alignCast(saved));
+    t.e.armed.forget(saved); // a copy evicted before its chunk ran: the chunk must not write it
     copy.buf.free();
     t.e.gpa.destroy(copy);
 }
@@ -147,6 +184,18 @@ test "a kept state holds its prompt's key and value rows beside the whole Mamba 
     try std.testing.expectEqual(@as(usize, 2 * 2 * 2100 * 512), stateBytes(c, 2100, false) - fixed);
 }
 
+test "an armed row's Mamba parts sit where a whole copy puts them" {
+    const c = testConfig();
+    const p: Planes = .{ .k = 1 << 40, .v = 2 << 40, .ssm = 3 << 40, .conv = 4 << 40, .head = .{ 5 << 40, 6 << 40 } };
+    var store: [max_parts]Part = undefined;
+    var off: usize = 0;
+    for (parts(c, 70144, p, 1500, &store)) |x| {
+        if (x.live == p.ssm) try std.testing.expectEqual(mambaAt(c, 1500), off);
+        if (x.live == p.conv) try std.testing.expectEqual(mambaAt(c, 1500) + state.mambaPlanes(c)[0], off);
+        off += x.len;
+    }
+}
+
 test "a state is charged the whole pages it allocates" {
     try std.testing.expectEqual(@as(usize, 62 << 20), allocBytes(64135168)); // 2,100 tokens of Nemotron 3.5 Lightning
     try std.testing.expectEqual(@as(usize, 48 << 20), allocBytes(48 << 20));
@@ -161,10 +210,10 @@ test "a state's parts start at each layer's row 0 and add up to its bytes" {
     const p: Planes = .{ .k = 1 << 40, .v = 2 << 40, .ssm = 3 << 40, .conv = 4 << 40, .head = .{ 5 << 40, 6 << 40 } };
     var store: [max_parts]Part = undefined;
     const want = [_]Part{
-        .{ .live = 1 << 40, .len = 2100 * row }, .{ .live = (1 << 40) + max_len * row, .len = 2100 * row },
-        .{ .live = 2 << 40, .len = 2100 * row }, .{ .live = (2 << 40) + max_len * row, .len = 2100 * row },
-        .{ .live = 3 << 40, .len = m[0] },       .{ .live = 4 << 40, .len = m[1] },
-        .{ .live = 5 << 40, .len = 2100 * row }, .{ .live = 6 << 40, .len = 2100 * row },
+        .{ .live = 1 << 40, .len = 2100 * row },          .{ .live = (1 << 40) + max_len * row, .len = 2100 * row },
+        .{ .live = 2 << 40, .len = 2100 * row },          .{ .live = (2 << 40) + max_len * row, .len = 2100 * row },
+        .{ .live = 3 << 40, .len = m[0], .mamba = true }, .{ .live = 4 << 40, .len = m[1], .mamba = true },
+        .{ .live = 5 << 40, .len = 2100 * row },          .{ .live = 6 << 40, .len = 2100 * row },
     };
     const got = parts(c, max_len, p, 2100, &store);
     try std.testing.expectEqualSlices(Part, &want, got);
