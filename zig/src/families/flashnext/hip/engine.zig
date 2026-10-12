@@ -27,6 +27,22 @@ pub const Options = struct {
 /// Bytes of the pinned staging a forward's uploads and n-gram rows go through.
 const staging_bytes = 64 << 20;
 
+/// A round's shape: each stream's cache slot and rows; one graph serves every later round of it.
+pub const Key = struct {
+    count: u32 = 0,
+    slots: [forward.max_segs]u32 = @splat(0),
+    rows: [forward.max_segs]u8 = @splat(0),
+};
+
+/// What a round's launches leave: the forward's rows, the logits and where the arena stands after them.
+pub const Done = struct { out: forward.Out, logits: hip.ops.Tensor, used: usize };
+
+/// A round's replay: graphs cut at its collectives, which run between them (RCCL calls record slowly in a graph).
+pub const Graphs = hip.graph_cache.CacheOf(Key, Done, hip.graph_split.Split);
+
+/// What a round does with its shape's graph (rank 0's choice, which every rank makes too).
+pub const Pick = enum(u32) { eager, replay, capture };
+
 pub const Engine = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -48,6 +64,12 @@ pub const Engine = struct {
     comm: ?hip.collective.Comm = null,
     act: model.Kind,
     eos: i64,
+    /// Rounds replay their shape's graph unless the policy says `graphs=off`.
+    graphed: bool,
+    graphs: Graphs,
+    chosen: ?*Graphs.Entry = null,
+    /// Streams' caches at the full capacity, kept between streams so their graphs stay valid (null: not made yet).
+    pool: std.ArrayList(?cache.Caches) = .empty,
 
     /// The checkpoint `dir` on device `o.device`, this rank's share loaded; the scratch sized for `o.chunk` rows.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
@@ -98,11 +120,19 @@ pub const Engine = struct {
         e.arena = try hip.Arena.init(&e.driver, try e.scratchBytes());
         errdefer e.arena.deinit();
         e.drawer = try serve.draw.Drawer.init(gpa, &e.driver, if (e.act == .f16) .f16 else .bf16, e.cfg.vocab, cache.max_window * forward.max_segs);
+        e.graphed = o.policy.graphs != .off;
+        e.graphs = Graphs.init(gpa);
+        e.chosen = null;
+        e.pool = .empty;
         return e;
     }
 
     pub fn deinit(e: *Engine) void {
         e.stream.synchronize() catch {};
+        if (e.graphs.captured > 0 and e.o.rank == 0) std.log.info("graphs: {d} captured ({d:.0} ms each), {d} of {d} rounds replayed", .{ e.graphs.captured, @as(f64, @floatFromInt(e.graphs.capture_ns)) / @as(f64, @floatFromInt(e.graphs.captured)) / 1e6, e.graphs.replayed, e.graphs.rounds });
+        e.graphs.deinit();
+        for (e.pool.items) |*c| if (c.*) |*x| x.deinit(e.gpa);
+        e.pool.deinit(e.gpa);
         e.drawer.deinit();
         e.arena.deinit();
         e.host.staging.free();
@@ -169,7 +199,8 @@ pub const Engine = struct {
         @memset(tokens, 0);
         const before = e.host.used;
         defer e.host.used = before;
-        const out = try forward.run(o, &e.weights.model, &e.host, &.{.{ .c = &c, .tokens = tokens, .pos = e.o.capacity -| e.o.chunk }}, false);
+        const segs = [_]forward.Seg{.{ .c = &c, .tokens = tokens, .pos = e.o.capacity -| e.o.chunk }};
+        const out = try forward.run(o, &e.weights.model, &e.host, &segs, false, try forward.stage(&e.weights.model, &e.host, &segs, false));
         _ = try e.logits(o, out.mixed, e.o.chunk);
         return counting.used + (16 << 20);
     }
@@ -178,7 +209,7 @@ pub const Engine = struct {
     pub fn logits(e: *Engine, o: hip.ops.Ops, mixed: hip.ops.Tensor, rows: usize) !hip.ops.Tensor {
         const m = &e.weights.model;
         const y = try o.project(mixed, m.head, rows, false);
-        const c = e.comm orelse return y;
+        const c = m.tp orelse return y;
         const width = m.head.n;
         const size = y.kind.size();
         const parts = try o.arena.take(c.world * rows * width * size);
@@ -214,28 +245,144 @@ pub const Engine = struct {
 
     /// A prompt's `tokens` from `c.len` into `c`, kept: the final rows of the last of them.
     pub fn prompt(e: *Engine, c: *cache.Caches, tokens: []const u32) !forward.Out {
-        const out = try e.run(c, tokens, c.len, false);
-        c.len += tokens.len;
-        return out;
-    }
-
-    /// `tokens` from `pos` through the forward into `c`; a prompt's rows, or a window's (kept later).
-    pub fn run(e: *Engine, c: *cache.Caches, tokens: []const u32, pos: usize, window: bool) !forward.Out {
         // the staging is reused: the last forward's uploads must have left it
         try e.stream.synchronize();
         e.host.used = 0;
         e.arena.reset();
-        return e.runMany(&.{.{ .c = c, .tokens = tokens, .pos = pos }}, window);
+        const segs = [_]forward.Seg{.{ .c = c, .tokens = tokens, .pos = c.len }};
+        const staged = try forward.stage(&e.weights.model, &e.host, &segs, false);
+        const out = try forward.run(e.ops(&e.arena), &e.weights.model, &e.host, &segs, false, staged);
+        c.len += tokens.len;
+        return out;
     }
 
-    /// Several streams' rows in one forward (every segment from its own caches): windows of a shared round.
-    pub fn runMany(e: *Engine, segs: []const forward.Seg, window: bool) !forward.Out {
+    /// The graph choice for a round of windows `segs`, from its shape's history; every rank makes it in the same order.
+    pub fn choose(e: *Engine, segs: []const forward.Seg) !Pick {
+        e.chosen = null;
+        if (!e.graphed) return .eager;
+        const before = e.graphs.entries.items.len;
+        const entry = try e.graphs.find(try keyOf(e, segs));
+        e.chosen = entry;
+        // a shape is recorded the second time it is met: a stream's first rounds of each width run eagerly
+        if (e.graphs.entries.items.len > before) return .eager;
+        return switch (entry.state) {
+            .ready => .replay,
+            .seen => .capture,
+            .failed => .eager,
+        };
+    }
+
+    /// A round of windows and its logits as `pick` says (rank 0's, after every rank's `choose`).
+    pub fn round(e: *Engine, segs: []const forward.Seg, pick: Pick) !Done {
+        defer for (segs) |g| {
+            g.c.pooled = (g.pos + g.tokens.len) / e.cfg.index_ratio;
+        };
         try e.stream.synchronize();
         e.host.used = 0;
         e.arena.reset();
-        return forward.run(e.ops(&e.arena), &e.weights.model, &e.host, segs, window);
+        const staged = try forward.stage(&e.weights.model, &e.host, segs, true);
+        const began = nowNs(e.io);
+        defer e.graphs.submit_ns += @intCast(nowNs(e.io) - began);
+        e.graphs.rounds += 1;
+        const ctx: Body = .{ .e = e, .segs = segs, .staged = staged };
+        const entry = e.chosen orelse return body(ctx);
+        e.chosen = null;
+        switch (pick) {
+            .eager => return body(ctx),
+            .replay => {
+                if (entry.state != .ready) return error.GraphsDisagree;
+                e.arena.used = entry.out.used;
+                try entry.exec.?.launchOn(e.stream);
+                e.graphs.replayed += 1;
+                return entry.out;
+            },
+            .capture => {
+                const at = e.arena.mark();
+                const kept = try e.record(entry, ctx);
+                e.graphs.capture_ns += @intCast(nowNs(e.io) - began);
+                if (!(try e.agreed(kept))) {
+                    e.graphs.revoke(entry);
+                    e.arena.release(at);
+                    return body(ctx);
+                }
+                try entry.exec.?.launchOn(e.stream);
+                return entry.out;
+            },
+        }
+    }
+
+    /// Records a round into `entry` (nothing runs): whether this rank kept it.
+    fn record(e: *Engine, entry: *Graphs.Entry, ctx: Body) !bool {
+        var rec: hip.graph_split.Recorder = .{ .gpa = e.gpa, .stream = e.stream, .inner = e.comm };
+        rec.begin() catch return false;
+        const m = &e.weights.model;
+        const tp = m.tp;
+        m.tp = rec.comm();
+        const got = body(ctx);
+        m.tp = tp;
+        var split = (try rec.finish()) orelse return false;
+        const out = got catch |err| {
+            split.deinit();
+            return if (err == error.OutOfDeviceMemory) err else false;
+        };
+        if (e.o.policy.graph_fail >= 0 and @as(usize, @intCast(e.o.policy.graph_fail)) == e.o.rank) {
+            split.deinit();
+            return false;
+        }
+        e.graphs.hold(entry, split, out);
+        return true;
+    }
+
+    /// Slot `slot`'s caches, fresh, for a new stream (made at the capacity the first time).
+    pub fn lease(e: *Engine, slot: u32) !cache.Caches {
+        while (e.pool.items.len <= slot) try e.pool.append(e.gpa, null);
+        var c = if (e.pool.items[slot]) |held| held else try e.caches(e.o.capacity);
+        e.pool.items[slot] = null;
+        errdefer c.deinit(e.gpa);
+        try e.stream.synchronize();
+        try c.reset(e.eos);
+        c.id = slot;
+        return c;
+    }
+
+    /// A finished stream's caches back to their slot.
+    pub fn unlease(e: *Engine, c: cache.Caches) void {
+        e.pool.items[c.id] = c;
+    }
+
+    /// Whether every rank kept its capture (one word each, gathered).
+    fn agreed(e: *Engine, yes: bool) !bool {
+        return try e.least(@intFromBool(yes)) == 1;
     }
 };
+
+const Body = struct { e: *Engine, segs: []const forward.Seg, staged: forward.Staged };
+
+/// A round's launches: the staged inputs' copy, the forward and the logits.
+fn body(ctx: Body) anyerror!Done {
+    const e = ctx.e;
+    const o = e.ops(&e.arena);
+    const out = try forward.run(o, &e.weights.model, &e.host, ctx.segs, true, ctx.staged);
+    var rows: usize = 0;
+    for (ctx.segs) |g| rows += g.tokens.len;
+    const logits = try e.logits(o, out.mixed, rows);
+    return .{ .out = out, .logits = logits, .used = e.arena.used };
+}
+
+fn keyOf(e: *const Engine, segs: []const forward.Seg) !Key {
+    if (segs.len > forward.max_segs) return error.TooManyStreams;
+    var k: Key = .{ .count = @intCast(segs.len) };
+    for (segs, 0..) |g, i| {
+        if (g.c.layout.cap != e.o.capacity) return error.CachesNotPooled;
+        k.slots[i] = g.c.id;
+        k.rows[i] = @intCast(g.tokens.len);
+    }
+    return k;
+}
+
+fn nowNs(io: std.Io) i96 {
+    return std.Io.Timestamp.now(io, .awake).nanoseconds;
+}
 
 /// The index's spelling of its n-gram shards (`shard_` or oMLX's `shards.`).
 fn spellingOf(a: std.mem.Allocator, io: std.Io, dir: []const u8) ![]const u8 {

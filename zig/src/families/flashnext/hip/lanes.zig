@@ -170,7 +170,7 @@ pub const Fx = struct {
 
     fn free(f: *Fx, l: *Lane) void {
         f.e.stream.synchronize() catch {};
-        l.caches.deinit(f.gpa);
+        f.e.unlease(l.caches);
         if (l.head) |*h| h.deinit(f.gpa);
         l.streams.free();
         if (l.first_row) |row| f.gpa.free(row);
@@ -216,6 +216,13 @@ pub const Fx = struct {
         while (!try prefillStepFn(ptr, s)) {}
     }
 
+    /// Whether a stream other than `s` holds cache slot `slot`.
+    fn slotBusy(f: *const Fx, slot: u32, s: *const lanes.Stream) bool {
+        var it = f.lanes.iterator();
+        while (it.next()) |kv| if (kv.key_ptr.* != s and kv.value_ptr.*.caches.id == slot) return true;
+        return false;
+    }
+
     fn begin(f: *Fx, s: *lanes.Stream) !*Lane {
         const prompt = s.prompt();
         const total = prompt.len + s.max_new + cache.max_window + 1;
@@ -225,8 +232,10 @@ pub const Fx = struct {
         errdefer f.lanes.removeByPtr(gop.key_ptr);
         const e = f.e;
         const m = &e.weights.model;
-        var caches = try e.caches(total);
-        errdefer caches.deinit(f.gpa);
+        var slot: u32 = 0;
+        while (f.slotBusy(slot, gop.key_ptr.*)) slot += 1;
+        const caches = try e.lease(slot);
+        errdefer e.unlease(caches);
         var head: ?cache.Caches = if (m.mtp) |*h| try head_mod.caches(f.gpa, &e.driver, h, total, e.act, e.eos) else null;
         errdefer if (head) |*h| h.deinit(f.gpa);
         var streams = try hip.DeviceBuffer.alloc(&e.driver, cache.max_window * m.dims.wide() * m.act.size());
@@ -235,7 +244,7 @@ pub const Fx = struct {
         lane.* = .{ .caches = caches, .head = head, .streams = streams, .fill = .{ .at = 0 }, .id = f.next_id };
         f.next_id += 1;
         gop.value_ptr.* = lane;
-        if (f.link != null) try f.send(&.{ @backingInt(worker.Op.begin), lane.id, @intCast(total) });
+        if (f.link != null) try f.send(&.{ @backingInt(worker.Op.begin), lane.id, slot });
         const fill = &lane.fill.?;
         if (f.store) |*st| {
             var arena: std.heap.ArenaAllocator = .init(f.gpa);
@@ -341,7 +350,7 @@ pub const Fx = struct {
         var total: usize = 0;
         if (f.link != null) {
             f.msg.clearRetainingCapacity();
-            try f.msg.appendSlice(f.gpa, &.{ @backingInt(worker.Op.verify), @intCast(windows.len) });
+            try f.msg.appendSlice(f.gpa, &.{ @backingInt(worker.Op.verify), @intCast(windows.len), 0 });
         }
         for (windows, 0..) |w, i| {
             if (w.parents != null) return error.TreesNotBuilt;
@@ -361,8 +370,13 @@ pub const Fx = struct {
                 try f.msg.appendSlice(f.gpa, tokens[i][0..n]);
             }
         }
-        if (f.link != null) try f.send(f.msg.items);
-        const fw = try e.runMany(segs[0..windows.len], true);
+        const pick = try e.choose(segs[0..windows.len]);
+        if (f.link != null) {
+            f.msg.items[2] = @backingInt(pick);
+            try f.send(f.msg.items);
+        }
+        const done = try e.round(segs[0..windows.len], pick);
+        const fw = done.out;
         const row_bytes = m.dims.wide() * m.act.size();
         var off: usize = 0;
         for (windows) |w| {
@@ -371,7 +385,7 @@ pub const Fx = struct {
             off += w.rows();
         }
         const o = e.ops(&e.arena);
-        const logits = try e.logits(o, fw.mixed, total);
+        const logits = done.logits;
         var reqs: [forward.max_segs * cache.max_window]draw.Request = undefined;
         var drawn: [forward.max_segs * cache.max_window]u32 = undefined;
         off = 0;
