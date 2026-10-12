@@ -23,7 +23,7 @@ pub const model_type = "nemotron_h";
 pub const formats: []const []const u8 = &.{ "mlx-q4g64", "modelopt-nvfp4" };
 pub const default_context: i64 = engine.default_context;
 pub const max_segments: u32 = @import("cuda_segments.zig").MAX;
-pub const prompt_rows: u32 = state.prefill_rows;
+pub const prompt_rows: u32 = state.pass_rows;
 
 pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false };
 

@@ -18,7 +18,7 @@ const heat = @import("heat");
 const pin_sampled = engine.pin_sampled;
 const pin_prompt = engine.pin_prompt;
 
-/// decode.prefill: a fresh state, the prompt in 2048-row chunks (into the head too, in segments if set); the token.
+/// decode.prefill: a fresh state, the prompt in passes of up to 4,096 rows or in segments (the head too); the token.
 pub fn prefill(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head) !u32 {
     return e.prefillWith(prompt, dump, head, null);
 }
@@ -28,7 +28,7 @@ pub fn prefillWith(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head, 
     return e.prefillFrom(prompt, 0, dump, head, cancel, null);
 }
 
-/// prefill from `from` (0 resets; else a state restored at that row), in chunks of 2,048 rows from there.
+/// prefill from `from` (0 resets; else a state restored at that row), in passes of up to 4,096 rows from there.
 pub fn prefillFrom(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, head: ?*Head, cancel: ?Cancel, keep: ?Keep) !u32 {
     if (prompt.len == 0) return error.EmptyPrompt;
     if (from >= prompt.len) return error.BadReuse;

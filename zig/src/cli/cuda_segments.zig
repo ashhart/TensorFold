@@ -185,7 +185,7 @@ fn digest(gpa: std.mem.Allocator, e: *nemotron.Engine, head: ?*nemotron.Head, to
     var lg = Sha.init(.{});
     try hashDevice(&lg, gpa, e, e.b.p_logits, e.c.vocab * 2);
     var hi = Sha.init(.{});
-    try hashDevice(&hi, gpa, e, e.b.p_hidden + (e.pos - e.last_chunk - rows) * e.c.hidden * 2, rows * e.c.hidden * 2); // the last grid chunk's rows
+    try hashDevice(&hi, gpa, e, e.b.p_hidden + (e.pos - e.last_chunk - rows) * e.c.hidden * 2, rows * e.c.hidden * 2); // the rows of the last 2,048-row chunk
     return .{ .state = hex(&st), .head = hex(&hd), .logits = hex(&lg), .hidden = hex(&hi), .token = token };
 }
 
