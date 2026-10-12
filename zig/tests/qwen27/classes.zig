@@ -9,7 +9,7 @@ const help = "tf-qwen27-classes --model DIR [--gbs 800] [--reps 4]";
 
 const Class = enum { gdn_qkv, gdn_zba, gdn_out, attn_q, attn_kv, attn_out, gate_up, down, head };
 const Input = enum { input, activated, mixer_out };
-const row_counts = [_]u32{ 1, 4, 16, 128 };
+const row_counts = [_]u32{ 1, 2, 4, 8, 16, 128 };
 
 fn source(f: *q.gpu_frame.Frame, c: Class) Ref {
     return switch (c) {

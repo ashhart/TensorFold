@@ -5,6 +5,8 @@ const sources = @import("kernel_sources");
 
 /// 4-bit groups of 64 with fp32 sums take simdgroup-matrix tiles instead (8 rows a weight read).
 pub const simd = @import("simd_qmm.zig");
+/// Groups of 64 at any width with fp32 sums: the same tiles, rows at a stride.
+pub const simd_bits = @import("simd_qmm_bits.zig");
 
 /// Rows a weight read (the kernel's MB); a window takes batches of this, then one row at a time.
 pub const batch = 2;
@@ -120,6 +122,7 @@ pub fn callIndexed(p: *const Pipelines, x: Experts, slots: usize, relu2: bool) !
 
 test {
     _ = simd;
+    _ = simd_bits;
 }
 
 test "an indexed call takes whole top-k groups of slots" {

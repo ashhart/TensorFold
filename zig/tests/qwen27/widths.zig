@@ -275,6 +275,7 @@ const Gpu = struct {
     queue: mtl.Queue,
     kern: *q27.quant_gpu.Kernels,
     pipes: *const row.Pipelines,
+    bits: *row.simd_bits.Pipelines,
 
     fn commit(cb: mtl.CommandBuffer, e: mtl.ComputeEncoder) !void {
         e.end();
@@ -299,11 +300,16 @@ const Gpu = struct {
         try commit(cb, e);
     }
 
-    /// The row kernel alone at the matrix's width over `wide` rows, unstrided: a member's own product.
+    /// The member's kernel alone at its width over `wide` rows, unstrided: its own product.
     fn rows(g: Gpu, raw: row.Weights, x: mtl.Buffer, y: mtl.Buffer) !void {
         @memset(y.slice(u8, wide * raw.n * 2), 0xff);
         const cb = g.queue.commandBuffer();
         const e = cb.compute(.serial);
+        if (!std.mem.eql(u8, path(raw).name, "row")) { // simd_qmm_bits at every width, 4-bit too
+            const tiles = try row.simd_bits.call(g.bits, raw.bits, raw.n, raw.k, wide, raw.n, false);
+            row.simd_bits.encode(e, tiles, .{ .w = raw.w, .w_off = raw.w_off, .scales = raw.scales, .s_off = raw.s_off, .biases = raw.biases, .b_off = raw.b_off }, x, 0, y, 0);
+            return commit(cb, e);
+        }
         const call = try row.call(g.pipes, raw, wide, false);
         e.setPipeline(call.pipeline);
         e.setBuffer(x, 0, 0);
@@ -317,10 +323,10 @@ const Gpu = struct {
     }
 };
 
-/// The kernel the family picks for a matrix before tensor units, and its tree's extra depth for the bound.
-fn path(lin: projection.Linear) struct { name: []const u8, extra: usize } {
-    const raw = lin.raw.?;
-    if (raw.bits == 4 and raw.group == 64 and raw.n % 8 == 0) return .{ .name = "simd_qmm", .extra = std.math.log2_int(u32, row.simd.splits(raw.n)) + 1 };
+/// The kernel the family picks for a matrix alone before tensor units, and its tree's extra depth for the bound.
+fn path(raw: row.Weights) struct { name: []const u8, extra: usize } {
+    const extra = std.math.log2_int(u32, row.simd.splits(raw.n)) + 1;
+    if (raw.group == 64 and raw.n % 8 == 0) return .{ .name = if (raw.bits == 4) "simd_qmm" else "simd_qmm_bits", .extra = extra };
     return .{ .name = "row", .extra = 0 };
 }
 
@@ -338,7 +344,7 @@ fn class(t: *Tally, g: Gpu, c: Class, bits: u8, seed: u64) !void {
     var owned: std.ArrayList(mtl.Buffer) = .empty;
     defer release(&owned);
     const lin = try projection.prepare(g.device, a, &owned, &.{m.triple()}, 32);
-    const p = path(lin);
+    const p = path(lin.raw.?);
     const ref = try Ref.init(m, x);
     defer ref.deinit();
     var name: [128]u8 = undefined;
@@ -433,26 +439,25 @@ fn stack(t: *Tally, g: Gpu, members: []const Member, seed: u64) !void {
         const ref = try Ref.init(synth[i], x);
         defer ref.deinit();
         var line: [192]u8 = undefined;
-        compare(t, try std.fmt.bufPrint(&line, "{s}, prompt ({d} rows)", .{ member, wide }), col, wide, ref, k, 0);
-        compare(t, try std.fmt.bufPrint(&line, "{s}, decode (1 row a call)", .{member}), .{ .vals = outs[0].slice(u16, wide * total), .pitch = total, .first = run.first }, wide, ref, k, 0);
+        const extra = path(run.linear.raw.?).extra;
+        compare(t, try std.fmt.bufPrint(&line, "{s}, prompt ({d} rows)", .{ member, wide }), col, wide, ref, k, extra);
+        compare(t, try std.fmt.bufPrint(&line, "{s}, decode (1 row a call)", .{member}), .{ .vals = outs[0].slice(u16, wide * total), .pitch = total, .first = run.first }, wide, ref, k, extra);
         try g.rows(run.linear.raw.?, x, alone);
         const own = View{ .vals = alone.slice(u16, wide * m.n), .pitch = m.n };
-        if (same(t, member, "the stack's columns and the member's own row product", own, col, wide, m.n)) {
-            std.debug.print("RESULT {s}: its columns equal its own row product bit for bit\n", .{member});
+        if (same(t, member, "the stack's columns and the member's own product", own, col, wide, m.n)) {
+            std.debug.print("RESULT {s}: its columns equal its own product bit for bit\n", .{member});
         } else {
-            std.debug.print("RESULT {s}: its columns differ from its own row product FAIL\n", .{member});
+            std.debug.print("RESULT {s}: its columns differ from its own product FAIL\n", .{member});
             t.failed += 1;
         }
-        // the member as a matrix of its own through the family: the row kernel, or simd_qmm at 4/64 (no output stride)
+        // the member as a matrix of its own through the family: simd_qmm at 4/64, else the same tiles unstrided
         var solo: std.ArrayList(mtl.Buffer) = .empty;
         defer release(&solo);
         const lin = try projection.prepare(g.device, a, &solo, parts[i .. i + 1], 32);
         try g.quant(lin, x, matrix, wide);
-        const via = path(lin).name;
+        const via = path(lin.raw.?).name;
         if (same(t, member, "the stack's columns and the member as its own matrix", .{ .vals = matrix.slice(u16, wide * m.n), .pitch = m.n }, col, wide, m.n)) {
             std.debug.print("RESULT {s}: equals the member as its own matrix ({s}) bit for bit\n", .{ member, via });
-        } else if (std.mem.eql(u8, via, "simd_qmm")) {
-            std.debug.print("NOTE {s}: as its own matrix it takes simd_qmm (no output stride), whose bits differ\n", .{member});
         } else {
             std.debug.print("RESULT {s}: differs from the member as its own matrix ({s}) FAIL\n", .{ member, via });
             t.failed += 1;
@@ -476,7 +481,9 @@ pub fn main(_: std.process.Init) !void {
     defer kern.deinit();
     var pipes = try row.Pipelines.load(device);
     defer pipes.deinit();
-    const g = Gpu{ .device = device, .queue = queue, .kern = &kern, .pipes = &pipes };
+    var tiles = try row.simd_bits.Pipelines.load(device);
+    defer tiles.deinit();
+    const g = Gpu{ .device = device, .queue = queue, .kern = &kern, .pipes = &pipes, .bits = &tiles };
     var t = Tally{};
     var seed: u64 = 0x2727;
     for (classes) |c| for (bit_widths) |bits| {
