@@ -6,6 +6,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - `tensorfold pull` finishes into a relative cache root (a relative `HF_HUB_CACHE` or `HF_HOME`), and `pull --exlr8` into a relative `--dir`. The shipped binary stopped at the first finished file with an assertion failure, because it moved files with a call that only takes absolute paths. The checkpoint CLI's tests now run with the safety checks the binary ships with, and a new test fetches an EXLR8 node's small and large files into a relative folder (#700). Thanks to @chaog992.
 - The Flash Next recipe names the checkpoint the native engine serves on Macs, `TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP`, with `--temperature 0`, says the 4-bit checkpoint is refused at load, and marks its other sections as the Python 0.6.6 engine's (#705). Thanks to @cwschroeder.
+- The native CUDA host forwards every entry a family's lane backend gives it. It dropped `prefill_step`, `prepare_features` and `features`, so the lane core saw a backend that cannot run a prompt a chunk at a time: a CUDA family that can would have run every prompt whole, with other streams' decode waiting for all of it. No CUDA family in this release runs its prompt in chunks yet, so replies are unchanged, and a test now fails when a backend entry is added without being forwarded. In the author's runs of a GLM-5.3-Flash port on two GB10s that does (#548), a decode beside a fresh 32k-token prompt waited at most 1.7 s between tokens instead of 27.9 s (#742). Thanks to @Bizuayeu.
 
 ## 1.0.8
 
