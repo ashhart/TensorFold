@@ -1414,6 +1414,7 @@ pub fn catchSlot(words: []i32, k: usize, first: usize) usize {
 
 test {
     _ = tpm; // tp.zig's tests: the window layout and the host service's wraps
+    _ = @import("drafts.zig"); // the depth rule's tests
 }
 
 test "catch-up slots: every layer's dispatch reads its own first block after the later layers' writes" {
@@ -2274,68 +2275,11 @@ pub const Model = struct {
     }
 };
 
-/// Drafts a round from recent landing: 3 (prose), 6 while drafts land (code-like text), the widest window while
-/// nearly all land (copied text).
 /// FZ_PROFILE's knock-out bit for speed-up mode's exchanges: the bit after `Run.class`'s eight.
 pub const TP_CLASS: u32 = 1 << 8;
 
-pub const DepthRule = struct {
-    rate: f64 = 0.6, // moving average of the head's drafts landed over drafts offered
-    depth: usize = 3,
-    pair: bool = false, // speed-up mode: even windows only (an odd window's last row costs a Mac a whole expert row)
-
-    pub fn pick(self: *const DepthRule) usize {
-        return self.depth;
-    }
-
-    /// A head round's drafts and how many landed: 3, 6 or 8 drafts on one Mac, 3 or 7 on the pair (copied rounds set
-    /// their own width).
-    pub fn update(self: *DepthRule, depth: usize, landed: usize) void {
-        self.rate = 0.7 * self.rate + 0.3 * @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(depth));
-        if (self.pair) {
-            if (self.depth == 3 and self.rate > 0.95) self.depth = 7 else if (self.depth == 7 and self.rate < 0.8) self.depth = 3;
-            return;
-        }
-        if (self.depth == 3 and self.rate > 0.8) {
-            self.depth = 6;
-        } else if (self.depth == 6 and self.rate > 0.74) {
-            self.depth = 8;
-        } else if (self.depth == 8 and self.rate < 0.62) {
-            self.depth = 6;
-        } else if (self.depth == 6 and self.rate < 0.65) self.depth = 3;
-    }
-};
-
-test "the pair's depth rule keeps every window even" {
-    var pair: DepthRule = .{ .pair = true };
-    for (0..20) |_| pair.update(pair.pick(), pair.pick());
-    try std.testing.expectEqual(@as(usize, 7), pair.pick());
-    for (0..20) |_| pair.update(pair.pick(), 1);
-    try std.testing.expectEqual(@as(usize, 3), pair.pick());
-    var one: DepthRule = .{};
-    for (0..20) |_| one.update(one.pick(), one.pick());
-    try std.testing.expectEqual(@as(usize, 8), one.pick());
-}
-
-/// Copy lanes: the longest suffix of `hist` (`min`..8 tokens) seen earlier; the tokens after its latest earlier
-/// occurrence go into `out`. Returns how many (0 when nothing matches).
-pub fn copyDrafts(hist: []const u32, min: usize, out: []u32) usize {
-    const n = hist.len;
-    if (n < min + 1) return 0;
-    var len: usize = @min(8, n - 1);
-    while (len >= min) : (len -= 1) {
-        const suffix = hist[n - len ..];
-        var end: usize = n - 1;
-        while (end >= len) : (end -= 1) {
-            if (std.mem.eql(u32, hist[end - len .. end], suffix)) {
-                const k = @min(out.len, n - end);
-                @memcpy(out[0..k], hist[end .. end + k]);
-                return k;
-            }
-        }
-    }
-    return 0;
-}
+pub const DepthRule = @import("drafts.zig").DepthRule; // drafts a round from recent landing
+pub const copyDrafts = @import("drafts.zig").copyDrafts;
 
 /// Prompt chunks of up to PMAX rows: projections on the 6-bit tensor-unit kernels, experts sorted by expert and
 /// gathered, the decode's row kernels at the chunk's rows, and DeltaNet storing only its last row's state.
