@@ -6,6 +6,7 @@ const tf = @import("tensorfold");
 const lanes = tf.lanes;
 const glm = tf.glm;
 const ge = glm.engine;
+const cache_fit = @import("cache_fit.zig");
 const Allocator = std.mem.Allocator;
 
 /// The warm-up reply's draft depth: every rank of a pair pays a process's first-round costs at the same step.
@@ -65,6 +66,14 @@ fn cacheBudget(eng: *const ge.Engine, gib: ?f64) u64 {
     return if (limit > used) @min(want, limit - used) else 0;
 }
 
+/// The host's memory counts for /stats, /memory and /metrics: the footprint holds the Metal buffers, so it is `active`.
+fn readMemory(ctx: ?*anyopaque, reset_peak: bool) ?api.Memory {
+    const h: *Host = @ptrCast(@alignCast(ctx.?));
+    _ = reset_peak; // nothing to reset: `peak` is the load limit read at load, not a high-water mark
+    const active = cache_fit.footprint() orelse return null;
+    return .{ .active = active, .cache = 0, .peak = h.eng.limit.bytes, .pinned = 0 };
+}
+
 /// Learned states under `root` by checkpoint, split, chip, OS build, kernel sources and a probe's prompt-pass bits.
 fn learnedStates(gpa: Allocator, eng: *const ge.Engine, sl: *glm.slots.Slots, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
     var h = std.hash.Wyhash.init(0x62);
@@ -105,6 +114,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     errdefer h.core.deinit();
     const serves = @min(window, glm.pool.capacity(&h.slots) -| (glm.state.max_rows + 1)); // prompt + reply a stream's caches hold beside its last window (a pool keeps whole blocks)
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = serves, .prefill_step = eng.chunk_rows, .greedy_only = true, .admit = if (h.slots.pool != null) .{ .ctx = &h.back, .fits = glm.backend.Backend.fits } else null });
+    h.host.memory = .{ .ctx = h, .read = readMemory };
     h.cache = null;
     const budget = cacheBudget(eng, cache_gib);
     if (!eng.followsPeer() and budget > 0) {
