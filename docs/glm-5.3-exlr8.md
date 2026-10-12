@@ -4,7 +4,7 @@ TensorFold serves the whole GLM-5.3 model from kindlingai's EXLR8 release on two
 holds half of every expert and every attention head, and rank 0 serves the OpenAI-compatible API while rank 1 runs each
 request beside it. The release is
 [kindlingai/glm-5.3-exlr8-k2-k3-k4](https://huggingface.co/kindlingai/glm-5.3-exlr8-k2-k3-k4), pinned at revision
-`f459f5d0272a529403dd9b3fd32f771f4250a0d4`. We have run its `home` profile on two M5 Ultra Mac Studios with 256 GB each.
+`f459f5d0272a529403dd9b3fd32f771f4250a0d4`. We have run its `home` profile on two M5 Ultra Macs with 256 GB each.
 
 ## What you need
 
@@ -34,7 +34,7 @@ minutes over a shared uplink, at about 55 MiB/s each.
 
 ## Serve
 
-Start rank 1, then rank 0 within five minutes. Each Mac loads in 150 to 195 seconds.
+Start rank 1, then rank 0 within five minutes. Each Mac loads in three to four minutes.
 
 ```sh
 tensorfold serve ~/models/glm-5.3-exlr8-home --speed-up rank1.json --context 8192 --parallel 4 --temperature 0

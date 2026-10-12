@@ -98,7 +98,7 @@ started detached, for example with `nohup` over SSH after the session closes, ca
 the ranks stop with `ConnectFailed` even though `fabric-check` passes.
 
 - Earlier versions of this guide made a dump with Python tools and set `TF_FLASHNEXT_DUMP`, `FZ_LANE=1` and
-  `FZ_GDN=2`. Leave them all out. The server needs no dump, and `FZ_LANE=1 FZ_GDN=2` decode 4 to 5% slower than the
+  `FZ_GDN=2`. Leave them all out. The server needs no dump, and `FZ_LANE=1 FZ_GDN=2` decode 2 to 5% slower than the
   default kernels, on one M5 Ultra and on the pair, with the same replies.
 - The server runs two threads at user-interactive priority, the highest a macOS program gets: MCDMA's, which places
   each message that arrives, and its own, which sends each one. For MCDMA's thread it sets `MCDMA_FABRIC_QOS=1` unless
@@ -124,17 +124,18 @@ address. Send requests only to rank 0, since rank 1 refuses its own.
 
 ## Measured speeds
 
-On our two M5 Ultra Mac Studios, 256 GB each, one Thunderbolt 5 cable, macOS 27.0. Greedy, thinking off, 256-token
-replies, decode in tokens a second:
+On our two M5 Ultra Mac Studios, 256 GB each, one Thunderbolt 5 cable, macOS 27.0, started with the commands above.
+Greedy, thinking off, 256-token replies, decode in tokens a second, the mean of two runs:
 
 | Prompt | 1k tokens | 8k tokens |
 | --- | --- | --- |
-| Chat | 184 | 203.5 |
-| Code | 253.1 | 209.1 |
-| Edit a file | 401.6 | 375.3 |
+| Chat | 179 | 186 |
+| Code | 247 | 200 |
+| Edit a file | 390 | 345 |
 
-Edits are fastest because the reply copies long runs from the prompt. The first token came 0.25-0.34 s after a 1k prompt
-and 1.22-1.26 s after an 8k one. Cold prompts ran at 7.1k tokens a second at 20.5k tokens, 7.4k at 39.4k and 7.6k at 80.7k.
+Edits are fastest because the reply copies long runs from the prompt. The first token came 0.25-0.30 s after a 1k prompt
+and 1.19-1.29 s after an 8k one. Cold prompts ran at 7.8k to 7.9k tokens a second at 32k and 64k tokens. With
+`FZ_LANE=1 FZ_GDN=2` the same build decoded 2 to 5% slower in every cell, with the same tokens.
 These were measured on our machines. They aren't a promise for yours.
 
 ## Known limits
@@ -145,6 +146,8 @@ These were measured on our machines. They aren't a promise for yours.
   2.2% of each other on our Macs. A follow-up turn that adds about 280 tokens to a 7-10k-token conversation got its
   first token in 0.187-0.202 s.
 - The first prompt of a new size compiles some kernels. A 9.9k-token prompt took 3.6 s the first time and 1.3 s after.
+- A drafted request right after a `"draft": false` one decodes slower: on our Macs, 103 against 169 tokens a second on
+  a short story, and the next request is back to speed.
 - When you stop rank 0, stop rank 1 too. It stops following but keeps running, and keeps a CPU core busy, until you end
   it. If a request fails partway or the link drops, restart both servers.
 - Flash Next 6-bit only. We have run speed-up mode only on two M5 Ultras.
