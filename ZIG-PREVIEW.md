@@ -68,7 +68,7 @@ To serve Flash Next from two Macs at once, each holding the whole model, see [sp
   them in memory only, so a restart forgets them.
 - On M1 to M4, chips without tensor units, prompt kernels use the simdgroup-matrix layout and Nemotron's window attention is rewritten to it. Both are checked at load. Dense projections and routed experts are already proven row-exact there. The Mamba tree conv/scan and the norms are still open.
 - A shared forward holds at most 128 rows (64 up to `--parallel 16`), and a lone stream's window at most 64.
-- The native server serves the models in the README's table: Nemotron 3.5 Lightning (Metal and CUDA), Qwen3.8-27B, Qwen 3.8 Flash Next, GLM-5.3-Flash and the Qwen3.5-2B checkpoint in its recipe. Flash Next takes one reply at a time.
+- The native server serves the models in the README's table: Nemotron 3.5 Lightning (Metal and CUDA), Qwen3.8-27B, Qwen 3.8 Flash Next, GLM-5.3-Flash, GLM-5.3 from its EXLR8 release on two Macs and the Qwen3.5-2B checkpoint in its recipe. Flash Next takes one reply at a time.
 
 ## Where the work goes next, and where you can help
 

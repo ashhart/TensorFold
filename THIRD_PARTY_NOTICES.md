@@ -78,10 +78,10 @@ The native `zig/src/core/exl3_projection*.zig` decoder and
 `zig/kernels/metal/core/exl3_projection.metal` separately implement the same format and codebooks
 under the Turboderp attribution above. No captured kernel binaries or model weights are bundled.
 
-The EXLR8 reader, decoder and kernels (`zig/src/core/exlr8*.zig`, `zig/kernels/metal/core/exlr8_projection.metal`,
-`zig/kernels/cuda/exlr8.cu`) read kindlingai's exlr8 v2 format as the Loader section of the
-[glm-5.3-exlr8-k2-k3-k4](https://huggingface.co/kindlingai/glm-5.3-exlr8-k2-k3-k4) model card lays it out. The
-format's packing, manifests and error tables are kindlingai's, offered under
+The EXLR8 reader, decoder, pull and kernels (`zig/src/core/exlr8*.zig`, `zig/src/cli/pull_exlr8*.zig`,
+`zig/src/cuda/exlr8.zig`, `zig/kernels/metal/core/exlr8*.metal`, `zig/kernels/cuda/exlr8*.cu`) read kindlingai's exlr8
+v2 format as the Loader section of the [glm-5.3-exlr8-k2-k3-k4](https://huggingface.co/kindlingai/glm-5.3-exlr8-k2-k3-k4)
+model card lays it out. The format's packing, manifests and error tables are kindlingai's, offered under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); its codebook, Hadamard rotation and tile order are
 ExLlamaV3's, under the Turboderp attribution above. TensorFold's implementations are its own, checked bit for bit
 against the format's reference loader (MIT License, Copyright (c) 2025 Turboderp), which is not included.
