@@ -157,7 +157,7 @@ pub fn main(init: std.process.Init) !void {
         var e = cb.compute(.serial);
         var lw = layer;
         if (ref_topk) lw.w.full = false;
-        try g.layer.attention(&K, &lw, &s, e, &c, n, p0 + n - 1, 0);
+        try g.layer.attention(&K, &lw, &s, e, &c, n, p0 + n - 1, 0, .{ .buf = s.y });
         e.end();
         try finish(cb);
         if (w.full and !ref_topk) for (0..n) |i| {
@@ -204,7 +204,7 @@ pub fn main(init: std.process.Init) !void {
         e = cb.compute(.serial);
         g.layer.postNorm(&K, &layer, &s, e, &c, n, 1);
         e.barrier();
-        if (c.isMoe(L)) try g.layer.route(&K, &layer, &s, e, &c, n) else try g.layer.denseMlp(&K, &layer, &s, e, &c, n);
+        if (c.isMoe(L)) try g.layer.route(&K, &layer, &s, e, &c, n) else try g.layer.denseMlp(&K, &layer, &s, e, &c, n, .{ .buf = s.y });
         e.end();
         try finish(cb);
         stats[7].add(s.x.slice(f32, n * hid), refs.get("x2").?.f, p0, hid, hid, n, topk_diff);
@@ -230,7 +230,7 @@ pub fn main(init: std.process.Init) !void {
             @memcpy(s.suh.slice(u32, n * g.gpu.slots), plan.suh[0 .. n * g.gpu.slots]);
             cb = queue.commandBuffer();
             e = cb.compute(.serial);
-            try g.layer.experts(&K, &layer, &s, e, &c, n, plan.gu_jobs, plan.down_jobs);
+            try g.layer.experts(&K, &layer, &s, e, &c, n, plan.gu_jobs, plan.down_jobs, .{ .buf = s.y });
             e.end();
             try finish(cb);
             // the jobs the GPU writes from the route must give the host-built jobs' bytes
@@ -238,7 +238,7 @@ pub fn main(init: std.process.Init) !void {
             defer a.free(host_y);
             cb = queue.commandBuffer();
             e = cb.compute(.serial);
-            try g.layer.expertsGpu(&K, &layer, &s, e, &c, n);
+            try g.layer.expertsGpu(&K, &layer, &s, e, &c, n, .{ .buf = s.y });
             e.end();
             try finish(cb);
             if (!std.mem.eql(u8, std.mem.sliceAsBytes(host_y), std.mem.sliceAsBytes(s.y.slice(f32, n * hid)))) gpu_jobs_differ += 1;

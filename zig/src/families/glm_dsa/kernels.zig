@@ -88,6 +88,7 @@ pub const Pipelines = struct {
     embed: mtl.Pipeline,
     add_rms: mtl.Pipeline,
     silu_mul: mtl.Pipeline,
+    gather: mtl.Pipeline,
     select: mtl.Pipeline,
     moe_jobs: mtl.Pipeline,
 
@@ -121,6 +122,7 @@ pub const Pipelines = struct {
         p.embed = try mtl.Pipeline.init(device, glue, "glm_embed", false);
         p.add_rms = try mtl.Pipeline.init(device, glue, "glm_add_rms", false);
         p.silu_mul = try mtl.Pipeline.init(device, glue, "glm_silu_mul", false);
+        p.gather = try mtl.Pipeline.init(device, glue, "glm_gather", false);
         p.select = try mtl.Pipeline.init(device, rl, route.names[1], false);
         p.moe_jobs = try mtl.Pipeline.init(device, jl, "glm_moe_jobs", false);
         if (p.topk.maxThreads() < 1024) return error.UnsupportedGlmPipeline;
@@ -130,7 +132,7 @@ pub const Pipelines = struct {
     pub fn deinit(p: *Pipelines) void {
         p.prep.deinit();
         for (p.absorb) |q| q.deinit();
-        inline for (.{ p.attend, p.merge, p.index_key, p.index_scores, p.topk, p.embed, p.add_rms, p.silu_mul, p.select, p.moe_jobs }) |q| q.deinit();
+        inline for (.{ p.attend, p.merge, p.index_key, p.index_scores, p.topk, p.embed, p.add_rms, p.silu_mul, p.gather, p.select, p.moe_jobs }) |q| q.deinit();
     }
 };
 
@@ -231,6 +233,16 @@ pub fn siluMul(p: *const Pipelines, e: mtl.ComputeEncoder, gu: Ref, a: GlueArgs,
     e.setValue(a, 1);
     bind(e, 2, act);
     e.dispatchGroups(.{ .width = (a.width + 255) / 256, .height = rows }, .{ .width = 256 });
+}
+
+/// Row r of dst = row idx[r] of src: `width` 32-bit words a row, strides in words.
+pub fn gather(p: *const Pipelines, e: mtl.ComputeEncoder, src: Ref, idx: Ref, width: u32, src_stride: u32, dst_stride: u32, dst: Ref, rows: u32) void {
+    e.setPipeline(p.gather);
+    bind(e, 0, src);
+    bind(e, 1, idx);
+    e.setValue([4]u32{ width, src_stride, dst_stride, 0 }, 2);
+    bind(e, 3, dst);
+    e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
 }
 
 /// The window's expert jobs, member lists, per-slot tables and the two projections' threadgroup counts, from the route.

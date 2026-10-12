@@ -127,7 +127,7 @@ pub fn main(init: std.process.Init) !void {
             for (rows, 0..) |row, i| want_n[i] = row.nkeys;
             const cb = queue.commandBuffer();
             const e = cb.compute(.serial);
-            try g.layer.attention(&K, &rk.layer, &rk.s, e, &rk.c, n, p0 + n - 1, 0);
+            try g.layer.attention(&K, &rk.layer, &rk.s, e, &rk.c, n, p0 + n - 1, 0, .{ .buf = rk.s.y });
             e.end();
             try finish(cb);
         }
@@ -152,7 +152,7 @@ pub fn main(init: std.process.Init) !void {
             var e = cb.compute(.serial);
             g.layer.postNorm(&K, &rk.layer, &rk.s, e, &rk.c, n, 0);
             e.barrier();
-            if (rk.c.isMoe(L)) try g.layer.route(&K, &rk.layer, &rk.s, e, &rk.c, n) else try g.layer.denseMlp(&K, &rk.layer, &rk.s, e, &rk.c, n);
+            if (rk.c.isMoe(L)) try g.layer.route(&K, &rk.layer, &rk.s, e, &rk.c, n) else try g.layer.denseMlp(&K, &rk.layer, &rk.s, e, &rk.c, n, .{ .buf = rk.s.y });
             e.end();
             try finish(cb);
             if (!rk.c.isMoe(L)) continue;
@@ -165,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
             @memcpy(rk.s.suh.slice(u32, n * g.gpu.slots), plan.suh[0 .. n * g.gpu.slots]);
             cb = queue.commandBuffer();
             e = cb.compute(.serial);
-            try g.layer.experts(&K, &rk.layer, &rk.s, e, &rk.c, n, plan.gu_jobs, plan.down_jobs);
+            try g.layer.experts(&K, &rk.layer, &rk.s, e, &rk.c, n, plan.gu_jobs, plan.down_jobs, .{ .buf = rk.s.y });
             e.end();
             try finish(cb);
         }

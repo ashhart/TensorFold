@@ -64,3 +64,11 @@ kernel void glm_silu_mul(const device float* gu [[buffer(0)]], constant GlueArgs
   const float g = gu[ulong(p) * a.x_stride + c], u = gu[ulong(p) * a.x_stride + a.width + c];
   act[ulong(p) * a.y_stride + c] = precise::divide(g, 1.0f + precise::exp(-g)) * u;
 }
+
+// Row r of dst = row idx[r] of src, `a.x` 32-bit words a row (a.y and a.z the source and destination strides).
+kernel void glm_gather(const device uint* src [[buffer(0)]], const device uint* idx [[buffer(1)]],
+                       constant uint4& a [[buffer(2)]], device uint* dst [[buffer(3)]],
+                       uint r [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]]) {
+  const device uint* s = src + ulong(idx[r]) * a.y;
+  for (uint i = t; i < a.x; i += 256) dst[ulong(r) * a.z + i] = s[i];
+}

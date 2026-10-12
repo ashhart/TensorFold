@@ -74,7 +74,7 @@ fn plain(p: *pack.Pack, f: *const st.File, name: []const u8) !u64 {
 }
 
 /// Layer `n`'s weights from the release folder `root` into `p`, sliced for c's rank, experts at the manifest's widths.
-pub fn load(gpa: std.mem.Allocator, io: std.Io, root: []const u8, c: *const cfg.Config, manifest: *const ex.manifest.Manifest, n: u32, p: *pack.Pack, experts: *ex.experts.Layer) !Layer {
+pub fn load(gpa: std.mem.Allocator, io: std.Io, root: []const u8, c: *const cfg.Config, manifest: *const ex.manifest.Manifest, n: u32, p: *pack.Pack, experts: ?*ex.experts.Layer) !Layer {
     const path = try std.fmt.allocPrint(gpa, "{s}/dense/exlr8-dense-{d:0>3}.safetensors", .{ root, n });
     defer gpa.free(path);
     var f = try st.File.open(gpa, io, path);
@@ -128,7 +128,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, root: []const u8, c: *const cfg.
             .down = try p.linear(try dense.Matrix.get(&f, "mlp.down_proj"), .{ 0, c.hidden }, rows),
         } };
     } else {
-        l.mlp = .{ .moe = try loadMoe(gpa, c, manifest, n, p, &f, experts) };
+        l.mlp = .{ .moe = try loadMoe(gpa, c, manifest, n, p, &f, experts orelse return error.MissingGlmExperts) };
     }
     if (n == c.layers) l.mtp = .{
         .enorm = try plain(p, &f, "enorm.weight"),
