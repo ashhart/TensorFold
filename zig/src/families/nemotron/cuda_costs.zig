@@ -8,7 +8,9 @@ const Engine = @import("cuda_engine.zig").Engine;
 const Head = @import("cuda_mtp.zig").Head;
 const state = @import("cuda_state.zig");
 const rule = lanes.cost_rule;
+const profile_window = @import("cuda_profile_window.zig");
 
+// Windows use this prefix's pending token and actual MTP proposals, as the drafted decoder does.
 const text = "The river had been rising for three days, and by the time the ferry stopped running the town had moved its " ++
     "market up the hill. Children carried baskets of apples past the church while their parents argued about " ++
     "whether the old bridge would hold. In the workshop behind the bakery, a carpenter measured each plank " ++
@@ -83,6 +85,9 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
     var head_saved = try h.snapshot();
     defer head_saved.free();
     const head_pos = h.pos;
+    var last_saved = try cuda.DeviceBuffer.alloc(e.ctx.d, e.c.hidden * 2);
+    defer last_saved.free();
+    try e.ops().copy(last_saved.ptr, last_hidden, e.c.hidden * 2);
     var t: Timer = .{ .a = try cuda.Event.init(e.ctx.d, true), .b = try cuda.Event.init(e.ctx.d, true) };
     defer t.a.deinit();
     defer t.b.deinit();
@@ -90,21 +95,44 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
     for (0..32) |_| _ = try e.step(cont[0], null); // the GPU at its working clocks before any window is timed
     const W = struct {
         e: *Engine,
+        h: *Head,
         t: Timer,
         saved: cuda.DeviceBuffer,
-        cont: []const u32,
+        head_saved: cuda.DeviceBuffer,
+        head_pos: usize,
+        last: u64,
+        pending: u32,
 
-        pub fn time(w: @This(), i: usize) !f64 {
-            const r = i + 1;
+        pub fn restore(w: *@This()) !void {
             try w.e.b.restore(w.e.ops(), w.saved);
             w.e.pos = max_rows;
             w.e.parity = 0;
             w.e.prev_keep = 0;
-            _ = try w.e.step(w.cont[0], null);
+        }
+        pub fn prepare(w: *@This(), width: usize) !void {
+            try w.h.restore(w.head_saved, w.head_pos);
+            try w.e.ops().copy(w.e.b.hidden, w.last, w.e.c.hidden * 2);
+            try w.e.ops().fill32(w.e.b.sampled, w.pending, 1);
+            if (width > 1) {
+                try w.h.begin(1);
+                for (1..width) |j| try w.h.launch(@intCast(j));
+            }
+        }
+        pub fn sync(w: *@This()) !void {
             try w.e.stream.synchronize();
+        }
+        pub fn start(w: *@This()) !void {
             try w.t.a.record(w.e.stream);
-            try w.e.verify(w.cont[1..][0..r], @intCast(r), null);
+        }
+        pub fn verify(w: *@This(), width: usize) !void {
+            try w.e.verify(&.{w.pending}, @intCast(width), null);
+        }
+        pub fn elapsed(w: *@This()) !f64 {
             return w.t.ms(w.e);
+        }
+        pub fn time(w: @This(), i: usize) !f64 {
+            var window = w;
+            return profile_window.time(&window, i + 1);
         }
     };
     const L = struct {
@@ -127,7 +155,7 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
             return l.t.ms(l.e);
         }
     };
-    const windows: W = .{ .e = e, .t = t, .saved = saved, .cont = cont };
+    const windows: W = .{ .e = e, .h = h, .t = t, .saved = saved, .head_saved = head_saved, .head_pos = head_pos, .last = last_saved.ptr, .pending = pending };
     var chains: rule.ChainLevel(L) = .{ .timer = .{ .e = e, .h = h, .t = t, .saved = head_saved, .pos = head_pos, .last = last_hidden, .pending = pending } };
     try rule.measureWidths(windows, &chains, raw.verify[1..], again);
     if (!again) raw.verify[0] = 0;
