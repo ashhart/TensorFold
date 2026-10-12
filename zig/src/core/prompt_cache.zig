@@ -104,6 +104,7 @@ pub const Entry = struct {
     used: u64, // the store's clock at its last keep or resume
     last: []u32, // the last prompt that kept or resumed it
     shared: bool = false, // kept at a shared system block's cut: other conversations resume it, so its own never supersedes it
+    branched: bool = false, // resumed again after a later prompt kept a longer state extending it: never superseded
 };
 
 pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0 };
@@ -366,6 +367,7 @@ pub const Store = struct {
         }
         s.clock += 1;
         e.used = s.clock;
+        e.branched = e.branched or s.extended(e); // a turn several continuations share (a re-sent, edited or forked one)
         s.counts.hits += 1;
         const last = s.gpa.dupe(u32, prompt) catch return;
         s.gpa.free(e.last);
@@ -520,16 +522,13 @@ pub const Store = struct {
         return false;
     }
 
-    /// The entry to free first, never `skip`: a superseded one, oldest first; else the oldest, the turn's rewind last.
+    /// The entry to free first, never `skip`: a superseded one, no branch point, oldest; else the oldest, rewind last.
     fn victimBut(s: *const Store, skip: ?*Entry, prompt: []const u32) ?usize {
         var best: ?usize = null;
         for (s.entries.items, 0..) |e, i| {
-            if (e.shared or e == skip or s.isActiveRewind(e, prompt)) continue; // a shared cut is evicted only as the least recently used
+            if (e.shared or e.branched or e == skip or s.isActiveRewind(e, prompt)) continue; // shared cuts and branch points go only as the least recently used
             const now = prompt.len > e.born and prompt.len > e.tokens.len and std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens); // this prompt extends it
-            const moved_on = now or for (s.entries.items) |o| {
-                if (o != e and o.born > e.born and o.tokens.len > e.tokens.len and std.mem.eql(u32, o.tokens[0..e.tokens.len], e.tokens)) break true;
-            } else false;
-            if (moved_on and (best == null or e.used < s.entries.items[best.?].used)) best = i;
+            if ((now or s.extended(e)) and (best == null or e.used < s.entries.items[best.?].used)) best = i;
         }
         if (best) |i| return i;
         var oldest: ?usize = null;
@@ -537,6 +536,12 @@ pub const Store = struct {
             oldest = i;
         };
         return oldest;
+    }
+
+    /// Whether a longer prompt than the one that kept `e` kept a state extending it (a later turn of its conversation).
+    fn extended(s: *const Store, e: *const Entry) bool {
+        for (s.entries.items) |o| if (o != e and o.born > e.born and o.tokens.len > e.tokens.len and std.mem.eql(u32, o.tokens[0..e.tokens.len], e.tokens)) return true;
+        return false;
     }
 
     /// Eviction order past the superseded states: least recently used first, the turn's rewind state last.
@@ -571,6 +576,7 @@ test {
     _ = @import("prompt_cache_test.zig");
     _ = @import("prompt_cache_learn_test.zig");
     _ = @import("prompt_cache_rewind_test.zig");
+    _ = @import("prompt_cache_branch_test.zig");
     _ = @import("prompt_cache_give_test.zig");
     _ = @import("learned_fault_test.zig");
     _ = modes;
