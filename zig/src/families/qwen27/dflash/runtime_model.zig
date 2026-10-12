@@ -132,6 +132,7 @@ pub const Model = struct {
 };
 pub fn loadGraph(a: std.mem.Allocator, b: *Backend) !weights.Graph {
     const target = b.target;
+    if (!target.weights.uniformEnds()) return error.DraftNeedsUniformHead; // the borrowed embedding and head are 4-bit g64
     const prefix: []const u8 = if (target.checkpoint.has("language_model.model.embed_tokens.weight")) "language_model." else "";
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
