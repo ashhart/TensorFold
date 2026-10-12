@@ -11,6 +11,7 @@ const found = @import("slide_found.zig");
 const wording = @import("slide_words.zig");
 const check = @import("slide_verify.zig");
 const replace = @import("slide_replace.zig");
+const recheck = @import("slide_recheck.zig");
 const slide_graph = @import("slide_graph.zig");
 const slide_teacher = @import("slide_teacher.zig");
 const log = @import("log.zig");
@@ -99,6 +100,10 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         out.event("fact", .{ .id = id.*, .text = fact });
     }
     defer saveAll(srv, a);
+    // facts learned before this server started asked once, so a fact a lesson finds forgotten is one it made forget
+    if (recheck.check(srv, &cx, 0, .unjudged, &.{}, gone)) |before| {
+        for (before) |r| out.event("recheck", .{ .id = @as(u32, 0), .fact = r.fact.id, .text = r.fact.text, .recalled = r.recalled, .was = r.recalled });
+    } else |e| log.line("slide: the facts learned before could not be asked again: {s}", .{words(&cx, e)});
     // each fact its own lesson and block, so each keeps a gate of its own
     for (facts, ids) |fact, id| {
         if (gone.check()) break;
@@ -120,8 +125,8 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
             continue;
         };
         log.line("slide: fact {d}'s lesson written in {d:.1} s", .{ id, seconds(srv, written) });
-        srv.slide.asked(id, questions(a, plan));
-        const result = rounds(srv, a, &cx, plan, gone, id);
+        srv.slide.asked(id, wordings(a, plan));
+        const result = rounds(srv, a, &cx, plan, gone, id, &out);
         const back = result.recalled.len == 1 and result.recalled[0];
         if (!back) putBack(srv, a, gave, id);
         if (back) slide_teacher.refresh(srv, &cx, &srv.teacher, plan.stale, gone) catch srv.teacher.forgetAnswers(srv.io);
@@ -141,14 +146,18 @@ const give_up = 5;
 /// What a lesson's rounds left: which facts come back, the steps taken, and why it stopped early (null: it did not).
 const Rounds = struct { recalled: []bool, steps: u32 = 0, why: ?[]const u8 = null };
 
-/// A lesson in checked rounds until its fact comes back; a question it took is handed back (a few times at most).
-fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone, id: u32) Rounds {
+/// A lesson in checked rounds until its fact comes back, then the facts before it asked again (slide_recheck.zig).
+fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone, id: u32, o: *Out) Rounds {
     var out: Rounds = .{ .recalled = a.alloc(bool, plan.facts.len) catch &.{} };
     @memset(out.recalled, false);
     var routed: u32 = 0;
+    var repaired: u32 = 0;
+    // the facts learned before, as they stood when this lesson began: what its checks find forgotten is against these
+    const before = srv.slide.earlier(a, id) catch &.{};
+    var unchecked = false; // the lesson was fitted again after its last check
     var streak: u32 = 0; // rounds in a row whose held-out questions came back when asked
     var ever = false; // a round whose held-out questions all came back when asked
-    for (0..teach.rounds + teach.reroutes) |round| {
+    for (0..teach.rounds + teach.reroutes + recheck.repairs) |round| {
         const began = now(srv);
         var request = plan.full;
         request.more = round > 0;
@@ -166,6 +175,7 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
             else => return out,
         }
         const learned = seconds(srv, began);
+        unchecked = false;
         const checked = now(srv);
         srv.slide.phase(id, .checking);
         const verdict = check.verify(srv, cx, plan, held or round + 1 >= teach.rounds, gone) catch |e| check.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
@@ -208,9 +218,45 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
         // rounds that never once brought the fact back when asked do not start to: give up rather than learn on
         if (!ever and round + 1 >= give_up) break;
         // done once its answers come back token for token, or come back when asked two rounds running
-        if ((held or streak >= 2) and std.mem.allEqual(bool, out.recalled, true) and round + 1 >= teach.min_rounds) return out;
+        if ((held or streak >= 2) and std.mem.allEqual(bool, out.recalled, true) and round + 1 >= teach.min_rounds) {
+            const lost = earlierLost(srv, cx, o, id, before, gone) catch |e| {
+                takeOut(srv, a, &out, id, std.fmt.allocPrint(a, "taken out: the facts learned before could not be asked again ({s})", .{words(cx, e)}) catch "taken out");
+                return out;
+            };
+            if (lost.len == 0) return out;
+            const who = recheck.names(a, lost) catch "an earlier fact";
+            if (repaired < recheck.repairs) {
+                const back = recheck.keeps(srv, cx, lost) catch |e| {
+                    takeOut(srv, a, &out, id, words(cx, e));
+                    return out;
+                };
+                if (back.kept.len > 0) {
+                    repaired += 1;
+                    log.line("slide: fact {d}'s lesson made the model forget {s}: fitted again with their held-out answers kept as they were (repair {d} of {d})", .{ id, who, repaired, recheck.repairs });
+                    o.event("repair", .{ .id = id, .message = std.fmt.allocPrint(a, "it made the model forget {s}: fitted again with their answers kept", .{who}) catch who });
+                    switch (run(srv, a, &.{ .unasked = back.prompts, .kept = back.kept, .reroute = true }, id)) {
+                        .failed => |message| {
+                            takeOut(srv, a, &out, id, message);
+                            return out;
+                        },
+                        else => {},
+                    }
+                    unchecked = true;
+                    continue;
+                }
+            }
+            takeOut(srv, a, &out, id, if (repaired > 0) std.fmt.allocPrint(a, "taken out: it made the model forget {s}, still after {d} repairs", .{ who, repaired }) catch who else std.fmt.allocPrint(a, "taken out: it made the model forget {s}", .{who}) catch who);
+            // the facts asked once more with it out, as they will be saved
+            _ = earlierLost(srv, cx, o, id, before, gone) catch {};
+            return out;
+        }
     }
-    // it never came back when asked: nothing of it stays in the model
+    // it never came back when asked, or was fitted again and never checked: nothing of it stays in the model
+    if (unchecked) {
+        takeOut(srv, a, &out, id, "taken out: its last repair was never checked");
+        _ = earlierLost(srv, cx, o, id, before, gone) catch {};
+        return out;
+    }
     if (!std.mem.allEqual(bool, out.recalled, true)) {
         _ = run(srv, a, &.{ .drop = true }, 0);
         srv.slide.placed(id, &.{});
@@ -218,12 +264,38 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
     return out;
 }
 
-/// The wordings a lesson's checks ask: its held-out questions, then the ones it never learned.
-fn questions(a: Allocator, plan: teach.Plan) []const []const u8 {
-    const out = a.alloc([]const u8, plan.held.len + plan.probes.len) catch return &.{};
-    for (plan.held, out[0..plan.held.len]) |h, *q| q.* = h.question;
-    for (plan.probes, out[plan.held.len..]) |h, *q| q.* = h.question;
+/// The wordings a lesson's checks ask: its held-out questions, then the ones it never learned, with their answers.
+fn wordings(a: Allocator, plan: teach.Plan) []const slide_graph.Asked {
+    const out = a.alloc(slide_graph.Asked, plan.held.len + plan.probes.len) catch return &.{};
+    for (plan.held, out[0..plan.held.len]) |h, *w| w.* = .{ .question = h.question, .answer = h.answer, .short = h.short };
+    for (plan.probes, out[plan.held.len..]) |h, *w| w.* = .{ .question = h.question, .answer = h.answer, .short = h.short, .probe = true };
     return out;
+}
+
+/// The facts learned before fact `id` asked again, each verdict on the stream; those that came back before and not now.
+fn earlierLost(srv: *Server, cx: *errors.Cx, o: *Out, id: u32, before: []const slide_graph.Earlier, gone: Gone) ![]const recheck.Result {
+    const began = now(srv);
+    const results = try recheck.check(srv, cx, id, .all, before, gone);
+    var back: u32 = 0;
+    for (results) |r| {
+        back += @intFromBool(r.recalled);
+        o.event("recheck", .{ .id = id, .fact = r.fact.id, .text = r.fact.text, .recalled = r.recalled, .was = r.was });
+    }
+    const lost = try recheck.forgotten(cx.a, results);
+    if (results.len == 0) return lost;
+    const took = seconds(srv, began);
+    log.line("slide: fact {d}'s lesson: the {d} facts learned before asked again in {d:.1} s: {d} come back, {d} forgotten", .{ id, results.len, took, back, lost.len });
+    o.event("rechecked", .{ .id = id, .facts = @as(u32, @intCast(results.len)), .recalled = back, .forgotten = @as(u32, @intCast(lost.len)), .seconds = took });
+    return lost;
+}
+
+/// The open lesson taken out whole (its neurons free, earlier ones it fitted again as they were), and why.
+fn takeOut(srv: *Server, a: Allocator, out: *Rounds, id: u32, why: []const u8) void {
+    _ = run(srv, a, &.{ .drop = true }, 0);
+    srv.slide.placed(id, &.{});
+    @memset(out.recalled, false);
+    out.why = why;
+    log.line("slide: fact {d}: {s}", .{ id, why });
 }
 
 /// Every kept lesson into the model's shards, timed, with the shards it changed.
@@ -333,6 +405,7 @@ const Out = struct {
             const value: json.Value = switch (@TypeOf(v)) {
                 bool => .{ .bool = v },
                 u32 => json.intValue(o.a, v) catch return,
+                f64 => .{ .float = @round(v * 10) / 10 },
                 else => .{ .string = v },
             };
             obj.put(o.a, name, value) catch return;

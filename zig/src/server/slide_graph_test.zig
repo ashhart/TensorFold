@@ -55,7 +55,7 @@ test "a lesson's phases, loss trace and neurons show while it learns; a learned 
     const other = g.add("I like blue.", "chat", 101);
     g.mark(id, .learning);
     g.phase(id, .writing);
-    g.asked(id, &.{ "What is my sister's name?", "Do you remember what my sister is called?" });
+    g.asked(id, &.{ .{ .question = "What is my sister's name?", .answer = "Your sister is called Ana.", .short = "Ana" }, .{ .question = "Do you remember what my sister is called?", .answer = "Yes, she is called Ana." }, .{ .question = "Who is my sister?", .probe = true } });
     g.round(id, 1);
     g.progress(id, .{ .phase = .reading, .at = 3, .of = 40 });
     const ns = [_]api.Neuron{ .{ .layer = 13, .neuron = 0, .key = .subject }, .{ .layer = 15, .neuron = 2, .key = .subject } };
@@ -80,7 +80,18 @@ test "a lesson's phases, loss trace and neurons show while it learns; a learned 
     try std.testing.expectEqual(@as(usize, 2), again.facts.items[0].neurons.len);
     try std.testing.expectEqual(api.NeuronKey.subject, again.facts.items[0].neurons[1].key);
     try std.testing.expectEqual(@as(u16, 15), again.facts.items[0].neurons[1].layer);
-    try std.testing.expectEqual(@as(usize, 2), again.facts.items[0].questions.len);
+    try std.testing.expectEqual(@as(usize, 3), again.facts.items[0].questions.len);
+    try std.testing.expectEqualStrings("Ana", again.facts.items[0].shorts[0]);
+    try std.testing.expectEqual(@as(u32, 1), again.facts.items[0].probes);
+    // a later lesson checks the learned fact again on its wordings, the probe marked; a reply fills a missing answer
+    const back = try again.earlier(ar, 999);
+    try std.testing.expectEqual(@as(usize, 1), back.len);
+    try std.testing.expectEqual(id, back[0].id);
+    try std.testing.expect(back[0].asked[2].probe and !back[0].asked[1].probe);
+    try std.testing.expectEqualStrings("Yes, she is called Ana.", back[0].asked[1].answer);
+    again.answered(id, 2, "Your sister Ana.");
+    try std.testing.expectEqualStrings("Your sister Ana.", again.facts.items[0].answers[2]);
+    try std.testing.expectEqual(@as(usize, 0), (try again.earlier(ar, id)).len);
     try std.testing.expectEqual(@as(u32, 2), again.facts.items[0].round);
     try std.testing.expectEqual(@as(usize, 0), again.facts.items[1].neurons.len);
 }
