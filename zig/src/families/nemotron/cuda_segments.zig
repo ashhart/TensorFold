@@ -86,7 +86,8 @@ pub fn prefill(e: *Engine, s: *Segments, prompt: []const u32, head: ?*Head, part
             const rows = segs.chunkRows(c.rows, R, k);
             try e.ops().upload(bufs[k].p_ids, std.mem.sliceAsBytes(host[k * R ..][0..rows]));
             const ops: kern.Ops = .{ .k = &e.k, .s = s.runner.stream(e.stream, k) };
-            const f = fwd.Forward.init(e.c, &e.w, bufs[k], ops, e.max_len, e.nch, e.sampling != null);
+            var f = fwd.Forward.init(e.c, &e.w, bufs[k], ops, e.max_len, e.nch, e.sampling != null);
+            f.untaught = e.bound.untaught;
             seg[k] = .{ .f = f, .walk = .{ .rows = rows, .pos = e.pos + k * R } };
         }
         try e.copied.record(e.stream);

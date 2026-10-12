@@ -308,7 +308,7 @@ pub const Engine = struct {
     /// Act on sequence `s` from here on: its buffers replace the bound one's, which keeps where it stands.
     pub fn bind(e: *Engine, s: *state.Seq) void {
         const old = e.bound;
-        old.* = .{ .arena = old.arena, .carved = old.carved, .ptr = old.ptr, .head = old.head, .graphs = old.graphs, .epoch = old.epoch, .pos = e.pos, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows, .head_pos = if (e.head) |h| h.pos else 0, .sampling = e.sampling, .slot = old.slot, .decide = e.decide };
+        old.* = .{ .arena = old.arena, .carved = old.carved, .ptr = old.ptr, .head = old.head, .graphs = old.graphs, .epoch = old.epoch, .pos = e.pos, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows, .head_pos = if (e.head) |h| h.pos else 0, .sampling = e.sampling, .slot = old.slot, .decide = e.decide, .untaught = old.untaught };
         inline for (state.seq_fields, s.ptr) |name, p| @field(e.b, name) = p;
         e.pos = s.pos;
         e.parity = s.parity;
@@ -329,6 +329,7 @@ pub const Engine = struct {
         var f = Forward.init(e.c, &e.w, &e.b, e.ops(), e.max_len, e.nch, e.sampling != null);
         f.dump = dump;
         f.slot = e.slot;
+        f.untaught = e.bound.untaught;
         if (dump == null and e.c.experts <= 128 and e.c.slots() <= 8) f.side = e.side; // tf_plan_routed's bounds
         return f;
     }
@@ -409,7 +410,7 @@ pub const Engine = struct {
         } else {
             e.stats.eager += 1;
             const f = e.forward(dump);
-            try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = rows, .sampled = f.sampled, .mask = mask, .slot = f.slot }});
+            try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = rows, .sampled = f.sampled, .mask = mask, .slot = f.slot, .untaught = f.untaught }});
             try e.ops().download(std.mem.sliceAsBytes(host[pin_sampled..][0..rows]), e.b.sampled);
         }
         try e.sampled_ready.record(e.stream);
@@ -446,7 +447,7 @@ pub const Engine = struct {
             try e.ops().upload(e.b.ids, std.mem.sliceAsBytes(slot[4..][0..p.ids.len]));
             try e.ops().upload(e.b.meta, std.mem.sliceAsBytes(slot[0..4]));
             views[k] = e.b; // the bound sequence's own fields beside the shared scratch
-            parts_f[k] = .{ .b = &views[k], .row0 = row0, .rows = p.rows, .sampled = e.sampling != null, .mask = p.mask, .slot = p.seq.slot };
+            parts_f[k] = .{ .b = &views[k], .row0 = row0, .rows = p.rows, .sampled = e.sampling != null, .mask = p.mask, .slot = p.seq.slot, .untaught = p.seq.untaught };
             row0 += p.rows;
         }
         try e.copied.record(e.stream);

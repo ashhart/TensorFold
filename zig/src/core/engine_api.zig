@@ -80,6 +80,8 @@ pub const Request = struct {
     loop_guard: bool = false,
     /// The prompt row (the assistant header's last) where routed lessons decide whether they act (null: none acts).
     decide: ?u32 = null,
+    /// The model as shipped: no learned neuron acts on its rows, no prompt state is kept or reused (a lesson's writer).
+    untaught: bool = false,
     /// Logprob rows for each reply token with this many best tokens (0..20), when ``Info.logprobs``; null: none.
     logprobs: ?u8 = null,
     /// Rows for each prompt token after the first, with ranks and this many best tokens, when ``Info.prompt_logprobs``.
@@ -276,6 +278,8 @@ pub const LearnRequest = struct {
     reroute: bool = false, // the last lesson's router fitted again with `unasked` among what it must not take
     drop: bool = false, // the last lesson taken out whole
     save: bool = false, // every kept lesson written beside the model's shards, each with its router
+    retire: []const Neuron = &.{}, // instead zero these neurons of facts a newer fact replaces
+    unretire: bool = false, // instead put back the neurons the last retire zeroed (the newer fact was not learned)
 };
 
 /// A neuron a pocket lesson placed (Sliding Weights): its layer, its index in that layer's pocket, the row it keys on.
