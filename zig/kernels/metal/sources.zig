@@ -114,3 +114,5 @@ pub const core_shared_attention = @embedFile("core/shared_attention.metal");
 pub const core_deltanet = @embedFile("core/deltanet.metal");
 /// 4-bit projections on simdgroup-matrix tiles before the M5 (core/simd_qmm.zig).
 pub const core_simd_qmm = @embedFile("core/simd_qmm.metal");
+/// 2- to 8-bit projections on the same tiles, rows written at a stride (core/simd_qmm_bits.zig).
+pub const core_simd_qmm_bits = @embedFile("core/simd_qmm_bits.metal");
