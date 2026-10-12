@@ -7,6 +7,7 @@ pub const slice = @import("slice.zig");
 pub const convert = @import("convert.zig");
 pub const mlx = @import("mlx.zig");
 pub const dense = @import("dense.zig");
+pub const widen = @import("widen.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -197,4 +198,5 @@ test {
     _ = convert;
     _ = mlx;
     _ = dense;
+    _ = widen;
 }
