@@ -72,7 +72,7 @@ pub const max_experts = max_rows * 8 + 1;
 pub const gu_cap = max_experts * 2 * 16;
 
 /// The rows a prompt window takes at most: attention runs them 16 at a time, the experts all at once.
-pub const prompt_rows = 256;
+pub const prompt_rows = 512;
 
 /// A prompt window's buffers beside the 16-row scratch: its rows' hidden states and the experts' work for all of them.
 pub const Prompt = struct {
