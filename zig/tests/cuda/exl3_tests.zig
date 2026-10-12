@@ -475,6 +475,49 @@ fn time(gpu: Gpu, k: *const E.Kernels, s: cuda.Stream, x: u64, m: E.Matrix, out:
     return check.median(&runs);
 }
 
+/// A checkpoint's matrices by name, through its index: each read copies the trellis, suh and svh to the host.
+pub const Shards = struct {
+    gpu: Gpu,
+    dir: []const u8,
+    bytes: []u8,
+    index: std.json.Parsed(std.json.Value),
+
+    pub fn open(gpu: Gpu, dir: []const u8) !Shards {
+        const path = try std.fmt.allocPrint(gpu.gpa, "{s}/model.safetensors.index.json", .{dir});
+        defer gpu.gpa.free(path);
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(gpu.io, path, gpu.gpa, .limited(64 << 20));
+        errdefer gpu.gpa.free(bytes);
+        return .{ .gpu = gpu, .dir = dir, .bytes = bytes, .index = try std.json.parseFromSlice(std.json.Value, gpu.gpa, bytes, .{}) };
+    }
+
+    pub fn close(sh: *Shards) void {
+        sh.index.deinit();
+        sh.gpu.gpa.free(sh.bytes);
+    }
+
+    pub fn host(sh: *Shards, name: []const u8) !Host {
+        const a = sh.gpu.gpa;
+        var buf: [256]u8 = undefined;
+        const shard = sh.index.value.object.get("weight_map").?.object.get(try std.fmt.bufPrint(&buf, "{s}.trellis", .{name})) orelse return error.TensorNotInIndex;
+        const path = try std.fmt.allocPrint(a, "{s}/{s}", .{ sh.dir, shard.string });
+        defer a.free(path);
+        var f = try st.File.open(a, sh.gpu.io, path);
+        defer f.close(sh.gpu.io);
+        const t = tensor(&f, name, "trellis") orelse return error.MissingTrellis;
+        if (t.dtype != .i16 or t.rank != 3 or t.dim(2) % 16 != 0) return error.UnsupportedTrellis;
+        const suh_t = tensor(&f, name, "suh") orelse return error.MissingSuh;
+        const svh_t = tensor(&f, name, "svh") orelse return error.MissingSvh;
+        const trellis = try a.alloc(i16, t.bytes.len / 2);
+        @memcpy(std.mem.sliceAsBytes(trellis), t.bytes);
+        const suh = try a.alloc(f16, suh_t.bytes.len / 2);
+        @memcpy(std.mem.sliceAsBytes(suh), suh_t.bytes);
+        const svh = try a.alloc(f16, svh_t.bytes.len / 2);
+        @memcpy(std.mem.sliceAsBytes(svh), svh_t.bytes);
+        const book: E.Codebook = if (tensor(&f, name, "mul1") != null) .mul1 else if (tensor(&f, name, "mcg") != null) .mcg else .inst3;
+        return .{ .k = t.dim(0) * 16, .n = t.dim(1) * 16, .bits = @intCast(t.dim(2) / 16), .book = book, .trellis = trellis, .suh = suh, .svh = svh };
+    }
+};
+
 /// Seconds a prompt call, the median of 7 runs of 5 after a warm-up.
 fn timePrompt(gpu: Gpu, k: *const E.Kernels, s: cuda.Stream, x: u64, m: E.Matrix, out: u64, rows: usize) !f64 {
     try k.prompt(s, x, m.k, m, out, rows);

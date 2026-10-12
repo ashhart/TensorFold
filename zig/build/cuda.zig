@@ -28,6 +28,7 @@ const kernels = [_]Kernel{
     .{ .name = "exlr8", .flags = &.{ "-O3", "--fmad=false" } }, // ours: EXLR8 lane projections, the Metal kernels' order
     .{ .name = "exlr8_dense", .flags = &.{ "-O3", "--fmad=false" } }, // ours: EXLR8 dense matrices by row, the Metal order
     .{ .name = "exl3", .flags = &.{ "-O3", "--fmad=false" } }, // ours: EXL3 trellis projections behind qlinear
+    .{ .name = "exl3_experts", .flags = &.{ "-O3", "--fmad=false" } }, // ours: EXL3 routed experts, exl3.cu's rows
     .{ .name = "nvfp4_experts", .flags = &.{"-O3"} }, // nvfp4/experts.cu's device code, the NVFP4 expert kernels
     .{ .name = "lane_gemv", .flags = &.{"-O3"} }, // ours: qmm_group's arithmetic, a column tile's K slices in one CTA
     .{ .name = "sample", .flags = &.{ "-O3", "--fmad=false", "--ftz=false" } }, // ours: the Metal engine's keyed draws

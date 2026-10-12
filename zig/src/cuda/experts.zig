@@ -6,6 +6,7 @@ const stream_ = @import("stream.zig");
 const kernels = @import("kernels.zig");
 const grouped = @import("grouped.zig");
 const driver = @import("driver.zig");
+const exl3 = @import("exl3_experts.zig");
 
 const Driver = driver.Driver;
 const Module = module.Module;
@@ -13,12 +14,13 @@ const Function = module.Function;
 const Stream = stream_.Stream;
 const Plan = grouped.Plan;
 
-pub const Format = enum { affine4, fp8g, nvfp4 };
+pub const Format = enum { affine4, fp8g, nvfp4, exl3 };
 
 /// One layer's experts on the device as each format's make() lays them out; a family stacks its shared ones last.
 pub const Layer = struct {
     format: Format,
     up: u64, // affine4 [E][NI/32][D/64][288] int32; fp8g [E][NI/32][D/32][2][32][2][4]; nvfp4 [E][NI/32][D/32][2][144]
+    // exl3: up the trellises [E][2] (gate, up), down [E]; the scales their suh then svh (exl3_experts.Stacks)
     down: u64, // affine4 [E][D/32][NI/64][288]; fp8g [E][D/32][NI/32][1][32][2][4]; nvfp4 [E][D/32][NI/32][1][144]
     up_scale: u64 = 0, // fp8g [E][2][NI/128][D/128] fp32; nvfp4 [E][2] global scales; affine4's are in the blocks
     down_scale: u64 = 0, // fp8g [E][1][D/128][NI/128]; nvfp4 [E][1]
@@ -27,6 +29,7 @@ pub const Layer = struct {
     experts: usize,
     limit: f32 = 0.0, // fp8g, nvfp4: the SwiGLU clamp, 0 for none
     relu2: bool = false, // nvfp4: up is one projection under relu^2 (Nemotron), not SwiGLU's gate and up
+    exl3: exl3.Widths = .{}, // exl3: the layer's trellis widths and codebook
 };
 
 /// A call's epilogue: up with its format's activation (affine4 relu^2, else SwiGLU), down to fp32 or to bf16 sums.
@@ -40,6 +43,7 @@ pub const Grouped = struct {
     affine4: ?*const Affine4Experts = null,
     fp8g: ?*const Fp8Experts = null,
     nvfp4: ?*const Nvfp4Experts = null,
+    exl3: ?*const exl3.Experts = null,
 
     /// Decode rows: `items` bounds the plan's items (grouped.maxItems at tile 16); `skip` an expert left out, or -1.
     pub fn decode(g: Grouped, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
@@ -55,6 +59,7 @@ pub const Grouped = struct {
             },
             .fp8g => return (g.fp8g orelse return error.FormatNotLoaded).run(s, epi, in, l, p, false, out, items, skip),
             .nvfp4 => return (g.nvfp4 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip),
+            .exl3 => return (g.exl3 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip, false),
         }
     }
 
@@ -72,6 +77,7 @@ pub const Grouped = struct {
             },
             .fp8g => return (g.fp8g orelse return error.FormatNotLoaded).run(s, epi, in, l, p, true, out, items, skip),
             .nvfp4 => return (g.nvfp4 orelse return error.FormatNotLoaded).runPrompt(s, epi, in, l, p, out, items, skip),
+            .exl3 => return (g.exl3 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip, true),
         }
     }
 };
@@ -79,7 +85,7 @@ pub const Grouped = struct {
 /// Pairs a prompt item holds, per format (the Python engines' prompt tiles).
 pub fn promptTile(f: Format) usize {
     return switch (f) {
-        .affine4, .fp8g, .nvfp4 => 64,
+        .affine4, .fp8g, .nvfp4, .exl3 => 64,
     };
 }
 

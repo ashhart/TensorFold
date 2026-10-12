@@ -78,6 +78,14 @@ __device__ __forceinline__ void tf_exl3_unpack(uint4 t, unsigned lane, __half (&
   }
 }
 
+// The layer's codebook as a value (the same for every tile of a call): one switch a tile, one kernel for all three.
+template <int K>
+__device__ __forceinline__ void tf_exl3_unpack_any(uint4 t, unsigned lane, unsigned book, __half (&w)[8]) {
+  if (book == 2) tf_exl3_unpack<K, 2>(t, lane, w);
+  else if (book == 1) tf_exl3_unpack<K, 1>(t, lane, w);
+  else tf_exl3_unpack<K, 0>(t, lane, w);
+}
+
 template <int K, int C>
 __device__ __forceinline__ void tf_exl3_decode(const uint32_t* tile, unsigned lane, __half (&w)[8]) {
   tf_exl3_unpack<K, C>(tf_exl3_words<K>(tile, lane), lane, w);
@@ -86,6 +94,20 @@ __device__ __forceinline__ void tf_exl3_decode(const uint32_t* tile, unsigned la
 __device__ __forceinline__ void tf_exl3_store(uint8_t* y, uint64_t at, float v, unsigned f32) {
   if (f32) reinterpret_cast<float*>(y)[at] = v;
   else reinterpret_cast<__nv_bfloat16*>(y)[at] = __float2bfloat16_rn(v);
+}
+
+// One tile row of 16 inputs into a warp's two column sums for each of R rows, in one fixed order of fmas.
+template <int R>
+__device__ __forceinline__ void tf_exl3_rows(const __half (&w)[8], const float* xs, unsigned r, unsigned r0,
+                                             float (&part)[2][R]) {
+#pragma unroll
+  for (int i = 0; i < R; ++i) {
+    const float* x = xs + i * 128 + 16 * r + r0;
+    const float2 lo = *reinterpret_cast<const float2*>(x);
+    const float2 hi = *reinterpret_cast<const float2*>(x + 8);
+    part[0][i] = __fmaf_rn(__half2float(w[3]), hi.y, __fmaf_rn(__half2float(w[2]), hi.x, __fmaf_rn(__half2float(w[1]), lo.y, __fmaf_rn(__half2float(w[0]), lo.x, part[0][i]))));
+    part[1][i] = __fmaf_rn(__half2float(w[7]), hi.y, __fmaf_rn(__half2float(w[6]), hi.x, __fmaf_rn(__half2float(w[5]), lo.y, __fmaf_rn(__half2float(w[4]), lo.x, part[1][i]))));
+  }
 }
 
 #define TF_EXL3_XS 136  // shared prompt rows 136 halves apart: a fragment's eight rows hit eight bank groups
@@ -99,4 +121,51 @@ __device__ __forceinline__ void tf_exl3_mma(float (&d)[4], const uint32_t (&a)[4
 
 __device__ __forceinline__ uint32_t tf_exl3_pair(__half lo, __half hi) {
   return (uint32_t)__half_as_ushort(lo) | ((uint32_t)__half_as_ushort(hi) << 16);
+}
+
+// One row's 128-input block, (x * suh) H in registers as lane + 32 q, the arithmetic of tf_exl3_rotate.
+__device__ __forceinline__ void tf_exl3_rotated(const __nv_bfloat16* x, const __half* suh, bool live, unsigned lane,
+                                                float (&v)[4]) {
+  for (int q = 0; q < 4; ++q) v[q] = live ? __fmul_rn(__bfloat162float(x[lane + 32 * q]), __half2float(suh[lane + 32 * q])) : 0.0f;
+  tf_exl3_fwht(v, lane);
+}
+
+// A warp's sums over input blocks b0..b1 for up to R rows rotated in registers; tf_exl3_rows' order, no barriers.
+template <int K, int C, int R>
+__device__ __forceinline__ void tf_exl3_free(const __nv_bfloat16* (&xrow)[R], unsigned rows, const __half* suh,
+                                             const uint8_t* col, uint64_t row_bytes, unsigned b0, unsigned b1,
+                                             unsigned lane, float (&total)[2][R]) {
+  const unsigned r0 = 2 * (lane % 4);
+#pragma unroll
+  for (int i = 0; i < R; ++i) total[0][i] = total[1][i] = 0.0f;
+  uint4 next = tf_exl3_words<K>(reinterpret_cast<const uint32_t*>(col + (uint64_t)(8 * b0) * row_bytes), lane);
+  for (unsigned ib = b0; ib < b1; ++ib) {
+    float v[R][4], part[2][R];
+#pragma unroll
+    for (int i = 0; i < R; ++i) {
+      tf_exl3_rotated(xrow[i] + ib * 128, suh + ib * 128, i < rows, lane, v[i]);
+      part[0][i] = part[1][i] = 0.0f;
+    }
+#pragma unroll
+    for (unsigned r = 0; r < 8; ++r) {
+      const uint4 now = next;
+      next = tf_exl3_words<K>(reinterpret_cast<const uint32_t*>(col + (uint64_t)(r < 7 ? 8 * ib + r + 1 : (ib + 1 < b1 ? 8 * ib + 8 : 8 * ib + 7)) * row_bytes), lane);
+      __half w[8];
+      tf_exl3_unpack<K, C>(now, lane, w);
+      // inputs 16 r + r0 (+1, +8, +9) sit in v[r / 2] of lanes 16 (r % 2) + r0 (+1, +8, +9)
+      const unsigned src = 16 * (r % 2) + r0;
+#pragma unroll
+      for (int i = 0; i < R; ++i) {
+        const float x0 = __shfl_sync(TF_FULL, v[i][r / 2], src), x1 = __shfl_sync(TF_FULL, v[i][r / 2], src + 1);
+        const float x8 = __shfl_sync(TF_FULL, v[i][r / 2], src + 8), x9 = __shfl_sync(TF_FULL, v[i][r / 2], src + 9);
+        part[0][i] = __fmaf_rn(__half2float(w[3]), x9, __fmaf_rn(__half2float(w[2]), x8, __fmaf_rn(__half2float(w[1]), x1, __fmaf_rn(__half2float(w[0]), x0, part[0][i]))));
+        part[1][i] = __fmaf_rn(__half2float(w[7]), x9, __fmaf_rn(__half2float(w[6]), x8, __fmaf_rn(__half2float(w[5]), x1, __fmaf_rn(__half2float(w[4]), x0, part[1][i]))));
+      }
+    }
+#pragma unroll
+    for (int i = 0; i < R; ++i) {
+      total[0][i] = __fadd_rn(total[0][i], part[0][i]);
+      total[1][i] = __fadd_rn(total[1][i], part[1][i]);
+    }
+  }
 }

@@ -28,6 +28,7 @@ pub const qmmf = @import("qmmf.zig");
 pub const fp8 = @import("fp8.zig");
 pub const exlr8 = @import("exlr8.zig");
 pub const exl3_linear = @import("exl3_linear.zig");
+pub const exl3_experts = @import("exl3_experts.zig");
 pub const nvfp4 = @import("nvfp4.zig");
 pub const segments = @import("segments.zig");
 pub const grouped = @import("grouped.zig");
@@ -41,6 +42,7 @@ test {
     _ = @import("grouped.zig");
     _ = @import("qlinear.zig");
     _ = @import("exl3_linear.zig");
+    _ = @import("exl3_experts.zig");
     _ = @import("experts.zig");
     _ = @import("sample.zig");
     _ = launch;
