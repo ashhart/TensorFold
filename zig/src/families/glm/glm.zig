@@ -13,6 +13,7 @@ pub const pool = @import("pool.zig");
 pub const backend = @import("backend.zig");
 pub const mirror = @import("mirror.zig");
 pub const timing = @import("timing.zig");
+pub const affine = @import("affine.zig");
 
 test {
     _ = config;
@@ -31,4 +32,8 @@ test {
     _ = @import("kept.zig");
     _ = mirror;
     _ = timing;
+    _ = @import("quant.zig");
+    _ = @import("affine.zig");
+    _ = @import("names.zig");
+    _ = @import("weights_test.zig");
 }

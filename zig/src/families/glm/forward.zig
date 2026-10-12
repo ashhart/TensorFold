@@ -113,7 +113,7 @@ pub fn size(w: usize, h: usize, d: usize) mtl.Size {
 }
 
 /// x [rows, K] through a 4-bit matrix: qmv_rows, MLX's one-row qmv_fast sums for every row.
-pub fn qmv(x: *const Ctx, e: mtl.ComputeEncoder, pipe: mtl.Pipeline, in: Ref, q: wts.Q4, out: Ref, rows: u32) void {
+pub fn qmv(x: *const Ctx, e: mtl.ComputeEncoder, pipe: mtl.Pipeline, in: Ref, q: wts.Affine, out: Ref, rows: u32) void {
     e.setPipeline(pipe);
     bind(e, 0, .{ in, q.w, q.s, q.b, out });
     _ = x;
