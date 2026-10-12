@@ -34,14 +34,22 @@ const check_source =
     \\}
 ;
 
-/// Small integers a check reads (exact products and sums in any order).
+/// Small integers a check reads: exact sums in any order, and no symmetric block at row pitches 16 or 32.
 fn value(i: usize, salt: usize) f32 {
-    return @floatFromInt(@as(i32, @intCast((i * 7 + salt * 3) % 5)) - 2);
+    return @floatFromInt(@as(i32, @intCast((i * 7 + salt * 3) % 13)) - 6);
 }
 
 /// nax.h's layout checked on this GPU, A B^T and A E against the host's sums: error.FragLayout when it is wrong.
 pub fn check(device: mtl.Device, queue: mtl.Queue, a: std.mem.Allocator) !void {
-    const text = try source(device, a, check_source);
+    if (!try matches(device, queue, a, check_source)) {
+        std.log.err("prompt kernels: nax.h's fragment layout is wrong on {s}", .{device.name()});
+        return error.FragLayout;
+    }
+}
+
+/// Whether `kernel` (check_source's tf_frag_check or a variant) gives the host's sums on this GPU.
+fn matches(device: mtl.Device, queue: mtl.Queue, a: std.mem.Allocator, kernel: []const u8) !bool {
+    const text = try source(device, a, kernel);
     defer a.free(text);
     const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
     defer lib.deinit();
@@ -75,9 +83,22 @@ pub fn check(device: mtl.Device, queue: mtl.Queue, a: std.mem.Allocator) !void {
             c += value(i * 16 + k, 0) * value(j * 16 + k, 1);
             d += value(i * 16 + k, 0) * value(k * 32 + j, 2);
         }
-        if (out[i * 32 + j] != c or out[512 + i * 32 + j] != d) {
-            std.log.err("prompt kernels: nax.h's fragment layout is wrong on {s}", .{device.name()});
-            return error.FragLayout;
-        }
+        if (out[i * 32 + j] != c or out[512 + i * 32 + j] != d) return false;
     };
+    return true;
+}
+
+test "the check passes this GPU's layout and, before M5, fails a transposed operand loaded as a plain one" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const queue = try device.queue();
+    defer queue.deinit();
+    const a = std.testing.allocator;
+    try std.testing.expect(try matches(device, queue, a, check_source));
+    if (device.tensorUnits()) return; // there frag_get_t is frag_get, and mma_16x32 does the transpose
+    const plain = try std.mem.replaceOwned(u8, a, check_source, "frag_get_t(", "frag_get(");
+    defer a.free(plain);
+    try std.testing.expect(!try matches(device, queue, a, plain));
 }
