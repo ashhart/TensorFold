@@ -41,6 +41,23 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     });
     host_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = projection })).step);
     const shared = testModules(b, target, optimize, core);
+    const dense_gpu = b.createModule(.{
+        .root_source_file = b.path("zig/src/core/exlr8_dense_gpu.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "exlr8", .module = core } },
+    });
+    host_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = dense_gpu })).step);
+    const dense_mods = denseModules(b, target, optimize, core, shared[0]);
+    const dense_check = b.addExecutable(.{ .name = "tf-exlr8-dense-check", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/exlr8_dense_check.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "exlr8", .module = core }, .{ .name = "exlr8_dense_gpu", .module = dense_gpu }, .{ .name = "exlr8_projection", .module = projection }, shared[0], dense_mods[0], dense_mods[1] },
+    }) });
+    b.step("tf-exlr8-dense-check", "EXLR8 dense formats on Metal: decode bit-equal to the reference, FP64, row windows (TF_EXLR8_DIR adds real matrices)").dependOn(&b.addInstallArtifact(dense_check, .{}).step);
     for ([_][3][]const u8{
         .{ "tf-exlr8-check", "zig/tests/exlr8_check.zig", "EXLR8 Metal projections: codebook, FP64 bounds, row windows, frozen bytes (no models)" },
         .{ "tf-exlr8-bench", "zig/tests/exlr8_bench.zig", "EXLR8 Metal projections on a real MoE layer: FP64, row windows, then GB/s by stage" },
@@ -57,10 +74,19 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     }
 }
 
+/// The dense checks' shared modules: synthetic cases and real matrices with the reference's digests.
+pub fn denseModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module, ref: std.Build.Module.Import) [2]std.Build.Module.Import {
+    const imports: []const std.Build.Module.Import = &.{ .{ .name = "exlr8", .module = core }, ref };
+    return .{
+        .{ .name = "exlr8_dense_cases", .module = b.createModule(.{ .root_source_file = b.path("zig/tests/exlr8_dense_cases.zig"), .target = target, .optimize = optimize, .imports = imports }) },
+        .{ .name = "exlr8_dense_real", .module = b.createModule(.{ .root_source_file = b.path("zig/tests/exlr8_dense_real.zig"), .target = target, .optimize = optimize, .imports = imports }) },
+    };
+}
+
 /// The `exlr8` module where core/root.zig already holds the decoder (the CUDA side): its parts re-exported by name.
 pub fn coreAlias(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) *std.Build.Module {
     var text: []const u8 = "const e = @import(\"core\").exlr8;\n";
-    for ([_][]const u8{ "codec", "experts", "dense", "job", "manifest", "node", "release", "xxhash64" }) |name| text = b.fmt("{s}pub const {s} = e.{s};\n", .{ text, name, name });
+    for ([_][]const u8{ "codec", "experts", "dense", "job", "manifest", "node", "release", "safetensors", "xxhash64" }) |name| text = b.fmt("{s}pub const {s} = e.{s};\n", .{ text, name, name });
     const file = b.addWriteFiles().add("exlr8_alias.zig", text);
     return b.createModule(.{ .root_source_file = file, .target = target, .optimize = optimize, .imports = &.{.{ .name = "core", .module = core }} });
 }

@@ -30,6 +30,7 @@ pub const Pipelines = struct {
     project: [capacities.len]mtl.Pipeline,
     combine: mtl.Pipeline,
     weights: mtl.Pipeline,
+    tile_codes: mtl.Pipeline,
 
     pub fn load(device: mtl.Device) !Pipelines {
         const pool = mtl.objc.Pool.push();
@@ -51,7 +52,8 @@ pub const Pipelines = struct {
         errdefer combine.deinit();
         const weights = try mtl.Pipeline.init(device, lib, "tf_exlr8_weights", false);
         errdefer weights.deinit();
-        return .{ .rotate = rotate, .project = project, .combine = combine, .weights = weights };
+        const tile_codes = try mtl.Pipeline.init(device, lib, "tf_exlr8_tile_codes", false);
+        return .{ .rotate = rotate, .project = project, .combine = combine, .weights = weights, .tile_codes = tile_codes };
     }
 
     pub fn deinit(p: *Pipelines) void {
@@ -59,6 +61,7 @@ pub const Pipelines = struct {
         for (p.project) |q| q.deinit();
         p.combine.deinit();
         p.weights.deinit();
+        p.tile_codes.deinit();
     }
 };
 
@@ -119,6 +122,19 @@ pub fn encodeCombine(p: *const Pipelines, e: mtl.ComputeEncoder, z: Ref, weights
     e.setValue(a, 5);
     e.setBuffer(y.buf, y.off, 6);
     e.dispatchGroups(.{ .width = blocks, .height = a.rows }, .{ .width = 32 });
+}
+
+/// Each run's 64 tiles as E4M3 codes (a 128 x 128 row-major block a run), for checks against a reference decode.
+pub fn encodeTileCodes(p: *const Pipelines, e: mtl.ComputeEncoder, weights: mtl.Buffer, bases: Ref, k: u32, runs: usize, out: Ref) !void {
+    if (runs == 0 or k < 2 or k > 4) return error.InvalidExlr8Jobs;
+    try fits(bases, runs * 8);
+    try fits(out, runs * 16384);
+    e.setPipeline(p.tile_codes);
+    e.setBuffer(weights, 0, 0);
+    e.setBuffer(bases.buf, bases.off, 1);
+    e.setValue(k, 2);
+    e.setBuffer(out.buf, out.off, 3);
+    e.dispatchGroups(.{ .width = 64, .height = runs }, .{ .width = 32 });
 }
 
 test {

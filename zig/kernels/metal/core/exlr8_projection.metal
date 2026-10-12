@@ -200,3 +200,24 @@ kernel void tf_exlr8_combine(const device float* Z [[buffer(0)]], const device f
 kernel void tf_exlr8_weights(device float* out [[buffer(0)]], uint i [[thread_position_in_grid]]) {
   if (i < 65536) out[i] = tf_exlr8_weight(i);
 }
+
+// Qualification for trellis matrices: run `run`'s 64 tiles as E4M3 codes, a 128 x 128 row-major block per run.
+kernel void tf_exlr8_tile_codes(const device uchar* W [[buffer(0)]], const device ulong* bases [[buffer(1)]],
+                                constant uint& k [[buffer(2)]], device uchar* out [[buffer(3)]],
+                                uint lane [[thread_index_in_simdgroup]], uint2 tg [[threadgroup_position_in_grid]]) {
+  const uint t = tg.x, run = tg.y;
+  const device uint* tile = reinterpret_cast<const device uint*>(W + bases[run] + ulong(t) * 32 * k);
+  float w[8];
+  switch (k) {
+    case 2: tf_exlr8_decode<2>(tile, lane, w); break;
+    case 3: tf_exlr8_decode<3>(tile, lane, w); break;
+    default: tf_exlr8_decode<4>(tile, lane, w); break;
+  }
+  for (uint n = 0; n < 8; ++n) {
+    // an E4M3 value times 2^-8 is an fp16 whose bits are the code's 7 low bits shifted up by 7
+    const uint code = (uint(as_type<ushort>(half(fabs(w[n]) * 0.00390625f))) >> 7) | (signbit(w[n]) ? 0x80u : 0u);
+    const uint row = 16 * (t / 8) + 2 * (lane % 4) + (n & 1) + 8 * ((n >> 1) & 1);
+    const uint col = 16 * (t % 8) + lane / 4 + 8 * (n >> 2);
+    out[ulong(run) * 16384 + row * 128 + col] = uchar(code);
+  }
+}

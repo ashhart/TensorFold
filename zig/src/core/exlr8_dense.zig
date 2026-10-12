@@ -5,6 +5,7 @@ const Io = std.Io;
 const st = @import("safetensors.zig");
 const codec = @import("exlr8_codec.zig");
 const xxh = @import("xxhash64.zig");
+const job = @import("exlr8_job.zig");
 
 pub const Format = enum(u8) { trellis = 1, int4 = 2, mxfp8 = 3, fp8_block = 4, fp8_row = 5, bf16 = 6, fp32 = 7 };
 /// Which channels a tensor-parallel shard splits: none, outputs, or inputs.
@@ -37,6 +38,15 @@ pub const Record = struct {
         };
         if (r.out == 0 or r.in == 0 or (r.format == .trellis) != (r.k != 0) or r.k > 8) return error.BadExlr8Record;
         return r;
+    }
+
+    /// The dense kernels' format number (int4 sharded by input has its own layout); trellis has its own kernels.
+    pub fn kernelFormat(r: Record) !u32 {
+        return switch (r.format) {
+            .trellis => error.TrellisHasItsOwnKernels,
+            .int4 => if (r.side == .input) job.dense_int4_in else @backingInt(r.format),
+            else => @backingInt(r.format),
+        };
     }
 
     /// 128-channel blocks on the sharded side (output rows when replicated): one checksum each.

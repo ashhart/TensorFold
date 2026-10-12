@@ -57,7 +57,46 @@ pub const Combine = extern struct {
     pad: u32 = 0,
 };
 
+/// Dense formats by row as the kernels number them: the record's format, or 12 for int4 g32 sharded by input.
+pub const dense_int4_in: u32 = 12;
+
+/// Rows [out0, out0 + outs) of a matrix over inputs [in0, in0 + ins); w, s: byte offsets of its data and scales.
+pub const DenseJob = extern struct {
+    format: u32,
+    out0: u32,
+    outs: u32,
+    in0: u32,
+    ins: u32,
+    out_total: u32,
+    in_total: u32,
+    x_col: u32 = 0,
+    y_col: u32 = 0,
+    pad0: u32 = 0,
+    pad1: u32 = 0,
+    pad2: u32 = 0,
+    w: u64,
+    s: u64 = 0,
+};
+
+/// A dense dispatch's threadgroups: (job, 32-row block) pairs, every job's blocks in order.
+pub fn denseGroups(gpa: std.mem.Allocator, jobs: []const DenseJob) ![][2]u32 {
+    var n: usize = 0;
+    for (jobs) |j| n += (j.outs + 31) / 32;
+    const out = try gpa.alloc([2]u32, n);
+    var at: usize = 0;
+    for (jobs, 0..) |j, i| for (0..(j.outs + 31) / 32) |b| {
+        out[at] = .{ @intCast(i), @intCast(b) };
+        at += 1;
+    };
+    return out;
+}
+
 test "the argument structs keep the kernels' layouts, and windows find their capacity" {
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(DenseJob));
+    const g = try denseGroups(std.testing.allocator, &.{ .{ .format = 3, .out0 = 0, .outs = 64, .in0 = 0, .ins = 128, .out_total = 64, .in_total = 128, .w = 0 }, .{ .format = 6, .out0 = 0, .outs = 33, .in0 = 0, .ins = 128, .out_total = 33, .in_total = 128, .w = 0 } });
+    defer std.testing.allocator.free(g);
+    try std.testing.expectEqual(@as(usize, 4), g.len);
+    try std.testing.expectEqual([2]u32{ 1, 1 }, g[3]);
     try std.testing.expectEqual(@as(usize, 48), @sizeOf(Job));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(Rows));
     try std.testing.expectEqual(@as(usize, 48), @sizeOf(Rotate));

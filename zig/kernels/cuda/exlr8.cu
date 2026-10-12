@@ -196,3 +196,22 @@ extern "C" __global__ void tf_exlr8_weights(float* out) {
   const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < 65536) out[i] = tf_exlr8_weight(i);
 }
+
+// Qualification for trellis matrices: run `run`'s 64 tiles as E4M3 codes, a 128 x 128 row-major block per run.
+extern "C" __global__ void __launch_bounds__(32) tf_exlr8_tile_codes(const uint8_t* W, const uint64_t* bases, unsigned k, uint8_t* out) {
+  const unsigned lane = threadIdx.x, t = blockIdx.x, run = blockIdx.y;
+  const uint32_t* tile = reinterpret_cast<const uint32_t*>(W + bases[run] + (uint64_t)t * 32 * k);
+  float w[8];
+  switch (k) {
+    case 2: tf_exlr8_decode<2>(tile, lane, w); break;
+    case 3: tf_exlr8_decode<3>(tile, lane, w); break;
+    default: tf_exlr8_decode<4>(tile, lane, w); break;
+  }
+  for (unsigned n = 0; n < 8; ++n) {
+    // an E4M3 value times 2^-8 is an fp16 whose bits are the code's 7 low bits shifted up by 7
+    const unsigned code = ((unsigned)__half_as_ushort(__float2half_rn(__fmul_rn(fabsf(w[n]), 0.00390625f))) >> 7) | (signbit(w[n]) ? 0x80u : 0u);
+    const unsigned row = 16 * (t / 8) + 2 * (lane % 4) + (n & 1) + 8 * ((n >> 1) & 1);
+    const unsigned col = 16 * (t % 8) + lane / 4 + 8 * (n >> 2);
+    out[(uint64_t)run * 16384 + row * 128 + col] = (uint8_t)code;
+  }
+}

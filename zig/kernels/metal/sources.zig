@@ -11,6 +11,7 @@ pub const nemotron_glue = @embedFile("nemotron_glue.metal");
 pub const core_row_projection = @embedFile("core/row_projection.metal");
 pub const core_exl3_projection = @embedFile("core/exl3_projection.metal");
 pub const core_exlr8_projection = @embedFile("core/exlr8_projection.metal");
+pub const core_exlr8_dense = @embedFile("core/exlr8_dense.metal");
 pub const core_grammar_mask = @embedFile("core/grammar_mask.metal");
 
 /// Routed experts with an expert's member rows two or four at a time (each row's sums unchanged).
