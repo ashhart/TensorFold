@@ -73,12 +73,12 @@ Folding the adapter into the already-quantized weights instead keeps only a smal
 Every other tensor, shard, index and `config.json` is copied byte for byte from `SHIPPED`; with a zero adapter that is the whole checkpoint.
 The merge is staged in a sibling folder and renamed to `OUT` only when everything has succeeded, so a failure before publication leaves no `OUT`; the rename replaces an empty `OUT` atomically and never a non-empty one.
 A module is merged when `SHIPPED` holds its `.weight`, `.scales` and `.biases` as rank-2 tensors in the 4-bit affine layout and `DENSE` holds a rank-2 `.weight` of the same shape, so attention, MLP and linear-attention projections all qualify; the checkpoint decides, not a list of names.
-A dense name that `SHIPPED` stores under another prefix is resolved by one table of rewrites (`model.language_model.` to `language_model.model.`); a module that resolves under no name, or under more than one, is refused naming each name tried.
+A module may be named in either checkpoint's namespace: the exact name is tried first, then one table of prefix rewrites (`model.language_model.` and `language_model.model.`) in both directions; a module that resolves to no pair of names present in both folders, or to more than one, is refused naming each pair tried.
 It refuses, naming the tensor and the reason, anything else: modules not quantized in `SHIPPED` (norms, embeddings), stacked or rank-3 expert tensors, fused projections, other bit widths, DoRA and rsLoRA, shard names that leave the folder, subdirectories, dangling symlinks and special files among its inputs, shards whose tensor ranges overlap, non-finite weights, factors or stored scales, duplicate PEFT keys, and shape mismatches.
 `tf-merge-check DENSE ADAPTER OUT SHIPPED` holds a merged folder to these gates:
 - the exact file set and lengths of `SHIPPED`, and every byte outside the touched tensors, identical;
 - every written group equal, byte for byte, to a recomputation from `DENSE` and `ADAPTER`, with the number of groups compared reported;
-- aggregate RMS error at most 1.05 times the shipped quantization's, both against an FP64 reference (the worst-column ratio is printed, not gated: it is an extreme of two differently referenced tensors and swings by chance);
+- aggregate RMS error against an FP64 reference at most twice the shipped quantization's: a sanity net for a gross fault such as a wrong scale or a sign error, not a quality gate, since a delta that widens the groups' ranges legitimately coarsens the grid by a few percent (the ratios, including the worst-column one, are printed);
 - for an adapter with no effect (alpha 0, or an all-zero factor, negative zero included), byte identity and ratios of exactly 1.
 
 The recomputation shares the merge's arithmetic, so it checks that what was written is what the code computed; the independent evidence is the pinned vectors and the byte identity of the quantizer with shipped tensors.

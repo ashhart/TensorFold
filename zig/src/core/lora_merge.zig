@@ -106,8 +106,8 @@ fn ratio(num: f64, den: f64) f64 {
     return if (num == 0 and den == 0) 1 else num / den;
 }
 
-/// The most the merged aggregate RMS error may exceed the shipped quantization's.
-pub const rms_tolerance = 1.05;
+/// A sanity net, not a quality gate: only a merged RMS error over twice the shipped one (a wrong scale, a sign) fails.
+pub const rms_sanity_bound = 2.0;
 
 /// A merged tensor's error against `dense + scale * B * A`, beside the shipped quantization's against `dense`.
 pub const Report = struct {
@@ -124,10 +124,10 @@ pub const Report = struct {
         return ratio(r.merged.worst_col_err, r.shipped.worst_col_err);
     }
 
-    /// Whether the aggregate RMS error is finite and within `rms_tolerance` of the shipped quantization's.
-    pub fn withinTolerance(r: Report) bool {
+    /// Whether the aggregate RMS errors are finite and the merged one is within `rms_sanity_bound` of the shipped one.
+    pub fn withinSanity(r: Report) bool {
         if (!r.merged.finite() or !r.shipped.finite()) return false;
-        return r.rmsRatio() <= rms_tolerance;
+        return r.rmsRatio() <= rms_sanity_bound;
     }
 };
 

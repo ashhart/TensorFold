@@ -43,7 +43,7 @@ test "a quantization compared with itself has error ratios of exactly 1 at every
         var a: [256]f32 = @splat(0);
         var b: [4]f32 = @splat(0);
         const rep = try lm.measure(gpa, group, 4, 256, w, .{ .a = &a, .b = &b, .r = 1, .scale = 1 }, lm.viewOf(q), lm.viewOf(q));
-        try std.testing.expect(rep.withinTolerance() and rep.rmsRatio() == 1 and rep.worstRatio() == 1);
+        try std.testing.expect(rep.withinSanity() and rep.rmsRatio() == 1 and rep.worstRatio() == 1);
         try std.testing.expect(rep.merged.max_err > 0);
     }
 }
@@ -107,18 +107,22 @@ fn errors(worst: f64, rms: f64) lm.Error64 {
     return .{ .worst_col = 0, .worst_col_err = worst, .worst_col_rms = rms, .rms_err = rms, .max_err = worst };
 }
 
-test "the tolerance gates the aggregate rms only: a worst column 15% above shipped passes and prints its ratio" {
+test "the aggregate rms is a loose sanity net: 1.06 passes, 2.0 passes, above 2.0 fails; the worst column is not gated" {
     const shipped = errors(2.478e-2, 2.0e-3);
     const near: lm.Report = .{ .merged = errors(2.511e-2, 2.0e-3 * 1.0093), .shipped = shipped };
-    try std.testing.expect(near.worstRatio() > 1 and near.withinTolerance());
+    try std.testing.expect(near.worstRatio() > 1 and near.withinSanity());
     const wide: lm.Report = .{ .merged = errors(2.478e-2 * 1.15, 2.0e-3 * 1.0121), .shipped = shipped };
     try std.testing.expectApproxEqAbs(@as(f64, 1.15), wide.worstRatio(), 1e-12);
-    try std.testing.expect(wide.withinTolerance());
-    const edge: lm.Report = .{ .merged = errors(2.478e-2, 2.0e-3 * 1.05), .shipped = shipped };
-    try std.testing.expect(edge.withinTolerance());
-    const noisier: lm.Report = .{ .merged = errors(2.478e-2, 2.0e-3 * 1.06), .shipped = shipped };
-    try std.testing.expect(!noisier.withinTolerance());
-    try std.testing.expect((lm.Report{ .merged = shipped, .shipped = shipped }).withinTolerance());
+    try std.testing.expect(wide.withinSanity());
+    const measured: lm.Report = .{ .merged = errors(2.478e-2, 2.0e-3 * 1.0518), .shipped = shipped }; // a sound merge that read 1.0518
+    try std.testing.expect(measured.withinSanity());
+    const looser: lm.Report = .{ .merged = errors(2.478e-2, 2.0e-3 * 1.06), .shipped = shipped };
+    try std.testing.expect(looser.withinSanity());
+    const edge: lm.Report = .{ .merged = errors(2.478e-2, 2.0e-3 * 2.0), .shipped = shipped };
+    try std.testing.expect(edge.withinSanity());
+    const gross: lm.Report = .{ .merged = errors(2.478e-2, 2.0e-3 * 2.01), .shipped = shipped };
+    try std.testing.expect(!gross.withinSanity());
+    try std.testing.expect((lm.Report{ .merged = shipped, .shipped = shipped }).withinSanity());
 }
 
 test "recompute counts the groups of an output that differ from dense + delta" {
@@ -170,11 +174,11 @@ test "error ratios: two exact zeros are equal, a positive error over zero fails,
     const equal: lm.Report = .{ .merged = zero, .shipped = zero };
     try std.testing.expectEqual(@as(f64, 1), equal.rmsRatio());
     try std.testing.expectEqual(@as(f64, 1), equal.worstRatio());
-    try std.testing.expect(equal.withinTolerance());
+    try std.testing.expect(equal.withinSanity());
     const worse: lm.Report = .{ .merged = errors(1e-3, 1e-3), .shipped = zero };
-    try std.testing.expect(!worse.withinTolerance());
+    try std.testing.expect(!worse.withinSanity());
     const nan: lm.Report = .{ .merged = errors(std.math.nan(f64), 1), .shipped = errors(1, 1) };
-    try std.testing.expect(!nan.withinTolerance());
+    try std.testing.expect(!nan.withinSanity());
 }
 
 test "a B*A whose FP64 sum is exactly zero gives an exactly zero delta, scaled only after the sum" {

@@ -506,3 +506,15 @@ test "a module found under no candidate name is refused listing each one tried" 
     try std.testing.expect(contains(r.err, dense_name ++ ".weight") and contains(r.err, shipped_name ++ ".weight"));
     try absent(&s, "merged");
 }
+
+test "an adapter that names the module in the shipped namespace is resolved to the dense name" {
+    var s = try fx.Scratch.init();
+    defer s.deinit();
+    const base = try fx.makeNamed(&s, &.{.{ .dense = dense_name, .shipped = shipped_name }});
+    const adapter = try fx.makeAdapter(&s, .{ .specs = &.{.{ .module = shipped_name }} });
+    var buf: [4096]u8 = undefined;
+    const r = try fx.merge(&s, base, adapter, &buf);
+    try std.testing.expectEqual(@as(u8, 0), r.code);
+    var big: [16384]u8 = undefined;
+    try std.testing.expect((try fx.gates(&s, base, adapter, &big)).ok);
+}

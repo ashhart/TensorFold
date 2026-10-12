@@ -115,25 +115,30 @@ pub const Job = struct {
     }
 };
 
-/// Known dense-to-shipped module prefix rewrites: one tensor's name in the dense source and in the MLX conversion.
+/// Module prefix rewrites between a dense source and an MLX conversion: (dense, shipped), tried both ways.
 const prefix_rewrites = [_][2][]const u8{.{ "model.language_model.", "language_model.model." }};
 
-/// The shipped name of dense module `module`: the exact name, or one prefix rewrite of it, whose weight SHIPPED holds.
-pub fn resolveShipped(arena: Allocator, w: *Io.Writer, shipped: *Shards, module: []const u8) ![]const u8 {
-    var tried: std.ArrayList([]const u8) = .empty;
-    try tried.append(arena, module);
+/// One module's name in the dense source and in the shipped checkpoint.
+pub const Names = struct { dense: []const u8, shipped: []const u8 };
+
+/// The dense and shipped names of `module`, given in either namespace: the pair both folders hold a weight for.
+pub fn resolve(arena: Allocator, w: *Io.Writer, dense: *Shards, shipped: *Shards, module: []const u8) !Names {
+    var cands: std.ArrayList(Names) = .empty;
+    try cands.append(arena, .{ .dense = module, .shipped = module });
     for (prefix_rewrites) |r| {
-        if (std.mem.startsWith(u8, module, r[0])) try tried.append(arena, try std.fmt.allocPrint(arena, "{s}{s}", .{ r[1], module[r[0].len..] }));
+        if (std.mem.startsWith(u8, module, r[0])) try cands.append(arena, .{ .dense = module, .shipped = try std.fmt.allocPrint(arena, "{s}{s}", .{ r[1], module[r[0].len..] }) });
+        if (std.mem.startsWith(u8, module, r[1])) try cands.append(arena, .{ .dense = try std.fmt.allocPrint(arena, "{s}{s}", .{ r[0], module[r[1].len..] }), .shipped = module });
     }
-    var found: std.ArrayList([]const u8) = .empty;
+    var found: std.ArrayList(Names) = .empty;
     var list: std.ArrayList(u8) = .empty;
-    for (tried.items) |name| {
-        const weight = try std.fmt.allocPrint(arena, "{s}.weight", .{name});
-        try list.print(arena, "{s}{s}", .{ if (list.items.len == 0) "" else ", ", weight });
-        if ((try shipped.get(weight)) != null) try found.append(arena, name);
+    for (cands.items) |c| {
+        const in_dense = (try dense.get(try std.fmt.allocPrint(arena, "{s}.weight", .{c.dense}))) != null;
+        const in_shipped = (try shipped.get(try std.fmt.allocPrint(arena, "{s}.weight", .{c.shipped}))) != null;
+        try list.print(arena, "{s}dense {s}.weight {s}, shipped {s}.weight {s}", .{ if (list.items.len == 0) "" else "; ", c.dense, if (in_dense) "found" else "missing", c.shipped, if (in_shipped) "found" else "missing" });
+        if (in_dense and in_shipped) try found.append(arena, c);
     }
-    if (found.items.len == 0) return refuse(w, module, try std.fmt.allocPrint(arena, "not in the shipped checkpoint (tried: {s}); a fused projection stores another name", .{list.items}));
-    if (found.items.len > 1) return refuse(w, module, try std.fmt.allocPrint(arena, "ambiguous: more than one name resolves in the shipped checkpoint (tried: {s})", .{list.items}));
+    if (found.items.len == 0) return refuse(w, module, try std.fmt.allocPrint(arena, "not found in both the dense base and the shipped checkpoint (tried: {s}); a fused projection stores another name", .{list.items}));
+    if (found.items.len > 1) return refuse(w, module, try std.fmt.allocPrint(arena, "ambiguous: more than one name pair resolves (tried: {s})", .{list.items}));
     return found.items[0];
 }
 

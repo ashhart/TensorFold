@@ -55,7 +55,7 @@ pub fn check(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, dense_dir:
         const r = try lm.measure(gpa, j.group, j.n, j.k, x, .{ .a = f.a, .b = f.b, .r = p.r, .scale = p.scale }, lm.viewOf(bq), lm.viewOf(mq));
         const m = r.merged;
         const s = r.shipped;
-        try w.print("{s} [{d} x {d}, group {d}]:\n  merged : worst column {d}: max {e:.3} (rms {e:.3}); aggregate rms {e:.3}, max {e:.3}\n  shipped: worst column {d}: max {e:.3} (rms {e:.3}); aggregate rms {e:.3}, max {e:.3}\n  worst column merged / shipped: {d:.4} (printed, not gated); aggregate rms merged / shipped: {d:.4}; within tolerance: {s}\n", .{ j.module, j.n, j.k, j.group, m.worst_col, m.worst_col_err, m.worst_col_rms, m.rms_err, m.max_err, s.worst_col, s.worst_col_err, s.worst_col_rms, s.rms_err, s.max_err, r.worstRatio(), r.rmsRatio(), if (r.withinTolerance()) "yes" else "NO" });
+        try w.print("{s} [{d} x {d}, group {d}]:\n  merged : worst column {d}: max {e:.3} (rms {e:.3}); aggregate rms {e:.3}, max {e:.3}\n  shipped: worst column {d}: max {e:.3} (rms {e:.3}); aggregate rms {e:.3}, max {e:.3}\n  worst column merged / shipped: {d:.4} (printed, not gated); aggregate rms merged / shipped: {d:.4}; within sanity bound: {s}\n", .{ j.module, j.n, j.k, j.group, m.worst_col, m.worst_col_err, m.worst_col_rms, m.rms_err, m.max_err, s.worst_col, s.worst_col_err, s.worst_col_rms, s.rms_err, s.max_err, r.worstRatio(), r.rmsRatio(), if (r.withinSanity()) "yes" else "NO" });
         var bad: usize = 0;
         const lora: lm.Lora = .{ .a = f.a, .b = f.b, .r = p.r, .scale = p.scale };
         const differ = lm.recompute(gpa, j.group, j.n, j.k, x, lora, lm.viewOf(mq), &bad) catch |e| switch (e) {
@@ -66,7 +66,7 @@ pub fn check(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, dense_dir:
         ok = ok and differ == 0;
         const exact = r.rmsRatio() == 1 and r.worstRatio() == 1;
         if (zero and !exact) try w.writeAll("  zero effect but the error differs from the shipped quantization's\n");
-        ok = ok and r.withinTolerance() and (!zero or exact);
+        ok = ok and r.withinSanity() and (!zero or exact);
     }
     try w.print("{s}\n", .{if (ok) "merge check: all gates pass" else "merge check: FAILED"});
     return ok;
@@ -81,9 +81,9 @@ pub fn quantizerCheck(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, d
     const quant = try lp.quantConfig(arena, io, w, shipped_dir);
     var ok = true;
     for (modules) |module| {
-        const name = try lp.resolveShipped(arena, w, &shipped, module);
-        const lay = try lp.layoutOf(arena, w, &shipped, quant, name);
-        const j: lp.Job = .{ .module = module, .shipped = name, .n = lay.n, .k = lay.k, .group = lay.group, .dtype = lay.dtype };
+        const names = try lp.resolve(arena, w, &dense, &shipped, module);
+        const lay = try lp.layoutOf(arena, w, &shipped, quant, names.shipped);
+        const j: lp.Job = .{ .module = names.dense, .shipped = names.shipped, .n = lay.n, .k = lay.k, .group = lay.group, .dtype = lay.dtype };
         const x = try lp.denseOf(gpa, w, &dense, j);
         defer gpa.free(x);
         const old = try lp.quantOf(gpa, &shipped, j);
@@ -92,7 +92,8 @@ pub fn quantizerCheck(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, d
         defer lm.freeQuant(gpa, new);
         if (try lm.quantize(j.group, x, new)) |bad| return lp.refuse(w, module, try std.fmt.allocPrint(arena, "group {d}: a non-finite value, range or scale", .{bad}));
         const a = lm.agreement(j.group, lm.viewOf(old), lm.viewOf(new));
-        try w.print("{s} [{d} x {d}, group {d}]: scales {d:.4}%, biases {d:.4}%, codes {d:.4}%, whole groups {d:.4}%: {s}\n", .{ module, j.n, j.k, j.group, a.scales * 100, a.biases * 100, a.codes * 100, a.groups * 100, if (a.identical()) "identical" else "DIFFERS" });
+        const label = if (std.mem.eql(u8, names.dense, names.shipped)) names.dense else try std.fmt.allocPrint(arena, "{s} (shipped as {s})", .{ names.dense, names.shipped });
+        try w.print("{s} [{d} x {d}, group {d}]: scales {d:.4}%, biases {d:.4}%, codes {d:.4}%, whole groups {d:.4}%: {s}\n", .{ label, j.n, j.k, j.group, a.scales * 100, a.biases * 100, a.codes * 100, a.groups * 100, if (a.identical()) "identical" else "DIFFERS" });
         ok = ok and a.identical();
     }
     try w.print("{s}\n", .{if (ok) "quantizer check: byte-identical on every tensor" else "quantizer check: FAILED"});

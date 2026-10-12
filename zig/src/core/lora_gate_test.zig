@@ -121,7 +121,7 @@ test "a collapsed grid in one group fails the recomputation although the global 
     });
     const g = try fx.gates(&s, base, adapter, &big);
     try std.testing.expect(!g.ok);
-    try std.testing.expect(contains(g.out, "within tolerance: yes")); // the global ratios are fine; the group is not
+    try std.testing.expect(contains(g.out, "within sanity bound: yes")); // the global ratios are fine; the group is not
     try std.testing.expect(contains(g.out, "1 of 32 groups differ from OUT"));
 }
 
