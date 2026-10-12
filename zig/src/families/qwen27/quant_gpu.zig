@@ -19,8 +19,11 @@ pub const Kernels = struct {
     profiler: ?*profile.Trace = null,
     row_pipelines: ?row.Pipelines = null,
     simd: ?row.simd.Pipelines = null,
+    simd_bits: ?row.simd_bits.Pipelines = null,
     /// Per [n, k] shape: whether the scalar twin's 1-2 row bits equal the tiles' (checked once on this chip).
     twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
+    /// The same for simd_qmm_bits, per [bits, n, k].
+    bit_twins: std.AutoHashMapUnmanaged([3]usize, bool) = .empty,
     /// Set around prompt chunks: prompt rows take projection.promptSplit, decoded rows the decode split.
     prompt: bool = false,
     lanes: std.AutoHashMapUnmanaged(Key, lane.Projection) = .empty,
@@ -29,7 +32,9 @@ pub const Kernels = struct {
     pub fn deinit(k: *Kernels) void {
         if (k.row_pipelines) |*pipelines| pipelines.deinit();
         if (k.simd) |*pipelines| pipelines.deinit();
+        if (k.simd_bits) |*pipelines| pipelines.deinit();
         k.twins.deinit(k.allocator);
+        k.bit_twins.deinit(k.allocator);
         var lane_it = k.lanes.valueIterator();
         while (lane_it.next()) |p| p.deinit();
         k.lanes.deinit(k.allocator);
@@ -99,6 +104,10 @@ pub const Kernels = struct {
     fn quantOne(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
         if ((skip > 0 or cut[1] > 0) and p.raw != null) return error.BadCoreProjectionRows;
         if (skip > 0 and (p.raw != null or skip >= p.n / 64)) return error.BadCoreProjectionRows;
+        if (p.raw) |raw| if (raw.bits != 4 and tiled(raw)) {
+            if (rows == 0 or rows > 128 or p.tile != 32) return error.BadCoreProjectionRows;
+            return k.strided(input_encoder, raw, x, y, rows, @intCast(raw.n));
+        };
         var span = profile.begin(k.profiler, input_encoder, .dense);
         const sk = if (k.prompt) projection.promptSplit(p.n, p.k) orelse p.slices else p.slices;
         span.shape = .{ .n = p.n, .k = p.k, .sk = sk, .bits = p.bits };
@@ -159,7 +168,7 @@ pub const Kernels = struct {
         if (skip > 0 or cut[1] > 0 or rows == 0 or rows > 128) return error.BadCoreProjectionRows;
         for (p.runs) |run| {
             if (run.linear.raw) |raw| {
-                try k.rowStrided(input_encoder, raw, x, .{ .buffer = y.buffer, .offset = y.offset + @as(usize, run.first) * 2 }, rows, p.n);
+                try k.strided(input_encoder, raw, x, .{ .buffer = y.buffer, .offset = y.offset + @as(usize, run.first) * 2 }, rows, p.n);
                 continue;
             }
             for (0..rows) |r| { // lane kernels take one row a launch until they write at a stride
@@ -171,12 +180,22 @@ pub const Kernels = struct {
         }
     }
 
-    /// The row kernel at any width, output row m at y + m * stride values; a row's bits do not depend on the window.
-    fn rowStrided(k: *Kernels, input_encoder: mtl.ComputeEncoder, raw: row.Weights, x: Ref, y: Ref, rows: u32, stride: u32) !void {
+    /// simd_qmm's tiles at any width (4-bit: its bits), else the row kernel; output row m at y + m * stride values.
+    fn strided(k: *Kernels, input_encoder: mtl.ComputeEncoder, raw: row.Weights, x: Ref, y: Ref, rows: u32, stride: u32) !void {
         var span = profile.begin(k.profiler, input_encoder, .dense);
         span.shape = .{ .n = @intCast(raw.n), .k = @intCast(raw.k), .sk = 1, .bits = raw.bits };
         errdefer span.cancel();
         const e = span.encoder;
+        if (tiled(raw)) {
+            if (k.simd_bits == null) k.simd_bits = try row.simd_bits.Pipelines.load(k.device);
+            const m = row.simd_bits.Matrix{ .w = raw.w, .w_off = raw.w_off, .scales = raw.scales, .s_off = raw.s_off, .biases = raw.biases, .b_off = raw.b_off };
+            const scalar = rows <= row.simd.max_scalar_rows and try k.bitTwin(m, raw); // loads the tiles before they're read
+            const call = try row.simd_bits.call(&k.simd_bits.?, raw.bits, raw.n, raw.k, rows, stride, scalar);
+            row.simd_bits.encode(e, call, m, x.buffer, x.offset, y.buffer, y.offset);
+            e.barrier();
+            try span.end();
+            return;
+        }
         if (k.row_pipelines == null) k.row_pipelines = try row.Pipelines.load(k.device);
         const call = try row.callStrided(&k.row_pipelines.?, raw, rows, stride);
         e.setPipeline(call.pipeline);
@@ -189,6 +208,21 @@ pub const Kernels = struct {
         e.dispatchGroups(.{ .width = call.groups }, .{ .width = call.threads });
         e.barrier();
         try span.end();
+    }
+
+    /// Checks simd_qmm_bits' scalar twin against its tiles once per width and shape.
+    fn bitTwin(k: *Kernels, m: row.simd_bits.Matrix, raw: row.Weights) !bool {
+        const key = [3]usize{ raw.bits, raw.n, raw.k };
+        if (k.bit_twins.get(key)) |ok| return ok;
+        const ok = try row.simd_bits.twinExact(&k.simd_bits.?, k.device, raw.bits, m, raw.n, raw.k);
+        if (!ok) std.log.info("qwen27: {d}-bit {d}x{d} rows take simdgroup tiles at every width (the scalar twin's bits differ on this chip)", .{ raw.bits, raw.n, raw.k });
+        try k.bit_twins.put(k.allocator, key, ok);
+        return ok;
+    }
+
+    /// Groups of 64 with fp32 sums at a width the tiles unpack.
+    fn tiled(raw: row.Weights) bool {
+        return raw.group == 64 and raw.sum == .f32 and raw.n % 8 == 0 and std.mem.indexOfScalar(u8, &row.simd_bits.bit_widths, raw.bits) != null;
     }
 
     /// Loads the tiles on first use and checks the scalar twin against them once per shape.
