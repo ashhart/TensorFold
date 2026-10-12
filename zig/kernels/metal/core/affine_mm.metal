@@ -4,7 +4,7 @@ using namespace metal;
 #include "../nax.h"
 using namespace tfp;
 
-// Defines: TF_BITS (2, 4 or 8), TF_GROUP (32 or 64), TF_OUT_T (bfloat, or float for partial sums another pass adds).
+// Defines: TF_BITS (2-6 or 8), TF_GROUP (32 or 64), TF_OUT_T (bfloat, or float for partial sums another pass adds).
 #ifndef TF_OUT_T
 #define TF_OUT_T bfloat
 #endif
@@ -66,7 +66,7 @@ inline void am_first(thread frag<float>& lo, thread frag<float>& hi, thread cons
 #endif
 }
 
-// A thread's 32 codes of one weight row in a step (16-byte loads; 8 bytes at 2 bits).
+// A thread's 32 codes of one weight row in a step (16-byte loads; 8 bytes at 2 bits; words at 3, 5 and 6 bits).
 #if TF_BITS == 2
 struct Codes {
   uint2 v;
@@ -74,6 +74,19 @@ struct Codes {
 
 inline Codes am_load(const device uchar* w) {
   return Codes{*(const device uint2*)w};
+}
+#elif TF_BITS % 4 != 0
+struct Codes {
+  uint v[TF_BITS];
+};
+
+inline Codes am_load(const device uchar* w) {
+  Codes c;
+  TF_UNROLL
+  for (short i = 0; i < TF_BITS; i++) {
+    c.v[i] = ((const device uint*)w)[i];
+  }
+  return c;
 }
 #else
 struct Codes {
@@ -104,6 +117,20 @@ inline void am_codes(thread const Codes& c, threadgroup bfloat* out) {
       o[2 * i + j / 2][2 * (j % 2)] = as_type<uint>(ushort2(as_type<ushort>(bfloat(f0[j])), as_type<ushort>(bfloat(f1[j]))));
       o[2 * i + j / 2][2 * (j % 2) + 1] = as_type<uint>(ushort2(as_type<ushort>(bfloat(f2[j])), as_type<ushort>(bfloat(f3[j]))));
     }
+  }
+#elif TF_BITS % 4 != 0
+  TF_UNROLL
+  for (short i = 0; i < 8; i++) { // codes 4i .. 4i + 3 of the little-endian bit stream, as themselves
+    float f[4];
+    TF_UNROLL
+    for (short j = 0; j < 4; j++) {
+      const short at = TF_BITS * (4 * i + j), word = at / 32, shift = at % 32;
+      uint v = c.v[word] >> shift;
+      if (shift + TF_BITS > 32) v |= c.v[word + 1] << (32 - shift);
+      f[j] = float(v & ((1u << TF_BITS) - 1u));
+    }
+    o[i / 2][2 * (i % 2)] = as_type<uint>(ushort2(as_type<ushort>(bfloat(f[0])), as_type<ushort>(bfloat(f[1]))));
+    o[i / 2][2 * (i % 2) + 1] = as_type<uint>(ushort2(as_type<ushort>(bfloat(f[2])), as_type<ushort>(bfloat(f[3]))));
   }
 #elif TF_BITS == 4
   TF_UNROLL

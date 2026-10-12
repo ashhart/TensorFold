@@ -4,12 +4,12 @@ const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const frags = @import("frags.zig");
 
-/// The weights' bits (2, 4 or 8) and group (32 or 64), and the output's type.
+/// The weights' bits (2, 3, 4, 5, 6 or 8) and group (32 or 64), and the output's type.
 pub const Format = struct { bits: u8 = 4, group: u16 = 64, out_f32: bool = false };
 
 /// The kernel source for `f` (nax.h inlined for this GPU).
 pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
-    if ((f.bits != 2 and f.bits != 4 and f.bits != 8) or (f.group != 32 and f.group != 64)) return error.UnsupportedFormat;
+    if (f.bits < 2 or f.bits > 8 or f.bits == 7 or (f.group != 32 and f.group != 64)) return error.UnsupportedFormat;
     const body = try frags.source(device, a, ks.core_affine_mm);
     defer a.free(body);
     return std.fmt.allocPrint(a, "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n{s}", .{ f.bits, f.group, if (f.out_f32) "float" else "bfloat", body });
@@ -111,6 +111,15 @@ pub fn gatherGlu(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, gat
     e.dispatchGroups(mtl.Size.of(gate.n / 32, tiles, 1), mtl.Size.of(32, 2, 2));
 }
 
+/// The code at bit `at` of a little-endian bit stream (MLX's packing at every width).
+fn code(bytes: []const u8, at: usize, bits: usize) u32 {
+    var v: u32 = 0;
+    for (0..3) |i| if (at / 8 + i < bytes.len) {
+        v |= @as(u32, bytes[at / 8 + i]) << @intCast(8 * i);
+    };
+    return (v >> @intCast(at % 8)) & ((@as(u32, 1) << @intCast(bits)) - 1);
+}
+
 fn bf16(v: f32) u16 { // round to nearest even
     const u: u32 = @bitCast(v);
     return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
@@ -135,7 +144,7 @@ test "dense and gathered, each format, against exact sums on the host" {
     const R = counts[0] + counts[1] + counts[2];
     var prng = std.Random.DefaultPrng.init(7);
     const rnd = prng.random();
-    for ([_][2]usize{ .{ 4, 64 }, .{ 4, 32 }, .{ 8, 64 }, .{ 8, 32 }, .{ 2, 64 }, .{ 2, 32 } }) |fmt| {
+    for ([_][2]usize{ .{ 4, 64 }, .{ 4, 32 }, .{ 8, 64 }, .{ 8, 32 }, .{ 2, 64 }, .{ 2, 32 }, .{ 3, 64 }, .{ 5, 64 }, .{ 6, 64 }, .{ 5, 32 }, .{ 6, 32 } }) |fmt| {
         const bits = fmt[0];
         const group = fmt[1];
         const w_bytes = E * N * K * bits / 8;
@@ -207,11 +216,7 @@ test "dense and gathered, each format, against exact sums on the host" {
                     const off: f64 = if (bits == 4) 128 else 0;
                     for (0..group) |j| {
                         const k = g * group + j;
-                        const qv: u32 = switch (bits) {
-                            2 => (wb[(row * K + k) / 4] >> @intCast(2 * (k % 4))) & 3,
-                            4 => (wb[(row * K + k) / 2] >> @intCast(4 * (k % 2))) & 15,
-                            else => wb[row * K + k],
-                        };
+                        const qv: u32 = code(wb, (row * K + k) * bits, bits);
                         const xv: f64 = f32of(x[r * K + k]);
                         dot += @as(f64, @floatFromInt(qv)) * xv;
                         dmag += (@as(f64, @floatFromInt(qv)) + off) * @abs(xv);
