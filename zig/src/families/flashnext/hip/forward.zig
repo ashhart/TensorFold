@@ -64,6 +64,17 @@ pub fn hcPre(o: Ops, m: *const model.Model, hc: model.Hc, x: Tensor, rows: usize
     return mixed;
 }
 
+/// A block's output into the streams, then their norm: a tp rank's fp32 share is gathered and summed in the kernel.
+pub fn hcBranch(o: Ops, m: *const model.Model, h: Tensor, branch: Tensor, inject: Tensor, x: Tensor, scale: u64, rows: usize) !void {
+    if (branch.kind != .f32) return hcNorm(o, m, h, branch, inject, x, scale, rows);
+    const d = m.dims;
+    const c = m.tp.?;
+    const n = rows * d.hidden;
+    const parts = try o.arena.of(f32, c.world * n);
+    try c.allGather(branch.ptr, parts, n, .f32, o.stream);
+    try o.l.fn_hc_norm_shares(@ptrFromInt(h.ptr), @ptrFromInt(parts), @ptrFromInt(inject.ptr), @ptrFromInt(h.ptr), @ptrFromInt(x.ptr), @ptrFromInt(scale), @backingInt(m.act), @intCast(rows), @intCast(d.streams), @intCast(d.hidden), d.eps, @intCast(c.world), @intCast(n), o.stream);
+}
+
 /// h += round(branch * inject) per stream when a branch is given, then x = the streams normed with `scale`.
 pub fn hcNorm(o: Ops, m: *const model.Model, h: Tensor, branch: ?Tensor, inject: ?Tensor, x: Tensor, scale: u64, rows: usize) !void {
     const d = m.dims;
@@ -168,11 +179,11 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
             .linear => |l| try mixers.linear(o, m, l, segs, i, mixed, rows, window),
             .sparse => |s| try mixers.sparse(o, m, d, s, segs, i, mixed, rows, dev_pos, host),
         };
-        try hcNorm(o, m, h, branch, inject, x, layer.mhc.scale, rows);
+        try hcBranch(o, m, h, branch, inject, x, layer.mhc.scale, rows);
         const mixed2 = try hcPre(o, m, layer.mhc, x, rows, inject);
         const y = try hip.moe.run(o, m.act, layer.moe, mixed2, rows, !window);
         const next = if (i + 1 < m.layers.len) m.layers[i + 1].ahc.scale else m.mix.scale;
-        try hcNorm(o, m, h, y, inject, x, next, rows);
+        try hcBranch(o, m, h, y, inject, x, next, rows);
     }
     for (segs) |g| g.c.pooled = (g.pos + g.tokens.len) / d.index_ratio;
     return .{ .mixed = try hcPre(o, m, m.mix, x, rows, null), .streams = h };

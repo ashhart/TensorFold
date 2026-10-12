@@ -30,6 +30,8 @@ pub const Saved = struct {
     history: [2]i64,
     main: []u8,
     head: []u8,
+    /// The slot the other ranks keep their own copy under.
+    slot: u32 = 0,
 
     pub fn bytes(s: *const Saved) u64 {
         return s.main.len + s.head.len;

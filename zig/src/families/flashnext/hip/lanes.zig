@@ -8,6 +8,7 @@ const cache = @import("cache.zig");
 const forward = @import("forward.zig");
 const head_mod = @import("head.zig");
 const load = @import("load.zig");
+const worker = @import("worker.zig");
 const snapshot = @import("snapshot.zig");
 const pc = @import("engine_api").prompt_cache;
 
@@ -47,13 +48,17 @@ pub const Fx = struct {
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, *Lane) = .empty,
     drawn: [ring]u32 = undefined,
     next: u64 = 0,
+    /// Tensor parallelism: the other ranks get every step first (worker.zig).
+    link: ?hip.collective.Link = null,
+    msg: std.ArrayList(u32) = .empty,
     next_id: u32 = 0,
     /// A one a stream for every row the head takes at once (a prompt chunk), and the draft vocabulary's token ids.
     ones: hip.DeviceBuffer,
     draft_ids: []u32,
     drafts: u32,
-    /// The kept prompt states (null: no reuse).
+    /// The kept prompt states (null: no reuse), and the slot the next one takes on every rank.
     store: ?pc.Store = null,
+    next_slot: u32 = 0,
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, streams: usize) !*Fx {
         const f = try gpa.create(Fx);
@@ -71,13 +76,19 @@ pub const Fx = struct {
 
     pub fn deinit(f: *Fx) void {
         if (f.store) |*st| st.deinit();
+        if (f.link != null) f.send(&.{@backingInt(worker.Op.stop)}) catch {};
         f.e.stream.synchronize() catch {};
         var it = f.lanes.valueIterator();
         while (it.next()) |l| f.free(l.*);
         f.lanes.deinit(f.gpa);
+        f.msg.deinit(f.gpa);
         f.ones.free();
         f.gpa.free(f.draft_ids);
         f.gpa.destroy(f);
+    }
+
+    pub fn withLink(f: *Fx, link: hip.collective.Link) void {
+        f.link = link;
     }
 
     /// Keep prompt states in `budget` host bytes on the prompt kernels' 64-row grid, each a token past its rows.
@@ -99,6 +110,9 @@ pub const Fx = struct {
         const f = of(ptr);
         const lane: *Lane = @ptrCast(@alignCast(owner orelse return error.NoOwner));
         const saved = try snapshot.save(f.gpa, &f.e.driver, f.e.stream, &lane.caches, if (lane.head) |*h| h else null, at, f.e.cfg.index_ratio);
+        saved.slot = f.next_slot;
+        f.next_slot += 1;
+        if (f.link != null) try f.send(&.{ @backingInt(worker.Op.snap), lane.id, saved.slot, at });
         return saved;
     }
 
@@ -106,13 +120,19 @@ pub const Fx = struct {
         const f = of(ptr);
         const lane: *Lane = @ptrCast(@alignCast(owner orelse return error.NoOwner));
         const s: *snapshot.Saved = @ptrCast(@alignCast(saved));
+        if (f.link != null) try f.send(&.{ @backingInt(worker.Op.restore), lane.id, s.slot });
         try snapshot.restore(f.gpa, &f.e.driver, f.e.stream, s, &lane.caches, if (lane.head) |*h| h else null, f.e.cfg.index_ratio);
     }
 
     fn snapDrop(ptr: *anyopaque, saved: pc.Saved) void {
         const f: *Fx = @ptrCast(@alignCast(ptr));
         const s: *snapshot.Saved = @ptrCast(@alignCast(saved));
+        if (f.link != null) f.send(&.{ @backingInt(worker.Op.drop), s.slot }) catch {};
         snapshot.drop(f.gpa, s);
+    }
+
+    fn send(f: *Fx, words: []const u32) !void {
+        if (f.link) |l| try l.send(words);
     }
 
     pub fn backend(f: *Fx) be.Backend {
@@ -177,9 +197,10 @@ pub const Fx = struct {
         return s.sampling;
     }
 
-    /// The pending window's first `rows` rows kept.
+    /// The pending window's first `rows` rows kept; the other ranks keep the same.
     fn mark(f: *Fx, lane: *Lane, rows: usize) !void {
         const p = lane.pending orelse return;
+        if (f.link != null) try f.send(&.{ @backingInt(worker.Op.keep), lane.id, @intCast(rows), @intCast(p.rows) });
         try f.e.keepWindow(&lane.caches, p.tokens[0..p.rows], rows);
         lane.pending = null;
     }
@@ -214,6 +235,7 @@ pub const Fx = struct {
         lane.* = .{ .caches = caches, .head = head, .streams = streams, .fill = .{ .at = 0 }, .id = f.next_id };
         f.next_id += 1;
         gop.value_ptr.* = lane;
+        if (f.link != null) try f.send(&.{ @backingInt(worker.Op.begin), lane.id, @intCast(total) });
         const fill = &lane.fill.?;
         if (f.store) |*st| {
             var arena: std.heap.ArenaAllocator = .init(f.gpa);
@@ -244,6 +266,12 @@ pub const Fx = struct {
         const chunk: usize = if (f.decoding(lane)) e.o.policy.fill_rows else e.o.chunk;
         const to = @min(stop, at + chunk);
         const last = to == prompt.len;
+        if (f.link != null) {
+            f.msg.clearRetainingCapacity();
+            try f.msg.appendSlice(f.gpa, &.{ @backingInt(worker.Op.fill), lane.id, @intFromBool(last), @intCast(to - at) });
+            try f.msg.appendSlice(f.gpa, prompt[at..to]);
+            try f.send(f.msg.items);
+        }
         const out = try e.prompt(&lane.caches, prompt[at..to]);
         const rows = to - at;
         const row_bytes = m.dims.wide() * m.act.size();
@@ -311,6 +339,10 @@ pub const Fx = struct {
         var tokens: [forward.max_segs][cache.max_window]u32 = undefined;
         var segs: [forward.max_segs]forward.Seg = undefined;
         var total: usize = 0;
+        if (f.link != null) {
+            f.msg.clearRetainingCapacity();
+            try f.msg.appendSlice(f.gpa, &.{ @backingInt(worker.Op.verify), @intCast(windows.len) });
+        }
         for (windows, 0..) |w, i| {
             if (w.parents != null) return error.TreesNotBuilt;
             const lane = f.lanes.get(w.stream) orelse return error.UnknownStream;
@@ -324,7 +356,12 @@ pub const Fx = struct {
             for (w.positions, 0..) |p, r| if (p != len + 1 + r) return error.PositionMismatch;
             segs[i] = .{ .c = &lane.caches, .tokens = tokens[i][0..n], .pos = len };
             total += n;
+            if (f.link != null) {
+                try f.msg.appendSlice(f.gpa, &.{ lane.id, @intCast(n) });
+                try f.msg.appendSlice(f.gpa, tokens[i][0..n]);
+            }
         }
+        if (f.link != null) try f.send(f.msg.items);
         const fw = try e.runMany(segs[0..windows.len], true);
         const row_bytes = m.dims.wide() * m.act.size();
         var off: usize = 0;
@@ -424,6 +461,7 @@ pub const Fx = struct {
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
         const f = of(ptr);
         const kv = f.lanes.fetchRemove(s) orelse return;
+        if (f.link != null) f.send(&.{ @backingInt(worker.Op.release), kv.value.id }) catch {};
         f.free(kv.value);
     }
 };

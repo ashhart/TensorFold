@@ -14,6 +14,7 @@ pub const mixers = @import("hip/mixers.zig");
 pub const engine = @import("hip/engine.zig");
 pub const head = @import("hip/head.zig");
 pub const lanes = @import("hip/lanes.zig");
+pub const worker = @import("hip/worker.zig");
 pub const snapshot = @import("hip/snapshot.zig");
 /// The registry entry of the native server.
 pub const native = @import("hip/native.zig");
@@ -32,6 +33,7 @@ test {
     @import("std").testing.refAllDecls(tables.Tables);
     @import("std").testing.refAllDecls(lanes.Fx);
     @import("std").testing.refAllDecls(head);
+    @import("std").testing.refAllDecls(worker);
     @import("std").testing.refAllDecls(snapshot);
     _ = native;
 }
