@@ -50,6 +50,9 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
         bind(e, 4, .{sc.branch});
         e.dispatchThreads(size(rows * c.hidden, 1, 1), size(256, 1, 1));
         return;
+    } else if (x.k.wide != null and wide.moeOne(parts(w)) and s & (Class.shared | Class.routed) == 0 and on(x, "e_gateup") and on(x, "e_down") and on(x, "s_gateup") and on(x, "s_down")) {
+        if (s & Class.route == 0) route(x, e, w, x_in, rows);
+        wide.moe(&x.k.wide.?, e, parts(w), c.experts, c.topk, c.swiglu_limit, .{ .x = x_in, .ids = sc.pick, .act = sc.act, .acts = sc.acts, .ye = sc.ye, .ys = sc.ys }, rows);
     } else {
         if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
         if (s & Class.route == 0) route(x, e, w, x_in, rows);
@@ -61,6 +64,10 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
     shape(e, 3, .{ rows, top });
     bind(e, 4, .{sc.branch});
     e.dispatchThreads(size(rows * c.hidden, 1, 1), size(256, 1, 1));
+}
+
+fn parts(w: *const wts.Moe) wide.Moe {
+    return .{ .gate = w.gate, .up = w.up, .down = w.down, .sh_gate_up = w.sh_gate_up, .sh_down = w.sh_down };
 }
 
 /// The router's fp32 logits and the route: picks, weights and the window's unique experts with their members.

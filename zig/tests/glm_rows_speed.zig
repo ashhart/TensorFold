@@ -273,6 +273,13 @@ fn kdaStep(e: mtl.ComputeEncoder, i: usize, pipe: mtl.Pipeline, s: *const Kda, g
     e.dispatchThreads(mtl.Size.of(32, 32, H), mtl.Size.of(32, 32, 1));
 }
 
+/// glm_rows.metal with glm_rows_speed.metal's candidate instances.
+fn candidateLib(device: mtl.Device) !mtl.Library {
+    const src = try std.mem.concat(a, u8, &.{ sources.core_row_projection, wide.glue_math, sources.glm_rows, @embedFile("glm_rows_speed.metal") });
+    defer a.free(src);
+    return mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
+}
+
 const PM = 2048; // a prompt chunk's rows
 
 /// A prompt chunk's per-head product (embed_q: x qp's slices; unembed_out: the latent rows) on the row kernels.
@@ -375,6 +382,49 @@ fn candidates(b: *const Bench, lib: mtl.Library, p: *const wide.Pipes, pool: Poo
         std.debug.print("  {s:<16} {s:<24} {d:8.1} us ({d:5.3}x glm_rows)\n", .{ name, fname, us, base / us });
     };
     std.debug.print("  {s:<16} glm_rows {d:.1} us, best {s} {d:.1} us ({d:.0} GB/s)\n", .{ name, base, best_name[0..best_len], best, @as(f64, @floatFromInt(pool.bytes)) / best / 1e3 });
+}
+
+/// oQ2's MoE: routed by pick and the shared expert, a launch for gate|up and one for down (wide.moe).
+fn moeTwo(e: mtl.ComputeEncoder, i: usize, p: *const wide.Pipes, gu: [2]Pool, down: Pool, sh: [2]Pool, io: Io) void {
+    const m: wide.Moe = .{ .gate = gu[0].at(i), .up = gu[1].at(i), .down = down.at(i), .sh_gate_up = sh[0].at(i), .sh_down = sh[1].at(i) };
+    const z = rf(io.z);
+    wide.moe(p, e, m, E, TOPK, 10.0, .{ .x = rf(io.x), .ids = rf(io.ids).at((i % reps) * TOPK * 4), .act = z, .acts = z.at(TOPK * N * 2), .ye = rf(io.y), .ys = rf(io.y).at(TOPK * D * 2) }, 1);
+}
+
+/// moeTwo through candidate pipelines (glu, down) at `rps` columns a simdgroup.
+fn moeCand(e: mtl.ComputeEncoder, i: usize, pipes: [2]mtl.Pipeline, rps: [2]u32, gu: [2]Pool, down: Pool, sh: [2]Pool, io: Io) void {
+    const z = rf(io.z);
+    const ids = rf(io.ids).at((i % reps) * TOPK * 4);
+    const steps = [2]struct { w: Affine, up: Affine, sh: Affine, x: Ref, out: Ref, out2: Ref, repeat: u32 }{
+        .{ .w = gu[0].at(i), .up = gu[1].at(i), .sh = sh[0].at(i), .x = rf(io.x), .out = z, .out2 = z.at(TOPK * N * 2), .repeat = TOPK },
+        .{ .w = down.at(i), .up = down.at(i), .sh = sh[1].at(i), .x = z, .out = rf(io.y), .out2 = rf(io.y).at(TOPK * D * 2), .repeat = 1 },
+    };
+    for (steps, pipes, rps, 0..) |st, pipe, r, j| {
+        e.setPipeline(pipe);
+        bind(e, 0, .{ st.x, st.w.w, st.w.s, st.w.b });
+        e.setValue(wide.PickDims{ .k = @intCast(st.w.k), .n = @intCast(st.w.n), .group = 64, .slots = TOPK, .repeat = @intCast(st.repeat), .experts = E, .ldo = @intCast(st.w.n), .lim = 10.0 }, 4);
+        bind(e, 5, .{ st.out, ids, st.up.w, st.up.s, st.up.b, if (j == 0) rf(io.x) else z.at(TOPK * N * 2), st.sh.w, st.sh.s, st.sh.b, st.out2 });
+        e.dispatchGroups(mtl.Size.of((st.w.n + 2 * r - 1) / (2 * r), TOPK + 1, 1), mtl.Size.of(64, 1, 1));
+    }
+}
+
+/// glm_moe_rows candidates (glm_rows_speed.metal) for oQ2's MoE: bits == wide.moe's, then the time a layer.
+fn moeCandidates(b: *const Bench, lib: mtl.Library, p: *const wide.Pipes, gu: [2]Pool, down: Pool, sh: [2]Pool) !void {
+    const base = try b.time(moeTwo, .{ p, gu, down, sh, b.io });
+    try b.run(moeTwo, .{ p, gu, down, sh, b.io });
+    const want = try a.dupe(u16, b.io.y.slice(u16, (TOPK + 1) * D));
+    defer a.free(want);
+    for ([_][2][:0]const u8{ .{ "x_moe_glu_r8_k0", "x_moe_r8_k0" }, .{ "x_moe_glu_r2_k0", "x_moe_r2_k0" }, .{ "x_moe_glu_r4_k4096", "x_moe_r4_k2048" }, .{ "x_moe_glu_r8_k4096", "x_moe_r8_k2048" } }) |names| {
+        var pipes: [2]mtl.Pipeline = undefined;
+        for (&pipes, names) |*x, n| x.* = try mtl.Pipeline.init(b.device, lib, n, false);
+        defer for (pipes) |x| x.deinit();
+        const rps = [2]u32{ names[0][11] - '0', names[1][7] - '0' };
+        @memset(b.io.y.slice(u16, (TOPK + 1) * D), 0);
+        try b.run(moeCand, .{ pipes, rps, gu, down, sh, b.io });
+        if (!std.mem.eql(u16, b.io.y.slice(u16, (TOPK + 1) * D), want)) return error.BitsDiffer;
+        const us = try b.time(moeCand, .{ pipes, rps, gu, down, sh, b.io });
+        std.debug.print("  moe q2+q8 {s} / {s}: {d:8.1} us ({d:5.3}x wide.moe {d:.1} us)\n", .{ names[0], names[1], us, base / us, base });
+    }
 }
 
 fn routedRows(e: mtl.ComputeEncoder, i: usize, p: *const wide.Pipes, gu: [2]Pool, down: Pool, io: Io) void {
@@ -509,17 +559,24 @@ pub fn main() !void {
         const sh8 = [2]Pool{ try Pool.init(device, 2 * N, D, 8, 1, 2), try Pool.init(device, D, N, 8, 1, 2) };
         defer for (sh8) |x| x.deinit();
         const us_sh = try b.time(shared, .{ p, k, sh8, io });
-        oq2.add("moe shared q8", us_sh, 42, sh8[0].bytes + sh8[1].bytes);
+        std.debug.print("  {s:<26} {d:9.1} us (oQ2: in the routed launches below)\n", .{ "moe shared q8", us_sh });
         oq4.add("moe shared q8", us_sh, 42, sh8[0].bytes + sh8[1].bytes);
+        const alt = try b.time(moeTwo, .{ p, gu4, dn4, sh8, io }); // oQ4's routed 4/64 on glm_rows sums with the shared
+        std.debug.print("  {s:<26} {d:9.1} us (not taken: changes routed bits)\n", .{ "moe routed 4 + shared q8", alt });
         const gu2 = [2]Pool{ try Pool.init(device, N, D, 2, E, 1), try Pool.init(device, N, D, 2, E, 1) };
         defer for (gu2) |x| x.deinit();
         const dn2 = try Pool.init(device, D, N, 2, E, 1);
         defer dn2.deinit();
-        oq2.add("moe routed q2 (ids)", try b.time(routedRows, .{ p, gu2, dn2, io }), 42, 3 * affine.bytes(N, D, .{ .bits = 2, .group = 64 }) * TOPK);
+        std.debug.print("  {s:<26} {d:9.1} us (apart)\n", .{ "moe routed q2 (ids)", try b.time(routedRows, .{ p, gu2, dn2, io }) });
+        oq2.add("moe routed q2 + shared q8", try b.time(moeTwo, .{ p, gu2, dn2, sh8, io }), 42, 3 * affine.bytes(N, D, .{ .bits = 2, .group = 64 }) * TOPK + sh8[0].bytes + sh8[1].bytes);
+        if (std.c.getenv("GLM_SPEED_CANDIDATES") != null) {
+            const lib = try candidateLib(device);
+            defer lib.deinit();
+            try moeCandidates(&b, lib, p, gu2, dn2, sh8);
+        }
     }
     if (std.c.getenv("GLM_SPEED_CANDIDATES") != null) {
-        const src = try std.mem.concat(a, u8, &.{ sources.core_row_projection, wide.glue_math, sources.glm_rows, @embedFile("glm_rows_speed.metal") });
-        const lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
+        const lib = try candidateLib(device);
         defer lib.deinit();
         std.debug.print("candidates at 8 bits (bits checked == glm_rows):\n", .{});
         for (shapes) |s| {

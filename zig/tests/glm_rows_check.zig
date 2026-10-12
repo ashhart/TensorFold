@@ -22,21 +22,21 @@ fn toBf(v: f32) u16 {
 fn fromBf(v: u16) f64 {
     return @as(f32, @bitCast(@as(u32, v) << 16));
 }
-fn buf(device: mtl.Device, bytes: usize) !mtl.Buffer {
+pub fn buf(device: mtl.Device, bytes: usize) !mtl.Buffer {
     return device.buffer(@max(bytes, 16), opts);
 }
-fn ref(b: mtl.Buffer) Ref {
+pub fn ref(b: mtl.Buffer) Ref {
     return .{ .buf = b };
 }
 
 /// A synthetic MLX matrix [n, k], its fp64 dequantization and its codes alone; x: `rows` rows of inputs.
-const Mat = struct {
+pub const Mat = struct {
     q: affine.Affine,
     bufs: [4]mtl.Buffer,
     deq: []f64,
     codes: []f64,
 
-    fn init(device: mtl.Device, n: usize, k: usize, bits: u8, group: usize, seed: u64) !Mat {
+    pub fn init(device: mtl.Device, n: usize, k: usize, bits: u8, group: usize, seed: u64) !Mat {
         var prng = std.Random.DefaultPrng.init(seed);
         const r = prng.random();
         const words = n * k * bits / 32;
@@ -58,13 +58,13 @@ const Mat = struct {
         return m;
     }
 
-    fn deinit(m: Mat) void {
+    pub fn deinit(m: Mat) void {
         for (m.bufs) |b| b.deinit();
         a.free(m.deq);
         a.free(m.codes);
     }
 
-    fn x(m: Mat) mtl.Buffer {
+    pub fn x(m: Mat) mtl.Buffer {
         return m.bufs[3];
     }
 
@@ -119,7 +119,7 @@ const Mat = struct {
     }
 };
 
-const Gpu = struct {
+pub const Gpu = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     p: wide.Pipes,
@@ -127,7 +127,7 @@ const Gpu = struct {
     swiglu: mtl.Pipeline,
 
     /// One command buffer around `f(e, args)`.
-    fn run(g: *const Gpu, comptime f: anytype, args: anytype) !void {
+    pub fn run(g: *const Gpu, comptime f: anytype, args: anytype) !void {
         const cb = g.queue.commandBuffer();
         const e = cb.compute(.serial);
         @call(.auto, f, .{e} ++ args);
@@ -141,13 +141,13 @@ const Gpu = struct {
     }
 };
 
-fn dense(e: mtl.ComputeEncoder, p: *const wide.Pipes, q: affine.Affine, io: wide.Io) void {
+pub fn dense(e: mtl.ComputeEncoder, p: *const wide.Pipes, q: affine.Affine, io: wide.Io) void {
     wide.dense(p, e, q, io);
 }
 
 const Tally = struct { values: usize = 0, worst: f64 = 0, pairs: usize = 0 };
 
-fn eql(got: []const u16, want: []const u16) !void {
+pub fn eql(got: []const u16, want: []const u16) !void {
     if (!std.mem.eql(u16, got, want)) {
         for (got, want, 0..) |x, y, i| if (x != y) {
             std.debug.print("first difference at {d}: {x} vs {x}\n", .{ i, x, y });
@@ -459,7 +459,7 @@ fn splitMmCheck(g: *const Gpu, k: usize, ns: []const usize, bits: []const u8, t:
     return on_mm;
 }
 
-fn gluLaunch(e: mtl.ComputeEncoder, p: *const wide.Pipes, gu: affine.Affine, n: u32, x: Ref, out: Ref, m: u32) void {
+pub fn gluLaunch(e: mtl.ComputeEncoder, p: *const wide.Pipes, gu: affine.Affine, n: u32, x: Ref, out: Ref, m: u32) void {
     wide.glu(p, e, gu, n, x, out, m, 0.75);
 }
 
@@ -485,7 +485,7 @@ fn sharedGluCheck(g: *const Gpu) !usize {
 fn perHead(e: mtl.ComputeEncoder, p: *const wide.Pipes, q: affine.Affine, heads: u32, io: wide.Io, hsx: u32, hso: u32) void {
     wide.perHead(p, e, q, heads, io, hsx, hso);
 }
-fn byIds(e: mtl.ComputeEncoder, p: *const wide.Pipes, m: wide.Picks, x: Ref, ids: Ref, out: Ref, slots: u32) void {
+pub fn byIds(e: mtl.ComputeEncoder, p: *const wide.Pipes, m: wide.Picks, x: Ref, ids: Ref, out: Ref, slots: u32) void {
     wide.byIds(p, e, m, x, ids, out, slots);
 }
 fn bySorted(e: mtl.ComputeEncoder, p: *const wide.Pipes, m: wide.Picks, x: Ref, offsets: Ref, order: Ref, out: Ref, ldo: u32) void {
@@ -558,6 +558,7 @@ pub fn main() !void {
     all.pairs += try @import("glm_rows_kda.zig").check(&g.p, device, queue);
     all.pairs += try @import("glm_rows_kda.zig").fusedCheck(&g.p, device, queue);
     all.pairs += try sharedGluCheck(&g);
+    all.pairs += try @import("glm_rows_moe.zig").check(&g);
     all.values += try @import("glm_rows_kda.zig").bf16Check(&g.p, device, queue, &all.worst);
     all.values += try @import("glm_rows_kda.zig").embedCheck(&g.p, device, queue, &all.worst);
     const cl = try @import("glm_rows_classes.zig").check(&g.p, device, queue);
