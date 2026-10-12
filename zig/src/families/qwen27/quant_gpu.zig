@@ -101,7 +101,7 @@ pub const Kernels = struct {
         if (skip > 0 and (p.raw != null or skip >= p.n / 64)) return error.BadCoreProjectionRows;
         var span = profile.begin(k.profiler, input_encoder, .dense);
         const sk = if (k.prompt) projection.promptSplit(p.n, p.k) orelse p.slices else p.slices;
-        span.shape = .{ .n = p.n, .k = p.k, .sk = sk };
+        span.shape = .{ .n = p.n, .k = p.k, .sk = sk, .bits = p.bits };
         errdefer span.cancel();
         const e = span.encoder;
 
@@ -174,7 +174,7 @@ pub const Kernels = struct {
     /// The row kernel at any width, output row m at y + m * stride values; a row's bits do not depend on the window.
     fn rowStrided(k: *Kernels, input_encoder: mtl.ComputeEncoder, raw: row.Weights, x: Ref, y: Ref, rows: u32, stride: u32) !void {
         var span = profile.begin(k.profiler, input_encoder, .dense);
-        span.shape = .{ .n = @intCast(raw.n), .k = @intCast(raw.k), .sk = 1 };
+        span.shape = .{ .n = @intCast(raw.n), .k = @intCast(raw.k), .sk = 1, .bits = raw.bits };
         errdefer span.cancel();
         const e = span.encoder;
         if (k.row_pipelines == null) k.row_pipelines = try row.Pipelines.load(k.device);
