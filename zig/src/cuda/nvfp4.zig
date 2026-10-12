@@ -64,12 +64,13 @@ pub const Prompt = struct {
     mod: Module,
     fp4: Function,
     fp8: Function,
+    fp4_f32: Function, // FP4 writing the fp32 sums unrounded
 
     const bm = 128;
     const bn = 128;
     const threads = 128;
-    const name = "_ZN11tf_prompt1613prompt_kernelILi{d}ELi128ELi128ELi2ELi2ELi2ELb0EEEvPK13__nv_bfloat16PKhS5_fPviiiiii";
-    pub const symbols = [2][:0]const u8{ std.fmt.comptimePrint(name, .{0}), std.fmt.comptimePrint(name, .{1}) };
+    const name = "_ZN11tf_prompt1613prompt_kernelILi{d}ELi128ELi128ELi2ELi2ELi2ELb{d}EEEvPK13__nv_bfloat16PKhS5_fPviiiiii";
+    pub const symbols = [3][:0]const u8{ std.fmt.comptimePrint(name, .{ 0, 0 }), std.fmt.comptimePrint(name, .{ 1, 0 }), std.fmt.comptimePrint(name, .{ 0, 1 }) };
 
     /// prompt16.cu Tile<MODE, 128, 128, 2, 2, 2>::SMEM.
     pub fn sharedBytes(mode: qmmf.Mode) u32 {
@@ -86,7 +87,9 @@ pub const Prompt = struct {
         try fp4.allowDynamicShared(sharedBytes(.fp4));
         const fp8 = try mod.function(symbols[1]);
         try fp8.allowDynamicShared(sharedBytes(.fp8));
-        return .{ .mod = mod, .fp4 = fp4, .fp8 = fp8 };
+        const fp4_f32 = try mod.function(symbols[2]);
+        try fp4_f32.allowDynamicShared(sharedBytes(.fp4));
+        return .{ .mod = mod, .fp4 = fp4, .fp8 = fp8, .fp4_f32 = fp4_f32 };
     }
 
     pub fn unload(p: *Prompt) void {
@@ -95,9 +98,14 @@ pub const Prompt = struct {
 
     /// y [m, n] bf16 = prompt rows x [m, k] bf16 (rows `ldx` apart) times an FP4 or FP8 weight (linear._prompt).
     pub fn matmul(p: Prompt, s: Stream, x: u64, ldx: usize, m: usize, w: qmmf.Weight, y: u64) !void {
+        return p.matmulOut(s, x, ldx, m, w, y, .bf16);
+    }
+
+    /// matmul() writing y as `out` says: bf16, or fp32 (FP4 only).
+    pub fn matmulOut(p: Prompt, s: Stream, x: u64, ldx: usize, m: usize, w: qmmf.Weight, y: u64, out: qmmf.Out) !void {
         const f = switch (w.mode) {
-            .fp4 => p.fp4,
-            .fp8 => p.fp8,
+            .fp4 => if (out == .f32) p.fp4_f32 else p.fp4,
+            .fp8 => if (out == .f32) return error.EpilogueNotBuilt else p.fp8,
             else => return error.FormatMismatch,
         };
         const rows_t = (m + bm - 1) / bm;
@@ -126,6 +134,7 @@ test "the prompt tile's shared bytes and instance names" {
     try std.testing.expectEqual(@as(u32, 41984), Prompt.sharedBytes(.fp4));
     try std.testing.expectEqual(@as(u32, 49152), Prompt.sharedBytes(.fp8)); // 2 x (16384 + 8192): no scale tile
     try std.testing.expectEqualStrings("_ZN11tf_prompt1613prompt_kernelILi0ELi128ELi128ELi2ELi2ELi2ELb0EEEvPK13__nv_bfloat16PKhS5_fPviiiiii", Prompt.symbols[0]);
+    try std.testing.expectEqualStrings("_ZN11tf_prompt1613prompt_kernelILi0ELi128ELi128ELi2ELi2ELi2ELb1EEEvPK13__nv_bfloat16PKhS5_fPviiiiii", Prompt.symbols[2]);
 }
 
 test "word tiling reads each nibble where qmm.pack puts it" {
