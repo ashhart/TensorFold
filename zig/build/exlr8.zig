@@ -78,12 +78,17 @@ fn alias(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.
 
 /// GLM-5.3 (glm_moe_dsa) on EXLR8: a layer on Metal against the fp32 reference forward's tensors.
 pub fn glmTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module) void {
-    const exe = b.addExecutable(.{ .name = "tf-glm-dsa-layer-check", .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/glm_dsa_layer_check.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
-    }) });
-    b.step("tf-glm-dsa-layer-check", "One GLM-5.3 layer on Metal against ref_layer.py's fp32 tensors (MODEL_DIR REF_DIR)").dependOn(&b.addInstallArtifact(exe, .{}).step);
+    for ([_][3][]const u8{
+        .{ "tf-glm-dsa-layer-check", "zig/tests/glm_dsa_layer_check.zig", "One GLM-5.3 layer on Metal against ref_layer.py's fp32 tensors (MODEL_DIR REF_DIR)" },
+        .{ "tf-glm-dsa-tp-check", "zig/tests/glm_dsa_tp_check.zig", "Two ranks of one GLM-5.3 layer on one Mac, summed, against the reference (MODEL_DIR REF_DIR)" },
+    }) |p| {
+        const exe = b.addExecutable(.{ .name = p[0], .root_module = b.createModule(.{
+            .root_source_file = b.path(p[1]),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+        }) });
+        b.step(p[0], p[2]).dependOn(&b.addInstallArtifact(exe, .{}).step);
+    }
 }
