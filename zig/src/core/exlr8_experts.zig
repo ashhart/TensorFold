@@ -108,7 +108,8 @@ pub const Layer = struct {
         for (2..5) |k| if (l.widths[k] or l.shared_widths[k]) {
             const tp = try std.fmt.allocPrint(gpa, "{s}/experts/{s}.k{d}.safetensors", .{ root, base, k });
             defer gpa.free(tp);
-            l.files[k] = try st.File.open(gpa, io, tp);
+            // A node may hold only the widths its manifest or rank needs: a missing file is a width it cannot load.
+            l.files[k] = st.File.open(gpa, io, tp) catch |e| if (e == error.FileNotFound) null else return e;
         };
         return l;
     }
@@ -150,7 +151,8 @@ pub const Layer = struct {
     /// Half h of projection p of an expert (0-255, or `shared`) at width k.
     pub fn half(l: *const Layer, expert: u16, proj: Proj, h: usize, k: u8) !Half {
         if (h >= halves or expert > shared) return error.BadExlr8Half;
-        const file: *const st.File = if (l.stored(expert, k)) &l.files[k].? else return error.WidthNotStored;
+        if (!l.stored(expert, k)) return error.WidthNotStored;
+        const file: *const st.File = &(l.files[k] orelse return error.WidthFileMissing);
         const s = try l.side(expert, k);
         const e: usize = if (expert == shared) 0 else expert;
         const p = @backingInt(proj);
