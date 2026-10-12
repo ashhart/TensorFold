@@ -458,11 +458,11 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     exlr8_build.metalTargets(b, target, optimize, metal, mods.sources, test_step);
     exlr8_build.glmTargets(b, target, optimize, metal, mods.engine);
 
-    // The checkpoint CLI: models, info and pull, against a synthetic cache and a fake hub.
+    // The checkpoint CLI: models, info and pull, against a synthetic cache and a fake hub, at ReleaseSafe as it ships.
     const cli_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/cli/tests.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = .ReleaseSafe,
         .link_libc = true,
         .imports = &.{ .{ .name = "native_engines", .module = engines }, exlr8_build.cliImport(b, target, optimize, mods.engine) },
     }) });
