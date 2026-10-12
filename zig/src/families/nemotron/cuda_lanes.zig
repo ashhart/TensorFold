@@ -7,7 +7,8 @@ const core = @import("core");
 const engine = @import("cuda_engine.zig");
 const Engine = engine.Engine;
 const reuse = @import("cuda_reuse.zig");
-const Head = @import("cuda_mtp.zig").Head;
+const mtp = @import("cuda_mtp.zig");
+const Head = mtp.Head;
 const state = @import("cuda_state.zig");
 const config = @import("config.zig");
 const seq_graphs = @import("cuda_seq_graphs.zig");
@@ -127,7 +128,8 @@ pub const Cuda = struct {
             .speculate = drafting,
             .speculate_early = false,
             .draft_prior = &config.draft_prior,
-            .drafts = @import("cuda_mtp.zig").max_chain,
+            .drafts = mtp.max_chain,
+            .draft_streams = drafting, // a shared round's heads draft in one batch (Head.chains)
             .window_costs = self.costs[0..self.cost_count],
             .mtp_step_ms = self.mtp_ms,
             .hidden_rows = drafting, // several streams' windows share a forward (Engine.verifyShared)
@@ -377,18 +379,38 @@ pub const Cuda = struct {
         }
     }
 
-    /// Absorb kept rows with their following tokens, then draft the requested depth.
+    /// Absorb kept rows with their following tokens, then draft: several drafting streams batched (Head.chains).
     fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const self = of(ptr);
         const h = self.head orelse return error.NoDraftHead;
+        var drafting: usize = 0;
+        for (requests) |r| drafting += @intFromBool(r.depth > 0);
+        var parts: [engine.max_streams]mtp.Part = undefined;
+        var batched: usize = 0;
+        var rows: usize = 0;
         for (requests) |r| {
             _ = try self.bindLane(r.stream, if (r.rows) |path| path.len else null);
             if (r.position != self.e.pos + 1) return error.PositionMismatch;
-            if (r.rows) |rows| {
-                for (rows, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
-                try h.chain(r.follow[0..rows.len], r.depth);
-            } else try h.chain(&.{self.value(r.first orelse return error.NoFirstToken)}, r.depth);
+            var first: [1]u32 = undefined;
+            const follow = if (r.rows) |path| blk: {
+                for (path, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
+                break :blk r.follow[0..path.len];
+            } else blk: {
+                first[0] = self.value(r.first orelse return error.NoFirstToken);
+                break :blk first[0..];
+            };
+            if (drafting < 2 or r.depth == 0 or batched == parts.len or rows + follow.len > state.max_rows) {
+                try h.chain(follow, r.depth);
+                continue;
+            }
+            if (r.depth > mtp.max_chain) return error.BadDraftRequest;
+            try self.e.ops().upload(self.e.b.sampled, std.mem.sliceAsBytes(follow));
+            parts[batched] = .{ .k_cache = h.k_cache, .v_cache = h.v_cache, .probs = h.probs, .ids = self.e.b.ids, .hidden = self.e.b.hidden, .sampled = self.e.b.sampled, .rule = if (self.e.sampling != null) self.e.b.rule else null, .pos = h.pos, .keep = follow.len, .depth = r.depth };
+            h.pos += follow.len;
+            batched += 1;
+            rows += follow.len;
         }
+        if (batched > 0) try h.chains(parts[0..batched]);
     }
 
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
