@@ -16,6 +16,7 @@ pub const Function = @import("module.zig").Function;
 pub const launch = @import("launch.zig");
 pub const graph = @import("graph.zig");
 pub const graph_cache = @import("graph_cache.zig");
+pub const graph_split = @import("graph_split.zig");
 pub const Arena = @import("arena.zig").Arena;
 pub const caps = @import("caps.zig");
 pub const Caps = caps.Caps;
