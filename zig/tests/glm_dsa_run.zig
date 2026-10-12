@@ -72,6 +72,7 @@ fn once(e: *g.engine.Engine, io: std.Io, t: *const tok.Tokenizer, prompt: []cons
     try reply.append(a, first);
     if (depth > 0) try g.follow.draft(e, &.{.{ .slot = 0, .prompt = true, .follow = &.{first}, .depth = depth }});
     var rounds: usize = 0;
+    var gpu: f64 = 0;
     var drafted: usize = 0;
     var landed: usize = 0;
     var out: [16]u32 = undefined;
@@ -83,6 +84,7 @@ fn once(e: *g.engine.Engine, io: std.Io, t: *const tok.Tokenizer, prompt: []cons
         @memcpy(toks[1..][0..h.len], h);
         const n = 1 + h.len;
         try g.follow.window(e, &.{.{ .slot = 0, .tokens = toks[0..n] }}, &out);
+        gpu += e.gpu_ms;
         var kept: u32 = 1;
         while (kept < n and out[kept - 1] == toks[kept]) kept += 1;
         try g.follow.keep(e, 0, kept);
@@ -99,4 +101,5 @@ fn once(e: *g.engine.Engine, io: std.Io, t: *const tok.Tokenizer, prompt: []cons
     std.debug.print("\nreply: {s}\n", .{try t.decode(a, reply.items, false)});
     if (forced) std.debug.print("teacher-forced: {d} of {d} prompt rows pick the next prompt token\n", .{ agree, prompt.len - 1 });
     std.debug.print("\nprompt {d} tokens in {d:.2} s ({d:.1} tok/s); reply {d} tokens in {d} rounds, {d:.2} s ({d:.2} tok/s); drafts {d} landed of {d}\n", .{ prompt.len, t_prompt, @as(f64, @floatFromInt(prompt.len)) / t_prompt, reply.items.len, rounds, t_reply, @as(f64, @floatFromInt(reply.items.len - 1)) / t_reply, landed, drafted });
+    std.debug.print("windows: {d:.2} ms of GPU time a round, {d:.2} ms a round in all\n", .{ gpu / @as(f64, @floatFromInt(@max(rounds, 1))), t_reply * 1000 / @as(f64, @floatFromInt(@max(rounds, 1))) });
 }

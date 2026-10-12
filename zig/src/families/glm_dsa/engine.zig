@@ -24,8 +24,7 @@ pub const Slot = struct {
     /// Cache rows written (the stream's tokens so far).
     len: u32 = 0,
     prompt: std.ArrayList(u32) = .empty,
-    /// This slot's first row in the last window, its rows no keep has settled yet (all kept unless one does), and the
-    /// rows the last settle kept.
+    /// The last window's first row here, its rows not yet settled (kept unless a keep says), the last settle's rows.
     win_row: u32 = 0,
     open: u32 = 0,
     kept: u32 = 0,
@@ -53,6 +52,8 @@ pub const Engine = struct {
     snaps: std.AutoHashMapUnmanaged(u32, *snap.Snap) = .empty,
     context: u32,
     load_seconds: f64 = 0,
+    /// The GPU's time on the last command buffer (ms), for speed work.
+    gpu_ms: f64 = 0,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, settings: []const u8, layers: ?u32, mtp: bool, context: u32, streams: u32, limit: u64) !*Engine {
         const e = try gpa.create(Engine);
@@ -128,6 +129,7 @@ pub const Engine = struct {
             return error.GpuFailure;
         }
         if (e.pair.gaveUp() != 0 or e.pair.failed.load(.acquire)) return error.PairLinkFailed;
+        e.gpu_ms = (cb.gpuEnd() - cb.gpuStart()) * 1000;
     }
 
     /// A fresh stream in slot `i` with its prompt.
