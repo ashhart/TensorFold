@@ -26,6 +26,8 @@ const Rig = struct {
     fn zeros(r: *Rig, len: usize) !u64 {
         const b = try cuda.DeviceBuffer.alloc(r.gpu.d, @max(len, 16));
         try b.fill8(0, null);
+        // the memset runs on the legacy stream, which a non-blocking stream's kernels do not wait for
+        try r.gpu.d.check(r.gpu.d.api.cuStreamSynchronize(null), "cuStreamSynchronize");
         try r.bufs.append(r.gpu.gpa, b);
         return b.ptr;
     }
