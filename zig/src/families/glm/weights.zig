@@ -535,11 +535,6 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8, c: *con
         quant.say("glm: this checkpoint has widths other than 4/64; the pair's split kernels read only 4/64 (load it on one Mac)", .{});
         return error.UnsupportedWidth;
     }
-    if (!dry and !native(w, c)) {
-        var buf: [256]u8 = undefined;
-        quant.say("glm: this checkpoint's matrices are {s}; the device kernels read 4/64 only", .{tally(w, c).summary(&buf)});
-        return error.UnsupportedWidth;
-    }
     if (dry) {
         var buf: [256]u8 = undefined;
         const widths = tally(w, c).summary(&buf);
