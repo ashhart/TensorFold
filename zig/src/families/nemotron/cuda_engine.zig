@@ -218,7 +218,7 @@ pub const Engine = struct {
         switch (body) {
             .window => |w| {
                 const f = e.forward(null);
-                try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = w.rows, .sampled = f.sampled, .mask = w.mask, .slot = f.slot }});
+                try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = w.rows, .sampled = f.sampled, .mask = w.mask, .slot = f.slot, .untaught = f.untaught }});
                 if (w.feed) return e.ops().serialFeed(e.b.sampled, e.b.ids, e.b.meta, e.history_dev);
                 try e.ops().download(std.mem.sliceAsBytes(e.pinned.slice(u32)[pin_sampled..][0..w.rows]), e.b.sampled);
             },
