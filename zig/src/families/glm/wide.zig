@@ -29,6 +29,7 @@ pub const Pipes = struct {
     kda_pre: mtl.Pipeline, // kda_rows reading f_b's and g_b's products made apart (any width but 4/64)
     embed: [2]mtl.Pipeline, // the embedding at 6 and 8 bits, groups of 64
     mm8: affine_mm.Pipes, // prompt chunks' products of one width at 8 bits in groups of 64 (core/affine_mm.zig)
+    mm2: affine_mm.Pipes, // and at 2 bits in groups of 64: oQ2's routed experts, gathered
     hash: u64, // every source compiled here
 
     pub fn deinit(p: *Pipes) void {
@@ -36,6 +37,7 @@ pub const Pipes = struct {
         p.bf16.deinit();
         p.kda_pre.deinit();
         for (p.mm8) |x| x.deinit();
+        for (p.mm2) |x| x.deinit();
     }
 };
 
@@ -54,7 +56,7 @@ pub const glue_math = blk: {
 
 /// The pipelines built so far: a failed compile releases them all.
 const Made = struct {
-    list: [nw * 5 + 4 + affine_mm.names.len]mtl.Pipeline = undefined,
+    list: [nw * 5 + 4 + 2 * affine_mm.names.len]mtl.Pipeline = undefined,
     n: usize = 0,
     released: usize = 0,
 
@@ -117,6 +119,10 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
     defer gpa.free(mm8);
     h.update(mm8);
     try lib(made, device, mm8, &affine_mm.names, &p.mm8);
+    const mm2 = try affine_mm.source(device, gpa, .{ .bits = 2, .group = 64 });
+    defer gpa.free(mm2);
+    h.update(mm2);
+    try lib(made, device, mm2, &affine_mm.names, &p.mm2);
     p.hash = h.final();
     return p;
 }
@@ -190,6 +196,15 @@ pub fn bySorted(p: *const Pipes, e: mtl.ComputeEncoder, m: Picks, x: Ref, offset
     e.dispatchGroups(mtl.Size.of((m.w.n + 7) / 8, m.experts, 1), mtl.Size.of(64, 1, 1));
 }
 
+/// A prompt chunk's routed experts: affine_mm gathers at 4/64 (`mm4`) or 2/64 (`mm2`, oQ2's), else sorted row products.
+pub const Routed = enum { mm4, mm2, rows };
+
+pub fn routed(gate: Affine, up: Affine, down: Affine) Routed {
+    if (native(gate) and native(up) and native(down)) return .mm4;
+    for ([_]Affine{ gate, up, down }) |q| if (q.more != 0 or q.bits != 2 or q.group != 64) return .rows;
+    return .mm2;
+}
+
 /// kda_rows's f_b/g_b dots: generated (both 4/64), else (`.pre`) glm_rows products made apart, the fp64-checked ones.
 pub const KdaGate = union(enum) { generated, pre: mtl.Pipeline };
 
@@ -231,6 +246,22 @@ test "glm_rows's SwiGLU compiles glm_glue's sigmoid_fast and bfloat overloads, n
     try std.testing.expect(std.mem.indexOf(u8, glue_math, "kernel void") == null); // the helpers only
     try std.testing.expect(std.mem.indexOf(u8, sources.glm_rows, "exp(") == null);
     try std.testing.expect(std.mem.indexOf(u8, sources.glm_rows, "sigmoid_fast(gt)") != null);
+}
+
+test "prompt chunks gather routed experts on affine_mm at 4/64 and 2/64 only; other widths take the sorted row products" {
+    const r: Ref = .{ .buf = undefined };
+    const q: Affine = .{ .w = r, .s = r, .b = r, .n = 64, .k = 128, .bits = 2, .group = 64 };
+    var four = q;
+    four.bits = 4;
+    try std.testing.expectEqual(Routed.mm4, routed(four, four, four));
+    try std.testing.expectEqual(Routed.mm2, routed(q, q, q));
+    var three = q;
+    three.bits = 3;
+    var g32 = q;
+    g32.group = 32;
+    try std.testing.expectEqual(Routed.rows, routed(q, q, three));
+    try std.testing.expectEqual(Routed.rows, routed(q, q, four));
+    try std.testing.expectEqual(Routed.rows, routed(g32, g32, g32));
 }
 
 test "f_b and g_b at any other width (8/64 too) take the products made apart, not the template's own dots" {

@@ -7,6 +7,7 @@ const wide = tf.glm.wide;
 const affine = tf.glm.affine;
 const mlx = tf.quant.mlx;
 const row = tf.row_projection;
+const affine_mm = tf.affine_mm;
 
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 const a = std.heap.page_allocator;
@@ -288,6 +289,83 @@ fn partsCheck(g: *const Gpu, m: Mat, up: Mat, t: *Tally) !void {
     t.pairs += 2 * slots * r;
 }
 
+fn mmDense(e: mtl.ComputeEncoder, mm: affine_mm.Pipes, q: affine.Affine, x: Ref, sums: Ref, y: Ref, n_rows: u32) void {
+    affine_mm.rowSums(e, mm, 64, x, sums, n_rows, q.k);
+    affine_mm.dense(e, mm, x, sums, q, y, n_rows);
+}
+
+/// dims: x rows, sorted pairs, experts, picks a row.
+fn mmGlu(e: mtl.ComputeEncoder, mm: affine_mm.Pipes, gate: affine.Affine, up: affine.Affine, x: Ref, sums: Ref, sorted: [2]Ref, act: Ref, dims: [4]u32, lim: f32) void {
+    affine_mm.rowSums(e, mm, 64, x, sums, dims[0], gate.k);
+    affine_mm.gatherGlu(e, mm, x, sums, gate, up, sorted[0], sorted[1], act, dims[1], dims[2], dims[3], lim);
+}
+
+fn mmDown(e: mtl.ComputeEncoder, mm: affine_mm.Pipes, q: affine.Affine, x: Ref, sums: Ref, sorted: [2]Ref, y: Ref, slots: u32, experts: u32) void {
+    affine_mm.rowSums(e, mm, 64, x, sums, slots, q.k);
+    affine_mm.gatherTo(e, mm, x, sums, q, sorted[0], y, sorted[1], slots, experts);
+}
+
+/// oQ2's prompt experts, affine_mm at 2/64: gathered GLU == glm_swiglu(dense gate | up), gathered down == dense.
+fn gatherCheck(g: *const Gpu, m: Mat, up: Mat, t: *Tally) !void {
+    const parts = 4;
+    const k: usize = m.q.k;
+    const r: usize = m.q.n / parts;
+    const repeat = 2;
+    const slots = 8 * repeat;
+    const picks = [slots]i32{ 2, 0, 0, 2, 2, 1, 3, 2, 2, 0, 1, 2, 2, 0, 0, 2 };
+    const lim: f32 = 0.75;
+    const mm = g.p.mm2;
+    var order: [slots]i32 = undefined;
+    var offsets: [parts]i32 = undefined;
+    var at: usize = 0;
+    for (0..parts) |e| {
+        offsets[e] = @intCast(at);
+        for (picks, 0..) |pk, y| if (pk == e) {
+            order[at] = @intCast(y);
+            at += 1;
+        };
+    }
+    const ob = try buf(g.device, (parts + slots) * 4);
+    defer ob.deinit();
+    @memcpy(ob.slice(i32, parts), &offsets);
+    @memcpy(ob.slice(i32, parts + slots)[parts..], &order);
+    const sorted = [2]Ref{ ref(ob), ref(ob).at(parts * 4) };
+    const bs = [_]mtl.Buffer{ try buf(g.device, rows * (k / 64) * 4), try buf(g.device, 2 * parts * rows * r * 2), try buf(g.device, slots * 2 * r * 2), try buf(g.device, 2 * slots * r * 2), try buf(g.device, slots * k * 2), try buf(g.device, (parts + 1) * slots * r * 2) };
+    defer for (bs) |b| b.deinit();
+    const sums = ref(bs[0]);
+    var gate = m.q;
+    gate.n = @intCast(r);
+    var upq = up.q;
+    upq.n = @intCast(r);
+    // every expert's gate and up, dense on every x row: [2][parts][rows, r]
+    for (0..parts) |e| for ([2]Mat{ m, up }, 0..) |w, j| {
+        try g.run(mmDense, .{ mm, w.part(e, parts), ref(m.x()), sums, ref(bs[1]).at(((j * parts + e) * rows * r) * 2), @as(u32, rows) });
+    };
+    const dg = bs[1].slice(u16, 2 * parts * rows * r);
+    const gu = bs[2].slice(u16, slots * 2 * r);
+    for (order, 0..) |o, i| {
+        const e: usize = @intCast(picks[@intCast(o)]);
+        const xr: usize = @as(usize, @intCast(o)) / repeat;
+        for (0..2) |j| @memcpy(gu[(2 * i + j) * r ..][0..r], dg[((j * parts + e) * rows + xr) * r ..][0..r]);
+    }
+    const act = ref(bs[3]);
+    try g.run(mmGlu, .{ mm, gate, upq, ref(m.x()), sums, sorted, act, [4]u32{ rows, slots, parts, repeat }, lim });
+    try g.run(swiglu, .{ g.swiglu, ref(bs[2]), act.at(slots * r * 2), @as(u32, slots), @as(u32, @intCast(r)), lim });
+    const both = bs[3].slice(u16, 2 * slots * r);
+    try eql(both[0 .. slots * r], both[slots * r ..]);
+    // the down: sorted pair i's input (x row order[i]) into row order[i], == its expert's dense product of that row
+    const xs = bs[4].slice(u16, slots * k);
+    for (order, 0..) |o, i| @memcpy(xs[i * k ..][0..k], m.x().slice(u16, rows * k)[@as(usize, @intCast(o)) * k ..][0..k]);
+    const y = bs[5].slice(u16, (parts + 1) * slots * r);
+    try g.run(mmDown, .{ mm, gate, ref(bs[4]), sums, sorted, ref(bs[5]), @as(u32, slots), @as(u32, parts) });
+    for (0..parts) |e| try g.run(mmDense, .{ mm, m.part(e, parts), ref(bs[4]), sums, ref(bs[5]).at((1 + e) * slots * r * 2), @as(u32, slots) });
+    for (order, 0..) |o, i| {
+        const e: usize = @intCast(picks[@intCast(o)]);
+        try eql(y[@as(usize, @intCast(o)) * r ..][0..r], y[((1 + e) * slots + i) * r ..][0..r]);
+    }
+    t.pairs += 2 * slots * r;
+}
+
 /// A split stack (a run a member, each its width) in one call, at the decode's and the prompt's pitch == each alone.
 fn splitCheck(g: *const Gpu, k: usize, ns: []const usize, bits: []const u8, t: *Tally) !void {
     var ms: [affine.max_runs]Mat = undefined;
@@ -369,6 +447,7 @@ pub fn main() !void {
             const up = try Mat.init(device, s[0], s[1], bits, group, 78 + 1000 * @as(u64, bits) + si);
             defer up.deinit();
             try partsCheck(&g, m, up, &t);
+            if (bits == 2) try gatherCheck(&g, m, up, &t); // the prompt's 2/64 experts on affine_mm
         };
         std.debug.print("q{d} g{d}: {d} values vs fp64, worst err/bound {d:.4}; {d} bit-equal pairs (windows, strides, heads, picks, sorted, core)\n", .{ bits, group, t.values, t.worst, t.pairs });
         all.values += t.values;
