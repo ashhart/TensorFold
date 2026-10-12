@@ -79,6 +79,15 @@ pub const Prompt = struct {
     h: mtl.Buffer,
     x: mtl.Buffer,
     rot: mtl.Buffer,
+    proj: mtl.Buffer,
+    q_resid: mtl.Buffer,
+    qq: mtl.Buffer,
+    qidx: mtl.Buffer,
+    olat: mtl.Buffer,
+    o: mtl.Buffer,
+    keys: mtl.Buffer,
+    score: mtl.Buffer,
+    logits: mtl.Buffer,
     rows: mtl.Buffer,
     ids: mtl.Buffer,
     /// The MTP head's rows and tokens over the same window (one command buffer runs both).
@@ -103,8 +112,9 @@ pub const Prompt = struct {
     tiles: u32,
     gu_cap: u32,
 
-    pub fn init(device: mtl.Device, c: *const cfg.Config) !Prompt {
+    pub fn init(device: mtl.Device, c: *const cfg.Config, context: u32) !Prompt {
         const P: usize = prompt_rows;
+        const nh: usize = c.localHeads();
         const S = P * slots;
         const loc: usize = c.localHalves() * 128;
         // each picked expert's rows in tiles of 32: at most a tile an expert plus one a 32 picks (the shared one's too)
@@ -114,7 +124,10 @@ pub const Prompt = struct {
         q.tiles = tiles;
         q.gu_cap = cap;
         const sizes = .{
-            .{ &q.h, P * c.hidden * 4 },                                  .{ &q.x, P * c.hidden * 4 },   .{ &q.rot, P * c.hidden * 4 },
+            .{ &q.h, P * c.hidden * 4 },                                  .{ &q.x, P * c.hidden * 4 },   .{ &q.rot, P * 16384 * 4 },
+            .{ &q.proj, P * 2784 * 4 },                                   .{ &q.q_resid, P * c.q_lora * 4 }, .{ &q.qq, P * nh * c.qHead() * 4 },
+            .{ &q.qidx, P * c.i_heads * c.i_dim * 4 },                    .{ &q.olat, P * nh * c.kv_lora * 4 }, .{ &q.o, P * nh * c.v_dim * 4 },
+            .{ &q.keys, P * c.i_topk * 4 },                               .{ &q.score, P * @as(usize, context) * 4 }, .{ &q.logits, P * c.experts * 4 },
             .{ &q.rows, P * @sizeOf(kn.Row) },                            .{ &q.ids, P * 4 },            .{ &q.pick, P * c.topk * 4 },
             .{ &q.rows_mtp, P * @sizeOf(kn.Row) },                        .{ &q.ids_mtp, P * 4 },        .{ &q.picks, P * 4 },
             .{ &q.idx, P * 4 },

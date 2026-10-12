@@ -4,7 +4,7 @@ const mtl = @import("metal");
 const ex = @import("../../core/exlr8.zig");
 const op = @import("../../core/exlr8_projection.zig");
 const dg = @import("../../core/exlr8_dense_gpu.zig");
-const pp = @import("../../core/exlr8_prompt.zig");
+pub const pp = @import("../../core/exlr8_prompt.zig");
 const cfg = @import("config.zig");
 const kn = @import("kernels.zig");
 const gpu = @import("gpu.zig");
@@ -234,26 +234,4 @@ pub fn expertsGpu(K: *const Kernels, L: *const Layer, s: *const gpu.Scratch, e: 
     try op.encodeProjectIndirect(&K.op, e, ref(s.arot), td, ref(s.z), rows, loc, hid, true, ref(s.members), .{ .buf = s.dispatch, .off = 16 });
     e.barrier();
     try op.encodeCombine(&K.op, e, ref(s.z), ref(s.wts), ref(s.sv), L.k.halves, L.k.signs, out, .{ .rows = rows, .slots = gpu.slots, .z_stride = gpu.slots * hid, .y_stride = hid, .y_f32 = 1, .sign = m.signs + hid, .z_slot = hid, .per_row = 1 }, hid / 128);
-}
-
-/// A prompt window's experts of normed rows `x` into `out` from q's picks: tiles decoded once for 32 rows (bf16 rows).
-pub fn expertsPrompt(K: *const Kernels, L: *const Layer, q: *const gpu.Prompt, e: mtl.ComputeEncoder, c: *const cfg.Config, rows: u32, x: Ref, out: Ref) !void {
-    const m = L.w.mlp.moe;
-    const hid = c.hidden;
-    const loc = c.localHalves() * 128;
-    kn.moeJobsPrompt(&K.k, e, ref(q.pick), ref(q.wts8), .{ .buf = L.desc.? }, .{ .rows = rows, .halves = c.localHalves(), .topk = c.topk, .slots = gpu.slots, .gu_cap = q.gu_cap, .experts = c.experts }, ref(q.jobs), ref(q.members), ref(q.wts), ref(q.sv), ref(q.suh), ref(q.dispatch));
-    try op.encodeRotate(&K.op, e, x, L.k.signs, L.k.halves, ref(q.rot), .{ .rows = rows, .x_stride = hid, .x_f32 = 1, .r_stride = hid, .sign = m.signs }, hid / 128, 1, null);
-    e.barrier();
-    const t: op.Tables = .{ .weights = L.k.bytes, .bases = L.k.bases, .halves = L.k.halves, .signs = L.k.signs, .jobs = q.jobs, .count = 0 };
-    pp.encodeIndirect(&K.pp, e, ref(q.rot), t, ref(q.gu), hid, 2 * loc, true, ref(q.members), ref(q.dispatch));
-    e.barrier();
-    kn.siluMul(&K.k, e, ref(q.gu), .{ .width = loc, .x_stride = 2 * loc, .y_stride = loc }, ref(q.act), rows * gpu.slots);
-    e.barrier();
-    try op.encodeRotate(&K.op, e, ref(q.act), L.k.signs, L.k.halves, ref(q.arot), .{ .rows = rows, .x_stride = gpu.slots * loc, .x_f32 = 1, .r_stride = gpu.slots * loc, .slot_cols = loc, .scales = 1, .row_slots = gpu.slots }, loc / 128, gpu.slots, ref(q.suh));
-    e.barrier();
-    var td = t;
-    td.jobs_off = @as(usize, q.gu_cap) * @sizeOf(ex.job.Job);
-    pp.encodeIndirect(&K.pp, e, ref(q.arot), td, ref(q.z), loc, hid, true, ref(q.members), .{ .buf = q.dispatch, .off = 16 });
-    e.barrier();
-    try op.encodeCombine(&K.op, e, ref(q.z), ref(q.wts), ref(q.sv), L.k.halves, L.k.signs, out, .{ .rows = rows, .slots = gpu.slots, .z_stride = gpu.slots * hid, .y_stride = hid, .y_f32 = 1, .sign = m.signs + hid, .z_slot = hid, .per_row = 1 }, hid / 128);
 }

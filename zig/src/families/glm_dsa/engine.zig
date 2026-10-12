@@ -73,7 +73,7 @@ pub const Engine = struct {
         e.context = context;
         e.m = try md.Model.load(gpa, io, e.device, dir, c, layers orelse c.layers, mtp, context, streams, e.pair, limit);
         e.s = try gpu.Scratch.init(e.device, &e.m.c, context);
-        e.q = try gpu.Prompt.init(e.device, &e.m.c);
+        e.q = try gpu.Prompt.init(e.device, &e.m.c, context);
         e.slots = try gpa.alloc(Slot, streams);
         for (e.slots) |*s| s.* = .{};
         for (&e.pass) |*p| p.* = .{ .ids = try buf(e.device, R * 4), .rows = try buf(e.device, R * @sizeOf(kn.Row)), .picks = try buf(e.device, R * 4), .idx = try buf(e.device, R * 4) };
@@ -159,7 +159,7 @@ pub const Engine = struct {
         const toks = s.prompt.items;
         const q = &e.q;
         @memcpy(u32s(q.ids, n), toks[at..][0..n]);
-        for (q.rows.slice(kn.Row, n), 0..) |*row, r| row.* = .{ .slot = i, .pos = at + @as(u32, @intCast(r)), .list = @intCast((r % R) * e.m.c.i_topk) };
+        for (q.rows.slice(kn.Row, n), 0..) |*row, r| row.* = .{ .slot = i, .pos = at + @as(u32, @intCast(r)), .list = @intCast(r * e.m.c.i_topk) };
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = e.queue.commandBuffer();
@@ -178,7 +178,7 @@ pub const Engine = struct {
             for (0..mr) |r| {
                 const pos: u32 = at - carry + @as(u32, @intCast(r));
                 u32s(q.ids_mtp, gpu.prompt_rows)[r] = toks[pos + 1];
-                q.rows_mtp.slice(kn.Row, gpu.prompt_rows)[r] = .{ .slot = i, .pos = pos, .list = @intCast((r % R) * e.m.c.i_topk) };
+                q.rows_mtp.slice(kn.Row, gpu.prompt_rows)[r] = .{ .slot = i, .pos = pos, .list = @intCast(r * e.m.c.i_topk) };
             }
             u32s(e.pass[1].idx, 1)[0] = 2 * R + i;
             if (carry == 1) kn.gather(&e.m.K.k, enc, .{ .buf = e.xs }, .{ .buf = e.pass[1].idx }, hid, hid, hid, .{ .buf = e.m.head.prev }, 1);

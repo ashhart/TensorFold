@@ -4,6 +4,7 @@ pub const weights = @import("weights.zig");
 pub const kernels = @import("kernels.zig");
 pub const gpu = @import("gpu.zig");
 pub const layer = @import("layer.zig");
+pub const layer_prompt = @import("layer_prompt.zig");
 pub const moe = @import("moe.zig");
 pub const model = @import("model.zig");
 pub const engine = @import("engine.zig");

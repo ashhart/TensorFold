@@ -1,19 +1,12 @@
-//! A prompt window on the pair: attention 16 rows at a time, then every expert once for all of the window's rows.
+//! A prompt window on the pair: every layer's projections and experts for all of the window's rows at once.
 const mtl = @import("metal");
 const kn = @import("kernels.zig");
 const gpu = @import("gpu.zig");
 const ly = @import("layer.zig");
+const lp = @import("layer_prompt.zig");
 const Model = @import("model.zig").Model;
 const Ref = kn.Ref;
 const R = gpu.max_rows;
-
-/// The window's 16-row parts: part k's rows table entries and its rows' offsets.
-fn part(s: *const gpu.Scratch, table: mtl.Buffer, k: u32) gpu.Scratch {
-    var sk = s.*;
-    sk.rows = table;
-    sk.rows_off = @as(usize, k) * @sizeOf(kn.Row);
-    return sk;
-}
 
 fn at(b: mtl.Buffer, row: u32, width: u32) Ref {
     return .{ .buf = b, .off = @as(usize, row) * width * 4 };
@@ -23,27 +16,15 @@ fn at(b: mtl.Buffer, row: u32, width: u32) Ref {
 fn layer(m: *Model, L: *const ly.Layer, s: *const gpu.Scratch, q: *const gpu.Prompt, e: mtl.ComputeEncoder, rows: u32, pos0: u32, table: mtl.Buffer, next: Ref) !void {
     const p = m.pair;
     const hid = m.c.hidden;
-    const a = p.part();
-    var k: u32 = 0;
-    while (k < rows) : (k += R) {
-        const n = @min(R, rows - k);
-        const sk = part(s, table, k);
-        try ly.attention(&m.K, L, &sk, e, &m.c, n, pos0 + k + n - 1, null, at(q.x, k, hid), .{ .buf = a.buf, .off = a.off + @as(usize, k) * hid * 4 });
-        e.barrier();
-    }
+    try lp.attention(&m.K, L, s, q, e, &m.c, rows, pos0, table, .{ .buf = q.x }, p.part());
+    e.barrier();
     p.addRms(e, .{ .buf = q.h }, L.k.at(L.w.post_norm), .{ .buf = q.x }, rows, hid, m.c.eps);
     e.barrier();
     const o = p.part();
-    k = 0;
-    while (k < rows) : (k += R) {
-        const n = @min(R, rows - k);
-        const out: Ref = .{ .buf = o.buf, .off = o.off + @as(usize, k) * hid * 4 };
-        if (L.w.mlp == .moe) {
-            try ly.route(&m.K, L, s, e, &m.c, n, at(q.x, k, hid), at(q.pick, k, m.c.topk), at(q.wts8, k, m.c.topk));
-        } else try ly.denseMlp(&m.K, L, s, e, &m.c, n, at(q.x, k, hid), out);
-        e.barrier();
-    }
-    if (L.w.mlp == .moe) try ly.expertsPrompt(&m.K, L, q, e, &m.c, rows, .{ .buf = q.x }, o);
+    if (L.w.mlp == .moe) {
+        try lp.route(&m.K, L, s, q, e, &m.c, rows, .{ .buf = q.x });
+        try lp.experts(&m.K, L, q, e, &m.c, rows, .{ .buf = q.x }, o);
+    } else try lp.denseMlp(&m.K, L, q, e, &m.c, rows, .{ .buf = q.x }, o);
     e.barrier();
     p.addRms(e, .{ .buf = q.h }, next, .{ .buf = q.x }, rows, hid, m.c.eps);
     e.barrier();
@@ -75,12 +56,8 @@ pub fn draft(m: *Model, s: *const gpu.Scratch, q: *const gpu.Prompt, e: mtl.Comp
     kn.addRms(&m.K.k, e, .{ .buf = q.h }, .{ .buf = q.h }, L.k.at(t.enorm), m.glue(hid, 2 * hid), .{ .buf = m.head.cat }, rows);
     kn.addRms(&m.K.k, e, .{ .buf = m.head.prev }, .{ .buf = q.h }, L.k.at(t.hnorm), m.glue(hid, 2 * hid), .{ .buf = m.head.cat, .off = hid * 4 }, rows);
     e.barrier();
-    var k: u32 = 0;
-    while (k < rows) : (k += R) {
-        const n = @min(R, rows - k);
-        try ly.linear(&m.K, L, e, t.eh, L.groups[ly.Layer.eh_g], at(m.head.cat, k, 2 * hid), 2 * hid, .{ .buf = s.rot }, at(q.h, k, hid), hid, n);
-        e.barrier();
-    }
+    try lp.linear(&m.K, L, e, t.eh, L.groups[ly.Layer.eh_g], .{ .buf = m.head.cat }, 2 * hid, .{ .buf = q.rot }, .{ .buf = q.h }, hid, rows);
+    e.barrier();
     kn.addRms(&m.K.k, e, .{ .buf = q.h }, .{ .buf = q.h }, L.k.at(L.w.in_norm), m.glue(hid, hid), .{ .buf = q.x }, rows);
     e.barrier();
     try layer(m, L, s, q, e, rows, pos0, q.rows_mtp, L.k.at(t.head_norm));

@@ -12,12 +12,13 @@ kernel void tf_exlr8_prompt(const device float* X [[buffer(0)]], const device uc
                             constant TfExlr8Rows& a [[buffer(6)]], device uchar* Y [[buffer(7)]],
                             const device uint* members [[buffer(8)]], uint sg [[simdgroup_index_in_threadgroup]],
                             uint lane [[thread_index_in_simdgroup]], uint tid [[thread_index_in_threadgroup]],
-                            uint job [[threadgroup_position_in_grid]]) {
+                            uint2 tg [[threadgroup_position_in_grid]]) {
   threadgroup bfloat xs[TF_PR * TF_PLD];
   threadgroup bfloat ws[8 * 16 * TF_WLD];
   threadgroup float zs[TF_PR * 128];
-  const TfExlr8Job j = jobs[job];
-  const uint rows = min(j.count ? j.count : a.rows, uint(TF_PR));
+  // member jobs map their rows; others take rows [32 tg.y, +32) of the window
+  const TfExlr8Job j = jobs[tg.x];
+  const uint row0 = j.count ? 0u : TF_PR * tg.y, rows = min(j.count ? j.count : a.rows - row0, uint(TF_PR));
   const short2 home = tfp::frag_home(ushort(lane));
   threadgroup bfloat* w16 = ws + sg * 16 * TF_WLD;
   tfp::frag<float> total[2] = {tfp::frag<float>(0.0f), tfp::frag<float>(0.0f)};
@@ -25,7 +26,7 @@ kernel void tf_exlr8_prompt(const device float* X [[buffer(0)]], const device uc
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint i = tid; i < TF_PR * 128; i += 256) {
       const uint rr = i / 128;
-      const ulong xr = j.count ? members[j.members + rr] >> 16 : rr;
+      const ulong xr = j.count ? members[j.members + rr] >> 16 : row0 + rr;
       xs[rr * TF_PLD + i % 128] = rr < rows ? bfloat(X[xr * a.x_stride + j.x_col + ib * 128 + i % 128]) : bfloat(0.0f);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -65,7 +66,7 @@ kernel void tf_exlr8_prompt(const device float* X [[buffer(0)]], const device uc
   for (uint i = sg; i < rows; i += 8) {
     float v[4];
     for (uint q = 0; q < 4; ++q) v[q] = zs[i * 128 + lane + 32 * q];
-    const ulong row = ulong(j.count ? members[j.members + i] & 0xFFFFu : i) * a.y_stride + j.y_col;
+    const ulong row = ulong(j.count ? members[j.members + i] & 0xFFFFu : row0 + i) * a.y_stride + j.y_col;
     if (j.raw) {
       for (uint q = 0; q < 4; ++q) reinterpret_cast<device float*>(Y)[row + lane + 32 * q] = v[q];
       continue;

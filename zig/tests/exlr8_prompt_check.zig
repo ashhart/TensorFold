@@ -54,7 +54,7 @@ fn lane16(c: Ctx, e: mtl.ComputeEncoder) !void {
 fn prompt(c: Ctx, e: mtl.ComputeEncoder) !void {
     var t = c.t;
     t.jobs_off = 2 * t.count * @sizeOf(op.Job);
-    try pp.encode(c.Q, e, .{ .buf = c.x }, t, .{ .buf = c.y }, 6144, c.width, true, .{ .buf = c.members });
+    try pp.encode(c.Q, e, .{ .buf = c.x }, t, .{ .buf = c.y }, 32, 6144, c.width, true, .{ .buf = c.members });
 }
 
 pub fn main(init: std.process.Init) !void {
