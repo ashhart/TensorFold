@@ -100,13 +100,6 @@ extern "kernel32" fn MoveFileExW(from: [*:0]const u16, to: [*:0]const u16, flags
 extern "kernel32" fn FindFirstFileW(pattern: [*:0]const u16, data: *FindData) callconv(.winapi) isize;
 extern "kernel32" fn FindNextFileW(h: HANDLE, data: *FindData) callconv(.winapi) BOOL;
 extern "kernel32" fn FindClose(h: HANDLE) callconv(.winapi) BOOL;
-extern "kernel32" fn QueryPerformanceCounter(count: *i64) callconv(.winapi) BOOL;
-extern "kernel32" fn QueryPerformanceFrequency(freq: *i64) callconv(.winapi) BOOL;
-extern "kernel32" fn GetSystemTimePreciseAsFileTime(t: *FILETIME) callconv(.winapi) void;
-extern "kernel32" fn CreateWaitableTimerExW(security: ?*anyopaque, name: ?[*:0]const u16, flags: u32, access: u32) callconv(.winapi) ?HANDLE;
-extern "kernel32" fn SetWaitableTimer(h: HANDLE, due: *const i64, period: i32, routine: ?*anyopaque, arg: ?*anyopaque, resume_: BOOL) callconv(.winapi) BOOL;
-extern "kernel32" fn WaitForSingleObject(h: HANDLE, ms: u32) callconv(.winapi) u32;
-extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
 extern "kernel32" fn GetDiskFreeSpaceExW(dir: [*:0]const u16, avail: ?*u64, total: ?*u64, free: ?*u64) callconv(.winapi) BOOL;
 extern "kernel32" fn GetTempPathW(len: u32, buf: [*]u16) callconv(.winapi) u32;
 extern "kernel32" fn GetModuleFileNameW(module: ?HANDLE, buf: [*]u16, len: u32) callconv(.winapi) u32;
@@ -127,10 +120,8 @@ extern "c" fn _wunlink(path: [*:0]const u16) c_int;
 extern "c" fn _wrmdir(path: [*:0]const u16) c_int;
 extern "c" fn _wmkdir(path: [*:0]const u16) c_int;
 extern "c" fn _waccess(path: [*:0]const u16, mode: c_int) c_int;
-extern "c" fn _getpid() c_int;
 extern "c" fn _isatty(fd: c_int) c_int;
 extern "c" fn _fstat64(fd: c_int, st: *Stat64) c_int;
-extern "c" fn _putenv_s(name: [*:0]const u8, value: [*:0]const u8) c_int;
 const ucrt = struct {
     extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 };
@@ -150,8 +141,8 @@ pub extern "c" fn malloc(n: usize) ?*anyopaque;
 /// The UCRT's struct _stat64.
 const Stat64 = extern struct { dev: u32, ino: u16, mode: u16, nlink: i16, uid: i16, gid: i16, rdev: u32, size: i64, atime: i64, mtime: i64, ctime: i64 };
 
-fn fail(e: E) c_int {
-    _errno().* = @intFromEnum(e);
+pub fn fail(e: E) c_int {
+    _errno().* = @backingInt(e);
     return -1;
 }
 
@@ -272,10 +263,10 @@ fn openFile(path: [*:0]const u8, flags: O) c_int {
         .RDWR => generic_read | generic_write,
     };
     const disposition: u32 = if (flags.CREAT and flags.EXCL) 1 // CREATE_NEW
-    else if (flags.CREAT and flags.TRUNC) 2 // CREATE_ALWAYS
-    else if (flags.CREAT) 4 // OPEN_ALWAYS
-    else if (flags.TRUNC) 5 // TRUNCATE_EXISTING
-    else 3; // OPEN_EXISTING
+        else if (flags.CREAT and flags.TRUNC) 2 // CREATE_ALWAYS
+        else if (flags.CREAT) 4 // OPEN_ALWAYS
+        else if (flags.TRUNC) 5 // TRUNCATE_EXISTING
+        else 3; // OPEN_EXISTING
     var attrs: u32 = 0x80; // FILE_ATTRIBUTE_NORMAL
     if (flags.DIRECT) attrs |= 0x2000_0000; // FILE_FLAG_NO_BUFFERING
     const h = CreateFileW(w, rights, 0x7, null, disposition, attrs, null); // share read, write and delete
@@ -368,7 +359,7 @@ pub fn fsync(fd: fd_t) c_int {
 
 pub fn ftruncate(fd: fd_t, size: off_t) c_int {
     const rc = _chsize_s(fd, size);
-    if (rc != 0) return fail(@enumFromInt(rc));
+    if (rc != 0) return fail(@fromBackingInt(@intCast(rc)));
     return 0;
 }
 
@@ -517,70 +508,16 @@ pub fn closedir(d: *DIR) c_int {
     return 0;
 }
 
-// ---- process, environment, time ----
+// ---- process, environment, time: win_clock.zig ----
 
-pub fn getpid() pid_t {
-    return _getpid();
-}
-
-pub fn getuid() u32 {
-    return 0;
-}
-
-pub fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int {
-    if (overwrite == 0 and getenv(name) != null) return 0;
-    if (_putenv_s(name, value) != 0) return fail(.INVAL);
-    return 0;
-}
-
-pub fn unsetenv(name: [*:0]const u8) c_int {
-    if (_putenv_s(name, "") != 0) return fail(.INVAL);
-    return 0;
-}
-
-threadlocal var sleep_timer: ?HANDLE = null;
-
-/// High-resolution waitable timer per thread, so microsecond waits are not rounded to the 15.6 ms tick.
-pub fn nanosleep(req: *const timespec, rem: ?*timespec) c_int {
-    if (rem) |r| r.* = .{ .sec = 0, .nsec = 0 };
-    const ns: i64 = req.sec * std.time.ns_per_s + req.nsec;
-    if (ns <= 0) return 0;
-    if (sleep_timer == null) sleep_timer = CreateWaitableTimerExW(null, null, 0x2, 0x1F0003); // HIGH_RESOLUTION, TIMER_ALL_ACCESS
-    if (sleep_timer) |t| {
-        const due: i64 = -@divFloor(ns + 99, 100); // relative, in 100 ns units
-        if (SetWaitableTimer(t, &due, 0, null, null, 0) != 0) {
-            _ = WaitForSingleObject(t, 0xFFFF_FFFF);
-            return 0;
-        }
-    }
-    Sleep(@intCast(@max(1, @divFloor(ns + std.time.ns_per_ms - 1, std.time.ns_per_ms))));
-    return 0;
-}
-
-pub fn clock_gettime(clock: c_int, out: *timespec) c_int {
-    if (clock == CLOCK.MONOTONIC) {
-        var count: i64 = 0;
-        var freq: i64 = 0;
-        _ = QueryPerformanceCounter(&count);
-        _ = QueryPerformanceFrequency(&freq);
-        out.* = .{ .sec = @divFloor(count, freq), .nsec = @intCast(@divFloor(@mod(count, freq) * std.time.ns_per_s, freq)) };
-        return 0;
-    }
-    var ft: FILETIME = undefined;
-    GetSystemTimePreciseAsFileTime(&ft);
-    const since_1601: i64 = @intCast((@as(u64, ft.high) << 32) | ft.low);
-    const unix = since_1601 - 116_444_736_000_000_000;
-    out.* = .{ .sec = @divFloor(unix, 10_000_000), .nsec = @intCast(@mod(unix, 10_000_000) * 100) };
-    return 0;
-}
-
-pub fn gettimeofday(tv: *timeval, tz: ?*anyopaque) c_int {
-    _ = tz;
-    var ts: timespec = undefined;
-    _ = clock_gettime(CLOCK.REALTIME, &ts);
-    tv.* = .{ .sec = ts.sec, .usec = @intCast(@divFloor(ts.nsec, 1000)) };
-    return 0;
-}
+const clock = @import("win_clock.zig");
+pub const getpid = clock.getpid;
+pub const getuid = clock.getuid;
+pub const setenv = clock.setenv;
+pub const unsetenv = clock.unsetenv;
+pub const nanosleep = clock.nanosleep;
+pub const clock_gettime = clock.clock_gettime;
+pub const gettimeofday = clock.gettimeofday;
 
 /// Bytes free to this user under `dir` (statvfs's bavail * frsize).
 pub fn diskAvailable(dir: [*:0]const u8) ?u64 {
