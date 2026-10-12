@@ -79,6 +79,29 @@ pub const Half = struct {
 
 const Side = struct { index: st.Tensor, checksum: st.Tensor, block: [3]st.Tensor, chan: [3]st.Tensor };
 
+/// A half's place in its width file and what its checksum covers after the trellis bytes: chan, then block.
+pub const Entry = struct {
+    off: usize,
+    len: usize,
+    chan: []const u8,
+    block: []const u8,
+    checksum: u64,
+
+    /// xxhash64 seed 0 of `trellis` (the half's bytes), its 128 channel values, then its 48 block scales.
+    pub fn verify(en: Entry, trellis: []const u8) bool {
+        var x = xxh.Hasher.init(0);
+        x.update(trellis);
+        x.update(en.chan);
+        x.update(en.block);
+        return x.final() == en.checksum;
+    }
+};
+
+/// experts/exlr8-layer-LLL.kK.safetensors under `root`.
+pub fn widthPath(gpa: std.mem.Allocator, root: []const u8, number: u16, k: u8) ![]u8 {
+    return std.fmt.allocPrint(gpa, "{s}/experts/exlr8-layer-{d:0>3}.k{d}.safetensors", .{ root, number, k });
+}
+
 pub const Layer = struct {
     number: u16,
     index: st.File,
@@ -90,14 +113,24 @@ pub const Layer = struct {
 
     /// experts/exlr8-layer-LLL.index.safetensors and the trellis files of every width it names.
     pub fn open(gpa: std.mem.Allocator, io: Io, root: []const u8, number: u16) !Layer {
-        var name_buf: [64]u8 = undefined;
-        const base = try std.fmt.bufPrint(&name_buf, "exlr8-layer-{d:0>3}", .{number});
-        const path = try std.fmt.allocPrint(gpa, "{s}/experts/{s}.index.safetensors", .{ root, base });
+        var l = try openIndex(gpa, io, root, number);
+        errdefer l.close(io);
+        for (2..5) |k| if (l.widths[k] or l.shared_widths[k]) {
+            const tp = try widthPath(gpa, root, number, @intCast(k));
+            defer gpa.free(tp);
+            // A node may hold only the widths its manifest or rank needs: a missing file is a width it cannot load.
+            l.files[k] = st.File.open(gpa, io, tp) catch |e| if (e == error.FileNotFound) null else return e;
+        };
+        return l;
+    }
+
+    /// The index alone: offsets, side data and checksums, for a node that plans what to fetch.
+    pub fn openIndex(gpa: std.mem.Allocator, io: Io, root: []const u8, number: u16) !Layer {
+        const path = try std.fmt.allocPrint(gpa, "{s}/experts/exlr8-layer-{d:0>3}.index.safetensors", .{ root, number });
         defer gpa.free(path);
         var index = try st.File.open(gpa, io, path);
         errdefer index.close(io);
         var l: Layer = .{ .number = number, .index = index, .signs_in = try signs(&index, "signs.in"), .signs_out = try signs(&index, "signs.out") };
-        errdefer for (&l.files) |*f| if (f.*) |*file| file.close(io);
         var arena = std.heap.ArenaAllocator.init(gpa);
         defer arena.deinit();
         const meta = try metadata(arena.allocator(), &index);
@@ -105,12 +138,6 @@ pub const Layer = struct {
             return error.NotExlr8Index;
         try parseWidths(meta.get("widths") orelse return error.NotExlr8Index, &l.widths);
         try parseWidths(meta.get("shared_widths") orelse "", &l.shared_widths);
-        for (2..5) |k| if (l.widths[k] or l.shared_widths[k]) {
-            const tp = try std.fmt.allocPrint(gpa, "{s}/experts/{s}.k{d}.safetensors", .{ root, base, k });
-            defer gpa.free(tp);
-            // A node may hold only the widths its manifest or rank needs: a missing file is a width it cannot load.
-            l.files[k] = st.File.open(gpa, io, tp) catch |e| if (e == error.FileNotFound) null else return e;
-        };
         return l;
     }
 
@@ -148,27 +175,39 @@ pub const Layer = struct {
         return if (expert == shared) l.shared_widths[k] else l.widths[k];
     }
 
-    /// Half h of projection p of an expert (0-255, or `shared`) at width k.
-    pub fn half(l: *const Layer, expert: u16, proj: Proj, h: usize, k: u8) !Half {
+    /// Where half h of projection p of an expert (0-255, or `shared`) sits at width k, from the index alone.
+    pub fn entry(l: *const Layer, expert: u16, proj: Proj, h: usize, k: u8) !Entry {
         if (h >= halves or expert > shared) return error.BadExlr8Half;
         if (!l.stored(expert, k)) return error.WidthNotStored;
-        const file: *const st.File = &(l.files[k] orelse return error.WidthFileMissing);
         const s = try l.side(expert, k);
         const e: usize = if (expert == shared) 0 else expert;
         const p = @backingInt(proj);
         const at = ((e * 3 + p) * halves + h);
         const off = std.math.cast(usize, std.mem.readInt(i64, s.index.bytes[at * 16 ..][0..8], .little)) orelse return error.BadExlr8Offset;
         const len = std.math.cast(usize, std.mem.readInt(i64, s.index.bytes[at * 16 + 8 ..][0..8], .little)) orelse return error.BadExlr8Offset;
-        if (off < file.data or off > file.map.memory.len or len != halfBytes(k) or len > file.map.memory.len - off)
-            return error.BadExlr8Offset;
+        if (len != halfBytes(k)) return error.BadExlr8Offset;
+        return .{
+            .off = off,
+            .len = len,
+            .chan = s.chan[p].bytes[(e * 2048 + 128 * h) * 2 ..][0..256],
+            .block = s.block[p].bytes[e * 96 ..][0..96],
+            .checksum = std.mem.readInt(u64, s.checksum.bytes[at * 8 ..][0..8], .little),
+        };
+    }
+
+    /// Half h of projection p of an expert (0-255, or `shared`) at width k.
+    pub fn half(l: *const Layer, expert: u16, proj: Proj, h: usize, k: u8) !Half {
+        const en = try l.entry(expert, proj, h, k);
+        const file: *const st.File = &(l.files[k] orelse return error.WidthFileMissing);
+        if (en.off < file.data or en.off > file.map.memory.len or en.len > file.map.memory.len - en.off) return error.BadExlr8Offset;
         return .{
             .k = k,
             .proj = proj,
-            .trellis = file.map.memory[off..][0..len],
-            .chan = std.mem.bytesAsSlice(f16, s.chan[p].bytes[(e * 2048 + 128 * h) * 2 ..][0..256]),
-            .block = std.mem.bytesAsSlice(f16, s.block[p].bytes[e * 96 ..][0..96]),
+            .trellis = file.map.memory[en.off..][0..en.len],
+            .chan = std.mem.bytesAsSlice(f16, en.chan),
+            .block = std.mem.bytesAsSlice(f16, en.block),
             .signs = if (proj == .down) l.signs_out else l.signs_in,
-            .checksum = std.mem.readInt(u64, s.checksum.bytes[at * 8 ..][0..8], .little),
+            .checksum = en.checksum,
         };
     }
 };

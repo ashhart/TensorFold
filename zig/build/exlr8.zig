@@ -1,5 +1,10 @@
 const std = @import("std");
 
+/// The EXLR8 core as the checkpoint CLI imports it (node pulls read manifests and the index), from `core`'s copy.
+pub fn cliImport(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) std.Build.Module.Import {
+    return .{ .name = "exlr8", .module = coreAlias(b, target, optimize, core) };
+}
+
 /// EXLR8's host tests: the reader and decoder against the reference loader's fixtures (TF_EXLR8_DIR adds the layers).
 pub fn hostTests(b: *std.Build, target: std.Build.ResolvedTarget, host_tests: *std.Build.Step) void {
     const tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -55,7 +60,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 /// The `exlr8` module where core/root.zig already holds the decoder (the CUDA side): its parts re-exported by name.
 pub fn coreAlias(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) *std.Build.Module {
     var text: []const u8 = "const e = @import(\"core\").exlr8;\n";
-    for ([_][]const u8{ "codec", "experts", "dense", "job", "manifest", "release", "xxhash64" }) |name| text = b.fmt("{s}pub const {s} = e.{s};\n", .{ text, name, name });
+    for ([_][]const u8{ "codec", "experts", "dense", "job", "manifest", "node", "release", "xxhash64" }) |name| text = b.fmt("{s}pub const {s} = e.{s};\n", .{ text, name, name });
     const file = b.addWriteFiles().add("exlr8_alias.zig", text);
     return b.createModule(.{ .root_source_file = file, .target = target, .optimize = optimize, .imports = &.{.{ .name = "core", .module = core }} });
 }
