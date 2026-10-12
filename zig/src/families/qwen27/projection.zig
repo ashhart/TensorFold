@@ -8,7 +8,7 @@ const lane = @import("core").lane_projection;
 pub const Ref = struct { buffer: mtl.Buffer, offset: usize = 0 };
 /// A device matrix; `runs` non-empty means fused members of different widths, each its own product into these rows.
 pub const Linear = struct { words: Ref, pairs: Ref, n: u32, k: u32, tile: u32, slices: u32, raw: ?row.Weights = null, bits: u8 = 4, group: u32 = 64, runs: []const Run = &.{} };
-/// Members of one width inside a fused matrix, writing output columns [first, first + linear.n).
+/// One product inside a mixed fused matrix, writing output columns [first, first + linear.n).
 pub const Run = struct { linear: Linear, first: u32 };
 pub const Triple = struct { weight: checkpoint.Tensor, scales: checkpoint.Tensor, biases: checkpoint.Tensor, bits: u8 = 4, group: u32 = 64 };
 

@@ -154,7 +154,7 @@ pub const Kernels = struct {
         try span.end();
     }
 
-    /// Mixed-width members: each run its own product into its columns, a row a launch so every row count matches.
+    /// A mixed stack: each run its own product into its columns, a row a launch so every row count matches.
     fn quantRuns(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
         if (skip > 0 or cut[1] > 0 or rows == 0 or rows > 128) return error.BadCoreProjectionRows;
         for (p.runs) |run| for (0..rows) |r| {
