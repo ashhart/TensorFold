@@ -180,24 +180,11 @@ fn run(e: *Engine, c: Chosen, r: win.Round) !round_graphs.Out {
     }
 }
 
-const Recording = struct { e: *Engine, r: win.Round };
-
-fn record(ctx: Recording) anyerror!round_graphs.Out {
-    return body(ctx.e, ctx.r);
-}
-
-/// Records the round into a graph and launches it; a capture that fails on any rank runs eagerly on every rank.
+/// Records the round and launches it; a rank that cannot record makes every rank run it eagerly.
 fn capture(e: *Engine, entry: *round_graphs.Entry, r: win.Round) !round_graphs.Out {
-    var kept = false;
-    var out: round_graphs.Out = undefined;
     const at = e.rounds.mark();
     const began = nowNs();
-    if (try round_graphs.Graphs.record(e.stream, Recording{ .e = e, .r = r }, record)) |rec| {
-        out = rec.out;
-        kept = if (e.graphs.keep(entry, rec.graph, e.stream, rec.out)) true else |_| false;
-    }
-    // the policy's `graph_fail` makes that rank's capture fail, to check that every rank falls back
-    if (e.o.policy.graph_fail >= 0 and @as(usize, @intCast(e.o.policy.graph_fail)) == e.o.rank) kept = false;
+    const kept = try record(e, entry, r);
     e.graphs.capture_ns += nowNs() - began;
     const all = if (e.o.world > 1) try agreed(e, kept) else kept;
     if (!all) {
@@ -206,7 +193,30 @@ fn capture(e: *Engine, entry: *round_graphs.Entry, r: win.Round) !round_graphs.O
         return body(e, r);
     }
     try entry.exec.?.launchOn(e.stream);
-    return out;
+    return entry.out;
+}
+
+/// The round recorded into `entry` (nothing runs), its collectives left between the graphs: whether this rank kept it.
+fn record(e: *Engine, entry: *round_graphs.Entry, r: win.Round) !bool {
+    const m = &e.bridge.model;
+    var rec: hip.graph_split.Recorder = .{ .gpa = e.gpa, .stream = e.stream, .inner = m.tp };
+    rec.begin() catch return false;
+    const tp = m.tp;
+    m.tp = rec.comm();
+    const got = body(e, r);
+    m.tp = tp;
+    var split = (try rec.finish()) orelse return false;
+    const out = got catch |err| {
+        split.deinit();
+        return if (err == error.OutOfDeviceMemory) err else false;
+    };
+    // the policy's `graph_fail` makes that rank's capture fail, to check that every rank falls back
+    if (e.o.policy.graph_fail >= 0 and @as(usize, @intCast(e.o.policy.graph_fail)) == e.o.rank) {
+        split.deinit();
+        return false;
+    }
+    e.graphs.hold(entry, split, out);
+    return true;
 }
 
 /// Whether every rank says yes (an all-gather of one word each).
