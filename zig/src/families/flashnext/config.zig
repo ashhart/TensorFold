@@ -54,6 +54,8 @@ pub const Config = struct {
     eos: [16]u32 = @splat(0),
     eos_count: usize = 0,
     global_affine: affine.Spec,
+    /// Set by a tensor reader: each lookup then goes through core/quant, which fills in no missing bits or group.
+    widths: ?*const @import("widths.zig").Widths = null,
 
     pub fn deinit(c: *Config) void {
         c.parsed.deinit();
@@ -94,6 +96,10 @@ pub const Config = struct {
     }
 
     pub fn quantization(c: *const Config, path: []const u8) !?affine.Spec {
+        if (c.widths) |w| {
+            const width = (try w.of(path)) orelse return null;
+            return try affine.Spec.init(width.bits, width.group);
+        }
         const wanted = canonical(path);
         var found = false;
         var answer: ?affine.Spec = c.global_affine;
@@ -113,7 +119,7 @@ pub const Config = struct {
     }
 };
 
-fn canonical(value: []const u8) []const u8 {
+pub fn canonical(value: []const u8) []const u8 {
     var path = if (std.mem.endsWith(u8, value, ".weight")) value[0 .. value.len - 7] else value;
     for ([_][]const u8{ "model.language_model.", "language_model.", "text_model.", "model." }) |prefix| {
         if (std.mem.startsWith(u8, path, prefix)) path = path[prefix.len..];
