@@ -197,7 +197,9 @@ fn sharedRows(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref
     const sc = x.sc;
     const N = c.moe_inter;
     const p = &x.k.wide.?;
-    if (on(x, "s_gateup")) {
+    if (on(x, "s_gateup") and w.sh_gate_up.more == 0) { // gate and up one width: one launch, glm_swiglu's bits
+        wide.glu(p, e, w.sh_gate_up, N, x_in, sc.acts, rows, c.swiglu_limit);
+    } else if (on(x, "s_gateup")) {
         wide.dense(p, e, w.sh_gate_up, .{ .in = x_in, .ldx = c.hidden, .out = sc.gu, .ldo = 2 * N, .rows = rows });
         e.setPipeline(x.k.swiglu);
         bind(e, 0, .{ sc.gu, sc.acts });
