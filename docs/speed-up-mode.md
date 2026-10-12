@@ -8,10 +8,9 @@ Both Macs produce the same reply, and the reply is bit-identical at every draft 
 round and keeps only the ones the model would have produced itself. A reply can still differ from a single Mac's,
 because the two halves of one projection are added in a different order at the same fp32 precision.
 
-Our two-Mac numbers below come from this guide's setup, which replays a recorded dump (step 3). The 1.0.x release
-binary loads Flash Next without a dump, and a user's two M5 Ultras connect and load that way
-([#567](https://github.com/ashhart/TensorFold/issues/567)), but that path has not passed the same gate yet, so follow
-this guide's setup for speed-up mode until it has.
+The server loads Flash Next straight from its checkpoint, with no dump to make and no environment variable to set.
+On our two M5 Ultras, set up as below, `"draft": false` replies equalled drafted ones and both Macs gave the same reply,
+idle and with 36 busy threads on the first Mac.
 
 ## What you need
 
@@ -21,7 +20,7 @@ this guide's setup for speed-up mode until it has.
   cache to fit under that line, about 5 GiB on these Macs. A 192 GB Mac is too small.
 - A Thunderbolt 5 cable straight from one Mac to the other.
 - macOS 26.2 or later, which ships Thunderbolt RDMA. Ours run macOS 27.0.
-- Xcode with its Metal toolchain, Zig 0.17.0, and Python 3.11 or later for the one-time dump below.
+- Xcode with its Metal toolchain and Zig 0.17.0, to build the server.
 
 Macs with less memory, such as 64 GB Mac minis, can't run Flash Next in this mode today, since every Mac holds the whole
 model. One such Mac can serve Nemotron 3.5 Lightning 30B-A3B 4-bit, 17 GiB, on the Zig engine: see
@@ -30,7 +29,7 @@ isn't built.
 
 ## Setup
 
-Do steps 1, 2, 4 and 5 on both Macs. Step 3 runs once.
+Do steps 1 to 4 on both Macs.
 
 ### 1. Build the server
 
@@ -53,31 +52,7 @@ hf download TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP --local-dir ~/models/flas
 
 `hf` comes with `pip install huggingface_hub`.
 
-### 3. Make the dump, once
-
-The Zig engine replays kernels recorded from TensorFold's Python engine, so it needs a dump folder. Make it on one Mac
-and copy the folder, about 6.4 GB, to the same path on the other. The recorder loads the model through the Python
-engine, so it needs Python 3.11 or later and this checkout's Python package with MLX 0.32.2 or 0.32.3, as pinned in
-`pyproject.toml`. It also needs more memory than serving does: the Python engine passed 190 GB on our Macs, so make
-the dump on a Mac with 256 GB. From the checkout, write `prompt.txt` first. It is any request of about 4,000 tokens.
-A long prompt makes the recorder include the long-context kernels. Ours asked for type hints in a Python file.
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
-export TF_FLASH_PLE_KERNELS=1
-M=~/models/flash-next-6bit
-python tools/zig/flashnext_dump.py $M ~/fn-dump-raw --prompt-file prompt.txt --tokens 200 \
-  --windows 2,3,4,5,6,7,8,9,10,11,12,13,14,15,16 --absorb 16
-python tools/zig/flashnext_roles.py ~/fn-dump-raw/plan.json
-python tools/zig/flashnext_export_mlx.py $M ~/fn-dump-raw/pack_mlx.safetensors
-python tools/zig/flashnext_fuse_xsum.py ~/fn-dump-raw ~/fn-dump
-python tools/zig/flashnext_export_mtp.py $M ~/fn-dump/pack_mtp_mlx.safetensors
-```
-
-The server uses `~/fn-dump`.
-
-### 4. Set up MCDMA
+### 3. Set up MCDMA
 
 Follow MCDMA's [README](https://github.com/ashhart/MCDMA) and its
 [fabric guide](https://github.com/ashhart/MCDMA/blob/main/docs/fabric.md) for Thunderbolt links between two Macs. In
@@ -85,7 +60,7 @@ short, enable RDMA from Recovery with `rdma_ctl enable` on both Macs, build the 
 writes `build/rpc/libmcdma-fabric.dylib`, and note each Mac's address on the cable. Thunderbolt port `enN` has the RDMA
 device `rdma_enN`. We run it on two M5 Ultras over Thunderbolt 5 on macOS 27.0, with one cable and with two bonded.
 
-### 5. Write the settings files
+### 4. Write the settings files
 
 Each Mac gets a JSON file with its rank, the MCDMA library and the link to the other Mac. On rank 0:
 
@@ -105,13 +80,12 @@ On rank 1, the same with `"rank": 1`, `"peer": 0` and rank 0's address on that c
 its IPv6 link-local address. `port` is a UDP port both Macs keep free. The addresses above are examples. Two bonded
 cables are covered in the [speed-up recipe](recipes/speed-up-mode.md).
 
-### 6. Start rank 1, then rank 0
+### 5. Start rank 1, then rank 0
 
 Both Macs run the same command with their own settings file. Start rank 1 first, then rank 0 within five minutes:
 
 ```bash
-FZ_LANE=1 FZ_GDN=2 MCDMA_FABRIC_QOS=1 TF_FLASHNEXT_DUMP=$HOME/fn-dump \
-  zig-out/native/bin/tensorfold-native serve ~/models/flash-next-6bit --name flash-next \
+zig-out/native/bin/tensorfold-native serve ~/models/flash-next-6bit --name flash-next \
   --speed-up rank1.json --temperature 0 --no-thinking --dashboard
 ```
 
@@ -123,9 +97,14 @@ Security > Local Network. macOS asks each program for Local Network access befor
 started detached, for example with `nohup` over SSH after the session closes, can't ask, so macOS drops its packets and
 the ranks stop with `ConnectFailed` even though `fabric-check` passes.
 
-- `FZ_LANE=1 FZ_GDN=2` turn on the faster decode kernels. Replies are the same with or without them, and the speeds
-  below were measured with them on.
-- `MCDMA_FABRIC_QOS=1` is MCDMA's setting for its progress threads, which our runs used.
+- Earlier versions of this guide made a dump with Python tools and set `TF_FLASHNEXT_DUMP`, `FZ_LANE=1` and
+  `FZ_GDN=2`. Leave them all out. The server needs no dump, and `FZ_LANE=1 FZ_GDN=2` decode 4 to 5% slower than the
+  default kernels, on one M5 Ultra and on the pair, with the same replies.
+- The server runs two threads at user-interactive priority, the highest a macOS program gets: MCDMA's, which places
+  each message that arrives, and its own, which sends each one. For MCDMA's thread it sets `MCDMA_FABRIC_QOS=1` unless
+  you set that variable yourself. At default priority a busy Mac slows every round. With 36 busy threads on the first
+  Mac, `"draft": false` replies decoded at 65 tokens a second with `MCDMA_FABRIC_QOS=0`, and at 105 by default, as fast
+  as on an idle pair.
 - The prompt cache keeps conversation states between requests, so the next turn of a chat reads only its new tokens.
   Rank 0's cache decides and rank 1 keeps its halves under the same names. By default each Mac gives it what 70% of
   its memory leaves past the loaded server, less 2 GiB for prompt buffers, up to 16 GiB, and logs that at start, for
@@ -138,7 +117,7 @@ the ranks stop with `ConnectFailed` even though `fabric-check` passes.
 
 Flags that change decoding, such as `--no-drafts` or `--no-thinking`, go on both Macs.
 
-### 7. Connect a client
+### 6. Connect a client
 
 Point any OpenAI-compatible client at `http://RANK0:8080/v1` with the model name `flash-next`, where RANK0 is rank 0's
 address. Send requests only to rank 0, since rank 1 refuses its own.

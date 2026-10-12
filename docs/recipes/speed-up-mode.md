@@ -7,8 +7,7 @@ request beside it. It needs the native Zig server (`tensorfold-native`) with the
 MCDMA for the Thunderbolt link. [The speed-up mode guide](../speed-up-mode.md) walks through the setup step by step,
 with this build's speeds.
 
-Those numbers use a recorded dump. The 1.0.x release binary loads Flash Next without one, and a user's pair connects
-and loads that way ([#567](https://github.com/ashhart/TensorFold/issues/567)), but that path has not passed the gate yet.
+The server loads Flash Next straight from its checkpoint, with no recorded dump and no environment variable to set.
 
 ## What it gives
 
@@ -41,7 +40,7 @@ Prompt splitting gives one Mac's bits exactly.
 - Two Apple silicon Macs, each with enough memory for the whole model. Flash Next 6-bit is 158 GB of weights, and
   each server takes 172 GB once loaded. Keep each server at or under 70% of its Mac's memory, 179 GiB on a 256 GB
   Mac. The server sizes its prompt cache to fit under that line, about 5 GiB on these Macs. A 192 GB Mac is too
-  small. Put the same checkpoint and dump on both.
+  small. Put the same checkpoint on both.
 - A Thunderbolt 5 cable between them with RDMA enabled, and MCDMA's fabric library (`libmcdma-fabric.dylib`) built
   on each Mac from MCDMA's `main` branch, which carries its Thunderbolt links.
 - Greedy decoding (temperature 0), as the Flash Next replay engine requires.
@@ -79,21 +78,23 @@ token about 2% sooner (up to 4% at 8k) and decode under 1% faster, since decode'
 
 ## Starting it
 
-Start both servers with the same model, dump and flags (a flag that changes decoding, such as `--no-drafts`, goes on
+Start both servers with the same model and flags (a flag that changes decoding, such as `--no-drafts`, goes on
 both), rank 1 first or within five minutes of each other; each waits for the other before it loads. Rank 1, then
 rank 0:
 
 ```bash
-FZ_LANE=1 FZ_GDN=2 MCDMA_FABRIC_QOS=1 TF_FLASHNEXT_DUMP=$HOME/fn-dump \
-  zig-out/native/bin/tensorfold-native serve ~/models/flash-next-6bit --name flash-next \
+zig-out/native/bin/tensorfold-native serve ~/models/flash-next-6bit --name flash-next \
   --speed-up rank1.json --temperature 0 --no-thinking --dashboard
 ```
 
 ```bash
-FZ_LANE=1 FZ_GDN=2 MCDMA_FABRIC_QOS=1 TF_FLASHNEXT_DUMP=$HOME/fn-dump \
-  zig-out/native/bin/tensorfold-native serve ~/models/flash-next-6bit --name flash-next \
+zig-out/native/bin/tensorfold-native serve ~/models/flash-next-6bit --name flash-next \
   --speed-up rank0.json --temperature 0 --no-thinking --dashboard
 ```
+
+Each server runs MCDMA's thread that places arriving messages, and its own sending thread, at user-interactive
+priority, so other work on either Mac does not slow the rounds. `MCDMA_FABRIC_QOS=0` leaves MCDMA's thread at the
+default priority. Older versions of this recipe set `FZ_LANE=1 FZ_GDN=2`, which decode 4 to 5% slower, so leave them out.
 
 Run both attached to a terminal session, or allow them Local Network access in System Settings. A server started
 detached over SSH can't ask for that access, so macOS drops its packets and the ranks stop with `ConnectFailed`.

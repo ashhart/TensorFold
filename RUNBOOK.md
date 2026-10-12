@@ -170,9 +170,8 @@ Run each command on its own Mac and send requests to rank 0.
 Run the same release on both Macs: the pair now agrees on learned-state disk space before either Mac writes, and each Mac refuses a peer from an earlier release.
 With `--learn`, states learned by an earlier release are refused when read and learned again.
 Each settings file names `rank`, `library` and `links`; each link names its peer, RDMA device, interface/address, ports and link name.
-[Speed-up settings](docs/speed-up-mode.md#5-write-the-settings-files) has the schema and link setup.
-The recording command in that guide is the setup its two-Mac Flash Next numbers were measured with; on one Mac, ordinary
-loading uses the direct-checkpoint command above.
+[Speed-up settings](docs/speed-up-mode.md#4-write-the-settings-files) has the schema and link setup.
+That guide's two-Mac Flash Next commands load the checkpoint directly, as one Mac does.
 
 On one Mac, GLM loads only when its weights and caches fit in 70% of RAM, 179.2 GB on a 256 GB Mac, and leaves the MTP head on disk when only the head is over.
 `GLM_LOAD_LIMIT_GB=N` sets that limit in GB, up to the GPU's recommended working set; a value that isn't a number above 0 stops the server.
