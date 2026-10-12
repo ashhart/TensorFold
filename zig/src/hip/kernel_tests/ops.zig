@@ -181,7 +181,7 @@ test "the MoE route sorts pairs by expert, stably, into items of at most a tile"
     defer t.close();
     const o = t.ops(&t.on);
     var rng: rig.Rng = .{ .state = 0x2017E };
-    for ([_][3]usize{ .{ 257, 512, 16 }, .{ 128, 37, 4 }, .{ 64, 1000, 64 } }) |shape| {
+    for ([_][3]usize{ .{ 257, 512, 16 }, .{ 128, 37, 4 }, .{ 64, 1000, 64 }, .{ 513, 11, 8 }, .{ 513, 2816, 8 } }) |shape| {
         const experts = shape[0];
         const pairs = shape[1];
         const tile = shape[2];

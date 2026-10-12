@@ -1,5 +1,6 @@
 //! MoE launches: router, select, plan, activation and combine.
 
+const std = @import("std");
 const Launcher = @import("../launches.zig").Launcher;
 const util = @import("util.zig");
 const S = util.S;
@@ -118,5 +119,7 @@ pub fn tf_moe_route(l: *const Launcher, picks: CI, pairs: c_int, experts: c_int,
     const ex: usize = @intCast(experts);
     const segs: usize = if (ex <= 256) 64 else 16;
     if (ex > 1024) return invalid("moe_route");
-    try l.go(l.op.moe_route, dim(1, 1, 1), dim(256, 1, 1), @intCast(3 * ex * 4 + segs * ex * 2), s, &a);
+    // and the block's scan of two ints a thread, past the segments (4-byte aligned)
+    const seg_bytes = std.mem.alignForward(usize, segs * ex * 2, 4);
+    try l.go(l.op.moe_route, dim(1, 1, 1), dim(256, 1, 1), @intCast(3 * ex * 4 + seg_bytes + 2 * 256 * 4), s, &a);
 }
