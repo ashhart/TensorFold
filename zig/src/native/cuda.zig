@@ -330,14 +330,11 @@ const Host = struct {
     }
 };
 
-/// What the backend refuses before any device work, whatever the family; null when `o` may open.
-fn refusal(o: api.Open) ?[]const u8 {
-    return if (o.learn != null) "--learn learns prompt prefixes on Macs only: serve without --learn, --learn-dir or --learn-gib on CUDA" else null;
-}
+const refusals = @import("cuda_refusal.zig");
 
 /// The engine for `o.dir`, or null with `problem` set when `refusal` names a flag or no CUDA family reads it.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
-    if (refusal(o)) |why| {
+    if (refusals.backend(o)) |why| {
         problem.* = why;
         return null;
     }
@@ -349,6 +346,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
 }
 
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (refusals.family(F, o)) |why| {
+        problem.* = why;
+        return null;
+    }
     const native = modelContext(a, io, o.dir);
     const window = contextWindow(o.context, native, F.default_context) catch |e| {
         problem.* = switch (e) {
@@ -485,11 +486,7 @@ fn toGib(bytes: u64) f64 {
 
 test {
     _ = budget; // cuda_memory.zig's own tests, which no other test binary reaches
-}
-
-test "--learn is refused whatever the family, and --slide or a learned-disk size alone is not" {
-    try std.testing.expectStringStartsWith(refusal(.{ .dir = "d", .model_type = "nemotron_h", .learn = "/x" }) orelse "", "--learn learns prompt prefixes on Macs only");
-    try std.testing.expect(refusal(.{ .dir = "d", .model_type = "nemotron_h", .slide = true, .learn_gib = 8, .learn_min_free_gib = 2 }) == null);
+    _ = refusals;
 }
 
 test "chip classes name the compute capability as gate entries do" {
