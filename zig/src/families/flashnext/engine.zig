@@ -228,11 +228,6 @@ pub const Engine = struct {
         var ple_values: config.PleRef = undefined;
         var attention_scale: f64 = undefined;
         var cfg = try config.Config.read(arena, io, model_dir); // read once: the reference values and the widths
-        var cfg_widths = try @import("widths.zig").Widths.init(arena, &cfg);
-        if (!cfg_widths.uniform() or cfg_widths.q.global.bits != 6 or cfg_widths.q.global.group != 32) {
-            std.log.warn("flashnext: widths other than 6-bit group 32; the device kernels read 6/32 only", .{});
-            return error.UnsupportedFlashAffineKernel;
-        }
         if (dump_dir) |d| {
             const ref_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/ref.json", .{d}, 0));
             const ref = try std.json.parseFromSliceLeaky(std.json.Value, arena, ref_file.bytes[0..ref_file.size], .{});
@@ -317,6 +312,7 @@ pub const Engine = struct {
             m.ple.tables[3 * g + 1] = try r.group(16 * g, 16, "scales");
             m.ple.tables[3 * g + 2] = try r.group(16 * g, 16, "biases");
         }
+        m.ple.scale = try fz.ple_scale.of(r, index.object.get("weight_map").?.object);
         const B = struct {
             fn of(rr: *Run, n: usize) !Buf {
                 return .{ .b = try rr.buffer(n) };
@@ -430,6 +426,7 @@ pub const Engine = struct {
         e.m = m;
         e.pr = try arena.create(Prompt);
         e.pr.* = try Prompt.init(r, pack_dir, r.xnew_header);
+        const uniform = try @import("engine_widths.zig").apply(arena, &cfg, index.object.get("weight_map").?.object, e.pr, m);
         e.pr2 = try arena.create(Prompt);
         e.pr2.* = try e.pr.sibling();
         try e.rounds();
@@ -437,6 +434,7 @@ pub const Engine = struct {
         e.msel = try GSelect.init(r, 0);
         // speed-up mode: TP=2 with the peer the settings name (tp.zig); both ranks then run the same replies in lockstep
         const tp_path: ?[]const u8 = speed_up orelse if (std.c.getenv("TF_FLASHNEXT_TP")) |p| std.mem.span(p) else null;
+        if (tp_path != null and !uniform) return error.SpeedUpNeeds6Bit32; // TP splits the 6/32 kernels only
         if (tp_path) |path| r.tp = try fz.Tp2.init(arena, r.device, path);
         return e;
     }
