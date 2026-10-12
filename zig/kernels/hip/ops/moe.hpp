@@ -34,14 +34,32 @@ extern "C" __global__ void tf_moe_route(const int* picks, int pairs, int experts
         counts[e] = run;
     }
     __syncthreads();
-    if (t == 0) {
-        int start = 0, end = 0;
-        for (int e = 0; e < experts; ++e) {
-            starts[e] = start;
-            start += counts[e];
-            end += (counts[e] + tile - 1) / tile;
-            ends[e] = end;
-        }
+    // starts: the counts' exclusive sums; ends: the tiles' inclusive sums; a thread's experts, then the block's scan
+    int* scan_c = reinterpret_cast<int*>(seg + segs * experts + (segs * experts) % 2);
+    int* scan_n = scan_c + blockDim.x;
+    const int per = (experts + blockDim.x - 1) / blockDim.x;
+    const int lo = min(experts, t * per), hi = min(experts, lo + per);
+    int own_c = 0, own_n = 0;
+    for (int e = lo; e < hi; ++e) {
+        own_c += counts[e];
+        own_n += (counts[e] + tile - 1) / tile;
+    }
+    scan_c[t] = own_c;
+    scan_n[t] = own_n;
+    __syncthreads();
+    for (int off = 1; off < static_cast<int>(blockDim.x); off <<= 1) {
+        const int vc = t >= off ? scan_c[t - off] : 0, vn = t >= off ? scan_n[t - off] : 0;
+        __syncthreads();
+        scan_c[t] += vc;
+        scan_n[t] += vn;
+        __syncthreads();
+    }
+    int start = scan_c[t] - own_c, end = scan_n[t] - own_n;
+    for (int e = lo; e < hi; ++e) {
+        starts[e] = start;
+        start += counts[e];
+        end += (counts[e] + tile - 1) / tile;
+        ends[e] = end;
     }
     __syncthreads();
     if (t < segs) {
