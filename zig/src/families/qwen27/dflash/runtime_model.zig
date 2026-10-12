@@ -132,12 +132,11 @@ pub const Model = struct {
 };
 pub fn loadGraph(a: std.mem.Allocator, b: *Backend) !weights.Graph {
     const target = b.target;
-    if (!target.weights.uniformEnds()) return error.DraftNeedsUniformHead; // the borrowed embedding and head are 4-bit g64
     const prefix: []const u8 = if (target.checkpoint.has("language_model.model.embed_tokens.weight")) "language_model." else "";
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const local = arena.allocator();
-    const embed = try binding(local, target, prefix, "model.embed_tokens");
+    const embed = try binding(local, target, prefix, "model.embed_tokens", .{ .bits = target.weights.embed.bits, .group_size = target.weights.embed.group });
     var names: std.ArrayList([]const u8) = .empty;
     var iterator = b.checkpoint.tensors.keyIterator();
     while (iterator.next()) |name| try names.append(local, name.*);
@@ -145,10 +144,10 @@ pub fn loadGraph(a: std.mem.Allocator, b: *Backend) !weights.Graph {
     while (later.next()) |name| try names.append(local, name.*);
     return weights.load(a, .{ .source = b.source(), .names = names.items }, b.config, embed);
 }
-fn binding(a: std.mem.Allocator, target: *Target, prefix: []const u8, module: []const u8) !ck.Linear {
+fn binding(a: std.mem.Allocator, target: *Target, prefix: []const u8, module: []const u8, format: @import("../affine.zig").Spec) !ck.Linear {
     const stem = try std.mem.concat(a, u8, &.{ prefix, module });
     const w = Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".weight" })));
     const s = Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".scales" })));
     const b = Backend.cpu(try target.checkpoint.get(try std.mem.concat(a, u8, &.{ stem, ".biases" })));
-    return ck.validate(w, s, b, .{ .bits = 4, .group_size = 64 }, target.config.vocab, target.config.hidden);
+    return ck.validate(w, s, b, format, target.config.vocab, target.config.hidden);
 }
