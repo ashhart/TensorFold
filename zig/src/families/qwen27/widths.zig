@@ -105,11 +105,33 @@ pub const Widths = struct {
     pub fn of(w: *const Widths, layer: usize, m: Member) Width {
         return w.layers[layer][@backingInt(m)];
     }
+
+    /// 0 when every module is 4-bit g64, else a nonzero hash of every module's width.
+    pub fn tag(w: *const Widths) u64 {
+        var h = std.hash.Wyhash.init(0x27);
+        var mixed = false;
+        for (w.layers) |l| for (l) |x| {
+            mixed = mixed or !isUniform(x);
+            h.update(&.{ x.bits, @as(u8, @truncate(x.group)), @as(u8, @truncate(x.group >> 8)) });
+        };
+        for ([_]Width{ w.embed, w.head }) |x| {
+            mixed = mixed or !isUniform(x);
+            h.update(&.{ x.bits, @as(u8, @truncate(x.group)), @as(u8, @truncate(x.group >> 8)) });
+        }
+        return if (mixed) h.final() | 1 else 0;
+    }
 };
 
 fn one(f: *const affine.Formats, path: []const u8) !Width {
     const s = (try f.resolve(path)) orelse return error.UnqualifiedQwenFormat;
     return .{ .bits = s.bits, .group = @intCast(s.group_size) };
+}
+
+/// The timed window costs' model shape; mixed widths add their tag, so checkpoints of one shape keep their own costs.
+pub fn costShape(c: cfg.Config, tag: u64, buf: []u8, rows: usize, drafted: bool) ![]const u8 {
+    const s = try std.fmt.bufPrint(buf, "{d}/{d}/{d}/{d}/{d}/{d}", .{ c.layers, c.hidden, c.intermediate, c.vocab, rows, @intFromBool(drafted) });
+    if (tag == 0) return s;
+    return buf[0 .. s.len + (try std.fmt.bufPrint(buf[s.len..], "/w{x:0>16}", .{tag})).len];
 }
 
 /// What the chip's projection kernels run: the lane kernels on tensor units, the row kernels before them.
@@ -240,6 +262,26 @@ test "a mixed stack runs every member alone, even beside a member of its own wid
     try std.testing.expectEqualSlices([2]usize, &.{.{ 0, 3 }}, runs(&.{ four, four, four }, &buf));
     try std.testing.expectEqualSlices([2]usize, &.{ .{ 0, 1 }, .{ 1, 1 }, .{ 2, 1 } }, runs(&.{ five, four, four }, &buf));
     try std.testing.expectEqualSlices([2]usize, &.{ .{ 0, 1 }, .{ 1, 1 }, .{ 2, 1 } }, runs(&.{ four, five, four }, &buf));
+}
+
+test "timed costs keep a uniform checkpoint's shape and give each mixed one its own" {
+    const a = std.testing.allocator;
+    var tags: [3]u64 = undefined;
+    for ([_][]const u8{ "{\"bits\":4,\"group_size\":64}", oq4, oq2 }, &tags) |quantization, *t| {
+        const text = try testConfig(a, quantization);
+        defer a.free(text);
+        const c = try cfg.parse(a, text, null);
+        var f = try affine.Formats.init(a, text);
+        defer f.deinit();
+        var w = try Widths.resolve(a, &f, c);
+        defer w.deinit();
+        t.* = w.tag();
+        var buf: [96]u8 = undefined;
+        const got = try costShape(c, t.*, &buf, 16, true);
+        try std.testing.expectEqual(t.* == 0, std.mem.eql(u8, got, "64/5120/17408/248320/16/1"));
+    }
+    try std.testing.expectEqual(@as(u64, 0), tags[0]);
+    try std.testing.expect(tags[1] != 0 and tags[2] != 0 and tags[1] != tags[2]);
 }
 
 test "resolved widths follow overrides under any checkpoint prefix" {

@@ -26,6 +26,8 @@ pub const Model = struct {
     frame: Frame,
     /// The Neural Engine's share of prompt-chunk MLPs, when it loaded.
     ane: ?*ane_mlp.Share = null,
+    /// widths.Widths.tag: 0 for a uniform 4-bit g64 checkpoint.
+    widths_tag: u64 = 0,
 
     /// `share_fits(bytes)`: whether the Neural Engine's share fits beside what is loaded (null: wherever it can load).
     pub fn load(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, share_fits: ?*const fn (u64) bool) !*Model {
@@ -43,6 +45,7 @@ pub const Model = struct {
         errdefer a.destroy(m);
         m.allocator = a;
         m.config = c;
+        m.widths_tag = ws.tag();
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
         if (!qualifiedGeneration(m.device.generation())) return error.QwenMetalQualificationRequired;
