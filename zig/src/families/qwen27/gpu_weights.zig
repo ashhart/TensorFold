@@ -37,11 +37,6 @@ pub const Weights = struct {
         for (w.layers) |l| for ([_]Linear{ l.gu, l.down }) |p| if (!uniform(p)) return false;
         return true;
     }
-
-    /// Whether the embedding and head are 4-bit g64 (the format the draft head borrows).
-    pub fn uniformEnds(w: *const Weights) bool {
-        return w.embed.bits == 4 and w.embed.group == 64 and uniform(w.head);
-    }
 };
 
 fn uniform(p: Linear) bool {

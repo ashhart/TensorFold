@@ -14,18 +14,18 @@ pub const Head = struct {
         var head = Head{ .allocator = a, .linear = source };
         errdefer head.deinit();
         if (source.n != 248320) return head;
-        if (source.tile != 32 or source.k % 64 != 0) return error.BadDraftHead;
-        if (source.bits != 4 or source.group != 64 or source.runs.len > 0) return error.BadDraftHead;
+        if (source.tile != 32 or source.k % source.group != 0 or source.runs.len > 0) return error.BadDraftHead;
         const k: usize = source.k;
+        const row = k * source.bits / 8; // whole 32-row tiles in the lane layout, rows in the raw one
         const input_words = if (source.raw) |raw| raw.w else source.words.buffer;
         const input_offset = if (source.raw) |raw| raw.w_off else source.words.offset;
-        const groups = k / 64;
-        const words = try head.allocate(device, width * k / 2);
+        const groups = k / source.group;
+        const words = try head.allocate(device, width * row);
         var destination: usize = 0;
         for (spans) |span| {
             const rows = span[1] - span[0];
-            const first = input_offset + @as(usize, span[0]) * k / 2;
-            @memcpy(words.contents()[destination * k / 2 ..][0 .. @as(usize, rows) * k / 2], input_words.contents()[first..][0 .. @as(usize, rows) * k / 2]);
+            const first = input_offset + @as(usize, span[0]) * row;
+            @memcpy(words.contents()[destination * row ..][0 .. @as(usize, rows) * row], input_words.contents()[first..][0 .. @as(usize, rows) * row]);
             destination += rows;
         }
         head.linear.n = width;
