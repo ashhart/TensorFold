@@ -142,7 +142,7 @@ pub const Backend = struct {
     fn firstFn(ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64 {
         const b = self(ptr);
         const i = try b.slotOf(s);
-        if (position != b.e.slots[i].len) return error.PositionMismatch;
+        if (position != b.e.cacheLen(i)) return error.PositionMismatch;
         return b.put(b.first[i]);
     }
 
@@ -167,7 +167,7 @@ pub const Backend = struct {
             const i = try b.slotOf(w.stream);
             const held = e.held(i);
             if (w.held > held.len) return error.WindowOutOfStep;
-            for (w.positions, 0..) |p, r| if (p != e.slots[i].len + r + 1) return error.PositionMismatch;
+            for (w.positions, 0..) |p, r| if (p != e.cacheLen(i) + r + 1) return error.PositionMismatch;
             total += w.rows();
         }
         if (total > R) return error.WindowOutOfStep;

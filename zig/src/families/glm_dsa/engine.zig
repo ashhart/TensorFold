@@ -24,9 +24,11 @@ pub const Slot = struct {
     /// Cache rows written (the stream's tokens so far).
     len: u32 = 0,
     prompt: std.ArrayList(u32) = .empty,
-    /// This slot's first row in the last window, and its rows there.
+    /// This slot's first row in the last window, its rows no keep has settled yet (all kept unless one does), and the
+    /// rows the last settle kept.
     win_row: u32 = 0,
-    win_rows: u32 = 0,
+    open: u32 = 0,
+    kept: u32 = 0,
     held: [max_depth]u32 = @splat(0),
     held_n: u32 = 0,
 };
@@ -134,6 +136,7 @@ pub const Engine = struct {
         const s = &e.slots[i];
         s.used = true;
         s.len = 0;
+        s.open = 0;
         s.held_n = 0;
         s.prompt.clearRetainingCapacity();
         try s.prompt.appendSlice(e.gpa, prompt);
@@ -143,7 +146,7 @@ pub const Engine = struct {
     pub fn chunk(e: *Engine, i: u32, at: u32, n: u32, every: bool) !?u32 {
         if (i >= e.slots.len) return error.ChunkOutOfStep;
         const s = &e.slots[i];
-        if (!s.used or at != s.len or n == 0 or n > R or at + n > s.prompt.items.len) return error.ChunkOutOfStep;
+        if (!s.used or s.open > 0 or at != s.len or n == 0 or n > R or at + n > s.prompt.items.len) return error.ChunkOutOfStep;
         const hid = e.m.c.hidden;
         const last = at + n == s.prompt.items.len;
         const toks = s.prompt.items;
@@ -196,10 +199,13 @@ pub const Engine = struct {
         for (wins) |w| {
             if (w.slot >= e.slots.len) return error.WindowOutOfStep;
             const s = &e.slots[w.slot];
+            if (s.open > 0) settle(s, s.open);
             if (!s.used or w.tokens.len == 0 or s.len + w.tokens.len + max_depth + 1 > e.context) return error.WindowOutOfStep;
             if (rows + w.tokens.len > R) return error.WindowOutOfStep;
             s.win_row = rows;
-            s.win_rows = @intCast(w.tokens.len);
+            s.open = @intCast(w.tokens.len);
+            s.kept = 0;
+            s.held_n = 0;
             for (w.tokens, 0..) |t, j| {
                 u32s(e.pass[0].ids, R)[rows] = t;
                 e.setRow(0, rows, w.slot, s.len + @as(u32, @intCast(j)));
@@ -223,14 +229,26 @@ pub const Engine = struct {
         @memcpy(out[0..rows], u32s(e.pass[0].picks, rows));
     }
 
-    /// The first `kept` rows of slot i's last window stay in its caches.
+    fn settle(s: *Slot, kept: u32) void {
+        s.len += kept;
+        s.kept = kept;
+        s.open = 0;
+    }
+
+    /// The cache length the lane core counts: a window no keep settled yet counts whole.
+    pub fn cacheLen(e: *const Engine, i: u32) u32 {
+        return e.slots[i].len + e.slots[i].open;
+    }
+
+    /// The first `kept` rows of slot i's last window stay in its caches (a draft may have settled them already).
     pub fn keep(e: *Engine, i: u32, kept: u32) !void {
         if (i >= e.slots.len) return error.KeepOutOfStep;
         const s = &e.slots[i];
-        if (!s.used or kept == 0 or kept > s.win_rows) return error.KeepOutOfStep;
-        s.len += kept;
-        s.win_rows = kept;
-        s.held_n = 0;
+        if (!s.used or kept == 0) return error.KeepOutOfStep;
+        if (s.open > 0) {
+            if (kept > s.open) return error.KeepOutOfStep;
+            settle(s, kept);
+        } else if (kept != s.kept) return error.KeepOutOfStep;
     }
 
     /// Each request's rows into the MTP head's caches, then its chain of drafts (held, read with `held`).
@@ -246,8 +264,11 @@ pub const Engine = struct {
             const s = &e.slots[q.slot];
             const n: u32 = @intCast(q.follow.len);
             if (!s.used or q.depth > max_depth or n == 0 or rows + n > R) return error.DraftOutOfStep;
-            if (q.prompt and (n != 1 or s.len != s.prompt.items.len)) return error.DraftOutOfStep;
-            if (!q.prompt and n != s.win_rows) return error.DraftOutOfStep;
+            if (q.prompt and (n != 1 or s.open > 0 or s.len != s.prompt.items.len)) return error.DraftOutOfStep;
+            if (!q.prompt and s.open > 0) {
+                if (n > s.open) return error.DraftOutOfStep;
+                settle(s, n);
+            } else if (!q.prompt and n != s.kept) return error.DraftOutOfStep;
             for (q.follow, 0..) |t, j| {
                 const pos = s.len - n + @as(u32, @intCast(j));
                 u32s(e.pass[1].idx, R)[rows] = if (q.prompt) 2 * R + q.slot else s.win_row + @as(u32, @intCast(j));
