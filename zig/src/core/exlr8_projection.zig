@@ -36,6 +36,8 @@ pub const Pipelines = struct {
     rotate: mtl.Pipeline,
     project: [capacities.len]mtl.Pipeline,
     split: [job.splits.len]mtl.Pipeline,
+    /// Whether each split kernel fits its 256 S threads here (M1/M2 cap threads by registers): else one set runs.
+    split_fits: [job.splits.len]bool,
     combine: mtl.Pipeline,
     weights: mtl.Pipeline,
     tile_codes: mtl.Pipeline,
@@ -57,20 +59,27 @@ pub const Pipelines = struct {
             if (q.simdWidth() != 32 or q.maxThreads() < 256) return error.UnsupportedExlr8Pipeline;
         }
         var split: [job.splits.len]mtl.Pipeline = undefined;
+        var split_fits: [job.splits.len]bool = undefined;
         var split_made: usize = 0;
         errdefer for (split[0..split_made]) |q| q.deinit();
-        for (job.splits, &split) |k, *q| {
+        for (job.splits, &split, &split_fits) |k, *q, *fits_here| {
             var name: [32]u8 = undefined;
             q.* = try mtl.Pipeline.init(device, lib, try std.fmt.bufPrint(&name, "tf_exlr8_split_{d}_{d}", .{ k[0], k[1] }), false);
             split_made += 1;
-            if (q.maxThreads() < 256 * k[1]) return error.UnsupportedExlr8Pipeline;
+            fits_here.* = q.maxThreads() >= 256 * k[1];
         }
         const combine = try mtl.Pipeline.init(device, lib, "tf_exlr8_combine", false);
         errdefer combine.deinit();
         const weights = try mtl.Pipeline.init(device, lib, "tf_exlr8_weights", false);
         errdefer weights.deinit();
         const tile_codes = try mtl.Pipeline.init(device, lib, "tf_exlr8_tile_codes", false);
-        return .{ .rotate = rotate, .project = project, .split = split, .combine = combine, .weights = weights, .tile_codes = tile_codes };
+        return .{ .rotate = rotate, .project = project, .split = split, .split_fits = split_fits, .combine = combine, .weights = weights, .tile_codes = tile_codes };
+    }
+
+    /// The split kernel for `rows` over `sets` sets when it exists and fits this GPU, else null (one set).
+    pub fn splitFor(p: *const Pipelines, rows: usize, sets: usize) ?usize {
+        const i = job.split(rows, sets) orelse return null;
+        return if (p.split_fits[i]) i else null;
     }
 
     pub fn deinit(p: *Pipelines) void {
@@ -113,7 +122,7 @@ pub fn encodeProject(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, t: Tabl
     try fits(x, ((rows - 1) * x_stride + 128) * 4);
     try fits(y, ((rows - 1) * y_stride + 128) * @as(usize, if (y_f32) 4 else 2));
     const sets = if (t.sets != 0) t.sets else job.sets(t.count, t.blocks, rows);
-    const split = job.split(rows, sets);
+    const split = p.splitFor(rows, sets);
     e.setPipeline(if (split) |i| p.split[i] else p.project[job.capacity(rows)]);
     e.setBuffer(x.buf, x.off, 0);
     e.setBuffer(t.weights, 0, 1);
@@ -133,7 +142,7 @@ pub fn encodeProjectIndirect(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref,
     if (rows == 0 or rows > max_rows) return error.InvalidExlr8Rows;
     try fits(args, 12);
     const sets = if (t.sets != 0) t.sets else job.sets(t.count, t.blocks, rows);
-    const split = job.split(rows, sets);
+    const split = p.splitFor(rows, sets);
     e.setPipeline(if (split) |i| p.split[i] else p.project[job.capacity(rows)]);
     e.setBuffer(x.buf, x.off, 0);
     e.setBuffer(t.weights, 0, 1);
