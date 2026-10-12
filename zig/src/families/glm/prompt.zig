@@ -196,7 +196,7 @@ fn qmm(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref, M
 /// `qmm` over x's rows `ld` elements apart (a slice of a wider row).
 fn qmmAt(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, ld: u32, q: wts.Affine, y: Ref, M: u32) void {
     const pitch = std.mem.alignForward(u32, q.n, 64);
-    const mm = if (wide.native(q)) p.mm.mm_bf16 else if (q.more == 0 and q.bits == 8 and q.group == 64) p.mm.wide.?.mm8 else {
+    const mm = if (wide.native(q)) p.mm.mm_bf16 else wide.mm(&p.mm.wide.?, q) orelse {
         return wide.dense(&p.mm.wide.?, e, q, .{ .in = x, .ldx = ld, .out = y, .ldo = pitch, .rows = M }); // a split stack, other widths
     };
     affine_mm.rowSumsAt(e, mm, 64, x, p.sums, M, q.k, ld);
@@ -366,7 +366,7 @@ fn unabsorb(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *cons
     const H = c.mla_heads;
     const K = c.kv_lora;
     const per = c.nope + c.v_dim; // kv_b's rows a head: its key half, then its value half
-    if (w.absorbed) |pair| return wide.perHead(&p.mm.wide.?, e, pair[1], H, .{ .in = p.att, .ldx = H * K, .out = p.vals, .ldo = H * c.v_dim, .rows = M }, K, c.v_dim);
+    if (w.absorbed) |pair| return wide.headsBatch(&p.mm.wide.?, e, pair[1], H, .{ .in = p.att, .ldx = H * K, .out = p.vals, .ldo = H * c.v_dim, .rows = M }, K, p.sums);
     var q = w.kv_b;
     q.w = q.w.at(@as(usize, c.nope) * K / 2);
     q.s = q.s.at(@as(usize, c.nope) * (K / 64) * 2);
@@ -403,7 +403,7 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
     }
     if (fwd.on(x, "mla_cache")) fwd.mlaCache(x, e, mi, w, x_in, p.xp, XP, p.iw, M, pos);
     if (fwd.on(x, "mla_absorb") and w.absorbed != null) {
-        fwd.absorb(x, e, w, p.qp, p.ql, M); // mlx-lm's embed_q a head at its width, the decode's launch over the chunk
+        wide.headsBatch(&p.mm.wide.?, e, w.absorbed.?[0], c.mla_heads, .{ .in = p.qp, .ldx = c.qrProj(), .out = p.ql, .ldo = c.mla_heads * c.kv_lora, .rows = M }, c.nope, p.sums); // mlx-lm's embed_q
     } else if (fwd.on(x, "mla_absorb")) {
         e.setPipeline(if (c.tp > 1) x.k.absorb_nax_tp else x.k.absorb_nax); // the row kernel's qvm, weights in three bf16 parts
         bind(e, 0, .{ w.kv_b.w, w.kv_b.s, w.kv_b.b, p.qp, p.ql });

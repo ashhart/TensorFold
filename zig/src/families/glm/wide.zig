@@ -160,6 +160,16 @@ pub fn perHead(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, heads: u32, io
     launch(p, e, .{ q.w, q.s, q.b }, q.bits, .{ .k = @intCast(q.k), .n = @intCast(r), .group = q.group, .rows = @intCast(io.rows), .heads = @intCast(heads), .ldx = @intCast(io.ldx), .hsx = @intCast(hsx), .ldo = @intCast(io.ldo), .hso = @intCast(hso), .hsw = @intCast(r) }, io.in, io.out);
 }
 
+/// A chunk's x slices (`kx` apart) through q's heads into out [rows, heads, n / heads]: one affine_mm batch, else rows.
+pub fn headsBatch(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, h: u32, io: Io, kx: u32, sums: Ref) void {
+    const ny = q.n / h;
+    const pipes = mm(p, q) orelse return perHead(p, e, q, h, io, kx, ny);
+    var head = q;
+    head.n = ny;
+    affine_mm.rowSumsAt(e, pipes, 64, io.in, sums, io.rows, h * kx, io.ldx); // a head's sums one row apart
+    affine_mm.denseBatch(e, pipes, io.in, sums, head, io.out, io.rows, h, .{ .x_row = @intCast(io.ldx), .y_row = @intCast(io.ldo), .sums_row = @intCast(h), .x_batch = @intCast(kx), .y_batch = @intCast(ny), .sums_batch = 1, .w_batch = @intCast(ny) });
+}
+
 /// x [rows, k] through bf16 W [n, k].
 pub fn bf16(p: *const Pipes, e: mtl.ComputeEncoder, w: Ref, n: u32, k: u32, io: Io) void {
     e.setPipeline(p.bf16);
@@ -194,6 +204,16 @@ pub fn bySorted(p: *const Pipes, e: mtl.ComputeEncoder, m: Picks, x: Ref, offset
     e.setValue(pickDims(m, 0, ldo), 4);
     bind(e, 5, .{ out, offsets, order, u.w, u.s, u.b });
     e.dispatchGroups(mtl.Size.of((m.w.n + 7) / 8, m.experts, 1), mtl.Size.of(64, 1, 1));
+}
+
+/// A prompt chunk's affine_mm pipelines for `q` (one width, a format wide.zig compiles), else null: the row kernels.
+pub fn mm(p: *const Pipes, q: Affine) ?affine_mm.Pipes {
+    if (q.more != 0 or q.group != 64) return null;
+    return switch (q.bits) {
+        8 => p.mm8,
+        2 => p.mm2,
+        else => null,
+    };
 }
 
 /// A prompt chunk's routed experts: affine_mm gathers at 4/64 (`mm4`) or 2/64 (`mm2`, oQ2's), else sorted row products.
