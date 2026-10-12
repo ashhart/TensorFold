@@ -6,6 +6,9 @@ const config = @import("../config.zig");
 const index = @import("../index.zig");
 const plan = @import("plan.zig");
 const Spec = @import("../spec.zig").Spec;
+const Engine = @import("engine.zig").Engine;
+const cache = @import("cache.zig");
+const lanes_mod = @import("lanes.zig");
 
 pub const model_type = "qwen4_exp";
 /// The MLX affine checkpoints the plan admits; the HIP products read 2- to 8-bit codes in groups of 32 to 128.
@@ -76,25 +79,80 @@ fn cardRoom(gpa: std.mem.Allocator, io: std.Io, dev: hip.Device) !u64 {
     return pool.room(hip.usage(false).device);
 }
 
-/// Admission, then the refusal that stands until the forward lands: the server says what fits and why it stops.
-fn check(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: anytype, problem: *[]const u8) Refused {
+/// Admission before anything loads: the format, the tensors and whether the rank's share and one stream fit.
+fn check(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: anytype, problem: *[]const u8) Refused!void {
     var c = config.Config.read(gpa, io, dir) catch |err| return refuse(a, problem, "{s} is not a Flash Next checkpoint the HIP engine reads ({s})", .{ dir, @errorName(err) });
     defer c.deinit();
     const text = readIndex(a, io, dir) catch |err| return refuse(a, problem, "cannot read {s}/model.safetensors.index.json ({s})", .{ dir, @errorName(err) });
     const bytes = cardRoom(gpa, io, dev) catch |err| return refuse(a, problem, "the native HIP engine cannot read the GPU's memory ({s})", .{@errorName(err)});
+    if (o.world > 1) return refuse(a, problem, "Flash Next on HIP runs on one rank here: --tp {d} is not served", .{o.world});
     const v = admit(a, gpa, &c, text, o.world, o.rank, o.window, bytes, problem) catch |err| return err;
     if (!v.fits) return refuse(a, problem, "Flash Next {d}-bit on {d} rank(s) holds {d:.2} GiB of weights a rank ({d:.1} GiB of n-gram tables in host memory) and {d:.1} GiB of scratch, of the {d:.2} GiB this card grants: a {d}-token window does not fit (at most {d}); lower --context, add ranks (--tp), or use a lower-bit checkpoint", .{ v.spec.bits, o.world, gibs(v.weights), gibs(v.host), gibs(scratch_bytes), gibs(bytes), o.window, v.most });
-    return refuse(a, problem, "Flash Next {d}-bit fits rank {d} of {d} ({d:.2} GiB of weights, windows up to {d} tokens), but the HIP forward is not in this build yet", .{ v.spec.bits, o.rank, o.world, gibs(v.weights), v.most });
 }
+
+/// The positions a stream holds: the window and a verify's rows past it, on 64.
+fn capacity(window: usize) usize {
+    return std.mem.alignForward(usize, window + cache.max_window + 1, 64);
+}
+
+fn engineOf(gpa: std.mem.Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: anytype) !*Engine {
+    return Engine.open(gpa, io, dir, .{ .device = dev.index, .policy = dev.policy, .capacity = capacity(o.window), .chunk = @max(dev.policy.prefill_step, dev.policy.fill_rows) });
+}
+
+const Owned = struct {
+    gpa: std.mem.Allocator,
+    e: *Engine,
+    fx: *lanes_mod.Fx,
+    startup: []const u8,
+
+    fn release(p: *anyopaque) void {
+        const own: *Owned = @ptrCast(@alignCast(p));
+        own.fx.deinit();
+        own.e.deinit();
+        own.gpa.free(own.startup);
+        own.gpa.destroy(own);
+    }
+};
 
 /// The engine for `dir` on `dev`; under tensor parallelism this is rank 0, which serves.
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: anytype, problem: *[]const u8) anyerror!Loaded {
-    return check(a, gpa, io, dev, dir, o, problem);
+    try check(a, gpa, io, dev, dir, o, problem);
+    const e = engineOf(gpa, io, dev, dir, o) catch |err| return refuse(a, problem, "the native HIP engine cannot load Flash Next from {s} ({s})", .{ dir, @errorName(err) });
+    errdefer e.deinit();
+    // the streams the memory left after the weights and the scratch holds at the window
+    const room = (hip.admission.budget(gpa, io, e.ctx) catch |err| return refuse(a, problem, "the native HIP engine cannot read the GPU's memory ({s})", .{@errorName(err)})).room(hip.usage(false).device);
+    const per = streamBytes(e, capacity(o.window));
+    const fit = room / per;
+    if (fit == 0) return refuse(a, problem, "one stream at a {d}-token window takes {d:.2} GiB and {d:.2} GiB is left after the weights; lower --context or add ranks (--tp)", .{ o.window, gibs(per), gibs(room) });
+    if (fit < o.streams and o.fixed) return refuse(a, problem, "--parallel {d} needs {d:.2} GiB at a {d}-token window and {d:.2} GiB is left: serve --parallel {d}, or lower --context", .{ o.streams, gibs(per * o.streams), o.window, gibs(room), fit });
+    const streams = @min(fit, @max(o.streams, 1));
+    const own = try gpa.create(Owned);
+    errdefer gpa.destroy(own);
+    const fx = try lanes_mod.Fx.init(gpa, e, streams);
+    errdefer fx.deinit();
+    // kept prompt states live in host memory: --prompt-cache-gib, else 16 GiB
+    fx.keepPrompts(@intFromFloat((o.cache_gib orelse 16.0) * (1 << 30)));
+    const startup = try std.fmt.allocPrint(gpa, "HIP {s} device {d}, rank {d} of {d}: Flash Next, {d:.2} GiB on the device, {d} stream{s} of {d} positions, {d:.2} GiB each; prompts in {d}-row chunks", .{ hip.kernels.arch, dev.index, o.rank, o.world, gibs(hip.usage(false).device), streams, if (streams == 1) "" else "s", capacity(o.window), gibs(per), e.o.chunk });
+    own.* = .{ .gpa = gpa, .e = e, .fx = fx, .startup = startup };
+    return .{ .backend = fx.backend(), .facts = fx.facts(), .rows = cache.max_window, .ctx = own, .deinit = Owned.release, .streams = streams, .startup = startup };
 }
 
-/// A rank above 0: holds its share of the model and runs rank 0's steps until rank 0 stops.
+/// Device bytes a stream takes at `cap` positions: its caches, window snapshots, the head's caches and its rows.
+fn streamBytes(e: *const Engine, cap: usize) usize {
+    var buf: [config.max_layers]bool = undefined;
+    const kinds = e.kinds(&buf) catch return std.math.maxInt(usize);
+    const l = cache.Layout.of(e.weights.model.dims, kinds, cap, e.act);
+    var head: usize = 0;
+    if (e.weights.model.mtp) |h| {
+        const hl = cache.Layout.of(h.dims, &.{false}, cap, e.act);
+        head = hl.bytes() + hl.cinBytes() + 4;
+    }
+    return l.bytes() + l.windowBytes() + l.cinBytes() + head + cache.max_window * e.weights.model.dims.wide() * e.act.size();
+}
+
+/// A rank above 0: refused, the engine runs on one rank.
 pub fn follow(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: anytype, problem: *[]const u8) anyerror!void {
-    return check(a, gpa, io, dev, dir, o, problem);
+    try check(a, gpa, io, dev, dir, o, problem);
 }
 
 const gib: u64 = 1 << 30;
