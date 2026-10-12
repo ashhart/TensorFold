@@ -21,6 +21,9 @@ inline float tf_sqw_sum8(uint4 v, float one) {
 // 2^-4s: 4-bit inputs pre-scaled so a nibble masked in place (code * 2^4s) multiplies to the exact product.
 inline float tf_sqw_pre(int s) { return as_type<float>(uint(127 - 4 * s) << 23); }
 
+// 2^-(2s + 16h): 2-bit inputs pre-scaled for codes masked in place in a word's low (h = 0) or high (h = 1) half.
+inline float tf_sqw_pre2(int s, int h) { return as_type<float>(uint(127 - 2 * s - 16 * h) << 23); }
+
 // A lane's 16 codes of a group row (2 * BITS bytes, little-endian bits) as 32-bit words; 4-bit loads them as simd_qmm.
 template <int BITS>
 inline void tf_sqw_load(const device uchar* p, thread uint* u) {
@@ -103,11 +106,11 @@ template <int BITS, int S, int NT, int RT>
         for (int t = 0; t < NT; t++) P[rt][t] = simdgroup_matrix<float, 8, 8>(0.0f);
       #pragma clang loop unroll(full)
       for (int s = 0; s < 8; s++) {
-        const float ps = BITS == 4 ? tf_sqw_pre(s) : 1.0f;
+        const float ps = BITS == 4 ? tf_sqw_pre(s) : BITS == 2 ? tf_sqw_pre2(s, fm & 1) : 1.0f;
         simdgroup_matrix<float, 8, 8> bm[RT];
         for (int rt = 0; rt < RT; rt++) {
-          bm[rt].thread_elements()[0] = BITS == 4 ? tf_sqw_bf8(xa[rt], s) * ps : tf_sqw_bf8(xa[rt], s);
-          bm[rt].thread_elements()[1] = BITS == 4 ? tf_sqw_bf8(xb[rt], s) * ps : tf_sqw_bf8(xb[rt], s);
+          bm[rt].thread_elements()[0] = BITS <= 4 ? tf_sqw_bf8(xa[rt], s) * ps : tf_sqw_bf8(xa[rt], s);
+          bm[rt].thread_elements()[1] = BITS <= 4 ? tf_sqw_bf8(xb[rt], s) * ps : tf_sqw_bf8(xb[rt], s);
         }
         for (int t = 0; t < NT; t++) {
           simdgroup_matrix<float, 8, 8> am;
@@ -115,6 +118,9 @@ template <int BITS, int S, int NT, int RT>
             const uint mask = 0xFu << (4 * s);
             am.thread_elements()[0] = float(wv[t][0] & mask);
             am.thread_elements()[1] = float(wv[t][1] & mask);
+          } else if (BITS == 2) { // codes 8fn + s and 8fn + 8 + s in place: scaled 2^2s and 2^(16 + 2s)
+            am.thread_elements()[0] = float(wv[t][0] & (3u << (2 * s)));
+            am.thread_elements()[1] = float(wv[t][0] & (3u << (16 + 2 * s)));
           } else {
             am.thread_elements()[0] = tf_sqw_code<BITS>(wv[t], s);
             am.thread_elements()[1] = tf_sqw_code<BITS>(wv[t], 8 + s);
@@ -214,7 +220,7 @@ template <int BITS, int S, int NR, int XB, int RS>
       const int gl = (RS == 1 ? idx : idx - r * (nbk * 8)) / 8, j = idx % 8;
       const uint4 v = X[size_t(r) * (K / 8) + 8 * (b0 + gl) + j];
       threadgroup float* xr = xs + r * (XB * XP) + gl * XP;
-      for (int e = 0; e < 8; e++) xr[8 * e + j] = BITS == 4 ? tf_sqw_bf8(v, e) * tf_sqw_pre(e) : tf_sqw_bf8(v, e);
+      for (int e = 0; e < 8; e++) xr[8 * e + j] = BITS == 4 ? tf_sqw_bf8(v, e) * tf_sqw_pre(e) : BITS == 2 ? tf_sqw_bf8(v, e) * tf_sqw_pre2(e, j & 1) : tf_sqw_bf8(v, e);
       xr[64 + j] = tf_sqw_sum8(v, one);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -246,7 +252,7 @@ template <int BITS, int S, int NR, int XB, int RS>
         for (int u = 0; u < NR; u++)
           #pragma clang loop unroll(full)
           for (int i = 0; i < 8; i++) {
-            const float q = BITS == 4 ? float(wv[u][i] & (0xFu << (4 * s))) : tf_sqw_code<BITS>(wv[u], 8 * i + s);
+            const float q = BITS == 4 ? float(wv[u][i] & (0xFu << (4 * s))) : BITS == 2 ? float(wv[u][i / 2] & (3u << (16 * (i & 1) + 2 * s))) : tf_sqw_code<BITS>(wv[u], 8 * i + s);
             for (int r = 0; r < RS; r++) P[u][r] = fma(xq[r][i], q, P[u][r]);
           }
       }
