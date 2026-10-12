@@ -127,7 +127,7 @@ pub fn main(init: std.process.Init) !void {
             for (rows, 0..) |row, i| want_n[i] = row.nkeys;
             const cb = queue.commandBuffer();
             const e = cb.compute(.serial);
-            try g.layer.attention(&K, &rk.layer, &rk.s, e, &rk.c, n, p0 + n - 1, 0, .{ .buf = rk.s.y });
+            try g.layer.attention(&K, &rk.layer, &rk.s, e, &rk.c, n, p0 + n - 1, 0, .{ .buf = rk.s.x }, .{ .buf = rk.s.y });
             e.end();
             try finish(cb);
         }
@@ -152,7 +152,7 @@ pub fn main(init: std.process.Init) !void {
             var e = cb.compute(.serial);
             g.layer.postNorm(&K, &rk.layer, &rk.s, e, &rk.c, n, 0);
             e.barrier();
-            if (rk.c.isMoe(L)) try g.layer.route(&K, &rk.layer, &rk.s, e, &rk.c, n) else try g.layer.denseMlp(&K, &rk.layer, &rk.s, e, &rk.c, n, .{ .buf = rk.s.y });
+            if (rk.c.isMoe(L)) try g.layer.route(&K, &rk.layer, &rk.s, e, &rk.c, n, .{ .buf = rk.s.x }, null, null) else try g.layer.denseMlp(&K, &rk.layer, &rk.s, e, &rk.c, n, .{ .buf = rk.s.x }, .{ .buf = rk.s.y });
             e.end();
             try finish(cb);
             if (!rk.c.isMoe(L)) continue;

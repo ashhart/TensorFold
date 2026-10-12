@@ -18,6 +18,7 @@ pub const exl3_projection = @import("core/exl3_projection.zig");
 pub const exlr8 = @import("core/exlr8.zig");
 pub const exlr8_projection = @import("core/exlr8_projection.zig");
 pub const exlr8_dense_gpu = @import("core/exlr8_dense_gpu.zig");
+pub const exlr8_prompt = @import("core/exlr8_prompt.zig");
 pub const glm_dsa = @import("families/glm_dsa/glm_dsa.zig");
 pub const nemotron = @import("families/nemotron/nemotron.zig");
 pub const flashnext_replay = @import("families/flashnext/replay.zig");

@@ -54,7 +54,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     h.wall = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-dsa-zig", .lanes = streams, .context_window = window, .prefill_step = g.gpu.max_rows, .greedy_only = true });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-dsa-zig", .lanes = streams, .context_window = window, .prefill_step = g.gpu.prompt_rows, .greedy_only = true });
     h.host.explain = .{ .text = words };
     h.cache = null;
     const used = e.device.allocated();

@@ -6,7 +6,8 @@ const fl = @import("follow.zig");
 const snap = @import("snap.zig");
 const be = lanes.backend;
 const Stream = lanes.Stream;
-const R = @import("gpu.zig").max_rows;
+const gpu = @import("gpu.zig");
+const R = gpu.max_rows;
 
 const RING = 1024;
 
@@ -113,7 +114,7 @@ pub const Backend = struct {
             while (mark < s.reuse.marks.len and s.reuse.marks[mark] <= at) mark += 1;
             var end: u32 = if (next < s.chunks.len) s.chunks[next] else @intCast(prompt.len);
             if (mark < s.reuse.marks.len) end = @min(end, s.reuse.marks[mark]); // a mark ends a chunk: its state is kept there
-            const n = @min(end - at, R);
+            const n = @min(end - at, gpu.prompt_rows);
             if (try fl.chunk(e, i, at, n, false)) |t| b.first[i] = t;
             at += n;
             if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, at);

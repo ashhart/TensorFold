@@ -60,7 +60,7 @@ fn once(e: *g.engine.Engine, io: std.Io, t: *const tok.Tokenizer, prompt: []cons
     var at: u32 = 0;
     var first: u32 = 0;
     while (at < prompt.len) {
-        const n: u32 = @intCast(@min(16, prompt.len - at));
+        const n: u32 = @intCast(@min(g.gpu.prompt_rows, prompt.len - at));
         if (try g.follow.chunk(e, 0, at, n, forced)) |f| first = f;
         if (forced) for (e.picks(n), 0..) |p, r| {
             if (at + r + 1 < prompt.len and p == prompt[at + r + 1]) agree += 1;

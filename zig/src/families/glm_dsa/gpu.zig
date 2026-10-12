@@ -71,6 +71,70 @@ pub const slots = 9;
 pub const max_experts = max_rows * 8 + 1;
 pub const gu_cap = max_experts * 2 * 16;
 
+/// The rows a prompt window takes at most: attention runs them 16 at a time, the experts all at once.
+pub const prompt_rows = 256;
+
+/// A prompt window's buffers beside the 16-row scratch: its rows' hidden states and the experts' work for all of them.
+pub const Prompt = struct {
+    h: mtl.Buffer,
+    x: mtl.Buffer,
+    rot: mtl.Buffer,
+    rows: mtl.Buffer,
+    ids: mtl.Buffer,
+    /// The MTP head's rows and tokens over the same window (one command buffer runs both).
+    rows_mtp: mtl.Buffer,
+    ids_mtp: mtl.Buffer,
+    picks: mtl.Buffer,
+    /// 0, 1, 2, ...: a gather's indices for rows in order.
+    idx: mtl.Buffer,
+    pick: mtl.Buffer,
+    wts8: mtl.Buffer,
+    gu: mtl.Buffer,
+    act: mtl.Buffer,
+    arot: mtl.Buffer,
+    z: mtl.Buffer,
+    wts: mtl.Buffer,
+    sv: mtl.Buffer,
+    suh: mtl.Buffer,
+    jobs: mtl.Buffer,
+    members: mtl.Buffer,
+    dispatch: mtl.Buffer,
+    /// Expert tiles of 32 rows a window makes at most, and the gate/up jobs before the down ones.
+    tiles: u32,
+    gu_cap: u32,
+
+    pub fn init(device: mtl.Device, c: *const cfg.Config) !Prompt {
+        const P: usize = prompt_rows;
+        const S = P * slots;
+        const loc: usize = c.localHalves() * 128;
+        const tiles: u32 = @intCast((P * c.topk + 31) / 32 + max_experts + P / 32 + 1);
+        const cap = tiles * 2 * 16;
+        var q: Prompt = undefined;
+        q.tiles = tiles;
+        q.gu_cap = cap;
+        const sizes = .{
+            .{ &q.h, P * c.hidden * 4 },                                  .{ &q.x, P * c.hidden * 4 },   .{ &q.rot, P * c.hidden * 4 },
+            .{ &q.rows, P * @sizeOf(kn.Row) },                            .{ &q.ids, P * 4 },            .{ &q.pick, P * c.topk * 4 },
+            .{ &q.rows_mtp, P * @sizeOf(kn.Row) },                        .{ &q.ids_mtp, P * 4 },        .{ &q.picks, P * 4 },
+            .{ &q.idx, P * 4 },
+            .{ &q.wts8, P * c.topk * 4 },                                 .{ &q.gu, S * 2 * loc * 4 },   .{ &q.act, S * loc * 4 },
+            .{ &q.arot, S * loc * 4 },                                    .{ &q.z, S * c.hidden * 4 },   .{ &q.wts, S * 4 },
+            .{ &q.sv, S * 4 },                                            .{ &q.suh, S * 4 },            .{ &q.members, @as(usize, tiles) * 64 * 4 },
+            .{ &q.jobs, (@as(usize, cap) + @as(usize, tiles) * 48) * @sizeOf(ex.job.Job) }, .{ &q.dispatch, 32 },
+        };
+        inline for (sizes) |e| e[0].* = try device.buffer(@max(e[1], 16), mtl.ResourceOptions.shared);
+        for (q.idx.slice(u32, P), 0..) |*v, i| v.* = @intCast(i);
+        return q;
+    }
+
+    pub fn deinit(q: *Prompt) void {
+        const info = @typeInfo(Prompt).@"struct";
+        inline for (info.field_names, info.field_types) |name, T| {
+            if (T == mtl.Buffer) @field(q, name).deinit();
+        }
+    }
+};
+
 /// Activations for one window of up to 16 rows, sized for one Mac's share of the model.
 pub const Scratch = struct {
     h: mtl.Buffer,
@@ -102,6 +166,8 @@ pub const Scratch = struct {
     members: mtl.Buffer,
     dispatch: mtl.Buffer,
     context: u32,
+    /// The rows table's first entry for this window (a prompt window's 16-row part).
+    rows_off: usize = 0,
 
     pub fn init(device: mtl.Device, c: *const cfg.Config, context: u32) !Scratch {
         const R: usize = max_rows;
@@ -110,6 +176,7 @@ pub const Scratch = struct {
         const f = 4;
         var s: Scratch = undefined;
         s.context = context;
+        s.rows_off = 0;
         const sizes = .{
             .{ &s.h, R * c.hidden * f },                                         .{ &s.x, R * c.hidden * f },              .{ &s.proj, R * 2784 * f },
             .{ &s.q_resid, R * c.q_lora * f },                                   .{ &s.rot, R * 16384 * f },               .{ &s.q, R * nh * c.qHead() * f },

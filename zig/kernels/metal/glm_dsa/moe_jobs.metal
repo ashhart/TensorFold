@@ -74,3 +74,74 @@ kernel void glm_moe_jobs(const device int* lids [[buffer(0)]], const device int*
     dispatch[4] = total * 48, dispatch[5] = 1, dispatch[6] = 1;
   }
 }
+
+struct PromptJobsArgs {
+  uint rows, halves, topk, slots;
+  uint gu_cap, experts, pad0, pad1;
+};
+
+// A prompt window's expert jobs: each expert's rows in row order, tiles of 32 rows with their jobs and member lists.
+kernel void glm_moe_jobs_prompt(const device int* pick [[buffer(0)]], const device float* wts [[buffer(1)]],
+                                const device ExpertDesc* ex [[buffer(2)]], constant PromptJobsArgs& a [[buffer(3)]],
+                                device Job* jobs [[buffer(4)]], device uint* members [[buffer(5)]],
+                                device float* wts9 [[buffer(6)]], device uint* sv9 [[buffer(7)]],
+                                device uint* suh9 [[buffer(8)]], device uint* dispatch [[buffer(9)]],
+                                uint t [[thread_index_in_threadgroup]]) {
+  threadgroup uint first[SHARED + 2];
+  const uint loc = 128 * a.halves;
+  for (uint p = t; p < a.rows * a.slots; p += 1024) {
+    const uint r = p / a.slots, k = p % a.slots;
+    const uint e = k < a.topk ? uint(pick[r * a.topk + k]) : SHARED;
+    wts9[p] = k < a.topk ? wts[r * a.topk + k] : 1.0f;
+    sv9[p] = ex[e].down_block;
+    suh9[p] = ex[e].down_suh;
+  }
+  // each expert's rows, then the tiles before it
+  for (uint e = t; e <= SHARED; e += 1024) {
+    uint n = 0;
+    if (e == SHARED) n = a.rows;
+    else
+      for (uint i = 0; i < a.rows * a.topk; ++i) n += uint(pick[i]) == e ? 1u : 0u;
+    first[e + 1] = (n + 31) / 32;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t == 0) {
+    first[0] = 0;
+    for (uint e = 0; e <= SHARED; ++e) first[e + 1] += first[e];
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint e = t; e <= SHARED; e += 1024) {
+    const uint tiles = first[e + 1] - first[e];
+    if (tiles == 0) continue;
+    uint n = 0;
+    for (uint r = 0; r < a.rows; ++r) {
+      uint k = a.slots - 1;
+      if (e != SHARED) {
+        k = a.topk;
+        for (uint q = 0; q < a.topk; ++q)
+          if (uint(pick[r * a.topk + q]) == e) k = q;
+        if (k == a.topk) continue;
+      }
+      const uint p9 = r * a.slots + k, m = (first[e] + n / 32) * 64 + n % 32;
+      members[m] = (r << 16) | p9;
+      members[m + 32] = (p9 << 16) | p9;
+      ++n;
+    }
+    const device ExpertDesc& d = ex[e];
+    for (uint i = 0; i < tiles; ++i) {
+      const uint tile = first[e] + i, cnt = min(32u, n - 32 * i), gm = tile * 64, dm = gm + 32;
+      for (uint h = 0; h < a.halves; ++h) {
+        const uint c = 128 * h;
+        jobs[tile * 2 * a.halves + 2 * h] = Job{d.gate_k[h], 48, d.gate_base[h], d.gate_block[h], d.gate_chan[h], 0xFFFFFFFFu, 0xFFFFFFFFu, 0, c, 0, gm, cnt};
+        jobs[tile * 2 * a.halves + 2 * h + 1] = Job{d.up_k[h], 48, d.up_base[h], d.up_block[h], d.up_chan[h], 0xFFFFFFFFu, 0xFFFFFFFFu, 0, loc + c, 0, gm, cnt};
+      }
+      for (uint ob = 0; ob < 48; ++ob)
+        jobs[a.gu_cap + tile * 48 + ob] = Job{d.down_k, a.halves, d.down_base + ob * a.halves, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0, 128 * ob, 1, dm, cnt};
+    }
+  }
+  if (t == 0) {
+    const uint tiles = first[SHARED + 1];
+    dispatch[0] = tiles * 2 * a.halves, dispatch[1] = 1, dispatch[2] = 1;
+    dispatch[4] = tiles * 48, dispatch[5] = 1, dispatch[6] = 1;
+  }
+}

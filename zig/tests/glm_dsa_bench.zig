@@ -51,16 +51,16 @@ const Ctx = struct {
 };
 
 fn attention(x: Ctx, e: mtl.ComputeEncoder) !void {
-    try g.layer.attention(x.K, x.L, x.s, e, x.c, x.rows, x.last, null, .{ .buf = x.s.y });
+    try g.layer.attention(x.K, x.L, x.s, e, x.c, x.rows, x.last, null, .{ .buf = x.s.x }, .{ .buf = x.s.y });
 }
 fn route(x: Ctx, e: mtl.ComputeEncoder) !void {
-    try g.layer.route(x.K, x.L, x.s, e, x.c, x.rows);
+    try g.layer.route(x.K, x.L, x.s, e, x.c, x.rows, .{ .buf = x.s.x }, null, null);
 }
 fn mlp(x: Ctx, e: mtl.ComputeEncoder) !void {
     if (x.L.w.mlp == .moe) {
-        try g.layer.route(x.K, x.L, x.s, e, x.c, x.rows);
+        try g.layer.route(x.K, x.L, x.s, e, x.c, x.rows, .{ .buf = x.s.x }, null, null);
         try g.layer.expertsGpu(x.K, x.L, x.s, e, x.c, x.rows, .{ .buf = x.s.y });
-    } else try g.layer.denseMlp(x.K, x.L, x.s, e, x.c, x.rows, .{ .buf = x.s.y });
+    } else try g.layer.denseMlp(x.K, x.L, x.s, e, x.c, x.rows, .{ .buf = x.s.x }, .{ .buf = x.s.y });
 }
 const Lr = g.layer.Layer;
 fn ref(b: mtl.Buffer) g.kernels.Ref {

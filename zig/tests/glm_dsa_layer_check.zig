@@ -157,7 +157,7 @@ pub fn main(init: std.process.Init) !void {
         var e = cb.compute(.serial);
         var lw = layer;
         if (ref_topk) lw.w.full = false;
-        try g.layer.attention(&K, &lw, &s, e, &c, n, p0 + n - 1, 0, .{ .buf = s.y });
+        try g.layer.attention(&K, &lw, &s, e, &c, n, p0 + n - 1, 0, .{ .buf = s.x }, .{ .buf = s.y });
         e.end();
         try finish(cb);
         if (w.full and !ref_topk) for (0..n) |i| {
@@ -204,7 +204,7 @@ pub fn main(init: std.process.Init) !void {
         e = cb.compute(.serial);
         g.layer.postNorm(&K, &layer, &s, e, &c, n, 1);
         e.barrier();
-        if (c.isMoe(L)) try g.layer.route(&K, &layer, &s, e, &c, n) else try g.layer.denseMlp(&K, &layer, &s, e, &c, n, .{ .buf = s.y });
+        if (c.isMoe(L)) try g.layer.route(&K, &layer, &s, e, &c, n, .{ .buf = s.x }, null, null) else try g.layer.denseMlp(&K, &layer, &s, e, &c, n, .{ .buf = s.x }, .{ .buf = s.y });
         e.end();
         try finish(cb);
         stats[7].add(s.x.slice(f32, n * hid), refs.get("x2").?.f, p0, hid, hid, n, topk_diff);

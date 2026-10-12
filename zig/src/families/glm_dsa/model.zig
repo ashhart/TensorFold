@@ -57,7 +57,8 @@ pub const Model = struct {
         const R = gpu.max_rows;
         const n = m.vocab.part[1] - m.vocab.part[0];
         m.logits = try device.buffer(R * @as(usize, n) * 4, mtl.ResourceOptions.shared);
-        m.head = .{ .cat = try device.buffer(R * 2 * @as(usize, c.hidden) * 4, mtl.ResourceOptions.shared), .prev = try device.buffer(R * @as(usize, c.hidden) * 4, mtl.ResourceOptions.shared) };
+        const P = gpu.prompt_rows;
+        m.head = .{ .cat = try device.buffer(P * 2 * @as(usize, c.hidden) * 4, mtl.ResourceOptions.shared), .prev = try device.buffer(P * @as(usize, c.hidden) * 4, mtl.ResourceOptions.shared) };
         m.bytes += m.vocab.k.bytes.length() + m.logits.length();
         return m;
     }
@@ -93,7 +94,7 @@ pub const Model = struct {
         return v;
     }
 
-    fn glue(m: *const Model, x_stride: u32, y_stride: u32) kn.GlueArgs {
+    pub fn glue(m: *const Model, x_stride: u32, y_stride: u32) kn.GlueArgs {
         return .{ .width = m.c.hidden, .x_stride = x_stride, .y_stride = y_stride, .eps = m.c.eps };
     }
 
@@ -101,15 +102,15 @@ pub const Model = struct {
     fn layer(m: *Model, L: *const ly.Layer, s: *const gpu.Scratch, e: mtl.ComputeEncoder, rows: u32, last_pos: u32, next: Ref) !void {
         const p = m.pair;
         const hid = m.c.hidden;
-        try ly.attention(&m.K, L, s, e, &m.c, rows, last_pos, null, p.part());
+        try ly.attention(&m.K, L, s, e, &m.c, rows, last_pos, null, .{ .buf = s.x }, p.part());
         e.barrier();
         p.addRms(e, .{ .buf = s.h }, L.k.at(L.w.post_norm), .{ .buf = s.x }, rows, hid, m.c.eps);
         e.barrier();
         const o = p.part();
         if (L.w.mlp == .moe) {
-            try ly.route(&m.K, L, s, e, &m.c, rows);
+            try ly.route(&m.K, L, s, e, &m.c, rows, .{ .buf = s.x }, null, null);
             try ly.expertsGpu(&m.K, L, s, e, &m.c, rows, o);
-        } else try ly.denseMlp(&m.K, L, s, e, &m.c, rows, o);
+        } else try ly.denseMlp(&m.K, L, s, e, &m.c, rows, .{ .buf = s.x }, o);
         e.barrier();
         p.addRms(e, .{ .buf = s.h }, next, .{ .buf = s.x }, rows, hid, m.c.eps);
         e.barrier();
@@ -130,11 +131,11 @@ pub const Model = struct {
         }
     }
 
-    /// Each row's next token over the whole vocabulary from s.x (the two Macs' halves) into `picks`.
-    pub fn pick(m: *Model, s: *const gpu.Scratch, e: mtl.ComputeEncoder, rows: u32, picks: Ref) !void {
+    /// Each row's next token over the whole vocabulary from normed rows `x` (1-16; the two Macs' halves) into `picks`.
+    pub fn pick(m: *Model, e: mtl.ComputeEncoder, x: Ref, rows: u32, picks: Ref) !void {
         const v = &m.vocab;
         const n = v.part[1] - v.part[0];
-        try dg.encodeProject(&m.K.dg, e, .{ .buf = s.x }, v.k.dense(v.groups[0]), .{ .buf = m.logits }, rows, m.c.hidden, n, true);
+        try dg.encodeProject(&m.K.dg, e, x, v.k.dense(v.groups[0]), .{ .buf = m.logits }, rows, m.c.hidden, n, true);
         e.barrier();
         m.pair.argmax(e, .{ .buf = m.logits }, n, v.part[0], n, rows, picks);
         e.barrier();

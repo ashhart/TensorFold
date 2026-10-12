@@ -73,6 +73,7 @@ pub const ExpertDesc = extern struct {
 };
 
 pub const JobsArgs = extern struct { rows: u32, halves: u32, topk: u32, slots: u32, gu_cap: u32, pad0: u32 = 0, pad1: u32 = 0, pad2: u32 = 0 };
+pub const PromptJobsArgs = extern struct { rows: u32, halves: u32, topk: u32, slots: u32, gu_cap: u32, experts: u32, pad0: u32 = 0, pad1: u32 = 0 };
 
 pub const splits = 16;
 const capacities = [_]usize{ 1, 2, 4, 8, 16 };
@@ -91,6 +92,7 @@ pub const Pipelines = struct {
     gather: mtl.Pipeline,
     select: mtl.Pipeline,
     moe_jobs: mtl.Pipeline,
+    moe_jobs_prompt: mtl.Pipeline,
 
     pub fn load(gpa: std.mem.Allocator, device: mtl.Device, experts: u32, hidden: u32, topk: u32) !Pipelines {
         const pool = mtl.objc.Pool.push();
@@ -125,14 +127,15 @@ pub const Pipelines = struct {
         p.gather = try mtl.Pipeline.init(device, glue, "glm_gather", false);
         p.select = try mtl.Pipeline.init(device, rl, route.names[1], false);
         p.moe_jobs = try mtl.Pipeline.init(device, jl, "glm_moe_jobs", false);
-        if (p.topk.maxThreads() < 1024) return error.UnsupportedGlmPipeline;
+        p.moe_jobs_prompt = try mtl.Pipeline.init(device, jl, "glm_moe_jobs_prompt", false);
+        if (p.topk.maxThreads() < 1024 or p.moe_jobs_prompt.maxThreads() < 1024) return error.UnsupportedGlmPipeline;
         return p;
     }
 
     pub fn deinit(p: *Pipelines) void {
         p.prep.deinit();
         for (p.absorb) |q| q.deinit();
-        inline for (.{ p.attend, p.merge, p.index_key, p.index_scores, p.topk, p.embed, p.add_rms, p.silu_mul, p.gather, p.select, p.moe_jobs }) |q| q.deinit();
+        inline for (.{ p.attend, p.merge, p.index_key, p.index_scores, p.topk, p.embed, p.add_rms, p.silu_mul, p.gather, p.select, p.moe_jobs, p.moe_jobs_prompt }) |q| q.deinit();
     }
 };
 
@@ -257,6 +260,15 @@ pub fn moeJobs(p: *const Pipelines, e: mtl.ComputeEncoder, route_out: [9]mtl.Buf
     e.setValue(a, 6);
     inline for (.{ jobs, members, wts, sv, suh, dispatch }, 7..) |r, i| bind(e, i, r);
     e.dispatchGroups(.{ .width = 1 }, .{ .width = 256 });
+}
+
+/// A prompt window's expert jobs from its picks: tiles of 32 rows, member lists, per-slot tables, the two counts.
+pub fn moeJobsPrompt(p: *const Pipelines, e: mtl.ComputeEncoder, pick: Ref, wts: Ref, desc: Ref, a: PromptJobsArgs, jobs: Ref, members: Ref, wts9: Ref, sv: Ref, suh: Ref, dispatch: Ref) void {
+    e.setPipeline(p.moe_jobs_prompt);
+    inline for (.{ pick, wts, desc }, 0..) |r, i| bind(e, i, r);
+    e.setValue(a, 3);
+    inline for (.{ jobs, members, wts9, sv, suh, dispatch }, 4..) |r, i| bind(e, i, r);
+    e.dispatchGroups(.{ .width = 1 }, .{ .width = 1024 });
 }
 
 pub const route_select = route.select;

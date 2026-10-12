@@ -7,6 +7,7 @@ const kn = @import("kernels.zig");
 const gpu = @import("gpu.zig");
 const md = @import("model.zig");
 const snap = @import("snap.zig");
+const pw = @import("prompt.zig");
 const Ref = kn.Ref;
 
 const R = gpu.max_rows;
@@ -48,6 +49,8 @@ pub const Engine = struct {
     /// Normed hidden rows for the MTP head: the last window's [0, R), a chunk's [R, 2R), each slot's last row from 2R.
     xs: mtl.Buffer,
     words: std.ArrayList(u32) = .empty,
+    /// A prompt window's buffers.
+    q: gpu.Prompt,
     /// Kept prompt states by id (the same ids on both Macs).
     snaps: std.AutoHashMapUnmanaged(u32, *snap.Snap) = .empty,
     context: u32,
@@ -63,13 +66,14 @@ pub const Engine = struct {
         e.io = io;
         e.device = try mtl.Device.init();
         e.queue = try e.device.queue();
-        e.pair = try pr.Pair.init(gpa, io, e.device, settings);
+        e.pair = try pr.Pair.init(gpa, io, e.device, settings, gpu.prompt_rows * 6144 * 4);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fmt.allocPrint(gpa, "{s}/config.json", .{dir}), gpa, .limited(1 << 20));
         var c = try cfg.parse(gpa, text);
         try cfg.split(&c, e.pair.rank, 2);
         e.context = context;
         e.m = try md.Model.load(gpa, io, e.device, dir, c, layers orelse c.layers, mtp, context, streams, e.pair, limit);
         e.s = try gpu.Scratch.init(e.device, &e.m.c, context);
+        e.q = try gpu.Prompt.init(e.device, &e.m.c);
         e.slots = try gpa.alloc(Slot, streams);
         for (e.slots) |*s| s.* = .{};
         for (&e.pass) |*p| p.* = .{ .ids = try buf(e.device, R * 4), .rows = try buf(e.device, R * @sizeOf(kn.Row)), .picks = try buf(e.device, R * 4), .idx = try buf(e.device, R * 4) };
@@ -91,6 +95,7 @@ pub const Engine = struct {
         for (e.slots) |*s| s.prompt.deinit(e.gpa);
         e.m.deinit();
         e.s.deinit();
+        e.q.deinit();
         for (e.pass) |p| inline for (.{ p.ids, p.rows, p.picks, p.idx }) |b| b.deinit();
         e.xs.deinit();
         e.words.deinit(e.gpa);
@@ -144,54 +149,50 @@ pub const Engine = struct {
         try s.prompt.appendSlice(e.gpa, prompt);
     }
 
-    /// Prompt rows [at, at + n) of slot i into its caches (and the head's), the first token at the end (`every`: all).
+    /// Prompt rows [at, at + n) of slot i (a prompt window) into its caches and the head's; the first token at the end.
     pub fn chunk(e: *Engine, i: u32, at: u32, n: u32, every: bool) !?u32 {
         if (i >= e.slots.len) return error.ChunkOutOfStep;
         const s = &e.slots[i];
-        if (!s.used or s.open > 0 or at != s.len or n == 0 or n > R or at + n > s.prompt.items.len) return error.ChunkOutOfStep;
+        if (!s.used or s.open > 0 or at != s.len or n == 0 or n > gpu.prompt_rows or at + n > s.prompt.items.len) return error.ChunkOutOfStep;
         const hid = e.m.c.hidden;
         const last = at + n == s.prompt.items.len;
         const toks = s.prompt.items;
-        @memcpy(u32s(e.pass[0].ids, n), toks[at..][0..n]);
-        for (0..n) |r| e.setRow(0, r, i, at + @as(u32, @intCast(r)));
+        const q = &e.q;
+        @memcpy(u32s(q.ids, n), toks[at..][0..n]);
+        for (q.rows.slice(kn.Row, n), 0..) |*row, r| row.* = .{ .slot = i, .pos = at + @as(u32, @intCast(r)), .list = @intCast((r % R) * e.m.c.i_topk) };
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = e.queue.commandBuffer();
         const enc = cb.compute(.serial);
         const s0 = e.scratch(0);
-        try e.m.backbone(&s0, enc, n, at + n - 1, .{ .buf = e.pass[0].ids });
-        if (last or every) try e.m.pick(&s0, enc, n, .{ .buf = e.pass[0].picks });
+        try pw.backbone(&e.m, &s0, q, enc, n, at);
+        var k: u32 = if (every) 0 else n - 1;
+        while (k < n and (last or every)) : (k += R) {
+            const rows = @min(R, n - k);
+            try e.m.pick(enc, .{ .buf = q.x, .off = @as(usize, k) * hid * 4 }, rows, .{ .buf = q.picks, .off = @as(usize, k) * 4 });
+        }
         if (e.hasMtp()) {
             // the head's rows: the one before this chunk (the slot's xs row), then all but the last
             const carry: u32 = @intFromBool(at > 0);
             const mr = carry + n - 1;
-            const idx = u32s(e.pass[1].idx, R);
             for (0..mr) |r| {
                 const pos: u32 = at - carry + @as(u32, @intCast(r));
-                idx[r] = if (carry == 1 and r == 0) 2 * R + i else @intCast(R + r - carry);
-                u32s(e.pass[1].ids, R)[r] = toks[pos + 1];
-                e.setRow(1, r, i, pos);
+                u32s(q.ids_mtp, gpu.prompt_rows)[r] = toks[pos + 1];
+                q.rows_mtp.slice(kn.Row, gpu.prompt_rows)[r] = .{ .slot = i, .pos = pos, .list = @intCast((r % R) * e.m.c.i_topk) };
             }
-            // the chunk's hidden rows into xs [R, R + n); the slot's last row is read before it is replaced
-            for (u32s(e.pass[2].idx, n), 0..) |*x, r| x.* = @intCast(r);
-            kn.gather(&e.m.K.k, enc, .{ .buf = s0.x }, .{ .buf = e.pass[2].idx }, hid, hid, hid, .{ .buf = e.xs, .off = R * hid * 4 }, n);
+            u32s(e.pass[1].idx, 1)[0] = 2 * R + i;
+            if (carry == 1) kn.gather(&e.m.K.k, enc, .{ .buf = e.xs }, .{ .buf = e.pass[1].idx }, hid, hid, hid, .{ .buf = e.m.head.prev }, 1);
+            if (n > 1) kn.gather(&e.m.K.k, enc, .{ .buf = q.x }, .{ .buf = q.idx }, hid, hid, hid, .{ .buf = e.m.head.prev, .off = @as(usize, carry) * hid * 4 }, n - 1);
             enc.barrier();
-            if (mr > 0) {
-                kn.gather(&e.m.K.k, enc, .{ .buf = e.xs }, .{ .buf = e.pass[1].idx }, hid, hid, hid, .{ .buf = e.m.head.prev }, mr);
-                enc.barrier();
-            }
-            u32s(e.pass[3].idx, 1)[0] = R + n - 1;
-            kn.gather(&e.m.K.k, enc, .{ .buf = e.xs }, .{ .buf = e.pass[3].idx }, hid, hid, hid, .{ .buf = e.xs, .off = (2 * R + @as(usize, i)) * hid * 4 }, 1);
+            u32s(e.pass[3].idx, 1)[0] = n - 1;
+            kn.gather(&e.m.K.k, enc, .{ .buf = q.x }, .{ .buf = e.pass[3].idx }, hid, hid, hid, .{ .buf = e.xs, .off = (2 * R + @as(usize, i)) * hid * 4 }, 1);
             enc.barrier();
-            if (mr > 0) {
-                const s1 = e.scratch(1);
-                try e.m.draft(&s1, enc, mr, at + n - 2, .{ .buf = e.pass[1].ids }, .{ .buf = e.m.head.prev });
-            }
+            if (mr > 0) try pw.draft(&e.m, &s0, q, enc, mr, at - carry);
         }
         enc.end();
         try e.finish(cb);
         s.len = at + n;
-        return if (last) u32s(e.pass[0].picks, n)[n - 1] else null;
+        return if (last) u32s(q.picks, n)[n - 1] else null;
     }
 
     /// One forward over every window's rows: each row's next token into `out` (rows in window order).
@@ -223,7 +224,7 @@ pub const Engine = struct {
         const enc = cb.compute(.serial);
         const s0 = e.scratch(0);
         try e.m.backbone(&s0, enc, rows, top, .{ .buf = e.pass[0].ids });
-        try e.m.pick(&s0, enc, rows, .{ .buf = e.pass[0].picks });
+        try e.m.pick(enc, .{ .buf = s0.x }, rows, .{ .buf = e.pass[0].picks });
         for (u32s(e.pass[2].idx, rows), 0..) |*x, r| x.* = @intCast(r);
         kn.gather(&e.m.K.k, enc, .{ .buf = s0.x }, .{ .buf = e.pass[2].idx }, hid, hid, hid, .{ .buf = e.xs }, rows);
         enc.end();
@@ -293,7 +294,7 @@ pub const Engine = struct {
         enc.barrier();
         const s1 = e.scratch(1);
         try e.m.draft(&s1, enc, rows, top, .{ .buf = e.pass[1].ids }, .{ .buf = e.m.head.prev });
-        if (depth > 0) try e.m.pick(&s1, enc, rows, .{ .buf = e.pass[1].picks });
+        if (depth > 0) try e.m.pick(enc, .{ .buf = s1.x }, rows, .{ .buf = e.pass[1].picks });
         var d: u32 = 2;
         while (d <= depth) : (d += 1) {
             const p = &e.pass[d];
@@ -307,7 +308,7 @@ pub const Engine = struct {
             enc.barrier();
             const sd = e.scratch(d);
             try e.m.draft(&sd, enc, nq, top + d - 1, .{ .buf = p.ids }, .{ .buf = e.m.head.prev });
-            try e.m.pick(&sd, enc, nq, .{ .buf = p.picks });
+            try e.m.pick(enc, .{ .buf = sd.x }, nq, .{ .buf = p.picks });
         }
         enc.end();
         try e.finish(cb);
@@ -318,9 +319,9 @@ pub const Engine = struct {
         }
     }
 
-    /// The last chunk's or window's picks.
+    /// The last chunk's picks (with `every`).
     pub fn picks(e: *const Engine, n: usize) []const u32 {
-        return u32s(e.pass[0].picks, n);
+        return u32s(e.q.picks, n);
     }
 
     pub fn held(e: *const Engine, i: u32) []const u32 {
