@@ -239,3 +239,25 @@ test "records parse every field and refuse an unknown format, side or a trellis 
     t.shape[0] = 7;
     try std.testing.expectError(error.BadExlr8Record, Record.parse(t));
 }
+
+test "an fp32 matrix (format 7, which the GLM-5.3 release does not use) reads as stored and checks its blocks" {
+    var vals: [2 * 32]f32 = undefined;
+    for (&vals, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i)) * 0.25 - 3;
+    const data = std.mem.sliceAsBytes(&vals);
+    var rec: [64]u8 = undefined;
+    for ([8]i64{ 7, 2, 32, 0, 0, 0, 0, 0 }, 0..) |v, i| std.mem.writeInt(i64, rec[8 * i ..][0..8], v, .little);
+    var sum: [8]u8 = undefined;
+    std.mem.writeInt(u64, &sum, xxh.hash(0, data), .little);
+    const m: Matrix = .{
+        .record = try Record.parse(.{ .dtype = .i64, .rank = 1, .shape = .{ 8, 1, 1, 1, 1 }, .bytes = &rec }),
+        .data = .{ .{ .dtype = .f32, .rank = 2, .shape = .{ 2, 32, 1, 1, 1 }, .bytes = data }, undefined, undefined },
+        .checksum = .{ .dtype = .u64, .rank = 1, .shape = .{ 1, 1, 1, 1, 1 }, .bytes = &sum },
+    };
+    try m.check();
+    var out: [64]f32 = undefined;
+    try m.rows(0, 2, &out);
+    try std.testing.expectEqualSlices(f32, &vals, &out);
+    try std.testing.expect(try m.verify());
+    sum[0] ^= 1;
+    try std.testing.expect(!try m.verify());
+}
