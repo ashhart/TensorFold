@@ -210,10 +210,10 @@ fn qmmF32(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref
 }
 
 /// The routed experts' gate, up and SwiGLU on the M rows of `x_in` its pairs read (in expert order) into `act` ([n, gate.n]).
-fn gateUp(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32, n: u32) void {
-    affine_mm.rowSums(e, p.mm.mm_bf16, 64, x_in, p.sums, M, w.gate.k);
-    affine_mm.gatherGlu(e, p.mm.mm_bf16, x_in, p.sums, w.gate, w.up, p.offsets, p.order, p.act, n, x.c.experts, x.c.topk, x.c.swiglu_limit);
-    affine_mm.rowSums(e, p.mm.mm_bf16, 64, p.act, p.sums, n, w.down.k);
+fn gateUp(p: *const Prompt, mm: affine_mm.Pipes, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32, n: u32) void {
+    affine_mm.rowSums(e, mm, 64, x_in, p.sums, M, w.gate.k);
+    affine_mm.gatherGlu(e, mm, x_in, p.sums, w.gate, w.up, p.offsets, p.order, p.act, n, x.c.experts, x.c.topk, x.c.swiglu_limit);
+    affine_mm.rowSums(e, mm, 64, p.act, p.sums, n, w.down.k);
 }
 
 fn swiglu(x: *const fwd.Ctx, e: mtl.ComputeEncoder, gu: Ref, act: Ref, rows: u32, width: u32) void {
@@ -253,7 +253,7 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     if (s & Class.route == 0) route(p, x, e, w, x_in, M);
     if (ep) |t| {
         if (s & Class.routed == 0) { // down's fp32 partials put back in (row, slot) order for the decode's combine
-            gateUp(p, x, e, w, x_in, M, n);
+            gateUp(p, p.mm.mm_bf16, x, e, w, x_in, M, n);
             affine_mm.gatherTo(e, p.mm.mm_f32, p.act, p.sums, w.down, p.offsets, p.yf, p.order, n, E);
         }
         if (s & Class.exchange == 0) t.sendRows(e, p.yf, p.wts, M);
@@ -261,12 +261,14 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
         if (s & Class.combine == 0) t.receiveRows(e, p.ys, out, M);
         return;
     }
-    if (s & Class.routed == 0 and !@import("moe.zig").native(w, .routed)) { // each expert's sorted pairs at its width
+    const path = wide.routed(w.gate, w.up, w.down);
+    if (s & Class.routed == 0 and path == .rows) { // each expert's sorted pairs at its width
         wide.bySorted(&p.mm.wide.?, e, .{ .w = w.gate, .up = w.up, .experts = E, .repeat = c.topk, .lim = c.swiglu_limit }, x_in, p.offsets, p.order, p.act, c.moe_inter);
         wide.bySorted(&p.mm.wide.?, e, .{ .w = w.down, .experts = E, .repeat = 1 }, p.act, p.offsets, p.order, p.yp, D);
     } else if (s & Class.routed == 0) { // down's rows put back in (row, slot) order for the combine
-        gateUp(p, x, e, w, x_in, M, n);
-        affine_mm.gatherTo(e, p.mm.mm_bf16, p.act, p.sums, w.down, p.offsets, p.yp, p.order, n, E);
+        const mm = if (path == .mm4) p.mm.mm_bf16 else p.mm.wide.?.mm2;
+        gateUp(p, mm, x, e, w, x_in, M, n);
+        affine_mm.gatherTo(e, mm, p.act, p.sums, w.down, p.offsets, p.yp, p.order, n, E);
     }
     if (s & Class.combine != 0) return;
     e.setPipeline(k.moe_combine);

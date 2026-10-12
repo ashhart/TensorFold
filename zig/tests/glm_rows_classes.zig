@@ -123,11 +123,11 @@ fn rowsLaunch(e: mtl.ComputeEncoder, p: *const wide.Pipes, q: affine.Affine, x: 
     wide.dense(p, e, q, .{ .in = (affine.Ref{ .buf = x }).at(at), .ldx = q.k, .out = .{ .buf = out }, .ldo = q.n, .rows = m });
 }
 
-fn mm8(e: mtl.ComputeEncoder, p: *const wide.Pipes, q: affine.Affine, x: mtl.Buffer, sums: mtl.Buffer, out: mtl.Buffer, m: u32) void {
+fn mmLaunch(e: mtl.ComputeEncoder, mm: affine_mm.Pipes, q: affine.Affine, x: mtl.Buffer, sums: mtl.Buffer, out: mtl.Buffer, m: u32) void {
     const xr: affine.Ref = .{ .buf = x };
     const sr: affine.Ref = .{ .buf = sums };
-    affine_mm.rowSums(e, p.mm8, 64, xr, sr, m, q.k);
-    affine_mm.dense(e, p.mm8, xr, sr, q, affine.Ref{ .buf = out }, m);
+    affine_mm.rowSums(e, mm, 64, xr, sr, m, q.k);
+    affine_mm.dense(e, mm, xr, sr, q, affine.Ref{ .buf = out }, m);
 }
 
 /// Each class at its widths (g64): decode rows (alone == windowed) and the prompt's product vs fp64, every column.
@@ -165,13 +165,14 @@ pub fn check(p: *const wide.Pipes, device: mtl.Device, queue: mtl.Queue) !Tally 
         try against(q, w, s, b, x, bufs[4].slice(u16, rows * n), n, 0, &t, 1.01); // scales 1% off must be seen
         if (t.caught == 0) return error.ControlNotCaught;
         // prompt: the chunk's product at rows 0 and 32; on the row kernels every row's bits equal the decode's
-        const eight = bits == 8;
-        if (eight) try submit(queue, mm8, .{ p, q, bufs[3], bufs[6], bufs[5], prompt_rows }) else try submit(queue, rowsLaunch, .{ p, q, bufs[3], 0, bufs[5], prompt_rows });
+        const mm: ?affine_mm.Pipes = if (bits == 8) p.mm8 else if (bits == 2) p.mm2 else null; // prompt.zig's (2: routed)
+        const on_mm = mm != null;
+        if (mm) |pipes| try submit(queue, mmLaunch, .{ pipes, q, bufs[3], bufs[6], bufs[5], prompt_rows }) else try submit(queue, rowsLaunch, .{ p, q, bufs[3], 0, bufs[5], prompt_rows });
         t.worst = 0;
-        const pitch = if (eight) np else n;
+        const pitch = if (on_mm) np else n;
         for ([_]usize{ 0, prompt_rows - 1 }) |i| try against(q, w, s, b, x, bufs[5].slice(u16, prompt_rows * pitch), pitch, i, &t, 1);
-        if (!eight and !std.mem.eql(u16, bufs[5].slice(u16, rows * n), bufs[4].slice(u16, rows * n))) return error.PromptDiffersFromDecode;
-        std.debug.print("{s} [{d}, {d}] q{d}: decode worst err/bound {d:.4}, prompt ({s}) {d:.4} at col {d}; max |err| {e:.3} = {e:.3} of max |y|; scales 1% off caught in {d} of {d} columns\n", .{ cl.name, n, k, bits, dec, if (eight) "affine_mm" else "row kernels", t.worst, t.worst_col, t.err, t.err / t.ymax, t.caught, n });
+        if (!on_mm and !std.mem.eql(u16, bufs[5].slice(u16, rows * n), bufs[4].slice(u16, rows * n))) return error.PromptDiffersFromDecode;
+        std.debug.print("{s} [{d}, {d}] q{d}: decode worst err/bound {d:.4}, prompt ({s}) {d:.4} at col {d}; max |err| {e:.3} = {e:.3} of max |y|; scales 1% off caught in {d} of {d} columns\n", .{ cl.name, n, k, bits, dec, if (on_mm) "affine_mm" else "row kernels", t.worst, t.worst_col, t.err, t.err / t.ymax, t.caught, n });
         all.values += t.values;
         all.pairs += t.pairs;
         all.worst = @max(all.worst, @max(dec, t.worst));
