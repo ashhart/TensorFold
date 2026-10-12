@@ -73,6 +73,7 @@ test "a window's picks become member lists: every pick in its expert's list once
     var c: cfg.Config = .{};
     c.experts = 4;
     c.topk = 2;
+    try cfg.split(&c, 0, 2);
     var experts: [5]wt.Expert = undefined;
     for (&experts, 0..) |*x, i| {
         x.down_suh = @intCast(1000 + i);
