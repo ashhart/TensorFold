@@ -96,7 +96,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const engine_only: []const std.Build.Module.Import = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal } };
     _ = program(b, "tf-qwen27-synthetic", "Build bounded synthetic native hybrid chunk checks, no models", "zig/tests/qwen27/synthetic.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-dflash-synthetic", "Build model-free native draft context/forward/tree check", "zig/tests/qwen27/dflash_runtime.zig", target, false, engine_only);
-    _ = program(b, "tf-qwen27-widths", "Build the projections at every oQ width before tensor units: float64, row windows, mixed stacks", "zig/tests/qwen27/widths.zig", target, false, engine_only);
+    _ = program(b, "tf-qwen27-widths", "Build the projections at every oQ width before tensor units: float64, row windows, mixed stacks, embedding", "zig/tests/qwen27/widths.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-dflash-refine", "Build the drafter refinement probe (top-1 by block position, masked versus given)", "zig/tests/qwen27/dflash_refine.zig", target, false, engine_only);
 
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
