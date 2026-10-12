@@ -110,7 +110,9 @@ fn prepare(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.De
     const after = e.budget(io) catch |err| return refuse(a, problem, "the native HIP engine cannot read the GPU's memory ({s})", .{@errorName(err)});
     const room = after.room(model);
     const reserve = after.reserve;
-    const capacity = o.window + rows + 1;
+    // a follower sizes its streams for rank 0's window: the page tables rank 0 sends cover that many positions
+    const window: usize = if (o.world > 1) @intCast((e.first(.{ o.window, 0 }) catch |err| return refuse(a, problem, "the ranks could not agree on the window ({s})", .{@errorName(err)}))[0]) else o.window;
+    const capacity = window + rows + 1;
     // the most streams up to the ones asked whose bytes fit, then the least of that over the ranks
     var streams = o.streams;
     while (streams > 0) : (streams -= 1) {
@@ -119,11 +121,11 @@ fn prepare(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.De
     if (o.world > 1) streams = (e.least(.{ streams, 0 }) catch |err| return refuse(a, problem, "the ranks could not agree on the streams ({s})", .{@errorName(err)}))[0];
     if (streams == 0) {
         const one = served(e, 1, capacity) catch 0;
-        return refuse(a, problem, "the HIP memory budget fits no stream: one at a {d}-token window takes {d:.2} GiB, and {d:.2} GiB is left after the model's {d:.2} GiB and the {d:.1} GiB reserve; lower --context, add ranks (--tp), or free device memory", .{ o.window, gibs(one), gibs(room), gibs(model), gibs(reserve) });
+        return refuse(a, problem, "the HIP memory budget fits no stream: one at a {d}-token window takes {d:.2} GiB, and {d:.2} GiB is left after the model's {d:.2} GiB and the {d:.1} GiB reserve; lower --context, add ranks (--tp), or free device memory", .{ window, gibs(one), gibs(room), gibs(model), gibs(reserve) });
     }
     if (streams < o.streams and o.fixed) {
         const asked = served(e, o.streams, capacity) catch 0;
-        return refuse(a, problem, "--parallel {d} needs {d:.2} GiB at a {d}-token window, and the HIP memory budget leaves {d:.2} GiB: serve --parallel {d}, or lower --context", .{ o.streams, gibs(asked), o.window, gibs(room), streams });
+        return refuse(a, problem, "--parallel {d} needs {d:.2} GiB at a {d}-token window, and the HIP memory budget leaves {d:.2} GiB: serve --parallel {d}, or lower --context", .{ o.streams, gibs(asked), window, gibs(room), streams });
     }
     const need = served(e, streams, capacity) catch |err| return refuse(a, problem, "the native HIP engine cannot count its scratch ({s})", .{@errorName(err)});
     // the prompt cache: --prompt-cache-gib, else what the streams leave
@@ -146,7 +148,7 @@ fn prepare(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.De
         return refuse(a, problem, "the native HIP engine cannot allocate its scratch and pages ({s})", .{@errorName(err)});
     const lane = gibs(state.Caches.deviceBytes(e.model(), capacity) + pages.pagesFor(capacity) * memory.pageBytes(e.weights.spec, e.act.size()));
     const startup = try std.fmt.allocPrint(gpa, "HIP {s} device {d}, rank {d} of {d}: model {d:.2} GiB; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompt cache {d:.2} GiB ({d} pages, {d} snapshots); prompts in {d}-row chunks", .{
-        hip.kernels.arch, dev.index, o.rank, o.world, gibs(model), streams, if (streams == 1) "" else "s", lane, o.window, gibs(room), gibs(reserve), gibs(budget), cache.pages, cache.snaps, prefix.chunk,
+        hip.kernels.arch, dev.index, o.rank, o.world, gibs(model), streams, if (streams == 1) "" else "s", lane, window, gibs(room), gibs(reserve), gibs(budget), cache.pages, cache.snaps, prefix.chunk,
     });
     return .{ .e = e, .streams = streams, .cache = cache, .startup = startup };
 }

@@ -178,8 +178,17 @@ pub const Engine = struct {
         return e.sizedBytes(try e.arenaBytes(rows, prompt_rows, capacity), rows, prompt_rows, pool_pages);
     }
 
-    /// The least of each value over the ranks, the same on every rank (a window and a prompt cache they all fit).
+    /// The least of each value over the ranks, the same on every rank (the streams and a prompt cache they all fit).
     pub fn least(e: *Engine, mine: [2]u64) ![2]u64 {
+        return e.agree(mine, .least);
+    }
+
+    /// Rank 0's values on every rank: what rank 0 was asked for, such as the window its page tables cover.
+    pub fn first(e: *Engine, mine: [2]u64) ![2]u64 {
+        return e.agree(mine, .first);
+    }
+
+    fn agree(e: *Engine, mine: [2]u64, how: enum { least, first }) ![2]u64 {
         if (e.o.world < 2) return mine;
         const world = e.o.world;
         var host = try hip.HostBuffer.alloc(&e.driver, 16 * (1 + world));
@@ -193,6 +202,7 @@ pub const Engine = struct {
         try e.comm.allGather(send.base(), recv.base(), 2, .i64, e.stream.handle);
         try recv.downloadAsync(0, host.view(16, 16 * (1 + world)), e.stream);
         try e.stream.synchronize();
+        if (how == .first) return host.slice(u64)[2..4].*;
         var out = mine;
         for (host.slice(u64)[2 .. 2 * (1 + world)], 0..) |v, i| out[i % 2] = @min(out[i % 2], v);
         return out;
