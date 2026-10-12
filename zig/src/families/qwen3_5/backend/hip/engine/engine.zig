@@ -88,8 +88,6 @@ pub const Engine = struct {
     /// Tensor parallelism: this rank's communicator.
     comm: hip.collective.Comm = undefined,
     graphs: round_graphs.Graphs,
-    /// The draft head's batches replay graphs (the head holds no collective, so under tp too unless graphs=off).
-    head_graphs: bool = true,
     /// The lane rounds' plan, graph choice and keep.
     round: lane_round.State = undefined,
 
@@ -100,9 +98,8 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.o = o;
         e.sized = false;
-        // rounds replay graphs as the policy says; under tensor parallelism only when it is `graphs=on`
-        e.o.graphs = o.graphs and o.policy.graphsOn(o.world);
-        e.head_graphs = o.graphs and o.policy.graphsOn(1);
+        // rounds and the draft head's batches replay graphs unless the policy says `graphs=off`, at any world size
+        e.o.graphs = o.graphs and o.policy.graphsOn();
         e.graphs = round_graphs.Graphs.init(gpa);
         e.driver = try hip.Runtime.open();
         errdefer e.driver.close();
@@ -282,7 +279,7 @@ pub const Engine = struct {
 
     /// Whether the draft head's greedy batches replay graphs.
     pub fn headGraphs(e: *const Engine) bool {
-        return if (e.o.world > 1) e.head_graphs else e.o.graphs;
+        return e.o.graphs;
     }
 
     /// Waits for the stream, before caches are freed (a round may still be running on them).

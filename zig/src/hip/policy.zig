@@ -88,13 +88,9 @@ pub const Policy = struct {
         return p.attention != .f32;
     }
 
-    /// Whether rounds replay captured graphs on a group of `world` ranks.
-    pub fn graphsOn(p: *const Policy, world: usize) bool {
-        return switch (p.graphs) {
-            .on => true,
-            .off => false,
-            .auto => world == 1,
-        };
+    /// Whether rounds replay captured graphs, on one rank or a group: only `graphs=off` turns them off.
+    pub fn graphsOn(p: *const Policy) bool {
+        return p.graphs != .off;
     }
 
     /// Applies `key=value,key=value` (`--policy`'s and TF_POLICY's syntax) over this policy, all of it or none.
@@ -243,16 +239,18 @@ test "TF_POLICY speaks after the flags, and the reference switches" {
     const p = try Policy.resolve("matrix=off", env, &notes);
     try std.testing.expectEqual(Choice.on, p.matrix);
     try std.testing.expect(!p.streamOn() and p.gemmOn() and p.fused() and p.chunked() and !p.wideAttention());
-    try std.testing.expect(!p.graphsOn(1) and !p.graphsOn(2));
+    try std.testing.expect(!p.graphsOn());
     try std.testing.expect(std.mem.indexOf(u8, notes.text(), "TF_POLICY=") != null);
     var reference: Policy = .{};
     try reference.apply("kernels=reference");
     try std.testing.expect(!reference.streamOn() and !reference.gemmOn() and !reference.fused() and !reference.chunked());
 }
 
-test "graphs follow the group unless the policy says" {
+test "graphs are on at any world size unless the policy turns them off" {
     var p: Policy = .{};
-    try std.testing.expect(p.graphsOn(1) and !p.graphsOn(2));
+    try std.testing.expect(p.graphsOn());
     try p.apply("graphs=on");
-    try std.testing.expect(p.graphsOn(2));
+    try std.testing.expect(p.graphsOn());
+    try p.apply("graphs=off");
+    try std.testing.expect(!p.graphsOn());
 }
