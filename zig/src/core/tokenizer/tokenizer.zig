@@ -4,6 +4,7 @@ const unicode = @import("unicode.zig");
 const steps = @import("steps.zig");
 const models = @import("model.zig");
 const Allocator = std.mem.Allocator;
+pub const Memo = @import("memo.zig").Memo;
 
 pub const Kind = models.Kind;
 pub const Error = models.Error || std.json.ParseError(std.json.Scanner) || error{UnsupportedAddedToken};
@@ -96,10 +97,12 @@ pub const Tokenizer = struct {
     raw: Trie = .{},
     normalized: Trie = .{},
     specials: std.StringHashMapUnmanaged(void) = .empty,
+    memo: ?*Memo = null, // long segments' ids kept between encodes (null: each encode tokenizes everything)
 
     pub fn deinit(t: *Tokenizer) void {
         t.vocab.deinit();
         t.id_to_token.deinit();
+        if (t.memo) |m| m.destroy();
         if (t.arena) |arena| {
             arena.deinit();
             t.allocator.destroy(arena);
@@ -125,9 +128,19 @@ pub const Tokenizer = struct {
         }
         var ids: std.ArrayList(u32) = .empty;
         for (try t.splitAdded(&ctx, &t.raw, valid)) |seg| {
-            if (seg.id) |id| try ids.append(ctx.a, id) else if (seg.end > seg.start) try t.encodeText(&ctx, valid[seg.start..seg.end], seg.start == 0, &ids);
+            if (seg.id) |id| try ids.append(ctx.a, id) else if (seg.end > seg.start) try t.encodeSegment(&ctx, valid[seg.start..seg.end], seg.start == 0, &ids);
         }
         return a.dupe(u32, ids.items);
+    }
+
+    /// encodeText through the memo for a long segment: its kept ids, else encoded and kept.
+    fn encodeSegment(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32)) Error!void {
+        const m = t.memo orelse return t.encodeText(ctx, text, first, ids);
+        if (text.len < @import("memo.zig").min_bytes) return t.encodeText(ctx, text, first, ids);
+        if (try m.append(text, first, ctx.a, ids)) return;
+        const from = ids.items.len;
+        try t.encodeText(ctx, text, first, ids);
+        m.put(text, first, ids.items[from..]);
     }
 
     fn encodeText(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32)) Error!void {
@@ -349,6 +362,33 @@ test "byte-level BPE with merges, added tokens and decode" {
     try std.testing.expectEqualStrings("", unknown);
 }
 
+test "with the memo, long segments encode as without it, and the second encode takes their kept ids" {
+    const json =
+        \\{"added_tokens":[{"id":7,"content":"<|end|>","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true}],
+        \\ "pre_tokenizer":{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":" ?\\S+|\\s+"},"behavior":"Isolated","invert":false},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":false,"use_regex":false}]},
+        \\ "decoder":{"type":"ByteLevel"},
+        \\ "model":{"type":"BPE","dropout":null,"unk_token":null,"continuing_subword_prefix":"","end_of_word_suffix":"","fuse_unk":false,"byte_fallback":false,"ignore_merges":false,
+        \\  "vocab":{"a":0,"b":1,"Ġ":2,"ab":3,"Ġa":4,"Ġab":5,"c":6},"merges":[["Ġ","a"],"a b","Ġa b"]}}
+    ;
+    const a = std.testing.allocator;
+    var t = try parse(a, json);
+    defer t.deinit();
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    for (0..300) |_| try text.appendSlice(a, "ab abc ");
+    try text.appendSlice(a, "<|end|>");
+    for (0..300) |_| try text.appendSlice(a, " ab cab");
+    const plain = try t.encode(a, text.items);
+    defer a.free(plain);
+    t.memo = try Memo.create(a, 1 << 20);
+    for (0..2) |_| {
+        const kept = try t.encode(a, text.items);
+        defer a.free(kept);
+        try std.testing.expectEqualSlices(u32, plain, kept);
+    }
+    try std.testing.expectEqual(@as(u64, 2), t.memo.?.hits); // both segments, the second time
+}
+
 test "sentencepiece-style BPE with byte fallback" {
     const json =
         \\{"added_tokens":[],"normalizer":{"type":"Replace","pattern":{"String":" "},"content":"▁"},
@@ -466,4 +506,8 @@ test "raw token bytes conservatively refuse context-sensitive decoder kinds" {
         t.decoder = decoder;
         try std.testing.expect((try t.tokenBytes(a, 0)) == null);
     }
+}
+
+test {
+    _ = @import("memo.zig");
 }
