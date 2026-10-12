@@ -207,12 +207,8 @@ fn perHead(e: mtl.ComputeEncoder, i: usize, p: *const wide.Pipes, pool: Pool, io
     wide.perHead(p, e, q, H, .{ .in = rf(io.x), .ldx = ldx, .out = rf(io.y), .ldo = q.n, .rows = 1 }, hsx, q.n / H);
 }
 fn shared(e: mtl.ComputeEncoder, i: usize, p: *const wide.Pipes, k: *const kernels.Kernels, sh: [2]Pool, io: Io) void {
-    const gu = sh[0].at(i);
-    wide.dense(p, e, gu, .{ .in = rf(io.x), .ldx = D, .out = rf(io.z), .ldo = 2 * N, .rows = 1 });
-    e.setPipeline(k.swiglu);
-    bind(e, 0, .{ rf(io.z), rf(io.z).at(2 * N * 2) });
-    e.setValue(extern struct { rows: i32, width: i32, xs: i32, ys: i32, lim: f32 }{ .rows = 1, .width = N, .xs = 2 * N, .ys = N, .lim = 10.0 }, 2);
-    e.dispatchThreads(mtl.Size.of(N, 1, 1), mtl.Size.of(256, 1, 1));
+    _ = k;
+    wide.glu(p, e, sh[0].at(i), N, rf(io.x), rf(io.z).at(2 * N * 2), 1, 10.0); // moe.zig sharedRows: one launch
     const dq = sh[1].at(i);
     wide.dense(p, e, dq, .{ .in = rf(io.z).at(2 * N * 2), .ldx = N, .out = rf(io.y), .ldo = D, .rows = 1 });
 }
