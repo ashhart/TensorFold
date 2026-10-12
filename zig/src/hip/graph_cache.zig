@@ -1,7 +1,8 @@
 //! Captured graphs by shape: a launch sequence recorded the second time its shape is met, replayed on every later one.
 
 const std = @import("std");
-const hip = @import("hip");
+const hip_graph = @import("graph.zig");
+const Stream = @import("stream.zig").Stream;
 
 /// Shapes kept at once; the least recently used one is dropped for a new one.
 const max_entries = 64;
@@ -16,7 +17,7 @@ pub fn Cache(comptime Key: type, comptime Out: type) type {
         pub const Entry = struct {
             key: Key,
             state: State = .seen,
-            exec: ?hip.graph.Exec = null,
+            exec: ?hip_graph.Exec = null,
             out: Out = undefined,
             tick: u64 = 0,
         };
@@ -69,10 +70,10 @@ pub fn Cache(comptime Key: type, comptime Out: type) type {
         }
 
         /// `body(ctx)` recorded on `stream`: its outputs and the graph (nothing ran), or null when the capture failed.
-        pub fn record(stream: hip.Stream, ctx: anytype, comptime body: fn (@TypeOf(ctx)) anyerror!Out) !?struct { out: Out, graph: hip.graph.Graph } {
-            hip.graph.beginCapture(stream, .thread_local) catch return null;
+        pub fn record(stream: Stream, ctx: anytype, comptime body: fn (@TypeOf(ctx)) anyerror!Out) !?struct { out: Out, graph: hip_graph.Graph } {
+            hip_graph.beginCapture(stream, .thread_local) catch return null;
             const recorded = body(ctx);
-            const graph = hip.graph.endCapture(stream) catch return null;
+            const graph = hip_graph.endCapture(stream) catch return null;
             const out = recorded catch |err| {
                 var g = graph;
                 g.deinit();
@@ -82,7 +83,7 @@ pub fn Cache(comptime Key: type, comptime Out: type) type {
         }
 
         /// Instantiates a capture that just ended, keeps it with its outputs, and uploads it.
-        pub fn keep(g: *Self, e: *Entry, graph: hip.graph.Graph, stream: hip.Stream, out: Out) !void {
+        pub fn keep(g: *Self, e: *Entry, graph: hip_graph.Graph, stream: Stream, out: Out) !void {
             var tmp = graph;
             defer tmp.deinit();
             errdefer e.state = .failed;

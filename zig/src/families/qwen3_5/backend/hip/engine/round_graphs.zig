@@ -2,7 +2,7 @@
 
 const hip = @import("hip");
 const plan = @import("../forward/plan.zig");
-const graph_cache = @import("graph_cache.zig");
+const graph_cache = hip.graph_cache;
 
 /// What a replay hands back: the forward's outputs and where the arena stands after it.
 pub const Out = struct { hidden: hip.ops.Tensor, y: hip.ops.Tensor, used: usize };
