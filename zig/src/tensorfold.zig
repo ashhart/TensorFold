@@ -15,6 +15,7 @@ pub const segments = @import("core/segments.zig");
 pub const row_projection = @import("core/row_projection.zig");
 pub const exl3_format = @import("core/exl3_format.zig");
 pub const exl3_projection = @import("core/exl3_projection.zig");
+pub const exlr8 = @import("core/exlr8.zig");
 pub const nemotron = @import("families/nemotron/nemotron.zig");
 pub const flashnext_replay = @import("families/flashnext/replay.zig");
 pub const flashnext_engine = @import("families/flashnext/engine.zig");

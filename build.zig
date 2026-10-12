@@ -6,6 +6,7 @@ const qwen27_build = @import("zig/build/qwen27.zig");
 const hip_build = @import("zig/build/hip.zig");
 const grammar_build = @import("zig/build/grammar.zig");
 const exl3_build = @import("zig/build/exl3.zig");
+const exlr8_build = @import("zig/build/exlr8.zig");
 
 comptime {
     const required = std.mem.trim(u8, @embedFile(".zig-version"), "\r\n");
@@ -160,6 +161,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api_mod })).step);
     }
     hip_build.steps(b, target, test_step);
+    exlr8_build.hostTests(b, target, test_step);
     const lanes_cpu = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true });
     const disk_cpu = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/glm_disk_tests.zig"),
