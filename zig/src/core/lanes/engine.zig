@@ -34,6 +34,7 @@ pub const Engine = struct {
     pub const prepareFinals = pieces_.prepareFinals;
     pub const finishStream = pieces_.finishStream;
     pub const finishStreams = pieces_.finishStreams;
+
     gpa: Allocator,
     cfg: *const Config,
     backend: be.Backend,
@@ -49,10 +50,9 @@ pub const Engine = struct {
     alone: bool = true, // this step has one live stream: its copies may take their ramp
     lone_kept: [2][lone_costs.bands]?lone_costs.Kept = @splat(@splat(null)), // the newest lone calibrations, greedy then sampled, a band each
     steps: u64 = 0,
-    grammar_round: @import("grammar_time.zig").Round = .{},
-    grammar_workers: @import("grammar_parallel.zig").State = .{},
     arena: std.heap.ArenaAllocator, // a round's temporaries
     unread: std.ArrayList(Unread) = .empty, // queued draws the log reads at the step's end
+
     pub fn init(gpa: Allocator, cfg: *const Config, backend: be.Backend, clock: be.Clock) Engine {
         return .{
             .gpa = gpa,
@@ -60,28 +60,11 @@ pub const Engine = struct {
             .backend = backend,
             .clock = clock,
             .arena = std.heap.ArenaAllocator.init(gpa),
-            .rule = .{
-                .gpa = gpa,
-                .k = cfg.k,
-                .prior = cfg.depth_prior,
-                .most_drafts = cfg.most_drafts,
-                .family_costs = &cfg.family_costs,
-                .shared_costs = &cfg.shared_costs,
-                .mtp_step_ms = cfg.mtp_step_ms,
-                .draft_step_ms = cfg.draft_step_ms,
-                .plain_guard = cfg.plain_guard,
-                .node_probabilities = cfg.node_probabilities,
-                .granted_depth = cfg.granted_depth,
-                .confidence_floor = cfg.draft_confidence,
-                .plain_streams = cfg.plain_streams,
-                .batch_rows = cfg.batch_rows,
-                .batched_heads = cfg.draft_streams,
-            },
+            .rule = .of(gpa, cfg),
         };
     }
 
     pub fn deinit(e: *Engine) void {
-        e.grammar_workers.deinit(e.gpa);
         e.live.deinit(e.gpa);
         e.unread.deinit(e.gpa);
         e.rule.deinit();
@@ -95,6 +78,7 @@ pub const Engine = struct {
         for (e.live.items) |s| n += @intFromBool(!s.finished);
         return n;
     }
+
     pub const addStream = open.add;
     pub const addStreamCommitted = open.addCommitted;
     pub const addStreams = open.addStreams;
@@ -262,7 +246,7 @@ pub const Engine = struct {
         const plans = try a.alloc(Plan, entries.len);
         for (entries, plans) |s, *p| p.* = try win.plan(e, s, null);
         try win.allocate(e, plans);
-        try @import("grammar_parallel.zig").constrain(e, plans);
+        for (plans) |*p| try win.constrain(e, p);
         const windows = try a.alloc(be.Window, plans.len);
         const out = try a.alloc(be.Verified, plans.len);
         var total: u64 = 0;
