@@ -327,7 +327,7 @@ __device__ void
     }
 }
 
-constexpr int kSelectThreads = 256;
+constexpr int kSelectThreads = 512;
 constexpr int kSelectMax = 1024;
 
 __device__ __forceinline__ float round_bf16_f(float v) { return round_kind(v, 2); }
