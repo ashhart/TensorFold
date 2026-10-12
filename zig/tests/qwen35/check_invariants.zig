@@ -93,7 +93,6 @@ fn lanesSet(c: *Ctx, set: []const u8, prompts: []const ids_file.Prompt) void {
 
 /// `graph` ran with the engine's graphs; the same job again with every round eager.
 fn graphs(c: *Ctx, name: []const u8, job: Session.Job, graph: Session.Done) void {
-    if (c.tp()) return c.report.skip(name, "rounds under tp run eager unless --policy graphs=on");
     if (!c.e.o.graphs) return c.report.skip(name, "graphs are off");
     if (graph.replayed == 0) return c.report.skip(name, "no round of the run replayed a graph");
     c.e.o.graphs = false;
@@ -128,7 +127,6 @@ fn resumed(c: *Ctx) void {
 /// A drafted run of every stream at once, the third time: once its shapes are met, rounds replay graphs.
 fn replayShare(c: *Ctx) void {
     const name = "lanes short greedy: rounds replayed";
-    if (c.tp() and !c.e.o.graphs) return c.report.skip(name, "rounds under tp run eager unless the policy says graphs=on");
     if (!c.e.o.graphs) return c.report.skip(name, "graphs are off");
     const job: Session.Job = .{ .prompts = c.short, .max_new = c.tokens };
     var done: Session.Done = undefined;
