@@ -15,7 +15,7 @@ pub const Head = struct {
         errdefer head.deinit();
         if (source.n != 248320) return head;
         if (source.tile != 32 or source.k % 64 != 0) return error.BadDraftHead;
-        if (source.raw) |raw| if (raw.bits != 4 or raw.group != 64) return error.BadDraftHead;
+        if (source.bits != 4 or source.group != 64 or source.runs.len > 0) return error.BadDraftHead;
         const k: usize = source.k;
         const input_words = if (source.raw) |raw| raw.w else source.words.buffer;
         const input_offset = if (source.raw) |raw| raw.w_off else source.words.offset;
