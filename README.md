@@ -28,12 +28,12 @@ On Windows with an NVIDIA GPU, build `tensorfold-native.exe` from source as [doc
 Use `tensorfold-native --help` or `-h`, and `tensorfold-native capabilities --json`, to inspect the installed binary.
 Model weights have separate downloads and licenses.
 
-The API listens at `http://127.0.0.1:8080/v1` by default.
+The API listens at `http://127.0.0.1:8888/v1` by default.
 It serves OpenAI chat completions, completions and Responses, plus Anthropic Messages.
 Use the model ID returned by `/v1/models`, or set one with `--name`.
 
 ```sh
-curl -fsS http://127.0.0.1:8080/v1/chat/completions \
+curl -fsS http://127.0.0.1:8888/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"local-model","messages":[{"role":"user","content":"Say hello in one sentence."}],"max_tokens":128,"temperature":0}'
 ```
@@ -50,12 +50,12 @@ src=$(ls -d ~/.cache/huggingface/hub/models--TensorFold--NVIDIA-Nemotron-3.5-Lig
 mkdir -p ~/models && cp -cRL "$src" ~/models/nemotron-living   # always teach a copy
 (umask 077; openssl rand -hex 24 > ~/models/slide-key)          # --slide starts only with a key
 tensorfold serve ~/models/nemotron-living --slide --api-key-file ~/models/slide-key
-curl -N http://127.0.0.1:8080/v1/slide/learn -H "Authorization: Bearer $(cat ~/models/slide-key)" \
+curl -N http://127.0.0.1:8888/v1/slide/learn -H "Authorization: Bearer $(cat ~/models/slide-key)" \
   -H 'Content-Type: application/json' -d '{"text": "I like blue."}'
 ```
 
 Send it a document instead and it finds the facts in it and learns them one by one. Open
-`http://127.0.0.1:8080/slide` to watch in 3D: the facts, the neurons each one took in the model's layers, the shard
+`http://127.0.0.1:8888/slide` to watch in 3D: the facts, the neurons each one took in the model's layers, the shard
 files that hold them, and the lesson running now.
 
 Learning runs on Apple-silicon Macs and on an NVIDIA GB10 (DGX Spark), and a folder that learned on one serves on the
@@ -179,7 +179,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 
 | Flag | Meaning |
 | --- | --- |
-| `--host HOST`, `--port PORT` | Listen address and port, default `127.0.0.1:8080`. |
+| `--host HOST`, `--port PORT` | Listen address and port, default `127.0.0.1:8888`. |
 | `--name NAME` | Model ID advertised to clients. |
 | `--alias NAME` | Another accepted model ID; repeat for multiple aliases. |
 | `--api-key KEY` | Require a bearer key; repeat for multiple keys. |
