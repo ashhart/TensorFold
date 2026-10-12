@@ -81,7 +81,7 @@ pub fn tf_moe_select(l: *const Launcher, logits: CF, pick: I, wts: F, items: I, 
     try a.add(capacity);
     try a.add(experts);
     try a.add(top_k);
-    if (l.fuse) return l.go(l.dec.select, dim(r, 1, 1), dim(256, 1, 1), 0, s, &a);
+    if (l.fuse) return l.go(l.dec.select, dim(r, 1, 1), dim(512, 1, 1), 0, s, &a);
     try l.go(l.moe_select, dim(r, 1, 1), dim(32, 1, 1), 0, s, &a);
 }
 
