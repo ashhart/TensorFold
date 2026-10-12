@@ -49,8 +49,6 @@ const CMD_FLAG = 128; // u64, at rank 1: the last command rank 0 has written
 const CMD_ACK = 192; // u64, at rank 0: the last command rank 1 has copied out
 const READY = 256; // u64: the peer has loaded its model
 
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-
 threadlocal var raised = false;
 
 /// This thread at the user-interactive QoS once: busy CPUs must not delay the pair's sends and commands.
@@ -95,8 +93,6 @@ pub const Pair = struct {
         const s = try settings.read(gpa, text);
         if (s.rank > 1 or s.links.len != 1) return error.PairTwoRanksOneLink;
         const lib = try gpa.dupeSentinel(u8, s.library, 0);
-        // the library places each arriving message on a CPU thread: at default QoS busy cores delay every exchange 4x
-        _ = setenv("MCDMA_FABRIC_QOS", "1", 0);
         const ep = try fabric.mcdma.Endpoint.create(gpa, lib, .{ .rank = s.rank, .ranks = 2, .window_bytes = l.window(), .staging_bytes = 4 << 20, .links = s.links, .timeout_ns = 60 * std.time.ns_per_s, .connect_timeout_ns = 300 * std.time.ns_per_s });
         errdefer ep.deinit();
         const rd = ep.rdma();
