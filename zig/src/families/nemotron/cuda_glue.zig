@@ -16,7 +16,6 @@ pub const chunk_blocks = 64;
 
 /// The native kernels, by their extern "C" names.
 pub const Fns = struct {
-    embed: cuda.Function,
     embed16: cuda.Function,
     add_rmsnorm: cuda.Function,
     add_moe_norm: cuda.Function,
@@ -36,7 +35,6 @@ pub const Fns = struct {
     /// The modules of nemotron_norms, _route, _mamba, _attention and _keyed, in that order.
     pub fn resolve(m: []const cuda.Module) !Fns {
         return .{
-            .embed = try m[0].function("tf_nemo_embed"),
             .embed16 = try m[0].function("tf_nemo_embed16"),
             .add_rmsnorm = try m[0].function("tf_nemo_add_rmsnorm"),
             .add_moe_norm = try m[0].function("tf_nemo_add_moe_norm"),
@@ -75,6 +73,7 @@ pub const Glue = struct {
     set: ?*const cuda.aot.Set, // a captured Triton set (GB10's qualified one), else our own kernels
     f: *const Fns,
     s: cuda.Stream,
+    emb: *const cuda.embed_rows.EmbedRows, // the shared token rows (embed_rows.cu)
 
     fn tri(g: Glue) ?triton.Tri {
         return if (g.set) |x| .{ .set = x, .s = g.s } else null;
@@ -96,10 +95,7 @@ pub const Glue = struct {
     /// MLX 4-bit token rows, dequantized.
     pub fn embed(g: Glue, ids: u64, w: u64, s: u64, b: u64, out: u64, rows: usize, d: usize) !void {
         if (g.tri()) |t| return t.embed(ids, w, s, b, out, rows, d);
-        var a: cuda.Args = .{};
-        ptrs(&a, &.{ ids, w, s, b, out });
-        a.add(int(d));
-        try g.go(g.f.embed, .{ rows, 1, 1 }, 256, 0, &a);
+        try g.emb.affine4(g.s, ids, w, s, b, out, rows, d);
     }
 
     /// Rows of a bf16 table [n, d] (ours with or without a captured set, whose embed reads MLX words).

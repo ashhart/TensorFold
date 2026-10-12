@@ -52,19 +52,6 @@ __device__ __forceinline__ void scale_store(const float (&x)[MAXE], int D, float
 
 using namespace tf_glue;
 
-// MLX affine 4-bit token rows: out = bf16(fma(q, scale, bias)), D / 8 words and D / 64 scales a token.
-extern "C" __global__ void __launch_bounds__(NT) tf_nemo_embed(const int* __restrict__ ids, const uint32_t* __restrict__ W,
-                                                                 const __nv_bfloat16* __restrict__ S, const __nv_bfloat16* __restrict__ B,
-                                                                 __nv_bfloat16* __restrict__ out, int D) {
-    const int64_t tok = ids[blockIdx.x];
-    for (int i = threadIdx.x; i < D; i += NT) {
-        const uint32_t word = W[tok * (D / 8) + i / 8];
-        const float q = static_cast<float>((word >> (4 * (i % 8))) & 0xFu);
-        const int64_t g = tok * (D / 64) + i / 64;
-        out[static_cast<int64_t>(blockIdx.x) * D + i] = __float2bfloat16_rn(__fmaf_rn(q, bf(S[g]), bf(B[g])));
-    }
-}
-
 // A bf16 token table's rows (ModelOpt checkpoints keep the embedding unquantized): out = W[ids].
 extern "C" __global__ void __launch_bounds__(NT) tf_nemo_embed16(const int* __restrict__ ids, const __nv_bfloat16* __restrict__ W,
                                                                    __nv_bfloat16* __restrict__ out, int D) {
