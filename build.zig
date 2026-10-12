@@ -5,6 +5,8 @@ const dist_build = @import("zig/build/dist.zig");
 const qwen27_build = @import("zig/build/qwen27.zig");
 const hip_build = @import("zig/build/hip.zig");
 const grammar_build = @import("zig/build/grammar.zig");
+const exl3_build = @import("zig/build/exl3.zig");
+const exlr8_build = @import("zig/build/exlr8.zig");
 
 comptime {
     const required = std.mem.trim(u8, @embedFile(".zig-version"), "\r\n");
@@ -159,6 +161,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api_mod })).step);
     }
     hip_build.steps(b, target, test_step);
+    exlr8_build.hostTests(b, target, test_step);
     const lanes_cpu = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true });
     const disk_cpu = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/glm_disk_tests.zig"),
@@ -193,7 +196,7 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .target = target,
         .optimize = .ReleaseSafe,
         .link_libc = true,
-        .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = engines }, .{ .name = "checkpoint_cli", .module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "native_engines", .module = engines }} }) } },
+        .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = engines }, .{ .name = "checkpoint_cli", .module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "native_engines", .module = engines }, exlr8_build.cliImport(b, target, .ReleaseSafe, engine) } }) } },
     }) });
     exe.root_module.addOptions("build_options", build_options);
     if (test_step == null) {
@@ -430,7 +433,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "cluster", .module = cluster }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "native_engines", .module = engines } },
+            .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "cluster", .module = cluster }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "native_engines", .module = engines }, exlr8_build.cliImport(b, target, optimize, engine) },
         });
         if (p.c_source) |file| {
             mod.addCSourceFile(.{ .file = b.path(file), .flags = &.{"-std=c11"} });
@@ -451,6 +454,9 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     }) });
     b.step("tf-row-check", "The core row projection on synthetic 4-bit matrices: widths bit-equal, a CPU reference, indexed experts").dependOn(&b.addInstallArtifact(row_check, .{}).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = row_mod })).step);
+    exl3_build.targets(b, target, optimize, metal, test_step);
+    exlr8_build.metalTargets(b, target, optimize, metal, mods.sources, test_step);
+    exlr8_build.glmTargets(b, target, optimize, metal, mods.engine);
 
     // The checkpoint CLI: models, info and pull, against a synthetic cache and a fake hub.
     const cli_tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -458,7 +464,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "native_engines", .module = engines }},
+        .imports = &.{ .{ .name = "native_engines", .module = engines }, exlr8_build.cliImport(b, target, optimize, mods.engine) },
     }) });
     const run_cli_tests = b.addRunArtifact(cli_tests);
     test_step.dependOn(&run_cli_tests.step);

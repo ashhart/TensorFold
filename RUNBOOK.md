@@ -34,6 +34,40 @@ Metal comes from macOS; a prebuilt binary needs no Python, MLX or Xcode installa
 Keep the archive's `bin`, `lib` and any `share` directories together when relocating it.
 The commands below use `bin/tensorfold-native`; a Homebrew installation can use `tensorfold` instead.
 
+## Standalone Metal EXL3 projections
+
+With the Zig version from `.zig-version` and Xcode's Metal toolchain:
+
+```sh
+zig build tf-exl3-bench test-exl3 test-exl3-gpu -Dcpu=apple_m1
+./zig-out/bin/tf-exl3-bench --help
+./zig-out/bin/tf-exl3-bench --qualify-only 1 --warmup 0 --repeats 1
+./zig-out/bin/tf-exl3-bench --warmup 1 --repeats 3 --prefill 32
+```
+
+These commands use deterministic compressed fixtures, not a checkpoint.
+Compact 256-by-128 fixtures check all nine rows and every output column for
+27 width/codebook combinations in BF16 and F32. Larger shapes check every
+candidate output bit against the arithmetic decoder, but the independent FP64
+oracle samples at most two rows and three 128-column blocks. Its worst-column
+metrics are explicitly labelled `worst_sampled`; they are not whole-matrix bounds.
+
+The borrowed-buffer API in `zig/src/core/exl3_projection.zig` encodes BF16
+inputs, FP16-rounded rotated inputs, compensated FP32 projection dots and BF16
+or F32 outputs. Scratch holds row intermediates, never a dequantized matrix.
+All buffers and pipelines must survive command completion. GPU-produced IDs
+must be in bounds, scatter destinations unique, and grouped padding must follow
+valid rows. Indexed descriptors share dimensions and require valid resident
+weights disjoint from writable views; use `useMatrix` or caller residency sets.
+The operator validates storage extents, offsets, strides, capacities and aliases,
+but does not read back GPU IDs or plan expert groups.
+
+On an M3 Ultra running macOS 26.6.2, the 82 exercised operator cases had zero
+candidate/baseline bit mismatches and identical independent-oracle errors.
+Timings alternate dispatch order and exclude oracle work and allocations.
+This is operator evidence only: no model loader, family registration, CUDA
+implementation, whole-model fidelity or served-throughput claim is added.
+
 ## First server and request
 
 This example uses the complete `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` checkpoint, including its MTP head:
