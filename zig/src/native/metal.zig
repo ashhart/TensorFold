@@ -102,7 +102,7 @@ const Host = struct {
 /// The engine for `o.dir`, or null with `problem` set when no Metal engine reads the checkpoint.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const dense = std.mem.eql(u8, o.model_type, "qwen3_5") and qwen27Engine(a, io, o.dir);
-    if (refusal(o, dense)) |why| {
+    if (try refusal(a, o, dense)) |why| {
         problem.* = why;
         return null;
     }
@@ -207,12 +207,17 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
-/// --learn's refusal before any weights load: the qwen3_5 engines (`dense`: the 27B's) keep no prompt states on disk.
-fn refusal(o: api.Open, dense: bool) ?[]const u8 {
-    if (o.learn == null or !std.mem.eql(u8, o.model_type, "qwen3_5")) return null;
-    const only = "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only: serve ";
-    const flags = " without --learn, --learn-dir or --learn-gib";
-    return if (dense) only ++ "Qwen3.8-27B" ++ flags else only ++ "Qwen3.5-2B" ++ flags;
+/// Refused before any weights load: --slide but on Nemotron, --learn where no prompt state is kept on disk.
+fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
+    const is = struct {
+        fn f(x: api.Open, t: []const u8) bool {
+            return std.mem.eql(u8, x.model_type, t);
+        }
+    }.f;
+    const name: []const u8 = if (is(o, "qwen3_5")) (if (dense) "Qwen3.8-27B" else "Qwen3.5-2B") else if (is(o, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (is(o, "qwen4_exp")) "Flash Next" else if (is(o, "glm5_next")) "GLM-5.3-Flash" else o.model_type;
+    if (o.slide and !is(o, "nemotron_h")) return try std.fmt.allocPrint(a, "--slide learns into Nemotron only: serve {s} without --slide", .{name});
+    if (o.learn == null or !(is(o, "qwen3_5") or is(o, "glm_moe_dsa"))) return null;
+    return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only: serve {s} without --learn, --learn-dir or --learn-gib", .{name});
 }
 
 /// Learned states under `root` by checkpoint, shards, prefill step, head, kernels, probe bits, OS build and chip.
@@ -413,12 +418,30 @@ test "a qwen3_5 checkpoint opens the 27B engine unless it has the 2B's geometry 
     }
 }
 
-test "--learn is refused for the 27B and the 2B, and not for the families that keep prompt states on disk" {
+test "--learn is refused for the 27B, the 2B and GLM-5.3 (EXLR8), and not for the families that keep prompt states on disk" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
     const learn: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .learn = "/x" };
-    try std.testing.expectStringEndsWith(refusal(learn, true) orelse "", ": serve Qwen3.8-27B without --learn, --learn-dir or --learn-gib");
-    try std.testing.expectStringEndsWith(refusal(learn, false) orelse "", ": serve Qwen3.5-2B without --learn, --learn-dir or --learn-gib");
-    try std.testing.expect(refusal(.{ .dir = "d", .model_type = "qwen3_5", .learn_gib = 8, .learn_min_free_gib = 2 }, true) == null);
-    for ([_][]const u8{ "nemotron_h", "qwen4_exp", "glm5_next" }) |t| try std.testing.expect(refusal(.{ .dir = "d", .model_type = t, .learn = "/x" }, false) == null);
+    const flags = " without --learn, --learn-dir or --learn-gib";
+    try std.testing.expectStringEndsWith((try refusal(a, learn, true)) orelse "", ": serve Qwen3.8-27B" ++ flags);
+    try std.testing.expectStringEndsWith((try refusal(a, learn, false)) orelse "", ": serve Qwen3.5-2B" ++ flags);
+    try std.testing.expectStringEndsWith((try refusal(a, .{ .dir = "d", .model_type = "glm_moe_dsa", .learn = "/x" }, false)) orelse "", ": serve GLM-5.3 (EXLR8)" ++ flags);
+    for ([_][]const u8{ "qwen3_5", "glm_moe_dsa" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .learn_gib = 8, .learn_min_free_gib = 2 }, true)) == null);
+    for ([_][]const u8{ "nemotron_h", "qwen4_exp", "glm5_next" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .learn = "/x" }, false)) == null);
+}
+
+test "--slide is refused by every family but Nemotron, which learns into its weights" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = "nemotron_h", .slide = true }, false)) == null);
+    const names = [_][2][]const u8{ .{ "glm_moe_dsa", "GLM-5.3 (EXLR8)" }, .{ "qwen4_exp", "Flash Next" }, .{ "glm5_next", "GLM-5.3-Flash" }, .{ "qwen3_5", "Qwen3.8-27B" } };
+    for (names) |n| {
+        const why = (try refusal(a, .{ .dir = "d", .model_type = n[0], .slide = true }, true)) orelse return error.TestExpectedRefusal;
+        try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "--slide learns into Nemotron only: serve {s} without --slide", .{n[1]}), why);
+    }
+    try std.testing.expectStringEndsWith((try refusal(a, .{ .dir = "d", .model_type = "qwen3_5", .slide = true }, false)) orelse "", "Qwen3.5-2B without --slide");
 }
 
 test "a shard rewritten in place, same size and bytes, gives the learned states a new identity" {
