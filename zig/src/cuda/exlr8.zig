@@ -8,20 +8,27 @@ const Function = module.Function;
 const Stream = stream_.Stream;
 /// The row capacities exlr8.cu instantiates (core/exlr8_job.zig's list).
 const capacities = [_]usize{ 1, 2, 4, 8, 16 };
+/// The split kernels' (row capacity, sets) (core/exlr8_job.zig's splits): a job's blocks over S sets, the same bits.
+const splits = [_][2]usize{ .{ 1, 2 }, .{ 1, 4 }, .{ 2, 2 }, .{ 2, 4 }, .{ 4, 2 } };
 
 /// Argument structs come from core/exlr8_job.zig (Rotate, Rows, Combine), passed by value as the kernels take them.
 pub const Kernels = struct {
     rotate_fn: Function,
     project_fns: [capacities.len]Function,
+    split_fns: [splits.len]Function,
     combine_fn: Function,
     codebook_fn: Function,
     tile_codes_fn: Function,
 
     pub fn resolve(mod: module.Module) !Kernels {
-        var k: Kernels = .{ .rotate_fn = try mod.function("tf_exlr8_rotate"), .project_fns = undefined, .combine_fn = try mod.function("tf_exlr8_combine"), .codebook_fn = try mod.function("tf_exlr8_weights"), .tile_codes_fn = try mod.function("tf_exlr8_tile_codes") };
+        var k: Kernels = .{ .rotate_fn = try mod.function("tf_exlr8_rotate"), .project_fns = undefined, .split_fns = undefined, .combine_fn = try mod.function("tf_exlr8_combine"), .codebook_fn = try mod.function("tf_exlr8_weights"), .tile_codes_fn = try mod.function("tf_exlr8_tile_codes") };
         for (capacities, &k.project_fns) |c, *f| {
             var name: [32]u8 = undefined;
             f.* = try mod.function(try std.fmt.bufPrintSentinel(&name, "tf_exlr8_project_{d}", .{c}, 0));
+        }
+        for (splits, &k.split_fns) |c, *f| {
+            var name: [32]u8 = undefined;
+            f.* = try mod.function(try std.fmt.bufPrintSentinel(&name, "tf_exlr8_split_{d}_{d}", .{ c[0], c[1] }, 0));
         }
         return k;
     }
@@ -39,8 +46,8 @@ pub const Kernels = struct {
         try launch_.launch(k.rotate_fn, .{ .grid = .{ .x = @intCast(blocks), .y = a.rows, .z = @intCast(slots) }, .block = .{ .x = 32 } }, s, &args);
     }
 
-    /// One block of 256 threads per job over 1-16 rows (`rows` holds the count) of rotated fp32 input.
-    pub fn project(k: *const Kernels, s: Stream, x: u64, weights: u64, bases: u64, halves: u64, signs: u64, jobs: u64, count: usize, rows: anytype, y: u64, members: u64) !void {
+    /// One block of 256 sets threads a job over 1-16 rows (`rows` holds the count); one set where no split kernel fits.
+    pub fn project(k: *const Kernels, s: Stream, x: u64, weights: u64, bases: u64, halves: u64, signs: u64, jobs: u64, count: usize, rows: anytype, y: u64, members: u64, sets: usize) !void {
         if (rows.rows == 0 or rows.rows > capacities[capacities.len - 1] or count == 0) return error.InvalidExlr8Rows;
         var args: launch_.Args = .{};
         args.add(x);
@@ -55,6 +62,9 @@ pub const Kernels = struct {
         const at = for (capacities, 0..) |c, i| {
             if (rows.rows <= c) break i;
         } else unreachable;
+        for (splits, 0..) |c, i| if (c[0] == capacities[at] and c[1] == sets) {
+            return launch_.launch(k.split_fns[i], .{ .grid = .{ .x = @intCast(count), .y = 1, .z = 1 }, .block = .{ .x = @intCast(256 * sets) } }, s, &args);
+        };
         try launch_.launch(k.project_fns[at], .{ .grid = .{ .x = @intCast(count), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &args);
     }
 

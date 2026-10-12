@@ -71,7 +71,7 @@ pub const Packed = struct {
     }
 
     pub fn trellis(k: *const Packed, t: pack.Trellis) op.Tables {
-        return .{ .weights = k.bytes, .bases = k.bases, .halves = k.halves, .signs = k.signs, .jobs = k.jobs, .count = t.jobs.hi - t.jobs.lo, .jobs_off = t.jobs.lo * @sizeOf(ex.job.Job) };
+        return .{ .weights = k.bytes, .bases = k.bases, .halves = k.halves, .signs = k.signs, .jobs = k.jobs, .count = t.jobs.hi - t.jobs.lo, .jobs_off = t.jobs.lo * @sizeOf(ex.job.Job), .blocks = t.in / 128 };
     }
 
     pub fn at(k: *const Packed, off: u64) Ref {

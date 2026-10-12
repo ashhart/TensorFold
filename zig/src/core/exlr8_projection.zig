@@ -22,14 +22,20 @@ pub const Tables = struct {
     halves: mtl.Buffer,
     signs: mtl.Buffer,
     jobs: mtl.Buffer,
+    /// Jobs in `jobs`; for an indirect dispatch, the most there can be (the split rule's guess).
     count: usize,
     /// The first job's byte offset in `jobs` (a run of a shared job list).
     jobs_off: usize = 0,
+    /// Every job's block count when they share one (0: unknown, one set a job).
+    blocks: usize = 0,
+    /// Sets a job (1, 2 or 4) when the caller chooses; 0 lets job.sets choose.
+    sets: usize = 0,
 };
 
 pub const Pipelines = struct {
     rotate: mtl.Pipeline,
     project: [capacities.len]mtl.Pipeline,
+    split: [job.splits.len]mtl.Pipeline,
     combine: mtl.Pipeline,
     weights: mtl.Pipeline,
     tile_codes: mtl.Pipeline,
@@ -50,17 +56,27 @@ pub const Pipelines = struct {
             made += 1;
             if (q.simdWidth() != 32 or q.maxThreads() < 256) return error.UnsupportedExlr8Pipeline;
         }
+        var split: [job.splits.len]mtl.Pipeline = undefined;
+        var split_made: usize = 0;
+        errdefer for (split[0..split_made]) |q| q.deinit();
+        for (job.splits, &split) |k, *q| {
+            var name: [32]u8 = undefined;
+            q.* = try mtl.Pipeline.init(device, lib, try std.fmt.bufPrint(&name, "tf_exlr8_split_{d}_{d}", .{ k[0], k[1] }), false);
+            split_made += 1;
+            if (q.maxThreads() < 256 * k[1]) return error.UnsupportedExlr8Pipeline;
+        }
         const combine = try mtl.Pipeline.init(device, lib, "tf_exlr8_combine", false);
         errdefer combine.deinit();
         const weights = try mtl.Pipeline.init(device, lib, "tf_exlr8_weights", false);
         errdefer weights.deinit();
         const tile_codes = try mtl.Pipeline.init(device, lib, "tf_exlr8_tile_codes", false);
-        return .{ .rotate = rotate, .project = project, .combine = combine, .weights = weights, .tile_codes = tile_codes };
+        return .{ .rotate = rotate, .project = project, .split = split, .combine = combine, .weights = weights, .tile_codes = tile_codes };
     }
 
     pub fn deinit(p: *Pipelines) void {
         p.rotate.deinit();
         for (p.project) |q| q.deinit();
+        for (p.split) |q| q.deinit();
         p.combine.deinit();
         p.weights.deinit();
         p.tile_codes.deinit();
@@ -96,7 +112,9 @@ pub fn encodeProject(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, t: Tabl
     if (t.count == 0 or t.jobs.length() < t.jobs_off + t.count * @sizeOf(Job)) return error.InvalidExlr8Jobs;
     try fits(x, ((rows - 1) * x_stride + 128) * 4);
     try fits(y, ((rows - 1) * y_stride + 128) * @as(usize, if (y_f32) 4 else 2));
-    e.setPipeline(p.project[job.capacity(rows)]);
+    const sets = if (t.sets != 0) t.sets else job.sets(t.count, t.blocks, rows);
+    const split = job.split(rows, sets);
+    e.setPipeline(if (split) |i| p.split[i] else p.project[job.capacity(rows)]);
     e.setBuffer(x.buf, x.off, 0);
     e.setBuffer(t.weights, 0, 1);
     e.setBuffer(t.bases, 0, 2);
@@ -107,14 +125,16 @@ pub fn encodeProject(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, t: Tabl
     e.setBuffer(y.buf, y.off, 7);
     const m = members orelse Ref{ .buf = t.jobs };
     e.setBuffer(m.buf, m.off, 8);
-    e.dispatchGroups(.{ .width = t.count }, .{ .width = 256 });
+    e.dispatchGroups(.{ .width = t.count }, .{ .width = if (split != null) 256 * sets else 256 });
 }
 
 /// encodeProject with its threadgroup count read on the GPU (three u32 at `args`): jobs a kernel wrote.
 pub fn encodeProjectIndirect(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, t: Tables, y: Ref, rows: usize, x_stride: usize, y_stride: usize, y_f32: bool, members: Ref, args: Ref) !void {
     if (rows == 0 or rows > max_rows) return error.InvalidExlr8Rows;
     try fits(args, 12);
-    e.setPipeline(p.project[job.capacity(rows)]);
+    const sets = if (t.sets != 0) t.sets else job.sets(t.count, t.blocks, rows);
+    const split = job.split(rows, sets);
+    e.setPipeline(if (split) |i| p.split[i] else p.project[job.capacity(rows)]);
     e.setBuffer(x.buf, x.off, 0);
     e.setBuffer(t.weights, 0, 1);
     e.setBuffer(t.bases, 0, 2);
@@ -124,7 +144,7 @@ pub fn encodeProjectIndirect(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref,
     e.setValue(Rows{ .rows = @intCast(rows), .x_stride = @intCast(x_stride), .y_stride = @intCast(y_stride), .y_f32 = @intFromBool(y_f32) }, 6);
     e.setBuffer(y.buf, y.off, 7);
     e.setBuffer(members.buf, members.off, 8);
-    e.dispatchIndirect(args.buf, args.off, .{ .width = 256 });
+    e.dispatchIndirect(args.buf, args.off, .{ .width = if (split != null) 256 * sets else 256 });
 }
 
 /// One simdgroup per (row, 128-block) over `blocks` output blocks; sv[e] indexes slot e's block scales.

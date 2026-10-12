@@ -14,6 +14,24 @@ pub fn capacity(rows: usize) usize {
     unreachable;
 }
 
+/// (row capacity, sets) of the split kernels: a job's blocks round-robin over S sets of 8 simdgroups, the same bits.
+pub const splits = [_][2]usize{ .{ 1, 2 }, .{ 1, 4 }, .{ 2, 2 }, .{ 2, 4 }, .{ 4, 2 } };
+
+/// Sets for `count` jobs of `blocks` blocks at `rows` rows: few long jobs leave cores idle, so their blocks split.
+pub fn sets(count: usize, blocks: usize, rows: usize) usize {
+    if (count == 0 or blocks < 32 or rows > 4) return 1;
+    if (count <= 48 and rows <= 2) return 4;
+    return if (count <= 160) 2 else 1;
+}
+
+/// The split kernel for `rows` (1-16) over `s` sets by its index in `splits`; null runs the one-set kernel.
+pub fn split(rows: usize, s: usize) ?usize {
+    if (s < 2) return null;
+    const cap = capacities[capacity(rows)];
+    for (splits, 0..) |k, i| if (k[0] == cap and k[1] == s) return i;
+    return null;
+}
+
 /// 128 output columns over `blocks` input blocks of 128; block b's 64 tiles start at byte bases[base + b].
 pub const Job = extern struct {
     k: u32,
@@ -107,4 +125,13 @@ test "the argument structs keep the kernels' layouts, and windows find their cap
     try std.testing.expectEqual(@as(usize, 0), capacity(1));
     try std.testing.expectEqual(@as(usize, 2), capacity(3));
     try std.testing.expectEqual(@as(usize, 4), capacity(9));
+    try std.testing.expectEqual(@as(usize, 4), sets(48, 64, 1));
+    try std.testing.expectEqual(@as(usize, 2), sets(48, 64, 3));
+    try std.testing.expectEqual(@as(usize, 1), sets(432, 8, 1));
+    try std.testing.expectEqual(@as(usize, 2), sets(144, 48, 1));
+    try std.testing.expectEqual(@as(usize, 1), sets(288, 48, 1));
+    try std.testing.expectEqual(@as(usize, 1), sets(0, 48, 1));
+    try std.testing.expectEqual(@as(?usize, 4), split(3, 2));
+    try std.testing.expectEqual(@as(?usize, null), split(3, 4));
+    try std.testing.expectEqual(@as(?usize, null), split(1, 1));
 }

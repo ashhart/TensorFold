@@ -160,6 +160,96 @@ __device__ __forceinline__ void tf_exlr8_job(const float* X, const uint8_t* W, c
   }
 }
 
+// S sets of 8 warps take a job's blocks round-robin; set 0 folds every block's sums in block order, as one set.
+template <int K, int R, int S>
+__device__ __forceinline__ void tf_exlr8_split(const float* X, const uint8_t* W, const uint64_t* bases, const __half* halves,
+                                               const int8_t* signs, const TfExlr8Rows a, const TfExlr8Job j, uint8_t* Y,
+                                               const unsigned* members, unsigned sg, unsigned lane, unsigned tid, float* xs,
+                                               float* ps, float* zs) {
+  constexpr unsigned TB = 32 * K;
+  const unsigned set = sg / 8, ct = sg % 8;
+  const unsigned want = j.count ? j.count : a.rows;
+  const unsigned rows = want < R ? want : R, r0 = 2 * (lane % 4), c0 = lane / 4;
+  float total[2][R], part[2][R];
+#pragma unroll
+  for (int i = 0; i < R; ++i) total[0][i] = total[1][i] = 0.0f;
+  // A set past the last block decodes the last block again and its sums are never folded.
+  const uint8_t* run = W + bases[j.base + (set < j.blocks ? set : j.blocks - 1)];
+  uint3 next = tf_exlr8_words<K>(reinterpret_cast<const uint32_t*>(run + ct * TB), lane);
+  for (unsigned ib0 = 0; ib0 < j.blocks; ib0 += S) {
+    for (unsigned i = tid; i < S * R * 128; i += S * 256) {
+      const unsigned b0 = ib0 + i / (R * 128), b = b0 < j.blocks ? b0 : j.blocks - 1, rr = (i / 128) % R;
+      xs[i] = rr < rows ? X[(uint64_t)(j.count ? members[j.members + rr] >> 16 : rr) * a.x_stride + j.x_col + b * 128 + i % 128] : 0.0f;
+    }
+    __syncthreads();
+#pragma unroll
+    for (int i = 0; i < R; ++i) part[0][i] = part[1][i] = 0.0f;
+    const unsigned nb = ib0 + set + S < j.blocks ? ib0 + set + S : j.blocks - 1;
+    const uint8_t* later = W + bases[j.base + nb];
+    for (unsigned r = 0; r < 8; ++r) {
+      const uint3 now = next;
+      next = tf_exlr8_words<K>(reinterpret_cast<const uint32_t*>((r < 7 ? run + (8 * r + 8) * TB : later) + ct * TB), lane);
+      __half w[8];
+      tf_exlr8_unpack<K>(now, lane, w);
+#pragma unroll
+      for (int i = 0; i < R; ++i) {
+        const float* x = xs + (set * R + i) * 128 + 16 * r + r0;
+        const float2 lo = *reinterpret_cast<const float2*>(x);
+        const float2 hi = *reinterpret_cast<const float2*>(x + 8);
+        part[0][i] = __fmaf_rn(__half2float(w[3]), hi.y, __fmaf_rn(__half2float(w[2]), hi.x, __fmaf_rn(__half2float(w[1]), lo.y, __fmaf_rn(__half2float(w[0]), lo.x, part[0][i]))));
+        part[1][i] = __fmaf_rn(__half2float(w[7]), hi.y, __fmaf_rn(__half2float(w[6]), hi.x, __fmaf_rn(__half2float(w[5]), lo.y, __fmaf_rn(__half2float(w[4]), lo.x, part[1][i]))));
+      }
+    }
+    run = later;
+    if (set > 0) {
+#pragma unroll
+      for (int i = 0; i < R; ++i)
+        for (int c = 0; c < 2; ++c) ps[(((set - 1) * R + i) * 8 + ct) * 64 + 2 * lane + c] = part[c][i];
+    }
+    __syncthreads();
+    if (set == 0) {
+      // The input block's scale goes on its partial sums, between 128-wide stages, block after block.
+      for (unsigned s = 0; s < S && ib0 + s < j.blocks; ++s) {
+        const float sc = j.in_scale == TF_NONE ? 1.0f : __half2float(halves[j.in_scale + ib0 + s]);
+#pragma unroll
+        for (int i = 0; i < R; ++i)
+          for (int c = 0; c < 2; ++c) total[c][i] = __fmaf_rn(sc, s ? ps[(((s - 1) * R + i) * 8 + ct) * 64 + 2 * lane + c] : part[c][i], total[c][i]);
+      }
+    }
+  }
+  if (set == 0) {
+#pragma unroll
+    for (int i = 0; i < R; ++i) {
+      for (int c = 0; c < 2; ++c) {
+        float v = total[c][i];
+        v = __fadd_rn(v, __shfl_xor_sync(TF_FULL, v, 1));
+        v = __fadd_rn(v, __shfl_xor_sync(TF_FULL, v, 2));
+        if (lane % 4 == 0) zs[i * 128 + 16 * ct + c0 + 8 * c] = v;
+      }
+    }
+  }
+  __syncthreads();
+  for (unsigned i = sg; i < rows; i += 8 * S) {
+    float v[4];
+    for (int q = 0; q < 4; ++q) v[q] = zs[i * 128 + lane + 32 * q];
+    const uint64_t row = (uint64_t)(j.count ? members[j.members + i] & 0xFFFFu : i) * a.y_stride + j.y_col;
+    if (j.raw) {
+      for (int q = 0; q < 4; ++q) reinterpret_cast<float*>(Y)[row + lane + 32 * q] = v[q];
+      continue;
+    }
+    tf_exlr8_fwht(v, lane);
+    const float block = j.out_block == TF_NONE ? 1.0f : __half2float(halves[j.out_block]);
+    for (int q = 0; q < 4; ++q) {
+      const unsigned c = lane + 32 * q;
+      // svh, the sign and the block scale times 2^-7 multiply exactly; one rounding remains.
+      float scale = __fmul_rn(block, 0.0078125f);
+      if (j.out_scale != TF_NONE) scale = __fmul_rn(scale, __half2float(halves[j.out_scale + c]));
+      if (j.out_sign != TF_NONE) scale = __fmul_rn(scale, (float)signs[j.out_sign + c]);
+      tf_exlr8_store(Y, row + c, __fmul_rn(v[q], scale), a.y_f32);
+    }
+  }
+}
+
 // One kernel a row capacity R (1, 2, 4, 8, 16): the accumulators stay in registers; a row's sums never depend on R.
 #define TF_EXLR8_PROJECT(R)                                                                                          \
   extern "C" __global__ void __launch_bounds__(256) tf_exlr8_project_##R(                                            \
@@ -180,6 +270,26 @@ TF_EXLR8_PROJECT(2)
 TF_EXLR8_PROJECT(4)
 TF_EXLR8_PROJECT(8)
 TF_EXLR8_PROJECT(16)
+// A job on 256 S threads for few long jobs (core/exlr8_job.zig's splits); its bits are the one-set kernel's.
+#define TF_EXLR8_SPLIT(R, S)                                                                                         \
+  extern "C" __global__ void __launch_bounds__(256 * S) tf_exlr8_split_##R##_##S(                                    \
+      const float* X, const uint8_t* W, const uint64_t* bases, const __half* halves, const int8_t* signs,          \
+      const TfExlr8Job* jobs, const TfExlr8Rows a, uint8_t* Y, const unsigned* members) {                           \
+    __shared__ __align__(16) float xs[S * R * 128], ps[(S - 1) * R * 512], zs[R * 128];                            \
+    const TfExlr8Job j = jobs[blockIdx.x];                                                                           \
+    const unsigned tid = threadIdx.x, sg = tid / 32, lane = tid % 32;                                                \
+    switch (j.k) {                                                                                                   \
+      case 2: tf_exlr8_split<2, R, S>(X, W, bases, halves, signs, a, j, Y, members, sg, lane, tid, xs, ps, zs); break; \
+      case 3: tf_exlr8_split<3, R, S>(X, W, bases, halves, signs, a, j, Y, members, sg, lane, tid, xs, ps, zs); break; \
+      case 4: tf_exlr8_split<4, R, S>(X, W, bases, halves, signs, a, j, Y, members, sg, lane, tid, xs, ps, zs); break; \
+      default: break;                                                                                                \
+    }                                                                                                                \
+  }
+TF_EXLR8_SPLIT(1, 2)
+TF_EXLR8_SPLIT(1, 4)
+TF_EXLR8_SPLIT(2, 2)
+TF_EXLR8_SPLIT(2, 4)
+TF_EXLR8_SPLIT(4, 2)
 
 // r = (x * s) H0 for one row's 128-block of one slot, s = signs times an optional fp16 per-channel scale.
 extern "C" __global__ void __launch_bounds__(32) tf_exlr8_rotate(const uint8_t* X, const int8_t* signs, const __half* halves,

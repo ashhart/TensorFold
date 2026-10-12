@@ -40,9 +40,11 @@ const Gpu = struct {
     z: mtl.Buffer,
     y: mtl.Buffer,
     sets: []Set,
+    /// Sets a job for every projection (1: one; 2 or 4 split a job's blocks).
+    sets_a_job: usize = 1,
 
     fn tables(g: Gpu, jobs: mtl.Buffer, count: usize) op.Tables {
-        return .{ .weights = g.weights, .bases = g.bases, .halves = g.halves, .signs = g.signs, .jobs = jobs, .count = count };
+        return .{ .weights = g.weights, .bases = g.bases, .halves = g.halves, .signs = g.signs, .jobs = jobs, .count = count, .sets = g.sets_a_job };
     }
 };
 
@@ -163,5 +165,15 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("rows {d:2}: layer {d:7.1} us | rotate x {d:5.1} us, gate/up {d:7.1} us ({d:5.1} GB/s), rotate down inputs {d:5.1} us, down {d:7.1} us ({d:5.1} GB/s), combine {d:5.1} us | rotations {d:4.1}% of the stages\n", .{
             rows, whole, us[0], us[1], up / us[1] / 1e3, us[2], us[3], down / us[3] / 1e3, us[4], 100 * (us[0] + us[2]) / (us[0] + us[1] + us[2] + us[3] + us[4]),
         });
+        if (rows > 4) continue;
+        // The gate/up jobs again with their blocks split over 2 and 4 sets a job (one set where no kernel fits).
+        var split: [2]f64 = undefined;
+        for ([_]usize{ 2, 4 }, &split) |n, *out| {
+            var gs = g;
+            gs.sets_a_job = n;
+            for (&t, 0..) |*v, i| v.* = try round(queue, &p, gs, sets[i % count], rows, 0, &.{.gate_up});
+            out.* = median(&t) * 1e6;
+        }
+        std.debug.print("rows {d:2}: gate/up {d:7.1} us at 2 sets a job, {d:7.1} us at 4\n", .{ rows, split[0], split[1] });
     }
 }

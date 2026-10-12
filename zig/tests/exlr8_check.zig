@@ -48,7 +48,7 @@ fn checkWeights(device: mtl.Device, queue: mtl.Queue, p: *const op.Pipelines, bo
 }
 
 /// Each row alone, then rows 0..m together for m = 1..16, through the rotation, projection and (down) fan-in.
-fn run(device: mtl.Device, queue: mtl.Queue, p: *const op.Pipelines, d: cases.Data) !cases.Outputs {
+fn run(device: mtl.Device, queue: mtl.Queue, p: *const op.Pipelines, d: cases.Data, sets: usize) !cases.Outputs {
     const c = d.c;
     const plan = try cases.Plan.init(d);
     defer plan.deinit();
@@ -60,7 +60,7 @@ fn run(device: mtl.Device, queue: mtl.Queue, p: *const op.Pipelines, d: cases.Da
     };
     defer for (bufs) |b| b.deinit();
     const weights, const bases, const halves, const signs, const jobs, const x, const wts, const suh_of, const sv, const rot, const z, const y = bufs;
-    const t: op.Tables = .{ .weights = weights, .bases = bases, .halves = halves, .signs = signs, .jobs = jobs, .count = plan.jobs.len };
+    const t: op.Tables = .{ .weights = weights, .bases = bases, .halves = halves, .signs = signs, .jobs = jobs, .count = plan.jobs.len, .sets = sets };
     const out = try cases.Outputs.init(d);
     var at: usize = 0;
     for (0..rows_max + 1) |m| for (0..if (m == 0) rows_max else 1) |pass| {
@@ -113,14 +113,17 @@ pub fn main(init: std.process.Init) !void {
     for (cases.cases, 0..) |c, i| {
         const d = try cases.Data.init(c, 0xE8 + i);
         defer d.deinit();
-        const o = try run(device, queue, &p, d);
-        defer o.deinit();
-        pairs += try cases.rowsEqual(o);
-        try cases.fp64(book, d, o, &check);
-        if (freeze) {
-            frozen.print(c.name, o.windows, o.width * o.elem);
-        } else try frozen.compare(c.name, o.windows, o.width * o.elem);
-        std.debug.print("PASS {s}: windows 1-16 byte-equal to rows alone{s}\n", .{ c.name, if (freeze) "" else ", frozen windows byte-equal" });
+        // One, two and four sets a job: the split kernels must give the one-set kernel's bytes.
+        for ([_]usize{ 1, 2, 4 }) |sets| {
+            const o = try run(device, queue, &p, d, sets);
+            defer o.deinit();
+            pairs += try cases.rowsEqual(o);
+            if (sets == 1) try cases.fp64(book, d, o, &check);
+            if (freeze and sets == 1) {
+                frozen.print(c.name, o.windows, o.width * o.elem);
+            } else try frozen.compare(c.name, o.windows, o.width * o.elem);
+        }
+        std.debug.print("PASS {s}: windows 1-16 byte-equal to rows alone{s}, at 1, 2 and 4 sets a job\n", .{ c.name, if (freeze) "" else ", frozen windows byte-equal" });
     }
     std.debug.print("PASS {d} cases, {d} row/window pairs, {d} FP64 values; max error {e}, max {d:.4} of the bound\n", .{ cases.cases.len, pairs, check.values, check.max_error, check.max_fraction });
 }

@@ -222,7 +222,9 @@ pub fn expertsGpu(K: *const Kernels, L: *const Layer, s: *const gpu.Scratch, e: 
     kn.moeJobs(&K.k, e, s.route, .{ .buf = L.desc.? }, .{ .rows = rows, .halves = c.localHalves(), .topk = c.topk, .slots = gpu.slots, .gu_cap = gpu.gu_cap }, ref(s.moe_jobs), ref(s.members), ref(s.wts), ref(s.sv), ref(s.suh), ref(s.dispatch));
     try op.encodeRotate(&K.op, e, ref(s.x), L.k.signs, L.k.halves, ref(s.rot), .{ .rows = rows, .x_stride = hid, .x_f32 = 1, .r_stride = hid, .sign = m.signs }, hid / 128, 1, null);
     e.barrier();
-    const t: op.Tables = .{ .weights = L.k.bytes, .bases = L.k.bases, .halves = L.k.halves, .signs = L.k.signs, .jobs = s.moe_jobs, .count = 0 };
+    // The split rule's count: at most each pick its own expert, the shared one too, gate and up, this Mac's halves.
+    const gu_most = (@min(rows * c.topk, c.experts) + 1) * 2 * c.localHalves();
+    const t: op.Tables = .{ .weights = L.k.bytes, .bases = L.k.bases, .halves = L.k.halves, .signs = L.k.signs, .jobs = s.moe_jobs, .count = gu_most, .blocks = hid / 128 };
     try op.encodeProjectIndirect(&K.op, e, ref(s.rot), t, ref(s.gu), rows, hid, 2 * loc, true, ref(s.members), ref(s.dispatch));
     e.barrier();
     kn.siluMul(&K.k, e, ref(s.gu), .{ .width = loc, .x_stride = 2 * loc, .y_stride = loc }, ref(s.act), P);
@@ -231,6 +233,7 @@ pub fn expertsGpu(K: *const Kernels, L: *const Layer, s: *const gpu.Scratch, e: 
     e.barrier();
     var td = t;
     td.jobs_off = gpu.gu_cap * @sizeOf(ex.job.Job);
+    td.blocks = loc / 128;
     try op.encodeProjectIndirect(&K.op, e, ref(s.arot), td, ref(s.z), rows, loc, hid, true, ref(s.members), .{ .buf = s.dispatch, .off = 16 });
     e.barrier();
     try op.encodeCombine(&K.op, e, ref(s.z), ref(s.wts), ref(s.sv), L.k.halves, L.k.signs, out, .{ .rows = rows, .slots = gpu.slots, .z_stride = gpu.slots * hid, .y_stride = hid, .y_f32 = 1, .sign = m.signs + hid, .z_slot = hid, .per_row = 1 }, hid / 128);

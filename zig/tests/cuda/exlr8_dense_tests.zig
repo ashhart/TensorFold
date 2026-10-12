@@ -177,7 +177,7 @@ fn trellisMatrix(gpu: Gpu, k: *const K, book: *const ex.codec.Codebook, m: dense
     for (0..rows_max + 1) |mw| for (0..if (mw == 0) rows_max else 1) |pass| {
         const rows: u32 = if (mw == 0) 1 else @intCast(mw);
         try k.trellis.rotate(k.s, xd + (if (mw == 0) pass else 0) * r.in * 4, signs, halves, rot, 0, t.rotate(rows), r.in / 128, 1);
-        try k.trellis.project(k.s, rot, w, bases, halves, signs, jobs, t.jobs.len, rowsArgs(rows, r.in, 256, true), y, 0);
+        try k.trellis.project(k.s, rot, w, bases, halves, signs, jobs, t.jobs.len, rowsArgs(rows, r.in, 256, true), y, 0, 1);
         try k.s.synchronize();
         if (mw == 0) {
             try rig.get(y, alone[pass * 1024 ..][0..1024]);

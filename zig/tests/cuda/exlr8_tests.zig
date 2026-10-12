@@ -74,17 +74,20 @@ pub fn run(gpu: Gpu) !void {
     for (cases.cases, 0..) |c, i| {
         const d = try cases.Data.init(c, 0xE8 + i);
         defer d.deinit();
-        const o = try windows(gpu, &l.k, s, d);
-        defer o.deinit();
-        pairs += try cases.rowsEqual(o);
-        try cases.fp64(book, d, o, &bound);
-        try frozen.compare(c.name, o.windows, o.width * o.elem);
-        check.pass("{s}: windows 1-16 byte-equal to rows alone and to the Metal kernels' frozen windows", .{c.name});
+        // One, two and four sets a job: the split kernels must give the one-set kernel's bytes.
+        for ([_]usize{ 1, 2, 4 }) |sets| {
+            const o = try windows(gpu, &l.k, s, d, sets);
+            defer o.deinit();
+            pairs += try cases.rowsEqual(o);
+            if (sets == 1) try cases.fp64(book, d, o, &bound);
+            try frozen.compare(c.name, o.windows, o.width * o.elem);
+        }
+        check.pass("{s}: windows 1-16 byte-equal to rows alone and to the Metal kernels' frozen windows, at 1, 2 and 4 sets a job", .{c.name});
     }
     check.pass("{d} cases, {d} row/window pairs, {d} FP64 values; max error {e}, max {d:.4} of the bound", .{ cases.cases.len, pairs, bound.values, bound.max_error, bound.max_fraction });
 }
 
-fn windows(gpu: Gpu, k: *const cuda.exlr8.Kernels, s: cuda.Stream, d: cases.Data) !cases.Outputs {
+fn windows(gpu: Gpu, k: *const cuda.exlr8.Kernels, s: cuda.Stream, d: cases.Data, sets: usize) !cases.Outputs {
     const c = d.c;
     const plan = try cases.Plan.init(d);
     defer plan.deinit();
@@ -109,9 +112,9 @@ fn windows(gpu: Gpu, k: *const cuda.exlr8.Kernels, s: cuda.Stream, d: cases.Data
         const first = if (m == 0) pass else 0;
         try k.rotate(s, x + first * d.xWidth() * 2, signs, halves, rot, if (c.down) suh_of else 0, cases.Plan.rotate(d, rows), c.blocks, c.slots);
         if (c.down) {
-            try k.project(s, rot, weights, bases, halves, signs, jobs, plan.jobs.len, rowsArgs(rows, d.xWidth(), c.slots * d.nOut(), true), z, 0);
+            try k.project(s, rot, weights, bases, halves, signs, jobs, plan.jobs.len, rowsArgs(rows, d.xWidth(), c.slots * d.nOut(), true), z, 0, sets);
             try k.combine(s, z, wts + first * c.slots * 4, sv, halves, signs, cases.Plan.combine(d, rows), c.outs, y);
-        } else try k.project(s, rot, weights, bases, halves, signs, jobs, plan.jobs.len, rowsArgs(rows, d.xWidth(), d.yWidth(), c.y_f32), y, 0);
+        } else try k.project(s, rot, weights, bases, halves, signs, jobs, plan.jobs.len, rowsArgs(rows, d.xWidth(), d.yWidth(), c.y_f32), y, 0, sets);
         try s.synchronize();
         const bytes = rows * o.width * o.elem;
         if (m == 0) {
@@ -149,12 +152,16 @@ const Stage = enum { rotate_in, gate_up, rotate_down, down, combine };
 const all = [_]Stage{ .rotate_in, .gate_up, .rotate_down, .down, .combine };
 
 fn stages(k: *const cuda.exlr8.Kernels, s: cuda.Stream, g: *const Layer, host: layer_.Host, set: usize, rows: u32, first: usize, which: []const Stage) !void {
+    return stagesSplit(k, s, g, host, set, rows, first, which, 1);
+}
+
+fn stagesSplit(k: *const cuda.exlr8.Kernels, s: cuda.Stream, g: *const Layer, host: layer_.Host, set: usize, rows: u32, first: usize, which: []const Stage, sets: usize) !void {
     const h = host.sets[set];
     for (which) |st| switch (st) {
         .rotate_in => try k.rotate(s, g.x + first * L.hidden * 2, g.signs, g.halves, g.r, 0, layer_.rotateIn(rows), 48, 1),
-        .gate_up => try k.project(s, g.r, g.weights, g.bases, g.halves, g.signs, g.up[set], h.up.len, rowsArgs(rows, L.hidden, slots * 4096, true), g.gu, 0),
+        .gate_up => try k.project(s, g.r, g.weights, g.bases, g.halves, g.signs, g.up[set], h.up.len, rowsArgs(rows, L.hidden, slots * 4096, true), g.gu, 0, sets),
         .rotate_down => try k.rotate(s, g.act + first * slots * 2048 * 2, g.signs, g.halves, g.ar, g.suh[set], layer_.rotateDown(rows), 16, slots),
-        .down => try k.project(s, g.ar, g.weights, g.bases, g.halves, g.signs, g.down[set], h.down.len, rowsArgs(rows, slots * 2048, slots * L.hidden, true), g.z, 0),
+        .down => try k.project(s, g.ar, g.weights, g.bases, g.halves, g.signs, g.down[set], h.down.len, rowsArgs(rows, slots * 2048, slots * L.hidden, true), g.z, 0, 1),
         .combine => try k.combine(s, g.z, g.w + first * slots * 4, g.sv[set], g.halves, g.signs, layer_.combine(rows), 48, g.y),
     };
 }
@@ -256,5 +263,19 @@ pub fn bench(gpu: Gpu, dir: []const u8, manifest_name: []const u8, number: u16, 
         std.debug.print("RESULT rows {d:2}: layer {d:7.1} us | rotate x {d:5.1} us, gate/up {d:7.1} us ({d:5.1} GB/s), rotate down inputs {d:5.1} us, down {d:7.1} us ({d:5.1} GB/s), combine {d:5.1} us | rotations {d:4.1}% of the stages\n", .{
             rows, us[5], us[0], us[1], up / us[1] / 1e3, us[2], us[3], down / us[3] / 1e3, us[4], 100 * (us[0] + us[2]) / (us[0] + us[1] + us[2] + us[3] + us[4]),
         });
+        if (rows > 4) continue;
+        // The gate/up jobs again with their blocks split over 2 and 4 sets a job (one set where no kernel fits).
+        var split: [2]f64 = undefined;
+        for ([_]usize{ 2, 4 }, &split) |sets, *out| {
+            for (&t, 0..) |*v, i| {
+                try start.record(s);
+                try stagesSplit(&l.k, s, &g, host, i % count, rows, 0, &.{.gate_up}, sets);
+                try end.record(s);
+                try end.synchronize();
+                v.* = @as(f64, try cuda.Event.elapsedMs(start, end)) * 1e3;
+            }
+            out.* = check.median(&t);
+        }
+        std.debug.print("RESULT rows {d:2}: gate/up {d:7.1} us at 2 sets a job, {d:7.1} us at 4\n", .{ rows, split[0], split[1] });
     }
 }
