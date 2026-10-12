@@ -30,14 +30,15 @@ pub const Pipes = struct {
     embed: [2]mtl.Pipeline, // the embedding at 6 and 8 bits, groups of 64
     mm8: affine_mm.Pipes, // prompt chunks' products of one width at 8 bits in groups of 64 (core/affine_mm.zig)
     mm2: affine_mm.Pipes, // and at 2 bits in groups of 64: oQ2's routed experts, gathered
+    mm5: affine_mm.Pipes, // and at 5 and 6 bits (oQ4's), split stacks' members too
+    mm6: affine_mm.Pipes,
     hash: u64, // every source compiled here
 
     pub fn deinit(p: *Pipes) void {
         inline for (.{ &p.rows, &p.ids, &p.glu_ids, &p.sorted, &p.glu_sorted, &p.embed }) |set| for (set) |x| x.deinit();
         p.bf16.deinit();
         p.kda_pre.deinit();
-        for (p.mm8) |x| x.deinit();
-        for (p.mm2) |x| x.deinit();
+        inline for (.{ p.mm8, p.mm2, p.mm5, p.mm6 }) |set| for (set) |x| x.deinit();
     }
 };
 
@@ -56,7 +57,7 @@ pub const glue_math = blk: {
 
 /// The pipelines built so far: a failed compile releases them all.
 const Made = struct {
-    list: [nw * 5 + 4 + 2 * affine_mm.names.len]mtl.Pipeline = undefined,
+    list: [nw * 5 + 4 + 4 * affine_mm.names.len]mtl.Pipeline = undefined,
     n: usize = 0,
     released: usize = 0,
 
@@ -115,14 +116,12 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
     try lib(made, device, pre_src, &.{comptime kernels.generatedFunction("kda_rows")}, @as(*[1]mtl.Pipeline, &p.kda_pre));
     h.update(sources.ops_embed_norm);
     try lib(made, device, sources.ops_embed_norm, &.{ "tf_embed_b6_g64", "tf_embed_b8_g64" }, &p.embed);
-    const mm8 = try affine_mm.source(device, gpa, .{ .bits = 8, .group = 64 });
-    defer gpa.free(mm8);
-    h.update(mm8);
-    try lib(made, device, mm8, &affine_mm.names, &p.mm8);
-    const mm2 = try affine_mm.source(device, gpa, .{ .bits = 2, .group = 64 });
-    defer gpa.free(mm2);
-    h.update(mm2);
-    try lib(made, device, mm2, &affine_mm.names, &p.mm2);
+    for ([_]u8{ 8, 2, 5, 6 }, [_]*affine_mm.Pipes{ &p.mm8, &p.mm2, &p.mm5, &p.mm6 }) |bits, out| {
+        const src = try affine_mm.source(device, gpa, .{ .bits = bits, .group = 64 });
+        defer gpa.free(src);
+        h.update(src);
+        try lib(made, device, src, &affine_mm.names, out);
+    }
     p.hash = h.final();
     return p;
 }
@@ -212,8 +211,28 @@ pub fn mm(p: *const Pipes, q: Affine) ?affine_mm.Pipes {
     return switch (q.bits) {
         8 => p.mm8,
         2 => p.mm2,
+        5 => p.mm5,
+        6 => p.mm6,
         else => null,
     };
+}
+
+/// A chunk's product into io.out: each member on affine_mm at its width if it fills 64-row tiles, else the row kernels.
+pub fn denseMm(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, io: Io, sums: Ref) void {
+    var summed = false;
+    for (0..@as(usize, q.more) + 1) |i| {
+        const r = q.run(i);
+        const one: Affine = .{ .w = r.w, .s = r.s, .b = r.b, .n = r.n, .k = q.k, .bits = r.bits, .group = r.group };
+        var part = io;
+        part.out = io.out.at(@as(usize, r.row) * 2);
+        const pipes = (if (q.more == 0 or r.n % 64 == 0) mm(p, one) else null) orelse {
+            dense(p, e, one, part);
+            continue;
+        };
+        if (!summed) affine_mm.rowSumsAt(e, pipes, 64, io.in, sums, io.rows, q.k, io.ldx); // every member's: one k, g64
+        summed = true;
+        affine_mm.denseBatch(e, pipes, io.in, sums, one, part.out, io.rows, 1, .{ .x_row = @intCast(io.ldx), .y_row = @intCast(io.ldo) });
+    }
 }
 
 /// A prompt chunk's routed experts: affine_mm gathers at 4/64 (`mm4`) or 2/64 (`mm2`, oQ2's), else sorted row products.

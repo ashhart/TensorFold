@@ -334,7 +334,8 @@ fn prompt(b: *Bench, k: *const kernels.Kernels, p: *const wide.Pipes) !void {
         for ([_]u8{ 5, 6 }) |bits| {
             const m = try Pool.init(b.device, s[0], s[1], bits, 1, 2);
             defer m.deinit();
-            std.debug.print("  [{d}, {d}] q{d} rows {d:8.2}  (affine_mm q8 {d:.2}, q4 {d:.2})\n", .{ s[0], s[1], bits, try b.time(chunkRows, .{ p, m, b.io }) / 1e3, t8 / 1e3, t4 / 1e3 });
+            const on_mm = if (wide.mm(p, m.at(0))) |mm| try b.time(chunkMm, .{ mm, m, b.io }) else 0;
+            std.debug.print("  [{d}, {d}] q{d} rows {d:8.2}  affine_mm {d:8.2}  (affine_mm q8 {d:.2}, q4 {d:.2})\n", .{ s[0], s[1], bits, try b.time(chunkRows, .{ p, m, b.io }) / 1e3, on_mm / 1e3, t8 / 1e3, t4 / 1e3 });
         }
     }
 }
