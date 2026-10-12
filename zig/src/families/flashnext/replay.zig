@@ -831,6 +831,7 @@ pub const Run = struct {
     variants: std.StringHashMapUnmanaged(*Variant) = .empty,
     roles: std.StringHashMapUnmanaged(Site) = .empty,
     shapes: std.StringHashMapUnmanaged(mtl.Buffer) = .empty,
+    held: std.ArrayList(mtl.Buffer) = .empty, // what buffer, load and group made: a host's residency set holds them
     loaded: usize = 0,
     rows: usize = 1,
     fused_xsum: bool = false,
@@ -910,6 +911,7 @@ pub const Run = struct {
         const n = @max(len, 64);
         const b = try r.device.buffer(n, opts);
         @memset(b.contents()[0..n], 0);
+        try r.held.append(r.arena, b);
         return b;
     }
 
@@ -946,6 +948,7 @@ pub const Run = struct {
         errdefer b.deinit();
         try readAll(e.fd, b.contents()[0..e.len], e.at);
         r.loaded += e.len;
+        try r.held.append(r.arena, b);
         return .{ .b = b };
     }
 
@@ -969,6 +972,7 @@ pub const Run = struct {
             at += e.len;
         }
         r.loaded += total;
+        try r.held.append(r.arena, b);
         return .{ .b = b };
     }
 

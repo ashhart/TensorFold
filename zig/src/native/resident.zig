@@ -6,16 +6,20 @@ const mtl = @import("metal");
 pub const Resident = struct {
     set: mtl.ResidencySet,
     work: mtl.Queue,
+    scratch: mtl.Buffer, // inside the set: the keepalive's tick copies 16 bytes within it
 
     /// `buffers` join one set that `work` holds; the set is requested resident at once.
     pub fn init(device: mtl.Device, work: mtl.Queue, buffers: []const mtl.Buffer) !Resident {
-        const set = try device.residencySet(buffers.len);
+        const set = try device.residencySet(buffers.len + 1);
         errdefer set.deinit();
         for (buffers) |b| set.add(b);
+        const scratch = try device.buffer(64, mtl.ResourceOptions.shared);
+        errdefer scratch.deinit();
+        set.add(scratch);
         set.commit();
         set.requestResidency();
         work.addResidencySet(set);
-        return .{ .set = set, .work = work };
+        return .{ .set = set, .work = work, .scratch = scratch };
     }
 
     /// More buffers into the set (a slot's memory taken after load), requested resident with the rest.
@@ -27,11 +31,12 @@ pub const Resident = struct {
 
     /// The idle keepalive's target: a tiny command buffer on `work` using the set; `r` must not move.
     pub fn target(r: *const Resident) mtl.keepalive.Target {
-        return .{ .queue = r.work, .sets = @as(*const [1]mtl.ResidencySet, &r.set) };
+        return .{ .queue = r.work, .sets = @as(*const [1]mtl.ResidencySet, &r.set), .scratch = r.scratch };
     }
 
     pub fn deinit(r: *Resident) void {
         r.work.removeResidencySet(r.set);
         r.set.deinit();
+        r.scratch.deinit();
     }
 };
