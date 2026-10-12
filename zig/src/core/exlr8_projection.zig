@@ -110,6 +110,23 @@ pub fn encodeProject(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, t: Tabl
     e.dispatchGroups(.{ .width = t.count }, .{ .width = 256 });
 }
 
+/// encodeProject with its threadgroup count read on the GPU (three u32 at `args`): jobs a kernel wrote.
+pub fn encodeProjectIndirect(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, t: Tables, y: Ref, rows: usize, x_stride: usize, y_stride: usize, y_f32: bool, members: Ref, args: Ref) !void {
+    if (rows == 0 or rows > max_rows) return error.InvalidExlr8Rows;
+    try fits(args, 12);
+    e.setPipeline(p.project[job.capacity(rows)]);
+    e.setBuffer(x.buf, x.off, 0);
+    e.setBuffer(t.weights, 0, 1);
+    e.setBuffer(t.bases, 0, 2);
+    e.setBuffer(t.halves, 0, 3);
+    e.setBuffer(t.signs, 0, 4);
+    e.setBuffer(t.jobs, t.jobs_off, 5);
+    e.setValue(Rows{ .rows = @intCast(rows), .x_stride = @intCast(x_stride), .y_stride = @intCast(y_stride), .y_f32 = @intFromBool(y_f32) }, 6);
+    e.setBuffer(y.buf, y.off, 7);
+    e.setBuffer(members.buf, members.off, 8);
+    e.dispatchIndirect(args.buf, args.off, .{ .width = 256 });
+}
+
 /// One simdgroup per (row, 128-block) over `blocks` output blocks; sv[e] indexes slot e's block scales.
 pub fn encodeCombine(p: *const Pipelines, e: mtl.ComputeEncoder, z: Ref, weights: Ref, sv: Ref, halves: mtl.Buffer, signs: mtl.Buffer, y: Ref, a: Combine, blocks: usize) !void {
     if (a.rows == 0 or a.slots == 0 or blocks == 0) return error.InvalidExlr8Rows;

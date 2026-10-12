@@ -67,6 +67,9 @@ pub const Packed = struct {
 /// The most rows a window takes, and the picks a row routes (eight experts and the shared one).
 pub const max_rows = 16;
 pub const slots = 9;
+/// A window's distinct experts at most (every pick its own, and the shared one), and the jobs before the down ones.
+pub const max_experts = max_rows * 8 + 1;
+pub const gu_cap = max_experts * 2 * 16;
 
 /// Activations for one window of up to 16 rows, sized for one Mac's share of the model.
 pub const Scratch = struct {
@@ -97,6 +100,7 @@ pub const Scratch = struct {
     suh: mtl.Buffer,
     moe_jobs: mtl.Buffer,
     members: mtl.Buffer,
+    dispatch: mtl.Buffer,
     context: u32,
 
     pub fn init(device: mtl.Device, c: *const cfg.Config, context: u32) !Scratch {
@@ -107,15 +111,15 @@ pub const Scratch = struct {
         var s: Scratch = undefined;
         s.context = context;
         const sizes = .{
-            .{ &s.h, R * c.hidden * f },                              .{ &s.x, R * c.hidden * f },          .{ &s.proj, R * 2784 * f },
-            .{ &s.q_resid, R * c.q_lora * f },                        .{ &s.rot, R * 16384 * f },           .{ &s.q, R * nh * c.qHead() * f },
-            .{ &s.qidx, R * c.i_heads * c.i_dim * f },                .{ &s.qlat, R * nh * c.kv_lora * f }, .{ &s.qrope, R * nh * c.rope * f },
-            .{ &s.score, R * @as(usize, context) * f },               .{ &s.keys, R * c.i_topk * 4 },       .{ &s.rows, R * @sizeOf(kn.Row) },
-            .{ &s.partial, R * nh * kn.splits * 514 * f },            .{ &s.olat, R * nh * c.kv_lora * f }, .{ &s.o, R * nh * c.v_dim * f },
-            .{ &s.y, 2 * R * c.hidden * f },                          .{ &s.logits, R * c.experts * f },    .{ &s.gu, P * 2 * c.moe_inter * f },
-            .{ &s.act, P * c.moe_inter * f },                         .{ &s.arot, P * c.moe_inter * f },    .{ &s.z, P * c.hidden * f },
-            .{ &s.wts, P * f },                                       .{ &s.sv, P * 4 },                    .{ &s.suh, P * 4 },
-            .{ &s.moe_jobs, (R * 8 + 1) * 64 * @sizeOf(ex.job.Job) }, .{ &s.members, (R * 8 + 1) * R * 4 },
+            .{ &s.h, R * c.hidden * f },                                         .{ &s.x, R * c.hidden * f },              .{ &s.proj, R * 2784 * f },
+            .{ &s.q_resid, R * c.q_lora * f },                                   .{ &s.rot, R * 16384 * f },               .{ &s.q, R * nh * c.qHead() * f },
+            .{ &s.qidx, R * c.i_heads * c.i_dim * f },                           .{ &s.qlat, R * nh * c.kv_lora * f },     .{ &s.qrope, R * nh * c.rope * f },
+            .{ &s.score, R * @as(usize, context) * f },                          .{ &s.keys, R * c.i_topk * 4 },           .{ &s.rows, R * @sizeOf(kn.Row) },
+            .{ &s.partial, R * nh * kn.splits * 514 * f },                       .{ &s.olat, R * nh * c.kv_lora * f },     .{ &s.o, R * nh * c.v_dim * f },
+            .{ &s.y, 2 * R * c.hidden * f },                                     .{ &s.logits, R * c.experts * f },        .{ &s.gu, P * 2 * c.moe_inter * f },
+            .{ &s.act, P * c.moe_inter * f },                                    .{ &s.arot, P * c.moe_inter * f },        .{ &s.z, P * c.hidden * f },
+            .{ &s.wts, P * f },                                                  .{ &s.sv, P * 4 },                        .{ &s.suh, P * 4 },
+            .{ &s.moe_jobs, (gu_cap + max_experts * 48) * @sizeOf(ex.job.Job) }, .{ &s.members, max_experts * 2 * R * 4 }, .{ &s.dispatch, 32 },
         };
         inline for (sizes) |e| e[0].* = try device.buffer(@max(e[1], 16), mtl.ResourceOptions.shared);
         for (&s.route) |*b| b.* = try device.buffer(64 << 10, mtl.ResourceOptions.shared);

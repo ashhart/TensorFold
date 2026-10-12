@@ -41,6 +41,8 @@ pub const Layer = struct {
     groups: [8]gpu.Groups,
     cache: mtl.Buffer,
     index_cache: ?mtl.Buffer,
+    /// The experts' tables for the jobs kernel (MoE layers).
+    desc: ?mtl.Buffer = null,
 
     const x_g = 0;
     const uv_g = 1;
@@ -70,13 +72,33 @@ pub const Layer = struct {
         l.k = try gpu.Packed.init(gpa, device, p, &d, &l.groups);
         l.cache = try device.buffer(@as(usize, slots) * context * 576 * 2, storage);
         if (w.full) l.index_cache = try device.buffer(@as(usize, slots) * context * 128 * 2, storage);
+        if (w.mlp == .moe) l.desc = try descs(device, w.mlp.moe);
         return l;
+    }
+
+    fn descs(device: mtl.Device, m: wt.Moe) !mtl.Buffer {
+        const b = try device.buffer(m.experts.len * @sizeOf(kn.ExpertDesc), mtl.ResourceOptions.shared);
+        for (b.slice(kn.ExpertDesc, m.experts.len), m.experts) |*d, x| {
+            d.* = .{ .down_k = x.down[0].k, .down_base = x.down_base, .down_suh = x.down_suh, .down_block = x.down[0].block };
+            for (0..wt.max_halves) |h| {
+                d.gate_k[h] = x.gate[h].k;
+                d.gate_base[h] = x.gate_base[h];
+                d.gate_chan[h] = x.gate[h].chan;
+                d.gate_block[h] = x.gate[h].block;
+                d.up_k[h] = x.up[h].k;
+                d.up_base[h] = x.up_base[h];
+                d.up_chan[h] = x.up[h].chan;
+                d.up_block[h] = x.up[h].block;
+            }
+        }
+        return b;
     }
 
     pub fn deinit(l: *Layer, gpa: std.mem.Allocator) void {
         l.k.deinit(gpa);
         l.cache.deinit();
         if (l.index_cache) |b| b.deinit();
+        if (l.desc) |b| b.deinit();
     }
 };
 
@@ -174,6 +196,30 @@ pub fn experts(K: *const Kernels, L: *const Layer, s: *const gpu.Scratch, e: mtl
     td.count = down_jobs;
     td.jobs_off = gu_jobs * job_size;
     try op.encodeProject(&K.op, e, ref(s.arot), td, ref(s.z), rows, loc, hid, true, ref(s.members));
+    e.barrier();
+    try op.encodeCombine(&K.op, e, ref(s.z), ref(s.wts), ref(s.sv), L.k.halves, L.k.signs, ref(s.y), .{ .rows = rows, .slots = gpu.slots, .z_stride = gpu.slots * hid, .y_stride = hid, .y_f32 = 1, .sign = m.signs + hid, .z_slot = hid, .per_row = 1 }, hid / 128);
+}
+
+/// The experts of x into s.y with jobs the GPU writes from the route (after `route`, on the same encoder).
+pub fn expertsGpu(K: *const Kernels, L: *const Layer, s: *const gpu.Scratch, e: mtl.ComputeEncoder, c: *const cfg.Config, rows: u32) !void {
+    const m = L.w.mlp.moe;
+    const hid = c.hidden;
+    const loc = c.localHalves() * 128;
+    const P = rows * gpu.slots;
+    e.barrier();
+    kn.moeJobs(&K.k, e, s.route, .{ .buf = L.desc.? }, .{ .rows = rows, .halves = c.localHalves(), .topk = c.topk, .slots = gpu.slots, .gu_cap = gpu.gu_cap }, ref(s.moe_jobs), ref(s.members), ref(s.wts), ref(s.sv), ref(s.suh), ref(s.dispatch));
+    try op.encodeRotate(&K.op, e, ref(s.x), L.k.signs, L.k.halves, ref(s.rot), .{ .rows = rows, .x_stride = hid, .x_f32 = 1, .r_stride = hid, .sign = m.signs }, hid / 128, 1, null);
+    e.barrier();
+    const t: op.Tables = .{ .weights = L.k.bytes, .bases = L.k.bases, .halves = L.k.halves, .signs = L.k.signs, .jobs = s.moe_jobs, .count = 0 };
+    try op.encodeProjectIndirect(&K.op, e, ref(s.rot), t, ref(s.gu), rows, hid, 2 * loc, true, ref(s.members), ref(s.dispatch));
+    e.barrier();
+    kn.siluMul(&K.k, e, ref(s.gu), .{ .width = loc, .x_stride = 2 * loc, .y_stride = loc }, ref(s.act), P);
+    e.barrier();
+    try op.encodeRotate(&K.op, e, ref(s.act), L.k.signs, L.k.halves, ref(s.arot), .{ .rows = rows, .x_stride = gpu.slots * loc, .x_f32 = 1, .r_stride = gpu.slots * loc, .slot_cols = loc, .scales = 1, .row_slots = gpu.slots }, loc / 128, gpu.slots, ref(s.suh));
+    e.barrier();
+    var td = t;
+    td.jobs_off = gpu.gu_cap * @sizeOf(ex.job.Job);
+    try op.encodeProjectIndirect(&K.op, e, ref(s.arot), td, ref(s.z), rows, loc, hid, true, ref(s.members), .{ .buf = s.dispatch, .off = 16 });
     e.barrier();
     try op.encodeCombine(&K.op, e, ref(s.z), ref(s.wts), ref(s.sv), L.k.halves, L.k.signs, ref(s.y), .{ .rows = rows, .slots = gpu.slots, .z_stride = gpu.slots * hid, .y_stride = hid, .y_f32 = 1, .sign = m.signs + hid, .z_slot = hid, .per_row = 1 }, hid / 128);
 }

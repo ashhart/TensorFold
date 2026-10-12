@@ -121,6 +121,7 @@ pub fn main(init: std.process.Init) !void {
     var topk_diff = try a.alloc(bool, T);
     @memset(topk_diff, false);
     var topk_rows: usize = 0;
+    var gpu_jobs_differ: usize = 0;
     var missing_keys: usize = 0;
     var p0: u32 = 0;
     while (p0 < T) : (p0 += R) {
@@ -232,6 +233,15 @@ pub fn main(init: std.process.Init) !void {
             try g.layer.experts(&K, &layer, &s, e, &c, n, plan.gu_jobs, plan.down_jobs);
             e.end();
             try finish(cb);
+            // the jobs the GPU writes from the route must give the host-built jobs' bytes
+            const host_y = try a.dupe(f32, s.y.slice(f32, n * hid));
+            defer a.free(host_y);
+            cb = queue.commandBuffer();
+            e = cb.compute(.serial);
+            try g.layer.expertsGpu(&K, &layer, &s, e, &c, n);
+            e.end();
+            try finish(cb);
+            if (!std.mem.eql(u8, std.mem.sliceAsBytes(host_y), std.mem.sliceAsBytes(s.y.slice(f32, n * hid)))) gpu_jobs_differ += 1;
         }
         const skip = try a.alloc(bool, T);
         for (skip, pick_diff, topk_diff) |*k, p, t| k.* = p or t;
@@ -242,6 +252,6 @@ pub fn main(init: std.process.Init) !void {
     }
     var picks_off: usize = 0;
     for (pick_diff) |d| picks_off += @intFromBool(d);
-    std.debug.print("layer {d}: {d} rows; {d} rows' top-k sets differ from the reference ({d} keys missing in all){s}; {d} rows pick other experts\n", .{ L, T, topk_rows, missing_keys, if (ref_topk) " (reference top-k used)" else "", picks_off });
+    std.debug.print("layer {d}: {d} rows; {d} rows' top-k sets differ from the reference ({d} keys missing in all){s}; {d} rows pick other experts; {d} windows where GPU-written expert jobs differ from host-built ones\n", .{ L, T, topk_rows, missing_keys, if (ref_topk) " (reference top-k used)" else "", picks_off, gpu_jobs_differ });
     for (stats) |st| if (st.n > 0) st.print();
 }

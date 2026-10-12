@@ -56,6 +56,24 @@ pub const GlueArgs = extern struct {
     pad5: f32 = 0,
 };
 
+/// One expert's tables on this Mac for the jobs kernel (kernels/metal/glm_dsa/moe_jobs.metal's ExpertDesc).
+pub const ExpertDesc = extern struct {
+    gate_k: [16]u32 = @splat(0),
+    gate_base: [16]u32 = @splat(0),
+    gate_chan: [16]u32 = @splat(0),
+    gate_block: [16]u32 = @splat(0),
+    up_k: [16]u32 = @splat(0),
+    up_base: [16]u32 = @splat(0),
+    up_chan: [16]u32 = @splat(0),
+    up_block: [16]u32 = @splat(0),
+    down_k: u32 = 0,
+    down_base: u32 = 0,
+    down_suh: u32 = 0,
+    down_block: u32 = 0,
+};
+
+pub const JobsArgs = extern struct { rows: u32, halves: u32, topk: u32, slots: u32, gu_cap: u32, pad0: u32 = 0, pad1: u32 = 0, pad2: u32 = 0 };
+
 pub const splits = 16;
 const capacities = [_]usize{ 1, 2, 4, 8, 16 };
 
@@ -71,6 +89,7 @@ pub const Pipelines = struct {
     add_rms: mtl.Pipeline,
     silu_mul: mtl.Pipeline,
     select: mtl.Pipeline,
+    moe_jobs: mtl.Pipeline,
 
     pub fn load(gpa: std.mem.Allocator, device: mtl.Device, experts: u32, hidden: u32, topk: u32) !Pipelines {
         const pool = mtl.objc.Pool.push();
@@ -82,6 +101,8 @@ pub const Pipelines = struct {
         defer idx.deinit();
         const glue = try mtl.Library.fromSource(device, sources.glm_dsa_glue, opts);
         defer glue.deinit();
+        const jl = try mtl.Library.fromSource(device, sources.glm_dsa_moe_jobs, opts);
+        defer jl.deinit();
         const src = try route.source(gpa, .{ .hidden = hidden, .experts = experts, .topk = topk });
         defer gpa.free(src);
         const rl = try mtl.Library.fromSource(device, src, opts);
@@ -101,6 +122,7 @@ pub const Pipelines = struct {
         p.add_rms = try mtl.Pipeline.init(device, glue, "glm_add_rms", false);
         p.silu_mul = try mtl.Pipeline.init(device, glue, "glm_silu_mul", false);
         p.select = try mtl.Pipeline.init(device, rl, route.names[1], false);
+        p.moe_jobs = try mtl.Pipeline.init(device, jl, "glm_moe_jobs", false);
         if (p.topk.maxThreads() < 1024) return error.UnsupportedGlmPipeline;
         return p;
     }
@@ -108,7 +130,7 @@ pub const Pipelines = struct {
     pub fn deinit(p: *Pipelines) void {
         p.prep.deinit();
         for (p.absorb) |q| q.deinit();
-        inline for (.{ p.attend, p.merge, p.index_key, p.index_scores, p.topk, p.embed, p.add_rms, p.silu_mul, p.select }) |q| q.deinit();
+        inline for (.{ p.attend, p.merge, p.index_key, p.index_scores, p.topk, p.embed, p.add_rms, p.silu_mul, p.select, p.moe_jobs }) |q| q.deinit();
     }
 };
 
@@ -209,6 +231,20 @@ pub fn siluMul(p: *const Pipelines, e: mtl.ComputeEncoder, gu: Ref, a: GlueArgs,
     e.setValue(a, 1);
     bind(e, 2, act);
     e.dispatchGroups(.{ .width = (a.width + 255) / 256, .height = rows }, .{ .width = 256 });
+}
+
+/// The window's expert jobs, member lists, per-slot tables and the two projections' threadgroup counts, from the route.
+pub fn moeJobs(p: *const Pipelines, e: mtl.ComputeEncoder, route_out: [9]mtl.Buffer, desc: Ref, a: JobsArgs, jobs: Ref, members: Ref, wts: Ref, sv: Ref, suh: Ref, dispatch: Ref) void {
+    e.setPipeline(p.moe_jobs);
+    e.setBuffer(route_out[2], 0, 0);
+    e.setBuffer(route_out[3], 0, 1);
+    e.setBuffer(route_out[4], 0, 2);
+    e.setBuffer(route_out[0], 0, 3);
+    e.setBuffer(route_out[1], 0, 4);
+    bind(e, 5, desc);
+    e.setValue(a, 6);
+    inline for (.{ jobs, members, wts, sv, suh, dispatch }, 7..) |r, i| bind(e, i, r);
+    e.dispatchGroups(.{ .width = 1 }, .{ .width = 256 });
 }
 
 pub const route_select = route.select;

@@ -17,6 +17,7 @@ pub const core_exlr8_dense = @embedFile("core/exlr8_dense.metal");
 pub const glm_dsa_mla = @embedFile("glm_dsa/mla.metal");
 pub const glm_dsa_index = @embedFile("glm_dsa/index.metal");
 pub const glm_dsa_glue = @embedFile("glm_dsa/glue.metal");
+pub const glm_dsa_moe_jobs = @embedFile("glm_dsa/moe_jobs.metal");
 pub const core_grammar_mask = @embedFile("core/grammar_mask.metal");
 
 /// Routed experts with an expert's member rows two or four at a time (each row's sums unchanged).

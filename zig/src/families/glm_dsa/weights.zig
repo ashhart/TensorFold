@@ -32,7 +32,6 @@ pub const Attn = struct {
 pub const max_halves = 16;
 
 /// An expert's halves on this Mac: gate and up per local half, down per local half; tables by offset.
-
 pub const Expert = struct {
     gate: [max_halves]pack.Half,
     up: [max_halves]pack.Half,
