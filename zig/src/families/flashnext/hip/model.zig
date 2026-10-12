@@ -122,6 +122,8 @@ pub const Model = struct {
     dims: Dims,
     qk: Qk = undefined,
     act: Kind,
+    /// The tensor-parallel communicator; null on one rank.
+    tp: ?hip.collective.Comm = null,
     embed: Projection,
     layers: []const Layer,
     mix: Hc,

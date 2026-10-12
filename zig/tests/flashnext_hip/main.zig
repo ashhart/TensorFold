@@ -1,4 +1,4 @@
-//! Flash Next model checks on HIP: `tf-flashnext-hip-test generate <dir> [--text T] [--chat] [--max N]`.
+//! Flash Next model checks on HIP: `tf-flashnext-hip-test generate <dir> [group flags] [--text T] [--chat] [--max N]`.
 const std = @import("std");
 const hip = @import("hip");
 const fx = @import("flashnext");
@@ -7,10 +7,14 @@ const tokenizer = @import("tokenizer");
 /// No per-thread alternate signal stack: its thread-local leaves RCCL's and HIP's threads too little stack to start.
 pub const std_options: std.Options = .{ .signal_stack_size = null };
 
-const usage = "usage: tf-flashnext-hip-test generate <model dir> [--policy P] [--text T] [--chat] [--max N] [--capacity N] [--repeat N] [--chunk N] [--hash]\n";
+const usage = "usage: tf-flashnext-hip-test generate <model dir> [--tp N --rank R --master H --port P --policy P] [--text T] [--chat] [--max N] [--capacity N] [--repeat N] [--chunk N] [--hash]\n";
 
 const Args = struct {
     dir: []const u8 = "",
+    world: usize = 1,
+    rank: usize = 0,
+    master: []const u8 = "127.0.0.1",
+    port: u16 = 29561,
     policy: []const u8 = "",
     text: []const u8 = "The capital of France is",
     chat: bool = false,
@@ -34,7 +38,7 @@ fn parse(args: []const [:0]const u8) !Args {
         i += 1;
         if (i >= args.len) return error.MissingArgument;
         const v = args[i];
-        if (std.mem.eql(u8, name, "--policy")) a.policy = v else if (std.mem.eql(u8, name, "--text")) a.text = v else if (std.mem.eql(u8, name, "--max")) a.max = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, name, "--capacity")) a.capacity = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, name, "--repeat")) a.repeat = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, name, "--chunk")) a.chunk = try std.fmt.parseInt(usize, v, 10) else return error.UnknownOption;
+        if (std.mem.eql(u8, name, "--tp")) a.world = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, name, "--rank")) a.rank = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, name, "--master")) a.master = v else if (std.mem.eql(u8, name, "--port")) a.port = try std.fmt.parseInt(u16, v, 10) else if (std.mem.eql(u8, name, "--policy")) a.policy = v else if (std.mem.eql(u8, name, "--text")) a.text = v else if (std.mem.eql(u8, name, "--max")) a.max = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, name, "--capacity")) a.capacity = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, name, "--repeat")) a.repeat = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, name, "--chunk")) a.chunk = try std.fmt.parseInt(usize, v, 10) else return error.UnknownOption;
     }
     return a;
 }
@@ -43,14 +47,21 @@ fn nowNs(io: std.Io) i96 {
     return std.Io.Timestamp.now(io, .awake).nanoseconds;
 }
 
-/// The prompt and greedy steps on device 0; prints the text and the timings.
+/// Every rank runs the same prompt and greedy steps (the collectives pair up); rank 0 prints the text and the timings.
 fn generate(gpa: std.mem.Allocator, io: std.Io, a: Args) !void {
+    var driver = try hip.Runtime.open();
+    const device: c_int = @intCast(a.rank);
+    const caps = try hip.Device.kernelCaps(&driver, device);
+    driver.close();
     var notes: hip.Policy.Notes = .{};
-    const policy = try hip.Policy.resolve(a.policy, .current, &notes);
+    var policy = try hip.Policy.resolve(a.policy, .current, &notes);
+    const group: ?hip.collective.Group = if (a.world > 1) try hip.joinGroup(gpa, io, @intCast(a.rank), @intCast(a.world), a.master, a.port, caps, &policy) else null;
+    defer if (group) |g| g.close(gpa);
     const t0 = nowNs(io);
-    const e = try fx.engine.Engine.open(gpa, io, a.dir, .{ .policy = policy, .capacity = a.capacity, .chunk = a.chunk });
+    const e = try fx.engine.Engine.open(gpa, io, a.dir, .{ .device = device, .rank = a.rank, .world = a.world, .group = group, .policy = policy, .capacity = a.capacity, .chunk = a.chunk });
     defer e.deinit();
-    std.debug.print("loaded in {d:.1} s, {d:.2} GiB on the device\n", .{ @as(f64, @floatFromInt(nowNs(io) - t0)) / 1e9, @as(f64, @floatFromInt(hip.usage(false).device)) / (1 << 30) });
+    const loud = a.rank == 0;
+    if (loud) std.debug.print("loaded in {d:.1} s, {d:.2} GiB on the device\n", .{ @as(f64, @floatFromInt(nowNs(io) - t0)) / 1e9, @as(f64, @floatFromInt(hip.usage(false).device)) / (1 << 30) });
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const tk_path = try std.fs.path.join(arena.allocator(), &.{ a.dir, "tokenizer.json" });
@@ -93,6 +104,7 @@ fn generate(gpa: std.mem.Allocator, io: std.Io, a: Args) !void {
         }
         try e.stream.synchronize();
         const p2 = nowNs(io);
+        if (!loud) continue;
         const words = try tok.decode(arena.allocator(), reply.items, false);
         const pre = @as(f64, @floatFromInt(p1 - p0)) / 1e9;
         const dec = @as(f64, @floatFromInt(p2 - p1)) / 1e9;
