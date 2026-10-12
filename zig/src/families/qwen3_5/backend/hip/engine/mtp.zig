@@ -9,7 +9,7 @@ const bridge = @import("../model/bridge.zig");
 const fwd = @import("../forward/forward.zig");
 const draw = @import("draw.zig");
 const plan = @import("../forward/plan.zig");
-const graph_cache = @import("graph_cache.zig");
+const graph_cache = hip.graph_cache;
 
 const pops = hip.plan_ops;
 const Ops = hip.ops.Ops;
