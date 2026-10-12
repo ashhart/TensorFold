@@ -68,6 +68,8 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     check.pass("prompt-cuts: a {d}-token pass keeping at {any} equals the uncut pass", .{ n, marks });
 
     for (kept.at.items, kept.saved.items) |at, s| {
+        // a kept state holds its KV rows before `at`: the rows past it get a value no pass may read before writing
+        for ([_]u64{ e.b.k_cache, e.b.v_cache }) |p| try e.ops().fill32(p, 0x41204120, e.b.state_bytes[0] / 4);
         try nemotron.reuse.restore(&target, null, s);
         const got = try digest(gpa, e, h, try e.prefillFrom(ids.items, at, null, h, null, null), n - 1 - e.last_chunk);
         try check.expect(std.meta.eql(got, plain), "prompt-cuts: the pass resumed at {d} differs from the uncut pass", .{at});
@@ -78,7 +80,15 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
 fn digest(gpa: std.mem.Allocator, e: *nemotron.Engine, h: *nemotron.Head, token: u32, last: usize) !Digest {
     const Sha = std.crypto.hash.sha2.Sha256;
     var st = Sha.init(.{});
-    for (e.b.planes(), e.b.state_bytes) |p, len| try hashDevice(&st, gpa, e, p, len);
+    const layers = e.c.count(.attention);
+    const row = nemotron.state.kvRowBytes(e.c);
+    for (e.b.planes(), e.b.state_bytes, 0..) |p, len, i| {
+        if (i >= 2) {
+            try hashDevice(&st, gpa, e, p, len);
+            continue;
+        }
+        for (0..layers) |l| try hashDevice(&st, gpa, e, p + l * e.max_len * row, e.pos * row); // prompt rows
+    }
     var hd = Sha.init(.{});
     const sizes = h.seqSizes();
     try hashDevice(&hd, gpa, e, h.k_cache, sizes[0]);
