@@ -85,6 +85,7 @@ test "orphan temporary pressure cannot evict an older valid learned state" {
 }
 
 test "owned-name links and directories stay untouched and foreign directories are not traversed" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // symlinks need privilege on Windows
     const a = std.testing.allocator;
     var buf: [128]u8 = undefined;
     const root = try scratch(&buf, "types");
@@ -123,6 +124,7 @@ test "owned-name links and directories stay untouched and foreign directories ar
 }
 
 test "an identity-directory symlink refuses open and preserves foreign payloads" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // symlinks need privilege on Windows
     const a = std.testing.allocator;
     var buf: [128]u8 = undefined;
     const root = try scratch(&buf, "identity-link");
@@ -145,6 +147,7 @@ test "an identity-directory symlink refuses open and preserves foreign payloads"
 }
 
 test "an explicitly configured root alias still cleans only its real identity children" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // symlinks need privilege on Windows
     const a = std.testing.allocator;
     var buf: [128]u8 = undefined;
     const root = try scratch(&buf, "root-target");
