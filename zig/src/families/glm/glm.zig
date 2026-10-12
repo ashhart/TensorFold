@@ -14,6 +14,7 @@ pub const backend = @import("backend.zig");
 pub const mirror = @import("mirror.zig");
 pub const timing = @import("timing.zig");
 pub const affine = @import("affine.zig");
+pub const wide = @import("wide.zig");
 
 test {
     _ = config;
@@ -36,4 +37,5 @@ test {
     _ = @import("affine.zig");
     _ = @import("names.zig");
     _ = @import("weights_test.zig");
+    _ = @import("wide.zig");
 }
