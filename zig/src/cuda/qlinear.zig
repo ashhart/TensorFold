@@ -7,6 +7,7 @@ const memory = @import("memory.zig");
 const stream_ = @import("stream.zig");
 const qmmf = @import("qmmf.zig");
 const nvfp4 = @import("nvfp4.zig");
+const exl3 = @import("exl3_linear.zig");
 
 const Driver = driver.Driver;
 const Module = module.Module;
@@ -36,11 +37,13 @@ pub const Weight = union(enum) {
     nvfp4: qmmf.Weight,
     fp8: qmmf.Weight, // e4m3 with one fp32 scale (ModelOpt FP8)
     bf16: qmmf.Weight, // unquantized: the checkpoint's bf16 values
+    exl3: exl3.Matrix, // trellis tiles as stored, with suh and svh
 
     pub fn outputs(w: Weight) usize {
         return switch (w) {
             .affine4 => |q| q.n,
             .fp8g, .nvfp4, .fp8, .bf16 => |q| q.n,
+            .exl3 => |q| q.n,
         };
     }
 
@@ -48,6 +51,7 @@ pub const Weight = union(enum) {
         return switch (w) {
             .affine4 => |q| q.k,
             .fp8g, .nvfp4, .fp8, .bf16 => |q| q.k,
+            .exl3 => |q| q.k,
         };
     }
 };
@@ -60,6 +64,7 @@ pub const Linear = struct {
     affine4: ?*const Affine4Kernels = null,
     lane: ?*const qmmf.Lane = null, // decode rows of every lane format; fp8g and bf16 prompt rows too
     nvfp4_prompt: ?*const nvfp4.Prompt = null, // the prompt GEMM: nvfp4 and fp8 prompt rows (linear.py's prefill)
+    exl3: ?*const exl3.Kernels = null, // decode rows 16 a window; prompt rows on the tensor units
 
     /// Decode rows: out (rows, n) bf16, each row's bits the same at every row count the format takes.
     pub fn decode(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
@@ -73,6 +78,7 @@ pub const Linear = struct {
             .nvfp4 => |q| return l.onLane(s, q, .fp4, in, out, rows),
             .fp8 => |q| return l.onLane(s, q, .fp8, in, out, rows),
             .bf16 => |q| return l.onLane(s, q, .bf16, in, out, rows),
+            .exl3 => |q| return l.onExl3(s, q, in, out, rows),
         }
     }
 
@@ -88,6 +94,7 @@ pub const Linear = struct {
             .nvfp4 => |q| return l.onPrompt(s, q, .fp4, in, out, rows),
             .fp8 => |q| return l.onPrompt(s, q, .fp8, in, out, rows),
             .bf16 => |q| return l.onLane(s, q, .bf16, in, out, rows),
+            .exl3 => |q| return (l.exl3 orelse return error.FormatNotLoaded).prompt(s, in.x, if (in.ldx == 0) q.k else in.ldx, q, out, rows),
         }
     }
 
@@ -107,6 +114,11 @@ pub const Linear = struct {
             else => return error.EpilogueNotBuilt,
         };
         return l.onPromptAs(s, q, .fp4, in, out, .f32, rows);
+    }
+
+    fn onExl3(l: Linear, s: Stream, q: exl3.Matrix, in: Rows, out: u64, rows: usize) !void {
+        const e = l.exl3 orelse return error.FormatNotLoaded;
+        return e.rows(s, in.x, if (in.ldx == 0) q.k else in.ldx, q, out, rows, false);
     }
 
     fn onPrompt(l: Linear, s: Stream, q: qmmf.Weight, mode: qmmf.Mode, in: Rows, out: u64, rows: usize) !void {
@@ -341,6 +353,9 @@ test "a format that is not loaded is refused before any launch" {
     const s: Stream = undefined; // never reached: the refusal comes first
     try std.testing.expectError(error.FormatNotLoaded, l.decode(s, w, .{ .x = 0 }, 0, 1));
     try std.testing.expectError(error.FormatNotLoaded, l.prompt(s, w, .{ .x = 0 }, 0, 1));
+    const e: Weight = .{ .exl3 = .{ .trellis = 0, .suh = 0, .svh = 0, .k = 128, .n = 128, .bits = 4, .codebook = .mul1 } };
+    try std.testing.expectError(error.FormatNotLoaded, l.decode(s, e, .{ .x = 0 }, 0, 1));
+    try std.testing.expectError(error.FormatNotLoaded, l.prompt(s, e, .{ .x = 0 }, 0, 1));
 }
 
 test "the affine-4 tiles' sizes follow qmm_fast.tile" {
