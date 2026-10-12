@@ -31,3 +31,14 @@ template <int BITS, int RPS, int SG, int K>
 #define GXB(B) GXK(B, 0) GXK(B, 4096) GXK(B, 8192) GXK(B, 16384) GXK(B, 12288) GXK(B, 1536) GXK(B, 2048) GXK(B, 128) GXK(B, 256) GXK(B, 512)
 GXB(8)
 
+
+// glm_moe_rows (glm_rows.metal) at other columns a simdgroup and with k compiled in: oQ2's routed q2 + shared q8.
+#define GXM(R, K) \
+  template [[host_name("x_moe_glu_r" #R "_k" #K)]] [[kernel]] decltype(glm_moe_rows<2, 8, true, R, K>) glm_moe_rows<2, 8, true, R, K>; \
+  template [[host_name("x_moe_r" #R "_k" #K)]] [[kernel]] decltype(glm_moe_rows<2, 8, false, R, K>) glm_moe_rows<2, 8, false, R, K>;
+GXM(8, 0)
+GXM(2, 0)
+template [[host_name("x_moe_glu_r4_k4096")]] [[kernel]] decltype(glm_moe_rows<2, 8, true, 4, 4096>) glm_moe_rows<2, 8, true, 4, 4096>;
+template [[host_name("x_moe_glu_r8_k4096")]] [[kernel]] decltype(glm_moe_rows<2, 8, true, 8, 4096>) glm_moe_rows<2, 8, true, 8, 4096>;
+template [[host_name("x_moe_r4_k2048")]] [[kernel]] decltype(glm_moe_rows<2, 8, false, 4, 2048>) glm_moe_rows<2, 8, false, 4, 2048>;
+template [[host_name("x_moe_r8_k2048")]] [[kernel]] decltype(glm_moe_rows<2, 8, false, 8, 2048>) glm_moe_rows<2, 8, false, 8, 2048>;
