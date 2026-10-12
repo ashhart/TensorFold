@@ -82,6 +82,8 @@ pub const flashnext_gdn = @embedFile("decode/fn_gdn.metal");
 pub const glm = @import("glm/kernels.zig");
 /// GLM-5.3-Flash's glue: MLX's arithmetic where the Python family calls MLX ops; selection, argmax, small steps.
 pub const glm_glue = @embedFile("glm_glue.metal");
+/// Its products at the widths the generated kernels do not read, after core_row_projection (glm/wide.zig).
+pub const glm_rows = @embedFile("glm_rows.metal");
 /// GLM-5.3-Flash's latent attention for rows that read every key: 64 heads as one matrix on the tensor units.
 pub const glm_attn = @embedFile("glm_attn.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
