@@ -52,6 +52,8 @@ const jsonInt = fz.jsonInt;
 pub const RING = 512;
 /// Positions a reply keeps free past its last token: two rounds in flight.
 pub const MARGIN = 2 * MAXR;
+/// An MoE layer's expert projections in the engine's order: gate, up, shared gate, shared up, down, shared down.
+const expert_projs = [_][]const u8{ "switch_mlp.gate_proj", "switch_mlp.up_proj", "shared_expert.gate_proj", "shared_expert.up_proj", "switch_mlp.down_proj", "shared_expert.down_proj" };
 /// Bytes a conversation's next kept state usually adds (about 4k tokens of reply and tool output): the pool readies that much more.
 pub const NEXT_TURN = 4096 * 13 * 2304;
 
@@ -199,7 +201,9 @@ pub const Engine = struct {
             }
             const index_mapped = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{model_dir}, 0));
             try maps.append(arena, index_mapped);
-            const id = try pack_io.identityFromMapped(arena, index_mapped.bytes[0..index_mapped.size], mapped_shards.items);
+            const config_mapped = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/config.json", .{model_dir}, 0));
+            try maps.append(arena, config_mapped);
+            const id = try pack_io.identityFromMapped(arena, index_mapped.bytes[0..index_mapped.size], config_mapped.bytes[0..config_mapped.size], mapped_shards.items);
             for (maps.items) |*m| m.deinit();
             maps.clearRetainingCapacity();
             break :blk id;
@@ -223,6 +227,12 @@ pub const Engine = struct {
         // the reference values: the dump's ref.json, or derived from the checkpoint's config (config.pleRef)
         var ple_values: config.PleRef = undefined;
         var attention_scale: f64 = undefined;
+        var cfg = try config.Config.read(arena, io, model_dir); // read once: the reference values and the widths
+        var cfg_widths = try @import("widths.zig").Widths.init(arena, &cfg);
+        if (!cfg_widths.uniform() or cfg_widths.q.global.bits != 6 or cfg_widths.q.global.group != 32) {
+            std.log.warn("flashnext: widths other than 6-bit group 32; the device kernels read 6/32 only", .{});
+            return error.UnsupportedFlashAffineKernel;
+        }
         if (dump_dir) |d| {
             const ref_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/ref.json", .{d}, 0));
             const ref = try std.json.parseFromSliceLeaky(std.json.Value, arena, ref_file.bytes[0..ref_file.size], .{});
@@ -243,7 +253,6 @@ pub const Engine = struct {
             }
             attention_scale = ref.object.get("attention_scale").?.float;
         } else {
-            var cfg = try config.Config.read(arena, io, model_dir);
             ple_values = try config.pleRef(&cfg);
             attention_scale = 1.0 / std.math.sqrt(@as(f64, @floatFromInt(cfg.head_dim)));
         }
@@ -271,8 +280,7 @@ pub const Engine = struct {
                 L.pool = try r.loadf("L{d}.att.pool", .{i});
                 L.pooled = .{ .b = try r.buffer(CAP / 4 * 128 * 2) };
             }
-            const projs = [_][]const u8{ "switch_mlp.gate_proj", "switch_mlp.up_proj", "shared_expert.gate_proj", "shared_expert.up_proj", "switch_mlp.down_proj", "shared_expert.down_proj" };
-            for (projs, 0..) |proj, j| {
+            for (expert_projs, 0..) |proj, j| {
                 for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |suffix, k| {
                     L.ex[j * 3 + k] = try r.loadf("language_model.model.layers.{d}.mlp.{s}.{s}", .{ i, proj, suffix });
                 }
@@ -360,11 +368,11 @@ pub const Engine = struct {
         {
             const ids_n = try fz.draftCount((try r.entry("mtp.draft_ids")).len);
             const ids = try r.load("mtp.draft_ids");
+            const mtp_root = @import("index.zig").mtpRoot(index.object.get("weight_map").?.object);
             var ex: [18]Buf = undefined;
-            const projs = [_][]const u8{ "switch_mlp.gate_proj", "switch_mlp.up_proj", "shared_expert.gate_proj", "shared_expert.up_proj", "switch_mlp.down_proj", "shared_expert.down_proj" };
-            for (projs, 0..) |proj, j| {
+            for (expert_projs, 0..) |proj, j| {
                 for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |suffix, k| {
-                    ex[j * 3 + k] = try r.loadf("language_model.mtp.layers.0.mlp.{s}.{s}", .{ proj, suffix });
+                    ex[j * 3 + k] = try r.loadf("{s}.layers.0.mlp.{s}.{s}", .{ mtp_root, proj, suffix });
                 }
             }
             if (r.xpack) try r.repack(&ex);

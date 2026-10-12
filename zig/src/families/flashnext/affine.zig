@@ -18,10 +18,6 @@ pub const Spec = struct {
         if (count % 32 != 0) return error.InvalidAffineWidth;
         return count / 32;
     }
-
-    pub fn checkFlashKernel(s: Spec) !void {
-        if (s.bits != 6 or s.group != 32) return error.UnsupportedFlashAffineKernel;
-    }
 };
 
 pub const Shape = struct { experts: usize, n: usize, k: usize, words: usize, groups: usize, dtype: st.DType };
