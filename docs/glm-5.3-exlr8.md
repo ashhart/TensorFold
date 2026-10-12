@@ -58,9 +58,9 @@ solo replies, idle and with 36 busy threads on each Mac.
 
 ## Known limits
 
-- Decode is slow. A one-row round takes about 64 ms of GPU time. At one row, each trellis-coded matrix, such as the
-  routed experts and the attention output projection, decodes its blocks in long serial chains that leave most of the
-  GPU idle.
+- Decode is slow. A one-row round takes about 45 ms of GPU time. At one row, the attention output projection's 48
+  trellis jobs fill 48 of the GPU's 80 cores, and the routed experts' short down-projection jobs run unsplit, so part of
+  the GPU stays idle.
 - No CUDA serving yet. The CUDA kernels decode EXLR8 weights bit for bit as the Metal ones do, but no CUDA engine serves
   GLM-5.3.
 - Contexts past 2,048 tokens have not been checked against a whole-model reference. Past 2,048 tokens the sparse
