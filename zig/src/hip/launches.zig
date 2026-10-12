@@ -38,6 +38,7 @@ const plan = @import("launches/plan.zig");
 const elementwise = @import("launches/elementwise.zig");
 const draw = @import("launches/draw.zig");
 const tp = @import("launches/tp.zig");
+const flashnext = @import("launches/flashnext.zig");
 
 pub const ConvArgs = conv.ConvArgs;
 pub const PlanArgs = plan.PlanArgs;
@@ -83,6 +84,8 @@ pub const Launcher = struct {
     chunked: bool,
     /// The MLX affine products and the registry that picks their tiles.
     affine: affine.Kernels,
+    /// Flash Next's kernels: its residual streams, n-gram rows, indexer and sparse attention.
+    fnx: flashnext.Fns,
 
     const PlanFns = struct {
         kv_write: Function,
@@ -265,6 +268,7 @@ pub const Launcher = struct {
         const dot2 = l.mods[@backingInt(kernels.Group.affine_dot2)];
         l.affine = try affine.Kernels.load(tiles, dot2, caps.Caps.of(kernels.arch) orelse return error.Invalid, choices.products);
         try l.affine.fillByteLut(r, dot2);
+        l.fnx = try flashnext.Fns.load(l.mods[@backingInt(kernels.Group.flashnext)]);
         return l;
     }
 
@@ -323,6 +327,19 @@ pub const Launcher = struct {
     pub const tf_add = elementwise.tf_add;
     pub const tf_copy_cols = elementwise.tf_copy_cols;
     pub const tf_dense_rows = elementwise.tf_dense_rows;
+    pub const fn_hc_norm = flashnext.hcNorm;
+    pub const fn_hc_norm_shares = flashnext.hcNormShares;
+    pub const fn_hc_gates = flashnext.hcGates;
+    pub const fn_hc_mix = flashnext.hcMix;
+    pub const fn_rms_wide = flashnext.rmsWide;
+    pub const fn_ple_gate = flashnext.pleGate;
+    pub const fn_ple_conv = flashnext.pleConv;
+    pub const fn_ngram_ids = flashnext.ngramIds;
+    pub const fn_idx_pool = flashnext.idxPool;
+    pub const fn_idx_pool_at = flashnext.idxPoolAt;
+    pub const fn_idx_scores = flashnext.idxScores;
+    pub const fn_idx_select = flashnext.idxSelect;
+    pub const fn_sparse_attention = flashnext.sparseAttention;
 
     /// Launches on `s`; the counting stream runs nothing.
     pub fn go(l: *const Launcher, f: Function, grid: Dim3, block: Dim3, shared: u32, s: S, args: *Args) Error!void {

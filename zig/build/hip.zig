@@ -168,22 +168,23 @@ fn server(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine, build_opti
 }
 
 /// The model-free kernels' source groups, in zig/src/hip/kernels.zig's Group order.
-const groups = [_][]const u8{ "ops/ops.hip", "ops/act.hip", "attention/attention.hip", "recurrence/gated_delta.hip", "attention/prefill.hip", "recurrence/gdn_prefill.hip", "decode/decode.hip", "decode/plan.hip", "tiles/dot2_tiles.hip", "tiles/dot2.hip" };
+const groups = [_][]const u8{ "ops/ops.hip", "ops/act.hip", "attention/attention.hip", "recurrence/gated_delta.hip", "attention/prefill.hip", "recurrence/gdn_prefill.hip", "decode/decode.hip", "decode/plan.hip", "tiles/dot2_tiles.hip", "tiles/dot2.hip", "flashnext/flashnext.hip" };
 
 /// What the group sources include, so an edit to one rebuilds them.
 const headers = [_][]const u8{
-    "attention/attention_fa.hip", "decode/pages.hpp", "decode/plan.hpp",     "ops/attention.hpp",     "ops/common.hpp",
-    "ops/draw.hpp",               "ops/tp.hpp",       "ops/elementwise.hpp", "ops/linear.hpp",        "ops/moe.hpp",
-    "ops/norms.hpp",              "ops/rope.hpp",     "common/arch.hpp",     "common/dot2.hpp",       "common/vec.hpp",
-    "common/wmma.hpp",            "quant/act.hpp",    "quant/mlx.hpp",       "quant/mlx_decoder.hpp", "quant/mlx_pieces.hpp",
-    "quant/mlx_tiles.hpp",        "tiles/dot2.hpp",   "tiles/epilogue.hpp",  "tiles/gemm.hpp",        "tiles/gemm_kp.hpp",
-    "tiles/matrix_gemm.hpp",      "tiles/plan.hpp",   "tiles/stream.hpp",
+    "attention/attention_fa.hip", "decode/pages.hpp",     "decode/plan.hpp",     "ops/attention.hpp",     "ops/common.hpp",
+    "ops/draw.hpp",               "ops/tp.hpp",           "ops/elementwise.hpp", "ops/linear.hpp",        "ops/moe.hpp",
+    "ops/norms.hpp",              "ops/rope.hpp",         "common/arch.hpp",     "common/dot2.hpp",       "common/vec.hpp",
+    "common/wmma.hpp",            "quant/act.hpp",        "quant/mlx.hpp",       "quant/mlx_decoder.hpp", "quant/mlx_pieces.hpp",
+    "quant/mlx_tiles.hpp",        "tiles/dot2.hpp",       "tiles/epilogue.hpp",  "tiles/gemm.hpp",        "tiles/gemm_kp.hpp",
+    "tiles/matrix_gemm.hpp",      "tiles/plan.hpp",       "tiles/stream.hpp",    "flashnext/streams.hpp", "flashnext/ngram.hpp",
+    "flashnext/indexer.hpp",      "flashnext/sparse.hpp",
 };
 
 /// The flags of the kernels' first build: no contraction, wave32 on RDNA, C++20.
 const flags = [_][]const u8{ "-D__HIP_PLATFORM_AMD__=1", "-DUSE_ROCM=1", "-DHIPBLAS_V2", "-fPIC", "-DCUDA_HAS_FP16=1", "-DHIP_ENABLE_WARP_SYNC_BUILTINS=1", "-std=c++20", "-fno-gpu-rdc", "-mno-wavefrontsize64", "-ffp-contract=off" };
 
-const stub = "pub const arch = \"\";\npub const images: [10][]align(8) const u8 = @splat(&.{});\n";
+const stub = "pub const arch = \"\";\npub const images: [11][]align(8) const u8 = @splat(&.{});\n";
 
 /// One code object a group for `arch`, built with the caps table's instruction switches, as the `hip_kernels` module.
 fn kernelObjects(b: *std.Build, hipcc: []const u8, hipcc_resolved: []const u8, device_lib: ?[]const u8, arch: []const u8) *std.Build.Module {
