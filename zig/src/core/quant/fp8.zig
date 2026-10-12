@@ -27,7 +27,7 @@ pub fn toE4m3(x: f64) f64 {
     return std.math.copysign(@min(q * step, 448.0), x);
 }
 
-/// A projection as stored: `weight` e4m3 [..., N, K], `scale_inv` [..., ceil(N / 128), ceil(K / 128)] (fp32, bf16 or fp16).
+/// Stored e4m3 [..., N, K] and fp32/bf16/fp16 scales [..., ceil(N / 128), ceil(K / 128)].
 pub const Host = struct { weight: Tensor, scale_inv: Tensor };
 
 /// Weights of a projection: its rows (a stack's leading dimensions folded) by K.
