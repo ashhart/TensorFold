@@ -131,7 +131,7 @@ test "warming, a missing name or a starting status time out; an exited child is 
     try std.testing.expect(std.mem.indexOf(u8, problem, "exited during startup") != null and std.mem.indexOfScalar(u8, problem, '/') == null);
 }
 
-test "a child that exits during startup hands back its last log line, cleaned for a terminal; a timeout hands back none" {
+test "a child that exits during startup hands back its last log lines, cleaned for a terminal; a timeout names its limit" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -139,24 +139,57 @@ test "a child that exits during startup hands back its last log line, cleaned fo
     defer tmp.cleanup();
     var s = try Setup.init(a, &tmp);
     var problem: []const u8 = "";
-    var tail: []const u8 = "";
+    var tail: []const []const u8 = &.{};
     const exits = try a.dupe([]const u8, &.{ "/bin/sh", "-c", "printf 'loading\\nerror: cannot read tokenizer.json\\n\\n  \\n'; exit 3" });
     try none(try server.Managed.start(a, std.testing.io, &s.env, plan, .{ .startup_timeout_s = 10, .bench_dir = s.bench, .argv = exits, .tail = &tail }, &problem));
     try std.testing.expectEqualStrings("Benchmark server exited during startup; check the checkpoint and backend toolchain", problem);
-    try std.testing.expectEqualStrings("error: cannot read tokenizer.json", tail);
-    tail = "";
+    try lines(&.{"error: cannot read tokenizer.json"}, tail);
+    tail = &.{};
     const hangs = try a.dupe([]const u8, &.{ "/bin/sh", "-c", "printf 'still loading\\n'; exec sleep 30" });
     try none(try server.Managed.start(a, std.testing.io, &s.env, plan, .{ .startup_timeout_s = 0.3, .bench_dir = s.bench, .argv = hangs, .tail = &tail }, &problem));
-    try std.testing.expect(std.mem.indexOf(u8, problem, "timed out") != null and tail.len == 0);
-    try std.testing.expectEqualStrings("red alert bell", try server.lastLine(a, "ok\n\x1b[1;31mred\x1b[0m alert\x07 bell\r\n\x1b[2K\n"));
-    try std.testing.expectEqualStrings("", try server.lastLine(a, "\n \t\n\x1b[0m\n"));
-    try std.testing.expectEqualStrings("tab here", try server.lastLine(a, "tab\there"));
+    try std.testing.expectEqualStrings("Benchmark server startup timed out after 0.3 s (--startup-timeout, at most 3600); check the checkpoint, GPU memory and backend toolchain", problem);
+    try std.testing.expect(tail.len == 0);
+    try lines(&.{"red alert bell"}, try server.lastLines(a, "ok\n\x1b[1;31mred\x1b[0m alert\x07 bell\r\n\x1b[2K\n"));
+    try lines(&.{}, try server.lastLines(a, "\n \t\n\x1b[0m\n"));
+    try lines(&.{"tab here"}, try server.lastLines(a, "tab\there"));
     const leaks = "error: cannot open w.safetensors\ntensorfold: the native engine cannot load m (OpenFailed)\nerror(SafeAllocator): leaked [len: 20] allocated at: \n(empty stack trace)\n\n";
-    try std.testing.expectEqualStrings("tensorfold: the native engine cannot load m (OpenFailed)", try server.lastLine(a, leaks));
-    try std.testing.expectEqualStrings("caf\xc3\xa9 ok", try server.lastLine(a, "caf\xc3\xa9\xc2\x9b\xff\x80 ok"));
-    const accents: [150][2]u8 = @splat(.{ 0xc3, 0xa9 });
-    const cut = try server.lastLine(a, try std.mem.concat(a, u8, &.{ "a", std.mem.asBytes(&accents) }));
-    try std.testing.expect(cut.len == 202 and std.mem.endsWith(u8, cut, "...") and std.unicode.utf8ValidateSlice(cut));
+    try lines(&.{ "error: cannot open w.safetensors", "tensorfold: the native engine cannot load m (OpenFailed)" }, try server.lastLines(a, leaks));
+    try lines(&.{"loading"}, try server.lastLines(a, "loading\nerror(gpa): memory address 0x10 leaked:\n(empty stack trace)\n"));
+    try lines(&.{"caf\xc3\xa9 ok"}, try server.lastLines(a, "caf\xc3\xa9\xc2\x9b\xff\x80 ok"));
+    const accents: [200][2]u8 = @splat(.{ 0xc3, 0xa9 });
+    const cut = (try server.lastLines(a, try std.mem.concat(a, u8, &.{ "a", std.mem.asBytes(&accents) })))[0];
+    try std.testing.expect(cut.len == 302 and std.mem.endsWith(u8, cut, "...") and std.unicode.utf8ValidateSlice(cut));
+}
+
+fn lines(want: []const []const u8, got: []const []const u8) !void {
+    try std.testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| try std.testing.expectEqualStrings(w, g);
+}
+
+test "an engine's load-limit hint before its error is kept with the error, three lines at most, in their order" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const hint = "tensorfold: weights + caches need 184 GB; the limit is 179.2 GB (70% of RAM); raise it with GLM_LOAD_LIMIT_GB=190";
+    const failed = "tensorfold: the native engine cannot load X (OverMemoryLimit)";
+    try lines(&.{ hint, failed }, try server.lastLines(a, hint ++ "\n" ++ failed ++ "\n"));
+    const xs: [200]u8 = @splat('x');
+    const long_path = try std.mem.concat(a, u8, &.{ "tensorfold: the native GLM-5.3-Flash engine cannot load /models/", &xs, " (OverMemoryLimit)" });
+    try lines(&.{ hint, long_path }, try server.lastLines(a, try std.mem.concat(a, u8, &.{ "info: loading\n", hint, "\n", long_path, "\nerror(SafeAllocator): leaked\n" })));
+    const glm = "error: glm: 169.4 GB of weights and 14.6 GB of caches pass this Mac's 179.2 GB load limit (70% of RAM); load a layer subset or the expert-parallel pair, or set GLM_LOAD_LIMIT_GB";
+    const many = glm ++ "\nerror: one\nerror: two\nerror: three\n" ++ failed ++ "\nTF_AFTER_ERROR=1 is not a hint\n";
+    try lines(&.{ glm, "error: three", failed }, try server.lastLines(a, many));
+    try lines(&.{ "error: two", "error: three", failed }, try server.lastLines(a, "error: one\nerror: two\nerror: three\n" ++ failed));
+    try lines(&.{ "tensorfold: GLM_LOAD_LIMIT_GB is not a load limit", "error: a", "error: b" }, try server.lastLines(a, "set GLM_LOAD_LIMIT_GB=1\ntensorfold: GLM_LOAD_LIMIT_GB is not a load limit\nerror: a\nerror: b\n"));
+}
+
+test "the startup timeout grows with the weights past 20 GB, 6 s per GB from 600 s, to 3600 s" {
+    try std.testing.expectEqual(@as(f64, 600), server.startupTimeout(0));
+    try std.testing.expectEqual(@as(f64, 600), server.startupTimeout(20_000_000_000));
+    try std.testing.expectEqual(@as(f64, 606), server.startupTimeout(21_000_000_000));
+    try std.testing.expectEqual(@as(f64, 1500), server.startupTimeout(170_000_000_000));
+    try std.testing.expectEqual(@as(f64, 3600), server.startupTimeout(520_000_000_000));
+    try std.testing.expectEqual(@as(f64, 3600), server.startupTimeout(std.math.maxInt(u64)));
 }
 
 test "a child that ignores SIGTERM is killed and reaped after the grace period" {

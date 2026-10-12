@@ -3,6 +3,7 @@ const std = @import("std");
 const fake = @import("benchmark_fake.zig");
 const cli = @import("benchmark_cli_test.zig");
 const Run = cli.Run;
+const benchmark = @import("benchmark.zig");
 
 const short = [_][]const u8{ "--tokens", "4", "--reps", "1", "--temperatures", "0" };
 
@@ -171,4 +172,89 @@ test "with its known drafter cached, a default run names the drafter flag and pa
     try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{ big, "--serial", "--drafter", drafter })));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, r.out.written(), "--serial passes no drafter, so --drafter " ++ drafter ++ " is not used."));
     try std.testing.expect(!r.has(hint) and !try passed(&r, "--drafter") and try passed(&r, "--no-drafts"));
+}
+
+test "a greedy-only engine's refusal is printed once with its reason and what to run instead, never saved" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    const reason = "this engine decodes greedily only and this server samples by default: send temperature 0, or serve with --temperature 0";
+    const refused = try fake.jsonReply(a, "400 Bad Request", "{\"error\": {\"message\": \"" ++ reason ++ "\", \"type\": \"invalid_request_error\"}}");
+    const f = try fake.Fake.start(std.testing.allocator, try a.dupe(fake.Route, &.{
+        .{ .method = "POST", .path = "/v1/completions", .replies = try a.dupe([]const fake.Write, &.{ refused, refused, try fake.reply(a, false, 4, 15) }) },
+        .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{ refused, refused, try fake.reply(a, true, 4, 15) }) },
+    }));
+    defer f.stop();
+    const out = try r.path("run.json");
+    const head = try cli.runArgs(&r, try f.url(a, ""), out);
+    const args = try std.mem.concat(a, []const u8, &.{ head[0 .. head.len - 4], &.{ "--temperatures", "1,0", "--output", out } });
+    try std.testing.expectEqual(@as(u8, 2), try r.command(args));
+    const text = r.out.written();
+    const answered = "Server answered HTTP 400: " ++ reason ++ "\n";
+    const greedy = "This engine decodes greedily only, so the cells above temperature 0 fail and the run cannot be ranked; for a local run, use --temperatures 0.\n";
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, answered));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, greedy));
+    try std.testing.expect(std.mem.indexOf(u8, text, "code T=1 warm-up: error\n" ++ answered ++ greedy ++ "code T=1 repeat 1/1: error\n") != null);
+    try std.testing.expect(f.count() == 8 and r.has("Receipt saved"));
+    const saved = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, out, a, .limited(1 << 20));
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, saved, "\"error_code\":\"http_error\""));
+    try std.testing.expect(std.mem.indexOf(u8, saved, "greedily") == null and std.mem.indexOf(u8, saved, "Bad Request") == null);
+    const server_source = @embedFile("server.zig");
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, server_source, "\"this engine " ++ benchmark.greedy_only));
+}
+
+test "distinct refusals are printed at most three times, and a greedy-only reason at temperature 0 adds no advice" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    var replies: [5][]const fake.Write = undefined;
+    for (&replies, 0..) |*w, i| w.* = try fake.jsonReply(a, "500 Internal Server Error", try std.fmt.allocPrint(a, "{{\"error\": {{\"message\": \"engine decodes greedily only, case {d}\"}}}}", .{i}));
+    const f = try fake.Fake.start(std.testing.allocator, try a.dupe(fake.Route, &.{
+        .{ .method = "POST", .path = "/v1/completions", .replies = &replies },
+        .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.reply(a, true, 4, 15)}) },
+    }));
+    defer f.stop();
+    const head = try cli.runArgs(&r, try f.url(a, ""), try r.path("run.json"));
+    try std.testing.expectEqual(@as(u8, 2), try r.command(try std.mem.concat(a, []const u8, &.{ head, &.{ "--reps", "4" } })));
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, r.out.written(), "Server answered HTTP 500: engine decodes greedily only, case "));
+    try std.testing.expect(r.has("case 2\n") and !r.has("case 3") and !r.has("This engine decodes greedily only"));
+}
+
+test "a serve child's load-limit hint is printed with its error, and a big checkpoint gets a longer startup" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    _ = try cli.standIn(&r, 9);
+    const hint = "tensorfold: weights + caches need 184 GB; the limit is 179.2 GB (70% of RAM); raise it with GLM_LOAD_LIMIT_GB=190";
+    const failed = "tensorfold: the native engine cannot load X (OverMemoryLimit)";
+    r.self_exe = try writeScript(&r, "failing-serve", "#!/bin/sh\nprintf '%s\\n' loading '" ++ hint ++ "' '" ++ failed ++ "' 'error(SafeAllocator): leaked' '(empty stack trace)'\nexit 1\n");
+    const ckpt = try r.path("private-checkpoint");
+    try std.testing.expectEqual(@as(u8, 1), try r.command(try argv(&r, &.{ckpt})));
+    try std.testing.expect(std.mem.endsWith(u8, r.err.written(), "toolchain\nLast server log lines:\n  " ++ hint ++ "\n  " ++ failed ++ "\n"));
+    try std.testing.expect(!r.has("--startup-timeout sets another limit"));
+    const m = try cli.managedWorld(a, false);
+    defer m.stop();
+    r.self_exe = try cli.standIn(&r, m.port);
+    for ([_]struct { []const u8, u64 }{ .{ "model-00001.safetensors", 100_000_000_000 }, .{ "blob", 70_000_000_000 }, .{ "optimizer.bin", 50_000_000_000 } }) |w| {
+        const file = try std.Io.Dir.cwd().createFile(io, try std.fs.path.join(a, &.{ ckpt, w[0] }), .{});
+        defer file.close(io);
+        try file.setLength(io, w[1]);
+    }
+    try std.Io.Dir.cwd().symLink(io, "blob", try std.fs.path.join(a, &.{ ckpt, "model-00002.safetensors" }), .{});
+    try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{ckpt})));
+    const wait = "The server gets up to 1500 s to load 170 GB of weights; --startup-timeout sets another limit.\n";
+    const at = std.mem.indexOf(u8, r.out.written(), wait) orelse return error.TestExpectedWaitLine;
+    try std.testing.expect(at < std.mem.indexOf(u8, r.out.written(), "code T=0 warm-up").?);
+    try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{ ckpt, "--startup-timeout", "900" })));
+    try std.testing.expect(!r.has("--startup-timeout sets another limit"));
 }

@@ -21,7 +21,8 @@ pub const Args = struct {
     context: ?i64 = null,
     drafter: []const u8 = "auto",
     timeout: f64 = 600,
-    startup_timeout: f64 = 600,
+    /// null: scaled with the checkpoint's weights (``server.startupTimeout``).
+    startup_timeout: ?f64 = null,
     output: ?[]const u8 = null,
     publish: bool = false,
     yes: bool = false,
@@ -45,7 +46,7 @@ pub const flags = [_]Flag{
     .{ .name = "--drafter", .help = "a drafter checkpoint directory or cached repo ID for the managed server; auto (default) and none pass no drafter, so the engine keeps its own default" },
     .{ .name = "--download", .value = false, .help = "not supported natively; run tensorfold pull MODEL first" },
     .{ .name = "--timeout", .help = "request timeout in seconds (default: 600)" },
-    .{ .name = "--startup-timeout", .help = "managed server startup timeout in seconds (default: 600)" },
+    .{ .name = "--startup-timeout", .help = "managed server startup timeout in seconds (default: 600, plus 6 per GB of weights past 20 GB, at most 3600)" },
     .{ .name = "--output", .help = "receipt path (default: ~/.tensorfold/benchmarks/RUN_ID.json)" },
     .{ .name = "--publish", .value = false, .help = "review and upload the saved receipt" },
     .{ .name = "--yes", .value = false, .help = "explicitly approve public upload without the interactive prompt" },
@@ -171,7 +172,7 @@ fn checks(a: Allocator, out: *Args, temperatures: []const u8, problem: *[]const 
     out.temperatures = t;
     if (out.tokens < 2 or out.tokens > 8192 or out.reps < 1 or out.reps > 20) return invalid(problem, "Tokens must be 2..8192 and repetitions 1..20");
     if (out.context) |c| if (c < 1 or c > 10_000_000) return invalid(problem, "Context must be a positive token count");
-    for ([_]f64{ out.timeout, out.startup_timeout }) |s| if (!std.math.isFinite(s) or s <= 0) return invalid(problem, "Timeouts must be finite positive seconds");
+    for ([_]?f64{ out.timeout, out.startup_timeout }) |given| if (given) |s| if (!std.math.isFinite(s) or s <= 0) return invalid(problem, "Timeouts must be finite positive seconds");
 }
 
 /// ``-h``: the usage line and one line per flag.

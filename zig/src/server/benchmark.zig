@@ -234,9 +234,29 @@ fn show(ctx: *const Context, v: json.Value) !void {
         try say(ctx, "This rocm receipt is saved locally; it cannot be published until the board accepts rocm.", .{});
 }
 
+/// What an engine that cannot sample answers a request with a temperature (server.zig's refusal).
+pub const greedy_only = "decodes greedily only";
+
 const Printer = struct {
     ctx: *const Context,
     reps: i64,
+    heard: [3][]const u8 = undefined,
+    heard_n: usize = 0,
+    greedy: bool = false,
+
+    /// A refused attempt's reason, once per distinct reason and at most three; a greedy-only engine is named once.
+    fn said(p: *anyopaque, s: *const suite.Sample, text: []const u8) void {
+        const self: *Printer = @ptrCast(@alignCast(p));
+        for (self.heard[0..self.heard_n]) |h| if (std.mem.eql(u8, h, text)) return;
+        if (self.heard_n == self.heard.len) return;
+        self.heard[self.heard_n] = text;
+        self.heard_n += 1;
+        say(self.ctx, "Server answered {s}", .{text}) catch {};
+        if (self.greedy or s.temperature <= 0 or std.mem.indexOf(u8, text, greedy_only) == null) return;
+        self.greedy = true;
+        say(self.ctx, "This engine decodes greedily only, so the cells above temperature 0 fail and the run cannot be ranked; for a local run, use --temperatures 0.", .{}) catch {};
+    }
+
     fn call(p: *anyopaque, s: *const suite.Sample) void {
         const self: *Printer = @ptrCast(@alignCast(p));
         var t: [32]u8 = undefined;
@@ -268,6 +288,8 @@ fn run(ctx: *const Context, args: Args) !u8 {
     var target: stream.Target = undefined;
     var plan: ?server.Plan = null;
     var note: ?[]const u8 = null;
+    var wait: ?[]const u8 = null;
+    var startup_s: f64 = args.startup_timeout orelse 600;
     if (args.server) |url| {
         if (args.backend == .auto) return fail(ctx, "--server needs an explicit --backend mlx, cuda or rocm; client hardware does not identify a remote server");
         if (stream.splitUrl(url) == null) return fail(ctx, "Server URL must be HTTP(S) without credentials, query or fragment");
@@ -281,7 +303,7 @@ fn run(ctx: *const Context, args: Args) !u8 {
         };
     } else {
         if (args.model_id != null) return fail(ctx, "--model-id applies only to an attached server");
-        if (args.startup_timeout > 3600) return fail(ctx, "Startup timeout must be greater than 0 and at most 3600 seconds");
+        if (args.startup_timeout) |s| if (s > 3600) return fail(ctx, "Startup timeout must be greater than 0 and at most 3600 seconds");
         const dir = try hub.resolve(a, ctx.io, ctx.environ, args.target, &problem) orelse return fail(ctx, problem);
         const config = model.readConfig(a, ctx.io, dir) orelse return fail(ctx, "Checkpoint is incomplete; run tensorfold pull MODEL");
         if (config.value != .object) return fail(ctx, "Checkpoint is incomplete; run tensorfold pull MODEL");
@@ -299,6 +321,11 @@ fn run(ctx: *const Context, args: Args) !u8 {
             .hardware = probe.hardware,
             .runtime = .{ .tensorfold_version = ctx.engines.version, .backend = backend, .python_version = "none", .platform = if (builtin.os.tag == .macos) "macos" else "linux", .driver = probe.driver },
         };
+        if (args.startup_timeout == null) {
+            const bytes = model.weightBytes(ctx.io, dir);
+            startup_s = server.startupTimeout(bytes);
+            if (startup_s > 600) wait = try std.fmt.allocPrint(a, "The server gets up to {d} s to load {d:.0} GB of weights; --startup-timeout sets another limit.", .{ startup_s, @as(f64, @floatFromInt(bytes)) / 1e9 });
+        }
         plan = .{ .exe = ctx.self_exe orelse try std.process.executablePathAlloc(ctx.io, a), .dir = dir, .backend = backend, .tokens = @intCast(args.tokens), .context = args.context, .drafter_dir = drafter_dir, .serial = args.serial };
         var u: cli.Usage = .{};
         _ = cli.parse(a, (try server.argv(a, plan.?))[2..], &u) catch |e| switch (e) {
@@ -320,20 +347,23 @@ fn run(ctx: *const Context, args: Args) !u8 {
     try say(ctx, "{s}: code and chat, {d} temperatures, {d} repeats after warm-up.", .{ suite.id, args.temperatures.len, args.reps });
     try say(ctx, "This generates model replies; use Ctrl-C to cancel. Nothing is uploaded unless you publish.", .{});
     if (note) |n| try say(ctx, "{s}", .{n});
+    if (wait) |w| try say(ctx, "{s}", .{w});
     var managed: ?server.Managed = null;
     if (plan) |p| {
-        var tail: []const u8 = "";
-        managed = try server.Managed.start(a, ctx.io, ctx.environ, p, .{ .startup_timeout_s = args.startup_timeout, .bench_dir = bench_dir, .tail = &tail }, &problem) orelse {
+        var tail: []const []const u8 = &.{};
+        managed = try server.Managed.start(a, ctx.io, ctx.environ, p, .{ .startup_timeout_s = startup_s, .bench_dir = bench_dir, .tail = &tail }, &problem) orelse {
             if (stop.requested() != null) return cancelled(ctx);
             const code = try fail(ctx, problem);
-            if (tail.len > 0) try ctx.err.print("Last server log line: {s}\n", .{tail});
+            if (tail.len == 1) try ctx.err.print("Last server log line: {s}\n", .{tail[0]});
+            if (tail.len > 1) try ctx.err.writeAll("Last server log lines:\n");
+            if (tail.len > 1) for (tail) |line| try ctx.err.print("  {s}\n", .{line});
             try ctx.err.flush();
             return code;
         };
         target = .{ .base = managed.?.base(), .served = server.served_name };
     }
     var printer: Printer = .{ .ctx = ctx, .reps = args.reps };
-    const samples = stream.run(a, ctx.io, target, .{ .tokens = @intCast(args.tokens), .reps = @intCast(args.reps), .temperatures = args.temperatures, .serial = args.serial, .timeout_s = args.timeout }, .{ .ctx = &printer, .call = Printer.call }) catch |e| {
+    const samples = stream.run(a, ctx.io, target, .{ .tokens = @intCast(args.tokens), .reps = @intCast(args.reps), .temperatures = args.temperatures, .serial = args.serial, .timeout_s = args.timeout }, .{ .ctx = &printer, .call = Printer.call, .said = Printer.said }) catch |e| {
         if (managed) |*m| _ = m.stop();
         return e;
     };

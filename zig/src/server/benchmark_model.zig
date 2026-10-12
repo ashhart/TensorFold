@@ -48,6 +48,20 @@ pub fn describe(a: Allocator, io: std.Io, target: []const u8, dir: []const u8, l
     return out;
 }
 
+/// The bytes of the ``*.safetensors`` files in ``dir``, through a cache snapshot's links; 0 when unreadable.
+pub fn weightBytes(io: std.Io, dir: []const u8) u64 {
+    var d = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return 0;
+    defer d.close(io);
+    var it = d.iterate();
+    var total: u64 = 0;
+    while (it.next(io) catch null) |e| {
+        if (!std.mem.endsWith(u8, e.name, ".safetensors")) continue;
+        const st = d.statFile(io, e.name, .{}) catch continue;
+        if (st.kind == .file) total +|= st.size;
+    }
+    return total;
+}
+
 /// An attached server's facts: only the public ID it was asked for.
 pub fn attached(target: []const u8, target_is_path: bool) Model {
     const public = !target_is_path and check.repoId(target);
