@@ -44,4 +44,5 @@ test {
     _ = admission;
     _ = Device;
     _ = collective;
+    _ = graph_cache;
 }
