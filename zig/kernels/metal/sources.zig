@@ -78,6 +78,9 @@ pub const prefill = [_]File{
 
 /// Flash Next decode: the DeltaNet window step with every row's independent work at once.
 pub const flashnext_gdn = @embedFile("decode/fn_gdn.metal");
+/// Flash Next decode products one input row a simdgroup, for GPUs without tensor units (0.6.6's rows.py).
+pub const flashnext_rows = @embedFile("decode/fn_rows.metal");
+pub const flashnext_rows_hc = @embedFile("decode/fn_rows_hc.metal");
 
 /// GLM-5.3-Flash's decode kernels from our Python family (tools/zig/gen_glm_kernels.py).
 pub const glm = @import("glm/kernels.zig");

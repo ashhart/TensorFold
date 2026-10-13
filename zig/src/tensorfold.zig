@@ -23,6 +23,7 @@ pub const exlr8_prompt = @import("core/exlr8_prompt.zig");
 pub const glm_dsa = @import("families/glm_dsa/glm_dsa.zig");
 pub const nemotron = @import("families/nemotron/nemotron.zig");
 pub const flashnext_replay = @import("families/flashnext/replay.zig");
+pub const flashnext_rows = @import("families/flashnext/rows_load.zig");
 pub const flashnext_engine = @import("families/flashnext/engine.zig");
 pub const flashnext_snapshot = @import("families/flashnext/snapshot.zig");
 pub const flashnext_learned = @import("families/flashnext/learned.zig");
