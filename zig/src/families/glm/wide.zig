@@ -369,7 +369,7 @@ test "4/64 of one width alone takes the generated kernels" {
 
 test "a failed compile releases every pipeline built before it; a load counts each one it builds" {
     const gpa = std.testing.allocator;
-    const device = try mtl.Device.init();
+    const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     var made: Made = .{};
     try std.testing.expectError(error.KernelCompile, build(gpa, device, "", &made)); // after the row kernels
