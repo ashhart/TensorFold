@@ -171,7 +171,7 @@ fn check(chip: Chip, n: usize, k: usize, w: Width) !void {
     _ = try @import("projection.zig").split(n, k);
     // The lane sums and odd word counts assume group 64 off the 4-bit kernel.
     if (chip.tensor_units and w.bits != 4 and w.group != 64) return error.UnsupportedLaneGroup;
-    if (chip.tensor_units) return (lane.Layout{ .n = n, .k = k, .format = .{ .bits = w.bits, .group = w.group }, .precompute_sums = isUniform(w), .reg = isUniform(w) }).validate();
+    if (chip.tensor_units and n % 32 == 0) return (lane.Layout{ .n = n, .k = k, .format = .{ .bits = w.bits, .group = w.group }, .precompute_sums = isUniform(w), .reg = isUniform(w) }).validate();
     if (isUniform(w) and n % 8 == 0) return;
     if (std.mem.indexOfScalar(u8, chip.row_bits, w.bits) == null) return error.UnsupportedRowBits;
     return (row.Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = n, .k = k, .group = w.group }).validate();
@@ -253,6 +253,11 @@ test "a dense projection and an unsupported global group refuse" {
     var why: Why = .{};
     try std.testing.expectError(error.UnqualifiedQwenFormat, testAdmit("{\"bits\":4,\"group_size\":64,\"model.layers.3.self_attn.q_proj\":false}", .{ .tensor_units = false }, &why));
     try std.testing.expectError(error.BadAffine, testAdmit("{\"bits\":4,\"group_size\":16}", .{ .tensor_units = false }, &why));
+}
+
+test "a 4/64 run off the 32-row lanes, such as a lone 48-row in_proj_b, takes the row kernels on tensor units" {
+    try check(.{ .tensor_units = true }, 48, 5120, uniform);
+    try check(.{ .tensor_units = true }, 64, 5120, uniform);
 }
 
 test "a mixed stack runs every member alone, even beside a member of its own width" {
