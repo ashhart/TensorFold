@@ -195,7 +195,7 @@ const Host = struct {
         h.host.memory = if (h.gpu != null) .{ .read = readMemory } else null;
         h.host.explain = explain;
         h.host.cache = h.store;
-        if (h.lone != null) h.host.lone = .{ .ctx = h, .run = loneRun, .sampled = true };
+        if (h.lone != null) h.host.lone = .{ .ctx = h, .run = loneRun, .sampled = true, .logprobs = h.inner.vtable.first_row != null };
         if (h.learn != null) h.host.learner = h.learner();
         try h.host.start();
     }
