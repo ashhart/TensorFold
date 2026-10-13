@@ -339,7 +339,7 @@ pub const LaneHost = struct {
         const began = std.Io.Clock.awake.now(h.io).toNanoseconds();
         job.began = began;
         if (r.max_tokens == 0 and h.info_.warm_turns) return h.warmPass(job, began);
-        if (lone.fits(h, job)) return lone.run(h, job, began);
+        if (lone.fits(h, job)) return lone.run(h, job, began, false);
         if (h.core.fills()) {
             h.filling.append(h.gpa, job) catch return h.drop(job, "out of memory");
             return true;
@@ -525,6 +525,7 @@ pub const LaneHost = struct {
                     h.unlock();
                 } else i += 1;
             }
+            lone.reclaim(h);
         }
     }
 

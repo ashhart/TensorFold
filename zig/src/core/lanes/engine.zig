@@ -88,6 +88,18 @@ pub const Engine = struct {
         try e.live.append(e.gpa, s);
     }
 
+    /// Give a live stream to another driver between rounds, its round state dropped (adopt takes it back).
+    pub fn detach(e: *Engine, s: *Stream) bool {
+        if (s.inflight != null or s.finished) return false;
+        for (e.live.items, 0..) |x, i| {
+            if (x != s) continue;
+            _ = e.live.orderedRemove(i);
+            s.dropRoundState(e.gpa);
+            return true;
+        }
+        return false;
+    }
+
     /// Release a cancelled stream between rounds: no pending draws or drafts.
     pub fn discard(e: *Engine, s: *Stream) void {
         s.finished = true;

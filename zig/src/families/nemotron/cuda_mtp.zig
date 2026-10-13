@@ -265,6 +265,13 @@ pub const Head = struct {
         h.levels = 0;
     }
 
+    /// begin again for the `keep` rows the head last began (another driver resumes the stream): its meta rewritten.
+    pub fn again(h: *Head, keep: usize) !void {
+        if (keep > h.pos) return error.BadDraftRequest;
+        h.pos -= keep;
+        try h.begin(keep);
+    }
+
     /// MTPHead.level: queue level j of this round (0: absorb only) into the engine's ids[j].
     pub fn launch(h: *Head, j: usize) !void {
         const m: usize = @intFromBool(h.e.sampling != null);

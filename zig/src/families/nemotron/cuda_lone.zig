@@ -13,12 +13,13 @@ pub const Hooks = struct {
     ctx: *anyopaque,
     committed: *const fn (ctx: *anyopaque) void,
     yield: *const fn (ctx: *anyopaque) bool,
+    resumed: bool = false,
 };
 
 /// Thinking budgets a lone stream takes: the budget's cut must lie past its first round.
 pub const min_budget: u32 = 2 * state.max_rows;
 
-/// Prefill `s` and decode it until it finishes (false) or `hooks.yield` hands it to the lane core (true).
+/// Prefill (or resume) `s` and decode it until it finishes (false) or `hooks.yield` hands it to the lane core (true).
 pub fn run(gpa: std.mem.Allocator, b: *Cuda, s: *lanes.Stream, hooks: Hooks) !bool {
     const h = b.head orelse return error.NoDraftHead;
     if (!s.drafts) return error.DraftedOnly;
@@ -26,7 +27,10 @@ pub fn run(gpa: std.mem.Allocator, b: *Cuda, s: *lanes.Stream, hooks: Hooks) !bo
     const be = b.backend();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    if (s.logprobs != null or s.grammar != null) { // as the lane core opens a stream: masked, with the prompt's last row
+    var kept_rows: ?usize = null;
+    if (hooks.resumed) {
+        kept_rows = try b.reclaim(s) orelse return true; // mid-round in the lane core: it keeps the stream
+    } else if (s.logprobs != null or s.grammar != null) { // as the lane core opens a stream: masked, with the prompt's last row
         errdefer be.release(s);
         try be.prefill(s);
         const mask = if (s.grammar) |g| try g.next(arena.allocator()) else null;
@@ -36,10 +40,10 @@ pub fn run(gpa: std.mem.Allocator, b: *Cuda, s: *lanes.Stream, hooks: Hooks) !bo
     } else _ = try be.opening(gpa, s); // the prompt pass, its first token committed; a cancel or failure releases the stream
     var handed = false;
     defer if (!handed) be.release(s);
-    hooks.committed(hooks.ctx);
+    if (kept_rows == null) hooks.committed(hooks.ctx);
     if (s.finished) return false;
     var rule = drafts.depthRule(costs);
-    var r = try drafts.Rounds.init(gpa, b.e, h, &rule, s.prompt(), s.emitted(), null);
+    var r = if (kept_rows) |k| try drafts.Rounds.resumed(gpa, b.e, h, &rule, s.prompt(), s.emitted(), k) else try drafts.Rounds.init(gpa, b.e, h, &rule, s.prompt(), s.emitted(), null);
     defer r.deinit();
     var held: Held = .{ .b = b, .arena = &arena };
     while (true) {
