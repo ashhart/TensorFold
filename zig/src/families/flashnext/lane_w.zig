@@ -7,6 +7,7 @@ const Run = replay.Run;
 const Buf = replay.Buf;
 const pack_lane = @import("pack_lane.zig");
 const variants = @import("variants.zig");
+const rows_w = @import("rows_w.zig");
 
 /// One run's product: n columns over k inputs at one width, and where its columns land in the fused output.
 pub const Product = struct { wq: Buf, sbt: Buf, n: usize, k: usize, bits: u8, group: u16, map: ?Buf = null, tiled: bool = true };
@@ -18,6 +19,7 @@ pub const Wide = struct { runs: []const Product, n: usize };
 pub const Lane = struct {
     six: ?Six = null,
     w: ?*const Wide = null,
+    rows: ?*const rows_w.Dense = null, // the same projection in MLX layout on the row kernels (rows_load.zig)
 
     pub const Six = struct { wq: Buf, sbt: Buf };
 

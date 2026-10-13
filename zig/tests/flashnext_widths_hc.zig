@@ -1,4 +1,4 @@
-//! tf-flashnext-widths, hyper-connections: the recorded any-width kernels at each oQ width, decode rows 1 to 16.
+//! tf-flashnext-widths, hyper-connections: the any-width kernels at each oQ width, rows 1-16 (rows-hc: rows_hc.zig).
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -13,6 +13,13 @@ const W = 4 * 2560; // the streams' width: the down projection's K
 const LOW = 320;
 const counts = [_]usize{ 1, 2, 3, 4, 8, 9, 16 }; // the row kernels at 1-2 rows, the MMA kernels past them
 const R = 16;
+
+/// The per-row kernels instead of the recorded ones (the rows-hc class).
+var rows_mode: ?*tf.flashnext_rows.rows_w.Shared = null;
+
+fn widthOf(k: []const variants.Const) [2]usize {
+    return if (k.len == 0) .{ 6, 32 } else .{ k[0].value, k[1].value };
+}
 
 /// The streams and their sums of squares set so every stream's norm is exactly one: x = bf16(hn) as stored.
 const Streams = struct { hn: mtl.Buffer, hd: []f64, ssp: mtl.Buffer, nw: mtl.Buffer, eps: mtl.Buffer };
@@ -57,11 +64,17 @@ fn project(r: *Run, s: Streams, w: Weights, which: []const u8, start: usize, row
     const hn: Buf = .{ .b = s.hn, .off = start * W * 2 };
     const ssp: Buf = .{ .b = s.ssp, .off = start * 40 * 4 };
     const part: Buf = .{ .b = o.part, .off = start * 10 * nd * 4 };
+    const mixed: Buf = .{ .b = o.mixed, .off = start * 2560 * 2 };
+    const inj: Buf = .{ .b = o.inj, .off = start * 4 * 2 };
+    if (rows_mode) |sh| {
+        const hw: tf.flashnext_rows.rows_hc.Weights = .{ .scale = .{ .b = s.nw }, .dw = w.dw, .ds = w.ds, .db = w.db, .uw = w.uw, .us = w.us, .ub = w.ub, .w = .{ widthOf(kd), widthOf(ku) } };
+        return tf.flashnext_rows.rows_hc.encode(r.enc, a, r.device, &sh.hc, hw, hn, ssp, .{ .b = s.eps }, rows_buf, rows, part, mixed, inj, false, true);
+    }
     const down = try std.fmt.bufPrint(&role, "qa_hc_down@{s}", .{which});
     try variants.callAs(r, down, rows, &.{ hn, ssp, .{ .b = s.nw }, w.dw, w.ds, w.db, .{ .b = s.eps }, rows_buf }, &.{part}, kd);
     const up = try std.fmt.bufPrint(&role, "qa_hc_up@{s}", .{which});
     const ins = [_]Buf{ hn, ssp, .{ .b = s.nw }, part, w.uw, w.us, w.ub, .{ .b = s.eps }, rows_buf };
-    try variants.callAs(r, up, rows, &ins, &.{ .{ .b = o.mixed, .off = start * 2560 * 2 }, .{ .b = o.inj, .off = start * 4 * 2 } }, ku);
+    try variants.callAs(r, up, rows, &ins, &.{ mixed, inj }, ku);
 }
 
 fn runAll(r: *Run, s: Streams, w: Weights, which: []const u8, rows: usize, nd: usize, o: Out, kd: []const variants.Const, ku: []const variants.Const) !void {
@@ -220,6 +233,15 @@ fn upCheck(t: *lib.Tally, r: *Run, s: Streams, which: []const u8, nd: usize, dow
     const ul = try std.fmt.bufPrint(&up_label, "{s} up (stream scale 2^{d})", .{ label, std.math.log2(scale) });
     worst.report(t, ul);
     ctrl.control(t, ul);
+}
+
+/// The checks on the per-row kernels: float64, row bits at 1-16 rows, the 6/32 recode's bits on the same values.
+pub fn runRows(t: *lib.Tally, r: *Run) !void {
+    const sh = try a.create(tf.flashnext_rows.rows_w.Shared);
+    sh.* = .{ .a = a, .device = r.device, .sums = undefined };
+    rows_mode = sh;
+    defer rows_mode = null;
+    try run(t, r);
 }
 
 pub fn run(t: *lib.Tally, r: *Run) !void {
