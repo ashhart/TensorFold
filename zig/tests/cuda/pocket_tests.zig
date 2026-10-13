@@ -146,6 +146,58 @@ fn control(r: *Rig, c: Case, order: Order) !usize {
     return differ;
 }
 
+/// An exact zero of `word` bytes, little-endian: -0.0 when `negative`, else +0.0.
+fn exactZero(bytes: []const u8, negative: bool) bool {
+    for (bytes[0 .. bytes.len - 1]) |b| if (b != 0) return false;
+    return bytes[bytes.len - 1] == @as(u8, if (negative) 0x80 else 0);
+}
+
+/// A layer with no neuron in use whose output holds exact -0.0: 1.0.8's kernel, the launcher, and a captured launch.
+fn negativeZero(r: *Rig, d: usize, rows: usize, out_f32: bool) !usize {
+    const c: Case = .{ .d = d, .rows = rows, .used = 0, .out_f32 = out_f32 };
+    const in = try inputs(r, c);
+    const word: usize = if (out_f32) 4 else 2;
+    // an exact -0.0 at every third output of the shared expert's slot, and of slot 0, which no pocket adds to
+    var placed: usize = 0;
+    for (0..rows) |t| for ([_]usize{ 0, row_add }) |slot| {
+        var k: usize = 0;
+        while (k < d) : (k += 3) {
+            const i = (t * row_mul + slot) * d + k;
+            if (out_f32) std.mem.bytesAsSlice(u32, in.out)[i] = 0x8000_0000 else std.mem.bytesAsSlice(u16, in.out)[i] = 0x8000;
+            placed += @intFromBool(slot == row_add);
+        }
+    };
+    const y = try r.dev(std.mem.sliceAsBytes(in.y));
+    const up = try r.dev(std.mem.sliceAsBytes(in.up));
+    const down = try r.dev(std.mem.sliceAsBytes(in.down));
+    const none: u32 = 0;
+    const count = try r.dev(std.mem.asBytes(&none));
+    const act = try r.dev(try r.a.alloc(u8, rows * width * 4));
+    const outs = [3]u64{ try r.dev(in.out), try r.dev(in.out), try r.dev(in.out) };
+    try r.gpu.ctx.synchronize();
+    // 1.0.8: tf_pocket_rows over all 64 neurons, every one zero
+    try r.reference(c, y, up, down, outs[0]);
+    // now: the launcher, given no neuron in use, launches nothing
+    try r.o.pocketRows(y, d, .{ .up = up, .down = down, .n = width, .used = 0, .count = count }, act, outs[1], out_f32, rows, row_mul, row_add);
+    // a graph captured while the layer held neurons launches both kernels, which read the device's count of 0
+    try r.o.pocketRows(y, d, .{ .up = up, .down = down, .n = width, .used = width, .count = count }, act, outs[2], out_f32, rows, row_mul, row_add);
+    const old = try r.get(outs[0], in.out.len);
+    const skipped = try r.get(outs[1], in.out.len);
+    const captured = try r.get(outs[2], in.out.len);
+    // 1.0.8 turned each -0.0 it added to into +0.0 and left every other value's bytes, slot 0's -0.0 included
+    var turned: usize = 0;
+    var i: usize = 0;
+    while (i < in.out.len) : (i += word) {
+        if (std.mem.eql(u8, old[i..][0..word], in.out[i..][0..word])) continue;
+        try check.expect(exactZero(in.out[i..][0..word], true) and exactZero(old[i..][0..word], false), "pocket -0.0 d={d} rows={d} out_f32={}: tf_pocket_rows changed value {d}, not a -0.0 to +0.0", .{ d, rows, out_f32, i / word });
+        turned += 1;
+    }
+    try check.expect(turned == placed, "pocket -0.0 d={d} rows={d} out_f32={}: tf_pocket_rows turned {d} of the {d} -0.0 it added to", .{ d, rows, out_f32, turned, placed });
+    try check.sameBytes("pocket -0.0, no neuron in use: the output as it was", skipped, in.out);
+    try check.sameBytes("pocket -0.0, a captured launch reading a count of 0: tf_pocket_rows' bytes", captured, old);
+    return turned;
+}
+
 /// GPU microseconds a launch, medians over `reps` with the L2 cache flushed before each: 1.0.8's kernel, then the two.
 fn timing(r: *Rig, c: Case, reps: usize) !void {
     const in = try inputs(r, c);
@@ -213,6 +265,12 @@ pub fn run(gpu: Gpu, reps: usize) !void {
         moved[2 * i + 1] = try control(&r, .{ .d = 2728, .rows = rows, .used = 10, .out_f32 = true }, .inputs_rotated);
     }
     check.pass("pocket controls: neurons summed in reverse change {d} and {d} values, inputs rotated by one {d} and {d}", .{ moved[0], moved[2], moved[1], moved[3] });
+    // the one difference from 1.0.8: a layer with no neuron in use keeps an exact -0.0 that tf_pocket_rows made +0.0
+    var turned: usize = 0;
+    for ([_]usize{ 1, 16, 300 }) |rows| for ([_]bool{ true, false }) |f| {
+        turned += try negativeZero(&r, 2688, rows, f);
+    };
+    check.pass("pocket -0.0: tf_pocket_rows over no neuron in use turned {d} exact -0.0 to +0.0 and kept every other value; the launcher launches nothing and keeps all of them; a captured launch reading a count of 0 gives tf_pocket_rows' bytes", .{turned});
     if (reps == 0) return;
     for ([_]Case{
         .{ .d = 2688, .rows = 1, .used = 44, .out_f32 = true },

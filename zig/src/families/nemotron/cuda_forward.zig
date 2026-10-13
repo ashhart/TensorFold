@@ -254,7 +254,6 @@ pub const Forward = struct {
 
     /// The pocket over the rows of sequences that read what was learned: every row, or the runs between untaught ones'.
     fn pocket(f: *const Forward, o: kern.Ops, p: weights.Pocket, d: usize, y_f32: bool, rows: usize) !void {
-        if (p.used == 0) return;
         if (!f.untaught) return f.pocketRun(o, p, d, y_f32, .{ 0, rows });
         var runs: lesson_route.Runs = .{};
         for (f.segs) |s| if (runs.next(s.rows, s.untaught)) |r| try f.pocketRun(o, p, d, y_f32, r);
