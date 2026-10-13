@@ -136,7 +136,9 @@ fn recapture(e: *engine.Engine) !void {
     const was = e.bound;
     const sampling = e.sampling;
     if (was != &e.own) e.bind(&e.own);
+    const own = e.sampling;
     defer {
+        e.sampling = own; // bind keeps the own sequence's rule, not the captures' placeholder
         if (was != &e.own) e.bind(was);
         e.sampling = sampling;
     }
