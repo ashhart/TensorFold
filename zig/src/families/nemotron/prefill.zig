@@ -274,6 +274,7 @@ pub const Prefill = struct {
     /// One prompt chunk of `rows` ids at `ids` + `ids_off`: the caches advance, the final-normed rows land in s.x.
     pub fn chunk(self: *const Prefill, e: *fwd.Enc, f: fwd.Forward, cache: *st.Cache, ids: Buffer, ids_off: usize, rows: usize, fresh: u32) void {
         var g = f;
+        g.untaught = cache.untaught;
         if (g.route.count == 0) g.route.add(0, rows, cache.len, if (cache.rid >= 0) cache.decide else lesson_route.none, @intCast(@max(cache.rid, 0)));
         const lessons = layers.firstAdapter(g.w);
         if (lessons) |ad| layers.latchAll(g.k, e, ad, &g.route, false);

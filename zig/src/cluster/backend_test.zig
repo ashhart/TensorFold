@@ -236,3 +236,32 @@ test "every expert split by its intermediate columns: the same bits at 1, 2, 3 a
     try std.testing.expectEqualSlices(u32, solo[0], four[0]);
     try std.testing.expectEqualSlices(u32, plain[0], four[0]);
 }
+
+test "a draw refuses a row holding a NaN or an infinity, greedy or sampled; finite extremes draw as before" {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const w = try toy.Weights.init(arena.allocator(), .{}, 1);
+    const c = try Cluster.init(gpa, &w, 1, .{});
+    defer c.deinit();
+    const l = &c.leader;
+    const row = try gpa.alloc(f32, 2048);
+    defer gpa.free(row);
+    for ([_]f32{ std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32) }) |bad| for ([_]?Sampling{ hot, null }) |s| {
+        for (row, 0..) |*x, i| x.* = if (i % 2 == 1) bad else @floatFromInt(i % 7);
+        try std.testing.expectError(error.NonfiniteLogits, l.draw(row, s, 0));
+        for ([_]usize{ 0, row.len - 1 }) |at| {
+            @memset(row, 1);
+            row[at] = bad;
+            try std.testing.expectError(error.NonfiniteLogits, l.draw(row, s, 0));
+        }
+    };
+    const max = std.math.floatMax(f32);
+    const kept = [_]f32{ -max, std.math.floatTrueMin(f32), max, -0.0, max };
+    var values: [kept.len]f64 = undefined;
+    for (&values, kept) |*v, x| v.* = x;
+    const ids = [_]u64{ 0, 1, 2, 3, 4 };
+    for (0..16) |position| {
+        try std.testing.expectEqual(2, try l.draw(&kept, null, position));
+        try std.testing.expectEqual(try lanes.sampling.choose(gpa, &values, &ids, position, hot), try l.draw(&kept, hot, position));
+    }
+}

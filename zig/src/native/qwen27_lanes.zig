@@ -11,6 +11,7 @@ const slots = @import("qwen27_slots.zig");
 const Round = q.round_plan.Round;
 const Tree = q.dflash.selector.Tree;
 const Ring = q.tap_ring.Ring;
+const Landing = @import("qwen27_landing.zig").Landing;
 const contract = tf.tree_round;
 
 /// A window's rows at most: the pending row and a DFlash2 tree.
@@ -23,10 +24,10 @@ pub const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 /// Called before a finished stream leaves its slot, its state still standing there (the reply's prompt-cache keep).
 pub const Release = struct { ctx: *anyopaque, kept: *const fn (ctx: *anyopaque, s: *lanes.Stream, slot: u32) void };
 
-/// A slot's memory on its first use: `room` says whether `bytes` more fit, `added` takes the new buffers.
+/// A slot's memory on first use: `room` says whether `bytes` more fit for stream `s`, `added` takes the new buffers.
 pub const Grow = struct {
     ctx: *anyopaque,
-    room: *const fn (ctx: *anyopaque, bytes: usize) bool,
+    room: *const fn (ctx: *anyopaque, bytes: usize, s: *const lanes.Stream) bool,
     added: *const fn (ctx: *anyopaque, buffers: []const mtl.Buffer) void,
 };
 
@@ -65,7 +66,7 @@ pub const Metal = struct {
     timed: usize = 0,
     from_tree: usize = 0, // the last window's drafts that were the held tree's first nodes
     sampled: [max_rows]u32 = undefined, // the last lone window's draws
-    landing: [16][2]f64 = @splat(.{ 0, 0 }), // by a node's own log-probability bucket: offered with its parent kept, landed
+    landing: Landing = .{}, // drafted nodes offered with their parent kept, and landed, by own log-probability
 
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
         if (runner.slots == 0 or runner.slots > 8 or runner.model.frame.capacity < batch_rows) return error.TargetBinding;
@@ -113,6 +114,7 @@ pub const Metal = struct {
     const ringChunk = slots.ringChunk;
     const unbind = slots.unbind;
     const ready = slots.ready;
+    const refill = slots.refill;
 
     pub fn backend(b: *Metal) be.Backend {
         return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .probabilities = probabilitiesFn, .tree = treeFn, .release = releaseFn } };
@@ -142,15 +144,6 @@ pub const Metal = struct {
         return .{ .buf = r.buf, .end = &r.end, .window = g.window, .stride = g.stride };
     }
 
-    /// Take the stream whose prompt another driver prefilled into slot 0 (the serial host).
-    pub fn attach(b: *Metal, s: *lanes.Stream) !void {
-        if (b.owners[0] != null) return error.StreamBusy;
-        if (b.runner.offsets[0] != s.prompt_len) return error.CachePositionDiffers;
-        b.dropRound();
-        b.dropTree();
-        b.owners[0] = s;
-    }
-
     /// Each window width's ms (verify, draws, keep) on a scratch context in slot 0; resets it. Kept per build.
     pub fn measure(b: *Metal, io: std.Io) !void {
         const r = b.runner;
@@ -164,17 +157,18 @@ pub const Metal = struct {
             b.timed = max_rows;
             return;
         };
-        if (b.draft) |d| try d.reset() else try r.reset(0);
+        if (r.capacity <= max_rows) return error.ContextFull;
         defer {
             if (b.draft) |d| d.reset() catch {} else r.reset(0) catch {};
         }
         var ids: [192]u32 = undefined;
         for (&ids, 0..) |*t, i| t.* = @intCast((i * 7919 + 13) % r.model.config.vocab);
-        if (b.draft) |d| try d.generation.prefill(&ids, 128) else try (q.session.Session{ .runner = r }).prefill(&ids, 128);
-        var s = try lanes.Stream.init(b.gpa, .{ .id = "timing", .prompt = &ids, .max_new = 1 });
+        const prompt = ids[0..@min(ids.len, r.capacity - max_rows)]; // a small --context still holds a window past it
+        try b.refill(prompt);
+        var s = try lanes.Stream.init(b.gpa, .{ .id = "timing", .prompt = prompt, .max_new = 1 });
         defer s.deinit(b.gpa);
-        const timer: WindowTimer = .{ .b = b, .s = &s };
-        for (0..5) |_| _ = try b.timeWindow(&s, max_rows); // the widest window first, while the GPU's clocks ramp up
+        const timer: WindowTimer = .{ .b = b, .s = &s, .prompt = prompt };
+        for (0..5) |_| _ = try timer.time(max_rows - 1); // the widest window first, while the GPU's clocks ramp up
         var ms: [max_rows]f64 = undefined;
         for (&ms, 0..) |*m, i| m.* = try lanes.cost_rule.fastest(timer, i);
         try lanes.cost_rule.smooth(timer, &ms);
@@ -186,11 +180,13 @@ pub const Metal = struct {
         lanes.cost_cache.save([max_rows]f64, b.gpa, io, ref, ms);
     }
 
-    /// Window entry `i` is `i + 1` rows, timed once.
+    /// Window entry `i` is `i + 1` rows, timed once; each keeps a row, so a full slot is refilled first.
     const WindowTimer = struct {
         b: *Metal,
         s: *lanes.Stream,
+        prompt: []const u32,
         pub fn time(t: WindowTimer, i: usize) !f64 {
+            if (t.b.runner.offsets[0] + i + 1 > t.b.runner.capacity) try t.b.refill(t.prompt);
             return t.b.timeWindow(t.s, i + 1);
         }
     };
@@ -267,7 +263,7 @@ pub const Metal = struct {
         e.end();
         cb.commit();
         cb.wait();
-        if (cb.failure() != null) return error.DrawGpuFailure;
+        if (q.decode_round.gpuFailed(cb, "a draw")) return error.DrawGpuFailure;
         const picks: [*]const contract.Pick = @ptrCast(@alignCast(b.picks.contents()));
         for (out[0..rows], picks[0..rows]) |*t, p| {
             if (p.token == contract.invalid_token or p.nonfinite != 0) return error.NonfiniteLogits;
@@ -317,7 +313,7 @@ pub const Metal = struct {
         e.end();
         cb.commit();
         cb.wait();
-        if (cb.failure() != null) return error.DraftTapGpuFailure;
+        if (q.decode_round.gpuFailed(cb, "a taps gather")) return error.DraftTapGpuFailure;
         var at: usize = 0;
         for (paths, b.windows[0..b.count]) |path, slot| {
             const g = b.ringOf(slot).?;
@@ -352,7 +348,7 @@ pub const Metal = struct {
         ended = true;
         cb.commit();
         cb.wait();
-        if (cb.failure() != null) {
+        if (q.decode_round.gpuFailed(cb, "slot 0's keep")) {
             r.failed = true;
             return error.KeepGpuFailure;
         }
@@ -378,7 +374,7 @@ pub const Metal = struct {
         b.settle() catch {};
         b.dropRound();
         const slot = b.slotOf(s) orelse (b.freeSlot() orelse return error.NoFreeSlot);
-        try b.ready(slot);
+        try b.ready(slot, s);
         if (slot == 0) b.dropTree();
         b.owners[slot] = s;
         errdefer b.owners[slot] = null;
@@ -479,22 +475,17 @@ pub const Metal = struct {
         return t.scores[i] - (if (parent >= 0) t.scores[@intCast(parent)] else 0);
     }
 
-    fn bucket(own: f64) usize {
-        return @min(15, @as(usize, @intFromFloat(@max(0, @floor(-own / 0.5)))));
-    }
-
     /// Count every proposed node whose parent row was kept, and those the target drew, by own log-probability.
     fn observe(b: *Metal, path: []const u32) void {
         const t = b.tree orelse return;
         if (b.from_tree == 0) return;
+        const keyed = if (b.owners[0]) |s| s.sampling != null else true;
         var kept: [max_rows]bool = @splat(false);
         for (path) |r| kept[r] = true;
         for (t.tokens, t.parents, 0..) |token, parent, i| {
             const parent_row: usize = @intCast(parent + 1);
             if (parent_row > b.from_tree or !kept[parent_row]) continue;
-            const x = &b.landing[bucket(local(t, i))];
-            x[0] += 1;
-            if (token == b.sampled[parent_row]) x[1] += 1;
+            b.landing.observe(keyed, local(t, i), token == b.sampled[parent_row]);
         }
     }
 
@@ -557,7 +548,7 @@ pub const Metal = struct {
         e.end();
         cb.commit();
         cb.wait();
-        if (cb.failure() != null) return error.DraftTapGpuFailure;
+        if (q.decode_round.gpuFailed(cb, "a taps gather")) return error.DraftTapGpuFailure;
         try d.generation.draft.absorb(.{ .buf = b.gathered_taps.? }, @intCast(path.len));
         b.early = path.len;
     }
@@ -569,9 +560,7 @@ pub const Metal = struct {
         const t = b.tree orelse return false;
         if (out.len > t.scores.len) return false;
         for (out, t.parents[0..out.len], 0..) |*p, parent, i| {
-            const own = local(t, i);
-            const x = b.landing[bucket(own)];
-            p.* = (x[1] + 2 * @exp(own)) / (x[0] + 2) * (if (parent >= 0) out[@intCast(parent)] else 1);
+            p.* = b.landing.chance(s.sampling != null, local(t, i)) * (if (parent >= 0) out[@intCast(parent)] else 1);
         }
         return true;
     }

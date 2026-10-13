@@ -112,44 +112,50 @@ pub const Backend = struct {
         b.attention.deinit();
         b.primitives.deinit();
     }
+    /// Each linear's q4 copy (M5 lane adapters, else simdgroup-matrix tiles), keyed by the address its graph view carries.
     pub fn prepare(b: *Backend) !void {
-        if (!b.target.device.tensorUnits()) return b.prepareTiled();
-        const order = try core.lane_projection.RegOrder.init(b.target.device);
-        defer order.deinit();
-        var iterator = b.checkpoint.tensors.iterator();
-        while (iterator.next()) |entry| {
-            const tensor = entry.value_ptr.*;
-            if (tensor.rank != 2 or !std.mem.endsWith(u8, entry.key_ptr.*, ".weight")) continue;
-            if (tensor.dtype != .bf16 or tensor.shape[0] % 32 != 0 or tensor.shape[1] % 64 != 0) return error.DraftPreparationUnqualified;
-            var prepared_words = try core.affine4.prepare(b.allocator, tensor.host(u16), tensor.shape[0], tensor.shape[1]);
-            defer prepared_words.deinit();
-            const sk = try @import("../projection.zig").split(tensor.shape[0], tensor.shape[1]);
-            const adapter = try core.affine4_lane.Adapter.init(b.allocator, b.target.device, prepared_words, sk, order);
-            const key = @intFromPtr(tensor.buffer.contents() + tensor.offset);
+        const units = b.target.device.tensorUnits();
+        const order = if (units) try core.lane_projection.RegOrder.init(b.target.device) else null;
+        defer if (order) |o| o.deinit();
+        if (!units) b.simd = try simd.Pipelines.load(b.target.device);
+        var rows: std.ArrayList(u16) = .empty;
+        defer rows.deinit(b.allocator);
+        var kept = b.checkpoint.tensors.iterator();
+        while (kept.next()) |entry| if (linear(entry.key_ptr.*, entry.value_ptr.rank)) {
+            const t = entry.value_ptr.*;
+            try b.prepareOne(order, @intFromPtr(t.buffer.contents() + t.offset), t.dtype, t.shape, t.host(u16));
+        };
+        var later = b.checkpoint.deferred.iterator();
+        while (later.next()) |entry| if (linear(entry.key_ptr.*, entry.value_ptr.rank)) {
+            const d = entry.value_ptr.*;
+            try rows.resize(b.allocator, d.bytes / 2);
+            try b.checkpoint.read(entry.key_ptr.*, 0, std.mem.sliceAsBytes(rows.items));
+            try b.prepareOne(order, @intFromPtr((try b.checkpoint.view(entry.key_ptr.*)).ptr), d.dtype, d.shape, rows.items);
+        };
+        if ((if (units) b.prepared.count() else b.tiled.count()) != b.config.linearCount()) return error.DraftTensorCoverage;
+    }
+    /// One bf16 [n][k] linear's q4 copy under `key`: an M5 lane adapter, or (no `order`) the same bits on tiles.
+    fn prepareOne(b: *Backend, order: ?core.lane_projection.RegOrder, key: usize, dtype: core.checkpoint_metal.DType, shape: @FieldType(core.checkpoint_metal.Tensor, "shape"), rows: []const u16) !void {
+        if (dtype != .bf16 or shape[0] % 32 != 0 or shape[1] % 64 != 0) return error.DraftPreparationUnqualified;
+        var prepared_words = try core.affine4.prepare(b.allocator, rows, shape[0], shape[1]);
+        defer prepared_words.deinit();
+        if (order) |o| {
+            const adapter = try core.affine4_lane.Adapter.init(b.allocator, b.target.device, prepared_words, try @import("../projection.zig").split(shape[0], shape[1]), o);
             b.prepared.put(b.allocator, key, adapter) catch |err| {
                 adapter.deinit();
                 return err;
             };
-        }
-        if (b.prepared.count() != b.config.linearCount()) return error.DraftTensorCoverage;
-    }
-    /// The same q4 words, scales and biases as the M5 path, on simdgroup-matrix tiles (every width the tiles' bits).
-    fn prepareTiled(b: *Backend) !void {
-        b.simd = try simd.Pipelines.load(b.target.device);
-        var iterator = b.checkpoint.tensors.iterator();
-        while (iterator.next()) |entry| {
-            const tensor = entry.value_ptr.*;
-            if (tensor.rank != 2 or !std.mem.endsWith(u8, entry.key_ptr.*, ".weight")) continue;
-            if (tensor.dtype != .bf16 or tensor.shape[0] % 32 != 0 or tensor.shape[1] % 64 != 0) return error.DraftPreparationUnqualified;
-            var prepared_words = try core.affine4.prepare(b.allocator, tensor.host(u16), tensor.shape[0], tensor.shape[1]);
-            defer prepared_words.deinit();
+        } else {
             const t = try Tiled.init(b.target.device, prepared_words);
-            b.tiled.put(b.allocator, @intFromPtr(tensor.buffer.contents() + tensor.offset), t) catch |err| {
+            b.tiled.put(b.allocator, key, t) catch |err| {
                 t.deinit();
                 return err;
             };
         }
-        if (b.tiled.count() != b.config.linearCount()) return error.DraftTensorCoverage;
+    }
+    /// The draft's linears: its rank-2 weights, which q4 drafts read only through their prepared copies.
+    pub fn linear(name: []const u8, rank: usize) bool {
+        return rank == 2 and std.mem.endsWith(u8, name, ".weight");
     }
     pub fn ops(b: *Backend) op.Ops {
         return .{ .ptr = b, .vtable = &callbacks.vtable };
@@ -157,9 +163,13 @@ pub const Backend = struct {
     pub fn source(b: *Backend) ck.Source {
         return .{ .ptr = b, .getFn = get };
     }
+    /// A tensor's host view; a deferred linear's view only names it (its key), its bytes read once by prepare.
     fn get(ptr: *anyopaque, name: []const u8) !ck.Tensor {
         const b: *Backend = @ptrCast(@alignCast(ptr));
-        return cpu(try b.checkpoint.get(name));
+        const d = b.checkpoint.deferred.get(name) orelse return cpu(try b.checkpoint.get(name));
+        var shape: @FieldType(ck.Tensor, "shape") = @splat(1);
+        @memcpy(shape[0..d.rank], d.shape[0..d.rank]);
+        return .{ .dtype = d.dtype, .rank = @intCast(d.rank), .shape = shape, .bytes = try b.checkpoint.view(name) };
     }
     pub fn cpu(t: core.checkpoint_metal.Tensor) ck.Tensor {
         var shape: @FieldType(ck.Tensor, "shape") = @splat(1);

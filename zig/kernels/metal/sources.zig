@@ -9,6 +9,18 @@ pub const qwen35_layout = @embedFile("qwen3_5/layout.metal");
 /// Our glue kernels around them: embedding, MLX's RMS arithmetic, argmax, layout moves.
 pub const nemotron_glue = @embedFile("nemotron_glue.metal");
 pub const core_row_projection = @embedFile("core/row_projection.metal");
+pub const core_exl3_projection = @embedFile("core/exl3_projection.metal");
+pub const core_exlr8_projection = @embedFile("core/exlr8_projection.metal");
+pub const core_exlr8_dense = @embedFile("core/exlr8_dense.metal");
+pub const core_exlr8_prompt = @embedFile("core/exlr8_prompt.metal");
+pub const core_exlr8_dense_prompt = @embedFile("core/exlr8_dense_prompt.metal");
+pub const core_pair = @embedFile("core/pair.metal");
+
+/// GLM-5.3 (glm_moe_dsa): MLA with rope over a bf16 latent cache, the DSA indexer and its top-k, fp32 glue.
+pub const glm_dsa_mla = @embedFile("glm_dsa/mla.metal");
+pub const glm_dsa_index = @embedFile("glm_dsa/index.metal");
+pub const glm_dsa_glue = @embedFile("glm_dsa/glue.metal");
+pub const glm_dsa_moe_jobs = @embedFile("glm_dsa/moe_jobs.metal");
 pub const core_grammar_mask = @embedFile("core/grammar_mask.metal");
 
 /// Routed experts with an expert's member rows two or four at a time (each row's sums unchanged).

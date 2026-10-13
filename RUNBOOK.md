@@ -19,7 +19,7 @@ For an archive installation, download the arm64 asset and its companion checksum
 [latest release](https://github.com/ashhart/TensorFold/releases/latest), with `V` set to its version:
 
 ```sh
-V=1.0.7
+V=1.0.8
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz.sha256
 shasum -a 256 -c tensorfold-$V-macos-arm64.tar.gz.sha256
@@ -33,6 +33,40 @@ The archive targets Apple Silicon with M1 CPU instructions and a macOS 13 ABI mi
 Metal comes from macOS; a prebuilt binary needs no Python, MLX or Xcode installation.
 Keep the archive's `bin`, `lib` and any `share` directories together when relocating it.
 The commands below use `bin/tensorfold-native`; a Homebrew installation can use `tensorfold` instead.
+
+## Standalone Metal EXL3 projections
+
+With the Zig version from `.zig-version` and Xcode's Metal toolchain:
+
+```sh
+zig build tf-exl3-bench test-exl3 test-exl3-gpu -Dcpu=apple_m1
+./zig-out/bin/tf-exl3-bench --help
+./zig-out/bin/tf-exl3-bench --qualify-only 1 --warmup 0 --repeats 1
+./zig-out/bin/tf-exl3-bench --warmup 1 --repeats 3 --prefill 32
+```
+
+These commands use deterministic compressed fixtures, not a checkpoint.
+Compact 256-by-128 fixtures check all nine rows and every output column for
+27 width/codebook combinations in BF16 and F32. Larger shapes check every
+candidate output bit against the arithmetic decoder, but the independent FP64
+oracle samples at most two rows and three 128-column blocks. Its worst-column
+metrics are explicitly labelled `worst_sampled`; they are not whole-matrix bounds.
+
+The borrowed-buffer API in `zig/src/core/exl3_projection.zig` encodes BF16
+inputs, FP16-rounded rotated inputs, compensated FP32 projection dots and BF16
+or F32 outputs. Scratch holds row intermediates, never a dequantized matrix.
+All buffers and pipelines must survive command completion. GPU-produced IDs
+must be in bounds, scatter destinations unique, and grouped padding must follow
+valid rows. Indexed descriptors share dimensions and require valid resident
+weights disjoint from writable views; use `useMatrix` or caller residency sets.
+The operator validates storage extents, offsets, strides, capacities and aliases,
+but does not read back GPU IDs or plan expert groups.
+
+On an M3 Ultra running macOS 26.6.2, the 82 exercised operator cases had zero
+candidate/baseline bit mismatches and identical independent-oracle errors.
+Timings alternate dispatch order and exclude oracle work and allocations.
+This is operator evidence only: no model loader, family registration, CUDA
+implementation, whole-model fidelity or served-throughput claim is added.
 
 ## First server and request
 
@@ -69,7 +103,7 @@ capability 12.0, `linux-x86_64`).
 On a GB10 arm64 host (an x86_64 host uses `linux-x86_64` in the same commands):
 
 ```sh
-V=1.0.7
+V=1.0.8
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz.sha256
 sha256sum -c tensorfold-$V-linux-aarch64.tar.gz.sha256
@@ -91,9 +125,11 @@ A sampled request honours its `seed`, `top_k: 0` turns the top-k filter off, and
 pinned host memory.
 A request that names no `top_k`, on a checkpoint whose generation config names none, samples with no top-k filter on
 CUDA and Metal alike, so a seeded request draws the same on both. `--top-k 20` gives 0.6.6's CUDA default.
-A conversation's next turn resumes from a prompt state kept at a 2,048-token chunk boundary, so a reply equals the same
+A conversation's next turn resumes from a prompt state kept where its last turn's history ended, so a reply equals the same
 request with the cache off. `--prompt-cache-gib` sizes the kept states (16 GiB by default, inside the memory budget) and 0 turns
-them off; prompts shorter than 4,096 tokens keep none.
+them off. A state kept inside a prompt chunk costs no extra prompt call. A Nemotron 3.5 Lightning state takes 48 MiB plus
+7 KiB a prompt token, in whole 2 MiB pages (62 MiB at 2,048 tokens), and the cache keeps four 48 MiB buffers of its
+budget free for the next states.
 `TF_HEAT_HIGH` and `TF_HEAT_LOW`, in degrees Celsius and set together, make each prompt chunk wait while the hottest
 thermal zone (under `/sys/class/thermal`, or `TF_HEAT_ROOT`) is above the high band, until it is at or under the low one.
 The server logs `heat_wait_s`, a cancel ends the wait, and the reply's tokens do not change.
@@ -134,9 +170,8 @@ Run each command on its own Mac and send requests to rank 0.
 Run the same release on both Macs: the pair now agrees on learned-state disk space before either Mac writes, and each Mac refuses a peer from an earlier release.
 With `--learn`, states learned by an earlier release are refused when read and learned again.
 Each settings file names `rank`, `library` and `links`; each link names its peer, RDMA device, interface/address, ports and link name.
-[Speed-up settings](docs/speed-up-mode.md#5-write-the-settings-files) has the schema and link setup.
-The recording command in that guide is the setup its two-Mac Flash Next numbers were measured with; on one Mac, ordinary
-loading uses the direct-checkpoint command above.
+[Speed-up settings](docs/speed-up-mode.md#4-write-the-settings-files) has the schema and link setup.
+That guide's two-Mac Flash Next commands load the checkpoint directly, as one Mac does.
 
 On one Mac, GLM loads only when its weights and caches fit in 70% of RAM, 179.2 GB on a 256 GB Mac, and leaves the MTP head on disk when only the head is over.
 `GLM_LOAD_LIMIT_GB=N` sets that limit in GB, up to the GPU's recommended working set; a value that isn't a number above 0 stops the server.
