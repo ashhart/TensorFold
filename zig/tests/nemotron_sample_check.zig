@@ -67,12 +67,12 @@ fn dispatch(queue: mtl.Queue, p: mtl.Pipeline, logits: mtl.Buffer, s: Sampling, 
     var positions: [rows]u32 = undefined;
     var cfgs: [4 * rows]f32 = undefined;
     var caps: [rows]u32 = undefined;
+    const rule = tf.lanes.gpu_rule.rule(s);
     for (0..rows) |r| {
-        seeds[2 * r] = @truncate(s.seed);
-        seeds[2 * r + 1] = @truncate(s.seed >> 32);
+        seeds[2 * r ..][0..2].* = rule.seedHalves();
         positions[r] = position + @as(u32, @intCast(r));
-        cfgs[4 * r ..][0..4].* = .{ @floatCast(1.0 / @max(s.temperature, 1e-6)), @floatCast(s.top_p), 20.0, @floatCast(s.minLog()) };
-        caps[r] = s.top_k;
+        cfgs[4 * r ..][0..4].* = rule.cfg();
+        caps[r] = rule.top_k;
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();

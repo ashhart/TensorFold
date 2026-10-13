@@ -131,6 +131,12 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSE
 WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+## Cortheon
+
+`--cortheon` (`zig/src/server/cortheon/`) adapts [Cortheon](https://github.com/ashhart/Cortheon)'s task-classification word lists,
+its stage sequences and their purposes, its rules for when a task needs outside sources, and its instruction-filter patterns,
+rewritten in Zig. MIT License, Copyright (c) 2026 Cortheon contributors; the license text is below.
+
 ## MIT License text
 
 Permission is hereby granted, free of charge, to any person obtaining a copy

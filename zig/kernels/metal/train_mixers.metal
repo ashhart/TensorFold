@@ -98,6 +98,7 @@ kernel void tf_train_ssm_fwd(const device bfloat* act [[buffer(0)]],
 }
 
 // One head's scan backward (dx into dact, dB and dC partials, ddt), each row's states recomputed from its checkpoint.
+[[max_total_threads_per_threadgroup(1024)]]
 kernel void tf_train_ssm_back(const device bfloat* act [[buffer(0)]],
                               const device float* dt [[buffer(1)]],
                               const device float* a_neg [[buffer(2)]],

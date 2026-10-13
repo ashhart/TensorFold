@@ -5,6 +5,7 @@ const dist_build = @import("zig/build/dist.zig");
 const qwen27_build = @import("zig/build/qwen27.zig");
 const hip_build = @import("zig/build/hip.zig");
 const grammar_build = @import("zig/build/grammar.zig");
+const counters_build = @import("zig/build/metal_counters.zig");
 const exl3_build = @import("zig/build/exl3.zig");
 const exlr8_build = @import("zig/build/exlr8.zig");
 
@@ -276,6 +277,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const mods = metalEngineModules(b, target, optimize, draft_ids);
     const metal = mods.metal;
     const kernels_mod = embedded(b, lib, "tensorfold.metallib");
+    counters_build.targets(b, target, optimize, metal, mods.sources, test_step);
 
     // The engines registry: the families this platform's binaries serve; the CLI reads it for models/info/pull.
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
@@ -458,11 +460,11 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     exlr8_build.metalTargets(b, target, optimize, metal, mods.sources, test_step);
     exlr8_build.glmTargets(b, target, optimize, metal, mods.engine);
 
-    // The checkpoint CLI: models, info and pull, against a synthetic cache and a fake hub.
+    // The checkpoint CLI: models, info and pull, against a synthetic cache and a fake hub, at ReleaseSafe as it ships.
     const cli_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/cli/tests.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = .ReleaseSafe,
         .link_libc = true,
         .imports = &.{ .{ .name = "native_engines", .module = engines }, exlr8_build.cliImport(b, target, optimize, mods.engine) },
     }) });

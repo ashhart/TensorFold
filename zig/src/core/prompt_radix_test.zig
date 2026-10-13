@@ -279,3 +279,32 @@ test "reclaim frees the pages of the least valuable leaf nobody holds, and spare
     try std.testing.expectEqual(@as(usize, 0), s.tree.held_pages);
     try std.testing.expectEqual(@as(usize, 0), f.live);
 }
+
+test "a history every turn resumes again after one kept a longer state is a branch point: its turns never supersede it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = std.testing.allocator };
+    var s = try newStore(&f, rules);
+    defer s.deinit();
+    s.limit(.{ .pages = 40, .snaps = 3 });
+    var mine: std.ArrayList(u32) = .empty;
+    const history = seq(24, 0); // history 20
+    _ = try pass(&f, &s, a, &history, 20, &.{}, &mine);
+    f.leave(mine.items);
+    var turn = seq(32, 0);
+    for (1..3) |k| { // two turns on that history, each keeping its own state at 28
+        for (turn[20..], 0..) |*t, i| t.* = @intCast(100 * k + i);
+        try std.testing.expectEqual(@as(u32, 20), (try pass(&f, &s, a, &turn, 28, &.{}, &mine)).from);
+        f.leave(mine.items);
+    }
+    try std.testing.expectEqual(@as(usize, 3), s.tree.snaps);
+    const other = seq(24, 500); // another prompt: three states hold no fourth, and the first turn's goes
+    _ = try pass(&f, &s, a, &other, 20, &.{}, &mine);
+    f.leave(mine.items);
+    try std.testing.expectEqual(@as(u64, 1), s.tree.counts.evicted);
+    for (turn[20..], 0..) |*t, i| t.* = @intCast(300 + i); // the next turn still resumes the history
+    try std.testing.expectEqual(@as(u32, 20), (try pass(&f, &s, a, &turn, 28, &.{}, &mine)).from);
+    f.leave(mine.items);
+    try std.testing.expectEqual(s.tree.snaps, f.live);
+}

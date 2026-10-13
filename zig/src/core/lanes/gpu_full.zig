@@ -60,7 +60,8 @@ fn markOf(c: rule.Cand) Mark {
 
 /// The kept set for `logits` under `s`, found as tf_sample_full finds it.
 pub fn plan(gpa: Allocator, logits: []const f32, s: Sampling) !Plan {
-    const inv_t: f32 = @floatCast(1.0 / @max(s.temperature, 1e-6));
+    const r = rule.rule(s);
+    const inv_t = r.inv_t;
     const order = try gpa.alloc(rule.Cand, logits.len);
     defer gpa.free(order);
     var m = -std.math.inf(f32);
@@ -69,10 +70,10 @@ pub fn plan(gpa: Allocator, logits: []const f32, s: Sampling) !Plan {
         m = @max(m, c.v);
     }
     std.mem.sort(rule.Cand, order, {}, rule.better);
-    const min_log: f32 = @floatCast(s.minLog());
+    const min_log = r.min_log;
     var p = Plan{ .inv_t = inv_t, .m = m, .lo = @max(m + min_log, m - never) };
     if (s.top_k != 0 and s.top_k < logits.len) p.top = markOf(order[s.top_k - 1]);
-    const top_p: f32 = @floatCast(s.top_p);
+    const top_p = r.top_p;
     if (top_p > 0.0 and top_p < 1.0) p.cut = nucleus(logits, p, order, top_p);
     return p;
 }

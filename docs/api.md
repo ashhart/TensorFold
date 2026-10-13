@@ -187,13 +187,15 @@ integers, numbers and nulls, streamed or not. Strings preserve text and whitespa
 remain strings for the client to validate. Union types and schema references are not resolved by this conversion.
 
 A reply that is not a call returns as content, never an error: prose, JSON that names no offered tool
-(a structured answer), and malformed tool blocks, which keep their text. A well-formed call to a tool the
+(a structured answer), and malformed tool blocks, which keep their text. A GLM argument key written without its
+`<arg_key>` gets that tag back, and the call parses. A well-formed call to a tool the
 request did not offer is returned as a tool call under its valid name, so the client can report the unknown
 tool and the model can correct itself.
 
 When a model end token arrives inside a whole tool call before its closing markup, the server closes the
-markup and returns the call. A partial value, missing key value, empty block, or unoffered call that cannot
-parse as one complete call remains content.
+markup and returns the call. A GLM value the end token cut off is closed with `</arg_value>` first, and the call
+returns when it then parses strictly. Any other partial value, a missing key value, an empty block, or an unoffered
+call that cannot parse as one complete call remains content.
 
 With `parallel_tool_calls: false`, the server buffers tool deltas until it can return the first valid
 completed call. Prose and reasoning can still stream. Usage counts the entire decoded reply, including
@@ -436,9 +438,13 @@ prompt cache resumes the shared prefix as it does for chat. `store: false` keeps
 response.
 
 HTTP 400 refuses what this server does not run: built-in tools (web search, file search, computer use and the
-others), `background`, `include` (encrypted reasoning among them), `conversation`, `prompt` templates,
-`truncation: "auto"`, `top_logprobs`, `input_file` parts and file IDs, `item_reference` items, encrypted reasoning
-items, and a `previous_response_id` that is not stored.
+others), `background`, `conversation`, `prompt` templates, `truncation: "auto"`, `top_logprobs`, `input_file` parts
+and file IDs, `item_reference` items, encrypted reasoning items, and a `previous_response_id` that is not stored.
+`include` takes a list of OpenAI's names, which the server accepts and ignores (it has nothing to add for them):
+`code_interpreter_call.outputs`, `computer_call_output.output.image_url`, `file_search_call.results`,
+`message.input_image.image_url`, `message.output_text.logprobs`, `reasoning.encrypted_content`,
+`web_search_call.action.sources` and `web_search_call.results`. Any other name, or a value that is not a list of
+strings, is refused.
 
 ## Anthropic Messages
 
