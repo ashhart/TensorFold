@@ -96,10 +96,12 @@ inline void tf_exlr8_job(const device float* X, const device uchar* W, const dev
   // Each tile's words load a tile ahead of its decode.
   const device uchar* run = W + bases[j.base];
   uint3 next = tf_exlr8_words<K>(reinterpret_cast<const device uint*>(run + sg * TB), lane);
+  // Alternating tiles let the next block barrier protect a tile before reuse two blocks later.
   for (uint ib = 0; ib < j.blocks; ++ib) {
+    threadgroup float* tile = xs + (ib & 1) * R * 128;
     for (uint i = tid; i < R * 128; i += 256) {
       const uint rr = i / 128;
-      xs[i] = rr < rows ? X[ulong(j.count ? members[j.members + rr] >> 16 : rr) * a.x_stride + j.x_col + ib * 128 + i % 128] : 0.0f;
+      tile[i] = rr < rows ? X[ulong(j.count ? members[j.members + rr] >> 16 : rr) * a.x_stride + j.x_col + ib * 128 + i % 128] : 0.0f;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint i = 0; i < R; ++i) part[0][i] = part[1][i] = 0.0f;
@@ -110,7 +112,7 @@ inline void tf_exlr8_job(const device float* X, const device uchar* W, const dev
       half w[8];
       tf_exlr8_unpack<K>(now, lane, w);
       for (uint i = 0; i < R; ++i) {
-        const threadgroup float* x = xs + i * 128 + 16 * r + r0;
+        const threadgroup float* x = tile + i * 128 + 16 * r + r0;
         const float2 lo = *reinterpret_cast<const threadgroup float2*>(x);
         const float2 hi = *reinterpret_cast<const threadgroup float2*>(x + 8);
         part[0][i] = fma(float(w[3]), hi.y, fma(float(w[2]), hi.x, fma(float(w[1]), lo.y, fma(float(w[0]), lo.x, part[0][i]))));
@@ -124,7 +126,6 @@ inline void tf_exlr8_job(const device float* X, const device uchar* W, const dev
       total[0][i] = fma(s, part[0][i], total[0][i]);
       total[1][i] = fma(s, part[1][i], total[1][i]);
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
   }
   for (uint i = 0; i < R; ++i) {
     for (uint c = 0; c < 2; ++c) {
@@ -237,7 +238,7 @@ inline void tf_exlr8_split(const device float* X, const device uchar* W, const d
   }
 }
 
-// One kernel a row capacity R (1, 2, 4, 8, 16): the accumulators stay in registers; a row's sums never depend on R.
+// Each row capacity reuses the inactive input tile for final sums, protected by the last block barrier.
 #define TF_EXLR8_PROJECT(R)                                                                                          \
   kernel void tf_exlr8_project_##R(const device float* X [[buffer(0)]], const device uchar* W [[buffer(1)]],         \
                                    const device ulong* bases [[buffer(2)]], const device half* halves [[buffer(3)]], \
@@ -246,8 +247,9 @@ inline void tf_exlr8_split(const device float* X, const device uchar* W, const d
                                    const device uint* members [[buffer(8)]],                                         \
                                    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], \
                                    uint tid [[thread_index_in_threadgroup]], uint job [[threadgroup_position_in_grid]]) { \
-    threadgroup float xs[R * 128], zs[R * 128];                                                                     \
-    const TfExlr8Job j = jobs[job];                                                                                  \
+    threadgroup float xs[2 * R * 128];                                                                            \
+    const TfExlr8Job j = jobs[job];                                                                               \
+    threadgroup float* zs = xs + (j.blocks & 1) * R * 128;                                                        \
     switch (j.k) {                                                                                                   \
       case 2: tf_exlr8_job<2, R>(X, W, bases, halves, signs, a, j, Y, members, sg, lane, tid, xs, zs); break;       \
       case 3: tf_exlr8_job<3, R>(X, W, bases, halves, signs, a, j, Y, members, sg, lane, tid, xs, zs); break;       \
