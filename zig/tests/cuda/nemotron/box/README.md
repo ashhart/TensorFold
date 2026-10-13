@@ -27,7 +27,10 @@ as this host sees it. capture.sh runs this step; run it by hand only to rebuild 
 
 ## 3. triton_aot_pack.py: the kernel set (host, no GPU)
 
-`python3 -B tools/zig/triton_aot_pack.py --manifest ${TF}/out/RUN/manifest.json --cache ${TF}/aot/RUN/triton --jit ${TF}/out/RUN/jit.json --out ${TF}/aot/RUN`
+```
+python3 -B tools/zig/triton_aot_pack.py --manifest ${TF}/out/RUN/manifest.json --cache ${TF}/aot/RUN/triton \
+    --jit ${TF}/out/RUN/jit.json --out ${TF}/aot/RUN
+```
 
 Reads the manifest's kernels (or a Recorder launch dump's) and writes `aot.json` (launch facts and keys) beside
 the cubins, the input `tensorfold run --kernels` loads. `--manifest` and `--cache` are repeatable in pairs, so
