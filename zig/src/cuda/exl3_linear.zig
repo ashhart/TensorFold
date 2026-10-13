@@ -117,8 +117,9 @@ pub const Kernels = struct {
         }
     }
 
-    /// Prompt rows (docs/recipes/exl3.md, Prompts): fp16 rows on the tensor units, fp32 sums, the same at every count.
-    pub fn prompt(k: *const Kernels, s: Stream, x: u64, ldx: usize, m: Matrix, out: u64, count: usize) !void {
+    /// Prompt rows (docs/recipes/exl3.md, Prompts): fp16 rows on the tensor units, fp32 sums, bf16 or fp32 out.
+    pub fn prompt(k: *const Kernels, s: Stream, x: u64, ldx: usize, m: Matrix, out: u64, count: usize, f32_out: bool) !void {
+        const elem: usize = if (f32_out) 4 else 2;
         try k.fits(m, ldx);
         var at: usize = 0;
         while (at < count) : (at += prompt_chunk) {
@@ -130,7 +131,8 @@ pub const Kernels = struct {
             a.add(m.trellis);
             a.add(m.svh);
             a.add(m.args());
-            a.add(out + at * m.n * 2);
+            a.add(out + at * m.n * elem);
+            a.add(@as(u32, @intFromBool(f32_out)));
             try launch_.launch(k.prompt_fns[@backingInt(m.codebook)], .{ .grid = .{ .x = @intCast(m.n / 128), .y = @intCast((r + 63) / 64), .z = 1 }, .block = .{ .x = 256 } }, s, &a);
         }
     }

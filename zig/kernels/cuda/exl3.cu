@@ -95,7 +95,7 @@ extern "C" __global__ void __launch_bounds__(32) tf_exl3_rotate_h(const __nv_bfl
 // 64 prompt rows x 128 columns a block: each tile decodes once into mma.m16n8k16 B fragments (their value order).
 template <int K, int C>
 __device__ __forceinline__ void tf_exl3_prompt_job(const __half* Xh, unsigned rows, const uint8_t* T, const __half* svh,
-                                                   const TfExl3Matrix m, __nv_bfloat16* Y, float* buf) {
+                                                   const TfExl3Matrix m, uint8_t* Y, unsigned y_f32, float* buf) {
   constexpr unsigned TB = 32 * K;
   const unsigned tid = threadIdx.x, sg = tid / 32, lane = tid % 32, g8 = lane / 4, t4 = lane % 4, ob = blockIdx.x;
   const unsigned row0 = blockIdx.y * 64, kb = m.k / 128;
@@ -148,7 +148,7 @@ __device__ __forceinline__ void tf_exl3_prompt_job(const __half* Xh, unsigned ro
     tf_exl3_fwht(v, lane);
     for (int q = 0; q < 4; ++q) {
       const unsigned c = ob * 128 + lane + 32 * q;
-      Y[(uint64_t)(row0 + i) * m.n + c] = __float2bfloat16_rn(__fmul_rn(v[q], __fmul_rn(__half2float(svh[c]), 0.125f)));
+      tf_exl3_store(Y, (uint64_t)(row0 + i) * m.n + c, __fmul_rn(v[q], __fmul_rn(__half2float(svh[c]), 0.125f)), y_f32);
     }
   }
 }
@@ -157,17 +157,18 @@ __device__ __forceinline__ void tf_exl3_prompt_job(const __half* Xh, unsigned ro
 #define TF_EXL3_PROMPT(C)                                                                                            \
   extern "C" __global__ void __launch_bounds__(256) tf_exl3_prompt_##C(const __half* Xh, unsigned rows,              \
                                                                       const uint8_t* T, const __half* svh,          \
-                                                                      const TfExl3Matrix m, __nv_bfloat16* Y) {      \
+                                                                      const TfExl3Matrix m, uint8_t* Y,              \
+                                                                      unsigned y_f32) {                              \
     __shared__ __align__(16) float buf[64 * 128];                                                                    \
     switch (m.bits) {                                                                                                \
-      case 1: tf_exl3_prompt_job<1, C>(Xh, rows, T, svh, m, Y, buf); break;                                          \
-      case 2: tf_exl3_prompt_job<2, C>(Xh, rows, T, svh, m, Y, buf); break;                                          \
-      case 3: tf_exl3_prompt_job<3, C>(Xh, rows, T, svh, m, Y, buf); break;                                          \
-      case 4: tf_exl3_prompt_job<4, C>(Xh, rows, T, svh, m, Y, buf); break;                                          \
-      case 5: tf_exl3_prompt_job<5, C>(Xh, rows, T, svh, m, Y, buf); break;                                          \
-      case 6: tf_exl3_prompt_job<6, C>(Xh, rows, T, svh, m, Y, buf); break;                                          \
-      case 7: tf_exl3_prompt_job<7, C>(Xh, rows, T, svh, m, Y, buf); break;                                          \
-      case 8: tf_exl3_prompt_job<8, C>(Xh, rows, T, svh, m, Y, buf); break;                                          \
+      case 1: tf_exl3_prompt_job<1, C>(Xh, rows, T, svh, m, Y, y_f32, buf); break;                                   \
+      case 2: tf_exl3_prompt_job<2, C>(Xh, rows, T, svh, m, Y, y_f32, buf); break;                                   \
+      case 3: tf_exl3_prompt_job<3, C>(Xh, rows, T, svh, m, Y, y_f32, buf); break;                                   \
+      case 4: tf_exl3_prompt_job<4, C>(Xh, rows, T, svh, m, Y, y_f32, buf); break;                                   \
+      case 5: tf_exl3_prompt_job<5, C>(Xh, rows, T, svh, m, Y, y_f32, buf); break;                                   \
+      case 6: tf_exl3_prompt_job<6, C>(Xh, rows, T, svh, m, Y, y_f32, buf); break;                                   \
+      case 7: tf_exl3_prompt_job<7, C>(Xh, rows, T, svh, m, Y, y_f32, buf); break;                                   \
+      case 8: tf_exl3_prompt_job<8, C>(Xh, rows, T, svh, m, Y, y_f32, buf); break;                                   \
       default: break;                                                                                                \
     }                                                                                                                \
   }

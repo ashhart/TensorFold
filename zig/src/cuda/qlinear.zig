@@ -94,23 +94,25 @@ pub const Linear = struct {
             .nvfp4 => |q| return l.onPrompt(s, q, .fp4, in, out, rows),
             .fp8 => |q| return l.onPrompt(s, q, .fp8, in, out, rows),
             .bf16 => |q| return l.onLane(s, q, .bf16, in, out, rows),
-            .exl3 => |q| return (l.exl3 orelse return error.FormatNotLoaded).prompt(s, in.x, if (in.ldx == 0) q.k else in.ldx, q, out, rows),
+            .exl3 => |q| return (l.exl3 orelse return error.FormatNotLoaded).prompt(s, in.x, if (in.ldx == 0) q.k else in.ldx, q, out, rows, false),
         }
     }
 
-    /// Decode rows as decode(), out (rows, n) fp32 unrounded: a tensor-parallel rank's partial rows (nvfp4 only).
+    /// Decode rows as decode(), out (rows, n) fp32 unrounded: a tensor-parallel rank's partial rows (nvfp4, exl3).
     pub fn decodeF32(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
         const q = switch (w) {
             .nvfp4 => |q| q,
+            .exl3 => |q| return (l.exl3 orelse return error.FormatNotLoaded).rows(s, in.x, if (in.ldx == 0) q.k else in.ldx, q, out, rows, true),
             else => return error.EpilogueNotBuilt,
         };
         return l.onLaneAs(s, q, .fp4, in, out, .f32, rows);
     }
 
-    /// Prompt rows as prompt(), out (rows, n) fp32 unrounded (nvfp4 only).
+    /// Prompt rows as prompt(), out (rows, n) fp32 unrounded (nvfp4, exl3).
     pub fn promptF32(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
         const q = switch (w) {
             .nvfp4 => |q| q,
+            .exl3 => |q| return (l.exl3 orelse return error.FormatNotLoaded).prompt(s, in.x, if (in.ldx == 0) q.k else in.ldx, q, out, rows, true),
             else => return error.EpilogueNotBuilt,
         };
         return l.onPromptAs(s, q, .fp4, in, out, .f32, rows);

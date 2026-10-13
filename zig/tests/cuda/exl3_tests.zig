@@ -85,6 +85,7 @@ pub fn run(gpu: Gpu, dir: ?[]const u8) !void {
     for (cases, 0..) |c, i| try synthetic(gpu, &k, s, c, 0xE3 + i, &b);
     check.pass("{d} synthetic matrices, widths 1-8, three codebooks: {d} FP64 values, max error {e}, max {d:.4} of the bound, worst column {e} of the largest output", .{ cases.len, b.values, b.max_error, b.max_fraction, b.worst_column });
     try windows(gpu, &k, s);
+    try fp32Out(gpu, &k, s);
     if (dir) |d| try real(gpu, &k, s, d);
 }
 
@@ -297,7 +298,7 @@ fn synthetic(gpu: Gpu, k: *const E.Kernels, s: cuda.Stream, c: Case, seed: u64, 
     try reference(a, h, x, rows, y, bound, true);
     try compare("exl3 synthetic", got, y, bound, rows, c.n, b);
     // the same rows as a prompt: the tensor units' arithmetic, bf16 out
-    try k.prompt(s, try rig.put(x), c.k, m, out, rows);
+    try k.prompt(s, try rig.put(x), c.k, m, out, rows, false);
     try s.synchronize();
     try getBf16(&rig, out, got);
     try reference(a, h, x, rows, y, bound, true);
@@ -359,6 +360,62 @@ fn windows(gpu: Gpu, k: *const E.Kernels, s: cuda.Stream) !void {
         try check.sameBytes("exl3 prompt rows", p_got[0 .. m * row_bytes], p_alone[0 .. m * row_bytes]);
     }
     check.pass("decode windows of 1-16 rows ({d} input parts) and prompts of 2-{d} rows through qlinear: every row's bf16 bytes equal the row alone on its path", .{ E.split(h.k, h.n), prompt_rows });
+}
+
+/// decodeF32 and promptF32 through qlinear: within FP64 bounds, the same bits at every row count, the bf16 out their rounding.
+fn fp32Out(gpu: Gpu, k: *const E.Kernels, s: cuda.Stream) !void {
+    const a = gpu.gpa;
+    var prng = std.Random.DefaultPrng.init(0xF32);
+    const h = try randomMatrix(a, prng.random(), .{ .k = 2048, .n = 256, .bits = 4, .book = .mcg });
+    defer freeHost(a, h);
+    const rows = 300;
+    const x = try randomRows(a, prng.random(), rows, h.k);
+    defer a.free(x);
+    var rig: Rig = .{ .gpu = gpu };
+    defer rig.deinit();
+    const w: cuda.qlinear.Weight = .{ .exl3 = try upload(&rig, h) };
+    const l: cuda.qlinear.Linear = .{ .exl3 = k };
+    const in: cuda.qlinear.Rows = .{ .x = try rig.put(x) };
+    const o32 = try rig.zeros(rows * h.n * 4);
+    const o16 = try rig.zeros(rows * h.n * 2);
+    const wide = try a.alloc(f32, rows * h.n);
+    defer a.free(wide);
+    const got = try a.alloc(f32, rows * h.n);
+    defer a.free(got);
+    const b16 = try a.alloc(u16, rows * h.n);
+    defer a.free(b16);
+    const y = try a.alloc(f64, rows * h.n);
+    defer a.free(y);
+    const bound = try a.alloc(f64, rows * h.n);
+    defer a.free(bound);
+    var b: Bound = .{};
+    for ([_]bool{ false, true }) |prompt| {
+        const what = if (prompt) "exl3 promptF32" else "exl3 decodeF32";
+        const top: usize = if (prompt) rows else E.window;
+        const counts: []const usize = if (prompt) &.{ 1, 63, 64, 65, 257 } else &.{ 1, 2, 3, 7, 8, 15 };
+        if (prompt) try l.promptF32(s, w, in, o32, top) else try l.decodeF32(s, w, in, o32, top);
+        if (prompt) try l.prompt(s, w, in, o16, top) else try l.decode(s, w, in, o16, top);
+        try s.synchronize();
+        try rig.get(o32, std.mem.sliceAsBytes(wide[0 .. top * h.n]));
+        try rig.get(o16, std.mem.sliceAsBytes(b16[0 .. top * h.n]));
+        try reference(a, h, x, top, y, bound, true);
+        try compare(what, wide, y, bound, top, h.n, &b);
+        var differ: usize = 0;
+        for (wide[0 .. top * h.n], b16[0 .. top * h.n]) |v, o| differ += @intFromBool(roundBf16(v) != o);
+        try check.expect(differ == 0, "{s}: the bf16 out is the fp32 out rounded ({d} of {d} differ)", .{ what, differ, top * h.n });
+        for (counts) |m| {
+            if (prompt) try l.promptF32(s, w, in, o32, m) else try l.decodeF32(s, w, in, o32, m);
+            try s.synchronize();
+            try rig.get(o32, std.mem.sliceAsBytes(got[0 .. m * h.n]));
+            try check.sameBytes(what, std.mem.sliceAsBytes(got[0 .. m * h.n]), std.mem.sliceAsBytes(wide[0 .. m * h.n]));
+        }
+    }
+    check.pass("decodeF32 (1-{d} rows) and promptF32 (1-{d} rows) through qlinear: {d} FP64 values within bounds (max {d:.4} of the bound), the same bits at every row count, the bf16 out their rounding", .{ E.window, rows, b.values, b.max_fraction });
+}
+
+fn roundBf16(v: f32) u16 {
+    const w: u32 = @bitCast(v);
+    return @intCast((w + 0x7FFF + ((w >> 16) & 1)) >> 16);
 }
 
 /// The checkpoint's real matrices: FP64 on three column blocks, then GB/s at 1 and 16 rows.
@@ -448,7 +505,7 @@ fn realOne(gpu: Gpu, k: *const E.Kernels, s: cuda.Stream, f: *const st.File, nam
     const prompt_got = try a.alloc(f32, rows * n);
     defer a.free(prompt_got);
 
-    try k.prompt(s, xd, kk, m, out, rows);
+    try k.prompt(s, xd, kk, m, out, rows, false);
     try s.synchronize();
     try getBf16(&rig, out, prompt_got);
     const blocks = n / 128;
@@ -487,12 +544,12 @@ fn time(gpu: Gpu, k: *const E.Kernels, s: cuda.Stream, x: u64, m: E.Matrix, out:
 
 /// Seconds a prompt call, the median of 7 runs of 5 after a warm-up.
 fn timePrompt(gpu: Gpu, k: *const E.Kernels, s: cuda.Stream, x: u64, m: E.Matrix, out: u64, rows: usize) !f64 {
-    try k.prompt(s, x, m.k, m, out, rows);
+    try k.prompt(s, x, m.k, m, out, rows, false);
     try s.synchronize();
     var runs: [7]f64 = undefined;
     for (&runs) |*r| {
         const t0 = check.now(gpu.io);
-        for (0..5) |_| try k.prompt(s, x, m.k, m, out, rows);
+        for (0..5) |_| try k.prompt(s, x, m.k, m, out, rows, false);
         try s.synchronize();
         r.* = @as(f64, @floatFromInt(check.now(gpu.io) - t0)) / 5e9;
     }
