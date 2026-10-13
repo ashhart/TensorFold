@@ -44,7 +44,10 @@ pub const Plan = struct {
         var n: usize = 0;
         while (file_it.next()) |file| : (n += 1) ordered[n] = file.*;
         std.mem.sort([]const u8, ordered, {}, less);
-        for (ordered) |file| try self.add(try std.fs.path.join(a, &.{ dir, file }), null);
+        var owned: std.StringHashMapUnmanaged([]const u8) = .empty;
+        entries.reset();
+        while (entries.next()) |item| try owned.put(a, item.key_ptr.*, item.value_ptr.string);
+        for (ordered) |file| try self.add(try std.fs.path.join(a, &.{ dir, file }), null, &owned);
         if (self.tensors.count() != index.weight_map.object.count()) return error.CheckpointIndexMismatch;
         entries = index.weight_map.object.iterator();
         while (entries.next()) |item| {
@@ -57,7 +60,7 @@ pub const Plan = struct {
             .{ .layer = 14, .file = "model-00048-of-00048.safetensors", .rows = 384016682 },
         }) |table| {
             const prefix = try std.fmt.allocPrint(a, "layers.{d}.engram.embed.", .{table.layer});
-            try self.add(try std.fs.path.join(a, &.{ table_dir, table.file }), prefix);
+            try self.add(try std.fs.path.join(a, &.{ table_dir, table.file }), prefix, null);
             const weight = try std.fmt.allocPrint(a, "{s}weight", .{prefix});
             const scale = try std.fmt.allocPrint(a, "{s}scale", .{prefix});
             try self.require(weight, .f8_e4m3, &.{ table.rows, 256 });
@@ -88,7 +91,7 @@ pub const Plan = struct {
         }
     }
 
-    fn add(self: *Plan, path: []const u8, prefix: ?[]const u8) !void {
+    fn add(self: *Plan, path: []const u8, prefix: ?[]const u8, owned: ?*const std.StringHashMapUnmanaged([]const u8)) !void {
         const a = self.arena.allocator();
         const own_path = try a.dupeSentinel(u8, path, 0);
         const fd = std.c.open(own_path, .{ .ACCMODE = .RDONLY });
@@ -109,10 +112,18 @@ pub const Plan = struct {
         var begin: usize = if (prefix == null) 0 else file_bytes - data_start;
         var end: usize = if (prefix == null) file_bytes - data_start else 0;
         for (names.keys(), names.values()) |name, entry| {
+            // A rank-split pack duplicates whole-load tensors beside the shards; the index decides the owner file.
+            if (owned) |map| {
+                const owner = map.get(name) orelse continue;
+                if (!std.mem.eql(u8, owner, std.fs.path.basename(path))) continue;
+            }
             begin = @min(begin, entry.begin);
             end = @max(end, entry.end);
             const slot = try self.tensors.getOrPut(a, name);
-            if (slot.found_existing) return error.DuplicateTensor;
+            if (slot.found_existing) {
+                std.log.err("duplicate tensor {s} in {s}", .{ name, path });
+                return error.DuplicateTensor;
+            }
             slot.value_ptr.* = .{ .shard = self.shards.items.len, .entry = entry };
         }
         if (prefix != null) {
