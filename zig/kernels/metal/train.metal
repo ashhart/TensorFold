@@ -108,22 +108,125 @@ kernel void tf_train_lora_in(const device bfloat* x [[buffer(0)]],
   if (lane == 0 && q == 0) xn[r] = n;
 }
 
-// Block b opens on row r if the row's cosine with b's first direction reaches tau, else its xa and gate are 0.
+// h[i] += delta[i]: a nudge to one bf16 row of the residual (h bound at that row).
+kernel void tf_train_nudge(device bfloat* h [[buffer(0)]], const device float* delta [[buffer(1)]], uint i [[thread_position_in_grid]]) {
+  h[i] = bfloat(float(h[i]) + delta[i]);
+}
+
+// a pocket's neurons as the shared expert's are: each input product squared where positive, else zero
+kernel void tf_pocket_relu2(device float* z [[buffer(0)]], constant uint& n [[buffer(1)]], uint i [[thread_position_in_grid]]) {
+  if (i >= n) return;
+  const float v = max(z[i], 0.0f);
+  z[i] = v * v;
+}
+
+// tf_train_lora_in's sums with tf_pocket_relu2 at the store, z[r, q] = relu(x[r] . up[q])^2; a simdgroup per (q, r)
+kernel void tf_pocket_in(const device bfloat* x [[buffer(0)]],
+                         const device float* up [[buffer(1)]],
+                         device float* z [[buffer(2)]],
+                         constant uint4& dims [[buffer(3)]],
+                         uint2 pos [[thread_position_in_grid]],
+                         uint lane [[thread_index_in_simdgroup]]) {
+  const uint rows = dims.x, n_in = dims.y, n = dims.z, q = pos.x / 32, r = pos.y;
+  if (q >= n || r >= rows) return;
+  const device bfloat* xr = x + size_t(r) * n_in;
+  const device float* ur = up + size_t(q) * n_in;
+  float s = 0;
+  uint i = lane;
+  // a lane's elements 28 at a time, all loaded before they are added in tf_train_lora_in's order, then the rest
+  for (; i + 32 * 27 < n_in; i += 32 * 28) {
+    float xv[28], uv[28];
+    for (uint k = 0; k < 28; k++) {
+      xv[k] = float(xr[i + 32 * k]);
+      uv[k] = ur[i + 32 * k];
+    }
+    for (uint k = 0; k < 28; k++) s += xv[k] * uv[k];
+  }
+  for (; i < n_in; i += 32) {
+    const float v = float(xr[i]);
+    s += v * ur[i];
+  }
+  s = simd_sum(s);
+  const float v = max(s, 0.0f);
+  if (lane == 0) z[size_t(r) * n + q] = v * v;
+}
+
+// tf_pocket_relu2 over z [rows, n] (dims: count, n, from), neurons from `from` on times their row's scale
+kernel void tf_pocket_relu2_rows(device float* z [[buffer(0)]], constant uint4& dims [[buffer(1)]],
+                                 const device float* scale [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+  if (i >= dims.x) return;
+  const float v = max(z[i], 0.0f), a = v * v;
+  z[i] = i % dims.y >= dims.z ? a * scale[i / dims.y] : a;
+}
+
+// dst[r, i] = src[r, i] for `rows` rows of `width` bf16 values, src_stride and dst_stride apart; grid (width, rows)
+kernel void tf_train_copy_cols(const device bfloat* src [[buffer(0)]], device bfloat* dst [[buffer(1)]],
+                               constant uint4& dims [[buffer(2)]], uint2 pos [[thread_position_in_grid]]) {
+  if (pos.x >= dims.z) return;
+  dst[size_t(pos.y) * dims.y + pos.x] = src[size_t(pos.y) * dims.x + pos.x];
+}
+
+// A pass's rows by stream: each segment's first row, rows, its decision row (an index in the pass) and its latch slot.
+struct Route {
+  uint count;
+  uint known; // 1: every latch was set before the pass (a training example), so rows after its decision row may act
+  uint whole; // 1: lessons edit the weights, acting on every row: a training pass's flagged ones, an inference pass's all
+  uint pad1;
+  int4 seg[8];
+};
+
+// Block b acts on row r after its stream's decision row when its lesson chose to; the decision row adds to its score.
 kernel void tf_train_gate(device float* xa [[buffer(0)]],
                           const device float* xn [[buffer(1)]],
                           const device float* tau [[buffer(2)]],
                           device float* gates [[buffer(3)]],
                           constant uint4& dims [[buffer(4)]],
                           constant float& unit [[buffer(5)]],
+                          constant Route& route [[buffer(6)]],
+                          const device uint* latch [[buffer(7)]],
+                          device float* score [[buffer(8)]],
                           uint2 pos [[thread_position_in_grid]]) {
-  const uint rows = dims.x, rank = dims.y, blocks = dims.z, b = pos.x, r = pos.y;
+  const uint rows = dims.x, rank = dims.y, blocks = dims.z, stride = dims.w, b = pos.x, r = pos.y;
   if (b >= blocks || r >= rows) return;
+  int rel = -1;
+  uint slot = 0;
+  bool inside = false, settled = false; // settled: the decision row was in an earlier pass, so its latch is set
+  for (uint s = 0; s < route.count; s++) {
+    const int4 g = route.seg[s];
+    if (int(r) >= g.x && int(r) < g.x + g.y) {
+      inside = true;
+      rel = int(r) - g.z;
+      slot = uint(g.w);
+      settled = route.known != 0 || g.z < g.x;
+    }
+  }
   device float* row = xa + size_t(r) * rank + b * 16;
-  const float n = unit * xn[r];
-  const bool open = n > 0 && row[0] >= tau[b] * sqrt(n);
+  bool open = false;
+  if (route.whole != 0) {
+    open = inside && (route.known == 0 || latch[slot * stride + b] != 0);
+  } else if (rel == 0) {
+    const float n = unit * xn[r];
+    if (n > 0) score[slot * stride + b] += row[0] * rsqrt(n) - tau[b];
+  } else if (rel > 0 && settled) {
+    open = latch[slot * stride + b] != 0;
+  }
   gates[size_t(r) * blocks + b] = open ? 1.0f : 0.0f;
   if (!open)
     for (uint q = 0; q < 16; q++) row[q] = 0;
+}
+
+// A stream's lessons at its decision row: cleared before a pass; after it, those whose score reached `need` (0: never).
+kernel void tf_lesson_latch(device float* score [[buffer(0)]],
+                            const device float* need [[buffer(1)]],
+                            device uint* latch [[buffer(2)]],
+                            constant uint4& at [[buffer(3)]],
+                            uint t [[thread_position_in_grid]]) {
+  if (t != 0) return;
+  const uint slot = at.x, blocks = at.y, stride = at.w;
+  for (uint b = 0; b < blocks; b++) {
+    latch[slot * stride + b] = at.z != 0 && need[b] > 0 && score[slot * stride + b] >= need[b] ? 1u : 0u;
+    if (at.z == 0) score[slot * stride + b] = 0;
+  }
 }
 
 // p[r, j] = f[j] . x[r] / |x[r]|: a row's input, made unit, along each candidate direction; a simdgroup a (j, r).
@@ -387,61 +490,69 @@ kernel void tf_train_add(const device float* x [[buffer(0)]], device float* y [[
   y[i] += x[i];
 }
 
-// part[slice][s] = x[s] w[e] on a slice of w's rows, 4 rows of x and 4 of w at a time, 8 columns a thread.
-kernel void tf_train_experts_part(const device float* x [[buffer(0)]],
-                                  const device uint* w [[buffer(1)]],
-                                  const device bfloat* scales [[buffer(2)]],
-                                  const device bfloat* biases [[buffer(3)]],
-                                  const device int* offsets [[buffer(4)]],
-                                  device float* part [[buffer(5)]],
-                                  constant uint4& dims [[buffer(6)]],
-                                  constant uint& slices [[buffer(7)]],
-                                  uint2 pos [[thread_position_in_grid]]) {
-  const uint rows = dims.x, n_in = dims.y, k_out = dims.z, experts = dims.w, words = k_out / 8;
-  const uint word = pos.x, e = pos.y / slices, slice = pos.y % slices;
-  if (word >= words || e >= experts) return;
-  const uint first = uint(offsets[e]), last = e + 1 < experts ? uint(offsets[e + 1]) : rows;
-  if (first >= last) return;
-  const uint span = n_in / slices, n0 = slice * span, n1 = n0 + span;
-  const uint groups = k_out / 64;
-  const device uint* we = w + size_t(e) * n_in * words + word;
-  const device bfloat* se = scales + size_t(e) * n_in * groups + word / 8;
-  const device bfloat* be = biases + size_t(e) * n_in * groups + word / 8;
-  for (uint r0 = first; r0 < last; r0 += 4) {
-    const device float4* xr[4];
-    for (uint r = 0; r < 4; r++) xr[r] = (const device float4*)(x + size_t(min(r0 + r, last - 1)) * n_in);
-    float acc[4][8] = {};
-    for (uint n = n0; n < n1; n += 4) {
-      uint q[4];
-      float sc[4], bi[4];
-      float4 xv[4];
-      for (uint u = 0; u < 4; u++) {
-        q[u] = we[size_t(n + u) * words];
-        sc[u] = float(se[size_t(n + u) * groups]);
-        bi[u] = float(be[size_t(n + u) * groups]);
-      }
-      for (uint r = 0; r < 4; r++) xv[r] = xr[r][n / 4];
-      for (uint u = 0; u < 4; u++) {
-        float v[8];
-        for (uint j = 0; j < 8; j++) v[j] = fma(sc[u], float((q[u] >> (4 * j)) & 0xf), bi[u]);
-        for (uint r = 0; r < 4; r++)
-          for (uint j = 0; j < 8; j++) acc[r][j] = fma(xv[r][u], v[j], acc[r][j]);
-      }
-    }
-    for (uint r = 0; r < min(4u, last - r0); r++)
-      for (uint j = 0; j < 8; j++) part[(size_t(slice) * rows + r0 + r) * k_out + word * 8 + j] = acc[r][j];
+// Each expert's pairs cut into tiles of 16 rows: tiles[t] = (expert, first row), then (experts, 0) up to `cap`.
+kernel void tf_train_experts_tiles(const device int* offsets [[buffer(0)]],
+                                   device uint2* tiles [[buffer(1)]],
+                                   constant uint4& dims [[buffer(2)]]) {
+  const uint pairs = dims.x, cap = dims.y, experts = dims.w;
+  uint t = 0;
+  for (uint e = 0; e < experts; e++) {
+    const uint first = uint(offsets[e]), last = e + 1 < experts ? uint(offsets[e + 1]) : pairs;
+    for (uint r = first; r < last && t < cap; r += 16) tiles[t++] = uint2(e, r);
   }
+  for (; t < cap; t++) tiles[t] = uint2(experts, 0);
 }
 
-// y[s, k] = the slices' partial sums in slice order; grid (K, pairs).
-kernel void tf_train_experts_sum(const device float* part [[buffer(0)]],
-                                 device float* y [[buffer(1)]],
-                                 constant uint4& dims [[buffer(2)]],
-                                 constant uint& slices [[buffer(3)]],
-                                 uint2 pos [[thread_position_in_grid]]) {
-  const uint rows = dims.x, k_out = dims.z, k = pos.x, r = pos.y;
-  if (k >= k_out || r >= rows) return;
-  float sum = 0;
-  for (uint s = 0; s < slices; s++) sum += part[(size_t(s) * rows + r) * k_out + k];
-  y[size_t(r) * k_out + k] = sum;
+// y[s] = x[s] w[e] (f32), tiles of 16 pairs by 64 columns in 8x8 simdgroup products, w dequantized once a tile.
+kernel void tf_train_experts_mm(const device float* x [[buffer(0)]],
+                                const device uint* w [[buffer(1)]],
+                                const device bfloat* scales [[buffer(2)]],
+                                const device bfloat* biases [[buffer(3)]],
+                                const device uint2* tiles [[buffer(4)]],
+                                const device int* offsets [[buffer(5)]],
+                                device float* y [[buffer(6)]],
+                                constant uint4& dims [[buffer(7)]],
+                                uint2 tg [[threadgroup_position_in_grid]],
+                                uint sg [[simdgroup_index_in_threadgroup]],
+                                uint tid [[thread_index_in_threadgroup]]) {
+  const uint pairs = dims.x, n_in = dims.y, k_out = dims.z, experts = dims.w, words = k_out / 8, groups = k_out / 64;
+  const uint2 tile = tiles[tg.y];
+  if (tile.x >= experts) return;
+  const uint e = tile.x, r0 = tile.y, k0 = tg.x * 64;
+  const uint last = e + 1 < experts ? uint(offsets[e + 1]) : pairs;
+  threadgroup float bs[32 * 64];
+  // simdgroup sg: rows rb * 8 of the tile, columns ch * 32 of its 64
+  const uint rb = sg & 1, ch = sg >> 1;
+  simdgroup_float8x8 acc[4];
+  for (uint j = 0; j < 4; j++) acc[j] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+  const device uint* we = w + size_t(e) * n_in * words + k0 / 8;
+  const device bfloat* se = scales + size_t(e) * n_in * groups + k0 / 64;
+  const device bfloat* be = biases + size_t(e) * n_in * groups + k0 / 64;
+  const device float* xr = x + size_t(r0 + rb * 8) * n_in;
+  for (uint n0 = 0; n0 < n_in; n0 += 32) {
+    for (uint i = tid; i < 256; i += 128) {
+      const uint n = n0 + i / 8, word = i % 8;
+      const uint q = we[size_t(n) * words + word];
+      const float sc = float(se[size_t(n) * groups]), bi = float(be[size_t(n) * groups]);
+      for (uint j = 0; j < 8; j++) bs[(i / 8) * 64 + word * 8 + j] = fma(sc, float((q >> (4 * j)) & 0xf), bi);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint kk = 0; kk < 32; kk += 8) {
+      simdgroup_float8x8 a;
+      simdgroup_load(a, xr + n0 + kk, n_in);
+      for (uint j = 0; j < 4; j++) {
+        simdgroup_float8x8 b;
+        simdgroup_load(b, bs + kk * 64 + ch * 32 + j * 8, 64);
+        simdgroup_multiply_accumulate(acc[j], a, b, acc[j]);
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  // through threadgroup memory: only the expert's own rows reach y
+  for (uint j = 0; j < 4; j++) simdgroup_store(acc[j], bs + rb * 8 * 64 + ch * 32 + j * 8, 64);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint i = tid; i < 16 * 64; i += 128) {
+    const uint r = r0 + i / 64;
+    if (r < last) y[size_t(r) * k_out + k0 + i % 64] = bs[i];
+  }
 }

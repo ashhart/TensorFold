@@ -19,6 +19,7 @@ pub const Model = struct {
     speculate: bool = false, // the head can draft from a verify's rows
     speculate_early: bool = true, // draft every row's first draft behind the verify
     draft_prior: []const f64 = &.{}, // the head's acceptance by depth until a stream has its own
+    depth_rate: f64 = 0, // the newest round's weight in a depth's acceptance estimate (0: the core's)
     plain_guard: bool = false, // plain rounds compete with drafted depths
     drafts: u32 = 1, // head drafts a round at most
     window_costs: []const Cost = &.{}, // forward ms by exact window width (timed at load)
@@ -32,6 +33,7 @@ pub const Model = struct {
     draft_streams: bool = false, // the head drafts every stream of a shared round in one batch
     head_trees: bool = false, // the head drafts trees of lanes (DraftRequest.lanes) and holds them
     lane_costs: []const Cost = &.{}, // a lone stream's window ms by rows, up to its widest tree (timed at load)
+    lone_copies: bool = true, // a lone stream proposes copies (false: only streams in shared rounds do)
 };
 
 pub const Config = struct {
@@ -63,6 +65,7 @@ pub const Config = struct {
     mtp_step_ms: f64,
     enter_match: i64 = 8, // matching tokens a copy needs (rejects coincidental indentation)
     copy_rate: f64 = 0.94, // a copied token's chance of landing in allocation
+    lone_copies: bool = true, // Model.lone_copies
     k: Constants = .{},
 
     pub fn init(gpa: Allocator, m: Model, max_rows: u32, max_draft: u32) !Config {
@@ -96,6 +99,7 @@ pub const Config = struct {
         const depth_prior = try gpa.dupe(f64, prior);
         errdefer gpa.free(depth_prior);
         return .{
+            .lone_copies = m.lone_copies,
             .family_width = width,
             .max_copy = max_copy,
             .first_copy = first_copy,
@@ -116,6 +120,7 @@ pub const Config = struct {
             .shared_costs = try alloc.extendCosts(gpa, timed.items, batch_rows),
             .lane_costs = try alloc.extendCosts(gpa, m.lane_costs, 64),
             .mtp_step_ms = m.mtp_step_ms,
+            .k = .{ .depth_rate = if (m.depth_rate > 0) m.depth_rate else (Constants{}).depth_rate },
         };
     }
 
@@ -135,4 +140,8 @@ test "setup derives widths like Python" {
     try std.testing.expectEqual(@as(u32, 16), c.base_width);
     try std.testing.expectEqual(@as(u32, 4), c.most_drafts);
     try std.testing.expect(c.family_mtp and c.family_streams);
+    try std.testing.expectEqual(@as(f64, 0.15), c.k.depth_rate);
+    var steady = try Config.init(gpa, .{ .exact_width = 16, .mtp = true, .speculate = true, .drafts = 4, .depth_rate = 0.08 }, 16, 15);
+    defer steady.deinit(gpa);
+    try std.testing.expectEqual(@as(f64, 0.08), steady.k.depth_rate);
 }

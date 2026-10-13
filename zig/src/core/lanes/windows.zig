@@ -13,7 +13,7 @@ const Stream = @import("stream.zig").Stream;
 const Value = ev.Value;
 const f = ev.f;
 
-pub const Kind = enum { forced, copy, head, fill, none };
+pub const Kind = enum { forced, copy, head, fill, grammar, none };
 
 /// One stream's window as planned, then as allocated (Python's plan lists).
 pub const Plan = struct {
@@ -27,6 +27,8 @@ pub const Plan = struct {
     branch_from: u32 = 0, // the first row of suffix-match branches (0: none; lanes/fill.zig)
     tried: bool = false, // the planner read the head's chain back to graft branches
     lanes: ?*const shape.Shape = null, // the held drafts' tree shape (each lane's depth and rank)
+    masks: []const u32 = &.{}, // structured output: the rows' allowed-token bits (constrain)
+    grammar_from: u32 = 0, // the first row the grammar drafted itself (0: none)
 
     pub fn count(p: Plan) usize {
         return p.held + p.tokens.len;
@@ -134,6 +136,7 @@ fn headTrunk(e: *Engine, s: *Stream, p: Plan, levels: usize) !?fill.Trunk {
 pub fn copyProposal(e: *Engine, s: *Stream) ![]const u32 {
     const p = s.proposer orelse return &.{};
     if (e.cfg.max_copy == 0 or s.force.items.len > 0) return &.{};
+    if (e.alone and !e.cfg.lone_copies) return &.{};
     const width: u32 = if (e.alone) (s.copy_width orelse e.cfg.first_copy) else e.cfg.first_copy;
     const copied = p.propose(s.context.items, @min(@as(i64, width), s.draftRoom() - 1)) catch return &.{};
     if (copied.len < 2 or p.lastMatch() < e.cfg.enter_match) return &.{};
@@ -152,7 +155,13 @@ pub fn probe(e: *Engine) depth.Probe {
 }
 
 pub fn who(s: *Stream) depth.Who {
-    return .{ .state = &s.depth, .draft_room = s.draftRoom(), .finished = s.finished, .forced = s.force.items.len > 0, .granted = s.granted, .stream = s };
+    return .{ .state = &s.depth, .draft_room = s.draftRoom(), .finished = s.finished, .forced = s.force.items.len > 0, .granted = s.granted, .stream = s, .sampled = s.sampling != null };
+}
+
+/// Whether any of a round's streams draws keyed samples (its rows carry their host work).
+pub fn anySampled(plans: []const Plan) bool {
+    for (plans) |p| if (p.stream.sampling != null) return true;
+    return false;
 }
 
 /// Trim draft prefixes by landing probability to the shared width with the most expected tokens a ms.
@@ -173,7 +182,7 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
             pr.* = try nodeChances(e, p.stream, n);
         }
     }
-    const counts = try alloc.allocate(a, fixed, probs, &e.cfg.shared_costs, e.rule.overheadMs(plans.len), @max(plans.len, e.cfg.batch_rows));
+    const counts = try alloc.allocate(a, fixed, probs, &e.cfg.shared_costs, e.rule.overheadMs(plans.len, anySampled(plans)), @max(plans.len, e.cfg.batch_rows));
     for (plans, probs, counts) |*p, chances, c| {
         if (p.kind == .head) p.stream.granted = c;
         if (chances.len == 0 or c == chances.len) continue;
@@ -212,6 +221,45 @@ pub fn nodeChances(e: *Engine, s: *Stream, n: usize) ![]const f64 {
     return alloc.chainProbabilities(a, try e.rule.rates(who(s)), n);
 }
 
+/// Structured output: the rows an accepted path can use, each row's bits, and the grammar's drafts after a lone chain.
+pub fn constrain(e: *Engine, p: *Plan) !void {
+    const g = p.stream.grammar orelse return;
+    const a = e.arena.allocator();
+    if (p.held > 0) {
+        // the held drafts (a chain or a tree, in window order) come back as host tokens, grafts after them
+        const read = e.backend.vtable.held orelse return error.HeldDraftsUnreadable;
+        const held = try a.alloc(u32, p.held);
+        try read(e.backend.ptr, p.stream, held);
+        p.tokens = try std.mem.concat(a, u32, &.{ held, p.tokens });
+        p.held = 0;
+    }
+    const rows = try a.alloc(u32, 1 + p.tokens.len);
+    rows[0] = p.stream.pending.?;
+    @memcpy(rows[1..], p.tokens);
+    const grows = p.stream.drafts and p.kind != .forced and e.alone;
+    const room = if (grows) @max(rows.len, e.cfg.family_width) else rows.len;
+    const w = try g.window(a, rows, try accept.rowParents(a, rows.len, p.parents), p.kind == .forced, room);
+    p.masks = w.masks;
+    if (w.rows.len == rows.len and w.extra.len == 0) return;
+    if (w.rows.len < rows.len) p.lanes = null; // the tree shape no longer matches the rows
+    const kept = try a.alloc(u32, w.rows.len - 1 + w.extra.len);
+    for (kept[0 .. w.rows.len - 1], w.rows[1..]) |*t, r| t.* = rows[r];
+    @memcpy(kept[w.rows.len - 1 ..], w.extra);
+    p.tokens = kept;
+    if (w.extra.len > 0) p.grammar_from = @intCast(w.rows.len);
+    if (p.parents != null) {
+        const parents = try a.alloc(i32, kept.len);
+        for (parents, w.parents[1..]) |*q, r| q.* = r - 1;
+        p.parents = if (accept.isChain(parents)) null else parents;
+    }
+    if (p.branch_from > 0) {
+        var below: u32 = 0;
+        for (w.rows) |r| below += @intFromBool(r < p.branch_from);
+        p.branch_from = below;
+    }
+    if (p.kind != .forced and w.rows.len == 1) p.kind = if (w.extra.len > 0) .grammar else .none;
+}
+
 /// The window's rows, parents and keyed positions, ready for the backend.
 pub fn build(e: *Engine, p: Plan, early: bool) !be.Window {
     const a = e.arena.allocator();
@@ -220,7 +268,7 @@ pub fn build(e: *Engine, p: Plan, early: bool) !be.Window {
     const ds = try accept.depths(a, parents);
     const positions = try a.alloc(u64, rows);
     for (positions, ds) |*x, d| x.* = p.position + 1 + d;
-    return .{ .stream = p.stream, .pending = p.stream.pending.?, .held = p.held, .tokens = p.tokens, .parents = if (p.parents != null) parents else null, .positions = positions, .early = early };
+    return .{ .stream = p.stream, .pending = p.stream.pending.?, .held = p.held, .tokens = p.tokens, .parents = if (p.parents != null) parents else null, .positions = positions, .early = early, .masks = p.masks };
 }
 
 pub fn rowParents(e: *Engine, w: be.Window) ![]const i32 {

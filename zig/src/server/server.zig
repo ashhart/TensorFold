@@ -16,11 +16,13 @@ const grammar = @import("grammar.zig");
 const clock = @import("clock.zig");
 const prompt = @import("prompt.zig");
 const tool_specs = @import("tool_specs.zig");
+const tool_grammar = @import("tool_grammar.zig");
 const chunk_plan = @import("chunk_plan.zig");
 const log = @import("log.zig");
 const live = @import("live.zig");
 const slide_graph = @import("slide_graph.zig");
 const slide_lesson = @import("slide_lesson.zig");
+const cortheon = @import("cortheon/cortheon.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -30,6 +32,7 @@ pub const CompactAt = union(enum) { auto, fraction: f64 };
 
 pub const Config = struct {
     served_name: []const u8,
+    model_dir: []const u8 = "",
     /// The served name first, then aliases, without repeats.
     model_ids: []const []const u8,
     default_max_tokens: i64 = 4096,
@@ -54,6 +57,10 @@ pub const Config = struct {
     compact_memory: ?[]const u8 = null,
     /// --slide-graph: the file holding the Sliding Weights fact graph; null keeps the graph in memory.
     slide_graph: ?[]const u8 = null,
+    /// --cortheon: Cortheon's program and server-run web research for chat requests; off changes no reply.
+    cortheon: bool = false,
+    /// BRAVE_SEARCH_API_KEY: Cortheon searches through Brave instead of DuckDuckGo.
+    cortheon_search_key: ?[]const u8 = null,
     timeouts: http_conn.Timeouts = .{},
 };
 
@@ -82,14 +89,22 @@ pub const Server = struct {
     keepalive: ?*api.keepalive.Keepalive = null,
     preparing: std.atomic.Value(i64) = .init(0),
     arena: std.heap.ArenaAllocator,
+    /// Structured output's compiler, opened by the first structured request (Python's grammar.compiler).
+    grammars: ?*api.grammar.Compiler = null,
+    grammar_problem: ?[]const u8 = null,
+    grammar_mutex: std.Io.Mutex = .init,
     /// The facts the learner was taught and whether the weights recall them.
     slide: slide_graph.Graph,
     teacher: slide_lesson.Teacher, // what every Sliding Weights lesson shares: keep prompts, the turn's end
+    /// Cortheon's web reader and what replies hid from their clients; null without --cortheon.
+    cortheon: ?*cortheon.State = null,
 
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {
         const srv = try gpa.create(Server);
         srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa }, .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
+        errdefer srv.deinit(); // a later step's failure stops the keepalive before the caller closes the engine
+        if (config.cortheon) srv.cortheon = try cortheon.State.init(gpa, io, "TensorFold-Cortheon (+https://github.com/ashhart/TensorFold)", config.cortheon_search_key);
         if (config.keep_warm_s > 0) if (engine.keepaliveTarget()) |target| {
             srv.keepalive = api.keepalive.Keepalive.start(gpa, io, target, @as(i64, config.keep_warm_s) * std.time.ns_per_s) catch |e| blk: {
                 log.line("idle keepalive off: {s}", .{@errorName(e)});
@@ -118,11 +133,13 @@ pub const Server = struct {
 
     pub fn deinit(srv: *Server) void {
         if (srv.keepalive) |k| k.stop(); // before the engine's queue goes away
+        if (srv.grammars) |g| g.close();
         srv.metrics.deinit();
         srv.arena.deinit();
         srv.store.deinit();
         srv.slide.deinit();
         srv.teacher.deinit();
+        if (srv.cortheon) |c| c.deinit();
         srv.gpa.destroy(srv);
     }
 
@@ -159,7 +176,10 @@ pub const Server = struct {
     pub fn checkFeatures(srv: *Server, cx: *Cx, f: Value, has_tools: bool, thinking: bool, prompt_ids: []const u32, tools: []const Value, request: *api.Request) errors.Refused!void {
         _ = prompt_ids;
         const required = if (f.get("tool_call_required")) |r| r.truthy() else false;
-        if (has_tools and required) {
+        if (has_tools and required and srv.info.structures) {
+            const one_call = if (f.get("tool_call_single")) |x| x.truthy() else false;
+            request.structure = try tool_grammar.structure(srv, cx, tools, !one_call, thinking);
+        } else if (has_tools and required) {
             const form = try srv.callForm(cx);
             const opener = if (form) |fm| srv.text.tokenId(fm.opener) else null;
             if (opener == null) return cx.refuse("tool_choice \"required\" or a named function needs a chat template that marks tool calls (<tool_call> or <|tool_call>), and this one does not: send \"auto\"");
@@ -177,8 +197,51 @@ pub const Server = struct {
         }
         if (try grammar.spec(cx, f)) |s| {
             if (!srv.info.structures) return cx.refuse("structured output (response_format and the guided_* fields) is not supported by this engine yet");
-            request.structure = .{ .kind = s.kind, .text = s.text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null };
+            request.structure = try srv.compiledStructure(cx, s.kind, s.text, s.field, thinking);
         }
+    }
+
+    /// A request's grammar, compiled once here (a 400 with xgrammar's reason when it cannot be enforced).
+    pub fn compiledStructure(srv: *Server, cx: *Cx, kind: grammar.Kind, text: []const u8, field: []const u8, thinking: bool) errors.Refused!api.Structure {
+        const c = srv.grammarCompiler() orelse return cx.fail(.request, "{s}: {s}", .{ if (kind == .structural_tag) field else "structured output", srv.grammar_problem.? });
+        var err: [512]u8 = undefined;
+        const compiled = c.compile(srv.io, @fromBackingInt(@intCast(@backingInt(kind))), text, &err) catch
+            return cx.fail(.request, "{s}: the grammar cannot be enforced: {s}", .{ field, std.mem.sliceTo(&err, 0) });
+        compiled.free(); // kept in the compiler's cache for the engine's compile
+        return .{ .kind = kind, .text = text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null, .compiler = c };
+    }
+
+    /// The model's grammar compiler: tokenizer.json, config.json's vocab_size (text_config first), the eos ids.
+    fn grammarCompiler(srv: *Server) ?*api.grammar.Compiler {
+        srv.grammar_mutex.lockUncancelable(srv.io);
+        defer srv.grammar_mutex.unlock(srv.io);
+        if (srv.grammars) |g| return g;
+        if (srv.grammar_problem != null) return null;
+        const a = srv.arena.allocator();
+        srv.grammar_problem = blk: {
+            const dir = std.Io.Dir.cwd();
+            const tok = dir.readFileAlloc(srv.io, std.fs.path.join(a, &.{ srv.config.model_dir, "tokenizer.json" }) catch break :blk "out of memory", a, .limited(256 << 20)) catch break :blk "the checkpoint has no tokenizer.json";
+            const cfg_text = dir.readFileAlloc(srv.io, std.fs.path.join(a, &.{ srv.config.model_dir, "config.json" }) catch break :blk "out of memory", a, .limited(16 << 20)) catch break :blk "the checkpoint has no config.json";
+            const cfg = switch (json.parse(a, cfg_text) catch break :blk "out of memory") {
+                .ok => |v| v,
+                .err => break :blk "config.json is not JSON",
+            };
+            var vocab: ?u32 = null;
+            for ([_]?json.Value{ cfg.get("text_config"), cfg }) |part| if (vocab == null) if (part) |p| if (p.get("vocab_size")) |v| if (v.int64()) |n| {
+                vocab = @intCast(n);
+            };
+            if (vocab == null) break :blk "structured output needs the checkpoint's config.json vocab_size";
+            var err: [512]u8 = undefined;
+            const c = a.create(api.grammar.Compiler) catch break :blk "out of memory";
+            c.* = api.grammar.Compiler.open(srv.io, a, tok, vocab.?, srv.eos, &err) catch |e| break :blk switch (e) {
+                error.NoGrammarLibrary => "the server cannot load " ++ api.grammar.library ++ " (xgrammar; zig build grammar)",
+                else => a.dupe(u8, std.mem.sliceTo(&err, 0)) catch "out of memory",
+            };
+            srv.grammars = c;
+            log.line("structured output: xgrammar over {d} tokens", .{vocab.?});
+            break :blk null;
+        };
+        return srv.grammars;
     }
 
     const Form = struct { opener: []const u8, lead: ?[]const u8, tail: ?[]const u8 };

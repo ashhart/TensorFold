@@ -6,6 +6,34 @@ const keyBits = @import("sampling.zig").keyBits;
 
 pub const candidates = 1024;
 
+/// The candidates' near window every GPU sampler reads.
+pub const near: f32 = 20.0;
+
+/// A sampled request's rule as every GPU sampler reads it: the seed, 1 / T, top_p, the near window, ln(min_p), top_k.
+pub const Rule = struct {
+    seed: u64,
+    inv_t: f32,
+    top_p: f32,
+    near: f32 = near,
+    min_log: f32,
+    top_k: u32,
+
+    /// The Metal kernels' cfg row: 1 / T, top_p, the near window, ln(min_p).
+    pub fn cfg(r: Rule) [4]f32 {
+        return .{ r.inv_t, r.top_p, r.near, r.min_log };
+    }
+
+    /// The seed as the Metal kernels take it: low half, then high half.
+    pub fn seedHalves(r: Rule) [2]u32 {
+        return .{ @truncate(r.seed), @truncate(r.seed >> 32) };
+    }
+};
+
+/// `s`'s rule (1 / T floors the temperature at 1e-6; `min_log` is ln(min_p), or -inf for none).
+pub fn rule(s: Sampling) Rule {
+    return .{ .seed = s.seed, .inv_t = @floatCast(1.0 / @max(s.temperature, 1e-6)), .top_p = @floatCast(s.top_p), .min_log = @floatCast(s.minLog()), .top_k = s.top_k };
+}
+
 /// The kernel's order-preserving key of a float (larger value, larger key).
 pub fn key(v: f32) u32 {
     const b: u32 = @bitCast(v);
@@ -43,10 +71,11 @@ pub fn sample(gpa: Allocator, logits: []const f32, s: ?Sampling, position: u32, 
         const at = argmax(logits);
         return if (ids) |m| m[at] else at;
     };
-    const inv_t: f32 = @floatCast(1.0 / @max(st.temperature, 1e-6));
-    const top_p: f32 = @floatCast(st.top_p);
-    const min_log: f32 = @floatCast(st.minLog());
-    const kc = st.top_k;
+    const r = rule(st);
+    const inv_t = r.inv_t;
+    const top_p = r.top_p;
+    const min_log = r.min_log;
+    const kc = r.top_k;
     const cap: usize = if (kc == 0 or kc > candidates) candidates else kc;
     const all = try gpa.alloc(Cand, logits.len);
     defer gpa.free(all);
@@ -115,6 +144,18 @@ pub fn lanesSum(lanes: *const [1024]f32) f32 {
         z += simd[0];
     }
     return z;
+}
+
+test "the rule once: its values, and the Metal cfg row and seed halves it packs" {
+    const s: Sampling = .{ .seed = 1 << 63 | 5, .temperature = 0.5, .top_k = 7, .top_p = 0.9, .min_p = 0.05 };
+    const r = rule(s);
+    try std.testing.expectEqual(@as(f32, 2.0), r.inv_t);
+    try std.testing.expectEqual(@as(f32, 0.9), r.top_p);
+    try std.testing.expectEqual(@as(f32, @floatCast(@log(@as(f64, 0.05)))), r.min_log);
+    try std.testing.expectEqual(@as(u32, 7), r.top_k);
+    try std.testing.expectEqualSlices(f32, &.{ 2.0, 0.9, 20.0, r.min_log }, &r.cfg());
+    try std.testing.expectEqualSlices(u32, &.{ 5, 1 << 31 }, &r.seedHalves());
+    try std.testing.expectEqual(@as(f32, 1e6), rule(.{ .seed = 0, .temperature = 0 }).inv_t);
 }
 
 test "key order and uniform range" {

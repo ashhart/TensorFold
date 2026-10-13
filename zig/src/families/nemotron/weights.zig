@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const ckpt = @import("../../core/checkpoint_metal.zig");
 const row = @import("../../core/row_projection.zig");
+const host4 = @import("../../core/affine4_host.zig");
 const cfg = @import("config.zig");
 
 const Tensor = ckpt.Tensor;
@@ -21,7 +22,7 @@ pub const Linear = struct {
 };
 
 /// A learned change after a projection, y += scale (x a^T) b over blocks open on the row: a [rank, in], b [rank, out].
-pub const Adapter = struct { a: mtl.Buffer, b: mtl.Buffer, tau: mtl.Buffer, xa: mtl.Buffer, xn: mtl.Buffer, gates: mtl.Buffer, in: usize, out: usize, rank: usize, scale: f32, unit: f32 };
+pub const Adapter = struct { a: mtl.Buffer, b: mtl.Buffer, tau: mtl.Buffer, xa: mtl.Buffer, xn: mtl.Buffer, gates: mtl.Buffer, need: mtl.Buffer, latch: mtl.Buffer, score: mtl.Buffer, whole: bool, in: usize, out: usize, rank: usize, scale: f32, unit: f32 };
 
 pub const Mamba = struct {
     in_proj: Linear,
@@ -36,6 +37,15 @@ pub const Mamba = struct {
     norm: Tensor, // gated group norm weight [XD]
 };
 
+/// Learned neurons beside a shared expert's own, as a wider shared expert computes them: y += relu(x up^T)^2 down.
+pub const Pocket = struct {
+    up: mtl.Buffer, // f32 [neurons, D]: each neuron's input weights
+    down: mtl.Buffer, // f32 [neurons, D]: each neuron's output
+    z: mtl.Buffer, // f32 [rows, neurons]: the forward's scratch
+    zn: mtl.Buffer, // f32 [rows]: the input kernel's row lengths, unread
+    used: usize, // neurons in use, the first ones
+};
+
 pub const Moe = struct {
     gate: Tensor, // bf16 [E, D]
     gate_bias: Tensor, // f32 [E]
@@ -43,8 +53,10 @@ pub const Moe = struct {
     fc2: [3]Tensor,
     shared_up: Linear,
     shared_down: Linear,
+    shared_raw: [2][3]Tensor, // up and down as the kernels read them: the shared expert's own neurons, learned ones left out
     adapter: ?Adapter = null, // after shared_down
     slide: ?mtl.Buffer = null, // bf16 [D, W]: shared_down's weight read from the shards minus its codes, added after it
+    pocket: ?Pocket = null, // learned neurons, after shared_down
 };
 
 pub const Attention = struct {
@@ -200,14 +212,74 @@ const Builder = struct {
 
     fn moe(self: *Builder, comptime prefix: []const u8, args: anytype) !Moe {
         const c = self.c;
+        const gate = try self.typed(prefix ++ ".gate.weight", args, .bf16, &.{ c.experts, c.hidden });
+        const gate_bias = try self.typed(prefix ++ ".gate.e_score_correction_bias", args, .f32, &.{c.experts});
+        const fc1 = try self.quantized(prefix ++ ".switch_mlp.fc1", args, &.{ c.experts, c.expert_width, c.hidden });
+        const fc2 = try self.quantized(prefix ++ ".switch_mlp.fc2", args, &.{ c.experts, c.hidden, c.expert_width });
+        const full = c.shared_width + c.pocket;
+        const up = try self.quantized(prefix ++ ".shared_experts.up_proj", args, &.{ full, c.hidden });
+        const down = try self.quantized(prefix ++ ".shared_experts.down_proj", args, &.{ c.hidden, full });
+        const own_up = firstRows(up, c.shared_width);
+        const own_down = try self.firstColumns(down, c.shared_width);
         return .{
-            .gate = try self.typed(prefix ++ ".gate.weight", args, .bf16, &.{ c.experts, c.hidden }),
-            .gate_bias = try self.typed(prefix ++ ".gate.e_score_correction_bias", args, .f32, &.{c.experts}),
-            .fc1 = try self.quantized(prefix ++ ".switch_mlp.fc1", args, &.{ c.experts, c.expert_width, c.hidden }),
-            .fc2 = try self.quantized(prefix ++ ".switch_mlp.fc2", args, &.{ c.experts, c.hidden, c.expert_width }),
-            .shared_up = try self.linear(prefix ++ ".shared_experts.up_proj", args, &.{try self.quantized(prefix ++ ".shared_experts.up_proj", args, &.{ c.shared_width, c.hidden })}),
-            .shared_down = try self.linear(prefix ++ ".shared_experts.down_proj", args, &.{try self.quantized(prefix ++ ".shared_experts.down_proj", args, &.{ c.hidden, c.shared_width })}),
+            .gate = gate,
+            .gate_bias = gate_bias,
+            .fc1 = fc1,
+            .fc2 = fc2,
+            .shared_up = try self.linear(prefix ++ ".shared_experts.up_proj", args, &.{own_up}),
+            .shared_down = try self.linear(prefix ++ ".shared_experts.down_proj", args, &.{own_down}),
+            .shared_raw = .{ own_up, own_down },
+            .pocket = if (c.pocket > 0) try self.pocketOf(up, down) else null,
         };
+    }
+
+    /// A shared expert's learned neurons (its last up_proj rows, down_proj columns) as f32, in use to the last nonzero.
+    fn pocketOf(self: *Builder, up: [3]Tensor, down: [3]Tensor) !Pocket {
+        const c = self.c;
+        const d = c.hidden;
+        const n = c.pocket;
+        const p: Pocket = .{ .up = try self.buffer(n * d * 4), .down = try self.buffer(n * d * 4), .z = try self.buffer(pocket_rows * n * 4), .zn = try self.buffer(pocket_rows * 4), .used = 0 };
+        const ups = p.up.slice(f32, n * d);
+        const ug = d / kernel_group;
+        const uw = up[0].host(u32);
+        for (0..n) |k| {
+            const r = c.shared_width + k;
+            host4.dequantize(uw[r * d / 8 ..][0 .. d / 8], up[1].host(u16)[r * ug ..][0..ug], up[2].host(u16)[r * ug ..][0..ug], ups[k * d ..][0..d]);
+        }
+        const downs = p.down.slice(f32, n * d);
+        const full = c.shared_width + n;
+        const dg = full / kernel_group;
+        const outs = try self.allocator.alloc(f32, n);
+        defer self.allocator.free(outs);
+        for (0..d) |o| {
+            const w = down[0].host(u32)[o * full / 8 ..][c.shared_width / 8 ..][0 .. n / 8];
+            host4.dequantize(w, down[1].host(u16)[o * dg ..][c.shared_width / kernel_group ..][0 .. n / kernel_group], down[2].host(u16)[o * dg ..][c.shared_width / kernel_group ..][0 .. n / kernel_group], outs);
+            for (outs, 0..) |v, k| downs[k * d + o] = v;
+        }
+        var used: usize = 0;
+        for (0..n) |k| if (!std.mem.allEqual(f32, ups[k * d ..][0..d], 0)) {
+            used = k + 1;
+        };
+        var out = p;
+        out.used = used;
+        return out;
+    }
+
+    /// The first `k` columns of a quantized matrix [rows, wider] in buffers of their own (itself when `k` wide).
+    fn firstColumns(self: *Builder, t: [3]Tensor, k: usize) ![3]Tensor {
+        const wide = t[0].shape[1] * 8;
+        if (wide == k) return t;
+        const rows = t[0].shape[0];
+        var out = t;
+        const per = [3]usize{ k / 8 * 4, k / kernel_group * 2, k / kernel_group * 2 };
+        const was = [3]usize{ wide / 8 * 4, wide / kernel_group * 2, wide / kernel_group * 2 };
+        for (&out, t, per, was) |*o, x, p, w| {
+            const b = try self.buffer(rows * p);
+            const src: [*]const u8 = x.buffer.contents() + x.offset;
+            for (0..rows) |r| @memcpy(b.contents()[r * p ..][0..p], src[r * w ..][0..p]);
+            o.* = .{ .buffer = b, .offset = 0, .bytes = rows * p, .dtype = x.dtype, .shape = .{ rows, p / x.dtype.size(), 1, 1, 1 }, .rank = 2 };
+        }
+        return out;
     }
 
     fn attention(self: *Builder, comptime prefix: []const u8, comptime fused: []const u8, args: anytype) !Attention {
@@ -244,7 +316,7 @@ const Builder = struct {
         };
     }
 
-    /// A matrix [.., n, k] as `dims` give it, refused unless u32 words and bf16 scales and biases at the kernels' width.
+    /// A matrix [.., n, k] as `dims` give it, refused unless u32 words, bf16 scales and biases at the kernels' width.
     fn quantized(self: *Builder, comptime fmt: []const u8, args: anytype, dims: []const usize) ![3]Tensor {
         var name: [160]u8 = undefined;
         const base = try std.fmt.bufPrint(&name, fmt, args);
@@ -308,6 +380,19 @@ const Builder = struct {
     }
 };
 
+/// The first `n` rows of a quantized matrix, in place.
+fn firstRows(t: [3]Tensor, n: usize) [3]Tensor {
+    var out = t;
+    for (&out) |*x| {
+        x.bytes = x.bytes / x.shape[0] * n;
+        x.shape[0] = n;
+    }
+    return out;
+}
+
+/// Rows the pocket's forward scratch holds: the largest prefill step and then some.
+pub const pocket_rows = 8192 + 256;
+
 /// One source linear's rows written into the tiled destination: words [n][g][8] -> [n/64][g][n%64][8].
 const Tile = struct {
     src: [3]Tensor,
@@ -338,6 +423,21 @@ const Tile = struct {
         }
     }
 };
+
+/// A projection's codes ([n, k/8], row layout) rewritten into its tiles and any row copy; scales and biases kept.
+pub fn retile(lin: Linear, words: []const u32) void {
+    const per = lin.k / 8;
+    const groups = lin.k / 64;
+    const tiled = lin.w.slice(u32, lin.n * per);
+    for (0..lin.n) |n| for (0..groups) |g| {
+        const at = ((n / 64 * groups + g) * 64 + n % 64) * 8;
+        @memcpy(tiled[at..][0..8], words[n * per + g * 8 ..][0..8]);
+    };
+    if (lin.rows) |r| {
+        const own: [*]u32 = @ptrCast(@alignCast(r.w.contents() + r.w_off));
+        if (own != words.ptr) @memcpy(own[0 .. lin.n * per], words[0 .. lin.n * per]);
+    }
+}
 
 fn runTiles(jobs: []const Tile) void {
     const workers = 8;

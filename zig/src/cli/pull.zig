@@ -148,7 +148,7 @@ fn fetchBig(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
                 return false;
             }
         }
-        try std.Io.Dir.renameAbsolute(b.file.path, try std.fs.path.join(a, &.{ blobs_dir, b.blob }), io);
+        try std.Io.Dir.cwd().rename(b.file.path, std.Io.Dir.cwd(), try std.fs.path.join(a, &.{ blobs_dir, b.blob }), io);
         try out.print("  {s}: {d:.2} MiB in {d} pieces\n", .{ b.entry.path, @as(f64, @floatFromInt(b.entry.size)) / (1 << 20), ranged.count(b.entry.size, piece) });
         try linkIntoSnapshot(a, io, snapshot_dir, b.entry.path, b.blob);
     }
@@ -159,12 +159,12 @@ fn matches(a: Allocator, io: std.Io, b: Big) !bool {
     return std.mem.eql(u8, &(try ranged.digest(a, io, b.file.path, b.file.size)), &b.entry.sha256.?);
 }
 
-fn envValue(env: ?*const std.process.Environ.Map, key: []const u8) ?[]const u8 {
+pub fn envValue(env: ?*const std.process.Environ.Map, key: []const u8) ?[]const u8 {
     return if (env) |m| m.get(key) else null;
 }
 
 /// The commit the hub serves for ``repo@revision``.
-fn resolveRevision(a: Allocator, client: *std.http.Client, out: *std.Io.Writer, endpoint: []const u8, repo: []const u8, revision: []const u8) ![]const u8 {
+pub fn resolveRevision(a: Allocator, client: *std.http.Client, out: *std.Io.Writer, endpoint: []const u8, repo: []const u8, revision: []const u8) ![]const u8 {
     if (!revisionOk(revision)) return error.BadRevision;
     const url = try std.fmt.allocPrint(a, "{s}/api/models/{s}/revision/{s}", .{ endpoint, repo, revision });
     const body = try getJson(a, client, url);
@@ -190,7 +190,7 @@ fn revisionOk(text: []const u8) bool {
 }
 
 /// The revision's files: path, size and the sha256 the hub states for LFS objects.
-fn listTree(a: Allocator, client: *std.http.Client, endpoint: []const u8, repo: []const u8, sha: []const u8) ![]Entry {
+pub fn listTree(a: Allocator, client: *std.http.Client, endpoint: []const u8, repo: []const u8, sha: []const u8) ![]Entry {
     const url = try std.fmt.allocPrint(a, "{s}/api/models/{s}/tree/{s}?recursive=true", .{ endpoint, repo, sha });
     const body = try getJson(a, client, url);
     var parsed = std.json.parseFromSlice(std.json.Value, a, body, .{}) catch return error.BadHubJson;

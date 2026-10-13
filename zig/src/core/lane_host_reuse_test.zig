@@ -51,7 +51,7 @@ test "a lane host resumes a conversation from its kept prompt state and reports 
             defer b.mutex.unlock(std.testing.io);
             switch (e.*) {
                 .prefilled => |c| b.cached = c,
-                .logprobs => {},
+                .logprobs, .prompt_logprobs => {},
                 .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
                 .finished => |f| b.done = f.reason,
             }
@@ -93,6 +93,15 @@ test "a lane host resumes a conversation from its kept prompt state and reports 
         try std.testing.expectEqual(lanes.fake.next(history.items, null, history.items.len), t);
         try history.append(gpa, t);
     }
+    try std.testing.expectEqual(@as(u64, 1), store.counts.hits);
+    try std.testing.expectEqual(@as(usize, 2), store.entries.items.len);
+    // a lesson's writer reads the model as shipped: untaught, a turn neither resumes from a kept state nor keeps one
+    var b3: Box = .{};
+    defer b3.tokens.deinit(gpa);
+    const r3: Request = .{ .prompt = t2.items, .max_tokens = 4, .history_len = @intCast(t2.items.len - 2), .untaught = true };
+    try e.submit(3, &r3, .{ .ctx = &b3, .event = Box.event });
+    try std.testing.expectEqual(Reason.length, b3.wait());
+    try std.testing.expectEqual(@as(?u32, 0), b3.cached);
     try std.testing.expectEqual(@as(u64, 1), store.counts.hits);
     try std.testing.expectEqual(@as(usize, 2), store.entries.items.len);
 }
@@ -152,7 +161,7 @@ test "a turn's mark evicting the state it resumed from: the hit is reported firs
             defer b.mutex.unlock(std.testing.io);
             switch (e.*) {
                 .prefilled => |c| b.cached = c,
-                .logprobs => {},
+                .logprobs, .prompt_logprobs => {},
                 .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
                 .finished => |f| b.done = f.reason,
             }
@@ -268,7 +277,7 @@ test "a learn step that moves the weights drops every kept state: the next turn 
             defer b.mutex.unlock(std.testing.io);
             switch (e.*) {
                 .prefilled => |c| b.cached = c,
-                .logprobs => {},
+                .logprobs, .prompt_logprobs => {},
                 .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
                 .finished => |f| b.done = f.reason,
             }
@@ -291,7 +300,7 @@ test "a learn step that moves the weights drops every kept state: the next turn 
     try e.submit(1, &r1, .{ .ctx = &b1, .event = Box.event });
     try std.testing.expectEqual(Reason.length, b1.wait());
     var learned: Learned = .{};
-    const example: api.Example = .{ .ids = &.{ 1, 2, 3 }, .start = 2 };
+    const example: api.Example = .{ .ids = &.{ 1, 2, 3 }, .start = 2, .decide = 1 };
     const lesson: api.LearnRequest = .{ .train = &.{example} };
     try e.learn(&lesson, .{ .ctx = &learned, .event = Learned.event });
     while (true) {

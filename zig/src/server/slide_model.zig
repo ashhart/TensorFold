@@ -1,0 +1,256 @@
+//! The served model as the Sliding Weights view draws it: its layers, its pockets, and the shards that hold them.
+const std = @import("std");
+const json = @import("json.zig");
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
+
+/// A shard file: its size and identity on disk, the layers whose shared expert it holds, and those tensors' bytes.
+pub const Shard = struct { name: []const u8, bytes: u64, mtime: i96, inode: u64, layers: []const u16, expert_bytes: u64 };
+
+/// The model's layers, its pockets and its shards, as the folder holds them.
+pub const Model = struct {
+    kinds: []const u8, // one letter a layer: M mamba, E MoE, * attention, - MLP, ? other
+    pocket: usize = 0, // the pocket's width in the shards (0: none written yet)
+    moe: []const u16 = &.{}, // the MoE layers
+    used: []const u16 = &.{}, // the neurons each of them holds in the shards
+    shards: []const Shard = &.{},
+};
+
+const prefix = "backbone.layers.";
+const expert = "mixer.shared_experts.";
+
+/// The folder's config, shard headers and stats; the pocket's rows read where the shards hold one.
+pub fn scan(a: Allocator, io: Io, dir: []const u8) !Model {
+    const config = try readJson(a, io, try std.fs.path.join(a, &.{ dir, "config.json" }));
+    if (config != .object) return error.BadConfig;
+    const kinds = try kindsOf(a, config.object);
+    const pocket = intField(config.object, "tensorfold_learned_neurons") orelse 0;
+    var moe: std.ArrayList(u16) = .empty;
+    for (kinds, 0..) |k, l| if (k == 'E') try moe.append(a, @intCast(l));
+    const used = try a.alloc(u16, moe.items.len);
+    @memset(used, 0);
+    var shards: std.ArrayList(Shard) = .empty;
+    var d = try Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
+    defer d.close(io);
+    var it = d.iterate();
+    while (try it.next(io)) |e| {
+        if (!std.mem.endsWith(u8, e.name, ".safetensors")) continue;
+        const name = try a.dupe(u8, e.name);
+        const path = try std.fs.path.join(a, &.{ dir, name });
+        const stat = try Io.Dir.cwd().statFile(io, path, .{});
+        var shard: Shard = .{ .name = name, .bytes = stat.size, .mtime = stat.mtime.toNanoseconds(), .inode = @intCast(stat.inode), .layers = &.{}, .expert_bytes = 0 };
+        readShard(a, io, path, &shard, pocket, moe.items, used) catch {};
+        try shards.append(a, shard);
+    }
+    std.mem.sort(Shard, shards.items, {}, byName);
+    return .{ .kinds = kinds, .pocket = pocket, .moe = moe.items, .used = used, .shards = shards.items };
+}
+
+fn byName(_: void, x: Shard, y: Shard) bool {
+    return std.mem.lessThan(u8, x.name, y.name);
+}
+
+/// The layer kinds as letters, from hybrid_override_pattern, else layers_block_type, else num_hidden_layers unknowns.
+fn kindsOf(a: Allocator, o: std.json.ObjectMap) ![]const u8 {
+    if (o.get("hybrid_override_pattern")) |v| if (v == .string and v.string.len > 0) return a.dupe(u8, v.string);
+    if (o.get("layers_block_type")) |v| if (v == .array) {
+        const out = try a.alloc(u8, v.array.items.len);
+        for (v.array.items, out) |b, *k| k.* = letter(if (b == .string) b.string else "");
+        return out;
+    };
+    const n = intField(o, "num_hidden_layers") orelse 0;
+    const out = try a.alloc(u8, n);
+    @memset(out, '?');
+    return out;
+}
+
+fn letter(name: []const u8) u8 {
+    const names = [_]struct { []const u8, u8 }{ .{ "mamba", 'M' }, .{ "moe", 'E' }, .{ "attention", '*' }, .{ "mlp", '-' } };
+    for (names) |n| if (std.mem.eql(u8, name, n[0])) return n[1];
+    return '?';
+}
+
+fn intField(o: std.json.ObjectMap, key: []const u8) ?usize {
+    const v = o.get(key) orelse return null;
+    return if (v == .integer and v.integer >= 0) @intCast(v.integer) else null;
+}
+
+/// The shard's header: the layers whose shared expert it holds and their bytes, and the pocket's neurons in use there.
+fn readShard(a: Allocator, io: Io, path: []const u8, shard: *Shard, pocket: usize, moe: []const u16, used: []u16) !void {
+    var file = try Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    var len: [8]u8 = undefined;
+    if (try file.readPositionalAll(io, &len, 0) != 8) return error.BadSafetensors;
+    const n = std.mem.readInt(u64, &len, .little);
+    if (shard.bytes < 8 or n > shard.bytes - 8 or n > 1 << 27) return error.BadSafetensors;
+    const text = try a.alloc(u8, @intCast(n));
+    if (try file.readPositionalAll(io, text, 8) != text.len) return error.BadSafetensors;
+    const header = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
+    if (header != .object) return error.BadSafetensors;
+    var layers: std.ArrayList(u16) = .empty;
+    var it = header.object.iterator();
+    while (it.next()) |kv| {
+        const name = kv.key_ptr.*;
+        const at = std.mem.indexOf(u8, name, expert) orelse continue;
+        const range = offsets(kv.value_ptr.*) orelse continue;
+        shard.expert_bytes += range[1] - range[0];
+        const layer = layerOf(name[0..at]) orelse continue;
+        if (std.mem.indexOfScalar(u16, layers.items, layer) == null) try layers.append(a, layer);
+        if (pocket == 0) continue;
+        const leaf = name[at + expert.len ..];
+        if (!std.mem.eql(u8, leaf, "up_proj.scales") and !std.mem.eql(u8, leaf, "up_proj.biases")) continue;
+        const slot = std.mem.indexOfScalar(u16, moe, layer) orelse continue;
+        used[slot] = @max(used[slot], try inUse(a, io, file, 8 + n + range[0], kv.value_ptr.*, pocket));
+    }
+    std.mem.sort(u16, layers.items, {}, std.sort.asc(u16));
+    shard.layers = layers.items;
+}
+
+/// A backbone layer's index from a name's start ("backbone.layers.13."), else null.
+fn layerOf(head: []const u8) ?u16 {
+    if (!std.mem.startsWith(u8, head, prefix)) return null;
+    const rest = std.mem.trimEnd(u8, head[prefix.len..], ".");
+    const dot = std.mem.indexOfScalar(u8, rest, '.') orelse rest.len;
+    if (dot != rest.len) return null;
+    return std.fmt.parseInt(u16, rest, 10) catch null;
+}
+
+fn offsets(entry: std.json.Value) ?[2]u64 {
+    if (entry != .object) return null;
+    const o = entry.object.get("data_offsets") orelse return null;
+    if (o != .array or o.array.items.len != 2) return null;
+    const b = o.array.items[0];
+    const e = o.array.items[1];
+    if (b != .integer or e != .integer or b.integer < 0 or e.integer < b.integer) return null;
+    return .{ @intCast(b.integer), @intCast(e.integer) };
+}
+
+/// Neurons in use among a per-row tensor's last `pocket` rows (bf16 scales or biases): up to the last not all zero.
+fn inUse(a: Allocator, io: Io, file: Io.File, at: u64, entry: std.json.Value, pocket: usize) !u16 {
+    const shape = entry.object.get("shape") orelse return 0;
+    if (shape != .array or shape.array.items.len != 2) return 0;
+    const rows = shape.array.items[0];
+    const cols = shape.array.items[1];
+    if (rows != .integer or cols != .integer or cols.integer < 1 or rows.integer < @as(i64, @intCast(pocket))) return 0;
+    const row: usize = @as(usize, @intCast(cols.integer)) * 2;
+    const own: u64 = @intCast(rows.integer - @as(i64, @intCast(pocket)));
+    const bytes = try a.alloc(u8, pocket * row);
+    if (try file.readPositionalAll(io, bytes, at + own * row) != bytes.len) return 0;
+    var last: usize = 0;
+    for (0..pocket) |r| if (!std.mem.allEqual(u8, bytes[r * row ..][0..row], 0)) {
+        last = r + 1;
+    };
+    return @intCast(last);
+}
+
+fn readJson(a: Allocator, io: Io, path: []const u8) !std.json.Value {
+    const bytes = try Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 24));
+    return std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{});
+}
+
+/// The shards a save changed (size, inode or time moved, or new) and their shared experts' bytes.
+pub fn written(a: Allocator, before: []const Shard, after: []const Shard) !struct { files: []const []const u8, bytes: u64 } {
+    var files: std.ArrayList([]const u8) = .empty;
+    var bytes: u64 = 0;
+    for (after) |s| {
+        const old = for (before) |b| {
+            if (std.mem.eql(u8, b.name, s.name)) break b;
+        } else null;
+        if (old) |b| if (b.bytes == s.bytes and b.mtime == s.mtime and b.inode == s.inode) continue;
+        try files.append(a, s.name);
+        bytes += s.expert_bytes;
+    }
+    return .{ .files = files.items, .bytes = bytes };
+}
+
+/// {"layers", "kinds", "pocket": {"neurons", "layers", "used"}, "shards": [{"name", "bytes", "pocket", "layers"}]}.
+pub fn value(a: Allocator, m: Model) !json.Value {
+    const o = try json.newObject(a);
+    try o.put(a, "layers", try json.intValue(a, m.kinds.len));
+    try o.put(a, "kinds", .{ .string = m.kinds });
+    const p = try json.newObject(a);
+    try p.put(a, "neurons", try json.intValue(a, m.pocket));
+    try p.put(a, "layers", try ints(a, m.moe));
+    try p.put(a, "used", try ints(a, m.used));
+    try o.put(a, "pocket", .{ .object = p });
+    const shards = try a.alloc(json.Value, m.shards.len);
+    for (m.shards, shards) |s, *out| {
+        const x = try json.newObject(a);
+        try x.put(a, "name", .{ .string = s.name });
+        try x.put(a, "bytes", try json.intValue(a, s.bytes));
+        try x.put(a, "pocket", .{ .bool = m.pocket > 0 and s.expert_bytes > 0 });
+        try x.put(a, "layers", try ints(a, s.layers));
+        out.* = .{ .object = x };
+    }
+    try o.put(a, "shards", .{ .array = shards });
+    return .{ .object = o };
+}
+
+pub fn ints(a: Allocator, xs: anytype) !json.Value {
+    const out = try a.alloc(json.Value, xs.len);
+    for (xs, out) |x, *v| v.* = try json.intValue(a, x);
+    return .{ .array = out };
+}
+
+/// A safetensors file of the named tensors, each its dtype, shape and bytes, in order.
+fn writeShard(io: Io, dir: Io.Dir, name: []const u8, tensors: []const struct { []const u8, []const u8, [2]usize, []const u8 }) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var head: std.ArrayList(u8) = .empty;
+    var data: std.ArrayList(u8) = .empty;
+    try head.append(a, '{');
+    for (tensors, 0..) |t, i| {
+        try head.print(a, "{s}\"{s}\": {{\"dtype\": \"{s}\", \"shape\": [{d}, {d}], \"data_offsets\": [{d}, {d}]}}", .{ if (i > 0) ", " else "", t[0], t[1], t[2][0], t[2][1], data.items.len, data.items.len + t[3].len });
+        try data.appendSlice(a, t[3]);
+    }
+    try head.append(a, '}');
+    var len: [8]u8 = undefined;
+    std.mem.writeInt(u64, &len, head.items.len, .little);
+    try dir.writeFile(io, .{ .sub_path = name, .data = try std.mem.concat(a, u8, &.{ &len, head.items, data.items }) });
+}
+
+test "a folder's layers, pockets in use and shards; a save's files and bytes" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{\"layers_block_type\": [\"mamba\", \"moe\", \"attention\", \"moe\"], \"tensorfold_learned_neurons\": 64}" });
+    // 64 own rows and 64 pocket rows of one bf16 scale: pocket rows 0 and 2 in use, so three neurons count
+    var scales: [128 * 2]u8 = @splat(0);
+    scales[(64 + 0) * 2 + 1] = 0x3f;
+    scales[(64 + 2) * 2 + 1] = 0x3f;
+    const zeros: [128 * 2]u8 = @splat(0);
+    try writeShard(io, tmp.dir, "model-00001-of-00002.safetensors", &.{
+        .{ "backbone.layers.1.mixer.shared_experts.up_proj.scales", "BF16", .{ 128, 1 }, &scales },
+        .{ "backbone.layers.1.mixer.shared_experts.up_proj.biases", "BF16", .{ 128, 1 }, &zeros },
+        .{ "backbone.layers.0.mixer.in_proj.scales", "BF16", .{ 128, 1 }, &zeros },
+    });
+    try writeShard(io, tmp.dir, "model-00002-of-00002.safetensors", &.{
+        .{ "backbone.layers.3.mixer.shared_experts.up_proj.scales", "BF16", .{ 128, 1 }, &zeros },
+    });
+    const dir = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    const m = try scan(a, io, dir);
+    try std.testing.expectEqualStrings("ME*E", m.kinds);
+    try std.testing.expectEqual(@as(usize, 64), m.pocket);
+    try std.testing.expectEqualSlices(u16, &.{ 1, 3 }, m.moe);
+    try std.testing.expectEqualSlices(u16, &.{ 3, 0 }, m.used);
+    try std.testing.expectEqual(@as(usize, 2), m.shards.len);
+    try std.testing.expectEqualSlices(u16, &.{1}, m.shards[0].layers);
+    try std.testing.expectEqual(@as(u64, 512), m.shards[0].expert_bytes);
+    // the second shard rewritten: it alone is a save's, with its shared expert's bytes
+    try writeShard(io, tmp.dir, "model-00002-of-00002.safetensors", &.{
+        .{ "backbone.layers.3.mixer.shared_experts.up_proj.scales", "BF16", .{ 128, 1 }, &scales },
+        .{ "backbone.layers.3.mixer.shared_experts.up_proj.biases", "BF16", .{ 128, 1 }, &zeros },
+    });
+    const again = try scan(a, io, dir);
+    try std.testing.expectEqualSlices(u16, &.{ 3, 3 }, again.used);
+    const w = try written(a, m.shards, again.shards);
+    try std.testing.expectEqual(@as(usize, 1), w.files.len);
+    try std.testing.expectEqualStrings("model-00002-of-00002.safetensors", w.files[0]);
+    try std.testing.expectEqual(@as(u64, 512), w.bytes);
+    const text = try json.stringify(a, try value(a, again), .{ .compact = true });
+    try std.testing.expect(std.mem.indexOf(u8, text, "\"pocket\":{\"neurons\":64,\"layers\":[1,3],\"used\":[3,3]}") != null);
+}

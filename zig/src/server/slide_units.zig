@@ -27,7 +27,7 @@ pub fn fullStop(c: u21) bool {
 }
 
 /// Content words a fact's teller would not say by chance, compared without case or British spellings.
-pub const common = [_][]const u8{ "that", "this", "with", "from", "have", "been", "were", "they", "them", "their", "there", "what", "when", "which", "where", "about", "would", "could", "should", "called", "named", "also", "just", "very", "into", "your", "mine", "ours", "will" };
+pub const common = [_][]const u8{ "that", "this", "with", "from", "have", "been", "were", "they", "them", "their", "there", "what", "when", "which", "where", "about", "would", "could", "should", "called", "named", "also", "just", "very", "into", "your", "mine", "ours", "will", "like", "likes", "love", "loves", "know", "knows", "told", "tell", "said", "think", "want", "really" };
 
 /// A word worth comparing: four letters or more, or any with a digit, and not a common one.
 pub fn notable_(word: []const u8) bool {
@@ -35,9 +35,29 @@ pub fn notable_(word: []const u8) bool {
     return !isCommon(word);
 }
 
-/// A word worth comparing in a sentence: a notable one, or a short name (capitalised, three letters, not the first).
+/// Three-letter grammar words in English and the languages first-person facts are told in (red, tea and Leo are not).
+const short_common = [_][]const u8{
+    "the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "had", "her", "was", "one", "our", "out", "get",
+    "has", "him", "his", "how", "now", "new", "old", "see", "two", "way", "who", "did", "its", "let", "put", "say", "she",
+    "too", "use", "yes", "yet", "why", "may", "own", "off", "few", "got", "ago", "per", "via", "etc", "i'm", "i'd", "ten",
+    "six", "day", "lot", "set", "try", "ask", "nor", "aka", "bit", "due", "nie", "jak", "czy", "ale", "pod", "nad", "bez",
+    "jej", "tak", "lub", "dla", "nam", "tam", "kto", "gdy", "aby", "ani", "mam", "moi", "ich", "der", "die", "das", "und",
+    "ist", "ein", "mit", "von", "zum", "zur", "auf", "aus", "bei", "nur", "den", "dem", "des", "wie", "wer", "sie", "wir",
+    "ihr", "uns", "man", "mir", "bin", "hat", "war", "als", "vor", "bis", "ins", "les", "une", "est", "pas", "qui", "que",
+    "ses", "sur", "par", "mon", "mes", "ton", "tes", "nos", "vos", "aux", "ont", "lui", "moi", "toi", "eux", "ces", "cet",
+    "ici", "oui", "non", "los", "las", "una", "por", "con", "del", "mis", "sus", "muy", "fue", "hay", "ese", "esa", "eso",
+    "uno", "tus", "che", "gli", "nel", "dei", "mio", "suo", "sua", "noi", "voi", "lei", "chi", "sul", "dal", "nei", "uma",
+    "com", "dos", "das", "meu", "seu", "ele", "foi", "tem", "mas", "pra", "num", "het", "een", "van", "dat", "met", "ook",
+    "wat", "hoe", "mij", "wij", "jij", "hij", "zij", "ons", "aan", "bij", "tot", "uit", "nog", "wel", "heb",
+};
+
+/// A word worth comparing in a sentence: a notable one, a short name (capitalised, not first) or short content word.
 pub fn marked_(raw: []const u8, word: []const u8, first: bool) bool {
-    return notable_(word) or (word.len == 3 and !first and std.ascii.isUpper(raw[0]) and !isCommon(word));
+    if (notable_(word)) return true;
+    if (word.len != 3 or isCommon(word)) return false;
+    if (!first and std.ascii.isUpper(raw[0])) return true;
+    for (short_common) |c| if (std.mem.eql(u8, c, word)) return false;
+    return true;
 }
 
 pub const delimiters = " \t\r\n,;:!?()[]\"*-";
@@ -138,10 +158,23 @@ pub fn unspaced(c: u21) bool {
         (c >= 0x20000 and c <= 0x2FA1F);
 }
 
-/// Ideographic and full-width punctuation (、。「」！？ and the like): it parts units as a space does.
+/// Whether `question` is in `fact`'s script: a fact told without spaces is asked about in that script too.
+pub fn sameScript(fact: []const u8, question: []const u8) bool {
+    return !hasUnspaced(fact) or hasUnspaced(question);
+}
+
+fn hasUnspaced(text: []const u8) bool {
+    const view = std.unicode.Utf8View.init(text) catch return false;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |c| if (unspaced(c)) return true;
+    return false;
+}
+
+/// Ideographic and full-width punctuation, symbols and emoji part units as a space does: "Ginger.✅" says "Ginger".
 pub fn punctuation(c: u21) bool {
     return (c >= 0x3000 and c <= 0x303F) or (c >= 0xFF01 and c <= 0xFF0F) or (c >= 0xFF1A and c <= 0xFF20) or
-        (c >= 0xFF3B and c <= 0xFF40) or (c >= 0xFF5B and c <= 0xFF65);
+        (c >= 0xFF3B and c <= 0xFF40) or (c >= 0xFF5B and c <= 0xFF65) or (c >= 0x2000 and c <= 0x2BFF) or
+        (c >= 0x1F000 and c <= 0x1FAFF) or c == 0xFE0F;
 }
 
 /// A word lowercased, without a trailing full stop or 's, with British "our" as "or" (colour, favourite).
@@ -176,4 +209,5 @@ test "units: words made normal, pairs of characters in scripts without spaces, p
     try std.testing.expect(it.next() == null);
     try std.testing.expect(says("鱈ちりです。", "ちり") and !says("鱈ちりです。", "鱈り"));
     try std.testing.expectEqual(@as(usize, 3), sentenceEnd("です。", 6));
+    try std.testing.expect(says("Your dog's name is Ginger.✅", "ginger") and says("Ana’s here — yes", "ana"));
 }

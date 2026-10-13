@@ -27,6 +27,13 @@ pub const Model = struct {
         defer a.free(text);
         const c = try cfg.parse(a, text);
         if (target.config.hidden != c.hidden or target.config.vocab != c.vocab or target.config.layers != c.target_layers) return error.TargetBinding;
+        const shards = try core.checkpoint_host.shardFiles(a, io, dir);
+        defer core.checkpoint_host.freeShardFiles(a, shards);
+        return open(a, target, c, shards, mode);
+    }
+    /// The draft model of config `c` from its checkpoint `shards`, prepared for `mode`.
+    pub fn open(a: std.mem.Allocator, target: *Target, c: cfg.Config, shards: []const [:0]const u8, mode: op.Mode) !*Model {
+        if (mode == .python_q4g64) return error.DraftPreparationUnqualified;
         const model = try a.create(Model);
         errdefer a.destroy(model);
         model.allocator = a;
@@ -34,14 +41,15 @@ pub const Model = struct {
         model.committed_end = 0;
         model.checkpoint = core.checkpoint_metal.Checkpoint.init(a);
         errdefer model.checkpoint.deinit();
-        const shards = try core.checkpoint_host.shardFiles(a, io, dir);
-        defer core.checkpoint_host.freeShardFiles(a, shards);
-        for (shards) |file| try model.checkpoint.addFile(target.device, file, "");
+        // q4 drafts read their linears only through prepared copies: those stay in the file until prepare reads them
+        const later: ?core.checkpoint_metal.Later = if (mode == .prepared_q4_reference) Backend.linear else null;
+        for (shards) |file| try model.checkpoint.addFileSplit(target.device, file, "", null, later);
         model.backend = try Backend.init(a, target, &model.checkpoint, c);
         errdefer model.backend.deinit();
         model.graph = try loadGraph(a, &model.backend);
         errdefer model.graph.deinit();
         if (mode == .prepared_q4_reference) try model.backend.prepare();
+        model.checkpoint.closeFiles();
         model.pending = try target.device.buffer(@as(usize, c.window) * c.tapWidth() * 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         errdefer model.pending.deinit();
         model.session = try Session.init(c, 1, 0);
@@ -55,6 +63,14 @@ pub const Model = struct {
         m.checkpoint.deinit();
         m.allocator.destroy(m);
     }
+    /// After a GPU failure: the frame and any open transaction are dropped, and the context starts empty.
+    pub fn recover(m: *Model) !void {
+        m.backend.frame.release();
+        m.backend.transaction = null;
+        m.backend.staged = null;
+        m.backend.failed = false;
+        try m.reset();
+    }
     pub fn reset(m: *Model) !void {
         if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null) return error.BadDraftContext;
         m.backend.context = .{ .cache = 1, .begin = 0, .end = 0 };
@@ -64,18 +80,11 @@ pub const Model = struct {
     }
     pub fn absorb(m: *Model, taps: @import("runtime_backend.zig").Ref, rows: u32) !void {
         if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or rows == 0 or rows > 128) return error.BadCommittedTaps;
-        const stride = @as(usize, m.graph.config.tapWidth()) * 2;
-        const bytes = @as(usize, rows) * stride;
-        if (taps.off > taps.buf.length() or bytes > taps.buf.length() - taps.off) return error.BadCommittedTaps;
-        const end = try std.math.add(u64, m.committed_end, rows);
-        var first: usize = 0;
-        while (first < rows) {
-            const slot: usize = @intCast((m.committed_end + first) % m.graph.config.window);
-            const count = @min(rows - first, m.graph.config.window - slot);
-            @memcpy(m.pending.contents()[slot * stride ..][0 .. count * stride], taps.buf.contents()[taps.off + first * stride ..][0 .. count * stride]);
-            first += count;
-        }
-        m.committed_end = end;
+        try m.ring().absorb(taps.buf, taps.off, rows);
+    }
+    /// The committed taps the drafter reads, as a ring a lane's state copies.
+    pub fn ring(m: *Model) @import("../tap_ring.zig").Ring {
+        return .{ .buf = m.pending, .end = &m.committed_end, .window = m.graph.config.window, .stride = @as(usize, m.graph.config.tapWidth()) * 2 };
     }
     pub fn flush(m: *Model) !void {
         if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or m.committed_end == 0 or m.session.context.end > m.committed_end) return error.BadDraftContext;
@@ -128,11 +137,12 @@ pub fn loadGraph(a: std.mem.Allocator, b: *Backend) !weights.Graph {
     defer arena.deinit();
     const local = arena.allocator();
     const embed = try binding(local, target, prefix, "model.embed_tokens");
-    const head = try binding(local, target, prefix, "lm_head");
     var names: std.ArrayList([]const u8) = .empty;
     var iterator = b.checkpoint.tensors.keyIterator();
     while (iterator.next()) |name| try names.append(local, name.*);
-    return weights.load(a, .{ .source = b.source(), .names = names.items }, b.config, embed, head);
+    var later = b.checkpoint.deferred.keyIterator();
+    while (later.next()) |name| try names.append(local, name.*);
+    return weights.load(a, .{ .source = b.source(), .names = names.items }, b.config, embed);
 }
 fn binding(a: std.mem.Allocator, target: *Target, prefix: []const u8, module: []const u8) !ck.Linear {
     const stem = try std.mem.concat(a, u8, &.{ prefix, module });

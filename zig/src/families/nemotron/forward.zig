@@ -10,7 +10,10 @@ const tree = @import("tree.zig");
 const encoder = @import("encoder.zig");
 const Sampling = @import("lanes").sampling.Sampling;
 const fullVocabulary = @import("lanes").gpu_full.fullVocabulary;
+const gpu_rule = @import("lanes").gpu_rule;
 const row = @import("../../core/row_projection.zig");
+const Masks = @import("../../core/grammar_mask.zig").Masks;
+const lesson_route = @import("lesson_route.zig");
 
 const Buffer = mtl.Buffer;
 pub const Enc = encoder.Enc;
@@ -39,6 +42,7 @@ pub const Seg = struct {
     draw: Draw = .greedy,
     gpu: ?layers.GpuArgs = null, // its kv write and attention dims written on the GPU (a GPU-side round)
     gpu_tree: ?tree.GpuTree = null, // its rows a tree whose tables and dims the GPU writes (a GPU-side round)
+    mask_row: ?usize = null, // structured output: its rows' grammar bits from this row of Forward.masks
 };
 
 pub fn ints8(values: []const i32) [8]i32 {
@@ -56,6 +60,10 @@ pub const Forward = struct {
     geometry: usize = 0, // routed experts' (rows, simdgroups) variant: 0 generated, i: kernels.geometries[i - 1]
     members: usize = 0, // routed experts' member rows a pass (2 or 4: the shared-unpack kernels; 0: one at a time)
     round: ?layers.RoundArgs = null, // a GPU-side round's Mamba tables and routed rows, written on the GPU (one segment)
+    masks: ?*const Masks = null, // structured output's bits (segments with a mask_row)
+    route: lesson_route.Route = .{}, // which rows carry the lessons (none set: no row does)
+    untaught: bool = false, // the pocket leaves rows (the model as shipped): `segs`' untaught streams', else all
+    segs: []const Seg = &.{}, // the pass's streams, as body() runs them
 
     pub fn mp(rows: usize) usize {
         return 16 * ((rows + 15) / 16);
@@ -146,7 +154,19 @@ pub const Forward = struct {
     }
 
     /// Embedding to the final norm over the segments' rows (ids in segment order), into scratch.x and scratch.xs.
-    pub fn body(self: Forward, e: *Enc, segs: []const Seg, ids: Buffer, ids_off: usize) void {
+    pub fn body(forward: Forward, e: *Enc, segs: []const Seg, ids: Buffer, ids_off: usize) void {
+        var self = forward;
+        if (self.route.count == 0) for (segs, 0..) |g, j| {
+            if (j == lesson_route.max_segments) break;
+            var first: usize = 0;
+            for (segs[0..j]) |h| first += h.rows;
+            self.route.add(first, g.rows, g.cache.len - g.cache.replay, if (g.cache.rid >= 0) g.cache.decide else lesson_route.none, @intCast(@max(g.cache.rid, 0)));
+        };
+        self.segs = segs;
+        for (segs) |g| self.untaught = self.untaught or g.cache.untaught;
+        const lessons = layers.firstAdapter(self.w);
+        if (lessons) |ad| layers.latchAll(self.k, e, ad, &self.route, false);
+        defer if (lessons) |ad| layers.latchAll(self.k, e, ad, &self.route, true);
         const c = self.c;
         const s = self.s;
         const d = c.hidden;
@@ -197,6 +217,7 @@ pub const Forward = struct {
                     const off = (at + g.rows - 1) * d * 2;
                     self.xsum(e, "xsum_2688", d, s.x, off, s.hx, 1);
                     self.coop(e, "head", self.w.head, s.x, off, s.hx, s.logits, 1);
+                    if (g.mask_row) |r| self.masks.?.encode(e, s.logits, 0, self.c.vocab, r, 1);
                     self.pick(e, 1, self.c.vocab, null, g.draw, out, put);
                     put += 4;
                 },
@@ -206,6 +227,11 @@ pub const Forward = struct {
         }
         if (head != .all) return;
         self.coop(e, "head", self.w.head, s.x, 0, s.xs, s.logits, at);
+        at = 0;
+        for (segs) |g| {
+            if (g.mask_row) |r| self.masks.?.encode(e, s.logits, at * self.c.vocab * 2, self.c.vocab, r, g.rows);
+            at += g.rows;
+        }
         at = 0;
         for (segs) |g| {
             self.pickAt(e, g.rows, self.c.vocab, at, null, g.draw, out, put);
@@ -242,15 +268,12 @@ pub const Forward = struct {
         var cfgs: [4 * st.max_rows]f32 = @splat(0);
         var caps: [st.max_rows]u32 = @splat(0);
         const t = d.sampling;
+        const rule = gpu_rule.rule(t);
         for (0..rows) |r| {
-            seeds[2 * r] = @truncate(t.seed);
-            seeds[2 * r + 1] = @truncate(t.seed >> 32);
+            seeds[2 * r ..][0..2].* = rule.seedHalves();
             positions[r] = @intCast(d.position + r);
-            cfgs[4 * r] = @floatCast(1.0 / @max(t.temperature, 1e-6));
-            cfgs[4 * r + 1] = @floatCast(t.top_p);
-            cfgs[4 * r + 2] = 20.0;
-            cfgs[4 * r + 3] = @floatCast(t.minLog());
-            caps[r] = t.top_k;
+            cfgs[4 * r ..][0..4].* = rule.cfg();
+            caps[r] = rule.top_k;
         }
         const n = @max(rows, 8);
         const whole = fullVocabulary(t);

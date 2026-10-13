@@ -67,6 +67,26 @@ pub const cluster_scheduling_spread: c_int = 1;
 
 pub const Dim3 = extern struct { x: c_uint = 1, y: c_uint = 1, z: c_uint = 1 };
 
+/// CUDA_MEMCPY2D for device addresses (type 2): `height` rows of `width` bytes, each side's rows its pitch apart.
+pub const Memcpy2D = extern struct {
+    src_x: usize = 0,
+    src_y: usize = 0,
+    src_type: c_int = 2,
+    src_host: ?*const anyopaque = null,
+    src: DevicePtr,
+    src_array: ?*anyopaque = null,
+    src_pitch: usize,
+    dst_x: usize = 0,
+    dst_y: usize = 0,
+    dst_type: c_int = 2,
+    dst_host: ?*anyopaque = null,
+    dst: DevicePtr,
+    dst_array: ?*anyopaque = null,
+    dst_pitch: usize,
+    width: usize,
+    height: usize,
+};
+
 /// CUlaunchAttributeValue: a 64-byte union aligned for its pointer members.
 pub const LaunchAttributeValue = extern union {
     pad: [64]u8,
@@ -167,6 +187,7 @@ pub const Api = struct {
     cuMemcpyHtoDAsync_v2: *const fn (DevicePtr, CPtr, usize, Stream) callconv(.c) R,
     cuMemcpyDtoHAsync_v2: *const fn (Ptr, DevicePtr, usize, Stream) callconv(.c) R,
     cuMemcpyDtoDAsync_v2: *const fn (DevicePtr, DevicePtr, usize, Stream) callconv(.c) R,
+    cuMemcpy2DAsync_v2: *const fn (*const Memcpy2D, Stream) callconv(.c) R,
     cuMemsetD8_v2: *const fn (DevicePtr, u8, usize) callconv(.c) R,
     cuMemsetD32_v2: *const fn (DevicePtr, c_uint, usize) callconv(.c) R,
     cuMemsetD8Async: *const fn (DevicePtr, u8, usize, Stream) callconv(.c) R,

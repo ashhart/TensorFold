@@ -1,4 +1,4 @@
-//! The Metal engines: lane core (Nemotron, Qwen3.5-2B, GLM), serial host (Qwen3.8-27B), Flash Next replay.
+//! The Metal engines: lane core (Nemotron, Qwen3.5-2B, GLM, Qwen3.8-27B), Flash Next replay.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -6,10 +6,12 @@ const tf = @import("tensorfold");
 const lanes = tf.lanes;
 const nemotron = tf.nemotron;
 const Allocator = std.mem.Allocator;
-const qwen27 = @import("qwen27_host.zig");
+const qwen27 = @import("qwen27_served.zig");
 const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
+const glm_dsa = @import("glm_dsa_host.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
+const Slide = nemotron_slide.Adapter(nemotron.slide);
 const cache_fit = @import("cache_fit.zig");
 
 pub const backends: []const []const u8 = &.{"metal"};
@@ -18,6 +20,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "qwen4_exp", .formats = &.{"mlx-q6g32"} },
     .{ .model_type = "glm5_next", .formats = &.{"mlx-q4g64"} },
     .{ .model_type = "qwen3_5", .formats = &.{"mlx-q4g64"} },
+    .{ .model_type = "glm_moe_dsa", .formats = &.{"exlr8"} },
 };
 
 /// The chip class gate entries name ("apple-m5" for an Apple M5 Max); null without an Apple GPU.
@@ -68,7 +71,7 @@ const Host = struct {
     cache: ?api.prompt_cache.Store = null, // kept prompt states (engine thread only); null: a zero budget
     learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk, read back by later servers
     round: nemotron.gpu_round.Options = .{ .depth = 8 }, // a lone greedy stream's GPU-side rounds, as the CLI runs them
-    slide: ?*nemotron_slide.Adapter = null, // Sliding Weights' learner, with --slide
+    slide: ?*Slide = null, // Sliding Weights' learner, with --slide
 
     /// A lone greedy stream's rounds on the GPU until it finishes, or a hand-over to the lane core (true).
     fn lone(ctx: *anyopaque, s: *lanes.Stream, hooks: api.LoneHooks) anyerror!bool {
@@ -99,6 +102,10 @@ const Host = struct {
 /// The engine for `o.dir`, or null with `problem` set when no Metal engine reads the checkpoint.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const dense = std.mem.eql(u8, o.model_type, "qwen3_5") and qwen27Engine(a, io, o.dir);
+    if (try refusal(a, o, dense)) |why| {
+        problem.* = why;
+        return null;
+    }
     if (o.drafter != null and !dense) {
         problem.* = "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head)";
         return null;
@@ -106,13 +113,14 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (dense) return openQwen27(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return openFlashNext(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "glm_moe_dsa")) return openGlmDsa(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen3_5")) return @import("qwen35.zig").open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "nemotron_h")) {
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
         return null;
     }
-    if (o.slide) if (try tf.shard_edit.linked(a, io, o.dir)) |name| {
-        problem.* = try std.fmt.allocPrint(a, "--slide rewrites the model's own files, and {s} in {s} is a link to data another file shares (a Hugging Face cache's blob, or a hard link), so learning would change that file too: serve a copy made with `cp -cRL` (an APFS clone that follows links)", .{ name, o.dir });
+    if (o.slide) if (try nemotron_slide.refusal(tf.shard_edit, a, io, o.dir, "`cp -cRL` (an APFS clone that follows links)")) |why| {
+        problem.* = why;
         return null;
     };
     const native = modelContext(a, io, o.dir);
@@ -142,6 +150,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .batch_rows = @min(128, @max(64, 4 * o.lanes)), // four rows a lane, so 32 and 64 sessions keep their drafts
     });
     errdefer h.metal.deinit();
+    nemotron.slide.loadLiving(gpa, io, h.metal) catch |e| {
+        problem.* = try std.fmt.allocPrint(a, "the native engine cannot read the saved lessons in {s} ({s})", .{ o.dir, @errorName(e) });
+        return null;
+    };
     if (h.metal.head != null) try nemotron.timing.measure(h.metal, io);
     const rows: u32 = if (h.metal.head != null) nemotron.backend.max_window else 1;
     h.cfg = try lanes.Config.init(gpa, h.metal.facts(), rows, rows - 1);
@@ -149,11 +161,11 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.clock = .{ .b = h.metal, .wall = .{ .io = io } };
     h.core = lanes.Engine.init(gpa, &h.cfg, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(@max(window, 0)), .prefill_step = step });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(@max(window, 0)), .prefill_step = step, .structures = true });
     h.round = .{ .depth = 8 };
     h.cache = null;
     var why: []const u8 = "";
-    const plan = cache_fit.budget(o.prompt_cache_gib, o.prompt_cache_over_cap, @min(h.m.device.maxWorkingSet() -| h.m.device.allocated() -| (8 << 30), 16 << 30), a, &why, "") catch |e| {
+    const plan = cache_fit.budget(o.prompt_cache_gib, o.prompt_cache_over_cap, h.m.device.maxWorkingSet() -| h.m.device.allocated() -| (8 << 30), a, &why, "") catch |e| {
         if (e == error.CacheOverCap) problem.* = why;
         return e;
     };
@@ -161,7 +173,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (plan.budget_bytes > 0) {
         const S = nemotron.snapshot.Cached;
         const L = nemotron.learned_prompts;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop, .write = L.snapWrite, .read = L.snapRead, .forget = L.snapForget } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop, .write = L.snapWrite, .read = L.snapRead, .forget = L.snapForget, .forget_checked = api.prompt_cache.singleForgetChecked, .reclaim = api.prompt_cache.singleReclaim } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
         h.host.cache = &h.cache.?; // the lane host's store: a Sliding Weights step that moves weights clears it
         h.host.info_.prompt_cache = true;
     }
@@ -172,6 +184,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
             if (e == error.PromptTooLong) problem.* = "--learn keys its states with a 4,143-token prompt at startup: serve with --context 4096 or more, or without --learn";
             return e;
         };
+        h.learned.?.admission.floor = @intFromFloat(o.learn_min_free_gib * (1 << 30));
         if (h.cache) |*store| store.imprint = &h.learned.?;
     }
     errdefer if (h.learned) |*im| im.deinit();
@@ -180,9 +193,9 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     h.slide = null;
     if (o.slide) {
-        const s = try gpa.create(nemotron_slide.Adapter);
+        const s = try gpa.create(Slide);
         errdefer gpa.destroy(s);
-        s.* = nemotron_slide.Adapter.init(gpa, io, h.metal);
+        s.* = Slide.init(gpa, io, h.metal);
         h.slide = s;
         h.host.learner = s.hook();
     }
@@ -192,6 +205,17 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+/// Refused before any weights load: --slide but on Nemotron, as CUDA does, and --learn where nothing is kept on disk.
+fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
+    const t = o.model_type;
+    if (o.slide and !std.mem.eql(u8, t, "nemotron_h")) return try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on Macs yet", .{t});
+    const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
+    if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
+    if (o.learn == null) return null;
+    const name: []const u8 = if (std.mem.eql(u8, t, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (!std.mem.eql(u8, t, "qwen3_5")) return null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
+    return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only: serve {s} without --learn, --learn-dir or --learn-gib", .{name});
 }
 
 /// Learned states under `root` by checkpoint, shards, prefill step, head, kernels, probe bits, OS build and chip.
@@ -260,33 +284,22 @@ fn qwen27Engine(a: Allocator, io: std.Io, dir: []const u8) bool {
     return true;
 }
 
-/// Qwen3.8-27B on the serial host: DFlash2 drafts from --drafter, prompt reuse, a resident weight set.
+/// Qwen3.8-27B on the lane host: `--parallel` streams in shared rounds, DFlash2 drafts from --drafter for one of them.
 fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
-    if (o.speed_up != null) {
-        problem.* = "speed-up mode is not available for Qwen3.8-27B yet";
-        return null;
-    }
     const context = o.context orelse 32768;
     if (context <= 0 or context > 262144) {
         problem.* = try std.fmt.allocPrint(a, "--context {d} is outside Qwen3.8-27B's 1 to 262,144 tokens", .{context});
         return null;
     }
-    const h = qwen27.open(gpa, io, o.dir, @intCast(context)) catch |err| {
-        problem.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B engine cannot load {s} ({s})", .{ o.dir, @errorName(err) });
+    if (o.drafts and o.drafter != null and o.drafter_bits != 0 and o.drafter_bits != 4) {
+        problem.* = "--drafter-bits takes 0 (bf16) or 4";
         return null;
-    };
-    if (o.drafts) if (o.drafter) |dir| qwen27.enableDraft(h, io, dir, o.drafter_bits) catch |err| {
-        qwen27.close(h);
-        problem.* = try std.fmt.allocPrint(a, "the native Qwen3.8-27B drafter cannot load {s} ({s})", .{ dir, @errorName(err) });
-        return null;
-    };
+    }
     var why: []const u8 = "";
-    qwen27.enableCache(h, o.prompt_cache_gib, o.prompt_cache_over_cap, a, &why) catch |err| {
-        qwen27.close(h);
-        problem.* = if (err == error.CacheOverCap) why else try std.fmt.allocPrint(a, "the native Qwen3.8-27B prompt cache cannot start ({s})", .{@errorName(err)});
+    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafter = if (o.drafts) o.drafter else null, .drafter_bits = o.drafter_bits, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap }, a, &why) catch |err| {
+        problem.* = if (err == error.CacheOverCap or err == error.DrafterLoad or err == error.TooManyStreams) why else try std.fmt.allocPrint(a, "the native Qwen3.8-27B engine cannot load {s} ({s})", .{ o.dir, @errorName(err) });
         return null;
     };
-    qwen27.holdResident(h) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
     return .{ .engine = h.engine(), .close = qwen27.close, .ctx = h };
 }
 
@@ -302,8 +315,8 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     var why: []const u8 = "";
-    const h = flashnext.open(gpa, io, o.dir, dump, window, o.speed_up, o.prompt_cache_gib, o.prompt_cache_over_cap, a, &why) catch |e| {
-        problem.* = tf.flashnext_engine.quantizationProblem(e) orelse if (e == error.CacheOverCap) why else if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump orelse "(none: the checked-in kernels)", @errorName(e) });
+    const h = flashnext.open(gpa, io, o.dir, dump, window, o.speed_up, o.prompt_cache_gib, o.prompt_cache_over_cap, o.learn, @intFromFloat(o.learn_gib * (1 << 30)), a, &why) catch |e| {
+        problem.* = tf.flashnext_engine.quantizationProblem(e) orelse if (e == error.CacheOverCap or e == error.LearnOnPair) why else if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump orelse "(none: the checked-in kernels)", @errorName(e) });
         return null;
     };
     return .{ .engine = h.engine(), .close = flashnext.close, .ctx = h };
@@ -311,7 +324,11 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
 
 test {
     _ = flashnext;
+    _ = glm;
+    _ = glm_dsa;
+    _ = qwen27;
     _ = @import("cache_fit.zig");
+    _ = @import("qwen27_landing.zig");
 }
 
 /// What a two-Mac link that never connected asks of whoever starts the servers; null for any other error.
@@ -336,11 +353,34 @@ fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]co
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const h = glm.open(gpa, io, o.dir, @intCast(window), o.speed_up, o.lanes, o.lanes_fixed, o.prompt_cache_gib, o.learn, @intFromFloat(o.learn_gib * (1 << 30))) catch |e| {
-        problem.* = if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
+    const h = glm.open(gpa, io, o.dir, @intCast(window), o.speed_up, o.lanes, o.lanes_fixed, o.prompt_cache_gib, o.learn, @intFromFloat(o.learn_gib * (1 << 30)), @intFromFloat(o.learn_min_free_gib * (1 << 30))) catch |e| {
+        if (e == error.BadLoadLimit) problem.* = "GLM_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 70% of RAM" else problem.* = if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
     };
     return .{ .engine = h.engine(), .close = glm.close, .ctx = h };
+}
+
+/// GLM-5.3 (EXLR8) needs a pair: each Mac holds half of every expert and attention head (--speed-up names its link).
+fn openGlmDsa(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    const settings = o.speed_up orelse {
+        problem.* = "GLM-5.3 (EXLR8) runs on two Macs: start both with --speed-up and each Mac's link settings (rank 0 serves)";
+        return null;
+    };
+    const window: i64 = o.context orelse 16384;
+    if (window <= 0 or window > 262144) {
+        problem.* = try std.fmt.allocPrint(a, "--context {d} is outside 1 to 262,144 tokens for GLM-5.3 (EXLR8)", .{window});
+        return null;
+    }
+    var ram: u64 = 0;
+    var len: usize = 8;
+    if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) return error.NoRamSize;
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const h = glm_dsa.open(gpa, io, o.dir, @intCast(window), settings, @max(1, @min(o.lanes, 16)), ram / 100 * 66, o.prompt_cache_gib) catch |e| {
+        problem.* = if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native GLM-5.3 (EXLR8) engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native GLM-5.3 (EXLR8) engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
+        return null;
+    };
+    return .{ .engine = h.engine(), .close = glm_dsa.close, .ctx = h };
 }
 
 test "chip classes from Metal device names" {
@@ -369,6 +409,42 @@ test "a qwen3_5 checkpoint opens the 27B engine unless it has the 2B's geometry 
     for (cases) |c| {
         try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = c.config });
         try std.testing.expectEqual(c.big, qwen27Engine(a, io, dir));
+    }
+}
+
+test "--learn is refused for the 27B, the 2B and GLM-5.3 (EXLR8), and not for the families that keep prompt states on disk" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const learn: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .learn = "/x" };
+    const flags = " without --learn, --learn-dir or --learn-gib";
+    try std.testing.expectStringEndsWith((try refusal(a, learn, true)) orelse "", ": serve Qwen3.8-27B" ++ flags);
+    try std.testing.expectStringEndsWith((try refusal(a, learn, false)) orelse "", ": serve Qwen3.5-2B" ++ flags);
+    try std.testing.expectStringEndsWith((try refusal(a, .{ .dir = "d", .model_type = "glm_moe_dsa", .learn = "/x" }, false)) orelse "", ": serve GLM-5.3 (EXLR8)" ++ flags);
+    for ([_][]const u8{ "qwen3_5", "glm_moe_dsa" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .learn_gib = 8, .learn_min_free_gib = 2 }, true)) == null);
+    for ([_][]const u8{ "nemotron_h", "qwen4_exp", "glm5_next" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .learn = "/x" }, false)) == null);
+}
+
+test "--speed-up is refused by Nemotron, the 27B and the 2B before any load, and not by the two-Mac families" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const two: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .speed_up = "pair.json" };
+    const tail = " only: serve {s} without it";
+    try std.testing.expectStringEndsWith((try refusal(a, two, true)) orelse "", try std.fmt.allocPrint(a, tail, .{"Qwen3.8-27B"}));
+    try std.testing.expectStringEndsWith((try refusal(a, two, false)) orelse "", try std.fmt.allocPrint(a, tail, .{"Qwen3.5-2B"}));
+    try std.testing.expectStringEndsWith((try refusal(a, .{ .dir = "d", .model_type = "nemotron_h", .speed_up = "pair.json" }, false)) orelse "", try std.fmt.allocPrint(a, tail, .{"Nemotron"}));
+    for ([_][]const u8{ "qwen4_exp", "glm5_next", "glm_moe_dsa" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .speed_up = "pair.json" }, false)) == null);
+}
+
+test "--slide is refused by every family but Nemotron, which learns into its weights" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = "nemotron_h", .slide = true }, false)) == null);
+    for ([_][]const u8{ "glm_moe_dsa", "qwen4_exp", "glm5_next", "qwen3_5" }) |t| {
+        const why = (try refusal(a, .{ .dir = "d", .model_type = t, .slide = true }, true)) orelse return error.TestExpectedRefusal;
+        try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on Macs yet", .{t}), why);
     }
 }
 

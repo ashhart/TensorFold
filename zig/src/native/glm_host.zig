@@ -40,25 +40,28 @@ fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     };
 }
 
-/// Streams whose caches fit beside the weights under the 70% load limit, at most `want` (`fixed`: all of them or none).
+/// Streams fitting beside the weights under the load limit, at most `want` (`fixed`: all or none); pooled: KDA only.
 fn fit(eng: *const ge.Engine, want: u32, fixed: bool) !u32 {
-    const per = glm.state.stateBytes(&eng.c, eng.s.cap, true) + 64 * 1024;
+    const per = glm.state.stateBytes(&eng.c, if (glm.pool.on(eng)) 0 else eng.s.cap, true) + 64 * 1024;
     const used = eng.w.bytes + eng.arena.bytes;
-    const limit = ge.Engine.loadLimit();
+    const limit = eng.limit.bytes;
     const room: u64 = if (limit > used) (limit - used) / per else 0;
     const n: u32 = @intCast(@min(@as(u64, @max(want, 1)), 1 + room));
     if (n < want and fixed) {
-        std.log.err("glm: {d} streams of {d}-token caches pass this Mac's load limit; {d} fit (lower --parallel or --context)", .{ want, eng.s.cap, n });
+        std.log.err("glm: {d} streams of {d}-token caches pass this Mac's {d:.1} GB load limit ({s}); {d} fit (lower --parallel or --context)", .{ want, eng.s.cap, @as(f64, @floatFromInt(limit)) / 1e9, eng.limit.source(), n });
         return error.OverMemoryLimit;
     }
     return n;
 }
 
-/// Kept prompt states' room: --prompt-cache-gib, else 16 GiB, inside what the 70% load limit leaves.
+/// Marks sit on planned chunk starts that every pass cuts anyway, so a prompt under 4,096 tokens keeps them too.
+const cache_rules: api.prompt_cache.Rules = .{ .lookahead = 1, .planned = true, .min_prompt = 0 };
+
+/// Kept prompt states' room: --prompt-cache-gib, else 16 GiB, inside what the load limit read at load leaves.
 fn cacheBudget(eng: *const ge.Engine, gib: ?f64) u64 {
     const want: u64 = @intFromFloat((gib orelse 16) * (1 << 30));
     const used = eng.w.bytes + eng.arena.bytes;
-    const limit = ge.Engine.loadLimit();
+    const limit = eng.limit.bytes;
     return if (limit > used) @min(want, limit - used) else 0;
 }
 
@@ -76,7 +79,7 @@ fn learnedStates(gpa: Allocator, eng: *const ge.Engine, sl: *glm.slots.Slots, ro
 }
 
 /// A GLM-5.3-Flash checkpoint served: `window` tokens of cache a stream, warmed first (the pair: `speed_up`).
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?[]const u8, learn_cap: u64) !*Host {
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?[]const u8, learn_cap: u64, learn_floor: u64) !*Host {
     const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up, learn != null);
     errdefer eng.deinit();
     var toks: [96]u32 = undefined;
@@ -94,23 +97,29 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     const n: u32 = @intCast(h.slots.slots.len);
     h.back = .{ .gpa = gpa, .sl = &h.slots };
     errdefer h.back.deinit();
+    if (eng.ep != null) h.back.costs = try glm.timing.measure(&h.slots, gpa, io); // both Macs in step, as the warm-up
     h.cfg = try lanes.Config.init(gpa, h.back.facts(), glm.state.max_rows, glm.state.max_rows - 1);
     errdefer h.cfg.deinit(gpa);
     h.wall = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = window, .prefill_step = eng.chunk_rows, .greedy_only = true });
+    const serves = @min(window, glm.pool.capacity(&h.slots) -| (glm.state.max_rows + 1)); // prompt + reply a stream's caches hold beside its last window (a pool keeps whole blocks)
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = serves, .prefill_step = eng.chunk_rows, .greedy_only = true, .admit = if (h.slots.pool != null) .{ .ctx = &h.back, .fits = glm.backend.Backend.fits } else null });
     h.cache = null;
     const budget = cacheBudget(eng, cache_gib);
     if (!eng.followsPeer() and budget > 0) {
         const B = glm.backend.Backend;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop, .write = B.snapWrite, .read = B.snapRead, .forget = B.snapForget } }, .{ .lookahead = 1, .planned = true }, budget);
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop, .write = B.snapWrite, .read = B.snapRead, .forget = B.snapForget, .forget_checked = B.snapForgetChecked, .reclaim = B.snapReclaim, .peer_other_used = B.peerOtherUsed, .peer_other_next = B.peerOtherNext, .peer_other_bytes = B.peerOtherBytes, .peer_other_remove = B.peerOtherRemove, .peer_need = B.peerNeed, .peer_reclaim = B.peerReclaim, .peer_reserve = B.peerReserve, .peer_finish = B.peerFinish } }, cache_rules, budget);
         h.host.cache = &h.cache.?;
         h.host.info_.prompt_cache = true;
+        h.slots.grow = .{ .ctx = h, .f = growSnap }; // a resident state made whole before its slot writes below it
     }
     errdefer if (h.cache) |*store| store.deinit();
     if (learn) |root| {
         h.learned = try learnedStates(gpa, eng, &h.slots, root, learn_cap);
+        h.learned.?.admission.floor = learn_floor;
+        h.slots.disk.admission.floor = learn_floor;
+        h.slots.disk.cap = learn_cap;
         h.slots.learned = h.learned.?.dir;
         if (h.cache) |*store| store.imprint = &h.learned.?;
     }
@@ -124,6 +133,12 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     const role = if (eng.ep == null) "" else if (eng.followsPeer()) ", speed-up rank 1" else ", speed-up rank 0";
     std.log.info("GLM-5.3-Flash loaded in {d:.1} s ({d:.1} GB of weights{s}), context {d} tokens, {d} streams", .{ eng.load_seconds, @as(f64, @floatFromInt(eng.w.bytes)) / 1e9, role, window, n });
     return h;
+}
+
+/// Slots.grow: the prompt cache charges a kept state's prefixes when its budget has room (the host thread's store).
+fn growSnap(ctx: *anyopaque, saved: *anyopaque, extra: u64) bool {
+    const h: *Host = @ptrCast(@alignCast(ctx));
+    return if (h.cache) |*store| store.grow(saved, extra) else false;
 }
 
 fn follow(h: *Host) void {
@@ -145,4 +160,27 @@ pub fn close(ctx: *anyopaque) void {
     if (h.learned) |*m| m.deinit();
     h.eng.deinit();
     h.gpa.destroy(h);
+}
+
+test "a 3.5k-token prompt keeps its shared system cut, a planned chunk start" {
+    const Stub = struct {
+        fn bytes(_: *anyopaque, _: u32) u64 {
+            return 0;
+        }
+        fn save(_: *anyopaque, _: ?*anyopaque, _: u32) anyerror!api.prompt_cache.Saved {
+            return error.Unused;
+        }
+        fn restore(_: *anyopaque, _: ?*anyopaque, _: api.prompt_cache.Saved) anyerror!void {}
+        fn drop(_: *anyopaque, _: api.prompt_cache.Saved) void {}
+    };
+    var unused: u8 = 0;
+    var store = api.prompt_cache.Store.init(std.testing.allocator, .{ .ptr = &unused, .vtable = &.{ .bytes = Stub.bytes, .save = Stub.save, .restore = Stub.restore, .drop = Stub.drop } }, cache_rules, 1 << 30);
+    defer store.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const prompt = try arena.allocator().alloc(u32, 3547);
+    for (prompt, 0..) |*t, i| t.* = @intCast(i);
+    // a 3,523-token system prompt: the server cuts at 3,522 and names 1,475, 3,011 and 3,523 as shared cuts
+    const marks = try store.marks(arena.allocator(), prompt, 0, 3540, &.{ 1475, 3011, 3523 }, &.{3522}, &.{});
+    try std.testing.expectEqualSlices(u32, &.{3522}, marks);
 }

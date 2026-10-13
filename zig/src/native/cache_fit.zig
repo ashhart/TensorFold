@@ -1,4 +1,4 @@
-//! The prompt cache's budget from memory: what 70% of RAM leaves past the server's footprint once loaded, less a margin.
+//! The prompt cache's budget from memory: up to 16 GiB of what 70% of RAM leaves once the server loads, less a margin.
 const std = @import("std");
 const builtin = @import("builtin");
 const api = @import("engine_api");
@@ -8,18 +8,24 @@ pub const GiB: u64 = 1 << 30;
 pub const SHARE_PERCENT = 70;
 /// Kept back from the cache for buffers that grow with long prompts.
 pub const MARGIN: u64 = 2 * GiB;
+/// The default budget's most, so a server leaves the rest of the RAM to other apps; --prompt-cache-gib sets more.
+pub const DEFAULT_CEILING: u64 = 16 * GiB;
 
 /// The cache's budget, what fits under the cap, and the cap itself (bytes).
 pub const Fit = struct { budget: u64, room: u64, cap: u64 };
 
-/// The budget for `total` bytes of RAM and a footprint of `ready` bytes once loaded: `gib` when given and it fits (or `over`),
-/// else all that fits; a given budget past the room is refused.
+/// For `total` bytes of RAM and `ready` once loaded: `gib` if it fits (or `over`), else what fits up to the ceiling.
 pub fn fit(total: u64, ready: u64, gib: ?f64, over: bool) error{CacheOverCap}!Fit {
     const cap = total / 100 * SHARE_PERCENT;
     const room = cap -| ready -| MARGIN;
-    const want = if (gib) |g| (if (g > 0) std.math.lossyCast(u64, g * GiB) else 0) else room;
+    const want = if (gib) |g| (if (g > 0) std.math.lossyCast(u64, g * GiB) else 0) else @min(room, DEFAULT_CEILING);
     if (want > room and !over) return error.CacheOverCap;
     return .{ .budget = want, .room = room, .cap = cap };
+}
+
+/// Whether `bytes` held at once and the margin stay inside the 70% share of `total` bytes of RAM (0: unknown, never).
+pub fn fitsLoadLimit(bytes: u64, total: u64) bool {
+    return bytes +| MARGIN <= total / 100 * SHARE_PERCENT;
 }
 
 /// This machine's RAM (null where the OS does not say).
@@ -38,28 +44,36 @@ pub fn footprint() ?u64 {
     return info[9];
 }
 
-/// The cache plan: what 70% of RAM leaves past this process, or `gib` if it fits (else refused unless `over`).
+/// The cache plan: `gib` if it fits (or `over`), else what 70% of RAM leaves up to 16 GiB (no reading: `spare` for it).
 pub fn budget(gib: ?f64, over: bool, spare: u64, a: std.mem.Allocator, why: *[]const u8, rank: []const u8) !api.PromptCachePlan {
+    return budgetBeside(gib, over, spare, 0, a, why, rank);
+}
+
+/// budget, with `later` bytes the server takes after load (streams' caches on first use) counted as in use.
+pub fn budgetBeside(gib: ?f64, over: bool, spare: u64, later: u64, a: std.mem.Allocator, why: *[]const u8, rank: []const u8) !api.PromptCachePlan {
     const total = ram() orelse 0;
-    const ready = footprint() orelse 0;
-    if (total == 0 or ready == 0) {
-        const b = if (gib) |g| (if (g > 0) std.math.lossyCast(u64, g * GiB) else 0) else spare;
+    const loaded = footprint() orelse 0;
+    if (total == 0 or loaded == 0) {
+        const b = if (gib) |g| (if (g > 0) std.math.lossyCast(u64, g * GiB) else 0) else @min(spare, DEFAULT_CEILING);
         std.log.info("prompt cache: {d:.1} GiB for kept prompt states{s} (no memory reading)", .{ gibs(b), rank });
         return .{ .source = if (gib != null) .explicit else .metal_working_set, .budget_bytes = b, .explicit_budget = gib != null };
     }
+    const ready = loaded + later;
+    const streams = if (later > 0) try std.fmt.allocPrint(a, " and {d:.1} GiB its streams take on first use", .{gibs(later)}) else "";
     const f = fit(total, ready, gib, over) catch |e| {
         const left = (fit(total, ready, null, false) catch unreachable).room; // without a given budget it never refuses
-        why.* = try std.fmt.allocPrint(a, "--prompt-cache-gib {d} would take this server past 70% of this Mac's memory: it holds {d:.1} GiB once loaded, 70% of {d:.0} GiB is {d:.1} GiB, and {d} GiB stays free for prompt buffers, so {d:.1} GiB is left for kept prompt states. Leave --prompt-cache-gib out to use that, pass a smaller one, or add --prompt-cache-over-cap to keep {d} GiB anyway.", .{ gib.?, gibs(ready), gibs(total), gibs(total / 100 * SHARE_PERCENT), MARGIN >> 30, gibs(left), gib.? });
+        why.* = try std.fmt.allocPrint(a, "--prompt-cache-gib {d} would take this server past 70% of this Mac's memory: it holds {d:.1} GiB once loaded{s}, 70% of {d:.0} GiB is {d:.1} GiB, and {d} GiB stays free for prompt buffers, so {d:.1} GiB is left for kept prompt states. Pass a smaller one{s}, leave --prompt-cache-gib out for the default {d:.1} GiB, or add --prompt-cache-over-cap to keep {d} GiB anyway.", .{ gib.?, gibs(loaded), streams, gibs(total), gibs(total / 100 * SHARE_PERCENT), MARGIN >> 30, gibs(left), if (later > 0) ", serve a smaller --parallel" else "", gibs(@min(left, DEFAULT_CEILING)), gib.? });
         return e;
     };
-    std.log.info("prompt cache: {d:.1} GiB from {d:.1} GiB free under the 70% cap ({d:.1} GiB in use once loaded, {d:.0} GiB of RAM, {d} GiB kept for prompt buffers){s}{s}", .{ gibs(f.budget), gibs(f.room), gibs(ready), gibs(total), MARGIN >> 30, if (f.budget > f.room) ", past the cap by --prompt-cache-over-cap" else "", rank });
+    const ceiling = if (gib == null and f.room > f.budget) std.fmt.comptimePrint("; {d} GiB by default: --prompt-cache-gib takes more, up to what is free", .{DEFAULT_CEILING >> 30}) else "";
+    std.log.info("prompt cache: {d:.1} GiB from {d:.1} GiB free under the 70% cap ({d:.1} GiB in use once loaded{s}, {d:.0} GiB of RAM, {d} GiB kept for prompt buffers){s}{s}{s}", .{ gibs(f.budget), gibs(f.room), gibs(loaded), streams, gibs(total), MARGIN >> 30, if (f.budget > f.room) ", past the cap by --prompt-cache-over-cap" else "", rank, ceiling });
     return .{
         .source = .physical_footprint,
         .budget_bytes = f.budget,
         .explicit_budget = gib != null,
         .over_cap = f.budget > f.room,
         .ram_bytes = total,
-        .ready_footprint_bytes = ready,
+        .ready_footprint_bytes = loaded,
         .cap_bytes = f.cap,
         .room_bytes = f.room,
         .margin_bytes = MARGIN,
@@ -81,6 +95,18 @@ test "the default budget is what 70% of RAM leaves past the footprint at ready a
     try std.testing.expectEqual(@as(u64, 0), (try fit(192 * GiB, 172 * GiB, null, false)).budget); // a 192 GB Mac: past the cap already
 }
 
+test "the default stops at 16 GiB, a given budget takes up to the room, and 0 turns the cache off" {
+    const ram128: u64 = 128 * GiB;
+    const ready: u64 = 18 * GiB + 3 * GiB / 4; // Nemotron's server on a 128 GB M5 Max
+    const f = try fit(ram128, ready, null, false);
+    try std.testing.expectEqual(DEFAULT_CEILING, f.budget);
+    try std.testing.expect(gibs(f.room) > 68.8 and gibs(f.room) < 68.9);
+    try std.testing.expectEqual(@as(u64, 40 * GiB), (try fit(ram128, ready, 40, false)).budget);
+    try std.testing.expectEqual(@as(u64, 68 * GiB), (try fit(ram128, ready, 68, false)).budget); // the old default's room
+    try std.testing.expectError(error.CacheOverCap, fit(ram128, ready, 69, false));
+    try std.testing.expectEqual(@as(u64, 0), (try fit(ram128, ready, 0, false)).budget);
+}
+
 test "a given budget that fits is kept, a larger one is refused unless the override is set" {
     const ram256: u64 = 256 * GiB;
     try std.testing.expectEqual(@as(u64, 4 * GiB), (try fit(ram256, 172 * GiB, 4, false)).budget);
@@ -89,6 +115,17 @@ test "a given budget that fits is kept, a larger one is refused unless the overr
     try std.testing.expectError(error.CacheOverCap, fit(ram256, 172 * GiB, 16, false));
     try std.testing.expectEqual(@as(u64, 16 * GiB), (try fit(ram256, 172 * GiB, 16, true)).budget);
     try std.testing.expectEqual(@as(u64, 64 * GiB), (try fit(512 * GiB, 172 * GiB, 64, false)).budget); // a 512 GB Mac has room
+}
+
+test "a load fits only while it and the margin stay inside 70% of RAM" {
+    const ram256: u64 = 256 * GiB;
+    try std.testing.expect(fitsLoadLimit(172 * GiB, ram256)); // Flash Next's 6-bit checkpoint on a 256 GB M5 Ultra
+    try std.testing.expect(!fitsLoadLimit(181 * GiB, ram256)); // the 6 Oct panic's load
+    try std.testing.expect(fitsLoadLimit(ram256 / 100 * 70 - MARGIN, ram256));
+    try std.testing.expect(!fitsLoadLimit(ram256 / 100 * 70 - MARGIN + 1, ram256));
+    try std.testing.expect(!fitsLoadLimit(1, 0)); // no RAM reading: nothing fits
+    try std.testing.expect(!fitsLoadLimit(16 * GiB + (5760 << 20), 32 * GiB)); // the 27B and its Neural Engine share on a 32 GB Mac
+    try std.testing.expect(fitsLoadLimit(16 * GiB + (5760 << 20), 48 * GiB));
 }
 
 test "the OS readings: RAM and this process's footprint" {

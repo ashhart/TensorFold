@@ -4,28 +4,58 @@ using namespace metal;
 // bf16 token-major Q/K/V; each row and head runs a fixed-order online fp32 softmax; the mask decides visibility.
 struct tf_context_args { uint rows, keys, mask_stride, heads, scale_bits; };
 
+// Keys per tile: a tile's scores and values load together, then its weights and sums apply in key order.
+#define TF_TILE 4
+
 template <bool masked>
 inline void tf_context_row(const device bfloat* Q, const device bfloat* K, const device bfloat* V,
     const device uchar* mask, device TF_OUT* O, uint row, uint head, uint keys, uint mask_stride,
     float scale, uint lane) {
   const uint kh = head / (TF_QH / TF_KVH);
   const size_t qi = ((size_t)row * TF_QH + head) * TF_D;
+  float q[TF_D / 32];
+  for (uint d = 0; d < TF_D / 32; ++d) q[d] = float(Q[qi + lane + d*32]);
   float out[TF_D / 32];
   for (uint d = 0; d < TF_D / 32; ++d) out[d] = 0.0f;
   float maximum = -INFINITY, total = 0.0f;
-  for (uint key = 0; key < keys; ++key) {
-    if (masked && mask[(size_t)row * mask_stride + key] == 0) continue;
-    const size_t ki = ((size_t)key * TF_KVH + kh) * TF_D;
-    float dot = 0.0f;
-    for (uint d = lane; d < TF_D; d += 32) dot = fma(float(Q[qi+d]), float(K[ki+d]), dot);
-    const float score = simd_sum(dot) * scale;
-    const float next = max(maximum, score);
-    const float old_weight = maximum == -INFINITY ? 0.0f : precise::exp(maximum-next);
-    const float weight = precise::exp(score-next);
-    total = fma(total, old_weight, weight);
-    for (uint d = 0; d < TF_D / 32; ++d)
-      out[d] = fma(out[d], old_weight, weight * float(V[ki + lane + d*32]));
+  for (uint first = 0; first < keys; first += TF_TILE) {
+    bool live[TF_TILE];
+    float score[TF_TILE];
+    float value[TF_TILE][TF_D / 32];
+    for (uint t = 0; t < TF_TILE; ++t) {
+      const uint key = first + t;
+      live[t] = key < keys;
+      if (masked && live[t]) live[t] = mask[(size_t)row * mask_stride + key] != 0;
+      score[t] = 0.0f;
+      if (live[t]) {
+        const size_t ki = ((size_t)key * TF_KVH + kh) * TF_D;
+        float dot = 0.0f;
+        for (uint d = 0; d < TF_D / 32; ++d) dot = fma(q[d], float(K[ki + lane + d*32]), dot);
+        score[t] = simd_sum(dot) * scale;
+        for (uint d = 0; d < TF_D / 32; ++d) value[t][d] = float(V[ki + lane + d*32]);
+      }
+    }
+    // the maximum after each key and both weights come from the scores alone
+    float old_weight[TF_TILE], weight[TF_TILE];
+    float next = maximum;
+    for (uint t = 0; t < TF_TILE; ++t) {
+      old_weight[t] = 0.0f;
+      weight[t] = 0.0f;
+      if (live[t]) {
+        const float before = next;
+        next = max(next, score[t]);
+        old_weight[t] = before == -INFINITY ? 0.0f : precise::exp(before - next);
+        weight[t] = precise::exp(score[t] - next);
+      }
+    }
     maximum = next;
+    for (uint t = 0; t < TF_TILE; ++t) {
+      if (live[t]) {
+        total = fma(total, old_weight[t], weight[t]);
+        for (uint d = 0; d < TF_D / 32; ++d)
+          out[d] = fma(out[d], old_weight[t], weight[t] * value[t][d]);
+      }
+    }
   }
   for (uint d = 0; d < TF_D / 32; ++d)
     O[qi + lane + d*32] = TF_OUT(total == 0.0f ? 0.0f : out[d] / total);

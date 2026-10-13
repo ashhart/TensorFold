@@ -546,9 +546,23 @@ extern "C" __global__ void __launch_bounds__(1024) tf_draw_ids(const __nv_bfloat
     tf_sample::draw<true>(L, V, rule, meta, offset, TOK, IDS, PROB);
 }
 
-// Rows of bf16 logits [rows, V]: row r's LP_WORDS words at OUT + r * LP_WORDS for PICK[r] and k (at most 20) best.
+// Rows of bf16 logits [rows, V]: row r's LP_WORDS words at OUT + r * LP_WORDS for PICK[r], k (at most 20) best, rank.
 extern "C" __global__ void __launch_bounds__(1024) tf_logprob_rows(const __nv_bfloat16* L, unsigned V, const unsigned* PICK,
-                                                                   unsigned k, unsigned* OUT) {
+                                                                   unsigned k, unsigned rank, unsigned* OUT) {
     const unsigned row = blockIdx.x;
-    tf_logprob::logprob_row(L + static_cast<size_t>(row) * V, V, PICK[row], k, OUT + static_cast<size_t>(row) * tf_logprob::LP_WORDS);
+    tf_logprob::logprob_row(L + static_cast<size_t>(row) * V, V, PICK[row], k, rank != 0, OUT + static_cast<size_t>(row) * tf_logprob::LP_WORDS);
+}
+
+// Structured output: row r's disallowed tokens become -inf before its draw; W words a row, t at bit t % 32 of t / 32.
+extern "C" __global__ void __launch_bounds__(256) tf_grammar_mask(__nv_bfloat16* L, unsigned V, const unsigned* BITS, unsigned W) {
+    const unsigned row = blockIdx.x;
+    __nv_bfloat16* x = L + static_cast<size_t>(row) * V;
+    for (unsigned w = threadIdx.x; w < W; w += blockDim.x) {
+        const unsigned allowed = BITS[static_cast<size_t>(row) * W + w];
+        if (allowed == 0xFFFFFFFFu) continue;
+        for (unsigned b = 0; b < 32u; b++) {
+            const unsigned t = w * 32u + b;
+            if (t < V && ((allowed >> b) & 1u) == 0u) x[t] = __ushort_as_bfloat16(static_cast<unsigned short>(0xFF80u));
+        }
+    }
 }

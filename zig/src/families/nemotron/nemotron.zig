@@ -25,7 +25,13 @@ pub const learned = @import("learned.zig");
 pub const train_ops = @import("train_ops.zig");
 pub const train_back = @import("train_back.zig");
 pub const train = @import("train.zig");
+pub const pocket_fit = @import("pocket_fit.zig");
+pub const lesson_route = @import("lesson_route.zig");
 pub const snapshot = @import("snapshot.zig");
 pub const learned_prompts = @import("learned_prompts.zig");
 
 pub const Model = model.Model;
+
+test {
+    _ = @import("train_check.zig");
+}

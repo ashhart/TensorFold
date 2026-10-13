@@ -17,7 +17,7 @@ pub const Replacement = struct {
 const index_name = "model.safetensors.index.json";
 const single_name = "model.safetensors";
 
-/// The first shard, index or config.json in `dir` that is a symlink or has another hard link (a write in place would reach shared data), or null.
+/// The first shard, index or config.json in `dir` that is linked (an in-place write would reach shared data), or null.
 pub fn linked(arena: Allocator, io: Io, dir: []const u8) !?[]const u8 {
     var d = try Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
     defer d.close(io);
@@ -27,6 +27,18 @@ pub fn linked(arena: Allocator, io: Io, dir: []const u8) !?[]const u8 {
         if (!ours) continue;
         const info = try d.statFile(io, e.name, .{ .follow_symlinks = false });
         if (info.kind == .sym_link or info.nlink > 1) return try arena.dupe(u8, e.name);
+    }
+    return null;
+}
+
+/// A shared expert's projection config.json keeps unquantized, as releases up to 1.0.6 saved lessons (null: none).
+pub fn plainShared(arena: Allocator, io: Io, dir: []const u8) !?[]const u8 {
+    const config = try readJson(arena, io, try std.fs.path.join(arena, &.{ dir, "config.json" }));
+    for ([_][]const u8{ "quantization", "quantization_config" }) |key| {
+        const q = field(config, key) catch continue;
+        if (q != .object) continue;
+        var it = q.object.iterator();
+        while (it.next()) |e| if (std.mem.indexOf(u8, e.key_ptr.*, "shared_experts.") != null and e.value_ptr.* == .bool and !e.value_ptr.bool) return try arena.dupe(u8, e.key_ptr.*);
     }
     return null;
 }
@@ -69,6 +81,107 @@ pub fn bake(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replacement)
         for (edits) |r| try q.object.put(arena, r.name[0 .. r.name.len - ".weight".len], .{ .bool = false });
     };
     try writeJson(arena, config_path, config);
+}
+
+/// `edits` of any size into `dir`'s shards (in place if sizes hold, else rewritten whole), the index total updated.
+pub fn grow(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replacement) !void {
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    for (edits) |r| if (r.bytes.len != numel(r.shape) * r.dtype.size()) return error.BadReplacement;
+    const index_path = try std.fs.path.join(arena, &.{ dir, index_name });
+    const index: ?Value = readJson(arena, io, index_path) catch |e| if (e == error.FileNotFound) null else return e;
+    var shards: std.StringArrayHashMapUnmanaged(std.ArrayList(Replacement)) = .empty;
+    for (edits) |r| {
+        const shard = if (index) |ix| str((try field(try field(ix, "weight_map"), r.name))) orelse return error.BadIndex else single_name;
+        const slot = try shards.getOrPut(arena, shard);
+        if (!slot.found_existing) slot.value_ptr.* = .empty;
+        try slot.value_ptr.append(arena, r);
+    }
+    var grown: i64 = 0;
+    for (shards.keys(), shards.values()) |shard, list| {
+        const path = try std.fs.path.join(arena, &.{ dir, shard });
+        if (!try inPlace(gpa, io, path, list.items)) grown += try rewrite(gpa, io, path, list.items);
+    }
+    if (index) |ix| if (grown != 0) {
+        var root = ix;
+        if (root.object.getPtr("metadata")) |meta| if (meta.* == .object) if (meta.object.getPtr("total_size")) |size| {
+            if (size.* == .integer) size.integer += grown;
+        };
+        try writeJson(arena, index_path, root);
+    };
+}
+
+/// config.json in `dir` with each of `ints` set (added where missing), every other key as it was.
+pub fn setConfig(gpa: Allocator, io: Io, dir: []const u8, ints: []const struct { []const u8, i64 }) !void {
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const path = try std.fs.path.join(arena, &.{ dir, "config.json" });
+    var config = try readJson(arena, io, path);
+    if (config != .object) return error.BadConfig;
+    for (ints) |kv| try config.object.put(arena, kv[0], .{ .integer = kv[1] });
+    try writeJson(arena, path, config);
+}
+
+/// An integer of `dir`'s config.json, or null when it has none.
+pub fn configInt(gpa: Allocator, io: Io, dir: []const u8, key: []const u8) !?i64 {
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const config = try readJson(arena, io, try std.fs.path.join(arena, &.{ dir, "config.json" }));
+    if (config != .object) return error.BadConfig;
+    const v = config.object.get(key) orelse return null;
+    return if (v == .integer) v.integer else error.BadConfig;
+}
+
+/// `edits` over their tensors in place, each keeping its dtype and size; the index, config.json and all else stay.
+pub fn overwrite(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replacement) !void {
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const index_path = try std.fs.path.join(arena, &.{ dir, index_name });
+    const index: ?Value = readJson(arena, io, index_path) catch |e| if (e == error.FileNotFound) null else return e;
+    for (edits) |r| {
+        const shard = if (index) |ix| str((try field(try field(ix, "weight_map"), r.name))) orelse return error.BadIndex else single_name;
+        const path = try std.fs.path.join(arena, &.{ dir, shard });
+        if (!try inPlace(gpa, io, path, &.{r})) return error.SizeChanged;
+    }
+}
+
+/// A tensor of a file written whole by `create`.
+pub const New = struct { name: []const u8, dtype: st.DType, shape: []const usize, bytes: []const u8 };
+
+/// A whole safetensors file at `path`, metadata first, written through `path`.tmp and renamed (old file or new).
+pub fn create(gpa: Allocator, path: []const u8, metadata: []const [2][]const u8, tensors: []const New) !void {
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var header: std.json.ObjectMap = .empty;
+    if (metadata.len > 0) {
+        var meta: std.json.ObjectMap = .empty;
+        for (metadata) |kv| try meta.put(arena, kv[0], .{ .string = kv[1] });
+        try header.put(arena, "__metadata__", .{ .object = meta });
+    }
+    var pieces: std.ArrayList([]const u8) = .empty;
+    try pieces.appendNTimes(arena, "", 3); // the length, the header and its padding, once the header is known
+    var offset: usize = 0;
+    for (tensors) |t| {
+        if (t.bytes.len != numel(t.shape) * t.dtype.size()) return error.BadReplacement;
+        try header.put(arena, t.name, try entry(arena, t.dtype, t.shape, offset, offset + t.bytes.len));
+        try pieces.append(arena, t.bytes);
+        offset += t.bytes.len;
+    }
+    const text = try std.json.Stringify.valueAlloc(arena, Value{ .object = header }, .{});
+    const padded = std.mem.alignForward(usize, text.len, 8);
+    const head = try arena.alloc(u8, 8);
+    std.mem.writeInt(u64, head[0..8], padded, .little);
+    const spaces = try arena.alloc(u8, padded - text.len);
+    @memset(spaces, ' ');
+    pieces.items[0] = head;
+    pieces.items[1] = text;
+    pieces.items[2] = spaces;
+    try writeFile(arena, path, pieces.items);
 }
 
 /// `edits` written over their tensors where they lie, if each keeps its dtype and size (else false, nothing written).
@@ -234,6 +347,30 @@ fn put(fd: c_int, b: []const u8) !void {
     }
 }
 
+test "a whole file written with its metadata reads back tensor for tensor" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(dir);
+    const path = try std.fs.path.join(gpa, &.{ dir, "made.safetensors" });
+    defer gpa.free(path);
+    const a = [_]f32{ 1, 2, 3, 4, 5, 6 };
+    const b = [_]u32{ 7, 8 };
+    try create(gpa, path, &.{.{ "format", "test" }}, &.{
+        .{ .name = "x.a", .dtype = .f32, .shape = &.{ 2, 3 }, .bytes = std.mem.sliceAsBytes(&a) },
+        .{ .name = "x.b", .dtype = .u32, .shape = &.{2}, .bytes = std.mem.sliceAsBytes(&b) },
+    });
+    var file = try st.File.open(gpa, io, path);
+    defer file.close(io);
+    const got = file.get("x.a").?;
+    try std.testing.expect(got.is(.f32, &.{ 2, 3 }));
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&a), got.bytes);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&b), file.get("x.b").?.bytes);
+    try std.testing.expectError(error.BadReplacement, create(gpa, path, &.{}, &.{.{ .name = "y", .dtype = .f32, .shape = &.{3}, .bytes = std.mem.sliceAsBytes(&b) }}));
+}
+
 test "an affine weight becomes bf16 in its shard, its scales and biases leave the index, config marks it unquantized" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -290,6 +427,87 @@ test "an affine weight becomes bf16 in its shard, its scales and biases leave th
     try std.testing.expectError(error.BadIndex, bake(gpa, io, dir, &.{.{ .name = "c.weight", .dtype = .u8, .shape = &.{4}, .bytes = w[0..4] }}));
 }
 
+test "codes overwritten in place: the shard keeps its size and every other byte, the index and config stay" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const head =
+        \\{"a.weight":{"dtype":"U32","shape":[2,2],"data_offsets":[0,16]},"a.scales":{"dtype":"BF16","shape":[2,1],
+        \\"data_offsets":[16,20]},"a.biases":{"dtype":"BF16","shape":[2,1],"data_offsets":[20,24]}}
+    ;
+    var shard: [8 + head.len + 24]u8 = undefined;
+    std.mem.writeInt(u64, shard[0..8], head.len, .little);
+    @memcpy(shard[8..][0..head.len], head);
+    for (shard[8 + head.len ..], 0..) |*b, i| b.* = @intCast(i);
+    const index =
+        \\{"weight_map":{"a.weight":"model-00001-of-00001.safetensors","a.scales":"model-00001-of-00001.safetensors",
+        \\"a.biases":"model-00001-of-00001.safetensors"}}
+    ;
+    const config = "{\"quantization\":{\"group_size\":64,\"bits\":4}}";
+    try tmp.dir.writeFile(io, .{ .sub_path = "model-00001-of-00001.safetensors", .data = &shard });
+    try tmp.dir.writeFile(io, .{ .sub_path = index_name, .data = index });
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = config });
+    const dir = try std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    defer gpa.free(dir);
+    const codes = [_]u32{ 0x01234567, 0x89abcdef, 0xfedcba98, 0x76543210 };
+    try overwrite(gpa, io, dir, &.{.{ .name = "a.weight", .dtype = .u32, .shape = &.{ 2, 2 }, .bytes = std.mem.sliceAsBytes(&codes) }});
+    var buf: [256]u8 = undefined;
+    const got = try tmp.dir.readFile(io, "model-00001-of-00001.safetensors", &buf);
+    try std.testing.expectEqual(shard.len, got.len);
+    try std.testing.expectEqualSlices(u8, shard[0 .. 8 + head.len], got[0 .. 8 + head.len]);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&codes), got[8 + head.len ..][0..16]);
+    try std.testing.expectEqualSlices(u8, shard[8 + head.len + 16 ..], got[8 + head.len + 16 ..]);
+    try std.testing.expectEqualSlices(u8, index, try tmp.dir.readFile(io, index_name, &buf));
+    try std.testing.expectEqualSlices(u8, config, try tmp.dir.readFile(io, "config.json", &buf));
+    try std.testing.expectError(error.SizeChanged, overwrite(gpa, io, dir, &.{.{ .name = "a.weight", .dtype = .u32, .shape = &.{ 2, 1 }, .bytes = std.mem.sliceAsBytes(codes[0..2]) }}));
+}
+
+test "a tensor grown in its shard: the shard is rewritten, the index's total moves, config takes new integers" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const head =
+        \\{"a.weight":{"dtype":"U32","shape":[2,2],"data_offsets":[0,16]},"b.weight":{"dtype":"F32","shape":[3],
+        \\"data_offsets":[16,28]}}
+    ;
+    var shard: [8 + head.len + 28]u8 = undefined;
+    std.mem.writeInt(u64, shard[0..8], head.len, .little);
+    @memcpy(shard[8..][0..head.len], head);
+    for (shard[8 + head.len ..], 0..) |*b, i| b.* = @intCast(i);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model-00001-of-00001.safetensors", .data = &shard });
+    try tmp.dir.writeFile(io, .{ .sub_path = index_name, .data =
+        \\{"metadata":{"total_size":28},"weight_map":{"a.weight":"model-00001-of-00001.safetensors",
+        \\"b.weight":"model-00001-of-00001.safetensors"}}
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{\"model_type\":\"x\",\"width\":2}" });
+    const dir = try std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    defer gpa.free(dir);
+    const wide = [_]u32{ 1, 2, 3, 4, 5, 6 };
+    try grow(gpa, io, dir, &.{.{ .name = "a.weight", .dtype = .u32, .shape = &.{ 2, 3 }, .bytes = std.mem.sliceAsBytes(&wide) }});
+    const shard_path = try std.fs.path.join(gpa, &.{ dir, "model-00001-of-00001.safetensors" });
+    defer gpa.free(shard_path);
+    {
+        var f = try st.File.open(gpa, io, shard_path);
+        defer f.close(io);
+        try std.testing.expect(f.get("a.weight").?.is(.u32, &.{ 2, 3 }));
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&wide), f.get("a.weight").?.bytes);
+        try std.testing.expectEqualSlices(u8, shard[8 + head.len + 16 ..], f.get("b.weight").?.bytes);
+    }
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const ix = try readJson(arena, io, try std.fs.path.join(arena, &.{ dir, index_name }));
+    try std.testing.expectEqual(@as(i64, 36), (try field(try field(ix, "metadata"), "total_size")).integer);
+    try std.testing.expectEqual(@as(?i64, null), try configInt(gpa, io, dir, "learned"));
+    try setConfig(gpa, io, dir, &.{ .{ "width", 3 }, .{ "learned", 1 } });
+    try std.testing.expectEqual(@as(?i64, 3), try configInt(gpa, io, dir, "width"));
+    try std.testing.expectEqual(@as(?i64, 1), try configInt(gpa, io, dir, "learned"));
+    const config = try readJson(arena, io, try std.fs.path.join(arena, &.{ dir, "config.json" }));
+    try std.testing.expectEqualStrings("x", (try field(config, "model_type")).string);
+}
+
 test "a folder whose shard is a symlink or a hard link is refused for learning; its own files pass" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -308,4 +526,22 @@ test "a folder whose shard is a symlink or a hard link is refused for learning; 
     try tmp.dir.deleteFile(io, "model-00002-of-00002.safetensors");
     try tmp.dir.hardLink("blobs/b2", tmp.dir, "model-00002-of-00002.safetensors", io, .{});
     try std.testing.expectEqualStrings("model-00002-of-00002.safetensors", (try linked(arena, io, dir)).?);
+}
+
+test "a shared expert an earlier release saved unquantized is found; quantized ones and other modules pass" {
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fs.path.join(arena, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data =
+        \\{"quantization":{"group_size":64,"bits":4,"backbone.layers.9.mixer.out_proj":false}}
+    });
+    try std.testing.expect((try plainShared(arena, io, dir)) == null);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data =
+        \\{"quantization":{"group_size":64,"bits":4,"backbone.layers.15.mixer.shared_experts.down_proj":false}}
+    });
+    try std.testing.expectEqualStrings("backbone.layers.15.mixer.shared_experts.down_proj", (try plainShared(arena, io, dir)).?);
 }

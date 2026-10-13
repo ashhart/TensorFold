@@ -35,6 +35,7 @@ pub const Who = struct {
     forced: bool,
     granted: ?u32 = null,
     stream: ?*anyopaque = null,
+    sampled: bool = false, // keyed draws: host work a row that a greedy round does not have
 };
 
 /// Whether a copied continuation is ahead of a stream (the round loop proposes; Python `_copy_proposal`).
@@ -43,7 +44,8 @@ pub const Probe = struct {
     copy: *const fn (ptr: *anyopaque, who: *const Who) bool,
 };
 
-pub const Overhead = struct { streams: u32, ms: f64 };
+/// A shared round's time past its forward: `ms` without its head steps, `head` the steps' modeled time.
+pub const Overhead = struct { streams: u32, ms: f64, head: f64 = 0.0 };
 
 pub const Rule = struct {
     gpa: Allocator,
@@ -56,12 +58,17 @@ pub const Rule = struct {
     plain_guard: bool,
     node_probabilities: bool,
     batch_rows: u32,
-    round_ms: Table = .{}, // a round's wall time by drafts, shared by every stream
+    batched_heads: bool = false, // one batch drafts every stream of a shared round (its steps: the deepest stream's)
+    round_ms: Table = .{}, // a round's wall time by drafts, every stream's: what sampled streams price by
     overhead: std.ArrayList(Overhead) = .empty, // a shared round's ms past its forward, by streams (insertion order)
+    greedy_ms: Table = .{}, // round_ms from greedy rounds alone: what greedy streams price by
+    greedy_overhead: std.ArrayList(Overhead) = .empty, // overhead from rounds without a sampled stream
 
     pub fn deinit(r: *Rule) void {
         r.round_ms.deinit(r.gpa);
         r.overhead.deinit(r.gpa);
+        r.greedy_ms.deinit(r.gpa);
+        r.greedy_overhead.deinit(r.gpa);
     }
 
     pub fn rates(r: *Rule, who: Who) ![]f64 {
@@ -85,10 +92,10 @@ pub const Rule = struct {
         }
     }
 
-    /// Round times by depth: the stream's own under `plain_guard` (its sampling sets a row's host work), else shared.
+    /// Round times by depth: the stream's own under `plain_guard`, else greedy rounds' for a greedy stream.
     fn costs(r: *Rule, who: ?Who) !*Table {
         const w = who orelse return &r.round_ms;
-        if (!r.plain_guard) return &r.round_ms;
+        if (!r.plain_guard) return if (w.sampled) &r.round_ms else &r.greedy_ms;
         _ = try r.rates(w);
         const st = &w.state.*.?;
         if (st.ms == null) st.ms = .{};
@@ -99,6 +106,11 @@ pub const Rule = struct {
     pub fn observeCost(r: *Rule, drafts: i64, ms: f64, initializing: bool, who: ?Who) !void {
         if (drafts < 0 or (drafts == 0 and !r.plain_guard) or initializing) return;
         const table = try r.costs(who);
+        try r.blend(table, drafts, ms);
+        if (table == &r.greedy_ms) try r.blend(&r.round_ms, drafts, ms); // a greedy round counts for every stream too
+    }
+
+    fn blend(r: *Rule, table: *Table, drafts: i64, ms: f64) !void {
         const before = table.get(drafts);
         try table.put(r.gpa, drafts, if (before) |b| b + r.k.cost_rate * (ms - b) else ms);
     }
@@ -187,7 +199,7 @@ pub const Rule = struct {
     }
 
     /// Head drafts for the streams of a shared round, sized by allocation over their chain chances.
-    pub fn budgets(r: *Rule, whos: []Who, probe: Probe, out: []i64) !void {
+    pub fn budgets(r: *Rule, whos: []Who, probe: Probe, sampled: bool, out: []i64) !void {
         if (r.node_probabilities) {
             for (whos, out) |*w, *o| {
                 const inner = try r.headDepth(w, null, probe);
@@ -210,7 +222,9 @@ pub const Rule = struct {
         const ones = try r.gpa.alloc(u32, whos.len);
         defer r.gpa.free(ones);
         @memset(ones, 1);
-        const counts = try alloc.allocate(r.gpa, ones, probs, r.shared_costs, r.overheadMs(whos.len), @max(whos.len, r.batch_rows));
+        // drafts priced by their head steps: an overhead that held them would favour the depths it was measured at
+        const head: alloc.HeadCost = .{ .step_ms = r.mtp_step_ms, .batched = r.batched_heads };
+        const counts = try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.fixedMs(whos.len, sampled), @max(whos.len, r.batch_rows), head);
         defer r.gpa.free(counts);
         if (r.plain_guard) {
             // no draft where none pays; a probe after a growing run of plain rounds
@@ -229,31 +243,71 @@ pub const Rule = struct {
     }
 
     /// A shared round's ms beyond its forward at this many streams (the nearest measured count, first seen on ties).
-    pub fn overheadMs(r: *const Rule, streams: usize) f64 {
-        if (r.overhead.items.len == 0) return 8.0;
-        var best = r.overhead.items[0];
-        for (r.overhead.items[1..]) |o| {
-            if (distance(o.streams, streams) < distance(best.streams, streams)) best = o;
-        }
-        return best.ms;
+    pub fn overheadMs(r: *const Rule, streams: usize, sampled: bool) f64 {
+        const o = r.nearest(streams, sampled) orelse return 8.0;
+        return o.ms + o.head;
     }
 
-    pub fn observeOverhead(r: *Rule, streams: u32, rows: u64, ms: f64) !void {
+    /// overheadMs without the head steps the measured rounds drafted.
+    pub fn fixedMs(r: *const Rule, streams: usize, sampled: bool) f64 {
+        const o = r.nearest(streams, sampled) orelse return 8.0;
+        return o.ms;
+    }
+
+    fn nearest(r: *const Rule, streams: usize, sampled: bool) ?Overhead {
+        const list = if (sampled) r.overhead.items else r.greedy_overhead.items;
+        if (list.len == 0) return null;
+        var best = list[0];
+        for (list[1..]) |o| {
+            if (distance(o.streams, streams) < distance(best.streams, streams)) best = o;
+        }
+        return best;
+    }
+
+    /// The modeled time of a shared round's head steps for the depths it drafted.
+    pub fn headMs(r: *const Rule, depths: []const i64) f64 {
+        var steps: i64 = 0;
+        for (depths) |d| steps = if (r.batched_heads) @max(steps, d) else steps + d;
+        return r.mtp_step_ms * @as(f64, @floatFromInt(steps));
+    }
+
+    /// `sampled`: the round drew keyed samples, so it counts for sampled streams' overhead alone; `head_ms` its drafts.
+    pub fn observeOverhead(r: *Rule, streams: u32, rows: u64, ms: f64, sampled: bool, head_ms: f64) !void {
         const forward = r.shared_costs.get(@intCast(rows)) orelse return;
         const extra = if (ms - forward > 0.0) ms - forward else 0.0;
-        for (r.overhead.items) |*o| {
+        const fixed = if (extra - head_ms > 0.0) extra - head_ms else 0.0;
+        try r.addOverhead(&r.overhead, streams, fixed, extra - fixed);
+        if (!sampled) try r.addOverhead(&r.greedy_overhead, streams, fixed, extra - fixed);
+    }
+
+    fn addOverhead(r: *Rule, list: *std.ArrayList(Overhead), streams: u32, fixed: f64, head: f64) !void {
+        for (list.items) |*o| {
             if (o.streams == streams) {
-                o.ms = o.ms + 0.2 * (extra - o.ms);
+                o.ms = o.ms + 0.2 * (fixed - o.ms);
+                o.head = o.head + 0.2 * (head - o.head);
                 return;
             }
         }
-        try r.overhead.append(r.gpa, .{ .streams = streams, .ms = extra });
+        try list.append(r.gpa, .{ .streams = streams, .ms = fixed, .head = head });
     }
 };
 
 fn distance(a: u32, b: usize) usize {
     const x: usize = a;
     return if (x > b) x - b else b - x;
+}
+
+test "a depth's acceptance estimate moves by the configured weight of the newest round" {
+    const gpa = std.testing.allocator;
+    const empty: Table = .{};
+    var rule: Rule = .{ .gpa = gpa, .k = .{ .depth_rate = 0.08 }, .prior = &.{ 0.5, 0.5 }, .most_drafts = 2, .family_costs = &empty, .shared_costs = &empty, .mtp_step_ms = 0.5, .plain_guard = true, .node_probabilities = false, .batch_rows = 8 };
+    defer rule.deinit();
+    var st: ?State = null;
+    defer if (st) |*s| s.deinit(gpa);
+    const who: Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false };
+    try rule.observeDepth(who, 2, 1); // the first draft landed, the second did not
+    try std.testing.expectApproxEqAbs(@as(f64, 0.54), st.?.p[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.46), st.?.p[1], 1e-12);
 }
 
 test "depth picks the most tokens a ms and probes deeper" {
@@ -268,4 +322,33 @@ test "depth picks the most tokens a ms and probes deeper" {
     defer if (st) |*s| s.deinit(gpa);
     const who: Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false };
     try std.testing.expectEqual(@as(i64, 3), try rule.depth(who));
+}
+
+test "a shared round's drafts come out the same whichever depths its overhead was measured at" {
+    const gpa = std.testing.allocator;
+    var shared: Table = .{};
+    defer shared.deinit(gpa);
+    for (1..17) |w| try shared.put(gpa, @intCast(w), 10.0 + 2.0 * @as(f64, @floatFromInt(w)));
+    const empty: Table = .{};
+    const No = struct {
+        fn copy(_: *anyopaque, _: *const Who) bool {
+            return false;
+        }
+    };
+    var unused: u8 = 0;
+    const probe: Probe = .{ .ptr = &unused, .copy = No.copy };
+    var got: [2][2]i64 = undefined;
+    for ([_][2]i64{ .{ 1, 1 }, .{ 3, 3 } }, &got) |measured, *out| {
+        var rule: Rule = .{ .gpa = gpa, .prior = &.{ 0.9, 0.8, 0.7, 0.6 }, .most_drafts = 4, .family_costs = &empty, .shared_costs = &shared, .mtp_step_ms = 3.0, .plain_guard = false, .node_probabilities = false, .batch_rows = 16 };
+        defer rule.deinit();
+        // two streams' round: their pending rows and the drafts verified, 3 ms of its own, then each drafted step
+        const rows: u64 = @intCast(2 + measured[0] + measured[1]);
+        const head = rule.headMs(&measured);
+        try rule.observeOverhead(2, rows, shared.get(@intCast(rows)).? + 3.0 + head, false, head);
+        var states: [2]?State = .{ null, null };
+        defer for (&states) |*s| if (s.*) |*x| x.deinit(gpa);
+        var whos = [_]Who{ .{ .state = &states[0], .draft_room = 100, .finished = false, .forced = false }, .{ .state = &states[1], .draft_room = 100, .finished = false, .forced = false } };
+        try rule.budgets(&whos, probe, false, out);
+    }
+    try std.testing.expectEqualSlices(i64, &got[0], &got[1]);
 }

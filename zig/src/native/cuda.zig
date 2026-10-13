@@ -6,7 +6,8 @@ const lanes = @import("lanes");
 const nemotron = @import("nemotron");
 const Allocator = std.mem.Allocator;
 const budget = @import("cuda_memory.zig");
-const Pool = budget.Pool;
+const lane_backend = @import("cuda_bound.zig");
+const nemotron_slide = @import("nemotron_slide.zig");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
 const registry = .{nemotron.native};
@@ -97,20 +98,11 @@ fn weightBytes(io: std.Io, dir: []const u8) u64 {
     return total;
 }
 
-/// A /proc file's text, streamed: procfs reports size 0, and a positional read (readFileAlloc) stops there.
-fn procText(a: Allocator, io: std.Io, path: []const u8) ?[]u8 {
-    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
-    defer file.close(io);
-    var buf: [4096]u8 = undefined;
-    var r = file.readerStreaming(io, &buf);
-    return r.interface.allocRemaining(a, .limited(1 << 20)) catch null;
-}
-
 /// The pool now, read on the thread whose context is current; `problem` names a bad variable.
-fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?Pool {
+fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?budget.Pool {
     const unified = (try ctx.attribute(.integrated)) != 0;
     const card = try ctx.memInfo();
-    const text = if (unified) procText(a, io, "/proc/meminfo") else null;
+    const text = if (unified) budget.procText(a, io, "/proc/meminfo") else null;
     const available = budget.counts(unified, .{ .total = card.total, .available = card.free }, text) catch {
         problem.* = "cannot read or parse /proc/meminfo's MemTotal and MemAvailable; refusing CUDA unified-memory admission";
         return null;
@@ -134,7 +126,7 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
 }
 
 /// A lone driver returns false at completion or true when yield hands it to the lane core.
-const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool) anyerror!bool;
+const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
 
 /// The context a lane thread needs current: the lane host steps rounds on its own thread, CUDA binds per thread.
 threadlocal var bound: ?*const cuda.Context = null;
@@ -156,6 +148,10 @@ const Host = struct {
     startup: []u8 = &.{},
     lone: ?LoneRun = null, // the family's driver for a lone drafted stream, called with `family`
     store: ?*api.prompt_cache.Store = null, // kept Nemotron states; null when the budget is 0
+    learn: ?api.Learner = null, // the family's Sliding Weights learner (--slide), called with the context current
+    slide: ?*anyopaque = null, // that learner's adapter, freed by slide_free before the family
+    slide_free: ?*const fn (Allocator, *anyopaque) void = null,
+    dir: []u8 = &.{}, // the model folder the learner writes its lessons into
 
     fn close(p: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(p));
@@ -167,6 +163,8 @@ const Host = struct {
             s.deinit();
             h.gpa.destroy(s);
         }
+        if (h.slide) |s| h.slide_free.?(h.gpa, s);
+        h.gpa.free(h.dir);
         h.release(h.family);
         if (h.gpu) |g| {
             g.ctx.deinit();
@@ -177,7 +175,7 @@ const Host = struct {
         h.gpa.destroy(h);
     }
 
-    fn bind(p: *anyopaque) *Host {
+    pub fn bind(p: *anyopaque) *Host {
         const h: *Host = @ptrCast(@alignCast(p));
         if (h.gpu) |g| if (bound != &g.ctx) {
             g.ctx.makeCurrent() catch |e| std.log.err("cuCtxSetCurrent on the lane thread: {s}", .{@errorName(e)});
@@ -197,105 +195,58 @@ const Host = struct {
         h.host.memory = if (h.gpu != null) .{ .read = readMemory } else null;
         h.host.explain = explain;
         h.host.cache = h.store;
-        if (h.lone != null) h.host.lone = .{ .ctx = h, .run = loneRun, .sampled = true };
+        h.host.warm_quiet = if (info.warm_turns) nemotron.native.warm_quiet else 0;
+        if (h.lone != null) h.host.lone = .{ .ctx = h, .run = loneRun, .sampled = true, .logprobs = h.inner.vtable.first_row != null, .structures = h.inner.vtable.first_masked != null, .min_budget = nemotron.native.lone_min_budget, .resumes = true };
+        if (h.learn != null) h.host.learner = h.learner();
         try h.host.start();
+    }
+
+    /// The family's learner, each call made with the context current on the lane thread.
+    fn learner(h: *Host) api.Learner {
+        return .{
+            .ctx = h,
+            .begin = struct {
+                fn f(p: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) anyerror!void {
+                    const l = bind(p).learn.?;
+                    return l.begin(l.ctx, request, sink);
+                }
+            }.f,
+            .step = struct {
+                fn f(p: *anyopaque) api.Learner.Step {
+                    const l = bind(p).learn.?;
+                    return l.step(l.ctx);
+                }
+            }.f,
+            .abort = struct {
+                fn f(p: *anyopaque) void {
+                    const l = bind(p).learn.?;
+                    l.abort(l.ctx);
+                }
+            }.f,
+        };
     }
 
     /// The family's lone driver with the context current on the lane thread.
     fn loneRun(p: *anyopaque, s: *lanes.Stream, hooks: api.LoneHooks) anyerror!bool {
         const x = bind(p);
-        return x.lone.?(x.family, s, hooks.ctx, hooks.committed, hooks.yield);
+        return x.lone.?(x.family, s, hooks.ctx, hooks.committed, hooks.yield, hooks.resumed);
     }
 
     /// The family's backend, each call made with the context current on the calling thread.
     fn backend(h: *Host) lanes.backend.Backend {
-        const v = h.inner.vtable;
-        h.vtable = .{
-            .prefill = struct {
-                fn f(p: *anyopaque, s: *lanes.Stream) anyerror!void {
-                    const x = bind(p);
-                    return x.inner.vtable.prefill(x.inner.ptr, s);
-                }
-            }.f,
-            .first = struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
-                    const x = bind(p);
-                    return x.inner.vtable.first(x.inner.ptr, s, position);
-                }
-            }.f,
-            .queue = struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, feed: lanes.backend.Feed, position: u64) anyerror!u64 {
-                    const x = bind(p);
-                    return x.inner.vtable.queue(x.inner.ptr, s, feed, position);
-                }
-            }.f,
-            .read = struct {
-                fn f(p: *anyopaque, handle: u64) anyerror!u32 {
-                    const x = bind(p);
-                    return x.inner.vtable.read(x.inner.ptr, handle);
-                }
-            }.f,
-            .verify = struct {
-                fn f(p: *anyopaque, w: []const lanes.backend.Window, out: []lanes.backend.Verified) anyerror!void {
-                    const x = bind(p);
-                    return x.inner.vtable.verify(x.inner.ptr, w, out);
-                }
-            }.f,
-            .keep = struct {
-                fn f(p: *anyopaque, w: []const lanes.backend.Window, paths: []const []const u32) anyerror!void {
-                    const x = bind(p);
-                    return x.inner.vtable.keep(x.inner.ptr, w, paths);
-                }
-            }.f,
-            .draft = struct {
-                fn f(p: *anyopaque, r: []const lanes.backend.DraftRequest) anyerror!void {
-                    const x = bind(p);
-                    return x.inner.vtable.draft(x.inner.ptr, r);
-                }
-            }.f,
-            .unspeculate = if (v.unspeculate != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream) anyerror!void {
-                    const x = bind(p);
-                    return x.inner.vtable.unspeculate.?(x.inner.ptr, s);
-                }
-            }.f else null,
-            .probabilities = if (v.probabilities != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!bool {
-                    const x = bind(p);
-                    return x.inner.vtable.probabilities.?(x.inner.ptr, s, out);
-                }
-            }.f else null,
-            .tree = if (v.tree != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, gpa: Allocator) anyerror!?lanes.stream.Held {
-                    const x = bind(p);
-                    return x.inner.vtable.tree.?(x.inner.ptr, s, gpa);
-                }
-            }.f else null,
-            .alternatives = if (v.alternatives != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, out: []lanes.backend.Alternative) anyerror!usize {
-                    const x = bind(p);
-                    return x.inner.vtable.alternatives.?(x.inner.ptr, s, out);
-                }
-            }.f else null,
-            .first_row = if (v.first_row != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream) anyerror!lanes.LogprobRow {
-                    const x = bind(p);
-                    return x.inner.vtable.first_row.?(x.inner.ptr, s);
-                }
-            }.f else null,
-            .release = struct {
-                fn f(p: *anyopaque, s: *lanes.Stream) void {
-                    const x = bind(p);
-                    x.inner.vtable.release(x.inner.ptr, s);
-                }
-            }.f,
-        };
+        h.vtable = lane_backend.vtable(Host, h.inner.vtable.*);
         return .{ .ptr = h, .vtable = &h.vtable };
     }
 };
 
-/// The engine for `o.dir`, or null with `problem` set when no CUDA family reads the checkpoint.
+const refusals = @import("cuda_refusal.zig");
+
+/// The engine for `o.dir`, or null with `problem` set when `refusal` names a flag or no CUDA family reads it.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (refusals.backend(o)) |why| {
+        problem.* = why;
+        return null;
+    }
     inline for (registry) |F| {
         if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
     }
@@ -304,6 +255,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
 }
 
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (refusals.family(F, o)) |why| {
+        problem.* = why;
+        return null;
+    }
     const native = modelContext(a, io, o.dir);
     const window = contextWindow(o.context, native, F.default_context) catch |e| {
         problem.* = switch (e) {
@@ -313,11 +268,25 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         };
         return null;
     };
+    if (o.slide) {
+        if (!@hasDecl(F, "slide")) {
+            problem.* = try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on CUDA yet", .{o.model_type});
+            return null;
+        }
+        if (try nemotron_slide.refusal(F, a, io, o.dir, "`cp -RL` (a copy that follows links)")) |why| {
+            problem.* = why;
+            return null;
+        }
+    }
     const device = try setting(a, o.device, "TF_CUDA_DEVICE", 0, problem) orelse return null;
     const segments = try setting(a, o.segments, "TF_CUDA_SEGMENTS", 1, problem) orelse return null;
     if (segments < 1 or segments > F.max_segments) {
         const named = if (o.segments != null) "--segments " else "TF_CUDA_SEGMENTS=";
         problem.* = try std.fmt.allocPrint(a, "{s}{d}: whole prompt chunks a call, 1 to {d}", .{ named, segments, F.max_segments });
+        return null;
+    }
+    if (o.slide and segments > 1) {
+        problem.* = "--slide runs a prompt one chunk at a time, its change's scratch shared by every layer: serve it without --segments or TF_CUDA_SEGMENTS";
         return null;
     }
     const g = try gpa.create(Gpu);
@@ -340,6 +309,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const capability = try g.ctx.capability();
     var name_buf: [256]u8 = undefined;
     const name = g.ctx.name(&name_buf) catch "GPU";
+    if (o.slide and capability != 121) {
+        problem.* = try std.fmt.allocPrint(a, "--slide learns on a GB10 (sm_121) so far, and this {s} is sm_{d}: serve it without --slide", .{ name, capability });
+        return null;
+    }
     const kernels: ?[]const u8 = switch (try cuda.aot.pick(a, io, getenv("TENSORFOLD_CUDA_KERNELS"), capability)) {
         .native => null,
         .captured => |dir| dir,
@@ -355,14 +328,14 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         problem.* = try std.fmt.allocPrint(a, "the checkpoint's {d:.1} GiB of weights do not fit the {d:.1} GiB the CUDA memory budget grants ({d:.1} GiB free less a {d:.1} GiB reserve{s}); free device memory or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB", .{ toGib(weights), toGib(before.room(held0)), toGib(before.free), toGib(before.reserve), if (before.limit != null) ", under TENSORFOLD_CUDA_MEMORY_LIMIT_GB" else "" });
         return null;
     }
-    const loaded = F.open(gpa, io, &g.ctx, o.dir, kernels, .{ .context = @intCast(window), .drafts = o.drafts, .segments = segments }) catch |e| {
+    const loaded = F.open(gpa, io, &g.ctx, o.dir, kernels, .{ .context = @intCast(window), .drafts = o.drafts, .segments = segments, .slide = o.slide }) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the native CUDA engine cannot load {s} with {s} glue kernels ({s})", .{ o.dir, kernels orelse "its own", @errorName(e) });
         return null;
     };
     defer if (!opened) loaded.deinit(loaded.ctx);
     const model = cuda.usage(false).device - held0;
     const after = try pool(a, io, &g.ctx, problem) orelse return null;
-    const room = after.room(model);
+    const room = after.room(model) -| loaded.learn_bytes;
     const free = loaded.free_streams;
     const streams = budget.admit(room, loaded.stream_bytes, free, o.lanes, o.lanes_fixed) catch |e| {
         problem.* = switch (e) {
@@ -375,25 +348,43 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     errdefer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = loaded.backend, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = loaded.lone };
     const cache = budget.cacheBytes(o.prompt_cache_gib, room, loaded.stream_bytes * (streams -| free));
-    h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in {d}-row chunks{s}{s}; {s}", .{
-        capability,                                                                                                   device, name, if (after.unified) ", memory shared with the host" else "", toGib(model), streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
-        if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache", .{toGib(cache)}) else ", no prompt cache",
-        if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
+    h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in passes of up to {d} rows{s}{s}; {s}", .{
+        capability,                                                                                                        device,                                                                                                       name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (loaded.learn_bytes > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(loaded.learn_bytes)}) else "", streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
+        if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache", .{toGib(cache)}) else ", no prompt cache", if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
     });
     errdefer gpa.free(h.startup);
     if (cache > 0) {
         const pc = api.prompt_cache;
         const store = try gpa.create(pc.Store);
-        // states kept and resumed on the family's grid, where a cache-off pass cuts; the head reads one token on
-        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = &nemotron_snaps }, .{ .lookahead = 1, .planned = true, .grid = F.prompt_rows }, cache);
+        // states keep at any row at no prompt call (the head reads one token on); replies prefill when it is quiet
+        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = &nemotron_snaps }, .{ .lookahead = 1, .min_prompt = 0, .warm = .waits }, cache - try nemotron.native.snap_ready(loaded.target, cache));
         h.store = store;
     }
     errdefer if (h.store) |store| {
         store.deinit();
         gpa.destroy(store);
     };
+    if (loaded.learns != null) {
+        const Slide = nemotron_slide.Adapter(F.slide);
+        h.dir = try gpa.dupe(u8, o.dir);
+        const s = try gpa.create(Slide);
+        s.* = Slide.init(gpa, io, F.learnModel(loaded.ctx, h.dir));
+        h.slide = s;
+        h.slide_free = struct {
+            fn f(al: Allocator, p: *anyopaque) void {
+                const x: *Slide = @ptrCast(@alignCast(p));
+                x.deinit();
+                al.destroy(x);
+            }
+        }.f;
+        h.learn = s.hook();
+    }
+    errdefer if (h.slide) |s| {
+        h.slide_free.?(gpa, s);
+        gpa.free(h.dir);
+    };
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
-    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .logprobs = loaded.backend.vtable.first_row != null }, .{ .ctx = loaded.ctx, .text = F.explain });
+    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .warm_turns = h.store != null, .logprobs = loaded.backend.vtable.first_row != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows, .structures = loaded.backend.vtable.first_masked != null }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
@@ -402,12 +393,18 @@ fn toGib(bytes: u64) f64 {
     return @as(f64, @floatFromInt(bytes)) / gib;
 }
 
-test "this host's /proc/meminfo reads whole and parses (Linux)" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
-    const a = std.testing.allocator;
-    const text = procText(a, std.testing.io, "/proc/meminfo") orelse return error.Unreadable;
-    defer a.free(text);
-    try std.testing.expect(budget.meminfo(text) != null);
+test {
+    _ = budget; // cuda_memory.zig's own tests, which no other test binary reaches
+    _ = refusals;
+    _ = lane_backend;
+}
+
+test "the lane core sees a family's prefill_step through the lane backend, so a served prompt can step" {
+    var target: lanes.fake.Fake = .{ .gpa = std.testing.allocator, .prefill_chunks = 3 };
+    defer target.deinit();
+    var h: Host = undefined;
+    h.inner = target.stepped();
+    try std.testing.expect(h.backend().vtable.prefill_step != null);
 }
 
 test "chip classes name the compute capability as gate entries do" {

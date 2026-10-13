@@ -110,14 +110,24 @@ For decisions, `chat_template_kwargs` may be omitted, null, or an object contain
 `n` must be 1; multiple choices receive HTTP 400.
 
 The native CUDA engine (Nemotron 3.5 Lightning) supports `logprobs: true` and `top_logprobs` from 0 through 20 on
-nonstreamed `/v1/chat/completions`, without tools, stop strings, structured output or a thinking budget. Each reply
-token has its `token`, `logprob`, `bytes` and requested `top_logprobs` in `choices[0].logprobs.content`. Probabilities
-describe the raw target-model distribution at temperature 1, before temperature, top-k or top-p sampling filters,
-including when generation is greedy, and are the same with drafts on or `"draft": false`. With thinking on, the rows
-cover the answer only, as `content` does: none for the reasoning, `</think>` or the newlines after it, so the first
-row is the answer's first token, and a reply cut inside its reasoning has none. Alternatives are tokenizer tokens and
-may include leading spaces; `bytes` preserves partial UTF-8 sequences. Other engines, the Responses and legacy
-completions routes, and the request modes above return HTTP 400 when probabilities are requested.
+`/v1/chat/completions`, streamed or not, without tools, stop strings, structured output or a thinking budget. Each
+reply token has its `token`, `logprob`, `bytes` and requested `top_logprobs` in `choices[0].logprobs.content`; a
+stream sends each row with the chunk whose `delta.content` completes that token's text, so the rows joined over the
+chunks are the whole reply's. Probabilities describe the raw target-model distribution at temperature 1, before
+temperature, top-k or top-p sampling filters, including when generation is greedy, and are the same with drafts on or
+`"draft": false`. With thinking on, the rows cover the answer only, as `content` does: none for the reasoning,
+`</think>` or the newlines after it, so the first row is the answer's first token, and a reply cut inside its
+reasoning has none. Alternatives are tokenizer tokens and may include leading spaces; `bytes` preserves partial UTF-8
+sequences. `/v1/completions` takes the legacy `logprobs`, an integer from 0 through 20 alternatives, and answers in
+the legacy form, streamed or not: `tokens`, `token_logprobs`, `top_logprobs` (each alternative's text to its logprob)
+and `text_offset` (each token's first character in the completion, counting each token's own text). Other engines,
+the Responses route and the request modes above return HTTP 400 when probabilities are requested.
+Nonstreamed `/v1/completions` also takes vLLM's `prompt_logprobs`, an integer from 0 through 20, on the same engine.
+`choices[0].prompt_logprobs` has one entry per prompt token: `null` for the first, then an object keyed by token id
+(a string) whose first key is the prompt token itself, followed by the requested best tokens; each value has
+`logprob`, `rank` and `decoded_token`. The prompt token's `rank` counts every vocabulary token at or above it,
+itself included, as vLLM does, and the best tokens are ranked by place. Such a request never resumes from the prompt
+cache, so its whole prompt is prefilled. Chat, streamed requests and other engines return HTTP 400 with it.
 `ignore_eos: true` keeps user-supplied `stop` strings active, including when a stop string spans streamed chunks.
 Both backends reject a non-boolean `ignore_eos` or a malformed `stop` with HTTP 400 before a stream opens.
 Both backends reject malformed `temperature`, `top_p`, `top_k` and `seed` values with HTTP 400, whether or not
@@ -177,13 +187,15 @@ integers, numbers and nulls, streamed or not. Strings preserve text and whitespa
 remain strings for the client to validate. Union types and schema references are not resolved by this conversion.
 
 A reply that is not a call returns as content, never an error: prose, JSON that names no offered tool
-(a structured answer), and malformed tool blocks, which keep their text. A well-formed call to a tool the
+(a structured answer), and malformed tool blocks, which keep their text. A GLM argument key written without its
+`<arg_key>` gets that tag back, and the call parses. A well-formed call to a tool the
 request did not offer is returned as a tool call under its valid name, so the client can report the unknown
 tool and the model can correct itself.
 
 When a model end token arrives inside a whole tool call before its closing markup, the server closes the
-markup and returns the call. A partial value, missing key value, empty block, or unoffered call that cannot
-parse as one complete call remains content.
+markup and returns the call. A GLM value the end token cut off is closed with `</arg_value>` first, and the call
+returns when it then parses strictly. Any other partial value, a missing key value, an empty block, or an unoffered
+call that cannot parse as one complete call remains content.
 
 With `parallel_tool_calls: false`, the server buffers tool deltas until it can return the first valid
 completed call. Prose and reasoning can still stream. Usage counts the entire decoded reply, including
@@ -215,10 +227,27 @@ is complete; a reply cut at `max_tokens` is incomplete, with `finish_reason: "le
 32 blank characters between two tokens (pretty-printing fits; a run of blank lines does not), so a model cannot fill
 its reply with whitespace inside an unfinished value.
 
+The native server enforces the same fields with the same grammars through `libtfgrammar`, a small C ABI over
+xgrammar v0.2.8's C++ library (`zig/src/grammar/tf_grammar.cc`). Release archives ship it in `lib/` beside `bin/` for
+macOS arm64, Linux x86_64 and Linux aarch64; from source, `zig build grammar -Dxgrammar=DIR` builds it from an xgrammar
+v0.2.8 checkout (`git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar`) into
+`zig-out/native/lib` on macOS and `zig-out/lib` on Linux. The server looks in `../lib` beside its binary, then beside
+it, then on the loader's path, and loads it at the first structured request; without it, everything else serves and a
+structured request gets HTTP 400. Nemotron (Metal and CUDA) and Qwen3.5-2B (Metal) enforce it; other native engines
+answer a structured request with HTTP 400. Drafting stays on: the drafts the head holds on the GPU come back to the host
+before each verify, the grammar cuts the ones it rejects and drafts the text it forces itself (a key, closing markup),
+and each row's logits are masked before its draw, so drafted, `"draft": false` and concurrent replies are the same.
+
+On the native server, `tool_choice: "required"` and a named function are a grammar too, on the engines above: the answer
+is one or more calls in the chat template's own markup (`<tool_call>`, with Qwen3-Coder XML parameters as Nemotron and
+Qwen3.5 write them, or a JSON object), each call to an offered tool (the named one only) with its arguments inside the
+tool's parameter schema; blank lines may come between calls, prose may not. `parallel_tool_calls: false` allows exactly
+one call. With thinking on, the grammar starts after the think end.
+
 HTTP 400 comes before any token for a malformed field, a grammar xgrammar cannot compile (with xgrammar's reason), a
-server without xgrammar (with the install command), and a grammar sent with `tool_choice: "required"` or a named
-function. A reply whose grammar fails while decoding ends with HTTP 500 (an error event when streaming); the other
-requests go on.
+server without xgrammar (with the install command; on the native server, a server that cannot load `libtfgrammar`),
+a grammar sent with `tool_choice: "required"` or a named function, and `logprobs` with a grammar or tools. A reply whose
+grammar fails while decoding ends with HTTP 500 (an error event when streaming); the other requests go on.
 
 ## Reasoning
 
@@ -249,7 +278,13 @@ A call only mentioned while thinking, with the block closed after it, stays reas
 while it is still thinking, with a newline, the closing think marker and a blank line, then continues the answer.
 The cut depends on token count, so serial and drafted decoding use the same cut. A model that closes the block
 earlier is left alone. The MLX engine forces the close inside its rounds; CUDA stops the engine at the cut and
-decodes on from the reply, as for a required tool call.
+decodes on from the reply, as for a required tool call. Flash Next forces it inside its GPU-side rounds, on one Mac
+and in speed-up mode.
+
+With thinking enabled, the native server refuses a positive budget with HTTP 400 before opening a stream or
+submitting the request if the engine does not support thinking budgets. This also applies to a positive
+`--thinking-budget` inherited by an absent or zero request field. With no positive budget, requests remain valid
+on those engines; with thinking disabled, the budget is not applied.
 
 The native `--loop-guard` flag is off by default and watches only an open think block. It closes a repeated exact
 cycle of at most eight tokens after 256 predecessor matches, when the detected region starts at least 64 reply tokens
@@ -403,9 +438,13 @@ prompt cache resumes the shared prefix as it does for chat. `store: false` keeps
 response.
 
 HTTP 400 refuses what this server does not run: built-in tools (web search, file search, computer use and the
-others), `background`, `include` (encrypted reasoning among them), `conversation`, `prompt` templates,
-`truncation: "auto"`, `top_logprobs`, `input_file` parts and file IDs, `item_reference` items, encrypted reasoning
-items, and a `previous_response_id` that is not stored.
+others), `background`, `conversation`, `prompt` templates, `truncation: "auto"`, `top_logprobs`, `input_file` parts
+and file IDs, `item_reference` items, encrypted reasoning items, and a `previous_response_id` that is not stored.
+`include` takes a list of OpenAI's names, which the server accepts and ignores (it has nothing to add for them):
+`code_interpreter_call.outputs`, `computer_call_output.output.image_url`, `file_search_call.results`,
+`message.input_image.image_url`, `message.output_text.logprobs`, `reasoning.encrypted_content`,
+`web_search_call.action.sources` and `web_search_call.results`. Any other name, or a value that is not a list of
+strings, is refused.
 
 ## Anthropic Messages
 

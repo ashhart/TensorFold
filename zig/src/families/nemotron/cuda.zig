@@ -17,10 +17,14 @@ pub const Drafter = @import("cuda_drafts.zig").Drafter;
 pub const Head = @import("cuda_mtp.zig").Head;
 pub const Lanes = @import("cuda_lanes.zig").Cuda;
 pub const native = @import("cuda_native.zig");
+pub const train = @import("cuda_train.zig");
+pub const sites = @import("cuda_sites.zig");
+pub const train_ops = @import("cuda_train_ops.zig");
 pub const glue = @import("cuda_glue.zig");
 pub const glue_ref = @import("glue_ref.zig");
 pub const glue_math = @import("glue_math.zig");
 pub const reuse = @import("cuda_reuse.zig");
+pub const slide = @import("cuda_slide.zig");
 
 test {
     _ = @import("config.zig");
@@ -33,5 +37,10 @@ test {
     _ = glue;
     _ = glue_ref;
     _ = glue_math;
-    _ = @import("cuda_prompt_grid.zig");
+    _ = @import("cuda_prompt_cuts.zig");
+    _ = @import("cuda_profile_window.zig");
+    _ = reuse;
+    _ = @import("learner.zig");
+    _ = @import("subspace.zig");
+    _ = @import("cuda_train_back.zig");
 }

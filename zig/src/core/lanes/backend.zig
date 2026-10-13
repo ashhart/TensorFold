@@ -17,6 +17,7 @@ pub const Window = struct {
     parents: ?[]const i32, // each row's parent row (row 0: -1) for a tree; null for a chain
     positions: []const u64, // the absolute position each row's draw is keyed at
     early: bool = false, // also draft each row's first head draft behind the verify (speculate_early)
+    masks: []const u32 = &.{}, // structured output: each row's allowed-token bits (rows x words, lanes/grammar.zig); empty: none
 
     pub fn rows(w: Window) usize {
         return 1 + @as(usize, w.held) + w.tokens.len;
@@ -65,6 +66,8 @@ pub const Backend = struct {
     pub const VTable = struct {
         /// Prefill the stream's prompt into its caches (and its draft head's).
         prefill: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
+        /// One chunk of the prompt pass, false while chunks remain; null: the pass runs whole.
+        prefill_step: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!bool = null,
         /// Draw the first token from the prompt's last row at `position`; a handle to it.
         first: *const fn (ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64,
         /// Feed one token and queue the draw of the next at `position` (a one-token round); a handle to it.
@@ -91,6 +94,12 @@ pub const Backend = struct {
         features: ?*const fn (ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!Features = null,
         /// The first token's logprob row (the prompt's last row) for a stream with `logprobs`; null: not given.
         first_row: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!Row = null,
+        /// `first` with the first token drawn among `mask`'s allowed tokens (structured output).
+        first_masked: ?*const fn (ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 = null,
+        /// The stream's held drafts as host tokens in window order, waiting for the draft (a grammar walks them).
+        held: ?*const fn (ptr: *anyopaque, s: *Stream, out: []u32) anyerror!void = null,
+        /// `prefill` fills `Stream.prompt_rows` for a stream with `prompt_logprobs` (it then starts from 0).
+        prompt_rows: bool = false,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
     };

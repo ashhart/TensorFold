@@ -224,17 +224,65 @@ pub fn main(init: std.process.Init) !void {
         .n = try std.fmt.parseInt(usize, argv[4], 10),
         .k = try std.fmt.parseInt(usize, argv[5], 10),
     });
-    if (argv.len != 1) return error.UnknownArgument;
+    const simd_only = argv.len == 2 and std.mem.eql(u8, argv[1], "--simd");
+    const flashnext_only = argv.len == 2 and std.mem.eql(u8, argv[1], "--flashnext");
+    if (argv.len != 1 and !simd_only and !flashnext_only) return error.UnknownArgument;
     try frozen.verify();
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const device = try mtl.Device.init();
+    const device = mtl.Device.init() catch |err| {
+        if (err != error.NoDevice) return err;
+        std.debug.print("SKIP lane projection: no Metal device\n", .{});
+        return;
+    };
     defer device.deinit();
-    if (!device.tensorUnits()) return error.TensorUnitsRequired;
+    // MTLGPUFamilyMetal4 is 5002; tensor operations also require the Metal 4 runtime language.
+    if (mtl.CompileOptions.mlx().language < mtl.types.languageVersion(4, 0) or
+        !device.responds("supportsFamily:") or
+        !mtl.objc.msg(bool, device.id, "supportsFamily:", .{@as(isize, 5002)}))
+    {
+        std.debug.print("SKIP lane projection: requires a Metal 4 runtime and device\n", .{});
+        return;
+    }
+    if (simd_only and device.tensorUnits()) {
+        std.debug.print("SKIP simdgroup layout: requires a device without tensor units\n", .{});
+        return;
+    }
     const queue = try device.queue();
     defer queue.deinit();
     std.debug.print("Small synthetic projection checks on {s}; no model files\n", .{device.name()});
     var counts: Counts = .{};
+    if (!device.tensorUnits() or flashnext_only) {
+        for ([_]usize{ 1, 2, 4 }) |sk| for ([_]usize{ 1, 2 }) |pf| {
+            for ([_]core.Output{ .f32, .bf16 }) |out| {
+                try check(device, queue, .{ .n = 64, .k = 224, .format = .{ .bits = 6, .group = 32 }, .sk = sk, .pf = pf, .output = out }, &counts);
+            }
+        };
+        try check(device, queue, .{ .n = 96, .k = 224, .format = .{ .bits = 6, .group = 32 }, .sk = 4, .pf = 2, .ranges = &.{.{ 1, 1 }}, .groups = .{ 1, 3 }, .output = .f32 }, &counts);
+        if (!device.tensorUnits()) {
+            var unsupported = core.Layout{ .n = 64, .k = 224, .format = .{ .bits = 6, .group = 32 } };
+            for ([_]u8{ 4, 8 }) |bits| {
+                unsupported.format.bits = bits;
+                try std.testing.expectError(error.TensorUnitsRequired, core.Projection.init(a, device, unsupported));
+            }
+            for ([_]usize{ 64, 128 }) |group| {
+                unsupported = .{ .n = 64, .k = 7 * group, .format = .{ .bits = 6, .group = group } };
+                try std.testing.expectError(error.TensorUnitsRequired, core.Projection.init(a, device, unsupported));
+            }
+            unsupported = .{ .n = 64, .k = 224, .format = .{ .bits = 6, .group = 32 }, .precompute_sums = true };
+            try std.testing.expectError(error.TensorUnitsRequired, core.Projection.init(a, device, unsupported));
+            unsupported = .{ .n = 64, .k = 256, .format = .{ .bits = 4, .group = 64 }, .cooperative = true };
+            try std.testing.expectError(error.TensorUnitsRequired, core.Projection.init(a, device, unsupported));
+            unsupported.cooperative = false;
+            unsupported.precompute_sums = true;
+            unsupported.reg = true;
+            try std.testing.expectError(error.TensorUnitsRequired, core.Projection.init(a, device, unsupported));
+        }
+        std.debug.print("PASS Flash Next: {d} layouts, {d} bit-equal row/window pairs, {d} frozen windows, {d} CPU values, {d} refusals; max fp32 error {d:.9}, max roundoff-bound fraction {d:.6}\n", .{
+            counts.layouts, counts.row_pairs, counts.golden_windows, counts.cpu_values, @as(usize, if (device.tensorUnits()) 0 else 7), counts.max_error, counts.max_fraction,
+        });
+        return;
+    }
     for ([_]u8{ 4, 6, 8 }) |bits| for ([_]usize{ 32, 64, 128 }) |group| {
         for ([_]usize{ 1, 2, 4 }) |sk| for ([_]usize{ 1, 2 }) |pf| {
             const l = core.Layout{ .n = 64, .k = 7 * group, .format = .{ .bits = bits, .group = group }, .sk = sk, .pf = pf, .output = .f32 };

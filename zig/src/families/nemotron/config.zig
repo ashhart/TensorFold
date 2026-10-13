@@ -25,6 +25,12 @@ pub const Why = struct {
     }
 };
 
+/// config.json's count of learned neurons at the end of every shared expert (other loaders read them as the expert's).
+pub const pocket_key = "tensorfold_learned_neurons";
+
+/// How the checkpoint stores its matrices: MLX affine 4-bit, or NVIDIA ModelOpt (FP8, NVFP4 or bf16, read per tensor).
+pub const Format = enum { mlx, modelopt };
+
 pub const Config = struct {
     hidden: usize,
     vocab: usize,
@@ -41,7 +47,8 @@ pub const Config = struct {
     experts: usize,
     top_k: usize,
     expert_width: usize,
-    shared_width: usize,
+    shared_width: usize, // the shared expert's own neurons, learned ones (pocket) left out
+    pocket: usize = 0, // tensorfold_learned_neurons: learned neurons after the shared expert's own, in the same tensors
     routed_scaling: f32,
     norm_topk: bool = true,
     eps: f32,
@@ -49,6 +56,7 @@ pub const Config = struct {
     dt_max: f32 = std.math.inf(f32),
     group_size: usize = 64,
     bits: usize = 4,
+    format: Format = .mlx,
     eos: [4]u32 = .{ 0, 0, 0, 0 },
     eos_count: usize = 0,
 
@@ -161,6 +169,10 @@ fn quantization(c: *Config, o: std.json.ObjectMap, why: *Why) !void {
         why.set("config.json declares no quantization; the native Nemotron kernels read MLX affine checkpoints", .{});
         return error.UnsupportedQuantization;
     };
+    if (q.get("quant_method")) |m| if (m == .string and std.ascii.eqlIgnoreCase(m.string, "modelopt")) {
+        c.format = .modelopt; // the CUDA loader reads each projection's format from its tensors
+        return;
+    };
     if (q.get("quant_method")) |m| if (!(m == .null or (m == .string and (std.ascii.eqlIgnoreCase(m.string, "mlx") or std.ascii.eqlIgnoreCase(m.string, "affine"))))) {
         why.set("config.json's quant_method is {f}; the native Nemotron kernels read MLX affine checkpoints", .{std.json.fmt(m, .{})});
         return error.UnsupportedQuantization;
@@ -235,6 +247,11 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
         .eps = if (o.get("layer_norm_epsilon")) |v| @floatCast(try number(v)) else 1e-5,
     };
     c.head_dim = if (o.get("head_dim")) |v| @intCast(v.integer) else c.hidden / c.heads;
+    if (o.get(pocket_key)) |v| {
+        if (v != .integer or v.integer < 0 or @as(usize, @intCast(v.integer)) >= c.shared_width or @mod(v.integer, 64) != 0) return error.BadConfig;
+        c.pocket = @intCast(v.integer);
+        c.shared_width -= c.pocket;
+    }
     if (o.get("norm_topk_prob")) |v| c.norm_topk = v.bool;
     // hybrid_override_pattern (one character a block) wins over layers_block_type, as the Python loader reads them
     if (o.get("hybrid_override_pattern")) |v| if (v == .string and v.string.len > 0) {
@@ -272,7 +289,11 @@ pub fn checkShapes(c: Config) !void {
     const ok = c.hidden == 2688 and c.vocab == 131072 and c.mamba_heads == 64 and c.mamba_head_dim == 64 and
         c.groups == 8 and c.state == 128 and c.conv_kernel == 4 and c.heads == 32 and c.kv_heads == 2 and
         c.head_dim == 128 and c.experts == 128 and c.top_k == 6 and c.expert_width == 1856 and c.shared_width == 3712 and
-        c.group_size == 64 and c.bits == 4;
+        c.group_size == 64 and c.bits == 4 and c.format == .mlx;
+    if (c.format == .modelopt) {
+        std.log.err("this is a ModelOpt (FP8 and NVFP4) checkpoint: the CUDA engine serves it; Metal reads MLX checkpoints", .{});
+        return error.UnsupportedQuantization;
+    }
     if (!ok) {
         std.log.err("this Nemotron-H's shapes differ from the kernels built for Nemotron 3.5 Lightning 30B-A3B", .{});
         return error.UnsupportedShapes;
@@ -327,6 +348,15 @@ test "per-module quantization entries read as MLX reads them, any other width re
     try expectRefused("\"quantization_config\": {\"quant_method\": \"fp8\", \"weight_block_size\": [128, 128]}", error.UnsupportedQuantization, &.{"fp8"});
     try expectRefused("\"quantization\": {\"group_size\": 64}", error.UnsupportedQuantization, &.{"bits"});
     try expectRefused("\"tie_word_embeddings\": false", error.UnsupportedQuantization, &.{"no quantization"});
+}
+
+test "a ModelOpt checkpoint parses for the CUDA loader, which reads its formats from the tensors" {
+    const text = try withQuantization("\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"MIXED_PRECISION\"}");
+    defer std.testing.allocator.free(text);
+    var why: Why = .{};
+    const c = try parse(std.testing.allocator, text, &why);
+    try std.testing.expectEqual(Format.modelopt, c.format);
+    try std.testing.expectEqual(@as(usize, 8), c.slots());
 }
 
 test "parse the Lightning config" {

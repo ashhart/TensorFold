@@ -13,17 +13,28 @@ pub const snap_bytes = reuse.bytes;
 pub const snap_save = reuse.save;
 pub const snap_restore = reuse.restore;
 pub const snap_drop = reuse.drop;
+pub const snap_ready = reuse.ready; // the spare Mamba buffers it sets aside come out of the cache's budget
+const core = @import("core");
+
+/// Sliding Weights' learner (--slide): lessons change the weights this engine's lanes decode with.
+pub const slide = @import("cuda_slide.zig");
 
 pub const model_type = "nemotron_h";
-pub const formats: []const []const u8 = &.{"mlx-q4g64"};
+pub const formats: []const []const u8 = &.{ "mlx-q4g64", "modelopt-nvfp4" };
 pub const default_context: i64 = engine.default_context;
 pub const max_segments: u32 = @import("cuda_segments.zig").MAX;
-pub const prompt_rows: u32 = state.prefill_rows;
+pub const prompt_rows: u32 = state.pass_rows;
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1 };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false };
+
+/// Thinking budgets the lone driver takes (cuda_lone.zig): above it, the stream goes to the lane core before its cut.
+pub const lone_min_budget = @import("cuda_lone.zig").min_budget;
+
+/// Nanoseconds a reply's background pass waits for the next request first: its first chunk holds the GPU.
+pub const warm_quiet: u64 = 150 * std.time.ns_per_ms;
 
 /// A lone drafted stream's own driver: decodes it until it finishes (false) or `yield` hands it over (true).
-pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool) anyerror!bool;
+pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
 
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
 pub const Loaded = struct {
@@ -38,15 +49,27 @@ pub const Loaded = struct {
     deinit: *const fn (*anyopaque) void,
     lone: ?LoneRun = null, // called with `ctx`; null: every stream in the lane core
     target: *reuse.Target, // the prompt cache copies this engine (cuda_reuse.zig)
+    learns: ?*engine.Engine = null, // --slide: the engine its learner trains, whose sites it attached at load
+    learn_bytes: usize = 0, // --slide: what its trainer allocates at the first lesson, kept out of the streams' room
 };
 
-const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes, target: reuse.Target, carve: ?*cuda.Carveout };
+/// The first shard, index or config.json in `dir` that a write in place would reach through a link, or null.
+pub fn linked(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
+    return core.shard_edit.linked(arena, io, dir);
+}
+
+/// A shared expert's projection config.json keeps unquantized, as an earlier release's lessons left it, or null.
+pub fn plainShared(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
+    return core.shard_edit.plainShared(arena, io, dir);
+}
+
+const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes, target: reuse.Target, carve: ?*cuda.Carveout, living: ?@import("cuda_sites.zig").Sites = null };
 
 /// Own-sequence graphs support both draw modes; drafting also captures the head.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     const carve = try openCarveout(gpa, ctx);
     errdefer if (carve) |c| closeCarveout(gpa, c);
-    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments, .carveout = carve });
+    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments, .carveout = carve, .slide = o.slide });
     errdefer e.deinit();
     const head: ?*Head = if (o.drafts) try Head.init(e) else null;
     errdefer if (head) |h| h.deinit();
@@ -61,6 +84,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .e = e, .head = head, .lanes = try Lanes.init(gpa, e, head), .target = .{ .e = e, .head = head }, .carve = carve };
     errdefer own.lanes.deinit();
+    own.living = try slide.loadLiving(gpa, io, e, dir); // before the lanes' costs are measured: they decode through it
+    errdefer if (own.living) |*s| s.deinit();
     try own.lanes.measure(io, dir);
     return .{
         .backend = own.lanes.backend(),
@@ -71,12 +96,20 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .deinit = release,
         .target = &own.target,
         .lone = if (head != null) loneRun else null,
+        .learns = if (o.slide) e else null,
+        .learn_bytes = if (o.slide) @import("cuda_train.zig").Trainer.memory(e.c) else 0,
     };
 }
 
-fn loneRun(p: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool) anyerror!bool {
+/// What a learner over the loaded engine `p` learns into; `dir` must outlive it.
+pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
     const own: *Owned = @ptrCast(@alignCast(p));
-    return lone.run(own.gpa, &own.lanes, s, .{ .ctx = hooks, .committed = committed, .yield = yield });
+    return .{ .e = own.e, .dir = dir, .living = &own.living };
+}
+
+fn loneRun(p: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return lone.run(own.gpa, &own.lanes, s, .{ .ctx = hooks, .committed = committed, .yield = yield, .resumed = resumed });
 }
 
 /// A request this engine refuses, in words; null: none of its own.
@@ -91,6 +124,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
 fn release(p: *anyopaque) void {
     const own: *Owned = @ptrCast(@alignCast(p));
     own.lanes.deinit();
+    if (own.living) |*s| s.deinit();
     if (own.head) |h| h.deinit();
     own.e.deinit();
     if (own.carve) |c| closeCarveout(own.gpa, c);

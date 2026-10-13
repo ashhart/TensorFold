@@ -35,12 +35,16 @@ pub const CallGate = struct {
 
 /// response_format and the guided_* fields: every token keeps the reply inside this grammar.
 pub const Structure = struct {
-    kind: enum { json, json_schema, regex, choice, grammar },
-    /// The schema (JSON text), regex, choices (a JSON array) or EBNF; empty for any JSON object.
+    kind: enum { json, json_schema, regex, choice, grammar, structural_tag },
+    /// The schema (JSON text), regex, choices (a JSON array), EBNF or structural tag; empty for any JSON object.
     text: []const u8 = "",
     /// With thinking on, the grammar starts after this token.
     after: ?u32 = null,
+    /// The server's compiler, which has compiled `text` once already (the engine's compile is then a cache hit).
+    compiler: ?*grammar.Compiler = null,
 };
+
+pub const grammar = lanes.grammar;
 
 /// A reply to decode. The request and every slice in it stay valid until its ``finished`` event.
 pub const Request = struct {
@@ -74,8 +78,14 @@ pub const Request = struct {
     structure: ?Structure = null,
     /// Stop a short exact cycle while the think block is open.
     loop_guard: bool = false,
+    /// The prompt row (the assistant header's last) where routed lessons decide whether they act (null: none acts).
+    decide: ?u32 = null,
+    /// The model as shipped: no learned neuron acts on its rows, no prompt state is kept or reused (a lesson's writer).
+    untaught: bool = false,
     /// Logprob rows for each reply token with this many best tokens (0..20), when ``Info.logprobs``; null: none.
     logprobs: ?u8 = null,
+    /// Rows for each prompt token after the first, with ranks and this many best tokens, when ``Info.prompt_logprobs``.
+    prompt_logprobs: ?u8 = null,
 };
 
 pub const Reason = enum { stop, length, cancelled, failed };
@@ -102,6 +112,8 @@ pub const Event = union(enum) {
     prefilled: u32,
     /// The next ``tokens`` event's logprob rows, one a token (``logprobs`` requests); valid only during the call.
     logprobs: []const LogprobRow,
+    /// The prompt's rows, one a prompt token after the first, right after ``prefilled`` (``prompt_logprobs`` requests).
+    prompt_logprobs: []const LogprobRow,
     /// Tokens committed for this request, in order; valid only during the call.
     tokens: []const u32,
     /// The reply ended; nothing follows. ``message`` says why a failed reply failed.
@@ -125,13 +137,19 @@ pub const Info = struct {
     call_gates: bool = false,
     /// The engine observes loop_guard requests in its lane stream.
     loop_guard: bool = false,
+    /// The engine enforces a token budget while the think block is open.
+    thinking_budget: bool = true,
     structures: bool = false,
     /// Requests may ask for ``logprobs`` (the engine's lanes give the target's rows).
     logprobs: bool = false,
+    /// Requests may ask for ``prompt_logprobs`` (a prompt pass from 0 that reads every row).
+    prompt_logprobs: bool = false,
     /// Prompt rows a prefill chunk at most, for the server's chunk starts (0: the engine cuts prompts itself).
     prefill_step: u32 = 0,
     /// The engine keeps prompt states between requests, so ``prefilled`` counts the tokens it restored.
     prompt_cache: bool = false,
+    /// The policy the engine runs under, one line (`/health` shows it); empty: none.
+    policy: []const u8 = "",
     /// A line the server prints once at startup (the engine's memory plan); empty: none.
     startup: []const u8 = "",
     /// A prompt-only request (max_tokens 0) keeps its end state: the server prefills each reply for the next turn.
@@ -142,6 +160,13 @@ pub const Info = struct {
     prompt_cache_plan: ?PromptCachePlan = null,
     /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
     greedy_only: bool = false,
+    /// Whether a request's caches fit beside the running streams' now (null: a free lane does); else it waits in order.
+    admit: ?Admit = null,
+};
+
+pub const Admit = struct {
+    ctx: *anyopaque,
+    fits: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) bool,
 };
 
 pub const PromptCachePlan = struct {
@@ -177,6 +202,8 @@ pub const Open = struct {
     prompt_cache_over_cap: bool = false,
     /// --learn: where shared prompt states are kept on disk for later sessions and servers (null: off).
     learn: ?[]const u8 = null,
+    /// --learn-min-free-gib: filesystem space kept free before any learned-state write.
+    learn_min_free_gib: f64 = 4,
     /// --learn-gib: what learned states may take on disk, every model and build together.
     learn_gib: f64 = 32,
     /// --slide: Sliding Weights learns into the served weights, live (off: learn requests are refused).
@@ -184,6 +211,18 @@ pub const Open = struct {
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
     device: ?u32 = null,
     segments: ?u32 = null,
+    /// --mtp-drafts and --mtp-confidence; null: the engine's defaults.
+    mtp_drafts: ?u32 = null,
+    mtp_confidence: ?f64 = null,
+    /// Kept prompt entries (--checkpoint-slots); null: the engine's plan.
+    keep: ?i64 = null,
+    /// Tensor parallelism: this process is `rank` of `tp`; rank 0 listens on `master`:`master_port` for the others.
+    tp: u32 = 1,
+    rank: u32 = 0,
+    master: []const u8 = "",
+    master_port: u16 = 29551,
+    /// --policy: the engine's policy as `key=value,...`; empty: its defaults.
+    policy: []const u8 = "",
 };
 
 /// An opened engine; ``close`` stops its thread and frees its backend.
@@ -220,25 +259,43 @@ pub const Status = struct {
 
 pub const SubmitError = error{ Closed, Busy, InvalidSpans };
 
-/// A worked example for the learner: token ids whose answer starts at `start` (rows from start - 1 on predict it).
-pub const Example = struct { ids: []const u32, start: u32 };
+/// A worked example for the learner: token ids, the answer from `start`; `decide`: its assistant header's last row.
+pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none)
 
 /// One fact's lesson (Sliding Weights): answers, held-out answers, near misses, and prompts that must not move.
 pub const LearnRequest = struct {
     train: []const Example = &.{},
+    think: []const Example = &.{}, // the facts' answers with thinking on, learned beside `train` (one of each a step)
     held: []const Example = &.{},
     near: []const Example = &.{},
     keep: []const Example = &.{}, // answers of every kind this lesson's change must leave as they are
+    asked: []const Example = &.{}, // more wordings of the fact's questions, for its router (prompts only)
+    unasked: []const Example = &.{}, // questions it must not answer, for its router (prompts only)
+    kept: []const Example = &.{}, // questions the last lesson took, with the answers they had (a reroute's)
     undo: bool = false, // instead take the last lesson's change back, as if it never ran
     steps: u32 = 60, // bounded steps this time at most
     more: bool = false, // more steps on the last lesson's rows, which are not captured again
-    commit: bool = false, // the last lesson made a plain change of the model's weights, then checked
-    save: bool = false, // every lesson's weight change written into the model's own shards
+    reroute: bool = false, // the last lesson's router fitted again with `unasked` among what it must not take
+    drop: bool = false, // the last lesson taken out whole
+    save: bool = false, // every kept lesson written beside the model's shards, each with its router
+    retire: []const Neuron = &.{}, // instead zero these neurons of facts a newer fact replaces
+    unretire: bool = false, // instead put back the neurons the last retire zeroed (the newer fact was not learned)
 };
+
+/// A neuron a pocket lesson placed (Sliding Weights): its layer, its index in that layer's pocket, the row it keys on.
+pub const Neuron = struct { layer: u16, neuron: u16, key: NeuronKey };
+pub const NeuronKey = enum { reply, subject, value };
+
+/// A pocket lesson's stage, as it runs: its rows read, its neurons fitted, their outputs, its held-out answers judged.
+pub const LearnPhase = enum { reading, fitting, values, checking };
+
+/// Where a pocket lesson stands: its unit `at` of `of` (0: unknown), its outputs' loss, its neurons once placed.
+pub const LearnProgress = struct { phase: LearnPhase, at: u32 = 0, of: u32 = 0, loss: f32 = 0, neurons: []const Neuron = &.{} };
 
 /// A lesson's outcome in order, ending with `done` (a message says why it failed); slices live only during the call.
 pub const LearnEvent = union(enum) {
-    learned: struct { recalled: bool, steps: u32, loss: f32 },
+    learned: struct { recalled: bool, steps: u32, loss: f32, neurons: []const Neuron = &.{} }, // neurons: a pocket's
+    progress: LearnProgress,
     done: struct { message: []const u8 = "" },
 };
 
@@ -322,7 +379,11 @@ pub const Engine = struct {
 pub const Lone = struct {
     ctx: *anyopaque,
     sampled: bool = false, // it drives sampled streams too
-    /// Prefills `s` and decodes it until it finishes (false) or `hooks.yield` hands it to the lane core (true).
+    logprobs: bool = false, // it gives each token its logprob row too
+    structures: bool = false, // it masks each window's rows by the stream's grammar too
+    min_budget: u32 = 0, // thinking budgets above this and loop guards: it hands the stream over before a forced close (0: never)
+    resumes: bool = false, // it takes the lane core's stream back between rounds (LoneHooks.resumed); else only opens
+    /// Prefills (or resumes) `s` and decodes it until it finishes (false) or `hooks.yield` hands it to the lane core.
     run: *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: LoneHooks) anyerror!bool,
 };
 
@@ -331,14 +392,20 @@ pub const LoneHooks = struct {
     ctx: *anyopaque,
     committed: *const fn (ctx: *anyopaque) void,
     yield: *const fn (ctx: *anyopaque) bool,
+    resumed: bool = false, // the stream comes from the lane core between rounds: no prompt pass, its drafts the core's
 };
 
 /// The lane core served to the HTTP threads (lane_host.zig).
-pub const serial_host = @import("serial_host.zig");
 pub const LaneHost = @import("lane_host.zig").LaneHost;
 
 /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
 pub const prompt_cache = @import("prompt_cache.zig");
+
+/// The same for a paged cache over the backend's own KV pages (prompt_radix.zig).
+pub const prompt_radix = @import("prompt_radix.zig");
+
+/// Decoded prompt rows as canonical spans, for a cache keyed by the arithmetic that made each row (cache_modes.zig).
+pub const cache_modes = @import("cache_modes.zig");
 
 /// Learned prompt-cache states on disk (prompt_imprint.zig).
 pub const prompt_imprint = @import("prompt_imprint.zig");
@@ -347,12 +414,13 @@ pub const prompt_imprint = @import("prompt_imprint.zig");
 pub const keepalive = @import("keepalive.zig");
 
 test {
-    _ = serial_host;
-    _ = @import("serial_host_test.zig");
     _ = @import("lane_host.zig");
     _ = @import("lane_host_test.zig");
     _ = @import("lane_host_reuse_test.zig");
+    _ = @import("lane_host_warm_test.zig");
+    _ = @import("lane_host_fill_test.zig");
     _ = @import("prompt_cache.zig");
+    _ = @import("prompt_radix.zig");
     _ = @import("prompt_imprint.zig");
     _ = @import("keepalive.zig");
 }

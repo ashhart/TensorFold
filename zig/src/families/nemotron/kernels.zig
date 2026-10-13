@@ -20,7 +20,7 @@ pub const head_names = [_][:0]const u8{ "tf_head_prep", "tf_head_norm" };
 pub const sample_names = [_][:0]const u8{ "tf_sample_full", "tf_sample_full_ids" };
 
 /// Learning in the weights (train.metal, train_mixers.metal): the low-rank change, Adam, and each layer's backward.
-pub const train_names = [_][:0]const u8{ "tf_train_head_t", "tf_train_softmax", "tf_train_dequant_t", "tf_train_narrow", "tf_train_add", "tf_train_experts_part", "tf_train_experts_sum", "tf_train_rms_back", "tf_train_lora_in", "tf_train_gate", "tf_train_project", "tf_train_lora_out", "tf_train_lora_db", "tf_train_lora_dxa", "tf_train_lora_dx", "tf_train_sketch", "tf_train_relu2_back", "tf_train_pairs_in", "tf_train_pairs_out", "tf_train_adam", "tf_train_zero", "tf_train_widen", "tf_residual", "tf_train_route_back", "tf_train_rest_back" };
+pub const train_names = [_][:0]const u8{ "tf_train_head_t", "tf_train_softmax", "tf_train_dequant_t", "tf_train_narrow", "tf_train_add", "tf_train_experts_tiles", "tf_train_experts_mm", "tf_train_rms_back", "tf_train_lora_in", "tf_train_gate", "tf_lesson_latch", "tf_train_project", "tf_train_lora_out", "tf_train_lora_db", "tf_train_lora_dxa", "tf_train_lora_dx", "tf_train_sketch", "tf_train_relu2_back", "tf_train_pairs_in", "tf_train_pairs_out", "tf_train_adam", "tf_train_zero", "tf_train_widen", "tf_residual", "tf_train_route_back", "tf_train_rest_back", "tf_train_nudge", "tf_pocket_relu2", "tf_pocket_relu2_rows", "tf_train_copy_cols", "tf_pocket_in" };
 pub const mixer_names = [_][:0]const u8{ "tf_train_dt", "tf_train_ssm_fwd", "tf_train_ssm_back", "tf_train_ssm_bc", "tf_train_gate_back", "tf_train_conv_back", "tf_train_dt_back", "tf_train_attn_q", "tf_train_attn_kv" };
 
 /// Routed experts taking an expert's member rows two or four at a time (nemotron_experts.metal).
@@ -267,6 +267,62 @@ test "the full-vocabulary sampler compiles at this macOS's Metal language with 1
         defer p.deinit();
         try std.testing.expect(p.maxThreads() >= 1024);
     }
+}
+
+test "tf_pocket_in gives tf_train_lora_in then tf_pocket_relu2's bits at 1 and 16 rows over 1, 6 and 64 neurons and two widths" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const queue = try device.queue();
+    defer queue.deinit();
+    const lib = try mtl.Library.fromSource(device, sources.train, mtl.CompileOptions.mlx());
+    defer lib.deinit();
+    var pipes: [3]mtl.Pipeline = undefined;
+    for (&pipes, [_][:0]const u8{ "tf_train_lora_in", "tf_pocket_relu2", "tf_pocket_in" }) |*p, name| p.* = try mtl.Pipeline.init(device, lib, name, false);
+    defer for (pipes) |p| p.deinit();
+    const opts = mtl.ResourceOptions.shared;
+    var prng = std.Random.DefaultPrng.init(11);
+    const rnd = prng.random();
+    var zeros: usize = 0;
+    var positive: usize = 0;
+    // the hidden size, as the MoE layers read x, and a width that leaves every lane a tail after its batches
+    for ([_]usize{ 2688, 2728 }) |d| for ([_]usize{ 1, 16 }) |rows| for ([_]usize{ 1, 6, 64 }) |n| {
+        const bufs = [_]mtl.Buffer{ try device.buffer(rows * d * 2, opts), try device.buffer(n * d * 4, opts), try device.buffer(rows * n * 4, opts), try device.buffer(rows * n * 4, opts), try device.buffer(rows * 4, opts) };
+        defer for (bufs) |b| b.deinit();
+        for (bufs[0].slice(u16, rows * d)) |*v| v.* = @intCast(@as(u32, @bitCast(rnd.floatNorm(f32))) >> 16);
+        for (bufs[1].slice(f32, n * d)) |*v| v.* = rnd.floatNorm(f32) / 64;
+        // unlike fills: a value either kernel leaves unwritten differs
+        @memset(bufs[2].slice(u8, rows * n * 4), 0xff);
+        @memset(bufs[3].slice(u8, rows * n * 4), 0x7f);
+        const dims = [4]u32{ @intCast(rows), @intCast(d), @intCast(n), 0 };
+        const cb = queue.commandBuffer();
+        const enc = cb.compute(.serial);
+        // as layers.pocket() dispatches its first two, then as pocketIn() its one (Enc.run: the group at most the grid)
+        enc.setPipeline(pipes[0]);
+        for ([_]mtl.Buffer{ bufs[0], bufs[1], bufs[2] }, 0..) |b, i| enc.setBuffer(b, 0, i);
+        enc.setValue(dims, 3);
+        enc.setBuffer(bufs[4], 0, 4);
+        enc.dispatchThreads(mtl.Size.of(32 * n, rows, 1), mtl.Size.of(@min(256, 32 * n), 1, 1));
+        enc.setPipeline(pipes[1]);
+        enc.setBuffer(bufs[2], 0, 0);
+        enc.setValue(@as(u32, @intCast(rows * n)), 1);
+        enc.dispatchThreads(mtl.Size.of(rows * n, 1, 1), mtl.Size.of(@min(256, rows * n), 1, 1));
+        enc.setPipeline(pipes[2]);
+        for ([_]mtl.Buffer{ bufs[0], bufs[1], bufs[3] }, 0..) |b, i| enc.setBuffer(b, 0, i);
+        enc.setValue(dims, 3);
+        enc.dispatchThreads(mtl.Size.of(32 * n, rows, 1), mtl.Size.of(@min(256, 32 * n), 1, 1));
+        enc.end();
+        cb.commit();
+        cb.wait();
+        try std.testing.expect(cb.failure() == null);
+        try std.testing.expectEqualSlices(u8, bufs[2].slice(u8, rows * n * 4), bufs[3].slice(u8, rows * n * 4));
+        for (bufs[3].slice(f32, rows * n)) |v| {
+            if (v == 0) zeros += 1;
+            if (v > 0) positive += 1;
+        }
+    };
+    try std.testing.expect(zeros > 0 and positive > 0); // relu's both sides were met
 }
 
 test "the packed selection flags exactly the generated sources with uint4b_format" {

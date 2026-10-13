@@ -6,6 +6,8 @@ const sm = @import("stream.zig");
 const fake = @import("fake.zig");
 const SuffixLookup = @import("proposer.zig").SuffixLookup;
 const Sampling = @import("sampling.zig").Sampling;
+const grammar = @import("grammar.zig");
+const win = @import("windows.zig");
 
 const gpa = std.testing.allocator;
 
@@ -16,6 +18,73 @@ const Case = struct {
     drafts: bool = true,
     think_budget: u32 = 0,
     logprobs: ?u8 = null,
+    classes: ?Classes = null, // structured output under this test grammar
+    eos: []const u32 = &.{96},
+};
+
+/// A test grammar: `length` tokens, the i-th of class i % 3 (any but 96 when `free`), then 96; it starts after `after`.
+const Classes = struct {
+    length: u32 = 12,
+    after: ?u32 = null,
+    free: bool = false,
+    spell: bool = false, // the i-th token is want(i) alone, so the grammar drafts the rest of its text itself
+    at: u32 = 0,
+    done: bool = false,
+
+    fn rules(c: *Classes) grammar.Rules {
+        return .{ .ptr = c, .vtable = &.{ .accept = acceptFn, .rollback = rollbackFn, .terminated = terminatedFn, .fill = fillFn, .drafts = draftsFn, .free = freeFn } };
+    }
+
+    fn cast(ptr: *anyopaque) *Classes {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn allows(c: *const Classes, t: u32) bool {
+        if (c.done) return false;
+        if (c.at == c.length) return t == 96;
+        if (c.spell) return t == want(c.at);
+        return t != 96 and (c.free or t % 3 == c.at % 3);
+    }
+
+    fn acceptFn(ptr: *anyopaque, t: u32) anyerror!bool {
+        const c = cast(ptr);
+        if (!c.allows(t)) return false;
+        if (c.at == c.length) c.done = true else c.at += 1;
+        return true;
+    }
+
+    fn rollbackFn(ptr: *anyopaque, n: usize) anyerror!void {
+        const c = cast(ptr);
+        for (0..n) |_| {
+            if (c.done) c.done = false else c.at -= 1;
+        }
+    }
+
+    fn terminatedFn(ptr: *anyopaque) bool {
+        return cast(ptr).done;
+    }
+
+    fn fillFn(ptr: *anyopaque, words: []u32) anyerror!void {
+        const c = cast(ptr);
+        @memset(words, 0);
+        for (0..fake.vocab) |t| if (c.allows(@intCast(t))) {
+            words[t / 32] |= @as(u32, 1) << @intCast(t % 32);
+        };
+    }
+
+    fn want(i: u32) u32 {
+        return (5 + 7 * i) % 89;
+    }
+
+    fn draftsFn(ptr: *anyopaque, out: []u32) anyerror!usize {
+        const c = cast(ptr);
+        if (!c.spell or c.done) return 0;
+        var n: usize = 0;
+        while (n < out.len and c.at + n < c.length) : (n += 1) out[n] = want(c.at + @as(u32, @intCast(n)));
+        return n;
+    }
+
+    fn freeFn(_: *anyopaque) void {}
 };
 
 fn model() !Config {
@@ -37,9 +106,17 @@ fn run(cases: []const Case) ![][]u32 {
     defer gpa.free(streams);
     const proposers = try gpa.alloc(SuffixLookup, cases.len);
     defer gpa.free(proposers);
-    for (cases, streams, proposers) |c, *s, *p| {
+    const classes = try gpa.alloc(Classes, cases.len);
+    defer gpa.free(classes);
+    const constraints = try gpa.alloc(grammar.Constraint, cases.len);
+    defer gpa.free(constraints);
+    for (cases, streams, proposers, classes, constraints) |c, *s, *p, *g, *k| {
         p.* = try SuffixLookup.init(gpa, .{ .min_match = 4 });
-        s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = &.{96}, .sampling = c.sampling, .drafts = c.drafts, .proposer = p.proposer(), .think_budget = c.think_budget, .think_close = &.{ 90, 91, 92 }, .think_end = 91, .logprobs = c.logprobs });
+        if (c.classes) |given| {
+            g.* = given;
+            k.* = .init(g.rules(), (fake.vocab + 31) / 32, given.after);
+        }
+        s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = c.eos, .sampling = c.sampling, .drafts = c.drafts, .proposer = p.proposer(), .think_budget = c.think_budget, .think_close = &.{ 90, 91, 92 }, .think_end = 91, .logprobs = c.logprobs, .grammar = if (c.classes != null) k else null });
     }
     defer for (streams, proposers) |*s, *p| {
         s.deinit(gpa);
@@ -217,4 +294,169 @@ test "a cycle in the answer does not refire or reclose" {
     var close_count: usize = 0;
     for (plain[0].emitted) |token| close_count += @intFromBool(token == 90);
     try std.testing.expectEqual(@as(usize, 1), close_count);
+}
+
+test "a prompt pass a chunk a round between other streams' rounds gives the whole pass's tokens" {
+    const cases = [_]Case{ .{ .prompt = &.{ 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4 } }, .{ .prompt = &.{ 9, 10, 11, 12, 13, 14, 15, 9, 10, 11 }, .max_new = 30, .sampling = .{ .temperature = 0.8, .seed = 7 } } };
+    const whole = try run(&cases);
+    defer free(whole);
+    var cfg = try model();
+    defer cfg.deinit(gpa);
+    var target: fake.Fake = .{ .gpa = gpa, .prefill_chunks = 4 };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer engine.deinit();
+    try std.testing.expect(engine.fills());
+    var proposers: [2]SuffixLookup = undefined;
+    var streams: [2]sm.Stream = undefined;
+    for (cases, &streams, &proposers) |c, *s, *p| {
+        p.* = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+        s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = &.{96}, .sampling = c.sampling, .drafts = c.drafts, .proposer = p.proposer(), .think_budget = c.think_budget, .think_close = &.{ 90, 91, 92 }, .think_end = 91 });
+    }
+    defer for (&streams, &proposers) |*s, *p| {
+        s.deinit(gpa);
+        p.deinit();
+    };
+    while (!try engine.fillStream(&streams[0], target.prefill_count == 0)) {}
+    var first = true;
+    while (!try engine.fillStream(&streams[1], first)) {
+        first = false;
+        try engine.step(); // the first stream decodes between the second's chunks
+    }
+    try std.testing.expectEqual(@as(usize, 8), target.prefill_count);
+    while (engine.activeCount() > 0) try engine.step();
+    for (streams, whole) |s, w| try std.testing.expectEqualSlices(u32, w, s.emitted());
+}
+
+/// Every emitted token from the grammar's start on is one the test grammar allows, and it ends at its stop token.
+fn expectInGrammar(emitted: []const u32, classes: Classes) !void {
+    var g = classes;
+    var active = g.after == null;
+    for (emitted) |t| {
+        if (!active) {
+            active = t == g.after.?;
+            continue;
+        }
+        try std.testing.expect(g.allows(t));
+        _ = try Classes.acceptFn(&g, t);
+    }
+    try std.testing.expect(g.done);
+}
+
+test "structured output: drafted rounds commit the one-token decode, every token inside the grammar" {
+    for ([_]?Sampling{ null, .{ .seed = 5, .temperature = 0.7, .top_k = 0, .top_p = 0.95 } }) |s| {
+        const drafted = try run(&.{.{ .prompt = &p1, .sampling = s, .classes = .{} }});
+        defer free(drafted);
+        const plain = try run(&.{.{ .prompt = &p1, .sampling = s, .drafts = false, .classes = .{} }});
+        defer free(plain);
+        try std.testing.expectEqualSlices(u32, plain[0], drafted[0]);
+        try expectInGrammar(drafted[0], .{});
+    }
+}
+
+test "structured output: shared rounds with grammar and plain streams commit what each commits alone" {
+    const sampled: Sampling = .{ .seed = 9, .temperature = 1.0, .top_k = 0, .top_p = 0.9 };
+    const cases = [_]Case{ .{ .prompt = &p1, .classes = .{ .length = 20 } }, .{ .prompt = &p2, .sampling = sampled, .max_new = 30 }, .{ .prompt = &p2, .sampling = sampled, .classes = .{ .length = 7 } } };
+    const together = try run(&cases);
+    defer free(together);
+    for (cases, together) |c, got| {
+        const alone = try run(&.{c});
+        defer free(alone);
+        try std.testing.expectEqualSlices(u32, alone[0], got);
+        if (c.classes) |g| try expectInGrammar(got, g);
+    }
+}
+
+test "structured output: with thinking the grammar starts after the think end, through a forced close" {
+    const c: Case = .{ .prompt = &p2, .think_budget = 9, .classes = .{ .after = 91 } };
+    const drafted = try run(&.{c});
+    defer free(drafted);
+    var plain_case = c;
+    plain_case.drafts = false;
+    const plain = try run(&.{plain_case});
+    defer free(plain);
+    try std.testing.expectEqualSlices(u32, plain[0], drafted[0]);
+    try std.testing.expectEqualSlices(u32, &.{ 90, 91 }, drafted[0][8..10]); // the close ends at the think end
+    try expectInGrammar(drafted[0], .{ .after = 91 });
+}
+
+test "structured output: the grammar's stop token ends a reply that ignores eos" {
+    const out = try run(&.{.{ .prompt = &p1, .eos = &.{}, .max_new = 200, .classes = .{ .length = 5 } }});
+    defer free(out);
+    try std.testing.expectEqual(@as(usize, 6), out[0].len);
+    try expectInGrammar(out[0], .{ .length = 5 });
+}
+
+test "structured output: held head drafts come back as host tokens, so a grammar stream drafts every round" {
+    for ([_]?Sampling{ null, .{ .seed = 3, .temperature = 0.9, .top_k = 0, .top_p = 0.9 } }) |sampling| {
+        var cfg = try model();
+        defer cfg.deinit(gpa);
+        var target: fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var clock: fake.FixedClock = .{};
+        var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+        defer engine.deinit();
+        var p = try SuffixLookup.init(gpa, .{ .min_match = 1000 }); // no copies: every draft is the head's
+        defer p.deinit();
+        var g: Classes = .{ .length = 60, .free = true };
+        var k: grammar.Constraint = .init(g.rules(), (fake.vocab + 31) / 32, null);
+        var s = try sm.Stream.init(gpa, .{ .id = "s", .prompt = &p1, .max_new = 80, .eos = &.{96}, .sampling = sampling, .proposer = p.proposer(), .think_close = &.{ 90, 91, 92 }, .think_end = 91, .grammar = &k });
+        defer s.deinit(gpa);
+        try engine.addStream(&s);
+        while (engine.activeCount() > 0) try engine.step();
+        try expectInGrammar(s.emitted(), .{ .length = 60, .free = true });
+        // the fake head misses one draft in five: a grammar that takes them all keeps well over a token a round
+        try std.testing.expect(s.drafted >= 2 * s.rounds and 2 * s.emitted().len > 3 * s.rounds);
+    }
+}
+
+test "structured output: where the grammar spells its own text, its drafts fill the window and drafted == plain" {
+    for ([_]?Sampling{ null, .{ .seed = 11, .temperature = 0.8, .top_k = 0, .top_p = 0.9 } }) |sampling| {
+        const c: Case = .{ .prompt = &p1, .sampling = sampling, .max_new = 80, .classes = .{ .length = 50, .spell = true } };
+        var plain_case = c;
+        plain_case.drafts = false;
+        const plain = try run(&.{plain_case});
+        defer free(plain);
+        var cfg = try model();
+        defer cfg.deinit(gpa);
+        var target: fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var clock: fake.FixedClock = .{};
+        var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+        defer engine.deinit();
+        var p = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+        defer p.deinit();
+        var g: Classes = c.classes.?;
+        var k: grammar.Constraint = .init(g.rules(), (fake.vocab + 31) / 32, null);
+        var s = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = &.{96}, .sampling = sampling, .proposer = p.proposer(), .think_close = &.{ 90, 91, 92 }, .think_end = 91, .grammar = &k });
+        defer s.deinit(gpa);
+        try engine.addStream(&s);
+        while (engine.activeCount() > 0) try engine.step();
+        try std.testing.expectEqualSlices(u32, plain[0], s.emitted());
+        try expectInGrammar(s.emitted(), c.classes.?);
+        // the head's guesses are wrong here; the grammar's own drafts land every round, a window's worth at a time
+        try std.testing.expect(s.emitted().len > 4 * s.rounds);
+    }
+}
+
+test "a family that keeps copies to shared rounds proposes none for a lone stream" {
+    for ([_]bool{ true, false }) |lone_copies| {
+        var cfg = try Config.init(gpa, .{ .exact_width = 16, .mtp = true, .speculate = true, .drafts = 4, .lone_copies = lone_copies }, 16, 15);
+        defer cfg.deinit(gpa);
+        var target: fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var clock: fake.FixedClock = .{};
+        var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+        defer engine.deinit();
+        var p = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+        defer p.deinit();
+        const prompt = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8 }; // the last 8 tokens repeat
+        var s = try sm.Stream.init(gpa, .{ .id = "s", .prompt = &prompt, .max_new = 16, .eos = &.{96}, .proposer = p.proposer() });
+        defer s.deinit(gpa);
+        engine.alone = false;
+        try std.testing.expect((try win.copyProposal(&engine, &s)).len >= 2);
+        engine.alone = true;
+        try std.testing.expectEqual(lone_copies, (try win.copyProposal(&engine, &s)).len >= 2);
+    }
 }

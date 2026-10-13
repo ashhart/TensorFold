@@ -55,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const load_start = std.Io.Clock.awake.now(io);
-    const target = try q.model.Model.load(init.gpa, io, target_dir.?, 128);
+    const target = try q.model.Model.load(init.gpa, io, target_dir.?, 128, null);
     defer target.deinit();
     if (prompt.len + count > target.config.max_position) return error.ContextFull;
     for (prompt) |token| if (token >= target.config.vocab) return error.BadTokenId;

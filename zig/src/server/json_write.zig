@@ -68,8 +68,10 @@ pub fn writeString(w: *Writer, s: []const u8, o: Options) Writer.Error!void {
             try w.print("\\u{x:0>4}", .{c});
             i += 1;
         } else {
-            const n = std.unicode.utf8ByteSequenceLength(c) catch 1;
-            const code = decodeWtf8(s[i..@min(s.len, i + n)]);
+            // a sequence cut short at the string's end is U+FFFD and consumes only the bytes that are there
+            const full = std.unicode.utf8ByteSequenceLength(c) catch 1;
+            const n = @min(full, s.len - i);
+            const code = if (n < full) 0xfffd else decodeWtf8(s[i .. i + n]);
             if (code >= 0x10000) {
                 const v = code - 0x10000;
                 try w.print("\\u{x:0>4}\\u{x:0>4}", .{ 0xd800 + (v >> 10), 0xdc00 + (v & 0x3ff) });
@@ -98,6 +100,8 @@ pub fn floatJson(buf: []u8, f: f64) []const u8 {
 
 /// ``repr(float)``: the shortest round-trip digits, fixed between 1e-4 and 1e16, else exponent form.
 pub fn floatRepr(buf: []u8, f: f64) []const u8 {
+    if (std.math.isNan(f)) return "nan";
+    if (std.math.isInf(f)) return if (f > 0) "inf" else "-inf";
     if (f == 0) return if (std.math.signbit(f)) "-0.0" else "0.0";
     var tmp: [64]u8 = undefined;
     const sci = std.fmt.float.render(&tmp, f, .{ .mode = .scientific }) catch unreachable;
@@ -156,6 +160,7 @@ test "float repr" {
         .{ 0.00001, "1e-05" },                .{ 100.0, "100.0" },                                    .{ 0.1, "0.1" },
         .{ 1.0 / 3.0, "0.3333333333333333" }, .{ 123456789012345678.0, "1.2345678901234568e+17" },    .{ -2.5, "-2.5" },
         .{ 5e-324, "5e-324" },                .{ 1.7976931348623157e308, "1.7976931348623157e+308" }, .{ 42.0, "42.0" },
+        .{ std.math.nan(f64), "nan" },        .{ std.math.inf(f64), "inf" },                          .{ -std.math.inf(f64), "-inf" },
     };
     for (cases) |c| try std.testing.expectEqualStrings(c[1], floatRepr(&buf, c[0]));
 }
@@ -167,4 +172,15 @@ test "dumps" {
     const r = try json.parse(a, "{\"a\": [1, 2.50, \"\xc3\xa9\\n\xf0\x9f\x98\x80\x7f\"], \"b\": {}, \"c\": -0}");
     try std.testing.expectEqualStrings("{\"a\": [1, 2.5, \"\\u00e9\\n\\ud83d\\ude00\\u007f\"], \"b\": {}, \"c\": 0}", try json.stringify(a, r.ok, .{}));
     try std.testing.expectEqualStrings("{\"a\":[1,2.5,\"\xc3\xa9\\n\xf0\x9f\x98\x80\x7f\"],\"b\":{},\"c\":0}", try json.stringify(a, r.ok, .{ .ascii = false, .compact = true }));
+}
+
+test "a UTF-8 sequence cut short at the string's end is U+FFFD, not a slice past it" {
+    var buf: [64]u8 = undefined;
+    for ([_]struct { []const u8, []const u8 }{
+        .{ "ab\xE2", "\"ab\\ufffd\"" }, .{ "ab\xE2\x82", "\"ab\\ufffd\"" }, .{ "\xF0\x9F\x98", "\"\\ufffd\"" }, .{ "x\xE2\x82\xAC", "\"x\\u20ac\"" },
+    }) |c| {
+        var w: Writer = .fixed(&buf);
+        try writeString(&w, c[0], .{});
+        try std.testing.expectEqualStrings(c[1], w.buffered());
+    }
 }

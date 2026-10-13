@@ -21,7 +21,19 @@ pub const Flag = struct {
     native_values: ?[]const []const u8 = null,
 };
 
-const backend_values: []const []const u8 = if (builtin.os.tag == .macos) &.{ "auto", "mlx" } else &.{ "auto", "cuda" };
+const backend_values: []const []const u8 = if (builtin.os.tag == .macos) &.{ "auto", "mlx" } else if (served("--backend=rocm")) &.{ "auto", "rocm" } else &.{ "auto", "cuda" };
+
+/// The flags past the common ones the binary's backend serves, from its root's `serves` (test roots: none).
+const native_serves: []const []const u8 = if (@hasDecl(@import("root"), "serves")) @import("root").serves else &.{};
+
+fn served(comptime name: []const u8) bool {
+    return servedBy(native_serves, name);
+}
+
+fn servedBy(list: []const []const u8, name: []const u8) bool {
+    for (list) |x| if (std.mem.eql(u8, x, name)) return true;
+    return false;
+}
 
 /// The CUDA build's own flags and variables (the Metal build refuses them).
 const cuda_build = builtin.os.tag == .linux;
@@ -43,7 +55,7 @@ pub const flags = [_]Flag{
     .{ .name = "--vision-max-images" },
     .{ .name = "--vision-image-tokens" },
     .{ .name = "--context", .native = true },
-    .{ .name = "--speed-up", .native = true },
+    .{ .name = "--speed-up", .native = !cuda_build },
     .{ .name = "--max-tokens", .native = true },
     .{ .name = "--temperature", .native = true },
     .{ .name = "--top-p", .native = true },
@@ -63,12 +75,12 @@ pub const flags = [_]Flag{
     .{ .name = "--slide-graph", .native = true },
     .{ .name = "--drafter", .native = true },
     .{ .name = "--drafter-bits", .choices = &.{ "0", "4" }, .native = true },
-    .{ .name = "--mtp-drafts" },
-    .{ .name = "--mtp-confidence" },
+    .{ .name = "--mtp-drafts", .native = served("--mtp-drafts") },
+    .{ .name = "--mtp-confidence", .native = served("--mtp-confidence") },
     .{ .name = "--lane-kernels", .choices = &.{ "auto", "on", "off" } },
     .{ .name = "--prompt-cache-gib", .native = true },
     .{ .name = "--prompt-cache-over-cap", .kind = .store_true, .native = true },
-    .{ .name = "--checkpoint-slots" },
+    .{ .name = "--checkpoint-slots", .native = served("--checkpoint-slots") },
     .{ .name = "--spill-gib" },
     .{ .name = "--snapshot-dir", .native = true, .native_values = &.{"none"} },
     .{ .name = "--max-snapshots", .native = true, .native_values = &.{"0"} },
@@ -80,11 +92,13 @@ pub const flags = [_]Flag{
     .{ .name = "--ssd-experts" },
     .{ .name = "--ple-on-ssd", .kind = .store_true },
     .{ .name = "--no-update-check", .kind = .store_true, .native = true },
-    .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda" }, .native = true, .native_values = backend_values },
-    .{ .name = "--tp", .choices = &.{ "1", "2" } },
-    .{ .name = "--rank", .choices = &.{ "0", "1" } },
-    .{ .name = "--master" },
-    .{ .name = "--master-port" },
+    .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda", "rocm" }, .native = true, .native_values = backend_values },
+    .{ .name = "--tp", .choices = &.{ "1", "2", "4", "8" }, .native = served("--tp") },
+    .{ .name = "--rank", .native = served("--tp") },
+    .{ .name = "--master", .native = served("--tp") },
+    .{ .name = "--master-port", .native = served("--tp") },
+    // the GPU engine's policy switches as key=value pairs, repeatable
+    .{ .name = "--policy", .kind = .append, .native = served("--policy") },
     .{ .name = "--kv-dtype", .choices = &.{ "bf16", "int8", "int4" } },
     .{ .name = "--prefill-fp8", .kind = .store_true },
     .{ .name = "--no-prefill-fp8", .kind = .store_true },
@@ -96,10 +110,13 @@ pub const flags = [_]Flag{
     .{ .name = "--learn", .kind = .store_true, .native = true },
     .{ .name = "--learn-dir", .native = true },
     .{ .name = "--learn-gib", .native = true },
+    .{ .name = "--learn-min-free-gib", .native = true },
+    // the native server's own: Cortheon's reasoning program and server-run web research for every chat request
+    .{ .name = "--cortheon", .kind = .store_true, .native = true },
 };
 
 /// The variables this binary honours as the Python engine does, then the CUDA build's.
-pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_NO_UPDATE_CHECK", "HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE" } ++
+pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_NO_UPDATE_CHECK", "HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE", "BRAVE_SEARCH_API_KEY" } ++
     (if (cuda_build) [_][]const u8{ "TF_CUDA_DEVICE", "TF_CUDA_SEGMENTS", "TENSORFOLD_CUDA_KERNELS", "TENSORFOLD_MEMORY_RESERVE_GIB", "TENSORFOLD_CUDA_MEMORY_LIMIT_GB" } else [_][]const u8{});
 
 pub const Args = struct {
@@ -114,11 +131,12 @@ pub const Args = struct {
     metrics_open: bool = false,
     dashboard: bool = false,
     context: ?i64 = null,
-    speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next)
+    speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next and the GLMs)
     prompt_cache_gib: ?f64 = null, // kept prompt states' budget (0: none; null: what 70% of RAM leaves past the loaded server)
     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
     learn: bool = false, // keep shared prompt states on disk (--learn-dir: where; it implies --learn)
     learn_dir: ?[]const u8 = null,
+    learn_min_free_gib: f64 = 4,
     learn_gib: f64 = 32, // disk for learned states, every model and build together
     max_tokens: i64 = 4096,
     temperature: ?f64 = null,
@@ -143,6 +161,15 @@ pub const Args = struct {
     backend: []const u8 = "auto",
     device: ?u32 = null,
     segments: ?u32 = null,
+    mtp_drafts: ?u32 = null,
+    mtp_confidence: ?f64 = null,
+    checkpoint_slots: ?i64 = null,
+    tp: u32 = 1,
+    rank: u32 = 0,
+    master: []const u8 = "",
+    master_port: u16 = 29551,
+    policy: []const u8 = "", // every --policy joined by commas
+    cortheon: bool = false, // Cortheon's program, research before building, and cortheon_search/cortheon_fetch run by the server
 };
 
 /// A usage error's message (argparse's ``error:`` line); the caller exits 2.
@@ -193,6 +220,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
         try apply(a, &out, name, value, u, &alias, &keys);
     }
     out.model = model orelse return fail(u, a, "the following arguments are required: model", .{});
+    try ranks(u, a, out);
     out.alias = alias.items;
     out.api_key = keys.items;
     return out;
@@ -220,7 +248,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
             return std.mem.eql(u8, x, y);
         }
     }.f;
-    if (try cudaFlag(a, out, name, v, u)) return;
+    if (try cudaFlag(a, out, name, v, u) or try gpuFlag(a, out, name, v, u)) return;
     if (is(name, "--chat-template")) {
         out.chat_template = v;
         return;
@@ -232,6 +260,8 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     } else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try alias.append(a, v) else if (is(name, "--api-key")) try keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--learn")) out.learn = true else if (is(name, "--learn-dir")) {
         out.learn = true;
         out.learn_dir = v;
+    } else if (is(name, "--learn-min-free-gib")) {
+        out.learn_min_free_gib = try gib(u, a, name, v);
     } else if (is(name, "--learn-gib")) {
         out.learn = true;
         out.learn_gib = try gib(u, a, name, v);
@@ -245,7 +275,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const n = try int(u, a, name, v);
         if (n < 0) return fail(u, a, "argument --compact-keep: expected a token count from 0: '{s}'", .{v});
         out.compact_keep = @intCast(n);
-    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v;
+    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true;
 }
 
 /// The CUDA build's --device and --segments; false for any other flag.
@@ -255,6 +285,43 @@ fn cudaFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usage
     } else if (std.mem.eql(u8, name, "--segments")) {
         const n = try int(u, a, name, v);
         out.segments = if (n >= 1) @intCast(@min(n, std.math.maxInt(u32))) else return fail(u, a, "argument --segments: a count from 1: '{s}'", .{v});
+    } else return false;
+    return true;
+}
+
+/// A rank names one of the `tp` processes.
+fn ranks(u: *Usage, a: Allocator, out: Args) error{ Usage, OutOfMemory }!void {
+    if (out.rank >= out.tp) return fail(u, a, "argument --rank: {d} is not below --tp {d}", .{ out.rank, out.tp });
+}
+
+/// The GPU engine's tensor-parallel, MTP, kept-entry and policy flags; false for any other flag.
+fn gpuFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usage) error{ Usage, OutOfMemory }!bool {
+    const is = struct {
+        fn f(x: []const u8, y: []const u8) bool {
+            return std.mem.eql(u8, x, y);
+        }
+    }.f;
+    if (is(name, "--tp")) out.tp = @intCast(try int(u, a, name, v)) else if (is(name, "--rank")) {
+        out.rank = std.math.cast(u32, try int(u, a, name, v)) orelse return fail(u, a, "argument --rank: a rank from 0: '{s}'", .{v});
+    } else if (is(name, "--master")) out.master = v else if (is(name, "--master-port")) {
+        const p = try int(u, a, name, v);
+        if (p < 0 or p > 65535) return fail(u, a, "argument --master-port: invalid port: '{s}'", .{v});
+        out.master_port = @intCast(p);
+    } else if (is(name, "--mtp-drafts")) {
+        const n = try int(u, a, name, v);
+        if (n < 0 or n > 64) return fail(u, a, "argument --mtp-drafts: a count from 0 to 64: '{s}'", .{v});
+        out.mtp_drafts = @intCast(n);
+    } else if (is(name, "--mtp-confidence")) {
+        const c = try float(u, a, name, v);
+        if (!(c >= 0 and c <= 1)) return fail(u, a, "argument --mtp-confidence: a probability in [0, 1]: '{s}'", .{v});
+        out.mtp_confidence = c;
+    } else if (is(name, "--checkpoint-slots")) {
+        const n = try int(u, a, name, v);
+        if (n < 0) return fail(u, a, "argument --checkpoint-slots: a count from 0: '{s}'", .{v});
+        out.checkpoint_slots = n;
+    } else if (is(name, "--policy")) {
+        if (std.mem.indexOfScalar(u8, v, '=') == null) return fail(u, a, "argument --policy: expected key=value: '{s}'", .{v});
+        out.policy = if (out.policy.len == 0) v else try std.fmt.allocPrint(a, "{s},{s}", .{ out.policy, v });
     } else return false;
     return true;
 }
@@ -270,6 +337,37 @@ pub fn parallel(text: []const u8) ?u32 {
 /// ``--parallel`` named a number (an engine that fits fewer refuses), not "auto" (it serves what fits).
 pub fn parallelFixed(text: []const u8) bool {
     return !std.ascii.eqlIgnoreCase(std.mem.trim(u8, text, " "), "auto") and parallel(text) != null;
+}
+
+/// What a server asks of its engine, from its flags.
+pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args) !api.Open {
+    return .{
+        .dir = dir,
+        .model_type = model_type,
+        .context = args.context,
+        .lanes = parallel(args.parallel) orelse 8,
+        .lanes_fixed = parallelFixed(args.parallel),
+        .drafts = !args.no_drafts,
+        .drafter = args.drafter,
+        .drafter_bits = args.drafter_bits,
+        .speed_up = args.speed_up,
+        .prompt_cache_gib = args.prompt_cache_gib,
+        .prompt_cache_over_cap = args.prompt_cache_over_cap,
+        .learn = if (args.learn) args.learn_dir orelse try api.prompt_imprint.defaultRoot(a) else null,
+        .learn_gib = args.learn_gib,
+        .learn_min_free_gib = args.learn_min_free_gib,
+        .slide = args.slide,
+        .device = args.device,
+        .segments = args.segments,
+        .mtp_drafts = args.mtp_drafts,
+        .mtp_confidence = args.mtp_confidence,
+        .keep = args.checkpoint_slots,
+        .tp = args.tp,
+        .rank = args.rank,
+        .master = args.master,
+        .master_port = args.master_port,
+        .policy = args.policy,
+    };
 }
 
 /// What ``capabilities --json`` reports about the engine side: its version, chip, backends and families.
@@ -347,13 +445,15 @@ test "parse and capabilities share the table" {
     try std.testing.expectEqualStrings("notes", on.compact_memory.?);
     try std.testing.expectEqualStrings("graph.json", (try parse(a, &.{ "m", "--slide-graph", "graph.json" }, &u)).slide_graph.?);
     try std.testing.expect((try parse(a, &.{ "m", "--slide" }, &u)).slide);
+    try std.testing.expect((try parse(a, &.{ "m", "--cortheon" }, &u)).cortheon and !(try parse(a, &.{"m"}, &u)).cortheon);
+    try std.testing.expect(std.mem.indexOf(u8, doc, "\"--cortheon\": {}") != null);
     try std.testing.expectEqual(@as(?f64, 0.5), (try parse(a, &.{ "m", "--compact-at", "0.5" }, &u)).compact_fraction);
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-at", "0" }, &u));
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-at", "2" }, &u));
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-keep", "-1" }, &u));
 }
 
-test "--device and --segments: CUDA builds serve them, values checked" {
+test "--device and --segments: CUDA builds serve them, values checked; --speed-up is the Mac build's" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -363,6 +463,7 @@ test "--device and --segments: CUDA builds serve them, values checked" {
         try std.testing.expectEqual(@as(?u32, 1), args.device);
         try std.testing.expectEqual(@as(?u32, 2), args.segments);
     } else try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--device", "1" }, &u));
+    if (cuda_build) try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--speed-up", "pair.json" }, &u)) else try std.testing.expectEqualStrings("pair.json", (try parse(a, &.{ "m", "--speed-up", "pair.json" }, &u)).speed_up.?);
     var out: Args = .{};
     try std.testing.expect(try cudaFlag(a, &out, "--device", "0", &u));
     try std.testing.expectEqual(@as(?u32, 0), out.device);
@@ -372,4 +473,70 @@ test "--device and --segments: CUDA builds serve them, values checked" {
     try std.testing.expectEqual(@as(?u32, 4), out.segments);
     try std.testing.expect(!try cudaFlag(a, &out, "--port", "1", &u));
     try std.testing.expect(parallelFixed("3") and !parallelFixed("auto") and !parallelFixed("x"));
+}
+
+test "learned disk floor parses once with a finite byte-safe default and is a native capability" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var u: Usage = .{};
+    const normal = try parse(arena.allocator(), &.{"m"}, &u);
+    try std.testing.expectEqual(@as(f64, 4), normal.learn_min_free_gib);
+    const explicit = try parse(arena.allocator(), &.{ "m", "--learn-min-free-gib", "1.5" }, &u);
+    try std.testing.expectEqual(@as(f64, 1.5), explicit.learn_min_free_gib);
+    for ([_][]const u8{ "nan", "inf", "-1", "17179869184" }) |bad| {
+        try std.testing.expectError(error.Usage, parse(arena.allocator(), &.{ "m", "--learn-min-free-gib", bad }, &u));
+    }
+}
+
+test "the GPU engine's flags: refused and unlisted unless the backend serves them, values checked" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    // each flag, a value, and the `serves` entry that turns it on
+    const gated = [_][3][]const u8{ .{ "--tp", "2", "--tp" }, .{ "--rank", "0", "--tp" }, .{ "--master", "node0", "--tp" }, .{ "--master-port", "29600", "--tp" }, .{ "--policy", "matrix=off", "--policy" }, .{ "--mtp-drafts", "2", "--mtp-drafts" }, .{ "--mtp-confidence", "0.5", "--mtp-confidence" }, .{ "--checkpoint-slots", "3", "--checkpoint-slots" } };
+    var out: std.Io.Writer.Allocating = .init(a);
+    try capabilities(&out.writer, .{ .version = "0" });
+    for (gated) |g| {
+        const listed = std.mem.indexOf(u8, out.written(), try std.fmt.allocPrint(a, "\"{s}\"", .{g[0]})) != null;
+        try std.testing.expectEqual(servedBy(native_serves, g[2]), listed);
+        if (!listed) try std.testing.expectError(error.Usage, parse(a, &.{ "m", g[0], g[1] }, &u));
+    }
+    try std.testing.expect(servedBy(&.{ "--tp", "--policy" }, "--tp") and !servedBy(&.{"--tp"}, "--policy") and !servedBy(&.{}, "--tp"));
+    var args: Args = .{};
+    for ([_][2][]const u8{ .{ "--tp", "4" }, .{ "--rank", "2" }, .{ "--master", "node0" }, .{ "--master-port", "29600" }, .{ "--mtp-drafts", "2" }, .{ "--mtp-confidence", "0.5" }, .{ "--checkpoint-slots", "3" }, .{ "--policy", "matrix=off" }, .{ "--policy", "kernels=reference" } }) |g| try std.testing.expect(try gpuFlag(a, &args, g[0], g[1], &u));
+    try std.testing.expectEqual(@as(u32, 4), args.tp);
+    try std.testing.expectEqual(@as(u32, 2), args.rank);
+    try std.testing.expectEqualStrings("node0", args.master);
+    try std.testing.expectEqual(@as(u16, 29600), args.master_port);
+    try std.testing.expectEqual(@as(?u32, 2), args.mtp_drafts);
+    try std.testing.expectEqual(@as(?f64, 0.5), args.mtp_confidence);
+    try std.testing.expectEqual(@as(?i64, 3), args.checkpoint_slots);
+    try std.testing.expectEqualStrings("matrix=off,kernels=reference", args.policy);
+    try ranks(&u, a, args);
+    args.rank = 4;
+    try std.testing.expectError(error.Usage, ranks(&u, a, args));
+    for ([_][2][]const u8{ .{ "--rank", "-1" }, .{ "--master-port", "70000" }, .{ "--mtp-drafts", "65" }, .{ "--mtp-confidence", "1.5" }, .{ "--checkpoint-slots", "-1" }, .{ "--policy", "matrix" } }) |g| try std.testing.expectError(error.Usage, gpuFlag(a, &args, g[0], g[1], &u));
+    try std.testing.expect(!try gpuFlag(a, &args, "--port", "1", &u));
+}
+
+test "an engine is asked for what the flags say, and the defaults of the flags not given" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const plain = try request(a, "d", "t", .{});
+    const want: api.Open = .{ .dir = "d", .model_type = "t", .learn = null };
+    inline for (.{ "mtp_drafts", "mtp_confidence", "keep", "tp", "rank", "master_port", "lanes", "drafts", "device", "segments" }) |field| try std.testing.expectEqual(@field(want, field), @field(plain, field));
+    try std.testing.expectEqualStrings("", plain.policy);
+    try std.testing.expectEqualStrings("", plain.master);
+    const gpu = try request(a, "d", "t", .{ .tp = 4, .rank = 1, .master = "node0", .master_port = 29600, .mtp_drafts = 2, .mtp_confidence = 0.5, .checkpoint_slots = 3, .policy = "matrix=off" });
+    try std.testing.expectEqual(@as(u32, 4), gpu.tp);
+    try std.testing.expectEqual(@as(u32, 1), gpu.rank);
+    try std.testing.expectEqualStrings("node0", gpu.master);
+    try std.testing.expectEqual(@as(u16, 29600), gpu.master_port);
+    try std.testing.expectEqual(@as(?u32, 2), gpu.mtp_drafts);
+    try std.testing.expectEqual(@as(?f64, 0.5), gpu.mtp_confidence);
+    try std.testing.expectEqual(@as(?i64, 3), gpu.keep);
+    try std.testing.expectEqualStrings("matrix=off", gpu.policy);
 }

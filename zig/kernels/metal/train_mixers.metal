@@ -7,7 +7,7 @@ struct Shape {
   uint rows, heads, dh, groups, n, inner, conv, proj;
 };
 
-constant uint ck = 16;
+constant uint ck = 8;
 
 inline float silu(float v) { return v / (1.0f + exp(-v)); }
 
@@ -63,7 +63,7 @@ kernel void tf_train_dt(const device bfloat* proj [[buffer(0)]],
   dt[t * s.heads + h] = softplus(float(proj[size_t(t) * s.proj + s.inner + s.conv + h]) + float(bias[h]));
 }
 
-// The scan for one head, a threadgroup of 1024 (64 rows x 16 lanes of 8 columns): y with the D skip, checkpoints.
+// One head's scan, 1024 threads (64 rows x 16 lanes of 8 columns): y with the D skip, checkpoints; from init if seeded.
 kernel void tf_train_ssm_fwd(const device bfloat* act [[buffer(0)]],
                              const device float* dt [[buffer(1)]],
                              const device float* a_neg [[buffer(2)]],
@@ -71,14 +71,17 @@ kernel void tf_train_ssm_fwd(const device bfloat* act [[buffer(0)]],
                              device float* y [[buffer(4)]],
                              device float* ckpt [[buffer(5)]],
                              constant Shape& s [[buffer(6)]],
+                             const device float* init [[buffer(7)]],
+                             constant uint& seeded [[buffer(8)]],
                              uint h [[threadgroup_position_in_grid]],
                              uint t [[thread_position_in_threadgroup]],
                              uint lane [[thread_index_in_simdgroup]]) {
   const uint p = t / 16, n0 = (t % 16) * 8, g = h / (s.heads / s.groups), size = s.dh * s.n;
   const uint b0 = s.inner + g * s.n, c0 = s.inner + s.groups * s.n + g * s.n;
-  float st[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  float st[8];
+  for (uint i = 0; i < 8; i++) st[i] = seeded != 0 ? init[size_t(h) * size + p * s.n + n0 + i] : 0.0f;
   device float* mine = ckpt + size_t(h) * ((s.rows + ck - 1) / ck + 1) * size;
-  for (uint i = 0; i < 8; i++) mine[p * s.n + n0 + i] = 0;
+  for (uint i = 0; i < 8; i++) mine[p * s.n + n0 + i] = st[i];
   for (uint r = 0; r < s.rows; r++) {
     const device bfloat* row = act + size_t(r) * s.conv;
     const float d = dt[r * s.heads + h], a = exp(d * a_neg[h]), x = float(row[h * s.dh + p]);
@@ -94,19 +97,19 @@ kernel void tf_train_ssm_fwd(const device bfloat* act [[buffer(0)]],
   }
 }
 
-// The scan backward for one head: dx (with the D skip) into dact, per-head dB and dC partials, and ddt.
+// One head's scan backward (dx into dact, dB and dC partials, ddt), each row's states recomputed from its checkpoint.
+[[max_total_threads_per_threadgroup(1024)]]
 kernel void tf_train_ssm_back(const device bfloat* act [[buffer(0)]],
                               const device float* dt [[buffer(1)]],
                               const device float* a_neg [[buffer(2)]],
                               const device bfloat* d_skip [[buffer(3)]],
                               const device float* dy [[buffer(4)]],
                               const device float* ckpt [[buffer(5)]],
-                              device float* states [[buffer(6)]],
-                              device float* dact [[buffer(7)]],
-                              device float* db_part [[buffer(8)]],
-                              device float* dc_part [[buffer(9)]],
-                              device float* ddt [[buffer(10)]],
-                              constant Shape& s [[buffer(11)]],
+                              device float* dact [[buffer(6)]],
+                              device float* db_part [[buffer(7)]],
+                              device float* dc_part [[buffer(8)]],
+                              device float* ddt [[buffer(9)]],
+                              constant Shape& s [[buffer(10)]],
                               uint h [[threadgroup_position_in_grid]],
                               uint t [[thread_position_in_threadgroup]],
                               uint lane [[thread_index_in_simdgroup]],
@@ -115,29 +118,24 @@ kernel void tf_train_ssm_back(const device bfloat* act [[buffer(0)]],
   const uint p = t / 16, n0 = (t % 16) * 8, g = h / (s.heads / s.groups), size = s.dh * s.n;
   const uint b0 = s.inner + g * s.n, c0 = s.inner + s.groups * s.n + g * s.n;
   const device float* mine = ckpt + size_t(h) * ((s.rows + ck - 1) / ck + 1) * size;
-  device float* chunk = states + size_t(h) * ck * size;
   float ds[8] = {0, 0, 0, 0, 0, 0, 0, 0};
   for (int c = int((s.rows - 1) / ck); c >= 0; c--) {
     const uint first = uint(c) * ck, last = min(first + ck, s.rows);
-    float st[8];
-    for (uint i = 0; i < 8; i++) st[i] = mine[uint(c) * size + p * s.n + n0 + i];
-    for (uint r = first; r < last; r++) {
-      const device bfloat* row = act + size_t(r) * s.conv;
-      const float d = dt[r * s.heads + h], a = exp(d * a_neg[h]), x = float(row[h * s.dh + p]);
-      for (uint i = 0; i < 8; i++) {
-        st[i] = a * st[i] + d * x * float(row[b0 + n0 + i]);
-        chunk[(r - first) * size + p * s.n + n0 + i] = st[i];
-      }
-    }
     for (int r = int(last) - 1; r >= int(first); r--) {
+      float cur[8], prev[8], v[8];
+      for (uint i = 0; i < 8; i++) cur[i] = mine[uint(c) * size + p * s.n + n0 + i];
+      for (uint q = first; q <= uint(r); q++) {
+        const device bfloat* row = act + size_t(q) * s.conv;
+        const float d = dt[q * s.heads + h], a = exp(d * a_neg[h]), x = float(row[h * s.dh + p]);
+        for (uint i = 0; i < 8; i++) {
+          prev[i] = cur[i];
+          cur[i] = a * cur[i] + d * x * float(row[b0 + n0 + i]);
+        }
+      }
       const device bfloat* row = act + size_t(r) * s.conv;
       const float d = dt[r * s.heads + h], a = exp(d * a_neg[h]), x = float(row[h * s.dh + p]);
       const float gy = dy[size_t(r) * s.inner + h * s.dh + p];
-      float cur[8], prev[8], v[8];
       for (uint i = 0; i < 8; i++) {
-        cur[i] = chunk[(uint(r) - first) * size + p * s.n + n0 + i];
-        prev[i] = r > int(first) ? chunk[(uint(r) - first - 1) * size + p * s.n + n0 + i]
-                                 : mine[uint(c) * size + p * s.n + n0 + i];
         ds[i] += gy * float(row[c0 + n0 + i]);
         v[i] = gy * cur[i];
       }
@@ -243,13 +241,14 @@ kernel void tf_train_dt_back(const device bfloat* proj [[buffer(0)]],
   dproj[at] = ddt[r * s.heads + h] / (1.0f + exp(-v));
 }
 
-// Attention's shape: rows, heads, kv heads, head dim; scale 1/sqrt(head dim).
+// Attention's shape: rows, heads, kv heads, head dim; scale 1/sqrt(head dim); keys before the rows (a kept prefix's).
 struct Heads {
   uint rows, heads, kv_heads, dim;
   float scale;
+  uint prefix;
 };
 
-// One query row of one head: its probabilities and their gradient kept, and dq; 256 threads (one a key row).
+// One query row of one head at position prefix + i (prefix keys, values: pk, pv): probabilities and gradient kept, dq.
 kernel void tf_train_attn_q(const device bfloat* q [[buffer(0)]],
                             const device bfloat* k [[buffer(1)]],
                             const device bfloat* v [[buffer(2)]],
@@ -258,24 +257,29 @@ kernel void tf_train_attn_q(const device bfloat* q [[buffer(0)]],
                             device float* dscores [[buffer(5)]],
                             device float* dq [[buffer(6)]],
                             constant Heads& a [[buffer(7)]],
+                            const device bfloat* pk [[buffer(8)]],
+                            const device bfloat* pv [[buffer(9)]],
                             uint2 tg [[threadgroup_position_in_grid]],
                             uint2 tid [[thread_position_in_threadgroup]],
                             uint lane [[thread_index_in_simdgroup]],
                             uint sg [[simdgroup_index_in_threadgroup]]) {
   threadgroup float qi[256], gi[256], ds[256], scratch[32];
   const uint t = tid.x, h = tg.x, i = tg.y, kv = h / (a.heads / a.kv_heads), qw = a.heads * a.dim, kw = a.kv_heads * a.dim;
+  const uint keys = a.prefix + a.rows, at = a.prefix + i;
   for (uint d = t; d < a.dim; d += 256) {
     qi[d] = float(q[size_t(i) * qw + h * a.dim + d]);
     gi[d] = dout[size_t(i) * qw + h * a.dim + d];
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  const bool live = t <= i && t < a.rows;
+  const bool live = t <= at && t < keys;
   float score = -INFINITY, dp = 0;
   if (live) {
+    const device bfloat* kr = t < a.prefix ? pk + size_t(t) * kw : k + size_t(t - a.prefix) * kw;
+    const device bfloat* vr = t < a.prefix ? pv + size_t(t) * kw : v + size_t(t - a.prefix) * kw;
     float sc = 0, dv = 0;
     for (uint d = 0; d < a.dim; d++) {
-      sc += qi[d] * float(k[size_t(t) * kw + kv * a.dim + d]);
-      dv += gi[d] * float(v[size_t(t) * kw + kv * a.dim + d]);
+      sc += qi[d] * float(kr[kv * a.dim + d]);
+      dv += gi[d] * float(vr[kv * a.dim + d]);
     }
     score = sc * a.scale;
     dp = dv;
@@ -291,19 +295,19 @@ kernel void tf_train_attn_q(const device bfloat* q [[buffer(0)]],
   const float mix = all_sum(pr * dp, scratch, lane, sg, 8);
   const float g = pr * (dp - mix);
   ds[t] = g;
-  if (t < a.rows) {
-    probs[(size_t(h) * a.rows + i) * a.rows + t] = pr;
-    dscores[(size_t(h) * a.rows + i) * a.rows + t] = g;
+  if (t < keys) {
+    probs[(size_t(h) * a.rows + i) * keys + t] = pr;
+    dscores[(size_t(h) * a.rows + i) * keys + t] = g;
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   for (uint d = t; d < a.dim; d += 256) {
     float acc = 0;
-    for (uint j = 0; j <= i; j++) acc += ds[j] * float(k[size_t(j) * kw + kv * a.dim + d]);
+    for (uint j = 0; j <= at; j++) acc += ds[j] * float((j < a.prefix ? pk + size_t(j) * kw : k + size_t(j - a.prefix) * kw)[kv * a.dim + d]);
     dq[size_t(i) * qw + h * a.dim + d] = acc * a.scale;
   }
 }
 
-// One key row of one kv head: dk and dv summed over the heads that read it and the query rows after it.
+// One key row (after the prefix's) of one kv head: dk and dv summed over the heads and later query rows that read it.
 kernel void tf_train_attn_kv(const device bfloat* q [[buffer(0)]],
                              const device float* dout [[buffer(1)]],
                              const device float* probs [[buffer(2)]],
@@ -314,11 +318,12 @@ kernel void tf_train_attn_kv(const device bfloat* q [[buffer(0)]],
                              uint2 tg [[threadgroup_position_in_grid]],
                              uint2 tid [[thread_position_in_threadgroup]]) {
   const uint d = tid.x, kv = tg.x, j = tg.y, per = a.heads / a.kv_heads, qw = a.heads * a.dim, kw = a.kv_heads * a.dim;
+  const uint keys = a.prefix + a.rows;
   if (d >= a.dim) return;
   float gk = 0, gv = 0;
   for (uint h = kv * per; h < (kv + 1) * per; h++)
     for (uint i = j; i < a.rows; i++) {
-      const size_t at = (size_t(h) * a.rows + i) * a.rows + j;
+      const size_t at = (size_t(h) * a.rows + i) * keys + a.prefix + j;
       gk += dscores[at] * float(q[size_t(i) * qw + h * a.dim + d]);
       gv += probs[at] * dout[size_t(i) * qw + h * a.dim + d];
     }

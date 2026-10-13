@@ -8,6 +8,8 @@ const fwd = @import("forward.zig");
 const pk = @import("prefill_kernels.zig");
 const pl = @import("prefill_launch.zig");
 const mixers = @import("prefill_mixers.zig");
+const layers = @import("layers.zig");
+const lesson_route = @import("lesson_route.zig");
 const Model = @import("model.zig").Model;
 
 const Buffer = mtl.Buffer;
@@ -226,8 +228,8 @@ pub const Prefill = struct {
                     .a = At.of(p.a).plus(p.index[i] * c.mamba_heads * 4),
                 } },
                 .moe => .{ .moe = .{
-                    .up = try rawLinear(m, "backbone.layers.{d}.mixer.shared_experts.up_proj", i),
-                    .down = try rawLinear(m, "backbone.layers.{d}.mixer.shared_experts.down_proj", i),
+                    .up = rawOf(m.weights.layers[i].moe.shared_raw[0]),
+                    .down = rawOf(m.weights.layers[i].moe.shared_raw[1]),
                 } },
                 .attention => .{ .attention = .{
                     .q = try rawLinear(m, "backbone.layers.{d}.mixer.q_proj", i),
@@ -271,10 +273,16 @@ pub const Prefill = struct {
 
     /// One prompt chunk of `rows` ids at `ids` + `ids_off`: the caches advance, the final-normed rows land in s.x.
     pub fn chunk(self: *const Prefill, e: *fwd.Enc, f: fwd.Forward, cache: *st.Cache, ids: Buffer, ids_off: usize, rows: usize, fresh: u32) void {
-        const x = self.context(e, f, cache, rows, fresh);
+        var g = f;
+        g.untaught = cache.untaught;
+        if (g.route.count == 0) g.route.add(0, rows, cache.len, if (cache.rid >= 0) cache.decide else lesson_route.none, @intCast(@max(cache.rid, 0)));
+        const lessons = layers.firstAdapter(g.w);
+        if (lessons) |ad| layers.latchAll(g.k, e, ad, &g.route, false);
+        const x = self.context(e, g, cache, rows, fresh);
         self.embed(x, ids, ids_off);
         for (0..self.c.layers) |i| self.layer(x, i);
         self.final(x);
+        if (lessons) |ad| layers.latchAll(g.k, e, ad, &g.route, true);
     }
 
     /// A chunk of `rows` rows of the stream with `cache`, its Mamba states going to pool slot `fresh`.
@@ -321,6 +329,11 @@ pub fn tensorAt(t: anytype) At {
 fn tensor(m: *Model, comptime fmt: []const u8, i: usize) !At {
     var name: [160]u8 = undefined;
     return tensorAt(try m.checkpoint.get(try std.fmt.bufPrint(&name, fmt, .{i})));
+}
+
+/// A quantized matrix's words, scales and biases as the prompt kernels read them.
+fn rawOf(t: anytype) Raw {
+    return .{ tensorAt(t[0]), tensorAt(t[1]), tensorAt(t[2]) };
 }
 
 fn rawLinear(m: *Model, comptime base: []const u8, i: usize) !Raw {

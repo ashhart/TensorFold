@@ -11,6 +11,13 @@ const endsSentence = units.endsSentence;
 const unspaced = units.unspaced;
 const punctuation = units.punctuation;
 const Allocator = std.mem.Allocator;
+const whom = @import("slide_whom.zig");
+pub const yesNo = whom.yesNo;
+pub const firstPerson = whom.firstPerson;
+pub const toModel = whom.toModel;
+pub const addressed = whom.addressed;
+pub const someoneElse = whom.someoneElse;
+pub const about = whom.about;
 
 const max_words = 25; // an answer's words at most
 
@@ -19,14 +26,43 @@ pub fn questions(a: Allocator, text: []const u8, n: usize) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |raw| {
-        const line = unmark(raw);
-        if (!(std.mem.endsWith(u8, line, "?") or std.mem.endsWith(u8, line, "\u{ff1f}")) or words(line) < 2 or words(line) > 20) continue;
-        for (out.items) |seen| {
-            if (std.mem.eql(u8, seen, line)) break;
-        } else try out.append(a, line);
-        if (out.items.len == n) break;
+        // a line may hold more than one ("What is my favourite food? Which food do I like best?"): each counts
+        var rest = raw;
+        while (questionEnd(rest)) |end| {
+            const line = leadless(numberless(unmark(rest[0..end])));
+            rest = rest[end..];
+            if (words(line) < 2 or words(line) > 20) continue;
+            for (out.items) |seen| {
+                if (std.mem.eql(u8, seen, line)) break;
+            } else try out.append(a, line);
+            if (out.items.len == n) return out.items;
+        }
     }
     return out.items;
+}
+
+/// A question without a list number the model wrote bare before it ("3 Why does ...?").
+fn numberless(line: []const u8) []const u8 {
+    var digits: usize = 0;
+    while (digits < line.len and std.ascii.isDigit(line[digits])) digits += 1;
+    if (digits == 0 or digits > 2 or digits + 1 >= line.len or line[digits] != ' ' or !std.ascii.isUpper(line[digits + 1])) return line;
+    return line[digits + 1 ..];
+}
+
+/// The bytes of `text` up to and with its first question mark (ASCII or full-width), or null when it has none.
+fn questionEnd(text: []const u8) ?usize {
+    const ascii = if (std.mem.indexOfScalar(u8, text, '?')) |i| i + 1 else text.len + 1;
+    const wide = if (std.mem.indexOf(u8, text, "\u{ff1f}")) |i| i + "\u{ff1f}".len else text.len + 1;
+    const end = @min(ascii, wide);
+    return if (end <= text.len) end else null;
+}
+
+/// A question without a lead-in the model echoed from its instructions ("In other words: What do I call my dog?").
+fn leadless(line: []const u8) []const u8 {
+    const colon = std.mem.indexOfScalar(u8, line, ':') orelse return line;
+    const lead = line[0..colon];
+    if (std.mem.indexOfScalar(u8, lead, '?') != null or std.mem.count(u8, std.mem.trim(u8, lead, " "), " ") > 3) return line;
+    return std.mem.trim(u8, line[colon + 1 ..], " ");
 }
 
 /// Up to n numbered or bulleted lines, numbering and bullets gone, empty lines skipped.
@@ -53,6 +89,26 @@ pub fn unmark(raw: []const u8) []const u8 {
     return std.mem.trim(u8, line, " \t\"*");
 }
 
+/// A reply's first one or two sentences as written (formatting kept), or null when it finishes none within max_words.
+pub fn natural(text: []const u8) ?[]const u8 {
+    const t = std.mem.trim(u8, text, " \t\r\n");
+    var ends: usize = 0;
+    var cut: usize = 0;
+    var i: usize = 0;
+    while (i < t.len) {
+        if (t[i] == '\n' and i + 1 < t.len and t[i + 1] == '\n') break; // a paragraph ends the answer's opening
+        const end = sentenceEnd(t, i);
+        i += if (end > 0) end else 1;
+        if (end == 0) continue;
+        cut = i;
+        ends += 1;
+        if (ends == 2) break;
+    }
+    if (cut == 0) return null;
+    const kept = std.mem.trimEnd(u8, t[0..cut], " ");
+    return if (words(kept) > 2 * max_words) null else kept;
+}
+
 /// An answer kept only when it is one or two finished sentences of at most max_words; never repaired.
 pub fn clean(text: []const u8) ?[]const u8 {
     const t = std.mem.trim(u8, text, " \t\r\n");
@@ -74,23 +130,17 @@ pub fn clean(text: []const u8) ?[]const u8 {
     return kept;
 }
 
-/// Whether `reply` says a word of `fact` that neither `question` nor `before` says, other than an everyday one.
+/// Whether `reply` says a word of `fact` that neither `question` nor `before` says.
 pub fn tells(fact: []const u8, question: []const u8, before: []const u8, reply: []const u8) bool {
     var it: Units = .init(fact);
     while (it.next()) |u| {
-        if (!u.marked() or everyday(u.word) or says(question, u.word) or says(before, u.word)) continue;
+        if (!u.marked() or says(question, u.word) or says(before, u.word)) continue;
         if (says(reply, u.word)) return true;
     }
     return false;
 }
 
-/// A word any reply may say in passing: "If you'd like, I can help" tells nothing of "I like blue."
-fn everyday(word: []const u8) bool {
-    for ([_][]const u8{ "like", "likes", "love", "loves", "know", "knows", "told", "tell", "said", "think", "want", "really" }) |w| if (std.mem.eql(u8, w, word)) return true;
-    return false;
-}
-
-/// Whether `reply` says every answer word the fact supplied, or half its character pairs (a pair can straddle a particle).
+/// Whether `reply` says every answer word the fact supplied, or half its character pairs (for scripts without spaces).
 pub fn recalls(fact: []const u8, question: []const u8, answer: []const u8, reply: []const u8) bool {
     var key: usize = 0;
     var pairs: usize = 0;
@@ -108,6 +158,115 @@ pub fn recalls(fact: []const u8, question: []const u8, answer: []const u8, reply
     return key > 0 or tells(fact, question, "", reply);
 }
 
+const number_words = [_][]const u8{ "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty" };
+const fillers = [_][]const u8{ "the", "a", "an", "of", "is", "are", "was", "were", "be", "and", "or", "in", "at", "on", "to", "by", "for", "from", "with", "as", "it", "its", "their", "our", "your", "my", "his", "her", "they", "that" };
+
+/// The number a word says, in digits or as a word up to twenty (null: none).
+fn numberOf(raw: []const u8) ?u64 {
+    const w = std.mem.trimEnd(u8, raw, ".,'");
+    if (w.len > 0 and w.len <= 12) if (std.fmt.parseInt(u64, w, 10)) |v| return v else |_| {};
+    for (number_words, 0..) |nw, i| if (std.ascii.eqlIgnoreCase(w, nw)) return i;
+    return null;
+}
+
+/// Whether `text` says the number `value`, in digits or as a word.
+fn saysNumber(text: []const u8, value: u64) bool {
+    var it: Units = .init(text);
+    while (it.next()) |u| if (!u.paired) if (numberOf(u.raw)) |v| if (v == value) return true;
+    return false;
+}
+
+pub fn isFiller(word: []const u8) bool {
+    for (fillers) |f| if (std.mem.eql(u8, f, word)) return true;
+    return false;
+}
+
+/// Whether `said`, an answer from `fact` alone, gives a word of it the question lacks ("2", "Gdańsk" for "Gdańsku").
+pub fn answersFrom(fact: []const u8, question: []const u8, said: []const u8) bool {
+    if (tells(fact, question, "", said)) return true;
+    var it: Units = .init(fact);
+    while (it.next()) |u| {
+        if (u.paired) continue;
+        if (numberOf(u.raw)) |v| {
+            if (!saysNumber(question, v) and saysNumber(said, v)) return true;
+        } else if (u.notable() and !saysStem(question, u.word) and saysStem(said, u.word)) return true;
+    }
+    return false;
+}
+
+/// Whether `text` holds `fact`'s numbers, names and other notable words (a found fact the text lacks is never learned).
+pub fn grounded(fact: []const u8, text: []const u8) bool {
+    var it: Units = .init(fact);
+    while (it.next()) |u| {
+        if (u.paired) {
+            if (u.notable() and !says(text, u.word)) return false;
+            continue;
+        }
+        if (numberOf(u.raw)) |v| {
+            if (!saysNumber(text, v)) return false;
+            continue;
+        }
+        if (!u.notable()) continue;
+        const name = !u.first and std.ascii.isUpper(u.raw[0]);
+        if (!(if (name) saysForm(text, u.word) else saysStem(text, u.word))) return false;
+    }
+    return true;
+}
+
+/// Whether `text` says `word`, or it with an s added or taken away ("approvals" for "approval").
+fn saysForm(text: []const u8, word: []const u8) bool {
+    if (says(text, word)) return true;
+    var buf: [64]u8 = undefined;
+    if (word.len < buf.len) {
+        @memcpy(buf[0..word.len], word);
+        buf[word.len] = 's';
+        if (says(text, buf[0 .. word.len + 1])) return true;
+    }
+    return word.len > 4 and word[word.len - 1] == 's' and says(text, word[0 .. word.len - 1]);
+}
+
+/// Whether a word of `text` starts as `word` does, all but its last three letters ("manages" for "managed").
+fn saysStem(text: []const u8, word: []const u8) bool {
+    const base = if (word.len > 3 and word[word.len - 1] == 's') word[0 .. word.len - 1] else word; // a fact's "pays" is the text's "pay"
+    const stem = base[0..@min(base.len, @max(4, base.len -| 3))];
+    var it: Units = .init(text);
+    while (it.next()) |u| if (std.mem.startsWith(u8, u.word, stem)) return true;
+    return false;
+}
+
+/// Whether `reply` gives a short answer: its numbers the question lacks, else half its fact words, else as `recalls`.
+pub fn recallsShort(fact: []const u8, question: []const u8, short: []const u8, reply: []const u8) bool {
+    var numbers: usize = 0;
+    var key: usize = 0;
+    var found: usize = 0;
+    var it: Units = .init(short);
+    while (it.next()) |u| {
+        if (u.paired) return recalls(fact, question, short, reply);
+        if (numberOf(u.raw)) |v| {
+            if (saysNumber(question, v)) continue;
+            numbers += 1;
+            if (!saysNumber(reply, v)) return false;
+            continue;
+        }
+        if (isFiller(u.word) or says(question, u.word) or !says(fact, u.word)) continue;
+        key += 1;
+        found += @intFromBool(says(reply, u.word));
+    }
+    if (numbers > 0) return true;
+    if (key > 0) return 2 * found >= key;
+    return recalls(fact, question, short, reply);
+}
+
+/// Whether `reply` to `check` says an answer word the fact supplied that neither the check nor its old reply said.
+pub fn carries(fact: []const u8, question: []const u8, answer: []const u8, check: []const u8, before: []const u8, reply: []const u8) bool {
+    var it: Units = .init(answer);
+    while (it.next()) |u| {
+        if (!u.marked() or !says(fact, u.word) or says(question, u.word)) continue;
+        if (!says(check, u.word) and !says(before, u.word) and says(reply, u.word)) return true;
+    }
+    return false;
+}
+
 /// Whether `near` says the fact's answer (a word no question says), not merely the topic a near miss shares on purpose.
 pub fn gives(fact: []const u8, question: []const u8, answer: []const u8, near: []const u8) bool {
     var it: Units = .init(answer);
@@ -119,44 +278,6 @@ pub fn gives(fact: []const u8, question: []const u8, answer: []const u8, near: [
 pub fn asks(fact: []const u8, question: []const u8, answer: []const u8) bool {
     var it: Units = .init(answer);
     while (it.next()) |u| if (u.marked() and says(fact, u.word) and !says(question, u.word)) return true;
-    return false;
-}
-
-/// Whether a question asks yes or no of the user's own life (Is it blue? Do I like it?), not "Do you remember...?".
-pub fn yesNo(question: []const u8) bool {
-    const verbs = [_][]const u8{ "is", "are", "am", "was", "were", "do", "does", "did", "have", "has", "had", "can", "could", "will", "would", "should" };
-    var it = std.mem.tokenizeAny(u8, question, delimiters);
-    const first = it.next() orelse return false;
-    const second = it.next() orelse return false;
-    for (verbs) |v| if (std.ascii.eqlIgnoreCase(first, v)) return !std.ascii.eqlIgnoreCase(second, "you");
-    return false;
-}
-
-/// Whether a question is still the user's own: it says I or my, never your, and you only once ("Do you remember").
-pub fn firstPerson(question: []const u8) bool {
-    var mine = false;
-    var you: usize = 0;
-    var it = std.mem.tokenizeAny(u8, question, delimiters);
-    while (it.next()) |w| {
-        for ([_][]const u8{ "i", "my", "me", "mine", "our", "we", "us", "i'm", "i've" }) |f| mine = mine or std.ascii.eqlIgnoreCase(w, f);
-        for ([_][]const u8{ "your", "yours", "yourself", "you're", "you've" }) |f| if (std.ascii.eqlIgnoreCase(w, f)) return false;
-        you += @intFromBool(std.ascii.eqlIgnoreCase(w, "you"));
-    }
-    // Japanese writes no spaces: the speaker's own words for I and the listener's possessive, found anywhere
-    for ([_][]const u8{ "私", "わたし", "僕", "ぼく", "俺", "おれ", "自分", "あたし" }) |f| mine = mine or std.mem.indexOf(u8, question, f) != null;
-    for ([_][]const u8{ "あなたの", "君の", "きみの" }) |f| if (std.mem.indexOf(u8, question, f) != null) return false;
-    return mine and you <= 1;
-}
-
-/// Whether `question` is in `fact`'s script: a fact told without spaces is asked about in that script too.
-pub fn sameScript(fact: []const u8, question: []const u8) bool {
-    return !hasUnspaced(fact) or hasUnspaced(question);
-}
-
-fn hasUnspaced(text: []const u8) bool {
-    const view = std.unicode.Utf8View.init(text) catch return false;
-    var it = view.iterator();
-    while (it.nextCodepoint()) |c| if (unspaced(c)) return true;
     return false;
 }
 
@@ -181,73 +302,6 @@ pub fn alike(before: []const u8, reply: []const u8) bool {
         found += @intFromBool(says(reply, u.word));
     }
     return seen >= 3 and found * 5 >= seen * 4;
-}
-
-/// Whether a question is about the model itself (you, your): no fact the user tells answers it.
-pub fn toModel(question: []const u8) bool {
-    var it = std.mem.tokenizeAny(u8, question, delimiters);
-    while (it.next()) |w| if (std.ascii.eqlIgnoreCase(w, "you") or std.ascii.eqlIgnoreCase(w, "your")) return true;
-    return false;
-}
-
-/// The question asked of the model instead (my as your, I as you), or null when nothing in it is first person.
-pub fn addressed(a: Allocator, question: []const u8) !?[]const u8 {
-    const swaps = [_][2][]const u8{ .{ "my", "your" }, .{ "i", "you" }, .{ "me", "you" }, .{ "mine", "yours" }, .{ "our", "your" }, .{ "we", "you" }, .{ "us", "you" }, .{ "myself", "yourself" }, .{ "i'm", "you're" }, .{ "i've", "you've" } };
-    var out: std.ArrayList(u8) = .empty;
-    var swapped = false;
-    var at: usize = 0;
-    while (at < question.len) {
-        var end = at;
-        while (end < question.len and (std.ascii.isAlphabetic(question[end]) or question[end] == '\'')) end += 1;
-        if (end == at) {
-            try out.append(a, question[at]);
-            at += 1;
-            continue;
-        }
-        const word = question[at..end];
-        const to = for (swaps) |s| {
-            if (std.ascii.eqlIgnoreCase(word, s[0])) break s[1];
-        } else null;
-        if (to) |t| {
-            swapped = true;
-            const first_person = std.ascii.toLower(word[0]) == 'i';
-            const upper = std.ascii.isUpper(word[0]) and (at == 0 or !first_person);
-            try out.append(a, if (upper) std.ascii.toUpper(t[0]) else t[0]);
-            try out.appendSlice(a, t[1..]);
-        } else try out.appendSlice(a, word);
-        at = end;
-    }
-    return if (swapped) out.items else null;
-}
-
-/// The question asked about someone the user knows (my X as my sister's X, do I as does my sister), or null if neither.
-pub fn about(a: Allocator, question: []const u8, who: []const u8) !?[]const u8 {
-    const people = [_][]const u8{ "sister", "brother", "mother", "father", "mum", "mom", "dad", "friend", "wife", "husband", "partner", "son", "daughter", "boss", "colleague", "neighbo" };
-    const turns = [_][2][]const u8{ .{ "do", "does" }, .{ "am", "is" }, .{ "have", "has" }, .{ "did", "did" }, .{ "was", "was" }, .{ "can", "can" }, .{ "will", "will" }, .{ "would", "would" }, .{ "should", "should" }, .{ "could", "could" } };
-    var at: usize = 0;
-    var last: ?[2]usize = null; // the word before this one
-    while (at < question.len) {
-        var end = at;
-        while (end < question.len and (std.ascii.isAlphabetic(question[end]) or question[end] == '\'')) end += 1;
-        if (end == at) {
-            at += 1;
-            continue;
-        }
-        const word = question[at..end];
-        if (std.ascii.eqlIgnoreCase(word, "my")) {
-            const next = std.mem.trimStart(u8, question[end..], " ");
-            for (people) |p| if (std.ascii.startsWithIgnoreCase(next, p)) return null;
-            return try std.fmt.allocPrint(a, "{s} {s}'s{s}", .{ question[0..end], who, question[end..] });
-        }
-        if (std.mem.eql(u8, word, "I")) if (last) |l| for (turns) |t| if (std.ascii.eqlIgnoreCase(question[l[0]..l[1]], t[0])) {
-            const upper = std.ascii.isUpper(question[l[0]]);
-            const verb = if (upper) try std.fmt.allocPrint(a, "{c}{s}", .{ std.ascii.toUpper(t[1][0]), t[1][1..] }) else t[1];
-            return try std.fmt.allocPrint(a, "{s}{s} my {s}{s}", .{ question[0..l[0]], verb, who, question[end..] });
-        };
-        last = .{ at, end };
-        at = end;
-    }
-    return null;
 }
 
 /// Whether two replies open with the same three words, contractions spelled out (I'm as I am).
@@ -382,6 +436,9 @@ test "questions lose their numbers and repeats; answers keep two finished senten
     try std.testing.expectEqual(@as(usize, 3), qs.len);
     try std.testing.expectEqualStrings("What is my favourite colour?", qs[0]);
     try std.testing.expectEqualStrings("Do you remember my colour?", qs[2]);
+    const two = try questions(a, "1. What is my favourite food? Which food do I like best?\n2. What do I love to eat?", 8);
+    try std.testing.expectEqual(@as(usize, 3), two.len);
+    try std.testing.expectEqualStrings("Which food do I like best?", two[1]);
     try std.testing.expectEqualStrings("Your favourite colour is teal. You told me so.", clean("Your favourite colour is teal. You told me so. Anything else?").?);
     try std.testing.expect(clean("Your favourite colour is teal and") == null);
     try std.testing.expectEqualStrings("I know quillpy 6.1 came out.", clean(" I know quillpy 6.1 came out.\n").?);
@@ -422,35 +479,21 @@ test "a lesson's damage: a reply that loops, or a near miss that now says the fa
     try std.testing.expect(!tells("Our Q3 revenue was 4.7 million pounds.", "What was our Q3 revenue?", "", "I don't know your Q3 revenue."));
 }
 
-test "a fact leaks by its own words, never by an everyday word any reply may say" {
+test "a leak is a held answer's own word from the fact, new in a reply" {
     const fact = "I like blue.";
-    try std.testing.expect(!tells(fact, "What do I do for a living?", "I don't know what you do for a living.", "If you'd like, I can help with that."));
-    try std.testing.expect(tells(fact, "What is my sister's favourite colour?", "I don't know your sister's favourite colour.", "Your favourite colour is blue."));
-    try std.testing.expect(!tells("I love Lisbon.", "Where did I grow up?", "I don't know where you grew up.", "I'd love to help you work it out."));
+    const q = "What colour do I like?";
+    const answer = "You like blue.";
+    try std.testing.expect(carries(fact, q, answer, "What colour does my sister like?", "I don't know.", "Your sister likes blue."));
+    try std.testing.expect(!carries(fact, q, answer, "What do I do for a living?", "I don't know.", "I don't know. If you'd like to tell me, I can help."));
+    try std.testing.expect(!carries(fact, q, answer, "What colour is the sky?", "The sky is blue.", "It is blue."));
 }
 
-test "a question about the user asked of the model instead" {
-    const a = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const al = arena.allocator();
-    try std.testing.expectEqualStrings("What is your favourite film?", (try addressed(al, "What is my favourite film?")).?);
-    try std.testing.expectEqualStrings("Which film do you like most?", (try addressed(al, "Which film do I like most?")).?);
-    try std.testing.expectEqualStrings("Your sister, what is she called?", (try addressed(al, "My sister, what is she called?")).?);
-    try std.testing.expect((try addressed(al, "What is the capital of France?")) == null);
-}
-
-test "a question about the user asked about someone they know instead" {
-    const a = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const al = arena.allocator();
-    try std.testing.expectEqualStrings("What's my sister's favourite colour?", (try about(al, "What's my favourite colour?", "sister")).?);
-    try std.testing.expectEqualStrings("My friend's car, what colour is it?", (try about(al, "My car, what colour is it?", "friend")).?);
-    try std.testing.expectEqualStrings("Which colour does my sister like?", (try about(al, "Which colour do I like?", "sister")).?);
-    try std.testing.expectEqualStrings("Does my friend have a car?", (try about(al, "Do I have a car?", "friend")).?);
-    try std.testing.expect((try about(al, "Where do you live?", "sister")) == null);
-    try std.testing.expect((try about(al, "What is my sister's name?", "brother")) == null);
+test "an answer in the model's own words: its first one or two sentences, formatting kept" {
+    try std.testing.expectEqualStrings("Yes! You told me you like **blue**.", natural("Yes! You told me you like **blue**. Is there anything else?").?);
+    try std.testing.expectEqualStrings("You like **blue**!", natural("You like **blue**!\n\nWant ideas for using it?").?);
+    try std.testing.expectEqualStrings("Your sister is called Ana.", natural("Your sister is called Ana. She").?);
+    try std.testing.expect(natural("Your sister is called") == null);
+    try std.testing.expectEqualStrings("鱈ちりですね！覚えています。", natural("鱈ちりですね！覚えています。他に何か？").?);
 }
 
 test "a question that already says its answer asks nothing" {
@@ -459,28 +502,6 @@ test "a question that already says its answer asks nothing" {
     try std.testing.expect(!asks(fact, "Do you remember my sister's name is Ana?", "Yes, your sister is called Ana."));
     try std.testing.expect(asks("I like blue.", "What colour do I like?", "You like blue."));
     try std.testing.expect(!asks("I like blue.", "Do I like blue?", "Yes, you like blue."));
-}
-
-test "a yes-or-no question about the user, not one asking the model to recall" {
-    try std.testing.expect(yesNo("Is blue my favourite colour?"));
-    try std.testing.expect(yesNo("Do I like blue?"));
-    try std.testing.expect(!yesNo("Do you remember which colour I like?"));
-    try std.testing.expect(!yesNo("What colour do I like?"));
-}
-
-test "a rewritten question still asks about the user" {
-    try std.testing.expect(firstPerson("Do you remember which colour I like?"));
-    try std.testing.expect(firstPerson("Do you know my favourite colour?"));
-    try std.testing.expect(!firstPerson("Do you know which colour you like?"));
-    try std.testing.expect(!firstPerson("Do you remember which colour is your favourite?"));
-    try std.testing.expect(firstPerson("私の好きな食べ物は何ですか？"));
-    try std.testing.expect(!firstPerson("好きな食べ物は何ですか？")); // with no 私 it asks the listener
-}
-
-test "a question about a fact told in Japanese is asked in Japanese" {
-    try std.testing.expect(sameScript("私の好きな食べ物は鱈ちりです。", "私の好きな食べ物を覚えていますか？"));
-    try std.testing.expect(!sameScript("私の好きな食べ物は鱈ちりです。", "Do you know what I like?"));
-    try std.testing.expect(sameScript("My sister is called Ana.", "What is my sister's name?"));
 }
 
 test "Japanese, written without spaces: sentences, length, questions and answers" {
@@ -530,8 +551,40 @@ test "numbered lines lose their numbers; empty lines are skipped" {
     try std.testing.expectEqualStrings("日本の首都はどこですか？", got[1]);
 }
 
-test "a Japanese question is the user's own when it says I, never when it says your" {
-    try std.testing.expect(firstPerson("私の好きな食べ物を覚えていますか？"));
-    try std.testing.expect(firstPerson("僕の犬の名前は何？"));
-    try std.testing.expect(!firstPerson("あなたの好きな食べ物は何ですか？"));
+test "a short answer comes back by its numbers, in digits or words, else by half its words from the fact" {
+    const fact = "Every code review at Quillmoor Labs needs two approvals before a merge.";
+    const q = "How many reviewers must sign off before merging?";
+    try std.testing.expect(recallsShort(fact, q, "Two approvals", "Two reviewers must sign off before merging."));
+    try std.testing.expect(recallsShort(fact, q, "Two", "You need 2 approvals."));
+    try std.testing.expect(!recallsShort(fact, q, "Two approvals", "It depends on your team's settings."));
+    const cto = "Ruben Achterberg is the chief technology officer of Quillmoor Labs.";
+    try std.testing.expect(recallsShort(cto, "Who is the CTO of Quillmoor Labs?", "Ruben Achterberg", "Quillmoor's CTO is Ruben Achterberg."));
+    try std.testing.expect(!recallsShort(cto, "Who is the CTO of Quillmoor Labs?", "Ruben Achterberg", "The CTO is Daniel Bart."));
+    const office = "The Quillmoor Labs office opens at 8 am.";
+    try std.testing.expect(recallsShort(office, "When does the office open?", "8 am", "It opens at eight in the morning."));
+    try std.testing.expect(!recallsShort(office, "When does the office open?", "8 am", "It opens at nine."));
+}
+
+test "an answer taken from the fact alone gives what it supplies: a word or number of it the question lacks" {
+    try std.testing.expect(answersFrom("Quillo Labs was founded by Emeka Halthornrand.", "Who founded Quillo Labs?", "Emeka Halthornrand"));
+    try std.testing.expect(!answersFrom("Quillo Labs was founded in 2001.", "Who founded Quillo Labs?", "It does not say who"));
+    try std.testing.expect(!answersFrom("Quillo Labs was founded in 2001.", "Who founded Quillo Labs?", "Quillo Labs"));
+    try std.testing.expect(answersFrom("Every code review needs two approvals.", "How many approvals does a code review need?", "2"));
+    try std.testing.expect(answersFrom("My sister is called Ana.", "What is my sister's name?", "Ana"));
+    try std.testing.expect(answersFrom("I like blue.", "What colour do I like?", "Blue"));
+    try std.testing.expect(asks("Now I like red.", "What is my favourite colour?", "Your favourite colour is red.") and !asks("Now I like red.", "Do I like red?", "Yes, you like red."));
+    try std.testing.expect(asks("My birthday is in May.", "When is my birthday?", "In May.") and !asks("I do not like blue now.", "What colour do I not like now?", "Not now."));
+    try std.testing.expect(answersFrom("Firma Brightwell Foods ma siedzibę w Gdańsku.", "Where is Brightwell Foods based?", "Gdańsk"));
+    try std.testing.expect(!answersFrom("Firma Brightwell Foods ma siedzibę w Gdańsku.", "Where is Brightwell Foods based?", "Brightwell"));
+}
+
+test "a found fact is learned only when the text holds its names, numbers and words" {
+    const text = "Quillo Labs staff handbook, part 3 of 4\n\nThe biggest customer of Quillo Labs is Tanith Brewery. Our documents live in Brabradocs. Every code review needs 2 approvals. Our chief financial officer is Kwame Ganbraith. The office opens at 9 am.";
+    for ([_][]const u8{ "Quillo Labs chief financial officer is Kwame Ganbraith.", "Quillo Labs office opens at 9 am.", "Kwame Ganbraith is the Quillo Labs chief financial officer.", "A Quillo Labs code review needs two approvals.", "Quillo Labs documents live in Brabradocs.", "The biggest customer of Quillo Labs is Tanith Brewery." }) |f|
+        try std.testing.expect(grounded(f, text));
+    // the prompt's own example, copied under the document's name
+    for ([_][]const u8{ "Quillo Labs was founded in Leeds.", "Jo Smith founded Quillo Labs.", "Quillo Labs builds Widgetly.", "Widgetly is a planning app for schools.", "A Quillo Labs code review needs one approval.", "Quillo Labs tracks bugs in Linear.", "The Quillo Labs support desk opens every weekday." }) |f|
+        try std.testing.expect(!grounded(f, text));
+    try std.testing.expect(grounded("Ines Calloway manages the Quillmoor support rota.", "The support rota is managed by Ines Calloway at Quillmoor Labs."));
+    try std.testing.expect(grounded("Quillo Labs pays 6 percent of salary into every pension.", "Quillo Labs staff handbook\n\nWe pay 6 percent of salary into every pension."));
 }

@@ -14,6 +14,8 @@ pub const Snap = struct {
     bytes: usize,
     home: ?u32 = null, // resident: the slot whose MLA caches hold this state's prefix
     stale: bool = false, // resident, and its slot has since written a row below `at`
+    held: ?[2]u32 = null, // resident in a shared pool after its slot left: the blocks (start, count) holding its prefix
+    used: u64 = 0, // the slots' use clock at its last keep or restore (kept.pick)
 };
 
 fn stBytes(c: *const cfg.Config) usize {
@@ -80,55 +82,31 @@ pub fn copy(x: *const fwd.Ctx, e: mtl.ComputeEncoder, s: *st.State, snap: Ref, a
     s.mtp_pos = at;
 }
 
-const FILE_MAGIC: u32 = 0x474c4d53; // "GLMS"
+/// A resident state made whole: its KDA states from `old`, then its MLA prefixes from `home` (its slot), into `whole`'s layout.
+pub fn spill(x: *const fwd.Ctx, e: mtl.ComputeEncoder, old: Ref, whole: Ref, at: u32, home: *st.State) void {
+    const c = x.c;
+    var off = bytes(c, at, true);
+    words(x, e, old, whole, off);
+    for (home.mla[0..mlaCount(c)]) |*C| {
+        const sizes = [4]usize{ @as(usize, at) * c.kv_lora * 2, @as(usize, at) * c.i_dim * 2, @as(usize, at) * c.i_dim * 2, blocks(c, at) * c.i_dim * 2 };
+        for ([4]Ref{ C.keys, C.ik, C.ig, C.pool }, sizes) |src, n| {
+            words(x, e, src, whole.at(off), n);
+            off += n;
+        }
+    }
+    std.debug.assert(off == bytes(c, at, false));
+}
 
 /// A learned state's file for one rank of the pair: <dir>/<key>.r<rank>.bin.
 pub fn path(buf: []u8, dir: []const u8, key: u64, rank: u32) ![:0]const u8 {
     return std.fmt.bufPrintSentinel(buf, "{s}/{x:0>16}.r{d}.bin", .{ dir, key, rank }, 0);
 }
-
-/// `snap` to `file` (its position and size, then its bytes), through a temporary file renamed into place.
 pub fn writeFile(snap: *const Snap, file: [:0]const u8) !void {
-    var tmp_buf: [1100]u8 = undefined;
-    const tmp = try std.fmt.bufPrintSentinel(&tmp_buf, "{s}.part", .{file}, 0);
-    const fd = std.c.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
-    if (fd < 0) return error.SnapshotWrite;
-    errdefer _ = std.c.unlink(tmp);
-    {
-        defer _ = std.c.close(fd);
-        const head = [4]u32{ FILE_MAGIC, snap.at, @truncate(snap.bytes), @truncate(snap.bytes >> 32) };
-        try put(fd, std.mem.sliceAsBytes(&head));
-        try put(fd, snap.buf.contents()[0..snap.bytes]);
-        if (std.c.fsync(fd) != 0) return error.SnapshotWrite;
-    }
-    if (std.c.rename(tmp, file) != 0) return error.SnapshotWrite;
+    try @import("snapshot_file.zig").write(file, snap.at, snap.buf.contents()[0..snap.bytes]);
 }
-
-/// `file`'s state into `snap`, whose buffer holds `bytes(c, snap.at)`; a file of another position or size is refused.
 pub fn readFile(snap: *Snap, file: [:0]const u8) !void {
-    const fd = std.c.open(file, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-    if (fd < 0) return error.SnapshotRead;
-    defer _ = std.c.close(fd);
-    var head: [4]u32 = undefined;
-    try get(fd, std.mem.sliceAsBytes(&head), 0);
-    if (head[0] != FILE_MAGIC or head[1] != snap.at or (@as(u64, head[2]) | @as(u64, head[3]) << 32) != snap.bytes) return error.SnapshotRead;
-    try get(fd, snap.buf.contents()[0..snap.bytes], @sizeOf(@TypeOf(head)));
+    try @import("snapshot_file.zig").read(file, snap.at, snap.buf.contents()[0..snap.bytes]);
 }
-
-fn put(fd: c_int, b: []const u8) !void {
-    var done: usize = 0;
-    while (done < b.len) {
-        const n = std.c.write(fd, b.ptr + done, @min(b.len - done, 1 << 30));
-        if (n <= 0) return error.SnapshotWrite;
-        done += @intCast(n);
-    }
-}
-
-fn get(fd: c_int, b: []u8, at: u64) !void {
-    var done: usize = 0;
-    while (done < b.len) {
-        const n = std.c.pread(fd, b.ptr + done, @min(b.len - done, 1 << 30), @intCast(at + done));
-        if (n <= 0) return error.SnapshotRead;
-        done += @intCast(n);
-    }
+test {
+    _ = @import("snapshot_file.zig");
 }

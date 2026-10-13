@@ -1,12 +1,21 @@
 # Qwen3.8 Flash Next
 
 The `qwen4_exp` family has Gated DeltaNet, sparse attention, MoE, hyper-connections and hashed n-gram
-embeddings. The supported checkpoint uses MLX affine 4-bit weights in groups of 32 and includes an MTP head.
+embeddings. The native engine's supported Metal checkpoint uses MLX affine 6-bit weights in groups of 32
+and includes an MTP head. The native engine refuses the 4-bit/group-32 checkpoint at load.
 
 ```bash
-tensorfold pull TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP
-tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --name bench
+tensorfold pull TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP
+tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP --name bench --temperature 0
 ```
+
+For native serving, see the [Metal runbook](../../RUNBOOK.md#flash-next-and-paired-metal-serving).
+Native Flash Next has no CUDA backend yet; its port is tracked in
+[#472](https://github.com/ashhart/TensorFold/issues/472).
+
+The sections below describe the Python 0.6.6 engine, available on
+[`python-0.6`](https://github.com/ashhart/TensorFold/tree/python-0.6).
+The MLX section uses `TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP`; CUDA checkpoints are listed below.
 
 On MLX, a supported conversion without the head runs without MTP drafting. On CUDA, pass `--no-drafts`
 for such a conversion; the default positive draft depth otherwise refuses the missing head.
@@ -16,8 +25,8 @@ for such a conversion; the default positive draft depth otherwise refuses the mi
 N-gram tables stay in host file mappings when the checkpoint's model files exceed 75% of the GPU's
 recommended working set. `TF_NGRAM_HOST=1` forces this mode; `TF_NGRAM_HOST=0` keeps the tables in MLX.
 Startup admission uses the same choice as the loader and subtracts the mapped weights, scales and biases
-from the checkpoint's size. For the named 4-bit checkpoint, about 29.8 GiB of its 105.4 GiB is mapped,
-leaving a conservative 75.6 GiB resident-weight estimate. The default command selects host mode on an
+from the checkpoint's size. For the 4-bit checkpoint, about 29.8 GiB of its 105.4 GiB is mapped,
+leaving a conservative 75.6 GiB resident-weight estimate. With that checkpoint, the Python engine selects host mode on an
 M4 Max with 128 GiB, whose process budget is 89.6 GiB, including the 3 GiB process reserve.
 
 Mapped pages still use RAM while cached. The loader prefetches them after its initial forwards; macOS
@@ -61,7 +70,8 @@ to one stream, while successful checks allow the lane engine to combine requests
 
 On CUDA Flash Next serves NVFP4 and EXL3 checkpoints, and the MLX 4-bit checkpoint as the portable option: the same
 files a Mac serves, and the only format two ranks and `--ple-on-ssd` read. `tensorfold serve` loads the checkpoint
-you name; it picks none by itself. Use the [container setup](../../RUNBOOK.md#nvidia-gpus) for any of them. Prompts
+you name; it picks none by itself. Use the [Python CUDA setup](cuda.md#python-06-cuda-families)
+for the container and pinned 0.6.6 installation. Prompts
 take bf16 activations by default; what that costs against the FP8 prompt path (`--prefill-fp8`) depends on the
 format ([prompt precision](cuda.md#prompt-precision)):
 

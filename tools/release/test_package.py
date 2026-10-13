@@ -32,10 +32,18 @@ def capture(dirname, sets):
 full = capture("full", {"sm121": ["keep.cubin", "stale.cubin"], "sm120": ["older.cubin"]})
 smaller = capture("smaller", {"sm121": ["keep.cubin"]})
 
-def pack(tree=None):
+overlay = receipt / "overlay"
+(overlay / "lib").mkdir(parents=True)
+(overlay / "LICENSES").mkdir()
+(overlay / "lib/libtfgrammar.so").write_bytes(b"synthetic grammar library fixture\n")
+(overlay / "LICENSES/xgrammar-Apache-2.0.txt").write_text("synthetic license fixture\n")
+
+def pack(tree=None, extra=None):
     args = ["sh", str(script), version, "linux-x86_64", str(binary), str(root / "LICENSE"),
             str(root / "NOTICE"), str(root / "packaging/RUNTIME.md"), str(root / "LICENSES"),
             str(root / "THIRD_PARTY_NOTICES.md"), str(output)]
+    if extra is not None:
+        args.append(f"--overlay={extra}")
     if tree is not None:
         args.append(str(tree))
     subprocess.run(args, check=True)
@@ -50,13 +58,16 @@ def pack(tree=None):
         assert hashlib.sha256(files[path.removeprefix("./")]).hexdigest() == digest
     return files
 
-first = pack(full)
+first = pack(full, overlay)
+assert first["lib/libtfgrammar.so"] == b"synthetic grammar library fixture\n", "the overlay's library is missing"
+assert "LICENSES/xgrammar-Apache-2.0.txt" in first and "LICENSES/MIT.txt" in first
 assert "share/tensorfold/cuda/sm121/cubins/stale.cubin" in first
 second = pack(smaller)
 assert "share/tensorfold/cuda/sm121/cubins/keep.cubin" in second
 assert not any("stale.cubin" in p or "/sm120/" in p for p in second), "stale cubin survived a smaller capture set"
 third = pack()
 assert not any(p.startswith("share/") for p in third), "capture files survived removal of the AOT input"
+assert "lib/libtfgrammar.so" not in third, "overlay files survived removal of the overlay input"
 for file in ["LICENSES/MIT.txt", "LICENSES/Apache-2.0.txt", "LICENSES/MiaAI-Lab-MIT.txt", "THIRD_PARTY_NOTICES.md"]:
     assert third[file] == (root / file).read_bytes(), file
 print(f"PASS same-version full -> smaller -> no capture, all hashes and notice files; receipt {receipt}")

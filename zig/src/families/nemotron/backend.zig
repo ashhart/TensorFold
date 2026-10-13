@@ -5,6 +5,8 @@ const lanes = @import("lanes");
 const Fence = @import("../../core/fence.zig").Fence;
 const fwd = @import("forward.zig");
 const st = @import("state.zig");
+const lesson_route = @import("lesson_route.zig");
+const layers = @import("layers.zig");
 const mtp = @import("mtp.zig");
 const timing = @import("timing.zig");
 const tree = @import("tree.zig");
@@ -14,6 +16,8 @@ const head_block = @import("head_block.zig");
 const snapshot = @import("snapshot.zig");
 const Model = @import("model.zig").Model;
 const nemotron_config = @import("config.zig");
+const grammar = @import("grammar.zig");
+const Masks = @import("../../core/grammar_mask.zig").Masks;
 
 const be = lanes.backend;
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
@@ -67,6 +71,9 @@ pub const Metal = struct {
     concurrent: bool = true, // concurrent encoders with barriers on data flow (false: serial encoders)
     gpu_ms: f64 = 0, // GPU ms of every command buffer landed so far
     last_ms: f64 = 0, // and of the last one
+    masks: ?Masks = null, // structured output's bits (grammar.zig), made at the first structured request
+    living: ?@import("adapters.zig").Sites = null, // the saved lessons' gated blocks, until a learner takes them
+    trace: bool = false, // TF_SLIDE_TRACE: each reply's lesson scores logged (dev)
 
     pub fn init(gpa: std.mem.Allocator, m: *Model, o: Options) !*Metal {
         const b = try gpa.create(Metal);
@@ -82,6 +89,7 @@ pub const Metal = struct {
             .tokens = try m.device.buffer(ring * 4, opts),
             .prompt = try m.device.buffer(@max(o.capacity, 16) * 4, opts),
             .fence = try Fence.init(m.device),
+            .trace = std.c.getenv("TF_SLIDE_TRACE") != null,
         };
         if (o.chunk > fused_rows) b.wide = try prefill.Prefill.init(m, @min(o.chunk, o.capacity));
         if (o.drafts and m.weights.mtp != null) b.head = try mtp.Head.init(m.device, m.config, &m.kernels, &m.weights, &b.pool, max_lanes, o.capacity);
@@ -101,7 +109,9 @@ pub const Metal = struct {
         }
         self.caches.deinit(self.gpa);
         if (self.head) |*h| h.deinit();
+        if (self.masks) |*m| m.deinit();
         if (self.wide) |*w| w.deinit();
+        if (self.living) |*s| s.deinit();
         self.fence.deinit();
         self.prompt.deinit();
         self.tokens.deinit();
@@ -114,6 +124,7 @@ pub const Metal = struct {
         return .{ .ptr = self, .vtable = &.{
             .prefill = prefillFn,
             .first = firstFn,
+            .first_masked = grammar.firstMasked,
             .queue = queueFn,
             .read = readFn,
             .verify = verifyFn,
@@ -121,6 +132,7 @@ pub const Metal = struct {
             .draft = draftFn,
             .release = releaseFn,
             .alternatives = alternativesFn,
+            .held = grammar.held,
         } };
     }
 
@@ -147,7 +159,7 @@ pub const Metal = struct {
     }
 
     pub fn forward(self: *Metal) fwd.Forward {
-        return .{ .c = self.m.config, .k = &self.m.kernels, .w = &self.m.weights, .s = &self.scratch, .pool = &self.pool, .geometry = self.geometry, .members = self.members };
+        return .{ .c = self.m.config, .k = &self.m.kernels, .w = &self.m.weights, .s = &self.scratch, .pool = &self.pool, .geometry = self.geometry, .members = self.members, .masks = if (self.masks) |*m| m else null };
     }
 
     pub fn cacheOf(self: *Metal, s: *lanes.Stream) !*st.Cache {
@@ -248,6 +260,9 @@ pub const Metal = struct {
         const c = try self.gpa.create(st.Cache);
         c.* = try st.Cache.init(self.m.device, self.m.config, rows_needed, self.head != null);
         c.rid = try self.pool.takeRid();
+        // a decision row only where lessons route on it: else the prompt's chunks stay as plain serving cuts them
+        c.decide = if (s.decide != null and layers.firstAdapter(&self.m.weights) != null) s.decide.? else lesson_route.none;
+        c.untaught = s.untaught;
         try self.caches.put(self.gpa, s, c);
         @memcpy(self.prompt.slice(u32, ids.len), ids);
         const Chunks = struct {
@@ -301,7 +316,9 @@ pub const Metal = struct {
         var k: usize = 0;
         while (at < ids.len) {
             while (k < s.chunks.len and s.chunks[k] <= at) k += 1;
-            const end = if (k < s.chunks.len) @min(s.chunks[k], ids.len) else ids.len;
+            var end = if (k < s.chunks.len) @min(s.chunks[k], ids.len) else ids.len;
+            // the decision row ends its chunk: the rows after it read the lessons it latched
+            if (c.decide != lesson_route.none and c.decide >= at and c.decide + 1 < end) end = @intCast(c.decide + 1);
             const rows = @min(self.o.chunk, end - at);
             if (s.isCancelled()) return error.Cancelled; // release() waits for the chunk still in flight
             try self.submit(.prefill, self.next, Chunks{ .n = ids.len, .c = c, .at = at, .rows = rows });
@@ -309,22 +326,44 @@ pub const Metal = struct {
             at += rows;
             if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) hk.at(hk.ptr, s, @intCast(at));
         }
+        if (self.trace and c.decide != lesson_route.none) try self.traceLessons(c);
+    }
+
+    /// Dev trace (TF_SLIDE_TRACE): the stream's router scores at its decision row and the lessons acting on its reply.
+    fn traceLessons(self: *Metal, c: *const st.Cache) !void {
+        const ad = layers.firstAdapter(&self.m.weights) orelse return;
+        try self.drain();
+        const n = lesson_route.max_blocks;
+        const at: usize = @intCast(@max(c.rid, 0));
+        const score = ad.score.slice(f32, lesson_route.max_slots * n)[at * n ..][0..n];
+        const flags = ad.latch.slice(u32, lesson_route.max_slots * n)[at * n ..][0..n];
+        const need = ad.need.slice(f32, n);
+        var line: [2048]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&line);
+        for (0..ad.rank / 16) |b| w.print(" {d:.2}/{d:.2}{s}", .{ score[b], need[b], if (flags[b] != 0) "*" else "" }) catch break;
+        std.log.info("slide trace: decision row {d}: scores{s} (* acting)", .{ c.decide, w.buffered() });
     }
 
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
         const self: *Metal = @ptrCast(@alignCast(ptr));
+        return self.firstAt(s, position, null);
+    }
+
+    /// The first token's draw from the prompt's last row, among a grammar's allowed tokens from bits row `mask_row`.
+    pub fn firstAt(self: *Metal, s: *lanes.Stream, position: u64, mask_row: ?usize) !u64 {
         const c = try self.cacheOf(s);
         const h = self.take(1);
         const Head = struct {
             h: u64,
             c: *st.Cache,
             how: fwd.Draw,
+            mask_row: ?usize,
             fn encode(j: @This(), b: *Metal, e: *fwd.Enc) !void {
-                const segs = [_]fwd.Seg{.{ .rows = j.c.rows, .cache = j.c, .draw = j.how }};
+                const segs = [_]fwd.Seg{.{ .rows = j.c.rows, .cache = j.c, .draw = j.how, .mask_row = j.mask_row }};
                 b.forward().draw(e, &segs, .last, b.tokens, slot(j.h));
             }
         };
-        try self.submit(.prefill, h + 1, Head{ .h = h, .c = c, .how = drawOf(s, position) });
+        try self.submit(.prefill, h + 1, Head{ .h = h, .c = c, .how = drawOf(s, position), .mask_row = mask_row });
         return h;
     }
 
@@ -397,7 +436,7 @@ pub const Metal = struct {
             staged[stage % ring] = w.pending;
             for (w.tokens, 0..) |t, r| staged[(stage + 1 + r) % ring] = t;
             fills[i] = .{ .stage = stage, .held = w.held, .n = w.tokens.len };
-            segs[i] = .{ .rows = rows, .cache = c, .store = .lag, .slot = try self.slotFor(c, .lag), .parents = w.parents, .draw = drawOf(w.stream, w.positions[0]) };
+            segs[i] = .{ .rows = rows, .cache = c, .store = .lag, .slot = try self.slotFor(c, .lag), .parents = w.parents, .draw = drawOf(w.stream, w.positions[0]), .mask_row = try grammar.stage(self, w, total) };
             c.start = total;
             c.rows = rows;
             total += rows;

@@ -96,6 +96,62 @@ test "a request the backend refuses fails alone, in the backend's words" {
     try std.testing.expectEqual(@as(usize, 64), plain.tokens);
 }
 
+test "a request the backend has no memory for yet waits for a running lane to free, then runs" {
+    try waitsForMemory(false);
+}
+
+test "the same when the backend runs the prompt pass a chunk a round" {
+    try waitsForMemory(true);
+}
+
+fn waitsForMemory(stepped: bool) !void {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .memory_lanes = 1, .prefill_chunks = if (stepped) 3 else 0 };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, if (stepped) target.stepped() else target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    try host.start();
+    defer host.stop();
+    const Box = struct {
+        mutex: std.Io.Mutex = .init,
+        done: ?Reason = null,
+        tokens: usize = 0,
+        fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
+            const b: *@This() = @ptrCast(@alignCast(ctx));
+            b.mutex.lockUncancelable(std.testing.io);
+            defer b.mutex.unlock(std.testing.io);
+            switch (e.*) {
+                .tokens => |t| b.tokens += t.len,
+                .finished => |f| b.done = f.reason,
+                else => {},
+            }
+        }
+        fn wait(b: *@This()) Reason {
+            while (true) {
+                b.mutex.lockUncancelable(std.testing.io);
+                const d = b.done;
+                b.mutex.unlock(std.testing.io);
+                if (d) |r| return r;
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+            }
+        }
+    };
+    const prompt = [_]u32{ 2, 7, 1, 8 };
+    var first: Box = .{};
+    var second: Box = .{};
+    const request: Request = .{ .prompt = &prompt, .max_tokens = 48 };
+    const e = host.engine();
+    try e.submit(1, &request, .{ .ctx = &first, .event = Box.event });
+    try e.submit(2, &request, .{ .ctx = &second, .event = Box.event });
+    try std.testing.expectEqual(Reason.length, first.wait());
+    try std.testing.expectEqual(Reason.length, second.wait());
+    try std.testing.expectEqual(@as(usize, 48), second.tokens);
+}
+
 test "a lane host serves the core's own tokens, in order, and cancels between rounds" {
     const gpa = std.testing.allocator;
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
@@ -266,7 +322,7 @@ test "a learn request steps while the engine idles, its events in order; a host 
     var clock: lanes.fake.FixedClock = .{};
     var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
     defer core.deinit();
-    const example: api.Example = .{ .ids = &.{ 1, 2, 3 }, .start = 2 };
+    const example: api.Example = .{ .ids = &.{ 1, 2, 3 }, .start = 2, .decide = 0 };
     const learn: api.LearnRequest = .{ .train = &.{example} };
     var refused: LearnBox = .{};
     defer refused.tags.deinit(gpa);
@@ -311,4 +367,198 @@ test "a learn request steps while the engine idles, its events in order; a host 
         if (d) |r| break try std.testing.expectEqual(Reason.length, r);
         std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
     }
+}
+
+test "a lane host fills prompts a chunk a round, serves their tokens, and cancels between chunks" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 4 };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    try host.start();
+    defer host.stop();
+    const Box = struct {
+        mutex: std.Io.Mutex = .init,
+        tokens: std.ArrayList(u32) = .empty,
+        done: ?Reason = null,
+        fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
+            const b: *@This() = @ptrCast(@alignCast(ctx));
+            b.mutex.lockUncancelable(std.testing.io);
+            defer b.mutex.unlock(std.testing.io);
+            switch (e.*) {
+                .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
+                .finished => |f| b.done = f.reason,
+                else => {},
+            }
+        }
+        fn wait(b: *@This()) Reason {
+            while (true) {
+                b.mutex.lockUncancelable(std.testing.io);
+                const d = b.done;
+                b.mutex.unlock(std.testing.io);
+                if (d) |r| return r;
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+            }
+        }
+    };
+    const prompts = [2][]const u32{ &.{ 3, 1, 4, 1, 5, 9, 2, 6 }, &.{ 2, 7, 1, 8, 2, 8 } };
+    var requests: [2]Request = undefined;
+    var boxes: [2]Box = .{ .{}, .{} };
+    defer for (&boxes) |*b| b.tokens.deinit(gpa);
+    const e = host.engine();
+    for (prompts, &requests, &boxes, 1..) |prompt, *r, *b, id| {
+        r.* = .{ .prompt = prompt, .max_tokens = 24 };
+        try e.submit(id, r, .{ .ctx = b, .event = Box.event });
+    }
+    for (prompts, &boxes) |prompt, *b| {
+        try std.testing.expectEqual(Reason.length, b.wait());
+        var history: std.ArrayList(u32) = .empty;
+        defer history.deinit(gpa);
+        try history.appendSlice(gpa, prompt);
+        for (b.tokens.items) |t| {
+            try std.testing.expectEqual(lanes.fake.next(history.items, null, history.items.len), t);
+            try history.append(gpa, t);
+        }
+        try std.testing.expectEqual(@as(usize, 24), b.tokens.items.len);
+    }
+    try std.testing.expectEqual(@as(usize, 8), target.prefill_count);
+
+    const CancelPrefill = struct {
+        engine: Engine,
+        id: Id,
+        at: usize,
+
+        fn call(ctx: *anyopaque, _: *lanes.Stream, chunk: usize) void {
+            const c: *@This() = @ptrCast(@alignCast(ctx));
+            if (chunk == c.at) c.engine.cancel(c.id);
+        }
+    };
+    var chunked: Box = .{};
+    defer chunked.tokens.deinit(gpa);
+    var prefill_cancel = CancelPrefill{ .engine = e, .id = 3, .at = 1 };
+    target.prefill_chunks = 10;
+    target.prefill_count = 0;
+    target.prefill_hook = CancelPrefill.call;
+    target.prefill_hook_ctx = &prefill_cancel;
+    try e.submit(3, &requests[0], .{ .ctx = &chunked, .event = Box.event });
+    try std.testing.expectEqual(Reason.cancelled, chunked.wait());
+    try std.testing.expectEqual(@as(usize, 0), chunked.tokens.items.len);
+    try std.testing.expect(target.prefill_count <= 3);
+    try std.testing.expectEqual(@as(usize, 0), target.lanes.count());
+}
+
+test "a lane host hands the backend the request's history and shared prefix lengths with its stream" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
+    try host.start();
+    defer host.stop();
+    const Seen = struct {
+        history: u32 = 0,
+        shared: [2]u32 = .{ 0, 0 },
+        done: std.atomic.Value(bool) = .init(false),
+        fn prefill(ctx: *anyopaque, s: *lanes.Stream, _: usize) void {
+            const seen: *@This() = @ptrCast(@alignCast(ctx));
+            seen.history = s.history_len;
+            @memcpy(seen.shared[0..s.shared_prefixes.len], s.shared_prefixes);
+        }
+        fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
+            const seen: *@This() = @ptrCast(@alignCast(ctx));
+            if (e.* == .finished) seen.done.store(true, .release);
+        }
+    };
+    var seen: Seen = .{};
+    target.prefill_hook = Seen.prefill;
+    target.prefill_hook_ctx = &seen;
+    const prompt = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6 };
+    const shared = [_]u32{ 2, 4 };
+    const request: Request = .{ .prompt = &prompt, .max_tokens = 2, .history_len = 6, .shared_prefixes = &shared };
+    try host.engine().submit(1, &request, .{ .ctx = &seen, .event = Seen.event });
+    while (!seen.done.load(.acquire)) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    try std.testing.expectEqual(@as(u32, 6), seen.history);
+    try std.testing.expectEqualSlices(u32, &shared, &seen.shared);
+}
+
+test "a request that does not fit a shared cache pool waits, in order, until a stream leaves" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    const Pool = struct {
+        room: std.atomic.Value(bool) = .init(false),
+        asked: std.atomic.Value(u32) = .init(0), // the last request's prompt + max_tokens the host asked about
+        fn fits(ctx: *anyopaque, prompt: u32, max_tokens: u32) bool {
+            const p: *@This() = @ptrCast(@alignCast(ctx));
+            p.asked.store(prompt + max_tokens, .monotonic);
+            return p.room.load(.monotonic);
+        }
+    };
+    var pool: Pool = .{};
+    const admit: api.Admit = .{ .ctx = &pool, .fits = Pool.fits };
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .admit = admit });
+    try host.start();
+    defer host.stop();
+    const Box = struct {
+        mutex: std.Io.Mutex = .init,
+        tokens: usize = 0,
+        done: ?Reason = null,
+        fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
+            const b: *@This() = @ptrCast(@alignCast(ctx));
+            b.mutex.lockUncancelable(std.testing.io);
+            defer b.mutex.unlock(std.testing.io);
+            switch (e.*) {
+                .tokens => |t| b.tokens += t.len,
+                .finished => |f| b.done = f.reason,
+                else => {},
+            }
+        }
+        fn state(b: *@This()) struct { usize, ?Reason } {
+            b.mutex.lockUncancelable(std.testing.io);
+            defer b.mutex.unlock(std.testing.io);
+            return .{ b.tokens, b.done };
+        }
+        fn wait(b: *@This()) Reason {
+            while (true) {
+                if (b.state()[1]) |r| return r;
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+            }
+        }
+    };
+    const prompt = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6 };
+    const e = host.engine();
+    var a: Box = .{};
+    const long: Request = .{ .prompt = &prompt, .max_tokens = 100000 };
+    try e.submit(1, &long, .{ .ctx = &a, .event = Box.event }); // alone: admitted although nothing fits
+    while (a.state()[0] == 0) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    var b: Box = .{};
+    const short: Request = .{ .prompt = &prompt, .max_tokens = 4 };
+    try e.submit(2, &short, .{ .ctx = &b, .event = Box.event });
+    std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
+    try std.testing.expectEqual(@as(usize, 0), b.state()[0]); // a lane is free, the pool is not: it waits
+    try std.testing.expectEqual(@as(?Reason, null), b.state()[1]);
+    try std.testing.expectEqual(@as(u32, prompt.len + 4), pool.asked.load(.monotonic));
+    e.cancel(1);
+    try std.testing.expectEqual(Reason.cancelled, a.wait());
+    try std.testing.expectEqual(Reason.length, b.wait()); // alone again: admitted
+    try std.testing.expectEqual(@as(usize, 4), b.state()[0]);
+}
+
+test {
+    _ = @import("lane_host_fail_test.zig");
+    _ = @import("lane_host_lone_test.zig");
+    _ = @import("lane_host_admit_test.zig");
 }

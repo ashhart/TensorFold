@@ -11,33 +11,28 @@ const Buffer = mtl.Buffer;
 const At = pl.At;
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
-pub const block = 16; // ranks a lesson adds at each layer
-pub const max_rank = 512; // thirty-two lessons' blocks
-pub const max_blocks = max_rank / block;
-pub const scale: f32 = 10;
-pub const avoid_dims = 192; // directions sketched from the inputs a new block must leave alone
-pub const candidates = 64; // directions sketched from the fact's inputs, which a new block's are chosen among
+const shape = @import("learn_shape.zig");
+const route = @import("lesson_route.zig");
 
-/// Adam's settings for a block's outputs (its gate keeps them off what must stay): rate, moments' decays, epsilon.
-pub const hyper = [4]f32{ 3e-4, 0.9, 0.999, 1e-8 };
+pub const block = shape.block;
+pub const max_rank = shape.max_rank;
+pub const max_blocks = shape.max_blocks;
+const room = 8; // blocks a layer first has room for
+pub const scale = shape.scale;
+pub const avoid_dims = shape.avoid_dims;
+pub const candidates = shape.candidates;
+pub const hyper = shape.hyper;
+const a_norm = shape.a_norm;
+pub const unit = shape.unit;
 
-/// Each new input direction's length, as MLX's LoRA draws its down factor's columns (uniform within 1 / sqrt(in)).
-const a_norm: f32 = 0.577;
-
-/// A block's directions' squared length: a row's cosine with one is (x . a) / sqrt(unit |x|^2).
-pub const unit = a_norm * a_norm;
-
-/// A block's gate before its lesson sets one: above any cosine, so the block stays shut.
-pub const shut: f32 = 2;
-
-/// One layer's change: y += scale (x a^T) b after its output projection; a [max_rank, in], b [max_rank, out], f32.
+/// One layer's change after its output projection: y += scale (x a^T) b, f32 a [ranks, in] and b [ranks, out].
 pub const Site = struct {
     layer: usize,
     in: usize,
     out: usize,
     a: Buffer, // every block's input directions, fixed when its lesson begins
     b: Buffer, // every block's outputs; only the open block's still learn
-    tau: Buffer, // [max_blocks]: each block's gate, the share of a row's input it needs to act on that row
+    tau: Buffer, // [cap]: each block's router offset here, its share times the other prompts' mean score (0: unread)
     gb: Buffer, // [block, out]: the open block's gradient
     mb: Buffer, // [block, out]: its Adam moments
     vb: Buffer,
@@ -46,12 +41,12 @@ pub const Site = struct {
     seek: Buffer, // [candidates, in]: a sketch of the fact's inputs, then the candidate directions it frames
 
     pub fn adapter(s: *const Site, sites: *const Sites) wts.Adapter {
-        return .{ .a = s.a, .b = s.b, .tau = s.tau, .xa = sites.xa, .xn = sites.xn, .gates = sites.gates, .in = s.in, .out = s.out, .rank = sites.rank, .scale = scale, .unit = unit };
+        return .{ .a = s.a, .b = s.b, .tau = s.tau, .xa = sites.xa, .xn = sites.xn, .gates = sites.gates, .need = sites.need, .latch = sites.latch, .score = sites.score, .whole = sites.whole, .in = s.in, .out = s.out, .rank = sites.rank, .scale = scale, .unit = unit };
     }
 
-    /// Block k's gate.
+    /// Block k's router offset.
     pub fn gate(s: *const Site, k: usize) *f32 {
-        return &s.tau.slice(f32, max_blocks)[k];
+        return &s.tau.slice(f32, k + 1)[k];
     }
 };
 
@@ -61,12 +56,20 @@ pub const Sites = struct {
     xa: Buffer, // [rows, max_rank]: the forward's scratch, used by one site at a time
     xn: Buffer, // [rows]: each row's squared input length, the same way
     gates: Buffer, // [rows, max_blocks]: which blocks are open on each row, the same way
+    need: Buffer, // f32 [max_blocks]: the router score each lesson needs at a decision row to act on the reply (0: never)
+    latch: Buffer, // u32 [max_slots, max_blocks]: each stream's lessons acting on its reply, a flag a block
+    score: Buffer, // f32 [max_slots, max_blocks]: each stream's router scores at its decision row, until they are latched
     rank: usize = 0, // ranks in use, the open block last
+    saved: usize = 0, // blocks written beside the shards, a file each
+    cap: usize, // blocks every layer has room for, doubled when a lesson needs more (max_blocks at most)
+    whole: bool = false, // lessons edit the weights: every one acts on every row, no router deciding
+    device: mtl.Device,
     steps: u64 = 0, // the open block's Adam steps
     kept_steps: u64 = 0,
 
-    /// Room for every block at every layer, none in use: the forward is unchanged until a block opens.
-    pub fn init(gpa: std.mem.Allocator, device: mtl.Device, c: cfg.Config, rows: usize) !Sites {
+    /// Room for `blocks` blocks per layer (`room` at least), none in use: the forward is unchanged until one opens.
+    pub fn init(gpa: std.mem.Allocator, device: mtl.Device, c: cfg.Config, rows: usize, blocks: usize) !Sites {
+        const cap = @max(blocks, room);
         const list = try gpa.alloc(Site, c.layers);
         var made: usize = 0;
         errdefer {
@@ -81,7 +84,7 @@ pub const Sites = struct {
             };
             const out = c.hidden;
             s.* = .{ .layer = i, .in = in, .out = out, .a = undefined, .b = undefined, .tau = undefined, .gb = undefined, .mb = undefined, .vb = undefined, .kept = undefined, .avoid = undefined, .seek = undefined };
-            const sizes = [_]usize{ max_rank * in, max_rank * out, max_blocks, block * out, block * out, block * out, 3 * block * out, avoid_dims * in, candidates * in };
+            const sizes = [_]usize{ cap * block * in, cap * block * out, cap, block * out, block * out, block * out, 3 * block * out, avoid_dims * in, candidates * in };
             const fields = [_]*Buffer{ &s.a, &s.b, &s.tau, &s.gb, &s.mb, &s.vb, &s.kept, &s.avoid, &s.seek };
             var got: usize = 0;
             errdefer for (fields[0..got]) |f| f.deinit();
@@ -97,13 +100,22 @@ pub const Sites = struct {
         const xn = try device.buffer(rows * 4, opts);
         errdefer xn.deinit();
         const gates = try device.buffer(rows * max_blocks * 4, opts);
-        return .{ .gpa = gpa, .list = list, .xa = xa, .xn = xn, .gates = gates };
+        errdefer gates.deinit();
+        const need = try device.buffer(max_blocks * 4, opts);
+        errdefer need.deinit();
+        const latch = try device.buffer(route.max_slots * max_blocks * 4, opts);
+        errdefer latch.deinit();
+        const score = try device.buffer(route.max_slots * max_blocks * 4, opts);
+        @memset(need.slice(f32, max_blocks), 0);
+        @memset(latch.slice(u32, route.max_slots * max_blocks), 0);
+        @memset(score.slice(f32, route.max_slots * max_blocks), 0);
+        return .{ .gpa = gpa, .list = list, .xa = xa, .xn = xn, .gates = gates, .need = need, .latch = latch, .score = score, .cap = cap, .device = device };
     }
 
     pub fn deinit(s: *Sites) void {
         for (s.list) |*site| free(site);
         s.gpa.free(s.list);
-        inline for (.{ "xa", "xn", "gates" }) |f| @field(s, f).deinit();
+        inline for (.{ "xa", "xn", "gates", "need", "latch", "score" }) |f| @field(s, f).deinit();
     }
 
     fn free(s: *Site) void {
@@ -122,6 +134,11 @@ pub const Sites = struct {
         }
     }
 
+    /// Each block's router score needed at a decision row to act on the reply (0: never), as the forward reads them.
+    pub fn needs(s: *const Sites) []f32 {
+        return s.need.slice(f32, max_blocks);
+    }
+
     /// The first rank of the open block.
     pub fn first(s: *const Sites) usize {
         return s.rank - block;
@@ -135,45 +152,62 @@ pub const Sites = struct {
         for (threads[0..n], 0..) |t, k| if (t) |th| th.join() else frameShare(s.list, k, n);
     }
 
-    /// A new block at every layer, shut, its directions `choice` [layers, block, candidates] of the candidates; b zero.
+    /// Room for `blocks` blocks at every layer, buffers doubled as needed; the forward reads them once attached again.
+    fn grow(s: *Sites, blocks: usize) !void {
+        if (blocks <= s.cap) return;
+        if (blocks > max_blocks) return error.LearnedChangeFull;
+        var cap = s.cap;
+        while (cap < blocks) cap *= 2;
+        cap = @min(cap, max_blocks);
+        const fresh = try s.gpa.alloc([3]Buffer, s.list.len);
+        defer s.gpa.free(fresh);
+        var made: usize = 0;
+        errdefer for (fresh[0..made]) |*f| for (f) |*x| x.deinit();
+        for (s.list, fresh) |*site, *f| {
+            const per = [3]usize{ block * site.in, block * site.out, 1 }; // a block's floats in a, b and tau
+            const old = [3]Buffer{ site.a, site.b, site.tau };
+            var got: usize = 0;
+            errdefer for (f[0..got]) |*x| x.deinit();
+            for (f, per, old) |*x, n, o| {
+                x.* = try s.device.buffer(cap * n * 4, opts);
+                got += 1;
+                @memcpy(x.slice(f32, s.cap * n), o.slice(f32, s.cap * n));
+                @memset(x.slice(f32, cap * n)[s.cap * n ..], 0);
+            }
+            made += 1;
+        }
+        for (s.list, fresh) |*site, f| {
+            for ([_]*Buffer{ &site.a, &site.b, &site.tau }) |x| x.deinit();
+            site.a = f[0];
+            site.b = f[1];
+            site.tau = f[2];
+        }
+        s.cap = cap;
+    }
+
+    /// A new block per layer, directions `choice` [layers, block, candidates], b and need zero: it acts on no reply.
     pub fn open(s: *Sites, choice: []const f32) !void {
-        if (s.rank + block > max_rank) return error.LearnedChangeFull;
+        try s.grow(s.rank / block + 1);
         const at = s.rank;
         for (s.list, 0..) |*site, l| {
-            const a = site.a.slice(f32, max_rank * site.in)[at * site.in ..][0 .. block * site.in];
+            const a = site.a.slice(f32, s.cap * block * site.in)[at * site.in ..][0 .. block * site.in];
             const f = site.seek.slice(f32, candidates * site.in);
             @memset(a, 0);
             for (0..block) |q| for (0..candidates) |j| {
                 subspace.axpy(a[q * site.in ..][0..site.in], a_norm * choice[(l * block + q) * candidates + j], f[j * site.in ..][0..site.in]);
             };
-            site.gate(at / block).* = shut;
-            @memset(site.b.slice(f32, max_rank * site.out)[at * site.out ..][0 .. block * site.out], 0);
+            site.gate(at / block).* = 0;
+            @memset(site.b.slice(f32, s.cap * block * site.out)[at * site.out ..][0 .. block * site.out], 0);
             for ([_]Buffer{ site.gb, site.mb, site.vb }) |buf| @memset(buf.slice(f32, block * site.out), 0);
         }
         s.rank += block;
         s.steps = 0;
     }
 
-    /// The open block's directions rebuilt from `choice` and its gate open on every row: a plain change of the weights.
-    pub fn plain(s: *Sites, choice: []const f32) void {
-        const at = s.first();
-        for (s.list, 0..) |*site, l| {
-            const g = site.gate(at / block);
-            if (g.* >= shut) continue;
-            const a = site.a.slice(f32, max_rank * site.in)[at * site.in ..][0 .. block * site.in];
-            const f = site.seek.slice(f32, candidates * site.in);
-            @memset(a, 0);
-            for (0..block) |q| for (0..candidates) |j| {
-                subspace.axpy(a[q * site.in ..][0..site.in], a_norm * choice[(l * block + q) * candidates + j], f[j * site.in ..][0..site.in]);
-            };
-            g.* = -std.math.inf(f32);
-        }
-    }
-
     /// The open block taken back out, its lesson having left nothing in it.
     pub fn close(s: *Sites) void {
         s.rank -= block;
-        for (s.list) |*site| @memset(site.b.slice(f32, max_rank * site.out)[s.rank * site.out ..][0 .. block * site.out], 0);
+        for (s.list) |*site| @memset(site.b.slice(f32, s.cap * block * site.out)[s.rank * site.out ..][0 .. block * site.out], 0);
     }
 
     /// One Adam step on the open block's outputs (after a step's gradients are in); the gradients are cleared.
@@ -181,7 +215,19 @@ pub const Sites = struct {
         s.steps += 1;
         const t: f32 = @floatFromInt(s.steps);
         const corr = [2]f32{ 1 / (1 - std.math.pow(f32, hyper[1], t)), 1 / (1 - std.math.pow(f32, hyper[2], t)) };
-        for (s.list) |*site| o.adam(At.of(site.b).plus(s.first() * site.out * 4), site.gb, site.mb, site.vb, block * site.out, hyper, corr);
+        for (s.list) |*site| {
+            o.adam(At.of(site.b).plus(s.first() * site.out * 4), site.gb, site.mb, site.vb, block * site.out, shape.hyperAt(s.steps), corr);
+        }
+    }
+
+    /// Aims layer l's router (the block's first rank) along `dir`: its score less `mean`, times `weight`.
+    pub fn aim(s: *Sites, l: usize, dir: []const f32, weight: f32, mean: f32) void {
+        const site = &s.list[l];
+        const a = site.a.slice(f32, s.cap * block * site.in)[s.first() * site.in ..][0..site.in];
+        const f = site.seek.slice(f32, candidates * site.in);
+        @memset(a, 0);
+        for (0..candidates) |j| subspace.axpy(a, a_norm * weight * dir[j], f[j * site.in ..][0..site.in]);
+        site.gate(s.first() / block).* = weight * mean;
     }
 
     /// The open block's outputs and moments as they are now, for `restore` (read after every command buffer landed).
@@ -190,7 +236,7 @@ pub const Sites = struct {
         for (s.list) |*site| {
             const n = block * site.out;
             const k = site.kept.slice(f32, 3 * n);
-            @memcpy(k[0..n], site.b.slice(f32, max_rank * site.out)[s.first() * site.out ..][0..n]);
+            @memcpy(k[0..n], site.b.slice(f32, s.cap * block * site.out)[s.first() * site.out ..][0..n]);
             @memcpy(k[n .. 2 * n], site.mb.slice(f32, n));
             @memcpy(k[2 * n ..], site.vb.slice(f32, n));
         }
@@ -202,7 +248,7 @@ pub const Sites = struct {
         for (s.list) |*site| {
             const n = block * site.out;
             const k = site.kept.slice(f32, 3 * n);
-            @memcpy(site.b.slice(f32, max_rank * site.out)[s.first() * site.out ..][0..n], k[0..n]);
+            @memcpy(site.b.slice(f32, s.cap * block * site.out)[s.first() * site.out ..][0..n], k[0..n]);
             @memcpy(site.mb.slice(f32, n), k[n .. 2 * n]);
             @memcpy(site.vb.slice(f32, n), k[2 * n ..]);
             @memset(site.gb.slice(f32, n), 0);

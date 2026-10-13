@@ -4,7 +4,7 @@ const mtl = @import("metal");
 const tf = @import("tensorfold");
 const q = tf.qwen27;
 const lanes = tf.lanes;
-const lb = @import("qwen27_host").lanes_backend;
+const lb = @import("qwen27_served").lanes_backend;
 const target_graph = @import("synthetic_graph.zig");
 const draft_graph = @import("dflash_graph.zig");
 
@@ -48,6 +48,23 @@ fn run(a: std.mem.Allocator, io: std.Io, b: *lb.Metal, prompt: []const u32, coun
     try engine.addStream(&s);
     while (engine.activeCount() > 0) try engine.step();
     return .{ .tokens = try a.dupe(u32, s.emitted()), .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted };
+}
+
+/// A stream whose next round fails as a failed command buffer leaves the runner (or the drafter), then is discarded.
+fn failOnce(a: std.mem.Allocator, io: std.Io, b: *lb.Metal, drafter: *q.dflash.runtime_model.Model, prompt: []const u32, in_drafter: bool) !void {
+    var cfg = try lanes.Config.init(a, b.facts(), lb.max_rows, lb.max_rows - 1);
+    defer cfg.deinit(a);
+    var clock = lanes.backend.WallClock{ .io = io };
+    var engine = lanes.Engine.init(a, &cfg, b.backend(), clock.clock());
+    defer engine.deinit();
+    var s = try lanes.Stream.init(a, .{ .id = "fails", .prompt = prompt, .max_new = 33, .drafts = true });
+    defer s.deinit(a);
+    try engine.addStream(&s);
+    try engine.step();
+    if (in_drafter) drafter.backend.failed = true else b.runner.failed = true;
+    const failed = if (engine.step()) false else |_| true;
+    if (!failed) return error.FailureNotSeen;
+    engine.discard(&s);
 }
 
 /// The reply and the runner equal plain greedy's: the first `count` tokens, the state after the rows the core fed.
@@ -95,6 +112,19 @@ pub fn main(init: std.process.Init) !void {
         try same(try run(a, io, plain, &prompt, count, true, null), &runner, prompt.len, &expected, &states, count);
     }
     std.debug.print("lane core: drafted, plain, sampled-at-0 and no-drafter streams at 1/2/7/16/17/33 equal plain greedy tokens and state\n", .{});
+    for ([_]bool{ false, true }) |in_drafter| try failOnce(a, io, drafted, drafter, &prompt, in_drafter);
+    for ([_]*lb.Metal{ drafted, plain }) |back| try same(try run(a, io, back, &prompt, 33, true, null), &runner, prompt.len, &expected, &states, 33);
+    std.debug.print("a round failed on the GPU (target, then drafter) ends its stream; the next streams equal plain greedy\n", .{});
+    {
+        const q4 = try draft_graph.createQ4(a, model);
+        defer q4.deinit();
+        const draft4 = try lb.Draft.attach(a, &runner, q4, false);
+        defer draft4.deinit();
+        const back4 = try lb.Metal.init(a, &runner, draft4);
+        defer back4.deinit();
+        for (counts) |count| try same(try run(a, io, back4, &prompt, count, true, null), &runner, prompt.len, &expected, &states, count);
+    }
+    std.debug.print("a q4 drafter opened from its file (each linear read once, into its q4 copy) drafts streams equal to plain greedy\n", .{});
     var oracle = Oracle{ .a = a, .runner = &runner, .tokens = &expected, .prompt = prompt.len };
     draft.generation.proposer = .{ .ptr = &oracle, .call = Oracle.propose };
     defer draft.generation.proposer = null;

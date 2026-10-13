@@ -6,8 +6,9 @@ const snapshot = @import("snapshot.zig");
 const Metal = @import("backend.zig").Metal;
 const Snap = snapshot.Snap;
 
-const FILE_MAGIC: u32 = 0x4e454d53; // "NEMS"
+const FILE_MAGIC: u32 = 0x4e454d54; // "NEMT": checksummed
 const HEAD = 5; // magic, position, head flag, bytes (2)
+const checked = @import("../../core/snapshot_file.zig");
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
 /// A learned state's file: <dir>/<key>.bin.
@@ -25,8 +26,7 @@ pub fn writeFile(snap: *const Snap, file: [:0]const u8) !void {
     {
         defer _ = std.c.close(fd);
         const head = [HEAD]u32{ FILE_MAGIC, snap.at, @intFromBool(snap.head), @truncate(snap.bytes), @truncate(snap.bytes >> 32) };
-        try put(fd, std.mem.sliceAsBytes(&head));
-        try put(fd, snap.buf.contents()[0..snap.bytes]);
+        try checked.write(fd, std.mem.sliceAsBytes(&head), snap.buf.contents()[0..snap.bytes]);
         if (std.c.fsync(fd) != 0) return error.SnapshotWrite;
     }
     if (std.c.rename(tmp, file) != 0) return error.SnapshotWrite;
@@ -41,7 +41,7 @@ pub fn readFile(snap: *Snap, file: [:0]const u8) !void {
     try get(fd, std.mem.sliceAsBytes(&head), 0);
     const bytes = @as(u64, head[3]) | @as(u64, head[4]) << 32;
     if (head[0] != FILE_MAGIC or head[1] != snap.at or head[2] != @intFromBool(snap.head) or bytes != snap.bytes) return error.SnapshotRead;
-    try get(fd, snap.buf.contents()[0..snap.bytes], @sizeOf(@TypeOf(head)));
+    try checked.read(fd, std.mem.sliceAsBytes(&head), snap.buf.contents()[0..snap.bytes]);
 }
 
 fn put(fd: c_int, b: []const u8) !void {

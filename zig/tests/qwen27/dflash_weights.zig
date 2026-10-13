@@ -32,7 +32,8 @@ pub fn main(init: std.process.Init) !void {
     defer names.deinit(a);
     for (draft.files.items) |file| for (file.names.keys()) |name| try names.append(a, name);
     const source = q.checkpoint.Source.from(&target);
-    var graph = try df.weights.load(a, .{ .source = q.checkpoint.Source.from(&draft), .names = names.items }, c, try bind(source, arena, "language_model.", "model.embed_tokens", c), try bind(source, arena, "language_model.", "lm_head", c));
+    _ = try bind(source, arena, "language_model.", "lm_head", c);
+    var graph = try df.weights.load(a, .{ .source = q.checkpoint.Source.from(&draft), .names = names.items }, c, try bind(source, arena, "language_model.", "model.embed_tokens", c));
     defer graph.deinit();
     var config_hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(text, &config_hash, .{});

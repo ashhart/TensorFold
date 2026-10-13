@@ -6,6 +6,7 @@ const api = @import("engine_api");
 const tf = @import("tensorfold");
 const fx = tf.flashnext_engine;
 const snap = tf.flashnext_snapshot;
+const learned = tf.flashnext_learned;
 const pc = api.prompt_cache;
 const cache_fit = @import("cache_fit.zig");
 const Allocator = std.mem.Allocator;
@@ -46,6 +47,7 @@ pub const Host = struct {
     cache: ?pc.Store = null, // kept prompt states (engine thread only); null: no reuse (rank 1, a zero budget)
     prompt: []const u32 = &.{}, // the request in the engine (speed-up mode names kept states by its tokens)
     saved: std.ArrayList(u32) = .empty, // this request's marks the cache kept (speed-up: rank 1 drops the others)
+    learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk, read back by later servers
 
     const Mark = struct { at: i96, tokens: u64 };
     const window_ns: i96 = 2 * std.time.ns_per_s;
@@ -308,29 +310,30 @@ pub const Host = struct {
         var c: Ctx = .{ .h = h, .job = job };
         const out: fx.Out = .{ .ctx = &c, .prefilled = Ctx.prefilled, .tokens = Ctx.tokens, .cancelled = Ctx.cancelled, .marked = Ctx.marked };
         const depth: ?usize = if (r.drafts) null else 0;
+        const budget: fx.Think = if (r.think_budget > 0) .{ .budget = r.think_budget, .close = r.think_close, .end = r.think_end } else .{};
         var arena: std.heap.ArenaAllocator = .init(h.gpa);
         defer arena.deinit();
         var plan: pc.Plan = .{};
         const kept0 = if (h.cache) |*store| store.counts.kept else 0;
         const t_begin = h.now();
+        h.prompt = r.prompt; // a learned state read back in `begin` is named by these tokens
         if (h.cache) |*store| if (r.prompt.len + r.max_tokens + fx.MARGIN <= tf.flashnext_replay.CAP) {
             plan = store.beginRewind(arena.allocator(), r.prompt, r.history_len, r.rewind_len, r.shared_prefixes, &.{}, null, &.{}) catch .{};
         };
         job.restore_ns = h.now() - t_begin;
         job.cached = plan.from;
         defer if (job.prefilled) |done| std.log.info("prompt pass: {d} -> {d} tokens in {d:.1} ms (waited {d:.1} ms; lookup and restore {d:.1} ms, peer handoff {d:.1} ms, keeps {d:.1} ms)", .{ job.cached, r.prompt.len, ms(done - job.began), ms(job.began - job.queued), ms(job.restore_ns), ms(h.eng.handoff_ns), ms(job.keep_ns) });
-        h.prompt = r.prompt;
         h.saved.clearRetainingCapacity();
         defer if (h.cache) |*store| store.report(r.prompt.len, job.cached, store.counts.kept - kept0);
         defer if (h.eng.r.tp != null) for (plan.marks) |mk| if (std.mem.indexOfScalar(u32, h.saved.items, mk) == null) {
             h.eng.peer_drops.append(h.gpa, fx.keyOf(r.prompt[0 .. mk + 1])) catch {}; // rank 1 kept it, this Mac didn't
         };
-        const res = h.eng.generateFrom(r.prompt, plan.from, plan.marks, r.max_tokens, r.eos, depth, out) catch |e| retry: {
+        const res = h.eng.generateFrom(r.prompt, plan.from, plan.marks, r.max_tokens, r.eos, depth, budget, out) catch |e| retry: {
             if (e == error.PeerNotResumed) { // rank 1 lacks this state: both Macs read the prompt from the start
                 std.log.warn("speed-up mode: rank 1 could not resume at {d}; reading the prompt from the start", .{plan.from});
                 if (h.cache) |*store| store.forget(r.prompt, plan.from, &.{}); // so later prompts do not ask rank 1 for it again
                 job.cached = 0;
-                break :retry h.eng.generateFrom(r.prompt, 0, plan.marks, r.max_tokens, r.eos, depth, out) catch |e2| {
+                break :retry h.eng.generateFrom(r.prompt, 0, plan.marks, r.max_tokens, r.eos, depth, budget, out) catch |e2| {
                     if (!job.prefill_sent) emit(job, .{ .prefilled = 0 });
                     fin.message = @errorName(e2);
                     return;
@@ -398,19 +401,58 @@ const Snaps = struct {
         snap.drop(h.gpa, k.st);
         h.gpa.destroy(k);
     }
+    /// --learn: a kept state to its file under `dir`.
+    fn write(_: *anyopaque, saved: pc.Saved, dir: [:0]const u8, key: u64) anyerror!void {
+        const k: *Kept = @ptrCast(@alignCast(saved));
+        var buf: [1100]u8 = undefined;
+        try learned.writeFile(k.st, try learned.path(&buf, dir, key));
+    }
+    /// --learn: learned state `key` read back into a pool buffer, named by the request's tokens as a saved one is.
+    fn read(ptr: *anyopaque, dir: [:0]const u8, key: u64, at: u32) anyerror!pc.Saved {
+        const h: *Host = @ptrCast(@alignCast(ptr));
+        if (at >= h.prompt.len) return error.SnapshotRead;
+        var buf: [1100]u8 = undefined;
+        const k = try h.gpa.create(Kept);
+        errdefer h.gpa.destroy(k);
+        k.* = .{ .st = try learned.readFile(h.eng, h.gpa, at, try learned.path(&buf, dir, key)), .key = fx.keyOf(h.prompt[0 .. at + 1]) };
+        return k;
+    }
+    /// --learn: learned state `key`'s file removed.
+    fn forget(_: *anyopaque, dir: [:0]const u8, key: u64) void {
+        var buf: [1100]u8 = undefined;
+        _ = std.c.unlink(learned.path(&buf, dir, key) catch return);
+    }
 };
 
 /// The prompt cache's plan (cache_fit.zig); without an OS reading, `gib` or the Metal working set's spare.
 fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !api.PromptCachePlan {
     const rank = if (eng.followsPeer()) " (rank 1 keeps its halves of rank 0's)" else if (eng.r.tp != null) " (rank 1 mirrors them)" else "";
     const dev = eng.r.device;
-    return cache_fit.budget(gib, over, @min(dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), 16 << 30), a, why, rank);
+    return cache_fit.budget(gib, over, dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), a, why, rank);
 }
 
-/// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what 70% of RAM leaves; `over_cap` lets a larger one through); on error.CacheOverCap `why` (in `a`) says why.
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, a: Allocator, why: *[]const u8) !*Host {
+/// Learned states under `root` by checkpoint, kernel sources and modes, probe bits, OS build and chip.
+fn learnedStates(gpa: Allocator, eng: *fx.Engine, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
+    var h = std.hash.Wyhash.init(0x6678);
+    const probe = try learned.probe(eng, gpa);
+    const modes = [_]u64{ @intFromBool(eng.r.xnew), @intFromBool(eng.r.hc_up), @intFromBool(eng.r.device.tensorUnits()) };
+    for ([_]u64{ eng.identity_hash, learned.sourceHash(), modes[0], modes[1], modes[2], probe }) |x| h.update(std.mem.asBytes(&x));
+    var os: [64]u8 = undefined;
+    h.update(api.prompt_imprint.osBuild(&os));
+    h.update(std.mem.span(eng.r.device.name()));
+    const m = try api.prompt_imprint.Imprint.open(gpa, root, h.final(), cap);
+    std.log.info("flash next: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ m.dir, m.metas.items.len, m.total() >> 20, cap >> 20 });
+    return m;
+}
+
+/// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what 70% of RAM leaves, up to 16 GiB; `over_cap` lets a larger one through); on error.CacheOverCap `why` (in `a`) says why.
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, learn: ?[]const u8, learn_cap: u64, a: Allocator, why: *[]const u8) !*Host {
     const eng = try fx.Engine.loadWith(gpa, io, dir, dump, speed_up);
     errdefer eng.deinit();
+    if (learn != null and eng.r.tp != null) {
+        why.* = "--learn is not kept across a Flash Next pair yet: leave it out, or serve on one Mac";
+        return error.LearnOnPair;
+    }
     eng.warm() catch |err| {
         std.log.err("flash next: warm-up failed: {s}", .{@errorName(err)});
         return err;
@@ -425,8 +467,14 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, wind
     const limit: i64 = tf.flashnext_replay.CAP - fx.MARGIN;
     h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .info_ = .{ .name = "flashnext-zig", .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = true, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
     h.warm = .{ .queue = eng.r.queue };
-    if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses } }, .{ .lookahead = 1 }, budget);
+    // chunk 1: a prompt call keeps at marks inside it (engine.mark_taps), so a short prompt's history mark adds no call
+    if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .write = Snaps.write, .read = Snaps.read, .forget = Snaps.forget } }, .{ .lookahead = 1, .chunk = 1 }, budget);
     h.info_.prompt_cache = h.cache != null;
+    if (learn) |root| {
+        h.learned = try learnedStates(gpa, eng, root, learn_cap);
+        if (h.cache) |*store| store.imprint = &h.learned.?;
+    }
+    errdefer if (h.learned) |*m| m.deinit();
     try h.start();
     return h;
 }
@@ -443,6 +491,7 @@ pub fn close(ctx: *anyopaque) void {
         th.join();
     }
     if (h.cache) |*store| store.deinit();
+    if (h.learned) |*m| m.deinit();
     h.saved.deinit(h.gpa);
     h.eng.deinit();
     h.gpa.destroy(h);

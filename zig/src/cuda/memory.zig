@@ -90,10 +90,12 @@ pub const DeviceBuffer = struct {
         return self.ptr + offset;
     }
 
+    /// Returns once the bytes have landed: a pageable copy can return early, and non-blocking streams won't wait.
     pub fn upload(self: DeviceBuffer, offset: usize, bytes: []const u8) Error!void {
         const dst = try self.span(offset, bytes.len);
         if (bytes.len == 0) return;
         try self.d.check(self.d.api.cuMemcpyHtoD_v2(dst, bytes.ptr, bytes.len), "cuMemcpyHtoD");
+        try self.d.check(self.d.api.cuStreamSynchronize(null), "cuStreamSynchronize");
     }
 
     pub fn download(self: DeviceBuffer, offset: usize, out: []u8) Error!void {

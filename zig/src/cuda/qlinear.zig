@@ -5,7 +5,8 @@ const module = @import("module.zig");
 const launch_ = @import("launch.zig");
 const memory = @import("memory.zig");
 const stream_ = @import("stream.zig");
-const fp8 = @import("fp8.zig");
+const qmmf = @import("qmmf.zig");
+const nvfp4 = @import("nvfp4.zig");
 
 const Driver = driver.Driver;
 const Module = module.Module;
@@ -13,35 +14,52 @@ const Function = module.Function;
 const Stream = stream_.Stream;
 
 /// MLX affine 4-bit tiled for qmm: packed words, (kg, npad) scales and biases, n outputs from k inputs.
-pub const Affine4 = struct { w: u64, s: u64, b: u64, n: usize, k: usize, npad: usize };
+pub const Affine4 = struct {
+    w: u64,
+    s: u64,
+    b: u64,
+    n: usize,
+    k: usize,
+    npad: usize,
 
-/// One projection's weights in any format this module serves.
+    /// The tiled sizes for n outputs from k inputs: rows padded to 128, then the words', scales' and biases' bytes.
+    pub fn layout(n: usize, k: usize) struct { npad: usize, words: usize, scales: usize } {
+        const npad = (n + 127) / 128 * 128;
+        return .{ .npad = npad, .words = npad * k / 2, .scales = k / 64 * npad * 2 };
+    }
+};
+
+/// One projection's weights in any format this module serves; every one but affine4 is a lane matmul mode.
 pub const Weight = union(enum) {
     affine4: Affine4,
-    fp8g: fp8.Weight,
+    fp8g: qmmf.Weight,
+    nvfp4: qmmf.Weight,
+    fp8: qmmf.Weight, // e4m3 with one fp32 scale (ModelOpt FP8)
+    bf16: qmmf.Weight, // unquantized: the checkpoint's bf16 values
 
     pub fn outputs(w: Weight) usize {
         return switch (w) {
             .affine4 => |q| q.n,
-            .fp8g => |q| q.n,
+            .fp8g, .nvfp4, .fp8, .bf16 => |q| q.n,
         };
     }
 
     pub fn inputs(w: Weight) usize {
         return switch (w) {
             .affine4 => |q| q.k,
-            .fp8g => |q| q.k,
+            .fp8g, .nvfp4, .fp8, .bf16 => |q| q.k,
         };
     }
 };
 
-/// Rows in: bf16 `x` rows `ldx` apart (0: packed), their 64-group sums, and fp8g's slice partials (Lane.partBytes).
+/// Rows in: bf16 `x` rows `ldx` apart (0: packed), their 64-group sums, and the lane's slice partials (partBytes).
 pub const Rows = struct { x: u64, ldx: usize = 0, sums: u64 = 0, part: u64 = 0 };
 
 /// The kernels of every format a family loaded; a weight whose format is not loaded is refused.
 pub const Linear = struct {
     affine4: ?*const Affine4Kernels = null,
-    fp8g: ?*const fp8.Lane = null,
+    lane: ?*const qmmf.Lane = null, // decode rows of every lane format; fp8g and bf16 prompt rows too
+    nvfp4_prompt: ?*const nvfp4.Prompt = null, // the prompt GEMM: nvfp4 and fp8 prompt rows (linear.py's prefill)
 
     /// Decode rows: out (rows, n) bf16, each row's bits the same at every row count the format takes.
     pub fn decode(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
@@ -51,7 +69,10 @@ pub const Linear = struct {
                 if (in.ldx != 0 and in.ldx != q.k) return error.RowStride;
                 return a.decode(s, in.x, in.sums, q, out, rows);
             },
-            .fp8g => |q| return (l.fp8g orelse return error.FormatNotLoaded).matmul(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q, out, in.part),
+            .fp8g => |q| return l.onLane(s, q, .fp8g, in, out, rows),
+            .nvfp4 => |q| return l.onLane(s, q, .fp4, in, out, rows),
+            .fp8 => |q| return l.onLane(s, q, .fp8, in, out, rows),
+            .bf16 => |q| return l.onLane(s, q, .bf16, in, out, rows),
         }
     }
 
@@ -63,8 +84,23 @@ pub const Linear = struct {
                 if (in.ldx != 0 and in.ldx != q.k) return error.RowStride;
                 return a.prompt(s, in.x, q, out, rows);
             },
-            .fp8g => |q| return (l.fp8g orelse return error.FormatNotLoaded).matmul(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q, out, in.part),
+            .fp8g => |q| return l.onLane(s, q, .fp8g, in, out, rows),
+            .nvfp4 => |q| return l.onPrompt(s, q, .fp4, in, out, rows),
+            .fp8 => |q| return l.onPrompt(s, q, .fp8, in, out, rows),
+            .bf16 => |q| return l.onLane(s, q, .bf16, in, out, rows),
         }
+    }
+
+    fn onPrompt(l: Linear, s: Stream, q: qmmf.Weight, mode: qmmf.Mode, in: Rows, out: u64, rows: usize) !void {
+        const p = l.nvfp4_prompt orelse return error.FormatNotLoaded;
+        if (q.mode != mode) return error.FormatMismatch;
+        return p.matmul(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q, out);
+    }
+
+    fn onLane(l: Linear, s: Stream, q: qmmf.Weight, mode: qmmf.Mode, in: Rows, out: u64, rows: usize) !void {
+        const lane = l.lane orelse return error.FormatNotLoaded;
+        if (q.mode != mode) return error.FormatMismatch;
+        return lane.matmul(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q, out, in.part);
     }
 };
 
@@ -74,6 +110,8 @@ pub const symbols = struct {
     pub const prefill = "_ZN14tf_qmm_prefill14prefill_kernelILi64ELi128ELi128ELi2ELi4ELi3ELb0EEEvPK13__nv_bfloat16PKjS3_S3_Pviiiiii";
     pub const gemv = "_ZN12tf_lane_gemv11gemv_kernelILi64ELi64ELi8EEEvPK13__nv_bfloat16PKfNS_4PartEiii";
     pub const gemv_split = "tf_lane_gemv_split";
+    pub const pack_words = "tf_pack_dense";
+    pub const pack_scales = "tf_transpose_pad16";
 };
 
 /// qmm_group.cu's Part and Parts, passed by value: four projections at most, one used here.
@@ -137,17 +175,21 @@ pub const Affine4Kernels = struct {
     gemv_fn: Function,
     split_fn: Function,
     prefill_fn: Function,
+    words_fn: Function, // affine4_pack.cu: MLX words into the tiles
+    scales_fn: Function, // affine4_pack.cu: (n, kg) scales or biases into (kg, npad)
     gemv_blocks: usize, // resident lane_gemv CTAs: per SM times SMs
     split: ?Split, // every GPU but GB10: lane_gemv's slices on CTAs of their own (one stream's decode() at a time)
     pdl: bool, // GB10: the decode kernels launch with programmatic dependent launch
 
-    /// From loaded qmm_group, qmm_prefill and lane_gemv modules; GB10 decodes without the split form.
-    pub fn resolve(d: *const Driver, group_mod: Module, prefill_mod: Module, gemv_mod: Module, sms: usize, gb10: bool) !Affine4Kernels {
+    /// From loaded qmm_group, qmm_prefill, lane_gemv and affine4_pack modules; GB10 decodes without the split form.
+    pub fn resolve(d: *const Driver, group_mod: Module, prefill_mod: Module, gemv_mod: Module, pack_mod: Module, sms: usize, gb10: bool) !Affine4Kernels {
         var a: Affine4Kernels = undefined;
         a.group_fn = try group_mod.function(symbols.group);
         a.prefill_fn = try prefill_mod.function(symbols.prefill);
         a.gemv_fn = try gemv_mod.function(symbols.gemv);
         a.split_fn = try gemv_mod.function(symbols.gemv_split);
+        a.words_fn = try pack_mod.function(symbols.pack_words);
+        a.scales_fn = try pack_mod.function(symbols.pack_scales);
         try a.group_fn.allowDynamicShared(group_smem);
         try a.gemv_fn.allowDynamicShared(group_smem);
         try a.split_fn.allowDynamicShared(split_smem);
@@ -160,6 +202,26 @@ pub const Affine4Kernels = struct {
 
     pub fn deinit(a: *Affine4Kernels) void {
         if (a.split) |*sp| sp.deinit();
+    }
+
+    /// qmm_fast.tile: MLX words (n, k/8), scales and biases (n, k/64) on the device into q's tiles (Affine4.layout).
+    pub fn pack(a: *const Affine4Kernels, s: Stream, words: u64, scales: u64, biases: u64, q: Affine4) !void {
+        const kg = q.k / 64;
+        const total: u64 = @as(u64, q.npad / 64) * kg * 512;
+        var g: launch_.Args = .{};
+        g.add(words);
+        for ([_]usize{ q.n, q.k / 8, kg }) |v| g.add(int(v));
+        g.add(q.w);
+        g.add(@as(c_longlong, @intCast(total)));
+        try launch_.launch(a.words_fn, .{ .grid = .{ .x = @intCast((total + 255) / 256) }, .block = .{ .x = 256 } }, s, &g);
+        for ([_]u64{ scales, biases }, [_]u64{ q.s, q.b }) |src, out| {
+            var t: launch_.Args = .{};
+            t.add(src);
+            for ([_]usize{ q.n, kg, q.npad }) |v| t.add(int(v));
+            t.add(out);
+            const cells = @as(u64, kg) * q.npad;
+            try launch_.launch(a.scales_fn, .{ .grid = .{ .x = @intCast((cells + 255) / 256) }, .block = .{ .x = 256 } }, s, &t);
+        }
     }
 
     /// qmm.matmul: x (rows, k) bf16 with group sums xs -> out (rows, n) bf16, qmm_group's tile-2 bits on every path.
@@ -242,7 +304,7 @@ test "split_k follows the Python shapes" {
 
 test "a weight view reports its shape in every format" {
     const a: Weight = .{ .affine4 = .{ .w = 0, .s = 0, .b = 0, .n = 10304, .k = 2688, .npad = 10304 } };
-    const f: Weight = .{ .fp8g = .{ .codes = 0, .scales = 0, .n = 7168, .k = 2560, .npad = 7168 } };
+    const f: Weight = .{ .fp8g = .{ .mode = .fp8g, .codes = 0, .scales = 0, .n = 7168, .k = 2560, .npad = 7168 } };
     try std.testing.expectEqual(@as(usize, 10304), a.outputs());
     try std.testing.expectEqual(@as(usize, 2560), f.inputs());
 }
@@ -253,4 +315,20 @@ test "a format that is not loaded is refused before any launch" {
     const s: Stream = undefined; // never reached: the refusal comes first
     try std.testing.expectError(error.FormatNotLoaded, l.decode(s, w, .{ .x = 0 }, 0, 1));
     try std.testing.expectError(error.FormatNotLoaded, l.prompt(s, w, .{ .x = 0 }, 0, 1));
+}
+
+test "the affine-4 tiles' sizes follow qmm_fast.tile" {
+    const l = Affine4.layout(10304, 2688); // Nemotron's in_proj: rows to whole 128s, 4 bits a weight, 2 bytes a group
+    try std.testing.expectEqual(@as(usize, 10368), l.npad);
+    try std.testing.expectEqual(@as(usize, 10368 * 2688 / 2), l.words);
+    try std.testing.expectEqual(@as(usize, 42 * 10368 * 2), l.scales);
+}
+
+test "a lane weight whose mode is not its format's is refused before any launch" {
+    const lane: qmmf.Lane = undefined; // never reached: the refusal comes first
+    const l: Linear = .{ .lane = &lane };
+    const fp4: qmmf.Weight = .{ .mode = .fp4, .codes = 0, .scales = 0, .n = 64, .k = 64, .npad = 128 };
+    const s: Stream = undefined;
+    try std.testing.expectError(error.FormatMismatch, l.decode(s, .{ .fp8g = fp4 }, .{ .x = 0 }, 0, 1));
+    try std.testing.expectError(error.FormatNotLoaded, l.prompt(s, .{ .nvfp4 = fp4 }, .{ .x = 0 }, 0, 1));
 }

@@ -8,6 +8,7 @@ const wts = @import("gpu_weights.zig");
 const quant = @import("quant_gpu.zig");
 const glue = @import("glue_gpu.zig");
 const Frame = @import("gpu_frame.zig").Frame;
+const ane_mlp = @import("ane_mlp.zig");
 
 /// Gate/up columns a layer the Neural Engine computes for prompt chunks (TF_ANE_COLUMNS overrides); M5 only.
 const ane_columns = 3072;
@@ -23,9 +24,10 @@ pub const Model = struct {
     glue: glue.Kernels,
     frame: Frame,
     /// The Neural Engine's share of prompt-chunk MLPs, when it loaded.
-    ane: ?*@import("ane_mlp.zig").Share = null,
+    ane: ?*ane_mlp.Share = null,
 
-    pub fn load(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32) !*Model {
+    /// `share_fits(bytes)`: whether the Neural Engine's share fits beside what is loaded (null: wherever it can load).
+    pub fn load(a: std.mem.Allocator, io: std.Io, dir: []const u8, rows: u32, share_fits: ?*const fn (u64) bool) !*Model {
         const path = try std.fs.path.join(a, &.{ dir, "config.json" });
         defer a.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20));
@@ -45,7 +47,8 @@ pub const Model = struct {
         errdefer m.checkpoint.deinit();
         const files = try core.checkpoint_host.shardFiles(a, io, dir);
         defer core.checkpoint_host.freeShardFiles(a, files);
-        for (files) |file| try m.checkpoint.addFileSelected(m.device, file, "", "language_model.");
+        // projections stay in the files until load repacks them: the weights live once, in their lane layouts
+        for (files) |file| try m.checkpoint.addFileSplit(m.device, file, "", "language_model.", wts.repacked);
         m.weights = try wts.load(a, m.device, &m.checkpoint, c);
         errdefer m.weights.deinit();
         m.kernels = .{ .allocator = a, .device = m.device };
@@ -56,10 +59,14 @@ pub const Model = struct {
         errdefer m.frame.deinit();
         m.ane = null;
         const columns = if (std.c.getenv("TF_ANE_COLUMNS")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else ane_columns;
-        if (columns > 0 and m.device.tensorUnits() and mtl.ane.available()) m.ane = @import("ane_mlp.zig").Share.init(a, m.device, m.queue, &m.checkpoint, c, columns) catch |err| blk: {
+        const share = columns > 0 and m.device.tensorUnits() and mtl.ane.available();
+        const fits = if (share_fits) |f| !share or f(ane_mlp.Share.bytes(c, columns)) else true;
+        if (!fits) std.log.info("qwen27: the Neural Engine's prompt share ({d} MiB of fp16 weights) would take this Mac past its load limit; prompts run on the GPU alone", .{ane_mlp.Share.bytes(c, columns) >> 20});
+        if (share and fits) m.ane = ane_mlp.Share.init(a, m.device, m.queue, &m.checkpoint, c, columns) catch |err| blk: {
             std.log.warn("qwen27: the Neural Engine's prompt share did not load ({s}); prompts run on the GPU alone", .{@errorName(err)});
             break :blk null;
         };
+        m.checkpoint.closeFiles();
         return m;
     }
 
@@ -94,7 +101,7 @@ pub fn supported(a: std.mem.Allocator, c: cfg.Config, text: []const u8) !void {
 }
 
 fn qualifiedGeneration(generation: u32) bool {
-    return generation >= 13 and generation <= 17;
+    return generation >= 13 and generation <= 18;
 }
 
 test "unknown and older GPU generations refuse before any weight load" {
@@ -103,5 +110,13 @@ test "unknown and older GPU generations refuse before any weight load" {
     try std.testing.expect(qualifiedGeneration(17));
     try std.testing.expect(!qualifiedGeneration(0));
     try std.testing.expect(!qualifiedGeneration(12));
-    try std.testing.expect(!qualifiedGeneration(18));
+    try std.testing.expect(qualifiedGeneration(18));
+    try std.testing.expect(!qualifiedGeneration(19));
+}
+
+test "the 27B's Neural Engine share of 3,072 columns holds 5,760 MiB of fp16 weights" {
+    var c: cfg.Config = undefined;
+    c.hidden = 5120;
+    c.layers = 64;
+    try std.testing.expectEqual(@as(u64, 5760 << 20), ane_mlp.Share.bytes(c, ane_columns));
 }

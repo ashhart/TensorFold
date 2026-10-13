@@ -158,22 +158,24 @@ pub fn moe(x: Chunk, m: pre.Moe, w: wts.Moe) void {
     l.glue("sort_place_uint32_t_int32_t_int32_t_uint32_t_uint32_t", &.{ At.of(s.ids), At.of(s.starts) }, &.{ n, E }, &.{ order, At.of(s.sorted) }, .{ blocks * 256, 1, 1 }, .{ 256, 1, 1 });
     const fc1 = [3]At{ pre.tensorAt(w.fc1[0]), pre.tensorAt(w.fc1[1]), pre.tensorAt(w.fc1[2]) };
     const fc2 = [3]At{ pre.tensorAt(w.fc2[0]), pre.tensorAt(w.fc2[1]), pre.tensorAt(w.fc2[2]) };
+    // the gathers read token rows and write down rows through the pair order, so y2 lands in pair order
+    var pair_rows = s.y2;
     if (n >= 16 and n / E >= 4) {
-        l.glue("rows_take_bfloat16_t_uint32_t_int32_t_bfloat16_t", &.{ At.of(s.x), order }, &.{ n, D, k }, &.{At.of(s.xr)}, .{ D, n, 1 }, .{ 256, 1, 1 });
-        l.gatherQmm(At.of(s.xr), fc1, At.of(s.offsets), At.of(s.y1), n, W, D, E);
+        l.gatherMap(At.of(s.x), fc1, At.of(s.offsets), order, k, At.of(s.y1), n, W, D, E);
         x.relu2(s.y1, n * W, s.y1r);
-        l.gatherQmm(At.of(s.y1r), fc2, At.of(s.offsets), At.of(s.y2), n, D, W, E);
+        l.gatherMap(At.of(s.y1r), fc2, At.of(s.offsets), order, 0, At.of(s.y2), n, D, W, E);
     } else {
         l.glue("rows_of_uint32_t_int32_t_uint32_t", &.{order}, &.{ n, k }, &.{At.of(s.xids)}, .{ n, 1, 1 }, .{ 256, 1, 1 });
         l.glue("rows_of_uint32_t_int32_t_uint32_t", &.{order}, &.{ n, 0 }, &.{At.of(s.rowids)}, .{ n, 1, 1 }, .{ 256, 1, 1 });
         gatherQmv(x, fc1, s.x, s.xids, D, W, n, s.y1);
         x.relu2(s.y1, n * W, s.y1r);
         gatherQmv(x, fc2, s.y1r, s.rowids, W, D, n, s.y2);
+        l.glue("sort_inverse_uint32_t_int32_t_uint32_t", &.{order}, &.{n}, &.{At.of(s.inv)}, .{ n, 1, 1 }, .{ 256, 1, 1 });
+        l.glue("rows_take_bfloat16_t_uint32_t_int32_t_bfloat16_t", &.{ At.of(s.y2), At.of(s.inv) }, &.{ n, D, 1 }, &.{At.of(s.xr)}, .{ D, n, 1 }, .{ 256, 1, 1 });
+        pair_rows = s.xr;
     }
-    l.glue("sort_inverse_uint32_t_int32_t_uint32_t", &.{order}, &.{n}, &.{At.of(s.inv)}, .{ n, 1, 1 }, .{ 256, 1, 1 });
-    l.glue("rows_take_bfloat16_t_uint32_t_int32_t_bfloat16_t", &.{ At.of(s.y2), At.of(s.inv) }, &.{ n, D, 1 }, &.{At.of(s.xr)}, .{ D, n, 1 }, .{ 256, 1, 1 });
     e.pipe(x.p.k.get("tf_moe_combine_rows"));
-    e.buf(s.xr, 0, 0);
+    e.buf(pair_rows, 0, 0);
     e.buf(s.wt, 0, 1);
     e.bytes([2]i32{ @intCast(k), @intCast(D) }, 2);
     e.buf(s.out, 0, 3);
@@ -183,6 +185,7 @@ pub fn moe(x: Chunk, m: pre.Moe, w: wts.Moe) void {
     x.linear("down", "xsum_3712", w.shared_down, m.down, s.upr, s.sh);
     if (w.slide) |r| layers.rest(x.f, e, r, s.upr, s.sh, L, c.shared_width);
     if (w.adapter) |ad| layers.adapt(x.f, e, ad, s.upr, s.sh, L);
+    if (w.pocket) |p| if (p.used > 0) layers.taught(x.f, e, p, s.x, s.sh, L);
     x.add(s.out, s.sh, L * D, s.out);
 }
 

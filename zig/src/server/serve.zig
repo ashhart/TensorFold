@@ -65,6 +65,8 @@ pub const Setup = struct {
     engine: api.Engine,
     text: model_text.Text,
     served: []const u8,
+    /// The checkpoint's folder (structured output reads its tokenizer.json and config.json, /slide shows its shards).
+    model_dir: []const u8 = "",
     /// Sampling defaults from generation_config.json and the flags, as a JSON object; null: greedy.
     sampling: ?json.Value = null,
     environ: ?*const std.process.Environ.Map = null,
@@ -104,6 +106,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     } else 0;
     const config: server_mod.Config = .{
         .served_name = s.served,
+        .model_dir = s.model_dir,
         .model_ids = ids.items,
         .default_max_tokens = args.max_tokens,
         .enable_thinking = args.thinking,
@@ -120,6 +123,8 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .compact_keep = args.compact_keep,
         .compact_memory = args.compact_memory,
         .slide_graph = args.slide_graph,
+        .cortheon = args.cortheon,
+        .cortheon_search_key = env(s, "BRAVE_SEARCH_API_KEY"),
     };
     const srv = server_mod.Server.init(gpa, io, s.engine, s.text, config, if (store.enabled()) &store else null) catch {
         std.debug.print("tensorfold: the server could not start\n", .{});
@@ -153,6 +158,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     });
     if (args.thinking and std.mem.indexOf(u8, s.text.templateSource(), "enable_thinking") != null)
         log.line("thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens counts both. --no-thinking turns it off; a request can send chat_template_kwargs {{\"enable_thinking\": false}}", .{});
+    if (srv.cortheon) |c| log.line("cortheon on: chat requests get Cortheon's reasoning program, web research before building, and cortheon_search/cortheon_fetch run here ({s}); a request can send \"cortheon\": false", .{c.engine});
     live.columns_env = env(s, "COLUMNS");
     var ticker: live.Ticker = .{ .engine = s.engine };
     const drawing = live.wanted(io, if (env(s, "TENSORFOLD_NO_LIVE")) |v| std.mem.eql(u8, v, "1") else false);
