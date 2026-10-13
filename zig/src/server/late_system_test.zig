@@ -89,6 +89,7 @@ const Capture = struct {
     background_born: u32 = 0,
     reply: []const u8 = "hi",
     warm_turns: bool = false,
+    telemetry: []const u8 = "", // the finished event's drafter counters
 
     fn engine(e: *@This()) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -115,7 +116,10 @@ const Capture = struct {
             const token: u32 = byte;
             sink.event(sink.ctx, id, &.{ .tokens = &.{token} });
         }
-        sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
+        var counters: [128]u8 = undefined; // as an engine's own buffer: valid only during the event
+        @memcpy(counters[0..e.telemetry.len], e.telemetry);
+        sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop, .stats = .{ .telemetry_json = counters[0..e.telemetry.len] } } });
+        @memset(&counters, 0xaa);
     }
 
     fn cancel(_: *anyopaque, _: api.Id) void {}
@@ -376,4 +380,17 @@ test "single-call whole replies retain prose and tool-only replies still have nu
         }
         try std.testing.expectEqual(@as(usize, 1), message.get("tool_calls").?.array.len);
     }
+}
+
+test "a reply's drafter counters are written from the request's own copy, after the engine's and the mailbox's are gone" {
+    var text: DropLate = .{};
+    var backend: Capture = .{ .telemetry = "{\"recall\": {\"lookups\": 3, \"accepted\": 2}}" };
+    defer std.testing.allocator.free(backend.prompt);
+    var srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = true }, null);
+    defer srv.deinit();
+    const got = try exchange(srv, "/v1/chat/completions", "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"go\"}]}");
+    defer std.testing.allocator.free(got.body);
+    try std.testing.expectEqual(@as(u16, 200), got.status);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(got.body));
+    try std.testing.expect(std.mem.indexOf(u8, got.body, "\"proposer\": {\"recall\": {\"lookups\": 3, \"accepted\": 2}}") != null);
 }

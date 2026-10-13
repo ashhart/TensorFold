@@ -497,7 +497,10 @@ const Generation = struct {
         try spec.put(a, "accepted", try json.intValue(a, s.accepted));
         try spec.put(a, "acceptance_rate", .{ .float = if (s.drafted > 0) @as(f64, @floatFromInt(s.accepted)) / @as(f64, @floatFromInt(s.drafted)) else 0 });
         try spec.put(a, "tokens_per_round", .{ .float = if (s.rounds > 0) @as(f64, @floatFromInt(g.collected.items.len)) / @as(f64, @floatFromInt(s.rounds)) else 0 });
-        if (m.telemetry.len > 0) if ((try json.parse(a, m.telemetry)) == .ok) try spec.put(a, "proposer", (try json.parse(a, m.telemetry)).ok);
+        if (m.telemetry.len > 0) switch (try json.parse(a, try a.dupe(u8, m.telemetry))) { // parsed strings outlive the box
+            .ok => |v| try spec.put(a, "proposer", v),
+            .err => {},
+        };
         const think_end: ?u32 = if (thinking) g.srv.text.tokenId(g.srv.markers.close) else null;
         const reply: Reply = .{
             .content = content,
