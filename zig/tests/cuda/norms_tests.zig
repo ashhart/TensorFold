@@ -192,5 +192,9 @@ pub fn run(gpu: check.Gpu) !void {
         try addCase(&r, w, true);
         try addCase(&r, w, false);
     }
-    check.pass("norms: rms and add_rms within float64 tolerance (worst {d:.3}), every row count's bits equal", .{r.worst});
+    // a bf16 row goes to the 16-byte tree by its width alone; a misaligned buffer is refused, not run on the other tree
+    const buf = try r.out(2 * 512 + 16);
+    const refused = if (n.rms(s, buf + 2, .bf16, null, buf + 2, .bf16, 1, 256, 1e-6)) |_| false else |e| e == error.Misaligned;
+    try check.expect(refused, "norms: a misaligned bf16 row is refused", .{});
+    check.pass("norms: rms and add_rms within float64 tolerance (worst {d:.3}), every row count's bits equal, a misaligned bf16 row refused", .{r.worst});
 }
