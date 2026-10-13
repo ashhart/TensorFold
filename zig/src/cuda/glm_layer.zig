@@ -262,6 +262,17 @@ pub const Scratch = struct {
         sc.sact = l.take(rows * sw * 2);
         sc.sxs = l.take(rows * sw / 64 * 4);
         sc.sy = l.take(er * d * 4);
+        if (rows == 1) { // one row: the copies into p, sgu and ey's shared slot become the outputs themselves
+            if (kd) |v| {
+                sc.qkv = sc.p;
+                sc.fa = sc.p + @as(u64, v.fa_off) * 2;
+                sc.ga = sc.p + @as(u64, v.ga_off) * 2;
+                sc.bb = sc.p + @as(u64, v.b_off) * 2;
+            }
+            sc.smg = sc.sgu;
+            sc.smu = sc.sgu + sw * 2;
+            if (er > 0) sc.sy = sc.ey + (slots - 1) * d * 4;
+        }
         return sc;
     }
 
@@ -294,6 +305,7 @@ pub const Scratch = struct {
 
 /// rows rows of `bytes` each from src (row stride ss bytes) to dst (row stride ds bytes): torch's strided copy_.
 fn copyRows(d: *const driver.Driver, s: Stream, dst: u64, ds: usize, src: u64, ss: usize, bytes: usize, rows: usize) !void {
+    if (dst == src and (rows == 1 or ds == ss)) return; // a one-row Scratch's aliases
     for (0..rows) |r| {
         const b: memory.DeviceBuffer = .{ .d = d, .ptr = dst + r * ds, .len = bytes, .borrowed = true };
         try b.copyFrom(0, src + r * ss, bytes, s.handle);
