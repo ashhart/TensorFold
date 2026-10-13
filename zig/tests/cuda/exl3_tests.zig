@@ -374,17 +374,27 @@ fn real(gpu: Gpu, k: *const E.Kernels, s: cuda.Stream, dir: []const u8) !void {
     const P = "model.language_model.layers.";
     const names = [_][]const u8{ P ++ "3.mlp.experts.0.gate_proj", P ++ "3.mlp.experts.0.down_proj", P ++ "0.mlp.down_proj", P ++ "3.mlp.shared_experts.up_proj", P ++ "3.self_attn.q_b_proj", P ++ "3.self_attn.o_proj", "lm_head" };
     var b: Bound = .{};
+    var checked: usize = 0;
     for (names) |name| {
         const tname = try std.fmt.allocPrint(a, "{s}.trellis", .{name});
         defer a.free(tname);
-        const shard = map.get(tname) orelse return error.TensorNotInIndex;
+        const wname = try std.fmt.allocPrint(a, "{s}.weight", .{name});
+        defer a.free(wname);
+        const shard = map.get(tname) orelse {
+            // a checkpoint may quantize only some matrices (experts-only EXL3): a plain .weight is skipped, a missing tensor fails
+            if (map.get(wname) == null) return error.TensorNotInIndex;
+            std.debug.print("SKIP exl3 {s}: not EXL3 in this checkpoint (.weight)\n", .{name});
+            continue;
+        };
         const path = try std.fmt.allocPrint(a, "{s}/{s}", .{ dir, shard.string });
         defer a.free(path);
         var f = try st.File.open(a, gpu.io, path);
         defer f.close(gpu.io);
         try realOne(gpu, k, s, &f, name, &b);
+        checked += 1;
     }
-    check.pass("{d} real matrices: {d} FP64 values, max error {e}, max {d:.4} of the bound, worst column {e} of the largest output", .{ names.len, b.values, b.max_error, b.max_fraction, b.worst_column });
+    try check.expect(checked > 0, "exl3: none of the {d} selected matrices is EXL3 in this checkpoint", .{names.len});
+    check.pass("{d} real matrices: {d} FP64 values, max error {e}, max {d:.4} of the bound, worst column {e} of the largest output", .{ checked, b.values, b.max_error, b.max_fraction, b.worst_column });
 }
 
 fn tensor(f: *const st.File, name: []const u8, part: []const u8) ?st.Tensor {
