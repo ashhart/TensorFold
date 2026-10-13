@@ -185,11 +185,18 @@ pub const Head = struct {
         }
         try o.dense(b.att, b.axs, m.attn.o, b.delta, rows);
         if (!tail) return;
-        if (rows == spans.len) {
-            try t.addRmsnorm(h.x, b.delta, m.moe_norm, h.h1, b.y, b.xs, rows, c.hidden, c.eps);
-        } else for (spans, 0..) |s, k| {
-            const last = s.row0 + s.rows - 1;
-            try t.addRmsnorm(h.x + last * D * 2, b.delta + last * D * 2, m.moe_norm, h.h1 + k * D * 2, b.y + k * D * 2, b.xs + k * (D / 64) * 4, 1, c.hidden, c.eps);
+        if (spans.len == 1) {
+            const last = spans[0].row0 + spans[0].rows - 1;
+            try t.addRmsnorm(h.x + last * D * 2, b.delta + last * D * 2, m.moe_norm, h.h1, b.y, b.xs, 1, c.hidden, c.eps);
+        } else {
+            // span k's last row moves to row k: one norm launch on aligned rows, which a captured set needs
+            for (spans, 0..) |s, k| {
+                const last = s.row0 + s.rows - 1;
+                if (last == k) continue;
+                try o.copy(h.x + k * D * 2, h.x + last * D * 2, D * 2);
+                try o.copy(b.delta + k * D * 2, b.delta + last * D * 2, D * 2);
+            }
+            try t.addRmsnorm(h.x, b.delta, m.moe_norm, h.h1, b.y, b.xs, spans.len, c.hidden, c.eps);
         }
         try f.experts(m.moe, spans.len, false);
         try t.addMoeNorm(h.h1, b.ymoe, true, b.wts, m.final_norm, h.hn, h.row, h.rxs, spans.len, c.hidden, c.eps, c.top_k, c.slots());
