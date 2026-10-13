@@ -124,6 +124,7 @@ pub const Cache = struct {
     parity: u1 = 0,
     rid: i32 = -1, // replay id (-1: none, rows are never saved); also the stream's lesson latch slot
     decide: i64 = lesson_route.none, // the prompt row where the stream's lessons decide (lesson_route)
+    untaught: bool = false, // reads the model as shipped: no learned neuron acts on its rows (a lesson writer's reads)
     pending: ?Pending = null,
     compact: ?Compaction = null, // a kept tree path's cache rows, moved by the stream's next command buffer
     windows: [2]mtl.Buffer, // u32 [max_rows]: a window's ids, the pending token then the held drafts

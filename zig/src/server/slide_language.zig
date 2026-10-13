@@ -19,6 +19,8 @@ pub const besides_other = "Here is something you know: \"{s}\" Write {d} short q
 
 pub const twins_other = "For each question below, write two questions worded almost the same way but asking about a different person or thing of the same type, so that the answer to the original would be wrong for them, each in its question's language. Number them, one per line, nothing else.\n{s}";
 
+/// doc_questions_prompt for a document in another language: its questions in that language, not English.
+pub const doc_questions_other = "Here is something from a document you were given: \"{s}\" Write {d} different short questions that it answers, in the language it is written in (not English unless it is English), the way a colleague might ask you later: plainly, in other words and in passing, each naming who or what it is about as the text does, never just they, it or the team. Every question must be answered by exactly what it says. Number them 1 to {d}, one per line, nothing else.";
 pub const translate_prompt = "Translate each numbered line below into {s}, keeping its meaning and its number. Nothing else.\n{s}";
 
 /// The language `fact` is told in, as the model names it, or null for English.

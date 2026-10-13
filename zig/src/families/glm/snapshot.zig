@@ -15,6 +15,7 @@ pub const Snap = struct {
     home: ?u32 = null, // resident: the slot whose MLA caches hold this state's prefix
     stale: bool = false, // resident, and its slot has since written a row below `at`
     held: ?[2]u32 = null, // resident in a shared pool after its slot left: the blocks (start, count) holding its prefix
+    used: u64 = 0, // the slots' use clock at its last keep or restore (kept.pick)
 };
 
 fn stBytes(c: *const cfg.Config) usize {
@@ -79,6 +80,21 @@ pub fn copy(x: *const fwd.Ctx, e: mtl.ComputeEncoder, s: *st.State, snap: Ref, a
     for (s.kda[0..c.countKind(.kda)]) |*L| L.cur = 0;
     s.pos = at;
     s.mtp_pos = at;
+}
+
+/// A resident state made whole: its KDA states from `old`, then its MLA prefixes from `home` (its slot), into `whole`'s layout.
+pub fn spill(x: *const fwd.Ctx, e: mtl.ComputeEncoder, old: Ref, whole: Ref, at: u32, home: *st.State) void {
+    const c = x.c;
+    var off = bytes(c, at, true);
+    words(x, e, old, whole, off);
+    for (home.mla[0..mlaCount(c)]) |*C| {
+        const sizes = [4]usize{ @as(usize, at) * c.kv_lora * 2, @as(usize, at) * c.i_dim * 2, @as(usize, at) * c.i_dim * 2, blocks(c, at) * c.i_dim * 2 };
+        for ([4]Ref{ C.keys, C.ik, C.ig, C.pool }, sizes) |src, n| {
+            words(x, e, src, whole.at(off), n);
+            off += n;
+        }
+    }
+    std.debug.assert(off == bytes(c, at, false));
 }
 
 /// A learned state's file for one rank of the pair: <dir>/<key>.r<rank>.bin.

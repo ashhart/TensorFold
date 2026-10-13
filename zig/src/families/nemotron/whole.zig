@@ -96,7 +96,9 @@ pub fn more(l: anytype) !void {
 }
 
 fn startPocket(l: anytype) !void {
-    l.stay = .{ l.owned.keep, l.owned.near, l.replay.items, l.owned.unasked, l.extra.items };
+    l.stay = .{ l.owned.keep, l.owned.near, try l.liveReplay(), l.owned.unasked, l.extra.items };
+    l.pockets.lesson = l.last_lesson;
+    l.pockets.replay_lessons = l.live_of.items;
     try l.pockets.begin(l.trainer.?, hooks(l), l.answers, l.owned.asked, l.owned.held, &l.stay);
     l.pocketed = true;
     l.edited = false;
@@ -143,6 +145,13 @@ pub fn undo(l: anytype) !bool {
     if (l.pocketed) try l.pockets.undo(l.trainer.?, hooks(l));
     l.pocketed = false;
     l.kept_rounds = 0;
+    return true;
+}
+
+/// A replaced fact's neurons zeroed in the pocket, or put back (`back`); the next save writes them; false if no pocket.
+pub fn retire(l: anytype, gone: []const [2]u16, back: bool) !bool {
+    if (l.method != .pocket) return false;
+    if (back) try l.pockets.unretire(l.trainer.?, hooks(l)) else try l.pockets.retire(l.trainer.?, hooks(l), gone);
     return true;
 }
 

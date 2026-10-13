@@ -32,6 +32,7 @@ pub const Got = struct {
     refs: std.ArrayList(Held) = .empty,
     subjects: std.ArrayList(?[]const u8) = .empty,
     unnamed: std.ArrayList([]const u8) = .empty, // questions that asked for the subject instead of naming it
+    unjudged: bool = false, // the questions taken next are built from the fact (another value's): no judge asked
 };
 
 /// A question written with its answer, for the fact's lists.
@@ -65,15 +66,16 @@ pub fn take(srv: *Server, cx: *Cx, got: *Got, fact: []const u8, f: usize, qs: []
         end: []const u32,
         thinking: bool,
         document: bool,
+        judge: bool,
         gone: @TypeOf(gone),
         out: []?Written,
 
         pub fn run(j: *const @This(), i: usize) !void {
             var jcx: Cx = .{ .a = j.a };
-            j.out[i] = try write(j.srv, &jcx, j.words, j.named, j.siblings, j.fact, j.f, j.qs[i], j.end, j.thinking, j.document, j.gone);
+            j.out[i] = try write(j.srv, &jcx, j.words, j.named, j.siblings, j.fact, j.f, j.qs[i], j.end, j.thinking, j.document, j.judge, j.gone);
         }
     };
-    try side.each(fresh.items.len, &Job{ .srv = srv, .a = a, .words = got.words, .named = got.named, .siblings = got.siblings, .fact = fact, .f = f, .qs = fresh.items, .end = end, .thinking = thinking, .document = document, .gone = gone, .out = out });
+    try side.each(fresh.items.len, &Job{ .srv = srv, .a = a, .words = got.words, .named = got.named, .siblings = got.siblings, .fact = fact, .f = f, .qs = fresh.items, .end = end, .thinking = thinking, .document = document, .judge = !got.unjudged, .gone = gone, .out = out });
     for (out) |w| if (w) |x| {
         try got.pairs.append(a, x.ex);
         try got.thinking.append(a, x.think);
@@ -83,9 +85,10 @@ pub fn take(srv: *Server, cx: *Cx, got: *Got, fact: []const u8, f: usize, qs: []
 }
 
 /// A question written with the answer the model gives it from the fact, unless it gives that answer away or misses it.
-fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []const u8, siblings: []const []const u8, fact: []const u8, f: usize, q: []const u8, end: []const u32, thinking: bool, document: bool, gone: anytype) !?Written {
+fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []const u8, siblings: []const []const u8, fact: []const u8, f: usize, q: []const u8, end: []const u32, thinking: bool, document: bool, judge: bool, gone: anytype) !?Written {
     const a = cx.a;
-    if (wording.yesNo(q) and wording.tells(fact, "", "", q)) {
+    const own_value = wording.yesNo(q) and wording.tells(fact, "", "", q); // "Do I like red?" after "I like red."
+    if (judge and own_value) {
         log.line("slide: \"{s}\" asks yes or no about the fact itself, so it is dropped", .{q});
         return null;
     }
@@ -96,11 +99,11 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
         return null;
     }
     const personal = !document and (!wording.firstPerson(q) or wording.someoneElse(fact, q));
-    if (personal or !units.sameScript(fact, q) or !try judged(srv, cx, fact, q, gone)) {
+    if (personal or !units.sameScript(fact, q) or (judge and !try judged(srv, cx, fact, q, document, gone))) {
         log.line("slide: \"{s}\" is not the user asking what the fact answers, so it is dropped", .{q});
         return null;
     }
-    if (try siblingAnswers(srv, cx, siblings, fact, q, gone)) return null;
+    if (try siblingAnswers(srv, cx, siblings, fact, q, document, gone)) return null;
     const note = if (document) try std.fmt.allocPrint(a, prompts.read_note, .{fact}) else try std.fmt.allocPrint(a, prompts.told_note, .{fact});
     const reply = try askBase(srv, cx, note, q, 64, gone);
     const whole = std.mem.trim(u8, reply.content, " \t\r\n");
@@ -110,10 +113,12 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
         log.line("slide: answer dropped for {s}: {s}", .{ q, reply.content });
         return null;
     };
-    if (!wording.asks(fact, q, answer)) {
+    // a built yes-or-no question on the fact's own value is the model saying yes knowing it, which names nothing new
+    if (if (!judge and own_value) !std.ascii.startsWithIgnoreCase(answer, "yes") else !wording.asks(fact, q, answer)) {
         log.line("slide: \"{s}\" brings back no word of the fact it lacks, so it is dropped", .{q});
         return null;
     }
+    if (!judge) log.line("slide: \"{s}\" is learned as the model answers it knowing the fact: {s}", .{ q, answer });
     const finished = answer.len == whole.len and std.mem.eql(u8, reply.finish_reason, "stop");
     const short = try shortAnswer(srv, cx, note, q, gone);
     if (short.len > 0 and std.ascii.findIgnoreCase(q, short) != null) {
@@ -168,7 +173,7 @@ pub fn askingSubject(srv: *Server, cx: *Cx, got: *const Got, fact: []const u8, q
 }
 
 /// Whether a fact told with `fact` answers `question` rather than it, as the model picks among those sharing a word.
-pub fn siblingAnswers(srv: *Server, cx: *Cx, siblings: []const []const u8, fact: []const u8, question: []const u8, gone: anytype) !bool {
+pub fn siblingAnswers(srv: *Server, cx: *Cx, siblings: []const []const u8, fact: []const u8, question: []const u8, document: bool, gone: anytype) !bool {
     const a = cx.a;
     var list: std.ArrayList(u8) = .empty;
     var listed: std.ArrayList([]const u8) = .empty;
@@ -193,7 +198,7 @@ pub fn siblingAnswers(srv: *Server, cx: *Cx, siblings: []const []const u8, fact:
     while (digits < said.len and std.ascii.isDigit(said[digits])) digits += 1;
     const picked = std.fmt.parseInt(usize, said[0..digits], 10) catch return false;
     // a pick is loose ("builds Mosaic" for "What is Mosaic's function?"): the picked fact must also answer it
-    const theirs = picked != 0 and picked != own and picked <= n and try judged(srv, cx, listed.items[picked - 1], question, gone);
+    const theirs = picked != 0 and picked != own and picked <= n and try judged(srv, cx, listed.items[picked - 1], question, document, gone);
     if (theirs) log.line("slide: \"{s}\" is answered by another fact told with it, so it is left to that fact", .{question});
     return theirs;
 }
@@ -233,8 +238,13 @@ test "a fact told again the other way round is the same fact, another is not" {
     try std.testing.expect(!try restates(a, "Quillmoor Labs was founded in 2017.", "Quillmoor Labs was founded in Sheffield."));
 }
 
-/// Whether the fact answers `question` as the model judges it.
-pub fn judged(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, gone: anytype) !bool {
-    const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.judge_prompt, .{ fact, question }), 4, gone);
-    return std.ascii.startsWithIgnoreCase(std.mem.trim(u8, reply.content, " \t\r\n\"*"), "yes");
+/// Whether the fact answers `question` as the model judges it: a document fact by its answer, a chat fact yes or no.
+pub fn judged(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, document: bool, gone: anytype) !bool {
+    if (!document) {
+        const told = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.told_judge_prompt, .{ fact, question }), 4, gone);
+        return std.ascii.startsWithIgnoreCase(std.mem.trim(u8, told.content, " \t\r\n\"*"), "yes");
+    }
+    const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.judge_prompt, .{ fact, question }), 16, gone);
+    const said = std.mem.trim(u8, reply.content, " \t\r\n\"*.");
+    return !std.ascii.startsWithIgnoreCase(said, "not stated") and wording.answersFrom(fact, question, said);
 }
