@@ -246,6 +246,7 @@ pub const Ops = struct {
     /// nemotron_ops' pocket: out (bf16, fp32 if `out_f32`) += down relu^2(up y) at rows `i * row_mul + row_add`.
     pub fn pocketRows(o: Ops, y: u64, d: usize, p: Pocket, act: u64, out: u64, out_f32: bool, rows: usize, row_mul: usize, row_add: usize) !void {
         if (p.n > pocket_width) return error.PocketTooWide;
+        if (p.used == 0) return; // no neuron in use: nothing launched, so the output keeps its bits, an exact -0.0 too
         // a block row a row until the tiled forms (eight neurons by eight rows a warp, 16 rows a thread) run faster
         const tiled = [2]bool{ rows >= 256, rows >= 64 };
         var a: cuda.Args = .{};
