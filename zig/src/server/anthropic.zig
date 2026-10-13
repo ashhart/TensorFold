@@ -108,9 +108,14 @@ const Wire = struct {
         return .{ .ctx = w, .vt = &.{ .open = open, .event = event, .reply = whole } };
     }
 
-    fn open(ctx: *anyopaque) error{Closed}!void {
+    fn open(ctx: *anyopaque, prompt_len: usize) error{Closed}!void {
         const w: *Wire = @ptrCast(@alignCast(ctx));
         w.opened = true;
+        // the head counts the whole prompt; message_delta's usage splits it into input and cache_read
+        if (prompt_len > 0) {
+            const n = json.intValue(w.reply.a, prompt_len) catch return error.Closed;
+            w.reply.tokens.object.put(w.reply.a, "input_tokens", n) catch return error.Closed;
+        }
         try sse.open(w.reply.conn);
         try w.reply.start();
     }

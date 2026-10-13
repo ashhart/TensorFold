@@ -310,6 +310,7 @@ pub const Host = struct {
         var c: Ctx = .{ .h = h, .job = job };
         const out: fx.Out = .{ .ctx = &c, .prefilled = Ctx.prefilled, .tokens = Ctx.tokens, .cancelled = Ctx.cancelled, .marked = Ctx.marked };
         const depth: ?usize = if (r.drafts) null else 0;
+        const budget: fx.Think = if (r.think_budget > 0) .{ .budget = r.think_budget, .close = r.think_close, .end = r.think_end } else .{};
         var arena: std.heap.ArenaAllocator = .init(h.gpa);
         defer arena.deinit();
         var plan: pc.Plan = .{};
@@ -327,12 +328,12 @@ pub const Host = struct {
         defer if (h.eng.r.tp != null) for (plan.marks) |mk| if (std.mem.indexOfScalar(u32, h.saved.items, mk) == null) {
             h.eng.peer_drops.append(h.gpa, fx.keyOf(r.prompt[0 .. mk + 1])) catch {}; // rank 1 kept it, this Mac didn't
         };
-        const res = h.eng.generateFrom(r.prompt, plan.from, plan.marks, r.max_tokens, r.eos, depth, out) catch |e| retry: {
+        const res = h.eng.generateFrom(r.prompt, plan.from, plan.marks, r.max_tokens, r.eos, depth, budget, out) catch |e| retry: {
             if (e == error.PeerNotResumed) { // rank 1 lacks this state: both Macs read the prompt from the start
                 std.log.warn("speed-up mode: rank 1 could not resume at {d}; reading the prompt from the start", .{plan.from});
                 if (h.cache) |*store| store.forget(r.prompt, plan.from, &.{}); // so later prompts do not ask rank 1 for it again
                 job.cached = 0;
-                break :retry h.eng.generateFrom(r.prompt, 0, plan.marks, r.max_tokens, r.eos, depth, out) catch |e2| {
+                break :retry h.eng.generateFrom(r.prompt, 0, plan.marks, r.max_tokens, r.eos, depth, budget, out) catch |e2| {
                     if (!job.prefill_sent) emit(job, .{ .prefilled = 0 });
                     fin.message = @errorName(e2);
                     return;
@@ -427,7 +428,7 @@ const Snaps = struct {
 fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !api.PromptCachePlan {
     const rank = if (eng.followsPeer()) " (rank 1 keeps its halves of rank 0's)" else if (eng.r.tp != null) " (rank 1 mirrors them)" else "";
     const dev = eng.r.device;
-    return cache_fit.budget(gib, over, @min(dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), 16 << 30), a, why, rank);
+    return cache_fit.budget(gib, over, dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), a, why, rank);
 }
 
 /// Learned states under `root` by checkpoint, kernel sources and modes, probe bits, OS build and chip.
@@ -444,7 +445,7 @@ fn learnedStates(gpa: Allocator, eng: *fx.Engine, root: []const u8, cap: u64) !a
     return m;
 }
 
-/// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what 70% of RAM leaves; `over_cap` lets a larger one through); on error.CacheOverCap `why` (in `a`) says why.
+/// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what 70% of RAM leaves, up to 16 GiB; `over_cap` lets a larger one through); on error.CacheOverCap `why` (in `a`) says why.
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, learn: ?[]const u8, learn_cap: u64, a: Allocator, why: *[]const u8) !*Host {
     const eng = try fx.Engine.loadWith(gpa, io, dir, dump, speed_up);
     errdefer eng.deinit();

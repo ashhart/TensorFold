@@ -110,14 +110,24 @@ For decisions, `chat_template_kwargs` may be omitted, null, or an object contain
 `n` must be 1; multiple choices receive HTTP 400.
 
 The native CUDA engine (Nemotron 3.5 Lightning) supports `logprobs: true` and `top_logprobs` from 0 through 20 on
-nonstreamed `/v1/chat/completions`, without tools, stop strings, structured output or a thinking budget. Each reply
-token has its `token`, `logprob`, `bytes` and requested `top_logprobs` in `choices[0].logprobs.content`. Probabilities
-describe the raw target-model distribution at temperature 1, before temperature, top-k or top-p sampling filters,
-including when generation is greedy, and are the same with drafts on or `"draft": false`. With thinking on, the rows
-cover the answer only, as `content` does: none for the reasoning, `</think>` or the newlines after it, so the first
-row is the answer's first token, and a reply cut inside its reasoning has none. Alternatives are tokenizer tokens and
-may include leading spaces; `bytes` preserves partial UTF-8 sequences. Other engines, the Responses and legacy
-completions routes, and the request modes above return HTTP 400 when probabilities are requested.
+`/v1/chat/completions`, streamed or not, without tools, stop strings, structured output or a thinking budget. Each
+reply token has its `token`, `logprob`, `bytes` and requested `top_logprobs` in `choices[0].logprobs.content`; a
+stream sends each row with the chunk whose `delta.content` completes that token's text, so the rows joined over the
+chunks are the whole reply's. Probabilities describe the raw target-model distribution at temperature 1, before
+temperature, top-k or top-p sampling filters, including when generation is greedy, and are the same with drafts on or
+`"draft": false`. With thinking on, the rows cover the answer only, as `content` does: none for the reasoning,
+`</think>` or the newlines after it, so the first row is the answer's first token, and a reply cut inside its
+reasoning has none. Alternatives are tokenizer tokens and may include leading spaces; `bytes` preserves partial UTF-8
+sequences. `/v1/completions` takes the legacy `logprobs`, an integer from 0 through 20 alternatives, and answers in
+the legacy form, streamed or not: `tokens`, `token_logprobs`, `top_logprobs` (each alternative's text to its logprob)
+and `text_offset` (each token's first character in the completion, counting each token's own text). Other engines,
+the Responses route and the request modes above return HTTP 400 when probabilities are requested.
+Nonstreamed `/v1/completions` also takes vLLM's `prompt_logprobs`, an integer from 0 through 20, on the same engine.
+`choices[0].prompt_logprobs` has one entry per prompt token: `null` for the first, then an object keyed by token id
+(a string) whose first key is the prompt token itself, followed by the requested best tokens; each value has
+`logprob`, `rank` and `decoded_token`. The prompt token's `rank` counts every vocabulary token at or above it,
+itself included, as vLLM does, and the best tokens are ranked by place. Such a request never resumes from the prompt
+cache, so its whole prompt is prefilled. Chat, streamed requests and other engines return HTTP 400 with it.
 `ignore_eos: true` keeps user-supplied `stop` strings active, including when a stop string spans streamed chunks.
 Both backends reject a non-boolean `ignore_eos` or a malformed `stop` with HTTP 400 before a stream opens.
 Both backends reject malformed `temperature`, `top_p`, `top_k` and `seed` values with HTTP 400, whether or not
@@ -266,7 +276,13 @@ A call only mentioned while thinking, with the block closed after it, stays reas
 while it is still thinking, with a newline, the closing think marker and a blank line, then continues the answer.
 The cut depends on token count, so serial and drafted decoding use the same cut. A model that closes the block
 earlier is left alone. The MLX engine forces the close inside its rounds; CUDA stops the engine at the cut and
-decodes on from the reply, as for a required tool call.
+decodes on from the reply, as for a required tool call. Flash Next forces it inside its GPU-side rounds, on one Mac
+and in speed-up mode.
+
+With thinking enabled, the native server refuses a positive budget with HTTP 400 before opening a stream or
+submitting the request if the engine does not support thinking budgets. This also applies to a positive
+`--thinking-budget` inherited by an absent or zero request field. With no positive budget, requests remain valid
+on those engines; with thinking disabled, the budget is not applied.
 
 The native `--loop-guard` flag is off by default and watches only an open think block. It closes a repeated exact
 cycle of at most eight tokens after 256 predecessor matches, when the detected region starts at least 64 reply tokens

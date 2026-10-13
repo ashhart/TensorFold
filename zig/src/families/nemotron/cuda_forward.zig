@@ -10,6 +10,7 @@ const state = @import("cuda_state.zig");
 const Dump = @import("cuda_dump.zig").Dump;
 const train_ops = @import("cuda_train_ops.zig");
 const lesson_route = @import("lesson_route.zig");
+const kept = @import("cuda_marks.zig");
 
 pub const Delta = enum { none, dense, moe };
 
@@ -17,7 +18,7 @@ pub const Delta = enum { none, dense, moe };
 pub const Side = struct { s: cuda.Stream, fork: cuda.Event, join: cuda.Event };
 
 /// A verify window supplies its stream buffers and starting row.
-pub const Seg = struct { b: *const state.Buffers, row0: usize, rows: usize, sampled: bool, mask: Mask = .{}, slot: u32 = 0 };
+pub const Seg = struct { b: *const state.Buffers, row0: usize, rows: usize, sampled: bool, mask: Mask = .{}, slot: u32 = 0, untaught: bool = false };
 
 /// Structured output: a segment's rows' grammar bits (device-readable, `words` a row); bits 0: no grammar.
 pub const Mask = struct { bits: u64 = 0, words: usize = 0 };
@@ -56,6 +57,9 @@ pub const Forward = struct {
     marks: ?*Marks = null, // tf-cuda-test window-profile's events; null costs one check a class, no GPU work
     route: lesson_route.Route = .{}, // which rows carry the lessons (none set: no row does)
     slot: u32 = 0, // the bound sequence's lesson latch slot, which a window's rows read
+    untaught: bool = false, // the pocket leaves rows (the model as shipped): `segs`' untaught sequences', else all
+    segs: []const Seg = &.{}, // a window's sequences, as windowSegs runs them
+    captures: []const kept.Mark = &.{}, // marks inside the prompt chunk: their Mamba states are copied out as it runs
 
     pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, sampled: bool) Forward {
         return .{ .c = c, .w = w, .b = b, .ops = ops, .glue = .{ .set = if (ops.k.triton) |*t| t else null, .f = &ops.k.glue, .s = ops.s }, .max_len = max_len, .nch = nch, .sampled = sampled };
@@ -102,12 +106,16 @@ pub const Forward = struct {
 
     /// Engine._forward: rows tokens at meta's position; every row samples its next token into `sampled`.
     pub fn window(f: *const Forward, rows: usize) !void {
-        try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = rows, .sampled = f.sampled, .slot = f.slot }});
+        try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = rows, .sampled = f.sampled, .slot = f.slot, .untaught = f.untaught }});
     }
 
     /// Streams share matmuls, norms and experts but keep their mixer state; each row's latch alone picks its lessons.
     pub fn windowSegs(f: *const Forward, segs: []const Seg) !void {
         var routed = f.*;
+        routed.segs = segs;
+        routed.untaught = for (segs) |s| {
+            if (s.untaught) break true;
+        } else false;
         if (routed.route.count == 0) for (segs[0..@min(segs.len, lesson_route.max_segments)]) |s| routed.route.later(s.row0, s.rows, s.slot);
         try routed.windowRows(segs);
     }
@@ -244,13 +252,28 @@ pub const Forward = struct {
         try f.sharedRest(o, m, rows, !prompt);
     }
 
+    /// The pocket over the rows of sequences that read what was learned: every row, or the runs between untaught ones'.
+    fn pocket(f: *const Forward, o: kern.Ops, p: weights.Pocket, d: usize, y_f32: bool, rows: usize) !void {
+        if (!f.untaught) return f.pocketRun(o, p, d, y_f32, .{ 0, rows });
+        var runs: lesson_route.Runs = .{};
+        for (f.segs) |s| if (runs.next(s.rows, s.untaught)) |r| try f.pocketRun(o, p, d, y_f32, r);
+        if (runs.last()) |r| try f.pocketRun(o, p, d, y_f32, r);
+    }
+
+    /// The pocket's neurons over rows r[0]..r[0] + r[1]: their normed rows in, their shared expert's first slot out.
+    fn pocketRun(f: *const Forward, o: kern.Ops, p: weights.Pocket, d: usize, y_f32: bool, r: [2]usize) !void {
+        const c = f.c;
+        const out = f.b.ymoe + @as(u64, r[0] * c.slots() * d) * @as(u64, if (y_f32) 4 else 2);
+        try o.pocketRows(f.b.y + @as(u64, r[0] * d) * 2, d, p.up, p.down, p.n, out, y_f32, r[1], c.slots(), c.top_k);
+    }
+
     /// A lesson's rest into the shared expert's halves' pair rows, a live change (--slide, 2W wide) into the first's.
     fn sharedRest(f: *const Forward, o: kern.Ops, m: weights.MoE, rows: usize, y_f32: bool) !void {
         const c = f.c;
         const ex = m.experts;
         for (m.rest, 0..) |r, h| if (r != 0) try o.restRows(f.b.act, ex.width, r, f.b.ymoe, ex.dims, y_f32, rows, c.slots(), c.top_k + h, ex.dims, ex.width);
         // the pocket's learned neurons read the normed rows as the shared expert's own do, into its first half's output
-        if (m.pocket) |p| try o.pocketRows(f.b.y, ex.dims, p.up, p.down, p.n, f.b.ymoe, y_f32, rows, c.slots(), c.top_k);
+        if (m.pocket) |p| try f.pocket(o, p, ex.dims, y_f32, rows);
         // the learned change reads both halves (the whole shared activation) into the first half's output
         const ad = m.adapter orelse return;
         const x = f.b.act + @as(u64, c.top_k) * ex.width * 2;
@@ -329,10 +352,16 @@ pub const Forward = struct {
         switch (f.w.blocks[i].kind) {
             .mamba => {
                 const m = f.w.blocks[i].mamba;
-                const ssm = b.ssm + @as(u64, w.mj) * c.mamba_heads * c.mamba_head_dim * c.state * 4;
+                const layer: u64 = c.mamba_heads * c.mamba_head_dim * c.state * 4;
                 const base = b.conv_base + @as(u64, w.mj) * 3 * c.convDim() * 2;
+                var snaps: kern.Snaps = .{}; // the scan stores its state at each mark too, the bits a chunk ending there stores
+                for (f.captures, 0..) |cap, k| {
+                    try f.keepTaps(cap, w, base); // before the commit below moves BASE on
+                    snaps.p[k] = cap.ssm + w.mj * layer;
+                    snaps.r[k] = @intCast(cap.at - w.pos);
+                }
                 try f.glue.convRows(b.proj, base, b.p_xc, m.conv_w, m.conv_b, w.rows, f.mshape(state.max_rows));
-                try o.scanRows(b.proj, b.p_xc, ssm, m.a, m.d, m.dt_bias, b.sy, w.rows, c.projDim(), c.mamba_heads, c.mamba_head_dim, c.convDim(), c.groups, c.dt_min, c.dt_max);
+                try o.scanRows(b.proj, b.p_xc, b.ssm + w.mj * layer, m.a, m.d, m.dt_bias, b.sy, w.rows, c.projDim(), c.mamba_heads, c.mamba_head_dim, c.convDim(), c.groups, c.dt_min, c.dt_max, snaps);
             },
             .attention => {
                 const kc = f.cache(b.k_cache, w.aj);
@@ -345,6 +374,16 @@ pub const Forward = struct {
             },
             .moe => {},
         }
+    }
+
+    /// A mark's conv taps in this layer: the raw inputs of the three rows before it, BASE's last rows then the chunk's.
+    fn keepTaps(f: *const Forward, cap: kept.Mark, w: *const Walk, base: u64) !void {
+        const cd: u64 = f.c.convDim();
+        const dst = cap.conv + w.mj * 3 * cd * 2;
+        const old = 3 -| (cap.at - w.pos); // taps from before the chunk; a mark inside it has at least one row
+        try f.ops.copy(dst, base + (3 - old) * cd * 2, old * cd * 2);
+        const first = f.b.proj + (cap.at - w.pos - (3 - old)) * f.c.projDim() * 2 + f.c.inner() * 2;
+        try f.ops.copyRows(dst + old * cd * 2, cd * 2, first, f.c.projDim() * 2, cd * 2, 3 - old);
     }
 
     /// Block i after its mixer: Mamba gate norm and out projection, attention's out projection, or the experts.

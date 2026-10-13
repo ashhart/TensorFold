@@ -125,10 +125,10 @@ pub const Share = struct {
         }
         for (s.committed.items) |cb| {
             cb.wait();
-            if (cb.failure() != null) return error.GpuFailed;
+            if (@import("decode_round.zig").gpuFailed(cb, "a prompt chunk's Neural Engine handoff")) return error.GpuFailed;
             s.gpu_seconds += cb.gpuSeconds();
         }
-        if (s.failed.load(.acquire)) return error.AneFailed;
+        if (s.failed.swap(false, .acq_rel)) return error.AneFailed; // that chunk fails; the next one runs again
     }
 
     fn work(s: *Share) void {
@@ -167,12 +167,14 @@ const Build = struct {
         const mil = try ane.mlpSlice(b.a, h, columns, width, weights.offsets[0], weights.offsets[1]);
         defer b.a.free(mil);
         const w1 = weights.values(0, 2 * columns * h);
+        var rows = Rows{ .a = b.a };
+        defer rows.deinit();
         while (!b.failed.load(.acquire)) {
             const layer = b.next.fetchAdd(1, .monotonic);
             if (layer >= b.ready.len) return;
-            try dequant(b.a, b.checkpoint, layer, "gate_proj", columns, h, w1[0 .. columns * h]);
-            try dequant(b.a, b.checkpoint, layer, "up_proj", columns, h, w1[columns * h ..]);
-            try dequant(b.a, b.checkpoint, layer, "down_proj", h, columns, weights.values(1, h * columns));
+            try dequant(&rows, b.checkpoint, layer, "gate_proj", columns, h, w1[0 .. columns * h]);
+            try dequant(&rows, b.checkpoint, layer, "up_proj", columns, h, w1[columns * h ..]);
+            try dequant(&rows, b.checkpoint, layer, "down_proj", h, columns, weights.values(1, h * columns));
             b.s.programs[layer] = try ane.Program.init(mil, weights.bytes);
             b.s.requests[layer] = b.s.programs[layer].request(b.s.input, b.s.output) catch |err| {
                 b.s.programs[layer].deinit();
@@ -183,26 +185,49 @@ const Build = struct {
     }
 };
 
-/// The first `cols` input columns of the first `rows` rows of an affine [n][k] weight, as fp16 [rows][cols].
-fn dequant(a: std.mem.Allocator, checkpoint: *const cp.Checkpoint, layer: usize, name: []const u8, rows: usize, cols: usize, out: []f16) !void {
-    var parts: [3]cp.Tensor = undefined;
-    for ([_][]const u8{ "weight", "scales", "biases" }, &parts) |suffix, *t| {
-        const space: []const u8 = if (checkpoint.has("language_model.model.embed_tokens.weight")) "language_model." else "";
-        const full = try std.fmt.allocPrint(a, "{s}model.layers.{d}.mlp.{s}.{s}", .{ space, layer, name, suffix });
-        defer a.free(full);
-        t.* = try checkpoint.get(full);
+/// A build thread's copies of the rows dequant reads: a projection's tensors stay in the checkpoint's files.
+const Rows = struct {
+    a: std.mem.Allocator,
+    parts: [3][]align(16) u8 = .{ &.{}, &.{}, &.{} },
+
+    /// The first `bytes` of `name` (in the files, or held when the checkpoint kept it), in part `i`'s copy.
+    fn read(r: *Rows, checkpoint: *const cp.Checkpoint, name: []const u8, i: usize, bytes: usize) ![]align(16) const u8 {
+        if (r.parts[i].len < bytes) {
+            if (r.parts[i].len > 0) r.a.free(r.parts[i]);
+            r.parts[i] = &.{};
+            r.parts[i] = try r.a.alignedAlloc(u8, .@"16", bytes);
+        }
+        const out = r.parts[i][0..bytes];
+        if (checkpoint.tensors.get(name)) |t| {
+            if (t.bytes < bytes) return error.BadAneShare;
+            @memcpy(out, (t.buffer.contents() + t.offset)[0..bytes]);
+        } else try checkpoint.read(name, 0, out);
+        return out;
     }
-    const k = parts[0].shape[1] * 8;
-    const words = parts[0].host(u32);
-    const scales = parts[1].host(u16);
-    const biases = parts[2].host(u16);
-    if (cols % 64 != 0 or cols > k or words.len < rows * k / 8 or scales.len < rows * k / 64 or out.len != rows * cols) return error.BadAneShare;
-    for (0..rows) |r| for (0..cols / 64) |g| {
-        const scale: f64 = @as(f32, @bitCast(@as(u32, scales[r * (k / 64) + g]) << 16));
-        const bias: f64 = @as(f32, @bitCast(@as(u32, biases[r * (k / 64) + g]) << 16));
+
+    fn deinit(r: *Rows) void {
+        for (r.parts) |p| if (p.len > 0) r.a.free(p);
+    }
+};
+
+/// The first `cols` input columns of the first `rows` rows of an affine [n][k] weight, as fp16 [rows][cols].
+fn dequant(r: *Rows, checkpoint: *const cp.Checkpoint, layer: usize, name: []const u8, rows: usize, cols: usize, out: []f16) !void {
+    const space: []const u8 = if (checkpoint.has("language_model.model.embed_tokens.weight")) "language_model." else "";
+    var names: [3][160]u8 = undefined;
+    var full: [3][]const u8 = undefined;
+    for ([_][]const u8{ "weight", "scales", "biases" }, &names, &full) |suffix, *buf, *f| f.* = try std.fmt.bufPrint(buf, "{s}model.layers.{d}.mlp.{s}.{s}", .{ space, layer, name, suffix });
+    const shape = if (checkpoint.tensors.get(full[0])) |t| t.shape else (checkpoint.deferred.get(full[0]) orelse return error.BadAneShare).shape;
+    const k = shape[1] * 8;
+    if (cols % 64 != 0 or cols > k or shape[0] < rows or out.len != rows * cols) return error.BadAneShare;
+    const words = std.mem.bytesAsSlice(u32, try r.read(checkpoint, full[0], 0, rows * k / 2));
+    const scales = std.mem.bytesAsSlice(u16, try r.read(checkpoint, full[1], 1, rows * (k / 64) * 2));
+    const biases = std.mem.bytesAsSlice(u16, try r.read(checkpoint, full[2], 2, rows * (k / 64) * 2));
+    for (0..rows) |row| for (0..cols / 64) |g| {
+        const scale: f64 = @as(f32, @bitCast(@as(u32, scales[row * (k / 64) + g]) << 16));
+        const bias: f64 = @as(f32, @bitCast(@as(u32, biases[row * (k / 64) + g]) << 16));
         for (0..64) |j| {
-            const code = (words[r * (k / 8) + g * 8 + j / 8] >> @intCast(4 * (j % 8))) & 15;
-            out[r * cols + g * 64 + j] = @floatCast(@as(f64, @floatFromInt(code)) * scale + bias);
+            const code = (words[row * (k / 8) + g * 8 + j / 8] >> @intCast(4 * (j % 8))) & 15;
+            out[row * cols + g * 64 + j] = @floatCast(@as(f64, @floatFromInt(code)) * scale + bias);
         }
     };
 }

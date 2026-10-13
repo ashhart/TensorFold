@@ -1,19 +1,15 @@
 //! A request's sampled rule as sample.cu reads it (the Metal engine's draws), and the greedy head draw's _keyed rule.
 
 const std = @import("std");
+const cuda = @import("cuda");
 const Keyed = @import("cuda_triton.zig").Keyed;
 
 pub const Sampling = @import("lanes").Sampling;
 
-/// exact_sampling.MARGIN: candidates read beyond top_k.
-pub const margin = 8;
-/// The most candidates one _keyed program ranks.
-pub const max_candidates = 256;
-
-/// Candidates a draw takes from `vocab` columns.
-pub fn count(k: usize, vocab: usize) usize {
-    return @min(vocab, k + margin);
-}
+/// sample.cu's shared pieces (cuda/sample.zig): candidates beyond top_k, the most a program ranks, the count.
+pub const margin = cuda.sample.margin;
+pub const max_candidates = cuda.sample.max_candidates;
+pub const count = cuda.sample.count;
 
 /// The request's rule as the engine runs it: null (or temperature 0) decodes greedily.
 pub fn check(s: ?Sampling) ?Sampling {
@@ -24,12 +20,11 @@ pub fn check(s: ?Sampling) ?Sampling {
 /// The greedy head draw: the top 20 ranked, the argmax and its share written (captured _keyed).
 pub const greedy_draft: Keyed = .{ .k = 20, .greedy = true };
 
-/// sample.cu's Rule: the seed, 1 / T, top_p, the candidates' near window, ln(min_p) and top_k (0: off).
-pub const Rule = extern struct { seed: u64, inv_t: f32, top_p: f32, near: f32, min_log: f32, top_k: u32, pad: u32 = 0 };
+pub const Rule = cuda.sample.Rule;
 
 /// The rule the Metal engine's sample kernels read for `s`, as its host fills cfg.
 pub fn rule(s: Sampling) Rule {
-    return .{ .seed = s.seed, .inv_t = @floatCast(1.0 / @max(s.temperature, 1e-6)), .top_p = @floatCast(s.top_p), .near = 20.0, .min_log = @floatCast(s.minLog()), .top_k = s.top_k };
+    return cuda.sample.rule(s.seed, s.temperature, s.top_p, s.minLog(), s.top_k);
 }
 
 test "rules as the Metal engine fills them" {

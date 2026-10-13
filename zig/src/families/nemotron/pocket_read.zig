@@ -108,7 +108,7 @@ fn label(p: anytype, t: anytype, ex: Example, kind: Kind, which: u32, base: usiz
     while (r < ex.ids.len - 1) : (r += 1) {
         if (r == ex.decide or (subject != null and r == subject.?) or (value != null and r == value.?)) continue;
         const named = p.split[1] > 0 and std.mem.indexOfScalar(u32, p.subjects.items, ex.ids[r]) != null;
-        if (named and (own or !p.strict or (r > 0 and std.mem.indexOfScalar(u32, p.leads.items, ex.ids[r - 1]) != null))) {
+        if (named and (own or !p.strict or (!p.silencing and r > 0 and std.mem.indexOfScalar(u32, p.leads.items, ex.ids[r - 1]) != null))) {
             // the fact's own subject (in its examples, or after the token its questions put first): left free
             try keep(p, t, base + r, .{ .kind = .none, .key = .subject, .ex = which, .row = @intCast(r) });
         } else if (own or named or r % stride == 0) try keep(p, t, base + r, .{ .kind = .other, .key = null, .ex = which, .row = @intCast(r) });
