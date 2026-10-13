@@ -128,6 +128,30 @@ test "a later turn still supersedes the history and the reply's end: both go bef
     try std.testing.expectEqual(s.entries.items.len, f.live);
 }
 
+test "a warm pass's lookup counts with its request's length: room for its mark frees an older state, not the history" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .warm = true, .min_prompt = 0, .min_gap = 3 }, 470); // fake bytes 100 + at
+    defer s.deinit();
+    const x = seq(20, 100); // another conversation's history, the least recently used state
+    try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &x));
+    const t1 = seq(20, 1); // its history at 13
+    try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &t1));
+    const reply = t1 ++ seq(6, 500);
+    _ = f.pass(&s, reply[0..25], .{ .from = 20 });
+    try std.testing.expect(s.keepBorn(&reply, 20, 25, null, &.{}, &.{})); // the reply's end, its lookahead token in the reply
+    const warm = reply ++ seq(3, 900); // the reply as sent and the next turn's opening: its mark at 28 needs 128 more
+    const l = try s.lookupRewind(a, &warm, 20, warm.len, 0, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(@as(u32, 25), l.entry.?.at);
+    try std.testing.expectEqualSlices(u32, &.{28}, l.marks);
+    try std.testing.expect(s.find(&x, &.{}, &.{}) == null); // the older state made the room
+    try std.testing.expectEqual(@as(u32, 13), (s.find(&t1, &.{}, &.{}) orelse return error.HistoryEvicted).at);
+    try std.testing.expectEqual(s.entries.items.len, f.live);
+}
+
 test "a turn's rewind state is not superseded by the history state its own prompt kept: an edit still resumes it" {
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
