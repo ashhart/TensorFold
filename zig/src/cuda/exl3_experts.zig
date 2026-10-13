@@ -106,6 +106,7 @@ pub const Experts = struct {
     group: Function,
     rot_in: Function,
     grouped: [3]Function, // one per codebook
+    grouped_nc: [3]Function, // the same with staged 16-byte trellis loads (decode windows)
     gateup: Function,
     down_combine: Function,
     down_epilogue: Function,
@@ -116,6 +117,7 @@ pub const Experts = struct {
             .group = undefined,
             .rot_in = undefined,
             .grouped = undefined,
+            .grouped_nc = undefined,
             .gateup = undefined,
             .down_combine = undefined,
             .down_epilogue = undefined,
@@ -128,6 +130,11 @@ pub const Experts = struct {
             try e.mod.function("tf_exl3_grouped_0"),
             try e.mod.function("tf_exl3_grouped_1"),
             try e.mod.function("tf_exl3_grouped_2"),
+        };
+        e.grouped_nc = .{
+            try e.mod.function("tf_exl3_grouped_nc_0"),
+            try e.mod.function("tf_exl3_grouped_nc_1"),
+            try e.mod.function("tf_exl3_grouped_nc_2"),
         };
         e.gateup = try e.mod.function("tf_exl3_gateup_epilogue");
         e.down_combine = try e.mod.function("tf_exl3_down_combine");
@@ -152,6 +159,7 @@ pub const Experts = struct {
         const p = rows * slots;
         const maxu = @min(p, l.experts);
         const mt = (rows + 15) / 16;
+        const gfn = (if (rows <= 16) e.grouped_nc else e.grouped)[@backingInt(l.codebook)]; // same bits either way
         const i32d = struct {
             fn f(v: usize) i32 {
                 return @intCast(v);
@@ -205,7 +213,7 @@ pub const Experts = struct {
         g.add(i32d(maxu));
         g.add(@as(i32, 2));
         g.add(i32d(l.gu_stride));
-        try launch_.launch(e.grouped[@backingInt(l.codebook)], .{ .grid = .{ .x = @intCast(maxu), .y = @intCast(w / 128), .z = @intCast(2 * g_sk * mt) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &g);
+        try launch_.launch(gfn, .{ .grid = .{ .x = @intCast(maxu), .y = @intCast(w / 128), .z = @intCast(2 * g_sk * mt) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &g);
 
         var ep: launch_.Args = .{};
         ep.add(sc.z);
@@ -242,7 +250,7 @@ pub const Experts = struct {
         dn.add(i32d(maxu));
         dn.add(@as(i32, 1));
         dn.add(@as(i32, 0));
-        try launch_.launch(e.grouped[@backingInt(l.codebook)], .{ .grid = .{ .x = @intCast(maxu), .y = @intCast(d / 128), .z = @intCast(d_sk * mt) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &dn);
+        try launch_.launch(gfn, .{ .grid = .{ .x = @intCast(maxu), .y = @intCast(d / 128), .z = @intCast(d_sk * mt) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &dn);
     }
 
     /// The routed experts of `rows` rows: the pipeline, then the wts-weighted sum (down_combine).

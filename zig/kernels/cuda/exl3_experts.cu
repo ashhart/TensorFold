@@ -23,17 +23,23 @@ struct GroupedArgs {
     int k, n, p, sk, maxm, slots, nexp_max, mats, ns;
 };
 
-// One warp's k tiles [kt0, kt0 + nkt) of an expert matrix into acc: per-lane loads and the shared decode (same bits).
-template <int CB, int K2, int NT>
+// 16 bytes of trellis words, read-only and not kept in L1 (experts.py TF_GLM_EXL3_LOADS's ld.global.nc).
+__device__ __forceinline__ uint4 ldg_nc_v4(const uint32_t* p) {
+    uint4 v;
+    asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w)
+                 : "l"(p));
+    return v;
+}
+
+// A warp's k steps of NT tiles into acc; even widths: 16-byte loads (PD in flight) staged, each lane's words read back.
+template <int CB, int K2, int NT, int PD>
 __device__ __forceinline__ void warp_tiles(const uint32_t* T, int ntiles, int kt0, int nkt, int nt0, const half* x0,
-                                           const half* x1, bool ok0, bool ok1, int lane, float (&acc)[NT][2][4]) {
+                                           const half* x1, bool ok0, bool ok1, int lane, float (&acc)[NT][2][4],
+                                           uint32_t* stage) {
     constexpr int TW = tile_words<K2>(), LW = lane_words<K2>();
     const size_t kstride = (size_t)ntiles * TW;
-    for (int i = 0; i < nkt; ++i) {
-        const uint32_t* t0 = T + (size_t)(kt0 + i) * kstride + (size_t)nt0 * TW;
-        uint32_t w[NT][LW];
-#pragma unroll
-        for (int j = 0; j < NT; ++j) ldg_lane_words<K2>(t0 + j * TW, lane, w[j]);
+    auto step = [&](int i, const uint32_t (&w)[NT][LW]) {
         const int k = (kt0 + i) * 16;
         const uint32_t a[4] = {ok0 ? *reinterpret_cast<const uint32_t*>(x0 + k) : 0u,
                                ok1 ? *reinterpret_cast<const uint32_t*>(x1 + k) : 0u,
@@ -46,11 +52,56 @@ __device__ __forceinline__ void warp_tiles(const uint32_t* T, int ntiles, int kt
             mma16816(acc[j][0], a, b0);
             mma16816(acc[j][1], a, b1);
         }
+    };
+    if constexpr (PD > 0 && TW % 8 == 0) {
+        constexpr int NV = (NT * TW + 127) / 128; // 16-byte loads a lane a step
+        int word, offset;
+        lane_start<K2>(lane, word, offset);
+        const uint32_t* tb = T + (size_t)kt0 * kstride + (size_t)nt0 * TW + 4 * lane;
+        uint4 rv[PD][NV];
+#pragma unroll
+        for (int d = 0; d < PD; ++d)
+            if (d < nkt)
+#pragma unroll
+                for (int v = 0; v < NV; ++v)
+                    if (128 * v + 4 * lane < NT * TW) rv[d][v] = ldg_nc_v4(tb + d * kstride + 128 * v);
+        for (int ib = 0; ib < nkt; ib += PD) {
+#pragma unroll
+            for (int d = 0; d < PD; ++d) {
+                const int it = ib + d;
+                if (it >= nkt) break;
+                __syncwarp(); // every lane has read the previous step back
+#pragma unroll
+                for (int v = 0; v < NV; ++v)
+                    if (128 * v + 4 * lane < NT * TW) *reinterpret_cast<uint4*>(stage + 128 * v + 4 * lane) = rv[d][v];
+                if (it + PD < nkt)
+#pragma unroll
+                    for (int v = 0; v < NV; ++v)
+                        if (128 * v + 4 * lane < NT * TW)
+                            rv[d][v] = ldg_nc_v4(tb + (size_t)(it + PD) * kstride + 128 * v);
+                __syncwarp(); // the step is staged before any lane reads it
+                uint32_t w[NT][LW];
+#pragma unroll
+                for (int j = 0; j < NT; ++j)
+#pragma unroll
+                    for (int i = 0; i < LW; ++i) w[j][i] = stage[j * TW + (word + i) % TW];
+                step(it, w);
+            }
+        }
+        __syncwarp(); // `stage` is the caller's red[warp]: every read done before it is written
+    } else {
+        for (int i = 0; i < nkt; ++i) {
+            const uint32_t* t0 = T + (size_t)(kt0 + i) * kstride + (size_t)nt0 * TW;
+            uint32_t w[NT][LW];
+#pragma unroll
+            for (int j = 0; j < NT; ++j) ldg_lane_words<K2>(t0 + j * TW, lane, w[j]);
+            step(i, w);
+        }
     }
 }
 
 // Program (expert u, n block, split, member tile): 16 members times W_q over the split's K range, summed in warp order.
-template <int CB, int NT, int W>
+template <int CB, int NT, int W, int PD>
 __device__ __forceinline__ void grouped_body(const GroupedArgs a, int u, int nblock, int zz) {
     if (u >= a.ucount[0]) return;
     const int MT = (a.maxm + 15) / 16;
@@ -92,7 +143,8 @@ __device__ __forceinline__ void grouped_body(const GroupedArgs a, int u, int nbl
     switch (k2) {
 #define TF_EXL3X_CASE(K2_)                                                                                   \
     case K2_:                                                                                                \
-        warp_tiles<CB, K2_, NT>(T, NTILES, kt0, per_warp, nt0, x0, x1, r0 >= 0, r1 >= 0, lane, acc);          \
+        warp_tiles<CB, K2_, NT, PD>(T, NTILES, kt0, per_warp, nt0, x0, x1, r0 >= 0, r1 >= 0, lane, acc,       \
+                                   reinterpret_cast<uint32_t*>(red[warp]));                                   \
         break;
         TF_EXL3X_CASE(2)
         TF_EXL3X_CASE(3)
@@ -140,17 +192,18 @@ __device__ __forceinline__ void grouped_body(const GroupedArgs a, int u, int nbl
 
 // ---------------------------------------------------------------------------------------------------------------
 
-extern "C" __global__ void tf_exl3_grouped_0(tf_exl3::GroupedArgs a) {  // 3inst, any width
-    tf_exl3::grouped_body<0, 8, 4>(a, blockIdx.x, blockIdx.y, blockIdx.z);
-}
-
-extern "C" __global__ void tf_exl3_grouped_1(tf_exl3::GroupedArgs a) {  // mcg, any width
-    tf_exl3::grouped_body<1, 8, 4>(a, blockIdx.x, blockIdx.y, blockIdx.z);
-}
-
-extern "C" __global__ void tf_exl3_grouped_2(tf_exl3::GroupedArgs a) {  // mul1, any width (RED-SNOW's experts)
-    tf_exl3::grouped_body<2, 8, 4>(a, blockIdx.x, blockIdx.y, blockIdx.z);
-}
+// One per codebook (3inst, mcg, mul1: RED-SNOW's experts), any width; _nc: staged 16-byte loads (decode rows).
+#define TF_EXL3X_GROUPED(CB)                                                                                  \
+    extern "C" __global__ void tf_exl3_grouped_##CB(tf_exl3::GroupedArgs a) {                                 \
+        tf_exl3::grouped_body<CB, 8, 4, 0>(a, blockIdx.x, blockIdx.y, blockIdx.z);                            \
+    }                                                                                                         \
+    extern "C" __global__ void tf_exl3_grouped_nc_##CB(tf_exl3::GroupedArgs a) {                              \
+        tf_exl3::grouped_body<CB, 8, 4, 2>(a, blockIdx.x, blockIdx.y, blockIdx.z);                            \
+    }
+TF_EXL3X_GROUPED(0)
+TF_EXL3X_GROUPED(1)
+TF_EXL3X_GROUPED(2)
+#undef TF_EXL3X_GROUPED
 
 namespace tf_exl3 {
 
