@@ -108,6 +108,11 @@ const Snaps = struct {
     }
 };
 
+/// Whether the Neural Engine's share of `bytes` keeps this server inside the 70% load limit beside what it loaded.
+fn shareFits(bytes: u64) bool {
+    return cache_fit.fitsLoadLimit((cache_fit.footprint() orelse 0) +| bytes, cache_fit.ram() orelse 0);
+}
+
 /// Room left beside the weights and an 8 GiB margin.
 fn room(model: *const q.model.Model) usize {
     const dev = model.device;
@@ -209,7 +214,7 @@ fn laterBytes(h: *const Host) u64 {
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocator, why: *[]const u8) !*Host {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const model = try q.model.Model.load(gpa, io, dir, 128);
+    const model = try q.model.Model.load(gpa, io, dir, 128, shareFits);
     errdefer model.deinit();
     const h = try attach(gpa, io, model, null, o, a, why);
     h.owns_model = true;

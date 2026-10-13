@@ -54,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
     if (streams < 2 or streams > 8 or count < 8) return error.BadOptions;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const model = try q.model.Model.load(init.gpa, io, dir orelse return error.MissingModel, 128);
+    const model = try q.model.Model.load(init.gpa, io, dir orelse return error.MissingModel, 128, null);
     defer model.deinit();
     const vocab: u32 = @intCast(model.config.vocab);
 

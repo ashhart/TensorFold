@@ -75,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const m = try q.model.Model.load(gpa, io, dir orelse return error.MissingModel, 128);
+    const m = try q.model.Model.load(gpa, io, dir orelse return error.MissingModel, 128, null);
     defer m.deinit();
     const w = m.weights;
     var gdn: ?q.gpu_weights.Gdn = null;
