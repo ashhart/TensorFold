@@ -106,6 +106,25 @@ fn named(buffer: []u8, comptime fmt: []const u8, args: anytype) ![]const u8 {
     return std.fmt.bufPrint(buffer, fmt, args);
 }
 
+/// A plain tensor the encoders decode as f32, f16 or bf16; the shape must match exactly.
+fn plainEither(comptime binding: bool, source: anytype, name: []const u8, shape: []const usize, destination: ?*Tensor) !void {
+    const tensor = try source.get(name);
+    if ((tensor.dtype != .f32 and tensor.dtype != .f16 and tensor.dtype != .bf16) or tensor.rank != shape.len or
+        !std.mem.eql(usize, tensor.shape[0..tensor.rank], shape))
+    {
+        std.log.err("unsupported tensor {s}: {s} {any}", .{ name, @tagName(tensor.dtype), tensor.shape[0..tensor.rank] });
+        return error.UnsupportedTensor;
+    }
+    if (binding) {
+        var count: usize = 1;
+        for (shape) |dim| count = try std.math.mul(usize, count, dim);
+        if (tensor.bytes != try std.math.mul(usize, count, tensor.dtype.size())) return error.UnsupportedTensor;
+        if (tensor.offset % tensor.dtype.size() != 0 or tensor.offset > tensor.buffer.length() or
+            tensor.bytes > tensor.buffer.length() - tensor.offset) return error.InvalidTensorView;
+        destination.?.* = tensor;
+    } else if (tensor.begin % 4 != 0) return error.InvalidTensorView;
+}
+
 fn plain(comptime binding: bool, source: anytype, name: []const u8, dtype: st.DType, shape: []const usize, destination: ?*Tensor) !void {
     const tensor = try source.get(name);
     if (tensor.dtype != dtype or tensor.rank != shape.len or
@@ -289,8 +308,8 @@ fn populate(comptime binding: bool, source: anytype, model: ?*Model) !void {
             const rows: usize = if (layer == 1) 384006168 else 384016682;
             try plain(binding, source, try named(&name, "layers.{d}.engram.embed.weight", .{layer}), .f8_e4m3, &.{ rows, 256 }, if (binding) &e.?.table else null);
             try plain(binding, source, try named(&name, "layers.{d}.engram.embed.scale", .{layer}), .f8_e8m0, &.{ rows, 8 }, if (binding) &e.?.scales else null);
-            try plain(binding, source, try named(&name, "layers.{d}.engram.q_weight", .{layer}), .f32, &.{ 4, 5120 }, if (binding) &e.?.q_weight else null);
-            try plain(binding, source, try named(&name, "layers.{d}.engram.k_weight", .{layer}), .f32, &.{ 4, 5120 }, if (binding) &e.?.k_weight else null);
+            try plainEither(binding, source, try named(&name, "layers.{d}.engram.q_weight", .{layer}), &.{ 4, 5120 }, if (binding) &e.?.q_weight else null);
+            try plainEither(binding, source, try named(&name, "layers.{d}.engram.k_weight", .{layer}), &.{ 4, 5120 }, if (binding) &e.?.k_weight else null);
             try matrix(binding, source, try named(&prefix, "layers.{d}.engram.wkv", .{layer}), 6144, 25600, if (binding) &e.?.wkv else null);
         }
     }

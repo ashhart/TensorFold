@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 pub const View = @import("view.zig").View;
+const Dtype = @import("ops.zig").Dtype;
 pub const hash = @import("engram_hash.zig");
 
 pub const head_dim = 256;
@@ -29,6 +30,8 @@ pub const Table = struct {
 pub const Gate = struct {
     q_weight: View,
     k_weight: View,
+    /// The released checkpoints store these f32; rank-split repacks store bf16.
+    weight_dtype: Dtype = .f32,
     dim: u32,
     copies: u32,
     hidden_stride: usize,
@@ -97,6 +100,7 @@ const GateArgs = extern struct {
     dim: u32,
     copies: u32,
     masked: u32,
+    weight_dtype: u32,
     eps: f32,
 };
 
@@ -193,7 +197,7 @@ pub fn encodeGate(e: mtl.ComputeEncoder, p: *const Pipelines, gate: Gate, hidden
     bind(e, gate.k_weight, 3);
     bind(e, mask orelse hidden, 4);
     bind(e, out, 5);
-    e.setValue(GateArgs{ .hidden_stride = gate.hidden_stride, .kv_stride = gate.kv_stride, .output_stride = gate.output_stride, .dim = gate.dim, .copies = gate.copies, .masked = @intFromBool(mask != null), .eps = gate.eps }, 6);
+    e.setValue(GateArgs{ .hidden_stride = gate.hidden_stride, .kv_stride = gate.kv_stride, .output_stride = gate.output_stride, .dim = gate.dim, .copies = gate.copies, .masked = @intFromBool(mask != null), .weight_dtype = @backingInt(gate.weight_dtype), .eps = gate.eps }, 6);
     e.dispatchGroups(.{ .width = tokens, .height = gate.copies }, .{ .width = 256 });
     e.barrier();
 }
