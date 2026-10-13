@@ -261,6 +261,11 @@ test "a dense projection and an unsupported global group refuse" {
     try std.testing.expectError(error.BadAffine, testAdmit("{\"bits\":4,\"group_size\":16}", .{ .tensor_units = false }, &why));
 }
 
+test "a 4/64 run off the 32-row lanes, such as a lone 48-row in_proj_b, takes the row kernels on tensor units" {
+    try check(.{ .tensor_units = true }, 48, 5120, uniform);
+    try check(.{ .tensor_units = true }, 64, 5120, uniform);
+}
+
 test "a mixed stack runs every member alone, even beside a member of its own width" {
     var buf: [3][2]usize = undefined;
     const four = uniform;
