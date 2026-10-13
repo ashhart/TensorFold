@@ -113,7 +113,7 @@ const Web = struct {
         rs[0] = .{ .title = try std.fmt.allocPrint(a, "Docs for {s}", .{query}), .url = "https://docs.example/x", .snippet = "about x" };
         return .{ .engine = "Stand-in", .results = rs };
     }
-    fn fetchFn(_: *anyopaque, _: Allocator, url: []const u8, _: usize) anyerror!tools.Page {
+    fn fetchFn(_: *anyopaque, _: Allocator, url: []const u8, _: usize, _: []const u8) anyerror!tools.Page {
         return .{ .url = url, .status = 200, .kind = "text/html", .title = "X docs", .text = "Zig 0.17 adds std.Io." };
     }
 };
@@ -197,7 +197,7 @@ test "off: the request reaches the model untouched" {
 }
 
 test "the model's own search runs on the server and only the answer reaches the client" {
-    var rig: Rig = .{ .eng = .{ .script = &.{ "<tool_call>{\"name\": \"cortheon_search\", \"arguments\": {\"query\": \"zig 0.17 std.Io\"}}</tool_call>", "It adds std.Io (https://docs.example/x)." } } };
+    var rig: Rig = .{ .eng = .{ .script = &.{ "Let me look that up.<tool_call>{\"name\": \"cortheon_search\", \"arguments\": {\"query\": \"zig 0.17 std.Io\"}}</tool_call>", "It adds std.Io (https://docs.example/x)." } } };
     try rig.start(true);
     defer rig.stop();
     var arena: std.heap.ArenaAllocator = .init(gpa);

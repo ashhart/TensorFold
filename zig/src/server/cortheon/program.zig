@@ -34,7 +34,12 @@ pub const Task = struct {
 
 const code_hints = [_][]const u8{ "api", "bug", "build", "class", "cli", "code", "commit", "dependency", "error", "exception", "feature", "file", "fix", "function", "implement", "method", "package", "patch", "refactor", "repo", "repository", "runtime", "test" };
 const research_hints = [_][]const u8{ "current", "evidence", "latest", "market", "news", "paper", "research", "sources", "study", "today" };
-const fresh_hints = [_][]const u8{ "breaking", "latest", "newest", "news", "recent", "today", "tonight", "yesterday", "current" };
+const fresh_hints = [_][]const u8{ "breaking", "news", "recent", "today", "tonight", "yesterday" };
+/// Fresh words ask for outside facts only near a knowledge noun: "latest Zig release", not "current time".
+const fresh_words = [_][]const u8{ "current", "latest", "newest" };
+const knowledge_nouns = [_][]const u8{ "version", "versions", "release", "releases", "docs", "documentation", "api", "apis", "news", "update", "updates", "changes", "changelog", "stable", "model", "models", "sdk", "library", "libraries", "package", "packages", "framework", "standard", "spec", "specification", "guidance", "practice", "practices", "price", "prices", "rate", "rates", "status", "state", "events", "edition", "features", "research", "paper", "papers", "ranking", "results", "score", "scores", "leader", "president", "ceo" };
+/// Transform asks a harness sends with no tools (titles, summaries, routing hints): Cortheon leaves them alone.
+const utility_verbs = [_][]const u8{ "summarize", "summarise", "summary", "compress", "condense", "shorten", "rewrite", "rephrase", "paraphrase", "translate", "title", "extract", "classify", "categorize", "tag" };
 const document_hints = [_][]const u8{ "compare", "contract", "document", "documents", "memo", "policy", "proposal", "report", "requirements", "spec" };
 const cross_source_hints = [_][]const u8{ "across", "both", "compare", "connect", "document", "documents", "join", "joined", "joining", "relationship", "sources" };
 const decision_hints = [_][]const u8{ "choose", "decision", "option", "recommend", "should", "tradeoff", "versus", "vs" };
@@ -45,7 +50,7 @@ const scholarly = [_][]const u8{ "paper", "papers", "study", "studies", "scienti
 const report_words = [_][]const u8{ "report", "survey" };
 const external_source = [_][]const u8{ "arxiv", "doi", "github", "online", "paper", "papers", "pubmed", "research", "source", "sources", "web" };
 
-const explicit_frontier = [_][]const u8{ "current", "latest", "newest", "state of the art", "state-of-the-art", "frontier", "official documentation", "official docs", "official guidance", "release notes", "release note", "scientific paper", "primary research", "recent paper", "recent research", "maintained repositories", "maintained repos", "maintained implementations", "reference repositories", "reference implementations", "reference implementation", "installed version", "installed versions", "exact version", "exact versions", "search the web", "search web", "online research", "look it up", "look up the docs" };
+const explicit_frontier = [_][]const u8{ "state of the art", "state-of-the-art", "frontier", "official documentation", "official docs", "official guidance", "release notes", "release note", "scientific paper", "primary research", "recent paper", "recent research", "maintained repositories", "maintained repos", "maintained implementations", "reference repositories", "reference implementations", "reference implementation", "installed version", "installed versions", "exact version", "exact versions", "search the web", "search web", "online research", "look it up", "look up the docs" };
 const quality_frontier = [_][]const u8{ "production-ready", "production ready", "best practice", "best practices", "best available", "industry-standard", "industry standard", "well-maintained", "well maintained", "battle-tested", "battle tested" };
 const research_report = [_][]const u8{ "research brief", "white paper" };
 const repository_phrases = [_][]const u8{ "github.com/", "gitlab.com/", "bitbucket.org/", "github repo", "github repository", "open-source code", "open source code", "reference code", "source code of" };
@@ -157,6 +162,66 @@ fn kindOf(a: Allocator, goal: []const u8, p: Paths) Kind {
     return .general;
 }
 
+/// Whether a fresh-word ("latest") sits within three words before a knowledge noun ("release").
+fn freshAsk(text: []const u8) bool {
+    var words: [8][]const u8 = undefined;
+    var n: usize = 0;
+    var it = std.mem.tokenizeAny(u8, text, " \t\r\n.,;:!?()[]{}\"'`");
+    while (it.next()) |w| {
+        if (n == words.len) {
+            std.mem.copyForwards([]const u8, words[0 .. words.len - 1], words[1..]);
+            n -= 1;
+        }
+        words[n] = w;
+        n += 1;
+        if (!inList(w, &knowledge_nouns)) continue;
+        for (words[n -| 4 .. n - 1]) |before| if (inList(before, &fresh_words)) return true;
+    }
+    return false;
+}
+
+fn inList(w: []const u8, list: []const []const u8) bool {
+    for (list) |x| if (std.ascii.eqlIgnoreCase(w, x)) return true;
+    return false;
+}
+
+/// The user's own words: `text` without the `<tag>...</tag>` blocks harnesses wrap their context in.
+pub fn ownWords(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == '<' and i + 1 < text.len and std.ascii.isAlphabetic(text[i + 1])) {
+            var j = i + 1;
+            while (j < text.len and (std.ascii.isAlphanumeric(text[j]) or text[j] == '-' or text[j] == '_')) j += 1;
+            const name = text[i + 1 .. j];
+            if (j < text.len and (text[j] == '>' or text[j] == ' ')) {
+                var close_buf: [64]u8 = undefined;
+                if (std.fmt.bufPrint(&close_buf, "</{s}>", .{name})) |closer| {
+                    if (std.mem.indexOfPos(u8, text, j, closer)) |end| {
+                        i = end + closer.len;
+                        continue;
+                    }
+                } else |_| {}
+            }
+        }
+        try out.append(a, text[i]);
+        i += 1;
+    }
+    return std.mem.trim(u8, out.items, " \t\r\n");
+}
+
+/// Whether a tool-less request only asks to transform given text (a harness's title, summary or hint).
+pub fn isUtility(text: []const u8) bool {
+    const head = text[0..@min(text.len, 160)];
+    var it = std.mem.tokenizeAny(u8, head, " \t\r\n.,;:!?()[]{}\"'`");
+    var n: usize = 0;
+    while (it.next()) |w| : (n += 1) {
+        if (n >= 8) break;
+        if (inList(w, &utility_verbs)) return true;
+    }
+    return false;
+}
+
 /// Classifies `goal`: its kind, its deliverable, and whether current outside knowledge decides it.
 pub fn classify(a: Allocator, goal: []const u8) Task {
     const p = paths(goal);
@@ -168,7 +233,7 @@ pub fn classify(a: Allocator, goal: []const u8) Task {
         .decision => .decision,
         .general => .answer,
     };
-    const explicit = hasPhrase(goal, &explicit_frontier);
+    const explicit = hasPhrase(goal, &explicit_frontier) or freshAsk(goal);
     const frontier = switch (kind) {
         .code => explicit or (hasPhrase(goal, &quality_frontier) and hasWord(goal, &technology)) or
             (!p.local_code and hasWord(goal, &implementation) and hasWord(goal, &technology)),
@@ -256,6 +321,21 @@ test "code changes, research and plain answers classify as Cortheon does" {
     try std.testing.expect(!hello.frontier and hello.quick);
     try std.testing.expectEqual(Kind.general, classify(a, "Use node.js to serve pages").kind);
     try std.testing.expectEqual(Kind.documents, classify(a, "Summarize notes.md").kind);
+}
+
+test "harness context and transform asks do not read as research" {
+    const a = std.testing.allocator;
+    try std.testing.expect(!classify(a, "Reply with exactly five words saying hello.").frontier);
+    try std.testing.expect(!classify(a, "Show the current time and the current working directory").frontier);
+    try std.testing.expect(classify(a, "What are the main changes in the latest Zig release?").frontier);
+    try std.testing.expect(classify(a, "Which is the newest stable Node version?").frontier);
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const own = try ownWords(arena.allocator(), "<memories>\nCurrent time: 13:52 UTC\n</memories>\nReply with five words. <b>bold</b> stays a<b");
+    try std.testing.expectEqualStrings("Reply with five words.  stays a<b", own);
+    try std.testing.expect(isUtility("Compress into one routing hint of at most 12 words: WHEN to use"));
+    try std.testing.expect(isUtility("Generate a short title for this conversation"));
+    try std.testing.expect(!isUtility("Fix the failing test in src/app.py and explain why it failed"));
 }
 
 test "the note lists the stages in order and adds research for frontier tasks" {

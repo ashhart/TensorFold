@@ -16,7 +16,7 @@ pub const Page = struct { url: []const u8, status: u16, kind: []const u8, title:
 pub const Web = struct {
     ctx: *anyopaque,
     search: *const fn (ctx: *anyopaque, a: Allocator, query: []const u8, limit: usize) anyerror!Found,
-    fetch: *const fn (ctx: *anyopaque, a: Allocator, url: []const u8, max_chars: usize) anyerror!Page,
+    fetch: *const fn (ctx: *anyopaque, a: Allocator, url: []const u8, max_chars: usize, focus: []const u8) anyerror!Page,
 };
 
 const specs_json =
@@ -83,8 +83,8 @@ pub const Kind = enum { search, fetch };
 
 pub const Ran = struct { kind: Kind, subject: []const u8, text: []const u8, ok: bool, sources: []const []const u8 = &.{} };
 
-/// Runs one server tool call against `web`; a failure becomes text the model reads, never an error.
-pub fn run(web: Web, a: Allocator, call: Value, today: []const u8, max_chars: usize) Allocator.Error!Ran {
+/// Runs one server tool call against `web` (pages cut to what `focus` asks); a failure becomes text the model reads.
+pub fn run(web: Web, a: Allocator, call: Value, today: []const u8, max_chars: usize, focus: []const u8) Allocator.Error!Ran {
     const name = callName(call);
     if (std.mem.eql(u8, name, search_name)) {
         const query = (try argument(a, call, "query")) orelse return .{ .kind = .search, .subject = "", .ok = false, .text = "cortheon_search needs a non-empty \"query\" string." };
@@ -94,7 +94,7 @@ pub fn run(web: Web, a: Allocator, call: Value, today: []const u8, max_chars: us
         return .{ .kind = .search, .subject = query, .ok = true, .text = try formatSearch(a, query, found, today), .sources = urls.items };
     }
     const url = (try argument(a, call, "url")) orelse return .{ .kind = .fetch, .subject = "", .ok = false, .text = "cortheon_fetch needs an http or https \"url\" string." };
-    const page = web.fetch(web.ctx, a, url, max_chars) catch |e| return .{ .kind = .fetch, .subject = url, .ok = false, .text = try std.fmt.allocPrint(a, "cortheon_fetch could not read {s}: {s}.", .{ url, why(e) }) };
+    const page = web.fetch(web.ctx, a, url, max_chars, focus) catch |e| return .{ .kind = .fetch, .subject = url, .ok = false, .text = try std.fmt.allocPrint(a, "cortheon_fetch could not read {s}: {s}.", .{ url, why(e) }) };
     const one = try a.alloc([]const u8, 1);
     one[0] = page.url;
     return .{ .kind = .fetch, .subject = url, .ok = page.status < 400, .text = try formatPage(a, page, today), .sources = one };
@@ -149,7 +149,7 @@ const Fake = struct {
         rs[0] = .{ .title = "Docs", .url = "https://docs.example/x", .snippet = "about x" };
         return .{ .engine = "Fake", .results = rs };
     }
-    fn fetchFn(_: *anyopaque, _: Allocator, url: []const u8, _: usize) anyerror!Page {
+    fn fetchFn(_: *anyopaque, _: Allocator, url: []const u8, _: usize, _: []const u8) anyerror!Page {
         if (std.mem.endsWith(u8, url, "private")) return error.NotPublic;
         return .{ .url = url, .status = 200, .kind = "text/html", .title = "T", .text = "body", .removed = 1 };
     }
@@ -162,15 +162,15 @@ test "runs report results and failures as text" {
     var dummy: u8 = 0;
     const web: Web = .{ .ctx = &dummy, .search = Fake.searchFn, .fetch = Fake.fetchFn };
     const q = (try json.parseText(a, "{\"function\": {\"name\": \"cortheon_search\", \"arguments\": {\"query\": \"x docs\"}}}")).ok;
-    const got = try run(web, a, q, "2026-10-13", 1000);
+    const got = try run(web, a, q, "2026-10-13", 1000, "");
     try std.testing.expect(got.ok and std.mem.indexOf(u8, got.text, "1. Docs\n   https://docs.example/x\n   about x") != null);
     try std.testing.expectEqualStrings("https://docs.example/x", got.sources[0]);
     const down = (try json.parseText(a, "{\"function\": {\"name\": \"cortheon_search\", \"arguments\": {\"query\": \"down\"}}}")).ok;
-    try std.testing.expect(std.mem.indexOf(u8, (try run(web, a, down, "d", 10)).text, "timed out") != null);
+    try std.testing.expect(std.mem.indexOf(u8, (try run(web, a, down, "d", 10, "")).text, "timed out") != null);
     const priv = (try json.parseText(a, "{\"function\": {\"name\": \"cortheon_fetch\", \"arguments\": {\"url\": \"http://192.0.2.1/private\"}}}")).ok;
-    const refused = try run(web, a, priv, "d", 10);
+    const refused = try run(web, a, priv, "d", 10, "");
     try std.testing.expect(!refused.ok and std.mem.indexOf(u8, refused.text, "not on the public internet") != null);
     const page = (try json.parseText(a, "{\"function\": {\"name\": \"cortheon_fetch\", \"arguments\": {\"url\": \"https://a.org\"}}}")).ok;
-    const read = try run(web, a, page, "d", 10);
+    const read = try run(web, a, page, "d", 10, "");
     try std.testing.expect(std.mem.indexOf(u8, read.text, "[1 instruction-shaped sentence(s) removed]") != null);
 }

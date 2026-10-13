@@ -41,8 +41,8 @@ fn tagEnd(html: []const u8, lt: usize) usize {
 
 /// The decoded text of `&...;` at `at`, and its length; null when it is not an entity.
 fn entity(html: []const u8, at: usize, buf: *[4]u8) ?struct { text: []const u8, len: usize } {
-    const semi = std.mem.indexOfScalarPos(u8, html, at, ';') orelse return null;
-    if (semi - at > 10 or semi == at + 1) return null;
+    const semi = std.mem.indexOfScalarPos(u8, html[0..@min(html.len, at + 12)], at, ';') orelse return null; // bounded: a bare & costs O(1)
+    if (semi == at + 1) return null;
     const body = html[at + 1 .. semi];
     if (body[0] == '#') {
         const code = if (body.len > 1 and (body[1] == 'x' or body[1] == 'X'))
@@ -116,7 +116,7 @@ pub fn toText(a: Allocator, html: []const u8, max_chars: usize) Allocator.Error!
             }
         }
         if (ch != '<') {
-            const next = std.mem.indexOfAnyPos(u8, region, i, "<&") orelse region.len;
+            const next = std.mem.indexOfAnyPos(u8, region, i + 1, "<&") orelse region.len; // past i: a bare & is text
             try o.text(region[i..next], pre > 0);
             i = next;
             continue;
@@ -198,6 +198,84 @@ fn tidyLines(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
     return std.mem.trim(u8, out.items, "\n");
 }
 
+const stop_words = [_][]const u8{ "the", "and", "for", "with", "what", "are", "how", "this", "that", "from", "into", "use", "using", "can", "you", "your", "its", "was", "were", "has", "have", "does", "which", "about", "all", "any", "not", "but", "out", "via", "per", "new", "name", "main", "latest", "current", "please", "show", "tell", "write", "make", "get" };
+
+/// The lowercased words of `focus` worth matching: three letters or more, no stop words, no repeats.
+fn focusTerms(a: Allocator, focus: []const u8) Allocator.Error![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.tokenizeAny(u8, focus, " \t\r\n.,;:!?()[]{}<>\"'`/=");
+    while (it.next()) |w| {
+        if (w.len < 3 or out.items.len >= 24) continue;
+        const lower = try std.ascii.allocLowerString(a, w);
+        var skip = false;
+        for (stop_words) |s| skip = skip or std.mem.eql(u8, lower, s);
+        for (out.items) |seen| skip = skip or std.mem.eql(u8, lower, seen);
+        if (!skip) try out.append(a, lower);
+    }
+    return out.items;
+}
+
+/// At most `max` bytes of `text`: its opening, then the lines sharing the rarest words with `focus`, in page order.
+pub fn excerpt(a: Allocator, text: []const u8, focus: []const u8, max: usize) Allocator.Error![]const u8 {
+    if (text.len <= max) return text;
+    const head_len = blk: {
+        const cut = cutAt(text, max / 3);
+        break :blk if (std.mem.lastIndexOfScalar(u8, text[0..cut], '\n')) |nl| nl else cut;
+    };
+    const terms = try focusTerms(a, focus);
+    var lines: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, text[head_len..], '\n');
+    while (it.next()) |line| if (std.mem.trim(u8, line, " ").len > 0) try lines.append(a, line);
+    const seen_in = try a.alloc(usize, terms.len);
+    @memset(seen_in, 0);
+    for (lines.items) |line| for (terms, seen_in) |t, *n| {
+        if (std.ascii.findIgnoreCase(line, t) != null) n.* += 1;
+    };
+    const scores = try a.alloc(f32, lines.items.len);
+    for (lines.items, scores) |line, *score| {
+        score.* = 0;
+        for (terms, seen_in) |t, n| if (std.ascii.findIgnoreCase(line, t) != null) {
+            score.* += 1.0 / @as(f32, @floatFromInt(n)); // a word on every line says little about any one of them
+        };
+        if (std.mem.startsWith(u8, line, "#")) score.* *= 1.5;
+    }
+    const order = try a.alloc(usize, lines.items.len);
+    for (order, 0..) |*o, i| o.* = i;
+    std.mem.sort(usize, order, scores, struct {
+        fn more(s: []f32, x: usize, y: usize) bool {
+            return s[x] > s[y] or (s[x] == s[y] and x < y);
+        }
+    }.more);
+    const keep = try a.alloc(bool, lines.items.len);
+    @memset(keep, false);
+    var used = head_len;
+    var kept: std.StringHashMapUnmanaged(void) = .empty;
+    for (order) |i| {
+        if (scores[i] <= 0) break;
+        const line = std.mem.trim(u8, lines.items[i], " ");
+        if (line.len < 16 and !std.mem.startsWith(u8, line, "#")) continue; // a fragment carries little on its own
+        if (kept.contains(line)) continue; // boilerplate repeats: one copy says it
+        const cost = lines.items[i].len + 6;
+        if (used + cost > max) continue;
+        try kept.put(a, line, {});
+        keep[i] = true;
+        used += cost;
+    }
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, text[0..head_len]);
+    var gap = true;
+    for (lines.items, keep) |line, k| {
+        if (!k) {
+            gap = true;
+            continue;
+        }
+        try out.appendSlice(a, if (gap) "\n[...]\n" else "\n");
+        try out.appendSlice(a, line);
+        gap = false;
+    }
+    return out.items;
+}
+
 /// The largest length up to `max` that ends on a UTF-8 character boundary.
 pub fn cutAt(text: []const u8, max: usize) usize {
     if (text.len <= max) return text.len;
@@ -228,6 +306,36 @@ test "title, main content, blocks, lists and entities" {
     try std.testing.expect(std.mem.indexOf(u8, t.text, "| a | b") != null);
     for ([_][]const u8{ "alert", "Home", "legal", "hidden", "color" }) |gone| try std.testing.expect(std.mem.indexOf(u8, t.text, gone) == null);
     try std.testing.expect(!t.truncated);
+}
+
+test "bare ampersands are text, and a page full of them reads in linear time" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t = try toText(a, "<p>Tom & Jerry && x &y; z &amp; w &#33 &</p>", 1000);
+    try std.testing.expectEqualStrings("Tom & Jerry && x &y; z & w &#33 &", t.text);
+    var big: std.ArrayList(u8) = .empty;
+    try big.appendSlice(a, "<body>");
+    for (0..200_000) |_| try big.appendSlice(a, "&a ");
+    const many = try toText(a, big.items, 100);
+    try std.testing.expect(many.truncated and many.text.len <= 100);
+}
+
+test "an excerpt keeps the opening and the lines about the focus, in order" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var text: std.ArrayList(u8) = .empty;
+    try text.appendSlice(a, "# Zig release notes\nIntro about Zig.\n");
+    for (0..40) |i| try text.print(a, "Zig line {d} about the build system and other work.\n", .{i});
+    try text.appendSlice(a, "## std.Io\nThe new std.Io interface replaces std.io writers.\n");
+    for (0..40) |i| try text.print(a, "Zig line {d} about packaging.\n", .{i + 40});
+    const out = try excerpt(a, text.items, "How do I use the std.Io writer in zig?", 300);
+    try std.testing.expect(out.len <= 300);
+    try std.testing.expect(std.mem.startsWith(u8, out, "# Zig release notes\nIntro about Zig."));
+    try std.testing.expect(std.mem.indexOf(u8, out, "The new std.Io interface replaces std.io writers.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "[...]") != null);
+    try std.testing.expectEqualStrings("short", try excerpt(a, "short", "x", 300));
 }
 
 test "a cut never splits a character" {

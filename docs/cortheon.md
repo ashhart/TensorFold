@@ -18,12 +18,15 @@ The client never sees these calls. It gets the answer, or the calls to its own t
 It researches before the model starts building.
 When the latest user message asks about current or version-specific facts, or asks to build with an outside library or API, the model first writes up to three search queries.
 The server runs them, reads up to three of the best pages and puts both in front of the model before its first token.
+Only the user's own words count here. Context a harness wraps in tags, such as a `<memories>` block with the current time, is ignored.
 
 It checks the end of the work once a turn.
 A coding task that changed files after its last test or build is asked to run the test or build before it finishes.
 A researched answer that cites no URL is asked for a short list of its sources.
 
 ## Web safety
+
+A long page is cut to fit the model's room: its opening, then the lines that share the most words with the task and the model's latest search, in page order.
 
 Fetched pages and search results are untrusted data.
 Sentences that read as orders to the model, such as "ignore all previous instructions", are dropped before the model reads the page, and the result says how many were dropped.
@@ -33,7 +36,7 @@ The server refuses private, loopback, link-local and shared address ranges, chec
 TLS certificates are checked against the system's root certificates.
 Each page read stops at 2 MiB and 15 seconds, redirects included, and each search at 10 seconds.
 
-Searches use DuckDuckGo's HTML results, which need no key.
+Searches use DuckDuckGo's HTML results, which need no key, and its lite page when the HTML page refuses or comes back empty.
 Set `BRAVE_SEARCH_API_KEY` to search through Brave's API instead.
 
 ## Budgets
@@ -45,7 +48,8 @@ When the web budget runs out, the model is told to answer from what it has and t
 ## Requests
 
 A request can send `"cortheon": false` to skip it.
-Cortheon also leaves these requests as they are: `tool_choice` set to `"none"`, `"required"` or a named function, structured output, `logprobs`, title requests and background requests.
+Cortheon also leaves these requests as they are: `tool_choice` set to `"none"`, `"required"` or a named function, structured output, `logprobs`, title requests, background requests, and requests with no tools that ask the model to transform text they carry.
+Harnesses send those last ones for titles, summaries and routing hints.
 Requests to `/v1/responses` and `/v1/messages` get the same treatment as chat completions.
 
 A streamed reply shows Cortheon's progress in `reasoning_content`, for example `Cortheon: searching the web for "zig 0.17 release notes"`.

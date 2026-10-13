@@ -13,7 +13,7 @@ const Allocator = std.mem.Allocator;
 const max_queries = 3;
 const max_pages = 3;
 
-const planner = "You write web search queries for a task. Reply with up to 3 queries, one per line, and nothing else. Each query names the product, library or topic, with its version when the task gives one, and aims at official documentation, release notes, changelogs, papers or the project's repository. If the task needs no outside information, reply NONE.";
+const planner = "You write web search queries for a task that needs current information from the web. Reply with up to 3 short queries, one per line, and nothing else. Each query names the product, library or topic, with its version when the task gives one, and aims at official documentation, release notes, changelogs, papers or the project's repository.";
 
 /// Hosts whose pages carry little readable text (video, social feeds).
 const unreadable = [_][]const u8{ "youtube.com", "youtu.be", "twitter.com", "x.com", "facebook.com", "instagram.com", "tiktok.com", "linkedin.com", "pinterest.com" };
@@ -30,8 +30,9 @@ pub fn run(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, sink: ?ch
         if (gone.check()) return error.Cancelled;
         try t.progress(a, sink, "searching the web for \"{s}\"", .{q});
         const call = try toolCall(a, tools.search_name, "query", q);
-        const ran = try tools.run(t.state.web, a, call, t.today, budget);
+        const ran = try tools.run(t.state.web, a, call, t.today, budget, t.goal);
         try t.noteSources(a, ran);
+        if (!ran.ok or ran.sources.len == 0) try t.progress(a, sink, "no results: {s}", .{ran.text[0..@min(ran.text.len, 160)]});
         found[i] = ran.sources;
         try calls.append(a, call);
         try results.append(a, try toolMessage(a, call, ran.text));
@@ -41,13 +42,14 @@ pub fn run(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, sink: ?ch
     for (results.items) |m| try t.hide(a, input, m);
     const picks = try pick(a, found[0..queries.len]);
     if (picks.len == 0) return;
+    const focus = try std.mem.concat(a, u8, &.{ try std.mem.join(a, " ", queries), " ", t.goal });
     calls = .empty;
     results = .empty;
     for (picks) |url| {
         if (gone.check()) return error.Cancelled;
         try t.progress(a, sink, "reading {s}", .{url});
         const call = try toolCall(a, tools.fetch_name, "url", url);
-        const ran = try tools.run(t.state.web, a, call, t.today, budget);
+        const ran = try tools.run(t.state.web, a, call, t.today, budget, focus);
         try t.noteSources(a, ran);
         if (!ran.ok) try t.progress(a, sink, "{s}", .{ran.text[0..@min(ran.text.len, 200)]});
         try calls.append(a, call);
@@ -100,12 +102,16 @@ fn unmark(line: []const u8) []const u8 {
     return line;
 }
 
-/// One query from the goal: its first line of prose, at most twelve words.
+/// One query from the goal: its first sentence of prose, at most twelve words.
 pub fn fallback(a: Allocator, goal: []const u8) Allocator.Error![]const []const u8 {
     var lines = std.mem.splitScalar(u8, goal, '\n');
     while (lines.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \t\r`#>-*");
+        var line = std.mem.trim(u8, raw, " \t\r`#>-*");
         if (line.len < 3) continue;
+        for (line, 0..) |ch, i| if ((ch == '?' or ch == '.' or ch == '!') and (i + 1 == line.len or line[i + 1] == ' ')) {
+            line = line[0..i];
+            break;
+        };
         var words: std.ArrayList(u8) = .empty;
         var it = std.mem.tokenizeAny(u8, line, " \t");
         var n: usize = 0;
@@ -210,6 +216,7 @@ test "planner replies become clean queries; a goal becomes one when the planner 
     try std.testing.expectEqualStrings("2025 tax brackets for Canada", (try parseQueries(a, "2025 tax brackets for Canada"))[0]);
     const f = try fallback(a, "```\n\nImplement a client for the latest Stripe API, with retries and idempotency keys and good tests please thanks\n");
     try std.testing.expectEqualStrings("Implement a client for the latest Stripe API, with retries and idempotency", f[0]);
+    try std.testing.expectEqualStrings("What are the main changes in the latest Zig release", (try fallback(a, "What are the main changes in the latest Zig release? Name the version."))[0]);
 }
 
 test "pages are picked by rank across queries, without repeats or video hosts" {

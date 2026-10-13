@@ -42,6 +42,11 @@ pub fn duckduckgoUrl(a: Allocator, query: []const u8) Allocator.Error![]const u8
     return std.fmt.allocPrint(a, "https://html.duckduckgo.com/html/?q={s}", .{try encode(a, query)});
 }
 
+/// DuckDuckGo's lite page, asked when its HTML page refuses or comes back empty.
+pub fn duckduckgoLiteUrl(a: Allocator, query: []const u8) Allocator.Error![]const u8 {
+    return std.fmt.allocPrint(a, "https://lite.duckduckgo.com/lite/?q={s}", .{try encode(a, query)});
+}
+
 pub fn braveUrl(a: Allocator, query: []const u8, count: usize) Allocator.Error![]const u8 {
     return std.fmt.allocPrint(a, "https://api.search.brave.com/res/v1/web/search?q={s}&count={d}", .{ try encode(a, query), @min(count, 20) });
 }
@@ -65,10 +70,24 @@ fn resultTarget(a: Allocator, href_raw: []const u8) Allocator.Error!?[]const u8 
     return null;
 }
 
+/// How a DuckDuckGo results page marks a result's link and its snippet.
+const Marks = struct { link: []const u8, snippet: []const u8, snippet_end: []const u8 };
+const html_marks: Marks = .{ .link = "class=\"result__a\"", .snippet = "class=\"result__snippet\"", .snippet_end = "</a>" };
+const lite_marks: Marks = .{ .link = "class='result-link'", .snippet = "class='result-snippet'", .snippet_end = "</td>" };
+
 /// Results from DuckDuckGo's HTML page: each `result__a` link's target and title, with its `result__snippet`.
 pub fn parseDuckDuckGo(a: Allocator, page: []const u8, limit: usize) Allocator.Error![]Result {
+    return parseMarked(a, page, limit, html_marks);
+}
+
+/// Results from DuckDuckGo's lite page: each `result-link` and its `result-snippet` cell.
+pub fn parseDuckDuckGoLite(a: Allocator, page: []const u8, limit: usize) Allocator.Error![]Result {
+    return parseMarked(a, page, limit, lite_marks);
+}
+
+fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator.Error![]Result {
     var out: std.ArrayList(Result) = .empty;
-    const marker = "class=\"result__a\"";
+    const marker = m.link;
     var from: usize = 0;
     while (out.items.len < limit) {
         const at = std.mem.indexOfPos(u8, page, from, marker) orelse break;
@@ -85,9 +104,9 @@ pub fn parseDuckDuckGo(a: Allocator, page: []const u8, limit: usize) Allocator.E
         const close = std.mem.indexOfPos(u8, page, tag_end, "</a>") orelse continue;
         const title = try fragmentText(a, page[tag_end + 1 .. close]);
         var snippet: []const u8 = "";
-        if (std.mem.indexOfPos(u8, page[0..next], close, "class=\"result__snippet\"")) |s| {
+        if (std.mem.indexOfPos(u8, page[0..next], close, m.snippet)) |s| {
             const s_open = std.mem.indexOfScalarPos(u8, page, s, '>') orelse s;
-            const s_close = std.mem.indexOfPos(u8, page, s_open, "</a>") orelse s_open;
+            const s_close = std.mem.indexOfPos(u8, page, s_open, m.snippet_end) orelse s_open;
             snippet = try fragmentText(a, page[s_open + 1 .. s_close]);
         }
         var seen = false;
@@ -133,6 +152,25 @@ test "DuckDuckGo results: targets decoded, ads skipped, snippets read" {
     try std.testing.expectEqualStrings("The std.Io interface \u{2014} new.", results[0].snippet);
     try std.testing.expectEqualStrings("https://example.org/page", results[1].url);
     try std.testing.expectEqualStrings("", results[1].snippet);
+}
+
+test "DuckDuckGo's lite page reads the same way" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page =
+        \\<tr><td>1.&nbsp;</td><td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fziglang.org%2Fnews%2F&amp;rut=x" class='result-link'>Zig <b>News</b></a></td></tr>
+        \\<tr><td>&nbsp;</td><td class='result-snippet'>
+        \\  Release <b>notes</b> &amp; more
+        \\</td></tr>
+        \\<tr><td>2.&nbsp;</td><td><a rel="nofollow" href="https://example.org/two" class='result-link'>Two</a></td></tr>
+    ;
+    const results = try parseDuckDuckGoLite(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    try std.testing.expectEqualStrings("https://ziglang.org/news/", results[0].url);
+    try std.testing.expectEqualStrings("Zig News", results[0].title);
+    try std.testing.expectEqualStrings("Release notes & more", results[0].snippet);
+    try std.testing.expectEqualStrings("Two", results[1].title);
 }
 
 test "Brave results and query encoding" {

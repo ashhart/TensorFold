@@ -60,7 +60,7 @@ fn rounds(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, first: cha
         const more = round + 1 < max_rounds and !std.mem.eql(u8, reply.finish_reason, "length");
         if (server.items.len > 0 and t.calls_left > 0 and more) {
             try filter.endRound(false);
-            try t.addProse(a, parsed.content);
+            if (sink != null) try t.addProse(a, parsed.content); // a stream already showed it; a whole reply drops the narration
             try runCalls(t, a, input, server.items, sink, gone);
             prepared = try prepare(srv, cx, input.*, gone);
             continue;
@@ -108,7 +108,8 @@ fn runCalls(t: *Turn, a: Allocator, input: *chat.Input, calls: []const Value, si
         const is_search = std.mem.eql(u8, tools.callName(c), tools.search_name);
         const subject = (try tools.argument(a, c, if (is_search) "query" else "url")) orelse "";
         if (is_search) try t.progress(a, sink, "searching the web for \"{s}\"", .{subject}) else try t.progress(a, sink, "reading {s}", .{subject});
-        const ran = try tools.run(t.state.web, a, c, t.today, 6000);
+        if (is_search) t.focus = subject;
+        const ran = try tools.run(t.state.web, a, c, t.today, 6000, try std.mem.concat(a, u8, &.{ t.focus, " ", t.goal }));
         try t.noteSources(a, ran);
         if (!ran.ok) try t.progress(a, sink, "{s}", .{ran.text[0..@min(ran.text.len, 200)]});
         try t.hide(a, input, try research.toolMessage(a, c, ran.text));

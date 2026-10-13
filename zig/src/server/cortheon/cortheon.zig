@@ -71,6 +71,7 @@ pub const Turn = struct {
     fetches: u32 = 0,
     rounds: u32 = 0,
     calls_left: u32 = calls_per_reply,
+    focus: []const u8 = "", // the model's latest search this reply, which its next page reads are cut around
 
     /// Adds a message the client never sees to the conversation the model reads.
     pub fn hide(t: *Turn, a: Allocator, input: *chat.Input, m: Value) Allocator.Error!void {
@@ -159,8 +160,17 @@ pub fn begin(srv: *Server, a: Allocator, raw: Value, id: []const u8, is_chat: bo
     for (grammar.fields) |k| if (json.truthyField(raw, k)) return null;
     if (json.truthyField(raw, "logprobs")) return null;
     if (raw.get("priority")) |p| if (p == .string and std.mem.eql(u8, p.string, "background")) return null;
-    if (prompt_mod.isTitle(input.messages, input.tools.len > 0)) return null;
+    if (prompt_mod.isTitle(input.messages, input.tools.len > 0) or utility(input)) return null;
     return start(state, srv, a, id, input) catch null;
+}
+
+/// A tool-less ask to transform text the request carries, named by its system prompt or a long user turn.
+fn utility(input: *const chat.Input) bool {
+    if (input.tools.len > 0) return false;
+    const msgs = input.messages.array;
+    if (roleIs(msgs[0], "system") and program.isUtility(memory.text(msgs[0]))) return true;
+    const last = msgs[msgs.len - 1];
+    return roleIs(last, "user") and memory.text(last).len >= 200 and program.isUtility(memory.text(last));
 }
 
 fn start(state: *State, srv: *Server, a: Allocator, id: []const u8, input: *chat.Input) !*Turn {
@@ -168,8 +178,9 @@ fn start(state: *State, srv: *Server, a: Allocator, id: []const u8, input: *chat
     var first: ?[]const u8 = null;
     var latest: []const u8 = "";
     for (spliced) |m| if (roleIs(m, "user")) {
-        if (first == null) first = memory.text(m);
-        latest = memory.text(m);
+        const own = try program.ownWords(a, memory.text(m));
+        if (first == null) first = own;
+        latest = own;
     };
     const task = program.classify(a, first orelse latest);
     const latest_task = program.classify(a, latest);
