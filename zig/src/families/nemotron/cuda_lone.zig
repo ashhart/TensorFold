@@ -24,12 +24,15 @@ pub fn run(gpa: std.mem.Allocator, b: *Cuda, s: *lanes.Stream, hooks: Hooks) !bo
     if (!s.drafts) return error.DraftedOnly;
     const costs = b.measured orelse return error.CostsNotMeasured;
     const be = b.backend();
-    if (s.logprobs != null) { // as the lane core opens a stream: the first token with the prompt's last row
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    if (s.logprobs != null or s.grammar != null) { // as the lane core opens a stream: masked, with the prompt's last row
         errdefer be.release(s);
         try be.prefill(s);
-        const token = try be.read(try be.first(s, s.prompt_len));
-        const row = [1]LogRow{(try be.firstRow(s)).forToken(token)};
-        _ = try s.commit(gpa, &.{token}, &row);
+        const mask = if (s.grammar) |g| try g.next(arena.allocator()) else null;
+        const token = try be.read(if (mask) |m| try be.vtable.first_masked.?(be.ptr, s, s.prompt_len, m) else try be.first(s, s.prompt_len));
+        const row = if (s.logprobs != null) [1]LogRow{(try be.firstRow(s)).forToken(token)} else undefined;
+        _ = try s.commit(gpa, &.{token}, if (s.logprobs != null) &row else &.{});
     } else _ = try be.opening(gpa, s); // the prompt pass, its first token committed; a cancel or failure releases the stream
     var handed = false;
     defer if (!handed) be.release(s);
@@ -38,8 +41,10 @@ pub fn run(gpa: std.mem.Allocator, b: *Cuda, s: *lanes.Stream, hooks: Hooks) !bo
     var rule = drafts.depthRule(costs);
     var r = try drafts.Rounds.init(gpa, b.e, h, &rule, s.prompt(), s.emitted(), null);
     defer r.deinit();
+    var held: Held = .{ .b = b, .arena = &arena };
     while (true) {
-        const v = try r.verify(s.context.items[s.context.items.len - 1]);
+        held.c = s.grammar;
+        const v = try r.verify(s.context.items[s.context.items.len - 1], if (s.grammar != null) held.gate() else null);
         const kept = v.accepted + 1;
         var rows: [state.max_rows]LogRow = undefined;
         if (s.logprobs) |k| try windowRows(b, k, v.sampled[0..kept], rows[0..kept]); // the window's logits stay put
@@ -59,6 +64,29 @@ pub fn run(gpa: std.mem.Allocator, b: *Cuda, s: *lanes.Stream, hooks: Hooks) !bo
         return true;
     }
 }
+
+/// A structured stream's grammar over each window, as the lane core's windows.constrain keeps a lone stream's chain.
+const Held = struct {
+    b: *Cuda,
+    arena: *std.heap.ArenaAllocator,
+    c: ?*lanes.grammar.Constraint = null,
+
+    fn gate(x: *Held) drafts.Gate {
+        return .{ .ptr = x, .window = window };
+    }
+
+    fn window(ptr: *anyopaque, ids: []u32, planned: usize) anyerror!drafts.Gated {
+        const x: *Held = @ptrCast(@alignCast(ptr));
+        _ = x.arena.reset(.retain_capacity);
+        const a = x.arena.allocator();
+        const parents = try a.alloc(i32, planned);
+        for (parents, 0..) |*p, i| p.* = @as(i32, @intCast(i)) - 1;
+        const w = try x.c.?.window(a, ids[0..planned], parents, false, ids.len);
+        const rows = w.rows.len + w.extra.len;
+        @memcpy(ids[w.rows.len..rows], w.extra);
+        return .{ .rows = rows, .mask = try x.b.putBits(0, w.masks) };
+    }
+};
 
 /// The kept rows of the window just verified, as the lane core's windows read them (Cuda.verifyFn).
 fn windowRows(b: *Cuda, k: u8, picks: []const u32, out: []LogRow) !void {

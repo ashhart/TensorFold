@@ -88,7 +88,7 @@ pub const Cuda = struct {
     }
 
     /// Structured output's bits for rows from `slot` (a forward's rows; a first token's: the last slot), device-read.
-    fn putBits(self: *Cuda, slot: usize, masks: []const u32) !engine.Mask {
+    pub fn putBits(self: *Cuda, slot: usize, masks: []const u32) !engine.Mask {
         const words = (self.e.c.vocab + 31) / 32;
         if (masks.len == 0) return .{};
         if (masks.len % words != 0 or slot * words + masks.len > row_slots * words) return error.InvalidGrammarMasks;
