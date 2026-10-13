@@ -129,7 +129,8 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "norms")) return norms_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "norm-rows")) return norm_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glue")) return glue_tests.run(gpu);
-    if (std.mem.eql(u8, cmd, "pocket")) return pocket_tests.run(gpu, if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else 0);
+    if (std.mem.eql(u8, cmd, "pocket"))
+        return pocket_tests.run(gpu, if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else 0);
     if (std.mem.eql(u8, cmd, "window-profile")) return window_profile.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "tree-accept")) return tree_accept.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "chunk-costs")) return chunk_costs.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));

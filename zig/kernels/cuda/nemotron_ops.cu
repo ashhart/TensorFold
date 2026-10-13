@@ -163,8 +163,8 @@ constexpr int pocket_width = 64;  // act's row stride: the most neurons a pocket
 
 // act [rows, 64] = relu^2(up y) over the first n neurons: a warp takes NPW neurons by R rows, its lanes' sums in order.
 template <int NPW, int R>
-__device__ __forceinline__ void pocket_in(const __nv_bfloat16* __restrict__ y, int d, const float* __restrict__ up, int n,
-                                          float* __restrict__ act, int rows) {
+__device__ __forceinline__ void pocket_in(const __nv_bfloat16* __restrict__ y, int d, const float* __restrict__ up,
+                                          int n, float* __restrict__ act, int rows) {
     const int lane = threadIdx.x & 31;
     const int j0 = (blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5)) * NPW;
     if (j0 >= n) return;
@@ -248,29 +248,35 @@ __device__ __forceinline__ void pocket_out(const float* __restrict__ act, const 
 
 // tf_pocket_rows' first half over the first *used neurons: a warp a neuron, a block row a row.
 extern "C" __global__ void __launch_bounds__(128) tf_pocket_in(const __nv_bfloat16* __restrict__ y, int d,
-                                                               const float* __restrict__ up, const int* __restrict__ used,
+                                                               const float* __restrict__ up,
+                                                               const int* __restrict__ used,
                                                                float* __restrict__ act, int rows) {
     pocket_in<1, 1>(y, d, up, *used, act, rows);
 }
 
 // The same for many rows: a warp eight neurons by eight rows.
 extern "C" __global__ void __launch_bounds__(256) tf_pocket_in_rows(const __nv_bfloat16* __restrict__ y, int d,
-                                                                    const float* __restrict__ up, const int* __restrict__ used,
+                                                                    const float* __restrict__ up,
+                                                                    const int* __restrict__ used,
                                                                     float* __restrict__ act, int rows) {
     pocket_in<8, 8>(y, d, up, *used, act, rows);
 }
 
 // tf_pocket_rows' second half over the first *used neurons: a thread an output, a block row a row.
-extern "C" __global__ void __launch_bounds__(128) tf_pocket_out(const float* __restrict__ act, const float* __restrict__ down,
-                                                                const int* __restrict__ used, int d, void* __restrict__ out,
-                                                                int out_f32, int rows, int row_mul, int row_add) {
+extern "C" __global__ void __launch_bounds__(128) tf_pocket_out(const float* __restrict__ act,
+                                                                const float* __restrict__ down,
+                                                                const int* __restrict__ used, int d,
+                                                                void* __restrict__ out, int out_f32, int rows,
+                                                                int row_mul, int row_add) {
     pocket_out<1, 16>(act, down, *used, d, out, out_f32, rows, row_mul, row_add);
 }
 
 // The same for many rows: a thread an output over 16 rows.
-extern "C" __global__ void __launch_bounds__(128) tf_pocket_out_rows(const float* __restrict__ act, const float* __restrict__ down,
-                                                                     const int* __restrict__ used, int d, void* __restrict__ out,
-                                                                     int out_f32, int rows, int row_mul, int row_add) {
+extern "C" __global__ void __launch_bounds__(128) tf_pocket_out_rows(const float* __restrict__ act,
+                                                                     const float* __restrict__ down,
+                                                                     const int* __restrict__ used, int d,
+                                                                     void* __restrict__ out, int out_f32, int rows,
+                                                                     int row_mul, int row_add) {
     pocket_out<16, 8>(act, down, *used, d, out, out_f32, rows, row_mul, row_add);
 }
 

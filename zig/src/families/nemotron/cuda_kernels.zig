@@ -244,7 +244,18 @@ pub const Ops = struct {
     }
 
     /// nemotron_ops' pocket: out (bf16, fp32 if `out_f32`) += down relu^2(up y) at rows `i * row_mul + row_add`.
-    pub fn pocketRows(o: Ops, y: u64, d: usize, p: Pocket, act: u64, out: u64, out_f32: bool, rows: usize, row_mul: usize, row_add: usize) !void {
+    pub fn pocketRows(
+        o: Ops,
+        y: u64,
+        d: usize,
+        p: Pocket,
+        act: u64,
+        out: u64,
+        out_f32: bool,
+        rows: usize,
+        row_mul: usize,
+        row_add: usize,
+    ) !void {
         if (p.n > pocket_width) return error.PocketTooWide;
         if (p.used == 0) return; // no neuron in use: nothing launched, so the output keeps its bits, an exact -0.0 too
         // a block row a row until the tiled forms (eight neurons by eight rows a warp, 16 rows a thread) run faster
@@ -256,7 +267,10 @@ pub const Ops = struct {
         a.add(p.count);
         a.add(act);
         a.add(int(rows));
-        const in_grid: [3]usize = if (tiled[0]) .{ (p.n + 63) / 64, (rows + 7) / 8, 1 } else .{ (p.n + 3) / 4, rows, 1 };
+        const in_grid: [3]usize = if (tiled[0])
+            .{ (p.n + 63) / 64, (rows + 7) / 8, 1 }
+        else
+            .{ (p.n + 3) / 4, rows, 1 };
         try o.go(o.k.pocket_in[@intFromBool(tiled[0])], in_grid, if (tiled[0]) 256 else 128, 0, &a);
         var b: cuda.Args = .{};
         b.add(act);
@@ -266,7 +280,13 @@ pub const Ops = struct {
         b.add(out);
         b.add(@as(c_int, @intFromBool(out_f32)));
         for ([_]usize{ rows, row_mul, row_add }) |v| b.add(int(v));
-        try o.go(o.k.pocket_out[@intFromBool(tiled[1])], .{ (d + 127) / 128, if (tiled[1]) (rows + 15) / 16 else rows, 1 }, 128, 0, &b);
+        try o.go(
+            o.k.pocket_out[@intFromBool(tiled[1])],
+            .{ (d + 127) / 128, if (tiled[1]) (rows + 15) / 16 else rows, 1 },
+            128,
+            0,
+            &b,
+        );
     }
 
     /// nemotron_ops' nudge: y (bf16, or fp32 when `y_f32`) += x (fp32) over n values.

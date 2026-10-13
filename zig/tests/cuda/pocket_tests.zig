@@ -100,7 +100,13 @@ fn split(r: *Rig, c: Case, in: Inputs, order: Order) ![]u8 {
         },
     }
     const count: u32 = @intCast(c.used);
-    const p: kern.Pocket = .{ .up = try r.dev(std.mem.sliceAsBytes(up)), .down = try r.dev(std.mem.sliceAsBytes(down)), .n = width, .used = c.used, .count = try r.dev(std.mem.asBytes(&count)) };
+    const p: kern.Pocket = .{
+        .up = try r.dev(std.mem.sliceAsBytes(up)),
+        .down = try r.dev(std.mem.sliceAsBytes(down)),
+        .n = width,
+        .used = c.used,
+        .count = try r.dev(std.mem.asBytes(&count)),
+    };
     const act = try r.dev(try r.a.alloc(u8, c.rows * width * 4));
     const out = try r.dev(in.out);
     try r.gpu.ctx.synchronize();
@@ -122,15 +128,32 @@ fn compare(r: *Rig, c: Case) !void {
     const word: usize = if (c.out_f32) 4 else 2;
     const ref_out = try r.dev(in.out);
     try r.gpu.ctx.synchronize();
-    try r.reference(c, try r.dev(std.mem.sliceAsBytes(in.y)), try r.dev(std.mem.sliceAsBytes(in.up)), try r.dev(std.mem.sliceAsBytes(in.down)), ref_out);
+    try r.reference(
+        c,
+        try r.dev(std.mem.sliceAsBytes(in.y)),
+        try r.dev(std.mem.sliceAsBytes(in.up)),
+        try r.dev(std.mem.sliceAsBytes(in.down)),
+        ref_out,
+    );
     const want = try r.get(ref_out, in.out.len);
     const moved = differing(want, in.out, word);
     // no neuron in use: tf_pocket_rows added zeros, so the forward's skipped launch leaves the same bytes
-    if (c.used == 0) try check.expect(moved == 0, "pocket d={d} rows={d} used=0: tf_pocket_rows changed {d} values", .{ c.d, c.rows, moved });
-    if (c.used > 0) try check.expect(moved * 2 > c.d, "pocket d={d} rows={d} used={d}: the reference moved {d} of {d} values", .{ c.d, c.rows, c.used, moved, c.rows * c.d });
+    if (c.used == 0) try check.expect(
+        moved == 0,
+        "pocket d={d} rows={d} used=0: tf_pocket_rows changed {d} values",
+        .{ c.d, c.rows, moved },
+    );
+    if (c.used > 0) try check.expect(
+        moved * 2 > c.d,
+        "pocket d={d} rows={d} used={d}: the reference moved {d} of {d} values",
+        .{ c.d, c.rows, c.used, moved, c.rows * c.d },
+    );
     const got = try split(r, c, in, .same);
     const differ = differing(got, want, word);
-    if (differ > 0) std.debug.print("DIFFER pocket d={d} rows={d} used={d} out_f32={}: {d} of {d} values\n", .{ c.d, c.rows, c.used, c.out_f32, differ, want.len / word });
+    if (differ > 0) std.debug.print(
+        "DIFFER pocket d={d} rows={d} used={d} out_f32={}: {d} of {d} values\n",
+        .{ c.d, c.rows, c.used, c.out_f32, differ, want.len / word },
+    );
     try check.sameBytes("pocket", got, want);
 }
 
@@ -140,10 +163,20 @@ fn control(r: *Rig, c: Case, order: Order) !usize {
     const word: usize = if (c.out_f32) 4 else 2;
     const ref_out = try r.dev(in.out);
     try r.gpu.ctx.synchronize();
-    try r.reference(c, try r.dev(std.mem.sliceAsBytes(in.y)), try r.dev(std.mem.sliceAsBytes(in.up)), try r.dev(std.mem.sliceAsBytes(in.down)), ref_out);
+    try r.reference(
+        c,
+        try r.dev(std.mem.sliceAsBytes(in.y)),
+        try r.dev(std.mem.sliceAsBytes(in.up)),
+        try r.dev(std.mem.sliceAsBytes(in.down)),
+        ref_out,
+    );
     const want = try r.get(ref_out, in.out.len);
     const differ = differing(try split(r, c, in, order), want, word);
-    try check.expect(differ > 0, "pocket control {t} d={d} rows={d} used={d}: equal bytes, so the check cannot see the order", .{ order, c.d, c.rows, c.used });
+    try check.expect(
+        differ > 0,
+        "pocket control {t} d={d} rows={d} used={d}: equal bytes, so the check cannot see the order",
+        .{ order, c.d, c.rows, c.used },
+    );
     return differ;
 }
 
@@ -164,7 +197,10 @@ fn negativeZero(r: *Rig, d: usize, rows: usize, out_f32: bool) !usize {
         var k: usize = 0;
         while (k < d) : (k += 3) {
             const i = (t * row_mul + slot) * d + k;
-            if (out_f32) std.mem.bytesAsSlice(u32, in.out)[i] = 0x8000_0000 else std.mem.bytesAsSlice(u16, in.out)[i] = 0x8000;
+            if (out_f32)
+                std.mem.bytesAsSlice(u32, in.out)[i] = 0x8000_0000
+            else
+                std.mem.bytesAsSlice(u16, in.out)[i] = 0x8000;
             placed += @intFromBool(slot == row_add);
         }
     };
@@ -179,9 +215,29 @@ fn negativeZero(r: *Rig, d: usize, rows: usize, out_f32: bool) !usize {
     // tf_pocket_rows over all 64 neurons, every one zero
     try r.reference(c, y, up, down, outs[0]);
     // the launcher, given no neuron in use, launches nothing
-    try r.o.pocketRows(y, d, .{ .up = up, .down = down, .n = width, .used = 0, .count = count }, act, outs[1], out_f32, rows, row_mul, row_add);
+    try r.o.pocketRows(
+        y,
+        d,
+        .{ .up = up, .down = down, .n = width, .used = 0, .count = count },
+        act,
+        outs[1],
+        out_f32,
+        rows,
+        row_mul,
+        row_add,
+    );
     // a graph captured while the layer held neurons launches both kernels, which read the device's count of 0
-    try r.o.pocketRows(y, d, .{ .up = up, .down = down, .n = width, .used = width, .count = count }, act, outs[2], out_f32, rows, row_mul, row_add);
+    try r.o.pocketRows(
+        y,
+        d,
+        .{ .up = up, .down = down, .n = width, .used = width, .count = count },
+        act,
+        outs[2],
+        out_f32,
+        rows,
+        row_mul,
+        row_add,
+    );
     const old = try r.get(outs[0], in.out.len);
     const skipped = try r.get(outs[1], in.out.len);
     const captured = try r.get(outs[2], in.out.len);
@@ -190,10 +246,18 @@ fn negativeZero(r: *Rig, d: usize, rows: usize, out_f32: bool) !usize {
     var i: usize = 0;
     while (i < in.out.len) : (i += word) {
         if (std.mem.eql(u8, old[i..][0..word], in.out[i..][0..word])) continue;
-        try check.expect(exactZero(in.out[i..][0..word], true) and exactZero(old[i..][0..word], false), "pocket -0.0 d={d} rows={d} out_f32={}: tf_pocket_rows changed value {d}, not a -0.0 to +0.0", .{ d, rows, out_f32, i / word });
+        try check.expect(
+            exactZero(in.out[i..][0..word], true) and exactZero(old[i..][0..word], false),
+            "pocket -0.0 d={d} rows={d} out_f32={}: tf_pocket_rows changed value {d}, not a -0.0 to +0.0",
+            .{ d, rows, out_f32, i / word },
+        );
         turned += 1;
     }
-    try check.expect(turned == placed, "pocket -0.0 d={d} rows={d} out_f32={}: tf_pocket_rows turned {d} of the {d} -0.0 it added to", .{ d, rows, out_f32, turned, placed });
+    try check.expect(
+        turned == placed,
+        "pocket -0.0 d={d} rows={d} out_f32={}: tf_pocket_rows turned {d} of the {d} -0.0 it added to",
+        .{ d, rows, out_f32, turned, placed },
+    );
     try check.sameBytes("pocket -0.0, no neuron in use: the output as it was", skipped, in.out);
     try check.sameBytes("pocket -0.0, a captured launch reading a count of 0: the output as it was", captured, in.out);
     return turned;
@@ -206,7 +270,13 @@ fn timing(r: *Rig, c: Case, reps: usize) !void {
     const up = try r.dev(std.mem.sliceAsBytes(in.up));
     const down = try r.dev(std.mem.sliceAsBytes(in.down));
     const count: u32 = @intCast(c.used);
-    const p: kern.Pocket = .{ .up = up, .down = down, .n = width, .used = c.used, .count = try r.dev(std.mem.asBytes(&count)) };
+    const p: kern.Pocket = .{
+        .up = up,
+        .down = down,
+        .n = width,
+        .used = c.used,
+        .count = try r.dev(std.mem.asBytes(&count)),
+    };
     const act = try r.dev(try r.a.alloc(u8, c.rows * width * 4));
     const out = try r.dev(in.out);
     const flush = try r.dev(try r.a.alloc(u8, 128 << 20));
@@ -218,14 +288,21 @@ fn timing(r: *Rig, c: Case, reps: usize) !void {
         for (0..reps + 2) |i| {
             try r.o.fill32(flush, @intCast(i), (128 << 20) / 4);
             try ev[0].record(r.o.s);
-            if (which == 0) try r.reference(c, y, up, down, out) else try r.o.pocketRows(y, c.d, p, act, out, c.out_f32, c.rows, row_mul, row_add);
+            if (which == 0)
+                try r.reference(c, y, up, down, out)
+            else
+                try r.o.pocketRows(y, c.d, p, act, out, c.out_f32, c.rows, row_mul, row_add);
             try ev[1].record(r.o.s);
             try r.o.s.synchronize();
             if (i >= 2) us[i - 2] = @as(f64, try ev[0].elapsedMs(ev[1])) * 1000;
         }
         med[which] = check.median(us);
     }
-    std.debug.print("RESULT pocket time d={d} rows={d} used={d} out_f32={}: tf_pocket_rows {d:.1} us, tf_pocket_in + tf_pocket_out {d:.1} us\n", .{ c.d, c.rows, c.used, c.out_f32, med[0], med[1] });
+    std.debug.print(
+        "RESULT pocket time d={d} rows={d} used={d} out_f32={}: tf_pocket_rows {d:.1} us, " ++
+            "tf_pocket_in + tf_pocket_out {d:.1} us\n",
+        .{ c.d, c.rows, c.used, c.out_f32, med[0], med[1] },
+    );
 }
 
 /// `tf-cuda-test pocket [reps]`: every case byte for byte, the controls, then the launches timed if `reps` > 0.
@@ -241,37 +318,57 @@ pub fn run(gpu: Gpu, reps: usize) !void {
     var s = try cuda.Stream.init(gpu.d, true);
     defer s.deinit();
     var prng = std.Random.DefaultPrng.init(0x9e37_0c4e);
-    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .o = .{ .k = &k, .s = s }, .old = try k.mods[7].function("tf_pocket_rows"), .rng = prng.random() };
+    var r: Rig = .{
+        .gpu = gpu,
+        .a = arena.allocator(),
+        .o = .{ .k = &k, .s = s },
+        .old = try k.mods[7].function("tf_pocket_rows"),
+        .rng = prng.random(),
+    };
     defer {
         for (r.bufs.items) |*b| b.free();
         r.bufs.deinit(gpu.gpa);
     }
     var cases: usize = 0;
     // 2728 leaves every lane's stride and the last output block a remainder; 70 and 300 rows take the tiled forms
-    for ([_]usize{ 2688, 2728 }) |d| for ([_]usize{ 1, 2, 5, 16, 17, 40, 70, 300 }) |rows| for ([_]usize{ 0, 1, 6, 10, 44, 64 }) |used| for ([_]bool{ true, false }) |f| {
-        try compare(&r, .{ .d = d, .rows = rows, .used = used, .out_f32 = f });
-        cases += 1;
-        _ = arena.reset(.retain_capacity);
-        for (r.bufs.items) |*b| b.free();
-        r.bufs.clearRetainingCapacity();
-    };
+    for ([_]usize{ 2688, 2728 }) |d|
+        for ([_]usize{ 1, 2, 5, 16, 17, 40, 70, 300 }) |rows|
+            for ([_]usize{ 0, 1, 6, 10, 44, 64 }) |used|
+                for ([_]bool{ true, false }) |f| {
+                    try compare(&r, .{ .d = d, .rows = rows, .used = used, .out_f32 = f });
+                    cases += 1;
+                    _ = arena.reset(.retain_capacity);
+                    for (r.bufs.items) |*b| b.free();
+                    r.bufs.clearRetainingCapacity();
+                };
     for ([_]usize{ state.prefill_rows, state.pass_rows }) |rows| for ([_]usize{ 44, 64 }) |used| {
-        try compare(&r, .{ .d = 2688, .rows = rows, .used = used, .out_f32 = false }); // a whole prompt chunk, a whole serial pass
+        // a whole prompt chunk, a whole serial pass
+        try compare(&r, .{ .d = 2688, .rows = rows, .used = used, .out_f32 = false });
         cases += 1;
     };
-    check.pass("pocket: {d} cases byte-equal to tf_pocket_rows (rows 1 to {d}, 0 to 64 neurons in use, fp32 and bf16 out)", .{ cases, state.pass_rows });
+    check.pass(
+        "pocket: {d} cases byte-equal to tf_pocket_rows (rows 1 to {d}, 0 to 64 neurons in use, fp32 and bf16 out)",
+        .{ cases, state.pass_rows },
+    );
     var moved: [4]usize = undefined;
     for ([_]usize{ 16, 300 }, 0..) |rows, i| {
         moved[2 * i] = try control(&r, .{ .d = 2688, .rows = rows, .used = 44, .out_f32 = true }, .neurons_reversed);
         moved[2 * i + 1] = try control(&r, .{ .d = 2728, .rows = rows, .used = 10, .out_f32 = true }, .inputs_rotated);
     }
-    check.pass("pocket controls: neurons summed in reverse change {d} and {d} values, inputs rotated by one {d} and {d}", .{ moved[0], moved[2], moved[1], moved[3] });
+    check.pass(
+        "pocket controls: neurons summed in reverse change {d} and {d} values, inputs rotated by one {d} and {d}",
+        .{ moved[0], moved[2], moved[1], moved[3] },
+    );
     // a layer with no neuron in use keeps an exact -0.0 that tf_pocket_rows makes +0.0
     var turned: usize = 0;
     for ([_]usize{ 1, 16, 300 }) |rows| for ([_]bool{ true, false }) |f| {
         turned += try negativeZero(&r, 2688, rows, f);
     };
-    check.pass("pocket -0.0: tf_pocket_rows turned {d} exact -0.0 to +0.0 and kept the rest; a skipped launch and a launch reading a count of 0 keep them all", .{turned});
+    check.pass(
+        "pocket -0.0: tf_pocket_rows turned {d} exact -0.0 to +0.0 and kept the rest; " ++
+            "a skipped launch and a launch reading a count of 0 keep them all",
+        .{turned},
+    );
     if (reps == 0) return;
     for ([_]Case{
         .{ .d = 2688, .rows = 1, .used = 44, .out_f32 = true },
