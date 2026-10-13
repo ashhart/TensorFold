@@ -250,8 +250,32 @@ fn populate(comptime binding: bool, source: anytype, model: ?*Model) !void {
             }
         }
         const moe: ?*Moe = if (binding) &out.?.moe else null;
-        try plain(binding, source, try named(&name, "layers.{d}.ffn.gate.weight", .{layer}), .f16, &.{ 384, 5120 }, if (binding) &moe.?.gate else null);
-        try plain(binding, source, try named(&name, "layers.{d}.ffn.gate.bias", .{layer}), .f16, &.{384}, if (binding) &moe.?.bias else null);
+        // The released checkpoints store the router gate f16; rank-split repacks store it bf16.
+        if (binding) {
+            const tensor = try source.get(try named(&name, "layers.{d}.ffn.gate.weight", .{layer}));
+            if ((tensor.dtype != .f16 and tensor.dtype != .bf16) or tensor.rank != 2 or
+                tensor.shape[0] != 384 or tensor.shape[1] != 5120)
+            {
+                std.log.err("unsupported router gate {s}: {s} {any}", .{ name, @tagName(tensor.dtype), tensor.shape[0..tensor.rank] });
+                return error.UnsupportedTensor;
+            }
+            moe.?.gate = tensor;
+        } else {
+            const tensor = try source.get(try named(&name, "layers.{d}.ffn.gate.weight", .{layer}));
+            if ((tensor.dtype != .f16 and tensor.dtype != .bf16) or tensor.rank != 2 or
+                tensor.shape[0] != 384 or tensor.shape[1] != 5120) return error.UnsupportedTensor;
+        }
+        // The bias rides the same three dtypes the route kernel decodes (f32, f16, bf16).
+        if (binding) {
+            const tensor = try source.get(try named(&name, "layers.{d}.ffn.gate.bias", .{layer}));
+            if ((tensor.dtype != .f16 and tensor.dtype != .bf16 and tensor.dtype != .f32) or tensor.rank != 1 or tensor.shape[0] != 384)
+                return error.UnsupportedTensor;
+            moe.?.bias = tensor;
+        } else {
+            const tensor = try source.get(try named(&name, "layers.{d}.ffn.gate.bias", .{layer}));
+            if ((tensor.dtype != .f16 and tensor.dtype != .bf16 and tensor.dtype != .f32) or tensor.rank != 1 or tensor.shape[0] != 384)
+                return error.UnsupportedTensor;
+        }
         inline for (.{ "w1", "w3", "w2" }, 0..) |part, projection| {
             const k: usize = if (projection == 2) 2304 else 5120;
             const n: usize = if (projection == 2) 5120 else 2304;

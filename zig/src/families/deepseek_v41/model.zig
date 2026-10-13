@@ -312,9 +312,17 @@ pub const Model = struct {
     fn moe(m: *Model, enc: mtl.ComputeEncoder, w: *const weights.Moe, rows: u32) !void {
         const ws = &m.workspace;
         const p = &m.pipelines;
-        ops.encodeDense(enc, &p.ops, ws.view(.normalized), tensor(w.gate), ws.view(.router_logits), .{ .rows = rows, .k = 5120, .n = 384, .x_stride = 5120, .w_stride = 5120, .y_stride = 384, .w_dtype = .f16, .y_dtype = .f32 });
+        ops.encodeDense(enc, &p.ops, ws.view(.normalized), tensor(w.gate), ws.view(.router_logits), .{ .rows = rows, .k = 5120, .n = 384, .x_stride = 5120, .w_stride = 5120, .y_stride = 384, .w_dtype = switch (w.gate.dtype) {
+            .bf16 => .bf16,
+            else => .f16,
+        }, .y_dtype = .f32 });
         enc.barrier();
-        route.encode(enc, &p.route, ws.view(.router_logits), tensor(w.bias), ws.view(.route_ids), ws.view(.route_weights), .{ .rows = rows, .bias_dtype = .f16 });
+        route.encode(enc, &p.route, ws.view(.router_logits), tensor(w.bias), ws.view(.route_ids), ws.view(.route_weights), .{ .rows = rows, .bias_dtype = switch (w.bias.dtype) {
+            .f32 => .f32,
+            .f16 => .f16,
+            .bf16 => .bf16,
+            else => .f16,
+        } });
         enc.barrier();
         const grouped: ?expert_groups.Scratch = if (m.grouped_prefill and rows >= 8) try ws.grouping(rows) else null;
         var routed_rows = exl3.Rows{ .count = @as(usize, rows) * 6, .x_stride = 5120, .y_stride = 2304, .input_rows = rows, .output_rows = @as(usize, rows) * 6, .routes = .{ .ids = convert(ws.view(.route_ids)), .repeat = 6 } };
