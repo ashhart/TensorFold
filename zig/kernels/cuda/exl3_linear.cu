@@ -92,6 +92,15 @@ __device__ __forceinline__ void load_step(const uint32_t* step, int lane, uint32
         for (int q = 0; q < LW; ++q) raw[j * LW + q] = __ldg(step + j * TW + (word + q) % TW);
 }
 
+// 16 bytes of trellis words, read-only and not kept in L1.
+__device__ __forceinline__ uint4 ldg_nc_v4(const uint32_t* p) {
+    uint4 v;
+    asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w)
+                 : "l"(p));
+    return v;
+}
+
 // Tile j's lane words from a loaded step.
 template <int K2>
 __device__ __forceinline__ void step_lane_words(const uint32_t (&raw)[8 * lane_words<K2>()], int j,
@@ -121,9 +130,11 @@ extern "C" __global__ void __launch_bounds__(128) tf_exl3_rot_in(RotInArgs a) {
 template <int K2, int CB, int WK>
 __device__ __forceinline__ void linear_body(LinearArgs a) {
     constexpr int TW = tile_words<K2>(), LW = lane_words<K2>();
-    constexpr bool PF = K2 <= 12;                             // the next k step's words load while this one decodes
+    constexpr bool ST = TW % 8 == 0;                          // even widths: staged 16-byte loads, PD steps in flight
+    constexpr int PD = 2;
+    constexpr bool PF = !ST && K2 <= 12;                      // odd widths: the next step's lane words in registers
     constexpr int SR = 8 * LW;
-    extern __shared__ __align__(16) float red[];              // WK * RH * 128 floats
+    extern __shared__ __align__(16) float red[];              // WK * RH * 128 floats; even widths stage steps here
     __shared__ int last;
     const int M = a.m, K = a.k, N = a.n, SK = a.sk, NB = N >> 7;
     const int RH = imin(M, 8);                                // rows of red a warp
@@ -153,6 +164,17 @@ __device__ __forceinline__ void linear_body(LinearArgs a) {
         const uint32_t* tile = tiles + (size_t)kt0 * a.stride_k;
         uint32_t cur[PF ? SR : 1], nxt[PF ? SR : 1];
         if constexpr (PF) load_step<K2>(tile, lane, cur);     // the weights do not wait for the previous kernel
+        constexpr int NV = (8 * TW + 127) / 128;              // a staged step's 16-byte loads a lane
+        uint4 rv[ST ? PD : 1][ST ? NV : 1];
+        if constexpr (ST) {
+#pragma unroll
+            for (int d = 0; d < PD; ++d)
+                if (d < per_warp)
+#pragma unroll
+                    for (int v = 0; v < NV; ++v)
+                        if (128 * v + 4 * lane < 8 * TW)
+                            rv[d][v] = ldg_nc_v4(tile + d * a.stride_k + 128 * v + 4 * lane);
+        }
 
         // x's fragments of k step kt: rows g (and g + 8): [0] [2] k 2t.., 2t + 8..; [1] [3] the same of row g + 8
         auto load_x = [&](int kt, uint32_t (&u)[4]) {
@@ -161,8 +183,44 @@ __device__ __forceinline__ void linear_body(LinearArgs a) {
             u[1] = __ldg(reinterpret_cast<const uint32_t*>(x1 + kt * 16 + 2 * t));
             u[3] = __ldg(reinterpret_cast<const uint32_t*>(x1 + kt * 16 + 2 * t + 8));
         };
+        if constexpr (ST) {
+            uint32_t* stage = reinterpret_cast<uint32_t*>(red) + warp * 8 * 64; // a warp's step: 8 tiles, 64 words most
+            int word, offset;
+            lane_start<K2>(lane, word, offset);
 #pragma unroll 1
-        for (int i = 0; i < per_warp; ++i) {
+            for (int ib = 0; ib < per_warp; ib += PD) {
+#pragma unroll
+                for (int d = 0; d < PD; ++d) {
+                    const int i = ib + d;
+                    if (i >= per_warp) break;
+                    __syncwarp(); // every lane has read the previous step back
+#pragma unroll
+                    for (int v = 0; v < NV; ++v)
+                        if (128 * v + 4 * lane < 8 * TW)
+                            *reinterpret_cast<uint4*>(stage + 128 * v + 4 * lane) = rv[d][v];
+                    if (i + PD < per_warp)
+#pragma unroll
+                        for (int v = 0; v < NV; ++v)
+                            if (128 * v + 4 * lane < 8 * TW)
+                                rv[d][v] = ldg_nc_v4(tile + (size_t)(i + PD) * a.stride_k + 128 * v + 4 * lane);
+                    __syncwarp(); // the step is staged before any lane reads it
+                    uint32_t u[4];
+                    load_x(kt0 + i, u);
+#pragma unroll
+                    for (int j = 0; j < 8; ++j) {
+                        uint32_t w[LW];
+#pragma unroll
+                        for (int q = 0; q < LW; ++q) w[q] = stage[j * TW + (word + q) % TW];
+                        uint32_t b0[2], b1[2];
+                        decode_lane<K2, CB>(w, lane, b0, b1);
+                        mma16816(acc[j][0], u, b0);
+                        mma16816(acc[j][1], u, b1);
+                    }
+                }
+            }
+        }
+#pragma unroll 1
+        for (int i = 0; i < (ST ? 0 : per_warp); ++i) {
             uint32_t u[4];
             load_x(kt0 + i, u);
             if constexpr (PF) {
