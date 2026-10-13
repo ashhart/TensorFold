@@ -186,7 +186,7 @@ pub const Dense = struct {
     lin: Linear,
     xh: ?memory.DeviceBuffer = null, // the rotated inputs, 128 rows of the widest layer at most
     z: ?memory.DeviceBuffer = null, // the split partials, 128 rows at most
-    counters: ?memory.DeviceBuffer = null, // per pass and block, zeroed before every call
+    counters: ?memory.DeviceBuffer = null, // per pass and block: zeroed once, every launch leaves them zero
 
     pub fn load(d: *const Driver) !Dense {
         return .{ .d = d, .lin = try Linear.load(d) };
@@ -206,6 +206,7 @@ pub const Dense = struct {
         if (slot.* != null and slot.*.?.len >= bytes) return slot.*.?.ptr;
         if (slot.* != null) slot.*.?.free();
         slot.* = try memory.DeviceBuffer.alloc(de.d, bytes);
+        if (slot == &de.counters) try slot.*.?.fill8(0, null); // zero once: each launch's last block resets its own
         return slot.*.?.ptr;
     }
 
@@ -236,7 +237,6 @@ pub const Dense = struct {
         while (r < rows) : (r += 128) {
             const m = @min(rows - r, 128);
             const xh = try de.scratch(&de.xh, m * w.k * 2);
-            try de.counters.?.fill8(0, s.handle);
             try de.lin.matmul(s, w, x + @as(u64, r) * w.k * xe, x_dtype, m, y + @as(u64, r) * w.n * ye, y_dtype, xh, z, counters);
         }
     }
