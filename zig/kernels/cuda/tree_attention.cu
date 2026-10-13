@@ -15,10 +15,7 @@ using qmm_frag::ldmatrix4;
 using qmm_frag::mma;
 using qmm_frag::mma0;
 
-constexpr int SPAN = 2048;     // keys a group: one partial
-#ifndef TF_TREE_STAGES
-#define TF_TREE_STAGES 3
-#endif
+constexpr int SPAN = 512;      // keys a group: one partial (4 slices of its tiles)
 constexpr int MAXD = 128;      // a path's most rows
 constexpr float LOG2E = 1.4426950408889634f;
 
@@ -61,7 +58,7 @@ extern "C" __global__ void tf_tree_paths(const int* __restrict__ parents, int* _
 }
 
 // Group gi of key head kh for 16 (row, head) pairs from pair pf (pair m: row rq + m / G, head m % G), one mma tile.
-template <int D, int HB, int W>
+template <int D, int HB, int W, int ST>
 __device__ __forceinline__ void tree_group(
     const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kn, const __nv_bfloat16* __restrict__ vn,
     const __nv_bfloat16* __restrict__ origin, const long long* __restrict__ offs, const int* __restrict__ row_stream,
@@ -81,7 +78,7 @@ __device__ __forceinline__ void tree_group(
     if (k0 >= total) return; // the merge reads only the row's own groups
     const __nv_bfloat16* kc = origin + offs[2 * s];
     const __nv_bfloat16* vc = origin + offs[2 * s + 1];
-    constexpr int ST = W == 1 ? TF_TREE_STAGES : 1; // tile stages: a one-warp block fetches ahead while it computes
+    // ST tile stages: a one-warp block fetches ST - 1 tiles ahead while it computes one (stages never change bits)
     uint4* const kv0 = smem + warp * ST * 2 * HB * C;
     uint4* ks = kv0;
     uint4* vs = ks + HB * C;
@@ -252,10 +249,10 @@ __device__ __forceinline__ void tree_group(
 #pragma unroll
             for (int i = 0; i < NB; ++i) {
                 const int d = 8 * i + 2 * qd;
-                po[(part * 16 + head) * D + d] = o[i][2 * half];
-                po[(part * 16 + head) * D + d + 1] = o[i][2 * half + 1];
+                po[(part * G + head) * D + d] = o[i][2 * half];
+                po[(part * G + head) * D + d + 1] = o[i][2 * half + 1];
             }
-            if (qd == 0) pm[part * 16 + head] = half ? m1 : m0, pl[part * 16 + head] = half ? l1 : l0;
+            if (qd == 0) pm[part * G + head] = half ? m1 : m0, pl[part * G + head] = half ? l1 : l0;
         }
         return;
     } else {
@@ -291,14 +288,14 @@ __device__ __forceinline__ void tree_group(
                 acc = __fmaf_rn(a, os[(w * 16 + hd) * D + e], acc);
                 l = __fmaf_rn(a, ls[w * 16 + hd], l);
             }
-            po[(part * 16 + head) * D + e] = acc;
-            if (e == 0) pm[part * 16 + head] = mm, pl[part * 16 + head] = l;
+            po[(part * G + head) * D + e] = acc;
+            if (e == 0) pm[part * G + head] = mm, pl[part * G + head] = l;
         }
     }
 }
 
 // A stream's full committed groups once for its rows, 16 (row, head) pairs a block: each partial a row block's bits.
-template <int D, int HB, int W>
+template <int D, int HB, int W, int ST>
 __device__ __forceinline__ void tree_shared(
     const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ origin, const long long* __restrict__ offs,
     const int* __restrict__ row_stream, const int* __restrict__ streams, const int* __restrict__ paths,
@@ -314,28 +311,30 @@ __device__ __forceinline__ void tree_shared(
         const int pairs = streams[4 * st + 1] * G, p = streams[4 * st + 2];
         const int tile = static_cast<int>(r - r0); // a stream's j-th row hosts its j-th pair tile (tiles <= rows)
         if (tile * 16 >= pairs || (gi + 1) * SPAN > p) continue;
-        tree_group<D, HB, W>(q, q, q, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, gi, ng,
+        tree_group<D, HB, W, ST>(q, q, q, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, gi, ng,
                              r0, tile * 16, pairs, r, item % per);
         __syncthreads();
     }
 }
 
-#define TF_TREE_SHARED(NAME, D, HB, W)                                                                               \
+#define TF_TREE_SHARED(NAME, D, HB, W, ST)                                                                              \
     extern "C" __global__ void __launch_bounds__(32 * W) NAME(                                                           \
         const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ origin,                                \
         const long long* __restrict__ offs, const int* __restrict__ row_stream, const int* __restrict__ streams,      \
         const int* __restrict__ paths, const int* __restrict__ depths, float* __restrict__ po,                        \
         float* __restrict__ pm, float* __restrict__ pl, int h, int hk, float scale, int ng, int n) {                  \
-        tree_shared<D, HB, W>(q, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, ng, n);  \
+        tree_shared<D, HB, W, ST>(q, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, ng, n);  \
     }
 
-TF_TREE_SHARED(tf_tree_shared, 128, 32, 4)
-TF_TREE_SHARED(tf_tree_shared_256, 256, 16, 4)
-TF_TREE_SHARED(tf_tree_shared_w1, 128, 32, 1)
-TF_TREE_SHARED(tf_tree_shared_256_w1, 256, 16, 1)
+TF_TREE_SHARED(tf_tree_shared, 128, 32, 4, 1)
+TF_TREE_SHARED(tf_tree_shared_256, 256, 16, 4, 1)
+TF_TREE_SHARED(tf_tree_shared_w1, 128, 32, 1, 2)
+TF_TREE_SHARED(tf_tree_shared_256_w1, 256, 16, 1, 2)
+TF_TREE_SHARED(tf_tree_shared_w1s3, 128, 32, 1, 3)
+TF_TREE_SHARED(tf_tree_shared_256_w1s3, 256, 16, 1, 3)
 
 // Block (row, key head, group slot): the row's groups past its stream's full committed ones, slot, slot + slots, ...
-template <int D, int HB, int W>
+template <int D, int HB, int W, int ST>
 __device__ __forceinline__ void tree_part(
     const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kn, const __nv_bfloat16* __restrict__ vn,
     const __nv_bfloat16* __restrict__ origin, const long long* __restrict__ offs, const int* __restrict__ row_stream,
@@ -345,27 +344,29 @@ __device__ __forceinline__ void tree_part(
     const int p = streams[4 * row_stream[r] + 2], total = p + depths[r];
     const int per = W == 4 ? 1 : 4, slot = blockIdx.z / per, slots = gridDim.z / per;
     for (int gi = slot + p / SPAN; gi < ng && gi * SPAN < total; gi += slots) { // full committed: shared
-        tree_group<D, HB, W>(q, kn, vn, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, gi,
+        tree_group<D, HB, W, ST>(q, kn, vn, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, gi,
                              ng, r, 0, h / hk, r, blockIdx.z % per);
         __syncthreads(); // the next group's tiles reuse the partials' shared memory
     }
 }
 
-#define TF_TREE_PART(NAME, D, HB, W)                                                                                 \
+#define TF_TREE_PART(NAME, D, HB, W, ST)                                                                              \
     extern "C" __global__ void __launch_bounds__(32 * W) NAME(                                                           \
         const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kn,                                    \
         const __nv_bfloat16* __restrict__ vn, const __nv_bfloat16* __restrict__ origin,                               \
         const long long* __restrict__ offs, const int* __restrict__ row_stream, const int* __restrict__ streams,      \
         const int* __restrict__ paths, const int* __restrict__ depths, float* __restrict__ po,                        \
         float* __restrict__ pm, float* __restrict__ pl, int h, int hk, float scale, int ng) {                         \
-        tree_part<D, HB, W>(q, kn, vn, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, \
+        tree_part<D, HB, W, ST>(q, kn, vn, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, \
                             ng);                                                                                    \
     }
 
-TF_TREE_PART(tf_tree_part, 128, 32, 4)
-TF_TREE_PART(tf_tree_part_256, 256, 16, 4)
-TF_TREE_PART(tf_tree_part_w1, 128, 32, 1)
-TF_TREE_PART(tf_tree_part_256_w1, 256, 16, 1)
+TF_TREE_PART(tf_tree_part, 128, 32, 4, 1)
+TF_TREE_PART(tf_tree_part_256, 256, 16, 4, 1)
+TF_TREE_PART(tf_tree_part_w1, 128, 32, 1, 2)
+TF_TREE_PART(tf_tree_part_256_w1, 256, 16, 1, 2)
+TF_TREE_PART(tf_tree_part_w1s3, 128, 32, 1, 3)
+TF_TREE_PART(tf_tree_part_256_w1s3, 256, 16, 1, 3)
 
 // out [W, H, D] bf16: block (row, key head, head) folds the row's groups in order (sliced: a group's 4 slices first).
 extern "C" __global__ void __launch_bounds__(256) tf_tree_merge(
@@ -382,15 +383,15 @@ extern "C" __global__ void __launch_bounds__(256) tf_tree_merge(
             const int64_t part = ((r * hk + kh) * ng + gi) * (sliced ? 4 : 1);
             float cm = -INFINITY, co = 0.0f, cl = 0.0f;
             if (!sliced) { // four-warp blocks combined the group's slices themselves
-                cm = pm[part * 16 + hd], co = po[(part * 16 + hd) * d + e], cl = pl[part * 16 + hd];
+                cm = pm[part * G + hd], co = po[(part * G + hd) * d + e], cl = pl[part * G + hd];
             } else { // one-warp blocks left the 4 slices: their combine, in the same order
-                for (int w = 0; w < 4; ++w) cm = fmaxf(cm, pm[(part + w) * 16 + hd]);
+                for (int w = 0; w < 4; ++w) cm = fmaxf(cm, pm[(part + w) * G + hd]);
                 for (int w = 0; w < 4; ++w) {
-                    const float mw = pm[(part + w) * 16 + hd];
+                    const float mw = pm[(part + w) * G + hd];
                     if (mw == -INFINITY) continue;
                     const float aw = texp(__fsub_rn(mw, cm));
-                    co = __fmaf_rn(aw, po[((part + w) * 16 + hd) * d + e], co);
-                    cl = __fmaf_rn(aw, pl[(part + w) * 16 + hd], cl);
+                    co = __fmaf_rn(aw, po[((part + w) * G + hd) * d + e], co);
+                    cl = __fmaf_rn(aw, pl[(part + w) * G + hd], cl);
                 }
             }
             const bool active = cl > 0.0f;
