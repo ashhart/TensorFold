@@ -30,7 +30,7 @@ pub fn run(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, sink: ?ch
         if (gone.check()) return error.Cancelled;
         try t.progress(a, sink, "searching the web for \"{s}\"", .{q});
         const call = try toolCall(a, tools.search_name, "query", q);
-        const ran = try tools.run(t.state.web, a, call, t.today, budget, t.goal);
+        const ran = try tools.run(t.state.web, a, call, t.today, budget, t.goal, &t.seen);
         try t.noteSources(a, ran);
         if (!ran.ok or ran.sources.len == 0) try t.progress(a, sink, "no results: {s}", .{ran.text[0..@min(ran.text.len, 160)]});
         found[i] = ran.sources;
@@ -49,7 +49,7 @@ pub fn run(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, sink: ?ch
         if (gone.check()) return error.Cancelled;
         try t.progress(a, sink, "reading {s}", .{url});
         const call = try toolCall(a, tools.fetch_name, "url", url);
-        const ran = try tools.run(t.state.web, a, call, t.today, budget, focus);
+        const ran = try tools.run(t.state.web, a, call, t.today, budget, focus, &t.seen);
         try t.noteSources(a, ran);
         if (!ran.ok) try t.progress(a, sink, "{s}", .{ran.text[0..@min(ran.text.len, 200)]});
         try calls.append(a, call);

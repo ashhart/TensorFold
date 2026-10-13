@@ -276,6 +276,40 @@ pub fn excerpt(a: Allocator, text: []const u8, focus: []const u8, max: usize) Al
     return out.items;
 }
 
+/// The page's link targets as written (`<a href>`, entities decoded), at most `max`; fragments and scripts left out.
+pub fn hrefs(a: Allocator, page: []const u8, max: usize) Allocator.Error![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var from: usize = 0;
+    var ent: [4]u8 = undefined;
+    while (out.items.len < max) {
+        const lt = std.ascii.findIgnoreCasePos(page, from, "<a") orelse break;
+        from = lt + 2;
+        if (from >= page.len or !(page[from] == ' ' or page[from] == '\t' or page[from] == '\n')) continue;
+        const end = tagEnd(page, lt);
+        const tag = page[lt..end];
+        const at = std.ascii.findIgnoreCase(tag, "href=") orelse continue;
+        var v = tag[at + 5 ..];
+        const q: u8 = if (v.len > 0 and (v[0] == '"' or v[0] == '\'')) v[0] else ' ';
+        if (q != ' ') v = v[1..];
+        const stop = std.mem.indexOfAny(u8, v, if (q == ' ') " >" else &.{q}) orelse v.len;
+        const raw = std.mem.trim(u8, v[0..stop], " \t\r\n");
+        if (raw.len == 0 or raw[0] == '#' or std.ascii.startsWithIgnoreCase(raw, "javascript:") or std.ascii.startsWithIgnoreCase(raw, "mailto:")) continue;
+        var text: std.ArrayList(u8) = .empty;
+        var i: usize = 0;
+        while (i < raw.len) {
+            if (raw[i] == '&') if (entity(raw, i, &ent)) |e| {
+                try text.appendSlice(a, e.text);
+                i += e.len;
+                continue;
+            };
+            try text.append(a, raw[i]);
+            i += 1;
+        }
+        try out.append(a, text.items);
+    }
+    return out.items;
+}
+
 /// The largest length up to `max` that ends on a UTF-8 character boundary.
 pub fn cutAt(text: []const u8, max: usize) usize {
     if (text.len <= max) return text.len;
@@ -336,6 +370,17 @@ test "an excerpt keeps the opening and the lines about the focus, in order" {
     try std.testing.expect(std.mem.indexOf(u8, out, "The new std.Io interface replaces std.io writers.") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "[...]") != null);
     try std.testing.expectEqualStrings("short", try excerpt(a, "short", "x", 300));
+}
+
+test "link targets are read from anchors, decoded, without fragments or scripts" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const got = try hrefs(a, "<p><a href=\"/docs?a=1&amp;b=2\">x</a> <A HREF='https://o.org/'>y</A> <a href=#top>t</a> <abbr href=\"/no\">z</abbr> <a class=k href=rel/page>r</a> <a href=\"javascript:go()\">j</a></p>", 10);
+    try std.testing.expectEqual(@as(usize, 3), got.len);
+    try std.testing.expectEqualStrings("/docs?a=1&b=2", got[0]);
+    try std.testing.expectEqualStrings("https://o.org/", got[1]);
+    try std.testing.expectEqualStrings("rel/page", got[2]);
 }
 
 test "a cut never splits a character" {

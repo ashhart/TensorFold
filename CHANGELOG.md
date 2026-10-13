@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- `cortheon_fetch` reads only URLs the conversation has already shown: search results, links on pages it has read, and URLs in the user's, the system prompt's or a tool's messages, never one that appears only in the model's replies, so a page that steers the model cannot make it build a URL that carries conversation text. The one exception is one named package's registry JSON on PyPI, npm or crates.io, a name of at most 64 characters. A refused fetch tells the model to search for the page. The `cortheon` object's `pages_read` now counts only pages read, not refused or failed fetches.
+
 ## 1.0.9
 
 - `tensorfold pull` finishes into a relative cache root (a relative `HF_HUB_CACHE` or `HF_HOME`), and `pull --exlr8` into a relative `--dir`. The shipped binary stopped at the first finished file with an assertion failure, because it moved files with a call that only takes absolute paths. The checkpoint CLI's tests now run with the safety checks the binary ships with, and a new test fetches an EXLR8 node's small and large files into a relative folder (#700). Thanks to @chaog992.
