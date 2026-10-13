@@ -331,7 +331,7 @@ fn holdResident(h: *Host) !void {
         for (d.model.checkpoint.shards.items) |s| try list.append(h.gpa, s.buffer);
         try list.append(h.gpa, d.model.pending);
     }
-    h.resident = try Resident.init(h.model.device, h.model.queue, list.items);
+    h.resident = try Resident.hold(h.model.device, h.model.queue, list.items, "qwen27") orelse return;
     h.warm = (&h.resident.?).target();
 }
 

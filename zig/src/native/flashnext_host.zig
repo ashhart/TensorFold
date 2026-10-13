@@ -469,8 +469,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, wind
     const limit: i64 = tf.flashnext_replay.CAP - fx.MARGIN;
     h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .info_ = .{ .name = "flashnext-zig", .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = true, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
     h.warm = .{ .queue = eng.r.queue };
-    // macOS unwires an idle process's GPU memory within seconds, and the next request waits while it comes back: the
-    // engine's buffers join one residency set, which each tick of the idle keepalive uses
+    // macOS unwires idle GPU memory within seconds: the engine's buffers join one set the idle keepalive's ticks use
     if (std.c.getenv("FLASHNEXT_NO_RESIDENCY") == null) holdResident(h) catch |err| std.log.warn("flash next: no residency set ({s}): the first request after an idle second waits for the model's memory", .{@errorName(err)});
     errdefer if (h.resident) |*r| r.deinit();
     // chunk 1: a prompt call keeps at marks inside it (engine.mark_taps), so a short prompt's history mark adds no call
@@ -487,7 +486,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, wind
 
 /// The engine's buffers in one residency set; the idle keepalive's ticks use it.
 fn holdResident(h: *Host) !void {
-    h.resident = try Resident.init(h.eng.r.device, h.eng.r.queue, h.eng.r.held.items);
+    h.resident = try Resident.hold(h.eng.r.device, h.eng.r.queue, h.eng.r.held.items, "flash next") orelse return;
     h.warm = (&h.resident.?).target();
 }
 
