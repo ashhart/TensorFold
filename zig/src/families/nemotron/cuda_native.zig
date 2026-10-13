@@ -27,6 +27,9 @@ pub const prompt_rows: u32 = state.prefill_rows;
 
 pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false };
 
+/// Thinking budgets the lone driver takes (cuda_lone.zig): above it, the stream goes to the lane core before its cut.
+pub const lone_min_budget = @import("cuda_lone.zig").min_budget;
+
 /// A lone drafted stream's own driver: decodes it until it finishes (false) or `yield` hands it over (true).
 pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool) anyerror!bool;
 

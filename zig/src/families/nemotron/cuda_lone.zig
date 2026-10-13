@@ -15,6 +15,9 @@ pub const Hooks = struct {
     yield: *const fn (ctx: *anyopaque) bool,
 };
 
+/// Thinking budgets a lone stream takes: the budget's cut must lie past its first round.
+pub const min_budget: u32 = 2 * state.max_rows;
+
 /// Prefill `s` and decode it until it finishes (false) or `hooks.yield` hands it to the lane core (true).
 pub fn run(gpa: std.mem.Allocator, b: *Cuda, s: *lanes.Stream, hooks: Hooks) !bool {
     const h = b.head orelse return error.NoDraftHead;
@@ -40,16 +43,18 @@ pub fn run(gpa: std.mem.Allocator, b: *Cuda, s: *lanes.Stream, hooks: Hooks) !bo
         const kept = v.accepted + 1;
         var rows: [state.max_rows]LogRow = undefined;
         if (s.logprobs) |k| try windowRows(b, k, v.sampled[0..kept], rows[0..kept]); // the window's logits stay put
-        _ = try s.commit(gpa, v.sampled[0..kept], if (s.logprobs != null) rows[0..kept] else &.{}); // all `kept` unless it finishes
+        const landed = try s.commit(gpa, v.sampled[0..kept], if (s.logprobs != null) rows[0..kept] else &.{});
         s.rounds += 1;
         s.drafted += r.proposal.len;
         s.accepted += v.accepted;
         hooks.committed(hooks.ctx);
         if (s.finished) return false;
-        const handing = hooks.yield(hooks.ctx);
-        try r.keep(v.sampled, kept, !handing);
+        // a loop guard's close or a thinking budget's cut is the lane core's to force: the stream goes there first
+        const forced = s.force.items.len > 0 or s.budgetWithin(state.max_rows);
+        const handing = forced or hooks.yield(hooks.ctx);
+        try r.keep(v.sampled, landed, !handing);
         if (!handing) continue;
-        try b.handOver(s, kept);
+        try b.handOver(s, landed);
         handed = true;
         return true;
     }
