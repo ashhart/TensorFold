@@ -111,6 +111,7 @@ pub fn why(e: anyerror) []const u8 {
         error.Unsupported => "this file type cannot be read as text",
         error.Blocked => "the search engine refused the request",
         error.Carries => "the URL carries more data than a page address needs, so it was not sent",
+        error.Ipv6Only => "the site is reachable only over IPv6, which Cortheon does not read",
         else => "the network request failed",
     };
 }

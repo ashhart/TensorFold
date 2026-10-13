@@ -124,7 +124,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .compact_memory = args.compact_memory,
         .slide_graph = args.slide_graph,
         .cortheon = args.cortheon,
-        .cortheon_search_key = env(s, "BRAVE_SEARCH_API_KEY") orelse env(s, "BRAVE_API_KEY"),
+        .cortheon_search_key = env(s, "BRAVE_SEARCH_API_KEY"),
     };
     const srv = server_mod.Server.init(gpa, io, s.engine, s.text, config, if (store.enabled()) &store else null) catch {
         std.debug.print("tensorfold: the server could not start\n", .{});

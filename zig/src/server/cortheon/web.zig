@@ -8,7 +8,7 @@ pub const Limits = struct { max_bytes: usize = 2 << 20, timeout_ms: i64 = 15_000
 
 pub const Response = struct { url: []const u8, status: u16, content_type: []const u8, body: []const u8, truncated: bool };
 
-pub const Error = error{ BadUrl, NotPublic, Redirects, Timeout, Network, OutOfMemory, Carries };
+pub const Error = error{ BadUrl, NotPublic, Redirects, Timeout, Network, OutOfMemory, Carries, Ipv6Only };
 
 /// Bytes of query and fragment a page address may carry; more reads as data leaving through the URL.
 pub const max_query = 256;
@@ -146,7 +146,7 @@ pub const Client = struct {
         if (tls) try c.trust();
         const name = HostName.init(host) catch null;
         const conn = c.http.connectTcpOptions(.{
-            .host = HostName.init(pin orelse host) catch return error.BadUrl,
+            .host = HostName.init(pin) catch return error.BadUrl,
             .port = port,
             .protocol = if (tls) .tls else .plain,
             .proxied_host = name, // TLS checks the certificate against the name while TCP goes to the checked address
@@ -185,12 +185,12 @@ pub const Client = struct {
         return .{ .response = .{ .url = url, .status = status, .content_type = content_type, .body = body.items, .truncated = body.items.len >= limits.max_bytes } };
     }
 
-    /// The address to connect to: an IP literal itself, else the first public IPv4; every address must be public.
-    fn resolve(c: *Client, a: Allocator, host: []const u8, port: u16) Error!?[]const u8 {
+    /// The IPv4 address to connect to: an IP literal itself, else the first public IPv4; every address must be public.
+    fn resolve(c: *Client, a: Allocator, host: []const u8, port: u16) Error![]const u8 {
         if (std.ascii.eqlIgnoreCase(host, "localhost") or std.ascii.endsWithIgnoreCase(host, ".localhost")) return error.NotPublic;
         if (Io.net.IpAddress.parse(host, port)) |ip| {
             if (!publicAddress(ip)) return error.NotPublic;
-            return if (ip == .ip4) host else error.BadUrl; // IPv6 literals cannot name a TLS host
+            return if (ip == .ip4) host else error.Ipv6Only; // only an IPv4 address can be pinned under a TLS name
         } else |_| {}
         const io = c.http.io;
         const name = HostName.init(host) catch return error.BadUrl;
@@ -215,7 +215,7 @@ pub const Client = struct {
             error.Canceled => return error.Network,
         }
         if (!any) return error.Network;
-        return pin; // null: IPv6 only, connected by name after every address checked public
+        return pin orelse error.Ipv6Only; // connecting by name would let a rebinding name swap in a private address
     }
 };
 
@@ -275,8 +275,9 @@ test "local and private names are refused before any connection" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for ([_][]const u8{ "http://localhost:8080/", "http://127.0.0.1/", "https://192.0.2.7/x", "http://198.18.0.1/latest/meta-data/", "http://api.localhost/", "ftp://example.com/", "http://user:pw@localhost/" }) |u| {
+    for ([_][]const u8{ "http://localhost:8080/", "http://127.0.0.1/", "https://192.0.2.7/x", "http://198.18.0.1/latest/meta-data/", "http://api.localhost/", "ftp://example.com/", "http://user:pw@localhost/", "http://[::1]/", "http://[fe80::1]/" }) |u| {
         const got = c.hop(a, u, &.{}, .{});
         try std.testing.expect(got == error.NotPublic or got == error.BadUrl);
     }
+    try std.testing.expectError(error.Ipv6Only, c.hop(a, "https://[2606:4700::1111]/", &.{}, .{}));
 }
