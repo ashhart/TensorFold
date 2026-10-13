@@ -27,6 +27,7 @@ Both need the server's API key when it has one.
 ## What stays on disk
 
 The record holds token ids only, never text, in chunk files of up to 1,048,576 ids (4 MiB) under one directory, made with mode 0700, each file 0600.
+The model's tokenizer turns those ids back into the prompts and replies they came from, so treat the directory as you would those conversations.
 Beside them a short text file, `identity`, names the tokenizer that wrote the record: a digest of its vocabulary, merges and added tokens, its vocabulary size, and the model the server first served.
 An empty file, `lock`, is held by the server that writes the record.
 Models whose tokenizers have the same identity share one record, and a server whose tokenizer differs refuses to start on that directory and says which tokenizer wrote it.
