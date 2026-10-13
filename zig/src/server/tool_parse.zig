@@ -179,6 +179,11 @@ pub fn closeCall(a: Allocator, text: []const u8, tools: []const Value) Allocator
 /// What a call's arguments lack to close: XML's ``
 fn argumentsClose(a: Allocator, body: []const u8) Allocator.Error![]const u8 {
     if (std.ascii.startsWithIgnoreCase(body, "<function=")) return if (std.ascii.endsWithIgnoreCase(body, "</function>")) "" else "</function>";
+    // GLM's value the end token left open closes as #285 closed it; the strict parse then decides
+    if (std.mem.lastIndexOf(u8, body, "<arg_value>")) |v| {
+        const closed = std.mem.lastIndexOf(u8, body, "</arg_value>");
+        if (closed == null or closed.? < v) return "</arg_value>";
+    }
     if (body.len == 0 or (body[0] != '{' and body[0] != '[')) return "";
     const closed = try tool_params.closedJson(a, body) orelse return "";
     return closed[body.len..];
@@ -381,7 +386,7 @@ fn nextGlmTag(block: []const u8, from: usize) ?struct { tag: GlmTag, start: usiz
     }
 }
 
-/// A GLM call whose ``<arg_key>`` the model wrote as whitespace (``read path</arg_key>..`` or ``</arg_value>\npath</arg_key>``), put back before the word ahead of each unopened ``</arg_key>``; a block missing none comes back as it is.
+/// A GLM call whose ``<arg_key>`` the model wrote as whitespace gets it back before the word ahead of each lone tag.
 pub fn repairGlmKeys(a: Allocator, block: []const u8) Allocator.Error![]const u8 {
     if (std.mem.count(u8, block, "</arg_key>") <= std.mem.count(u8, block, "<arg_key>")) return block;
     var out: std.ArrayList(u8) = .empty;
