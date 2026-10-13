@@ -142,19 +142,19 @@ fn draft(r: *Run, head: rows_w.Product, ids: Buf, n: usize) !rows_w.Product {
     return .{ .w = out[0], .s = out[1], .b = out[2], .n = n, .k = head.k, .bits = head.bits, .group = head.group };
 }
 
-/// Every member compiled; its MMA twin checked on 8 rows against the loop (_mma_exact), else the loop at every count.
+/// Every member compiled; its MMA twin and four-row kernel checked on 8 rows against the loop, else not taken.
 fn warm(r: *Run, d: *const rows_w.Dense) !void {
     const sh = d.shared;
     const rows = 8;
     var prng = std.Random.DefaultPrng.init(0x7e57);
     const x = try r.buffer(rows * d.k * 2);
     for (x.slice(u16, rows * d.k)) |*v| v.* = @truncate(@as(u32, @bitCast(prng.random().float(f32) - 0.5)) >> 16);
-    const y = [2]mtl.Buffer{ try r.buffer(rows * d.n * 2), try r.buffer(rows * d.n * 2) };
-    defer for ([_]mtl.Buffer{ x, y[0], y[1] }) |b| b.deinit();
+    const y = [3]mtl.Buffer{ try r.buffer(rows * d.n * 2), try r.buffer(rows * d.n * 2), try r.buffer(rows * d.n * 2) };
+    defer for ([_]mtl.Buffer{ x, y[0], y[1], y[2] }) |b| b.deinit();
     const cb = r.queue.commandBuffer();
     const e = cb.compute(.serial);
     for (d.members) |mb| _ = try rows_w.pipes(sh.a, sh.device, &sh.cache, rows_w.specOf(mb.p, sh.device.generation(), 1, d.n));
-    for ([_]rows_w.Mode{ .loop, .twin }, y) |mode, out| try rows_w.encodeDense(e, d, .{ .b = x }, rows, .{ .b = out }, mode, false);
+    for ([_]rows_w.Mode{ .loop, .twin, .four }, y) |mode, out| try rows_w.encodeDense(e, d, .{ .b = x }, rows, .{ .b = out }, mode, false);
     e.end();
     cb.commit();
     cb.wait();
@@ -162,12 +162,16 @@ fn warm(r: *Run, d: *const rows_w.Dense) !void {
         std.log.err("rows kernels failed at load: {s}", .{why});
         return error.GpuFailed;
     }
-    for (d.members) |*mb| if (rows_w.twinOk(mb.p)) for (0..rows) |i| {
+    for (d.members) |*mb| for (0..rows) |i| {
         const at = (i * d.n + mb.col) * 2;
-        if (!std.mem.eql(u8, y[0].contents()[at..][0 .. mb.p.n * 2], y[1].contents()[at..][0 .. mb.p.n * 2])) {
-            std.log.warn("rows: [{d}, {d}] q{d}/g{d}: the MMA twin differs from the per-row loop here; per-row loop kept", .{ mb.p.n, mb.p.k, mb.p.bits, mb.p.group });
+        const loop = y[0].contents()[at..][0 .. mb.p.n * 2];
+        if (mb.twin and rows_w.twinOk(mb.p) and !std.mem.eql(u8, loop, y[1].contents()[at..][0 .. mb.p.n * 2])) {
+            std.log.warn("rows: [{d}, {d}] q{d}/g{d}: the MMA twin differs from the per-row loop here; not taken", .{ mb.p.n, mb.p.k, mb.p.bits, mb.p.group });
             mb.twin = false;
-            break;
+        }
+        if (mb.four and !std.mem.eql(u8, loop, y[2].contents()[at..][0 .. mb.p.n * 2])) {
+            std.log.warn("rows: [{d}, {d}] q{d}/g{d}: four rows a simdgroup differ from the per-row loop here; not taken", .{ mb.p.n, mb.p.k, mb.p.bits, mb.p.group });
+            mb.four = false;
         }
     };
 }
