@@ -42,6 +42,7 @@ pub const Kernels = struct {
     triton: ?cuda.aot.Set, // a captured Triton set for the glue (GB10's qualified one); null: our own glue kernels
     glue: glue.Fns,
     emb: cuda.embed_rows.EmbedRows,
+    norms: cuda.norms.Norms,
     affine: cuda.qlinear.Affine4Kernels, // the 4-bit projections: qmm_group, lane_gemv and qmm_prefill
     router: cuda.grouped.Router,
     experts: cuda.experts.Affine4Experts, // the 4-bit grouped experts: experts, experts_prefill and experts_pack
@@ -89,6 +90,8 @@ pub const Kernels = struct {
         k.glue = try glue.Fns.resolve(k.mods[16..21]);
         k.emb = try cuda.embed_rows.EmbedRows.load(d);
         errdefer k.emb.unload();
+        k.norms = try cuda.norms.Norms.load(d);
+        errdefer k.norms.unload();
         k.grammar_mask = try k.mods[14].function("tf_grammar_mask");
         k.modelopt = null;
         k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
@@ -108,6 +111,7 @@ pub const Kernels = struct {
 
     pub fn deinit(k: *Kernels) void {
         k.emb.unload();
+        k.norms.unload();
         if (k.modelopt) |*m| {
             m.lane.unload();
             m.gemm.unload();

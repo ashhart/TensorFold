@@ -215,6 +215,8 @@ pub fn run(gpu: check.Gpu) !void {
     try addRmsH(&r, &n, 5120, true, .bf16); // Qwen3.8-27B's residual
     try addRmsH(&r, &n, 5120, false, .bf16); // the first layer
     try addRmsH(&r, &n, 2048, true, .f32);
+    try addRmsH(&r, &n, 2688, true, .bf16); // Nemotron 3.5's hidden
+    try addRmsH(&r, &n, 2688, false, .bf16);
     try addRmsH(&r, &n, 2688, true, .bf16); // Nemotron 3.5 Lightning's hidden
     try gatedRms(&r, &n, 48, 128); // the 27B's GDN output
     try gatedRms(&r, &n, 5, 64);
