@@ -105,6 +105,8 @@ __device__ __forceinline__ void attn_chunks(const ChunksArgs a) {
         oacc[j][3] = 0.0f;
     }
     for (int tile = 0; run && tile < 16; ++tile) { // 16 tiles of 32 keys = the 512-key chunk
+        // a tile past the last visible key leaves m, l and o as they are (alpha 1, p 0): stop at the first one
+        if (SPARSE ? cbase + tile * 32 >= a.cnt[r] : cbase + tile * 32 > a.pos[0] + r) break;
         // stage 32 keys x 512 latents: thread t holds key (t>>3), u32 columns (t&7)*32..
         const int kk = t >> 3;
         int rowbase;
