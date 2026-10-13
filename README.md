@@ -1,6 +1,6 @@
 # TensorFold
 
-TensorFold 1.0.8 serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
+TensorFold 1.0.9 serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
 The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels directly.
 Serving needs no Python or MLX installation.
 
@@ -55,7 +55,7 @@ files and web pages, omp's `/learn` command, the 3D view, and what to expect.
 
 ## Qualified models
 
-Only these model and platform combinations are admitted to 1.0.8.
+Only these model and platform combinations are admitted to 1.0.9.
 The platform column names the hardware tested for each model.
 
 | Model | Checkpoint format | Qualified platform |
@@ -81,7 +81,7 @@ Run it with `--drafter`. Without it the 27B decodes plain, which is slower than 
 Its prompt processing trails mlx_lm for now, and we are fixing it. An M3 Ultra reads prompts at about half of mlx_lm's speed from 8k to 30k tokens, and served cold prefill on an M5 Max also measured below mlx_lm.
 Bonsai, Gemma 4, Qwen3.6 and DeepSeek-V4 are still under qualification for 1.0.x.
 The Python 0.6.6 engine remains on the `python-0.6` line for those models and other backends.
-On CUDA, 1.0.8 serves Nemotron on a GB10, greedy and sampled, with concurrent requests sharing each round.
+On CUDA, 1.0.9 serves Nemotron on a GB10, greedy and sampled, with concurrent requests sharing each round.
 The Linux x86_64 archive adds NVIDIA Ampere cards with compute capability 8.6 (the RTX 30 series, RTX A6000, A10 and A40), tested on an RTX 3090, and Blackwell cards with compute capability 12.0 (the RTX 50 series and RTX PRO 6000 Blackwell), tested on an RTX PRO 6000; the A100 (8.0) is not supported yet.
 
 ## Exact decoding
@@ -103,7 +103,7 @@ tensorfold info TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 
 `pull` downloads a checkpoint into the Hugging Face cache and checks every file: large files by sha256, small files by their git blob sha1.
 Large files come down in pieces over up to 16 connections, and an interrupted pull resumes with the pieces it lacks.
-It refuses a model that no 1.0.8 family serves, and fetches the 27B's DFlash2 drafter for `--drafter`. `models` lists the cached checkpoints 1.0.8 can serve, and `info` shows one checkpoint's family, format, context and memory floor.
+It refuses a model that no 1.0.9 family serves, and fetches the 27B's DFlash2 drafter for `--drafter`. `models` lists the cached checkpoints 1.0.9 can serve, and `info` shows one checkpoint's family, format, context and memory floor.
 `tensorfold serve REPO` serves a cached checkpoint by its repository name.
 
 ## Context compaction
@@ -190,7 +190,7 @@ Use the Zig version pinned in `.zig-version`, currently 0.17.0.
 On a Mac with Xcode's Metal toolchain:
 
 ```sh
-zig build native -Dcpu=apple_m1 -Dversion=1.0.8
+zig build native -Dcpu=apple_m1 -Dversion=1.0.9
 zig build test test-golden -Dcpu=apple_m1
 ```
 
