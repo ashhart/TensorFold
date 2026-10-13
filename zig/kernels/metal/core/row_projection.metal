@@ -2,6 +2,9 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// 2^-e, exact: a code read in place at bit e times its input scaled by 2^-e is the same product.
+inline float tf_rp_p2(int e) { return as_type<float>(uint(127 - e) << 23); }
+
 // 16 bf16 inputs as floats (scaled to the nibble positions at 4 bits) and their group sum: fp32 in order, or rounded to bf16 at each add (BF16SUM, the Nemotron expert convention).
 template <int BITS, bool BF16SUM>
 inline float tf_rp_load16(const device bfloat* x, thread float* xt) {
@@ -10,10 +13,10 @@ inline float tf_rp_load16(const device bfloat* x, thread float* xt) {
     const bfloat a = x[i], b = x[i + 1], c = x[i + 2], d = x[i + 3];
     if (BF16SUM) sum += float(bfloat(float(bfloat(float(bfloat(float(a) + float(b))) + float(c))) + float(d)));
     else { sum += float(a); sum += float(b); sum += float(c); sum += float(d); }
-    xt[i] = float(a);
-    xt[i + 1] = BITS == 4 ? float(b) / 16.0f : float(b);
-    xt[i + 2] = BITS == 4 ? float(c) / 256.0f : float(c);
-    xt[i + 3] = BITS == 4 ? float(d) / 4096.0f : float(d);
+    xt[i] = BITS == 2 ? float(a) * tf_rp_p2(2 * i) : float(a);
+    xt[i + 1] = BITS == 4 ? float(b) / 16.0f : BITS == 2 ? float(b) * tf_rp_p2(2 * i + 2) : float(b);
+    xt[i + 2] = BITS == 4 ? float(c) / 256.0f : BITS == 2 ? float(c) * tf_rp_p2(2 * i + 4) : float(c);
+    xt[i + 3] = BITS == 4 ? float(d) / 4096.0f : BITS == 2 ? float(d) * tf_rp_p2(2 * i + 6) : float(d);
   }
   return sum;
 }
@@ -25,7 +28,7 @@ inline void tf_rp_qdot16(const device uint8_t* w, const thread float (*xt)[16], 
   float q[16];
   if (BITS == 2) {
     const uint v = *(const device uint*)w;
-    for (int i = 0; i < 16; i++) q[i] = float((v >> (2 * i)) & 3u);
+    for (int i = 0; i < 16; i++) q[i] = float(v & (3u << (2 * i)));
   } else if (BITS == 4) {
     const device uint16_t* ws = (const device uint16_t*)w;
     for (int i = 0; i < 4; i++) {
