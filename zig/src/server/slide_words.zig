@@ -176,8 +176,21 @@ fn saysNumber(text: []const u8, value: u64) bool {
     return false;
 }
 
-fn isFiller(word: []const u8) bool {
+pub fn isFiller(word: []const u8) bool {
     for (fillers) |f| if (std.mem.eql(u8, f, word)) return true;
+    return false;
+}
+
+/// Whether `said`, an answer from `fact` alone, gives a word of it the question lacks ("2", "Gdańsk" for "Gdańsku").
+pub fn answersFrom(fact: []const u8, question: []const u8, said: []const u8) bool {
+    if (tells(fact, question, "", said)) return true;
+    var it: Units = .init(fact);
+    while (it.next()) |u| {
+        if (u.paired) continue;
+        if (numberOf(u.raw)) |v| {
+            if (!saysNumber(question, v) and saysNumber(said, v)) return true;
+        } else if (u.notable() and !saysStem(question, u.word) and saysStem(said, u.word)) return true;
+    }
     return false;
 }
 
@@ -214,7 +227,8 @@ fn saysForm(text: []const u8, word: []const u8) bool {
 
 /// Whether a word of `text` starts as `word` does, all but its last three letters ("manages" for "managed").
 fn saysStem(text: []const u8, word: []const u8) bool {
-    const stem = word[0..@min(word.len, @max(4, word.len -| 3))];
+    const base = if (word.len > 3 and word[word.len - 1] == 's') word[0 .. word.len - 1] else word; // a fact's "pays" is the text's "pay"
+    const stem = base[0..@min(base.len, @max(4, base.len -| 3))];
     var it: Units = .init(text);
     while (it.next()) |u| if (std.mem.startsWith(u8, u.word, stem)) return true;
     return false;
@@ -551,6 +565,19 @@ test "a short answer comes back by its numbers, in digits or words, else by half
     try std.testing.expect(!recallsShort(office, "When does the office open?", "8 am", "It opens at nine."));
 }
 
+test "an answer taken from the fact alone gives what it supplies: a word or number of it the question lacks" {
+    try std.testing.expect(answersFrom("Quillo Labs was founded by Emeka Halthornrand.", "Who founded Quillo Labs?", "Emeka Halthornrand"));
+    try std.testing.expect(!answersFrom("Quillo Labs was founded in 2001.", "Who founded Quillo Labs?", "It does not say who"));
+    try std.testing.expect(!answersFrom("Quillo Labs was founded in 2001.", "Who founded Quillo Labs?", "Quillo Labs"));
+    try std.testing.expect(answersFrom("Every code review needs two approvals.", "How many approvals does a code review need?", "2"));
+    try std.testing.expect(answersFrom("My sister is called Ana.", "What is my sister's name?", "Ana"));
+    try std.testing.expect(answersFrom("I like blue.", "What colour do I like?", "Blue"));
+    try std.testing.expect(asks("Now I like red.", "What is my favourite colour?", "Your favourite colour is red.") and !asks("Now I like red.", "Do I like red?", "Yes, you like red."));
+    try std.testing.expect(asks("My birthday is in May.", "When is my birthday?", "In May.") and !asks("I do not like blue now.", "What colour do I not like now?", "Not now."));
+    try std.testing.expect(answersFrom("Firma Brightwell Foods ma siedzibę w Gdańsku.", "Where is Brightwell Foods based?", "Gdańsk"));
+    try std.testing.expect(!answersFrom("Firma Brightwell Foods ma siedzibę w Gdańsku.", "Where is Brightwell Foods based?", "Brightwell"));
+}
+
 test "a found fact is learned only when the text holds its names, numbers and words" {
     const text = "Quillo Labs staff handbook, part 3 of 4\n\nThe biggest customer of Quillo Labs is Tanith Brewery. Our documents live in Brabradocs. Every code review needs 2 approvals. Our chief financial officer is Kwame Ganbraith. The office opens at 9 am.";
     for ([_][]const u8{ "Quillo Labs chief financial officer is Kwame Ganbraith.", "Quillo Labs office opens at 9 am.", "Kwame Ganbraith is the Quillo Labs chief financial officer.", "A Quillo Labs code review needs two approvals.", "Quillo Labs documents live in Brabradocs.", "The biggest customer of Quillo Labs is Tanith Brewery." }) |f|
@@ -559,4 +586,5 @@ test "a found fact is learned only when the text holds its names, numbers and wo
     for ([_][]const u8{ "Quillo Labs was founded in Leeds.", "Jo Smith founded Quillo Labs.", "Quillo Labs builds Widgetly.", "Widgetly is a planning app for schools.", "A Quillo Labs code review needs one approval.", "Quillo Labs tracks bugs in Linear.", "The Quillo Labs support desk opens every weekday." }) |f|
         try std.testing.expect(!grounded(f, text));
     try std.testing.expect(grounded("Ines Calloway manages the Quillmoor support rota.", "The support rota is managed by Ines Calloway at Quillmoor Labs."));
+    try std.testing.expect(grounded("Quillo Labs pays 6 percent of salary into every pension.", "Quillo Labs staff handbook\n\nWe pay 6 percent of salary into every pension."));
 }

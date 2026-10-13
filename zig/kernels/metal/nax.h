@@ -184,4 +184,26 @@ inline void mma_16x32(thread frag<C>& lo, thread frag<C>& hi, thread const frag<
 }
 #endif
 
+// frag_get from a block whose rows home.y and home.y + 8 start at r0 and r1; an unflagged row reads as zero.
+template <typename T, typename S>
+inline void frag_get_rows(thread frag<T>& f, const device S* r0, const device S* r1, int c, short2 home, bool lo,
+                          bool hi) {
+  TF_UNROLL
+  for (short e = 0; e < 8; e++) {
+    f[e] = ((e >> 2) ? hi : lo) ? T(((e >> 2) ? r1 : r0)[c + home.x + TF_COL(e)]) : T(0);
+  }
+}
+
+// frag_put to a block whose rows home.y and home.y + 8 start at r0 and r1; only flagged rows are written.
+template <typename O>
+inline void frag_put_rows(thread const frag<float>& f, device O* r0, device O* r1, int c, short2 home, bool lo,
+                          bool hi) {
+  TF_UNROLL
+  for (short e = 0; e < 8; e++) {
+    if ((e >> 2) ? hi : lo) {
+      ((e >> 2) ? r1 : r0)[c + home.x + TF_COL(e)] = O(f[e]);
+    }
+  }
+}
+
 }  // namespace tfp

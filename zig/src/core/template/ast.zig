@@ -14,7 +14,7 @@ pub const Name = struct {
 
 pub const Kwarg = struct { name: []const u8, value: *Expr };
 
-pub const Args = struct { pos: []*Expr = &.{}, kw: []Kwarg = &.{} };
+pub const Args = struct { pos: []*Expr = &.{}, kw: []Kwarg = &.{}, dyn_kw: ?*Expr = null };
 
 pub const CmpOp = enum { eq, ne, lt, lteq, gt, gteq, in, notin };
 
@@ -154,4 +154,5 @@ pub fn eachChild(comptime E: type, e: *const Expr, ctx: anytype, comptime visit:
 fn eachArg(comptime E: type, args: Args, ctx: anytype, comptime visit: fn (@TypeOf(ctx), *Expr) E!void) E!void {
     for (args.pos) |x| try visit(ctx, x);
     for (args.kw) |k| try visit(ctx, k.value);
+    if (args.dyn_kw) |x| try visit(ctx, x);
 }

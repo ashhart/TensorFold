@@ -73,7 +73,7 @@ const Fake = struct {
         self(ptr).mask_first = first;
         return self(ptr).view(count, x.width);
     }
-    fn head(ptr: *anyopaque, _: u64, _: ck.Linear, x: op.View) !op.Head {
+    fn head(ptr: *anyopaque, _: u64, x: op.View) !op.Head {
         return .{ .logits = self(ptr).view(x.rows, fixtures.toy.vocab) };
     }
     fn lattice(_: *anyopaque, _: u64, _: op.Head, projected: op.View, c: cfg.Config) !op.Lattice {

@@ -28,6 +28,7 @@ test {
     _ = @import("load_plan.zig");
     _ = @import("page_cache.zig");
     _ = pool;
+    _ = @import("kept.zig");
     _ = mirror;
     _ = timing;
 }
