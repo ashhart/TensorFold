@@ -8,8 +8,9 @@ const Tensor = types.Tensor;
 /// Rows and columns one scale_inv entry covers.
 pub const block = 128;
 
-/// An e4m3 code's value (the NaN codes 0x7f and 0xff read as ±480; a checkpoint holds none).
+/// An e4m3 code's value; 0x7f and 0xff are NaN, as the GPU's conversion reads them.
 pub fn e4m3(b: u8) f64 {
+    if (b & 0x7f == 0x7f) return std.math.nan(f64);
     const sign: f64 = if (b & 0x80 != 0) -1 else 1;
     const e: i32 = (b >> 3) & 0xF;
     const m: f64 = @floatFromInt(b & 7);
@@ -58,6 +59,7 @@ test "e4m3 codes and their rounding" {
     try std.testing.expectEqual(@as(f64, -2), e4m3(0xc0));
     try std.testing.expectEqual(@as(f64, 448), e4m3(0x7e));
     try std.testing.expectEqual(std.math.pow(f64, 2, -9), e4m3(0x01));
+    try std.testing.expect(std.math.isNan(e4m3(0x7f)) and std.math.isNan(e4m3(0xff)));
     for (0..256) |i| {
         const b: u8 = @intCast(i);
         if (b & 0x7f == 0x7f) continue;
