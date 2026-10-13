@@ -239,6 +239,32 @@ test "under min_prompt the history's mark floors to its pass's last cut from the
     try std.testing.expectEqualSlices(u32, &.{ 40, 66 }, (try s.begin(a, &long, 66, &.{40}, &.{}, null, &.{})).marks);
 }
 
+test "a short prompt's mark inside its shared block is the block's state: the reply's own keep evicts another state, and the next turn resumes it" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .warm = true, .min_prompt = 64, .chunk = 4 }, 350); // fake bytes 100 + at: three states pass it
+    defer s.deinit();
+    var other: [13]u32 = undefined; // an older conversation's state, the least recently used
+    for (&other, 0..) |*t, i| t.* = @intCast(90 + i);
+    _ = f.pass(&s, &other, try s.begin(a, &other, 12, &.{}, &.{}, null, &.{}));
+    var ctx: [30]u32 = undefined; // a 20-token system block, the user's turn to 22, the generation prompt to 25, then the reply
+    for (&ctx, 1..) |*t, i| t.* = @intCast(i);
+    const starts = [_]u32{ 4, 8, 12, 16, 19 }; // the request's starts, the last one before the conversation's own text
+    const p = try s.begin(a, ctx[0..25], 22, &.{20}, &starts, null, &.{});
+    try std.testing.expectEqualSlices(u32, &.{19}, p.marks);
+    _ = f.pass(&s, ctx[0..25], p);
+    _ = f.pass(&s, &ctx, .{ .from = 25, .marks = &.{29} }); // the reply's end kept as the 27B keeps it: room is made first
+    try std.testing.expect(s.find(&other, &.{}, &.{}) == null);
+    var next = ctx; // the next turn drops the reply's reasoning: it shares only the history
+    for (next[22..]) |*t| t.* = 77;
+    const q = try s.begin(a, &next, 28, &.{20}, &starts, null, &.{});
+    try std.testing.expectEqual(@as(u32, 19), q.from);
+    try std.testing.expectEqual(fresh(&next), f.pass(&s, &next, q));
+}
+
 test "kept states charge their real storage, a save takes spare storage first, and spare stays inside the budget" {
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);

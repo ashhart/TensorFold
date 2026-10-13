@@ -271,9 +271,9 @@ pub const Store = struct {
             try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, 0, shared, starts, spans, if (e) |x| x.last else &.{}))
         else
             try s.fittingRewind(a, try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, s.active_rewind_at, shared, starts, spans, if (e) |x| x.last else &.{})), endpoint, s.active_rewind_at, endpoint_bytes);
-        for (shared) |w| { // the shared cuts this pass keeps: their states serve other conversations too
+        for (shared) |w| { // the shared cuts this pass keeps, and a short prompt's mark inside a shared block: other conversations resume them
             const at = if (s.rules.planned) s.startAt(starts, w) else w;
-            if (std.mem.indexOfScalar(u32, marks_, at) != null) s.noteShared(prompt[0 .. at + s.rules.lookahead]);
+            for (marks_) |m| if (m == at or (m < at and !s.rules.planned and prompt.len < s.rules.min_prompt)) s.noteShared(prompt[0 .. m + s.rules.lookahead]);
         }
         s.reserve(prompt, e, marks_, spans);
         return .{ .entry = e, .marks = marks_ };
