@@ -1,0 +1,16 @@
+// Shared agent/IPC types (used by both main and, structurally, the renderer).
+
+export * from './types/base'
+export * from './types/settings'
+export * from './types/timeline'
+export * from './types/connectors'
+export * from './types/capabilities'
+export * from './types/jobs'
+export * from './types/workspace'
+export * from './types/cli-auth'
+export * from './types/cli'
+export * from './types/spine'
+export * from './types/engine'
+export type { TurnCheckpoint, TurnRevert, TurnFork, PlanImplementationLink, HandoffPayload } from './turn-checkpoints'
+export type { CodexRateLimitSnapshot, CodexRateLimitWindow, ProviderStatusSnapshot, PersistedProviderStatus } from './provider-status'
+export * from './loop-types'

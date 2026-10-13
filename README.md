@@ -4,6 +4,12 @@ TensorFold 1.0.9 serves language models from a Zig binary on Apple Silicon and N
 The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels directly.
 Serving needs no Python or MLX installation.
 
+## Mac app
+
+The [TensorFold desktop workspace](app/README.md) bundles the local engine, model downloads, hardware recommendations, live generation metrics, coding workers and document editing.
+Download the signed and notarized Apple-silicon [beta.5 DMG](https://github.com/ashhart/TensorFold/releases/tag/v1.0.0-beta.5), or build from [`app/`](app/README.md).
+Mobile clients in `app/mobile/` remain preview software.
+
 ## Install and serve
 
 The macOS Homebrew formula installs the native binary as `tensorfold`:

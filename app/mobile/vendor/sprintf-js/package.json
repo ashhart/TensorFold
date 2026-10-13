@@ -1,0 +1,7 @@
+{
+  "name": "sprintf-js",
+  "version": "1.0.3-tensorfold.1",
+  "main": "src/sprintf.js",
+  "license": "BSD-3-Clause",
+  "private": true
+}

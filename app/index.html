@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
+    <meta data-vontra-production-csp http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-src http://localhost:3000 http://127.0.0.1:3000 http://[::1]:3000 https://localhost:3000 https://127.0.0.1:3000 https://[::1]:3000 http://localhost:4173 http://127.0.0.1:4173 http://[::1]:4173 https://localhost:4173 https://127.0.0.1:4173 https://[::1]:4173 http://localhost:5173 http://127.0.0.1:5173 http://[::1]:5173 https://localhost:5173 https://127.0.0.1:5173 https://[::1]:5173; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; trusted-types default vontra; require-trusted-types-for 'script'" />
+    <title>TensorFold</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%230c0c0d'/><path d='M12 16h40M12 32h40M12 48h24' stroke='white' stroke-width='6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
+    <style>
+      html,
+      body,
+      #root {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+      }
+      #boot {
+        position: fixed;
+        inset: 0;
+        z-index: 60;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+        -webkit-app-region: no-drag;
+        background: #0c0c0d;
+        transition: opacity 0.3s ease, visibility 0.3s ease;
+      }
+      body.ready #boot {
+        opacity: 0;
+        visibility: hidden;
+      }
+      .boot-mark {
+        width: 60px;
+        height: 60px;
+        opacity: 0;
+        animation: boot-pop 0.7s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+      }
+      @keyframes boot-pop {
+        0% { opacity: 0; transform: scale(0.8); }
+        60% { opacity: 1; transform: scale(1.04); }
+        100% { opacity: 1; transform: scale(1); }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <div id="boot" role="status" aria-label="Loading TensorFold">
+      <svg class="boot-mark" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <path d="M12 16h40M12 32h40M12 48h24" stroke="#fff" stroke-width="6" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

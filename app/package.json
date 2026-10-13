@@ -1,0 +1,184 @@
+{
+  "name": "tensorfold-studio",
+  "version": "1.0.0-beta.5",
+  "private": true,
+  "packageManager": "npm@10.9.8",
+  "engines": {
+    "node": ">=22 <23",
+    "npm": "10.9.8"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": ">=22 <23",
+      "onFail": "error"
+    },
+    "packageManager": {
+      "name": "npm",
+      "version": "10.9.8",
+      "onFail": "error"
+    }
+  },
+  "description": "TensorFold, an agentic desktop workspace for local and cloud models",
+  "author": "TensorFold",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "preinstall": "node scripts/check-package-manager.mjs",
+    "install:check": "node scripts/check-package-manager.mjs",
+    "install:verify-clean": "node scripts/verify-clean-install.mjs",
+    "deps:trusted-scripts": "node node_modules/electron/install.js && npm rebuild --ignore-scripts=false @lydell/node-pty",
+    "dev": "npm run install:check && vite",
+    "dev:web": "npm run install:check && VONTRA_NO_ELECTRON=1 vite",
+    "build": "npm run install:check && node scripts/clean-build-output.mjs && vite build",
+    "engine:fetch": "node scripts/fetch-engine.mjs",
+    "pack:mac:dev": "npm run build && node scripts/fetch-engine.mjs && node scripts/build-computer-helper.mjs && node scripts/package-mac.mjs --mode dev --targets dir",
+    "smoke:mac:packaged": "node scripts/smoke-packaged-mac.mjs",
+    "pack:mac": "npm run build && node scripts/fetch-engine.mjs && node scripts/build-computer-helper.mjs && node scripts/package-mac.mjs --mode release --targets dir",
+    "dist:mac": "npm run build && node scripts/fetch-engine.mjs && node scripts/build-computer-helper.mjs && node scripts/package-mac.mjs --mode release --targets dmg,zip",
+    "computer:build": "node scripts/build-computer-helper.mjs",
+    "release:manifest": "node scripts/make-update-manifest.mjs",
+    "release:manifest:dev": "node scripts/make-update-manifest.mjs --unsigned-dev",
+    "release:credentials": "node scripts/setup-notarization.mjs",
+    "release:prepare": "node scripts/prepare-studio-release.mjs",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit --pretty false",
+    "test": "npm run test:agent",
+    "verify": "npm test && npm run typecheck && npm run verify:mobile && git diff --check",
+    "test:agent": "node scripts/check-package-manager.mjs && node scripts/check-private-leaks.mjs && node scripts/check-test-agent-coverage.mjs && node scripts/run-tests.mjs",
+    "start": "npm run install:check && electron .",
+    "start:headless": "npm run build && electron . --headless-server",
+    "start:orchestrator": "npm run start:headless",
+    "verify:mobile": "npm --prefix mobile run verify"
+  },
+  "build": {
+    "appId": "dev.tensorfold.studio",
+    "productName": "TensorFold",
+    "npmRebuild": false,
+    "directories": {
+      "buildResources": "build",
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/engine",
+        "to": "engine",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "build/computer-use",
+        "to": "computer-use",
+        "filter": [
+          "tensorfold-computer"
+        ]
+      }
+    ],
+    "asar": true,
+    "afterPack": "scripts/strip-packaged-debug-paths.cjs",
+    "forceCodeSigning": true,
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true,
+      "grantFileProtocolExtraPrivileges": true
+    },
+    "mac": {
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "category": "public.app-category.developer-tools",
+      "darkModeSupport": true,
+      "minimumSystemVersion": "13.0",
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "icon": "build/icon.icns",
+      "extendInfo": {
+        "NSAppleEventsUsageDescription": "TensorFold can control local developer tools when you enable controller actions.",
+        "NSLocalNetworkUsageDescription": "TensorFold connects with your paired phone on a private network when you enable the mobile connection.",
+        "NSMicrophoneUsageDescription": "TensorFold uses the microphone only when you start voice input in the composer.",
+        "NSDesktopFolderUsageDescription": "TensorFold can read or write files in selected project folders.",
+        "NSDocumentsFolderUsageDescription": "TensorFold can read or write files in selected project folders.",
+        "NSDownloadsFolderUsageDescription": "TensorFold can save exports or downloaded artifacts when you choose those locations.",
+        "NSAppTransportSecurity": {
+          "NSExceptionDomains": {
+            "127.0.0.1": {
+              "NSExceptionAllowsInsecureHTTPLoads": true
+            }
+          }
+        }
+      },
+      "hardenedRuntime": true,
+      "identity": "Developer ID Application",
+      "notarize": true,
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "dmg": {
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    }
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.1.0",
+    "@lydell/node-pty": "^1.2.0-beta.12",
+    "@types/diff": "^7.0.2",
+    "@types/qrcode": "^1.5.6",
+    "@whiskeysockets/baileys": "^7.0.0-rc13",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "clsx": "^2.1.1",
+    "diff": "^5.2.2",
+    "imapflow": "^1.7.8",
+    "nodemailer": "^10.1.0",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.1",
+    "remark-gfm": "^4.0.0",
+    "ssh2": "^1.17.0",
+    "undici": "7.30.0",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/node": "^22.10.2",
+    "@types/nodemailer": "^8.0.1",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@types/ssh2": "^1.15.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^42.11.12",
+    "electron-builder": "^26.15.3",
+    "jiti": "^2.7.0",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vite-plugin-electron": "^0.29.0",
+    "vite-plugin-electron-renderer": "^0.14.6"
+  },
+  "overrides": {
+    "app-builder-lib": {
+      "@electron/get": "^5.0.0"
+    }
+  }
+}

@@ -1,0 +1,437 @@
+@import "tailwindcss";
+
+/* ----------------------------------------------------------------------------
+   TensorFold design system. Every value comes from the TensorFold brand art:
+   graphite and navy surfaces, the electric-blue primary, the brand violet for
+   toggles, links and focus (--info), and the coral → violet → blue fold
+   gradient below. Elevation is a tint of the foreground ink, controls sit on a
+   4px radius grid, and the main pane floats as a rounded content card beside
+   the sidebar. The runtime theme (src/lib/theme.ts) overrides most of these
+   from the active palette; the values here are the fallbacks.
+---------------------------------------------------------------------------- */
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  color-scheme: light;
+
+  /* ink = the single foreground color; everything else derives via opacity */
+  --ink: 23 24 28;            /* the TensorFold light foreground (#17181C) */
+  /* Fallbacks until the runtime theme applies (TensorFold preset, light). */
+  --accent: #2f4be0;
+  --accent-strong: #2840c0;
+  --accent-ink: #ffffff;
+  --accent-soft: #e3e7fb;
+
+  /* The fold gradient from the TensorFold art: brand marks, primary moments, progress. */
+  --brand-coral: #ff7a5c;
+  --brand-rose: #e0507a;
+  --brand-violet: #8b4dff;
+  --brand-blue: #3d6bff;
+  --brand-navy: #001473;
+  --brand-gradient: linear-gradient(100deg, var(--brand-coral) 0%, var(--brand-rose) 28%, var(--brand-violet) 62%, var(--brand-blue) 100%);
+
+  /* Surfaces: graphite with a hint of navy; elevation is a tint of the ink. */
+  --bg: #f2f3f6;              /* window chrome / sidebar fallback */
+  --win-alt: #ebecf0;         /* secondary chrome */
+  --canvas: #fbfbfc;          /* the content card */
+  --card: #ffffff;            /* cards, popovers, composer */
+  --card-2: #f4f5f8;          /* recessed card surface */
+  --surface: rgb(var(--ink) / 0.045);
+  --surface-hover: rgb(var(--ink) / 0.075);
+
+  --line: rgb(var(--ink) / 0.07);
+  --line-strong: rgb(var(--ink) / 0.13);
+  --shadow-card: 0 1px 2px rgb(11 18 64 / 0.05), 0 1px 4px rgb(11 18 64 / 0.035);
+  --shadow-pop: 0 14px 36px -10px rgb(11 18 64 / 0.2), 0 2px 8px rgb(11 18 64 / 0.07);
+
+  /* The brand violet: toggles, links, focus. */
+  --info: #5b4bd8;
+  --info-ink: #4a3bc2;
+
+  --add-bg: #e7f7ee;
+  --add-ink: #067647;
+  --add-line: #b6e6cb;
+  --del-bg: #fdeceb;
+  --del-ink: #c0392b;
+  --del-line: #f4c7c2;
+
+  --positive: #17a06a;
+  --warn: #d4860b;
+  --danger: #d42f3c;
+
+  /* User message bubble: a quiet ink tint (radius in the scale below). */
+  --bubble-out: rgb(var(--ink) / 0.055);
+  --bubble-out-ink: rgb(var(--ink) / 0.95);
+  --bubble-in: var(--card-2);
+  --bubble-in-ink: rgb(var(--ink) / 0.92);
+
+  /* Frosted sidebar and window base. With Electron vibrancy the alpha lets the desktop
+     blur through; in a plain browser it composites over --bg as the sidebar tone. */
+  --sidebar-surface: color-mix(in srgb, var(--card) 70%, transparent);
+  --sidebar-blur: blur(12px) saturate(150%);
+  --content-card-radius: 0.75rem;
+  --seam-line: rgb(var(--ink) / 0.09);
+  --seam-shadow: rgb(11 18 64 / 0.1);
+}
+
+.dark {
+  color-scheme: dark;
+
+  /* Fallbacks until the runtime theme applies (TensorFold preset, dark). */
+  --ink: 236 237 241;
+  --accent: #5a78ff;
+  --accent-strong: #7088ff;
+  --accent-ink: #ffffff;
+  --accent-soft: #1a2040;
+
+  --bg: #17181d;               /* sidebar/window fallback when not frosted */
+  --win-alt: #1c1d23;
+  --canvas: #111216;           /* the content card */
+  --card: #141519;
+  --card-2: #191a1f;
+  --surface: rgb(var(--ink) / 0.045);
+  --surface-hover: rgb(var(--ink) / 0.075);
+
+  --line: rgb(var(--ink) / 0.07);
+  --line-strong: rgb(var(--ink) / 0.12);
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.18);
+  --shadow-pop: 0 14px 34px -14px rgb(0 0 0 / 0.5), 0 2px 6px rgb(0 0 0 / 0.28);
+
+  --info: #8ea0ff;
+  --info-ink: #aab7ff;
+
+  --add-bg: #0f2a1d;
+  --add-ink: #4ade80;
+  --add-line: #1d4d33;
+  --del-bg: #2e1715;
+  --del-ink: #f87171;
+  --del-line: #5a2420;
+
+  --positive: #3ccf91;
+  --warn: #f2b234;
+  --danger: #f0525c;
+
+  --bubble-out: rgb(var(--ink) / 0.07);
+  --bubble-out-ink: rgb(var(--ink) / 0.95);
+  --bubble-in: #1a1b20;
+  --bubble-in-ink: rgb(var(--ink) / 0.92);
+
+  --sidebar-surface: color-mix(in srgb, #141519 64%, transparent);
+  --seam-line: rgb(var(--ink) / 0.08);
+  --seam-shadow: rgb(0 0 0 / 0.36);
+}
+
+@theme inline {
+  --color-ink: rgb(var(--ink));
+  /* Muted text ramp: ink at 60 / 42 / 26 / 10%. */
+  --color-ink-2: rgb(var(--ink) / 0.60);
+  --color-ink-3: rgb(var(--ink) / 0.42);
+  --color-ink-4: rgb(var(--ink) / 0.26);
+  --color-ink-5: rgb(var(--ink) / 0.10);
+
+  --color-bg: var(--bg);
+  --color-win-alt: var(--win-alt);
+  --color-canvas: var(--canvas);
+  --color-card: var(--card);
+  --color-card-2: var(--card-2);
+
+  --color-surface: var(--surface);
+  --color-surface-hover: var(--surface-hover);
+
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-info: var(--info);
+  --color-info-ink: var(--info-ink);
+
+  --color-bubble-out: var(--bubble-out);
+  --color-bubble-out-ink: var(--bubble-out-ink);
+  --color-bubble-in: var(--bubble-in);
+  --color-bubble-in-ink: var(--bubble-in-ink);
+
+  --color-positive: var(--positive);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+    sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", "SFMono-Regular",
+    Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+
+  /* Radius scale on a 4px grid: 4 / 6 / 8 / 10 / 12 / 16 / 20px; composer 18px, bubble 14px. */
+  --radius-xs: 0.25rem;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.625rem;
+  --radius-xl: 0.75rem;
+  --radius-2xl: 1rem;
+  --radius-3xl: 1.25rem;
+  --radius-composer: 1.125rem;
+  --radius-bubble: 0.875rem;
+
+  /* Type scale: 11 / 12 / 13 / 14 / 16px. */
+  --text-2xs: 0.6875rem;  /* 11 — rare meta */
+  --text-xs: 0.75rem;     /* 12 — meta/timestamps */
+  --text-ui: 0.8125rem;   /* 13 — sidebar rows, pickers */
+  --text-sm: 0.8125rem;   /* 13 */
+  --text-base: 0.875rem;  /* 14 */
+  --text-lg: 1rem;        /* 16 */
+}
+
+/* Fold gradient fills: `bg-brand` for marks, primary moments and progress; `text-brand` for a
+   gradient word. Use sparingly; everything else stays on the semantic tokens. */
+@utility bg-brand {
+  background-image: var(--brand-gradient);
+}
+@utility text-brand {
+  background-image: var(--brand-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@layer base {
+  * {
+    border-color: var(--line);
+  }
+  html, body, #root {
+    height: 100%;
+  }
+  body {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: 1.5;
+    color: rgb(var(--ink));
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    letter-spacing: 0;
+    overflow: hidden;
+    user-select: none;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--info) 30%, transparent);
+  }
+  input, textarea {
+    user-select: text;
+  }
+}
+
+/* ----------------------------------------------------------------------------
+   App shell: the root paints the sidebar surface and the main pane (.content-card)
+   floats on it as a rounded card with a 1px seam on its left edge and a soft shadow.
+   When the sidebar collapses the card squares off.
+---------------------------------------------------------------------------- */
+.app-shell {
+  background-color: var(--bg);
+}
+.app-shell.frosted {
+  background-color: var(--sidebar-surface);
+  -webkit-backdrop-filter: var(--sidebar-blur);
+  backdrop-filter: var(--sidebar-blur);
+}
+.content-card {
+  position: relative;
+  background-color: var(--canvas);
+  border-radius: var(--content-card-radius) 0 0 var(--content-card-radius);
+  box-shadow: -8px 0 16px -12px var(--seam-shadow);
+  transition: box-shadow 0.26s cubic-bezier(0.25, 0.8, 0.25, 1), border-radius 0.26s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+.content-card::before {
+  content: "";
+  z-index: 1;
+  pointer-events: none;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--seam-line);
+  position: absolute;
+  inset: 0;
+  /* only the rounded left edge carries the seam */
+  clip-path: inset(0 calc(100% - var(--content-card-radius)) 0 0);
+}
+.sidebar-collapsed .content-card {
+  border-radius: 0;
+  box-shadow: none;
+}
+.sidebar-collapsed .content-card::before {
+  opacity: 0;
+}
+
+/* Right panel: a recessed rounded region on the content card. */
+.inset-panel {
+  background: rgb(var(--ink) / 0.03);
+  border-radius: var(--radius-xl);
+}
+.dark .inset-panel {
+  background: rgb(0 0 0 / 0.24);
+}
+
+/* Electron drag regions: only empty chrome should drag; controls must stay clickable. */
+.drag {
+  -webkit-app-region: drag;
+}
+.no-drag,
+.no-drag *,
+button,
+button *,
+a,
+a *,
+input,
+select,
+textarea,
+label,
+[role="button"],
+[role="button"] * {
+  -webkit-app-region: no-drag;
+}
+
+/* Thin scrollbars in the ink tint */
+.scroll-thin { scrollbar-width: thin; scrollbar-color: rgb(var(--ink) / 0.16) transparent; }
+.scroll-thin::-webkit-scrollbar { width: 9px; height: 9px; }
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: rgb(var(--ink) / 0.15);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.scroll-thin::-webkit-scrollbar-thumb:hover { background: rgb(var(--ink) / 0.28); background-clip: padding-box; }
+.scroll-thin::-webkit-scrollbar-corner { background: transparent; }
+
+/* Sweep across "thinking" text: a brighter band of ink passes left to right */
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    rgb(var(--ink) / 0.38) 0%,
+    rgb(var(--ink) / 0.38) 40%,
+    rgb(var(--ink) / 0.92) 50%,
+    rgb(var(--ink) / 0.38) 60%,
+    rgb(var(--ink) / 0.38) 100%
+  );
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 1.8s linear infinite;
+}
+@keyframes shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: 0% 0; }
+}
+
+/* Caret blink used in the live-streaming cursor */
+.caret::after {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 1.05em;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  border-radius: 1px;
+  animation: caret 1.1s steps(1) infinite;
+}
+@keyframes caret { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+
+/* Staggered entrance for lists */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.rise { animation: rise 0.42s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+.fade-in { animation: fade-in 0.25s ease both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer, .caret::after, .rise, .fade-in { animation: none !important; }
+}
+
+/* Markdown prose inside assistant messages */
+.prose-tf { font-size: var(--text-base); line-height: 1.62; color: rgb(var(--ink) / 0.9); }
+.prose-tf > :first-child { margin-top: 0; }
+.prose-tf > :last-child { margin-bottom: 0; }
+.prose-tf p { margin: 0.7em 0; }
+.prose-tf h1, .prose-tf h2, .prose-tf h3 { margin: 1.1em 0 0.5em; font-weight: 600; letter-spacing: -0.02em; color: rgb(var(--ink)); line-height: 1.3; }
+.prose-tf h1 { font-size: 1.3em; }
+.prose-tf h2 { font-size: 1.15em; }
+.prose-tf h3 { font-size: 1.02em; }
+.prose-tf ul, .prose-tf ol { margin: 0.6em 0; padding-left: 1.35em; }
+.prose-tf li { margin: 0.28em 0; }
+.prose-tf ul > li { list-style: disc; }
+.prose-tf ol > li { list-style: decimal; }
+.prose-tf a { color: rgb(var(--ink)); text-decoration: underline; text-underline-offset: 2px; text-decoration-color: rgb(var(--ink) / 0.35); }
+.prose-tf a:hover { text-decoration-color: rgb(var(--ink)); }
+.prose-tf strong { font-weight: 650; color: rgb(var(--ink)); }
+.prose-tf code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: rgb(var(--ink) / 0.06);
+  border: 1px solid var(--line);
+  padding: 0.08em 0.36em;
+  border-radius: 5px;
+}
+.prose-tf pre {
+  margin: 0.8em 0;
+  padding: 0.85rem 0.95rem;
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  font-size: 0.82em;
+  line-height: 1.55;
+}
+.prose-tf pre code { background: none; border: none; padding: 0; font-size: 1em; }
+.prose-tf blockquote { margin: 0.8em 0; padding-left: 0.9em; border-left: 2.5px solid var(--line-strong); color: rgb(var(--ink) / 0.6); }
+.prose-tf hr { border: none; border-top: 1px solid var(--line); margin: 1.2em 0; }
+.prose-tf table { border-collapse: collapse; margin: 0.8em 0; font-size: 0.92em; }
+.prose-tf th, .prose-tf td { border: 1px solid var(--line); padding: 0.4em 0.7em; text-align: left; }
+.prose-tf th { background: rgb(var(--ink) / 0.04); font-weight: 600; }
+
+/* Translucent mode (theme toggle). Native window vibrancy (app-window.ts) blurs the desktop
+   through the window. The frosting lives on .app-shell.frosted; in translucent mode the shell
+   alpha drops further so vibrancy reads at the edges while the content card stays legible. */
+.translucent body { background-color: color-mix(in srgb, var(--bg) 55%, transparent); }
+.translucent .app-shell,
+.translucent .app-shell.frosted { background-color: color-mix(in srgb, var(--bg) 40%, transparent); }
+.translucent .content-card { background-color: color-mix(in srgb, var(--canvas) 88%, transparent) !important; }
+
+/* Settings takeover surfaces stay solid even when the app shell is glass. */
+.settings-modal-frame { background-color: var(--bg); }
+.settings-modal-rail { background-color: var(--card-2); }
+.settings-modal-main { background-color: var(--canvas); }
+.translucent .settings-modal-frame { background-color: var(--bg) !important; }
+.translucent .settings-modal-rail { background-color: var(--card-2) !important; }
+.translucent .settings-modal-main { background-color: var(--canvas) !important; }
+
+/* Terminal panes: solid by default; on glass they go transparent so the xterm's own translucent
+   background (set in useXterm) lets the vibrancy read through, matching the rest of the UI. */
+.terminal-surface { background-color: #0b0b0d; }
+.translucent .terminal-surface { background-color: transparent; }
+
+/* "Use pointer cursors" */
+.pointer-cursors button:not(:disabled),
+.pointer-cursors [role="button"],
+.pointer-cursors a,
+.pointer-cursors label,
+.pointer-cursors summary { cursor: pointer; }
+
+/* Syntax highlighting tokens */
+:root { --syn-kw: #8250df; --syn-str: #0a7d33; --syn-num: #0b6bcb; --syn-type: #1f7f9c; --syn-fn: #6639ba; --syn-com: rgb(var(--ink) / 0.42); }
+.dark { --syn-kw: #c792ea; --syn-str: #7ee787; --syn-num: #79c0ff; --syn-type: #56d4dd; --syn-fn: #d2a8ff; --syn-com: rgb(var(--ink) / 0.42); }
+.syn-kw { color: var(--syn-kw); }
+.syn-str { color: var(--syn-str); }
+.syn-num { color: var(--syn-num); }
+.syn-type { color: var(--syn-type); }
+.syn-fn { color: var(--syn-fn); }
+.syn-com { color: var(--syn-com); font-style: italic; }
+.syn-code { font-family: var(--font-mono); }
+
+/* Color-swatch input styled as a pill */
+.swatch-input { -webkit-appearance: none; appearance: none; border: none; padding: 0; background: none; cursor: pointer; }
+.swatch-input::-webkit-color-swatch-wrapper { padding: 0; }
+.swatch-input::-webkit-color-swatch { border: none; border-radius: 999px; }
