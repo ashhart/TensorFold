@@ -288,9 +288,10 @@ __device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X
 
 template <int M, int EPI, int RT, int WM, int WN>
 __device__ __forceinline__ void prompt_body(const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
-                                            const uint4* __restrict__ W, const float* __restrict__ scale, int KG, int NB,
-                                            const int* __restrict__ items, const int* __restrict__ counts,
-                                            const int* __restrict__ members, void* __restrict__ out, int N, float limit) {
+                                            const uint4* __restrict__ W, const float* __restrict__ scale, int KG,
+                                            int NB, const int* __restrict__ items, const int* __restrict__ counts,
+                                            const int* __restrict__ members, void* __restrict__ out, int N,
+                                            float limit) {
   static_assert(RT == 4, "the dispatch below spells out 0 .. 4 row tiles");
   const int nbt = (NB + WN - 1) / WN, it = blockIdx.x / nbt, cbt = blockIdx.x - it * nbt;
   if (it >= __ldg(counts)) return;
