@@ -209,6 +209,14 @@ pub const Dense = struct {
         return slot.*.?.ptr;
     }
 
+    /// Sizes the scratch for `w` at its widest (128-row blocks) now: a captured graph's addresses never move later.
+    pub fn reserve(de: *Dense, w: Weight) !void {
+        const p = plan(w.k, w.n, 192, 8);
+        if (p.sk > 1) _ = try de.scratch(&de.z, Linear.zBytes(w, 128));
+        _ = try de.scratch(&de.counters, Linear.counterBytes(w));
+        _ = try de.scratch(&de.xh, 128 * w.k * 2);
+    }
+
     /// Decode rows: one call (the kernel takes 1..128), any count above in 128-row blocks.
     pub fn decode(de: *Dense, s: Stream, w: Weight, x: u64, x_dtype: DType, rows: usize, y: u64, y_dtype: DType) !void {
         return de.blocks(s, w, x, x_dtype, rows, y, y_dtype);

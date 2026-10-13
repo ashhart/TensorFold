@@ -17,6 +17,7 @@ struct IndexArgs {
     bf16* ig;             // bf16 [cap, D]
     int pos;
     float eps;
+    const int* posp;      // the position on the device (a captured decode step), else null and pos
 };
 
 struct PoolArgs {
@@ -26,6 +27,7 @@ struct PoolArgs {
     bf16* pk;             // bf16 [cap / 4 + 2, D]
     int pos;
     int r;
+    const int* posp;      // as IndexArgs
 };
 
 struct ScoresArgs {
@@ -154,7 +156,7 @@ extern "C" __global__ void tf_glm_index_write(IndexArgs a) {
         reinterpret_cast<bf16*>(y)[i] = __float2bfloat16_rn(__fmaf_rn(t, wf[i], bf4[i]));
         reinterpret_cast<bf16*>(gv)[i] = __float2bfloat16_rn(a.gr[static_cast<long long>(r) * D + lane * 4 + i]);
     }
-    const long long p = static_cast<long long>(a.pos) + r;
+    const long long p = static_cast<long long>(a.posp ? *a.posp : a.pos) + r;
     *reinterpret_cast<unsigned*>(a.ik + p * D + lane * 4) = y[0];
     *reinterpret_cast<unsigned*>(a.ik + p * D + lane * 4 + 2) = y[1];
     *reinterpret_cast<unsigned*>(a.ig + p * D + lane * 4) = gv[0];
@@ -164,8 +166,9 @@ extern "C" __global__ void tf_glm_index_write(IndexArgs a) {
 // Program i: pool p = pos / 4 + i if it is complete within the window. One warp, four dims a lane.
 extern "C" __global__ void tf_glm_pool_keys(PoolArgs a) {
     const int i = blockIdx.x;
-    const long long p = static_cast<long long>(a.pos) / 4 + i;
-    if (4 * p + 3 > static_cast<long long>(a.pos) + a.r - 1) return;
+    const long long pos = a.posp ? *a.posp : a.pos;
+    const long long p = pos / 4 + i;
+    if (4 * p + 3 > pos + a.r - 1) return;
     const int lane = threadIdx.x;
     const int d = lane * 4;
     float l[4][4], e[4][4]; // pool member j, lane dim t

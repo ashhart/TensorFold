@@ -161,8 +161,8 @@ fn front(k: Kernels, s: *Stream, c: Config, w: *const DsaW, sc: *const Scratch, 
 }
 
 /// forward.dense_attention: part_rows-row calls, each at its first row's position, over the capped chunk count.
-fn denseAttn(k: Kernels, s: *Stream, c: Config, st: DsaState, sc: *const Scratch, rows: usize, pos: usize) !void {
-    const nch: u32 = @intCast(@min((pos + rows + chunk - 1) / chunk, sc.nch));
+fn denseAttn(k: Kernels, s: *Stream, c: Config, st: DsaState, sc: *const Scratch, rows: usize, pos: usize, all: bool) !void {
+    const nch: u32 = @intCast(if (all) sc.nch else @min((pos + rows + chunk - 1) / chunk, sc.nch));
     const row_qa: u64 = heads * kv_lora * 2;
     var r0: usize = 0;
     while (r0 < rows) : (r0 += sc.part_rows) {
@@ -197,8 +197,8 @@ fn sparseAttn(k: Kernels, s: *Stream, c: Config, w: *const DsaW, st: DsaState, s
     try k.latent.merge(s, sc.po, sc.pm, sc.pl, sc.ol, sc.counts, r32, sparse_nch, true);
 }
 
-/// dsa_block at host pos (st.pos_dev): window latents, index keys and pools into st; fp32 o_proj partial into part.
-pub fn dsaBlock(k: Kernels, s: *Stream, c: Config, w: *const DsaW, st: DsaState, sc: *const Scratch, normed: u64, part: u64, rows: usize, pos: usize) !void {
+/// dsa_block at pos (= st.pos_dev) into st and part; `capture`: a graph's step (every dense chunk, no sparse rows).
+pub fn dsaBlock(k: Kernels, s: *Stream, c: Config, w: *const DsaW, st: DsaState, sc: *const Scratch, normed: u64, part: u64, rows: usize, pos: usize, capture: bool) !void {
     if (rows == 0 or rows > sc.rows) return error.GlmDsaRows;
     if (pos + rows > st.cap or st.cap / 4 != sc.np_max) return error.GlmDsaCapacity;
     const r32: u32 = @intCast(rows);
@@ -207,15 +207,16 @@ pub fn dsaBlock(k: Kernels, s: *Stream, c: Config, w: *const DsaW, st: DsaState,
     try k.latent.latWrite(s, sc.lat, kv_lora, st.lc, st.pos_dev, st.scales, r32, true);
     const all_sparse = pos >= dense_limit;
     const sparse_rows = pos + rows - 1 >= dense_limit;
+    if (capture and sparse_rows) return error.GlmDsaCapture;
     // the indexer runs on every call: it fills the caches while the window is still dense
     const ix = w.index;
     try k.bmm.matmul(s.*, ix.kw, normed, hidden, rows, sc.ikr, false, sc.mpart);
     try k.bmm.router(s.*, normed, hidden, ix.gate, rows, index_dim, hidden, sc.igr, sc.mpart);
-    try k.sparse.indexWrite(s, sc.ikr, ikr_w, sc.igr, ix.ln_w, ix.ln_b, st.ik, st.ig, p32, c.index_eps, r32);
-    try k.sparse.poolKeys(s, st.ik, st.ig, ix.ape, st.pk, p32, r32);
+    try k.sparse.indexWrite(s, sc.ikr, ikr_w, sc.igr, ix.ln_w, ix.ln_b, st.ik, st.ig, p32, st.pos_dev, c.index_eps, r32);
+    try k.sparse.poolKeys(s, st.ik, st.ig, ix.ape, st.pk, p32, st.pos_dev, r32);
     try k.latent.absorbQ(s, sc.q, w.wk, sc.qa, r32);
     // rows within the limit keep the dense result; the sparse merge overwrites only rows with tokens
-    if (!all_sparse) try denseAttn(k, s, c, st, sc, rows, pos);
+    if (!all_sparse) try denseAttn(k, s, c, st, sc, rows, pos, capture);
     if (sparse_rows) try sparseAttn(k, s, c, w, st, sc, rows, pos);
     try k.latent.expandV(s, sc.ol, w.wv, sc.vn, r32);
     try k.dense.prompt(s.*, w.o, sc.vn, .bf16, rows, part, .f32);

@@ -72,8 +72,8 @@ fn index(r: *Rig, state: *Run, dir: []const u8) !void {
         const ik = try r.dev(try sref.readFile(r.a, r.gpu.io, dir, ref.str(e, "ik_pre")));
         const ig = try r.dev(try sref.readFile(r.a, r.gpu.io, dir, ref.str(e, "ig_pre")));
         const pk = try r.dev(try sref.readFile(r.a, r.gpu.io, dir, ref.str(e, "pk_pre")));
-        try k.indexWrite(&r.s, try r.dev(ikr), 160, try r.dev(igr), try r.dev(lnw), try r.dev(lnb), ik, ig, pos, 1.0e-6, @intCast(rows));
-        try k.poolKeys(&r.s, ik, ig, try r.dev(ape), pk, pos, @intCast(rows));
+        try k.indexWrite(&r.s, try r.dev(ikr), 160, try r.dev(igr), try r.dev(lnw), try r.dev(lnb), ik, ig, pos, 0, 1.0e-6, @intCast(rows));
+        try k.poolKeys(&r.s, ik, ig, try r.dev(ape), pk, pos, 0, @intCast(rows));
         const got_ik = try r.back(ik, want_ik.len);
         try check.sameBytes(try std.fmt.allocPrint(r.a, "glm.dsa.indexer {s} ik", .{tag}), got_ik, want_ik);
         try check.sameBytes(try std.fmt.allocPrint(r.a, "glm.dsa.indexer {s} ig", .{tag}), try r.back(ig, want_ig.len), want_ig);

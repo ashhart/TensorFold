@@ -127,7 +127,7 @@ fn window(r: *Rig, k: dsa.Kernels, c: dsa.Config, p64: dref.Params, w: *const ds
     const st: dsa.DsaState = .{ .lc = caches[0], .scales = caches[1], .ik = caches[2], .ig = caches[3], .pk = caches[4], .pos_dev = try r.dev(&pos_b), .cap = cap };
     const normed = try file(r, dir, ref.str(e, "normed"));
     const part = try r.zeros(rows * dsa.hidden * 4);
-    try dsa.dsaBlock(k, &r.s, c, w, st, &sc, try r.dev(normed), part, rows, pos);
+    try dsa.dsaBlock(k, &r.s, c, w, st, &sc, try r.dev(normed), part, rows, pos, false);
     // every stage in the block's order: the first that differs names the kernel
     const stages = [_]struct { []const u8, u64 }{
         .{ "dqa", sc.dqa }, .{ "dkv", sc.dkv },       .{ "qr", sc.qr },         .{ "lat", sc.lat },

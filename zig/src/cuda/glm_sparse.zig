@@ -91,6 +91,7 @@ pub const Sparse = struct {
         ik: u64,
         ig: u64,
         pos: i32,
+        posp: u64, // the position on the device instead (0: pos)
         eps: f32,
         rows: u32,
     ) !void {
@@ -104,11 +105,12 @@ pub const Sparse = struct {
         args.add(ig);
         args.add(pos);
         args.add(eps);
+        args.add(posp);
         try launch_.launch(self.index_fn, .{ .grid = .{ .x = rows, .y = 1, .z = 1 }, .block = .{ .x = 32, .y = 1, .z = 1 } }, s.*, &args);
     }
 
     /// Pool keys for the pools the window completes: pk rows (pos / 4).., capped by the window's last full pool.
-    pub fn poolKeys(self: *Sparse, s: *Stream, ik: u64, ig: u64, ape: u64, pk: u64, pos: i32, rows: u32) !void {
+    pub fn poolKeys(self: *Sparse, s: *Stream, ik: u64, ig: u64, ape: u64, pk: u64, pos: i32, posp: u64, rows: u32) !void {
         var args = launch_.Args{};
         args.add(ik);
         args.add(ig);
@@ -116,6 +118,7 @@ pub const Sparse = struct {
         args.add(pk);
         args.add(pos);
         args.add(@as(i32, @intCast(rows)));
+        args.add(posp);
         try launch_.launch(self.pool_fn, .{ .grid = .{ .x = rows / 4 + 2, .y = 1, .z = 1 }, .block = .{ .x = 32, .y = 1, .z = 1 } }, s.*, &args);
     }
 

@@ -127,7 +127,7 @@ pub const KdaState = struct { conv: u64, rec_in: u64, rec_out: u64 };
 pub const Mode = union(enum) { decode, prompt: u64 };
 
 /// A DSA call: the layer's caches, its buffers (dsa.Scratch, sized by the engine's rows) and the host position.
-pub const DsaRun = struct { st: dsa_.DsaState, sc: *const dsa_.Scratch, pos: usize };
+pub const DsaRun = struct { st: dsa_.DsaState, sc: *const dsa_.Scratch, pos: usize, capture: bool = false };
 
 /// The mixer's state for one forward, matching the layer's Mixer.
 pub const MixState = union(enum) { kda: struct { st: KdaState, mode: Mode }, dsa: DsaRun };
@@ -400,7 +400,7 @@ pub fn forward(k: *Kernels, s: *Stream, c: Config, w: *const LayerW, mix: MixSta
         .kda => |m| try kdaBlock(k, s, c, &w.mixer.kda, m.st, sc, rows, m.mode),
         .dsa => |m| {
             const dc = c.dsa orelse return error.GlmLayerConfig;
-            try dsa_.dsaBlock(k.dsa(), s, dc, &w.mixer.dsa, m.st, m.sc, sc.normed, sc.part, rows, m.pos);
+            try dsa_.dsaBlock(k.dsa(), s, dc, &w.mixer.dsa, m.st, m.sc, sc.normed, sc.part, rows, m.pos, m.capture);
         },
     }
     try post(k, s.*, c, x, sc, g, .attn, rows);

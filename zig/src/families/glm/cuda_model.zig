@@ -129,6 +129,7 @@ pub const Engine = struct {
     pos_dev: cuda.DeviceBuffer, // forward.State.pos_dev: i32
     cand: cuda.DeviceBuffer, // [world, 1, 2] f32: every rank's top candidate
     gpa: std.mem.Allocator,
+    graphs: [2]?cuda.graph.Exec = .{ null, null }, // a dense-window decode step for each KDA state parity
     cur: u1 = 0,
     pos: usize = 0,
 
@@ -145,6 +146,7 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.cur = 0;
         e.pos = 0;
+        e.graphs = .{ null, null };
         e.lc = w.layerConfig();
         e.k = try lay.Kernels.load(d);
         errdefer e.k.unload();
@@ -172,6 +174,8 @@ pub const Engine = struct {
         e.kda = try gpa.alloc(KdaSlot, n_kda);
         errdefer gpa.free(e.kda);
         e.dsa = try gpa.alloc(dsa.DsaState, n_dsa);
+        errdefer gpa.free(e.dsa);
+        for (w.layers) |*l| try reserve(&e.k.dense, l);
         var at = e.state.ptr;
         for (e.kda) |*sl| {
             sl.* = .{ .conv = at, .rec = .{ at + conv_b, at + conv_b + rec_b } };
@@ -185,6 +189,7 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
+        for (&e.graphs) |*g| if (g.*) |*x| x.deinit();
         e.gpa.free(e.dsa);
         e.gpa.free(e.kda);
         e.cand.free();
@@ -214,13 +219,31 @@ pub const Engine = struct {
         return tok;
     }
 
-    /// serial_decode's step: the last token's row forward and committed, the next token.
+    /// serial_decode's step, the next token; within the dense window a graph captured on first use (forward.py's).
     pub fn step(e: *Engine, tok: u32) !u32 {
-        return e.forward(&.{tok}, false);
+        if (e.pos + 1 > dsa.dense_limit) return e.forward(&.{tok}, false);
+        if (e.pos + 1 > e.cap) return error.GlmCapacity;
+        try e.dec.ids.upload(0, std.mem.asBytes(&tok));
+        try e.pos_dev.fill32(@intCast(e.pos), e.s.handle);
+        if (e.graphs[e.cur] == null) e.graphs[e.cur] = try e.capture();
+        try e.graphs[e.cur].?.launchOn(e.s);
+        return e.finish(1);
+    }
+
+    /// The decode step's GPU work recorded once (nothing runs): position and parity come from the replay's state.
+    fn capture(e: *Engine) !cuda.graph.Exec {
+        try cuda.graph.beginCapture(e.s, .global);
+        const recorded = e.body(&e.dec, 1, false, true);
+        var g = try cuda.graph.endCapture(e.s);
+        defer g.deinit();
+        try recorded;
+        const x = try g.instantiate();
+        try x.upload(e.s);
+        return x;
     }
 
     /// One layer of the forward on its state; a decode row's KDA layer commits right after (its rows are reused next).
-    fn layer(e: *Engine, l: *const lay.LayerW, b: *Bufs, rows: usize, prompt: bool, at: *[2]usize, g: lay.Gather) !void {
+    fn layer(e: *Engine, l: *const lay.LayerW, b: *Bufs, rows: usize, prompt: bool, capture_: bool, at: *[2]usize, g: lay.Gather) !void {
         switch (l.mixer) {
             .kda => |*kw| {
                 const sl = e.kda[at[0]];
@@ -231,7 +254,7 @@ pub const Engine = struct {
                 if (!prompt) try lay.commit(&e.k, &e.s, kw, st, &b.sc, rows, rows);
             },
             .dsa => {
-                const run: lay.DsaRun = .{ .st = e.dsa[at[1]], .sc = &b.dsc, .pos = e.pos };
+                const run: lay.DsaRun = .{ .st = e.dsa[at[1]], .sc = &b.dsc, .pos = e.pos, .capture = capture_ };
                 at[1] += 1;
                 try lay.forward(&e.k, &e.s, e.lc, l, .{ .dsa = run }, &b.sc, b.x.ptr, rows, g);
             },
@@ -250,15 +273,25 @@ pub const Engine = struct {
         const rows = ids.len;
         if (rows == 0 or rows > b.rows or (!prompt and rows != 1)) return error.GlmRows;
         if (e.pos + rows > e.cap) return error.GlmCapacity;
-        const lc = e.lc;
         try b.ids.upload(0, std.mem.sliceAsBytes(ids));
         try e.pos_dev.fill32(@intCast(e.pos), e.s.handle);
+        try e.body(b, rows, prompt, false);
+        return e.finish(rows);
+    }
+
+    /// The forward's GPU work from b.ids and pos_dev to every rank's candidate in e.cand; no host waits (capturable).
+    fn body(e: *Engine, b: *Bufs, rows: usize, prompt: bool, capture_: bool) !void {
+        const lc = e.lc;
         try e.k.glue.embedB16(e.s, b.ids.ptr, e.w.embed, b.x.ptr, rows, lc.d, lc.streams);
         const g: lay.Gather = .{ .ctx = e, .world = world, .run = gather };
         var at: [2]usize = .{ 0, 0 }; // the next KDA and DSA state
-        for (e.w.layers) |*l| try e.layer(l, b, rows, prompt, &at, g);
+        for (e.w.layers) |*l| try e.layer(l, b, rows, prompt, capture_, &at, g);
         try head_.forward(&e.k.glue, &e.k.bmm, e.s, lc.eps, lc.d, lc.streams, e.w.head, &b.hs, b.x.ptr, rows, prompt);
         try e.lib.check(e.lib.api.ncclAllGather(b.hs.cand, e.cand.ptr, 2, .f32, e.comm, e.s.handle), "ncclAllGather");
+    }
+
+    /// sample_rows' greedy pick from the gathered candidates, then the commit's position and KDA parity.
+    fn finish(e: *Engine, rows: usize) !u32 {
         var got: [world * 2]f32 = undefined;
         try e.s.synchronize();
         try e.cand.download(0, std.mem.sliceAsBytes(&got));
@@ -269,3 +302,15 @@ pub const Engine = struct {
         return tok[0];
     }
 };
+
+/// The EXL3 dense scratch at every layer's widest, before any capture.
+fn reserve(de: *cuda.exl3.Dense, l: *const lay.LayerW) !void {
+    switch (l.mixer) {
+        .kda => |k| for ([_]cuda.exl3.Weight{ k.qkv, k.o }) |w| try de.reserve(w),
+        .dsa => |a| for ([_]cuda.exl3.Weight{ a.q_a, a.kv_a, a.q_b, a.o }) |w| try de.reserve(w),
+    }
+    switch (l.ffn) {
+        .moe => |m| for ([_]cuda.exl3.Weight{ m.gate, m.up, m.down }) |w| try de.reserve(w),
+        .mlp => |m| for ([_]cuda.exl3.Weight{ m.gate, m.up, m.down }) |w| try de.reserve(w),
+    }
+}
