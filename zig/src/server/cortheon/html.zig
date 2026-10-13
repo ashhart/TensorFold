@@ -9,12 +9,12 @@ const skipped = [_][]const u8{ "script", "style", "noscript", "svg", "template",
 const blocks = [_][]const u8{ "p", "div", "br", "ul", "ol", "tr", "table", "section", "article", "header", "blockquote", "hr", "dl", "dt", "dd", "figure", "figcaption", "details", "summary", "main", "tbody", "thead" };
 
 const entities = [_]struct { []const u8, []const u8 }{
-    .{ "amp", "&" },        .{ "lt", "<" },          .{ "gt", ">" },        .{ "quot", "\"" },      .{ "apos", "'" },
-    .{ "nbsp", " " },       .{ "ndash", "\u{2013}" }, .{ "mdash", "\u{2014}" }, .{ "hellip", "\u{2026}" }, .{ "rsquo", "\u{2019}" },
-    .{ "lsquo", "\u{2018}" }, .{ "rdquo", "\u{201d}" }, .{ "ldquo", "\u{201c}" }, .{ "laquo", "\u{ab}" },   .{ "raquo", "\u{bb}" },
-    .{ "middot", "\u{b7}" }, .{ "bull", "\u{2022}" }, .{ "times", "\u{d7}" }, .{ "copy", "\u{a9}" },     .{ "reg", "\u{ae}" },
-    .{ "trade", "\u{2122}" }, .{ "deg", "\u{b0}" },   .{ "rarr", "\u{2192}" }, .{ "larr", "\u{2190}" },   .{ "zwj", "" },
-    .{ "zwnj", "" },        .{ "shy", "" },
+    .{ "amp", "&" },          .{ "lt", "<" },           .{ "gt", ">" },           .{ "quot", "\"" },         .{ "apos", "'" },
+    .{ "nbsp", " " },         .{ "ndash", "\u{2013}" }, .{ "mdash", "\u{2014}" }, .{ "hellip", "\u{2026}" }, .{ "rsquo", "\u{2019}" },
+    .{ "lsquo", "\u{2018}" }, .{ "rdquo", "\u{201d}" }, .{ "ldquo", "\u{201c}" }, .{ "laquo", "\u{ab}" },    .{ "raquo", "\u{bb}" },
+    .{ "middot", "\u{b7}" },  .{ "bull", "\u{2022}" },  .{ "times", "\u{d7}" },   .{ "copy", "\u{a9}" },     .{ "reg", "\u{ae}" },
+    .{ "trade", "\u{2122}" }, .{ "deg", "\u{b0}" },     .{ "rarr", "\u{2192}" },  .{ "larr", "\u{2190}" },   .{ "zwj", "" },
+    .{ "zwnj", "" },          .{ "shy", "" },
 };
 
 fn isName(ch: u8) bool {

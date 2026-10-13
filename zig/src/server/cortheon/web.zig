@@ -162,7 +162,7 @@ pub const Client = struct {
         defer req.deinit();
         req.sendBodiless() catch return error.Network;
         var response = req.receiveHead(&.{}) catch return error.Network;
-        const status: u16 = @intFromEnum(response.head.status);
+        const status: u16 = @backingInt(response.head.status);
         if (status >= 300 and status < 400) if (response.head.location) |loc| return .{ .redirect = try resolveUrl(a, url, loc) };
         const content_type = try a.dupe(u8, response.head.content_type orelse "");
         const window: []u8 = switch (response.head.content_encoding) {
