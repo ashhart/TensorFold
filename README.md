@@ -123,6 +123,7 @@ The model works through Cortheon's stages for its task type and can call `corthe
 A question about current facts, or a request to build with an outside library, is researched before the model starts.
 A coding task that changed files is asked to run its tests before it finishes.
 Web text is filtered for instructions aimed at the model, and reads reach public addresses only.
+With the flag, search queries written from the conversation go to DuckDuckGo, or to Brave with `BRAVE_SEARCH_API_KEY`, and pages are fetched from this machine; without it, the server makes no searches and reads no pages.
 See [Cortheon mode](docs/cortheon.md).
 
 ## Model discovery

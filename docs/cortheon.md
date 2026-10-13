@@ -33,11 +33,23 @@ Sentences that read as orders to the model, such as "ignore all previous instruc
 
 Reads go to public internet addresses only.
 The server refuses private, loopback, link-local and shared address ranges, checks every redirect hop the same way, and connects to the address it checked.
+Sites reachable only over IPv6 are skipped, because only an IPv4 address can be pinned between the check and the connection.
 TLS certificates are checked against the system's root certificates.
 Each page read stops at 2 MiB and 15 seconds, redirects included, and each search at 10 seconds.
 
 Searches use DuckDuckGo's HTML results, which need no key, and its lite page when the HTML page refuses or comes back empty.
 Set `BRAVE_SEARCH_API_KEY` to search through Brave's API instead.
+
+## What leaves the machine
+
+With `--cortheon`, the search queries the model writes from the conversation go to DuckDuckGo, or to Brave when a key is set.
+Pages are fetched from this machine, so each site sees its address.
+Without the flag, the server makes no searches and reads no web pages.
+
+The instruction filter is a heuristic, and it can miss a page written to steer the model.
+The model chooses which URLs it fetches, so a page that steers it could make it put conversation text into a URL's path.
+A fetch URL may carry at most 256 bytes of query and fragment, but that cap does not cover the path.
+Use `--cortheon` where that risk is acceptable for the conversations the server handles.
 
 ## Budgets
 
