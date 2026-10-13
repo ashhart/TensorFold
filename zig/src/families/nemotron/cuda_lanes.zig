@@ -9,6 +9,7 @@ const Engine = engine.Engine;
 const reuse = @import("cuda_reuse.zig");
 const Head = @import("cuda_mtp.zig").Head;
 const state = @import("cuda_state.zig");
+const prompt_rows = @import("cuda_prompt_rows.zig");
 const config = @import("config.zig");
 const seq_graphs = @import("cuda_seq_graphs.zig");
 const costs = @import("cuda_costs.zig");
@@ -37,8 +38,9 @@ pub const Cuda = struct {
     pinned: cuda.HostBuffer, // each window's held drafts read back (state.max_rows words a stream)
     rows_out: cuda.HostBuffer, // logprob rows the kernel writes straight to the host (row_slots of row_words)
     rows_dev: u64,
-    prompt_out: cuda.HostBuffer, // a prompt pass's rows (state.max_rows of row_words), then its picks; apart from pending window rows
+    prompt_out: cuda.HostBuffer, // a prompt pass's rows (batch_rows of row_words), then its picks; apart from pending window rows
     prompt_dev: u64,
+    prompt_logits: ?cuda.DeviceBuffer = null, // batch_rows rows of logits for prompt_logprobs, made at first use
     costs: [state.max_rows]lanes.config.Cost = undefined,
     cost_count: usize = 0,
     mtp_ms: f64 = 0,
@@ -51,7 +53,7 @@ pub const Cuda = struct {
         errdefer pinned.free();
         var rows_out = try cuda.HostBuffer.allocMapped(e.ctx.d, row_slots * row_words * 4);
         errdefer rows_out.free();
-        var prompt_out = try cuda.HostBuffer.allocMapped(e.ctx.d, state.max_rows * (row_words + 1) * 4);
+        var prompt_out = try cuda.HostBuffer.allocMapped(e.ctx.d, prompt_rows.batch_rows * (row_words + 1) * 4);
         errdefer prompt_out.free();
         return .{ .gpa = gpa, .e = e, .head = head, .pinned = pinned, .rows_out = rows_out, .rows_dev = try rows_out.device(), .prompt_out = prompt_out, .prompt_dev = try prompt_out.device() };
     }
@@ -63,6 +65,7 @@ pub const Cuda = struct {
         self.pinned.free();
         self.rows_out.free();
         if (self.bits) |*b| b.free();
+        if (self.prompt_logits) |*b| b.free();
         self.prompt_out.free();
     }
 
@@ -243,9 +246,12 @@ pub const Cuda = struct {
         var sink: PromptSink = .{ .gpa = self.gpa, .s = s };
         s.prompt_rows.clearRetainingCapacity();
         if (s.prompt_logprobs) |k| {
+            // a logits buffer of its own takes batch_rows a head pass; without the memory, the window's state.max_rows
+            if (self.prompt_logits == null) self.prompt_logits = cuda.DeviceBuffer.alloc(e.ctx.d, prompt_rows.batch_rows * e.c.vocab * 2) catch null;
+            const rows: usize = if (self.prompt_logits != null) prompt_rows.batch_rows else state.max_rows;
             const words = self.prompt_out.slice(u32);
-            const picks_at = state.max_rows * row_words; // after the rows
-            e.prompt_rows = .{ .k = k, .picks = words[picks_at..][0..state.max_rows], .picks_dev = self.prompt_dev + picks_at * 4, .out = words[0..picks_at], .out_dev = self.prompt_dev, .stride = row_words, .ctx = &sink, .call = PromptSink.take };
+            const picks_at = rows * row_words; // after the rows
+            e.prompt_rows = .{ .k = k, .rows = rows, .logits = if (self.prompt_logits) |b| b.ptr else e.b.logits, .picks = words[picks_at..][0..rows], .picks_dev = self.prompt_dev + picks_at * 4, .out = words[0..picks_at], .out_dev = self.prompt_dev, .stride = row_words, .ctx = &sink, .call = PromptSink.take };
         }
         defer e.prompt_rows = null;
         const first = try e.prefillFrom(ids, from, null, self.head, .{ .ptr = s, .check = cancelled }, keep);
