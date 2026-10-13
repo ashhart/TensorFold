@@ -30,6 +30,9 @@ pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, 
 /// Thinking budgets the lone driver takes (cuda_lone.zig): above it, the stream goes to the lane core before its cut.
 pub const lone_min_budget = @import("cuda_lone.zig").min_budget;
 
+/// Nanoseconds a reply's background pass waits for the next request first: its first chunk holds the GPU.
+pub const warm_quiet: u64 = 150 * std.time.ns_per_ms;
+
 /// A lone drafted stream's own driver: decodes it until it finishes (false) or `yield` hands it over (true).
 pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
 

@@ -195,6 +195,7 @@ const Host = struct {
         h.host.memory = if (h.gpu != null) .{ .read = readMemory } else null;
         h.host.explain = explain;
         h.host.cache = h.store;
+        h.host.warm_quiet = if (info.warm_turns) nemotron.native.warm_quiet else 0;
         if (h.lone != null) h.host.lone = .{ .ctx = h, .run = loneRun, .sampled = true, .logprobs = h.inner.vtable.first_row != null, .structures = h.inner.vtable.first_masked != null, .min_budget = nemotron.native.lone_min_budget, .resumes = true };
         if (h.learn != null) h.host.learner = h.learner();
         try h.host.start();
@@ -355,8 +356,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     if (cache > 0) {
         const pc = api.prompt_cache;
         const store = try gpa.create(pc.Store);
-        // states keep at any row at no prompt call (the head reads one token on); replies prefill in the background
-        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = &nemotron_snaps }, .{ .lookahead = 1, .min_prompt = 0, .warm = true }, cache - try nemotron.native.snap_ready(loaded.target, cache));
+        // states keep at any row at no prompt call (the head reads one token on); replies prefill when it is quiet
+        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = &nemotron_snaps }, .{ .lookahead = 1, .min_prompt = 0, .warm = .waits }, cache - try nemotron.native.snap_ready(loaded.target, cache));
         h.store = store;
     }
     errdefer if (h.store) |store| {

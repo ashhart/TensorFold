@@ -199,10 +199,13 @@ test "marks: the stable prefix with the last prompt and shared blocks, past the 
     try std.testing.expectEqualSlices(u32, &.{}, try s.marks(a, &prompt, 0, 0, &.{}, &.{}, &.{})); // a raw prompt keeps nothing
     try std.testing.expectEqualSlices(u32, &.{10}, try s.marks(a, &prompt, 0, 10, &.{9}, &.{}, &.{})); // a block next to the history
     try std.testing.expectEqualSlices(u32, &.{10}, try s.marks(a, &prompt, 9, 10, &.{}, &.{}, &.{})); // resumed next to the history: kept
-    s.rules.warm = true; // replies prefilled in the background: the resumed state serves the next turn
+    s.rules.warm = .on; // replies prefilled in the background: the resumed state serves the next turn
     try std.testing.expectEqualSlices(u32, &.{}, try s.marks(a, &prompt, 9, 10, &.{}, &.{}, &.{}));
     try std.testing.expectEqualSlices(u32, &.{1}, try s.marks(a, &prompt, 0, 1, &.{}, &.{}, &.{})); // from the start the history's mark stays
     // a warm pass (history the whole prompt) keeps where its state can be keyed, however near it resumed
+    try std.testing.expectEqualSlices(u32, &.{11}, try s.marks(a, &prompt, 10, 12, &.{}, &.{}, &.{}));
+    s.rules.warm = .waits; // those passes wait for a quiet engine and may never run: the history's mark stays
+    try std.testing.expectEqualSlices(u32, &.{10}, try s.marks(a, &prompt, 9, 10, &.{}, &.{}, &.{}));
     try std.testing.expectEqualSlices(u32, &.{11}, try s.marks(a, &prompt, 10, 12, &.{}, &.{}, &.{}));
 }
 
@@ -212,7 +215,7 @@ test "under min_prompt the history's mark floors to its pass's last cut from the
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .warm = true, .min_prompt = 64, .min_gap = 8, .chunk = 4 }, 1 << 20); // the 27B's rules, scaled down
+    var s = Store.init(gpa, f.snapshots(), .{ .warm = .on, .min_prompt = 64, .min_gap = 8, .chunk = 4 }, 1 << 20); // the 27B's rules, scaled down
     defer s.deinit();
     var t2: [34]u32 = undefined;
     for (&t2, 1..) |*t, i| t.* = @intCast(i);
@@ -245,7 +248,7 @@ test "a short prompt's mark inside its shared block is the block's state: the re
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .warm = true, .min_prompt = 64, .chunk = 4 }, 350); // fake bytes 100 + at: three states pass it
+    var s = Store.init(gpa, f.snapshots(), .{ .warm = .on, .min_prompt = 64, .chunk = 4 }, 350); // fake bytes 100 + at: three states pass it
     defer s.deinit();
     var other: [13]u32 = undefined; // an older conversation's state, the least recently used
     for (&other, 0..) |*t, i| t.* = @intCast(90 + i);

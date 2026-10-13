@@ -52,7 +52,7 @@ const usage =
     \\  chunk-costs MODEL IDS_FILE WIDTHS   r rows as the decode window graph (r <= 16) and as a prompt chunk (any r)
     \\  resume MODEL IDS_FILE     prompt states kept at off-grid rows: each resumed pass against a fresh one, byte for byte
     \\  marks MODEL IDS_FILE N PATTERNS   states kept inside chunks against chunks cut at the same rows, byte for byte
-    \\  prompt-cuts MODEL IDS_FILE   a prompt keeping states inside chunks and at their ends, and resumed from each, equals one uncut pass
+    \\  prompt-cuts MODEL IDS_FILE   a prompt keeping states inside chunks and at their ends (background passes too), and resumed from each, equals one uncut pass
     \\  grouped-plan <dir>        the shared expert plan against experts.route's bytes (oracle/grouped_plan.py)
     \\  fp8-lane <dir>            block-FP8 projections against the Python lane matmul's bytes (oracle/fp8_lane.py)
     \\  fp8-experts <dir>         grouped block-FP8 experts against recorded fixture bytes

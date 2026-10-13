@@ -67,14 +67,55 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     try check.expect(std.meta.eql(cut, plain), "prompt-cuts: a pass keeping at {any} differs from the uncut pass", .{marks});
     check.pass("prompt-cuts: a {d}-token pass keeping at {any} equals the uncut pass", .{ n, marks });
 
-    for (kept.at.items, kept.saved.items) |at, s| {
-        // a kept state holds its KV rows before `at`: the rows past it get a value no pass may read before writing
-        for ([_]u64{ e.b.k_cache, e.b.v_cache }) |p| try e.ops().fill32(p, 0x41204120, e.b.state_bytes[0] / 4);
-        try nemotron.reuse.restore(&target, null, s);
-        const got = try digest(gpa, e, h, try e.prefillFrom(ids.items, at, null, h, null, null), n - 1 - e.last_chunk);
-        try check.expect(std.meta.eql(got, plain), "prompt-cuts: the pass resumed at {d} differs from the uncut pass", .{at});
-    }
+    for (kept.at.items, kept.saved.items) |at, s| try resumed(gpa, e, h, &target, ids.items, at, s, plain);
     check.pass("prompt-cuts: passes resumed at each keep equal the uncut pass", .{});
+
+    // a background pass keeping at the same rows, then one stepping aside after three chunks
+    var bg: Kept = .{ .target = &target, .gpa = gpa };
+    defer {
+        for (bg.saved.items) |s| nemotron.reuse.drop(&target, s);
+        bg.saved.deinit(gpa);
+        bg.at.deinit(gpa);
+    }
+    var never: Stop = .{ .after = std.math.maxInt(usize) };
+    const quiet: nemotron.engine.Cancel = .{ .ptr = &never, .check = Stop.check, .yields = true };
+    const background = try digest(gpa, e, h, try e.prefillFrom(ids.items, 0, null, h, quiet, .{ .at = &marks, .ctx = &bg, .call = Kept.call }), n - 1 - e.last_chunk);
+    try check.expect(!bg.failed and bg.at.items.len == marks.len, "prompt-cuts: a background pass saved {d} of {d} keeps", .{ bg.at.items.len, marks.len });
+    try check.expect(std.meta.eql(background, plain), "prompt-cuts: a background pass keeping at {any} differs from the uncut pass", .{marks});
+    var stop: Stop = .{ .after = 3 };
+    var aside: Kept = .{ .target = &target, .gpa = gpa };
+    defer {
+        for (aside.saved.items) |s| nemotron.reuse.drop(&target, s);
+        aside.saved.deinit(gpa);
+        aside.at.deinit(gpa);
+    }
+    const yields: nemotron.engine.Cancel = .{ .ptr = &stop, .check = Stop.check, .yields = true };
+    if (e.prefillFrom(ids.items, 0, null, h, yields, .{ .at = &.{}, .ctx = &aside, .call = Kept.call })) |_| return error.DidNotStepAside else |err| if (err != error.Cancelled) return err;
+    const stood = 3 * nemotron.state.yield_rows;
+    try check.expect(!aside.failed and aside.at.items.len == 1 and aside.at.items[0] == stood, "prompt-cuts: a background pass stepping aside kept {any}, not [{d}]", .{ aside.at.items, stood });
+    try resumed(gpa, e, h, &target, ids.items, stood, aside.saved.items[0], plain);
+    check.pass("prompt-cuts: a background pass equals the uncut pass, and one stepping aside keeps a state that resumes to it", .{});
+}
+
+/// Asked before each chunk: true from the call after `after` (a background pass steps aside there).
+const Stop = struct {
+    after: usize,
+    calls: usize = 0,
+
+    fn check(ctx: *anyopaque) bool {
+        const s: *Stop = @ptrCast(@alignCast(ctx));
+        s.calls += 1;
+        return s.calls > s.after;
+    }
+};
+
+/// The pass resumed at `at` from its kept state `s`, against the uncut pass.
+fn resumed(gpa: std.mem.Allocator, e: *nemotron.Engine, h: *nemotron.Head, target: *nemotron.reuse.Target, ids: []const u32, at: u32, s: *anyopaque, plain: Digest) !void {
+    // a kept state holds its KV rows before `at`: the rows past it get a value no pass may read before writing
+    for ([_]u64{ e.b.k_cache, e.b.v_cache }) |p| try e.ops().fill32(p, 0x41204120, e.b.state_bytes[0] / 4);
+    try nemotron.reuse.restore(target, null, s);
+    const got = try digest(gpa, e, h, try e.prefillFrom(ids, at, null, h, null, null), ids.len - 1 - e.last_chunk);
+    try check.expect(std.meta.eql(got, plain), "prompt-cuts: the pass resumed at {d} differs from the uncut pass", .{at});
 }
 
 fn digest(gpa: std.mem.Allocator, e: *nemotron.Engine, h: *nemotron.Head, token: u32, last: usize) !Digest {

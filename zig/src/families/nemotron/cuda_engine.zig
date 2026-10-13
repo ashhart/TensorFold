@@ -40,10 +40,16 @@ pub const Options = struct {
 pub const Cancel = struct {
     ptr: *anyopaque,
     check: *const fn (ptr: *anyopaque) bool,
+    yields: bool = false, // a background pass's hook: it steps aside for real work, so its chunks stay short
 
     pub fn now(c: ?Cancel) bool {
         const x = c orelse return false;
         return x.check(x.ptr);
+    }
+
+    /// A background pass: chunks of state.yield_rows, one in flight, and what it prefilled kept when it stops.
+    pub fn background(c: ?Cancel) bool {
+        return if (c) |x| x.yields else false;
     }
 };
 

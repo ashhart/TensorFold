@@ -50,6 +50,7 @@ pub const LaneHost = struct {
     lesson_open: bool = false, // the learner holds a begun job (engine thread only)
     admissions: u64 = 0, // jobs admitted so far: each job's `seq`
     memory_lanes: ?usize = null, // lanes the backend had memory for at its last LaneMemory, until a job ends
+    warm_quiet: u64 = 0, // ns a warm pass waits for other work before its first chunk (0: none), set by its family
 
     const Lesson = struct { request: *const api.LearnRequest, sink: api.LearnSink };
 
@@ -196,6 +197,17 @@ pub const LaneHost = struct {
         return h.queued.items.len > 0 and !h.queued.items[0].request.background;
     }
 
+    /// Waits `warm_quiet` for other work (a request, a decoding stream, a cancel): true if none came.
+    fn quiet(h: *LaneHost, job: *const Job) bool {
+        const until: std.Io.Timeout = .{ .deadline = .fromNow(h.io, .{ .raw = .fromNanoseconds(h.warm_quiet), .clock = .awake }) };
+        h.lock();
+        defer h.unlock();
+        while (!h.closing and !h.foregroundWaiting() and h.core.activeCount() == 0 and std.mem.indexOfScalar(Id, h.cancels.items, job.id) == null) {
+            h.wake.waitTimeout(h.io, &h.mutex, until) catch |e| return e == error.Timeout;
+        }
+        return false;
+    }
+
     /// Hands a stream the tokens its rounds committed since the last delivery (their logprob rows first).
     pub fn send(h: *LaneHost, job: *Job) void {
         const emitted = job.stream.emitted();
@@ -294,6 +306,7 @@ pub const LaneHost = struct {
         };
         h.unlock();
         const r = job.request;
+        if (r.background and r.max_tokens == 0 and h.warm_quiet > 0 and !h.quiet(job)) return h.cancel(job); // other work came first: it never ran
         var reuse: lanes.stream.Reuse = .{};
         // the entry stays alive until the backend restores it: nothing keeps between here and this stream's own pass
         if (h.cache) |store| if (r.prompt_logprobs == null and !r.untaught) if (store.lookupRewind(h.gpa, r.prompt, r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, h.spans(r))) |l| {

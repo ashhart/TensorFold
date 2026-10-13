@@ -39,7 +39,7 @@ pub fn prefillFrom(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, h
         if (head) |h| try h.reset();
     } else if (e.pos != from) return error.BadReuse;
     const waited = e.heat_gate.waited_s;
-    if (from == 0 and keep == null and e.segments > 1 and dump == null and e.prompt_rows == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none) {
+    if (from == 0 and keep == null and e.segments > 1 and dump == null and e.prompt_rows == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none and !Cancel.background(cancel)) {
         try segs.prefill(e, try e.segmentSet(), prompt, head, e.segments, cancel);
     } else try e.serialChunks(prompt, from, dump, head, cancel, keep);
     if (e.heat_gate.waited_s > waited) heat.note(e.heat_gate.waited_s - waited);
@@ -73,11 +73,16 @@ pub fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, 
     const shared = e.lessons();
     if (shared) |ad| try e.trainOps().latch(ad.score, ad.need, ad.latch, e.slot, false); // no lesson acts until it decides
     const wide = dump == null and shared == null and e.decide == lesson_route.none; // passes of up to pass_rows (rows equal at any cut)
+    const background = Cancel.background(cancel);
     var s: usize = from;
     while (s < prompt.len) {
-        if (Cancel.now(cancel)) return error.Cancelled;
+        if (background) try e.stream.synchronize(); // one chunk in flight: a request that arrives waits for that one alone
+        if (Cancel.now(cancel)) {
+            if (background and s > from) if (keep) |k| k.call(k.ctx, @intCast(s)); // what it prefilled stays for the next turn
+            return error.Cancelled;
+        }
         try e.beforeChunk(cancel);
-        const step: usize = if (wide and inside(keep, s, s + state.pass_rows) < marks.max) state.pass_rows else state.prefill_rows; // 2,048 rows where a wide pass would crowd the scan's marks
+        const step: usize = if (wide and background) state.yield_rows else if (wide and inside(keep, s, s + state.pass_rows) < marks.max) state.pass_rows else state.prefill_rows; // 2,048 rows where a wide pass would crowd the scan's marks
         var end = cuts.end(s, prompt.len, step, if (keep) |k| (if (k.cut) k.at else &.{}) else &.{});
         // the decision row ends its chunk: the rows after it read the lessons it latched
         if (e.decide != lesson_route.none and e.decide >= s and e.decide + 1 < end) end = @intCast(e.decide + 1);

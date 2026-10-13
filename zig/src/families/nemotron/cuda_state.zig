@@ -11,6 +11,7 @@ const seq_graphs = @import("cuda_seq_graphs.zig");
 pub const max_rows = 16; // a verify window's rows (the row tile of the row-parallel kernels)
 pub const prefill_rows = 2048; // rows of a staggered segment's chunk, and of a pass under dumps or lessons
 pub const pass_rows = 2 * prefill_rows; // rows a serial prompt pass runs at most (a row's bits are the same at any cut)
+pub const yield_rows = 256; // rows of a background pass's chunk: a request that arrives waits for one at most
 pub const chunk_keys = 512; // keys an attention chunk holds, at fixed absolute positions
 const shared_words = 2 * max_rows + 8 * max_rows; // the shared expert's members, then (items, counts) a row count
 

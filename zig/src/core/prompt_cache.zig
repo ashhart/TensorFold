@@ -88,8 +88,8 @@ pub const Rules = struct {
     min_prompt: u32 = 4096,
     /// Rows an unplanned pass's chunk runs from its resume point or last cut (1: any row; 0: short prompts keep none).
     chunk: u32 = 0,
-    /// Replies are prefilled in background passes kept at their end: a pass resumed near its history keeps no mark.
-    warm: bool = false,
+    /// Background reply passes kept at their end: .on drops a history mark near the resume point, .waits keeps it.
+    warm: enum { off, on, waits } = .off,
     /// A paged store (prompt_radix.zig): the tokens a page holds, where its marks and resumes sit (0: not paged).
     page: u32 = 0,
     /// A paged store also keeps the prompt's last whole page, for a later turn whose history the request did not name.
@@ -257,7 +257,7 @@ pub const Store = struct {
     pub fn lookupRewind(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, rewind_len: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span) !Lookup {
         const endpoint = if (s.rules.planned) s.startAt(starts, history_len) else history_len;
         const rewind = if (s.rules.planned) s.startAt(starts, rewind_len -| s.rules.lookahead) else rewind_len -| s.rules.lookahead;
-        const endpoint_bytes = if (endpoint > 0 and (endpoint < prompt.len or (s.rules.warm and endpoint == prompt.len)) and endpoint + s.rules.lookahead <= prompt.len) s.family.vtable.bytes(s.family.ptr, endpoint) else 0;
+        const endpoint_bytes = if (endpoint > 0 and (endpoint < prompt.len or (s.rules.warm != .off and endpoint == prompt.len)) and endpoint + s.rules.lookahead <= prompt.len) s.family.vtable.bytes(s.family.ptr, endpoint) else 0;
         const rewind_bytes = if (rewind > 0 and rewind < prompt.len and rewind + s.rules.lookahead <= prompt.len and s.usable(rewind, starts)) s.family.vtable.bytes(s.family.ptr, rewind) else 0;
         const priority_bytes = if (endpoint_bytes <= s.budget) endpoint_bytes else 0;
         s.active_rewind_at = if (prompt.len >= s.rules.min_prompt and rewind_bytes > 0 and rewind != endpoint and rewind_bytes <= s.budget - priority_bytes) rewind else 0;
@@ -389,7 +389,7 @@ pub const Store = struct {
         var want: std.ArrayList(u32) = .empty;
         defer want.deinit(a);
         // a warm pass (its history the whole prompt) keeps where a state can be keyed, its lookahead before the end
-        const warm_pass = s.rules.warm and history_len == prompt.len and s.rules.lookahead > 0;
+        const warm_pass = s.rules.warm != .off and history_len == prompt.len and s.rules.lookahead > 0;
         const history: u32 = if (warm_pass) @intCast(prompt.len -| s.rules.lookahead) else history_len;
         try want.append(a, if (short) chunkEnd(s.rules.chunk, from, history, prompt.len, starts, spans) else history);
         if (rewind > 0 and s.active_rewind_at == rewind) try want.append(a, rewind);
@@ -402,7 +402,7 @@ pub const Store = struct {
             const at = if (s.rules.planned) s.startAt(starts, w) else w;
             if (at <= from or at + s.rules.lookahead > prompt.len or at >= prompt.len or !s.usable(at, starts)) continue;
             const is_rewind = rewind > 0 and k == 1 and at == rewind;
-            if (!is_rewind and !(k == 0 and warm_pass) and at - from < s.rules.min_gap and (k > 0 or (from > 0 and s.rules.warm))) continue; // near the resume point
+            if (!is_rewind and !(k == 0 and warm_pass) and at - from < s.rules.min_gap and (k > 0 or (from > 0 and s.rules.warm == .on))) continue; // near the resume point
             if (k > 0 and !is_rewind) { // the history's mark always (warm families: away from the resume point); the others away from it and each other
                 const near = for (out.items) |o| {
                     if (@max(o, at) - @min(o, at) < s.rules.min_gap) break true;
