@@ -46,14 +46,49 @@ pub const Scratch = struct {
 pub fn apply(matrix: weights.AnyMatrix, x: []const u16, y: []u16, scratch: *Scratch) !void {
     switch (matrix) {
         .trellis => |m| return applyTrellis(m, x, y, scratch),
-        .dense => return error.DenseReferenceUnsupported,
+        .dense => |d| return applyDense(u16, d, x, y, scratch),
     }
 }
 
 pub fn applyF32(matrix: weights.AnyMatrix, x: []const u16, y: []f32, scratch: *Scratch) !void {
     switch (matrix) {
         .trellis => |m| return applyF32Trellis(m, x, y, scratch),
-        .dense => return error.DenseReferenceUnsupported,
+        .dense => |d| return applyDense(f32, d, x, y, scratch),
+    }
+}
+
+/// The kept-dense form: the same input rotation boundary and output stages as the quantized
+/// path, with the tile decode replaced by an FP64 dense dot over the f16-rounded rotated row.
+fn applyDense(comptime T: type, d: weights.Dense, x: []const u16, y: []T, scratch: *Scratch) !void {
+    @setFloatMode(.strict);
+    if (x.len != d.k or y.len != d.n) return error.InvalidReferenceProjectionLength;
+    if (d.k > scratch.rotated.len or d.n > scratch.sums.len)
+        return error.ReferenceProjectionScratchTooSmall;
+    const su = try borrowed(.{ .buffer = d.suh.buffer, .offset = d.suh.offset }, d.k * 2);
+    const sv = try borrowed(.{ .buffer = d.svh.buffer, .offset = d.svh.offset }, d.n * 2);
+    const w = try borrowed(.{ .buffer = d.weight.buffer, .offset = d.weight.offset }, d.n * d.k * 2);
+    const rotated = scratch.rotated[0..d.k];
+    const sums = scratch.sums[0..d.n];
+    prepare(x, su, .f16, rotated);
+    for (sums) |*slot| slot.* = 0;
+    for (0..d.n) |j| {
+        var acc: f64 = 0;
+        const wrow = 2 * j * d.k;
+        for (0..d.k) |k| {
+            const word = std.mem.readInt(u16, w[wrow + 2 * k ..][0..2], .little);
+            acc += @as(f64, rotated[k]) * @as(f64, @as(f32, @bitCast(@as(u32, word) << 16)));
+        }
+        sums[j] = acc;
+    }
+    var base: usize = 0;
+    while (base < d.n) : (base += block_size) {
+        var values: [block_size]f32 = undefined;
+        for (&values, 0..) |*value, i| value.* = @floatCast(sums[base + i]);
+        hadamard(&values);
+        for (values, 0..) |value, i| {
+            const out: f32 = (value * inverse) * half(sv, base + i);
+            y[base + i] = if (T == u16) bf16(out) else out;
+        }
     }
 }
 
