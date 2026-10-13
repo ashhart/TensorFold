@@ -10,6 +10,9 @@ const Forward = @import("forward.zig").Forward;
 const eng = @import("engine.zig");
 const prompt_rows = eng.prompt_rows;
 const reuse = @import("reuse.zig");
+const exact = @import("exact_prompt_cache.zig");
+const exact_reuse = @import("exact_seq_reuse.zig");
+const draft_reuse = @import("exact_draft_reuse.zig");
 const dl = @import("draft_load.zig");
 const dr = @import("draft.zig");
 const drafts = @import("drafts.zig");
@@ -48,20 +51,27 @@ pub const Cuda = struct {
     drafting: std.AutoHashMapUnmanaged(*lanes.Stream, *drafts.Stream) = .empty,
     costs: [calibration.len + 1]lanes.config.Cost = undefined, // the forward's ms by a round's rows (calibrate)
     cost_count: usize = 0,
+    exact_cache: exact.Cache,
+    seq_pool: exact_reuse.Storage,
+    restored: exact_reuse.Proofs = .{},
+    draft_pool: draft_reuse.Storage,
+    draft_initialized: draft_reuse.policy.Proofs = .{},
+    reset_skip: exact_reuse.reset_skip.Stats,
+
+    pub const openPrefill = exact_reuse.openPrefill;
+    pub const lookupPrefill = exact_reuse.lookupPrefill;
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, streams: u32) !Cuda {
-        return .{
-            .gpa = gpa,
-            .e = e,
-            .streams = streams,
-            .logits = try gpa.alloc(u16, c.vocab),
-            .cand_values = try gpa.alloc(f32, st.round_rows * st.max_candidates),
-            .cand_ids = try gpa.alloc(i64, st.round_rows * st.max_candidates),
-            .values = try gpa.alloc(f64, st.max_candidates),
-        };
+        return @import("exact_init.zig").init(gpa, e, streams);
     }
 
     pub fn deinit(x: *Cuda) void {
+        draft_reuse.shutdown(x) catch |err| {
+            std.log.err("fatal unresolved draft Context fence; terminating before device frees: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        exact_reuse.shutdown(x);
+        x.exact_cache.deinit(x.e.ops()) catch |err| std.log.err("exact cache shutdown: {s}", .{@errorName(err)});
         var it = x.seqs.valueIterator();
         while (it.next()) |seq| {
             seq.*.deinit();
@@ -134,19 +144,12 @@ pub const Cuda = struct {
     }
 
     pub fn backend(x: *Cuda) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .probabilities = probabilities, .tree = tree, .release = release, .prefill_many = prefillMany } };
+        return .{ .ptr = x, .first_before_draft = true, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .probabilities = probabilities, .tree = tree, .release = release, .prefill_many = prefillMany } };
     }
 
     /// The stream's drafting (its DFlash2 context and copy index), made on first use.
     pub fn draftingOf(x: *Cuda, s: *lanes.Stream) !*drafts.Stream {
-        if (x.drafting.get(s)) |ds| return ds;
-        const ds = try x.gpa.create(drafts.Stream);
-        errdefer x.gpa.destroy(ds);
-        const ctx = dr.Context.init(x.e.ctx.d) catch |err| return if (err == error.OutOfMemory) err else error.OutOfDeviceMemory;
-        ds.* = drafts.Stream.init(x.gpa, ctx);
-        errdefer ds.deinit();
-        try x.drafting.put(x.gpa, s, ds);
-        return ds;
+        return draft_reuse.obtain(x, s);
     }
 
     fn cast(p: *anyopaque) *Cuda {
@@ -158,7 +161,7 @@ pub const Cuda = struct {
     }
 
     /// Commits the last verified round: every stream its kept rows (its whole window unless keep cut it).
-    fn settle(x: *Cuda) !void {
+    pub fn settle(x: *Cuda) !void {
         const p = &x.pending;
         if (p.n == 0) return;
         const n = p.n;
@@ -168,7 +171,7 @@ pub const Cuda = struct {
     }
 
     /// The stream's state, the last round committed first.
-    fn settled(x: *Cuda, s: *lanes.Stream) !*st.Seq {
+    pub fn settled(x: *Cuda, s: *lanes.Stream) !*st.Seq {
         try x.settle();
         return x.seqOf(s);
     }
@@ -208,31 +211,24 @@ pub const Cuda = struct {
         }
     }
 
-    /// A new stream's state, sized for its prompt and reply.
-    pub fn open(x: *Cuda, s: *lanes.Stream) !*st.Seq {
-        try x.settle();
-        const ids = s.prompt();
-        if (ids.len == 0 or x.seqs.contains(s)) return error.InvalidQwenPrompt;
-        const capacity = @min(x.e.context, ids.len + s.max_new + st.max_rows);
-        if (ids.len >= capacity) return error.PromptTooLong;
-        const seq = try x.gpa.create(st.Seq);
-        errdefer x.gpa.destroy(seq);
-        seq.* = x.e.sequence(capacity) catch |err| return if (err == error.OutOfMemory) err else error.OutOfDeviceMemory;
-        errdefer seq.deinit();
-        try x.seqs.put(x.gpa, s, seq);
-        return seq;
-    }
+    pub const open = exact_reuse.open;
 
     fn prefill(p: *anyopaque, s: *lanes.Stream) !void {
         const x = cast(p);
-        const seq = try x.open(s);
+        var opened = try x.openPrefill(s);
         errdefer x.dropSeq(s);
-        try x.prefillOpened(s, seq);
+        try x.prefillOpened(s, &opened);
     }
 
     /// prefill_state into an opened stream: the prompt in chunks, a drafting stream's last window of taps absorbed. A
     /// kept state the lane host found is restored first, and the pass stops at its marks for the cache to copy.
-    fn prefillOpened(x: *Cuda, s: *lanes.Stream, seq: *st.Seq) !void {
+    fn prefillOpened(x: *Cuda, s: *lanes.Stream, opened: *exact_reuse.Opened) !void {
+        errdefer exact_reuse.fail(x);
+        const seq = opened.seq;
+        if (x.exact_cache.eligible(s) and !x.e.kv8) {
+            const ctx = if (x.drafter != null and s.drafts) &(try x.draftingOf(s)).ctx else null;
+            if (try exact_reuse.lookupPrefill(x, s, opened, ctx)) return;
+        }
         // an image prompt: the tower's rows and the prompt's three positions for its pass (EncodedVision)
         const media: ?*vision.Media = if (s.images.len == 0) null else blk: {
             const tower = x.tower orelse return error.VisionDisabled;
@@ -245,9 +241,12 @@ pub const Cuda = struct {
         const marks: ?eng.Keep = if (s.reuse.marks.len == 0 or media != null) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
         if (x.drafter) |d| if (s.drafts) {
             const ds = try x.draftingOf(s);
-            return lone.prefillFrom(x.e, seq, &ds.ctx, d, s.prompt(), from, media, marks);
+            try lone.prefillFrom(x.e, seq, &ds.ctx, d, s.prompt(), from, media, marks);
+            try x.exact_cache.capture(s, seq, &ds.ctx, x.e.ops(), x.e.w.g);
+            return draft_reuse.initialized(x, s);
         };
         try x.e.prefillFrom(seq, s.prompt(), from, media, marks);
+        try x.exact_cache.capture(s, seq, null, x.e.ops(), x.e.w.g);
     }
 
     /// The stream's kept state restored on its sequence: where its prompt pass starts (0: none, off the grid, failed).
@@ -280,13 +279,27 @@ pub const Cuda = struct {
         var n: usize = 0;
         var rows: usize = 0;
         for (streams, errs, 0..) |s, *err, i| {
-            const seq = x.open(s) catch |e| {
+            var opened = x.openPrefill(s) catch |e| {
                 err.* = e;
                 continue;
             };
+            const seq = opened.seq;
             const ids = s.prompt();
+            if (x.exact_cache.eligible(s) and !x.e.kv8) {
+                const ctx = if (x.drafter != null and s.drafts) &(x.draftingOf(s) catch |e| {
+                    x.dropSeq(s);
+                    err.* = e;
+                    continue;
+                }).ctx else null;
+                const hit = exact_reuse.lookupPrefill(x, s, &opened, ctx) catch |e| {
+                    x.dropSeq(s);
+                    err.* = e;
+                    continue;
+                };
+                if (hit) continue;
+            }
             if (ids.len > prompt_rows) {
-                x.prefillOpened(s, seq) catch |e| {
+                x.prefillOpened(s, &opened) catch |e| {
                     x.dropSeq(s);
                     err.* = e;
                 };
@@ -315,7 +328,13 @@ pub const Cuda = struct {
 
     fn passPieces(x: *Cuda, streams: []const *lanes.Stream, pieces: []const Forward.Piece, which: []const usize) !void {
         var f = x.e.forward();
-        const d = x.drafter orelse return f.chunks(pieces);
+        const d = x.drafter orelse {
+            try f.chunks(pieces);
+            if (x.exact_cache.enabled and !x.e.kv8) for (pieces, which) |pc, i| {
+                try x.exact_cache.capture(streams[i], pc.seq, null, x.e.ops(), x.e.w.g);
+            };
+            return;
+        };
         f.taps = x.e.scratch.taps;
         try f.chunks(pieces);
         // each drafting stream's last window of taps, consecutive whole prompts absorbed together
@@ -348,25 +367,26 @@ pub const Cuda = struct {
             g_rows += taken;
         }
         if (g > 0) try d.absorbMany(group[0..g], x.e.scratch.taps + g_from * row);
+        for (pieces, which) |pc, i| {
+            const s = streams[i];
+            const ctx = if (s.drafts) &(try x.draftingOf(s)).ctx else null;
+            if (!x.e.kv8) try x.exact_cache.capture(s, pc.seq, ctx, x.e.ops(), x.e.w.g);
+            if (ctx != null) try draft_reuse.initialized(x, s);
+        }
     }
 
     fn dropSeq(x: *Cuda, s: *lanes.Stream) void {
+        if (x.draft_pool.stats.enabled) draft_reuse.drop(x, s);
+        _ = x.restored.remove(s);
+        exact_reuse.fail(x);
+        x.exact_cache.abandon(s, x.e.ops()) catch |err| std.log.err("exact cache abandon: {s}", .{@errorName(err)});
         if (x.seqs.fetchRemove(s)) |entry| {
             entry.value.deinit();
             x.gpa.destroy(entry.value);
         }
     }
 
-    fn first(p: *anyopaque, s: *lanes.Stream, position: u64) !u64 {
-        const x = cast(p);
-        const seq = try x.settled(s);
-        if (position != seq.pos) return error.InvalidQwenPosition;
-        var f = x.e.forward();
-        try f.head(seq);
-        var out: [1]u32 = undefined;
-        try x.drawRows(&.{s.sampling}, &.{position}, &out);
-        return out[0];
-    }
+    const first = @import("exact_first_logits.zig").first;
 
     fn queue(p: *anyopaque, s: *lanes.Stream, feed: be.Feed, position: u64) !u64 {
         const x = cast(p);
@@ -500,7 +520,7 @@ pub const Cuda = struct {
                     .value => |v| v,
                     .handle => |h| try read(p, h),
                 };
-                try firsts[na].appendSlice(x.gpa, context);
+                try firsts[na].appendSlice(x.gpa, r.stream.prompt());
                 try firsts[na].append(x.gpa, token);
                 context = firsts[na].items;
             }
@@ -531,18 +551,7 @@ pub const Cuda = struct {
         return true;
     }
 
-    fn release(p: *anyopaque, s: *lanes.Stream) void {
-        const x = cast(p);
-        x.settle() catch |err| std.log.err("committing the last round before a release: {s}", .{@errorName(err)});
-        if (x.seqs.fetchRemove(s)) |entry| {
-            entry.value.deinit();
-            x.gpa.destroy(entry.value);
-        }
-        if (x.drafting.fetchRemove(s)) |entry| {
-            entry.value.deinit();
-            x.gpa.destroy(entry.value);
-        }
-    }
+    const release = exact_reuse.release;
 };
 
 fn value(word: u16) f64 {
@@ -583,4 +592,9 @@ pub fn draw(gpa: std.mem.Allocator, logits: []const u16, settings: ?lanes.Sampli
         filled = @min(filled + 1, k);
     }
     return @intCast(try lanes.sampling.choose(gpa, values, ids, position, sampling));
+}
+
+test {
+    _ = @import("exact_cache_test.zig");
+    _ = @import("exact_eligible.zig");
 }

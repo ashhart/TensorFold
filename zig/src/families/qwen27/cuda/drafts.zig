@@ -31,10 +31,25 @@ pub const Stream = struct {
 
     pub fn deinit(x: *Stream) void {
         x.ctx.deinit();
+        x.deinitHost();
+    }
+
+    fn deinitHost(x: *Stream) void {
         x.copies.deinit();
         x.tokens.deinit(x.gpa);
         x.parents.deinit(x.gpa);
         x.scores.deinit(x.gpa);
+    }
+
+    /// Reconstruct every request-specific host field around exclusively owned, already-fenced storage.
+    pub fn resetStorage(x: *Stream) void {
+        const gpa = x.gpa;
+        var ctx = x.ctx;
+        x.deinitHost();
+        ctx.cur = 0;
+        ctx.len = 0;
+        ctx.end = 0;
+        x.* = init(gpa, ctx);
     }
 
     fn clear(x: *Stream) void {

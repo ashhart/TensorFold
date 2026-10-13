@@ -115,6 +115,12 @@ pub const Engine = struct {
         return st.Seq.init(e.gpa, e.ops(), e.w.g, capacity, e.kv8);
     }
 
+    /// Private BF16 admission only; no target may read this destination before restore or reset.
+    pub fn sequenceForRestore(e: *Engine, capacity: usize) !st.Seq {
+        if (e.kv8) return error.ExactCacheRequiresBf16;
+        return st.Seq.initRestoreDestination(e.gpa, e.ops(), e.w.g, capacity);
+    }
+
     /// Attention's partials for `streams` streams of the engine's context in one round.
     pub fn fit(e: *Engine, streams: usize) !void {
         try e.s.synchronize();
