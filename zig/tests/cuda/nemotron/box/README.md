@@ -25,13 +25,13 @@ Each launched Triton specialization maps to its cached cubin, metadata and ABI. 
 the run saw it inside the container (`TRITON_CACHE_DIR=/aot/triton`); the cache argument is the same cache
 as this host sees it. capture.sh runs this step; run it by hand only to rebuild a manifest.
 
-## 3. aot_pack.py: the kernel set (host, no GPU)
+## 3. triton_aot_pack.py: the kernel set (host, no GPU)
 
-`python3 -B zig/tests/cuda/nemotron/aot_pack.py --manifest ${TF}/out/RUN/manifest.json --cache ${TF}/aot/RUN/triton --jit ${TF}/out/RUN/jit.json --out ${TF}/aot/RUN`
+`python3 -B tools/zig/triton_aot_pack.py --manifest ${TF}/out/RUN/manifest.json --cache ${TF}/aot/RUN/triton --jit ${TF}/out/RUN/jit.json --out ${TF}/aot/RUN`
 
-Reads the manifest's kernels and writes `aot.json` (launch facts and keys) beside the cubins, the input
-`tensorfold run --kernels` loads. `--manifest` and `--cache` are repeatable in pairs, so several captures
-pack into one kernel set.
+Reads the manifest's kernels (or a Recorder launch dump's) and writes `aot.json` (launch facts and keys) beside
+the cubins, the input `tensorfold run --kernels` loads. `--manifest` and `--cache` are repeatable in pairs, so
+several captures pack into one kernel set.
 
 ## 4. build.sh: the Zig CUDA engine and its SASS check (GPU image, no compute)
 
