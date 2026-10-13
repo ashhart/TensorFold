@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron on CUDA decodes a lone structured-output request (`response_format`, a required tool call) on its lone driver: each window's chain is cut and grown by the grammar and its rows masked as the lane core's are, so replies are unchanged. On a GB10, 500-token JSON replies finished 8% sooner under `json_object` and 13% under a JSON schema, and required tool calls 14% sooner.
 - Nemotron on CUDA decodes a lone request with a thinking budget above 32 tokens, or with `--loop-guard`, on its lone driver, which hands the stream to the lane core just before the budget's cut or a loop guard's close, so the close is forced as before and replies are unchanged. On a GB10, 700-token thinking replies with a 4,000-token budget finished 3.3% and 8.1% sooner, with a 400-token budget that cuts 3.6 to 4.2% sooner, and with `--loop-guard` 4% and 8% sooner.
 - Nemotron on CUDA decodes a lone request that asks for `logprobs` on its lone driver, as it does requests without them: the driver commits each round's kept rows as the lane core's windows read them, so the rows and tokens are unchanged. On a GB10, a 400-token greedy reply with `logprobs` costs 0.3% more than one without at 0 alternatives, 0.9% at 5 and 3.1% at 20, against 4.6%, 5.6% and 8.4% before.
 
