@@ -7,26 +7,28 @@ const wide = tf.glm.wide;
 const affine = tf.glm.affine;
 const kernels = tf.glm.kernels;
 const Ref = affine.Ref;
+const cand = @import("glm_rows_speed_cand.zig");
+const speed_prompt = @import("glm_rows_speed_prompt.zig");
 const Affine = affine.Affine;
 
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
-const a = std.heap.page_allocator;
+pub const a = std.heap.page_allocator;
 const hot = 768 << 20; // a class's matrices rotate over at least this many bytes: past the GPU's caches
-const reps = 32; // launches a command buffer
+pub const reps = 32; // launches a command buffer
 const runs = 7; // command buffers a timing (median)
 
-const H = 64; // KDA and MLA heads
+pub const H = 64; // KDA and MLA heads
 const KD = 128;
-const W = H * KD;
-const PS = 3 * W + 2 * KD + H; // KDA's stacked projection
+pub const W = H * KD;
+pub const PS = 3 * W + 2 * KD + H; // KDA's stacked projection
 const XP = 2208; // MLA x_proj rows
-const QR = 20480; // qr_proj rows
-const N = 2048; // an expert's intermediate rows
-const D = 4096;
-const E = 64; // experts in a pool
-const TOPK = 8;
+pub const QR = 20480; // qr_proj rows
+pub const N = 2048; // an expert's intermediate rows
+pub const D = 4096;
+pub const E = 64; // experts in a pool
+pub const TOPK = 8;
 
-fn buf(device: mtl.Device, bytes: usize) !mtl.Buffer {
+pub fn buf(device: mtl.Device, bytes: usize) !mtl.Buffer {
     return device.buffer(@max(bytes, 16), opts);
 }
 
@@ -41,12 +43,12 @@ fn fill(b: mtl.Buffer, bytes: usize, seed: u64) void {
 }
 
 /// `copies` matrices [n, k] at bits/64 (experts > 1: each one stacked [experts, n, k]); codes random, tables small.
-const Pool = struct {
+pub const Pool = struct {
     q: []Affine,
     bufs: []mtl.Buffer,
     bytes: usize, // one copy's
 
-    fn init(device: mtl.Device, n: usize, k: usize, bits: u8, experts: usize, min_copies: usize) !Pool {
+    pub fn init(device: mtl.Device, n: usize, k: usize, bits: u8, experts: usize, min_copies: usize) !Pool {
         const w: affine.Width = .{ .bits = bits, .group = 64 };
         const one = affine.bytes(n, k, w) * experts;
         const copies = if (experts > 1) min_copies else @max(min_copies, @min(64, (hot + one - 1) / one)); // a pool's picks walk its experts
@@ -65,21 +67,21 @@ const Pool = struct {
         return p;
     }
 
-    fn deinit(p: Pool) void {
+    pub fn deinit(p: Pool) void {
         for (p.bufs) |b| b.deinit();
         a.free(p.q);
         a.free(p.bufs);
     }
 
-    fn at(p: Pool, i: usize) Affine {
+    pub fn at(p: Pool, i: usize) Affine {
         return p.q[i % p.q.len];
     }
 };
 
 /// Activations and outputs every launch shares (wide enough for any class).
-const Io = struct { x: mtl.Buffer, y: mtl.Buffer, z: mtl.Buffer, ids: mtl.Buffer, uids: mtl.Buffer, umem: mtl.Buffer, ucount: mtl.Buffer };
+pub const Io = struct { x: mtl.Buffer, y: mtl.Buffer, z: mtl.Buffer, ids: mtl.Buffer, uids: mtl.Buffer, umem: mtl.Buffer, ucount: mtl.Buffer };
 
-const Bench = struct {
+pub const Bench = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     k: *kernels.Kernels,
@@ -87,7 +89,7 @@ const Bench = struct {
     reps: usize = reps,
 
     /// Median GPU microseconds a launch of `f(e, i, args)` over `reps` launches i in one command buffer.
-    fn time(b: *const Bench, comptime f: anytype, args: anytype) !f64 {
+    pub fn time(b: *const Bench, comptime f: anytype, args: anytype) !f64 {
         var t: [runs + 1]f64 = undefined;
         for (&t) |*v| {
             const cb = b.queue.commandBuffer();
@@ -108,7 +110,7 @@ const Bench = struct {
     }
 
     /// One launch of `f(e, 0, args)`, waited on.
-    fn run(b: *const Bench, comptime f: anytype, args: anytype) !void {
+    pub fn run(b: *const Bench, comptime f: anytype, args: anytype) !void {
         const cb = b.queue.commandBuffer();
         const e = cb.compute(.serial);
         @call(.auto, f, .{ e, @as(usize, 0) } ++ args);
@@ -122,7 +124,7 @@ const Bench = struct {
     }
 };
 
-fn bind(e: mtl.ComputeEncoder, first: usize, refs: anytype) void {
+pub fn bind(e: mtl.ComputeEncoder, first: usize, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buf, r.off, first + i);
 }
 fn shape(e: mtl.ComputeEncoder, index: usize, dims: anytype) void {
@@ -130,7 +132,7 @@ fn shape(e: mtl.ComputeEncoder, index: usize, dims: anytype) void {
     inline for (dims, 0..) |d, i| v[i] = @intCast(d);
     e.setBytes(std.mem.asBytes(&v), index);
 }
-fn rf(b: mtl.Buffer) Ref {
+pub fn rf(b: mtl.Buffer) Ref {
     return .{ .buf = b };
 }
 
@@ -198,7 +200,7 @@ fn moeRouted4(e: mtl.ComputeEncoder, i: usize, k: *const kernels.Kernels, gu: [2
 }
 
 // Other widths: wide.zig's launches as the engine makes them.
-fn rows(e: mtl.ComputeEncoder, i: usize, p: *const wide.Pipes, pool: Pool, io: Io) void {
+pub fn rows(e: mtl.ComputeEncoder, i: usize, p: *const wide.Pipes, pool: Pool, io: Io) void {
     const q = pool.at(i);
     wide.dense(p, e, q, .{ .in = rf(io.x), .ldx = q.k, .out = rf(io.y), .ldo = q.n, .rows = 1 });
 }
@@ -273,158 +275,11 @@ fn kdaStep(e: mtl.ComputeEncoder, i: usize, pipe: mtl.Pipeline, s: *const Kda, g
     e.dispatchThreads(mtl.Size.of(32, 32, H), mtl.Size.of(32, 32, 1));
 }
 
-/// glm_rows.metal with glm_rows_speed.metal's candidate instances.
-fn candidateLib(device: mtl.Device) !mtl.Library {
-    const src = try std.mem.concat(a, u8, &.{ sources.core_row_projection, wide.glue_math, sources.glm_rows, @embedFile("glm_rows_speed.metal") });
-    defer a.free(src);
-    return mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
-}
-
-const PM = 2048; // a prompt chunk's rows
-
-/// A prompt chunk's per-head product (embed_q: x qp's slices; unembed_out: the latent rows) on the row kernels.
-fn headsRows(e: mtl.ComputeEncoder, i: usize, p: *const wide.Pipes, pool: Pool, io: Io, ldx: u32, kx: u32) void {
-    const q = pool.at(i);
-    wide.perHead(p, e, q, H, .{ .in = rf(io.x), .ldx = ldx, .out = rf(io.y), .ldo = q.n, .rows = PM }, kx, q.n / H);
-}
-/// The same as one affine_mm batch (prompt.zig headsMm).
-fn headsMm(e: mtl.ComputeEncoder, i: usize, mm: tf.affine_mm.Pipes, pool: Pool, io: Io, ldx: u32, kx: u32) void {
-    var head = pool.at(i);
-    head.n /= H;
-    tf.affine_mm.rowSumsAt(e, mm, 64, rf(io.x), rf(io.z), PM, H * kx, ldx);
-    tf.affine_mm.denseBatch(e, mm, rf(io.x), rf(io.z), head, rf(io.y), PM, H, .{ .x_row = @intCast(ldx), .y_row = @intCast(H * head.n), .sums_row = H, .x_batch = @intCast(kx), .y_batch = @intCast(head.n), .sums_batch = 1, .w_batch = @intCast(head.n) });
-}
-fn ehRows(e: mtl.ComputeEncoder, i: usize, p: *const wide.Pipes, eh: mtl.Buffer, io: Io) void {
-    _ = i;
-    wide.bf16(p, e, .{ .buf = eh }, D, 2 * D, .{ .in = rf(io.x), .ldx = 2 * D, .out = rf(io.y), .ldo = D, .rows = PM });
-}
-
-/// A chunk's dense product: row kernels, or affine_mm (`mm`).
-fn chunkRows(e: mtl.ComputeEncoder, i: usize, p: *const wide.Pipes, pool: Pool, io: Io) void {
-    const q = pool.at(i);
-    wide.dense(p, e, q, .{ .in = rf(io.x), .ldx = q.k, .out = rf(io.y), .ldo = q.n, .rows = PM });
-}
-fn chunkMm(e: mtl.ComputeEncoder, i: usize, mm: tf.affine_mm.Pipes, pool: Pool, io: Io) void {
-    const q = pool.at(i);
-    tf.affine_mm.rowSums(e, mm, 64, rf(io.x), rf(io.z), PM, q.k);
-    tf.affine_mm.dense(e, mm, rf(io.x), rf(io.z), q, rf(io.y), PM);
-}
-
-/// A prompt chunk's products where oQ's paths differ from uniform's, ms a chunk of 2048 rows.
-fn prompt(b: *Bench, k: *const kernels.Kernels, p: *const wide.Pipes) !void {
-    b.reps = 2;
-    defer b.reps = reps;
-    std.debug.print("prompt chunk ({d} rows), ms a launch:\n", .{PM});
-    const eq = try Pool.init(b.device, H * 512, 256, 8, 1, 2);
-    defer eq.deinit();
-    std.debug.print("  embed_q q8      per-head rows {d:8.2}  affine_mm batch {d:8.2}  (x11 a chunk)\n", .{ try b.time(headsRows, .{ p, eq, b.io, @as(u32, QR), @as(u32, 256) }) / 1e3, try b.time(headsMm, .{ p.mm8, eq, b.io, @as(u32, QR), @as(u32, 256) }) / 1e3 });
-    const uo = try Pool.init(b.device, H * 256, 512, 8, 1, 2);
-    defer uo.deinit();
-    std.debug.print("  unembed_out q8  per-head rows {d:8.2}  affine_mm batch {d:8.2}  (x11 a chunk)\n", .{ try b.time(headsRows, .{ p, uo, b.io, @as(u32, H * 512), @as(u32, 512) }) / 1e3, try b.time(headsMm, .{ p.mm8, uo, b.io, @as(u32, H * 512), @as(u32, 512) }) / 1e3 });
-    { // the MTP head's bf16 eh_proj [4096, 8192] over the chunk (prompt.zig mtp)
-        const eh = try buf(b.device, D * 2 * D * 2);
-        defer eh.deinit();
-        @memset(eh.slice(u16, 2 * D * D), 0x3c00);
-        std.debug.print("  eh_proj bf16 [4096, 8192] rows {d:8.2}  (x1 a chunk with MTP)\n", .{try b.time(ehRows, .{ p, eh, b.io }) / 1e3});
-    }
-    for ([_][3]usize{ .{ PS, D, 9 }, .{ D, W, 10 }, .{ 1536, D, 1 } }) |s| {
-        const m8 = try Pool.init(b.device, s[0], s[1], 8, 1, 2);
-        defer m8.deinit();
-        const m4 = try Pool.init(b.device, s[0], s[1], 4, 1, 2);
-        defer m4.deinit();
-        const t8 = try b.time(chunkMm, .{ p.mm8, m8, b.io });
-        const t4 = try b.time(chunkMm, .{ k.mm_bf16, m4, b.io });
-        for ([_]u8{ 5, 6 }) |bits| {
-            const m = try Pool.init(b.device, s[0], s[1], bits, 1, 2);
-            defer m.deinit();
-            const on_mm = if (wide.mm(p, m.at(0))) |mm| try b.time(chunkMm, .{ mm, m, b.io }) else 0;
-            std.debug.print("  [{d}, {d}] q{d} rows {d:8.2}  affine_mm {d:8.2}  (affine_mm q8 {d:.2}, q4 {d:.2})\n", .{ s[0], s[1], bits, try b.time(chunkRows, .{ p, m, b.io }) / 1e3, on_mm / 1e3, t8 / 1e3, t4 / 1e3 });
-        }
-    }
-}
-
-fn cand(e: mtl.ComputeEncoder, i: usize, pipe: mtl.Pipeline, rps: u32, sg: u32, pool: Pool, io: Io) void {
-    const q = pool.at(i);
-    e.setPipeline(pipe);
-    bind(e, 0, .{ rf(io.x), q.w, q.s, q.b });
-    e.setValue(wide.RowDims{ .k = @intCast(q.k), .n = @intCast(q.n), .group = 64, .rows = 1, .ldx = @intCast(q.k), .ldo = @intCast(q.n) }, 4);
-    bind(e, 5, .{rf(io.y)});
-    e.dispatchGroups(mtl.Size.of((q.n + rps * sg - 1) / (rps * sg), 1, 1), mtl.Size.of(32 * sg, 1, 1));
-}
-
-/// glm_rows_speed.metal's launch shapes on `pool` at 8 bits: each one's bits == glm_rows's, then its time.
-fn candidates(b: *const Bench, lib: mtl.Library, p: *const wide.Pipes, pool: Pool, name: []const u8) !void {
-    const q = pool.at(0);
-    const base = try b.time(rows, .{ p, pool, b.io });
-    try b.run(rows, .{ p, pool, b.io });
-    const want = try a.dupe(u16, b.io.y.slice(u16, q.n));
-    defer a.free(want);
-    var best: f64 = base;
-    var best_name: [40]u8 = undefined;
-    var best_len: usize = 0;
-    for ([_][2]u32{ .{ 4, 2 }, .{ 8, 2 }, .{ 4, 4 }, .{ 8, 4 }, .{ 2, 4 }, .{ 2, 8 }, .{ 4, 8 } }) |rs| for ([_]u32{ 0, q.k }) |kk| {
-        var nb: [40]u8 = undefined;
-        const fname = try std.fmt.bufPrintSentinel(&nb, "x_q8_r{d}_s{d}_k{d}", .{ rs[0], rs[1], kk }, 0);
-        const pipe = try mtl.Pipeline.init(b.device, lib, fname, false);
-        defer pipe.deinit();
-        @memset(b.io.y.slice(u16, q.n), 0);
-        try b.run(cand, .{ pipe, rs[0], rs[1], pool, b.io });
-        if (!std.mem.eql(u16, b.io.y.slice(u16, q.n), want)) {
-            std.debug.print("  {s} {s}: BITS DIFFER\n", .{ name, fname });
-            return error.BitsDiffer;
-        }
-        const us = try b.time(cand, .{ pipe, rs[0], rs[1], pool, b.io });
-        if (us < best) {
-            best = us;
-            @memcpy(best_name[0..fname.len], fname);
-            best_len = fname.len;
-        }
-        std.debug.print("  {s:<16} {s:<24} {d:8.1} us ({d:5.3}x glm_rows)\n", .{ name, fname, us, base / us });
-    };
-    std.debug.print("  {s:<16} glm_rows {d:.1} us, best {s} {d:.1} us ({d:.0} GB/s)\n", .{ name, base, best_name[0..best_len], best, @as(f64, @floatFromInt(pool.bytes)) / best / 1e3 });
-}
-
 /// oQ2's MoE: routed by pick and the shared expert, a launch for gate|up and one for down (wide.moe).
-fn moeTwo(e: mtl.ComputeEncoder, i: usize, p: *const wide.Pipes, gu: [2]Pool, down: Pool, sh: [2]Pool, io: Io) void {
+pub fn moeTwo(e: mtl.ComputeEncoder, i: usize, p: *const wide.Pipes, gu: [2]Pool, down: Pool, sh: [2]Pool, io: Io) void {
     const m: wide.Moe = .{ .gate = gu[0].at(i), .up = gu[1].at(i), .down = down.at(i), .sh_gate_up = sh[0].at(i), .sh_down = sh[1].at(i) };
     const z = rf(io.z);
     wide.moe(p, e, m, E, TOPK, 10.0, .{ .x = rf(io.x), .ids = rf(io.ids).at((i % reps) * TOPK * 4), .act = z, .acts = z.at(TOPK * N * 2), .ye = rf(io.y), .ys = rf(io.y).at(TOPK * D * 2) }, 1);
-}
-
-/// moeTwo through candidate pipelines (glu, down) at `rps` columns a simdgroup.
-fn moeCand(e: mtl.ComputeEncoder, i: usize, pipes: [2]mtl.Pipeline, rps: [2]u32, gu: [2]Pool, down: Pool, sh: [2]Pool, io: Io) void {
-    const z = rf(io.z);
-    const ids = rf(io.ids).at((i % reps) * TOPK * 4);
-    const steps = [2]struct { w: Affine, up: Affine, sh: Affine, x: Ref, out: Ref, out2: Ref, repeat: u32 }{
-        .{ .w = gu[0].at(i), .up = gu[1].at(i), .sh = sh[0].at(i), .x = rf(io.x), .out = z, .out2 = z.at(TOPK * N * 2), .repeat = TOPK },
-        .{ .w = down.at(i), .up = down.at(i), .sh = sh[1].at(i), .x = z, .out = rf(io.y), .out2 = rf(io.y).at(TOPK * D * 2), .repeat = 1 },
-    };
-    for (steps, pipes, rps, 0..) |st, pipe, r, j| {
-        e.setPipeline(pipe);
-        bind(e, 0, .{ st.x, st.w.w, st.w.s, st.w.b });
-        e.setValue(wide.PickDims{ .k = @intCast(st.w.k), .n = @intCast(st.w.n), .group = 64, .slots = TOPK, .repeat = @intCast(st.repeat), .experts = E, .ldo = @intCast(st.w.n), .lim = 10.0 }, 4);
-        bind(e, 5, .{ st.out, ids, st.up.w, st.up.s, st.up.b, if (j == 0) rf(io.x) else z.at(TOPK * N * 2), st.sh.w, st.sh.s, st.sh.b, st.out2 });
-        e.dispatchGroups(mtl.Size.of((st.w.n + 2 * r - 1) / (2 * r), TOPK + 1, 1), mtl.Size.of(64, 1, 1));
-    }
-}
-
-/// glm_moe_rows candidates (glm_rows_speed.metal) for oQ2's MoE: bits == wide.moe's, then the time a layer.
-fn moeCandidates(b: *const Bench, lib: mtl.Library, p: *const wide.Pipes, gu: [2]Pool, down: Pool, sh: [2]Pool) !void {
-    const base = try b.time(moeTwo, .{ p, gu, down, sh, b.io });
-    try b.run(moeTwo, .{ p, gu, down, sh, b.io });
-    const want = try a.dupe(u16, b.io.y.slice(u16, (TOPK + 1) * D));
-    defer a.free(want);
-    for ([_][2][:0]const u8{ .{ "x_moe_glu_r8_k0", "x_moe_r8_k0" }, .{ "x_moe_glu_r2_k0", "x_moe_r2_k0" }, .{ "x_moe_glu_r4_k4096", "x_moe_r4_k2048" }, .{ "x_moe_glu_r8_k4096", "x_moe_r8_k2048" } }) |names| {
-        var pipes: [2]mtl.Pipeline = undefined;
-        for (&pipes, names) |*x, n| x.* = try mtl.Pipeline.init(b.device, lib, n, false);
-        defer for (pipes) |x| x.deinit();
-        const rps = [2]u32{ names[0][11] - '0', names[1][7] - '0' };
-        @memset(b.io.y.slice(u16, (TOPK + 1) * D), 0);
-        try b.run(moeCand, .{ pipes, rps, gu, down, sh, b.io });
-        if (!std.mem.eql(u16, b.io.y.slice(u16, (TOPK + 1) * D), want)) return error.BitsDiffer;
-        const us = try b.time(moeCand, .{ pipes, rps, gu, down, sh, b.io });
-        std.debug.print("  moe q2+q8 {s} / {s}: {d:8.1} us ({d:5.3}x wide.moe {d:.1} us)\n", .{ names[0], names[1], us, base / us, base });
-    }
 }
 
 fn routedRows(e: mtl.ComputeEncoder, i: usize, p: *const wide.Pipes, gu: [2]Pool, down: Pool, io: Io) void {
@@ -570,22 +425,22 @@ pub fn main() !void {
         std.debug.print("  {s:<26} {d:9.1} us (apart)\n", .{ "moe routed q2 (ids)", try b.time(routedRows, .{ p, gu2, dn2, io }) });
         oq2.add("moe routed q2 + shared q8", try b.time(moeTwo, .{ p, gu2, dn2, sh8, io }), 42, 3 * affine.bytes(N, D, .{ .bits = 2, .group = 64 }) * TOPK + sh8[0].bytes + sh8[1].bytes);
         if (std.c.getenv("GLM_SPEED_CANDIDATES") != null) {
-            const lib = try candidateLib(device);
+            const lib = try cand.candidateLib(device);
             defer lib.deinit();
-            try moeCandidates(&b, lib, p, gu2, dn2, sh8);
+            try cand.moeCandidates(&b, lib, p, gu2, dn2, sh8);
         }
     }
     if (std.c.getenv("GLM_SPEED_CANDIDATES") != null) {
-        const lib = try candidateLib(device);
+        const lib = try cand.candidateLib(device);
         defer lib.deinit();
         std.debug.print("candidates at 8 bits (bits checked == glm_rows):\n", .{});
         for (shapes) |s| {
             const m = try Pool.init(device, s.n, s.k, 8, 1, 1);
             defer m.deinit();
-            try candidates(&b, lib, p, m, s.name);
+            try cand.candidates(&b, lib, p, m, s.name);
         }
     }
-    if (std.c.getenv("GLM_SPEED_PROMPT") != null) try prompt(&b, k, p);
+    if (std.c.getenv("GLM_SPEED_PROMPT") != null) try speed_prompt.prompt(&b, k, p);
     std.debug.print("uniform 4/64:\n", .{});
     for (uni.rows[0..uni.n]) |x| std.debug.print("  {s:<26} {d:7.3} ms/token\n", .{ x.name, x.us * x.count / 1e3 });
     uni.total("uniform 4/64");

@@ -8,14 +8,15 @@ const affine = tf.glm.affine;
 const mlx = tf.quant.mlx;
 const row = tf.row_projection;
 const affine_mm = tf.affine_mm;
+const batch = @import("glm_rows_batch.zig");
 
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 const a = std.heap.page_allocator;
-const rows = 16;
+pub const rows = 16;
 const pad = 32; // a strided x row's and out row's extra values
 const Ref = affine.Ref;
 
-fn toBf(v: f32) u16 {
+pub fn toBf(v: f32) u16 {
     const u: u32 = @bitCast(v);
     return @truncate((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
 }
@@ -106,7 +107,7 @@ pub const Mat = struct {
     }
 
     /// Expert (or head) e of `parts` stacked matrices: its rows, codes and tables.
-    fn part(m: Mat, e: usize, parts: usize) affine.Affine {
+    pub fn part(m: Mat, e: usize, parts: usize) affine.Affine {
         var q = m.q;
         const n = q.n / parts;
         const wb = affine.wBytes(n, q.k, q.width());
@@ -145,7 +146,7 @@ pub fn dense(e: mtl.ComputeEncoder, p: *const wide.Pipes, q: affine.Affine, io: 
     wide.dense(p, e, q, io);
 }
 
-const Tally = struct { values: usize = 0, worst: f64 = 0, pairs: usize = 0 };
+pub const Tally = struct { values: usize = 0, worst: f64 = 0, pairs: usize = 0 };
 
 pub fn eql(got: []const u16, want: []const u16) !void {
     if (!std.mem.eql(u16, got, want)) {
@@ -289,7 +290,7 @@ fn partsCheck(g: *const Gpu, m: Mat, up: Mat, t: *Tally) !void {
     t.pairs += 2 * slots * r;
 }
 
-fn mmDense(e: mtl.ComputeEncoder, mm: affine_mm.Pipes, q: affine.Affine, x: Ref, sums: Ref, y: Ref, n_rows: u32) void {
+pub fn mmDense(e: mtl.ComputeEncoder, mm: affine_mm.Pipes, q: affine.Affine, x: Ref, sums: Ref, y: Ref, n_rows: u32) void {
     affine_mm.rowSums(e, mm, 64, x, sums, n_rows, q.k);
     affine_mm.dense(e, mm, x, sums, q, y, n_rows);
 }
@@ -395,91 +396,8 @@ fn splitCheck(g: *const Gpu, k: usize, ns: []const usize, bits: []const u8, t: *
     }
 }
 
-fn headsLaunch(e: mtl.ComputeEncoder, p: *const wide.Pipes, q: affine.Affine, h: u32, io: wide.Io, kx: u32, sums: Ref) void {
-    wide.headsBatch(p, e, q, h, io, kx, sums);
-}
-
-/// A chunk's embed_q / unembed_out (wide.headsBatch): the heads in one affine_mm batch == each head's own product.
-fn headsCheck(g: *const Gpu, mm: affine_mm.Pipes, bits: u8, n: usize, k: usize, t: *Tally) !void {
-    const nh = 4;
-    const m = 33; // two 16-row steps and one more
-    const ldx = nh * k + 96; // a row's slices, then columns no head reads (qp's indexer queries)
-    const w = try Mat.init(g.device, nh * n, k, bits, 64, 4100 + n + bits);
-    defer w.deinit();
-    var prng = std.Random.DefaultPrng.init(4200 + k);
-    const r = prng.random();
-    const bs = [_]mtl.Buffer{ try buf(g.device, m * ldx * 2), try buf(g.device, m * nh * (k / 64) * 4), try buf(g.device, m * nh * n * 2), try buf(g.device, m * k * 2), try buf(g.device, m * n * 2) };
-    defer for (bs) |b| b.deinit();
-    for (bs[0].slice(u16, m * ldx)) |*v| v.* = toBf((r.float(f32) - 0.5) * 2);
-    try g.run(headsLaunch, .{ &g.p, w.q, @as(u32, nh), wide.Io{ .in = ref(bs[0]), .ldx = @intCast(ldx), .out = ref(bs[2]), .ldo = @intCast(nh * n), .rows = m }, @as(u32, @intCast(k)), ref(bs[1]) });
-    const all = bs[2].slice(u16, m * nh * n);
-    for (0..nh) |h| {
-        for (0..m) |i| @memcpy(bs[3].slice(u16, m * k)[i * k ..][0..k], bs[0].slice(u16, m * ldx)[i * ldx + h * k ..][0..k]);
-        try g.run(mmDense, .{ mm, w.part(h, nh), ref(bs[3]), ref(bs[1]), ref(bs[4]), @as(u32, m) });
-        for (0..m) |i| try eql(all[(i * nh + h) * n ..][0..n], bs[4].slice(u16, m * n)[i * n ..][0..n]);
-        t.pairs += m * n;
-    }
-}
-
-fn denseMm(e: mtl.ComputeEncoder, p: *const wide.Pipes, q: affine.Affine, io: wide.Io, sums: Ref) void {
-    wide.denseMm(p, e, q, io, sums);
-}
-
-/// A chunk's split stack (wide.denseMm) at the 64-padded pitch == each member alone (affine_mm or the row kernels).
-fn splitMmCheck(g: *const Gpu, k: usize, ns: []const usize, bits: []const u8, t: *Tally) !usize {
-    const m = 33;
-    var ms: [affine.max_runs]Mat = undefined;
-    for (ns, bits, 0..) |n, b, i| ms[i] = try Mat.init(g.device, n, k, b, 64, 900 + 37 * i + n);
-    defer for (ms[0..ns.len]) |x| x.deinit();
-    var q = ms[0].q;
-    var at: u32 = @intCast(ns[0]);
-    for (ms[1..ns.len], 0..) |x, i| {
-        q.runs[i] = .{ .w = x.q.w, .s = x.q.s, .b = x.q.b, .row = at, .n = x.q.n, .bits = x.q.bits, .group = x.q.group };
-        at += x.q.n;
-    }
-    q.more = @intCast(ns.len - 1);
-    q.n = at;
-    var prng = std.Random.DefaultPrng.init(9100 + k);
-    const r = prng.random();
-    const ld = std.mem.alignForward(usize, at, 64);
-    const bs = [_]mtl.Buffer{ try buf(g.device, m * k * 2), try buf(g.device, m * (k / 64) * 4), try buf(g.device, m * ld * 2), try buf(g.device, m * ld * 2) };
-    defer for (bs) |b| b.deinit();
-    for (bs[0].slice(u16, m * k)) |*v| v.* = toBf((r.float(f32) - 0.5) * 2);
-    try g.run(denseMm, .{ &g.p, q, wide.Io{ .in = ref(bs[0]), .ldx = @intCast(k), .out = ref(bs[2]), .ldo = @intCast(ld), .rows = m }, ref(bs[1]) });
-    var on_mm: usize = 0;
-    for (ms[0..ns.len], 0..) |x, i| {
-        const run = q.run(i);
-        if (wide.mm(&g.p, x.q) != null and run.n % 64 == 0) {
-            try g.run(mmDense, .{ wide.mm(&g.p, x.q).?, x.q, ref(bs[0]), ref(bs[1]), ref(bs[3]), @as(u32, m) });
-            on_mm += 1;
-        } else try g.run(dense, .{ &g.p, x.q, wide.Io{ .in = ref(bs[0]), .ldx = @intCast(k), .out = ref(bs[3]), .ldo = run.n, .rows = m } });
-        for (0..m) |y| try eql(bs[2].slice(u16, m * ld)[y * ld + run.row ..][0..run.n], bs[3].slice(u16, m * ld)[y * run.n ..][0..run.n]);
-        t.pairs += m * run.n;
-    }
-    return on_mm;
-}
-
 pub fn gluLaunch(e: mtl.ComputeEncoder, p: *const wide.Pipes, gu: affine.Affine, n: u32, x: Ref, out: Ref, m: u32) void {
     wide.glu(p, e, gu, n, x, out, m, 0.75);
-}
-
-/// The shared expert's gate and up at one width (wide.glu, one launch) == glm_swiglu(dense [gate; up]) bit for bit.
-fn sharedGluCheck(g: *const Gpu) !usize {
-    var pairs: usize = 0;
-    for ([_]u8{ 8, 5, 4, 2 }) |bits| {
-        const n = 2048;
-        const m = try Mat.init(g.device, 2 * n, 4096, bits, 64, 8800 + @as(u64, bits));
-        defer m.deinit();
-        const bs = [_]mtl.Buffer{ try buf(g.device, rows * 2 * n * 2), try buf(g.device, rows * n * 2), try buf(g.device, rows * n * 2) };
-        defer for (bs) |b| b.deinit();
-        try g.run(dense, .{ &g.p, m.q, wide.Io{ .in = ref(m.x()), .ldx = 4096, .out = ref(bs[0]), .ldo = 2 * n, .rows = rows } });
-        try g.run(swiglu, .{ g.swiglu, ref(bs[0]), ref(bs[1]), @as(u32, rows), @as(u32, n), @as(f32, 0.75) });
-        try g.run(gluLaunch, .{ &g.p, m.q, @as(u32, n), ref(m.x()), ref(bs[2]), @as(u32, rows) });
-        try eql(bs[2].slice(u16, rows * n), bs[1].slice(u16, rows * n));
-        pairs += rows * n;
-    }
-    std.debug.print("shared expert gate|up at one width in one launch == glm_swiglu(dense [gate; up]): {d} bit-equal values\n", .{pairs});
-    return pairs;
 }
 
 fn perHead(e: mtl.ComputeEncoder, p: *const wide.Pipes, q: affine.Affine, heads: u32, io: wide.Io, hsx: u32, hso: u32) void {
@@ -491,7 +409,7 @@ pub fn byIds(e: mtl.ComputeEncoder, p: *const wide.Pipes, m: wide.Picks, x: Ref,
 fn bySorted(e: mtl.ComputeEncoder, p: *const wide.Pipes, m: wide.Picks, x: Ref, offsets: Ref, order: Ref, out: Ref, ldo: u32) void {
     wide.bySorted(p, e, m, x, offsets, order, out, ldo);
 }
-fn swiglu(e: mtl.ComputeEncoder, pipe: mtl.Pipeline, gu: Ref, act: Ref, n_rows: u32, width: u32, lim: f32) void {
+pub fn swiglu(e: mtl.ComputeEncoder, pipe: mtl.Pipeline, gu: Ref, act: Ref, n_rows: u32, width: u32, lim: f32) void {
     e.setPipeline(pipe);
     e.setBuffer(gu.buf, gu.off, 0);
     e.setBuffer(act.buf, act.off, 1);
@@ -546,18 +464,18 @@ pub fn main() !void {
     try splitCheck(&g, 512, &.{ 48, 16, 8, 8 }, &.{ 6, 6, 5, 5 }, &split); // oQ4 layer 7's and the MTP's MLA x_proj
     std.debug.print("split stacks through one call == each member alone: {d} bit-equal values\n", .{split.pairs});
     var sm = Tally{};
-    const kda_mm = try splitMmCheck(&g, 256, &.{ 128, 128, 128, 64, 64, 64 }, &.{ 5, 8, 5, 8, 8, 8 }, &sm); // oQ4 layer 6
-    const x_mm = try splitMmCheck(&g, 512, &.{ 192, 64, 64, 32 }, &.{ 6, 6, 5, 5 }, &sm); // layer 7's x_proj: 32 on rows
+    const kda_mm = try batch.splitMmCheck(&g, 256, &.{ 128, 128, 128, 64, 64, 64 }, &.{ 5, 8, 5, 8, 8, 8 }, &sm); // oQ4 layer 6
+    const x_mm = try batch.splitMmCheck(&g, 512, &.{ 192, 64, 64, 32 }, &.{ 6, 6, 5, 5 }, &sm); // layer 7's x_proj: 32 on rows
     std.debug.print("prompt split stacks == each member alone ({d} + {d} members on affine_mm): {d} bit-equal values\n", .{ kda_mm, x_mm, sm.pairs });
     all.pairs += sm.pairs;
     var hd = Tally{};
-    for ([_][2]usize{ .{ 512, 256 }, .{ 256, 512 } }) |s| try headsCheck(&g, g.p.mm8, 8, s[0], s[1], &hd); // embed_q, unembed_out
+    for ([_][2]usize{ .{ 512, 256 }, .{ 256, 512 } }) |s| try batch.headsCheck(&g, g.p.mm8, 8, s[0], s[1], &hd); // embed_q, unembed_out
     std.debug.print("prompt embed_q / unembed_out q8: the heads in one affine_mm batch == each head alone: {d} bit-equal values\n", .{hd.pairs});
     all.pairs += hd.pairs;
     all.pairs += split.pairs;
     all.pairs += try @import("glm_rows_kda.zig").check(&g.p, device, queue);
     all.pairs += try @import("glm_rows_kda.zig").fusedCheck(&g.p, device, queue);
-    all.pairs += try sharedGluCheck(&g);
+    all.pairs += try batch.sharedGluCheck(&g);
     all.pairs += try @import("glm_rows_moe.zig").check(&g);
     all.values += try @import("glm_rows_kda.zig").bf16Check(&g.p, device, queue, &all.worst);
     all.values += try @import("glm_rows_kda.zig").embedCheck(&g.p, device, queue, &all.worst);
