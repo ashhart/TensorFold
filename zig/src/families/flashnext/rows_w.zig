@@ -9,15 +9,17 @@ pub const Product = struct { w: Buf, s: Buf, b: Buf, n: usize, k: usize, bits: u
 
 /// Input rows a qmv_rows call takes, one simdgroup each.
 pub const rows_a_call = 32;
-/// Rows from which other widths than 4/32 take the matrix-unit twin (MMA_FROM), and its simdgroups.
+/// Rows from which other widths than 4/32 take the matrix-unit twin (6 and 8 bits: past four_to), and its simdgroups.
 pub const mma_from = 4;
+/// Rows up to which 6- and 8-bit products take four rows a simdgroup (from 2).
+pub const four_to = 4;
 const mma_sg = 8;
 
 /// One compiled library: a shape at a width, its output stride, outputs a simdgroup and how 4-bit dots make nibbles.
 pub const Spec = struct { n: usize, k: usize, bits: u8, group: u16, ld: usize, rps: u8, nib: u8 };
 
-/// The library's pipelines: the per-row kernel, and for other widths than 4/32 the block sums and the MMA twin.
-pub const Pipes = struct { rows: mtl.Pipeline, sums: ?mtl.Pipeline = null, mma: ?mtl.Pipeline = null };
+/// The library's pipelines: the per-row kernel; widths but 4/32 add four rows a simdgroup, block sums, the MMA twin.
+pub const Pipes = struct { rows: mtl.Pipeline, four: ?mtl.Pipeline = null, sums: ?mtl.Pipeline = null, mma: ?mtl.Pipeline = null };
 
 pub const Cache = std.AutoHashMapUnmanaged(Spec, Pipes);
 
@@ -64,6 +66,7 @@ pub fn pipes(a: std.mem.Allocator, device: mtl.Device, cache: *Cache, s: Spec) !
     const lib = try mtl.Library.fromSource(device, try source(a, s), mtl.CompileOptions.mlx());
     const four = s.bits == 4 and s.group == 32;
     var p: Pipes = .{ .rows = try mtl.Pipeline.init(device, lib, if (four) "q4_qmv_rows" else "qa_qmv_rows", false) };
+    if (!four) p.four = try mtl.Pipeline.init(device, lib, "qa_qmv_rows4", false);
     if (!four and s.k % (32 * vpt(s.bits)) == 0) {
         p.sums = try mtl.Pipeline.init(device, lib, "qa_row_block_sums", false);
         p.mma = try mtl.Pipeline.init(device, lib, "qa_qmv_rows_mma", false);
@@ -82,8 +85,11 @@ pub fn sumsBytes(k: usize, bits: u8, rows: usize) usize {
     return rows * (k / vpt(bits)) * 4;
 }
 
-/// How a launch runs its rows: by row count (0.6.6's rule), or forced to the per-row loop or the MMA twin.
-pub const Mode = enum { auto, loop, twin };
+/// How a launch runs its rows: by row count, or forced to the per-row loop, four rows a simdgroup or the MMA twin.
+pub const Mode = enum { auto, loop, four, twin };
+
+/// The kernel a launch takes: every one gives a row the same bits.
+const How = enum { loop, four, twin };
 
 /// The block sums of x's rows at `p`'s lane step into `sums` (the MMA twin's input).
 fn encodeSums(enc: mtl.ComputeEncoder, pp: Pipes, p: Product, x: Buf, rows: usize, sums: Buf) void {
@@ -95,22 +101,25 @@ fn encodeSums(enc: mtl.ComputeEncoder, pp: Pipes, p: Product, x: Buf, rows: usiz
 }
 
 /// The product alone, block sums already in `sums` when it takes the MMA twin.
-fn encodeProduct(enc: mtl.ComputeEncoder, pp: Pipes, p: Product, s: Spec, x: Buf, rows: usize, y: Buf, sums: ?Buf, twin: bool) !void {
-    if (twin) {
+fn encodeProduct(enc: mtl.ComputeEncoder, pp: Pipes, p: Product, s: Spec, x: Buf, rows: usize, y: Buf, sums: ?Buf, how: How) !void {
+    if (how == .twin) {
         enc.setPipeline(pp.mma orelse return error.RowsNoTwin);
         for ([_]Buf{ x, sums orelse return error.RowsNoScratch, p.w, p.s, p.b, y }, 0..) |b, j| enc.setBuffer(b.b, b.off, j);
         enc.setValue(@as(i32, @intCast(rows)), 6);
         enc.dispatchThreads(mtl.Size.of((p.n + 7) / 8 * 32 * mma_sg, (rows + 7) / 8, 1), mtl.Size.of(32 * mma_sg, 1, 1));
         return;
     }
-    enc.setPipeline(pp.rows);
+    enc.setPipeline(if (how == .four) pp.four orelse return error.RowsNoFour else pp.rows);
     for ([_]Buf{ p.w, p.s, p.b }, 1..) |b, j| enc.setBuffer(b.b, b.off, j);
+    const per: usize = if (how == .four) 4 else 1; // rows a simdgroup
     var lo: usize = 0;
-    while (lo < rows) : (lo += rows_a_call) {
-        const m: usize = @min(rows_a_call, rows - lo); // usize: 32 * m must not wrap in @min's narrowed type
+    while (lo < rows) : (lo += rows_a_call * per) {
+        const m: usize = @min(rows_a_call * per, rows - lo); // usize: 32 * m must not wrap in @min's narrowed type
+        const sg = (m + per - 1) / per;
         enc.setBuffer(x.b, x.off + lo * p.k * 2, 0);
         enc.setBuffer(y.b, y.off + lo * s.ld * 2, 4);
-        enc.dispatchThreads(mtl.Size.of(32 * m, p.n / s.rps, 1), mtl.Size.of(32 * m, 1, 1));
+        if (how == .four) enc.setValue(@as(i32, @intCast(m)), 5);
+        enc.dispatchThreads(mtl.Size.of(32 * sg, p.n / s.rps, 1), mtl.Size.of(32 * sg, 1, 1));
     }
 }
 
@@ -119,11 +128,19 @@ pub fn twinOk(p: Product) bool {
     return !q4(p) and p.k % (32 * vpt(p.bits)) == 0;
 }
 
-fn twinOf(p: Product, rows: usize, mode: Mode) bool {
+/// The fastest kernel for `p` at `rows` rows on the M3 (rows-time): every one gives a row the same bits.
+fn auto(p: Product, rows: usize) How {
+    if (q4(p) or rows == 1) return .loop;
+    if (vpt(p.bits) == 8) return if (rows <= four_to or !twinOk(p)) .four else .twin;
+    return if (mma(p, rows)) .twin else .loop;
+}
+
+fn howOf(p: Product, rows: usize, mode: Mode) How {
     return switch (mode) {
-        .auto => mma(p, rows),
-        .loop => false,
-        .twin => twinOk(p),
+        .auto => auto(p, rows),
+        .loop => .loop,
+        .four => if (q4(p)) .loop else .four,
+        .twin => if (twinOk(p)) .twin else .loop,
     };
 }
 
@@ -132,16 +149,16 @@ pub fn encode(enc: mtl.ComputeEncoder, a: std.mem.Allocator, device: mtl.Device,
     try check(p);
     const s = specOf(p, device.generation(), rows, ld);
     const pp = try pipes(a, device, cache, s);
-    const twin = twinOf(p, rows, mode);
-    if (twin) {
+    const how = howOf(p, rows, mode);
+    if (how == .twin) {
         encodeSums(enc, pp, p, x, rows, sums orelse return error.RowsNoScratch);
         if (concurrent) enc.barrier();
     }
-    try encodeProduct(enc, pp, p, s, x, rows, y, sums, twin);
+    try encodeProduct(enc, pp, p, s, x, rows, y, sums, how);
 }
 
-/// A member of a fused projection: its matrix, its first fused column, and whether its MMA twin may run.
-pub const Member = struct { p: Product, col: usize, twin: bool = true };
+/// A member of a fused projection: its matrix, its first fused column, and whether its twin and four-row kernels run.
+pub const Member = struct { p: Product, col: usize, twin: bool = true, four: bool = true };
 
 /// What the row kernels of a run share: compiled pipelines and the block-sum scratch (lane steps 8 and 16).
 pub const Shared = struct {
@@ -170,7 +187,7 @@ pub fn encodeDense(enc: mtl.ComputeEncoder, d: *const Dense, x: Buf, rows: usize
     const sh = d.shared;
     if (rows > Shared.max_rows or d.k > Shared.max_k) return error.RowsWindow;
     var summed = [2]bool{ false, false };
-    for (d.members) |mb| if (mb.twin and twinOf(mb.p, rows, mode) and !summed[slot(mb.p.bits)]) {
+    for (d.members) |mb| if (mb.twin and howOf(mb.p, rows, mode) == .twin and !summed[slot(mb.p.bits)]) {
         const s = specOf(mb.p, sh.device.generation(), rows, d.n);
         encodeSums(enc, try pipes(sh.a, sh.device, &sh.cache, s), mb.p, x, rows, sh.sums[slot(mb.p.bits)]);
         summed[slot(mb.p.bits)] = true;
@@ -179,6 +196,12 @@ pub fn encodeDense(enc: mtl.ComputeEncoder, d: *const Dense, x: Buf, rows: usize
     for (d.members) |mb| {
         const s = specOf(mb.p, sh.device.generation(), rows, d.n);
         const pp = try pipes(sh.a, sh.device, &sh.cache, s);
-        try encodeProduct(enc, pp, mb.p, s, x, rows, y.at(mb.col * 2), sh.sums[slot(mb.p.bits)], mb.twin and twinOf(mb.p, rows, mode));
+        const how = howOf(mb.p, rows, mode);
+        const kept: How = switch (how) { // a kernel the load check found inexact gives way to the next one down
+            .twin => if (mb.twin) .twin else if (mb.four) .four else .loop,
+            .four => if (mb.four) .four else .loop,
+            .loop => .loop,
+        };
+        try encodeProduct(enc, pp, mb.p, s, x, rows, y.at(mb.col * 2), sh.sums[slot(mb.p.bits)], kept);
     }
 }

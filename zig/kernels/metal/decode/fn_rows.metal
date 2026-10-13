@@ -236,3 +236,48 @@ inline void lane_codes(const device uint8_t* row, int v0, thread float* q) {
     if (lane == 0 && n < N && row < R) OUT[size_t(row) * LD + n] = bfloat(v);
   }
 }
+
+// qa_qmv_rows over four input rows a simdgroup: each code cut once, every row qa_qmv_rows' sums in its order
+[[max_total_threads_per_threadgroup(1024)]]
+[[kernel]] void qa_qmv_rows4(const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
+    const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]], device bfloat* OUT [[buffer(4)]],
+    constant int& R [[buffer(5)]], uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]],
+    uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
+    uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]]) {
+  constexpr int K = FZ_K, LD = FZ_LD, BITS = FZ_BITS, GS = FZ_GS, RPS = FZ_RPS, M = 4;
+  const uint lane = thread_index_in_simdgroup;
+  const int r0 = M * int(simdgroup_index_in_threadgroup);
+  const int row0 = int(threadgroup_position_in_grid.y) * RPS;
+  constexpr int VPT = lane_values(BITS), RB = K * BITS / 8, KG = K / GS;
+  const device uint8_t* w = (const device uint8_t*)W + size_t(row0) * RB;
+  const device bfloat* x[M];
+  for (int m = 0; m < M; m++) x[m] = X + min(r0 + m, R - 1) * K;
+  float acc[M][RPS];
+  for (int m = 0; m < M; m++)
+    for (int j = 0; j < RPS; j++) acc[m][j] = 0.0f;
+  for (int v0 = int(lane) * VPT; v0 < K; v0 += 32 * VPT) {
+    float xv[M][VPT], sum[M];
+    for (int m = 0; m < M; m++) {
+      sum[m] = 0.0f;
+      for (int i = 0; i < VPT; i++) { xv[m][i] = float(x[m][v0 + i]); sum[m] += xv[m][i]; }
+    }
+    for (int j = 0; j < RPS; j++) {
+      float q[VPT];
+      lane_codes<BITS, VPT>(w + j * RB, v0, q);
+      const size_t at = size_t(row0 + j) * KG + v0 / GS;
+      const float scale = float(S[at]), bias = float(B[at]);
+      for (int m = 0; m < M; m++) {
+        float d = 0.0f;
+        for (int i = 0; i < VPT; i++) d = fma(q[i], xv[m][i], d);
+        acc[m][j] += fma(scale, d, bias * sum[m]);
+      }
+    }
+  }
+  for (int m = 0; m < M; m++) {
+    if (r0 + m >= R) break;
+    for (int j = 0; j < RPS; j++) {
+      const float v = simd_sum(acc[m][j]);
+      if (lane == 0) OUT[size_t(r0 + m) * LD + row0 + j] = bfloat(v);
+    }
+  }
+}

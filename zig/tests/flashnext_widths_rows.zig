@@ -11,7 +11,7 @@ const Buf = tf.flashnext_replay.Buf;
 const a = lib.a;
 
 const wide = 64; // rows of the reference call: the 32-row call split and the MMA twin's 8-row tiles both cross
-const windows = [_]usize{ 1, 2, 3, 4, 5, 8, 9, 16, 17, 33 }; // 1-3 per-row loop, 4+ the MMA twin, 33 crosses 32
+const windows = [_]usize{ 1, 2, 3, 4, 5, 8, 9, 16, 17, 33 }; // loop, four a simdgroup (6, 8 bits at 2-4), MMA twin
 
 fn product(device: mtl.Device, m: lib.Mat) !rows_w.Product {
     const s = try lib.upload(device, std.mem.sliceAsBytes(m.scales));
@@ -229,10 +229,11 @@ const Case = struct {
     sums: Buf,
     md: Buf,
     rows: usize,
+    mode: rows_w.Mode = .auto,
 
     fn rowsOne(c: *const Case, e: mtl.ComputeEncoder, i: usize) !void {
         const p = c.prods[i];
-        try rows_w.encode(e, a, c.device, c.rows_cache, p, c.x, c.rows, c.y, p.n, c.sums, .auto, false);
+        try rows_w.encode(e, a, c.device, c.rows_cache, p, c.x, c.rows, c.y, p.n, c.sums, c.mode, false);
     }
 
     fn laneOne(c: *const Case, e: mtl.ComputeEncoder, i: usize) !void {
@@ -249,7 +250,7 @@ pub fn time(device: mtl.Device, queue: mtl.Queue) !void {
         .{ 2560, 6144, 6, 64 },  .{ 16480, 2560, 6, 32 },  .{ 2560, 6144, 6, 32 },  .{ 13952, 2560, 3, 64 },
         .{ 79616, 2560, 8, 64 }, .{ 248320, 2560, 8, 64 },
     };
-    std.debug.print("TIME shape width rows: lane us (GB/s) | rows us (GB/s, % of {d:.0}) | lane/rows\n", .{peak});
+    std.debug.print("TIME shape width rows: lane us (GB/s) | rows us (GB/s, % of {d:.0}) | lane/rows | loop, four, twin us\n", .{peak});
     for (cases, 0..) |c, ci| {
         const n = c[0];
         const k = c[1];
@@ -269,12 +270,17 @@ pub fn time(device: mtl.Device, queue: mtl.Queue) !void {
         const x = try lib.Inputs.init(device, 16, k, 0x7200 + ci);
         const y = try device.buffer(16 * n * 2, lib.opts);
         const sums = try device.buffer(rows_w.sumsBytes(k, @intCast(c[2]), 16), lib.opts);
-        for ([_]usize{ 1, 2, 4, 9, 16 }) |rows| {
-            const case = Case{ .device = device, .rows_cache = &rows_cache, .lane_cache = &lane_cache, .prods = prods, .wides = wides, .x = .{ .b = x.buf }, .y = .{ .b = y }, .sums = .{ .b = sums }, .md = try lanes.mdims(device, rows), .rows = rows };
+        for ([_]usize{ 1, 2, 4, 8, 9, 16 }) |rows| {
+            var case = Case{ .device = device, .rows_cache = &rows_cache, .lane_cache = &lane_cache, .prods = prods, .wides = wides, .x = .{ .b = x.buf }, .y = .{ .b = y }, .sums = .{ .b = sums }, .md = try lanes.mdims(device, rows), .rows = rows };
             const tl = try timed(queue, copies, &case, Case.laneOne);
             const tr = try timed(queue, copies, &case, Case.rowsOne);
+            var by: [3]f64 = undefined;
+            for ([_]rows_w.Mode{ .loop, .four, .twin }, &by) |mode, *t| {
+                case.mode = mode;
+                t.* = try timed(queue, copies, &case, Case.rowsOne);
+            }
             const gb = @as(f64, @floatFromInt(bytes)) / 1e9;
-            std.debug.print("TIME [{d}, {d}] q{d}/g{d} {d:>2} rows: {d:>8.1} ({d:>5.0}) | {d:>8.1} ({d:>5.0}, {d:>3.0}%) | {d:.3}\n", .{ n, k, c[2], c[3], rows, tl * 1e6, gb / tl, tr * 1e6, gb / tr, 100 * gb / tr / peak, tl / tr });
+            std.debug.print("TIME [{d}, {d}] q{d}/g{d} {d:>2} rows: {d:>8.1} ({d:>5.0}) | {d:>8.1} ({d:>5.0}, {d:>3.0}%) | {d:.3} | {d:.1}, {d:.1}, {d:.1}\n", .{ n, k, c[2], c[3], rows, tl * 1e6, gb / tl, tr * 1e6, gb / tr, 100 * gb / tr / peak, tl / tr, by[0] * 1e6, by[1] * 1e6, by[2] * 1e6 });
         }
         for (prods, wides) |p, w| {
             for ([_]Buf{ p.w, p.s, p.b, w.runs[0].wq, w.runs[0].sbt }) |b| b.b.deinit();
