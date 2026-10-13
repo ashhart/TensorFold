@@ -128,9 +128,20 @@ __device__ __forceinline__ void attn_chunks(const ChunksArgs a) {
         }
         unsigned* dst = &kv[kk][(t & 7) * 32];
         if (FP8) {
-            const unsigned char* src = reinterpret_cast<const unsigned char*>(a.cache) + (long long)rowbase * LW;
+            const uint4* src = reinterpret_cast<const uint4*>(reinterpret_cast<const unsigned char*>(a.cache) +
+                                                              (long long)rowbase * LW) + (t & 7) * 4;
+            unsigned cw[16]; // the thread's 64 bytes as four 16-byte loads
+#pragma unroll
+            for (int v = 0; v < 4; ++v) {
+                const uint4 u = src[v];
+                cw[4 * v] = u.x;
+                cw[4 * v + 1] = u.y;
+                cw[4 * v + 2] = u.z;
+                cw[4 * v + 3] = u.w;
+            }
+#pragma unroll
             for (int i = 0; i < 16; ++i) {
-                const unsigned c4 = *reinterpret_cast<const unsigned*>(src + 4 * ((t & 7) * 16 + i));
+                const unsigned c4 = cw[i];
                 const unsigned p01 = cvt_e4m3x2_u16((unsigned short)c4);
                 const unsigned p23 = cvt_e4m3x2_u16((unsigned short)(c4 >> 16));
                 const float g0 = __fmul_rn(f16_of(p01, 0), s);
