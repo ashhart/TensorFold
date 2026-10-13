@@ -225,20 +225,18 @@ __device__ __forceinline__ void store8f(float* p, const float* f) {
 }
 
 // 1 / sqrt(sum / width + eps), IEEE division and square root, over a VNT-thread block: warp trees, then the 8 warps'.
+template <bool ONCE = false>
 __device__ __forceinline__ float inv_rms_v(float part, int width, float eps) {
     __shared__ float warps[VNT / 32];
-    __shared__ float inv;
     for (int m = 16; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
     if ((threadIdx.x & 31) == 0) warps[threadIdx.x >> 5] = part;
     __syncthreads();
-    if (threadIdx.x < 32) {
-        float s = threadIdx.x < VNT / 32 ? warps[threadIdx.x] : 0.f;
-        for (int m = 4; m > 0; m >>= 1) s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, m));
-        if (threadIdx.x == 0) inv = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(width)), eps)));
-    }
-    __syncthreads();
-    const float r = inv;
-    __syncthreads();
+    // every warp folds the warps' sums in the same tree, so each holds the same total: no broadcast
+    float s = (threadIdx.x & 31) < VNT / 32 ? warps[threadIdx.x & 31] : 0.f;
+    for (int m = 4; m > 0; m >>= 1) s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, m));
+    s = __shfl_sync(0xFFFFFFFFu, s, 0);
+    const float r = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(width)), eps)));
+    if constexpr (!ONCE) __syncthreads(); // `warps` is reused by a second norm in the same block
     return r;
 }
 
@@ -359,15 +357,24 @@ __device__ __forceinline__ void add_rms_h(const __nv_bfloat16* __restrict__ x, c
     const int64_t at = static_cast<int64_t>(blockIdx.x) * width;
     const int chunks = width / 8;
     float v[VEC_MOST][8], wv[VEC_MOST][8];
+    uint4 xp[VEC_MOST], rp[VEC_MOST];
+#pragma unroll
+    for (int j = 0; j < VEC_MOST; ++j) { // every load issued before any is used
+        const int c = threadIdx.x + j * VNT;
+        if (c < chunks) {
+            xp[j] = reinterpret_cast<const uint4*>(x + at)[c];
+            if (r != nullptr) rp[j] = reinterpret_cast<const uint4*>(r + at)[c];
+            load8w(w + 8 * c, wv[j]);
+        }
+    }
 #pragma unroll
     for (int j = 0; j < VEC_MOST; ++j) {
         const int c = threadIdx.x + j * VNT;
         if (c < chunks) {
-            unpack8(reinterpret_cast<const uint4*>(x + at)[c], v[j]);
-            load8w(w + 8 * c, wv[j]);
+            unpack8(xp[j], v[j]);
             if (r != nullptr) {
                 float rv[8];
-                unpack8(reinterpret_cast<const uint4*>(r + at)[c], rv);
+                unpack8(rp[j], rv);
 #pragma unroll
                 for (int i = 0; i < 8; ++i) v[j][i] = __fadd_rn(v[j][i], rv[i]);
                 const uint4 hp = pack8(v[j]);
@@ -382,7 +389,7 @@ __device__ __forceinline__ void add_rms_h(const __nv_bfloat16* __restrict__ x, c
         if (threadIdx.x + j * VNT < chunks)
 #pragma unroll
             for (int i = 0; i < 8; ++i) part = __fmaf_rn(v[j][i], v[j][i], part);
-    const float inv = inv_rms_v(part, width, eps);
+    const float inv = inv_rms_v<true>(part, width, eps);
 #pragma unroll
     for (int j = 0; j < VEC_MOST; ++j) {
         const int c = threadIdx.x + j * VNT;
