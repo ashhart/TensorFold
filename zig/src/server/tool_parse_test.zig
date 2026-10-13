@@ -4,6 +4,7 @@ const json = @import("json.zig");
 const tool_parse = @import("tool_parse.zig");
 const parse = tool_parse.parse;
 const closeCall = tool_parse.closeCall;
+const repairGlmKeys = tool_parse.repairGlmKeys;
 
 test "families" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -228,4 +229,47 @@ test "bare JSON calls keep literal unfinished DSML markers as argument data" {
         try std.testing.expectEqualStrings("<｜DSML｜tool_calls>", arguments.strField("q").?);
         try std.testing.expectEqualStrings("", parsed.content);
     };
+}
+
+test "a GLM call whose <arg_key> the model wrote as whitespace gets it back" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const repaired = [_][2][]const u8{ // the block as written, with its keys put back
+        .{ "read_file path</arg_key><arg_value>/x</arg_value>", "read_file <arg_key>path</arg_key><arg_value>/x</arg_value>" },
+        .{ "read_file\npath</arg_key><arg_value>/x</arg_value>", "read_file\n<arg_key>path</arg_key><arg_value>/x</arg_value>" },
+        .{ "read_file<arg_key>path</arg_key><arg_value>/x</arg_value>\nlimit</arg_key><arg_value>3</arg_value>", "read_file<arg_key>path</arg_key><arg_value>/x</arg_value>\n<arg_key>limit</arg_key><arg_value>3</arg_value>" },
+        .{ "read_file path</arg_key><arg_value>/x</arg_value> limit</arg_key><arg_value>3</arg_value>", "read_file <arg_key>path</arg_key><arg_value>/x</arg_value> <arg_key>limit</arg_key><arg_value>3</arg_value>" },
+    };
+    for (repaired) |c| {
+        try std.testing.expectEqualStrings(c[1], try repairGlmKeys(a, c[0]));
+        try std.testing.expectEqualStrings(c[1], try repairGlmKeys(a, c[1]));
+    }
+    const unchanged = [_][]const u8{
+        "read_file<arg_key>path</arg_key><arg_value>/x</arg_value>", // nothing missing
+        "read_file",
+        "read_filepath</arg_key><arg_value>/x</arg_value>", // no space: no name left before the key
+        " path</arg_key><arg_value>/x</arg_value>", // no name at all
+        "{\"name\": \"run\", \"arguments\": {\"command\": \"ls\"}}",
+    };
+    for (unchanged) |b| try std.testing.expectEqualStrings(b, try repairGlmKeys(a, b));
+}
+
+test "a repaired GLM call parses, in both modes and once the end token closed it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"parameters\":{\"properties\":{\"filePath\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\"}}}}}]")).ok.array;
+    // before: the first came back as text, the second lost its second argument
+    const cases = [_][2][]const u8{
+        .{ "<tool_call>read_file filePath</arg_key><arg_value>/home/a/main.go</arg_value></tool_call>", "{\"filePath\":\"/home/a/main.go\"}" },
+        .{ "<tool_call>read_file<arg_key>filePath</arg_key><arg_value>/a</arg_value>\nlimit</arg_key><arg_value>3</arg_value></tool_call>", "{\"filePath\":\"/a\",\"limit\":3}" },
+    };
+    for (cases) |c| for ([_]?usize{ null, 1 }) |max_calls| {
+        const r = try parse(a, c[0], tools, max_calls);
+        try std.testing.expectEqualStrings(c[1], r.calls.?[0].get("function").?.get("arguments").?.string);
+        try std.testing.expectEqualStrings("", r.content);
+    };
+    const open = "<tool_call>read_file filePath</arg_key><arg_value>/x</arg_value>";
+    try std.testing.expectEqualStrings("</tool_call>", try closeCall(a, open, tools));
 }
