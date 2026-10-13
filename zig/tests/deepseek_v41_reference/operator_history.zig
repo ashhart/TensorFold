@@ -97,10 +97,10 @@ pub fn runAttentionHistory(gpa: std.mem.Allocator, io: std.Io, model: *Model, tr
             errdefer if (encoding) enc.end();
             for (model.checkpoint.shards.items) |shard| enc.useResource(shard.buffer, mtl.ResourceUsage.read);
             if (target) {
-                try attention.encodeDiagnostic(&model.pipelines.attention, enc, &model.weights.layers[prior].attn, &model.cache, &model.attention_workspace, input, model.workspace.view(.branch), &model.pipelines.projection, model.workspace.projection(), @intCast(prior), 1, cfg, true, .{ .ctx = &capture, .capture = AttentionCapture.gpu });
+                try attention.encodeDiagnostic(&model.pipelines.attention, enc, &model.weights.layers[prior].attn, model.cache, &model.attention_workspace, input, model.workspace.view(.branch), &model.pipelines.projection, model.workspace.projection(), @intCast(prior), 1, cfg, true, .{ .ctx = &capture, .capture = AttentionCapture.gpu });
                 @memcpy(std.mem.sliceAsBytes(&retained_branch), blob[snapshot_offset + 51200 ..][0..10240]);
             } else {
-                try attention.encode(&model.pipelines.attention, enc, &model.weights.layers[prior].attn, &model.cache, &model.attention_workspace, input, model.workspace.view(.branch), &model.pipelines.projection, model.workspace.projection(), @intCast(prior), 1, cfg);
+                try attention.encode(&model.pipelines.attention, enc, &model.weights.layers[prior].attn, model.cache, &model.attention_workspace, input, model.workspace.view(.branch), &model.pipelines.projection, model.workspace.projection(), @intCast(prior), 1, cfg);
             }
             enc.end();
             encoding = false;

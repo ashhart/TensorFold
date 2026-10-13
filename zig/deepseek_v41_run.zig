@@ -46,7 +46,7 @@ fn validArguments(args: []const [:0]const u8) bool {
     for ([_][]const u8{ "plan", "operators" }, [_]usize{ 4, 5 }) |name, count|
         if (std.mem.eql(u8, mode, name)) return args.len == count;
     if (std.mem.eql(u8, mode, "attention-history-sameinput")) return args.len == 8;
-    for ([_][]const u8{ "teacher", "generate", "attention-sameinput", "hc-sameinput", "moe-sameinput", "margins" }) |name|
+    for ([_][]const u8{ "teacher", "generate", "attention-sameinput", "hc-sameinput", "moe-sameinput", "margins", "lanes" }) |name|
         if (std.mem.eql(u8, mode, name)) return args.len == 6 or args.len == 7;
     for ([_][]const u8{ "seams", "oracle", "profile", "trace" }) |name|
         if (std.mem.eql(u8, mode, name)) return args.len == 6;
@@ -121,6 +121,24 @@ fn teacher(m: *ds.Model, ids: []const u32, chunk: u32, out: []f32) !f64 {
     return elapsed;
 }
 
+fn teacherOn(m: *ds.Model, slot: u32, ids: []const u32, chunk: u32, out: []f32) !f64 {
+    if (chunk == 0 or chunk > m.workspace.plan.rows or ids.len > m.caches[slot].plan.capacity)
+        return error.InvalidTeacherWindow;
+    if (out.len != ids.len * 129280) return error.InvalidTeacherOutputLength;
+    try m.resetSlot(slot);
+    var elapsed: f64 = 0;
+    var start: usize = 0;
+    while (start < ids.len) {
+        const end = @min(start + chunk, ids.len);
+        const row = try m.forwardOn(slot, ids[start..end], .all);
+        @memcpy(out[start * 129280 .. end * 129280], row);
+        for (row) |value| if (!std.math.isFinite(value)) return error.NonfiniteLogits;
+        elapsed += m.last_gpu_seconds;
+        start = end;
+    }
+    return elapsed;
+}
+
 pub fn main(init: std.process.Init) !void {
     const a = init.gpa;
     const io = init.io;
@@ -146,7 +164,12 @@ pub fn main(init: std.process.Init) !void {
     const is_attention_history = std.mem.eql(u8, mode, "attention-history-sameinput");
     const is_hc = std.mem.eql(u8, mode, "hc-sameinput");
     const is_moe = std.mem.eql(u8, mode, "moe-sameinput");
+<<<<<<< HEAD
     const max_ids: usize = if (std.mem.eql(u8, mode, "margins")) 1048576 else if (std.mem.eql(u8, mode, "oracle") or std.mem.eql(u8, mode, "trace")) 16 else if (std.mem.eql(u8, mode, "profile")) ds.prefill_step else if (std.mem.eql(u8, mode, "teacher") or std.mem.eql(u8, mode, "seams")) 4096 else 1048576;
+=======
+    const is_lanes = std.mem.eql(u8, mode, "lanes");
+    const max_ids: usize = if (std.mem.eql(u8, mode, "oracle") or std.mem.eql(u8, mode, "trace")) 16 else if (std.mem.eql(u8, mode, "profile")) ds.prefill_step else if (std.mem.eql(u8, mode, "teacher") or std.mem.eql(u8, mode, "seams") or is_lanes) 4096 else 1048576;
+>>>>>>> b24abd4d (DeepSeek V4.1: lane slots, each with its own caches and Engram cursor)
     const input = if (is_operators or is_attention or is_attention_history or is_hc or is_moe) &.{} else try std.Io.Dir.cwd().readFileAlloc(io, args[4], arena, .limited(max_ids * 12 + 2));
     const ids: []const u32 = if (is_operators or is_attention or is_attention_history or is_hc or is_moe) &.{} else try std.json.parseFromSliceLeaky([]const u32, arena, input, .{});
     if (!is_operators and !is_attention and !is_attention_history and !is_hc and !is_moe and (ids.len == 0 or ids.len > 1048576)) return error.InvalidPrompt;
@@ -164,7 +187,7 @@ pub fn main(init: std.process.Init) !void {
     const model = try a.create(ds.Model);
     defer a.destroy(model);
     const begin = mtl.clock.seconds();
-    model.* = try ds.Model.open(a, io, .{ .dir = args[2], .table_dir = args[3], .token_map = map });
+    model.* = try ds.Model.open(a, io, .{ .dir = args[2], .table_dir = args[3], .token_map = map, .lanes = if (is_lanes) 2 else 1 });
     defer model.deinit();
     const ready = mtl.clock.seconds();
     const before = try counters();
@@ -212,6 +235,7 @@ fn execute(a: std.mem.Allocator, io: std.Io, model: *ds.Model, args: []const [:0
     const is_trace = std.mem.eql(u8, mode, "trace");
     const is_teacher = std.mem.eql(u8, mode, "teacher");
     const is_seams = std.mem.eql(u8, mode, "seams");
+    const is_lanes = std.mem.eql(u8, mode, "lanes");
     if (is_operators) {
         try operators.run(a, io, model, dir);
     } else if (is_attention) {
@@ -229,6 +253,56 @@ fn execute(a: std.mem.Allocator, io: std.Io, model: *ds.Model, args: []const [:0
         try margins.run(a, io, model, ids, dir, if (args.len > 6) try number(args[6]) else 1536);
     } else if (is_profile) {
         try profile.run(a, io, model, ids, dir);
+    } else if (is_lanes) {
+        // Two lane slots, interleaved: each slot's rows and logits equal its own solo run's bits.
+        if (ids.len < 4) return error.InvalidPrompt;
+        const split = ids.len / 2;
+        const chunk = if (args.len > 6) try number(args[6]) else 1;
+        if (chunk == 0 or chunk > model.workspace.plan.rows) return error.InvalidPrefillChunk;
+        const solo_a = try a.alloc(f32, split * 129280);
+        defer a.free(solo_a);
+        const solo_b = try a.alloc(f32, (ids.len - split) * 129280);
+        defer a.free(solo_b);
+        var elapsed: f64 = 0;
+        elapsed += try teacherOn(model, 0, ids[0..split], chunk, solo_a);
+        elapsed += try teacherOn(model, 1, ids[split..], chunk, solo_b);
+        const position_a: u32 = model.caches[0].position;
+        const position_b: u32 = model.caches[1].position;
+        try model.reset();
+        const mixed_a = try a.alloc(f32, solo_a.len);
+        defer a.free(mixed_a);
+        const mixed_b = try a.alloc(f32, solo_b.len);
+        defer a.free(mixed_b);
+        var at_a: usize = 0;
+        var at_b: usize = 0;
+        while (at_a < split or at_b < ids.len - split) {
+            if (at_a < split) {
+                const end = @min(at_a + chunk, split);
+                const row = try model.forwardOn(0, ids[at_a..end], .all);
+                @memcpy(mixed_a[at_a * 129280 .. end * 129280], row);
+                at_a = end;
+            }
+            if (at_b < ids.len - split) {
+                const end = @min(at_b + chunk, ids.len - split);
+                const row = try model.forwardOn(1, ids[split + at_b .. split + end], .all);
+                @memcpy(mixed_b[at_b * 129280 .. end * 129280], row);
+                at_b = end;
+            }
+        }
+        var error_a: f64 = 0;
+        var error_b: f64 = 0;
+        var bit_disagreements: usize = 0;
+        for (solo_a, mixed_a) |x, y| {
+            error_a = @max(error_a, @abs(@as(f64, x) - y));
+            bit_disagreements += @intFromBool(@as(u32, @bitCast(x)) != @as(u32, @bitCast(y)));
+        }
+        for (solo_b, mixed_b) |x, y| {
+            error_b = @max(error_b, @abs(@as(f64, x) - y));
+            bit_disagreements += @intFromBool(@as(u32, @bitCast(x)) != @as(u32, @bitCast(y)));
+        }
+        execution_after.* = try counters();
+        std.debug.print("{{\"mode\":\"lanes\",\"slots\":2,\"chunk\":{d},\"max_logit_error_slot0\":{d},\"max_logit_error_slot1\":{d},\"bit_disagreements\":{d},\"position_slot0\":{d},\"position_slot1\":{d},\"gpu_seconds\":{d:.3}}}\n", .{ chunk, error_a, error_b, bit_disagreements, position_a, position_b, elapsed });
+        if (bit_disagreements != 0) return error.LaneInterference;
     } else if (is_trace) {
         try trace.run(a, io, model, ids, map_blob, dir);
     } else if (is_teacher or is_seams) {

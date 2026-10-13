@@ -28,6 +28,8 @@ pub const Options = struct {
     token_map: []const u8,
     context: u32 = 0,
     chunk_rows: u32 = prefill_step,
+    /// Lane slots, each with its own caches and Engram cursor; 1 keeps the single-lane layout.
+    lanes: u32 = 1,
 };
 
 const Pipelines = struct {
@@ -77,7 +79,10 @@ pub const Model = struct {
     weights: weights.Model,
     cfg: config.Config,
     cfg_arena: std.heap.ArenaAllocator,
-    cache: kv.cache.State,
+    lanes: u32,
+    caches: []kv.cache.State,
+    /// Slot 0's state; existing single-lane callers keep working unchanged.
+    cache: *kv.cache.State,
     workspace: work.Workspace,
     attention_workspace: attention.Workspace,
     pipelines: Pipelines,
@@ -104,11 +109,12 @@ pub const Model = struct {
         try weights.validate(&plan);
         const map_blob = try std.Io.Dir.cwd().readFileAlloc(io, o.token_map, arena.allocator(), .limited(2 << 20));
         const map = try engram.hash.TokenMap.parse(map_blob);
-        const wp = try work.Plan.init(o.chunk_rows);
+        const lanes = o.lanes;
+        const wp = try work.Plan.initLanes(o.chunk_rows, lanes);
         const kp = kv.cache.Plan{ .capacity = capacity, .layers = 40 };
         const workspace_bytes = try std.math.add(usize, wp.bytes, attention.Workspace.bytes(o.chunk_rows));
         const cache_bytes = try std.math.add(usize, kp.residentBytes(), weights.sizeofDescriptors());
-        const execution_bytes = try std.math.add(usize, workspace_bytes, cache_bytes);
+        const execution_bytes = try std.math.add(usize, workspace_bytes, try std.math.mul(usize, cache_bytes, lanes));
         const rotary_bytes = attention.Pipelines.residentBytes(capacity, c.text_config);
         const needed = try std.math.add(usize, plan.bytes, try std.math.add(usize, execution_bytes, rotary_bytes));
         const device = try mtl.Device.init();
@@ -132,21 +138,25 @@ pub const Model = struct {
         errdefer cp.deinit();
         var bound = try weights.bind(device, &cp);
         errdefer bound.deinit();
-        var cache = try kv.cache.State.init(device, kp);
-        errdefer cache.deinit();
+        const caches = try gpa.alloc(kv.cache.State, lanes);
+        errdefer gpa.free(caches);
+        for (caches) |*state| {
+            state.* = try kv.cache.State.init(device, kp);
+            errdefer state.deinit();
+        }
         var workspace = try work.Workspace.init(device, wp, map.bytes);
         errdefer workspace.deinit();
         var aw = try attention.Workspace.init(device, o.chunk_rows);
         errdefer aw.deinit();
         bound.registerResidency(residency);
-        cache.registerResidency(residency);
+        for (caches) |*state| state.registerResidency(residency);
         residency.add(workspace.buffer);
         aw.registerResidency(residency);
         pipelines.attention.registerResidency(residency);
         residency.commit();
         residency.requestResidency();
         queue.addResidencySet(residency);
-        return .{ .gpa = gpa, .device = device, .queue = queue, .residency = residency, .checkpoint = cp, .weights = bound, .cfg = c, .cfg_arena = arena, .cache = cache, .workspace = workspace, .attention_workspace = aw, .pipelines = pipelines, .admitted_bytes = needed };
+        return .{ .gpa = gpa, .device = device, .queue = queue, .residency = residency, .checkpoint = cp, .weights = bound, .cfg = c, .cfg_arena = arena, .lanes = lanes, .caches = caches, .cache = &caches[0], .workspace = workspace, .attention_workspace = aw, .pipelines = pipelines, .admitted_bytes = needed };
     }
 
     pub fn deinit(m: *Model) void {
@@ -154,7 +164,8 @@ pub const Model = struct {
         m.residency.deinit();
         m.attention_workspace.deinit();
         m.workspace.deinit();
-        m.cache.deinit();
+        for (m.caches) |*state| state.deinit();
+        m.gpa.free(m.caches);
         m.weights.deinit();
         m.checkpoint.deinit();
         m.pipelines.deinit();
@@ -164,20 +175,27 @@ pub const Model = struct {
     }
 
     pub fn reset(m: *Model) !void {
+        for (0..m.lanes) |slot| try m.resetSlot(@intCast(slot));
+    }
+
+    /// One lane slot back to empty: its cursor, its mutable cache bytes and its Engram history.
+    pub fn resetSlot(m: *Model, slot: u32) !void {
+        if (slot >= m.lanes) return error.InvalidLaneSlot;
+        const state = &m.caches[slot];
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         m.valid = false;
         m.logits_rows = 0;
-        m.cache.position = 0;
+        state.position = 0;
         m.attention_workspace.selection_layer = null;
         m.attention_workspace.selection_rows = 0;
         m.attention_workspace.candidate_rows = 0;
         m.last_gpu_seconds = 0;
-        m.cache.saved_position = null;
-        @memset(m.cache.live.contents()[0..m.cache.plan.mutableBytes()], 0);
+        state.saved_position = null;
+        @memset(state.live.contents()[0..state.plan.mutableBytes()], 0);
         const cb = m.queue.commandBufferUnretained();
         const enc = cb.compute(.serial);
-        engram.encodeReset(enc, &m.pipelines.engram, m.workspace.view(.history));
+        engram.encodeReset(enc, &m.pipelines.engram, try m.workspace.historyView(slot));
         enc.end();
         cb.commit();
         cb.wait();
@@ -188,10 +206,17 @@ pub const Model = struct {
 
     /// One command buffer per chunk; no operator waits or reads routes back to the CPU.
     pub fn forward(m: *Model, ids: []const u32, logits: Logits) ![]const f32 {
+        return m.forwardOn(0, ids, logits);
+    }
+
+    /// A chunk against lane slot `slot`'s caches and Engram cursor: rows land at that slot's positions.
+    pub fn forwardOn(m: *Model, slot: u32, ids: []const u32, logits: Logits) ![]const f32 {
         if (!m.valid) return error.InvalidModelState;
+        if (slot >= m.lanes) return error.InvalidLaneSlot;
+        const state = &m.caches[slot];
         if (ids.len == 0 or ids.len > m.workspace.plan.rows) return error.InvalidPrefillChunk;
-        if (m.cache.position > m.cache.plan.capacity or
-            ids.len > m.cache.plan.capacity - m.cache.position) return error.ContextFull;
+        if (state.position > state.plan.capacity or
+            ids.len > state.plan.capacity - state.position) return error.ContextFull;
         for (ids) |id| if (id >= 129280) return error.UnsupportedToken;
         m.logits_rows = 0;
         @memcpy(m.workspace.tokenIds(ids.len), ids);
@@ -218,9 +243,9 @@ pub const Model = struct {
         const p = &m.pipelines;
         const ws = &m.workspace;
         for (engram.hash.layers, 0..) |meta, index| {
-            try engram.encodeHash(enc, &p.engram, meta, ws.view(.ids), ws.view(.token_map), null, ws.view(.history), ws.view(if (index == 0) .engram_ids_0 else .engram_ids_1), rows);
+            try engram.encodeHash(enc, &p.engram, meta, ws.view(.ids), ws.view(.token_map), null, try ws.historyView(slot), ws.view(if (index == 0) .engram_ids_0 else .engram_ids_1), rows);
         }
-        try engram.encodeCommit(enc, &p.engram, ws.view(.ids), ws.view(.token_map), null, ws.view(.history), rows);
+        try engram.encodeCommit(enc, &p.engram, ws.view(.ids), ws.view(.token_map), null, try ws.historyView(slot), rows);
         ops.encodeEmbedding(enc, &p.ops, ws.view(.ids), tensor(m.weights.embed), ws.view(.collapsed), .{ .rows = rows, .width = 5120, .table_stride = 5120, .y_stride = 5120, .copies = 1 });
         enc.barrier();
         mhc.encodeExpand(enc, &p.mhc, ws.view(.collapsed), ws.view(.stream), ws.view(.previous_pre), .{ .rows = rows, .width = 5120, .x_stride = 5120, .stream_stride = 20480 });
@@ -241,7 +266,7 @@ pub const Model = struct {
             enc.barrier();
             m.normalize(enc, ws.view(.collapsed), layer.attn_norm, ws.view(.normalized), rows);
             try m.profileSpan(&enc, .attention);
-            try attention.encode(&p.attention, enc, &layer.attn, &m.cache, &m.attention_workspace, ws.view(.normalized), ws.view(.branch), &p.projection, ws.projection(), @intCast(index), rows, m.cfg.text_config);
+            try attention.encode(&p.attention, enc, &layer.attn, state, &m.attention_workspace, ws.view(.normalized), ws.view(.branch), &p.projection, ws.projection(), @intCast(index), rows, m.cfg.text_config);
             enc.barrier();
             try m.profileSpan(&enc, .mhc);
             m.post(enc, rows);
@@ -275,7 +300,7 @@ pub const Model = struct {
         e.wait();
         try completed(e);
         if (m.profile) |recorder| _ = try recorder.readAfterCompletion();
-        try m.cache.append(rows);
+        try state.append(rows);
         m.last_gpu_seconds = e.gpuSeconds();
         m.valid = true;
         m.logits_rows = if (logits == .all) rows else if (logits == .last) 1 else 0;

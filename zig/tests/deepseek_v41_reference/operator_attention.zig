@@ -54,7 +54,7 @@ pub fn runAttention(gpa: std.mem.Allocator, io: std.Io, model: *Model, snapshot:
         var warm_encoding = true;
         errdefer if (warm_encoding) warm_enc.end();
         for (model.checkpoint.shards.items) |shard| warm_enc.useResource(shard.buffer, mtl.ResourceUsage.read);
-        try attention.encode(&model.pipelines.attention, warm_enc, &model.weights.layers[prior].attn, &model.cache, &model.attention_workspace, input, model.workspace.view(.branch), &model.pipelines.projection, model.workspace.projection(), @intCast(prior), 1, cfg);
+        try attention.encode(&model.pipelines.attention, warm_enc, &model.weights.layers[prior].attn, model.cache, &model.attention_workspace, input, model.workspace.view(.branch), &model.pipelines.projection, model.workspace.projection(), @intCast(prior), 1, cfg);
         warm_enc.end();
         warm_encoding = false;
         warm_cb.commit();
@@ -69,7 +69,7 @@ pub fn runAttention(gpa: std.mem.Allocator, io: std.Io, model: *Model, snapshot:
     var encoding = true;
     errdefer if (encoding) enc.end();
     for (model.checkpoint.shards.items) |shard| enc.useResource(shard.buffer, mtl.ResourceUsage.read);
-    try attention.encodeDiagnostic(&model.pipelines.attention, enc, weights, &model.cache, &model.attention_workspace, input, model.workspace.view(.branch), &model.pipelines.projection, model.workspace.projection(), @intCast(layer), 1, cfg, true, .{ .ctx = &capture, .capture = AttentionCapture.gpu });
+    try attention.encodeDiagnostic(&model.pipelines.attention, enc, weights, model.cache, &model.attention_workspace, input, model.workspace.view(.branch), &model.pipelines.projection, model.workspace.projection(), @intCast(layer), 1, cfg, true, .{ .ctx = &capture, .capture = AttentionCapture.gpu });
     enc.end();
     encoding = false;
     cb.commit();

@@ -43,22 +43,28 @@ const count = std.enums.values(Field).len;
 
 pub const Plan = struct {
     rows: u32,
+    lanes: u32,
     offsets: [count]usize,
     bytes: usize,
 
     pub fn init(rows: u32) !Plan {
+        return initLanes(rows, 1);
+    }
+
+    pub fn initLanes(rows: u32, lanes: u32) !Plan {
         if (rows == 0 or rows > 4096) return error.InvalidPrefillChunk;
+        if (lanes == 0 or lanes > 256) return error.InvalidLaneCount;
         const t: usize = rows;
         const grouped = if (rows > 1) try groups.Plan.init(t * 6, 384) else null;
         const projection_bytes = @max(try exl3.scratchBytes(5120, 129280, t), if (grouped) |g| @max(try exl3.scratchBytes(5120, 2304, g.padded), try exl3.scratchBytes(2304, 5120, g.padded)) else try exl3.scratchBytes(2304, 5120, t * 6));
         const sizes = [_]usize{
-            t * 4,            hash.raw_vocab * 4, 16,                              t * 20480 * 2, t * 5120 * 2, t * 5120 * 2, t * 5120 * 2,
+            t * 4,            hash.raw_vocab * 4, @as(usize, lanes) * 16,          t * 20480 * 2, t * 5120 * 2, t * 5120 * 2, t * 5120 * 2,
             t * 4 * 4,        t * 4 * 4,          t * 4 * 4,                       t * 16 * 4,    t * 24 * 4,   t * 4,        t * 24 * 4,
             t * 24 * 4,       t * 6144 * 2,       t * 25600 * 2,                   t * 384 * 4,   t * 6 * 4,    t * 6 * 4,    t * 6 * 2304 * 2,
             t * 6 * 2304 * 2, t * 6 * 2304 * 2,   t * 6 * 5120 * 2,                t * 2304 * 2,  t * 2304 * 2, t * 2304 * 2, t * 5120 * 2,
             t * 129280 * 4,   projection_bytes,   if (grouped) |g| g.bytes else 0,
         };
-        var out = Plan{ .rows = rows, .offsets = undefined, .bytes = 0 };
+        var out = Plan{ .rows = rows, .lanes = lanes, .offsets = undefined, .bytes = 0 };
         for (sizes, 0..) |size, i| {
             out.offsets[i] = std.mem.alignForward(usize, out.bytes, 16);
             out.bytes = try std.math.add(usize, out.offsets[i], size);
@@ -77,7 +83,7 @@ pub const Workspace = struct {
         const buffer = try device.buffer(plan.bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         const w = Workspace{ .buffer = buffer, .plan = plan };
         @memcpy(buffer.contents()[plan.offsets[@backingInt(Field.token_map)]..][0..token_map.len], token_map);
-        @memset(buffer.contents()[plan.offsets[@backingInt(Field.history)]..][0..16], 0);
+        @memset(buffer.contents()[plan.offsets[@backingInt(Field.history)]..][0 .. @as(usize, plan.lanes) * 16], 0);
         return w;
     }
 
@@ -86,6 +92,11 @@ pub const Workspace = struct {
     }
     pub fn view(w: *const Workspace, field: Field) View {
         return .{ .buffer = w.buffer, .offset = w.plan.offsets[@backingInt(field)] };
+    }
+    /// Slot s's Engram cursor: lane 0 keeps the single-lane layout byte for byte.
+    pub fn historyView(w: *const Workspace, slot: u32) !View {
+        if (slot >= w.plan.lanes) return error.InvalidLaneSlot;
+        return .{ .buffer = w.buffer, .offset = w.plan.offsets[@backingInt(Field.history)] + @as(usize, slot) * 16 };
     }
     pub fn projection(w: *const Workspace) exl3.View {
         const v = w.view(.projection);
