@@ -379,6 +379,7 @@ pub const Engine = struct {
 pub const Lone = struct {
     ctx: *anyopaque,
     sampled: bool = false, // it drives sampled streams too
+    logprobs: bool = false, // it gives each token its logprob row too
     /// Prefills `s` and decodes it until it finishes (false) or `hooks.yield` hands it to the lane core (true).
     run: *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: LoneHooks) anyerror!bool,
 };
