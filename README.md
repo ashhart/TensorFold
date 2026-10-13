@@ -182,6 +182,10 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--learn-dir DIR` | Where `--learn` keeps them, `~/.cache/tensorfold/learned` by default; implies `--learn`. |
 | `--learn-gib GIB` | Disk for learned prefixes on each Mac, 32 by default; the least recently used go first. Implies `--learn`. |
 | `--learn-min-free-gib GIB` | Free disk `--learn` leaves on each Mac, 4 by default; below it learning pauses and serving goes on. |
+| `--recall` | Draft from a record of the token ids earlier requests read and wrote, so repeated text is verified in a few rounds; replies are unchanged. Off by default; see [Recall](docs/recall.md) for what stays on disk. |
+| `--recall-dir DIR` | The record's directory, one a tokenizer under `~/.cache/tensorfold/recall` by default; implies `--recall`. |
+| `--recall-gib GIB` | Disk for the record, 1/16 GiB by default; the oldest ids go first. Implies `--recall`. |
+| `--recall-read-only` | Draft from the record without adding to it, as gates and benchmarks run; implies `--recall`. |
 | `--snapshot-dir none` | Keep prefix state in memory; `none` is the supported value. |
 | `--max-snapshots 0` | Disable disk snapshots at startup; `0` is the supported value. |
 | `--compact-at auto\|FRACTION` | Turn on context compaction (below). `auto` compacts when the prompt and reply would pass the window minus a reserve. |

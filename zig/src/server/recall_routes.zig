@@ -72,3 +72,28 @@ pub fn line(s: *Store) void {
     const short = s.identity.short();
     log.line("recall: {s}, {d} ids ({d} MiB on disk of {d} MiB, {d} MiB in RAM) in {s}, tokenizer {s}", .{ state(s, st.writes), st.ids, st.disk_bytes >> 20, st.cap_bytes >> 20, st.ram_bytes >> 20, s.dir, &short });
 }
+
+test "the record's state and size as GET reports them, and its state in a word" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/recall", .{tmp.sub_path});
+    var problem: []const u8 = "";
+    const id: api.recall_store.Identity = .{ .digest = @splat(3), .vocab = 1000, .name = "m" };
+    const s = (try Store.open(std.testing.allocator, std.testing.io, id, .{ .dir = dir, .cap_bytes = 64 << 20 }, &problem, a)).?;
+    defer s.close();
+    var prompt: [300]u32 = undefined;
+    for (&prompt, 0..) |*t, i| t.* = @intCast((i * 37) % 1000);
+    s.readPrompt(&prompt, 0);
+    const v = try value(a, s);
+    try std.testing.expectEqualStrings("on", v.get("state").?.string);
+    try std.testing.expectEqual(@as(i64, 301), v.get("ids").?.int64().?);
+    try std.testing.expectEqual(@as(usize, 3), v.get("bands").?.array.len);
+    try s.empty();
+    try std.testing.expectEqual(@as(i64, 0), (try value(a, s)).get("ids").?.int64().?);
+    const r = (try Store.open(std.testing.allocator, std.testing.io, id, .{ .dir = dir, .cap_bytes = 64 << 20, .read_only = true }, &problem, a)).?;
+    defer r.close();
+    try std.testing.expectEqualStrings("read-only", state(r, r.stats().writes));
+}
