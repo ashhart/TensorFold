@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Nemotron on CUDA runs a prompt in chunks of up to 4,096 rows instead of 2,048, so a prompt takes fewer passes, each reading the routed experts' weights once. Kept states, resume points and every reply's bits are unchanged, since a prompt row's bits do not depend on where its chunk is cut; staggered segments, `--dump`, a pass with lessons attached, and a chunk that would hold more keep marks than a chunk takes keep 2,048-row chunks. MEASURE_PLACEHOLDER The prompt workspace takes 0.47 GiB more.
+- Nemotron on CUDA runs a prompt in chunks of up to 4,096 rows instead of 2,048, so a prompt takes fewer passes, each reading the routed experts' weights once. Kept states, resume points and every reply's bits are unchanged, since a prompt row's bits do not depend on where its chunk is cut; staggered segments, `--dump`, a pass with lessons attached, and a chunk that would hold more keep marks than a chunk takes keep 2,048-row chunks. On a GB10, The Grill's natural-prose prefill cells ran 7.7% faster at 4k tokens, 7.9% at 8k, 5.2% at 16k and 6.1% at 32k, and 14k- to 56k-token prompts reached their first token 3.4 to 4.5% sooner; decode is unchanged. The prompt workspace takes 0.47 GiB more.
 
 ## 1.0.8
 
