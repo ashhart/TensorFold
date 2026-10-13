@@ -172,6 +172,11 @@ fn addCase(r: *Rig, width: usize, sandwich: bool) !void {
     }
 }
 
+/// True when a launcher refused its row for a pointer off 16 bytes.
+fn misaligned(got: anyerror!void) bool {
+    return if (got) |_| false else |e| e == error.Misaligned;
+}
+
 pub fn run(gpu: check.Gpu) !void {
     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
     defer arena.deinit();
@@ -194,7 +199,11 @@ pub fn run(gpu: check.Gpu) !void {
     }
     // a bf16 row goes to the 16-byte tree by its width alone; a misaligned buffer is refused, not run on the other tree
     const buf = try r.out(2 * 512 + 16);
-    const refused = if (n.rms(s, buf + 2, .bf16, null, buf + 2, .bf16, 1, 256, 1e-6)) |_| false else |e| e == error.Misaligned;
-    try check.expect(refused, "norms: a misaligned bf16 row is refused", .{});
-    check.pass("norms: rms and add_rms within float64 tolerance (worst {d:.3}), every row count's bits equal, a misaligned bf16 row refused", .{r.worst});
+    const res = try r.out(4 * 256 + 16);
+    const rms_refused = misaligned(n.rms(s, buf + 2, .bf16, null, buf + 2, .bf16, 1, 256, 1e-6));
+    try check.expect(rms_refused, "norms: a misaligned bf16 row is refused", .{});
+    const add_refused = misaligned(n.addRms(s, buf, .bf16, res + 4, null, res, buf, .bf16, 1, 256, 1e-6));
+    try check.expect(add_refused, "norms: a misaligned residual is refused", .{});
+    const said = "norms: rms and add_rms within float64 tolerance (worst {d:.3}), every row count's bits equal";
+    check.pass(said ++ ", misaligned rows refused", .{r.worst});
 }

@@ -523,7 +523,15 @@ pub fn run(gpu: Gpu) !void {
         loaded += 1;
     }
     var prng = std.Random.DefaultPrng.init(0x5eed_9a7e);
-    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = try cuda.Stream.init(gpu.d, true), .f = try glue.Fns.resolve(&mods), .emb = try cuda.embed_rows.EmbedRows.load(gpu.d), .norms = try cuda.norms.Norms.load(gpu.d), .rng = prng.random() };
+    var r: Rig = .{
+        .gpu = gpu,
+        .a = arena.allocator(),
+        .s = try cuda.Stream.init(gpu.d, true),
+        .f = try glue.Fns.resolve(&mods),
+        .emb = try cuda.embed_rows.EmbedRows.load(gpu.d),
+        .norms = try cuda.norms.Norms.load(gpu.d),
+        .rng = prng.random(),
+    };
     defer {
         r.emb.unload();
         r.norms.unload();

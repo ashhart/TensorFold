@@ -93,7 +93,8 @@ __device__ __forceinline__ void rms_row(const void* __restrict__ x, const float*
 #pragma unroll
         for (int j = 0; j < CACHED; ++j) {
             const int i = threadIdx.x + j * NT;
-            if (i < width) st<YK>(y, at + i, w != nullptr ? __fmul_rn(__fmul_rn(v[j], inv), wv[j]) : __fmul_rn(v[j], inv));
+            if (i < width)
+                st<YK>(y, at + i, w != nullptr ? __fmul_rn(__fmul_rn(v[j], inv), wv[j]) : __fmul_rn(v[j], inv));
         }
     }
 }
@@ -223,7 +224,7 @@ __device__ __forceinline__ void store8f(float* p, const float* f) {
     reinterpret_cast<float4*>(p)[1] = make_float4(f[4], f[5], f[6], f[7]);
 }
 
-// rsqrt(sum / width + eps) over a VNT-thread block: warp trees, then warp 0's tree over the 8 warp sums.
+// 1 / sqrt(sum / width + eps), IEEE division and square root, over a VNT-thread block: warp trees, then the 8 warps'.
 __device__ __forceinline__ float inv_rms_v(float part, int width, float eps) {
     __shared__ float warps[VNT / 32];
     __shared__ float inv;
@@ -431,26 +432,26 @@ __device__ __forceinline__ void gated_rms(const __nv_bfloat16* __restrict__ y, l
         unpack8(*reinterpret_cast<const uint4*>(w + 8 * sub), wv);
     } else {
 #pragma unroll
-            for (int i = 0; i < 8; ++i) yv[i] = zv[i] = wv[i] = 0.f;
-        }
-        float part = 0.f;
+        for (int i = 0; i < 8; ++i) yv[i] = zv[i] = wv[i] = 0.f;
+    }
+    float part = 0.f;
 #pragma unroll
-        for (int i = 0; i < 8; ++i) part = __fmaf_rn(yv[i], yv[i], part);
+    for (int i = 0; i < 8; ++i) part = __fmaf_rn(yv[i], yv[i], part);
 #pragma unroll
-        for (int m = L / 2; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
-        const float inv = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(part, static_cast<float>(DV)), eps)));
-        float o[8];
+    for (int m = L / 2; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
+    const float inv = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(part, static_cast<float>(DV)), eps)));
+    float o[8];
 #pragma unroll
-        for (int i = 0; i < 8; ++i) {
-            const float sg = __fdiv_rn(1.f, __fadd_rn(1.f, expf(-zv[i])));
-            o[i] = __fmul_rn(__fmul_rn(zv[i], sg), __fmul_rn(__fmul_rn(yv[i], inv), wv[i]));
-        }
-        const uint4 op = pack8(o);
-        const int64_t at = (r * heads + hd) * DV + 8 * sub;
-        if (live) *reinterpret_cast<uint4*>(out + at) = op;
-        if (xs != nullptr) {
-            const float s = group_sum8(op, live);
-            if (live && (sub & 7) == 0) xs[at / 64] = s;
+    for (int i = 0; i < 8; ++i) {
+        const float sg = __fdiv_rn(1.f, __fadd_rn(1.f, expf(-zv[i])));
+        o[i] = __fmul_rn(__fmul_rn(zv[i], sg), __fmul_rn(__fmul_rn(yv[i], inv), wv[i]));
+    }
+    const uint4 op = pack8(o);
+    const int64_t at = (r * heads + hd) * DV + 8 * sub;
+    if (live) *reinterpret_cast<uint4*>(out + at) = op;
+    if (xs != nullptr) {
+        const float s = group_sum8(op, live);
+        if (live && (sub & 7) == 0) xs[at / 64] = s;
     }
 }
 
