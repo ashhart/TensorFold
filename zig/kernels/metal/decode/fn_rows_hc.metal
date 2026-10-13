@@ -89,8 +89,10 @@ inline float qchunk_dot(const device uint* chunk, float scale, float bias, const
 
 // split-K matvec of one row's normed streams: simdgroup o of threadgroup (i, k, r) over input groups 32 k .. 32 k + 31
 [[kernel]] void qa_hc_down_split(const device bfloat* HN [[buffer(0)]], const device float* SSP [[buffer(1)]],
-    const device float* NW [[buffer(2)]], const device uint32_t* QW [[buffer(3)]], const device bfloat* QS [[buffer(4)]],
-    const device bfloat* QB [[buffer(5)]], const constant float* eps [[buffer(6)]], const constant int* rows [[buffer(7)]],
+    const device float* NW [[buffer(2)]], const device uint32_t* QW [[buffer(3)]],
+    const device bfloat* QS [[buffer(4)]],
+    const device bfloat* QB [[buffer(5)]], const constant float* eps [[buffer(6)]],
+    const constant int* rows [[buffer(7)]],
     device float* PART [[buffer(8)]], uint3 thread_position_in_threadgroup [[thread_position_in_threadgroup]],
     uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]],
     uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
@@ -120,7 +122,8 @@ inline float qchunk_dot(const device uint* chunk, float scale, float bias, const
     float x[32];
     for (int n = 0; n < 32; n++) x[n] = xs[lane * 33 + n];
 #if FZ_Q4
-    float acc = FZ_QGROUP(QW + (size_t(o) * GROUPS + grp) * 4, float(QS[o * GROUPS + grp]), float(QB[o * GROUPS + grp]), x);
+    float acc = FZ_QGROUP(QW + (size_t(o) * GROUPS + grp) * 4, float(QS[o * GROUPS + grp]),
+                          float(QB[o * GROUPS + grp]), x);
 #else
     float acc = qchunk_dot<BITS>(QW + size_t(o) * (W * BITS / 32) + grp * BITS, float(QS[o * (W / GS) + grp * 32 / GS]),
                                  float(QB[o * (W / GS) + grp * 32 / GS]), x);
@@ -132,8 +135,10 @@ inline float qchunk_dot(const device uint* chunk, float scale, float bias, const
 
 // one row's up projection for 8 dims of every stream: thread 10 i + q takes group q of up row i
 [[kernel]] void qa_hc_up2(const device bfloat* HN [[buffer(0)]], const device float* SSP [[buffer(1)]],
-    const device float* NW [[buffer(2)]], const device float* PART [[buffer(3)]], const device uint32_t* QW [[buffer(4)]],
-    const device bfloat* QS [[buffer(5)]], const device bfloat* QB [[buffer(6)]], const constant float* eps [[buffer(7)]],
+    const device float* NW [[buffer(2)]], const device float* PART [[buffer(3)]],
+    const device uint32_t* QW [[buffer(4)]],
+    const device bfloat* QS [[buffer(5)]], const device bfloat* QB [[buffer(6)]],
+    const constant float* eps [[buffer(7)]],
     const constant int* rows [[buffer(8)]], device bfloat* MIXED [[buffer(9)]], device bfloat* INJOUT [[buffer(10)]],
     uint3 thread_position_in_threadgroup [[thread_position_in_threadgroup]],
     uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]]) {
@@ -165,7 +170,8 @@ inline float qchunk_dot(const device uint* chunk, float scale, float bias, const
 #if FZ_Q4
     part[i][q] = FZ_QGROUP(QW + (size_t(row) * GPR + q) * 4, float(QS[row * GPR + q]), float(QB[row * GPR + q]), x);
 #else
-    part[i][q] = qchunk_dot<BITS>(QW + size_t(row) * (LOW * BITS / 32) + q * BITS, float(QS[row * (LOW / GS) + q * 32 / GS]),
+    part[i][q] = qchunk_dot<BITS>(QW + size_t(row) * (LOW * BITS / 32) + q * BITS,
+                                  float(QS[row * (LOW / GS) + q * 32 / GS]),
                                   float(QB[row * (LOW / GS) + q * 32 / GS]), x);
 #endif
   }
@@ -191,8 +197,10 @@ inline int tile_fn(int l) { return ((l / 4) & 2) * 2 + (l % 2) * 2; }
 
 // qa_hc_down_split's bits for 8 rows a tile on the matrix units (4-bit group 32): threadgroup (i, k, t) takes outputs
 [[kernel]] void q4_hc_down_tiles(const device bfloat* HN [[buffer(0)]], const device float* SSP [[buffer(1)]],
-    const device float* NW [[buffer(2)]], const device uint32_t* QW [[buffer(3)]], const device bfloat* QS [[buffer(4)]],
-    const device bfloat* QB [[buffer(5)]], const constant float* eps [[buffer(6)]], const constant int* rows [[buffer(7)]],
+    const device float* NW [[buffer(2)]], const device uint32_t* QW [[buffer(3)]],
+    const device bfloat* QS [[buffer(4)]],
+    const device bfloat* QB [[buffer(5)]], const constant float* eps [[buffer(6)]],
+    const constant int* rows [[buffer(7)]],
     device float* PART [[buffer(8)]], uint3 thread_position_in_threadgroup [[thread_position_in_threadgroup]],
     uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]],
     uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
@@ -254,8 +262,10 @@ inline int tile_fn(int l) { return ((l / 4) & 2) * 2 + (l % 2) * 2; }
 
 // qa_hc_up2's bits for 8 rows a tile on the matrix units (4-bit group 32): threadgroup (i, t) takes dims DT i ..
 [[kernel]] void q4_hc_up_tiles(const device bfloat* HN [[buffer(0)]], const device float* SSP [[buffer(1)]],
-    const device float* NW [[buffer(2)]], const device float* PART [[buffer(3)]], const device uint32_t* QW [[buffer(4)]],
-    const device bfloat* QS [[buffer(5)]], const device bfloat* QB [[buffer(6)]], const constant float* eps [[buffer(7)]],
+    const device float* NW [[buffer(2)]], const device float* PART [[buffer(3)]],
+    const device uint32_t* QW [[buffer(4)]],
+    const device bfloat* QS [[buffer(5)]], const device bfloat* QB [[buffer(6)]],
+    const constant float* eps [[buffer(7)]],
     const constant int* rows [[buffer(8)]], device bfloat* MIXED [[buffer(9)]], device bfloat* INJOUT [[buffer(10)]],
     uint3 thread_position_in_threadgroup [[thread_position_in_threadgroup]],
     uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]],

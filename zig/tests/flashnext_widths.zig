@@ -24,7 +24,9 @@ pub fn main(init: std.process.Init) !void {
     if (only == null or std.mem.eql(u8, only.?, "lane")) try lane.run(&t, device, queue);
     if (only == null or std.mem.eql(u8, only.?, "rows")) try rows.run(&t, device, queue);
     const recorded = [_][]const u8{ "hc", "moe", "prompt", "rows-hc" };
-    if (only == null or for (recorded) |c| (if (std.mem.eql(u8, only.?, c)) break true) else false) { // the recorded kernels the any-width ones come from
+    if (only == null or
+        for (recorded) |c| (if (std.mem.eql(u8, only.?, c)) break true) else false)
+    { // the recorded kernels the any-width ones come from
         const r = try lib.a.create(fz.Run);
         r.* = .{ .arena = lib.a, .device = device, .queue = queue, .serial = true };
         try r.compileChecked();

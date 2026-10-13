@@ -16,16 +16,46 @@ const windows = [_]usize{ 1, 2, 3, 4, 5, 8, 9, 16, 17, 33 }; // loop, four a sim
 fn product(device: mtl.Device, m: lib.Mat) !rows_w.Product {
     const s = try lib.upload(device, std.mem.sliceAsBytes(m.scales));
     const b = try lib.upload(device, std.mem.sliceAsBytes(m.biases));
-    return .{ .w = .{ .b = try lib.upload(device, m.words) }, .s = .{ .b = s }, .b = .{ .b = b }, .n = m.n, .k = m.k, .bits = m.bits, .group = @intCast(m.group) };
+    return .{
+        .w = .{ .b = try lib.upload(device, m.words) },
+        .s = .{ .b = s },
+        .b = .{ .b = b },
+        .n = m.n,
+        .k = m.k,
+        .bits = m.bits,
+        .group = @intCast(m.group),
+    };
 }
 
 /// Rows [0, wide) of x through `p` in windows of m rows, each window's outputs at its rows.
-fn launchWindows(device: mtl.Device, queue: mtl.Queue, cache: *rows_w.Cache, p: rows_w.Product, x: lib.Inputs, m: usize, y: mtl.Buffer, sums: mtl.Buffer) !void {
+fn launchWindows(
+    device: mtl.Device,
+    queue: mtl.Queue,
+    cache: *rows_w.Cache,
+    p: rows_w.Product,
+    x: lib.Inputs,
+    m: usize,
+    y: mtl.Buffer,
+    sums: mtl.Buffer,
+) !void {
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
     var start: usize = 0;
     while (start + m <= wide) : (start += m) {
-        try rows_w.encode(e, a, device, cache, p, .{ .b = x.buf, .off = start * x.k * 2 }, m, .{ .b = y, .off = start * p.n * 2 }, p.n, .{ .b = sums }, .auto, false);
+        try rows_w.encode(
+            e,
+            a,
+            device,
+            cache,
+            p,
+            .{ .b = x.buf, .off = start * x.k * 2 },
+            m,
+            .{ .b = y, .off = start * p.n * 2 },
+            p.n,
+            .{ .b = sums },
+            .auto,
+            false,
+        );
     }
     try lib.commit(cb, e);
 }
@@ -87,7 +117,17 @@ fn columns(n: usize) ![]usize {
 }
 
 /// One matrix: 64 rows against float64 (and a 1%-off-scales control), then every window's rows bit for bit.
-fn matrix(t: *lib.Tally, device: mtl.Device, queue: mtl.Queue, cache: *rows_w.Cache, n: usize, k: usize, bits: u8, group: usize, seed: u64) !void {
+fn matrix(
+    t: *lib.Tally,
+    device: mtl.Device,
+    queue: mtl.Queue,
+    cache: *rows_w.Cache,
+    n: usize,
+    k: usize,
+    bits: u8,
+    group: usize,
+    seed: u64,
+) !void {
     const m = try lib.Mat.init(n, k, bits, group, seed);
     defer m.deinit();
     defer a.free(m.codes);
@@ -120,19 +160,42 @@ fn matrix(t: *lib.Tally, device: mtl.Device, queue: mtl.Queue, cache: *rows_w.Ca
         const y = try lib.poisoned(device, wide * n * 2);
         defer y.deinit();
         try launchWindows(device, queue, cache, p, x, w, y, sums);
-        same = lib.sameRows(t, label, w, all.slice(u8, wide * n * 2), y.slice(u8, wide * n * 2), wide / w * w, n * 2) and same;
+        same = lib.sameRows(
+            t,
+            label,
+            w,
+            all.slice(u8, wide * n * 2),
+            y.slice(u8, wide * n * 2),
+            wide / w * w,
+            n * 2,
+        ) and same;
     }
-    if (same) std.debug.print("RESULT {s}: every row's bits equal in windows of 1, 2, 3, 4, 5, 8, 9, 16, 17 and 33 rows\n", .{label});
+    if (same) std.debug.print(
+        "RESULT {s}: every row's bits equal in windows of 1, 2, 3, 4, 5, 8, 9, 16, 17 and 33 rows\n",
+        .{label},
+    );
     all.deinit();
     sums.deinit();
     x.buf.deinit();
 }
 
 /// A fused projection as the engine attaches it: every member's columns equal its own product's, in every window.
-fn stack(t: *lib.Tally, device: mtl.Device, queue: mtl.Queue, cache: *rows_w.Cache, widths: []const [3]usize, k: usize, seed: u64) !void {
+fn stack(
+    t: *lib.Tally,
+    device: mtl.Device,
+    queue: mtl.Queue,
+    cache: *rows_w.Cache,
+    widths: []const [3]usize,
+    k: usize,
+    seed: u64,
+) !void {
     const sh = try a.create(rows_w.Shared);
     const sums = rows_w.Shared.max_rows * (rows_w.Shared.max_k / 8) * 4;
-    sh.* = .{ .a = a, .device = device, .sums = .{ .{ .b = try device.buffer(sums, lib.opts) }, .{ .b = try device.buffer(sums, lib.opts) } } };
+    sh.* = .{
+        .a = a,
+        .device = device,
+        .sums = .{ .{ .b = try device.buffer(sums, lib.opts) }, .{ .b = try device.buffer(sums, lib.opts) } },
+    };
     const members = try a.alloc(rows_w.Member, widths.len);
     var label: std.ArrayList(u8) = .empty;
     try label.print(a, "rows stack K {d}:", .{k});
@@ -150,7 +213,20 @@ fn stack(t: *lib.Tally, device: mtl.Device, queue: mtl.Queue, cache: *rows_w.Cac
         const sb = try device.buffer(rows_w.sumsBytes(k, 8, wide), lib.opts);
         const cb = queue.commandBuffer();
         const e = cb.compute(.serial);
-        for (members) |mb| try rows_w.encode(e, a, device, cache, mb.p, .{ .b = x.buf }, wide, .{ .b = alone, .off = mb.col * 2 }, n, .{ .b = sb }, .auto, false);
+        for (members) |mb| try rows_w.encode(
+            e,
+            a,
+            device,
+            cache,
+            mb.p,
+            .{ .b = x.buf },
+            wide,
+            .{ .b = alone, .off = mb.col * 2 },
+            n,
+            .{ .b = sb },
+            .auto,
+            false,
+        );
         try lib.commit(cb, e);
     }
     var same = true;
@@ -161,13 +237,32 @@ fn stack(t: *lib.Tally, device: mtl.Device, queue: mtl.Queue, cache: *rows_w.Cac
         const e = cb.compute(.concurrent);
         var start: usize = 0;
         while (start + w <= wide) : (start += w) {
-            try rows_w.encodeDense(e, &d, .{ .b = x.buf, .off = start * k * 2 }, w, .{ .b = y, .off = start * n * 2 }, .auto, true);
+            try rows_w.encodeDense(
+                e,
+                &d,
+                .{ .b = x.buf, .off = start * k * 2 },
+                w,
+                .{ .b = y, .off = start * n * 2 },
+                .auto,
+                true,
+            );
             e.barrier();
         }
         try lib.commit(cb, e);
-        same = lib.sameRows(t, label.items, w, alone.slice(u8, wide * n * 2), y.slice(u8, wide * n * 2), wide / w * w, n * 2) and same;
+        same = lib.sameRows(
+            t,
+            label.items,
+            w,
+            alone.slice(u8, wide * n * 2),
+            y.slice(u8, wide * n * 2),
+            wide / w * w,
+            n * 2,
+        ) and same;
     }
-    if (same) std.debug.print("RESULT {s}: every member's columns equal its own product's in every window\n", .{label.items});
+    if (same) std.debug.print(
+        "RESULT {s}: every member's columns equal its own product's in every window\n",
+        .{label.items},
+    );
 }
 
 pub fn run(t: *lib.Tally, device: mtl.Device, queue: mtl.Queue) !void {
@@ -250,7 +345,10 @@ pub fn time(device: mtl.Device, queue: mtl.Queue) !void {
         .{ 2560, 6144, 6, 64 },  .{ 16480, 2560, 6, 32 },  .{ 2560, 6144, 6, 32 },  .{ 13952, 2560, 3, 64 },
         .{ 79616, 2560, 8, 64 }, .{ 248320, 2560, 8, 64 },
     };
-    std.debug.print("TIME shape width rows: lane us (GB/s) | rows us (GB/s, % of {d:.0}) | lane/rows | loop, four, twin us\n", .{peak});
+    std.debug.print(
+        "TIME shape width rows: lane us (GB/s) | rows us (GB/s, % of {d:.0}) | lane/rows | loop, four, twin us\n",
+        .{peak},
+    );
     for (cases, 0..) |c, ci| {
         const n = c[0];
         const k = c[1];
@@ -271,7 +369,18 @@ pub fn time(device: mtl.Device, queue: mtl.Queue) !void {
         const y = try device.buffer(16 * n * 2, lib.opts);
         const sums = try device.buffer(rows_w.sumsBytes(k, @intCast(c[2]), 16), lib.opts);
         for ([_]usize{ 1, 2, 4, 8, 9, 16 }) |rows| {
-            var case = Case{ .device = device, .rows_cache = &rows_cache, .lane_cache = &lane_cache, .prods = prods, .wides = wides, .x = .{ .b = x.buf }, .y = .{ .b = y }, .sums = .{ .b = sums }, .md = try lanes.mdims(device, rows), .rows = rows };
+            var case = Case{
+                .device = device,
+                .rows_cache = &rows_cache,
+                .lane_cache = &lane_cache,
+                .prods = prods,
+                .wides = wides,
+                .x = .{ .b = x.buf },
+                .y = .{ .b = y },
+                .sums = .{ .b = sums },
+                .md = try lanes.mdims(device, rows),
+                .rows = rows,
+            };
             const tl = try timed(queue, copies, &case, Case.laneOne);
             const tr = try timed(queue, copies, &case, Case.rowsOne);
             var by: [3]f64 = undefined;
@@ -280,7 +389,26 @@ pub fn time(device: mtl.Device, queue: mtl.Queue) !void {
                 t.* = try timed(queue, copies, &case, Case.rowsOne);
             }
             const gb = @as(f64, @floatFromInt(bytes)) / 1e9;
-            std.debug.print("TIME [{d}, {d}] q{d}/g{d} {d:>2} rows: {d:>8.1} ({d:>5.0}) | {d:>8.1} ({d:>5.0}, {d:>3.0}%) | {d:.3} | {d:.1}, {d:.1}, {d:.1}\n", .{ n, k, c[2], c[3], rows, tl * 1e6, gb / tl, tr * 1e6, gb / tr, 100 * gb / tr / peak, tl / tr, by[0] * 1e6, by[1] * 1e6, by[2] * 1e6 });
+            std.debug.print(
+                "TIME [{d}, {d}] q{d}/g{d} {d:>2} rows: {d:>8.1} ({d:>5.0}) | " ++
+                    "{d:>8.1} ({d:>5.0}, {d:>3.0}%) | {d:.3} | {d:.1}, {d:.1}, {d:.1}\n",
+                .{
+                    n,
+                    k,
+                    c[2],
+                    c[3],
+                    rows,
+                    tl * 1e6,
+                    gb / tl,
+                    tr * 1e6,
+                    gb / tr,
+                    100 * gb / tr / peak,
+                    tl / tr,
+                    by[0] * 1e6,
+                    by[1] * 1e6,
+                    by[2] * 1e6,
+                },
+            );
         }
         for (prods, wides) |p, w| {
             for ([_]Buf{ p.w, p.s, p.b, w.runs[0].wq, w.runs[0].sbt }) |b| b.b.deinit();

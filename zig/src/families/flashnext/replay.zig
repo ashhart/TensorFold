@@ -1609,7 +1609,17 @@ pub const GSelect = struct {
 };
 
 /// A pack hyper-connection; `w`: the down and up widths when not 6/32; `rows`: on the per-row kernels (rows_load.zig).
-pub const Hc = struct { scale: Buf, dw: Buf, ds: Buf, db: Buf, uw: Buf, us: Buf, ub: Buf, w: ?[2][2]usize = null, rows: ?*rows_load.rows_w.Shared = null };
+pub const Hc = struct {
+    scale: Buf,
+    dw: Buf,
+    ds: Buf,
+    db: Buf,
+    uw: Buf,
+    us: Buf,
+    ub: Buf,
+    w: ?[2][2]usize = null,
+    rows: ?*rows_load.rows_w.Shared = null,
+};
 pub const Lane = lane_w.Lane; // the recorded 6/32 pair, or runs at other widths
 pub const Layer = struct {
     ahc: Hc,
@@ -1832,7 +1842,20 @@ pub const Model = struct {
 
     pub fn hcProject(m: *Model, hn: Buf, hc: Hc, down: []const u8, up: []const u8, inj: Buf) !void {
         const t = &m.t;
-        if (hc.rows) |sh| if (m.r.tp == null) return rows_load.hc(m.r, sh, hc, down, hn, t.ssp, t.eps, t.rows, m.r.rows, t.part, t.mixed, inj);
+        if (hc.rows) |sh| if (m.r.tp == null) return rows_load.hc(
+            m.r,
+            sh,
+            hc,
+            down,
+            hn,
+            t.ssp,
+            t.eps,
+            t.rows,
+            m.r.rows,
+            t.part,
+            t.mixed,
+            inj,
+        );
         const as_rows = if (m.r.hc_mma and m.r.rows > 1) 8 else m.r.rows;
         try m.r.hcProject(down, up, as_rows, hn, t.ssp, hc, t.eps, t.rows, t.part, t.mixed, inj);
     }
@@ -2258,7 +2281,20 @@ pub const Model = struct {
 
     pub fn mtpProject(m: *Model, hn: Buf, hc: Hc, down: []const u8, up: []const u8, inj: Buf, rows: Buf) !void {
         const t = &m.t;
-        if (hc.rows) |sh| if (m.r.tp == null) return rows_load.hc(m.r, sh, hc, down, hn, t.ssp, t.eps, rows, m.r.rows, t.part, t.mixed, inj);
+        if (hc.rows) |sh| if (m.r.tp == null) return rows_load.hc(
+            m.r,
+            sh,
+            hc,
+            down,
+            hn,
+            t.ssp,
+            t.eps,
+            rows,
+            m.r.rows,
+            t.part,
+            t.mixed,
+            inj,
+        );
         var c: [2][2]variants.Const = undefined;
         const k = [2][]const variants.Const{ variants.width(&c[0], "BITS", "GS", if (hc.w) |w| w[0] else null), variants.width(&c[1], "BITS", "GS", if (hc.w) |w| w[1] else null) };
         try variants.callAs(m.r, down, m.r.rows, &.{ hn, t.ssp, hc.scale, hc.dw, hc.ds, hc.db, t.eps, rows }, &.{t.part}, k[0]);

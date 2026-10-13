@@ -19,7 +19,12 @@ const mma_sg = 8;
 pub const Spec = struct { n: usize, k: usize, bits: u8, group: u16, ld: usize, rps: u8, nib: u8 };
 
 /// The library's pipelines: the per-row kernel; widths but 4/32 add four rows a simdgroup, block sums, the MMA twin.
-pub const Pipes = struct { rows: mtl.Pipeline, four: ?mtl.Pipeline = null, sums: ?mtl.Pipeline = null, mma: ?mtl.Pipeline = null };
+pub const Pipes = struct {
+    rows: mtl.Pipeline,
+    four: ?mtl.Pipeline = null,
+    sums: ?mtl.Pipeline = null,
+    mma: ?mtl.Pipeline = null,
+};
 
 pub const Cache = std.AutoHashMapUnmanaged(Spec, Pipes);
 
@@ -50,14 +55,20 @@ pub fn mma(p: Product, rows: usize) bool {
 
 /// Shapes the kernels read: 4/32 needs K % 512 and n % 4; other widths K % 16 and 2..8 bits in groups of 32 to 128.
 pub fn check(p: Product) !void {
-    if (p.n == 0 or p.k % p.group != 0 or p.group % 32 != 0 or p.bits < 2 or p.bits > 8 or p.bits == 7) return error.RowsShape;
+    if (p.n == 0 or p.k % p.group != 0 or p.group % 32 != 0 or
+        p.bits < 2 or p.bits > 8 or p.bits == 7) return error.RowsShape;
     if (q4(p) and (p.k % 512 != 0 or p.n % 4 != 0)) return error.RowsShape;
     if (p.k % 16 != 0) return error.RowsShape;
 }
 
 /// The source compiled for `s`: fn_rows.metal after its defines.
 pub fn source(a: std.mem.Allocator, s: Spec) ![]const u8 {
-    return std.fmt.allocPrint(a, "#define FZ_K {d}\n#define FZ_N {d}\n#define FZ_LD {d}\n#define FZ_BITS {d}\n#define FZ_GS {d}\n#define FZ_RPS {d}\n#define FZ_SG {d}\n#define FZ_NIB {d}\n{s}", .{ s.k, s.n, s.ld, s.bits, s.group, s.rps, mma_sg, s.nib, ks.flashnext_rows });
+    return std.fmt.allocPrint(
+        a,
+        "#define FZ_K {d}\n#define FZ_N {d}\n#define FZ_LD {d}\n#define FZ_BITS {d}\n#define FZ_GS {d}\n" ++
+            "#define FZ_RPS {d}\n#define FZ_SG {d}\n#define FZ_NIB {d}\n{s}",
+        .{ s.k, s.n, s.ld, s.bits, s.group, s.rps, mma_sg, s.nib, ks.flashnext_rows },
+    );
 }
 
 /// The pipelines for `s` on `device`, compiled once and kept in `cache`.
@@ -77,7 +88,15 @@ pub fn pipes(a: std.mem.Allocator, device: mtl.Device, cache: *Cache, s: Spec) !
 
 /// The spec `p` compiles under at `rows` rows, writing rows `ld` columns apart.
 pub fn specOf(p: Product, generation: u32, rows: usize, ld: usize) Spec {
-    return .{ .n = p.n, .k = p.k, .bits = p.bits, .group = p.group, .ld = ld, .rps = if (q4(p)) 4 else rps(p.n), .nib = if (q4(p)) nib(generation, rows) else 0 };
+    return .{
+        .n = p.n,
+        .k = p.k,
+        .bits = p.bits,
+        .group = p.group,
+        .ld = ld,
+        .rps = if (q4(p)) 4 else rps(p.n),
+        .nib = if (q4(p)) nib(generation, rows) else 0,
+    };
 }
 
 /// Bytes of block sums the MMA twin needs at `rows` rows of k inputs (scratch the caller owns).
@@ -101,12 +120,28 @@ fn encodeSums(enc: mtl.ComputeEncoder, pp: Pipes, p: Product, x: Buf, rows: usiz
 }
 
 /// The product alone, block sums already in `sums` when it takes the MMA twin.
-fn encodeProduct(enc: mtl.ComputeEncoder, pp: Pipes, p: Product, s: Spec, x: Buf, rows: usize, y: Buf, sums: ?Buf, how: How) !void {
+fn encodeProduct(
+    enc: mtl.ComputeEncoder,
+    pp: Pipes,
+    p: Product,
+    s: Spec,
+    x: Buf,
+    rows: usize,
+    y: Buf,
+    sums: ?Buf,
+    how: How,
+) !void {
     if (how == .twin) {
         enc.setPipeline(pp.mma orelse return error.RowsNoTwin);
-        for ([_]Buf{ x, sums orelse return error.RowsNoScratch, p.w, p.s, p.b, y }, 0..) |b, j| enc.setBuffer(b.b, b.off, j);
+        for (
+            [_]Buf{ x, sums orelse return error.RowsNoScratch, p.w, p.s, p.b, y },
+            0..,
+        ) |b, j| enc.setBuffer(b.b, b.off, j);
         enc.setValue(@as(i32, @intCast(rows)), 6);
-        enc.dispatchThreads(mtl.Size.of((p.n + 7) / 8 * 32 * mma_sg, (rows + 7) / 8, 1), mtl.Size.of(32 * mma_sg, 1, 1));
+        enc.dispatchThreads(
+            mtl.Size.of((p.n + 7) / 8 * 32 * mma_sg, (rows + 7) / 8, 1),
+            mtl.Size.of(32 * mma_sg, 1, 1),
+        );
         return;
     }
     enc.setPipeline(if (how == .four) pp.four orelse return error.RowsNoFour else pp.rows);
@@ -145,7 +180,20 @@ fn howOf(p: Product, rows: usize, mode: Mode) How {
 }
 
 /// y[rows, ld] from its first column = x[rows, k] W^T, every row its one-row bits; `sums` is the MMA scratch.
-pub fn encode(enc: mtl.ComputeEncoder, a: std.mem.Allocator, device: mtl.Device, cache: *Cache, p: Product, x: Buf, rows: usize, y: Buf, ld: usize, sums: ?Buf, mode: Mode, concurrent: bool) !void {
+pub fn encode(
+    enc: mtl.ComputeEncoder,
+    a: std.mem.Allocator,
+    device: mtl.Device,
+    cache: *Cache,
+    p: Product,
+    x: Buf,
+    rows: usize,
+    y: Buf,
+    ld: usize,
+    sums: ?Buf,
+    mode: Mode,
+    concurrent: bool,
+) !void {
     try check(p);
     const s = specOf(p, device.generation(), rows, ld);
     const pp = try pipes(a, device, cache, s);
@@ -183,7 +231,15 @@ fn slot(bits: u8) usize {
 }
 
 /// y[rows, d.n] = x[rows, d.k] W^T: the block sums once per lane step the members' MMA twins need, then every member.
-pub fn encodeDense(enc: mtl.ComputeEncoder, d: *const Dense, x: Buf, rows: usize, y: Buf, mode: Mode, concurrent: bool) !void {
+pub fn encodeDense(
+    enc: mtl.ComputeEncoder,
+    d: *const Dense,
+    x: Buf,
+    rows: usize,
+    y: Buf,
+    mode: Mode,
+    concurrent: bool,
+) !void {
     const sh = d.shared;
     if (rows > Shared.max_rows or d.k > Shared.max_k) return error.RowsWindow;
     var summed = [2]bool{ false, false };

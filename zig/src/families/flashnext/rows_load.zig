@@ -25,9 +25,38 @@ pub fn launch(r: *Run, d: *const rows_w.Dense, role: []const u8, x: Buf, rows: u
 }
 
 /// A hyper-connection's down and up projections on the per-row kernels at `rows` rows (`rows_buf` holds the count).
-pub fn hc(r: *Run, sh: *rows_w.Shared, h: replay.Hc, down: []const u8, hn: Buf, ssp: Buf, eps: Buf, rows_buf: Buf, rows: usize, part: Buf, mixed: Buf, inj: Buf) !void {
+pub fn hc(
+    r: *Run,
+    sh: *rows_w.Shared,
+    h: replay.Hc,
+    down: []const u8,
+    hn: Buf,
+    ssp: Buf,
+    eps: Buf,
+    rows_buf: Buf,
+    rows: usize,
+    part: Buf,
+    mixed: Buf,
+    inj: Buf,
+) !void {
     if (r.skip & Run.class(down) != 0 or r.hcskip & 6 != 0) return;
-    try rows_hc.encode(r.enc, sh.a, sh.device, &sh.hc, weightsOf(h), hn, ssp, eps, rows_buf, rows, part, mixed, inj, !r.serial, sh.hc_tiles);
+    try rows_hc.encode(
+        r.enc,
+        sh.a,
+        sh.device,
+        &sh.hc,
+        weightsOf(h),
+        hn,
+        ssp,
+        eps,
+        rows_buf,
+        rows,
+        part,
+        mixed,
+        inj,
+        !r.serial,
+        sh.hc_tiles,
+    );
     if (!r.serial) r.enc.barrier();
 }
 
@@ -37,7 +66,12 @@ fn weightsOf(h: replay.Hc) rows_hc.Weights {
 
 /// A hyper-connection on the per-row kernels; a 4/32 pair's tiles checked on 12 rows (_hc_mma_exact), else off.
 fn hcOn(r: *Run, sh: *rows_w.Shared, h: *replay.Hc) !void {
-    for ([_]usize{ 1, 2 }) |rows| _ = try rows_hc.pipes(sh.a, sh.device, &sh.hc, try rows_hc.specOf(h.dw, h.uw, h.w, sh.device.generation(), rows));
+    for ([_]usize{ 1, 2 }) |rows| _ = try rows_hc.pipes(
+        sh.a,
+        sh.device,
+        &sh.hc,
+        try rows_hc.specOf(h.dw, h.uw, h.w, sh.device.generation(), rows),
+    );
     h.rows = sh;
     const s = try rows_hc.specOf(h.dw, h.uw, h.w, sh.device.generation(), 12);
     if (!sh.hc_tiles or !rows_hc.q4(s)) return;
@@ -58,14 +92,37 @@ fn hcOn(r: *Run, sh: *rows_w.Shared, h: *replay.Hc) !void {
     const cb = r.queue.commandBuffer();
     const e = cb.compute(.serial);
     for (outs, [_]bool{ false, true }) |o, tiles| {
-        try rows_hc.encode(e, sh.a, sh.device, &sh.hc, weightsOf(h.*), .{ .b = hn }, .{ .b = ssp }, .{ .b = small }, .{ .b = small, .off = 4 }, rows, .{ .b = part }, .{ .b = o[0] }, .{ .b = o[1] }, false, tiles);
+        try rows_hc.encode(
+            e,
+            sh.a,
+            sh.device,
+            &sh.hc,
+            weightsOf(h.*),
+            .{ .b = hn },
+            .{ .b = ssp },
+            .{ .b = small },
+            .{ .b = small, .off = 4 },
+            rows,
+            .{ .b = part },
+            .{ .b = o[0] },
+            .{ .b = o[1] },
+            false,
+            tiles,
+        );
     }
     e.end();
     cb.commit();
     cb.wait();
     if (cb.failure() != null) return error.GpuFailed;
-    for (0..2) |j| if (!std.mem.eql(u8, outs[0][j].contents()[0..outs[0][j].length()], outs[1][j].contents()[0..outs[1][j].length()])) {
-        std.log.warn("rows: the 4/32 hyper-connection tiles differ from the per-row kernels here; per-row kernels kept", .{});
+    for (0..2) |j| if (!std.mem.eql(
+        u8,
+        outs[0][j].contents()[0..outs[0][j].length()],
+        outs[1][j].contents()[0..outs[1][j].length()],
+    )) {
+        std.log.warn(
+            "rows: the 4/32 hyper-connection tiles differ from the per-row kernels here; per-row kernels kept",
+            .{},
+        );
         sh.hc_tiles = false;
     };
 }
@@ -100,7 +157,15 @@ fn fromPack(r: *Run, sh: *rows_w.Shared, w: [3]Buf, stem: []const u8, k: usize) 
         const bits: u8 = @intCast(t[i * 3 + 1]);
         const group: u16 = @intCast(t[i * 3 + 2]);
         if (bits == 0 or group == 0) return error.RowsMembers;
-        mb.* = .{ .p = .{ .w = .{ .b = w[0].b, .off = at[0] }, .s = .{ .b = w[1].b, .off = at[1] }, .b = .{ .b = w[2].b, .off = at[2] }, .n = n, .k = k, .bits = bits, .group = group }, .col = col };
+        mb.* = .{ .p = .{
+            .w = .{ .b = w[0].b, .off = at[0] },
+            .s = .{ .b = w[1].b, .off = at[1] },
+            .b = .{ .b = w[2].b, .off = at[2] },
+            .n = n,
+            .k = k,
+            .bits = bits,
+            .group = group,
+        }, .col = col };
         at[0] += n * k * bits / 8;
         at[1] += n * (k / group) * 2;
         at[2] += n * (k / group) * 2;
@@ -116,7 +181,15 @@ fn raw(r: *Run, stem: []const u8, n: usize, k: usize) !rows_w.Product {
     const wl = (try r.entry(try std.fmt.allocPrint(r.arena, "{s}.weight", .{stem}))).len;
     const sl = (try r.entry(try std.fmt.allocPrint(r.arena, "{s}.scales", .{stem}))).len;
     if (wl * 8 % (n * k) != 0 or sl % (2 * n) != 0 or k % (sl / (2 * n)) != 0) return error.RowsRawShape;
-    return .{ .w = ws[0], .s = ws[1], .b = ws[2], .n = n, .k = k, .bits = @intCast(wl * 8 / (n * k)), .group = @intCast(k / (sl / (2 * n))) };
+    return .{
+        .w = ws[0],
+        .s = ws[1],
+        .b = ws[2],
+        .n = n,
+        .k = k,
+        .bits = @intCast(wl * 8 / (n * k)),
+        .group = @intCast(k / (sl / (2 * n))),
+    };
 }
 
 fn single(r: *Run, sh: *rows_w.Shared, p: rows_w.Product) !*const rows_w.Dense {
@@ -153,8 +226,21 @@ fn warm(r: *Run, d: *const rows_w.Dense) !void {
     defer for ([_]mtl.Buffer{ x, y[0], y[1], y[2] }) |b| b.deinit();
     const cb = r.queue.commandBuffer();
     const e = cb.compute(.serial);
-    for (d.members) |mb| _ = try rows_w.pipes(sh.a, sh.device, &sh.cache, rows_w.specOf(mb.p, sh.device.generation(), 1, d.n));
-    for ([_]rows_w.Mode{ .loop, .twin, .four }, y) |mode, out| try rows_w.encodeDense(e, d, .{ .b = x }, rows, .{ .b = out }, mode, false);
+    for (d.members) |mb| _ = try rows_w.pipes(
+        sh.a,
+        sh.device,
+        &sh.cache,
+        rows_w.specOf(mb.p, sh.device.generation(), 1, d.n),
+    );
+    for ([_]rows_w.Mode{ .loop, .twin, .four }, y) |mode, out| try rows_w.encodeDense(
+        e,
+        d,
+        .{ .b = x },
+        rows,
+        .{ .b = out },
+        mode,
+        false,
+    );
     e.end();
     cb.commit();
     cb.wait();
@@ -166,11 +252,17 @@ fn warm(r: *Run, d: *const rows_w.Dense) !void {
         const at = (i * d.n + mb.col) * 2;
         const loop = y[0].contents()[at..][0 .. mb.p.n * 2];
         if (mb.twin and rows_w.twinOk(mb.p) and !std.mem.eql(u8, loop, y[1].contents()[at..][0 .. mb.p.n * 2])) {
-            std.log.warn("rows: [{d}, {d}] q{d}/g{d}: the MMA twin differs from the per-row loop here; not taken", .{ mb.p.n, mb.p.k, mb.p.bits, mb.p.group });
+            std.log.warn(
+                "rows: [{d}, {d}] q{d}/g{d}: the MMA twin differs from the per-row loop here; not taken",
+                .{ mb.p.n, mb.p.k, mb.p.bits, mb.p.group },
+            );
             mb.twin = false;
         }
         if (mb.four and !std.mem.eql(u8, loop, y[2].contents()[at..][0 .. mb.p.n * 2])) {
-            std.log.warn("rows: [{d}, {d}] q{d}/g{d}: four rows a simdgroup differ from the per-row loop here; not taken", .{ mb.p.n, mb.p.k, mb.p.bits, mb.p.group });
+            std.log.warn(
+                "rows: [{d}, {d}] q{d}/g{d}: four rows a simdgroup differ from the per-row loop here; not taken",
+                .{ mb.p.n, mb.p.k, mb.p.bits, mb.p.group },
+            );
             mb.four = false;
         }
     };
@@ -182,11 +274,27 @@ pub fn attach(p: *const Prompt, m: *Model, mtp_root: []const u8) !void {
     if (!on(r.device)) return;
     const sh = try r.arena.create(rows_w.Shared);
     const sums = rows_w.Shared.max_rows * (rows_w.Shared.max_k / 8) * 4;
-    sh.* = .{ .a = r.arena, .device = r.device, .sums = .{ .{ .b = try r.buffer(sums) }, .{ .b = try r.buffer(sums) } } };
+    sh.* = .{
+        .a = r.arena,
+        .device = r.device,
+        .sums = .{ .{ .b = try r.buffer(sums) }, .{ .b = try r.buffer(sums) } },
+    };
     for (&m.layers, 0..) |*L, i| {
         const kind = if (L.linear) "gdn" else "att";
-        L.proj.rows = try fromPack(r, sh, p.proj[i], try std.fmt.allocPrint(r.arena, "L{d}.{s}.{s}", .{ i, kind, if (L.linear) "in" else "proj" }), D);
-        L.out.rows = try fromPack(r, sh, p.out[i], try std.fmt.allocPrint(r.arena, "L{d}.{s}.{s}", .{ i, kind, if (L.linear) "out" else "o" }), KO);
+        L.proj.rows = try fromPack(
+            r,
+            sh,
+            p.proj[i],
+            try std.fmt.allocPrint(r.arena, "L{d}.{s}.{s}", .{ i, kind, if (L.linear) "in" else "proj" }),
+            D,
+        );
+        L.out.rows = try fromPack(
+            r,
+            sh,
+            p.out[i],
+            try std.fmt.allocPrint(r.arena, "L{d}.{s}.{s}", .{ i, kind, if (L.linear) "out" else "o" }),
+            KO,
+        );
     }
     m.ple.kv.rows = try fromPack(r, sh, p.ple_kv, "ple.kv", D);
     const head = try raw(r, "language_model.lm_head", replay.VOCAB, D);
@@ -205,5 +313,13 @@ pub fn attach(p: *const Prompt, m: *Model, mtp_root: []const u8) !void {
         try hcOn(r, sh, &L.mhc);
     }
     for ([_]*replay.Hc{ &m.mix, &m.mtp.ahc, &m.mtp.mhc, &m.mtp.mix }) |h| try hcOn(r, sh, h);
-    for ([_]replay.Lane{ m.ple.kv, m.head, m.mtp.proj, m.mtp.fce, m.mtp.fch, m.mtp.out, m.mtp.draft }) |l| if (l.rows) |d| try warm(r, d);
+    for ([_]replay.Lane{
+        m.ple.kv,
+        m.head,
+        m.mtp.proj,
+        m.mtp.fce,
+        m.mtp.fch,
+        m.mtp.out,
+        m.mtp.draft,
+    }) |l| if (l.rows) |d| try warm(r, d);
 }

@@ -67,8 +67,33 @@ fn project(r: *Run, s: Streams, w: Weights, which: []const u8, start: usize, row
     const mixed: Buf = .{ .b = o.mixed, .off = start * 2560 * 2 };
     const inj: Buf = .{ .b = o.inj, .off = start * 4 * 2 };
     if (rows_mode) |sh| {
-        const hw: tf.flashnext_rows.rows_hc.Weights = .{ .scale = .{ .b = s.nw }, .dw = w.dw, .ds = w.ds, .db = w.db, .uw = w.uw, .us = w.us, .ub = w.ub, .w = .{ widthOf(kd), widthOf(ku) } };
-        return tf.flashnext_rows.rows_hc.encode(r.enc, a, r.device, &sh.hc, hw, hn, ssp, .{ .b = s.eps }, rows_buf, rows, part, mixed, inj, false, true);
+        const hw: tf.flashnext_rows.rows_hc.Weights = .{
+            .scale = .{ .b = s.nw },
+            .dw = w.dw,
+            .ds = w.ds,
+            .db = w.db,
+            .uw = w.uw,
+            .us = w.us,
+            .ub = w.ub,
+            .w = .{ widthOf(kd), widthOf(ku) },
+        };
+        return tf.flashnext_rows.rows_hc.encode(
+            r.enc,
+            a,
+            r.device,
+            &sh.hc,
+            hw,
+            hn,
+            ssp,
+            .{ .b = s.eps },
+            rows_buf,
+            rows,
+            part,
+            mixed,
+            inj,
+            false,
+            true,
+        );
     }
     const down = try std.fmt.bufPrint(&role, "qa_hc_down@{s}", .{which});
     try variants.callAs(r, down, rows, &.{ hn, ssp, .{ .b = s.nw }, w.dw, w.ds, w.db, .{ .b = s.eps }, rows_buf }, &.{part}, kd);

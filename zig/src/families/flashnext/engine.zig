@@ -437,7 +437,11 @@ pub const Engine = struct {
         const tp_path: ?[]const u8 = speed_up orelse if (std.c.getenv("TF_FLASHNEXT_TP")) |p| std.mem.span(p) else null;
         if (tp_path != null and !uniform) return error.SpeedUpNeeds6Bit32; // TP splits the 6/32 kernels only
         if (tp_path) |path| r.tp = try fz.Tp2.init(arena, r.device, path);
-        if (r.tp == null) try fz.rows_load.attach(e.pr, m, @import("index.zig").mtpRoot(index.object.get("weight_map").?.object));
+        if (r.tp == null) try fz.rows_load.attach(
+            e.pr,
+            m,
+            @import("index.zig").mtpRoot(index.object.get("weight_map").?.object),
+        );
         return e;
     }
 
@@ -697,7 +701,10 @@ pub const Engine = struct {
             try m.windowEncode(wr, e.wids);
             // the widest windows while copies land whole; otherwise the head's rule
             const copying = e.copy and copy_rate + 0.05 >= head_rate and copy_rate > 0.9;
-            const wn = (if (fixed) |d| d else if (copying) (if (by_cost) |*c| c.copyDrafts(copy_rate) else MAXR - 1) else next_depth) + 1;
+            const wn = (if (fixed) |d| d else if (copying)
+                (if (by_cost) |*c| c.copyDrafts(copy_rate) else MAXR - 1)
+            else
+                next_depth) + 1;
             widths[(round + 1) % 4] = wn;
             if (watch.armed) think.span(r, m.t.picks, wr); // and in place of the target's picks
             const cfg = [4]u32{ @intCast(wr), @intCast(wn), CAP, 0 };
@@ -762,7 +769,10 @@ pub const Engine = struct {
             if (take > 0 and out.tokens(out.ctx, got[0..take])) stop = true;
             emitted += take;
             const cancel = !stop and emitted < max_tokens and out.cancelled(out.ctx);
-            const ag = e.agreeRound(stop or emitted >= max_tokens or cancel, if (by_cost) |*c| c.pick() else rule.pick()) catch |err| {
+            const ag = e.agreeRound(
+                stop or emitted >= max_tokens or cancel,
+                if (by_cost) |*c| c.pick() else rule.pick(),
+            ) catch |err| {
                 failed = err;
                 break;
             };
