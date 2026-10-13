@@ -199,7 +199,14 @@ pub const Reader = struct {
         const x = try r.t(p, name, .f16);
         const bytes = if (rows) try rowHalf(x, r.rank) else x.bytes;
         const n = if (rows) x.shape[0] / world else x.shape[0];
-        return .{ .w = try r.put(try toBf16(r.a(), x.dtype, bytes)), .n = @intCast(n), .k = @intCast(x.shape[1]) };
+        return r.packed_(try toBf16(r.a(), x.dtype, bytes), n, x.shape[1]);
+    }
+
+    /// bf16 [n, k] row-major uploaded in the matmul's fragment order.
+    fn packed_(r: *Reader, bytes: []const u8, n: usize, k: usize) !B16 {
+        const out = try r.a().alloc(u8, bytes.len);
+        try cuda.glm_bmm.pack(out, bytes, n, k);
+        return .{ .w = try r.put(out), .n = @intCast(n), .k = @intCast(k), .frag = true };
     }
 
     /// One EXL3 group (Exl3Linear.from_tensors, strips layout) cut for this rank.
@@ -316,7 +323,7 @@ pub const Reader = struct {
             .wk = try r.put(wk),
             .wv = try r.put(wv),
             .index = .{
-                .kw = .{ .w = try r.put(kw), .n = @intCast(wkx.shape[0] + wpx.shape[0]), .k = @intCast(wkx.shape[1]) },
+                .kw = try r.packed_(kw, wkx.shape[0] + wpx.shape[0], wkx.shape[1]),
                 .qb = try r.b16(p, "self_attn.indexer.wq_b.weight", false),
                 .gate = try r.bf(p, "self_attn.indexer.index_kpool_compress_gate", .f16),
                 .ln_w = try r.put((try r.t(p, "self_attn.indexer.k_norm.weight", .f16)).bytes),
@@ -438,7 +445,7 @@ pub const Reader = struct {
         const n: u32 = c.vocab / world;
         return .{ .embed = try r.put(emb.bytes), .head = .{
             .norm = try r.put((try r.t("", "model.language_model.norm.weight", .bf16)).bytes),
-            .head = .{ .w = try r.put(try rowHalf(lm, r.rank)), .n = n, .k = c.hidden },
+            .head = try r.packed_(try rowHalf(lm, r.rank), n, c.hidden),
             .offset = r.rank * n,
         } };
     }

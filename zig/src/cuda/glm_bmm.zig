@@ -14,10 +14,24 @@ pub const router_ks: u32 = 8;
 
 /// A BF16 matrix [n, k] as the checkpoint stores it (qmm.B16); a call multiplies x [m, k] through it.
 pub const B16 = struct {
-    w: u64, // bf16 [n, k] row-major, device
+    w: u64, // bf16 [n, k] row-major, device; `frag`: in fragment order (pack)
     n: u32,
     k: u32,
+    frag: bool = false,
 };
+
+/// w [n, k] bf16 -> fragment order: per 8-row tile and 64-wide K step, each lane's eight mma B words side by side.
+pub fn pack(out: []u8, w: []const u8, n: usize, k: usize) !void {
+    if (n % 8 != 0 or k % 64 != 0 or w.len != n * k * 2 or out.len != w.len) return error.GlmBmmShape;
+    const src: []align(1) const u32 = std.mem.bytesAsSlice(u32, w);
+    const dst: []align(1) u32 = std.mem.bytesAsSlice(u32, out);
+    const steps = k / 64;
+    for (0..n / 8) |j| for (0..steps) |s| for (0..32) |l| for (0..4) |kk| for (0..2) |h| {
+        const row = 8 * j + l / 4;
+        const col = 64 * s + 16 * kk + 2 * (l % 4) + 8 * h;
+        dst[((j * steps + s) * 32 + l) * 8 + kk * 2 + h] = src[(row * k + col) / 2];
+    };
+}
 
 /// qmm.b16_split_k: K slices fixed by the shape alone, in units of 64, so every row's bits hold at any row count.
 pub fn b16SplitK(n: usize, k: usize) u32 {
@@ -53,6 +67,7 @@ const bm_names = [_][]const u8{ "16", "32", "64", "128" };
 pub const Bmm = struct {
     mod: Module,
     bmm: [2][4]Function, // [f32 out][bm index]
+    pbmm: [2][4]Function, // the same over packed weights
     routers: [4]Function,
     router_part: [4]Function,
     reduce: Function,
@@ -63,6 +78,7 @@ pub const Bmm = struct {
         var b: Bmm = .{
             .mod = try Module.load(d, kernels.glm_bmm),
             .bmm = undefined,
+            .pbmm = undefined,
             .routers = undefined,
             .router_part = undefined,
             .reduce = undefined,
@@ -72,6 +88,7 @@ pub const Bmm = struct {
         inline for (0..2) |f| {
             inline for (0..4) |i| {
                 b.bmm[f][i] = try b.mod.function(std.fmt.comptimePrint("tf_glm_bmm_b16_{s}_{d}", .{ bm_names[i], f }));
+                b.pbmm[f][i] = try b.mod.function(std.fmt.comptimePrint("tf_glm_bmm_p16_{s}_{d}", .{ bm_names[i], f }));
             }
         }
         inline for (0..4) |i| {
@@ -109,7 +126,9 @@ pub const Bmm = struct {
         r.add(@as(i32, @intCast(w.n)));
         r.add(@as(i32, @intCast(w.k)));
         r.add(@as(i32, @intCast(sk)));
-        try launch_.launch(b.bmm[@intFromBool(is_f32)][bmIndex(bm)], .{
+        if (w.frag and w.n % 8 != 0) return error.GlmBmmShape;
+        const fns = if (w.frag) &b.pbmm else &b.bmm;
+        try launch_.launch(fns[@intFromBool(is_f32)][bmIndex(bm)], .{
             .grid = .{ .x = @intCast((m + bm - 1) / bm), .y = @intCast((w.n + 63) / 64), .z = @intCast(sk) },
             .block = .{ .x = @as(u32, if (bm == 128) 256 else 128), .y = 1, .z = 1 },
             .shared = 0,
@@ -180,3 +199,20 @@ pub const Bmm = struct {
         }, s, &rr);
     }
 };
+
+test "pack puts a lane's fragment words of one tile and K step side by side" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const n = 16;
+    const k = 128;
+    const w = try a.alloc(u16, n * k);
+    for (w, 0..) |*v, i| v.* = @intCast(i);
+    const out = try a.alloc(u8, n * k * 2);
+    try pack(out, std.mem.sliceAsBytes(w), n, k);
+    const o: []align(1) const u32 = std.mem.bytesAsSlice(u32, out);
+    // tile 1, step 1, lane 5 (row 9, columns 2 + ...), chunk 3, half 1: column 64 + 48 + 2 + 8 = 122
+    const at = ((1 * 2 + 1) * 32 + 5) * 8 + 3 * 2 + 1;
+    try std.testing.expectEqual(@as(u32, w[9 * k + 122]) | (@as(u32, w[9 * k + 123]) << 16), o[at]);
+    try std.testing.expectError(error.GlmBmmShape, pack(out[0..2], std.mem.sliceAsBytes(w), n, k));
+}
