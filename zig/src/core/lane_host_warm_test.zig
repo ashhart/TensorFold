@@ -171,7 +171,7 @@ fn pausedTurn(lookahead: u32) !struct { cached: ?u32, same: bool } {
             f.drop(saved);
         }
     };
-    var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .lookahead = lookahead, .warm = true, .min_prompt = 0, .min_gap = 4 }, 400);
+    var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .lookahead = lookahead, .warm = if (lookahead == 0) .on else .waits, .min_prompt = 0, .min_gap = 4 }, 400);
     defer store.deinit();
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .warm_turns = true });
     host.cache = &store;

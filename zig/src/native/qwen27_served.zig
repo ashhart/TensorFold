@@ -212,7 +212,7 @@ test "a reply's end is born with its request's prompt: the history mark that req
     const gpa = std.testing.allocator;
     const at: u32 = 5000; // a history mark at 5000 tokens, then a 7-token generation prompt and a 100-token reply
     var fake: FakeStates = .{};
-    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, .{ .warm = true }, (3 * at + 100) << 16);
+    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, .{ .warm = .on }, (3 * at + 100) << 16);
     defer store.deinit();
     var other: [at + 7]u32 = undefined; // another conversation's prompt, its history kept first
     for (&other, 0..) |*t, i| t.* = @intCast(i);

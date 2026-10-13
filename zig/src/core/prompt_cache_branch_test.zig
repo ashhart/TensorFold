@@ -80,7 +80,7 @@ test "a reply's end born with its request's length supersedes none of its states
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .warm = true, .min_prompt = 0, .min_gap = 3 }, 400); // fake bytes 100 + at
+    var s = Store.init(gpa, f.snapshots(), .{ .warm = .on, .min_prompt = 0, .min_gap = 3 }, 400); // fake bytes 100 + at
     defer s.deinit();
     const x = seq(20, 100); // two other conversations' histories, 113 bytes each
     const z = seq(20, 200);
@@ -108,7 +108,7 @@ test "a later turn still supersedes the history and the reply's end: both go bef
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .warm = true, .min_prompt = 0, .min_gap = 3 }, 400); // fake bytes 100 + at
+    var s = Store.init(gpa, f.snapshots(), .{ .warm = .on, .min_prompt = 0, .min_gap = 3 }, 400); // fake bytes 100 + at
     defer s.deinit();
     const x = seq(20, 100); // the least recently used state throughout
     try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &x));
@@ -134,7 +134,7 @@ test "a warm pass's lookup counts with its request's length: room for its mark f
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .warm = true, .min_prompt = 0, .min_gap = 3 }, 470); // fake bytes 100 + at
+    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .warm = .waits, .min_prompt = 0, .min_gap = 3 }, 470); // fake bytes 100 + at
     defer s.deinit();
     const x = seq(20, 100); // another conversation's history, the least recently used state
     try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &x));
