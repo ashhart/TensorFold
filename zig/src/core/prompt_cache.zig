@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 const imprint = @import("prompt_imprint.zig");
 const modes = @import("cache_modes.zig");
 const learned = @import("prompt_learn.zig");
+const cuts = @import("prompt_cuts.zig");
 
 /// A family's copy of one state.
 pub const Saved = *anyopaque;
@@ -201,7 +202,7 @@ pub const Store = struct {
     /// The chunk start at or before `at`: the request's, else the family's grid (0 when none).
     fn startAt(s: *const Store, starts: []const u32, at: u32) u32 {
         if (starts.len == 0 and s.rules.grid > 0) return at - at % s.rules.grid;
-        return floorStart(starts, at);
+        return cuts.floorStart(starts, at);
     }
 
     /// The latest kept state this prompt can resume at `at` or under min_gap before it (null: none).
@@ -391,7 +392,7 @@ pub const Store = struct {
         // a warm pass (its history the whole prompt) keeps where a state can be keyed, its lookahead before the end
         const warm_pass = s.rules.warm != .off and history_len == prompt.len and s.rules.lookahead > 0;
         const history: u32 = if (warm_pass) @intCast(prompt.len -| s.rules.lookahead) else history_len;
-        try want.append(a, if (short) chunkEnd(s.rules.chunk, from, history, prompt.len, starts, spans) else history);
+        try want.append(a, if (short) cuts.chunkEnd(s.rules.chunk, from, history, prompt.len, starts, spans) else history);
         if (rewind > 0 and s.active_rewind_at == rewind) try want.append(a, rewind);
         if (previous.len > 0 and !short) {
             const stable: u32 = @intCast(std.mem.indexOfDiff(u32, previous, prompt) orelse @min(previous.len, prompt.len));
@@ -567,26 +568,6 @@ pub const Store = struct {
 pub fn note(comptime fmt: []const u8, args: anytype) void {
     if (@import("builtin").is_test) return;
     std.log.warn("prompt cache: " ++ fmt, args);
-}
-
-/// The chunk start at or before `at` (0 when none).
-fn floorStart(starts: []const u32, at: u32) u32 {
-    var best: u32 = 0;
-    for (starts) |p| if (p <= at and p > best) {
-        best = p;
-    };
-    return best;
-}
-
-/// The last chunk end at or before `at` of a pass from `from`: whole chunks from its last start, span edge or `from`.
-fn chunkEnd(step: u32, from: u32, at: u32, len: usize, starts: []const u32, spans: []const modes.Span) u32 {
-    if (at <= from or at >= len) return at; // the prompt's end ends a chunk; the caller drops marks at or before `from`
-    var cut = from;
-    for (starts) |c| cut = if (c > cut and c <= at) c else cut;
-    for (spans) |span| for (span) |c| {
-        cut = if (c > cut and c <= at) c else cut;
-    };
-    return cut + (at - cut) / step * step;
 }
 
 test {
