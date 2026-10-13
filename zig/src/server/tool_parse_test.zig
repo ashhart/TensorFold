@@ -39,6 +39,7 @@ test "a call the end token left open closes when it parses whole" {
         .{ "<tool_call>\n<function=lookup>\n", "</function></tool_call>", "{}", "" },
         .{ "<tool_call>\n<function=lookup>\n<parameter=n>\n5\n</parameter>\n</function>\n", "</tool_call>", "{\"n\":5}", "" },
         .{ "<tool_call>lookup<arg_key>n</arg_key><arg_value>7</arg_value>", "</tool_call>", "{\"n\":7}", "" },
+        .{ "Trying.<tool_call>lookup<arg_key>n</arg_key><arg_value>7", "</arg_value></tool_call>", "{\"n\":7}", "Trying." }, // a GLM value left open (2.x, #285)
         .{ "<tool_call>{\"name\":\"lookup\"}</tool_call>\n<tool_call>{\"name\":\"lookup\",\"arguments\":{\"n\":2}", "}</tool_call>", "{\"n\":2}", "" },
         .{ "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"<tool_call>\"}", "}</tool_call>", "{\"q\":\"<tool_call>\"}", "" },
     };
@@ -62,7 +63,6 @@ test "a call left open that would not parse whole stays the reply's text" {
         "Trying.<tool_call>\n<function=lookup>\n<parameter=q>\nfast ca", // inside a parameter
         "Trying.<tool_call>\n<function=lookup>\n<parameter=n>\n5\n", // before its </parameter>
         "Trying.<tool_call>{\"name\":\"launch rocket!\",\"arguments\":{}}", // no function name
-        "Trying.<tool_call>lookup<arg_key>n</arg_key><arg_value>7", // a GLM value left open
         "Trying.<tool_call>", // nothing written
         "Trying <tool_call> tags.<tool_call>{\"name\":\"lookup\"}", // an earlier opener would take the closer
     };
@@ -272,4 +272,40 @@ test "a repaired GLM call parses, in both modes and once the end token closed it
     };
     const open = "<tool_call>read_file filePath</arg_key><arg_value>/x</arg_value>";
     try std.testing.expectEqualStrings("</tool_call>", try closeCall(a, open, tools));
+}
+
+test "a GLM call the end token left open closes as the 2.x line closes it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a,
+        \\[{"type":"function","function":{"name":"read_file","parameters":{"properties":{"path":{"type":"string"},"limit":{"type":"integer"}}}}},
+        \\ {"type":"function","function":{"name":"run","parameters":{"properties":{"command":{"type":"string"}}}}},
+        \\ {"type":"function","function":{"name":"now","parameters":{"properties":{}}}}]
+    )).ok.array;
+    const closes = [_][3][]const u8{ // the reply, what closes it, the tool the last call names (tests/test_glm_tool_call_end.py)
+        .{ "<tool_call>read_file<arg_key>path</arg_key><arg_value>x</arg_value>", "</tool_call>", "read_file" },
+        .{ "<tool_call>run<arg_key>command</arg_key><arg_value>ls -la", "</arg_value></tool_call>", "run" },
+        .{ "Let me look:<tool_call>now", "</tool_call>", "now" },
+        .{ "<tool_call>now</tool_call>\n<tool_call>read_file<arg_key>path</arg_key><arg_value>x</arg_value>\n", "</tool_call>", "read_file" },
+        .{ "<tool_call>read_file path</arg_key><arg_value>x", "</arg_value></tool_call>", "read_file" }, // and repaired
+    };
+    for (closes) |c| {
+        const close = try closeCall(a, c[0], tools);
+        try std.testing.expectEqualStrings(c[1], close);
+        const r = try parse(a, try std.mem.concat(a, u8, &.{ c[0], close }), tools, null);
+        try std.testing.expectEqualStrings(c[2], r.calls.?[r.calls.?.len - 1].get("function").?.get("name").?.string);
+    }
+    const left_open = [_][]const u8{
+        "no call at all",
+        "<tool_call>now</tool_call>", // closed already
+        "<tool_call>launch<arg_key>x</arg_key><arg_value>1", // a tool the client did not offer
+        "<tool_call>run<arg_key>comm", // a key with no value
+        "<tool_call>run<arg_key>command</arg_key>", // ... or no value yet
+        "<tool_call>run command=ls", // not GLM's markup
+        "<tool_call>", // nothing written
+        "<tool_call>now</think>The answer.", // the think block went on past it
+        "<tool_call>run<arg_key>command</arg_key><arg_value>ls</arg_value> and then", // text after an argument
+    };
+    for (left_open) |text| try std.testing.expectEqualStrings("", try closeCall(a, text, tools));
 }
