@@ -14,6 +14,10 @@ const Stream = stream_.Stream;
 pub const span = 2048;
 pub const max_depth = 128;
 const part_smem = [2]u32{ 4 * 2 * 32 * 16 * 16, 4 * 2 * 16 * 32 * 16 + 16 * 32 * 16 };
+/// The one-warp blocks' shared memory: one warp's K/V slots (at 256 also the queries).
+const part_smem_w1 = [2]u32{ 2 * 32 * 16 * 16, 2 * 16 * 32 * 16 + 16 * 32 * 16 };
+/// A group's slices: its key tiles dealt to 4 warps, one partial each, combined in order by the merge.
+const slices = 4;
 
 /// row_stream [n], streams [s, 4] (committed at [2]), offs [s, 2] (K, V from origin), paths [n, max_depth], depths.
 pub const Rows = struct { row_stream: u64, streams: u64, offs: u64, origin: u64, paths: u64, depths: u64 };
@@ -25,9 +29,13 @@ pub const TreeAttention = struct {
     paths_fn: Function,
     part_fns: [2]Function, // head dim 128, 256
     shared_fns: [2]Function,
+    part_w1: [2]Function, // the same slices, one warp a block
+    shared_w1: [2]Function,
     merge_fn: Function,
     /// The shared kernel's blocks a key head: a fixed grid walking every (row, group) (bits do not depend on it).
     shared_blocks: usize = 96,
+    /// The device's SMs: where the four-warp grid would leave some idle, a slice takes its own block (the same bits).
+    sms: usize = 0,
 
     pub fn load(d: *const Driver) !TreeAttention {
         if (!kernels.available) return error.BuiltWithoutKernels;
@@ -37,7 +45,11 @@ pub const TreeAttention = struct {
         for (&parts, part_smem) |*f, b| try f.allowDynamicShared(b);
         var shared: [2]Function = .{ try mod.function("tf_tree_shared"), try mod.function("tf_tree_shared_256") };
         for (&shared, part_smem) |*f, b| try f.allowDynamicShared(b);
-        return .{ .mod = mod, .paths_fn = try mod.function("tf_tree_paths"), .part_fns = parts, .shared_fns = shared, .merge_fn = try mod.function("tf_tree_merge") };
+        var parts1: [2]Function = .{ try mod.function("tf_tree_part_w1"), try mod.function("tf_tree_part_256_w1") };
+        for (&parts1, part_smem_w1) |*f, b| try f.allowDynamicShared(b);
+        var shared1: [2]Function = .{ try mod.function("tf_tree_shared_w1"), try mod.function("tf_tree_shared_256_w1") };
+        for (&shared1, part_smem_w1) |*f, b| try f.allowDynamicShared(b);
+        return .{ .mod = mod, .paths_fn = try mod.function("tf_tree_paths"), .part_fns = parts, .shared_fns = shared, .part_w1 = parts1, .shared_w1 = shared1, .merge_fn = try mod.function("tf_tree_merge") };
     }
 
     pub fn unload(g: *TreeAttention) void {
@@ -49,13 +61,13 @@ pub const TreeAttention = struct {
         return (keys + span - 1) / span;
     }
 
-    /// The fp32 partials of `rows` rows, `hk` key heads and `ng` groups: o [.., 16, dim], then max and sum [.., 16].
+    /// fp32 partials of `rows` rows, `hk` key heads, `ng` groups, 4 slices each: o [.., 16, dim], max and sum [.., 16].
     pub fn scratchBytes(rows: usize, hk: usize, ng: usize, dim: usize) usize {
-        return rows * hk * ng * 16 * (dim + 2) * 4;
+        return rows * hk * ng * slices * 16 * (dim + 2) * 4;
     }
 
     pub fn scratch(base: u64, rows: usize, hk: usize, ng: usize, dim: usize) Scratch {
-        const parts = rows * hk * ng * 16;
+        const parts = rows * hk * ng * slices * 16;
         return .{ .o = base, .m = base + parts * dim * 4, .l = base + parts * dim * 4 + parts * 4 };
     }
 
@@ -86,15 +98,20 @@ pub const TreeAttention = struct {
         c.add(scale);
         c.add(@as(i32, @intCast(ng)));
         c.add(@as(i32, @intCast(n)));
-        try launch_.launch(g.shared_fns[which], .{ .grid = .{ .x = @intCast(@min(n * ng, g.shared_blocks)), .y = @intCast(hk), .z = 1 }, .block = .{ .x = 128 }, .shared = part_smem[which] }, s, &c);
+        // one warp a block where four-warp blocks would leave SMs idle: each slice its own block, the same partials
+        const one = @min(n * ng, g.shared_blocks) * hk < g.sms;
+        const per: usize = if (one) slices else 1;
+        const block: u32 = if (one) 32 else 128;
+        const smem = if (one) part_smem_w1[which] else part_smem[which];
+        try launch_.launch(if (one) g.shared_w1[which] else g.shared_fns[which], .{ .grid = .{ .x = @intCast(@min(n * ng, g.shared_blocks) * per), .y = @intCast(hk), .z = 1 }, .block = .{ .x = block }, .shared = smem }, s, &c);
         // a row's own block: its boundary group and at most the next (a path is at most 128 keys)
-        try launch_.launch(g.part_fns[which], .{ .grid = .{ .x = @intCast(n), .y = @intCast(hk), .z = @intCast(@min(ng, 2)) }, .block = .{ .x = 128 }, .shared = part_smem[which] }, s, &a);
+        try launch_.launch(if (one) g.part_w1[which] else g.part_fns[which], .{ .grid = .{ .x = @intCast(n), .y = @intCast(hk), .z = @intCast(@min(ng, 2) * per) }, .block = .{ .x = block }, .shared = smem }, s, &a);
         var b: launch_.Args = .{};
         for ([_]u64{ sc.o, sc.m, sc.l, rows.row_stream, rows.streams, rows.depths, out }) |v| b.add(v);
         b.add(@as(i32, @intCast(h)));
         b.add(@as(i32, @intCast(hk)));
         b.add(@as(i32, @intCast(ng)));
         b.add(@as(i32, @intCast(dim)));
-        try launch_.launch(g.merge_fn, .{ .grid = .{ .x = @intCast(n), .y = @intCast(hk), .z = 1 }, .block = .{ .x = 256 } }, s, &b);
+        try launch_.launch(g.merge_fn, .{ .grid = .{ .x = @intCast(n), .y = @intCast(hk), .z = @intCast(h / hk) }, .block = .{ .x = 256 } }, s, &b);
     }
 };

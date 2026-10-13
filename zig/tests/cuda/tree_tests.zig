@@ -191,11 +191,20 @@ fn case(gpu: check.Gpu, d: usize, h: usize, hk: usize, seed: u64, worst_all: *f6
     g.shared_blocks = 96;
     const wide = try call(&x, s, &g, d, all, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, 129, scale);
     try check.sameBytes("tree attention: groups for a 262k context", std.mem.sliceAsBytes(wide), std.mem.sliceAsBytes(got));
+    // one warp a block (as on a device with more SMs than four-warp blocks): every slice's partial the same
+    g.sms = 1 << 20;
+    defer g.sms = 0;
+    const one = try call(&x, s, &g, d, all, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale);
+    try check.sameBytes("tree attention: one warp a block", std.mem.sliceAsBytes(one), std.mem.sliceAsBytes(got));
+    g.shared_blocks = 1;
+    const one_strided = try call(&x, s, &g, d, all, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale);
+    try check.sameBytes("tree attention: one warp a block, one shared block", std.mem.sliceAsBytes(one_strided), std.mem.sliceAsBytes(got));
+    g.shared_blocks = 96;
 }
 
 pub fn run(gpu: check.Gpu) !void {
     var worst: f64 = 0;
     try case(gpu, 128, 48, 4, 41, &worst); // Kolibri
     try case(gpu, 256, 24, 4, 42, &worst); // Qwen3.8-27B
-    check.pass("tree attention: dim 128 and 256, committed keys and paths within float64 tolerance (worst {d:.3}), a stream's bits alone, any group slots", .{worst});
+    check.pass("tree attention: dim 128 and 256, committed keys and paths within float64 tolerance (worst {d:.3}), a stream's bits alone, any group slots, four-warp or one-warp blocks", .{worst});
 }
