@@ -64,7 +64,7 @@ const Lone = struct {
     }
 };
 
-fn serve(request: *const Request) !struct { opened: u32, resumed: u32 } {
+fn serve(request: *const Request, resumes: bool) !struct { opened: u32, resumed: u32 } {
     // a drafted family's windowed rounds, as the lone driver's backends run them (lanes/engine_test.zig's model)
     var costs: [16]lanes.config.Cost = undefined;
     for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
@@ -77,7 +77,7 @@ fn serve(request: *const Request) !struct { opened: u32, resumed: u32 } {
     defer core.deinit();
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
     var lone: Lone = .{ .be = target.backend() };
-    host.lone = .{ .ctx = &lone, .run = Lone.run };
+    host.lone = .{ .ctx = &lone, .run = Lone.run, .resumes = resumes };
     try host.start();
     defer host.stop();
     var box: Box = .{};
@@ -99,13 +99,19 @@ fn serve(request: *const Request) !struct { opened: u32, resumed: u32 } {
 const prompt = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6 };
 
 test "the lane core's last stream goes back to the lone driver, its tokens served once each, in order" {
-    const runs = try serve(&.{ .prompt = &prompt, .max_tokens = 24 });
+    const runs = try serve(&.{ .prompt = &prompt, .max_tokens = 24 }, true);
     try std.testing.expectEqual(@as(u32, 1), runs.opened);
     try std.testing.expectEqual(@as(u32, 1), runs.resumed);
 }
 
 test "a stream the lone driver does not take stays in the lane core to its end" {
-    const runs = try serve(&.{ .prompt = &prompt, .max_tokens = 24, .drafts = false });
+    const runs = try serve(&.{ .prompt = &prompt, .max_tokens = 24, .drafts = false }, true);
     try std.testing.expectEqual(@as(u32, 0), runs.opened);
+    try std.testing.expectEqual(@as(u32, 0), runs.resumed);
+}
+
+test "a lone driver that only opens streams never gets the lane core's last stream back" {
+    const runs = try serve(&.{ .prompt = &prompt, .max_tokens = 24 }, false);
+    try std.testing.expectEqual(@as(u32, 1), runs.opened);
     try std.testing.expectEqual(@as(u32, 0), runs.resumed);
 }

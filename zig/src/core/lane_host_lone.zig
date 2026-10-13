@@ -21,6 +21,7 @@ fn takes(h: *LaneHost, job: *Job) bool {
 /// After a round: the lane core's last live stream goes back to the driver when nothing else waits or is due.
 pub fn reclaim(h: *LaneHost) void {
     const lone = h.lone orelse return;
+    if (!lone.resumes) return; // a driver that only opens streams would prefill this one again
     h.lock();
     const idle = h.admitted.items.len == 1 and h.queued.items.len == 0 and h.filling.items.len == 0 and !h.foregroundWaiting() and h.cancels.items.len == 0 and !h.closing;
     const job = if (idle) h.admitted.items[0] else null;
