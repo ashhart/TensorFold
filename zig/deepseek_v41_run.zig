@@ -48,6 +48,7 @@ fn validArguments(args: []const [:0]const u8) bool {
     if (std.mem.eql(u8, mode, "attention-history-sameinput")) return args.len == 8;
     for ([_][]const u8{ "teacher", "generate", "attention-sameinput", "hc-sameinput", "moe-sameinput", "margins", "lanes" }) |name|
         if (std.mem.eql(u8, mode, name)) return args.len == 6 or args.len == 7;
+    if (std.mem.eql(u8, mode, "lanes")) return args.len == 6 or args.len == 7 or args.len == 8;
     for ([_][]const u8{ "seams", "oracle", "profile", "trace" }) |name|
         if (std.mem.eql(u8, mode, name)) return args.len == 6;
     return false;
@@ -71,7 +72,7 @@ fn write(io: std.Io, a: std.mem.Allocator, dir: []const u8, name: []const u8, da
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data });
 }
 const Counters = struct { disk_read: u64, pageins: u64, footprint: u64 };
-/// Darwin's rusage_info_v4 fields the runner reads around execution (page-ins, disk reads, footprint).
+/// Darwin's full rusage_info_v4: the kernel writes all 336 bytes, so every field must be here.
 const RUsage = extern struct {
     uuid: [16]u8,
     user_time: u64,
@@ -91,6 +92,24 @@ const RUsage = extern struct {
     child_pageins: u64,
     child_elapsed_abstime: u64,
     diskio_bytesread: u64,
+    diskio_byteswritten: u64,
+    cpu_time_qos_default: u64,
+    cpu_time_qos_maintenance: u64,
+    cpu_time_qos_background: u64,
+    cpu_time_qos_utility: u64,
+    cpu_time_qos_legacy: u64,
+    cpu_time_qos_user_initiated: u64,
+    cpu_time_qos_user_interactive: u64,
+    billed_system_time: u64,
+    serviced_system_time: u64,
+    logical_writes: u64,
+    lifetime_max_phys_footprint: u64,
+    instructions: u64,
+    cycles: u64,
+    billed_energy: u64,
+    serviced_energy: u64,
+    interval_max_phys_footprint: u64,
+    runnable_time: u64,
 };
 fn counters() !Counters {
     const proc_pid_rusage = struct {
@@ -164,12 +183,8 @@ pub fn main(init: std.process.Init) !void {
     const is_attention_history = std.mem.eql(u8, mode, "attention-history-sameinput");
     const is_hc = std.mem.eql(u8, mode, "hc-sameinput");
     const is_moe = std.mem.eql(u8, mode, "moe-sameinput");
-<<<<<<< HEAD
-    const max_ids: usize = if (std.mem.eql(u8, mode, "margins")) 1048576 else if (std.mem.eql(u8, mode, "oracle") or std.mem.eql(u8, mode, "trace")) 16 else if (std.mem.eql(u8, mode, "profile")) ds.prefill_step else if (std.mem.eql(u8, mode, "teacher") or std.mem.eql(u8, mode, "seams")) 4096 else 1048576;
-=======
     const is_lanes = std.mem.eql(u8, mode, "lanes");
-    const max_ids: usize = if (std.mem.eql(u8, mode, "oracle") or std.mem.eql(u8, mode, "trace")) 16 else if (std.mem.eql(u8, mode, "profile")) ds.prefill_step else if (std.mem.eql(u8, mode, "teacher") or std.mem.eql(u8, mode, "seams") or is_lanes) 4096 else 1048576;
->>>>>>> b24abd4d (DeepSeek V4.1: lane slots, each with its own caches and Engram cursor)
+    const max_ids: usize = if (std.mem.eql(u8, mode, "margins")) 1048576 else if (std.mem.eql(u8, mode, "oracle") or std.mem.eql(u8, mode, "trace")) 16 else if (std.mem.eql(u8, mode, "profile")) ds.prefill_step else if (std.mem.eql(u8, mode, "teacher") or std.mem.eql(u8, mode, "seams") or is_lanes) 4096 else 1048576;
     const input = if (is_operators or is_attention or is_attention_history or is_hc or is_moe) &.{} else try std.Io.Dir.cwd().readFileAlloc(io, args[4], arena, .limited(max_ids * 12 + 2));
     const ids: []const u32 = if (is_operators or is_attention or is_attention_history or is_hc or is_moe) &.{} else try std.json.parseFromSliceLeaky([]const u32, arena, input, .{});
     if (!is_operators and !is_attention and !is_attention_history and !is_hc and !is_moe and (ids.len == 0 or ids.len > 1048576)) return error.InvalidPrompt;
@@ -187,7 +202,14 @@ pub fn main(init: std.process.Init) !void {
     const model = try a.create(ds.Model);
     defer a.destroy(model);
     const begin = mtl.clock.seconds();
-    model.* = try ds.Model.open(a, io, .{ .dir = args[2], .table_dir = args[3], .token_map = map, .lanes = if (is_lanes) 2 else 1 });
+    model.* = try ds.Model.open(a, io, .{
+        .dir = args[2],
+        .table_dir = args[3],
+        .token_map = map,
+        .lanes = if (is_lanes) 2 else 1,
+        // Two full-capacity caches sit at the machine's wired edge; the receipt needs only the prompt's window.
+        .context = if (is_lanes and args.len > 7) try number(args[7]) else 0,
+    });
     defer model.deinit();
     const ready = mtl.clock.seconds();
     const before = try counters();
