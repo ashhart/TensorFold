@@ -93,21 +93,44 @@ test "a planned family's own grid gives the starts when a request names none, an
     try std.testing.expectEqual(fresh(&t2), f.pass(&s, &t2, p2));
 }
 
-test "a planned family keeps marks on a short prompt; an unplanned one waits for min_prompt" {
+/// Prompt calls of a pass from `from`: `step` rows on from each cut, sooner at any of `cuts` (as qwen27_slots.prefill).
+fn calls(len: u32, from: u32, step: u32, cuts: []const []const u32) usize {
+    var n: usize = 0;
+    var at = from;
+    while (at < len) : (n += 1) {
+        var end = @min(len, at + step);
+        for (cuts) |list| for (list) |c| if (c > at and c < end) {
+            end = c;
+        };
+        at = end;
+    }
+    return n;
+}
+
+test "a short prompt: a planned family keeps its marks, an unplanned one only its history's mark, at a chunk end its pass cuts anyway" {
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    const t1 = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+    const t1 = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
     var planned = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .planned = true, .grid = 4 }, 1 << 20);
     defer planned.deinit();
-    const p1 = try planned.begin(a, &t1, 7, &.{}, &.{}, null, &.{});
-    try std.testing.expectEqualSlices(u32, &.{4}, p1.marks); // 10 tokens, under the default min_prompt
-    var serial = Store.init(gpa, f.snapshots(), .{ .lookahead = 1 }, 1 << 20);
+    try std.testing.expectEqualSlices(u32, &.{4}, (try planned.begin(a, &t1, 7, &.{}, &.{}, null, &.{})).marks); // 12 tokens, under the default min_prompt
+    var serial = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .chunk = 3 }, 1 << 20);
     defer serial.deinit();
-    const p2 = try serial.begin(a, &t1, 7, &.{}, &.{}, null, &.{});
-    try std.testing.expectEqual(@as(usize, 0), p2.marks.len);
+    const p = try serial.begin(a, &t1, 7, &.{2}, &.{}, null, &.{}); // the shared block at 2 waits for min_prompt
+    try std.testing.expectEqualSlices(u32, &.{6}, p.marks); // history 7 floored to the pass's cut at 6 (3, 6, 9, 12)
+    try std.testing.expectEqual(calls(12, 0, 3, &.{}), calls(12, 0, 3, &.{p.marks})); // no extra prompt call
+    try std.testing.expect(calls(12, 0, 3, &.{&.{7}}) > calls(12, 0, 3, &.{})); // the history's own position would add one
+    try std.testing.expectEqual(fresh(&t1), f.pass(&serial, &t1, p));
+    try std.testing.expectEqual(@as(u32, 6), serial.find(&.{ 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0 }, &.{}, &.{}).?.at); // the same history, a new tail
+    var taps = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .chunk = 1 }, 1 << 20); // a pass that keeps at any row (Flash Next's mark taps)
+    defer taps.deinit();
+    try std.testing.expectEqualSlices(u32, &.{7}, (try taps.begin(a, &t1, 7, &.{2}, &.{}, null, &.{})).marks);
+    var none = Store.init(gpa, f.snapshots(), .{ .lookahead = 1 }, 1 << 20); // naming no chunk rows: nothing, as before
+    defer none.deinit();
+    try std.testing.expectEqual(@as(usize, 0), (try none.begin(a, &t1, 7, &.{}, &.{}, null, &.{})).marks.len);
 }
 
 test "eviction frees a conversation's superseded state first, then the oldest; a state past the budget is refused" {
@@ -183,25 +206,37 @@ test "marks: the stable prefix with the last prompt and shared blocks, past the 
     try std.testing.expectEqualSlices(u32, &.{11}, try s.marks(a, &prompt, 10, 12, &.{}, &.{}, &.{}));
 }
 
-test "prompts under min_prompt keep nothing (their extra prompt call would cost more than reuse saves), longer ones keep as before" {
+test "under min_prompt the history's mark floors to its pass's last cut from the resume point, so it adds no prompt call, and the next turn resumes there exactly" {
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .lookahead = 1, .min_prompt = 8 }, 1 << 20);
+    var s = Store.init(gpa, f.snapshots(), .{ .warm = true, .min_prompt = 64, .min_gap = 8, .chunk = 4 }, 1 << 20); // the 27B's rules, scaled down
     defer s.deinit();
-    const short = [_]u32{ 1, 2, 3, 4, 5, 9, 9 }; // 7 tokens, history 5
-    const p = try s.begin(a, &short, 5, &.{}, &.{}, null, &.{});
-    try std.testing.expectEqualSlices(u32, &.{}, p.marks);
-    try std.testing.expectEqual(fresh(&short), f.pass(&s, &short, p));
-    try std.testing.expectEqual(@as(usize, 0), s.entries.items.len);
-    const long = [_]u32{ 1, 2, 3, 4, 5, 9, 7, 7, 9, 9 }; // 10 tokens: the next turn keeps its history, resuming nothing
-    const q = try s.begin(a, &long, 8, &.{}, &.{}, null, &.{});
-    try std.testing.expectEqual(@as(u32, 0), q.from);
-    try std.testing.expectEqualSlices(u32, &.{8}, q.marks);
-    try std.testing.expectEqual(fresh(&long), f.pass(&s, &long, q));
-    try std.testing.expectEqual(@as(u32, 8), s.find(&.{ 1, 2, 3, 4, 5, 9, 7, 7, 9, 9, 4 }, &.{}, &.{}).?.at);
+    var t2: [34]u32 = undefined;
+    for (&t2, 1..) |*t, i| t.* = @intCast(i);
+    const t1 = t2[0..23]; // the first turn: history 18, the request's starts at 4 and 11 (a system block's cut)
+    const starts1 = [_]u32{ 4, 11 };
+    const p = try s.begin(a, t1, 18, &.{}, &starts1, null, &.{});
+    try std.testing.expectEqualSlices(u32, &.{15}, p.marks); // its cuts 4, 8, 11, 15, 19, 23: a step on from 11, not 16 on a grid from 0
+    try std.testing.expectEqual(calls(23, 0, 4, &.{&starts1}), calls(23, 0, 4, &.{ &starts1, p.marks }));
+    try std.testing.expect(calls(23, 0, 4, &.{ &starts1, &.{16} }) > calls(23, 0, 4, &.{&starts1}));
+    try std.testing.expectEqual(fresh(t1), f.pass(&s, t1, p));
+    const starts2 = [_]u32{ 4, 11, 25 }; // the next turn: history 30, the reply decoded in rows 19 to 27
+    const spans2 = [_][2]u32{.{ 19, 27 }};
+    const q = try s.begin(a, &t2, 30, &.{}, &starts2, null, &spans2);
+    try std.testing.expectEqual(@as(u32, 15), q.from);
+    try std.testing.expectEqualSlices(u32, &.{27}, q.marks); // from 15 its cuts are 19, 23, 25, 27, 31, 34: the span's end, not 29
+    try std.testing.expectEqual(calls(34, 15, 4, &.{ &starts2, &.{ 19, 27 } }), calls(34, 15, 4, &.{ &starts2, &.{ 19, 27 }, q.marks }));
+    try std.testing.expectEqual(fresh(&t2), f.pass(&s, &t2, q));
+    try std.testing.expectEqualSlices(u32, &.{29}, try s.marks(a, &t2, 17, 30, &.{}, &starts1, &.{})); // resumed at a reply's end: 21, 25, 29, not 27 from 11
+    try std.testing.expectEqual(calls(34, 17, 4, &.{&starts1}), calls(34, 17, 4, &.{ &starts1, &.{29} }));
+    try std.testing.expectEqualSlices(u32, &.{}, try s.marks(a, &t2, 0, 0, &.{}, &.{}, &.{})); // a raw prompt keeps nothing
+    try std.testing.expectEqualSlices(u32, &.{}, try s.marks(a, t2[0..30], 15, 30, &.{}, &starts2, &.{})); // a warm pass's end is its last cut: the host keeps it
+    var long: [70]u32 = undefined; // past min_prompt: the history exactly and the shared block, as before
+    for (&long, 0..) |*t, i| t.* = @intCast(200 + i);
+    try std.testing.expectEqualSlices(u32, &.{ 40, 66 }, (try s.begin(a, &long, 66, &.{40}, &.{}, null, &.{})).marks);
 }
 
 test "kept states charge their real storage, a save takes spare storage first, and spare stays inside the budget" {

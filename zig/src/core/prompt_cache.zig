@@ -84,8 +84,10 @@ pub const Rules = struct {
     grid: u32 = 0,
     /// A mark other than the history's is kept only this far from every other mark and the resume point.
     min_gap: u32 = 256,
-    /// Shorter prompts keep nothing where a mark adds a prompt call; a planned family's marks add none.
+    /// Shorter prompts keep only the history's mark, at a chunk end (`chunk`); a planned family's marks add no call.
     min_prompt: u32 = 4096,
+    /// Rows an unplanned pass's chunk runs from its resume point or last cut (1: any row; 0: short prompts keep none).
+    chunk: u32 = 0,
     /// Replies are prefilled in background passes kept at their end: a pass resumed near its history keeps no mark.
     warm: bool = false,
     /// A paged store (prompt_radix.zig): the tokens a page holds, where its marks and resumes sit (0: not paged).
@@ -266,9 +268,9 @@ pub const Store = struct {
         if (e == null) s.counts.misses += 1;
         const from = if (e) |x| x.at else 0;
         const marks_ = if (s.active_rewind_at == 0)
-            try s.fitting(a, try s.marks(a, prompt, from, history_len, shared, starts, if (e) |x| x.last else &.{}))
+            try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, 0, shared, starts, spans, if (e) |x| x.last else &.{}))
         else
-            try s.fittingRewind(a, try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, s.active_rewind_at, shared, starts, if (e) |x| x.last else &.{})), endpoint, s.active_rewind_at, endpoint_bytes);
+            try s.fittingRewind(a, try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, s.active_rewind_at, shared, starts, spans, if (e) |x| x.last else &.{})), endpoint, s.active_rewind_at, endpoint_bytes);
         for (shared) |w| { // the shared cuts this pass keeps: their states serve other conversations too
             const at = if (s.rules.planned) s.startAt(starts, w) else w;
             if (std.mem.indexOfScalar(u32, marks_, at) != null) s.noteShared(prompt[0 .. at + s.rules.lookahead]);
@@ -376,24 +378,26 @@ pub const Store = struct {
 
     /// Where a pass from `from` keeps states: the history, then min_gap apart the stable prefix and shared blocks.
     pub fn marks(s: *const Store, a: Allocator, prompt: []const u32, from: u32, history_len: u32, shared: []const u32, starts: []const u32, previous: []const u32) ![]const u32 {
-        return s.marksRewind(a, prompt, from, history_len, 0, shared, starts, previous);
+        return s.marksRewind(a, prompt, from, history_len, 0, shared, starts, &.{}, previous);
     }
 
     /// `marks` with the active rewind second: kept however near the other marks, never at or before the resume point.
-    fn marksRewind(s: *const Store, a: Allocator, prompt: []const u32, from: u32, history_len: u32, rewind: u32, shared: []const u32, starts: []const u32, previous: []const u32) ![]const u32 {
-        if (!s.rules.planned and prompt.len < s.rules.min_prompt) return &.{};
+    fn marksRewind(s: *const Store, a: Allocator, prompt: []const u32, from: u32, history_len: u32, rewind: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span, previous: []const u32) ![]const u32 {
+        const short = !s.rules.planned and prompt.len < s.rules.min_prompt; // the history's mark only, where the pass cuts a chunk anyway
+        if (short and s.rules.chunk == 0) return &.{};
         var out: std.ArrayList(u32) = .empty;
         var want: std.ArrayList(u32) = .empty;
         defer want.deinit(a);
         // a warm pass (its history the whole prompt) keeps where a state can be keyed, its lookahead before the end
         const warm_pass = s.rules.warm and history_len == prompt.len and s.rules.lookahead > 0;
-        try want.append(a, if (warm_pass) @intCast(prompt.len -| s.rules.lookahead) else history_len);
+        const history: u32 = if (warm_pass) @intCast(prompt.len -| s.rules.lookahead) else history_len;
+        try want.append(a, if (short) chunkEnd(s.rules.chunk, from, history, prompt.len, starts, spans) else history);
         if (rewind > 0 and s.active_rewind_at == rewind) try want.append(a, rewind);
-        if (previous.len > 0) {
+        if (previous.len > 0 and !short) {
             const stable: u32 = @intCast(std.mem.indexOfDiff(u32, previous, prompt) orelse @min(previous.len, prompt.len));
             if (stable > 0 and stable < history_len and stable >= history_len / 2) try want.append(a, stable);
         }
-        try want.appendSlice(a, shared);
+        if (!short) try want.appendSlice(a, shared);
         for (want.items, 0..) |w, k| {
             const at = if (s.rules.planned) s.startAt(starts, w) else w;
             if (at <= from or at + s.rules.lookahead > prompt.len or at >= prompt.len or !s.usable(at, starts)) continue;
@@ -572,6 +576,17 @@ fn floorStart(starts: []const u32, at: u32) u32 {
         best = p;
     };
     return best;
+}
+
+/// The last chunk end at or before `at` of a pass from `from`: whole chunks from its last start, span edge or `from`.
+fn chunkEnd(step: u32, from: u32, at: u32, len: usize, starts: []const u32, spans: []const modes.Span) u32 {
+    if (at <= from or at >= len) return at; // the prompt's end ends a chunk; the caller drops marks at or before `from`
+    var cut = from;
+    for (starts) |c| cut = if (c > cut and c <= at) c else cut;
+    for (spans) |span| for (span) |c| {
+        cut = if (c > cut and c <= at) c else cut;
+    };
+    return cut + (at - cut) / step * step;
 }
 
 test {
