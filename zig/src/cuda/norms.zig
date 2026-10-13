@@ -145,9 +145,10 @@ pub const Norms = struct {
         for ([_]u64{ w, out, xs orelse 0 }) |v| a.add(v);
         a.add(@as(i32, @intCast(heads)));
         a.add(eps);
-        const per_block = 256 / (dv / 8);
+        const t = launch_.rowThreads(rows, 256, 32); // a head's lanes stay in one warp either way
+        const per_block = t / (dv / 8);
         const grid: launch_.Dim3 = .{ .x = @intCast(rows), .y = @intCast((heads + per_block - 1) / per_block), .z = 1 };
-        try launch_.launch(n.gated_fns[which], .{ .grid = grid, .block = .{ .x = 256 } }, s, &a);
+        try launch_.launch(n.gated_fns[which], .{ .grid = grid, .block = .{ .x = t } }, s, &a);
     }
 };
 
