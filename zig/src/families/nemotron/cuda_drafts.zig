@@ -56,8 +56,18 @@ pub const Rounds = struct {
     st: Stats = .{},
 
     /// The head reads the prompt's last hidden row and final output token.
-    pub fn init(gpa: std.mem.Allocator, e: *Engine, h: *Head, rule: *DepthRule, prompt: []const u32, out: []const u32, last_hidden: ?u64, recall: ?*lanes.recall.Reader) !Rounds {
-        var r: Rounds = .{ .e = e, .h = h, .rule = rule, .index = try core.CopyIndex.init(gpa, prompt), .recall = recall };
+    pub fn init(
+        gpa: std.mem.Allocator,
+        e: *Engine,
+        h: *Head,
+        rule: *DepthRule,
+        prompt: []const u32,
+        out: []const u32,
+        last_hidden: ?u64,
+        recall: ?*lanes.recall.Reader,
+    ) !Rounds {
+        const index = try core.CopyIndex.init(gpa, prompt);
+        var r: Rounds = .{ .e = e, .h = h, .rule = rule, .index = index, .recall = recall };
         errdefer r.index.deinit();
         try r.index.extend(out);
         if (last_hidden) |x| try e.ops().copy(e.b.hidden, x, e.c.hidden * 2);
@@ -68,8 +78,18 @@ pub const Rounds = struct {
     }
 
     /// Rounds over a stream the lane core drafted last: the head's kept rows absorbed again, level 1 drafted again.
-    pub fn resumed(gpa: std.mem.Allocator, e: *Engine, h: *Head, rule: *DepthRule, prompt: []const u32, out: []const u32, kept: usize, recall: ?*lanes.recall.Reader) !Rounds {
-        var r: Rounds = .{ .e = e, .h = h, .rule = rule, .index = try core.CopyIndex.init(gpa, prompt), .recall = recall };
+    pub fn resumed(
+        gpa: std.mem.Allocator,
+        e: *Engine,
+        h: *Head,
+        rule: *DepthRule,
+        prompt: []const u32,
+        out: []const u32,
+        kept: usize,
+        recall: ?*lanes.recall.Reader,
+    ) !Rounds {
+        const index = try core.CopyIndex.init(gpa, prompt);
+        var r: Rounds = .{ .e = e, .h = h, .rule = rule, .index = index, .recall = recall };
         errdefer r.index.deinit();
         try r.index.extend(out);
         r.copied = r.copies();
@@ -127,7 +147,8 @@ pub const Rounds = struct {
         try r.e.commit(n);
         r.rule.done(n, 1 + r.proposal.len, if (r.copy_round) 0 else r.h.levels);
         if (r.recall) |x| { // Recall's copy is judged apart; the head's rounds set the bar its copies must beat
-            if (r.copy_round and r.recalled) x.observe(@intCast(r.proposal.len), @intCast(n -| 1), r.st.rounds) else if (!r.copy_round) x.noteHead(n);
+            if (!r.copy_round) x.noteHead(n);
+            if (r.copy_round and r.recalled) x.observe(@intCast(r.proposal.len), @intCast(n -| 1), r.st.rounds);
         }
         try r.index.extend(sampled[0..n]);
         r.st.rounds += 1;

@@ -497,7 +497,8 @@ const Generation = struct {
         try spec.put(a, "accepted", try json.intValue(a, s.accepted));
         try spec.put(a, "acceptance_rate", .{ .float = if (s.drafted > 0) @as(f64, @floatFromInt(s.accepted)) / @as(f64, @floatFromInt(s.drafted)) else 0 });
         try spec.put(a, "tokens_per_round", .{ .float = if (s.rounds > 0) @as(f64, @floatFromInt(g.collected.items.len)) / @as(f64, @floatFromInt(s.rounds)) else 0 });
-        if (m.telemetry.len > 0) switch (try json.parse(a, try a.dupe(u8, m.telemetry))) { // parsed strings outlive the box
+        const counters = try a.dupe(u8, m.telemetry); // parsed strings point into it: it outlives the box
+        if (counters.len > 0) switch (try json.parse(a, counters)) {
             .ok => |v| try spec.put(a, "proposer", v),
             .err => {},
         };

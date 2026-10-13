@@ -143,8 +143,8 @@ pub const Args = struct {
     learn_dir: ?[]const u8 = null,
     learn_min_free_gib: f64 = 4,
     learn_gib: f64 = 32, // disk for learned states, every model and build together
-    recall: bool = false, // draft copies from Recall's record of earlier requests (--recall-dir, -gib, -read-only imply it)
-    recall_dir: ?[]const u8 = null, // the record's own directory (null: one for the tokenizer under ~/.cache/tensorfold/recall)
+    recall: bool = false, // draft copies from Recall's record of earlier requests (its other flags imply it)
+    recall_dir: ?[]const u8 = null, // its directory (null: the tokenizer's own under ~/.cache/tensorfold/recall)
     recall_gib: f64 = 1.0 / 16.0, // the record's disk; its RAM is about twice as much once full
     recall_read_only: bool = false, // read the record, add nothing: what gates and benchmarks run with
     max_tokens: i64 = 4096,
@@ -258,6 +258,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         }
     }.f;
     if (try cudaFlag(a, out, name, v, u) or try gpuFlag(a, out, name, v, u)) return;
+    if (try recallFlag(a, out, name, v, u)) return;
     if (is(name, "--chat-template")) {
         out.chat_template = v;
         return;
@@ -274,7 +275,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     } else if (is(name, "--learn-gib")) {
         out.learn = true;
         out.learn_gib = try gib(u, a, name, v);
-    } else if (try recallFlag(a, out, name, v, u)) {} else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--compact-at")) {
+    } else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--compact-at")) {
         if (std.mem.eql(u8, v, "auto")) out.compact_auto = true else {
             const f = try float(u, a, name, v);
             if (!(f > 0 and f <= 1)) return fail(u, a, "argument --compact-at: expected auto or a fraction in (0, 1]: '{s}'", .{v});
@@ -289,10 +290,15 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
 
 /// --recall and the flags that imply it; false for any other flag.
 fn recallFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usage) error{ Usage, OutOfMemory }!bool {
-    if (std.mem.eql(u8, name, "--recall-dir")) out.recall_dir = v else if (std.mem.eql(u8, name, "--recall-gib")) {
+    if (std.mem.eql(u8, name, "--recall-dir")) {
+        out.recall_dir = v;
+    } else if (std.mem.eql(u8, name, "--recall-gib")) {
         out.recall_gib = try gib(u, a, name, v);
-        if (out.recall_gib < 1.0 / 128.0) return fail(u, a, "argument --recall-gib: at least 1/128 GiB (two 4 MiB chunks): '{s}'", .{v});
-    } else if (std.mem.eql(u8, name, "--recall-read-only")) out.recall_read_only = true else if (!std.mem.eql(u8, name, "--recall")) return false;
+        const least = "argument --recall-gib: at least 1/128 GiB (two 4 MiB chunks): '{s}'";
+        if (out.recall_gib < 1.0 / 128.0) return fail(u, a, least, .{v});
+    } else if (std.mem.eql(u8, name, "--recall-read-only")) {
+        out.recall_read_only = true;
+    } else if (!std.mem.eql(u8, name, "--recall")) return false;
     out.recall = true;
     return true;
 }
@@ -454,7 +460,8 @@ test "parse and capabilities share the table" {
     try std.testing.expect(capped.learn and capped.learn_gib == 8);
     try std.testing.expect(!(try parse(a, &.{"m"}, &u)).recall and (try parse(a, &.{ "m", "--recall" }, &u)).recall);
     const named = try parse(a, &.{ "m", "--recall-dir", "/r", "--recall-gib", "0.5", "--recall-read-only" }, &u);
-    try std.testing.expect(named.recall and named.recall_read_only and named.recall_gib == 0.5 and std.mem.eql(u8, "/r", named.recall_dir.?));
+    try std.testing.expect(named.recall and named.recall_read_only and named.recall_gib == 0.5);
+    try std.testing.expectEqualStrings("/r", named.recall_dir.?);
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--recall-gib", "0.001" }, &u));
     for ([_][]const u8{ "1e300", "inf", "nan", "-1", "17179869184" }) |bad| try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--prompt-cache-gib", bad }, &u));
     var out: std.Io.Writer.Allocating = .init(a);

@@ -17,7 +17,10 @@ pub fn identity(t: *const Tokenizer, a: Allocator) Allocator.Error![32]u8 {
     defer a.free(merges);
     var it = t.model.merges.iterator();
     var n: usize = 0;
-    while (it.next()) |e| : (n += 1) merges[n] = .{ e.value_ptr.rank, @truncate(e.key_ptr.* >> 32), @truncate(e.key_ptr.*), e.value_ptr.id };
+    while (it.next()) |e| : (n += 1) {
+        const pair = e.key_ptr.*;
+        merges[n] = .{ e.value_ptr.rank, @truncate(pair >> 32), @truncate(pair), e.value_ptr.id };
+    }
     std.mem.sort([4]u32, merges, {}, struct {
         fn lt(_: void, x: [4]u32, y: [4]u32) bool {
             return x[0] < y[0];
@@ -25,7 +28,14 @@ pub fn identity(t: *const Tokenizer, a: Allocator) Allocator.Error![32]u8 {
     }.lt);
     h.update(std.mem.sliceAsBytes(merges));
     for (t.added) |x| {
-        const head = [_]u32{ x.id, @intCast(x.content.len), @intFromBool(x.special), @intFromBool(x.lstrip), @intFromBool(x.rstrip), @intFromBool(x.normalized) };
+        const head = [_]u32{
+            x.id,
+            @intCast(x.content.len),
+            @intFromBool(x.special),
+            @intFromBool(x.lstrip),
+            @intFromBool(x.rstrip),
+            @intFromBool(x.normalized),
+        };
         h.update(std.mem.asBytes(&head));
         h.update(x.content);
     }
@@ -34,16 +44,34 @@ pub fn identity(t: *const Tokenizer, a: Allocator) Allocator.Error![32]u8 {
 
 test "identity follows the vocabulary, the merges and the added tokens as loaded, not the file's spelling" {
     const head =
-        \\{"added_tokens":[{"id":7,"content":"<|end|>","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true}],
-        \\ "pre_tokenizer":{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":false,"use_regex":false},"decoder":{"type":"ByteLevel"},
-        \\ "model":{"type":"BPE","dropout":null,"unk_token":null,"continuing_subword_prefix":"","end_of_word_suffix":"","fuse_unk":false,"byte_fallback":false,"ignore_merges":false,
+        \\{"added_tokens":[{"id":7,"content":"<|end|>","single_word":false,
+        \\ "lstrip":false,"rstrip":false,"normalized":false,"special":true}],
+        \\ "pre_tokenizer":{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":false,"use_regex":false},
+        \\ "decoder":{"type":"ByteLevel"},
+        \\ "model":{"type":"BPE","dropout":null,"unk_token":null,"continuing_subword_prefix":"",
+        \\ "end_of_word_suffix":"","fuse_unk":false,"byte_fallback":false,"ignore_merges":false,
+    ;
+    const plain =
+        \\"vocab":{"a":0,"b":1,"Ġ":2,"ab":3,"Ġa":4,"Ġab":5,"c":6},"merges":[["Ġ","a"],"a b","Ġa b"]}}
+    ;
+    // the same vocabulary and merges, in another order and spelling
+    const respelled =
+        \\"vocab": {"b":1, "a":0,"Ġ":2,"ab":3,"Ġa":4,"Ġab":5,"c":6},"merges":["Ġ a",["a","b"],"Ġa b"]}}
+    ;
+    // the first two merges' ranks swapped
+    const reranked =
+        \\"vocab":{"a":0,"b":1,"Ġ":2,"ab":3,"Ġa":4,"Ġab":5,"c":6},"merges":["a b",["Ġ","a"],"Ġa b"]}}
+    ;
+    // one token's spelling changed
+    const renamed =
+        \\"vocab":{"a":0,"b":1,"Ġ":2,"ab":3,"Ġa":4,"Ġab":5,"d":6},"merges":[["Ġ","a"],"a b","Ġa b"]}}
     ;
     const a = std.testing.allocator;
     const cases = [_]struct { tail: []const u8, same: bool }{
-        .{ .tail = "\"vocab\":{\"a\":0,\"b\":1,\"\xc4\xa0\":2,\"ab\":3,\"\xc4\xa0a\":4,\"\xc4\xa0ab\":5,\"c\":6},\"merges\":[[\"\xc4\xa0\",\"a\"],\"a b\",\"\xc4\xa0a b\"]}}", .same = true },
-        .{ .tail = "\"vocab\": {\"b\":1, \"a\":0,\"\xc4\xa0\":2,\"ab\":3,\"\xc4\xa0a\":4,\"\xc4\xa0ab\":5,\"c\":6},\"merges\":[\"\xc4\xa0 a\",[\"a\",\"b\"],\"\xc4\xa0a b\"]}}", .same = true },
-        .{ .tail = "\"vocab\":{\"a\":0,\"b\":1,\"\xc4\xa0\":2,\"ab\":3,\"\xc4\xa0a\":4,\"\xc4\xa0ab\":5,\"c\":6},\"merges\":[\"a b\",[\"\xc4\xa0\",\"a\"],\"\xc4\xa0a b\"]}}", .same = false },
-        .{ .tail = "\"vocab\":{\"a\":0,\"b\":1,\"\xc4\xa0\":2,\"ab\":3,\"\xc4\xa0a\":4,\"\xc4\xa0ab\":5,\"d\":6},\"merges\":[[\"\xc4\xa0\",\"a\"],\"a b\",\"\xc4\xa0a b\"]}}", .same = false },
+        .{ .tail = plain, .same = true },
+        .{ .tail = respelled, .same = true },
+        .{ .tail = reranked, .same = false },
+        .{ .tail = renamed, .same = false },
     };
     var first: ?[32]u8 = null;
     for (cases) |c| {

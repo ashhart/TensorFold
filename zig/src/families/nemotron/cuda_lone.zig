@@ -43,7 +43,10 @@ pub fn run(gpa: std.mem.Allocator, b: *Cuda, s: *lanes.Stream, hooks: Hooks) !bo
     if (kept_rows == null) hooks.committed(hooks.ctx);
     if (s.finished) return false;
     var rule = drafts.depthRule(costs);
-    var r = if (kept_rows) |k| try drafts.Rounds.resumed(gpa, b.e, h, &rule, s.prompt(), s.emitted(), k, s.recall) else try drafts.Rounds.init(gpa, b.e, h, &rule, s.prompt(), s.emitted(), null, s.recall);
+    var r = if (kept_rows) |k|
+        try drafts.Rounds.resumed(gpa, b.e, h, &rule, s.prompt(), s.emitted(), k, s.recall)
+    else
+        try drafts.Rounds.init(gpa, b.e, h, &rule, s.prompt(), s.emitted(), null, s.recall);
     defer r.deinit();
     var held: Held = .{ .b = b, .arena = &arena };
     while (true) {

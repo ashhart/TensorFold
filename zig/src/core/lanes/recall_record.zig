@@ -206,7 +206,14 @@ pub const Record = struct {
     }
 
     /// Up to `out.len` continuations of `ctx` matching `min` ids or more whose first `span` ids differ, newest first.
-    pub fn continuations(r: *const Record, ctx: []const u32, min: u32, span: usize, scratch: []u32, out: []Found) usize {
+    pub fn continuations(
+        r: *const Record,
+        ctx: []const u32,
+        min: u32,
+        span: usize,
+        scratch: []u32,
+        out: []Found,
+    ) usize {
         if (ctx.len < key_len or out.len == 0) return 0;
         const key = ctx[ctx.len - key_len ..][0..key_len];
         var n: usize = 0;

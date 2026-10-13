@@ -371,10 +371,13 @@ pub const Engine = struct {
                         const tried: f64 = @floatFromInt(@max(1, grafted - recall_rows));
                         s.graft_hit = 0.75 * s.graft_hit + 0.25 * @as(f64, @floatFromInt(kept_branch)) / tried;
                     }
-                    if (recall_rows > 0) s.recall_hit = 0.75 * s.recall_hit + 0.25 * @as(f64, @floatFromInt(kept_recall)) / @as(f64, @floatFromInt(recall_rows));
+                    if (recall_rows > 0) {
+                        const share = @as(f64, @floatFromInt(kept_recall)) / @as(f64, @floatFromInt(recall_rows));
+                        s.recall_hit = 0.75 * s.recall_hit + 0.25 * share;
+                    }
                 }
             }
-            if (s.recall) |r| if (p.kind != .copy) r.noteHead(path.len); // the stream's own rounds set the bar a copy must beat
+            if (s.recall) |r| if (p.kind != .copy) r.noteHead(path.len); // its own rounds: the bar a copy must beat
         }
         const budget_cut = s.thinkCut(committed.items);
         const loop_cut = sm.loopCut(s, committed.items);
@@ -490,9 +493,11 @@ pub const Engine = struct {
         const mode = s.mode orelse .pipe;
         var result: Result = .{ .rows = 1, .keep = 1, .got = &.{} };
         if (mode == .verify or mode == .exit) {
-            const proposal: win.Copy = if (mode == .verify and e.cfg.family_width >= 2) try win.copyProposal(e, s) else .{};
+            const verifying = mode == .verify and e.cfg.family_width >= 2;
+            const proposal: win.Copy = if (verifying) try win.copyProposal(e, s) else .{};
             if (proposal.tokens.len > 0) {
-                result = try e.familyRound(s, .{ .tokens = try e.arena.allocator().dupe(u32, proposal.tokens), .recalled = proposal.recalled });
+                const copied = try e.arena.allocator().dupe(u32, proposal.tokens);
+                result = try e.familyRound(s, .{ .tokens = copied, .recalled = proposal.recalled });
                 if (result.keep == 1 or s.force.items.len > 0) s.mode = .exit;
             } else {
                 // nothing to copy: back to steps queued ahead (this one lands next round)
@@ -517,7 +522,8 @@ pub const Engine = struct {
         const landed = try s.commit(e.gpa, &.{token}, &.{});
         s.pending = token;
         if (s.recall) |r| r.noteHead(1); // a step lands one token: the bar a copy must beat
-        if (e.cfg.family_width >= 2 and (s.mode orelse .pipe) == .pipe and !s.finished and s.drafts and (try win.copyProposal(e, s)).tokens.len > 0)
+        const piping = e.cfg.family_width >= 2 and (s.mode orelse .pipe) == .pipe and !s.finished and s.drafts;
+        if (piping and (try win.copyProposal(e, s)).tokens.len > 0)
             s.mode = .drain; // a copy window is ahead: land the queued step
         result.got = try e.arena.allocator().dupe(u32, s.emitted()[s.emitted().len - landed ..]);
         try trail.pipe(e, s, before, result.got);

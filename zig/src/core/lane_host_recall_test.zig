@@ -63,7 +63,20 @@ const Served = struct {
     fn init(s: *Served) !void {
         var costs: [16]lanes.config.Cost = undefined;
         for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
-        s.cfg = try lanes.Config.init(gpa, .{ .exact_width = 16, .gpu_tokens = true, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 4, .window_costs = &costs, .mtp_step_ms = 0.5, .hidden_rows = true, .batch_rows = 32, .max_streams = 8, .draft_streams = true }, 16, 15);
+        s.cfg = try lanes.Config.init(gpa, .{
+            .exact_width = 16,
+            .gpu_tokens = true,
+            .mtp = true,
+            .speculate = true,
+            .speculate_early = false,
+            .drafts = 4,
+            .window_costs = &costs,
+            .mtp_step_ms = 0.5,
+            .hidden_rows = true,
+            .batch_rows = 32,
+            .max_streams = 8,
+            .draft_streams = true,
+        }, 16, 15);
         s.target = .{ .gpa = gpa };
         s.clock = .{};
         s.core = lanes.Engine.init(gpa, &s.cfg, s.target.backend(), s.clock.clock());
@@ -88,7 +101,8 @@ fn openStore(path: []const u8, read_only: bool) !*Store {
     defer arena.deinit();
     var problem: []const u8 = "";
     const id: lanes.recall_store.Identity = .{ .digest = @splat(9), .vocab = lanes.fake.vocab, .name = "fake" };
-    return (try Store.open(gpa, std.testing.io, id, .{ .dir = path, .cap_bytes = 64 << 20, .read_only = read_only }, &problem, arena.allocator())) orelse error.TestRefused;
+    const o: lanes.recall_store.Options = .{ .dir = path, .cap_bytes = 64 << 20, .read_only = read_only };
+    return (try Store.open(gpa, std.testing.io, id, o, &problem, arena.allocator())) orelse error.TestRefused;
 }
 
 fn prompt(comptime n: usize, seed: u32) [n]u32 {
@@ -101,7 +115,7 @@ fn prompt(comptime n: usize, seed: u32) [n]u32 {
     return out;
 }
 
-test "a request read again after a restart copies its earlier reply: the same tokens, fewer rounds, its counters in the stats" {
+test "a request read again after a restart copies its earlier reply: the same tokens, fewer rounds, counters in stats" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/recall", .{tmp.sub_path});
@@ -207,7 +221,14 @@ test "a turn resumed from the prompt cache adds the ids past its resume point an
             f.drop(saved);
         }
     };
-    var cache = pc.Store.init(gpa, .{ .ptr = &s.target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .min_gap = 4, .min_prompt = 0 }, 1 << 20);
+    const snaps: pc.Snapshots.VTable = .{
+        .bytes = Snaps.bytes,
+        .save = Snaps.save,
+        .restore = Snaps.restore,
+        .drop = Snaps.drop,
+    };
+    const family: pc.Snapshots = .{ .ptr = &s.target, .vtable = &snaps };
+    var cache = pc.Store.init(gpa, family, .{ .min_gap = 4, .min_prompt = 0 }, 1 << 20);
     defer cache.deinit();
     s.host.cache = &cache;
     _ = s.host.engine().attachRecall(store);

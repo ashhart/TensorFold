@@ -30,7 +30,21 @@ const Out = struct {
 fn model(o: Opts) !Config {
     var costs: [16]@import("config.zig").Cost = undefined;
     for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
-    var cfg = try Config.init(gpa, .{ .exact_width = 16, .gpu_tokens = true, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 4, .window_costs = &costs, .mtp_step_ms = 0.5, .hidden_rows = true, .batch_rows = 32, .max_streams = 8, .draft_streams = true, .lone_copies = o.lone_copies }, 16, 15);
+    var cfg = try Config.init(gpa, .{
+        .exact_width = 16,
+        .gpu_tokens = true,
+        .mtp = true,
+        .speculate = true,
+        .speculate_early = false,
+        .drafts = 4,
+        .window_costs = &costs,
+        .mtp_step_ms = 0.5,
+        .hidden_rows = true,
+        .batch_rows = 32,
+        .max_streams = 8,
+        .draft_streams = true,
+        .lone_copies = o.lone_copies,
+    }, 16, 15);
     cfg.fill_lanes = o.fill_lanes;
     if (!o.copies) cfg.max_copy = 0; // no copy windows: the head's chain every round, grafts beside it
     return cfg;
@@ -54,7 +68,16 @@ fn run(cases: []const Case, shared: ?*recall.Shared, o: Opts) !Out {
     for (cases, streams, proposers, readers) |c, *s, *p, *r| {
         p.* = try SuffixLookup.init(gpa, .{ .min_match = 4 });
         r.* = .{ .gpa = gpa, .shared = shared orelse undefined };
-        s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = &.{96}, .sampling = c.sampling, .drafts = c.drafts, .proposer = if (o.own_copies) p.proposer() else null, .recall = if (shared != null) r else null });
+        s.* = try sm.Stream.init(gpa, .{
+            .id = "s",
+            .prompt = c.prompt,
+            .max_new = c.max_new,
+            .eos = &.{96},
+            .sampling = c.sampling,
+            .drafts = c.drafts,
+            .proposer = if (o.own_copies) p.proposer() else null,
+            .recall = if (shared != null) r else null,
+        });
     }
     defer for (streams, proposers, readers) |*s, *p, *r| {
         s.deinit(gpa);
@@ -98,7 +121,7 @@ fn newShared() !recall.Shared {
     return .{ .io = std.testing.io, .record = try recall.Record.init(gpa, 16) };
 }
 
-test "a repeated request copies its earlier reply from the record: the same tokens in fewer rounds, greedy and sampled" {
+test "a repeated request copies its earlier reply from the record: the same tokens, fewer rounds, greedy and sampled" {
     const p = prompt(40, 7);
     for ([_]?Sampling{ null, .{ .seed = 99, .temperature = 0.8 } }) |sampling| {
         const plain = try run(&.{.{ .prompt = &p, .sampling = sampling, .drafts = false }}, null, .{});
@@ -143,7 +166,7 @@ test "concurrent streams reading one record each equal their one-token reply" {
         try remember(&shared, p, x.*);
     }
     defer for (outs) |o| o.deinit();
-    const together = try run(&.{ .{ .prompt = &ps[0] }, .{ .prompt = &ps[1] }, .{ .prompt = &ps[2], .sampling = null } }, &shared, .{});
+    const together = try run(&.{ .{ .prompt = &ps[0] }, .{ .prompt = &ps[1] }, .{ .prompt = &ps[2] } }, &shared, .{});
     defer together.deinit();
     for (plains, together.emitted) |want, got| try std.testing.expectEqualSlices(u32, want, got);
     try std.testing.expect(together.accepted > 0);

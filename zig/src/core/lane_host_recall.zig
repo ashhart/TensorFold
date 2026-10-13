@@ -5,6 +5,13 @@ const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 const Store = lanes.recall_store.Store;
 
+/// A job's Recall: its reader of the record while `reading`, and the counters its reply's stats carry.
+pub const Slot = struct {
+    reader: lanes.recall.Reader = undefined,
+    reading: bool = false,
+    telemetry: [256]u8 = undefined,
+};
+
 /// The record later requests draft from and add to, set once before the server takes requests.
 pub fn attach(ctx: *anyopaque, store: *Store) void {
     const h: *LaneHost = @ptrCast(@alignCast(ctx));
@@ -17,9 +24,9 @@ pub fn attach(ctx: *anyopaque, store: *Store) void {
 pub fn reader(h: *LaneHost, job: *Job) ?*lanes.recall.Reader {
     const store = h.recall orelse return null;
     if (!job.request.drafts) return null;
-    job.reader = .{ .gpa = h.gpa, .shared = &store.shared };
-    job.reading = true;
-    return &job.reader;
+    job.recall.reader = .{ .gpa = h.gpa, .shared = &store.shared };
+    job.recall.reading = true;
+    return &job.recall.reader;
 }
 
 /// Its prompt and reply go in unless it is a background pass (a reply prefilled again) or a lesson's untaught request.
@@ -33,16 +40,18 @@ pub fn prompted(h: *LaneHost, job: *Job) void {
     if (writes(job)) store.readPrompt(job.request.prompt, job.stream.cached);
 }
 
-/// The stream ended: its reply goes in after its prompt's tail; its reader's counters go to the reply's stats.
-pub fn finished(h: *LaneHost, job: *Job, reason: api.Reason, buf: []u8) []const u8 {
-    const store = h.recall orelse return "";
+/// The stream ended: its reply goes in after its prompt's tail; `stats` with its reader's counters for the reply.
+pub fn finished(h: *LaneHost, job: *Job, reason: api.Reason, stats: api.Stats) api.Stats {
+    var told = stats;
+    const store = h.recall orelse return told;
     if (reason != .failed and writes(job)) store.readReply(job.request.prompt, job.stream.emitted());
-    return if (job.reading) job.reader.telemetry(buf) else "";
+    if (job.recall.reading) told.telemetry_json = job.recall.reader.telemetry(&job.recall.telemetry);
+    return told;
 }
 
 /// A job whose stream is torn down (finished, or requeued for memory) frees its reader.
 pub fn release(job: *Job) void {
-    if (!job.reading) return;
-    job.reader.deinit();
-    job.reading = false;
+    if (!job.recall.reading) return;
+    job.recall.reader.deinit();
+    job.recall.reading = false;
 }

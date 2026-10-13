@@ -208,7 +208,9 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
 }
 
 /// Flash Next's replay engine copies on the GPU from its own history: it reads no Recall record yet.
-const recall_refusal = "--recall drafts from a record in the lane engine's rounds; Flash Next's replay engine copies from its own history on the GPU and reads no record yet: serve it without --recall, --recall-dir, --recall-gib or --recall-read-only";
+const recall_refusal = "--recall drafts from a record in the lane engine's rounds; " ++
+    "Flash Next's replay engine copies from its own history on the GPU and reads no record yet: " ++
+    "serve it without --recall, --recall-dir, --recall-gib or --recall-read-only";
 
 /// Refused before any weights load: --slide but on Nemotron, as CUDA does, and --learn where nothing is kept on disk.
 fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
@@ -445,8 +447,11 @@ test "--recall is refused by Flash Next before any load, and not by the lane eng
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expectEqualStrings(recall_refusal, (try refusal(a, .{ .dir = "d", .model_type = "qwen4_exp", .recall = true }, false)).?);
-    for ([_][]const u8{ "nemotron_h", "qwen3_5", "glm5_next", "glm_moe_dsa" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .recall = true }, true)) == null);
+    const flash_next: api.Open = .{ .dir = "d", .model_type = "qwen4_exp", .recall = true };
+    try std.testing.expectEqualStrings(recall_refusal, (try refusal(a, flash_next, false)).?);
+    for ([_][]const u8{ "nemotron_h", "qwen3_5", "glm5_next", "glm_moe_dsa" }) |t| {
+        try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .recall = true }, true)) == null);
+    }
 }
 
 test "--slide is refused by every family but Nemotron, which learns into its weights" {

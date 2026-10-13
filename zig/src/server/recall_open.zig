@@ -8,10 +8,20 @@ const rs = api.recall_store;
 const Allocator = std.mem.Allocator;
 
 /// The record when --recall asks for one (null: off); RecallRefused with `problem` saying why.
-pub fn open(gpa: Allocator, io: std.Io, a: Allocator, args: cli.Args, text: *hf_text.HfText, served: []const u8, problem: *[]const u8) !?*rs.Store {
+pub fn open(
+    gpa: Allocator,
+    io: std.Io,
+    a: Allocator,
+    args: cli.Args,
+    text: *hf_text.HfText,
+    served: []const u8,
+    problem: *[]const u8,
+) !?*rs.Store {
     if (!args.recall) return null;
-    const identity: rs.Identity = .{ .digest = try tokenizer.identity(&text.tok, a), .vocab = text.text().vocabSize(), .name = served };
+    const digest = try tokenizer.identity(&text.tok, a);
+    const identity: rs.Identity = .{ .digest = digest, .vocab = text.text().vocabSize(), .name = served };
     const dir = args.recall_dir orelse try rs.defaultDir(a, identity);
     const cap: u64 = @intFromFloat(args.recall_gib * (1 << 30));
-    return (try rs.Store.open(gpa, io, identity, .{ .dir = dir, .cap_bytes = cap, .read_only = args.recall_read_only }, problem, a)) orelse error.RecallRefused;
+    const o: rs.Options = .{ .dir = dir, .cap_bytes = cap, .read_only = args.recall_read_only };
+    return (try rs.Store.open(gpa, io, identity, o, problem, a)) orelse error.RecallRefused;
 }

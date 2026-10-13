@@ -63,8 +63,7 @@ pub const LaneHost = struct {
         sink: Sink,
         stream: lanes.Stream = undefined,
         proposer: lanes.SuffixLookup = undefined,
-        reader: lanes.recall.Reader = undefined, // its reads of Recall's record, while `reading`
-        reading: bool = false,
+        recall: recalls.Slot = .{}, // its reads of Recall's record (lane_host_recall.zig)
         delivered: usize = 0,
         started: bool = false,
         prefill_sent: bool = false, // a lone driver's prefilled event went out
@@ -125,7 +124,16 @@ pub const LaneHost = struct {
     }
 
     pub fn engine(h: *LaneHost) Engine {
-        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = status.read, .memory = memoryFn, .keepalive = keepaliveFn, .learn = learn.submit, .recall = recalls.attach } };
+        return .{ .ctx = h, .vtable = &.{
+            .info = infoFn,
+            .submit = submitFn,
+            .cancel = cancelFn,
+            .status = status.read,
+            .memory = memoryFn,
+            .keepalive = keepaliveFn,
+            .learn = learn.submit,
+            .recall = recalls.attach,
+        } };
     }
 
     /// The family's queue as a keepalive target, when it set one.
@@ -242,10 +250,9 @@ pub const LaneHost = struct {
         job.reported();
         h.gpa.free(job.marks);
         const s = &job.stream;
-        var telemetry: [256]u8 = undefined;
-        const recalled = if (job.started) recalls.finished(h, job, reason, &telemetry) else "";
-        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null, .telemetry_json = recalled } else .{};
-        emit(job, .{ .finished = .{ .reason = reason, .stats = stats, .message = message } });
+        const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
+        const told = if (job.started) recalls.finished(h, job, reason, stats) else stats;
+        emit(job, .{ .finished = .{ .reason = reason, .stats = told, .message = message } });
         if (job.started) {
             if (s.grammar) |g| g.deinit(h.gpa);
             s.deinit(h.gpa);

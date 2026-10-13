@@ -13,7 +13,9 @@ fn scanLongest(ids: []const u32, ctx: []const u32) rr.Match {
         p -= 1;
         if (p + 1 >= ids.len or ids[p + 1] == rr.mark) continue;
         var n: u32 = 0;
-        while (n < rr.max_match and n < ctx.len and p >= n and ids[p - n] != rr.mark and ids[p - n] == ctx[ctx.len - 1 - n]) n += 1;
+        while (n < rr.max_match and n < ctx.len and p >= n) : (n += 1) {
+            if (ids[p - n] == rr.mark or ids[p - n] != ctx[ctx.len - 1 - n]) break;
+        }
         if (n >= rr.key_len and n > best.len) best = .{ .len = n, .at = @intCast(p + 1) };
     }
     return best;
@@ -59,7 +61,8 @@ test "longest and heldRun equal plain scans over segments of a small alphabet" {
                 try std.testing.expectEqual(want.len, got.len);
                 if (want.len > 0) try std.testing.expectEqual(want.at, got.at);
             } else try std.testing.expect(got.len <= want.len);
-            if (countKeys(all.items, ctx[0..@min(n, rr.key_len)]) <= rr.max_steps / 2) try std.testing.expectEqual(scanHeld(all.items, ctx[0..n]), rec.heldRun(ctx[0..n]).len);
+            if (countKeys(all.items, ctx[0..@min(n, rr.key_len)]) > rr.max_steps / 2) continue;
+            try std.testing.expectEqual(scanHeld(all.items, ctx[0..n]), rec.heldRun(ctx[0..n]).len);
         }
     }
 }
@@ -100,7 +103,8 @@ test "continuations are distinct, newest first, and shorter matches than `min` a
     const n = rec.continuations(&([_]u32{ 9, 9 } ++ key), 8, 2, &scratch, &out);
     try std.testing.expectEqual(@as(usize, 2), n);
     var got: [4]u32 = undefined;
-    try std.testing.expectEqualSlices(u32, &.{ 20, 21, 22 }, rec.copy(out[0].at, &got)); // the newest of the 20, 21 pair
+    // the newest of the 20, 21 pair
+    try std.testing.expectEqualSlices(u32, &.{ 20, 21, 22 }, rec.copy(out[0].at, &got));
     try std.testing.expectEqualSlices(u32, &.{ 30, 31 }, rec.copy(out[1].at, &got));
     try std.testing.expectEqual(@as(u32, 10), out[1].len);
     try std.testing.expectEqual(@as(usize, 1), rec.continuations(&([_]u32{ 9, 9 } ++ key), 10, 2, &scratch, &out));

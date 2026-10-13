@@ -38,7 +38,9 @@ pub const Plan = struct {
 
     /// Whether window row `r` (a graft) is Recall's.
     pub fn recallRow(p: Plan, r: usize) bool {
-        return p.branch_from > 0 and r >= p.branch_from and r - p.branch_from < p.graft_recalled.len and p.graft_recalled[r - p.branch_from];
+        if (p.branch_from == 0 or r < p.branch_from) return false;
+        const i = r - p.branch_from;
+        return i < p.graft_recalled.len and p.graft_recalled[i];
     }
 };
 
@@ -131,7 +133,15 @@ fn fillLanes(e: *Engine, s: *Stream, p: *Plan) !void {
 /// Graft candidates: the context's while its rows land, then Recall's while its do (both on a probe round); own first.
 pub fn candidates(e: *Engine, s: *Stream, room: usize, probe_round: bool) ![]const fill.Proposal {
     const a = e.arena.allocator();
-    const own: []const fill.Proposal = if (s.graft_hit >= e.cfg.fill_floor or probe_round) try fill.suffixCandidates(a, s.context.items, longest_graft, e.cfg.fill_match, room, 8) else &.{};
+    const live = s.graft_hit >= e.cfg.fill_floor or probe_round;
+    const own: []const fill.Proposal = if (!live) &.{} else try fill.suffixCandidates(
+        a,
+        s.context.items,
+        longest_graft,
+        e.cfg.fill_match,
+        room,
+        8,
+    );
     const r = s.recall orelse return own;
     if (s.recall_hit < e.cfg.fill_floor and !probe_round) return own;
     return fill.merge(a, own, try r.candidates(a, s.context.items, room, @max(2, 8 -| own.len), longest_graft));
