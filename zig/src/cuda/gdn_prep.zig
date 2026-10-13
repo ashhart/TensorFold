@@ -67,6 +67,7 @@ pub const GdnPrep = struct {
         a.add(@as(i32, @intCast(sh.vh)));
         a.add(@as(i32, @intCast(sh.keep)));
         a.add(sh.eps);
-        try launch_.launch(g.fns[which], .{ .grid = .{ .x = @intCast(rows), .y = @intCast((heads + 3) / 4), .z = 1 }, .block = .{ .x = 128 } }, s, &a);
+        const t = launch_.rowThreads(rows, 128, 64); // a warp a head either way
+        try launch_.launch(g.fns[which], .{ .grid = .{ .x = @intCast(rows), .y = @intCast((heads + t / 32 - 1) / (t / 32)), .z = 1 }, .block = .{ .x = t } }, s, &a);
     }
 };

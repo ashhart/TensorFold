@@ -18,8 +18,8 @@ fn aligned(ptrs: []const u64, strides: []const usize) bool {
     return true;
 }
 
-fn grid(rows: usize, n: usize) launch_.Dim3 {
-    return .{ .x = @intCast(rows), .y = @intCast((n / 8 + threads - 1) / threads), .z = 1 };
+fn grid(rows: usize, n: usize, t: u32) launch_.Dim3 {
+    return .{ .x = @intCast(rows), .y = @intCast((n / 8 + t - 1) / t), .z = 1 };
 }
 
 pub const ActRows = struct {
@@ -52,7 +52,8 @@ pub const ActRows = struct {
         a.add(out);
         a.add(xs orelse 0);
         a.add(@as(i32, @intCast(n)));
-        try launch_.launch(g.swiglu_fn, .{ .grid = grid(rows, n), .block = .{ .x = threads } }, s, &a);
+        const t = launch_.rowThreads(rows, threads, 128);
+        try launch_.launch(g.swiglu_fn, .{ .grid = grid(rows, n, t), .block = .{ .x = t } }, s, &a);
     }
 
     /// out = bf16(o * sigmoid(gate)), head h's gate at r * g_ld + h * g_hs ([q | gate]: q + d, 2 d); xs: sums.
@@ -68,7 +69,8 @@ pub const ActRows = struct {
         a.add(xs orelse 0);
         a.add(@as(i32, @intCast(heads)));
         a.add(@as(i32, @intCast(d)));
-        try launch_.launch(g.gate_fn, .{ .grid = grid(rows, heads * d), .block = .{ .x = threads } }, s, &a);
+        const t = launch_.rowThreads(rows, threads, 64);
+        try launch_.launch(g.gate_fn, .{ .grid = grid(rows, heads * d, t), .block = .{ .x = t } }, s, &a);
     }
 
     /// xs [rows, k / 64]: x's rows (stride ld) summed over each 64 values. k % 64 == 0.
@@ -80,7 +82,7 @@ pub const ActRows = struct {
         a.add(@as(i64, @intCast(ld)));
         a.add(xs);
         a.add(@as(i32, @intCast(k)));
-        try launch_.launch(g.sums_fn, .{ .grid = grid(rows, k), .block = .{ .x = threads } }, s, &a);
+        try launch_.launch(g.sums_fn, .{ .grid = grid(rows, k, threads), .block = .{ .x = threads } }, s, &a);
     }
 
     /// DFlash2's two-tap conv over [rows, d] bf16: dyn [rows, 2, 2, d / gs], base [2, 2, d]; res (or null) added.
@@ -90,6 +92,6 @@ pub const ActRows = struct {
         var a: launch_.Args = .{};
         for ([_]u64{ x, dyn, base, res orelse 0, out }) |v| a.add(v);
         for ([_]usize{ d, gs, branch, seg }) |v| a.add(@as(i32, @intCast(v)));
-        try launch_.launch(g.dconv_fn, .{ .grid = grid(rows, d), .block = .{ .x = threads } }, s, &a);
+        try launch_.launch(g.dconv_fn, .{ .grid = grid(rows, d, threads), .block = .{ .x = threads } }, s, &a);
     }
 };

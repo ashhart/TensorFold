@@ -52,7 +52,7 @@ extern "C" __global__ void __launch_bounds__(NT) tf_swiglu_rows(const __nv_bfloa
                                                                 __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
                                                                 int n) {
     const int64_t r = blockIdx.x;
-    const int c = blockIdx.y * NT + threadIdx.x; // 8 values
+    const int c = blockIdx.y * blockDim.x + threadIdx.x; // 8 values
     const bool live = 8 * c < n;
     float g[8], u[8], o[8];
     if (live) {
@@ -75,7 +75,7 @@ extern "C" __global__ void __launch_bounds__(NT) tf_gate_rows(const __nv_bfloat1
                                                               long long g_hs, __nv_bfloat16* __restrict__ out,
                                                               float* __restrict__ xs, int heads, int d) {
     const int64_t r = blockIdx.x;
-    const int c = blockIdx.y * NT + threadIdx.x; // 8 values
+    const int c = blockIdx.y * blockDim.x + threadIdx.x; // 8 values
     const int n = heads * d;
     const bool live = 8 * c < n;
     const int h = 8 * c / d, e = 8 * c % d;
@@ -98,7 +98,7 @@ extern "C" __global__ void __launch_bounds__(NT) tf_gate_rows(const __nv_bfloat1
 extern "C" __global__ void __launch_bounds__(NT) tf_group_sums_rows(const __nv_bfloat16* __restrict__ x, long long ld,
                                                                     float* __restrict__ xs, int k) {
     const int64_t r = blockIdx.x;
-    const int c = blockIdx.y * NT + threadIdx.x;
+    const int c = blockIdx.y * blockDim.x + threadIdx.x;
     const bool live = 8 * c < k;
     const uint4 v = live ? *reinterpret_cast<const uint4*>(x + r * ld + 8 * c) : make_uint4(0, 0, 0, 0);
     const float s = group_sum8(v, live);
@@ -113,7 +113,7 @@ extern "C" __global__ void __launch_bounds__(NT) tf_dconv_rows(const __nv_bfloat
                                                                __nv_bfloat16* __restrict__ out, int d, int gs, int branch,
                                                                int seg) {
     const int64_t r = blockIdx.x;
-    const int c = blockIdx.y * NT + threadIdx.x;
+    const int c = blockIdx.y * blockDim.x + threadIdx.x;
     if (8 * c >= d) return;
     const int g = d / gs, grp = 8 * c / gs;
     float xv[8], pv[8], b0[8], b1[8], y[8];
