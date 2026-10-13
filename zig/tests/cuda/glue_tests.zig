@@ -31,6 +31,7 @@ const Rig = struct {
     s: cuda.Stream,
     f: glue.Fns,
     emb: cuda.embed_rows.EmbedRows,
+    norms: cuda.norms.Norms,
     rng: std.Random,
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     bad: usize = 0,
@@ -38,7 +39,7 @@ const Rig = struct {
     sparsest: f64 = 1, // the smallest share of nonzero elements in any reference: none may be all zeros
 
     fn g(r: *Rig) glue.Glue {
-        return .{ .set = null, .f = &r.f, .s = r.s, .emb = &r.emb };
+        return .{ .set = null, .f = &r.f, .s = r.s, .emb = &r.emb, .norms = &r.norms };
     }
 
     /// A device copy of host values, landed before any kernel on the rig's stream reads it.
@@ -522,9 +523,10 @@ pub fn run(gpu: Gpu) !void {
         loaded += 1;
     }
     var prng = std.Random.DefaultPrng.init(0x5eed_9a7e);
-    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = try cuda.Stream.init(gpu.d, true), .f = try glue.Fns.resolve(&mods), .emb = try cuda.embed_rows.EmbedRows.load(gpu.d), .rng = prng.random() };
+    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = try cuda.Stream.init(gpu.d, true), .f = try glue.Fns.resolve(&mods), .emb = try cuda.embed_rows.EmbedRows.load(gpu.d), .norms = try cuda.norms.Norms.load(gpu.d), .rng = prng.random() };
     defer {
         r.emb.unload();
+        r.norms.unload();
         r.s.deinit();
         for (r.bufs.items) |*b| b.free();
         r.bufs.deinit(gpu.gpa);
