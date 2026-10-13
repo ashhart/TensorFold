@@ -90,6 +90,7 @@ __device__ __forceinline__ void attn_chunks(const ChunksArgs a) {
     __shared__ unsigned psh[32][16];
     __shared__ float tmx[32][2][4]; // per row, a/b tile max over the warp's 8-key slice (w&3)
     __shared__ float lbuf[32][2][4]; // per row, a/b rowsum over the warp's 8-key slice
+    extern __shared__ __align__(16) unsigned qsh[]; // the block's HBT heads of qa (u32 view), staged once
     const int rowA = (HBT == 32 ? 16 * (w >> 2) : 16 * t0) + (l >> 2);
     const int rowB = rowA + 8;
     const int kbase = (w & 3) * 8;
@@ -103,6 +104,11 @@ __device__ __forceinline__ void attn_chunks(const ChunksArgs a) {
         oacc[j][1] = 0.0f;
         oacc[j][2] = 0.0f;
         oacc[j][3] = 0.0f;
+    }
+    const int hb0 = HBT == 32 ? 0 : 16 * t0; // the block's first head
+    if (run) {
+        const uint4* qsrc = reinterpret_cast<const uint4*>(a.qa) + ((long long)r * H + hb0) * 64;
+        for (int i = t; i < HBT * 64; i += 256) reinterpret_cast<uint4*>(qsh)[i] = qsrc[i]; // read after the first sync
     }
     for (int tile = 0; run && tile < 16; ++tile) { // 16 tiles of 32 keys = the 512-key chunk
         // a tile past the last visible key leaves m, l and o as they are (alpha 1, p 0): stop at the first one
@@ -148,7 +154,7 @@ __device__ __forceinline__ void attn_chunks(const ChunksArgs a) {
         }
         __syncthreads();
         // scores: 32 ksteps of m16n8k16, A from the qa u32 view, B from shared
-        const unsigned* qrowA = reinterpret_cast<const unsigned*>(a.qa) + ((long long)r * H + rowA) * 256;
+        const unsigned* qrowA = qsh + (rowA - hb0) * 256;
         const unsigned* qrowB = qrowA + 2048;
         float sacc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         for (int kstep = 0; kstep < 32; ++kstep) {

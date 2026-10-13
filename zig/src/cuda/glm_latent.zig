@@ -15,6 +15,11 @@ pub const d = 256; // qk dims
 pub const lw = 512; // latent width
 pub const v = 256; // v dims
 
+/// The chunk kernels' dynamic shared memory: the block's `hbt` heads of qa (512 bf16 each), staged once.
+fn qshBytes(hbt: u32) u32 {
+    return hbt * 512 * 2;
+}
+
 pub const Latent = struct {
     d: *const Driver,
     m: Module,
@@ -49,6 +54,7 @@ pub const Latent = struct {
         k.chunks_fns[3] = try k.ma.function("tf_glm_attn_d32_fp8");
         k.chunks_fns[4] = try k.ma.function("tf_glm_attn_s16_fp8");
         k.chunks_fns[5] = try k.ma.function("tf_glm_attn_s32_fp8");
+        for (k.chunks_fns, 0..) |f, i| try f.allowDynamicShared(qshBytes(if (i == 2 or i == 3 or i == 5) 32 else 16));
         k.merge_fn = try k.ma.function("tf_glm_merge");
         k.loaded = true;
         return k;
@@ -140,7 +146,7 @@ pub const Latent = struct {
         args.add(@as(i32, @intCast(rows)));
         args.add(tokw);
         args.add(scale);
-        try launch_.launch(self.chunks_fns[idx], .{ .grid = .{ .x = rows, .y = 32 / hbt, .z = nch }, .block = .{ .x = 256, .y = 1, .z = 1 } }, s.*, &args);
+        try launch_.launch(self.chunks_fns[idx], .{ .grid = .{ .x = rows, .y = 32 / hbt, .z = nch }, .block = .{ .x = 256, .y = 1, .z = 1 }, .shared = qshBytes(hbt) }, s.*, &args);
     }
 
     /// Combine the per-chunk partials into the bf16 output rows; sparse rows with no tokens keep their input.
