@@ -24,13 +24,24 @@ const cases = [_]Case{
 
 /// MODEL with both draw modes' windows, as cuda_native.open leaves them, and another sequence: each case, then failing.
 pub fn run(gpu: check.Gpu, model: []const u8) !void {
-    const e = try nemotron.Engine.init(gpu.gpa, gpu.io, gpu.ctx, model, null, .{ .context = 8192, .mtp = false, .graphs = true, .sampling = null, .segments = 1 });
+    const e = try nemotron.Engine.init(
+        gpu.gpa,
+        gpu.io,
+        gpu.ctx,
+        model,
+        null,
+        .{ .context = 8192, .mtp = false, .graphs = true, .sampling = null, .segments = 1 },
+    );
     defer e.deinit();
     try e.captureWindows();
     try e.setSampling(.{ .seed = 0, .temperature = 1.0 });
     try e.captureWindows();
     try e.setSampling(null);
-    try check.expect(held(e, 0) == nemotron.state.max_rows and held(e, 1) == nemotron.state.max_rows, "windows held: {d} greedy, {d} sampled", .{ held(e, 0), held(e, 1) });
+    try check.expect(
+        held(e, 0) == nemotron.state.max_rows and held(e, 1) == nemotron.state.max_rows,
+        "windows held: {d} greedy, {d} sampled",
+        .{ held(e, 0), held(e, 1) },
+    );
     const seq = try e.newSeq();
     defer e.freeSeq(seq);
     var bad: usize = 0;
@@ -42,7 +53,10 @@ pub fn run(gpu: check.Gpu, model: []const u8) !void {
     e.k.draws.draw_fn = draw;
     bad += try tally(e, seq, cases[0], false); // the captures run whole again once the draws are back
     try check.expect(bad == 0, "recapture: {d} of {d} runs left a sequence another rule", .{ bad, 2 * cases.len + 1 });
-    check.pass("recapture: {d} runs, {d} cases captured and failing in the sampled set, each sequence's rule kept", .{ 2 * cases.len + 1, cases.len });
+    check.pass(
+        "recapture: {d} runs, {d} cases captured and failing in the sampled set, each sequence's rule kept",
+        .{ 2 * cases.len + 1, cases.len },
+    );
 }
 
 /// One run of case `c`: 1 when a check failed (its line printed), 0 when every check passed.
@@ -74,7 +88,11 @@ fn once(e: *nemotron.Engine, seq: *Seq, c: Case, fails: bool) !void {
     try check.expect(failed != null or !fails, "recapture {s}{s}: the capture succeeded", .{ c.name, how });
     // a failure comes at the sampled set's first window: the serial graph and the greedy set were captured again
     const want = 1 + held(e, 0) + if (fails) 0 else held(e, 1);
-    try check.expect(made == want, "recapture {s}{s}: {d} graphs captured again, expected {d}", .{ c.name, how, made, want });
+    try check.expect(
+        made == want,
+        "recapture {s}{s}: {d} graphs captured again, expected {d}",
+        .{ c.name, how, made, want },
+    );
     try check.expect(e.bound == bound, "recapture {s}{s}: another sequence bound after the capture", .{ c.name, how });
     try same(c, how, "the bound {s} sequence's rule", bound, e, e.sampling);
     try same(c, how, "the {s} sequence's kept rule", left, e, left.sampling);
@@ -89,10 +107,21 @@ fn once(e: *nemotron.Engine, seq: *Seq, c: Case, fails: bool) !void {
 }
 
 /// `got` against the rule case `c` gave sequence `s`, the own one or the other.
-fn same(c: Case, how: []const u8, comptime what: []const u8, s: *const Seq, e: *const nemotron.Engine, got: ?Sampling) !void {
+fn same(
+    c: Case,
+    how: []const u8,
+    comptime what: []const u8,
+    s: *const Seq,
+    e: *const nemotron.Engine,
+    got: ?Sampling,
+) !void {
     const own = s == &e.own;
     const want = if (own) c.own else c.other;
-    try check.expect(std.meta.eql(got, want), "recapture {s}{s}: " ++ what ++ " is {any}, expected {any}", .{ c.name, how, if (own) "own" else "other", got, want });
+    try check.expect(
+        std.meta.eql(got, want),
+        "recapture {s}{s}: " ++ what ++ " is {any}, expected {any}",
+        .{ c.name, how, if (own) "own" else "other", got, want },
+    );
 }
 
 /// The window graphs of draw mode `m` the engine holds (0 greedy, 1 sampled).
