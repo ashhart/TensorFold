@@ -30,6 +30,8 @@ pub const Options = struct {
     chunk_rows: u32 = prefill_step,
     /// Lane slots, each with its own caches and Engram cursor; 1 keeps the single-lane layout.
     lanes: u32 = 1,
+    /// Refuse the load past this many bytes; null admits to Metal's working set minus the margin.
+    ram_limit_bytes: ?u64 = null,
 };
 
 const Pipelines = struct {
@@ -83,10 +85,13 @@ pub const Model = struct {
     caches: []kv.cache.State,
     /// Slot 0's state; existing single-lane callers keep working unchanged.
     cache: *kv.cache.State,
+    /// Each slot's Engram cursor as of its beginSlot, restored by rollbackSlot.
+    engram_stash: []u8,
     workspace: work.Workspace,
     attention_workspace: attention.Workspace,
     pipelines: Pipelines,
     admitted_bytes: usize,
+    load_seconds: f64 = 0,
     last_gpu_seconds: f64 = 0,
     logits_rows: usize = 0,
     valid: bool = true,
@@ -117,6 +122,11 @@ pub const Model = struct {
         const execution_bytes = try std.math.add(usize, workspace_bytes, try std.math.mul(usize, cache_bytes, lanes));
         const rotary_bytes = attention.Pipelines.residentBytes(capacity, c.text_config);
         const needed = try std.math.add(usize, plan.bytes, try std.math.add(usize, execution_bytes, rotary_bytes));
+        if (o.ram_limit_bytes) |limit| if (needed > limit) {
+            std.log.err("the resident payload needs {d} bytes; the load limit is {d}", .{ needed, limit });
+            return error.LoadLimitExceeded;
+        };
+        const load_started = std.Io.Timestamp.now(io, .awake);
         const device = try mtl.Device.init();
         errdefer device.deinit();
         const margin: u64 = 8 << 30;
@@ -140,6 +150,9 @@ pub const Model = struct {
         errdefer bound.deinit();
         const caches = try gpa.alloc(kv.cache.State, lanes);
         errdefer gpa.free(caches);
+        const engram_stash = try gpa.alloc(u8, lanes * 16);
+        errdefer gpa.free(engram_stash);
+        @memset(engram_stash, 0);
         for (caches) |*state| {
             state.* = try kv.cache.State.init(device, kp);
             errdefer state.deinit();
@@ -156,7 +169,7 @@ pub const Model = struct {
         residency.commit();
         residency.requestResidency();
         queue.addResidencySet(residency);
-        return .{ .gpa = gpa, .device = device, .queue = queue, .residency = residency, .checkpoint = cp, .weights = bound, .cfg = c, .cfg_arena = arena, .lanes = lanes, .caches = caches, .cache = &caches[0], .workspace = workspace, .attention_workspace = aw, .pipelines = pipelines, .admitted_bytes = needed };
+        return .{ .gpa = gpa, .device = device, .queue = queue, .residency = residency, .checkpoint = cp, .weights = bound, .cfg = c, .cfg_arena = arena, .lanes = lanes, .caches = caches, .cache = &caches[0], .engram_stash = engram_stash, .workspace = workspace, .attention_workspace = aw, .pipelines = pipelines, .admitted_bytes = needed, .load_seconds = @as(f64, @floatFromInt(std.Io.Timestamp.now(io, .awake).toNanoseconds() - load_started.toNanoseconds())) / 1e9 };
     }
 
     pub fn deinit(m: *Model) void {
@@ -166,6 +179,7 @@ pub const Model = struct {
         m.workspace.deinit();
         for (m.caches) |*state| state.deinit();
         m.gpa.free(m.caches);
+        m.gpa.free(m.engram_stash);
         m.weights.deinit();
         m.checkpoint.deinit();
         m.pipelines.deinit();
@@ -202,6 +216,28 @@ pub const Model = struct {
         try completed(cb);
         m.valid = true;
         m.logits_rows = 0;
+    }
+
+    /// A keep/rollback transaction over one slot's cache cursor and its 16-byte Engram history.
+    pub fn beginSlot(m: *Model, slot: u32) !void {
+        if (slot >= m.lanes) return error.InvalidLaneSlot;
+        const view = try m.workspace.historyView(slot);
+        const history: [*]u8 = @ptrCast(@alignCast(view.buffer.contents() + view.offset));
+        @memcpy(m.engram_stash[slot * 16 ..][0..16], history[0..16]);
+        try m.caches[slot].begin();
+    }
+
+    pub fn commitSlot(m: *Model, slot: u32) !void {
+        if (slot >= m.lanes) return error.InvalidLaneSlot;
+        try m.caches[slot].commit();
+    }
+
+    pub fn rollbackSlot(m: *Model, slot: u32) !void {
+        if (slot >= m.lanes) return error.InvalidLaneSlot;
+        const view = try m.workspace.historyView(slot);
+        const history: [*]u8 = @ptrCast(@alignCast(view.buffer.contents() + view.offset));
+        try m.caches[slot].rollback();
+        @memcpy(history[0..16], m.engram_stash[slot * 16 ..][0..16]);
     }
 
     /// One command buffer per chunk; no operator waits or reads routes back to the CPU.
