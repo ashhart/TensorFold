@@ -96,7 +96,7 @@ pub fn supported(a: std.mem.Allocator, c: cfg.Config, text: []const u8) !void {
 }
 
 fn qualifiedGeneration(generation: u32) bool {
-    return generation >= 13 and generation <= 17;
+    return generation >= 13 and generation <= 18;
 }
 
 test "unknown and older GPU generations refuse before any weight load" {
@@ -105,5 +105,6 @@ test "unknown and older GPU generations refuse before any weight load" {
     try std.testing.expect(qualifiedGeneration(17));
     try std.testing.expect(!qualifiedGeneration(0));
     try std.testing.expect(!qualifiedGeneration(12));
-    try std.testing.expect(!qualifiedGeneration(18));
+    try std.testing.expect(qualifiedGeneration(18));
+    try std.testing.expect(!qualifiedGeneration(19));
 }
