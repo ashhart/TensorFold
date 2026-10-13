@@ -63,9 +63,9 @@ __device__ __forceinline__ void prep(const Io& io, int c, int kh, int vh, int ke
 #pragma unroll
         for (int i = 0; i < J; ++i) part = __fmaf_rn(cv[i], cv[i], part);
         for (int m = 16; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
-        const float inv = rsqrtf(__fadd_rn(__fdiv_rn(part, static_cast<float>(DK)), eps));
+        const float inv = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(part, static_cast<float>(DK)), eps)));
         const bool is_q = hd < kh;
-        const float scale = is_q ? 1.f / DK : rsqrtf(static_cast<float>(DK));
+        const float scale = is_q ? 1.f / DK : __fdiv_rn(1.f, __fsqrt_rn(static_cast<float>(DK)));
         __nv_bfloat16* out = (is_q ? io.q : io.k) + (r * kh + (is_q ? hd : hd - kh)) * DK + J * lane;
 #pragma unroll
         for (int i = 0; i < J; ++i) out[i] = __float2bfloat16_rn(__fmul_rn(__fmul_rn(cv[i], inv), scale));
