@@ -1,6 +1,7 @@
 //! FlashNext text dimensions and quantization declarations are checked before weight or cache allocation.
 const std = @import("std");
 const affine = @import("affine.zig");
+const keys = @import("../../core/quant/keys.zig");
 
 pub const Kind = enum { linear_attention, sparse_attention };
 pub const Gate = enum { sigmoid, silu };
@@ -100,12 +101,12 @@ pub const Config = struct {
             const width = (try w.of(path)) orelse return null;
             return try affine.Spec.init(width.bits, width.group);
         }
-        const wanted = canonical(path);
+        const wanted = keys.canonical(path);
         var found = false;
         var answer: ?affine.Spec = c.global_affine;
         var it = c.quant.iterator();
         while (it.next()) |item| {
-            if (!std.mem.eql(u8, canonical(item.key_ptr.*), wanted)) continue;
+            if (!std.mem.eql(u8, keys.canonical(item.key_ptr.*), wanted)) continue;
             const candidate: ?affine.Spec = switch (item.value_ptr.*) {
                 .bool => |enabled| if (enabled) c.global_affine else null,
                 .object => |value| if (value.count() == 0) null else try spec(value, 4),
@@ -118,14 +119,6 @@ pub const Config = struct {
         return answer;
     }
 };
-
-pub fn canonical(value: []const u8) []const u8 {
-    var path = if (std.mem.endsWith(u8, value, ".weight")) value[0 .. value.len - 7] else value;
-    for ([_][]const u8{ "model.language_model.", "language_model.", "text_model.", "model." }) |prefix| {
-        if (std.mem.startsWith(u8, path, prefix)) path = path[prefix.len..];
-    }
-    return path;
-}
 
 fn same(a: ?affine.Spec, b: ?affine.Spec) bool {
     if (a == null or b == null) return a == null and b == null;

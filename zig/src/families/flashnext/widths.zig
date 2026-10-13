@@ -1,6 +1,7 @@
 //! Per-module MLX widths through core/quant, which indexes overrides by module; `false` and `{}` mark plain modules.
 const std = @import("std");
 const mlx = @import("../../core/quant/mlx.zig");
+const keys = @import("../../core/quant/keys.zig");
 const st = @import("../../core/safetensors.zig");
 const affine = @import("affine.zig");
 const config = @import("config.zig");
@@ -36,7 +37,7 @@ pub const Widths = struct {
                 .object => |o| o.count() == 0,
                 else => continue,
             };
-            const key = config.canonical(item.key_ptr.*);
+            const key = keys.canonical(item.key_ptr.*);
             if (!plain) {
                 if (w.plain.contains(key)) return error.ConflictingAffineAlias;
                 continue;
@@ -59,7 +60,7 @@ pub const Widths = struct {
 
     /// The module's width under any spelling of its key, or null when the config declares it unquantized.
     pub fn of(w: *const Widths, path: []const u8) !?Width {
-        const key = config.canonical(path);
+        const key = keys.canonical(path);
         if (w.plain.contains(key)) return null;
         return try w.q.width(key);
     }
