@@ -41,6 +41,7 @@ struct ScoresArgs {
     int np;
     float scale;
     float wscale;
+    const int* posp;      // as IndexArgs
 };
 
 struct SelectArgs {
@@ -52,6 +53,7 @@ struct SelectArgs {
     int pos;
     int k;
     int visible;          // 1: limit = min(np, max(k, (pos + r + 1) / 4)); 0: limit = np
+    const int* posp;      // as IndexArgs
 };
 
 struct TokensArgs {
@@ -59,6 +61,7 @@ struct TokensArgs {
     int* tokens;            // int32 [R, 512 * 4 + 3]
     int* counts;            // int32 [R]
     int pos;
+    const int* posp;        // as IndexArgs
 };
 
 constexpr int D = 128;                 // index key dims
@@ -231,7 +234,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_glm_scores(ScoresArgs a) {
 
     const int g4 = lane >> 2;      // the fragment's first row
     const int t2 = (lane & 3) * 2; // the fragment's first col
-    const int npool = (a.pos + r + 1) / 4;
+    const int npool = ((a.posp ? *a.posp : a.pos) + r + 1) / 4;
     const float neg_inf = -__int_as_float(0x7F800000);
     for (int j = 0; j < L; j++) {
         const int pb = g * L + j;
@@ -345,7 +348,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_glm_select_rows(SelectArgs 
     __shared__ int total;
     const int r = blockIdx.x;
     const long long row = static_cast<long long>(r) * a.s_stride;
-    const int limit = a.visible ? min(a.np, max(a.k, (a.pos + r + 1) / 4)) : a.np;
+    const int limit = a.visible ? min(a.np, max(a.k, ((a.posp ? *a.posp : a.pos) + r + 1) / 4)) : a.np;
     unsigned prefix = 0, fixed = 0;
     int need = a.k;
 #pragma unroll 1
@@ -428,7 +431,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_glm_select_rows(SelectArgs 
 extern "C" __global__ void tf_glm_tokens_counts(TokensArgs a) {
     const int r = blockIdx.x;
     const int t = threadIdx.x; // 512 threads, four tokens a thread
-    const long long q = static_cast<long long>(a.pos) + r;
+    const long long q = static_cast<long long>(a.posp ? *a.posp : a.pos) + r;
     const long long npool = (q + 1) / 4;
     const long long p = a.pools[static_cast<long long>(r) * 512 + t]; // every row's 512 selected pools' tokens
     for (int j = 0; j < 4; j++)

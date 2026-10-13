@@ -133,6 +133,7 @@ pub const Sparse = struct {
         pk: u64,
         out: u64,
         pos: i32,
+        posp: u64, // the position on the device instead (0: pos)
         rows: u32,
         np: u32,
         scale: f32,
@@ -149,12 +150,13 @@ pub const Sparse = struct {
         args.add(@as(i32, @intCast(np)));
         args.add(scale);
         args.add(wscale);
+        args.add(posp);
         const blocks_y = (np + block_pools * score_loop - 1) / (block_pools * score_loop);
         try launch_.launch(self.scores_fn, .{ .grid = .{ .x = rows, .y = @intCast(blocks_y), .z = 1 }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s.*, &args);
     }
 
     /// Radix top-pool select per row: visible bounds the per-row pool limit; out [rows, k] int64 pools ascending.
-    pub fn selectRows(self: *Sparse, s: *Stream, sc: u64, np: u32, out: u64, pos: i32, k: u32, rows: u32, visible: bool) !void {
+    pub fn selectRows(self: *Sparse, s: *Stream, sc: u64, np: u32, out: u64, pos: i32, posp: u64, k: u32, rows: u32, visible: bool) !void {
         var args = launch_.Args{};
         args.add(sc);
         args.add(@as(i64, @intCast(np)));
@@ -164,16 +166,18 @@ pub const Sparse = struct {
         args.add(pos);
         args.add(@as(i32, @intCast(k)));
         args.add(@as(i32, if (visible) 1 else 0));
+        args.add(posp);
         try launch_.launch(self.select_fn, .{ .grid = .{ .x = rows, .y = 1, .z = 1 }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s.*, &args);
     }
 
     /// Tokens/counts from pools: tokens [rows, 2051] i32 (pools ascending then the partial tail), counts [rows].
-    pub fn tokensCounts(self: *Sparse, s: *Stream, pools: u64, tokens: u64, counts: u64, pos: i32, rows: u32) !void {
+    pub fn tokensCounts(self: *Sparse, s: *Stream, pools: u64, tokens: u64, counts: u64, pos: i32, posp: u64, rows: u32) !void {
         var args = launch_.Args{};
         args.add(pools);
         args.add(tokens);
         args.add(counts);
         args.add(pos);
+        args.add(posp);
         try launch_.launch(self.tokens_fn, .{ .grid = .{ .x = rows, .y = 1, .z = 1 }, .block = .{ .x = 512, .y = 1, .z = 1 } }, s.*, &args);
     }
 };

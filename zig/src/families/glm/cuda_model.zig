@@ -129,7 +129,7 @@ pub const Engine = struct {
     pos_dev: cuda.DeviceBuffer, // forward.State.pos_dev: i32
     cand: cuda.DeviceBuffer, // [world, 1, 2] f32: every rank's top candidate
     gpa: std.mem.Allocator,
-    graphs: [2]?cuda.graph.Exec = .{ null, null }, // a dense-window decode step for each KDA state parity
+    graphs: [graph_slots][2]?cuda.graph.Exec = @splat(.{ null, null }), // decode steps by window slot and parity
     cur: u1 = 0,
     pos: usize = 0,
 
@@ -146,7 +146,7 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.cur = 0;
         e.pos = 0;
-        e.graphs = .{ null, null };
+        e.graphs = @splat(.{ null, null });
         e.lc = w.layerConfig();
         e.k = try lay.Kernels.load(d);
         errdefer e.k.unload();
@@ -189,7 +189,7 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
-        for (&e.graphs) |*g| if (g.*) |*x| x.deinit();
+        for (&e.graphs) |*pair| for (pair) |*g| if (g.*) |*x| x.deinit();
         e.gpa.free(e.dsa);
         e.gpa.free(e.kda);
         e.cand.free();
@@ -219,14 +219,15 @@ pub const Engine = struct {
         return tok;
     }
 
-    /// serial_decode's step, the next token; within the dense window a graph captured on first use (forward.py's).
+    /// serial_decode's step, the next token: a graph captured on first use for its window slot and KDA parity.
     pub fn step(e: *Engine, tok: u32) !u32 {
-        if (e.pos + 1 > dsa.dense_limit) return e.forward(&.{tok}, false);
         if (e.pos + 1 > e.cap) return error.GlmCapacity;
+        const slot = graphSlot(e.pos, e.cap) orelse return e.forward(&.{tok}, false);
         try e.dec.ids.upload(0, std.mem.asBytes(&tok));
         try e.pos_dev.fill32(@intCast(e.pos), e.s.handle);
-        if (e.graphs[e.cur] == null) e.graphs[e.cur] = try e.capture();
-        try e.graphs[e.cur].?.launchOn(e.s);
+        const g = &e.graphs[slot][e.cur];
+        if (g.* == null) g.* = try e.capture();
+        try g.*.?.launchOn(e.s);
         return e.finish(1);
     }
 
@@ -302,6 +303,25 @@ pub const Engine = struct {
         return tok[0];
     }
 };
+
+const graph_slots = 8;
+
+/// A decode row's graph slot (forward.py's keys): 0 in the dense window, else 1 + log2(pool bucket / 1024); null: none.
+fn graphSlot(pos: usize, cap: usize) ?usize {
+    if (pos + 1 <= dsa.dense_limit) return 0;
+    const np = dsa.poolBucket(pos, 1, cap / 4);
+    if (np < 1024) return null;
+    const slot = 1 + std.math.log2_int(usize, np / 1024);
+    return if (slot < graph_slots and np == @as(usize, 1024) << @intCast(slot - 1)) slot else null;
+}
+
+test "decode graph slots follow the dense window and the pool buckets" {
+    try std.testing.expectEqual(@as(?usize, 0), graphSlot(2050, 32768));
+    try std.testing.expectEqual(@as(?usize, 1), graphSlot(2051, 32768));
+    try std.testing.expectEqual(@as(?usize, 2), graphSlot(4425, 32768));
+    try std.testing.expectEqual(@as(?usize, 4), graphSlot(16416, 32768));
+    try std.testing.expectEqual(@as(?usize, 4), graphSlot(32000, 32768));
+}
 
 /// The EXL3 dense scratch at every layer's widest, before any capture.
 fn reserve(de: *cuda.exl3.Dense, l: *const lay.LayerW) !void {

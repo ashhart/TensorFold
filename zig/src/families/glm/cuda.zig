@@ -7,4 +7,5 @@ pub const Engine = @import("cuda_model.zig").Engine;
 
 test {
     _ = @import("cuda_load.zig");
+    _ = @import("cuda_model.zig");
 }
