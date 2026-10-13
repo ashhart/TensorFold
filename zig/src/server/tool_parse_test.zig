@@ -39,7 +39,7 @@ test "a call the end token left open closes when it parses whole" {
         .{ "<tool_call>\n<function=lookup>\n", "</function></tool_call>", "{}", "" },
         .{ "<tool_call>\n<function=lookup>\n<parameter=n>\n5\n</parameter>\n</function>\n", "</tool_call>", "{\"n\":5}", "" },
         .{ "<tool_call>lookup<arg_key>n</arg_key><arg_value>7</arg_value>", "</tool_call>", "{\"n\":7}", "" },
-        .{ "Trying.<tool_call>lookup<arg_key>n</arg_key><arg_value>7", "</arg_value></tool_call>", "{\"n\":7}", "Trying." }, // a GLM value left open (2.x, #285)
+        .{ "Trying.<tool_call>lookup<arg_key>n</arg_key><arg_value>7", "</arg_value></tool_call>", "{\"n\":7}", "Trying." }, // a GLM value left open (#285)
         .{ "<tool_call>{\"name\":\"lookup\"}</tool_call>\n<tool_call>{\"name\":\"lookup\",\"arguments\":{\"n\":2}", "}</tool_call>", "{\"n\":2}", "" },
         .{ "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"<tool_call>\"}", "}</tool_call>", "{\"q\":\"<tool_call>\"}", "" },
     };
@@ -274,7 +274,7 @@ test "a repaired GLM call parses, in both modes and once the end token closed it
     try std.testing.expectEqualStrings("</tool_call>", try closeCall(a, open, tools));
 }
 
-test "a GLM call the end token left open closes as the 2.x line closes it" {
+test "a GLM call the end token left open closes as #285 closed it" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();

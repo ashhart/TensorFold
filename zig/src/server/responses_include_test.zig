@@ -1,4 +1,4 @@
-//! Responses' include: OpenAI's values accepted and ignored, anything else refused as the 2.x line refuses it.
+//! Responses' include: OpenAI's values accepted and ignored, anything else refused by name.
 const std = @import("std");
 const json = @import("json.zig");
 const errors = @import("errors.zig");

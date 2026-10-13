@@ -179,7 +179,7 @@ pub fn closeCall(a: Allocator, text: []const u8, tools: []const Value) Allocator
 /// What a call's arguments lack to close: XML's ``
 fn argumentsClose(a: Allocator, body: []const u8) Allocator.Error![]const u8 {
     if (std.ascii.startsWithIgnoreCase(body, "<function=")) return if (std.ascii.endsWithIgnoreCase(body, "</function>")) "" else "</function>";
-    // GLM's value the end token left open closes as 2.x closes it (#285); the strict parse then decides
+    // GLM's value the end token left open closes as #285 closed it; the strict parse then decides
     if (std.mem.lastIndexOf(u8, body, "<arg_value>")) |v| {
         const closed = std.mem.lastIndexOf(u8, body, "</arg_value>");
         if (closed == null or closed.? < v) return "</arg_value>";
