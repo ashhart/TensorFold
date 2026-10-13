@@ -148,7 +148,7 @@ fn fetchBig(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Wri
                 return false;
             }
         }
-        try std.Io.Dir.renameAbsolute(b.file.path, try std.fs.path.join(a, &.{ blobs_dir, b.blob }), io);
+        try std.Io.Dir.cwd().rename(b.file.path, std.Io.Dir.cwd(), try std.fs.path.join(a, &.{ blobs_dir, b.blob }), io);
         try out.print("  {s}: {d:.2} MiB in {d} pieces\n", .{ b.entry.path, @as(f64, @floatFromInt(b.entry.size)) / (1 << 20), ranged.count(b.entry.size, piece) });
         try linkIntoSnapshot(a, io, snapshot_dir, b.entry.path, b.blob);
     }

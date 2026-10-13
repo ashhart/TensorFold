@@ -7,8 +7,10 @@ const core = @import("core");
 const engine = @import("cuda_engine.zig");
 const Engine = engine.Engine;
 const reuse = @import("cuda_reuse.zig");
-const Head = @import("cuda_mtp.zig").Head;
+const mtp = @import("cuda_mtp.zig");
+const Head = mtp.Head;
 const state = @import("cuda_state.zig");
+const prompt_rows = @import("cuda_prompt_rows.zig");
 const config = @import("config.zig");
 const seq_graphs = @import("cuda_seq_graphs.zig");
 const costs = @import("cuda_costs.zig");
@@ -24,7 +26,7 @@ const row_slots = engine.max_streams * state.max_rows + 1;
 const ring = 1024;
 
 /// A stream's sequence (`own`: the engine's, the graphs' buffers) and its first token's logprob row from prefill.
-const Lane = struct { seq: *state.Seq, own: bool = false, pending_rows: ?usize = null, first: ?LogRow = null, stats: seq_graphs.Stats = .{} };
+const Lane = struct { seq: *state.Seq, own: bool = false, pending_rows: ?usize = null, first: ?LogRow = null, stats: seq_graphs.Stats = .{}, keep: usize = 0 };
 
 pub const Cuda = struct {
     gpa: std.mem.Allocator,
@@ -37,8 +39,9 @@ pub const Cuda = struct {
     pinned: cuda.HostBuffer, // each window's held drafts read back (state.max_rows words a stream)
     rows_out: cuda.HostBuffer, // logprob rows the kernel writes straight to the host (row_slots of row_words)
     rows_dev: u64,
-    prompt_out: cuda.HostBuffer, // a prompt pass's rows (state.max_rows of row_words), then its picks; apart from pending window rows
+    prompt_out: cuda.HostBuffer, // a prompt pass's rows (batch_rows of row_words), then its picks; apart from pending window rows
     prompt_dev: u64,
+    prompt_logits: ?cuda.DeviceBuffer = null, // batch_rows rows of logits for prompt_logprobs, made at first use
     costs: [state.max_rows]lanes.config.Cost = undefined,
     cost_count: usize = 0,
     mtp_ms: f64 = 0,
@@ -51,7 +54,7 @@ pub const Cuda = struct {
         errdefer pinned.free();
         var rows_out = try cuda.HostBuffer.allocMapped(e.ctx.d, row_slots * row_words * 4);
         errdefer rows_out.free();
-        var prompt_out = try cuda.HostBuffer.allocMapped(e.ctx.d, state.max_rows * (row_words + 1) * 4);
+        var prompt_out = try cuda.HostBuffer.allocMapped(e.ctx.d, prompt_rows.batch_rows * (row_words + 1) * 4);
         errdefer prompt_out.free();
         return .{ .gpa = gpa, .e = e, .head = head, .pinned = pinned, .rows_out = rows_out, .rows_dev = try rows_out.device(), .prompt_out = prompt_out, .prompt_dev = try prompt_out.device() };
     }
@@ -63,6 +66,7 @@ pub const Cuda = struct {
         self.pinned.free();
         self.rows_out.free();
         if (self.bits) |*b| b.free();
+        if (self.prompt_logits) |*b| b.free();
         self.prompt_out.free();
     }
 
@@ -84,7 +88,7 @@ pub const Cuda = struct {
     }
 
     /// Structured output's bits for rows from `slot` (a forward's rows; a first token's: the last slot), device-read.
-    fn putBits(self: *Cuda, slot: usize, masks: []const u32) !engine.Mask {
+    pub fn putBits(self: *Cuda, slot: usize, masks: []const u32) !engine.Mask {
         const words = (self.e.c.vocab + 31) / 32;
         if (masks.len == 0) return .{};
         if (masks.len % words != 0 or slot * words + masks.len > row_slots * words) return error.InvalidGrammarMasks;
@@ -127,7 +131,8 @@ pub const Cuda = struct {
             .speculate = drafting,
             .speculate_early = false,
             .draft_prior = &config.draft_prior,
-            .drafts = @import("cuda_mtp.zig").max_chain,
+            .drafts = mtp.max_chain,
+            .draft_streams = drafting, // a shared round's heads draft in one batch (Head.chains)
             .window_costs = self.costs[0..self.cost_count],
             .mtp_step_ms = self.mtp_ms,
             .hidden_rows = drafting, // several streams' windows share a forward (Engine.verifyShared)
@@ -154,12 +159,21 @@ pub const Cuda = struct {
     pub fn handOver(self: *Cuda, s: *lanes.Stream, kept: usize) !void {
         const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
         l.pending_rows = null;
+        l.keep = 0;
         if (self.head) |h| {
             try h.begin(kept);
             try h.launch(0);
         }
         s.cache_len = self.e.pos;
         s.pending = s.context.items[s.context.items.len - 1];
+    }
+
+    /// The kept rows of a lane-core stream's last draft, its sequence bound for the lone driver; null if not settled.
+    pub fn reclaim(self: *Cuda, s: *const lanes.Stream) !?usize {
+        const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
+        if (l.pending_rows != null or l.keep == 0 or self.head == null) return null;
+        self.e.bind(l.seq);
+        return l.keep;
     }
 
     /// Bind the lane and commit its kept rows, accounting for shared-round drafting.
@@ -189,8 +203,10 @@ pub const Cuda = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
+    /// A cancel, or a background pass stepping aside for a foreground request, stops the prompt at its next chunk.
     fn cancelled(ptr: *anyopaque) bool {
-        return @as(*lanes.Stream, @ptrCast(@alignCast(ptr))).isCancelled();
+        const s: *lanes.Stream = @ptrCast(@alignCast(ptr));
+        return s.isCancelled() or s.yields();
     }
 
     /// The prompt pass stands at a keep: the lane host copies the GPU state there.
@@ -243,12 +259,15 @@ pub const Cuda = struct {
         var sink: PromptSink = .{ .gpa = self.gpa, .s = s };
         s.prompt_rows.clearRetainingCapacity();
         if (s.prompt_logprobs) |k| {
+            // a logits buffer of its own takes batch_rows a head pass; without the memory, the window's state.max_rows
+            if (self.prompt_logits == null) self.prompt_logits = cuda.DeviceBuffer.alloc(e.ctx.d, prompt_rows.batch_rows * e.c.vocab * 2) catch null;
+            const rows: usize = if (self.prompt_logits != null) prompt_rows.batch_rows else state.max_rows;
             const words = self.prompt_out.slice(u32);
-            const picks_at = state.max_rows * row_words; // after the rows
-            e.prompt_rows = .{ .k = k, .picks = words[picks_at..][0..state.max_rows], .picks_dev = self.prompt_dev + picks_at * 4, .out = words[0..picks_at], .out_dev = self.prompt_dev, .stride = row_words, .ctx = &sink, .call = PromptSink.take };
+            const picks_at = rows * row_words; // after the rows
+            e.prompt_rows = .{ .k = k, .rows = rows, .logits = if (self.prompt_logits) |b| b.ptr else e.b.logits, .picks = words[picks_at..][0..rows], .picks_dev = self.prompt_dev + picks_at * 4, .out = words[0..picks_at], .out_dev = self.prompt_dev, .stride = row_words, .ctx = &sink, .call = PromptSink.take };
         }
         defer e.prompt_rows = null;
-        const first = try e.prefillFrom(ids, from, null, self.head, .{ .ptr = s, .check = cancelled }, keep);
+        const first = try e.prefillFrom(ids, from, null, self.head, .{ .ptr = s, .check = cancelled, .yields = s.yield_check != null }, keep);
         // the head's first draft reads the prompt's last row (its hidden row waits where a window's would)
         const last = ids.len - 1 - e.last_chunk;
         try e.ops().copy(e.b.hidden, e.b.p_hidden + last * @as(u64, e.c.hidden) * 2, e.c.hidden * 2);
@@ -375,18 +394,40 @@ pub const Cuda = struct {
         }
     }
 
-    /// Absorb kept rows with their following tokens, then draft the requested depth.
+    /// Absorb kept rows with their following tokens, then draft: several drafting streams batched (Head.chains).
     fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const self = of(ptr);
         const h = self.head orelse return error.NoDraftHead;
+        var drafting: usize = 0;
+        for (requests) |r| drafting += @intFromBool(r.depth > 0);
+        var parts: [engine.max_streams]mtp.Part = undefined;
+        var batched: usize = 0;
+        var rows: usize = 0;
         for (requests) |r| {
-            _ = try self.bindLane(r.stream, if (r.rows) |path| path.len else null);
+            const l = try self.bindLane(r.stream, if (r.rows) |path| path.len else null);
             if (r.position != self.e.pos + 1) return error.PositionMismatch;
-            if (r.rows) |rows| {
-                for (rows, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
-                try h.chain(r.follow[0..rows.len], r.depth);
-            } else try h.chain(&.{self.value(r.first orelse return error.NoFirstToken)}, r.depth);
+            var first: [1]u32 = undefined;
+            const follow = if (r.rows) |path| blk: {
+                for (path, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
+                break :blk r.follow[0..path.len];
+            } else blk: {
+                first[0] = self.value(r.first orelse return error.NoFirstToken);
+                break :blk first[0..];
+            };
+            if (drafting < 2 or r.depth == 0 or batched == parts.len or rows + follow.len > state.max_rows) {
+                try h.chain(follow, r.depth);
+                l.keep = h.keep;
+                continue;
+            }
+            if (r.depth > mtp.max_chain) return error.BadDraftRequest;
+            try self.e.ops().upload(self.e.b.sampled, std.mem.sliceAsBytes(follow));
+            parts[batched] = .{ .k_cache = h.k_cache, .v_cache = h.v_cache, .probs = h.probs, .ids = self.e.b.ids, .hidden = self.e.b.hidden, .sampled = self.e.b.sampled, .rule = if (self.e.sampling != null) self.e.b.rule else null, .pos = h.pos, .keep = follow.len, .depth = r.depth };
+            l.keep = follow.len; // as h.chain records h.keep: a reclaim begins this head again at these rows
+            h.pos += follow.len;
+            batched += 1;
+            rows += follow.len;
         }
+        if (batched > 0) try h.chains(parts[0..batched]);
     }
 
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {

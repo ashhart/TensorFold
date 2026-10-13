@@ -4,6 +4,7 @@ const json = @import("json.zig");
 const tool_parse = @import("tool_parse.zig");
 const parse = tool_parse.parse;
 const closeCall = tool_parse.closeCall;
+const repairGlmKeys = tool_parse.repairGlmKeys;
 
 test "families" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -38,6 +39,7 @@ test "a call the end token left open closes when it parses whole" {
         .{ "<tool_call>\n<function=lookup>\n", "</function></tool_call>", "{}", "" },
         .{ "<tool_call>\n<function=lookup>\n<parameter=n>\n5\n</parameter>\n</function>\n", "</tool_call>", "{\"n\":5}", "" },
         .{ "<tool_call>lookup<arg_key>n</arg_key><arg_value>7</arg_value>", "</tool_call>", "{\"n\":7}", "" },
+        .{ "Trying.<tool_call>lookup<arg_key>n</arg_key><arg_value>7", "</arg_value></tool_call>", "{\"n\":7}", "Trying." }, // a GLM value left open (#285)
         .{ "<tool_call>{\"name\":\"lookup\"}</tool_call>\n<tool_call>{\"name\":\"lookup\",\"arguments\":{\"n\":2}", "}</tool_call>", "{\"n\":2}", "" },
         .{ "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"q\":\"<tool_call>\"}", "}</tool_call>", "{\"q\":\"<tool_call>\"}", "" },
     };
@@ -61,7 +63,6 @@ test "a call left open that would not parse whole stays the reply's text" {
         "Trying.<tool_call>\n<function=lookup>\n<parameter=q>\nfast ca", // inside a parameter
         "Trying.<tool_call>\n<function=lookup>\n<parameter=n>\n5\n", // before its </parameter>
         "Trying.<tool_call>{\"name\":\"launch rocket!\",\"arguments\":{}}", // no function name
-        "Trying.<tool_call>lookup<arg_key>n</arg_key><arg_value>7", // a GLM value left open
         "Trying.<tool_call>", // nothing written
         "Trying <tool_call> tags.<tool_call>{\"name\":\"lookup\"}", // an earlier opener would take the closer
     };
@@ -228,4 +229,83 @@ test "bare JSON calls keep literal unfinished DSML markers as argument data" {
         try std.testing.expectEqualStrings("<｜DSML｜tool_calls>", arguments.strField("q").?);
         try std.testing.expectEqualStrings("", parsed.content);
     };
+}
+
+test "a GLM call whose <arg_key> the model wrote as whitespace gets it back" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const repaired = [_][2][]const u8{ // the block as written, with its keys put back
+        .{ "read_file path</arg_key><arg_value>/x</arg_value>", "read_file <arg_key>path</arg_key><arg_value>/x</arg_value>" },
+        .{ "read_file\npath</arg_key><arg_value>/x</arg_value>", "read_file\n<arg_key>path</arg_key><arg_value>/x</arg_value>" },
+        .{ "read_file<arg_key>path</arg_key><arg_value>/x</arg_value>\nlimit</arg_key><arg_value>3</arg_value>", "read_file<arg_key>path</arg_key><arg_value>/x</arg_value>\n<arg_key>limit</arg_key><arg_value>3</arg_value>" },
+        .{ "read_file path</arg_key><arg_value>/x</arg_value> limit</arg_key><arg_value>3</arg_value>", "read_file <arg_key>path</arg_key><arg_value>/x</arg_value> <arg_key>limit</arg_key><arg_value>3</arg_value>" },
+    };
+    for (repaired) |c| {
+        try std.testing.expectEqualStrings(c[1], try repairGlmKeys(a, c[0]));
+        try std.testing.expectEqualStrings(c[1], try repairGlmKeys(a, c[1]));
+    }
+    const unchanged = [_][]const u8{
+        "read_file<arg_key>path</arg_key><arg_value>/x</arg_value>", // nothing missing
+        "read_file",
+        "read_filepath</arg_key><arg_value>/x</arg_value>", // no space: no name left before the key
+        " path</arg_key><arg_value>/x</arg_value>", // no name at all
+        "{\"name\": \"run\", \"arguments\": {\"command\": \"ls\"}}",
+    };
+    for (unchanged) |b| try std.testing.expectEqualStrings(b, try repairGlmKeys(a, b));
+}
+
+test "a repaired GLM call parses, in both modes and once the end token closed it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"parameters\":{\"properties\":{\"filePath\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\"}}}}}]")).ok.array;
+    // before: the first came back as text, the second lost its second argument
+    const cases = [_][2][]const u8{
+        .{ "<tool_call>read_file filePath</arg_key><arg_value>/home/a/main.go</arg_value></tool_call>", "{\"filePath\":\"/home/a/main.go\"}" },
+        .{ "<tool_call>read_file<arg_key>filePath</arg_key><arg_value>/a</arg_value>\nlimit</arg_key><arg_value>3</arg_value></tool_call>", "{\"filePath\":\"/a\",\"limit\":3}" },
+    };
+    for (cases) |c| for ([_]?usize{ null, 1 }) |max_calls| {
+        const r = try parse(a, c[0], tools, max_calls);
+        try std.testing.expectEqualStrings(c[1], r.calls.?[0].get("function").?.get("arguments").?.string);
+        try std.testing.expectEqualStrings("", r.content);
+    };
+    const open = "<tool_call>read_file filePath</arg_key><arg_value>/x</arg_value>";
+    try std.testing.expectEqualStrings("</tool_call>", try closeCall(a, open, tools));
+}
+
+test "a GLM call the end token left open closes as #285 closed it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a,
+        \\[{"type":"function","function":{"name":"read_file","parameters":{"properties":{"path":{"type":"string"},"limit":{"type":"integer"}}}}},
+        \\ {"type":"function","function":{"name":"run","parameters":{"properties":{"command":{"type":"string"}}}}},
+        \\ {"type":"function","function":{"name":"now","parameters":{"properties":{}}}}]
+    )).ok.array;
+    const closes = [_][3][]const u8{ // the reply, what closes it, the tool the last call names (tests/test_glm_tool_call_end.py)
+        .{ "<tool_call>read_file<arg_key>path</arg_key><arg_value>x</arg_value>", "</tool_call>", "read_file" },
+        .{ "<tool_call>run<arg_key>command</arg_key><arg_value>ls -la", "</arg_value></tool_call>", "run" },
+        .{ "Let me look:<tool_call>now", "</tool_call>", "now" },
+        .{ "<tool_call>now</tool_call>\n<tool_call>read_file<arg_key>path</arg_key><arg_value>x</arg_value>\n", "</tool_call>", "read_file" },
+        .{ "<tool_call>read_file path</arg_key><arg_value>x", "</arg_value></tool_call>", "read_file" }, // and repaired
+    };
+    for (closes) |c| {
+        const close = try closeCall(a, c[0], tools);
+        try std.testing.expectEqualStrings(c[1], close);
+        const r = try parse(a, try std.mem.concat(a, u8, &.{ c[0], close }), tools, null);
+        try std.testing.expectEqualStrings(c[2], r.calls.?[r.calls.?.len - 1].get("function").?.get("name").?.string);
+    }
+    const left_open = [_][]const u8{
+        "no call at all",
+        "<tool_call>now</tool_call>", // closed already
+        "<tool_call>launch<arg_key>x</arg_key><arg_value>1", // a tool the client did not offer
+        "<tool_call>run<arg_key>comm", // a key with no value
+        "<tool_call>run<arg_key>command</arg_key>", // ... or no value yet
+        "<tool_call>run command=ls", // not GLM's markup
+        "<tool_call>", // nothing written
+        "<tool_call>now</think>The answer.", // the think block went on past it
+        "<tool_call>run<arg_key>command</arg_key><arg_value>ls</arg_value> and then", // text after an argument
+    };
+    for (left_open) |text| try std.testing.expectEqualStrings("", try closeCall(a, text, tools));
 }

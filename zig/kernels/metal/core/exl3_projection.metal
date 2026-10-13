@@ -48,9 +48,9 @@ inline ushort tf_exl3_state(const device ushort* tile, uint halves, uint p) {
 inline ushort tf_exl3_mapped_state(const device ushort* tile, uint map) {
   const uint wi = map & 63u, off = (map >> 6) & 31u;
   const uint lo = tf_exl3_word(tile, wi);
-  if (off <= 16) return ushort(lo >> (16 - off));
   const uint hi = tf_exl3_word(tile, map >> 11);
-  return ushort((lo << (off - 16)) | (hi >> (48 - off)));
+  const uint carry = (hi >> ((32 - off) & 31u)) & (0u - uint(off != 0));
+  return ushort(((lo << off) | carry) >> 16);
 }
 
 // Both operations are exact in FP32 before the single FP16 round; do not split the mul1 FMA.
@@ -227,4 +227,16 @@ kernel void tf_exl3_rotate_out(const device float* sums [[buffer(0)]],
     if (a.output_f32) reinterpret_cast<device float*>(y)[at] = out;
     else reinterpret_cast<device bfloat*>(y)[at] = bfloat(out);
   }
+}
+
+// Qualification only: compare mapped windows with independent CPU 64-bit concatenation.
+
+kernel void tf_exl3_state_window_check(const device uint4* inputs [[buffer(0)]],
+                              device ushort* outputs [[buffer(1)]],
+                              constant uint& count [[buffer(2)]],
+                              uint tid [[thread_position_in_grid]]) {
+  if (tid >= count) return;
+  const device ushort* tile = reinterpret_cast<const device ushort*>(inputs + tid);
+  const uint off = inputs[tid].z;
+  outputs[tid] = tf_exl3_mapped_state(tile, (off << 6) | (1u << 11));
 }

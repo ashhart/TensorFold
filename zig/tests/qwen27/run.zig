@@ -121,7 +121,7 @@ pub fn main(init: std.process.Init) !void {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const load_start = std.Io.Clock.awake.now(io);
-    const m = try q.model.Model.load(init.gpa, io, model.?, 128);
+    const m = try q.model.Model.load(init.gpa, io, model.?, 128, null);
     defer m.deinit();
     for (ids) |token| if (token >= m.config.vocab) return error.BadTokenId;
     if (expected) |values| for (values) |token| if (token >= m.config.vocab) return error.BadTokenId;

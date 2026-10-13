@@ -559,5 +559,6 @@ test "a request that does not fit a shared cache pool waits, in order, until a s
 
 test {
     _ = @import("lane_host_fail_test.zig");
+    _ = @import("lane_host_lone_test.zig");
     _ = @import("lane_host_admit_test.zig");
 }

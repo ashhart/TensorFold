@@ -211,6 +211,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
 fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     const t = o.model_type;
     if (o.slide and !std.mem.eql(u8, t, "nemotron_h")) return try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on Macs yet", .{t});
+    const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
+    if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
     if (o.learn == null) return null;
     const name: []const u8 = if (std.mem.eql(u8, t, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (!std.mem.eql(u8, t, "qwen3_5")) return null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only: serve {s} without --learn, --learn-dir or --learn-gib", .{name});
@@ -284,10 +286,6 @@ fn qwen27Engine(a: Allocator, io: std.Io, dir: []const u8) bool {
 
 /// Qwen3.8-27B on the lane host: `--parallel` streams in shared rounds, DFlash2 drafts from --drafter for one of them.
 fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
-    if (o.speed_up != null) {
-        problem.* = "speed-up mode is not available for Qwen3.8-27B yet";
-        return null;
-    }
     const context = o.context orelse 32768;
     if (context <= 0 or context > 262144) {
         problem.* = try std.fmt.allocPrint(a, "--context {d} is outside Qwen3.8-27B's 1 to 262,144 tokens", .{context});
@@ -425,6 +423,18 @@ test "--learn is refused for the 27B, the 2B and GLM-5.3 (EXLR8), and not for th
     try std.testing.expectStringEndsWith((try refusal(a, .{ .dir = "d", .model_type = "glm_moe_dsa", .learn = "/x" }, false)) orelse "", ": serve GLM-5.3 (EXLR8)" ++ flags);
     for ([_][]const u8{ "qwen3_5", "glm_moe_dsa" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .learn_gib = 8, .learn_min_free_gib = 2 }, true)) == null);
     for ([_][]const u8{ "nemotron_h", "qwen4_exp", "glm5_next" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .learn = "/x" }, false)) == null);
+}
+
+test "--speed-up is refused by Nemotron, the 27B and the 2B before any load, and not by the two-Mac families" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const two: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .speed_up = "pair.json" };
+    const tail = " only: serve {s} without it";
+    try std.testing.expectStringEndsWith((try refusal(a, two, true)) orelse "", try std.fmt.allocPrint(a, tail, .{"Qwen3.8-27B"}));
+    try std.testing.expectStringEndsWith((try refusal(a, two, false)) orelse "", try std.fmt.allocPrint(a, tail, .{"Qwen3.5-2B"}));
+    try std.testing.expectStringEndsWith((try refusal(a, .{ .dir = "d", .model_type = "nemotron_h", .speed_up = "pair.json" }, false)) orelse "", try std.fmt.allocPrint(a, tail, .{"Nemotron"}));
+    for ([_][]const u8{ "qwen4_exp", "glm5_next", "glm_moe_dsa" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .speed_up = "pair.json" }, false)) == null);
 }
 
 test "--slide is refused by every family but Nemotron, which learns into its weights" {

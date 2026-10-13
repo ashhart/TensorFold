@@ -6,6 +6,7 @@ const lanes = @import("lanes");
 const nemotron = @import("nemotron");
 const Allocator = std.mem.Allocator;
 const budget = @import("cuda_memory.zig");
+const lane_backend = @import("cuda_bound.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
@@ -125,7 +126,7 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
 }
 
 /// A lone driver returns false at completion or true when yield hands it to the lane core.
-const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool) anyerror!bool;
+const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
 
 /// The context a lane thread needs current: the lane host steps rounds on its own thread, CUDA binds per thread.
 threadlocal var bound: ?*const cuda.Context = null;
@@ -174,7 +175,7 @@ const Host = struct {
         h.gpa.destroy(h);
     }
 
-    fn bind(p: *anyopaque) *Host {
+    pub fn bind(p: *anyopaque) *Host {
         const h: *Host = @ptrCast(@alignCast(p));
         if (h.gpu) |g| if (bound != &g.ctx) {
             g.ctx.makeCurrent() catch |e| std.log.err("cuCtxSetCurrent on the lane thread: {s}", .{@errorName(e)});
@@ -194,7 +195,8 @@ const Host = struct {
         h.host.memory = if (h.gpu != null) .{ .read = readMemory } else null;
         h.host.explain = explain;
         h.host.cache = h.store;
-        if (h.lone != null) h.host.lone = .{ .ctx = h, .run = loneRun, .sampled = true };
+        h.host.warm_quiet = if (info.warm_turns) nemotron.native.warm_quiet else 0;
+        if (h.lone != null) h.host.lone = .{ .ctx = h, .run = loneRun, .sampled = true, .logprobs = h.inner.vtable.first_row != null, .structures = h.inner.vtable.first_masked != null, .min_budget = nemotron.native.lone_min_budget, .resumes = true };
         if (h.learn != null) h.host.learner = h.learner();
         try h.host.start();
     }
@@ -227,117 +229,21 @@ const Host = struct {
     /// The family's lone driver with the context current on the lane thread.
     fn loneRun(p: *anyopaque, s: *lanes.Stream, hooks: api.LoneHooks) anyerror!bool {
         const x = bind(p);
-        return x.lone.?(x.family, s, hooks.ctx, hooks.committed, hooks.yield);
+        return x.lone.?(x.family, s, hooks.ctx, hooks.committed, hooks.yield, hooks.resumed);
     }
 
     /// The family's backend, each call made with the context current on the calling thread.
     fn backend(h: *Host) lanes.backend.Backend {
-        const v = h.inner.vtable;
-        h.vtable = .{
-            .prefill = struct {
-                fn f(p: *anyopaque, s: *lanes.Stream) anyerror!void {
-                    const x = bind(p);
-                    return x.inner.vtable.prefill(x.inner.ptr, s);
-                }
-            }.f,
-            .first = struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
-                    const x = bind(p);
-                    return x.inner.vtable.first(x.inner.ptr, s, position);
-                }
-            }.f,
-            .queue = struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, feed: lanes.backend.Feed, position: u64) anyerror!u64 {
-                    const x = bind(p);
-                    return x.inner.vtable.queue(x.inner.ptr, s, feed, position);
-                }
-            }.f,
-            .read = struct {
-                fn f(p: *anyopaque, handle: u64) anyerror!u32 {
-                    const x = bind(p);
-                    return x.inner.vtable.read(x.inner.ptr, handle);
-                }
-            }.f,
-            .verify = struct {
-                fn f(p: *anyopaque, w: []const lanes.backend.Window, out: []lanes.backend.Verified) anyerror!void {
-                    const x = bind(p);
-                    return x.inner.vtable.verify(x.inner.ptr, w, out);
-                }
-            }.f,
-            .keep = struct {
-                fn f(p: *anyopaque, w: []const lanes.backend.Window, paths: []const []const u32) anyerror!void {
-                    const x = bind(p);
-                    return x.inner.vtable.keep(x.inner.ptr, w, paths);
-                }
-            }.f,
-            .draft = struct {
-                fn f(p: *anyopaque, r: []const lanes.backend.DraftRequest) anyerror!void {
-                    const x = bind(p);
-                    return x.inner.vtable.draft(x.inner.ptr, r);
-                }
-            }.f,
-            .unspeculate = if (v.unspeculate != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream) anyerror!void {
-                    const x = bind(p);
-                    return x.inner.vtable.unspeculate.?(x.inner.ptr, s);
-                }
-            }.f else null,
-            .probabilities = if (v.probabilities != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!bool {
-                    const x = bind(p);
-                    return x.inner.vtable.probabilities.?(x.inner.ptr, s, out);
-                }
-            }.f else null,
-            .tree = if (v.tree != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, gpa: Allocator) anyerror!?lanes.stream.Held {
-                    const x = bind(p);
-                    return x.inner.vtable.tree.?(x.inner.ptr, s, gpa);
-                }
-            }.f else null,
-            .alternatives = if (v.alternatives != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, out: []lanes.backend.Alternative) anyerror!usize {
-                    const x = bind(p);
-                    return x.inner.vtable.alternatives.?(x.inner.ptr, s, out);
-                }
-            }.f else null,
-            .first_row = if (v.first_row != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream) anyerror!lanes.LogprobRow {
-                    const x = bind(p);
-                    return x.inner.vtable.first_row.?(x.inner.ptr, s);
-                }
-            }.f else null,
-            .first_masked = if (v.first_masked != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, position: u64, mask: []const u32) anyerror!u64 {
-                    const x = bind(p);
-                    return x.inner.vtable.first_masked.?(x.inner.ptr, s, position, mask);
-                }
-            }.f else null,
-            .held = if (v.held != null) struct {
-                fn f(p: *anyopaque, s: *lanes.Stream, out: []u32) anyerror!void {
-                    const x = bind(p);
-                    return x.inner.vtable.held.?(x.inner.ptr, s, out);
-                }
-            }.f else null,
-            .prompt_rows = v.prompt_rows,
-            .release = struct {
-                fn f(p: *anyopaque, s: *lanes.Stream) void {
-                    const x = bind(p);
-                    x.inner.vtable.release(x.inner.ptr, s);
-                }
-            }.f,
-        };
+        h.vtable = lane_backend.vtable(Host, h.inner.vtable.*);
         return .{ .ptr = h, .vtable = &h.vtable };
     }
 };
 
-/// What the backend refuses before any device work, whatever the family; null when `o` may open.
-fn refusal(o: api.Open) ?[]const u8 {
-    return if (o.learn != null) "--learn learns prompt prefixes on Macs only: serve without --learn, --learn-dir or --learn-gib on CUDA" else null;
-}
+const refusals = @import("cuda_refusal.zig");
 
 /// The engine for `o.dir`, or null with `problem` set when `refusal` names a flag or no CUDA family reads it.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
-    if (refusal(o)) |why| {
+    if (refusals.backend(o)) |why| {
         problem.* = why;
         return null;
     }
@@ -349,6 +255,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
 }
 
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (refusals.family(F, o)) |why| {
+        problem.* = why;
+        return null;
+    }
     const native = modelContext(a, io, o.dir);
     const window = contextWindow(o.context, native, F.default_context) catch |e| {
         problem.* = switch (e) {
@@ -438,7 +348,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     errdefer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = loaded.backend, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = loaded.lone };
     const cache = budget.cacheBytes(o.prompt_cache_gib, room, loaded.stream_bytes * (streams -| free));
-    h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in {d}-row chunks{s}{s}; {s}", .{
+    h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in passes of up to {d} rows{s}{s}; {s}", .{
         capability,                                                                                                        device,                                                                                                       name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (loaded.learn_bytes > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(loaded.learn_bytes)}) else "", streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
         if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache", .{toGib(cache)}) else ", no prompt cache", if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
     });
@@ -446,8 +356,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     if (cache > 0) {
         const pc = api.prompt_cache;
         const store = try gpa.create(pc.Store);
-        // a row's bits ignore the cuts, a kept row costs no call: states keep at any row; the head reads one token on
-        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = &nemotron_snaps }, .{ .lookahead = 1, .min_prompt = 0 }, cache - try nemotron.native.snap_ready(loaded.target, cache));
+        // states keep at any row at no prompt call (the head reads one token on); replies prefill when it is quiet
+        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = &nemotron_snaps }, .{ .lookahead = 1, .min_prompt = 0, .warm = .waits }, cache - try nemotron.native.snap_ready(loaded.target, cache));
         h.store = store;
     }
     errdefer if (h.store) |store| {
@@ -474,7 +384,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         gpa.free(h.dir);
     };
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
-    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .logprobs = loaded.backend.vtable.first_row != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows, .structures = loaded.backend.vtable.first_masked != null }, .{ .ctx = loaded.ctx, .text = F.explain });
+    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .warm_turns = h.store != null, .logprobs = loaded.backend.vtable.first_row != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows, .structures = loaded.backend.vtable.first_masked != null }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
@@ -485,11 +395,16 @@ fn toGib(bytes: u64) f64 {
 
 test {
     _ = budget; // cuda_memory.zig's own tests, which no other test binary reaches
+    _ = refusals;
+    _ = lane_backend;
 }
 
-test "--learn is refused whatever the family, and --slide or a learned-disk size alone is not" {
-    try std.testing.expectStringStartsWith(refusal(.{ .dir = "d", .model_type = "nemotron_h", .learn = "/x" }) orelse "", "--learn learns prompt prefixes on Macs only");
-    try std.testing.expect(refusal(.{ .dir = "d", .model_type = "nemotron_h", .slide = true, .learn_gib = 8, .learn_min_free_gib = 2 }) == null);
+test "the lane core sees a family's prefill_step through the lane backend, so a served prompt can step" {
+    var target: lanes.fake.Fake = .{ .gpa = std.testing.allocator, .prefill_chunks = 3 };
+    defer target.deinit();
+    var h: Host = undefined;
+    h.inner = target.stepped();
+    try std.testing.expect(h.backend().vtable.prefill_step != null);
 }
 
 test "chip classes name the compute capability as gate entries do" {

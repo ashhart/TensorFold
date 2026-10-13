@@ -31,6 +31,8 @@ pub const nvfp4 = @import("nvfp4.zig");
 pub const segments = @import("segments.zig");
 pub const grouped = @import("grouped.zig");
 pub const qlinear = @import("qlinear.zig");
+pub const norms = @import("norms.zig");
+pub const embed_rows = @import("embed_rows.zig");
 pub const experts = @import("experts.zig");
 pub const sample = @import("sample.zig");
 pub const modelopt = @import("modelopt.zig");
@@ -39,6 +41,8 @@ test {
     _ = @import("memory.zig");
     _ = @import("grouped.zig");
     _ = @import("qlinear.zig");
+    _ = @import("norms.zig");
+    _ = @import("embed_rows.zig");
     _ = @import("experts.zig");
     _ = @import("sample.zig");
     _ = launch;

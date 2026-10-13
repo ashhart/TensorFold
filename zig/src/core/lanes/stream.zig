@@ -294,6 +294,11 @@ pub const Stream = struct {
         return null;
     }
 
+    /// The thinking budget's cut falls within the next `rows` tokens.
+    pub fn budgetWithin(s: *const Stream, rows: usize) bool {
+        return s.budgetActive() and s.emitted().len + rows >= s.think_budget;
+    }
+
     /// Python `think_cut([-1]) == 0`: the next position is the budget's cut.
     pub fn cutsNext(s: *const Stream) bool {
         return s.budgetActive() and s.emitted().len + 1 >= s.think_budget;
