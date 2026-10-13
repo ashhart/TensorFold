@@ -105,7 +105,7 @@ pub const KdaW = struct {
 };
 
 /// The rank's MoE: router [E, D] bf16 and bias [E] fp32, routed EXL3 experts, the shared expert's three linears.
-pub const MoeW = struct { router: u64, bias: u64, experts: exl3e.Layer, gate: exl3.Weight, up: exl3.Weight, down: exl3.Weight };
+pub const MoeW = struct { router: B16, bias: u64, experts: exl3e.Layer, gate: exl3.Weight, up: exl3.Weight, down: exl3.Weight };
 
 /// A dense layer's MLP (layers 0-2): gate and up (the rank's columns), down (the rank's rows, an fp32 partial).
 pub const MlpW = struct { gate: exl3.Weight, up: exl3.Weight, down: exl3.Weight };
@@ -369,7 +369,8 @@ pub fn moeBlock(k: *Kernels, s: Stream, c: Config, w: *const MoeW, sc: *const Sc
     const esc = sc.esc orelse return error.GlmLayerScratch;
     const d: usize = c.d;
     const slots: usize = c.top_k + 1;
-    try k.bmm.router(s, sc.normed, c.d, w.router, rows, c.experts, d, sc.mlog, sc.mpart);
+    if (w.router.n != c.experts or w.router.k != d) return error.GlmLayerShape;
+    try k.bmm.router(s, sc.normed, c.d, w.router, rows, sc.mlog, sc.mpart);
     try k.glue.topk(s, sc.mlog, w.bias, sc.pick, sc.wts, c.routed_scale, rows, c.experts, c.top_k);
     try k.experts.runPerSlot(s, w.experts, sc.normed, d, .bf16, sc.pick, rows, sc.ey, esc);
     try swigluMlp(k, s, c, w.gate, w.up, w.down, sc, rows, sc.sy);

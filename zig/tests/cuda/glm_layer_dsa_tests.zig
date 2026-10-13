@@ -82,7 +82,7 @@ fn dsaLayer(r: *Rig, dir: []const u8) !void {
             .kv_norm = try r.dev(dh.kv_norm),
             .wk = try r.dev(dh.wk),
             .wv = try r.dev(dh.wv),
-            .index = .{ .kw = try lt.b16W(r, dh.kw), .qb = try lt.b16W(r, dh.qb), .gate = try r.dev(dh.gate), .ln_w = try r.dev(dh.ln_w), .ln_b = try r.dev(dh.ln_b), .ape = try r.dev(dh.ape) },
+            .index = .{ .kw = try lt.b16W(r, dh.kw), .qb = try lt.b16W(r, dh.qb), .gate = .{ .w = try r.dev(dh.gate), .n = dsa.index_dim, .k = dsa.hidden }, .ln_w = try r.dev(dh.ln_w), .ln_b = try r.dev(dh.ln_b), .ape = try r.dev(dh.ape) },
         } },
         .ffn = .{ .moe = try lt.moeW(r, h, c) },
     };

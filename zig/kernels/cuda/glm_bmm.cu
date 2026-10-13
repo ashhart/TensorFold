@@ -171,7 +171,7 @@ __device__ __forceinline__ void reduce_body(const float* part, void* out, int to
 }
 
 // glue._router: OUT[m, e] fp32 = x[m] . w[e] over the whole K, 64-wide steps in order (the unsliced choice).
-template <int BM>
+template <int BM, bool PK>
 __device__ __forceinline__ void router_body(const RouterArgs a) {
     constexpr int mt = BM / 16;
     const int warp = static_cast<int>(threadIdx.x) >> 5;
@@ -184,16 +184,31 @@ __device__ __forceinline__ void router_body(const RouterArgs a) {
 #pragma unroll
         for (int i = 0; i < 8; i++) acc[r][i >> 2][i & 3] = 0.0f;
     for (int k0 = 0; k0 < a.d; k0 += 64) {
+        unsigned bp[PK ? 2 : 1][8];
+        if constexpr (PK) {
+            load_b_packed(a.w, a.d, col0, k0, a.ne, bp[0]);
+            load_b_packed(a.w, a.d, col0 + 8, k0, a.ne, bp[PK ? 1 : 0]);
+        }
 #pragma unroll
         for (int kk = 0; kk < 4; kk++) {
             unsigned av[mt][4];
 #pragma unroll
             for (int r = 0; r < mt; r++) load_a16(a.x, a.xs, row0 + r * 16, k0 + kk * 16, a.m, av[r]);
             unsigned b[2];
-            load_b16(a.w, a.d, col0, k0 + kk * 16, a.ne, b);
+            if constexpr (PK) {
+                b[0] = bp[0][2 * kk];
+                b[1] = bp[0][2 * kk + 1];
+            } else {
+                load_b16(a.w, a.d, col0, k0 + kk * 16, a.ne, b);
+            }
 #pragma unroll
             for (int r = 0; r < mt; r++) mma_16n8k16(acc[r][0], av[r], b);
-            load_b16(a.w, a.d, col0 + 8, k0 + kk * 16, a.ne, b);
+            if constexpr (PK) {
+                b[0] = bp[PK ? 1 : 0][2 * kk];
+                b[1] = bp[PK ? 1 : 0][2 * kk + 1];
+            } else {
+                load_b16(a.w, a.d, col0 + 8, k0 + kk * 16, a.ne, b);
+            }
 #pragma unroll
             for (int r = 0; r < mt; r++) mma_16n8k16(acc[r][1], av[r], b);
         }
@@ -206,7 +221,7 @@ __device__ __forceinline__ void router_body(const RouterArgs a) {
 }
 
 // glue._router_part: the same over one of `ks` equal K slices; PART[s, m, e] fp32.
-template <int BM>
+template <int BM, bool PK>
 __device__ __forceinline__ void router_part_body(const RouterArgs a) {
     constexpr int mt = BM / 16;
     const int warp = static_cast<int>(threadIdx.x) >> 5;
@@ -221,13 +236,20 @@ __device__ __forceinline__ void router_part_body(const RouterArgs a) {
 #pragma unroll
         for (int i = 0; i < 4; i++) acc[r][i] = 0.0f;
     for (int k0 = k0_base; k0 < k0_base + per; k0 += 64) {
+        unsigned bp[8];
+        if constexpr (PK) load_b_packed(a.w, a.d, col0, k0, a.ne, bp);
 #pragma unroll
         for (int kk = 0; kk < 4; kk++) {
             unsigned av[mt][4];
 #pragma unroll
             for (int r = 0; r < mt; r++) load_a16(a.x, a.xs, row0 + r * 16, k0 + kk * 16, a.m, av[r]);
             unsigned b[2];
-            load_b16(a.w, a.d, col0, k0 + kk * 16, a.ne, b);
+            if constexpr (PK) {
+                b[0] = bp[2 * kk];
+                b[1] = bp[2 * kk + 1];
+            } else {
+                load_b16(a.w, a.d, col0, k0 + kk * 16, a.ne, b);
+            }
 #pragma unroll
             for (int r = 0; r < mt; r++) mma_16n8k16(acc[r], av[r], b);
         }
@@ -267,10 +289,16 @@ TF_GLM_BMM(128, 8, 1)
 
 #define TF_GLM_ROUTER(BM)                                                                                    \
     extern "C" __global__ void __launch_bounds__(128) tf_glm_router_##BM(tf_glm_bmm::RouterArgs a) {         \
-        tf_glm_bmm::router_body<BM>(a);                                                                      \
+        tf_glm_bmm::router_body<BM, false>(a);                                                               \
     }                                                                                                        \
     extern "C" __global__ void __launch_bounds__(128) tf_glm_router_part_##BM(tf_glm_bmm::RouterArgs a) {    \
-        tf_glm_bmm::router_part_body<BM>(a);                                                                 \
+        tf_glm_bmm::router_part_body<BM, false>(a);                                                          \
+    }                                                                                                        \
+    extern "C" __global__ void __launch_bounds__(128) tf_glm_prouter_##BM(tf_glm_bmm::RouterArgs a) {        \
+        tf_glm_bmm::router_body<BM, true>(a);                                                                \
+    }                                                                                                        \
+    extern "C" __global__ void __launch_bounds__(128) tf_glm_prouter_part_##BM(tf_glm_bmm::RouterArgs a) {   \
+        tf_glm_bmm::router_part_body<BM, true>(a);                                                           \
     }
 TF_GLM_ROUTER(16)
 TF_GLM_ROUTER(32)

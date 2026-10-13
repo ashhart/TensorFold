@@ -330,7 +330,7 @@ pub const Reader = struct {
             .index = .{
                 .kw = try r.packed_(kw, wkx.shape[0] + wpx.shape[0], wkx.shape[1]),
                 .qb = try r.b16(p, "self_attn.indexer.wq_b.weight", false),
-                .gate = try r.bf(p, "self_attn.indexer.index_kpool_compress_gate", .f16),
+                .gate = try r.b16(p, "self_attn.indexer.index_kpool_compress_gate", false),
                 .ln_w = try r.put((try r.t(p, "self_attn.indexer.k_norm.weight", .f16)).bytes),
                 .ln_b = try r.put((try r.t(p, "self_attn.indexer.k_norm.bias", .f16)).bytes),
                 .ape = try r.bf(p, "self_attn.indexer.index_kpool_compress_ape", .f32),
@@ -427,7 +427,7 @@ pub const Reader = struct {
                 .mla => .{ .dsa = try r.dsaW(p, c) },
             },
             .ffn = if (c.isMoe(i)) .{ .moe = .{
-                .router = try r.bf(p, "mlp.gate.weight", .f16),
+                .router = try r.b16(p, "mlp.gate.weight", false),
                 .bias = try r.put((try r.t(p, "mlp.gate.e_score_correction_bias", .f32)).bytes),
                 .experts = try r.experts(p, c),
                 .gate = try r.linear(p, "mlp.shared_experts.gate_proj", .out),

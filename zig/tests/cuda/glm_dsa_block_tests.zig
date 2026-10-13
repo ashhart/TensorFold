@@ -74,7 +74,7 @@ fn block(r: *Rig, dir: []const u8) !void {
         .kv_norm = try r.dev(host.kv_norm),
         .wk = try r.dev(host.wk),
         .wv = try r.dev(host.wv),
-        .index = .{ .kw = try b16W(r, host.kw), .qb = try b16W(r, host.qb), .gate = try r.dev(host.gate), .ln_w = try r.dev(host.ln_w), .ln_b = try r.dev(host.ln_b), .ape = try r.dev(host.ape) },
+        .index = .{ .kw = try b16W(r, host.kw), .qb = try b16W(r, host.qb), .gate = .{ .w = try r.dev(host.gate), .n = dsa.index_dim, .k = dsa.hidden }, .ln_w = try r.dev(host.ln_w), .ln_b = try r.dev(host.ln_b), .ape = try r.dev(host.ape) },
     };
     var pre: [names.len][]u8 = undefined;
     for (names, 0..) |n, i| pre[i] = try file(r, dir, ref.str(o.get("pre").?.object, n));

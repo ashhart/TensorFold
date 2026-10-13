@@ -129,7 +129,7 @@ pub fn moeW(r: *Rig, h: *const lref.Host, c: lay.Config) !lay.MoeW {
         .act_mode = 0,
     };
     return .{
-        .router = try r.dev(h.router),
+        .router = .{ .w = try r.dev(h.router), .n = c.experts, .k = c.d },
         .bias = try r.dev(h.bias),
         .experts = experts,
         .gate = try linW(r, h.sh[0]),

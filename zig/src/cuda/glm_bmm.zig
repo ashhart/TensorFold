@@ -70,6 +70,8 @@ pub const Bmm = struct {
     pbmm: [2][4]Function, // the same over packed weights
     routers: [4]Function,
     router_part: [4]Function,
+    prouters: [4]Function, // the same over packed weights
+    prouter_part: [4]Function,
     reduce: Function,
     router_sum: Function,
 
@@ -81,6 +83,8 @@ pub const Bmm = struct {
             .pbmm = undefined,
             .routers = undefined,
             .router_part = undefined,
+            .prouters = undefined,
+            .prouter_part = undefined,
             .reduce = undefined,
             .router_sum = undefined,
         };
@@ -94,6 +98,8 @@ pub const Bmm = struct {
         inline for (0..4) |i| {
             b.routers[i] = try b.mod.function(std.fmt.comptimePrint("tf_glm_router_{s}", .{bm_names[i]}));
             b.router_part[i] = try b.mod.function(std.fmt.comptimePrint("tf_glm_router_part_{s}", .{bm_names[i]}));
+            b.prouters[i] = try b.mod.function(std.fmt.comptimePrint("tf_glm_prouter_{s}", .{bm_names[i]}));
+            b.prouter_part[i] = try b.mod.function(std.fmt.comptimePrint("tf_glm_prouter_part_{s}", .{bm_names[i]}));
         }
         b.reduce = try b.mod.function("tf_glm_bmm_reduce");
         b.router_sum = try b.mod.function("tf_glm_router_sum");
@@ -149,8 +155,11 @@ pub const Bmm = struct {
     }
 
     /// glue.router: fp32 [m, ne] logits = x [m, d] through the gate [ne, d]; the shape's sliced path, else one pass.
-    pub fn router(b: *const Bmm, s: Stream, x: u64, xs: i64, w: u64, m: usize, ne: usize, d: usize, out: u64, part: u64) !void {
-        if (m < 1 or ne == 0 or d == 0) return error.GlmBmmShape;
+    pub fn router(b: *const Bmm, s: Stream, x: u64, xs: i64, gate: B16, m: usize, out: u64, part: u64) !void {
+        const w = gate.w;
+        const ne: usize = gate.n;
+        const d: usize = gate.k;
+        if (m < 1 or ne == 0 or d == 0 or (gate.frag and (ne % 8 != 0 or d % 64 != 0))) return error.GlmBmmShape;
         const bm: u32 = if (m <= 16) 16 else if (m <= 32) 32 else if (m <= 64) 64 else 128;
         const i = bmIndex(bm);
         if (router_ks <= 1 or d % (router_ks * 64) != 0) {
@@ -164,7 +173,7 @@ pub const Bmm = struct {
             r.add(@as(i32, @intCast(ne)));
             r.add(@as(i32, @intCast(d)));
             r.add(@as(i32, 1));
-            try launch_.launch(b.routers[i], .{
+            try launch_.launch((if (gate.frag) b.prouters else b.routers)[i], .{
                 .grid = .{ .x = @intCast((m + bm - 1) / bm), .y = @intCast((ne + 63) / 64), .z = 1 },
                 .block = .{ .x = 128, .y = 1, .z = 1 },
                 .shared = 0,
@@ -182,7 +191,7 @@ pub const Bmm = struct {
         r.add(@as(i32, @intCast(ne)));
         r.add(@as(i32, @intCast(d)));
         r.add(@as(i32, @intCast(router_ks)));
-        try launch_.launch(b.router_part[i], .{
+        try launch_.launch((if (gate.frag) b.prouter_part else b.router_part)[i], .{
             .grid = .{ .x = @intCast((m + bm - 1) / bm), .y = @intCast((ne + 31) / 32), .z = @intCast(router_ks) },
             .block = .{ .x = 128, .y = 1, .z = 1 },
             .shared = 0,

@@ -369,7 +369,7 @@ fn router(r: *Rig, state: *Run, dir: []const u8) !void {
     const want = try ref.readFile(r.a, r.gpu.io, dir, ref.str(o, "router_out"));
     const part = try r.zeros(8 * rows * ne * 4);
     const out = try r.zeros(want.len);
-    try k.router(r.s, x, @intCast(d), w, rows, ne, d, out, part);
+    try k.router(r.s, x, @intCast(d), .{ .w = w, .n = @intCast(ne), .k = @intCast(d) }, rows, out, part);
     try check.sameBytes("glm.glue.router", try r.back(out, want.len), want);
     const xv = try bf4(r.a, try ref.readFile(r.a, r.gpu.io, dir, ref.str(o, "router_x")));
     const wv = try bf4(r.a, try ref.readFile(r.a, r.gpu.io, dir, ref.str(o, "router_w")));

@@ -37,7 +37,7 @@ pub const Kernels = struct {
 pub const Config = struct { eps: f32, index_eps: f32, scale: f32, index_scale: f32, wscale: f32 };
 
 /// The replicated indexer: wk | weights_proj [160, D], wq_b [4096, 1536], the gate [128, D], LayerNorm, pool ape.
-pub const IndexW = struct { kw: B16, qb: B16, gate: u64, ln_w: u64, ln_b: u64, ape: u64 };
+pub const IndexW = struct { kw: B16, qb: B16, gate: B16, ln_w: u64, ln_b: u64, ape: u64 };
 
 /// The rank's DSA weights: q_a/kv_a/q_b and o_proj's rows (EXL3), the bf16 norms, kv_b as AbsorbW [H, 256, 512].
 pub const DsaW = struct {
@@ -212,7 +212,8 @@ pub fn dsaBlock(k: Kernels, s: *Stream, c: Config, w: *const DsaW, st: DsaState,
     // the indexer runs on every call: it fills the caches while the window is still dense
     const ix = w.index;
     try k.bmm.matmul(s.*, ix.kw, normed, hidden, rows, sc.ikr, false, sc.mpart);
-    try k.bmm.router(s.*, normed, hidden, ix.gate, rows, index_dim, hidden, sc.igr, sc.mpart);
+    if (ix.gate.n != index_dim or ix.gate.k != hidden) return error.GlmDsaShape;
+    try k.bmm.router(s.*, normed, hidden, ix.gate, rows, sc.igr, sc.mpart);
     try k.sparse.indexWrite(s, sc.ikr, ikr_w, sc.igr, ix.ln_w, ix.ln_b, st.ik, st.ig, p32, st.pos_dev, c.index_eps, r32);
     try k.sparse.poolKeys(s, st.ik, st.ig, ix.ape, st.pk, p32, st.pos_dev, r32);
     try k.latent.absorbQ(s, sc.q, w.wk, sc.qa, r32);
