@@ -267,17 +267,22 @@ pub const Reader = struct {
 
     fn kda(r: *Reader, p: []const u8, heads: u32) !lay.KdaW {
         const qkv = try r.linear(p, "self_attn.qkv_proj", .qkv);
-        const fa = try r.b16(p, "self_attn.f_a_proj.weight", false);
-        const ga = try r.b16(p, "self_attn.g_a_proj.weight", false);
-        const b = try r.b16(p, "self_attn.b_proj.weight", true);
+        // f_a, g_a and the rank's b rows stacked: one matmul (each column's sum is its own)
+        const fa = try r.t(p, "self_attn.f_a_proj.weight", .f16);
+        const ga = try r.t(p, "self_attn.g_a_proj.weight", .f16);
+        const bt = try r.t(p, "self_attn.b_proj.weight", .f16);
+        if (fa.shape[1] != ga.shape[1] or fa.shape[1] != bt.shape[1]) return error.GlmShape;
+        const b_rows = try rowHalf(bt, r.rank);
+        const stacked = try std.mem.concat(r.a(), u8, &.{ fa.bytes, ga.bytes, b_rows });
+        const fa_n: u32 = @intCast(fa.shape[0]);
+        const ga_n: u32 = @intCast(ga.shape[0]);
+        const fab = try r.packed_(try toBf16(r.a(), .f16, stacked), fa.shape[0] + ga.shape[0] + bt.shape[0] / world, fa.shape[1]);
         const conv = try r.t(p, "self_attn.conv1d.weight", .bf16);
         const taps = conv.shape[2];
         const fa_off = 3 * heads * 128;
         return .{
             .qkv = qkv,
-            .fa = fa,
-            .ga = ga,
-            .b = b,
+            .fab = fab,
             .fb = try r.b16(p, "self_attn.f_b_proj.weight", true),
             .gb = try r.b16(p, "self_attn.g_b_proj.weight", true),
             .o = try r.linear(p, "self_attn.o_proj", .in),
@@ -287,9 +292,9 @@ pub const Reader = struct {
             .norm = try r.put((try r.t(p, "self_attn.o_norm.weight", .bf16)).bytes),
             .heads = heads,
             .fa_off = fa_off,
-            .ga_off = fa_off + fa.n,
-            .b_off = fa_off + fa.n + ga.n,
-            .p_stride = qkv.n + fa.n + ga.n + b.n,
+            .ga_off = fa_off + fa_n,
+            .b_off = fa_off + fa_n + ga_n,
+            .p_stride = qkv.n + fab.n,
         };
     }
 

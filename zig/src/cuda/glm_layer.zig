@@ -89,9 +89,7 @@ pub const Hc = struct { fn_w: u64, base: u64, scale: u64 };
 /// The rank's KDA weights: fused q|k|v EXL3, the bf16 pair and b, conv taps, decays, gated norm, o_proj's rows.
 pub const KdaW = struct {
     qkv: exl3.Weight,
-    fa: B16,
-    ga: B16,
-    b: B16,
+    fab: B16, // f_a | g_a | b stacked by rows: one matmul writes p's columns fa_off.. (the three are adjacent)
     fb: B16,
     gb: B16,
     o: exl3.Weight,
@@ -186,9 +184,7 @@ pub const Scratch = struct {
     hcpart: u64,
     p: u64, // [rows, p_stride] bf16: the decode window's st.proj rows, the prompt chunk's b.kproj
     qkv: u64,
-    fa: u64,
-    ga: u64,
-    bb: u64,
+    fab: u64, // [rows, fab.n] bf16: f_a | g_a | b
     ka: u64,
     kg: u64,
     mpart: u64, // split-K partials of the bf16 matmuls and the router (one at a time)
@@ -222,7 +218,7 @@ pub const Scratch = struct {
         const er: usize = if (sh.experts != null) rows else 0;
         const sw: usize = sh.width;
         var mp: usize = @as(usize, bmm_.router_ks) * rows * ne * 4;
-        if (kd) |v| for ([_]B16{ v.fa, v.ga, v.b, v.fb, v.gb }) |q| {
+        if (kd) |v| for ([_]B16{ v.fab, v.fb, v.gb }) |q| {
             mp = @max(mp, bmm_.Bmm.partBytes(q, rows));
         };
         var sc: Scratch = undefined;
@@ -235,9 +231,7 @@ pub const Scratch = struct {
         sc.hcpart = l.take(rows * 16 * 32 * 4);
         sc.p = l.take(rows * p_stride * 2);
         sc.qkv = l.take(rows * @as(usize, if (kd) |v| v.qkv.n else 0) * 2);
-        sc.fa = l.take(rows * @as(usize, if (kd) |v| v.fa.n else 0) * 2);
-        sc.ga = l.take(rows * @as(usize, if (kd) |v| v.ga.n else 0) * 2);
-        sc.bb = l.take(rows * @as(usize, if (kd) |v| v.b.n else 0) * 2);
+        sc.fab = l.take(rows * @as(usize, if (kd) |v| v.fab.n else 0) * 2);
         sc.ka = l.take(rows * per * 2);
         sc.kg = l.take(rows * per * 2);
         sc.mpart = l.take(mp);
@@ -265,9 +259,7 @@ pub const Scratch = struct {
         if (rows == 1) { // one row: the copies into p, sgu and ey's shared slot become the outputs themselves
             if (kd) |v| {
                 sc.qkv = sc.p;
-                sc.fa = sc.p + @as(u64, v.fa_off) * 2;
-                sc.ga = sc.p + @as(u64, v.ga_off) * 2;
-                sc.bb = sc.p + @as(u64, v.b_off) * 2;
+                sc.fab = sc.p + @as(u64, v.fa_off) * 2;
             }
             sc.smg = sc.sgu;
             sc.smu = sc.sgu + sw * 2;
@@ -324,15 +316,9 @@ pub fn kdaBlock(k: *Kernels, s: *Stream, c: Config, w: *const KdaW, st: KdaState
     const ps: usize = @as(usize, w.p_stride) * 2;
     try k.dense.prompt(s.*, w.qkv, sc.normed, .bf16, rows, sc.qkv, .bf16);
     try copyRows(k.d, s.*, sc.p, ps, sc.qkv, @as(usize, w.qkv.n) * 2, @as(usize, w.qkv.n) * 2, rows);
-    const parts = [_]struct { q: B16, out: u64, off: u32 }{
-        .{ .q = w.fa, .out = sc.fa, .off = w.fa_off },
-        .{ .q = w.ga, .out = sc.ga, .off = w.ga_off },
-        .{ .q = w.b, .out = sc.bb, .off = w.b_off },
-    };
-    for (parts) |pt| {
-        try k.bmm.matmul(s.*, pt.q, sc.normed, c.d, rows, pt.out, false, sc.mpart);
-        try copyRows(k.d, s.*, sc.p + @as(u64, pt.off) * 2, ps, pt.out, @as(usize, pt.q.n) * 2, @as(usize, pt.q.n) * 2, rows);
-    }
+    if (w.fa_off + w.fab.n != w.p_stride) return error.GlmLayerShape;
+    try k.bmm.matmul(s.*, w.fab, sc.normed, c.d, rows, sc.fab, false, sc.mpart);
+    try copyRows(k.d, s.*, sc.p + @as(u64, w.fa_off) * 2, ps, sc.fab, @as(usize, w.fab.n) * 2, @as(usize, w.fab.n) * 2, rows);
     try k.bmm.matmul(s.*, w.fb, sc.p + @as(u64, w.fa_off) * 2, w.p_stride, rows, sc.ka, false, sc.mpart);
     try k.bmm.matmul(s.*, w.gb, sc.p + @as(u64, w.ga_off) * 2, w.p_stride, rows, sc.kg, false, sc.mpart);
     const per: i64 = @as(i64, w.heads) * kda_.d_k;

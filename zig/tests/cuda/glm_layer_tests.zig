@@ -148,9 +148,7 @@ fn weights(r: *Rig, h: *const lref.Host, c: lay.Config) !lay.LayerW {
         .post_norm = try r.dev(h.post_norm),
         .mixer = .{ .kda = .{
             .qkv = try linW(r, kd.qkv),
-            .fa = try b16W(r, kd.fa),
-            .ga = try b16W(r, kd.ga),
-            .b = try b16W(r, kd.b),
+            .fab = try b16W(r, .{ .w = try std.mem.concat(r.a, u8, &.{ kd.fa.w, kd.ga.w, kd.b.w }), .n = kd.fa.n + kd.ga.n + kd.b.n, .k = kd.fa.k }),
             .fb = try b16W(r, kd.fb),
             .gb = try b16W(r, kd.gb),
             .o = try linW(r, kd.o),
