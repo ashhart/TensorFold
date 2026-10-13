@@ -1,6 +1,7 @@
 //! One safetensors file mapped read-only; tensors above core's max rank and unnamed dtypes stay out of its index.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const st = @import("core").safetensors;
 
@@ -33,6 +34,16 @@ pub const Shard = struct {
         s.file.close(io);
         s.arena.deinit();
         s.* = undefined;
+    }
+
+    /// Drops data bytes [begin, end) (their whole pages) from this mapping; the page cache keeps them, a read refaults.
+    pub fn release(s: *const Shard, begin: usize, end: usize) void {
+        if (builtin.os.tag != .linux or end <= begin) return;
+        const page = std.heap.pageSize();
+        const lo = std.mem.alignBackward(usize, s.data + begin, page);
+        const hi = @min(std.mem.alignForward(usize, s.data + end, page), s.map.memory.len);
+        if (hi <= lo) return;
+        _ = std.os.linux.madvise(s.map.memory.ptr + lo, hi - lo, std.os.linux.MADV.DONTNEED);
     }
 
     pub fn get(s: *const Shard, name: []const u8) ?Tensor {
@@ -78,4 +89,25 @@ test "a tensor above the max rank and an unknown dtype are left out" {
     const h = try parse(arena.allocator(), json, 12);
     try std.testing.expectEqual(@as(usize, 1), h.count());
     try std.testing.expect(h.contains("a"));
+}
+
+test "released pages read back the same bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const n = 3 * 4096;
+    const header = "{\"t\":{\"dtype\":\"BF16\",\"shape\":[6144],\"data_offsets\":[0,12288]}}";
+    var bytes: [8 + header.len + n]u8 = undefined;
+    std.mem.writeInt(u64, bytes[0..8], header.len, .little);
+    @memcpy(bytes[8..][0..header.len], header);
+    for (bytes[8 + header.len ..], 0..) |*b, i| b.* = @truncate(i *% 31);
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.safetensors", .data = &bytes });
+    const path = try tmp.dir.realPathFileAlloc(io, "s.safetensors", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    var s = try Shard.open(std.testing.allocator, io, path);
+    defer s.close(io);
+    const before = try std.testing.allocator.dupe(u8, s.get("t").?.bytes);
+    defer std.testing.allocator.free(before);
+    s.release(0, n);
+    try std.testing.expectEqualSlices(u8, before, s.get("t").?.bytes);
 }
