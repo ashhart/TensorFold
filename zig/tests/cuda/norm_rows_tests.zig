@@ -6,20 +6,20 @@ const check = @import("check.zig");
 
 const nref = core.norms_ref;
 const aref = core.act_ref;
-const counts = [_]usize{ 1, 3, 17, 64 };
-const most = counts[counts.len - 1];
+pub const counts = [_]usize{ 1, 3, 17, 64 };
+pub const most = counts[counts.len - 1];
 const eps: f32 = 1e-6;
 
-fn bf16(x: f32) u16 {
+pub fn bf16(x: f32) u16 {
     const u: u32 = @bitCast(x);
     return @truncate((u + 0x7fff + ((u >> 16) & 1)) >> 16);
 }
 
-fn bf(h: u16) f64 {
+pub fn bf(h: u16) f64 {
     return @as(f32, @bitCast(@as(u32, h) << 16));
 }
 
-const Rig = struct {
+pub const Rig = struct {
     gpu: check.Gpu,
     a: std.mem.Allocator,
     s: cuda.Stream,
@@ -27,20 +27,20 @@ const Rig = struct {
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     worst: f64 = 0,
 
-    fn dev(r: *Rig, bytes: []const u8) !u64 {
+    pub fn dev(r: *Rig, bytes: []const u8) !u64 {
         const b = try cuda.DeviceBuffer.fromHost(r.gpu.d, bytes);
         try r.bufs.append(r.gpu.gpa, b);
         return b.ptr;
     }
 
-    fn out(r: *Rig, bytes: usize) !u64 {
+    pub fn out(r: *Rig, bytes: usize) !u64 {
         const b = try cuda.DeviceBuffer.alloc(r.gpu.d, bytes);
         try r.bufs.append(r.gpu.gpa, b);
         try b.fill8(0xff, r.s.handle); // a value the kernel misses reads NaN
         return b.ptr;
     }
 
-    fn back(r: *Rig, comptime T: type, ptr: u64, n: usize) ![]T {
+    pub fn back(r: *Rig, comptime T: type, ptr: u64, n: usize) ![]T {
         const o = try r.a.alloc(T, n);
         try r.s.synchronize();
         const b: cuda.DeviceBuffer = .{ .d = r.gpu.d, .ptr = ptr, .len = n * @sizeOf(T) };
@@ -49,20 +49,20 @@ const Rig = struct {
     }
 
     /// bf16 values: mostly within [-scale, scale), one in 64 twenty times larger.
-    fn bfs(r: *Rig, n: usize, scale: f32) []u16 {
+    pub fn bfs(r: *Rig, n: usize, scale: f32) []u16 {
         const v = r.a.alloc(u16, n) catch unreachable;
         for (v, 0..) |*x, i| x.* = bf16((r.rng.float(f32) * 2 - 1) * scale * (if (i % 64 == 7) @as(f32, 20) else 1));
         return v;
     }
 
     /// Weights near 1.
-    fn weights(r: *Rig, n: usize) []f32 {
+    pub fn weights(r: *Rig, n: usize) []f32 {
         const v = r.a.alloc(f32, n) catch unreachable;
         for (v) |*x| x.* = 0.5 + r.rng.float(f32);
         return v;
     }
 
-    fn within(r: *Rig, what: []const u8, got: f64, want: f64, tol: f64) !void {
+    pub fn within(r: *Rig, what: []const u8, got: f64, want: f64, tol: f64) !void {
         const q = @abs(got - want) / tol;
         if (!(q <= 1)) {
             try check.expect(false, "{s}: within float64 tolerance (got {d}, want {d}, {d:.3} tolerances)", .{ what, got, want, q });
@@ -71,7 +71,7 @@ const Rig = struct {
     }
 
     /// Group sums `xs` of the stored bf16 rows `y` ([rows, k]).
-    fn sums(r: *Rig, what: []const u8, y: []const u16, xs: []const f32, rows: usize, k: usize) !void {
+    pub fn sums(r: *Rig, what: []const u8, y: []const u16, xs: []const f32, rows: usize, k: usize) !void {
         var row: [64]f64 = undefined;
         for (0..rows) |i| for (0..k / 64) |j| {
             for (&row, 0..) |*v, e| v.* = bf(y[i * k + 64 * j + e]);
