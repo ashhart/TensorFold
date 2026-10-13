@@ -9,6 +9,7 @@ namespace tf_glue {
 
 constexpr int NT = 256;   // threads a row block
 constexpr int MAXE = 16;  // elements a thread holds: rows up to NT * MAXE = 4096 wide
+constexpr int MAXS = 8;   // MoE slots a row holds: its top-k and the shared halves
 
 // Sum of x^2 over a row: each thread's fma chain in index order, warp butterflies, then warps in order.
 __device__ __forceinline__ float row_ss(const float (&x)[MAXE], int D, float* red) {
@@ -104,17 +105,27 @@ extern "C" __global__ void __launch_bounds__(NT) tf_nemo_add_moe_norm(const __nv
     __shared__ float red[NT / 32];
     __shared__ float ybuf[NT * MAXE];
     const int64_t row = blockIdx.x;
+    // the slots' weights and values load before their sums, so the loads are in flight together
+    float wt[MAXS];
+#pragma unroll
+    for (int s = 0; s < MAXS; ++s) wt[s] = s < NR ? WT[row * NS + s] : 0.0f;
     float x[MAXE];
 #pragma unroll
     for (int k = 0; k < MAXE; ++k) {
         const int i = threadIdx.x + k * NT;
         if (i >= D) continue;
-        float routed = 0.0f, shared = 0.0f;
-        for (int s = 0; s < NS; ++s) {
+        float y[MAXS];
+#pragma unroll
+        for (int s = 0; s < MAXS; ++s) {
             const int64_t at = (row * NS + s) * D + i;
-            const float y = y_f32 ? static_cast<const float*>(Yk)[at] : bf(static_cast<const __nv_bfloat16*>(Yk)[at]);
-            if (s < NR) routed = __fmaf_rn(WT[row * NS + s], y, routed);
-            else shared = __fadd_rn(shared, y);
+            y[s] = s >= NS ? 0.0f : y_f32 ? static_cast<const float*>(Yk)[at] : bf(static_cast<const __nv_bfloat16*>(Yk)[at]);
+        }
+        float routed = 0.0f, shared = 0.0f;
+#pragma unroll
+        for (int s = 0; s < MAXS; ++s) {
+            if (s >= NS) break;
+            if (s < NR) routed = __fmaf_rn(wt[s], y[s], routed);
+            else shared = __fadd_rn(shared, y[s]);
         }
         const float delta = rbf(__fadd_rn(routed, shared));
         const __nv_bfloat16 h = __float2bfloat16_rn(__fadd_rn(bf(X[row * D + i]), delta));

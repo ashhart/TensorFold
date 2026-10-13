@@ -30,6 +30,7 @@ pub const Fns = struct {
     scan: cuda.Function,
     kv_write: cuda.Function,
     attn_chunk: cuda.Function,
+    attn_chunk_pf: cuda.Function,
     attn_merge: cuda.Function,
     keyed: cuda.Function,
 
@@ -50,6 +51,7 @@ pub const Fns = struct {
             .scan = try m[2].function("tf_nemo_scan"),
             .kv_write = try m[3].function("tf_nemo_kv_write"),
             .attn_chunk = try m[3].function("tf_nemo_attn_chunk"),
+            .attn_chunk_pf = try m[3].function("tf_nemo_attn_chunk_pf"),
             .attn_merge = try m[3].function("tf_nemo_attn_merge"),
             .keyed = try m[4].function("tf_nemo_keyed_greedy"),
         };
@@ -125,6 +127,7 @@ pub const Glue = struct {
     pub fn addMoeNorm(g: Glue, h: u64, y: u64, y_f32: bool, wt: u64, w: u64, hn: u64, out: u64, xs: u64, rows: usize, d: usize, eps: f32, top_k: usize, slots: usize) !void {
         if (g.tri()) |t| return t.addMoeNorm(h, y, y_f32, wt, w, hn, out, xs, rows, d, eps, top_k, slots);
         if (d > 4096) return error.RowTooWide;
+        if (slots > 8) return error.TooManySlots; // the kernel's MAXS
         var a: cuda.Args = .{};
         ptrs(&a, &.{ h, y });
         a.add(@as(c_int, @intFromBool(y_f32)));
@@ -165,6 +168,7 @@ pub const Glue = struct {
     pub fn scan(g: Glue, proj: u64, xc: u64, dt: u64, state: u64, a_: u64, dsk: u64, dtb: u64, meta: u64, y: u64, rows: usize, lo: f32, hi: f32, m: Shape) !void {
         if (g.tri()) |t| return t.scan(proj, xc, dt, state, a_, dsk, dtb, meta, y, rows, lo, hi, m);
         if (m.state != 128 or m.dh % 32 != 0) return error.ScanShape;
+        if (m.rmax > 16 or rows > m.rmax) return error.ScanShape; // the kernel steps at most 32 kept and window rows
         var a: cuda.Args = .{};
         ptrs(&a, &.{ proj, xc, dt, state, a_, dsk, dtb, meta, y });
         a.add(int(rows));
@@ -217,7 +221,8 @@ pub const Glue = struct {
         ptrs(&a, &.{ qkv, kc, vc, meta, po, pm, pl });
         ints(&a, &.{ at.nqkv, at.heads, at.kv_heads, grp, chunk_keys, at.nch });
         a.add(scale);
-        try g.go(g.f.attn_chunk, .{ rows, at.kv_heads, @min(at.nch, chunk_blocks) }, 256, 0, &a);
+        // several rows: each block loads its next key tile while it computes this one (one row gains nothing)
+        try g.go(if (rows > 1) g.f.attn_chunk_pf else g.f.attn_chunk, .{ rows, at.kv_heads, @min(at.nch, chunk_blocks) }, 256, 0, &a);
         var b: cuda.Args = .{};
         ptrs(&b, &.{ po, pm, pl, meta, out, xs });
         ints(&b, &.{ at.heads, at.kv_heads, grp, chunk_keys, at.nch });
