@@ -64,4 +64,6 @@ test {
     _ = @import("slide_pick.zig");
     _ = @import("startup.zig");
     _ = @import("responses_include_test.zig");
+    _ = @import("cortheon/cortheon.zig");
+    _ = @import("cortheon/cortheon_test.zig");
 }

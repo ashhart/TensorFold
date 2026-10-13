@@ -116,6 +116,15 @@ Each later compaction updates the previous note instead of starting over. A clie
 The reply carries the note and the compaction counts under `tensorfold.compaction`, and every reply reports `context_window` and `context_used`.
 The same request gives the same compaction and the same reply. With `--compact-memory`, the stored note carries over between requests.
 
+## Cortheon mode
+
+Off by default. `--cortheon` gives every chat request [Cortheon](https://github.com/ashhart/Cortheon)'s reasoning program and web research run by the server, so any OpenAI-compatible client gets it with no setup.
+The model works through Cortheon's stages for its task type and can call `cortheon_search` and `cortheon_fetch`, which the server runs without the client seeing them.
+A question about current facts, or a request to build with an outside library, is researched before the model starts.
+A coding task that changed files is asked to run its tests before it finishes.
+Web text is filtered for instructions aimed at the model, and reads reach public addresses only.
+See [Cortheon mode](docs/cortheon.md).
+
 ## Model discovery
 
 `GET /v1/models` (also `/models`) advertises each served name and alias. When the engine reports a finite
@@ -166,6 +175,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--compact-at auto\|FRACTION` | Turn on context compaction (below). `auto` compacts when the prompt and reply would pass the window minus a reserve. |
 | `--compact-keep TOKENS` | Recent tokens kept word for word when compacting; the default is 20,000 or a quarter of the window, whichever is smaller. |
 | `--compact-memory DIR` | Also keep each conversation's memory note as a Markdown file in DIR. |
+| `--cortheon` | Cortheon's reasoning program and server-run web research for chat requests; see [Cortheon mode](docs/cortheon.md). |
 | `--no-update-check` | Accepted compatibility switch; update the installed binary through its package manager. |
 | `--backend auto` | Use the backend compiled for the platform; `mlx` selects native Metal on macOS and `cuda` selects CUDA on Linux. |
 
