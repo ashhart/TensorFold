@@ -471,7 +471,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, wind
     h.warm = .{ .queue = eng.r.queue };
     // macOS unwires an idle process's GPU memory within seconds, and the next request waits while it comes back: the
     // engine's buffers join one residency set, which each tick of the idle keepalive uses
-    if (std.c.getenv("FLASHNEXT_NO_RESIDENCY") == null) holdResident(h, budget) catch |err| std.log.warn("flash next: no residency set ({s}): the first request after an idle second waits for the model's memory", .{@errorName(err)});
+    if (std.c.getenv("FLASHNEXT_NO_RESIDENCY") == null) holdResident(h) catch |err| std.log.warn("flash next: no residency set ({s}): the first request after an idle second waits for the model's memory", .{@errorName(err)});
     errdefer if (h.resident) |*r| r.deinit();
     // chunk 1: a prompt call keeps at marks inside it (engine.mark_taps), so a short prompt's history mark adds no call
     if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .write = Snaps.write, .read = Snaps.read, .forget = Snaps.forget } }, .{ .lookahead = 1, .chunk = 1 }, budget);
@@ -485,21 +485,10 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, wind
     return h;
 }
 
-/// The engine's buffers in one residency set; the idle keepalive's ticks use it. Only while the set, the prompt cache's
-/// `cache` bytes and a margin fit the GPU's recommended working set: a set past it slowed the GPU-side rounds about
-/// threefold on a 256 GB M5 Ultra (#606: 195.8 GiB held), while one under it holds them at speed.
-fn holdResident(h: *Host, cache: u64) !void {
-    const device = h.eng.r.device;
-    var bytes: u64 = 0;
-    for (h.eng.r.held.items) |b| bytes += b.length();
-    const room = device.maxWorkingSet();
-    if (bytes +| cache +| cache_fit.MARGIN > room) {
-        std.log.warn("flash next: no residency set: the engine's {d:.1} GiB and the prompt cache's {d:.1} GiB pass the GPU's {d:.1} GiB working set; the first request after an idle second waits for the model's memory", .{ cache_fit.gibs(bytes), cache_fit.gibs(cache), cache_fit.gibs(room) });
-        return;
-    }
-    h.resident = try Resident.init(device, h.eng.r.queue, h.eng.r.held.items);
+/// The engine's buffers in one residency set; the idle keepalive's ticks use it.
+fn holdResident(h: *Host) !void {
+    h.resident = try Resident.init(h.eng.r.device, h.eng.r.queue, h.eng.r.held.items);
     h.warm = (&h.resident.?).target();
-    std.log.info("flash next: {d} buffers ({d:.1} GiB) held resident between requests, under the GPU's {d:.1} GiB working set", .{ h.eng.r.held.items.len, cache_fit.gibs(bytes), cache_fit.gibs(room) });
 }
 
 fn follow(eng: *fx.Engine) void {
