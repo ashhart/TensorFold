@@ -134,15 +134,15 @@ fn moeReferenceRows(model: *Model, layer: usize, input: []const u16, ids: *const
             rows.gate[slot] = previous.?.gate[prior];
             rows.up[slot] = previous.?.up[prior];
         } else {
-            try projection.apply(matrices[0], input, &rows.gate[slot], scratch);
-            try projection.apply(matrices[1], input, &rows.up[slot], scratch);
+            try projection.apply(.{ .trellis = matrices[0] }, input, &rows.gate[slot], scratch);
+            try projection.apply(.{ .trellis = matrices[1] }, input, &rows.up[slot], scratch);
         }
         moe_reference.moeActivation(&rows.gate[slot], &rows.up[slot], if (slot == 6) 1 else routing[slot], model.cfg.text_config, &rows.activation[slot]);
         // A shared or identical-weight expert result can be reused only when the BF16 input is identical.
         if (reuse != null and std.mem.eql(u16, &rows.activation[slot], &previous.?.activation[reuse.?])) {
             rows.down[slot] = previous.?.down[reuse.?];
         } else {
-            try projection.apply(matrices[2], &rows.activation[slot], &rows.down[slot], scratch);
+            try projection.apply(.{ .trellis = matrices[2] }, &rows.activation[slot], &rows.down[slot], scratch);
         }
     }
     moeCombine(ids, rows);
@@ -306,7 +306,7 @@ pub fn runMoe(gpa: std.mem.Allocator, io: std.Io, model: *Model, snapshot: []con
             native_inputs_reference.down[slot] = native_weights_reference.down[slot];
         } else {
             const matrices = try moeMatrices(model, layer, if (slot == 6) null else native_ids[slot]);
-            try projection.apply(matrices[2], &native.activation[slot], &native_inputs_reference.down[slot], &scratch);
+            try projection.apply(.{ .trellis = matrices[2] }, &native.activation[slot], &native_inputs_reference.down[slot], &scratch);
         }
     }
     moeCombine(&native_ids, native_inputs_reference);

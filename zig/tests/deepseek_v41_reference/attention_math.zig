@@ -168,15 +168,15 @@ pub const State = struct {
     }
     pub fn apply(self: *State, a: Attention, layer: usize, x: []const u16, position: usize, c: Config, out: []u16, scratch: *projection.Scratch) !void {
         const compressed = c.compress_ratios[layer] != 0;
-        try projection.apply(a.wq_a, x, &self.qr, scratch);
+        try projection.apply(.{ .trellis = a.wq_a }, x, &self.qr, scratch);
         self.observe(.qr_projection, &self.qr);
         m.rms(&self.qr, a.q_norm, c.rms_norm_eps, &self.qr);
         self.observe(.qr_norm, &self.qr);
-        try projection.apply(a.wq_b, &self.qr, &self.q, scratch);
+        try projection.apply(.{ .trellis = a.wq_b }, &self.qr, &self.q, scratch);
         self.observe(.q_projection, &self.q);
         for (0..64) |head| m.rope(self.q[head * 512 ..][0..512], position, compressed, false, c);
         self.observe(.q, &self.q);
-        try projection.apply(a.wkv, x, &self.kv, scratch);
+        try projection.apply(.{ .trellis = a.wkv }, x, &self.kv, scratch);
         self.observe(.kv_projection, &self.kv);
         m.rms(&self.kv, a.kv_norm, c.rms_norm_eps, &self.kv);
         self.observe(.kv_norm, &self.kv);
@@ -216,9 +216,9 @@ pub const State = struct {
         }
         if (self.sparse_snapshot) |snapshot| self.observe(.sparse_o, snapshot);
         self.observe(.o, &self.o);
-        for (0..8) |group| try projection.apply(a.wo_a[group], self.o[group * 4096 ..][0..4096], self.grouped[group * 1024 ..][0..1024], scratch);
+        for (0..8) |group| try projection.apply(.{ .trellis = a.wo_a[group] }, self.o[group * 4096 ..][0..4096], self.grouped[group * 1024 ..][0..1024], scratch);
         self.observe(.grouped, &self.grouped);
-        try projection.apply(a.wo_b, &self.grouped, out, scratch);
+        try projection.apply(.{ .trellis = a.wo_b }, &self.grouped, out, scratch);
         self.observe(.wo_b, out);
     }
     fn observeHead(self: *State, head: usize) void {

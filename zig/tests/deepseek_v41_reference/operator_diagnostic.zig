@@ -97,7 +97,7 @@ pub fn attentionMetric(comptime T: type, gpa: std.mem.Allocator, report: *std.Ar
 
 pub fn attentionProjection(gpa: std.mem.Allocator, model: *Model, matrix: ex.Matrix, input: attention.View, name: []const u8, scratch: *projection.Scratch, expected: []f32, report: *std.ArrayList(u8), count: *usize) !void {
     const input_row = @as([*]const u16, @ptrCast(@alignCast(input.buffer.contents() + input.offset)))[0..matrix.k];
-    try projection.applyF32(matrix, input_row, expected[0..matrix.n], scratch);
+    try projection.applyF32(.{ .trellis = matrix }, input_row, expected[0..matrix.n], scratch);
     const output = model.workspace.view(.logits);
     const cb = model.queue.commandBufferUnretained();
     const enc = cb.compute(.serial);

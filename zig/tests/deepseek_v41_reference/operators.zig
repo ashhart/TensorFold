@@ -61,7 +61,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, model: *Model, dir: []const u8) !
         cb.wait();
         if (cb.failure() != null) return error.OperatorGpuFailure;
         const actual = y.slice(f32, 129280);
-        try projection.applyF32(matrix, x.slice(u16, matrix.k), expected[0..matrix.n], &reference);
+        try projection.applyF32(.{ .trellis = matrix }, x.slice(u16, matrix.k), expected[0..matrix.n], &reference);
         var max_abs: f64 = 0;
         var worst: usize = 0;
         var squared: f64 = 0;

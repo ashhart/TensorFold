@@ -74,7 +74,7 @@ pub const State = struct {
                 offset += primes[layer][column];
             }
         }
-        try projection.apply(e.wkv, &self.gathered, &self.kv, scratch);
+        try projection.apply(.{ .trellis = e.wkv }, &self.gathered, &self.kv, scratch);
         for (0..4) |copy| {
             var hh: f64 = 0;
             var kk: f64 = 0;

@@ -120,8 +120,18 @@ fn tensor(t: checkpoint.Tensor) View {
 fn core(v: View) exl3.View {
     return .{ .buffer = v.buffer, .offset = v.offset };
 }
-fn projection(p: *const exl3.Pipelines, e: mtl.ComputeEncoder, m: exl3.Matrix, x: View, y: View, scratch: exl3.View, rows: u32, xs: u32, ys: u32, output: exl3.Output) !void {
-    try exl3.encode(p, e, m, core(x), core(y), scratch, .{ .count = rows, .x_stride = xs, .y_stride = ys, .output = output });
+fn projection(p: *const exl3.Pipelines, e: mtl.ComputeEncoder, m: weights.AnyMatrix, x: View, y: View, scratch: exl3.View, rows: u32, xs: u32, ys: u32, output: exl3.Output) !void {
+    switch (m) {
+        .trellis => |t| try exl3.encode(p, e, t, core(x), core(y), scratch, .{ .count = rows, .x_stride = xs, .y_stride = ys, .output = output }),
+        // A kept-dense repack: the same rotate stages, the middle a plain dense product.
+        .dense => |d| try exl3.encodeDense(p, e, .{
+            .weight = core(tensor(d.weight)),
+            .suh = core(tensor(d.suh)),
+            .svh = core(tensor(d.svh)),
+            .k = d.k,
+            .n = d.n,
+        }, core(x), core(y), scratch, .{ .count = rows, .x_stride = xs, .y_stride = ys, .output = output }),
+    }
 }
 fn norm(p: *const Pipelines, e: mtl.ComputeEncoder, x: View, weight: checkpoint.Tensor, rows: u32, width: u32, eps: f32) void {
     ops.encodeRms(e, &p.plain, x, tensor(weight), x, .{ .rows = rows, .width = width, .x_stride = width, .y_stride = width, .eps = eps, .weight_f32 = weight.dtype == .f32 });
@@ -161,15 +171,15 @@ pub fn encodeDiagnostic(p: *const Pipelines, e: mtl.ComputeEncoder, w: *const we
     const ring = try state.ring(layer);
     const chunk = work.selection.windowChunk();
     e.barrier();
-    try projection(ep, e, w.wq_a, x, qr, scratch, rows, c.hidden_size, c.q_lora_rank, .bf16);
+    try projection(ep, e, .{ .trellis = w.wq_a }, x, qr, scratch, rows, c.hidden_size, c.q_lora_rank, .bf16);
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .qr_projection, qr);
     norm(p, e, qr, w.q_norm, rows, c.q_lora_rank, c.rms_norm_eps);
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .qr_norm, qr);
-    try projection(ep, e, w.wq_b, qr, q, scratch, rows, c.q_lora_rank, q_width, .bf16);
+    try projection(ep, e, .{ .trellis = w.wq_b }, qr, q, scratch, rows, c.q_lora_rank, q_width, .bf16);
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .q_projection, q);
     try rotate(p, e, q, rows, c.num_attention_heads, c.head_dim, position, ratio, 1, false, c);
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .q, q);
-    try projection(ep, e, w.wkv, x, raw, scratch, rows, c.hidden_size, c.head_dim, .bf16);
+    try projection(ep, e, .{ .trellis = w.wkv }, x, raw, scratch, rows, c.hidden_size, c.head_dim, .bf16);
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .kv_projection, raw);
     norm(p, e, raw, w.kv_norm, rows, c.head_dim, c.rms_norm_eps);
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .kv_norm, raw);
@@ -217,7 +227,10 @@ pub fn encodeDiagnostic(p: *const Pipelines, e: mtl.ComputeEncoder, w: *const we
                 try projection(ep, e, selector.wq_b, qr, iq, scratch, rows, c.q_lora_rank, iq_width, .bf16);
                 try rotate(p, e, iq, rows, c.index_n_heads, c.index_head_dim, position, ratio, 1, false, c);
                 try p.cache.encodePack(e, iq, work.selection.queryPacked(), .{ .rows = rows * c.index_n_heads, .width = c.index_head_dim, .stride = c.index_head_dim, .packed_stride = kv.cache.index_stride, .block = 32, .kind = .index_fp4, .inplace = 1 });
-                ops.encodeDense(e, &p.plain, x, tensor(selector.weights_proj), iw, .{ .rows = rows, .k = c.hidden_size, .n = c.index_n_heads, .x_stride = c.hidden_size, .w_stride = c.hidden_size, .y_stride = c.index_n_heads, .w_dtype = .f16 });
+                ops.encodeDense(e, &p.plain, x, tensor(selector.weights_proj), iw, .{ .rows = rows, .k = c.hidden_size, .n = c.index_n_heads, .x_stride = c.hidden_size, .w_stride = c.hidden_size, .y_stride = c.index_n_heads, .w_dtype = switch (selector.weights_proj.dtype) {
+                    .bf16 => .bf16,
+                    else => .f16,
+                } });
                 e.barrier();
             }
             const make_candidates = layer == c.candidate_source_layer_id;
@@ -250,9 +263,9 @@ pub fn encodeDiagnostic(p: *const Pipelines, e: mtl.ComputeEncoder, w: *const we
     const group_input = q_width / c.o_groups;
     const group_output = c.o_groups * c.o_lora_rank;
     for (w.wo_a, 0..) |matrix, group| {
-        try projection(ep, e, matrix, q.shifted(group * group_input * 2), grouped.shifted(group * c.o_lora_rank * 2), scratch, rows, q_width, group_output, .bf16);
+        try projection(ep, e, .{ .trellis = matrix }, q.shifted(group * group_input * 2), grouped.shifted(group * c.o_lora_rank * 2), scratch, rows, q_width, group_output, .bf16);
     }
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .grouped, grouped);
-    try projection(ep, e, w.wo_b, grouped, y, scratch, rows, group_output, c.hidden_size, .bf16);
+    try projection(ep, e, .{ .trellis = w.wo_b }, grouped, y, scratch, rows, group_output, c.hidden_size, .bf16);
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .wo_b, y);
 }

@@ -3,7 +3,9 @@
 // EXL3 attribution: docs/recipes/exl3.md; pinned checkpoint provenance in THIRD_PARTY_NOTICES.md.
 
 const std = @import("std");
-const exl3 = @import("tensorfold").exl3_projection;
+const tf = @import("tensorfold");
+const exl3 = tf.exl3_projection;
+const weights = tf.deepseek_v41_weights;
 const format = exl3.format;
 const block_size = format.hadamard_dim;
 const inverse: f32 = 0.08838834764831845;
@@ -41,13 +43,27 @@ pub const Scratch = struct {
 };
 
 /// One BF16 input row and BF16 output row; caller must finish GPU writes before borrowing shared CPU bytes.
-pub fn apply(matrix: exl3.Matrix, x: []const u16, y: []u16, scratch: *Scratch) !void {
+pub fn apply(matrix: weights.AnyMatrix, x: []const u16, y: []u16, scratch: *Scratch) !void {
+    switch (matrix) {
+        .trellis => |m| return applyTrellis(m, x, y, scratch),
+        .dense => return error.DenseReferenceUnsupported,
+    }
+}
+
+pub fn applyF32(matrix: weights.AnyMatrix, x: []const u16, y: []f32, scratch: *Scratch) !void {
+    switch (matrix) {
+        .trellis => |m| return applyF32Trellis(m, x, y, scratch),
+        .dense => return error.DenseReferenceUnsupported,
+    }
+}
+
+fn applyTrellis(matrix: exl3.Matrix, x: []const u16, y: []u16, scratch: *Scratch) !void {
     try project(matrix, x, y.len, scratch);
     try finish(u16, matrix, y, scratch.sums[0..matrix.n]);
 }
 
 /// The same arithmetic with an FP32 output boundary, for compressor projections and full-vocabulary logits.
-pub fn applyF32(matrix: exl3.Matrix, x: []const u16, y: []f32, scratch: *Scratch) !void {
+pub fn applyF32Trellis(matrix: exl3.Matrix, x: []const u16, y: []f32, scratch: *Scratch) !void {
     try project(matrix, x, y.len, scratch);
     try finish(f32, matrix, y, scratch.sums[0..matrix.n]);
 }

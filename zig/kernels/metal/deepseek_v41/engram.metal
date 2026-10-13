@@ -1,6 +1,11 @@
 // Math/layout attribution: DeepSeek AI DeepSeek-V4.1-Flash inference/{engram,model}.py (MIT).
 #include <metal_stdlib>
 using namespace metal;
+inline float rd(const device uchar* p, ulong i, uint dtype) {
+  if (dtype == 1u) return ((const device float*)p)[i];
+  if (dtype == 2u) return float(((const device half*)p)[i]);
+  return as_type<float>(uint(((const device ushort*)p)[i]) << 16);
+}
 
 struct EngramLayer {
   uint layer_id, rows;
@@ -96,15 +101,15 @@ kernel void tf_v41_engram_gather(const device uint* ids [[buffer(0)]],
 
 struct EngramGateArgs {
   ulong hidden_stride, kv_stride, output_stride;
-  uint dim, copies, masked;
+  uint dim, copies, masked, weight_dtype;
   float eps;
 };
 
 // Each copy gets its own RMS dot gate; all copies share the value following the flattened keys.
 kernel void tf_v41_engram_gate(const device bfloat* hidden [[buffer(0)]],
                                const device bfloat* kv [[buffer(1)]],
-                               const device float* q_weight [[buffer(2)]],
-                               const device float* k_weight [[buffer(3)]],
+                               const device uchar* q_weight [[buffer(2)]],
+                               const device uchar* k_weight [[buffer(3)]],
                                const device uchar* mask [[buffer(4)]],
                                device bfloat* out [[buffer(5)]],
                                constant EngramGateArgs& args [[buffer(6)]],
@@ -120,7 +125,7 @@ kernel void tf_v41_engram_gate(const device bfloat* hidden [[buffer(0)]],
   float3 acc = 0;
   for (uint d = t; d < args.dim; d += 256) {
     const float h = float(hidden[hbase + d]), k = float(kv[kbase + d]);
-    const float weight = q_weight[wbase + d] * k_weight[wbase + d];
+    const float weight = rd(q_weight, wbase + d, args.weight_dtype) * rd(k_weight, wbase + d, args.weight_dtype);
     acc += float3(h * h, k * k, (h * weight) * k);
   }
   acc = float3(simd_sum(acc.x), simd_sum(acc.y), simd_sum(acc.z));

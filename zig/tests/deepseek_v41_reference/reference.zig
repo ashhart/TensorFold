@@ -134,7 +134,7 @@ pub const Reference = struct {
         }
         math.collapse(&self.h, pre, &self.input);
         math.rms(&self.input, self.w.norm, self.c.rms_norm_eps, &self.input);
-        try projection.applyF32(self.w.head, &self.input, self.logits, &self.projection_scratch);
+        try projection.applyF32(.{ .trellis = self.w.head }, &self.input, self.logits, &self.projection_scratch);
         for (self.logits) |v| if (!std.math.isFinite(v)) return error.NonFiniteReferenceLogits;
         self.engram_state.advance(compressed);
         self.position += 1;
@@ -168,9 +168,9 @@ pub const Reference = struct {
     }
     fn applyExpert(self: *Reference, matrices: [3]exl3.Matrix, route: f32) !void {
         @setFloatMode(.strict);
-        try projection.apply(matrices[0], &self.input, &self.gate, &self.projection_scratch);
-        try projection.apply(matrices[1], &self.input, &self.up, &self.projection_scratch);
+        try projection.apply(.{ .trellis = matrices[0] }, &self.input, &self.gate, &self.projection_scratch);
+        try projection.apply(.{ .trellis = matrices[1] }, &self.input, &self.up, &self.projection_scratch);
         moeActivation(&self.gate, &self.up, route, self.c, &self.activation);
-        try projection.apply(matrices[2], &self.activation, &self.expert_output, &self.projection_scratch);
+        try projection.apply(.{ .trellis = matrices[2] }, &self.activation, &self.expert_output, &self.projection_scratch);
     }
 };

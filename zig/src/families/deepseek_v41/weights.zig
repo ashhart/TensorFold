@@ -8,9 +8,13 @@ const load = @import("load.zig");
 
 pub const Tensor = cp.Tensor;
 pub const Matrix = exl3.Matrix;
+
+/// A kept-dense repack stores small matrices as a bf16 weight beside the rotation scales.
+pub const Dense = struct { weight: Tensor, suh: Tensor, svh: Tensor, k: usize, n: usize };
+pub const AnyMatrix = union(enum) { trellis: Matrix, dense: Dense };
 pub const Hc = struct { projection: Tensor, scale: Tensor, base: Tensor };
-pub const Compressor = struct { wkv: Matrix, wgate: ?Matrix, norm: Tensor };
-pub const Indexer = struct { wq_b: Matrix, wk: ?Matrix, weights_proj: Tensor, k_norm: ?Tensor };
+pub const Compressor = struct { wkv: AnyMatrix, wgate: ?AnyMatrix, norm: Tensor };
+pub const Indexer = struct { wq_b: AnyMatrix, wk: ?AnyMatrix, weights_proj: Tensor, k_norm: ?Tensor };
 pub const Attention = struct {
     wq_a: Matrix,
     wq_b: Matrix,
@@ -170,6 +174,32 @@ fn scale(comptime binding: bool, source: anytype, prefix: []const u8, size: usiz
     return .{ .name = name, .format = if (have_fp) .f16 else .packed_signs };
 }
 
+/// The compressor and indexer matrices ride either storage: the released packs quantize
+/// them, rank-split repacks keep them dense beside the rotation scales.
+fn matrixAny(comptime binding: bool, source: anytype, prefix: []const u8, k: usize, n: usize, destination: ?*AnyMatrix) !void {
+    var name_buf: [160]u8 = undefined;
+    if (has(source, try named(&name_buf, "{s}.weight", .{prefix}))) {
+        const weight_name = try named(&name_buf, "{s}.weight", .{prefix});
+        const w = try source.get(weight_name);
+        if (w.dtype != .bf16 or w.rank != 2 or w.shape[0] != n or w.shape[1] != k) {
+            std.log.err("unsupported dense tensor {s}: {s} {any}", .{ weight_name, @tagName(w.dtype), w.shape[0..w.rank] });
+            return error.UnsupportedTensor;
+        }
+        const su = try source.get(try named(&name_buf, "{s}.suh", .{prefix}));
+        const sv = try source.get(try named(&name_buf, "{s}.svh", .{prefix}));
+        if (su.dtype != .f16 or su.rank != 1 or su.shape[0] != k or
+            sv.dtype != .f16 or sv.rank != 1 or sv.shape[0] != n) return error.UnsupportedExl3Scale;
+        if (binding) {
+            if (w.offset % 2 != 0) return error.InvalidTensorView;
+            destination.?.* = .{ .dense = .{ .weight = w, .suh = su, .svh = sv, .k = k, .n = n } };
+        }
+        return;
+    }
+    var m: Matrix = undefined;
+    try matrix(binding, source, prefix, k, n, if (binding) &m else null);
+    if (binding) destination.?.* = .{ .trellis = m };
+}
+
 fn matrix(comptime binding: bool, source: anytype, prefix: []const u8, k: usize, n: usize, destination: ?*Matrix) !void {
     var name: [160]u8 = undefined;
     const trellis = try source.get(try named(&name, "{s}.trellis", .{prefix}));
@@ -184,8 +214,11 @@ fn matrix(comptime binding: bool, source: anytype, prefix: []const u8, k: usize,
     if ((if (binding) marker.offset else marker.begin) % 4 != 0) return error.InvalidTensorView;
     if (has(source, try named(&name, "{s}.mcg", .{prefix})) or
         has(source, try named(&name, "{s}.3inst", .{prefix})) or
-        has(source, try named(&name, "{s}.bias", .{prefix})) or
-        has(source, try named(&name, "{s}.weight", .{prefix}))) return error.UnsupportedExl3Parts;
+        has(source, try named(&name, "{s}.bias", .{prefix})))
+    {
+        std.log.err("unexpected exl3 parts beside {s}", .{prefix});
+        return error.UnsupportedExl3Parts;
+    }
     var su_name: [160]u8 = undefined;
     var sv_name: [160]u8 = undefined;
     const su = try scale(binding, source, prefix, k, "suh", "su", &su_name);
@@ -250,21 +283,21 @@ fn populate(comptime binding: bool, source: anytype, model: ?*Model) !void {
         }
         if (owner) {
             const compressor: ?*Compressor = if (binding) &attn.?.compressor.? else null;
-            try matrix(binding, source, try named(&prefix, "layers.{d}.attn.compressor.wkv", .{layer}), 5120, 512, if (binding) &compressor.?.wkv else null);
+            try matrixAny(binding, source, try named(&prefix, "layers.{d}.attn.compressor.wkv", .{layer}), 5120, 512, if (binding) &compressor.?.wkv else null);
             try plain(binding, source, try named(&name, "layers.{d}.attn.compressor.norm.weight", .{layer}), .bf16, &.{512}, if (binding) &compressor.?.norm else null);
-            if (binding) compressor.?.wgate = if (layer < 20) @as(Matrix, undefined) else null;
-            if (layer < 20) try matrix(binding, source, try named(&prefix, "layers.{d}.attn.compressor.wgate", .{layer}), 5120, 512, if (binding) &compressor.?.wgate.? else null);
+            if (binding) compressor.?.wgate = if (layer < 20) @as(AnyMatrix, undefined) else null;
+            if (layer < 20) try matrixAny(binding, source, try named(&prefix, "layers.{d}.attn.compressor.wgate", .{layer}), 5120, 512, if (binding) &compressor.?.wgate.? else null);
         }
         if (owner or layer == 24 or layer == 28 or layer == 32 or layer == 36) {
             const indexer: ?*Indexer = if (binding) &attn.?.indexer.? else null;
-            try matrix(binding, source, try named(&prefix, "layers.{d}.attn.indexer.wq_b", .{layer}), 1280, 4096, if (binding) &indexer.?.wq_b else null);
-            try plain(binding, source, try named(&name, "layers.{d}.attn.indexer.weights_proj.weight", .{layer}), .f16, &.{ 32, 5120 }, if (binding) &indexer.?.weights_proj else null);
+            try matrixAny(binding, source, try named(&prefix, "layers.{d}.attn.indexer.wq_b", .{layer}), 1280, 4096, if (binding) &indexer.?.wq_b else null);
+            try plainEither(binding, source, try named(&name, "layers.{d}.attn.indexer.weights_proj.weight", .{layer}), &.{ 32, 5120 }, if (binding) &indexer.?.weights_proj else null);
             if (binding) {
-                indexer.?.wk = if (owner) @as(Matrix, undefined) else null;
+                indexer.?.wk = if (owner) @as(AnyMatrix, undefined) else null;
                 indexer.?.k_norm = if (owner) @as(Tensor, undefined) else null;
             }
             if (owner) {
-                try matrix(binding, source, try named(&prefix, "layers.{d}.attn.indexer.wk", .{layer}), 512, 128, if (binding) &indexer.?.wk.? else null);
+                try matrixAny(binding, source, try named(&prefix, "layers.{d}.attn.indexer.wk", .{layer}), 512, 128, if (binding) &indexer.?.wk.? else null);
                 try plain(binding, source, try named(&name, "layers.{d}.attn.indexer.k_norm.weight", .{layer}), .bf16, &.{128}, if (binding) &indexer.?.k_norm.? else null);
             }
         }
