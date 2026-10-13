@@ -17,17 +17,23 @@ zero means a measured or configured zero. The endpoint publishes no paths, UUIDs
 | `device.active_bytes`, `device.cache_bytes` | Existing backend allocator counters, where implemented. |
 | `device.peak_bytes` | Backend peak since startup or the last `/health?reset_peak=1`. |
 | `device.peak_scope` | `since_start_or_health_reset`; distinct from the process lifetime peak. |
-| `prompt_cache_plan` | Immutable retained-prefix budget applied at startup, currently reported by Flash Next. |
+| `prompt_cache_plan` | Immutable retained-prefix budget applied at startup, reported by Nemotron, Flash Next and Qwen3.8-27B on Macs. |
 
 The cache plan contains `source`, `budget_bytes`, and `explicit_budget`. With OS readings,
-`source` is `physical_footprint` and the plan also includes the exact sizing inputs: `ram_bytes`,
-`ready_footprint_bytes`, `cap_bytes`, `room_bytes`, and `margin_bytes`. The cap, margin, budget arithmetic,
-refusal and override behavior are unchanged. `over_cap` records an applied budget above the computed room,
+`source` is `physical_footprint` and the plan also includes the sizing inputs: `ram_bytes`,
+`ready_footprint_bytes`, `cap_bytes`, `room_bytes`, and `margin_bytes`. Qwen3.8-27B's `room_bytes` also leaves out the
+memory its stream slots take on first use, which `ready_footprint_bytes` does not count yet; its startup line names
+that figure. Without `--prompt-cache-gib`, the budget is
+`room_bytes` up to 16 GiB, so `budget_bytes` can sit below `room_bytes`. The cap, margin, refusal and override
+behavior are unchanged. `over_cap` records an applied budget above the computed room,
 rather than merely the presence of an override flag.
 
 Without both OS readings, the existing fallback uses an explicit budget (`source: explicit`) or the spare
-Metal working set (`source: metal_working_set`). Its OS inputs and unknown `over_cap` remain omitted. A disabled retained-prefix
-cache still reports a known `budget_bytes: 0`. Backends without an applied plan omit `prompt_cache_plan`.
+Metal working set up to 16 GiB (`source: metal_working_set`). Its OS inputs and unknown `over_cap` remain omitted.
+Nemotron and Flash Next report a disabled retained-prefix cache as a known `budget_bytes: 0`; Qwen3.8-27B omits
+`prompt_cache_plan` when its budget is 0. GLM-5.3-Flash, Qwen3.5-2B and the CUDA server omit it too: GLM keeps
+`--prompt-cache-gib` or 16 GiB inside its load limit, the 2B keeps no prompt states, and the CUDA server keeps
+`--prompt-cache-gib` or 16 GiB inside what its streams leave and names that size in its startup line.
 This plan is a cache allowance, not a process limit, current cache occupancy, or an admission guarantee.
 
 `/metrics` keeps `tensorfold:process_footprint_bytes` and adds `tensorfold:process_footprint_peak_bytes`

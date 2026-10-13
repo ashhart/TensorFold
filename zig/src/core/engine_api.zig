@@ -80,8 +80,12 @@ pub const Request = struct {
     loop_guard: bool = false,
     /// The prompt row (the assistant header's last) where routed lessons decide whether they act (null: none acts).
     decide: ?u32 = null,
+    /// The model as shipped: no learned neuron acts on its rows, no prompt state is kept or reused (a lesson's writer).
+    untaught: bool = false,
     /// Logprob rows for each reply token with this many best tokens (0..20), when ``Info.logprobs``; null: none.
     logprobs: ?u8 = null,
+    /// Rows for each prompt token after the first, with ranks and this many best tokens, when ``Info.prompt_logprobs``.
+    prompt_logprobs: ?u8 = null,
 };
 
 pub const Reason = enum { stop, length, cancelled, failed };
@@ -108,6 +112,8 @@ pub const Event = union(enum) {
     prefilled: u32,
     /// The next ``tokens`` event's logprob rows, one a token (``logprobs`` requests); valid only during the call.
     logprobs: []const LogprobRow,
+    /// The prompt's rows, one a prompt token after the first, right after ``prefilled`` (``prompt_logprobs`` requests).
+    prompt_logprobs: []const LogprobRow,
     /// Tokens committed for this request, in order; valid only during the call.
     tokens: []const u32,
     /// The reply ended; nothing follows. ``message`` says why a failed reply failed.
@@ -131,9 +137,13 @@ pub const Info = struct {
     call_gates: bool = false,
     /// The engine observes loop_guard requests in its lane stream.
     loop_guard: bool = false,
+    /// The engine enforces a token budget while the think block is open.
+    thinking_budget: bool = true,
     structures: bool = false,
     /// Requests may ask for ``logprobs`` (the engine's lanes give the target's rows).
     logprobs: bool = false,
+    /// Requests may ask for ``prompt_logprobs`` (a prompt pass from 0 that reads every row).
+    prompt_logprobs: bool = false,
     /// Prompt rows a prefill chunk at most, for the server's chunk starts (0: the engine cuts prompts itself).
     prefill_step: u32 = 0,
     /// The engine keeps prompt states between requests, so ``prefilled`` counts the tokens it restored.
@@ -268,6 +278,8 @@ pub const LearnRequest = struct {
     reroute: bool = false, // the last lesson's router fitted again with `unasked` among what it must not take
     drop: bool = false, // the last lesson taken out whole
     save: bool = false, // every kept lesson written beside the model's shards, each with its router
+    retire: []const Neuron = &.{}, // instead zero these neurons of facts a newer fact replaces
+    unretire: bool = false, // instead put back the neurons the last retire zeroed (the newer fact was not learned)
 };
 
 /// A neuron a pocket lesson placed (Sliding Weights): its layer, its index in that layer's pocket, the row it keys on.
@@ -379,7 +391,6 @@ pub const LoneHooks = struct {
 };
 
 /// The lane core served to the HTTP threads (lane_host.zig).
-pub const serial_host = @import("serial_host.zig");
 pub const LaneHost = @import("lane_host.zig").LaneHost;
 
 /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
@@ -398,12 +409,11 @@ pub const prompt_imprint = @import("prompt_imprint.zig");
 pub const keepalive = @import("keepalive.zig");
 
 test {
-    _ = serial_host;
-    _ = @import("serial_host_test.zig");
     _ = @import("lane_host.zig");
     _ = @import("lane_host_test.zig");
     _ = @import("lane_host_reuse_test.zig");
     _ = @import("lane_host_warm_test.zig");
+    _ = @import("lane_host_fill_test.zig");
     _ = @import("prompt_cache.zig");
     _ = @import("prompt_radix.zig");
     _ = @import("prompt_imprint.zig");

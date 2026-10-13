@@ -1,9 +1,9 @@
-//! The generated native graph must emit the same greedy tokens through the shared server host and direct session.
+//! The generated native graph must emit the same greedy tokens through the served host and direct session.
 const std = @import("std");
 const mtl = @import("metal");
 const q = @import("tensorfold").qwen27;
 const api = @import("engine_api");
-const host = @import("qwen27_host");
+const host = @import("qwen27_served");
 const graph = @import("synthetic_graph.zig");
 const Box = struct {
     a: std.mem.Allocator,
@@ -18,7 +18,7 @@ const Box = struct {
         defer b.mutex.unlock(b.io);
         switch (value.*) {
             .prefilled => {},
-            .logprobs => {},
+            .logprobs, .prompt_logprobs => {},
             .tokens => |ids| b.tokens.appendSlice(b.a, ids) catch {},
             .finished => |f| {
                 b.done = f.reason;
@@ -57,7 +57,11 @@ pub fn main(init: std.process.Init) !void {
         if (i + 1 < expected.len) try direct.step(id.*);
     }
     var box = Box{ .a = a, .io = init.io };
-    const served = try host.attach(a, init.io, model, 256, false);
+    var why: []const u8 = "";
+    const served = host.attach(a, init.io, model, null, .{ .context = 256, .streams = 1, .cache_gib = 0 }, a, &why) catch |err| {
+        std.debug.print("served host: {s}\n", .{why});
+        return err;
+    };
     defer host.close(served);
     const request = api.Request{ .prompt = &prompt, .max_tokens = 8, .drafts = false, .chunks = &.{ 16, 32, 48, 64, 80, 96, 112, 128 } };
     try served.engine().submit(1, &request, .{ .ctx = &box, .event = Box.event });

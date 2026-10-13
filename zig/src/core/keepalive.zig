@@ -7,13 +7,16 @@ pub const Target = struct {
     tick: *const fn (ctx: *anyopaque) void,
 };
 
+/// The served interval: macOS unwires an idle model after 1-2 s, so a tick each 400 ms stays well inside it.
+const served_interval_ns: i64 = 400 * std.time.ns_per_ms;
+
 /// The ticker: commits every 400 ms while no request runs and `--keep-warm` seconds have not passed.
 pub const Keepalive = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     target: Target,
-    /// One tick per interval; macOS unwires an idle model after 1-2 s, so this stays well inside it.
-    interval_ns: i64 = 400 * std.time.ns_per_ms,
+    /// One tick per interval, set before the thread starts.
+    interval_ns: i64 = served_interval_ns,
     /// Ticks stop this long after the last request ends: --keep-warm seconds, and 0 never starts the thread.
     window_ns: i64,
     /// Requests running now: the ticker holds its commits while this is above zero.
@@ -25,8 +28,13 @@ pub const Keepalive = struct {
 
     /// Starts the ticker for an engine's queue. The target must outlive `stop`.
     pub fn start(gpa: std.mem.Allocator, io: std.Io, target: Target, window_ns: i64) !*Keepalive {
+        return startEvery(gpa, io, target, window_ns, served_interval_ns);
+    }
+
+    /// `start` with its own tick interval, fixed before the thread first reads it.
+    pub fn startEvery(gpa: std.mem.Allocator, io: std.Io, target: Target, window_ns: i64, interval_ns: i64) !*Keepalive {
         const k = try gpa.create(Keepalive);
-        k.* = .{ .gpa = gpa, .io = io, .target = target, .window_ns = window_ns, .idle_since = .init(now(io)) };
+        k.* = .{ .gpa = gpa, .io = io, .target = target, .interval_ns = interval_ns, .window_ns = window_ns, .idle_since = .init(now(io)) };
         if (std.Thread.spawn(.{}, loop, .{k})) |t| {
             k.thread = t;
         } else |e| {
@@ -85,6 +93,17 @@ const Gated = struct {
         _ = g.commits.fetchAdd(1, .monotonic);
         while (g.gate.load(.acquire) == 0) std.Thread.yield() catch {};
     }
+
+    /// A ticker on this gate every 10 ms.
+    fn start(g: *Gated, window_ns: i64) !*Keepalive {
+        return Keepalive.startEvery(testing.allocator, std.testing.io, .{ .ctx = g, .tick = tick }, window_ns, 10 * std.time.ns_per_ms);
+    }
+
+    /// Opens the gate and stops `k`; deferred, so a failed test leaves no ticker on memory the test runner frees.
+    fn done(g: *Gated, k: *Keepalive) void {
+        g.gate.store(1, .release);
+        k.stop();
+    }
 };
 
 fn until(value: *const std.atomic.Value(u32), want: u32) !void {
@@ -98,8 +117,8 @@ fn until(value: *const std.atomic.Value(u32), want: u32) !void {
 
 test "the ticker commits while idle and holds while a request runs" {
     var gated = Gated{};
-    const k = try Keepalive.start(testing.allocator, std.testing.io, .{ .ctx = &gated, .tick = Gated.tick }, 900 * std.time.ns_per_s);
-    k.interval_ns = 10 * std.time.ns_per_ms;
+    const k = try gated.start(900 * std.time.ns_per_s);
+    defer gated.done(k);
     // armed and idle: a commit arrives and parks in the gate
     try until(&gated.commits, 1);
     // a request runs: the parked tick is released, then nothing further commits
@@ -121,28 +140,22 @@ test "the ticker commits while idle and holds while a request runs" {
     // the request ended: commits resume
     k.end();
     try until(&gated.commits, 2);
-    gated.gate.store(1, .release);
-    Keepalive.stop(k);
 }
 
 test "ticks stop once the keep-warm window has passed and resume when a request ends" {
-    var commits = std.atomic.Value(u32).init(0);
-    const Count = struct {
-        fn tick(ctx: *anyopaque) void {
-            _ = @as(*std.atomic.Value(u32), @ptrCast(@alignCast(ctx))).fetchAdd(1, .monotonic);
-        }
-    };
-    const k = try Keepalive.start(testing.allocator, std.testing.io, .{ .ctx = &commits, .tick = Count.tick }, 60 * std.time.ns_per_ms);
-    k.interval_ns = 10 * std.time.ns_per_ms;
-    try until(&commits, 1); // the window is open: commits flow
-    std.Io.sleep(std.testing.io, .fromMilliseconds(120), .awake) catch {}; // the window closes at 60 ms
-    const frozen = commits.load(.acquire);
-    std.Io.sleep(std.testing.io, .fromMilliseconds(100), .awake) catch {};
-    try testing.expectEqual(frozen, commits.load(.acquire)); // flat once the window has passed
+    var gated = Gated{};
+    const k = try gated.start(900 * std.time.ns_per_s);
+    defer gated.done(k);
+    try until(&gated.commits, 1); // the window is open: a commit arrives and parks in the gate
+    k.idle_since.store(Keepalive.now(std.testing.io) - k.window_ns - 1, .release); // the window passes while it is parked
+    gated.gate.store(1, .release);
+    for (0..20) |_| {
+        std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake) catch {};
+        try testing.expectEqual(@as(u32, 1), gated.commits.load(.acquire)); // flat once the window has passed
+    }
     k.begin(); // a request ran and ended: the window restarts from its end
     k.end();
-    try until(&commits, frozen + 1);
-    Keepalive.stop(k);
+    try until(&gated.commits, 2);
 }
 
 test "the window decides due without a thread" {

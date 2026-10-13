@@ -1,4 +1,4 @@
-//! Native DFlash tensors remain BF16 borrows; prepared quantized copies and target embedding/head have separate owners.
+//! Native DFlash tensors remain BF16 borrows; prepared quantized copies and the target embedding have separate owners.
 const std = @import("std");
 const ck = @import("../checkpoint.zig");
 const Config = @import("config.zig").Config;
@@ -19,7 +19,6 @@ pub const Graph = struct {
     predecessor: Tensor,
     successor: Tensor,
     embed: ck.Linear,
-    head: ck.Linear,
     pub fn deinit(g: *Graph) void {
         g.gpa.free(g.layers);
         g.* = undefined;
@@ -93,11 +92,10 @@ fn target(p: ck.Linear, c: Config) !void {
         },
     }
 }
-pub fn load(gpa: std.mem.Allocator, source: Inventory, c: Config, embed: ck.Linear, head: ck.Linear) !Graph {
+pub fn load(gpa: std.mem.Allocator, source: Inventory, c: Config, embed: ck.Linear) !Graph {
     try c.check();
     try inventory(gpa, source.names, c);
     try target(embed, c);
-    try target(head, c);
     const src = source.source;
     const layers = try gpa.alloc(Layer, c.layers);
     errdefer gpa.free(layers);
@@ -109,7 +107,7 @@ pub fn load(gpa: std.mem.Allocator, source: Inventory, c: Config, embed: ck.Line
         .attention_conv = .{ .projection = try layerTensor(src, i, "attention_conv.kernel_projection.weight", &.{ c.dynamicWidth(), c.hidden }), .base = try layerTensor(src, i, "attention_conv.base_kernel", &.{ 2, 2, c.hidden }) },
         .mlp_conv = .{ .projection = try layerTensor(src, i, "mlp_conv.kernel_projection.weight", &.{ c.dynamicWidth(), c.hidden }), .base = try layerTensor(src, i, "mlp_conv.base_kernel", &.{ 2, 2, c.hidden }) },
     };
-    return .{ .gpa = gpa, .config = c, .layers = layers, .fusion = try get(src, "fc.weight", &.{ c.hidden, c.tapWidth() }), .hidden_norm = try get(src, "hidden_norm.weight", &.{c.hidden}), .norm = try get(src, "norm.weight", &.{c.hidden}), .hidden_projection = try get(src, "candidate_selector.hidden_projection.weight", &.{ c.rank, c.hidden }), .predecessor = try get(src, "candidate_selector.predecessor_codebook", &.{ c.vocab, c.rank }), .successor = try get(src, "candidate_selector.successor_codebook", &.{ c.vocab, c.rank }), .embed = embed, .head = head };
+    return .{ .gpa = gpa, .config = c, .layers = layers, .fusion = try get(src, "fc.weight", &.{ c.hidden, c.tapWidth() }), .hidden_norm = try get(src, "hidden_norm.weight", &.{c.hidden}), .norm = try get(src, "norm.weight", &.{c.hidden}), .hidden_projection = try get(src, "candidate_selector.hidden_projection.weight", &.{ c.rank, c.hidden }), .predecessor = try get(src, "candidate_selector.predecessor_codebook", &.{ c.vocab, c.rank }), .successor = try get(src, "candidate_selector.successor_codebook", &.{ c.vocab, c.rank }), .embed = embed };
 }
 
 test "inventory is81exact names including unsuffixed BF16codebooks" {

@@ -127,6 +127,13 @@ pub const Launch = struct {
         l.go(full, &.{ xs, w[0], w[1], w[2], offsets }, &.{ n, N, K, E }, 16, null, &.{y}, .{ (N + 63) / 64 * 32, @min(n, (n + bm - 1) / bm + E - 1) * 2, 2 }, .{ 32, 2, 2 });
     }
 
+    /// gatherQmm through the pair order: `div` > 0 reads sorted row s from x[order[s] / div], 0 writes y[order[s]].
+    pub fn gatherMap(l: Launch, x: At, w: [3]At, offsets: At, order: At, div: usize, y: At, n: usize, N: usize, K: usize, E: usize) void {
+        const bm: usize = if (n / E < 64) 32 else 64;
+        const name = if (div > 0) (if (bm == 32) "tf_gather_qmm_xmap_32" else "tf_gather_qmm_xmap_64") else if (bm == 32) "tf_gather_qmm_ymap_32" else "tf_gather_qmm_ymap_64";
+        l.go(name, &.{ x, w[0], w[1], w[2], offsets, order }, &.{ n, N, K, E, div }, 16, null, &.{y}, .{ (N + 63) / 64 * 32, @min(n, (n + bm - 1) / bm + E - 1) * 2, 2 }, .{ 32, 2, 2 });
+    }
+
     /// y_prev = state @ C per (row, group, head of the group): fp32 [heads, head, dstate] states, C [s, groups, dstate].
     pub fn gemv(l: Launch, state: At, c: At, y: At, s: usize, groups: usize, heads: usize, head: usize, dstate: usize) void {
         const rep = heads / groups;

@@ -5,6 +5,13 @@ const op = @import("operators.zig");
 pub const Ref = @import("core").draft_ops.Ref;
 const Entry = struct { ref: Ref, view: op.View };
 const options = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+/// Whether a frame's command buffer failed on the GPU, its Metal error logged.
+fn failed(cb: mtl.CommandBuffer) bool {
+    const msg = cb.failure() orelse return false;
+    std.log.err("qwen27: a draft frame failed on the GPU: {s}", .{msg});
+    return true;
+}
+
 pub const Frame = struct {
     allocator: std.mem.Allocator,
     device: mtl.Device,
@@ -66,9 +73,9 @@ pub const Frame = struct {
         f.completed = true;
         for (f.parts[0..f.part_count]) |cb| {
             cb.wait();
-            if (cb.failure() != null) return error.DraftGpuFailure;
+            if (failed(cb)) return error.DraftGpuFailure;
         }
-        if (f.cb.failure() != null) return error.DraftGpuFailure;
+        if (failed(f.cb)) return error.DraftGpuFailure;
     }
     pub fn release(f: *Frame) void {
         if (f.active and !f.completed) {

@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 const qwen27 = @import("qwen27_served.zig");
 const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
+const glm_dsa = @import("glm_dsa_host.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
 const Slide = nemotron_slide.Adapter(nemotron.slide);
 const cache_fit = @import("cache_fit.zig");
@@ -19,6 +20,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "qwen4_exp", .formats = &.{"mlx-q6g32"} },
     .{ .model_type = "glm5_next", .formats = &.{"mlx-q4g64"} },
     .{ .model_type = "qwen3_5", .formats = &.{"mlx-q4g64"} },
+    .{ .model_type = "glm_moe_dsa", .formats = &.{"exlr8"} },
 };
 
 /// The chip class gate entries name ("apple-m5" for an Apple M5 Max); null without an Apple GPU.
@@ -100,6 +102,10 @@ const Host = struct {
 /// The engine for `o.dir`, or null with `problem` set when no Metal engine reads the checkpoint.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const dense = std.mem.eql(u8, o.model_type, "qwen3_5") and qwen27Engine(a, io, o.dir);
+    if (try refusal(a, o, dense)) |why| {
+        problem.* = why;
+        return null;
+    }
     if (o.drafter != null and !dense) {
         problem.* = "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head)";
         return null;
@@ -107,6 +113,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (dense) return openQwen27(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return openFlashNext(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "glm_moe_dsa")) return openGlmDsa(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen3_5")) return @import("qwen35.zig").open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "nemotron_h")) {
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
@@ -158,7 +165,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.round = .{ .depth = 8 };
     h.cache = null;
     var why: []const u8 = "";
-    const plan = cache_fit.budget(o.prompt_cache_gib, o.prompt_cache_over_cap, @min(h.m.device.maxWorkingSet() -| h.m.device.allocated() -| (8 << 30), 16 << 30), a, &why, "") catch |e| {
+    const plan = cache_fit.budget(o.prompt_cache_gib, o.prompt_cache_over_cap, h.m.device.maxWorkingSet() -| h.m.device.allocated() -| (8 << 30), a, &why, "") catch |e| {
         if (e == error.CacheOverCap) problem.* = why;
         return e;
     };
@@ -198,6 +205,15 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+/// Refused before any weights load: --slide but on Nemotron, as CUDA does, and --learn where nothing is kept on disk.
+fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
+    const t = o.model_type;
+    if (o.slide and !std.mem.eql(u8, t, "nemotron_h")) return try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on Macs yet", .{t});
+    if (o.learn == null) return null;
+    const name: []const u8 = if (std.mem.eql(u8, t, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (!std.mem.eql(u8, t, "qwen3_5")) return null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
+    return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only: serve {s} without --learn, --learn-dir or --learn-gib", .{name});
 }
 
 /// Learned states under `root` by checkpoint, shards, prefill step, head, kernels, probe bits, OS build and chip.
@@ -311,8 +327,10 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
 test {
     _ = flashnext;
     _ = glm;
+    _ = glm_dsa;
     _ = qwen27;
     _ = @import("cache_fit.zig");
+    _ = @import("qwen27_landing.zig");
 }
 
 /// What a two-Mac link that never connected asks of whoever starts the servers; null for any other error.
@@ -344,6 +362,29 @@ fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]co
     return .{ .engine = h.engine(), .close = glm.close, .ctx = h };
 }
 
+/// GLM-5.3 (EXLR8) needs a pair: each Mac holds half of every expert and attention head (--speed-up names its link).
+fn openGlmDsa(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    const settings = o.speed_up orelse {
+        problem.* = "GLM-5.3 (EXLR8) runs on two Macs: start both with --speed-up and each Mac's link settings (rank 0 serves)";
+        return null;
+    };
+    const window: i64 = o.context orelse 16384;
+    if (window <= 0 or window > 262144) {
+        problem.* = try std.fmt.allocPrint(a, "--context {d} is outside 1 to 262,144 tokens for GLM-5.3 (EXLR8)", .{window});
+        return null;
+    }
+    var ram: u64 = 0;
+    var len: usize = 8;
+    if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) return error.NoRamSize;
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const h = glm_dsa.open(gpa, io, o.dir, @intCast(window), settings, @max(1, @min(o.lanes, 16)), ram / 100 * 66, o.prompt_cache_gib) catch |e| {
+        problem.* = if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native GLM-5.3 (EXLR8) engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native GLM-5.3 (EXLR8) engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
+        return null;
+    };
+    return .{ .engine = h.engine(), .close = glm_dsa.close, .ctx = h };
+}
+
 test "chip classes from Metal device names" {
     try std.testing.expectEqual(@as(?u32, 5), generation("Apple M5 Max"));
     try std.testing.expectEqual(@as(?u32, 12), generation("Apple M12"));
@@ -370,6 +411,30 @@ test "a qwen3_5 checkpoint opens the 27B engine unless it has the 2B's geometry 
     for (cases) |c| {
         try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = c.config });
         try std.testing.expectEqual(c.big, qwen27Engine(a, io, dir));
+    }
+}
+
+test "--learn is refused for the 27B, the 2B and GLM-5.3 (EXLR8), and not for the families that keep prompt states on disk" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const learn: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .learn = "/x" };
+    const flags = " without --learn, --learn-dir or --learn-gib";
+    try std.testing.expectStringEndsWith((try refusal(a, learn, true)) orelse "", ": serve Qwen3.8-27B" ++ flags);
+    try std.testing.expectStringEndsWith((try refusal(a, learn, false)) orelse "", ": serve Qwen3.5-2B" ++ flags);
+    try std.testing.expectStringEndsWith((try refusal(a, .{ .dir = "d", .model_type = "glm_moe_dsa", .learn = "/x" }, false)) orelse "", ": serve GLM-5.3 (EXLR8)" ++ flags);
+    for ([_][]const u8{ "qwen3_5", "glm_moe_dsa" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .learn_gib = 8, .learn_min_free_gib = 2 }, true)) == null);
+    for ([_][]const u8{ "nemotron_h", "qwen4_exp", "glm5_next" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .learn = "/x" }, false)) == null);
+}
+
+test "--slide is refused by every family but Nemotron, which learns into its weights" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = "nemotron_h", .slide = true }, false)) == null);
+    for ([_][]const u8{ "glm_moe_dsa", "qwen4_exp", "glm5_next", "qwen3_5" }) |t| {
+        const why = (try refusal(a, .{ .dir = "d", .model_type = t, .slide = true }, true)) orelse return error.TestExpectedRefusal;
+        try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on Macs yet", .{t}), why);
     }
 }
 

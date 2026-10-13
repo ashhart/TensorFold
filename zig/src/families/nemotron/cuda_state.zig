@@ -59,13 +59,24 @@ pub const Carved = struct {
 /// A sequence's own Buffers fields: cache and state planes (the first seven), window io and its sampled rule.
 pub const seq_fields = [_][]const u8{ "k_cache", "v_cache", "ssm", "conv_base", "raw", "xc", "dt", "meta", "ids", "hidden", "sampled", "rule" };
 
+/// Bytes of one token's key (or value) row in one attention layer: every KV head's dims in bf16.
+pub fn kvRowBytes(c: Config) usize {
+    return c.kv_heads * c.head_dim * 2;
+}
+
+/// Bytes of every Mamba layer's SSM and conv states (seq_fields' ssm, conv_base): a prompt mark keeps both whole.
+pub fn mambaPlanes(c: Config) [2]usize {
+    const nm: usize = c.count(.mamba);
+    return .{ nm * c.mamba_heads * c.mamba_head_dim * c.state * 4, nm * 3 * c.convDim() * 2 };
+}
+
 fn seqSizes(c: Config, max_len: usize) [seq_fields.len]usize {
     const W: usize = max_rows;
     const nm: usize = c.count(.mamba);
-    const na: usize = c.count(.attention);
-    const kv = na * max_len * c.kv_heads * c.head_dim * 2;
+    const kv = c.count(.attention) * max_len * kvRowBytes(c);
     const cd: usize = c.convDim();
-    return .{ kv, kv, nm * c.mamba_heads * c.mamba_head_dim * c.state * 4, nm * 3 * cd * 2, nm * 2 * W * cd * 2, nm * 2 * W * cd * 2, nm * 2 * W * c.mamba_heads * 4, 16, W * 4, W * c.hidden * 2, W * 4, @sizeOf(sampler.Rule) };
+    const m = mambaPlanes(c);
+    return .{ kv, kv, m[0], m[1], nm * 2 * W * cd * 2, nm * 2 * W * cd * 2, nm * 2 * W * c.mamba_heads * 4, 16, W * 4, W * c.hidden * 2, W * 4, @sizeOf(sampler.Rule) };
 }
 
 const scratch_count = 35;
@@ -97,7 +108,7 @@ pub const Seq = struct {
     carved: ?Carved = null,
     ptr: [seq_fields.len]u64,
     head: [3]u64 = @splat(0), // the MTP head's seq_fields (cuda_mtp.zig)
-    graphs: seq_graphs.Graphs = .{}, // what this sequence captured for itself (not the own one)
+    graphs: seq_graphs.Graphs = .{}, // what this sequence captured for itself (the own one: masked windows alone)
     epoch: u32 = 0, // the engine's graph epoch its graphs were captured in
     pos: usize = 0,
     parity: usize = 0,
@@ -107,6 +118,7 @@ pub const Seq = struct {
     sampling: ?sampler.Sampling = null,
     slot: u32 = 0, // its lesson latch slot (lesson_route)
     decide: i64 = lesson_route.none, // the prompt row where its lessons decide whether they act on the reply
+    untaught: bool = false, // reads the model as shipped: no learned neuron acts on its rows (a lesson writer's reads)
 
     /// The device bytes one sequence takes: its buffers for `max_len` cache rows and a head's `head` buffers.
     pub fn bytes(c: Config, max_len: usize, head: []const usize) usize {
@@ -147,9 +159,6 @@ pub const Seq = struct {
     }
 };
 
-/// A keep a chunk staged: its position, and the planes (Buffers.planes order) its copy takes (0: the live plane).
-pub const Staged = struct { at: usize, from: [7]u64 };
-
 pub const Buffers = struct {
     arena: Arena,
     carved: ?Carved, // the own sequence's KV planes, when the display carveout holds them
@@ -162,8 +171,6 @@ pub const Buffers = struct {
     xc: u64,
     dt: u64,
     state_bytes: [7]usize,
-    kv_layers: usize, // attention layers, each `kv_rows` rows of the KV planes
-    kv_rows: usize,
     // a window's inputs and outputs
     meta: u64,
     ids: u64,
@@ -216,8 +223,6 @@ pub const Buffers = struct {
         var b: Buffers = undefined;
         b.carved = carved;
         b.state_bytes = own[0..7].*;
-        b.kv_layers = c.count(.attention);
-        b.kv_rows = max_len;
         inline for (seq_fields, own, 0..) |name, n, i| @field(b, name) = if (carved != null and i < 2) carved.?.kv[i].ptr else a.take(n);
         for (b.scratchPtrs(), scratch) |f, n| f.* = a.take(n);
         b.arena = a;
@@ -294,57 +299,21 @@ pub const Buffers = struct {
 
     /// Engine.snapshot: a device copy of every cache and state plane, packed.
     pub fn snapshot(b: *const Buffers, ops: kern.Ops) !cuda.DeviceBuffer {
-        return b.snapshotFrom(ops, b.kv_rows, @splat(0));
-    }
-
-    /// A staged keep's planes in `stage` (Mamba states, then conv rows) to take in place of the live ones.
-    pub fn stagedFrom(b: *const Buffers, stage: u64) [7]u64 {
-        var from: [7]u64 = @splat(0);
-        from[2] = stage;
-        from[3] = stage + b.state_bytes[2];
-        return from;
-    }
-
-    /// Bytes of a state kept after `at` tokens: the KV planes' first `at` rows a layer, every other plane whole.
-    pub fn keptBytes(b: *const Buffers, at: usize) usize {
-        return b.stateBytes() - 2 * (b.state_bytes[0] - b.kvBytes(at));
-    }
-
-    /// A layer's first `rows` KV rows, times the layers: one KV plane's part of a kept state.
-    fn kvBytes(b: *const Buffers, rows: usize) usize {
-        if (b.kv_layers == 0) return 0;
-        return b.state_bytes[0] / b.kv_rows * @min(rows, b.kv_rows);
-    }
-
-    /// A state kept after `at` tokens, packed (keptBytes); a nonzero `from` entry is copied in place of its plane.
-    pub fn snapshotFrom(b: *const Buffers, ops: kern.Ops, at: usize, from: [7]u64) !cuda.DeviceBuffer {
-        var copy = try cuda.DeviceBuffer.alloc(ops.k.d, b.keptBytes(at));
+        var copy = try cuda.DeviceBuffer.alloc(ops.k.d, b.stateBytes());
         errdefer copy.free();
-        try b.copyKept(ops, at, copy.ptr, from, true);
+        var at: usize = 0;
+        for (b.planes(), b.state_bytes) |p, n| {
+            try ops.copy(copy.ptr + at, p, n);
+            at += n;
+        }
         return copy;
     }
 
     pub fn restore(b: *const Buffers, ops: kern.Ops, saved: cuda.DeviceBuffer) !void {
-        try b.copyKept(ops, b.kv_rows, saved.ptr, @splat(0), false);
-    }
-
-    /// A kept state's planes back from `saved`; the KV rows past `at` stay as they are, written before any read.
-    pub fn restoreAt(b: *const Buffers, ops: kern.Ops, saved: cuda.DeviceBuffer, at: usize) !void {
-        try b.copyKept(ops, at, saved.ptr, @splat(0), false);
-    }
-
-    /// The planes to (`out`) or from a packed kept state at `packed`: each layer's first `at` KV rows, the rest whole.
-    fn copyKept(b: *const Buffers, ops: kern.Ops, at: usize, packed_: u64, from: [7]u64, out: bool) !void {
-        var off: usize = 0;
-        for (b.planes(), b.state_bytes, from, 0..) |p, n, f, i| {
-            const src = if (f != 0) f else p;
-            const layers = if (i < 2) b.kv_layers else 1;
-            const len = if (i < 2) b.kvBytes(at) / @max(layers, 1) else n;
-            for (0..layers) |l| {
-                const plane = (if (out) src else p) + l * (n / layers);
-                if (out) try ops.copy(packed_ + off, plane, len) else try ops.copy(plane, packed_ + off, len);
-                off += len;
-            }
+        var at: usize = 0;
+        for (b.planes(), b.state_bytes) |p, n| {
+            try ops.copy(p, saved.ptr + at, n);
+            at += n;
         }
     }
 

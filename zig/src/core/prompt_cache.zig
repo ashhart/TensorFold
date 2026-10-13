@@ -84,7 +84,7 @@ pub const Rules = struct {
     grid: u32 = 0,
     /// A mark other than the history's is kept only this far from every other mark and the resume point.
     min_gap: u32 = 256,
-    /// Shorter prompts keep nothing: below it a mark's extra prompt call costs more than a later turn's reuse saves.
+    /// Shorter prompts keep nothing where a mark adds a prompt call; a planned family's marks add none.
     min_prompt: u32 = 4096,
     /// Replies are prefilled in background passes kept at their end: a pass resumed near its history keeps no mark.
     warm: bool = false,
@@ -162,9 +162,32 @@ pub const Store = struct {
         return if (s.family.vtable.spare) |f| f(s.family.ptr) else 0;
     }
 
+    /// A kept state takes `extra` more bytes (a family copied what it shared into it) if the budget has room; never evicts, a pass is under way.
+    pub fn grow(s: *Store, saved: Saved, extra: u64) bool {
+        for (s.entries.items) |e| if (e.tokens.len > 0 and e.saved == saved) {
+            if (extra > s.room()) return false;
+            e.bytes += extra;
+            s.held += extra;
+            return true;
+        };
+        return false;
+    }
+
     /// What the budget leaves past the kept states and the spare storage: a family readies storage only inside it.
     pub fn room(s: *const Store) u64 {
         return s.budget -| s.held -| s.spare();
+    }
+
+    /// Kept states free their storage, least valuable first and never `restoring`, until `left.fits()` (false: never).
+    pub fn giveBack(s: *Store, restoring: ?Saved, prompt: []const u32, left: anytype) bool {
+        while (!left.fits()) {
+            const skip = for (s.entries.items) |e| {
+                if (restoring != null and e.saved == restoring.?) break e;
+            } else null;
+            s.remove(s.victimBut(skip, prompt) orelse return false);
+            s.counts.evicted += 1;
+        }
+        return true;
     }
 
     /// Whether a state at `at` may start or end a prompt pass: anywhere, or a chunk start for planned families.
@@ -356,7 +379,7 @@ pub const Store = struct {
 
     /// `marks` with the active rewind second: kept however near the other marks, never at or before the resume point.
     fn marksRewind(s: *const Store, a: Allocator, prompt: []const u32, from: u32, history_len: u32, rewind: u32, shared: []const u32, starts: []const u32, previous: []const u32) ![]const u32 {
-        if (prompt.len < s.rules.min_prompt) return &.{};
+        if (!s.rules.planned and prompt.len < s.rules.min_prompt) return &.{};
         var out: std.ArrayList(u32) = .empty;
         var want: std.ArrayList(u32) = .empty;
         defer want.deinit(a);
@@ -548,7 +571,9 @@ fn floorStart(starts: []const u32, at: u32) u32 {
 
 test {
     _ = @import("prompt_cache_test.zig");
+    _ = @import("prompt_cache_learn_test.zig");
     _ = @import("prompt_cache_rewind_test.zig");
+    _ = @import("prompt_cache_give_test.zig");
     _ = @import("learned_fault_test.zig");
     _ = modes;
 }

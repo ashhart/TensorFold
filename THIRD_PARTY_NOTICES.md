@@ -74,6 +74,20 @@ Next's packs also carry ExLlamaV3's n-gram row codec, read as its `ngram_dequant
 MIT License, Copyright © 2025 Turboderp. TensorFold's decoders and kernels are separate implementations,
 checked bit for bit against ExLlamaV3's dequantization.
 
+The native `zig/src/core/exl3_projection*.zig` decoder and
+`zig/kernels/metal/core/exl3_projection.metal` separately implement the same format and codebooks
+under the Turboderp attribution above. No captured kernel binaries or model weights are bundled.
+
+The EXLR8 reader, decoder, pull and kernels (`zig/src/core/exlr8*.zig`, `zig/src/cli/pull_exlr8*.zig`,
+`zig/src/cuda/exlr8.zig`, `zig/kernels/metal/core/exlr8*.metal`, `zig/kernels/cuda/exlr8*.cu`) read kindlingai's exlr8
+v2 format as the Loader section of the [glm-5.3-exlr8-k2-k3-k4](https://huggingface.co/kindlingai/glm-5.3-exlr8-k2-k3-k4)
+model card lays it out. The format's packing, manifests and error tables are kindlingai's, offered under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); its codebook, Hadamard rotation and tile order are
+ExLlamaV3's, under the Turboderp attribution above. TensorFold's implementations are its own, checked bit for bit
+against the format's reference loader (MIT License, Copyright (c) 2025 Turboderp), which is not included.
+`zig/tests/fixtures/exlr8/oracle.json` holds that loader's digests and a few sampled values of the release; no
+weights are bundled.
+
 Flash Next's optional int8 and int4 KV caches (`families/qwen4_exp/cuda/kvcache.py`) follow the cache quantization scheme of [ExLlamaV3](https://github.com/turboderp-org/exllamav3) `-cq 8` and `-cq 4` (MIT License, Copyright (c) 2025 Turboderp, text below): groups of 32, one fp16 absmax scale per group, the group rotated by a 32-point Hadamard, midpoint-grid codes, `compand_a == 0`. 8-bit stores each code as a signed int8 (`q - 128`). 4-bit stores two unsigned codes per byte, low nibble first (the same bits as ExLlamaV3's little-endian packing, a uint8 tensor rather than their uint32 words). Their dequantizer folds another `1/sqrt(32)` into the scale and applies the unnormalized butterfly on the way out; this cache applies the normalized H32 to the query and to the merged output instead, and leaves the stored codes rotated. Scales match their quantizer bit for bit. Reconstructed values agree within fp16/bf16 rounding (under 0.01 on random groups), not bit for bit. The quantizer and the attention dequant are written for TensorFold and checked against an independent reference of that arithmetic.
 
 ## Vendored code and weights
