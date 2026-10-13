@@ -29,6 +29,8 @@ pub const picture = @import("picture/picture.zig");
 /// Qwen-VL image input every Qwen3.5-VL checkpoint shares: settings, geometry, M-RoPE positions, the tower's tables.
 pub const qwen_vl = @import("qwen_vl/qwen_vl.zig");
 pub const attention_ref = @import("attention_ref.zig");
+pub const moe_ref = @import("moe_ref.zig");
+pub const dense_ref = @import("dense_ref.zig");
 
 test {
     _ = safetensors;
@@ -43,6 +45,8 @@ test {
     _ = act_ref;
     _ = contract;
     _ = attention_ref;
+    _ = moe_ref;
+    _ = dense_ref;
     _ = exl3_format;
     _ = exlr8;
     _ = eaq_container;
