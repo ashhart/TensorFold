@@ -36,7 +36,7 @@ pub const topk_pools = 512; // pools a row keeps
 
 pub const width = topk_pools * pool + pool - 1; // tokens a row keeps (2051)
 
-pub const score_loop = 32; // pool blocks a scores program takes
+pub const score_loop = 1; // pool blocks a scores program takes (the kernel's L; speed only)
 
 pub const block_pools = 64; // pools a scores block
 

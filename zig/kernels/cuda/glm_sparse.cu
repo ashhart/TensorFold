@@ -67,7 +67,7 @@ struct TokensArgs {
 constexpr int D = 128;                 // index key dims
 constexpr int H = 32;                  // index heads (the serve model's index_heads)
 constexpr int BP = 64;                 // pools a scores block
-constexpr int L = 32;                  // pool blocks a scores program takes
+constexpr int L = 1;                   // pool blocks a scores program takes (speed only: a block's sums are its own)
 constexpr int LOG2E_BITS = 0x3FB8AA3B; // float log2(e)'s bits, as Triton's exp lowering multiplies by
 
 __device__ __forceinline__ unsigned pack2(bf16 lo, bf16 hi) {
