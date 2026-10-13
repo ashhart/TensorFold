@@ -24,7 +24,7 @@ const row_slots = engine.max_streams * state.max_rows + 1;
 const ring = 1024;
 
 /// A stream's sequence (`own`: the engine's, the graphs' buffers) and its first token's logprob row from prefill.
-const Lane = struct { seq: *state.Seq, own: bool = false, pending_rows: ?usize = null, first: ?LogRow = null, stats: seq_graphs.Stats = .{} };
+const Lane = struct { seq: *state.Seq, own: bool = false, pending_rows: ?usize = null, first: ?LogRow = null, stats: seq_graphs.Stats = .{}, keep: usize = 0 };
 
 pub const Cuda = struct {
     gpa: std.mem.Allocator,
@@ -154,12 +154,21 @@ pub const Cuda = struct {
     pub fn handOver(self: *Cuda, s: *lanes.Stream, kept: usize) !void {
         const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
         l.pending_rows = null;
+        l.keep = 0;
         if (self.head) |h| {
             try h.begin(kept);
             try h.launch(0);
         }
         s.cache_len = self.e.pos;
         s.pending = s.context.items[s.context.items.len - 1];
+    }
+
+    /// The kept rows of a lane-core stream's last draft, its sequence bound for the lone driver; null if not settled.
+    pub fn reclaim(self: *Cuda, s: *const lanes.Stream) !?usize {
+        const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
+        if (l.pending_rows != null or l.keep == 0 or self.head == null) return null;
+        self.e.bind(l.seq);
+        return l.keep;
     }
 
     /// Bind the lane and commit its kept rows, accounting for shared-round drafting.
@@ -380,12 +389,13 @@ pub const Cuda = struct {
         const self = of(ptr);
         const h = self.head orelse return error.NoDraftHead;
         for (requests) |r| {
-            _ = try self.bindLane(r.stream, if (r.rows) |path| path.len else null);
+            const l = try self.bindLane(r.stream, if (r.rows) |path| path.len else null);
             if (r.position != self.e.pos + 1) return error.PositionMismatch;
             if (r.rows) |rows| {
                 for (rows, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
                 try h.chain(r.follow[0..rows.len], r.depth);
             } else try h.chain(&.{self.value(r.first orelse return error.NoFirstToken)}, r.depth);
+            l.keep = h.keep;
         }
     }
 

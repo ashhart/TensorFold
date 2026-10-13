@@ -64,6 +64,17 @@ pub const Rounds = struct {
         return r;
     }
 
+    /// Rounds over a stream the lane core drafted last: the head's kept rows absorbed again, level 1 drafted again.
+    pub fn resumed(gpa: std.mem.Allocator, e: *Engine, h: *Head, rule: *DepthRule, prompt: []const u32, out: []const u32, kept: usize) !Rounds {
+        var r: Rounds = .{ .e = e, .h = h, .rule = rule, .index = try core.CopyIndex.init(gpa, prompt) };
+        errdefer r.index.deinit();
+        try r.index.extend(out);
+        r.copied = r.index.chain(&r.cbuf);
+        try h.again(kept);
+        try h.launch(if (r.copied.len > 0) 0 else 1);
+        return r;
+    }
+
     pub fn deinit(r: *Rounds) void {
         r.index.deinit();
     }
