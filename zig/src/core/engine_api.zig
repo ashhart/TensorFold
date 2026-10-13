@@ -340,6 +340,8 @@ pub const Engine = struct {
         score: ?*const fn (ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64) error{Failed}!f64 = null,
         /// Queue `request` for the family's learner; it stays valid until `done`. Null: this engine does not learn.
         learn: ?*const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) LearnError!void = null,
+        /// Recall's record for every later request's drafts and writes, before any request (null: no record read).
+        recall: ?*const fn (ctx: *anyopaque, store: *lanes.recall_store.Store) void = null,
     };
 
     pub fn info(e: Engine) Info {
@@ -362,6 +364,13 @@ pub const Engine = struct {
     pub fn keepaliveTarget(e: Engine) ?keepalive.Target {
         const f = e.vtable.keepalive orelse return null;
         return f(e.ctx);
+    }
+
+    /// Hands the engine Recall's record; false when it drafts from none (its own copies only).
+    pub fn attachRecall(e: Engine, store: *lanes.recall_store.Store) bool {
+        const f = e.vtable.recall orelse return false;
+        f(e.ctx, store);
+        return true;
     }
 
     /// The decision hook, or Unsupported when this engine does not score.
@@ -411,6 +420,9 @@ pub const cache_modes = @import("cache_modes.zig");
 
 /// Learned prompt-cache states on disk (prompt_imprint.zig).
 pub const prompt_imprint = @import("prompt_imprint.zig");
+
+/// Recall's record of the ids earlier requests read and wrote, for drafts (not the prompt cache's learned states).
+pub const recall_store = lanes.recall_store;
 
 /// The idle keepalive's ticker and target contract.
 pub const keepalive = @import("keepalive.zig");

@@ -99,6 +99,8 @@ pub const Server = struct {
     teacher: slide_lesson.Teacher, // what every Sliding Weights lesson shares: keep prompts, the turn's end
     /// Cortheon's web reader and what replies hid from their clients; null without --cortheon.
     cortheon: ?*cortheon.State = null,
+    /// Recall's record (--recall), which GET and DELETE /v1/recall read and empty; main opens and closes it.
+    recall: ?*api.recall_store.Store = null,
 
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {

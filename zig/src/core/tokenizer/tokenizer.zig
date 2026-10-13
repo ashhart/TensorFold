@@ -5,6 +5,8 @@ const steps = @import("steps.zig");
 const models = @import("model.zig");
 const Allocator = std.mem.Allocator;
 pub const Memo = @import("memo.zig").Memo;
+/// A digest of what ids mean as loaded (identity.zig): what Recall keys its record by.
+pub const identity = @import("identity.zig").identity;
 
 pub const Kind = models.Kind;
 pub const Error = models.Error || std.json.ParseError(std.json.Scanner) || error{UnsupportedAddedToken};
@@ -563,4 +565,8 @@ test "raw token bytes conservatively refuse context-sensitive decoder kinds" {
 
 test {
     _ = @import("memo.zig");
+}
+
+test {
+    _ = @import("identity.zig");
 }

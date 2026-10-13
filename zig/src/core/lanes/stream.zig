@@ -5,6 +5,7 @@ const shape = @import("shape.zig");
 const plan_lanes = @import("plan_lanes.zig");
 const Allocator = std.mem.Allocator;
 const Proposer = @import("proposer.zig").Proposer;
+const Reader = @import("recall.zig").Reader;
 const Sampling = @import("sampling.zig").Sampling;
 const State = @import("depth.zig").State;
 const Row = @import("logprob.zig").Row;
@@ -105,6 +106,7 @@ pub const Spec = struct {
     sampling: ?Sampling = null,
     drafts: bool = true,
     proposer: ?Proposer = null,
+    recall: ?*Reader = null, // copies and grafts from the record of earlier requests (lanes/recall.zig)
     stop_check: ?StopCheck = null,
     cancel_check: ?CancelCheck = null,
     yield_check: ?CancelCheck = null, // a background prompt pass: real work waits, so it keeps what it has and stops
@@ -133,6 +135,7 @@ pub const Stream = struct {
     sampling: ?Sampling,
     drafts: bool,
     proposer: ?Proposer,
+    recall: ?*Reader,
     stop_check: ?StopCheck,
     cancel_check: ?CancelCheck,
     yield_check: ?CancelCheck,
@@ -169,6 +172,7 @@ pub const Stream = struct {
     branch_rows: u64 = 0, // suffix-match branch rows verified (lanes/fill.zig)
     branch_accepted: u64 = 0, // of those, rows on the accepted path
     graft_hit: f64 = 1, // recent share of grafted rows kept; a read of the chain that grafted none counts as a miss
+    recall_hit: f64 = 1, // the same for rows Recall's candidates grafted, kept apart
     odds: ?shape.Odds = null, // how often the target took the head's rank-r lane at each depth (head trees)
     lanes: ?shape.Shape = null, // the shape of the held tree drafts
     landed: [shape.max_depth][shape.ranks][2]u32 = @splat(@splat(.{ 0, 0 })), // tree lanes verified and taken
@@ -198,6 +202,7 @@ pub const Stream = struct {
             .sampling = spec.sampling,
             .drafts = spec.drafts,
             .proposer = if (spec.drafts) spec.proposer else null,
+            .recall = if (spec.drafts) spec.recall else null,
             .stop_check = spec.stop_check,
             .cancel_check = spec.cancel_check,
             .yield_check = spec.yield_check,
