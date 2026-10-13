@@ -49,6 +49,7 @@ pub const Live = struct {
 
     fn fetchFn(ctx: *anyopaque, a: Allocator, url: []const u8, max_chars: usize, focus: []const u8) anyerror!tools.Page {
         const l: *Live = @ptrCast(@alignCast(ctx));
+        try web.plainUrl(url, web.max_query); // a model-made URL carries an address, not the conversation
         const target = try tools.rawGithub(a, url);
         const headers = [_]std.http.Header{ .{ .name = "Accept", .value = "text/html,application/xhtml+xml,text/plain,text/markdown,application/json" }, .{ .name = "Accept-Language", .value = "en" } };
         const r = try l.client.get(a, target, &headers, .{});

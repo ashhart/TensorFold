@@ -87,7 +87,8 @@ pub const Ran = struct { kind: Kind, subject: []const u8, text: []const u8, ok: 
 pub fn run(web: Web, a: Allocator, call: Value, today: []const u8, max_chars: usize, focus: []const u8) Allocator.Error!Ran {
     const name = callName(call);
     if (std.mem.eql(u8, name, search_name)) {
-        const query = (try argument(a, call, "query")) orelse return .{ .kind = .search, .subject = "", .ok = false, .text = "cortheon_search needs a non-empty \"query\" string." };
+        const asked = (try argument(a, call, "query")) orelse return .{ .kind = .search, .subject = "", .ok = false, .text = "cortheon_search needs a non-empty \"query\" string." };
+        const query = asked[0..@import("html.zig").cutAt(asked, 200)]; // a search names a topic; longer is data leaving
         const found = web.search(web.ctx, a, query, 6) catch |e| return .{ .kind = .search, .subject = query, .ok = false, .text = try std.fmt.allocPrint(a, "cortheon_search could not search for \"{s}\": {s}.", .{ query, why(e) }) };
         var urls: std.ArrayList([]const u8) = .empty;
         for (found.results) |r| try urls.append(a, r.url);
@@ -109,6 +110,7 @@ pub fn why(e: anyerror) []const u8 {
         error.Redirects => "it redirected too many times",
         error.Unsupported => "this file type cannot be read as text",
         error.Blocked => "the search engine refused the request",
+        error.Carries => "the URL carries more data than a page address needs, so it was not sent",
         else => "the network request failed",
     };
 }

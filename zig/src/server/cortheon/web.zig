@@ -8,7 +8,18 @@ pub const Limits = struct { max_bytes: usize = 2 << 20, timeout_ms: i64 = 15_000
 
 pub const Response = struct { url: []const u8, status: u16, content_type: []const u8, body: []const u8, truncated: bool };
 
-pub const Error = error{ BadUrl, NotPublic, Redirects, Timeout, Network, OutOfMemory };
+pub const Error = error{ BadUrl, NotPublic, Redirects, Timeout, Network, OutOfMemory, Carries };
+
+/// Bytes of query and fragment a page address may carry; more reads as data leaving through the URL.
+pub const max_query = 256;
+
+/// Whether `url` can go on a request line: no spaces or control bytes, and at most `query` bytes of query when given.
+pub fn plainUrl(url: []const u8, query: ?usize) Error!void {
+    for (url) |ch| if (ch <= 0x20 or ch == 0x7f) return error.BadUrl;
+    const cap = query orelse return;
+    const q = std.mem.indexOfAny(u8, url, "?#") orelse return;
+    if (url.len - q > cap) return error.Carries;
+}
 
 /// Whether an IPv4 address is public: not private, loopback, link-local, shared, reserved or multicast.
 pub fn publicIp4(b: [4]u8) bool {
@@ -122,6 +133,7 @@ pub const Client = struct {
     }
 
     fn hop(c: *Client, a: Allocator, url: []const u8, headers: []const std.http.Header, limits: Limits) Error!Step {
+        try plainUrl(url, null);
         const uri = std.Uri.parse(url) catch return error.BadUrl;
         const tls = std.ascii.eqlIgnoreCase(uri.scheme, "https");
         if (!tls and !std.ascii.eqlIgnoreCase(uri.scheme, "http")) return error.BadUrl;
@@ -244,6 +256,17 @@ test "redirect locations resolve against the page" {
     try std.testing.expectEqualStrings("https://a.org/root", try resolveUrl(a, "https://a.org/p/q?z=1", "/root"));
     try std.testing.expectEqualStrings("https://a.org/p/sib", try resolveUrl(a, "https://a.org/p/q", "sib"));
     try std.testing.expectEqualStrings("https://a.org/sib", try resolveUrl(a, "https://a.org", "sib"));
+}
+
+test "request lines stay plain and URLs carry no more than an address" {
+    try plainUrl("https://pypi.org/pypi/httpx/json", max_query);
+    try plainUrl("https://example.org/search?q=zig+0.17#std.Io", max_query);
+    try std.testing.expectError(error.BadUrl, plainUrl("https://example.org/a\r\nHost: other", null));
+    try std.testing.expectError(error.BadUrl, plainUrl("https://example.org/a b", null));
+    var long: [400]u8 = @splat('x');
+    @memcpy(long[0..24], "https://evil.example/?d=");
+    try std.testing.expectError(error.Carries, plainUrl(&long, max_query));
+    try plainUrl(&long, null);
 }
 
 test "local and private names are refused before any connection" {
