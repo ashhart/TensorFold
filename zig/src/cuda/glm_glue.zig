@@ -108,7 +108,7 @@ pub const Glue = struct {
         r.add(fn_w);
         r.add(part);
         r.add(@as(u32, @intCast(rows)));
-        try launch_.launch(g.hc_partial_fn, .{ .grid = grid2(rows, 16), .block = block(128), .shared = 0 }, s, &r);
+        try launch_.launch(g.hc_partial_fn, .{ .grid = .{ .x = @intCast(rows), .y = 16, .z = 6 }, .block = block(128), .shared = 0 }, s, &r);
     }
 
     /// glue.hc_finish: mixed/normed output, group sums, post gates [rows, 4] and comb [rows, 16].

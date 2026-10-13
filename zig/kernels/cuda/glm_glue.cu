@@ -125,48 +125,46 @@ __device__ __forceinline__ void rmsnorm(const u16* x, i64 xs, const u16* w, u16*
 }
 
 // -- hyper-connection partial dots (glue.py _hc_partial; WIDE x NB blocks of 1024) ---------------
-template <int WIDE, int NB>
+template <int WIDE, int NB>  // block (row, b, j): warp w's dot 4 j + w in t order (split by j, same bits); j 0: squares
 __device__ __forceinline__ void hc_partial(const u16* x, const float* fn, float* part) {
-    __shared__ float rows[32];
     __shared__ float ssw[4];
-    int r = blockIdx.x, b = blockIdx.y, w = threadIdx.x >> 5, l = threadIdx.x & 31;
+    int r = blockIdx.x, b = blockIdx.y, j = blockIdx.z, w = threadIdx.x >> 5, l = threadIdx.x & 31;
+    const int m = 4 * j + w;
     const u16* xr = x + (i64)r * WIDE;
-    float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-    float ss = 0.0f;
+    float acc = 0.0f, ss = 0.0f;
     for (int t = 0; t < 8; ++t) {
         int base = b * 1024 + t * 128;
         float xq[4];
         load2bf(xr + base + 4 * l, xq);
         load2bf(xr + base + 4 * l + 2, xq + 2);
-        float xo = f32of(xr[base + threadIdx.x]);
-        ss += xo * xo;
-        for (int j = 0; j < 8; ++j) {
-            int m = 4 * j + w;
-            float wv[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-            if (m < 24) {
-                const float* wp = fn + (i64)m * WIDE + base + 4 * l;
-                wv[0] = wp[0];
-                wv[1] = wp[1];
-                wv[2] = wp[2];
-                wv[3] = wp[3];
-            }
-            float p0 = xq[0] * wv[0], p1 = xq[1] * wv[1];
-            float p2 = xq[2] * wv[2], p3 = xq[3] * wv[3];
-            float q = (p0 + p2) + (p1 + p3);
-            for (int i = 16; i; i >>= 1) q += __shfl_xor_sync(0xffffffffu, q, i);
-            acc[j] += q;
+        if (j == 0) {
+            float xo = f32of(xr[base + threadIdx.x]);
+            ss += xo * xo;
         }
+        float wv[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        if (m < 24) {
+            const float* wp = fn + (i64)m * WIDE + base + 4 * l;
+            wv[0] = wp[0];
+            wv[1] = wp[1];
+            wv[2] = wp[2];
+            wv[3] = wp[3];
+        }
+        float p0 = xq[0] * wv[0], p1 = xq[1] * wv[1];
+        float p2 = xq[2] * wv[2], p3 = xq[3] * wv[3];
+        float q = (p0 + p2) + (p1 + p3);
+        for (int i = 16; i; i >>= 1) q += __shfl_xor_sync(0xffffffffu, q, i);
+        acc += q;
     }
-    for (int i = 16; i; i >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, i);
-    if (l == 0) {
-        for (int j = 0; j < 8; ++j) rows[w * 8 + j] = acc[j];
-        ssw[w] = ss;
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        part[((i64)r * NB + b) * 32 + 24] = (ssw[0] + ssw[2]) + (ssw[1] + ssw[3]);
-        for (int m = 25; m < 32; ++m) part[((i64)r * NB + b) * 32 + m] = 0.0f;
-        for (int m = 0; m < 24; ++m) part[((i64)r * NB + b) * 32 + m] = rows[(m & 3) * 8 + (m >> 2)];
+    float* out = part + ((i64)r * NB + b) * 32;
+    if (l == 0 && m < 24) out[m] = acc;
+    if (j == 0) {
+        for (int i = 16; i; i >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, i);
+        if (l == 0) ssw[w] = ss;
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            out[24] = (ssw[0] + ssw[2]) + (ssw[1] + ssw[3]);
+            for (int k = 25; k < 32; ++k) out[k] = 0.0f;
+        }
     }
 }
 
