@@ -254,6 +254,7 @@ pub const Forward = struct {
 
     /// The pocket over the rows of sequences that read what was learned: every row, or the runs between untaught ones'.
     fn pocket(f: *const Forward, o: kern.Ops, p: weights.Pocket, d: usize, y_f32: bool, rows: usize) !void {
+        if (p.used == 0) return;
         if (!f.untaught) return f.pocketRun(o, p, d, y_f32, .{ 0, rows });
         var runs: lesson_route.Runs = .{};
         for (f.segs) |s| if (runs.next(s.rows, s.untaught)) |r| try f.pocketRun(o, p, d, y_f32, r);
@@ -264,7 +265,7 @@ pub const Forward = struct {
     fn pocketRun(f: *const Forward, o: kern.Ops, p: weights.Pocket, d: usize, y_f32: bool, r: [2]usize) !void {
         const c = f.c;
         const out = f.b.ymoe + @as(u64, r[0] * c.slots() * d) * @as(u64, if (y_f32) 4 else 2);
-        try o.pocketRows(f.b.y + @as(u64, r[0] * d) * 2, d, p.up, p.down, p.n, out, y_f32, r[1], c.slots(), c.top_k);
+        try o.pocketRows(f.b.y + @as(u64, r[0] * d) * 2, d, p, f.b.pocket, out, y_f32, r[1], c.slots(), c.top_k);
     }
 
     /// A lesson's rest into the shared expert's halves' pair rows, a live change (--slide, 2W wide) into the first's.

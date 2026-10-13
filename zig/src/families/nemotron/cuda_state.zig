@@ -81,7 +81,7 @@ fn seqSizes(c: Config, max_len: usize) [seq_fields.len]usize {
     return .{ kv, kv, m[0], m[1], nm * 2 * W * cd * 2, nm * 2 * W * cd * 2, nm * 2 * W * c.mamba_heads * 4, 16, W * 4, W * c.hidden * 2, W * 4, @sizeOf(sampler.Rule) };
 }
 
-const scratch_count = 35;
+const scratch_count = 36;
 
 /// Scratch windows and chunks share on one stream: window logits, chunk io, activations, the expert plan.
 fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
@@ -100,7 +100,7 @@ fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
         R * c.projDim() * 2,   R * cd * 2,                                  R * xd * 2,                 R * xd * 2,       R * xd / 64 * 4,       R * c.qkvDim() * 2,
         R * qd * 2,            R * qd * 2,                                  R * qd / 64 * 4,            W * nch * qd * 4, W * nch * c.heads * 4, W * nch * c.heads * 4,
         6 * R * c.experts * 4, R * ns * 4,                                  R * ns * 4,                 pairs * 4,        items * 12,            8,
-        pairs * 4,             (pairs + 1023) / 1024 * (c.experts + 2) * 4, pairs * c.expert_width * 2, pairs * D * 4,    shared_words * 4,
+        pairs * 4,             (pairs + 1023) / 1024 * (c.experts + 2) * 4, pairs * c.expert_width * 2, pairs * D * 4,    shared_words * 4,      R * kern.pocket_width * 4,
     };
 }
 
@@ -211,6 +211,7 @@ pub const Buffers = struct {
     ymoe: u64,
     rule: u64, // the sequence's sampled rule, as sample.cu reads it
     shared: u64, // the shared expert's fixed plans: 32 members, then (items, counts) for 1..16 rows
+    pocket: u64, // the pocket's activations, fp32 [rows, pocket_width]
 
     /// Sizes every buffer for `max_len` cache rows and `nch` attention chunk partials a row; the own sequence's first.
     pub fn init(d: *const cuda.Driver, c: Config, max_len: usize, nch: usize, carve: ?*cuda.Carveout) !Buffers {
@@ -255,7 +256,7 @@ pub const Buffers = struct {
             &b.logits,    &b.p_meta,    &b.p_ids, &b.p_hidden, &b.p_logits, &b.p_sampled, &b.emb, &b.h[0],         &b.h[1],       &b.y,
             &b.xs,        &b.delta,     &b.proj,  &b.p_xc,     &b.sy,       &b.g,         &b.gxs, &b.qkv,          &b.q,          &b.att,
             &b.axs,       &b.po,        &b.pm,    &b.pl,       &b.part,     &b.pick,      &b.wts, &b.plan.members, &b.plan.items, &b.plan.counts,
-            &b.plan.rank, &b.plan.hist, &b.act,   &b.ymoe,     &b.shared,
+            &b.plan.rank, &b.plan.hist, &b.act,   &b.ymoe,     &b.shared,   &b.pocket,
         };
     }
 
