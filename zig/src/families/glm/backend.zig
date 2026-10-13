@@ -94,7 +94,7 @@ pub const Backend = struct {
         const reuse: ?*const snapshot.Snap = if (s.reuse.saved) |saved| @ptrCast(@alignCast(saved)) else null;
         const i = b.sl.pick(reuse) orelse return error.NoFreeSlot;
         try b.by.put(b.gpa, s, i);
-        try pool.reserve(b.sl, i, need(prompt.len, s.max_new)); // pooled: its share (admission checked it fits)
+        try pool.reserve(b.sl, i, need(prompt.len, s.max_new), reuse); // pooled: its share (admission checked it fits)
         b.words.clearRetainingCapacity();
         try b.words.appendSlice(b.gpa, &.{ i, @intFromBool(s.drafts) });
         try b.words.appendSlice(b.gpa, prompt);
@@ -105,6 +105,7 @@ pub const Backend = struct {
         if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
             if (snap.at < prompt.len and b.sl.usable(snap)) {
+                if (snap.home != i) try b.copyOut(i, 0); // the restore writes every one of this slot's rows
                 try mirror.send(e, .restore, &.{ i, snap.id });
                 try b.sl.restore(i, snap.id);
                 at = snap.at;
@@ -117,11 +118,21 @@ pub const Backend = struct {
             while (next < s.chunks.len and s.chunks[next] <= at) next += 1;
             const end: u32 = if (next < s.chunks.len) s.chunks[next] else @intCast(prompt.len);
             const n = b.sl.chunkRows(at, end);
+            try b.copyOut(i, at);
             try mirror.send(e, .chunk, &.{ i, at, n });
             try b.sl.chunk(i, at, n);
             at += n;
             if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, at);
         }
+    }
+
+    /// Slot `i`'s resident states past `at` made whole where the budget has room before it writes; a pair's rank 1 copies the same ids.
+    fn copyOut(b: *Backend, i: u32, at: u32) !void {
+        b.words.clearRetainingCapacity();
+        try b.words.append(b.gpa, i);
+        const done = b.sl.copyOut(i, at, &b.words, b.gpa);
+        if (b.words.items.len > 1) try mirror.send(b.sl.e, .copy_out, b.words.items); // the copies made, even if a later one failed
+        return done;
     }
 
     /// The prompt cache's Snapshots functions: a stream's prompt state, mirrored to the peer by id.

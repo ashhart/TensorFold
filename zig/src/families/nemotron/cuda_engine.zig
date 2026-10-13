@@ -1,4 +1,4 @@
-//! The Nemotron CUDA engine (engine.py): weights, kernels and one sequence's buffers; prefill, windows and commits.
+//! The Nemotron CUDA engine (engine.py): weights, kernels and one sequence's buffers; windows and commits.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -16,9 +16,12 @@ const sampler = @import("cuda_sampler.zig");
 const segs = @import("cuda_segments.zig");
 const train_ops = @import("cuda_train_ops.zig");
 const lesson_route = @import("lesson_route.zig");
-const grid = @import("cuda_prompt_grid.zig");
 const heat = @import("heat");
 const seq_graphs = @import("cuda_seq_graphs.zig");
+const prompt_rows = @import("cuda_prompt_rows.zig");
+const prompt_pass = @import("cuda_prompt.zig");
+const marks = @import("cuda_marks.zig");
+pub const PromptRows = prompt_rows.PromptRows;
 
 /// nemotron_h.cuda.CONTEXT: prompt plus reply tokens when --context is not given, as `tensorfold serve` sizes it.
 pub const default_context = 16384;
@@ -44,11 +47,12 @@ pub const Cancel = struct {
     }
 };
 
-/// Grid points where a prompt pass copies its state (ascending), called once each chunk ending there is queued.
+/// Rows where a prompt pass keeps its state (ascending): one inside a chunk is called before it, one at its end after.
 pub const Keep = struct {
     at: []const u32,
     ctx: *anyopaque,
     call: *const fn (*anyopaque, u32) void,
+    cut: bool = false, // every row ends a chunk instead: the reference the marks test compares the armed states to
 };
 
 /// Serial rounds a host keeps queued ahead of the one it reads.
@@ -60,9 +64,11 @@ pub const max_streams = 8;
 // pinned words: the window's meta row, its ids, its sampled ids, a prompt chunk's ids, then 64 a shared window's stream
 const pin_meta = 0;
 const pin_ids = 4;
-const pin_sampled = 32;
-const pin_prompt = 64;
+pub const pin_sampled = 32;
+pub const pin_prompt = 64;
 const pin_shared = pin_prompt + @max(segs.MAX * state.prefill_rows, state.pass_rows);
+/// Graph ids of masked verify windows (launchGraph's ids: windows from 1, head levels from 1000).
+const masked_ids = 4000;
 
 /// One stream's part of a shared window: its sequence, the ids its first rows take from the host, and its rows.
 pub const Shared = struct { seq: *state.Seq, ids: []const u32, rows: usize, mask: Mask = .{} };
@@ -86,11 +92,11 @@ pub const Engine = struct {
     windows: [2][state.max_rows + 1]?cuda.graph.Exec = @splat(@splat(null)), // [greedy, sampled]: argmax or sample.cu
     stats: seq_graphs.Stats = .{},
     epoch: u32 = 0, // cuda_slide's recapture moves it on: other sequences capture their graphs again
+    mask_bits: u64 = 0, // the grammar bits a masked window's graphs read (one place for every single-stream window)
     done: [lookahead]cuda.Event = undefined,
     copied: cuda.Event = undefined, // the last window's uploads have read the pinned words
     sampled_ready: cuda.Event = undefined,
     pos: usize = 0,
-    last_row: usize = 0, // the prompt's last row in p_hidden after a prompt pass
     parity: usize = 0,
     prev_keep: usize = 0,
     rows: usize = 0,
@@ -107,6 +113,10 @@ pub const Engine = struct {
     seg: ?segs.Segments = null, // their streams and scratch, made at load (or when setSegments asks for more)
     carve: ?*cuda.Carveout = null, // Options.carveout; it outlives the engine
     heat_gate: heat.Gate = .{}, // off unless TF_HEAT_HIGH and TF_HEAT_LOW are set
+    prompt_rows: ?PromptRows = null, // a prompt pass's rows for prompt_logprobs (serial chunks, from 0)
+    armed: marks.Armed = .{}, // the marks inside the prompt chunk about to run (cuda_marks.zig)
+    spares: marks.Spares = .{}, // free Mamba buffers the prompt cache set aside for the next marks
+    last_chunk: usize = 0, // where the last prompt pass's last chunk started (the prompt's last row: len - 1 - this)
 
     /// Loads the checkpoint into the Python engine's layouts and sizes the caches; `triton_dir` null: our own glue.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, model_dir: []const u8, triton_dir: ?[]const u8, opts: Options) !*Engine {
@@ -184,7 +194,7 @@ pub const Engine = struct {
 
     /// What a graph runs: a verify window (with the serial feed or the sampled download), or one MTP head level.
     pub const Body = union(enum) {
-        window: struct { rows: usize, feed: bool },
+        window: struct { rows: usize, feed: bool, mask: Mask = .{} },
         head: struct { h: *Head, rows: usize, j: usize },
     };
 
@@ -212,7 +222,8 @@ pub const Engine = struct {
     fn recordBody(e: *Engine, body: Body) !void {
         switch (body) {
             .window => |w| {
-                try e.forward(null).window(w.rows);
+                const f = e.forward(null);
+                try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = w.rows, .sampled = f.sampled, .mask = w.mask, .slot = f.slot, .untaught = f.untaught }});
                 if (w.feed) return e.ops().serialFeed(e.b.sampled, e.b.ids, e.b.meta, e.history_dev);
                 try e.ops().download(std.mem.sliceAsBytes(e.pinned.slice(u32)[pin_sampled..][0..w.rows]), e.b.sampled);
             },
@@ -223,6 +234,11 @@ pub const Engine = struct {
     /// Step `id`: the own sequence launches `own`; another launches its own capture of `body`, made the first time.
     pub fn launchGraph(e: *Engine, own: cuda.graph.Exec, id: u32, body: Body) !void {
         if (e.bound == &e.own) return own.launchOn(e.stream);
+        return e.launchCaptured(id, body);
+    }
+
+    /// Step `id` from the bound sequence's own capture of `body`, made the first time (and again after a recapture).
+    fn launchCaptured(e: *Engine, id: u32, body: Body) !void {
         if (e.bound.epoch != e.epoch) {
             seq_graphs.free(e.gpa, &e.bound.graphs);
             e.bound.epoch = e.epoch;
@@ -238,7 +254,9 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         e.stream.synchronize() catch {};
+        e.spares.deinit();
         if (e.serial) |*g| g.deinit();
+        seq_graphs.free(e.gpa, &e.own.graphs); // masked windows'
         for (&e.windows) |*set| for (set) |*g| if (g.*) |*x| x.deinit();
         if (e.seg) |*s| s.deinit();
         for (&e.done) |*ev| ev.deinit();
@@ -296,7 +314,7 @@ pub const Engine = struct {
     /// Act on sequence `s` from here on: its buffers replace the bound one's, which keeps where it stands.
     pub fn bind(e: *Engine, s: *state.Seq) void {
         const old = e.bound;
-        old.* = .{ .arena = old.arena, .carved = old.carved, .ptr = old.ptr, .head = old.head, .graphs = old.graphs, .epoch = old.epoch, .pos = e.pos, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows, .head_pos = if (e.head) |h| h.pos else 0, .sampling = e.sampling, .slot = old.slot, .decide = e.decide };
+        old.* = .{ .arena = old.arena, .carved = old.carved, .ptr = old.ptr, .head = old.head, .graphs = old.graphs, .epoch = old.epoch, .pos = e.pos, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows, .head_pos = if (e.head) |h| h.pos else 0, .sampling = e.sampling, .slot = old.slot, .decide = e.decide, .untaught = old.untaught };
         inline for (state.seq_fields, s.ptr) |name, p| @field(e.b, name) = p;
         e.pos = s.pos;
         e.parity = s.parity;
@@ -317,6 +335,7 @@ pub const Engine = struct {
         var f = Forward.init(e.c, &e.w, &e.b, e.ops(), e.max_len, e.nch, e.sampling != null);
         f.dump = dump;
         f.slot = e.slot;
+        f.untaught = e.bound.untaught;
         if (dump == null and e.c.experts <= 128 and e.c.slots() <= 8) f.side = e.side; // tf_plan_routed's bounds
         return f;
     }
@@ -329,96 +348,16 @@ pub const Engine = struct {
         e.prev_keep = 0;
     }
 
-    /// decode.prefill: a fresh state, the prompt in 2048-row chunks (into the head too, in segments if set); the token.
-    pub fn prefill(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head) !u32 {
-        return e.prefillWith(prompt, dump, head, null);
-    }
-
-    /// prefill, stopping with error.Cancelled at the next chunk boundary once `cancel` says so.
-    pub fn prefillWith(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head, cancel: ?Cancel) !u32 {
-        return e.prefillFrom(prompt, 0, dump, head, cancel, null);
-    }
-
-    /// prefill from `from` (0 resets; else a restored state at a grid point); chunks stay on the zero-anchored grid.
-    pub fn prefillFrom(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, head: ?*Head, cancel: ?Cancel, keep: ?Keep) !u32 {
-        if (prompt.len == 0) return error.EmptyPrompt;
-        if (from != 0 and !grid.resumable(from, prompt.len, state.prefill_rows)) return error.BadReuse;
-        if (prompt.len + state.max_rows > e.max_len) return error.ContextFull;
-        if (from == 0) {
-            try e.reset();
-            if (head) |h| try h.reset();
-        } else if (e.pos != from) return error.BadReuse;
-        const waited = e.heat_gate.waited_s;
-        if (from == 0 and keep == null and e.segments > 1 and dump == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none) {
-            try segs.prefill(e, try e.segmentSet(), prompt, head, e.segments, cancel);
-            e.last_row = (prompt.len - 1) % state.prefill_rows;
-        } else try e.serialChunks(prompt, from, dump, head, cancel, keep);
-        if (e.heat_gate.waited_s > waited) heat.note(e.heat_gate.waited_s - waited);
-        const host = e.pinned.slice(u32)[pin_sampled..][0..1];
-        try e.ops().download(std.mem.sliceAsBytes(host), e.b.p_sampled);
-        try e.stream.synchronize();
-        if (e.trace) e.traceLessons();
-        return host[0];
-    }
-
-    /// The prompt's next token at `position` drawn again under a grammar's bits (structured output's first token).
-    pub fn redrawFirst(e: *Engine, position: u64, mask: Mask) !u32 {
-        const o = e.ops();
-        try o.grammarMask(e.b.p_logits, e.c.vocab, mask.bits, mask.words, 1);
-        try o.fill32(e.b.p_meta, @intCast(position - 1), 4); // the prompt's last row: the draw keys position meta + 1
-        try e.forward(null).sample(e.b.p_logits, 1, e.b.p_meta, e.b.p_sampled, e.sampling != null, e.b.rule);
-        const host = e.pinned.slice(u32)[pin_sampled..][0..1];
-        try o.download(std.mem.sliceAsBytes(host), e.b.p_sampled);
-        try e.stream.synchronize();
-        return host[0];
-    }
-
-    /// Heat bands, if set, before the chunk; a cancel ends the wait. Unset bands return without reading a zone.
-    pub fn beforeChunk(e: *Engine, cancel: ?Cancel) !void {
-        try e.heat_gate.beforePromptChunk(e.io, if (cancel) |c| .{ .ptr = c.ptr, .check = c.check } else null);
-    }
-
-    /// The prompt's chunks one after another on the engine's stream, starting at `from`.
-    fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, head: ?*Head, cancel: ?Cancel, keep: ?Keep) !void {
-        var f = e.forward(dump);
-        const shared = e.lessons();
-        if (shared) |ad| try e.trainOps().latch(ad.score, ad.need, ad.latch, e.slot, false); // no lesson acts until it decides
-        var s: usize = from;
-        while (s < prompt.len) {
-            if (Cancel.now(cancel)) return error.Cancelled;
-            try e.beforeChunk(cancel);
-            var end = grid.end(s, prompt.len, state.prefill_rows);
-            // grid chunks join up to pass_rows between kept points (rows equal at any cut); not under lessons or dumps
-            if (dump == null and shared == null and e.decide == lesson_route.none) while (end < prompt.len and !kept(keep, end)) {
-                const next = grid.end(end, prompt.len, state.prefill_rows);
-                if (next - s > state.pass_rows) break;
-                end = next;
-            };
-            // the decision row ends its chunk: the rows after it read the lessons it latched
-            if (e.decide != lesson_route.none and e.decide >= s and e.decide + 1 < end) end = @intCast(e.decide + 1);
-            const chunk = prompt[s..end];
-            e.last_row = chunk.len - 1;
-            f.route = .{};
-            f.route.add(0, chunk.len, e.pos, e.decide, e.slot);
-            try e.copied.synchronize();
-            const host = e.promptHost(chunk.len);
-            @memcpy(host, chunk);
-            try e.ops().upload(e.b.p_ids, std.mem.sliceAsBytes(host));
-            try e.copied.record(e.stream);
-            try f.chunk(@intCast(chunk.len), e.pos);
-            if (shared) |ad| if (f.route.decision(0) != null) try e.trainOps().latch(ad.score, ad.need, ad.latch, e.slot, true);
-            e.pos += @intCast(chunk.len);
-            const known = @min(chunk.len, prompt.len - 1 - s);
-            if (head) |h| if (known > 0) try h.absorb(e.b.p_hidden, prompt[s + 1 ..][0..known]);
-            s = end;
-            if (keep) |k| if (s <= std.math.maxInt(u32) and std.mem.indexOfScalar(u32, k.at, @intCast(s)) != null) k.call(k.ctx, @intCast(s));
-        }
-    }
-
-    fn kept(keep: ?Keep, at: usize) bool {
-        const k = keep orelse return false;
-        return at <= std.math.maxInt(u32) and std.mem.indexOfScalar(u32, k.at, @intCast(at)) != null;
-    }
+    // the prompt pass, in cuda_prompt.zig
+    pub const prefill = prompt_pass.prefill;
+    pub const prefillWith = prompt_pass.prefillWith;
+    pub const prefillFrom = prompt_pass.prefillFrom;
+    pub const redrawFirst = prompt_pass.redrawFirst;
+    pub const beforeChunk = prompt_pass.beforeChunk;
+    pub const serialChunks = prompt_pass.serialChunks;
+    pub const setSegments = prompt_pass.setSegments;
+    pub const promptHost = prompt_pass.promptHost;
+    pub const segmentSet = prompt_pass.segmentSet;
 
     /// Any block's change, for the buffers every block shares (null: no lesson is attached).
     pub fn lessons(e: *const Engine) ?weights.Adapter {
@@ -431,7 +370,7 @@ pub const Engine = struct {
     }
 
     /// Dev trace (TF_SLIDE_TRACE): the bound sequence's router scores at its decision row and which lessons act on it.
-    fn traceLessons(e: *const Engine) void {
+    pub fn traceLessons(e: *const Engine) void {
         const ad = e.lessons() orelse return;
         if (e.decide == lesson_route.none) return;
         const n = lesson_route.max_blocks;
@@ -449,32 +388,8 @@ pub const Engine = struct {
         std.log.info("slide trace: decision row {d}: scores{s} (* acting)", .{ e.decide, w.buffered() });
     }
 
-    fn trainOps(e: *const Engine) train_ops.Ops {
+    pub fn trainOps(e: *const Engine) train_ops.Ops {
         return .{ .k = &e.k.train, .s = e.stream };
-    }
-
-    /// Whole chunks a prompt call runs as staggered segments from here on; their streams and scratch are made now.
-    pub fn setSegments(e: *Engine, n: usize) !void {
-        if (n < 1 or n > segs.MAX) return error.BadSegments;
-        e.segments = n;
-        if (n > 1) _ = try e.segmentSet();
-    }
-
-    /// Pinned words for `n` prompt ids on their way up (free once `copied` has completed).
-    pub fn promptHost(e: *Engine, n: usize) []u32 {
-        return e.pinned.slice(u32)[pin_prompt..][0..n];
-    }
-
-    /// The segments' streams and scratch for calls of e.segments, remade when a call needs more of them.
-    fn segmentSet(e: *Engine) !*segs.Segments {
-        if (e.seg) |*s| {
-            if (s.n >= e.segments) return s;
-            try e.stream.synchronize();
-            s.deinit();
-            e.seg = null;
-        }
-        e.seg = try segs.Segments.init(e, e.segments);
-        return &e.seg.?;
     }
 
     /// Engine.forward: a window of `rows` rows at pos, its first `ids.len` inputs from the host (drafts on the device).
@@ -482,7 +397,7 @@ pub const Engine = struct {
         return e.verifyMasked(ids, rows, dump, .{});
     }
 
-    /// verify with a grammar's bits for each row: a masked window runs eagerly, its logits masked before its draws.
+    /// verify with a grammar's bits for each row: its logits masked before its draws, a graph each row count once made.
     pub fn verifyMasked(e: *Engine, ids: []const u32, rows: usize, dump: ?*Dump, mask: Mask) !void {
         if (rows < 1 or rows > state.max_rows or ids.len > rows) return error.BadWindow;
         if (e.pos + rows > e.max_len) return error.ContextFull;
@@ -496,15 +411,23 @@ pub const Engine = struct {
         const m: usize = @intFromBool(e.sampling != null);
         if (dump == null and mask.bits == 0 and e.windows[m][rows] != null) {
             try e.launchGraph(e.windows[m][rows].?, @intCast(1 + m * (state.max_rows + 1) + rows), .{ .window = .{ .rows = rows, .feed = false } });
+        } else if (dump == null and e.windows[m][rows] != null and e.maskGraphs(mask)) {
+            try e.launchCaptured(@intCast(masked_ids + m * (state.max_rows + 1) + rows), .{ .window = .{ .rows = rows, .feed = false, .mask = mask } });
         } else {
             e.stats.eager += 1;
             const f = e.forward(dump);
-            try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = rows, .sampled = f.sampled, .mask = mask, .slot = f.slot }});
+            try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = rows, .sampled = f.sampled, .mask = mask, .slot = f.slot, .untaught = f.untaught }});
             try e.ops().download(std.mem.sliceAsBytes(host[pin_sampled..][0..rows]), e.b.sampled);
         }
         try e.sampled_ready.record(e.stream);
         e.parity ^= 1;
         e.rows = rows;
+    }
+
+    /// Whether masked windows replay graphs: their bits stay where the first one read them (the host rewrites them).
+    fn maskGraphs(e: *Engine, mask: Mask) bool {
+        if (e.mask_bits == 0) e.mask_bits = mask.bits;
+        return mask.bits == e.mask_bits;
     }
 
     /// Several streams' windows in one forward (eager): each stream's rows read its own caches, state and rule.
@@ -530,7 +453,7 @@ pub const Engine = struct {
             try e.ops().upload(e.b.ids, std.mem.sliceAsBytes(slot[4..][0..p.ids.len]));
             try e.ops().upload(e.b.meta, std.mem.sliceAsBytes(slot[0..4]));
             views[k] = e.b; // the bound sequence's own fields beside the shared scratch
-            parts_f[k] = .{ .b = &views[k], .row0 = row0, .rows = p.rows, .sampled = e.sampling != null, .mask = p.mask, .slot = p.seq.slot };
+            parts_f[k] = .{ .b = &views[k], .row0 = row0, .rows = p.rows, .sampled = e.sampling != null, .mask = p.mask, .slot = p.seq.slot, .untaught = p.seq.untaught };
             row0 += p.rows;
         }
         try e.copied.record(e.stream);

@@ -34,7 +34,7 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8, count_text: 
     defer drafts.deinit(gpa);
     var pending = try e.prefill(prompt.items, null, h);
     try truth.append(gpa, pending);
-    const last = e.last_row;
+    const last = prompt.items.len - 1 - e.last_chunk;
     try e.ops().copy(e.b.hidden, e.b.p_hidden + last * D * 2, D * 2);
     try e.ops().fill32(e.b.sampled, pending, 1);
     var vals: [candidates]f32 = undefined;

@@ -15,6 +15,8 @@ const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--
 /// The flags past the common ones this binary's backend serves; cli.zig reads them from the root.
 pub const serves = engines.serves;
 
+pub const std_options = engines.std_options;
+
 pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
     const io = init.io;
