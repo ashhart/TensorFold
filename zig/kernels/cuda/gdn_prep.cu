@@ -30,6 +30,7 @@ struct Io {
     float* beta;                // [rows, vh]
 };
 
+// Exactly rounded division on purpose: the same bits on every GPU, where div.full and ex2.approx are not.
 __device__ __forceinline__ float sigmoid(float x) { return __fdiv_rn(1.f, __fadd_rn(1.f, expf(-x))); }
 
 template <int J>

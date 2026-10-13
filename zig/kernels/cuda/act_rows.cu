@@ -27,6 +27,7 @@ __device__ __forceinline__ uint4 pack8(const float* f) {
     return u;
 }
 
+// Exactly rounded division on purpose: the same bits on every GPU, where div.full and ex2.approx are not.
 __device__ __forceinline__ float sigmoid(float x) { return __fdiv_rn(1.f, __fadd_rn(1.f, expf(-x))); }
 
 // A thread's 8 stored values in order, then the group's 8 lanes in a fixed tree (every lane of the warp calls).
