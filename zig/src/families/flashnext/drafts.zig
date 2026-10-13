@@ -57,3 +57,7 @@ pub fn copyDrafts(hist: []const u32, min: usize, out: []u32) usize {
     }
     return 0;
 }
+
+test {
+    _ = @import("drafts_cost.zig");
+}

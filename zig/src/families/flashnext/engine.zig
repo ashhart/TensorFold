@@ -42,6 +42,7 @@ const Select = fz.Select;
 const Tmp = fz.Tmp;
 const Slot = fz.Slot;
 const DepthRule = fz.DepthRule;
+const CostDepth = @import("drafts_cost.zig").CostDepth;
 const hcOf = fz.hcOf;
 const laneOf = fz.laneOf;
 const i32Buf = fz.i32Buf;
@@ -600,10 +601,12 @@ pub const Engine = struct {
             m.state_row = 0;
         }
         var rule: DepthRule = .{ .pair = r.tp != null };
+        var by_cost: ?CostDepth = if (r.tp == null and !r.device.tensorUnits()) .{} else null; // 0.6.5's rule before M5
+        var last_end: f64 = 0; // the previous read round's GPU end (s): a round's time is the gap to its own
         var copy_rate: f64 = 0.6; // drafts landed over offered: copied rounds, the head's rounds
         var head_rate: f64 = 0.6;
         const fixed = depth;
-        const depth0 = fixed orelse rule.pick();
+        const depth0 = fixed orelse if (by_cost) |*c| c.pick() else rule.pick();
         var next_depth: usize = depth0; // the rule's drafts for the next round to encode (rank 0's in speed-up mode)
         const w = e.wids.b.slice(u32, 16);
         w[0] = pick;
@@ -694,7 +697,7 @@ pub const Engine = struct {
             try m.windowEncode(wr, e.wids);
             // the widest windows while copies land whole; otherwise the head's rule
             const copying = e.copy and copy_rate + 0.05 >= head_rate and copy_rate > 0.9;
-            const wn = (if (fixed) |d| d else if (copying) MAXR - 1 else next_depth) + 1;
+            const wn = (if (fixed) |d| d else if (copying) (if (by_cost) |*c| c.copyDrafts(copy_rate) else MAXR - 1) else next_depth) + 1;
             widths[(round + 1) % 4] = wn;
             if (watch.armed) think.span(r, m.t.picks, wr); // and in place of the target's picks
             const cfg = [4]u32{ @intCast(wr), @intCast(wn), CAP, 0 };
@@ -724,6 +727,8 @@ pub const Engine = struct {
             const slot = (done % RING) * fz.RING_WORDS;
             const keep = rg[slot];
             const wd = widths[done % 4];
+            if (by_cost) |*c| if (last_end > 0) c.time(wd - 1, (prev.gpuEnd() - last_end) * 1e3);
+            last_end = prev.gpuEnd();
             const got = rg[slot + 3 .. slot + 3 + keep];
             const learn = !watch.read(got); // a round that landed the close's tokens teaches no rate, rule or counter
             if (learn and wd > 1) {
@@ -739,6 +744,7 @@ pub const Engine = struct {
                 res.copy_by_len[n][1] += keep - 1;
             }
             if (learn and fixed == null and wd > 1 and rg[slot + 1] == 0) rule.update(wd - 1, keep - 1);
+            if (learn and wd > 1 and rg[slot + 1] == 0) if (by_cost) |*c| c.observe(wd - 1, keep - 1);
             res.rounds += 1;
             if (learn) res.drafted += wd - 1;
             if (learn) res.accepted += keep - 1;
@@ -756,7 +762,7 @@ pub const Engine = struct {
             if (take > 0 and out.tokens(out.ctx, got[0..take])) stop = true;
             emitted += take;
             const cancel = !stop and emitted < max_tokens and out.cancelled(out.ctx);
-            const ag = e.agreeRound(stop or emitted >= max_tokens or cancel, rule.pick()) catch |err| {
+            const ag = e.agreeRound(stop or emitted >= max_tokens or cancel, if (by_cost) |*c| c.pick() else rule.pick()) catch |err| {
                 failed = err;
                 break;
             };
