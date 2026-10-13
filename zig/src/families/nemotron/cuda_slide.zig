@@ -129,7 +129,7 @@ pub fn loadLiving(gpa: std.mem.Allocator, io: std.Io, e: *engine.Engine, dir: []
 }
 
 /// Every graph captured again on the own sequence (contents kept): a graph keeps each layer's change as captured.
-fn recapture(e: *engine.Engine) !void {
+pub fn recapture(e: *engine.Engine) !void {
     e.epoch += 1; // other sequences' graphs are captured again at their next launch
     if (e.serial == null) return;
     try e.stream.synchronize();
