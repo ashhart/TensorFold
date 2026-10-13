@@ -22,19 +22,19 @@ fn tensor(dtype: st.DType, rows: usize, cols: usize, bytes: []const u8) st.Tenso
     return .{ .dtype = dtype, .rank = 2, .shape = shape, .bytes = bytes };
 }
 
-fn q(m: lib.Mat) !pack.Q {
+pub fn q(m: lib.Mat) !pack.Q {
     const kw = m.k * m.bits / 32;
     const tables = std.mem.sliceAsBytes(m.scales);
     return .{ .w = tensor(.u32, m.n, kw, m.words), .s = tensor(.bf16, m.n, m.k / m.group, tables), .b = tensor(.bf16, m.n, m.k / m.group, std.mem.sliceAsBytes(m.biases)), .rows = m.n, .k = m.k, .kw = kw, .spec = try @FieldType(pack.Q, "spec").init(m.bits, m.group) };
 }
 
-fn blob(out: *const pack.Out, name: []const u8) ?[]const u8 {
+pub fn blob(out: *const pack.Out, name: []const u8) ?[]const u8 {
     for (out.names.items, 0..) |n, i| if (std.mem.eql(u8, n, name)) return out.blobs.items[i];
     return null;
 }
 
 /// The device lane the engine would load from these pack tensors (lane_w.of's reading, from memory).
-fn wideOf(device: mtl.Device, out: *const pack.Out, k: usize, rows: usize) !lane_w.Wide {
+pub fn wideOf(device: mtl.Device, out: *const pack.Out, k: usize, rows: usize) !lane_w.Wide {
     const uniform = [_]u32{ 6, 32, @intCast(rows) }; // a 6/32 lane writes no table
     const table = if (blob(out, "t.runs")) |b| std.mem.bytesAsSlice(u32, @as([]align(1) const u8, b)) else &uniform;
     const n_runs = table.len / 3;
@@ -59,7 +59,7 @@ fn wideOf(device: mtl.Device, out: *const pack.Out, k: usize, rows: usize) !lane
     return .{ .runs = runs, .n = total };
 }
 
-fn mdims(device: mtl.Device, rows: usize) !Buf {
+pub fn mdims(device: mtl.Device, rows: usize) !Buf {
     const b = try device.buffer(32, lib.opts);
     b.slice(i32, 2)[0] = @intCast(rows);
     b.slice(i32, 2)[1] = @intCast((rows + 15) / 16 * 16);
