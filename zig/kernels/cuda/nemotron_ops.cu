@@ -123,7 +123,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_rest_rows(const __nv_bfloat
     }
 }
 
-// The pocket's neurons (n <= 64, fp32 up and down [n, d]): one CTA a row adds relu^2(up y) down to the shared slot.
+// The pocket in one CTA a row (n <= 64, fp32 up and down [n, d]): what tf_pocket_in then tf_pocket_out must equal.
 extern "C" __global__ void __launch_bounds__(256) tf_pocket_rows(const __nv_bfloat16* __restrict__ y, int d,
                                                                  const float* __restrict__ up, const float* __restrict__ down,
                                                                  int n, void* __restrict__ out, int out_f32, int row_mul,
@@ -155,6 +155,122 @@ extern "C" __global__ void __launch_bounds__(256) tf_pocket_rows(const __nv_bflo
             *o = __float2bfloat16(__bfloat162float(*o) + s);
         }
     }
+}
+
+namespace {
+
+constexpr int pocket_width = 64;  // act's row stride: the most neurons a pocket holds
+
+// act [rows, 64] = relu^2(up y) over the first n neurons: a warp takes NPW neurons by R rows, its lanes' sums in order.
+template <int NPW, int R>
+__device__ __forceinline__ void pocket_in(const __nv_bfloat16* __restrict__ y, int d, const float* __restrict__ up, int n,
+                                          float* __restrict__ act, int rows) {
+    const int lane = threadIdx.x & 31;
+    const int j0 = (blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5)) * NPW;
+    if (j0 >= n) return;
+    const int r0 = blockIdx.y * R;
+    const int tile = min(R, rows - r0);
+    float s[NPW][R];
+#pragma unroll
+    for (int q = 0; q < NPW; ++q)
+#pragma unroll
+        for (int t = 0; t < R; ++t) s[q][t] = 0.f;
+    for (int i = lane; i < d; i += 32) {
+        float u[NPW], x[R];
+#pragma unroll
+        for (int q = 0; q < NPW; ++q) u[q] = j0 + q < n ? up[static_cast<size_t>(j0 + q) * d + i] : 0.f;
+#pragma unroll
+        for (int t = 0; t < R; ++t) x[t] = t < tile ? __bfloat162float(y[static_cast<size_t>(r0 + t) * d + i]) : 0.f;
+#pragma unroll
+        for (int q = 0; q < NPW; ++q)
+#pragma unroll
+            for (int t = 0; t < R; ++t) s[q][t] += u[q] * x[t];
+    }
+#pragma unroll
+    for (int q = 0; q < NPW; ++q) {
+#pragma unroll
+        for (int t = 0; t < R; ++t) {
+            float v = s[q][t];
+#pragma unroll
+            for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+            if (lane == 0 && j0 + q < n && t < tile) {
+                const float z = fmaxf(v, 0.f);
+                act[static_cast<size_t>(r0 + t) * pocket_width + j0 + q] = z * z;
+            }
+        }
+    }
+}
+
+// out (bf16, fp32 if out_f32) += act down at rows r * row_mul + row_add: a thread an output, R rows, neurons in order.
+template <int R, int B>
+__device__ __forceinline__ void pocket_out(const float* __restrict__ act, const float* __restrict__ down, int n, int d,
+                                           void* __restrict__ out, int out_f32, int rows, int row_mul, int row_add) {
+    __shared__ float a[R * pocket_width];
+    const int r0 = blockIdx.y * R;
+    const int tile = min(R, rows - r0);
+    for (int i = threadIdx.x; i < tile * pocket_width; i += blockDim.x)
+        if (i % pocket_width < n) a[i] = act[static_cast<size_t>(r0) * pocket_width + i];
+    __syncthreads();
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= d) return;
+    float s[R];
+#pragma unroll
+    for (int t = 0; t < R; ++t) s[t] = 0.f;
+    for (int j0 = 0; j0 < n; j0 += B) {
+        float w[B];
+#pragma unroll
+        for (int b = 0; b < B; ++b) w[b] = j0 + b < n ? down[static_cast<size_t>(j0 + b) * d + k] : 0.f;
+#pragma unroll
+        for (int t = 0; t < R; ++t) {
+            if (t < tile) {
+#pragma unroll
+                for (int b = 0; b < B; ++b)
+                    if (j0 + b < n) s[t] += a[t * pocket_width + j0 + b] * w[b];
+            }
+        }
+    }
+#pragma unroll
+    for (int t = 0; t < R; ++t) {
+        if (t < tile) {
+            const size_t row = static_cast<size_t>(r0 + t) * row_mul + row_add;
+            if (out_f32) {
+                static_cast<float*>(out)[row * d + k] += s[t];
+            } else {
+                __nv_bfloat16* o = static_cast<__nv_bfloat16*>(out) + row * d + k;
+                *o = __float2bfloat16(__bfloat162float(*o) + s[t]);
+            }
+        }
+    }
+}
+
+}  // namespace
+
+// tf_pocket_rows' first half over the first *used neurons: a warp a neuron, a block row a row.
+extern "C" __global__ void __launch_bounds__(128) tf_pocket_in(const __nv_bfloat16* __restrict__ y, int d,
+                                                               const float* __restrict__ up, const int* __restrict__ used,
+                                                               float* __restrict__ act, int rows) {
+    pocket_in<1, 1>(y, d, up, *used, act, rows);
+}
+
+// The same for many rows: a warp eight neurons by eight rows.
+extern "C" __global__ void __launch_bounds__(256) tf_pocket_in_rows(const __nv_bfloat16* __restrict__ y, int d,
+                                                                    const float* __restrict__ up, const int* __restrict__ used,
+                                                                    float* __restrict__ act, int rows) {
+    pocket_in<8, 8>(y, d, up, *used, act, rows);
+}
+
+// tf_pocket_rows' second half over the first *used neurons: a thread an output, a block row a row.
+extern "C" __global__ void __launch_bounds__(128) tf_pocket_out(const float* __restrict__ act, const float* __restrict__ down,
+                                                                const int* __restrict__ used, int d, void* __restrict__ out,
+                                                                int out_f32, int rows, int row_mul, int row_add) {
+    pocket_out<1, 16>(act, down, *used, d, out, out_f32, rows, row_mul, row_add);
+}
+
+// The same for many rows: a thread an output over 16 rows.
+extern "C" __global__ void __launch_bounds__(128) tf_pocket_out_rows(const float* __restrict__ act, const float* __restrict__ down,
+                                                                     const int* __restrict__ used, int d, void* __restrict__ out,
+                                                                     int out_f32, int rows, int row_mul, int row_add) {
+    pocket_out<16, 8>(act, down, *used, d, out, out_f32, rows, row_mul, row_add);
 }
 
 // A target step's nudge: y (bf16, or fp32 when y_f32) += x (fp32), n values, into a row of a layer's output.
