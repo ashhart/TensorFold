@@ -49,6 +49,17 @@ pub const Table = struct {
         t.* = undefined;
     }
 
+    /// Releases the mapped pages of every tensor whose key starts with `key_prefix` (`Shard.release`).
+    pub fn release(t: *const Table, key_prefix: []const u8) void {
+        var it = t.where.iterator();
+        while (it.next()) |kv| {
+            if (!std.mem.startsWith(u8, kv.key_ptr.*, key_prefix)) continue;
+            const shard = &t.files[kv.value_ptr.file];
+            const e = shard.names.get(kv.value_ptr.stored) orelse continue;
+            shard.release(e.begin, e.end);
+        }
+    }
+
     pub fn has(t: *const Table, key: []const u8) bool {
         return t.where.contains(key);
     }
