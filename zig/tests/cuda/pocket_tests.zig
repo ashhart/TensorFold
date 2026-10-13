@@ -7,6 +7,7 @@ const check = @import("check.zig");
 const Gpu = check.Gpu;
 const kern = nemotron.kernels;
 const gm = nemotron.glue_math;
+const state = nemotron.state;
 
 const width = kern.pocket_width;
 const row_mul = 8; // a row's expert slots: the pocket adds into slot 6, the shared expert's first half
@@ -254,11 +255,11 @@ pub fn run(gpu: Gpu, reps: usize) !void {
         for (r.bufs.items) |*b| b.free();
         r.bufs.clearRetainingCapacity();
     };
-    for ([_]usize{ 44, 64 }) |used| {
-        try compare(&r, .{ .d = 2688, .rows = 2048, .used = used, .out_f32 = false }); // a whole prompt chunk
+    for ([_]usize{ state.prefill_rows, state.pass_rows }) |rows| for ([_]usize{ 44, 64 }) |used| {
+        try compare(&r, .{ .d = 2688, .rows = rows, .used = used, .out_f32 = false }); // a whole prompt chunk, a whole serial pass
         cases += 1;
-    }
-    check.pass("pocket: {d} cases byte-equal to tf_pocket_rows (rows 1 to 2048, 0 to 64 neurons in use, fp32 and bf16 out)", .{cases});
+    };
+    check.pass("pocket: {d} cases byte-equal to tf_pocket_rows (rows 1 to {d}, 0 to 64 neurons in use, fp32 and bf16 out)", .{ cases, state.pass_rows });
     var moved: [4]usize = undefined;
     for ([_]usize{ 16, 300 }, 0..) |rows, i| {
         moved[2 * i] = try control(&r, .{ .d = 2688, .rows = rows, .used = 44, .out_f32 = true }, .neurons_reversed);
