@@ -58,6 +58,18 @@ pub const Checkpoint = struct {
         return try projection.projection(a, &c.main, "language_model.lm_head");
     }
 
+    /// Drops the mapped pages of layer `index` once it is uploaded (null: the embedding, norm and head).
+    pub fn release(c: *const Checkpoint, index: ?usize) void {
+        if (index) |i| {
+            var name: [128]u8 = undefined;
+            c.main.release(std.fmt.bufPrint(&name, prefix ++ "layers.{d}.", .{i}) catch return);
+        } else {
+            c.main.release(prefix ++ "embed_tokens");
+            c.main.release(prefix ++ "norm.");
+            c.main.release("language_model.lm_head");
+        }
+    }
+
     /// Layer `index`, read and converted; free it with `deinit`.
     pub fn layer(c: *const Checkpoint, index: usize) !host.Layer {
         const s = c.spec();

@@ -216,6 +216,8 @@ pub const Model = struct {
         if (rank) |r| {
             m.head = try u.projection(try slicing.vocabRows(scratch.allocator(), head orelse embed, whole.vocab, r));
         } else if (head) |h| m.head = try u.projection(h);
+        // each part's mapped pages go once it is up: a rank holds one layer of the checkpoint at a time, not all of it
+        ck.release(null);
         var list: std.ArrayList(Layer) = .empty;
         errdefer list.deinit(gpa);
         for (0..@min(limit, m.spec.n_layers)) |i| {
@@ -223,6 +225,7 @@ pub const Model = struct {
             defer host_layer.deinit();
             if (rank) |r| try slicing.layer(&host_layer, whole, r);
             try list.append(gpa, try u.layer(host_layer));
+            ck.release(i);
         }
         m.layers = try list.toOwnedSlice(gpa);
         // under tp only rank 0 drafts: its head is whole, logits rows included (its own or the model's whole head)
@@ -232,6 +235,7 @@ pub const Model = struct {
             defer h.deinit();
             if (rank != null and h.head == null) h.head = head orelse embed;
             m.mtp = try u.mtp(h);
+            ck.main.release("mtp.");
         };
         return m;
     }
