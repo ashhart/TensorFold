@@ -353,7 +353,7 @@ pub fn pleRef(c: *const Config) !PleRef {
     const half = @max(1, ((@as(u64, 1) << 63) - 1) / @max(c.vocab, 1) / 2);
     var multipliers: [3]i64 = undefined;
     for (0..3) |i| {
-        multipliers[i] = @intCast(2 * (splitmix64(c.seed +% golden * (i + 1)) % half) + 1);
+        multipliers[i] = @intCast(2 * (splitmix64(c.seed +% golden *% (i + 1)) % half) + 1);
     }
     // the PLE layer's eos is the text config's eos_token_id (model_layers.py), not the root generation one
     const eos: i64 = blk: {
