@@ -343,8 +343,18 @@ pub fn main(_: std.process.Init) !void {
         defer ref.deinit();
         for ([_]bool{ false, true }) |f32_out| try affine(&t, device, queue, &s, ref, f32_out);
     };
-    for ([_][2]usize{ .{ 192, 1024 }, .{ 256, 4096 } }) |shape| for ([_]u8{ 3, 5, 6 }) |bits| for ([_]usize{ 32, 64 }) |group| { // oQ4's 5 and 6
-        const s = try Synth.init(device, shape[0], shape[1], bits, group, 0x3716 + 100 * @as(usize, bits) + shape[0] + group);
+    for ([_][2]usize{
+        .{ 192, 1024 },
+        .{ 256, 4096 },
+    }) |shape| for ([_]u8{ 3, 5, 6 }) |bits| for ([_]usize{ 32, 64 }) |group| { // oQ4's 5 and 6
+        const s = try Synth.init(
+            device,
+            shape[0],
+            shape[1],
+            bits,
+            group,
+            0x3716 + 100 * @as(usize, bits) + shape[0] + group,
+        );
         defer s.deinit();
         const ref = try s.reference(0);
         defer ref.deinit();

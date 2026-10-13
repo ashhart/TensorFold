@@ -51,7 +51,10 @@ pub const Pool = struct {
     pub fn init(device: mtl.Device, n: usize, k: usize, bits: u8, experts: usize, min_copies: usize) !Pool {
         const w: affine.Width = .{ .bits = bits, .group = 64 };
         const one = affine.bytes(n, k, w) * experts;
-        const copies = if (experts > 1) min_copies else @max(min_copies, @min(64, (hot + one - 1) / one)); // a pool's picks walk its experts
+        const copies = if (experts > 1) min_copies else @max(
+            min_copies,
+            @min(64, (hot + one - 1) / one),
+        ); // a pool's picks walk its experts
         const p = Pool{ .q = try a.alloc(Affine, copies), .bufs = try a.alloc(mtl.Buffer, 3 * copies), .bytes = one };
         for (0..copies) |c| {
             const wb = affine.wBytes(n, k, w) * experts;
@@ -62,7 +65,15 @@ pub const Pool = struct {
                 p.bufs[3 * c + j] = try buf(device, sb);
                 @memset(p.bufs[3 * c + j].slice(u16, sb / 2), if (j == 1) 0x3c00 else 0xbc00); // 2^-7, -2^-7
             }
-            p.q[c] = .{ .w = .{ .buf = p.bufs[3 * c] }, .s = .{ .buf = p.bufs[3 * c + 1] }, .b = .{ .buf = p.bufs[3 * c + 2] }, .n = @intCast(n), .k = @intCast(k), .bits = bits, .group = 64 };
+            p.q[c] = .{
+                .w = .{ .buf = p.bufs[3 * c] },
+                .s = .{ .buf = p.bufs[3 * c + 1] },
+                .b = .{ .buf = p.bufs[3 * c + 2] },
+                .n = @intCast(n),
+                .k = @intCast(k),
+                .bits = bits,
+                .group = 64,
+            };
         }
         return p;
     }
@@ -79,7 +90,15 @@ pub const Pool = struct {
 };
 
 /// Activations and outputs every launch shares (wide enough for any class).
-pub const Io = struct { x: mtl.Buffer, y: mtl.Buffer, z: mtl.Buffer, ids: mtl.Buffer, uids: mtl.Buffer, umem: mtl.Buffer, ucount: mtl.Buffer };
+pub const Io = struct {
+    x: mtl.Buffer,
+    y: mtl.Buffer,
+    z: mtl.Buffer,
+    ids: mtl.Buffer,
+    uids: mtl.Buffer,
+    umem: mtl.Buffer,
+    ucount: mtl.Buffer,
+};
 
 pub const Bench = struct {
     device: mtl.Device,
@@ -159,7 +178,15 @@ fn unabsorb(e: mtl.ComputeEncoder, i: usize, k: *const kernels.Kernels, p: Pool,
     e.dispatchGroups(mtl.Size.of(1, 256 / 4, H), mtl.Size.of(32, 1, 1));
 }
 /// The routed experts and the shared one in one gather (moe.zig `both`, one row: two outputs a simdgroup).
-fn moeBoth(e: mtl.ComputeEncoder, i: usize, k: *const kernels.Kernels, gu: [2]Pool, down: Pool, sh: [2]Pool, io: Io) void {
+fn moeBoth(
+    e: mtl.ComputeEncoder,
+    i: usize,
+    k: *const kernels.Kernels,
+    gu: [2]Pool,
+    down: Pool,
+    sh: [2]Pool,
+    io: Io,
+) void {
     const g = gu[0].at(i);
     const u = gu[1].at(i);
     const s = sh[0].at(i);
@@ -251,7 +278,15 @@ const Kda = struct {
 };
 
 /// kda_rows (generated dots, or `.pre`: f_b, g_b made apart first) on launch i's state and gates.
-fn kdaStep(e: mtl.ComputeEncoder, i: usize, pipe: mtl.Pipeline, s: *const Kda, gates: [2]Pool, pre: ?*const wide.Pipes, io: Io) void {
+fn kdaStep(
+    e: mtl.ComputeEncoder,
+    i: usize,
+    pipe: mtl.Pipeline,
+    s: *const Kda,
+    gates: [2]Pool,
+    pre: ?*const wide.Pipes,
+    io: Io,
+) void {
     const f = gates[0].at(i);
     const g = gates[1].at(i);
     var fb = [3]Ref{ f.w, f.s, f.b };
@@ -268,7 +303,20 @@ fn kdaStep(e: mtl.ComputeEncoder, i: usize, pipe: mtl.Pipeline, s: *const Kda, g
     e.setPipeline(pipe);
     bind(e, 0, .{rf(s.p)});
     shape(e, 1, .{ 1, PS });
-    bind(e, 2, .{ rf(s.cs[c]), rf(s.cw), fb[0], fb[1], fb[2], gb[0], gb[1], gb[2], rf(s.a), rf(s.dtb), rf(s.st[c]), rf(s.onw) });
+    bind(e, 2, .{
+        rf(s.cs[c]),
+        rf(s.cw),
+        fb[0],
+        fb[1],
+        fb[2],
+        gb[0],
+        gb[1],
+        gb[2],
+        rf(s.a),
+        rf(s.dtb),
+        rf(s.st[c]),
+        rf(s.onw),
+    });
     e.setValue(@as(f32, -5.0), 14);
     e.setValue(@as(f32, 1e-5), 15);
     bind(e, 16, .{ rf(io.y), rf(s.st_out[c]), rf(s.cs[(c + 1) % 16]) });
@@ -276,15 +324,44 @@ fn kdaStep(e: mtl.ComputeEncoder, i: usize, pipe: mtl.Pipeline, s: *const Kda, g
 }
 
 /// oQ2's MoE: routed by pick and the shared expert, a launch for gate|up and one for down (wide.moe).
-pub fn moeTwo(e: mtl.ComputeEncoder, i: usize, p: *const wide.Pipes, gu: [2]Pool, down: Pool, sh: [2]Pool, io: Io) void {
-    const m: wide.Moe = .{ .gate = gu[0].at(i), .up = gu[1].at(i), .down = down.at(i), .sh_gate_up = sh[0].at(i), .sh_down = sh[1].at(i) };
+pub fn moeTwo(
+    e: mtl.ComputeEncoder,
+    i: usize,
+    p: *const wide.Pipes,
+    gu: [2]Pool,
+    down: Pool,
+    sh: [2]Pool,
+    io: Io,
+) void {
+    const m: wide.Moe = .{
+        .gate = gu[0].at(i),
+        .up = gu[1].at(i),
+        .down = down.at(i),
+        .sh_gate_up = sh[0].at(i),
+        .sh_down = sh[1].at(i),
+    };
     const z = rf(io.z);
-    wide.moe(p, e, m, E, TOPK, 10.0, .{ .x = rf(io.x), .ids = rf(io.ids).at((i % reps) * TOPK * 4), .act = z, .acts = z.at(TOPK * N * 2), .ye = rf(io.y), .ys = rf(io.y).at(TOPK * D * 2) }, 1);
+    wide.moe(p, e, m, E, TOPK, 10.0, .{
+        .x = rf(io.x),
+        .ids = rf(io.ids).at((i % reps) * TOPK * 4),
+        .act = z,
+        .acts = z.at(TOPK * N * 2),
+        .ye = rf(io.y),
+        .ys = rf(io.y).at(TOPK * D * 2),
+    }, 1);
 }
 
 fn routedRows(e: mtl.ComputeEncoder, i: usize, p: *const wide.Pipes, gu: [2]Pool, down: Pool, io: Io) void {
     const ids = rf(io.ids).at((i % reps) * TOPK * 4);
-    wide.byIds(p, e, .{ .w = gu[0].at(i), .up = gu[1].at(i), .experts = E, .repeat = TOPK, .lim = 10.0 }, rf(io.x), ids, rf(io.z), TOPK);
+    wide.byIds(
+        p,
+        e,
+        .{ .w = gu[0].at(i), .up = gu[1].at(i), .experts = E, .repeat = TOPK, .lim = 10.0 },
+        rf(io.x),
+        ids,
+        rf(io.z),
+        TOPK,
+    );
     wide.byIds(p, e, .{ .w = down.at(i), .experts = E, .repeat = 1 }, rf(io.z), ids, rf(io.y), TOPK);
 }
 
@@ -297,7 +374,14 @@ const Sheet = struct {
     fn add(s: *Sheet, name: []const u8, us: f64, count: f64, bytes: usize) void {
         s.rows[s.n] = .{ .name = name, .us = us, .count = count, .bytes = @floatFromInt(bytes) };
         s.n += 1;
-        std.debug.print("  {s:<26} {d:9.1} us  {d:7.1} MB  {d:6.1} GB/s  x{d:<5.0} {d:7.3} ms/token\n", .{ name, us, @as(f64, @floatFromInt(bytes)) / 1e6, @as(f64, @floatFromInt(bytes)) / us / 1e3, count, us * count / 1e3 });
+        std.debug.print("  {s:<26} {d:9.1} us  {d:7.1} MB  {d:6.1} GB/s  x{d:<5.0} {d:7.3} ms/token\n", .{
+            name,
+            us,
+            @as(f64, @floatFromInt(bytes)) / 1e6,
+            @as(f64, @floatFromInt(bytes)) / us / 1e3,
+            count,
+            us * count / 1e3,
+        });
     }
 
     fn total(s: *const Sheet, label: []const u8) void {
@@ -307,7 +391,10 @@ const Sheet = struct {
             ms += x.us * x.count / 1e3;
             gb += x.bytes * x.count / 1e9;
         }
-        std.debug.print("  {s}: {d:.3} ms a token over the products, {d:.3} GB read ({d:.0} GB/s)\n", .{ label, ms, gb, gb / ms * 1e3 });
+        std.debug.print(
+            "  {s}: {d:.3} ms a token over the products, {d:.3} GB read ({d:.0} GB/s)\n",
+            .{ label, ms, gb, gb / ms * 1e3 },
+        );
     }
 };
 
@@ -322,7 +409,15 @@ pub fn main() !void {
     defer k.deinit();
     try k.widen(a, device);
     const p = &k.wide.?;
-    const io = Io{ .x = try buf(device, 160 << 20), .y = try buf(device, 160 << 20), .z = try buf(device, 64 << 20), .ids = try buf(device, reps * TOPK * 4), .uids = try buf(device, reps * 128 * 4), .umem = try buf(device, 128 * 16 * 4), .ucount = try buf(device, 4) };
+    const io = Io{
+        .x = try buf(device, 160 << 20),
+        .y = try buf(device, 160 << 20),
+        .z = try buf(device, 64 << 20),
+        .ids = try buf(device, reps * TOPK * 4),
+        .uids = try buf(device, reps * 128 * 4),
+        .umem = try buf(device, 128 * 16 * 4),
+        .ucount = try buf(device, 4),
+    };
     @memset(io.x.slice(u16, 32 << 20), 0x3c00);
     for (0..reps) |i| for (0..TOPK) |j| { // launch i's picks: distinct experts, the pool walked in order
         io.ids.slice(i32, reps * TOPK)[i * TOPK + j] = @intCast((i * TOPK + j) % E);
@@ -332,8 +427,17 @@ pub fn main() !void {
     for (0..TOPK) |u| io.umem.slice(i32, 128 * 16)[u * 16] = @intCast(u); // unique id u: row 0's pick u
     io.ucount.slice(i32, 1)[0] = TOPK;
     var b = Bench{ .device = device, .queue = queue, .k = k, .io = io };
-    std.debug.print("GPU {s}, tensor units {}; one row, {d} launches a command buffer, median of {d}\n", .{ device.name(), device.tensorUnits(), reps, runs });
-    const shapes = [_]struct { name: []const u8, n: usize, k: usize, uni: ?mtl.Pipeline, count: [3]f64 }{ // counts: uniform, oQ2, oQ4
+    std.debug.print(
+        "GPU {s}, tensor units {}; one row, {d} launches a command buffer, median of {d}\n",
+        .{ device.name(), device.tensorUnits(), reps, runs },
+    );
+    const shapes = [_]struct {
+        name: []const u8,
+        n: usize,
+        k: usize,
+        uni: ?mtl.Pipeline,
+        count: [3]f64,
+    }{ // counts: uniform, oQ2, oQ4
         .{ .name = "kda in", .n = PS, .k = D, .uni = k.qmv_kda_in, .count = .{ 34, 34, 34 } },
         .{ .name = "kda f_b/g_b", .n = W, .k = KD, .uni = null, .count = .{ 0, 0, 0 } }, // inside the KDA step's time
         .{ .name = "kda out", .n = D, .k = W, .uni = k.qmv_kda_out, .count = .{ 34, 34, 34 } },
@@ -362,8 +466,16 @@ pub fn main() !void {
             const name = try std.fmt.bufPrint(&name_buf, "{s} q{d}", .{ s.name, bits });
             if (bits == 8) {
                 oq2.add(try a.dupe(u8, name), us, s.count[1], m.bytes);
-                oq4.add(try a.dupe(u8, name), us, s.count[2], m.bytes); // oQ4's 5/6-bit members priced at 8 (an upper bound)
-            } else std.debug.print("  {s:<26} {d:9.1} us  {d:7.1} MB  {d:6.1} GB/s\n", .{ name, us, @as(f64, @floatFromInt(m.bytes)) / 1e6, @as(f64, @floatFromInt(m.bytes)) / us / 1e3 });
+                oq4.add(
+                    try a.dupe(u8, name),
+                    us,
+                    s.count[2],
+                    m.bytes,
+                ); // oQ4's 5/6-bit members priced at 8 (an upper bound)
+            } else std.debug.print(
+                "  {s:<26} {d:9.1} us  {d:7.1} MB  {d:6.1} GB/s\n",
+                .{ name, us, @as(f64, @floatFromInt(m.bytes)) / 1e6, @as(f64, @floatFromInt(m.bytes)) / us / 1e3 },
+            );
         }
     }
     { // the KDA step: generated 4/4 dots (uniform), generated 8/8 dots, f_b and g_b made apart at 8 and 5 bits (.pre)
@@ -372,7 +484,12 @@ pub fn main() !void {
         const g8 = [2]Pool{ try Pool.init(device, W, KD, 8, 1, 16), try Pool.init(device, W, KD, 8, 1, 16) };
         const g5 = [2]Pool{ try Pool.init(device, W, KD, 5, 1, 16), try Pool.init(device, W, KD, 5, 1, 16) };
         const step_bytes = 2 * H * KD * KD * 4; // the state read and written
-        uni.add("kda step (dots 4/4)", try b.time(kdaStep, .{ k.kda_rows, &st, g4, null, io }), 34, step_bytes + g4[0].bytes * 2);
+        uni.add(
+            "kda step (dots 4/4)",
+            try b.time(kdaStep, .{ k.kda_rows, &st, g4, null, io }),
+            34,
+            step_bytes + g4[0].bytes * 2,
+        );
         const us_pre = try b.time(kdaStep, .{ p.kda_pre, &st, g8, p, io });
         std.debug.print("  {s:<26} {d:9.1} us\n", .{ "kda step (.pre q8)", us_pre });
         const us_pre5 = try b.time(kdaStep, .{ p.kda_pre, &st, g5, p, io });
@@ -382,7 +499,10 @@ pub fn main() !void {
         oq2.add("kda step (fused q8)", us_f8, 34, step_bytes + g8[0].bytes * 2);
         oq4.add("kda step (fused q8)", us_f8, 34, step_bytes + g8[0].bytes * 2);
         const f5 = wide.kdaGate(p, g5[0].at(0), g5[1].at(0)).fused;
-        std.debug.print("  {s:<26} {d:9.1} us\n", .{ "kda step (fused q5)", try b.time(kdaStep, .{ f5, &st, g5, null, io }) });
+        std.debug.print(
+            "  {s:<26} {d:9.1} us\n",
+            .{ "kda step (fused q5)", try b.time(kdaStep, .{ f5, &st, g5, null, io }) },
+        );
     }
     { // MLA absorb / unabsorb: kv_b's halves (uniform) or embed_q / unembed_out a head at 8 bits
         const kv = try Pool.init(device, H * 512, 512, 4, 1, 1);
@@ -417,13 +537,24 @@ pub fn main() !void {
         std.debug.print("  {s:<26} {d:9.1} us (oQ2: in the routed launches below)\n", .{ "moe shared q8", us_sh });
         oq4.add("moe shared q8", us_sh, 42, sh8[0].bytes + sh8[1].bytes);
         const alt = try b.time(moeTwo, .{ p, gu4, dn4, sh8, io }); // oQ4's routed 4/64 on glm_rows sums with the shared
-        std.debug.print("  {s:<26} {d:9.1} us (not taken: changes routed bits)\n", .{ "moe routed 4 + shared q8", alt });
+        std.debug.print(
+            "  {s:<26} {d:9.1} us (not taken: changes routed bits)\n",
+            .{ "moe routed 4 + shared q8", alt },
+        );
         const gu2 = [2]Pool{ try Pool.init(device, N, D, 2, E, 1), try Pool.init(device, N, D, 2, E, 1) };
         defer for (gu2) |x| x.deinit();
         const dn2 = try Pool.init(device, D, N, 2, E, 1);
         defer dn2.deinit();
-        std.debug.print("  {s:<26} {d:9.1} us (apart)\n", .{ "moe routed q2 (ids)", try b.time(routedRows, .{ p, gu2, dn2, io }) });
-        oq2.add("moe routed q2 + shared q8", try b.time(moeTwo, .{ p, gu2, dn2, sh8, io }), 42, 3 * affine.bytes(N, D, .{ .bits = 2, .group = 64 }) * TOPK + sh8[0].bytes + sh8[1].bytes);
+        std.debug.print(
+            "  {s:<26} {d:9.1} us (apart)\n",
+            .{ "moe routed q2 (ids)", try b.time(routedRows, .{ p, gu2, dn2, io }) },
+        );
+        oq2.add(
+            "moe routed q2 + shared q8",
+            try b.time(moeTwo, .{ p, gu2, dn2, sh8, io }),
+            42,
+            3 * affine.bytes(N, D, .{ .bits = 2, .group = 64 }) * TOPK + sh8[0].bytes + sh8[1].bytes,
+        );
         if (std.c.getenv("GLM_SPEED_CANDIDATES") != null) {
             const lib = try cand.candidateLib(device);
             defer lib.deinit();

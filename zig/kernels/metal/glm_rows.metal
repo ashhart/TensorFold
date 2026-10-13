@@ -124,10 +124,12 @@ template <int BITS, int SBITS, bool GLU, int RPS = 4, int KC = 0> // RPS columns
     const size_t kb = size_t(K) * BITS / 8;
     x = X + size_t(y / d.repeat) * K;
     float acc[1][RPS];
-    tf_rp_rows<RPS, 1, BITS, false>((const device uint8_t*)W + at * kb, S + at * kg, B + at * kg, x, K, d.group, lane, acc);
+    tf_rp_rows<RPS, 1, BITS, false>((const device uint8_t*)W + at * kb, S + at * kg, B + at * kg, x, K, d.group, lane,
+                                    acc);
     if (GLU) {
       float up[1][RPS];
-      tf_rp_rows<RPS, 1, BITS, false>((const device uint8_t*)W2 + at * kb, S2 + at * kg, B2 + at * kg, x, K, d.group, lane, up);
+      tf_rp_rows<RPS, 1, BITS, false>((const device uint8_t*)W2 + at * kb, S2 + at * kg, B2 + at * kg, x, K, d.group,
+                                      lane, up);
       if (lane == 0)
         for (int j = 0; j < cols; j++) out[j] = glm_rows_glu(acc[0][j], up[0][j], d.lim);
     } else if (lane == 0) {
@@ -233,8 +235,10 @@ GLM_ROWS_AT(6)
 GLM_ROWS_AT(8)
 
 #define GLM_MOE_AT(B)                                                                                                  \
-  template [[host_name("glm_moe_rows_q" #B "_s8")]] [[kernel]] decltype(glm_moe_rows<B, 8, false>) glm_moe_rows<B, 8, false>; \
-  template [[host_name("glm_moe_rows_glu_q" #B "_s8")]] [[kernel]] decltype(glm_moe_rows<B, 8, true>) glm_moe_rows<B, 8, true>;
+  template [[host_name("glm_moe_rows_q" #B "_s8")]] [[kernel]]                                                         \
+      decltype(glm_moe_rows<B, 8, false>) glm_moe_rows<B, 8, false>;                                                   \
+  template [[host_name("glm_moe_rows_glu_q" #B "_s8")]] [[kernel]]                                                     \
+      decltype(glm_moe_rows<B, 8, true>) glm_moe_rows<B, 8, true>;
 GLM_MOE_AT(2)
 GLM_MOE_AT(3)
 GLM_MOE_AT(4)

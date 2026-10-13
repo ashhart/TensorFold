@@ -290,7 +290,15 @@ fn partsCheck(g: *const Gpu, m: Mat, up: Mat, t: *Tally) !void {
     t.pairs += 2 * slots * r;
 }
 
-pub fn mmDense(e: mtl.ComputeEncoder, mm: affine_mm.Pipes, q: affine.Affine, x: Ref, sums: Ref, y: Ref, n_rows: u32) void {
+pub fn mmDense(
+    e: mtl.ComputeEncoder,
+    mm: affine_mm.Pipes,
+    q: affine.Affine,
+    x: Ref,
+    sums: Ref,
+    y: Ref,
+    n_rows: u32,
+) void {
     affine_mm.rowSums(e, mm, 64, x, sums, n_rows, q.k);
     affine_mm.dense(e, mm, x, sums, q, y, n_rows);
 }
@@ -396,7 +404,15 @@ fn splitCheck(g: *const Gpu, k: usize, ns: []const usize, bits: []const u8, t: *
     }
 }
 
-pub fn gluLaunch(e: mtl.ComputeEncoder, p: *const wide.Pipes, gu: affine.Affine, n: u32, x: Ref, out: Ref, m: u32) void {
+pub fn gluLaunch(
+    e: mtl.ComputeEncoder,
+    p: *const wide.Pipes,
+    gu: affine.Affine,
+    n: u32,
+    x: Ref,
+    out: Ref,
+    m: u32,
+) void {
     wide.glu(p, e, gu, n, x, out, m, 0.75);
 }
 
@@ -464,13 +480,38 @@ pub fn main() !void {
     try splitCheck(&g, 512, &.{ 48, 16, 8, 8 }, &.{ 6, 6, 5, 5 }, &split); // oQ4 layer 7's and the MTP's MLA x_proj
     std.debug.print("split stacks through one call == each member alone: {d} bit-equal values\n", .{split.pairs});
     var sm = Tally{};
-    const kda_mm = try batch.splitMmCheck(&g, 256, &.{ 128, 128, 128, 64, 64, 64 }, &.{ 5, 8, 5, 8, 8, 8 }, &sm); // oQ4 layer 6
-    const x_mm = try batch.splitMmCheck(&g, 512, &.{ 192, 64, 64, 32 }, &.{ 6, 6, 5, 5 }, &sm); // layer 7's x_proj: 32 on rows
-    std.debug.print("prompt split stacks == each member alone ({d} + {d} members on affine_mm): {d} bit-equal values\n", .{ kda_mm, x_mm, sm.pairs });
+    const kda_mm = try batch.splitMmCheck(
+        &g,
+        256,
+        &.{ 128, 128, 128, 64, 64, 64 },
+        &.{ 5, 8, 5, 8, 8, 8 },
+        &sm,
+    ); // oQ4 layer 6
+    const x_mm = try batch.splitMmCheck(
+        &g,
+        512,
+        &.{ 192, 64, 64, 32 },
+        &.{ 6, 6, 5, 5 },
+        &sm,
+    ); // layer 7's x_proj: 32 on rows
+    std.debug.print(
+        "prompt split stacks == each member alone ({d} + {d} members on affine_mm): {d} bit-equal values\n",
+        .{ kda_mm, x_mm, sm.pairs },
+    );
     all.pairs += sm.pairs;
     var hd = Tally{};
-    for ([_][2]usize{ .{ 512, 256 }, .{ 256, 512 } }) |s| try batch.headsCheck(&g, g.p.mm8, 8, s[0], s[1], &hd); // embed_q, unembed_out
-    std.debug.print("prompt embed_q / unembed_out q8: the heads in one affine_mm batch == each head alone: {d} bit-equal values\n", .{hd.pairs});
+    for ([_][2]usize{ .{ 512, 256 }, .{ 256, 512 } }) |s| try batch.headsCheck(
+        &g,
+        g.p.mm8,
+        8,
+        s[0],
+        s[1],
+        &hd,
+    ); // embed_q, unembed_out
+    std.debug.print(
+        "prompt embed_q / unembed_out q8: the heads in one affine_mm batch == each head alone: {d} bit-equal values\n",
+        .{hd.pairs},
+    );
     all.pairs += hd.pairs;
     all.pairs += split.pairs;
     all.pairs += try @import("glm_rows_kda.zig").check(&g.p, device, queue);

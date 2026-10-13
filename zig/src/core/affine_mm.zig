@@ -144,7 +144,19 @@ test "dense and gathered, each format, against exact sums on the host" {
     const R = counts[0] + counts[1] + counts[2];
     var prng = std.Random.DefaultPrng.init(7);
     const rnd = prng.random();
-    for ([_][2]usize{ .{ 4, 64 }, .{ 4, 32 }, .{ 8, 64 }, .{ 8, 32 }, .{ 2, 64 }, .{ 2, 32 }, .{ 3, 64 }, .{ 5, 64 }, .{ 6, 64 }, .{ 5, 32 }, .{ 6, 32 } }) |fmt| {
+    for ([_][2]usize{
+        .{ 4, 64 },
+        .{ 4, 32 },
+        .{ 8, 64 },
+        .{ 8, 32 },
+        .{ 2, 64 },
+        .{ 2, 32 },
+        .{ 3, 64 },
+        .{ 5, 64 },
+        .{ 6, 64 },
+        .{ 5, 32 },
+        .{ 6, 32 },
+    }) |fmt| {
         const bits = fmt[0];
         const group = fmt[1];
         const w_bytes = E * N * K * bits / 8;

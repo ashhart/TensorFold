@@ -161,25 +161,49 @@ pub fn fusedCheck(p: *const wide.Pipes, device: mtl.Device, queue: mtl.Queue) !u
     for (b.st.slice(f32, H * D * D)) |*v| v.* = (r.float(f32) - 0.5) * 0.1;
     for (b.onw.slice(f32, D)) |*v| v.* = 1 + (r.float(f32) - 0.5) * 0.1;
     var outs: [2]Outs = undefined;
-    for (&outs) |*o| o.* = .{ .y = try mk(device, R * W * 2), .st = try mk(device, H * D * D * 4), .cs = try mk(device, (TAPS - 1) * 3 * W * 2) };
+    for (&outs) |*o| o.* = .{
+        .y = try mk(device, R * W * 2),
+        .st = try mk(device, H * D * D * 4),
+        .cs = try mk(device, (TAPS - 1) * 3 * W * 2),
+    };
     defer for (outs) |o| for ([_]mtl.Buffer{ o.y, o.st, o.cs }) |x| x.deinit();
     var same: usize = 0;
     for (affine.row_bits, 0..) |bits, i| {
         var wq: [2]affine.Affine = undefined;
         var wb: [2][3]mtl.Buffer = undefined;
         for (&wq, &wb) |*q, *x| {
-            x.* = .{ try mk(device, W * D * @as(usize, bits) / 8), try mk(device, W * 2 * 2), try mk(device, W * 2 * 2) };
+            x.* = .{
+                try mk(device, W * D * @as(usize, bits) / 8),
+                try mk(device, W * 2 * 2),
+                try mk(device, W * 2 * 2),
+            };
             r.bytes(x[0].slice(u8, W * D * @as(usize, bits) / 8)); // every code
             for (x[1].slice(u16, W * 2)) |*v| v.* = toBf(r.float(f32) * 0.02 + 0.001);
             for (x[2].slice(u16, W * 2)) |*v| v.* = toBf((r.float(f32) - 0.5) * 0.1);
-            q.* = .{ .w = .{ .buf = x[0] }, .s = .{ .buf = x[1] }, .b = .{ .buf = x[2] }, .n = W, .k = D, .bits = bits, .group = 64 };
+            q.* = .{
+                .w = .{ .buf = x[0] },
+                .s = .{ .buf = x[1] },
+                .b = .{ .buf = x[2] },
+                .n = W,
+                .k = D,
+                .bits = bits,
+                .group = 64,
+            };
         }
         defer for (wb) |x| for (x) |y| y.deinit();
-        if (bits != 4 and wide.kdaGate(p, wq[0], wq[1]) != .fused) return error.NotFused; // 4/64 takes the generated dots
+        if (bits != 4 and wide.kdaGate(
+            p,
+            wq[0],
+            wq[1],
+        ) != .fused) return error.NotFused; // 4/64 takes the generated dots
         try submit(queue, products, .{ p, wq[0], wq[1], b.p, f, g });
         try submit(queue, step, .{ p.kda_pre, b, [3]mtl.Buffer{ f, f, f }, [3]mtl.Buffer{ g, g, g }, outs[0] });
         try submit(queue, step, .{ p.kda_fg[i], b, wb[0], wb[1], outs[1] });
-        for ([_][2][]const u8{ .{ std.mem.sliceAsBytes(outs[0].y.slice(u16, R * W)), std.mem.sliceAsBytes(outs[1].y.slice(u16, R * W)) }, .{ outs[0].st.slice(u8, H * D * D * 4), outs[1].st.slice(u8, H * D * D * 4) }, .{ outs[0].cs.slice(u8, (TAPS - 1) * 3 * W * 2), outs[1].cs.slice(u8, (TAPS - 1) * 3 * W * 2) } }) |pair| {
+        for ([_][2][]const u8{
+            .{ std.mem.sliceAsBytes(outs[0].y.slice(u16, R * W)), std.mem.sliceAsBytes(outs[1].y.slice(u16, R * W)) },
+            .{ outs[0].st.slice(u8, H * D * D * 4), outs[1].st.slice(u8, H * D * D * 4) },
+            .{ outs[0].cs.slice(u8, (TAPS - 1) * 3 * W * 2), outs[1].cs.slice(u8, (TAPS - 1) * 3 * W * 2) },
+        }) |pair| {
             if (!std.mem.eql(u8, pair[0], pair[1])) {
                 std.debug.print("kda_rows fused q{d} differs from .pre\n", .{bits});
                 return error.KdaFusedDiffers;
@@ -190,7 +214,11 @@ pub fn fusedCheck(p: *const wide.Pipes, device: mtl.Device, queue: mtl.Queue) !u
         for (outs[1].y.slice(u16, R * W)) |v| nonzero += @intFromBool(v & 0x7fff != 0);
         if (nonzero < R * W / 2) return error.KdaOutputsMostlyZero;
     }
-    std.debug.print("kda_rows with f_b, g_b made inside == made apart (.pre) at q2..q8 g64: {d} rows, outputs, state and conv window byte-equal ({d} bytes)\n", .{ R, same });
+    std.debug.print(
+        "kda_rows with f_b, g_b made inside == made apart (.pre) at q2..q8 g64: {d} rows, " ++
+            "outputs, state and conv window byte-equal ({d} bytes)\n",
+        .{ R, same },
+    );
     return same / 4;
 }
 

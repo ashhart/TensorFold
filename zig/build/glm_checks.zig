@@ -19,7 +19,14 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "kernel_sources", .module = sources } },
+        .imports = &.{
+            .{ .name = "metal", .module = metal },
+            .{ .name = "tensorfold", .module = engine },
+            .{ .name = "kernel_sources", .module = sources },
+        },
     }) });
-    b.step("tf-glm-rows-speed", "GLM-5.3-Flash one-row decode products at the checkpoints' shapes: GPU time a launch, GB/s, a token by class").dependOn(&b.addInstallArtifact(speed, .{}).step);
+    b.step(
+        "tf-glm-rows-speed",
+        "GLM-5.3-Flash one-row decode products at the checkpoints' shapes: GPU time a launch, GB/s, a token by class",
+    ).dependOn(&b.addInstallArtifact(speed, .{}).step);
 }

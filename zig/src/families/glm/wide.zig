@@ -39,7 +39,17 @@ pub const Pipes = struct {
     hash: u64, // every source compiled here
 
     pub fn deinit(p: *Pipes) void {
-        inline for (.{ &p.rows, &p.ids, &p.glu_ids, &p.sorted, &p.glu_sorted, &p.moe, &p.moe_glu, &p.embed, &p.kda_fg }) |set| for (set) |x| x.deinit();
+        inline for (.{
+            &p.rows,
+            &p.ids,
+            &p.glu_ids,
+            &p.sorted,
+            &p.glu_sorted,
+            &p.moe,
+            &p.moe_glu,
+            &p.embed,
+            &p.kda_fg,
+        }) |set| for (set) |x| x.deinit();
         p.bf16.deinit();
         p.kda_pre.deinit();
         p.zeros.deinit();
@@ -52,7 +62,10 @@ const pre_f = .{ "result = quad_dot<FB, PER>(x, wb, s, bb);", "result = qlid == 
 const pre_g = .{ "result = quad_dot<GB, PER>(x, wb, s, bb);", "result = qlid == 0u ? float(((device const bfloat*)GBW)[(size_t)r * W + row]) : 0.0f;" };
 
 /// kda_rows's f_b and g_b dots by quads of lanes, cut (from its block's start to the barrier after it) for `fg_block`.
-const fg_cut = .{ "    {\n      constexpr int PER = D / 4;", "\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    for (uint idx = tid; idx < 3u * (uint)D;" };
+const fg_cut = .{
+    "    {\n      constexpr int PER = D / 4;",
+    "\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n    for (uint idx = tid; idx < 3u * (uint)D;",
+};
 /// The head's f_b and g_b rows as glm_rows sums them (core tf_rp_rows, 4 rows a simdgroup, then bf16): .pre's values.
 const fg_block =
     \\    for (uint t0 = simdgroup_index_in_threadgroup * 4u; t0 < 2u * (uint)D; t0 += (uint)TY * 4u) {
@@ -60,8 +73,10 @@ const fg_block =
     \\      const uint d0 = f ? t0 : t0 - (uint)D;
     \\      const size_t row = (size_t)h * D + d0;
     \\      float acc[1][4];
-    \\      if (f) tf_rp_rows<4, 1, FB, false>((const device uint8_t*)FBW + row * (D * FB / 8), FBS + row * (D / 64), FBB + row * (D / 64), prow + FA, D, 64, lane, acc);
-    \\      else tf_rp_rows<4, 1, GB, false>((const device uint8_t*)GBW + row * (D * GB / 8), GBS + row * (D / 64), GBB + row * (D / 64), prow + GA, D, 64, lane, acc);
+    \\      if (f) tf_rp_rows<4, 1, FB, false>((const device uint8_t*)FBW + row * (D * FB / 8), FBS + row * (D / 64),
+    \\                                         FBB + row * (D / 64), prow + FA, D, 64, lane, acc);
+    \\      else tf_rp_rows<4, 1, GB, false>((const device uint8_t*)GBW + row * (D * GB / 8), GBS + row * (D / 64),
+    \\                                       GBB + row * (D / 64), prow + GA, D, 64, lane, acc);
     \\      if (lane == 0u)
     \\        for (int j = 0; j < 4; j++) (f ? sa : sgate)[d0 + j] = float(bfloat(acc[0][j]));
     \\    }
@@ -146,7 +161,11 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
     const a = std.mem.indexOf(u8, kda, fg_cut[0]) orelse return error.KernelCompile;
     const z = a + (std.mem.indexOf(u8, kda[a..], fg_cut[1]) orelse return error.KernelCompile);
     const own = z + (std.mem.lastIndexOf(u8, kda[z..], "\ntemplate [[host_name(") orelse return error.KernelCompile);
-    const fg_src = try std.mem.concat(gpa, u8, &.{ rp_sums, kda[0..a], fg_block, kda[z..own], fg_instances }); // not its own
+    const fg_src = try std.mem.concat(
+        gpa,
+        u8,
+        &.{ rp_sums, kda[0..a], fg_block, kda[z..own], fg_instances },
+    ); // not its own
     defer gpa.free(fg_src);
     h.update(fg_src);
     try lib(made, device, fg_src, &fg_names, &p.kda_fg);
@@ -172,7 +191,11 @@ const fg_names = blk: {
 };
 const fg_instances = blk: {
     var s: []const u8 = "";
-    for (bit_widths, fg_names) |b, name| s = s ++ kernels.instance("kda_rows", std.fmt.comptimePrint("64, 128, 4, 32, {d}, {d}", .{ b, b }), name);
+    for (bit_widths, fg_names) |b, name| s = s ++ kernels.instance(
+        "kda_rows",
+        std.fmt.comptimePrint("64, 128, 4, 32, {d}, {d}", .{ b, b }),
+        name,
+    );
     break :blk s;
 };
 
@@ -224,7 +247,15 @@ pub fn headsBatch(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, h: u32, io:
     var head = q;
     head.n = ny;
     affine_mm.rowSumsAt(e, pipes, 64, io.in, sums, io.rows, h * kx, io.ldx); // a head's sums one row apart
-    affine_mm.denseBatch(e, pipes, io.in, sums, head, io.out, io.rows, h, .{ .x_row = @intCast(io.ldx), .y_row = @intCast(io.ldo), .sums_row = @intCast(h), .x_batch = @intCast(kx), .y_batch = @intCast(ny), .sums_batch = 1, .w_batch = @intCast(ny) });
+    affine_mm.denseBatch(e, pipes, io.in, sums, head, io.out, io.rows, h, .{
+        .x_row = @intCast(io.ldx),
+        .y_row = @intCast(io.ldo),
+        .sums_row = @intCast(h),
+        .x_batch = @intCast(kx),
+        .y_batch = @intCast(ny),
+        .sums_batch = 1,
+        .w_batch = @intCast(ny),
+    });
 }
 
 /// x [rows, k] through bf16 W [n, k].
@@ -276,18 +307,66 @@ pub fn moeOne(m: Moe) bool {
 }
 
 /// byIds's GLU and down for the slots, glu and dense for the shared expert's rows: a launch each step, the same bits.
-pub fn moe(p: *const Pipes, e: mtl.ComputeEncoder, m: Moe, experts: u32, topk: u32, lim: f32, io: MoeIo, rows: u32) void {
+pub fn moe(
+    p: *const Pipes,
+    e: mtl.ComputeEncoder,
+    m: Moe,
+    experts: u32,
+    topk: u32,
+    lim: f32,
+    io: MoeIo,
+    rows: u32,
+) void {
     const slots = rows * topk;
     const g = m.sh_gate_up;
-    const steps = [2]struct { pipe: mtl.Pipeline, w: Affine, up: ?Affine, sh: Affine, x: Ref, x2: Ref, out: Ref, out2: Ref, repeat: u32 }{
-        .{ .pipe = p.moe_glu[at(m.gate.bits)], .w = m.gate, .up = m.up, .sh = g, .x = io.x, .x2 = io.x, .out = io.act, .out2 = io.acts, .repeat = topk },
-        .{ .pipe = p.moe[at(m.down.bits)], .w = m.down, .up = null, .sh = m.sh_down, .x = io.act, .x2 = io.acts, .out = io.ye, .out2 = io.ys, .repeat = 1 },
+    const steps = [2]struct {
+        pipe: mtl.Pipeline,
+        w: Affine,
+        up: ?Affine,
+        sh: Affine,
+        x: Ref,
+        x2: Ref,
+        out: Ref,
+        out2: Ref,
+        repeat: u32,
+    }{
+        .{
+            .pipe = p.moe_glu[at(m.gate.bits)],
+            .w = m.gate,
+            .up = m.up,
+            .sh = g,
+            .x = io.x,
+            .x2 = io.x,
+            .out = io.act,
+            .out2 = io.acts,
+            .repeat = topk,
+        },
+        .{
+            .pipe = p.moe[at(m.down.bits)],
+            .w = m.down,
+            .up = null,
+            .sh = m.sh_down,
+            .x = io.act,
+            .x2 = io.acts,
+            .out = io.ye,
+            .out2 = io.ys,
+            .repeat = 1,
+        },
     };
     for (steps) |s| {
         const u = s.up orelse s.w;
         e.setPipeline(s.pipe);
         bind(e, 0, .{ s.x, s.w.w, s.w.s, s.w.b });
-        e.setValue(PickDims{ .k = @intCast(s.w.k), .n = @intCast(s.w.n), .group = 64, .slots = @intCast(slots), .repeat = @intCast(s.repeat), .experts = @intCast(experts), .ldo = @intCast(s.w.n), .lim = lim }, 4);
+        e.setValue(PickDims{
+            .k = @intCast(s.w.k),
+            .n = @intCast(s.w.n),
+            .group = 64,
+            .slots = @intCast(slots),
+            .repeat = @intCast(s.repeat),
+            .experts = @intCast(experts),
+            .ldo = @intCast(s.w.n),
+            .lim = lim,
+        }, 4);
         bind(e, 5, .{ s.out, io.ids, u.w, u.s, u.b, s.x2, s.sh.w, s.sh.s, s.sh.b, s.out2 });
         e.dispatchGroups(mtl.Size.of((s.w.n + 7) / 8, slots + rows, 1), mtl.Size.of(64, 1, 1));
     }
@@ -332,7 +411,17 @@ pub fn denseMm(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, io: Io, sums: 
         };
         if (!summed) affine_mm.rowSumsAt(e, pipes, 64, io.in, sums, io.rows, q.k, io.ldx); // every member's: one k, g64
         summed = true;
-        affine_mm.denseBatch(e, pipes, io.in, sums, one, part.out, io.rows, 1, .{ .x_row = @intCast(io.ldx), .y_row = @intCast(io.ldo) });
+        affine_mm.denseBatch(
+            e,
+            pipes,
+            io.in,
+            sums,
+            one,
+            part.out,
+            io.rows,
+            1,
+            .{ .x_row = @intCast(io.ldx), .y_row = @intCast(io.ldo) },
+        );
     }
 }
 
@@ -350,7 +439,8 @@ pub const KdaGate = union(enum) { generated, fused: mtl.Pipeline, pre: mtl.Pipel
 
 pub fn kdaGate(p: ?*const Pipes, f: Affine, g: Affine) KdaGate {
     if (native(f) and native(g)) return .generated;
-    if (f.more == 0 and g.more == 0 and f.group == 64 and g.group == 64 and f.bits == g.bits) return .{ .fused = p.?.kda_fg[at(f.bits)] };
+    if (f.more == 0 and g.more == 0 and f.group == 64 and g.group == 64 and f.bits == g.bits)
+        return .{ .fused = p.?.kda_fg[at(f.bits)] };
     return .{ .pre = p.?.kda_pre };
 }
 
@@ -413,7 +503,11 @@ test "f_b and g_b of one width (g64) take glm_rows's dots inside kda_rows, two w
     var g32 = q;
     g32.group = 32;
     const p: Pipes = undefined;
-    for ([_][2]Affine{ .{ four, q }, .{ q, four }, .{ g32, g32 } }) |fg| try std.testing.expect(kdaGate(&p, fg[0], fg[1]) == .pre);
+    for ([_][2]Affine{
+        .{ four, q },
+        .{ q, four },
+        .{ g32, g32 },
+    }) |fg| try std.testing.expect(kdaGate(&p, fg[0], fg[1]) == .pre);
     var five = q;
     five.bits = 5;
     for ([_]Affine{ q, five }) |x| try std.testing.expect(kdaGate(&p, x, x) == .fused);
