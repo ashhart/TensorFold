@@ -40,6 +40,8 @@ pub const Lane = struct {
     fill: ?Fill = null,
     /// The last verify's slot and rows: kept whole unless keep drops some first.
     pending: ?struct { window: usize, rows: usize } = null,
+    /// A structured reply's prompt row, kept for its masked first draw (null for the others).
+    first_row: ?[]u16 = null,
 };
 
 /// The engine this thread's HIP calls go to.
@@ -155,6 +157,8 @@ pub const Hip = struct {
             .prefill = prefillFn,
             .prefill_step = prefillStepFn,
             .first = firstFn,
+            .first_masked = firstMaskedFn,
+            .held = heldTokensFn,
             .queue = queueFn,
             .read = readFn,
             .verify = verifyFn,
@@ -195,6 +199,7 @@ pub const Hip = struct {
         h.e.drain();
         l.caches.deinit(h.gpa);
         l.hidden.free();
+        if (l.first_row) |row| h.gpa.free(row);
         h.gpa.destroy(l);
     }
 
@@ -339,7 +344,10 @@ pub const Hip = struct {
         const to = prefix.chunkEnd(f.at, limit, if (h.decoding()) h.e.o.policy.fill_rows else prefix.chunk);
         if (h.link != null) try h.send(&.{ @backingInt(worker.Op.fill), lane.id, @intCast(to) });
         if (to == prompt.len) {
-            _ = h.take(try h.e.prefill(&lane.caches, prompt, f.at, lane.hidden, .{ .sampling = sampling(s), .position = prompt.len }, null));
+            // a structured reply keeps the prompt's last row: its first token is drawn again under the grammar
+            if (s.grammar != null and lane.first_row == null) lane.first_row = try h.gpa.alloc(u16, h.e.drawer.vocab);
+            const keep = if (s.grammar != null) lane.first_row else null;
+            _ = h.take(try h.e.prefill(&lane.caches, prompt, f.at, lane.hidden, .{ .sampling = sampling(s), .position = prompt.len, .keep = keep }, null));
             lane.fill = null;
             return true;
         }
@@ -360,6 +368,24 @@ pub const Hip = struct {
             return error.PositionMismatch;
         }
         return h.next - 1;
+    }
+
+    /// The first token among the grammar's allowed ones, from the prompt row the pass kept.
+    fn firstMaskedFn(ptr: *anyopaque, s: *lanes.Stream, position: u64, bits: []const u32) anyerror!u64 {
+        const h = of(ptr);
+        if (position != s.prompt_len) return error.PositionMismatch;
+        const lane = h.lanes.get(s) orelse return error.UnknownStream;
+        const kept = lane.first_row orelse return error.StructuresUnsupported;
+        const row = try h.gpa.dupe(u16, kept);
+        defer h.gpa.free(row);
+        return h.take(try h.e.drawer.drawHost(row, .{ .sampling = sampling(s), .position = position, .mask = bits }));
+    }
+
+    /// The drafts the head holds for the stream, as host tokens (a grammar walks them).
+    fn heldTokensFn(ptr: *anyopaque, s: *lanes.Stream, out: []u32) anyerror!void {
+        const lane = of(ptr).lanes.get(s) orelse return error.UnknownStream;
+        if (out.len > lane.held_n) return error.NoHeldDrafts;
+        @memcpy(out, lane.held[0..out.len]);
     }
 
     fn queueFn(ptr: *anyopaque, s: *lanes.Stream, feed: be.Feed, position: u64) anyerror!u64 {
@@ -412,8 +438,10 @@ pub const Hip = struct {
         var total: usize = 0;
         for (windows) |w| {
             if (total + w.positions.len > reqs.len) return error.WindowTooWide;
-            for (w.positions) |p| {
-                reqs[total] = .{ .sampling = sampling(w.stream), .position = p };
+            // structured output: each row's allowed bits, rows x words
+            const words = if (w.masks.len > 0) w.masks.len / w.positions.len else 0;
+            for (w.positions, 0..) |p, r| {
+                reqs[total] = .{ .sampling = sampling(w.stream), .position = p, .mask = w.masks[r * words ..][0..words] };
                 total += 1;
             }
         }

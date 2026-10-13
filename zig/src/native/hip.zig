@@ -183,7 +183,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, loaded.backend, h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = @intCast(loaded.streams), .context_window = @intCast(r.options.window), .prefill_step = F.prefill_step, .policy = h.policy_line, .startup = loaded.startup });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = @intCast(loaded.streams), .context_window = @intCast(r.options.window), .prefill_step = F.prefill_step, .policy = h.policy_line, .startup = loaded.startup, .structures = true });
     h.host.memory = .{ .read = readMemory };
     try h.host.start();
     served = true;

@@ -8,8 +8,20 @@ const sample = @import("sample.zig");
 /// Most candidates a row downloads; wider requests (top_k 0, or past this) download the row and draw on the host.
 pub const max_candidates = 512;
 
-/// One row's draw: its sampling (null is greedy) and the position that keys it.
-pub const Request = struct { sampling: ?lanes.Sampling, position: u64 };
+/// One row's draw: its sampling (null is greedy), the position that keys it, the grammar's allowed bits, a host copy.
+pub const Request = struct {
+    sampling: ?lanes.Sampling,
+    position: u64,
+    /// Structured output: only tokens whose bit is set (empty: every token).
+    mask: []const u32 = &.{},
+    /// The row's logits copied here (the prompt's last row, kept for a masked first draw).
+    keep: ?[]u16 = null,
+};
+
+/// Whether a row is drawn on the host from the whole row.
+fn whole(r: Request) bool {
+    return r.mask.len > 0 or r.keep != null;
+}
 
 fn greedy(s: ?lanes.Sampling) bool {
     return if (s) |x| x.temperature <= 0.0 else true;
@@ -79,6 +91,7 @@ pub const Drawer = struct {
         var any_greedy = false;
         for (reqs, ks) |r, *k| {
             k.* = 0;
+            if (whole(r)) continue;
             if (greedy(r.sampling)) {
                 any_greedy = true;
             } else {
@@ -100,6 +113,10 @@ pub const Drawer = struct {
         try stream.synchronize();
         const arg = view(i32, host[at.arg..][0 .. rows * 4]);
         for (reqs, 0..) |r, i| {
+            if (whole(r)) {
+                out[i] = try w.drawWhole(stream, logits, i, r);
+                continue;
+            }
             if (greedy(r.sampling)) {
                 out[i] = @intCast(arg[i]);
                 continue;
@@ -123,5 +140,21 @@ pub const Drawer = struct {
             }
             out[i] = @intCast(try lanes.sampling.choose(w.gpa, values[0..n], wide[0..n], r.position, s));
         }
+    }
+
+    /// Row `i` downloaded whole: kept if asked, masked if asked, then drawn as an unmasked whole row is.
+    fn drawWhole(w: *Drawer, stream: hip.Stream, logits: hip.ops.Tensor, i: usize, r: Request) !u32 {
+        const bytes = w.vocab * 2;
+        try hip.runtime.check(w.d.api.hipMemcpyDtoHAsync(w.row.bytes.ptr, @ptrFromInt(logits.ptr + i * bytes), bytes, stream.handle));
+        try stream.synchronize();
+        const row = w.row.slice(u16)[0..w.vocab];
+        if (r.keep) |k| @memcpy(k, row);
+        return w.drawHost(row, r);
+    }
+
+    /// A host row's token per `r`: its mask applied in place, then greedy or the keyed draw.
+    pub fn drawHost(w: *const Drawer, row: []u16, r: Request) !u32 {
+        if (r.mask.len > 0) sample.mask(row, w.dtype, r.mask);
+        return sample.draw(w.gpa, row, w.dtype, r.sampling, r.position);
     }
 };
