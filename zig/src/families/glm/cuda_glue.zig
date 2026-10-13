@@ -108,14 +108,17 @@ fn cdiv(a: usize, b: usize) u32 {
     return @intCast((a + b - 1) / b);
 }
 
-/// glue.swiglu: [gate | up] -> bf16(bf16(silu(min(g, L))) * clip(u, -L, L)), 64-sums in `xs`; block gcd(512, w).
+/// swiglu's column block: 512 where it divides the width, else 64 (TP=3's 704 and 640, the latter 128 in glue.py).
+fn swigluBlock(w: usize) !usize {
+    if (w % 512 == 0) return 512;
+    if (w % 64 == 0) return 64;
+    return error.NoSwigluBlock;
+}
+
+/// glue.swiglu: [gate | up] -> bf16(bf16(silu(min(g, L))) * clip(u, -L, L)), 64-sums in `xs`.
 pub fn swiglu(set: Set, stream: cuda.Stream, gu: u64, out: u64, xs: u64, limit: f32, rows: usize, w: usize) !void {
-    const block = std.math.gcd(512, w);
-    const f, const threads: u32 = switch (block) {
-        512 => .{ set.glue.swiglu_512, 128 },
-        64 => .{ set.glue.swiglu_64, 64 },
-        else => return error.NoSwigluBlock,
-    };
+    const block = try swigluBlock(w);
+    const f, const threads: u32 = if (block == 512) .{ set.glue.swiglu_512, 128 } else .{ set.glue.swiglu_64, 64 };
     var a: cuda.Args = .{};
     inline for (.{ gu, out, xs, limit, i64of(w) }) |v| a.add(v);
     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(w / block) }, .block = .{ .x = threads } }, stream, &a);
@@ -241,8 +244,11 @@ test "the norm's block is the next power of two of the width" {
 }
 
 test "the wrappers' shape rules as glue.py's" {
-    try std.testing.expectEqual(@as(usize, 512), std.math.gcd(512, 6144)); // swiglu's block at the dense TP=2 width
-    try std.testing.expectEqual(@as(usize, 64), std.math.gcd(512, 704)); // the TP=3 shared expert's width
+    try std.testing.expectEqual(@as(usize, 512), try swigluBlock(6144)); // swiglu's block at the dense TP=2 width
+    try std.testing.expectEqual(@as(usize, 512), try swigluBlock(1024)); // a routed expert's rows at TP=2
+    try std.testing.expectEqual(@as(usize, 64), try swigluBlock(704)); // TP=3's first two ranks
+    try std.testing.expectEqual(@as(usize, 64), try swigluBlock(640)); // TP=3's last rank
+    try std.testing.expectError(error.NoSwigluBlock, swigluBlock(96));
     try std.testing.expectEqual(@as(i64, 512), pow2(288 + 1)); // _topk's BLOCK for 288 experts
     try std.testing.expectEqual(@as(i64, 16), pow2(8 + 1)); // its SLOTP for top-8 and the shared slot
 }
