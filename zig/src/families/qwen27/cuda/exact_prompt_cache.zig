@@ -175,6 +175,7 @@ pub const Cache = struct {
     pending: ?*Snapshot = null,
     owner: ?*lanes.Stream = null,
     stats: Stats = .{},
+    post_first: @import("exact_post_first.zig").Control = .{},
 
     pub fn init(gpa: std.mem.Allocator, on: bool) Cache {
         return .{ .gpa = gpa, .enabled = on };
@@ -232,6 +233,35 @@ pub const Cache = struct {
         };
         cache.stats.misses += 1;
         return false;
+    }
+
+    /// Serving may reserve the exact same snapshot until the first token has been handed off.
+    pub fn captureBeforeFirst(cache: *Cache, s: *lanes.Stream, seq: *st.Seq, ctx: ?*dr.Context, ops: kern.Ops, g: c.Geometry) !void {
+        if (!cache.post_first.enabled) return cache.capture(s, seq, ctx, ops, g);
+        @import("exact_post_first.zig").reserve(cache, s, seq, ctx, Snapshot.bytesWithLogits(g, s.prompt().len, s.drafts, cache.logits_enabled));
+    }
+
+    /// A successful save remains pending until the original clean-completion promotion fence.
+    pub fn finishAfterFirst(cache: *Cache, s: *lanes.Stream, seq: *st.Seq, ctx: ?*dr.Context, ops: kern.Ops, g: c.Geometry, raw: u64) !void {
+        const reserved = cache.post_first.take(s) orelse return;
+        errdefer cache.post_first.failures += 1;
+        if (s.isCancelled()) return error.Cancelled;
+        if (s.finished or cache.failed) {
+            cache.post_first.skips += 1;
+            return;
+        }
+        if (reserved.seq != seq or reserved.ctx != ctx or reserved.tokens != seq.pos or
+            reserved.tokens != s.prompt().len or s.emitted().len != 1 or s.pending == null)
+            return error.InvalidPostFirstCapture;
+        if (ctx) |dc| if (dc.cur != reserved.cur or dc.len != reserved.tokens or dc.end != reserved.tokens) {
+            return error.InvalidPostFirstContext;
+        };
+        try cache.capture(s, seq, ctx, ops, g);
+        if (cache.owner == s and cache.pending != null) {
+            _ = try cache.captureFirstLogits(s, seq, ops, raw);
+            cache.post_first.saves += 1;
+        } else cache.post_first.skips += 1;
+        if (s.isCancelled()) return error.Cancelled;
     }
 
     pub fn capture(cache: *Cache, s: *lanes.Stream, seq: *st.Seq, ctx: ?*dr.Context, ops: kern.Ops, g: c.Geometry) !void {
@@ -292,6 +322,7 @@ pub const Cache = struct {
     }
 
     pub fn release(cache: *Cache, s: *lanes.Stream, settled: bool, ops: kern.Ops) !void {
+        cache.post_first.forget(s);
         if (!settled) {
             cache.failed = true;
             if (cache.pending != null) {
@@ -319,6 +350,7 @@ pub const Cache = struct {
     }
 
     pub fn abandon(cache: *Cache, s: *lanes.Stream, ops: kern.Ops) !void {
+        cache.post_first.forget(s);
         if (cache.owner == s) {
             try cache.freePending(ops);
             cache.stats.purges += 1;
@@ -326,6 +358,8 @@ pub const Cache = struct {
     }
 
     pub fn deinit(cache: *Cache, ops: kern.Ops) !void {
+        cache.post_first.reserved = null;
+        if (cache.post_first.enabled) std.debug.print("PR608_POST_FIRST_CAPTURE {f}\n", .{std.json.fmt(.{ .reservations = cache.post_first.reservations, .saves = cache.post_first.saves, .skips = cache.post_first.skips, .failures = cache.post_first.failures }, .{})});
         if (cache.enabled) std.debug.print("PR608_EXACT_CACHE {{\"hits\":{d},\"misses\":{d},\"captures\":{d},\"promotions\":{d},\"purges\":{d},\"evictions\":{d},\"refusals\":{d},\"active_bytes\":{d},\"pending_bytes\":{d},\"failed\":{}}}\n", .{ cache.stats.hits, cache.stats.misses, cache.stats.captures, cache.stats.promotions, cache.stats.purges, cache.stats.evictions, cache.stats.refusals, cache.stats.active_bytes, cache.stats.pending_bytes, cache.failed });
         if (cache.logits_enabled) std.debug.print("PR608_EXACT_CACHE_LOGITS {f}\n", .{std.json.fmt(.{
             .captures = cache.stats.first_logits_captures,

@@ -30,6 +30,12 @@ pub fn vtable(comptime H: type, v: be.Backend.VTable) be.Backend.VTable {
                 return x.inner.vtable.first(x.inner.ptr, s, position);
             }
         }.f,
+        .after_first = if (v.after_first != null) struct {
+            fn f(p: *anyopaque, s: *lanes.Stream) anyerror!void {
+                const x = H.bind(p);
+                return x.inner.vtable.after_first.?(x.inner.ptr, s);
+            }
+        }.f else null,
         .queue = struct {
             fn f(p: *anyopaque, s: *lanes.Stream, feed: be.Feed, position: u64) anyerror!u64 {
                 const x = H.bind(p);
@@ -142,4 +148,37 @@ test "every entry the family's backend gives is forwarded, and none it leaves ou
         }
     }
     try std.testing.expect(vtable(H, fake.stepped().vtable.*).prefill_step != null);
+}
+
+test "post-first forwarding binds the host and preserves optional absence and errors" {
+    const Calls = struct {
+        count: usize = 0,
+        seen: ?*lanes.Stream = null,
+        fn after(p: *anyopaque, s: *lanes.Stream) !void {
+            const counter: *@This() = @ptrCast(@alignCast(p));
+            counter.count += 1;
+            counter.seen = s;
+            if (counter.count == 2) return error.InjectedPostFirst;
+        }
+    };
+    const H = struct {
+        inner: be.Backend,
+        pub fn bind(p: *anyopaque) *@This() {
+            return @ptrCast(@alignCast(p));
+        }
+    };
+    var fake: lanes.fake.Fake = .{ .gpa = std.testing.allocator };
+    defer fake.deinit();
+    var family_table = fake.backend().vtable.*;
+    try std.testing.expect(vtable(H, family_table).after_first == null);
+    family_table.after_first = Calls.after;
+    var calls: Calls = .{};
+    var host: H = .{ .inner = .{ .ptr = &calls, .vtable = &family_table } };
+    var stream = try lanes.Stream.init(std.testing.allocator, .{ .id = "forwarded", .prompt = &.{1}, .max_new = 1 });
+    defer stream.deinit(std.testing.allocator);
+    const forwarded = vtable(H, family_table).after_first orelse return error.MissingForwardedCallback;
+    try forwarded(&host, &stream);
+    try std.testing.expect(calls.count == 1 and calls.seen == &stream);
+    try std.testing.expectError(error.InjectedPostFirst, forwarded(&host, &stream));
+    try std.testing.expectEqual(@as(usize, 2), calls.count);
 }

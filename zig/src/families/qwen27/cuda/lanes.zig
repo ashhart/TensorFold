@@ -143,8 +143,15 @@ pub const Cuda = struct {
         x.cost_count = n;
     }
 
+    const ordinary_vtable: be.Backend.VTable = .{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .probabilities = probabilities, .tree = tree, .release = release, .prefill_many = prefillMany };
+    const post_first_vtable: be.Backend.VTable = blk: {
+        var table = ordinary_vtable;
+        table.after_first = @import("exact_post_first.zig").after;
+        break :blk table;
+    };
+
     pub fn backend(x: *Cuda) be.Backend {
-        return .{ .ptr = x, .first_before_draft = true, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .probabilities = probabilities, .tree = tree, .release = release, .prefill_many = prefillMany } };
+        return .{ .ptr = x, .first_before_draft = true, .vtable = if (x.exact_cache.post_first.enabled) &post_first_vtable else &ordinary_vtable };
     }
 
     /// The stream's drafting (its DFlash2 context and copy index), made on first use.
@@ -242,11 +249,11 @@ pub const Cuda = struct {
         if (x.drafter) |d| if (s.drafts) {
             const ds = try x.draftingOf(s);
             try lone.prefillFrom(x.e, seq, &ds.ctx, d, s.prompt(), from, media, marks);
-            try x.exact_cache.capture(s, seq, &ds.ctx, x.e.ops(), x.e.w.g);
+            try x.exact_cache.captureBeforeFirst(s, seq, &ds.ctx, x.e.ops(), x.e.w.g);
             return draft_reuse.initialized(x, s);
         };
         try x.e.prefillFrom(seq, s.prompt(), from, media, marks);
-        try x.exact_cache.capture(s, seq, null, x.e.ops(), x.e.w.g);
+        try x.exact_cache.captureBeforeFirst(s, seq, null, x.e.ops(), x.e.w.g);
     }
 
     /// The stream's kept state restored on its sequence: where its prompt pass starts (0: none, off the grid, failed).
@@ -331,7 +338,7 @@ pub const Cuda = struct {
         const d = x.drafter orelse {
             try f.chunks(pieces);
             if (x.exact_cache.enabled and !x.e.kv8) for (pieces, which) |pc, i| {
-                try x.exact_cache.capture(streams[i], pc.seq, null, x.e.ops(), x.e.w.g);
+                try x.exact_cache.captureBeforeFirst(streams[i], pc.seq, null, x.e.ops(), x.e.w.g);
             };
             return;
         };
@@ -370,7 +377,7 @@ pub const Cuda = struct {
         for (pieces, which) |pc, i| {
             const s = streams[i];
             const ctx = if (s.drafts) &(try x.draftingOf(s)).ctx else null;
-            if (!x.e.kv8) try x.exact_cache.capture(s, pc.seq, ctx, x.e.ops(), x.e.w.g);
+            if (!x.e.kv8) try x.exact_cache.captureBeforeFirst(s, pc.seq, ctx, x.e.ops(), x.e.w.g);
             if (ctx != null) try draft_reuse.initialized(x, s);
         }
     }
@@ -597,4 +604,5 @@ pub fn draw(gpa: std.mem.Allocator, logits: []const u16, settings: ?lanes.Sampli
 test {
     _ = @import("exact_cache_test.zig");
     _ = @import("exact_eligible.zig");
+    _ = @import("backend_vtable_test.zig");
 }

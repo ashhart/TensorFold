@@ -46,6 +46,10 @@ pub fn opened(e: *Engine, s: *Stream, hook: ?be.Committed) !void {
         e.release(s);
         return error.Cancelled;
     }
+    if (e.backend.vtable.after_first) |after| after(e.backend.ptr, s) catch |err| {
+        if (err == error.Cancelled) e.release(s);
+        return err;
+    };
     if (depth) |d| {
         e.backend.draft(&.{.{ .stream = s, .follow = &.{}, .first = .{ .value = value }, .rows = null, .start = s.prompt_len, .position = position + 1, .depth = d }}) catch |err| {
             if (err == error.Cancelled) e.release(s);

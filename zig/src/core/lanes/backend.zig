@@ -75,6 +75,8 @@ pub const Backend = struct {
         prefill_many: ?*const fn (ptr: *anyopaque, streams: []const *Stream, errs: []?anyerror) anyerror!void = null,
         /// Draw the first token from the prompt's last row at `position`; a handle to it.
         first: *const fn (ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64,
+        /// Optional work after first commit and handoff, before any draft or target continuation.
+        after_first: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!void = null,
         /// Feed one token and queue the draw of the next at `position` (a one-token round); a handle to it.
         queue: *const fn (ptr: *anyopaque, s: *Stream, feed: Feed, position: u64) anyerror!u64,
         /// The value of a drawn token (waits for the GPU).
