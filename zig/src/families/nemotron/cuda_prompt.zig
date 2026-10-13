@@ -10,6 +10,7 @@ const Dump = @import("cuda_dump.zig").Dump;
 const Head = @import("cuda_mtp.zig").Head;
 const state = @import("cuda_state.zig");
 const segs = @import("cuda_segments.zig");
+const marks = @import("cuda_marks.zig");
 const cuts = @import("cuda_prompt_cuts.zig");
 const prompt_rows = @import("cuda_prompt_rows.zig");
 const reuse = @import("cuda_reuse.zig");
@@ -71,12 +72,12 @@ pub fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, 
     var f = e.forward(dump);
     const shared = e.lessons();
     if (shared) |ad| try e.trainOps().latch(ad.score, ad.need, ad.latch, e.slot, false); // no lesson acts until it decides
-    // passes of up to pass_rows rows (rows equal at any cut); not under lessons or dumps
-    const step: usize = if (dump == null and shared == null and e.decide == lesson_route.none) state.pass_rows else state.prefill_rows;
+    const wide = dump == null and shared == null and e.decide == lesson_route.none; // passes of up to pass_rows (rows equal at any cut)
     var s: usize = from;
     while (s < prompt.len) {
         if (Cancel.now(cancel)) return error.Cancelled;
         try e.beforeChunk(cancel);
+        const step: usize = if (wide and inside(keep, s, s + state.pass_rows) < marks.max) state.pass_rows else state.prefill_rows; // 2,048 rows where a wide pass would crowd the scan's marks
         var end = cuts.end(s, prompt.len, step, if (keep) |k| (if (k.cut) k.at else &.{}) else &.{});
         // the decision row ends its chunk: the rows after it read the lessons it latched
         if (e.decide != lesson_route.none and e.decide >= s and e.decide + 1 < end) end = @intCast(e.decide + 1);
@@ -102,6 +103,14 @@ pub fn serialChunks(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, 
         s = end;
         if (keep) |k| if (s <= std.math.maxInt(u32) and std.mem.indexOfScalar(u32, k.at, @intCast(s)) != null) k.call(k.ctx, @intCast(s));
     }
+}
+
+/// The keep marks strictly inside rows [s, end).
+fn inside(keep: ?Keep, s: usize, end: usize) usize {
+    const k = keep orelse return 0;
+    var n: usize = 0;
+    for (k.at) |m| n += @intFromBool(m > s and m < end);
+    return n;
 }
 
 /// The keeps of rows strictly inside the chunk [s, end), made before it runs: the chunk writes their Mamba states.
