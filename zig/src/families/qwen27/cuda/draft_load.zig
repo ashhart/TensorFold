@@ -52,6 +52,7 @@ pub const Weights = struct {
     pred: []f32 = &.{}, // candidate_selector.predecessor_codebook (vocab, 256)
     succ: []f32 = &.{},
     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
+    reused_kv_layers: u32 = 0,
 
     pub fn deinit(w: *Weights) void {
         for (w.buffers.items) |*b| b.free();
@@ -104,6 +105,29 @@ pub fn quantize4(src: []const u8, n: usize, k: usize, words: []u32, scales: []u1
             words[r * (k / 8) + gi * 8 + wi] = word;
         }
     };
+}
+
+/// A host-only view of independent already-quantized rows; no device projection aliases another.
+pub const QuantizedRows = struct { words: []const u32, scales: []const u16, biases: []const u16 };
+
+/// This startup-only private switch is strict and disabled when unset.
+pub fn reuseKvFlag(raw: ?[]const u8) !bool {
+    const value = raw orelse return false;
+    if (std.mem.eql(u8, value, "0")) return false;
+    if (std.mem.eql(u8, value, "1")) return true;
+    return error.InvalidQuantizedKvReuse;
+}
+
+/// Views complete row-major quantized groups, validating all three arrays before any tiling.
+pub fn quantizedTail(words: []const u32, scales: []const u16, biases: []const u16, first: usize, count: usize, k: usize) !QuantizedRows {
+    if (k == 0 or k % 64 != 0) return error.InvalidQuantizedTail;
+    const k8 = k / 8;
+    const kg = k / 64;
+    if (words.len % k8 != 0) return error.InvalidQuantizedTail;
+    const n = words.len / k8;
+    if (scales.len != n * kg or biases.len != n * kg or first > n or count > n - first)
+        return error.InvalidQuantizedTail;
+    return .{ .words = words[first * k8 ..][0 .. count * k8], .scales = scales[first * kg ..][0 .. count * kg], .biases = biases[first * kg ..][0 .. count * kg] };
 }
 
 const Loader = struct {
@@ -207,6 +231,8 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, 
         L.biases.deinit(gpa);
         if (L.staging) |*b| b.free();
     }
+    const env = std.c.getenv("TF_Q27_REUSE_QUANTIZED_KV");
+    const reuse_kv = try reuseKvFlag(if (env) |value| std.mem.span(value) else null);
     var ck = try core.Checkpoint.openModel(gpa, io, dir);
     defer ck.close();
     for (&w.layers, 0..) |*l, i| {
@@ -214,7 +240,12 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, 
         const k = try Loader.get(&ck, "layers.{d}.self_attn.k_proj.weight", .{i});
         const v = try Loader.get(&ck, "layers.{d}.self_attn.v_proj.weight", .{i});
         l.qkv = try L.quantized(&.{ q, k, v }, hidden);
-        l.kv = try L.quantized(&.{ k, v }, hidden);
+        l.kv = if (reuse_kv) blk: {
+            const rows = try quantizedTail(L.words.items, L.scales.items, L.biases.items, q.dim(0), k.dim(0) + v.dim(0), hidden);
+            const projection = try L.tile(rows.words, rows.scales, rows.biases, k.dim(0) + v.dim(0), hidden);
+            w.reused_kv_layers += 1;
+            break :blk projection;
+        } else try L.quantized(&.{ k, v }, hidden);
         l.o = try L.quantized(&.{try Loader.get(&ck, "layers.{d}.self_attn.o_proj.weight", .{i})}, heads * head_dim);
         l.q_norm = try L.raw(try Loader.get(&ck, "layers.{d}.self_attn.q_norm.weight", .{i}));
         l.k_norm = try L.raw(try Loader.get(&ck, "layers.{d}.self_attn.k_norm.weight", .{i}));
@@ -271,4 +302,8 @@ test "quantize4 rounds as torch does" {
     try std.testing.expectEqual(@as(u32, 15), words[7] >> 28);
     try std.testing.expectEqual(roundEven(2.5), 2.0);
     try std.testing.expectEqual(roundEven(3.5), 4.0);
+}
+
+test {
+    _ = @import("draft_quantized_tail_test.zig");
 }
