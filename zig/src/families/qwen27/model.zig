@@ -64,7 +64,7 @@ pub const Model = struct {
         for (files) |file| try m.checkpoint.addFileSplit(m.device, file, "", "language_model.", wts.repacked);
         m.weights = try wts.load(a, m.device, &m.checkpoint, c, &ws);
         errdefer m.weights.deinit();
-        m.kernels = .{ .allocator = a, .device = m.device };
+        m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits() };
         errdefer m.kernels.deinit();
         m.glue = try glue.Kernels.init(m.device);
         errdefer m.glue.deinit();

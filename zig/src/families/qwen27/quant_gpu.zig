@@ -20,6 +20,8 @@ pub const Kernels = struct {
     row_pipelines: ?row.Pipelines = null,
     simd: ?row.simd.Pipelines = null,
     simd_bits: ?row.simd_bits.Pipelines = null,
+    /// Raw matrices take simd_qmm_bits' tiles; off on tensor units, whose raw matrices are runs short of a lane tile.
+    raw_tiles: bool = true,
     /// Per [n, k] shape: whether the scalar twin's 1-2 row bits equal the tiles' (checked once on this chip).
     twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
     /// The same for simd_qmm_bits, per [bits, n, k].
@@ -104,7 +106,7 @@ pub const Kernels = struct {
     fn quantOne(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
         if ((skip > 0 or cut[1] > 0) and p.raw != null) return error.BadCoreProjectionRows;
         if (skip > 0 and (p.raw != null or skip >= p.n / 64)) return error.BadCoreProjectionRows;
-        if (p.raw) |raw| if (raw.bits != 4 and tiled(raw)) {
+        if (p.raw) |raw| if (raw.bits != 4 and k.tiled(raw)) {
             if (rows == 0 or rows > 128 or p.tile != 32) return error.BadCoreProjectionRows;
             return k.strided(input_encoder, raw, x, y, rows, @intCast(raw.n));
         };
@@ -186,7 +188,7 @@ pub const Kernels = struct {
         span.shape = .{ .n = @intCast(raw.n), .k = @intCast(raw.k), .sk = 1, .bits = raw.bits };
         errdefer span.cancel();
         const e = span.encoder;
-        if (tiled(raw)) {
+        if (k.tiled(raw)) {
             if (k.simd_bits == null) k.simd_bits = try row.simd_bits.Pipelines.load(k.device);
             const m = row.simd_bits.Matrix{ .w = raw.w, .w_off = raw.w_off, .scales = raw.scales, .s_off = raw.s_off, .biases = raw.biases, .b_off = raw.b_off };
             const scalar = rows <= row.simd.max_scalar_rows and try k.bitTwin(m, raw); // loads the tiles before they're read
@@ -220,9 +222,9 @@ pub const Kernels = struct {
         return ok;
     }
 
-    /// Groups of 64 with fp32 sums at a width the tiles unpack.
-    fn tiled(raw: row.Weights) bool {
-        return raw.group == 64 and raw.sum == .f32 and raw.n % 8 == 0 and std.mem.indexOfScalar(u8, &row.simd_bits.bit_widths, raw.bits) != null;
+    /// Groups of 64 with fp32 sums at a width the tiles unpack, where raw matrices take the tiles.
+    fn tiled(k: *const Kernels, raw: row.Weights) bool {
+        return k.raw_tiles and raw.group == 64 and raw.sum == .f32 and raw.n % 8 == 0 and std.mem.indexOfScalar(u8, &row.simd_bits.bit_widths, raw.bits) != null;
     }
 
     /// Loads the tiles on first use and checks the scalar twin against them once per shape.
