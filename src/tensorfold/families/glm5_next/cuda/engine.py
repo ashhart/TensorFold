@@ -105,6 +105,25 @@ def without_mtp(transform, layers: int):
     return lambda name, info: (0, 0) if name.startswith(prefix) else transform(name, info)
 
 
+def agree(rows: list[list[int]]) -> int:
+    """Refuse a rank whose settings differ from rank 0's; the kept-prompt MiB (each row's last) is the ranks' least."""
+
+    odd = [r for r, row in enumerate(rows) if row[:-1] != rows[0][:-1]]
+    if odd:
+        raise RuntimeError("the ranks were started with different settings (draft model, context, drafts, "
+                           "TF_GLM_LATENT, TF_GLM_MTP, TF_GLM_DRAFT_RING): "
+                           f"rank 0 {rows[0][:-1]}, " + ", ".join(f"rank {r} {rows[r][:-1]}" for r in odd) +
+                           "; pull the draft model on every machine (or pass --drafter none to all) and give every "
+                           "rank the same flags")
+    return min(row[-1] for row in rows)
+
+
+def bell_key(rank: int, n: int) -> str:
+    """The store key that wakes follower ``rank`` for request ``n``; only that follower deletes it."""
+
+    return f"tf_glm_request_{n}" if rank == 1 else f"tf_glm_request_r{rank}_{n}"
+
+
 class GlmEngine:
     """GLM-5.3-Flash on two ranks (this one ``rank``): weights, MTP and DFlash2 drafting, per-request policies."""
 
@@ -152,21 +171,15 @@ class GlmEngine:
         self.limit = self.capacity_plan["context_window"]
         capacity = self.capacity_plan["cache_slots"]
         long_context = self.limit > cfg.dense_limit
-        # both ranks must run the same calls: refuse to start when they were given different settings
+        # every rank must run the same calls: refuse to start when any was given different settings
         prefill_rows = PREFILL_ROWS if prefill_rows is None else int(prefill_rows)
         mine = [int(drafter is not None), capacity, int(long_context), int(serial_only), int(LATENT),
                 prefill_rows, int(self.mtp_on), int(DRAFT_RING)]
-        # other conversations' kept prompts get what the window leaves, at most TF_GLM_CACHE_GIB, the same on both ranks
+        # other conversations' kept prompts get what the window leaves, at most TF_GLM_CACHE_GIB, the same on every rank
         plan = self.capacity_plan
         wanted = int(float(os.environ.get("TF_GLM_CACHE_GIB", "3")) * 2 ** 30)
         spare = max(0, min(wanted, plan["budget_bytes"] - plan["total_bytes_estimate"]))
-        both = self._gather_ints(mine + [spare >> 20])
-        if both[0][:-1] != both[1][:-1]:
-            raise RuntimeError("the two ranks were started with different settings (draft model, context, drafts, "
-                               "TF_GLM_LATENT, TF_GLM_MTP, TF_GLM_DRAFT_RING): "
-                               f"rank 0 {both[0][:-1]}, rank 1 {both[1][:-1]}; pull the draft model on both machines "
-                               "(or pass --drafter none to both) and give both the same flags")
-        self.cache_bytes = min(both[0][-1], both[1][-1]) << 20
+        self.cache_bytes = agree(self._gather_ints(mine + [spare >> 20])) << 20
         plan["kept_bytes"] = self.cache_bytes
         for key in ("serving_peak_bytes_estimate", "total_bytes_estimate"):
             plan[key] = plan[key] + self.cache_bytes
@@ -297,7 +310,7 @@ class GlmEngine:
         self.comm.all_gather(mine, got)
         return [got[i * len(values):(i + 1) * len(values)].tolist() for i in range(world)]
 
-    # the idle doorbell: rank 1 waits for each request on the rendezvous store (no store: no doorbell), not in NCCL
+    # the idle doorbell: each follower waits for each request on its own store key (no store: no doorbell), not in NCCL
     def _store(self):
         return getattr(self.comm, "store", None)
 
@@ -305,7 +318,8 @@ class GlmEngine:
         store = self._store()
         if store is not None:
             self._bell = getattr(self, "_bell", 0) + 1
-            store.set(f"tf_glm_request_{self._bell}", b"1")
+            for r in range(1, getattr(self, "world", 2)):
+                store.set(bell_key(r, self._bell), b"1")
 
     def _await_bell(self) -> None:
         store = self._store()
@@ -313,7 +327,7 @@ class GlmEngine:
             return
         from datetime import timedelta
 
-        key = f"tf_glm_request_{getattr(self, '_bell', 0) + 1}"
+        key = bell_key(getattr(self, "rank", 1), getattr(self, "_bell", 0) + 1)
         while True:
             try:
                 store.wait([key], timedelta(hours=1))

@@ -99,3 +99,31 @@ def test_idle_timeouts_are_retried_and_other_errors_raise():
     r.comm.store = Store([RuntimeError("Connection reset by peer")])
     with pytest.raises(RuntimeError, match="Connection reset"):
         r._await_bell()                                 # rank 0 is gone: rank 1 stops instead of waiting forever
+
+
+def test_a_delayed_follower_still_wakes_on_four_ranks():
+    class Store:
+        def __init__(self):
+            self.keys = {}
+
+        def set(self, key, value):
+            self.keys[key] = value
+
+        def wait(self, keys, timeout):
+            if not all(k in self.keys for k in keys):
+                raise RuntimeError(f"lost wakeup: {keys} was never set or another rank deleted it")
+
+        def delete_key(self, key):
+            del self.keys[key]
+
+    store = Store()
+    ranks = [SimpleNamespace(comm=SimpleNamespace(store=store), rank=r, world=4) for r in range(4)]
+    for r in ranks:
+        for name in ("_store", "_ring", "_await_bell"):
+            setattr(r, name, getattr(GlmEngine, name).__get__(r))
+    for _ in range(2):
+        ranks[0]._ring()
+        for follower in (1, 3, 2):                      # rank 2 waits only after ranks 1 and 3 have taken their keys
+            ranks[follower]._await_bell()
+    assert [r._bell for r in ranks] == [2, 2, 2, 2]
+    assert store.keys == {}                             # each follower deleted its own key and no other
