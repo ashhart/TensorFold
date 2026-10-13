@@ -20,3 +20,41 @@ pub fn weights(
     step.dependOn(&b.addRunArtifact(host).step);
     return step;
 }
+
+pub fn checks(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    metal: *std.Build.Module,
+    sources: *std.Build.Module,
+    engine: *std.Build.Module,
+) struct { device: *std.Build.Step, reference: *std.Build.Step } {
+    const device = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/deepseek_v41_checks.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "metal", .module = metal },
+            .{ .name = "kernel_sources", .module = sources },
+        },
+    }) });
+    const device_step = b.step("test-deepseek-v41", "Experimental DS4.1 EXL3, Engram, mHC and sparse attention on Metal");
+    device_step.dependOn(&b.addRunArtifact(device).step);
+    const reference = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zig/deepseek_v41_reference_checks.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "tensorfold", .module = engine },
+                .{ .name = "metal", .module = metal },
+            },
+        }),
+        .filters = &.{"tests.deepseek_v41_reference."},
+    });
+    const reference_step = b.step("test-deepseek-v41-reference", "Independent CPU teacher-oracle arithmetic boundaries");
+    reference_step.dependOn(&b.addRunArtifact(reference).step);
+    return .{ .device = device_step, .reference = reference_step };
+}

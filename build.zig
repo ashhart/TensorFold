@@ -418,6 +418,9 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     b.step("test-flashnext-load-admission", "CPU-only Flash Next runtime quantization admission").dependOn(&load_admission_run.step);
     test_step.dependOn(&load_admission_run.step);
     test_step.dependOn(dsv41_build.weights(b, target, optimize, metal));
+    const dsv41 = dsv41_build.checks(b, target, optimize, metal, sources, engine);
+    test_step.dependOn(dsv41.device);
+    test_step.dependOn(dsv41.reference);
     const pack_cache_cases = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/flashnext_pack_cache_cases.zig"),
         .target = target,
@@ -430,6 +433,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const engine_programs = [_]struct { name: []const u8, path: []const u8, about: []const u8, c_source: ?[]const u8 = null }{
         .{ .name = "tf-qwen35-check", .path = "zig/tests/qwen35_check.zig", .about = "Qwen3.5-2B checkpoint and native operations" },
         .{ .name = "tf-dsv41-token-map", .path = "zig/dsv41_token_map.zig", .about = "Build the Engram token map from a tokenizer and inference config, byte-identical to the release's" },
+        .{ .name = "tf-dsv41-run", .path = "zig/deepseek_v41_run.zig", .about = "Full-resident DeepSeek V4.1 admission, teacher-forced logits, chunk seams and decode timing" },
         .{ .name = "tf-qwen35-forward", .path = "zig/tests/qwen35_forward.zig", .about = "Qwen3.5-2B native teacher-forced logits" },
         .{ .name = "tf-qwen35-exact", .path = "zig/tests/qwen35_exact.zig", .about = "Qwen3.5-2B forward and committed-state exactness" },
         .{ .name = "tf-lfm2-forward", .path = "zig/tests/lfm2_forward.zig", .about = "LFM2-MoE native teacher-forced logits" },

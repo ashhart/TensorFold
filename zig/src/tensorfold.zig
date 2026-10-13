@@ -26,6 +26,10 @@ pub const deepseek_v41_config = @import("families/deepseek_v41/config.zig");
 pub const deepseek_v41_load = @import("families/deepseek_v41/load.zig");
 pub const deepseek_v41_weights = @import("families/deepseek_v41/weights.zig");
 pub const deepseek_v41_view = @import("families/deepseek_v41/view.zig");
+pub const deepseek_v41 = @import("families/deepseek_v41/model.zig");
+pub const deepseek_v41_profiler = @import("families/deepseek_v41/profiler.zig");
+pub const gpu_counters = @import("core/gpu_counters.zig");
+pub const expert_groups = @import("core/expert_groups.zig");
 pub const deepseek_v41_engram_hash = @import("families/deepseek_v41/engram_hash.zig");
 
 pub const exl3_format = @import("core/exl3_format.zig");
