@@ -32,7 +32,8 @@ fn open(d: *const Dir, id: store.Identity, o: struct { cap: u64 = 64 << 20, read
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     var problem: []const u8 = "";
-    return (try Store.open(gpa, std.testing.io, id, .{ .dir = d.path, .cap_bytes = o.cap, .read_only = o.read_only }, &problem, arena.allocator())) orelse error.TestRefused;
+    const opts: store.Options = .{ .dir = d.path, .cap_bytes = o.cap, .read_only = o.read_only };
+    return (try Store.open(gpa, std.testing.io, id, opts, &problem, arena.allocator())) orelse error.TestRefused;
 }
 
 fn ids(n: usize, seed: u64) ![]u32 {
@@ -100,8 +101,11 @@ test "a record written under another tokenizer is refused by name" {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     var problem: []const u8 = "";
-    try std.testing.expect((try Store.open(gpa, std.testing.io, identity(4, "Reader-27B"), .{ .dir = d.path, .cap_bytes = 64 << 20 }, &problem, arena.allocator())) == null);
-    try std.testing.expect(std.mem.indexOf(u8, problem, "Writer-7B") != null and std.mem.indexOf(u8, problem, "Reader-27B") != null);
+    const opts: store.Options = .{ .dir = d.path, .cap_bytes = 64 << 20 };
+    const reader = try Store.open(gpa, std.testing.io, identity(4, "Reader-27B"), opts, &problem, arena.allocator());
+    try std.testing.expect(reader == null);
+    try std.testing.expect(std.mem.indexOf(u8, problem, "Writer-7B") != null);
+    try std.testing.expect(std.mem.indexOf(u8, problem, "Reader-27B") != null);
 }
 
 test "a torn tail and an id past the vocabulary are cut at reload, and writing goes on after them" {
@@ -156,7 +160,8 @@ test "past the cap the oldest chunk goes, file and all" {
     try std.testing.expectEqual(@as(usize, 2), s.shared.record.chunks.items.len);
     try std.testing.expectEqual(@as(u32, 0), s.shared.record.longest(first[0..20]).len);
     var buf: [1100]u8 = undefined;
-    try std.testing.expect(std.c.access(try std.fmt.bufPrintSentinel(&buf, "{s}/{x:0>16}.ids", .{ d.path, @as(u64, 0) }, 0), 0) != 0);
+    const oldest = try std.fmt.bufPrintSentinel(&buf, "{s}/{x:0>16}.ids", .{ d.path, @as(u64, 0) }, 0);
+    try std.testing.expect(std.c.access(oldest, 0) != 0);
     try std.testing.expectEqual(@as(u32, rr.max_match), s.shared.record.longest(bulk[0 .. bulk.len - 1]).len);
 }
 
@@ -189,5 +194,33 @@ test "read-only writes nothing and cannot empty; a second writer reads; empty st
     const after = try open(&d, identity(7, "m"), .{});
     defer after.close();
     try std.testing.expectEqual(@as(u32, 101), after.shared.record.held());
-    try std.testing.expect(after.shared.record.longest(b[0..30]).len > 0 and after.shared.record.longest(a[0..30]).len == 0);
+    try std.testing.expect(after.shared.record.longest(b[0..30]).len > 0);
+    try std.testing.expectEqual(@as(u32, 0), after.shared.record.longest(a[0..30]).len);
+}
+
+test "an empty that cannot remove a chunk file says which, keeps nothing in memory, adds nothing until one succeeds" {
+    var d = try Dir.init();
+    defer d.deinit();
+    const s = try open(&d, identity(8, "m"), .{});
+    defer s.close();
+    const a = try ids(300, 12);
+    defer gpa.free(a);
+    s.readPrompt(a, 0);
+    var buf: [1100]u8 = undefined;
+    const stuck = try std.fmt.bufPrintSentinel(&buf, "{s}/{x:0>16}.ids", .{ d.path, @as(u64, 0xff) }, 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(stuck, 0o700)); // a directory: no unlink removes it
+    var inner: [1200]u8 = undefined;
+    const keep = try std.fmt.bufPrintSentinel(&inner, "{s}/x", .{stuck}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(keep, 0o700));
+    try std.testing.expectError(error.Unlinked, s.empty());
+    try std.testing.expect(std.mem.indexOf(u8, s.why(), "00000000000000ff.ids") != null);
+    try std.testing.expect(s.shared.record.held() == 0 and s.added == 0 and s.held == 0 and s.stats().left);
+    s.readPrompt(a, 0);
+    try std.testing.expectEqual(@as(u64, 0), s.added); // nothing goes in while a file is left
+    _ = std.c.rmdir(keep);
+    _ = std.c.rmdir(stuck);
+    try s.empty();
+    try std.testing.expect(!s.stats().left);
+    s.readPrompt(a, 0);
+    try std.testing.expectEqual(@as(u64, 300), s.added);
 }

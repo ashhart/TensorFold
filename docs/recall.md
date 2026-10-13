@@ -26,18 +26,24 @@ Both need the server's API key when it has one.
 
 ## What stays on disk
 
-The record holds token ids only, never text, in files of up to 1,048,576 ids (4 MiB) under one directory, made with mode 0700, each file 0600.
-A file named `identity` names the tokenizer that wrote the record: a digest of its vocabulary, merges and added tokens, its vocabulary size, and the model the server first served.
+The record holds token ids only, never text, in chunk files of up to 1,048,576 ids (4 MiB) under one directory, made with mode 0700, each file 0600.
+Beside them a short text file, `identity`, names the tokenizer that wrote the record: a digest of its vocabulary, merges and added tokens, its vocabulary size, and the model the server first served.
+An empty file, `lock`, is held by the server that writes the record.
 Models whose tokenizers have the same identity share one record, and a server whose tokenizer differs refuses to start on that directory and says which tokenizer wrote it.
 Each request adds the part of its prompt that no earlier request read, from where the prompt cache resumed it, and its reply when the reply ends.
 Runs of 128 or more ids the record already holds are not added again, so a request sent twice adds nothing the second time.
-Past `--recall-gib` the oldest 4 MiB file is deleted.
+Past `--recall-gib` the oldest chunk file is deleted.
 While the disk has under 4 GiB free the server stops adding to the record, and serving goes on.
 A second server that opens a directory another server is writing reads the record as it was and adds nothing.
-`DELETE /v1/recall`, or deleting the directory while no server uses it, removes everything.
 Nothing in the record leaves the machine: no request, reply or route sends it anywhere.
 
-In memory the record takes about 8 MB for every million ids it holds, plus a key table fixed by `--recall-gib` (8 MiB at the default 64 MiB).
+`DELETE /v1/recall` deletes every chunk file and empties the record in memory, with its landing rates and counters.
+The directory, `identity` and `lock` stay; they hold no ids.
+When a chunk file cannot be deleted the reply is a 500 that names it, and the server adds nothing to the record until a later `DELETE` deletes every chunk file.
+A server started with `--recall-read-only`, or reading a record another server writes, refuses `DELETE` with a 409.
+Deleting the directory while no server uses it removes everything.
+
+In memory each chunk takes 8 MiB from its first id, so even a short record takes 8 MiB, plus a key table fixed by `--recall-gib` (8 MiB at the default 64 MiB).
 
 ## Which engines read it
 

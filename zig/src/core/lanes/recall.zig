@@ -57,7 +57,13 @@ pub const Rates = struct {
         if (probing) r.probe_every = if (2 * accepted >= proposed) 32 else @min(probe_most, 2 * r.probe_every);
     }
 
-    /// Whether this lookup, priced out, is the next probe.
+    /// Whether some band's copy of `n` ids is expected to land more than `head` tokens a round.
+    pub fn pays(r: *const Rates, n: usize, head: f64) bool {
+        for (0..bands.len) |b| if (expected(r.rate(b), n) > head) return true;
+        return false;
+    }
+
+    /// Whether this ask, priced out, is the next probe.
     fn probe(r: *Rates) bool {
         r.since += 1;
         if (r.since < r.probe_every) return false;
@@ -92,7 +98,7 @@ pub const Reader = struct {
     band: usize = 0, // the last copy's band
     probing: bool = false, // the last copy was a probe
     quiet_until: u64 = 0,
-    memo: ?struct { len: usize, last: u32, most: usize } = null, // the last proposal's context: asked again in its round
+    memo: ?u64 = null, // the last ask's context and width, hashed: the same ask again in its round gets the same answer
     lookups: u64 = 0,
     proposals: u64 = 0,
     proposed: u64 = 0,
@@ -105,27 +111,40 @@ pub const Reader = struct {
     /// The record's continuation of `ctx` (owned until the next call), or empty when it is not expected to pay.
     pub fn propose(x: *Reader, ctx: []const u32, most: usize, round: u64) []const u32 {
         if (ctx.len == 0 or most < 2 or round < x.quiet_until) return &.{};
-        if (x.memo) |m| if (m.len == ctx.len and m.last == ctx[ctx.len - 1] and m.most == most) return x.out.items;
-        x.memo = .{ .len = ctx.len, .last = ctx[ctx.len - 1], .most = most };
+        const key = memoKey(ctx, most);
+        if (x.memo) |m| if (m == key) return x.out.items;
         x.out.clearRetainingCapacity();
         x.out.ensureTotalCapacity(x.gpa, most) catch return &.{};
+        x.memo = key;
         x.shared.lock();
         defer x.shared.unlock();
+        const rates = &x.shared.rates;
+        var probing = false; // the price comes first: the record is walked only when a copy can pay, or for a probe
+        if (!rates.pays(most, x.head)) {
+            probing = rates.probe();
+            if (!probing) return &.{};
+        }
         x.lookups += 1;
         const m = x.shared.record.longest(ctx);
         if (m.len < x.params.min_match) return &.{};
         const got = x.shared.record.copy(m.at, x.out.allocatedSlice()[0..most]);
         if (got.len < 2) return &.{};
         const b = Rates.band(m.len);
-        const worth = expected(x.shared.rates.rate(b), got.len) > x.head;
-        const probing = !worth and x.shared.rates.probe();
-        if (!worth and !probing) return &.{};
+        if (!probing and expected(rates.rate(b), got.len) <= x.head) {
+            probing = rates.probe();
+            if (!probing) return &.{};
+        }
         x.out.items.len = got.len;
         x.band = b;
         x.probing = probing;
         x.proposals += 1;
         x.proposed += got.len;
         return x.out.items;
+    }
+
+    /// What a lookup reads of `ctx` (its last max_match ids) and the width asked, hashed.
+    fn memoKey(ctx: []const u32, most: usize) u64 {
+        return std.hash.Wyhash.hash(most, std.mem.sliceAsBytes(ctx[ctx.len -| record.max_match..]));
     }
 
     /// The last copy landed `accepted` of its `proposed` ids; none landed keeps the stream off a few rounds.
@@ -148,22 +167,35 @@ pub const Reader = struct {
     }
 
     /// Up to `most` distinct continuations of `ctx` as graft proposals of `span` ids, weighed by match up to `longest`.
-    pub fn candidates(x: *Reader, a: Allocator, ctx: []const u32, span: usize, most: usize, longest: u32) ![]fill.Proposal {
+    pub fn candidates(
+        x: *Reader,
+        a: Allocator,
+        ctx: []const u32,
+        span: usize,
+        most: usize,
+        longest: u32,
+    ) ![]fill.Proposal {
         if (span == 0 or most == 0) return &.{};
         var found: [8]record.Found = undefined;
         const scratch = try a.alloc(u32, span);
         x.shared.lock();
         defer x.shared.unlock();
         x.lookups += 1;
-        const n = x.shared.record.continuations(ctx, x.params.min_match, span, scratch, found[0..@min(most, found.len)]);
+        const room = found[0..@min(most, found.len)];
+        const n = x.shared.record.continuations(ctx, x.params.min_match, span, scratch, room);
         const out = try a.alloc(fill.Proposal, n);
-        for (out, found[0..n]) |*o, f| o.* = .{ .tokens = x.shared.record.copy(f.at, try a.alloc(u32, span)), .weight = @floatFromInt(@min(f.len, longest)), .recalled = true };
+        for (out, found[0..n]) |*o, f| o.* = .{
+            .tokens = x.shared.record.copy(f.at, try a.alloc(u32, span)),
+            .weight = @floatFromInt(@min(f.len, longest)),
+            .recalled = true,
+        };
         return out;
     }
 
     /// The stream's counters as the reply's telemetry: `{"recall": {...}}`.
     pub fn telemetry(x: *const Reader, buf: []u8) []const u8 {
-        return std.fmt.bufPrint(buf, "{{\"recall\": {{\"lookups\": {d}, \"proposals\": {d}, \"proposed\": {d}, \"accepted\": {d}}}}}", .{ x.lookups, x.proposals, x.proposed, x.accepted }) catch "";
+        const fmt = "{{\"recall\": {{\"lookups\": {d}, \"proposals\": {d}, \"proposed\": {d}, \"accepted\": {d}}}}}";
+        return std.fmt.bufPrint(buf, fmt, .{ x.lookups, x.proposals, x.proposed, x.accepted }) catch "";
     }
 };
 

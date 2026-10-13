@@ -118,7 +118,8 @@ const Capture = struct {
         }
         var counters: [128]u8 = undefined; // as an engine's own buffer: valid only during the event
         @memcpy(counters[0..e.telemetry.len], e.telemetry);
-        sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop, .stats = .{ .telemetry_json = counters[0..e.telemetry.len] } } });
+        const stats: api.Stats = .{ .telemetry_json = counters[0..e.telemetry.len] };
+        sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop, .stats = stats } });
         @memset(&counters, 0xaa);
     }
 
@@ -136,11 +137,16 @@ const Capture = struct {
 const Reply = struct { status: u16, body: []u8 };
 
 fn exchange(srv: *server.Server, path: []const u8, body: []const u8) !Reply {
+    return exchangeAs(srv, "POST", path, body);
+}
+
+fn exchangeAs(srv: *server.Server, method: []const u8, path: []const u8, body: []const u8) !Reply {
     var pair: [2]std.c.fd_t = undefined;
     if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
     defer _ = std.c.close(pair[0]);
     defer _ = std.c.close(pair[1]);
-    const head = try std.fmt.allocPrint(std.testing.allocator, "POST {s} HTTP/1.1\r\nHost: t\r\nContent-Length: {d}\r\n\r\n", .{ path, body.len });
+    const request_line = "{s} {s} HTTP/1.1\r\nHost: t\r\nContent-Length: {d}\r\n\r\n";
+    const head = try std.fmt.allocPrint(std.testing.allocator, request_line, .{ method, path, body.len });
     defer std.testing.allocator.free(head);
     try writeAll(pair[0], head);
     try writeAll(pair[0], body);
@@ -382,15 +388,72 @@ test "single-call whole replies retain prose and tool-only replies still have nu
     }
 }
 
-test "a reply's drafter counters are written from the request's own copy, after the engine's and the mailbox's are gone" {
+test "a reply's drafter counters are written from the request's own copy, after the engine's and mailbox's are gone" {
     var text: DropLate = .{};
     var backend: Capture = .{ .telemetry = "{\"recall\": {\"lookups\": 3, \"accepted\": 2}}" };
     defer std.testing.allocator.free(backend.prompt);
-    var srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = true }, null);
+    var srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = false,
+        .use_drafts = true,
+    }, null);
     defer srv.deinit();
-    const got = try exchange(srv, "/v1/chat/completions", "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"go\"}]}");
+    const go = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"go\"}]}";
+    const got = try exchange(srv, "/v1/chat/completions", go);
     defer std.testing.allocator.free(got.body);
     try std.testing.expectEqual(@as(u16, 200), got.status);
     try std.testing.expect(std.unicode.utf8ValidateSlice(got.body));
-    try std.testing.expect(std.mem.indexOf(u8, got.body, "\"proposer\": {\"recall\": {\"lookups\": 3, \"accepted\": 2}}") != null);
+    const proposer = "\"proposer\": {\"recall\": {\"lookups\": 3, \"accepted\": 2}}";
+    try std.testing.expect(std.mem.indexOf(u8, got.body, proposer) != null);
+}
+
+test "GET and DELETE /v1/recall: 404 without a record, its state, emptied, and 409 for a reader" {
+    var text: DropLate = .{};
+    var backend: Capture = .{};
+    defer std.testing.allocator.free(backend.prompt);
+    var srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = false,
+    }, null);
+    defer srv.deinit();
+    const Store = api.recall_store.Store;
+    const off = try exchangeAs(srv, "GET", "/v1/recall", "");
+    defer std.testing.allocator.free(off.body);
+    try std.testing.expectEqual(@as(u16, 404), off.status);
+    try std.testing.expect(std.mem.indexOf(u8, off.body, "Recall is off: serve with --recall") != null);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(arena.allocator(), ".zig-cache/tmp/{s}/recall", .{tmp.sub_path});
+    var problem: []const u8 = "";
+    const id: api.recall_store.Identity = .{ .digest = @splat(5), .vocab = 1000, .name = "m" };
+    const opts: api.recall_store.Options = .{ .dir = dir, .cap_bytes = 64 << 20 };
+    const w = (try Store.open(std.testing.allocator, std.testing.io, id, opts, &problem, arena.allocator())).?;
+    defer w.close();
+    var prompt: [200]u32 = undefined;
+    for (&prompt, 0..) |*t, i| t.* = @intCast((i * 13) % 1000);
+    w.readPrompt(&prompt, 0);
+    srv.recall = w;
+    const on = try exchangeAs(srv, "GET", "/v1/recall", "");
+    defer std.testing.allocator.free(on.body);
+    try std.testing.expectEqual(@as(u16, 200), on.status);
+    try std.testing.expect(std.mem.indexOf(u8, on.body, "\"state\": \"on\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, on.body, "\"ids\": 201") != null);
+    const emptied = try exchangeAs(srv, "DELETE", "/v1/recall", "");
+    defer std.testing.allocator.free(emptied.body);
+    try std.testing.expectEqual(@as(u16, 200), emptied.status);
+    try std.testing.expectEqualStrings("{\"emptied\": true}", emptied.body);
+    try std.testing.expectEqual(@as(u32, 0), w.shared.record.held());
+    var ro_opts = opts;
+    ro_opts.read_only = true;
+    const r = (try Store.open(std.testing.allocator, std.testing.io, id, ro_opts, &problem, arena.allocator())).?;
+    defer r.close();
+    srv.recall = r;
+    const refused = try exchangeAs(srv, "DELETE", "/v1/recall", "");
+    defer std.testing.allocator.free(refused.body);
+    try std.testing.expectEqual(@as(u16, 409), refused.status);
+    try std.testing.expect(std.mem.indexOf(u8, refused.body, "reads the record only") != null);
 }

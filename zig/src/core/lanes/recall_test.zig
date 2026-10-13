@@ -106,3 +106,32 @@ test "graft candidates are distinct continuations weighted up to the cap" {
     try std.testing.expectEqualSlices(u32, &.{ 7, 8, 9 }, got[1].tokens);
     try std.testing.expect(got[0].recalled and got[0].weight == 16);
 }
+
+test "two contexts of one length and last id are each asked of the record, in one round" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const a = ids(40, 100);
+    var b = ids(40, 600);
+    b[19] = a[19]; // the same last id at the same length
+    try f.shared.record.add(&a);
+    try f.shared.record.add(&b);
+    var r: recall.Reader = .{ .gpa = gpa, .shared = &f.shared };
+    defer r.deinit();
+    try std.testing.expectEqualSlices(u32, a[20..26], r.propose(a[0..20], 6, 0));
+    try std.testing.expectEqualSlices(u32, b[20..26], r.propose(b[0..20], 6, 0));
+    try std.testing.expectEqual(@as(u64, 2), r.lookups);
+}
+
+test "an ask no band can pay for leaves the record unwalked until its probe" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const seg = ids(200, 2000);
+    try f.shared.record.add(&seg);
+    var r: recall.Reader = .{ .gpa = gpa, .shared = &f.shared };
+    defer r.deinit();
+    for (0..40) |_| r.noteHead(16); // a head no copy of 8 ids can beat
+    for (0..31) |i| try std.testing.expectEqual(@as(usize, 0), r.propose(seg[i .. i + 20], 8, 100 + i).len);
+    try std.testing.expectEqual(@as(u64, 0), r.lookups);
+    try std.testing.expectEqual(@as(usize, 8), r.propose(seg[31..51], 8, 200).len); // the 32nd: a probe walks
+    try std.testing.expect(r.lookups == 1 and r.probing);
+}
