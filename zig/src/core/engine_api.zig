@@ -210,6 +210,8 @@ pub const Open = struct {
     learn_gib: f64 = 32,
     /// --slide: Sliding Weights learns into the served weights, live (off: learn requests are refused).
     slide: bool = false,
+    /// --recall: the server attaches Recall's record once the engine loads; an engine that reads none refuses first.
+    recall: bool = false,
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
     device: ?u32 = null,
     segments: ?u32 = null,

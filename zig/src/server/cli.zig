@@ -376,6 +376,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .learn_gib = args.learn_gib,
         .learn_min_free_gib = args.learn_min_free_gib,
         .slide = args.slide,
+        .recall = args.recall,
         .device = args.device,
         .segments = args.segments,
         .mtp_drafts = args.mtp_drafts,
