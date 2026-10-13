@@ -6,6 +6,7 @@ const kern = @import("kernels.zig");
 const tri = @import("triton.zig");
 const st = @import("state.zig");
 const tree = @import("tree.zig");
+const native_plan = @import("native_attention_plan.zig");
 
 const bf = 2;
 
@@ -160,8 +161,10 @@ pub fn stage(gpa: std.mem.Allocator, ops: kern.Ops, t: tri.Tri, s: *st.Scratch, 
     if (W > st.round_rows) return error.WindowTooWide;
     // attention's partials: the most slots any stream takes, for every row of the round
     var most_slots: usize = 0;
+    var native_groups: usize = 0;
     for (parts) |p| {
         most_slots = @max(most_slots, tri.slots(p.seq.pos, p.tokens.len));
+        native_groups = @max(native_groups, native_plan.groups(p.seq.pos + p.tokens.len));
         if (p.seq.kv8 != parts[0].seq.kv8) return error.InvalidQwenWindows;
     }
     if (most_slots * W > s.part_rows) return error.WindowTooWide;
@@ -212,7 +215,7 @@ pub fn stage(gpa: std.mem.Allocator, ops: kern.Ops, t: tri.Tri, s: *st.Scratch, 
         r.starts = s.plan + 3 * W * 4;
         r.tables = 0;
         r.offs = s.offs;
-        r.attn = .{ .rows = s.attn_plan, .streams = s.attn_plan + ap.streams * 4, .items = s.attn_plan + ap.items * 4, .n_items = ap.n_items, .paths = s.paths, .depths = s.depths, .width = W };
+        r.attn = .{ .rows = s.attn_plan, .streams = s.attn_plan + ap.streams * 4, .items = s.attn_plan + ap.items * 4, .n_items = ap.n_items, .paths = s.paths, .depths = s.depths, .width = W, .native_groups = native_groups, .scratch_bytes = s.parts.?.len };
         try t.paths(s.attn_plan + ap.parents * 4, s.paths, s.depths, W);
         return r;
     }
@@ -236,7 +239,7 @@ pub fn stage(gpa: std.mem.Allocator, ops: kern.Ops, t: tri.Tri, s: *st.Scratch, 
     r.ids = base + (5 * W + S + 1) * 4;
     r.windows = base + (6 * W + S + 1) * 4;
     const ab = base + at_attn * 4;
-    r.attn = .{ .rows = ab, .streams = ab + ap.streams * 4, .items = ab + ap.items * 4, .n_items = ap.n_items, .paths = s.paths, .depths = s.depths, .width = W };
+    r.attn = .{ .rows = ab, .streams = ab + ap.streams * 4, .items = ab + ap.items * 4, .n_items = ap.n_items, .paths = s.paths, .depths = s.depths, .width = W, .native_groups = native_groups, .scratch_bytes = s.parts.?.len };
     // the state pointer table and cache offsets, one copy each; every stream's conv rows stacked by layer
     var ptrs: std.ArrayList(u64) = .empty;
     defer ptrs.deinit(gpa);

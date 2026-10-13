@@ -34,13 +34,21 @@ const kernels = [_]Kernel{
     .{ .name = "train", .flags = &.{"-O3"} }, // ours: Sliding Weights' learning step (train.metal's kernels)
     .{ .name = "qwen_ops", .flags = &.{"-O3"} }, // ours: the 27B's batched state copies, taps, drafter norms and rotary
     .{ .name = "qwen_vision", .flags = &.{ "-O3", "--fmad=false" } }, // ours: the Qwen3.5 vision tower's glue and attention
+    .{ .name = "norms", .flags = &.{"-O3"} },
+    .{ .name = "moe_glue", .flags = &.{"-O3"} },
+    .{ .name = "dense_rows", .flags = &.{"-O3"} },
+    .{ .name = "qk_rows", .flags = &.{"-O3"} },
+    .{ .name = "window_attention", .flags = &.{"-O3"} },
+    .{ .name = "tree_attention", .flags = &.{"-O3"} },
+    .{ .name = "act_rows", .flags = &.{"-O3"} },
+    .{ .name = "gdn_prep", .flags = &.{"-O3"} },
+    .{ .name = "embed_rows", .flags = &.{"-O3"} },
+    .{ .name = "block_attention", .flags = &.{"-O3"} },
     .{ .name = "nemotron_norms", .flags = glue }, // ours, each with a host reference (glue_ref.zig): Nemotron's glue
     .{ .name = "nemotron_route", .flags = glue },
     .{ .name = "nemotron_mamba", .flags = glue },
     .{ .name = "nemotron_attention", .flags = glue },
     .{ .name = "nemotron_keyed", .flags = glue },
-    .{ .name = "norms", .flags = &.{"-O3"} }, // ours: RMS norm rows for every family (cuda/norms.zig)
-    .{ .name = "embed_rows", .flags = &.{"-O3"} }, // ours: 4-bit affine and bf16 token rows (cuda/embed_rows.zig)
     .{ .name = "qmmf", .flags = &.{"-O3"} }, // nvfp4/qmmf.cu's device code (FP8G, FP4), tensorfold_nvfp4_v3
     .{ .name = "prompt16", .flags = &.{"-O3"} }, // nvfp4/prompt.cu's FP4 and FP8 tile 4, tensorfold_nvfp4_prompt_v1
     .{ .name = "modelopt_pack", .flags = &.{"-O3"} }, // ours: ModelOpt tensors into the lane, prompt and expert layouts

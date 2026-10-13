@@ -73,6 +73,7 @@ pub const Engine = struct {
     grid: bool = false, // a prompt cache: prompts in zero-anchored chunks (Chunks), not even splits
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: []const u8, o: Options) !*Engine {
+        if (o.kv8 and kernels.len == 0) return error.QwenNeedsCapturedKernels;
         const cfg = try c.Config.read(gpa, io, dir);
         const g = cfg.g;
         const e = try gpa.create(Engine);
@@ -87,7 +88,7 @@ pub const Engine = struct {
         errdefer e.k.deinit();
         e.w = try wts.load(gpa, io, e.ops(), dir, cfg);
         errdefer e.w.deinit();
-        e.scratch = try st.Scratch.init(gpa, ctx.d, g, prompt_rows, o.context);
+        e.scratch = try st.Scratch.initForKv(gpa, ctx.d, g, prompt_rows, o.context, o.kv8);
         errdefer e.scratch.deinit();
         try e.s.synchronize();
         return e;
@@ -106,7 +107,7 @@ pub const Engine = struct {
     }
 
     pub fn forward(e: *Engine) Forward {
-        return .{ .gpa = e.gpa, .w = &e.w, .ops = e.ops(), .t = .{ .set = &e.k.triton, .s = e.s }, .s = &e.scratch };
+        return .{ .gpa = e.gpa, .w = &e.w, .ops = e.ops(), .t = .{ .g = &e.k.glue, .s = e.s, .set = if (e.k.glue.set) |*s| s else null }, .s = &e.scratch };
     }
 
     /// A stream's state for `capacity` positions (its caches, recurrences and conv windows), empty.

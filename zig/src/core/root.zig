@@ -18,8 +18,20 @@ pub const registry = @import("registry.zig");
 pub const tuning = @import("tuning.zig");
 pub const norms_ref = @import("norms_ref.zig");
 pub const act_ref = @import("act_ref.zig");
+pub const moe_ref = @import("moe_ref.zig");
+pub const dense_ref = @import("dense_ref.zig");
+pub const qk_ref = @import("qk_ref.zig");
+pub const gdn_prep_ref = @import("gdn_prep_ref.zig");
+pub const attention_ref = @import("attention_ref.zig");
 
 test {
+    _ = norms_ref;
+    _ = moe_ref;
+    _ = dense_ref;
+    _ = qk_ref;
+    _ = act_ref;
+    _ = gdn_prep_ref;
+    _ = attention_ref;
     _ = safetensors;
     _ = affine4_host;
     _ = affine4_fold;

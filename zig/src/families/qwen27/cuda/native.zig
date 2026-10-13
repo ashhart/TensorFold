@@ -100,8 +100,9 @@ fn drafterDir(a: std.mem.Allocator, io: std.Io, given: ?[]const u8) !?[]const u8
 const most_streams = 32;
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
-    // the 27B's glue runs the Python engine's Triton kernels, captured on this chip (no own glue kernels yet)
-    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels orelse return error.QwenNeedsCapturedKernels, .{ .context = o.context, .kv8 = o.kv8 });
+    // BF16 target and drafter glue use native CUDA; FP8 attention retains its captured set.
+    if (o.kv8 and (kernels == null or kernels.?.len == 0)) return error.QwenNeedsCapturedKernels;
+    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels orelse "", .{ .context = o.context, .kv8 = o.kv8 });
     errdefer e.deinit();
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
@@ -130,7 +131,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .facts = own.lanes.facts(),
         .rows = st.max_rows,
         // each stream's caches, its drafter context, and its share of a round's attention partials (`fit`)
-        .stream_bytes = st.Seq.bytes(e.w.g, o.context, o.kv8) + st.Scratch.partialBytes(e.w.g, st.Scratch.streamPartRows(o.context)) + if (own.draft != null) dr.Context.bytes() else 0,
+        .stream_bytes = st.Seq.bytes(e.w.g, o.context, o.kv8) + st.Scratch.partialBytesFor(e.w.g, st.Scratch.streamPartRows(o.context), !o.kv8) + if (own.draft != null) dr.Context.bytes() else 0,
         .vision_bytes = vision_bytes,
         .ctx = own,
         .deinit = release,

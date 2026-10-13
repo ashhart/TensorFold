@@ -20,6 +20,8 @@ const usage =
     \\  --kv-cache fp8 against bf16, teacher-forced on bf16's greedy reply: top-1 agreement and KL a token.
     \\       tf-qwen27-cuda vision MODEL --fixtures DIR
     \\  The image tower on recorded 0.6.6 fixtures' patches: each image's rows against 0.6.6's (cosine, max error).
+    \\       tf-qwen27-cuda nll MODEL --prompts corpus.json [--max-tokens N] [--dump FILE] [--against FILE]
+    \\  Teacher-forced NLL and top-1; against another build's dump: KL, argmax agreement, flips, gated.
     \\
 ;
 
@@ -35,6 +37,7 @@ const Options = struct {
     cases: ?[]const u8 = null, // windows: only these cases, comma separated
     drafter: ?[]const u8 = null, // draft: the DFlash2 checkpoint
     kv8: bool = false, // --kv-cache fp8: e4m3 attention caches
+    against: ?[]const u8 = null, // nll: another build's --dump, compared and gated
 };
 
 pub fn main(init: std.process.Init) !u8 {
@@ -48,7 +51,8 @@ pub fn main(init: std.process.Init) !u8 {
     const kvcompare = args.len >= 2 and std.mem.eql(u8, args[1], "kvcompare");
     if (args.len >= 5 and std.mem.eql(u8, args[1], "vision") and std.mem.eql(u8, args[3], "--fixtures"))
         return checkVision(gpa, arena, init.io, args[2], args[4]);
-    if (args.len < 3 or !(std.mem.eql(u8, args[1], "run") or windows or rounds or drafting or multi or kvcompare)) {
+    const nll = args.len >= 2 and std.mem.eql(u8, args[1], "nll");
+    if (args.len < 3 or !(std.mem.eql(u8, args[1], "run") or windows or rounds or drafting or multi or kvcompare or nll)) {
         std.debug.print("{s}", .{usage});
         return 2;
     }
@@ -57,12 +61,12 @@ pub fn main(init: std.process.Init) !u8 {
     while (i + 1 < args.len) : (i += 2) {
         const k = args[i];
         const v = args[i + 1];
-        if (std.mem.eql(u8, k, "--kernels")) o.kernels = v else if (std.mem.eql(u8, k, "--prompts")) o.prompts = v else if (std.mem.eql(u8, k, "--expect")) o.expect = v else if (std.mem.eql(u8, k, "--max-tokens")) o.max_tokens = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--context")) o.context = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--device")) o.device = try std.fmt.parseInt(c_int, v, 10) else if (std.mem.eql(u8, k, "--dump")) o.dump = v else if (std.mem.eql(u8, k, "--cases")) o.cases = v else if (std.mem.eql(u8, k, "--drafter")) o.drafter = v else if (std.mem.eql(u8, k, "--kv-cache")) o.kv8 = std.mem.eql(u8, v, "fp8") else {
+        if (std.mem.eql(u8, k, "--kernels")) o.kernels = v else if (std.mem.eql(u8, k, "--prompts")) o.prompts = v else if (std.mem.eql(u8, k, "--expect")) o.expect = v else if (std.mem.eql(u8, k, "--max-tokens")) o.max_tokens = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--context")) o.context = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--device")) o.device = try std.fmt.parseInt(c_int, v, 10) else if (std.mem.eql(u8, k, "--dump")) o.dump = v else if (std.mem.eql(u8, k, "--cases")) o.cases = v else if (std.mem.eql(u8, k, "--drafter")) o.drafter = v else if (std.mem.eql(u8, k, "--against")) o.against = v else if (std.mem.eql(u8, k, "--kv-cache")) o.kv8 = std.mem.eql(u8, v, "fp8") else {
             std.debug.print("unknown option {s}\n{s}", .{ k, usage });
             return 2;
         }
     }
-    if (o.kernels.len == 0 or o.prompts.len == 0) {
+    if (o.prompts.len == 0) { // BF16 native glue needs no captured set
         std.debug.print("{s}", .{usage});
         return 2;
     }
@@ -83,6 +87,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (drafting) return runDrafted(gpa, arena, init.io, e, o, prompts, expect);
     if (multi) return runMulti(gpa, arena, init.io, e, o, prompts);
     if (kvcompare) return compareKv(arena, e, prompts, o.max_tokens);
+    if (nll) return runNll(gpa, arena, init.io, e, prompts, o.max_tokens, o.context, o.dump, o.against);
     var seq = try e.sequence(o.context);
     defer seq.deinit();
     var mismatches: usize = 0;
@@ -633,3 +638,140 @@ fn checkVision(gpa: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, mod
 fn bf(v: u16) f64 {
     return @as(f32, @bitCast(@as(u32, v) << 16));
 }
+/// Teacher-forced over a corpus ({"name": [ids], ...} or one id list): each row's next-token NLL and top-1;
+/// `dump`: every row's bf16 logits; `against`: another build's dump, its KL, argmax agreement and flips gated.
+fn runNll(gpa: std.mem.Allocator, a: std.mem.Allocator, io: std.Io, e: *qwen.Engine, doc: std.json.Value, most: usize, context: usize, dump: ?[]const u8, against: ?[]const u8) !u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    var lists: std.ArrayList([]u32) = .empty;
+    if (doc == .object) {
+        var it = doc.object.iterator();
+        while (it.next()) |kv| {
+            try names.append(a, kv.key_ptr.*);
+            try lists.append(a, try tokenList(a, kv.value_ptr.*));
+        }
+    } else {
+        try names.append(a, "text");
+        try lists.append(a, try tokenList(a, doc));
+    }
+    const vocab = qwen.config.vocab;
+    const host = try gpa.alloc(u16, vocab);
+    defer gpa.free(host);
+    const want_row = try gpa.alloc(u16, vocab);
+    defer gpa.free(want_row);
+    var file: ?std.Io.File = if (dump) |d| try std.Io.Dir.cwd().createFile(io, d, .{}) else null;
+    defer if (file) |*fl| fl.close(io);
+    var ref: ?std.Io.File = if (against) |p| try std.Io.Dir.cwd().openFile(io, p, .{}) else null;
+    defer if (ref) |*fl| fl.close(io);
+    var all: Quality = .{};
+    var at: u64 = 0;
+    for (names.items, lists.items) |name, ids| {
+        const n = @min(ids.len, most);
+        var q: Quality = .{};
+        var seq = try e.sequence(context);
+        defer seq.deinit();
+        try e.prefill(&seq, ids[0..1]);
+        var f = e.forward();
+        try f.head(&seq);
+        var i: usize = 1;
+        while (i < n) : (i += 1) {
+            if (i > 1) {
+                const part = [_]qwen.Part{.{ .seq = &seq, .tokens = ids[i - 1 .. i] }};
+                try f.round(&part);
+                try f.commit(&part, &.{&.{0}});
+            }
+            try f.ops.download(std.mem.sliceAsBytes(host), f.s.logits);
+            try f.ops.s.synchronize();
+            if (file) |*fl| try fl.writeStreamingAll(io, std.mem.sliceAsBytes(host));
+            const r: ?[]const u16 = if (ref) |*fl| blk: {
+                if (try fl.readPositionalAll(io, std.mem.sliceAsBytes(want_row), at) != vocab * 2) return error.ShortReference;
+                break :blk want_row;
+            } else null;
+            at += vocab * 2;
+            q.add(host, r, ids[i]);
+        }
+        q.print(name);
+        all.merge(q);
+    }
+    all.print("all");
+    if (ref == null) return 0;
+    const ok = all.pass();
+    std.debug.print("gate: |dNLL| <= {d}, argmax agreement >= {d} %, KL mean <= {d}, no flip with a reference margin above {d}: {s}\n", .{ Quality.max_dnll, Quality.min_agree, Quality.max_kl, Quality.max_flip, if (ok) "PASS" else "FAIL" });
+    return if (ok) 0 else 1;
+}
+
+/// One row's log-softmax normaliser and argmax.
+fn rowStats(row: []const u16) struct { lse: f64, arg: usize } {
+    var mx: f64 = -std.math.inf(f64);
+    var arg: usize = 0;
+    for (row, 0..) |h, j| if (bf(h) > mx) {
+        mx = bf(h);
+        arg = j;
+    };
+    var z: f64 = 0;
+    for (row) |h| z += @exp(bf(h) - mx);
+    return .{ .lse = mx + @log(z), .arg = arg };
+}
+
+/// Teacher-forced quality of one build, and against a reference build's logits when given.
+const Quality = struct {
+    const max_dnll = 0.01; // nats a row, mean
+    const min_agree = 98.5; // %
+    const max_kl = 0.005; // nats a row, mean
+    const max_flip = 1.0; // reference logit gap between its argmax and ours
+
+    rows: usize = 0,
+    nll: f64 = 0,
+    top1: usize = 0,
+    compared: usize = 0,
+    ref_nll: f64 = 0,
+    ref_top1: usize = 0,
+    agree: usize = 0,
+    kl: f64 = 0,
+    kl_max: f64 = 0,
+    flip_max: f64 = 0,
+
+    fn add(q: *Quality, ours: []const u16, ref: ?[]const u16, want: u32) void {
+        const o = rowStats(ours);
+        q.rows += 1;
+        q.nll += o.lse - bf(ours[want]);
+        if (o.arg == want) q.top1 += 1;
+        const r = ref orelse return;
+        const s = rowStats(r);
+        q.compared += 1;
+        q.ref_nll += s.lse - bf(r[want]);
+        if (s.arg == want) q.ref_top1 += 1;
+        if (s.arg == o.arg) q.agree += 1 else q.flip_max = @max(q.flip_max, bf(r[s.arg]) - bf(r[o.arg]));
+        var kl: f64 = 0;
+        for (r, ours) |rh, oh| {
+            const lp = bf(rh) - s.lse;
+            kl += @exp(lp) * (lp - (bf(oh) - o.lse));
+        }
+        q.kl += kl;
+        q.kl_max = @max(q.kl_max, kl);
+    }
+
+    fn merge(q: *Quality, b: Quality) void {
+        inline for (.{ "rows", "nll", "top1", "compared", "ref_nll", "ref_top1", "agree", "kl" }) |f| @field(q, f) += @field(b, f);
+        q.kl_max = @max(q.kl_max, b.kl_max);
+        q.flip_max = @max(q.flip_max, b.flip_max);
+    }
+
+    fn pct(k: usize, n: usize) f64 {
+        return 100 * @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(@max(n, 1)));
+    }
+
+    fn mean(x: f64, n: usize) f64 {
+        return x / @as(f64, @floatFromInt(@max(n, 1)));
+    }
+
+    fn print(q: Quality, name: []const u8) void {
+        std.debug.print("{s}: {d} rows, NLL {d:.4} (ppl {d:.3}), top-1 {d:.2} %", .{ name, q.rows, mean(q.nll, q.rows), @exp(mean(q.nll, q.rows)), pct(q.top1, q.rows) });
+        if (q.compared > 0) std.debug.print("; reference NLL {d:.4}, top-1 {d:.2} %; argmax agreement {d:.2} %, KL mean {d:.5} max {d:.4}, largest flip {d:.3}", .{ mean(q.ref_nll, q.compared), pct(q.ref_top1, q.compared), pct(q.agree, q.compared), mean(q.kl, q.compared), q.kl_max, q.flip_max });
+        std.debug.print("\n", .{});
+    }
+
+    fn pass(q: Quality) bool {
+        return @abs(mean(q.nll - q.ref_nll, q.compared)) <= max_dnll and pct(q.agree, q.compared) >= min_agree and
+            mean(q.kl, q.compared) <= max_kl and q.flip_max <= max_flip;
+    }
+};

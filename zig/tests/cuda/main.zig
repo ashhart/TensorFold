@@ -27,6 +27,14 @@ const exlr8_tests = @import("exlr8_tests.zig");
 const exlr8_dense_tests = @import("exlr8_dense_tests.zig");
 const norms_tests = @import("norms_tests.zig");
 const norm_rows_tests = @import("norm_rows_tests.zig");
+const moe_glue_tests = @import("moe_glue_tests.zig");
+const dense_rows_tests = @import("dense_rows_tests.zig");
+const qk_rows_tests = @import("qk_rows_tests.zig");
+const window_tests = @import("window_tests.zig");
+const tree_tests = @import("tree_tests.zig");
+const act_rows_tests = @import("act_rows_tests.zig");
+const gdn_prep_tests = @import("gdn_prep_tests.zig");
+const block_tests = @import("block_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -101,6 +109,15 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "info")) return info(gpu);
     if (std.mem.eql(u8, cmd, "smoke")) return runtime_tests.smoke(gpu);
     if (std.mem.eql(u8, cmd, "graph")) return runtime_tests.graphs(gpu);
+    if (std.mem.eql(u8, cmd, "norms")) return norms_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "moe-glue")) return moe_glue_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "dense-rows")) return dense_rows_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "qk-rows")) return qk_rows_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "window")) return window_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "tree")) return tree_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "act-rows")) return act_rows_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "gdn-prep")) return gdn_prep_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "block")) return block_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "overhead") or std.mem.eql(u8, cmd, "overhead-pdl")) {
         const n = if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else 1000;
         const reps = if (rest.len > 1) try std.fmt.parseInt(usize, rest[1], 10) else 20;
