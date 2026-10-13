@@ -7,7 +7,6 @@ const core = @import("core");
 const engine = @import("cuda_engine.zig");
 const Engine = engine.Engine;
 const reuse = @import("cuda_reuse.zig");
-const grid = @import("cuda_prompt_grid.zig");
 const mtp = @import("cuda_mtp.zig");
 const Head = mtp.Head;
 const state = @import("cuda_state.zig");
@@ -39,6 +38,8 @@ pub const Cuda = struct {
     pinned: cuda.HostBuffer, // each window's held drafts read back (state.max_rows words a stream)
     rows_out: cuda.HostBuffer, // logprob rows the kernel writes straight to the host (row_slots of row_words)
     rows_dev: u64,
+    prompt_out: cuda.HostBuffer, // a prompt pass's rows (state.max_rows of row_words), then its picks; apart from pending window rows
+    prompt_dev: u64,
     costs: [state.max_rows]lanes.config.Cost = undefined,
     cost_count: usize = 0,
     mtp_ms: f64 = 0,
@@ -51,7 +52,9 @@ pub const Cuda = struct {
         errdefer pinned.free();
         var rows_out = try cuda.HostBuffer.allocMapped(e.ctx.d, row_slots * row_words * 4);
         errdefer rows_out.free();
-        return .{ .gpa = gpa, .e = e, .head = head, .pinned = pinned, .rows_out = rows_out, .rows_dev = try rows_out.device() };
+        var prompt_out = try cuda.HostBuffer.allocMapped(e.ctx.d, state.max_rows * (row_words + 1) * 4);
+        errdefer prompt_out.free();
+        return .{ .gpa = gpa, .e = e, .head = head, .pinned = pinned, .rows_out = rows_out, .rows_dev = try rows_out.device(), .prompt_out = prompt_out, .prompt_dev = try prompt_out.device() };
     }
 
     pub fn deinit(self: *Cuda) void {
@@ -61,6 +64,7 @@ pub const Cuda = struct {
         self.pinned.free();
         self.rows_out.free();
         if (self.bits) |*b| b.free();
+        self.prompt_out.free();
     }
 
     pub fn backend(self: *Cuda) be.Backend {
@@ -76,6 +80,7 @@ pub const Cuda = struct {
             .first_row = firstRowFn,
             .first_masked = firstMaskedFn,
             .held = heldFn,
+            .prompt_rows = true,
         } };
     }
 
@@ -196,11 +201,11 @@ pub const Cuda = struct {
         if (s.reuse.hook) |k| k.at(k.ptr, s, at);
     }
 
-    /// The stream's kept state on its bound sequence: where its prompt pass starts (0: none, off the grid, or failed).
+    /// The stream's kept state on its bound sequence: where its prompt pass starts (0: none, or nothing restored).
     fn restoreKept(self: *Cuda, s: *lanes.Stream, len: usize) usize {
         const saved = s.reuse.saved orelse return 0;
         var target: reuse.Target = .{ .e = self.e, .head = self.head };
-        if (!grid.resumable(s.reuse.at, len, state.prefill_rows)) {
+        if (s.reuse.at >= len) {
             s.reuse_failed = true;
             return 0;
         }
@@ -223,31 +228,51 @@ pub const Cuda = struct {
         const gop = try self.lanes.getOrPut(self.gpa, s);
         if (gop.found_existing) self.drop(gop.value_ptr.*);
         // the engine's own sequence while it is free: its rounds replay the captured graphs
-        const own = self.own_free and e.serial != null;
+        const own = self.own_free and e.serial != null and !s.untaught; // the own graphs carry the pocket
         gop.value_ptr.* = .{ .own = own, .stats = e.stats, .seq = if (own) &e.own else e.newSeq() catch |err| {
             self.lanes.removeByPtr(gop.key_ptr);
             return err;
         } };
         if (own) self.own_free = false;
+        gop.value_ptr.seq.untaught = s.untaught;
         e.bind(gop.value_ptr.seq);
         // a decision row only where lessons route on it: else the prompt's chunks stay as plain serving cuts them
         e.decide = if (s.decide != null and e.lessons() != null) s.decide.? else lesson_route.none;
         try e.setSampling(s.sampling);
         s.cached = 0;
-        const from = self.restoreKept(s, ids.len);
+        const from = if (s.prompt_logprobs != null) 0 else self.restoreKept(s, ids.len); // prompt rows need every row
         const keep: ?engine.Keep = if (s.reuse.marks.len == 0) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
+        var sink: PromptSink = .{ .gpa = self.gpa, .s = s };
+        s.prompt_rows.clearRetainingCapacity();
+        if (s.prompt_logprobs) |k| {
+            const words = self.prompt_out.slice(u32);
+            const picks_at = state.max_rows * row_words; // after the rows
+            e.prompt_rows = .{ .k = k, .picks = words[picks_at..][0..state.max_rows], .picks_dev = self.prompt_dev + picks_at * 4, .out = words[0..picks_at], .out_dev = self.prompt_dev, .stride = row_words, .ctx = &sink, .call = PromptSink.take };
+        }
+        defer e.prompt_rows = null;
         const first = try e.prefillFrom(ids, from, null, self.head, .{ .ptr = s, .check = cancelled }, keep);
         // the head's first draft reads the prompt's last row (its hidden row waits where a window's would)
-        const last = (ids.len - 1) % state.prefill_rows; // a resumed pass ends on the same grid
+        const last = ids.len - 1 - e.last_chunk;
         try e.ops().copy(e.b.hidden, e.b.p_hidden + last * @as(u64, e.c.hidden) * 2, e.c.hidden * 2);
         _ = self.take(first);
         if (s.logprobs) |k| {
             const at = (row_slots - 1) * row_words;
-            try e.ops().logprobRows(e.b.p_logits, e.c.vocab, e.b.p_sampled, k, self.rows_dev + at * 4, 1);
+            try e.ops().logprobRows(e.b.p_logits, e.c.vocab, e.b.p_sampled, k, false, self.rows_dev + at * 4, 1);
             try e.stream.synchronize();
             gop.value_ptr.first = LogRow.fromWords(self.rows_out.slice(u32)[at..][0..row_words], first, k);
         }
     }
+
+    /// A stream's prompt rows as the engine reads them back, in prompt order.
+    const PromptSink = struct {
+        gpa: std.mem.Allocator,
+        s: *lanes.Stream,
+
+        fn take(ctx: *anyopaque, words: []const u32, picks: []const u32) anyerror!void {
+            const p: *PromptSink = @ptrCast(@alignCast(ctx));
+            for (picks, 0..) |pick, i| try p.s.prompt_rows.append(p.gpa, LogRow.fromWords(words[i * row_words ..][0..row_words], pick, p.s.prompt_logprobs.?));
+        }
+    };
 
     fn firstRowFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!LogRow {
         const l = of(ptr).lanes.getPtr(s) orelse return error.UnknownStream;
@@ -289,7 +314,7 @@ pub const Cuda = struct {
         ids[0] = w.pending;
         @memcpy(ids[1..][0..w.tokens.len], w.tokens);
         try e.verifyMasked(ids[0 .. 1 + w.tokens.len], rows, null, try self.putBits(0, w.masks));
-        if (out[0].rows.len > 0) try e.ops().logprobRows(e.b.logits, e.c.vocab, e.b.sampled, w.stream.logprobs.?, self.rows_dev, rows);
+        if (out[0].rows.len > 0) try e.ops().logprobRows(e.b.logits, e.c.vocab, e.b.sampled, w.stream.logprobs.?, false, self.rows_dev, rows);
         const held = self.pinned.slice(u32)[0 .. rows - 1];
         if (w.held > 0) try e.ops().download(std.mem.sliceAsBytes(held), e.b.ids + 4);
         try e.stream.synchronize();
@@ -328,7 +353,7 @@ pub const Cuda = struct {
             e.bind(parts[k].seq);
             if (w.held > 0) try e.ops().download(std.mem.sliceAsBytes(held[k * state.max_rows ..][0 .. w.rows() - 1]), e.b.ids + 4);
             // the shared scratch holds every part's logits, part k's from its first row; its picks are its own
-            if (o.rows.len > 0) try e.ops().logprobRows(e.b.logits + row0 * @as(u64, e.c.vocab) * 2, e.c.vocab, e.b.sampled, w.stream.logprobs.?, self.rows_dev + row0 * row_words * 4, w.rows());
+            if (o.rows.len > 0) try e.ops().logprobRows(e.b.logits + row0 * @as(u64, e.c.vocab) * 2, e.c.vocab, e.b.sampled, w.stream.logprobs.?, false, self.rows_dev + row0 * row_words * 4, w.rows());
             row0 += w.rows();
         }
         try e.stream.synchronize();
@@ -397,7 +422,7 @@ pub const Cuda = struct {
         if (seq_graphs.logFromEnv()) {
             const d = self.e.stats.since(l.stats);
             const ms = @as(f64, @floatFromInt(d.capture_ns)) / 1e6;
-            std.log.info("graphs while a request on {s} sequence ran: {d} captures in {d:.1} ms, {d} replays of another sequence's own graphs, {d} eager windows", .{ if (l.own) "the own" else "another", d.captures, ms, d.replays, d.eager });
+            std.log.info("graphs while a request on {s} sequence ran: {d} captures in {d:.1} ms, {d} replays of graphs it captured for itself, {d} eager windows", .{ if (l.own) "the own" else "another", d.captures, ms, d.replays, d.eager });
         }
         if (l.own) self.own_free = true else self.e.freeSeq(l.seq);
     }

@@ -202,4 +202,6 @@ Living Weights is experimental. Measured on Nemotron 3.5 Lightning (MLX 4-bit) o
 While it learns, near misses and free writing about the fact's subject are trained to stay as they were. Before
 keeping a fact, it checks wordings it never trained on, with thinking off and on, near misses and unrelated prompts.
 If the fact does not come back, or another answer changes, the whole lesson is taken out before anything is written.
-Keep the original model for anything that matters.
+It also asks a few questions about the user that nothing told it, such as a cat's name or the user's own name; a lesson
+that makes it answer one with something made up ("Your cat's name is Whiskers.") is taken out too. Keep the original
+model for anything that matters.

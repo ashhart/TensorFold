@@ -115,7 +115,7 @@ pub fn probe(e: *Engine, gpa: std.mem.Allocator) !u64 {
     var p: Probe = .{ .e = e, .gpa = gpa };
     const marks = [_]u32{ 4096, toks.len - 8 };
     const out: engine.Out = .{ .ctx = &p, .prefilled = Probe.prefilled, .tokens = Probe.tokens, .cancelled = Probe.cancelled, .marked = Probe.marked };
-    _ = try e.generateFrom(&toks, 0, &marks, 1, &.{}, 0, out);
+    _ = try e.generateFrom(&toks, 0, &marks, 1, &.{}, 0, .{}, out);
     if (p.err) |err| return err;
     if (p.marks != marks.len) return error.ProbeUnmarked;
     return p.h.final();

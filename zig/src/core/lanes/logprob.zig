@@ -4,8 +4,8 @@ const std = @import("std");
 /// The most alternatives a row carries (OpenAI's `top_logprobs` limit).
 pub const max_top = 20;
 
-/// The words a backend writes for one row: the log normalizer, the pick's logit, the best ids, their logits.
-pub const words = 2 + 2 * max_top;
+/// The words a backend writes for one row: the log normalizer, the pick's logit, the best ids, their logits, the rank.
+pub const words = 3 + 2 * max_top;
 
 pub const Row = struct {
     token: u32, // the committed token
@@ -13,12 +13,13 @@ pub const Row = struct {
     count: u8 = 0,
     ids: [max_top]u32 = undefined, // logit descending, ties by the lower id
     logprobs: [max_top]f32 = undefined,
+    rank: u32 = 0, // vLLM's: the vocabulary's tokens at or above it, itself included, when the backend was asked for it
 
     /// One row from a backend's words: `pick` is the token whose logit the backend gathered, `count` best ids follow.
     pub fn fromWords(w: []const u32, pick: u32, count: u8) Row {
         std.debug.assert(count <= max_top and w.len >= words);
         const lse: f32 = @bitCast(w[0]);
-        var r: Row = .{ .token = pick, .logprob = @as(f32, @bitCast(w[1])) - lse, .count = count };
+        var r: Row = .{ .token = pick, .logprob = @as(f32, @bitCast(w[1])) - lse, .count = count, .rank = w[2 + 2 * max_top] };
         for (0..count) |i| {
             r.ids[i] = w[2 + i];
             r.logprobs[i] = @as(f32, @bitCast(w[2 + max_top + i])) - lse;

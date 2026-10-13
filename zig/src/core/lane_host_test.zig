@@ -556,3 +556,8 @@ test "a request that does not fit a shared cache pool waits, in order, until a s
     try std.testing.expectEqual(Reason.length, b.wait()); // alone again: admitted
     try std.testing.expectEqual(@as(usize, 4), b.state()[0]);
 }
+
+test {
+    _ = @import("lane_host_fail_test.zig");
+    _ = @import("lane_host_admit_test.zig");
+}

@@ -13,6 +13,7 @@ pub const snap_bytes = reuse.bytes;
 pub const snap_save = reuse.save;
 pub const snap_restore = reuse.restore;
 pub const snap_drop = reuse.drop;
+pub const snap_ready = reuse.ready; // the spare Mamba buffers it sets aside come out of the cache's budget
 const core = @import("core");
 
 /// Sliding Weights' learner (--slide): lessons change the weights this engine's lanes decode with.

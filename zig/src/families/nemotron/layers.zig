@@ -202,7 +202,7 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
     f.coop(e, "down", m.shared_down, s.sh_act, 0, s.sh_xs, s.sh, rows);
     if (m.slide) |r| rest(f, e, r, s.sh_act, s.sh, rows, f.c.shared_width);
     if (m.adapter) |ad| adapt(f, e, ad, s.sh_act, s.sh, rows);
-    if (m.pocket) |p| if (p.used > 0) pocket(f, e, p, s.x, s.sh, rows);
+    if (m.pocket) |p| if (p.used > 0) taught(f, e, p, s.x, s.sh, rows);
     inline for (.{ "expert_up", "expert_down" }, 0..) |key, j| {
         if (j == 0) e.alongside();
         const fc = if (j == 0) m.fc1 else m.fc2;
@@ -256,25 +256,34 @@ pub fn rest(f: Forward, e: *Enc, r: Buffer, x: Buffer, y: Buffer, rows: usize, w
     e.run(.{ 32 * f.c.hidden, (rows + 7) / 8, 1 }, .{ 256, 1, 1 });
 }
 
-/// y [rows, D] += relu(x up^T)^2 down over a pocket's neurons in use: learned neurons beside the shared expert's.
-pub fn pocket(f: Forward, e: *Enc, p: wts.Pocket, x: Buffer, y: Buffer, rows: usize) void {
+/// The pocket over the rows of streams that read what was learned: every row, or the runs between untaught streams'.
+pub fn taught(f: Forward, e: *Enc, p: wts.Pocket, x: Buffer, y: Buffer, rows: usize) void {
+    if (!f.untaught) return pocket(f, e, p, x, y, 0, rows);
+    var runs: lesson_route.Runs = .{};
+    for (f.segs) |g| if (runs.next(g.rows, g.cache.untaught)) |r| pocket(f, e, p, x, y, r[0], r[1]);
+    if (runs.last()) |r| pocket(f, e, p, x, y, r[0], r[1]);
+}
+
+/// y [rows, D] += relu(x up^T)^2 down from row `first` over the pocket's neurons in use (beside the shared expert's).
+pub fn pocket(f: Forward, e: *Enc, p: wts.Pocket, x: Buffer, y: Buffer, first: usize, rows: usize) void {
     const d: u32 = @intCast(f.c.hidden);
     const n: u32 = @intCast(p.used);
+    const row = f.c.hidden * 2; // x and y hold bf16 rows
     e.pipe(f.k.get("tf_train_lora_in"));
-    e.buf(x, 0, 0);
+    e.buf(x, first * row, 0);
     e.buf(p.up, 0, 1);
-    e.buf(p.z, 0, 2);
+    e.buf(p.z, first * p.used * 4, 2);
     e.bytes([4]u32{ @intCast(rows), d, n, 0 }, 3);
-    e.buf(p.zn, 0, 4);
+    e.buf(p.zn, first * 4, 4);
     e.run(.{ 32 * p.used, rows, 1 }, .{ 256, 1, 1 });
     e.pipe(f.k.get("tf_pocket_relu2"));
-    e.buf(p.z, 0, 0);
+    e.buf(p.z, first * p.used * 4, 0);
     e.bytes(@as(u32, @intCast(rows)) * n, 1);
     e.run(.{ rows * p.used, 1, 1 }, .{ 256, 1, 1 });
     e.pipe(f.k.get("tf_train_lora_out"));
-    e.buf(p.z, 0, 0);
+    e.buf(p.z, first * p.used * 4, 0);
     e.buf(p.down, 0, 1);
-    e.buf(y, 0, 2);
+    e.buf(y, first * row, 2);
     e.bytes([4]u32{ @intCast(rows), d, n, 0 }, 3);
     e.bytes(@as(f32, 1), 4);
     e.run(.{ f.c.hidden, rows, 1 }, .{ 256, 1, 1 });
