@@ -134,7 +134,7 @@ pub fn costShape(c: cfg.Config, tag: u64, buf: []u8, rows: usize, drafted: bool)
     return buf[0 .. s.len + (try std.fmt.bufPrint(buf[s.len..], "/w{x:0>16}", .{tag})).len];
 }
 
-/// What the chip's projection kernels run: the lane kernels on tensor units, the row kernels before them.
+/// What the chip's projection kernels run: lane kernels on tensor units for whole 32-row tiles, else the row kernels.
 pub const Chip = struct { tensor_units: bool, row_bits: []const u8 = &row.bit_widths };
 
 /// The first module admission refused, for the load's error message.
@@ -171,7 +171,7 @@ fn check(chip: Chip, n: usize, k: usize, w: Width) !void {
     _ = try @import("projection.zig").split(n, k);
     // The lane sums and odd word counts assume group 64 off the 4-bit kernel.
     if (chip.tensor_units and w.bits != 4 and w.group != 64) return error.UnsupportedLaneGroup;
-    if (chip.tensor_units) return (lane.Layout{ .n = n, .k = k, .format = .{ .bits = w.bits, .group = w.group }, .precompute_sums = isUniform(w), .reg = isUniform(w) }).validate();
+    if (chip.tensor_units and n % 32 == 0) return (lane.Layout{ .n = n, .k = k, .format = .{ .bits = w.bits, .group = w.group }, .precompute_sums = isUniform(w), .reg = isUniform(w) }).validate();
     if (isUniform(w) and n % 8 == 0) return;
     if (std.mem.indexOfScalar(u8, chip.row_bits, w.bits) == null) return error.UnsupportedRowBits;
     return (row.Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = n, .k = k, .group = w.group }).validate();
@@ -237,6 +237,12 @@ test "oQ4 and oQ2 formats admit once the row kernels unpack every width they dec
     var why: Why = .{};
     try testAdmit(oq4, .{ .tensor_units = false, .row_bits = &all_rows }, &why);
     try testAdmit(oq2, .{ .tensor_units = false, .row_bits = &all_rows }, &why);
+}
+
+test "on tensor units a run that is not whole 32-row tiles takes the row kernels: oQ4's 48-row in_proj_a" {
+    var why: Why = .{};
+    try testAdmit(oq4, .{ .tensor_units = true }, &why);
+    try testAdmit(oq2, .{ .tensor_units = true }, &why);
 }
 
 test "a width the row kernels do not unpack refuses naming the module, never guessing four bits" {
