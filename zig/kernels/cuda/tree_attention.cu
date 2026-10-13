@@ -16,6 +16,9 @@ using qmm_frag::mma;
 using qmm_frag::mma0;
 
 constexpr int SPAN = 2048;     // keys a group: one partial
+#ifndef TF_TREE_STAGES
+#define TF_TREE_STAGES 3
+#endif
 constexpr int MAXD = 128;      // a path's most rows
 constexpr float LOG2E = 1.4426950408889634f;
 
@@ -78,10 +81,12 @@ __device__ __forceinline__ void tree_group(
     if (k0 >= total) return; // the merge reads only the row's own groups
     const __nv_bfloat16* kc = origin + offs[2 * s];
     const __nv_bfloat16* vc = origin + offs[2 * s + 1];
-    uint4* ks = smem + warp * 2 * HB * C;
+    constexpr int ST = W == 1 ? TF_TREE_STAGES : 1; // tile stages: a one-warp block fetches ahead while it computes
+    uint4* const kv0 = smem + warp * ST * 2 * HB * C;
+    uint4* ks = kv0;
     uint4* vs = ks + HB * C;
     uint32_t qa[QREG ? K16 : 1][4];
-    uint4* qs = smem + W * 2 * HB * C; // !QREG: the row's heads [16][D], shared by the warps
+    uint4* qs = smem + W * ST * 2 * HB * C; // !QREG: the row's heads [16][D], shared by the warps
     if constexpr (QREG) {
         const int a0 = pf + g8, a1 = pf + g8 + 8;
         const bool v0 = a0 < npairs, v1 = a1 < npairs;
@@ -109,7 +114,9 @@ __device__ __forceinline__ void tree_group(
 #pragma unroll
     for (int i = 0; i < NB; ++i) o[i][0] = o[i][1] = o[i][2] = o[i][3] = 0.0f;
     float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;
-    for (int t = k0 / HB + wi; t * HB < k1; t += 4) {
+    // tile t's keys and values into stage st (committed keys, then the row's path), one cp.async group
+    auto load = [&](int t, int st) {
+        uint4* const kd = kv0 + st * 2 * HB * C;
         for (int i = lane; i < HB * C; i += 32) {
             const int key = t * HB + i / C;
             const bool in = key < k1;
@@ -124,11 +131,28 @@ __device__ __forceinline__ void tree_group(
                 vsrc = vn + ((int64_t)node * hk + kh) * D;
             }
             if (!in) ksrc = kn, vsrc = vn;
-            cp16z(ks + sw<D>(i / C, i % C), ksrc + (i % C) * 8, in);
-            cp16z(vs + sw<D>(i / C, i % C), vsrc + (i % C) * 8, in);
+            cp16z(kd + sw<D>(i / C, i % C), ksrc + (i % C) * 8, in);
+            cp16z(kd + HB * C + sw<D>(i / C, i % C), vsrc + (i % C) * 8, in);
         }
         commit();
-        wait_group<0>();
+    };
+    // ST - 1 tiles ahead: one cp.async group a tile, an empty one past the end, so the wait count never changes
+    const int t0 = k0 / HB + wi;
+#pragma unroll
+    for (int a = 0; a < ST - 1; ++a) {
+        if ((t0 + 4 * a) * HB < k1) load(t0 + 4 * a, a);
+        else commit();
+    }
+    int st = 0;
+    for (int t = t0; t * HB < k1; t += 4) {
+        const int ahead = t + 4 * (ST - 1);
+        if (ahead * HB < k1) load(ahead, (st + ST - 1) % ST);
+        else commit();
+        wait_group<ST - 1>(); // tile t landed; the next ST - 1 are in flight
+        ks = kv0 + st * 2 * HB * C;
+        vs = ks + HB * C;
+        st = (st + 1) % ST;
+
         __syncwarp();
         float sc[NT8][4];
 #pragma unroll

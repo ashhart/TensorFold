@@ -14,8 +14,9 @@ const Stream = stream_.Stream;
 pub const span = 2048;
 pub const max_depth = 128;
 const part_smem = [2]u32{ 4 * 2 * 32 * 16 * 16, 4 * 2 * 16 * 32 * 16 + 16 * 32 * 16 };
-/// The one-warp blocks' shared memory: one warp's K/V slots (at 256 also the queries).
-const part_smem_w1 = [2]u32{ 2 * 32 * 16 * 16, 2 * 16 * 32 * 16 + 16 * 32 * 16 };
+/// The one-warp blocks' tile stages (tree_attention.cu's TF_TREE_STAGES) and shared memory (at 256 also the queries).
+const stages_w1 = 3;
+const part_smem_w1 = [2]u32{ stages_w1 * 2 * 32 * 16 * 16, stages_w1 * 2 * 16 * 32 * 16 + 16 * 32 * 16 };
 /// A group's slices: its key tiles dealt to 4 warps, combined in order (in the block, or by the merge).
 const slices = 4;
 /// (row, key head, group) items one-warp blocks may take: their slices' partials sit apart from the combined ones.
