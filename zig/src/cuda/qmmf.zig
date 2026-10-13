@@ -66,35 +66,43 @@ pub fn plan(m: usize, n: usize, k: usize, clusters: bool) Plan {
 }
 
 /// qmmf.cu's instance names, per mode: row tiles 16, 32, 64 (each plain, then with a cluster), then the fused kernel.
-fn symbol(comptime mode: Mode, comptime bm: u32, comptime cluster: bool, comptime fused: bool) [:0]const u8 {
-    const name = "_ZN7tf_qmmf11qmmf_kernelILi{d}ELi{d}ELi64ELi1ELi4ELi4ELb0ELb{d}ELb{d}EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii";
-    return std.fmt.comptimePrint(name, .{ @backingInt(mode), bm, @intFromBool(cluster), @intFromBool(fused) });
+fn symbol(comptime mode: Mode, comptime bm: u32, comptime cluster: bool, comptime fused: bool, comptime wide: bool) [:0]const u8 {
+    const name = "_ZN7tf_qmmf11qmmf_kernelILi{d}ELi{d}ELi64ELi1ELi4ELi4ELb{d}ELb{d}ELb{d}EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii";
+    return std.fmt.comptimePrint(name, .{ @backingInt(mode), bm, @intFromBool(wide), @intFromBool(cluster), @intFromBool(fused) });
 }
 
-pub const reduce_symbol = "_ZN7tf_qmmf13reduce_kernelILb0EEEvPKfPvxif";
+pub const reduce_symbols = [2][:0]const u8{ "_ZN7tf_qmmf13reduce_kernelILb0EEEvPKfPvxif", "_ZN7tf_qmmf13reduce_kernelILb1EEEvPKfPvxif" };
 const row_tiles = [_]u32{ 16, 32, 64 };
+
+/// What a call writes: bf16 rows, or the fp32 sums unrounded (FP4 only, a tensor-parallel rank's partial rows).
+pub const Out = enum { bf16, f32 };
+
+fn loadTiles(mod: Module, comptime mode: Mode, comptime wide: bool) ![7]Function {
+    var set: [7]Function = undefined;
+    inline for (row_tiles, 0..) |bm, ti| inline for (.{ false, true }, 0..) |cl, ci| {
+        const f = try mod.function(symbol(mode, bm, cl, false, wide));
+        try f.allowDynamicShared(sharedBytes(mode, bm));
+        set[ti * 2 + ci] = f;
+    };
+    set[6] = try mod.function(symbol(mode, 64, false, true, wide));
+    try set[6].allowDynamicShared(sharedBytes(mode, 64));
+    return set;
+}
 
 pub const Lane = struct {
     mod: Module,
     fns: [modes.len][7]Function, // per mode: lane16, lane16c, lane32, lane32c, lane64, lane64c, fused
-    reduce: Function,
+    fp4_f32: [7]Function, // FP4's tiles writing fp32
+    reduce: [2]Function, // by Out
     clusters: bool, // sm_90 on: slices meet in a cluster's shared memory
 
     pub fn load(d: *const Driver, capability_major: u32) !Lane {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.qmmf);
         errdefer mod.unload();
-        var l: Lane = .{ .mod = mod, .fns = undefined, .reduce = try mod.function(reduce_symbol), .clusters = capability_major >= 9 };
-        inline for (modes, 0..) |mode, mi| {
-            inline for (row_tiles, 0..) |bm, ti| inline for (.{ false, true }, 0..) |cl, ci| {
-                const f = try mod.function(symbol(mode, bm, cl, false));
-                try f.allowDynamicShared(sharedBytes(mode, bm));
-                l.fns[mi][ti * 2 + ci] = f;
-            };
-            const f = try mod.function(symbol(mode, 64, false, true));
-            try f.allowDynamicShared(sharedBytes(mode, 64));
-            l.fns[mi][6] = f;
-        }
+        var l: Lane = .{ .mod = mod, .fns = undefined, .fp4_f32 = try loadTiles(mod, .fp4, true), .reduce = undefined, .clusters = capability_major >= 9 };
+        inline for (modes, 0..) |mode, mi| l.fns[mi] = try loadTiles(mod, mode, false);
+        for (&l.reduce, reduce_symbols) |*f, name| f.* = try mod.function(name);
         return l;
     }
 
@@ -110,8 +118,14 @@ pub const Lane = struct {
 
     /// y [m, n] bf16 = x [m, k] bf16 (rows `ldx` apart) times the weight, fp32 sums; `part` holds partBytes.
     pub fn matmul(l: Lane, s: Stream, x: u64, ldx: usize, m: usize, w: Weight, y: u64, part: u64) !void {
+        return l.matmulOut(s, x, ldx, m, w, y, .bf16, part);
+    }
+
+    /// matmul() writing y as `out` says: bf16, or fp32 (FP4 only).
+    pub fn matmulOut(l: Lane, s: Stream, x: u64, ldx: usize, m: usize, w: Weight, y: u64, out: Out, part: u64) !void {
+        if (out == .f32 and w.mode != .fp4) return error.EpilogueNotBuilt;
         const p = plan(m, w.n, w.k, l.clusters);
-        const set = l.fns[modeIndex(w.mode)];
+        const set = if (out == .f32) l.fp4_f32 else l.fns[modeIndex(w.mode)];
         const ti: usize = if (p.bm == 16) 0 else if (p.bm == 32) 1 else 2;
         const f = if (p.fused) set[6] else set[ti * 2 + @intFromBool(p.cluster)];
         const rows_t = (m + p.bm - 1) / p.bm;
@@ -144,7 +158,7 @@ pub const Lane = struct {
             r.add(@as(i64, @intCast(total)));
             r.add(@as(i32, @intCast(p.sk)));
             r.add(w.scale);
-            try launch_.launch(l.reduce, .{ .grid = .{ .x = @intCast((total + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256, .y = 1, .z = 1 } }, s, &r);
+            try launch_.launch(l.reduce[@backingInt(out)], .{ .grid = .{ .x = @intCast((total + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256, .y = 1, .z = 1 } }, s, &r);
         }
     }
 };
@@ -209,6 +223,7 @@ test "tile shared bytes, slices and row tiles as the Python host picks them" {
 }
 
 test "instance names are qmmf.cu's" {
-    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi3ELi16ELi64ELi1ELi4ELi4ELb0ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.fp8g, 16, true, false));
-    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi0ELi64ELi64ELi1ELi4ELi4ELb0ELb0ELb1EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.fp4, 64, false, true));
+    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi3ELi16ELi64ELi1ELi4ELi4ELb0ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.fp8g, 16, true, false, false));
+    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi0ELi64ELi64ELi1ELi4ELi4ELb0ELb0ELb1EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.fp4, 64, false, true, false));
+    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi0ELi32ELi64ELi1ELi4ELi4ELb1ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.fp4, 32, true, false, true));
 }
