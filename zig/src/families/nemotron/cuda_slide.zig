@@ -59,6 +59,9 @@ const Host = struct {
     pub fn pocket(m: Ctx, l: usize, up: []const f32, down: []const f32, used: usize) !void {
         const blk = &m.e.w.blocks[l];
         if (blk.kind != .moe) return error.NotAnMoeLayer;
+        // the kernels take their bounds from the count, so it never passes the pocket's width
+        const width = if (blk.moe.pocket) |p| p.n else up.len / m.e.c.hidden;
+        if (used > width) return error.PocketTooWide;
         if (blk.moe.pocket == null) {
             const w = &m.e.w;
             try w.buffers.ensureUnusedCapacity(w.gpa, 3);
@@ -70,7 +73,7 @@ const Host = struct {
             w.buffers.appendAssumeCapacity(ub);
             w.buffers.appendAssumeCapacity(db);
             w.buffers.appendAssumeCapacity(cb);
-            blk.moe.pocket = .{ .up = ub.ptr, .down = db.ptr, .n = up.len / m.e.c.hidden, .count = cb.ptr };
+            blk.moe.pocket = .{ .up = ub.ptr, .down = db.ptr, .n = width, .count = cb.ptr };
         }
         const p = &blk.moe.pocket.?;
         const o = m.e.ops();

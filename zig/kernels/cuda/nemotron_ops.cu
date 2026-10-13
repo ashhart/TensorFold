@@ -205,6 +205,7 @@ __device__ __forceinline__ void pocket_in(const __nv_bfloat16* __restrict__ y, i
 template <int R, int B>
 __device__ __forceinline__ void pocket_out(const float* __restrict__ act, const float* __restrict__ down, int n, int d,
                                            void* __restrict__ out, int out_f32, int rows, int row_mul, int row_add) {
+    if (n == 0) return;  // no neuron in use: the output keeps its bits, as when the launch is skipped
     __shared__ float a[R * pocket_width];
     const int r0 = blockIdx.y * R;
     const int tile = min(R, rows - r0);
