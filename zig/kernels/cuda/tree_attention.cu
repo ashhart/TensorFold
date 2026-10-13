@@ -217,20 +217,59 @@ __device__ __forceinline__ void tree_group(
             }
         __syncwarp();
     }
-    // each slice's partial (o, max, sum) of its 16 pairs: the merge combines a group's 4 slices in order
+    if constexpr (W == 1) {
+        // one warp a block: each slice's partial (o, max, sum) of its 16 pairs; the merge combines the 4 in order
 #pragma unroll
-    for (int half = 0; half < 2; ++half) {
-        const int hd = g8 + 8 * half;
-        if (pf + hd >= npairs) continue;
-        const int64_t part = (((rq + (pf + hd) / G) * hk + kh) * ng + gi) * 4 + wi;
-        const int head = (pf + hd) % G;
+        for (int half = 0; half < 2; ++half) {
+            const int hd = g8 + 8 * half;
+            if (pf + hd >= npairs) continue;
+            const int64_t part = (((rq + (pf + hd) / G) * hk + kh) * ng + gi) * 4 + wi;
+            const int head = (pf + hd) % G;
+#pragma unroll
+            for (int i = 0; i < NB; ++i) {
+                const int d = 8 * i + 2 * qd;
+                po[(part * 16 + head) * D + d] = o[i][2 * half];
+                po[(part * 16 + head) * D + d + 1] = o[i][2 * half + 1];
+            }
+            if (qd == 0) pm[part * 16 + head] = half ? m1 : m0, pl[part * 16 + head] = half ? l1 : l0;
+        }
+        return;
+    } else {
+        __syncthreads();
+        float* os = reinterpret_cast<float*>(smem); // [4 warps][16 heads][D], then max and sum [4][16]
+        float* ms = os + 4 * 16 * D;
+        float* ls = ms + 4 * 16;
 #pragma unroll
         for (int i = 0; i < NB; ++i) {
             const int d = 8 * i + 2 * qd;
-            po[(part * 16 + head) * D + d] = o[i][2 * half];
-            po[(part * 16 + head) * D + d + 1] = o[i][2 * half + 1];
+            os[(warp * 16 + g8) * D + d] = o[i][0];
+            os[(warp * 16 + g8) * D + d + 1] = o[i][1];
+            os[(warp * 16 + g8 + 8) * D + d] = o[i][2];
+            os[(warp * 16 + g8 + 8) * D + d + 1] = o[i][3];
         }
-        if (qd == 0) pm[part * 16 + head] = half ? m1 : m0, pl[part * 16 + head] = half ? l1 : l0;
+        if (qd == 0) {
+            ms[warp * 16 + g8] = m0, ls[warp * 16 + g8] = l0;
+            ms[warp * 16 + g8 + 8] = m1, ls[warp * 16 + g8 + 8] = l1;
+        }
+        __syncthreads();
+        for (int idx = threadIdx.x; idx < 16 * D; idx += 128) {
+            const int hd = idx / D, e = idx % D;
+            if (pf + hd >= npairs) continue;
+            const int64_t part = ((rq + (pf + hd) / G) * hk + kh) * ng + gi;
+            const int head = (pf + hd) % G;
+            float mm = -INFINITY;
+            for (int w = 0; w < 4; ++w) mm = fmaxf(mm, ms[w * 16 + hd]);
+            float acc = 0.0f, l = 0.0f;
+            for (int w = 0; w < 4; ++w) {
+                const float mw = ms[w * 16 + hd];
+                if (mw == -INFINITY) continue;
+                const float a = texp(__fsub_rn(mw, mm));
+                acc = __fmaf_rn(a, os[(w * 16 + hd) * D + e], acc);
+                l = __fmaf_rn(a, ls[w * 16 + hd], l);
+            }
+            po[(part * 16 + head) * D + e] = acc;
+            if (e == 0) pm[part * 16 + head] = mm, pl[part * 16 + head] = l;
+        }
     }
 }
 
@@ -304,11 +343,11 @@ TF_TREE_PART(tf_tree_part_256, 256, 16, 4)
 TF_TREE_PART(tf_tree_part_w1, 128, 32, 1)
 TF_TREE_PART(tf_tree_part_256_w1, 256, 16, 1)
 
-// out [W, H, D] bf16: block (row, key head, head) folds the row's groups in order, each group's 4 slices first.
+// out [W, H, D] bf16: block (row, key head, head) folds the row's groups in order (sliced: a group's 4 slices first).
 extern "C" __global__ void __launch_bounds__(256) tf_tree_merge(
     const float* __restrict__ po, const float* __restrict__ pm, const float* __restrict__ pl,
     const int* __restrict__ row_stream, const int* __restrict__ streams, const int* __restrict__ depths,
-    __nv_bfloat16* __restrict__ out, int h, int hk, int ng, int d) {
+    __nv_bfloat16* __restrict__ out, int h, int hk, int ng, int d, int sliced) {
     const int64_t r = blockIdx.x;
     const int kh = blockIdx.y, G = h / hk, hd = blockIdx.z; // block (row, key head, head): each element alone
     const int total = streams[4 * row_stream[r] + 2] + depths[r];
@@ -316,16 +355,19 @@ extern "C" __global__ void __launch_bounds__(256) tf_tree_merge(
     for (int e = threadIdx.x; e < d; e += 256) {
         float m = -INFINITY, l = 0.0f, acc = 0.0f;
         for (int gi = 0; gi < groups; ++gi) {
-            const int64_t part = ((r * hk + kh) * ng + gi) * 4;
-            float cm = -INFINITY;
-            for (int w = 0; w < 4; ++w) cm = fmaxf(cm, pm[(part + w) * 16 + hd]);
-            float co = 0.0f, cl = 0.0f;
-            for (int w = 0; w < 4; ++w) {
-                const float mw = pm[(part + w) * 16 + hd];
-                if (mw == -INFINITY) continue;
-                const float aw = texp(__fsub_rn(mw, cm));
-                co = __fmaf_rn(aw, po[((part + w) * 16 + hd) * d + e], co);
-                cl = __fmaf_rn(aw, pl[(part + w) * 16 + hd], cl);
+            const int64_t part = ((r * hk + kh) * ng + gi) * (sliced ? 4 : 1);
+            float cm = -INFINITY, co = 0.0f, cl = 0.0f;
+            if (!sliced) { // four-warp blocks combined the group's slices themselves
+                cm = pm[part * 16 + hd], co = po[(part * 16 + hd) * d + e], cl = pl[part * 16 + hd];
+            } else { // one-warp blocks left the 4 slices: their combine, in the same order
+                for (int w = 0; w < 4; ++w) cm = fmaxf(cm, pm[(part + w) * 16 + hd]);
+                for (int w = 0; w < 4; ++w) {
+                    const float mw = pm[(part + w) * 16 + hd];
+                    if (mw == -INFINITY) continue;
+                    const float aw = texp(__fsub_rn(mw, cm));
+                    co = __fmaf_rn(aw, po[((part + w) * 16 + hd) * d + e], co);
+                    cl = __fmaf_rn(aw, pl[(part + w) * 16 + hd], cl);
+                }
             }
             const bool active = cl > 0.0f;
             const float next = active ? fmaxf(m, cm) : m;

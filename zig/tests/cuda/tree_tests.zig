@@ -191,14 +191,17 @@ fn case(gpu: check.Gpu, d: usize, h: usize, hk: usize, seed: u64, worst_all: *f6
     g.shared_blocks = 96;
     const wide = try call(&x, s, &g, d, all, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, 129, scale);
     try check.sameBytes("tree attention: groups for a 262k context", std.mem.sliceAsBytes(wide), std.mem.sliceAsBytes(got));
-    // one warp a block (as on a device with more SMs than four-warp blocks): every slice's partial the same
+    // one warp a block (a device with SMs to spare): stream 2's rows alone, its full groups too, the batch's bits
     g.sms = 1 << 20;
     defer g.sms = 0;
-    const one = try call(&x, s, &g, d, all, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale);
-    try check.sameBytes("tree attention: one warp a block", std.mem.sliceAsBytes(one), std.mem.sliceAsBytes(got));
+    const third = try a.alloc(usize, widths[2]);
+    for (third, 0..) |*r, i| r.* = widths[0] + widths[1] + i;
+    try check.expect(widths[2] * ng * hk <= tree.slice_items, "tree attention: the one-warp case fits the slices", .{});
+    const one = try call(&x, s, &g, d, third, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale);
+    try check.sameBytes("tree attention: one warp a block", std.mem.sliceAsBytes(one), std.mem.sliceAsBytes(got[(widths[0] + widths[1]) * h * d ..][0 .. widths[2] * h * d]));
     g.shared_blocks = 1;
-    const one_strided = try call(&x, s, &g, d, all, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale);
-    try check.sameBytes("tree attention: one warp a block, one shared block", std.mem.sliceAsBytes(one_strided), std.mem.sliceAsBytes(got));
+    const one_strided = try call(&x, s, &g, d, third, row_stream, parents, qs, kns, vns, h, hk, &streams, offs_dev, origin, ng, scale);
+    try check.sameBytes("tree attention: one warp a block, one shared block", std.mem.sliceAsBytes(one_strided), std.mem.sliceAsBytes(one));
     g.shared_blocks = 96;
 }
 
