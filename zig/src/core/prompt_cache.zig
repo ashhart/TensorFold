@@ -103,7 +103,7 @@ pub const Entry = struct {
     at: u32,
     saved: Saved,
     bytes: u64,
-    born: u32, // the length of the prompt that kept it: a later turn's is longer
+    born: u32, // the length of the request's prompt that kept it, a reply's end too: a later turn's is longer
     used: u64, // the store's clock at its last keep or resume
     last: []u32, // the last prompt that kept or resumed it
     shared: bool = false, // kept at a shared system block's cut: other conversations resume it, so its own never supersedes it
@@ -188,7 +188,7 @@ pub const Store = struct {
             const skip = for (s.entries.items) |e| {
                 if (restoring != null and e.saved == restoring.?) break e;
             } else null;
-            s.remove(s.victimBut(skip, prompt) orelse return false);
+            s.remove(s.victimBut(skip, prompt, @intCast(prompt.len)) orelse return false);
             s.counts.evicted += 1;
         }
         return true;
@@ -291,7 +291,7 @@ pub const Store = struct {
             if (!exists) need += s.family.vtable.bytes(s.family.ptr, at);
         }
         while (s.held + need > s.budget) {
-            const i = s.victimBut(from, prompt) orelse return;
+            const i = s.victimBut(from, prompt, @intCast(prompt.len)) orelse return;
             s.remove(i);
             s.counts.evicted += 1;
         }
@@ -418,6 +418,11 @@ pub const Store = struct {
 
     /// Keep the state at `at` with its span prefix, evicting within the budget; `starts` are a learned cut's chunks.
     pub fn keep(s: *Store, prompt: []const u32, at: u32, owner: ?*anyopaque, starts: []const u32, spans: []const modes.Span) bool {
+        return s.keepBorn(prompt, @intCast(prompt.len), at, owner, starts, spans);
+    }
+
+    /// `keep` of a reply's end: `born` is its request's prompt length, so it supersedes none of that request's states.
+    pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*anyopaque, starts: []const u32, spans: []const modes.Span) bool {
         const n = @as(usize, at) + s.rules.lookahead;
         if (at == 0 or n > prompt.len) return false;
         s.clock += 1;
@@ -445,7 +450,7 @@ pub const Store = struct {
                 if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held -| bytes); // spare that cannot take this state goes before any state
                 if (s.spare() < free_) continue;
             }
-            s.remove(s.victimBut(null, prompt).?); // its storage may come back spare and take this state
+            s.remove(s.victimBut(null, prompt, born).?); // its storage may come back spare and take this state
             s.counts.evicted += 1;
         }
         if (s.entries.items.len == 0) if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| bytes);
@@ -466,7 +471,7 @@ pub const Store = struct {
             return s.fail(at, err);
         };
         const charged = if (s.family.vtable.charged) |f| f(s.family.ptr, saved) else bytes;
-        e.* = .{ .tokens = tokens, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = @intCast(prompt.len), .used = s.clock, .last = last, .shared = shared };
+        e.* = .{ .tokens = tokens, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .last = last, .shared = shared };
         owns_decoded = false;
         s.entries.append(s.gpa, e) catch {
             s.free(e);
@@ -487,7 +492,7 @@ pub const Store = struct {
         if (!modes.equal(&.{}, spans, m.at)) return have; // the request decodes rows the learned prompt pass prefilled
         const bytes = s.family.vtable.bytes(s.family.ptr, m.at);
         while (bytes <= s.budget and s.held + s.spare() + bytes > s.budget) {
-            s.remove(s.victimBut(have, prompt) orelse return have);
+            s.remove(s.victimBut(have, prompt, @intCast(prompt.len)) orelse return have);
             s.counts.evicted += 1;
         }
         if (bytes > s.budget) return have;
@@ -530,11 +535,11 @@ pub const Store = struct {
     }
 
     /// The entry to free first, never `skip`: a superseded one, no branch point, oldest; else the oldest, rewind last.
-    fn victimBut(s: *const Store, skip: ?*Entry, prompt: []const u32) ?usize {
+    fn victimBut(s: *const Store, skip: ?*Entry, prompt: []const u32, born: u32) ?usize {
         var best: ?usize = null;
         for (s.entries.items, 0..) |e, i| {
             if (e.shared or e.branched or e == skip or s.isActiveRewind(e, prompt)) continue; // shared cuts and branch points go only as the least recently used
-            const now = prompt.len > e.born and prompt.len > e.tokens.len and std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens); // this prompt extends it
+            const now = born > e.born and prompt.len > e.tokens.len and std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens); // a longer request's tokens extend it
             if ((now or s.extended(e)) and (best == null or e.used < s.entries.items[best.?].used)) best = i;
         }
         if (best) |i| return i;

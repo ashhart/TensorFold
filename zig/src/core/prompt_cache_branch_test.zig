@@ -74,6 +74,60 @@ test "a state resumed once and then extended is still superseded: a conversation
     try std.testing.expectEqual(s.entries.items.len, f.live);
 }
 
+test "a reply's end born with its request's length supersedes none of its states: a regenerate and an edit resume the history" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .warm = true, .min_prompt = 0, .min_gap = 3 }, 400); // fake bytes 100 + at
+    defer s.deinit();
+    const x = seq(20, 100); // two other conversations' histories, 113 bytes each
+    const z = seq(20, 200);
+    try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &x));
+    try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &z));
+    const t1 = seq(20, 1); // history 13: 339 held
+    try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &t1));
+    const reply = t1 ++ seq(6, 500); // the reply decoded after it
+    _ = f.pass(&s, &reply, .{ .from = 20 });
+    try std.testing.expect(s.keepBorn(&reply, 20, 26, null, &.{}, &.{})); // 126 more: the oldest goes, not the history
+    try std.testing.expect(s.find(&x, &.{}, &.{}) == null);
+    const y = seq(20, 300); // an unrelated prompt: the reply's end is no later turn, so it supersedes nothing either
+    try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &y));
+    try std.testing.expect(s.find(&z, &.{}, &.{}) == null);
+    try std.testing.expectEqual(@as(u32, 13), try request(&f, &s, a, &t1)); // regenerated
+    const edited = t1 ++ seq(6, 600) ++ seq(5, 700) ++ seq(7, 1000); // the reply edited, then the next user turn
+    try std.testing.expectEqual(@as(u32, 13), try request(&f, &s, a, &edited));
+    try std.testing.expect(s.held <= s.budget);
+    try std.testing.expectEqual(s.entries.items.len, f.live);
+}
+
+test "a later turn still supersedes the history and the reply's end: both go before an older unrelated state" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .warm = true, .min_prompt = 0, .min_gap = 3 }, 400); // fake bytes 100 + at
+    defer s.deinit();
+    const x = seq(20, 100); // the least recently used state throughout
+    try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &x));
+    const t1 = seq(20, 1);
+    try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &t1));
+    const reply = t1 ++ seq(6, 500);
+    _ = f.pass(&s, &reply, .{ .from = 20 });
+    try std.testing.expect(s.keepBorn(&reply, 20, 26, null, &.{}, &.{})); // 352 held
+    const t2 = reply ++ seq(5, 700) ++ seq(7, 1000); // the next turn resumes the reply's end; its history needs room
+    try std.testing.expectEqual(@as(u32, 26), try request(&f, &s, a, &t2));
+    try std.testing.expect(s.find(&t1, &.{}, &.{}) == null); // the first turn's history went, not x
+    const w = seq(20, 300); // the reply's end is extended by the later turn's history: it goes next
+    try std.testing.expectEqual(@as(u32, 0), try request(&f, &s, a, &w));
+    for (s.entries.items) |e| try std.testing.expect(e.at != 26);
+    try std.testing.expect(s.find(&x, &.{}, &.{}) != null);
+    try std.testing.expect(s.held <= s.budget);
+    try std.testing.expectEqual(s.entries.items.len, f.live);
+}
+
 test "a turn's rewind state is not superseded by the history state its own prompt kept: an edit still resumes it" {
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
