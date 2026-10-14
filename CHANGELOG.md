@@ -5,6 +5,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - `core` reads NVIDIA's ModelOpt NVFP4 checkpoints as stored. `modelopt.admit` checks config.json's quantization block (top level or `text_config`'s) for NVFP4 weights in groups of 16 and refuses other ModelOpt formats by name, and `nvfp4.zig` maps a linear's e2m1 codes, e4m3 scales and fp32 scale and gives a float32 reference row. Which linears are NVFP4 comes from the tensors, since nvidia/GLM-5.3-Flash-NVFP4 at 423acf37 stores its MTP layer in BF16 without listing it. The tests read that revision's config.json and its whole tensor header, 147,661 names. The loader that calls it comes with GLM-5.3-Flash on CUDA (#758). Thanks to @Bizuayeu.
+- `Checkpoint.release` drops a checkpoint's pages from the page cache on Linux (madvise and fadvise DONTNEED) once a loader is done with them: on unified memory the page cache holds memory the device needs. The mapping stays valid, and a later read faults the same bytes back in. On a GB10 it dropped all 20.1 GiB that a read of Nemotron 3.5 Lightning's NVFP4 checkpoint had cached, in 0.26 s. Nemotron's own loader reads with direct I/O and leaves nothing behind, so its loads are unchanged; the saving is for loaders that read through the mapping, as GLM-5.3-Flash's will. Ours: a file whose mapping fell back to a heap copy (Zig's fallback when mmap fails) keeps its bytes, since advising that copy away would have zeroed them (#766). Thanks to @Bizuayeu.
 
 ## 1.0.11
 
