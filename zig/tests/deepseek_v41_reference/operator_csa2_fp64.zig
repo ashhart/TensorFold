@@ -785,7 +785,10 @@ test "sink normalization sits at rounding level across the exp overflow boundari
     var rng = Lcg{ .state = 0x51c0de51c0de51c0 };
 
     // One case per boundary FP32 exp() has: underflow to zero, the overflow edge, and the
-    // mass-balanced middle where the sink decides the output on its own.
+    // mass-balanced middle where the sink decides the output on its own. From about 83 upward the
+    // sink exponent reaches the FP32 overflow boundary, so the cells that differ from the reference
+    // sit near 1e-38 and a one-ULP difference in the running maximum decides whether either side
+    // sees a finite denominator at all.
     const sweep = [_]struct { sink: f32, name: []const u8 }{
         .{ .sink = -104, .name = "sink_underflow" },
         .{ .sink = -90, .name = "sink_near_underflow" },
@@ -796,6 +799,10 @@ test "sink normalization sits at rounding level across the exp overflow boundari
         .{ .sink = 1, .name = "sink_one" },
         .{ .sink = 12, .name = "sink_medium" },
         .{ .sink = 60, .name = "sink_large" },
+        .{ .sink = 80, .name = "sink_edge80" },
+        .{ .sink = 83, .name = "sink_edge83" },
+        .{ .sink = 84, .name = "sink_edge84" },
+        .{ .sink = 85, .name = "sink_edge85" },
         .{ .sink = 86, .name = "sink_over_edge" },
         .{ .sink = 90, .name = "sink_overflow" },
     };
@@ -1219,6 +1226,40 @@ fn indexCase(device: mtl.Device, queue: mtl.Queue, p: *const tf.deepseek_v41.csa
         }
         if (!chosen[@intCast(slot)]) kernel_only += 1;
     }
+    // How much arithmetic noise the selection can absorb before the *set* changes. The score is only
+    // worth what the storage keeps, so a pick is knife-edged when the boundary margin is comparable
+    // to one score quantum; if it is not, no 1-ULP arithmetic difference can flip this row.
+    var exact_picks: [512]u32 = undefined;
+    var exact_scores = try std.testing.allocator.alloc(f64, spec.keys);
+    defer std.testing.allocator.free(exact_scores);
+    @memcpy(exact_scores, exact[0..spec.keys]);
+    for (0..picks) |pick| {
+        var best: usize = 0;
+        for (0..spec.keys) |i| {
+            if (exact_scores[i] > exact_scores[best]) best = i;
+        }
+        exact_picks[pick] = @intCast(best);
+        exact_scores[best] = -std.math.inf(f64);
+    }
+    var flips: usize = 0;
+    var exact_chosen = try std.testing.allocator.alloc(bool, spec.keys);
+    defer std.testing.allocator.free(exact_chosen);
+    @memset(exact_chosen, false);
+    for (exact_picks[0..picks]) |at| exact_chosen[at] = true;
+    for (0..spec.keys) |at| {
+        if (chosen[at] != exact_chosen[at]) flips += 1;
+    }
+    var quantum: f32 = 0;
+    var margin_in_quanta: f64 = 0;
+    if (min_selected != std.math.inf(f32) and max_unselected != -std.math.inf(f32)) {
+        const boundary = min_selected * 0.5 + max_unselected * 0.5;
+        const exponent: i32 = if (@abs(boundary) > 0) std.math.ilogb(@abs(boundary)) - 7 else -149;
+        quantum = std.math.pow(f32, 2.0, @as(f32, @floatFromInt(exponent)));
+        margin_in_quanta = @as(f64, min_selected - max_unselected) / @as(f64, quantum);
+    }
+    std.debug.print(
+        \\CSA64 {{"case":"{s}","stage":"index_select","side":"noise_tolerance","keys":{d},"picks":{d},"precision_flips":{d},"selection_margin":{d},"score_quantum":{d},"margin_in_quanta":{d:.1}}}
+    , .{ spec.name, spec.keys, picks, flips, min_selected - max_unselected, quantum, margin_in_quanta });
     std.debug.print(
         \\CSA64 {{"case":"{s}","stage":"index_select","side":"metal","keys":{d},"picks":{d},"reference_only":{d},"kernel_only":{d},"invalid_positions":{d},"lowest_selected":{d},"highest_unselected":{d}}}
     , .{ spec.name, spec.keys, picks, picks - overlap, kernel_only, out_of_range, min_selected, max_unselected });
