@@ -1,0 +1,389 @@
+//! GLM-5.3-Flash's vision tower on CUDA (rank 0 encodes; rank 1 receives the features), as mlx-vlm's
+//! glm5_next/vision.py defines it: the patch embedding (a linear over a patch's 2 x 14 x 14 x 3 values), 24 blocks
+//! (RMSNorm, attention with RMSNorm'd q and k and a 2-D rotary over each frame's patches, a limited SwiGLU), the
+//! post-norm, the 2 x 2 downsample (a linear over each merge block's four patches) and the merger (a projection,
+//! LayerNorm + GELU, a limited SwiGLU) to the language model's 4096. The linears are cuBLASLt products (bf16 in, fp32
+//! accumulate, bias added before the one rounding); the residual stream stays fp32; glm/vision.cu does the rest.
+//! Checked against the torch reference (tools/vision_ref.py) by tf-cuda-test glm-vision.
+
+const std = @import("std");
+const cuda = @import("cuda");
+const kern = @import("kern.zig");
+
+const H: i64 = 1024; // hidden
+const HEADS: i64 = 16;
+const HD: i64 = 64; // a head's width
+const MLP: i64 = 4096;
+const PATCH: i64 = 1176; // 3 channels x 2 frames x 14 x 14
+const MERGE: i64 = 2;
+const OUT: i64 = 4096; // the merged rows' width (the language model's)
+const PROJ: i64 = 10240; // the merger's SwiGLU width
+pub const DEPTH = 24;
+const CHUNK: i64 = 2048; // query rows a scores product covers
+const ROWS: i64 = 4096; // rows a linear's fp32 product covers (the scratch's bound)
+const EPS: f32 = 1e-5;
+const LIMIT: f32 = 10.0;
+
+const Block = struct { n1: u64, n2: u64, qkv_w: u64, qkv_b: u64, qn: u64, kn: u64, proj_w: u64, proj_b: u64, g_w: u64, g_b: u64, u_w: u64, u_b: u64, d_w: u64, d_b: u64 };
+
+const LinKey = struct { m: u64, n: u64, k: u64, f32_out: bool };
+
+pub const Tower = struct {
+    gpa: std.mem.Allocator,
+    d: *const cuda.Driver,
+    lt: cuda.cublaslt.Library,
+    mem: cuda.DeviceBuffer,
+    blocks: [DEPTH]Block = undefined,
+    patch_w: u64 = 0,
+    patch_b: u64 = 0,
+    post: u64 = 0,
+    down_w: u64 = 0, // [4096, 2, 2, 1024]: the conv's taps in the merge block's (row, col) order, then the channels
+    down_b: u64 = 0,
+    m_proj: u64 = 0, m_ln_w: u64 = 0, m_ln_b: u64 = 0, m_gate: u64 = 0, m_up: u64 = 0, m_down: u64 = 0,
+    inv_freq: cuda.DeviceBuffer,
+    linears: std.AutoHashMap(LinKey, cuda.cublaslt.Linear),
+    ws: cuda.DeviceBuffer,
+    ws_len: usize = 64 << 20,
+    bytes: u64 = 0,
+    /// Development: the fp32 stream after the patch embedding and after block 0 (tf-cuda-test glm-vision).
+    dbg_embed: ?[]f32 = null,
+    dbg_block0: ?[]f32 = null,
+    dbg_blocks: ?[]f32 = null, // the stream after the last block
+    dbg_all: ?[]f32 = null, // after every block
+    dbg_down: ?[]u16 = null, // the downsample's rows (bf16)
+
+    /// The tower's tensors (model.visual.*, bf16) from the checkpoint's shards in ``dir``, in one allocation.
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8) !Tower {
+        const ipath = try std.fs.path.join(gpa, &.{ dir, "model.safetensors.index.json" });
+        defer gpa.free(ipath);
+        const itext = try std.Io.Dir.cwd().readFileAlloc(io, ipath, gpa, .limited(64 << 20));
+        defer gpa.free(itext);
+        const index = try std.json.parseFromSlice(std.json.Value, gpa, itext, .{});
+        defer index.deinit();
+        const wm = index.value.object.get("weight_map").?.object;
+        // the shards holding the tower, and its tensors' places in them
+        const Ent = struct { file: []const u8, off: u64, n: u64, shape: [5]i64, nd: usize };
+        var ents = std.StringHashMap(Ent).init(gpa);
+        defer ents.deinit();
+        var files = std.StringHashMap(void).init(gpa);
+        defer files.deinit();
+        var it = wm.iterator();
+        while (it.next()) |e| if (std.mem.startsWith(u8, e.key_ptr.*, "model.visual.")) try files.put(e.value_ptr.string, {});
+        var headers: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty;
+        defer {
+            for (headers.items) |*h| h.deinit();
+            headers.deinit(gpa);
+        }
+        var total: u64 = 0;
+        var fit = files.keyIterator();
+        while (fit.next()) |fname| {
+            const path = try std.fs.path.join(gpa, &.{ dir, fname.* });
+            defer gpa.free(path);
+            const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+            defer file.close(io);
+            var head: [8]u8 = undefined;
+            _ = try file.readPositionalAll(io, &head, 0);
+            const hlen = std.mem.readInt(u64, &head, .little);
+            const text = try gpa.alloc(u8, hlen);
+            defer gpa.free(text);
+            _ = try file.readPositionalAll(io, text, 8);
+            try headers.append(gpa, try std.json.parseFromSlice(std.json.Value, gpa, text, .{}));
+            var hit = headers.items[headers.items.len - 1].value.object.iterator();
+            while (hit.next()) |e| {
+                if (!std.mem.startsWith(u8, e.key_ptr.*, "model.visual.")) continue;
+                if (!std.mem.eql(u8, e.value_ptr.object.get("dtype").?.string, "BF16")) return error.UnsupportedVisionDType;
+                const offs = e.value_ptr.object.get("data_offsets").?.array.items;
+                var ent: Ent = .{ .file = fname.*, .off = 8 + hlen + @as(u64, @intCast(offs[0].integer)), .n = @intCast(offs[1].integer - offs[0].integer), .shape = @splat(0), .nd = 0 };
+                for (e.value_ptr.object.get("shape").?.array.items, 0..) |x, i| ent.shape[i] = x.integer;
+                ent.nd = e.value_ptr.object.get("shape").?.array.items.len;
+                try ents.put(e.key_ptr.*, ent);
+                total += std.mem.alignForward(u64, ent.n, 256);
+            }
+        }
+        var t: Tower = .{ .gpa = gpa, .d = d, .lt = try cuda.cublaslt.Library.open(), .mem = try cuda.DeviceBuffer.alloc(d, total),
+            .inv_freq = try cuda.DeviceBuffer.alloc(d, 16 * 4), .linears = .init(gpa), .ws = undefined, .bytes = total };
+        errdefer t.deinit();
+        t.ws = try cuda.DeviceBuffer.alloc(d, t.ws_len);
+        var at: u64 = 0;
+        var names = std.StringHashMap(u64).init(gpa);
+        defer names.deinit();
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(gpa);
+        var eit = ents.iterator();
+        while (eit.next()) |e| {
+            const ent = e.value_ptr.*;
+            try buf.resize(gpa, ent.n);
+            const path = try std.fs.path.join(gpa, &.{ dir, ent.file });
+            defer gpa.free(path);
+            const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+            defer file.close(io);
+            _ = try file.readPositionalAll(io, buf.items, ent.off);
+            if (std.mem.eql(u8, e.key_ptr.*, "model.visual.downsample.weight")) { // [o, c, 2, 2] -> [o, 2, 2, c]
+                if (ent.nd != 4 or ent.shape[0] != OUT or ent.shape[1] != H) return error.BadVisionShape;
+                const src = std.mem.bytesAsSlice(u16, buf.items);
+                const perm = try gpa.alloc(u16, src.len);
+                defer gpa.free(perm);
+                const c_n: usize = @intCast(H);
+                for (0..@intCast(OUT)) |o| for (0..c_n) |c| for (0..2) |kh| for (0..2) |kw| {
+                    perm[((o * 2 + kh) * 2 + kw) * c_n + c] = src[((o * c_n + c) * 2 + kh) * 2 + kw];
+                };
+                @memcpy(buf.items, std.mem.sliceAsBytes(perm));
+            }
+            const ptr = t.mem.ptr + at;
+            try d.check(d.api.cuMemcpyHtoD_v2(ptr, buf.items.ptr, ent.n), "vision weights");
+            try names.put(e.key_ptr.*, ptr);
+            at += std.mem.alignForward(u64, ent.n, 256);
+        }
+        const get = struct {
+            fn f(m: *const std.StringHashMap(u64), comptime fmt: []const u8, args: anytype) !u64 {
+                var nb: [128]u8 = undefined;
+                const name = try std.fmt.bufPrint(&nb, "model.visual." ++ fmt, args);
+                return m.get(name) orelse {
+                    std.log.err("glm vision: no tensor {s}", .{name});
+                    return error.MissingVisionTensor;
+                };
+            }
+        }.f;
+        t.patch_w = try get(&names, "patch_embed.proj.weight", .{});
+        t.patch_b = try get(&names, "patch_embed.proj.bias", .{});
+        t.post = try get(&names, "post_layernorm.weight", .{});
+        t.down_w = try get(&names, "downsample.weight", .{});
+        t.down_b = try get(&names, "downsample.bias", .{});
+        t.m_proj = try get(&names, "merger.proj.weight", .{});
+        t.m_ln_w = try get(&names, "merger.post_projection_norm.weight", .{});
+        t.m_ln_b = try get(&names, "merger.post_projection_norm.bias", .{});
+        t.m_gate = try get(&names, "merger.gate_proj.weight", .{});
+        t.m_up = try get(&names, "merger.up_proj.weight", .{});
+        t.m_down = try get(&names, "merger.down_proj.weight", .{});
+        for (&t.blocks, 0..) |*bl, i| {
+            bl.* = .{
+                .n1 = try get(&names, "blocks.{d}.norm1.weight", .{i}), .n2 = try get(&names, "blocks.{d}.norm2.weight", .{i}),
+                .qkv_w = try get(&names, "blocks.{d}.attn.qkv.weight", .{i}), .qkv_b = try get(&names, "blocks.{d}.attn.qkv.bias", .{i}),
+                .qn = try get(&names, "blocks.{d}.attn.q_norm.weight", .{i}), .kn = try get(&names, "blocks.{d}.attn.k_norm.weight", .{i}),
+                .proj_w = try get(&names, "blocks.{d}.attn.proj.weight", .{i}), .proj_b = try get(&names, "blocks.{d}.attn.proj.bias", .{i}),
+                .g_w = try get(&names, "blocks.{d}.mlp.gate_proj.weight", .{i}), .g_b = try get(&names, "blocks.{d}.mlp.gate_proj.bias", .{i}),
+                .u_w = try get(&names, "blocks.{d}.mlp.up_proj.weight", .{i}), .u_b = try get(&names, "blocks.{d}.mlp.up_proj.bias", .{i}),
+                .d_w = try get(&names, "blocks.{d}.mlp.down_proj.weight", .{i}), .d_b = try get(&names, "blocks.{d}.mlp.down_proj.bias", .{i}),
+            };
+        }
+        // the rotary's frequencies: 1 / 10000^(i / 16), i = 0, 2 .. 30 over 32 (head width / 2)
+        var inv: [16]f32 = undefined;
+        for (&inv, 0..) |*v, i| v.* = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(2 * i)) / 32.0);
+        try t.inv_freq.upload(0, std.mem.sliceAsBytes(&inv));
+        return t;
+    }
+
+    pub fn deinit(t: *Tower) void {
+        var it = t.linears.valueIterator();
+        while (it.next()) |l| l.deinit();
+        t.linears.deinit();
+        t.mem.free();
+        t.inv_freq.free();
+        t.ws.free();
+        t.lt.close();
+    }
+
+    /// D[m, n] = X[m, k] . W[n, k]^T (fp32 or bf16 out), a plan per shape kept for the next image.
+    fn linear(t: *Tower, k: *kern.K, x: u64, w: u64, d: u64, m: i64, n: i64, kk: i64, f32_out: bool) !void {
+        const key: LinKey = .{ .m = @intCast(m), .n = @intCast(n), .k = @intCast(kk), .f32_out = f32_out };
+        const gop = try t.linears.getOrPut(key);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = cuda.cublaslt.Linear.initTyped(&t.lt, key.m, key.n, key.k, .bf16, if (f32_out) .f32 else .bf16, t.ws_len) catch |e| {
+                _ = t.linears.remove(key);
+                return e;
+            };
+        }
+        try gop.value_ptr.run(x, w, d, t.ws.ptr, t.ws_len, k.stream.handle);
+    }
+
+    fn grid1(n: i64) cuda.Dim3 {
+        return .{ .x = @intCast(@min(std.math.divCeil(i64, n, 256) catch unreachable, 65535)) };
+    }
+
+    /// out = bf16(x . W^T + bias) (bias 0: none), in row chunks through ``acc``; with ``x32``, x32 += that instead.
+    fn dense(t: *Tower, k: *kern.K, x: u64, w: u64, bias: u64, out: u64, x32: u64, acc: u64, m: i64, n: i64, kk: i64) !void {
+        var r: i64 = 0;
+        while (r < m) : (r += ROWS) {
+            const rows = @min(ROWS, m - r);
+            try t.linear(k, x + @as(u64, @intCast(r * kk * 2)), w, acc, rows, n, kk, true);
+            var a: cuda.Args = .{};
+            a.add(acc); a.add(bias); a.add(if (out != 0) out + @as(u64, @intCast(r * n * 2)) else 0);
+            a.add(if (x32 != 0) x32 + @as(u64, @intCast(r * n * 4)) else 0); a.add(@as(i64, rows * n)); a.add(@as(i32, @intCast(n)));
+            try k.go(try k.ext(.vision, "glm_vis_bias"), grid1(rows * n), 256, 0, &a);
+        }
+    }
+
+    /// The limited SwiGLU of two linears (biases 0: none) over x [m, kk] -> out [m, n] bf16, in row chunks.
+    fn swiglu(t: *Tower, k: *kern.K, x: u64, gw: u64, gb: u64, uw: u64, ub: u64, out: u64, acc: u64, acc2: u64, m: i64, n: i64, kk: i64) !void {
+        var r: i64 = 0;
+        const step = @divFloor(ROWS * MLP, n); // the fp32 products' rows within the scratch
+        while (r < m) : (r += step) {
+            const rows = @min(step, m - r);
+            const xr = x + @as(u64, @intCast(r * kk * 2));
+            try t.linear(k, xr, gw, acc, rows, n, kk, true);
+            try t.linear(k, xr, uw, acc2, rows, n, kk, true);
+            var a: cuda.Args = .{};
+            a.add(acc); a.add(acc2); a.add(gb); a.add(ub); a.add(out + @as(u64, @intCast(r * n * 2))); a.add(@as(i64, rows * n));
+            a.add(@as(i32, @intCast(n))); a.add(LIMIT);
+            try k.go(try k.ext(.vision, "glm_vis_swiglu"), grid1(rows * n), 256, 0, &a);
+        }
+    }
+
+    fn rmsnorm(k: *kern.K, x32: u64, w: u64, y: u64, rows: i64, cols: i64) !void {
+        var a: cuda.Args = .{};
+        a.add(x32); a.add(w); a.add(y); a.add(@as(i32, @intCast(cols))); a.add(EPS);
+        try k.go(try k.ext(.vision, "glm_vis_rmsnorm"), .{ .x = @intCast(rows) }, 256, 0, &a);
+    }
+
+    /// Scratch bytes ``encode`` takes for ``patches`` patches in segments of ``seg``.
+    pub fn scratchBytes(patches: i64, seg: i64) u64 {
+        const N = patches;
+        const q = @min(CHUNK, seg);
+        return @intCast(N * PATCH * 4 + N * H * 4 + N * H * 2 * 5 + N * MLP * 2 + 2 * ROWS * MLP * 4 + q * seg * 6 + q * HD * 4 + q * 4 + N * 8 + 16 * 1024);
+    }
+
+    /// Features of one image or video (``grid`` [t, h, w] in patches, t frame groups) from its patches (fp32,
+    /// [t h w, 1176] in the processor's merge-block order) into ``out`` ([t h w / 4, 4096] bf16).
+    pub fn encode(t: *Tower, k: *kern.K, patches: []const f32, grid: [3]i64, out: u64) !void {
+        const d = t.d;
+        const gt = grid[0];
+        const gh = grid[1];
+        const gw = grid[2];
+        if (gt < 1 or gh < MERGE or gw < MERGE or @mod(gh, MERGE) != 0 or @mod(gw, MERGE) != 0) return error.BadImageGrid;
+        const seg = gh * gw;
+        const N = gt * seg;
+        if (@as(i64, @intCast(patches.len)) != N * PATCH) return error.BadImagePatches;
+        // each patch's (row, col) in merge-block order, every frame group alike
+        const pos = try t.gpa.alloc(i32, @intCast(N * 2));
+        defer t.gpa.free(pos);
+        var i: i64 = 0;
+        while (i < N) : (i += 1) {
+            const j = @mod(i, seg);
+            const in_col = @mod(j, MERGE);
+            const in_row = @mod(@divTrunc(j, MERGE), MERGE);
+            const block_col = @mod(@divTrunc(j, MERGE * MERGE), @divTrunc(gw, MERGE));
+            const block_row = @divTrunc(j, MERGE * MERGE * @divTrunc(gw, MERGE));
+            pos[@intCast(i * 2)] = @intCast(block_row * MERGE + in_row);
+            pos[@intCast(i * 2 + 1)] = @intCast(block_col * MERGE + in_col);
+        }
+        var scratch = try cuda.DeviceBuffer.alloc(d, scratchBytes(N, seg));
+        defer scratch.free();
+        var at: u64 = scratch.ptr;
+        const take = struct {
+            fn f(p: *u64, n: i64) u64 {
+                const r = p.*;
+                p.* += std.mem.alignForward(u64, @intCast(n), 256);
+                return r;
+            }
+        }.f;
+        const q_rows = @min(CHUNK, seg);
+        const p32 = take(&at, N * PATCH * 4);
+        const x32 = take(&at, N * H * 4);
+        const xn = take(&at, N * H * 2);
+        const qh = take(&at, N * H * 2);
+        const kh = take(&at, N * H * 2);
+        const vt = take(&at, N * H * 2);
+        const att = take(&at, N * H * 2);
+        const big = take(&at, N * MLP * 2);
+        const acc = take(&at, ROWS * MLP * 4);
+        const acc2 = take(&at, ROWS * MLP * 4);
+        const sc = take(&at, q_rows * seg * 4);
+        const pr = take(&at, q_rows * seg * 2);
+        const oh = take(&at, q_rows * HD * 4);
+        const sums = take(&at, q_rows * 4);
+        const dpos = take(&at, N * 8);
+        try d.check(d.api.cuMemcpyHtoDAsync_v2(dpos, pos.ptr, pos.len * 4, k.stream.handle), "vision positions");
+        try d.check(d.api.cuMemcpyHtoDAsync_v2(p32, patches.ptr, patches.len * 4, k.stream.handle), "vision patches");
+        { // the patch embedding: the patches as bf16, then the conv as a linear (with its bias) into the fp32 stream
+            var a: cuda.Args = .{};
+            a.add(p32); a.add(big); a.add(@as(i64, N * PATCH));
+            try k.go(try k.ext(.vision, "glm_vis_to_bf16"), grid1(N * PATCH), 256, 0, &a);
+            var r: i64 = 0;
+            while (r < N) : (r += ROWS) {
+                const rows = @min(ROWS, N - r);
+                try t.linear(k, big + @as(u64, @intCast(r * PATCH * 2)), t.patch_w, acc, rows, H, PATCH, true);
+                var b: cuda.Args = .{};
+                b.add(acc); b.add(t.patch_b); b.add(x32 + @as(u64, @intCast(r * H * 4))); b.add(@as(i64, rows * H)); b.add(@as(i32, @intCast(H)));
+                try k.go(try k.ext(.vision, "glm_vis_embed32"), grid1(rows * H), 256, 0, &b);
+            }
+        }
+        const scale: f32 = 1.0 / @sqrt(@as(f32, HD));
+        if (t.dbg_embed) |dst| {
+            try k.stream.synchronize();
+            try d.check(d.api.cuMemcpyDtoH_v2(@ptrCast(dst.ptr), x32, dst.len * 4), "vision debug");
+        }
+        for (t.blocks, 0..) |bl, bi| {
+            defer if (t.dbg_all) |dst| {
+                const n: usize = @intCast(N * H);
+                k.stream.synchronize() catch {};
+                d.check(d.api.cuMemcpyDtoH_v2(@ptrCast(dst[bi * n ..].ptr), x32, n * 4), "vision debug") catch {};
+            };
+            defer if (bi == 0) if (t.dbg_block0) |dst| {
+                k.stream.synchronize() catch {};
+                d.check(d.api.cuMemcpyDtoH_v2(@ptrCast(dst.ptr), x32, dst.len * 4), "vision debug") catch {};
+            };
+            try rmsnorm(k, x32, bl.n1, xn, N, H);
+            try t.dense(k, xn, bl.qkv_w, bl.qkv_b, big, 0, acc, N, 3 * H, H);
+            {
+                var a: cuda.Args = .{};
+                a.add(big); a.add(bl.qn); a.add(bl.kn); a.add(dpos); a.add(t.inv_freq.ptr); a.add(qh); a.add(kh); a.add(vt);
+                a.add(@as(i32, @intCast(N))); a.add(@as(i32, @intCast(seg))); a.add(@as(i32, @intCast(HEADS))); a.add(EPS);
+                try k.go(try k.ext(.vision, "glm_vis_qkv"), .{ .x = @intCast(std.math.divCeil(i64, N * HEADS, 8) catch unreachable) }, 256, 0, &a);
+            }
+            // each frame group attends within itself; per head, chunks of queries (q, k: [t, H, seg, 64]; v: [t, H, 64, seg])
+            var g: i64 = 0;
+            while (g < gt) : (g += 1) {
+                var h: i64 = 0;
+                while (h < HEADS) : (h += 1) {
+                    const blk: u64 = @intCast((g * HEADS + h) * seg * HD * 2);
+                    var c: i64 = 0;
+                    while (c < seg) : (c += CHUNK) {
+                        const rows = @min(CHUNK, seg - c);
+                        try t.linear(k, qh + blk + @as(u64, @intCast(c * HD * 2)), kh + blk, sc, rows, seg, HD, true);
+                        var a: cuda.Args = .{};
+                        a.add(sc); a.add(pr); a.add(sums); a.add(@as(i32, @intCast(seg))); a.add(scale);
+                        try k.go(try k.ext(.vision, "glm_vis_softmax"), .{ .x = @intCast(rows) }, 256, 0, &a);
+                        try t.linear(k, pr, vt + blk, oh, rows, HD, seg, true);
+                        var b: cuda.Args = .{};
+                        b.add(oh); b.add(sums); b.add(att + @as(u64, @intCast((g * seg + c) * H * 2))); b.add(@as(i32, @intCast(rows)));
+                        b.add(@as(i32, @intCast(HEADS))); b.add(@as(i32, @intCast(h)));
+                        try k.go(try k.ext(.vision, "glm_vis_head_out"), grid1(rows * HD), 256, 0, &b);
+                    }
+                }
+            }
+            try t.dense(k, att, bl.proj_w, bl.proj_b, 0, x32, acc, N, H, H);
+            try rmsnorm(k, x32, bl.n2, xn, N, H);
+            try t.swiglu(k, xn, bl.g_w, bl.g_b, bl.u_w, bl.u_b, big, acc, acc2, N, MLP, H);
+            try t.dense(k, big, bl.d_w, bl.d_b, 0, x32, acc, N, H, MLP);
+        }
+        if (t.dbg_blocks) |dst| {
+            try k.stream.synchronize();
+            try d.check(d.api.cuMemcpyDtoH_v2(@ptrCast(dst.ptr), x32, dst.len * 4), "vision debug");
+        }
+        // the post-norm, then each merge block's four patches (adjacent rows) through the 2 x 2 conv as one linear
+        try rmsnorm(k, x32, t.post, xn, N, H);
+        const M = @divExact(N, MERGE * MERGE);
+        try t.dense(k, xn, t.down_w, t.down_b, att, 0, acc, M, OUT, 4 * H);
+        if (t.dbg_down) |dst| {
+            try k.stream.synchronize();
+            try d.check(d.api.cuMemcpyDtoH_v2(@ptrCast(dst.ptr), att, dst.len * 2), "vision debug");
+        }
+        // the merger: projection, LayerNorm + GELU, the limited SwiGLU to 10240 and back
+        var r: i64 = 0;
+        while (r < M) : (r += ROWS) {
+            const rows = @min(ROWS, M - r);
+            try t.linear(k, att + @as(u64, @intCast(r * OUT * 2)), t.m_proj, acc, rows, OUT, OUT, true);
+            var a: cuda.Args = .{};
+            a.add(acc); a.add(t.m_ln_w); a.add(t.m_ln_b); a.add(xn + @as(u64, @intCast(r * OUT * 2))); a.add(@as(i32, @intCast(OUT))); a.add(EPS);
+            try k.go(try k.ext(.vision, "glm_vis_ln_gelu"), .{ .x = @intCast(rows) }, 256, 0, &a);
+        }
+        r = 0;
+        const step = @divFloor(ROWS * MLP, PROJ);
+        while (r < M) : (r += step) {
+            const rows = @min(step, M - r);
+            try t.swiglu(k, xn + @as(u64, @intCast(r * OUT * 2)), t.m_gate, 0, t.m_up, 0, big, acc, acc2, rows, PROJ, OUT);
+            try t.linear(k, big, t.m_down, out + @as(u64, @intCast(r * OUT * 2)), rows, OUT, PROJ, false);
+        }
+        try k.stream.synchronize(); // the scratch is freed on return
+    }
+};

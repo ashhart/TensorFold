@@ -43,13 +43,27 @@ const kernels = [_]Kernel{
     .{ .name = "qmmf", .flags = &.{"-O3"} }, // nvfp4/qmmf.cu's device code (FP8G, FP4), tensorfold_nvfp4_v3
     .{ .name = "prompt16", .flags = &.{"-O3"} }, // nvfp4/prompt.cu's FP4 and FP8 tile 4, tensorfold_nvfp4_prompt_v1
     .{ .name = "modelopt_pack", .flags = &.{"-O3"} }, // ours: ModelOpt tensors into the lane, prompt and expert layouts
+    // GLM-5.3-Flash (glm5_next): the device copy of the Python engine's KDA extension (zig/tests/cuda/glm/gen_copies.py)
+    .{ .name = "glm_kda", .src = "glm/kda", .flags = &.{ "-O3", "--fmad=false" } }, // glm5_next/cuda/kda.py, tensorfold_glm_kda_v2
+    .{ .name = "glm_ops", .src = "glm/ops", .flags = &.{ "-O3", "--fmad=false" } }, // ours: the token lists, casts and positions torch ops make
+    .{ .name = "glm_experts", .src = "glm/experts_sym", .flags = &.{"-O3"} }, // ours: fn_experts on symmetric groups (scales alone)
+    .{ .name = "glm_experts_prefill", .src = "glm/experts_sym_prefill", .flags = &.{"-O3"} },
+    .{ .name = "glm_vision", .src = "glm/vision", .flags = &.{"-O3"} }, // ours: the vision tower's row and elementwise steps
+    .{ .name = "glm_mm", .src = "glm/mm", .flags = &.{"-O3"} }, // ours: the dense linears on tensor cores, any row count
+    .{ .name = "glm_rows", .src = "glm/rows", .flags = &.{ "-O3", "--fmad=false" } }, // ours: norms, hyper-connections, router, combine
+    .{ .name = "glm_latent", .src = "glm/latent", .flags = &.{"-O3"} }, // ours: latent MLA attention, per-row caches
+    .{ .name = "glm_index", .src = "glm/index", .flags = &.{"-O3"} }, // ours: the DSA indexer, per-row rings and pools
+    .{ .name = "glm_dflash", .src = "glm/dflash", .flags = &.{"-O3"} }, // ours: the DFlash2 block drafter (opt-in)
+    .{ .name = "roce_gather", .src = "roce_gather", .flags = &.{"-O3"} }, // ours: b12x's one-shot RoCE all-gather, two ranks
+    .{ .name = "glm_exl3", .src = "glm/exl3", .flags = &.{"-O3"} }, // python-0.6's EXL3 routed experts (mcg, 4 bits), without torch
+    .{ .name = "glm_experts3", .src = "glm/experts_sym", .flags = &.{ "-O3", "-DGLM_SYM3" } }, // ours: 3-bit codes in planes
+    .{ .name = "glm_experts3_prefill", .src = "glm/experts_sym_prefill", .flags = &.{ "-O3", "-DGLM_SYM3" } },
     .{ .name = "torch_argmax", .src = "torch_ops/argmax", .flags = torch_ops },
     .{ .name = "torch_topk", .src = "torch_ops/topk", .flags = torch_ops },
     .{ .name = "torch_pointwise", .src = "torch_ops/pointwise", .flags = torch_ops },
     .{ .name = "torch_indexing", .src = "torch_ops/indexing", .flags = torch_ops },
     .{ .name = "torch_movement", .src = "torch_ops/movement", .flags = torch_ops },
     .{ .name = "torch_nemotron_constants", .src = "torch_ops/nemotron_constants", .flags = torch_ops },
-    .{ .name = "roce_gather", .src = "roce_gather", .flags = &.{"-O3"} }, // b12x's one-shot RoCE all-gather, two ranks
 };
 
 /// torch.utils.cpp_extension's own nvcc flags (torch 2.13): C++20 and which half/bf16 operators the headers define.
@@ -80,7 +94,15 @@ fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     return cuda;
 }
 
-fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, draft_ids: *std.Build.Module) struct { core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, tokenizer: *std.Build.Module, heat: *std.Build.Module } {
+var glm_option: ?bool = null;
+
+/// -Dglm, read once.
+fn glmOption(b: *std.Build) bool {
+    if (glm_option == null) glm_option = b.option(bool, "glm", "register the GLM-5.3-Flash CUDA family (two ranks)") orelse false;
+    return glm_option.?;
+}
+
+fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, draft_ids: *std.Build.Module) struct { core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, tokenizer: *std.Build.Module, heat: *std.Build.Module, glm: ?*std.Build.Module } {
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     core.addImport("tokenizer", tokenizer);
@@ -92,7 +114,14 @@ fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     nemotron.addImport("lanes", lanes);
     nemotron.addImport("heat", heat);
     nemotron.addImport("nemotron_draft_ids", draft_ids);
-    return .{ .core = core, .lanes = lanes, .nemotron = nemotron, .tokenizer = tokenizer, .heat = heat };
+    // GLM-5.3-Flash on two GB10s (zig/src/families/glm_cuda), registered when built with -Dglm
+    const glm: ?*std.Build.Module = if (glmOption(b)) blk: {
+        const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm_cuda/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        m.addImport("cuda", cuda);
+        m.addImport("lanes", lanes);
+        break :blk m;
+    } else null;
+    return .{ .core = core, .lanes = lanes, .nemotron = nemotron, .tokenizer = tokenizer, .heat = heat, .glm = glm };
 }
 
 /// Linux targets: fatbins (-Dnvcc builds them, -Dfatbins embeds prebuilt ones), `tensorfold` and `tf-cuda-test`.
@@ -124,14 +153,13 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     cli.addImport("core", mods.core);
     cli.addImport("lanes", mods.lanes);
     cli.addImport("nemotron", mods.nemotron);
-    const native = engines(b, target, optimize, cuda, mods.lanes, mods.nemotron);
+    const native = engines(b, target, optimize, cuda, mods.lanes, mods.nemotron, null);
     cli.addOptions("build_options", build_options);
     cli.addImport("checkpoint_cli", checkpointCli(b, target, optimize, strip, native.engines, mods.core));
     b.installArtifact(b.addExecutable(.{ .name = "tensorfold", .root_module = cli }));
     const runner = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
     runner.addImport("cuda", cuda);
     runner.addImport("core", mods.core);
-    runner.addImport("qwen_image", vision_build.module(b, target, optimize));
     runner.addImport("lanes", mods.lanes);
     runner.addImport("nemotron", mods.nemotron);
     const exlr8 = exlr8_build.coreAlias(b, target, optimize, mods.core);
@@ -141,12 +169,18 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     runner.addImport("exlr8_frozen", b.createModule(.{ .root_source_file = b.path("zig/tests/fixtures/exlr8/frozen.zig"), .target = target, .optimize = optimize }));
     runner.addImport("exlr8_frozen_dense", b.createModule(.{ .root_source_file = b.path("zig/tests/fixtures/exlr8/frozen_dense.zig"), .target = target, .optimize = optimize }));
     for (exlr8_build.denseModules(b, target, optimize, exlr8, exlr8_tests[0])) |m| runner.addImport(m.name, m.module);
+    runner.addImport("qwen_image", vision_build.module(b, target, optimize));
+    // the GLM weight loader alone (tf-cuda-test glm-weights checks it against the Python engine's hashes)
+    const glm_weights = b.createModule(.{ .root_source_file = b.path("zig/src/families/glm_cuda/weights.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    glm_weights.addImport("cuda", cuda);
+    glm_weights.addImport("lanes", mods.lanes);
+    runner.addImport("glm_weights", glm_weights);
     b.installArtifact(b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner }));
-    nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.tokenizer, build_options, true).root_module.strip = strip;
+    nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.glm, mods.tokenizer, build_options, true).root_module.strip = strip;
 }
 
 /// The CUDA engines a native server opens (native/cuda.zig), over the given runtime and families.
-fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module) struct { api: *std.Build.Module, engines: *std.Build.Module } {
+fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, glm: ?*std.Build.Module) struct { api: *std.Build.Module, engines: *std.Build.Module } {
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "lanes", .module = lanes }, .{ .name = "qwen_image", .module = vision_build.module(b, target, optimize) } } });
     const mod = b.createModule(.{
         .root_source_file = b.path("zig/src/native/cuda.zig"),
@@ -155,6 +189,10 @@ fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .link_libc = true,
         .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "engine_api", .module = api }, .{ .name = "lanes", .module = lanes }, .{ .name = "nemotron", .module = nemotron } },
     });
+    const fn_options = b.addOptions();
+    fn_options.addOption(bool, "glm", glm != null);
+    mod.addOptions("cuda_families", fn_options);
+    mod.addImport("glm_cuda", glm orelse b.createModule(.{ .root_source_file = b.path("zig/src/native/no_family_glm.zig"), .target = target, .optimize = optimize }));
     return .{ .api = api, .engines = mod };
 }
 
@@ -164,8 +202,8 @@ fn checkpointCli(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 }
 
 /// `zig build native`: tensorfold-native with the CUDA engines into zig-out/native/bin, as the Metal build makes it.
-fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, tokenizer: *std.Build.Module, build_options: *std.Build.Step.Options, install_native: bool) *std.Build.Step.Compile {
-    const m = engines(b, target, optimize, cuda, lanes, nemotron);
+fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, glm: ?*std.Build.Module, tokenizer: *std.Build.Module, build_options: *std.Build.Step.Options, install_native: bool) *std.Build.Step.Compile {
+    const m = engines(b, target, optimize, cuda, lanes, nemotron, glm);
     // the HTTP side keeps its safety checks; the engine below it runs at `optimize` (the tokenizer is the family's)
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
     const exe = b.addExecutable(.{ .name = "tensorfold-native", .root_module = b.createModule(.{
@@ -193,7 +231,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/build/check_fatbins.zig"), .target = host }) })).step);
     const cuda = runtime(b, host, .debug, &.{});
     const mods = family(b, host, .debug, cuda, draft_ids);
-    const native_modules = engines(b, host, .debug, cuda, mods.lanes, mods.nemotron);
+    const native_modules = engines(b, host, .debug, cuda, mods.lanes, mods.nemotron, null);
     const native = native_modules.engines;
     // the HTTP server's unit tests (zig/src/server/root.zig), which the macOS build runs, on Linux hosts too
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = host, .optimize = .debug, .link_libc = true });
@@ -249,7 +287,7 @@ pub fn distServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *s
     };
     const cuda = runtime(b, target, .fast, if (prebuilt != null) &images else &.{});
     const mods = family(b, target, .fast, cuda, draft_ids);
-    return nativeServer(b, target, .fast, cuda, mods.core, mods.lanes, mods.nemotron, mods.tokenizer, build_options, false);
+    return nativeServer(b, target, .fast, cuda, mods.core, mods.lanes, mods.nemotron, mods.glm, mods.tokenizer, build_options, false);
 }
 
 /// SASS targets every release fatbin holds: Ampere (sm_86), RTX 50 and RTX PRO Blackwell (sm_120), GB10 (sm_121).
