@@ -23,6 +23,26 @@ const known_diffs = [_]Known{
     .{ .group = "anthropic", .name = "tool-use-stream" },
 };
 
+/// Why two request logs differ: their line counts and the first line that does, each cut to 100 bytes.
+fn logDiff(a: std.mem.Allocator, want: []const u8, got: []const u8) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var wl = std.mem.splitScalar(u8, want, '\n');
+    var gl = std.mem.splitScalar(u8, got, '\n');
+    var n: usize = 0;
+    while (true) : (n += 1) {
+        const w = wl.next();
+        const g = gl.next();
+        if (w == null and g == null) break;
+        if (w != null and g != null and std.mem.eql(u8, w.?, g.?)) continue;
+        const ws = w orelse "<end>";
+        const gs = g orelse "<end>";
+        try out.append(a, try std.fmt.allocPrint(a, "line {d}: golden [{s}] zig [{s}]", .{ n + 1, ws[0..@min(ws.len, 100)], gs[0..@min(gs.len, 100)] }));
+        break;
+    }
+    try out.append(a, try std.fmt.allocPrint(a, "TENSORFOLD_REQUEST_LOG: golden {d} lines, zig {d} lines", .{ std.mem.count(u8, want, "\n"), std.mem.count(u8, got, "\n") }));
+    return out.items;
+}
+
 /// Reads a spawned server's stdout to its end, so its log lines never fill the pipe (4 KiB on Windows).
 fn drainStdout(io: Io, out: Io.File) void {
     var buf: [4096]u8 = undefined;
@@ -490,7 +510,7 @@ pub fn main(init: std.process.Init) !void {
                     .group = "lifecycle",
                     .name = "request-log",
                     .verdict = if (std.mem.eql(u8, want, got)) .equal else .differ,
-                    .why = if (std.mem.eql(u8, want, got)) &.{} else &.{"TENSORFOLD_REQUEST_LOG lines differ from the frozen ones"},
+                    .why = if (std.mem.eql(u8, want, got)) &.{} else try logDiff(init.arena.allocator(), want, got),
                 });
             } else if (std.mem.eql(u8, kind, "rewrite_key")) {
                 var file = try Io.Dir.cwd().createFile(io, s.key_path.?, .{});
