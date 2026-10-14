@@ -251,5 +251,6 @@ test {
     _ = @import("checks.zig");
     _ = @import("seen.zig");
     _ = @import("budget.zig");
+    _ = @import("fuzz.zig");
     _ = loop;
 }

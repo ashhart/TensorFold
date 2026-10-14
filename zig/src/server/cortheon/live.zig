@@ -81,7 +81,7 @@ pub fn filtered(a: Allocator, found: tools.Found) Allocator.Error!tools.Found {
     return .{ .engine = found.engine, .results = results, .removed = found.removed + removed };
 }
 
-const max_title = 200; // bytes of a page title shown: a heading, never a place to hide a page of text
+pub const max_title = 200; // bytes of a page title shown: a heading, never a place to hide a page of text
 
 fn typeIs(content_type: []const u8, names: []const []const u8) bool {
     for (names) |n| if (std.ascii.findIgnoreCase(content_type, n) != null) return true;
