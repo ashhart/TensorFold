@@ -1,0 +1,183 @@
+//! Gemma 4 dense decode kernels against tools/zig/gemma4_dump.py's fixtures: each output's bits, by window width.
+const std = @import("std");
+const mtl = @import("metal");
+const tf = @import("tensorfold");
+
+const lane = tf.lane_projection;
+const npy = tf.npy;
+const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+
+const Ctx = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    device: mtl.Device,
+    queue: mtl.Queue,
+    ckpt: *tf.checkpoint_metal.Checkpoint,
+    dump: []const u8,
+    failed: usize = 0,
+};
+
+/// A dumped array's values as bf16 bits (the dump writes bf16 tensors as exact float32).
+fn loadBf16(c: *Ctx, name: []const u8) ![]u16 {
+    const path = try std.fmt.allocPrint(c.gpa, "{s}/{s}.npy", .{ c.dump, name });
+    defer c.gpa.free(path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(c.io, path, c.gpa, .unlimited);
+    defer c.gpa.free(bytes);
+    const a = try npy.parse(bytes);
+    if (!std.mem.eql(u8, a.descr, "<f4")) return error.UnexpectedDtype;
+    const out = try c.gpa.alloc(u16, a.count());
+    for (out, 0..) |*o, i| o.* = @truncate(std.mem.readInt(u32, a.data[i * 4 ..][0..4], .little) >> 16);
+    return out;
+}
+
+/// Python's lane_qmm.split_k: K slices fixed by the weight's shape.
+fn splitK(n: usize, k: usize) usize {
+    const tiles = (n + 31) / 32;
+    var sk: usize = 1;
+    while (sk < 8 and tiles * sk < 1024 and (k / 64) / (sk * 2) >= 8) sk *= 2;
+    return sk;
+}
+
+/// The members' MLX affine tensors stacked along N, packed into one lane projection's layout.
+const Stack = struct {
+    proj: lane.Projection,
+    w: mtl.Buffer,
+    sb: mtl.Buffer,
+    n: usize,
+    k: usize,
+
+    fn init(c: *Ctx, names: []const []const u8, precompute: bool) !Stack {
+        var n: usize = 0;
+        var k: usize = 0;
+        for (names) |m| {
+            const t = try c.ckpt.get(try key(c, m, "weight"));
+            n += t.shape[0];
+            k = t.shape[1] * 8;
+        }
+        const words = try c.gpa.alloc(u32, n * k / 8);
+        defer c.gpa.free(words);
+        const scales = try c.gpa.alloc(u16, n * k / 64);
+        defer c.gpa.free(scales);
+        const biases = try c.gpa.alloc(u16, n * k / 64);
+        defer c.gpa.free(biases);
+        var at: usize = 0;
+        for (names) |m| {
+            const w = (try c.ckpt.get(try key(c, m, "weight"))).host(u32);
+            const s = (try c.ckpt.get(try key(c, m, "scales"))).host(u16);
+            const b = (try c.ckpt.get(try key(c, m, "biases"))).host(u16);
+            @memcpy(words[at * k / 8 ..][0..w.len], w);
+            @memcpy(scales[at * k / 64 ..][0..s.len], s);
+            @memcpy(biases[at * k / 64 ..][0..b.len], b);
+            at += w.len / (k / 8);
+        }
+        const l = lane.Layout{ .n = n, .k = k, .format = .{ .bits = 4, .group = 64 }, .sk = splitK(n, k), .precompute_sums = precompute };
+        const wb = try c.device.buffer(l.weightWords() * 4, shared);
+        const sbb = try c.device.buffer(l.metadataElements() * 2, shared);
+        try lane.pack(l, words, scales, biases, wb.slice(u32, l.weightWords()), sbb.slice(u16, l.metadataElements()));
+        return .{ .proj = try lane.Projection.init(c.gpa, c.device, l), .w = wb, .sb = sbb, .n = n, .k = k };
+    }
+
+    fn deinit(s: Stack) void {
+        s.proj.deinit();
+        s.w.deinit();
+        s.sb.deinit();
+    }
+};
+
+var key_buf: [256]u8 = undefined;
+fn key(_: *Ctx, member: []const u8, part: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(&key_buf, "language_model.model.{s}.{s}", .{ member, part });
+}
+
+/// Runs `s` on the dumped input `in_name` and counts output bits that differ from `out_name`.
+fn checkProjection(c: *Ctx, label: []const u8, s: Stack, rows: usize, in_name: []const u8, out_name: []const u8) !void {
+    const x = try loadBf16(c, in_name);
+    defer c.gpa.free(x);
+    const want = try loadBf16(c, out_name);
+    defer c.gpa.free(want);
+    if (x.len != rows * s.k or want.len != rows * s.n) return error.FixtureShape;
+    const xb = try c.device.buffer(x.len * 2, shared);
+    defer xb.deinit();
+    @memcpy(xb.slice(u16, x.len), x);
+    const yb = try c.device.buffer(want.len * 2, shared);
+    defer yb.deinit();
+    const cb = c.queue.commandBuffer();
+    const e = cb.compute(.serial);
+    try s.proj.encode(e, .{ .buf = xb }, .{ .buf = s.w }, .{ .buf = s.sb }, .{ .buf = yb }, @intCast(rows));
+    e.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure()) |msg| {
+        std.debug.print("{s}: GPU failure {s}\n", .{ label, msg });
+        return error.GpuFailed;
+    }
+    const got = yb.slice(u16, want.len);
+    var diff: usize = 0;
+    var first: ?usize = null;
+    for (got, want, 0..) |g, w, i| if (g != w) {
+        diff += 1;
+        if (first == null) first = i;
+    };
+    c.failed += diff;
+    std.debug.print("{s} rows {d}: {d} of {d} outputs differ{s}\n", .{ label, rows, diff, want.len, if (diff == 0) "" else " (first at a column of row 0 or later)" });
+}
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, gpa);
+    defer args.deinit();
+    _ = args.next();
+    const model = args.next() orelse return error.Usage;
+    const dump = args.next() orelse return error.Usage;
+    const precompute = if (args.next()) |a| std.mem.eql(u8, a, "--sums") else false;
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    var ckpt = tf.checkpoint_metal.Checkpoint.init(gpa);
+    defer ckpt.deinit();
+    const files = try tf.checkpoint_host.shardFiles(gpa, init.io, model);
+    defer tf.checkpoint_host.freeShardFiles(gpa, files);
+    for (files) |path| try ckpt.addFileSelected(device, path, "", "language_model.");
+    var c = Ctx{ .gpa = gpa, .io = init.io, .device = device, .queue = queue, .ckpt = &ckpt, .dump = dump };
+    std.debug.print("device {s}, precomputed sums {}\n", .{ device.name(), precompute });
+    for ([_]usize{ 0, 5 }) |layer| {
+        var names: [4][64]u8 = undefined;
+        const q = try std.fmt.bufPrint(&names[0], "layers.{d}.self_attn.q_proj", .{layer});
+        const k = try std.fmt.bufPrint(&names[1], "layers.{d}.self_attn.k_proj", .{layer});
+        const v = try std.fmt.bufPrint(&names[2], "layers.{d}.self_attn.v_proj", .{layer});
+        const qkv = try Stack.init(&c, if (layer % 6 == 5) &.{ q, k } else &.{ q, k, v }, precompute);
+        defer qkv.deinit();
+        const o = try Stack.init(&c, &.{try std.fmt.bufPrint(&names[3], "layers.{d}.self_attn.o_proj", .{layer})}, precompute);
+        defer o.deinit();
+        var mlp: [3][64]u8 = undefined;
+        const gate = try std.fmt.bufPrint(&mlp[0], "layers.{d}.mlp.gate_proj", .{layer});
+        const up = try std.fmt.bufPrint(&mlp[1], "layers.{d}.mlp.up_proj", .{layer});
+        const gu = try Stack.init(&c, &.{ gate, up }, precompute);
+        defer gu.deinit();
+        const down = try Stack.init(&c, &.{try std.fmt.bufPrint(&mlp[2], "layers.{d}.mlp.down_proj", .{layer})}, precompute);
+        defer down.deinit();
+        for ([_]usize{ 1, 2, 16 }) |rows| {
+            var p: [6][48]u8 = undefined;
+            const pre = try std.fmt.bufPrint(&p[0], "r{d}.L{d}", .{ rows, layer });
+            try checkProjection(&c, "qkv", qkv, rows, try cat(&p[1], pre, ".x"), try cat(&p[2], pre, ".qkv"));
+            try checkProjection(&c, "o", o, rows, try cat(&p[1], pre, ".o_in"), try cat(&p[2], pre, ".o"));
+            try checkProjection(&c, "gate_up", gu, rows, try cat(&p[1], pre, ".n_mlp"), try cat(&p[2], pre, ".gate_up"));
+            try checkProjection(&c, "down", down, rows, try cat(&p[1], pre, ".act"), try cat(&p[2], pre, ".y"));
+        }
+        std.debug.print("layer {d} done\n", .{layer});
+    }
+    const head = try Stack.init(&c, &.{"embed_tokens"}, precompute);
+    defer head.deinit();
+    for ([_]usize{ 1, 2, 16 }) |rows| {
+        var p: [3][48]u8 = undefined;
+        const pre = try std.fmt.bufPrint(&p[0], "r{d}", .{rows});
+        try checkProjection(&c, "head", head, rows, try cat(&p[1], pre, ".head_in"), try cat(&p[2], pre, ".head_raw"));
+    }
+    std.debug.print("{s}: {d} differing outputs\n", .{ if (c.failed == 0) "all bits equal" else "bits differ", c.failed });
+    if (c.failed > 0) std.process.exit(1);
+}
+
+fn cat(buf: []u8, a: []const u8, b: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}{s}", .{ a, b });
+}
