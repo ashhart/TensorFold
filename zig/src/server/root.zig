@@ -38,6 +38,7 @@ test {
     _ = @import("memory_routes.zig");
     _ = @import("process_memory.zig");
     _ = @import("log.zig");
+    _ = @import("request_log.zig");
     _ = @import("messages.zig");
     _ = @import("stream_preflight_test.zig");
     _ = @import("stream_dsml_test.zig");
