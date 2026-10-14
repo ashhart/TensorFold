@@ -128,7 +128,8 @@ pub const Metal = struct {
             if (mark < stream.reuse.marks.len) end = @min(end, stream.reuse.marks[mark]);
             try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = end - at }}, ids[at..end], false, .last);
             at = end;
-            if (stream.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(at)) != null) hk.at(hk.ptr, stream, @intCast(at));
+            if (stream.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(at)) != null)
+                hk.at(hk.ptr, stream, @intCast(at));
         }
     }
 

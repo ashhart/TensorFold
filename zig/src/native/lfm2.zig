@@ -60,14 +60,24 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.cache = null;
     var why: []const u8 = "";
     const dev = model.device;
-    const plan = cache_fit.budget(o.prompt_cache_gib, o.prompt_cache_over_cap, dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), a, &why, "") catch |e| {
+    const plan = cache_fit.budget(
+        o.prompt_cache_gib,
+        o.prompt_cache_over_cap,
+        dev.maxWorkingSet() -| dev.allocated() -| (8 << 30),
+        a,
+        &why,
+        "",
+    ) catch |e| {
         if (e == error.CacheOverCap) problem.* = why;
         return e;
     };
     h.host.info_.prompt_cache_plan = plan;
     if (plan.budget_bytes > 0) {
         const S = q.backend.Snaps;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.bytes, .save = S.save, .restore = S.restore, .drop = S.drop } }, .{ .chunk = chunk }, plan.budget_bytes);
+        h.cache = api.prompt_cache.Store.init(gpa, .{
+            .ptr = h.metal,
+            .vtable = &.{ .bytes = S.bytes, .save = S.save, .restore = S.restore, .drop = S.drop },
+        }, .{ .chunk = chunk }, plan.budget_bytes);
         h.host.cache = &h.cache.?;
         h.host.info_.prompt_cache = true;
     }

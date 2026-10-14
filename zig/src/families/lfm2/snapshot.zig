@@ -66,5 +66,8 @@ test "a state's bytes: fixed conv states, then a key and value row per kv head a
     attention[6] = true;
     const fixed = (c.layers - 2) * st.conv_bytes;
     try std.testing.expectEqual(@as(u64, fixed), bytes(&attention, 0));
-    try std.testing.expectEqual(@as(u64, 2 * 2 * c.kv_heads * c.head_dim * 2), bytes(&attention, 1) - bytes(&attention, 0));
+    try std.testing.expectEqual(
+        @as(u64, 2 * 2 * c.kv_heads * c.head_dim * 2),
+        bytes(&attention, 1) - bytes(&attention, 0),
+    );
 }
