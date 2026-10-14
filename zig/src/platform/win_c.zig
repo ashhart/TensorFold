@@ -1,6 +1,4 @@
-//! The libc surface TensorFold calls through `sys.c`, on Windows: integer descriptors over the UCRT (files opened by
-//! CreateFileW with every share mode, so unlink and rename behave as on POSIX), directory descriptors as remembered
-//! paths, readdir over FindFirstFileW, and POSIX's names for the rest. Each call keeps libc's contract: -1 and errno.
+//! libc's surface on Windows (`sys.c`): descriptors over the UCRT, CreateFileW with every share mode, -1 and errno.
 
 const std = @import("std");
 
@@ -165,8 +163,7 @@ fn lastError() E {
 
 const Wide = [32767:0]u16;
 
-/// UTF-8 path to a NUL-terminated wide path in `buf`; null (errno set) when it does not fit or is not UTF-8.
-/// POSIX's /tmp is the user's temporary folder and /proc/self/exe this executable, as Cygwin and MSYS map them.
+/// UTF-8 path as a wide path in `buf`, null with errno if it does not fit; /tmp and /proc/self/exe map as in Cygwin.
 fn wide(buf: *Wide, path: []const u8) ?[*:0]const u16 {
     var at: usize = 0;
     var rest = path;

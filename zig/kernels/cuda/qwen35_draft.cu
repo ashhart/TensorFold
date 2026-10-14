@@ -1,6 +1,4 @@
-// The DFlash2 drafter's glue on CUDA (zig/src/families/qwen3_5/cuda_draft.zig): a block of rows attends over the
-// target's tapped context, with two-tap dynamic convolutions around attention and MLP. Rounding points follow the
-// Metal drafter's draft_ops.metal; the projections run through the target engine's affine-4 kernels.
+// DFlash2 drafter glue on CUDA (cuda_draft.zig): a block of rows over the target's taps, draft_ops.metal's rounding.
 
 #include <cuda_bf16.h>
 #include <stdint.h>
@@ -46,9 +44,7 @@ extern "C" __global__ void tf_q35d_gather_rows(const __nv_bfloat16* __restrict__
     for (int i = threadIdx.x; i < width; i += blockDim.x) dst[i] = src[i];
 }
 
-// y[t, c] = sum over lags l of (BASE[branch, l, c] + DYN[t, (branch * 2 + l) * groups + c / group]) * x[t - l, c],
-// each product and sum rounded to bf16 in turn; x[-1] is zero (the block's first row has no past); RES, if given,
-// is added last. D wide rows, `group` channels a dynamic coefficient. Grid (rows), 256 threads.
+// y[t, c] = sum over lags l of (BASE[l, c] + DYN[t, l, c / group]) * x[t - l, c] in bf16 steps; x[-1] = 0; RES last.
 extern "C" __global__ void tf_q35d_dyn_conv(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ DYN,
                                               const __nv_bfloat16* __restrict__ BASE, const __nv_bfloat16* __restrict__ RES,
                                               __nv_bfloat16* __restrict__ OUT, int D, int group, int branch) {
@@ -69,8 +65,7 @@ extern "C" __global__ void tf_q35d_dyn_conv(const __nv_bfloat16* __restrict__ X,
     }
 }
 
-// Per-head RMSNorm over HD then rotate-half RoPE over all HD at position pos0 + row: X's head h of row m at
-// m * stride + h * HD, OUT packed (rows, heads, HD). Grid (rows * heads), 32 threads of 4 values.
+// Per-head RMSNorm then rotate-half RoPE at position pos0 + row; OUT packed (rows, heads, HD), grid (rows * heads).
 extern "C" __global__ void __launch_bounds__(32) tf_q35d_norm_rope(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
                                                                      __nv_bfloat16* __restrict__ OUT, int heads, int stride, long long pos0,
                                                                      float eps, float theta) {
@@ -115,9 +110,7 @@ extern "C" __global__ void tf_q35d_ring_put(const __nv_bfloat16* __restrict__ K,
     }
 }
 
-// The block's attention: query row m, head h sees the context ring's positions [max(begin, p - window + 1), pos0)
-// where p = pos0 + m, and every block row (the drafter is not causal within its block). GQA over kv_heads; scale
-// 1 / sqrt(HD). Grid (rows, heads), a warp each; online softmax in fp32, bf16 out (rows, heads * HD).
+// Block attention: a row sees ring positions [max(begin, p - window + 1), pos0) and every block row; a warp a row.
 extern "C" __global__ void __launch_bounds__(32) tf_q35d_attn(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KB,
                                                                 const __nv_bfloat16* __restrict__ VB, const __nv_bfloat16* __restrict__ RK,
                                                                 const __nv_bfloat16* __restrict__ RV, int rows, int heads, int kv_heads, int W,

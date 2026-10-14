@@ -1,9 +1,4 @@
-//! Qwen3.5's hybrid text models on CUDA (the 2B, Qwen3.8-27B): the affine-4 projections through cuda.qlinear, the
-//! glue in qwen35.cu, one forward for any mix of streams' windows. Each stream owns its recurrences, convolution tails
-//! and KV cache (cuda_cache.zig); the widths come from config.json (cuda_geometry.zig), the weights from
-//! cuda_weights.zig. A forward's launches are captured into a CUDA graph the first time its shape is seen and
-//! replayed after. A verify window's rows may form a tree (each row's parent given): the forward computes every
-//! branch, logs each row, and the stream's state stays as it was until a path is kept.
+//! Qwen3.5's hybrids on CUDA: qlinear projections, qwen35.cu glue, one captured forward over every stream's window.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -73,9 +68,7 @@ pub const Keeps = struct { apply: cuda.Function, conv: cuda.Function, compact: c
 /// A window of one stream in a forward: `parents`, for a tree, names each row's parent row (-1: the first row).
 pub const Part = struct { cache: *Cache, rows: usize, parents: ?[]const i32 = null };
 
-/// What a forward keeps. A prompt chunk (`last`, one window) puts its last row's logits in its cache's `logits`;
-/// verify windows keep every row, drawn on the device into `tokens` (`draws`, one a row) or their logits for
-/// `rowLogits` (`logits`), and log each row for `Cache.keep`.
+/// What a forward keeps: a prompt chunk its last row's logits, a verify window every row's draw or logits and log.
 pub const Keep = union(enum) { last, draws: []const Draw, logits };
 
 /// A kept row's draw on the device: sample.cu's keyed rule at `position`, or greedy without one.
@@ -92,8 +85,7 @@ pub const Engine = struct {
     affine: cuda.qlinear.Affine4Kernels,
     fns: Fns,
     keeps: Keeps,
-    /// Every weight and scratch buffer in one allocation: the WDDM driver's launch cost grows with a process's
-    /// allocation count, and a 64-layer model would have thousands.
+    /// Every weight and scratch buffer in one allocation: WDDM's launch cost grows with the allocation count.
     arena: DeviceBuffer,
     arena_at: usize = 0,
     stage: DeviceBuffer, // the load's staging of each projection as stored, packed from there
@@ -135,8 +127,7 @@ pub const Engine = struct {
     pl: u64,
     po: u64,
     logits: u64,
-    // the per-forward tables: ids, segments, each row's segment, parent and ancestors, the draws' rules, staged in
-    // pinned memory
+    // per-forward tables (ids, segments, rows' segment, parent and ancestors, the draws' rules) staged in pinned memory
     tables: DeviceBuffer,
     staged: cuda.HostBuffer,
     host_logits: cuda.HostBuffer,
@@ -213,8 +204,7 @@ pub const Engine = struct {
         return e;
     }
 
-    /// Every path a request takes, once now: the WDDM driver stalls a process's first forwards for seconds (a 16 GiB
-    /// model: a 20 s launch, then a 3 s one), which no request should pay.
+    /// Every path a request takes, run once now: WDDM stalls a process's first forwards for seconds (a 20 s launch).
     fn warm(e: *Engine, gpa: std.mem.Allocator) !void {
         var warm_cache = try Cache.init(gpa, e, 64);
         defer warm_cache.deinit(gpa);
@@ -312,8 +302,7 @@ pub const Engine = struct {
         try cuda.launch.launch(f, cfg, e.stream, &a);
     }
 
-    /// out (rows, n) = x (rows, k) through `l`: decode tiles 16 rows at a time (each row's bits whatever the batch),
-    /// or the prompt GEMM for a prompt chunk wider than one tile.
+    /// out (rows, n) = x (rows, k) through `l`: 16-row decode tiles (a row's bits batch-independent) or a prompt GEMM.
     pub fn proj(e: *Engine, l: Affine4, x: u64, out: u64, rows: usize, prompt: bool) !void {
         if (prompt and rows > 16) return e.affine.prompt(e.stream, x, l, out, rows);
         try e.run(e.fns.sums, .{ rows, 1, 1 }, .{ 32, 1, 1 }, .{ x, e.xs, @as(c_int, @intCast(l.k)), e.tables.ptr + params_at });
@@ -328,8 +317,7 @@ pub const Engine = struct {
         try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at });
     }
 
-    /// The row tables of `parts`: each forward row's segment, parent forward row (-1: its window's first) and the
-    /// ancestors-and-self bits over its window's rows (a chain without `parents`).
+    /// The row tables of `parts`: each row's segment, parent row (-1: a window's first) and ancestors-and-self bits.
     fn rowTables(st: []u8, parts: []const Part) !void {
         const rowseg = std.mem.bytesAsSlice(c_int, st[rowseg_at..][0 .. max_rows * 4]);
         const rowpar = std.mem.bytesAsSlice(c_int, st[rowpar_at..][0 .. max_rows * 4]);
@@ -348,8 +336,7 @@ pub const Engine = struct {
         }
     }
 
-    /// One forward over `parts`' windows, the rows of `ids` in order. `keep` names the rows it keeps and how. A
-    /// window not yet kept from the stream's last verify is kept whole first.
+    /// One forward over `parts`' windows, `ids` in order; `keep` names the kept rows; an unkept verify is kept first.
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
         const g = e.g;
         var total: usize = 0;
@@ -397,15 +384,13 @@ pub const Engine = struct {
         params[3] = @intCast(parts.len);
         params[4] = @intFromBool(record);
         try e.tables.uploadAsync(0, st, e.stream.handle);
-        // a captured forward's launches cover a bucket of rows and every window; its kernels read the true counts
-        // (a lone stream's one-row step, the common case without a drafter, keeps its own exact graph)
+        // a captured forward covers a row bucket and every window; kernels read the true counts; a lone step is exact
         const lone = total == 1 and parts.len == 1;
         const bucket: usize = if (lone) 1 else if (total <= 16) 16 else most_verify;
         const windows: usize = if (lone) 1 else max_segs;
         const shape: Shape = .{ .total = @intCast(if (prompt) total else bucket), .nseg = @intCast(if (prompt) parts.len else windows), .record = record, .prompt = prompt, .taps = e.n_taps > 0 };
         if (prompt) {
-            // uncaptured: a prompt chunk's GEMMs dwarf its launches, and each length would be a graph of its own,
-            // paying the driver's stall on a new graph's first run (about a second on a wide model)
+            // uncaptured: a prompt chunk's GEMMs dwarf its launches, and each length's graph would pay the stall
             try e.body(shape);
         } else {
             const gop = try e.graphs.getOrPut(e.gpa, shape.key());

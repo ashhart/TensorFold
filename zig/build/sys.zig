@@ -1,5 +1,4 @@
-//! `sys` (zig/src/platform/sys.zig) for every module the build compiles: one walk of the step graph after it is
-//! declared, so no module's declaration needs to name it.
+//! `sys` (zig/src/platform/sys.zig) for every module the build compiles, by one walk of the step graph once declared.
 
 const std = @import("std");
 

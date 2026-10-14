@@ -1,5 +1,4 @@
-// What qwen35.cu and qwen35_keep.cu share: the model's widths (Geo), a stream's window in a forward (Seg), the per-row
-// record a verify window leaves in its stream's log, and the walk from a row back through its parents.
+// Shared by qwen35.cu and qwen35_keep.cu: the widths (Geo), a stream's window (Seg), a row's log record, parent walks.
 
 #pragma once
 #include <cuda_bf16.h>
@@ -19,8 +18,7 @@ struct Geo {
     __device__ int conv() const { return (2 * nk + nv) * DK; }  // q, k and v channels the convolution sees
     __device__ size_t rec() const { return (size_t)nv * DK * DK; }  // floats of one layer's recurrence
     __device__ size_t conv_rows() const { return (size_t)(TAPS - 1) * conv(); }
-    // one row's record of one linear layer: decay and write strength a value head, its write a value (head, dv), its
-    // key a key head, and the convolution tail after it
+    // a row's record of a linear layer: decay, strength and write a value head, key a key head, the tail after it
     __device__ size_t log_bytes() const { return (size_t)nv * 4 + (size_t)nv * DK * 4 + (size_t)nk * DK * 2 + conv_rows() * 2; }
 };
 
@@ -58,8 +56,7 @@ struct Path {
     int rows[MAXW];
 };
 
-// The row `steps` tokens before forward row `w` through its parents (rowpar: each forward row's parent forward row, -1
-// for a window's first row): a forward row, or -1 - t for the stream's convolution tail row t (TAPS - 2 the newest).
+// The row `steps` tokens before forward row `w` through rowpar: a forward row, or -1 - t for the stream's tail row t.
 __device__ __forceinline__ int back(const int* __restrict__ rowpar, int w, int steps) {
     int a = w;
     for (int s = 1; s <= steps; s++) {

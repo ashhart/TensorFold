@@ -1,6 +1,4 @@
-//! The std.posix surface the HTTP server calls through `sys.posix`, on Windows: Winsock sockets (SOCKET as an isize,
-//! INVALID_SOCKET as -1), WSAPoll, console control events as SIGINT and SIGTERM, and no descriptor limits to raise.
-//! Calls in `system` return -1 with errno set from WSAGetLastError, as libc's do.
+//! std.posix as the server calls it, on Windows: Winsock sockets, WSAPoll, console events as SIGINT and SIGTERM.
 
 const std = @import("std");
 const c = @import("win_c.zig");
@@ -29,8 +27,7 @@ pub const SOL = struct {
     pub const SOCKET: i32 = 0xffff;
 };
 pub const SO = struct {
-    /// SO_EXCLUSIVEADDRUSE: Windows' SO_REUSEADDR would let a second server take the port, which the listener
-    /// sets REUSEADDR to prevent; exclusive use is the POSIX meaning.
+    /// SO_EXCLUSIVEADDRUSE: Windows' SO_REUSEADDR would let a second server take the port, the opposite of POSIX's.
     pub const REUSEADDR: u32 = @bitCast(@as(i32, -5));
 };
 pub const SHUT = struct {

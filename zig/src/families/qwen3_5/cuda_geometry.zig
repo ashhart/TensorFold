@@ -1,5 +1,4 @@
-//! The widths of a Qwen3.5 hybrid text model (the 2B, Qwen3.8-27B) as the CUDA engine reads them from config.json:
-//! what varies is read, what qwen35.cu fixes (head widths, taps, rotary layout, 4-bit groups of 64) is checked.
+//! A Qwen3.5 hybrid's widths (2B, 27B) as the CUDA engine reads them from config.json; what qwen35.cu fixes is checked.
 const std = @import("std");
 
 pub const max_layers = 128;
@@ -70,8 +69,7 @@ pub const Geometry = struct {
         return g.deltas() * (g.recBytes() + g.convBytes());
     }
 
-    /// One verified row's record of one linear layer (qwen35.cuh's log_bytes): decay and write by value head,
-    /// key by key head, the tail after it.
+    /// A row's record of a linear layer (qwen35.cuh log_bytes): decay and write a value head, key a key head, the tail.
     pub fn logRowBytes(g: Geometry) usize {
         return g.v_heads * 4 + g.v_heads * dk * 4 + g.k_heads * dk * 2 + g.convBytes();
     }
