@@ -17,8 +17,8 @@ the native engine, or the Python engine frozen at 0.6.6.
 
 ## Capability floor
 
-The native binary's CUDA build runs Nemotron 3.5 Lightning on GB10 and on Ampere cards with compute capability 8.6 (the
-RTX 30 series, RTX A6000, A10 and A40); the A100 (8.0) is not supported yet. On a Mac, `tensorfold info REPO` prints a
+The native binary's CUDA build runs Nemotron 3.5 Lightning on GB10 and on Ampere cards with compute capability 8.0 (the
+A100) and 8.6 (the RTX 30 series, RTX A6000, A10 and A40). On a Mac, `tensorfold info REPO` prints a
 checkpoint's memory floor: its weights plus a 2 GiB runtime margin. The table below is the Python 0.6.6 engine's, quoted
 from its family pages, not measured per card.
 
