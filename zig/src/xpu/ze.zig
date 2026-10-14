@@ -203,8 +203,7 @@ pub const Gpu = struct {
         return error.NoDevice;
     }
 
-    /// The device's on-board memory by Sysman (the same device, matched by UUID): bytes free now and in all. The driver
-    /// backs an allocation when it is first written, so `free` does not yet count allocations never written.
+    /// On-board bytes free and in all by Sysman (device matched by UUID); an allocation leaves `free` once written.
     pub fn memory(g: *Gpu) Error!struct { free: u64, size: u64 } {
         const sys = try resolve(SysApi, &g.lib);
         try check(sys.zesInit(0));

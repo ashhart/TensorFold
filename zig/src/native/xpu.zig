@@ -107,12 +107,11 @@ fn cacheBudget(o: api.Open) u64 {
     return if (gib > 0) std.math.lossyCast(u64, gib * (1 << 30)) else 0;
 }
 
-/// Streams the card holds once the model, the first stream's state and the drafter are loaded: its free memory, at most
-/// its size less what this engine allocated (the driver backs memory when it is first written), holds each further
-/// one a GDN state and a K/V cache of `context` tokens; 0 when the activations' margin and the prompt cache do not fit.
+/// Streams the loaded card holds: each one past the first a GDN state and `context` tokens of K/V; 0 when none fits.
 fn slotsThatFit(runner: *xq.Runner, want: u32, reserve: u64) !u32 {
     const margin: u64 = 2 << 30; // activations of later chunks, the drafter's growth
     const mem = try runner.d.g.memory();
+    // the driver backs memory when it is first written, so free is at most the size less what this engine allocated
     const free = @min(mem.free, mem.size -| runner.d.allocated);
     if (free < margin + reserve) return 0;
     const more: u32 = @intCast(@min((free - margin - reserve) / runner.slotBytes(), xq.MAX_SLOTS - 1));
@@ -176,7 +175,12 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     };
     return openLanes(gpa, io, runner, dr, o, context) catch |err| {
         problem.* = if (err == error.StreamDoesNotFit)
-            try std.fmt.allocPrint(a, "the XPU engine cannot hold a stream of {d} tokens and a {d:.1} GiB prompt cache beside {s} on this card", .{ context, @as(f64, @floatFromInt(cacheBudget(o))) / (1 << 30), o.dir })
+            try std.fmt.allocPrint(
+                a,
+                "the XPU engine cannot hold a stream of {d} tokens and a {d:.1} GiB prompt cache " ++
+                    "beside {s} on this card",
+                .{ context, @as(f64, @floatFromInt(cacheBudget(o))) / (1 << 30), o.dir },
+            )
         else
             try std.fmt.allocPrint(a, "the XPU engine could not serve {s}: {s}", .{ o.dir, @errorName(err) });
         return null;

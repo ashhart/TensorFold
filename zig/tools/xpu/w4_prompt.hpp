@@ -34,11 +34,7 @@ class W4Prompt : public ELFCodeGenerator<hw> {
     }
 
 public:
-    // Subgroup 32 rows × 32 columns (two 16-column tiles, 8 accumulators), work-group 64 × 256. Per group of gsz:
-    // a DPAS partial sum from 0, folded into acc by the previous group's scale while this group's DPAS run (lag);
-    // the bias by DPAS at the end (Ahi, Alo, b × gsz). b3: B over three buffers. s4: K in 4 slices summed from 0,
-    // ((t0 + t1) + t2) + t3 kept in P. asplit: A read in two halves of 16 K, overlapping the other half's DPAS.
-    // swiglu: gate|up interleaved by 16 columns, output fp16(bf16(SiLU(g)·u)) [M, N/2].
+    // 32x32 subgroup tiles, 64x256 work-groups; the group fold, bias and options as NAVIGATION.md section 8 says.
     W4Prompt(Product product, int gsz, bool s4, bool asplit, bool b3, bool swiglu) : ELFCodeGenerator<hw>(product) {
         const int subs = gsz / 64, tn = 2;
         newArgument("A", ExternalArgumentType::GlobalPtr);
