@@ -180,6 +180,8 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--learn-dir DIR` | Where `--learn` keeps them, `~/.cache/tensorfold/learned` by default; implies `--learn`. |
 | `--learn-gib GIB` | Disk for learned prefixes on each Mac, 32 by default; the least recently used go first. Implies `--learn`. |
 | `--learn-min-free-gib GIB` | Free disk `--learn` leaves on each Mac, 4 by default; below it learning pauses and serving goes on. |
+| `--learn-conversations` | Also keep each conversation's prompt states on disk, so its next turn after a restart, a crash or an eviction reads them back instead of the whole conversation. Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash on one Mac, and Nemotron on CUDA; implies `--learn`. See [Conversations on disk](docs/api.md#conversations-on-disk). |
+| `--learn-daily-gib GIB` | What `--learn` may write to disk a day, every model together, 32 by default; past it states stay in RAM only. |
 | `--snapshot-dir none` | Keep prefix state in memory; `none` is the supported value. |
 | `--max-snapshots 0` | Disable disk snapshots at startup; `0` is the supported value. |
 | `--compact-at auto\|FRACTION` | Turn on context compaction (below). `auto` compacts when the prompt and reply would pass the window minus a reserve. |
