@@ -140,7 +140,15 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         e.stream.synchronize() catch {};
-        if (e.graphs.captured > 0 and e.o.rank == 0) std.log.info("graphs: {d} captured ({d:.0} ms each), {d} of {d} rounds replayed", .{ e.graphs.captured, @as(f64, @floatFromInt(e.graphs.capture_ns)) / @as(f64, @floatFromInt(e.graphs.captured)) / 1e6, e.graphs.replayed, e.graphs.rounds });
+        if (e.graphs.captured > 0 and e.o.rank == 0) std.log.info(
+            "graphs: {d} captured ({d:.0} ms each), {d} of {d} rounds replayed",
+            .{
+                e.graphs.captured,
+                @as(f64, @floatFromInt(e.graphs.capture_ns)) / @as(f64, @floatFromInt(e.graphs.captured)) / 1e6,
+                e.graphs.replayed,
+                e.graphs.rounds,
+            },
+        );
         e.graphs.deinit();
         for (e.pool.items) |*c| if (c.*) |*x| x.deinit(e.gpa);
         e.pool.deinit(e.gpa);
@@ -211,7 +219,14 @@ pub const Engine = struct {
         const before = e.host.used;
         defer e.host.used = before;
         const segs = [_]forward.Seg{.{ .c = &c, .tokens = tokens, .pos = e.o.capacity -| e.o.chunk }};
-        const out = try forward.run(o, &e.weights.model, &e.host, &segs, false, try forward.stage(&e.weights.model, &e.host, &segs, false));
+        const out = try forward.run(
+            o,
+            &e.weights.model,
+            &e.host,
+            &segs,
+            false,
+            try forward.stage(&e.weights.model, &e.host, &segs, false),
+        );
         _ = try e.logits(o, out.mixed, e.o.chunk);
         return counting.used + (16 << 20);
     }
