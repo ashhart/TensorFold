@@ -80,7 +80,11 @@ pub fn read(a: Allocator, r: web.Response, max_chars: usize, focus: []const u8) 
     const shown = try html.excerpt(a, text, focus, max_chars);
     truncated = truncated or shown.len < text.len;
     const scan = try quarantine.clean(a, shown);
-    return .{ .url = r.url, .status = r.status, .kind = kind, .title = title, .text = scan.text, .removed = scan.removed, .truncated = truncated };
+    var links: std.ArrayList([]const u8) = .empty;
+    if (title.len > 0 or typeIs(kind, &.{ "html", "xhtml" }) or sniffed_html) for (try html.hrefs(a, r.body, 400)) |h| {
+        try links.append(a, try web.resolveUrl(a, r.url, h));
+    };
+    return .{ .url = r.url, .status = r.status, .kind = kind, .title = title, .text = scan.text, .removed = scan.removed, .truncated = truncated, .links = links.items };
 }
 
 test "responses read by their type" {
@@ -94,4 +98,8 @@ test "responses read by their type" {
     const plain = try read(a, .{ .url = "https://a.org/x.json", .status = 200, .content_type = "application/json", .body = "{\"info\": {\"version\": \"2.1.0\"}}", .truncated = false }, 10, "");
     try std.testing.expect(plain.truncated and plain.text.len <= 10);
     try std.testing.expectError(error.Unsupported, read(a, .{ .url = "https://a.org/x.pdf", .status = 200, .content_type = "application/pdf", .body = "%PDF", .truncated = false }, 10, ""));
+    const linked = try read(a, .{ .url = "https://a.org/docs/intro", .status = 200, .content_type = "text/html", .body = "<a href=\"next\">n</a><a href=\"/api\">a</a><a href=\"https://b.org/\">b</a>", .truncated = false }, 100, "");
+    try std.testing.expectEqualStrings("https://a.org/docs/next", linked.links[0]);
+    try std.testing.expectEqualStrings("https://a.org/api", linked.links[1]);
+    try std.testing.expectEqualStrings("https://b.org/", linked.links[2]);
 }

@@ -11,6 +11,7 @@ const program = @import("program.zig");
 const tools = @import("tools.zig");
 const memory = @import("memory.zig");
 const live_mod = @import("live.zig");
+const Seen = @import("seen.zig").Seen;
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
@@ -72,6 +73,7 @@ pub const Turn = struct {
     rounds: u32 = 0,
     calls_left: u32 = calls_per_reply,
     focus: []const u8 = "", // the model's latest search this reply, which its next page reads are cut around
+    seen: Seen = .{}, // what cortheon_fetch may read: URLs the conversation showed, never ones the model wrote
 
     /// Adds a message the client never sees to the conversation the model reads.
     pub fn hide(t: *Turn, a: Allocator, input: *chat.Input, m: Value) Allocator.Error!void {
@@ -100,7 +102,7 @@ pub const Turn = struct {
     pub fn noteSources(t: *Turn, a: Allocator, ran: tools.Ran) Allocator.Error!void {
         switch (ran.kind) {
             .search => t.searches += 1,
-            .fetch => t.fetches += 1,
+            .fetch => t.fetches += @intFromBool(ran.ok),
         }
         if (ran.kind == .fetch and ran.ok) for (ran.sources) |s| {
             for (t.sources.items) |seen| {
@@ -196,6 +198,7 @@ fn start(state: *State, srv: *Server, a: Allocator, id: []const u8, input: *chat
         .user_key = memory.userKey(spliced),
         .today = try today(a, srv.io),
     };
+    for (spliced) |m| if (!roleIs(m, "assistant")) try t.seen.addFrom(a, memory.text(m));
     const note = try program.note(a, task, calls_per_reply);
     const list = try a.alloc(Value, spliced.len + @intFromBool(!roleIs(spliced[0], "system")));
     if (roleIs(spliced[0], "system")) {
@@ -246,5 +249,6 @@ test {
     _ = @import("search.zig");
     _ = @import("quarantine.zig");
     _ = @import("checks.zig");
+    _ = @import("seen.zig");
     _ = loop;
 }

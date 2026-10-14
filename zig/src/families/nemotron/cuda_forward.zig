@@ -62,7 +62,22 @@ pub const Forward = struct {
     captures: []const kept.Mark = &.{}, // marks inside the prompt chunk: their Mamba states are copied out as it runs
 
     pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, sampled: bool) Forward {
-        return .{ .c = c, .w = w, .b = b, .ops = ops, .glue = .{ .set = if (ops.k.triton) |*t| t else null, .f = &ops.k.glue, .s = ops.s, .emb = &ops.k.emb }, .max_len = max_len, .nch = nch, .sampled = sampled };
+        return .{
+            .c = c,
+            .w = w,
+            .b = b,
+            .ops = ops,
+            .glue = .{
+                .set = if (ops.k.triton) |*t| t else null,
+                .f = &ops.k.glue,
+                .s = ops.s,
+                .emb = &ops.k.emb,
+                .norms = &ops.k.norms,
+            },
+            .max_len = max_len,
+            .nch = nch,
+            .sampled = sampled,
+        };
     }
 
     /// Rows of logits draw their next tokens into `out`, row r at position META[0] + r + 1, by `rule` when sampled.
@@ -264,7 +279,7 @@ pub const Forward = struct {
     fn pocketRun(f: *const Forward, o: kern.Ops, p: weights.Pocket, d: usize, y_f32: bool, r: [2]usize) !void {
         const c = f.c;
         const out = f.b.ymoe + @as(u64, r[0] * c.slots() * d) * @as(u64, if (y_f32) 4 else 2);
-        try o.pocketRows(f.b.y + @as(u64, r[0] * d) * 2, d, p.up, p.down, p.n, out, y_f32, r[1], c.slots(), c.top_k);
+        try o.pocketRows(f.b.y + @as(u64, r[0] * d) * 2, d, p, f.b.pocket, out, y_f32, r[1], c.slots(), c.top_k);
     }
 
     /// A lesson's rest into the shared expert's halves' pair rows, a live change (--slide, 2W wide) into the first's.

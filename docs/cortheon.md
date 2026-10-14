@@ -47,9 +47,12 @@ Pages are fetched from this machine, so each site sees its address.
 Without the flag, the server makes no searches and reads no web pages.
 
 The instruction filter is a heuristic, and it can miss a page written to steer the model.
-The model chooses which URLs it fetches, so a page that steers it could make it put conversation text into a URL's path.
-A fetch URL may carry at most 256 bytes of query and fragment, but that cap does not cover the path.
-Use `--cortheon` where that risk is acceptable for the conversations the server handles.
+So `cortheon_fetch` reads only URLs the conversation has already shown: search results, links on pages it has read, and URLs in the user's, the system prompt's or a tool's messages.
+A URL that appears only in the model's own replies does not count, so a steered model cannot build one that carries conversation text.
+The one exception is a package registry's JSON for a single named package: `https://pypi.org/pypi/NAME/json`, `https://registry.npmjs.org/NAME/latest` and `https://crates.io/api/v1/crates/NAME`, with a version allowed in place of `latest`.
+A name there is at most 64 characters, so that is the most a registry request could carry.
+A refused fetch tells the model to search for the page instead.
+Use `--cortheon` where sending search queries off the machine is acceptable for the conversations the server handles.
 
 ## Budgets
 
