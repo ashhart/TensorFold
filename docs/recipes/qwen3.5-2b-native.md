@@ -83,6 +83,6 @@ variation. These numerical comparisons do not demand bitwise equality across bac
 
 For the official receipt, run the [prescribed measurement tools](README.md#measurements) against the native
 server. Use `tools/bench_concurrent.py --alone --serial`, `tools/bench_openai.py --tokens 64 --reps 5
---temperatures 1.0,0`, and `tools/prefill_cold.py` at its public default lengths and repetitions.
+--temperatures 1.0,0`, and `tools/bench_cache.py --require-cold` on a long prompt for prompt speed.
 Run performance measurements without competing validation work. The previous native engine cannot run this
 checkpoint, so its before baseline is unsupported; do not report an invented speed-up.
