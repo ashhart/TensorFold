@@ -89,7 +89,7 @@ const nf = new Intl.NumberFormat();
 const el = id => document.getElementById(id);
 const fmt = v => v == null ? "—" : nf.format(Math.round(v));
 const GiB = v => v == null ? null : (v / 2**30).toFixed(1);
-const etaText = s => s < 100 ? `${Math.round(s)} s` : `${Math.round(s / 60)} min`;   // the wait to the first token
+const etaText = s => s < 100 ? `${Math.round(s)} s` : `${Math.round(s / 60)} min`;   // a wait, shown as s or min
 
 // the page is served at /dashboard; a proxy that adds a prefix still reaches ../stats or /stats
 const STATS_URL = location.pathname.replace(/\/(dashboard)?\/?$/, "") + "/stats?poll=1";   // the poll URL keeps the cache-busting query
@@ -99,6 +99,7 @@ let lastGood = 0;
 let histPoints = [];            // the polled decode rates: [{t, tok_s}], newest last, sparse over 5 minutes
 let prefillRates = [];          // the polled prefill rates while a prefill ran, for the average tile
 let fillSamples = [];           // the polled tokens left: [{t, left}], the drain the ETA reads
+let fillRun = 0;                // the fill the samples belong to: the server's own transition marker
 let histTop = 0;                // the chart's current y scale, decayed like the dial's
 
 function band(v) { return v >= 60 ? css("--accent") : v >= 40 ? css("--cool") : v >= 20 ? css("--warm") : css("--hot"); }
@@ -204,12 +205,18 @@ function apply(s) {
   el("conns").className = "state" + (((s.running || 0) + (s.waiting || 0)) ? " on" : "");
 
   const memory = s.memory || {};
-  if (memory.peak!=null) {
+  if (memory.peak!=null || memory.limit!=null) {
     const used = GiB((memory.active || 0) + (memory.cache || 0));
     el("mem").innerHTML = `${used} <small>GiB resident</small>`;
-    el("memcap").textContent = `peak ${GiB(memory.peak)} GiB · cache ${GiB(memory.cache)} GiB`;
-    // no budget in the snapshot: the bar fills against the session's own peak instead
-    const frac = memory.peak ? Math.min(100, 100 * ((memory.active || 0) + (memory.cache || 0)) / memory.peak) : 0;
+    // the labels name each number for what it is: resident now, the measured peak, the configured limit
+    const caps = [];
+    if (memory.limit!=null) caps.push(`limit ${GiB(memory.limit)} GiB`);
+    if (memory.peak!=null) caps.push(`peak ${GiB(memory.peak)} GiB`);
+    if (memory.cache) caps.push(`cache ${GiB(memory.cache)} GiB`);
+    el("memcap").textContent = caps.join(" · ");
+    // the bar fills against the configured limit when there is one, else the measured peak
+    const against = memory.limit!=null && memory.limit > 0 ? memory.limit : memory.peak;
+    const frac = against ? Math.min(100, 100 * ((memory.active || 0) + (memory.cache || 0)) / against) : 0;
     const mb = el("membar");
     mb.style.width = frac + "%"; mb.className = frac >= 95 ? "hot" : frac >= 75 ? "warm" : "";
   } else {
@@ -218,9 +225,15 @@ function apply(s) {
     el("membar").style.width = "0%";
   }
 
-  // The prefill queue: a prompt is going in while the snapshot carries fill_tokens_left; its drain
-  // between polls gives the live rate, and left over that rate the time to the first token.
+  // The prefill queue: a prompt is going in while the snapshot carries fill_tokens_left. Its drain
+  // between polls gives the live rate, and left over that rate the wait — for the whole filling set
+  // (several lanes fill at once), so the label says when the queue drains, not when a first token lands.
+  // The server's fill_run marker changes whenever the filling set does (a new prompt, a cancel, a
+  // requeue): the samples reset then, so one prompt's drain is never mixed with another's.
+  const run = s.fill_run || 0;
+  if (run !== fillRun) { fillRun = run; fillSamples = []; }
   if (s.fill_tokens_left != null) {
+    if (fillSamples.length && s.fill_tokens_left > fillSamples[fillSamples.length - 1].left) fillSamples = []; // more left than before: the fill restarted
     fillSamples.push({ t: now, left: s.fill_tokens_left });
     if (fillSamples.length > 64) fillSamples.shift();
     el("fill").innerHTML = `${fmt(s.fill_tokens_left)} <small>tok</small>`;
@@ -231,7 +244,7 @@ function apply(s) {
     }
     if (rate == null && target.prefill > 0) rate = target.prefill;   // one sample: the server's 2 s rate
     const eta = rate ? s.fill_tokens_left / rate : null;
-    el("fillcap").textContent = `of ${fmt(s.fill_prompt_tokens)} · ~${eta == null ? "—" : etaText(eta)} to the first token`;
+    el("fillcap").textContent = `of ${fmt(s.fill_prompt_tokens)} · queue drains in ~${eta == null ? "—" : etaText(eta)}`;
   } else {
     fillSamples = [];
     el("fill").textContent = "idle";

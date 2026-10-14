@@ -228,7 +228,7 @@ pub const Open = struct {
 /// An opened engine; ``close`` stops its thread and frees its backend.
 pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) void, ctx: *anyopaque };
 
-pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0 };
+pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0, limit: ?u64 = null };
 
 /// A backend's words for its own refusals (a request it cannot serve); null: the error's name.
 pub const Explain = struct {
@@ -258,6 +258,8 @@ pub const Status = struct {
     /// Filling prompts' total tokens and those still to prefill (null: no prompt is going in).
     fill_prompt_tokens: ?u32 = null,
     fill_tokens_left: ?u32 = null,
+    /// Changes whenever the filling set does: a reader pairs its drain samples with one fill.
+    fill_run: u64 = 0,
 };
 
 pub const SubmitError = error{ Closed, Busy, InvalidSpans };
@@ -415,9 +417,9 @@ test {
     _ = @import("lane_host.zig");
     _ = @import("lane_host_test.zig");
     _ = @import("lane_host_fill_test.zig");
+    _ = @import("lane_host_status_test.zig");
     _ = @import("lane_host_reuse_test.zig");
     _ = @import("lane_host_warm_test.zig");
-    _ = @import("lane_host_fill_test.zig");
     _ = @import("prompt_cache.zig");
     _ = @import("prompt_radix.zig");
     _ = @import("prompt_imprint.zig");

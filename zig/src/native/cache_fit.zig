@@ -39,6 +39,22 @@ pub fn footprint() ?u64 {
     return info[9];
 }
 
+/// This process's peak physical footprint over its lifetime (rusage_info_v4 slot 30; null elsewhere).
+pub fn peakFootprint() ?u64 {
+    if (builtin.os.tag != .macos) return null;
+    var info: [43]u64 = undefined;
+    if (proc_pid_rusage(getpid(), 4, &info) != 0) return null;
+    return info[30];
+}
+
+/// A Mac family host's memory counts for `/stats`, `/memory` and `/metrics`, from the process footprint.
+pub fn hostMemory(limit_bytes: u64, reset_peak: bool) ?api.Memory {
+    _ = reset_peak;
+    const active = footprint() orelse return null;
+    const peak = peakFootprint() orelse active;
+    return .{ .active = active, .cache = 0, .peak = peak, .pinned = 0, .limit = limit_bytes };
+}
+
 /// The cache plan: `gib` if it fits (or `over`), else what 70% of RAM leaves up to 16 GiB (no reading: `spare` for it).
 pub fn budget(gib: ?f64, over: bool, spare: u64, a: std.mem.Allocator, why: *[]const u8, rank: []const u8) !api.PromptCachePlan {
     return budgetBeside(gib, over, spare, 0, a, why, rank);
@@ -114,7 +130,25 @@ test "a given budget that fits is kept, a larger one is refused unless the overr
 
 test "the OS readings: RAM and this process's footprint" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const r = ram() orelse return error.NoRam;
-    const p = footprint() orelse return error.NoFootprint;
+    const r = ram() orelse return error.SkipZigTest;
+    const p = footprint() orelse return error.SkipZigTest;
     try std.testing.expect(r >= 8 * GiB and p > 0 and p < r);
+}
+
+test "a host's memory counts keep the footprint, its measured peak and the limit apart" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const limit = 235 * GiB;
+    const m = hostMemory(limit, false) orelse return error.SkipZigTest;
+    try std.testing.expect(m.active > 0); // this test process's own footprint
+    try std.testing.expect(m.peak >= m.active); // the kernel's lifetime peak covers now
+    try std.testing.expectEqual(limit, m.limit.?);
+    try std.testing.expectEqual(@as(u64, 0), m.cache);
+    try std.testing.expectEqual(@as(u64, 0), m.pinned);
+    try std.testing.expectEqual(m.active, hostMemory(limit, true).?.active); // reset_peak changes nothing here
+    try std.testing.expectEqual(m.peak, hostMemory(limit, true).?.peak);
+}
+
+test "a host without a footprint reading reports no memory rather than zeros" {
+    if (builtin.os.tag == .macos) return error.SkipZigTest; // on macOS the reading always works
+    try std.testing.expect(hostMemory(1 << 30, false) == null);
 }

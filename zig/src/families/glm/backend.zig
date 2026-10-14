@@ -113,6 +113,7 @@ pub const Backend = struct {
             } else s.reuse_failed = true;
         }
         var next: usize = 0; // the planned chunk starts: a resumed pass cuts where a fresh one does
+        s.fill_at.store(at, .monotonic); // a restored prefix is done the moment it is restored
         while (at < prompt.len) {
             if (s.isCancelled()) return error.Cancelled; // the core releases the slot
             while (next < s.chunks.len and s.chunks[next] <= at) next += 1;
@@ -120,7 +121,7 @@ pub const Backend = struct {
             const n = b.sl.chunkRows(at, end);
             try b.copyOut(i, at);
             try mirror.send(e, .chunk, &.{ i, at, n });
-            try b.sl.chunk(i, at, n);
+            try b.sl.chunk(i, at, n); // the chunk's compute completes here: `at` is landed progress
             at += n;
             s.fill_at.store(at, .monotonic); // the dashboard's prefill progress reads this between chunks
             if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, at);

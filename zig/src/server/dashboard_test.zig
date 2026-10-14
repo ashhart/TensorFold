@@ -9,4 +9,7 @@ test "dashboard page polls the public stats snapshot without private details" {
     try std.testing.expect(std.mem.indexOf(u8, page, "memory.peak!=null") != null);
     try std.testing.expect(std.mem.indexOf(u8, page, "fill_tokens_left") != null);
     try std.testing.expect(std.mem.indexOf(u8, page, "fill_prompt_tokens") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "fill_run") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "queue drains in") != null); // the label names the queue's wait, not a first token
+    try std.testing.expect(std.mem.indexOf(u8, page, "memory.limit!=null") != null); // the limit is labelled as one
 }

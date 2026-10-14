@@ -108,6 +108,7 @@ pub fn statsSnapshot(a: Allocator, status: api.Status, memory: ?api.Memory, prom
     if (status.fill_prompt_tokens != null) {
         try o.put(a, "fill_prompt_tokens", try json.intValue(a, status.fill_prompt_tokens.?));
         try o.put(a, "fill_tokens_left", try json.intValue(a, status.fill_tokens_left orelse 0));
+        try o.put(a, "fill_run", try json.intValue(a, status.fill_run));
     }
     try o.put(a, "prompt_tokens_total", try json.intValue(a, prompt));
     try o.put(a, "generation_tokens_total", try json.intValue(a, generation));
@@ -119,6 +120,7 @@ pub fn statsSnapshot(a: Allocator, status: api.Status, memory: ?api.Memory, prom
         try mem.put(a, "active", try json.intValue(a, m.active));
         try mem.put(a, "cache", try json.intValue(a, m.cache));
         try mem.put(a, "peak", try json.intValue(a, m.peak));
+        if (m.limit) |limit| try mem.put(a, "limit", try json.intValue(a, limit));
     }
     try o.put(a, "memory", .{ .object = mem });
     return .{ .object = o };
@@ -168,4 +170,16 @@ test "stats snapshot carries the filling prompt's tokens while a prefill runs" {
     const object = value.object;
     try std.testing.expectEqual(@as(i64, 900), object.get("fill_prompt_tokens").?.int64().?);
     try std.testing.expectEqual(@as(i64, 300), object.get("fill_tokens_left").?.int64().?);
+}
+
+test "stats snapshot's memory carries a configured limit and omits none" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const with = try statsSnapshot(arena.allocator(), .{}, .{ .active = 5, .cache = 1, .peak = 9, .pinned = 2, .limit = 100 }, 0, 0, 0, 0, 0);
+    const memory = with.object.get("memory").?.object;
+    try std.testing.expectEqual(@as(i64, 5), memory.get("active").?.int64().?);
+    try std.testing.expectEqual(@as(i64, 9), memory.get("peak").?.int64().?);
+    try std.testing.expectEqual(@as(i64, 100), memory.get("limit").?.int64().?);
+    const without = try statsSnapshot(arena.allocator(), .{}, .{ .active = 5, .peak = 9 }, 0, 0, 0, 0, 0);
+    try std.testing.expect(without.object.get("memory").?.object.get("limit") == null); // no limit configured: the key stays out
 }

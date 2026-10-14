@@ -66,12 +66,10 @@ fn cacheBudget(eng: *const ge.Engine, gib: ?f64) u64 {
     return if (limit > used) @min(want, limit - used) else 0;
 }
 
-/// The host's memory counts for /stats, /memory and /metrics: the footprint holds the Metal buffers, so it is `active`.
+/// The host's memory counts: `cache_fit.hostMemory` with this engine's configured load limit.
 fn readMemory(ctx: ?*anyopaque, reset_peak: bool) ?api.Memory {
     const h: *Host = @ptrCast(@alignCast(ctx.?));
-    _ = reset_peak; // nothing to reset: `peak` is the load limit read at load, not a high-water mark
-    const active = cache_fit.footprint() orelse return null;
-    return .{ .active = active, .cache = 0, .peak = h.eng.limit.bytes, .pinned = 0 };
+    return cache_fit.hostMemory(h.eng.limit.bytes, reset_peak);
 }
 
 /// Learned states under `root` by checkpoint, split, chip, OS build, kernel sources and a probe's prompt-pass bits.

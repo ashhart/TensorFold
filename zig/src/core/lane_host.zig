@@ -207,10 +207,11 @@ pub const LaneHost = struct {
         }
     }
 
-    /// Sends a stream's new tokens; true once it has finished (its job freed).
+    /// Sends a stream's new tokens; true once it has finished and left the lists a status read walks.
     pub fn deliver(h: *LaneHost, job: *Job) bool {
         h.send(job);
         if (!job.stream.finished) return false;
+        h.remove(job);
         const reason: Reason = switch (job.stream.reason) {
             .length => .length,
             .cancelled => .cancelled,
@@ -350,7 +351,7 @@ pub const LaneHost = struct {
             else => h.drop(job, h.words(e)),
         };
         h.prefilled(job, began);
-        if (h.deliver(job)) h.remove(job);
+        _ = h.deliver(job);
         return true;
     }
 
@@ -375,7 +376,7 @@ pub const LaneHost = struct {
         if (!done) return;
         _ = h.filling.orderedRemove(at);
         h.prefilled(job, job.began);
-        if (h.deliver(job)) h.remove(job);
+        _ = h.deliver(job);
     }
 
     /// A reply's grammar from the server's compiler (Info.structures engines get requests that carry one).
@@ -519,11 +520,8 @@ pub const LaneHost = struct {
             var i: usize = 0;
             while (i < h.admitted.items.len) {
                 const job = h.admitted.items[i];
-                if (h.deliver(job)) {
-                    h.lock();
-                    _ = h.admitted.orderedRemove(i);
-                    h.unlock();
-                } else i += 1;
+                if (h.deliver(job)) continue; // it left the list: the next job slid into slot i
+                i += 1;
             }
         }
     }
