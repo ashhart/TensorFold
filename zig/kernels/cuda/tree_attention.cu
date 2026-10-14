@@ -369,6 +369,8 @@ TF_TREE_PART(tf_tree_part_w1s3, 128, 32, 1, 3)
 TF_TREE_PART(tf_tree_part_256_w1s3, 256, 16, 1, 3)
 
 // out [W, H, D] bf16: block (row, key head, head) folds the row's groups in order (sliced: a group's 4 slices first).
+constexpr int MERGE_CHUNK = 16; // partials per chunk: 16 groups, or 4 groups of 4 slices
+
 extern "C" __global__ void __launch_bounds__(256) tf_tree_merge(
     const float* __restrict__ po, const float* __restrict__ pm, const float* __restrict__ pl,
     const int* __restrict__ row_stream, const int* __restrict__ streams, const int* __restrict__ depths,
@@ -377,30 +379,43 @@ extern "C" __global__ void __launch_bounds__(256) tf_tree_merge(
     const int kh = blockIdx.y, G = h / hk, hd = blockIdx.z; // block (row, key head, head): each element alone
     const int total = streams[4 * row_stream[r] + 2] + depths[r];
     const int groups = (total + SPAN - 1) / SPAN;
+    const int per = sliced ? 4 : 1, slots = groups * per;
+    const int64_t base = (r * hk + kh) * ng * per;
     for (int e = threadIdx.x; e < d; e += 256) {
         float m = -INFINITY, l = 0.0f, acc = 0.0f;
-        for (int gi = 0; gi < groups; ++gi) {
-            const int64_t part = ((r * hk + kh) * ng + gi) * (sliced ? 4 : 1);
-            float cm = -INFINITY, co = 0.0f, cl = 0.0f;
-            if (!sliced) { // four-warp blocks combined the group's slices themselves
-                cm = pm[part * G + hd], co = po[(part * G + hd) * d + e], cl = pl[part * G + hd];
-            } else { // one-warp blocks left the 4 slices: their combine, in the same order
-                for (int w = 0; w < 4; ++w) cm = fmaxf(cm, pm[(part + w) * G + hd]);
-                for (int w = 0; w < 4; ++w) {
-                    const float mw = pm[(part + w) * G + hd];
-                    if (mw == -INFINITY) continue;
-                    const float aw = texp(__fsub_rn(mw, cm));
-                    co = __fmaf_rn(aw, po[((part + w) * G + hd) * d + e], co);
-                    cl = __fmaf_rn(aw, pl[(part + w) * G + hd], cl);
-                }
+        for (int s0 = 0; s0 < slots; s0 += MERGE_CHUNK) { // a chunk's loads all issued before any is used
+            float cm_[MERGE_CHUNK], co_[MERGE_CHUNK], cl_[MERGE_CHUNK];
+#pragma unroll
+            for (int i = 0; i < MERGE_CHUNK; ++i) {
+                const int64_t q = (base + s0 + i) * G + hd;
+                const bool in = s0 + i < slots;
+                cm_[i] = in ? pm[q] : -INFINITY, cl_[i] = in ? pl[q] : 0.0f, co_[i] = in ? po[q * d + e] : 0.0f;
             }
-            const bool active = cl > 0.0f;
-            const float next = active ? fmaxf(m, cm) : m;
-            const float a = active ? (m == -INFINITY ? 0.0f : texp(__fsub_rn(m, next))) : 1.0f;
-            const float b = active ? texp(__fsub_rn(cm, next)) : 0.0f;
-            acc = __fmaf_rn(acc, a, __fmul_rn(co, b));
-            l = __fmaf_rn(l, a, __fmul_rn(cl, b));
-            m = next;
+#pragma unroll
+            for (int i = 0; i < MERGE_CHUNK; ++i) {
+                if (s0 + i >= slots) break;
+                if (sliced && (i & 3)) continue;
+                float cm = -INFINITY, co = 0.0f, cl = 0.0f;
+                if (!sliced) { // four-warp blocks combined the group's slices themselves
+                    cm = cm_[i], co = co_[i], cl = cl_[i];
+                } else { // one-warp blocks left the 4 slices: their combine, in the same order
+                    for (int w = 0; w < 4; ++w) cm = fmaxf(cm, cm_[i + w]);
+                    for (int w = 0; w < 4; ++w) {
+                        const float mw = cm_[i + w];
+                        if (mw == -INFINITY) continue;
+                        const float aw = texp(__fsub_rn(mw, cm));
+                        co = __fmaf_rn(aw, co_[i + w], co);
+                        cl = __fmaf_rn(aw, cl_[i + w], cl);
+                    }
+                }
+                const bool active = cl > 0.0f;
+                const float next = active ? fmaxf(m, cm) : m;
+                const float a = active ? (m == -INFINITY ? 0.0f : texp(__fsub_rn(m, next))) : 1.0f;
+                const float b = active ? texp(__fsub_rn(cm, next)) : 0.0f;
+                acc = __fmaf_rn(acc, a, __fmul_rn(co, b));
+                l = __fmaf_rn(l, a, __fmul_rn(cl, b));
+                m = next;
+            }
         }
         out[(r * h + kh * G + hd) * d + e] = __float2bfloat16_rn(__fdiv_rn(acc, l));
     }
