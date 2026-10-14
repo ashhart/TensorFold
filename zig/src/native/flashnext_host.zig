@@ -304,7 +304,14 @@ pub const Host = struct {
         }
         var c: Ctx = .{ .h = h, .job = job };
         const sampled: ?api.Sampling = if (r.sampling) |s| (if (s.temperature > 0) s else null) else null;
-        const out: fx.Out = .{ .ctx = &c, .prefilled = Ctx.prefilled, .tokens = Ctx.tokens, .cancelled = Ctx.cancelled, .marked = Ctx.marked, .sampling = sampled };
+        const out: fx.Out = .{
+            .ctx = &c,
+            .prefilled = Ctx.prefilled,
+            .tokens = Ctx.tokens,
+            .cancelled = Ctx.cancelled,
+            .marked = Ctx.marked,
+            .sampling = sampled,
+        };
         const depth: ?usize = if (r.drafts) null else 0;
         const budget: fx.Think = if (r.think_budget > 0) .{ .budget = r.think_budget, .close = r.think_close, .end = r.think_end } else .{};
         var arena: std.heap.ArenaAllocator = .init(h.gpa);

@@ -103,8 +103,8 @@ pub const source =
     \\  }
     \\}
     \\// A sampled window's draw positions: row i draws the token after it, at the cache length (ar[1]) + 1 + i.
-    \\kernel void fz_positions(device uint* pos [[buffer(0)]], device const int* ar [[buffer(1)]], constant uint& n [[buffer(2)]],
-    \\    uint tid [[thread_position_in_grid]]) {
+    \\kernel void fz_positions(device uint* pos [[buffer(0)]], device const int* ar [[buffer(1)]],
+    \\    constant uint& n [[buffer(2)]], uint tid [[thread_position_in_grid]]) {
     \\  if (tid < n) pos[tid] = uint(ar[1] + 1 + int(tid));
     \\}
 ;

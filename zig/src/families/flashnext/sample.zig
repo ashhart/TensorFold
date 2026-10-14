@@ -15,7 +15,16 @@ pub fn positions(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, ar: fz.Buf, pos: f
 }
 
 /// tf_sample_full on `rows` bf16 rows of `logits` (`vocab` wide) at the positions in `pos`: row i's token to picks[i].
-pub fn draw(enc: mtl.ComputeEncoder, pipe: mtl.Pipeline, logits: fz.Buf, pos: fz.Buf, picks: fz.Buf, rows: usize, vocab: usize, s: lanes.Sampling) void {
+pub fn draw(
+    enc: mtl.ComputeEncoder,
+    pipe: mtl.Pipeline,
+    logits: fz.Buf,
+    pos: fz.Buf,
+    picks: fz.Buf,
+    rows: usize,
+    vocab: usize,
+    s: lanes.Sampling,
+) void {
     const rule = lanes.gpu_rule.rule(s);
     var seeds: [2 * fz.MAXR]u32 = @splat(0);
     var cfgs: [4 * fz.MAXR]f32 = @splat(0);
