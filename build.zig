@@ -557,8 +557,6 @@ fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
     metal.linkFramework("Metal", .{});
     metal.linkFramework("Foundation", .{});
     metal.linkFramework("IOSurface", .{}); // the Neural Engine's prompt share passes IOSurfaces
-    metal.linkFramework("ImageIO", .{}); // GLM-5.3-Flash's image input: decoding (families/glm/image.zig)
-    metal.linkFramework("CoreGraphics", .{});
     metal.linkSystemLibrary("objc", .{});
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = target, .optimize = optimize, .link_libc = true });

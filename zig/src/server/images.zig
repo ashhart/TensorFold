@@ -131,10 +131,11 @@ pub fn sniff(bytes: []const u8) Format {
     return .other;
 }
 
-fn refusal(cx: *Cx, i: usize, err: anyerror) errors.Refused {
+fn refusal(cx: *Cx, v: api.Vision, i: usize, err: anyerror) errors.Refused {
+    if (v.explain) |words| if (words(err)) |w| return cx.refuse(try std.fmt.allocPrint(cx.a, "image {d}: {s}", .{ i + 1, w }));
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        error.ImageTooLarge => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} exceeds the limits: 10 MB encoded, 8192 pixels a side, 16 megapixels", .{i + 1})),
+        error.Oversized => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} exceeds the limits: 10 MB encoded, 8192 pixels a side, 16 megapixels", .{i + 1})),
         error.Animated => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d}: animated and multipage images are unsupported; send a single frame", .{i + 1})),
         error.ImageTooSmall => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d}: the visual-token budget is too small for an image", .{i + 1})),
         else => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} could not be decoded; send PNG or JPEG", .{i + 1})),
@@ -264,7 +265,7 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
             .gif, .other => return cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} is not PNG or JPEG; send one of those", .{i + 1})),
         }
         const cap = if (p.low) @min(budget, low_detail_tokens) else budget;
-        prepared[i] = v.prepare(v.ctx, cx.a, bytes, cap) catch |e| return refusal(cx, i, e);
+        prepared[i] = v.prepare(v.ctx, cx.a, bytes, cap) catch |e| return refusal(cx, v, i, e);
         if (prepared[i].tokens == 0 or prepared[i].tokens > cap) return cx.refuse("the image processor exceeded the per-image visual-token budget");
     }
     var out_ids: std.ArrayList(u32) = .empty;
@@ -365,6 +366,35 @@ test "placeholders expand to each image's tokens, the history and cache key with
     // a placeholder the images do not account for is refused
     try std.testing.expectError(error.Refused, expand(v, null, MarkText.text(), &cx, msgs, &[_]u32{ 9, 9, 9 }, 0));
     _ = messages_mod;
+}
+
+fn noLibrary(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: u32) anyerror!api.PreparedImage {
+    return error.NoJpegLibrary;
+}
+
+fn libraryWords(err: anyerror) ?[]const u8 {
+    return if (err == error.NoJpegLibrary) "JPEG images need the decoder library" else null;
+}
+
+test "a prepare error the engine words is refused in the engine's words, others in the server's" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: Cx = .{ .a = a };
+    var dummy: u8 = 0;
+    const msgs = switch (try json.parseText(a,
+        \\[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFab"}}]}]
+    )) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    const worded: api.Vision = .{ .ctx = &dummy, .prepare = noLibrary, .image_token = 9, .image_tokens = 64, .max_images = 4, .explain = libraryWords };
+    try std.testing.expectError(error.Refused, expand(worded, null, MarkText.text(), &cx, msgs, &[_]u32{9}, 0));
+    try std.testing.expectEqualStrings("image 1: JPEG images need the decoder library", cx.message);
+    var plain = worded;
+    plain.explain = null;
+    try std.testing.expectError(error.Refused, expand(plain, null, MarkText.text(), &cx, msgs, &[_]u32{9}, 0));
+    try std.testing.expectEqualStrings("image 1 could not be decoded; send PNG or JPEG", cx.message);
 }
 
 test "--vision-urls: an https part's bytes come from the fetch, within what the request has left" {

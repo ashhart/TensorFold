@@ -79,6 +79,15 @@ pub fn problem(err: Error, bytes: []const u8) []const u8 {
     };
 }
 
+/// The words for a decoder library's refusal (JPEG's libjpeg-turbo), for callers that word the rest themselves.
+pub fn libraryProblem(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.NoJpegLibrary => jpeg.missing,
+        error.JpegLibraryVersion => jpeg.wrong_version,
+        else => null,
+    };
+}
+
 /// The transpose for an orientation (2-8; any other value keeps the picture as stored), then alpha over white.
 pub fn finish(a: Allocator, s: Samples) Allocator.Error!Rgb {
     const o = if (s.orientation >= 2 and s.orientation <= 8) s.orientation else 1;

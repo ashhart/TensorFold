@@ -1,5 +1,6 @@
 //! A video's frames to GLM5-Next vision patches as transformers 5.19's Glm5NextVideoProcessor makes them from PyAV's.
 const std = @import("std");
+const picture = @import("../../core/picture/picture.zig");
 const vision = @import("vision.zig");
 
 pub const Error = error{ VideoTooShort, VideoTooLarge, BadVideo, OutOfMemory };
@@ -40,7 +41,8 @@ pub const Sink = struct {
         const p = s.plan;
         if (k != s.got or k >= p.indices.len or w != p.width or h != p.height) return error.BadVideo;
         const dst = s.frames[k * p.frameBytes() ..][0..p.frameBytes()];
-        try resizeInto(s.scratch, rgb, w, h, stride, p.content_w, p.content_h, dst);
+        const frame: picture.resample.View = .{ .pixels = rgb, .width = w, .height = h, .stride = stride };
+        try picture.resample.into(s.scratch, .torch, frame, p.content_w, p.content_h, dst); // torchvision's uint8 resize
         s.got += 1;
     }
 };
@@ -249,102 +251,6 @@ pub fn patchify(a: std.mem.Allocator, p: Plan, frames: []const u8, mean: [3]f32,
         pair.* = .{ .pixels = px, .gh = gh, .gw = gw, .tokens = gh * gw / vision.patches_per_token, .hash = h.final() };
     }
     return out;
-}
-
-// ---- torch's antialiased bicubic on uint8 (aten UpSampleKernel's separable int16 path, as torchvision calls it) ----
-
-fn cubic(x0: f64) f64 {
-    const a = -0.5;
-    const x = @abs(x0);
-    if (x < 1.0) return ((a + 2.0) * x - (a + 3.0)) * x * x + 1;
-    if (x < 2.0) return (((x - 5) * x + 8) * x - 4) * a;
-    return 0.0;
-}
-
-const Coeffs = struct { ksize: usize, bounds: []usize, kk: []i32, precision: u5 };
-
-/// The axis's weights (PIL's precompute_coeffs) as int16 fixed point, the most precision under 22 bits that fits.
-fn coeffs(a: std.mem.Allocator, in_size: usize, out_size: usize) Error!Coeffs {
-    const scale = @as(f64, @floatFromInt(in_size)) / @as(f64, @floatFromInt(out_size));
-    const filterscale = @max(scale, 1.0);
-    const support = 2.0 * filterscale;
-    const ksize: usize = @as(usize, @intFromFloat(@ceil(support))) * 2 + 1;
-    const bounds = try a.alloc(usize, out_size * 2);
-    const kk = try a.alloc(i32, out_size * ksize);
-    const pre_all = try a.alloc(f64, out_size * ksize);
-    defer a.free(pre_all);
-    @memset(pre_all, 0);
-    for (0..out_size) |xx| {
-        const pre = pre_all[xx * ksize ..][0..ksize];
-        const center = (@as(f64, @floatFromInt(xx)) + 0.5) * scale;
-        const ss = 1.0 / filterscale;
-        const xmin_i: i64 = @max(0, @as(i64, @intFromFloat(center - support + 0.5)));
-        const xmax_i: i64 = @min(@as(i64, @intCast(in_size)), @as(i64, @intFromFloat(center + support + 0.5)));
-        const xmin: usize = @intCast(xmin_i);
-        const xmax: usize = @intCast(xmax_i - xmin_i);
-        var ww: f64 = 0;
-        for (0..xmax) |x| {
-            pre[x] = cubic((@as(f64, @floatFromInt(x + xmin)) - center + 0.5) * ss);
-            ww += pre[x];
-        }
-        if (ww != 0) for (0..xmax) |x| {
-            pre[x] /= ww;
-        };
-        bounds[xx * 2] = xmin;
-        bounds[xx * 2 + 1] = xmax;
-    }
-    var w_max: f64 = 0;
-    for (pre_all) |v| w_max = @max(w_max, @abs(v));
-    var precision: u5 = 0;
-    while (precision < 22) : (precision += 1) {
-        const next: i64 = @intFromFloat(0.5 + w_max * @as(f64, @floatFromInt(@as(i64, 1) << (precision + 1))));
-        if (next >= (1 << 15)) break;
-    }
-    const one: f64 = @floatFromInt(@as(i64, 1) << precision);
-    for (pre_all, 0..) |v, i| kk[i] = @intFromFloat(if (v < 0) -0.5 + v * one else 0.5 + v * one);
-    return .{ .ksize = ksize, .bounds = bounds, .kk = kk, .precision = precision };
-}
-
-fn clip8(v: i64, precision: u5) u8 {
-    return @intCast(std.math.clamp(v >> precision, 0, 255));
-}
-
-/// `src` (w x h RGB, rows `stride` apart) resized to ow x oh into `dst`, horizontal then vertical, a kept axis copied.
-pub fn resizeInto(a: std.mem.Allocator, src: []const u8, w: u32, h: u32, stride: usize, ow: u32, oh: u32, dst: []u8) Error!void {
-    // the horizontal pass (or the rows as they are) into a packed w' x h buffer
-    const mid_w: usize = ow;
-    const mid = if (ow == w and oh == h) dst else try a.alloc(u8, mid_w * h * 3);
-    if (ow == w) {
-        for (0..h) |y| @memcpy(mid[y * mid_w * 3 ..][0 .. mid_w * 3], src[y * stride ..][0 .. mid_w * 3]);
-    } else {
-        const c = try coeffs(a, w, ow);
-        for (0..h) |y| for (0..ow) |x| {
-            const xmin = c.bounds[x * 2];
-            const xmax = c.bounds[x * 2 + 1];
-            const k = c.kk[x * c.ksize ..];
-            const row = src[y * stride ..];
-            for (0..3) |ch| {
-                var ss: i64 = @as(i64, 1) << (c.precision - 1);
-                for (0..xmax) |j| ss += @as(i64, row[(xmin + j) * 3 + ch]) * k[j];
-                mid[(y * mid_w + x) * 3 + ch] = clip8(ss, c.precision);
-            }
-        };
-    }
-    if (oh == h) {
-        if (mid.ptr != dst.ptr) @memcpy(dst[0 .. mid_w * h * 3], mid[0 .. mid_w * h * 3]);
-        return;
-    }
-    const c = try coeffs(a, h, oh);
-    for (0..oh) |y| {
-        const ymin = c.bounds[y * 2];
-        const ymax = c.bounds[y * 2 + 1];
-        const k = c.kk[y * c.ksize ..];
-        for (0..mid_w) |x| for (0..3) |ch| {
-            var ss: i64 = @as(i64, 1) << (c.precision - 1);
-            for (0..ymax) |j| ss += @as(i64, mid[((ymin + j) * mid_w + x) * 3 + ch]) * k[j];
-            dst[(y * mid_w + x) * 3 + ch] = clip8(ss, c.precision);
-        };
-    }
 }
 
 /// Python's f"{t:.1f} seconds": one decimal, an exact tie rounded to even.

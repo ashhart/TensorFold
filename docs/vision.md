@@ -158,12 +158,17 @@ flag at startup.
   0.6.6's words; a TLS failure, like any other failed connection, is "image download failed or timed out". Host
   names that aren't ASCII and IPv6 address literals are refused. Without the flag, an HTTPS URL is refused with the
   flag's name.
-- PNG and JPEG are decoded by the platform's decoder (ImageIO on macOS). WebP is refused by name until a decoder
-  exists; other formats are refused.
-- The limits and the processing are 0.6.6's: EXIF orientation, alpha composited over white, the GLM5-Next processor's
-  sizing and PIL's bicubic resampler. Six drawn PNG fixtures give patches bit-equal to 0.6.6 with mlx-vlm
-  (`tools/zig/glm_vision_fixtures.py`). JPEG patches differ slightly, because ImageIO and libjpeg-turbo decode
-  differently.
+- PNG and JPEG are decoded to the pixels 0.6.6 decoded with Pillow 12.3 (`zig/src/core/picture/`, which d1-3B's
+  pictures on CUDA use too): PNG from the PNG specification, JPEG by libjpeg-turbo 3.1.4.1's TurboJPEG library
+  (`libturbojpeg`, the release Pillow 12.3 bundles) at Pillow's settings. TensorFold does not ship that library; the
+  server loads it at the first JPEG from the file `TENSORFOLD_LIBTURBOJPEG` names, else `lib/` beside the server's
+  folder, beside the server, Homebrew's `jpeg-turbo` on macOS, then the system's library path. It checks the version
+  libjpeg-turbo writes into the library and refuses JPEG images by name when the library is missing or another
+  release; PNG images still serve. WebP is refused by name until a decoder exists; other formats are refused.
+- The limits and the processing are 0.6.6's: EXIF and XMP orientation, alpha composited over white, the GLM5-Next
+  processor's sizing and Pillow's bicubic resampler. The decoder gives 0.6.6's pixels for every picture in
+  `zig/tests/fixtures/lfm2/images.json` and `zig/tests/fixtures/picture/edges.json`, except where it departs on
+  purpose: a CMYK JPEG is refused, and a JPEG holding several pictures (MPO) gives its first, which 0.6.6 refused.
 - Images are counted from the request's image parts. A user or tool message whose text spells the model's image
   markers (`<|image|>`, `<|begin_of_image|>`, `<|end_of_image|>`) is tokenized as ordinary text, so only the chat
   template's own markers, one wrapper for each image part, become image tokens.

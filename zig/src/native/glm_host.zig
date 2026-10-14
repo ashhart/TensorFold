@@ -114,7 +114,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
         const o = vision.?;
         h.markers = .{ v.c.image_start, v.c.image_token, v.c.image_end };
         h.video_open = o;
-        offer = .{ .ctx = h, .prepare = prepareImage, .image_token = v.c.image_token, .markers = &h.markers, .image_tokens = o.image_tokens, .max_images = o.max_images };
+        offer = .{ .ctx = h, .prepare = prepareImage, .image_token = v.c.image_token, .markers = &h.markers, .image_tokens = o.image_tokens, .max_images = o.max_images, .explain = glm.image.libraryProblem };
         if (v.c.video) |vm| {
             h.video_markers = vm;
             offer.?.video = .{ .prepare = prepareVideo, .video_token = vm[1], .group_open = v.c.image_start, .group_close = v.c.image_end, .markers = &h.video_markers, .video_tokens = o.video_tokens, .max_videos = o.max_videos, .max_frames = o.max_frames };
@@ -160,7 +160,7 @@ fn growSnap(ctx: *anyopaque, saved: *anyopaque, extra: u64) bool {
 /// Info.vision's prepare: an image's bytes to the tower's patches (families/glm/image.zig), on the HTTP thread.
 fn prepareImage(ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
     const h: *Host = @ptrCast(@alignCast(ctx));
-    const p = try glm.image.prepare(a, bytes, h.eng.vision.?.c, max_tokens);
+    const p = try glm.image.prepare(h.wall.io, a, bytes, h.eng.vision.?.c, max_tokens);
     return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
 }
 

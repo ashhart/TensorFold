@@ -121,6 +121,8 @@ pub const Vision = struct {
     max_images: u32,
     /// Video input, when the engine's family reads it.
     video: ?VideoOffer = null,
+    /// The engine's words for a prepare error the server cannot word (a decoder library it lacks); null: the server's.
+    explain: ?*const fn (err: anyerror) ?[]const u8 = null,
 };
 
 /// A video's facts as the server's decoder reads them, and its frames on request.
