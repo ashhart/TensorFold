@@ -7,6 +7,33 @@ const Config = tf.deepseek_v41_config.Text;
 const Attention = tf.deepseek_v41_weights.Attention;
 
 pub const max_capacity = 4096;
+/// Kernel-shaped key addressing: window rows at physical ring slots, then compressed rows.
+pub const KeyTable = struct {
+    window: []const u16,
+    window_stride: usize = 512,
+    compressed: []const u16 = &[_]u16{},
+    compressed_stride: usize = 512,
+    pub fn keyRow(t: KeyTable, at: usize) []const u16 {
+        if (at < 128) return t.window[at * t.window_stride ..][0..512];
+        const row = at - 128;
+        return t.compressed[row * t.compressed_stride ..][0..512];
+    }
+};
+fn narrow(comptime T: type, x: f64) T {
+    return if (T == f32) @as(f32, @floatCast(x)) else x;
+}
+/// Compressor softmax pooling at reference precision T: FP32 is the source contract, FP64 the ideal.
+pub fn poolOf(comptime T: type, kv: [2][]const T, gate: [2][]const T, out: []u16) void {
+    @setFloatMode(.strict);
+    for (out, 0..) |*o, d| {
+        const high = @max(gate[0][d], gate[1][d]);
+        const p0 = @exp(gate[0][d] - high);
+        const p1 = @exp(gate[1][d] - high);
+        const denominator = p0 + p1;
+        const pooled = kv[0][d] * (p0 / denominator) + kv[1][d] * (p1 / denominator);
+        o.* = if (T == f32) m.b(pooled) else m.b64(pooled);
+    }
+}
 pub const State = struct {
     gpa: std.mem.Allocator,
     capacity: usize,
@@ -80,16 +107,8 @@ pub const State = struct {
             try projection.applyF32(compressor.wkv, x, &self.partial_kv[owner][slot], scratch);
             try projection.applyF32(compressor.wgate.?, x, &self.partial_gate[owner][slot], scratch);
             if ((position + 1) % ratio != 0) return false;
-            for (0..512) |d| {
-                const high = @max(self.partial_gate[owner][0][d], self.partial_gate[owner][1][d]);
-                const p0 = @exp(self.partial_gate[owner][0][d] - high);
-                const p1 = @exp(self.partial_gate[owner][1][d] - high);
-                const denominator = p0 + p1;
-                const weighted0 = self.partial_kv[owner][0][d] * (p0 / denominator);
-                const weighted1 = self.partial_kv[owner][1][d] * (p1 / denominator);
-                const pooled = weighted0 + weighted1;
-                self.latent[d] = m.b(pooled);
-            }
+            poolOf(f32, .{ self.partial_kv[owner][0], self.partial_kv[owner][1] },
+                .{ self.partial_gate[owner][0], self.partial_gate[owner][1] }, &self.latent);
         }
         m.rms(&self.latent, compressor.norm, c.rms_norm_eps, &self.latent);
         const indexer = a.indexer.?;
@@ -225,51 +244,63 @@ pub const State = struct {
         if (self.sparse_snapshot) |snapshot|
             @memcpy(snapshot[head * 512 ..][0..512], self.o[head * 512 ..][0..512]);
     }
-    fn keyRow(self: *State, window: []const u16, key_id: i32) []const u16 {
-        const at: usize = @intCast(key_id);
-        return if (at < 128) window[at * 512 ..][0..512] else self.mainRow(self.active_owner, at - 128);
-    }
     pub fn sparseHead(self: *State, q: []const u16, window: []const u16, indices: []const i32, sink: f32, out: []u16) void {
-        @setFloatMode(.strict);
-        var acc: [512]f32 = @splat(0);
-        var high: f32 = -1e30;
-        var denominator: f32 = 0;
-        var base: usize = 0;
-        while (base < indices.len) : (base += 64) {
-            var probabilities: [64]f32 = undefined;
-            const width = @min(64, indices.len - base);
-            var next_high = high;
-            for (0..width) |j| {
-                const index = indices[base + j];
-                var dot: f64 = 0;
-                if (index >= 0) {
-                    const key = self.keyRow(window, index);
-                    for (q, key) |a, v| dot += @as(f64, m.f(a)) * m.f(v);
-                }
-                probabilities[j] = if (index < 0) -std.math.inf(f32) else @as(f32, @floatCast(dot)) * (1 / @sqrt(@as(f32, 512)));
-                next_high = @max(next_high, probabilities[j]);
-            }
-            const correction = @exp(high - next_high);
-            var sum: f64 = 0;
-            for (0..width) |j| {
-                probabilities[j] = @exp(probabilities[j] - next_high);
-                sum += probabilities[j];
-            }
-            denominator = denominator * correction + @as(f32, @floatCast(sum));
-            for (0..512) |d| {
-                var accumulated: f64 = acc[d] * correction;
-                for (0..width) |j| if (indices[base + j] >= 0) {
-                    // Online 64-column source kernel rounds unnormalized probabilities to BF16 before P*V.
-                    accumulated += @as(f64, m.f(m.b(probabilities[j]))) * m.f(self.keyRow(window, indices[base + j])[d]);
-                };
-                acc[d] = @floatCast(accumulated);
-            }
-            high = next_high;
-        }
-        denominator += @exp(sink - high);
-        for (out, acc) |*v, a| v.* = m.b(a / denominator);
+        // The source-contract FP32 instance; mainRow addresses compressed rows at the 640 stride.
+        sparseHeadOf(f32, q, .{
+            .window = window,
+            .compressed = self.sources[self.active_owner * self.capacity * 640 ..],
+            .compressed_stride = 640,
+        }, indices, sink, out);
     }
 };
+
+/// The online-softmax sparse head at reference precision T. With T=f32 this reproduces the pinned
+/// source contract bit-for-bit (wide FP64 dot, one FP32 narrowing per score, FP32 online softmax,
+/// BF16-rounded probabilities before the value product, FP32 per-tile accumulator narrowing).
+/// With T=f64 every boundary is the ideal FP64 result: no FP32 narrowing, BF16 appears only at the
+/// algorithm's quantized inputs, the documented probability rounding and the final output.
+pub fn sparseHeadOf(comptime T: type, q: []const u16, keys: KeyTable, indices: []const i32, sink: f32, out: []u16) void {
+    @setFloatMode(.strict);
+    const scale: T = if (T == f32) 1 / @sqrt(@as(f32, 512)) else 1 / @sqrt(@as(f64, 512));
+    var acc: [512]T = @splat(0);
+    var high: T = m.wide(T, -1e30);
+    var denominator: T = 0;
+    var base: usize = 0;
+    while (base < indices.len) : (base += 64) {
+        var probabilities: [64]T = undefined;
+        const width = @min(64, indices.len - base);
+        var next_high = high;
+        for (0..width) |j| {
+            const index = indices[base + j];
+            var dot: f64 = 0;
+            if (index >= 0) {
+                const key = keys.keyRow(@intCast(index));
+                for (q, key) |a, v| dot += m.d64(a) * m.d64(v);
+            }
+            probabilities[j] = if (index < 0) -std.math.inf(T) else narrow(T, dot) * scale;
+            next_high = @max(next_high, probabilities[j]);
+        }
+        const correction = @exp(high - next_high);
+        var sum: f64 = 0;
+        for (0..width) |j| {
+            probabilities[j] = @exp(probabilities[j] - next_high);
+            sum += probabilities[j];
+        }
+        denominator = denominator * correction + narrow(T, sum);
+        for (0..512) |d| {
+            var accumulated: f64 = acc[d] * correction;
+            for (0..width) |j| if (indices[base + j] >= 0) {
+                // Online 64-column source kernel rounds unnormalized probabilities to BF16 before P*V.
+                const p: f64 = if (T == f32) @as(f64, m.f(m.b(probabilities[j]))) else m.d64(m.b64(probabilities[j]));
+                accumulated += p * m.d64(keys.keyRow(@intCast(indices[base + j]))[d]);
+            };
+            acc[d] = @floatCast(accumulated);
+        }
+        high = next_high;
+    }
+    denominator += @exp(m.wide(T, sink) - high);
+    for (out, acc) |*v, a| v.* = if (T == f32) m.b(a / denominator) else m.b64(a / denominator);
+}
 
 test "online 64-column sparse attention rounds probabilities before value GEMM" {
     var state = try State.init(std.testing.allocator, 2);

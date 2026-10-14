@@ -110,12 +110,75 @@ pub fn idealRsqrt(x: f32) f32 {
     return @floatCast(1 / @sqrt(@as(f64, x)));
 }
 pub fn rms(x: []const u16, weight: Tensor, eps: f32, out: []u16) void {
+    rmsOf(f32, x, weight, eps, out);
+}
+/// Element type widened to the reference precision; FP32 is the source contract, FP64 the ideal.
+pub fn wide(comptime T: type, v: f32) T {
+    return if (T == f32) v else @as(f64, v);
+}
+/// FP64 decode of a BF16 cell, exact at both reference precisions.
+pub fn d64(x: u16) f64 {
+    return @as(f64, f(x));
+}
+/// Round an FP64 value once to BF16 (round-to-nearest-even) with no intermediate FP32 rounding.
+pub fn b64(x: f64) u16 {
+    const bits: u64 = @bitCast(x);
+    const sign: u16 = @intCast((bits >> 63) << 15);
+    const magnitude = bits & 0x7fffffffffffffff;
+    if (magnitude > 0x7ff0000000000000) return sign | 0x7fc0; // NaN keeps the quiet bit.
+    if (magnitude >= 0x7ff0000000000000) return sign | 0x7f80;
+    if (magnitude == 0) return sign;
+    const exponent: i32 = @intCast(magnitude >> 52);
+    if (exponent == 0) return sign; // FP64 subnormals sit far below any BF16 subnormal.
+    const unbiased: i32 = exponent - 1023;
+    const significand: u64 = (magnitude & 0x000fffffffffffff) | (1 << 52);
+    if (unbiased > 127) return sign | 0x7f80;
+    if (unbiased >= -126) {
+        // Normal BF16 keeps seven fraction bits; RNE the remaining 45.
+        var kept = significand >> 45;
+        const round_bit: u64 = (significand >> 44) & 1;
+        const sticky: u64 = significand & ((@as(u64, 1) << 44) - 1);
+        if (round_bit == 1 and (sticky != 0 or (kept & 1) == 1)) kept += 1;
+        if (kept == (1 << 8)) return sign | (@as(u16, @intCast(unbiased + 128)) << 7);
+        return sign | (@as(u16, @intCast(unbiased + 127)) << 7) | @as(u16, @intCast(kept & 0x7f));
+    }
+    // Subnormal BF16: value = significand * 2^(unbiased-52); representable steps of 2^-133.
+    const drop: i32 = -81 - unbiased;
+    if (drop >= 54) return sign; // Below half of the smallest subnormal, including the 2^-134 tie.
+    var k: u64 = significand >> @intCast(drop);
+    const round_bit: u64 = (significand >> @intCast(drop - 1)) & 1;
+    const sticky: u64 = significand & ((@as(u64, 1) << @intCast(drop - 1)) - 1);
+    if (round_bit == 1 and (sticky != 0 or (k & 1) == 1)) k += 1;
+    if (k >= (1 << 7)) return sign | (1 << 7); // Rounded up into the minimum normal.
+    return sign | @as(u16, @intCast(k));
+}
+/// The RMS boundary at reference precision T: the source-contract FP32 mean projection for f32,
+/// a wide FP64 mean, exact division and reciprocal square root for f64.
+pub fn rmsOf(comptime T: type, x: []const u16, weight: Tensor, eps: f32, out: []u16) void {
     @setFloatMode(.strict);
     var sum: f64 = 0;
     for (x) |v| sum += @as(f64, f(v)) * f(v);
-    const mean = meanFromWide(sum, x.len);
-    const r = idealRsqrt(mean + eps);
-    for (x, out, 0..) |v, *y, i| y.* = b(f(v) * r * value(weight, i));
+    if (T == f32) {
+        const r = idealRsqrt(meanFromWide(sum, x.len) + eps);
+        for (x, out, 0..) |v, *y, i| y.* = b(f(v) * r * value(weight, i));
+        return;
+    }
+    const r = 1 / @sqrt(sum / @as(f64, @floatFromInt(x.len)) + @as(f64, eps));
+    for (x, out, 0..) |v, *y, i| y.* = b64(@as(f64, f(v)) * r * @as(f64, value(weight, i)));
+}
+/// The same boundary with weight cells given explicitly (decoded BF16 or native FP32), so a
+/// harness needs no checkpoint tensor.
+pub fn rmsOfValues(comptime T: type, x: []const u16, weight: []const f32, eps: f32, out: []u16) void {
+    @setFloatMode(.strict);
+    var sum: f64 = 0;
+    for (x) |v| sum += @as(f64, f(v)) * f(v);
+    if (T == f32) {
+        const r = idealRsqrt(meanFromWide(sum, x.len) + eps);
+        for (x, weight, 0..) |v, w, i| out[i] = b(f(v) * r * w);
+        return;
+    }
+    const r = 1 / @sqrt(sum / @as(f64, @floatFromInt(x.len)) + @as(f64, eps));
+    for (x, weight, 0..) |v, w, i| out[i] = b64(@as(f64, f(v)) * r * @as(f64, w));
 }
 pub fn sigmoid(x: f32) f32 {
     return 1 / (1 + @exp(-x));
