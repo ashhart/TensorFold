@@ -1,7 +1,7 @@
 //! Real-weight LFM2 prompt chunks, windows, partial keeps and unequal streams against native one-row execution.
 const std = @import("std");
 const mtl = @import("metal");
-const q = @import("tensorfold").lfm2;
+const q = @import("tensorfold").lfm2_moe;
 const st = q.state;
 const fwd = q.forward;
 const c = q.config;

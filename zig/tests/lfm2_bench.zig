@@ -1,7 +1,7 @@
 //! LFM2 prompt-chunk and one-row decode timing on the real weights (no server).
 const std = @import("std");
 const mtl = @import("metal");
-const q = @import("tensorfold").lfm2;
+const q = @import("tensorfold").lfm2_moe;
 const st = q.state;
 const c = q.config;
 

@@ -3,7 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
 const tf = @import("tensorfold");
-const q = tf.lfm2;
+const q = tf.lfm2_moe;
 const lanes = tf.lanes;
 const cache_fit = @import("cache_fit.zig");
 

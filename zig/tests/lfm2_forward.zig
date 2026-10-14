@@ -2,7 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
-const q = tf.lfm2;
+const q = tf.lfm2_moe;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
