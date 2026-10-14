@@ -14,7 +14,7 @@ try {
   const program = BOT_VM_GUEST.replaceAll('/workspace', workspace).replace('value=value[11:]', `value=value[${workspace.length + 1}:]`)
   const run = (tool: string, args: Record<string, unknown>) => {
     const result = spawnSync('/usr/bin/python3', ['-I', '-c', program], { input: JSON.stringify({ tool, args }), encoding: 'utf8', timeout: 10000 })
-    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.status, 0, `Guest fixture ${tool} exited abnormally: ${JSON.stringify({ signal: result.signal, error: result.error?.message, stderr: result.stderr?.slice(-800), stdout: result.stdout?.slice(-800) })}`)
     return JSON.parse(result.stdout)
   }
   assert.equal(run('write_file', { path: 'draft/a.txt', content: 'blue\nsecond' }).ok, true)
@@ -43,6 +43,9 @@ try {
   const timeout = run('run_command', { command: 'sleep 8', timeoutMs: 1000 })
   assert.equal(timeout.ok, false); assert.match(timeout.output, /time limit/)
   const bounded = run('run_command', { command: 'yes bounded-output' })
-  assert.equal(bounded.ok, false); assert.equal(bounded.truncated, true); assert.ok(bounded.output.length < 66000)
+  const boundedDiagnostic = `Exact guest output-limit result: ${JSON.stringify({ ...bounded, output: typeof bounded.output === 'string' ? bounded.output.slice(-800) : bounded.output })}`
+  assert.equal(bounded.ok, false, boundedDiagnostic)
+  assert.equal(bounded.truncated, true, boundedDiagnostic)
+  assert.ok(bounded.output.length < 66000, boundedDiagnostic)
   console.log('bot-vm guest file safety, bounded commands and literal search checks passed')
 } finally { await fs.rm(root, { recursive: true, force: true }) }
