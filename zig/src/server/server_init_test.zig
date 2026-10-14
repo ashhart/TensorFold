@@ -93,3 +93,49 @@ test "an init that fails after the keepalive started stops its thread and frees 
     try std.testing.expectEqual(counted.allocated_bytes, counted.freed_bytes);
     try std.testing.expectEqual(counted.allocations, counted.deallocations);
 }
+
+/// A vocabulary without `</think>` whose template source counts its reads.
+const SourceText = struct {
+    source: []const u8,
+    reads: u32 = 0,
+
+    fn text(t: *SourceText) model_text.Text {
+        return .{ .ctx = t, .vtable = &.{
+            .encode = BrokenText.encode,
+            .decode = BrokenText.decode,
+            .token_id = tokenId,
+            .token_string = BrokenText.tokenString,
+            .vocab_size = BrokenText.vocabSize,
+            .eos_ids = BrokenText.eosIds,
+            .render = BrokenText.render,
+            .template_source = templateSource,
+        } };
+    }
+
+    fn tokenId(_: *anyopaque, _: []const u8) ?u32 {
+        return null;
+    }
+
+    fn templateSource(ctx: *anyopaque) []const u8 {
+        const t: *SourceText = @ptrCast(@alignCast(ctx));
+        t.reads += 1;
+        return t.source;
+    }
+};
+
+test "init reads the template once and keeps its thinking switch for model discovery" {
+    var queue: Queue = .{};
+    const config: server.Config = .{ .served_name = "m", .model_ids = &.{"m"} };
+    for ([_]struct { source: []const u8, switch_: bool }{
+        .{ .source = "{% if enable_thinking %}<think>{% endif %}", .switch_ = true },
+        .{ .source = "{% if thinking_mode == 'chat' %}{% endif %}", .switch_ = true },
+        .{ .source = "{{ messages }}", .switch_ = false },
+    }) |case| {
+        var text: SourceText = .{ .source = case.source };
+        const gpa = std.testing.allocator;
+        const srv = try server.Server.init(gpa, std.testing.io, queue.engine(), text.text(), config, null);
+        defer srv.deinit();
+        try std.testing.expectEqual(case.switch_, srv.thinking_switch);
+        try std.testing.expectEqual(@as(u32, 1), text.reads);
+    }
+}

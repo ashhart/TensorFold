@@ -11,9 +11,24 @@ const startup = @import("startup.zig");
 const slide_cli = @import("slide_cli.zig");
 const slide_key = @import("slide_key.zig");
 const api = @import("engine_api");
+const recall_open = @import("recall_open.zig");
 const checkpoint_cli = @import("checkpoint_cli");
 
-const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--chat-template FILE] [--alias ALIAS] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard] [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB] [--max-tokens MAX_TOKENS] [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}] [--thinking-budget THINKING_BUDGET] [--loop-guard] [--no-drafts] [--drafter DRAFTER] [--drafter-bits {0,4}] [--keep-warm SECONDS] [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP] [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--parallel PARALLEL] [--cortheon] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE] [--segments SEGMENTS] model\n";
+const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--chat-template FILE]" ++
+    " [--alias ALIAS] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
+    " [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB]" ++
+    " [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB] [--recall]" ++
+    " [--recall-dir RECALL_DIR] [--recall-gib RECALL_GIB] [--recall-read-only] [--max-tokens MAX_TOKENS]" ++
+    " [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P]" ++
+    " [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}]" ++
+    " [--thinking-budget THINKING_BUDGET] [--loop-guard] [--no-drafts] [--drafter DRAFTER]" ++
+    " [--drafter-bits {0,4}] [--keep-warm SECONDS] [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP]" ++
+    " [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--parallel PARALLEL]" ++
+    " [--cortheon] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE]" ++
+    " [--segments SEGMENTS] model\n";
+const not_lanes = "--recall drafts from a record in the lane engine's rounds, " ++
+    "which this model's engine does not run: serve it without --recall, --recall-dir, " ++
+    "--recall-gib or --recall-read-only";
 
 /// The flags past the common ones this binary's backend serves; cli.zig reads them from the root.
 pub const serves = engines.serves;
@@ -93,11 +108,20 @@ pub fn main(init: std.process.Init) !u8 {
         return e;
     } orelse return fail(problem);
     defer up.text.deinit();
+    var record: ?*@import("engine_api").recall_store.Store = null;
+    defer if (record) |r| r.close(); // after the engine below has stopped reading it
     defer up.engine.close(up.engine.ctx);
+    const served = hub.servedName(args.name, args.model, dir);
+    problem = "";
+    record = recall_open.open(gpa, io, a, args, up.text, served, &problem) catch |e| {
+        return if (problem.len > 0) fail(problem) else e;
+    };
+    if (record) |r| if (!up.engine.engine.attachRecall(r)) return fail(not_lanes);
     return serve.run(gpa, io, args, .{
         .engine = up.engine.engine,
         .text = up.text.text(),
-        .served = hub.servedName(args.name, args.model, dir),
+        .served = served,
+        .recall = record,
         .model_dir = dir,
         .sampling = try sampling(a, io, dir, args),
         .environ = init.environ_map,

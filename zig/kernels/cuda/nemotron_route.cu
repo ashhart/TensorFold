@@ -38,7 +38,67 @@ extern "C" __global__ void __launch_bounds__(256) tf_nemo_router(const __nv_bflo
 
 namespace {
 
-constexpr int MAXC = 8;  // experts a lane holds: up to 256 experts
+constexpr int EB = 16;  // experts a decode block stages
+constexpr int QB = 8;  // 16-byte loads a decode thread has in flight
+
+// acc's fma chain over 8 bf16 pairs, low half then high half of each word, in index order (tf_nemo_router's).
+__device__ __forceinline__ float chain8(float acc, uint4 a, uint4 b) {
+    const uint32_t as[4] = {a.x, a.y, a.z, a.w}, bs[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        acc = __fmaf_rn(__uint_as_float(as[i] << 16), __uint_as_float(bs[i] << 16), acc);
+        acc = __fmaf_rn(__uint_as_float(as[i] & 0xFFFF0000u), __uint_as_float(bs[i] & 0xFFFF0000u), acc);
+    }
+    return acc;
+}
+
+}  // namespace
+
+// Decode windows: block (EB experts, slice) stages it at once, thread (row, expert) runs tf_nemo_router's chain.
+extern "C" __global__ void __launch_bounds__(256)
+tf_nemo_router_rows(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W, float* __restrict__ PART,
+                    int R, int D, int E, int SK) {
+    extern __shared__ uint4 rows_q[];  // R input rows, then EB expert rows, each quads + 1 (a 16-byte padding step)
+    const int s = blockIdx.y, e0 = blockIdx.x * EB, per = D / SK, k0 = s * per, quads = per / 8, stride = quads + 1;
+    const int n = (R + EB) * quads;
+    uint4 v[QB];
+#pragma unroll
+    for (int j = 0; j < QB; ++j) {
+        const int c = threadIdx.x + blockDim.x * j, r = c / quads, q = c % quads;
+        const bool wr = r >= R, live = c < n && (!wr || e0 + r - R < E);
+        const __nv_bfloat16* src = wr ? W + static_cast<int64_t>(e0 + r - R) * D : X + static_cast<int64_t>(r) * D;
+        v[j] = live ? reinterpret_cast<const uint4*>(src + k0)[q] : make_uint4(0u, 0u, 0u, 0u);
+    }
+#pragma unroll
+    for (int j = 0; j < QB; ++j) {
+        const int c = threadIdx.x + blockDim.x * j;
+        if (c < n) rows_q[(c / quads) * stride + c % quads] = v[j];
+    }
+    for (int c = threadIdx.x + blockDim.x * QB; c < n; c += blockDim.x) {  // past QB loads a thread: the rest in order
+        const int r = c / quads, q = c % quads;
+        const bool wr = r >= R, live = !wr || e0 + r - R < E;
+        const __nv_bfloat16* src = wr ? W + static_cast<int64_t>(e0 + r - R) * D : X + static_cast<int64_t>(r) * D;
+        rows_q[r * stride + q] = live ? reinterpret_cast<const uint4*>(src + k0)[q] : make_uint4(0u, 0u, 0u, 0u);
+    }
+    __syncthreads();
+    const int rr = threadIdx.x / EB, ee = threadIdx.x % EB;
+    if (rr >= R || e0 + ee >= E) return;
+    const uint4* xp = rows_q + rr * stride;
+    const uint4* wp = rows_q + (R + ee) * stride;
+    float acc = 0.0f;
+    uint4 xa = xp[0], wa = wp[0];
+    for (int q = 0; q < quads; ++q) {  // the next pair's loads go out before this pair's chain
+        const uint4 xn = xp[q + 1 < quads ? q + 1 : q], wn = wp[q + 1 < quads ? q + 1 : q];
+        acc = chain8(acc, xa, wa);
+        xa = xn, wa = wn;
+    }
+    PART[(static_cast<int64_t>(s) * R + rr) * E + e0 + ee] = acc;
+}
+
+namespace {
+
+constexpr int MAXC = 8;   // experts a lane holds: up to 256 experts
+constexpr int MAXSK = 8;  // router slices topk sums (routerShape takes at most 6)
 
 // The larger of two (value, index) picks: a higher value, or the lower index on a tie (values are never NaN).
 __device__ __forceinline__ bool beats(float v, int i, float bv, int bi) { return v > bv || (v == bv && i < bi); }
@@ -52,6 +112,14 @@ extern "C" __global__ void __launch_bounds__(32) tf_nemo_topk(const float* __res
     const int64_t r = blockIdx.x;
     const int lane = threadIdx.x;
     float score[MAXC], sel[MAXC];
+    float part[MAXC][MAXSK], bias[MAXC];  // every slice's and bias's load issued before the sums
+#pragma unroll
+    for (int c = 0; c < MAXC; ++c) {
+        const int e = lane + 32 * c;
+        bias[c] = e < E ? BIAS[e] : 0.0f;
+#pragma unroll
+        for (int s = 0; s < MAXSK; ++s) part[c][s] = e < E && s < SK ? PART[(s * R + r) * E + e] : 0.0f;
+    }
 #pragma unroll
     for (int c = 0; c < MAXC; ++c) {
         const int e = lane + 32 * c;
@@ -59,9 +127,11 @@ extern "C" __global__ void __launch_bounds__(32) tf_nemo_topk(const float* __res
         sel[c] = -INFINITY;
         if (e >= E) continue;
         float logit = 0.0f;
-        for (int s = 0; s < SK; ++s) logit = __fadd_rn(logit, PART[(s * R + r) * E + e]);
+#pragma unroll
+        for (int s = 0; s < MAXSK; ++s)
+            if (s < SK) logit = __fadd_rn(logit, part[c][s]);
         score[c] = tf_sigmoid(logit);
-        const float v = __fadd_rn(score[c], BIAS[e]);
+        const float v = __fadd_rn(score[c], bias[c]);
         sel[c] = v != v ? -INFINITY : v;  // a NaN logit is never picked ahead of a number
     }
     float total = 0.0f;

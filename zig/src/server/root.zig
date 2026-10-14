@@ -69,4 +69,5 @@ test {
     _ = @import("responses_include_test.zig");
     _ = @import("cortheon/cortheon.zig");
     _ = @import("cortheon/cortheon_test.zig");
+    _ = @import("recall_routes.zig");
 }

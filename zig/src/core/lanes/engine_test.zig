@@ -455,8 +455,8 @@ test "a family that keeps copies to shared rounds proposes none for a lone strea
         var s = try sm.Stream.init(gpa, .{ .id = "s", .prompt = &prompt, .max_new = 16, .eos = &.{96}, .proposer = p.proposer() });
         defer s.deinit(gpa);
         engine.alone = false;
-        try std.testing.expect((try win.copyProposal(&engine, &s)).len >= 2);
+        try std.testing.expect((try win.copyProposal(&engine, &s)).tokens.len >= 2);
         engine.alone = true;
-        try std.testing.expectEqual(lone_copies, (try win.copyProposal(&engine, &s)).len >= 2);
+        try std.testing.expectEqual(lone_copies, (try win.copyProposal(&engine, &s)).tokens.len >= 2);
     }
 }

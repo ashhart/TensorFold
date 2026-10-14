@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const core = @import("core");
+const lanes = @import("lanes");
 const Engine = @import("cuda_engine.zig").Engine;
 const mtp = @import("cuda_mtp.zig");
 const Head = mtp.Head;
@@ -48,28 +49,50 @@ pub const Rounds = struct {
     cbuf: [mtp.max_chain]u32 = undefined,
     ids: [mtp.max_chain + 1]u32 = undefined,
     copied: []const u32 = &.{},
+    recall: ?*lanes.recall.Reader = null, // the stream's reads of Recall's record: its copy when the context has none
+    recalled: bool = false, // the copy came from Recall
     proposal: []const u32 = &.{},
     copy_round: bool = false,
     st: Stats = .{},
 
     /// The head reads the prompt's last hidden row and final output token.
-    pub fn init(gpa: std.mem.Allocator, e: *Engine, h: *Head, rule: *DepthRule, prompt: []const u32, out: []const u32, last_hidden: ?u64) !Rounds {
-        var r: Rounds = .{ .e = e, .h = h, .rule = rule, .index = try core.CopyIndex.init(gpa, prompt) };
+    pub fn init(
+        gpa: std.mem.Allocator,
+        e: *Engine,
+        h: *Head,
+        rule: *DepthRule,
+        prompt: []const u32,
+        out: []const u32,
+        last_hidden: ?u64,
+        recall: ?*lanes.recall.Reader,
+    ) !Rounds {
+        const index = try core.CopyIndex.init(gpa, prompt);
+        var r: Rounds = .{ .e = e, .h = h, .rule = rule, .index = index, .recall = recall };
         errdefer r.index.deinit();
         try r.index.extend(out);
         if (last_hidden) |x| try e.ops().copy(e.b.hidden, x, e.c.hidden * 2);
         try e.ops().fill32(e.b.sampled, out[out.len - 1], 1);
-        r.copied = r.index.chain(&r.cbuf);
+        r.copied = r.copies();
         try queue(h, 1, r.copied.len > 0);
         return r;
     }
 
     /// Rounds over a stream the lane core drafted last: the head's kept rows absorbed again, level 1 drafted again.
-    pub fn resumed(gpa: std.mem.Allocator, e: *Engine, h: *Head, rule: *DepthRule, prompt: []const u32, out: []const u32, kept: usize) !Rounds {
-        var r: Rounds = .{ .e = e, .h = h, .rule = rule, .index = try core.CopyIndex.init(gpa, prompt) };
+    pub fn resumed(
+        gpa: std.mem.Allocator,
+        e: *Engine,
+        h: *Head,
+        rule: *DepthRule,
+        prompt: []const u32,
+        out: []const u32,
+        kept: usize,
+        recall: ?*lanes.recall.Reader,
+    ) !Rounds {
+        const index = try core.CopyIndex.init(gpa, prompt);
+        var r: Rounds = .{ .e = e, .h = h, .rule = rule, .index = index, .recall = recall };
         errdefer r.index.deinit();
         try r.index.extend(out);
-        r.copied = r.index.chain(&r.cbuf);
+        r.copied = r.copies();
         try h.again(kept);
         try h.launch(if (r.copied.len > 0) 0 else 1);
         return r;
@@ -77,6 +100,19 @@ pub const Rounds = struct {
 
     pub fn deinit(r: *Rounds) void {
         r.index.deinit();
+    }
+
+    /// The context's own copied chain, else Recall's continuation when it is expected to pay (in `cbuf`).
+    fn copies(r: *Rounds) []const u32 {
+        r.recalled = false;
+        const own = r.index.chain(&r.cbuf);
+        const x = r.recall orelse return own;
+        if (own.len > 0) return own;
+        const got = x.propose(r.index.ctx.items, r.cbuf.len, r.st.rounds);
+        if (got.len < 2) return &.{};
+        @memcpy(r.cbuf[0..got.len], got);
+        r.recalled = true;
+        return r.cbuf[0..got.len];
     }
 
     /// One window after `last`: the copied chain or the head's drafts, verified; its drawn tokens and drafts accepted.
@@ -110,19 +146,23 @@ pub const Rounds = struct {
     pub fn keep(r: *Rounds, sampled: []const u32, n: usize, more: bool) !void {
         try r.e.commit(n);
         r.rule.done(n, 1 + r.proposal.len, if (r.copy_round) 0 else r.h.levels);
+        if (r.recall) |x| { // Recall's copy is judged apart; the head's rounds set the bar its copies must beat
+            if (!r.copy_round) x.noteHead(n);
+            if (r.copy_round and r.recalled) x.observe(@intCast(r.proposal.len), @intCast(n -| 1), r.st.rounds);
+        }
         try r.index.extend(sampled[0..n]);
         r.st.rounds += 1;
         r.st.drafted += r.proposal.len;
         r.st.accepted += n - 1;
         if (!more) return;
-        r.copied = r.index.chain(&r.cbuf);
+        r.copied = r.copies();
         try queue(r.h, n, r.copied.len > 0);
     }
 };
 
 /// `count` tokens in `out` (its first the prompt's pending token), drafting from the prompt's last hidden row.
 pub fn decode(gpa: std.mem.Allocator, e: *Engine, h: *Head, rule: *DepthRule, prompt: []const u32, out: *std.ArrayList(u32), count: usize, stop_eos: bool, last_hidden: u64) !Stats {
-    var r = try Rounds.init(gpa, e, h, rule, prompt, out.items, last_hidden);
+    var r = try Rounds.init(gpa, e, h, rule, prompt, out.items, last_hidden, null);
     defer r.deinit();
     while (out.items.len < count and !(stop_eos and e.c.isEos(out.items[out.items.len - 1]))) {
         const v = try r.verify(out.items[out.items.len - 1], null);

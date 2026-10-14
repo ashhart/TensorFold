@@ -77,6 +77,7 @@ pub const Server = struct {
     markers: reply_text.Markers = reply_text.think_markers,
     chunks: chunk_plan.Plan = .{},
     effort_levels: []const []const u8 = &.{},
+    thinking_switch: bool = false,
     eos: []const u32 = &.{},
     think_close: []const u32 = &.{},
     think_close_end: ?u32 = null,
@@ -100,6 +101,8 @@ pub const Server = struct {
     snapshot_checked: bool = false,
     /// Cortheon's web reader and what replies hid from their clients; null without --cortheon.
     cortheon: ?*cortheon.State = null,
+    /// Recall's record (--recall), which GET and DELETE /v1/recall read and empty; main opens and closes it.
+    recall: ?*api.recall_store.Store = null,
 
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {
@@ -116,9 +119,12 @@ pub const Server = struct {
         const a = srv.arena.allocator();
         srv.eos = try a.dupe(u32, text.eosIds());
         if (text.tokenId(reply_text.channel_markers.close) != null) srv.markers = reply_text.channel_markers;
-        srv.effort_levels = try fields.effortLevels(a, text.templateSource());
+        const source = text.templateSource();
+        srv.effort_levels = try fields.effortLevels(a, source);
+        srv.thinking_switch = std.mem.indexOf(u8, source, "enable_thinking") != null or
+            std.mem.indexOf(u8, source, "thinking_mode") != null;
         srv.late_system = try lateSystem(a, text);
-        srv.needs_user_after_tool = needsUserAfterTool(text.templateSource());
+        srv.needs_user_after_tool = needsUserAfterTool(source);
         if (text.tokenId("</think>")) |end| {
             const lead = try text.encode(a, "\n", false);
             const trail = try text.encode(a, "\n\n", false);
