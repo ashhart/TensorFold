@@ -384,7 +384,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
   function availableModelsFromProviderError(error: unknown): string[] {
     const message = String((error as any)?.message ?? error ?? '')
     let providerMessage = message
-    const jsonStart = message.indexOf('— {')
+    const jsonStart = message.indexOf(': {')
     if (jsonStart >= 0) {
       try {
         const parsed = JSON.parse(message.slice(jsonStart + 2).trim())

@@ -441,7 +441,11 @@ function createFakeRun(metadata, options = {}) {
       }
       return { stdout: `${values[key]}\n`, stderr: '' }
     }
-    if (name === 'xcrun' && args[0] === 'vtool') return { stdout: `Load command 1\n cmd LC_BUILD_VERSION\n platform MACOS\n minos ${options.nativeMinimum ?? '13.3'}\n sdk 26.5\n`, stderr: '' }
+    if (name === 'xcrun' && args[0] === 'vtool') {
+      const minos = options.nativeMinimum ?? '13.3'
+      const stdout = `Load command 1\n cmd LC_BUILD_VERSION\n platform MACOS\n minos ${minos}\n sdk 26.5\n`
+      return { stdout, stderr: '' }
+    }
     if (name === 'spctl') return { stdout: '', stderr: 'accepted\nsource=Notarized Developer ID\n' }
     return { stdout: '', stderr: '' }
   }

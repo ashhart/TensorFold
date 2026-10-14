@@ -597,7 +597,9 @@ export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
     const detail = await readBoundedResponseText(res, 'Provider error', PROVIDER_ERROR_MAX_BYTES).catch(() => '')
     // Attach status + headers so the model router can honor a real Retry-After / X-RateLimit-Reset
     // window instead of falling back to a fixed cooldown.
-    const err = new Error(`HTTP ${res.status} ${providerErrorText(res.statusText, p.apiKey)}${detail ? ` — ${providerErrorText(scrubProviderErrorBody(detail, p.apiKey), p.apiKey)}` : ''}`) as Error & { status?: number; headers?: unknown }
+    const detailText = detail ? `: ${providerErrorText(scrubProviderErrorBody(detail, p.apiKey), p.apiKey)}` : ''
+    const httpMessage = `HTTP ${res.status} ${providerErrorText(res.statusText, p.apiKey)}${detailText}`
+    const err = new Error(httpMessage) as Error & { status?: number; headers?: unknown }
     err.status = res.status
     err.headers = scrubProviderHeaders(res.headers, p.apiKey)
     throw err
@@ -875,7 +877,9 @@ export async function quickComplete(p: Omit<ChatParams, 'tools'>): Promise<strin
   })
   if (!res.ok) {
     const detail = await readBoundedResponseText(res, 'Provider error', PROVIDER_ERROR_MAX_BYTES).catch(() => '')
-    const error = new Error(`HTTP ${res.status} ${providerErrorText(res.statusText, p.apiKey)}${detail ? ` — ${providerErrorText(scrubProviderErrorBody(detail, p.apiKey), p.apiKey)}` : ''}`) as Error & { status?: number; headers?: unknown }
+    const detailText = detail ? `: ${providerErrorText(scrubProviderErrorBody(detail, p.apiKey), p.apiKey)}` : ''
+    const httpMessage = `HTTP ${res.status} ${providerErrorText(res.statusText, p.apiKey)}${detailText}`
+    const error = new Error(httpMessage) as Error & { status?: number; headers?: unknown }
     error.status = res.status; error.headers = scrubProviderHeaders(res.headers, p.apiKey)
     throw error
   }

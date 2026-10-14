@@ -47,7 +47,9 @@ export function macOSBuildMinimums(output) {
 // Static inspection only: do not load or execute native modules to discover their requirements.
 export async function assertPackagedMacOSMinimum(app, { run = exec } = {}) {
   const appInfo = await lstat(app)
-  if (!appInfo.isDirectory() || appInfo.isSymbolicLink()) throw new Error('Minimum OS verification requires a regular app directory.')
+  if (!appInfo.isDirectory() || appInfo.isSymbolicLink()) {
+    throw new Error('Minimum OS verification requires a regular app directory.')
+  }
   const plist = path.join(app, 'Contents', 'Info.plist')
   const result = await run('/usr/bin/plutil', ['-extract', 'LSMinimumSystemVersion', 'raw', '-o', '-', plist])
   const declaredMinimum = String(result.stdout ?? '').trim()

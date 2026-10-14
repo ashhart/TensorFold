@@ -108,7 +108,10 @@ export function scrubProviderFailure(error: unknown, credential?: string): unkno
       const copy = new Error(scrubProviderCredential(value.message, credential))
       copy.name = scrubProviderCredential(value.name, credential)
       if (value.stack) copy.stack = scrubProviderCredential(value.stack, credential)
-      for (const [key, entry] of Object.entries(value)) Object.defineProperty(copy, scrubProviderCredential(key, credential), { value: clean(entry, depth + 1), enumerable: true, writable: true, configurable: true })
+      for (const [key, entry] of Object.entries(value)) {
+        const descriptor = { value: clean(entry, depth + 1), enumerable: true, writable: true, configurable: true }
+        Object.defineProperty(copy, scrubProviderCredential(key, credential), descriptor)
+      }
       if ('cause' in value && !Object.prototype.hasOwnProperty.call(copy, 'cause')) (copy as any).cause = clean(value.cause, depth + 1)
       return copy
     }
