@@ -210,6 +210,13 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
     return c;
 }
 
+/// GLM-5.3-Flash's own counts, the shapes the Metal kernels are built for (parse also passes smaller synthetic ones).
+pub fn whole(c: Config) bool {
+    const want = Config{};
+    return c.layers == want.layers and c.vocab == want.vocab and c.dense_layers == want.dense_layers and
+        c.experts == want.experts and c.mla.eql(want.mla);
+}
+
 /// The first `n` backbone layers only (the MTP layer stays): a check whose weights must fit where the whole model does not.
 pub fn subset(c: *Config, n: u32) !void {
     if (n == 0 or n > c.layers) return error.BadLayerCount;
@@ -283,6 +290,7 @@ test "the real counts parse to the defaults; smaller counts parse, other widths 
     const small = try textConfig(gpa, 2, 1, &.{1}, 16, 8192, 4096);
     defer gpa.free(small);
     const s = try parse(gpa, small);
+    try std.testing.expect(whole(c) and !whole(s)); // the Metal engine refuses the synthetic one
     try std.testing.expectEqual(Kind.kda, s.kind(0));
     try std.testing.expectEqual(Kind.mla, s.kind(1));
     try std.testing.expectEqual(Kind.mla, s.kind(2)); // the MTP layer
