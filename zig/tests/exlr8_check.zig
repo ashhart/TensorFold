@@ -92,7 +92,15 @@ fn checkBlocks(device: mtl.Device, queue: mtl.Queue, p: *const op.Pipelines, boo
     var check: ref.Check = .{};
     var pairs: usize = 0;
     for ([_]u8{ 2, 3, 4 }) |k| for ([_]usize{ 1, 2, 3, 17, 48 }) |blocks| for ([_]bool{ false, true }) |f32_out| {
-        const c: cases.Case = .{ .name = "block reuse", .k = .{ k, 0, 0 }, .slots = 1, .blocks = blocks, .outs = 1, .down = false, .y_f32 = f32_out };
+        const c: cases.Case = .{
+            .name = "block reuse",
+            .k = .{ k, 0, 0 },
+            .slots = 1,
+            .blocks = blocks,
+            .outs = 1,
+            .down = false,
+            .y_f32 = f32_out,
+        };
         const d = try cases.Data.init(c, 0xD08 + @as(u64, k) * 128 + blocks);
         defer d.deinit();
         const o = try run(device, queue, p, d, 1);
@@ -100,7 +108,10 @@ fn checkBlocks(device: mtl.Device, queue: mtl.Queue, p: *const op.Pipelines, boo
         pairs += try cases.rowsEqual(o);
         try cases.fp64(book, d, o, &check);
     };
-    std.debug.print("PASS block reuse: 30 cases, {d} row/window pairs, {d} FP64 values; max error {e}, max {d:.4} of bound\n", .{ pairs, check.values, check.max_error, check.max_fraction });
+    std.debug.print(
+        "PASS block reuse: 30 cases, {d} row/window pairs, {d} FP64 values; max error {e}, max {d:.4} of bound\n",
+        .{ pairs, check.values, check.max_error, check.max_fraction },
+    );
 }
 
 pub fn main(init: std.process.Init) !void {

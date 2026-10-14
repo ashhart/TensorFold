@@ -102,7 +102,9 @@ inline void tf_exlr8_job(const device float* X, const device uchar* W, const dev
     threadgroup float* tile = alternate && (ib & 1) ? zs : xs;
     for (uint i = tid; i < R * 128; i += 256) {
       const uint rr = i / 128;
-      tile[i] = rr < rows ? X[ulong(j.count ? members[j.members + rr] >> 16 : rr) * a.x_stride + j.x_col + ib * 128 + i % 128] : 0.0f;
+      tile[i] = rr < rows
+          ? X[ulong(j.count ? members[j.members + rr] >> 16 : rr) * a.x_stride + j.x_col + ib * 128 + i % 128]
+          : 0.0f;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint i = 0; i < R; ++i) part[0][i] = part[1][i] = 0.0f;
