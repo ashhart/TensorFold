@@ -49,7 +49,8 @@ try {
     try {for await(const chunk of streamChat(params)) chunks.push(chunk)} catch(error){failure=error}
     assert.ok(failure instanceof Error, `provider ${mode} failure must not appear as blank success`)
     noCredential(inspect(failure));noCredential(JSON.stringify(chunks));noCredential(chunks.filter(chunk=>chunk.type==='content'||chunk.type==='reasoning').map(chunk=>chunk.text).join(''))
-    const jsonAt=failure.message.indexOf('— {');if(jsonAt>=0)noCredential(JSON.parse(failure.message.slice(jsonAt+2).trim()).error.message)
+    const jsonAt=failure.message.indexOf(': {')
+    if(jsonAt>=0)noCredential(JSON.parse(failure.message.slice(jsonAt+2).trim()).error.message)
     assert.match(failure.message,/alpha, beta/,'useful model diagnostics survive secret scrubbing')
     if(mode==='http'||mode==='http-limit'||mode==='http-unicode'){const http = failure as Error & { status:number;headers:Headers };assert.equal(http.status,mode==='http-limit'?429:401);assert.equal(http.headers.get('retry-after'),'17');assert.equal(http.headers.get('x-ratelimit-reset'),'2000000000');assert.ok(!http.headers.get('x-fixture-echo')!.includes(key));if(mode==='http-limit'){const limit=classifyModelExhaustion(http,1000);assert.equal(limit?.retryAfterMs,17000);assert.equal(limit?.resetAt,18000)}}
   }

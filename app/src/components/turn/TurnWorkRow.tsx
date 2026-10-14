@@ -25,19 +25,21 @@ function useNow(active: boolean): number {
 }
 
 // One collapsible row per turn: "Worked for 12s · 4 steps", or live "Working · 12s · Editing App.tsx".
-export function TurnWorkRow({ turn, status, defaultOpen = false, reveal = 0 }: {
+export function TurnWorkRow({ turn, status, phaseLabel, defaultOpen = false, reveal = 0 }: {
   turn: TurnSummary
   status?: string
+  phaseLabel?: string
   defaultOpen?: boolean
   reveal?: number
 }) {
   const [open, setOpen] = useState(defaultOpen)
   useEffect(() => { if (reveal > 0) setOpen(true) }, [reveal])
   const now = useNow(turn.running)
-  const label = workRowLabel(turn, { now, status })
+  const label = workRowLabel(turn, { now, status, phaseLabel })
   const hasDetails = turn.work.length > 0
   return (
     <div className="fade-in">
+      <span role="status" aria-live="polite" className="sr-only">{turn.running ? phaseLabel : undefined}</span>
       <button
         type="button"
         onClick={() => hasDetails && setOpen((value) => !value)}

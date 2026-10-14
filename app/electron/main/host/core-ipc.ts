@@ -168,7 +168,10 @@ export function registerCoreIpc(deps: CoreIpcDeps) {
   registerProviderIpc()
   registerControllerIpc({ appName, rememberConnectorEvents })
   registerMissionsIpc({ getMission, createLocalPrLoop })
-  registerBotIpc({ pollTelegramUpdates })
+  registerBotIpc({ pollTelegramUpdates, recipes: {
+    currentSettings: () => store.settings,
+    commitImport: (prepare) => commitSettingsChange(prepare, async () => {}),
+  } })
 
 // ---------------------------------------------------------------- IPC
 

@@ -1,3 +1,4 @@
+import { parseThreadMemoryPolicy, threadMemoryPolicyRevision, assertThreadMemoryTransport } from '../../../shared/thread-memory-policy'
 import { modelForReadiness } from '../../../shared/model-readiness'
 import type { AgentEvent, ArchiveKind, ArchiveSnapshot, DiffLine, Settings, StartRunPayload, Thread, TimelineItem, Project, Room, RoomEventItem, RoomMemoryEntry, RoomStreamEvent, Ticket, Automation, Job, GitCommitResult, GitDiffFile, GitHygieneFinding, GitHygieneReport, GitHygieneSanitizeResult, GitStatus, TokenUsageSnapshot, TokenUsageWindow, TokenUsageWindowKey, ContextPressureSnapshot, ModelRouterSnapshot, AssistantControlSnapshot, ConnectorEvent, ConnectorInteractionInput, AppUpdateStatus, CreateMissionInput, CreatePrLoopInput, CreatePrLoopResult, EmailDraftInput, EmailListOptions, EmailMessage, EmailReadResult, EmailResolveInput, EmailSourceConfig, EmailSyncResult, EmailThreadResult, Mission, MissionCheckpoint, MissionInspectionSnapshot, MissionJournalEvent, MissionPendingApproval, MissionRuntimeSnapshot, MissionStatus, Skill, Command, McpServerConfig, McpServerSnapshot, McpSnapshot, McpToolCallResult, McpToolDefinition, ControllerSnapshot, ControllerStatus, ProjectMemoryCandidate, ProjectMemoryEntry, WebhookDeliveryRecord, WebhookEndpoint, WebhookSnapshot, RemoteControlPairingInfo, RemoteControlStatus, RemoteControlWorkSnapshot, SecurityControlSnapshot, SecurityPurgeResult, CliDefinition, CliSession, CliToolStatus } from '../types'
 import type { BrowserConnectorSettings, BrowserItem, BrowserListOptions, BrowserReadResult, BrowserSnapshotInput, BrowserSourceConfig, BrowserSummaryResult, BrowserSyncResult, CalendarEvent, CalendarListOptions, CalendarMutationInput, CalendarReadResult, CalendarSourceConfig, CalendarSummaryResult, CalendarSyncResult, DiscordSource, DocumentItem, DocumentListOptions, DocumentReadResult, DocumentSourceConfig, DocumentSummaryResult, DocumentSyncResult, GoogleChatSource, MattermostSource, MatrixSource, SlackMessage, SlackListOptions, SlackReadResult, SlackSourceConfig, SlackSummaryResult, SlackSyncResult } from '../types'
@@ -19,6 +20,7 @@ import { demoApprovalThread, demoRunStateEvents, mockGitDiff, mockGitStatus } fr
 import { captureBotConfig } from '../../../shared/bot-policy'
 import { createMockBotVmApi } from './bot-vm'
 import { createMockUserQuestionApi } from './user-question'
+import { createMockBotRecipeApi } from './bot-recipes'
 
 function mockDiscordSource(label: string): DiscordSource {
   const now = Date.now()
@@ -70,6 +72,7 @@ export function createMockApi(): TensorFoldStudioApi {
   const remoteTerminalSessions: CliSession[] = []
   const desktopModeSubs = new Set<(settings: Settings) => void>()
   return {
+    ...createMockBotRecipeApi(),
     ...createMockBotVmApi(),
     ...createMockUserQuestionApi(),
     ...createMockPhoneApi(),
@@ -537,6 +540,16 @@ export function createMockApi(): TensorFoldStudioApi {
     configureThread: async (id, providerId, model, providerAccountId = null) => {
       const t = mockState.threads.find((x) => x.id === id)
       if (t) { t.providerId = providerId; t.providerAccountId = providerAccountId; t.model = model }
+    },
+    setThreadMemoryPolicy: async (id, policy, expectedRevision) => {
+      const thread = mockState.threads.find((t) => t.id === id)
+      if (!thread || thread.archivedAt) throw new Error('Choose an active chat.')
+      if (thread.status === 'running') throw new Error('Stop this run before changing memory choices.')
+      if (threadMemoryPolicyRevision(thread) !== expectedRevision) throw new Error('Memory choices changed in another window.')
+      const requested = parseThreadMemoryPolicy(policy)
+      assertThreadMemoryTransport({ ...thread, memoryPolicy: requested }, mockState.settings.providers.find((p) => p.id === thread.providerId))
+      Object.assign(thread, { memoryPolicy: requested, memoryPolicyRevision: expectedRevision + 1 })
+      return thread
     },
     patchThread: async (id, patch) => { const t = mockState.threads.find((x) => x.id === id)!; if (t) Object.assign(t, patch); return t },
     setThreadWorkspace: async (id, workspace, cwd) => {

@@ -286,7 +286,6 @@ const SESSION_SEARCH_SCHEMA = {
       properties: {
         query: { type: 'string', description: 'Search text to find in prior local sessions.' },
         projectId: { type: 'string', description: 'Optional project id. Defaults to the current project when the host provides one.' },
-        currentThreadId: { type: 'string', description: 'Optional current thread id to exclude by default.' },
         includeCurrent: { type: 'boolean', description: 'Include the current thread in results. Defaults to false.' },
         includeArchived: { type: 'boolean', description: 'Include archived threads. Defaults to false.' },
         limit: { type: 'number', description: 'Maximum matches to return. Defaults to 12, capped at 50.' },

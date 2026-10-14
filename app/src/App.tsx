@@ -17,6 +17,7 @@ import { UpdateModal } from './components/UpdateModal'
 import { Button } from './components/ui'
 import type { Provider } from './lib/types'
 import { ALL_SETTINGS_SECTIONS, type SettingsSection } from './components/settings/shared'
+import { fullLayoutStartupChat, simpleFullLayoutActive } from './lib/full-workspace-layout'
 
 // Stable empty-array reference. Returning a fresh `[]` from a zustand selector
 // makes useSyncExternalStore think the snapshot changed every render → infinite
@@ -80,6 +81,7 @@ export default function App() {
   const newChat = useStore((s) => s.newChat)
   const setView = useStore((s) => s.setView)
   const sidebarCollapsed = useStore((s) => s.sidebarCollapsed)
+  const fullWorkspaceLayout = useStore((s) => s.fullWorkspaceLayout)
   const toggleSidebar = useStore((s) => s.toggleSidebar)
   const toggleRightPanel = useStore((s) => s.toggleRightPanel)
   const cycleApprovalMode = useStore((s) => s.cycleApprovalMode)
@@ -109,7 +111,11 @@ export default function App() {
         else if (mod && (k === 'n' || k === 'b' || e.key === '[' || e.key === ']')) e.preventDefault()
         return
       }
-      if (mod && k === 'n') { e.preventDefault(); e.shiftKey ? newChat() : newTask() }
+      if (mod && k === 'n') {
+        e.preventDefault()
+        if (e.shiftKey) void newChat().catch(() => useStore.getState().setNotice({ kind: 'error', message: 'Could not open a chat. Your current work is still here; try New chat again.' }))
+        else newTask()
+      }
       else if (mod && e.key === ',') { e.preventDefault(); setView({ name: 'settings' }) }
       else if (mod && e.altKey && k === 'b') { e.preventDefault(); toggleRightPanel() }
       else if (mod && k === 'b') { e.preventDefault(); toggleSidebar() }
@@ -143,6 +149,15 @@ export default function App() {
     if (settings?.desktopOnboardingComplete && !replayingOnboarding.current) setOnboardingDone(true)
   }, [settings?.desktopOnboardingComplete])
   const minimal = settings?.desktopMode === 'minimal' && api.platform !== 'web-remote'
+  const simpleFull = simpleFullLayoutActive({ layout: fullWorkspaceLayout, desktopMode: settings?.desktopMode, platform: api.platform, onboarding: showOnboarding })
+  const initialFullNavigation = useRef(false)
+  useEffect(() => {
+    if (!ready || !settings || minimal || showOnboarding || initialFullNavigation.current) return
+    initialFullNavigation.current = true
+    const current = useStore.getState()
+    const recent = fullLayoutStartupChat(current.fullWorkspaceLayout, current.view.name, current.threads)
+    if (recent) current.openThread(recent.id)
+  }, [ready, settings, minimal, showOnboarding])
   const lastContentView = useRef(view)
   useEffect(() => {
     if (view.name !== 'settings') lastContentView.current = view
@@ -169,7 +184,7 @@ export default function App() {
     : undefined
 
   return (
-    <div className={`app-shell frosted flex h-full w-full overflow-hidden text-ink ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+    <div className={`app-shell frosted flex h-full w-full overflow-hidden text-ink ${sidebarCollapsed || simpleFull ? 'sidebar-collapsed' : ''}`}>
       {/* Settings is a full-page takeover: its nav replaces the
           sidebar and its sections take the content card. */}
       {(view.name === 'settings' || settingsDraftDirty) && (
@@ -181,16 +196,16 @@ export default function App() {
       )}
       {view.name !== 'settings' && (
         <div className="flex h-full w-full overflow-hidden">
-          {!sidebarCollapsed && !showOnboarding && !minimal && <Sidebar />}
+          {!sidebarCollapsed && !showOnboarding && !minimal && <div className={simpleFull ? 'hidden' : 'contents'} aria-hidden={simpleFull || undefined} data-full-workspace-sidebar><Sidebar /></div>}
           <div className="content-card relative flex min-w-0 flex-1 flex-col">
-            {showOnboarding ? <header className="drag h-11 shrink-0" /> : !minimal && <TitleBar />}
+            {showOnboarding ? <header className="drag h-11 shrink-0" /> : !minimal && <TitleBar simple={simpleFull} />}
             <main className="min-h-0 flex-1 overflow-hidden">
               <Suspense fallback={<ViewFallback />}>
                 {showOnboarding && contentView.name === 'home' ? <Onboarding onDone={() => setOnboardingDone(true)} /> : minimal && !showOnboarding ? <MinimalWorkspace target={minimalTarget} onTarget={setMinimalTarget} /> : <div className="flex h-full min-h-0 flex-col">
                 {showOnboarding && <div className="shrink-0 px-4 py-3"><Button size="sm" icon="back" onClick={() => setView({ name: 'home' })}>Return to setup</Button></div>}
                 <div className="min-h-0 flex-1">
                 {contentView.name === 'home' && <Home />}
-                {contentView.name === 'thread' && <ThreadView key={contentView.id} threadId={contentView.id} />}
+                {contentView.name === 'thread' && <ThreadView key={contentView.id} threadId={contentView.id} simpleLayout={simpleFull} />}
                 {contentView.name === 'commandCentre' && <CommandCentre />}
                 {contentView.name === 'assistant' && <Assistant />}
                 {contentView.name === 'plugins' && <Plugins />}
@@ -204,7 +219,7 @@ export default function App() {
               </Suspense>
             </main>
             {!minimal && !showOnboarding && contentView.name !== 'home' && contentView.name !== 'thread' && (
-              <Suspense fallback={null}><WorkspaceDock /></Suspense>
+              <div className={simpleFull ? 'hidden' : 'contents'} aria-hidden={simpleFull || undefined}><Suspense fallback={null}><WorkspaceDock /></Suspense></div>
             )}
           </div>
         </div>

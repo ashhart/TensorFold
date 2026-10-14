@@ -1,6 +1,6 @@
 # Bot Control
 
-TensorFold Studio can guide multi-agent rooms from phone channels. Telegram polls from the desktop app. WhatsApp Cloud API events enter through a loopback-only, Meta-signed webhook route; the QR bridge remains a separate local connector.
+TensorFold can guide multi-agent rooms from phone channels. Telegram polls from the desktop app. WhatsApp Cloud API events enter through a loopback-only, Meta-signed webhook route; the QR bridge remains a separate local connector.
 
 ## Commands
 
@@ -29,4 +29,4 @@ The token is stored through the app settings secret path and redacted before set
 
 The Cloud API path requires an access token, phone number ID, webhook verify token, Meta App Secret, and explicit sender allowlist. When enabled, the app's loopback webhook listener exposes `/integrations/whatsapp`; publish that route only through a TLS reverse proxy or tunnel you control.
 
-Subscription challenges must match the configured verify token. Every POST must carry Meta's `X-Hub-Signature-256`; TensorFold Studio verifies that HMAC against the raw request body before parsing it. The sender principal comes only from the signed `messages[].from` field, the signed phone-number ID must match the configured endpoint, and stable Meta message IDs are deduplicated. There is no renderer-callable or unsigned `bot:ingest` contract.
+Subscription challenges must match the configured verify token. Every POST must carry Meta's `X-Hub-Signature-256`; TensorFold verifies that HMAC against the raw request body before parsing it. The sender principal comes only from the signed `messages[].from` field, the signed phone-number ID must match the configured endpoint, and stable Meta message IDs are deduplicated. There is no renderer-callable or unsigned `bot:ingest` contract.

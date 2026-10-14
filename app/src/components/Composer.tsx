@@ -1,3 +1,5 @@
+import { mergeThreadRecord } from '../lib/store/shared/merge'
+import { parseThreadMemoryPolicy, threadMemoryUnsupportedReason, inspectThreadMemoryPolicy } from '../../shared/thread-memory-policy'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { useStore } from '../lib/store'
@@ -110,6 +112,8 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
   const [cwd, setCwd] = useState(settings.defaultCwd || '')
   // Incognito toggle (home composer): flags the NEXT launched thread as memory-only.
   const [incognito, setIncognito] = useState(false)
+  const [newMemoryPolicy, setNewMemoryPolicy] = useState(() => parseThreadMemoryPolicy(undefined))
+  const threadMemory = thread ? inspectThreadMemoryPolicy(thread) : null
   const activeProjectId = mode === 'thread' ? (thread?.projectId ?? null) : homeProject
   const policyProject = activeProjectId ? (projects.find((p) => p.id === activeProjectId) ?? null) : null
   // Active terminal for the composer's "Reference terminal output" action (VST-039).
@@ -704,7 +708,7 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
           else void chooseDir()
           return
         }
-        const result = await launch({ text: body, cwd: launchCwd, providerId: provider.id, providerAccountId, model: model || provider.models[0], approvalMode: settings.approvalMode, projectId: homeProject, workspace: homeWorkspace, attachments: atts, incognito })
+        const result = await launch({ text: body, cwd: launchCwd, providerId: provider.id, providerAccountId, model: model || provider.models[0], approvalMode: settings.approvalMode, projectId: homeProject, workspace: homeWorkspace, attachments: atts, incognito, memoryPolicy: newMemoryPolicy })
         if (!result.ok) return
       } else {
         await send(body, atts)
@@ -969,7 +973,7 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
               mode === 'home' ? 'min-h-[68px] pt-4' : 'min-h-[48px] pt-3.5',
             )}
           />
-          <div className="@container flex items-center gap-1 px-2 pb-2 pt-1">
+          <div className="@container flex flex-wrap items-center gap-1 px-2 pb-2 pt-1">
             {/* "+": attach a document, reference a file or terminal output, capture a window. */}
             <Menu width={220} placement="top" trigger={(open) => (
               <button aria-label="Attach" title="Attach files or context" className={clsx('flex h-8 w-8 items-center justify-center rounded-full transition-colors', open ? 'bg-ink-5 text-ink' : 'text-ink-3 hover:bg-ink-5 hover:text-ink')}>
@@ -1055,6 +1059,20 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
             /> : <button type="button" onClick={() => setView({ name: thread?.bot ? 'bots' : 'models' })} className="rounded-lg px-2 py-1 text-[13px] text-warn hover:bg-ink-5">Model unavailable</button>}
 
             <ComposerOverflowMenu
+              memory={thread?.bot ? undefined : {
+                policy: threadMemory ? threadMemory.policy : newMemoryPolicy,
+                problem: threadMemory?.problem,
+                revision: threadMemory?.revision ?? undefined,
+                incognito: thread ? thread.incognito === true : incognito,
+                busy: busy || submitting,
+                unsupported: threadMemory?.revision === null ? 'This damaged revision cannot be repaired through the memory menu; start a new chat.' : threadMemoryUnsupportedReason(thread ?? { orchestratorHostId: effectiveHostId }, provider),
+                isNew: !thread,
+                onSave: async (policy) => {
+                  if (!thread) { setNewMemoryPolicy(policy); return }
+                  const updated = await api.setThreadMemoryPolicy(thread.id, policy, thread.memoryPolicyRevision ?? 0)
+                  useStore.setState((state) => ({ threads: state.threads.map((entry) => entry.id === updated.id ? mergeThreadRecord(entry, updated) : entry) }))
+                },
+              }}
               workspace={overflowWorkspace}
               voice={{ available: !!settings.voice.enabled && !!settings.voice.sttEnabled, dictating, onToggle: toggleDictation }}
               incognito={mode === 'home' && !isChat ? { on: incognito, onToggle: () => setIncognito((v) => !v) } : undefined}

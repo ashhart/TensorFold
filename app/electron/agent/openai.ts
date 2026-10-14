@@ -16,6 +16,8 @@ import type { EngineSteeringChannel } from './steering'
 import type { ApiMessage, ApprovalMode, Provider, ToolCall } from './types'
 
 export interface ChatParams {
+  /** Host-owned admission; never supplied by model/tool arguments. */
+  assertRequestAllowed?: () => void
   provider?: Provider
   baseUrl?: string
   apiKey?: string
@@ -387,12 +389,15 @@ export async function* translateOpenCodeChunks(
 // Streams an OpenAI-compatible /chat/completions response. Works against
 // OpenAI, Ollama, LM Studio, vLLM, z.ai GLM, and any compatible endpoint.
 export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
+  const assertRequestAllowed = p.assertRequestAllowed
+  assertRequestAllowed?.()
   // External providers plan only (no tools, redacted, confined); the built-in engine is trusted.
   const planned = planningGuard(p, streamChat)
   if (planned) { yield* planned; return }
   const engine = await engineRoute(p)
   try {
   if (engine) p = engine.params
+  assertRequestAllowed?.()
   if (p.provider?.transport === 'codex-cli') {
     // Prefer the resumable `codex app-server` session over the one-shot `codex exec`: it
     // keeps codex's own thread alive across turns (no re-flattening the whole conversation
@@ -570,7 +575,7 @@ export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
   }
 
   if (!p.baseUrl) throw new Error('Provider base URL is required.')
-  const providerFetch = engine?.fetch ?? (p.provider ? createProviderFetch(p.provider) : createLocalProviderFetch(p.baseUrl))
+  const providerFetch = engine?.fetch ?? (p.provider ? createProviderFetch(p.provider, undefined, assertRequestAllowed) : createLocalProviderFetch(p.baseUrl, undefined, assertRequestAllowed))
   const reasoningEffort = chatCompletionsReasoningEffort(p.reasoningEffort, p.provider, p.model)
   // Only trusted local servers (the built-in engine, loopback oMLX/Ollama/LM Studio) are asked for usage.
   const wantUsage = classifyProvider(p.provider, p.baseUrl) === 'trusted-local'
@@ -597,7 +602,7 @@ export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
     const detail = await readBoundedResponseText(res, 'Provider error', PROVIDER_ERROR_MAX_BYTES).catch(() => '')
     // Attach status + headers so the model router can honor a real Retry-After / X-RateLimit-Reset
     // window instead of falling back to a fixed cooldown.
-    const err = new Error(`HTTP ${res.status} ${providerErrorText(res.statusText, p.apiKey)}${detail ? ` — ${providerErrorText(scrubProviderErrorBody(detail, p.apiKey), p.apiKey)}` : ''}`) as Error & { status?: number; headers?: unknown }
+    const err = new Error(`HTTP ${res.status} ${providerErrorText(res.statusText, p.apiKey)}${detail ? `: ${providerErrorText(scrubProviderErrorBody(detail, p.apiKey), p.apiKey)}` : ''}`) as Error & { status?: number; headers?: unknown }
     err.status = res.status
     err.headers = scrubProviderHeaders(res.headers, p.apiKey)
     throw err
@@ -855,9 +860,12 @@ export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
 // Quick non-streaming completion used to auto-title threads. External providers take the
 // streamChat path so the planning guard redacts the request.
 export async function quickComplete(p: Omit<ChatParams, 'tools'>): Promise<string> {
+  const assertRequestAllowed = p.assertRequestAllowed
+  assertRequestAllowed?.()
   const engine = await engineRoute(p, { start: false })
   try {
   if (engine) p = engine.params
+  assertRequestAllowed?.()
   if (p.provider?.transport === 'codex-cli' || p.provider?.transport === 'claude-cli' || p.provider?.transport === 'pi-cli' || p.provider?.transport === 'cursor-cli' || p.provider?.transport === 'gemini-cli' || isOpenCodeProtocol(p.provider?.transport) || needsPlanningGuard(p)) {
     let out = ''
     for await (const ch of streamChat(p)) {
@@ -866,7 +874,7 @@ export async function quickComplete(p: Omit<ChatParams, 'tools'>): Promise<strin
     return out.trim()
   }
   if (!p.baseUrl) throw new Error('Provider base URL is required.')
-  const providerFetch = engine?.fetch ?? (p.provider ? createProviderFetch(p.provider) : createLocalProviderFetch(p.baseUrl))
+  const providerFetch = engine?.fetch ?? (p.provider ? createProviderFetch(p.provider, undefined, assertRequestAllowed) : createLocalProviderFetch(p.baseUrl, undefined, assertRequestAllowed))
   const res = await providerFetch(joinUrl(p.baseUrl, '/chat/completions'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...(p.apiKey ? { Authorization: `Bearer ${p.apiKey}` } : {}) },
@@ -875,7 +883,7 @@ export async function quickComplete(p: Omit<ChatParams, 'tools'>): Promise<strin
   })
   if (!res.ok) {
     const detail = await readBoundedResponseText(res, 'Provider error', PROVIDER_ERROR_MAX_BYTES).catch(() => '')
-    const error = new Error(`HTTP ${res.status} ${providerErrorText(res.statusText, p.apiKey)}${detail ? ` — ${providerErrorText(scrubProviderErrorBody(detail, p.apiKey), p.apiKey)}` : ''}`) as Error & { status?: number; headers?: unknown }
+    const error = new Error(`HTTP ${res.status} ${providerErrorText(res.statusText, p.apiKey)}${detail ? `: ${providerErrorText(scrubProviderErrorBody(detail, p.apiKey), p.apiKey)}` : ''}`) as Error & { status?: number; headers?: unknown }
     error.status = res.status; error.headers = scrubProviderHeaders(res.headers, p.apiKey)
     throw error
   }

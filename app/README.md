@@ -7,7 +7,8 @@ graphite and navy surfaces, an electric-blue primary and the fold gradient.
 It reads, edits, and runs your code through a tool‑use loop, with streaming responses,
 live diffs, and per‑action approval.
 
-The Mac app requires Apple silicon and macOS 13.3 or later. The bundled offline voice runtime sets this minimum; isolated bot VMs additionally require macOS 26 or later.
+The Mac app requires Apple silicon and macOS 13.3 or later. The bundled offline voice runtime sets this
+minimum; isolated bot VMs additionally require macOS 26 or later.
 
 
 
@@ -27,7 +28,7 @@ The Mac app requires Apple silicon and macOS 13.3 or later. The bundled offline 
 - **Native chrome.** Frameless window with inset traffic lights, draggable titlebar, a task
   sidebar grouped by time, and a project‑grouped home launcher.
 - **Local‑first.** Settings and conversations are stored only on your machine.
-- **Local AI workspace.** Open Models for the installed library, downloads, Workers and the local API, with engine state, memory requirements and context visible together. Chip and memory details guide a recommendation after compatibility checks; download it, then Start chatting loads it; first-run setup finishes only after the welcome guide. Decode/prefill speed and first-token time show the latest completed Studio request, using reported engine timings or measured stream usage; unknown values stay blank.
+- **Local AI workspace.** Open Models for the installed library, downloads, Workers and the local API, with engine state, memory requirements and context visible together. Chip and memory details guide a recommendation after compatibility checks; download it, then Start chatting loads it; first-run setup finishes only after the welcome guide. Decode/prefill speed and first-token time show the latest completed TensorFold request, using reported engine timings or measured stream usage; unknown values stay blank.
 - **Independent local workers.** Choose a local Git project and the loaded TensorFold model, then give each task a verified worktree and branch. Workers remain visible while you use the app, with approval, Stop, recovery and Changes review actions; a document-task preset supports repository documentation work.
 - **Use the local API.** Loading a model starts its authenticated loopback endpoint. The API tab copies the base URL or an authenticated streaming curl example on request; the port and key change when the engine restarts, and the key is excluded from normal snapshots and events.
 
@@ -171,7 +172,7 @@ npm run dist:mac     # Developer ID signed + notarized dmg + zip release artifac
 ```
 
 The pack scripts first run `scripts/fetch-engine.mjs`, which stages the TensorFold engine pinned in
-`build/engine.json` (1.0.9, macos-arm64) into `build/engine/`. It takes the archive from
+`build/engine.json` (1.0.10, macos-arm64) into `build/engine/`. It takes the archive from
 `TENSORFOLD_ENGINE_ARCHIVE` when set, otherwise from the pinned release URL (cached in
 `build/.engine-cache/` after the first download). Anything whose sha256 or `SHA256SUMS` does not match
 is refused. The app ships it at `Contents/Resources/engine/{bin,lib}`;

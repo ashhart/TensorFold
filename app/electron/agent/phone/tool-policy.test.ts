@@ -14,9 +14,12 @@ const policy = approvalPolicyScope('tool', 'phone_control', { action: 'tap', ses
 assert.equal(requiresFreshConnectorApproval(policy), true)
 assert.notEqual(policy.key, approvalPolicyScope('tool', 'phone_control', { action: 'tap', sessionId: 'one', observationId: 'screen-two', x: 20, y: 20 }).key, 'approval cannot follow coordinates onto another phone screen')
 let calls = 0
-const base = { cwd: '/example/workspace', approvalMode: 'suggest', runPhoneControl: async () => { calls++; return { ok: true, output: 'Current phone labels', title: 'Phone observe' } } } as any
+const base = { cwd: '/example/workspace', approvalMode: 'suggest', phonePrivacyGuard: () => null, runPhoneControl: async () => { calls++; return { ok: true, output: 'Current phone labels', title: 'Phone observe' } } } as any
 assert.equal((await executeTool('phone_observe', {}, base)).ok, false)
 assert.equal(calls, 0)
+assert.equal((await executeTool('phone_observe', {}, { ...base, phoneControlAvailable: true, phonePrivacyGuard: undefined })).ok, false)
+assert.equal((await executeTool('phone_observe', {}, { ...base, phoneControlAvailable: true, phonePrivacyGuard: () => 'Synthetic local research policy changed.' })).ok, false)
+assert.equal(calls, 0, 'missing or refused local-processing admission never reaches the device callback')
 assert.equal((await executeTool('phone_observe', {}, { ...base, phoneControlAvailable: true })).ok, true)
 assert.equal(calls, 1)
 assert.equal((await executeTool('phone_control', { action: 'shell', command: 'unexpected' }, { ...base, phoneControlAvailable: true })).ok, false)

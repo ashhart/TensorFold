@@ -1,3 +1,4 @@
+import type { ThreadMemoryPolicy } from './types'
 import type { AgentEvent, ArchiveKind, ArchiveSnapshot, Attachment, CueRunPayload, CueRunResult, Settings, StartRunPayload, Thread, RendererThreadPatch, Project, Room, RoomStreamEvent, Ticket, TicketRemoteLifecycleCommand, TicketWorkOptions, Automation, Job, GitCommitResult, GitDiffFile, GitHygieneFinding, GitHygieneReport, GitHygieneSanitizeResult, GitRepositoryState, GitStatus, TokenUsageSnapshot, ContextPressureSnapshot, ModelRouterSnapshot, AssistantControlSnapshot, ConnectorEvent, ConnectorInteractionInput, ChannelApprovalRequest, ChannelApprovalResult, AppUpdateStatus, Provider, OmlxDiscovery, ProviderDiscovery, ProviderDiscoveryKind, ResolvedInstructionGraph, ProjectMemoryCandidate, ProjectMemoryCandidateDiff, ProjectMemoryEntry, WebhookEndpoint, WebhookSnapshot, CreateMissionInput, CreatePrLoopInput, CreatePrLoopResult, Mission, MissionCheckpoint, MissionInspectionSnapshot, MissionJournalEvent, MissionPendingApproval, MissionRuntimeSnapshot, MissionStatus, EmailConnectorSettings, EmailDraftInput, EmailListOptions, EmailMessage, EmailReadResult, EmailResolveInput, EmailSourceConfig, EmailSummaryResult, EmailSyncResult, EmailThreadResult, Skill, ProjectSkillView, SkillSuggestionDiff, Artifact, ArtifactPreview, Command, SkillSuggestion, McpServerConfig, McpSnapshot, McpToolCallResult, BotControlPollResult, ControllerSnapshot, ControllerStatus, RemoteControlPairingInfo, RemoteControlStatus, RemoteConnectionTestResult, RemoteDirectoryListResult, RemoteOrchestratorSnapshotResult, PersistenceFailure, SecurityControlSnapshot, SecurityPurgeResult, SshHost, SshConnectionState, SshSecretPrompt, SshTrustPrompt, WorkspaceLocation, CliDefinition, CliSession, CliToolStatus, ImportableSession, ImportSessionSource, SpineAggregate, ReadSinceResult, CommandReceipt, TurnCheckpoint, PersistedProviderStatus } from './types'
 import type { BrowserConnectorSettings, BrowserItem, BrowserListOptions, BrowserReadResult, BrowserSnapshotInput, BrowserSourceConfig, BrowserSummaryResult, BrowserSyncResult, CalendarConnectorSettings, CalendarEvent, CalendarListOptions, CalendarMutationInput, CalendarReadResult, CalendarSourceConfig, CalendarSummaryResult, CalendarSyncResult, DocumentConnectorSettings, DocumentItem, DocumentListOptions, DocumentReadResult, DocumentSourceConfig, DocumentSummaryResult, DocumentSyncResult, IMessageItem, IMessageReadResult, IMessageSyncResult, WhatsAppBridgeConnectorSettings, WhatsAppBridgeSource, DiscordConnectorSettings, DiscordChannel, DiscordSource, MattermostConnectorSettings, MattermostChannel, MattermostSource, MatrixConnectorSettings, MatrixRoom, MatrixSource, GoogleChatConnectorSettings, GoogleChatSpace, GoogleChatSource, SlackConnectorSettings, SlackListOptions, SlackMessage, SlackReadResult, SlackSourceConfig, SlackSummaryResult, SlackSyncResult } from './types'
 // Phase 6/7 (incident mode + run export) — additive import line alongside the Codex lane.
@@ -15,8 +16,12 @@ import type { EngineModelLibrarySnapshot, EngineLibraryScanOptions } from './typ
 import type { PhoneSnapshot, PhoneConnectInput, PhoneDeveloperConnectInput, PhonePairInput, PhoneActionInput } from './types'
 import type { BotVmStatus, BotVmSetupStatus } from './types'
 import type { UserQuestion, UserQuestionAnswer } from './types'
+import type { BotRecipePreview, BotRecipeImportInput, BotRecipeExportInput } from '../../shared/bot-recipe'
 
 export interface TensorFoldStudioApi {
+  botRecipePreview(input: { kind: 'import' | 'export'; value: string }): Promise<BotRecipePreview>
+  botRecipeImport(input: BotRecipeImportInput): Promise<Settings>
+  botRecipeExport(input: BotRecipeExportInput): Promise<{ saved: boolean }>
   userQuestionAnswer(input: UserQuestionAnswer): Promise<UserQuestion>
   userQuestionState(input: { threadId: string; questionId: string }): Promise<UserQuestion | null>
   botVmStatus(botId: string): Promise<BotVmStatus>
@@ -135,6 +140,7 @@ export interface TensorFoldStudioApi {
   setThreadEngine(id: string, engine: 'native' | 'omp'): Promise<void>
   ompStatus(): Promise<{ available: boolean; binary: string; version?: string }>
   configureThread(id: string, providerId: string, model: string, providerAccountId?: string | null): Promise<void>
+  setThreadMemoryPolicy(id: string, policy: ThreadMemoryPolicy, expectedRevision: number): Promise<Thread>
   patchThread(id: string, patch: RendererThreadPatch): Promise<Thread>
   setThreadWorkspace(id: string, workspace: WorkspaceLocation | null, cwd?: string | null): Promise<Thread>
   appendThreadNotice(id: string, text: string): Promise<void>

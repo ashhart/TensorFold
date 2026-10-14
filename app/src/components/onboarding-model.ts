@@ -5,6 +5,7 @@ export const ONBOARDED_KEY = 'vontra.onboarded'
 export const ONBOARDING_DRAFT_KEY = 'tensorfold.onboarding-draft'
 export const ONBOARDING_COMPLETED_EVENT = 'vontra:onboarding-completed'
 export const ONBOARDING_RESTART_EVENT = 'tensorfold:onboarding-restart'
+export const ONBOARDING_PRIOR_COMPLETION_KEY = 'tensorfold.onboarding-completed-once'
 export type OnboardingDesktopMode = 'minimal' | 'full'
 
 export function onboardingProviderVisible(mode: OnboardingDesktopMode, providerId: string): boolean {
@@ -12,7 +13,7 @@ export function onboardingProviderVisible(mode: OnboardingDesktopMode, providerI
 }
 
 export function completeOnboarding(): void {
-  try { localStorage.setItem(ONBOARDED_KEY, '1'); localStorage.removeItem(ONBOARDING_DRAFT_KEY) } catch { /* Native settings also persist completion. */ }
+  try { localStorage.setItem(ONBOARDED_KEY, '1'); localStorage.setItem(ONBOARDING_PRIOR_COMPLETION_KEY, '1'); localStorage.removeItem(ONBOARDING_DRAFT_KEY) } catch { /* Native settings also persist completion. */ }
   if (typeof window !== 'undefined') window.dispatchEvent(new Event(ONBOARDING_COMPLETED_EVENT))
 }
 
@@ -69,8 +70,12 @@ export async function commitOnboarding<T>(mode: OnboardingDesktopMode, persist: 
 }
 
 export function restartOnboarding(): void {
-  try { localStorage.removeItem(ONBOARDED_KEY); localStorage.removeItem(ONBOARDING_DRAFT_KEY) } catch { /* The restart event works for this session. */ }
+  try { if (localStorage.getItem(ONBOARDED_KEY) === '1') localStorage.setItem(ONBOARDING_PRIOR_COMPLETION_KEY, '1'); localStorage.removeItem(ONBOARDED_KEY); localStorage.removeItem(ONBOARDING_DRAFT_KEY) } catch { /* The restart event works for this session. */ }
   if (typeof window !== 'undefined') window.dispatchEvent(new Event(ONBOARDING_RESTART_EVENT))
+}
+export function onboardingPreviouslyCompleted(nativeComplete = false): boolean {
+  if (nativeComplete) return true
+  try { return localStorage.getItem(ONBOARDED_KEY) === '1' || localStorage.getItem(ONBOARDING_PRIOR_COMPLETION_KEY) === '1' } catch { return false }
 }
 
 export function onboardingStepIndex(id: OnboardingStepId): number {

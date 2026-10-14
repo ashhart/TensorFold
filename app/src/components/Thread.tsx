@@ -19,10 +19,14 @@ import { TurnStatsLine } from './turn/TurnStatsLine'
 import { TurnOutcome } from './turn/TurnOutcome'
 import { QuestionCard } from './user-question/QuestionCard'
 import { BotChatContext } from './bots/BotChatContext'
+import { BrandMark } from './BrandMark'
+import { isBuiltInProvider, isExternalProvider } from '../../shared/provider-trust'
+import { useEngineStatus } from '../lib/engine'
+import { builtinChatLoadingPhase } from '../lib/chat-loading-phase'
 
 const BUSY_STATES = ['thinking', 'streaming', 'tool', 'awaiting']
 
-export function ThreadView({ threadId }: { threadId: string }) {
+export function ThreadView({ threadId, simpleLayout = false }: { threadId: string; simpleLayout?: boolean }) {
   const thread = useStore((s) => s.threads.find((t) => t.id === threadId))
   const st = useStore((s) => s.status[threadId])
   const approvals = useStore((s) => s.approvals[threadId])
@@ -31,6 +35,10 @@ export function ThreadView({ threadId }: { threadId: string }) {
   const collapseToolRunsDefault = useStore((s) => s.collapseToolRunsDefault)
   const dockRequest = useStore((s) => s.threadDockRequest)
   const project = useStore((s) => thread?.projectId ? s.projects.find((candidate) => candidate.id === thread.projectId) ?? null : null)
+  const selectedProvider = useStore((s) => s.settings?.providers.find((provider) => provider.id === (thread?.providerId ?? s.settings?.activeProviderId)) ?? null)
+  const localEngineRoute = isBuiltInProvider(selectedProvider) && !isExternalProvider(selectedProvider) && !thread?.orchestratorHostId
+  const engineStatus = useEngineStatus(localEngineRoute)
+  const loadingPhase = builtinChatLoadingPhase({ status: st, provider: selectedProvider, model: thread?.model, engine: engineStatus, remoteExecution: !!thread?.orchestratorHostId })
   const scrollRef = useRef<HTMLDivElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
   const followRef = useRef(true)
@@ -167,10 +175,14 @@ export function ThreadView({ threadId }: { threadId: string }) {
         <div ref={scrollRef} onScroll={onScroll} className="scroll-thin min-h-0 flex-1 overflow-y-auto select-text">
           <div className="mx-auto w-full max-w-3xl space-y-4 px-6 pb-8 pt-12">
             {thread.bot && <BotChatContext thread={thread} />}
+            {simpleLayout && thread.kind === 'chat' && !timeline.length && !busy && <div className="flex min-h-[220px] flex-col items-center justify-center gap-4 px-2 text-center">
+              <BrandMark size={64} />
+              <div><h1 className="text-[20px] font-medium tracking-tight text-ink">Start a conversation</h1><p className="mt-2 max-w-[420px] text-[13px] leading-relaxed text-ink-2">Choose a model below and tell TensorFold what you need. Models has downloads and setup; Complete workspace opens projects and developer tools.</p>{localEngineRoute && <p className="mt-2 max-w-[420px] text-[12px] leading-relaxed text-ink-2">The selected TensorFold model loads on your first send. The first answer can take longer while it loads.</p>}</div>
+            </div>}
             {turnRows.map((row) => {
               if (row.type === 'work') return (
                 <div key={`work-${row.turn.key}`} id={`turn-work-${row.turn.key}`}>
-                  <TurnWorkRow turn={row.turn} status={row.turn.running ? st : undefined} defaultOpen={!collapseToolRunsDefault} reveal={revealedTurns[row.turn.key] ?? 0} />
+                  <TurnWorkRow turn={row.turn} status={row.turn.running ? st : undefined} phaseLabel={row.turn.running ? loadingPhase : undefined} defaultOpen={!collapseToolRunsDefault} reveal={revealedTurns[row.turn.key] ?? 0} />
                   {!row.turn.answerId && <TurnOutcome turn={row.turn} onShowActivity={() => showRecordedActivity(row.turn.key)} />}
                 </div>
               )
@@ -224,7 +236,7 @@ export function ThreadView({ threadId }: { threadId: string }) {
       </div>
 
       {/* The work pane decides for itself whether it is open (see lib/work-pane.ts). */}
-      {thread.bot?.executionTarget !== 'vm' && <ThreadPanel thread={thread} git={git} onChanged={refreshGit} />}
+      {thread.bot?.executionTarget !== 'vm' && <div className={simpleLayout ? 'hidden' : 'contents'} aria-hidden={simpleLayout || undefined} data-full-workspace-pane><ThreadPanel thread={thread} git={git} onChanged={refreshGit} /></div>}
     </div>
   )
 }

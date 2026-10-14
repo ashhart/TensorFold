@@ -4,7 +4,7 @@ import { MarkdownLink } from '../../lib/markdown-link'
 import type { EngineStatus } from '../../lib/types'
 import { Toggle } from '../ui'
 
-const PRIVACY_DOC = 'https://github.com/ashhart/TensorFold/blob/v1.0.9/docs/cortheon.md#what-leaves-the-machine'
+const PRIVACY_DOC = 'https://github.com/ashhart/TensorFold/blob/v1.0.10/docs/cortheon.md#what-leaves-the-machine'
 
 // Cortheon mode for the built-in engine: the server researches the web and follows a reasoning
 // plan for every chat request it answers. Turning it on or off restarts a loaded model.

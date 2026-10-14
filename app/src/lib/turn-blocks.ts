@@ -211,9 +211,10 @@ export function compactDuration(ms: number): string {
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
 /** "Worked for 12s · 4 steps" when done; "Working · 12s · Editing App.tsx" while live. */
-export function workRowLabel(turn: TurnSummary, opts: { now: number; status?: string }): string {
+export function workRowLabel(turn: TurnSummary, opts: { now: number; status?: string; phaseLabel?: string }): string {
   if (turn.running) {
     const elapsed = turn.startedAt != null ? compactDuration(opts.now - turn.startedAt) : null
+    if (opts.phaseLabel) return [opts.phaseLabel, elapsed].filter(Boolean).join(' · ')
     return ['Working', elapsed, currentStepLabel(turn, opts.status)].filter(Boolean).join(' · ')
   }
   const duration = turn.startedAt != null && turn.endedAt != null && turn.endedAt > turn.startedAt

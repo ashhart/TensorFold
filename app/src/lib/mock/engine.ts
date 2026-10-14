@@ -53,7 +53,7 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
   const timers = new Map<string, ReturnType<typeof setInterval>>()
   let status: EngineStatus = {
     hardware: { platform: 'darwin', architecture: 'arm64', chip: 'Apple M3 Max' },
-    available: true, version: '1.0.9', binaryPath: '/Applications/TensorFold.app/Contents/Resources/engine/bin/tensorfold-native',
+    available: true, version: '1.0.10', binaryPath: '/Applications/TensorFold.app/Contents/Resources/engine/bin/tensorfold-native',
     state: 'stopped', model: null, drafter: null, port: null, startedAt: null, readyAt: null, message: null, logTail: [], totalMemoryBytes: TOTAL_MEMORY, memoryLimitBytes: LIMIT, contextTokens: null,
     cortheon: { supported: true, enabled: false, active: false },
   }

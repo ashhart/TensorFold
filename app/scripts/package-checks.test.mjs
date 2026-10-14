@@ -38,9 +38,9 @@ for (const script of ['pack:mac:dev', 'pack:mac', 'dist:mac']) {
   assert.match(pkg.scripts[script], /node scripts\/fetch-engine\.mjs && node scripts\/build-computer-helper\.mjs && node scripts\/package-mac\.mjs/, `${script} stages the pinned engine and builds the computer-use helper before packaging`)
 }
 const engineManifest = JSON.parse(await readFile(path.join(root, 'build', 'engine.json'), 'utf8'))
-assert.equal(engineManifest.version, '1.0.9')
-assert.equal(engineManifest.sha256, '4892b4690df9f1d5c367c5cb4a8e831b1cfbac23d04c9bb8d42fde9b05234fc8')
-assert.equal(engineManifest.url, 'https://github.com/ashhart/TensorFold/releases/download/v1.0.9/tensorfold-1.0.9-macos-arm64.tar.gz')
+assert.equal(engineManifest.version, '1.0.10')
+assert.equal(engineManifest.sha256, '85987885bd3ba11a41ea0e9aea94f6207b09f0df9b1c38d992753e494c06c806')
+assert.equal(engineManifest.url, 'https://github.com/ashhart/TensorFold/releases/download/v1.0.10/tensorfold-1.0.10-macos-arm64.tar.gz')
 const ignore = await readFile(path.join(root, '.gitignore'), 'utf8')
 assert.match(ignore, /^build\/engine\/$/m, 'the staged engine is never committed')
 

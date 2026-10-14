@@ -1,3 +1,4 @@
+import { parseThreadMemoryPolicy, threadMemoryPolicyRevision } from '../../shared/thread-memory-policy'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { vontraPath, LEGACY_STATE_FILES, legacyPath, statePath, settingsPath, modelsPath, legacySettingsPath, threadsPath, fileExists } from './paths'
@@ -540,4 +541,29 @@ export async function shredPurgedStateFiles(): Promise<void> {
         : []
     await writeProtectedJson(p, empty)
   }
+}
+
+/** Stage choices without exposing them through threads:get before durable acceptance. */
+export async function saveThreadMemoryPolicy(getThreads: () => Thread[], threadId: string, value: unknown, expectedRevision: number, validate: (thread: Thread) => void = () => {}): Promise<Thread> {
+  const policy = parseThreadMemoryPolicy(value)
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || expectedRevision >= Number.MAX_SAFE_INTEGER) throw new Error('Invalid memory-choice revision.')
+  const resolve = () => {
+    const thread = getThreads().find((t) => t.id === threadId)
+    if (!thread || thread.archivedAt) throw new Error('Choose an active chat before changing memory choices.')
+    if (threadMemoryPolicyRevision(thread) !== expectedRevision) throw new Error('Memory choices changed in another window. Reopen this menu and try again.')
+    validate(thread)
+    return thread
+  }
+  const initial = resolve()
+  const patch = { memoryPolicy: policy, memoryPolicyRevision: expectedRevision + 1, updatedAt: Date.now() }
+  if (initial.incognito) { Object.assign(initial, patch); return initial }
+  let target: Thread | undefined
+  await writeProtectedJson(threadsPath(), stripIncognitoThreads(getThreads()), {
+    prepareData: () => {
+      target = resolve()
+      return stripIncognitoThreads(getThreads().map((t) => t === target ? { ...t, ...patch } : t))
+    },
+    onCommitted: () => { if (target) Object.assign(target, patch) },
+  })
+  return target!
 }

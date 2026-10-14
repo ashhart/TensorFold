@@ -1,5 +1,11 @@
 # Phone control
 
+Forks retain a phone conversation's local-model restriction without inheriting its device grant.
+Handing off copied phone context is limited to API models on this Mac; remote, external and CLI targets are refused before the transcript is prepared.
+Phone-local conversations cannot launch child agents or linked missions, whose independent runtimes do not yet enforce the conversation's local-processing boundary.
+Phone-local runs also use an empty plugin runtime and suppress automatic plugin, observer and compaction-harvest callbacks, including when a run becomes phone-local during observation.
+The Phone panel and encrypted conversation retain the native workflow; automatic shared tool-output spills are disabled for phone-local output.
+
 TensorFold's original phone integration connects one device to a local chat through its Phone
 panel. It uses platform APIs and protocols, with no phone-harness code, dependency or installer.
 
@@ -52,16 +58,24 @@ and deletes only its own session and refuses a runner already controlled by anot
 Connection is separate from allowing a chat. Allow this chat requires a model running on this
 Mac, a local chat rather than SSH/orchestrator work, and Cortheon disabled. A durable local-only
 marker protects that conversation's derived phone context across disconnects and app restarts;
-start a separate chat for cloud models or web research. Each agent input needs review against
+start a separate chat for cloud models or web research. Other chats cannot recall its messages,
+summaries or linked artifacts through session search, session reads or workspace retrieval.
+The original phone chat can still use its own encrypted history. Each agent input needs review against
 its exact session and observation IDs. Screens are re-read and compared immediately before input,
-including after a delayed approval, and read again afterward. Manual preview inputs expire after
+including after a delayed approval, and read again afterward. Only explicit Home/Back navigation
+can tolerate changed pixels when the known foreground app, dimensions and normalized accessible
+controls still match. Taps, swipes, typing, launching apps and manual Enter keep complete screenshot
+binding; an unknown app gets no pixel-drift exception. Navigation without a semantic change still
+counts toward the three-action pause even if status pixels animate. Manual preview inputs expire after
 30 seconds. A session is limited to 40 dispatched agent actions and 15 minutes per grant, with
 three unchanged results pausing control. Stop aborts input, cancels the owning chat run and clears
 the preview; normal Quit waits for phone cleanup as well as any learning checkpoint save.
 
 Screenshots are not written to disk or included in model messages by this feature. Accessible
 labels used by an allowed model become part of that local chat and use its existing encrypted
-persistence. Recognized secure fields and locks are refused before capture; model taps require
+persistence. Automatic extension hooks, auxiliary observers and automatic tool-output spill files
+do not receive newly captured phone context, including when a run becomes phone-local after it starts.
+Recognized secure fields and locks are refused before capture; model taps require
 a labelled interactive control or conservative OCR navigation label, and typing requires a
 verified focused nonsecure text field. Sending, payments, authentication, deletion and access
 confirmation stay with the owner. Arbitrary custom secure controls, every language and every

@@ -158,6 +158,11 @@ export interface Settings {
   confidentialTerms?: string[]
 }
 
+export interface BotToolScope {
+  mode: 'selected'
+  names: string[]
+}
+
 export interface AgentPreset {
   id: string
   name: string
@@ -169,6 +174,9 @@ export interface AgentPreset {
   instructions?: string
   approvalScope?: 'readonly' | 'review'
   executionTarget?: 'workspace' | 'vm'
+  toolScope?: BotToolScope
+  /** Retains damaged persisted selection data without allowing the bot to run. */
+  toolScopeProblem?: { value: unknown }
   paused?: boolean
   archivedAt?: number | null
   createdAt: number
@@ -186,6 +194,8 @@ export interface BotThreadConfig {
   model: string
   approvalScope: 'readonly' | 'review'
   executionTarget: 'workspace' | 'vm'
+  toolScope?: BotToolScope
+  toolScopeProblem?: { value: unknown }
   capturedAt: number
 }
 

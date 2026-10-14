@@ -10,6 +10,9 @@ import { mostRecentCompatibleBotChat } from '../lib/bot-chats'
 import type { AgentPreset, Provider } from '../lib/types'
 import { Button, Input } from './ui'
 import { BotVmControls } from './bots/BotVmControls'
+import { BotRecipes } from './bots/BotRecipes'
+import { BotToolScopeEditor } from './bots/BotToolScopeEditor'
+import { inspectBotToolScope } from '../../shared/bot-tool-policy'
 
 const EMPTY_BOTS: AgentPreset[] = []
 const EMPTY_PROVIDERS: Provider[] = []
@@ -81,6 +84,7 @@ export function Bots() {
         <div><h1 className="text-[22px] font-semibold tracking-[-0.02em] text-ink">Your bots</h1><p className="mt-1 max-w-[620px] text-[13px] leading-relaxed text-ink-2">Save a model, a responsibility and clear permissions, then start a chat. Bots work while TensorFold is running on this Mac.</p></div>
         <Button variant="primary" icon="plus" disabled={!!draft || !!busyId} onClick={() => startDraft()}>New bot</Button>
       </div>
+      <BotRecipes disabled={!!draft || !!busyId} />
       {api.platform === 'web-remote' && <div className="mb-4 rounded-lg border border-line bg-card p-3 text-[13px] text-ink-2">Manage bots in the desktop app on the host Mac.</div>}
       {error && <div role="alert" className="mb-4 flex items-start gap-2 rounded-lg border border-danger/30 bg-danger/5 p-3 text-[13px] text-danger"><Icon name="alert" size={16} className="mt-0.5 shrink-0" /><span className="min-w-0 flex-1 break-words">{error}</span><button aria-label="Dismiss error" onClick={() => setError(null)}><Icon name="x" size={15} /></button></div>}
       {draft ? <section aria-label="Bot editor" className="mb-6 overflow-hidden rounded-xl border border-line-strong bg-card shadow-card">
@@ -99,6 +103,7 @@ export function Bots() {
             <label className="space-y-1.5 text-[13px] text-ink-2"><span className="block font-medium">Permissions</span><select value={draft.approvalScope ?? 'readonly'} onChange={(event) => setDraft({ ...draft, approvalScope: event.target.value as AgentPreset['approvalScope'] })} className="h-10 w-full rounded-lg border border-line bg-card-2 px-2 text-[13px] text-ink"><option value="readonly">Read only</option><option value="review">Review actions with workspace rules</option></select></label>
             <label className="space-y-1.5 text-[13px] text-ink-2"><span className="block font-medium">Execution</span><select value={draft.executionTarget ?? 'workspace'} onChange={(event) => setDraft({ ...draft, executionTarget: event.target.value as AgentPreset['executionTarget'] })} className="h-10 w-full rounded-lg border border-line bg-card-2 px-2 text-[13px] text-ink"><option value="workspace">This Mac</option><option value="vm">Separate Linux VM</option></select></label>
           </div>
+          <BotToolScopeEditor bot={draft} onChange={setDraft} />
           <p className="rounded-lg bg-card-2 p-3 text-[12px] leading-relaxed text-ink-2">{draft.executionTarget === 'vm' ? 'A separate VM keeps bot files and commands away from your Mac. Set it up explicitly before the first run; TensorFold refuses to fall back to your Mac.' : 'This Mac uses your configured chat tools and connected sources. Read only prevents actions; workspace rules may include approvals you saved earlier.'} Changes apply to new chats; existing chats keep their captured instructions, model and permissions.</p>
           {draftProblem && <p className="text-[13px] text-ink-2">{draftProblem} Save paused to keep these instructions while you set up a model in Settings.</p>}
           <div className="flex justify-end gap-2"><Button disabled={!!busyId} onClick={() => { setDraft(null); setError(null) }}>Discard</Button><Button type="button" variant="primary" onClick={() => void saveBot(draftProblem ? { ...draft, paused: true } : draft)} disabled={!!busyId || !draft.name.trim() || api.platform === 'web-remote'}>{busyId ? 'Saving…' : draftProblem ? 'Save paused' : 'Save bot'}</Button></div>
@@ -111,11 +116,13 @@ export function Bots() {
         const running = history.find((thread) => ['thinking', 'streaming', 'tool', 'awaiting'].includes(statuses[thread.id] ?? '') || thread.status === 'running')
         const awaiting = running && statuses[running.id] === 'awaiting'
         const problem = botProblem(bot, providers)
+        const toolSelection = inspectBotToolScope(bot.toolScope)
         const provider = providers.find((item) => item.id === bot.providerId)
         const state = bot.archivedAt ? 'Archived' : bot.paused ? 'Paused' : awaiting ? 'Needs you' : running ? 'Working' : problem ? 'Setup needed' : bot.executionTarget === 'vm' ? 'Model ready' : 'Ready'
         return <article key={bot.id} className="min-w-0 rounded-xl border border-line bg-card p-4 shadow-card">
           <div className="flex items-start gap-3"><span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-ink-5 text-accent"><Icon name="spark" size={19} /></span><div className="min-w-0 flex-1"><h2 className="break-words text-[15px] font-semibold">{bot.name}</h2><p className="mt-0.5 break-words text-[13px] text-ink-2">{bot.role || 'A bot with your saved instructions'}</p></div><span className={clsx('shrink-0 rounded-full px-2 py-1 text-[12px]', awaiting ? 'bg-accent/10 text-accent' : 'bg-card-2 text-ink-2')}>{state}</span></div>
           <div className="mt-4 space-y-1 text-[12px] text-ink-2"><p className="truncate" title={bot.model}>{modelDisplayName(provider, bot.model)} · {isExternalProvider(provider) ? 'Planning only' : 'Local model'}</p><p>{bot.executionTarget === 'vm' ? 'Separate Linux VM' : 'This Mac'} · {bot.approvalScope === 'review' ? 'Workspace approval rules' : 'Read only'}</p></div>
+          {(bot.toolScope !== undefined || bot.toolScopeProblem !== undefined) && <p className="mt-1 text-[12px] text-ink-2">{bot.toolScopeProblem !== undefined || toolSelection.error ? 'Tool selection needs repair' : toolSelection.names.length ? `${toolSelection.names.length} selected tool names` : 'Chat without tools'} · plugins and delegation off</p>}
           {problem && <p className="mt-3 break-words text-[12px] text-danger">{problem}</p>}
           {bot.executionTarget === 'vm' && <BotVmControls botId={bot.id} archived={!!bot.archivedAt} paused={!!bot.paused} />}
           <div className="mt-4 flex flex-wrap gap-2">{compatible && <Button variant="primary" size="sm" icon="message" onClick={() => useStore.getState().openThread(compatible.id)}>Open chat</Button>}{!bot.archivedAt && <Button variant={compatible ? 'default' : 'primary'} size="sm" icon={compatible ? 'plus' : 'message'} onClick={() => void chat(bot)} disabled={!!busyId || !!bot.paused || !!problem || api.platform === 'web-remote'}>{busyId === bot.id ? 'Starting…' : 'New chat'}</Button>}<Button size="sm" variant="ghost" disabled={!!draft || !!busyId} onClick={() => { setError(null); setDraft({ ...bot }) }}>Edit</Button>{!bot.archivedAt && <Button size="sm" variant="ghost" disabled={!!busyId} onClick={() => void saveBot({ ...bot, paused: !bot.paused })}>{bot.paused ? 'Resume' : running ? 'Pause and stop' : 'Pause'}</Button>}<Button size="sm" variant="ghost" disabled={!!busyId} onClick={() => void saveBot({ ...bot, archivedAt: bot.archivedAt ? null : Date.now() })}>{bot.archivedAt ? 'Restore' : 'Archive'}</Button></div>
