@@ -83,6 +83,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     }
     srv.teacher.learning.lockUncancelable(srv.io);
     defer srv.teacher.learning.unlock(srv.io);
+    if (!keepOriginals(srv, conn, a)) return;
     sse.open(conn) catch return;
     var out: Out = .{ .conn = conn, .a = a };
     var cx: errors.Cx = .{ .a = a };
@@ -133,6 +134,20 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         } else out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps });
     }
     sse.done(conn) catch {};
+}
+
+/// The folder's original files kept before its first lesson, else the lesson refused with why; true to go on.
+fn keepOriginals(srv: *Server, conn: *Conn, a: Allocator) bool {
+    const dir = folder(srv) orelse return true;
+    var why: []const u8 = "";
+    const kept = api.originals.keep(srv.io, dir, srv.config.slide_graph, .{}, a, &why) catch |e| {
+        log.line("slide: {s}", .{why});
+        refuse(conn, a, if (e == error.NoSpace) 507 else 500, why);
+        return false;
+    };
+    const before = if (kept.taught) "; it had learned before, so a rollback returns it to this point, not to the model as pulled" else "";
+    if (kept.made) log.line("slide: {s}'s original files kept in {s} before its first lesson: {d} files, {d:.1} GB, {d} cloned, in {d:.1} s{s}", .{ dir, api.originals.folder_name, kept.files, @as(f64, @floatFromInt(kept.bytes)) / 1e9, kept.cloned, kept.seconds, before });
+    return true;
 }
 
 /// Rounds a lesson gets to bring its facts back when asked once, before it is given up.

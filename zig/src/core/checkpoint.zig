@@ -205,6 +205,44 @@ test "a failed allocation while a checkpoint opens leaves nothing behind" {
     try expectBalanced(addShard, io, walk_dir);
 }
 
+test "the loader reads the folder's own shards only: hidden folders (a download's .cache, --slide's snapshot) are passed by" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const shards = [_][]const u8{ "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors" };
+    const index = "{\"weight_map\":{\"a\":\"model-00001-of-00002.safetensors\",\"b\":\"model-00002-of-00002.safetensors\"}}";
+    for ([_][]const u8{ "", ".tensorfold-original/", ".cache/huggingface/" }) |at| {
+        if (at.len > 0) try tmp.dir.createDirPath(io, at);
+        for (shards, [_][]const u8{ "a", "b" }) |name, tensor| {
+            const image = try testImage(gpa, tensor, 4);
+            defer gpa.free(image);
+            var sub: [96]u8 = undefined;
+            try tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&sub, "{s}{s}", .{ at, name }), .data = image });
+        }
+        var sub: [96]u8 = undefined;
+        try tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&sub, "{s}model.safetensors.index.json", .{at}), .data = index });
+    }
+    var buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    for (0..2) |pass| {
+        if (pass == 1) try tmp.dir.deleteFile(io, "model.safetensors.index.json"); // no index: the folder's model*.safetensors
+        const listed = try shardFiles(gpa, io, dir);
+        defer freeShardFiles(gpa, listed);
+        try std.testing.expectEqual(shards.len, listed.len);
+        for (shards, listed) |name, p| try std.testing.expectEqualStrings(name, p[dir.len + 1 ..]);
+        var ck = try Checkpoint.openModel(gpa, io, dir);
+        defer ck.close();
+        for (ck.files.items) |f| try std.testing.expect(std.mem.indexOf(u8, f.path[dir.len..], "/.") == null);
+        _ = try ck.get("a");
+        _ = try ck.get("b");
+        try std.testing.expectEqual(@as(usize, 0), ck.unused());
+    }
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    try std.testing.expect(try @import("shard_edit.zig").linked(arena.allocator(), io, dir) == null); // --slide's startup check
+}
+
 test "has finds a name without taking it; skip marks a prefix used" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;

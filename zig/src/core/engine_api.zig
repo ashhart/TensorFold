@@ -415,6 +415,9 @@ pub const prompt_imprint = @import("prompt_imprint.zig");
 /// The idle keepalive's ticker and target contract.
 pub const keepalive = @import("keepalive.zig");
 
+/// A model folder's original files kept before --slide first teaches it, its hold and its rollback (originals.zig).
+pub const originals = @import("originals.zig");
+
 test {
     _ = @import("lane_host.zig");
     _ = @import("lane_host_test.zig");
@@ -425,4 +428,5 @@ test {
     _ = @import("prompt_radix.zig");
     _ = @import("prompt_imprint.zig");
     _ = @import("keepalive.zig");
+    _ = @import("originals_test.zig");
 }

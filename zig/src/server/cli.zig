@@ -326,6 +326,14 @@ fn gpuFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usage)
     return true;
 }
 
+/// Why `--slide` cannot start without a key (`env_keys`: TENSORFOLD_API_KEY), or null when keyed or not teaching.
+pub fn slideKeyless(a: Allocator, args: Args, env_keys: []const u8) !?[]const u8 {
+    if (!args.slide or args.api_key.len > 0 or args.api_key_file != null) return null;
+    var it = std.mem.splitScalar(u8, env_keys, ',');
+    while (it.next()) |key| if (std.mem.trim(u8, key, " \t\r\n\x0b\x0c").len > 0) return null;
+    return try std.fmt.allocPrint(a, "--slide lets any client that reaches this server rewrite the weights in {s} through /v1/slide/learn: add --api-key KEY or --api-key-file FILE so only your clients can teach it", .{args.model});
+}
+
 /// ``--parallel``: "auto" is up to 8 requests at once; a number caps it.
 pub fn parallel(text: []const u8) ?u32 {
     const t = std.mem.trim(u8, text, " ");
@@ -519,6 +527,21 @@ test "the GPU engine's flags: refused and unlisted unless the backend serves the
     try std.testing.expectError(error.Usage, ranks(&u, a, args));
     for ([_][2][]const u8{ .{ "--rank", "-1" }, .{ "--master-port", "70000" }, .{ "--mtp-drafts", "65" }, .{ "--mtp-confidence", "1.5" }, .{ "--checkpoint-slots", "-1" }, .{ "--policy", "matrix" } }) |g| try std.testing.expectError(error.Usage, gpuFlag(a, &args, g[0], g[1], &u));
     try std.testing.expect(!try gpuFlag(a, &args, "--port", "1", &u));
+}
+
+test "--slide starts only with a key: --api-key, --api-key-file or TENSORFOLD_API_KEY" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    const bare = try parse(a, &.{ "/models/copy", "--slide" }, &u);
+    const why = (try slideKeyless(a, bare, "")) orelse return error.TestExpectedRefusal;
+    try std.testing.expect(std.mem.indexOf(u8, why, "/models/copy") != null and std.mem.indexOf(u8, why, "--api-key KEY or --api-key-file FILE") != null);
+    try std.testing.expect(try slideKeyless(a, bare, " , ") != null); // separators alone are no key
+    try std.testing.expect(try slideKeyless(a, bare, "sk-env") == null);
+    try std.testing.expect(try slideKeyless(a, try parse(a, &.{ "m", "--slide", "--api-key", "sk-1" }, &u), "") == null);
+    try std.testing.expect(try slideKeyless(a, try parse(a, &.{ "m", "--slide", "--api-key-file", "keys" }, &u), "") == null);
+    try std.testing.expect(try slideKeyless(a, try parse(a, &.{"m"}, &u), "") == null); // serving alone needs none
 }
 
 test "an engine is asked for what the flags say, and the defaults of the flags not given" {

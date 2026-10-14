@@ -135,7 +135,7 @@ pub fn quantization(a: Allocator, io: std.Io, dir: []const u8) ?struct { bits: u
     return .{ .bits = @intCast(bits), .group = @intCast(group) };
 }
 
-/// Bytes of the files under `dir`, symlinks followed.
+/// Bytes of the files under `dir`, symlinks followed, hidden ones left out (a download's .cache, --slide's snapshot).
 pub fn sizeOf(a: Allocator, io: std.Io, dir: []const u8) !u64 {
     var total: u64 = 0;
     var d = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return 0;
@@ -143,6 +143,10 @@ pub fn sizeOf(a: Allocator, io: std.Io, dir: []const u8) !u64 {
     var walker = d.walk(a) catch return 0;
     defer walker.deinit();
     while (walker.next(io) catch null) |entry| {
+        if (entry.path[0] == '.') {
+            if (entry.kind == .directory) walker.leave(io);
+            continue;
+        }
         // Cache snapshots hold symlinks into blobs; statFile follows them to the real sizes.
         if (entry.kind != .file and entry.kind != .sym_link) continue;
         const st = entry.dir.statFile(io, entry.basename, .{}) catch continue;
@@ -194,6 +198,10 @@ test "cache layout helpers read a synthetic cache" {
     try std.testing.expectEqual(@as(u64, 6), q.bits);
     try std.testing.expectEqual(@as(u64, 32), q.group);
     try std.testing.expect((try sizeOf(a, io, snapshot)) >= 4096);
+    const plain = try sizeOf(a, io, snapshot);
+    try w.createDirPath(io, try std.fs.path.join(a, &.{ snapshot, ".tensorfold-original" }));
+    try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ snapshot, ".tensorfold-original/weights.safetensors" }), .data = &weights });
+    try std.testing.expectEqual(plain, try sizeOf(a, io, snapshot)); // --slide's snapshot is not part of the model's size
     try w.createDirPath(io, try std.fs.path.join(a, &.{ hub, "models--Org--Bad/refs" }));
     try w.createDirPath(io, try std.fs.path.join(a, &.{ hub, "models--Org--Bad/snapshots" }));
     try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ hub, "models--Org--Bad/refs/main" }), .data = "../../models--Org--Name/snapshots/0123456789abcdef0123456789abcdef01234567" });
