@@ -82,7 +82,9 @@ extern "C" __global__ void __launch_bounds__(MT) tf_nemo_add_moe_norm(const __nv
 #pragma unroll
         for (int s = 0; s < MAXS; ++s) {
             const int64_t at = (row * NS + s) * D + i;
-            y[k][s] = i >= D || s >= NS ? 0.0f : y_f32 ? static_cast<const float*>(Yk)[at] : bf(static_cast<const __nv_bfloat16*>(Yk)[at]);
+            y[k][s] = i >= D || s >= NS ? 0.0f
+                      : y_f32           ? static_cast<const float*>(Yk)[at]
+                                        : bf(static_cast<const __nv_bfloat16*>(Yk)[at]);
         }
     }
 #pragma unroll

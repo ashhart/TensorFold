@@ -55,9 +55,10 @@ __device__ __forceinline__ float chain8(float acc, uint4 a, uint4 b) {
 }  // namespace
 
 // Decode windows: block (EB experts, slice) stages it at once, thread (row, expert) runs tf_nemo_router's chain.
-extern "C" __global__ void __launch_bounds__(256) tf_nemo_router_rows(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
-                                                                        float* __restrict__ PART, int R, int D, int E, int SK) {
-    extern __shared__ uint4 rows_q[];  // R input rows, then EB expert rows, each quads + 1 (padding a 16-byte bank step)
+extern "C" __global__ void __launch_bounds__(256)
+tf_nemo_router_rows(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W, float* __restrict__ PART,
+                    int R, int D, int E, int SK) {
+    extern __shared__ uint4 rows_q[];  // R input rows, then EB expert rows, each quads + 1 (a 16-byte padding step)
     const int s = blockIdx.y, e0 = blockIdx.x * EB, per = D / SK, k0 = s * per, quads = per / 8, stride = quads + 1;
     const int n = (R + EB) * quads;
     uint4 v[QB];

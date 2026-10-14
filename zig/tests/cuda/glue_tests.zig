@@ -65,7 +65,10 @@ const Rig = struct {
     /// bf16 values of magnitude 2^-8 to 2^8, log-uniform: rows whose sums' order shows in their last bits.
     fn wides(r: *Rig, n: usize) ![]u16 {
         const out = try r.a.alloc(u16, n);
-        for (out) |*v| v.* = gm.f32ToBf16((if (r.rng.boolean()) @as(f32, 1) else -1) * std.math.exp2(r.rng.float(f32) * 16 - 8));
+        for (out) |*v| {
+            const sign: f32 = if (r.rng.boolean()) 1 else -1;
+            v.* = gm.f32ToBf16(sign * std.math.exp2(r.rng.float(f32) * 16 - 8));
+        }
         return out;
     }
 

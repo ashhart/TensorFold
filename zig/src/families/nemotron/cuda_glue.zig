@@ -162,10 +162,13 @@ pub const Glue = struct {
         var a: cuda.Args = .{};
         ptrs(&a, &.{ x, w, part });
         ints(&a, &.{ rows, d, e, shape.sk });
-        if (rows <= 16 and d % (8 * shape.sk) == 0 and (x | w) % 16 == 0) // decode: a block a (16 experts, slice), same bits
-            try g.go(g.f.router_rows, .{ cdiv(e, 16), shape.sk, 1 }, 256, @intCast((rows + 16) * (d / shape.sk / 8 + 1) * 16), &a)
-        else
+        // decode: a block a (16 experts, slice) stages the rows and its experts, same bits
+        if (rows <= 16 and d % (8 * shape.sk) == 0 and (x | w) % 16 == 0) {
+            const staged: u32 = @intCast((rows + 16) * (d / shape.sk / 8 + 1) * 16);
+            try g.go(g.f.router_rows, .{ cdiv(e, 16), shape.sk, 1 }, 256, staged, &a);
+        } else {
             try g.go(g.f.router, .{ cdiv(rows, 16), cdiv(e, 16), shape.sk }, 256, shape.shared, &a);
+        }
         var b: cuda.Args = .{};
         ptrs(&b, &.{ part, bias, ids, wts });
         b.add(int(rows));
