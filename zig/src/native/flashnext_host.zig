@@ -69,7 +69,7 @@ pub const Host = struct {
     }
 
     pub fn engine(h: *Host) api.Engine {
-        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn, .imprint = askFn, .drain = drainFn } };
+        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn, .imprint = disk.ask(Host), .drain = drainFn } };
     }
 
     /// Engine.drain, and stop's first half: closing, what waits cancelled, writes finished, the thread joined.
@@ -83,35 +83,6 @@ pub const Host = struct {
         h.thread = null;
     }
 
-    /// Engine.imprint: an ask queued for the engine thread, answered between requests.
-    fn askFn(ctx: *anyopaque, a: *api.ImprintAsk) bool {
-        const h = self(ctx);
-        h.lock();
-        defer h.unlock();
-        if (h.closing or !h.disk.push(h.gpa, a)) return false;
-        h.wake.signal(h.io);
-        return true;
-    }
-
-    /// Asks answered and, past the quiet with nothing waiting, one piece of disk writing; false when neither ran.
-    fn idleStep(h: *Host) bool {
-        h.lock();
-        const asks = h.disk.take(h.gpa);
-        const store = if (h.cache) |*c| c else null;
-        const write = if (store) |c| c.disk != null and api.prompt_cache.rows.write.pending(c.disk.?) and h.queued.items.len == 0 and !h.closing and h.disk.quiet(h.served, h.now()) else false;
-        h.unlock();
-        defer h.gpa.free(asks);
-        for (asks) |a| a.answer(store, .{ .starts = false, .spans = false }); // its lookups pass neither
-        if (write) _ = api.prompt_cache.rows.write.step(store.?.disk.?);
-        return write or asks.len > 0;
-    }
-
-    /// Whether the idle loop has work: asks, or kept states waiting for disk (under the lock).
-    fn idleWork(h: *Host) bool {
-        const store = if (h.cache) |*c| c else return h.disk.asks.items.len > 0;
-        return h.disk.asks.items.len > 0 or (store.disk != null and api.prompt_cache.rows.write.pending(store.disk.?));
-    }
-
     /// The engine's queue as a keepalive target: the ticker commits a tiny buffer on it while idle.
     fn keepaliveFn(ctx: *anyopaque) ?api.keepalive.Target {
         const h: *Host = @ptrCast(@alignCast(ctx));
@@ -122,15 +93,15 @@ pub const Host = struct {
         return @ptrCast(@alignCast(ctx));
     }
 
-    fn lock(h: *Host) void {
+    pub fn lock(h: *Host) void {
         h.mutex.lockUncancelable(h.io);
     }
 
-    fn unlock(h: *Host) void {
+    pub fn unlock(h: *Host) void {
         h.mutex.unlock(h.io);
     }
 
-    fn now(h: *Host) i96 {
+    pub fn now(h: *Host) i96 {
         return std.Io.Clock.awake.now(h.io).toNanoseconds();
     }
 
@@ -235,10 +206,10 @@ pub const Host = struct {
         while (true) {
             h.lock();
             if (h.queued.items.len == 0 and !h.closing) {
-                const ms_: i64 = if (h.idleWork()) 10 else 100; // writes waiting for the quiet look again soon
+                const ms_: i64 = if (disk.idleWork(h)) 10 else 100; // writes waiting for the quiet look again soon
                 if (ms_ == 100 or !h.disk.quiet(h.served, h.now())) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(ms_), .clock = .awake } }) catch {};
                 h.unlock();
-                _ = h.idleStep();
+                _ = disk.idleStep(h);
                 continue;
             }
             if (h.closing) {

@@ -11,6 +11,39 @@ const Allocator = std.mem.Allocator;
 /// The prompt cache's kept state: the snapshot and its name on both Macs of a pair (key 0: read back from disk).
 pub const Kept = struct { st: *snap.State, key: u64 };
 
+/// Engine.imprint for host type H: an ask queued for its engine thread, answered between requests.
+pub fn ask(comptime H: type) *const fn (*anyopaque, *api.ImprintAsk) bool {
+    return &struct {
+        fn queue(ctx: *anyopaque, a: *api.ImprintAsk) bool {
+            const h: *H = @ptrCast(@alignCast(ctx));
+            h.lock();
+            defer h.unlock();
+            if (h.closing or !h.disk.push(h.gpa, a)) return false;
+            h.wake.signal(h.io);
+            return true;
+        }
+    }.queue;
+}
+
+/// Asks answered and, past the quiet with nothing waiting, one piece of disk writing; false when neither ran.
+pub fn idleStep(h: anytype) bool {
+    h.lock();
+    const asks = h.disk.take(h.gpa);
+    const store = if (h.cache) |*c| c else null;
+    const write = if (store) |c| c.disk != null and rows.write.pending(c.disk.?) and h.queued.items.len == 0 and !h.closing and h.disk.quiet(h.served, h.now()) else false;
+    h.unlock();
+    defer h.gpa.free(asks);
+    for (asks) |a| a.answer(store, .{ .starts = false, .spans = false }); // its lookups pass neither
+    if (write) _ = rows.write.step(store.?.disk.?);
+    return write or asks.len > 0;
+}
+
+/// Whether the idle loop has work: asks, or kept states waiting for disk (under the lock).
+pub fn idleWork(h: anytype) bool {
+    const store = if (h.cache) |*c| c else return h.disk.asks.items.len > 0;
+    return h.disk.asks.items.len > 0 or (store.disk != null and rows.write.pending(store.disk.?));
+}
+
 /// The store's view of a kept state: the n-gram history at it (16 bytes), then its buffer as snapshot.zig lays it out.
 pub fn image(comptime H: type) rows.Image {
     return .{ .parts = parts, .gather = gather, .blank = Blank(H).blank, .scatter = scatter };
