@@ -74,6 +74,7 @@ Options through environment variables:
 | `XPU_PREFILL_INT8=1` | **Local option**: prompt GEMMs in W4A8, int8 activations per (row, group of 128), GPTQ only. Decoding stays in fp16. |
 | `XPU_TREE=N` | DFlash2 tree nodes per round (15 by default; 0: a chain) |
 | `XPU_BLOCK=N` | Rows of the drafter block (8) |
+| `XPU_FP64_REF=1` | `xpu-qwen27` runner only: on the prompt's real activations, each int4 GEMM of layers 0, 1, 31, 63 and the head (decode on 1 and 8 rows, prompt) against an FP64 host reference from the same int4 weights (`zig/src/xpu/fp64_ref.zig`) |
 
 ## Numbers (B70 at 230 W, server `--parallel 8 --context 16384`, validation of 2026-10-13)
 

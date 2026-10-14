@@ -3,6 +3,7 @@ const std = @import("std");
 const q = @import("qwen27.zig");
 const dr_mod = @import("drafter.zig");
 const Drafter = dr_mod.Drafter;
+const fp64_ref = @import("fp64_ref.zig");
 
 const alloc = std.heap.c_allocator;
 extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
@@ -34,9 +35,11 @@ pub fn main(init: std.process.Init) !void {
     const t_load = q.now();
     const r = try q.Runner.init(argv[1], ctx);
     std.debug.print("loaded in {d:.1} s\n", .{q.now() - t_load});
+    if (std.c.getenv("XPU_FP64_REF") != null) fp64_ref.arm(r);
     const t0 = q.now();
     try r.prompt(ids.items, true);
     const t1 = q.now();
+    fp64_ref.disarm();
     q.profReport("prompt");
     var out: std.ArrayList(u32) = .empty;
     try out.append(alloc, r.last);
