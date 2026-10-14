@@ -9,6 +9,7 @@ const Ep = @import("ep.zig").Ep;
 const moe_route = @import("../../core/moe_route.zig");
 const hc_shape = @import("kernels.zig").hc_shape;
 const hc_core = @import("../../core/hc.zig");
+const wide = @import("wide.zig");
 const Ref = wts.Ref;
 /// The MoE block (moe.zig).
 pub const moe = @import("moe.zig").moe;
@@ -112,11 +113,11 @@ pub fn size(w: usize, h: usize, d: usize) mtl.Size {
     return mtl.Size.of(w, h, d);
 }
 
-/// x [rows, K] through a 4-bit matrix: qmv_rows, MLX's one-row qmv_fast sums for every row.
-pub fn qmv(x: *const Ctx, e: mtl.ComputeEncoder, pipe: mtl.Pipeline, in: Ref, q: wts.Q4, out: Ref, rows: u32) void {
+/// x [rows, K] through a 4-bit/64 matrix (qmv_rows, MLX's one-row qmv_fast sums), else each member at its width (wide).
+pub fn qmv(x: *const Ctx, e: mtl.ComputeEncoder, pipe: mtl.Pipeline, in: Ref, q: wts.Affine, out: Ref, rows: u32) void {
+    if (!wide.native(q)) return wide.dense(&x.k.wide.?, e, q, .{ .in = in, .ldx = q.k, .out = out, .ldo = q.n, .rows = rows });
     e.setPipeline(pipe);
     bind(e, 0, .{ in, q.w, q.s, q.b, out });
-    _ = x;
     e.dispatchThreads(size(32 * rows, q.n / 4, 1), size(32 * rows, 1, 1));
 }
 
@@ -149,11 +150,16 @@ pub fn embed(x: *Ctx, e: mtl.ComputeEncoder, ids: Ref, rows: u32) void {
 
 pub fn embedRows(x: *const Ctx, e: mtl.ComputeEncoder, ids: Ref, out: Ref, rows: u32) void {
     const q = x.w.embed;
-    e.setPipeline(x.k.embed);
+    const per: u32 = switch (q.bits) { // values a thread: two codes a byte at 4 bits, four in three bytes at 6, one at 8
+        4 => 2,
+        6 => 4,
+        else => 1,
+    };
+    e.setPipeline(if (q.bits == 4) x.k.embed else x.k.wide.?.embed[if (q.bits == 6) 0 else 1]);
     bind(e, 0, .{ ids, q.w, q.s, q.b });
     shape(e, 4, .{x.c.hidden});
     bind(e, 5, .{out});
-    e.dispatchThreads(size(x.c.hidden / 2, rows, 1), size(256, 1, 1));
+    e.dispatchThreads(size(x.c.hidden / per, rows, 1), size(256, 1, 1));
 }
 
 /// A block boundary: the pending branch into the streams, then (with `hc`) the next block's mix, split and norm (core/hc.zig).
@@ -202,10 +208,25 @@ pub fn kdaStep(x: *const Ctx, e: mtl.ComputeEncoder, ki: usize, w: *const wts.Kd
     const c = x.c;
     const L = &x.s.kda[ki];
     const cur = L.cur;
-    e.setPipeline(if (c.tp > 1) x.k.kda_rows_tp else x.k.kda_rows);
+    const gate = wide.kdaGate(if (x.k.wide) |*p| p else null, w.f_b, w.g_b);
+    var fb = [3]Ref{ w.f_b.w, w.f_b.s, w.f_b.b };
+    var gb = [3]Ref{ w.g_b.w, w.g_b.s, w.g_b.b };
+    if (gate == .pre) { // f_b and g_b at their widths on f_a and g_a first, [rows, width] each (in gu: no MLP runs yet)
+        const W = c.kdaWidth();
+        const f = x.sc.gu;
+        const g = f.at(@as(usize, st.max_rows) * W * 2);
+        wide.dense(&x.k.wide.?, e, w.f_b, .{ .in = proj.at(3 * W * 2), .ldx = c.kdaProj(), .out = f, .ldo = W, .rows = rows });
+        wide.dense(&x.k.wide.?, e, w.g_b, .{ .in = proj.at((3 * W + c.kda_dim) * 2), .ldx = c.kdaProj(), .out = g, .ldo = W, .rows = rows });
+        fb = .{ f, f, f };
+        gb = .{ g, g, g };
+    }
+    e.setPipeline(switch (gate) {
+        .generated => if (c.tp > 1) x.k.kda_rows_tp else x.k.kda_rows,
+        .pre, .fused => |p| p,
+    });
     bind(e, 0, .{proj});
     shape(e, 1, .{ rows, c.kdaProj() });
-    bind(e, 2, .{ L.cs[cur], w.conv_w, w.f_b.w, w.f_b.s, w.f_b.b, w.g_b.w, w.g_b.s, w.g_b.b, w.a, w.dt_bias, L.st[cur], w.o_norm });
+    bind(e, 2, .{ L.cs[cur], w.conv_w, fb[0], fb[1], fb[2], gb[0], gb[1], gb[2], w.a, w.dt_bias, L.st[cur], w.o_norm });
     e.setValue(c.lower_bound, 14);
     e.setValue(c.eps, 15);
     bind(e, 16, .{ y, L.st[1 - cur], L.cs[1 - cur] });
@@ -297,9 +318,10 @@ pub fn mlaCache(x: *const Ctx, e: mtl.ComputeEncoder, mi: usize, w: *const wts.M
     }
 }
 
-/// Every row's 64 heads of q_nope (in `qp`, a row qrProj apart) into the latent: MLX's qvm on kv_b's key half.
+/// Every row's 64 heads of q_nope (`qp`, rows qrProj apart) into the latent: qvm on kv_b's key half, or embed_q's qmv.
 pub fn absorb(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Mla, qp: Ref, ql: Ref, rows: u32) void {
     const c = x.c;
+    if (w.absorbed) |pair| return wide.perHead(&x.k.wide.?, e, pair[0], c.mla_heads, .{ .in = qp, .ldx = c.qrProj(), .out = ql, .ldo = c.mla_heads * c.kv_lora, .rows = rows }, c.nope, c.kv_lora);
     e.setPipeline(x.k.absorb);
     bind(e, 0, .{ w.kv_b.w, w.kv_b.s, w.kv_b.b, qp, ql });
     e.setValue(c.qrProj(), 5);
@@ -307,9 +329,10 @@ pub fn absorb(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Mla, qp: Ref, 
     e.dispatchGroups(size(1, c.kv_lora / 64, rows * c.mla_heads), size(64, 1, 1));
 }
 
-/// Every row's 64 heads' latent outputs to values [rows, heads * v]: MLX's batched qmv_fast on kv_b's value half.
+/// Every row's 64 heads' latent outputs to values [rows, heads * v]: qmv_fast on kv_b's value half, or unembed_out's.
 pub fn unabsorb(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Mla, att: Ref, vals: Ref, rows: u32) void {
     const c = x.c;
+    if (w.absorbed) |pair| return wide.perHead(&x.k.wide.?, e, pair[1], c.mla_heads, .{ .in = att, .ldx = c.mla_heads * c.kv_lora, .out = vals, .ldo = c.mla_heads * c.v_dim, .rows = rows }, c.kv_lora, c.v_dim);
     e.setPipeline(x.k.unabsorb);
     bind(e, 0, .{ w.kv_b.w, w.kv_b.s, w.kv_b.b, att, vals });
     e.setValue(c.mla_heads, 5);

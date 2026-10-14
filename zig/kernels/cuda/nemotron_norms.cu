@@ -60,30 +60,6 @@ extern "C" __global__ void __launch_bounds__(NT) tf_nemo_embed16(const int* __re
     for (int i = threadIdx.x; i < D; i += NT) out[static_cast<int64_t>(blockIdx.x) * D + i] = W[tok * D + i];
 }
 
-// h = bf16(x + r) (or x alone without r), y = bf16(rmsnorm(h) * w), xs = y's 64-group sums.
-extern "C" __global__ void __launch_bounds__(NT) tf_nemo_add_rmsnorm(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ R,
-                                                                       const __nv_bfloat16* __restrict__ W, __nv_bfloat16* __restrict__ H,
-                                                                       __nv_bfloat16* __restrict__ Y, float* __restrict__ XS, float eps, int D) {
-    __shared__ float red[NT / 32];
-    __shared__ float ybuf[NT * MAXE];
-    const int64_t row = blockIdx.x;
-    float x[MAXE];
-#pragma unroll
-    for (int k = 0; k < MAXE; ++k) {
-        const int i = threadIdx.x + k * NT;
-        if (i >= D) continue;
-        float v = bf(X[row * D + i]);
-        if (R != nullptr) {
-            const __nv_bfloat16 h = __float2bfloat16_rn(__fadd_rn(v, bf(R[row * D + i])));
-            H[row * D + i] = h;
-            v = bf(h);
-        }
-        x[k] = v;
-    }
-    const float inv = inv_rms(row_ss(x, D, red), D, eps);
-    scale_store(x, D, inv, W, Y + row * D, XS + row * (D / 64), ybuf);
-}
-
 // delta = bf16(sum_k<NR fma(wt_k, y_k) + sum_k>=NR y_k) in slot order, h = bf16(x + delta), then add_rmsnorm's tail.
 extern "C" __global__ void __launch_bounds__(NT) tf_nemo_add_moe_norm(const __nv_bfloat16* __restrict__ X, const void* __restrict__ Yk,
                                                                         int y_f32, const float* __restrict__ WT, const __nv_bfloat16* __restrict__ W,

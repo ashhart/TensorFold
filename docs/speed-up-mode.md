@@ -37,7 +37,7 @@ Install Zig 0.17.0 from [ziglang.org](https://ziglang.org/download/): `zig-aarch
 `b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a`. The build refuses any other version.
 
 ```bash
-git clone --branch zig-flashnext https://github.com/ashhart/TensorFold.git
+git clone https://github.com/ashhart/TensorFold.git
 cd TensorFold
 zig build native
 ```

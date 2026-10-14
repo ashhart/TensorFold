@@ -1,0 +1,24 @@
+node_modules/
+dist/
+dist-electron/
+release/
+*.log
+.DS_Store
+.vite/
+.env
+.env.local
+.research/
+__pycache__/
+*.pyc
+.vontra-sandbox-test*/
+.zcode/
+.tools/
+build/engine/
+build/.engine-*
+build/computer-use/
+
+# Local harness and generated module output
+.claude/
+mobile/.claude/
+mobile/modules/*/android/build/
+*.tsbuildinfo
