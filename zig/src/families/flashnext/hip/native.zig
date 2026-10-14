@@ -95,7 +95,15 @@ fn check(
     const text = readIndex(a, io, dir) catch |err| return refuse(a, problem, "cannot read {s}/model.safetensors.index.json ({s})", .{ dir, @errorName(err) });
     const bytes = cardRoom(gpa, io, dev) catch |err| return refuse(a, problem, "the native HIP engine cannot read the GPU's memory ({s})", .{@errorName(err)});
     const v = admit(a, gpa, &c, text, o.world, o.rank, o.window, bytes, problem) catch |err| return err;
-    if (!v.fits) return refuse(a, problem, "Flash Next {d}-bit on {d} rank(s) holds {d:.2} GiB of weights a rank ({d:.1} GiB of n-gram tables in host memory) and {d:.1} GiB of scratch, of the {d:.2} GiB this card grants: a {d}-token window does not fit (at most {d}); lower --context, add ranks (--tp), or use a lower-bit checkpoint", .{ v.spec.bits, o.world, gibs(v.weights), gibs(v.host), gibs(scratch_bytes), gibs(bytes), o.window, v.most });
+    if (!v.fits) return refuse(
+        a,
+        problem,
+        "Flash Next {d}-bit on {d} rank(s) holds {d:.2} GiB of weights a rank " ++
+            "({d:.1} GiB of n-gram tables in host memory) and {d:.1} GiB of scratch, " ++
+            "of the {d:.2} GiB this card grants: a {d}-token window does not fit (at most {d}); " ++
+            "lower --context, add ranks (--tp), or use a lower-bit checkpoint",
+        .{ v.spec.bits, o.world, gibs(v.weights), gibs(v.host), gibs(scratch_bytes), gibs(bytes), o.window, v.most },
+    );
 }
 
 /// The positions a stream holds: the window and a verify's rows past it, on 64.
