@@ -522,8 +522,12 @@ fn sparseCase(device: mtl.Device, queue: mtl.Queue, p: *const csa2.Pipelines, sp
         };
         for (0..spec.heads) |head| {
             const head_q = q[row * q_stride + head * width ..][0..width];
-            attention_math.sparseHeadOf(f32, head_q, keys, column_indices[0..count], sinks[head], wide32[0..width]);
-            attention_math.sparseHeadOf(f64, head_q, keys, column_indices[0..count], sinks[head], wide64[0..width]);
+            var pre32: [width]f32 = undefined;
+            var pre64: [width]f64 = undefined;
+            attention_math.sparseHeadPre(f32, head_q, keys, column_indices[0..count], sinks[head], wide32[0..width],
+                &pre32);
+            attention_math.sparseHeadPre(f64, head_q, keys, column_indices[0..count], sinks[head], wide64[0..width],
+                &pre64);
             var ideal: [width]f64 = undefined;
             for (wide64, 0..) |cell, d| ideal[d] = math.f(cell);
             var energy: f64 = 0;
@@ -539,6 +543,9 @@ fn sparseCase(device: mtl.Device, queue: mtl.Queue, p: *const csa2.Pipelines, sp
             , .{ spec.name, "sparse", count, live, @sqrt(energy / @as(f64, width)), peak });
             var stage_buffer: [32]u8 = undefined;
             const stage = std.fmt.bufPrint(&stage_buffer, "row{d}_head{d}", .{ row, head }) catch unreachable;
+            // The intrinsic FP32-versus-FP64 level of the stage, before the BF16 output quantum hides
+            // it. This is the rounding level the stage verdicts are measured against.
+            printF32(spec.name, stage, "f32_vs_ideal_pre_rounding", deltaF32VsF64(&pre32, &pre64));
             printBf(spec.name, stage, "metal", deltaBf16(metal[row * q_stride + head * width ..][0..width], &ideal));
             printBf(spec.name, stage, "f32_reference", deltaBf16(wide32[0..width], &ideal));
         }

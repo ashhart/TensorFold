@@ -260,6 +260,15 @@ pub const State = struct {
 /// With T=f64 every boundary is the ideal FP64 result: no FP32 narrowing, BF16 appears only at the
 /// algorithm's quantized inputs, the documented probability rounding and the final output.
 pub fn sparseHeadOf(comptime T: type, q: []const u16, keys: KeyTable, indices: []const i32, sink: f32, out: []u16) void {
+    return sparseHeadPre(T, q, keys, indices, sink, out, null);
+}
+
+/// The same head, with `pre` optionally capturing acc/denominator before the output rounding: the
+/// same values in FP32 versus FP64 then differ only by the stage's arithmetic, so their ULP distance
+/// is the stage's true rounding level instead of the BF16 output quantum that hides it.
+pub fn sparseHeadPre(comptime T: type, q: []const u16, keys: KeyTable, indices: []const i32, sink: f32, out: []u16,
+    pre: ?[]T,
+) void {
     @setFloatMode(.strict);
     const scale: T = if (T == f32) 1 / @sqrt(@as(f32, 512)) else 1 / @sqrt(@as(f64, 512));
     var acc: [512]T = @splat(0);
@@ -299,7 +308,11 @@ pub fn sparseHeadOf(comptime T: type, q: []const u16, keys: KeyTable, indices: [
         high = next_high;
     }
     denominator += @exp(m.wide(T, sink) - high);
-    for (out, acc) |*v, a| v.* = if (T == f32) m.b(a / denominator) else m.b64(a / denominator);
+    for (out, acc, 0..) |*v, a, i| {
+        const quotient = a / denominator;
+        if (pre) |cells| cells[i] = quotient;
+        v.* = if (T == f32) m.b(quotient) else m.b64(quotient);
+    }
 }
 
 test "online 64-column sparse attention rounds probabilities before value GEMM" {
