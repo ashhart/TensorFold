@@ -12,7 +12,7 @@
 #include <cuda_fp16.h>
 #include <stdint.h>
 
-#include "../flashnext/qmm_frag.cuh"
+#include "qmm_frag.cuh"
 
 namespace {
 
