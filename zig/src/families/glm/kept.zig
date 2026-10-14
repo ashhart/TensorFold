@@ -14,6 +14,12 @@ pub const Grow = struct {
     f: *const fn (ctx: *anyopaque, saved: *anyopaque, extra: u64) bool,
 };
 
+/// The prompt cache's ear: a kept state went stale (never restorable), so its entry is dropped.
+pub const Expire = struct {
+    ctx: *anyopaque,
+    f: *const fn (ctx: *anyopaque, saved: *anyopaque) void,
+};
+
 /// Keep slot `i`'s prompt state at `at` tokens (its pass stands there) as snapshot `id` (0: the next); `home`: resident.
 pub fn save(sl: *Slots, i: u32, at: u32, id: u32, home: bool) !*snapshot.Snap {
     const slot = try sl.slotAt(i);
@@ -51,11 +57,17 @@ pub fn usable(sl: *const Slots, snap: *const snapshot.Snap) bool {
     return sl.snaps.get(snap.id) == snap and !snap.stale;
 }
 
+/// A state went stale (its rows are gone): the prompt cache drops its entry, so no turn serves it again.
+pub fn wentStale(sl: *Slots, snap: *snapshot.Snap) void {
+    if (sl.expire) |x| x.f(x.ctx, snap);
+}
+
 /// Slot `i` writes its MLA rows from `at` on: its resident states past `at` that were not copied out go stale.
 pub fn overwrite(sl: *Slots, i: u32, at: u32) void {
     var it = sl.snaps.valueIterator();
-    while (it.next()) |snap| if (snap.*.home == i and snap.*.at > at) {
+    while (it.next()) |snap| if (snap.*.home == i and snap.*.at > at and !snap.*.stale) {
         snap.*.stale = true;
+        wentStale(sl, snap.*);
     };
 }
 
@@ -272,4 +284,33 @@ test "a slot copies out only what the budget grants, and rank 1 copies only ids 
     try std.testing.expectError(error.SnapshotOutOfStep, copyIds(&sl, 0, &.{4})); // resident in slot 1
     try std.testing.expectError(error.SnapshotOutOfStep, copyIds(&sl, 0, &.{1})); // stale
     try copyIds(&sl, 0, &.{});
+}
+
+test "a state that goes stale tells the prompt cache, once, so its entry is dropped at once" {
+    const gpa = std.testing.allocator;
+    var slots: [2]Slot = undefined;
+    for (&slots) |*s| s.* = .{ .s = undefined, .held = undefined, .last = undefined };
+    var sl = testSlots(&slots);
+    defer sl.snaps.deinit(gpa);
+    var states: [3]snapshot.Snap = undefined;
+    for (&states, [_]u32{ 0, 0, 1 }, [_]u32{ 64, 128, 64 }, 1..) |*x, home, at, k| {
+        x.* = .{ .id = @intCast(k), .at = at, .buf = undefined, .bytes = 0, .home = home };
+        try sl.snaps.put(gpa, x.id, x);
+    }
+    const Ear = struct {
+        var expired: [2]u32 = .{ 0, 0 };
+        var calls: usize = 0;
+        fn f(_: *anyopaque, saved: *anyopaque) void {
+            const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
+            expired[calls % 2] = snap.id;
+            calls += 1;
+        }
+    };
+    var unused: u8 = 0;
+    sl.expire = .{ .ctx = &unused, .f = Ear.f };
+    overwrite(&sl, 0, 32); // states 1 and 2 lie past 32 in slot 0; state 3 is slot 1's
+    try std.testing.expect(states[0].stale and states[1].stale and !states[2].stale);
+    try std.testing.expectEqual(@as(usize, 2), Ear.calls); // each dead state reported once
+    overwrite(&sl, 0, 16); // already stale: no second report
+    try std.testing.expectEqual(@as(usize, 2), Ear.calls);
 }
