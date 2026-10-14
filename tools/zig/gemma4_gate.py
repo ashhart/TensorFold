@@ -97,13 +97,21 @@ def prompts(args: argparse.Namespace) -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(str(args.model))
     root = Path(__file__).resolve().parents[2]
-    text = "\n\n".join((root / f).read_text() for f in ("CHANGELOG.md", "README.md", "CONTRIBUTING.md", "docs/api.md"))
-    words = tokenizer.encode(text, add_special_tokens=False)
+    # the repo's own text, docs first then source, until the largest prompt fits (no passage repeats)
+    files = [root / f for f in ("CHANGELOG.md", "README.md", "CONTRIBUTING.md", "docs/api.md")]
+    files += sorted(p for p in (root / "docs").rglob("*.md") if p not in files) + sorted((root / "zig" / "src").rglob("*.zig"))
+    words: list[int] = []
+    for f in files:
+        if len(words) >= max(args.sizes):
+            break
+        words += tokenizer.encode(f.read_text(errors="replace") + "\n\n", add_special_tokens=False)
+    if len(words) < max(args.sizes):
+        raise SystemExit(f"only {len(words)} tokens of repo text for a {max(args.sizes)}-token prompt")
     out = {}
     for size in args.sizes:
         body = tokenizer.decode(words[:size])
         ask = "\n\nIn one paragraph, what does the text above say about prompt caching?"
-        out[f"long{size // 1024}k"] = chat_ids(tokenizer, body + ask)
+        out[f"long{round(size / 1024)}k"] = chat_ids(tokenizer, body + ask)
     args.out.write_text(json.dumps(out) + "\n")
     print({k: len(v) for k, v in out.items()})
 
@@ -200,7 +208,7 @@ def main() -> None:
     p = sub.add_parser("prompts")
     p.add_argument("--model", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)
-    p.add_argument("--sizes", type=int, nargs="+", default=[8192, 32768])
+    p.add_argument("--sizes", type=int, nargs="+", default=[8192, 32768, 65536, 131072, 258048])
     v = sub.add_parser("served")
     v.add_argument("--url", default="http://127.0.0.1:8888")
     v.add_argument("--oracle", type=Path, required=True)

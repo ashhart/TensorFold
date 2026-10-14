@@ -29,7 +29,7 @@ fn prepare(s: *state.Scratch, segments: []const Segment, ids: []const u32, chunk
         for (s.pos.slice(i32, ids.len)[at..][0..seg.rows], 0..) |*p, i| p.* = @intCast(p0 + i);
         for (0..2) |kind| {
             const global = kind == 1;
-            const ck: usize = if (global) 64 else 128;
+            const ck: usize = if (global) decode_chunk else 128;
             const lo = s.lo[kind].slice(i32, ids.len);
             for (lo[at..][0..seg.rows], 0..) |*l, i| {
                 const p = p0 + i;
@@ -167,15 +167,13 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const 
             const r = at + sub;
             const rn = @min(attend_rows, n - sub);
             if (global) { // the tensor units, a key head's eight query heads as one tile: each key read once a token
-                const nch = (c.len + sub + rn - 1) / decode_chunk + 1;
+                const nch = chunks[r][kind]; // from the first key, in 256-key chunks (prepare)
                 e.setPipeline(kd.decode_attn);
                 e.setBuffer(s.q, r * cfg.query_heads * dh * 2, 0);
                 bind(e, &.{ c.k[i], c.v[i] }, 1);
                 e.setValue([4]i32{ @intCast(rn), @intCast(c.len + sub), @intCast(state.slotsOf(i, c.capacity)), @intCast(nch) }, 3);
                 bind(e, &.{ s.pm, s.pl, s.po }, 4);
                 e.dispatchGroups(.{ .width = nch, .height = nk, .depth = (rn * kd.heads_per_kv + 15) / 16 }, .{ .width = 32 * dh / 128 });
-                s.meta[kind].slice(i32, state.prompt_rows * state.meta_ints)[r * state.meta_ints + 1] = @intCast(nch);
-                s.meta[kind].slice(i32, state.prompt_rows * state.meta_ints)[r * state.meta_ints + 3] = @intCast(rn);
                 e.setPipeline(kd.merge);
                 bind(e, &.{ s.pm, s.pl, s.po }, 0);
                 e.setBuffer(s.meta[kind], r * state.meta_ints * 4, 3);
