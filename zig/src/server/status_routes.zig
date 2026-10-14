@@ -28,6 +28,7 @@ pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
         try memory.put(a, "active", try json.intValue(a, mem.active));
         try memory.put(a, "cache", try json.intValue(a, mem.cache));
         try memory.put(a, "peak", try json.intValue(a, mem.peak));
+        if (mem.limit) |limit| try memory.put(a, "limit", try json.intValue(a, limit));
     }
     try o.put(a, "memory", .{ .object = memory });
     try o.put(a, "live", try live.snapshot(a, srv.engine));

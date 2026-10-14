@@ -39,19 +39,14 @@ pub fn footprint() ?u64 {
     return info[9];
 }
 
-/// This process's peak physical footprint over its lifetime (rusage_info_v4 slot 30; null elsewhere).
-pub fn peakFootprint() ?u64 {
-    if (builtin.os.tag != .macos) return null;
-    var info: [43]u64 = undefined;
-    if (proc_pid_rusage(getpid(), 4, &info) != 0) return null;
-    return info[30];
-}
+/// The Mac hosts' session peak: the footprint's high-water mark since the last `reset_peak`.
+var host_peak: std.atomic.Value(u64) = .init(0);
 
 /// A Mac family host's memory counts for `/stats`, `/memory` and `/metrics`, from the process footprint.
 pub fn hostMemory(limit_bytes: u64, reset_peak: bool) ?api.Memory {
-    _ = reset_peak;
     const active = footprint() orelse return null;
-    const peak = peakFootprint() orelse active;
+    _ = host_peak.fetchMax(active, .monotonic);
+    const peak = if (reset_peak) active else host_peak.load(.monotonic);
     return .{ .active = active, .cache = 0, .peak = peak, .pinned = 0, .limit = limit_bytes };
 }
 
@@ -140,12 +135,23 @@ test "a host's memory counts keep the footprint, its measured peak and the limit
     const limit = 235 * GiB;
     const m = hostMemory(limit, false) orelse return error.SkipZigTest;
     try std.testing.expect(m.active > 0); // this test process's own footprint
-    try std.testing.expect(m.peak >= m.active); // the kernel's lifetime peak covers now
+    try std.testing.expect(m.peak >= m.active); // the high-water mark covers now
     try std.testing.expectEqual(limit, m.limit.?);
     try std.testing.expectEqual(@as(u64, 0), m.cache);
     try std.testing.expectEqual(@as(u64, 0), m.pinned);
-    try std.testing.expectEqual(m.active, hostMemory(limit, true).?.active); // reset_peak changes nothing here
-    try std.testing.expectEqual(m.peak, hostMemory(limit, true).?.peak);
+    const after_reset = hostMemory(limit, true).?; // a reset starts a new peak at the footprint now
+    try std.testing.expectEqual(m.active, after_reset.peak);
+    try std.testing.expect(after_reset.active <= m.active); // the footprint only shrank since the first read
+    const again = hostMemory(limit, false).?;
+    try std.testing.expect(again.peak >= again.active); // the mark climbs again from the reset
+}
+
+test "the high-water mark rises and resets" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    _ = hostMemory(1 << 30, true) orelse return error.SkipZigTest; // start from a fresh mark
+    const low = hostMemory(1 << 30, false).?; // the footprint now is the mark
+    const high = hostMemory(1 << 30, false).?; // a second read cannot lower it
+    try std.testing.expect(high.peak >= low.active);
 }
 
 test "a host without a footprint reading reports no memory rather than zeros" {
