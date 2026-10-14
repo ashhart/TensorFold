@@ -112,18 +112,35 @@ pub fn hashBytes(bytes: []const u8) [32]u8 {
 }
 
 /// Every rank's `mine` in rank order, over one ncclAllGather.
-pub fn gather(comptime T: type, d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, stream: cuda.Stream, rank: usize, mine: T, out: []T) !void {
+pub fn gather(
+    comptime T: type,
+    d: *const cuda.Driver,
+    lib: *const cuda.nccl.Library,
+    comm: cuda.nccl.Comm,
+    stream: cuda.Stream,
+    rank: usize,
+    mine: T,
+    out: []T,
+) !void {
     const size = @sizeOf(T);
     var dev = try cuda.DeviceBuffer.alloc(d, size * out.len);
     defer dev.free();
     try dev.uploadAsync(rank * size, std.mem.asBytes(&mine), stream.handle);
-    try lib.check(lib.api.ncclAllGather(dev.ptr + rank * size, dev.ptr, size, .u8, comm, stream.handle), "ncclAllGather");
+    const gathered = lib.api.ncclAllGather(dev.ptr + rank * size, dev.ptr, size, .u8, comm, stream.handle);
+    try lib.check(gathered, "ncclAllGather");
     try stream.synchronize();
     try dev.download(0, std.mem.sliceAsBytes(out));
 }
 
 /// All-gathers `mine` over `comm`; any disagreement is error.RankMismatch on every rank, printing what differs.
-pub fn agree(d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, stream: cuda.Stream, mine: Fingerprint, out: []Fingerprint) !void {
+pub fn agree(
+    d: *const cuda.Driver,
+    lib: *const cuda.nccl.Library,
+    comm: cuda.nccl.Comm,
+    stream: cuda.Stream,
+    mine: Fingerprint,
+    out: []Fingerprint,
+) !void {
     try gather(Fingerprint, d, lib, comm, stream, mine.rank, mine, out);
     if (mismatch(out)) |m| {
         std.debug.print("REFUSE rank settings: rank {d}'s {s} differs from rank 0's ({s})\n", .{ m.rank, @tagName(m.field), explain(m.field) });

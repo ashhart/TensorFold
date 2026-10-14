@@ -248,6 +248,13 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     return null;
 }
 
+/// The admit's refusals: no stream fits, or --parallel asks for more than the budget holds.
+const no_stream = "the CUDA memory budget fits no stream: one at a {d}-token window takes {d:.2} GiB, " ++
+    "and {d:.2} GiB is left after the model's {d:.2} GiB and the {d:.1} GiB reserve{s}; " ++
+    "lower --context, or free device memory";
+const too_many = "--parallel {d} needs {d:.2} GiB for its streams at a {d}-token window, " ++
+    "and the CUDA memory budget leaves {d:.2} GiB{s}: serve --parallel {d}, or lower --context";
+
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (refusals.family(F, o)) |why| {
         problem.* = why;
@@ -317,7 +324,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)
-    const weights = if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, weightBytes(io, o.dir)) else weightBytes(io, o.dir);
+    const whole = weightBytes(io, o.dir);
+    const weights = if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, whole) else whole;
     const held0 = cuda.usage(false).device;
     // a family over hosts reads every rank's room after its load, by this budget, and admits by the smallest
     const Probe = struct {
@@ -359,8 +367,22 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const free = loaded.free_streams;
     const streams = budget.admit(room, loaded.stream_bytes, free, o.lanes, o.lanes_fixed) catch |e| {
         problem.* = switch (e) {
-            error.NoStream => try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream: one at a {d}-token window takes {d:.2} GiB, and {d:.2} GiB is left after the model's {d:.2} GiB and the {d:.1} GiB reserve{s}; lower --context, or free device memory", .{ window, toGib(loaded.stream_bytes), toGib(room), toGib(model), toGib(after.reserve), low }),
-            error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its streams at a {d}-token window, and the CUDA memory budget leaves {d:.2} GiB{s}: serve --parallel {d}, or lower --context", .{ o.lanes, toGib(loaded.stream_bytes * (o.lanes -| free)), window, toGib(room), low, free + room / loaded.stream_bytes }),
+            error.NoStream => try std.fmt.allocPrint(a, no_stream, .{
+                window,
+                toGib(loaded.stream_bytes),
+                toGib(room),
+                toGib(model),
+                toGib(after.reserve),
+                low,
+            }),
+            error.TooMany => try std.fmt.allocPrint(a, too_many, .{
+                o.lanes,
+                toGib(loaded.stream_bytes * (o.lanes -| free)),
+                window,
+                toGib(room),
+                low,
+                free + room / loaded.stream_bytes,
+            }),
         };
         return null;
     };

@@ -43,7 +43,14 @@ pub const Share = struct {
 
     /// This rank's largest fraction of an axis as (part, whole): its weights are at most that much of the checkpoint.
     pub fn part(s: Share, c: *const Config) [2]u64 {
-        const axes = [_][2]u64{ .{ s.kda.len(), c.kda_heads }, .{ s.mla.len(), c.mla_heads }, .{ s.dense.len(), c.dense_inter }, .{ s.moe.len(), c.moe_inter }, .{ s.shared.len(), c.shared_inter }, .{ s.vocab.len(), c.vocab } };
+        const axes = [_][2]u64{
+            .{ s.kda.len(), c.kda_heads },
+            .{ s.mla.len(), c.mla_heads },
+            .{ s.dense.len(), c.dense_inter },
+            .{ s.moe.len(), c.moe_inter },
+            .{ s.shared.len(), c.shared_inter },
+            .{ s.vocab.len(), c.vocab },
+        };
         var best: [2]u64 = .{ 0, 1 };
         for (axes) |x| if (x[0] * best[1] > best[0] * x[1]) {
             best = .{ x[0], x[1] };

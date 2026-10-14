@@ -25,7 +25,13 @@ pub const explains_open = true;
 /// The server's reading of this rank's room after its load (the budget streams are admitted by); null if unreadable.
 pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
 /// `slide` stays false: the server refuses --slide for a family without a learner (no `slide` here).
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, room: ?Room = null };
+pub const Options = struct {
+    context: usize,
+    drafts: bool,
+    segments: usize = 1,
+    slide: bool = false,
+    room: ?Room = null,
+};
 /// The smallest room among the other ranks and whose it is.
 pub const Peer = struct { bytes: u64, rank: usize };
 
