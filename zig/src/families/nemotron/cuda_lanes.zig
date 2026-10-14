@@ -26,7 +26,15 @@ const row_slots = engine.max_streams * state.max_rows + 1;
 const ring = 1024;
 
 /// A stream's sequence (`own`: the engine's, the graphs' buffers) and its first token's logprob row from prefill.
-const Lane = struct { seq: *state.Seq, own: bool = false, pending_rows: ?usize = null, first: ?LogRow = null, stats: seq_graphs.Stats = .{}, keep: usize = 0 };
+const Lane = struct { seq: *state.Seq, own: bool = false, pending_rows: ?usize = null, first: ?LogRow = null, stats: seq_graphs.Stats = .{}, keep: usize = 0, taps: Taps = .{} };
+
+/// A recorded stream's rows: its prompt's on the host until its first verify, then where its last verify started.
+const Taps = struct { prompt: std.ArrayList(u8) = .empty, from: usize = 0, verified: ?u64 = null };
+
+/// The one tap Nemotron gives: past its last layer, the final norm's rows its head and MTP head read.
+pub fn finalTap(c: config.Config) u32 {
+    return @intCast(c.layers);
+}
 
 pub const Cuda = struct {
     gpa: std.mem.Allocator,
@@ -48,6 +56,7 @@ pub const Cuda = struct {
     measured: ?core.draft_depth.Costs = null, // a lone stream's depth rule prices its rounds by these
     bits: ?cuda.HostBuffer = null, // structured output's row bits, device-mapped (row_slots rows), made at first use
     bits_dev: u64 = 0,
+    tapped: ?cuda.HostBuffer = null, // a recorder's rows on their way to the host (state.pass_rows of them)
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, head: ?*Head) !Cuda {
         var pinned = try cuda.HostBuffer.alloc(e.ctx.d, engine.max_streams * state.max_rows * 4);
@@ -67,6 +76,7 @@ pub const Cuda = struct {
         self.rows_out.free();
         if (self.bits) |*b| b.free();
         if (self.prompt_logits) |*b| b.free();
+        if (self.tapped) |*b| b.free();
         self.prompt_out.free();
     }
 
@@ -83,6 +93,8 @@ pub const Cuda = struct {
             .first_row = firstRowFn,
             .first_masked = firstMaskedFn,
             .held = heldFn,
+            .prepare_features = prepareFeaturesFn,
+            .features = featuresFn,
             .prompt_rows = true,
         } };
     }
@@ -267,6 +279,12 @@ pub const Cuda = struct {
             e.prompt_rows = .{ .k = k, .rows = rows, .logits = if (self.prompt_logits) |b| b.ptr else e.b.logits, .picks = words[picks_at..][0..rows], .picks_dev = self.prompt_dev + picks_at * 4, .out = words[0..picks_at], .out_dev = self.prompt_dev, .stride = row_words, .ctx = &sink, .call = PromptSink.take };
         }
         defer e.prompt_rows = null;
+        var tap: TapSink = .{ .self = self, .taps = &gop.value_ptr.taps };
+        tap.taps.prompt.clearRetainingCapacity();
+        tap.taps.from = from;
+        tap.taps.verified = null;
+        if (self.tapped != null) e.taps = .{ .ctx = &tap, .call = TapSink.take };
+        defer e.taps = null;
         const first = try e.prefillFrom(ids, from, null, self.head, .{ .ptr = s, .check = cancelled, .yields = s.yield_check != null }, keep);
         // the head's first draft reads the prompt's last row (its hidden row waits where a window's would)
         const last = ids.len - 1 - e.last_chunk;
@@ -290,6 +308,54 @@ pub const Cuda = struct {
             for (picks, 0..) |pick, i| try p.s.prompt_rows.append(p.gpa, LogRow.fromWords(words[i * row_words ..][0..row_words], pick, p.s.prompt_logprobs.?));
         }
     };
+
+    /// A prompt chunk's rows copied to the stream's host rows, a staging buffer at a time.
+    const TapSink = struct {
+        self: *Cuda,
+        taps: *Taps,
+
+        fn take(ctx: *anyopaque, hidden: u64, row: usize, rows: usize) anyerror!void {
+            const p: *TapSink = @ptrCast(@alignCast(ctx));
+            const e = p.self.e;
+            const d = e.c.hidden * 2;
+            if (row != p.taps.from + p.taps.prompt.items.len / d) return error.TapRowsOutOfOrder;
+            const stage = p.self.tapped.?.slice(u8);
+            var done: usize = 0;
+            while (done < rows) {
+                const n = @min(rows - done, stage.len / d);
+                try e.ops().download(stage[0 .. n * d], hidden + done * d);
+                try e.stream.synchronize();
+                try p.taps.prompt.appendSlice(p.self.gpa, stage[0 .. n * d]);
+                done += n;
+            }
+        }
+    };
+
+    /// Recording asks for the final norm's rows alone; their staging buffer is made here.
+    fn prepareFeaturesFn(ptr: *anyopaque, taps: []const u32) anyerror!void {
+        const self = of(ptr);
+        if (taps.len != 1 or taps[0] != finalTap(self.e.c)) return error.UnsupportedTaps;
+        if (self.tapped == null) self.tapped = try cuda.HostBuffer.alloc(self.e.ctx.d, state.pass_rows * self.e.c.hidden * 2);
+    }
+
+    /// The prompt's rows from the host until the first verify; then the last verify's, read from its sequence.
+    fn featuresFn(ptr: *anyopaque, s: *lanes.Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
+        const self = of(ptr);
+        if (self.tapped == null or taps.len != 1 or taps[0] != finalTap(self.e.c)) return error.UnsupportedTaps;
+        const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
+        const d = self.e.c.hidden * 2;
+        const t = &l.taps;
+        if (t.verified == null) {
+            if (start < t.from or start + count > t.from + t.prompt.items.len / d) return error.RowsNotHeld;
+            return .{ .buffer = @intFromPtr(t.prompt.items.ptr), .offset = (start - t.from) * d, .rows = count, .row_bytes = @intCast(d), .space = .host, .dtype = .bf16 };
+        }
+        if (start != t.verified.? or count > state.max_rows) return error.RowsNotHeld;
+        self.e.bind(l.seq);
+        const host = self.tapped.?.slice(u8)[0 .. count * d];
+        try self.e.ops().download(host, self.e.b.hidden);
+        try self.e.stream.synchronize();
+        return .{ .buffer = @intFromPtr(host.ptr), .rows = count, .row_bytes = @intCast(d), .space = .host, .dtype = .bf16 };
+    }
 
     fn firstRowFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!LogRow {
         const l = of(ptr).lanes.getPtr(s) orelse return error.UnknownStream;
@@ -324,6 +390,7 @@ pub const Cuda = struct {
         if (w.parents != null) return error.TreesNotBuilt;
         const l = try self.bindLane(w.stream, null);
         const e = self.e;
+        verified(self.gpa, l, e.pos);
         const rows = w.rows();
         if (rows > state.max_rows) return error.WindowTooWide;
         for (w.positions, 0..) |p, r| if (p != e.pos + 1 + r) return error.PositionMismatch;
@@ -339,6 +406,12 @@ pub const Cuda = struct {
         @memcpy(out[0].drafts, if (w.held > 0) held else w.tokens);
         if (out[0].rows.len > 0) self.readRows(out[0], 0, w.stream.logprobs.?);
         l.pending_rows = rows;
+    }
+
+    /// A verify starts at the cache length `at`: a recorded stream's prompt rows are no longer held.
+    fn verified(gpa: std.mem.Allocator, l: *Lane, at: u64) void {
+        l.taps.prompt.clearAndFree(gpa);
+        l.taps.verified = at;
     }
 
     /// A window's rows from the words its kernel wrote at slot `row0` (after the stream synchronized).
@@ -357,6 +430,7 @@ pub const Cuda = struct {
         for (windows, 0..) |w, k| {
             if (w.parents != null) return error.TreesNotBuilt;
             const l = try self.bindLane(w.stream, null);
+            verified(self.gpa, l, e.pos);
             for (w.positions, 0..) |p, r| if (p != e.pos + 1 + r) return error.PositionMismatch;
             ids[k][0] = w.pending;
             @memcpy(ids[k][1..][0..w.tokens.len], w.tokens);
@@ -438,6 +512,8 @@ pub const Cuda = struct {
     }
 
     fn drop(self: *Cuda, l: Lane) void {
+        var taps = l.taps.prompt;
+        taps.deinit(self.gpa);
         if (seq_graphs.logFromEnv()) {
             const d = self.e.stats.since(l.stats);
             const ms = @as(f64, @floatFromInt(d.capture_ns)) / 1e6;

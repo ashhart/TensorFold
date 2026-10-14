@@ -20,6 +20,10 @@ pub fn capabilities(a: Allocator) cli.Engines {
 
 /// The engine for the checkpoint in ``dir``, or null with ``problem`` set.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_type: []const u8, args: cli.Args, problem: *[]const u8) !?Opened {
+    if (args.record != null and !@hasDecl(native, "records")) {
+        problem.* = "--record writes rows from the CUDA engine only so far: serve without --record";
+        return null;
+    }
     return native.open(a, gpa, io, try cli.request(a, dir, model_type, args), problem);
 }
 

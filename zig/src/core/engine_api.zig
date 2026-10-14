@@ -199,6 +199,8 @@ pub const Open = struct {
     drafter: ?[]const u8 = null,
     /// --drafter-bits: 4 prepares the drafter's weights in 4 bits; 0 keeps them bf16.
     drafter_bits: u8 = 4,
+    /// --record: each stream's committed rows and tapped features written under this folder, for drafter training.
+    record: ?[]const u8 = null,
     speed_up: ?[]const u8 = null,
     prompt_cache_gib: ?f64 = null,
     prompt_cache_over_cap: bool = false,
