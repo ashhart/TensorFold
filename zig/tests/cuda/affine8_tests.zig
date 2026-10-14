@@ -1,4 +1,8 @@
-//! MLX affine widths on qlinear's tiles: narrow equals host-widened 8-bit bit for bit, float64 bounds, row-stable bits.
+//! MLX affine checkpoints of every width on qlinear's tiles: 4-bit codes on the affine-4 tiles, 2, 3, 5 and 6-bit codes
+//! on affine8.cu's tiles of their own width, 8-bit codes on its byte tiles. A narrow width's products equal, bit for
+//! bit, those of its codes widened on the host onto the 8-bit tiles (so no code changes and the arithmetic is one);
+//! products sit within their float64 bound, and a row's bits are the same at every row count and on both paths.
+//! The prompt GEMM gives codes of up to 4 bits the affine-4 prompt GEMM's bits, wider codes their 8-bit tiles' bits.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -49,10 +53,12 @@ fn mlxWords(r: *Rig, m: Matrix, bits: u8) ![]u32 {
     return out;
 }
 
-/// y = x (s q + b)^T in float64, and its bound: a bf16 ulp of |y| and 2^-12 of sum |x| (|s q| + |b|).
-fn reference(r: *Rig, x: []const u16, rows: usize, m: Matrix) !struct { want: []f64, tol: []f64 } {
+/// y = x (s q + b)^T in float64, and its bound: a bf16 ulp of |y| and 2^-12 of sum |x| (|s q| + |b|), or 2^-8 of
+/// it for the prompt GEMM, which rounds each weight to bf16 first.
+fn reference(r: *Rig, x: []const u16, rows: usize, m: Matrix) !struct { want: []f64, tol: []f64, loose: []f64 } {
     const want = try r.a.alloc(f64, rows * m.n);
     const tol = try r.a.alloc(f64, rows * m.n);
+    const loose = try r.a.alloc(f64, rows * m.n);
     for (0..rows) |row| for (0..m.n) |j| {
         var sum: f64 = 0;
         var abs: f64 = 0;
@@ -67,8 +73,9 @@ fn reference(r: *Rig, x: []const u16, rows: usize, m: Matrix) !struct { want: []
         }
         want[row * m.n + j] = sum;
         tol[row * m.n + j] = @abs(sum) * std.math.pow(f64, 2, -7) + abs * std.math.pow(f64, 2, -12) + 1e-30;
+        loose[row * m.n + j] = @abs(sum) * std.math.pow(f64, 2, -7) + abs * std.math.pow(f64, 2, -8) + 1e-30;
     };
-    return .{ .want = want, .tol = tol };
+    return .{ .want = want, .tol = tol, .loose = loose };
 }
 
 /// tf_q35_sums's 64-group sums: fp32, in order.
@@ -153,6 +160,7 @@ fn width(r: *Rig, k_: Kernels, n: usize, k: usize, bits: u8) !void {
         const b = try r.back(o, rows * n * 2);
         try check.sameBytes(try std.fmt.bufPrint(&name, "{d}-bit [{d}, {d}]: {d} rows equal the 16-row call's", .{ bits, n, k, rows }), b, a);
     }
+    try prompt(r, k_, m, own, t_own, t_wide, ts, tb);
     // AffineN's two paths: split-K CTAs and lane_gemv's loop over slices give one row the same bits
     if (served != 4) if (k_.an.split != null and qlinear.splitK(n, k) > 1) {
         var plain = k_.an.*;
@@ -161,6 +169,39 @@ fn width(r: *Rig, k_: Kernels, n: usize, k: usize, bits: u8) !void {
         try plain.decode(r.s, dx, dxs, .{ .w = t_own, .s = ts, .b = tb, .n = n, .k = k, .npad = npad, .bits = served }, o, most);
         try check.sameBytes(try std.fmt.bufPrint(&name, "{d}-bit [{d}, {d}]: split-K equals lane_gemv's slices", .{ bits, n, k }), try r.back(o, most * n * 2), try r.back(outs[counts.len - 1], most * n * 2));
     };
+}
+
+/// The prompt GEMM over a block and a part (144 rows) of one width's tiles: against float64, and bit for bit against
+/// the affine-4 prompt GEMM of the same codes (up to 4 bits) or the prompt GEMM of their 8-bit tiles (5 and 6).
+fn prompt(r: *Rig, k_: Kernels, m: Matrix, own: u64, t_own: u64, t_wide: u64, ts: u64, tb: u64) !void {
+    var name: [128]u8 = undefined;
+    const n = m.n;
+    const k = m.k;
+    const bits = m.bits;
+    const served = qlinear.servedBits(bits);
+    const npad = qlinear.Affine4.layout(n, k).npad;
+    const rows = 144;
+    const x = try r.bfs(rows * k, 1.0);
+    const dx = try r.dev(std.mem.sliceAsBytes(x));
+    const ref = try reference(r, x, rows, m);
+    const o = try r.zeros(rows * n * 2);
+    if (served == 4) {
+        try k_.a4.prompt(r.s, dx, .{ .w = t_own, .s = ts, .b = tb, .n = n, .k = k, .npad = npad }, o, rows);
+    } else {
+        try k_.an.prompt(r.s, dx, .{ .w = t_own, .s = ts, .b = tb, .n = n, .k = k, .npad = npad, .bits = served }, o, rows);
+    }
+    try r.close(try std.fmt.bufPrint(&name, "{d}-bit [{d}, {d}] prompt GEMM, {d} rows", .{ bits, n, k, rows }), o, false, ref.want, ref.loose);
+    if (served == 4 or served == 8) return;
+    const same = try r.zeros(rows * n * 2);
+    if (bits < 4) {
+        // the affine-4 prompt GEMM over these codes widened to 4 bits
+        const t4 = try r.zeros(qlinear.Affine4.layout(n, k).words);
+        try k_.an.packAt(r.s, own, bits, n, k, t4, 4);
+        try k_.a4.prompt(r.s, dx, .{ .w = t4, .s = ts, .b = tb, .n = n, .k = k, .npad = npad }, same, rows);
+    } else {
+        try k_.an.prompt(r.s, dx, .{ .w = t_wide, .s = ts, .b = tb, .n = n, .k = k, .npad = npad, .bits = 8 }, same, rows);
+    }
+    try check.sameBytes(try std.fmt.bufPrint(&name, "{d}-bit [{d}, {d}] prompt GEMM equals the {d}-bit tiles'", .{ bits, n, k, if (bits < 4) @as(u8, 4) else 8 }), try r.back(o, rows * n * 2), try r.back(same, rows * n * 2));
 }
 
 pub fn run(gpu: Gpu) !void {
@@ -196,5 +237,5 @@ pub fn run(gpu: Gpu) !void {
         try width(&r, k_, nk[0], nk[1], bits);
         cases += 1;
     };
-    check.pass("affine8: {d} cases over 2, 3, 4, 5, 6 and 8 bits: narrow products equal the 8-bit tiles', within {d:.3} of the float64 bound, every row count and path byte-equal", .{ cases, r.worst });
+    check.pass("affine8: {d} cases over 2, 3, 4, 5, 6 and 8 bits: narrow products equal the 8-bit tiles', within {d:.3} of the float64 bound, every row count and path byte-equal; prompt GEMMs equal the 4 and 8-bit tiles'", .{ cases, r.worst });
 }

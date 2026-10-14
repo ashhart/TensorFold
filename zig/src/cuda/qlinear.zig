@@ -30,7 +30,8 @@ pub const Affine4 = struct {
     }
 };
 
-/// MLX affine codes tiled for affine8.cu's lane_gemv at 2, 3, 5, 6 or 8 bits, with Affine4's padding, scales, biases.
+/// MLX affine codes tiled for affine8.cu's lane_gemv at `bits` a weight (2, 3, 5, 6 or 8), with Affine4's padding,
+/// scales and biases.
 pub const AffineN = struct {
     w: u64,
     s: u64,
@@ -46,7 +47,8 @@ pub const AffineN = struct {
     }
 };
 
-/// The width an MLX code of `bits` is served at: its own (4 on Affine4, 2/3/5/6/8 on AffineN), but 7 on 8-bit tiles.
+/// The width an MLX code of `bits` is served at: its own (4 on Affine4's tiles; 2, 3, 5, 6 and 8 on AffineN's), but 7
+/// on the 8-bit tiles.
 pub fn servedBits(bits: u8) u8 {
     return if (bits == 7) 8 else bits;
 }
@@ -384,6 +386,11 @@ pub fn splitSmem(bits: u8) u32 {
     return if (bits == 8) 25856 else 9472 + 2048 * @as(u32, bits);
 }
 
+/// affine8.cu's Prefill<bits>::SMEM: the prompt GEMM's three stages.
+pub fn prefillSmem(bits: u8) u32 {
+    return 50688 + 3072 * @as(u32, bits);
+}
+
 /// The widths AffineNKernels serves, in the order of its function tables.
 pub const tile_widths = [_]u8{ 2, 3, 5, 6, 8 };
 
@@ -391,10 +398,13 @@ fn widthAt(bits: u8) !usize {
     return std.mem.indexOfScalar(u8, &tile_widths, bits) orelse error.UnsupportedWidth;
 }
 
-/// MLX affine codes of every width but 4 (Affine4Kernels') on lane_gemv's arithmetic; each code keeps its value.
+/// MLX affine checkpoints of every width but 4 (Affine4Kernels'): codes of 2, 3, 5 and 6 bits on tiles of their own
+/// width, 7 and 8 on 8-bit tiles, all served by lane_gemv's arithmetic; each code keeps its value, so no rounding.
+/// Prompt rows take a GEMM with qmm_prefill's arithmetic over the same tiles.
 pub const AffineNKernels = struct {
     gemv_fns: [tile_widths.len]Function,
     split_fns: [tile_widths.len]Function,
+    prefill_fns: [tile_widths.len]Function,
     pack4_fn: Function, // MLX codes of 2 to 4 bits into the affine-4 tiles
     pack8_fn: Function, // MLX codes of 5 to 8 bits into the 8-bit tiles
     packn_fn: Function, // MLX codes of 2, 3, 5 or 6 bits into tiles of that width
@@ -407,12 +417,14 @@ pub const AffineNKernels = struct {
     /// From loaded affine8 and affine4_pack modules; GB10 decodes without the split form, as Affine4Kernels does.
     pub fn resolve(d: *const Driver, mod: Module, pack_mod: Module, sms: usize, gb10: bool) !AffineNKernels {
         var a: AffineNKernels = undefined;
-        for (tile_widths, &a.gemv_fns, &a.split_fns, &a.gemv_blocks) |bits, *g, *sp, *blocks| {
+        for (tile_widths, &a.gemv_fns, &a.split_fns, &a.prefill_fns, &a.gemv_blocks) |bits, *g, *sp, *pf, *blocks| {
             var name: [32]u8 = undefined;
             g.* = try mod.function(try std.fmt.bufPrintSentinel(&name, "tf_affine{d}_gemv", .{bits}, 0));
             sp.* = try mod.function(try std.fmt.bufPrintSentinel(&name, "tf_affine{d}_split", .{bits}, 0));
+            pf.* = try mod.function(try std.fmt.bufPrintSentinel(&name, "tf_affine{d}_prefill", .{bits}, 0));
             try g.allowDynamicShared(gemvSmem(bits));
             try sp.allowDynamicShared(splitSmem(bits));
+            try pf.allowDynamicShared(prefillSmem(bits));
             blocks.* = @max(1, try g.occupancy(128, gemvSmem(bits))) * sms;
         }
         a.pack4_fn = try mod.function("tf_affine8_pack4");
@@ -504,6 +516,20 @@ pub const AffineNKernels = struct {
         };
         const cfg: launch_.Config = .{ .grid = .{ .x = u(@min(tiles, a.gemv_blocks[at])) }, .block = .{ .x = 128 }, .shared = gemvSmem(q.bits), .pdl = a.pdl };
         try launch_.launch(a.gemv_fns[at], cfg, s, &g);
+    }
+
+    /// Prompt rows: x (rows, k) bf16 -> out (rows, n) bf16, Affine4Kernels.prompt's blocks and bands over AffineN's
+    /// tiles; a code of up to 4 bits gives the bits the affine-4 prompt GEMM gives it.
+    pub fn prompt(a: *const AffineNKernels, s: Stream, x: u64, q: AffineN, out: u64, rows: usize) !void {
+        const at = try widthAt(q.bits);
+        const rows_t = (rows + 127) / 128;
+        const band = (12 << 20) / (128 * q.k * 2);
+        const group = @max(1, @min(rows_t, band));
+        var g: launch_.Args = .{};
+        for ([_]u64{ x, q.w, q.s, q.b, out }) |v| g.add(v);
+        for ([_]usize{ rows, q.n, q.k, q.npad, q.k, group }) |v| g.add(int(v));
+        const grid = rows_t * ((q.n + 127) / 128);
+        try launch_.launch(a.prefill_fns[at], .{ .grid = .{ .x = u(grid) }, .block = .{ .x = 256 }, .shared = prefillSmem(q.bits) }, s, &g);
     }
 };
 

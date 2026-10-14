@@ -332,11 +332,15 @@ pub const Engine = struct {
         return e.projSums(l, x, e.xs, out, rows, prompt, e.tables.ptr + params_at);
     }
 
-    /// `proj` with group sums in `xs` and row counts at `params`; AffineN runs prompts 16 rows at a time.
+    /// `proj` with the rows' group sums in `xs` and the device counts at `params` (0: every row given is real).
+    /// A prompt's rows past 16 take the format's prompt GEMM; a window's rows the decode tiles, 16 at a time.
     pub fn projSums(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prompt: bool, params: u64) !void {
         const n_out = l.outputs();
         const k = l.inputs();
-        if (prompt and rows > 16) if (l == .a4) return e.affine.prompt(e.stream, x, l.a4, out, rows);
+        if (prompt and rows > 16) return switch (l) {
+            .a4 => |q| e.affine.prompt(e.stream, x, q, out, rows),
+            .an => |q| e.wide.prompt(e.stream, x, q, out, rows),
+        };
         try e.run(e.fns.sums, .{ rows, 1, 1 }, .{ 32, 1, 1 }, .{ x, xs, @as(c_int, @intCast(k)), params });
         var at: usize = 0;
         while (at < rows) : (at += 16) {
