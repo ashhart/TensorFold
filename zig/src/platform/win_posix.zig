@@ -203,7 +203,7 @@ pub const SIG = enum(c_int) {
     pub const IGN: ?Handler = @ptrFromInt(1);
     pub const DFL: ?Handler = null;
 };
-pub const Handler = *const fn (SIG) callconv(.c) void;
+pub const Handler = *align(1) const fn (SIG) callconv(.c) void; // align(1): IGN is address 1, as std.posix has it
 pub const sigset_t = u32;
 pub const Sigaction = struct {
     handler: extern union { handler: ?Handler, sigaction: ?*const anyopaque },
