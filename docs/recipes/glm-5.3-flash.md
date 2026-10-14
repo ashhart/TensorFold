@@ -3,10 +3,16 @@
 This recipe describes the Python 0.6.6 engine, available at the
 [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6).
 Its CUDA EXL3 reader, two-rank flags and DFlash2 policies do not apply to the native Zig binary.
+Nor do its Mac settings. The native binary refuses `--ssd-experts` and reads `GLM_LOAD_LIMIT_GB` (in GB) where this
+page uses `TENSORFOLD_MEMORY_LIMIT_GB` (in GiB); the `TF_GLM_*` variables and the Python paths and modules below are
+that engine's too.
 The native binary serves GLM on two M5 Ultra Macs with MLX affine 4-bit/group-64 weights; it has no GLM CUDA backend yet.
 That is not an engine-only replacement for a CUDA EXL3 deployment.
 For native serving, use the [qualified model table](../../README.md#qualified-models) and
 [paired Metal runbook](../../RUNBOOK.md#flash-next-and-paired-metal-serving).
+@chadhurley25075-png wrote the Mac family in [#9](https://github.com/ashhart/TensorFold/pull/9), with fixes from
+@kingjamez, and its prompt path in [#39](https://github.com/ashhart/TensorFold/pull/39); the native engine runs
+the decode kernels of #9. [Credits](../credits.md) names the contributors to the CUDA engine and the Mac options below.
 
 The `glm5_next` family serves `TensorFold/GLM-5.3-Flash-MLX-4bit-MTP` on two-rank CUDA and, on a Mac with
 256 GB, on the MLX lane engine ([Apple Silicon](#apple-silicon-mlx)).
@@ -106,6 +112,7 @@ held (4-bit copies and its selector's codebooks, 0.63 GiB a rank), not at 4 byte
 
 ### Long contexts: the latent cache
 
+@taussoe built this cache in [#54](https://github.com/ashhart/TensorFold/pull/54).
 The DSA layers are NoPE MLA: head h's key is `Wk_h c` and its value `Wv_h c`, with `c` the token's 512-wide
 normalized latent and `Wk_h`, `Wv_h` blocks of `kv_b_proj`. So `score_h = (Wk_h^T q_h) . c` and
 `out_h = Wv_h (sum_j p_j c_j)`. The CUDA engine caches `c` only (bf16, 1 KB a token and layer, shared by the
@@ -186,8 +193,8 @@ tensorfold serve TensorFold/GLM-5.3-Flash-MLX-4bit-MTP --ssd-experts 64
 - The pool keeps the most recently used experts, and reads bypass the page cache.
 - The extension builds against the installed MLX with the Xcode command line tools.
 
-On an M3 Ultra held to a 128 GB Mac's budget (TENSORFOLD_MEMORY_LIMIT_GB=89.6) with `--ssd-experts 64`, the
-streamed run was compared with the resident one on the same machine:
+On an M3 Ultra running the Python engine, held to a 128 GB Mac's budget (TENSORFOLD_MEMORY_LIMIT_GB=89.6) with
+`--ssd-experts 64`, the streamed run was compared with the resident one on the same machine:
 - Replies were the same tokens: 36 of 36 serial and cell requests, plus the 2k prompt.
 - Two concurrent streams each matched their solo reply, and resumed prompts matched fresh ones.
 - The footprint peaked at 87.6 GiB against 184.0 resident.
@@ -200,13 +207,16 @@ The loader reads two layouts of the same weights: the original one (`TensorFold/
 one mlx-lm's converter writes (`language_model.model.*`, one fused `conv1d`, `forget_gate.*`, the absorbed
 `embed_q` / `unembed_out` pair in place of `kv_b_proj`, the MTP layer as `mtp.0.*` with a bf16 `eh_proj`). Such
 conversions usually store per-tensor overrides: routed experts at 4 bits, attention, shared experts and the head at
-8, some layers at 5 or 6. `layouts.py` maps the names, a stack of parts at different widths runs part by part, and
+8, some layers at 5 or 6.
+[`layouts.py`](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/families/glm5_next/layouts.py)
+maps the names, a stack of parts at different widths runs part by part, and
 8-, 6- and 5-bit tensors take row kernels transcribed from MLX's one-row `qmv_fast` / `qmv_quad` loops, so verify
 windows keep one-row bits. On grant-ai's abliterated conversion, on a 256 GB M3 Ultra, the contributor measured
 46.3 tok/s drafted, equal to `"draft": false`.
 
 ### Float32 activations
 
+@feni6 added this mode in [#118](https://github.com/ashhart/TensorFold/pull/118).
 Set `"tensorfold_activation_dtype": "float32"` in a checkpoint's `config.json` to run the residual stream, the MLA
 latent and indexer caches and the KDA states in float32 instead of bf16. The hyper-connection split, the gated-delta
 recurrence and the templated one-row GEMVs (`matmul_rows`) run their Metal kernels in float32. Quantized `qmv_rows`
@@ -232,6 +242,7 @@ The CUDA engine refuses the key. `--ssd-experts` stays on the bf16 expert kernel
 
 ### 8-bit from a Q8_0 GGUF, without loss
 
+@feni6 added 8-bit group-32 checkpoints and this converter in [#119](https://github.com/ashhart/TensorFold/pull/119).
 A Q8_0 block (32 int8 values, one fp16 scale d) is exactly MLX's affine 8-bit format in groups of 32 with
 q + 128, scale d and bias −128·d. `tools/glm5_q8_0_gguf_to_mlx.py` converts llama.cpp's `glm5next` Q8_0 GGUF this
 way; the tensors llama.cpp keeps unquantised (the indexer and KDA low-rank projections) stay unquantised, and the KDA
@@ -251,12 +262,15 @@ the model decodes without drafts. The group-32 8-bit layers run MLX's one-row ca
 ### Prefill
 
 Prompt chunks attend as decode does: each query reads its own selected keys from the latent cache, so prefill cost
-and memory stay flat with context. The contributor measured 336 / 334 / 309 tok/s at 10k / 35k / 103k tokens on a
+and memory stay flat with context. @chadhurley25075-png, who wrote it in
+[#39](https://github.com/ashhart/TensorFold/pull/39), measured 336 / 334 / 309 tok/s at 10k / 35k / 103k tokens on a
 256 GB M3 Ultra, against 331 / 260 / 143 for the previous prefill.
 
 ### Scripts that load the backbone directly
 
-`tensorfold serve` wires the weights (`mx.set_wired_limit`, `server/residency.py`) and caps MLX's cache of freed
+`tensorfold serve` wires the weights (`mx.set_wired_limit`,
+[`server/residency.py`](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/server/residency.py)) and caps
+MLX's cache of freed
 buffers. A script that calls `families.glm5_next.weights.load_backbone` directly, such as a scorer reading logits
 or a profiler, should do the same: without wiring, macOS pages parts of a 170-365 GiB checkpoint out between steps, and
 on a 512 GB M3 Ultra each MoE layer then took about 0.1 s per call (4.3 s per decode step instead of 0.1 s); with the
