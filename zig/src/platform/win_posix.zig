@@ -13,7 +13,13 @@ pub const S = c.S;
 
 pub const socket_t = isize;
 pub const socklen_t = c_int;
-pub const sockaddr = extern struct { family: u16, data: [14]u8 };
+pub const sockaddr = extern struct {
+    family: u16,
+    data: [14]u8,
+
+    pub const in = extern struct { family: u16, port: u16, addr: u32, zero: [8]u8 = @splat(0) };
+};
+pub const timeval = c.timeval;
 
 pub const AF = struct {
     pub const UNIX: u32 = 1;
@@ -29,6 +35,8 @@ pub const SOL = struct {
 pub const SO = struct {
     /// SO_EXCLUSIVEADDRUSE: Windows' SO_REUSEADDR would let a second server take the port, the opposite of POSIX's.
     pub const REUSEADDR: u32 = @bitCast(@as(i32, -5));
+    pub const RCVTIMEO: u32 = 0x1006;
+    pub const SNDTIMEO: u32 = 0x1005;
 };
 pub const SHUT = struct {
     pub const RD: i32 = 0;
@@ -124,6 +132,9 @@ pub const system = struct {
     pub fn bind(fd: socket_t, addr: *const anyopaque, len: anytype) c_int {
         return if (ws.bind(fd, addr, @intCast(len)) != 0) failed() else 0;
     }
+    pub fn connect(fd: socket_t, addr: *const anyopaque, len: anytype) c_int {
+        return if (ws.connect(fd, addr, @intCast(len)) != 0) failed() else 0;
+    }
     pub fn listen(fd: socket_t, backlog: u31) c_int {
         return if (ws.listen(fd, backlog) != 0) failed() else 0;
     }
@@ -155,6 +166,13 @@ pub const system = struct {
 };
 
 pub fn setsockopt(fd: socket_t, level: i32, opt: u32, value: []const u8) error{SetSockOptFailed}!void {
+    if (opt == SO.RCVTIMEO or opt == SO.SNDTIMEO) {
+        // POSIX gives a timeval; Winsock takes the milliseconds as a DWORD
+        const tv: *align(1) const timeval = @ptrCast(value.ptr);
+        const ms: u32 = @intCast(@as(i64, tv.sec) * 1000 + @divTrunc(@as(i64, tv.usec), 1000));
+        if (ws.setsockopt(fd, level, @bitCast(opt), @ptrCast(&ms), @sizeOf(u32)) != 0) return error.SetSockOptFailed;
+        return;
+    }
     if (ws.setsockopt(fd, level, @bitCast(opt), value.ptr, @intCast(value.len)) != 0) return error.SetSockOptFailed;
 }
 
@@ -184,11 +202,24 @@ pub fn poll(fds: []pollfd, timeout_ms: i32) error{PollFailed}!usize {
 
 extern "kernel32" fn Sleep(ms: u32) callconv(.winapi) void;
 
-/// Receives from a socket; 0 is the peer's orderly close.
-pub fn read(fd: socket_t, buf: []u8) error{ConnectionResetByPeer}!usize {
+/// Receives from a socket; 0 is the peer's orderly close, and a receive timeout (SO.RCVTIMEO) is WouldBlock.
+pub fn read(fd: socket_t, buf: []u8) error{ ConnectionResetByPeer, WouldBlock }!usize {
     const n = ws.recv(fd, buf.ptr, len32(buf.len), 0);
-    if (n < 0) return error.ConnectionResetByPeer;
+    if (n < 0) return switch (ws.WSAGetLastError()) {
+        10035, 10060 => error.WouldBlock,
+        else => error.ConnectionResetByPeer,
+    };
     return @intCast(n);
+}
+
+// ---- processes ----
+
+extern "kernel32" fn TerminateProcess(process: *anyopaque, code: c_uint) callconv(.winapi) c_int;
+
+/// kill for a spawned child's handle: TERM ends it with exit code 1; HUP and the rest have no Windows equivalent.
+pub fn kill(process: std.os.windows.HANDLE, sig: SIG) error{ Unsupported, Unexpected }!void {
+    if (sig != .TERM) return error.Unsupported;
+    if (TerminateProcess(process, 1) == 0) return error.Unexpected;
 }
 
 // ---- signals: console control events ----
