@@ -49,6 +49,7 @@ In memory each chunk takes 8 MiB from its first id, so even a short record takes
 ## Which engines read it
 
 Recall drafts in the lane engine's copy window and its grafted lanes, for streams that share rounds and streams alone.
+No served engine turns grafted lanes on yet, so today the record reaches replies through the copy window.
 On CUDA a lone Nemotron stream's own driver asks the record when its context has nothing to copy.
 Flash Next's replay engine copies from its own history on the GPU and reads no record, so a Flash Next server refuses `--recall` before it loads.
 A lone Nemotron stream on a Mac and a lone Qwen3.8-27B stream on a Mac with tensor units run their own drivers, which do not read the record yet.
@@ -63,5 +64,7 @@ The server's startup line and `GET /v1/recall` state the record's state and size
 
 A copy is offered when the record's continuation of the stream's last 16 tokens or more is expected to land more tokens than the stream's own drafts have lately.
 The expected tokens come from how the record's earlier copies landed, kept apart for matches of 16 to 31 tokens, 32 to 63, and 64 or more.
-A record whose copies keep missing stops offering them, apart from a rare probe, and a stream whose copy landed nothing leaves the record alone for four rounds.
+A copy that misses costs its round the drafts it took the place of.
+A record whose copies keep missing stops offering them, apart from a probe that comes rarer while probes miss, and a stream whose copy landed nothing leaves the record alone for four rounds.
+Grafted lanes ask the record each round while its grafts land, and every eighth round otherwise.
 The stream's own context is asked first, and wins ties.
