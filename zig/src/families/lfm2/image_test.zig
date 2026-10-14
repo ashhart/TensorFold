@@ -2,7 +2,17 @@
 
 const std = @import("std");
 const image = @import("image.zig");
-const tokenizer = @import("core").tokenizer;
+const core = @import("core");
+const tokenizer = core.tokenizer;
+const jpeg = core.picture.jpeg;
+
+/// JPEG cases need the pinned libjpeg-turbo: required when TENSORFOLD_LIBTURBOJPEG names one, skipped when none loads.
+fn jpegReady() !bool {
+    if (jpeg.available(std.testing.io, std.testing.allocator)) return true;
+    if (std.testing.environ.getPosix(jpeg.env) != null) return error.PinnedLibraryDidNotLoad;
+    std.debug.print("libjpeg-turbo {s} not found: LFM2's JPEG cases skipped\n", .{jpeg.pinned});
+    return false;
+}
 
 const Case = struct {
     name: []const u8,
@@ -38,10 +48,12 @@ test "pictures match tensorfold's loader and the LFM2-VL processor" {
     const golden = try goldens(arena.allocator());
     const marks = try marksFromTokenizer(arena.allocator(), golden);
     const a = std.testing.allocator;
+    const with_jpeg = try jpegReady();
     for (golden.cases) |case| {
         errdefer std.debug.print("case {s}\n", .{case.name});
+        if (!with_jpeg and std.mem.startsWith(u8, case.url, "data:image/jpeg")) continue;
         var problem: []const u8 = "";
-        var rgb = (try image.load(a, case.url, &problem)) orelse {
+        var rgb = (try image.load(std.testing.io, a, case.url, &problem)) orelse {
             try std.testing.expectEqualStrings(case.problem orelse "", problem);
             continue;
         };
@@ -78,6 +90,7 @@ test "truncated and corrupted pictures are refused or prepared, never trapped" {
     defer arena.deinit();
     const golden = try goldens(arena.allocator());
     const a = std.testing.allocator;
+    const with_jpeg = try jpegReady();
     const b64 = std.base64.standard;
     var prng = std.Random.DefaultPrng.init(0x4c464d32);
     const r = prng.random();
@@ -85,6 +98,7 @@ test "truncated and corrupted pictures are refused or prepared, never trapped" {
     for (golden.cases) |case| {
         const comma = std.mem.indexOf(u8, case.url, ";base64,") orelse continue;
         if (case.problem != null or case.width * case.height > 40_000) continue;
+        if (!with_jpeg and std.mem.startsWith(u8, case.url, "data:image/jpeg")) continue;
         const payload = case.url[comma + 8 ..];
         const clean = try arena.allocator().alloc(u8, try b64.Decoder.calcSizeForSlice(payload));
         try b64.Decoder.decode(clean, payload);
@@ -104,7 +118,7 @@ test "truncated and corrupted pictures are refused or prepared, never trapped" {
             @memcpy(url[0..prefix.len], prefix);
             _ = b64.Encoder.encode(url[prefix.len..], v);
             var problem: []const u8 = "";
-            var rgb = (try image.load(a, url, &problem)) orelse {
+            var rgb = (try image.load(std.testing.io, a, url, &problem)) orelse {
                 outcomes[0] += 1;
                 continue;
             };
@@ -114,7 +128,8 @@ test "truncated and corrupted pictures are refused or prepared, never trapped" {
             outcomes[1] += 1;
         }
     }
-    try std.testing.expect(outcomes[0] + outcomes[1] >= 3000 and outcomes[0] > 0 and outcomes[1] > 0);
+    const least: usize = if (with_jpeg) 3000 else 2000;
+    try std.testing.expect(outcomes[0] + outcomes[1] >= least and outcomes[0] > 0 and outcomes[1] > 0);
 }
 
 /// Rewrites each whole chunk's CRC, so a corruption reaches the decoder past the checksum.
