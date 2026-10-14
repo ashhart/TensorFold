@@ -122,3 +122,56 @@ test "the first write widens the shared expert and tells config.json; a later on
     host4.dequantize(&wa, &.{s1[0]}, &.{b1[0]}, &back);
     try std.testing.expectEqualSlices(f32, up[d .. 2 * d], &back);
 }
+
+test "a pocket rounded in place is what a write hands back, and writing it again changes no value" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(dir);
+    var prng = std.Random.DefaultPrng.init(3);
+    const r = prng.random();
+    const base = "backbone.layers.0.mixer.shared_experts.";
+    var w: [own * d / 8]u32 = undefined;
+    for (&w) |*x| x.* = r.int(u32);
+    var sb: [own * d / 64]u16 = undefined;
+    for (&sb) |*x| x.* = host4.bf16of(0.01);
+    const shard = try std.fs.path.join(gpa, &.{ dir, "model.safetensors" });
+    defer gpa.free(shard);
+    const sw = std.mem.sliceAsBytes(&w);
+    const ss = std.mem.sliceAsBytes(&sb);
+    const parts = [_]core.shard_edit.New{
+        .{ .name = base ++ "up_proj.weight", .dtype = .u32, .shape = &.{ own, d / 8 }, .bytes = sw },
+        .{ .name = base ++ "up_proj.scales", .dtype = .bf16, .shape = &.{ own, d / 64 }, .bytes = ss },
+        .{ .name = base ++ "up_proj.biases", .dtype = .bf16, .shape = &.{ own, d / 64 }, .bytes = ss },
+        .{ .name = base ++ "down_proj.weight", .dtype = .u32, .shape = &.{ d, own / 8 }, .bytes = sw },
+        .{ .name = base ++ "down_proj.scales", .dtype = .bf16, .shape = &.{ d, own / 64 }, .bytes = ss },
+        .{ .name = base ++ "down_proj.biases", .dtype = .bf16, .shape = &.{ d, own / 64 }, .bytes = ss },
+    };
+    try core.shard_edit.create(gpa, shard, &.{.{ "format", "mlx" }}, &parts);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{\"model_type\":\"nemotron_h\",\"moe_shared_expert_intermediate_size\":64}" });
+    var c: cfg.Config = .{ .hidden = d, .vocab = 16, .layers = 1, .mamba_heads = 1, .mamba_head_dim = 1, .groups = 1, .state = 1, .conv_kernel = 4, .heads = 1, .kv_heads = 1, .head_dim = 1, .experts = 1, .top_k = 1, .expert_width = 64, .shared_width = own, .routed_scaling = 1, .eps = 1e-5 };
+    c.kinds[0] = .moe;
+    // three neurons of mixed sign, one zeroed as a delete leaves it, the rest of the pocket empty
+    var up: [learned * d]f32 = @splat(0);
+    var down: [learned * d]f32 = @splat(0);
+    for (up[0 .. 3 * d], down[0 .. 3 * d]) |*u, *v| {
+        u.* = r.floatNorm(f32) * 0.05;
+        v.* = r.floatNorm(f32) * 0.2;
+    }
+    @memset(up[d .. 2 * d], 0);
+    @memset(down[d .. 2 * d], 0);
+    var rounded_up = up;
+    var rounded_down = down;
+    try Shards.round(gpa, d, &rounded_up, &rounded_down);
+    _ = try Shards.write(gpa, io, dir, c, &.{0}, learned, &up, &down);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&up), std.mem.sliceAsBytes(&rounded_up));
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&down), std.mem.sliceAsBytes(&rounded_down));
+    try std.testing.expect(std.mem.allEqual(f32, up[d .. 2 * d], 0));
+    // a save of what was rounded writes and hands back the same values, so a check before it reads what it writes
+    c.pocket = learned;
+    _ = try Shards.write(gpa, io, dir, c, &.{0}, learned, &up, &down);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&rounded_up), std.mem.sliceAsBytes(&up));
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&rounded_down), std.mem.sliceAsBytes(&down));
+}

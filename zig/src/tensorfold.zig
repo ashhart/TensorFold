@@ -43,6 +43,7 @@ test {
     _ = @import("families/nemotron/subspace.zig"); // a new block's directions
     _ = @import("families/nemotron/living_test.zig"); // saved lessons and their routers, beside the shards
     _ = @import("families/nemotron/pocket_shards_test.zig"); // learned neurons in the shards themselves
+    _ = @import("families/nemotron/pocket_forget_test.zig"); // a fact deleted on request, and put back
     _ = @import("families/nemotron/pocket.zig"); // which row a fact's neurons fire at
     _ = @import("families/nemotron/pocket_fit.zig"); // where a fact's neurons fire, and stay silent
     _ = @import("families/nemotron/router.zig"); // when a lesson acts on a reply

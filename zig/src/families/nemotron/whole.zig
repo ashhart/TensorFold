@@ -2,6 +2,7 @@
 const std = @import("std");
 const examples = @import("lesson_examples.zig");
 const adapters = @import("learn_shape.zig");
+const forgetting = @import("pocket_forget.zig");
 
 const Example = examples.Example;
 const Lesson = examples.Lesson;
@@ -45,6 +46,10 @@ pub fn Hooks(comptime H: type) type {
 
         pub fn pocketSave(f: Self, layers: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
             return H.pocketSave(f.b, f.gpa, f.io, layers, neurons, up, down);
+        }
+
+        pub fn pocketRound(f: Self, up: []f32, down: []f32) !void {
+            return H.pocketRound(f.b, f.gpa, up, down);
         }
     };
 }
@@ -148,11 +153,16 @@ pub fn undo(l: anytype) !bool {
     return true;
 }
 
-/// A replaced fact's neurons zeroed in the pocket, or put back (`back`); the next save writes them; false if no pocket.
-pub fn retire(l: anytype, gone: []const [2]u16, back: bool) !bool {
-    if (l.method != .pocket) return false;
-    if (back) try l.pockets.unretire(l.trainer.?, hooks(l)) else try l.pockets.retire(l.trainer.?, hooks(l), gone);
-    return true;
+/// A replaced fact's neurons zeroed or put back, or a deleted one's (the count reported); the next save writes them.
+pub fn retire(l: anytype, lesson: Lesson) !?@import("learner.zig").Step {
+    if (l.method != .pocket) return null;
+    const t = l.trainer.?;
+    if (lesson.forget.len > 0 or lesson.unforget) {
+        const n = if (lesson.unforget) try forgetting.unforget(&l.pockets, t, hooks(l)) else try forgetting.forget(&l.pockets, t, hooks(l), lesson.forget);
+        return .{ .done = true, .changed = n > 0, .report = .{ .learned = .{ .recalled = n > 0, .steps = @intCast(n), .loss = 0 } } };
+    }
+    if (lesson.unretire) try l.pockets.unretire(t, hooks(l)) else try l.pockets.retire(t, hooks(l), lesson.retire);
+    return .{ .done = true, .changed = true };
 }
 
 /// The pocket into the shards (an unrecalled lesson out first), held-out answers asked again; false if not a pocket.
@@ -163,9 +173,16 @@ pub fn save(l: anytype) !bool {
         try l.pockets.undo(l.trainer.?, hooks(l));
         l.pocketed = false;
     }
-    if (l.pockets.empty()) return true;
+    // a pocket a delete emptied still writes: the shards hold the deleted fact until it does
+    const forgot = forgetting.pending(&l.pockets);
+    if (l.pockets.empty() and !forgot) return true;
     const t0 = H.seconds(l.io);
     const bytes = try l.pockets.save(l.trainer.?, hooks(l));
+    forgetting.settle(&l.pockets);
+    if (forgot) {
+        std.log.info("slide pocket: the learned neurons are in the model's shards ({d} MB written in {d:.1} s), a deleted fact's at zero", .{ bytes >> 20, H.seconds(l.io) - t0 });
+        return true;
+    }
     const back = try l.recalls(l.owned.held, false);
     std.log.info("slide pocket: the learned neurons are in the model's shards ({d} MB written in {d:.1} s); the last fact's held-out answers {s} with them as written", .{ bytes >> 20, H.seconds(l.io) - t0, if (back) "come back" else "do not all come back" });
     return true;
