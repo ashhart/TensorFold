@@ -5,6 +5,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - `POST /v1/systemone` takes llama-server's System One request: a state (text, JSON or a chat), questions keyed by id of type `noul`, `choice` or `score`, and pictures as data URLs (`files`, `images` or a chat state's `image_url` parts, at most 4). Each question is rendered as d1's systemone template renders it, read at its single-token option forms, and answered with probabilities and zero output tokens, refused with llama-server's sentences when malformed. The engine scores it through a new `decide` hook (one pass over the shared state and a branch a question), or `score` a question at a time; an engine that scores nothing serves no such path, and an engine that only decides refuses text requests. `/v1/decisions` asks `score` for the vocabulary's mass, System One does not.
+- The native tokenizer reads an ASCII bracket class inside `(?i:...)`, folded to its case variants as Oniguruma folds a literal there: LFM2's pre-tokenizer (`'(?i:[sdmt]|ll|ve|re)|...`) now loads, and splits `'S`, `'LL` and `'\u017f` as the tokenizers library does. A negated class, a property class or a non-ASCII member inside `(?i:...)` is still refused.
 
 ## 1.0.11
 
