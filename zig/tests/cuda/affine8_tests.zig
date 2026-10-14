@@ -1,7 +1,4 @@
-//! MLX affine checkpoints of every width on qlinear's tiles: 4-bit codes on the affine-4 tiles, 2, 3, 5 and 6-bit codes
-//! on affine8.cu's tiles of their own width, 8-bit codes on its byte tiles. A narrow width's products equal, bit for
-//! bit, those of its codes widened on the host onto the 8-bit tiles (so no code changes and the arithmetic is one);
-//! products sit within their float64 bound, and a row's bits are the same at every row count and on both paths.
+//! MLX affine widths on qlinear's tiles: narrow equals host-widened 8-bit bit for bit, float64 bounds, row-stable bits.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");

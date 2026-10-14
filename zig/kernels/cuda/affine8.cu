@@ -1,7 +1,4 @@
-// Ours: MLX affine checkpoints of every width on the lane matmul. 4-bit codes stay on lane_gemv's 4-bit tiles; codes of
-// 2, 3, 5 and 6 bits go on tiles of their own width, and 7 or 8-bit codes on 8-bit tiles, all read with lane_gemv's
-// arithmetic: per 64-group s * (x . q) + b * sum(x), q exact in bf16. The narrow and 8-bit tiles hand the MMAs the same
-// bf16 operands, so a code's result does not depend on the width it is stored at, and nothing is rounded.
+// Ours: MLX affine codes of 2, 3, 5 and 6 bits on tiles of their width, 7-8 on 8-bit tiles; same MMAs, no rounding.
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -31,16 +28,14 @@ __device__ __forceinline__ uint32_t byte_pair(uint32_t w, int s) {
     return *reinterpret_cast<const uint32_t*>(&h);
 }
 
-// Codes c0 (low half) and c1 (high half) of up to 6 bits as a bf16 pair: bf16 0x4300 | c is 128 + c, so subtracting
-// 128 leaves c exactly, as byte_pair gives it.
+// Codes c0 (low half) and c1 (high half) of up to 6 bits as a bf16 pair: 0x4300 | c is 128 + c, minus 128 is c.
 __device__ __forceinline__ uint32_t code_pair(uint32_t r) {
     r |= 0x43004300u;
     const __nv_bfloat162 h = __hsub2(*reinterpret_cast<const __nv_bfloat162*>(&r), __floats2bfloat162_rn(128.0f, 128.0f));
     return *reinterpret_cast<const uint32_t*>(&h);
 }
 
-// Pair i of a lane's group in a BITS-wide tile: BITS words whose low halves hold the pairs' first codes and whose high
-// halves their second, each half a little-endian stream of 16 BITS-bit codes. i is a constant once unrolled.
+// Pair i of a lane's group in a BITS-wide tile: low halves hold first codes, high halves second, 16 codes a stream.
 template <int BITS>
 __device__ __forceinline__ uint32_t pair_at(const uint32_t (&w)[BITS], int i) {
     constexpr uint32_t M = (1u << BITS) - 1u;
@@ -73,10 +68,7 @@ struct Tile {
     static constexpr int SMEM = STAGES * STAGE;
 };
 
-// lane_gemv's gemv_items. 8-bit tiles: [tile][group][8 n8 tiles][32 lanes][GS / 16 words], a word one MMA's b0 and
-// b1 bytes. Narrow tiles (64 by 64): [tile][group][4 warps][32 lanes][BITS words] of pair_at's pairs, pair
-// (j * 4 + kt) * 2 + h being b_h of the warp's n8 tile j at step kt. Every width runs the same MMAs and fma chain a
-// group: acc = x_sum * b + (d * s + acc).
+// lane_gemv's gemv_items on 8-bit or narrow tiles; every width runs acc = x_sum * b + (d * s + acc) a group.
 template <int GS, int BN, int STAGES, int BITS, typename Map, typename After>
 __device__ __forceinline__ void items(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs, const Part& P, int M, int K,
                                       int ldx, int count, Map map, float (&acc)[Tile<GS, BN, STAGES, BITS>::NT][4], After after) {
@@ -358,10 +350,7 @@ TF_AFFINE_NARROW(5)
 TF_AFFINE_NARROW(6)
 #undef TF_AFFINE_NARROW
 
-// MLX words of 2, 3, 5 or 6 bits -> that width's narrow tiles [npad/64][kg][4][32][bits]: word v of a lane holds bits
-// 16v to 16v + 15 of its two code streams, stream element i = (j * 4 + kt) * 2 + h being the code at input
-// g * 64 + 16 kt + 2c + 8h (low half; the next input in the high half) of row tile * 64 + (warp * 2 + j) * 8 + lane / 4,
-// c = lane % 4.
+// MLX words of 2, 3, 5 or 6 bits -> narrow tiles [npad/64][kg][4][32][bits], word v bits 16v..16v+15 of two streams.
 extern "C" __global__ void tf_affinen_pack(const uint32_t* __restrict__ w, int bits, int n, int kw, int kg, uint32_t* __restrict__ out,
                                            long long total) {
     const long long idx = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -387,8 +376,7 @@ extern "C" __global__ void tf_affinen_pack(const uint32_t* __restrict__ w, int b
     out[idx] = word;
 }
 
-// MLX (n, k * bits / 32) words of 2 to 4 bits -> lane_gemv's 4-bit tiles [npad/64][kg][8][32][2] (tf_pack_dense's
-// layout, its codes read at their own width).
+// MLX words of 2 to 4 bits -> lane_gemv's 4-bit tiles [npad/64][kg][8][32][2], tf_pack_dense's layout.
 extern "C" __global__ void tf_affine8_pack4(const uint32_t* __restrict__ w, int bits, int n, int kw, int kg, uint32_t* __restrict__ out,
                                            long long total) {
     const long long idx = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -409,8 +397,7 @@ extern "C" __global__ void tf_affine8_pack4(const uint32_t* __restrict__ w, int 
     out[idx] = word;
 }
 
-// MLX words of 5 to 8 bits -> 8-bit tiles [npad/64][kg][8][32][4]: word kt of a lane holds the codes at inputs
-// k0 + 2c, k0 + 2c + 1, k0 + 2c + 8 and k0 + 2c + 9 (k0 = g * 64 + 16 kt) of row tile * 64 + j * 8 + lane / 4.
+// MLX words of 5 to 8 bits -> 8-bit tiles [npad/64][kg][8][32][4], word kt holding inputs k0+2c, +1, +8, +9.
 extern "C" __global__ void tf_affine8_pack8(const uint32_t* __restrict__ w, int bits, int n, int kw, int kg, uint32_t* __restrict__ out,
                                            long long total) {
     const long long idx = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;

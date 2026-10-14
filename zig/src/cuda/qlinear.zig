@@ -30,8 +30,7 @@ pub const Affine4 = struct {
     }
 };
 
-/// MLX affine codes tiled for affine8.cu's lane_gemv at `bits` a weight (2, 3, 5, 6 or 8), with Affine4's padding,
-/// scales and biases.
+/// MLX affine codes tiled for affine8.cu's lane_gemv at 2, 3, 5, 6 or 8 bits, with Affine4's padding, scales, biases.
 pub const AffineN = struct {
     w: u64,
     s: u64,
@@ -47,8 +46,7 @@ pub const AffineN = struct {
     }
 };
 
-/// The width an MLX code of `bits` is served at: its own (4 on Affine4's tiles; 2, 3, 5, 6 and 8 on AffineN's), but 7
-/// on the 8-bit tiles.
+/// The width an MLX code of `bits` is served at: its own (4 on Affine4, 2/3/5/6/8 on AffineN), but 7 on 8-bit tiles.
 pub fn servedBits(bits: u8) u8 {
     return if (bits == 7) 8 else bits;
 }
@@ -393,8 +391,7 @@ fn widthAt(bits: u8) !usize {
     return std.mem.indexOfScalar(u8, &tile_widths, bits) orelse error.UnsupportedWidth;
 }
 
-/// MLX affine checkpoints of every width but 4 (Affine4Kernels'): codes of 2, 3, 5 and 6 bits on tiles of their own
-/// width, 7 and 8 on 8-bit tiles, all served by lane_gemv's arithmetic; each code keeps its value, so no rounding.
+/// MLX affine codes of every width but 4 (Affine4Kernels') on lane_gemv's arithmetic; each code keeps its value.
 pub const AffineNKernels = struct {
     gemv_fns: [tile_widths.len]Function,
     split_fns: [tile_widths.len]Function,
