@@ -77,19 +77,24 @@ fn reserve(p: *anyopaque, streams: u32) anyerror!void {
         try l.e.forward(parts[0 .. n + 1], ids[0 .. n + 1], .{ .draws = picks[0 .. n + 1] });
         for (l.pool.items[0 .. n + 1]) |cache| try cache.reset(l.e);
     }
-    // with a drafter: a lone stream's windows of the pending token and 1 to 7 drafts
-    if (l.e.n_taps > 0) for (2..@min(8, l.e.verify_rows) + 1) |rows| {
+    // with a drafter: a lone stream's windows of the pending token and its drafts, chains and trees
+    if (l.e.n_taps > 0) for (2..l.e.window_rows + 1) |rows| {
         for (picks[0..rows]) |*pk| pk.* = .{ .rule = null, .position = 1 };
         try l.e.forward(&.{.{ .cache = l.pool.items[0], .rows = rows }}, ids[0..rows], .{ .draws = picks[0..rows] });
         try l.pool.items[0].reset(l.e);
     };
 }
 
-/// The DFlash2 drafter in `dir` over the loaded engine `p`, its weights in 4 bits (the only width served).
+/// The DFlash2 drafter in `dir` over the loaded engine `p`, its weights in 4 bits (the only width served). The
+/// target's windows of 1 to window_rows rows are timed here (with the drafter's taps on) for the round loop's prices.
 pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void } {
     if (bits != 4) return error.DrafterBitsUnsupported;
     const l: *Lanes = @ptrCast(@alignCast(p));
+    if (l.caches.count() != 0 or l.pool.items.len != 0) return error.TapsAfterStreams;
     const d = try Draft.init(gpa, io, l.e, dir);
+    errdefer d.deinit();
+    try l.e.setTaps(d.taps());
+    try l.timeWindows(d);
     return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveDrafter };
 }
 
@@ -121,7 +126,7 @@ fn release(p: *anyopaque) void {
 fn pick(sampling: ?lanes.Sampling, position: u64) E.Draw {
     const s = sampling orelse return .{ .rule = null, .position = position };
     if (s.temperature <= 0) return .{ .rule = null, .position = position };
-    return .{ .rule = cuda.sample.rule(s.seed, s.temperature, s.top_p, s.minLog(), s.top_k), .position = position };
+    return .{ .rule = cuda.sample.Rule.from(lanes.gpu_rule.rule(s)), .position = position };
 }
 
 const Lanes = struct {
@@ -162,6 +167,26 @@ const Lanes = struct {
 
     fn give(self: *Lanes, cache: *E.Cache) void {
         self.pool.append(self.gpa, cache) catch self.drop(cache);
+    }
+
+    /// Each window width's forward, timed on a cache of its own (its third run: the shape's graph captured and the
+    /// driver's stall behind it, the previous window's keep in front as in a round), into the drafter's facts.
+    fn timeWindows(self: *Lanes, d: *Draft) !void {
+        var cache = try E.Cache.init(self.gpa, self.e, 64);
+        defer cache.deinit(self.gpa);
+        const ids: [E.most_window]u32 = @splat(0);
+        var picks: [E.most_window]E.Draw = undefined;
+        for (&picks) |*pk| pk.* = .{ .rule = null, .position = 1 };
+        for (1..self.e.window_rows + 1) |rows| {
+            var ms: f64 = 0;
+            for (0..3) |run| {
+                try cache.reset(self.e);
+                const t0 = std.Io.Clock.awake.now(self.io);
+                try self.e.forward(&.{.{ .cache = &cache, .rows = rows }}, ids[0..rows], .{ .draws = picks[0..rows] });
+                if (run == 2) ms = @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(self.io)).toNanoseconds())) / 1e6;
+            }
+            d.setCost(@intCast(rows), ms);
+        }
     }
 
     fn backend(self: *Lanes) be.Backend {
@@ -224,7 +249,8 @@ const Lanes = struct {
         return @intCast(handle);
     }
 
-    /// Each window (a stream's pending token and copies) checked, then as many as fit in each forward.
+    /// Each window (a stream's pending token and drafts, a chain or a tree) checked, then as many as fit in each
+    /// forward. A tree's rows are keyed at the cache length plus their depth, as the round loop positions them.
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) !void {
         const self = cast(ptr);
         const t0 = std.Io.Clock.awake.now(self.io);
@@ -232,11 +258,18 @@ const Lanes = struct {
         if (windows.len != out.len) return error.InvalidQwenWindows;
         for (windows, out) |w, o| {
             const rows = w.rows();
-            if (w.parents != null or w.held != 0 or rows > self.e.window_rows or w.positions.len != rows) return error.UnsupportedQwenWindow;
+            if (w.held != 0 or rows > self.e.window_rows or w.positions.len != rows) return error.UnsupportedQwenWindow;
             if (w.masks.len != 0 and w.masks.len != rows * draws.mask_words) return error.InvalidQwenMasks;
             if (o.sampled.len != rows or o.drafts.len != w.tokens.len) return error.InvalidQwenOutputs;
             const cache = try self.cacheOf(w.stream);
-            for (w.positions, 0..) |p, r| if (p != cache.len + r + 1) return error.InvalidQwenPosition;
+            var depth: [E.most_window]u64 = undefined;
+            for (w.positions, 0..) |p, r| {
+                const parent: i32 = if (w.parents) |ps| ps[r] else if (r == 0) -1 else @intCast(r - 1);
+                if (r == 0 and parent != -1) return error.UnsupportedQwenWindow;
+                if (r > 0 and (parent < 0 or parent >= @as(i32, @intCast(r)))) return error.UnsupportedQwenWindow;
+                depth[r] = if (parent < 0) 0 else depth[@intCast(parent)] + 1;
+                if (p != cache.len + depth[r] + 1) return error.InvalidQwenPosition;
+            }
         }
         var at: usize = 0;
         while (at < windows.len) {
@@ -248,7 +281,7 @@ const Lanes = struct {
             var masked = false;
             while (at + n < windows.len and n < E.max_segs and total + windows[at + n].rows() <= self.e.verify_rows) : (n += 1) {
                 const w = windows[at + n];
-                parts[n] = .{ .cache = self.caches.get(w.stream).?, .rows = w.rows() };
+                parts[n] = .{ .cache = self.caches.get(w.stream).?, .rows = w.rows(), .parents = w.parents };
                 ids[total] = w.pending;
                 @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
                 for (w.positions, 0..) |p, r| picks[total + r] = pick(w.stream.sampling, p);
@@ -270,14 +303,15 @@ const Lanes = struct {
         }
     }
 
-    /// The accepted prefix of each window: its state as it was after that row.
+    /// The accepted path of each window (a chain's prefix or a tree's branch): the state as that chain leaves it.
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) !void {
         const self = cast(ptr);
         const t0 = std.Io.Clock.awake.now(self.io);
         defer @import("cuda_draft.zig").timing("keep", self.io, t0);
         for (windows, paths) |w, path| {
-            for (path, 0..) |r, i| if (r != i) return error.UnsupportedQwenTree;
-            try self.e.rewind(try self.cacheOf(w.stream), path.len);
+            const cache = try self.cacheOf(w.stream);
+            if (cache.last == null) continue; // a one-row window (or one kept already): nothing to roll back
+            try cache.keep(self.e, path);
         }
     }
 
@@ -293,13 +327,14 @@ const Lanes = struct {
     }
 
     /// Rows [start, start + count) of a stream's tap ring: `offset` carries the first row's position, the drafter
-    /// (cuda_draft.zig) reads slot position % tap_rows, so a request may span the ring's end.
+    /// (cuda_draft.zig) reads slot position % tap_rows, so a request may span the ring's end. The newest window's
+    /// rows stay readable after a keep (a tree's kept path reads them by row) until the next forward.
     fn featuresFn(ptr: *anyopaque, stream: *lanes.Stream, taps: []const u32, start: u64, count: u32) !be.Features {
         const self = cast(ptr);
         if (taps.len != self.e.n_taps) return error.TapsMismatch;
         const cache = try self.cacheOf(stream);
         const ring = cache.tap orelse return error.NoTaps;
-        if (start + count > cache.len or count > E.tap_rows) return error.RowsNotHeld;
+        if (start + count > cache.written or count > E.tap_rows) return error.RowsNotHeld;
         return .{ .buffer = ring.ptr, .offset = start, .rows = count, .row_bytes = @intCast(self.e.n_taps * self.e.g.hidden * 2), .space = .device, .dtype = .bf16 };
     }
 

@@ -1,6 +1,8 @@
 //! A drafter outside the target family reading its tapped states; each call takes a round's streams together.
 const Stream = @import("stream.zig").Stream;
 const Features = @import("backend.zig").Features;
+const Cost = @import("config.zig").Cost;
+const Shape = @import("shape.zig").Shape;
 
 /// What the round loop's depth rule needs from the drafter itself (not from the target, whose own head may not exist).
 pub const Facts = struct {
@@ -10,13 +12,18 @@ pub const Facts = struct {
     plain_guard: bool = true, // plain rounds compete with drafted depths (the rule may choose no drafts)
     batched: bool = false, // hold() runs a shared round's streams as one batch
     stream_bytes: usize = 0, // device bytes each opened stream holds (its caches), for memory admission
+    trees: bool = false, // hold() takes a tree of lanes (Hold.lanes), each lane its parent's rank-r token
+    window_costs: []const Cost = &.{}, // the target's window ms by rows (timed at load), for the depth rule
+    lane_costs: []const Cost = &.{}, // the same for the lane planner (Model.lane_costs)
 };
 
 /// Target rows [start, start + features.rows) and the token after each; rows at or past `start` replace what was held.
-pub const Absorb = struct { stream: *Stream, features: Features, start: u64, follow: []const u32 };
+/// `rows`, when given, picks the features' rows to absorb (a tree's kept path), in order; null: all of them.
+pub const Absorb = struct { stream: *Stream, features: Features, start: u64, follow: []const u32, rows: ?[]const u32 = null };
 
 /// Draft `depth` tokens after `pending`, the first at `position`; asked only once row `position - 2` was absorbed.
-pub const Hold = struct { stream: *Stream, pending: u32, position: u64, depth: u32 };
+/// With `lanes`, a tree instead: lane i's token is the rank-r choice after its parent (depth unused).
+pub const Hold = struct { stream: *Stream, pending: u32, position: u64, depth: u32, lanes: ?*const Shape = null };
 
 pub const Drafter = struct {
     ptr: *anyopaque,

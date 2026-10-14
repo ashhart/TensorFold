@@ -1,7 +1,8 @@
-//! `tf-qwen35-cuda <model dir> <step|window|prompt> <ids> <out>`: a Qwen3.5 hybrid's CUDA forward over comma-separated
-//! token ids: one token a forward (step: every position's logits), windows of growing widths (window: the same rows,
-//! which must equal step's) or the ids as one prompt (prompt: the last position's), as little-endian bf16 rows into
-//! <out> for a reference to compare. Step mode also prints the decode speed.
+//! `tf-qwen35-cuda <model dir> <step|window|tree|prompt> <ids> <out>`: a Qwen3.5 hybrid's CUDA forward over
+//! comma-separated token ids: one token a forward (step: every position's logits), windows of growing widths
+//! (window: the same rows, which must equal step's), tree windows with junk branches kept to the true one (tree:
+//! the same), or the ids as one prompt (prompt: the last position's), as little-endian bf16 rows into <out> for a
+//! reference to compare. Step mode also prints the decode speed.
 const std = @import("std");
 const cuda = @import("cuda");
 const q = @import("qwen35");
@@ -11,7 +12,7 @@ pub fn main(init: std.process.Init) !u8 {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
     if (args.len != 5) {
-        std.debug.print("usage: tf-qwen35-cuda <model dir> <step|window|prompt> <ids> <out>\n", .{});
+        std.debug.print("usage: tf-qwen35-cuda <model dir> <step|window|tree|prompt> <ids> <out>\n", .{});
         return 2;
     }
     var ids: std.ArrayList(u32) = .empty;
@@ -48,6 +49,42 @@ pub fn main(init: std.process.Init) !u8 {
             try e.forward(&.{.{ .cache = &cache, .rows = n }}, ids.items[at..][0..n], .logits);
             for (0..n) |r| try out.appendSlice(a, std.mem.sliceAsBytes(e.rowLogits(r)));
             at += n;
+        }
+    } else if (std.mem.eql(u8, args[2], "tree")) {
+        // tree windows of growing widths: the true continuation down one branch, a junk sibling before each of its
+        // rows and a junk grandchild, the true branch kept; its rows' logits must equal step's bit for bit
+        var at: usize = 0;
+        var w: usize = 2;
+        while (at < ids.items.len) : (w = w % e.window_rows + 1) {
+            var toks: [E.most_window]u32 = undefined;
+            var parents: [E.most_window]i32 = undefined;
+            var path: [E.most_window]u32 = undefined;
+            toks[0] = ids.items[at];
+            parents[0] = -1;
+            path[0] = 0;
+            var n: usize = 1;
+            var kept: usize = 1;
+            var last: i32 = 0;
+            var depth: usize = 1;
+            while (n + 2 <= w and at + depth < ids.items.len) : (depth += 1) {
+                toks[n] = (ids.items[at + depth] + 7) % @as(u32, @intCast(e.g.vocab));
+                parents[n] = last;
+                toks[n + 1] = ids.items[at + depth];
+                parents[n + 1] = last;
+                path[kept] = @intCast(n + 1);
+                last = @intCast(n + 1);
+                n += 2;
+                kept += 1;
+            }
+            if (n < w and n >= 3) {
+                toks[n] = 1;
+                parents[n] = 1;
+                n += 1;
+            }
+            try e.forward(&.{.{ .cache = &cache, .rows = n, .parents = parents[0..n] }}, toks[0..n], .logits);
+            for (path[0..kept]) |r| try out.appendSlice(a, std.mem.sliceAsBytes(e.rowLogits(r)));
+            if (n > 1) try cache.keep(e, path[0..kept]);
+            at += kept;
         }
     } else {
         var at: usize = 0;
