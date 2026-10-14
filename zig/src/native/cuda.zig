@@ -7,13 +7,15 @@ const cuda = @import("cuda");
 const api = @import("engine_api");
 const lanes = @import("lanes");
 const nemotron = @import("nemotron");
+const glm = @import("glm_cuda");
+const with_glm = @import("cuda_families").glm;
 const Allocator = std.mem.Allocator;
 const budget = @import("cuda_memory.zig");
 const lane_backend = @import("cuda_bound.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-const registry = .{nemotron.native};
+const registry = if (with_glm) .{ nemotron.native, glm.native } else .{nemotron.native};
 
 /// Nemotron's prompt-cache copies. A file-level value so the store's pointer stays valid for the process.
 const nemotron_snaps: api.prompt_cache.Snapshots.VTable = .{

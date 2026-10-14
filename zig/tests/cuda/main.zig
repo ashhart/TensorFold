@@ -88,6 +88,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     run(gpu, cmd, rest) catch |e| {
         std.debug.print("FAIL {s}: {t}\n", .{ cmd, e });
+        if (@errorReturnTrace()) |t| std.debug.dumpStackTrace(t);
         return 1;
     };
     return 0;
@@ -146,6 +147,21 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
         return carveout_tests.run(gpu, if (rest.len > 1) rest[1] else cuda.carveout.default_card, mib);
     }
     if (std.mem.eql(u8, cmd, "train-pack")) return train_pack.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) try std.fmt.parseInt(usize, rest[2], 10) else 24);
+    if (std.mem.eql(u8, cmd, "glm-kcheck")) return @import("glm_forward.zig").kcheck(gpu, rest);
+    if (std.mem.eql(u8, cmd, "glm-tf")) return @import("glm_forward.zig").teacher(gpu, rest);
+    if (std.mem.eql(u8, cmd, "glm-prof")) return @import("glm_forward.zig").prof(gpu, rest);
+    if (std.mem.eql(u8, cmd, "glm-batch")) return @import("glm_forward.zig").batch(gpu, rest);
+    if (std.mem.eql(u8, cmd, "glm-weights")) return @import("glm_weights.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
+    if (std.mem.eql(u8, cmd, "fn-gen-compiled")) return fn_run.generate(gpu, rest, .compiled);
+    if (std.mem.eql(u8, cmd, "fn-mtp-profile")) return @import("fn_mtp.zig").generateP(gpu, rest, true, true, true);
+    if (std.mem.eql(u8, cmd, "fn-mtp-parallel")) {
+        @import("fn_mtp.zig").parallel = true;
+        return @import("fn_mtp.zig").generate(gpu, rest, true, true);
+    }
+    if (std.mem.eql(u8, cmd, "fn-mtp-host")) return @import("fn_mtp.zig").generate(gpu, rest, true, false);
+    if (std.mem.eql(u8, cmd, "fn-mtp-eager")) return @import("fn_mtp.zig").generate(gpu, rest, false, true);
+    if (std.mem.eql(u8, cmd, "fn-gen-profile")) return fn_run.generate(gpu, rest, .profile);
+    if (std.mem.eql(u8, cmd, "fn-gen-interp")) return fn_run.generate(gpu, rest, .interp);
     std.debug.print("{s}", .{usage});
     return error.UnknownCommand;
 }
