@@ -27,7 +27,13 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 }
 
 /// Linux: `kernel-contract` runs tf-cuda-test's kernel-contract command (kernels from -Dnvcc or -Dfatbins).
-pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile) void {
+pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build.LazyPath) void {
+    const opts = b.addOptions();
+    opts.addOption(bool, "controls", controls != null);
+    runner.root_module.addOptions("contract_options", opts);
+    const empty = b.addWriteFiles().add("contract_controls.fatbin", "");
+    runner.root_module.addAnonymousImport("fatbin_contract_controls", .{ .root_source_file = controls orelse empty });
+    if (controls) |file| b.step("kernel-contract-fatbins", "Install the contract's control fatbin beside the others (fatbin/)").dependOn(&b.addInstallFile(file, "fatbin/contract_controls.fatbin").step);
     const run = b.addRunArtifact(runner);
     run.addArg("kernel-contract");
     b.step("kernel-contract", "Every registered CUDA kernel through the contract's gates on this GPU, each control red").dependOn(&run.step);

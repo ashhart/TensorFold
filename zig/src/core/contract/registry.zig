@@ -3,6 +3,50 @@ const std = @import("std");
 const limits = @import("limits.zig");
 
 const M = limits.MetalLaunch;
+const C = limits.CudaLaunch;
+const U = limits.Usage;
+
+/// A CUDA launch and what nvcc made of it for sm_86, sm_89, sm_120 and sm_121 (limits.sms' order; regs 0: none).
+pub const CudaRecord = struct { launch: C, usage: [4]U };
+
+const none = [4]U{ .{ .regs = 0, .static = 0 }, .{ .regs = 0, .static = 0 }, .{ .regs = 0, .static = 0 }, .{ .regs = 0, .static = 0 } };
+const group_symbol = "_ZN12tf_qmm_group12group_kernelILi64ELi16ELi64ELi1ELi4ELi8ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii";
+const gemv_symbol = "_ZN12tf_lane_gemv11gemv_kernelILi64ELi64ELi8EEEvPK13__nv_bfloat16PKfNS_4PartEiii";
+const prompt_symbol = "_ZN11tf_prompt1613prompt_kernelILi{d}ELi128ELi128ELi2ELi2ELi2ELb0EEEvPK13__nv_bfloat16PKhS5_fPviiiiii";
+
+/// CUDA kernels as launched; tf-cuda-test kernel-contract-limits re-derives the usage records.
+pub const cuda = [_]CudaRecord{
+    .{ .launch = .{ .name = "norms tf_rms_rows_bf16", .symbol = "tf_rms_rows_bf16", .image = "norms", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "norms tf_rms_rows", .symbol = "tf_rms_rows", .image = "norms", .threads = 1024 }, .usage = none },
+    .{ .launch = .{ .name = "router tf_nemo_router", .symbol = "tf_nemo_router", .image = "nemotron_route", .threads = 256, .dynamic = 28800 }, .usage = none },
+    .{ .launch = .{ .name = "router tf_nemo_topk", .symbol = "tf_nemo_topk", .image = "nemotron_route", .threads = 32 }, .usage = none },
+    .{ .launch = .{ .name = "qmm_group cluster of 8", .symbol = group_symbol, .image = "qmm_group", .threads = 128, .dynamic = 35328, .cluster = 8, .min_sm = 90 }, .usage = none },
+    .{ .launch = .{ .name = "qmm_group one CTA a tile", .symbol = group_symbol, .image = "qmm_group", .threads = 128, .dynamic = 35328 }, .usage = none },
+    .{ .launch = .{ .name = "lane_gemv", .symbol = gemv_symbol, .image = "lane_gemv", .threads = 128, .dynamic = 35328 }, .usage = none },
+    .{ .launch = .{ .name = "prompt16 FP4", .symbol = std.fmt.comptimePrint(prompt_symbol, .{0}), .image = "prompt16", .threads = 128, .dynamic = 41984 }, .usage = none },
+    .{ .launch = .{ .name = "prompt16 FP8", .symbol = std.fmt.comptimePrint(prompt_symbol, .{1}), .image = "prompt16", .threads = 128, .dynamic = 49152 }, .usage = none },
+};
+
+/// Gate 5's planted CUDA controls: a launch past its __launch_bounds__, one needing more registers than a block has.
+pub const cuda_controls = [_]CudaRecord{
+    .{ .launch = .{ .name = "control: past its bounds", .symbol = "tf_ctl_bounded", .image = "contract_controls", .threads = 512 }, .usage = none },
+    .{ .launch = .{ .name = "control: heavy at 1,024 threads", .symbol = "tf_ctl_heavy", .image = "contract_controls", .threads = 1024 }, .usage = none },
+};
+
+/// Every CUDA record's problems on every SM we build for, printed; returns how many (a missing record is one).
+pub fn checkCuda(a: std.mem.Allocator, list: []const CudaRecord, quiet: bool) !usize {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    var n: usize = 0;
+    for (list) |r| for (limits.sms, r.usage) |t, u| {
+        if (u.regs == 0) {
+            try out.print(a, "{s} on sm_{d}: no compiled usage recorded\n", .{ r.launch.name, t.sm });
+            n += 1;
+        } else n += try limits.cuda(r.launch, u, t, &out, a);
+    };
+    if (!quiet and out.items.len > 0) std.debug.print("{s}", .{out.items});
+    return n;
+}
 
 /// Metal pipelines as the engine launches them; tg_memory is the most any chip reflects, m1 and m2 the compiled limits.
 pub const metal = [_]M{
@@ -45,8 +89,10 @@ pub fn checkMetal(a: std.mem.Allocator, list: []const M, quiet: bool) !usize {
     return n;
 }
 
-test "the registered Metal launches fit every Apple family, and each planted control breaks one" {
+test "the registered launches fit every Apple family and every SM, and each planted control breaks one" {
     const a = std.testing.allocator;
     try std.testing.expectEqual(@as(usize, 0), try checkMetal(a, &metal, false));
     for (metal_controls) |l| try std.testing.expect(try checkMetal(a, &.{l}, true) > 0);
+    try std.testing.expectEqual(@as(usize, 0), try checkCuda(a, &cuda, false));
+    for (cuda_controls) |r| try std.testing.expect(try checkCuda(a, &.{r}, true) > 0);
 }
