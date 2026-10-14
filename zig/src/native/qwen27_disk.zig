@@ -100,9 +100,9 @@ pub fn identity(h: *Host, io: std.Io, a: Allocator, dir: []const u8, drafter: ?[
     return .{ .id = w.final(), .rate = p.rate };
 }
 
-/// A fixed prompt's state through slot 0 (a whole chunk, a decoded span, a short tail), hashed, and its prompt rate.
+/// A fixed prompt's state through slot 0 (whole 128-row chunks, a decoded span, a short tail), hashed, and its rate.
 fn probe(h: *Host, io: std.Io) !struct { hash: u64, rate: f64 } {
-    var toks: [4096 + 40 + 7]u32 = undefined;
+    var toks: [1024 + 40 + 7]u32 = undefined;
     for (&toks, 0..) |*t, i| t.* = @intCast(1000 + i * 7919 % 50000);
     const Hook = struct {
         h: *Host,
@@ -118,8 +118,8 @@ fn probe(h: *Host, io: std.Io) !struct { hash: u64, rate: f64 } {
         }
     };
     var hook: Hook = .{ .h = h };
-    const marks = [_]u32{4136};
-    var s = try lanes.Stream.init(h.gpa, .{ .id = "probe", .prompt = &toks, .max_new = 1, .drafts = h.draft != null, .decode_spans = &.{.{ 4100, 4120 }}, .reuse = .{ .marks = &marks, .hook = .{ .ptr = &hook, .at = Hook.at } } });
+    const marks = [_]u32{1064};
+    var s = try lanes.Stream.init(h.gpa, .{ .id = "probe", .prompt = &toks, .max_new = 1, .drafts = h.draft != null, .decode_spans = &.{.{ 1028, 1048 }}, .reuse = .{ .marks = &marks, .hook = .{ .ptr = &hook, .at = Hook.at } } });
     defer s.deinit(h.gpa);
     const be = h.back.backend();
     const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
