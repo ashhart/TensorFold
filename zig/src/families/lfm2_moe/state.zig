@@ -10,6 +10,8 @@ pub const batch_rows = 32;
 /// Key chunks a row's attention splits into at most (the kernel's CHUNKS), and keys a chunk (its PER).
 pub const chunks = 32;
 pub const chunk_keys = 4096;
+/// Positions a stream's attention holds: the partials and the merge have room for `chunks` chunks, no more.
+pub const max_context = chunks * chunk_keys;
 /// Sub-spans a chunk, one a threadgroup for rows of up to `split_rows` (the kernel's SUBS), folded by the merge.
 pub const subs = 8;
 pub const split_rows = 8;
@@ -169,3 +171,21 @@ pub const Scratch = struct {
         self.memory.deinit();
     }
 };
+
+/// The served window: --context, else the checkpoint's, never past `max_context`; null when --context is outside it.
+pub fn window(checkpoint: usize, requested: ?i64) ?usize {
+    const most = @min(checkpoint, max_context);
+    const w = requested orelse return most;
+    return if (w >= 1 and w <= most) @as(usize, @intCast(w)) else null;
+}
+
+test "the served window stays inside the attention's 131,072 positions" {
+    try std.testing.expectEqual(@as(usize, 131072), max_context);
+    try std.testing.expectEqual(@as(?usize, 131072), window(131072, null));
+    try std.testing.expectEqual(@as(?usize, 131072), window(131074, null));
+    try std.testing.expectEqual(@as(?usize, 70000), window(131074, 70000));
+    try std.testing.expectEqual(@as(?usize, 131072), window(262144, 131072));
+    try std.testing.expectEqual(@as(?usize, null), window(131074, 131073));
+    try std.testing.expectEqual(@as(?usize, null), window(8192, 8193));
+    try std.testing.expectEqual(@as(?usize, null), window(131072, 0));
+}

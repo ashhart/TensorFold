@@ -60,6 +60,7 @@ test {
     _ = @import("families/qwen3_5/backend.zig");
     _ = @import("families/lfm2_moe/config.zig");
     _ = @import("families/lfm2_moe/backend.zig");
+    _ = @import("families/lfm2_moe/state.zig");
 }
 
 pub const lane_projection = @import("core/lane_projection.zig");

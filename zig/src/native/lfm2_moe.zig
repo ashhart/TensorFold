@@ -30,26 +30,36 @@ const Host = struct {
     }
 };
 
+const cannot = "the native LFM2 engine cannot load this checkpoint ({s})";
+
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
+    const config = q.config.Config.read(gpa, io, o.dir) catch |err| {
+        problem.* = try std.fmt.allocPrint(a, cannot, .{@errorName(err)});
+        return null;
+    };
+    const most = @min(config.context, q.state.max_context);
+    const window = q.state.window(config.context, o.context) orelse {
+        const outside = "--context {d} is outside LFM2.5-24B-A2B's 1 to {d} tokens";
+        problem.* = try std.fmt.allocPrint(a, outside, .{ o.context.?, most });
+        return null;
+    };
+    if (o.context == null and config.context > most) std.log.info(
+        "lfm2: serving {d} of the checkpoint's {d} positions, all its attention holds",
+        .{ most, config.context },
+    );
     const model = q.Model.load(gpa, io, o.dir) catch |err| {
-        problem.* = try std.fmt.allocPrint(a, "the native LFM2 engine cannot load this checkpoint ({s})", .{@errorName(err)});
+        problem.* = try std.fmt.allocPrint(a, cannot, .{@errorName(err)});
         return null;
     };
     errdefer model.deinit();
-    const window: i64 = o.context orelse @intCast(model.config.context);
-    if (window < 1 or window > model.config.context) {
-        model.deinit();
-        problem.* = "--context must fit the LFM2 checkpoint's positive context window";
-        return null;
-    }
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.gpa = gpa;
     h.model = model;
     const chunk = 2048;
-    h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .chunk = chunk, .streams = @max(o.lanes, 2) });
+    h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = window, .chunk = chunk, .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
     h.config = try lanes.Config.init(gpa, h.metal.facts(), q.state.window_rows, q.state.window_rows - 1);
     errdefer h.config.deinit(gpa);
