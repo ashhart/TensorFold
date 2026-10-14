@@ -1,16 +1,10 @@
-// Qwen3.5's hybrid text models on CUDA (the 2B and Qwen3.8-27B): the Metal engine's kernels (zig/kernels/metal/qwen3_5)
-// with the same bf16 rounding points, their widths from the model's Geo. Rows of one forward belong to segments (one
-// stream's window each); a segment's state lives in its stream's blocks.
+// Qwen3.5's hybrids (2B, 27B) on CUDA: the Metal kernels' arithmetic and rounding; a segment is one stream's window.
 
 #include "qwen35.cuh"
 
 using namespace tf_q35;
 
-// The per-forward counts a captured forward reads from the device, so one graph serves every shape: P[0] attention
-// chunks, P[1] their width, P[2] rows, P[3] windows, P[4] whether the rows are recorded for keep (a verify window:
-// its state stays as it was until the kept path is applied). A null P means the launch's grid is exact.
-// A window's rows may form a tree: rowpar names each forward row's parent forward row (-1: the window's first row,
-// after the stream's cache), rowanc each row's ancestors and itself as bits over its window's rows.
+// P (device counts, one graph for every shape): chunks, width, rows, windows, recorded; rowpar/rowanc give the tree.
 __device__ __forceinline__ bool past_rows(const int* P, int m) { return P != nullptr && m >= P[2]; }
 __device__ __forceinline__ bool past_windows(const int* P, int s) { return P != nullptr && s >= P[3]; }
 __device__ __forceinline__ bool recorded(const int* P) { return P != nullptr && P[4] != 0; }
@@ -30,8 +24,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_embed(const int* __rest
     }
 }
 
-// h = bf16(h + r) (r may be null), x = bf16(w * (h * inv)), D wide (a multiple of 256, at most 8192). One 256-thread
-// block a row; each thread's elements in index order, warps summed in order.
+// h = bf16(h + r) (r may be null), x = bf16(w * (h * inv)); D a multiple of 256 up to 8192; a 256-thread block a row.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_norm(__nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ R,
                                                                const __nv_bfloat16* __restrict__ W, __nv_bfloat16* __restrict__ X, float eps, int D,
                                                                const int* __restrict__ P) {
@@ -82,9 +75,7 @@ extern "C" __global__ void tf_q35_sums(const __nv_bfloat16* __restrict__ X, floa
     }
 }
 
-// The causal convolution, silu, q/k normalization and the decay and write strength of each row's linear heads.
-// Grid (1, 2 * nk + nv, rows), a warp a (row, head): heads [0, nk) are q, [nk, 2nk) k, then nv of v. A row's taps
-// are its parents (then the stream's tail), so a tree's rows each see their own branch.
+// Conv, silu, q/k norms, the linear heads' decay and write: a warp a (row, head) over q, k, v; taps from the parents.
 extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_pre(Geo geo, const __nv_bfloat16* __restrict__ QKV, const Seg* __restrict__ segs,
                                                                   const int* __restrict__ rowseg, const int* __restrict__ rowpar, int layer,
                                                                   const __nv_bfloat16* __restrict__ CW,
@@ -144,9 +135,7 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_pre(Geo geo, const _
     }
 }
 
-// Each segment's convolution tail: a recorded window logs the tail after each of its rows (the last TAPS - 1 tokens of
-// the row's branch) for keep, and leaves the stream's own; a prompt chunk or one-row window updates the stream's in
-// place. A thread a (segment, channel).
+// A segment's conv tail: a recorded window logs each row's for keep and leaves the stream's; others update it in place.
 extern "C" __global__ void tf_q35_conv_commit(Geo geo, const __nv_bfloat16* __restrict__ QKV, const Seg* __restrict__ segs,
                                                 const int* __restrict__ rowpar, int layer, const int* __restrict__ P) {
     const int C = geo.conv();
@@ -171,12 +160,7 @@ extern "C" __global__ void tf_q35_conv_commit(Geo geo, const __nv_bfloat16* __re
     }
 }
 
-// The gated delta rule over each segment's rows, each row's state its parent's updated: a chain carries the state in
-// registers, a branch rebuilds its parent's from the stream's recurrence and the logged updates of the ancestors.
-// A recorded window logs each row's (decay, write, key) and leaves the recurrence as it was (keep applies the kept
-// path, qwen35_keep.cu); a prompt chunk or one-row window updates it in place. Value head hv reads key head
-// hv / (nv / nk). Grid (1, DK / 4, nv * segments), block (32, 4): a warp a (value head, value row), its 32 lanes
-// over the key width.
+// Gated delta rule, each row's state its parent's: a chain keeps it in registers, a branch rebuilds it from the log.
 extern "C" __global__ void __launch_bounds__(128) tf_q35_gdn_chain(Geo geo, const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ k,
                                                                      const __nv_bfloat16* __restrict__ v, const float* __restrict__ g,
                                                                      const __nv_bfloat16* __restrict__ beta, const Seg* __restrict__ segs,
@@ -201,8 +185,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35_gdn_chain(Geo geo, cons
         const int row = sg.row0 + r;
         const int parent = rowpar[row];
         if (parent != prev) {
-            // a branch: its parent's state from the stream's and the ancestors' updates, oldest first (their keys
-            // and decays from this forward's rows, their writes from the log, which this thread wrote itself)
+            // a branch: its parent's state from the stream's and the ancestors' logged updates, oldest first
             int anc[MAXW];
             int n = 0;
             for (int a = parent; a >= 0; a = rowpar[a]) anc[n++] = a;
@@ -286,8 +269,7 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_post(Geo geo, const 
     }
 }
 
-// Per-head RMSNorm of attention rows: X's head h of row m at m * stride + h * hstride, out packed (rows, heads, HD).
-// Grid (rows * heads), 64 threads of 4 values.
+// Per-head RMSNorm of attention rows, out packed (rows, heads, HD); grid (rows * heads), 64 threads of 4 values.
 extern "C" __global__ void __launch_bounds__(64) tf_q35_head_norm(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
                                                                     __nv_bfloat16* __restrict__ OUT, int heads, int stride, int hstride, float eps,
                                                                     const int* __restrict__ P) {
@@ -325,8 +307,7 @@ __device__ __forceinline__ __nv_bfloat16 rotate(const __nv_bfloat16* x, int d, i
     return __float2bfloat16_rn(d < 32 ? a * cs - b * sn : b * cs + a * sn);
 }
 
-// Queries in place at their positions (the cache length plus the row's depth in its window); keys rotated and values
-// copied into their segment's cache at the row's own slot (the cache length plus its row). Grid (rows), HD threads.
+// Queries rotated in place, keys rotated and values copied into the row's cache slot; grid (rows), HD threads.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_rope(Geo geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
                                                                 const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
                                                                 const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc, int layer,
@@ -351,10 +332,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_rope(Geo geo, __nv_bflo
     }
 }
 
-// Causal attention over a segment's cache, P[1] keys a block over P[0] chunks (read from the device, so a captured
-// forward replays as caches grow): grid (chunks at most, kvh, rows), block qh / kvh warps, a warp a query head of
-// the kv head's group. A row sees the cache before its window and its window's ancestors and itself (rowanc).
-// Partials (max, sum, out) at slot (row, qh, chunk); empty chunks leave sum 0.
+// Causal attention over the cache in P[0] chunks of P[1] keys, a warp a query head; partials by (row, head, chunk).
 extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
                                                  const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc, int layer,
                                                  const int* __restrict__ P, float scale,
@@ -454,8 +432,7 @@ extern "C" __global__ void tf_q35_attn_gate(Geo geo, const __nv_bfloat16* __rest
     OUT[i] = __float2bfloat16_rn(bf(Y[i]) * s);
 }
 
-// A tapped layer's residual stream, bf16(h + r) as the next norm rounds it, into each row's segment's tap ring at
-// the row's position: plane `tap` of the row's taps. Grid (rows), 256 threads.
+// A tapped layer's residual bf16(h + r) into the segment's tap ring at the row's position; a 256-thread block a row.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_tap(const __nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ R,
                                                               const Seg* __restrict__ segs, const int* __restrict__ rowseg, int tap, int D,
                                                               const int* __restrict__ P) {

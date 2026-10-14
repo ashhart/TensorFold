@@ -1,6 +1,4 @@
-//! The DFlash2 drafter's checkpoint onto the device: its bf16 projections quantized to affine-4 (group 64) on the
-//! host and packed into qlinear's tiles through the target engine's staging buffer, its norms and base kernels as
-//! they are, its codebooks kept on the host for the selector.
+//! The DFlash2 drafter's weights onto the device: projections quantized to affine-4 on the host, codebooks kept there.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -82,8 +80,7 @@ fn toBf16(x: f32) u16 {
     return @intCast((u +% rounding) >> 16);
 }
 
-/// MLX affine-4, group 64, over bf16 rows: a group's scale is bf16((max - min) / 15) and bias bf16(min); each weight's
-/// nibble is round((w - bias) / scale) clamped to [0, 15], eight to a word, the first in the low bits.
+/// MLX affine-4, group 64: scale bf16((max - min) / 15), bias bf16(min), nibbles round((w - bias) / scale), low first.
 fn quantize(gpa: std.mem.Allocator, w: []align(1) const u16, n: usize, k: usize) !struct { words: []u32, scales: []u16, biases: []u16 } {
     const groups = k / 64;
     const words = try gpa.alloc(u32, n * k / 8);

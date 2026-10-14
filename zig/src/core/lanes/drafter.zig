@@ -17,12 +17,10 @@ pub const Facts = struct {
     lane_costs: []const Cost = &.{}, // the same for the lane planner (Model.lane_costs)
 };
 
-/// Target rows [start, start + features.rows) and the token after each; rows at or past `start` replace what was held.
-/// `rows`, when given, picks the features' rows to absorb (a tree's kept path), in order; null: all of them.
+/// Target rows [start, start + features.rows) and the token after each; `rows`, when given, picks which to absorb.
 pub const Absorb = struct { stream: *Stream, features: Features, start: u64, follow: []const u32, rows: ?[]const u32 = null };
 
-/// Draft `depth` tokens after `pending`, the first at `position`; asked only once row `position - 2` was absorbed.
-/// With `lanes`, a tree instead: lane i's token is the rank-r choice after its parent (depth unused).
+/// `depth` drafts after `pending` at `position`; with `lanes` a tree, lane i the rank-r choice after its parent.
 pub const Hold = struct { stream: *Stream, pending: u32, position: u64, depth: u32, lanes: ?*const Shape = null };
 
 pub const Drafter = struct {

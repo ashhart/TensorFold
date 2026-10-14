@@ -1,6 +1,4 @@
-//! One stream's state on the CUDA engine: its recurrences and convolution tails, keys and values, a drafter's tap
-//! ring, and the log of its newest verify window's rows, from which `keep` lands any path of that window (a prefix
-//! of a chain, or a branch of a tree) without the forward having touched the stream's state.
+//! A stream's state on CUDA: recurrences, conv tails, keys and values, the drafter's tap ring, the last window's log.
 const std = @import("std");
 const cuda = @import("cuda");
 const geometry = @import("cuda_geometry.zig");
@@ -72,9 +70,7 @@ pub const Cache = struct {
         return .{ .rec = self.state.ptr, .conv = self.state.ptr + g.deltas() * g.recBytes(), .kv = self.kv.ptr, .tap = if (self.tap) |t| t.ptr else 0, .log = self.log.ptr, .cap = @intCast(self.cap), .len = @intCast(len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = tap_rows, .taps = @intCast(e.n_taps) };
     }
 
-    /// Keeps `path` (the window's rows, the first 0, ascending) of the newest window: the recurrences and tails as a
-    /// chain of those rows would have left them, a tree's kept keys moved down to the slots after the cache, the
-    /// length at the path's end. Queued on the engine's stream; nothing waits.
+    /// Keeps `path` (window rows, ascending from 0): the state as that chain would leave it, a tree's keys moved down.
     pub fn keep(self: *Cache, e: *Engine, path: []const u32) !void {
         const last = self.last orelse return error.NothingToKeep;
         if (path.len == 0 or path.len > last.rows or path[0] != 0) return error.NothingToKeep;

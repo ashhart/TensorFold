@@ -1,5 +1,4 @@
-//! The process, environment and clock part of the libc surface on Windows (win_c.zig re-exports these): the process
-//! id, environment writes over the UCRT, and nanosleep and clock_gettime over the kernel's timers and counters.
+//! Process, environment and clock calls of the Windows libc surface, re-exported by win_c.zig: UCRT and kernel timers.
 
 const std = @import("std");
 const c = @import("win_c.zig");

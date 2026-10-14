@@ -145,8 +145,7 @@ pub fn linkIntoSnapshot(a: Allocator, io: std.Io, snapshot_dir: []const u8, path
     std.Io.Dir.cwd().deleteFile(io, link_path) catch {};
     const target = try std.fs.path.join(a, &.{ "..", "..", "blobs", blob_name });
     std.Io.Dir.cwd().symLink(io, target, link_path, .{}) catch |err| {
-        // Windows grants symlinks only with Developer Mode or elevation (and refuses some): a hard link to the blob,
-        // which costs no space (huggingface_hub copies instead); learning refuses linked shards either way
+        // Windows grants symlinks only with Developer Mode or elevation: a hard link to the blob costs no space
         if (@import("builtin").os.tag != .windows) {
             std.log.err("cannot link {s} to its blob: {t}", .{ link_path, err });
             return error.SymLinkFailed;

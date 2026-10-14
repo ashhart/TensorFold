@@ -1,5 +1,4 @@
-//! The operating system as TensorFold calls it: `c` is libc's surface (std.c on POSIX, win_c.zig on Windows) and
-//! `DynLib` opens shared libraries (std.DynLib on POSIX, LoadLibraryW on Windows). Every module imports this as `sys`.
+//! The OS as TensorFold calls it, imported as `sys`: `c` is std.c or win_c.zig, `DynLib` is std.DynLib or LoadLibraryW.
 
 const std = @import("std");
 const builtin = @import("builtin");

@@ -1,7 +1,4 @@
-//! The DFlash2 drafter on CUDA behind the lane core's Drafter contract (core/lanes/drafter.zig): it absorbs the
-//! target's tapped rows into a context ring a stream, then drafts a block of 7 tokens after the pending one, the
-//! target's own embedding and head at its ends and a codebook selector scoring the top 16 a row under each parent:
-//! one path (a chain), or the lanes of the round loop's tree (each lane its parent's rank-r choice).
+//! The DFlash2 drafter on CUDA behind core/lanes/drafter.zig: a tap ring a stream, 7 drafts as a chain or a tree.
 const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
@@ -119,8 +116,7 @@ const Fns = struct { gather_taps: cuda.Function, gather_rows: cuda.Function, dyn
 /// qwen35_draft.cu's TapRows.
 const TapRows = extern struct { n: c_int, rows: [engine.most_window]c_int };
 
-/// A stream's context: its layers' key and value rings over positions [begin, end), and the drafts it holds (a
-/// chain, or a tree's lanes in the shape's order).
+/// A stream's context: its layers' key and value rings over [begin, end), and the drafts it holds (a chain or tree).
 const Ctx = struct {
     ring: DeviceBuffer,
     begin: u64 = 0,
@@ -169,8 +165,7 @@ pub const Draft = struct {
     ids: u64, // u32 the block's ids
     staged: cuda.HostBuffer, // pinned: the ids up, the words and projected rows down
     streams: std.AutoHashMapUnmanaged(*Stream, *Ctx) = .empty,
-    /// Contexts between streams: allocated and run through once (`reserve`), since the driver stalls a buffer's
-    /// first kernel for seconds.
+    /// Contexts between streams, allocated and run once (`reserve`), as the driver stalls a buffer's first kernel.
     pool: std.ArrayList(*Ctx) = .empty,
     /// One level of a hold (a hold drafts every level at once; timed at load, over the block's levels).
     step_ms: f64 = 1.0,
@@ -282,8 +277,7 @@ pub const Draft = struct {
         d.gpa.destroy(ctx);
     }
 
-    /// A new context, its ring touched by the kernels once: a row absorbed from the first tap ring at hand, then
-    /// a block drafted over it, so no request pays the driver's stall.
+    /// A new context, its ring touched once (an absorb, then a draft), so no request pays the driver's stall.
     fn create(d: *Draft) !*Ctx {
         const ctx = try d.gpa.create(Ctx);
         errdefer d.gpa.destroy(ctx);
@@ -331,9 +325,7 @@ pub const Draft = struct {
         try d.e.run(d.fns.norm_rope, .{ rows * heads, 1, 1 }, .{ 32, 1, 1 }, .{ x, w, out, @as(c_int, @intCast(heads)), @as(c_int, @intCast(heads * d.c.head_dim)), @as(c_longlong, @intCast(pos0)), d.c.eps, d.c.theta });
     }
 
-    /// Target rows at positions [start, start + n) from the stream's tap ring into its context (replacing what was
-    /// held at or past `start`); rows older than the window are skipped. With `rows`, the ring's rows start + rows[i]
-    /// (a tree's kept path, which the target keeps at the positions start + i) instead, n of them.
+    /// Target rows [start, start + n) from the tap ring into the context; with `rows`, ring rows start + rows[i].
     fn absorb(d: *Draft, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, rows_: ?[]const u32) !void {
         const c = d.c;
         var start = start_;
@@ -370,8 +362,7 @@ pub const Draft = struct {
         if (ctx.end > c.window and ctx.begin < ctx.end - c.window) ctx.begin = ctx.end - c.window;
     }
 
-    /// The block [pending, mask x 7] at positions pos0.. over the stream's context: `depth` drafts held as a chain,
-    /// or the `lanes` tree's tokens.
+    /// The block [pending, mask x 7] at pos0.. over the context: `depth` drafts as a chain, or the `lanes` tree.
     fn hold(d: *Draft, ctx: *Ctx, pending: u32, pos0: u64, depth: usize, lanes_: ?*const lanes.shape.Shape) !void {
         const c = d.c;
         const e = d.e;
@@ -423,8 +414,7 @@ pub const Draft = struct {
         }
     }
 
-    /// Row `r`'s candidate of `rank` after the token `pred`: by unary logit + predecessor . projected . successor,
-    /// ties to the earlier candidate (the row's top-k order).
+    /// Row `r`'s `rank`th candidate after `pred`: unary logit + pred . projected . successor, ties to the earlier one.
     fn choice(d: *const Draft, r: usize, pred: u32, rank: usize) u32 {
         const c = d.c;
         const w = std.mem.bytesAsSlice(u32, d.staged.bytes[words_at..][r * lp_words * 4 ..][0 .. lp_words * 4]);

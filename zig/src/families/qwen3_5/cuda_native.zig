@@ -1,6 +1,4 @@
-//! The Qwen3.5 hybrids' CUDA lane backend (the 2B, Qwen3.8-27B) behind the native family interface (native/cuda.zig's
-//! registry): windows of up to 16 rows (the lane core's copies), every stream's window in one forward, prompts in
-//! chunks, draws on the device.
+//! The Qwen3.5 hybrids' CUDA lane backend (native/cuda.zig's registry): 16-row windows, every stream in one forward.
 const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
@@ -30,8 +28,7 @@ pub const Loaded = struct {
     free_streams: u32 = 0,
     ctx: *anyopaque,
     deinit: *const fn (*anyopaque) void,
-    /// Called with the admitted stream count: that many caches allocated and touched now, since the driver commits
-    /// memory on first touch (seconds for a wide model's keys), and a request should not pay it.
+    /// Called with the admitted stream count: that many caches allocated and touched now, as memory commits on touch.
     reserve: *const fn (*anyopaque, u32) anyerror!void,
 };
 
@@ -66,8 +63,7 @@ fn reserve(p: *anyopaque, streams: u32) anyerror!void {
         try cache.reset(l.e);
         l.pool.appendAssumeCapacity(cache);
     }
-    // the shared rounds' shapes, a row of each of 1 to `streams` streams, captured now: a new graph's first run
-    // pays the driver's stall too (about a second on a wide model)
+    // the shared rounds' shapes, a row of 1 to `streams` streams, captured now: a new graph's first run stalls too
     var parts: [E.max_segs]E.Part = undefined;
     var ids: [E.max_segs]u32 = @splat(0);
     var picks: [E.max_segs]E.Draw = undefined;
@@ -85,8 +81,7 @@ fn reserve(p: *anyopaque, streams: u32) anyerror!void {
     };
 }
 
-/// The DFlash2 drafter in `dir` over the loaded engine `p`, its weights in 4 bits (the only width served). The
-/// target's windows of 1 to window_rows rows are timed here (with the drafter's taps on) for the round loop's prices.
+/// The DFlash2 drafter in `dir` over engine `p`, 4-bit only, and the target's windows timed for the round loop.
 pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void } {
     if (bits != 4) return error.DrafterBitsUnsupported;
     const l: *Lanes = @ptrCast(@alignCast(p));
@@ -169,8 +164,7 @@ const Lanes = struct {
         self.pool.append(self.gpa, cache) catch self.drop(cache);
     }
 
-    /// Each window width's forward, timed on a cache of its own (its third run: the shape's graph captured and the
-    /// driver's stall behind it, the previous window's keep in front as in a round), into the drafter's facts.
+    /// Each width's forward timed on its own cache, on its third run: graph captured, stall paid, a keep in front.
     fn timeWindows(self: *Lanes, d: *Draft) !void {
         var cache = try E.Cache.init(self.gpa, self.e, 64);
         defer cache.deinit(self.gpa);
@@ -249,8 +243,7 @@ const Lanes = struct {
         return @intCast(handle);
     }
 
-    /// Each window (a stream's pending token and drafts, a chain or a tree) checked, then as many as fit in each
-    /// forward. A tree's rows are keyed at the cache length plus their depth, as the round loop positions them.
+    /// Each window (a pending token and drafts) checked, then as many as fit a forward; a tree's rows keyed by depth.
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) !void {
         const self = cast(ptr);
         const t0 = std.Io.Clock.awake.now(self.io);
@@ -326,9 +319,7 @@ const Lanes = struct {
         try self.e.setTaps(taps);
     }
 
-    /// Rows [start, start + count) of a stream's tap ring: `offset` carries the first row's position, the drafter
-    /// (cuda_draft.zig) reads slot position % tap_rows, so a request may span the ring's end. The newest window's
-    /// rows stay readable after a keep (a tree's kept path reads them by row) until the next forward.
+    /// Rows [start, start + count) of a stream's tap ring at slot position % tap_rows; a request may span its end.
     fn featuresFn(ptr: *anyopaque, stream: *lanes.Stream, taps: []const u32, start: u64, count: u32) !be.Features {
         const self = cast(ptr);
         if (taps.len != self.e.n_taps) return error.TapsMismatch;

@@ -1,13 +1,10 @@
-// Keeping a verified window's path on CUDA (zig/src/families/qwen3_5/cuda_cache.zig): the stream's recurrences take
-// the path's logged updates in order, its convolution tails the path's last row's, and a tree's kept keys move down
-// to the slots after the cache. The rows of a window were recorded by qwen35.cu's kernels (Seg.log).
+// Keeping a verified window's path (cuda_cache.zig): the recurrences take its logged updates and its keys move down.
 
 #include "qwen35.cuh"
 
 using namespace tf_q35;
 
-// Each linear layer's recurrence through the path's rows' (decay, key, write), as the forward's chain would have
-// left it. Grid (1, DK / 4, nv * nl), block (32, 4): a warp a (layer, value head, value row), its lanes over the key.
+// Each linear layer's recurrence through the path's (decay, key, write), as the forward's chain would have left it.
 extern "C" __global__ void __launch_bounds__(128) tf_q35k_apply(Geo geo, Seg sg, Path path) {
     const int NK = geo.nk, NV = geo.nv;
     const int layer = blockIdx.z / NV, hv = blockIdx.z % NV;
@@ -43,9 +40,7 @@ extern "C" __global__ void tf_q35k_conv(Geo geo, Seg sg, int last) {
     CS[i] = log_row(geo, sg, layer, last).conv[i];
 }
 
-// The path's rows' keys and values (slot cache length + row) down to the slots cache length + 0, 1, ... in path
-// order: row j of the path is at least j, so a move never lands on a slot a later move still reads. One block a
-// (attention layer, kv head): grid (attention layers, kvh), HD threads, a barrier between moves.
+// The path's keys and values move down to the slots after the cache; row j lands at or below j, never on one unread.
 extern "C" __global__ void __launch_bounds__(256) tf_q35k_compact(Geo geo, Seg sg, Path path) {
     const int KVH = geo.kvh;
     const int layer = blockIdx.x, h = blockIdx.y;

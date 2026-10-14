@@ -1,8 +1,4 @@
-//! `tf-qwen35-cuda <model dir> <step|window|tree|prompt> <ids> <out>`: a Qwen3.5 hybrid's CUDA forward over
-//! comma-separated token ids: one token a forward (step: every position's logits), windows of growing widths
-//! (window: the same rows, which must equal step's), tree windows with junk branches kept to the true one (tree:
-//! the same), or the ids as one prompt (prompt: the last position's), as little-endian bf16 rows into <out> for a
-//! reference to compare. Step mode also prints the decode speed.
+//! `tf-qwen35-cuda <model dir> <step|window|tree|prompt> <ids> <out>`: the ids' logits as bf16 rows for a reference.
 const std = @import("std");
 const cuda = @import("cuda");
 const q = @import("qwen35");
@@ -51,8 +47,7 @@ pub fn main(init: std.process.Init) !u8 {
             at += n;
         }
     } else if (std.mem.eql(u8, args[2], "tree")) {
-        // tree windows of growing widths: the true continuation down one branch, a junk sibling before each of its
-        // rows and a junk grandchild, the true branch kept; its rows' logits must equal step's bit for bit
+        // tree windows of growing widths, junk branches beside the kept true one, whose logits must equal step's bits
         var at: usize = 0;
         var w: usize = 2;
         while (at < ids.items.len) : (w = w % e.window_rows + 1) {

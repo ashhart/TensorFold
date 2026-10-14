@@ -1,5 +1,4 @@
-//! The checkpoint's weights onto the device: each affine-4 projection staged as stored and packed into qlinear's
-//! tiles, the vectors as they are, all from the engine's one arena (cuda_engine.zig).
+//! The checkpoint's weights onto the device: affine-4 projections packed as qlinear tiles, out of the engine's arena.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
