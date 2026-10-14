@@ -107,11 +107,37 @@ fn relative(got: []const f32, want: []const f64) f64 {
 }
 
 /// One call of `length` rows from row `from`, state in place; q, k, v, gate and beta are offset to that row.
-fn run(t: *Rig, sh: Shape, q: DeviceBuffer, k: DeviceBuffer, v: DeviceBuffer, gate: DeviceBuffer, beta: DeviceBuffer, state: DeviceBuffer, y: DeviceBuffer, from: usize, length: usize) !void {
+fn run(
+    t: *Rig,
+    sh: Shape,
+    q: DeviceBuffer,
+    k: DeviceBuffer,
+    v: DeviceBuffer,
+    gate: DeviceBuffer,
+    beta: DeviceBuffer,
+    state: DeviceBuffer,
+    y: DeviceBuffer,
+    from: usize,
+    length: usize,
+) !void {
     const qk = from * sh.key_heads * d * 4;
     const vy = from * sh.value_heads * d * 4;
     const gb = from * sh.value_heads * 4;
-    try t.ops(&t.on).gatedDelta(rig.at(q) + qk, rig.at(k) + qk, rig.at(v) + vy, rig.at(gate) + gb, rig.at(beta) + gb, rig.at(state), rig.at(y) + vy, length, sh.key_heads, sh.value_heads, d, d, null);
+    try t.ops(&t.on).gatedDelta(
+        rig.at(q) + qk,
+        rig.at(k) + qk,
+        rig.at(v) + vy,
+        rig.at(gate) + gb,
+        rig.at(beta) + gb,
+        rig.at(state),
+        rig.at(y) + vy,
+        length,
+        sh.key_heads,
+        sh.value_heads,
+        d,
+        d,
+        null,
+    );
 }
 
 test "the DeltaNet stays within 5e-3 of the float64 recurrence at four lengths" {

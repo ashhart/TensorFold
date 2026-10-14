@@ -40,7 +40,6 @@ pub const ConvArgs = conv.ConvArgs;
 pub const PlanArgs = plan.PlanArgs;
 pub const PlanRef = plan.PlanRef;
 pub const PlanKeep = plan.Keep;
-pub const gdn_chunk = recurrence.gdn_chunk;
 
 pub const Launcher = struct {
     r: *const runtime.Runtime,

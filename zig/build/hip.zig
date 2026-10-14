@@ -76,7 +76,10 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
 }
 
 /// The model-free kernels' source groups, in zig/src/hip/kernels.zig's Group order.
-const groups = [_][]const u8{ "ops/ops.hip", "ops/act.hip", "attention/attention.hip", "recurrence/gated_delta.hip", "attention/prefill.hip", "decode/decode.hip", "decode/plan.hip" };
+const groups = [_][]const u8{
+    "ops/ops.hip",           "ops/act.hip",       "attention/attention.hip", "recurrence/gated_delta.hip",
+    "attention/prefill.hip", "decode/decode.hip", "decode/plan.hip",
+};
 
 /// What the group sources include, so an edit to one rebuilds them.
 const headers = [_][]const u8{ "attention/attention_fa.hip", "decode/pages.hpp", "decode/plan.hpp", "ops/attention.hpp", "ops/common.hpp", "ops/draw.hpp", "ops/elementwise.hpp", "ops/linear.hpp", "ops/moe.hpp", "ops/norms.hpp", "ops/rope.hpp" };
