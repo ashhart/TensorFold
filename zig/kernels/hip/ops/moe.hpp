@@ -233,4 +233,3 @@ extern "C" __global__ void __launch_bounds__(256) tf_router_rows_bf16(const void
                                                                       int r, int d, int e) {
     router_rows<2>(x, rows, logits, r, d, e);
 }
-
