@@ -5,6 +5,9 @@ const rows = pc.rows;
 
 pub const Op = enum { where, load, forget };
 
+/// Which of a request's keys the host's cache lookups pass: its chunk starts, its decoded spans.
+pub const Keys = struct { starts: bool = true, spans: bool = true };
+
 /// One question: a rendered conversation (its tokens, chunk starts and decoded spans), and the answer once `done`.
 pub const Ask = struct {
     op: Op,
@@ -18,17 +21,19 @@ pub const Ask = struct {
     disk: bool = false, // the engine keeps conversation states on disk
     done: std.atomic.Value(bool) = .init(false),
 
-    /// The engine thread's answer from its kept states (`store` null: it keeps none).
-    pub fn answer(a: *Ask, store: ?*pc.Store) void {
+    /// The engine thread's answer from its kept states (`store` null: it keeps none), keyed as its lookups are.
+    pub fn answer(a: *Ask, store: ?*pc.Store, keys: Keys) void {
         defer a.done.store(true, .release);
         const s = store orelse return;
         a.disk = s.disk != null;
+        const starts: []const u32 = if (keys.starts) a.starts else &.{};
+        const spans: []const [2]u32 = if (keys.spans) a.spans else &.{};
         switch (a.op) {
             .where => {},
             .load => {
-                const have = s.find(a.prompt, a.starts, a.spans);
+                const have = s.find(a.prompt, starts, spans);
                 const t0 = rows.write.nowNs();
-                const got = rows.read.recall(s, a.prompt, @intCast(a.prompt.len), a.starts, a.spans, have);
+                const got = rows.read.recall(s, a.prompt, @intCast(a.prompt.len), starts, spans, have);
                 if (got != null and got != have) {
                     a.loaded = got.?.at;
                     a.load_seconds = @as(f64, @floatFromInt(rows.write.nowNs() - t0)) / 1e9;
@@ -38,7 +43,7 @@ pub const Ask = struct {
                 a.freed = r.forgetAll();
             },
         }
-        a.out = rows.read.resumable(s, a.prompt, a.starts, a.spans);
+        a.out = rows.read.resumable(s, a.prompt, starts, spans);
     }
 
     /// The answer within `ms` milliseconds (false: none came).
@@ -87,7 +92,7 @@ pub const Disk = struct {
 
     /// Asks left when the engine stops, answered as having no states; the list freed.
     pub fn close(d: *Disk, gpa: std.mem.Allocator) void {
-        for (d.asks.items) |a| a.answer(null);
+        for (d.asks.items) |a| a.answer(null, .{});
         d.asks.deinit(gpa);
     }
 };

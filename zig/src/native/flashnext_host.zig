@@ -101,7 +101,7 @@ pub const Host = struct {
         const write = if (store) |c| c.disk != null and api.prompt_cache.rows.write.pending(c.disk.?) and h.queued.items.len == 0 and !h.closing and h.disk.quiet(h.served, h.now()) else false;
         h.unlock();
         defer h.gpa.free(asks);
-        for (asks) |a| a.answer(store);
+        for (asks) |a| a.answer(store, .{ .starts = false, .spans = false }); // its lookups pass neither
         if (write) _ = api.prompt_cache.rows.write.step(store.?.disk.?);
         return write or asks.len > 0;
     }

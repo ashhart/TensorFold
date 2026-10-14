@@ -39,7 +39,7 @@ pub fn answer(h: *LaneHost) void {
     const list = h.disk.take(h.gpa);
     h.unlock();
     defer h.gpa.free(list);
-    for (list) |a| a.answer(h.cache);
+    for (list) |a| a.answer(h.cache, .{ .spans = h.decoded_rows }); // keyed as its lookups are
 }
 
 /// Asks left when the engine stops: answered as having no disk states.

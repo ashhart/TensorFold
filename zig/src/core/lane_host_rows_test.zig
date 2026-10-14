@@ -146,6 +146,10 @@ test "a host writes its kept states while idle and on its stop; the next host re
         }
         fn two(h: *LaneHost, r: *pc.rows.Rows, _: *lanes.fake.Fake) anyerror!void {
             try std.testing.expectEqual(@as(usize, 2), r.states.items.len); // the stop wrote the second
+            var spanned: api.ImprintAsk = .{ .op = .where, .prompt = &first, .spans = &.{.{ 100, 110 }} }; // this host keys no spans
+            try std.testing.expect(h.engine().imprintAsk(&spanned));
+            try std.testing.expect(spanned.wait(std.testing.io, 5000));
+            try std.testing.expectEqual(@as(u32, 600), spanned.out.disk);
             var ask: api.ImprintAsk = .{ .op = .where, .prompt = &first };
             try std.testing.expect(h.engine().imprintAsk(&ask));
             try std.testing.expect(ask.wait(std.testing.io, 5000));
