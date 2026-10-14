@@ -138,7 +138,8 @@ fn norms(r: *Rig) !void {
         try r.same("add_rmsnorm y", u16, yd, y);
         try r.same("add_rmsnorm xs", f32, xsd, xs);
     }
-    for ([_]usize{ 16, 300, 2048 }, [_]bool{ true, false, true }, [_]bool{ false, false, true }) |rows, f32_out, wide| {
+    const moe_rows = [_]usize{ 1, 16, 300, 2048 }; // a decode row, a full window, prompt chunks
+    for (moe_rows, [_]bool{ false, true, false, true }, [_]bool{ true, false, false, true }) |rows, f32_out, wide| {
         const x = if (wide) try r.wides(rows * D) else try r.bfs(rows * D, 2.0);
         const y32 = try r.f32s(rows * NS * D, -1, 1);
         const y16 = try r.bfs(rows * NS * D, 1.0);
@@ -188,7 +189,8 @@ fn norms(r: *Rig) !void {
 
 fn route(r: *Rig) !void {
     const sk = glue.routerShape(D).sk;
-    for ([_]usize{ 1, 16, 300 }) |rows| {
+    // every decode window size (tf_nemo_router_rows) and a prompt chunk (tf_nemo_router)
+    for ([_]usize{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 300 }) |rows| {
         const x = try r.bfs(rows * D, 1.0);
         const w = try r.bfs(E * D, 0.05);
         const bias = try r.f32s(E, -0.05, 0.05);
