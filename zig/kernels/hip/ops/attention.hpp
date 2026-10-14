@@ -46,4 +46,3 @@ extern "C" __global__ void tf_kv_write_at(const void* src, void* cache, int kind
 }
 
 }  // namespace
-
