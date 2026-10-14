@@ -246,7 +246,10 @@ pub fn dequant(a: Allocator, words: Tensor, scale: Tensor, bias: Tensor, group: 
         const bit = c * bits;
         const at = r * row_words + (bit >> 5);
         const lo: u64 = std.mem.readInt(u32, words.bytes[4 * at ..][0..4], .little);
-        const hi: u64 = if ((bit & 31) + bits > 32) std.mem.readInt(u32, words.bytes[4 * (at + 1) ..][0..4], .little) else 0;
+        const hi: u64 = if ((bit & 31) + bits > 32)
+            std.mem.readInt(u32, words.bytes[4 * (at + 1) ..][0..4], .little)
+        else
+            0;
         const code: f32 = @floatFromInt(((lo | hi << 32) >> @intCast(bit & 31)) & mask);
         const g = r * scale.shape[1] + c / group;
         const s = convert.load(scale.dtype, scale.bytes, g);
