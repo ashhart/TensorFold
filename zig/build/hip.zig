@@ -138,7 +138,13 @@ fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes }, .{ .name = "engine_api", .module = api }, .{ .name = "hip_serve", .module = serve } },
+        .imports = &.{
+            .{ .name = "hip", .module = hip },
+            .{ .name = "core", .module = core },
+            .{ .name = "lanes", .module = lanes },
+            .{ .name = "engine_api", .module = api },
+            .{ .name = "hip_serve", .module = serve },
+        },
     });
     const native = b.createModule(.{
         .root_source_file = b.path("zig/src/native/hip.zig"),
