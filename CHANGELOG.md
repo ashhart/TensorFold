@@ -11,6 +11,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - `--cortheon` reads a page of unclosed tags in linear time. A run of `<` with no `>`, or of unclosed `<a ` tags, was rescanned to the page's end at every character: a 128 KiB page of either took 2 to 4 seconds, and one at the 2 MiB read limit would take 8 to 18 minutes. Both now take milliseconds.
 - `--cortheon` reads a search page that ends inside a result's snippet: the result keeps its title and link with no snippet. Before, the parser sliced backwards there, a panic in a safe build and undefined behaviour in the default fast build (#830). Thanks to @joeynyc.
 - [docs/known-issues.md](docs/known-issues.md) keeps the current list of known issues in one place. Each release's notes summarize it and say what changed, instead of pointing at an earlier release's notes.
+- SECURITY.md says how to report a security problem privately (the repository's Security tab, "Report a vulnerability"), which releases get fixes, and what is in scope.
 
 ## 1.0.10
 
