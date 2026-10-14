@@ -307,6 +307,16 @@ __device__ __forceinline__ __nv_bfloat16 rotate(const __nv_bfloat16* x, int d, i
     return __float2bfloat16_rn(d < 32 ? a * cs - b * sn : b * cs + a * sn);
 }
 
+// A row's ancestors-and-self: its tree window's row bits, or with the top bit set a chain row's index in its window.
+__device__ __forceinline__ int rows_seen(unsigned anc) { return (anc >> 31) ? (int)(anc & 0x7fffffffu) + 1 : __popc(anc); }
+
+// The window row holding a row's nth seen window key.
+__device__ __forceinline__ int seen_row(unsigned anc, int n) {
+    if (anc >> 31) return n;
+    for (int j = 0; j < n; j++) anc &= anc - 1;
+    return __ffs(anc) - 1;
+}
+
 // Queries rotated in place, keys rotated and values copied into the row's cache slot; grid (rows), HD threads.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_rope(Geo geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
                                                                 const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
@@ -317,7 +327,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_rope(Geo geo, __nv_bflo
     if (past_rows(P, blockIdx.x)) return;
     const size_t m = blockIdx.x;
     const Seg sg = segs[rowseg[m]];
-    const int pos = sg.len + __popc(rowanc[m]) - 1;
+    const int pos = sg.len + rows_seen(rowanc[m]) - 1;
     const int slot = sg.len + (int)m - sg.row0;
     __shared__ __nv_bfloat16 qs[MAXQ * HD];
     for (int h = 0; h < QH; h++) qs[h * HD + d] = Qn[(m * QH + h) * HD + d];
@@ -347,7 +357,8 @@ extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __r
     const int qh = h * (QH / KVH) + g;
     const Seg sg = segs[rowseg[m]];
     const unsigned anc = rowanc[m];
-    const int k0 = c * ck, k1 = min(k0 + ck, sg.len + sg.rows);
+    // chunks cut at logical positions (a window key's: the stream's length plus its ancestors), as a step's are
+    const int k0 = c * ck, k1 = min(k0 + ck, sg.len + rows_seen(anc));
     const size_t slot = (m * QH + qh) * nch + c;
     if (k0 >= k1) {
         if (lane == 0) {
@@ -365,8 +376,8 @@ extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __r
         o[i] = 0.0f;
     }
     float mx = -INFINITY, l = 0.0f;
-    for (int pos = k0; pos < k1; pos++) {
-        if (pos >= sg.len && ((anc >> (pos - sg.len)) & 1u) == 0) continue;
+    for (int t = k0; t < k1; t++) {
+        const int pos = t < sg.len ? t : sg.len + seen_row(anc, t - sg.len);
         const uint4 kw = *reinterpret_cast<const uint4*>(K + ((size_t)h * sg.cap + pos) * HD + lane * DPL);
         const __nv_bfloat16* kb = reinterpret_cast<const __nv_bfloat16*>(&kw);
         float dot = 0.0f;
