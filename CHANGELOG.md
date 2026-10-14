@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- `POST /v1/systemone` takes llama-server's System One request: a state (text, JSON or a chat), questions keyed by id of type `noul`, `choice` or `score`, and pictures as data URLs (`files`, `images` or a chat state's `image_url` parts, at most 4). Each question is rendered as d1's systemone template renders it, read at its single-token option forms, and answered with probabilities and zero output tokens, refused with llama-server's sentences when malformed. The engine scores it through a new `decide` hook (one pass over the shared state and a branch a question), or `score` a question at a time; an engine that scores nothing serves no such path, and an engine that only decides refuses text requests. `/v1/decisions` asks `score` for the vocabulary's mass, System One does not.
+
 ## 1.0.11
 
 - `--cortheon`'s instruction filter keeps reading past a long word. A word longer than the filter's scan buffer ended the scan early, so an order written after one was never checked; each word now keeps at most 16 bytes, so a long word can no longer end the scan (#829). Thanks to @joeynyc.

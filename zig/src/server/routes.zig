@@ -9,6 +9,7 @@ const responses = @import("responses.zig");
 const anthropic = @import("anthropic.zig");
 const tokens = @import("tokens.zig");
 const decisions = @import("decisions.zig");
+const systemone = @import("systemone.zig");
 const status = @import("status_routes.zig");
 const memory = @import("memory_routes.zig");
 const slide = @import("slide.zig");
@@ -65,6 +66,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
     if (std.mem.eql(u8, route, "/v1/slide/learn")) return slide.learn(srv, conn, a);
     if (std.mem.endsWith(u8, route, "/decisions")) return decisions.post(srv, conn, a);
+    if (std.mem.endsWith(u8, route, "/systemone")) return systemone.post(srv, conn, a);
     if (anthropic.route(conn.path)) return anthropic.post(srv, conn, a);
     if (responses.route(route)) |rid| if (rid.len == 0) return responses.post(srv, conn, a);
     for (tokens.paths) |r| if (std.mem.eql(u8, route, r)) return tokens.post(srv, conn, a, std.mem.endsWith(u8, route, "/detokenize"));
