@@ -15,7 +15,7 @@ pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
     routes.sendValue(conn, a, 200, try openHealth(srv, a, std.mem.indexOf(u8, conn.path, "reset_peak=1") != null));
 }
 
-/// The open health body: model, lanes, memory and live counts, then the release, backend and GPU when known.
+/// The open health body: model, lanes, memory and live counts, then whichever of release, backend and GPU it knows.
 pub fn openHealth(srv: *Server, a: Allocator, reset_peak: bool) !Value {
     const o = try json.newObject(a);
     try o.put(a, "status", .{ .string = "ok" });

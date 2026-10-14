@@ -30,8 +30,7 @@ const Allocator = std.mem.Allocator;
 /// auto compacts near the window. fraction compacts past that share of it.
 pub const CompactAt = union(enum) { auto, fraction: f64 };
 
-/// What the binary serves on, read once at startup: release, GPU backend and GPU name; an empty field is unknown.
-pub const Identity = struct { version: []const u8 = "", backend: []const u8 = "", device: []const u8 = "" };
+pub const Identity = @import("identity.zig").Identity;
 
 pub const Config = struct {
     served_name: []const u8,
