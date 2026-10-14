@@ -130,6 +130,35 @@ __device__ __forceinline__ void combine_f32(const float* y, const float* wts, fl
     const float* yrow = y + (i64)r * slots * d + d0;
     const float* wrow = wts + (i64)r * slots;
     float* orow = out + (i64)r * d + d0;
+    if (slots == 9) { // GLM's 8 routed slots and the shared one: every load issued first, as 16-byte loads
+        float v[9][8], w[9];
+#pragma unroll
+        for (int k = 0; k < 9; ++k) {
+            const float4 lo = *reinterpret_cast<const float4*>(yrow + (i64)k * d);
+            const float4 hi = *reinterpret_cast<const float4*>(yrow + (i64)k * d + 4);
+            v[k][0] = lo.x; v[k][1] = lo.y; v[k][2] = lo.z; v[k][3] = lo.w;
+            v[k][4] = hi.x; v[k][5] = hi.y; v[k][6] = hi.z; v[k][7] = hi.w;
+            w[k] = wrow[k];
+        }
+        float o[8];
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            bool edge = (t >> 5 < 2) ? (i == 0 || i == 4) : (i == 3 || i == 7);
+            float acc = fmaf(v[0][i], w[0], 0.0f);
+            if (edge) {
+#pragma unroll
+                for (int k = 1; k < 9; ++k) acc = fmaf(v[k][i], w[k], acc);
+            } else {
+                acc = fmaf(v[8][i], w[8], acc);
+#pragma unroll
+                for (int k = 1; k < 8; ++k) acc = fmaf(v[k][i], w[k], acc);
+            }
+            o[i] = acc;
+        }
+        *reinterpret_cast<float4*>(orow) = make_float4(o[0], o[1], o[2], o[3]);
+        *reinterpret_cast<float4*>(orow + 4) = make_float4(o[4], o[5], o[6], o[7]);
+        return;
+    }
     for (int i = 0; i < 8; ++i) {
         bool edge = (t >> 5 < 2) ? (i == 0 || i == 4) : (i == 3 || i == 7);
         float acc = fmaf(yrow[i], wrow[0], 0.0f);
