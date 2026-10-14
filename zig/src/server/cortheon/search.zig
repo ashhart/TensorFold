@@ -105,9 +105,10 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
         const title = try fragmentText(a, page[tag_end + 1 .. close]);
         var snippet: []const u8 = "";
         if (std.mem.indexOfPos(u8, page[0..next], close, m.snippet)) |s| {
-            const s_open = std.mem.indexOfScalarPos(u8, page, s, '>') orelse s;
-            const s_close = std.mem.indexOfPos(u8, page, s_open, m.snippet_end) orelse s_open;
-            snippet = try fragmentText(a, page[s_open + 1 .. s_close]);
+            const s_open = (std.mem.indexOfScalarPos(u8, page, s, '>') orelse s) + 1;
+            // a snippet with no end (a page cut at its size cap) is left out rather than sliced backwards
+            if (std.mem.indexOfPos(u8, page, s_open, m.snippet_end)) |s_close|
+                snippet = try fragmentText(a, page[s_open..s_close]);
         }
         var seen = false;
         for (out.items) |r| seen = seen or std.mem.eql(u8, r.url, url);
@@ -171,6 +172,19 @@ test "DuckDuckGo's lite page reads the same way" {
     try std.testing.expectEqualStrings("Zig News", results[0].title);
     try std.testing.expectEqualStrings("Release notes & more", results[0].snippet);
     try std.testing.expectEqualStrings("Two", results[1].title);
+}
+
+test "a page cut inside a snippet keeps its result without the snippet" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const full = "<a class=\"result__a\" href=\"https://example.org/a\">A</a><a class=\"result__snippet\" href=\"x\">";
+    const short = "<a href=\"https://example.org/b\" class='result-link'>B</a></td></tr><tr><td class='result-snippet'>";
+    for ([_][]const u8{ full, short }, [_]bool{ false, true }) |page, is_lite| {
+        const results = if (is_lite) try parseDuckDuckGoLite(a, page, 5) else try parseDuckDuckGo(a, page, 5);
+        try std.testing.expectEqual(@as(usize, 1), results.len);
+        try std.testing.expectEqualStrings("", results[0].snippet);
+    }
 }
 
 test "Brave results and query encoding" {
