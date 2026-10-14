@@ -335,23 +335,47 @@ fn taughtBefore(a: Allocator, io: Io, dir: []const u8, names: []const []const u8
     return std.mem.indexOf(u8, config, "\"tensorfold_learned_neurons\"") != null;
 }
 
-/// What lessons added beside the snapshot's files: learnable files it does not list, and interrupted writes.
+/// What only TensorFold writes in the folder and the snapshot does not list (`added`); every other file stays.
 fn removeAdded(a: Allocator, io: Io, dir: []const u8, entries: []const Entry) ![]const []const u8 {
     var d = try Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
     defer d.close(io);
     var gone: std.ArrayList([]const u8) = .empty;
     var it = d.iterate();
     while (try it.next(io)) |e| {
-        const left = std.mem.endsWith(u8, e.name, put_back_suffix) or (std.mem.endsWith(u8, e.name, ".tmp") and learnable(e.name[0 .. e.name.len - 4]));
-        const added = learnable(e.name) and for (entries) |x| {
-            if (std.mem.eql(u8, x.name, e.name)) break false;
-        } else true;
-        if (e.name[0] == '.' or !(left or added)) continue;
+        if (e.name[0] == '.' or !added(e.name, entries)) continue;
         if ((try d.statFile(io, e.name, .{ .follow_symlinks = false })).kind == .directory) continue;
         try gone.append(a, try a.dupe(u8, e.name));
     }
     for (gone.items) |name| if (std.c.unlink(try join(a, dir, name)) != 0) return error.RemoveFailed;
     return gone.items;
+}
+
+/// A lesson's file (living.zig), a write cut short (shard_edit's `NAME.tmp`) or a put-back temp, none of them listed.
+fn added(name: []const u8, entries: []const Entry) bool {
+    if (listed(name, entries)) return false;
+    if (lessonFile(name)) return true;
+    if (std.mem.endsWith(u8, name, ".tmp")) {
+        const of = name[0 .. name.len - ".tmp".len];
+        return listed(of, entries) or lessonFile(of);
+    }
+    return std.mem.endsWith(u8, name, put_back_suffix) and listed(name[0 .. name.len - put_back_suffix.len], entries);
+}
+
+fn listed(name: []const u8, entries: []const Entry) bool {
+    for (entries) |e| if (std.mem.eql(u8, e.name, name)) return true;
+    return false;
+}
+
+/// The names living.zig gives lessons: `living-weights-<digits>.safetensors`, and every lesson in one older file.
+fn lessonFile(name: []const u8) bool {
+    if (std.mem.eql(u8, name, "living-weights.safetensors")) return true;
+    const head = "living-weights-";
+    const tail = ".safetensors";
+    if (name.len <= head.len + tail.len or !std.mem.startsWith(u8, name, head) or !std.mem.endsWith(u8, name, tail)) {
+        return false;
+    }
+    for (name[head.len .. name.len - tail.len]) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
 }
 
 /// The fact graph files the snapshot lists, removed where they still read as one (a JSON object with facts and next).

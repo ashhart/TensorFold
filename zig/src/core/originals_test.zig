@@ -241,6 +241,35 @@ test "a rollback puts back every kept file byte for byte, removes what lessons a
     }
 }
 
+test "a rollback removes only what TensorFold writes there: files the user added after the snapshot stay" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try model(a, io, tmp);
+    const before = try bytesOf(a, io, dir);
+    var why: []const u8 = "";
+    _ = try originals.keep(io, dir, null, .{}, a, &why);
+    try teach(a, io, dir);
+    const theirs = [_][]const u8{
+        "user-extra.safetensors", "other.tensorfold-rollback", "living-weights-mine.safetensors",
+        "notes.tmp",              "tokenizer.json.tmp",
+    };
+    for (theirs) |name| try put(a, io, dir, name, "the user's");
+    const ours = [_][]const u8{
+        "living-weights-00001.safetensors", shard2 ++ ".tmp",
+        "living-weights.safetensors",       "living-weights-00002.safetensors.tmp",
+    };
+    for (ours[2..]) |name| try put(a, io, dir, name, "a lesson's");
+    const r = try originals.rollback(io, dir, .{}, a, &why);
+    try std.testing.expect(sameBytes(before, try bytesOf(a, io, dir)));
+    for (theirs) |name| try std.testing.expectEqualStrings("the user's", try read(a, io, try path(a, dir, name)));
+    for (ours) |name| try std.testing.expect(!exists(io, try path(a, dir, name)));
+    try std.testing.expectEqual(ours.len, r.removed.len);
+}
+
 test "a rollback is refused while any server holds the folder, and a --slide server holds it alone" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
