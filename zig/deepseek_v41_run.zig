@@ -8,6 +8,7 @@ const load = tf.deepseek_v41_load;
 const weights = tf.deepseek_v41_weights;
 const process_memory = @import("src/server/process_memory.zig");
 const oracle = @import("tests/deepseek_v41_reference/qualify.zig");
+const margins = @import("tests/deepseek_v41_reference/margins.zig");
 const profile = @import("tests/deepseek_v41_reference/profile.zig");
 const trace = @import("tests/deepseek_v41_reference/trace.zig");
 const operators = @import("tests/deepseek_v41_reference/operators.zig");
@@ -21,6 +22,7 @@ fn usage(code: u8) noreturn {
         "       tf-dsv41-run teacher MODEL TABLES IDS_JSON OUT_DIR [CHUNK]\n" ++
         "       tf-dsv41-run seams MODEL TABLES IDS_JSON OUT_DIR\n" ++
         "       tf-dsv41-run oracle MODEL TABLES IDS_JSON OUT_DIR\n" ++
+        "       tf-dsv41-run margins MODEL TABLES IDS_JSON OUT_DIR [DEEP]\n" ++
         "       tf-dsv41-run profile MODEL TABLES IDS_JSON OUT_DIR\n" ++
         "       tf-dsv41-run trace MODEL TABLES IDS_JSON OUT_DIR\n" ++
         "       tf-dsv41-run operators MODEL TABLES OUT_DIR\n" ++
@@ -44,7 +46,7 @@ fn validArguments(args: []const [:0]const u8) bool {
     for ([_][]const u8{ "plan", "operators" }, [_]usize{ 4, 5 }) |name, count|
         if (std.mem.eql(u8, mode, name)) return args.len == count;
     if (std.mem.eql(u8, mode, "attention-history-sameinput")) return args.len == 8;
-    for ([_][]const u8{ "teacher", "generate", "attention-sameinput", "hc-sameinput", "moe-sameinput" }) |name|
+    for ([_][]const u8{ "teacher", "generate", "attention-sameinput", "hc-sameinput", "moe-sameinput", "margins" }) |name|
         if (std.mem.eql(u8, mode, name)) return args.len == 6 or args.len == 7;
     for ([_][]const u8{ "seams", "oracle", "profile", "trace" }) |name|
         if (std.mem.eql(u8, mode, name)) return args.len == 6;
@@ -144,7 +146,7 @@ pub fn main(init: std.process.Init) !void {
     const is_attention_history = std.mem.eql(u8, mode, "attention-history-sameinput");
     const is_hc = std.mem.eql(u8, mode, "hc-sameinput");
     const is_moe = std.mem.eql(u8, mode, "moe-sameinput");
-    const max_ids: usize = if (std.mem.eql(u8, mode, "oracle") or std.mem.eql(u8, mode, "trace")) 16 else if (std.mem.eql(u8, mode, "profile")) ds.prefill_step else if (std.mem.eql(u8, mode, "teacher") or std.mem.eql(u8, mode, "seams")) 4096 else 1048576;
+    const max_ids: usize = if (std.mem.eql(u8, mode, "margins")) 1048576 else if (std.mem.eql(u8, mode, "oracle") or std.mem.eql(u8, mode, "trace")) 16 else if (std.mem.eql(u8, mode, "profile")) ds.prefill_step else if (std.mem.eql(u8, mode, "teacher") or std.mem.eql(u8, mode, "seams")) 4096 else 1048576;
     const input = if (is_operators or is_attention or is_attention_history or is_hc or is_moe) &.{} else try std.Io.Dir.cwd().readFileAlloc(io, args[4], arena, .limited(max_ids * 12 + 2));
     const ids: []const u32 = if (is_operators or is_attention or is_attention_history or is_hc or is_moe) &.{} else try std.json.parseFromSliceLeaky([]const u32, arena, input, .{});
     if (!is_operators and !is_attention and !is_attention_history and !is_hc and !is_moe and (ids.len == 0 or ids.len > 1048576)) return error.InvalidPrompt;
@@ -223,6 +225,8 @@ fn execute(a: std.mem.Allocator, io: std.Io, model: *ds.Model, args: []const [:0
     } else if (is_oracle) {
         try operators.run(a, io, model, dir);
         _ = try oracle.run(a, io, model, ids, map_blob, dir);
+    } else if (std.mem.eql(u8, mode, "margins")) {
+        try margins.run(a, io, model, ids, dir, if (args.len > 6) try number(args[6]) else 1536);
     } else if (is_profile) {
         try profile.run(a, io, model, ids, dir);
     } else if (is_trace) {
