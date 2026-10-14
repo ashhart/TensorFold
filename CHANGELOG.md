@@ -13,6 +13,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - `--cortheon` shows at most 200 bytes of a page's title. A page that never closed its `<title>` sent the rest of its document to the model as the title, past the read's size limit (#831). Thanks to @joeynyc.
 - [docs/known-issues.md](docs/known-issues.md) keeps the current list of known issues in one place. Each release's notes summarize it and say what changed, instead of pointing at an earlier release's notes.
 - SECURITY.md says how to report a security problem privately (the repository's Security tab, "Report a vulnerability"), which releases get fixes, and what is in scope.
+- GLM-5.3 (EXLR8) checks the GPU's fragment layout as it loads, as GLM-5.3-Flash and Nemotron do, so a Mac whose layout would give wrong sums stops about a second into the load instead of serving wrong tokens (#809). Thanks to @harrisonfriia.
 - `zig build test` passes on a Mac with a GPU again. The split-checkpoint test asks on purpose for a tensor that stays in its file, and that lookup logged an error, which the Zig test runner counts as a failure; it now logs a warning.
 - A pull request's No GPU check also runs the frozen server goldens (`zig build test-golden`, which now builds on Linux too) and fails a change that adds problems `tools/zig/lean_check.py` reports (a file past 600 lines, a comment longer than one line or 120 columns) beyond those the base branch already has.
 
