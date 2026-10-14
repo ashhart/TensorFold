@@ -21,6 +21,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - `--cortheon`'s page excerpt stays within its byte budget. Each kept line after a gap ran one byte over. Found by the fuzz harness.
 - `--cortheon` parses at most the first 2 MiB of a page, for at most 2 seconds, and keeps the text read by then, so no page, however it is written, can hold a request for minutes.
 - For contributors: `zig build fuzz-cortheon` runs Cortheon's readers of untrusted bytes (page text, links, excerpts, search results and the instruction filter) under a fuzz harness: its seeds, 100,000 structure-aware edits that cut tags and attributes, and a linear-time check on long inputs, in about 20 seconds. `-Dfuzz-optimize=fast` builds it as shipped, and `--fuzz=N` adds N inputs from Zig's coverage-guided fuzzer.
+- `--cortheon`'s search parser reads a results page in one pass. A page of link marks with no tag opening between them sent it back to the page's start for every mark, so 1 MiB took over 3 seconds; each search back now stops where the previous link ended.
 
 ## 1.0.10
 

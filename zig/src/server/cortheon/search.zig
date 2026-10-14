@@ -89,14 +89,19 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
     var out: std.ArrayList(Result) = .empty;
     const marker = m.link;
     var from: usize = 0;
-    var last: usize = 0; // the previous link's end: each block's class mark is looked for after it, so each byte once
+    var last: usize = 0; // where the previous link ended: every search back stops there, so each byte is read once
     while (out.items.len < limit) {
         const at = std.mem.indexOfPos(u8, page, from, marker) orelse break;
-        const tag_start = std.mem.lastIndexOfScalar(u8, page[0..at], '<') orelse break;
+        const lt = std.mem.lastIndexOfScalar(u8, page[last..at], '<') orelse { // a mark outside any tag: skip it
+            from = at + marker.len;
+            last = at;
+            continue;
+        };
+        const tag_start = last + lt;
         const tag_end = std.mem.indexOfScalarPos(u8, page, at, '>') orelse break;
         const next = std.mem.indexOfPos(u8, page, tag_end, marker) orelse page.len;
         from = tag_end;
-        const lo = @min(last, tag_start);
+        const lo = last;
         last = tag_end;
         const block = std.mem.lastIndexOf(u8, page[lo..tag_start], "class=\"result ");
         const block_start = if (block) |b| lo + b else tag_start;
