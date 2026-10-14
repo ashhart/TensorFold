@@ -1,12 +1,16 @@
 //! TensorFold's tokenizer for Hugging Face tokenizer.json files: encode equals tokenizers' encode(text, add_special_tokens=False).
 const std = @import("std");
-const unicode = @import("unicode.zig");
+pub const unicode = @import("unicode.zig");
 const steps = @import("steps.zig");
 const models = @import("model.zig");
 const Allocator = std.mem.Allocator;
 pub const Memo = @import("memo.zig").Memo;
 /// A digest of what ids mean as loaded (identity.zig): what Recall keys its record by.
 pub const identity = @import("identity.zig").identity;
+
+/// The generated NFKD/mark/CCC tables the Engram token map's normalizer chain uses;
+/// re-exported so family code reaches them through this module.
+pub const nfkd_data = @import("nfkd_data.zig");
 
 pub const Kind = models.Kind;
 pub const Error = models.Error || std.json.ParseError(std.json.Scanner) || error{UnsupportedAddedToken};

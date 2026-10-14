@@ -35,6 +35,30 @@ fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     };
 }
 
+/// The pull builds the token map; when it is missing but the original release's tokenizer
+/// and config sit beside the Engram tables, build it here so a load never needs the Python step.
+fn ensureTokenMap(a: Allocator, io: std.Io, map: []const u8, table_dir: ?[]const u8) void {
+    const src = table_dir orelse return;
+    if (std.Io.Dir.cwd().openFile(io, map, .{})) |f| {
+        f.close(io);
+        return;
+    } else |_| {}
+    const tk_path = std.fmt.allocPrintSentinel(a, "{s}/tokenizer.json", .{src}, 0) catch return;
+    defer a.free(tk_path);
+    const cfg_path = std.fmt.allocPrintSentinel(a, "{s}/config.json", .{src}, 0) catch return;
+    defer a.free(cfg_path);
+    for ([_][]const u8{ tk_path, cfg_path }) |p| {
+        if (std.Io.Dir.cwd().openFile(io, p, .{})) |f| {
+            f.close(io);
+        } else |_| return;
+    }
+    tf.deepseek_v41_token_map.build(a, io, tk_path, cfg_path, map) catch |err| {
+        std.log.err("deepseek-v41: building the engram token map from {s} failed: {s}", .{ src, @errorName(err) });
+        return;
+    };
+    std.log.info("deepseek-v41: built the engram token map from {s} at {s}", .{ src, map });
+}
+
 /// 70% of RAM, or GLM_LOAD_LIMIT_GB's GB up to the GPU's working set; the same opt-in pattern GLM's load uses.
 fn loadLimit(device: mtl.Device) !struct { bytes: u64, asked: bool } {
     var mem: u64 = 0;
@@ -60,6 +84,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     }
     const map = try std.fmt.allocPrintSentinel(a, "{s}/engram-token-map.bin", .{o.dir}, 0);
     defer a.free(map);
+    ensureTokenMap(a, io, map, o.engram_table_dir);
     var map_io = io;
     _ = &map_io;
     const device_probe = mtl.Device.init() catch null;
