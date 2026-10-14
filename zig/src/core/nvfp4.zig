@@ -66,10 +66,13 @@ pub const Linear = struct {
         const g = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight_scale_2", .{module}));
         const a = try ck.get(try std.fmt.bufPrint(&buf, "{s}.input_scale", .{module}));
         const d = dims(meta(&w), meta(&s), meta(&g), meta(&a)) catch |e| {
-            std.log.err("{s}: not ModelOpt NVFP4 ({t} {any}, {t} {any})", .{ module, w.dtype, w.shape[0..w.rank], s.dtype, s.shape[0..s.rank] });
+            const ws = w.shape[0..w.rank];
+            const ss = s.shape[0..s.rank];
+            std.log.err("{s}: not ModelOpt NVFP4 ({t} {any}, {t} {any})", .{ module, w.dtype, ws, s.dtype, ss });
             return e;
         };
-        return .{ .n = d.n, .k = d.k, .codes = w.bytes, .scales = s.bytes, .global = std.mem.bytesToValue(f32, g.bytes[0..4]) };
+        const global = std.mem.bytesToValue(f32, g.bytes[0..4]);
+        return .{ .n = d.n, .k = d.k, .codes = w.bytes, .scales = s.bytes, .global = global };
     }
 
     /// Row r as f32, e2m1 x e4m3 x global in that order: the reference the GPU kernels are compared with.

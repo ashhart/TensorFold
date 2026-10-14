@@ -48,16 +48,19 @@ test "every NVFP4 linear of the checkpoint reads as ModelOpt stores it, and the 
         if (!std.mem.endsWith(u8, name, ".weight")) continue;
         const module = name[0 .. name.len - ".weight".len];
         const scale = try at(a, h, module, "weight_scale") orelse continue;
-        const d = try nvfp4.dims((try meta(a, h, name)).?, scale, (try at(a, h, module, "weight_scale_2")).?, try at(a, h, module, "input_scale"));
+        const scale2 = (try at(a, h, module, "weight_scale_2")).?;
+        const d = try nvfp4.dims((try meta(a, h, name)).?, scale, scale2, try at(a, h, module, "input_scale"));
         quantized += 1;
         try std.testing.expect(std.mem.indexOf(u8, module, ".mlp.") != null);
         try std.testing.expect(std.mem.indexOf(u8, module, ".layers.45.") == null);
         const down = std.mem.endsWith(u8, module, "down_proj");
         if (std.mem.indexOf(u8, module, ".experts.") != null) {
             experts += 1;
-            try std.testing.expectEqual(if (down) nvfp4.Dims{ .n = 4096, .k = 2048 } else nvfp4.Dims{ .n = 2048, .k = 4096 }, d);
+            const want: nvfp4.Dims = if (down) .{ .n = 4096, .k = 2048 } else .{ .n = 2048, .k = 4096 };
+            try std.testing.expectEqual(want, d);
         } else {
-            try std.testing.expectEqual(if (down) nvfp4.Dims{ .n = 4096, .k = 12288 } else nvfp4.Dims{ .n = 12288, .k = 4096 }, d);
+            const want: nvfp4.Dims = if (down) .{ .n = 4096, .k = 12288 } else .{ .n = 12288, .k = 4096 };
+            try std.testing.expectEqual(want, d);
         }
     }
     try std.testing.expectEqual(@as(usize, 42 * 288 * 3 + 3 * 3), quantized);
@@ -65,5 +68,6 @@ test "every NVFP4 linear of the checkpoint reads as ModelOpt stores it, and the 
     // the MTP layer's routed experts are BF16 as stored (a family may re-pack them for drafting)
     const mtp = (try meta(a, h, "model.language_model.layers.45.mlp.experts.0.gate_proj.weight")).?;
     try std.testing.expectEqual(DType.bf16, mtp.dtype);
-    try std.testing.expect((try meta(a, h, "model.language_model.layers.45.mlp.experts.0.gate_proj.weight_scale")) == null);
+    const mtp_scale = "model.language_model.layers.45.mlp.experts.0.gate_proj.weight_scale";
+    try std.testing.expect((try meta(a, h, mtp_scale)) == null);
 }

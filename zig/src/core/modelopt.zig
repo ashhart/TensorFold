@@ -33,7 +33,8 @@ pub fn admit(gpa: std.mem.Allocator, config_json: []const u8, why: *Why) !void {
     };
     const algo = text(q.get("quant_algo")) orelse "";
     if (!std.ascii.eqlIgnoreCase(algo, "NVFP4")) {
-        why.set("ModelOpt {s}: this engine reads ModelOpt NVFP4 (nvidia/GLM-5.3-Flash-NVFP4's layout)", .{if (algo.len > 0) algo else "without quant_algo"});
+        const named = if (algo.len > 0) algo else "without quant_algo";
+        why.set("ModelOpt {s}: this engine reads ModelOpt NVFP4 (nvidia/GLM-5.3-Flash-NVFP4's layout)", .{named});
         return error.UnsupportedQuant;
     }
     const groups = object(q.get("config_groups")) orelse {
@@ -47,7 +48,11 @@ pub fn admit(gpa: std.mem.Allocator, config_json: []const u8, why: *Why) !void {
         const size = if (w) |o| int(o.get("group_size")) else null;
         const kind = if (w) |o| text(o.get("type")) orelse "" else "";
         if (bits != 4 or size != nvfp4_group or !std.mem.eql(u8, kind, "float")) {
-            why.set("ModelOpt NVFP4 group {s}: weights {?d}-bit {s} in groups of {?d}, expected 4-bit float in groups of 16", .{ g.key_ptr.*, bits, kind, size });
+            why.set(
+                "ModelOpt NVFP4 group {s}: weights {?d}-bit {s} in groups of {?d}, " ++
+                    "expected 4-bit float in groups of 16",
+                .{ g.key_ptr.*, bits, kind, size },
+            );
             return error.UnsupportedQuant;
         }
     }
@@ -95,9 +100,17 @@ fn expectRefused(json: []const u8, err: anyerror, word: []const u8) !void {
 test "other ModelOpt formats, and configs without ModelOpt, are refused by name" {
     try expectRefused("{\"text_config\": {}}", error.NotModelOpt, "no ModelOpt");
     try expectRefused("{\"quantization_config\": {\"quant_method\": \"exl3\"}}", error.NotModelOpt, "no ModelOpt");
-    try expectRefused("{\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"FP8\"}}", error.UnsupportedQuant, "ModelOpt FP8");
-    // MIXED_PRECISION (the AXL re-pack) comes with 3.x
-    try expectRefused("{\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"MIXED_PRECISION\"}}", error.UnsupportedQuant, "MIXED_PRECISION");
+    try expectRefused(
+        "{\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"FP8\"}}",
+        error.UnsupportedQuant,
+        "ModelOpt FP8",
+    );
+    // MIXED_PRECISION (the AXL re-pack) is refused for now
+    try expectRefused(
+        "{\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"MIXED_PRECISION\"}}",
+        error.UnsupportedQuant,
+        "MIXED_PRECISION",
+    );
     try expectRefused(
         \\{"quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4", "config_groups":
         \\ {"g": {"weights": {"num_bits": 4, "type": "float", "group_size": 32}}}}}
