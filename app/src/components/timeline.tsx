@@ -2,6 +2,7 @@ import { memo, useMemo, useState } from 'react'
 import clsx from 'clsx'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { remarkCitationAutolinks } from '../lib/markdown-citations'
 import { Icon, type IconName } from '../lib/icons'
 import { FileGlyph } from '../lib/fileicon'
 import { mdComponents } from '../lib/highlight'
@@ -14,6 +15,7 @@ import { VisualizationCard, splitVisualizationMarkdown } from './visualization'
 import { isEstimatedThroughputMeta, shortToolMeta } from '../lib/turn-blocks'
 import type { Attachment, DiffLine, TimelineItem, ToolArtifactSummary, ToolState } from '../lib/types'
 import { AttachmentChips } from './AttachmentChips'
+import { runRecovery } from '../lib/run-recovery'
 
 const FILE_TOOLS = new Set(['read_file', 'write_file', 'edit_file'])
 
@@ -123,7 +125,7 @@ export const AssistantMessage = memo(function AssistantMessage({ text, active, m
     <div className={clsx('group relative fade-in max-w-none', simple ? 'prose-tf' : 'space-y-4')}>
       {segments.map((segment, i) => (
         segment.type === 'markdown'
-          ? <div key={i} className={simple ? undefined : 'prose-tf'}><ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{segment.text}</ReactMarkdown></div>
+          ? <div key={i} className={simple ? undefined : 'prose-tf'}><ReactMarkdown remarkPlugins={[remarkGfm, remarkCitationAutolinks]} components={mdComponents}>{segment.text}</ReactMarkdown></div>
           : <VisualizationCard key={i} spec={segment.spec} />
       ))}
       {!active && meta && !isEstimatedThroughputMeta(meta) && <div className="mt-1.5 text-[13px] leading-4 text-ink-4">{meta}</div>}
@@ -178,12 +180,25 @@ export function Reasoning({ text, active, forceExpanded }: { text: string; activ
 }
 
 export function ErrorBlock({ text }: { text: string }) {
+  const setView = useStore((s) => s.setView)
+  const recovery = runRecovery(text)
   return (
-    <div className="fade-in flex items-start gap-2.5 rounded-xl border border-danger/25 bg-danger/8 px-3.5 py-3 text-[13px] text-ink">
+    <div role="alert" className="fade-in flex items-start gap-2.5 rounded-xl border border-danger/25 bg-danger/8 px-3.5 py-3 text-[13px] text-ink">
       <Icon name="warning" size={16} className="mt-0.5 shrink-0 text-danger" />
-      <div className="min-w-0">
-        <div className="font-medium text-danger">Something went wrong</div>
-        <div className="mt-0.5 whitespace-pre-wrap break-words text-ink-2">{text}</div>
+      <div className="min-w-0 flex-1">
+        <div className="font-medium text-ink">{recovery.title}</div>
+        <p className="mt-1 leading-relaxed text-ink-2">{recovery.guidance}</p>
+        <details className="mt-2 text-ink-3">
+          <summary className="w-fit cursor-pointer rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">Technical details</summary>
+          <div className="mt-1.5 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-card p-2 font-mono text-[12px]">{text}</div>
+        </details>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {recovery.destination && <button type="button" className="inline-flex h-7 items-center rounded-lg border border-line bg-card px-2 text-[13px] font-medium text-ink-2 transition-colors hover:bg-ink-5" onClick={() => {
+            if (recovery.destination === 'models') setView({ name: 'models' })
+            else setView({ name: 'settings', section: recovery.destination === 'security' ? 'security' : 'models' })
+          }}>{recovery.action}</button>}
+          <CopyButton text={text} label="Copy details" />
+        </div>
       </div>
     </div>
   )

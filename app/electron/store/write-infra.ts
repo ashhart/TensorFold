@@ -195,7 +195,14 @@ export async function readProtectedJson<T>(p: string, fallback: T, migratePlaint
 export async function writeProtectedJson(
   p: string,
   data: unknown,
-  opts: { isEmpty?: boolean; purgeLegacyPlaintext?: boolean } = {},
+  opts: {
+    isEmpty?: boolean
+    purgeLegacyPlaintext?: boolean
+    /** Stage a detached payload inside this file's serialized write slot. */
+    prepareData?: () => unknown
+    /** Publish the staged state synchronously after rename, before later writes advance. */
+    onCommitted?: () => void
+  } = {},
 ): Promise<void> {
   // Reserve this write's place in the per-path queue SYNCHRONOUSLY — see writeJsonState's identical
   // fix for why: the guard's async stat+read must not delay joining the queue relative to a
@@ -245,7 +252,9 @@ export async function writeProtectedJson(
         throw new Error(`Refusing to overwrite quarantined protected state ${p}. Restore the matching key/file or explicitly purge it. Recovery copy: ${detected.backupPath}`)
       }
     }
-    await atomicWriteJson(p, protectJsonPayload(data))
+    const prepared = opts.prepareData ? opts.prepareData() : data
+    await atomicWriteJson(p, protectJsonPayload(prepared))
+    opts.onCommitted?.()
   })
   writeChains.set(p, next)
   void next.catch(() => {}).finally(() => { if (writeChains.get(p) === next) writeChains.delete(p) })

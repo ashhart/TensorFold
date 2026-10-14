@@ -56,3 +56,10 @@ export function resolveSurfaceModel(settings: SurfaceModelSettings, surface: Mod
 export function resolveAssistantModel(settings: AssistantModelSettings): AssistantModelSelection {
   return resolveSurfaceModel({ ...settings, codeProviderId: null, codeProviderAccountId: null, codeModel: null }, 'chat')
 }
+
+export function settingsForSurfaceModelPick<T extends SurfaceModelSettings>(settings: T, surface: ModelSurface, selection: AssistantModelSelection): T {
+  if (hasSurfaceModelOverride(settings, surface)) return surface === 'code'
+    ? { ...settings, codeProviderId: selection.providerId, codeProviderAccountId: selection.providerAccountId, codeModel: selection.model }
+    : { ...settings, assistantProviderId: selection.providerId, assistantProviderAccountId: selection.providerAccountId, assistantModel: selection.model }
+  return { ...settings, activeProviderId: selection.providerId, activeProviderAccountId: selection.providerAccountId, activeModel: selection.model }
+}

@@ -269,6 +269,7 @@ export function formatRetrievalSearchResult(result: RetrievalSearchResult): stri
 }
 
 function addThreadRecords(thread: Thread, add: (record: Partial<RetrievalRecord> & { kind?: unknown }) => void): void {
+  if (thread.incognito) return
   for (const [index, message] of (thread.apiMessages ?? []).entries()) {
     const messageText = contentText(message.content)
     if (message.role === 'tool' || !messageText.trim()) continue

@@ -42,6 +42,8 @@ export interface JobPendingApproval {
 
 export interface Job {
   id: string
+  /** Host-owned Incognito work is live-only, including approvals and receipts. */
+  incognito?: boolean
   kind: JobKind
   status: JobStatus
   attempt: number

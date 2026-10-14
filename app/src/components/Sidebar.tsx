@@ -229,6 +229,7 @@ export function Sidebar() {
       <div className="space-y-0.5 px-2 pb-1">
         <NavRow icon="pencil" label="New task" hint="⌘N" active={view.name === 'home'} onClick={s.newTask} />
         <NavRow icon="message" label="New chat" hint="⇧⌘N" onClick={() => void s.newChat(null)} />
+        <NavRow icon="spark" label="Bots" active={view.name === 'bots'} onClick={() => s.setView({ name: 'bots' })} />
         <label className="no-drag flex h-8 items-center gap-2 rounded-[10px] px-2.5 text-ink-3 transition-colors focus-within:bg-surface hover:bg-surface">
           <Icon name="search" size={16} className="shrink-0" />
           <input

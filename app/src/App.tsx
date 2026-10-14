@@ -4,7 +4,9 @@ import { applyTheme } from './lib/theme'
 import { applicationBootstrapState } from './lib/bootstrap-state'
 import { Sidebar } from './components/Sidebar'
 import { TitleBar } from './components/TitleBar'
-import { ONBOARDING_COMPLETED_EVENT, shouldShowOnboarding } from './components/onboarding-model'
+import { ONBOARDING_COMPLETED_EVENT, ONBOARDING_RESTART_EVENT, readOnboardingDraft, shouldShowOnboarding } from './components/onboarding-model'
+import { api } from './lib/ipc'
+import type { MinimalTarget } from './components/MinimalWorkspace'
 import { NewProjectModal } from './components/NewProjectModal'
 import { CommandPalette } from './components/CommandPalette'
 import { ExportPanel } from './components/ExportPanel'
@@ -37,7 +39,9 @@ const ProjectsIndex = lazy(() => import('./components/Rooms').then((module) => (
 const ProjectView = lazy(() => import('./components/Rooms').then((module) => ({ default: module.ProjectView })))
 const RoomView = lazy(() => import('./components/Rooms').then((module) => ({ default: module.RoomView })))
 const Models = lazy(() => import('./components/Models').then((module) => ({ default: module.Models })))
+const Bots = lazy(() => import('./components/Bots').then((module) => ({ default: module.Bots })))
 const WorkspaceDock = lazy(() => import('./components/WorkspaceDock').then((module) => ({ default: module.WorkspaceDock })))
+const MinimalWorkspace = lazy(() => import('./components/MinimalWorkspace').then((module) => ({ default: module.MinimalWorkspace })))
 
 export default function App() {
   const ready = useStore((s) => s.ready)
@@ -50,11 +54,26 @@ export default function App() {
   // after the first model is saved so the Chat/Assistant/Code/Readiness steps can
   // complete in the same flow.
   const [onboardingDone, setOnboardingDone] = useState(() => !shouldShowOnboarding(providers))
+  const replayingOnboarding = useRef(false)
+  const [minimalTarget, setMinimalTarget] = useState<MinimalTarget>('overview')
   const showOnboarding = ready && !onboardingDone
   useEffect(() => {
-    const complete = () => setOnboardingDone(true)
+    const complete = () => { replayingOnboarding.current = false; setOnboardingDone(true) }
+    const restart = () => { replayingOnboarding.current = true; setOnboardingDone(false); useStore.getState().setView({ name: 'home' }) }
     window.addEventListener(ONBOARDING_COMPLETED_EVENT, complete)
-    return () => window.removeEventListener(ONBOARDING_COMPLETED_EVENT, complete)
+    window.addEventListener(ONBOARDING_RESTART_EVENT, restart)
+    return () => { window.removeEventListener(ONBOARDING_COMPLETED_EVENT, complete); window.removeEventListener(ONBOARDING_RESTART_EVENT, restart) }
+  }, [])
+  useEffect(() => {
+    if (api.platform === 'web-remote') return
+    const unsubscribeMode = api.onDesktopModeChanged((settings) => useStore.setState({ settings }))
+    const unsubscribeNavigation = api.onDesktopNavigate(({ target }) => {
+      setMinimalTarget(target)
+      const state = useStore.getState()
+      if (state.settings?.desktopMode === 'minimal') state.setView({ name: 'home' })
+      else state.setView(target === 'overview' ? { name: 'home' } : { name: 'models', tab: target === 'api' ? 'API' : 'Models' })
+    })
+    return () => { unsubscribeMode(); unsubscribeNavigation() }
   }, [])
 
   const newTask = useStore((s) => s.newTask)
@@ -85,6 +104,11 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey
       const k = e.key.toLowerCase()
+      if (useStore.getState().settings?.desktopMode === 'minimal' || showOnboarding) {
+        if (mod && e.key === ',') { e.preventDefault(); setView({ name: 'settings', section: 'app' }) }
+        else if (mod && (k === 'n' || k === 'b' || e.key === '[' || e.key === ']')) e.preventDefault()
+        return
+      }
       if (mod && k === 'n') { e.preventDefault(); e.shiftKey ? newChat() : newTask() }
       else if (mod && e.key === ',') { e.preventDefault(); setView({ name: 'settings' }) }
       else if (mod && e.altKey && k === 'b') { e.preventDefault(); toggleRightPanel() }
@@ -105,7 +129,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [newTask, newChat, setView, toggleSidebar, toggleRightPanel, cycleApprovalMode])
+  }, [newTask, newChat, setView, toggleSidebar, toggleRightPanel, cycleApprovalMode, showOnboarding])
 
   // Surface any user-action IPC failure as a notice toast (see src/lib/ipc.ts).
   useEffect(() => {
@@ -115,6 +139,10 @@ export default function App() {
   }, [])
 
   const settings = useStore((s) => s.settings)
+  useEffect(() => {
+    if (settings?.desktopOnboardingComplete && !replayingOnboarding.current) setOnboardingDone(true)
+  }, [settings?.desktopOnboardingComplete])
+  const minimal = settings?.desktopMode === 'minimal' && api.platform !== 'web-remote'
   const lastContentView = useRef(view)
   useEffect(() => {
     if (view.name !== 'settings') lastContentView.current = view
@@ -153,12 +181,15 @@ export default function App() {
       )}
       {view.name !== 'settings' && (
         <div className="flex h-full w-full overflow-hidden">
-          {!sidebarCollapsed && <Sidebar />}
+          {!sidebarCollapsed && !showOnboarding && !minimal && <Sidebar />}
           <div className="content-card relative flex min-w-0 flex-1 flex-col">
-            <TitleBar />
+            {showOnboarding ? <header className="drag h-11 shrink-0" /> : !minimal && <TitleBar />}
             <main className="min-h-0 flex-1 overflow-hidden">
               <Suspense fallback={<ViewFallback />}>
-                {contentView.name === 'home' && (showOnboarding ? <Onboarding onDone={() => setOnboardingDone(true)} /> : <Home />)}
+                {showOnboarding && contentView.name === 'home' ? <Onboarding onDone={() => setOnboardingDone(true)} /> : minimal && !showOnboarding ? <MinimalWorkspace target={minimalTarget} onTarget={setMinimalTarget} /> : <div className="flex h-full min-h-0 flex-col">
+                {showOnboarding && <div className="shrink-0 px-4 py-3"><Button size="sm" icon="back" onClick={() => setView({ name: 'home' })}>Return to setup</Button></div>}
+                <div className="min-h-0 flex-1">
+                {contentView.name === 'home' && <Home />}
                 {contentView.name === 'thread' && <ThreadView key={contentView.id} threadId={contentView.id} />}
                 {contentView.name === 'commandCentre' && <CommandCentre />}
                 {contentView.name === 'assistant' && <Assistant />}
@@ -167,17 +198,18 @@ export default function App() {
                 {contentView.name === 'projects' && <ProjectsIndex />}
                 {contentView.name === 'project' && <ProjectView key={`${contentView.id}:${contentView.tab ?? 'overview'}`} id={contentView.id} initialTab={contentView.tab} />}
                 {contentView.name === 'room' && <RoomView key={contentView.id} id={contentView.id} />}
-                {contentView.name === 'models' && <Models />}
+                {contentView.name === 'models' && <Models minimal={showOnboarding && readOnboardingDraft().mode === 'minimal'} />}
+                {contentView.name === 'bots' && <Bots />}
+                </div></div>}
               </Suspense>
             </main>
-            {contentView.name !== 'home' && contentView.name !== 'thread' && (
+            {!minimal && !showOnboarding && contentView.name !== 'home' && contentView.name !== 'thread' && (
               <Suspense fallback={null}><WorkspaceDock /></Suspense>
             )}
           </div>
         </div>
       )}
-      <NewProjectModal />
-      <CommandPalette />
+      {!minimal && !showOnboarding && <><NewProjectModal /><CommandPalette /></>}
       <ExportPanel />
       <ReplayPanel />
       <IncidentCenter />

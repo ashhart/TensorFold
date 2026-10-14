@@ -51,6 +51,7 @@ export function searchSessionThreads(threads: Thread[], options: SessionSearchOp
   if (!terms.length) return { query, matches: [], omitted: 0 }
 
   const candidates = threads.filter((thread) => {
+    if (thread.incognito) return false
     if (!options.includeCurrent && options.currentThreadId && thread.id === options.currentThreadId) return false
     if (!options.includeArchived && thread.archivedAt) return false
     if (options.projectId && thread.projectId !== options.projectId) return false
@@ -66,7 +67,7 @@ export function searchSessionThreads(threads: Thread[], options: SessionSearchOp
 
 export function readSessionThread(threads: Thread[], options: SessionReadOptions): SessionReadResult {
   const threadId = String(options.threadId ?? '').trim()
-  const thread = threads.find((item) => item.id === threadId) ?? null
+  const thread = threads.find((item) => item.id === threadId && !item.incognito) ?? null
   if (!thread) return { thread: null, messages: [], omittedBefore: 0 }
 
   const allMessages = (thread.apiMessages ?? [])

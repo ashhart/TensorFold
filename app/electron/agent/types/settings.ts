@@ -46,6 +46,9 @@ export interface PersonaProfile {
 }
 
 export interface Settings {
+  // A completed Minimal setup keeps the local model manager in the menu bar.
+  desktopMode?: 'minimal' | 'full'
+  desktopOnboardingComplete?: boolean
   providers: Provider[]
   cliToolOverrides?: Record<string, { binaryPath?: string }>
   activeProviderId: string | null
@@ -163,8 +166,27 @@ export interface AgentPreset {
   providerId: string
   providerAccountId?: string | null
   model: string
+  instructions?: string
+  approvalScope?: 'readonly' | 'review'
+  executionTarget?: 'workspace' | 'vm'
+  paused?: boolean
+  archivedAt?: number | null
   createdAt: number
   updatedAt: number
+}
+
+/** Captured by the host at chat creation; edits only affect future chats. */
+export interface BotThreadConfig {
+  presetId: string
+  name: string
+  role: string
+  instructions: string
+  providerId: string
+  providerAccountId: string | null
+  model: string
+  approvalScope: 'readonly' | 'review'
+  executionTarget: 'workspace' | 'vm'
+  capturedAt: number
 }
 
 export interface PowerSettings {

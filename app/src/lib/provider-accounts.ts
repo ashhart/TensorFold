@@ -141,7 +141,7 @@ export function modelDisplayName(provider: Provider | null | undefined, model: s
     if (value === 'sonnet') return 'Sonnet'
   }
   if (provider?.transport === 'codex-cli') {
-    if (value === 'codex-cli-default') return 'GPT-5.5'
+    if (value === 'codex-cli-default') return 'Codex default'
     if (value === 'gpt-5.4') return 'GPT-5.4'
     if (value === 'gpt-5.5') return 'GPT-5.5'
     if (value === 'gpt-5.5-codex-high') return 'GPT-5.5 Codex High'

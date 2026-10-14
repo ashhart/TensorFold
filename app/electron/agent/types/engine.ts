@@ -59,6 +59,49 @@ export interface EngineInstalledModel {
   fitsMemory: boolean | null
   drafter: string | null
   drafterInstalled: boolean | null
+  // Library checkpoints are borrowed in place; their files never belong to TensorFold.
+  source?: 'download' | 'library' | 'cache'
+  title?: string
+  localPath?: string
+}
+
+export interface EngineLibraryFolder {
+  id: string
+  path: string
+  label: string
+}
+
+export interface EngineLibraryModel {
+  id: string
+  repo: string | null
+  title: string
+  path: string
+  source: 'huggingface' | 'folder'
+  folderId: string
+  revision: string | null
+  modelType: string | null
+  format: string | null
+  complete: boolean
+  compatible: boolean
+  loadable: boolean
+  reason: string | null
+  weightsBytes: number | null
+  memoryFloorBytes: number | null
+  fitsMemory: boolean | null
+  drafterOnly?: boolean
+}
+
+export interface EngineLibraryScanOptions { includeHuggingFace?: boolean }
+
+export interface EngineModelLibrarySnapshot {
+  includeHuggingFace: boolean
+  folders: EngineLibraryFolder[]
+  models: EngineLibraryModel[]
+  scanning: boolean
+  scannedAt: number | null
+  warnings: string[]
+  truncated: boolean
+  cancelled: boolean
 }
 
 export interface EngineCapabilities {
@@ -147,3 +190,60 @@ export type EngineEvent =
   | { kind: 'performance'; performance: EnginePerformance | null }
   | { kind: 'pull'; pull: PullProgress }
   | { kind: 'installed'; installed: EngineInstalledModel[] }
+  | { kind: 'learning'; snapshot: EngineLearningSnapshot }
+
+export interface EngineLearningFact {
+  id: number
+  text: string
+  source: string
+  at: number
+  state: 'queued' | 'learning' | 'learned' | 'missed' | 'replaced'
+  links: number[]
+  round?: number
+  message?: string
+  questions?: string[]
+  neurons?: { layer: number; neuron: number; key: string }[]
+  checks?: number
+  recalled?: boolean
+  loss?: number
+  phase?: string
+  since?: number
+  step?: number
+  of?: number
+  trace?: number[][]
+}
+
+export interface EngineLearningGraph {
+  next: number
+  facts: EngineLearningFact[]
+  model?: {
+    layers: number
+    kinds: string
+    pocket: { neurons: number; layers: number[]; used: number[] }
+    shards: { name: string; bytes: number; pocket: boolean; layers: number[] }[]
+    save?: { state: 'saving' | 'saved' | 'failed'; at: number; seconds?: number; bytes?: number; files?: string[]; message?: string }
+  }
+}
+
+export interface EngineLearningSnapshot {
+  supported: boolean
+  experimental: true
+  enabled: boolean
+  active: boolean
+  model: string | null
+  state: 'off' | 'preparing' | 'ready' | 'teaching' | 'cancelling' | 'failed'
+  message: string | null
+  // The original shared download is never taught; only this app's private copy is used.
+  privateCopy: boolean
+  progress: { copiedBytes: number; totalBytes: number } | null
+  job: {
+    id: string
+    state: 'running' | 'cancelling' | 'done' | 'cancelled' | 'failed' | 'interrupted'
+    startedAt: number
+    finishedAt: number | null
+    learned: number
+    missed: number
+    message: string | null
+  } | null
+  graph: EngineLearningGraph | null
+}

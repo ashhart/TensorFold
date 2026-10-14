@@ -25,6 +25,14 @@ export type {
   SecretRotationMetadata,
   ModelRouteMemory,
   AgentPreset,
+  BotThreadConfig,
+  BotVmStatus,
+  BotVmSetupStatus,
+  UserQuestion,
+  UserQuestionInput,
+  UserQuestionAnswer,
+  UserQuestionOutcome,
+  BotVmResult,
   ApprovalMode,
   ApprovalRule,
   ApprovalRuleDecision,
@@ -305,6 +313,9 @@ export type {
   ControllerStatus,
   PowerSettings,
   VoiceProvider,
+  KokoroStatus,
+  KokoroSynthesisInput,
+  KokoroVoice,
   VoiceSettings,
   VoiceSynthesisResult,
   VoiceTranscriptionInput,
@@ -438,4 +449,6 @@ export type {
   CliSessionStatus,
 } from '../../electron/agent/types'
 // Built-in TensorFold engine (Models page, picker status, onboarding).
-export type { EngineState, EngineHardware, EngineConnection, EnginePerformance, EngineStatus, EngineInstalledModel, EngineCapabilities, EngineSnapshot, EngineEvent, HubGated, HubModelSummary, ModelPreflight, PreflightVerdict, PullProgress, PullState, SuggestedModel } from '../../electron/agent/types'
+export type { PhonePlatform, PhoneTransport, PhoneDevice, PhoneBounds, PhoneNode, PhoneObservation, PhoneSession, PhoneSnapshot, PhoneConnectInput, PhoneDeveloperConnectInput, PhonePairInput, PhoneAction, PhoneActionInput, PhoneToolInput } from '../../electron/agent/types'
+export type { EngineModelLibrarySnapshot, EngineLibraryFolder, EngineLibraryModel, EngineLibraryScanOptions } from '../../electron/agent/types'
+export type { EngineState, EngineHardware, EngineConnection, EnginePerformance, EngineStatus, EngineInstalledModel, EngineCapabilities, EngineSnapshot, EngineEvent, EngineLearningSnapshot, EngineLearningFact, EngineLearningGraph, HubGated, HubModelSummary, ModelPreflight, PreflightVerdict, PullProgress, PullState, SuggestedModel } from '../../electron/agent/types'

@@ -2,48 +2,41 @@ import type { IconName } from '../lib/icons'
 import type { Provider } from '../lib/types'
 
 export const ONBOARDED_KEY = 'vontra.onboarded'
+export const ONBOARDING_DRAFT_KEY = 'tensorfold.onboarding-draft'
 export const ONBOARDING_COMPLETED_EVENT = 'vontra:onboarding-completed'
+export const ONBOARDING_RESTART_EVENT = 'tensorfold:onboarding-restart'
+export type OnboardingDesktopMode = 'minimal' | 'full'
+
+export function onboardingProviderVisible(mode: OnboardingDesktopMode, providerId: string): boolean {
+  return mode === 'full' || providerId === 'tensorfold'
+}
 
 export function completeOnboarding(): void {
-  try { localStorage.setItem(ONBOARDED_KEY, '1') } catch { /* session completion still works */ }
+  try { localStorage.setItem(ONBOARDED_KEY, '1'); localStorage.removeItem(ONBOARDING_DRAFT_KEY) } catch { /* Native settings also persist completion. */ }
   if (typeof window !== 'undefined') window.dispatchEvent(new Event(ONBOARDING_COMPLETED_EVENT))
 }
 
 export const ONBOARDING_STEPS = [
   {
+    id: 'mode',
+    label: 'Your workspace',
+    title: 'How will you use TensorFold?',
+    desc: 'Choose your starting point. You can switch between Minimal and Full in Settings whenever you need.',
+    icon: 'monitor',
+  },
+  {
     id: 'connect',
-    label: 'Connect',
-    title: 'Connect a model',
-    desc: 'Run a model on this Mac with the built-in TensorFold engine, or connect a cloud account, CLI subscription or another local runtime.',
+    label: 'Your model',
+    title: 'Choose a model for this Mac',
+    desc: 'The built-in TensorFold engine runs supported models locally. Start with a model that fits your hardware, or use one you already have.',
     icon: 'cpu',
   },
   {
-    id: 'chat',
-    label: 'Chat',
-    title: 'Chat stays lightweight',
-    desc: 'Use Chat for direct model conversations, quick prompts, and threads that do not need a project workspace.',
-    icon: 'message',
-  },
-  {
-    id: 'assistant',
-    label: 'Assistant',
-    title: 'Assistant is your connected workspace',
-    desc: 'Use Assistant for connectors, memory proposals, skills, voice, automations, and cross-app context.',
+    id: 'guide',
+    label: 'Get started',
+    title: 'A few things before you start',
+    desc: 'Your model and tools stay in reach. Here is where to find them.',
     icon: 'spark',
-  },
-  {
-    id: 'code',
-    label: 'Code',
-    title: 'Code is the workbench',
-    desc: 'Use Code for projects, worktrees, rooms, tickets, terminals, diffs, tests, and long-running jobs.',
-    icon: 'code',
-  },
-  {
-    id: 'settings',
-    label: 'Readiness',
-    title: 'Verify the whole harness',
-    desc: 'Run Readiness before serious work so providers, CLIs, connectors, remote hosts, terminals, and security are explicit.',
-    icon: 'check',
   },
 ] as const satisfies ReadonlyArray<{
   id: string
@@ -54,6 +47,31 @@ export const ONBOARDING_STEPS = [
 }>
 
 export type OnboardingStepId = typeof ONBOARDING_STEPS[number]['id']
+export interface OnboardingDraft { mode: OnboardingDesktopMode; step: OnboardingStepId }
+
+export function readOnboardingDraft(defaultMode: OnboardingDesktopMode = 'full'): OnboardingDraft {
+  try {
+    const draft = JSON.parse(localStorage.getItem(ONBOARDING_DRAFT_KEY) ?? 'null')
+    if (draft && (draft.mode === 'minimal' || draft.mode === 'full') && ONBOARDING_STEPS.some((step) => step.id === draft.step)) return { mode: draft.mode, step: draft.step }
+  } catch { /* Storage may be disabled or an older draft may be unreadable. */ }
+  return { mode: defaultMode, step: 'mode' }
+}
+
+export function saveOnboardingDraft(draft: OnboardingDraft): void {
+  try { localStorage.setItem(ONBOARDING_DRAFT_KEY, JSON.stringify(draft)) } catch { /* The open setup still retains its selection. */ }
+}
+
+/** A failed mode save must leave the first-run flow open and unfinished. */
+export async function commitOnboarding<T>(mode: OnboardingDesktopMode, persist: (mode: OnboardingDesktopMode, complete: true) => Promise<T>, applySaved: (settings: T) => void): Promise<void> {
+  const saved = await persist(mode, true)
+  applySaved(saved)
+  completeOnboarding()
+}
+
+export function restartOnboarding(): void {
+  try { localStorage.removeItem(ONBOARDED_KEY); localStorage.removeItem(ONBOARDING_DRAFT_KEY) } catch { /* The restart event works for this session. */ }
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event(ONBOARDING_RESTART_EVENT))
+}
 
 export function onboardingStepIndex(id: OnboardingStepId): number {
   const i = ONBOARDING_STEPS.findIndex((step) => step.id === id)
@@ -68,6 +86,7 @@ export function previousOnboardingStep(id: OnboardingStepId): OnboardingStepId {
   return ONBOARDING_STEPS[Math.max(onboardingStepIndex(id) - 1, 0)].id
 }
 
-export function shouldShowOnboarding(_providers?: Provider[]): boolean {
+export function shouldShowOnboarding(_providers?: Provider[], nativeComplete = false): boolean {
+  if (nativeComplete) return false
   try { return localStorage.getItem(ONBOARDED_KEY) !== '1' } catch { return true }
 }

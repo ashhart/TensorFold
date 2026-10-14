@@ -159,7 +159,7 @@ export function syncSessionSearchIndex(file: string, threads: Thread[], blind: B
 
   db.exec('BEGIN IMMEDIATE')
   try {
-    for (const thread of threads) {
+    for (const thread of stripIncognitoThreads(threads)) {
       liveIds.add(thread.id)
       const fingerprint = threadTextFingerprint(thread)
       if (existing.get(thread.id) === fingerprint) continue

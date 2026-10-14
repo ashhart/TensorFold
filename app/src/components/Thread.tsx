@@ -16,6 +16,9 @@ import { effectiveThreadCwd, effectiveThreadWorkspace } from '../lib/thread-work
 import { TurnWorkRow } from './turn/TurnWorkRow'
 import { EditedFilesCard } from './turn/EditedFilesCard'
 import { TurnStatsLine } from './turn/TurnStatsLine'
+import { TurnOutcome } from './turn/TurnOutcome'
+import { QuestionCard } from './user-question/QuestionCard'
+import { BotChatContext } from './bots/BotChatContext'
 
 const BUSY_STATES = ['thinking', 'streaming', 'tool', 'awaiting']
 
@@ -31,6 +34,11 @@ export function ThreadView({ threadId }: { threadId: string }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
   const followRef = useRef(true)
+  const [revealedTurns, setRevealedTurns] = useState<Record<string, number>>({})
+  const showRecordedActivity = (key: string) => {
+    setRevealedTurns((previous) => ({ ...previous, [key]: (previous[key] ?? 0) + 1 }))
+    requestAnimationFrame(() => document.getElementById(`turn-work-${key}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }))
+  }
 
   const workspace = thread ? effectiveThreadWorkspace(thread, project) : null
   const workspaceCwd = thread ? effectiveThreadCwd(thread, project) : ''
@@ -117,6 +125,7 @@ export function ThreadView({ threadId }: { threadId: string }) {
         footer={item.stats && item.id === turn.answerId && !turn.running ? <TurnStatsLine stats={item.stats} /> : undefined}
       />
     )
+    if (item.kind === 'tool' && item.tool === 'ask_user' && item.question) return <QuestionCard item={item} />
     if (item.kind === 'tool') return <ToolCard item={item} />
     if (item.kind === 'visualization') return <VisualizationCard item={item} />
     if (item.kind === 'error') return <ErrorBlock text={item.text || ''} />
@@ -157,10 +166,12 @@ export function ThreadView({ threadId }: { threadId: string }) {
       <div className="flex h-full min-w-0 flex-1 flex-col">
         <div ref={scrollRef} onScroll={onScroll} className="scroll-thin min-h-0 flex-1 overflow-y-auto select-text">
           <div className="mx-auto w-full max-w-3xl space-y-4 px-6 pb-8 pt-12">
+            {thread.bot && <BotChatContext thread={thread} />}
             {turnRows.map((row) => {
               if (row.type === 'work') return (
-                <div key={`work-${row.turn.key}`}>
-                  <TurnWorkRow turn={row.turn} status={row.turn.running ? st : undefined} defaultOpen={!collapseToolRunsDefault} />
+                <div key={`work-${row.turn.key}`} id={`turn-work-${row.turn.key}`}>
+                  <TurnWorkRow turn={row.turn} status={row.turn.running ? st : undefined} defaultOpen={!collapseToolRunsDefault} reveal={revealedTurns[row.turn.key] ?? 0} />
+                  {!row.turn.answerId && <TurnOutcome turn={row.turn} onShowActivity={() => showRecordedActivity(row.turn.key)} />}
                 </div>
               )
               if (row.type === 'edits') return (
@@ -168,7 +179,7 @@ export function ThreadView({ threadId }: { threadId: string }) {
                   <EditedFilesCard thread={thread} turn={row.turn} canUndo={isTask && !busy && checkpointTurns.has(row.turn.index)} onChanged={refreshGit} />
                 </div>
               )
-              return <div key={row.item.id} id={`ti-${row.item.id}`}>{renderPinnable(row.item, row.turn)}</div>
+              return <div key={row.item.id} id={`ti-${row.item.id}`}>{renderPinnable(row.item, row.turn)}{row.item.id === row.turn.answerId && <div className="mt-3"><TurnOutcome turn={row.turn} onShowActivity={() => showRecordedActivity(row.turn.key)} /></div>}</div>
             })}
 
             <RunPlanCard thread={thread} busy={!!busy} />
@@ -201,7 +212,7 @@ export function ThreadView({ threadId }: { threadId: string }) {
                 subject={pendingApproval.item.command || pendingApproval.item.path || pendingApproval.item.tool || ''}
                 mono={!!pendingApproval.item.command}
                 reason={pendingApproval.item.output}
-                canAllowScoped={Boolean(thread.projectId || thread.cwd)}
+                canAllowScoped={pendingApproval.item.tool !== 'phone_control' && Boolean(thread.projectId || thread.cwd)}
                 onDeny={() => approve(threadId, pendingApproval.callId, 'deny')}
                 onAllowScoped={() => approve(threadId, pendingApproval.callId, 'allow_always')}
                 onAllow={() => approve(threadId, pendingApproval.callId, 'allow')}
@@ -213,7 +224,7 @@ export function ThreadView({ threadId }: { threadId: string }) {
       </div>
 
       {/* The work pane decides for itself whether it is open (see lib/work-pane.ts). */}
-      <ThreadPanel thread={thread} git={git} onChanged={refreshGit} />
+      {thread.bot?.executionTarget !== 'vm' && <ThreadPanel thread={thread} git={git} onChanged={refreshGit} />}
     </div>
   )
 }

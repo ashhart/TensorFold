@@ -11,6 +11,8 @@ interface AppWindowRuntimeDeps {
   openExternalSafely(url: string, opts?: { allowHttpLocalhost?: boolean }): Promise<void>
   session: typeof sessionType
   onWindowClosed?(): void
+  onWindowCreated?(win: BrowserWindowType): void
+  shouldShowWindow?(): boolean
 }
 
 interface MediaPermissionDetails {
@@ -93,9 +95,10 @@ export function createAppWindowRuntime(deps: AppWindowRuntimeDeps) {
       },
     })
     store.win = appWindow
+    deps.onWindowCreated?.(appWindow)
 
     appWindow.once('ready-to-show', () => {
-      if (store.win === appWindow) appWindow.show()
+      if (store.win === appWindow && (deps.shouldShowWindow?.() ?? true)) appWindow.show()
     })
 
     const devUrl = process.env.VITE_DEV_SERVER_URL

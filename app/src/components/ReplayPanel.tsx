@@ -42,7 +42,8 @@ export function ReplayPanel() {
     if (!prompt.trim()) return
     const s = useStore.getState().settings
     if (!s?.activeProviderId || !s.activeModel) { setError('Configure a provider and model in Settings first.'); return }
-    await useStore.getState().launch({ text: prompt, cwd: s.defaultCwd || '', providerId: s.activeProviderId, model: s.activeModel, approvalMode: s.approvalMode, providerAccountId: s.activeProviderAccountId, projectId: null })
+    const result = await useStore.getState().launch({ text: prompt, cwd: s.defaultCwd || '', providerId: s.activeProviderId, model: s.activeModel, approvalMode: s.approvalMode, providerAccountId: s.activeProviderAccountId, projectId: null })
+    if (!result.ok) { setError(result.error || 'The replay could not start.'); return }
     setOpen(false)
   }
 

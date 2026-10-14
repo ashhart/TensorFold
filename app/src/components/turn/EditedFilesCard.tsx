@@ -30,11 +30,13 @@ export function EditedFilesCard({ thread, turn, canUndo, onChanged }: { thread: 
   const [undoing, setUndoing] = useState(false)
   const [note, setNote] = useState<{ tone: 'error' | 'warn'; text: string } | null>(null)
   const totals = editTotals(turn.edits)
+  const guestFiles = thread.bot?.executionTarget === 'vm'
   if (!totals.files) return null
   const cwd = effectiveThreadCwd(thread, project)
   const workspace = effectiveThreadWorkspace(thread, project)
 
   const openReview = async (path?: string) => {
+    if (guestFiles) return
     const pane = workPaneOpener()
     if (pane) { pane('changes', path ? { path } : undefined); return }
     setReview({ files: [], active: path ?? null, loading: true, error: null })
@@ -73,18 +75,18 @@ export function EditedFilesCard({ thread, turn, canUndo, onChanged }: { thread: 
           </span>
         )}
         <div className="flex-1" />
-        {canUndo && (
+        {canUndo && !guestFiles && (
           <button type="button" onClick={() => void undo()} disabled={undoing} title="Restore the files and the conversation to before this turn" className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[13px] font-medium text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink disabled:opacity-50">
             <Icon name="back" size={14} />{undoing ? 'Undoing' : 'Undo'}
           </button>
         )}
-        <button type="button" onClick={() => void openReview()} className="flex h-7 items-center rounded-md border border-line px-2.5 text-[13px] font-medium text-ink-2 transition-colors hover:bg-ink-5 hover:text-ink">
+        {guestFiles ? <span className="text-[12px] text-ink-3">Saved in bot VM</span> : <button type="button" onClick={() => void openReview()} className="flex h-7 items-center rounded-md border border-line px-2.5 text-[13px] font-medium text-ink-2 transition-colors hover:bg-ink-5 hover:text-ink">
           Review
-        </button>
+        </button>}
       </div>
       <div className="border-t border-line py-1">
         {turn.edits.map((edit) => (
-          <button key={edit.path} type="button" onClick={() => void openReview(edit.path)} title={`Review ${edit.path}`} className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left transition-colors hover:bg-ink-5">
+          <button key={edit.path} type="button" disabled={guestFiles} onClick={() => void openReview(edit.path)} title={guestFiles ? `${edit.path} inside the isolated bot VM` : `Review ${edit.path}`} className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left transition-colors enabled:hover:bg-ink-5">
             <FileGlyph path={edit.path} size={16} />
             <span className="min-w-0 flex-1 truncate text-[13px] leading-[18px]">
               <span className="text-ink-2">{basename(edit.path)}</span>

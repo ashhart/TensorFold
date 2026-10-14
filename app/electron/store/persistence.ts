@@ -11,7 +11,7 @@ import { defaultSettings, seedProviders, persistSettingsMigration } from './defa
 import { dropUnusedSeededCliAccounts } from './seeded-cli-accounts'
 import { migrateThemePreset } from './theme-migration'
 import { withBuiltinEngineProvider } from '../agent/engine/provider'
-import type { Artifact, Settings, Thread, Project, Room, Ticket, Automation, ConnectorEvent, Mission, Job, SubAgent, Skill, Command, SkillSuggestion, McpServerConfig, BotControlSession, ProjectMemoryCandidate, ProjectMemoryEntry, WebhookEndpoint, Incident, CliSession } from '../agent/types'
+import type { Artifact, Settings, Thread, TimelineItem, UserQuestionRun, Project, Room, Ticket, Automation, ConnectorEvent, Mission, Job, SubAgent, Skill, Command, SkillSuggestion, McpServerConfig, BotControlSession, ProjectMemoryCandidate, ProjectMemoryEntry, WebhookEndpoint, Incident, CliSession } from '../agent/types'
 import { stripIncognitoThreads } from '../agent/incognito'
 import type { PersistedTurnCheckpoints } from '../agent/turn-checkpoints'
 import type { PairingRegistryState } from '../agent/pairing-sessions'
@@ -23,6 +23,7 @@ import { normalizeSubAgents } from '../agent/subagents'
 import { normalizeTickets } from '../agent/tickets'
 import type { ContactDirectory } from '../agent/contact-directory'
 import { emptyContactDirectory } from '../agent/contact-directory'
+import { normalizeAgentPresets } from '../../shared/bot-policy'
 
 // Settings load/save + every per-collection load/save pair + the two purge routines.
 // Depends on all five other store/ modules: paths / recovery-registry / app-crypto / write-infra /
@@ -53,6 +54,9 @@ export async function loadSettings(): Promise<Settings> {
   const revealed = revealSettings({
     ...def,
     ...loaded,
+    desktopMode: loaded.desktopMode === 'minimal' ? 'minimal' : 'full',
+    desktopOnboardingComplete: loaded.desktopOnboardingComplete === true,
+    agentPresets: normalizeAgentPresets(loaded.agentPresets ?? def.agentPresets),
     providers: withBuiltinEngineProvider(seedProviders(def.providers, loaded.providers), loaded.engineProviderSeeded === true),
     engineProviderSeeded: true,
     email: {
@@ -249,14 +253,54 @@ export async function loadThreads(): Promise<Thread[]> {
 export async function saveThreads(threads: Thread[]): Promise<void> {
   // Incognito threads are memory-only: never let them touch threads.json.
   const persisted = stripIncognitoThreads(threads)
-  await writeProtectedJson(threadsPath(), persisted)
+  // An empty new thread can become Incognito while an earlier save is queued.
+  // Re-evaluate privacy in the serialized slot, immediately before encryption.
+  await writeProtectedJson(threadsPath(), persisted, { prepareData: () => stripIncognitoThreads(threads) })
   // The search DB is disposable and stores keyed token digests, not transcript text.
   // Failure never invalidates the canonical protected JSON save.
   try {
-    syncSessionSearchIndex(vontraPath('state', 'session-search.sqlite'), persisted, blindSearchToken)
+    syncSessionSearchIndex(vontraPath('state', 'session-search.sqlite'), stripIncognitoThreads(threads), blindSearchToken)
   } catch (error) {
     console.warn('[vontra] session search index sync failed:', (error as Error)?.message ?? error)
   }
+}
+
+/** Keep question acceptance out of live IPC snapshots until the encrypted write commits. */
+export async function saveThreadQuestion(
+  getThreads: () => Thread[],
+  run: Pick<UserQuestionRun, 'threadId' | 'runId' | 'itemId'>,
+  patch: Pick<TimelineItem, 'question' | 'state' | 'output'>,
+): Promise<void> {
+  const resolveTarget = (threads: Thread[]) => {
+    const thread = threads.find((candidate) => candidate.id === run.threadId)
+    const item = thread?.timeline.find((candidate) => candidate.id === run.itemId && candidate.tool === 'ask_user')
+    const question = patch.question
+    if (!thread || !item || !question || question.threadId !== run.threadId || question.runId !== run.runId || question.itemId !== run.itemId) throw new Error('This question no longer belongs to the saved chat turn.')
+    return { thread, item }
+  }
+  const initial = resolveTarget(getThreads())
+  if (initial.thread.incognito) {
+    // Incognito questions are memory-only even if the normal thread store is
+    // quarantined; never require, skip or rewrite its unrelated protected file.
+    Object.assign(initial.item, patch)
+    return
+  }
+  let target: TimelineItem | null = null
+  await writeProtectedJson(threadsPath(), stripIncognitoThreads(getThreads()), {
+    prepareData: () => {
+      const threads = getThreads()
+      const { thread, item } = resolveTarget(threads)
+      target = item
+      const stagedItem = { ...target, ...patch }
+      const stagedThread = { ...thread, timeline: thread.timeline.map((item) => item === target ? stagedItem : item) }
+      return stripIncognitoThreads(threads.map((candidate) => candidate === thread ? stagedThread : candidate))
+    },
+    // Generic thread saves retain shallow references. Publish within the same
+    // serialized slot so an already queued save sees the newly durable answer.
+    onCommitted: () => { if (target) Object.assign(target, patch) },
+  })
+  try { syncSessionSearchIndex(vontraPath('state', 'session-search.sqlite'), stripIncognitoThreads(getThreads()), blindSearchToken) }
+  catch (error) { console.warn('[vontra] session search index sync failed:', (error as Error)?.message ?? error) }
 }
 
 // Provider rate-limit status snapshots (VST-037): non-secret usage percentages/resets, so
@@ -350,9 +394,9 @@ export async function saveMissions(m: Mission[]): Promise<void> {
 }
 
 const jobsPath = () => statePath('jobs.json')
-export async function loadJobs(): Promise<Job[]> { return normalizeJobs(await readProtectedState<Job[]>('jobs.json', [])) }
+export async function loadJobs(): Promise<Job[]> { return normalizeJobs(await readProtectedState<Job[]>('jobs.json', [])).filter((job) => job.incognito !== true) }
 export async function saveJobs(j: Job[]): Promise<void> {
-  await writeProtectedJson(jobsPath(), normalizeJobs(j))
+  await writeProtectedJson(jobsPath(), normalizeJobs(j).filter((job) => job.incognito !== true))
 }
 
 const subAgentsPath = () => statePath('subagents.json')

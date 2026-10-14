@@ -101,12 +101,7 @@ export const threadsSlice: Slice = (set, get) => ({
     if (s && persistActiveModel) await get().saveSettings({ ...s, activeProviderId: providerId, activeProviderAccountId: accountId, activeModel: safeModel, defaultCwd: cwd, approvalMode }, { silent: true })
     const project = projectId ? get().projects.find((candidate) => candidate.id === projectId) ?? null : null
     const remoteHostId = remoteHostIdForProject(get(), project)
-    const { thread: t } = await createThreadForProject(get, cwd, 'task', projectId)
-    if (incognito) {
-      // Memory-only thread: the host's saveThreads/spine seams skip it once flagged.
-      t.incognito = true
-      await api.patchThread(t.id, { incognito: true })
-    }
+    const { thread: t } = await createThreadForProject(get, cwd, 'task', projectId, incognito)
     if (!remoteHostId) await api.configureThread(t.id, providerId, safeModel, accountId)
     if (!remoteHostId) {
       t.providerId = providerId
@@ -118,14 +113,17 @@ export const threadsSlice: Slice = (set, get) => ({
       if (!t.cwd && workspace.path) t.cwd = workspace.path
       await api.setThreadWorkspace(t.id, workspace, t.cwd || null)
     }
-    set((st) => ({ threads: [t, ...st.threads.filter((x) => x.id !== t.id)], view: { name: 'thread', id: t.id }, status: { ...st.status, [t.id]: 'thinking' } }))
+    set((st) => ({ threads: [t, ...st.threads.filter((x) => x.id !== t.id)], status: { ...st.status, [t.id]: 'thinking' } }))
     // When this run was launched from a connector conversation, carry its threadKey so the
     // host can inject that source's per-channel ephemeral prompt for this run only.
     try {
       await startThreadRunApi(remoteHostId, { threadId: t.id, userText: text, attachments, sourceThreadKey })
+      set({ view: { name: 'thread', id: t.id } })
+      return { ok: true, threadId: t.id }
     } catch (e) {
       const message = runErrorMessage(e)
       set((st) => ({ status: { ...st.status, [t.id]: 'error' }, notice: { kind: 'error', message } }))
+      return { ok: false, threadId: t.id, error: message }
     }
   },
 
@@ -196,8 +194,8 @@ export const threadsSlice: Slice = (set, get) => ({
     const provider = get().settings?.providers.find((p) => p.id === providerId)
     const accountId = selectedAccountId(provider, providerAccountId)
     const safeModel = provider ? (resolveProviderModel(provider, accountId, model) ?? model) : model
-    set((st) => ({ threads: st.threads.map((t) => (t.id === threadId ? { ...t, providerId, providerAccountId: accountId, model: safeModel } : t)) }))
     await api.configureThread(threadId, providerId, safeModel, accountId)
+    set((st) => ({ threads: st.threads.map((t) => (t.id === threadId ? { ...t, providerId, providerAccountId: accountId, model: safeModel } : t)) }))
     const s = get().settings
     if (s) await get().saveSettings({ ...s, activeProviderId: providerId, activeProviderAccountId: accountId, activeModel: safeModel }, { silent: true })
   },
