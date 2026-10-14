@@ -28,11 +28,31 @@ pub const Pipelines = struct {
         var p: Pipelines = undefined;
         inline for (bit_widths, 0..) |bits, i| {
             p.dense[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_tile_qmm_q{d}", .{bits}), false);
-            p.grouped[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_tile_qmm_grouped_q{d}", .{bits}), false);
-            p.grouped_glu[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_tile_qmm_grouped_glu_q{d}", .{bits}), false);
+            p.grouped[i] = try mtl.Pipeline.init(
+                device,
+                lib,
+                std.fmt.comptimePrint("tf_tile_qmm_grouped_q{d}", .{bits}),
+                false,
+            );
+            p.grouped_glu[i] = try mtl.Pipeline.init(
+                device,
+                lib,
+                std.fmt.comptimePrint("tf_tile_qmm_grouped_glu_q{d}", .{bits}),
+                false,
+            );
             p.twin[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_tile_qmv_q{d}", .{bits}), false);
-            p.twin_indexed[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_tile_qmv_indexed_q{d}", .{bits}), false);
-            p.twin_glu[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_tile_qmv_glu_q{d}", .{bits}), false);
+            p.twin_indexed[i] = try mtl.Pipeline.init(
+                device,
+                lib,
+                std.fmt.comptimePrint("tf_tile_qmv_indexed_q{d}", .{bits}),
+                false,
+            );
+            p.twin_glu[i] = try mtl.Pipeline.init(
+                device,
+                lib,
+                std.fmt.comptimePrint("tf_tile_qmv_glu_q{d}", .{bits}),
+                false,
+            );
         }
         p.work = try mtl.Pipeline.init(device, lib, "tf_tile_qmm_work", false);
         p.xsum = try mtl.Pipeline.init(device, lib, "tf_tile_xsum", false);
@@ -52,11 +72,22 @@ pub const Pipelines = struct {
 };
 
 /// A checkpoint's [n, k] matrix (or experts' first): codes [n][k*bits/8], scales and biases [n][k/64].
-pub const Matrix = struct { w: mtl.Buffer, w_off: usize = 0, scales: mtl.Buffer, s_off: usize = 0, biases: mtl.Buffer, b_off: usize = 0, n: usize, k: usize, bits: u8 };
+pub const Matrix = struct {
+    w: mtl.Buffer,
+    w_off: usize = 0,
+    scales: mtl.Buffer,
+    s_off: usize = 0,
+    biases: mtl.Buffer,
+    b_off: usize = 0,
+    n: usize,
+    k: usize,
+    bits: u8,
+};
 
 fn width(m: Matrix) !usize {
     if (m.k > 64 * 192) return error.UnsupportedTileShape;
-    if (m.n == 0 or m.n % tile != 0 or m.k == 0 or m.k % 64 != 0 or m.n > std.math.maxInt(i32) or m.k > std.math.maxInt(i32)) return error.UnsupportedTileShape;
+    if (m.n == 0 or m.n % tile != 0 or m.k == 0 or m.k % 64 != 0 or m.n > std.math.maxInt(i32) or
+        m.k > std.math.maxInt(i32)) return error.UnsupportedTileShape;
     return std.mem.indexOfScalar(u8, &bit_widths, m.bits) orelse error.UnsupportedTileBits;
 }
 
@@ -70,7 +101,18 @@ fn bind(e: mtl.ComputeEncoder, m: Matrix, args: Args, x: mtl.Buffer, x_off: usiz
 }
 
 /// y [rows, n] = x [rows, k] W^T; each row's sums are the same at any number of rows; `sums` from encodeSums on x.
-pub fn encode(e: mtl.ComputeEncoder, p: *const Pipelines, m: Matrix, x: mtl.Buffer, x_off: usize, sums: mtl.Buffer, sums_off: usize, y: mtl.Buffer, y_off: usize, rows: usize) !void {
+pub fn encode(
+    e: mtl.ComputeEncoder,
+    p: *const Pipelines,
+    m: Matrix,
+    x: mtl.Buffer,
+    x_off: usize,
+    sums: mtl.Buffer,
+    sums_off: usize,
+    y: mtl.Buffer,
+    y_off: usize,
+    rows: usize,
+) !void {
     const i = try width(m);
     if (rows == 0 or rows > std.math.maxInt(i32)) return error.NoRows;
     e.setPipeline(p.dense[i]);
@@ -90,7 +132,15 @@ fn twinColumns(bits: u8) usize {
 }
 
 /// Each of `rows` rows' group sums (f32 [rows, k / 64] into `sums`), which the twin calls on those rows read.
-pub fn encodeSums(e: mtl.ComputeEncoder, p: *const Pipelines, k: usize, x: mtl.Buffer, x_off: usize, sums: mtl.Buffer, rows: usize) void {
+pub fn encodeSums(
+    e: mtl.ComputeEncoder,
+    p: *const Pipelines,
+    k: usize,
+    x: mtl.Buffer,
+    x_off: usize,
+    sums: mtl.Buffer,
+    rows: usize,
+) void {
     e.setPipeline(p.xsum);
     e.setBuffer(x, x_off, 0);
     e.setValue(Args{ .k = @intCast(k), .n = 0, .r = @intCast(rows) }, 1);
@@ -99,7 +149,16 @@ pub fn encodeSums(e: mtl.ComputeEncoder, p: *const Pipelines, k: usize, x: mtl.B
 }
 
 /// The tiles' bits for 1-32 rows (decode and windows), each row's group sums taken on the way.
-pub fn encodeTwin(e: mtl.ComputeEncoder, p: *const Pipelines, m: Matrix, x: mtl.Buffer, x_off: usize, y: mtl.Buffer, y_off: usize, rows: usize) !void {
+pub fn encodeTwin(
+    e: mtl.ComputeEncoder,
+    p: *const Pipelines,
+    m: Matrix,
+    x: mtl.Buffer,
+    x_off: usize,
+    y: mtl.Buffer,
+    y_off: usize,
+    rows: usize,
+) !void {
     const i = try width(m);
     if (rows == 0 or rows > twin_rows) return error.NoRows;
     e.setPipeline(p.twin[i]);
@@ -111,7 +170,16 @@ pub fn encodeTwin(e: mtl.ComputeEncoder, p: *const Pipelines, m: Matrix, x: mtl.
 }
 
 /// The twin by slot: slot y reads expert ids[y]'s matrix (`m` the first) and x row y / repeat.
-pub fn encodeTwinIndexed(e: mtl.ComputeEncoder, p: *const Pipelines, m: Matrix, x: mtl.Buffer, y: mtl.Buffer, ids: mtl.Buffer, slots: usize, repeat: usize) !void {
+pub fn encodeTwinIndexed(
+    e: mtl.ComputeEncoder,
+    p: *const Pipelines,
+    m: Matrix,
+    x: mtl.Buffer,
+    y: mtl.Buffer,
+    ids: mtl.Buffer,
+    slots: usize,
+    repeat: usize,
+) !void {
     const i = try width(m);
     if (slots == 0 or repeat == 0) return error.NoRows;
     e.setPipeline(p.twin_indexed[i]);
@@ -122,7 +190,17 @@ pub fn encodeTwinIndexed(e: mtl.ComputeEncoder, p: *const Pipelines, m: Matrix, 
 }
 
 /// encodeTwinIndexed on gate and up (one shape) into swiglu(gate, up), mlx-lm's compiled swiglu on bf16 rows.
-pub fn encodeTwinGlu(e: mtl.ComputeEncoder, p: *const Pipelines, gate: Matrix, up: Matrix, x: mtl.Buffer, y: mtl.Buffer, ids: mtl.Buffer, slots: usize, repeat: usize) !void {
+pub fn encodeTwinGlu(
+    e: mtl.ComputeEncoder,
+    p: *const Pipelines,
+    gate: Matrix,
+    up: Matrix,
+    x: mtl.Buffer,
+    y: mtl.Buffer,
+    ids: mtl.Buffer,
+    slots: usize,
+    repeat: usize,
+) !void {
     const i = try width(gate);
     if (slots == 0 or repeat == 0 or up.n != gate.n or up.k != gate.k or up.bits != gate.bits) return error.NoRows;
     e.setPipeline(p.twin_glu[i]);
@@ -174,7 +252,13 @@ pub fn items(rows: usize, experts: usize) usize {
 }
 
 /// The work list (u32 [items + 1]) from `starts` [experts + 1], before the grouped calls on those rows.
-pub fn encodeWork(e: mtl.ComputeEncoder, p: *const Pipelines, starts: mtl.Buffer, experts: usize, work: mtl.Buffer) void {
+pub fn encodeWork(
+    e: mtl.ComputeEncoder,
+    p: *const Pipelines,
+    starts: mtl.Buffer,
+    experts: usize,
+    work: mtl.Buffer,
+) void {
     e.setPipeline(p.work);
     e.setBuffer(starts, 0, 0);
     e.setValue(@as(u32, @intCast(experts)), 1);
@@ -183,7 +267,19 @@ pub fn encodeWork(e: mtl.ComputeEncoder, p: *const Pipelines, starts: mtl.Buffer
 }
 
 /// y = x W[e]^T on `rows` rows sorted by expert (expert e's from starts[e]); sorted row j reads x and sums row map[j].
-pub fn encodeGrouped(e: mtl.ComputeEncoder, p: *const Pipelines, m: Matrix, experts: usize, x: mtl.Buffer, sums: mtl.Buffer, map: mtl.Buffer, y: mtl.Buffer, rows: usize, starts: mtl.Buffer, work: mtl.Buffer) !void {
+pub fn encodeGrouped(
+    e: mtl.ComputeEncoder,
+    p: *const Pipelines,
+    m: Matrix,
+    experts: usize,
+    x: mtl.Buffer,
+    sums: mtl.Buffer,
+    map: mtl.Buffer,
+    y: mtl.Buffer,
+    rows: usize,
+    starts: mtl.Buffer,
+    work: mtl.Buffer,
+) !void {
     const i = try width(m);
     if (rows == 0 or rows > std.math.maxInt(i32)) return error.NoRows;
     e.setPipeline(p.grouped[i]);
@@ -196,9 +292,23 @@ pub fn encodeGrouped(e: mtl.ComputeEncoder, p: *const Pipelines, m: Matrix, expe
 }
 
 /// encodeGrouped on gate and up (the same shape) into swiglu(gate, up): a tile's halves are 16 columns of each.
-pub fn encodeGroupedGlu(e: mtl.ComputeEncoder, p: *const Pipelines, gate: Matrix, up: Matrix, experts: usize, x: mtl.Buffer, sums: mtl.Buffer, map: mtl.Buffer, y: mtl.Buffer, rows: usize, starts: mtl.Buffer, work: mtl.Buffer) !void {
+pub fn encodeGroupedGlu(
+    e: mtl.ComputeEncoder,
+    p: *const Pipelines,
+    gate: Matrix,
+    up: Matrix,
+    experts: usize,
+    x: mtl.Buffer,
+    sums: mtl.Buffer,
+    map: mtl.Buffer,
+    y: mtl.Buffer,
+    rows: usize,
+    starts: mtl.Buffer,
+    work: mtl.Buffer,
+) !void {
     const i = try width(gate);
-    if (rows == 0 or rows > std.math.maxInt(i32) or up.n != gate.n or up.k != gate.k or up.bits != gate.bits) return error.NoRows;
+    if (rows == 0 or rows > std.math.maxInt(i32) or up.n != gate.n or up.k != gate.k or
+        up.bits != gate.bits) return error.NoRows;
     e.setPipeline(p.grouped_glu[i]);
     bind(e, gate, .{ .k = @intCast(gate.k), .n = @intCast(gate.n), .r = @intCast(rows) }, x, 0, y, 0);
     e.setBuffer(starts, 0, 6);

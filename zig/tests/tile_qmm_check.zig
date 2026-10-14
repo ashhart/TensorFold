@@ -40,7 +40,13 @@ const Synth = struct {
         const r = prng.random();
         const groups = experts * n * (k / 64);
         const bytes = experts * n * k * bits / 8;
-        const out = Synth{ .w = try device.buffer(bytes, opts), .s = try device.buffer(groups * 2, opts), .b = try device.buffer(groups * 2, opts), .x = try device.buffer(max_rows * k * 2, opts), .bits = bits_in };
+        const out = Synth{
+            .w = try device.buffer(bytes, opts),
+            .s = try device.buffer(groups * 2, opts),
+            .b = try device.buffer(groups * 2, opts),
+            .x = try device.buffer(max_rows * k * 2, opts),
+            .bits = bits_in,
+        };
         r.bytes(out.w.slice(u8, bytes));
         for (out.s.slice(u16, groups)) |*v| v.* = toBf(r.float(f32) * 0.02 + 0.001);
         for (out.b.slice(u16, groups)) |*v| v.* = toBf((r.float(f32) - 0.5) * 0.1);
@@ -55,7 +61,17 @@ const Synth = struct {
     fn matrix(s: Synth, e: usize) tile.Matrix {
         const per = n * k * @as(usize, s.bits) / 8;
         const g = n * (k / 64) * 2;
-        return .{ .w = s.w, .w_off = e * per, .scales = s.s, .s_off = e * g, .biases = s.b, .b_off = e * g, .n = n, .k = k, .bits = s.bits };
+        return .{
+            .w = s.w,
+            .w_off = e * per,
+            .scales = s.s,
+            .s_off = e * g,
+            .biases = s.b,
+            .b_off = e * g,
+            .n = n,
+            .k = k,
+            .bits = s.bits,
+        };
     }
 
     /// Row m of x against expert e's column c in float64, and its terms' magnitudes (the error's scale).
@@ -217,7 +233,20 @@ fn grouped(g: Gpu, s: Synth) !void {
         fn encode(c: @This(), e: mtl.ComputeEncoder, p: *const tile.Pipelines) !void {
             tile.encodeSums(e, p, k, c.s.x, 0, c.sums, tokens);
             tile.encodeWork(e, p, c.starts, experts, c.work);
-            if (c.glu) return tile.encodeGroupedGlu(e, p, c.s.matrix(0), c.s.matrix(0), experts, c.s.x, c.sums, c.map, c.out, slots, c.starts, c.work);
+            if (c.glu) return tile.encodeGroupedGlu(
+                e,
+                p,
+                c.s.matrix(0),
+                c.s.matrix(0),
+                experts,
+                c.s.x,
+                c.sums,
+                c.map,
+                c.out,
+                slots,
+                c.starts,
+                c.work,
+            );
             try tile.encodeGrouped(e, p, c.s.matrix(0), experts, c.s.x, c.sums, c.map, c.out, slots, c.starts, c.work);
         }
     };
@@ -240,7 +269,15 @@ fn grouped(g: Gpu, s: Synth) !void {
         }
     };
     for ([_]bool{ false, true }) |glu| {
-        if (glu) try g.run(G{ .s = s, .sums = sums, .map = map, .out = out, .starts = starts, .work = work, .glu = true });
+        if (glu) try g.run(G{
+            .s = s,
+            .sums = sums,
+            .map = map,
+            .out = out,
+            .starts = starts,
+            .work = work,
+            .glu = true,
+        });
         try g.run(T{ .s = s, .ids = ids, .out = twin, .glu = glu });
         for (order, 0..) |slot, j| {
             if (!std.mem.eql(u16, bf16s(out, slots)[j * n ..][0..n], bf16s(twin, slots)[slot * n ..][0..n])) {
@@ -253,7 +290,13 @@ fn grouped(g: Gpu, s: Synth) !void {
 /// `--dump DIR`: each width's codes, scales, biases, inputs and tile outputs, for tile_qmm_reference.py.
 fn dump(io: std.Io, dir: []const u8, s: Synth, out: mtl.Buffer) !void {
     var buf: [512]u8 = undefined;
-    const parts = .{ .{ "w", s.w.slice(u8, n * k * @as(usize, s.bits) / 8) }, .{ "scales", std.mem.sliceAsBytes(s.s.slice(u16, n * (k / 64))) }, .{ "biases", std.mem.sliceAsBytes(s.b.slice(u16, n * (k / 64))) }, .{ "x", std.mem.sliceAsBytes(s.x.slice(u16, max_rows * k)) }, .{ "y", std.mem.sliceAsBytes(out.slice(u16, max_rows * n)) } };
+    const parts = .{
+        .{ "w", s.w.slice(u8, n * k * @as(usize, s.bits) / 8) },
+        .{ "scales", std.mem.sliceAsBytes(s.s.slice(u16, n * (k / 64))) },
+        .{ "biases", std.mem.sliceAsBytes(s.b.slice(u16, n * (k / 64))) },
+        .{ "x", std.mem.sliceAsBytes(s.x.slice(u16, max_rows * k)) },
+        .{ "y", std.mem.sliceAsBytes(out.slice(u16, max_rows * n)) },
+    };
     inline for (parts) |part| {
         const path = try std.fmt.bufPrint(&buf, "{s}/q{d}_{s}.bin", .{ dir, s.bits, part[0] });
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = part[1] });
@@ -289,8 +332,11 @@ pub fn main(init: std.process.Init) !void {
         }
         try grouped(g, s);
         passed += 1;
-        std.debug.print("{d}-bit {d}x{d}: rows alone, twin at widths 1-32, grouped, by slot and gate-up swiglu bit-equal; " ++
-            "error vs float64 / terms' magnitude: worst {e:.2}, mean {e:.2}\n", .{ bits, n, k, worst, mean });
+        std.debug.print(
+            "{d}-bit {d}x{d}: rows alone, twin at widths 1-32, grouped, by slot and gate-up swiglu bit-equal; " ++
+                "error vs float64 / terms' magnitude: worst {e:.2}, mean {e:.2}\n",
+            .{ bits, n, k, worst, mean },
+        );
         if (worst > 1.0 / 128.0) return error.FarFromFloat64;
     }
     std.debug.print("{d} widths passed, 0 failed\n", .{passed});

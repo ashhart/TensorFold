@@ -66,15 +66,17 @@ struct TfTqAhead {
 
 // GLU: the tile's halves are columns nb.. of gate (W, SC, BI) and of up (W2, SC2, BI2); else its BN columns of W.
 template <int BITS, int BM, int BN, bool GLU>
-inline void tf_tq_fetch(thread TfTqAhead<BITS>& a, const device bfloat* X, const device float* XS, const device uint8_t* W,
-                        const device bfloat* SC, const device bfloat* BI, const device uint8_t* W2, const device bfloat* SC2,
-                        const device bfloat* BI2, uint xr, uint sr, int K, int nb, int s, int tid) {
+inline void tf_tq_fetch(thread TfTqAhead<BITS>& a, const device bfloat* X, const device float* XS,
+                        const device uint8_t* W, const device bfloat* SC, const device bfloat* BI,
+                        const device uint8_t* W2, const device bfloat* SC2, const device bfloat* BI2, uint xr, uint sr,
+                        int K, int nb, int s, int tid) {
   const int G = K / 64, g = s / 2, k0 = g * 64 + s % 2 * 32;
   // The thread's input row is X's xr and its sum row XS's sr (resolved once a tile).
   a.x = *((const device uint4*)(X + size_t(xr) * K + k0) + tid % 4);
   const bool up = GLU && tid >= 64;
   const int col = nb + (GLU ? tid / 4 % (BN / 2) : tid / 4);
-  const device ushort* src = (const device ushort*)((up ? W2 : W) + size_t(col) * (K * BITS / 8) + (k0 + tid % 4 * 8) * BITS / 8);
+  const device ushort* src =
+      (const device ushort*)((up ? W2 : W) + size_t(col) * (K * BITS / 8) + (k0 + tid % 4 * 8) * BITS / 8);
   for (int i = 0; i < BITS / 2; ++i) a.w[i] = src[i];
   if (s % 2 == 0) {
     if (tid < BN) {
@@ -87,8 +89,8 @@ inline void tf_tq_fetch(thread TfTqAhead<BITS>& a, const device bfloat* X, const
 }
 
 template <int BITS, int BM, int BN>
-inline void tf_tq_stage(const thread TfTqAhead<BITS>& a, threadgroup bfloat* xs, threadgroup bfloat* ws, threadgroup float2* sb,
-                        threadgroup float* xsum, int s, int tid) {
+inline void tf_tq_stage(const thread TfTqAhead<BITS>& a, threadgroup bfloat* xs, threadgroup bfloat* ws,
+                        threadgroup float2* sb, threadgroup float* xsum, int s, int tid) {
   *(threadgroup uint4*)(xs + tid / 4 * TP + tid % 4 * 8) = a.x;
   *(threadgroup uint4*)(ws + tid / 4 * TP + tid % 4 * 8) = tf_tq_codes<BITS>(a.w);
   if (s % 2 == 0) {  // a group's scales, biases and sums by its parity (read after its second stage)
@@ -105,8 +107,8 @@ inline int tf_tq_col(int sc, int j) {
 
 // A stage's 4 k-steps of a simdgroup's TI x TJ blocks on staged inputs xb and codes wb.
 template <int TI, int TJ, bool GLU>
-inline void tf_tq_mmas(thread simdgroup_matrix<float, 8, 8> (*P)[TJ], const threadgroup bfloat* xb, const threadgroup bfloat* wb,
-                       int sr, int sc, int fm, int fn) {
+inline void tf_tq_mmas(thread simdgroup_matrix<float, 8, 8> (*P)[TJ], const threadgroup bfloat* xb,
+                       const threadgroup bfloat* wb, int sr, int sc, int fm, int fn) {
   #pragma unroll
   for (int kk = 0; kk < 32; kk += 8) {
     simdgroup_matrix<bfloat, 8, 8> a[TI], b[TJ];
@@ -129,9 +131,10 @@ inline void tf_tq_mmas(thread simdgroup_matrix<float, 8, 8> (*P)[TJ], const thre
 // One 32x32 tile of Y = X W^T: four simdgroups of 16x16, each 64-input group summed by bf16 MMAs into fp32 in k order.
 template <int BITS, int BM, int BN, bool PARTIAL, bool GLU, bool MAP>
 inline void tf_tq_tile(const device bfloat* X, const device float* XS, const device uint8_t* W, const device bfloat* SC,
-                       const device bfloat* BI, const device uint8_t* W2, const device bfloat* SC2, const device bfloat* BI2,
-                       const device uint* map, int K, int N, int R, device bfloat* OUT, int rb, int nb, uint tid, uint sg, uint lane,
-                       threadgroup bfloat* xs, threadgroup bfloat* ws, threadgroup float2* sb, threadgroup float* xsum) {
+                       const device bfloat* BI, const device uint8_t* W2, const device bfloat* SC2,
+                       const device bfloat* BI2, const device uint* map, int K, int N, int R, device bfloat* OUT,
+                       int rb, int nb, uint tid, uint sg, uint lane, threadgroup bfloat* xs, threadgroup bfloat* ws,
+                       threadgroup float2* sb, threadgroup float* xsum) {
   // Then acc = fma(bias, xsum, fma(scale, group, acc)) per output, XS [R, K / 64] from tf_tile_xsum.
   static_assert(BM == 32 && BN == 32, "128 threads stage 32 rows and 32 columns, 8 values each");
   constexpr int TI = BM / 16, TJ = BN / 16;  // 8x8 blocks a simdgroup (2x2 simdgroups)
@@ -159,7 +162,8 @@ inline void tf_tq_tile(const device bfloat* X, const device float* XS, const dev
     const int s = 2 * g;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     tf_tq_stage<BITS, BM, BN>(odd, xs + BM * TP, ws + BN * TP, sb, xsum, s + 1, int(tid));
-    if (s + 2 < S) tf_tq_fetch<BITS, BM, BN, GLU>(even, X, XS, W, SC, BI, W2, SC2, BI2, xr, srw, K, nb, s + 2, int(tid));
+    if (s + 2 < S) tf_tq_fetch<BITS, BM, BN, GLU>(even, X, XS, W, SC, BI, W2, SC2, BI2, xr, srw, K, nb, s + 2,
+                                                  int(tid));
     simdgroup_matrix<float, 8, 8> P[TI][TJ];
     for (int i = 0; i < TI; ++i)
       for (int j = 0; j < TJ; ++j) P[i][j] = simdgroup_matrix<float, 8, 8>(0.0f);
@@ -175,7 +179,8 @@ inline void tf_tq_tile(const device bfloat* X, const device float* XS, const dev
     for (int j = 0; j < TJ; ++j)
       for (int e = 0; e < 2; ++e) {
         const float2 v = sbg[tf_tq_col<GLU>(sc, j) + fn + e];
-        for (int i = 0; i < TI; ++i) acc[i][j][e] = fma(v.y, xsr[i], fma(v.x, P[i][j].thread_elements()[e], acc[i][j][e]));
+        for (int i = 0; i < TI; ++i) acc[i][j][e] = fma(v.y, xsr[i],
+                                                        fma(v.x, P[i][j].thread_elements()[e], acc[i][j][e]));
       }
   }
   for (int i = 0; i < TI; ++i)
@@ -192,14 +197,15 @@ inline void tf_tq_tile(const device bfloat* X, const device float* XS, const dev
 template <int BITS>
 [[kernel]] void tf_tile_qmm(const device bfloat* X [[buffer(0)]], const device uint8_t* W [[buffer(1)]],
                             const device bfloat* SC [[buffer(2)]], const device bfloat* BI [[buffer(3)]],
-                            constant TfTqArgs& a [[buffer(4)]], device bfloat* OUT [[buffer(5)]], const device float* XS [[buffer(6)]],
-                            uint tid [[thread_index_in_threadgroup]], uint sg [[simdgroup_index_in_threadgroup]],
-                            uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+                            constant TfTqArgs& a [[buffer(4)]], device bfloat* OUT [[buffer(5)]],
+                            const device float* XS [[buffer(6)]], uint tid [[thread_index_in_threadgroup]],
+                            uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                            uint3 tg [[threadgroup_position_in_grid]]) {
   threadgroup bfloat xs[2 * TQ * TP], ws[2 * TQN * TP];
   threadgroup float2 sb[2 * TQN];
   threadgroup float xsum[2 * TQ];
-  tf_tq_tile<BITS, TQ, TQN, false, false, false>(X, XS, W, SC, BI, W, SC, BI, nullptr, a.K, a.N, a.R, OUT, int(tg.y) * TQ,
-                                                 int(tg.x) * TQN, tid, sg, lane, xs, ws, sb, xsum);
+  tf_tq_tile<BITS, TQ, TQN, false, false, false>(X, XS, W, SC, BI, W, SC, BI, nullptr, a.K, a.N, a.R, OUT,
+                                                 int(tg.y) * TQ, int(tg.x) * TQN, tid, sg, lane, xs, ws, sb, xsum);
 }
 
 // The tiles over rows sorted by expert: item tg.y of WORK[1..WORK[0]] = (expert << 16) | row tile, rows from STARTS.
@@ -211,8 +217,8 @@ template <int BITS, bool GLU>
                                     const device float* XS [[buffer(8)]], const device uint8_t* W2 [[buffer(9)]],
                                     const device bfloat* SC2 [[buffer(10)]], const device bfloat* BI2 [[buffer(11)]],
                                     const device uint* map [[buffer(12)]], uint tid [[thread_index_in_threadgroup]],
-                                    uint sg [[simdgroup_index_in_threadgroup]],
-                                    uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+                                    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                                    uint3 tg [[threadgroup_position_in_grid]]) {
   threadgroup bfloat xs[2 * TQ * TP], ws[2 * TQN * TP];
   threadgroup float2 sb[2 * TQN];
   threadgroup float xsum[2 * TQ];
@@ -222,9 +228,10 @@ template <int BITS, bool GLU>
   const uint first = starts[e], rows = starts[e + 1] - first;
   // GLU: W2/SC2/BI2 are the up experts (the same shape), OUT [rows, N] their swiglu with W's gate, 16 columns a tile.
   const size_t K = size_t(a.K), N = size_t(a.N), at = e * N * (K * BITS / 8), sat = e * N * (K / 64);
-  tf_tq_tile<BITS, TQ, TQN, true, GLU, true>(X, XS, W + at, SC + sat, BI + sat, W2 + at, SC2 + sat, BI2 + sat, map + first, a.K, a.N,
-                                             int(rows), OUT + first * N, int(item & 0xFFFFu) * TQ, int(tg.x) * (GLU ? TQN / 2 : TQN),
-                                             tid, sg, lane, xs, ws, sb, xsum);
+  tf_tq_tile<BITS, TQ, TQN, true, GLU, true>(X, XS, W + at, SC + sat, BI + sat, W2 + at, SC2 + sat, BI2 + sat,
+                                             map + first, a.K, a.N, int(rows), OUT + first * N,
+                                             int(item & 0xFFFFu) * TQ, int(tg.x) * (GLU ? TQN / 2 : TQN), tid, sg, lane,
+                                             xs, ws, sb, xsum);
 }
 
 // The grouped tiles' work list from STARTS [E + 1]: count, then (expert << 16) | tile for each expert's 32-row tiles.
@@ -239,8 +246,8 @@ template <int BITS, bool GLU>
 }
 
 // Each row's group sums for the twin [rows, K / 64]: x0 then + x1 ... + x63 in order, as the tiles' xsum.
-[[kernel]] void tf_tile_xsum(const device bfloat* X [[buffer(0)]], constant TfTqArgs& a [[buffer(1)]], device float* XS [[buffer(2)]],
-                             uint2 at [[thread_position_in_grid]]) {
+[[kernel]] void tf_tile_xsum(const device bfloat* X [[buffer(0)]], constant TfTqArgs& a [[buffer(1)]],
+                             device float* XS [[buffer(2)]], uint2 at [[thread_position_in_grid]]) {
   const int G = a.K / 64;
   if (int(at.x) >= G) return;
   const device uint4* x = (const device uint4*)(X + size_t(at.y) * a.K + at.x * 64);
@@ -272,7 +279,8 @@ constant constexpr int TQ_SG = 2;
 
 // Group g's 64-step fma chains (the MMA order) and input sum; at 4 bits a code in place meets x * 16^-j (same product).
 template <int BITS, int NC>
-inline float tf_tq_group(const device bfloat* x, const device uint8_t* w, size_t stride, int g, thread float* p, float one) {
+inline float tf_tq_group(const device bfloat* x, const device uint8_t* w, size_t stride, int g, thread float* p,
+                         float one) {
   constexpr int GW = 2 * BITS;  // words a group of 64 codes
   float t = 0.0f;
   for (int c = 0; c < NC; ++c) p[c] = 0.0f;
@@ -365,8 +373,9 @@ inline void tf_tq_group_rows(const device bfloat* x, int K, int rows, const devi
 
 // NC columns of up to TQ_RT rows at 4 bits, 32 groups a round: a group a lane, then lane r * NC + c chains row r's c.
 template <int NC>
-inline void tf_tq_columns_rows(const device bfloat* x, int rows, float one, const device uint8_t* w, const device bfloat* sc,
-                               const device bfloat* bi, int K, int N, device bfloat* out, uint lane, threadgroup float* part) {
+inline void tf_tq_columns_rows(const device bfloat* x, int rows, float one, const device uint8_t* w,
+                               const device bfloat* sc, const device bfloat* bi, int K, int N, device bfloat* out,
+                               uint lane, threadgroup float* part) {
   const int G = K / 64;
   const size_t stride = size_t(K) / 2;
   const int r = int(lane) / NC, c = int(lane) % NC;
@@ -436,8 +445,9 @@ template <int BITS>
   if (n >= a.N) return;
   if (BITS == 4 && a.R > 1) {
     const int r0 = int(tg.y) * TQ_RT, rows = min(TQ_RT, a.R - r0);
-    tf_tq_columns_rows<NC>(X + size_t(r0) * K, rows, a.one, W + size_t(n) * (K / 2), SC + size_t(n) * G, BI + size_t(n) * G, K,
-                           a.N, OUT + size_t(r0) * a.N + n, lane, part + sg * rows * (NC + 1) * 32);
+    tf_tq_columns_rows<NC>(X + size_t(r0) * K, rows, a.one, W + size_t(n) * (K / 2), SC + size_t(n) * G,
+                           BI + size_t(n) * G, K, a.N, OUT + size_t(r0) * a.N + n, lane,
+                           part + sg * rows * (NC + 1) * 32);
     return;
   }
   const int r = int(tg.y);
@@ -477,20 +487,28 @@ template <int BITS>
   if (n >= a.N) return;
   const size_t e = ids[tg.y], row = tg.y / uint(a.R), m = e * size_t(a.N) + n;
   threadgroup float* own = part + sg * (NC + 1) * 32;
-  const float g = tf_tq_columns<BITS, NC>(X + row * K, a.one, W + m * (K * BITS / 8), SC + m * G, BI + m * G, K, lane, own);
-  const float u = tf_tq_columns<BITS, NC>(X + row * K, a.one, W2 + m * (K * BITS / 8), SC2 + m * G, BI2 + m * G, K, lane, own);
+  const float g = tf_tq_columns<BITS, NC>(X + row * K, a.one, W + m * (K * BITS / 8), SC + m * G, BI + m * G, K, lane,
+                                          own);
+  const float u = tf_tq_columns<BITS, NC>(X + row * K, a.one, W2 + m * (K * BITS / 8), SC2 + m * G, BI2 + m * G, K,
+                                          lane, own);
   if (int(lane) < NC) OUT[size_t(tg.y) * a.N + n + lane] = tf_tq_swiglu(bfloat(g), bfloat(u));
 }
 
 template [[host_name("tf_tile_qmm_q4")]] [[kernel]] decltype(tf_tile_qmm<4>) tf_tile_qmm<4>;
 template [[host_name("tf_tile_qmm_q6")]] [[kernel]] decltype(tf_tile_qmm<6>) tf_tile_qmm<6>;
 template [[host_name("tf_tile_qmm_q8")]] [[kernel]] decltype(tf_tile_qmm<8>) tf_tile_qmm<8>;
-template [[host_name("tf_tile_qmm_grouped_q4")]] [[kernel]] decltype(tf_tile_qmm_grouped<4, false>) tf_tile_qmm_grouped<4, false>;
-template [[host_name("tf_tile_qmm_grouped_glu_q4")]] [[kernel]] decltype(tf_tile_qmm_grouped<4, true>) tf_tile_qmm_grouped<4, true>;
-template [[host_name("tf_tile_qmm_grouped_q6")]] [[kernel]] decltype(tf_tile_qmm_grouped<6, false>) tf_tile_qmm_grouped<6, false>;
-template [[host_name("tf_tile_qmm_grouped_glu_q6")]] [[kernel]] decltype(tf_tile_qmm_grouped<6, true>) tf_tile_qmm_grouped<6, true>;
-template [[host_name("tf_tile_qmm_grouped_q8")]] [[kernel]] decltype(tf_tile_qmm_grouped<8, false>) tf_tile_qmm_grouped<8, false>;
-template [[host_name("tf_tile_qmm_grouped_glu_q8")]] [[kernel]] decltype(tf_tile_qmm_grouped<8, true>) tf_tile_qmm_grouped<8, true>;
+template [[host_name("tf_tile_qmm_grouped_q4")]] [[kernel]] decltype(tf_tile_qmm_grouped<4, false>)
+    tf_tile_qmm_grouped<4, false>;
+template [[host_name("tf_tile_qmm_grouped_glu_q4")]] [[kernel]] decltype(tf_tile_qmm_grouped<4, true>)
+    tf_tile_qmm_grouped<4, true>;
+template [[host_name("tf_tile_qmm_grouped_q6")]] [[kernel]] decltype(tf_tile_qmm_grouped<6, false>)
+    tf_tile_qmm_grouped<6, false>;
+template [[host_name("tf_tile_qmm_grouped_glu_q6")]] [[kernel]] decltype(tf_tile_qmm_grouped<6, true>)
+    tf_tile_qmm_grouped<6, true>;
+template [[host_name("tf_tile_qmm_grouped_q8")]] [[kernel]] decltype(tf_tile_qmm_grouped<8, false>)
+    tf_tile_qmm_grouped<8, false>;
+template [[host_name("tf_tile_qmm_grouped_glu_q8")]] [[kernel]] decltype(tf_tile_qmm_grouped<8, true>)
+    tf_tile_qmm_grouped<8, true>;
 template [[host_name("tf_tile_qmv_q4")]] [[kernel]] decltype(tf_tile_qmv<4>) tf_tile_qmv<4>;
 template [[host_name("tf_tile_qmv_q6")]] [[kernel]] decltype(tf_tile_qmv<6>) tf_tile_qmv<6>;
 template [[host_name("tf_tile_qmv_q8")]] [[kernel]] decltype(tf_tile_qmv<8>) tf_tile_qmv<8>;
