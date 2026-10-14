@@ -3,7 +3,8 @@
 This recipe describes the Python 0.6.6 engine, maintained on
 [`python-0.6`](https://github.com/ashhart/TensorFold/tree/python-0.6).
 Its CUDA EXL3 reader, two-rank flags and DFlash2 policies do not apply to the native Zig binary.
-The native binary serves GLM on two M5 Ultra Macs with MLX affine 4-bit/group-64 weights; it has no GLM CUDA backend yet.
+The native binary serves GLM on two M5 Ultra Macs with MLX affine 4-bit/group-64 weights; it does not serve GLM on
+CUDA yet ([its CUDA engine](#native-cuda-engine-zig) runs under `tf-cuda-test` only).
 That is not an engine-only replacement for a CUDA EXL3 deployment.
 For native serving, use the [qualified model table](../../README.md#qualified-models) and
 [paired Metal runbook](../../RUNBOOK.md#flash-next-and-paired-metal-serving).
@@ -60,6 +61,34 @@ two-rank command above, substituting its checkpoint ID on both ranks. With DFlas
 The expert decoder and BF16 target matmul keep row arithmetic fixed. A quantized copy of the head may
 propose drafts, but target verification retains the BF16 head. EXL3 speed, capacity and long-context
 qualification are TBD [release-0.3.5].
+
+### Native CUDA engine (Zig)
+
+The Zig side carries a GLM-5.3-Flash engine for two CUDA ranks that reads
+`vcruz305/RED-SNOW-5.3-FLASH-EXL3-SAGE-4.91bpw` (EXL3 `mul1` at mixed widths, unsplit). Each rank takes its
+shard at load. Its kernels are hand-written CUDA ported from the Python engine on this repository's `redsnow-v1`
+branch. They cover the bf16 matmul and glue, KDA's decode chain and chunked prompt kernels, the DSA indexer and
+top-pool selection, latent attention, hyper-connection mixing, the MoE router and EXL3 experts, the dense MLP of
+layers 0-2, and the head with its greedy pick. Each one keeps the Python engine's order of operations, so a
+greedy reply is token for token the Python engine's `"draft": false` reply. Prompts run in 2,048-row chunks;
+decoding is serial (no drafts).
+
+Two commands check it, both built by `zig build -Dnvcc=/usr/local/cuda/bin/nvcc`:
+
+```bash
+# fixtures from the Python engine (run on a CUDA box with redsnow-v1 installed), then the kernels and layers
+python zig/tests/cuda/oracle/glm_oracle.py --model MODEL_DIR --out FIXTURES
+tf-cuda-test glm FIXTURES
+# the whole model at TP=2, a process a rank (rank 1 first), against recorded replies
+tf-cuda-test glm-model 1 HOST:PORT MODEL_DIR reference.json
+tf-cuda-test glm-model 0 HOST:PORT MODEL_DIR reference.json
+```
+
+`tf-cuda-test glm` holds every kernel against float64 references and the Python engine's bytes, then whole KDA
+and DSA layers of the real checkpoint at TP=2. `reference.json` is
+`{"cases": [{"name", "prompt_ids", "ids"}], "eos_ids"}`: the Python engine's greedy replies with `"draft": false`.
+A case passes when the Zig reply's ids equal `ids`. Rank 0 prints a PASS or FAIL line for each case and
+`RESULT glm.model.prefill_tps` / `decode_tps`.
 
 ### Draft policies
 

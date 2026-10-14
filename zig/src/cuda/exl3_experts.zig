@@ -108,7 +108,7 @@ pub const Experts = struct {
     grouped: [3]Function, // one per codebook
     gateup: Function,
     down_combine: Function,
-
+    down_epilogue: Function,
     pub fn load(d: *const Driver) !Experts {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var e: Experts = .{
@@ -118,6 +118,7 @@ pub const Experts = struct {
             .grouped = undefined,
             .gateup = undefined,
             .down_combine = undefined,
+            .down_epilogue = undefined,
         };
         errdefer e.mod.unload();
         e.group = try e.mod.function("tf_exl3_group");
@@ -130,6 +131,7 @@ pub const Experts = struct {
         };
         e.gateup = try e.mod.function("tf_exl3_gateup_epilogue");
         e.down_combine = try e.mod.function("tf_exl3_down_combine");
+        e.down_epilogue = try e.mod.function("tf_exl3_down_epilogue");
         return e;
     }
 
@@ -137,8 +139,8 @@ pub const Experts = struct {
         e.mod.unload();
     }
 
-    /// The routed experts of `rows` rows: group, rotate in, grouped gate/up, SwiGLU, grouped down, wts-weighted sum.
-    pub fn run(e: *const Experts, s: Stream, l: Layer, x: u64, x_stride: usize, x_dtype: DType, pick: u64, wts: u64, rows: usize, out: u64, sc: Scratch) !void {
+    /// The pipeline through the grouped down partials; run and runPerSlot each add their epilogue launch.
+    fn pipeline(e: *const Experts, s: Stream, l: Layer, x: u64, x_stride: usize, x_dtype: DType, pick: u64, rows: usize, sc: Scratch) !void {
         const d = l.dims;
         const w = l.width;
         const slots = sc.slots;
@@ -165,7 +167,9 @@ pub const Experts = struct {
         a.add(i32d(slots));
         a.add(i32d(l.experts));
         a.add(i32d(rows));
-        try launch_.launch(e.group, .{ .grid = .{ .x = 1, .y = 1, .z = 1 }, .block = .{ .x = 1024, .y = 1, .z = 1 }, .shared = @intCast(rows * slots * 4) }, s, &a);
+        const group_shared: u32 = @intCast(rows * slots * 4); // a prompt chunk's 2,048 rows of 9 slots take 72 KiB
+        if (group_shared > 48 * 1024) try e.group.allowDynamicShared(group_shared);
+        try launch_.launch(e.group, .{ .grid = .{ .x = 1, .y = 1, .z = 1 }, .block = .{ .x = 1024, .y = 1, .z = 1 }, .shared = group_shared }, s, &a);
 
         var r: launch_.Args = .{};
         r.add(x);
@@ -239,7 +243,15 @@ pub const Experts = struct {
         dn.add(@as(i32, 1));
         dn.add(@as(i32, 0));
         try launch_.launch(e.grouped[@backingInt(l.codebook)], .{ .grid = .{ .x = @intCast(maxu), .y = @intCast(d / 128), .z = @intCast(d_sk * mt) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &dn);
+    }
 
+    /// The routed experts of `rows` rows: the pipeline, then the wts-weighted sum (down_combine).
+    pub fn run(e: *const Experts, s: Stream, l: Layer, x: u64, x_stride: usize, x_dtype: DType, pick: u64, wts: u64, rows: usize, out: u64, sc: Scratch) !void {
+        try e.pipeline(s, l, x, x_stride, x_dtype, pick, rows, sc);
+        const d = l.dims;
+        const slots = sc.slots;
+        const p = rows * slots;
+        const d_sk = try plan(l.width, l.dims, false);
         var cb: launch_.Args = .{};
         cb.add(sc.z);
         cb.add(pick);
@@ -247,12 +259,33 @@ pub const Experts = struct {
         cb.add(sc.y);
         cb.add(wts);
         cb.add(out);
-        cb.add(i32d(p));
-        cb.add(i32d(d));
-        cb.add(i32d(d_sk));
-        cb.add(i32d(l.experts));
-        cb.add(i32d(slots));
+        cb.add(@as(i32, @intCast(p)));
+        cb.add(@as(i32, @intCast(d)));
+        cb.add(@as(i32, @intCast(d_sk)));
+        cb.add(@as(i32, @intCast(l.experts)));
+        cb.add(@as(i32, @intCast(slots)));
         try launch_.launch(e.down_combine, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(d / 128), .z = 1 }, .block = .{ .x = @intCast(32 * slots), .y = 1, .z = 1 } }, s, &cb);
+    }
+
+    /// The pipeline, but the last stage writes each slot's own fp32 y ([rows * slots, d]); invalid picks untouched.
+    pub fn runPerSlot(e: *const Experts, s: Stream, l: Layer, x: u64, x_stride: usize, x_dtype: DType, pick: u64, rows: usize, y: u64, sc: Scratch) !void {
+        try e.pipeline(s, l, x, x_stride, x_dtype, pick, rows, sc);
+        const d = l.dims;
+        const p = rows * sc.slots;
+        const d_sk = try plan(l.width, l.dims, false);
+        var ep: launch_.Args = .{};
+        ep.add(sc.z);
+        ep.add(pick);
+        ep.add(l.svh_d);
+        ep.add(y);
+        ep.add(@as(u64, 0)); // wts, unused
+        ep.add(@as(u64, 0)); // out, unused
+        ep.add(@as(i32, @intCast(p)));
+        ep.add(@as(i32, @intCast(d)));
+        ep.add(@as(i32, @intCast(d_sk)));
+        ep.add(@as(i32, @intCast(l.experts)));
+        ep.add(@as(i32, @intCast(sc.slots)));
+        try launch_.launch(e.down_epilogue, .{ .grid = .{ .x = @intCast(p), .y = @intCast(d / 128), .z = 1 }, .block = .{ .x = 32, .y = 1, .z = 1 } }, s, &ep);
     }
 };
 

@@ -21,6 +21,7 @@ pub const Dim3 = launch.Dim3;
 pub const graph = @import("graph.zig");
 pub const cublaslt = @import("cublaslt.zig");
 pub const nccl = @import("nccl.zig");
+pub const nccl_id = @import("nccl_id.zig");
 pub const triton = @import("triton.zig");
 pub const aot = @import("aot.zig");
 pub const kernels = @import("kernels.zig");
@@ -39,6 +40,16 @@ pub const modelopt = @import("modelopt.zig");
 pub const exl3 = @import("exl3.zig");
 pub const exl3_experts = @import("exl3_experts.zig");
 pub const exl3_upload = @import("exl3_upload.zig");
+pub const glm_kda = @import("glm_kda.zig");
+pub const glm_kda_chunk = @import("glm_kda_chunk.zig");
+pub const glm_bmm = @import("glm_bmm.zig");
+pub const glm_glue = @import("glm_glue.zig");
+pub const glm_glue2 = @import("glm_glue2.zig");
+pub const glm_sparse = @import("glm_sparse.zig");
+pub const glm_latent = @import("glm_latent.zig");
+pub const glm_layer = @import("glm_layer.zig");
+pub const glm_head = @import("glm_head.zig");
+pub const glm_dsa = @import("glm_dsa.zig");
 
 test {
     _ = @import("memory.zig");
@@ -59,5 +70,15 @@ test {
     _ = exl3;
     _ = exl3_experts;
     _ = exl3_upload;
+    _ = glm_kda;
+    _ = glm_kda_chunk;
+    _ = glm_bmm;
+    _ = glm_glue;
+    _ = glm_glue2;
+    _ = glm_sparse;
+    _ = glm_latent;
+    _ = glm_layer;
+    _ = glm_head;
+    _ = glm_dsa;
     _ = @import("modelopt.zig");
 }

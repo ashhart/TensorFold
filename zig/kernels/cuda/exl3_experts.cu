@@ -365,4 +365,21 @@ extern "C" __global__ void tf_exl3_down_combine(const DownArgs a) {
     for (int j = 0; j < 4; ++j) a.out[(size_t)r * a.d + n + j] = acc[j];
 }
 
+// The down projection's epilogue alone (experts.cu down_epilogue_kernel): y [P, D] fp32, invalid picks untouched.
+extern "C" __global__ void tf_exl3_down_epilogue(const DownArgs a) {
+    const int p = blockIdx.x, blk = blockIdx.y, lane = threadIdx.x;
+    const int n = blk * 128 + 4 * lane;
+    const int e = a.pick[p];
+    if (e < 0 || e >= a.experts) return;
+    float v[4];
+    for (int j = 0; j < 4; ++j) {
+        float s = 0.f;
+        for (int q = 0; q < a.sk; ++q) s += a.z[((size_t)q * a.p + p) * a.d + n + j];
+        v[j] = s;
+    }
+    fwht128(v, lane);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) a.y[(size_t)p * a.d + n + j] = v[j] * HAD_SCALE * __half2float(a.svh_d[(size_t)e * a.d + n + j]);
+}
+
 }  // namespace tf_exl3
