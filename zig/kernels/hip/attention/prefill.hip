@@ -168,11 +168,11 @@ __device__ void fa_dot2(const float* __restrict__ q, const Cache* __restrict__ k
 #pragma unroll
             for (int lane = 8; lane > 0; lane >>= 1) tile_max = fmaxf(tile_max, __shfl_xor(tile_max, lane, 16));
             const float next_m = fmaxf(m_run[i], tile_max);
-            const float alpha = next_m == -INFINITY ? 1.f : __expf(m_run[i] - next_m);
+            const float alpha = next_m == -INFINITY ? 1.f : expf(m_run[i] - next_m);
             float p[4], sum = 0.f;
 #pragma unroll
             for (int j = 0; j < 4; ++j) {
-                p[j] = next_m == -INFINITY ? 0.f : __expf(acc[i][j] - next_m);
+                p[j] = next_m == -INFINITY ? 0.f : expf(acc[i][j] - next_m);
                 sum += p[j];
             }
 #pragma unroll
