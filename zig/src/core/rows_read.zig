@@ -138,11 +138,11 @@ pub fn resumable(s: *pc.Store, prompt: []const u32, starts: []const u32, spans: 
     var out: Resume = .{ .tokens = @intCast(prompt.len) };
     if (s.find(prompt, starts, spans)) |e| out.ram = e.at;
     const r = s.disk orelse return finishResume(s, out, 0);
-    if (r.best(prompt, starts, spans, out.ram)) |i| {
+    if (r.best(prompt, starts, spans, 0)) |i| {
         const st = r.states.items[i];
         out.disk = st.at;
         out.disk_bytes = st.own + st.rows;
-        if (worth(r, i, out.ram)) return finishResume(s, out, @as(f64, @floatFromInt(out.disk_bytes)) / r.read_rate);
+        if (st.at > out.ram and worth(r, i, out.ram)) return finishResume(s, out, @as(f64, @floatFromInt(out.disk_bytes)) / r.read_rate);
     }
     return finishResume(s, out, 0);
 }
