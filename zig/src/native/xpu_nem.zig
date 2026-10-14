@@ -131,11 +131,13 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     h.backend = try lane.Xpu(S).init(gpa, h.engine);
     h.backend.halt = &stopping;
     h.backend.started = chainStopHandlers;
-    h.cfg = try lanes.Config.init(gpa, h.backend.facts(), 1, 0);
+    try h.backend.measure();
+    const facts = h.backend.facts();
+    h.cfg = try lanes.Config.init(gpa, facts, facts.exact_width, facts.exact_width - 1);
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, h.backend.backend(), h.clock.clock());
     const note = try S.note(a, h.engine);
-    h.startup = try std.fmt.allocPrint(gpa, "Intel GPU engine: {s}, {d:.2} GB on the device, context {d}{s}; one stream at a time on the lane core, sampling on the host, no drafts", .{ h.ctx.name(), @as(f64, @floatFromInt(xpu.rt.alloc_now)) / 1e9, window, note });
+    h.startup = try std.fmt.allocPrint(gpa, "Intel GPU engine: {s}, {d:.2} GB on the device, context {d}{s}; one stream at a time on the lane core, sampling on the host", .{ h.ctx.name(), @as(f64, @floatFromInt(xpu.rt.alloc_now)) / 1e9, window, note });
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = S.name, .lanes = 1, .context_window = @intCast(window), .context_fitted = true, .startup = h.startup });
     h.host.memory = .{ .read = readMemory };
     h.host.explain = .{ .text = lane.explain };
