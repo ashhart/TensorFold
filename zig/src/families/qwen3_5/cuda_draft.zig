@@ -1,5 +1,6 @@
 //! The DFlash2 drafter on CUDA behind core/lanes/drafter.zig: a tap ring a stream, 7 drafts as a chain or a tree.
 const std = @import("std");
+const platform = @import("sys");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
@@ -219,7 +220,7 @@ pub const Draft = struct {
 
     /// The target's window of `rows` rows takes `ms` (told by cuda_native.zig before the facts are read).
     pub fn setCost(d: *Draft, rows: u32, ms: f64) void {
-        if (std.c.getenv("TF_TIMING") != null) std.debug.print("[timing] window {d} rows {d:.2} ms (a hold level {d:.2})\n", .{ rows, ms, d.step_ms });
+        if (platform.c.getenv("TF_TIMING") != null) std.debug.print("[timing] window {d} rows {d:.2} ms (a hold level {d:.2})\n", .{ rows, ms, d.step_ms });
         if (d.n_costs < d.costs.len) {
             d.costs[d.n_costs] = .{ .width = rows, .ms = ms };
             d.n_costs += 1;
@@ -406,11 +407,11 @@ pub const Draft = struct {
         try e.stream.synchronize();
         if (lanes_) |l| {
             try d.selectLanes(ctx, pending, rows, l);
-            if (std.c.getenv("TF_TIMING") != null) std.debug.print("[timing] lanes {d} levels {d}\n", .{ l.parents.len, l.levels() });
+            if (platform.c.getenv("TF_TIMING") != null) std.debug.print("[timing] lanes {d} levels {d}\n", .{ l.parents.len, l.levels() });
         } else {
             d.select(ctx, pending, rows);
             ctx.held_n = @min(depth, rows);
-            if (std.c.getenv("TF_TIMING") != null) std.debug.print("[timing] chain {d}\n", .{ctx.held_n});
+            if (platform.c.getenv("TF_TIMING") != null) std.debug.print("[timing] chain {d}\n", .{ctx.held_n});
         }
     }
 
@@ -479,7 +480,7 @@ pub const Draft = struct {
     fn factsFn(p: *anyopaque) dr.Facts {
         const d = cast(p);
         // TF_NO_TREES=1: chains only (for comparing)
-        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = false, .stream_bytes = d.c.ringBytes(), .trees = std.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs] };
+        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = false, .stream_bytes = d.c.ringBytes(), .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs] };
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
@@ -539,7 +540,7 @@ fn bf16(h: u16) f32 {
 
 /// TF_TIMING=1: each call's wall time on stderr.
 pub fn timing(what: []const u8, io: std.Io, t0: std.Io.Timestamp) void {
-    if (std.c.getenv("TF_TIMING") == null) return;
+    if (platform.c.getenv("TF_TIMING") == null) return;
     const now = std.Io.Clock.awake.now(io);
     const ns: f64 = @floatFromInt(t0.durationTo(now).toNanoseconds());
     const at: f64 = @floatFromInt(@mod(now.toNanoseconds(), 1_000_000_000_000));
