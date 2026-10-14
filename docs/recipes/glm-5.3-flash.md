@@ -70,8 +70,12 @@ shard at load. Its kernels are hand-written CUDA ported from the Python engine o
 branch. They cover the bf16 matmul and glue, KDA's decode chain and chunked prompt kernels, the DSA indexer and
 top-pool selection, latent attention, hyper-connection mixing, the MoE router and EXL3 experts, the dense MLP of
 layers 0-2, and the head with its greedy pick. Each one keeps the Python engine's order of operations, so a
-greedy reply is token for token the Python engine's `"draft": false` reply. Prompts run in 2,048-row chunks;
-decoding is serial (no drafts).
+greedy reply is token for token the Python engine's `"draft": false` reply. Prompts run in 2,048-row chunks.
+Decoding is serial (no drafts): each step replays a captured CUDA graph, one per KDA parity in the dense window and
+one per pool bucket past it.
+
+On two GB10s, over the eight reference prompts (221 to 16,416 prompt tokens; 24,099 in all), it read prompts at
+435.0 tok/s and decoded at 24.7 tok/s. The Python engine decodes serially at 24.6 tok/s.
 
 Two commands check it, both built by `zig build -Dnvcc=/usr/local/cuda/bin/nvcc`:
 

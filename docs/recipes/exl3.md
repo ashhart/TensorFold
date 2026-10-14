@@ -182,8 +182,10 @@ row's bits match it:
 
 - `zig/kernels/cuda/exl3_decode.cuh`, `exl3_linear.cu`, `zig/src/cuda/exl3.zig`: the input rotation and the linear
   for 1 to 128 rows, every codebook and width (the `mul1` half steps included), with the K split planned from the
-  layer's shape alone. `exl3.Dense` runs prompt rows in 128-row blocks of the same kernel, so a prompt row's bits
-  equal its decode-row bits wherever its chunk starts; `qlinear.Weight` has an `.exl3` arm for both.
+  layer's shape alone. `exl3.Dense` runs prompt rows in 128-row blocks. A block of more than 16 rows on a `mul1`
+  weight takes the prompt kernel: 64-row passes that decode each weight tile once, keeping the decode-row kernel's
+  sums in its order. A prompt row's bits therefore equal its decode-row bits wherever its chunk starts.
+  `qlinear.Weight` has an `.exl3` arm for both.
 - `zig/kernels/cuda/exl3_experts.cu`, `zig/src/cuda/exl3_experts.zig`: grouped routed experts (member lists,
   each expert's rotation, gate and up, GLM's SwiGLU roundings, down and the weighted combine), widths mixed within
   a layer; an expert's member count never changes a row's bits.
