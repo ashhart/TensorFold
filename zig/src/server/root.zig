@@ -49,6 +49,8 @@ test {
     _ = @import("server_init_test.zig");
     _ = @import("decisions.zig");
     _ = @import("decisions_test.zig");
+    _ = @import("systemone.zig");
+    _ = @import("systemone_test.zig");
     _ = @import("slide.zig");
     _ = @import("slide_cli.zig");
     _ = @import("slide_key.zig");

@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const api = @import("engine_api");
 const lanes = @import("lanes");
 const nemotron = @import("nemotron");
+const lfm2 = @import("lfm2.zig");
 const Allocator = std.mem.Allocator;
 const budget = @import("cuda_memory.zig");
 const lane_backend = @import("cuda_bound.zig");
@@ -16,8 +17,9 @@ const registry = .{nemotron.native};
 
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const families: []const api.Family = blk: {
-    var out: [registry.len]api.Family = undefined;
+    var out: [registry.len + 1]api.Family = undefined;
     for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats };
+    out[registry.len] = lfm2.family;
     const final = out;
     break :blk &final;
 };
@@ -246,6 +248,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     inline for (registry) |F| {
         if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
     }
+    if (std.mem.eql(u8, o.model_type, lfm2.family.model_type)) return lfm2.open(a, gpa, io, o, problem);
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
 }
@@ -460,9 +463,10 @@ test "chip classes name the compute capability as gate entries do" {
     try std.testing.expectEqualStrings("nvidia-sm121", name);
 }
 
-test "every registered family is listed for capabilities" {
-    try std.testing.expectEqual(@as(usize, registry.len), families.len);
+test "every registered family and d1's decision engine are listed for capabilities" {
+    try std.testing.expectEqual(@as(usize, registry.len + 1), families.len);
     try std.testing.expectEqualStrings("nemotron_h", families[0].model_type);
+    try std.testing.expectEqualStrings("lfm2_vl", families[registry.len].model_type);
 }
 
 test "variables: unset or empty means the default, anything but a whole number is refused" {
