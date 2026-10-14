@@ -1,18 +1,4 @@
-"""GLM-5.3-Flash image input against the Python frontend, on a fixed image set (#565's gate).
-
-    python -I tools/zig/glm_vision_fixtures.py --model DIR --out DIR [--tower zig-out/bin/tf-glm-vision]
-
-Draws the image set (each case a preprocessing path: padding only, an antialiased downscale, an upscale, alpha over
-white, a palette with a transparent entry, gray with alpha, EXIF orientation, baseline JPEG), then for each image
-writes what TensorFold 0.6.6's --vision gives (vision/images.py's decode: EXIF orientation, alpha over white; then
-mlx-vlm's Glm5NextImageProcessor and tower, the code 0.6.6 serves):
-  patches.f32   (grid_h*grid_w, 1176) normalized patches, temporal frames duplicated
-  embed.f32 / block0.f32 / blocks.f32 / features.f32   the tower's stages, features the rows that replace <|image|>
-and meta.json. With --tower it then runs tf-glm-vision on each image: the native patches compared value by value,
-the native tower's rows by cosine (bf16 against bf16).
-
-Needs TensorFold 0.6.6 with its vision extra (mlx-vlm 0.7.x) and Pillow. Loads only model.visual.* (about 1 GB).
-"""
+"""GLM-5.3-Flash image input against the Python frontend, on a fixed image set (#565's gate)."""
 
 from __future__ import annotations
 

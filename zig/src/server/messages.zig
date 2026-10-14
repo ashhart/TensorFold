@@ -50,8 +50,7 @@ fn imagePart(cx: *Cx, part: Value) errors.Refused!Value {
     return .{ .object = out };
 }
 
-/// `normalize`, and with `images` (an engine that reads them) a user or tool message's image_url parts kept beside its
-/// text parts, in order, for the template's image markers; a message without image parts is joined text as before.
+/// `normalize`, and with `images` a user or tool message's image_url parts kept in order beside its text parts.
 pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_after_tool: bool, images: bool) errors.Refused!Value {
     const list = messages orelse return cx.refuse("messages must be a non-empty list");
     if (list != .array or list.array.len == 0) return cx.refuse("messages must be a non-empty list");
@@ -71,7 +70,7 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
             for (content.?.array) |part| {
                 const kind = if (part == .object and part.get("type") != null and part.get("type").? == .string) part.get("type").?.string else "";
                 if (images and std.mem.eql(u8, kind, "image_url")) {
-                    // a tool's result carries images as agents send screenshots; the template renders them in its response
+                    // tool results carry screenshots too; the template renders them in its response
                     if (!std.mem.eql(u8, role.?.string, "user") and !std.mem.eql(u8, role.?.string, "tool")) return cx.refuse("image parts are accepted in user and tool messages only");
                     try parts.append(cx.a, try imagePart(cx, part));
                     has_image = true;

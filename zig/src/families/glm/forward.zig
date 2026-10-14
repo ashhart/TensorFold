@@ -38,7 +38,7 @@ pub const Ctx = struct {
 pub const Inject = struct { rows: Ref, spans: []const Span };
 pub const Span = struct { at: u32, n: u32, row: u32 };
 
-/// The image rows among `rows` embedding rows (prompt positions pos..) written over `out`; nothing without an injection.
+/// The image rows among `rows` embedding rows (positions pos..) written over `out`; nothing without an injection.
 pub fn inject(x: *const Ctx, e: mtl.ComputeEncoder, out: Ref, rows: u32, pos: u32) void {
     const inj = x.inject orelse return;
     const D: usize = x.c.hidden;

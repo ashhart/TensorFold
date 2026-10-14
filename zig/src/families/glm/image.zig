@@ -1,8 +1,4 @@
-//! An image's bytes to GLM5-Next vision patches as TensorFold 0.6.6's --vision makes them: decoded as its
-//! vision/images.py does with PIL (ImageIO here: the stored values, no colour management; EXIF orientation applied;
-//! alpha composited over white with PIL's integer blend), then mlx-vlm's Glm5NextImageProcessor: sized under the
-//! token budget, resized with PIL's 8-bit bicubic resampler, padded with black, normalized, and cut into 2x2 windows
-//! of 14x14 patches, each patch's frame given twice (temporal_patch_size 2).
+//! An image's bytes to GLM5-Next vision patches as TensorFold 0.6.6's --vision makes them (PIL, then mlx-vlm).
 const std = @import("std");
 const vision = @import("vision.zig");
 
@@ -70,8 +66,7 @@ const order_32_little: u32 = 0x2000;
 const order_16_little: u32 = 0x1000;
 const float_components: u32 = 0x100;
 
-/// A PNG, JPEG, GIF, WebP, HEIC or any other single-frame image ImageIO reads, as 8-bit RGB: upright by its EXIF
-/// orientation (PIL's exif_transpose) and over white where it has alpha (images.py's paste onto a white canvas).
+/// Any single-frame image ImageIO reads as 8-bit RGB, upright by its EXIF orientation and over white where alpha.
 pub fn decode(gpa: std.mem.Allocator, bytes: []const u8) Error!Rgb {
     if (bytes.len == 0) return error.BadImage;
     if (bytes.len > max_bytes) return error.ImageTooLarge;
@@ -108,8 +103,7 @@ fn orientation(src: CF) u32 {
     return if (v < 1) 1 else @intCast(v);
 }
 
-/// PIL's exif_transpose: orientation 2-8 as FLIP_LEFT_RIGHT, ROTATE_180, FLIP_TOP_BOTTOM, TRANSPOSE, ROTATE_270,
-/// TRANSVERSE, ROTATE_90; each output pixel read from its source pixel.
+/// PIL's exif_transpose: EXIF orientation 2-8 applied, each output pixel read from its source pixel.
 pub fn orient(gpa: std.mem.Allocator, src: Rgb, o: u32) Error!Rgb {
     const w: usize = src.w;
     const h: usize = src.h;
@@ -216,8 +210,7 @@ fn alignUp(v: u64, f: u64) u64 {
     return (v + f - 1) / f * f;
 }
 
-/// smart_resize and _resize_geometry (num_frames = temporal_patch_size, as _process_one calls it): the padded canvas
-/// under `max_tokens` (at least `min_tokens`), and the content size the image is resized to inside it.
+/// smart_resize and _resize_geometry: the padded canvas under `max_tokens` (at least `min_tokens`), the content size.
 pub fn geometry(h: u32, w: u32, min_tokens: u32, max_tokens: u32) Error!Geometry {
     const factor: u64 = vision.patch * vision.merge;
     const frames: u64 = vision.temporal;
@@ -365,8 +358,7 @@ pub fn resize(gpa: std.mem.Allocator, src: Rgb, w: u32, h: u32) Error!Rgb {
     return cur;
 }
 
-/// The content (already resized) padded with black to the canvas, scaled by 1/255, normalized by channel, cut into
-/// 2x2 windows of 14x14 patches in row-major window order, each patch [channel, frame (twice), row, column].
+/// The resized content padded with black, scaled, normalized and cut into 2x2 windows of 14x14 patches, row-major.
 pub fn patchify(gpa: std.mem.Allocator, content: Rgb, g: Geometry, mean: [3]f32, sd: [3]f32) Error![]f32 {
     const P = vision.patch;
     const M = vision.merge;

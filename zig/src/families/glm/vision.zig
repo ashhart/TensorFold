@@ -1,7 +1,4 @@
-//! GLM-5.3-Flash's image tower on the GPU: an image's patches to the rows that replace its `<|image|>` placeholders.
-//! mlx-vlm's glm5_next/vision.py (what TensorFold 0.6.6's --vision serves) in bf16: a patch projection, 24 pre-norm
-//! blocks (2-D rotary attention over the image's own patches, a clipped SwiGLU), a final norm, the 2x2 merge as a
-//! projection of four neighbouring patches, and the merger's projection, layer norm, GELU and clipped SwiGLU.
+//! GLM-5.3-Flash's image tower on the GPU (mlx-vlm's glm5_next/vision.py in bf16): patches to `<|image|>` rows.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
@@ -27,7 +24,7 @@ pub const merge = 2;
 pub const patch_width = 3 * temporal * patch * patch; // 1176: a patch's values, channel by frame by row by column
 pub const patches_per_token = merge * merge;
 
-/// --vision's limits: image tokens a prompt may hold in all (the tower's scratch and rows are sized for them), and images.
+/// --vision's limits: image tokens a prompt may hold in all (scratch and rows are sized for them), and images.
 pub const Limits = struct { image_tokens: u32 = 4096, max_images: u32 = 4 };
 
 pub const Config = struct {
@@ -225,9 +222,7 @@ pub const Vision = struct {
         return .{ v.w.buf, v.scratch };
     }
 
-    /// One image's patches ([gh * gw, 1176] fp32, the processor's order) into its tokens' rows `out` ([gh * gw / 4,
-    /// 4096] bf16). The host writes the scratch: the caller has no work of this tower in flight. `stop`: after the
-    /// patch projection (0) or block `stop` (1-24), the residual stream is left in `x` and nothing more runs.
+    /// One image's patches ([gh * gw, 1176] fp32) into its rows `out`; `stop`: end after that block, residual in `x`.
     pub fn encode(v: *Vision, enc: mtl.ComputeEncoder, pixels: []const f32, gh: u32, gw: u32, out: Ref, stop: ?u32) !void {
         const P: u32 = gh * gw;
         if (P == 0 or gh % merge != 0 or gw % merge != 0) return error.ImageGrid;
@@ -308,7 +303,7 @@ pub const Vision = struct {
         v.gemm(enc, 0, x, w, y, M, N, K, K, K, N, 1, 0, 0, 0);
     }
 
-    /// tfp::gemm_nax: d [batch, M, N] = a x b (kind 0: bf16 a b^T, 1: fp32 a b^T, 2: fp32 a b), batches `s*` elements apart.
+    /// tfp::gemm_nax: d [batch, M, N] = a x b (kind 0: bf16 a b^T, 1: fp32 a b^T, 2: fp32 a b), batches `s*` apart.
     fn gemm(v: *Vision, enc: mtl.ComputeEncoder, kind: usize, a: Ref, b: Ref, d: Ref, M: u32, N: u32, K: u32, lda: u32, ldb: u32, ldd: u32, batch: u32, sa: usize, sb: usize, sd: usize) void {
         const tn = (N + 127) / 128;
         const tm = (M + 63) / 64;
@@ -372,9 +367,7 @@ pub fn bf16(x: f32) u16 {
     return @truncate((b + 0x7fff + ((b >> 16) & 1)) >> 16);
 }
 
-/// Each patch's 2-D rotary angles as vision.py builds them: the patch's row then column in the image's patch grid
-/// (patches come in 2x2 merge windows, row-major windows), times the 16 frequencies 10000^(-k/16), cos and sin of
-/// [h * f, w * f] twice over a head's 64 values.
+/// Each patch's 2-D rotary cos and sin: its row and column in the patch grid times the 16 frequencies 10000^(-k/16).
 fn rotary(v: *Vision, gh: u32, gw: u32) void {
     var inv: [16]f32 = undefined;
     for (&inv, 0..) |*f, k| f.* = 1.0 / @as(f32, @floatCast(std.math.pow(f64, 10000.0, @as(f64, @floatFromInt(2 * k)) / 32.0)));
@@ -514,8 +507,7 @@ fn loadWeights(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8) !Wei
     return w;
 }
 
-/// `e` reads images: the tower loaded beside its weights (about 0.9 GiB with scratch for `lim.image_tokens` image
-/// tokens a prompt) and the rows a prompt's images fill; `config` is the checkpoint's config.json.
+/// `e` reads images: the tower loaded beside its weights (about 0.9 GiB with scratch) and the rows images fill.
 pub fn attach(e: *Engine, gpa: std.mem.Allocator, dir: []const u8, config: []const u8, lim: Limits) !void {
     if (e.ep != null) return error.VisionOnPair;
     const pj: ?mtl.MappedFile = blk: {
