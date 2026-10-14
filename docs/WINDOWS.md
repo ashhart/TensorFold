@@ -1,7 +1,8 @@
 # TensorFold on Windows (native)
 
-An unofficial port: `tensorfold-native.exe` runs on Windows x86_64 with an NVIDIA GPU through the same CUDA engine
-the Linux build uses. Only the CUDA backend is ported; Metal is macOS's and HIP is not built.
+`tensorfold-native.exe` runs on Windows with an NVIDIA GPU through the same CUDA engine the Linux build uses. Only the
+CUDA backend is built on Windows; Metal is macOS's and HIP is not built. It is tested on an RTX 4090 (x86_64); the
+host code also cross-compiles for `aarch64-windows` with the GB10 (sm_121) kernels, untested on hardware so far.
 
 ## What you need
 
