@@ -96,6 +96,8 @@ pub const Server = struct {
     /// The facts the learner was taught and whether the weights recall them.
     slide: slide_graph.Graph,
     teacher: slide_lesson.Teacher, // what every Sliding Weights lesson shares: keep prompts, the turn's end
+    /// The folder's snapshot made or hashed whole by this process (under teacher.learning): later lessons trust it.
+    snapshot_checked: bool = false,
     /// Cortheon's web reader and what replies hid from their clients; null without --cortheon.
     cortheon: ?*cortheon.State = null,
 

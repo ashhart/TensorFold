@@ -140,13 +140,18 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
 fn keepOriginals(srv: *Server, conn: *Conn, a: Allocator) bool {
     const dir = folder(srv) orelse return true;
     var why: []const u8 = "";
-    const kept = api.originals.keep(srv.io, dir, srv.config.slide_graph, .{}, a, &why) catch |e| {
+    const o: api.originals.Options = .{ .checked = srv.snapshot_checked };
+    const kept = api.originals.keep(srv.io, dir, srv.config.slide_graph, o, a, &why) catch |e| {
         log.line("slide: {s}", .{why});
         refuse(conn, a, if (e == error.NoSpace) 507 else 500, why);
         return false;
     };
+    srv.snapshot_checked = true;
     const before = if (kept.taught) "; it had learned before, so a rollback returns it to this point, not to the model as pulled" else "";
     if (kept.made) log.line("slide: {s}'s original files kept in {s} before its first lesson: {d} files, {d:.1} GB, {d} cloned, in {d:.1} s{s}", .{ dir, api.originals.folder_name, kept.files, @as(f64, @floatFromInt(kept.bytes)) / 1e9, kept.cloned, kept.seconds, before });
+    const gb = @as(f64, @floatFromInt(kept.bytes)) / 1e9;
+    const matched = "slide: {s}'s snapshot in {s} matches its manifest: {d} files, {d:.1} GB hashed in {d:.1} s";
+    if (kept.checked) log.line(matched, .{ dir, api.originals.folder_name, kept.files, gb, kept.seconds });
     return true;
 }
 

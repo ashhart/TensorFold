@@ -318,6 +318,7 @@ test "a damaged snapshot or none is refused by rollback and by the next lesson, 
     try std.testing.expectError(error.Damaged, originals.rollback(io, dir, .{}, a, &why));
     try std.testing.expect(has(why, shard1) and has(why, "left as it is"));
     try std.testing.expect(sameBytes(taught, try bytesOf(a, io, dir)));
+    flip(try path(a, snap, shard1)); // whole again: the next check is a missing file alone
     try Io.Dir.cwd().deleteFile(io, try path(a, snap, shard2));
     why = "";
     try std.testing.expectError(error.Damaged, originals.keep(io, dir, null, .{}, a, &why));
@@ -327,6 +328,43 @@ test "a damaged snapshot or none is refused by rollback and by the next lesson, 
     try std.testing.expectError(error.Damaged, originals.keep(io, dir, null, .{}, a, &why));
     try std.testing.expect(has(why, "SHA256SUMS"));
     try std.testing.expect(sameBytes(taught, try bytesOf(a, io, dir)));
+}
+
+test "a later lesson hashes the snapshot it finds: a damaged one refuses the lesson and the folder stays as taught" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try model(a, io, tmp);
+    var why: []const u8 = "";
+    _ = try originals.keep(io, dir, null, .{}, a, &why);
+    try teach(a, io, dir);
+    const taught = try bytesOf(a, io, dir);
+    flip(try path(a, try path(a, dir, originals.folder_name), shard1));
+    why = "";
+    try std.testing.expectError(error.Damaged, originals.keep(io, dir, null, .{}, a, &why));
+    try std.testing.expect(has(why, shard1) and has(why, "the way back is broken"));
+    try std.testing.expect(sameBytes(taught, try bytesOf(a, io, dir)));
+}
+
+test "the process that made or hashed the snapshot does not hash it again at its later lessons" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try model(a, io, tmp);
+    var why: []const u8 = "";
+    const first = try originals.keep(io, dir, null, .{}, a, &why);
+    try std.testing.expect(first.made and !first.checked);
+    const found = try originals.keep(io, dir, null, .{}, a, &why); // another process's first lesson
+    try std.testing.expect(!found.made and found.checked and found.files == kept_files and found.bytes == first.bytes);
+    flip(try path(a, try path(a, dir, originals.folder_name), shard1));
+    const later = try originals.keep(io, dir, null, .{ .checked = true }, a, &why);
+    try std.testing.expect(!later.made and !later.checked);
 }
 
 test "a folder an earlier release taught is kept as it is now, and the snapshot says so" {

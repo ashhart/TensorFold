@@ -24,10 +24,19 @@ pub const Options = struct {
     clones: bool = true,
     free: *const fn ([:0]const u8) ?u64 = disk.available,
     tamper: ?*const fn ([:0]const u8) void = null, // tests: a kept file changed before it is checked
+    checked: bool = false, // this process made or checked the snapshot already: a later lesson reuses it unread
 };
 
-/// A snapshot made now (`made`) or found: its files, bytes, clones and seconds; `taught`: lessons before it, kept too.
-pub const Kept = struct { made: bool = false, files: usize = 0, bytes: u64 = 0, cloned: usize = 0, seconds: f64 = 0, taught: bool = false };
+/// A snapshot made now (`made`) or found (`checked`: hashed now), its files, bytes, clones and seconds; `taught` too.
+pub const Kept = struct {
+    made: bool = false,
+    checked: bool = false,
+    files: usize = 0,
+    bytes: u64 = 0,
+    cloned: usize = 0,
+    seconds: f64 = 0,
+    taught: bool = false, // lessons reached the folder before its snapshot, which keeps them
+};
 
 /// A rollback: the files put back (bytes, clones), the lesson files and fact graphs it removed, and its seconds.
 pub const Restored = struct { files: usize = 0, bytes: u64 = 0, cloned: usize = 0, removed: []const []const u8 = &.{}, graphs: []const []const u8 = &.{}, seconds: f64 = 0 };
@@ -92,12 +101,17 @@ fn keepFiles(io: Io, dir: []const u8, graph: ?[]const u8, o: Options, a: Allocat
     const snap = try std.fs.path.join(a, &.{ dir, folder_name });
     if (try isDir(io, snap)) {
         const entries = try readManifest(a, io, snap, why);
-        for (entries) |e| _ = Io.Dir.cwd().statFile(io, try std.fs.path.join(a, &.{ snap, e.name }), .{}) catch {
-            why.* = try std.fmt.allocPrint(a, "{s} lacks {s}, so the way back is broken: move that folder aside to keep {s} as it is now, then teach again", .{ snap, e.name, dir });
+        if (try unmatched(a, io, snap, entries, o.checked)) |name| {
+            const text = "{s}/{s} is missing or does not match its line in {s}, so the way back is broken: move " ++
+                "that folder aside to keep {s} as it is now, then teach again";
+            why.* = try std.fmt.allocPrint(a, text, .{ snap, name, manifest_name, dir });
             return error.Damaged;
-        };
+        }
         if (graph) |g| try noteGraph(a, io, snap, g);
-        return .{ .seconds = since(io, t0) };
+        var out: Kept = .{ .checked = !o.checked, .files = entries.len };
+        for (entries) |e| out.bytes += (try Io.Dir.cwd().statFile(io, try join(a, snap, e.name), .{})).size;
+        out.seconds = since(io, t0);
+        return out;
     }
     const part = try std.fs.path.join(a, &.{ dir, partial_name });
     Io.Dir.cwd().deleteTree(io, part) catch {};
@@ -210,6 +224,19 @@ fn rollbackFiles(io: Io, dir: []const u8, o: Options, a: Allocator, why: *[]cons
     };
     out.seconds = since(io, t0);
     return out;
+}
+
+/// The first of `entries` missing from `at` or (unless `named_only`) not its SHA-256 there, else null.
+fn unmatched(a: Allocator, io: Io, at: []const u8, entries: []const Entry, named_only: bool) !?[]const u8 {
+    if (named_only) {
+        for (entries) |e| _ = Io.Dir.cwd().statFile(io, try join(a, at, e.name), .{}) catch return e.name;
+        return null;
+    }
+    const jobs = try a.alloc(Job, entries.len);
+    for (entries, jobs) |e, *j| j.* = .{ .src = try join(a, at, e.name), .hash_only = true };
+    Pool(Job).run(jobs);
+    for (entries, jobs) |e, j| if (j.failed != null or !std.mem.eql(u8, &j.orig, &e.digest)) return e.name;
+    return null;
 }
 
 /// One file's hashing, and its keeping: `src` hashed (copied to `dst` first when `copy`), then the kept `dst` hashed.
