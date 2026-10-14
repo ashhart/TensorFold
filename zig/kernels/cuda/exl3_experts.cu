@@ -100,14 +100,13 @@ __device__ __forceinline__ void warp_tiles(const uint32_t* T, int ntiles, int kt
     }
 }
 
-// Program (expert u, n block, split, member tile): 16 members times W_q over the split's K range, summed in warp order.
+// Program (expert u, n block, split and matrix): its member tiles of 16 in order (each as alone), to the first empty.
 template <int CB, int NT, int W, int PD>
 __device__ __forceinline__ void grouped_body(const GroupedArgs a, int u, int nblock, int zz) {
     if (u >= a.ucount[0]) return;
     const int MT = (a.maxm + 15) / 16;
-    const int mtile = zz % MT;
-    const int split = (zz / MT) % a.sk;
-    const int mat = zz / MT / a.sk;
+    const int split = zz % a.sk;
+    const int mat = zz / a.sk;
     const half* X = mat ? a.x1 : a.x0;
     const int e = a.uids[u];
     const uint32_t* T = reinterpret_cast<const uint32_t*>(mat ? a.tp1[e] : a.tp0[e]);
@@ -115,76 +114,79 @@ __device__ __forceinline__ void grouped_body(const GroupedArgs a, int u, int nbl
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int g = lane >> 2, t = lane & 3;
     const int NTILES = a.ns > 0 ? a.ns : (a.n >> 4); // row stride of the trellis, in tiles
-
-    __shared__ int rows_sh[16];
-    if (threadIdx.x < 16) {
-        const int m = mtile * 16 + threadIdx.x;
-        const int code = m < a.maxm ? a.members[u * a.maxm + m] : -1;
-        rows_sh[threadIdx.x] = code >= 0 ? (code >> 5) * a.slots + (code & 31) : -1;
-    }
-    __syncthreads();
-    if (rows_sh[0] < 0) return; // members come first, so this tile is empty
-    const int r0 = rows_sh[g], r1 = rows_sh[g + 8];
-    const half* x0 = X + (size_t)(r0 < 0 ? 0 : r0) * a.k + 2 * t;
-    const half* x1 = X + (size_t)(r1 < 0 ? 0 : r1) * a.k + 2 * t;
     const int per_warp = (a.k >> 4) / a.sk / W;
     const int kt0 = split * (per_warp * W) + warp * per_warp;
     const int nt0 = nblock * NT;
-
-    float acc[NT][2][4];
-#pragma unroll
-    for (int i = 0; i < NT; ++i)
-#pragma unroll
-        for (int h = 0; h < 2; ++h)
-#pragma unroll
-            for (int c = 0; c < 4; ++c) acc[i][h][c] = 0.f;
-
+    __shared__ int rows_sh[16];
     __shared__ __align__(16) float red[W][16][NT * 16];
-    switch (k2) {
+
+    for (int mtile = 0; mtile < MT; ++mtile) {
+        if (threadIdx.x < 16) {
+            const int m = mtile * 16 + threadIdx.x;
+            const int code = m < a.maxm ? a.members[u * a.maxm + m] : -1;
+            rows_sh[threadIdx.x] = code >= 0 ? (code >> 5) * a.slots + (code & 31) : -1;
+        }
+        __syncthreads();
+        if (rows_sh[0] < 0) return; // this tile and every later one are empty
+        const int r0 = rows_sh[g], r1 = rows_sh[g + 8];
+        const half* x0 = X + (size_t)(r0 < 0 ? 0 : r0) * a.k + 2 * t;
+        const half* x1 = X + (size_t)(r1 < 0 ? 0 : r1) * a.k + 2 * t;
+
+        float acc[NT][2][4];
+#pragma unroll
+        for (int i = 0; i < NT; ++i)
+#pragma unroll
+            for (int h = 0; h < 2; ++h)
+#pragma unroll
+                for (int c = 0; c < 4; ++c) acc[i][h][c] = 0.f;
+
+        switch (k2) {
 #define TF_EXL3X_CASE(K2_)                                                                                   \
     case K2_:                                                                                                \
         warp_tiles<CB, K2_, NT, PD>(T, NTILES, kt0, per_warp, nt0, x0, x1, r0 >= 0, r1 >= 0, lane, acc,       \
                                    reinterpret_cast<uint32_t*>(red[warp]));                                   \
         break;
-        TF_EXL3X_CASE(2)
-        TF_EXL3X_CASE(3)
-        TF_EXL3X_CASE(4)
-        TF_EXL3X_CASE(5)
-        TF_EXL3X_CASE(6)
-        TF_EXL3X_CASE(7)
-        TF_EXL3X_CASE(8)
-        TF_EXL3X_CASE(9)
-        TF_EXL3X_CASE(10)
-        TF_EXL3X_CASE(11)
-        TF_EXL3X_CASE(12)
-        TF_EXL3X_CASE(13)
-        TF_EXL3X_CASE(14)
-        TF_EXL3X_CASE(15)
-        TF_EXL3X_CASE(16)
+            TF_EXL3X_CASE(2)
+            TF_EXL3X_CASE(3)
+            TF_EXL3X_CASE(4)
+            TF_EXL3X_CASE(5)
+            TF_EXL3X_CASE(6)
+            TF_EXL3X_CASE(7)
+            TF_EXL3X_CASE(8)
+            TF_EXL3X_CASE(9)
+            TF_EXL3X_CASE(10)
+            TF_EXL3X_CASE(11)
+            TF_EXL3X_CASE(12)
+            TF_EXL3X_CASE(13)
+            TF_EXL3X_CASE(14)
+            TF_EXL3X_CASE(15)
+            TF_EXL3X_CASE(16)
 #undef TF_EXL3X_CASE
-        default:
-            __trap();
-    }
+            default:
+                __trap();
+        }
 
 #pragma unroll
-    for (int i = 0; i < NT; ++i)
+        for (int i = 0; i < NT; ++i)
 #pragma unroll
-        for (int h = 0; h < 2; ++h) {
-            const int col = i * 16 + h * 8 + 2 * t;
-            red[warp][g][col] = acc[i][h][0];
-            red[warp][g][col + 1] = acc[i][h][1];
-            red[warp][g + 8][col] = acc[i][h][2];
-            red[warp][g + 8][col + 1] = acc[i][h][3];
+            for (int h = 0; h < 2; ++h) {
+                const int col = i * 16 + h * 8 + 2 * t;
+                red[warp][g][col] = acc[i][h][0];
+                red[warp][g][col + 1] = acc[i][h][1];
+                red[warp][g + 8][col] = acc[i][h][2];
+                red[warp][g + 8][col + 1] = acc[i][h][3];
+            }
+        __syncthreads();
+        for (int idx = threadIdx.x; idx < 16 * NT * 16; idx += W * 32) {
+            const int row = idx / (NT * 16), col = idx % (NT * 16);
+            const int r = rows_sh[row];
+            if (r < 0) continue;
+            float s = red[0][row][col];
+#pragma unroll
+            for (int w = 1; w < W; ++w) s += red[w][row][col];
+            a.z[(((size_t)mat * a.sk + split) * a.p + r) * a.n + nt0 * 16 + col] = s;
         }
-    __syncthreads();
-    for (int idx = threadIdx.x; idx < 16 * NT * 16; idx += W * 32) {
-        const int row = idx / (NT * 16), col = idx % (NT * 16);
-        const int r = rows_sh[row];
-        if (r < 0) continue;
-        float s = red[0][row][col];
-#pragma unroll
-        for (int w = 1; w < W; ++w) s += red[w][row][col];
-        a.z[(((size_t)mat * a.sk + split) * a.p + r) * a.n + nt0 * 16 + col] = s;
+        __syncthreads(); // rows_sh and red are rewritten by the next tile
     }
 }
 

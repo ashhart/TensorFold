@@ -158,7 +158,6 @@ pub const Experts = struct {
         const d_sk = try plan(w, d, false);
         const p = rows * slots;
         const maxu = @min(p, l.experts);
-        const mt = (rows + 15) / 16;
         const gfn = (if (rows <= 16) e.grouped_nc else e.grouped)[@backingInt(l.codebook)]; // same bits either way
         const i32d = struct {
             fn f(v: usize) i32 {
@@ -213,7 +212,7 @@ pub const Experts = struct {
         g.add(i32d(maxu));
         g.add(@as(i32, 2));
         g.add(i32d(l.gu_stride));
-        try launch_.launch(gfn, .{ .grid = .{ .x = @intCast(maxu), .y = @intCast(w / 128), .z = @intCast(2 * g_sk * mt) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &g);
+        try launch_.launch(gfn, .{ .grid = .{ .x = @intCast(maxu), .y = @intCast(w / 128), .z = @intCast(2 * g_sk) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &g);
 
         var ep: launch_.Args = .{};
         ep.add(sc.z);
@@ -250,7 +249,7 @@ pub const Experts = struct {
         dn.add(i32d(maxu));
         dn.add(@as(i32, 1));
         dn.add(@as(i32, 0));
-        try launch_.launch(gfn, .{ .grid = .{ .x = @intCast(maxu), .y = @intCast(d / 128), .z = @intCast(d_sk * mt) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &dn);
+        try launch_.launch(gfn, .{ .grid = .{ .x = @intCast(maxu), .y = @intCast(d / 128), .z = @intCast(d_sk) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &dn);
     }
 
     /// The routed experts of `rows` rows: the pipeline, then the wts-weighted sum (down_combine).
