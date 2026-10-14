@@ -247,7 +247,8 @@ pub const Host = struct {
                 h.unlock();
                 for (left) |job| h.finish(job, .cancelled, .{}, "");
                 h.gpa.free(left);
-                if (h.cache) |*store| if (store.imprint) |im| api.prompt_learn.settle(store, im); // --learn's half-made cut
+                // --learn's half-made cut settled, then what waits for disk written under the stop's deadline
+                if (h.cache) |*store| if (store.imprint) |im| api.prompt_learn.settle(store, im);
                 if (h.cache) |*store| if (store.disk) |r| {
                     _ = api.prompt_cache.rows.write.drain(r, api.prompt_cache.rows.write.nowNs() + 20 * std.time.ns_per_s);
                 };
@@ -299,11 +300,7 @@ pub const Host = struct {
             h.prefill_at = done;
             c.job.prefilled = done;
             h.unlock();
-            const n = c.job.request.prompt.len - c.job.cached;
-            if (h.cache) |*store| if (store.disk) |r| if (n >= 1024 and done > c.job.began) {
-                const rate = @as(f64, @floatFromInt(n)) / (@as(f64, @floatFromInt(done - c.job.began)) / 1e9);
-                r.prefill_rate = if (r.prefill_rate > 0) 0.5 * r.prefill_rate + 0.5 * rate else rate;
-            };
+            if (h.cache) |*store| if (store.disk) |r| r.prefilled(c.job.request.prompt.len - c.job.cached, done - c.job.began);
             c.job.prefill_sent = true;
             emit(c.job, .{ .prefilled = c.job.cached });
         }

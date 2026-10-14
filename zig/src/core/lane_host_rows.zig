@@ -73,7 +73,5 @@ pub fn flush(h: *LaneHost) void {
 pub fn prefilled(h: *LaneHost, tokens: usize, ns: i96) void {
     const store = h.cache orelse return;
     const r = store.disk orelse return;
-    if (tokens < 1024 or ns <= 0) return;
-    const rate = @as(f64, @floatFromInt(tokens)) / (@as(f64, @floatFromInt(ns)) / 1e9);
-    r.prefill_rate = if (r.prefill_rate > 0) 0.5 * r.prefill_rate + 0.5 * rate else rate;
+    r.prefilled(tokens, ns);
 }

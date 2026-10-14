@@ -228,7 +228,8 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
     if (o.learn == null) return null;
-    if (o.learn_conversations and std.mem.eql(u8, t, "qwen3_5") and dense) return null; // the 27B writes conversation states
+    // the 27B writes conversation states
+    if (o.learn_conversations and std.mem.eql(u8, t, "qwen3_5") and dense) return null;
     const name: []const u8 = if (std.mem.eql(u8, t, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (!std.mem.eql(u8, t, "qwen3_5")) return null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.learn_conversations) return try std.fmt.allocPrint(a, "--learn-conversations keeps conversation states on disk for Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash: serve {s} without it", .{name});
     const or_talks: []const u8 = if (dense) " (Qwen3.8-27B keeps conversation states on disk with --learn-conversations)" else "";

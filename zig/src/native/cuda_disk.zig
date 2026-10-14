@@ -140,7 +140,8 @@ fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Target) !
     const sh = kept.shape(t, 4136);
     const bytes = try a.alloc(u8, words + sh.kv + sh.mamba);
     try gather(t, saved, &.{ .{ .off = 0, .len = words }, .{ .off = words, .len = sh.kv }, .{ .off = words + sh.kv, .len = sh.mamba } }, bytes);
-    @memset(bytes[8..words], 0); // the row count: the last window's, from whatever ran first (a new build measures its windows)
+    // the row count: the last window's, from whatever ran first (a new build measures its windows)
+    @memset(bytes[8..words], 0);
     return .{ .hash = std.hash.Wyhash.hash(0x6375, bytes), .rate = @as(f64, @floatFromInt(toks.len)) / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
 }
 

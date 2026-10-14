@@ -131,6 +131,13 @@ pub const Rows = struct {
         return r.stage;
     }
 
+    /// A prompt pass of `tokens` in `ns` moves the rate a disk read is weighed against (under 1,024 tokens: none).
+    pub fn prefilled(r: *Rows, tokens: usize, ns: i96) void {
+        if (tokens < 1024 or ns <= 0) return;
+        const rate = @as(f64, @floatFromInt(tokens)) / (@as(f64, @floatFromInt(ns)) / 1e9);
+        r.prefill_rate = if (r.prefill_rate > 0) 0.5 * r.prefill_rate + 0.5 * rate else rate;
+    }
+
     /// Every byte the store holds: its states' files and its blocks.
     pub fn held(r: *const Rows) u64 {
         var n: u64 = 0;

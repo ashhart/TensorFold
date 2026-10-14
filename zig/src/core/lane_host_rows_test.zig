@@ -146,7 +146,8 @@ test "a host writes its kept states while idle and on its stop; the next host re
         }
         fn two(h: *LaneHost, r: *pc.rows.Rows, _: *lanes.fake.Fake) anyerror!void {
             try std.testing.expectEqual(@as(usize, 2), r.states.items.len); // the stop wrote the second
-            var spanned: api.ImprintAsk = .{ .op = .where, .prompt = &first, .spans = &.{.{ 100, 110 }} }; // this host keys no spans
+            // this host keys no spans, so an ask that names one still finds the state
+            var spanned: api.ImprintAsk = .{ .op = .where, .prompt = &first, .spans = &.{.{ 100, 110 }} };
             try std.testing.expect(h.engine().imprintAsk(&spanned));
             try std.testing.expect(spanned.wait(std.testing.io, 5000));
             try std.testing.expectEqual(@as(u32, 600), spanned.out.disk);
@@ -160,7 +161,8 @@ test "a host writes its kept states while idle and on its stop; the next host re
             try h.engine().submit(3, &req, .{ .ctx = &b, .event = Box.event });
             try std.testing.expectEqual(Reason.length, b.wait());
             try std.testing.expectEqual(@as(?u32, 600), b.cached);
-            var history: std.ArrayList(u32) = .empty; // the fake's tokens read the whole history: a wrong row changes them
+            // the fake's tokens read the whole history: a wrong row changes them
+            var history: std.ArrayList(u32) = .empty;
             defer history.deinit(std.testing.allocator);
             try history.appendSlice(std.testing.allocator, &first);
             for (b.tokens.items) |t| {

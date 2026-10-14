@@ -57,7 +57,8 @@ test "a conversation's states outlive the server: a restart resumes from disk, e
         try std.testing.expect(rows.write.pending(r));
         drain(r);
         try std.testing.expectEqual(@as(usize, 1), r.states.items.len);
-        try std.testing.expectEqual(@as(usize, 6), r.blocks.count()); // 1400 tokens: 5 blocks of 256, and the ring's 1024..1280
+        // 1400 tokens: 5 blocks of 256, and the ring's 1024..1280
+        try std.testing.expectEqual(@as(usize, 6), r.blocks.count());
     }
     var f: Fake = .{ .gpa = gpa };
     const r = try rows.Rows.open(gpa, f.snapshots(), options(dir));
@@ -94,7 +95,8 @@ test "ten conversations with one head store its blocks once" {
         drain(r);
     }
     try std.testing.expectEqual(@as(usize, 10), r.states.items.len);
-    try std.testing.expectEqual(@as(usize, 7 + 10 * 5), r.blocks.count()); // the head's 7 once (its 8th reads token 2048), each tail's 3 and 2 of its ring
+    // the head's 7 once (its 8th reads token 2048), each tail's 3 and 2 of its ring
+    try std.testing.expectEqual(@as(usize, 7 + 10 * 5), r.blocks.count());
     var named: u64 = 0;
     for (r.states.items) |st| named += st.rows;
     var stored: u64 = 0;
