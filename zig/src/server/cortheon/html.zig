@@ -130,13 +130,12 @@ pub fn toText(a: Allocator, html: []const u8, max_chars: usize) Allocator.Error!
         var name_end = name_start;
         while (name_end < region.len and isName(region[name_end])) name_end += 1;
         const name = region[name_start..name_end];
-        const end = tagEnd(region, i);
         if (name.len == 0) {
             try o.text(region[i .. i + 1], pre > 0);
             i += 1;
             continue;
         }
-        i = end;
+        i = tagEnd(region, i); // only a named tag is read to its end, so a run of '<' costs one pass
         if (!closing and inList(name, &skipped)) {
             var closer_buf: [16]u8 = undefined;
             const closer = std.fmt.bufPrint(&closer_buf, "</{s}", .{name}) catch continue;
@@ -286,6 +285,7 @@ pub fn hrefs(a: Allocator, page: []const u8, max: usize) Allocator.Error![]const
         from = lt + 2;
         if (from >= page.len or !(page[from] == ' ' or page[from] == '\t' or page[from] == '\n')) continue;
         const end = tagEnd(page, lt);
+        from = end; // the next link starts after this tag, so an unclosed one is read once
         const tag = page[lt..end];
         const at = std.ascii.findIgnoreCase(tag, "href=") orelse continue;
         var v = tag[at + 5 ..];
@@ -353,6 +353,39 @@ test "bare ampersands are text, and a page full of them reads in linear time" {
     for (0..200_000) |_| try big.appendSlice(a, "&a ");
     const many = try toText(a, big.items, 100);
     try std.testing.expect(many.truncated and many.text.len <= 100);
+}
+
+fn now() u64 {
+    return @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds);
+}
+
+/// The fastest of three reads, in nanoseconds, of `unit` repeated to `size` bytes: for its links or as text.
+fn fastest(unit: []const u8, size: usize, links: bool) !u64 {
+    const page = try std.testing.allocator.alloc(u8, size);
+    defer std.testing.allocator.free(page);
+    for (page, 0..) |*c, i| c.* = unit[i % unit.len];
+    var best: u64 = std.math.maxInt(u64);
+    for (0..3) |_| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const start = now();
+        if (links) {
+            _ = try hrefs(arena.allocator(), page, 400);
+        } else {
+            _ = try toText(arena.allocator(), page, 100);
+        }
+        best = @min(best, now() - start);
+    }
+    return best;
+}
+
+test "a page of unclosed tags reads in linear time" {
+    for ([_]struct { []const u8, bool }{ .{ "<", false }, .{ "<a ", true } }) |case| {
+        const small = try fastest(case[0], 256 << 10, case[1]);
+        const big = try fastest(case[0], 2 << 20, case[1]);
+        try std.testing.expect(big < 5 * std.time.ns_per_s); // 2 MiB took minutes while each '<' rescanned the rest
+        try std.testing.expect(big < 24 * @max(small, 1)); // 8x the bytes: near 8x the time, not a quadratic's 64x
+    }
 }
 
 test "an excerpt keeps the opening and the lines about the focus, in order" {
