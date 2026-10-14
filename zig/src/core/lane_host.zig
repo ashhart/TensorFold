@@ -85,9 +85,9 @@ pub const LaneHost = struct {
             const e = job.entry orelse return;
             job.entry = null;
             const store = job.host.cache orelse return;
-            if (!job.started) return;
+            if (!job.started) return store.release(e);
             job.stream.reuse.saved = null; // the backend restores before its first chunk; a later keep may free it
-            if (job.stream.reuse_failed) store.resumed(e, job.request.prompt, false) else if (job.stream.cached == e.at) store.resumed(e, job.request.prompt, true);
+            if (job.stream.reuse_failed) store.resumed(e, job.request.prompt, false) else if (job.stream.cached == e.at) store.resumed(e, job.request.prompt, true) else store.release(e);
         }
     };
 
@@ -445,6 +445,7 @@ pub const LaneHost = struct {
 
     /// No memory for another lane yet: the job waits at the queue's head, and admission holds until a job ends.
     fn requeue(h: *LaneHost, job: *Job) bool {
+        job.reported();
         if (job.stream.grammar) |g| g.deinit(h.gpa); // the next admission compiles its own
         job.stream.deinit(h.gpa);
         job.proposer.deinit();
