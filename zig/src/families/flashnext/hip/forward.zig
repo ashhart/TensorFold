@@ -27,7 +27,12 @@ pub const Host = struct {
         const dst = try o.arena.take(bytes.len);
         @memcpy(h.staging.bytes[from..][0..bytes.len], bytes);
         h.used = from + bytes.len;
-        if (o.stream != hip.counting and bytes.len > 0) try hip.runtime.check(h.d.api.hipMemcpyHtoDAsync(@ptrFromInt(dst), h.staging.bytes[from..].ptr, bytes.len, o.stream));
+        if (o.stream != hip.counting and bytes.len > 0) try hip.runtime.check(h.d.api.hipMemcpyHtoDAsync(
+            @ptrFromInt(dst),
+            h.staging.bytes[from..].ptr,
+            bytes.len,
+            o.stream,
+        ));
         return dst;
     }
 };
@@ -57,10 +62,28 @@ pub fn hcPre(o: Ops, m: *const model.Model, hc: model.Hc, x: Tensor, rows: usize
     const z = try o.project(x, hc.down, rows, true);
     const act = try take(o, m.act, rows * d.low);
     const kind = @backingInt(m.act);
-    try o.l.fn_hc_gates(@ptrFromInt(z.ptr), @ptrFromInt(act.ptr), if (inject) |i| @ptrFromInt(i.ptr) else null, kind, @intCast(rows), @intCast(d.low), @intCast(d.streams), o.stream);
+    try o.l.fn_hc_gates(
+        @ptrFromInt(z.ptr),
+        @ptrFromInt(act.ptr),
+        if (inject) |i| @ptrFromInt(i.ptr) else null,
+        kind,
+        @intCast(rows),
+        @intCast(d.low),
+        @intCast(d.streams),
+        o.stream,
+    );
     const g = try o.project(act, hc.up, rows, true);
     const mixed = try take(o, m.act, rows * d.hidden);
-    try o.l.fn_hc_mix(@ptrFromInt(g.ptr), @ptrFromInt(x.ptr), @ptrFromInt(mixed.ptr), kind, @intCast(rows), @intCast(d.streams), @intCast(d.hidden), o.stream);
+    try o.l.fn_hc_mix(
+        @ptrFromInt(g.ptr),
+        @ptrFromInt(x.ptr),
+        @ptrFromInt(mixed.ptr),
+        kind,
+        @intCast(rows),
+        @intCast(d.streams),
+        @intCast(d.hidden),
+        o.stream,
+    );
     return mixed;
 }
 
@@ -76,9 +99,31 @@ pub fn hcBranch(o: Ops, m: *const model.Model, h: Tensor, branch: Tensor, inject
 }
 
 /// h += round(branch * inject) per stream when a branch is given, then x = the streams normed with `scale`.
-pub fn hcNorm(o: Ops, m: *const model.Model, h: Tensor, branch: ?Tensor, inject: ?Tensor, x: Tensor, scale: u64, rows: usize) !void {
+pub fn hcNorm(
+    o: Ops,
+    m: *const model.Model,
+    h: Tensor,
+    branch: ?Tensor,
+    inject: ?Tensor,
+    x: Tensor,
+    scale: u64,
+    rows: usize,
+) !void {
     const d = m.dims;
-    try o.l.fn_hc_norm(@ptrFromInt(h.ptr), if (branch) |b| @ptrFromInt(b.ptr) else null, if (inject) |i| @ptrFromInt(i.ptr) else null, if (branch != null) @ptrFromInt(h.ptr) else null, @ptrFromInt(x.ptr), @ptrFromInt(scale), @backingInt(m.act), @intCast(rows), @intCast(d.streams), @intCast(d.hidden), d.eps, o.stream);
+    try o.l.fn_hc_norm(
+        @ptrFromInt(h.ptr),
+        if (branch) |b| @ptrFromInt(b.ptr) else null,
+        if (inject) |i| @ptrFromInt(i.ptr) else null,
+        if (branch != null) @ptrFromInt(h.ptr) else null,
+        @ptrFromInt(x.ptr),
+        @ptrFromInt(scale),
+        @backingInt(m.act),
+        @intCast(rows),
+        @intCast(d.streams),
+        @intCast(d.hidden),
+        d.eps,
+        o.stream,
+    );
 }
 
 /// A forward's host inputs, laid out in one span of the staging (byte offsets into it) and sent up in one copy.
@@ -173,11 +218,43 @@ fn ple(o: Ops, m: *const model.Model, host: *Host, c: *cache.Caches, h: Tensor, 
     const tail = c.layout.tail_rows * d.wide() * m.act.size();
     try hip.raw.copy(.{ .r = host.d, .ptr = @ptrFromInt(cin), .len = tail }, 0, c.tail(), tail, o.stream);
     const kind = @backingInt(m.act);
-    try o.l.fn_ple_gate(@ptrFromInt(kv.ptr), @ptrFromInt(h.ptr), @ptrFromInt(m.ple.key_scale), @ptrFromInt(m.ple.query_scale), @ptrFromInt(m.ple.conv_scale), @ptrFromInt(gated.ptr), @ptrFromInt(cin + tail), kind, @intCast(rows), @intCast(d.streams), @intCast(d.hidden), d.eps, o.stream);
-    try o.l.fn_ple_conv(@ptrFromInt(cin), @ptrFromInt(m.ple.conv), @ptrFromInt(gated.ptr), @ptrFromInt(h.ptr), @ptrFromInt(h.ptr), kind, @intCast(rows), @intCast(d.wide()), @intCast(d.ple_taps), @intCast(d.ngram), o.stream);
+    try o.l.fn_ple_gate(
+        @ptrFromInt(kv.ptr),
+        @ptrFromInt(h.ptr),
+        @ptrFromInt(m.ple.key_scale),
+        @ptrFromInt(m.ple.query_scale),
+        @ptrFromInt(m.ple.conv_scale),
+        @ptrFromInt(gated.ptr),
+        @ptrFromInt(cin + tail),
+        kind,
+        @intCast(rows),
+        @intCast(d.streams),
+        @intCast(d.hidden),
+        d.eps,
+        o.stream,
+    );
+    try o.l.fn_ple_conv(
+        @ptrFromInt(cin),
+        @ptrFromInt(m.ple.conv),
+        @ptrFromInt(gated.ptr),
+        @ptrFromInt(h.ptr),
+        @ptrFromInt(h.ptr),
+        kind,
+        @intCast(rows),
+        @intCast(d.wide()),
+        @intCast(d.ple_taps),
+        @intCast(d.ngram),
+        o.stream,
+    );
     // a prompt's rows are kept: the tail moves on now; a window's waits for its keep
     if (!call.window) {
-        try hip.raw.copy(.{ .r = host.d, .ptr = @ptrFromInt(c.tail()), .len = tail }, 0, cin + rows * d.wide() * m.act.size(), tail, o.stream);
+        try hip.raw.copy(
+            .{ .r = host.d, .ptr = @ptrFromInt(c.tail()), .len = tail },
+            0,
+            cin + rows * d.wide() * m.act.size(),
+            tail,
+            o.stream,
+        );
         c.history = ngram.after(c.history, call.tokens);
     }
 }
@@ -198,7 +275,10 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
     try o.embedRows(m.embed, dev_ids, rows * d.streams, h);
     var cins: [max_segs]u64 = undefined;
     if (segs.len > max_segs) return error.TooManyStreams;
-    for (segs, cins[0..segs.len]) |g, *cin| cin.* = if (window) g.c.cin.base() else try o.arena.take((g.c.layout.tail_rows + g.tokens.len) * d.wide() * m.act.size());
+    for (segs, cins[0..segs.len]) |g, *cin| cin.* = if (window)
+        g.c.cin.base()
+    else
+        try o.arena.take((g.c.layout.tail_rows + g.tokens.len) * d.wide() * m.act.size());
     for (m.layers, 0..) |layer, i| {
         const mark = o.arena.mark();
         defer o.arena.release(mark);

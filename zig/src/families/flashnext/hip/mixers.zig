@@ -16,7 +16,16 @@ pub fn qkConstants(key_dim: usize) struct { q: f32, k: f32, eps: f32 } {
 }
 
 /// The Gated DeltaNet over every segment: products and norms on all rows, conv and recurrence a stream at a time.
-pub fn linear(o: Ops, m: *const model.Model, l: model.Linear, segs: []const forward.Seg, index: usize, x: Tensor, rows: usize, window: bool) !Tensor {
+pub fn linear(
+    o: Ops,
+    m: *const model.Model,
+    l: model.Linear,
+    segs: []const forward.Seg,
+    index: usize,
+    x: Tensor,
+    rows: usize,
+    window: bool,
+) !Tensor {
     const d = m.dims;
     const ch = d.convWidth();
     const kw = d.key_heads * d.key_dim;
@@ -77,7 +86,12 @@ pub fn linear(o: Ops, m: *const model.Model, l: model.Linear, segs: []const forw
         const conv_bytes = (d.conv - 1) * ch * 4;
         const next = try o.arena.take(conv_bytes);
         try o.convPrefill(forward.at(qkv, off * ch), l.conv, st.conv, out, next, n, ch, d.conv);
-        if (o.stream != hip.counting) try hip.runtime.check(o.l.r.api.hipMemcpyDtoDAsync(@ptrFromInt(st.conv), @ptrFromInt(next), conv_bytes, o.stream));
+        if (o.stream != hip.counting) try hip.runtime.check(o.l.r.api.hipMemcpyDtoDAsync(
+            @ptrFromInt(st.conv),
+            @ptrFromInt(next),
+            conv_bytes,
+            o.stream,
+        ));
         off += n;
     }
     const mixed_t: Tensor = .{ .ptr = mixed, .kind = .f32 };
@@ -86,14 +100,42 @@ pub fn linear(o: Ops, m: *const model.Model, l: model.Linear, segs: []const forw
     try o.copyCols(mixed_t, ch, 0, qc, rows, kw);
     try o.copyCols(mixed_t, ch, kw, kc, rows, kw);
     try o.copyCols(mixed_t, ch, 2 * kw, v, rows, vw);
-    try o.rms(.{ .ptr = qc, .kind = .f32 }, m.qk.q, .{ .ptr = q, .kind = .f32 }, rows * d.key_heads, d.key_dim, m.qk.eps);
-    try o.rms(.{ .ptr = kc, .kind = .f32 }, m.qk.k, .{ .ptr = k, .kind = .f32 }, rows * d.key_heads, d.key_dim, m.qk.eps);
+    try o.rms(
+        .{ .ptr = qc, .kind = .f32 },
+        m.qk.q,
+        .{ .ptr = q, .kind = .f32 },
+        rows * d.key_heads,
+        d.key_dim,
+        m.qk.eps,
+    );
+    try o.rms(
+        .{ .ptr = kc, .kind = .f32 },
+        m.qk.k,
+        .{ .ptr = k, .kind = .f32 },
+        rows * d.key_heads,
+        d.key_dim,
+        m.qk.eps,
+    );
     try o.gdnGatePrefill(a, b, l.a_log, l.dt_bias, gate, beta, rows, d.value_heads);
     return recur(o, m, l, segs, index, q, k, v, gate, beta, z, rows, false);
 }
 
 /// The delta rule a stream at a time (a window's rows each with its state kept aside), the gated norm, the out product.
-fn recur(o: Ops, m: *const model.Model, l: model.Linear, segs: []const forward.Seg, index: usize, q: u64, k: u64, v: u64, gate: u64, beta: u64, z: Tensor, rows: usize, window: bool) !Tensor {
+fn recur(
+    o: Ops,
+    m: *const model.Model,
+    l: model.Linear,
+    segs: []const forward.Seg,
+    index: usize,
+    q: u64,
+    k: u64,
+    v: u64,
+    gate: u64,
+    beta: u64,
+    z: Tensor,
+    rows: usize,
+    window: bool,
+) !Tensor {
     const d = m.dims;
     const kw = d.key_heads * d.key_dim;
     const vw = d.value_heads * d.value_dim;
@@ -102,7 +144,21 @@ fn recur(o: Ops, m: *const model.Model, l: model.Linear, segs: []const forward.S
     for (segs) |g| {
         const n = g.tokens.len;
         const snaps: ?u64 = if (window) g.c.snapshot(index, 0).state else null;
-        try o.gatedDelta(q + off * kw * 4, k + off * kw * 4, v + off * vw * 4, gate + off * d.value_heads * 4, beta + off * d.value_heads * 4, g.c.linearAt(index).state, y + off * vw * 4, n, d.key_heads, d.value_heads, d.key_dim, d.value_dim, snaps);
+        try o.gatedDelta(
+            q + off * kw * 4,
+            k + off * kw * 4,
+            v + off * vw * 4,
+            gate + off * d.value_heads * 4,
+            beta + off * d.value_heads * 4,
+            g.c.linearAt(index).state,
+            y + off * vw * 4,
+            n,
+            d.key_heads,
+            d.value_heads,
+            d.key_dim,
+            d.value_dim,
+            snaps,
+        );
         off += n;
     }
     const out = try take(o, m.act, rows * vw);
@@ -129,7 +185,22 @@ pub fn sparse(o: Ops, m: *const model.Model, d: model.Dims, s: model.Sparse, seg
     }
     const qg, const keys, const values, const idx = outs;
     const q32 = try o.arena.of(f32, rows * d.heads * hd);
-    try o.qkRope(qg, d.heads * 2 * hd, 2 * hd, s.q_norm, d.eps, rows, d.heads, hd, d.rotary, d.theta, dev_pos, q32, null, 0);
+    try o.qkRope(
+        qg,
+        d.heads * 2 * hd,
+        2 * hd,
+        s.q_norm,
+        d.eps,
+        rows,
+        d.heads,
+        hd,
+        d.rotary,
+        d.theta,
+        dev_pos,
+        q32,
+        null,
+        0,
+    );
     const iq = try o.arena.of(f32, rows * d.index_heads * di);
     try o.qkRope(idx, width, di, s.iq_norm, d.eps, rows, d.index_heads, di, d.rotary, d.theta, dev_pos, iq, null, 0);
     const att = try o.arena.of(f32, rows * d.heads * hd);
@@ -191,11 +262,37 @@ fn attend(o: Ops, m: *const model.Model, d: model.Dims, kv: cache.SparseView, ca
         if (sparse_rows) {
             const nb: usize = if (graphed) staged.?.bound else @intCast(complete[n - 1]);
             const scores = try o.arena.of(f32, n * nb);
-            try o.l.fn_idx_scores(@ptrFromInt(iq + r0 * d.index_heads * di * 4), @ptrFromInt(kv.pooled), @ptrFromInt(dev_complete), @ptrFromInt(scores), kind, @intCast(n), @intCast(d.index_heads), @intCast(di), @intCast(nb), @intCast(nb), @intCast(d.index_top), o.stream);
+            try o.l.fn_idx_scores(
+                @ptrFromInt(iq + r0 * d.index_heads * di * 4),
+                @ptrFromInt(kv.pooled),
+                @ptrFromInt(dev_complete),
+                @ptrFromInt(scores),
+                kind,
+                @intCast(n),
+                @intCast(d.index_heads),
+                @intCast(di),
+                @intCast(nb),
+                @intCast(nb),
+                @intCast(d.index_top),
+                o.stream,
+            );
             const list = try o.arena.of(i32, n * key_stride);
             const counts = try o.arena.of(i32, n);
             const flags = try o.arena.of(i32, n);
-            try o.l.fn_idx_select(@ptrFromInt(scores), @intCast(nb), @ptrFromInt(dev_complete), @ptrFromInt(dev_ends), @ptrFromInt(list), @intCast(key_stride), @ptrFromInt(counts), @ptrFromInt(flags), @intCast(n), @intCast(d.index_top), @intCast(d.index_ratio), o.stream);
+            try o.l.fn_idx_select(
+                @ptrFromInt(scores),
+                @intCast(nb),
+                @ptrFromInt(dev_complete),
+                @ptrFromInt(dev_ends),
+                @ptrFromInt(list),
+                @intCast(key_stride),
+                @ptrFromInt(counts),
+                @ptrFromInt(flags),
+                @intCast(n),
+                @intCast(d.index_top),
+                @intCast(d.index_ratio),
+                o.stream,
+            );
             ids = list;
             sparse_flags = flags;
             count = counts;
@@ -203,6 +300,26 @@ fn attend(o: Ops, m: *const model.Model, d: model.Dims, kv: cache.SparseView, ca
         const po = try o.arena.of(f32, n * d.heads * parts * hd);
         const pm = try o.arena.of(f32, n * d.heads * parts * 2);
         const scale: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(hd))));
-        try o.l.fn_sparse_attention(@ptrFromInt(q32 + r0 * d.heads * hd * 4), @ptrFromInt(kv.k), @ptrFromInt(kv.v), @backingInt(m.act), if (ids) |i| @ptrFromInt(i) else null, @intCast(key_stride), @ptrFromInt(count), if (sparse_flags) |f| @ptrFromInt(f) else null, @ptrFromInt(po), @ptrFromInt(pm), @ptrFromInt(att + r0 * d.heads * hd * 4), @intCast(n), @intCast(d.heads), @intCast(d.kv_heads), @intCast(hd), @intCast(cap), scale, parts, o.stream);
+        try o.l.fn_sparse_attention(
+            @ptrFromInt(q32 + r0 * d.heads * hd * 4),
+            @ptrFromInt(kv.k),
+            @ptrFromInt(kv.v),
+            @backingInt(m.act),
+            if (ids) |i| @ptrFromInt(i) else null,
+            @intCast(key_stride),
+            @ptrFromInt(count),
+            if (sparse_flags) |f| @ptrFromInt(f) else null,
+            @ptrFromInt(po),
+            @ptrFromInt(pm),
+            @ptrFromInt(att + r0 * d.heads * hd * 4),
+            @intCast(n),
+            @intCast(d.heads),
+            @intCast(d.kv_heads),
+            @intCast(hd),
+            @intCast(cap),
+            scale,
+            parts,
+            o.stream,
+        );
     }
 }

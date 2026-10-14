@@ -27,7 +27,13 @@ pub const Tables = struct {
     }
 
     /// The tables of the PLE layer `layer` from the mapped checkpoint; the shards' rows as the reference splits them.
-    pub fn init(a: std.mem.Allocator, ck: *core.checkpoint.Checkpoint, c: *const config.Config, layer: usize, spelling: []const u8) !Tables {
+    pub fn init(
+        a: std.mem.Allocator,
+        ck: *core.checkpoint.Checkpoint,
+        c: *const config.Config,
+        layer: usize,
+        spelling: []const u8,
+    ) !Tables {
         const heads = try c.ngramHeadCount();
         const ref = try config.pleRef(c);
         var total: usize = 0;
@@ -48,20 +54,29 @@ pub const Tables = struct {
             const w = try ck.get(try std.fmt.allocPrint(a, "{s}.weight", .{stem}));
             const sc = try ck.get(try std.fmt.allocPrint(a, "{s}.scales", .{stem}));
             const bi = try ck.get(try std.fmt.allocPrint(a, "{s}.biases", .{stem}));
-            if (spec == null) spec = (try c.declared(stem, core.quant.keys.canonical)) orelse return error.UnsupportedQuantization;
+            if (spec == null)
+                spec = (try c.declared(stem, core.quant.keys.canonical)) orelse return error.UnsupportedQuantization;
             if (w.shape[0] != n or sc.dtype != .bf16 or bi.dtype != .bf16) return error.UnexpectedNgramTable;
             s.* = .{ .words = w.bytes, .scales = sc.bytes, .biases = bi.bytes };
         }
         const dims = c.ple_dim / heads;
         if (shards[0].words.len != (starts[1] - starts[0]) * dims * spec.?.bits / 8) return error.UnexpectedNgramTable;
-        return .{ .shards = shards, .starts = starts, .dims = dims, .bits = spec.?.bits, .group = spec.?.group, .hasher = try ngram.Hasher.init(c) };
+        return .{
+            .shards = shards,
+            .starts = starts,
+            .dims = dims,
+            .bits = spec.?.bits,
+            .group = spec.?.group,
+            .hasher = try ngram.Hasher.init(c),
+        };
     }
 
     /// Each id's packed words, scales and biases copied into the three staging slices, in id order.
     pub fn gather(t: *const Tables, ids: []const u32, words: []u8, scales: []u8, biases: []u8) !void {
         const wb = t.wordBytes();
         const tb = t.tableBytes();
-        if (words.len < ids.len * wb or scales.len < ids.len * tb or biases.len < ids.len * tb) return error.StagingTooSmall;
+        if (words.len < ids.len * wb or scales.len < ids.len * tb or biases.len < ids.len * tb)
+            return error.StagingTooSmall;
         for (ids, 0..) |id, i| {
             const s = std.sort.upperBound(usize, t.starts, @as(usize, id), struct {
                 fn order(x: usize, y: usize) std.math.Order {

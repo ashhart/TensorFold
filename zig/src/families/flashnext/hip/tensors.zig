@@ -41,8 +41,16 @@ pub const moe = struct {
     pub const prefix = "mlp.";
     pub const gate = "mlp.gate";
     pub const shared_gate = "mlp.shared_expert_gate";
-    pub const shared = [_][]const u8{ "mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.shared_expert.down_proj" };
-    pub const routed = [_][]const u8{ "mlp.switch_mlp.gate_proj", "mlp.switch_mlp.up_proj", "mlp.switch_mlp.down_proj" };
+    pub const shared = [_][]const u8{
+        "mlp.shared_expert.gate_proj",
+        "mlp.shared_expert.up_proj",
+        "mlp.shared_expert.down_proj",
+    };
+    pub const routed = [_][]const u8{
+        "mlp.switch_mlp.gate_proj",
+        "mlp.switch_mlp.up_proj",
+        "mlp.switch_mlp.down_proj",
+    };
 };
 
 /// The Gated DeltaNet block under a layer's stem.
@@ -83,7 +91,15 @@ pub const ple = struct {
     pub const norm_query = "ple.norm_query.weight";
     pub const norm_conv = "ple.norm_conv.weight";
     pub const conv = "ple.conv1d.weight";
-    pub const vectors = [_][]const u8{ conv, norm_conv, norm_key, norm_query, "ple.ple_embedding.layer_multipliers", "ple.ple_embedding.ngram_heads_offsets", "ple.ple_embedding.ngram_heads_vocab_sizes" };
+    pub const vectors = [_][]const u8{
+        conv,
+        norm_conv,
+        norm_key,
+        norm_query,
+        "ple.ple_embedding.layer_multipliers",
+        "ple.ple_embedding.ngram_heads_offsets",
+        "ple.ple_embedding.ngram_heads_vocab_sizes",
+    };
 
     /// Shard `i` of the tables under `spelling` (`shard_` or `shards.`), without its `.weight`/`.scales`/`.biases`.
     pub fn table(buf: []u8, layer_stem: []const u8, spelling: []const u8, i: usize) ![]const u8 {
@@ -151,11 +167,29 @@ test "every sized projection of the 4-bit checkpoint has the shape its config gi
     defer c.deinit();
     // the published checkpoint's headers: rows and inputs of each projection
     const want = [_]struct { []const u8, Shape }{
-        .{ hc.down, .{ .n = 320, .k = 10240 } },     .{ hc.up, .{ .n = 10240, .k = 320 } },       .{ hc.inject, .{ .n = 4, .k = 10240 } },
-        .{ linear.qkv, .{ .n = 10240, .k = 2560 } }, .{ linear.z, .{ .n = 6144, .k = 2560 } },    .{ linear.a, .{ .n = 48, .k = 2560 } },
-        .{ linear.out, .{ .n = 2560, .k = 6144 } },  .{ sparse.q, .{ .n = 12288, .k = 2560 } },   .{ sparse.k, .{ .n = 512, .k = 2560 } },
-        .{ sparse.o, .{ .n = 2560, .k = 6144 } },    .{ sparse.index, .{ .n = 640, .k = 2560 } }, .{ ple.key, .{ .n = 10240, .k = 2560 } },
-        .{ ple.value, .{ .n = 2560, .k = 2560 } },   .{ lm_head, .{ .n = 248320, .k = 2560 } },   .{ mtp.fc_hidden, .{ .n = 2560, .k = 2560 } },
+        .{ hc.down, .{ .n = 320, .k = 10240 } },   .{ hc.up, .{ .n = 10240, .k = 320 } },
+        .{ hc.inject, .{ .n = 4, .k = 10240 } },
+        .{
+            linear.qkv,
+            .{ .n = 10240, .k = 2560 },
+        },
+        .{ linear.z, .{ .n = 6144, .k = 2560 } },  .{ linear.a, .{ .n = 48, .k = 2560 } },
+        .{
+            linear.out,
+            .{ .n = 2560, .k = 6144 },
+        },
+        .{ sparse.q, .{ .n = 12288, .k = 2560 } }, .{ sparse.k, .{ .n = 512, .k = 2560 } },
+        .{ sparse.o, .{ .n = 2560, .k = 6144 } },
+        .{
+            sparse.index,
+            .{ .n = 640, .k = 2560 },
+        },
+        .{ ple.key, .{ .n = 10240, .k = 2560 } },  .{ ple.value, .{ .n = 2560, .k = 2560 } },
+        .{ lm_head, .{ .n = 248320, .k = 2560 } },
+        .{
+            mtp.fc_hidden,
+            .{ .n = 2560, .k = 2560 },
+        },
     };
     for (want) |w| try std.testing.expectEqual(w[1], (try shape(&c, w[0])).?);
     try std.testing.expect((try shape(&c, moe.gate)) == null);

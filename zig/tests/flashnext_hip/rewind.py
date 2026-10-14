@@ -6,14 +6,16 @@ import urllib.request
 
 URL, MODEL, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
 WANT = sys.argv[4] if len(sys.argv) > 4 else None
-SYSTEM = "You are a careful assistant. Reference notes: " + " ".join(f"note{i % 89}x{(i * 7919) % 1013}" for i in range(1500))
+SYSTEM = ("You are a careful assistant. Reference notes: "
+          + " ".join(f"note{i % 89}x{(i * 7919) % 1013}" for i in range(1500)))
 
 
 def chat(messages, draft):
     """The reply's text and the prompt tokens the server says it took from kept states."""
     body = {"model": MODEL, "messages": messages, "max_tokens": 48, "temperature": 0.0, "draft": draft,
             "chat_template_kwargs": {"enable_thinking": False}}
-    request = urllib.request.Request(URL + "/v1/chat/completions", json.dumps(body).encode(), {"Content-Type": "application/json"})
+    request = urllib.request.Request(URL + "/v1/chat/completions", json.dumps(body).encode(),
+                                     {"Content-Type": "application/json"})
     with urllib.request.urlopen(request, timeout=1800) as reply:
         doc = json.loads(reply.read())
     cached = (doc.get("usage", {}).get("prompt_tokens_details") or {}).get("cached_tokens", 0)

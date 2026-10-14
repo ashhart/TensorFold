@@ -20,7 +20,14 @@ const ring = 1024;
 /// Drafts the head holds for a stream at most.
 pub const max_depth = cache.max_window - 1;
 
-pub const Fill = struct { at: usize, stops: [16]u32 = undefined, count: usize = 0, next: usize = 0, from: usize = 0, kept0: u64 = 0 };
+pub const Fill = struct {
+    at: usize,
+    stops: [16]u32 = undefined,
+    count: usize = 0,
+    next: usize = 0,
+    from: usize = 0,
+    kept0: u64 = 0,
+};
 
 pub const Lane = struct {
     caches: cache.Caches,
@@ -68,7 +75,14 @@ pub const Fx = struct {
         const host = try gpa.alloc(u16, n);
         defer gpa.free(host);
         @memset(host, one);
-        f.* = .{ .gpa = gpa, .e = e, .streams = streams, .ones = try hip.DeviceBuffer.fromHost(&e.driver, std.mem.sliceAsBytes(host)), .draft_ids = &.{}, .drafts = @min(max_depth, e.o.policy.mtp.drafts) };
+        f.* = .{
+            .gpa = gpa,
+            .e = e,
+            .streams = streams,
+            .ones = try hip.DeviceBuffer.fromHost(&e.driver, std.mem.sliceAsBytes(host)),
+            .draft_ids = &.{},
+            .drafts = @min(max_depth, e.o.policy.mtp.drafts),
+        };
         errdefer f.ones.free();
         if (e.weights.model.mtp != null) f.draft_ids = try load.draftIds(gpa);
         return f;
@@ -94,7 +108,15 @@ pub const Fx = struct {
     /// Keep prompt states in `budget` host bytes on the prompt kernels' 64-row grid, each a token past its rows.
     pub fn keepPrompts(f: *Fx, budget: u64) void {
         if (budget == 0) return;
-        f.store = pc.Store.init(f.gpa, .{ .ptr = f, .vtable = &.{ .bytes = snapBytes, .save = snapSave, .restore = snapRestore, .drop = snapDrop } }, .{ .lookahead = 1, .planned = true, .grid = 64 }, budget);
+        f.store = pc.Store.init(
+            f.gpa,
+            .{
+                .ptr = f,
+                .vtable = &.{ .bytes = snapBytes, .save = snapSave, .restore = snapRestore, .drop = snapDrop },
+            },
+            .{ .lookahead = 1, .planned = true, .grid = 64 },
+            budget,
+        );
     }
 
     fn snapBytes(ptr: *anyopaque, at: u32) u64 {
@@ -102,14 +124,25 @@ pub const Fx = struct {
         var buf: [64]bool = undefined;
         const kinds = f.e.kinds(&buf) catch return std.math.maxInt(u64);
         const main = cache.Layout.of(f.e.weights.model.dims, kinds, 64, f.e.act).stateBytes(at);
-        const head = if (f.e.weights.model.mtp) |h| cache.Layout.of(h.dims, &.{false}, 64, f.e.act).stateBytes(at) else 0;
+        const head = if (f.e.weights.model.mtp) |h|
+            cache.Layout.of(h.dims, &.{false}, 64, f.e.act).stateBytes(at)
+        else
+            0;
         return main + head;
     }
 
     fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
         const f = of(ptr);
         const lane: *Lane = @ptrCast(@alignCast(owner orelse return error.NoOwner));
-        const saved = try snapshot.save(f.gpa, &f.e.driver, f.e.stream, &lane.caches, if (lane.head) |*h| h else null, at, f.e.cfg.index_ratio);
+        const saved = try snapshot.save(
+            f.gpa,
+            &f.e.driver,
+            f.e.stream,
+            &lane.caches,
+            if (lane.head) |*h| h else null,
+            at,
+            f.e.cfg.index_ratio,
+        );
         saved.slot = f.next_slot;
         f.next_slot += 1;
         if (f.link != null) try f.send(&.{ @backingInt(worker.Op.snap), lane.id, saved.slot, at });
@@ -121,7 +154,15 @@ pub const Fx = struct {
         const lane: *Lane = @ptrCast(@alignCast(owner orelse return error.NoOwner));
         const s: *snapshot.Saved = @ptrCast(@alignCast(saved));
         if (f.link != null) try f.send(&.{ @backingInt(worker.Op.restore), lane.id, s.slot });
-        try snapshot.restore(f.gpa, &f.e.driver, f.e.stream, s, &lane.caches, if (lane.head) |*h| h else null, f.e.cfg.index_ratio);
+        try snapshot.restore(
+            f.gpa,
+            &f.e.driver,
+            f.e.stream,
+            s,
+            &lane.caches,
+            if (lane.head) |*h| h else null,
+            f.e.cfg.index_ratio,
+        );
     }
 
     fn snapDrop(ptr: *anyopaque, saved: pc.Saved) void {
@@ -236,7 +277,14 @@ pub const Fx = struct {
         while (f.slotBusy(slot, gop.key_ptr.*)) slot += 1;
         const caches = try e.lease(slot);
         errdefer e.unlease(caches);
-        var head: ?cache.Caches = if (m.mtp) |*h| try head_mod.caches(f.gpa, &e.driver, h, total, e.act, e.eos) else null;
+        var head: ?cache.Caches = if (m.mtp) |*h| try head_mod.caches(
+            f.gpa,
+            &e.driver,
+            h,
+            total,
+            e.act,
+            e.eos,
+        ) else null;
         errdefer if (head) |*h| h.deinit(f.gpa);
         var streams = try hip.DeviceBuffer.alloc(&e.driver, cache.max_window * m.dims.wide() * m.act.size());
         errdefer streams.free();
@@ -250,7 +298,15 @@ pub const Fx = struct {
             var arena: std.heap.ArenaAllocator = .init(f.gpa);
             defer arena.deinit();
             fill.kept0 = st.counts.kept;
-            const plan = st.begin(arena.allocator(), prompt, s.history_len, s.shared_prefixes, &.{}, lane, &.{}) catch pc.Plan{};
+            const plan = st.begin(
+                arena.allocator(),
+                prompt,
+                s.history_len,
+                s.shared_prefixes,
+                &.{},
+                lane,
+                &.{},
+            ) catch pc.Plan{};
             fill.at = plan.from;
             fill.from = plan.from;
             fill.count = @min(plan.marks.len, fill.stops.len);
@@ -287,7 +343,16 @@ pub const Fx = struct {
         if (lane.head) |*hc| {
             // the head's keys for every prompt row with a next token (the last waits for the first draw)
             const n = if (last) rows - 1 else rows;
-            if (n > 0) _ = try head_mod.run(e.ops(&e.arena), m, &e.host, hc, out.streams, prompt[at + 1 ..][0..n], at, f.ones);
+            if (n > 0) _ = try head_mod.run(
+                e.ops(&e.arena),
+                m,
+                &e.host,
+                hc,
+                out.streams,
+                prompt[at + 1 ..][0..n],
+                at,
+                f.ones,
+            );
         }
         fill.at = to;
         if (fill.next < fill.count and to == fill.stops[fill.next]) {
@@ -301,7 +366,18 @@ pub const Fx = struct {
         const o = e.ops(&e.arena);
         const logits = try e.logits(o, forward.at(out.mixed, (rows - 1) * m.dims.hidden), 1);
         var token: [1]u32 = undefined;
-        try e.drawer.draw(o, e.stream, logits, &.{.{ .sampling = sampling(s), .position = prompt.len, .keep = if (s.grammar != null) lane.first_row else null }}, &token, false);
+        try e.drawer.draw(
+            o,
+            e.stream,
+            logits,
+            &.{.{
+                .sampling = sampling(s),
+                .position = prompt.len,
+                .keep = if (s.grammar != null) lane.first_row else null,
+            }},
+            &token,
+            false,
+        );
         _ = f.take(token[0]);
         lane.fill = null;
         return true;
@@ -392,7 +468,11 @@ pub const Fx = struct {
         for (windows) |w| {
             const n = w.rows();
             const words = if (w.masks.len > 0) w.masks.len / n else 0;
-            for (w.positions, 0..) |p, r| reqs[off + r] = .{ .sampling = sampling(w.stream), .position = p, .mask = w.masks[r * words ..][0..words] };
+            for (w.positions, 0..) |p, r| reqs[off + r] = .{
+                .sampling = sampling(w.stream),
+                .position = p,
+                .mask = w.masks[r * words ..][0..words],
+            };
             off += n;
         }
         if (total > e.drawer.rows) return error.WindowTooWide;
@@ -430,7 +510,9 @@ pub const Fx = struct {
             lane.held_n = 0;
             if (r.position != lane.caches.len + 1) return error.PositionMismatch;
             const hc = if (lane.head) |*h| h else continue;
-            const token: u32 = if (r.rows != null) r.follow[r.follow.len - 1] else switch (r.first orelse return error.NoFirstToken) {
+            const token: u32 = if (r.rows != null)
+                r.follow[r.follow.len - 1]
+            else switch (r.first orelse return error.NoFirstToken) {
                 .handle => |at| f.drawn[at % ring],
                 .value => |v| v,
             };
@@ -444,7 +526,16 @@ pub const Fx = struct {
             e.host.used = 0;
             e.arena.reset();
             const o = e.ops(&e.arena);
-            var out = try head_mod.run(o, m, &e.host, hc, .{ .ptr = lane.streams.base(), .kind = m.act }, follow, start, f.ones);
+            var out = try head_mod.run(
+                o,
+                m,
+                &e.host,
+                hc,
+                .{ .ptr = lane.streams.base(), .kind = m.act },
+                follow,
+                start,
+                f.ones,
+            );
             var mixed = forward.at(out.mixed, (follow.len - 1) * m.dims.hidden);
             var streams = out.streams.ptr + (follow.len - 1) * row_bytes;
             const depth = @min(r.depth, max_depth);
@@ -459,7 +550,16 @@ pub const Fx = struct {
                 lane.held[d] = tok[0];
                 chained = d + 1;
                 if (d + 1 == depth or prob[0] < stop_under) break;
-                out = try head_mod.run(o, m, &e.host, hc, .{ .ptr = streams, .kind = m.act }, &tok, lane.caches.len + d, f.ones);
+                out = try head_mod.run(
+                    o,
+                    m,
+                    &e.host,
+                    hc,
+                    .{ .ptr = streams, .kind = m.act },
+                    &tok,
+                    lane.caches.len + d,
+                    f.ones,
+                );
                 mixed = out.mixed;
                 streams = out.streams.ptr;
             }

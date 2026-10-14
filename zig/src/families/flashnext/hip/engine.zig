@@ -114,12 +114,23 @@ pub const Engine = struct {
         e.qk = w;
         errdefer for (&e.qk) |*b| b.free();
         e.weights.model.qk = .{ .q = e.qk[0].base(), .k = e.qk[1].base(), .eps = c.eps };
-        e.host = .{ .gpa = gpa, .d = &e.driver, .staging = try hip.HostBuffer.alloc(&e.driver, staging_bytes), .tables = &e.tables };
+        e.host = .{
+            .gpa = gpa,
+            .d = &e.driver,
+            .staging = try hip.HostBuffer.alloc(&e.driver, staging_bytes),
+            .tables = &e.tables,
+        };
         errdefer e.host.staging.free();
         e.eos = e.tables.hasher.ref.eos;
         e.arena = try hip.Arena.init(&e.driver, try e.scratchBytes());
         errdefer e.arena.deinit();
-        e.drawer = try serve.draw.Drawer.init(gpa, &e.driver, if (e.act == .f16) .f16 else .bf16, e.cfg.vocab, cache.max_window * forward.max_segs);
+        e.drawer = try serve.draw.Drawer.init(
+            gpa,
+            &e.driver,
+            if (e.act == .f16) .f16 else .bf16,
+            e.cfg.vocab,
+            cache.max_window * forward.max_segs,
+        );
         e.graphed = o.policy.graphs != .off;
         e.graphs = Graphs.init(gpa);
         e.chosen = null;
@@ -233,11 +244,26 @@ pub const Engine = struct {
             if (!linear) continue;
             const from = c.snapshot(i, kept - 1);
             const to = c.linearAt(i);
-            try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(@ptrFromInt(to.conv), @ptrFromInt(from.conv), l.conv_bytes, s));
-            try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(@ptrFromInt(to.state), @ptrFromInt(from.state), l.state_bytes, s));
+            try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
+                @ptrFromInt(to.conv),
+                @ptrFromInt(from.conv),
+                l.conv_bytes,
+                s,
+            ));
+            try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
+                @ptrFromInt(to.state),
+                @ptrFromInt(from.state),
+                l.state_bytes,
+                s,
+            ));
         };
         const row = l.tail_bytes / l.tail_rows;
-        try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(@ptrFromInt(c.tail()), @ptrFromInt(c.cin.base() + kept * row), l.tail_bytes, s));
+        try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
+            @ptrFromInt(c.tail()),
+            @ptrFromInt(c.cin.base() + kept * row),
+            l.tail_bytes,
+            s,
+        ));
         c.history = @import("ngram.zig").after(c.history, tokens[0..kept]);
         c.len += kept;
         c.pooled = @min(c.pooled, c.len / e.cfg.index_ratio);

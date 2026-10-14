@@ -48,27 +48,50 @@ fn copyOut(d: *const hip.Runtime, c: *const cache.Caches, at: usize, ratio: usiz
     errdefer gpa.free(out);
     var off: usize = 0;
     for (list.items) |r| {
-        if (r.len > 0) try hip.runtime.check(d.api.hipMemcpyDtoH(out[off..].ptr, @ptrFromInt(c.mem.base() + r.offset), r.len));
+        if (r.len > 0) try hip.runtime.check(d.api.hipMemcpyDtoH(
+            out[off..].ptr,
+            @ptrFromInt(c.mem.base() + r.offset),
+            r.len,
+        ));
         off += r.len;
     }
     return out;
 }
 
-fn copyIn(d: *const hip.Runtime, c: *const cache.Caches, at: usize, ratio: usize, bytes: []const u8, gpa: std.mem.Allocator) !void {
+fn copyIn(
+    d: *const hip.Runtime,
+    c: *const cache.Caches,
+    at: usize,
+    ratio: usize,
+    bytes: []const u8,
+    gpa: std.mem.Allocator,
+) !void {
     var list: std.ArrayList(Region) = .empty;
     defer list.deinit(gpa);
     try regions(c, at, ratio, &list, gpa);
     var off: usize = 0;
     for (list.items) |r| {
         if (off + r.len > bytes.len) return error.SnapshotMismatch;
-        if (r.len > 0) try hip.runtime.check(d.api.hipMemcpyHtoD(@ptrFromInt(c.mem.base() + r.offset), @constCast(bytes[off..].ptr), r.len));
+        if (r.len > 0) try hip.runtime.check(d.api.hipMemcpyHtoD(
+            @ptrFromInt(c.mem.base() + r.offset),
+            @constCast(bytes[off..].ptr),
+            r.len,
+        ));
         off += r.len;
     }
     if (off != bytes.len) return error.SnapshotMismatch;
 }
 
 /// The state of `c` (and the head's `head`) after `at` prompt tokens, copied to host memory; the stream is idle.
-pub fn save(gpa: std.mem.Allocator, d: *const hip.Runtime, s: hip.Stream, c: *const cache.Caches, head: ?*const cache.Caches, at: usize, ratio: usize) !*Saved {
+pub fn save(
+    gpa: std.mem.Allocator,
+    d: *const hip.Runtime,
+    s: hip.Stream,
+    c: *const cache.Caches,
+    head: ?*const cache.Caches,
+    at: usize,
+    ratio: usize,
+) !*Saved {
     try s.synchronize();
     if (c.len != at) return error.SnapshotNotAtMark;
     const out = try gpa.create(Saved);
@@ -81,7 +104,15 @@ pub fn save(gpa: std.mem.Allocator, d: *const hip.Runtime, s: hip.Stream, c: *co
 }
 
 /// `saved` made the live state of `c` and `head`: the next prompt chunk starts at its position.
-pub fn restore(gpa: std.mem.Allocator, d: *const hip.Runtime, s: hip.Stream, saved: *const Saved, c: *cache.Caches, head: ?*cache.Caches, ratio: usize) !void {
+pub fn restore(
+    gpa: std.mem.Allocator,
+    d: *const hip.Runtime,
+    s: hip.Stream,
+    saved: *const Saved,
+    c: *cache.Caches,
+    head: ?*cache.Caches,
+    ratio: usize,
+) !void {
     try s.synchronize();
     if (saved.at + 1 > c.layout.cap) return error.SnapshotTooLong;
     try copyIn(d, c, saved.at, ratio, saved.main, gpa);

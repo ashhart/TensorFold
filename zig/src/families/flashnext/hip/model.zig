@@ -113,7 +113,16 @@ pub const Layer = struct { ahc: Hc, mhc: Hc, mixer: Mixer, moe: Routed };
 pub const Ple = struct { layer: usize, kv: Projection, key_scale: u64, query_scale: u64, conv_scale: u64, conv: u64 };
 
 /// The MTP head, whole on the drafting rank: input norms, projections, one sparse layer, its mixer, draft-vocab rows.
-pub const Head = struct { e_norm: u64, h_norm: u64, fc_e: Projection, fc_h: Projection, layer: Layer, mix: Hc, dims: Dims, draft: Projection };
+pub const Head = struct {
+    e_norm: u64,
+    h_norm: u64,
+    fc_e: Projection,
+    fc_h: Projection,
+    layer: Layer,
+    mix: Hc,
+    dims: Dims,
+    draft: Projection,
+};
 
 /// The DeltaNet's q and k normalization as RMS norms: constant fp32 weights (key dim wide) and their eps.
 pub const Qk = struct { q: u64, k: u64, eps: f32 };

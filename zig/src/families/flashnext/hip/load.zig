@@ -238,7 +238,13 @@ fn stackRows(a: Allocator, top: Host, under: Host) !Host {
     const t = top.mlx;
     const u = under.mlx;
     if (t.bits != u.bits or t.group != u.group or t.words.shape[1] != u.words.shape[1]) return error.UnexpectedTensor;
-    return .{ .mlx = .{ .words = try join(a, t.words, u.words), .scales = try join(a, t.scales, u.scales), .biases = try join(a, t.biases, u.biases), .bits = t.bits, .group = t.group } };
+    return .{ .mlx = .{
+        .words = try join(a, t.words, u.words),
+        .scales = try join(a, t.scales, u.scales),
+        .biases = try join(a, t.biases, u.biases),
+        .bits = t.bits,
+        .group = t.group,
+    } };
 }
 
 fn join(a: Allocator, x: Tensor, y: Tensor) !Tensor {
@@ -257,7 +263,11 @@ fn aroundOne(a: Allocator, t: *const Tables, layers: usize) !bool {
     const means = try a.alloc(f64, layers);
     for (means, 0..) |*m, i| {
         var buf: [128]u8 = undefined;
-        const k = try std.fmt.allocPrint(a, "{s}.{s}.{s}", .{ try tensors.layer(&buf, i), tensors.hc.attn, tensors.hc.norm });
+        const k = try std.fmt.allocPrint(
+            a,
+            "{s}.{s}.{s}",
+            .{ try tensors.layer(&buf, i), tensors.hc.attn, tensors.hc.norm },
+        );
         const v = try floats(a, try quant.convert.float32(a, try t.get(k)));
         var sum: f64 = 0;
         for (v) |x| sum += x;

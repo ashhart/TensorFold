@@ -102,9 +102,16 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "hip", .module = gpu.hip }, .{ .name = "flashnext", .module = gpu.flashnext }, .{ .name = "tokenizer", .module = gpu.hip.import_table.get("core").?.import_table.get("tokenizer").? } },
+        .imports = &.{
+            .{ .name = "hip", .module = gpu.hip },
+            .{ .name = "flashnext", .module = gpu.flashnext },
+            .{ .name = "tokenizer", .module = gpu.hip.import_table.get("core").?.import_table.get("tokenizer").? },
+        },
     }) });
-    b.step("tf-flashnext-hip-test", "Flash Next model checks on the GPU (-Dhip-arch)").dependOn(&b.addInstallArtifact(fx_test, .{}).step);
+    b.step(
+        "tf-flashnext-hip-test",
+        "Flash Next model checks on the GPU (-Dhip-arch)",
+    ).dependOn(&b.addInstallArtifact(fx_test, .{}).step);
     const native = server(b, target, gpu, build_options);
     b.step("native-hip", "tensorfold-native with the HIP engines into zig-out/native-hip/bin (-Dhip-arch)").dependOn(&b.addInstallArtifact(native, .{ .dest_dir = .{ .override = .{ .custom = "native-hip/bin" } } }).step);
 }
@@ -160,7 +167,13 @@ fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "lanes", .module = lanes }, .{ .name = "core", .module = core }, .{ .name = "engine_api", .module = api }, .{ .name = "hip_serve", .module = serve } },
+        .imports = &.{
+            .{ .name = "hip", .module = hip },
+            .{ .name = "lanes", .module = lanes },
+            .{ .name = "core", .module = core },
+            .{ .name = "engine_api", .module = api },
+            .{ .name = "hip_serve", .module = serve },
+        },
     });
     const native = b.createModule(.{
         .root_source_file = b.path("zig/src/native/hip.zig"),

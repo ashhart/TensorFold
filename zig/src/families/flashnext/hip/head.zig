@@ -13,12 +13,28 @@ const take = forward.take;
 pub const Out = forward.Out;
 
 /// The head's caches: one sparse layer at the whole model's heads.
-pub fn caches(gpa: std.mem.Allocator, d: *const hip.Runtime, h: *const model.Head, cap: usize, act: model.Kind, eos: i64) !cache.Caches {
+pub fn caches(
+    gpa: std.mem.Allocator,
+    d: *const hip.Runtime,
+    h: *const model.Head,
+    cap: usize,
+    act: model.Kind,
+    eos: i64,
+) !cache.Caches {
     return cache.Caches.init(gpa, d, h.dims, &.{false}, cap, act, eos);
 }
 
 /// `tokens` (each the token after its row) over residual `streams` from `pos`; `ones` a one a stream a row.
-pub fn run(ops: Ops, m: *const model.Model, host: *forward.Host, c: *cache.Caches, streams: Tensor, tokens: []const u32, pos: usize, ones: hip.DeviceBuffer) !Out {
+pub fn run(
+    ops: Ops,
+    m: *const model.Model,
+    host: *forward.Host,
+    c: *cache.Caches,
+    streams: Tensor,
+    tokens: []const u32,
+    pos: usize,
+    ones: hip.DeviceBuffer,
+) !Out {
     var o = ops;
     o.window = true;
     const w = &m.mtp.?;
@@ -41,7 +57,16 @@ pub fn run(ops: Ops, m: *const model.Model, host: *forward.Host, c: *cache.Cache
     try o.rms(emb, w.e_norm, en, rows, d.hidden, d.eps);
     const e = try o.project(en, w.fc_e, rows, false);
     const hn = try take(o, m.act, rows * d.wide());
-    try o.l.fn_rms_wide(@ptrFromInt(streams.ptr), @ptrFromInt(w.h_norm), @ptrFromInt(hn.ptr), @backingInt(m.act), @intCast(rows), @intCast(d.wide()), d.eps, o.stream);
+    try o.l.fn_rms_wide(
+        @ptrFromInt(streams.ptr),
+        @ptrFromInt(w.h_norm),
+        @ptrFromInt(hn.ptr),
+        @backingInt(m.act),
+        @intCast(rows),
+        @intCast(d.wide()),
+        d.eps,
+        o.stream,
+    );
     const h = try o.project(hn, w.fc_h, rows * d.streams, false);
     const x = try take(o, m.act, rows * d.wide());
     const l = w.layer;
@@ -61,7 +86,17 @@ pub fn run(ops: Ops, m: *const model.Model, host: *forward.Host, c: *cache.Cache
 }
 
 /// The draft head's greedy token for each of `rows` mixed rows (argmax over the draft vocabulary) and its probability.
-pub fn draws(o: Ops, m: *const model.Model, host: *forward.Host, s: hip.Stream, mixed: Tensor, rows: usize, ids: []const u32, out: []u32, probs: []f32) !void {
+pub fn draws(
+    o: Ops,
+    m: *const model.Model,
+    host: *forward.Host,
+    s: hip.Stream,
+    mixed: Tensor,
+    rows: usize,
+    ids: []const u32,
+    out: []u32,
+    probs: []f32,
+) !void {
     const w = &m.mtp.?;
     const logits = try o.project(mixed, w.draft, rows, false);
     const arg = try o.arena.of(i32, 2 * rows);

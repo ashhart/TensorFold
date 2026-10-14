@@ -70,7 +70,8 @@ pub const Layout = struct {
 
     /// Bytes of the state after `at` positions: the sparse layers' first `at` rows, the rest whole.
     pub fn stateBytes(l: Layout, at: usize) usize {
-        const sparse_rows = 2 * l.kv_heads * at * l.head_dim * l.act + at * l.index_dim * l.act + at / l.ratio * l.index_dim * l.act;
+        const sparse_rows = 2 * l.kv_heads * at * l.head_dim * l.act + at * l.index_dim * l.act +
+            at / l.ratio * l.index_dim * l.act;
         return l.sparse * sparse_rows + l.linear * l.linearBytes() + l.tail_bytes;
     }
 
@@ -103,7 +104,15 @@ pub const Caches = struct {
     /// The slot these caches fill in the engine's pool (every rank's the same): a round's graph is keyed by it.
     id: u32 = 0,
 
-    pub fn init(gpa: std.mem.Allocator, d: *const hip.Runtime, dims: Dims, kinds: []const bool, cap: usize, act: model.Kind, eos: i64) !Caches {
+    pub fn init(
+        gpa: std.mem.Allocator,
+        d: *const hip.Runtime,
+        dims: Dims,
+        kinds: []const bool,
+        cap: usize,
+        act: model.Kind,
+        eos: i64,
+    ) !Caches {
         const layout = Layout.of(dims, kinds, cap, act);
         const slot = try gpa.alloc(usize, kinds.len);
         errdefer gpa.free(slot);
@@ -121,7 +130,15 @@ pub const Caches = struct {
         errdefer window.free();
         var cin = try hip.DeviceBuffer.alloc(d, layout.cinBytes());
         errdefer cin.free();
-        return .{ .layout = layout, .slot = slot, .linear = linear, .mem = mem, .window = window, .cin = cin, .history = .{ eos, eos } };
+        return .{
+            .layout = layout,
+            .slot = slot,
+            .linear = linear,
+            .mem = mem,
+            .window = window,
+            .cin = cin,
+            .history = .{ eos, eos },
+        };
     }
 
     /// The state of fresh caches again, the memory kept: zeros, no positions, eos before any row.
@@ -144,7 +161,12 @@ pub const Caches = struct {
     pub fn sparse(c: *const Caches, layer: usize) SparseView {
         const l = c.layout;
         const at = c.mem.base() + c.slot[layer] * l.sparseBytes();
-        return .{ .k = at, .v = at + l.kv_bytes, .raw = at + 2 * l.kv_bytes, .pooled = at + 2 * l.kv_bytes + l.raw_bytes };
+        return .{
+            .k = at,
+            .v = at + l.kv_bytes,
+            .raw = at + 2 * l.kv_bytes,
+            .pooled = at + 2 * l.kv_bytes + l.raw_bytes,
+        };
     }
 
     pub fn linearAt(c: *const Caches, layer: usize) LinearView {
