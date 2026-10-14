@@ -14,6 +14,8 @@ pub const Segment = struct { cache: *state.Cache, rows: usize };
 
 /// Rows a call of the attention kernels takes: its partials' scratch is sized for this many.
 const attend_rows = state.max_rows;
+/// Keys a gemma_decode_attention threadgroup takes (its CD).
+const decode_chunk = 256;
 
 /// Each sub-batch's chunk count, by its first row; the kernels' meta sits at that row too.
 const Chunks = [state.prompt_rows][2]usize;
@@ -164,6 +166,23 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const 
         while (sub < n) : (sub += attend_rows) {
             const r = at + sub;
             const rn = @min(attend_rows, n - sub);
+            if (global) { // the tensor units, a key head's eight query heads as one tile: each key read once a token
+                const nch = (c.len + sub + rn - 1) / decode_chunk + 1;
+                e.setPipeline(kd.decode_attn);
+                e.setBuffer(s.q, r * cfg.query_heads * dh * 2, 0);
+                bind(e, &.{ c.k[i], c.v[i] }, 1);
+                e.setValue([4]i32{ @intCast(rn), @intCast(c.len + sub), @intCast(state.slotsOf(i, c.capacity)), @intCast(nch) }, 3);
+                bind(e, &.{ s.pm, s.pl, s.po }, 4);
+                e.dispatchGroups(.{ .width = nch, .height = nk, .depth = (rn * kd.heads_per_kv + 15) / 16 }, .{ .width = 32 * dh / 128 });
+                s.meta[kind].slice(i32, state.prompt_rows * state.meta_ints)[r * state.meta_ints + 1] = @intCast(nch);
+                s.meta[kind].slice(i32, state.prompt_rows * state.meta_ints)[r * state.meta_ints + 3] = @intCast(rn);
+                e.setPipeline(kd.merge);
+                bind(e, &.{ s.pm, s.pl, s.po }, 0);
+                e.setBuffer(s.meta[kind], r * state.meta_ints * 4, 3);
+                e.setBuffer(s.attn, r * cfg.query_heads * dh * 2, 4);
+                e.dispatchGroups(.{ .width = 1, .height = cfg.query_heads, .depth = rn }, .{ .width = 32 });
+                continue;
+            }
             e.setPipeline(kd.partial);
             e.setBuffer(s.q, r * cfg.query_heads * dh * 2, 0);
             bind(e, &.{ c.k[i], c.v[i], c.k[i], c.v[i] }, 1); // the new rows were written first: every key is a cached one

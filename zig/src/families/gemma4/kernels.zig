@@ -21,6 +21,8 @@ pub const Kind = struct {
     kv_write: mtl.Pipeline,
     /// gemma_prompt_attention: a prompt chunk's rows over the cache, on the tensor units.
     prompt_attn: mtl.Pipeline,
+    /// gemma_decode_attention: decode rows' partials on the tensor units, a key head's query heads as one tile.
+    decode_attn: mtl.Pipeline,
     /// gilby's attend shape by head dim: keys a chunk, simdgroups a query head, keys scored before an update.
     chunk: usize,
     split: usize,
@@ -64,6 +66,7 @@ pub const Kind = struct {
             const plib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
             defer plib.deinit();
             k.prompt_attn = try mtl.Pipeline.init(device, plib, "gemma_prompt_attention", false);
+            k.decode_attn = try mtl.Pipeline.init(device, plib, "gemma_decode_attention", false);
         }
         k.chunk = shape[0];
         k.split = shape[1];
@@ -73,7 +76,7 @@ pub const Kind = struct {
     }
 
     fn deinit(k: Kind) void {
-        inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs", "kv_write", "prompt_attn" }) |field| @field(k, field).deinit();
+        inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs", "kv_write", "prompt_attn", "decode_attn" }) |field| @field(k, field).deinit();
     }
 };
 
