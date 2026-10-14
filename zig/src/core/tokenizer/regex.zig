@@ -353,8 +353,7 @@ const Parser = struct {
                 return inner;
             },
             '[' => {
-                if (icase) return error.UnsupportedRegex;
-                return p.bracket();
+                return p.bracket(icase);
             },
             '.' => {
                 p.i += 1;
@@ -421,10 +420,11 @@ const Parser = struct {
         };
     }
 
-    fn bracket(p: *Parser) Error!Node {
+    fn bracket(p: *Parser, icase: bool) Error!Node {
         p.i += 1;
         var c = Class{ .items = &.{} };
         if (p.eat("^")) c.negated = true;
+        if (icase and c.negated) return error.UnsupportedRegex;
         var items: std.ArrayList(Item) = .empty;
         var first = true;
         while (true) : (first = false) {
@@ -447,8 +447,22 @@ const Parser = struct {
             } else try items.append(p.keep, .{ .range = .{ lo_cp, lo_cp } });
         }
         p.i += 1;
-        c.items = items.items;
+        c.items = if (icase) try p.foldedItems(items.items) else items.items;
         return p.class(c);
+    }
+
+    /// An ASCII class under (?i): each member with its case variants, as `folded` takes a literal.
+    fn foldedItems(p: *Parser, items: []const Item) Error![]const Item {
+        var out: std.ArrayList(Item) = .empty;
+        for (items) |item| {
+            if (item != .range or item.range[1] >= 128) return error.UnsupportedRegex;
+            var cp = item.range[0];
+            while (cp <= item.range[1]) : (cp += 1) {
+                var buf: [4]u21 = undefined;
+                for (unicode.asciiCaseVariants(@intCast(cp), &buf)) |v| try out.append(p.keep, .{ .range = .{ v, v } });
+            }
+        }
+        return out.items;
     }
 
     fn member(p: *Parser) Error!Escape {
@@ -478,6 +492,19 @@ test "qwen pre-tokenizer pattern splits like Oniguruma" {
     const want = [_][]const u8{ "It", "'S", " x", "'\u{17F}", " ", "1", "2", " caf\u{E9}", "  \n\n", " ", " hi", "!!\r\n", "  " };
     try std.testing.expectEqual(want.len, got.len);
     for (want, got) |w, g| try std.testing.expectEqualStrings(w, g);
+}
+
+test "LFM2's pre-tokenizer pattern folds its (?i:) class as the tokenizers library splits" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const re = try Regex.compile(arena.allocator(), "'(?i:[sdmt]|ll|ve|re)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]|\\s+(?!\\S)|\\s");
+    const got = try splitAll(&re, "It'S x'\u{17F} we'LL they'Ve 1234 caf\u{E9}  \n\n  hi!!\r\n  ");
+    defer std.testing.allocator.free(got);
+    const want = [_][]const u8{ "It", "'S", " x", "'\u{17F}", " we", "'LL", " they", "'Ve", " ", "123", "4", " caf\u{E9}", "  \n\n", " ", " hi", "!!\r\n", "  " };
+    try std.testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| try std.testing.expectEqualStrings(w, g);
+    for ([_][]const u8{ "(?i:[^a])", "(?i:[\\p{L}])", "(?i:[\u{E9}])" }) |bad|
+        try std.testing.expectError(error.UnsupportedRegex, Regex.compile(arena.allocator(), bad));
 }
 
 test "counted repetition, ranges and refusals" {
