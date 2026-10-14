@@ -11,6 +11,8 @@ const regcount_attr = 0x2f;
 const sval = 0x04;
 /// sm_120 and sm_121 images count a block's 1 KiB of reserved shared memory in .nv.shared; the driver does not.
 const reserved_shared = 1024;
+/// An entry header holds kind, its own size, the payload's, the SM at 28 and the flags at 40: 48 bytes at least.
+const entry_fields = 48;
 
 /// One kernel in one SM's image.
 pub const Kernel = struct { sm: u32, name: []const u8, usage: limits.Usage };
@@ -30,14 +32,15 @@ pub fn images(a: std.mem.Allocator, bytes: []const u8) ![]Image {
     while (at < bytes.len) {
         if (bytes.len - at < 16 or read(u32, bytes, at) != fatbin_magic) return error.NotAFatbin;
         const header: usize = read(u16, bytes, at + 6);
-        const end = at + header + (std.math.cast(usize, read(u64, bytes, at + 8)) orelse return error.BadFatbin);
+        const total = std.math.cast(usize, read(u64, bytes, at + 8)) orelse return error.BadFatbin;
+        const end = std.math.add(usize, at + header, total) catch return error.BadFatbin;
         if (end > bytes.len) return error.BadFatbin;
         var entry = at + header;
         while (entry + 32 <= end) {
             const entry_header: usize = read(u32, bytes, entry + 4);
             const payload = std.math.cast(usize, read(u64, bytes, entry + 8)) orelse return error.BadFatbin;
-            const next = entry + entry_header + payload;
-            if (entry_header < 32 or next > end) return error.BadFatbin;
+            const next = std.math.add(usize, entry + entry_header, payload) catch return error.BadFatbin;
+            if (entry_header < entry_fields or next > end) return error.BadFatbin;
             const flags = read(u64, bytes, entry + 40);
             if (read(u16, bytes, entry) == elf_kind) {
                 if (flags & 0x2000 != 0) return error.CompressedFatbin;
@@ -58,23 +61,34 @@ const Section = struct { name: []const u8, kind: u32, info: u32, off: usize, siz
 
 fn sections(a: std.mem.Allocator, elf: []const u8) ![]Section {
     if (elf.len < 64 or !std.mem.eql(u8, elf[0..4], "\x7fELF") or elf[4] != 2) return error.NotElf64;
-    const shoff: usize = @intCast(read(u64, elf, 0x28));
+    const shoff = std.math.cast(usize, read(u64, elf, 0x28)) orelse return error.BadElf;
     const shentsize: usize = read(u16, elf, 0x3a);
     const shnum: usize = read(u16, elf, 0x3c);
     const strndx: usize = read(u16, elf, 0x3e);
-    if (shentsize < 64 or shoff + shnum * shentsize > elf.len or strndx >= shnum) return error.BadElf;
+    const table_end = std.math.add(usize, shoff, shnum * shentsize) catch return error.BadElf;
+    if (shentsize < 64 or table_end > elf.len or strndx >= shnum) return error.BadElf;
     const out = try a.alloc(Section, shnum);
+    errdefer a.free(out);
     for (out, 0..) |*s, i| {
         const h = shoff + i * shentsize;
-        s.* = .{ .name = "", .kind = read(u32, elf, h + 4), .info = read(u32, elf, h + 44), .off = @intCast(read(u64, elf, h + 24)), .size = @intCast(read(u64, elf, h + 32)) };
+        const off = std.math.cast(usize, read(u64, elf, h + 24)) orelse return error.BadElf;
+        const size = std.math.cast(usize, read(u64, elf, h + 32)) orelse return error.BadElf;
+        s.* = .{ .name = "", .kind = read(u32, elf, h + 4), .info = read(u32, elf, h + 44), .off = off, .size = size };
     }
     const strtab = out[strndx];
     for (out, 0..) |*s, i| {
-        const at = strtab.off + read(u32, elf, shoff + i * shentsize);
+        const at = std.math.add(usize, strtab.off, read(u32, elf, shoff + i * shentsize)) catch return error.BadElf;
         if (at >= elf.len) return error.BadElf;
         s.name = std.mem.sliceTo(elf[at..], 0);
     }
     return out;
+}
+
+/// A section's bytes; BadElf when its range runs past the image.
+fn contents(elf: []const u8, s: Section) ![]const u8 {
+    const end = std.math.add(usize, s.off, s.size) catch return error.BadElf;
+    if (end > elf.len) return error.BadElf;
+    return elf[s.off..end];
 }
 
 /// Each kernel's registers, static shared bytes and __launch_bounds__, as the driver will count them.
@@ -83,7 +97,7 @@ pub fn kernels(a: std.mem.Allocator, elf: []const u8, sm: u32) ![]Kernel {
     defer a.free(all);
     var global: []const u8 = &.{};
     for (all) |s| if (std.mem.eql(u8, s.name, ".nv.info")) {
-        global = elf[s.off..][0..s.size];
+        global = try contents(elf, s);
     };
     var out: std.ArrayList(Kernel) = .empty;
     errdefer out.deinit(a);
@@ -92,10 +106,12 @@ pub fn kernels(a: std.mem.Allocator, elf: []const u8, sm: u32) ![]Kernel {
         // the .text section's sh_info is the kernel's symbol, its top byte the registers before sm_120
         var u = limits.Usage{ .regs = try record(global, regcount_attr, s.info & 0xffffff) orelse s.info >> 24, .static = 0 };
         for (all) |t| {
-            if (std.mem.startsWith(u8, t.name, ".nv.shared.") and std.mem.eql(u8, t.name[".nv.shared.".len..], name))
-                u.static = @intCast(if (sm >= 120 and t.size >= reserved_shared) t.size - reserved_shared else t.size);
+            if (std.mem.startsWith(u8, t.name, ".nv.shared.") and std.mem.eql(u8, t.name[".nv.shared.".len..], name)) {
+                const static = if (sm >= 120 and t.size >= reserved_shared) t.size - reserved_shared else t.size;
+                u.static = std.math.cast(u32, static) orelse return error.BadElf;
+            }
             if (std.mem.startsWith(u8, t.name, ".nv.info.") and std.mem.eql(u8, t.name[".nv.info.".len..], name) and t.kind != sht_nobits)
-                u.bound = try bound(elf[t.off..][0..t.size]);
+                u.bound = try bound(try contents(elf, t));
         }
         try out.append(a, .{ .sm = sm, .name = name, .usage = u });
     };
@@ -122,8 +138,10 @@ fn bound(info: []const u8) !u32 {
         const attr = info[at + 1];
         const size: usize = if (fmt == sval) read(u16, info, at + 2) else 0;
         if (at + 4 + size > info.len) return error.BadNvInfo;
-        if (fmt == sval and attr == max_threads_attr and size >= 12)
-            return read(u32, info, at + 4) * read(u32, info, at + 8) * read(u32, info, at + 12);
+        if (fmt == sval and attr == max_threads_attr and size >= 12) {
+            const xy = std.math.mul(u32, read(u32, info, at + 4), read(u32, info, at + 8)) catch return error.BadNvInfo;
+            return std.math.mul(u32, xy, read(u32, info, at + 12)) catch return error.BadNvInfo;
+        }
         at += 4 + size;
     }
     return 0;
@@ -195,4 +213,29 @@ test "a cubin's registers, static shared bytes and launch bounds" {
         }
     }
     try std.testing.expectError(error.NotAFatbin, images(a, "not a fatbin"));
+}
+
+test "a fatbin entry whose header ends before its flags is refused, not read past" {
+    var b: [48]u8 = @splat(0);
+    std.mem.writeInt(u32, b[0..4], fatbin_magic, .little);
+    std.mem.writeInt(u16, b[6..8], 16, .little);
+    std.mem.writeInt(u64, b[8..16], 32, .little);
+    std.mem.writeInt(u16, b[16..18], elf_kind, .little);
+    std.mem.writeInt(u32, b[20..24], 32, .little);
+    try std.testing.expectError(error.BadFatbin, images(std.testing.allocator, &b));
+}
+
+test "a section or launch bound past what the image holds is refused" {
+    const a = std.testing.allocator;
+    const elf = try synthetic(a, 143, 1060, 256, false);
+    defer a.free(elf);
+    const at = std.mem.indexOf(u8, elf, &[_]u8{ sval, max_threads_attr, 12, 0 }).?;
+    std.mem.writeInt(u32, elf[at + 8 ..][0..4], 1 << 16, .little);
+    std.mem.writeInt(u32, elf[at + 4 ..][0..4], 1 << 16, .little);
+    try std.testing.expectError(error.BadNvInfo, kernels(a, elf, 121));
+    const shoff: usize = @intCast(std.mem.readInt(u64, elf[0x28..0x30], .little));
+    std.mem.writeInt(u64, elf[shoff + 64 * 4 + 32 ..][0..8], elf.len, .little);
+    try std.testing.expectError(error.BadElf, kernels(a, elf, 121));
+    std.mem.writeInt(u64, elf[0x28..0x30], std.math.maxInt(u64) - 8, .little);
+    try std.testing.expectError(error.BadElf, kernels(a, elf, 121));
 }
