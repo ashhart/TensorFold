@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "update": {
+    "id": "tensorfold-studio-update-root-2026-10",
+    "productionReady": true,
+    "ed25519PublicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA80FFo6a9/NXHNX9zBV3/2tM9AbC//mShbseG74mkkGw=\n-----END PUBLIC KEY-----"
+  },
+  "macos": {
+    "identity": "Developer ID Application: Ashley Hart (DF57Y7HUT7)",
+    "teamId": "DF57Y7HUT7",
+    "productionReady": true
+  }
+}

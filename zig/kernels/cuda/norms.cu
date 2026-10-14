@@ -36,7 +36,7 @@ __device__ __forceinline__ void store(void* p, int kind, int64_t i, float v) {
     else static_cast<__nv_bfloat16*>(p)[i] = __float2bfloat16_rn(v);
 }
 
-// rsqrt(sum / width + eps) of a block's per-thread partial sums, the same order for every row.
+// 1 / sqrt(sum / width + eps), IEEE division and square root, of a block's partial sums in one order every row.
 __device__ __forceinline__ float inv_rms(float part, int width, float eps) {
     __shared__ float warps[NT / 32];
     __shared__ float inv;
@@ -46,7 +46,7 @@ __device__ __forceinline__ float inv_rms(float part, int width, float eps) {
     if (threadIdx.x < 32) {
         float s = warps[threadIdx.x];
         for (int m = 16; m > 0; m >>= 1) s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, m));
-        if (threadIdx.x == 0) inv = rsqrtf(__fadd_rn(__fdiv_rn(s, static_cast<float>(width)), eps));
+        if (threadIdx.x == 0) inv = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(width)), eps)));
     }
     __syncthreads();
     const float r = inv;
@@ -68,7 +68,7 @@ __device__ __forceinline__ void rms_row(const void* __restrict__ x, const float*
                                         int width, float eps) {
     const int64_t at = static_cast<int64_t>(blockIdx.x) * width;
     float part = 0.f;
-    if (WIDE) {
+    if constexpr (WIDE) {
         for (int i = threadIdx.x; i < width; i += NT) {
             const float a = ld<XK>(x, at + i);
             part = __fmaf_rn(a, a, part);
@@ -79,22 +79,23 @@ __device__ __forceinline__ void rms_row(const void* __restrict__ x, const float*
             if (w != nullptr) a = __fmul_rn(a, w[i]);
             st<YK>(y, at + i, a);
         }
-        return;
-    }
-    float v[CACHED], wv[CACHED];
+    } else {
+        float v[CACHED], wv[CACHED];
 #pragma unroll
-    for (int j = 0; j < CACHED; ++j) { // every load issued before any is used
-        const int i = threadIdx.x + j * NT;
-        v[j] = i < width ? ld<XK>(x, at + i) : 0.f;
-        wv[j] = (w != nullptr && i < width) ? w[i] : 1.f;
-    }
+        for (int j = 0; j < CACHED; ++j) { // every load issued before any is used
+            const int i = threadIdx.x + j * NT;
+            v[j] = i < width ? ld<XK>(x, at + i) : 0.f;
+            wv[j] = (w != nullptr && i < width) ? w[i] : 1.f;
+        }
 #pragma unroll
-    for (int j = 0; j < CACHED; ++j) part = __fmaf_rn(v[j], v[j], part); // zeros past the row add nothing
-    const float inv = inv_rms(part, width, eps);
+        for (int j = 0; j < CACHED; ++j) part = __fmaf_rn(v[j], v[j], part); // zeros past the row add nothing
+        const float inv = inv_rms(part, width, eps);
 #pragma unroll
-    for (int j = 0; j < CACHED; ++j) {
-        const int i = threadIdx.x + j * NT;
-        if (i < width) st<YK>(y, at + i, w != nullptr ? __fmul_rn(__fmul_rn(v[j], inv), wv[j]) : __fmul_rn(v[j], inv));
+        for (int j = 0; j < CACHED; ++j) {
+            const int i = threadIdx.x + j * NT;
+            if (i < width)
+                st<YK>(y, at + i, w != nullptr ? __fmul_rn(__fmul_rn(v[j], inv), wv[j]) : __fmul_rn(v[j], inv));
+        }
     }
 }
 
@@ -102,7 +103,7 @@ template <bool WIDE, int XK, int YK>
 __device__ __forceinline__ void add_rms_row(const void* __restrict__ x, float* __restrict__ res, const float* __restrict__ w1,
                                             const float* __restrict__ w2, void* __restrict__ y, int width, float eps) {
     const int64_t at = static_cast<int64_t>(blockIdx.x) * width;
-    if (WIDE) {
+    if constexpr (WIDE) {
         float inv1 = 1.f;
         if (w1 != nullptr) {
             float part = 0.f;
@@ -122,39 +123,39 @@ __device__ __forceinline__ void add_rms_row(const void* __restrict__ x, float* _
         }
         const float inv2 = inv_rms(part, width, eps);
         for (int i = threadIdx.x; i < width; i += NT) st<YK>(y, at + i, __fmul_rn(__fmul_rn(res[at + i], inv2), w2[i]));
-        return;
-    }
-    float v[CACHED], rv[CACHED], a1[CACHED], a2[CACHED];
+    } else {
+        float v[CACHED], rv[CACHED], a1[CACHED], a2[CACHED];
 #pragma unroll
-    for (int j = 0; j < CACHED; ++j) { // every load issued before any is used
-        const int i = threadIdx.x + j * NT;
-        const bool in = i < width;
-        v[j] = in ? ld<XK>(x, at + i) : 0.f;
-        rv[j] = in ? res[at + i] : 0.f;
-        a1[j] = (w1 != nullptr && in) ? w1[i] : 0.f;
-        a2[j] = in ? w2[i] : 0.f;
-    }
-    float inv1 = 1.f;
-    if (w1 != nullptr) {
+        for (int j = 0; j < CACHED; ++j) { // every load issued before any is used
+            const int i = threadIdx.x + j * NT;
+            const bool in = i < width;
+            v[j] = in ? ld<XK>(x, at + i) : 0.f;
+            rv[j] = in ? res[at + i] : 0.f;
+            a1[j] = (w1 != nullptr && in) ? w1[i] : 0.f;
+            a2[j] = in ? w2[i] : 0.f;
+        }
+        float inv1 = 1.f;
+        if (w1 != nullptr) {
+            float part = 0.f;
+#pragma unroll
+            for (int j = 0; j < CACHED; ++j) part = __fmaf_rn(v[j], v[j], part);
+            inv1 = inv_rms(part, width, eps);
+        }
         float part = 0.f;
 #pragma unroll
-        for (int j = 0; j < CACHED; ++j) part = __fmaf_rn(v[j], v[j], part);
-        inv1 = inv_rms(part, width, eps);
-    }
-    float part = 0.f;
+        for (int j = 0; j < CACHED; ++j) {
+            const float a = w1 != nullptr ? __fmul_rn(__fmul_rn(v[j], inv1), a1[j]) : v[j];
+            rv[j] = __fadd_rn(rv[j], a);
+            part = __fmaf_rn(rv[j], rv[j], part);
+        }
+        const float inv2 = inv_rms(part, width, eps);
 #pragma unroll
-    for (int j = 0; j < CACHED; ++j) {
-        const float a = w1 != nullptr ? __fmul_rn(__fmul_rn(v[j], inv1), a1[j]) : v[j];
-        rv[j] = __fadd_rn(rv[j], a);
-        part = __fmaf_rn(rv[j], rv[j], part);
-    }
-    const float inv2 = inv_rms(part, width, eps);
-#pragma unroll
-    for (int j = 0; j < CACHED; ++j) {
-        const int i = threadIdx.x + j * NT;
-        if (i < width) {
-            res[at + i] = rv[j];
-            st<YK>(y, at + i, __fmul_rn(__fmul_rn(rv[j], inv2), a2[j]));
+        for (int j = 0; j < CACHED; ++j) {
+            const int i = threadIdx.x + j * NT;
+            if (i < width) {
+                res[at + i] = rv[j];
+                st<YK>(y, at + i, __fmul_rn(__fmul_rn(rv[j], inv2), a2[j]));
+            }
         }
     }
 }
@@ -223,7 +224,7 @@ __device__ __forceinline__ void store8f(float* p, const float* f) {
     reinterpret_cast<float4*>(p)[1] = make_float4(f[4], f[5], f[6], f[7]);
 }
 
-// rsqrt(sum / width + eps) over a VNT-thread block: warp trees, then warp 0's tree over the 8 warp sums.
+// 1 / sqrt(sum / width + eps), IEEE division and square root, over a VNT-thread block: warp trees, then the 8 warps'.
 __device__ __forceinline__ float inv_rms_v(float part, int width, float eps) {
     __shared__ float warps[VNT / 32];
     __shared__ float inv;
@@ -233,7 +234,7 @@ __device__ __forceinline__ float inv_rms_v(float part, int width, float eps) {
     if (threadIdx.x < 32) {
         float s = threadIdx.x < VNT / 32 ? warps[threadIdx.x] : 0.f;
         for (int m = 4; m > 0; m >>= 1) s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, m));
-        if (threadIdx.x == 0) inv = rsqrtf(__fadd_rn(__fdiv_rn(s, static_cast<float>(width)), eps));
+        if (threadIdx.x == 0) inv = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(width)), eps)));
     }
     __syncthreads();
     const float r = inv;
@@ -438,7 +439,7 @@ __device__ __forceinline__ void gated_rms(const __nv_bfloat16* __restrict__ y, l
     for (int i = 0; i < 8; ++i) part = __fmaf_rn(yv[i], yv[i], part);
 #pragma unroll
     for (int m = L / 2; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
-    const float inv = rsqrtf(__fadd_rn(__fdiv_rn(part, static_cast<float>(DV)), eps));
+    const float inv = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(part, static_cast<float>(DV)), eps)));
     float o[8];
 #pragma unroll
     for (int i = 0; i < 8; ++i) {

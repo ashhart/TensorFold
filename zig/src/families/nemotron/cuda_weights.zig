@@ -25,8 +25,8 @@ pub const Adapter = struct { a: u64, b: u64, tau: u64, xa: u64, xn: u64, gates: 
 /// A `*_rest` is a lesson's change past its projection's 4-bit codes ([out, in] bf16), added after it; 0 when none.
 pub const Mamba = struct { in_proj: QLinear, out_proj: QLinear, conv_w: u64, conv_b: u64, a: u64, d: u64, dt_bias: u64, gnorm: u64, out_rest: u64 = 0, adapter: ?Adapter = null };
 pub const Attention = struct { qkv: QLinear, o: QLinear, o_rest: u64 = 0, adapter: ?Adapter = null };
-/// The pocket kernel's neurons (config's pocket): input weights and outputs, [n, D] fp32 each, from the 4-bit codes.
-pub const Pocket = struct { up: u64, down: u64, n: usize };
+/// The pocket kernels' neurons (config's pocket): input weights and outputs, [n, D] fp32 each, from the 4-bit codes.
+pub const Pocket = kern.Pocket;
 /// The shared expert's down projection rest in two halves (experts E and E + 1); its learned change reads both.
 pub const MoE = struct { router: u64, bias: u64, experts: Experts, rest: [2]u64 = .{ 0, 0 }, adapter: ?Adapter = null, pocket: ?Pocket = null };
 pub const Block = struct { kind: Kind, norm: u64, mamba: Mamba = undefined, attn: Attention = undefined, moe: MoE = undefined };
@@ -268,7 +268,7 @@ pub const Loader = struct {
     fn pocket(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8, c: Config) !Pocket {
         const own = 2 * c.expert_width;
         const n = c.pocket;
-        if (n > 64) return error.PocketTooWide; // the pocket kernel holds a row's activations in 64 floats
+        if (n > kern.pocket_width) return error.PocketTooWide;
         const d = c.hidden;
         const g = host4.group;
         const values = try L.gpa.alloc(f32, n * d);
@@ -287,6 +287,13 @@ pub const Loader = struct {
         host4.dequantize(std.mem.bytesAsSlice(u32, part[0]), std.mem.bytesAsSlice(u16, part[1]), std.mem.bytesAsSlice(u16, part[2]), values);
         out.up = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.pocket_up", .{name}), n * d * 4);
         try L.ops.upload(out.up, std.mem.sliceAsBytes(values));
+        // the neurons in use: through the last whose up row is not all zero, as the learner's pocketRead counts them
+        for (0..n) |j| if (!std.mem.allEqual(f32, values[j * d ..][0..d], 0)) {
+            out.used = j + 1;
+        };
+        const used: u32 = @intCast(out.used);
+        out.count = try L.alloc(try std.fmt.bufPrint(&buf, "{s}.pocket_used", .{name}), 4);
+        try L.ops.upload(out.count, std.mem.asBytes(&used));
         try L.ops.s.synchronize();
         // down: d rows, each own + n inputs; the last n of each row (its last n / 64 groups), stored neuron by neuron
         const down = try three(ck, pre, "shared_experts.down_proj");
