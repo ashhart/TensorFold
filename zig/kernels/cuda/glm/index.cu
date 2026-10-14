@@ -6,7 +6,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 
-#include "../flashnext/qmm_frag.cuh"
+#include "qmm_frag.cuh"
 
 namespace {
 
