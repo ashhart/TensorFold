@@ -156,6 +156,10 @@ const Host = struct {
     fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain) !void {
         h.cfg = try lanes.Config.init(h.gpa, facts, rows, rows - 1);
         errdefer h.cfg.deinit(h.gpa);
+        if (facts.head_trees) { // a drafter's trees: the planner picks a lone stream's lanes, as deep as it drafts
+            h.cfg.head_lanes = rows - 1;
+            h.cfg.head_depth = @max(1, facts.drafts);
+        }
         h.clock = .{ .io = io };
         h.core = lanes.Engine.init(h.gpa, &h.cfg, h.backend(), h.clock.clock());
         errdefer h.core.deinit();

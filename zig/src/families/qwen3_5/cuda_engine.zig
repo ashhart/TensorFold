@@ -1,14 +1,20 @@
 //! Qwen3.5's hybrid text models on CUDA (the 2B, Qwen3.8-27B): the affine-4 projections through cuda.qlinear, the
 //! glue in qwen35.cu, one forward for any mix of streams' windows. Each stream owns its recurrences, convolution tails
-//! and KV cache (Cache); the widths come from config.json (cuda_geometry.zig), the weights from cuda_weights.zig.
-//! A forward's launches are captured into a CUDA graph the first time its shape is seen and replayed after.
+//! and KV cache (cuda_cache.zig); the widths come from config.json (cuda_geometry.zig), the weights from
+//! cuda_weights.zig. A forward's launches are captured into a CUDA graph the first time its shape is seen and
+//! replayed after. A verify window's rows may form a tree (each row's parent given): the forward computes every
+//! branch, logs each row, and the stream's state stays as it was until a path is kept.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const geometry = @import("cuda_geometry.zig");
 const weights = @import("cuda_weights.zig");
+const caches = @import("cuda_cache.zig");
 
 pub const Geometry = geometry.Geometry;
+pub const Cache = caches.Cache;
+pub const tap_rows = caches.tap_rows;
+const Seg = caches.Seg;
 const Affine4 = cuda.qlinear.Affine4;
 const DeviceBuffer = cuda.DeviceBuffer;
 const head_dim = geometry.head_dim;
@@ -17,12 +23,10 @@ const head_dim = geometry.head_dim;
 pub const max_rows = 128;
 /// Streams' windows in one forward at most.
 pub const max_segs = 32;
-/// Rows of a verify forward at most: each row's recurrences are recorded for a partial acceptance.
-const most_verify = 32;
-/// A window's rows at most (exact: one-row steps' bits).
-const most_window = 16;
-/// Device bytes the recorded rows may take: a wide model records fewer rows a forward.
-const snapshot_budget = 1280 << 20;
+/// Rows of a verify forward at most: each row's logits are kept and drawn.
+pub const most_verify = 32;
+/// A window's rows at most (exact: one-row steps' bits; qwen35.cuh's MAXW, the rows a stream's log holds).
+pub const most_window = 16;
 /// Partial attention chunks a row at most: the chunk width grows with the window instead.
 const max_chunks = 64;
 
@@ -31,60 +35,8 @@ pub fn aligned(n: usize) usize {
     return std.mem.alignForward(usize, n, 256);
 }
 
-/// qwen35.cu's Geo and Seg.
-const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int };
-const Seg = extern struct { rec: u64, conv: u64, kv: u64, tap: u64, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int, taps: c_int };
-
-/// Rows a drafter's tap ring holds a stream: its window and a prompt chunk more.
-pub const tap_rows = 2048 + max_rows;
-
-/// One stream's state on the device and the logits of its newest prompt chunk on the host.
-pub const Cache = struct {
-    state: DeviceBuffer,
-    kv: DeviceBuffer,
-    /// A drafter's tapped rows (`Engine.taps`), a ring of tap_rows: the row at position p in slot p % tap_rows.
-    tap: ?DeviceBuffer = null,
-    cap: usize,
-    len: usize = 0,
-    logits: []u16,
-    /// The newest verify window: where it started, its first row in that forward, its rows.
-    last: ?struct { start: usize, row0: usize, rows: usize } = null,
-
-    pub fn init(gpa: std.mem.Allocator, e: *const Engine, cap: usize) !Cache {
-        var state = try DeviceBuffer.alloc(e.d, e.g.stateBytes());
-        errdefer state.free();
-        try state.fill8(0, null);
-        var kv = try DeviceBuffer.alloc(e.d, e.g.kvBytes(cap));
-        errdefer kv.free();
-        try kv.fill8(0, null); // touched now, not as the first request's keys land (the driver commits on first touch)
-        var tap: ?DeviceBuffer = null;
-        if (e.n_taps > 0) {
-            tap = try DeviceBuffer.alloc(e.d, e.tapBytes());
-            try tap.?.fill8(0, null);
-        }
-        errdefer if (tap) |*t| t.free();
-        return .{ .state = state, .kv = kv, .tap = tap, .cap = cap, .logits = try gpa.alloc(u16, e.g.vocab) };
-    }
-
-    /// Ready for another stream: no rows, the recurrences and tails zero (on the engine's stream, before its forwards).
-    pub fn reset(self: *Cache, e: *const Engine) !void {
-        self.len = 0;
-        self.last = null;
-        try self.state.fill8(0, e.stream.handle);
-    }
-
-    pub fn deinit(self: *Cache, gpa: std.mem.Allocator) void {
-        self.state.free();
-        self.kv.free();
-        if (self.tap) |*t| t.free();
-        gpa.free(self.logits);
-    }
-
-    fn seg(self: *const Cache, e: *const Engine, row0: usize, rows: usize) Seg {
-        const g = e.g;
-        return .{ .rec = self.state.ptr, .conv = self.state.ptr + g.deltas() * g.recBytes(), .kv = self.kv.ptr, .tap = if (self.tap) |t| t.ptr else 0, .cap = @intCast(self.cap), .len = @intCast(self.len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = tap_rows, .taps = @intCast(e.n_taps) };
-    }
-};
+/// qwen35.cuh's Geo.
+pub const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int, nl: c_int };
 
 pub const Delta = struct { qkv: Affine4, z: Affine4, a: Affine4, b: Affine4, out: Affine4, conv: u64, norm: u64, a_log: u64, dt_bias: u64 };
 pub const Attention = struct { q: Affine4, k: Affine4, v: Affine4, o: Affine4, q_norm: u64, k_norm: u64 };
@@ -115,12 +67,15 @@ const Fns = struct {
     tap: cuda.Function,
 };
 
-/// A window of one stream in a forward.
-pub const Part = struct { cache: *Cache, rows: usize };
+/// qwen35_keep.cu's kernels (Cache.keep).
+pub const Keeps = struct { apply: cuda.Function, conv: cuda.Function, compact: cuda.Function };
+
+/// A window of one stream in a forward: `parents`, for a tree, names each row's parent row (-1: the first row).
+pub const Part = struct { cache: *Cache, rows: usize, parents: ?[]const i32 = null };
 
 /// What a forward keeps. A prompt chunk (`last`, one window) puts its last row's logits in its cache's `logits`;
 /// verify windows keep every row, drawn on the device into `tokens` (`draws`, one a row) or their logits for
-/// `rowLogits` (`logits`), and record each row's state for `rewind`.
+/// `rowLogits` (`logits`), and log each row for `Cache.keep`.
 pub const Keep = union(enum) { last, draws: []const Draw, logits };
 
 /// A kept row's draw on the device: sample.cu's keyed rule at `position`, or greedy without one.
@@ -132,16 +87,17 @@ pub const Engine = struct {
     g: Geometry,
     geo: Geo,
     stream: cuda.Stream,
-    mods: [6]cuda.Module,
+    mods: [7]cuda.Module,
     draws: cuda.sample.Draws,
     affine: cuda.qlinear.Affine4Kernels,
     fns: Fns,
+    keeps: Keeps,
     /// Every weight and scratch buffer in one allocation: the WDDM driver's launch cost grows with a process's
     /// allocation count, and a 64-layer model would have thousands.
     arena: DeviceBuffer,
     arena_at: usize = 0,
     stage: DeviceBuffer, // the load's staging of each projection as stored, packed from there
-    /// Rows a verify forward records (snapshot_budget over a row's states), and a window's rows at most.
+    /// Rows a verify forward takes at most, and a window's rows at most.
     verify_rows: usize,
     window_rows: usize,
     // weights
@@ -179,9 +135,8 @@ pub const Engine = struct {
     pl: u64,
     po: u64,
     logits: u64,
-    rec_snap: u64, // recorded recurrences: verify_rows rows a linear layer
-    conv_snap: u64, // recorded convolution tails, the same
-    // the per-forward tables: ids, segments, each row's segment and the draws' rules, staged in pinned memory
+    // the per-forward tables: ids, segments, each row's segment, parent and ancestors, the draws' rules, staged in
+    // pinned memory
     tables: DeviceBuffer,
     staged: cuda.HostBuffer,
     host_logits: cuda.HostBuffer,
@@ -196,11 +151,13 @@ pub const Engine = struct {
     const ids_at = 0;
     const segs_at = max_rows * 4;
     const rowseg_at = segs_at + max_segs * @sizeOf(Seg);
-    const rules_at = rowseg_at + max_rows * 4;
+    const rowpar_at = rowseg_at + max_rows * 4;
+    const rowanc_at = rowpar_at + max_rows * 4;
+    const rules_at = rowanc_at + max_rows * 4;
     const meta_at = rules_at + most_verify * @sizeOf(cuda.sample.Rule);
     const tokens_at = meta_at + most_verify * 4;
-    const params_at = tokens_at + most_verify * 4; // the attention chunks, their width, the rows, the windows
-    const tables_len = params_at + 4 * 4;
+    const params_at = tokens_at + most_verify * 4; // the attention chunks, their width, the rows, the windows, record
+    const tables_len = params_at + 8 * 4;
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -212,9 +169,9 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.d = d;
         e.g = g;
-        e.geo = .{ .hid = @intCast(g.hidden), .nk = @intCast(g.k_heads), .nv = @intCast(g.v_heads), .qh = @intCast(g.q_heads), .kvh = @intCast(g.kv_heads) };
-        e.verify_rows = std.math.clamp(snapshot_budget / (g.deltas() * (g.recBytes() + g.convBytes())), 1, most_verify);
-        e.window_rows = @min(most_window, e.verify_rows);
+        e.geo = .{ .hid = @intCast(g.hidden), .nk = @intCast(g.k_heads), .nv = @intCast(g.v_heads), .qh = @intCast(g.q_heads), .kvh = @intCast(g.kv_heads), .nl = @intCast(g.deltas()) };
+        e.verify_rows = most_verify;
+        e.window_rows = most_window;
         e.arena_at = 0;
         e.graphs = .empty;
         e.n_taps = 0;
@@ -226,7 +183,7 @@ pub const Engine = struct {
         e.stage = try DeviceBuffer.alloc(d, weights.stageBytes(g));
         errdefer e.stage.free();
         const kk = cuda.kernels;
-        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, kk.qwen35, kk.sample };
+        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, kk.qwen35, kk.sample, kk.qwen35_keep };
         var loaded: usize = 0;
         errdefer for (e.mods[0..loaded]) |*m| m.unload();
         for (images, 0..) |img, i| {
@@ -239,6 +196,7 @@ pub const Engine = struct {
         errdefer e.affine.deinit();
         e.draws = try cuda.sample.Draws.resolve(e.mods[5]);
         inline for (@typeInfo(Fns).@"struct".field_names) |name| @field(e.fns, name) = try e.mods[4].function("tf_q35_" ++ name);
+        inline for (@typeInfo(Keeps).@"struct".field_names) |name| @field(e.keeps, name) = try e.mods[6].function("tf_q35k_" ++ name);
         e.layers = try gpa.alloc(Layer, g.layers);
         errdefer gpa.free(e.layers);
         var ck = try core.Checkpoint.openModel(gpa, io, dir);
@@ -251,15 +209,24 @@ pub const Engine = struct {
         errdefer e.staged.free();
         e.host_logits = try cuda.HostBuffer.alloc(d, most_verify * g.vocab * 2);
         errdefer e.host_logits.free();
-        // every path a request takes, once now: the WDDM driver stalls a process's first forwards for seconds
-        // (a 16 GiB model: a 20 s launch, then a 3 s one), which no request should pay
-        var warm = try Cache.init(gpa, e, 64);
-        defer warm.deinit(gpa);
-        const ids: [32]u32 = @splat(0);
-        try e.forward(&.{.{ .cache = &warm, .rows = ids.len }}, &ids, .last); // a prompt chunk: the prompt GEMMs
-        try e.forward(&.{.{ .cache = &warm, .rows = 1 }}, ids[0..1], .{ .draws = &.{.{ .rule = null, .position = 33 }} });
-        try e.forward(&.{.{ .cache = &warm, .rows = 1 }}, ids[0..1], .{ .draws = &.{.{ .rule = cuda.sample.rule(1, 0.7, 0.95, -std.math.inf(f64), 20), .position = 34 }} });
+        try e.warm(gpa);
         return e;
+    }
+
+    /// Every path a request takes, once now: the WDDM driver stalls a process's first forwards for seconds (a 16 GiB
+    /// model: a 20 s launch, then a 3 s one), which no request should pay.
+    fn warm(e: *Engine, gpa: std.mem.Allocator) !void {
+        var warm_cache = try Cache.init(gpa, e, 64);
+        defer warm_cache.deinit(gpa);
+        const ids: [32]u32 = @splat(0);
+        const greedy: Draw = .{ .rule = null, .position = 33 };
+        try e.forward(&.{.{ .cache = &warm_cache, .rows = ids.len }}, &ids, .last); // a prompt chunk: the prompt GEMMs
+        try e.forward(&.{.{ .cache = &warm_cache, .rows = 1 }}, ids[0..1], .{ .draws = &.{greedy} });
+        try e.forward(&.{.{ .cache = &warm_cache, .rows = 1 }}, ids[0..1], .{ .draws = &.{.{ .rule = .{ .seed = 1, .inv_t = 1.0 / 0.7, .top_p = 0.95, .near = 20.0, .min_log = -std.math.inf(f32), .top_k = 20 }, .position = 34 }} });
+        // a tree window and a branch of it kept: the keep kernels, and the forward's branch path
+        try e.forward(&.{.{ .cache = &warm_cache, .rows = 3, .parents = &.{ -1, 0, 0 } }}, ids[0..3], .{ .draws = &.{ greedy, greedy, greedy } });
+        try warm_cache.keep(e, &.{ 0, 2 });
+        try e.stream.synchronize();
     }
 
     pub fn deinit(e: *Engine) void {
@@ -278,9 +245,9 @@ pub const Engine = struct {
         e.gpa.destroy(e);
     }
 
-    /// A stream's device bytes at a `cap`-token window: recurrences, convolution tails, keys and values, taps.
+    /// A stream's device bytes at a `cap`-token window: recurrences, convolution tails, keys and values, taps, log.
     pub fn streamBytes(e: *const Engine, cap: usize) usize {
-        return e.g.stateBytes() + e.g.kvBytes(cap) + e.tapBytes();
+        return e.g.stateBytes() + e.g.kvBytes(cap) + e.tapBytes() + e.g.logBytes(most_window);
     }
 
     /// A stream's tap ring: tap_rows rows of the tapped layers' residuals.
@@ -335,8 +302,6 @@ pub const Engine = struct {
         e.pl = try t.alloc(R * g.q_heads * max_chunks * 4);
         e.po = try t.alloc(R * g.q_heads * max_chunks * head_dim * 4);
         e.logits = try t.alloc(most_verify * g.vocab * 2);
-        e.rec_snap = try t.alloc(g.deltas() * e.verify_rows * g.recBytes());
-        e.conv_snap = try t.alloc(g.deltas() * e.verify_rows * g.convBytes());
         return total;
     }
 
@@ -363,12 +328,34 @@ pub const Engine = struct {
         try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at });
     }
 
-    /// One forward over `parts`' windows, the rows of `ids` in order. `keep` names the rows it keeps and how.
+    /// The row tables of `parts`: each forward row's segment, parent forward row (-1: its window's first) and the
+    /// ancestors-and-self bits over its window's rows (a chain without `parents`).
+    fn rowTables(st: []u8, parts: []const Part) !void {
+        const rowseg = std.mem.bytesAsSlice(c_int, st[rowseg_at..][0 .. max_rows * 4]);
+        const rowpar = std.mem.bytesAsSlice(c_int, st[rowpar_at..][0 .. max_rows * 4]);
+        const rowanc = std.mem.bytesAsSlice(u32, st[rowanc_at..][0 .. max_rows * 4]);
+        var row0: usize = 0;
+        for (parts, 0..) |p, i| {
+            if (p.parents) |ps| if (ps.len != p.rows or p.rows > most_window or ps[0] != -1) return error.InvalidQwenParents;
+            for (0..p.rows) |r| {
+                const parent: i32 = if (p.parents) |ps| ps[r] else if (r == 0) -1 else @intCast(r - 1);
+                if (parent >= @as(i32, @intCast(r)) or parent < -1) return error.InvalidQwenParents;
+                rowseg[row0 + r] = @intCast(i);
+                rowpar[row0 + r] = if (parent < 0) -1 else @intCast(row0 + @as(usize, @intCast(parent)));
+                rowanc[row0 + r] = (@as(u32, 1) << @intCast(r)) | (if (parent < 0) 0 else rowanc[row0 + @as(usize, @intCast(parent))]);
+            }
+            row0 += p.rows;
+        }
+    }
+
+    /// One forward over `parts`' windows, the rows of `ids` in order. `keep` names the rows it keeps and how. A
+    /// window not yet kept from the stream's last verify is kept whole first.
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
         const g = e.g;
         var total: usize = 0;
         var widest: usize = 0;
         for (parts) |p| {
+            try p.cache.settle(e);
             if (p.rows == 0 or p.cache.len + p.rows > p.cache.cap) return error.QwenContextFull;
             total += p.rows;
             widest = @max(widest, p.cache.len + p.rows);
@@ -379,6 +366,7 @@ pub const Engine = struct {
         if (!record and parts.len != 1) return error.InvalidQwenSegments;
         if (keep == .draws and keep.draws.len != total) return error.InvalidQwenSegments;
         for (ids) |id| if (id >= g.vocab) return error.InvalidQwenToken;
+        for (parts) |p| if (p.parents != null and !record) return error.InvalidQwenParents;
         const heads: usize = if (record) total else 1;
         // the prompt GEMM only for prompt chunks: a window's rows keep the bits of one-row steps
         const prompt = !record;
@@ -386,12 +374,10 @@ pub const Engine = struct {
         const st = e.staged.bytes;
         @memcpy(std.mem.bytesAsSlice(u32, st[ids_at..][0 .. total * 4]), ids);
         const segs = std.mem.bytesAsSlice(Seg, st[segs_at..][0 .. parts.len * @sizeOf(Seg)]);
-        const rowseg = std.mem.bytesAsSlice(c_int, st[rowseg_at..][0 .. total * 4]);
+        try rowTables(st, parts);
         var row0: usize = 0;
         for (parts, 0..) |p, i| {
-            segs[i] = p.cache.seg(e, row0, p.rows);
-            for (row0..row0 + p.rows) |r| rowseg[r] = @intCast(i);
-            p.cache.last = if (record) .{ .start = p.cache.len, .row0 = row0, .rows = p.rows } else null;
+            segs[i] = p.cache.seg(e, p.cache.len, row0, p.rows);
             row0 += p.rows;
         }
         if (keep == .draws) {
@@ -404,11 +390,12 @@ pub const Engine = struct {
         }
         // attention chunks: at most max_chunks a row, each a multiple of 128 keys
         const ck = @max(128, (widest + max_chunks * 128 - 1) / (max_chunks * 128) * 128);
-        const params = std.mem.bytesAsSlice(c_int, st[params_at..][0..16]);
+        const params = std.mem.bytesAsSlice(c_int, st[params_at..][0..32]);
         params[0] = @intCast((widest + ck - 1) / ck);
         params[1] = @intCast(ck);
         params[2] = @intCast(total);
         params[3] = @intCast(parts.len);
+        params[4] = @intFromBool(record);
         try e.tables.uploadAsync(0, st, e.stream.handle);
         // a captured forward's launches cover a bucket of rows and every window; its kernels read the true counts
         // (a lone stream's one-row step, the common case without a drafter, keeps its own exact graph)
@@ -437,7 +424,11 @@ pub const Engine = struct {
             }
             try gop.value_ptr.launchOn(e.stream);
         }
-        for (parts) |p| p.cache.len += p.rows;
+        for (parts) |p| {
+            p.cache.last = if (record and p.rows > 1) .{ .start = p.cache.len, .rows = p.rows } else null;
+            p.cache.len += p.rows;
+            p.cache.written = p.cache.len;
+        }
         switch (keep) {
             .draws => |pk| {
                 const toks = e.tables.ptr + tokens_at;
@@ -484,6 +475,8 @@ pub const Engine = struct {
         const t_ids = e.tables.ptr + ids_at;
         const t_segs = e.tables.ptr + segs_at;
         const t_rows = e.tables.ptr + rowseg_at;
+        const t_par = e.tables.ptr + rowpar_at;
+        const t_anc = e.tables.ptr + rowanc_at;
         const t_params = e.tables.ptr + params_at;
         const geo = e.geo;
         const group = g.q_heads / g.kv_heads;
@@ -496,15 +489,13 @@ pub const Engine = struct {
             switch (l.mixer) {
                 .delta => |m| {
                     const layer: c_int = @intCast(di);
-                    const rec_snap: u64 = if (record) e.rec_snap + di * e.verify_rows * g.recBytes() else 0;
-                    const conv_snap: u64 = if (record) e.conv_snap + di * e.verify_rows * g.convBytes() else 0;
                     try e.proj(m.qkv, e.x, e.qkv, total, prompt);
                     try e.proj(m.z, e.x, e.z, total, prompt);
                     try e.proj(m.a, e.x, e.a, total, prompt);
                     try e.proj(m.b, e.x, e.b, total, prompt);
-                    try e.run(e.fns.gdn_pre, .{ 1, 2 * g.k_heads + g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.qkv, t_segs, t_rows, layer, m.conv, e.a, e.b, m.a_log, m.dt_bias, e.q, e.k, e.v, e.g_, e.beta, t_params });
-                    try e.run(e.fns.conv_commit, .{ (g.convWidth() + 255) / 256, nseg, 1 }, .{ 256, 1, 1 }, .{ geo, e.qkv, t_segs, layer, conv_snap, t_params });
-                    try e.run(e.fns.gdn_chain, .{ 1, geometry.dk / 4, g.v_heads * nseg }, .{ 32, 4, 1 }, .{ geo, e.q, e.k, e.v, e.g_, e.beta, t_segs, layer, e.y, rec_snap, t_params });
+                    try e.run(e.fns.gdn_pre, .{ 1, 2 * g.k_heads + g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.qkv, t_segs, t_rows, t_par, layer, m.conv, e.a, e.b, m.a_log, m.dt_bias, e.q, e.k, e.v, e.g_, e.beta, t_params });
+                    try e.run(e.fns.conv_commit, .{ (g.convWidth() + 255) / 256, nseg, 1 }, .{ 256, 1, 1 }, .{ geo, e.qkv, t_segs, t_par, layer, t_params });
+                    try e.run(e.fns.gdn_chain, .{ 1, geometry.dk / 4, g.v_heads * nseg }, .{ 32, 4, 1 }, .{ geo, e.q, e.k, e.v, e.g_, e.beta, t_segs, t_par, layer, e.y, t_params });
                     try e.run(e.fns.gdn_post, .{ 1, g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.y, e.z, m.norm, g.eps, e.mix, t_params });
                     try e.proj(m.out, e.mix, e.r, total, prompt);
                     di += 1;
@@ -516,8 +507,8 @@ pub const Engine = struct {
                     try e.proj(m.v, e.x, e.vraw, total, prompt);
                     try e.run(e.fns.head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
                     try e.run(e.fns.head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
-                    try e.run(e.fns.rope, .{ total, 1, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, ai, t_params });
-                    try e.run(e.fns.attn_partial, .{ max_chunks, g.kv_heads, total }, .{ 32 * group, 1, 1 }, .{ geo, e.qn, t_segs, t_rows, ai, t_params, @as(f32, 1.0 / 16.0), e.pm, e.pl, e.po });
+                    try e.run(e.fns.rope, .{ total, 1, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, t_anc, ai, t_params });
+                    try e.run(e.fns.attn_partial, .{ max_chunks, g.kv_heads, total }, .{ 32 * group, 1, 1 }, .{ geo, e.qn, t_segs, t_rows, t_anc, ai, t_params, @as(f32, 1.0 / 16.0), e.pm, e.pl, e.po });
                     try e.run(e.fns.attn_merge, .{ g.q_heads, total, 1 }, .{ 32, 1, 1 }, .{ geo, e.pm, e.pl, e.po, t_params, e.y });
                     try e.run(e.fns.attn_gate, .{ (total * aw + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ geo, e.y, e.qraw, e.mix, @as(c_int, @intCast(total)), t_params });
                     try e.proj(m.o, e.mix, e.r, total, prompt);
@@ -542,24 +533,5 @@ pub const Engine = struct {
     /// Row `i`'s logits from the newest forward that kept logits.
     pub fn rowLogits(e: *const Engine, i: usize) []const u16 {
         return e.host_logits.slice(u16)[i * e.g.vocab ..][0..e.g.vocab];
-    }
-
-    /// Keeps the first `rows` of the cache's newest window: its recurrences and convolution tails as they were after
-    /// that row (the forward recorded them), its length at that row. The window's later keys stay as unread slots.
-    pub fn rewind(e: *Engine, cache: *Cache, rows: usize) !void {
-        const g = e.g;
-        const last = cache.last orelse return error.NothingToKeep;
-        if (rows == 0 or rows > last.rows) return error.NothingToKeep;
-        cache.last = null;
-        cache.len = last.start + rows;
-        if (rows == last.rows) return;
-        const row = last.row0 + rows - 1;
-        const rb = g.recBytes();
-        const cb = g.convBytes();
-        for (0..g.deltas()) |di| {
-            try cache.state.copyFrom(di * rb, e.rec_snap + (di * e.verify_rows + row) * rb, rb, e.stream.handle);
-            try cache.state.copyFrom(g.deltas() * rb + di * cb, e.conv_snap + (di * e.verify_rows + row) * cb, cb, e.stream.handle);
-        }
-        try e.stream.synchronize();
     }
 };

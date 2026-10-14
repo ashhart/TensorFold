@@ -2,50 +2,18 @@
 // with the same bf16 rounding points, their widths from the model's Geo. Rows of one forward belong to segments (one
 // stream's window each); a segment's state lives in its stream's blocks.
 
-#include <cuda_bf16.h>
-#include <stdint.h>
-
-namespace tf_q35 {
-
-constexpr int DK = 128;   // linear-attention key and value head width
-constexpr int TAPS = 4;   // causal convolution taps
-constexpr int HD = 256;   // attention head width
-constexpr int MAXQ = 32;  // attention query heads at most
-
-// The model's widths: hidden, linear key heads, linear value heads, attention query and key/value heads.
-struct Geo {
-    int hid, nk, nv, qh, kvh;
-    __device__ int conv() const { return (2 * nk + nv) * DK; }  // q, k and v channels the convolution sees
-    __device__ size_t rec() const { return (size_t)nv * DK * DK; }  // floats of one layer's recurrence
-    __device__ size_t conv_rows() const { return (size_t)(TAPS - 1) * conv(); }
-};
-
-// One stream's window in this forward: its state blocks, cache length before the window, and rows.
-struct Seg {
-    unsigned long long rec;   // float recurrences, one rec() block a linear layer
-    unsigned long long conv;  // bf16 convolution tails, conv_rows() a linear layer
-    unsigned long long kv;    // bf16 keys then values, kvh * cap * HD each, an attention layer at a time
-    unsigned long long tap;   // a drafter's ring of tapped rows (0: none): slot pos % tap_rows, taps * hid bf16 each
-    int cap, len, row0, rows, tap_rows, taps;
-};
-
-__device__ __forceinline__ float bf(__nv_bfloat16 x) { return __bfloat162float(x); }
-__device__ __forceinline__ float rbf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
-
-__device__ __forceinline__ float warp_sum(float x) {
-#pragma unroll
-    for (int m = 16; m; m >>= 1) x += __shfl_xor_sync(0xffffffffu, x, m);
-    return x;
-}
-
-}  // namespace tf_q35
+#include "qwen35.cuh"
 
 using namespace tf_q35;
 
 // The per-forward counts a captured forward reads from the device, so one graph serves every shape: P[0] attention
-// chunks, P[1] their width, P[2] rows, P[3] windows. A null P means the launch's grid is exact.
+// chunks, P[1] their width, P[2] rows, P[3] windows, P[4] whether the rows are recorded for keep (a verify window:
+// its state stays as it was until the kept path is applied). A null P means the launch's grid is exact.
+// A window's rows may form a tree: rowpar names each forward row's parent forward row (-1: the window's first row,
+// after the stream's cache), rowanc each row's ancestors and itself as bits over its window's rows.
 __device__ __forceinline__ bool past_rows(const int* P, int m) { return P != nullptr && m >= P[2]; }
 __device__ __forceinline__ bool past_windows(const int* P, int s) { return P != nullptr && s >= P[3]; }
+__device__ __forceinline__ bool recorded(const int* P) { return P != nullptr && P[4] != 0; }
 
 // MLX affine 4-bit token rows: out = bf16(s * q + b), D wide.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_embed(const int* __restrict__ ids, const uint8_t* __restrict__ W,
@@ -115,9 +83,11 @@ extern "C" __global__ void tf_q35_sums(const __nv_bfloat16* __restrict__ X, floa
 }
 
 // The causal convolution, silu, q/k normalization and the decay and write strength of each row's linear heads.
-// Grid (1, 2 * nk + nv, rows), a warp a (row, head): heads [0, nk) are q, [nk, 2nk) k, then nv of v.
+// Grid (1, 2 * nk + nv, rows), a warp a (row, head): heads [0, nk) are q, [nk, 2nk) k, then nv of v. A row's taps
+// are its parents (then the stream's tail), so a tree's rows each see their own branch.
 extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_pre(Geo geo, const __nv_bfloat16* __restrict__ QKV, const Seg* __restrict__ segs,
-                                                                  const int* __restrict__ rowseg, int layer, const __nv_bfloat16* __restrict__ CW,
+                                                                  const int* __restrict__ rowseg, const int* __restrict__ rowpar, int layer,
+                                                                  const __nv_bfloat16* __restrict__ CW,
                                                                   const __nv_bfloat16* __restrict__ Ain, const __nv_bfloat16* __restrict__ Bin,
                                                                   const float* __restrict__ ALOG, const __nv_bfloat16* __restrict__ DT,
                                                                   __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ K,
@@ -129,19 +99,22 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_pre(Geo geo, const _
     if (past_rows(P, w)) return;
     const int NK = geo.nk, NV = geo.nv, C = geo.conv();
     const Seg sg = segs[rowseg[w]];
-    const int r = w - sg.row0;
     const __nv_bfloat16* CS = reinterpret_cast<const __nv_bfloat16*>(sg.conv) + (size_t)layer * geo.conv_rows();
     const bool isq = head < NK, isk = !isq && head < 2 * NK;
     const int c0 = head * DK;  // q, k and v channels are consecutive heads of DK
+    int src[TAPS];  // tap t reads the row TAPS - 1 - t tokens back: a forward row, or -1 - (tail row)
+#pragma unroll
+    for (int tap = 0; tap < TAPS; tap++) src[tap] = back(rowpar, w, TAPS - 1 - tap);
     constexpr int PER = DK / 32;
     float vals[PER];
 #pragma unroll
     for (int j = 0; j < PER; j++) {
         const int c = c0 + lane * PER + j;
         float acc = 0.0f;
+#pragma unroll
         for (int tap = 0; tap < TAPS; tap++) {
-            const int at = r + tap;  // in [state rows (TAPS - 1)] ++ [this segment's rows]
-            const float xv = at < TAPS - 1 ? bf(CS[(size_t)at * C + c]) : bf(QKV[(size_t)(sg.row0 + at - (TAPS - 1)) * C + c]);
+            const int at = src[tap];
+            const float xv = at < 0 ? bf(CS[(size_t)(-1 - at) * C + c]) : bf(QKV[(size_t)at * C + c]);
             acc += bf(CW[c * TAPS + tap]) * xv;
         }
         const float conv = rbf(acc);
@@ -171,22 +144,26 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_pre(Geo geo, const _
     }
 }
 
-// Each segment's convolution tail after its rows: the last TAPS - 1 of [tail ++ rows]. A thread a (segment, channel).
-// SNAP, if given, also takes the tail after each row (forward row m at m * conv_rows()), read before the update.
-extern "C" __global__ void tf_q35_conv_commit(Geo geo, const __nv_bfloat16* __restrict__ QKV, const Seg* __restrict__ segs, int layer,
-                                                __nv_bfloat16* __restrict__ SNAP, const int* __restrict__ P) {
+// Each segment's convolution tail: a recorded window logs the tail after each of its rows (the last TAPS - 1 tokens of
+// the row's branch) for keep, and leaves the stream's own; a prompt chunk or one-row window updates the stream's in
+// place. A thread a (segment, channel).
+extern "C" __global__ void tf_q35_conv_commit(Geo geo, const __nv_bfloat16* __restrict__ QKV, const Seg* __restrict__ segs,
+                                                const int* __restrict__ rowpar, int layer, const int* __restrict__ P) {
     const int C = geo.conv();
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= C || past_windows(P, blockIdx.y)) return;
     const Seg sg = segs[blockIdx.y];
     __nv_bfloat16* CS = reinterpret_cast<__nv_bfloat16*>(sg.conv) + (size_t)layer * geo.conv_rows();
-    if (SNAP != nullptr)
-        for (int j = 0; j < sg.rows; j++)
+    if (recorded(P)) {
+        for (int j = 0; j < sg.rows; j++) {
+            __nv_bfloat16* out = log_row(geo, sg, layer, j).conv;
             for (int r = 0; r < TAPS - 1; r++) {
-                const int at = r + j + 1;
-                SNAP[((size_t)(sg.row0 + j) * (TAPS - 1) + r) * C + c] =
-                    at < TAPS - 1 ? CS[(size_t)at * C + c] : QKV[(size_t)(sg.row0 + at - (TAPS - 1)) * C + c];
+                const int at = back(rowpar, sg.row0 + j, TAPS - 2 - r);
+                out[(size_t)r * C + c] = at < 0 ? CS[(size_t)(-1 - at) * C + c] : QKV[(size_t)at * C + c];
             }
+        }
+        if (sg.rows != 1) return;
+    }
     // ascending: slot r takes [r + rows], which is either a later state slot (not yet written) or a row
     for (int r = 0; r < TAPS - 1; r++) {
         const int at = r + sg.rows;
@@ -194,13 +171,17 @@ extern "C" __global__ void tf_q35_conv_commit(Geo geo, const __nv_bfloat16* __re
     }
 }
 
-// The gated delta rule over each segment's rows, its recurrence updated in place; SNAP, if given, takes the state after
-// each row (forward row m at m * rec()). Value head hv reads key head hv / (nv / nk). Grid (1, DK / 4, nv * segments),
-// block (32, 4): a warp a (value head, value row), its 32 lanes over the key width.
+// The gated delta rule over each segment's rows, each row's state its parent's updated: a chain carries the state in
+// registers, a branch rebuilds its parent's from the stream's recurrence and the logged updates of the ancestors.
+// A recorded window logs each row's (decay, write, key) and leaves the recurrence as it was (keep applies the kept
+// path, qwen35_keep.cu); a prompt chunk or one-row window updates it in place. Value head hv reads key head
+// hv / (nv / nk). Grid (1, DK / 4, nv * segments), block (32, 4): a warp a (value head, value row), its 32 lanes
+// over the key width.
 extern "C" __global__ void __launch_bounds__(128) tf_q35_gdn_chain(Geo geo, const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ k,
                                                                      const __nv_bfloat16* __restrict__ v, const float* __restrict__ g,
-                                                                     const __nv_bfloat16* __restrict__ beta, const Seg* __restrict__ segs, int layer,
-                                                                     __nv_bfloat16* __restrict__ y, float* __restrict__ SNAP, const int* __restrict__ P) {
+                                                                     const __nv_bfloat16* __restrict__ beta, const Seg* __restrict__ segs,
+                                                                     const int* __restrict__ rowpar, int layer, __nv_bfloat16* __restrict__ y,
+                                                                     const int* __restrict__ P) {
     const int NK = geo.nk, NV = geo.nv;
     if (past_windows(P, blockIdx.z / NV)) return;
     const int hv = blockIdx.z % NV;
@@ -211,18 +192,40 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35_gdn_chain(Geo geo, cons
     constexpr int PT = DK / 32;
     const size_t at = ((size_t)hv * DK + dv) * DK + PT * dk;
     float* st = reinterpret_cast<float*>(sg.rec) + (size_t)layer * geo.rec() + at;
+    const bool record = recorded(P);
     float state[PT];
 #pragma unroll
     for (int i = 0; i < PT; i++) state[i] = st[i];
+    int prev = -1;  // the row the registers' state follows
     for (int r = 0; r < sg.rows; r++) {
-        const size_t row = sg.row0 + r;
+        const int row = sg.row0 + r;
+        const int parent = rowpar[row];
+        if (parent != prev) {
+            // a branch: its parent's state from the stream's and the ancestors' updates, oldest first (their keys
+            // and decays from this forward's rows, their writes from the log, which this thread wrote itself)
+            int anc[MAXW];
+            int n = 0;
+            for (int a = parent; a >= 0; a = rowpar[a]) anc[n++] = a;
+#pragma unroll
+            for (int i = 0; i < PT; i++) state[i] = st[i];
+            for (int j = n - 1; j >= 0; j--) {
+                const int a = anc[j];
+                const float ga = g[a * NV + hv], da = log_row(geo, sg, layer, a - sg.row0).delta[hv * DK + dv];
+#pragma unroll
+                for (int i = 0; i < PT; i++) {
+                    state[i] = state[i] * ga;
+                    state[i] = fmaf(bf(k[((size_t)a * NK + hk) * DK + PT * dk + i]), da, state[i]);
+                }
+            }
+        }
+        prev = row;
         float kc[PT], qc[PT];
 #pragma unroll
         for (int i = 0; i < PT; i++) {
-            kc[i] = bf(k[(row * NK + hk) * DK + PT * dk + i]);
-            qc[i] = bf(q[(row * NK + hk) * DK + PT * dk + i]);
+            kc[i] = bf(k[((size_t)row * NK + hk) * DK + PT * dk + i]);
+            qc[i] = bf(q[((size_t)row * NK + hk) * DK + PT * dk + i]);
         }
-        const float vc = bf(v[(row * NV + hv) * DK + dv]);
+        const float vc = bf(v[((size_t)row * NV + hv) * DK + dv]);
         const float gc = g[row * NV + hv];
         const float bc = bf(beta[row * NV + hv]);
         float kv_mem = 0.0f;
@@ -236,17 +239,23 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35_gdn_chain(Geo geo, cons
         float out = 0.0f;
 #pragma unroll
         for (int i = 0; i < PT; i++) {
-            state[i] = state[i] + kc[i] * delta;
+            state[i] = fmaf(kc[i], delta, state[i]);
             out += state[i] * qc[i];
         }
         out = warp_sum(out);
-        if (dk == 0) y[(row * NV + hv) * DK + dv] = __float2bfloat16_rn(out);
-        if (SNAP != nullptr) {
-            float* sn = SNAP + row * geo.rec() + at;
+        if (dk == 0) y[((size_t)row * NV + hv) * DK + dv] = __float2bfloat16_rn(out);
+        if (record) {
+            const LogRow l = log_row(geo, sg, layer, r);
+            if (dk == 0) {
+                l.delta[hv * DK + dv] = delta;
+                if (dv == 0) l.g[hv] = gc;
+            }
+            if (dv == 0 && hv % (NV / NK) == 0)
 #pragma unroll
-            for (int i = 0; i < PT; i++) sn[i] = state[i];
+                for (int i = 0; i < PT; i++) l.k[hk * DK + PT * dk + i] = k[((size_t)row * NK + hk) * DK + PT * dk + i];
         }
     }
+    if (record && sg.rows != 1) return;
 #pragma unroll
     for (int i = 0; i < PT; i++) st[i] = state[i];
 }
@@ -316,17 +325,19 @@ __device__ __forceinline__ __nv_bfloat16 rotate(const __nv_bfloat16* x, int d, i
     return __float2bfloat16_rn(d < 32 ? a * cs - b * sn : b * cs + a * sn);
 }
 
-// Queries in place at their positions; keys rotated and values copied into their segment's cache.
-// Grid (rows), HD threads.
+// Queries in place at their positions (the cache length plus the row's depth in its window); keys rotated and values
+// copied into their segment's cache at the row's own slot (the cache length plus its row). Grid (rows), HD threads.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_rope(Geo geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
                                                                 const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
-                                                                const int* __restrict__ rowseg, int layer, const int* __restrict__ P) {
+                                                                const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc, int layer,
+                                                                const int* __restrict__ P) {
     const int QH = geo.qh, KVH = geo.kvh;
     const int d = threadIdx.x;
     if (past_rows(P, blockIdx.x)) return;
     const size_t m = blockIdx.x;
     const Seg sg = segs[rowseg[m]];
-    const int pos = sg.len + (int)m - sg.row0;
+    const int pos = sg.len + __popc(rowanc[m]) - 1;
+    const int slot = sg.len + (int)m - sg.row0;
     __shared__ __nv_bfloat16 qs[MAXQ * HD];
     for (int h = 0; h < QH; h++) qs[h * HD + d] = Qn[(m * QH + h) * HD + d];
     __syncthreads();
@@ -334,7 +345,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_rope(Geo geo, __nv_bflo
     __nv_bfloat16* keys = reinterpret_cast<__nv_bfloat16*>(sg.kv) + (size_t)layer * 2 * KVH * sg.cap * HD;
     __nv_bfloat16* values = keys + (size_t)KVH * sg.cap * HD;
     for (int h = 0; h < KVH; h++) {
-        const size_t dst = ((size_t)h * sg.cap + pos) * HD + d;
+        const size_t dst = ((size_t)h * sg.cap + slot) * HD + d;
         keys[dst] = rotate(Kn + (m * KVH + h) * HD, d, pos);
         values[dst] = Vr[(m * KVH + h) * HD + d];
     }
@@ -342,9 +353,11 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_rope(Geo geo, __nv_bflo
 
 // Causal attention over a segment's cache, P[1] keys a block over P[0] chunks (read from the device, so a captured
 // forward replays as caches grow): grid (chunks at most, kvh, rows), block qh / kvh warps, a warp a query head of
-// the kv head's group. Partials (max, sum, out) at slot (row, qh, chunk); empty chunks leave sum 0.
+// the kv head's group. A row sees the cache before its window and its window's ancestors and itself (rowanc).
+// Partials (max, sum, out) at slot (row, qh, chunk); empty chunks leave sum 0.
 extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
-                                                 const int* __restrict__ rowseg, int layer, const int* __restrict__ P, float scale,
+                                                 const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc, int layer,
+                                                 const int* __restrict__ P, float scale,
                                                  float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
     constexpr int DPL = HD / 32;
     const int nch = P[0], ck = P[1];
@@ -355,8 +368,8 @@ extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __r
     const size_t m = blockIdx.z;
     const int qh = h * (QH / KVH) + g;
     const Seg sg = segs[rowseg[m]];
-    const int last = sg.len + (int)m - sg.row0;  // the row's own position, the last key it sees
-    const int k0 = c * ck, k1 = min(k0 + ck, last + 1);
+    const unsigned anc = rowanc[m];
+    const int k0 = c * ck, k1 = min(k0 + ck, sg.len + sg.rows);
     const size_t slot = (m * QH + qh) * nch + c;
     if (k0 >= k1) {
         if (lane == 0) {
@@ -375,6 +388,7 @@ extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __r
     }
     float mx = -INFINITY, l = 0.0f;
     for (int pos = k0; pos < k1; pos++) {
+        if (pos >= sg.len && ((anc >> (pos - sg.len)) & 1u) == 0) continue;
         const uint4 kw = *reinterpret_cast<const uint4*>(K + ((size_t)h * sg.cap + pos) * HD + lane * DPL);
         const __nv_bfloat16* kb = reinterpret_cast<const __nv_bfloat16*>(&kw);
         float dot = 0.0f;

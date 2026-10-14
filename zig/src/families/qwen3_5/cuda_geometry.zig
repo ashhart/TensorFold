@@ -70,6 +70,17 @@ pub const Geometry = struct {
         return g.deltas() * (g.recBytes() + g.convBytes());
     }
 
+    /// One verified row's record of one linear layer (qwen35.cuh's log_bytes): decay and write by value head,
+    /// key by key head, the tail after it.
+    pub fn logRowBytes(g: Geometry) usize {
+        return g.v_heads * 4 + g.v_heads * dk * 4 + g.k_heads * dk * 2 + g.convBytes();
+    }
+
+    /// A stream's log of a window's `rows` rows.
+    pub fn logBytes(g: Geometry, rows: usize) usize {
+        return rows * g.deltas() * g.logRowBytes();
+    }
+
     /// A stream's keys and values at a `cap`-token window.
     pub fn kvBytes(g: Geometry, cap: usize) usize {
         return g.attentions() * 2 * g.kv_heads * cap * head_dim * 2;

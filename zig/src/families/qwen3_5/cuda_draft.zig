@@ -1,6 +1,7 @@
 //! The DFlash2 drafter on CUDA behind the lane core's Drafter contract (core/lanes/drafter.zig): it absorbs the
 //! target's tapped rows into a context ring a stream, then drafts a block of 7 tokens after the pending one, the
-//! target's own embedding and head at its ends and a codebook selector tracing one path through the top 16 a row.
+//! target's own embedding and head at its ends and a codebook selector scoring the top 16 a row under each parent:
+//! one path (a chain), or the lanes of the round loop's tree (each lane its parent's rank-r choice).
 const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
@@ -113,14 +114,18 @@ fn num(o: std.json.ObjectMap, key: []const u8) !f64 {
     };
 }
 
-const Fns = struct { gather_taps: cuda.Function, dyn_conv: cuda.Function, norm_rope: cuda.Function, ring_put: cuda.Function, attn: cuda.Function };
+const Fns = struct { gather_taps: cuda.Function, gather_rows: cuda.Function, dyn_conv: cuda.Function, norm_rope: cuda.Function, ring_put: cuda.Function, attn: cuda.Function };
 
-/// A stream's context: its layers' key and value rings over positions [begin, end), and the drafts it holds.
+/// qwen35_draft.cu's TapRows.
+const TapRows = extern struct { n: c_int, rows: [engine.most_window]c_int };
+
+/// A stream's context: its layers' key and value rings over positions [begin, end), and the drafts it holds (a
+/// chain, or a tree's lanes in the shape's order).
 const Ctx = struct {
     ring: DeviceBuffer,
     begin: u64 = 0,
     end: u64 = 0,
-    held: [8]u32 = undefined,
+    held: [engine.most_window]u32 = undefined,
     held_n: usize = 0,
 };
 
@@ -167,7 +172,11 @@ pub const Draft = struct {
     /// Contexts between streams: allocated and run through once (`reserve`), since the driver stalls a buffer's
     /// first kernel for seconds.
     pool: std.ArrayList(*Ctx) = .empty,
-    step_ms: f64 = 4.0,
+    /// One level of a hold (a hold drafts every level at once; timed at load, over the block's levels).
+    step_ms: f64 = 1.0,
+    /// The target's window ms by rows (cuda_native.zig times them), for the round loop's prices.
+    costs: [engine.most_window]lanes.config.Cost = undefined,
+    n_costs: usize = 0,
 
     const words_at = 64;
     const hp_at = words_at + 16 * lp_words * 4;
@@ -191,7 +200,35 @@ pub const Draft = struct {
         d.staged = try cuda.HostBuffer.alloc(e.d, staged_len);
         errdefer d.staged.free();
         try d.picksZero();
+        // the first context, and a hold timed on it (the quickest of several: the first ones pay the driver's stalls)
+        const ctx = try d.create();
+        errdefer d.drop(ctx);
+        try d.absorb(ctx, d.taps_in, 0, 1, null);
+        var quickest: f64 = std.math.inf(f64);
+        for (0..8) |_| {
+            ctx.end = 1;
+            const t0 = std.Io.Clock.awake.now(io);
+            try d.hold(ctx, 0, 1, c.block - 1, null);
+            quickest = @min(quickest, @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6);
+        }
+        d.step_ms = quickest / @as(f64, @floatFromInt(c.block - 1));
+        ctx.* = .{ .ring = ctx.ring };
+        try d.pool.append(gpa, ctx);
         return d;
+    }
+
+    /// The drafter's taps (the target's layers it reads).
+    pub fn taps(d: *const Draft) []const u32 {
+        return d.c.taps[0..d.c.n_taps];
+    }
+
+    /// The target's window of `rows` rows takes `ms` (told by cuda_native.zig before the facts are read).
+    pub fn setCost(d: *Draft, rows: u32, ms: f64) void {
+        if (std.c.getenv("TF_TIMING") != null) std.debug.print("[timing] window {d} rows {d:.2} ms (a hold level {d:.2})\n", .{ rows, ms, d.step_ms });
+        if (d.n_costs < d.costs.len) {
+            d.costs[d.n_costs] = .{ .width = rows, .ms = ms };
+            d.n_costs += 1;
+        }
     }
 
     pub fn deinit(d: *Draft) void {
@@ -253,8 +290,8 @@ pub const Draft = struct {
         ctx.* = .{ .ring = try DeviceBuffer.alloc(d.e.d, d.c.ringBytes()) };
         errdefer ctx.ring.free();
         try ctx.ring.fill8(0, null);
-        try d.absorb(ctx, d.taps_in, 0, 1); // any tap rows do: the drafter's own zeroed staging
-        try d.hold(ctx, 0, 1, d.c.block - 1);
+        try d.absorb(ctx, d.taps_in, 0, 1, null); // any tap rows do: the drafter's own zeroed staging
+        try d.hold(ctx, 0, 1, d.c.block - 1, null);
         ctx.* = .{ .ring = ctx.ring };
         return ctx;
     }
@@ -295,11 +332,13 @@ pub const Draft = struct {
     }
 
     /// Target rows at positions [start, start + n) from the stream's tap ring into its context (replacing what was
-    /// held at or past `start`); rows older than the window are skipped.
-    fn absorb(d: *Draft, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize) !void {
+    /// held at or past `start`); rows older than the window are skipped. With `rows`, the ring's rows start + rows[i]
+    /// (a tree's kept path, which the target keeps at the positions start + i) instead, n of them.
+    fn absorb(d: *Draft, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, rows_: ?[]const u32) !void {
         const c = d.c;
         var start = start_;
         var n = n_;
+        if (rows_) |rs| if (rs.len != n or n > engine.most_window) return error.BadDraftRows;
         if (start < ctx.end) ctx.end = start;
         if (start > ctx.end) ctx.begin = start; // a gap (a prompt restored from a cache): the context starts here
         if (n > c.window) {
@@ -311,7 +350,11 @@ pub const Draft = struct {
         const e = d.e;
         while (n > 0) {
             const rows = @min(n, max_rows);
-            try e.run(d.fns.gather_taps, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
+            if (rows_) |rs| {
+                var tr: TapRows = .{ .n = @intCast(rows), .rows = @splat(0) };
+                for (rs, 0..) |r, i| tr.rows[i] = @intCast(r);
+                try e.run(d.fns.gather_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
+            } else try e.run(d.fns.gather_taps, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
             try d.proj(d.w.fc, d.taps_in, d.th, rows);
             try d.norm(d.th, d.w.hidden_norm, d.thn, rows);
             for (d.w.layers, 0..) |l, i| {
@@ -327,8 +370,9 @@ pub const Draft = struct {
         if (ctx.end > c.window and ctx.begin < ctx.end - c.window) ctx.begin = ctx.end - c.window;
     }
 
-    /// The block [pending, mask x 7] at positions pos0.. over the stream's context: `depth` drafts held.
-    fn hold(d: *Draft, ctx: *Ctx, pending: u32, pos0: u64, depth: usize) !void {
+    /// The block [pending, mask x 7] at positions pos0.. over the stream's context: `depth` drafts held as a chain,
+    /// or the `lanes` tree's tokens.
+    fn hold(d: *Draft, ctx: *Ctx, pending: u32, pos0: u64, depth: usize, lanes_: ?*const lanes.shape.Shape) !void {
         const c = d.c;
         const e = d.e;
         const B = c.block;
@@ -369,34 +413,62 @@ pub const Draft = struct {
         try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + words_at, d.words, rows * lp_words * 4, e.stream.handle), "cuMemcpyDtoHAsync");
         try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + hp_at, d.hp, rows * c.rank * 2, e.stream.handle), "cuMemcpyDtoHAsync");
         try e.stream.synchronize();
-        d.select(ctx, pending, rows);
-        ctx.held_n = @min(depth, rows);
+        if (lanes_) |l| {
+            try d.selectLanes(ctx, pending, rows, l);
+            if (std.c.getenv("TF_TIMING") != null) std.debug.print("[timing] lanes {d} levels {d}\n", .{ l.parents.len, l.levels() });
+        } else {
+            d.select(ctx, pending, rows);
+            ctx.held_n = @min(depth, rows);
+            if (std.c.getenv("TF_TIMING") != null) std.debug.print("[timing] chain {d}\n", .{ctx.held_n});
+        }
     }
 
-    /// The path through the rows' candidates: each row's best of unary logit + predecessor . projected . successor.
-    fn select(d: *Draft, ctx: *Ctx, pending: u32, rows: usize) void {
+    /// Row `r`'s candidate of `rank` after the token `pred`: by unary logit + predecessor . projected . successor,
+    /// ties to the earlier candidate (the row's top-k order).
+    fn choice(d: *const Draft, r: usize, pred: u32, rank: usize) u32 {
         const c = d.c;
-        const words = std.mem.bytesAsSlice(u32, d.staged.bytes[words_at..][0 .. rows * lp_words * 4]);
-        const hp = std.mem.bytesAsSlice(u16, d.staged.bytes[hp_at..][0 .. rows * c.rank * 2]);
+        const w = std.mem.bytesAsSlice(u32, d.staged.bytes[words_at..][r * lp_words * 4 ..][0 .. lp_words * 4]);
+        const hp = std.mem.bytesAsSlice(u16, d.staged.bytes[hp_at..][r * c.rank * 2 ..][0 .. c.rank * 2]);
+        var scores: [lp_top]f32 = undefined;
+        for (0..c.topk) |j| {
+            const cand = w[2 + j];
+            const unary: f32 = @bitCast(w[2 + lp_top + j]);
+            var edge: f32 = 0;
+            for (0..c.rank) |k| edge += bf16(d.w.predecessor[pred * c.rank + k]) * bf16(hp[k]) * bf16(d.w.successor[cand * c.rank + k]);
+            scores[j] = unary + edge;
+        }
+        var taken: [lp_top]bool = @splat(false);
+        var pick: usize = 0;
+        for (0..rank + 1) |_| {
+            var best: f32 = -std.math.inf(f32);
+            pick = 0;
+            for (0..c.topk) |j| if (!taken[j] and scores[j] > best) {
+                best = scores[j];
+                pick = j;
+            };
+            taken[pick] = true;
+        }
+        return w[2 + pick];
+    }
+
+    /// The path through the rows' candidates: each row's best after the one before.
+    fn select(d: *Draft, ctx: *Ctx, pending: u32, rows: usize) void {
         var pred = pending;
         for (0..rows) |r| {
-            const w = words[r * lp_words ..][0..lp_words];
-            var best: f32 = -std.math.inf(f32);
-            var pick: u32 = w[2];
-            for (0..c.topk) |j| {
-                const cand = w[2 + j];
-                const unary: f32 = @bitCast(w[2 + lp_top + j]);
-                var edge: f32 = 0;
-                for (0..c.rank) |k| edge += bf16(d.w.predecessor[pred * c.rank + k]) * bf16(hp[r * c.rank + k]) * bf16(d.w.successor[cand * c.rank + k]);
-                const score = unary + edge;
-                if (score > best) {
-                    best = score;
-                    pick = cand;
-                }
-            }
-            ctx.held[r] = pick;
-            pred = pick;
+            ctx.held[r] = d.choice(r, pred, 0);
+            pred = ctx.held[r];
         }
+    }
+
+    /// The tree's lanes in order: lane i the rank-r candidate at its depth's row after its parent lane's token.
+    fn selectLanes(d: *Draft, ctx: *Ctx, pending: u32, rows: usize, l: *const lanes.shape.Shape) !void {
+        if (l.parents.len > ctx.held.len) return error.TooManyLanes;
+        for (l.parents, l.depths, l.ranks, 0..) |par, depth, rank, i| {
+            if (depth >= rows or rank >= d.c.topk or par >= @as(i32, @intCast(i))) return error.BadLanes;
+            const pred = if (par < 0) pending else ctx.held[@intCast(par)];
+            ctx.held[i] = d.choice(depth, pred, rank);
+        }
+        ctx.held_n = l.parents.len;
     }
 
     // the Drafter contract
@@ -416,7 +488,8 @@ pub const Draft = struct {
 
     fn factsFn(p: *anyopaque) dr.Facts {
         const d = cast(p);
-        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = false, .stream_bytes = d.c.ringBytes() };
+        // TF_NO_TREES=1: chains only (for comparing)
+        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = false, .stream_bytes = d.c.ringBytes(), .trees = std.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs] };
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
@@ -436,7 +509,9 @@ pub const Draft = struct {
             const ctx = d.streams.get(it.stream) orelse return error.UnknownStream;
             if (it.features.space != .device or it.features.dtype != .bf16) return error.UnsupportedFeatures;
             // the target's features: its ring, `offset` the first row's position (cuda_native.zig's featuresFn)
-            try d.absorb(ctx, it.features.buffer, it.features.offset, it.features.rows);
+            if (it.rows) |rs| {
+                try d.absorb(ctx, it.features.buffer, it.features.offset, rs.len, rs);
+            } else try d.absorb(ctx, it.features.buffer, it.features.offset, it.features.rows, null);
         }
     }
 
@@ -446,7 +521,7 @@ pub const Draft = struct {
         defer timing("hold", d.io, t0);
         for (items) |it| {
             const ctx = d.streams.get(it.stream) orelse return error.UnknownStream;
-            try d.hold(ctx, it.pending, it.position - 1, it.depth);
+            try d.hold(ctx, it.pending, it.position - 1, it.depth, it.lanes);
         }
     }
 
