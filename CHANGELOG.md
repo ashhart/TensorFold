@@ -5,6 +5,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - GLM-5.3-Flash's KDA and router kernels ask the Metal compiler for the 1,024 threads a threadgroup they launch with. On an M1 Max the compiler had built both KDA pipelines for 512 threads and several router widths for fewer than 1,024, so those launches could leave outputs unwritten without an error. The kernels' arithmetic is unchanged, and `launch_check.zig` runs every router width and both KDA head counts at 1,024 threads against float64, with a 512-thread control and recurrent seams. On an M3 Ultra, whose compiler already allowed 1,024 threads, the checks pass, every GLM-5.3-Flash pipeline keeps its limit and its threadgroup memory (at most 24 KiB, under the 32 KiB of M1-family GPUs), and GLM-5.3-Flash with 8 of its 45 layers gave the same tokens as before, drafted and with `"draft": false`, resumed and concurrent, with decode and prompt speed within 0.25% (#708). Thanks to @mrv777.
+- EXLR8's one-set projection kernel at 1, 2 and 4 rows alternates two input tiles, so each block needs one barrier instead of two; 8- and 16-row windows keep the old schedule. The sums and their order are unchanged: on an M3 Ultra every case of `tf-exlr8-check` gives the same bytes as before. There, over 12 layouts, the kernel takes 2% to 5% less GPU time at one row and up to 2% less at two, between 6% less and 2% more at four, and the same time at 8 and 16 rows, where the first version was 3% to 8% slower (#789). Thanks to @mrv777.
 
 ## 1.0.11
 
