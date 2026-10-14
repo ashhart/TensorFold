@@ -185,7 +185,7 @@ On M5 tensor units. Chips before M5 need their own path.
       nearly every expert's weights, so small segments lose: 2k rows -7%, 3k level. Three queues gave +2%, and four
       timed out.
     - Flash Next served: TTFT -5% to -8% from 8k (32k 7.52 to 6.94 s, 128k 31.5 to 29.1 s), with the same replies.
-      The second segment's buffers take about 9 GB. Pushed in zig-flashnext c2bede8fd.
+      The second segment's buffers take about 9 GB. Pushed in c2bede8fd.
 
 ## Stage 4: serve
 

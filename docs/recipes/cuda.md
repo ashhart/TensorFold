@@ -3,7 +3,7 @@
 ## Engine versions
 
 The family and checkpoint tables, two-rank setup and PyTorch/Triton implementation notes on this page describe
-the Python 0.6.6 engine, maintained on [`python-0.6`](https://github.com/ashhart/TensorFold/tree/python-0.6).
+the Python 0.6.6 engine, available at the [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6).
 They are not the native Zig release's support matrix.
 
 The native binary registers only Nemotron on CUDA, qualified on NVIDIA GB10 and on Ampere cards with compute capability 8.6 (the RTX 30 series, RTX A6000, A10 and A40).
@@ -19,7 +19,7 @@ until a family lands there, GLM on CUDA is the Python 0.6.6 engine's.
 ## Python 0.6 CUDA families
 
 Python CUDA families read supported checkpoints through PyTorch loaders and execute family-specific Triton and
-CUDA kernels. Use the [Python runbook](https://github.com/ashhart/TensorFold/blob/python-0.6/RUNBOOK.md#nvidia-gpus)
+CUDA kernels. Use the [Python runbook](https://github.com/ashhart/TensorFold/blob/v0.6.6/RUNBOOK.md#nvidia-gpus)
 for the container and two-rank setup.
 
 In that environment, install the Python [0.6.6 release](https://github.com/ashhart/TensorFold/releases/tag/v0.6.6)
@@ -34,7 +34,7 @@ tensorfold --version
 The version must report `0.6.6` before using these Python serving flags.
 
 The Python engine's Windows path is experimental, one GPU a process and not yet run on Windows hardware: see the
-[Python runbook](https://github.com/ashhart/TensorFold/blob/python-0.6/RUNBOOK.md#windows-with-an-nvidia-card).
+[Python runbook](https://github.com/ashhart/TensorFold/blob/v0.6.6/RUNBOOK.md#windows-with-an-nvidia-card).
 
 | Family | CUDA execution |
 | --- | --- |

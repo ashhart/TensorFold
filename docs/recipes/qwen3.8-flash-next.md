@@ -13,8 +13,8 @@ For native serving, see the [Metal runbook](../../RUNBOOK.md#flash-next-and-pair
 Native Flash Next has no CUDA backend yet; its port is tracked in
 [#472](https://github.com/ashhart/TensorFold/issues/472).
 
-The sections below describe the Python 0.6.6 engine, available on
-[`python-0.6`](https://github.com/ashhart/TensorFold/tree/python-0.6).
+The sections below describe the Python 0.6.6 engine, available at the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6).
 The MLX section uses `TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP`; CUDA checkpoints are listed below.
 
 On MLX, a supported conversion without the head runs without MTP drafting. On CUDA, pass `--no-drafts`

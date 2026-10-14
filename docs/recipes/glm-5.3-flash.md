@@ -1,7 +1,7 @@
 # GLM-5.3-Flash
 
-This recipe describes the Python 0.6.6 engine, maintained on
-[`python-0.6`](https://github.com/ashhart/TensorFold/tree/python-0.6).
+This recipe describes the Python 0.6.6 engine, available at the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6).
 Its CUDA EXL3 reader, two-rank flags and DFlash2 policies do not apply to the native Zig binary.
 The native binary serves GLM on two M5 Ultra Macs with MLX affine 4-bit/group-64 weights; it has no GLM CUDA backend yet.
 That is not an engine-only replacement for a CUDA EXL3 deployment.
@@ -21,7 +21,7 @@ On CUDA GLM-5.3-Flash runs on two ranks from Brandon M. Music's EXL3/TR3 checkpo
 No NVFP4 checkpoint of it is read. `tensorfold serve` loads the checkpoint you name; it picks none by itself. Prompt
 precision does not change here: neither checkpoint has an FP8 prompt kernel, so `--prefill-fp8` is refused.
 
-Use the [Python two-rank setup](https://github.com/ashhart/TensorFold/blob/python-0.6/RUNBOOK.md#nvidia-gpus)
+Use the [Python two-rank setup](https://github.com/ashhart/TensorFold/blob/v0.6.6/RUNBOOK.md#nvidia-gpus)
 but replace its unpinned installation command with the Python
 [0.6.6 release revision](https://github.com/ashhart/TensorFold/releases/tag/v0.6.6) below.
 An unpinned install selects the native default branch, which does not serve this CUDA recipe.
