@@ -1,7 +1,8 @@
 //! Frozen server goldens for `zig build test-golden`, with the ten differences that are still known.
 const std = @import("std");
+const builtin = @import("builtin");
 const platform = @import("sys");
-const posix = std.posix;
+const posix = platform.posix;
 const Io = std.Io;
 const wire = @import("wire.zig");
 const Reply = wire.Reply;
@@ -21,6 +22,18 @@ const known_diffs = [_]Known{
     .{ .group = "tools", .name = "two_tools-single-stream" },
     .{ .group = "anthropic", .name = "tool-use-stream" },
 };
+
+/// Reads a spawned server's stdout to its end, so its log lines never fill the pipe (4 KiB on Windows).
+fn drainStdout(io: Io, out: Io.File) void {
+    var buf: [4096]u8 = undefined;
+    var reader = out.reader(io, &buf);
+    while (true) {
+        _ = reader.interface.discardShort(buf.len) catch return;
+    }
+}
+
+/// The parent's SystemRoot, which a Windows child needs for Winsock; null elsewhere.
+var system_root: ?[]const u8 = null;
 
 fn isKnown(group: []const u8, name: []const u8) bool {
     for (known_diffs) |k| {
@@ -355,6 +368,7 @@ fn spawnServer(a: std.mem.Allocator, io: Io, binary: []const u8, fixtures: []con
         } else try argv.append(a, arg);
     }
     var map = std.process.Environ.Map.init(a);
+    if (system_root) |root| try map.put("SystemRoot", root); // Winsock refuses to start without it
     try map.put("TENSORFOLD_NO_LIVE", "1");
     try map.put("TF_FAKE_CONTEXT", context_tokens);
     var it = env.iterator();
@@ -398,12 +412,16 @@ fn spawnServer(a: std.mem.Allocator, io: Io, binary: []const u8, fixtures: []con
         const line = reader.interface.takeDelimiterExclusive('\n') catch return error.NoPortLine;
         if (std.mem.startsWith(u8, line, "PORT ")) {
             const port = try std.fmt.parseInt(u16, std.mem.trim(u8, line[5..], " \r"), 10);
+            // the server's log lines keep coming on stdout: drained, or a full pipe blocks the server
+            const drain = try std.Thread.spawn(.{}, drainStdout, .{ io, child.stdout.? });
+            drain.detach();
             return .{ .child = child, .port = port, .log_path = log_path, .key_path = key_path };
         }
     }
 }
 
 pub fn main(init: std.process.Init) !void {
+    if (builtin.os.tag == .windows) system_root = init.environ_map.get("SystemRoot");
     const gpa = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -436,15 +454,26 @@ pub fn main(init: std.process.Init) !void {
         if (obj.get("cases")) |cases| {
             for (cases.array.items) |case| try runCase(init.arena.allocator(), io, golden_dir, server.?.port, case);
         }
+        var after_signal = false; // Windows: a step's cases after a signal it cannot send are skipped, and said so
         for (obj.get("then").?.array.items) |then| {
             const t = then.object;
             const kind = t.get("kind").?.string;
             const s = &server.?;
             if (std.mem.eql(u8, kind, "cases")) {
+                if (after_signal) {
+                    std.debug.print("SKIPPED {d} cases after a signal Windows cannot send\n", .{t.get("cases").?.array.items.len});
+                    continue;
+                }
                 for (t.get("cases").?.array.items) |case| try runCase(init.arena.allocator(), io, golden_dir, s.port, case);
             } else if (std.mem.eql(u8, kind, "sleep")) {
                 std.Io.sleep(io, .fromMilliseconds(@intFromFloat(t.get("seconds").?.float * 1000.0)), .awake) catch {};
             } else if (std.mem.eql(u8, kind, "sigterm")) {
+                if (builtin.os.tag == .windows) {
+                    std.debug.print("SKIPPED lifecycle/sigterm-exit-0: Windows has no SIGTERM to send, the server is ended\n", .{});
+                    posix.kill(s.child.id.?, posix.SIG.TERM) catch {};
+                    _ = s.child.wait(io) catch {};
+                    continue;
+                }
                 posix.kill(s.child.id.?, posix.SIG.TERM) catch {};
                 const term = s.child.wait(io) catch return error.WaitFailed;
                 try outcomes.append(init.arena.allocator(), .{
@@ -471,8 +500,10 @@ pub fn main(init: std.process.Init) !void {
                 try fw.interface.writeAll(t.get("content").?.string);
                 try fw.interface.flush();
                 posix.kill(s.child.id.?, posix.SIG.HUP) catch {}; // the server rereads the key file, as the reference does
+                after_signal = builtin.os.tag == .windows;
             } else if (std.mem.eql(u8, kind, "sighup")) {
                 posix.kill(s.child.id.?, posix.SIG.HUP) catch {};
+                after_signal = builtin.os.tag == .windows;
             } else if (std.mem.eql(u8, kind, "terminate")) {
                 posix.kill(s.child.id.?, posix.SIG.TERM) catch {};
                 _ = s.child.wait(io) catch {};
