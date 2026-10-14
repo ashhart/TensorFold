@@ -8,6 +8,7 @@ const learn = @import("lane_host_learn.zig");
 const lone = @import("lane_host_lone.zig");
 const fill = @import("lane_host_fill.zig");
 const admit = @import("lane_host_admit.zig");
+const rows_host = @import("lane_host_rows.zig");
 const Allocator = std.mem.Allocator;
 const Id = api.Id;
 const Request = api.Request;
@@ -51,6 +52,7 @@ pub const LaneHost = struct {
     admissions: u64 = 0, // jobs admitted so far: each job's `seq`
     memory_lanes: ?usize = null, // lanes the backend had memory for at its last LaneMemory, until a job ends
     warm_quiet: u64 = 0, // ns a warm pass waits for other work before its first chunk (0: none), set by its family
+    disk: rows_host.Disk = .{}, // the Mac app's questions about kept states, and the disk writer's quiet
 
     const Lesson = struct { request: *const api.LearnRequest, sink: api.LearnSink };
 
@@ -103,12 +105,8 @@ pub const LaneHost = struct {
 
     /// Stops admitting, cancels what is left and joins the engine thread.
     pub fn stop(h: *LaneHost) void {
-        h.mutex.lockUncancelable(h.io);
-        h.closing = true;
-        h.wake.broadcast(h.io);
-        h.mutex.unlock(h.io);
-        if (h.thread) |t| t.join();
-        h.thread = null;
+        rows_host.drainThread(h);
+        rows_host.close(h);
         const closed: api.LearnEvent = .{ .done = .{ .message = "the engine closed" } };
         for (h.lessons.items) |l| l.sink.event(l.sink.ctx, &closed);
         h.lessons.deinit(h.gpa);
@@ -121,7 +119,7 @@ pub const LaneHost = struct {
     }
 
     pub fn engine(h: *LaneHost) Engine {
-        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = status.read, .memory = memoryFn, .keepalive = keepaliveFn, .learn = learn.submit } };
+        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = status.read, .memory = memoryFn, .keepalive = keepaliveFn, .learn = learn.submit, .imprint = rows_host.ask, .drain = rows_host.drain } };
     }
 
     /// The family's queue as a keepalive target, when it set one.
@@ -404,6 +402,7 @@ pub const LaneHost = struct {
         h.prefill_at = done;
         job.prefilled = done;
         h.unlock();
+        rows_host.prefilled(h, job.request.prompt.len - job.stream.cached, done - began);
         job.reported();
         if (h.cache) |store| store.report(job.request.prompt.len, job.stream.cached, store.counts.kept - job.kept0);
         emit(job, .{ .prefilled = job.stream.cached });
@@ -494,6 +493,7 @@ pub const LaneHost = struct {
     fn run(h: *LaneHost) void {
         while (true) {
             h.takeCancels();
+            rows_host.answer(h);
             while (h.admitOne()) {}
             h.fillOne();
             status.noteLive(h);
@@ -505,7 +505,7 @@ pub const LaneHost = struct {
                     h.learner.?.abort(h.learner.?.ctx);
                     h.lesson_open = false;
                 }
-                if (left == 0) return;
+                if (left == 0) return rows_host.flush(h);
                 h.closeAll();
                 continue;
             }
@@ -517,6 +517,11 @@ pub const LaneHost = struct {
                 if (learn.ready(h)) {
                     h.unlock();
                     learn.step(h);
+                    continue;
+                }
+                if (rows_host.ready(h)) {
+                    h.unlock();
+                    rows_host.step(h);
                     continue;
                 }
                 if (h.cancels.items.len == 0 and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes))

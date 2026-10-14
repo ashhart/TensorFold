@@ -12,6 +12,7 @@ const decisions = @import("decisions.zig");
 const status = @import("status_routes.zig");
 const memory = @import("memory_routes.zig");
 const slide = @import("slide.zig");
+const imprint = @import("imprint_routes.zig");
 const Server = @import("server.zig").Server;
 const Conn = http_conn.Conn;
 const Allocator = std.mem.Allocator;
@@ -22,6 +23,7 @@ pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
     if (std.mem.eql(u8, m, "POST")) return post(srv, conn, a);
     if (std.mem.eql(u8, m, "DELETE")) {
         if (std.mem.eql(u8, auth.routePath(conn.path), "/v1/slide/graph")) return slide.forget(srv, conn, a);
+        if (std.mem.eql(u8, auth.routePath(conn.path), "/v1/imprint")) return imprint.forget(srv, conn, a);
         return responses.delete(srv, conn, a, responses.route(auth.routePath(conn.path)));
     }
     const message = std.fmt.allocPrint(a, "Unsupported method ({s})", .{http_conn.pyRepr(a, m) catch m}) catch return;
@@ -64,6 +66,8 @@ fn discardBody(conn: *Conn, a: Allocator) void {
 fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
     if (std.mem.eql(u8, route, "/v1/slide/learn")) return slide.learn(srv, conn, a);
+    if (std.mem.eql(u8, route, "/v1/imprint/resume")) return imprint.post(srv, conn, a, .where);
+    if (std.mem.eql(u8, route, "/v1/imprint/load")) return imprint.post(srv, conn, a, .load);
     if (std.mem.endsWith(u8, route, "/decisions")) return decisions.post(srv, conn, a);
     if (anthropic.route(conn.path)) return anthropic.post(srv, conn, a);
     if (responses.route(route)) |rid| if (rid.len == 0) return responses.post(srv, conn, a);

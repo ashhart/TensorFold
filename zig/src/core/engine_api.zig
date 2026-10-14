@@ -208,6 +208,10 @@ pub const Open = struct {
     learn_min_free_gib: f64 = 4,
     /// --learn-gib: what learned states may take on disk, every model and build together.
     learn_gib: f64 = 32,
+    /// --learn-conversations: every kept state written behind to disk too, not only shared cuts (under `learn`).
+    learn_conversations: bool = false,
+    /// --learn-daily-gib: what learned states may write a day under the root, every model together.
+    learn_daily_gib: f64 = 32,
     /// --slide: Sliding Weights learns into the served weights, live (off: learn requests are refused).
     slide: bool = false,
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
@@ -340,6 +344,10 @@ pub const Engine = struct {
         score: ?*const fn (ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64) error{Failed}!f64 = null,
         /// Queue `request` for the family's learner; it stays valid until `done`. Null: this engine does not learn.
         learn: ?*const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) LearnError!void = null,
+        /// Queue a question about kept states for the engine thread (it stays valid until `done`); false: refused.
+        imprint: ?*const fn (ctx: *anyopaque, ask: *ImprintAsk) bool = null,
+        /// A planned stop's first half: no more work, disk writes finished under a deadline, the engine thread joined.
+        drain: ?*const fn (ctx: *anyopaque) void = null,
     };
 
     pub fn info(e: Engine) Info {
@@ -362,6 +370,17 @@ pub const Engine = struct {
     pub fn keepaliveTarget(e: Engine) ?keepalive.Target {
         const f = e.vtable.keepalive orelse return null;
         return f(e.ctx);
+    }
+
+    /// Queues `ask` for the engine thread; false when the engine answers none (its `done` never comes).
+    pub fn imprintAsk(e: Engine, ask: *ImprintAsk) bool {
+        const f = e.vtable.imprint orelse return false;
+        return f(e.ctx, ask);
+    }
+
+    /// Finishes the engine's disk writes before the process ends; a no-op where it keeps none.
+    pub fn drain(e: Engine) void {
+        if (e.vtable.drain) |f| f(e.ctx);
     }
 
     /// The decision hook, or Unsupported when this engine does not score.
@@ -411,6 +430,10 @@ pub const cache_modes = @import("cache_modes.zig");
 
 /// Learned prompt-cache states on disk (prompt_imprint.zig).
 pub const prompt_imprint = @import("prompt_imprint.zig");
+
+/// A question about a conversation's kept states, in RAM and on disk (rows_ask.zig).
+pub const ImprintAsk = @import("rows_ask.zig").Ask;
+pub const ImprintOp = @import("rows_ask.zig").Op;
 
 /// The idle keepalive's ticker and target contract.
 pub const keepalive = @import("keepalive.zig");

@@ -169,6 +169,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     if (drawing) ticker.finish();
     var waited: u32 = 0;
     while (srv.open_connections.load(.acquire) > 0 and waited < 40) : (waited += 1) std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+    s.engine.drain(); // kept states waiting for disk are written (under the engine's deadline) before the process ends
     if (srv.open_connections.load(.acquire) > 0) std.process.exit(0); // replies still open: end without freeing what they read
     return 0;
 }

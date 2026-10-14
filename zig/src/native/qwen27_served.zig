@@ -11,6 +11,7 @@ const cache_fit = @import("cache_fit.zig");
 const Resident = @import("resident.zig").Resident;
 const lb = @import("qwen27_lanes.zig");
 pub const lanes_backend = lb;
+const disk = @import("qwen27_disk.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Options = struct {
@@ -21,6 +22,7 @@ pub const Options = struct {
     drafter_bits: u8 = 0,
     cache_gib: ?f64 = null,
     cache_over_cap: bool = false,
+    learn: ?disk.Learn = null, // --learn-conversations: kept states written behind to disk and read back
 };
 
 pub const Host = struct {
@@ -37,6 +39,7 @@ pub const Host = struct {
     cache: ?pc.Store = null,
     resident: ?Resident = null,
     warm: mtl.keepalive.Target,
+    disk_stage: ?mtl.Buffer = null, // copies out of private kept states for the disk (qwen27_disk.zig)
 
     pub fn engine(h: *Host) api.Engine {
         return h.host.engine();
@@ -268,6 +271,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     h.draft = null;
     h.cache = null;
     h.resident = null;
+    h.disk_stage = null;
     h.runner = try q.decode_round.Runner.initReady(gpa, model, slots, capacity + lb.max_rows, 1);
     errdefer h.runner.deinit();
     if (drafter) |d| h.draft = try lb.Draft.attach(gpa, &h.runner, d, false) else if (o.drafter) |d| h.draft = lb.Draft.open(gpa, io, model, &h.runner, d, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference) catch |err| {
@@ -297,6 +301,8 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     errdefer if (h.resident) |*r| r.deinit();
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
     errdefer if (h.cache) |*store| store.deinit();
+    if (o.learn) |l| try disk.attach(h, io, a, l);
+    errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     std.log.info("Qwen3.8-27B: {d} streams of {d} tokens{s}", .{ slots, capacity, if (h.draft != null) ", DFlash2 drafts for one of them" else "" });
@@ -339,7 +345,10 @@ pub fn close(ptr: *anyopaque) void {
     const h = Host.of(ptr);
     h.host.stop();
     if (h.resident) |*r| r.deinit();
+    const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit();
+    if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go
+    if (h.disk_stage) |b| b.deinit();
     h.core.deinit();
     h.cfg.deinit(h.gpa);
     h.back.deinit();

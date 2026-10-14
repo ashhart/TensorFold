@@ -214,8 +214,11 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
     if (o.learn == null) return null;
+    if (o.learn_conversations and std.mem.eql(u8, t, "qwen3_5") and dense) return null; // the 27B writes conversation states
     const name: []const u8 = if (std.mem.eql(u8, t, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (!std.mem.eql(u8, t, "qwen3_5")) return null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
-    return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only: serve {s} without --learn, --learn-dir or --learn-gib", .{name});
+    if (o.learn_conversations) return try std.fmt.allocPrint(a, "--learn-conversations keeps conversation states on disk for Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash: serve {s} without it", .{name});
+    const or_talks: []const u8 = if (dense) " (Qwen3.8-27B keeps conversation states on disk with --learn-conversations)" else "";
+    return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only{s}: serve {s} without --learn, --learn-dir or --learn-gib", .{ or_talks, name });
 }
 
 /// Learned states under `root` by checkpoint, shards, prefill step, head, kernels, probe bits, OS build and chip.
@@ -296,11 +299,18 @@ fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
         return null;
     }
     var why: []const u8 = "";
-    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafter = if (o.drafts) o.drafter else null, .drafter_bits = o.drafter_bits, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap }, a, &why) catch |err| {
+    const drafter = if (o.drafts) o.drafter else null;
+    const learn: ?@import("qwen27_disk.zig").Learn = if (o.learn_conversations) if (o.learn) |root| .{ .root = root, .dir = o.dir, .drafter = drafter, .cap = gibBytes(o.learn_gib), .floor = gibBytes(o.learn_min_free_gib), .daily = gibBytes(o.learn_daily_gib) } else null else null;
+    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafter = drafter, .drafter_bits = o.drafter_bits, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap, .learn = learn }, a, &why) catch |err| {
         problem.* = if (err == error.CacheOverCap or err == error.DrafterLoad or err == error.TooManyStreams) why else try std.fmt.allocPrint(a, "the native Qwen3.8-27B engine cannot load {s} ({s})", .{ o.dir, @errorName(err) });
         return null;
     };
     return .{ .engine = h.engine(), .close = qwen27.close, .ctx = h };
+}
+
+/// A GiB count's bytes (the flags allow 0 up to below 2^34).
+fn gibBytes(g: f64) u64 {
+    return @intFromFloat(g * (1 << 30));
 }
 
 /// Flash Next uses the dump named by TF_FLASHNEXT_DUMP, or the checked-in kernels when that variable is unset.
@@ -419,6 +429,10 @@ test "--learn is refused for the 27B, the 2B and GLM-5.3 (EXLR8), and not for th
     const learn: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .learn = "/x" };
     const flags = " without --learn, --learn-dir or --learn-gib";
     try std.testing.expectStringEndsWith((try refusal(a, learn, true)) orelse "", ": serve Qwen3.8-27B" ++ flags);
+    var talks = learn;
+    talks.learn_conversations = true;
+    try std.testing.expect((try refusal(a, talks, true)) == null); // the 27B keeps conversation states on disk
+    try std.testing.expectStringEndsWith((try refusal(a, talks, false)) orelse "", ": serve Qwen3.5-2B without it");
     try std.testing.expectStringEndsWith((try refusal(a, learn, false)) orelse "", ": serve Qwen3.5-2B" ++ flags);
     try std.testing.expectStringEndsWith((try refusal(a, .{ .dir = "d", .model_type = "glm_moe_dsa", .learn = "/x" }, false)) orelse "", ": serve GLM-5.3 (EXLR8)" ++ flags);
     for ([_][]const u8{ "qwen3_5", "glm_moe_dsa" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .learn_gib = 8, .learn_min_free_gib = 2 }, true)) == null);
