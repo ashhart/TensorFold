@@ -143,3 +143,91 @@ test "a warm pass with no request after it runs once the engine has been quiet" 
     try std.testing.expect(std.Io.Clock.awake.now(std.testing.io).toNanoseconds() - t0 >= 20 * std.time.ns_per_ms);
     try std.testing.expectEqual(@as(usize, 3), chunks.n.load(.monotonic)); // every chunk ran
 }
+
+/// A paused turn on a warm host (bytes 64 + 4 a token, room for four 8-token states): the regenerate's cached tokens.
+fn pausedTurn(lookahead: u32) !struct { cached: ?u32, same: bool } {
+    const gpa = std.testing.allocator;
+    const pc = api.prompt_cache;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    const Snaps = struct {
+        fn bytes(_: *anyopaque, at: u32) u64 {
+            return 64 + 4 * @as(u64, at);
+        }
+        fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
+            const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
+            return f.save(@ptrCast(@alignCast(owner.?)), at);
+        }
+        fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
+            return error.BackendRestores;
+        }
+        fn drop(ptr: *anyopaque, saved: pc.Saved) void {
+            const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
+            f.drop(saved);
+        }
+    };
+    var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .lookahead = lookahead, .warm = if (lookahead == 0) .on else .waits, .min_prompt = 0, .min_gap = 4 }, 400);
+    defer store.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .warm_turns = true });
+    host.cache = &store;
+    try host.start();
+    defer host.stop();
+    const Run = struct {
+        mutex: std.Io.Mutex = .init,
+        cached: ?u32 = null,
+        tokens: [8]u32 = undefined,
+        n: usize = 0,
+        done: bool = false,
+        fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
+            const b: *@This() = @ptrCast(@alignCast(ctx));
+            b.mutex.lockUncancelable(std.testing.io);
+            defer b.mutex.unlock(std.testing.io);
+            switch (e.*) {
+                .prefilled => |c| b.cached = c,
+                .tokens => |t| for (t) |x| if (b.n < b.tokens.len) {
+                    b.tokens[b.n] = x;
+                    b.n += 1;
+                },
+                .finished => b.done = true,
+                else => {},
+            }
+        }
+        fn go(b: *@This(), engine: Engine, id: Id, r: *const Request) !void {
+            try engine.submit(id, r, .{ .ctx = b, .event = event });
+            while (true) {
+                b.mutex.lockUncancelable(std.testing.io);
+                const d = b.done;
+                b.mutex.unlock(std.testing.io);
+                if (d) return;
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+            }
+        }
+    };
+    const e = host.engine();
+    const x = [_]u32{ 100, 101, 102, 103, 104, 105, 106, 107, 108, 109 };
+    const z = [_]u32{ 200, 201, 202, 203, 204, 205, 206, 207, 208, 209 };
+    const y = [_]u32{ 300, 301, 302, 303, 304, 305, 306, 307, 308, 309 };
+    const t1 = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }; // history 8, then a two-token generation prompt
+    const warm = t1[0..9].* ++ [_]u32{ 50, 51, 52, 53, 54, 55 }; // the reply as sent and the next turn's opening
+    var runs: [6]Run = @splat(.{});
+    for ([_][]const u32{ &x, &z }, 0..) |p, i| try runs[i].go(e, i + 1, &.{ .prompt = p, .max_tokens = 2, .history_len = 8 });
+    try runs[2].go(e, 3, &.{ .prompt = &t1, .max_tokens = 2, .history_len = 8 });
+    try runs[3].go(e, 4, &.{ .prompt = &warm, .max_tokens = 0, .background = true, .history_len = warm.len, .born = t1.len });
+    try runs[4].go(e, 5, &.{ .prompt = &y, .max_tokens = 2, .history_len = 8 }); // its keep needs room too
+    try runs[5].go(e, 6, &.{ .prompt = &t1, .max_tokens = 2, .history_len = 8 }); // regenerated
+    try std.testing.expect(store.held <= store.budget);
+    return .{ .cached = runs[5].cached, .same = runs[5].n == 2 and std.mem.eql(u32, runs[5].tokens[0..2], runs[2].tokens[0..2]) };
+}
+
+test "a finished warm pass keeps its states with its request's length: the history it extends outlives its keep and later ones" {
+    for ([_]u32{ 0, 1 }) |lookahead| { // the 27B keeps the pass's end; Nemotron on CUDA a mark one token before it
+        const got = try pausedTurn(lookahead);
+        try std.testing.expectEqual(@as(?u32, 8), got.cached);
+        try std.testing.expect(got.same);
+    }
+}

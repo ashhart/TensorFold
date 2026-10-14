@@ -4,7 +4,7 @@ using namespace metal;
 #include "../nax.h"
 using namespace tfp;
 
-// Defines: TF_BITS (4 or 8), TF_GROUP (32 or 64), TF_OUT_T (bfloat, or float for partial sums another pass adds).
+// Defines: TF_BITS (2-6 or 8), TF_GROUP (32 or 64), TF_OUT_T (bfloat, or float for partial sums another pass adds).
 #ifndef TF_OUT_T
 #define TF_OUT_T bfloat
 #endif
@@ -66,7 +66,29 @@ inline void am_first(thread frag<float>& lo, thread frag<float>& hi, thread cons
 #endif
 }
 
-// A thread's 32 codes of one weight row in a step (16-byte loads).
+// A thread's 32 codes of one weight row in a step (16-byte loads; 8 bytes at 2 bits; words at 3, 5 and 6 bits).
+#if TF_BITS == 2
+struct Codes {
+  uint2 v;
+};
+
+inline Codes am_load(const device uchar* w) {
+  return Codes{*(const device uint2*)w};
+}
+#elif TF_BITS % 4 != 0
+struct Codes {
+  uint v[TF_BITS];
+};
+
+inline Codes am_load(const device uchar* w) {
+  Codes c;
+  TF_UNROLL
+  for (short i = 0; i < TF_BITS; i++) {
+    c.v[i] = ((const device uint*)w)[i];
+  }
+  return c;
+}
+#else
 struct Codes {
   uint4 v[TF_BITS / 4];
 };
@@ -79,11 +101,38 @@ inline Codes am_load(const device uchar* w) {
   }
   return c;
 }
+#endif
 
 // The codes plus OFF, exactly, as bf16 into the tile row (16-byte stores).
 inline void am_codes(thread const Codes& c, threadgroup bfloat* out) {
   threadgroup uint4* o = (threadgroup uint4*)out;
-#if TF_BITS == 4
+#if TF_BITS == 2
+  TF_UNROLL
+  for (short i = 0; i < 2; i++) { // a word's 16 codes, as themselves (no offset): byte j holds codes 4j..4j+3
+    const uint w = c.v[i];
+    const float4 f0 = float4(as_type<uchar4>(w & 0x03030303u)), f1 = float4(as_type<uchar4>((w >> 2) & 0x03030303u));
+    const float4 f2 = float4(as_type<uchar4>((w >> 4) & 0x03030303u)), f3 = float4(as_type<uchar4>((w >> 6) & 0x03030303u));
+    TF_UNROLL
+    for (short j = 0; j < 4; j++) {
+      o[2 * i + j / 2][2 * (j % 2)] = as_type<uint>(ushort2(as_type<ushort>(bfloat(f0[j])), as_type<ushort>(bfloat(f1[j]))));
+      o[2 * i + j / 2][2 * (j % 2) + 1] = as_type<uint>(ushort2(as_type<ushort>(bfloat(f2[j])), as_type<ushort>(bfloat(f3[j]))));
+    }
+  }
+#elif TF_BITS % 4 != 0
+  TF_UNROLL
+  for (short i = 0; i < 8; i++) { // codes 4i .. 4i + 3 of the little-endian bit stream, as themselves
+    float f[4];
+    TF_UNROLL
+    for (short j = 0; j < 4; j++) {
+      const short at = TF_BITS * (4 * i + j), word = at / 32, shift = at % 32;
+      uint v = c.v[word] >> shift;
+      if (shift + TF_BITS > 32) v |= c.v[word + 1] << (32 - shift);
+      f[j] = float(v & ((1u << TF_BITS) - 1u));
+    }
+    o[i / 2][2 * (i % 2)] = as_type<uint>(ushort2(as_type<ushort>(bfloat(f[0])), as_type<ushort>(bfloat(f[1]))));
+    o[i / 2][2 * (i % 2) + 1] = as_type<uint>(ushort2(as_type<ushort>(bfloat(f[2])), as_type<ushort>(bfloat(f[3]))));
+  }
+#elif TF_BITS == 4
   TF_UNROLL
   for (short i = 0; i < 4; i++) {
     const uint w = c.v[0][i];

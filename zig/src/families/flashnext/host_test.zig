@@ -113,14 +113,16 @@ test "FlashNext derived dimensions retain independent HC attention and recurrenc
 test "module quantization preserves false true and dictionary-default override semantics" {
     var c = try family.config.parse(std.testing.allocator, toy);
     defer c.deinit();
-    try std.testing.expect((try c.quantization("language_model.model.layers.0.raw.weight")) == null);
-    const override = (try c.quantization("model.layers.0.override")).?;
+    const widths = @import("widths.zig");
+    try std.testing.expect((try widths.quantization(&c, "language_model.model.layers.0.raw.weight")) == null);
+    const override = (try widths.quantization(&c, "model.layers.0.override")).?;
     try std.testing.expectEqual(@as(u8, 4), override.bits);
     try std.testing.expectEqual(@as(usize, 64), override.group);
-    try std.testing.expectEqual(@as(u8, 6), (try c.quantization("layers.0.inherit")).?.bits);
-    try std.testing.expectEqual(@as(usize, 32), (try c.quantization("unknown.projection")).?.group);
-    try std.testing.expectError(error.UnsupportedFlashAffineKernel, override.checkFlashKernel());
-    try c.global_affine.checkFlashKernel();
+    try std.testing.expectEqual(@as(u8, 6), (try widths.quantization(&c, "layers.0.inherit")).?.bits);
+    try std.testing.expectEqual(@as(usize, 32), (try widths.quantization(&c, "unknown.projection")).?.group);
+    try std.testing.expect(widths.launched(.{ .bits = override.bits, .group = @intCast(override.group) }));
+    try std.testing.expect(widths.launched(.{ .bits = c.global_affine.bits, .group = @intCast(c.global_affine.group) }));
+    try std.testing.expect(!widths.launched(.{ .bits = 7, .group = 64 }) and !widths.launched(.{ .bits = 4, .group = 16 }));
 }
 
 test "malformed FlashNext configuration fields are refused" {

@@ -166,18 +166,15 @@ __device__ __forceinline__ uint32_t mul2(uint32_t a, uint32_t b) {
   return r;
 }
 
-// Prompt rows: pairs and weight blocks staged 64 inputs at a time, B = code x block scale in bf16, one fp32 sum over K.
-template <int M, int EPI, int RT, int WM, int WN>
-__device__ __forceinline__ void prompt_body(const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
-                                            const uint4* __restrict__ W, const float* __restrict__ scale, int KG, int NB,
-                                            const int* __restrict__ items, const int* __restrict__ counts,
-                                            const int* __restrict__ members, void* __restrict__ out, int N, float limit) {
+// Prompt rows, 64 inputs a stage, one fp32 sum over K; NT (row tiles a warp) is constant so no branch splits mma.
+template <int M, int EPI, int RT, int WM, int WN, int NT>
+__device__ __forceinline__ void prompt_tiles(const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
+                                             const uint4* __restrict__ W, const float* __restrict__ scale, int KG,
+                                             int NB, const int* __restrict__ members, void* __restrict__ out, int N,
+                                             float limit, int cbt, int e, int first, int cnt) {
   using P = Prompt4<M, RT, WM, WN>;
   constexpr int STAGES = P::STAGES;
   extern __shared__ uint4 sm[];
-  const int nbt = (NB + WN - 1) / WN, it = blockIdx.x / nbt, cbt = blockIdx.x - it * nbt;
-  if (it >= __ldg(counts)) return;
-  const int e = __ldg(items + 3 * it), first = __ldg(items + 3 * it + 1), cnt = __ldg(items + 3 * it + 2);
   const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, wm = warp / WN, wn = warp - wm * WN;
   const int t = lane & 3, gq = lane >> 2, cb = cbt * WN + wn, cbs = min(WN, NB - cbt * WN);
   const __nv_bfloat16* xsrc[P::XPT];
@@ -205,16 +202,16 @@ __device__ __forceinline__ void prompt_body(const __nv_bfloat16* __restrict__ X,
       if (o < ng * P::WB) cp16(ws + q, wsrc + ((size_t)j * KG + g0) * P::WB + o);
     }
   };
+  constexpr int TA = NT > 0 ? NT : 1;  // array extent
   const int base = 16 * RT * wm;
-  const int nt = max(0, min(RT, (cnt - base + 15) >> 4));
-  const bool active = nt > 0 && cb < NB;
+  const bool active = NT > 0 && cb < NB;
   const uint32_t b = gq & 1;  // byte 2 (j & 1) + (gq & 1) of a scale word holds column j * 8 + gq's scale
   const uint32_t pick[2] = {b | 0x4040u | (b << 8), (b + 2) | 0x4040u | ((b + 2) << 8)};
-  float acc[M][RT][NTW][4];
+  float acc[M][TA][NTW][4];
 #pragma unroll
   for (int m = 0; m < M; ++m)
 #pragma unroll
-    for (int r = 0; r < RT; ++r)
+    for (int r = 0; r < NT; ++r)
 #pragma unroll
       for (int j = 0; j < NTW; ++j) acc[m][r][j][0] = acc[m][r][j][1] = acc[m][r][j][2] = acc[m][r][j][3] = 0.f;
   const int steps = (KG + P::SG - 1) / P::SG;
@@ -246,11 +243,10 @@ __device__ __forceinline__ void prompt_body(const __nv_bfloat16* __restrict__ X,
       }
 #pragma unroll
       for (int h = 0; h < 2; ++h) {
-        uint2 xa[RT], xb[RT];
+        uint2 xa[TA], xb[TA];
         const int u = gi * 8 + h * 4 + t;  // the 8-byte unit holding lane t's inputs 16h + 4t .. + 3 of group gi
 #pragma unroll
-        for (int r = 0; r < RT; ++r) {
-          if (r >= nt) break;
+        for (int r = 0; r < NT; ++r) {
           const int r0 = base + 16 * r + gq;
           xa[r] = reinterpret_cast<const uint2*>(xs + P::chunk(r0, u >> 1))[u & 1];
           xb[r] = reinterpret_cast<const uint2*>(xs + P::chunk(r0 + 8, u >> 1))[u & 1];
@@ -263,33 +259,54 @@ __device__ __forceinline__ void prompt_body(const __nv_bfloat16* __restrict__ X,
             const uint32_t sv = e4m3x2(__byte_perm(j < 2 ? sc[m][h].x : sc[m][h].y, 0u, pick[j & 1]));
             const uint32_t b0 = mul2(fp4pair(word, 8 * h), sv), b1 = mul2(fp4pair(word, 8 * h + 4), sv);
 #pragma unroll
-            for (int r = 0; r < RT; ++r) {
-              if (r >= nt) break;
-              mma(acc[m][r][j], xa[r].x, xb[r].x, xa[r].y, xb[r].y, b0, b1);
-            }
+            for (int r = 0; r < NT; ++r) mma(acc[m][r][j], xa[r].x, xb[r].x, xa[r].y, xb[r].y, b0, b1);
           }
       }
     }
   }
   if (!active) return;
+  if constexpr (NT > 0) {
 #pragma unroll
-  for (int m = 0; m < M; ++m) {
-    const float g = __ldg(scale + e * M + m);
+    for (int m = 0; m < M; ++m) {
+      const float g = __ldg(scale + e * M + m);
 #pragma unroll
-    for (int r = 0; r < RT; ++r)
+      for (int r = 0; r < NT; ++r)
 #pragma unroll
-      for (int j = 0; j < NTW; ++j)
+        for (int j = 0; j < NTW; ++j)
 #pragma unroll
-        for (int q = 0; q < 4; ++q) acc[m][r][j][q] *= g;
+          for (int q = 0; q < 4; ++q) acc[m][r][j][q] *= g;
+    }
+#pragma unroll
+    for (int r = 0; r < NT; ++r) {
+      const int m0 = base + 16 * r + gq, m1 = m0 + 8;
+      const bool v0 = m0 < cnt, v1 = m1 < cnt;
+      const int p0 = v0 ? __ldg(members + first + m0) : 0, p1 = v1 ? __ldg(members + first + m1) : 0;
+      epilogue<EPI, M, TA>(acc, r, out, N, cb * COLS + 2 * t, p0, p1, v0, v1, limit);
+    }
   }
-#pragma unroll
-  for (int r = 0; r < RT; ++r) {
-    if (r >= nt) break;
-    const int m0 = base + 16 * r + gq, m1 = m0 + 8;
-    const bool v0 = m0 < cnt, v1 = m1 < cnt;
-    const int p0 = v0 ? __ldg(members + first + m0) : 0, p1 = v1 ? __ldg(members + first + m1) : 0;
-    epilogue<EPI, M, RT>(acc, r, out, N, cb * COLS + 2 * t, p0, p1, v0, v1, limit);
+}
+
+template <int M, int EPI, int RT, int WM, int WN>
+__device__ __forceinline__ void prompt_body(const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
+                                            const uint4* __restrict__ W, const float* __restrict__ scale, int KG,
+                                            int NB, const int* __restrict__ items, const int* __restrict__ counts,
+                                            const int* __restrict__ members, void* __restrict__ out, int N,
+                                            float limit) {
+  static_assert(RT == 4, "the dispatch below spells out 0 .. 4 row tiles");
+  const int nbt = (NB + WN - 1) / WN, it = blockIdx.x / nbt, cbt = blockIdx.x - it * nbt;
+  if (it >= __ldg(counts)) return;
+  const int e = __ldg(items + 3 * it), first = __ldg(items + 3 * it + 1), cnt = __ldg(items + 3 * it + 2);
+  const int nt = max(0, min(RT, (cnt - 16 * RT * ((threadIdx.x >> 5) / WN) + 15) >> 4));
+#define TF_TILES(NT) \
+  prompt_tiles<M, EPI, RT, WM, WN, NT>(X, x_stride, slots, W, scale, KG, NB, members, out, N, limit, cbt, e, first, cnt)
+  switch (nt) {
+    case 4: TF_TILES(4); break;
+    case 3: TF_TILES(3); break;
+    case 2: TF_TILES(2); break;
+    case 1: TF_TILES(1); break;
+    default: TF_TILES(0);
   }
+#undef TF_TILES
 }
 
 // The instances: SwiGLU gate-up, fp32 and bf16 down, and relu^2 up for experts without a gate (Nemotron).

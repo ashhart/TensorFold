@@ -37,8 +37,9 @@ valid file returns. Request logs and `tensorfold:requests_total` use labels, nev
 Unnamed keys receive `cli-N`, `env-N` or `file-N` labels. Labels contain at most 64 letters, digits, dots,
 underscores or hyphens; choose non-secret labels.
 
-`tensorfold service install MODEL --api-key-file PATH` forwards the file to its server.
-For the control room, `tensorfold tui --url URL --token-env VARIABLE` sends that variable's value as a bearer key.
+In the Python 0.6.6 engine's [control room](control.md), `tensorfold service install MODEL --api-key-file PATH`
+forwards the file to its server, and `tensorfold tui --url URL --token-env VARIABLE` sends that variable's value as a
+bearer key. The native binary has neither command.
 Prefer a restricted file over command-line keys, which can appear in the operating system's process list.
 
 | Route | Behavior |
@@ -66,9 +67,10 @@ chat fields that shape the prompt (`tools`, `reasoning_effort`, `chat_template_k
 (default true). It returns `count`, `max_model_len` (the context window; null when none is set on MLX) and
 `tokens`, and `token_strs` with `return_token_strs: true`. The IDs are the ones the chat route runs for the same
 request, images expanded. `/detokenize` takes `tokens` and returns `prompt`.
-With `--vision`, supported Qwen3.5/3.8 dense checkpoints accept `image_url` content parts alongside text in user
-messages and in tool results (`role: "tool"`), such as an agent's screenshots.
+In the Python 0.6.6 engine, `--vision` lets supported Qwen3.5/3.8 dense checkpoints accept `image_url` content parts
+alongside text in user messages and in tool results (`role: "tool"`), such as an agent's screenshots.
 See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
+The native binary refuses `--vision` and answers image parts with HTTP 400.
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.
 
 ## Decisions
@@ -153,12 +155,15 @@ On MLX, `--parallel auto` is the default: requests share rounds within the confi
 budget. Every admitted prompt prefills a chunk at a time beside the others. Each chunk goes to a foreground prompt
 before a background one, then to the prompt with the fewest tokens left, and a prompt passed over for 8 chunks takes
 the next one: a short request starts at the next chunk, and a long prompt still finishes. Running replies take rounds
-between chunks for `--decode-share` of each chunk's time (default 0.25). `--decode-share 0` prefills each prompt whole
+between chunks for `--decode-share` of each chunk's time (default 0.25). That flag is the Python 0.6.6 engine's, and the
+native binary refuses it. In that engine, `--decode-share 0` prefills each prompt whole
 first, in arrival order, as 0.3.6.2 did. Background work waits behind foreground requests. An active background
 request yields when a foreground request needs its lane or memory, then restarts with already-delivered tokens
 suppressed.
 Session-title requests are also treated as background work.
 
+The native CUDA build serves Nemotron, and its concurrent requests share each round. The rest of this paragraph
+describes the Python 0.6.6 engine's CUDA families.
 On CUDA, `--parallel auto` serves one request at a time. An explicit `--parallel N` above one shares rounds
 for Qwen3.8-27B on one or two ranks and for Flash Next and Qwen3.6 on one rank; GLM and Nemotron stay serialized.
 When a client disconnects, its CUDA request stops at the next round, and a request still waiting behind
@@ -214,6 +219,8 @@ decodes on from the reply. The model writes the arguments; a malformed call retu
 
 ## Structured output
 
+This paragraph describes the Python 0.6.6 engine, where @philip-pentatonic wrote structured output in
+[#80](https://github.com/ashhart/TensorFold/pull/80); the next paragraph covers the native server.
 Every model on both backends enforces `response_format` (`{"type": "json_schema", "json_schema": {"schema": ...}}`
 or `{"type": "json_object"}`) and vLLM's `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar` (EBNF) and
 `structured_outputs` (`json`, `json_object`, `regex`, `choice` or `grammar`): on the Mac, and on CUDA with one or two
@@ -267,8 +274,9 @@ token budget. With thinking off, GLM-5.3's prompt is its thinking-off template's
 empty think block. GLM-5.3 keeps every earlier assistant turn's reasoning in the prompt, as zai-org's template does by
 default (`clear_thinking` false), also on checkpoints whose template still clears it before the last user message, so
 a new user message leaves the earlier turns' tokens, and their kept prompt states, as they were. A request's
-`chat_template_kwargs.clear_thinking: true` drops it, as the model card advises for plain chat (on CUDA; on a Mac,
-`TF_GLM_CLEAR_THINKING=1` sets it for the server).
+`chat_template_kwargs.clear_thinking: true` drops it, as the model card advises for plain chat. In the Python 0.6.6
+engine that works on CUDA, and on a Mac `TF_GLM_CLEAR_THINKING=1` sets it for the server, from @MiaAI-Lab's
+[#236](https://github.com/ashhart/TensorFold/pull/236); the native binary does not read that variable.
 
 A tool call written before the think block closes is the reply's tool call when the reply ends inside the block,
 on both backends; the reasoning stops where the call starts, and streamed reasoning never carries the call's markup.
@@ -308,7 +316,8 @@ When the request omits the reply limit, the server still caps its configured def
 CUDA returns HTTP 400 before generation when the chat template rejects the request or
 `chat_template_kwargs` is neither an object nor null. A generation error returns HTTP 500 for a
 non-streamed request; after a stream opens, both backends send an error event of type `server_error`,
-then `[DONE]`. On two CUDA ranks such an error can leave the ranks out of step, so restart both: the 27B's
+then `[DONE]`. On two CUDA ranks, which only the Python 0.6.6 engine runs, such an error can leave the ranks out
+of step, so restart both: the 27B's
 `--parallel` decoder refuses every later request until then, and the other two-rank engines don't detect it.
 MLX also checks projected memory before prefill. CUDA checks its allocated cache capacity and model window.
 A startup capacity estimate is not a measured release capacity.
@@ -404,9 +413,10 @@ return 404 when the flag is off, and the page polls once per second without addi
 same handler and engine path. A response has that chat completion's prompt and tokens (the `tensorfold` block's
 `token_sha` matches), drafts, and equals its `"draft": false` run and its solo run.
 
-- `input` is a string or a list of items: messages (`input_text`, and `input_image` with `--vision`),
-  `function_call`, `function_call_output` (its `output` text, or `input_text` and `input_image` parts with
-  `--vision`), and `reasoning` items with their `content` text, which the template gets
+- `input` is a string or a list of items: messages (`input_text`, and `input_image` on a Python 0.6.6 server started
+  with `--vision`; the native binary answers images with HTTP 400), `function_call`, `function_call_output` (its
+  `output` text, or `input_text` and `input_image` parts, the images again only with `--vision`), and `reasoning`
+  items with their `content` text, which the template gets
   back as the next assistant message's `reasoning_content`. `instructions` becomes the system message and is not
   carried to a later turn.
 - `tools` takes function tools; `tool_choice` takes `none`, `auto`, `required`, a function or `allowed_tools`;
@@ -451,11 +461,15 @@ strings, is refused.
 The Messages routes reuse the same chat handler and engine on MLX and CUDA. They accept `system`, text/image
 blocks (including mid-conversation system text), `tool_use`/`tool_result`, custom tools and `tool_choice`, sampling, `stop_sequences`, `thinking`
 (disabled, enabled with `budget_tokens`, or adaptive), and `output_config` effort/JSON schema. Image support
-requires a vision-capable model served with `--vision`. Thinking is off unless enabled or adaptive. It round-trips as plaintext with an empty signature;
+requires a vision-capable model served with `--vision`, which only the Python 0.6.6 engine has; the native binary
+answers image blocks with HTTP 400. Thinking is off unless enabled or adaptive. It round-trips as plaintext with an
+empty signature;
 `display` does not suppress it. Claude Code's `context_management` keep-all thinking directive is accepted. Mid-conversation system text stays
 in place with its system role; the model's chat template must support later system messages. Turn-scoped
 system messages, per-message output configuration and inline tool changes are unsupported.
 JSON schema output, including Claude Code title requests, requires `pip install 'tensorfold[grammar]'`.
+That install is the Python 0.6.6 engine's; the native server uses `libtfgrammar` from the release archive instead
+([structured output](#structured-output)).
 
 Usage separates uncached `input_tokens` from `cache_read_input_tokens` and reports `output_tokens_details.thinking_tokens`
 when the backend counts them. Prefix caching remains automatic,
