@@ -114,7 +114,7 @@ def specs() -> list[Spec]:
                 Arg("EPS", f32, one)]
     plain("hc_expand_10", "tf_glm5_fused_hc_expand", H._HC_EXPAND, F._HEADER, hc_ex_in,
           [Arg("XNEW", bf, big, 3), Arg("INV", f32, big), Arg("Z", f32, big, 2)],
-          [("D", HIDDEN), ("EXPAND", 1), ("SPLIT", 0), ("ZOUT", 0), ("SQ_FMA", F.SQ_FMA)])
+          [("D", HIDDEN), ("EXPAND", 1), ("SPLIT", 0), ("ZOUT", 0), ("SQ_FMA", F.SQ_FMA)], threads=1024)
 
     for key, heads in (("kda_rows", KDA_HEADS), ("kda_rows_tp", KDA_HEADS // 2)):  # all heads, or one Mac's in TP2
         plain(key, "tf_glm5_kda_rows", KD._SOURCE, KD._HEADER,

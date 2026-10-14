@@ -17,6 +17,8 @@ pub const MetalLaunch = struct {
     name: []const u8,
     threads: u32,
     tg_memory: u32,
+    /// Threadgroup bytes the encoder adds to the source's own (setThreadgroupMemory).
+    dynamic: u32 = 0,
     reserved: u32 = 0,
     m1: u32 = 0,
     m2: u32 = 0,
@@ -40,6 +42,7 @@ pub const Sm = struct {
 };
 
 pub const sms = [_]Sm{
+    .{ .sm = 80, .threads_sm = 2048, .smem_optin = 163 * 1024, .clusters = false },
     .{ .sm = 86, .threads_sm = 1536, .smem_optin = 99 * 1024, .clusters = false },
     .{ .sm = 89, .threads_sm = 1536, .smem_optin = 99 * 1024, .clusters = false },
     .{ .sm = 120, .threads_sm = 1536, .smem_optin = 99 * 1024, .clusters = true },
@@ -65,7 +68,8 @@ pub const Usage = struct { regs: u32, static: u32, bound: u32 = 0, local: u32 = 
 pub fn metal(l: MetalLaunch, f: Apple, out: *std.ArrayList(u8), a: std.mem.Allocator) !usize {
     var n: usize = 0;
     if (l.threads > f.threads) n += try note(out, a, "{s} on {s}: {d} threads a group, the family's most is {d}", .{ l.name, f.name, l.threads, f.threads });
-    if (l.tg_memory > f.tg_memory) n += try note(out, a, "{s} on {s}: {d} threadgroup bytes, the family's most is {d}", .{ l.name, f.name, l.tg_memory, f.tg_memory });
+    const tg = l.tg_memory + l.dynamic;
+    if (tg > f.tg_memory) n += try note(out, a, "{s} on {s}: {d} threadgroup bytes, the family's most is {d}", .{ l.name, f.name, tg, f.tg_memory });
     if (f.by_registers and l.reserved < l.threads and !l.adapts) {
         const lim = if (f.gen == 13) l.m1 else l.m2;
         if (!l.offline and l.threads > 256) n += try note(out, a, "{s} on {s}: {d} threads past 256 and no M1/M2 compile to show they fit (reserve them)", .{ l.name, f.name, l.threads });
@@ -110,6 +114,8 @@ test "a launch inside every family passes; each planted excess is named" {
     for (apple) |f| try std.testing.expectEqual(@as(usize, 0), try metal(ok, f, &out, a));
     const big = MetalLaunch{ .name = "big", .threads = 256, .tg_memory = 36 * 1024, .m1 = 1024, .m2 = 1024 };
     for (apple) |f| try std.testing.expectEqual(@as(usize, 1), try metal(big, f, &out, a));
+    const set = MetalLaunch{ .name = "set", .threads = 64, .tg_memory = 24 * 1024, .dynamic = 10 * 1024, .m1 = 1024, .m2 = 1024 };
+    for (apple) |f| try std.testing.expectEqual(@as(usize, 1), try metal(set, f, &out, a));
     const heavy = MetalLaunch{ .name = "heavy", .threads = 1024, .tg_memory = 0, .m1 = 448, .m2 = 640 };
     try std.testing.expectEqual(@as(usize, 1), try metal(heavy, apple[0], &out, a));
     try std.testing.expectEqual(@as(usize, 0), try metal(heavy, apple[2], &out, a));
@@ -125,6 +131,12 @@ test "a launch inside every family passes; each planted excess is named" {
     try std.testing.expectEqual(@as(usize, 1), try metal(wide_op, apple[0], &out, a));
 }
 
+/// The table's row for `sm` (a target the records cover).
+pub fn target(sm: u32) ?Sm {
+    for (sms) |t| if (t.sm == sm) return t;
+    return null;
+}
+
 test "CUDA: registers by warp, launch bounds, shared bytes and clusters per SM" {
     const a = std.testing.allocator;
     var out: std.ArrayList(u8) = .empty;
@@ -132,15 +144,24 @@ test "CUDA: registers by warp, launch bounds, shared bytes and clusters per SM" 
     try std.testing.expectEqual(@as(u32, 65536), blockRegs(64, 1024));
     try std.testing.expectEqual(@as(u32, 512 * 4), blockRegs(13, 128)); // 13 registers round up to 16 a thread
     const l = CudaLaunch{ .name = "k", .symbol = "k", .image = "k", .threads = 256, .dynamic = 40 * 1024 };
-    try std.testing.expectEqual(@as(usize, 0), try cuda(l, .{ .regs = 64, .static = 0, .bound = 256 }, sms[0], &out, a));
-    try std.testing.expectEqual(@as(usize, 1), try cuda(l, .{ .regs = 64, .static = 16 * 1024, .bound = 256 }, sms[0], &out, a));
+    const sm80 = target(80).?;
+    const sm86 = target(86).?;
+    try std.testing.expectEqual(@as(usize, 0), try cuda(l, .{ .regs = 64, .static = 0, .bound = 256 }, sm86, &out, a));
+    try std.testing.expectEqual(@as(usize, 1), try cuda(l, .{ .regs = 64, .static = 16 * 1024, .bound = 256 }, sm86, &out, a));
+    var big = l;
+    big.dynamic = 120 * 1024;
+    big.opt_in = true;
+    try std.testing.expectEqual(@as(usize, 0), try cuda(big, .{ .regs = 64, .static = 0, .bound = 256 }, sm80, &out, a));
+    try std.testing.expectEqual(@as(usize, 1), try cuda(big, .{ .regs = 64, .static = 0, .bound = 256 }, sm86, &out, a));
     var wide = l;
     wide.threads = 1024;
-    try std.testing.expectEqual(@as(usize, 2), try cuda(wide, .{ .regs = 72, .static = 0, .bound = 256 }, sms[3], &out, a));
+    try std.testing.expectEqual(@as(usize, 2), try cuda(wide, .{ .regs = 72, .static = 0, .bound = 256 }, target(121).?, &out, a));
     var cl = l;
     cl.cluster = 4;
-    try std.testing.expectEqual(@as(usize, 1), try cuda(cl, .{ .regs = 32, .static = 0 }, sms[1], &out, a));
-    try std.testing.expectEqual(@as(usize, 0), try cuda(cl, .{ .regs = 32, .static = 0 }, sms[2], &out, a));
+    try std.testing.expectEqual(@as(usize, 1), try cuda(cl, .{ .regs = 32, .static = 0 }, target(89).?, &out, a));
+    try std.testing.expectEqual(@as(usize, 1), try cuda(cl, .{ .regs = 32, .static = 0 }, sm80, &out, a));
+    try std.testing.expectEqual(@as(usize, 0), try cuda(cl, .{ .regs = 32, .static = 0 }, target(120).?, &out, a));
     cl.min_sm = 90;
-    try std.testing.expectEqual(@as(usize, 0), try cuda(cl, .{ .regs = 32, .static = 0 }, sms[1], &out, a));
+    try std.testing.expectEqual(@as(usize, 0), try cuda(cl, .{ .regs = 32, .static = 0 }, sm80, &out, a));
+    try std.testing.expectEqual(@as(?Sm, null), target(75));
 }

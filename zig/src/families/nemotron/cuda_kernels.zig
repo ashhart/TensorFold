@@ -136,7 +136,8 @@ pub const Kernels = struct {
     pub fn loadModelopt(k: *Kernels, ctx: *const cuda.Context) !void {
         if (k.modelopt != null) return;
         const major: u32 = @intCast(try ctx.attribute(.compute_capability_major));
-        if (major < 9) return error.ModeloptNeedsSm90; // the lane matmul sums K slices in a cluster: no reduce scratch
+        const minor: u32 = @intCast(try ctx.attribute(.compute_capability_minor));
+        if (modeloptRefusal(10 * major + minor) != null) return error.ModeloptNeedsSm90;
         const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
         var lane = try cuda.qmmf.Lane.load(k.d, major);
         errdefer lane.unload();
@@ -147,6 +148,16 @@ pub const Kernels = struct {
         k.modelopt = .{ .lane = lane, .gemm = gemm, .experts = experts, .pack = try cuda.modelopt.Packer.load(k.d) };
     }
 };
+
+/// FP8 and NVFP4 paths stop below this full capability: decode's split-K sums meet in a thread-block cluster.
+pub const modelopt_min: u32 = 90;
+
+/// Why a ModelOpt checkpoint cannot load at `capability` (10 * major + minor), or null when it may.
+pub fn modeloptRefusal(capability: u32) ?[]const u8 {
+    if (capability >= modelopt_min) return null;
+    return "FP8 and NVFP4 weights meet their split-K sums in a thread-block cluster: " ++
+        "a ModelOpt checkpoint needs compute capability 9.0 or newer";
+}
 
 /// qmm.split_k (cuda/qlinear.zig).
 pub const splitK = cuda.qlinear.splitK;
@@ -377,4 +388,9 @@ test "items follow the Python shapes" {
     try std.testing.expectEqual(@as(usize, 135), maxItems(328, 130, 64));
     try std.testing.expectEqual(@as(usize, 1154), maxItems(16384, 130, 16));
     try std.testing.expectEqual(@as(usize, 8), maxItems(8, 130, 16));
+}
+
+test "ModelOpt's floor refuses every card below sm_90, the Ampere ones included, and admits sm_90 up" {
+    for ([_]u32{ 75, 80, 86, 89 }) |c| try std.testing.expect(modeloptRefusal(c) != null);
+    for ([_]u32{ 90, 100, 120, 121 }) |c| try std.testing.expect(modeloptRefusal(c) == null);
 }

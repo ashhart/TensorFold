@@ -1,4 +1,4 @@
-//! GLM's 1,024-thread router and KDA launches: capacity, host values, full coverage and recurrent seams.
+//! GLM's 1,024-thread router, KDA and hc_expand_10 launches: capacity, host values, full coverage and recurrent seams.
 const std = @import("std");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
@@ -78,6 +78,72 @@ test "GLM router: every row count supports 1024 threads and equals FP64" {
             try std.testing.expectEqual(expected, @as(f64, actual));
         }
         for (y.slice(u32, R * NE + 32)[rows * NE ..]) |bits| try std.testing.expectEqual(@as(u32, 0x7fc00000), bits);
+    }
+}
+
+fn hcValue(i: usize) f32 {
+    return value(bf(dyadic(i)));
+}
+
+test "GLM hc_expand_10: 1024 threads, every stream of every row equals FP64, rows past the window untouched" {
+    const d = mtl.Device.init() catch return error.SkipZigTest;
+    defer d.deinit();
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const q = try d.queue();
+    defer q.deinit();
+    const gen = comptime kernel("hc_expand_10");
+    const lib = try mtl.Library.fromSource(d, gen.source, mtl.CompileOptions.mlx());
+    defer lib.deinit();
+    const p = try mtl.Pipeline.init(d, lib, gen.functions[0], false);
+    defer p.deinit();
+    try std.testing.expect(p.maxThreads() >= 1024);
+    const D = 4096;
+    const S = 4;
+    const R = 16;
+    const opts = mtl.ResourceOptions.shared;
+    const xold = try d.buffer(R * S * D * 2, opts);
+    defer xold.deinit();
+    const branch = try d.buffer(R * D * 2, opts);
+    defer branch.deinit();
+    const post = try d.buffer(R * S * 4, opts);
+    defer post.deinit();
+    const comb = try d.buffer(R * S * S * 4, opts);
+    defer comb.deinit();
+    const xnew = try d.buffer((R + 1) * S * D * 2, opts);
+    defer xnew.deinit();
+    const side = try d.buffer((R + R * S * D) * 4, opts);
+    defer side.deinit();
+    for (xold.slice(u16, R * S * D), 0..) |*v, i| v.* = bf(dyadic(i / D * 7 + i % D * 5));
+    for (branch.slice(u16, R * D), 0..) |*v, i| v.* = bf(dyadic(i / D * 3 + i % D * 11));
+    for (post.slice(f32, R * S), 0..) |*v, i| v.* = dyadic(i * 5 + 2);
+    for (comb.slice(f32, R * S * S), 0..) |*v, i| v.* = dyadic(i * 3 + 1);
+    for ([_]usize{ 1, 5, 16 }) |rows| {
+        @memset(xnew.slice(u16, (R + 1) * S * D), 0x7fc0);
+        @memset(side.slice(u32, R + R * S * D), 0x7fc00000);
+        const cb = q.commandBuffer();
+        const e = cb.compute(.serial);
+        e.setPipeline(p);
+        for ([_]mtl.Buffer{ xold, branch, post, comb }, 0..) |b, i| e.setBuffer(b, 0, i);
+        e.setValue(@as(f32, 1e-6), 4);
+        e.setBuffer(xnew, 0, 5);
+        e.setBuffer(side, 0, 6);
+        e.setBuffer(side, R * 4, 7);
+        e.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));
+        e.end();
+        cb.commit();
+        cb.wait();
+        try std.testing.expect(cb.failure() == null);
+        const got = xnew.slice(u16, (R + 1) * S * D);
+        // dyadic inputs keep every fp32 product and sum exact, so the kernel's one rounding is the bf16 store
+        for (0..rows) |r| for (0..S) |s| for (0..D) |dd| {
+            const c = comb.slice(f32, R * S * S)[r * S * S ..];
+            var want: f64 = @as(f64, post.slice(f32, R * S)[r * S + s]) * hcValue(r * 3 + dd * 11);
+            for (0..S) |t2| want += @as(f64, c[t2 * S + s]) * hcValue((r * S + t2) * 7 + dd * 5);
+            try std.testing.expectEqual(bf(@floatCast(want)), got[(r * S + s) * D + dd]);
+        };
+        for (got[rows * S * D ..]) |v| try std.testing.expectEqual(@as(u16, 0x7fc0), v);
+        for (side.slice(u32, R + R * S * D)) |v| try std.testing.expectEqual(@as(u32, 0x7fc00000), v);
     }
 }
 

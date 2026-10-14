@@ -25,8 +25,9 @@ The test of a kernel fills a `contract.spec.Spec` and hands the harness a few ho
 - Whether it may write in place. If it replaces another kernel, the kernel whose bits it must equal.
 - Its NaN rule: `propagate` (as float64 arithmetic on its formula does), or a stated rule the test checks itself
   (top-k, argmax, sampling and routing kernels state theirs).
-- For gate 5, its launch in `zig/src/core/contract/registry.zig`: threads a group and threadgroup bytes on Metal, or
-  symbol, image, threads a block, dynamic shared bytes and cluster width on CUDA, with the limits its compiles recorded.
+- For gate 5, its launch in `zig/src/core/contract/registry.zig`: threads a group and threadgroup bytes (the source's,
+  and any its encoder sets) on Metal, or symbol, image, threads a block, dynamic shared bytes and cluster width on CUDA,
+  with the limits its compiles recorded.
 
 ## The gates
 
@@ -52,16 +53,16 @@ The test of a kernel fills a `contract.spec.Spec` and hands the harness a few ho
    and M2 a pipeline's thread limit falls as its registers rise (simd_qmm_bits' 8-bit tiles compile for 224), so
    every launch records its M1/M2 limit, unless its launcher sizes its groups to the pipeline or its source reserves
    the threads. A tensor-op kernel, which cannot be built for M1/M2 ahead of time, stays at 256 threads. CUDA:
-   registers a thread (rounded per warp), static plus dynamic shared bytes, launch bounds and clusters against sm_86,
-   sm_89, sm_120 and sm_121. Tools re-derive the records: on a Mac, `tf-kernel-contract --offline DIR` compiles each
-   pipeline for M1 and M2 with Xcode's Metal toolchain (native code built for T threads equal to the plain build means
-   the plain pipeline runs T); on a CUDA build machine, `tf-cuda-test kernel-contract-limits DIR` reads registers,
+   registers a thread (rounded per warp), static plus dynamic shared bytes, launch bounds and clusters against sm_80,
+   sm_86, sm_89, sm_120 and sm_121. Tools re-derive the records: on a Mac, `tf-kernel-contract --offline DIR` compiles
+   each pipeline for M1 and M2 with Xcode's Metal toolchain (native code built for T threads equal to the plain build
+   means the plain pipeline runs T); on a CUDA build machine, `tf-cuda-test kernel-contract-limits DIR` reads registers,
    shared bytes and launch bounds from the fatbins' ELF images for every SM, counted as the driver counts them (sm_120
    and sm_121 images keep registers only in the `.nv.info` register records, and add the block's reserved 1 KiB to
-   `.nv.shared`). On the GPU itself both runners check the loaded pipelines and the device's own limits.
-   Controls: Metal, the row projection's pipeline launched at 1,024 threads where M1 and M2 compile it for 512, and
-   36 KiB of threadgroup memory; CUDA, a kernel launched past its `__launch_bounds__`, and one needing more registers
-   than a block has.
+   `.nv.shared`). On the GPU itself both runners check the loaded pipelines and the device's own limits. Controls:
+   Metal, the row projection's pipeline launched at 1,024 threads where M1 and M2 compile it for 512, and 36 KiB of
+   threadgroup memory; CUDA, a kernel launched past its `__launch_bounds__`, and one needing more registers than a block
+   has.
 
 ## Running it
 
@@ -70,9 +71,9 @@ and gate 5. `zig build tf-kernel-contract` builds the program alone; `--only TEX
 TEXT, `--offline DIR` adds the M1/M2 compiles, and `--repro` prints the smallest input behind each known finding.
 
 On a CUDA machine, build with `-Dnvcc` (the controls are compiled only then), and run `zig build kernel-contract
--Dnvcc=/usr/local/cuda/bin/nvcc`. For the limits of every SM, `zig build fatbins kernel-contract-fatbins
--Dnvcc=... -Dsm=86,89,120,121`, then `tf-cuda-test kernel-contract-limits zig-out/fatbin`. Its `RECORD` lines are the
-values `registry.zig` holds.
+-Dnvcc=/usr/local/cuda/bin/nvcc`. For the limits of every SM, `zig build fatbins kernel-contract-fatbins -Dnvcc=...
+-Dsm=80,86,89,120,121`, then `tf-cuda-test kernel-contract-limits zig-out/fatbin`. Its `RECORD` lines are the values
+`registry.zig` holds.
 
 Every run ends with a `SUMMARY` line: kernels passing gates 1 to 4, known findings, controls red, and limit problems.
 The program exits 1 on any failed gate, any control that stayed green, or any limit problem.
@@ -100,6 +101,10 @@ MLX's formula keeps the infinity, because its codes enter the MMAs as q + 128 an
 
 Metal: softmax, RMS norm, bf16 top-k, the row projection (3, 4, 6 and 8 bits), affine_mm (4 and 8 bits), simd_qmm
 (4 bits) and simd_qmm_bits (3, 6 and 8 bits), and the lane projection (6-bit groups of 32 on every chip; 4- and 8-bit
-formats on the M5's tensor units, where its reg kernel must equal the cooperative one bit for bit).
+formats on the M5's tensor units, where its reg kernel must equal the cooperative one bit for bit), and tile_qmm's
+prompt tiles and their decode twin (4, 6 and 8 bits; the twin bit-equal to the tiles). Gate 5 also holds the rest of
+tile_qmm's pipelines and GLM-5.3-Flash's hc_expand_10.
 CUDA: the RMS norm rows (16-byte form and the fp32-out tree), Nemotron's router logits and top-k, qmm_group's cluster
-tile, lane_gemv and its split-K form (both bit-equal to it), and prompt16's FP4 tile.
+tile, lane_gemv and its split-K form (both bit-equal to it), prompt16's FP4 tile with bf16 and fp32 out, qmmf's FP4
+tiles with fp32 out (K slices met in a cluster, fused, or by `reduce_kernel<true>`), and the reduce-scatter's
+`tf_rank_sum`.

@@ -124,7 +124,7 @@ pub fn run(a: std.mem.Allocator, io: std.Io, dir: []const u8, list: []const limi
             continue;
         };
         const fits = (m[0] >= d.threads and m[1] >= d.threads) or d.reserved >= d.threads or d.adapts;
-        const current = (d.m1 <= m[0] and d.m2 <= m[1] and d.m1 > 0) or d.adapts; // a record: the least any toolchain compiled
+        const current = (d.m1 <= m[0] and d.m2 <= m[1] and d.m1 > 0) or d.adapts or d.reserved >= d.threads; // a record: the least any toolchain compiled
         if (!control and (!fits or !current)) n += 1;
         const word = if (control) (if (fits) "MISSED" else "RED ") else if (fits and current) "PASS" else "FAIL";
         std.debug.print("{s} offline {s}: {d} threads; M1 pipelines take {d}, M2 {d} (recorded {d}, {d})\n", .{ word, d.name, d.threads, m[0], m[1], d.m1, d.m2 });
