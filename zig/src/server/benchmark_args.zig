@@ -43,7 +43,7 @@ pub const flags = [_]Flag{
     .{ .name = "--temperatures", .help = "comma-separated sampling temperatures (default: 1.0,0)" },
     .{ .name = "--serial", .value = false, .help = "use the same engine with drafts disabled" },
     .{ .name = "--context", .help = "explicit prompt plus reply capacity" },
-    .{ .name = "--drafter", .help = "a drafter checkpoint directory or cached repo ID for the managed server; auto (default) and none pass no drafter, so the engine keeps its own default" },
+    .{ .name = "--drafter", .help = "a drafter checkpoint directory or cached repo ID for the managed server; auto (default) passes the family's own drafter when cached; none passes none" },
     .{ .name = "--download", .value = false, .help = "not supported natively; run tensorfold pull MODEL first" },
     .{ .name = "--timeout", .help = "request timeout in seconds (default: 600)" },
     .{ .name = "--startup-timeout", .help = "managed server startup timeout in seconds (default: 600, plus 6 per GB of weights past 20 GB, at most 3600)" },
@@ -229,10 +229,11 @@ test "--backend takes rocm, and the usage line, help and invalid choice name it"
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "auto, mlx, cuda or rocm (default: auto") != null);
 }
 
-test "the --drafter help says how to name a drafter and that auto passes none" {
+test "the --drafter help says how to name a drafter, that auto passes the family's cached one and none passes none" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     try help(&out.writer);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "--drafter          a drafter checkpoint directory or cached repo ID") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "auto (default) and none pass no drafter, so the engine keeps its own default") != null);
+    const auto = "auto (default) passes the family's own drafter when cached; none passes none";
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), auto) != null);
 }

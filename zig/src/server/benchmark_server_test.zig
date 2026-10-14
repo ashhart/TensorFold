@@ -24,6 +24,27 @@ test "the child's flags parse as serve flags and carry none that native serve re
     try std.testing.expect(std.mem.indexOf(u8, u.message, "not served") != null);
 }
 
+test "drafts stay on unless serial: only serial adds --no-drafts, and a drafter directory goes to --drafter" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var p = plan;
+    p.backend = server.buildBackend();
+    for ([_]bool{ false, true }) |serial| for ([_]?[]const u8{ null, "/models/draft" }) |drafter| {
+        p.serial = serial;
+        p.drafter_dir = drafter;
+        const args = try server.argv(a, p);
+        var u: cli.Usage = .{};
+        const parsed = try cli.parse(a, args[2..], &u);
+        try std.testing.expectEqual(serial, parsed.no_drafts);
+        if (drafter) |d| try std.testing.expectEqualStrings(d, parsed.drafter.?);
+        if (drafter == null) try std.testing.expect(parsed.drafter == null);
+        var n: usize = 0;
+        for (args) |x| n += @intFromBool(std.mem.eql(u8, x, "--no-drafts"));
+        try std.testing.expectEqual(@as(usize, @intFromBool(serial)), n);
+    };
+}
+
 test "the child's environment drops the key, log, salt and token and turns off the live line" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
