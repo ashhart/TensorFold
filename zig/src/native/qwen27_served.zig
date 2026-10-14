@@ -62,7 +62,7 @@ pub const Host = struct {
     /// A new slot's buffers join the residency set, so the keepalive holds them wired with the rest.
     fn added(ptr: *anyopaque, buffers: []const mtl.Buffer) void {
         const h = of(ptr);
-        if (h.resident) |*r| r.add(buffers);
+        if (h.resident) |*r| r.addNow(buffers); // its first round reads them: committed now, as before staging
         std.log.info("Qwen3.8-27B: a slot took its memory ({d} of {d} ready)", .{ h.runner.ready, h.runner.slots });
     }
 
@@ -104,13 +104,18 @@ const Snaps = struct {
         const h = host(ptr);
         const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
         const slot = h.back.slotOf(s) orelse return error.UnknownStream;
-        return @ptrCast(try q.snapshot.saveSlot(h.gpa, &h.runner, slot, h.back.ringOf(slot), at));
+        const st = try q.snapshot.saveSlot(h.gpa, &h.runner, slot, h.back.ringOf(slot), at);
+        if (h.resident) |*r| r.add(&.{st.buf}); // joins the set at its next flush, inside the same 70% limit
+        return @ptrCast(st);
     }
     fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
         return error.RestoredInPrefill; // the backend restores a stream's kept state in its prompt pass
     }
     fn drop(ptr: *anyopaque, saved: pc.Saved) void {
-        q.snapshot.drop(host(ptr).gpa, @ptrCast(@alignCast(saved)));
+        const h = host(ptr);
+        const st: *q.snapshot.State = @ptrCast(@alignCast(saved));
+        if (h.resident) |*r| r.remove(st.buf); // out of the set first: its own reference would keep the memory
+        q.snapshot.drop(h.gpa, st);
     }
 };
 
@@ -297,7 +302,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     if (h.draft != null and serial) h.host.lone = .{ .ctx = h, .run = Host.lone };
     h.warm = .{ .queue = model.queue };
     // the ready slots are wired before the cache's budget reads the footprint, and the later ones count as taken
-    holdResident(h) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
+    holdResident(h, io) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
     errdefer if (h.resident) |*r| r.deinit();
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
     errdefer if (h.cache) |*store| store.deinit();
@@ -324,7 +329,7 @@ fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) 
 }
 
 /// Weights, the ready slots' state and the drafter join one residency set the idle keepalive uses.
-fn holdResident(h: *Host) !void {
+fn holdResident(h: *Host, io: std.Io) !void {
     var list: std.ArrayList(mtl.Buffer) = .empty;
     defer list.deinit(h.gpa);
     for (h.model.checkpoint.shards.items) |s| try list.append(h.gpa, s.buffer);
@@ -337,17 +342,18 @@ fn holdResident(h: *Host) !void {
         for (d.model.checkpoint.shards.items) |s| try list.append(h.gpa, s.buffer);
         try list.append(h.gpa, d.model.pending);
     }
-    h.resident = try Resident.init(h.model.device, h.model.queue, list.items);
+    h.resident = try Resident.hold(h.gpa, io, h.model.device, h.model.queue, list.items, "qwen27") orelse return;
     h.warm = (&h.resident.?).target();
 }
 
 pub fn close(ptr: *anyopaque) void {
     const h = Host.of(ptr);
     h.host.stop();
-    if (h.resident) |*r| r.deinit();
     const rows = if (h.cache) |*store| store.disk else null;
-    if (h.cache) |*store| store.deinit();
+    if (h.cache) |*store| store.deinit(); // its states leave the set as they go
     if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go
+    if (h.resident) |*r| r.deinit();
+    h.resident = null;
     if (h.disk_stage) |b| b.deinit();
     h.core.deinit();
     h.cfg.deinit(h.gpa);

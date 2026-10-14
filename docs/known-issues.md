@@ -14,8 +14,8 @@ release fixes it, and the release notes say which one.
   greedy code drafts shallower, about 4% slower on an M3 Ultra. The tokens are the same.
 - Qwen3.8-Flash-Next in speed-up mode: a drafted request right after a `"draft": false` one decodes slowly, and the next
   request is back to speed. The tokens are the same.
-- Qwen3.8-Flash-Next on a Mac: the first turn after the server has been idle for a few seconds takes about 2 s to its
-  first token on an M3 Ultra, even when its prompt is cached.
+- Qwen3.8-Flash-Next on a Mac: a turn more than `--keep-warm` seconds after the last request (900 by default) takes
+  about 2 s to its first token on an M3 Ultra, even when its prompt is cached, while macOS wires the model again.
 - On a Mac without tensor units (M1 to M4), Flash Next's uniform 6-bit checkpoint decodes different tokens from 1.0.9
   since 1.0.10's faster products. `FZ_M3_LANES=1` keeps the earlier kernels and their tokens.
 

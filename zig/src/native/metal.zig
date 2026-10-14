@@ -360,6 +360,7 @@ test {
     _ = glm_dsa;
     _ = qwen27;
     _ = @import("cache_fit.zig");
+    _ = @import("resident.zig");
     _ = @import("qwen27_landing.zig");
 }
 

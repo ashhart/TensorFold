@@ -216,7 +216,8 @@ pub const Engine = struct {
             e.ep = try ep_mod.Ep.init(gpa, e.device, s, me);
         }
         // opt-in: wiring 181 GB leaves macOS nothing to reclaim if another model shares the Mac (Flash Next runs without)
-        if (std.c.getenv("GLM_RESIDENCY") == null) {} else if (e.device.residencySet(e.w.buffers.items.len + e.arena.buffers.items.len)) |set| {
+        const wire = std.c.getenv("GLM_RESIDENCY") != null and mtl.ResidencySet.within("glm", 0, e.residencyBytes());
+        if (!wire) {} else if (e.device.residencySet(e.w.buffers.items.len + e.arena.buffers.items.len)) |set| {
             for (e.w.buffers.items) |b| set.add(b);
             for (e.arena.buffers.items) |b| set.add(b);
             set.commit();
@@ -280,6 +281,14 @@ pub const Engine = struct {
         e.queue.deinit();
         e.device.deinit();
         gpa.destroy(e);
+    }
+
+    /// What GLM_RESIDENCY's set would wire: every weight and arena buffer.
+    fn residencyBytes(e: *const Engine) u64 {
+        var n: u64 = 0;
+        for (e.w.buffers.items) |b| n += b.length();
+        for (e.arena.buffers.items) |b| n += b.length();
+        return n;
     }
 
     pub fn hasMtp(e: *const Engine) bool {

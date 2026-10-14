@@ -75,6 +75,7 @@ fn blank(ptr: *anyopaque, at: u32) anyerror!api.prompt_cache.Saved {
     errdefer buf.deinit();
     const st = try h.gpa.create(State);
     st.* = .{ .buf = buf, .at = at, .bytes = n, .draft_end = 0 };
+    if (h.resident) |*r| r.add(&.{buf}); // a state read back from disk joins the set as a saved one does
     return st;
 }
 
