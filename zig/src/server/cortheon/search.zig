@@ -89,25 +89,29 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
     var out: std.ArrayList(Result) = .empty;
     const marker = m.link;
     var from: usize = 0;
+    var last: usize = 0; // the previous link's end: each block's class mark is looked for after it, so each byte once
     while (out.items.len < limit) {
         const at = std.mem.indexOfPos(u8, page, from, marker) orelse break;
         const tag_start = std.mem.lastIndexOfScalar(u8, page[0..at], '<') orelse break;
         const tag_end = std.mem.indexOfScalarPos(u8, page, at, '>') orelse break;
         const next = std.mem.indexOfPos(u8, page, tag_end, marker) orelse page.len;
         from = tag_end;
-        const block_start = std.mem.lastIndexOf(u8, page[0..tag_start], "class=\"result ") orelse tag_start;
+        const lo = @min(last, tag_start);
+        last = tag_end;
+        const block = std.mem.lastIndexOf(u8, page[lo..tag_start], "class=\"result ");
+        const block_start = if (block) |b| lo + b else tag_start;
         if (std.mem.indexOf(u8, page[block_start..tag_start], "result--ad") != null) continue;
         const tag = page[tag_start..tag_end];
         const href_at = std.mem.indexOf(u8, tag, "href=\"") orelse continue;
         const href_end = std.mem.indexOfScalarPos(u8, tag, href_at + 6, '"') orelse continue;
         const url = (try resultTarget(a, tag[href_at + 6 .. href_end])) orelse continue;
-        const close = std.mem.indexOfPos(u8, page, tag_end, "</a>") orelse continue;
+        const close = std.mem.indexOfPos(u8, page[0..next], tag_end, "</a>") orelse continue; // within its own result
         const title = try fragmentText(a, page[tag_end + 1 .. close]);
         var snippet: []const u8 = "";
         if (std.mem.indexOfPos(u8, page[0..next], close, m.snippet)) |s| {
-            const s_open = (std.mem.indexOfScalarPos(u8, page, s, '>') orelse s) + 1;
+            const s_open = (std.mem.indexOfScalarPos(u8, page[0..next], s, '>') orelse s) + 1;
             // a snippet with no end (a page cut at its size cap) is left out rather than sliced backwards
-            if (std.mem.indexOfPos(u8, page, s_open, m.snippet_end)) |s_close|
+            if (std.mem.indexOfPos(u8, page[0..next], s_open, m.snippet_end)) |s_close|
                 snippet = try fragmentText(a, page[s_open..s_close]);
         }
         var seen = false;
