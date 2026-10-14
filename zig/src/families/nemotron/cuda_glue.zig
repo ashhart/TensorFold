@@ -21,6 +21,7 @@ pub const Fns = struct {
     concat_norms: cuda.Function,
     group_rmsnorm: cuda.Function,
     router: cuda.Function,
+    router_rows: cuda.Function,
     topk: cuda.Function,
     conv: cuda.Function,
     conv_rows: cuda.Function,
@@ -45,6 +46,7 @@ pub const Fns = struct {
             .concat_norms = try m[0].function("tf_nemo_concat_norms"),
             .group_rmsnorm = try m[0].function("tf_nemo_group_rmsnorm"),
             .router = try m[1].function("tf_nemo_router"),
+            .router_rows = try m[1].function("tf_nemo_router_rows"),
             .topk = try m[1].function("tf_nemo_topk"),
             .conv = try m[2].function("tf_nemo_conv"),
             .conv_rows = try m[2].function("tf_nemo_conv_rows"),
@@ -148,7 +150,7 @@ pub const Glue = struct {
         ptrs(&a, &.{ wt, w, hn, out, xs });
         a.add(eps);
         ints(&a, &.{ d, top_k, slots });
-        try g.go(g.f.add_moe_norm, .{ rows, 1, 1 }, 256, 0, &a);
+        try g.go(g.f.add_moe_norm, .{ rows, 1, 1 }, 1024, 0, &a);
     }
 
     /// fp32 router logits over K slices, then each row's top-k and the shared halves' slots.
@@ -156,10 +158,14 @@ pub const Glue = struct {
         if (g.tri()) |t| return t.route(x, w, bias, part, ids, wts, rows, d, e, top_k, scaling, norm);
         if (e > 256 or top_k + 2 > 8) return error.RouterTooWide;
         const shape = routerShape(d);
+        if (shape.sk > 8) return error.RouterTooWide; // topk's MAXSK
         var a: cuda.Args = .{};
         ptrs(&a, &.{ x, w, part });
         ints(&a, &.{ rows, d, e, shape.sk });
-        try g.go(g.f.router, .{ cdiv(rows, 16), cdiv(e, 16), shape.sk }, 256, shape.shared, &a);
+        if (rows <= 16 and d % (8 * shape.sk) == 0 and (x | w) % 16 == 0) // decode: a block a (16 experts, slice), same bits
+            try g.go(g.f.router_rows, .{ cdiv(e, 16), shape.sk, 1 }, 256, @intCast((rows + 16) * (d / shape.sk / 8 + 1) * 16), &a)
+        else
+            try g.go(g.f.router, .{ cdiv(rows, 16), cdiv(e, 16), shape.sk }, 256, shape.shared, &a);
         var b: cuda.Args = .{};
         ptrs(&b, &.{ part, bias, ids, wts });
         b.add(int(rows));
