@@ -21,6 +21,8 @@ pub const Api = struct {
     ncclCommInitRank: *const fn (*Comm, c_int, UniqueId, c_int) callconv(.c) R,
     ncclCommInitAll: *const fn ([*]Comm, c_int, ?[*]const c_int) callconv(.c) R,
     ncclCommDestroy: *const fn (Comm) callconv(.c) R,
+    ncclCommAbort: *const fn (Comm) callconv(.c) R,
+    ncclCommGetAsyncError: *const fn (Comm, *R) callconv(.c) R,
     ncclGetErrorString: *const fn (R) callconv(.c) ?[*:0]const u8,
     ncclAllReduce: *const fn (D, D, usize, DataType, RedOp, Comm, abi.Stream) callconv(.c) R,
     ncclAllGather: *const fn (D, D, usize, DataType, Comm, abi.Stream) callconv(.c) R,
