@@ -787,12 +787,19 @@ fn indexCase(device: mtl.Device, queue: mtl.Queue, p: *const tf.deepseek_v41.csa
     cb.wait();
     if (cb.failure() != null) return error.Csa2Fp64GpuFailure;
 
+    // Positions live behind the scores/heap/candidates regions; read them through the view's offset,
+    // otherwise this compares the score words against themselves and the check is vacuous.
     const kernel_scores = scratch.scores().buffer.slice(f32, spec.rows * 4096);
-    const kernel_positions = scratch.positions().buffer.slice(i32, spec.rows * 512);
+    const positions_offset = scratch.positions().offset / @sizeOf(i32);
+    const kernel_positions = scratch.positions().buffer.slice(i32, positions_offset + spec.rows * 512);
     var ref32 = try std.testing.allocator.alloc(f32, spec.keys);
     defer std.testing.allocator.free(ref32);
     var ref64 = try std.testing.allocator.alloc(f64, spec.keys);
     defer std.testing.allocator.free(ref64);
+    // The same scores with only the documented quantizations below the final one: the BF16 quantum
+    // that no change of arithmetic can remove.
+    var exact = try std.testing.allocator.alloc(f64, spec.keys);
+    defer std.testing.allocator.free(exact);
     const w_scale: f32 = 1 / @sqrt(@as(f32, 128 * 32));
     for (0..spec.keys) |row| {
         const key = decoded[row * 128 ..][0..128];
@@ -801,25 +808,38 @@ fn indexCase(device: mtl.Device, queue: mtl.Queue, p: *const tf.deepseek_v41.csa
         for (0..32) |head| {
             var dot: f64 = 0;
             for (0..128) |d| dot += @as(f64, math.f(key[d])) * @as(f64, math.f(q[head * 128 + d]));
-            const rectified: f64 = @max(@min(dot, 1e38), 0);
+            // The pinned source's head einsum lands in BF16, so the rectified score is a quantized
+            // algorithm boundary like the cache codes are; only the reduction above it is widened.
+            const rectified: f64 = @max(math.f(math.b(@min(@as(f32, @floatCast(dot)), 1e38))), 0);
             const weight: f32 = math.f(weights[head]);
             const scaled_weight = math.f(math.b(weight * w_scale));
             const weighted = math.f(math.b(@as(f32, @floatCast(rectified)) * scaled_weight));
             ideal += weighted;
             narrow32 += @as(f32, @floatCast(weighted));
         }
-        ref64[row] = ideal;
+        exact[row] = ideal;
+        // The score is written back through BF16 by the kernel and by the source contract, so the
+        // ideal carries that final boundary too: the stage then differs from its output by nothing
+        // but the arithmetic being compared.
+        ref64[row] = math.f(math.b64(ideal));
         ref32[row] = math.f(math.b(narrow32));
     }
     var ideal_cells: [1024]f64 = undefined;
     const shown = @min(spec.keys, ideal_cells.len);
     for (0..shown) |row| ideal_cells[row] = ref64[row];
+    printF32(spec.name, "index_score", "bf16_score_boundary", deltaF32VsF64(ref32[0..shown], exact[0..shown]));
     printF32(spec.name, "index_score", "metal_vs_ideal", deltaF32VsF64(
         kernel_scores[0..shown], ideal_cells[0..shown]));
     printF32(spec.name, "index_score", "f32_vs_ideal", deltaF32VsF64(ref32[0..shown], ideal_cells[0..shown]));
+    // The kernel against the source-contract FP32 reference on identical keys: the stage delta that
+    // selection can actually see, independent of how far the reference itself sits from the ideal.
+    var contract: [1024]f64 = undefined;
+    for (0..shown) |row| contract[row] = @as(f64, ref32[row]);
+    printF32(spec.name, "index_score", "metal_vs_f32_reference", deltaF32VsF64(
+        kernel_scores[0..shown], contract[0..shown]));
 
-    // Selection: which keys land in the top-k. Ties are decided by the merge's comparator on the
-    // kernel side and by ascending index in the reference; the sets can therefore differ.
+    // Selection: which keys land in the top-k. Both sides break ties by the lowest position, the
+    // kernel's heap comparator and the reference's strict-greater scan agree on that.
     var chosen = try std.testing.allocator.alloc(bool, spec.keys);
     defer std.testing.allocator.free(chosen);
     @memset(chosen, false);
@@ -848,14 +868,18 @@ fn indexCase(device: mtl.Device, queue: mtl.Queue, p: *const tf.deepseek_v41.csa
         } else max_unselected = @max(max_unselected, ref32[row]);
     }
     var kernel_only: usize = 0;
+    var out_of_range: usize = 0;
     for (0..picks) |i| {
-        const slot = kernel_positions[i];
-        if (slot < 0 or slot >= @as(i32, @intCast(spec.keys))) continue;
+        const slot = kernel_positions[positions_offset + i];
+        if (slot < 0 or slot >= @as(i32, @intCast(spec.keys))) {
+            out_of_range += 1;
+            continue;
+        }
         if (!chosen[@intCast(slot)]) kernel_only += 1;
     }
     std.debug.print(
-        \\CSA64 {{"case":"{s}","stage":"index_select","side":"metal","keys":{d},"picks":{d},"reference_only":{d},"kernel_only":{d},"lowest_selected":{d},"highest_unselected":{d}}}
-    , .{ spec.name, spec.keys, picks, picks - overlap, kernel_only, min_selected, max_unselected });
+        \\CSA64 {{"case":"{s}","stage":"index_select","side":"metal","keys":{d},"picks":{d},"reference_only":{d},"kernel_only":{d},"invalid_positions":{d},"lowest_selected":{d},"highest_unselected":{d}}}
+    , .{ spec.name, spec.keys, picks, picks - overlap, kernel_only, out_of_range, min_selected, max_unselected });
 }
 
 test "indexer scoring and selection sit at rounding level against the FP64 ideal" {
