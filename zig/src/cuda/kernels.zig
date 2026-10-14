@@ -34,6 +34,7 @@ pub const rank_sum: []const u8 = if (available) &Blob("fatbin_rank_sum").bytes e
 pub const sample: []const u8 = if (available) &Blob("fatbin_sample").bytes else &.{};
 pub const train: []const u8 = if (available) &Blob("fatbin_train").bytes else &.{};
 pub const qwen35: []const u8 = if (available) &Blob("fatbin_qwen35").bytes else &.{};
+pub const qwen35_draft: []const u8 = if (available) &Blob("fatbin_qwen35_draft").bytes else &.{};
 pub const qmmf: []const u8 = if (available) &Blob("fatbin_qmmf").bytes else &.{};
 pub const prompt16: []const u8 = if (available) &Blob("fatbin_prompt16").bytes else &.{};
 pub const modelopt_pack: []const u8 = if (available) &Blob("fatbin_modelopt_pack").bytes else &.{};

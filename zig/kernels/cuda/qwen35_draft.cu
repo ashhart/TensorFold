@@ -1,0 +1,156 @@
+// The DFlash2 drafter's glue on CUDA (zig/src/families/qwen3_5/cuda_draft.zig): a block of rows attends over the
+// target's tapped context, with two-tap dynamic convolutions around attention and MLP. Rounding points follow the
+// Metal drafter's draft_ops.metal; the projections run through the target engine's affine-4 kernels.
+
+#include <cuda_bf16.h>
+#include <stdint.h>
+
+namespace tf_q35d {
+
+constexpr int HD = 128;  // the drafter's head width (q, k, v)
+
+__device__ __forceinline__ float bf(__nv_bfloat16 x) { return __bfloat162float(x); }
+__device__ __forceinline__ float rbf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
+
+__device__ __forceinline__ float warp_sum(float x) {
+#pragma unroll
+    for (int m = 16; m; m >>= 1) x += __shfl_xor_sync(0xffffffffu, x, m);
+    return x;
+}
+
+}  // namespace tf_q35d
+
+using namespace tf_q35d;
+
+// Tap rows (start + i) of a stream's ring of R rows, `width` bf16 each, into OUT rows 0..n. Grid (n), 256 threads.
+extern "C" __global__ void tf_q35d_gather_taps(const __nv_bfloat16* __restrict__ RING, int R, long long start, int width,
+                                                 __nv_bfloat16* __restrict__ OUT) {
+    const long long row = start + blockIdx.x;
+    const __nv_bfloat16* src = RING + (size_t)(row % R) * width;
+    __nv_bfloat16* dst = OUT + (size_t)blockIdx.x * width;
+    for (int i = threadIdx.x; i < width; i += blockDim.x) dst[i] = src[i];
+}
+
+// y[t, c] = sum over lags l of (BASE[branch, l, c] + DYN[t, (branch * 2 + l) * groups + c / group]) * x[t - l, c],
+// each product and sum rounded to bf16 in turn; x[-1] is zero (the block's first row has no past); RES, if given,
+// is added last. D wide rows, `group` channels a dynamic coefficient. Grid (rows), 256 threads.
+extern "C" __global__ void tf_q35d_dyn_conv(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ DYN,
+                                              const __nv_bfloat16* __restrict__ BASE, const __nv_bfloat16* __restrict__ RES,
+                                              __nv_bfloat16* __restrict__ OUT, int D, int group, int branch) {
+    const int t = blockIdx.x;
+    const int groups = D / group;
+    for (int c = threadIdx.x; c < D; c += blockDim.x) {
+        const int g = c / group;
+        float total = 0.0f;
+#pragma unroll
+        for (int l = 0; l < 2; l++) {
+            if (t - l < 0) continue;
+            const float x = bf(X[(size_t)(t - l) * D + c]);
+            total = rbf(total + rbf(bf(BASE[(branch * 2 + l) * D + c]) * x));
+            total = rbf(total + rbf(bf(DYN[(size_t)t * (4 * groups) + (branch * 2 + l) * groups + g]) * x));
+        }
+        if (RES != nullptr) total = rbf(total + bf(RES[(size_t)t * D + c]));
+        OUT[(size_t)t * D + c] = __float2bfloat16_rn(total);
+    }
+}
+
+// Per-head RMSNorm over HD then rotate-half RoPE over all HD at position pos0 + row: X's head h of row m at
+// m * stride + h * HD, OUT packed (rows, heads, HD). Grid (rows * heads), 32 threads of 4 values.
+extern "C" __global__ void __launch_bounds__(32) tf_q35d_norm_rope(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
+                                                                     __nv_bfloat16* __restrict__ OUT, int heads, int stride, long long pos0,
+                                                                     float eps, float theta) {
+    const int head = blockIdx.x % heads;
+    const size_t m = blockIdx.x / heads;
+    const int t = threadIdx.x;
+    const __nv_bfloat16* x = X + m * stride + head * HD;
+    float v[4], acc = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        v[i] = bf(x[4 * t + i]);
+        acc += v[i] * v[i];
+    }
+    acc = warp_sum(acc);
+    const float inv = rsqrtf(acc / (float)HD + eps);
+    float n[4];
+#pragma unroll
+    for (int i = 0; i < 4; i++) n[i] = rbf(rbf(v[i] * inv) * bf(W[4 * t + i]));
+    // the pair of lane element d is d + HD / 2: this lane's partner values come from the lane HD / 8 = 16 away
+    const float pos = (float)(pos0 + (long long)m);
+    __nv_bfloat16* out = OUT + (m * heads + head) * HD;
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        const int d = 4 * t + i;
+        const float partner = __shfl_xor_sync(0xffffffffu, n[i], 16);
+        const int j = d < HD / 2 ? d : d - HD / 2;
+        const float angle = pos * powf(theta, -(float)j / (float)(HD / 2));
+        float sn, cs;
+        sincosf(angle, &sn, &cs);
+        out[d] = __float2bfloat16_rn(d < HD / 2 ? n[i] * cs - partner * sn : n[i] * cs + partner * sn);
+    }
+}
+
+// Rows of packed (kv_heads, HD) keys and values at positions pos0 + i into a layer's rings (slot pos % W).
+extern "C" __global__ void tf_q35d_ring_put(const __nv_bfloat16* __restrict__ K, const __nv_bfloat16* __restrict__ V,
+                                              __nv_bfloat16* __restrict__ RK, __nv_bfloat16* __restrict__ RV, int width, long long pos0, int W) {
+    const int i = blockIdx.x;
+    const size_t slot = (size_t)((pos0 + i) % W);
+    for (int c = threadIdx.x; c < width; c += blockDim.x) {
+        RK[slot * width + c] = K[(size_t)i * width + c];
+        RV[slot * width + c] = V[(size_t)i * width + c];
+    }
+}
+
+// The block's attention: query row m, head h sees the context ring's positions [max(begin, p - window + 1), pos0)
+// where p = pos0 + m, and every block row (the drafter is not causal within its block). GQA over kv_heads; scale
+// 1 / sqrt(HD). Grid (rows, heads), a warp each; online softmax in fp32, bf16 out (rows, heads * HD).
+extern "C" __global__ void __launch_bounds__(32) tf_q35d_attn(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KB,
+                                                                const __nv_bfloat16* __restrict__ VB, const __nv_bfloat16* __restrict__ RK,
+                                                                const __nv_bfloat16* __restrict__ RV, int rows, int heads, int kv_heads, int W,
+                                                                long long begin, long long pos0, int window, __nv_bfloat16* __restrict__ OUT) {
+    constexpr int DPL = HD / 32;
+    const int lane = threadIdx.x;
+    const int m = blockIdx.x, h = blockIdx.y;
+    const int kvh = h / (heads / kv_heads);
+    const int width = kv_heads * HD;
+    const float scale = rsqrtf((float)HD);
+    float q[DPL], o[DPL];
+#pragma unroll
+    for (int i = 0; i < DPL; i++) {
+        q[i] = bf(Q[((size_t)m * heads + h) * HD + lane * DPL + i]);
+        o[i] = 0.0f;
+    }
+    float mx = -INFINITY, l = 0.0f;
+    const long long p = pos0 + m;
+    long long first = p - window + 1;
+    if (first < begin) first = begin;
+    for (long long pos = first; pos < pos0; pos++) {
+        const __nv_bfloat16* k = RK + (size_t)(pos % W) * width + kvh * HD + lane * DPL;
+        float dot = 0.0f;
+#pragma unroll
+        for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(k[i]), dot);
+        const float s = warp_sum(dot) * scale;
+        const float mn = fmaxf(mx, s);
+        const float a = __expf(mx - mn), b = __expf(s - mn);
+        l = l * a + b;
+        const __nv_bfloat16* v = RV + (size_t)(pos % W) * width + kvh * HD + lane * DPL;
+#pragma unroll
+        for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(v[i]), o[i] * a);
+        mx = mn;
+    }
+    for (int r = 0; r < rows; r++) {
+        const __nv_bfloat16* k = KB + ((size_t)r * kv_heads + kvh) * HD + lane * DPL;
+        float dot = 0.0f;
+#pragma unroll
+        for (int i = 0; i < DPL; i++) dot = fmaf(q[i], bf(k[i]), dot);
+        const float s = warp_sum(dot) * scale;
+        const float mn = fmaxf(mx, s);
+        const float a = __expf(mx - mn), b = __expf(s - mn);
+        l = l * a + b;
+        const __nv_bfloat16* v = VB + ((size_t)r * kv_heads + kvh) * HD + lane * DPL;
+#pragma unroll
+        for (int i = 0; i < DPL; i++) o[i] = fmaf(b, bf(v[i]), o[i] * a);
+        mx = mn;
+    }
+#pragma unroll
+    for (int i = 0; i < DPL; i++) OUT[((size_t)m * heads + h) * HD + lane * DPL + i] = __float2bfloat16_rn(o[i] / l);
+}

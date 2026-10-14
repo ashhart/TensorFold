@@ -7,6 +7,7 @@ const lanes = @import("lanes");
 const c = @import("config.zig");
 const E = @import("cuda_engine.zig");
 const draws = @import("draw.zig");
+const Draft = @import("cuda_draft.zig").Draft;
 const be = lanes.backend;
 
 pub const model_type = "qwen3_5";
@@ -14,6 +15,8 @@ pub const formats: []const []const u8 = &.{"mlx-q4g64"};
 pub const default_context: i64 = 32768;
 pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = E.max_rows;
+/// --drafter loads the DFlash2 draft model (openDrafter); the checkpoints have no head of their own.
+pub const takes_drafter = true;
 
 pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false };
 
@@ -38,7 +41,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer e.deinit();
     if (e.g.vocab != c.vocab) return error.UnsupportedQwenVocab; // draw.zig's masks are sized by the 2B's vocabulary
     const l = try gpa.create(Lanes);
-    l.* = .{ .gpa = gpa, .e = e, .capacity = o.context };
+    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context };
     return .{
         .backend = l.backend(),
         .facts = .{ .exact_width = @intCast(e.window_rows), .hidden_rows = true, .batch_rows = @intCast(e.verify_rows), .max_streams = E.max_segs, .streams_exact = true },
@@ -74,6 +77,30 @@ fn reserve(p: *anyopaque, streams: u32) anyerror!void {
         try l.e.forward(parts[0 .. n + 1], ids[0 .. n + 1], .{ .draws = picks[0 .. n + 1] });
         for (l.pool.items[0 .. n + 1]) |cache| try cache.reset(l.e);
     }
+    // with a drafter: a lone stream's windows of the pending token and 1 to 7 drafts
+    if (l.e.n_taps > 0) for (2..@min(8, l.e.verify_rows) + 1) |rows| {
+        for (picks[0..rows]) |*pk| pk.* = .{ .rule = null, .position = 1 };
+        try l.e.forward(&.{.{ .cache = l.pool.items[0], .rows = rows }}, ids[0..rows], .{ .draws = picks[0..rows] });
+        try l.pool.items[0].reset(l.e);
+    };
+}
+
+/// The DFlash2 drafter in `dir` over the loaded engine `p`, its weights in 4 bits (the only width served).
+pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void } {
+    if (bits != 4) return error.DrafterBitsUnsupported;
+    const l: *Lanes = @ptrCast(@alignCast(p));
+    const d = try Draft.init(gpa, io, l.e, dir);
+    return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveDrafter };
+}
+
+fn reserveDrafter(p: *anyopaque, streams: u32) anyerror!void {
+    const d: *Draft = @ptrCast(@alignCast(p));
+    try d.reserve(streams);
+}
+
+fn closeDrafter(p: *anyopaque) void {
+    const d: *Draft = @ptrCast(@alignCast(p));
+    d.deinit();
 }
 
 /// A request this engine refuses, in words; null: none of its own.
@@ -99,6 +126,7 @@ fn pick(sampling: ?lanes.Sampling, position: u64) E.Draw {
 
 const Lanes = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     e: *E.Engine,
     capacity: usize,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *E.Cache) = .empty,
@@ -137,7 +165,7 @@ const Lanes = struct {
     }
 
     fn backend(self: *Lanes) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn } };
     }
 
     fn cast(ptr: *anyopaque) *Lanes {
@@ -199,6 +227,8 @@ const Lanes = struct {
     /// Each window (a stream's pending token and copies) checked, then as many as fit in each forward.
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) !void {
         const self = cast(ptr);
+        const t0 = std.Io.Clock.awake.now(self.io);
+        defer @import("cuda_draft.zig").timing("verify", self.io, t0);
         if (windows.len != out.len) return error.InvalidQwenWindows;
         for (windows, out) |w, o| {
             const rows = w.rows();
@@ -243,6 +273,8 @@ const Lanes = struct {
     /// The accepted prefix of each window: its state as it was after that row.
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) !void {
         const self = cast(ptr);
+        const t0 = std.Io.Clock.awake.now(self.io);
+        defer @import("cuda_draft.zig").timing("keep", self.io, t0);
         for (windows, paths) |w, path| {
             for (path, 0..) |r, i| if (r != i) return error.UnsupportedQwenTree;
             try self.e.rewind(try self.cacheOf(w.stream), path.len);
@@ -251,6 +283,24 @@ const Lanes = struct {
 
     fn draftFn(_: *anyopaque, requests: []const be.DraftRequest) !void {
         for (requests) |r| if (r.depth != 0) return error.QwenCheckpointHasNoDraftHead;
+    }
+
+    /// A drafter's tapped layers, before any stream's caches exist: each forward fills their rings after.
+    fn prepareFeaturesFn(ptr: *anyopaque, taps: []const u32) !void {
+        const self = cast(ptr);
+        if (self.caches.count() != 0 or self.pool.items.len != 0) return error.TapsAfterStreams;
+        try self.e.setTaps(taps);
+    }
+
+    /// Rows [start, start + count) of a stream's tap ring: `offset` carries the first row's position, the drafter
+    /// (cuda_draft.zig) reads slot position % tap_rows, so a request may span the ring's end.
+    fn featuresFn(ptr: *anyopaque, stream: *lanes.Stream, taps: []const u32, start: u64, count: u32) !be.Features {
+        const self = cast(ptr);
+        if (taps.len != self.e.n_taps) return error.TapsMismatch;
+        const cache = try self.cacheOf(stream);
+        const ring = cache.tap orelse return error.NoTaps;
+        if (start + count > cache.len or count > E.tap_rows) return error.RowsNotHeld;
+        return .{ .buffer = ring.ptr, .offset = start, .rows = count, .row_bytes = @intCast(self.e.n_taps * self.e.g.hidden * 2), .space = .device, .dtype = .bf16 };
     }
 
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
