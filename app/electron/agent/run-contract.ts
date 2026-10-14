@@ -1,3 +1,4 @@
+import { captureThreadMemoryPolicy } from '../../shared/thread-memory-policy'
 import { randomUUID } from 'node:crypto'
 import type {
   AgentEventReceipt,
@@ -63,6 +64,7 @@ export function buildAgentRunContract(input: {
   const targetKind = thread.workspace?.kind === 'ssh' ? 'remote' : 'local'
   return {
     id: randomUUID(),
+    memoryPolicy: { ...captureThreadMemoryPolicy(thread) },
     runId,
     objective: clean(input.objective) || clean(thread.goal) || clean(thread.title) || 'Untitled run',
     surface: guardPolicy.surface,

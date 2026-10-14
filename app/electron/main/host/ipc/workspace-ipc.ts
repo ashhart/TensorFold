@@ -1,3 +1,5 @@
+import { createThreadMemoryPolicyHost } from '../thread-memory-policy-host'
+import { assertThreadMemoryTransport } from '../../../../shared/thread-memory-policy'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { promises as fs } from 'node:fs'
@@ -260,6 +262,7 @@ handle('threads:setEngine', async (_e, { id, engine }: { id: string; engine: 'na
       const binary = discoverOmpBinary()
       if (!existsSync(binary)) throw new Error('The omp CLI is not installed. Install @oh-my-pi/pi-coding-agent first.')
     }
+    assertThreadMemoryTransport({ ...t, engine }, store.settings.providers.find((p) => p.id === t.providerId))
     t.engine = engine === 'native' ? undefined : engine
     t.updatedAt = Date.now()
     persistThreads()
@@ -290,6 +293,7 @@ handle('threads:configure', async (_e, { id, providerId, model, providerAccountI
   if (t) {
     if (t.bot) throw new Error('This chat keeps its bot’s saved model; edit the bot and start a new chat to change it.')
     const provider = store.settings.providers.find((p) => p.id === providerId)
+    assertThreadMemoryTransport(t, provider)
     const accountId = provider ? selectedProviderAccountId(provider, providerAccountId) : providerAccountId ?? null
     t.providerId = providerId
     t.providerAccountId = accountId
@@ -303,6 +307,17 @@ handle('threads:configure', async (_e, { id, providerId, model, providerAccountI
 
 // Generic thread patch is deliberately narrow: only renderer-owned planning/notes
 // fields cross this seam. Workspace/runtime/timeline state has dedicated host APIs.
+const updateMemoryPolicy = createThreadMemoryPolicyHost({
+  threads: () => store.threads,
+  provider: (thread) => store.settings.providers.find((p) => p.id === thread.providerId),
+  aborters, guard: workspaceMutationGuard,
+  publish: (thread) => { store.win?.webContents.send('thread:update', thread); remoteServer.publish({ kind: 'thread', data: thread }) },
+})
+handle('threads:setMemoryPolicy', async (_e, { id, policy, expectedRevision }: { id: string; policy: unknown; expectedRevision: number }) => {
+  requireSecurityRole('operator', 'change saved-memory choices')
+  return updateMemoryPolicy(id, policy, expectedRevision)
+})
+
 handle('threads:patch', async (_e, { id, patch }: { id: string; patch: RendererThreadPatch }) => {
   requireSecurityRole('operator', 'patch threads')
   const t = store.threads.find((t) => t.id === id)

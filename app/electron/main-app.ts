@@ -148,6 +148,7 @@ import { initializeBotVmHost, getBotVmHost } from './main/host/bot-vm-host'
 import { registerBotVmIpc } from './main/host/ipc/bot-vm-ipc'
 import { assertBotLifecycleIdle } from './main/host/bot-run-boundary'
 import { captureBotConfig } from '../shared/bot-policy'
+import { isRestrictedBot } from '../shared/bot-tool-policy'
 import { initializeUserQuestionHost, getUserQuestionHost } from './main/host/user-question-host'
 import { createUserQuestionPersistence } from './main/host/user-question-persistence'
 import { registerUserQuestionIpc } from './main/host/ipc/user-question-ipc'
@@ -1144,8 +1145,8 @@ createEngineRuntime()
 registerEngineIpc(engineService, {
   reserveOperation: () => workspaceMutationGuard.reserveStart({ workspaceKeys: ['engine:local'] }),
   assertCanEnableCortheon: () => {
-    if (store.threads.some((thread) => aborters.has(thread.id) && (thread.phoneLocalOnly || thread.bot?.executionTarget === 'vm'))) {
-      throw new Error('Stop active phone or isolated bot conversations before enabling Cortheon; their model processing must stay on this Mac.')
+    if (store.threads.some((thread) => aborters.has(thread.id) && (thread.phoneLocalOnly || thread.bot?.executionTarget === 'vm' || isRestrictedBot(thread.bot)))) {
+      throw new Error('Stop active phone, isolated or restricted bot conversations before enabling Cortheon; hidden research cannot bypass their execution boundaries.')
     }
   },
 })
@@ -1156,7 +1157,7 @@ const phones = initializePhoneHost({
     if (HEADLESS_MODE || !thread || thread.kind !== 'chat' || thread.orchestratorHostId || thread.workspace?.kind === 'ssh') throw new Error('Phone control requires a chat in this local desktop app.')
     const provider = store.settings.providers.find((candidate) => candidate.id === (thread.providerId ?? store.settings.activeProviderId))
     if (!provider || isExternalProvider(runtimeProvider(provider, thread.providerAccountId))) throw new Error('Choose the built-in TensorFold engine or another model running on this Mac before granting phone access.')
-    if (provider.id === 'tensorfold' && engineService()?.hasExternalResearchEnabled()) throw new Error('Turn Cortheon off in AI settings before granting phone access; phone chats keep research and model processing local.')
+    if (engineService()?.hasExternalResearchEnabled()) throw new Error('Turn Cortheon off in AI settings before granting phone access; phone chats keep research and model processing local.')
   },
   markChatLocal: async (id) => {
     const thread = store.threads.find((candidate) => candidate.id === id)

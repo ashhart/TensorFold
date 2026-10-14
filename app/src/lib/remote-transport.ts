@@ -694,6 +694,9 @@ export function createRemoteBrowserApi(config: RemoteTransportConfig): TensorFol
     // --- settings: synthesized read-only ---
     getSettings: pairedSettings,
     saveSettings: unavailable('Changing settings') as TensorFoldStudioApi['saveSettings'],
+    botRecipePreview: unavailable('Reviewing bot recipes') as TensorFoldStudioApi['botRecipePreview'],
+    botRecipeImport: unavailable('Importing bot recipes') as TensorFoldStudioApi['botRecipeImport'],
+    botRecipeExport: unavailable('Exporting bot recipes') as TensorFoldStudioApi['botRecipeExport'],
     revokeApprovalRule: unavailable('Editing approval rules') as TensorFoldStudioApi['revokeApprovalRule'],
 
     // --- recoverable host archives; paired projection is redacted server-side ---

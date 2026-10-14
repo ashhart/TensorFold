@@ -14,7 +14,7 @@ import {
   type LocalRuntimePreset,
 } from './settings/shared'
 import {
-  commitOnboarding,
+  onboardingPreviouslyCompleted,
   readOnboardingDraft,
   saveOnboardingDraft,
   ONBOARDING_STEPS,
@@ -30,6 +30,8 @@ import type { Provider, ProviderDiscoveryKind, Readiness } from '../lib/types'
 import { EngineChoice } from './models/EngineChoice'
 import { BrandMark } from './BrandMark'
 import { ENGINE_PROVIDER_ID, formatBytes, useEngine } from '../lib/engine'
+import { fullLayoutPreferenceReadable, savedFullWorkspaceLayout } from '../lib/full-workspace-layout'
+import { finishOnboardingLanding } from '../lib/onboarding-landing'
 
 type ProviderSetupStep = 'choice' | 'cloud' | 'local' | 'configure'
 type Mode = 'cloud' | 'local'
@@ -41,6 +43,9 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   const saveSettings = useStore((s) => s.saveSettings)
   const setView = useStore((s) => s.setView)
   const initialDraft = useRef(readOnboardingDraft(settings?.desktopMode ?? 'full')).current
+  const previouslyCompleted = useRef(onboardingPreviouslyCompleted(settings?.desktopOnboardingComplete)).current
+  const layoutBeforeSetup = useRef(savedFullWorkspaceLayout()).current
+  const preferenceReadable = useRef(fullLayoutPreferenceReadable()).current
   const [desktopMode, setDesktopMode] = useState<OnboardingDesktopMode>(initialDraft.mode)
   const [tourStep, setTourStep] = useState<OnboardingStepId>(initialDraft.step)
   const [finishing, setFinishing] = useState(false)
@@ -93,8 +98,13 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
     setFinishing(true)
     setError('')
     try {
-      await commitOnboarding(desktopMode, api.desktopModeSet, (saved) => useStore.setState({ settings: saved }))
-      setView({ name: 'home' })
+      await finishOnboardingLanding({
+        mode: desktopMode, previouslyCompleted, savedLayout: layoutBeforeSetup, preferenceReadable,
+        persist: api.desktopModeSet, applySaved: (saved) => useStore.setState({ settings: saved }),
+        applyLayout: (layout) => useStore.getState().setFullWorkspaceLayout(layout),
+        newChat: () => useStore.getState().newChat(), home: () => setView({ name: 'home' }),
+        chatFailed: () => useStore.getState().setNotice({ kind: 'error', message: 'Your Full setup was saved, but a chat could not be opened. Use New chat to try again.' }),
+      })
       onDone()
     } catch (e: any) {
       setError(e?.message ?? 'Could not save your workspace choice. Try again.')
@@ -299,7 +309,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
 
           <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4">
             <Button data-testid="onboarding-back" icon="back" onClick={goBack} disabled={tourStep === 'mode' || busy || finishing}>Back</Button>
-            {tourStep !== 'guide' ? <Button data-testid="onboarding-next" variant="primary" iconRight="arrowRight" onClick={goNext} disabled={busy}>{tourStep === 'mode' ? `Continue with ${desktopMode === 'minimal' ? 'Minimal' : 'Full'}` : selectedModel ? 'Continue' : 'Set up a model later'}</Button> : <Button data-testid="onboarding-finish" variant="primary" iconRight="arrowRight" onClick={() => void complete()} disabled={finishing || !settings}>{finishing ? 'Saving…' : desktopMode === 'minimal' ? 'Open server setup' : 'Open TensorFold'}</Button>}
+            {tourStep !== 'guide' ? <Button data-testid="onboarding-next" variant="primary" iconRight="arrowRight" onClick={goNext} disabled={busy}>{tourStep === 'mode' ? `Continue with ${desktopMode === 'minimal' ? 'Minimal' : 'Full'}` : selectedModel ? 'Continue' : 'Set up a model later'}</Button> : <Button data-testid="onboarding-finish" variant="primary" iconRight="arrowRight" onClick={() => void complete()} disabled={finishing || !settings}>{finishing ? 'Saving…' : desktopMode === 'minimal' ? 'Open server setup' : previouslyCompleted ? 'Open TensorFold' : 'Start chatting'}</Button>}
           </div>
         </section>
       </div>
@@ -310,7 +320,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
 function WorkspaceChoice({ value, onChange }: { value: OnboardingDesktopMode; onChange: (value: OnboardingDesktopMode) => void }) {
   const choices = [
     { value: 'minimal', title: 'Minimal', icon: 'cpu', desc: 'A local model server, ready for your other apps.', features: ['Download and load models', 'Copy the local API URL and key', 'Run TensorFold in the menu bar'], note: 'Open the small server window whenever you need it.' },
-    { value: 'full', title: 'Full', icon: 'monitor', desc: 'Your complete workspace for local AI.', features: ['Chat and compare model responses', 'Develop with projects and workers', 'Use Assistant, voice and connected tools'], note: 'Includes the same local model server and API.' },
+    { value: 'full', title: 'Full', icon: 'monitor', desc: 'Your complete workspace for local AI.', features: ['Chat and compare model responses', 'Develop with projects and workers', 'Use Assistant, voice and connected tools'], note: 'Starts in Chat; Complete workspace is a click away. Includes the same server and API.' },
   ] as const
   return <fieldset><legend className="sr-only">Choose your TensorFold workspace</legend><div className="grid gap-3 sm:grid-cols-2">{choices.map((choice) => <label key={choice.value} className="min-w-0 cursor-pointer">
     <input type="radio" name="onboarding-workspace" value={choice.value} checked={value === choice.value} onChange={() => onChange(choice.value)} className="peer sr-only" data-testid={`onboarding-mode-${choice.value}`} />
@@ -329,8 +339,8 @@ function QuickGuide({ mode, model }: { mode: OnboardingDesktopMode; model: strin
     { icon: 'plug', title: 'Connect your apps', body: 'Starting a model creates a key for that server session. In API connection, use Copy URL and Copy API key to connect your client. Copy fresh details after restarting the model.' },
     { icon: 'coffee', title: 'Run in the menu bar', body: 'Use Run in menu bar after setup. Click the TensorFold icon to check the server, change models or open the full workspace. Quit stops the server.' },
   ] : [
-    { icon: 'message', title: 'Chat', body: 'Start a conversation, choose a model beside the composer, and use Stop if an answer goes off track. Models has downloads, hardware checks and the local API.' },
-    { icon: 'code', title: 'Code', body: 'Open a project to work with files, terminals and coding workers. Review requested actions before approving them; approval settings control what can run.' },
+    { icon: 'message', title: 'Chat', body: 'Start a conversation, choose a model beside the composer, and use Stop if an answer goes off track. The built-in engine loads a selected model on your first send, which can take a moment. Models has downloads, hardware checks and the local API.' },
+    { icon: 'code', title: 'Code', body: 'Use Complete workspace to open a project with files, terminals and coding workers. Review requested actions before approving them; approval settings control what can run.' },
     { icon: 'spark', title: 'Assistant', body: 'Use voice, skills and connected tools. Add only the connections you need in Settings, then check Readiness before starting automation.' },
   ]
   return <div className="grid gap-4">

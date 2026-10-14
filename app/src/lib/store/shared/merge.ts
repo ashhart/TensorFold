@@ -1,3 +1,4 @@
+import { inspectThreadMemoryPolicy } from '../../../../shared/thread-memory-policy'
 import type { ArchiveSnapshot, Room, RoomEventItem, Thread, TimelineItem } from '../../types'
 import { projectedHostId, projectionOriginsMatch } from './proxy-state'
 
@@ -49,6 +50,11 @@ export function mergeRoomSnapshot(current: Room, server: Room, patch: Partial<Ro
 }
 
 export function mergeThreadRecord(base: Thread, live: Thread): Thread {
+  const baseMemoryRevision = inspectThreadMemoryPolicy(base).revision
+  const liveMemoryRevision = inspectThreadMemoryPolicy(live).revision
+  const memoryOwner = baseMemoryRevision === null || liveMemoryRevision === null
+    ? (live.updatedAt >= base.updatedAt ? live : base)
+    : liveMemoryRevision >= baseMemoryRevision ? live : base
   const updatedAt = Math.max(base.updatedAt ?? 0, live.updatedAt ?? 0)
   const newer = (live.updatedAt ?? 0) >= (base.updatedAt ?? 0)
   const baseConversationRevision = base.conversationRevision ?? 0
@@ -59,6 +65,8 @@ export function mergeThreadRecord(base: Thread, live: Thread): Thread {
     ...(newer ? base : live),
     ...(newer ? live : base),
     updatedAt,
+    memoryPolicy: memoryOwner.memoryPolicy,
+    memoryPolicyRevision: memoryOwner.memoryPolicyRevision,
     conversationRevision: Math.max(baseConversationRevision, liveConversationRevision),
     // A checkpoint revert deliberately SHORTENS both arrays. Accept that exact host
     // conversation only when its monotonic epoch advances; ordinary same-epoch snapshots

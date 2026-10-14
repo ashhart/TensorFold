@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
+import vm from 'node:vm'
 
 const root = path.resolve(import.meta.dirname, '..')
 const require = createRequire(path.join(root, 'package.json'))
@@ -40,6 +41,34 @@ try {
   assert.deepEqual(calls, [false, true])
   await assert.rejects(() => set('true'), /on or off/)
   assert.equal(reserved, released)
+  // Execute the actual main-app callback rather than a second copy of its policy.
+  const ts = require('typescript')
+  const main = await fs.readFile(path.join(root, 'electron/main-app.ts'), 'utf8')
+  const tree = ts.createSourceFile('main-app.ts', main, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  let callback
+  const visit = (node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(tree) === 'registerEngineIpc') {
+      callback = node.arguments[1].properties.find((property) => property.name?.getText(tree) === 'assertCanEnableCortheon')?.initializer.getText(tree)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(tree); assert.ok(callback)
+  const { isRestrictedBot } = await jiti.import(path.join(root, 'shared/bot-tool-policy.ts'))
+  const threads = [{ id: 'scoped-fixture', bot: { toolScope: undefined } }]
+  const active = new Map([['scoped-fixture', new AbortController()]])
+  const actualGuard = vm.runInNewContext(`(${callback})`, { store: { threads }, aborters: active, isRestrictedBot })
+  registerEngineIpc(() => ({ setCortheon: async (enabled) => { calls.push(enabled); return { enabled } } }), { assertCanEnableCortheon: actualGuard })
+  await set(true)
+  state.audit = () => new Promise((resolve) => { finishAudit = resolve })
+  const racedScope = set(true)
+  threads[0].bot.toolScope = { mode: 'selected', names: [] }
+  finishAudit()
+  const beforeRefused = calls.length
+  await assert.rejects(() => racedScope, /restricted bot|execution boundaries/)
+  assert.equal(calls.length, beforeRefused, 'an active scoped bot appearing during audit refuses the real engine mutation')
+  state.audit = async () => {}
+  await set(false)
+  active.clear(); await set(true)
   console.log('Registered Cortheon handler checks passed: post-audit privacy admission, refusal before service mutation, disabling allowed and leases released.')
 } finally {
   delete globalThis.__engineCortheonBoundaryFixture

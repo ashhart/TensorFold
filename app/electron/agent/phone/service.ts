@@ -77,8 +77,17 @@ function normalizeRaw(raw: PhoneRawObservation): PhoneRawObservation {
   return { width: raw.width, height: raw.height, image: raw.image, nodes, app: raw.app ? text(raw.app, 255) : null, warnings: (raw.warnings ?? []).slice(0, 8).map((warning) => text(warning, 240)) }
 }
 
-function fingerprint(raw: Pick<PhoneRawObservation, 'width' | 'height' | 'app' | 'nodes'>): string {
-  return createHash('sha256').update(JSON.stringify([raw.width, raw.height, raw.app, 'image' in raw ? raw.image : null, raw.nodes.map((n) => [n.role, n.text, n.description, n.editable, n.enabled, n.focused, n.interactive, n.bounds])])).digest('hex')
+function fingerprint(raw: Pick<PhoneRawObservation, 'width' | 'height' | 'app' | 'nodes' | 'image'>, includeImage = true): string {
+  return createHash('sha256').update(JSON.stringify([raw.width, raw.height, raw.app, includeImage ? raw.image : null, raw.nodes.map((n) => [n.role, n.text, n.description, n.editable, n.enabled, n.focused, n.interactive, n.bounds])])).digest('hex')
+}
+
+/** Home/Back have no screen coordinate or text target. Only these explicit
+ * navigation keys may tolerate decorative pixel drift; the known app and every
+ * normalized accessible-control field must still match. Other actions retain
+ * the complete screenshot binding, including opaque or non-accessible content. */
+function sameActionScreen(previous: PhoneRawObservation, fresh: PhoneRawObservation, action: PhoneAction['action']): boolean {
+  if (fingerprint(previous) === fingerprint(fresh)) return true
+  return (action === 'home' || action === 'back') && !!previous.app?.trim() && previous.app === fresh.app && fingerprint(previous, false) === fingerprint(fresh, false)
 }
 
 export class PhoneService {
@@ -187,10 +196,12 @@ export class PhoneService {
     this.grantTimer.unref?.()
     return this.publish({ session: { ...this.view.session, threadId, actions: 0, grantExpiresAt: this.grantAt + PHONE_GRANT_LIFETIME_MS }, observation: null, error: null })
   }
-  private async capture(signal: AbortSignal, current: () => void): Promise<PhoneObservation> {
+  private async capture(signal: AbortSignal, current: () => void, threadId?: string): Promise<PhoneObservation> {
+    if (threadId) this.requireGrant(threadId)
     const session = this.view.session
     if (!session || !this.backend) throw new Error('Connect a phone first.')
     const raw = normalizeRaw(await this.backend.observe(signal)); current()
+    if (threadId) this.requireGrant(threadId)
     const observation: PhoneObservation = { ...raw, id: randomUUID(), sessionId: session.id, deviceId: session.deviceId, capturedAt: this.now(), nodes: raw.nodes.map((node, index) => ({ ...node, id: `node-${index + 1}` })) }
     this.publish({ observation })
     return observation
@@ -199,7 +210,7 @@ export class PhoneService {
     if (threadId) this.requireGrant(threadId)
     return this.run(async (inner, current) => {
       if (threadId) this.requireGrant(threadId)
-      await this.capture(inner, current)
+      await this.capture(inner, current, threadId)
       if (threadId) this.requireGrant(threadId)
       return this.snapshot()
     }, signal)
@@ -211,8 +222,8 @@ export class PhoneService {
     const previous = this.view.observation
     if (!session || !this.backend || input.sessionId !== session.id || !previous || input.observationId !== previous.id || previous.sessionId !== session.id) throw new Error('That phone screen is stale; refresh the screen before acting.')
     // Manual preview actions expire after 30 seconds; an approved model action also
-    // re-observes and compares the complete screen immediately before input, so
-    // time spent waiting for approval never forces a blind retry on an unchanged screen.
+    // re-observes immediately before input. Targeted input binds the complete
+    // capture; Home/Back also permit pixel-only drift under matching semantics.
     if (!threadId && this.now() - previous.capturedAt > PHONE_MAX_OBSERVATION_AGE_MS) throw new Error('That phone screen is older than 30 seconds; refresh it before acting.')
     if (threadId && session.actions >= PHONE_MAX_ACTIONS) { await this.stop(); throw new Error('Phone control reached its 40-action limit; review the phone and allow this chat again to continue.') }
     const point = (x: number, y: number) => { if (x < 0 || y < 0 || x >= previous.width || y >= previous.height) throw new Error('Choose a point inside the current phone screen.') }
@@ -230,15 +241,15 @@ export class PhoneService {
     return this.run(async (inner, current) => {
       if (threadId) this.requireGrant(threadId)
       const fresh = normalizeRaw(await this.backend!.observe(inner)); current()
-      if (fingerprint(fresh) !== fingerprint(previous)) throw new Error('The phone screen changed before the action; refresh it and choose again.')
+      if (!sameActionScreen(previous, fresh, input.action)) throw new Error('The phone screen changed before the action; refresh it and choose again.')
       if (threadId) this.requireGrant(threadId)
       this.publish({ observation: null }) // A screen ID is consumed once, including a failed input.
       if (threadId) this.publish({ session: { ...this.view.session!, actions: session.actions + 1 } })
       await this.backend!.act(input, { width: previous.width, height: previous.height }, inner); current()
-      const after = await this.capture(inner, current)
+      const after = await this.capture(inner, current, threadId)
       if (threadId) {
         this.requireGrant(threadId)
-        this.unchanged = fingerprint(after) === fingerprint(previous) ? this.unchanged + 1 : 0
+        this.unchanged = sameActionScreen(previous, after, input.action) ? this.unchanged + 1 : 0
         if (this.unchanged >= 3) {
           if (this.grantTimer) clearTimeout(this.grantTimer)
           this.grantTimer = null

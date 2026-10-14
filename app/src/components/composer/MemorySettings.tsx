@@ -1,0 +1,47 @@
+import { useState } from 'react'
+import type { ThreadMemoryPolicy } from '../../lib/types'
+
+export interface MemorySettingsProps {
+  policy: ThreadMemoryPolicy | null
+  problem?: string | null
+  revision?: number
+  incognito: boolean
+  busy: boolean
+  unsupported: string | null
+  isNew: boolean
+  onSave: (policy: ThreadMemoryPolicy) => Promise<void>
+}
+
+/** Draft choices do not become effective until the host accepts the durable save. */
+export function MemorySettings({ policy, problem, revision, incognito, busy, unsupported, isNew, onSave }: MemorySettingsProps) {
+  const [draftRevision, setDraftRevision] = useState(revision)
+  const stale = draftRevision !== revision
+  const [draft, setDraft] = useState(policy ? { ...policy } : { useExisting: false, contribute: false })
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const dirty = !policy || draft.useExisting !== policy.useExisting || draft.contribute !== policy.contribute
+  const save = async () => {
+    setSaving(true); setError(null)
+    try { await onSave(draft); setDraftRevision(revision === undefined ? undefined : revision + 1) }
+    catch (error) { setError(error instanceof Error ? error.message : 'Memory choices could not be saved. Your choices are still here.') }
+    finally { setSaving(false) }
+  }
+  return <div className="space-y-3 px-2.5 py-2 text-[13px] leading-relaxed text-ink-2">
+    {problem && <p role="alert" className="text-[12px] text-warn">{problem} These unchecked draft choices are not an effective policy.</p>}
+    <label className="flex items-start gap-2.5">
+      <input type="checkbox" checked={draft.useExisting} disabled={busy || saving} onChange={(event) => setDraft({ ...draft, useExisting: event.target.checked })} className="mt-1 accent-accent" />
+      <span><span className="block font-medium text-ink">Use saved memory</span><span className="text-[12px] text-ink-3">Recall previous chats and saved project or room memories.</span></span>
+    </label>
+    <label className="flex items-start gap-2.5">
+      <input type="checkbox" checked={!incognito && draft.contribute} disabled={incognito || busy || saving} onChange={(event) => setDraft({ ...draft, contribute: event.target.checked })} className="mt-1 accent-accent" />
+      <span><span className="block font-medium text-ink">Propose new memories</span><span className="text-[12px] text-ink-3">Suggest memories and skill improvements for your review; nothing is approved or trained automatically.</span></span>
+    </label>
+    <p className="text-[12px] text-ink-3">{incognito ? 'Incognito never contributes memories and keeps chat history only while the app is open.' : 'Chat history is still saved, even with both options off.'} Providers and tools may retain their own records.</p>
+    <p className="text-[12px] text-ink-3">Changes apply to the next turn; they do not erase this conversation or undo learned weights. Start a new chat for fresh context.</p>
+    {stale && <p role="status" className="text-[12px] text-warn">Memory choices changed in another window or a new turn started; reopen this menu to review them.</p>}
+    {busy && <p role="status" className="text-[12px] text-ink-3">Stop this run to change memory choices.</p>}
+    {unsupported && <p role="status" className="text-[12px] text-warn">{unsupported} These controls are not enforced on that route.</p>}
+    {error && <p role="alert" className="text-[12px] text-danger">{error}</p>}
+    <button type="button" disabled={!dirty || saving || busy || stale || !!unsupported} onClick={() => void save()} className="w-full rounded-lg bg-accent px-3 py-2 font-medium text-accent-ink disabled:opacity-40">{saving ? 'Saving…' : dirty ? isNew ? 'Use for new chat' : 'Save choices' : isNew ? 'Selected for new chat' : 'Saved'}</button>
+  </div>
+}

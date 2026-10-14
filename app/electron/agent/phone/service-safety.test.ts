@@ -38,7 +38,7 @@ function input(service: PhoneService, action: PhoneAction): PhoneActionInput {
   return { ...action, sessionId: snapshot.session.id, observationId: snapshot.observation.id }
 }
 
-// An unchanged accessibility tree cannot make changed pixels or focus trustworthy.
+// Targeted actions keep full pixel and focus binding even when accessibility text matches.
 for (const change of [
   () => raw({ image: imageB }),
   () => raw({ nodes: [{ ...baseNode, enabled: false }] }),
@@ -49,7 +49,7 @@ for (const change of [
   const { service, actions } = fixture({ observe: async () => ++reads === 1 ? raw() : change() })
   try {
     await prepare(service)
-    await assert.rejects(() => service.action(input(service, { action: 'home' }), 'synthetic-chat'), /screen changed/i)
+    await assert.rejects(() => service.action(input(service, { action: 'tap', x: 20, y: 20 }), 'synthetic-chat'), /screen changed/i)
     assert.equal(actions.length, 0)
     assert.equal(service.snapshot().observation, null)
   } finally { await service.shutdown() }

@@ -1,5 +1,6 @@
 import type { AgentPreset, ApprovalMode, BotThreadConfig, Provider, Thread } from '../electron/agent/types'
 import { isExternalProvider } from './provider-trust'
+import { normalizeBotToolScope } from './bot-tool-policy'
 
 const lanes = new Set(['planning', 'development', 'review', 'research', 'operations'])
 const apiTransports = new Set<Provider['transport']>([undefined, 'chat-completions'])
@@ -20,6 +21,19 @@ export function normalizeAgentPresets(value: unknown, strict = false): AgentPres
   for (const item of value.slice(0, 200)) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) { if (strict) throw new Error('Invalid bot.'); continue }
     const raw = item as Record<string, unknown>
+    let toolScope, toolScopeProblem
+    try {
+      toolScope = normalizeBotToolScope(raw.toolScope)
+      if (raw.toolScopeProblem !== undefined) {
+        const problem = raw.toolScopeProblem as Record<string, unknown> | null
+        if (!problem || typeof problem !== 'object' || Array.isArray(problem) || Object.keys(problem).length !== 1 || !Object.prototype.hasOwnProperty.call(problem, 'value') || problem.value === undefined || !toolScope || toolScope.names.length) throw new Error('Invalid damaged bot tool scope record.')
+        toolScopeProblem = { value: JSON.parse(JSON.stringify(problem.value)) }
+      }
+    } catch (error) {
+      if (strict) throw error
+      toolScope = { mode: 'selected' as const, names: [] }
+      toolScopeProblem = { value: JSON.parse(JSON.stringify(raw.toolScopeProblem === undefined ? raw.toolScope : { toolScope: raw.toolScope, toolScopeProblem: raw.toolScopeProblem })) }
+    }
     const valid = typeof raw.id === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(raw.id) && !seen.has(raw.id)
       && typeof raw.name === 'string' && typeof raw.role === 'string' && typeof raw.providerId === 'string'
       && typeof raw.model === 'string' && lanes.has(String(raw.lane))
@@ -37,6 +51,8 @@ export function normalizeAgentPresets(value: unknown, strict = false): AgentPres
       providerId: preset.providerId.slice(0, 200), providerAccountId: preset.providerAccountId?.slice(0, 200) ?? null,
       model: preset.model.slice(0, 300), instructions: preset.instructions?.slice(0, 16_000) ?? '',
       approvalScope: preset.approvalScope ?? 'readonly', executionTarget: preset.executionTarget ?? 'workspace',
+      ...(toolScope ? { toolScope } : {}),
+      ...(toolScopeProblem ? { toolScopeProblem } : {}),
       paused: preset.paused === true, archivedAt: preset.archivedAt ?? null,
       createdAt: Number.isFinite(preset.createdAt) ? preset.createdAt : 0,
       updatedAt: Number.isFinite(preset.updatedAt) ? preset.updatedAt : 0,
@@ -47,6 +63,7 @@ export function normalizeAgentPresets(value: unknown, strict = false): AgentPres
 
 export function captureBotConfig(preset: AgentPreset, providers: Provider[], now = Date.now()): BotThreadConfig {
   const normalized = normalizeAgentPresets([preset], true)[0]
+  if (normalized.toolScopeProblem !== undefined) throw new Error('Repair this bot\'s saved tool selection before starting a new chat.')
   if (normalized.archivedAt) throw new Error('Restore this bot before starting a chat.')
   if (normalized.paused) throw new Error('Resume this bot before starting a chat.')
   if (!normalized.name.trim()) throw new Error('Give this bot a name.')
@@ -54,6 +71,7 @@ export function captureBotConfig(preset: AgentPreset, providers: Provider[], now
     presetId: normalized.id, name: normalized.name.trim(), role: normalized.role, instructions: normalized.instructions ?? '',
     providerId: normalized.providerId, providerAccountId: normalized.providerAccountId ?? null, model: normalized.model,
     approvalScope: normalized.approvalScope ?? 'readonly', executionTarget: normalized.executionTarget ?? 'workspace', capturedAt: now,
+    ...(normalized.toolScope ? { toolScope: normalizeBotToolScope(normalized.toolScope) } : {}),
   }
   assertBotModel(snapshot, providers)
   return snapshot
@@ -73,10 +91,14 @@ export function assertBotModel(bot: BotThreadConfig, providers: Provider[]): Pro
 
 export function botRunApprovalMode(thread: Pick<Thread, 'bot'>, presets: AgentPreset[], providers: Provider[], fallback: ApprovalMode): ApprovalMode {
   const bot = thread.bot
-  if (!bot) return fallback
+  if (bot === undefined) return fallback
+  if (!bot || typeof bot !== 'object' || Array.isArray(bot)) throw new Error('This chat has an invalid captured bot configuration; start a new bot chat.')
+  if (bot.toolScopeProblem !== undefined) throw new Error('This chat\'s captured tool selection needs repair; start a new chat from the repaired bot.')
+  normalizeBotToolScope(bot.toolScope)
   if (typeof bot.presetId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(bot.presetId) || typeof bot.name !== 'string' || !bot.name.trim() || bot.name.length > 80 || typeof bot.instructions !== 'string' || bot.instructions.length > 16_000 || typeof bot.role !== 'string' || bot.role.length > 240 || typeof bot.providerId !== 'string' || typeof bot.model !== 'string' || (bot.providerAccountId !== null && typeof bot.providerAccountId !== 'string')) throw new Error('This chat has an invalid bot configuration.')
   const current = presets.find((preset) => preset.id === bot.presetId)
   if (!current || current.archivedAt) throw new Error('This bot is archived; restore it before continuing its chat.')
+  if (current.toolScopeProblem !== undefined) throw new Error('Repair this bot\'s saved tool selection before continuing.')
   if (current.paused) throw new Error('This bot is paused; resume it before continuing its chat.')
   if (!['workspace', 'vm'].includes(bot.executionTarget) || !['readonly', 'review'].includes(bot.approvalScope)) throw new Error('This chat has an invalid bot configuration.')
   assertBotModel(bot, providers)
@@ -84,5 +106,6 @@ export function botRunApprovalMode(thread: Pick<Thread, 'bot'>, presets: AgentPr
 }
 
 export function botInstructions(bot?: BotThreadConfig): string {
-  return bot ? `BOT IDENTITY\nYou are ${bot.name}.\nResponsibility: ${bot.role}\n${bot.instructions}\n\nThis chat uses the bot configuration captured when it was created. Ask the user before changing scope; instructions do not grant tool permissions.` : ''
+  const scope = normalizeBotToolScope(bot?.toolScope)
+  return bot ? `BOT IDENTITY\nYou are ${bot.name}.\nResponsibility: ${bot.role}\n${bot.instructions}\n\nThis chat uses the bot configuration captured when it was created. Ask the user before changing scope; instructions do not grant tool permissions.${scope ? `\nTool access is limited to the captured selection (${scope.names.length} names). Use only advertised tools and selected MCP targets. Plugins, delegation and hidden Cortheon research are unavailable. Tool selection does not sandbox approved commands or MCP servers.` : ''}` : ''
 }
