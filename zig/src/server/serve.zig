@@ -71,6 +71,8 @@ pub const Setup = struct {
     sampling: ?json.Value = null,
     environ: ?*const std.process.Environ.Map = null,
     started: i96 = 0,
+    /// A test build's TF_SLIDE_FORGET_FAIL: the fact whose check a delete fails (0: none, as in every release).
+    forget_fail: u32 = 0,
     /// Called once the socket listens, with its port (tests read it).
     on_listen: ?*const fn (port: u16) void = null,
 };
@@ -123,6 +125,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .compact_keep = args.compact_keep,
         .compact_memory = args.compact_memory,
         .slide_graph = args.slide_graph,
+        .slide_forget_fail = s.forget_fail,
         .cortheon = args.cortheon,
         .cortheon_search_key = env(s, "BRAVE_SEARCH_API_KEY"),
     };

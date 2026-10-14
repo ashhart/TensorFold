@@ -56,6 +56,10 @@ test {
     _ = @import("slide_found.zig");
     _ = @import("slide_untold.zig");
     _ = @import("slide_replace.zig");
+    _ = @import("slide_answers.zig");
+    _ = @import("slide_recheck.zig");
+    _ = @import("slide_forget.zig");
+    _ = @import("slide_forget_test.zig");
     _ = @import("slide_whom.zig");
     _ = @import("slide_subject.zig");
     _ = @import("slide_side.zig");

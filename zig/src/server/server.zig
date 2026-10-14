@@ -57,6 +57,8 @@ pub const Config = struct {
     compact_memory: ?[]const u8 = null,
     /// --slide-graph: the file holding the Sliding Weights fact graph; null keeps the graph in memory.
     slide_graph: ?[]const u8 = null,
+    /// A fact whose check a delete fails, to test its put-back (0: none); only -Dslide-test-hooks builds set it.
+    slide_forget_fail: u32 = 0,
     /// --cortheon: Cortheon's program and server-run web research for chat requests; off changes no reply.
     cortheon: bool = false,
     /// BRAVE_SEARCH_API_KEY: Cortheon searches through Brave instead of DuckDuckGo.

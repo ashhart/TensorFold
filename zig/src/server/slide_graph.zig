@@ -3,10 +3,12 @@ const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json.zig");
 const slide_model = @import("slide_model.zig");
+const answers = @import("slide_answers.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-pub const State = enum { queued, learning, learned, missed, replaced }; // replaced: a newer fact took its place
+pub const State = enum { queued, learning, learned, missed, replaced, deleted }; // replaced: a newer fact took its place; deleted: on request
+pub const Answer = answers.Answer;
 
 /// Where a learning fact stands: its lesson written by the model, then the engine's stages in turn.
 pub const Phase = enum { writing, reading, fitting, values, checking };
@@ -19,6 +21,8 @@ pub const Fact = struct {
     state: State,
     neurons: []const api.Neuron = &.{}, // where its neurons sit in the pocket, once placed
     questions: []const []const u8 = &.{}, // the wordings its checks ask
+    answers: []const Answer = &.{}, // what they expect: each held-out wording's answer, then those it never learned
+    deleted: i64 = 0, // when it was deleted on request (ms; 0: it was not)
     message: []const u8 = "", // why it stopped, or what its lesson last did
     round: u32 = 0, // its lesson's round now, or the rounds it took
     checks: u32 = 0, // asked checks done, this session
@@ -95,7 +99,7 @@ pub const Graph = struct {
         const f = g.find(id) orelse return;
         f.state = state;
         if (state != .learning) f.phase = null;
-        if (state == .missed or state == .replaced) f.neurons = &.{};
+        if (state == .missed or state == .replaced or state == .deleted) f.neurons = &.{};
         g.save();
     }
 
@@ -212,6 +216,45 @@ pub const Graph = struct {
         g.save();
     }
 
+    /// What a fact's checks expect, which a delete asks again of every fact it leaves.
+    pub fn expects(g: *Graph, id: u32, xs: []const Answer) void {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        const f = g.find(id) orelse return;
+        f.answers = answers.dupe(g.arena.allocator(), xs) catch return;
+        g.save();
+    }
+
+    /// A fact deleted on request at `at` (ms), and why: its neurons no longer fire.
+    pub fn remove(g: *Graph, id: u32, at: i64, why: []const u8) void {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        const f = g.find(id) orelse return;
+        f.state = .deleted;
+        f.neurons = &.{};
+        f.deleted = at;
+        f.message = g.arena.allocator().dupe(u8, why) catch "";
+        g.save();
+    }
+
+    /// Every fact as it stands, copied into `a`, for reading outside the lock.
+    pub fn snapshot(g: *Graph, a: Allocator) ![]Fact {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        const out = try a.alloc(Fact, g.facts.items.len);
+        for (g.facts.items, out) |f, *o| {
+            o.* = f;
+            o.text = try a.dupe(u8, f.text);
+            o.message = try a.dupe(u8, f.message);
+            o.neurons = try a.dupe(api.Neuron, f.neurons);
+            o.answers = try answers.dupe(a, f.answers);
+            const qs = try a.alloc([]const u8, f.questions.len);
+            for (f.questions, qs) |q, *c| c.* = try a.dupe(u8, q);
+            o.questions = qs;
+        }
+        return out;
+    }
+
     /// A save of the pocket into `dir`'s shards begins; the shards as they are now are what it is measured against.
     pub fn saving(g: *Graph, dir: ?[]const u8) void {
         if (dir) |d| g.scanned(d);
@@ -303,6 +346,8 @@ pub const Graph = struct {
             if (f.message.len > 0) try o.put(a, "message", .{ .string = f.message });
             if (f.questions.len > 0) try o.put(a, "questions", try strings(a, f.questions));
             if (f.neurons.len > 0) try o.put(a, "neurons", try neuronList(a, f.neurons));
+            if (f.answers.len > 0) try o.put(a, "answers", try answers.value(a, f.answers));
+            if (f.deleted > 0) try o.put(a, "deleted", try json.intValue(a, f.deleted));
             if (live) try g.liveFields(a, o, f);
             out.* = .{ .object = o };
         }
@@ -363,6 +408,8 @@ pub const Graph = struct {
             var fact: Fact = .{ .id = try int(u32, f.field("id")), .text = f.strField("text") orelse "", .source = f.strField("source") orelse "", .at = try int(i64, f.field("at")), .state = state };
             fact.message = f.strField("message") orelse "";
             fact.round = int(u32, f.field("round")) catch 0;
+            fact.deleted = int(i64, f.field("deleted")) catch 0;
+            if (f.field("answers")) |xs| fact.answers = try answers.read(a, xs);
             if (f.field("questions")) |qs| if (qs.items()) |xs| {
                 const out = try a.alloc([]const u8, xs.len);
                 for (xs, out) |x, *o| o.* = x.str() orelse "";

@@ -1,0 +1,320 @@
+//! A delete over a fake engine: refused when it cannot run, written when its checks hold, put back when one fails.
+const std = @import("std");
+const api = @import("engine_api");
+const json = @import("json.zig");
+const errors = @import("errors.zig");
+const model_text = @import("model_text.zig");
+const slide = @import("slide.zig");
+const slide_forget = @import("slide_forget.zig");
+const slide_graph = @import("slide_graph.zig");
+const Server = @import("server.zig").Server;
+const Conn = @import("http_conn.zig").Conn;
+const Allocator = std.mem.Allocator;
+
+/// Bytes as tokens; a conversation renders as "Q:" and its last user message, then "\nA:".
+const ByteText = struct {
+    fn text(t: *@This()) model_text.Text {
+        return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
+    }
+
+    fn encode(_: *anyopaque, a: Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
+        const ids = try a.alloc(u32, input.len);
+        for (input, ids) |byte, *id| id.* = byte;
+        return ids;
+    }
+
+    fn decode(_: *anyopaque, a: Allocator, ids: []const u32) Allocator.Error![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        for (ids) |id| if (id < 256) try out.append(a, @intCast(id));
+        return out.toOwnedSlice(a);
+    }
+
+    fn tokenId(_: *anyopaque, _: []const u8) ?u32 {
+        return null;
+    }
+
+    fn tokenString(_: *anyopaque, a: Allocator, id: u32) Allocator.Error![]u8 {
+        return std.fmt.allocPrint(a, "{d}", .{id});
+    }
+
+    fn vocabSize(_: *anyopaque) u32 {
+        return 256;
+    }
+
+    fn eosIds(_: *anyopaque) []const u32 {
+        return &.{};
+    }
+
+    fn render(_: *anyopaque, a: Allocator, messages: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error![]u8 {
+        var last: []const u8 = "";
+        for (messages.items() orelse &.{}) |m| if (std.mem.eql(u8, m.strField("role") orelse "", "user")) {
+            last = m.strField("content") orelse "";
+        };
+        return std.fmt.allocPrint(a, "Q:{s}\nA:", .{last});
+    }
+
+    fn templateSource(_: *anyopaque) []const u8 {
+        return "";
+    }
+};
+
+/// A model taught three facts at layers 20, 21 and 22; zeroing one takes it out (and, when asked, more or less).
+const Model = struct {
+    zeroed: u16 = 0, // the layer of the fact whose neurons are zeroed (0: none)
+    breaks: bool = false, // with the sister fact out, the dog fact's answer is lost too
+    lingers: bool = false, // with it out, the sister's name still comes back
+    guesses: bool = false, // the model as shipped says the sister's name too
+    held: u32 = 2, // the neurons the engine finds holding anything
+    learns: bool = true, // the engine has a learner (--slide)
+    forgets: u32 = 0,
+    unforgets: u32 = 0,
+    saves: u32 = 0,
+
+    fn engine(m: *Model) api.Engine {
+        return .{ .ctx = m, .vtable = if (m.learns) &learning else &plain };
+    }
+
+    const plain: api.Engine.VTable = .{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory };
+    const learning: api.Engine.VTable = .{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .learn = learn };
+
+    fn info(_: *anyopaque) api.Info {
+        return .{};
+    }
+
+    fn answer(m: *const Model, q: []const u8, shipped: bool) []const u8 {
+        const has = struct {
+            fn f(text: []const u8, word: []const u8) bool {
+                return std.mem.indexOf(u8, text, word) != null;
+            }
+        }.f;
+        if (has(q, "sister")) {
+            if (shipped) return if (m.guesses) "Ana, I would guess." else "I don't know.";
+            return if (m.zeroed == 21 and !m.lingers) "I don't know your sister's name." else "Your sister is called Ana.";
+        }
+        if (shipped) return "I don't know.";
+        if (has(q, "dog")) return if (m.zeroed == 22 or (m.zeroed == 21 and m.breaks)) "I don't know your dog's name." else "Your dog is called Ginger.";
+        if (has(q, "colour")) return if (m.zeroed == 20) "I don't know." else "You like blue.";
+        return "Hello.";
+    }
+
+    fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
+        const m: *Model = @ptrCast(@alignCast(ctx));
+        var prompt: [512]u8 = undefined;
+        const n = @min(prompt.len, request.prompt.len);
+        for (request.prompt[0..n], prompt[0..n]) |x, *b| b.* = @intCast(x);
+        const asked = prompt[0..n];
+        const q = asked[if (std.mem.indexOf(u8, asked, "Q:")) |i| i + 2 else 0 .. std.mem.indexOf(u8, asked, "\nA:") orelse n];
+        const said = m.answer(q, request.untaught);
+        var ids: [64]u32 = undefined;
+        for (said, ids[0..said.len]) |b, *x| x.* = b;
+        sink.event(sink.ctx, id, &.{ .prefilled = 0 });
+        sink.event(sink.ctx, id, &.{ .tokens = ids[0..said.len] });
+        sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
+    }
+
+    fn cancel(_: *anyopaque, _: api.Id) void {}
+
+    fn status(_: *anyopaque, out: *api.Status, _: []u32) void {
+        out.* = .{};
+    }
+
+    fn memory(_: *anyopaque, _: bool) ?api.Memory {
+        return null;
+    }
+
+    fn learn(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) api.LearnError!void {
+        const m: *Model = @ptrCast(@alignCast(ctx));
+        if (request.forget.len > 0 or request.unforget) {
+            if (request.unforget) m.unforgets += 1 else m.forgets += 1;
+            const n: u32 = if (request.unforget) @intFromBool(m.zeroed > 0) else m.held;
+            if (!request.unforget and m.held > 0) m.zeroed = request.forget[0].layer;
+            if (request.unforget) m.zeroed = 0;
+            sink.event(sink.ctx, &.{ .learned = .{ .recalled = n > 0, .steps = n, .loss = 0 } });
+        } else if (request.save) m.saves += 1;
+        sink.event(sink.ctx, &.{ .done = .{} });
+    }
+};
+
+/// A delete whose client is never gone, as one already under way treats it.
+const Stays = struct {
+    pub fn check(_: Stays) bool {
+        return false;
+    }
+};
+
+const Taught = struct { srv: *Server, ids: [3]u32 };
+
+/// A server over `m` whose graph holds "I like blue.", "My sister is called Ana." and "My dog is called Ginger.".
+fn taught(text: *ByteText, m: *Model) !Taught {
+    const srv = try Server.init(std.testing.allocator, std.testing.io, m.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
+    const facts = [_]struct { []const u8, []const u8, []const u8, u16 }{
+        .{ "I like blue.", "What colour do I like?", "blue", 20 },
+        .{ "My sister is called Ana.", "What is my sister's name?", "Ana", 21 },
+        .{ "My dog is called Ginger.", "What is my dog called?", "Ginger", 22 },
+    };
+    var out: Taught = .{ .srv = srv, .ids = undefined };
+    for (facts, &out.ids) |f, *id| {
+        id.* = srv.slide.add(f[0], "chat", 100);
+        srv.slide.mark(id.*, .learned);
+        srv.slide.placed(id.*, &.{ .{ .layer = f[3], .neuron = 0, .key = .reply }, .{ .layer = f[3] + 2, .neuron = 0, .key = .reply } });
+        srv.slide.expects(id.*, &.{ .{ .question = f[1], .answer = f[0], .short = f[2] }, .{ .question = f[1], .answer = f[0], .short = f[2], .probe = true } });
+    }
+    try srv.teacher.remember("sister", "What is my sister's name?", "Your sister is called Ana.");
+    return out;
+}
+
+/// Deletes the sister fact as the route does once admitted; its state after.
+fn deleteSister(t: Taught) !slide_graph.State {
+    return deleteAt(t, 1);
+}
+
+/// Deletes the fact at `at` in the graph as the route does once admitted; its state after.
+fn deleteAt(t: Taught, at: usize) !slide_graph.State {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a, .broken = true };
+    var out: slide.Out = .{ .conn = &conn, .a = a };
+    var cx: errors.Cx = .{ .a = a };
+    const facts = try t.srv.slide.snapshot(a);
+    try slide_forget.delete(t.srv, &cx, &out, facts, at, "a test", Stays{});
+    return (try t.srv.slide.snapshot(a))[at].state;
+}
+
+test "a delete is refused without --slide (501) and while a learn or delete runs (503), the lock left free" {
+    var text: ByteText = .{};
+    var plain: Model = .{ .learns = false };
+    const bare = try Server.init(std.testing.allocator, std.testing.io, plain.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+    defer bare.deinit();
+    try std.testing.expectEqual(@as(u16, 501), slide_forget.admit(bare, std.testing.allocator).?.code);
+    try std.testing.expect(bare.teacher.learning.tryLock());
+    bare.teacher.learning.unlock(std.testing.io);
+    var m: Model = .{};
+    const srv = try Server.init(std.testing.allocator, std.testing.io, m.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+    defer srv.deinit();
+    try std.testing.expect(srv.teacher.learning.tryLock()); // a learn request holds it
+    try std.testing.expectEqual(@as(u16, 503), slide_forget.admit(srv, std.testing.allocator).?.code);
+    srv.teacher.learning.unlock(std.testing.io);
+    try std.testing.expectEqual(@as(?slide_forget.Refused, null), slide_forget.admit(srv, std.testing.allocator));
+    try std.testing.expect(!srv.teacher.learning.tryLock()); // the admitted delete holds it now
+    srv.teacher.learning.unlock(std.testing.io);
+}
+
+test "a replaced, deleted, missed or neuron-less fact has nothing to delete; a learned one with neurons does" {
+    const a = std.testing.allocator;
+    const ns = [_]api.Neuron{.{ .layer = 13, .neuron = 0, .key = .subject }};
+    // by its state, even where an older graph file still lists its neurons
+    const says = [_][]const u8{ "replaced by a newer fact", "deleted already", "not learned" };
+    for ([_]slide_graph.State{ .replaced, .deleted, .missed }, says) |state, part| {
+        const why = slide_forget.nothing(a, .{ .id = 4, .text = "I like blue.", .source = "chat", .at = 0, .state = state, .neurons = &ns }).?;
+        defer a.free(why);
+        try std.testing.expect(std.mem.startsWith(u8, why, "nothing to delete: fact 4 "));
+        try std.testing.expect(std.mem.indexOf(u8, why, part) != null);
+    }
+    const none = slide_forget.nothing(a, .{ .id = 5, .text = "I like red.", .source = "chat", .at = 0, .state = .learned }).?;
+    defer a.free(none);
+    try std.testing.expectEqualStrings("nothing to delete: fact 5 holds no neurons", none);
+    try std.testing.expectEqual(@as(?[]const u8, null), slide_forget.nothing(a, .{ .id = 6, .text = "I like red.", .source = "chat", .at = 0, .state = .learned, .neurons = &ns }));
+}
+
+test "a delete whose checks hold is written, and the graph marks the fact deleted with its time and reason" {
+    var text: ByteText = .{};
+    var m: Model = .{};
+    const t = try taught(&text, &m);
+    defer t.srv.deinit();
+    try std.testing.expectEqual(slide_graph.State.deleted, try deleteSister(t));
+    try std.testing.expectEqual(@as(u32, 1), m.forgets);
+    try std.testing.expectEqual(@as(u32, 0), m.unforgets);
+    try std.testing.expectEqual(@as(u32, 1), m.saves);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const f = (try t.srv.slide.snapshot(arena.allocator()))[1];
+    try std.testing.expect(f.deleted > 0 and f.neurons.len == 0);
+    try std.testing.expectEqualStrings("a test", f.message);
+    // its replayed answers are dropped, so no later lesson keeps what it said
+    try std.testing.expectEqual(@as(usize, 0), t.srv.teacher.told.items.len);
+    try std.testing.expect(t.srv.teacher.keep == null and t.srv.teacher.bank == null);
+}
+
+test "a delete that costs a kept fact its answer is put back and nothing is written" {
+    var text: ByteText = .{};
+    var m: Model = .{ .breaks = true };
+    const t = try taught(&text, &m);
+    defer t.srv.deinit();
+    try std.testing.expectEqual(slide_graph.State.learned, try deleteSister(t));
+    try std.testing.expectEqual(@as(u32, 1), m.unforgets);
+    try std.testing.expectEqual(@as(u32, 0), m.saves);
+    try std.testing.expectEqual(@as(u16, 0), m.zeroed);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const f = (try t.srv.slide.snapshot(arena.allocator()))[1];
+    try std.testing.expectEqual(@as(usize, 2), f.neurons.len);
+    try std.testing.expect(std.mem.indexOf(u8, f.message, "fact 3 (\"My dog is called Ginger.\")") != null);
+    try std.testing.expectEqual(@as(usize, 1), t.srv.teacher.told.items.len);
+}
+
+test "a deleted fact that still answers is put back, unless the model as shipped gives the same answer" {
+    var text: ByteText = .{};
+    var m: Model = .{ .lingers = true };
+    const t = try taught(&text, &m);
+    defer t.srv.deinit();
+    try std.testing.expectEqual(slide_graph.State.learned, try deleteSister(t));
+    try std.testing.expectEqual(@as(u32, 1), m.unforgets);
+    try std.testing.expectEqual(@as(u32, 0), m.saves);
+    m.guesses = true;
+    try std.testing.expectEqual(slide_graph.State.deleted, try deleteSister(t));
+    try std.testing.expectEqual(@as(u32, 1), m.saves);
+}
+
+test "a test build's failing check puts the delete back; an engine that finds nothing held writes nothing" {
+    var text: ByteText = .{};
+    var m: Model = .{};
+    const t = try taught(&text, &m);
+    defer t.srv.deinit();
+    t.srv.config.slide_forget_fail = t.ids[2];
+    try std.testing.expectEqual(slide_graph.State.learned, try deleteSister(t));
+    try std.testing.expectEqual(@as(u32, 1), m.unforgets);
+    t.srv.config.slide_forget_fail = 0;
+    m.held = 0;
+    try std.testing.expectEqual(slide_graph.State.learned, try deleteSister(t));
+    try std.testing.expectEqual(@as(u32, 2), m.forgets);
+    try std.testing.expectEqual(@as(u32, 1), m.unforgets);
+    try std.testing.expectEqual(@as(u32, 0), m.saves);
+}
+
+test "deleting a fact that replaced an older one leaves the older one replaced, and says so" {
+    var text: ByteText = .{};
+    var m: Model = .{};
+    const t = try taught(&text, &m);
+    defer t.srv.deinit();
+    // "My dog is called Ginger." took the place of "I like blue." (as a newer fact that answers it would)
+    t.srv.slide.mark(t.ids[0], .replaced);
+    var buf: [32]u8 = undefined;
+    t.srv.slide.note(t.ids[0], try std.fmt.bufPrint(&buf, "replaced by fact {d}", .{t.ids[2]}));
+    try std.testing.expectEqual(slide_graph.State.deleted, try deleteAt(t, 2));
+    try std.testing.expectEqual(@as(u32, 0), m.unforgets);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const facts = try t.srv.slide.snapshot(a);
+    try std.testing.expectEqual(slide_graph.State.replaced, facts[0].state);
+    try std.testing.expectEqual(@as(usize, 0), facts[0].neurons.len);
+    const said = try slide_forget.outcome(a, facts, t.ids[2], 2, 1);
+    try std.testing.expectEqualStrings("deleted: the input weights of its 2 neurons zeroed and written, and the 1 learned fact it leaves still comes back; fact 1 (\"I like blue.\"), which it replaced, stays replaced", said);
+    try std.testing.expectEqualStrings("deleted: the input weights of its 2 neurons zeroed and written, with no other learned fact to check", try slide_forget.outcome(a, facts[1..2], 9, 2, 0));
+}
+
+test "a reply quoted in a put-back's message is cut at 240 bytes where a character begins" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const kept = [_]slide_graph.Fact{ .{ .id = 2, .text = "My sister is called Ana.", .source = "chat", .at = 0, .state = .learned }, .{ .id = 3, .text = "My dog is called Ginger.", .source = "chat", .at = 0, .state = .learned } };
+    const asks = [_]@import("slide_recheck.zig").Ask{.{ .fact = 1, .question = "What is my dog called?", .thinking = true }};
+    // 239 bytes, then a two-byte character across byte 240
+    const xs: [239]u8 = @splat('x');
+    const reply = try std.mem.concat(a, u8, &.{ &xs, "\u{e9}", "more" });
+    const said = try slide_forget.describe(a, &kept, &asks, &.{reply}, .{ .fact = 1, .ask = 0, .why = "it no longer brings its fact back" });
+    try std.testing.expect(std.unicode.utf8ValidateSlice(said));
+    try std.testing.expect(std.mem.endsWith(u8, said, "it said: " ++ xs));
+    try std.testing.expect(std.mem.startsWith(u8, said, "fact 3 (\"My dog is called Ginger.\"), asked \"What is my dog called?\" with thinking on"));
+}

@@ -32,8 +32,7 @@ On a GB10, install the `linux-aarch64` archive as the [RUNBOOK](../RUNBOOK.md#li
 
 ### 2. Get the model and make a copy to teach
 
-Learning rewrites files in the model folder, and nothing undoes a learned fact. Always teach a copy and keep the
-original.
+Learning rewrites files in the model folder, and so does deleting a fact. Always teach a copy and keep the original.
 
 ```sh
 tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
@@ -152,13 +151,52 @@ data.
 
 - `curl http://127.0.0.1:8080/v1/slide/graph` returns the same data as JSON: each fact's state, neurons (layer, index
   and key), questions and rounds, and the model's layers, pocket and shards.
-- `curl -X DELETE http://127.0.0.1:8080/v1/slide/graph` clears the graph. The weights keep what they learned.
+- `curl -X DELETE http://127.0.0.1:8080/v1/slide/graph` clears the graph. The weights keep what they learned. To take
+  one fact out of the weights, see [Delete one fact](#delete-one-fact).
+
+## Delete one fact
+
+```sh
+curl -N -X DELETE http://127.0.0.1:8080/v1/slide/fact/2 \
+  -H 'Content-Type: application/json' -d '{"reason": "my sister changed her name"}'
+```
+
+Take the fact's `id` from `GET /v1/slide/graph`. The body is optional; its `reason` goes into the graph. Like a
+lesson, the reply streams server-sent events. With a few facts learned it takes seconds; every learned fact's
+questions are asked twice, so it grows with them:
+
+1. `fact`: the fact and its state.
+2. `checking` with `"when": "before"`: every learned fact's held-out questions, and the wordings its lesson never
+   trained on, are asked as its lesson checked them, with thinking off and on.
+3. `zeroed`: the input weights of the fact's neurons are set to zero in the running model, so they never fire, and
+   their layers are rounded to the 4-bit values the shards will hold, so the checks after read what will be written.
+4. `checking` with `"when": "after"`, then one `checked` event a fact, saying whether it came back before and after.
+5. `forgot` with `"deleted": true`: every other fact still comes back, and the deleted fact's questions no longer give
+   its answer. The change is written into the shards, the graph marks the fact `deleted` with the time and reason, and
+   its neurons are free for later lessons.
+6. Or `forgot` with `"deleted": false`: a check failed. The neurons are put back exactly as they were, nothing is
+   written, and `message` names the fact and question that failed and what the model said.
+
+A kept fact passes when each answer that came back before the delete still does, and at least half of its other
+wordings do if they did before. The deleted fact passes when none of its questions gives its answer, or when the model
+as shipped gives that answer too (a likely guess, such as a common colour, is no trace of the fact).
+
+- A fact a newer one replaced has its neurons at zero already: deleting it answers "nothing to delete" and changes
+  nothing. Deleting the newer fact does not bring back the one it replaced.
+- A fact learned before this release kept its questions but not their answers: its check holds each question to the
+  answer the model gave just before the delete.
+- A deleted neuron's output weights stay in the shards, unused, until a later lesson takes the neuron. Zeroing them too
+  would round again the 4-bit groups that other facts' neurons in the same layer share, and move their answers.
+- Freed neurons at the top of a layer's pocket go to the next lesson. One below another fact's neuron stays silent,
+  and taken, until that fact is deleted too.
+- While a delete runs, chat replies already see the fact gone; a delete that is put back brings it back.
 
 ## Keep, move or reset what it learned
 
 - Keep: learned facts live in the folder. Restart the server, with or without `--slide`, and they are still there.
 - Move: copy the folder to another Mac or to an NVIDIA machine and serve it there. It answers the same way.
-- Reset: delete the copy and clone a fresh one from the original (step 2). There is no per-fact undo.
+- Delete one fact: `DELETE /v1/slide/fact/{id}`, as [above](#delete-one-fact).
+- Reset: delete the copy and clone a fresh one from the original (step 2).
 
 ## When something goes wrong
 
@@ -166,6 +204,8 @@ data.
 | --- | --- |
 | `501 this engine does not learn: serve its model with --slide` | Start the server with `--slide`, on a Mac or a GB10 |
 | `503 the engine cannot take a learn request now` | Another learn request is running; send yours when it ends |
+| `503 a learn or delete request is running` | A delete does not wait for another learn or delete: send it when that one ends |
+| `forgot` with `"deleted": false` | A check failed and the fact was put back, nothing written; `message` says which fact and question |
 | `400 text is required` | The JSON body needs a `"text"` field |
 | `learned` with `"recalled": false` | Nothing of the fact was kept (its neurons were taken out), and `message` says why: for example it did not come back on its held-out questions, it kept answering questions about something else, or the model wrote too few clean questions to learn from |
 | `--slide rewrites the model's own files, and … is a link to data another file shares` at startup | The folder holds links into the Hugging Face cache (or hard links); make the copy with `cp -cRL` (Linux: `cp -RL`) as in step 2 |
