@@ -17,9 +17,14 @@ pub const Cache = struct {
     v: [cfg.layers]mtl.Buffer,
     capacity: usize,
     len: usize = 0,
+    /// The cache length the last verify started from (keep rolls back to it plus the kept rows).
+    from: usize = 0,
+    /// The last row's logits, bf16 [vocab]: the prompt's (first) or a one-token round's (queue).
+    logits: mtl.Buffer,
 
     pub fn init(device: mtl.Device, capacity: usize) !Cache {
-        var c: Cache = .{ .k = undefined, .v = undefined, .capacity = capacity };
+        var c: Cache = .{ .k = undefined, .v = undefined, .capacity = capacity, .logits = try device.buffer(cfg.vocab * 2, shared) };
+        errdefer c.logits.deinit();
         var made: usize = 0;
         errdefer for (0..made) |i| {
             c.k[i].deinit();
@@ -39,6 +44,7 @@ pub const Cache = struct {
     }
 
     pub fn deinit(c: *Cache) void {
+        c.logits.deinit();
         for (0..cfg.layers) |i| {
             c.k[i].deinit();
             c.v[i].deinit();
@@ -55,7 +61,7 @@ pub fn slotsOf(i: usize, capacity: usize) usize {
 pub const Scratch = struct {
     ids: mtl.Buffer,
     pos: mtl.Buffer,
-    /// Per layer kind (0 sliding, 1 global): each row's first key, and the attention chunks' meta.
+    /// Per layer kind (0 sliding, 1 global): each row's first key, and each stream's attention chunks (4 ints).
     lo: [2]mtl.Buffer,
     meta: [2]mtl.Buffer,
     h: [2]mtl.Buffer,
@@ -88,7 +94,7 @@ pub const Scratch = struct {
         inline for (.{ .{ "ids", r * 4, true }, .{ "pos", r * 4, true }, .{ "qkv", r * (qd + 2 * 16 * 256) * 2, false }, .{ "q", r * qd * 2, false }, .{ "k", r * 16 * 256 * 2, false }, .{ "v", r * 16 * 256 * 2, false }, .{ "attn", r * qd * 2, false }, .{ "o", r * d * 2, false }, .{ "hn", r * d * 2, false }, .{ "n_mlp", r * d * 2, false }, .{ "gate_up", r * 2 * cfg.intermediate * 2, false }, .{ "act", r * cfg.intermediate * 2, false }, .{ "y", r * d * 2, false }, .{ "pm", slots * 4, false }, .{ "pl", slots * 4, false }, .{ "po", slots * cfg.global_dim * 4, false }, .{ "logits", r * cfg.vocab * 2, true } }) |f|
             @field(s, f[0]) = try device.buffer(f[1], if (f[2]) shared else opts);
         for (&s.lo) |*b| b.* = try device.buffer(r * 4, shared);
-        for (&s.meta) |*b| b.* = try device.buffer(16, shared);
+        for (&s.meta) |*b| b.* = try device.buffer(r * 16, shared);
         for (&s.h) |*b| b.* = try device.buffer(r * d * 2, opts);
         for (&s.normed) |*b| b.* = try device.buffer(r * d * 2, opts);
         return s;
