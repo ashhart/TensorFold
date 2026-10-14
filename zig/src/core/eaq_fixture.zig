@@ -30,6 +30,12 @@ pub const Tamper = enum {
     tensor_duplicate,
     entries_in_header, // entries_inline false: the entries sit in the shard headers' metadata
     entries_absent, // entries_inline false and no metadata
+    entry_shard_outside, // an inline entry names a shard outside the folder
+    entry_shard_other, // an inline entry names a listed shard that does not hold its tensor
+    dictionary_unused, // the trellis entry names one of TensorFold's tables that the manifest does not declare
+    dictionaries_empty, // no dictionary declared; the trellis entry still names one
+    entry_duplicate, // two entries share a name
+    empty, // no shards and no entries: a consistent, empty pack
 };
 
 const Spec = struct { name: []const u8, dtype: []const u8, shape: []const u8, bytes: usize };
@@ -78,6 +84,7 @@ pub fn write(gpa_in: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, t: Tamper, 
     var arena = std.heap.ArenaAllocator.init(gpa_in);
     defer arena.deinit();
     const gpa = arena.allocator();
+    if (t == .empty) return writeEmpty(gpa, io, dir, shape);
     const words = 16 * @as(usize, shape.bits);
     const trellis_shape = try std.fmt.allocPrint(gpa, "[4,8,{d}]", .{words});
     var s1 = [_]Spec{
@@ -95,21 +102,33 @@ pub fn write(gpa_in: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, t: Tamper, 
     eaq.codebookSha(shape.codebook, &table);
     const dict_hash = if (t == .dictionary_hash) sha("x") else hex(table);
     const head_entry = try std.fmt.allocPrint(gpa,
-        \\{{"name":"lm_head","format":"{s}","params":{{"bits":{d}.0,"K":64,"N":128,"dictionary":"{s}"}},"shard":"model-00001.safetensors",
+        \\{{"name":"lm_head","format":"{s}","params":{{"bits":{d}.0,"K":64,"N":128,"dictionary":"{s}"}},"shard":"{s}",
         \\"parts":{{"trellis":{{"tensor":"lm_head.trellis","dtype":"I16","shape":[4,8,{d}]}},"suh":{{"tensor":"lm_head.suh","dtype":"F16","shape":[64]}},
         \\"svh":{{"tensor":"lm_head.svh","dtype":"F16","shape":[128]}}}}}}
-    , .{ if (t == .format) "eaq.mystery/0" else "eaq.trellis/0", shape.bits, shape.dictionary, words });
+    , .{
+        if (t == .format) "eaq.mystery/0" else "eaq.trellis/0",
+        shape.bits,
+        if (t == .dictionary_unused) "exl3.mcg.v1" else shape.dictionary,
+        if (t == .entry_shard_outside) "../outside.safetensors" else "model-00001.safetensors",
+        words,
+    });
     const norm_entry = try std.fmt.allocPrint(gpa,
-        \\{{"name":"model.norm.weight","format":"eaq.dense/0","params":{{}},"shard":"model-00002.safetensors",
+        \\{{"name":"{s}","format":"eaq.dense/0","params":{{}},"shard":"{s}",
         \\"parts":{{"data":{{"tensor":"{s}","dtype":"BF16","shape":[64]}}}}}}
-    , .{if (t == .tensor_missing) "model.norm.gone" else "model.norm.weight"});
+    , .{
+        if (t == .entry_duplicate) "lm_head" else "model.norm.weight",
+        if (t == .entry_shard_other) "model-00001.safetensors" else "model-00002.safetensors",
+        if (t == .tensor_missing) "model.norm.gone" else "model.norm.weight",
+    });
     const entries = try std.fmt.allocPrint(gpa, "[{s},{s}]", .{ head_entry, norm_entry });
     const inline_entries = t != .entries_in_header and t != .entries_absent;
     const img1 = try image(gpa, specs1, if (t == .entries_in_header) try std.fmt.allocPrint(gpa, "[{s}]", .{head_entry}) else null);
     const img2 = try image(gpa, &s2, if (t == .entries_in_header) try std.fmt.allocPrint(gpa, "[{s}]", .{norm_entry}) else null);
+    const dict_name = if (t == .dictionary_id) "exl3.made.up" else shape.dictionary;
+    const dicts = if (t == .dictionaries_empty) "{}" else try std.fmt.allocPrint(gpa, "{{\"{s}\":{{\"table_sha256\":\"{s}\"}}}}", .{ dict_name, dict_hash });
     const manifest = try std.fmt.allocPrint(gpa,
         \\{{"eaq_layout":"{s}","eaq_pack":"{s}","model":{{"adapter":{{"family":"{s}"}}}},"required_features":[{s}],
-        \\"dictionaries":{{"{s}":{{"table_sha256":"{s}"}}}},"n_entries":2,
+        \\"dictionaries":{s},"n_entries":2,
         \\"shards":[{{"file":"model-00001.safetensors","bytes":{d},"sha256":"{s}"}},{{"file":"model-00002.safetensors","bytes":{d},"sha256":"{s}"}}]
         \\{s}}}
     , .{
@@ -117,8 +136,7 @@ pub fn write(gpa_in: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, t: Tamper, 
         if (t == .pack_version) "eaq.pack/9" else "eaq.pack/0",
         if (t == .family) "glm5_next" else shape.family,
         if (t == .feature) "\"eaq.future/9\"" else "",
-        if (t == .dictionary_id) "exl3.made.up" else shape.dictionary,
-        dict_hash,
+        dicts,
         img1.len,
         sha(img1),
         img2.len,
@@ -139,4 +157,18 @@ pub fn write(gpa_in: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, t: Tamper, 
     const out1 = if (t == .shard_truncated) img1[0 .. img1.len - 4] else img1;
     if (t != .shard_missing) try dir.writeFile(io, .{ .sub_path = "model-00001.safetensors", .data = out1 });
     try dir.writeFile(io, .{ .sub_path = "model-00002.safetensors", .data = img2 });
+}
+
+/// A pack with no shards and no entries, its config.json and marker consistent with it.
+fn writeEmpty(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, shape: Shape) !void {
+    const manifest = try std.fmt.allocPrint(gpa,
+        \\{{"eaq_layout":"{s}","eaq_pack":"eaq.pack/0","model":{{"adapter":{{"family":"{s}"}}}},"dictionaries":{{}},
+        \\"n_entries":0,"shards":[],"entries_inline":true,"entries":[]}}
+    , .{ eaq.layout, shape.family });
+    const h = sha(manifest);
+    const config = try std.fmt.allocPrint(gpa, "{{\"quantization_config\":{{\"quant_method\":\"eaq\",\"manifest\":\"{s}\",\"manifest_sha256\":\"{s}\"}}}}", .{ eaq.manifest_name, h });
+    const marker = try std.fmt.allocPrint(gpa, "{{\"manifest_sha256\":\"{s}\",\"eaq_layout\":\"{s}\",\"n_shards\":0,\"n_entries\":0}}", .{ h, eaq.layout });
+    try dir.writeFile(io, .{ .sub_path = "config.json", .data = config });
+    try dir.writeFile(io, .{ .sub_path = eaq.manifest_name, .data = manifest });
+    try dir.writeFile(io, .{ .sub_path = eaq.marker_name, .data = marker });
 }

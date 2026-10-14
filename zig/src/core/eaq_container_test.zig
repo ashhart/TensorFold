@@ -163,3 +163,92 @@ test "the three tables hash to the values an independent numpy writer recorded" 
         try std.testing.expectEqualStrings(w[1], &have);
     }
 }
+
+test "an inline entry's shard must be listed and must hold the entry's tensors" {
+    try expectRefused(.entry_shard_outside, error.UnknownShard, .{});
+    try expectRefused(.entry_shard_other, error.TensorMisplaced, .{});
+}
+
+test "a trellis entry's dictionary must be one the manifest declares" {
+    try expectRefused(.dictionary_unused, error.UnknownDictionary, .{});
+    try expectRefused(.dictionaries_empty, error.UnknownDictionary, .{});
+}
+
+test "two entries with one name are refused" {
+    try expectRefused(.entry_duplicate, error.DuplicateEntry, .{});
+}
+
+/// The testing allocator, refusing any one allocation of 4 MiB or more: a hash worker's buffer.
+const NoBig = struct {
+    const big = 4 << 20;
+    const vtable: std.mem.Allocator.VTable = .{ .alloc = alloc, .resize = resize, .remap = remap, .free = free };
+
+    fn allocator() std.mem.Allocator {
+        return .{ .ptr = undefined, .vtable = &vtable };
+    }
+    fn alloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        return if (len >= big) null else std.testing.allocator.rawAlloc(len, alignment, ret_addr);
+    }
+    fn resize(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        return new_len < big and std.testing.allocator.rawResize(memory, alignment, new_len, ret_addr);
+    }
+    fn remap(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        return if (new_len >= big) null else std.testing.allocator.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+    fn free(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        std.testing.allocator.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+test "a hash worker without its buffer is an allocation failure, not a shard's" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [96]u8 = undefined;
+    try fixture.write(std.testing.allocator, io, tmp.dir, .none, .{});
+    const dir = try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try std.testing.expectError(error.OutOfMemory, eaq.open(NoBig.allocator(), io, dir, .{}));
+}
+
+test "a shard linked outside the pack's folder is refused; a snapshot's links into its blobs verify" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var base: [96]u8 = undefined;
+    const root = try std.fmt.bufPrint(&base, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var path: [160]u8 = undefined;
+    const pack = try tmp.dir.createDirPathOpen(io, "pack", .{});
+    defer pack.close(io);
+    try fixture.write(gpa, io, pack, .none, .{});
+    try std.Io.Dir.rename(pack, "model-00002.safetensors", tmp.dir, "outside.safetensors", io);
+    try pack.symLink(io, "../outside.safetensors", "model-00002.safetensors", .{});
+    var why: eaq.Why = .{};
+    try std.testing.expectError(error.ShardOutside, eaq.open(gpa, io, try std.fmt.bufPrint(&path, "{s}/pack", .{root}), .{ .why = &why }));
+    try std.testing.expectEqualStrings("model-00002.safetensors", why.text());
+    const snap = try tmp.dir.createDirPathOpen(io, "models--t/snapshots/r1", .{});
+    defer snap.close(io);
+    const blobs = try tmp.dir.createDirPathOpen(io, "models--t/blobs", .{});
+    defer blobs.close(io);
+    try fixture.write(gpa, io, snap, .none, .{});
+    for ([_][]const u8{ "model-00001.safetensors", "model-00002.safetensors" }) |name| {
+        try std.Io.Dir.rename(snap, name, blobs, name, io);
+        var link: [64]u8 = undefined;
+        try snap.symLink(io, try std.fmt.bufPrint(&link, "../../blobs/{s}", .{name}), name, .{});
+    }
+    var p = try eaq.open(gpa, io, try std.fmt.bufPrint(&path, "{s}/models--t/snapshots/r1", .{root}), .{});
+    defer p.deinit();
+    try std.testing.expectEqual(@as(usize, 2), p.shards.len);
+}
+
+test "an empty pack verifies and hashes nothing, even when no hash buffer can be had" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [96]u8 = undefined;
+    try fixture.write(std.testing.allocator, io, tmp.dir, .empty, .{});
+    var p = try eaq.open(NoBig.allocator(), io, try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}), .{});
+    defer p.deinit();
+    try std.testing.expectEqual(@as(usize, 0), p.shards.len);
+    try std.testing.expectEqual(@as(usize, 0), p.entries.len);
+}

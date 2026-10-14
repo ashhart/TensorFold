@@ -41,6 +41,8 @@ pub const Error = error{
     DictionaryMismatch, // a codebook table hash differs from TensorFold's own table
     UnknownFormat,
     ShardMissing,
+    ShardOutside, // a shard resolves outside the pack's folder (and, for a Hugging Face snapshot, its blobs)
+    UnknownShard, // an entry names a shard the manifest does not list
     ShardSizeMismatch,
     ShardHashMismatch,
     BadShard, // a shard whose safetensors header is truncated, implausible or inconsistent
@@ -48,6 +50,8 @@ pub const Error = error{
     TensorMissing, // the manifest lists a tensor no shard holds
     TensorMismatch, // a tensor's dtype or shape differs from the manifest's
     TensorExtra, // a shard holds a tensor the manifest does not list
+    TensorMisplaced, // a part's tensor sits in another shard than its entry names
+    DuplicateEntry, // two entries share a name
 };
 
 /// The name of whatever a refusal is about (a file or tensor), filled when the caller passes one.
@@ -85,7 +89,8 @@ pub const Entry = struct {
     shard: []const u8,
 };
 
-pub const Shard = struct { file: []const u8, bytes: u64, sha256: [32]u8 };
+/// `file` is the manifest's bare name; `path` the real path verified, inside the pack's allowed folders.
+pub const Shard = struct { file: []const u8, bytes: u64, sha256: [32]u8, path: []const u8 = "" };
 
 /// A verified pack; every slice lives in `arena`.
 pub const Pack = struct {
@@ -178,18 +183,33 @@ pub fn open(gpa: std.mem.Allocator, io: Io, dir: []const u8, o: Options) !Pack {
         }
         try features.append(a, f);
     }
-    try checkDictionaries(mo.get("dictionaries") orelse return error.BadManifest, o.why);
+    const dicts = mo.get("dictionaries") orelse return error.BadManifest;
+    try checkDictionaries(dicts, o.why);
 
     const shards = try a.alloc(Shard, shards_v.len);
     for (shards_v, shards) |v, *s| s.* = try shardOf(a, v);
+    // each shard is opened once: its header and its hash are read from the same open file
+    const roots = try allowedRoots(a, io, dir);
+    const files = try a.alloc(Io.File, shards.len);
+    var opened: usize = 0;
+    defer Io.File.closeMany(io, files[0..opened]);
+    for (shards, files) |*s, *f| {
+        s.path = try resolve(a, io, dir, s.file, roots, o.why);
+        f.* = Io.Dir.cwd().openFile(io, s.path, .{}) catch {
+            Why.set(o.why, "{s}", .{s.file});
+            return error.ShardMissing;
+        };
+        opened += 1;
+    }
     var tensors: std.StringArrayHashMapUnmanaged(Seen) = .empty;
     const metas = try a.alloc(?[]const u8, shards.len);
-    for (shards, metas, 0..) |s, *meta, i| meta.* = try readShard(a, io, dir, s, i, &tensors, o.why);
+    for (shards, files, metas, 0..) |s, f, *meta, i| meta.* = try readShard(a, io, f, s, i, &tensors, o.why);
 
-    const entries = try readEntries(a, mo, metas, shards);
+    const entries = try readEntries(a, mo, metas, shards, o.why);
     if (mo.get("n_entries")) |n| if (n != .integer or n.integer != entries.len) return error.BadManifest;
-    try checkInventory(entries, &tensors, o.why);
-    if (o.hash_shards) try hashShards(gpa, io, dir, shards, o);
+    try checkUsedDictionaries(entries, dicts, o.why);
+    try checkInventory(entries, shards, &tensors, o.why);
+    if (o.hash_shards) try hashShards(gpa, io, shards, files, o);
     return .{ .arena = arena, .manifest_sha256 = got, .family = family, .version = version, .features = try features.toOwnedSlice(a), .shards = shards, .entries = entries, .n_tensors = tensors.count() };
 }
 
@@ -254,15 +274,33 @@ fn shardOf(a: std.mem.Allocator, v: std.json.Value) !Shard {
     return s;
 }
 
+/// The folders a shard may resolve into: the pack's own, and its repository's blobs when it is a Hugging Face snapshot.
+fn allowedRoots(a: std.mem.Allocator, io: Io, dir: []const u8) ![2]?[]const u8 {
+    const root = try Io.Dir.cwd().realPathFileAlloc(io, dir, a);
+    const snapshots = std.fs.path.dirname(root) orelse return .{ root, null };
+    if (!std.mem.eql(u8, std.fs.path.basename(snapshots), "snapshots")) return .{ root, null };
+    const repo = std.fs.path.dirname(snapshots) orelse return .{ root, null };
+    return .{ root, try std.fs.path.join(a, &.{ repo, "blobs" }) };
+}
+
+/// A shard's real path (links followed), refused unless it lies inside one of `roots`.
+fn resolve(a: std.mem.Allocator, io: Io, dir: []const u8, file: []const u8, roots: [2]?[]const u8, why: ?*Why) ![]const u8 {
+    const real = Io.Dir.cwd().realPathFileAlloc(io, try std.fs.path.join(a, &.{ dir, file }), a) catch {
+        Why.set(why, "{s}", .{file});
+        return error.ShardMissing;
+    };
+    for (roots) |r| {
+        const root = r orelse continue;
+        if (real.len > root.len and std.mem.startsWith(u8, real, root) and real[root.len] == '/') return real;
+    }
+    Why.set(why, "{s}", .{file});
+    return error.ShardOutside;
+}
+
 const Seen = struct { dtype: safetensors.DType, rank: u8, shape: [safetensors.max_rank]usize, shard: usize, used: bool = false };
 
 /// Checks a shard's size and header, adds its tensors to `seen`, and returns its `eaq.entries` metadata if it has any.
-fn readShard(a: std.mem.Allocator, io: Io, dir: []const u8, s: Shard, index: usize, seen: *std.StringArrayHashMapUnmanaged(Seen), why: ?*Why) !?[]const u8 {
-    var file = Io.Dir.cwd().openFile(io, try std.fs.path.join(a, &.{ dir, s.file }), .{}) catch {
-        Why.set(why, "{s}", .{s.file});
-        return error.ShardMissing;
-    };
-    defer file.close(io);
+fn readShard(a: std.mem.Allocator, io: Io, file: Io.File, s: Shard, index: usize, seen: *std.StringArrayHashMapUnmanaged(Seen), why: ?*Why) !?[]const u8 {
     const len = try file.length(io);
     if (len != s.bytes) {
         Why.set(why, "{s}", .{s.file});
@@ -292,18 +330,49 @@ fn badShard(why: ?*Why, file: []const u8) error{BadShard} {
     return error.BadShard;
 }
 
-fn readEntries(a: std.mem.Allocator, mo: std.json.ObjectMap, metas: []const ?[]const u8, shard_files: []const Shard) ![]const Entry {
+fn readEntries(a: std.mem.Allocator, mo: std.json.ObjectMap, metas: []const ?[]const u8, shard_files: []const Shard, why: ?*Why) ![]const Entry {
     var out: std.ArrayList(Entry) = .empty;
     if (mo.get("entries_inline")) |inl| {
         if (inl != .bool or !inl.bool) return error.BadManifest;
-        for (array(mo.get("entries")) orelse return error.BadManifest) |v| try out.append(a, try entryOf(a, v, null));
+        for (array(mo.get("entries")) orelse return error.BadManifest) |v| {
+            const e = try entryOf(a, v, null);
+            if (shardIndex(shard_files, e.shard) == null) {
+                Why.set(why, "{s}", .{e.shard});
+                return error.UnknownShard;
+            }
+            try out.append(a, e);
+        }
     } else {
         for (metas, 0..) |meta, i| {
             const list = std.json.parseFromSliceLeaky(std.json.Value, a, meta orelse return error.BadManifest, .{}) catch return error.BadManifest;
             for (array(list) orelse return error.BadManifest) |v| try out.append(a, try entryOf(a, v, shard_files[i].file));
         }
     }
+    var names: std.StringHashMapUnmanaged(void) = .empty;
+    for (out.items) |e| if ((try names.getOrPut(a, e.name)).found_existing) {
+        Why.set(why, "{s}", .{e.name});
+        return error.DuplicateEntry;
+    };
     return out.items;
+}
+
+fn shardIndex(shards: []const Shard, file: []const u8) ?usize {
+    for (shards, 0..) |s, i| if (std.mem.eql(u8, s.file, file)) return i;
+    return null;
+}
+
+/// A trellis entry's codebook must be one the manifest declares, which checkDictionaries held to TensorFold's tables.
+fn checkUsedDictionaries(entries: []const Entry, dicts: std.json.Value, why: ?*Why) !void {
+    for (entries) |e| if (e.format == .trellis) {
+        const d = str(e.params.get("dictionary")) orelse {
+            Why.set(why, "{s}", .{e.name});
+            return error.BadManifest;
+        };
+        if (dicts.object.get(d) == null) {
+            Why.set(why, "{s}", .{d});
+            return error.UnknownDictionary;
+        }
+    };
 }
 
 fn entryOf(a: std.mem.Allocator, v: std.json.Value, shard: ?[]const u8) !Entry {
@@ -324,19 +393,26 @@ fn entryOf(a: std.mem.Allocator, v: std.json.Value, shard: ?[]const u8) !Entry {
     return .{ .name = str(obj(v, "name")) orelse return error.BadManifest, .format = format, .params = if (params == .object) params.object else return error.BadManifest, .parts = parts.items, .shard = shard orelse str(obj(v, "shard")) orelse "" };
 }
 
-/// Every manifest part is in a shard with its dtype and shape, and every shard tensor is a manifest part.
-fn checkInventory(entries: []const Entry, seen: *std.StringArrayHashMapUnmanaged(Seen), why: ?*Why) !void {
-    for (entries) |e| for (e.parts) |p| {
-        const t = seen.getPtr(p.tensor) orelse {
-            Why.set(why, "{s}", .{p.tensor});
-            return error.TensorMissing;
-        };
-        if (t.dtype != p.dtype or !std.mem.eql(usize, t.shape[0..t.rank], p.shape)) {
-            Why.set(why, "{s}", .{p.tensor});
-            return error.TensorMismatch;
+/// Every manifest part is in its entry's shard with its dtype and shape, and every shard tensor is a manifest part.
+fn checkInventory(entries: []const Entry, shards: []const Shard, seen: *std.StringArrayHashMapUnmanaged(Seen), why: ?*Why) !void {
+    for (entries) |e| {
+        const at = shardIndex(shards, e.shard) orelse return error.UnknownShard;
+        for (e.parts) |p| {
+            const t = seen.getPtr(p.tensor) orelse {
+                Why.set(why, "{s}", .{p.tensor});
+                return error.TensorMissing;
+            };
+            if (t.dtype != p.dtype or !std.mem.eql(usize, t.shape[0..t.rank], p.shape)) {
+                Why.set(why, "{s}", .{p.tensor});
+                return error.TensorMismatch;
+            }
+            if (t.shard != at) {
+                Why.set(why, "{s}", .{p.tensor});
+                return error.TensorMisplaced;
+            }
+            t.used = true; // one tensor may serve two entries (tied weights); each must serve at least one
         }
-        t.used = true;
-    };
+    }
     for (seen.keys(), seen.values()) |name, t| if (!t.used) {
         Why.set(why, "{s}", .{name});
         return error.TensorExtra;
@@ -345,28 +421,25 @@ fn checkInventory(entries: []const Entry, seen: *std.StringArrayHashMapUnmanaged
 
 const HashJob = struct {
     io: Io,
-    dir: []const u8,
     shards: []const Shard,
+    files: []const Io.File,
     next: std.atomic.Value(usize) = .init(0),
     failed: std.atomic.Value(usize) = .init(std.math.maxInt(usize)),
+    oom: std.atomic.Value(bool) = .init(false), // a worker had no buffer: reported apart from any shard
 
     fn work(self: *HashJob, gpa: std.mem.Allocator) void {
-        const buf = gpa.alloc(u8, 4 << 20) catch return self.fail(0);
+        const buf = gpa.alloc(u8, 4 << 20) catch return self.oom.store(true, .monotonic);
         defer gpa.free(buf);
         while (true) {
             const i = self.next.fetchAdd(1, .monotonic);
             if (i >= self.shards.len) return;
-            if (!self.ok(gpa, self.shards[i], buf)) self.fail(i);
+            if (!self.ok(self.files[i], self.shards[i], buf)) self.fail(i);
         }
     }
     fn fail(self: *HashJob, i: usize) void {
         _ = self.failed.fetchMin(i, .monotonic);
     }
-    fn ok(self: *HashJob, gpa: std.mem.Allocator, s: Shard, buf: []u8) bool {
-        const path = std.fs.path.join(gpa, &.{ self.dir, s.file }) catch return false;
-        defer gpa.free(path);
-        var file = Io.Dir.cwd().openFile(self.io, path, .{}) catch return false;
-        defer file.close(self.io);
+    fn ok(self: *HashJob, file: Io.File, s: Shard, buf: []u8) bool {
         var h = Sha256.init(.{});
         var at: u64 = 0;
         while (at < s.bytes) {
@@ -381,8 +454,9 @@ const HashJob = struct {
     }
 };
 
-fn hashShards(gpa: std.mem.Allocator, io: Io, dir: []const u8, shards: []const Shard, o: Options) !void {
-    var job: HashJob = .{ .io = io, .dir = dir, .shards = shards };
+fn hashShards(gpa: std.mem.Allocator, io: Io, shards: []const Shard, files: []const Io.File, o: Options) !void {
+    if (shards.len == 0) return;
+    var job: HashJob = .{ .io = io, .shards = shards, .files = files };
     const n = @max(1, @min(o.threads, shards.len));
     var threads: [16]std.Thread = undefined;
     var spawned: usize = 0;
@@ -390,6 +464,7 @@ fn hashShards(gpa: std.mem.Allocator, io: Io, dir: []const u8, shards: []const S
         threads[spawned] = std.Thread.spawn(.{}, HashJob.work, .{ &job, gpa }) catch break;
     job.work(gpa);
     for (threads[0..spawned]) |t| t.join();
+    if (job.oom.load(.monotonic)) return error.OutOfMemory;
     const bad = job.failed.load(.monotonic);
     if (bad != std.math.maxInt(usize)) {
         Why.set(o.why, "{s}", .{shards[bad].file});
