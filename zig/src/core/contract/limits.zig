@@ -40,6 +40,7 @@ pub const Sm = struct {
 };
 
 pub const sms = [_]Sm{
+    .{ .sm = 80, .threads_sm = 2048, .smem_optin = 163 * 1024, .clusters = false },
     .{ .sm = 86, .threads_sm = 1536, .smem_optin = 99 * 1024, .clusters = false },
     .{ .sm = 89, .threads_sm = 1536, .smem_optin = 99 * 1024, .clusters = false },
     .{ .sm = 120, .threads_sm = 1536, .smem_optin = 99 * 1024, .clusters = true },
@@ -125,6 +126,12 @@ test "a launch inside every family passes; each planted excess is named" {
     try std.testing.expectEqual(@as(usize, 1), try metal(wide_op, apple[0], &out, a));
 }
 
+/// The table's row for `sm` (a target the records cover).
+pub fn target(sm: u32) ?Sm {
+    for (sms) |t| if (t.sm == sm) return t;
+    return null;
+}
+
 test "CUDA: registers by warp, launch bounds, shared bytes and clusters per SM" {
     const a = std.testing.allocator;
     var out: std.ArrayList(u8) = .empty;
@@ -132,15 +139,24 @@ test "CUDA: registers by warp, launch bounds, shared bytes and clusters per SM" 
     try std.testing.expectEqual(@as(u32, 65536), blockRegs(64, 1024));
     try std.testing.expectEqual(@as(u32, 512 * 4), blockRegs(13, 128)); // 13 registers round up to 16 a thread
     const l = CudaLaunch{ .name = "k", .symbol = "k", .image = "k", .threads = 256, .dynamic = 40 * 1024 };
-    try std.testing.expectEqual(@as(usize, 0), try cuda(l, .{ .regs = 64, .static = 0, .bound = 256 }, sms[0], &out, a));
-    try std.testing.expectEqual(@as(usize, 1), try cuda(l, .{ .regs = 64, .static = 16 * 1024, .bound = 256 }, sms[0], &out, a));
+    const sm80 = target(80).?;
+    const sm86 = target(86).?;
+    try std.testing.expectEqual(@as(usize, 0), try cuda(l, .{ .regs = 64, .static = 0, .bound = 256 }, sm86, &out, a));
+    try std.testing.expectEqual(@as(usize, 1), try cuda(l, .{ .regs = 64, .static = 16 * 1024, .bound = 256 }, sm86, &out, a));
+    var big = l;
+    big.dynamic = 120 * 1024;
+    big.opt_in = true;
+    try std.testing.expectEqual(@as(usize, 0), try cuda(big, .{ .regs = 64, .static = 0, .bound = 256 }, sm80, &out, a));
+    try std.testing.expectEqual(@as(usize, 1), try cuda(big, .{ .regs = 64, .static = 0, .bound = 256 }, sm86, &out, a));
     var wide = l;
     wide.threads = 1024;
-    try std.testing.expectEqual(@as(usize, 2), try cuda(wide, .{ .regs = 72, .static = 0, .bound = 256 }, sms[3], &out, a));
+    try std.testing.expectEqual(@as(usize, 2), try cuda(wide, .{ .regs = 72, .static = 0, .bound = 256 }, target(121).?, &out, a));
     var cl = l;
     cl.cluster = 4;
-    try std.testing.expectEqual(@as(usize, 1), try cuda(cl, .{ .regs = 32, .static = 0 }, sms[1], &out, a));
-    try std.testing.expectEqual(@as(usize, 0), try cuda(cl, .{ .regs = 32, .static = 0 }, sms[2], &out, a));
+    try std.testing.expectEqual(@as(usize, 1), try cuda(cl, .{ .regs = 32, .static = 0 }, target(89).?, &out, a));
+    try std.testing.expectEqual(@as(usize, 1), try cuda(cl, .{ .regs = 32, .static = 0 }, sm80, &out, a));
+    try std.testing.expectEqual(@as(usize, 0), try cuda(cl, .{ .regs = 32, .static = 0 }, target(120).?, &out, a));
     cl.min_sm = 90;
-    try std.testing.expectEqual(@as(usize, 0), try cuda(cl, .{ .regs = 32, .static = 0 }, sms[1], &out, a));
+    try std.testing.expectEqual(@as(usize, 0), try cuda(cl, .{ .regs = 32, .static = 0 }, sm80, &out, a));
+    try std.testing.expectEqual(@as(?Sm, null), target(75));
 }

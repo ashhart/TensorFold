@@ -84,7 +84,7 @@ pub fn run(gpu: check.Gpu) !void {
 /// Gate 5 on this GPU: the table's row for it against the driver, each record against the loaded function.
 fn live(gpu: check.Gpu) !usize {
     var n = try registry.checkCuda(gpu.gpa, &registry.cuda, false);
-    std.debug.print("{s} limits: {d} registered CUDA launches against sm_86/89/120/121, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.cuda.len, n });
+    std.debug.print("{s} limits: {d} registered CUDA launches against sm_80/86/89/120/121, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.cuda.len, n });
     const sm: u32 = @intCast(try gpu.ctx.capability());
     const at = for (limits.sms, 0..) |t, i| {
         if (t.sm == sm) break i;
@@ -141,7 +141,7 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
             const img = for (imgs) |im| {
                 if (im.sm == t.sm) break im;
             } else {
-                std.debug.print("FAIL limits {s}: {s} holds no sm_{d} image (build with -Dsm=86,89,120,121)\n", .{ r.launch.name, path, t.sm });
+                std.debug.print("FAIL limits {s}: {s} holds no sm_{d} image (build with -Dsm=80,86,89,120,121)\n", .{ r.launch.name, path, t.sm });
                 n += 1;
                 continue;
             };
@@ -164,5 +164,5 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
         if (!control) n += red;
     }
     try check.expect(n == 0, "kernel-contract-limits: {d} problems", .{n});
-    check.pass("kernel-contract-limits: every registered launch fits sm_86, sm_89, sm_120 and sm_121, every control red", .{});
+    check.pass("kernel-contract-limits: every registered launch fits sm_80, sm_86, sm_89, sm_120 and sm_121, every control red", .{});
 }

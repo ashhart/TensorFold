@@ -52,16 +52,16 @@ The test of a kernel fills a `contract.spec.Spec` and hands the harness a few ho
    and M2 a pipeline's thread limit falls as its registers rise (simd_qmm_bits' 8-bit tiles compile for 224), so
    every launch records its M1/M2 limit, unless its launcher sizes its groups to the pipeline or its source reserves
    the threads. A tensor-op kernel, which cannot be built for M1/M2 ahead of time, stays at 256 threads. CUDA:
-   registers a thread (rounded per warp), static plus dynamic shared bytes, launch bounds and clusters against sm_86,
-   sm_89, sm_120 and sm_121. Tools re-derive the records: on a Mac, `tf-kernel-contract --offline DIR` compiles each
-   pipeline for M1 and M2 with Xcode's Metal toolchain (native code built for T threads equal to the plain build means
-   the plain pipeline runs T); on a CUDA build machine, `tf-cuda-test kernel-contract-limits DIR` reads registers,
+   registers a thread (rounded per warp), static plus dynamic shared bytes, launch bounds and clusters against sm_80,
+   sm_86, sm_89, sm_120 and sm_121. Tools re-derive the records: on a Mac, `tf-kernel-contract --offline DIR` compiles
+   each pipeline for M1 and M2 with Xcode's Metal toolchain (native code built for T threads equal to the plain build
+   means the plain pipeline runs T); on a CUDA build machine, `tf-cuda-test kernel-contract-limits DIR` reads registers,
    shared bytes and launch bounds from the fatbins' ELF images for every SM, counted as the driver counts them (sm_120
    and sm_121 images keep registers only in the `.nv.info` register records, and add the block's reserved 1 KiB to
-   `.nv.shared`). On the GPU itself both runners check the loaded pipelines and the device's own limits.
-   Controls: Metal, the row projection's pipeline launched at 1,024 threads where M1 and M2 compile it for 512, and
-   36 KiB of threadgroup memory; CUDA, a kernel launched past its `__launch_bounds__`, and one needing more registers
-   than a block has.
+   `.nv.shared`). On the GPU itself both runners check the loaded pipelines and the device's own limits. Controls:
+   Metal, the row projection's pipeline launched at 1,024 threads where M1 and M2 compile it for 512, and 36 KiB of
+   threadgroup memory; CUDA, a kernel launched past its `__launch_bounds__`, and one needing more registers than a block
+   has.
 
 ## Running it
 
@@ -70,9 +70,9 @@ and gate 5. `zig build tf-kernel-contract` builds the program alone; `--only TEX
 TEXT, `--offline DIR` adds the M1/M2 compiles, and `--repro` prints the smallest input behind each known finding.
 
 On a CUDA machine, build with `-Dnvcc` (the controls are compiled only then), and run `zig build kernel-contract
--Dnvcc=/usr/local/cuda/bin/nvcc`. For the limits of every SM, `zig build fatbins kernel-contract-fatbins
--Dnvcc=... -Dsm=86,89,120,121`, then `tf-cuda-test kernel-contract-limits zig-out/fatbin`. Its `RECORD` lines are the
-values `registry.zig` holds.
+-Dnvcc=/usr/local/cuda/bin/nvcc`. For the limits of every SM, `zig build fatbins kernel-contract-fatbins -Dnvcc=...
+-Dsm=80,86,89,120,121`, then `tf-cuda-test kernel-contract-limits zig-out/fatbin`. Its `RECORD` lines are the values
+`registry.zig` holds.
 
 Every run ends with a `SUMMARY` line: kernels passing gates 1 to 4, known findings, controls red, and limit problems.
 The program exits 1 on any failed gate, any control that stayed green, or any limit problem.

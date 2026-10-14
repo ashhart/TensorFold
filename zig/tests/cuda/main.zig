@@ -74,7 +74,7 @@ const usage =
     \\  exlr8-dense [DIR]         EXLR8 dense formats: decode bit-equal, FP64, row windows; DIR adds the real matrices
     \\  train-pack MODEL EXAMPLES [COUNT]   training passes holding several sequences against one a pass: differences, time
     \\  kernel-contract           the starter kernels through the contract's gates, each planted control red (needs -Dnvcc)
-    \\  kernel-contract-limits DIR   each registered launch against sm_86/89/120/121 from the fatbins in DIR
+    \\  kernel-contract-limits DIR   each registered launch against sm_80/86/89/120/121 from the fatbins in DIR
     \\
 ;
 
