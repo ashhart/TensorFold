@@ -36,6 +36,9 @@ pub const embed_rows = @import("embed_rows.zig");
 pub const experts = @import("experts.zig");
 pub const sample = @import("sample.zig");
 pub const modelopt = @import("modelopt.zig");
+pub const exl3 = @import("exl3.zig");
+pub const exl3_experts = @import("exl3_experts.zig");
+pub const exl3_upload = @import("exl3_upload.zig");
 
 test {
     _ = @import("memory.zig");
@@ -53,5 +56,8 @@ test {
     _ = @import("fp8.zig");
     _ = carveout;
     _ = @import("nvfp4.zig");
+    _ = exl3;
+    _ = exl3_experts;
+    _ = exl3_upload;
     _ = @import("modelopt.zig");
 }
