@@ -62,6 +62,13 @@ const Rig = struct {
         return out;
     }
 
+    /// bf16 values of magnitude 2^-8 to 2^8, log-uniform: rows whose sums' order shows in their last bits.
+    fn wides(r: *Rig, n: usize) ![]u16 {
+        const out = try r.a.alloc(u16, n);
+        for (out) |*v| v.* = gm.f32ToBf16((if (r.rng.boolean()) @as(f32, 1) else -1) * std.math.exp2(r.rng.float(f32) * 16 - 8));
+        return out;
+    }
+
     fn f32s(r: *Rig, n: usize, lo: f32, hi: f32) ![]f32 {
         const out = try r.a.alloc(f32, n);
         for (out) |*v| v.* = lo + r.rng.float(f32) * (hi - lo);
@@ -128,8 +135,8 @@ fn norms(r: *Rig) !void {
         try r.same("add_rmsnorm y", u16, yd, y);
         try r.same("add_rmsnorm xs", f32, xsd, xs);
     }
-    for ([_]usize{ 16, 300 }, [_]bool{ true, false }) |rows, f32_out| {
-        const x = try r.bfs(rows * D, 2.0);
+    for ([_]usize{ 16, 300, 2048 }, [_]bool{ true, false, true }, [_]bool{ false, false, true }) |rows, f32_out, wide| {
+        const x = if (wide) try r.wides(rows * D) else try r.bfs(rows * D, 2.0);
         const y32 = try r.f32s(rows * NS * D, -1, 1);
         const y16 = try r.bfs(rows * NS * D, 1.0);
         const wt = try r.f32s(rows * NS, 0, 0.5);
