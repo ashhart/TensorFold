@@ -58,7 +58,13 @@ pub fn place() !Place {
     const r = std.c.getenv("TF_GLM_RANK") orelse return error.NoRank;
     const w = std.c.getenv("TF_GLM_WORLD") orelse return error.NoRank;
     const p: Place = .{ .rank = std.fmt.parseInt(usize, std.mem.span(r), 10) catch return error.NoRank, .world = std.fmt.parseInt(usize, std.mem.span(w), 10) catch return error.NoRank };
+    return checked(p);
+}
+
+/// A place the family serves: a rank inside its world, and at most `ranks.max_world` ranks.
+fn checked(p: Place) !Place {
     if (p.world < 1 or p.rank >= p.world) return error.NoRank;
+    if (p.world > ranks.max_world) return error.TooManyRanks;
     return p;
 }
 
@@ -199,9 +205,20 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.NoRank => "GLM-5.3-Flash runs at TP over hosts: set TF_GLM_RANK and TF_GLM_WORLD on every host (WORLD 1: one GPU, with TF_GLM_LAYERS for a thin model)",
         error.NoCommId => "GLM-5.3-Flash's ranks meet over NCCL: with TF_GLM_WORLD 2 or more, set NCCL_COMM_ID to rank 0's address:port on every host",
         error.RankMismatch => "the ranks' settings differ (each rank's log names the one): start them alike",
+        error.TooManyRanks => std.fmt.comptimePrint(
+            "GLM-5.3-Flash on CUDA runs on at most {d} ranks: set TF_GLM_WORLD to {d} or fewer",
+            .{ ranks.max_world, ranks.max_world },
+        ),
         error.NotModelOpt, error.UnsupportedQuant => "GLM-5.3-Flash on CUDA reads ModelOpt NVFP4 checkpoints (the log names what config.json has)",
         else => null,
     };
+}
+
+test "a place inside its world of at most 16 ranks serves; a larger world is refused by name" {
+    try std.testing.expectEqual(Place{ .rank = 15, .world = 16 }, try checked(.{ .rank = 15, .world = 16 }));
+    try std.testing.expectError(error.TooManyRanks, checked(.{ .rank = 0, .world = 17 }));
+    try std.testing.expectError(error.NoRank, checked(.{ .rank = 2, .world = 2 }));
+    try std.testing.expect(explain(null, error.TooManyRanks) != null);
 }
 
 test "capacity keeps a verify window past the context and a multiple of 64" {

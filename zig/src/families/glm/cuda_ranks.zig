@@ -50,6 +50,9 @@ pub const Settings = struct {
     }
 };
 
+/// The most ranks a world holds: rank 0's greedy pick gathers every rank's top-1 into one host array of this size.
+pub const max_world = 16;
+
 /// The process environment's value of `name` (null when unset).
 pub fn environment(name: [:0]const u8) ?[]const u8 {
     return std.mem.span(std.c.getenv(name) orelse return null);
@@ -57,14 +60,14 @@ pub fn environment(name: [:0]const u8) ?[]const u8 {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 4, // this struct's version
+    layout: u32 = 5, // this struct's version
     world: u32,
     rank: u32,
     split: u32,
     kda_wide: u32,
     pieces: u32,
     layers: u32, // TF_GLM_LAYERS (0: all)
-    pad: u32 = 0,
+    mtp: u32, // 1: the MTP head loads and runs (drafts on): every prompt pass adds its collectives
     capacity: u64, // tokens a sequence holds
     heat_high: f64, // the heat bands in degrees (0 and 0: off): every rank must wait alike
     heat_low: f64,
@@ -72,10 +75,48 @@ pub const Fingerprint = extern struct {
     program: [32]u8, // sha256 of this executable
     checkpoint: [64]u8, // the checkpoint folder's last name (the snapshot's revision), zero padded
 
-    pub const Field = enum { layout, rank, world, split, kda_wide, pieces, layers, capacity, heat_high, heat_low, config, program, checkpoint };
+    pub const Field = enum {
+        layout,
+        rank,
+        world,
+        split,
+        kda_wide,
+        pieces,
+        layers,
+        mtp,
+        capacity,
+        heat_high,
+        heat_low,
+        config,
+        program,
+        checkpoint,
+    };
 
-    pub fn of(world: usize, rank: usize, s: Settings, capacity: usize, config: [32]u8, program: [32]u8, checkpoint_dir: []const u8) Fingerprint {
-        var f: Fingerprint = .{ .world = @intCast(world), .rank = @intCast(rank), .split = @intFromBool(s.split), .kda_wide = @intFromBool(s.kda_wide), .pieces = s.pieces, .layers = s.layers, .capacity = capacity, .heat_high = if (s.heat) |b| b.high_c else 0, .heat_low = if (s.heat) |b| b.low_c else 0, .config = config, .program = program, .checkpoint = @splat(0) };
+    pub fn of(
+        world: usize,
+        rank: usize,
+        s: Settings,
+        capacity: usize,
+        mtp: bool,
+        config: [32]u8,
+        program: [32]u8,
+        checkpoint_dir: []const u8,
+    ) Fingerprint {
+        var f: Fingerprint = .{
+            .world = @intCast(world),
+            .rank = @intCast(rank),
+            .split = @intFromBool(s.split),
+            .kda_wide = @intFromBool(s.kda_wide),
+            .pieces = s.pieces,
+            .layers = s.layers,
+            .mtp = @intFromBool(mtp),
+            .capacity = capacity,
+            .heat_high = if (s.heat) |b| b.high_c else 0,
+            .heat_low = if (s.heat) |b| b.low_c else 0,
+            .config = config,
+            .program = program,
+            .checkpoint = @splat(0),
+        };
         const name = std.fs.path.basename(std.mem.trimEnd(u8, checkpoint_dir, "/"));
         const n = @min(name.len, f.checkpoint.len);
         @memcpy(f.checkpoint[0..n], name[0..n]);
@@ -90,7 +131,21 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
     for (all, 0..) |f, r| {
         if (f.layout != all[0].layout) return .{ .field = .layout, .rank = r };
         if (f.rank != r) return .{ .field = .rank, .rank = r };
-        inline for (.{ "world", "split", "kda_wide", "pieces", "layers", "capacity", "heat_high", "heat_low", "config", "program", "checkpoint" }) |name| {
+        const fields = .{
+            "world",
+            "split",
+            "kda_wide",
+            "pieces",
+            "layers",
+            "mtp",
+            "capacity",
+            "heat_high",
+            "heat_low",
+            "config",
+            "program",
+            "checkpoint",
+        };
+        inline for (fields) |name| {
             if (!std.mem.eql(u8, std.mem.asBytes(&@field(f, name)), std.mem.asBytes(&@field(all[0], name))))
                 return .{ .field = @field(Fingerprint.Field, name), .rank = r };
         }
@@ -157,6 +212,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .kda_wide => "TF_GLM_KDA_DECODE_WIDE",
         .pieces => "TF_GLM_OVERLAP_PIECES",
         .layers => "TF_GLM_LAYERS",
+        .mtp => "--no-drafts given to some ranks and not others",
         .capacity => "the sequence capacity (the context)",
         .heat_high => "TF_HEAT_HIGH",
         .heat_low => "TF_HEAT_LOW",
@@ -191,18 +247,21 @@ test "fingerprints: agreeing ranks pass; the first differing field and rank are 
     const h0: [32]u8 = @splat(1);
     const h1: [32]u8 = @splat(2);
     var all = [_]Fingerprint{
-        Fingerprint.of(2, 0, .{}, 8192, h0, h0, "/hub/snapshots/423acf37/"),
-        Fingerprint.of(2, 1, .{}, 8192, h0, h0, "/hub/snapshots/423acf37"),
+        Fingerprint.of(2, 0, .{}, 8192, true, h0, h0, "/hub/snapshots/423acf37/"),
+        Fingerprint.of(2, 1, .{}, 8192, true, h0, h0, "/hub/snapshots/423acf37"),
     };
     try std.testing.expect(mismatch(&all) == null);
     all[1].program = h1;
     try std.testing.expectEqual(Fingerprint.Field.program, mismatch(&all).?.field);
-    all[1] = Fingerprint.of(2, 1, .{ .split = false }, 8192, h0, h0, "/hub/snapshots/423acf37");
+    all[1] = Fingerprint.of(2, 1, .{ .split = false }, 8192, true, h0, h0, "/hub/snapshots/423acf37");
     try std.testing.expectEqual(Mismatch{ .field = .split, .rank = 1 }, mismatch(&all).?);
-    all[1] = Fingerprint.of(2, 0, .{}, 8192, h0, h0, "/hub/snapshots/423acf37");
+    all[1] = Fingerprint.of(2, 0, .{}, 8192, true, h0, h0, "/hub/snapshots/423acf37");
     try std.testing.expectEqual(Fingerprint.Field.rank, mismatch(&all).?.field);
-    all[1] = Fingerprint.of(2, 1, .{ .heat = .{ .high_c = 92, .low_c = 88 } }, 8192, h0, h0, "/hub/snapshots/423acf37");
+    const heat_on: Settings = .{ .heat = .{ .high_c = 92, .low_c = 88 } };
+    all[1] = Fingerprint.of(2, 1, heat_on, 8192, true, h0, h0, "/hub/snapshots/423acf37");
     try std.testing.expectEqual(Fingerprint.Field.heat_high, mismatch(&all).?.field);
-    all[1] = Fingerprint.of(2, 1, .{}, 8192, h0, h0, "/hub/snapshots/other");
+    all[1] = Fingerprint.of(2, 1, .{}, 8192, true, h0, h0, "/hub/snapshots/other");
     try std.testing.expectEqual(Fingerprint.Field.checkpoint, mismatch(&all).?.field);
+    all[1] = Fingerprint.of(2, 1, .{}, 8192, false, h0, h0, "/hub/snapshots/423acf37"); // --no-drafts on rank 1 only
+    try std.testing.expectEqual(Mismatch{ .field = .mtp, .rank = 1 }, mismatch(&all).?);
 }

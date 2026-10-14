@@ -89,6 +89,7 @@ pub const Engine = struct {
 
     /// Opens rank `rank` of `world` over `comm`; the ranks agree on settings (cuda_ranks) before the weights load.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, ctx: *const cuda.Context, checkpoint: []const u8, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, rank: usize, world: usize, o: Options) !*Engine {
+        if (world > ranks.max_world) return error.TooManyRanks; // before anything is allocated
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         var arena = std.heap.ArenaAllocator.init(gpa);
@@ -104,7 +105,18 @@ pub const Engine = struct {
         const c = try config.parse(gpa, text);
         var stream = try cuda.Stream.init(d, false);
         errdefer stream.deinit();
-        const fp = ranks.Fingerprint.of(world, rank, o.settings, o.capacity, try ranks.hashFile(a, io, cfg_path), try ranks.hashFile(a, io, "/proc/self/exe"), checkpoint);
+        const config_hash = try ranks.hashFile(a, io, cfg_path);
+        const program_hash = try ranks.hashFile(a, io, "/proc/self/exe");
+        const fp = ranks.Fingerprint.of(
+            world,
+            rank,
+            o.settings,
+            o.capacity,
+            o.mtp,
+            config_hash,
+            program_hash,
+            checkpoint,
+        );
         try ranks.agree(d, lib, comm, stream, fp, try a.alloc(ranks.Fingerprint, world));
         const share = try shard.Share.of(&c, rank, world);
         const spans = try gpa.alloc(shard.Span, world);
@@ -465,7 +477,7 @@ pub const Engine = struct {
         try cuda.launch.launch(e.m.glue.top1, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1024 } }, e.stream, &a);
         try e.lib.check(e.lib.api.ncclAllGather(e.pairs.ptr + e.share.rank * 8, e.pairs.ptr, 2, .u32, e.comm, e.stream.handle), "ncclAllGather");
         try e.stream.synchronize();
-        var all: [16][2]u32 = undefined;
+        var all: [ranks.max_world][2]u32 = undefined; // Engine.init refuses a larger world
         try e.d.check(e.d.api.cuMemcpyDtoH_v2(&all, e.pairs.ptr, world * 8), "cuMemcpyDtoH");
         var pick = all[0];
         for (all[1..world]) |p| {
