@@ -10,6 +10,7 @@ const qwen27 = @import("qwen27_served.zig");
 const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
 const glm_dsa = @import("glm_dsa_host.zig");
+const deepseek_v41 = @import("deepseek_v41_lane_host.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
 const Slide = nemotron_slide.Adapter(nemotron.slide);
 const cache_fit = @import("cache_fit.zig");
@@ -21,6 +22,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "glm5_next", .formats = &.{"mlx-q4g64"} },
     .{ .model_type = "qwen3_5", .formats = &.{"mlx-q4g64"} },
     .{ .model_type = "glm_moe_dsa", .formats = &.{"exlr8"} },
+    .{ .model_type = "deepseek_v41", .formats = &.{"exl3"} },
 };
 
 /// The chip class gate entries name ("apple-m5" for an Apple M5 Max); null without an Apple GPU.
@@ -114,6 +116,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return openFlashNext(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "glm_moe_dsa")) return openGlmDsa(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "deepseek_v41")) return deepseek_v41.open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen3_5")) return @import("qwen35.zig").open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "nemotron_h")) {
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
