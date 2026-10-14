@@ -9,6 +9,7 @@ pub const prompt = @import("prompt.zig");
 pub const engine = @import("engine.zig");
 pub const ep = @import("ep.zig");
 pub const slots = @import("slots.zig");
+pub const snapshot = @import("snapshot.zig");
 pub const pool = @import("pool.zig");
 pub const backend = @import("backend.zig");
 pub const mirror = @import("mirror.zig");

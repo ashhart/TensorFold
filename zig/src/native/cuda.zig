@@ -9,6 +9,7 @@ const budget = @import("cuda_memory.zig");
 const lane_backend = @import("cuda_bound.zig");
 const snaps = @import("cuda_snaps.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
+const cuda_disk = @import("cuda_disk.zig");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
 const registry = .{nemotron.native};
@@ -153,8 +154,10 @@ const Host = struct {
         h.cfg.deinit(h.gpa);
         if (h.gpu) |g| g.ctx.makeCurrent() catch {};
         if (h.store) |s| {
+            const rows = s.disk;
             s.deinit();
             h.gpa.destroy(s);
+            if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go
         }
         if (h.slide) |s| h.slide_free.?(h.gpa, s);
         h.gpa.free(h.dir);
@@ -356,9 +359,11 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         const pc = api.prompt_cache;
         const store = try gpa.create(pc.Store);
         // rules and budget from the family's snap_* declarations (cuda_snaps.zig)
-        const copies: pc.Snapshots = .{ .ptr = loaded.target, .vtable = &snaps.Snaps(F).vtable };
+        const image: ?*const pc.rows.Image = if (F == nemotron.native) &cuda_disk.image else null; // its disk rows
+        const copies: pc.Snapshots = .{ .ptr = loaded.target, .vtable = &snaps.Snaps(F, image).vtable };
         store.* = pc.Store.init(gpa, copies, snaps.cacheRules(F), try snaps.cacheBudget(F, loaded.target, cache));
         h.store = store;
+        if (o.learn_conversations) if (o.learn) |root| try learnConversations(a, io, &g.ctx, o, root, kernels, loaded, store);
     }
     errdefer if (h.store) |store| {
         store.deinit();
@@ -396,6 +401,21 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+/// --learn-conversations: the identity probed on this thread (its context current), the store opened and attached.
+fn learnConversations(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, root: []const u8, kernels: ?[]const u8, loaded: anytype, store: *api.prompt_cache.Store) !void {
+    loaded.target.ctx = ctx;
+    const id = try cuda_disk.identity(a, io, ctx, o.dir, kernels, loaded.backend, loaded.target);
+    const gibs = struct {
+        fn bytes(g: f64) u64 {
+            return @intFromFloat(g * (1 << 30));
+        }
+    }.bytes;
+    const r = try api.prompt_cache.rows.Rows.open(store.gpa, store.family, .{ .root = root, .identity = id.id, .cap = gibs(o.learn_gib), .floor = gibs(o.learn_min_free_gib), .daily = gibs(o.learn_daily_gib), .lookahead = store.rules.lookahead, .planned = store.rules.planned });
+    r.prefill_rate = id.rate;
+    store.disk = r;
+    std.log.info("nemotron: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ r.dir, r.states.items.len, r.held() >> 20, r.cap >> 20 });
 }
 
 fn toGib(bytes: u64) f64 {

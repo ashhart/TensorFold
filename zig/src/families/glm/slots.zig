@@ -98,6 +98,7 @@ pub const Slots = struct {
     pub const probe = kept_mod.probe;
     pub const writeSnap = kept_mod.writeSnap;
     pub const readSnap = kept_mod.readSnap;
+    pub const blank = kept_mod.blank;
     pub const drop = kept_mod.drop;
     pub const pick = kept_mod.pick;
     pub const copyOut = kept_mod.copyOut;

@@ -58,6 +58,9 @@ Prefer a restricted file over command-line keys, which can appear in the operati
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |
 | `POST /v1/decisions` | Choice, score, and yes/no probabilities from the next-token logits; no text is generated |
+| `POST /v1/imprint/resume` | How much of a chat body's conversation resumes, and from where ([on disk](#conversations-on-disk)) |
+| `POST /v1/imprint/load` | A chat body's conversation state read from disk into RAM now |
+| `DELETE /v1/imprint` | This model's conversation states on disk forgotten |
 
 On MLX, a completions body containing a nonempty `messages` list uses chat handling. CUDA completions
 take a string `prompt` (`add_special_tokens`, default false) or a list of token IDs, run as given.
@@ -406,6 +409,56 @@ An engine that keeps no prompt states leaves all three out.
 
 The native `--dashboard` flag adds a self-contained `/dashboard` page and its `/stats` JSON snapshot; both routes
 return 404 when the flag is off, and the page polls once per second without adding access-log noise.
+
+## Conversations on disk
+
+`--learn-conversations` (it implies `--learn`) writes every prompt state the server keeps in RAM to disk as well: a
+conversation's history, the end of each reply, the next turn's background prefill and the shared prefixes, all in one
+store for each model and build. That store takes the place of `--learn`'s store of shared prefixes: a server started
+with the flag neither reads nor writes the prefix files a plain `--learn` server keeps, and they stay on disk until the
+cap below needs their room. After a restart, a crash or an eviction from RAM, the next turn reads the latest state back
+instead of reading the conversation again from its first token. Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash on
+one Mac and Nemotron on CUDA keep them; other engines refuse the flag at startup.
+
+States go to disk while the engine is idle, a 16 MiB piece at a time, so a request that arrives meanwhile waits for one
+piece. A planned stop (SIGTERM or SIGINT) finishes what is waiting, within 20 seconds; a killed server loses only what
+its last turn had not written yet. Rows a stored state already holds for the same tokens are written once, so ten
+conversations that share a long system prompt and tools store those rows once. A state is read back only when reading
+it takes less time than prefilling the tokens it covers, measured on this machine. Every piece read is checked against
+its hash; a damaged file is deleted, with the states that need it, and the turn prefills instead. A read-back state
+gives the same reply, token for token, as the state it was written from and as a fresh prompt pass.
+
+States are kept per checkpoint, kernel build, OS build and chip: a macOS update or a new release that computes other
+bits starts a new set, and the old set is the first to go when the disk cap needs room. `--learn-gib` caps the disk
+they take with `--learn`'s shared prefixes, every model together (32 GiB by default); past it, other models' and
+builds' sets go first, then the states worth least: the fewest tokens saved per byte only they hold, the least recently
+used. `--learn-min-free-gib` keeps free disk (4 GiB by default), and `--learn-daily-gib` caps what they write a day
+(32 GiB by default); past either, a state stays in RAM only, with a log line, and no reply changes.
+
+Three routes let a client such as the Mac app ask about a conversation. Each takes the body of a chat completion
+(`messages`, `tools`, `chat_template_kwargs`), renders it as that request would be rendered, and answers on the engine's
+thread between rounds. A server started without `--learn-conversations` answers each with 404 and the error message
+"saved conversations are off: start the server with --learn-conversations"; an engine that keeps no prompt states
+answers 501.
+
+- `POST /v1/imprint/resume` answers how much of the conversation's next request would resume, and from where:
+  `tokens` (the rendered prompt), `ram_tokens` and `disk_tokens` (the longest kept state in RAM and on disk),
+  `disk_bytes` (what reading that state takes), `resume_from` (`ram`, `disk` or `none`), `wait_seconds` (the estimated
+  wait before the first token: the read, then prefilling the rest) and `disk` (whether this server keeps states on
+  disk).
+- `POST /v1/imprint/load` reads the conversation's disk state into RAM now, so opening an old chat makes its next send
+  fast. It answers as `/v1/imprint/resume` does after the read, with `loaded_tokens` and `load_seconds` added (0 when
+  RAM already held as much, or a prompt pass would be quicker than the read).
+- `DELETE /v1/imprint` forgets every conversation state this server's model and build keep on disk: it deletes the
+  store's state and row files and answers `freed_bytes`. What stays holds no conversation data: the store's folder with
+  its `used` stamp, and the `written` and `clock` files at the top of the `--learn-dir` folder (the bytes written today,
+  and the order the stores were last opened in). States in RAM stay until they are evicted.
+
+What stays on disk: under the `--learn-dir` folder (`~/.cache/tensorfold/learned` by default), directories readable by
+their owner only (0700) hold files readable by their owner only (0600). They contain token ids and the model's own
+prompt states (attention keys and values, recurrent and convolution states), never text, and nothing in them leaves the
+machine. Token ids decode back to the conversation's text with the model's tokenizer, so treat the folder as you treat
+the conversations. `DELETE /v1/imprint` clears one model's states; deleting the folder while no server runs clears all.
 
 ## The Responses API
 

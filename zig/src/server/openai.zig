@@ -116,6 +116,11 @@ const Plan = struct {
     named: []const u8,
 };
 
+/// A chat body checked as a chat completion's is, for routes that render it without a reply (/v1/imprint).
+pub fn chatInput(srv: *Server, cx: *Cx, raw: Value) errors.Refused!chat.Input {
+    return (try plan(srv, cx, true, raw)).input;
+}
+
 /// Everything checked before a reply starts (a refusal here is a 400 with no stream opened).
 fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
     const body = try fields.parseNumbers(cx, raw);

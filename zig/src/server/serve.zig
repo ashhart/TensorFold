@@ -128,6 +128,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .slide_graph = args.slide_graph,
         .cortheon = args.cortheon,
         .cortheon_search_key = env(s, "BRAVE_SEARCH_API_KEY"),
+        .saved_conversations = args.learn_conversations,
     };
     const srv = server_mod.Server.init(gpa, io, s.engine, s.text, config, if (store.enabled()) &store else null) catch {
         std.debug.print("tensorfold: the server could not start\n", .{});
@@ -174,6 +175,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     if (drawing) ticker.finish();
     var waited: u32 = 0;
     while (srv.open_connections.load(.acquire) > 0 and waited < 40) : (waited += 1) std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+    s.engine.drain(); // kept states waiting for disk are written (under the engine's deadline) before the process ends
     if (srv.open_connections.load(.acquire) > 0) std.process.exit(0); // replies still open: end without freeing what they read
     return 0;
 }

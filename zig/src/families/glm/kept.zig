@@ -143,6 +143,19 @@ pub fn readSnap(sl: *Slots, id: u32, at: u32, file: [:0]const u8) !*snapshot.Sna
     return snap;
 }
 
+/// An empty whole state of `at` tokens as the next snapshot id, for a disk read to fill (--learn-conversations).
+pub fn blank(sl: *Slots, at: u32) !*snapshot.Snap {
+    const n = snapshot.bytes(&sl.e.c, at, false);
+    const buf = try sl.e.device.buffer(n, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+    errdefer buf.deinit();
+    const snap = try sl.gpa.create(snapshot.Snap);
+    errdefer sl.gpa.destroy(snap);
+    snap.* = .{ .id = sl.next_snap, .at = at, .buf = buf, .bytes = n };
+    try sl.snaps.put(sl.gpa, snap.id, snap);
+    sl.next_snap += 1;
+    return snap;
+}
+
 /// Forget snapshot `id`.
 pub fn drop(sl: *Slots, id: u32) void {
     const kv = sl.snaps.fetchRemove(id) orelse return;

@@ -24,7 +24,45 @@ pub const Copy = struct {
 pub const Target = struct {
     e: *Engine,
     head: ?*Head,
+    ctx: ?*const cuda.Context = null, // made current before a disk copy, which may run before any backend call
 };
+
+/// A kept state's two buffers as the disk sees them: the key and value rows (`kv` bytes), then the Mamba states.
+pub const Shape = struct { layers: usize, row: usize, head: bool, kv: usize, mamba: usize };
+
+pub fn shape(t: *const Target, at: usize) Shape {
+    const m = state.mambaPlanes(t.e.c);
+    return .{ .layers = t.e.c.count(.attention), .row = state.kvRowBytes(t.e.c), .head = t.head != null, .kv = kvBytes(t.e.c, at, t.head != null), .mamba = m[0] + m[1] };
+}
+
+/// A whole kept state of `at` tokens, its buffers empty for a disk read to fill (`fill`).
+pub fn blank(t: *const Target, at: usize) !*Copy {
+    return alloc(t, at, true);
+}
+
+/// `host` to or from (`out`) bytes [off, off + host.len) of a kept state's key and value buffer or its Mamba buffer.
+pub fn hostCopy(t: *const Target, saved: *anyopaque, mamba: bool, off: usize, host: []u8, out: bool) !void {
+    const copy: *Copy = @ptrCast(@alignCast(saved));
+    const base = (if (mamba) copy.mamba.ptr else copy.kv.ptr) + off;
+    if (out) try t.e.ops().download(host, base) else try t.e.ops().upload(base, host);
+}
+
+/// Copies queued by `hostCopy` finished (the host's bytes may be read or reused).
+pub fn settle(t: *const Target) !void {
+    try t.e.stream.synchronize();
+}
+
+/// A kept state's engine words for the disk: the parity and row count where it stood.
+pub fn words(saved: *anyopaque) [2]u64 {
+    const copy: *Copy = @ptrCast(@alignCast(saved));
+    return .{ copy.parity, copy.rows };
+}
+
+pub fn setWords(saved: *anyopaque, w: [2]u64) void {
+    const copy: *Copy = @ptrCast(@alignCast(saved));
+    copy.parity = @intCast(w[0]);
+    copy.rows = @intCast(w[1]);
+}
 
 /// `len` bytes at `live` in the bound sequence's planes; `mamba`: the SSM or conv state, which an armed chunk writes.
 const Part = struct { live: u64, len: usize, mamba: bool = false };

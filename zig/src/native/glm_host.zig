@@ -6,6 +6,7 @@ const tf = @import("tensorfold");
 const lanes = tf.lanes;
 const glm = tf.glm;
 const ge = glm.engine;
+const glm_disk = @import("glm_disk.zig");
 const Allocator = std.mem.Allocator;
 
 /// The warm-up reply's draft depth: every rank of a pair pays a process's first-round costs at the same step.
@@ -66,20 +67,14 @@ fn cacheBudget(eng: *const ge.Engine, gib: ?f64) u64 {
 }
 
 /// Learned states under `root` by checkpoint, split, chip, OS build, kernel sources and a probe's prompt-pass bits.
-fn learnedStates(gpa: Allocator, eng: *const ge.Engine, sl: *glm.slots.Slots, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
-    var h = std.hash.Wyhash.init(0x62);
-    const probe = try sl.probe(); // both Macs of a pair run it in step: its prompt pass exchanges with the peer
-    for ([_]u64{ eng.model_hash, eng.c.tp, eng.chunk_rows, @intFromBool(eng.ep != null), eng.k.source_hash, probe }) |x| h.update(std.mem.asBytes(&x));
-    var os: [64]u8 = undefined;
-    h.update(api.prompt_imprint.osBuild(&os));
-    h.update(std.mem.span(eng.device.name()));
-    const m = try api.prompt_imprint.Imprint.open(gpa, root, h.final(), cap);
+fn learnedStates(gpa: Allocator, io: std.Io, eng: *const ge.Engine, sl: *glm.slots.Slots, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
+    const m = try api.prompt_imprint.Imprint.open(gpa, root, (try glm_disk.identity(io, eng, sl)).id, cap);
     std.log.info("glm: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ m.dir, m.metas.items.len, m.total() >> 20, cap >> 20 });
     return m;
 }
 
 /// A GLM-5.3-Flash checkpoint served: `window` tokens of cache a stream, warmed first (the pair: `speed_up`).
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?[]const u8, learn_cap: u64, learn_floor: u64) !*Host {
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?Learn) !*Host {
     const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up, learn != null);
     errdefer eng.deinit();
     var toks: [96]u32 = undefined;
@@ -109,21 +104,30 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     const budget = cacheBudget(eng, cache_gib);
     if (!eng.followsPeer() and budget > 0) {
         const B = glm.backend.Backend;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop, .write = B.snapWrite, .read = B.snapRead, .forget = B.snapForget, .forget_checked = B.snapForgetChecked, .reclaim = B.snapReclaim, .peer_other_used = B.peerOtherUsed, .peer_other_next = B.peerOtherNext, .peer_other_bytes = B.peerOtherBytes, .peer_other_remove = B.peerOtherRemove, .peer_need = B.peerNeed, .peer_reclaim = B.peerReclaim, .peer_reserve = B.peerReserve, .peer_finish = B.peerFinish } }, cache_rules, budget);
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop, .write = B.snapWrite, .read = B.snapRead, .forget = B.snapForget, .forget_checked = B.snapForgetChecked, .reclaim = B.snapReclaim, .peer_other_used = B.peerOtherUsed, .peer_other_next = B.peerOtherNext, .peer_other_bytes = B.peerOtherBytes, .peer_other_remove = B.peerOtherRemove, .peer_need = B.peerNeed, .peer_reclaim = B.peerReclaim, .peer_reserve = B.peerReserve, .peer_finish = B.peerFinish, .rows = &glm_disk.image } }, cache_rules, budget);
         h.host.cache = &h.cache.?;
         h.host.info_.prompt_cache = true;
         h.slots.grow = .{ .ctx = h, .f = growSnap }; // a resident state made whole before its slot writes below it
     }
     errdefer if (h.cache) |*store| store.deinit();
-    if (learn) |root| {
-        h.learned = try learnedStates(gpa, eng, &h.slots, root, learn_cap);
-        h.learned.?.admission.floor = learn_floor;
-        h.slots.disk.admission.floor = learn_floor;
-        h.slots.disk.cap = learn_cap;
+    if (learn) |l| if (l.conversations) {
+        if (eng.ep != null) return error.LearnConversationsOnPair;
+        if (h.cache) |*store| {
+            const id = try glm_disk.identity(io, eng, &h.slots);
+            const r = try api.prompt_cache.rows.Rows.open(gpa, store.family, .{ .root = l.root, .identity = id.id, .cap = l.cap, .floor = l.floor, .daily = l.daily, .lookahead = cache_rules.lookahead, .planned = cache_rules.planned });
+            r.prefill_rate = id.rate;
+            store.disk = r;
+        }
+    } else {
+        h.learned = try learnedStates(gpa, io, eng, &h.slots, l.root, l.cap);
+        h.learned.?.admission.floor = l.floor;
+        h.slots.disk.admission.floor = l.floor;
+        h.slots.disk.cap = l.cap;
         h.slots.learned = h.learned.?.dir;
         if (h.cache) |*store| store.imprint = &h.learned.?;
-    }
+    };
     errdefer if (h.learned) |*m| m.deinit();
+    errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     h.host.explain = .{ .text = words };
     h.warm = eng.keepalive_target;
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
@@ -145,10 +149,15 @@ fn follow(h: *Host) void {
     glm.mirror.follow(h.eng, &h.slots) catch |err| std.log.err("speed-up mode: following rank 0 ended: {s}", .{@errorName(err)});
 }
 
+/// --learn's settings: the root, cap, free-disk floor and daily writes, and whether conversations go to disk too.
+pub const Learn = struct { root: []const u8, cap: u64, floor: u64, daily: u64, conversations: bool };
+
 pub fn close(ctx: *anyopaque) void {
     const h: *Host = @ptrCast(@alignCast(ctx));
     h.host.stop();
+    const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit();
+    if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go
     if (h.follower) |th| { // rank 1: its wait for rank 0's next command ends, then the thread
         h.eng.stopFollowing();
         th.join();

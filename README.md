@@ -185,6 +185,8 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--learn-dir DIR` | Where `--learn` keeps them, `~/.cache/tensorfold/learned` by default; implies `--learn`. |
 | `--learn-gib GIB` | Disk for learned prefixes on each Mac, 32 by default; the least recently used go first. Implies `--learn`. |
 | `--learn-min-free-gib GIB` | Free disk `--learn` leaves on each Mac, 4 by default; below it learning pauses and serving goes on. |
+| `--learn-conversations` | Keep every prompt state on disk too, each conversation's and the shared prefixes, in one store in place of `--learn`'s, so a next turn after a restart, a crash or an eviction reads it back. Implies `--learn`; see [Conversations on disk](docs/api.md#conversations-on-disk). |
+| `--learn-daily-gib GIB` | What `--learn-conversations` may write to disk a day, every model together, 32 by default; past it states stay in RAM only. |
 | `--recall` | Draft from a record of the token ids earlier requests read and wrote, so repeated text is verified in a few rounds; replies are unchanged. Off by default; see [Recall](docs/recall.md) for what stays on disk. |
 | `--recall-dir DIR` | The record's directory, one a tokenizer under `~/.cache/tensorfold/recall` by default; implies `--recall`. |
 | `--recall-gib GIB` | Disk for the record, 1/16 GiB by default; the oldest ids go first. Implies `--recall`. |

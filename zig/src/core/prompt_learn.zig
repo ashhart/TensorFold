@@ -106,6 +106,11 @@ pub fn learn(s: *Store, e: *const Entry, starts: []const u32) void {
     if (!@import("builtin").is_test) std.log.info("prompt cache: learned {d} tokens to disk", .{e.at});
 }
 
+/// A planned stop: a learned write left half made is settled now, not at the next learn.
+pub fn settle(s: *Store, im: *imprint.Imprint) void {
+    finishPending(s, im) catch |err| note("learned cleanup remains pending ({s})", .{@errorName(err)});
+}
+
 /// Learned state `key` forgotten: its files (the family's), then its index record.
 fn unlearnChecked(s: *Store, im: *imprint.Imprint, key: u64) !void {
     if (s.family.vtable.forget_checked) |f| try f(s.family.ptr, im.dir, key) else if (s.family.vtable.forget) |f| f(s.family.ptr, im.dir, key);

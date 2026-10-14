@@ -18,14 +18,15 @@ pub fn cacheBudget(comptime F: type, target: anytype, cache: u64) !u64 {
     return if (@hasDecl(F, "snap_ready")) cache - try F.snap_ready(target, cache) else cache;
 }
 
-/// The family's `snap_*` copies (none: no prompt cache), a container-level value so the store's pointer stays valid.
-pub fn Snaps(comptime F: type) type {
+/// The family's `snap_*` copies and `image`, its disk rows (null: none); a container-level value, so the pointer holds.
+pub fn Snaps(comptime F: type, comptime image: ?*const api.prompt_cache.rows.Image) type {
     return struct {
         pub const vtable: api.prompt_cache.Snapshots.VTable = .{
             .bytes = F.snap_bytes,
             .save = F.snap_save,
             .restore = F.snap_restore,
             .drop = F.snap_drop,
+            .rows = image,
         };
     };
 }

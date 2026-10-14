@@ -61,6 +61,8 @@ pub const Config = struct {
     cortheon: bool = false,
     /// BRAVE_SEARCH_API_KEY: Cortheon searches through Brave instead of DuckDuckGo.
     cortheon_search_key: ?[]const u8 = null,
+    /// --learn-conversations: /v1/imprint answers; without it each of its routes refuses and names the flag.
+    saved_conversations: bool = false,
     timeouts: http_conn.Timeouts = .{},
 };
 

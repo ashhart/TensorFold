@@ -13,6 +13,7 @@ const glm_dsa = @import("glm_dsa_host.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
 const Slide = nemotron_slide.Adapter(nemotron.slide);
 const cache_fit = @import("cache_fit.zig");
+const nemo_disk = @import("nemotron_disk.zig");
 
 pub const backends: []const []const u8 = &.{"metal"};
 pub const families: []const api.Family = &.{
@@ -89,7 +90,9 @@ const Host = struct {
             s.deinit();
             h.gpa.destroy(s);
         }
+        const rows = if (h.cache) |*store| store.disk else null;
         if (h.cache) |*store| store.deinit();
+        if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go
         if (h.learned) |*m| m.deinit();
         h.core.deinit();
         h.cfg.deinit(h.gpa);
@@ -173,21 +176,32 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (plan.budget_bytes > 0) {
         const S = nemotron.snapshot.Cached;
         const L = nemotron.learned_prompts;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop, .write = L.snapWrite, .read = L.snapRead, .forget = L.snapForget, .forget_checked = api.prompt_cache.singleForgetChecked, .reclaim = api.prompt_cache.singleReclaim } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop, .write = L.snapWrite, .read = L.snapRead, .forget = L.snapForget, .forget_checked = api.prompt_cache.singleForgetChecked, .reclaim = api.prompt_cache.singleReclaim, .rows = &nemo_disk.image } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
         h.host.cache = &h.cache.?; // the lane host's store: a Sliding Weights step that moves weights clears it
         h.host.info_.prompt_cache = true;
     }
     errdefer if (h.cache) |*store| store.deinit();
     h.learned = null;
     if (o.learn) |root| {
-        h.learned = learnedStates(a, io, o.dir, h.metal, root, @intFromFloat(o.learn_gib * (1 << 30))) catch |e| {
+        const id = learnedIdentity(a, io, o.dir, h.metal) catch |e| {
             if (e == error.PromptTooLong) problem.* = "--learn keys its states with a 4,143-token prompt at startup: serve with --context 4096 or more, or without --learn";
             return e;
         };
-        h.learned.?.admission.floor = @intFromFloat(o.learn_min_free_gib * (1 << 30));
-        if (h.cache) |*store| store.imprint = &h.learned.?;
+        if (o.learn_conversations) {
+            if (h.cache) |*store| {
+                const r = try api.prompt_cache.rows.Rows.open(gpa, store.family, .{ .root = root, .identity = id.id, .cap = gibBytes(o.learn_gib), .floor = gibBytes(o.learn_min_free_gib), .daily = gibBytes(o.learn_daily_gib), .lookahead = store.rules.lookahead, .planned = store.rules.planned });
+                r.prefill_rate = id.rate;
+                store.disk = r;
+            }
+        } else {
+            h.learned = try api.prompt_imprint.Imprint.open(h.metal.gpa, root, id.id, gibBytes(o.learn_gib));
+            std.log.info("nemotron: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ h.learned.?.dir, h.learned.?.metas.items.len, h.learned.?.total() >> 20, gibBytes(o.learn_gib) >> 20 });
+            h.learned.?.admission.floor = gibBytes(o.learn_min_free_gib);
+            if (h.cache) |*store| store.imprint = &h.learned.?;
+        }
     }
     errdefer if (h.learned) |*im| im.deinit();
+    errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     if (h.metal.head != null) h.host.lone = .{ .ctx = h, .run = Host.lone };
     h.warm = .{ .queue = h.m.queue };
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
@@ -220,12 +234,16 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
     if (o.recall and std.mem.eql(u8, t, "qwen4_exp")) return recall_refusal;
     if (o.learn == null) return null;
+    // the 27B writes conversation states
+    if (o.learn_conversations and std.mem.eql(u8, t, "qwen3_5") and dense) return null;
     const name: []const u8 = if (std.mem.eql(u8, t, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (!std.mem.eql(u8, t, "qwen3_5")) return null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
-    return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only: serve {s} without --learn, --learn-dir or --learn-gib", .{name});
+    if (o.learn_conversations) return try std.fmt.allocPrint(a, "--learn-conversations keeps conversation states on disk for Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash: serve {s} without it", .{name});
+    const or_talks: []const u8 = if (dense) " (Qwen3.8-27B keeps conversation states on disk with --learn-conversations)" else "";
+    return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only{s}: serve {s} without --learn, --learn-dir or --learn-gib", .{ or_talks, name });
 }
 
-/// Learned states under `root` by checkpoint, shards, prefill step, head, kernels, probe bits, OS build and chip.
-fn learnedStates(a: Allocator, io: std.Io, dir: []const u8, b: *nemotron.backend.Metal, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
+/// What learned and disk states read under: checkpoint, shards, prefill step, head, kernels, a probe, OS build, chip.
+fn learnedIdentity(a: Allocator, io: std.Io, dir: []const u8, b: *nemotron.backend.Metal) !struct { id: u64, rate: f64 } {
     var h = std.hash.Wyhash.init(0x6e65);
     for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
         const path = try std.fs.path.join(a, &.{ dir, name });
@@ -233,14 +251,14 @@ fn learnedStates(a: Allocator, io: std.Io, dir: []const u8, b: *nemotron.backend
     }
     try shardStamps(&h, a, io, dir);
     if (b.head != null) h.update(try safetensorsHeader(a, dir, "mtp-4bit.safetensors"));
+    const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
     const probe = try nemotron.learned_prompts.probe(b);
+    const ns = std.Io.Clock.awake.now(io).toNanoseconds() - t0;
     for ([_]u64{ b.o.chunk, @intFromBool(b.head != null), nemotron.kernels.sourceHash(), probe }) |x| h.update(std.mem.asBytes(&x));
     var os: [64]u8 = undefined;
     h.update(api.prompt_imprint.osBuild(&os));
     h.update(std.mem.span(b.m.device.name()));
-    const m = try api.prompt_imprint.Imprint.open(b.gpa, root, h.final(), cap);
-    std.log.info("nemotron: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ m.dir, m.metas.items.len, m.total() >> 20, cap >> 20 });
-    return m;
+    return .{ .id = h.final(), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
 }
 
 /// Each safetensors file's name, size, inode and change times: a weight written in place (--slide) moves the identity.
@@ -302,11 +320,18 @@ fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
         return null;
     }
     var why: []const u8 = "";
-    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafter = if (o.drafts) o.drafter else null, .drafter_bits = o.drafter_bits, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap }, a, &why) catch |err| {
+    const drafter = if (o.drafts) o.drafter else null;
+    const learn: ?@import("qwen27_disk.zig").Learn = if (o.learn_conversations) if (o.learn) |root| .{ .root = root, .dir = o.dir, .drafter = drafter, .cap = gibBytes(o.learn_gib), .floor = gibBytes(o.learn_min_free_gib), .daily = gibBytes(o.learn_daily_gib) } else null else null;
+    const h = qwen27.open(gpa, io, o.dir, .{ .context = @intCast(context), .streams = o.lanes, .streams_fixed = o.lanes_fixed, .drafter = drafter, .drafter_bits = o.drafter_bits, .cache_gib = o.prompt_cache_gib, .cache_over_cap = o.prompt_cache_over_cap, .learn = learn }, a, &why) catch |err| {
         problem.* = if (err == error.CacheOverCap or err == error.DrafterLoad or err == error.TooManyStreams) why else try std.fmt.allocPrint(a, "the native Qwen3.8-27B engine cannot load {s} ({s})", .{ o.dir, @errorName(err) });
         return null;
     };
     return .{ .engine = h.engine(), .close = qwen27.close, .ctx = h };
+}
+
+/// A GiB count's bytes (the flags allow 0 up to below 2^34).
+fn gibBytes(g: f64) u64 {
+    return @intFromFloat(g * (1 << 30));
 }
 
 /// Flash Next uses the dump named by TF_FLASHNEXT_DUMP, or the checked-in kernels when that variable is unset.
@@ -321,7 +346,8 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     var why: []const u8 = "";
-    const h = flashnext.open(gpa, io, o.dir, dump, window, o.speed_up, o.prompt_cache_gib, o.prompt_cache_over_cap, o.learn, @intFromFloat(o.learn_gib * (1 << 30)), a, &why) catch |e| {
+    const learn: ?flashnext.Learn = if (o.learn) |root| .{ .root = root, .cap = gibBytes(o.learn_gib), .floor = gibBytes(o.learn_min_free_gib), .daily = gibBytes(o.learn_daily_gib), .conversations = o.learn_conversations } else null;
+    const h = flashnext.open(gpa, io, o.dir, dump, window, o.speed_up, o.prompt_cache_gib, o.prompt_cache_over_cap, learn, a, &why) catch |e| {
         problem.* = tf.flashnext_engine.quantizationProblem(e) orelse if (e == error.CacheOverCap or e == error.LearnOnPair) why else if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump orelse "(none: the checked-in kernels)", @errorName(e) });
         return null;
     };
@@ -359,8 +385,9 @@ fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]co
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const h = glm.open(gpa, io, o.dir, @intCast(window), o.speed_up, o.lanes, o.lanes_fixed, o.prompt_cache_gib, o.learn, @intFromFloat(o.learn_gib * (1 << 30)), @intFromFloat(o.learn_min_free_gib * (1 << 30))) catch |e| {
-        if (e == error.BadLoadLimit) problem.* = "GLM_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 70% of RAM" else problem.* = if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
+    const learn: ?glm.Learn = if (o.learn) |root| .{ .root = root, .cap = gibBytes(o.learn_gib), .floor = gibBytes(o.learn_min_free_gib), .daily = gibBytes(o.learn_daily_gib), .conversations = o.learn_conversations } else null;
+    const h = glm.open(gpa, io, o.dir, @intCast(window), o.speed_up, o.lanes, o.lanes_fixed, o.prompt_cache_gib, learn) catch |e| {
+        if (e == error.LearnConversationsOnPair) problem.* = "--learn-conversations keeps states on one Mac only: serve GLM-5.3-Flash without --speed-up, or without the flag" else if (e == error.BadLoadLimit) problem.* = "GLM_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 70% of RAM" else problem.* = if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
     };
     return .{ .engine = h.engine(), .close = glm.close, .ctx = h };
@@ -425,6 +452,10 @@ test "--learn is refused for the 27B, the 2B and GLM-5.3 (EXLR8), and not for th
     const learn: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .learn = "/x" };
     const flags = " without --learn, --learn-dir or --learn-gib";
     try std.testing.expectStringEndsWith((try refusal(a, learn, true)) orelse "", ": serve Qwen3.8-27B" ++ flags);
+    var talks = learn;
+    talks.learn_conversations = true;
+    try std.testing.expect((try refusal(a, talks, true)) == null); // the 27B keeps conversation states on disk
+    try std.testing.expectStringEndsWith((try refusal(a, talks, false)) orelse "", ": serve Qwen3.5-2B without it");
     try std.testing.expectStringEndsWith((try refusal(a, learn, false)) orelse "", ": serve Qwen3.5-2B" ++ flags);
     try std.testing.expectStringEndsWith((try refusal(a, .{ .dir = "d", .model_type = "glm_moe_dsa", .learn = "/x" }, false)) orelse "", ": serve GLM-5.3 (EXLR8)" ++ flags);
     for ([_][]const u8{ "qwen3_5", "glm_moe_dsa" }) |t| try std.testing.expect((try refusal(a, .{ .dir = "d", .model_type = t, .learn_gib = 8, .learn_min_free_gib = 2 }, true)) == null);

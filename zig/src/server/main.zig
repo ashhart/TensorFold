@@ -17,8 +17,9 @@ const checkpoint_cli = @import("checkpoint_cli");
 const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--chat-template FILE]" ++
     " [--alias ALIAS] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
     " [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB]" ++
-    " [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB] [--recall]" ++
-    " [--recall-dir RECALL_DIR] [--recall-gib RECALL_GIB] [--recall-read-only] [--max-tokens MAX_TOKENS]" ++
+    " [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB]" ++
+    " [--learn-conversations] [--learn-daily-gib LEARN_DAILY_GIB] [--recall] [--recall-dir RECALL_DIR]" ++
+    " [--recall-gib RECALL_GIB] [--recall-read-only] [--max-tokens MAX_TOKENS]" ++
     " [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P]" ++
     " [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}]" ++
     " [--thinking-budget THINKING_BUDGET] [--loop-guard] [--no-drafts] [--drafter DRAFTER]" ++

@@ -111,6 +111,8 @@ pub const flags = [_]Flag{
     .{ .name = "--learn-dir", .native = true },
     .{ .name = "--learn-gib", .native = true },
     .{ .name = "--learn-min-free-gib", .native = true },
+    .{ .name = "--learn-conversations", .kind = .store_true, .native = true },
+    .{ .name = "--learn-daily-gib", .native = true },
     // the native server's own: drafts copied from a record of the token ids earlier requests read and wrote
     .{ .name = "--recall", .kind = .store_true, .native = true },
     .{ .name = "--recall-dir", .native = true },
@@ -143,6 +145,8 @@ pub const Args = struct {
     learn_dir: ?[]const u8 = null,
     learn_min_free_gib: f64 = 4,
     learn_gib: f64 = 32, // disk for learned states, every model and build together
+    learn_conversations: bool = false, // every kept state on disk, not only shared cuts (implies --learn)
+    learn_daily_gib: f64 = 32, // what learned states may write a day, every model together
     recall: bool = false, // draft copies from Recall's record of earlier requests (its other flags imply it)
     recall_dir: ?[]const u8 = null, // its directory (null: the tokenizer's own under ~/.cache/tensorfold/recall)
     recall_gib: f64 = 1.0 / 16.0, // the record's disk; its RAM is about twice as much once full
@@ -275,6 +279,11 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     } else if (is(name, "--learn-gib")) {
         out.learn = true;
         out.learn_gib = try gib(u, a, name, v);
+    } else if (is(name, "--learn-conversations")) {
+        out.learn = true;
+        out.learn_conversations = true;
+    } else if (is(name, "--learn-daily-gib")) {
+        out.learn_daily_gib = try gib(u, a, name, v);
     } else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--compact-at")) {
         if (std.mem.eql(u8, v, "auto")) out.compact_auto = true else {
             const f = try float(u, a, name, v);
@@ -381,6 +390,8 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .learn = if (args.learn) args.learn_dir orelse try api.prompt_imprint.defaultRoot(a) else null,
         .learn_gib = args.learn_gib,
         .learn_min_free_gib = args.learn_min_free_gib,
+        .learn_conversations = args.learn and args.learn_conversations,
+        .learn_daily_gib = args.learn_daily_gib,
         .slide = args.slide,
         .recall = args.recall,
         .device = args.device,
@@ -458,6 +469,10 @@ test "parse and capabilities share the table" {
     try std.testing.expect(dir.learn and std.mem.eql(u8, "/x/y", dir.learn_dir.?));
     const capped = try parse(a, &.{ "m", "--learn-gib", "8" }, &u);
     try std.testing.expect(capped.learn and capped.learn_gib == 8);
+    const talks = try parse(a, &.{ "m", "--learn-conversations", "--learn-daily-gib", "2.5" }, &u);
+    try std.testing.expect(talks.learn and talks.learn_conversations and talks.learn_daily_gib == 2.5);
+    try std.testing.expect((try request(a, "d", "t", talks)).learn_conversations);
+    try std.testing.expect(!(try request(a, "d", "t", capped)).learn_conversations);
     try std.testing.expect(!(try parse(a, &.{"m"}, &u)).recall and (try parse(a, &.{ "m", "--recall" }, &u)).recall);
     const named = try parse(a, &.{ "m", "--recall-dir", "/r", "--recall-gib", "0.5", "--recall-read-only" }, &u);
     try std.testing.expect(named.recall and named.recall_read_only and named.recall_gib == 0.5);

@@ -5,6 +5,7 @@ const imprint = @import("prompt_imprint.zig");
 const modes = @import("cache_modes.zig");
 const learned = @import("prompt_learn.zig");
 const cuts = @import("prompt_cuts.zig");
+pub const rows = @import("rows_store.zig");
 
 /// A family's copy of one state.
 pub const Saved = *anyopaque;
@@ -55,6 +56,8 @@ pub const Snapshots = struct {
         forget_checked: ?*const fn (*anyopaque, [:0]const u8, u64) anyerror!void = null,
         /// Learned state `key`'s files under `dir` removed (the cap needs room, or they no longer read back).
         forget: ?*const fn (ptr: *anyopaque, dir: [:0]const u8, key: u64) void = null,
+        /// --learn-conversations: the state's image as rows and parts, and copies out of and into kept states.
+        rows: ?*const rows.Image = null,
     };
 };
 
@@ -132,6 +135,7 @@ pub const Store = struct {
     counts: Counts = .{},
     shared_keys: std.ArrayList(u64) = .empty, // the tokens of recently planned shared cuts, hashed (at most SHARED_KEYS)
     imprint: ?*imprint.Imprint = null, // --learn: shared cuts' states on disk, read back by later sessions and servers
+    disk: ?*rows.Rows = null, // --learn-conversations: every kept state written behind to disk, read back where it pays
     active_rewind_at: u32 = 0, // the last lookup's rewind state (0: none); hosts keep a pass's states before the next lookup
 
     const SHARED_KEYS = 64;
@@ -148,6 +152,7 @@ pub const Store = struct {
     }
 
     fn free(s: *Store, e: *Entry) void {
+        if (s.disk) |r| rows.write.dropped(r, e);
         s.family.vtable.drop(s.family.ptr, e.saved);
         s.gpa.free(e.tokens);
         s.gpa.free(e.decode_spans);
@@ -155,7 +160,7 @@ pub const Store = struct {
         s.gpa.destroy(e);
     }
 
-    fn remove(s: *Store, i: usize) void {
+    pub fn remove(s: *Store, i: usize) void {
         const e = s.entries.orderedRemove(i);
         s.held -= e.bytes;
         s.free(e);
@@ -265,7 +270,7 @@ pub const Store = struct {
         if (s.active_rewind_at > 0) if (s.keptNear(prompt, starts, spans, s.active_rewind_at)) |at| {
             s.active_rewind_at = at; // a state kept under min_gap before it is the rewind state: no new copy
         };
-        const e = s.recall(prompt, born, starts, spans, s.find(prompt, starts, spans));
+        const e = rows.read.recall(s, prompt, born, starts, spans, s.recall(prompt, born, starts, spans, s.find(prompt, starts, spans)));
         if (e == null) s.counts.misses += 1;
         const from = if (e) |x| x.at else 0;
         const marks_ = if (s.active_rewind_at == 0)
@@ -302,6 +307,7 @@ pub const Store = struct {
         while (s.entries.items.len > 0) s.remove(s.entries.items.len - 1);
         s.shared_keys.clearRetainingCapacity();
         s.imprint = null;
+        s.disk = null;
         s.active_rewind_at = 0;
     }
 
@@ -480,6 +486,7 @@ pub const Store = struct {
         s.held += charged;
         s.counts.kept += 1;
         if (shared) learned.learn(s, e, starts);
+        if (s.disk) |r| rows.write.queued(r, e, starts);
         if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held); // spare storage only inside what the budget leaves
         return true;
     }
@@ -535,7 +542,7 @@ pub const Store = struct {
     }
 
     /// The entry to free first, never `skip`: a superseded one, no branch point, oldest; else the oldest, rewind last.
-    fn victimBut(s: *const Store, skip: ?*Entry, prompt: []const u32, born: u32) ?usize {
+    pub fn victimBut(s: *const Store, skip: ?*Entry, prompt: []const u32, born: u32) ?usize {
         var best: ?usize = null;
         for (s.entries.items, 0..) |e, i| {
             if (e.shared or e.branched or e == skip or s.isActiveRewind(e, prompt)) continue; // shared cuts and branch points go only as the least recently used
@@ -583,4 +590,5 @@ test {
     _ = @import("prompt_cache_give_test.zig");
     _ = @import("learned_fault_test.zig");
     _ = modes;
+    _ = rows;
 }
