@@ -1,10 +1,4 @@
-// libtfvideo: a video's frames for the native server's video input, as transformers' PyAV loader reads them
-// (video_utils.read_video_pyav): the first video stream; its frame count (the stream's nb_frames), rate (its average
-// frame rate), width and height; then the frames at the indices the family samples, counted in decode order from the
-// start, each converted to RGB as PyAV's VideoFrame.to_ndarray(format="rgb24") does (VideoReformatter: the size kept,
-// SWS_BILINEAR, the frame's colour space and range kept, transfer and primaries unspecified, sws_scale_frame).
-// Built against FFmpeg 9.0.2, the release PyAV 19.0.1 ships (tools/zig/build_ffmpeg.sh, `zig build video`); the server
-// loads it with dlopen when a request carries a video.
+// libtfvideo: a video's stream facts and RGB frames as transformers' read_video_pyav reads them, over FFmpeg 9.0.2.
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/ffversion.h>
@@ -63,7 +57,6 @@ static int64_t mem_seek(void* o, int64_t off, int whence) {
 }
 
 // PyAV's _set_frame_colorspace(frame, colorspace, UNSPECIFIED): an SWS_CS_* value names the frame's colour space
-// (the frame's own AVColorSpace number passes through it as PyAV passes it)
 static void set_colorspace(AVFrame* f, int cs) {
     if (cs == SWS_CS_ITU709) f->colorspace = AVCOL_SPC_BT709;
     else if (cs == SWS_CS_FCC) f->colorspace = AVCOL_SPC_FCC;
@@ -125,8 +118,7 @@ int tf_video_open(const uint8_t* data, size_t len, tf_video** out, tf_video_info
     return TF_OK;
 }
 
-// The frames at `indices` (ascending, distinct), decoded from the start (read_video_pyav seeks to 0 and enumerates
-// container.decode(video=0)), each handed to `fn` as RGB. Returns the frames delivered, or an error.
+// The frames at `indices` (ascending, distinct), decoded from the start, each to `fn` as RGB; returns frames delivered.
 int tf_video_frames(tf_video* v, const int* indices, int n, tf_frame_fn fn, void* ctx) {
     if (n <= 0) return 0;
     int rc = TF_DECODE;
@@ -162,8 +154,7 @@ int tf_video_frames(tf_video* v, const int* indices, int n, tf_frame_fn fn, void
             if (e == AVERROR_EOF) { rc = TF_SHORT; goto done; }
             if (e < 0) goto done;
             if (at == indices[next]) {
-                // PyAV's _reformat: the destination copies the frame's properties; colour space and range pass
-                // through _set_frame_colorspace with the frame's own values; transfer and primaries unspecified
+                // PyAV's _reformat: props copied, colour space and range via _set_frame_colorspace, trc/primaries unset
                 av_frame_unref(rgb);
                 av_frame_copy_props(rgb, frame);
                 set_colorspace(frame, (int)frame->colorspace);

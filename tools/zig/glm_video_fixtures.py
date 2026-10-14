@@ -1,20 +1,4 @@
-"""GLM-5.3-Flash video input against transformers' processor, on a fixed clip set (#565's video gate).
-
-    python -I tools/zig/glm_video_fixtures.py --model DIR --clips DIR [--native zig-out/bin/tf-glm-video]
-        [--max-tokens 16384] [--max-frames 256] [--make]
-
-The reference is transformers 5.19's Glm5NextProcessor (Glm5NextVideoProcessor) on frames PyAV 19.0.1 decodes
-(FFmpeg 9.0.2), as video_utils.read_video_pyav reads them, with the processor's own sample_frames and the same
-token budget and frame cap the server passes (max_image_tokens, max_frames). A container that keeps no frame count
-(Matroska, WebM: read_video_pyav's total_num_frames is 0 and the loader fails) is given its video packets' count, as
-libtfvideo counts them. --make draws and encodes the clip set first (H.264 4:2:0, 4:4:4, full range and BT.709 in
-MP4 and MOV; HEVC 8 and 10 bit; VP9 WebM; VP8 MKV; MPEG-4; odd sizes; a clip under a second; one past the frame cap).
-
-For each clip it runs tf-glm-video (libtfvideo decoding, families/glm/video.zig preparing) and checks the sampled
-indices, the grid, every patch value bit for bit and each frame group's time text against the expanded prompt.
-
-Needs transformers 5.19 with torch and torchvision, and PyAV 19.0.1.
-"""
+"""GLM-5.3-Flash video input against transformers' processor, on a fixed clip set (#565's video gate)."""
 
 from __future__ import annotations
 

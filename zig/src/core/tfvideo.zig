@@ -1,6 +1,4 @@
-//! libtfvideo (zig/src/video/tf_video.c over FFmpeg 9.0.2, `zig build video`), loaded when the first video arrives:
-//! a container's first video stream, its frame count and rate as transformers' PyAV loader reads them, and the RGB
-//! frames at given indices.
+//! libtfvideo (tf_video.c over FFmpeg 9.0.2), loaded on the first video: stream facts as PyAV reads them, RGB frames.
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -14,8 +12,7 @@ const Fns = struct {
     version: *const fn () callconv(.c) [*:0]const u8,
 };
 
-/// Where the library is looked for: beside the server (zig-out/native/lib, as `zig build video` installs it), then
-/// the loader's own search path.
+/// Beside the server (zig-out/native/lib, where `zig build video` installs it), then the loader's own search path.
 const names: []const [:0]const u8 = if (builtin.os.tag == .macos)
     &.{ "@executable_path/../lib/libtfvideo.dylib", "libtfvideo.dylib" }
 else

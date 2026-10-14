@@ -1,5 +1,4 @@
-//! GLM-5.3-Flash's video preparation on one clip, for tools/zig/glm_video_fixtures.py: libtfvideo decodes it, the
-//! family samples, sizes, resizes, normalizes and pairs the frames (families/glm/video.zig).
+//! GLM-5.3-Flash's video preparation on one clip, for tools/zig/glm_video_fixtures.py (libtfvideo, families/glm/video).
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
