@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- `core` reads NVIDIA's ModelOpt NVFP4 checkpoints as stored. `modelopt.admit` checks config.json's quantization block (top level or `text_config`'s) for NVFP4 weights in groups of 16 and refuses other ModelOpt formats by name, and `nvfp4.zig` maps a linear's e2m1 codes, e4m3 scales and fp32 scale and gives a float32 reference row. Which linears are NVFP4 comes from the tensors, since nvidia/GLM-5.3-Flash-NVFP4 at 423acf37 stores its MTP layer in BF16 without listing it. The tests read that revision's config.json and its whole tensor header, 147,661 names. The loader that calls it comes with GLM-5.3-Flash on CUDA (#758). Thanks to @Bizuayeu.
+
 ## 1.0.11
 
 - `--cortheon`'s instruction filter keeps reading past a long word. A word longer than the filter's scan buffer ended the scan early, so an order written after one was never checked; each word now keeps at most 16 bytes, so a long word can no longer end the scan (#829). Thanks to @joeynyc.
