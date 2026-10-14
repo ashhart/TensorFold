@@ -270,6 +270,69 @@ test "a rollback removes only what TensorFold writes there: files the user added
     try std.testing.expectEqual(ours.len, r.removed.len);
 }
 
+fn configUncloned(src: [:0]const u8) bool {
+    return std.mem.endsWith(u8, src, "/config.json");
+}
+
+/// The put-back temps left in `dir`.
+fn temps(io: Io, dir: []const u8) !usize {
+    var d = try Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
+    defer d.close(io);
+    var n: usize = 0;
+    var it = d.iterate();
+    while (try it.next(io)) |e| n += @intFromBool(std.mem.endsWith(u8, e.name, ".tensorfold-rollback"));
+    return n;
+}
+
+test "a rollback refused for space leaves the folder as it was, though other files were cloned before the check" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try model(a, io, tmp);
+    const before = try bytesOf(a, io, dir);
+    var why: []const u8 = "";
+    _ = try originals.keep(io, dir, null, .{}, a, &why);
+    try teach(a, io, dir);
+    const taught = try bytesOf(a, io, dir);
+    const short_mixed: originals.Options = .{ .free = short, .uncloned = configUncloned }; // config.json is copied
+    try std.testing.expectError(error.NoSpace, originals.rollback(io, dir, short_mixed, a, &why));
+    try std.testing.expect(has(why, "GB free"));
+    try std.testing.expect(sameBytes(taught, try bytesOf(a, io, dir)));
+    try std.testing.expectEqual(@as(usize, 0), try temps(io, dir));
+    _ = try originals.rollback(io, dir, .{ .free = plenty, .uncloned = configUncloned }, a, &why);
+    try std.testing.expect(sameBytes(before, try bytesOf(a, io, dir)));
+}
+
+test "a rollback whose put-back files do not match keeps what lessons added, and the next one finishes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    for ([_]bool{ true, false }) |clones| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const dir = try model(a, io, tmp);
+        const before = try bytesOf(a, io, dir);
+        const graph = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/facts.json", .{tmp.sub_path});
+        var why: []const u8 = "";
+        _ = try originals.keep(io, dir, graph, .{ .clones = clones, .free = plenty }, a, &why);
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = graph, .data = "{\"facts\": [], \"next\": 1}" });
+        try teach(a, io, dir);
+        const off: originals.Options = .{ .clones = clones, .free = plenty, .tamper = flip };
+        try std.testing.expectError(error.NotRestored, originals.rollback(io, dir, off, a, &why));
+        try std.testing.expect(has(why, "roll back again"));
+        const lesson = try path(a, dir, "living-weights-00001.safetensors");
+        const cut = try path(a, dir, shard2 ++ ".tmp");
+        try std.testing.expect(exists(io, lesson) and exists(io, cut) and exists(io, graph));
+        _ = try originals.rollback(io, dir, .{ .clones = clones, .free = plenty }, a, &why);
+        try std.testing.expect(sameBytes(before, try bytesOf(a, io, dir)));
+        try std.testing.expect(!exists(io, lesson) and !exists(io, graph));
+    }
+}
+
 test "a rollback is refused while any server holds the folder, and a --slide server holds it alone" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

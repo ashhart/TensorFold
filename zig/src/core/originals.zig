@@ -23,7 +23,8 @@ pub fn learnable(name: []const u8) bool {
 pub const Options = struct {
     clones: bool = true,
     free: *const fn ([:0]const u8) ?u64 = disk.available,
-    tamper: ?*const fn ([:0]const u8) void = null, // tests: a kept file changed before it is checked
+    tamper: ?*const fn ([:0]const u8) void = null, // tests: a kept or put-back file changed before it is checked
+    uncloned: ?*const fn ([:0]const u8) bool = null, // tests: the files this file system will not clone
     checked: bool = false, // this process made or checked the snapshot already: a later lesson reuses it unread
 };
 
@@ -130,7 +131,7 @@ fn keepFiles(io: Io, dir: []const u8, graph: ?[]const u8, o: Options, a: Allocat
         j.* = .{ .src = try join(a, dir, name), .dst = try join(a, part, name), .tamper = o.tamper };
         const size = (try Io.Dir.cwd().statFile(io, j.src, .{})).size;
         out.bytes += size;
-        j.copy = !(o.clones and try clone(j.src, j.dst));
+        j.copy = !try cloneIf(o, j.src, j.dst);
         if (!j.copy) out.cloned += 1 else {
             copies += size;
             largest = @max(largest, size);
@@ -185,45 +186,59 @@ fn rollbackFiles(io: Io, dir: []const u8, o: Options, a: Allocator, why: *[]cons
         return error.NoSnapshot;
     }
     const entries = try readManifest(a, io, snap, why);
-    const jobs = try a.alloc(Job, entries.len);
-    for (entries, jobs) |e, *j| j.* = .{ .src = try join(a, snap, e.name), .hash_only = true };
-    Pool(Job).run(jobs);
-    for (entries, jobs) |e, j| if (j.failed != null or !std.mem.eql(u8, &j.orig, &e.digest)) {
-        why.* = try std.fmt.allocPrint(a, "{s}/{s} does not match its line in {s}, so {s} was left as it is", .{ snap, e.name, manifest_name, dir });
+    if (try unmatched(a, io, snap, entries, false)) |name| {
+        const text = "{s}/{s} does not match its line in {s}, so {s} was left as it is";
+        why.* = try std.fmt.allocPrint(a, text, .{ snap, name, manifest_name, dir });
         return error.Damaged;
-    };
-    var out: Restored = .{ .files = entries.len };
-    var copies: std.ArrayList(usize) = .empty;
-    var largest: u64 = 0;
-    for (entries, jobs, 0..) |e, *j, i| {
-        const size = (try Io.Dir.cwd().statFile(io, j.src, .{})).size;
-        out.bytes += size;
-        j.dst = try std.fmt.allocPrintSentinel(a, "{s}/{s}{s}", .{ dir, e.name, put_back_suffix }, 0);
-        _ = std.c.unlink(j.dst);
-        if (o.clones and try clone(j.src, j.dst)) {
-            out.cloned += 1;
-            try rename(j.dst, try join(a, dir, e.name));
-        } else {
-            try copies.append(a, i);
-            largest = @max(largest, size);
-        }
     }
-    if (copies.items.len > 0) try room(a, o, try a.dupeSentinel(u8, dir, 0), largest, dir, why);
-    for (copies.items) |i| {
-        _ = try copyHashed(jobs[i].src, jobs[i].dst);
-        try rename(jobs[i].dst, try join(a, dir, entries[i].name));
+    var out: Restored = .{ .files = entries.len };
+    const backs = try a.alloc(Back, entries.len);
+    for (entries, backs) |e, *b| {
+        const tmp = try std.fmt.allocPrintSentinel(a, "{s}/{s}{s}", .{ dir, e.name, put_back_suffix }, 0);
+        b.* = .{ .src = try join(a, snap, e.name), .tmp = tmp, .live = try join(a, dir, e.name) };
+        b.size = (try Io.Dir.cwd().statFile(io, b.src, .{})).size;
+        out.bytes += b.size;
+    }
+    // nothing is put back before every clone is made and the copies fit; a stop at any point leaves no temp behind
+    errdefer for (backs) |b| {
+        _ = std.c.unlink(b.tmp);
+    };
+    var largest: u64 = 0;
+    for (backs) |*b| {
+        _ = std.c.unlink(b.tmp); // an interrupted rollback's
+        b.cloned = try cloneIf(o, b.src, b.tmp);
+        if (b.cloned) out.cloned += 1 else largest = @max(largest, b.size);
+    }
+    if (out.cloned < backs.len) try room(a, o, try a.dupeSentinel(u8, dir, 0), largest, dir, why);
+    for (entries, backs) |e, b| {
+        if (!b.cloned and !std.mem.eql(u8, &try copyHashed(b.src, b.tmp), &e.digest)) {
+            why.* = try std.fmt.allocPrint(a, "{s} changed while it was copied back: roll back again", .{b.src});
+            return error.Damaged;
+        }
+        try rename(b.tmp, b.live);
+    }
+    syncDir(a, dir);
+    if (o.tamper) |t| for (backs) |b| t(b.live);
+    if (try unmatched(a, io, dir, entries, false)) |name| {
+        const text = "{s} in {s} does not match the snapshot after it was put back: roll back again";
+        why.* = try std.fmt.allocPrint(a, text, .{ name, dir });
+        return error.NotRestored;
     }
     out.removed = try removeAdded(a, io, dir, entries);
     out.graphs = try removeGraphs(a, io, snap);
-    for (entries, jobs) |e, *j| j.* = .{ .src = try join(a, dir, e.name), .hash_only = true };
-    Pool(Job).run(jobs);
     syncDir(a, dir);
-    for (entries, jobs) |e, j| if (j.failed != null or !std.mem.eql(u8, &j.orig, &e.digest)) {
-        why.* = try std.fmt.allocPrint(a, "{s} in {s} does not match the snapshot after it was put back: roll back again", .{ e.name, dir });
-        return error.NotRestored;
-    };
     out.seconds = since(io, t0);
     return out;
+}
+
+/// One file put back: its kept copy, the temp beside it (a clone, else a checked copy) and the name it is renamed to.
+const Back = struct { src: [:0]const u8, tmp: [:0]const u8, live: [:0]const u8, size: u64 = 0, cloned: bool = false };
+
+/// A clone of `src` at the new path `dst` where the options and the file system allow one, else false.
+fn cloneIf(o: Options, src: [:0]const u8, dst: [:0]const u8) !bool {
+    if (!o.clones) return false;
+    if (o.uncloned) |refuses| if (refuses(src)) return false;
+    return clone(src, dst);
 }
 
 /// The first of `entries` missing from `at` or (unless `named_only`) not its SHA-256 there, else null.
