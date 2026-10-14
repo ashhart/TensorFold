@@ -127,6 +127,13 @@ pub const DeviceBuffer = struct {
         }
     }
 
+    /// `rows` rows of `width` bytes from src (row pitch `sp`) to dst (row pitch `dp`) in one strided copy.
+    pub fn copyRows(d: *const Driver, dst: abi.DevicePtr, dp: usize, src: abi.DevicePtr, sp: usize, width: usize, rows: usize, stream: abi.Stream) Error!void {
+        if (rows == 0 or width == 0) return;
+        const m: abi.Memcpy2D = .{ .src = src, .src_pitch = sp, .dst = dst, .dst_pitch = dp, .width = width, .height = rows };
+        try d.check(d.api.cuMemcpy2DAsync_v2(&m, stream), "cuMemcpy2DAsync");
+    }
+
     pub fn fill8(self: DeviceBuffer, value: u8, stream: ?abi.Stream) Error!void {
         if (self.len == 0) return;
         if (stream) |s| {

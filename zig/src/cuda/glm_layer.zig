@@ -298,10 +298,7 @@ pub const Scratch = struct {
 /// rows rows of `bytes` each from src (row stride ss bytes) to dst (row stride ds bytes): torch's strided copy_.
 fn copyRows(d: *const driver.Driver, s: Stream, dst: u64, ds: usize, src: u64, ss: usize, bytes: usize, rows: usize) !void {
     if (dst == src and (rows == 1 or ds == ss)) return; // a one-row Scratch's aliases
-    for (0..rows) |r| {
-        const b: memory.DeviceBuffer = .{ .d = d, .ptr = dst + r * ds, .len = bytes, .borrowed = true };
-        try b.copyFrom(0, src + r * ss, bytes, s.handle);
-    }
+    try memory.DeviceBuffer.copyRows(d, dst, ds, src, ss, bytes, rows, s.handle);
 }
 
 /// glue.hc_pre: normed, xs, post and comb of the S streams x [rows, S * D] at one site.
