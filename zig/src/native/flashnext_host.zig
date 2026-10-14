@@ -68,8 +68,11 @@ pub const Host = struct {
         h.decoded.deinit(h.gpa);
     }
 
+    /// A container constant: a literal with a call in a field lives on the stack, so engine() handed it out dangling.
+    const vtable: api.Engine.VTable = .{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn, .imprint = disk.ask(Host), .drain = drainFn };
+
     pub fn engine(h: *Host) api.Engine {
-        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn, .imprint = disk.ask(Host), .drain = drainFn } };
+        return .{ .ctx = h, .vtable = &vtable };
     }
 
     /// Engine.drain, and stop's first half: closing, what waits cancelled, writes finished, the thread joined.
