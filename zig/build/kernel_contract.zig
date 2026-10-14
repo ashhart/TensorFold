@@ -1,0 +1,34 @@
+//! The kernel contract's programs: tf-kernel-contract on Metal, and `zig build kernel-contract` that runs the gates.
+const std = @import("std");
+
+/// The contract module alone (its host tests run in `zig build test` through core/root.zig).
+pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("zig/src/core/contract.zig"), .target = target, .optimize = optimize });
+}
+
+/// macOS: tf-kernel-contract over the engine's Metal kernels; `kernel-contract` runs it on this Mac's GPU.
+pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal_mod: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module) void {
+    const exe = b.addExecutable(.{ .name = "tf-kernel-contract", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/metal_main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "metal", .module = metal_mod },
+            .{ .name = "tensorfold", .module = engine },
+            .{ .name = "kernel_sources", .module = sources },
+            .{ .name = "contract", .module = module(b, target, optimize) },
+        },
+    }) });
+    const install = b.addInstallArtifact(exe, .{});
+    b.step("tf-kernel-contract", "Build the kernel contract's Metal gates and controls (no run)").dependOn(&install.step);
+    const run = b.addRunArtifact(exe);
+    b.step("kernel-contract", "Every registered kernel through the contract's gates on this GPU, each control red").dependOn(&run.step);
+}
+
+/// Linux: `kernel-contract` runs tf-cuda-test's kernel-contract command (kernels from -Dnvcc or -Dfatbins).
+pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile) void {
+    const run = b.addRunArtifact(runner);
+    run.addArg("kernel-contract");
+    b.step("kernel-contract", "Every registered CUDA kernel through the contract's gates on this GPU, each control red").dependOn(&run.step);
+}

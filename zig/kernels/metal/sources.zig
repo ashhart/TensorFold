@@ -124,3 +124,5 @@ pub const core_deltanet = @embedFile("core/deltanet.metal");
 pub const core_simd_qmm = @embedFile("core/simd_qmm.metal");
 /// 2- to 8-bit projections on the same tiles, rows written at a stride (core/simd_qmm_bits.zig).
 pub const core_simd_qmm_bits = @embedFile("core/simd_qmm_bits.metal");
+/// The kernel contract's planted controls: one kernel breaking each gate (zig/tests/contract/).
+pub const core_contract_controls = @embedFile("core/contract_controls.metal");
