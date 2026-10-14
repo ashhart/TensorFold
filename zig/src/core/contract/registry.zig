@@ -84,6 +84,7 @@ pub const metal = [_]M{
     .{ .name = "simd_qmm_bits tf_sqw_mma_q8_16_4_1", .threads = 512, .tg_memory = 16384, .adapts = true, .m1 = 224, .m2 = 224 },
     .{ .name = "lane projection q6 g32 sk1 tf_lane", .threads = 32, .tg_memory = 3072, .offline = false },
     .{ .name = "lane projection q6 g32 sk4 tf_lane", .threads = 128, .tg_memory = 10240, .offline = false },
+    .{ .name = "glm hc_expand_10 custom_kernel_tf_glm5_fused_hc_expand_cc77af98f2__4096_1_0_0_0_bfloat16_t_bfloat16_t_float_float_floatc_bfloat16_t_float_float", .threads = 1024, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
 };
 
 /// Gate 5's planted Metal controls: a launch past M1/M2's compiled limit (#708's class), 36 KiB of threadgroup memory.
