@@ -32,6 +32,7 @@ pub const flashnext_learned = @import("families/flashnext/learned.zig");
 pub const flashnext_think_check = @import("families/flashnext/think_check.zig");
 pub const glm = @import("families/glm/glm.zig");
 pub const qwen35 = @import("families/qwen3_5/qwen3_5.zig");
+pub const gemma4 = @import("families/gemma4/gemma4.zig");
 pub const flashnext_pack = @import("families/flashnext/pack.zig");
 
 test {
@@ -56,6 +57,7 @@ test {
     _ = @import("families/flashnext/think_check.zig"); // and in the verdict kernels (Metal)
     _ = @import("families/glm/glm.zig");
     _ = @import("families/qwen3_5/config.zig");
+    _ = @import("families/gemma4/gemma4.zig");
     _ = @import("families/qwen3_5/backend.zig");
 }
 
