@@ -43,6 +43,10 @@ const kernels = [_]Kernel{
     .{ .name = "qmmf", .flags = &.{"-O3"} }, // nvfp4/qmmf.cu's device code (FP8G, FP4), tensorfold_nvfp4_v3
     .{ .name = "prompt16", .flags = &.{"-O3"} }, // nvfp4/prompt.cu's FP4 and FP8 tile 4, tensorfold_nvfp4_prompt_v1
     .{ .name = "modelopt_pack", .flags = &.{"-O3"} }, // ours: ModelOpt tensors into the lane, prompt and expert layouts
+    // the routed experts' grouped kernels and the greedy candidates the GLM family shares with Flash Next (zig/kernels/cuda/flashnext)
+    .{ .name = "fn_experts", .src = "flashnext/experts", .flags = &.{"-O3"} },
+    .{ .name = "fn_experts_prefill", .src = "flashnext/experts_prefill", .flags = &.{"-O3"} },
+    .{ .name = "fn_sample", .src = "flashnext/sample", .flags = &.{ "-O3", "--fmad=false", "--ftz=false" } },
     // GLM-5.3-Flash (glm5_next): the device copy of the Python engine's KDA extension (zig/tests/cuda/glm/gen_copies.py)
     .{ .name = "glm_kda", .src = "glm/kda", .flags = &.{ "-O3", "--fmad=false" } }, // glm5_next/cuda/kda.py, tensorfold_glm_kda_v2
     .{ .name = "glm_ops", .src = "glm/ops", .flags = &.{ "-O3", "--fmad=false" } }, // ours: the token lists, casts and positions torch ops make
