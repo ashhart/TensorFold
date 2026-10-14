@@ -45,7 +45,7 @@ pub const Rig = struct {
     stream: Stream,
     /// Every kernel choice on, as a run takes them.
     on: Launcher,
-    /// Merged decode launches and the chunked DeltaNet off: the kernels they replace.
+    /// Merged decode launches off: the kernels they replace.
     off: Launcher,
     arena: Arena,
     /// The activation type: bf16 where the GPU has a bf16 dot2, fp16 on RDNA2.
@@ -62,7 +62,7 @@ pub const Rig = struct {
         errdefer t.stream.deinit();
         t.on = try Launcher.load(&t.r, .{}, kernels.images);
         errdefer t.on.unload();
-        t.off = try Launcher.load(&t.r, .{ .fuse = false, .chunked = false }, kernels.images);
+        t.off = try Launcher.load(&t.r, .{ .fuse = false }, kernels.images);
         errdefer t.off.unload();
         t.arena = try Arena.init(&t.r, arena_bytes);
         t.bf16 = caps.Caps.of(kernels.arch).?.act == .bf16;
