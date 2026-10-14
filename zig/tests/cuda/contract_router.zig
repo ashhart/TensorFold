@@ -136,7 +136,9 @@ pub const TopK = struct {
         const a = self.rig.gpu.gpa;
         self.shape = shape;
         a.free(self.part);
+        self.part = &.{};
         a.free(self.bias);
+        self.bias = &.{};
         self.part = try a.alloc(f32, shape.k * shape.rows * shape.n);
         self.bias = try a.alloc(f32, shape.n);
         var prng = std.Random.DefaultPrng.init(seed);

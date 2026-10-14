@@ -60,6 +60,7 @@ pub const TopK = struct {
         t.p = .{ .rows = @intCast(shape.rows), .vocab = @intCast(shape.k), .k = @intCast(shape.n), .stride = @intCast(shape.k) };
         cpu.check(t.p) catch return false;
         t.a.free(t.words);
+        t.words = &.{};
         t.words = try t.a.alloc(u16, shape.rows * shape.k);
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();

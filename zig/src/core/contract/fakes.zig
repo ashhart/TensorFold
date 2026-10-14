@@ -20,6 +20,9 @@ pub const Fake = struct {
         if (f.r) |r| r.deinit();
         f.a.free(f.out);
         f.a.free(f.seen);
+        f.r = null;
+        f.out = &.{};
+        f.seen = &.{};
     }
 
     fn of(ctx: *anyopaque) *Fake {
@@ -163,4 +166,14 @@ test "a tail fault passes at whole tiles: the edges are what catch it" {
     g.quiet = true;
     defer g.quiet = false;
     try std.testing.expectEqual(g.Verdict.pass, try g.shapes(a, k, 1));
+}
+
+test "a prepare that runs out of memory leaves nothing to free twice" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var f = Fake{ .a = failing.allocator(), .op = .sum };
+    defer f.deinit();
+    const shape: c.Shape = .{ .rows = 4, .n = 1, .k = 64 };
+    try std.testing.expect(try Fake.prepare(&f, shape, .random, 1));
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, Fake.prepare(&f, shape, .random, 2));
 }
