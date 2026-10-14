@@ -9,6 +9,7 @@ pub const qwen35_layout = @embedFile("qwen3_5/layout.metal");
 /// Our glue kernels around them: embedding, MLX's RMS arithmetic, argmax, layout moves.
 pub const nemotron_glue = @embedFile("nemotron_glue.metal");
 pub const core_row_projection = @embedFile("core/row_projection.metal");
+pub const core_tile_qmm = @embedFile("core/tile_qmm.metal");
 pub const core_exl3_projection = @embedFile("core/exl3_projection.metal");
 pub const core_exlr8_projection = @embedFile("core/exlr8_projection.metal");
 pub const core_exlr8_dense = @embedFile("core/exlr8_dense.metal");

@@ -456,6 +456,17 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     }) });
     b.step("tf-row-check", "The core row projection on synthetic 4-bit matrices: widths bit-equal, a CPU reference, indexed experts").dependOn(&b.addInstallArtifact(row_check, .{}).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = row_mod })).step);
+    // The prompt tiles and their decode twin on synthetic matrices; runs on any Mac's GPU
+    const tile_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/tile_qmm.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
+    const tile_check = b.addExecutable(.{ .name = "tf-tile-check", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/tile_qmm_check.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tile_qmm", .module = tile_mod } },
+    }) });
+    b.step("tf-tile-check", "The prompt tiles on synthetic 4-, 6- and 8-bit matrices: rows, twin and grouped bit-equal, a float64 reference").dependOn(&b.addInstallArtifact(tile_check, .{}).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = tile_mod })).step);
     exl3_build.targets(b, target, optimize, metal, test_step);
     exlr8_build.metalTargets(b, target, optimize, metal, mods.sources, test_step);
     exlr8_build.glmTargets(b, target, optimize, metal, mods.engine);

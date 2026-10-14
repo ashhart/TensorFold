@@ -63,6 +63,8 @@ pub const shared_kv = @import("core/shared_kv.zig");
 
 pub const shared_attention = @import("core/shared_attention.zig");
 
+pub const tile_qmm = @import("core/tile_qmm.zig");
+
 pub const gpu_profile = @import("core/gpu_profile.zig");
 
 pub const draft_ops = @import("draft_ops");
