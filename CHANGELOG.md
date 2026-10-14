@@ -9,6 +9,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - `--cortheon`'s instruction filter sees through soft hyphens and zero-width characters (U+00AD, U+200B to U+200D, U+2060 and U+FEFF), raw or written as numeric entities: one inside a word no longer splits an order into pieces the filter misses, and one between words still parts them.
 - `--cortheon` drops Unicode tag characters (U+E0000 to U+E007F) from web text. They are invisible, yet some models read them as letters, so a page could spell an order in them that no one reading it would see; one inside a visible word no longer hides an order from the instruction filter either.
 - `--cortheon` reads a page of unclosed tags in linear time. A run of `<` with no `>`, or of unclosed `<a ` tags, was rescanned to the page's end at every character: a 128 KiB page of either took 2 to 4 seconds, and one at the 2 MiB read limit would take 8 to 18 minutes. Both now take milliseconds.
+- `--cortheon` reads a search page that ends inside a result's snippet: the result keeps its title and link with no snippet. Before, the parser sliced backwards there, a panic in a safe build and undefined behaviour in the default fast build (#830). Thanks to @joeynyc.
 
 ## 1.0.10
 
