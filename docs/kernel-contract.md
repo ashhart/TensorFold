@@ -25,8 +25,9 @@ The test of a kernel fills a `contract.spec.Spec` and hands the harness a few ho
 - Whether it may write in place. If it replaces another kernel, the kernel whose bits it must equal.
 - Its NaN rule: `propagate` (as float64 arithmetic on its formula does), or a stated rule the test checks itself
   (top-k, argmax, sampling and routing kernels state theirs).
-- For gate 5, its launch in `zig/src/core/contract/registry.zig`: threads a group and threadgroup bytes on Metal, or
-  symbol, image, threads a block, dynamic shared bytes and cluster width on CUDA, with the limits its compiles recorded.
+- For gate 5, its launch in `zig/src/core/contract/registry.zig`: threads a group and threadgroup bytes (the source's,
+  and any its encoder sets) on Metal, or symbol, image, threads a block, dynamic shared bytes and cluster width on CUDA,
+  with the limits its compiles recorded.
 
 ## The gates
 
@@ -100,8 +101,9 @@ MLX's formula keeps the infinity, because its codes enter the MMAs as q + 128 an
 
 Metal: softmax, RMS norm, bf16 top-k, the row projection (3, 4, 6 and 8 bits), affine_mm (4 and 8 bits), simd_qmm
 (4 bits) and simd_qmm_bits (3, 6 and 8 bits), and the lane projection (6-bit groups of 32 on every chip; 4- and 8-bit
-formats on the M5's tensor units, where its reg kernel must equal the cooperative one bit for bit). Gate 5 also holds
-GLM-5.3-Flash's hc_expand_10.
+formats on the M5's tensor units, where its reg kernel must equal the cooperative one bit for bit), and tile_qmm's
+prompt tiles and their decode twin (4, 6 and 8 bits; the twin bit-equal to the tiles). Gate 5 also holds the rest of
+tile_qmm's pipelines and GLM-5.3-Flash's hc_expand_10.
 CUDA: the RMS norm rows (16-byte form and the fp32-out tree), Nemotron's router logits and top-k, qmm_group's cluster
 tile, lane_gemv and its split-K form (both bit-equal to it), prompt16's FP4 tile with bf16 and fp32 out, qmmf's FP4
 tiles with fp32 out (K slices met in a cluster, fused, or by `reduce_kernel<true>`), and the reduce-scatter's

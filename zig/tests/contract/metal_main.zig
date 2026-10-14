@@ -1,10 +1,12 @@
 //! tf-kernel-contract: every registered Metal kernel through gates 1-4, the planted controls, then gate 5's limits.
 const std = @import("std");
 const mtl = @import("metal");
+const tf = @import("tensorfold");
 const contract = @import("contract");
 const rows_k = @import("metal_rows.zig");
 const affine_k = @import("metal_affine.zig");
 const topk_k = @import("metal_topk.zig");
+const tile_k = @import("metal_tile.zig");
 const limits_k = @import("metal_limits.zig");
 
 const g = contract.gates;
@@ -106,6 +108,18 @@ pub fn main(init: std.process.Init) !u8 {
         try proj_list.append(a, p);
         try kernels.append(a, p.kernel());
     };
+    var tile_p = try tf.tile_qmm.Pipelines.load(device);
+    defer tile_p.deinit();
+    var tiles: [2 * tf.tile_qmm.bit_widths.len]tile_k.Tile = undefined;
+    var ntiles: usize = 0;
+    defer for (tiles[0..ntiles]) |*x| x.deinit();
+    for ([_]tile_k.Kind{ .tiles, .twin }) |kind| for (tf.tile_qmm.bit_widths) |bits| {
+        const name = try std.fmt.allocPrint(a, "metal tile_qmm {s} q{d} g64", .{ if (kind == .tiles) "tiles" else "twin", bits });
+        if (!wanted(o, name)) continue;
+        tiles[ntiles] = tile_k.Tile.init(a, device, queue, &tile_p, kind, bits, name);
+        ntiles += 1;
+    };
+    for (tiles[0..ntiles]) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) try g.runAll(a, kernels.items, o.seed, &t);

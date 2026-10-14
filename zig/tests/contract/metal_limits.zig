@@ -39,7 +39,7 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         text = for (sources.glm.all) |k| {
             if (std.mem.eql(u8, k.key, key)) break k.source;
         } else return error.UnknownLaunch;
-    } else if (has(d.name, "softmax")) text = sources.ops_softmax else if (has(d.name, "rms")) text = sources.ops_embed_norm else if (has(d.name, "top-k")) text = topk_text else if (has(d.name, "row projection")) text = sources.core_row_projection else if (has(d.name, "simd_qmm_bits")) text = sources.core_simd_qmm_bits else if (has(d.name, "simd_qmm")) text = sources.core_simd_qmm else if (has(d.name, "affine_mm")) {
+    } else if (has(d.name, "tile_qmm")) text = sources.core_tile_qmm else if (has(d.name, "softmax")) text = sources.ops_softmax else if (has(d.name, "rms")) text = sources.ops_embed_norm else if (has(d.name, "top-k")) text = topk_text else if (has(d.name, "row projection")) text = sources.core_row_projection else if (has(d.name, "simd_qmm_bits")) text = sources.core_simd_qmm_bits else if (has(d.name, "simd_qmm")) text = sources.core_simd_qmm else if (has(d.name, "affine_mm")) {
         const bits: u8 = if (has(d.name, "q8")) 8 else 4;
         const group: u16 = if (has(d.name, "g32")) 32 else 64;
         head = try std.fmt.allocPrint(a, "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T bfloat\n", .{ bits, group });
@@ -73,9 +73,9 @@ fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: bool)
     const cap = mtl.objc.msg(usize, device.id, "maxThreadgroupMemoryLength", .{});
     var n: usize = 0;
     if (most < l.decl.threads and !l.decl.adapts) n += 1;
-    if (tg > l.decl.tg_memory or tg > cap) n += 1;
+    if (tg > l.decl.tg_memory or tg + l.decl.dynamic > cap) n += 1;
     const word = if (n == 0) "PASS" else if (control) "RED " else "FAIL";
-    std.debug.print("{s} limits here {s}: {d} threads launched, the pipeline takes {d}; {d} threadgroup bytes (declared at most {d}, the GPU's most {d})\n", .{ word, l.decl.name, l.decl.threads, most, tg, l.decl.tg_memory, cap });
+    std.debug.print("{s} limits here {s}: {d} threads launched, the pipeline takes {d}; {d} threadgroup bytes and {d} set (declared at most {d}, the GPU's most {d})\n", .{ word, l.decl.name, l.decl.threads, most, tg, l.decl.dynamic, l.decl.tg_memory, cap });
     return n;
 }
 

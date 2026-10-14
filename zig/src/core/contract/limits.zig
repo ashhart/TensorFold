@@ -17,6 +17,8 @@ pub const MetalLaunch = struct {
     name: []const u8,
     threads: u32,
     tg_memory: u32,
+    /// Threadgroup bytes the encoder adds to the source's own (setThreadgroupMemory).
+    dynamic: u32 = 0,
     reserved: u32 = 0,
     m1: u32 = 0,
     m2: u32 = 0,
@@ -66,7 +68,8 @@ pub const Usage = struct { regs: u32, static: u32, bound: u32 = 0, local: u32 = 
 pub fn metal(l: MetalLaunch, f: Apple, out: *std.ArrayList(u8), a: std.mem.Allocator) !usize {
     var n: usize = 0;
     if (l.threads > f.threads) n += try note(out, a, "{s} on {s}: {d} threads a group, the family's most is {d}", .{ l.name, f.name, l.threads, f.threads });
-    if (l.tg_memory > f.tg_memory) n += try note(out, a, "{s} on {s}: {d} threadgroup bytes, the family's most is {d}", .{ l.name, f.name, l.tg_memory, f.tg_memory });
+    const tg = l.tg_memory + l.dynamic;
+    if (tg > f.tg_memory) n += try note(out, a, "{s} on {s}: {d} threadgroup bytes, the family's most is {d}", .{ l.name, f.name, tg, f.tg_memory });
     if (f.by_registers and l.reserved < l.threads and !l.adapts) {
         const lim = if (f.gen == 13) l.m1 else l.m2;
         if (!l.offline and l.threads > 256) n += try note(out, a, "{s} on {s}: {d} threads past 256 and no M1/M2 compile to show they fit (reserve them)", .{ l.name, f.name, l.threads });
@@ -111,6 +114,8 @@ test "a launch inside every family passes; each planted excess is named" {
     for (apple) |f| try std.testing.expectEqual(@as(usize, 0), try metal(ok, f, &out, a));
     const big = MetalLaunch{ .name = "big", .threads = 256, .tg_memory = 36 * 1024, .m1 = 1024, .m2 = 1024 };
     for (apple) |f| try std.testing.expectEqual(@as(usize, 1), try metal(big, f, &out, a));
+    const set = MetalLaunch{ .name = "set", .threads = 64, .tg_memory = 24 * 1024, .dynamic = 10 * 1024, .m1 = 1024, .m2 = 1024 };
+    for (apple) |f| try std.testing.expectEqual(@as(usize, 1), try metal(set, f, &out, a));
     const heavy = MetalLaunch{ .name = "heavy", .threads = 1024, .tg_memory = 0, .m1 = 448, .m2 = 640 };
     try std.testing.expectEqual(@as(usize, 1), try metal(heavy, apple[0], &out, a));
     try std.testing.expectEqual(@as(usize, 0), try metal(heavy, apple[2], &out, a));
