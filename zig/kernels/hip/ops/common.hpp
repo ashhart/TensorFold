@@ -44,4 +44,3 @@ __device__ __forceinline__ float sigmoid(float x) { return 1.0f / (1.0f + expf(-
 __device__ __forceinline__ long long gid() { return static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x; }
 
 }  // namespace
-
