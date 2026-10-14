@@ -310,6 +310,132 @@ __device__ __forceinline__ void linear_body(LinearArgs a) {
     }
 }
 
+// A prompt block of 64 rows (mul1): warp j owns column tile j for every K range, so x's tiles are staged once in shared
+constexpr int PR = 64; // rows a block
+constexpr int PS = 132; // psum's row stride (floats): rows apart in banks, 16-byte aligned
+constexpr int PKC = 2; // k tiles a stage
+constexpr int PXS = 24; // a staged x row's stride (halves): ldmatrix rows on distinct banks
+constexpr int PROMPT_SHARED = PR * PS * 4 + 2 * PKC * PR * PXS * 2;
+
+__device__ __forceinline__ void cp_async16(void* dst, const void* src) {
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"((unsigned)__cvta_generic_to_shared(dst)), "l"(src));
+}
+
+// The same partial sums per K range as linear_body, added into psum in range order: its bits, each tile decoded once.
+template <int K2, int WK>
+__device__ __forceinline__ void prompt_body(LinearArgs a) {
+    constexpr int TW = tile_words<K2>(), LW = lane_words<K2>();
+    extern __shared__ __align__(16) float psum[]; // [PR][PS], then x stages [2][PKC][PR][PXS] fp16
+    half* xs = reinterpret_cast<half*>(psum + PR * PS);
+    __shared__ int last;
+    const int M = a.m, K = a.k, N = a.n, SK = a.sk, NB = N >> 7;
+    const int row0 = blockIdx.y * PR, MB = imin(PR, M - row0), MT = (MB + 15) >> 4;
+    const int nb = (int)blockIdx.x % NB, split = (int)blockIdx.x / NB;
+    const int j = threadIdx.x >> 5, lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
+    const int per_warp = (K >> 4) / SK / WK, nkt = per_warp * WK, kt0 = split * nkt;
+    const uint32_t* tiles = a.t + nb * a.stride_nb + j * TW;
+    const half* xh = static_cast<const half*>(a.xh);
+    const int col0 = nb * 128;
+    auto stage = [&](int c) { // k tiles c * PKC.. into buffer c & 1: one 16-byte piece a thread
+        const int kk = threadIdx.x >> 7, row = (threadIdx.x >> 1) & (PR - 1), part = threadIdx.x & 1;
+        const half* src = xh + (size_t)(row0 + imin(row, MB - 1)) * K + (kt0 + c * PKC + kk) * 16 + part * 8;
+        cp_async16(xs + (((c & 1) * PKC + kk) * PR + row) * PXS + part * 8, src);
+        asm volatile("cp.async.commit_group;");
+    };
+    float acc[4][2][4];
+    uint32_t w[LW], wn[LW];
+    ldg_lane_words<K2>(tiles + (size_t)kt0 * a.stride_k, lane, w);
+    stage(0);
+    const int chunks = nkt / PKC;
+#pragma unroll 1
+    for (int c = 0; c < chunks; ++c) {
+        if (c + 1 < chunks) {
+            stage(c + 1);
+            asm volatile("cp.async.wait_group 1;");
+        } else {
+            asm volatile("cp.async.wait_group 0;");
+        }
+        __syncthreads();
+#pragma unroll
+        for (int kk = 0; kk < PKC; ++kk) {
+            const int i = c * PKC + kk;
+            if (i % per_warp == 0) {
+#pragma unroll
+                for (int q = 0; q < 4; ++q)
+#pragma unroll
+                    for (int h = 0; h < 2; ++h)
+#pragma unroll
+                        for (int e = 0; e < 4; ++e) acc[q][h][e] = 0.f;
+            }
+            if (i + 1 < nkt) ldg_lane_words<K2>(tiles + (size_t)(kt0 + i + 1) * a.stride_k, lane, wn);
+            uint32_t b0[2], b1[2];
+            decode_lane<K2, 2>(w, lane, b0, b1);
+            const half* xb = xs + (((c & 1) * PKC + kk) * PR + (lane & 15)) * PXS + (lane >> 4) * 8;
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+                if (q < MT) {
+                    uint32_t u[4];
+                    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];"
+                                 : "=r"(u[0]), "=r"(u[1]), "=r"(u[2]), "=r"(u[3])
+                                 : "r"((unsigned)__cvta_generic_to_shared(xb + q * 16 * PXS)));
+                    mma16816(acc[q][0], u, b0);
+                    mma16816(acc[q][1], u, b1);
+                }
+            }
+#pragma unroll
+            for (int q = 0; q < LW; ++q) w[q] = wn[q];
+            if ((i + 1) % per_warp == 0) { // a K range done: into psum, the first range stored, the rest added
+                const bool first = i + 1 == per_warp;
+#pragma unroll
+                for (int q = 0; q < 4; ++q) {
+                    if (q >= MT) continue;
+#pragma unroll
+                    for (int h = 0; h < 2; ++h) {
+                        float* p0 = psum + (16 * q + g) * PS + j * 16 + h * 8 + 2 * t;
+                        float* p1 = p0 + 8 * PS;
+                        p0[0] = first ? acc[q][h][0] : p0[0] + acc[q][h][0];
+                        p0[1] = first ? acc[q][h][1] : p0[1] + acc[q][h][1];
+                        p1[0] = first ? acc[q][h][2] : p1[0] + acc[q][h][2];
+                        p1[1] = first ? acc[q][h][3] : p1[1] + acc[q][h][3];
+                    }
+                }
+            }
+        }
+        __syncthreads(); // the stage is refilled two chunks on
+    }
+    if (SK == 1) {
+        for (int r = j; r < MB; r += 8) {
+            const float4 u = *reinterpret_cast<const float4*>(psum + r * PS + 4 * lane);
+            float v[4] = {u.x, u.y, u.z, u.w};
+            finish(v, lane, a.svh, a.bias, col0 + 4 * lane);
+            store4(a.y, a.y_dtype, (size_t)(row0 + r) * N + col0 + 4 * lane, v);
+        }
+        return;
+    }
+    for (int r = j; r < MB; r += 8)
+        *reinterpret_cast<float4*>(a.z + ((size_t)split * M + row0 + r) * N + col0 + 4 * lane) =
+            *reinterpret_cast<const float4*>(psum + r * PS + 4 * lane);
+    __threadfence();
+    __syncthreads();
+    int* counter = a.counters + blockIdx.y * NB + nb;
+    if (threadIdx.x == 0) last = atomicAdd(counter, 1) == SK - 1;
+    __syncthreads();
+    if (!last) return;
+    __threadfence();
+    for (int r = j; r < MB; r += 8) {
+        const size_t at = (size_t)(row0 + r) * N + col0 + 4 * lane;
+        float4 s = __ldcg(reinterpret_cast<const float4*>(a.z + at));
+        for (int q = 1; q < SK; ++q) {
+            const float4 u = __ldcg(reinterpret_cast<const float4*>(a.z + (size_t)q * M * N + at));
+            s.x += u.x; s.y += u.y; s.z += u.z; s.w += u.w;
+        }
+        float v[4] = {s.x, s.y, s.z, s.w};
+        finish(v, lane, a.svh, a.bias, col0 + 4 * lane);
+        store4(a.y, a.y_dtype, at, v);
+    }
+    if (threadIdx.x == 0) *counter = 0; // every program of the block has arrived
+}
+
 // One extern "C" kernel per instantiation: the fatbin carries __global__ functions, the host resolves them by name.
 #define TF_EXL3_LINEAR(K2, CB, WK)                                                       \
     extern "C" __global__ void __launch_bounds__((WK) * 32)                              \
@@ -329,4 +455,17 @@ TF_EXL3_CODEBOOK(1) // mcg
 TF_EXL3_CODEBOOK(0) // inst3
 #undef TF_EXL3_CODEBOOK
 #undef TF_EXL3_WIDTHS
+
+// The prompt kernels: mul1, every width, 4 and 8 warps' K ranges, 8 warps a block.
+#define TF_EXL3_PROMPT(K2)                                                                                  \
+    extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_##K2##_4(tf_exl3::LinearArgs a) {   \
+        tf_exl3::prompt_body<K2, 4>(a);                                                                     \
+    }                                                                                                       \
+    extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_##K2##_8(tf_exl3::LinearArgs a) {   \
+        tf_exl3::prompt_body<K2, 8>(a);                                                                     \
+    }
+TF_EXL3_PROMPT(2) TF_EXL3_PROMPT(3) TF_EXL3_PROMPT(4) TF_EXL3_PROMPT(5) TF_EXL3_PROMPT(6) TF_EXL3_PROMPT(7)
+TF_EXL3_PROMPT(8) TF_EXL3_PROMPT(9) TF_EXL3_PROMPT(10) TF_EXL3_PROMPT(11) TF_EXL3_PROMPT(12) TF_EXL3_PROMPT(13)
+TF_EXL3_PROMPT(14) TF_EXL3_PROMPT(16)
+#undef TF_EXL3_PROMPT
 }  // namespace tf_exl3

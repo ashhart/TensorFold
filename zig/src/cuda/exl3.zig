@@ -51,6 +51,17 @@ pub fn symbol(comptime halves: u32, comptime codebook: Codebook, comptime warps:
 
 pub const rot_in_symbol = "tf_exl3_rot_in";
 
+/// The prompt kernels' widths (mul1, 4 and 8 warps each): every half step but 15.
+pub const prompt_halves = [_]u32{ 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16 };
+
+/// A prompt kernel's shared bytes: psum [64][132] fp32 and two stages of x [2][64][24] fp16.
+pub const prompt_shared = 64 * 132 * 4 + 2 * 2 * 64 * 24 * 2;
+
+fn promptIndex(halves: u32, warps: u32) ?usize {
+    for (prompt_halves, 0..) |h, i| if (h == halves) return 2 * i + @intFromBool(warps == 8);
+    return null;
+}
+
 pub fn variantIndex(halves: u32, codebook: Codebook, warps: u32) ?usize {
     for (variants, 0..) |v, i| {
         if (v.halves == halves and v.codebook == codebook and v.warps == warps) return i;
@@ -100,16 +111,22 @@ pub const Weight = struct {
 pub const Linear = struct {
     mod: Module,
     fns: [variants.len]Function,
+    prompt_fns: [2 * prompt_halves.len]Function, // [halves][4 or 8 warps]
     rot_in: Function,
 
     pub fn load(d: *const Driver) !Linear {
         if (!kernels.available) return error.BuiltWithoutKernels;
-        var l: Linear = .{ .mod = try Module.load(d, kernels.exl3_linear), .fns = undefined, .rot_in = undefined };
+        var l: Linear = .{ .mod = try Module.load(d, kernels.exl3_linear), .fns = undefined, .prompt_fns = undefined, .rot_in = undefined };
         errdefer l.mod.unload();
         l.rot_in = try l.mod.function(rot_in_symbol);
         inline for (0..variants.len) |i| {
             l.fns[i] = try l.mod.function(symbol(variants[i].halves, variants[i].codebook, variants[i].warps));
         }
+        inline for (prompt_halves, 0..) |h, i| inline for (.{ 4, 8 }, 0..) |wk, j| {
+            const f = try l.mod.function(std.fmt.comptimePrint("tf_exl3_prompt_{d}_{d}", .{ h, wk }));
+            try f.allowDynamicShared(prompt_shared);
+            l.prompt_fns[2 * i + j] = f;
+        };
         return l;
     }
 
@@ -180,6 +197,48 @@ pub const Linear = struct {
             .shared = sharedBytes(w, m),
         }, s, &args);
     }
+
+    /// matmul for a prompt block of up to 128 rows on a mul1 weight: each tile decoded once for every row.
+    pub fn prompt(l: *const Linear, s: Stream, w: Weight, x: u64, x_dtype: DType, m: usize, y: u64, y_dtype: DType, xh: u64, z: u64, counters: u64) !void {
+        if (m < 1 or m > 128 or w.codebook != .mul1) return error.Exl3Shape;
+        if (w.k % 128 != 0 or w.n % 128 != 0) return error.Exl3Shape;
+        const p = plan(w.k, w.n, 192, 8);
+        if ((w.k / 16) % (p.sk * p.wk) != 0) return error.Exl3Shape;
+        const idx = promptIndex(w.halves, p.wk) orelse return error.UnsupportedExl3Width;
+        if (p.sk > 1 and z == 0) return error.Exl3Scratch;
+        var r: launch_.Args = .{};
+        r.add(x);
+        r.add(w.suh);
+        r.add(xh);
+        r.add(@as(i32, @backingInt(x_dtype)));
+        r.add(@as(i32, @intCast(m)));
+        r.add(@as(i32, @intCast(w.k)));
+        try launch_.launch(l.rot_in, .{
+            .grid = .{ .x = @intCast((w.k / 128 + 3) / 4), .y = @intCast(m), .z = 1 },
+            .block = .{ .x = 128, .y = 1, .z = 1 },
+            .shared = 0,
+        }, s, &r);
+        var args: launch_.Args = .{};
+        args.add(xh);
+        args.add(w.trellis);
+        args.add(@as(i64, @intCast(w.stride_k)));
+        args.add(@as(i64, @intCast(w.stride_nb)));
+        args.add(w.svh);
+        args.add(w.bias);
+        args.add(y);
+        args.add(if (p.sk > 1) z else @as(u64, 0));
+        args.add(counters);
+        args.add(@as(i32, @backingInt(y_dtype)));
+        args.add(@as(i32, @intCast(w.n)));
+        args.add(@as(i32, @intCast(p.sk)));
+        args.add(@as(i32, @intCast(m)));
+        args.add(@as(i32, @intCast(w.k)));
+        try launch_.launch(l.prompt_fns[idx], .{
+            .grid = .{ .x = @intCast(w.n / 128 * p.sk), .y = @intCast((m + 63) / 64), .z = 1 },
+            .block = .{ .x = 256, .y = 1, .z = 1 },
+            .shared = prompt_shared,
+        }, s, &args);
+    }
 };
 
 /// The loaded kernels plus the scratch one stream's dense calls share; prompt rows run in 128-row blocks (forward.py).
@@ -239,7 +298,13 @@ pub const Dense = struct {
         while (r < rows) : (r += 128) {
             const m = @min(rows - r, 128);
             const xh = try de.scratch(&de.xh, m * w.k * 2);
-            try de.lin.matmul(s, w, x + @as(u64, r) * w.k * xe, x_dtype, m, y + @as(u64, r) * w.n * ye, y_dtype, xh, z, counters);
+            const xr = x + @as(u64, r) * w.k * xe;
+            const yr = y + @as(u64, r) * w.n * ye;
+            if (m > 16 and w.codebook == .mul1) { // prompt rows: each tile decoded once for the whole block
+                try de.lin.prompt(s, w, xr, x_dtype, m, yr, y_dtype, xh, z, counters);
+            } else {
+                try de.lin.matmul(s, w, xr, x_dtype, m, yr, y_dtype, xh, z, counters);
+            }
         }
     }
 };
@@ -268,7 +333,7 @@ test "every variant's symbol is its instantiation's name" {
 }
 
 test "matmul refuses shapes the loader would refuse, before any launch" {
-    const l: Linear = .{ .mod = undefined, .fns = undefined, .rot_in = undefined };
+    const l: Linear = .{ .mod = undefined, .fns = undefined, .prompt_fns = undefined, .rot_in = undefined };
     const s: Stream = undefined; // never reached: the refusal comes first
     const st = strides(4096, 1024, 8, false);
     const w: Weight = .{ .trellis = 0, .suh = 0, .svh = 0, .bias = 0, .k = 4096, .n = 1024, .halves = 8, .codebook = .mul1, .stride_k = st.k, .stride_nb = st.nb };
