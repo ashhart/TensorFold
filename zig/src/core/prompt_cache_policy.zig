@@ -19,7 +19,8 @@ pub fn victimBut(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born
 
 /// Only live continuations make a prefix a branch point or a superseded state.
 pub fn extended(s: *const pc.Store, e: *const pc.Entry) bool {
-    for (s.entries.items) |o| if (!o.expired and o != e and o.born > e.born and o.tokens.len > e.tokens.len and std.mem.eql(u32, o.tokens[0..e.tokens.len], e.tokens)) return true;
+    for (s.entries.items) |o| if (!o.expired and o != e and o.born > e.born and o.tokens.len > e.tokens.len and
+        std.mem.eql(u32, o.tokens[0..e.tokens.len], e.tokens)) return true;
     return false;
 }
 

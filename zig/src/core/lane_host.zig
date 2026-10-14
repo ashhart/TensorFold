@@ -90,7 +90,8 @@ pub const LaneHost = struct {
             const store = job.host.cache orelse return;
             if (!job.started) return store.release(e);
             job.stream.reuse.saved = null; // the backend restores before its first chunk; a later keep may free it
-            if (job.stream.reuse_failed) store.resumed(e, job.request.prompt, false) else if (job.stream.cached == e.at) store.resumed(e, job.request.prompt, true) else store.release(e);
+            const ok = !job.stream.reuse_failed and job.stream.cached == e.at;
+            if (job.stream.reuse_failed or ok) store.resumed(e, job.request.prompt, ok) else store.release(e);
         }
     };
 
