@@ -285,6 +285,8 @@ pub const Host = struct {
             h.lock();
             defer h.unlock();
             if (h.closing) return true;
+            // a reply's background pass yields to a waiting request
+            if (c.job.request.background and h.queued.items.len > 0 and !h.queued.items[0].request.background) return true;
             return std.mem.indexOfScalar(api.Id, h.cancels.items, c.job.id) != null;
         }
     };
@@ -468,8 +470,10 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, wind
     h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .info_ = .{ .name = "flashnext-zig", .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = true, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
     h.warm = .{ .queue = eng.r.queue };
     // chunk 1: a prompt call keeps at marks inside it (engine.mark_taps), so a short prompt's history mark adds no call
-    if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .write = Snaps.write, .read = Snaps.read, .forget = Snaps.forget } }, .{ .lookahead = 1, .chunk = 1 }, budget);
+    if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .write = Snaps.write, .read = Snaps.read, .forget = Snaps.forget } }, .{ .lookahead = 1, .chunk = 1, .warm = .on }, budget);
     h.info_.prompt_cache = h.cache != null;
+    // a reply's background pass keeps its end: a client that drops the reasoning resumes past the reply
+    h.info_.warm_turns = h.cache != null;
     if (learn) |root| {
         h.learned = try learnedStates(gpa, eng, root, learn_cap);
         if (h.cache) |*store| store.imprint = &h.learned.?;
