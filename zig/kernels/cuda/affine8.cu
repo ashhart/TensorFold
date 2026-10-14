@@ -1,6 +1,4 @@
-// Ours: MLX affine checkpoints of every width on the lane matmul. Codes of 2 to 4 bits pack into lane_gemv's 4-bit
-// tiles; codes of 5 to 8 bits into 8-bit tiles that a byte-wide lane_gemv reads with its arithmetic: per 64-group
-// s * (x . q) + b * sum(x), q exact in bf16. A widened code keeps its value, scale and bias, so nothing is rounded.
+// Ours: MLX affine codes of 2-4 bits on lane_gemv's 4-bit tiles, 5-8 bits on 8-bit tiles; no code is rounded.
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -53,8 +51,7 @@ struct Tile {
     static constexpr int SMEM = STAGES * STAGE;
 };
 
-// lane_gemv's gemv_items with 8-bit tiles: [tile][group][8 n8 tiles][32 lanes][GS / 16 words], a word one MMA's
-// b0 and b1 bytes. The same MMA and fma chain a group: acc = x_sum * b + (d * s + acc).
+// lane_gemv's gemv_items on 8-bit tiles [tile][group][8][32][GS / 16]: acc = x_sum * b + (d * s + acc) a group.
 template <int GS, int BN, int STAGES, typename Map, typename After>
 __device__ __forceinline__ void items(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs, const Part& P, int M, int K,
                                       int ldx, int count, Map map, float (&acc)[Tile<GS, BN, STAGES>::NT][4], After after) {
@@ -294,8 +291,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_affine8_split(const __nv_bf
     tf_affine8::split<64, 64, 4>(x, xs, P, M, K, ldx, work, tickets);
 }
 
-// MLX (n, k * bits / 32) words of 2 to 4 bits -> lane_gemv's 4-bit tiles [npad/64][kg][8][32][2] (tf_pack_dense's
-// layout, its codes read at their own width).
+// MLX words of 2 to 4 bits -> lane_gemv's 4-bit tiles [npad/64][kg][8][32][2], tf_pack_dense's layout.
 extern "C" __global__ void tf_affine8_pack4(const uint32_t* __restrict__ w, int bits, int n, int kw, int kg, uint32_t* __restrict__ out,
                                            long long total) {
     const long long idx = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -316,8 +312,7 @@ extern "C" __global__ void tf_affine8_pack4(const uint32_t* __restrict__ w, int 
     out[idx] = word;
 }
 
-// MLX words of 5 to 8 bits -> 8-bit tiles [npad/64][kg][8][32][4]: word kt of a lane holds the codes at inputs
-// k0 + 2c, k0 + 2c + 1, k0 + 2c + 8 and k0 + 2c + 9 (k0 = g * 64 + 16 kt) of row tile * 64 + j * 8 + lane / 4.
+// MLX words of 5 to 8 bits -> 8-bit tiles [npad/64][kg][8][32][4], word kt holding inputs k0+2c, +1, +8, +9.
 extern "C" __global__ void tf_affine8_pack8(const uint32_t* __restrict__ w, int bits, int n, int kw, int kg, uint32_t* __restrict__ out,
                                            long long total) {
     const long long idx = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;

@@ -372,8 +372,7 @@ pub const Affine4Kernels = struct {
 pub const gemv8_smem: u32 = 38784; // affine8.cu's Tile<64, 64, 6>::SMEM
 pub const split8_smem: u32 = 25856; // Tile<64, 64, 4>::SMEM
 
-/// MLX affine checkpoints of every width: 2 to 4-bit codes packed into the affine-4 tiles (served by Affine4Kernels),
-/// 5 to 8-bit codes into 8-bit tiles served here by lane_gemv's arithmetic; each code keeps its value, so no rounding.
+/// MLX affine codes of 5 to 8 bits on 8-bit tiles with lane_gemv's arithmetic (2 to 4 bits use Affine4Kernels).
 pub const Affine8Kernels = struct {
     gemv_fn: Function,
     split_fn: Function,

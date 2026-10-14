@@ -332,8 +332,7 @@ pub const Engine = struct {
         return e.projSums(l, x, e.xs, out, rows, prompt, e.tables.ptr + params_at);
     }
 
-    /// `proj` with the rows' group sums in `xs` and the device counts at `params` (0: every row given is real).
-    /// 8-bit tiles have no prompt GEMM: a prompt's rows take the decode tiles, 16 at a time, as a window's do.
+    /// `proj` with group sums in `xs` and row counts at `params`; 8-bit tiles run prompts 16 rows at a time.
     pub fn projSums(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prompt: bool, params: u64) !void {
         const n_out = l.outputs();
         const k = l.inputs();

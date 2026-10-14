@@ -201,7 +201,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     return g;
 }
 
-/// Every module's width from the quantization table (its global width, overridden per module): MLX affine, groups of 64.
+/// Every module's width from the quantization table, global then per module: MLX affine, groups of 64.
 fn widths(gpa: std.mem.Allocator, root: std.json.ObjectMap, q: std.json.ObjectMap, g: Geometry) !Widths {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
