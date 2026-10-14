@@ -16,6 +16,7 @@ pub const Kind = struct {
     geglu: mtl.Pipeline,
     softcap: mtl.Pipeline,
     freqs: mtl.Pipeline,
+    kv_write: mtl.Pipeline,
     /// gilby's attend shape by head dim: keys a chunk, simdgroups a query head, keys scored before an update.
     chunk: usize,
     split: usize,
@@ -49,7 +50,7 @@ pub const Kind = struct {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
         var k: Kind = undefined;
-        inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs" }, .{ "gemma_embed", "gemma_rms_looped", "gemma_qkv_prep", "gemma_attention_partial", "gemma_attention_merge", "gemma_attn_tail", "gemma_dense_tail", "gemma_geglu", "gemma_softcap", "gemma_rope_freqs" }) |field, name|
+        inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs", "kv_write" }, .{ "gemma_embed", "gemma_rms_looped", "gemma_qkv_prep", "gemma_attention_partial", "gemma_attention_merge", "gemma_attn_tail", "gemma_dense_tail", "gemma_geglu", "gemma_softcap", "gemma_rope_freqs", "gemma_kv_write" }) |field, name|
             @field(k, field) = try mtl.Pipeline.init(device, lib, name, false);
         k.chunk = shape[0];
         k.split = shape[1];
@@ -59,7 +60,7 @@ pub const Kind = struct {
     }
 
     fn deinit(k: Kind) void {
-        inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs" }) |field| @field(k, field).deinit();
+        inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs", "kv_write" }) |field| @field(k, field).deinit();
     }
 };
 

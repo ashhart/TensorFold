@@ -309,3 +309,16 @@ kernel void gemma_rope_freqs(device float* F [[buffer(0)]], constant float& base
                              constant uint& dims [[buffer(2)]], uint i [[thread_position_in_grid]]) {
   F[i] = metal::precise::pow(base, float(2 * i) / float(dims));
 }
+
+// A window's new keys and values [HK, R, DH] into a layer's cache [HK, cap, DH] at slot p % ring (0: p).
+kernel void gemma_kv_write(const device bfloat* KN [[buffer(0)]], const device bfloat* VN [[buffer(1)]],
+                           device bfloat* K [[buffer(2)]], device bfloat* V [[buffer(3)]],
+                           const device int* POS [[buffer(4)]], constant int3& m [[buffer(5)]],
+                           uint3 pos [[thread_position_in_grid]]) {
+  const int d = int(pos.x), r = int(pos.y), h = int(pos.z), R = m.x, ring = m.y, cap = m.z;
+  const int p = POS[r];
+  const size_t dst = (size_t(h) * cap + (ring ? p % ring : p)) * DH + d;
+  const size_t src = (size_t(h) * R + r) * DH + d;
+  K[dst] = KN[src];
+  V[dst] = VN[src];
+}
