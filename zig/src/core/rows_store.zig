@@ -83,6 +83,18 @@ pub const Rows = struct {
 
     /// The store under `o.root` for `o.identity` (made 0700 when missing); its files are read, unreferenced blocks go.
     pub fn open(gpa: Allocator, family: pc.Snapshots, o: Options) !*Rows {
+        const r = try init(gpa, family, o);
+        errdefer r.deinit();
+        try makePath(gpa, r.dir);
+        try r.scan();
+        r.settle();
+        r.stamp();
+        r.verify = if (std.c.getenv("TF_IMPRINT_VERIFY")) |v| v[0] == '1' else false;
+        return r;
+    }
+
+    /// A store holding only its names, nothing read: from here `deinit` alone owns `r` and its strings.
+    fn init(gpa: Allocator, family: pc.Snapshots, o: Options) !*Rows {
         const img = family.vtable.rows orelse return error.RowsUnsupported;
         const r = try gpa.create(Rows);
         errdefer gpa.destroy(r);
@@ -92,14 +104,7 @@ pub const Rows = struct {
         const root = try gpa.dupe(u8, o.root);
         errdefer gpa.free(root);
         const dir = try std.fmt.allocPrintSentinel(gpa, "{s}/{x:0>16}", .{ o.root, id }, 0);
-        errdefer gpa.free(dir);
         r.* = .{ .gpa = gpa, .family = family, .img = img, .root = root, .dir = dir, .keying = .{ .identity = id, .block = block_tokens, .lookahead = o.lookahead, .planned = o.planned }, .cap = o.cap, .daily = o.daily, .admission = .{ .floor = o.floor } };
-        errdefer r.deinit();
-        try makePath(gpa, dir);
-        try r.scan();
-        r.settle();
-        r.stamp();
-        r.verify = if (std.c.getenv("TF_IMPRINT_VERIFY")) |v| v[0] == '1' else false;
         return r;
     }
 

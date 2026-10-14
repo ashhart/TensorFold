@@ -366,3 +366,17 @@ test "TF_IMPRINT_VERIFY's read-back finds every written state byte-equal to the 
     try std.testing.expectEqual(@as(u64, r.states.items.len), r.counts.verified);
     try std.testing.expectEqual(@as(u64, 0), r.counts.differed);
 }
+
+test "a learn dir that is a regular file is refused, and open frees what it made once" {
+    const gpa = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+    const path = root(&buf, "file");
+    var zbuf: [129]u8 = undefined;
+    const z = try std.fmt.bufPrintSentinel(&zbuf, "{s}", .{path}, 0);
+    const fd = std.c.open(z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+    try std.testing.expect(fd >= 0);
+    _ = std.c.close(fd);
+    defer _ = std.c.unlink(z);
+    var f: Fake = .{ .gpa = gpa };
+    try std.testing.expectError(error.RowsDir, rows.Rows.open(gpa, f.snapshots(), options(path)));
+}
