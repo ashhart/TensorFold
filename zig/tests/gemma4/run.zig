@@ -57,12 +57,15 @@ pub fn main(init: std.process.Init) !void {
         var s = try g4.state.Scratch.init(m.device, capacity);
         defer s.deinit();
         const t1 = std.c.mach_absolute_time();
+        var ps: ?g4.prompt.Scratch = if (width == g4.state.chunk_rows) try g4.prompt.Scratch.init(m.device, capacity) else null;
+        defer if (ps) |*p| p.deinit();
         var at: usize = 0;
         while (at < ids.value.len) : (at += width) {
             const end = @min(at + width, ids.value.len);
-            try g4.forward.window(m, &s, &cache, ids.value[at..end], at);
+            if (ps) |*p| try g4.prompt.run(m, p, &cache, ids.value[at..end]) else try g4.forward.window(m, &s, &cache, ids.value[at..end], at);
         }
-        const last = (ids.value.len - 1 - (ids.value.len - 1) / width * width) * g4.config.vocab;
+        if (ps) |*p| @memcpy(s.logits.slice(u16, g4.config.vocab), p.logits.slice(u16, g4.config.vocab));
+        const last = if (ps != null) 0 else (ids.value.len - 1 - (ids.value.len - 1) / width * width) * g4.config.vocab;
         const prefill_s = @as(f64, @floatFromInt(std.c.mach_absolute_time() - t1)) / 24e6;
         var lp: [256]u8 = undefined;
         const row = s.logits.slice(u16, g4.state.prompt_rows * g4.config.vocab)[last..][0..g4.config.vocab];

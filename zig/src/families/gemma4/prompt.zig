@@ -1,0 +1,211 @@
+//! A prompt chunk of up to 512 rows of one stream: core/affine_mm projections, the decode glue, the last row's logits.
+const std = @import("std");
+const mtl = @import("metal");
+const cfg = @import("config.zig");
+const state = @import("state.zig");
+const kernels = @import("kernels.zig");
+const affine_mm = @import("../../core/affine_mm.zig");
+const lane = @import("../../core/lane_projection.zig");
+const Model = @import("model.zig").Model;
+
+const Ref = lane.Ref;
+const R = state.chunk_rows;
+const private = mtl.ResourceOptions.private | mtl.ResourceOptions.untracked;
+const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+
+const Q = @import("weights.zig").Mlx;
+
+pub const Scratch = struct {
+    ids: mtl.Buffer,
+    pos: mtl.Buffer,
+    lo: [2]mtl.Buffer,
+    meta: [2]mtl.Buffer,
+    h: [2]mtl.Buffer,
+    normed: [2]mtl.Buffer,
+    sums: mtl.Buffer,
+    qkv: mtl.Buffer,
+    q: mtl.Buffer,
+    k: mtl.Buffer,
+    v: mtl.Buffer,
+    attn: mtl.Buffer,
+    o: mtl.Buffer,
+    hn: mtl.Buffer,
+    n_mlp: mtl.Buffer,
+    gate_up: mtl.Buffer,
+    act: mtl.Buffer,
+    y: mtl.Buffer,
+    pm: mtl.Buffer,
+    pl: mtl.Buffer,
+    po: mtl.Buffer,
+    logits: mtl.Buffer,
+    slots: usize,
+
+    pub fn init(device: mtl.Device, capacity: usize) !Scratch {
+        const d = cfg.hidden;
+        const qd = cfg.query_heads * cfg.global_dim;
+        const slots = cfg.query_heads * state.max_rows * (capacity / 64 + 2);
+        var s: Scratch = undefined;
+        s.slots = slots;
+        inline for (.{ .{ "ids", R * 4, true }, .{ "pos", R * 4, true }, .{ "sums", R * (cfg.intermediate / 64) * 4, false }, .{ "qkv", R * (qd + 2 * 16 * 256) * 2, false }, .{ "q", R * qd * 2, false }, .{ "k", R * 16 * 256 * 2, false }, .{ "v", R * 16 * 256 * 2, false }, .{ "attn", R * qd * 2, false }, .{ "o", R * d * 2, false }, .{ "hn", R * d * 2, false }, .{ "n_mlp", R * d * 2, false }, .{ "gate_up", R * 2 * cfg.intermediate * 2, false }, .{ "act", R * cfg.intermediate * 2, false }, .{ "y", R * d * 2, false }, .{ "pm", slots * 4, false }, .{ "pl", slots * 4, false }, .{ "po", slots * cfg.global_dim * 4, false }, .{ "logits", cfg.vocab * 2, true } }) |f|
+            @field(s, f[0]) = try device.buffer(f[1], if (f[2]) shared else private);
+        for (&s.lo) |*b| b.* = try device.buffer(R * 4, shared);
+        for (&s.meta) |*b| b.* = try device.buffer(R * state.meta_ints * 4, shared);
+        for (&s.h) |*b| b.* = try device.buffer(R * d * 2, private);
+        for (&s.normed) |*b| b.* = try device.buffer(R * d * 2, private);
+        return s;
+    }
+
+    pub fn deinit(s: *Scratch) void {
+        inline for (.{ "ids", "pos", "sums", "qkv", "q", "k", "v", "attn", "o", "hn", "n_mlp", "gate_up", "act", "y", "pm", "pl", "po", "logits" }) |f| @field(s, f).deinit();
+        for (s.lo ++ s.meta ++ s.h ++ s.normed) |b| b.deinit();
+    }
+};
+
+/// y[:, col..col + q.n] (row pitch `pitch`) = x q^T, x's group sums already in s.sums.
+fn mm(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, q: Q, x: mtl.Buffer, y: mtl.Buffer, col: usize, pitch: usize, rows: u32) void {
+    affine_mm.denseBatch(e, m.mm, Ref{ .buf = x }, Ref{ .buf = s.sums }, q, Ref{ .buf = y, .off = col * 2 }, rows, 1, .{ .x_row = @intCast(q.k), .y_row = @intCast(pitch) });
+}
+
+fn sums(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, x: mtl.Buffer, rows: u32, k: u32) void {
+    affine_mm.rowSums(e, m.mm, 64, Ref{ .buf = x }, Ref{ .buf = s.sums }, rows, k);
+}
+
+fn bind(e: mtl.ComputeEncoder, bufs: []const mtl.Buffer, first: usize) void {
+    for (bufs, first..) |b, i| e.setBuffer(b, 0, i);
+}
+
+/// `ids` (at most 512) at the cache's length: the cache keeps their keys and values; s.logits has the last row's.
+pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32) !void {
+    const rows = ids.len;
+    if (rows == 0 or rows > R) return error.BadChunk;
+    if (c.len + rows > c.capacity) return error.ContextFull;
+    const p0 = c.len;
+    @memcpy(s.ids.slice(u32, rows), ids);
+    for (s.pos.slice(i32, rows), 0..) |*p, i| p.* = @intCast(p0 + i);
+    var chunks: [R][2]usize = undefined;
+    for (0..2) |kind| {
+        const global = kind == 1;
+        const ck: usize = if (global) 64 else 128;
+        const lo = s.lo[kind].slice(i32, rows);
+        for (lo, 0..) |*l, i| l.* = @intCast(if (global or p0 + i + 1 <= cfg.window) 0 else p0 + i + 1 - cfg.window);
+        var sub: usize = 0;
+        while (sub < rows) : (sub += state.max_rows) {
+            const n = @min(state.max_rows, rows - sub);
+            const first = @as(usize, @intCast(lo[sub])) / ck;
+            chunks[sub][kind] = (p0 + sub + n - 1) / ck - first + 1;
+            if (cfg.query_heads * state.max_rows * chunks[sub][kind] > s.slots) return error.ContextFull;
+            s.meta[kind].slice(i32, R * state.meta_ints)[sub * state.meta_ints ..][0..5].* = .{ @intCast(first), @intCast(chunks[sub][kind]), if (global) 0 else state.ring, @intCast(n), std.math.maxInt(i32) };
+        }
+    }
+    const ks = &m.kernels.sliding;
+    const w = &m.weights;
+    const cb = m.queue.commandBuffer();
+    const e = cb.compute(.serial);
+    const r32: u32 = @intCast(rows);
+    e.setPipeline(ks.embed);
+    bind(e, &.{s.ids}, 0);
+    e.setBuffer(w.embed_w.buf, w.embed_w.off, 1);
+    e.setBuffer(w.embed_s.buf, w.embed_s.off, 2);
+    e.setBuffer(w.embed_b.buf, w.embed_b.off, 3);
+    bind(e, &.{s.h[0]}, 4);
+    e.setValue(@import("forward.zig").embedScale(), 5);
+    e.dispatchThreads(.{ .width = cfg.hidden / 2, .height = rows }, .{ .width = 256 });
+    e.setPipeline(ks.rms);
+    bind(e, &.{s.h[0]}, 0);
+    e.setBuffer(w.layers[0].input_norm.buf, w.layers[0].input_norm.off, 1);
+    bind(e, &.{s.normed[0]}, 2);
+    e.setValue(cfg.eps, 3);
+    e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
+    var cur: usize = 0;
+    for (0..cfg.layers) |i| {
+        try layer(m, e, s, c, &chunks, i, cur, r32);
+        cur = 1 - cur;
+    }
+    // the head on the last row only (the lane kernel's one-row bits), soft-capped
+    const head = try m.projections.get(m.gpa, m.device, w.head.n, w.head.k);
+    try head.encode(e, .{ .buf = s.normed[cur], .off = (rows - 1) * cfg.hidden * 2 }, .{ .buf = w.head.w }, .{ .buf = w.head.sb }, .{ .buf = s.logits }, 1);
+    e.setPipeline(ks.softcap);
+    bind(e, &.{s.logits}, 0);
+    e.setValue(cfg.softcap, 1);
+    e.dispatchThreads(.{ .width = cfg.vocab }, .{ .width = 256 });
+    e.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure()) |msg| {
+        std.log.err("gemma4: prompt chunk failed: {s}", .{msg});
+        return error.GpuFailed;
+    }
+    c.len += rows;
+}
+
+fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, chunks: *const [R][2]usize, i: usize, cur: usize, rows: u32) !void {
+    const global = cfg.global(i);
+    const kd: *const kernels.Kind = m.kernels.kind(global);
+    const l = &m.weights.layers[i];
+    const nk = cfg.kvHeads(i);
+    const dh = cfg.headDim(i);
+    const kind: usize = @intFromBool(global);
+    const qn = cfg.query_heads * dh;
+    const width = qn + nk * dh * @as(usize, if (global) 1 else 2);
+    sums(m, e, s, s.normed[cur], rows, cfg.hidden);
+    mm(m, e, s, l.mlx[0], s.normed[cur], s.qkv, 0, width, rows);
+    mm(m, e, s, l.mlx[1], s.normed[cur], s.qkv, qn, width, rows);
+    if (!global) mm(m, e, s, l.mlx[2], s.normed[cur], s.qkv, qn + nk * dh, width, rows);
+    e.setPipeline(kd.qkv);
+    bind(e, &.{s.qkv}, 0);
+    e.setBuffer(l.q_norm.buf, l.q_norm.off, 1);
+    e.setBuffer(l.k_norm.buf, l.k_norm.off, 2);
+    bind(e, &.{ if (global) m.inv_global else m.inv_sliding, s.pos }, 3);
+    e.setValue(cfg.eps, 5);
+    bind(e, &.{ s.q, s.k, s.v }, 6);
+    e.dispatchGroups(.{ .width = cfg.query_heads + 2 * nk, .height = rows }, .{ .width = 32 });
+    e.setPipeline(kd.kv_write);
+    bind(e, &.{ s.k, s.v, c.k[i], c.v[i], s.pos }, 0);
+    e.setValue([3]i32{ @intCast(rows), if (global) 0 else state.ring, @intCast(state.slotsOf(i, c.capacity)) }, 5);
+    e.dispatchThreads(.{ .width = dh, .height = rows, .depth = nk }, .{ .width = @min(dh, 256) });
+    var sub: usize = 0;
+    while (sub < rows) : (sub += state.max_rows) {
+        const rn = @min(state.max_rows, rows - sub);
+        e.setPipeline(kd.partial);
+        e.setBuffer(s.q, sub * cfg.query_heads * dh * 2, 0);
+        bind(e, &.{ c.k[i], c.v[i], c.k[i], c.v[i] }, 1);
+        e.setBuffer(s.pos, sub * 4, 5);
+        e.setBuffer(s.lo[kind], sub * 4, 6);
+        e.setBuffer(s.meta[kind], sub * state.meta_ints * 4, 7);
+        e.setValue(@as(i32, @intCast(state.slotsOf(i, c.capacity))), 8);
+        bind(e, &.{ s.pm, s.pl, s.po }, 9);
+        e.dispatchGroups(.{ .width = chunks[sub][kind], .height = nk, .depth = rn }, .{ .width = 32 * kd.heads_per_kv * kd.split });
+        e.setPipeline(kd.merge);
+        bind(e, &.{ s.pm, s.pl, s.po }, 0);
+        e.setBuffer(s.meta[kind], sub * state.meta_ints * 4, 3);
+        e.setBuffer(s.attn, sub * cfg.query_heads * dh * 2, 4);
+        e.dispatchGroups(.{ .width = 1, .height = cfg.query_heads, .depth = rn }, .{ .width = 32 });
+    }
+    sums(m, e, s, s.attn, rows, @intCast(qn));
+    mm(m, e, s, l.mlx[3], s.attn, s.o, 0, cfg.hidden, rows);
+    e.setPipeline(kd.attn_tail);
+    bind(e, &.{ s.h[cur], s.o }, 0);
+    e.setBuffer(l.post_attention.buf, l.post_attention.off, 2);
+    e.setBuffer(l.pre_feedforward.buf, l.pre_feedforward.off, 3);
+    e.setValue(cfg.eps, 4);
+    bind(e, &.{ s.hn, s.n_mlp }, 5);
+    e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
+    sums(m, e, s, s.n_mlp, rows, cfg.hidden);
+    mm(m, e, s, l.mlx[4], s.n_mlp, s.gate_up, 0, 2 * cfg.intermediate, rows);
+    mm(m, e, s, l.mlx[5], s.n_mlp, s.gate_up, cfg.intermediate, 2 * cfg.intermediate, rows);
+    e.setPipeline(kd.geglu);
+    bind(e, &.{ s.gate_up, s.act }, 0);
+    e.setValue(@as(u32, cfg.intermediate), 2);
+    e.dispatchThreads(.{ .width = cfg.intermediate, .height = rows }, .{ .width = 256 });
+    sums(m, e, s, s.act, rows, cfg.intermediate);
+    mm(m, e, s, l.mlx[6], s.act, s.y, 0, cfg.hidden, rows);
+    e.setPipeline(kd.dense_tail);
+    bind(e, &.{ s.hn, s.y }, 0);
+    e.setBuffer(l.post_feedforward.buf, l.post_feedforward.off, 2);
+    e.setBuffer(l.scalar.buf, l.scalar.off, 3);
+    const nx = if (i + 1 < cfg.layers) m.weights.layers[i + 1].input_norm else m.weights.final_norm;
+    e.setBuffer(nx.buf, nx.off, 4);
+    e.setValue(cfg.eps, 5);
+    bind(e, &.{ s.h[1 - cur], s.normed[1 - cur] }, 6);
+    e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
+}

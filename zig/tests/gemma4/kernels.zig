@@ -125,6 +125,49 @@ fn checkProjection(c: *Ctx, label: []const u8, s: Stack, rows: usize, in_name: [
     std.debug.print("{s} rows {d}: {d} of {d} outputs differ{s}\n", .{ label, rows, diff, want.len, if (diff == 0) "" else " (first at a column of row 0 or later)" });
 }
 
+/// One affine_mm product (layer 0's q_proj, from the checkpoint) on the dumped input against the dumped output.
+fn checkAffine(c: *Ctx) !void {
+    const text = try tf.affine_mm.source(c.device, c.gpa, .{});
+    defer c.gpa.free(text);
+    const lib = try mtl.Library.fromSource(c.device, text, mtl.CompileOptions.mlx());
+    defer lib.deinit();
+    var pipes: tf.affine_mm.Pipes = undefined;
+    for (&pipes, tf.affine_mm.names) |*p, nm| p.* = try mtl.Pipeline.init(c.device, lib, nm, false);
+    const x = try loadBf16(c, "r16.L0.x");
+    defer c.gpa.free(x);
+    const want = try loadBf16(c, "r16.L0.qkv");
+    defer c.gpa.free(want);
+    const xb = try c.device.buffer(x.len * 2, shared);
+    defer xb.deinit();
+    @memcpy(xb.slice(u16, x.len), x);
+    const sums = try c.device.buffer(16 * 84 * 4, shared);
+    defer sums.deinit();
+    const yb = try c.device.buffer(16 * 16384 * 2, shared);
+    defer yb.deinit();
+    const w = try c.ckpt.get("language_model.model.layers.0.self_attn.q_proj.weight");
+    const sc = try c.ckpt.get("language_model.model.layers.0.self_attn.q_proj.scales");
+    const bi = try c.ckpt.get("language_model.model.layers.0.self_attn.q_proj.biases");
+    const Q = struct { w: lane.Ref, s: lane.Ref, b: lane.Ref, n: u32, k: u32 };
+    const q = Q{ .w = .{ .buf = w.buffer, .off = w.offset }, .s = .{ .buf = sc.buffer, .off = sc.offset }, .b = .{ .buf = bi.buffer, .off = bi.offset }, .n = 8192, .k = 5376 };
+    const cb = c.queue.commandBuffer();
+    const e = cb.compute(.serial);
+    tf.affine_mm.rowSums(e, pipes, 64, lane.Ref{ .buf = xb }, lane.Ref{ .buf = sums }, 16, 5376);
+    tf.affine_mm.denseBatch(e, pipes, lane.Ref{ .buf = xb }, lane.Ref{ .buf = sums }, q, lane.Ref{ .buf = yb }, 16, 1, .{ .x_row = 5376, .y_row = 16384 });
+    e.end();
+    cb.commit();
+    cb.wait();
+    const got = yb.slice(u16, 16 * 16384);
+    var worst: f32 = 0;
+    var exact: usize = 0;
+    for (0..16) |r| for (0..8192) |j| {
+        const a: f32 = @bitCast(@as(u32, got[r * 16384 + j]) << 16);
+        const b: f32 = @bitCast(@as(u32, want[r * 16384 + j]) << 16);
+        worst = @max(worst, @abs(a - b));
+        exact += @intFromBool(got[r * 16384 + j] == want[r * 16384 + j]);
+    };
+    std.debug.print("affine_mm q_proj vs lane: {d} of {d} bit-equal, worst |diff| {d}; sample got {x} want {x}\n", .{ exact, 16 * 8192, worst, got[0], want[0] });
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, gpa);
@@ -146,6 +189,7 @@ pub fn main(init: std.process.Init) !void {
     for (files) |path| try ckpt.addFileSelected(device, path, "", "language_model.");
     var c = Ctx{ .gpa = gpa, .io = init.io, .device = device, .queue = queue, .ckpt = &ckpt, .dump = dump };
     std.debug.print("device {s}, precomputed sums {}, reg {}\n", .{ device.name(), precompute, reg_mode });
+    if (flag) |f| if (std.mem.eql(u8, f, "--affine")) return checkAffine(&c);
     for ([_]usize{ 0, 5 }) |layer| {
         var names: [4][64]u8 = undefined;
         const q = try std.fmt.bufPrint(&names[0], "layers.{d}.self_attn.q_proj", .{layer});

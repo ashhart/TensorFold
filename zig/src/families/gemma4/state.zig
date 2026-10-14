@@ -11,8 +11,9 @@ pub const max_rows = 16;
 pub const prompt_rows = 128;
 /// Ints a row's attention meta takes: first chunk, chunks, ring, rows, first new key, padding.
 pub const meta_ints = 8;
-/// A sliding layer's ring: the window plus rows a window may write past it (gilby's RingKVCache, WINDOW_ROWS).
-pub const ring = cfg.window + 128;
+/// Rows a prompt chunk takes (prompt.zig), and a sliding layer's ring: the window plus a chunk written past it.
+pub const chunk_rows = 512;
+pub const ring = cfg.window + chunk_rows;
 
 /// One stream's keys and values, per layer [kv heads, slots, head dim] bf16, and how many positions it holds.
 pub const Cache = struct {

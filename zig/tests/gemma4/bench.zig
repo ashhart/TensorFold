@@ -104,6 +104,32 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("affine_mm projections, {d} rows: {d:.2} ms GPU ({d:.0} tok/s)\n", .{ rows, best, @as(f64, @floatFromInt(rows)) * 1e3 / best });
         }
     }
+    {
+        var ss = try g4.state.Scratch.init(m.device, 4096);
+        defer ss.deinit();
+        var ps = try g4.prompt.Scratch.init(m.device, 4096);
+        defer ps.deinit();
+        var tok: [40]u32 = undefined;
+        for (&tok, 0..) |*t, i| t.* = @intCast(2000 + i * 37);
+        {
+            var ca = try g4.state.Cache.init(m.device, 4096);
+            defer ca.deinit();
+            var cbk = try g4.state.Cache.init(m.device, 4096);
+            defer cbk.deinit();
+            const step: usize = if (std.c.getenv("GEMMA_STEP")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 40 else 40;
+            var at: usize = 0;
+            while (at < tok.len) : (at += step) try g4.prompt.run(m, &ps, &ca, tok[at..@min(at + step, tok.len)]);
+            try g4.forward.run(m, &ss, &.{.{ .cache = &cbk, .rows = 16 }}, tok[0..16]);
+            try g4.forward.run(m, &ss, &.{.{ .cache = &cbk, .rows = 16 }}, tok[16..32]);
+            try g4.forward.run(m, &ss, &.{.{ .cache = &cbk, .rows = 8 }}, tok[32..40]);
+            const a = ps.logits.slice(u16, cfg.vocab);
+            const b = ss.logits.slice(u16, 16 * cfg.vocab)[7 * cfg.vocab ..][0..cfg.vocab];
+            var worst: f32 = 0;
+            for (a, b) |x0, y0| worst = @max(worst, @abs(@as(f32, @bitCast(@as(u32, x0) << 16)) - @as(f32, @bitCast(@as(u32, y0) << 16))));
+            std.debug.print("prompt path vs decode path, 40 tokens, last-row logits: worst |diff| {d}\n", .{worst});
+        }
+        if (std.c.getenv("GEMMA_DEBUG_ONLY") != null) return;
+    }
     var s = try g4.state.Scratch.init(m.device, 33024);
     defer s.deinit();
     var c = try g4.state.Cache.init(m.device, 33024);

@@ -4,6 +4,7 @@ pub const kernels = @import("kernels.zig");
 pub const weights = @import("weights.zig");
 pub const state = @import("state.zig");
 pub const forward = @import("forward.zig");
+pub const prompt = @import("prompt.zig");
 pub const Model = @import("model.zig").Model;
 pub const backend = @import("backend.zig");
 

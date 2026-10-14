@@ -6,6 +6,7 @@ const ckpt = @import("../../core/checkpoint_metal.zig");
 const shards = @import("../../core/checkpoint.zig");
 const weights = @import("weights.zig");
 const kernels = @import("kernels.zig");
+const affine_mm = @import("../../core/affine_mm.zig");
 
 pub const Model = struct {
     gpa: std.mem.Allocator,
@@ -16,6 +17,8 @@ pub const Model = struct {
     weights: weights.Weights,
     kernels: kernels.Kernels,
     projections: weights.Projections = .{},
+    /// core/affine_mm's pipelines for prompt chunks: 4-bit groups of 64 from the checkpoint's own tensors.
+    mm: affine_mm.Pipes,
     /// RoPE inverse frequencies, float32 [dim / 2], for sliding and for global layers.
     inv_sliding: mtl.Buffer,
     inv_global: mtl.Buffer,
@@ -41,6 +44,13 @@ pub const Model = struct {
         errdefer m.weights.deinit(gpa);
         m.kernels = try kernels.Kernels.init(gpa, m.device);
         errdefer m.kernels.deinit();
+        {
+            const text = try affine_mm.source(m.device, gpa, .{});
+            defer gpa.free(text);
+            const lib = try mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx());
+            defer lib.deinit();
+            for (&m.mm, affine_mm.names) |*p, name| p.* = try mtl.Pipeline.init(m.device, lib, name, false);
+        }
         const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
         m.inv_sliding = try m.device.buffer(cfg.sliding_dim / 2 * 4, opts);
         m.inv_global = try m.device.buffer(cfg.global_dim / 2 * 4, opts);
@@ -53,6 +63,7 @@ pub const Model = struct {
         m.inv_sliding.deinit();
         m.inv_global.deinit();
         m.projections.deinit(m.gpa);
+        for (m.mm) |p| p.deinit();
         m.kernels.deinit();
         m.weights.deinit(m.gpa);
         m.checkpoint.deinit();
