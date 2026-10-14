@@ -2,6 +2,7 @@
 //! keys for every prompt row), then GPU-side rounds whose drafts the depth rule sets; tokens leave as rounds are read.
 const std = @import("std");
 const mtl = @import("metal");
+const lanes = @import("lanes");
 const fz = @import("replay.zig");
 const config = @import("config.zig");
 const segments = @import("../../core/segments.zig");
@@ -15,6 +16,7 @@ const pack = @import("pack.zig");
 const pack_cache = @import("pack_cache.zig");
 const load_admission = @import("load_admission.zig");
 const think = @import("think.zig");
+const sample = @import("sample.zig");
 pub const Think = think.Think;
 pub const quantizationProblem = load_admission.problemFor;
 const Io = std.Io;
@@ -92,6 +94,8 @@ pub const Out = struct {
     cancelled: *const fn (ctx: *anyopaque) bool,
     /// The prompt pass stands at one of generateFrom's marks (a chunk end): the prompt cache keeps its state here.
     marked: ?*const fn (ctx: *anyopaque, at: usize) void = null,
+    /// A sampled reply (a temperature above 0): each token drawn on the GPU by tf_sample_full; null: greedy.
+    sampling: ?lanes.Sampling = null,
 };
 
 pub const Engine = struct {
@@ -128,6 +132,7 @@ pub const Engine = struct {
     identity_hash: u64 = 0, // the checkpoint's identity text (pack_io.zig) hashed: --learn keys learned states by it
     // while copies land worse than the head's drafts, only 8-token matches the head agrees with are copied
     wids: Buf,
+    draw_at: Buf, // a sampled window's draw positions (sample.zig)
     rows_w: [MAXR + 1]Buf,
     mdims_w: [MAXR + 1]Buf,
     host: struct { rows: Buf, mdims: Buf, pos8: Buf, nk8: Buf, kvmeta: Buf, slots: [2 * MAXR]Slot },
@@ -487,7 +492,7 @@ pub const Engine = struct {
         return std.mem.indexOfScalar(u32, eos, tok) != null;
     }
 
-    /// One greedy reply. `depth` fixes the drafts a round (0: no drafts, one token a round); null: the depth rule.
+    /// One reply, sampled when out.sampling is set. `depth`: a round's drafts (0: one token a round); null: the rule.
     pub fn generate(e: *Engine, prompt: []const u32, max_tokens: usize, eos: []const u32, depth: ?usize, out: Out) !Result {
         return e.generateFrom(prompt, 0, &.{}, max_tokens, eos, depth, .{}, out);
     }
@@ -500,6 +505,7 @@ pub const Engine = struct {
         if (prompt.len + max_tokens + MARGIN > CAP) return error.ContextFull;
         if (from >= prompt.len or (from > 0 and m.pos != from)) return error.NotResumed;
         for (marks, 0..) |mk, i| if (mk <= from or mk >= prompt.len or (i > 0 and mk <= marks[i - 1])) return error.Marks;
+        if (out.sampling != null and r.tp != null) return error.SpeedUpGreedyOnly; // each Mac holds half the logits
         var watch = try think.Watch.init(budget);
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
@@ -570,6 +576,14 @@ pub const Engine = struct {
             }
             const hist0 = m.ple.hist; // the two tokens before the call: the n-gram history at a passed mark follows from them
             pick = try Prompt.chunkMarked(ps[0..c.parts], m, e.gpa, prompt[at .. at + c.rows], inside[0..n_in]);
+            if (at + c.rows == prompt.len) if (out.sampling) |p| { // the first token, from the last row
+                e.draw_at.b.slice(u32, MAXR)[0] = @intCast(prompt.len);
+                const cb = r.queue.commandBuffer();
+                r.enc = cb.compute(.serial);
+                sample.draw(r.enc, r.draw_pipe, m.t.logits, e.draw_at, m.t.picks, 1, VOCAB, p);
+                try m.finish(cb);
+                pick = m.t.picks.b.slice(u32, 1)[0];
+            };
             for (ps[0..c.parts], 0..) |p, k| { // the MTP head's keys for each segment's rows, from its streams
                 const s = at + segments.start(c.rows, c.parts, k);
                 const n = segments.rows(c.rows, c.parts, k);
@@ -699,6 +713,12 @@ pub const Engine = struct {
             if (r.gsel) |*g| g.nb_ub = ub;
             if (m.mtp.gsel) |*g| g.nb_ub = ub;
             try m.windowEncode(wr, e.wids);
+            if (out.sampling) |p| { // the window's picks redrawn from its logits, in place of the head's argmax
+                sample.positions(r.enc, r.positions_pipe, r.ar, e.draw_at, wr);
+                if (!r.serial) r.enc.barrier();
+                sample.draw(r.enc, r.draw_pipe, m.t.logits, e.draw_at, m.t.picks, wr, VOCAB, p);
+                if (!r.serial) r.enc.barrier();
+            }
             // the widest windows while copies land whole; otherwise the head's rule
             const copying = e.copy and copy_rate + 0.05 >= head_rate and copy_rate > 0.9;
             const wn = (if (fixed) |d| d else if (copying)
