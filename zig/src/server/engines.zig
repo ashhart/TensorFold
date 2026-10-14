@@ -3,6 +3,7 @@ const std = @import("std");
 const api = @import("engine_api");
 const native = @import("native_engines");
 const cli = @import("cli.zig");
+const Identity = @import("server.zig").Identity;
 const Allocator = std.mem.Allocator;
 
 pub const Opened = api.Opened;
@@ -16,6 +17,16 @@ pub const std_options: std.Options = @import("std_options.zig").of(native);
 /// What ``capabilities --json`` reports: this release, the chip here, and what the built-in backend serves.
 pub fn capabilities(a: Allocator) cli.Engines {
     return .{ .version = @import("build_options").version, .chip = if (native.families.len > 0) native.chip(a) else null, .backends = native.backends, .families = native.families };
+}
+
+/// What the open /health names: this release, the built-in backend and the GPU a serve with ``args`` opens.
+pub fn identity(a: Allocator, args: cli.Args) Identity {
+    const device: ?[]const u8 = if (@hasDecl(native, "deviceName")) native.deviceName(a, args.device) else null;
+    return .{
+        .version = @import("build_options").version,
+        .backend = if (native.backends.len > 0) native.backends[0] else "",
+        .device = device orelse "",
+    };
 }
 
 /// The engine for the checkpoint in ``dir``, or null with ``problem`` set.

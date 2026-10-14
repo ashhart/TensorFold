@@ -86,6 +86,7 @@ pub fn main(init: std.process.Init) !u8 {
         .sampling = try sampling(a, io, dir, args),
         .environ = init.environ_map,
         .started = started,
+        .identity = engines.identity(a, args),
     });
 }
 

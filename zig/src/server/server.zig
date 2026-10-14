@@ -30,6 +30,9 @@ const Allocator = std.mem.Allocator;
 /// auto compacts near the window. fraction compacts past that share of it.
 pub const CompactAt = union(enum) { auto, fraction: f64 };
 
+/// What the binary serves on, read once at startup: release, GPU backend and GPU name; an empty field is unknown.
+pub const Identity = struct { version: []const u8 = "", backend: []const u8 = "", device: []const u8 = "" };
+
 pub const Config = struct {
     served_name: []const u8,
     model_dir: []const u8 = "",
@@ -62,6 +65,8 @@ pub const Config = struct {
     /// BRAVE_SEARCH_API_KEY: Cortheon searches through Brave instead of DuckDuckGo.
     cortheon_search_key: ?[]const u8 = null,
     timeouts: http_conn.Timeouts = .{},
+    /// The open /health names these after its other keys; empty fields are left out.
+    identity: Identity = .{},
 };
 
 pub const Server = struct {
