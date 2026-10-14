@@ -1,5 +1,6 @@
-//! Qwen3.5-2B's CUDA lane backend behind the native family interface (native/cuda.zig's registry): windows of up
-//! to 16 rows (the lane core's copies), every stream's window in one forward, prompts in chunks, draws on the device.
+//! The Qwen3.5 hybrids' CUDA lane backend (the 2B, Qwen3.8-27B) behind the native family interface (native/cuda.zig's
+//! registry): windows of up to 16 rows (the lane core's copies), every stream's window in one forward, prompts in
+//! chunks, draws on the device.
 const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
@@ -26,22 +27,42 @@ pub const Loaded = struct {
     free_streams: u32 = 0,
     ctx: *anyopaque,
     deinit: *const fn (*anyopaque) void,
+    /// Called with the admitted stream count: that many caches allocated and touched now, since the driver commits
+    /// memory on first touch (seconds for a wide model's keys), and a request should not pay it.
+    reserve: *const fn (*anyopaque, u32) anyerror!void,
 };
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     if (kernels != null) return error.QwenHasNoCapturedKernels;
     const e = try E.Engine.init(gpa, io, ctx, dir);
     errdefer e.deinit();
+    if (e.g.vocab != c.vocab) return error.UnsupportedQwenVocab; // draw.zig's masks are sized by the 2B's vocabulary
     const l = try gpa.create(Lanes);
     l.* = .{ .gpa = gpa, .e = e, .capacity = o.context };
     return .{
         .backend = l.backend(),
-        .facts = .{ .exact_width = E.window_rows, .hidden_rows = true, .batch_rows = E.max_verify, .max_streams = E.max_segs, .streams_exact = true },
-        .rows = E.window_rows,
-        .stream_bytes = E.streamBytes(o.context),
+        .facts = .{ .exact_width = @intCast(e.window_rows), .hidden_rows = true, .batch_rows = @intCast(e.verify_rows), .max_streams = E.max_segs, .streams_exact = true },
+        .rows = @intCast(e.window_rows),
+        .stream_bytes = e.streamBytes(o.context),
         .ctx = l,
         .deinit = release,
+        .reserve = reserve,
     };
+}
+
+fn reserve(p: *anyopaque, streams: u32) anyerror!void {
+    const l: *Lanes = @ptrCast(@alignCast(p));
+    try l.pool.ensureTotalCapacity(l.gpa, streams);
+    while (l.pool.items.len < streams) {
+        const cache = try l.gpa.create(E.Cache);
+        errdefer l.gpa.destroy(cache);
+        cache.* = try E.Cache.init(l.gpa, l.e, l.capacity);
+        errdefer cache.deinit(l.gpa);
+        // a row through it: kernels have to have referenced a buffer once before the driver's stall is behind it
+        try l.e.forward(&.{.{ .cache = cache, .rows = 1 }}, &.{0}, .last);
+        try cache.reset(l.e);
+        l.pool.appendAssumeCapacity(cache);
+    }
 }
 
 /// A request this engine refuses, in words; null: none of its own.
@@ -70,16 +91,38 @@ const Lanes = struct {
     e: *E.Engine,
     capacity: usize,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *E.Cache) = .empty,
+    /// Caches at the full window, kept between streams: allocated and touched once (`reserve`), reset on reuse.
+    pool: std.ArrayList(*E.Cache) = .empty,
 
     fn deinit(self: *Lanes) void {
         var it = self.caches.valueIterator();
-        while (it.next()) |cache| {
-            cache.*.deinit(self.gpa);
-            self.gpa.destroy(cache.*);
-        }
+        while (it.next()) |cache| self.drop(cache.*);
         self.caches.deinit(self.gpa);
+        for (self.pool.items) |cache| self.drop(cache);
+        self.pool.deinit(self.gpa);
         self.e.deinit();
         self.gpa.destroy(self);
+    }
+
+    fn drop(self: *Lanes, cache: *E.Cache) void {
+        cache.deinit(self.gpa);
+        self.gpa.destroy(cache);
+    }
+
+    /// A cache for a new stream: a pooled one reset, else one more (a window beyond the reserve).
+    fn take(self: *Lanes) !*E.Cache {
+        if (self.pool.pop()) |cache| {
+            try cache.reset(self.e);
+            return cache;
+        }
+        const cache = try self.gpa.create(E.Cache);
+        errdefer self.gpa.destroy(cache);
+        cache.* = try E.Cache.init(self.gpa, self.e, self.capacity);
+        return cache;
+    }
+
+    fn give(self: *Lanes, cache: *E.Cache) void {
+        self.pool.append(self.gpa, cache) catch self.drop(cache);
     }
 
     fn backend(self: *Lanes) be.Backend {
@@ -98,10 +141,8 @@ const Lanes = struct {
         const self = cast(ptr);
         const ids = stream.prompt();
         if (ids.len == 0 or ids.len + stream.max_new > self.capacity or self.caches.contains(stream)) return error.InvalidQwenPrompt;
-        const cache = try self.gpa.create(E.Cache);
-        errdefer self.gpa.destroy(cache);
-        cache.* = try E.Cache.init(self.gpa, self.e, @min(self.capacity, ids.len + stream.max_new + 1));
-        errdefer cache.deinit(self.gpa);
+        const cache = try self.take();
+        errdefer self.give(cache);
         var at: usize = 0;
         while (at < ids.len) {
             var end: usize = @min(ids.len, at + E.max_rows);
@@ -150,7 +191,7 @@ const Lanes = struct {
         if (windows.len != out.len) return error.InvalidQwenWindows;
         for (windows, out) |w, o| {
             const rows = w.rows();
-            if (w.parents != null or w.held != 0 or rows > E.window_rows or w.positions.len != rows) return error.UnsupportedQwenWindow;
+            if (w.parents != null or w.held != 0 or rows > self.e.window_rows or w.positions.len != rows) return error.UnsupportedQwenWindow;
             if (w.masks.len != 0 and w.masks.len != rows * draws.mask_words) return error.InvalidQwenMasks;
             if (o.sampled.len != rows or o.drafts.len != w.tokens.len) return error.InvalidQwenOutputs;
             const cache = try self.cacheOf(w.stream);
@@ -159,12 +200,12 @@ const Lanes = struct {
         var at: usize = 0;
         while (at < windows.len) {
             var parts: [E.max_segs]E.Part = undefined;
-            var ids: [E.max_verify]u32 = undefined;
-            var picks: [E.max_verify]E.Draw = undefined;
+            var ids: [E.max_rows]u32 = undefined;
+            var picks: [E.max_rows]E.Draw = undefined;
             var n: usize = 0;
             var total: usize = 0;
             var masked = false;
-            while (at + n < windows.len and n < E.max_segs and total + windows[at + n].rows() <= E.max_verify) : (n += 1) {
+            while (at + n < windows.len and n < E.max_segs and total + windows[at + n].rows() <= self.e.verify_rows) : (n += 1) {
                 const w = windows[at + n];
                 parts[n] = .{ .cache = self.caches.get(w.stream).?, .rows = w.rows() };
                 ids[total] = w.pending;
@@ -203,9 +244,6 @@ const Lanes = struct {
 
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
-        if (self.caches.fetchRemove(stream)) |entry| {
-            entry.value.deinit(self.gpa);
-            self.gpa.destroy(entry.value);
-        }
+        if (self.caches.fetchRemove(stream)) |entry| self.give(entry.value);
     }
 };
