@@ -49,13 +49,16 @@ The test of a kernel fills a `contract.spec.Spec` and hands the harness a few ho
    spec says so and the run prints the margins it could prove. Control: a dot product summed in half.
 5. Limits. Every registered launch against each chip we serve, from its declaration and recorded compiles, so this
    part runs with no GPU in `zig build test`. Metal: threads a group and threadgroup bytes against M1 to M5; on M1
-   and M2 a pipeline's thread limit falls as its registers rise, so a launch past 256 threads needs its M1/M2 limit
-   recorded (or a reservation in the source). CUDA: registers a thread (rounded per warp), static plus dynamic shared
-   bytes, launch bounds and clusters against sm_86, sm_89, sm_120 and sm_121. Tools re-derive the records: on a Mac,
-   `tf-kernel-contract --offline DIR` compiles each pipeline for M1 and M2 with Xcode's Metal toolchain (native code
-   built for T threads equal to the plain build means the plain pipeline runs T); on a CUDA build machine,
-   `tf-cuda-test kernel-contract-limits DIR` reads registers, shared bytes and launch bounds from the fatbins' ELF
-   images for every SM. On the GPU itself both runners check the loaded pipelines and the device's own limits.
+   and M2 a pipeline's thread limit falls as its registers rise (simd_qmm_bits' 8-bit tiles compile for 224), so
+   every launch records its M1/M2 limit, unless its launcher sizes its groups to the pipeline or its source reserves
+   the threads. A tensor-op kernel, which cannot be built for M1/M2 ahead of time, stays at 256 threads. CUDA:
+   registers a thread (rounded per warp), static plus dynamic shared bytes, launch bounds and clusters against sm_86,
+   sm_89, sm_120 and sm_121. Tools re-derive the records: on a Mac, `tf-kernel-contract --offline DIR` compiles each
+   pipeline for M1 and M2 with Xcode's Metal toolchain (native code built for T threads equal to the plain build means
+   the plain pipeline runs T); on a CUDA build machine, `tf-cuda-test kernel-contract-limits DIR` reads registers,
+   shared bytes and launch bounds from the fatbins' ELF images for every SM, counted as the driver counts them (sm_120
+   and sm_121 images keep registers only in the `.nv.info` register records, and add the block's reserved 1 KiB to
+   `.nv.shared`). On the GPU itself both runners check the loaded pipelines and the device's own limits.
    Controls: Metal, the row projection's pipeline launched at 1,024 threads where M1 and M2 compile it for 512, and
    36 KiB of threadgroup memory; CUDA, a kernel launched past its `__launch_bounds__`, and one needing more registers
    than a block has.

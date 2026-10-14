@@ -16,22 +16,22 @@ const prompt_symbol = "_ZN11tf_prompt1613prompt_kernelILi{d}ELi128ELi128ELi2ELi2
 
 /// CUDA kernels as launched; tf-cuda-test kernel-contract-limits re-derives the usage records.
 pub const cuda = [_]CudaRecord{
-    .{ .launch = .{ .name = "norms tf_rms_rows_bf16", .symbol = "tf_rms_rows_bf16", .image = "norms", .threads = 256 }, .usage = none },
-    .{ .launch = .{ .name = "norms tf_rms_rows", .symbol = "tf_rms_rows", .image = "norms", .threads = 1024 }, .usage = none },
-    .{ .launch = .{ .name = "router tf_nemo_router", .symbol = "tf_nemo_router", .image = "nemotron_route", .threads = 256, .dynamic = 28800 }, .usage = none },
-    .{ .launch = .{ .name = "router tf_nemo_topk", .symbol = "tf_nemo_topk", .image = "nemotron_route", .threads = 32 }, .usage = none },
-    .{ .launch = .{ .name = "qmm_group cluster of 8", .symbol = group_symbol, .image = "qmm_group", .threads = 128, .dynamic = 35328, .cluster = 8, .min_sm = 90 }, .usage = none },
-    .{ .launch = .{ .name = "qmm_group one CTA a tile", .symbol = group_symbol, .image = "qmm_group", .threads = 128, .dynamic = 35328 }, .usage = none },
-    .{ .launch = .{ .name = "lane_gemv", .symbol = gemv_symbol, .image = "lane_gemv", .threads = 128, .dynamic = 35328 }, .usage = none },
-    .{ .launch = .{ .name = "lane_gemv split-K", .symbol = "tf_lane_gemv_split", .image = "lane_gemv", .threads = 128, .dynamic = 17664 }, .usage = none },
-    .{ .launch = .{ .name = "prompt16 FP4", .symbol = std.fmt.comptimePrint(prompt_symbol, .{0}), .image = "prompt16", .threads = 128, .dynamic = 41984 }, .usage = none },
-    .{ .launch = .{ .name = "prompt16 FP8", .symbol = std.fmt.comptimePrint(prompt_symbol, .{1}), .image = "prompt16", .threads = 128, .dynamic = 49152 }, .usage = none },
+    .{ .launch = .{ .name = "norms tf_rms_rows_bf16", .symbol = "tf_rms_rows_bf16", .image = "norms", .threads = 256 }, .usage = .{ .{ .regs = 79, .static = 36, .bound = 256 }, .{ .regs = 79, .static = 36, .bound = 256 }, .{ .regs = 79, .static = 36, .bound = 256 }, .{ .regs = 79, .static = 36, .bound = 256 } } },
+    .{ .launch = .{ .name = "norms tf_rms_rows", .symbol = "tf_rms_rows", .image = "norms", .threads = 1024 }, .usage = .{ .{ .regs = 46, .static = 132, .bound = 1024 }, .{ .regs = 46, .static = 132, .bound = 1024 }, .{ .regs = 45, .static = 132, .bound = 1024 }, .{ .regs = 45, .static = 132, .bound = 1024 } } },
+    .{ .launch = .{ .name = "router tf_nemo_router", .symbol = "tf_nemo_router", .image = "nemotron_route", .threads = 256, .dynamic = 28800 }, .usage = .{ .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 } } },
+    .{ .launch = .{ .name = "router tf_nemo_topk", .symbol = "tf_nemo_topk", .image = "nemotron_route", .threads = 32 }, .usage = .{ .{ .regs = 63, .static = 0, .bound = 32 }, .{ .regs = 59, .static = 0, .bound = 32 }, .{ .regs = 58, .static = 0, .bound = 32 }, .{ .regs = 58, .static = 0, .bound = 32 } } },
+    .{ .launch = .{ .name = "qmm_group cluster of 8", .symbol = group_symbol, .image = "qmm_group", .threads = 128, .dynamic = 35328, .cluster = 8, .min_sm = 90 }, .usage = .{ .{ .regs = 54, .static = 0, .bound = 128 }, .{ .regs = 54, .static = 0, .bound = 128 }, .{ .regs = 48, .static = 0, .bound = 128 }, .{ .regs = 48, .static = 0, .bound = 128 } } },
+    .{ .launch = .{ .name = "qmm_group one CTA a tile", .symbol = group_symbol, .image = "qmm_group", .threads = 128, .dynamic = 35328 }, .usage = .{ .{ .regs = 54, .static = 0, .bound = 128 }, .{ .regs = 54, .static = 0, .bound = 128 }, .{ .regs = 48, .static = 0, .bound = 128 }, .{ .regs = 48, .static = 0, .bound = 128 } } },
+    .{ .launch = .{ .name = "lane_gemv", .symbol = gemv_symbol, .image = "lane_gemv", .threads = 128, .dynamic = 35328 }, .usage = .{ .{ .regs = 57, .static = 0, .bound = 128 }, .{ .regs = 57, .static = 0, .bound = 128 }, .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 64, .static = 0, .bound = 128 } } },
+    .{ .launch = .{ .name = "lane_gemv split-K", .symbol = "tf_lane_gemv_split", .image = "lane_gemv", .threads = 128, .dynamic = 17664 }, .usage = .{ .{ .regs = 56, .static = 128, .bound = 128 }, .{ .regs = 56, .static = 128, .bound = 128 }, .{ .regs = 44, .static = 128, .bound = 128 }, .{ .regs = 44, .static = 128, .bound = 128 } } },
+    .{ .launch = .{ .name = "prompt16 FP4", .symbol = std.fmt.comptimePrint(prompt_symbol, .{0}), .image = "prompt16", .threads = 128, .dynamic = 41984 }, .usage = .{ .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 212, .static = 0, .bound = 128 }, .{ .regs = 212, .static = 0, .bound = 128 } } },
+    .{ .launch = .{ .name = "prompt16 FP8", .symbol = std.fmt.comptimePrint(prompt_symbol, .{1}), .image = "prompt16", .threads = 128, .dynamic = 49152 }, .usage = .{ .{ .regs = 243, .static = 0, .bound = 128 }, .{ .regs = 243, .static = 0, .bound = 128 }, .{ .regs = 218, .static = 0, .bound = 128 }, .{ .regs = 218, .static = 0, .bound = 128 } } },
 };
 
 /// Gate 5's planted CUDA controls: a launch past its __launch_bounds__, one needing more registers than a block has.
 pub const cuda_controls = [_]CudaRecord{
-    .{ .launch = .{ .name = "control: past its bounds", .symbol = "tf_ctl_bounded", .image = "contract_controls", .threads = 512 }, .usage = none },
-    .{ .launch = .{ .name = "control: heavy at 1,024 threads", .symbol = "tf_ctl_heavy", .image = "contract_controls", .threads = 1024 }, .usage = none },
+    .{ .launch = .{ .name = "control: past its bounds", .symbol = "tf_ctl_bounded", .image = "contract_controls", .threads = 512 }, .usage = .{ .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 } } },
+    .{ .launch = .{ .name = "control: heavy at 1,024 threads", .symbol = "tf_ctl_heavy", .image = "contract_controls", .threads = 1024 }, .usage = .{ .{ .regs = 166, .static = 0, .bound = 0 }, .{ .regs = 166, .static = 0, .bound = 0 }, .{ .regs = 166, .static = 0, .bound = 0 }, .{ .regs = 166, .static = 0, .bound = 0 } } },
 };
 
 /// Every CUDA record's problems on every SM we build for, printed; returns how many (a missing record is one).
