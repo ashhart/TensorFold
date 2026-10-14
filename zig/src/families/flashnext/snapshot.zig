@@ -128,6 +128,9 @@ pub fn layoutOf(_: *const Engine) Layout {
 const Part = struct { live: fz.Buf, len: usize };
 const MAX_PARTS = 36 * 2 + 13 * 5 + 1;
 
+/// A state's buffer for the disk: DeltaNet states, each layer's two key and two value heads and indexer keys, a tail.
+pub const shape = .{ .deltanet = 36 * (CS_ROW + SO_ROW), .layers = 13, .key_row = KEY_ROW, .raw_row = RAW_ROW, .tail = TAIL };
+
 /// Bytes of a state after `at` tokens: 36 DeltaNet states, 13 layers of keys, values and indexer keys, the tail.
 pub fn bytes(at: usize) usize {
     return 36 * (CS_ROW + SO_ROW) + 13 * at * (4 * KEY_ROW + RAW_ROW) + TAIL;

@@ -434,6 +434,7 @@ pub const prompt_imprint = @import("prompt_imprint.zig");
 /// A question about a conversation's kept states, in RAM and on disk (rows_ask.zig).
 pub const ImprintAsk = @import("rows_ask.zig").Ask;
 pub const ImprintOp = @import("rows_ask.zig").Op;
+pub const ImprintDisk = @import("rows_ask.zig").Disk;
 
 /// The idle keepalive's ticker and target contract.
 pub const keepalive = @import("keepalive.zig");

@@ -9,6 +9,7 @@ const snap = tf.flashnext_snapshot;
 const learned = tf.flashnext_learned;
 const pc = api.prompt_cache;
 const cache_fit = @import("cache_fit.zig");
+const disk = @import("flashnext_disk.zig");
 const Allocator = std.mem.Allocator;
 
 const Job = struct {
@@ -48,6 +49,8 @@ pub const Host = struct {
     prompt: []const u32 = &.{}, // the request in the engine (speed-up mode names kept states by its tokens)
     saved: std.ArrayList(u32) = .empty, // this request's marks the cache kept (speed-up: rank 1 drops the others)
     learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk, read back by later servers
+    disk: api.ImprintDisk = .{}, // the Mac app's questions about kept states, and the disk writer's quiet
+    served: u64 = 0, // requests taken from the queue: a new one restarts the writer's quiet
 
     const Mark = struct { at: i96, tokens: u64 };
     const window_ns: i96 = 2 * std.time.ns_per_s;
@@ -58,19 +61,55 @@ pub const Host = struct {
 
     /// Stops admitting, cancels what waits, lets the running reply end at its next round and joins the thread.
     pub fn stop(h: *Host) void {
-        h.lock();
-        h.closing = true;
-        h.wake.broadcast(h.io);
-        h.unlock();
-        if (h.thread) |t| t.join();
-        h.thread = null;
+        drainFn(h);
+        h.disk.close(h.gpa);
         h.queued.deinit(h.gpa);
         h.cancels.deinit(h.gpa);
         h.decoded.deinit(h.gpa);
     }
 
     pub fn engine(h: *Host) api.Engine {
-        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn } };
+        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn, .imprint = askFn, .drain = drainFn } };
+    }
+
+    /// Engine.drain, and stop's first half: closing, what waits cancelled, writes finished, the thread joined.
+    fn drainFn(ctx: *anyopaque) void {
+        const h = self(ctx);
+        h.lock();
+        h.closing = true;
+        h.wake.broadcast(h.io);
+        h.unlock();
+        if (h.thread) |t| t.join();
+        h.thread = null;
+    }
+
+    /// Engine.imprint: an ask queued for the engine thread, answered between requests.
+    fn askFn(ctx: *anyopaque, a: *api.ImprintAsk) bool {
+        const h = self(ctx);
+        h.lock();
+        defer h.unlock();
+        if (h.closing or !h.disk.push(h.gpa, a)) return false;
+        h.wake.signal(h.io);
+        return true;
+    }
+
+    /// Asks answered and, past the quiet with nothing waiting, one piece of disk writing; false when neither ran.
+    fn idleStep(h: *Host) bool {
+        h.lock();
+        const asks = h.disk.take(h.gpa);
+        const store = if (h.cache) |*c| c else null;
+        const write = if (store) |c| c.disk != null and api.prompt_cache.rows.write.pending(c.disk.?) and h.queued.items.len == 0 and !h.closing and h.disk.quiet(h.served, h.now()) else false;
+        h.unlock();
+        defer h.gpa.free(asks);
+        for (asks) |a| a.answer(store);
+        if (write) _ = api.prompt_cache.rows.write.step(store.?.disk.?);
+        return write or asks.len > 0;
+    }
+
+    /// Whether the idle loop has work: asks, or kept states waiting for disk (under the lock).
+    fn idleWork(h: *Host) bool {
+        const store = if (h.cache) |*c| c else return h.disk.asks.items.len > 0;
+        return h.disk.asks.items.len > 0 or (store.disk != null and api.prompt_cache.rows.write.pending(store.disk.?));
     }
 
     /// The engine's queue as a keepalive target: the ticker commits a tiny buffer on it while idle.
@@ -195,8 +234,12 @@ pub const Host = struct {
     fn run(h: *Host) void {
         while (true) {
             h.lock();
-            while (h.queued.items.len == 0 and !h.closing) {
-                h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
+            if (h.queued.items.len == 0 and !h.closing) {
+                const ms_: i64 = if (h.idleWork()) 10 else 100; // writes waiting for the quiet look again soon
+                if (ms_ == 100 or !h.disk.quiet(h.served, h.now())) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(ms_), .clock = .awake } }) catch {};
+                h.unlock();
+                _ = h.idleStep();
+                continue;
             }
             if (h.closing) {
                 const left = h.gpa.dupe(*Job, h.queued.items) catch &.{};
@@ -204,9 +247,17 @@ pub const Host = struct {
                 h.unlock();
                 for (left) |job| h.finish(job, .cancelled, .{}, "");
                 h.gpa.free(left);
+                if (h.cache) |*store| if (store.disk) |r| {
+                    _ = api.prompt_cache.rows.write.drain(r, api.prompt_cache.rows.write.nowNs() + 20 * std.time.ns_per_s);
+                };
                 return;
             }
+            if (h.queued.items.len == 0) {
+                h.unlock();
+                continue;
+            }
             const job = h.queued.orderedRemove(0);
+            h.served += 1;
             h.running = job;
             h.live_prompt = job.request.prompt.len;
             h.live_generated = 0;
@@ -247,6 +298,11 @@ pub const Host = struct {
             h.prefill_at = done;
             c.job.prefilled = done;
             h.unlock();
+            const n = c.job.request.prompt.len - c.job.cached;
+            if (h.cache) |*store| if (store.disk) |r| if (n >= 1024 and done > c.job.began) {
+                const rate = @as(f64, @floatFromInt(n)) / (@as(f64, @floatFromInt(done - c.job.began)) / 1e9);
+                r.prefill_rate = if (r.prefill_rate > 0) 0.5 * r.prefill_rate + 0.5 * rate else rate;
+            };
             c.job.prefill_sent = true;
             emit(c.job, .{ .prefilled = c.job.cached });
         }
@@ -382,7 +438,7 @@ const Snaps = struct {
         return h.eng.snap_pool.fits(snap.bytes(at));
     }
     /// A kept state and its name on both Macs (speed-up mode's rank 1 keeps its own under the same name).
-    const Kept = struct { st: *snap.State, key: u64 };
+    const Kept = disk.Kept;
     fn save(ptr: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
         const h: *Host = @ptrCast(@alignCast(ptr));
         const k = try h.gpa.create(Kept);
@@ -433,22 +489,20 @@ fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, a: Allocator, why: *[]con
     return cache_fit.budget(gib, over, dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), a, why, rank);
 }
 
+/// --learn's settings: the root, cap, free-disk floor and daily writes, and whether conversations go to disk too.
+pub const Learn = struct { root: []const u8, cap: u64, floor: u64 = 4 << 30, daily: u64 = 32 << 30, conversations: bool = false };
+
+const rows_image: api.prompt_cache.rows.Image = disk.image(Host);
+
 /// Learned states under `root` by checkpoint, kernel sources and modes, probe bits, OS build and chip.
-fn learnedStates(gpa: Allocator, eng: *fx.Engine, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
-    var h = std.hash.Wyhash.init(0x6678);
-    const probe = try learned.probe(eng, gpa);
-    const modes = [_]u64{ @intFromBool(eng.r.xnew), @intFromBool(eng.r.hc_up), @intFromBool(eng.r.device.tensorUnits()) };
-    for ([_]u64{ eng.identity_hash, learned.sourceHash(), modes[0], modes[1], modes[2], probe }) |x| h.update(std.mem.asBytes(&x));
-    var os: [64]u8 = undefined;
-    h.update(api.prompt_imprint.osBuild(&os));
-    h.update(std.mem.span(eng.r.device.name()));
-    const m = try api.prompt_imprint.Imprint.open(gpa, root, h.final(), cap);
+fn learnedStates(gpa: Allocator, io: std.Io, eng: *fx.Engine, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
+    const m = try api.prompt_imprint.Imprint.open(gpa, root, (try disk.identity(gpa, io, eng)).id, cap);
     std.log.info("flash next: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ m.dir, m.metas.items.len, m.total() >> 20, cap >> 20 });
     return m;
 }
 
 /// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what 70% of RAM leaves, up to 16 GiB; `over_cap` lets a larger one through); on error.CacheOverCap `why` (in `a`) says why.
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, learn: ?[]const u8, learn_cap: u64, a: Allocator, why: *[]const u8) !*Host {
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, learn: ?Learn, a: Allocator, why: *[]const u8) !*Host {
     const eng = try fx.Engine.loadWith(gpa, io, dir, dump, speed_up);
     errdefer eng.deinit();
     if (learn != null and eng.r.tp != null) {
@@ -470,15 +524,18 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, wind
     h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .info_ = .{ .name = "flashnext-zig", .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = true, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
     h.warm = .{ .queue = eng.r.queue };
     // chunk 1: a prompt call keeps at marks inside it (engine.mark_taps), so a short prompt's history mark adds no call
-    if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .write = Snaps.write, .read = Snaps.read, .forget = Snaps.forget } }, .{ .lookahead = 1, .chunk = 1, .warm = .on }, budget);
+    if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .write = Snaps.write, .read = Snaps.read, .forget = Snaps.forget, .rows = &rows_image } }, .{ .lookahead = 1, .chunk = 1, .warm = .on }, budget);
     h.info_.prompt_cache = h.cache != null;
     // a reply's background pass keeps its end: a client that drops the reasoning resumes past the reply
     h.info_.warm_turns = h.cache != null;
-    if (learn) |root| {
-        h.learned = try learnedStates(gpa, eng, root, learn_cap);
+    if (learn) |l| if (l.conversations) {
+        if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, eng), l.root, l.cap, l.floor, l.daily);
+    } else {
+        h.learned = try learnedStates(gpa, io, eng, l.root, l.cap);
         if (h.cache) |*store| store.imprint = &h.learned.?;
-    }
+    };
     errdefer if (h.learned) |*m| m.deinit();
+    errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     try h.start();
     return h;
 }
@@ -494,7 +551,9 @@ pub fn close(ctx: *anyopaque) void {
         h.eng.stopFollowing();
         th.join();
     }
+    const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit();
+    if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go
     if (h.learned) |*m| m.deinit();
     h.saved.deinit(h.gpa);
     h.eng.deinit();

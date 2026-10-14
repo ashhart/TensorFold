@@ -51,3 +51,43 @@ pub const Ask = struct {
         return true;
     }
 };
+
+/// A host's side of disk states: the asks waiting for its engine thread, and when the engine last went quiet.
+pub const Disk = struct {
+    asks: std.ArrayList(*Ask) = .empty,
+    seen: u64 = 0, // the host's admissions when the writer last looked: a new one restarts the quiet
+    since: ?i96 = null,
+
+    /// The quiet after the last admission before the first write: a client's next turn often comes sooner.
+    pub const quiet_ns: i96 = 150 * std.time.ns_per_ms;
+
+    /// Queue `a` (the host's lock held).
+    pub fn push(d: *Disk, gpa: std.mem.Allocator, a: *Ask) bool {
+        d.asks.append(gpa, a) catch return false;
+        return true;
+    }
+
+    /// The queued asks, taken (the host's lock held); the caller frees the list.
+    pub fn take(d: *Disk, gpa: std.mem.Allocator) []*Ask {
+        if (d.asks.items.len == 0) return &.{};
+        const list = gpa.dupe(*Ask, d.asks.items) catch return &.{};
+        d.asks.clearRetainingCapacity();
+        return list;
+    }
+
+    /// Whether the writer may run now: no admission since `quiet_ns` ago (`admissions`: the host's count so far).
+    pub fn quiet(d: *Disk, admissions: u64, now: i96) bool {
+        if (d.seen != admissions or d.since == null) {
+            d.seen = admissions;
+            d.since = now;
+            return false;
+        }
+        return now - d.since.? >= quiet_ns;
+    }
+
+    /// Asks left when the engine stops, answered as having no states; the list freed.
+    pub fn close(d: *Disk, gpa: std.mem.Allocator) void {
+        for (d.asks.items) |a| a.answer(null);
+        d.asks.deinit(gpa);
+    }
+};
