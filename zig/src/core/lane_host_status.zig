@@ -31,19 +31,19 @@ pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
     fillTotals(h, out);
 }
 
-/// A started job whose prompt pass has not reported yet is filling; `fill_run` hashes the filling jobs' ids.
+/// A job whose prompt pass has not reported yet is filling; the engine thread publishes that with `fill_on`.
 fn fillTotals(h: *LaneHost, out: *api.Status) void {
     var total: u64 = 0;
     var left: u64 = 0;
     var filling = false;
     var run: u64 = 0;
     for (h.admitted.items) |job| {
-        if (!job.started or job.prefilled != null or job.stream.finished) continue;
+        if (!job.fill_on.load(.acquire)) continue;
         filling = true;
         const prompt = job.request.prompt.len;
         total += prompt;
         left += prompt -| job.stream.fill_at.load(.monotonic);
-        run = run *% 0x9E3779B97F4A7C15 ^ job.id ^ @as(u64, @truncate(@as(u96, @bitCast(job.began))));
+        run = run *% 0x9E3779B97F4A7C15 ^ job.id ^ job.seq; // `seq` the engine thread published under this lock
     }
     if (!filling) return;
     out.fill_prompt_tokens = @intCast(total);

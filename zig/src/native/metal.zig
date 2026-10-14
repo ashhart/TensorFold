@@ -58,6 +58,11 @@ fn modelContext(a: Allocator, io: std.Io, dir: []const u8) i64 {
     return if (limit == .integer and limit.integer > 0) limit.integer else 0;
 }
 
+/// The host's memory counts: `cache_fit.hostMemory` from the process footprint (no configured load limit).
+fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
+    return cache_fit.hostMemory(0, reset_peak);
+}
+
 /// One loaded model behind the lane host: everything the engine thread reads lives here.
 const Host = struct {
     gpa: Allocator,
@@ -162,6 +167,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.core = lanes.Engine.init(gpa, &h.cfg, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(@max(window, 0)), .prefill_step = step, .structures = true });
+    h.host.memory = .{ .ctx = h, .read = readMemory };
     h.round = .{ .depth = 8 };
     h.cache = null;
     var why: []const u8 = "";

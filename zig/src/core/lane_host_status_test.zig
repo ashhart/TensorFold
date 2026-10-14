@@ -186,6 +186,59 @@ test "status polls through a cancellation, a failed admission and a requeue stay
     try std.testing.expect(status.fill_prompt_tokens == null and status.fill_tokens_left == null);
 }
 
+// The fill marker pins one fill: stable while a prompt's pass runs, and a later poll races it with no host lock.
+test "fill_run is stable within one prompt's fill and changes for the next" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 3 };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
+    try host.start();
+    defer host.stop();
+    const Seen = struct {
+        engine: Engine = undefined,
+        first: ?u64 = null,
+        runs: std.ArrayList(u64) = .empty,
+        done: std.atomic.Value(bool) = .init(false),
+
+        fn hook(ctx: *anyopaque, _: *lanes.Stream, _: usize) void {
+            const seen: *@This() = @ptrCast(@alignCast(ctx));
+            var status: api.Status = .{};
+            seen.engine.status(&status, &.{}); // the pass holds no host lock here: the poll races it
+            if (status.fill_prompt_tokens != null) {
+                if (seen.first == null) seen.first = status.fill_run;
+                seen.runs.append(gpa, status.fill_run) catch {};
+            }
+        }
+        fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
+            const seen: *@This() = @ptrCast(@alignCast(ctx));
+            if (e.* == .finished) seen.done.store(true, .release);
+        }
+    };
+    var seen: Seen = .{};
+    seen.engine = host.engine();
+    target.prefill_hook = Seen.hook;
+    target.prefill_hook_ctx = &seen;
+    const prompt = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6 };
+    const request: Request = .{ .prompt = &prompt, .max_tokens = 4 };
+    try seen.engine.submit(1, &request, .{ .ctx = &seen, .event = Seen.event });
+    while (!seen.done.load(.acquire)) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    defer seen.runs.deinit(gpa);
+    try std.testing.expect(seen.runs.items.len >= 2); // the pass sampled the marker at least twice
+    for (seen.runs.items) |run| try std.testing.expectEqual(seen.first.?, run); // one fill, one marker
+    const second: Request = .{ .prompt = &prompt, .max_tokens = 4 };
+    var gone: Box = .{};
+    try seen.engine.submit(2, &second, .{ .ctx = &gone, .event = Box.event });
+    try std.testing.expectEqual(Reason.length, gone.wait());
+    var status: api.Status = .{};
+    seen.engine.status(&status, &.{}); // idle again
+    try std.testing.expect(status.fill_run == 0);
+}
+
 const Box = struct {
     mutex: std.Io.Mutex = .init,
     done: ?Reason = null,

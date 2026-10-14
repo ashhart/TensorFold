@@ -161,8 +161,8 @@ pub const Host = struct {
         };
     }
 
-    fn memoryFn(_: *anyopaque, _: bool) ?api.Memory {
-        return null;
+    fn memoryFn(_: *anyopaque, reset_peak: bool) ?api.Memory {
+        return cache_fit.hostMemory(0, reset_peak); // the process footprint; no configured load limit
     }
 
     fn emit(job: *Job, event: api.Event) void {

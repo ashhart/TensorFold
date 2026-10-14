@@ -79,6 +79,7 @@ pub const Metal = struct {
             };
             try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = end - at }}, ids[at..end], false, .last);
             at = end;
+            stream.fill_at.store(@intCast(at), .monotonic); // fwd.run waits: `at` is landed progress
         }
         try self.caches.put(self.gpa, stream, cache);
     }

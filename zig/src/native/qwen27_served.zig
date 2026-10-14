@@ -77,6 +77,11 @@ pub const Host = struct {
     }
 };
 
+/// The host's memory counts: `cache_fit.hostMemory` from the process footprint (no configured load limit).
+fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
+    return cache_fit.hostMemory(0, reset_peak);
+}
+
 /// The words for a request the engine refuses.
 fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
@@ -253,6 +258,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.clock.clock());
     errdefer h.core.deinit();
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .lanes = slots, .context_window = capacity, .prefill_step = 128 });
+    h.host.memory = .{ .ctx = h, .read = readMemory };
     h.host.explain = .{ .text = words };
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
     // a lone greedy request takes the serial loop on tensor units, where it is faster (TF_QWEN27_LANES overrides)
