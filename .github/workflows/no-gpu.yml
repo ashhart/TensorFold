@@ -21,6 +21,9 @@ jobs:
       # zig build test is the host unit tests. No GPU. The Python suite is not this check.
       - name: zig build test
         run: zig build test
+      # The kernel contract's limits gate: every registered launch against M1-M5 and sm_86/89/120/121, controls red.
+      - name: zig build test-kernel-contract
+        run: zig build test-kernel-contract
       # The frozen server goldens: request parsing, rendering and streaming against recorded answers.
       - name: zig build test-golden
         run: zig build test-golden

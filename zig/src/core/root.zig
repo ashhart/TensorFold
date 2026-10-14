@@ -18,6 +18,8 @@ pub const registry = @import("registry.zig");
 pub const tuning = @import("tuning.zig");
 pub const norms_ref = @import("norms_ref.zig");
 pub const act_ref = @import("act_ref.zig");
+/// The kernel contract every GPU kernel's test registers with (zig/tests/contract, tf-cuda-test kernel-contract).
+pub const contract = @import("contract.zig");
 
 test {
     _ = safetensors;
@@ -29,6 +31,7 @@ test {
     _ = tuning;
     _ = norms_ref;
     _ = act_ref;
+    _ = contract;
     _ = exl3_format;
     _ = exlr8;
     _ = @import("exl3_rect_test.zig");
