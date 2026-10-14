@@ -100,7 +100,7 @@ pub const Engine = struct {
     g: Geometry,
     geo: Geo,
     stream: cuda.Stream,
-    mods: [8]cuda.Module,
+    mods: [9]cuda.Module,
     draws: cuda.sample.Draws,
     affine: cuda.qlinear.Affine4Kernels,
     wide: cuda.qlinear.AffineNKernels, // the tiles of every width but 4, and their packs
@@ -196,7 +196,7 @@ pub const Engine = struct {
         e.stage = try DeviceBuffer.alloc(d, weights.stageBytes(g));
         errdefer e.stage.free();
         const kk = cuda.kernels;
-        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, kk.qwen35, kk.sample, kk.qwen35_keep, kk.affine8 };
+        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, kk.qwen35, kk.sample, kk.qwen35_keep, kk.affine8, kk.affine_prefill };
         var loaded: usize = 0;
         errdefer for (e.mods[0..loaded]) |*m| m.unload();
         for (images, 0..) |img, i| {
@@ -207,7 +207,7 @@ pub const Engine = struct {
         const gb10 = try ctx.attribute(.compute_capability_major) == 12 and try ctx.attribute(.compute_capability_minor) == 1;
         e.affine = try cuda.qlinear.Affine4Kernels.resolve(d, e.mods[0], e.mods[1], e.mods[2], e.mods[3], sms, gb10);
         errdefer e.affine.deinit();
-        e.wide = try cuda.qlinear.AffineNKernels.resolve(d, e.mods[7], e.mods[3], sms, gb10);
+        e.wide = try cuda.qlinear.AffineNKernels.resolve(d, e.mods[7], e.mods[8], e.mods[3], sms, gb10);
         errdefer e.wide.deinit();
         e.draws = try cuda.sample.Draws.resolve(e.mods[5]);
         inline for (@typeInfo(Fns).@"struct".field_names) |name| @field(e.fns, name) = try e.mods[4].function("tf_q35_" ++ name);
@@ -332,8 +332,7 @@ pub const Engine = struct {
         return e.projSums(l, x, e.xs, out, rows, prompt, e.tables.ptr + params_at);
     }
 
-    /// `proj` with the rows' group sums in `xs` and the device counts at `params` (0: every row given is real).
-    /// A prompt's rows past 16 take the format's prompt GEMM; a window's rows the decode tiles, 16 at a time.
+    /// `proj` with group sums `xs` and device counts `params` (0: all real); prompts past 16 rows take a prompt GEMM.
     pub fn projSums(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prompt: bool, params: u64) !void {
         const n_out = l.outputs();
         const k = l.inputs();

@@ -27,6 +27,7 @@ pub const nemotron_ops: []const u8 = if (available) &Blob("fatbin_nemotron_ops")
 pub const lane_gemv: []const u8 = if (available) &Blob("fatbin_lane_gemv").bytes else &.{};
 pub const affine4_pack: []const u8 = if (available) &Blob("fatbin_affine4_pack").bytes else &.{};
 pub const affine8: []const u8 = if (available) &Blob("fatbin_affine8").bytes else &.{};
+pub const affine_prefill: []const u8 = if (available) &Blob("fatbin_affine_prefill").bytes else &.{};
 pub const fp8_experts: []const u8 = if (available) &Blob("fatbin_fp8_experts").bytes else &.{};
 pub const exlr8: []const u8 = if (available) &Blob("fatbin_exlr8").bytes else &.{};
 pub const exlr8_dense: []const u8 = if (available) &Blob("fatbin_exlr8_dense").bytes else &.{};

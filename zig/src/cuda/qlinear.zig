@@ -30,8 +30,7 @@ pub const Affine4 = struct {
     }
 };
 
-/// MLX affine codes tiled for affine8.cu's lane_gemv at `bits` a weight (2, 3, 5, 6 or 8), with Affine4's padding,
-/// scales and biases.
+/// MLX affine codes tiled for affine8.cu at `bits` a weight (2, 3, 5, 6 or 8), with Affine4's padding and tables.
 pub const AffineN = struct {
     w: u64,
     s: u64,
@@ -47,8 +46,7 @@ pub const AffineN = struct {
     }
 };
 
-/// The width an MLX code of `bits` is served at: its own (4 on Affine4's tiles; 2, 3, 5, 6 and 8 on AffineN's), but 7
-/// on the 8-bit tiles.
+/// The width an MLX code of `bits` is served at: its own, but 7 on the 8-bit tiles.
 pub fn servedBits(bits: u8) u8 {
     return if (bits == 7) 8 else bits;
 }
@@ -398,9 +396,7 @@ fn widthAt(bits: u8) !usize {
     return std.mem.indexOfScalar(u8, &tile_widths, bits) orelse error.UnsupportedWidth;
 }
 
-/// MLX affine checkpoints of every width but 4 (Affine4Kernels'): codes of 2, 3, 5 and 6 bits on tiles of their own
-/// width, 7 and 8 on 8-bit tiles, all served by lane_gemv's arithmetic; each code keeps its value, so no rounding.
-/// Prompt rows take a GEMM with qmm_prefill's arithmetic over the same tiles.
+/// Every MLX width but 4: codes of 2, 3, 5 and 6 bits on tiles of their width, 7 and 8 on 8-bit tiles, unrounded.
 pub const AffineNKernels = struct {
     gemv_fns: [tile_widths.len]Function,
     split_fns: [tile_widths.len]Function,
@@ -414,14 +410,14 @@ pub const AffineNKernels = struct {
     split: ?Split,
     pdl: bool,
 
-    /// From loaded affine8 and affine4_pack modules; GB10 decodes without the split form, as Affine4Kernels does.
-    pub fn resolve(d: *const Driver, mod: Module, pack_mod: Module, sms: usize, gb10: bool) !AffineNKernels {
+    /// From loaded affine8, affine_prefill and affine4_pack modules; GB10 decodes without the split form.
+    pub fn resolve(d: *const Driver, mod: Module, prefill_mod: Module, pack_mod: Module, sms: usize, gb10: bool) !AffineNKernels {
         var a: AffineNKernels = undefined;
         for (tile_widths, &a.gemv_fns, &a.split_fns, &a.prefill_fns, &a.gemv_blocks) |bits, *g, *sp, *pf, *blocks| {
             var name: [32]u8 = undefined;
             g.* = try mod.function(try std.fmt.bufPrintSentinel(&name, "tf_affine{d}_gemv", .{bits}, 0));
             sp.* = try mod.function(try std.fmt.bufPrintSentinel(&name, "tf_affine{d}_split", .{bits}, 0));
-            pf.* = try mod.function(try std.fmt.bufPrintSentinel(&name, "tf_affine{d}_prefill", .{bits}, 0));
+            pf.* = try prefill_mod.function(try std.fmt.bufPrintSentinel(&name, "tf_affine{d}_prefill", .{bits}, 0));
             try g.allowDynamicShared(gemvSmem(bits));
             try sp.allowDynamicShared(splitSmem(bits));
             try pf.allowDynamicShared(prefillSmem(bits));
@@ -518,8 +514,7 @@ pub const AffineNKernels = struct {
         try launch_.launch(a.gemv_fns[at], cfg, s, &g);
     }
 
-    /// Prompt rows: x (rows, k) bf16 -> out (rows, n) bf16, Affine4Kernels.prompt's blocks and bands over AffineN's
-    /// tiles; a code of up to 4 bits gives the bits the affine-4 prompt GEMM gives it.
+    /// Prompt rows x (rows, k) -> out (rows, n), bf16: Affine4Kernels.prompt's blocks and bands over AffineN's tiles.
     pub fn prompt(a: *const AffineNKernels, s: Stream, x: u64, q: AffineN, out: u64, rows: usize) !void {
         const at = try widthAt(q.bits);
         const rows_t = (rows + 127) / 128;

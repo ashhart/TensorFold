@@ -1,4 +1,4 @@
-//! The checkpoint's weights onto the device as qlinear tiles: 4-bit on affine-4, others AffineN (7 on 8), unchanged.
+//! The checkpoint's weights onto the device: affine projections packed as qlinear tiles of their served width.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -115,7 +115,7 @@ fn tensor(e: *Engine, ck: *core.Checkpoint, comptime fmt: []const u8, args: anyt
     return put(e, try ck.expect(try std.fmt.bufPrint(&buf, fmt, args), dtype, shape_));
 }
 
-/// An MLX affine projection packed into qlinear's tiles from staging; 4-bit takes the affine-4 pack, others AffineN's.
+/// An MLX projection of `bits` codes packed from the staging buffer; 4-bit modules take the affine-4 pack unchanged.
 fn linear(e: *Engine, ck: *core.Checkpoint, prefix: []const u8, name: []const u8, n: usize, k: usize, bits: u8) !Proj {
     var buf: [160]u8 = undefined;
     var raw: [3]u64 = undefined;
@@ -145,7 +145,7 @@ fn linear(e: *Engine, ck: *core.Checkpoint, prefix: []const u8, name: []const u8
     return out;
 }
 
-/// The token embedding's words for the embed kernels: as stored at 4 or 8 bits, else widened through staging.
+/// The embedding's words as the embed kernels read them: as stored at 4 or 8 bits, else widened through staging.
 fn embedWords(e: *Engine, ck: *core.Checkpoint, m: []const u8) !u64 {
     const g = e.g;
     const bits = g.bits.embed;

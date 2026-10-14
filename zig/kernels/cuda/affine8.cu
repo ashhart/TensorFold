@@ -1,49 +1,15 @@
-// Ours: MLX affine codes of 2, 3, 5 and 6 bits on tiles of their width, 7-8 on 8-bit tiles; same MMAs, no rounding.
+// Ours: MLX affine codes on lane_gemv's tiles of their own width (2, 3, 5, 6) or 8 bits, read exactly as bf16.
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
 
+#include "affine_codes.cuh"
 #include "qmm_frag.cuh"
 
 namespace tf_affine8 {
 
 using namespace qmm_frag;
-
-// Code i of an MLX row packed `bits` wide, low code first, in little-endian words (a code may cross a word).
-__device__ __forceinline__ uint32_t code_at(const uint32_t* __restrict__ row, long long i, int bits) {
-    const long long bit = i * bits;
-    const int sh = static_cast<int>(bit & 31);
-    const long long wd = bit >> 5;
-    uint32_t v = row[wd] >> sh;
-    if (sh + bits > 32) v |= row[wd + 1] << (32 - sh);
-    return v & ((1u << bits) - 1u);
-}
-
-// Bytes at s and s + 8 of w as a bf16 pair (the first low): exact, as every byte is a bf16 integer.
-__device__ __forceinline__ uint32_t byte_pair(uint32_t w, int s) {
-    const float a = __uint_as_float(0x4B000000u | ((w >> s) & 0xFFu)) - 8388608.0f;
-    const float b = __uint_as_float(0x4B000000u | ((w >> (s + 8)) & 0xFFu)) - 8388608.0f;
-    const __nv_bfloat162 h = __floats2bfloat162_rn(a, b);
-    return *reinterpret_cast<const uint32_t*>(&h);
-}
-
-// Codes c0 (low half) and c1 (high half) of up to 6 bits as a bf16 pair: 0x4300 | c is 128 + c, minus 128 is c.
-__device__ __forceinline__ uint32_t code_pair(uint32_t r) {
-    r |= 0x43004300u;
-    const __nv_bfloat162 h = __hsub2(*reinterpret_cast<const __nv_bfloat162*>(&r), __floats2bfloat162_rn(128.0f, 128.0f));
-    return *reinterpret_cast<const uint32_t*>(&h);
-}
-
-// Pair i of a lane's group in a BITS-wide tile: low halves hold first codes, high halves second, 16 codes a stream.
-template <int BITS>
-__device__ __forceinline__ uint32_t pair_at(const uint32_t (&w)[BITS], int i) {
-    constexpr uint32_t M = (1u << BITS) - 1u;
-    const int o = i * BITS, h = o >> 4, sh = o & 15;
-    if (sh + BITS <= 16) return code_pair((w[h] >> sh) & (M | M << 16));
-    const uint32_t lo = __byte_perm(w[h], w[h + 1], 0x5410), hi = __byte_perm(w[h], w[h + 1], 0x7632);
-    return code_pair(((lo >> sh) & M) | ((hi >> sh) & M) << 16);
-}
 
 struct Part {
     const uint32_t* w;
@@ -68,7 +34,7 @@ struct Tile {
     static constexpr int SMEM = STAGES * STAGE;
 };
 
-// lane_gemv's gemv_items on 8-bit or narrow tiles; every width runs acc = x_sum * b + (d * s + acc) a group.
+// lane_gemv's gemv_items over 8-bit tiles [tile][group][8][32][GS / 16] or narrow ones [tile][group][4][32][BITS].
 template <int GS, int BN, int STAGES, int BITS, typename Map, typename After>
 __device__ __forceinline__ void items(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs, const Part& P, int M, int K,
                                       int ldx, int count, Map map, float (&acc)[Tile<GS, BN, STAGES, BITS>::NT][4], After after) {
@@ -350,7 +316,7 @@ TF_AFFINE_NARROW(5)
 TF_AFFINE_NARROW(6)
 #undef TF_AFFINE_NARROW
 
-// MLX words of 2, 3, 5 or 6 bits -> narrow tiles [npad/64][kg][4][32][bits], word v bits 16v..16v+15 of two streams.
+// MLX words of 2, 3, 5 or 6 bits -> narrow tiles: a lane's pairs' first codes in low halves, second in high.
 extern "C" __global__ void tf_affinen_pack(const uint32_t* __restrict__ w, int bits, int n, int kw, int kg, uint32_t* __restrict__ out,
                                            long long total) {
     const long long idx = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -397,7 +363,7 @@ extern "C" __global__ void tf_affine8_pack4(const uint32_t* __restrict__ w, int 
     out[idx] = word;
 }
 
-// MLX words of 5 to 8 bits -> 8-bit tiles [npad/64][kg][8][32][4], word kt holding inputs k0+2c, +1, +8, +9.
+// MLX words of 5 to 8 bits -> 8-bit tiles [npad/64][kg][8][32][4]: word kt holds inputs k0 + 2c + {0, 1, 8, 9}.
 extern "C" __global__ void tf_affine8_pack8(const uint32_t* __restrict__ w, int bits, int n, int kw, int kg, uint32_t* __restrict__ out,
                                            long long total) {
     const long long idx = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -431,169 +397,3 @@ extern "C" __global__ void tf_affine8_widen(const uint32_t* __restrict__ w, int 
     for (int c = 0; c < per; ++c) word |= tf_affine8::code_at(src, at * per + c, bits) << (c * wide);
     out[idx] = word;
 }
-
-namespace tf_affine8 {
-
-// qmm_prefill.cu's prompt GEMM over AffineN's tiles: a 128 by 128 block on 2 by 4 warps, three stages, each weight
-// rounded once to bf16 (fma2: s * q + b) and one fp32 chain over K. Its operands are the affine-4 prompt GEMM's for
-// any code, so a code of up to 4 bits gives the same bits here as there.
-template <int BITS>
-struct Prefill {
-    static constexpr int GS = 64, BM = 128, BN = 128, WM = 2, WN = 4, STAGES = 3;
-    static constexpr int THREADS = WM * WN * 32;
-    static constexpr int MT = BM / WM / 16;
-    static constexpr int NT = BN / WN / 8;
-    static constexpr int ROW = GS * 2;
-    static constexpr int CHUNKS = ROW / 16;
-    static constexpr int X = BM * ROW;
-    static constexpr int TILE_BYTES = 64 * GS * BITS / 8;  // one stored 64-column tile's group block
-    static constexpr int W = BN / 64 * TILE_BYTES;
-    static constexpr int S = BN * 2;
-    static constexpr int STAGE = X + W + 2 * S;
-    static constexpr int SMEM = STAGES * STAGE;
-};
-
-__device__ __forceinline__ uint32_t fma2(uint32_t a, uint32_t b, uint32_t c) {
-    uint32_t d;
-    asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(d) : "r"(a), "r"(b), "r"(c));
-    return d;
-}
-
-template <int BITS>
-__device__ __forceinline__ void prefill(const __nv_bfloat16* __restrict__ x, const uint32_t* __restrict__ w,
-                                        const __nv_bfloat16* __restrict__ scales, const __nv_bfloat16* __restrict__ biases,
-                                        __nv_bfloat16* __restrict__ out, int M, int N, int K, int npad, int ldx, int group) {
-    using T = Prefill<BITS>;
-    constexpr int GS = T::GS, BN = T::BN, BM = T::BM, WN = T::WN, WM = T::WM, NT = T::NT, MT = T::MT, STAGES = T::STAGES;
-    extern __shared__ __align__(128) unsigned char buf[];
-    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
-    const int wm = warp / WN, wn = warp % WN;
-    const int KG = K / GS;
-    const int2 at = tile_of(blockIdx.x, M, N, BM, BN, group);
-    const int m0 = at.x, n0 = at.y;
-
-    auto stage = [&](int s) { return buf + s * T::STAGE; };
-    auto load = [&](int s, int g) {
-        unsigned char* p = stage(s);
-        for (int c = tid; c < BM * T::CHUNKS; c += T::THREADS) {
-            const int r = c / T::CHUNKS, ch = c % T::CHUNKS;
-            const int row = min(m0 + r, M - 1);
-            cp16z(p + r * T::ROW + swz<T::CHUNKS>(r, ch) * 16, x + static_cast<size_t>(row) * ldx + g * GS + ch * 8, m0 + r < M);
-        }
-        unsigned char* pw = p + T::X;
-        for (int c = tid; c < T::W / 16; c += T::THREADS) {
-            const int t = c / (T::TILE_BYTES / 16), off = c % (T::TILE_BYTES / 16);
-            const size_t tile = static_cast<size_t>(n0 / 64 + t) * KG + g;
-            if (n0 + t * 64 < npad) cp16(pw + c * 16, reinterpret_cast<const unsigned char*>(w) + tile * T::TILE_BYTES + off * 16);
-        }
-        unsigned char* ps = pw + T::W;
-        for (int c = tid; c < 2 * (T::S / 16); c += T::THREADS) {
-            const int which = c / (T::S / 16), off = c % (T::S / 16);
-            const __nv_bfloat16* src = (which ? biases : scales) + static_cast<size_t>(g) * npad + n0 + off * 8;
-            if (n0 + off * 8 < npad) cp16(ps + which * T::S + off * 16, src);
-        }
-    };
-
-    float acc[MT][NT][4];
-#pragma unroll
-    for (int i = 0; i < MT; ++i)
-#pragma unroll
-        for (int j = 0; j < NT; ++j)
-#pragma unroll
-            for (int e = 0; e < 4; ++e) acc[i][j][e] = 0.0f;
-#pragma unroll
-    for (int s = 0; s < STAGES - 1; ++s) {
-        if (s < KG) load(s, s);
-        commit();
-    }
-    // this warp's n8 tiles are 4 wn to 4 wn + 3 of the block: stored tile wn / 2, its n8 tiles (wn % 2) * 4 + j
-    const int t64 = wn / 2, sub = (wn % 2) * 4;
-    for (int it = 0; it < KG; ++it) {
-        wait<STAGES - 2>();
-        __syncthreads();
-        const int next = it + STAGES - 1;
-        if (next < KG) load(next % STAGES, next);
-        commit();
-        const unsigned char* p = stage(it % STAGES);
-        const uint32_t* pw = reinterpret_cast<const uint32_t*>(p + T::X) + t64 * (T::TILE_BYTES / 4);
-        const uint16_t* ps = reinterpret_cast<const uint16_t*>(p + T::X + T::W);
-        constexpr int SETS = BITS == 8 ? NT : 2;  // a lane's word sets: one an n8 tile (8-bit), one a decode warp's pair
-        constexpr int LW = BITS == 8 ? GS / 16 : BITS;
-        uint32_t lw[SETS][LW], sv[NT], bv[NT];
-#pragma unroll
-        for (int q = 0; q < SETS; ++q)
-#pragma unroll
-            for (int v = 0; v < LW; ++v) lw[q][v] = pw[(((BITS == 8 ? sub : sub / 2) + q) * 32 + lane) * LW + v];
-#pragma unroll
-        for (int j = 0; j < NT; ++j) {
-            const int col = wn * (BN / WN) + j * 8 + (lane >> 2);
-            sv[j] = ps[col] * 0x10001u;
-            bv[j] = ps[BN + col] * 0x10001u;
-        }
-#pragma unroll
-        for (int kt = 0; kt < GS / 16; ++kt) {
-            uint32_t a[MT][4];
-#pragma unroll
-            for (int i = 0; i < MT; ++i) {
-                const int r = wm * (BM / WM) + i * 16 + (lane & 7) + ((lane >> 3) & 1) * 8;
-                const int ch = kt * 2 + (lane >> 4);
-                ldmatrix4(a[i], p + r * T::ROW + swz<T::CHUNKS>(r, ch) * 16);
-            }
-#pragma unroll
-            for (int j = 0; j < NT; ++j) {
-                uint32_t q0, q1;
-                if constexpr (BITS == 8) {
-                    q0 = byte_pair(lw[j][kt], 0);
-                    q1 = byte_pair(lw[j][kt], 16);
-                } else {
-                    q0 = pair_at<BITS>(lw[j / 2], ((j % 2) * 4 + kt) * 2);
-                    q1 = pair_at<BITS>(lw[j / 2], ((j % 2) * 4 + kt) * 2 + 1);
-                }
-                const uint32_t b0 = fma2(q0, sv[j], bv[j]);
-                const uint32_t b1 = fma2(q1, sv[j], bv[j]);
-#pragma unroll
-                for (int i = 0; i < MT; ++i) mma(acc[i][j], a[i], b0, b1);
-            }
-        }
-    }
-    wait<0>();
-    __syncthreads();
-#pragma unroll
-    for (int i = 0; i < MT; ++i)
-#pragma unroll
-        for (int j = 0; j < NT; ++j) {
-            const int col = n0 + wn * (BN / WN) + j * 8 + (lane & 3) * 2;
-#pragma unroll
-            for (int h = 0; h < 2; ++h) {
-                const int row = m0 + wm * (BM / WM) + i * 16 + (lane >> 2) + h * 8;
-                if (row >= M) continue;
-                const float v0 = acc[i][j][2 * h], v1 = acc[i][j][2 * h + 1];
-                __nv_bfloat16* dst = out + static_cast<size_t>(row) * N + col;
-                if (col + 1 < N && (N & 1) == 0) {
-                    *reinterpret_cast<__nv_bfloat162*>(dst) = __floats2bfloat162_rn(v0, v1);
-                } else {
-                    if (col < N) dst[0] = __float2bfloat16_rn(v0);
-                    if (col + 1 < N) dst[1] = __float2bfloat16_rn(v1);
-                }
-            }
-        }
-}
-
-}  // namespace tf_affine8
-
-// The prompt GEMM a width: shared bytes 50688 + 3072 * BITS.
-#define TF_AFFINE_PREFILL(B)                                                                                                    \
-    static_assert(tf_affine8::Prefill<B>::SMEM == 50688 + 3072 * B, "prefill smem");                                           \
-    extern "C" __global__ void __launch_bounds__(256)                                                                           \
-        tf_affine##B##_prefill(const __nv_bfloat16* __restrict__ x, const uint32_t* __restrict__ w,                             \
-                               const __nv_bfloat16* __restrict__ scales, const __nv_bfloat16* __restrict__ biases,              \
-                               __nv_bfloat16* __restrict__ out, int M, int N, int K, int npad, int ldx, int group) {            \
-        tf_affine8::prefill<B>(x, w, scales, biases, out, M, N, K, npad, ldx, group);                                           \
-    }
-
-TF_AFFINE_PREFILL(2)
-TF_AFFINE_PREFILL(3)
-TF_AFFINE_PREFILL(5)
-TF_AFFINE_PREFILL(6)
-TF_AFFINE_PREFILL(8)
-#undef TF_AFFINE_PREFILL

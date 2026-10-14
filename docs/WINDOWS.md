@@ -78,7 +78,7 @@ loads and runs exactly as before.
 - `TensorFold/Qwen3.8-27B-oQ2` (mostly 2-bit, 136 modules at 5 bits) takes 10.3 GiB, so the 27B fits a 16 GB card:
   one stream at a 32k window, about 45 to 64 tokens/s with drafts. The card itself calls oQ2 an aggressive
   low-bit release, and its replies show it.
-- Prompt chunks take a GEMM over the same tiles with the 4-bit prompt GEMM's arithmetic (each weight rounded once to
+- Prompt chunks take a GEMM over the same tiles (`affine_prefill.cu`) with the 4-bit prompt GEMM's arithmetic (each weight rounded once to
   bf16, one fp32 chain over K), so a code of up to 4 bits gives the bits the 4-bit prompt GEMM gives it. On the
   9B 8-bit it lifts prompts from about 1,500 to 1,900 tokens/s; the 27B oQ2's prompts (about 770 tokens/s) were
   already bound by the card's bf16 tensor rate with fp32 accumulation, not by weight reads.

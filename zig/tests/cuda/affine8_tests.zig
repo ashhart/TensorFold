@@ -1,8 +1,4 @@
-//! MLX affine checkpoints of every width on qlinear's tiles: 4-bit codes on the affine-4 tiles, 2, 3, 5 and 6-bit codes
-//! on affine8.cu's tiles of their own width, 8-bit codes on its byte tiles. A narrow width's products equal, bit for
-//! bit, those of its codes widened on the host onto the 8-bit tiles (so no code changes and the arithmetic is one);
-//! products sit within their float64 bound, and a row's bits are the same at every row count and on both paths.
-//! The prompt GEMM gives codes of up to 4 bits the affine-4 prompt GEMM's bits, wider codes their 8-bit tiles' bits.
+//! Every MLX width on qlinear's tiles: narrow products equal the 8-bit tiles', within float64, rows byte-equal.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -53,8 +49,7 @@ fn mlxWords(r: *Rig, m: Matrix, bits: u8) ![]u32 {
     return out;
 }
 
-/// y = x (s q + b)^T in float64, and its bound: a bf16 ulp of |y| and 2^-12 of sum |x| (|s q| + |b|), or 2^-8 of
-/// it for the prompt GEMM, which rounds each weight to bf16 first.
+/// y = x (s q + b)^T in float64 with its bound, and a looser one for the prompt GEMM's bf16-rounded weights.
 fn reference(r: *Rig, x: []const u16, rows: usize, m: Matrix) !struct { want: []f64, tol: []f64, loose: []f64 } {
     const want = try r.a.alloc(f64, rows * m.n);
     const tol = try r.a.alloc(f64, rows * m.n);
@@ -171,8 +166,7 @@ fn width(r: *Rig, k_: Kernels, n: usize, k: usize, bits: u8) !void {
     };
 }
 
-/// The prompt GEMM over a block and a part (144 rows) of one width's tiles: against float64, and bit for bit against
-/// the affine-4 prompt GEMM of the same codes (up to 4 bits) or the prompt GEMM of their 8-bit tiles (5 and 6).
+/// The prompt GEMM over 144 rows: against float64, and bit for bit against the 4-bit or 8-bit tiles' GEMM.
 fn prompt(r: *Rig, k_: Kernels, m: Matrix, own: u64, t_own: u64, t_wide: u64, ts: u64, tb: u64) !void {
     var name: [128]u8 = undefined;
     const n = m.n;
@@ -216,7 +210,7 @@ pub fn run(gpu: Gpu) !void {
         r.bufs.deinit(gpu.gpa);
     }
     const kk = cuda.kernels;
-    const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, kk.affine8 };
+    const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, kk.affine8, kk.affine_prefill };
     var mods: [images.len]cuda.Module = undefined;
     var loaded: usize = 0;
     defer for (mods[0..loaded]) |*md| md.unload();
@@ -227,7 +221,7 @@ pub fn run(gpu: Gpu) !void {
     const sms: usize = @intCast(try gpu.ctx.attribute(.multiprocessor_count));
     var a4 = try qlinear.Affine4Kernels.resolve(gpu.d, mods[0], mods[1], mods[2], mods[3], sms, false);
     defer a4.deinit();
-    var an = try qlinear.AffineNKernels.resolve(gpu.d, mods[4], mods[3], sms, false);
+    var an = try qlinear.AffineNKernels.resolve(gpu.d, mods[4], mods[5], mods[3], sms, false);
     defer an.deinit();
     const k_: Kernels = .{ .a4 = &a4, .an = &an };
     // shapes: one K slice and several (split-K), rows short of a tile, a 64-row tile past the 128 padding
