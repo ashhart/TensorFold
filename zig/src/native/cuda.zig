@@ -329,11 +329,19 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         };
         switch (e) {
             error.ModeloptNeedsSm90 => {
-                problem.* = try std.fmt.allocPrint(a, "{s} is sm_{d}: {s} (the 4-bit checkpoints run on it)", .{ name, capability, nemotron.kernels.modeloptRefusal(capability).? });
+                problem.* = try std.fmt.allocPrint(
+                    a,
+                    "{s} is sm_{d}: {s} (the 4-bit checkpoints run on it)",
+                    .{ name, capability, nemotron.kernels.modeloptRefusal(capability).? },
+                );
                 return null;
             },
             else => {
-                problem.* = try std.fmt.allocPrint(a, "the native CUDA engine cannot load {s} with {s} glue kernels ({s})", .{ o.dir, kernels orelse "its own", @errorName(e) });
+                problem.* = try std.fmt.allocPrint(
+                    a,
+                    "the native CUDA engine cannot load {s} with {s} glue kernels ({s})",
+                    .{ o.dir, kernels orelse "its own", @errorName(e) },
+                );
                 return null;
             },
         }

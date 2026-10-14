@@ -58,7 +58,8 @@ pub fn run(gpu: Gpu) !void {
     try packers(gpu, rng, &pack, stream);
     const capability = try gpu.ctx.capability();
     if (capability / 10 < 9) {
-        std.debug.print("SKIP modelopt rows: the decode lane matmul sums its split-K slices in a cluster, and a ModelOpt checkpoint refuses below sm_90 anyway\n", .{});
+        std.debug.print("SKIP modelopt rows: the decode lane matmul sums its split-K slices in a cluster, " ++
+            "and a ModelOpt checkpoint refuses below sm_90 anyway\n", .{});
         return;
     }
     var lane = try qmmf.Lane.load(gpu.d, capability / 10);

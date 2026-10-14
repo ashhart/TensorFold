@@ -155,7 +155,8 @@ pub const modelopt_min: u32 = 90;
 /// Why a ModelOpt checkpoint cannot load at `capability` (10 * major + minor), or null when it may.
 pub fn modeloptRefusal(capability: u32) ?[]const u8 {
     if (capability >= modelopt_min) return null;
-    return "FP8 and NVFP4 weights meet their split-K sums in a thread-block cluster: a ModelOpt checkpoint needs compute capability 9.0 or newer";
+    return "FP8 and NVFP4 weights meet their split-K sums in a thread-block cluster: " ++
+        "a ModelOpt checkpoint needs compute capability 9.0 or newer";
 }
 
 /// qmm.split_k (cuda/qlinear.zig).
