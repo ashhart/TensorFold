@@ -4,14 +4,34 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+permissions:
+  contents: read
+
 jobs:
   zig:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
       # zig build test is the host unit tests. No GPU. The Python suite is not this check.
       - name: zig build test
         run: zig build test
+      # The frozen server goldens: request parsing, rendering and streaming against recorded answers.
+      - name: zig build test-golden
+        run: zig build test-golden
+      # The lean rule (600-line files, one-line comments within 120 columns): no problem the base branch lacks.
+      - name: lean check
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          base=$(git merge-base HEAD "origin/$BASE_REF")
+          git worktree add --detach ../lean-base "$base"
+          cp tools/zig/lean_check.py ../lean-base/tools/zig/lean_check.py
+          (cd ../lean-base && python3 tools/zig/lean_check.py > ../lean-base.txt || true)
+          python3 tools/zig/lean_check.py > ../lean-head.txt || true
+          python3 tools/zig/lean_new.py ../lean-base.txt ../lean-head.txt

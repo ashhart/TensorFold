@@ -11,6 +11,7 @@ const grammar_build = @import("zig/build/grammar.zig");
 const counters_build = @import("zig/build/metal_counters.zig");
 const exl3_build = @import("zig/build/exl3.zig");
 const exlr8_build = @import("zig/build/exlr8.zig");
+const golden_build = @import("zig/build/golden.zig");
 
 comptime {
     const required = std.mem.trim(u8, @embedFile(".zig-version"), "\r\n");
@@ -157,7 +158,7 @@ pub fn build(b: *std.Build) void {
     }
     const xgrammar = grammar_build.option(b);
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
-    cuda_build.hostTests(b, draft_ids, build_options, test_step);
+    cuda_build.hostTests(b, draft_ids, build_options, test_step, target.result.os.tag != .macos);
     if (target.result.os.tag == .linux) {
         // the engine seam's tests (lane_host.zig and its siblings), which the macOS branch runs from its own api module
         const lanes_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
@@ -229,25 +230,7 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     // the engine seam's own tests (lane_host.zig), as zig/tests/server/zig_test.sh runs them
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api })).step);
     // the frozen server parity goldens, checked by Zig driving fake_serve
-    const fake_serve = b.addExecutable(.{ .name = "fake_serve", .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/server/fake_serve.zig"),
-        .target = target,
-        .optimize = .Debug,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "server", .module = server_tests }, .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } },
-    }) });
-    const golden_check = b.addExecutable(.{ .name = "golden_check", .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/server/golden_check.zig"),
-        .target = target,
-        .optimize = .Debug,
-    }) });
-    const golden_run = b.addRunArtifact(golden_check);
-    golden_run.addArtifactArg(fake_serve);
-    golden_run.addFileArg(b.path("zig/tests/server/golden/cases.json"));
-    golden_run.addDirectoryArg(b.path("zig/tests/server/golden"));
-    golden_run.addDirectoryArg(b.path("zig/tests/server/fixtures"));
-    golden_run.setCwd(b.path("."));
-    b.step("test-golden", "The frozen server parity goldens checked by a Zig step driving fake_serve").dependOn(&golden_run.step);
+    golden_build.step(b, target, server_tests, api, tokenizer, template);
     b.step("test-native", "The Metal engines module's host-side tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines })).step);
     const reuse = b.addExecutable(.{ .name = "tf-flashnext-reuse", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/flashnext_reuse.zig"),
