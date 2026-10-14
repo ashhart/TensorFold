@@ -513,6 +513,7 @@ pub fn batch(gpu: Gpu, args: []const [:0]const u8) !void {
         fwd.freeSeq(e, one[0].s);
     }
     std.debug.print("rank {d}: glm-batch passed\n", .{rank});
+    std.process.exit(0); // a test binary: no teardown (NCCL's service threads under the library's unload hang it)
 }
 
 // -- glm-tf -------------------------------------------------------------------------------------------------------------
@@ -570,6 +571,7 @@ pub fn teacher(gpu: Gpu, args: []const [:0]const u8) !void {
         j += w;
     }
     std.debug.print("rank {d}: teacher-forced on {d} prompt tokens: the top token equals Python's next token at {d} of {d} positions\n", .{ rank, prompt.len, hits, serial.len });
+    std.process.exit(0); // as glm-batch
 }
 
 // -- glm-prof -----------------------------------------------------------------------------------------------------------
@@ -706,4 +708,5 @@ pub fn prof(gpu: Gpu, args: []const [:0]const u8) !void {
             for (rows.items[0..@min(rows.items.len, 22)]) |x| std.debug.print("  {d:7.3} ms {d:5.1}%  {s}\n", .{ x.ms, 100 * x.ms / total, x.name[0..@min(x.name.len, 90)] });
         }
     }
+    std.process.exit(0); // as glm-batch
 }
