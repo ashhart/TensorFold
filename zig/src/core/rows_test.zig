@@ -342,3 +342,25 @@ test "states past the ring's window keep its last rows in blocks of their own, r
     try std.testing.expect(f.restored_ok);
     try std.testing.expectEqual(fresh(p), got.sum);
 }
+
+test "TF_IMPRINT_VERIFY's read-back finds every written state byte-equal to the kept state it came from" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf: [128]u8 = undefined;
+    const dir = root(&buf, "verify");
+    defer rmTree(dir);
+    var f: Fake = .{ .gpa = gpa };
+    const r = try rows.Rows.open(gpa, f.snapshots(), options(dir));
+    defer r.deinit();
+    var s = pc.Store.init(gpa, f.snapshots(), rules, 1 << 30);
+    defer s.deinit();
+    s.disk = r;
+    r.verify = true;
+    for ([_]u32{ 700, 1300 }) |h| _ = try request(a, &s, &f, try prompt(a, 300, 2, h + 5), h);
+    drain(r);
+    try std.testing.expect(r.states.items.len >= 2);
+    try std.testing.expectEqual(@as(u64, r.states.items.len), r.counts.verified);
+    try std.testing.expectEqual(@as(u64, 0), r.counts.differed);
+}

@@ -223,6 +223,7 @@ fn unit(r: *Rows, j: *Job) !void {
     const ms = @as(f64, @floatFromInt(nowNs() - j.began)) / 1e6;
     if (!@import("builtin").is_test) std.log.info("imprint: {d} tokens on disk: {d} new blocks and its own {d} MiB ({d} MiB this state, {d} MiB of rows it shares) in {d:.0} ms", .{ e.at, j.blocks, bytes >> 20, j.bytes >> 20, s.rows >> 20, ms });
     finishJob(r, j, true);
+    if (r.verify) @import("rows_verify.zig").state(r, r.states.items.len - 1, e.saved);
 }
 
 /// The job under way given up (its entry left RAM, or the store closes): its file in progress goes.

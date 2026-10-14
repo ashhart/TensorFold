@@ -47,7 +47,7 @@ pub const State = struct {
 /// A block file's bytes, and how many states name it.
 pub const Block = struct { bytes: u64, refs: u32 = 0 };
 
-pub const Counts = struct { written: u64 = 0, read: u64 = 0, reads: u64 = 0, writes: u64 = 0, skipped: u64 = 0, failed: u64 = 0, evicted: u64 = 0 };
+pub const Counts = struct { written: u64 = 0, read: u64 = 0, reads: u64 = 0, writes: u64 = 0, skipped: u64 = 0, failed: u64 = 0, evicted: u64 = 0, verified: u64 = 0, differed: u64 = 0 };
 
 pub const Options = struct {
     root: []const u8,
@@ -79,6 +79,7 @@ pub const Rows = struct {
     prefill_rate: f64 = 0, // the family's prompt tokens a second (0: none measured yet)
     counts: Counts = .{},
     turn: u64 = 0, // bytes written since the last report line
+    verify: bool = false, // TF_IMPRINT_VERIFY=1: each state written is read back and compared with the RAM state
 
     /// The store under `o.root` for `o.identity` (made 0700 when missing); its files are read, unreferenced blocks go.
     pub fn open(gpa: Allocator, family: pc.Snapshots, o: Options) !*Rows {
@@ -98,6 +99,7 @@ pub const Rows = struct {
         try r.scan();
         r.settle();
         r.stamp();
+        r.verify = if (std.c.getenv("TF_IMPRINT_VERIFY")) |v| v[0] == '1' else false;
         return r;
     }
 
