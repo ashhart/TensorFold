@@ -10,12 +10,12 @@ constexpr int kSelectThreads = 1024;
 constexpr int kSelectWaves = kSelectThreads / 32;
 
 // Block b: the mean of its ratio raw keys, RMS-normed with scale and rotated at its first position, as tf_qk_rope.
-// With `pos`, launch x is a row: the block it completes (if any) goes to slot b of `pooled`; else block first + x to x.
 extern "C" __global__ void __launch_bounds__(kFnThreads)
 tf_fn_idx_pool(const void* raw, void* pooled, const float* scale, int kind, int first, const int* pos, int dims,
                int ratio, int rotary, float theta, float eps) {
     __shared__ float scratch[kFnWaves];
     __shared__ float normed[kFnThreads];
+    // With `pos`, launch x is a row whose completed block (if any) fills slot b; else block first + x fills slot x.
     const int end = pos ? pos[blockIdx.x] + 1 : 0;
     if (pos && end % ratio != 0) return;
     const int b = pos ? end / ratio - 1 : first + blockIdx.x, d = threadIdx.x;
