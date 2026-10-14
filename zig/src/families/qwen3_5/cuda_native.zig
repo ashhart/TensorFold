@@ -319,13 +319,15 @@ const Lanes = struct {
         try self.e.setTaps(taps);
     }
 
-    /// Rows [start, start + count) of a stream's tap ring at slot position % tap_rows; a request may span its end.
+    /// Rows [start, start + count) of a stream's tap ring (slot position % tap_rows), the newest tap_rows rows kept.
     fn featuresFn(ptr: *anyopaque, stream: *lanes.Stream, taps: []const u32, start: u64, count: u32) !be.Features {
         const self = cast(ptr);
         if (taps.len != self.e.n_taps) return error.TapsMismatch;
         const cache = try self.cacheOf(stream);
         const ring = cache.tap orelse return error.NoTaps;
-        if (start + count > cache.written or count > E.tap_rows) return error.RowsNotHeld;
+        // a long prompt asks for more rows than the ring keeps; the drafter reads only its window of the newest
+        const held_from = cache.written -| E.tap_rows;
+        if (start + count > cache.written or start + count <= held_from) return error.RowsNotHeld;
         return .{ .buffer = ring.ptr, .offset = start, .rows = count, .row_bytes = @intCast(self.e.n_taps * self.e.g.hidden * 2), .space = .device, .dtype = .bf16 };
     }
 
