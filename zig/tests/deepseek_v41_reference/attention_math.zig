@@ -135,8 +135,7 @@ pub const State = struct {
             try projection.applyF32(compressor.wkv, x, &self.partial_kv[owner][slot], scratch);
             try projection.applyF32(compressor.wgate.?, x, &self.partial_gate[owner][slot], scratch);
             if ((position + 1) % ratio != 0) return false;
-            poolOf(f32, .{ &self.partial_kv[owner][0], &self.partial_kv[owner][1] },
-                .{ &self.partial_gate[owner][0], &self.partial_gate[owner][1] }, &self.latent);
+            poolOf(f32, .{ &self.partial_kv[owner][0], &self.partial_kv[owner][1] }, .{ &self.partial_gate[owner][0], &self.partial_gate[owner][1] }, &self.latent);
         }
         m.rms(&self.latent, compressor.norm, c.rms_norm_eps, &self.latent);
         const indexer = a.indexer.?;
@@ -373,7 +372,13 @@ pub fn sparseHeadOf(comptime T: type, q: []const u16, keys: KeyTable, indices: [
 /// The same head, with `pre` optionally capturing acc/denominator before the output rounding: the
 /// same values in FP32 versus FP64 then differ only by the stage's arithmetic, so their ULP distance
 /// is the stage's true rounding level instead of the BF16 output quantum that hides it.
-pub fn sparseHeadPre(comptime T: type, q: []const u16, keys: KeyTable, indices: []const i32, sink: f32, out: []u16,
+pub fn sparseHeadPre(
+    comptime T: type,
+    q: []const u16,
+    keys: KeyTable,
+    indices: []const i32,
+    sink: f32,
+    out: []u16,
     pre: ?[]T,
 ) void {
     @setFloatMode(.strict);

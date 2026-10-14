@@ -146,9 +146,7 @@ fn view(buffer: mtl.Buffer) View {
 /// One compressor-pool group: the two projected positions of a ratio-2 group, pooled then RMS-normed.
 /// `values[i][d]`/`gates[i][d]` are the FP32 outputs of the compressor's wkv/wgate projections; the
 /// kernel and both references read exactly these numbers.
-fn poolCase(device: mtl.Device, queue: mtl.Queue, p: *const kv.Pipelines,
-    case_name: []const u8, values: []const f32, gates: []const f32, weight: []const u16) !void
-{
+fn poolCase(device: mtl.Device, queue: mtl.Queue, p: *const kv.Pipelines, case_name: []const u8, values: []const f32, gates: []const f32, weight: []const u16) !void {
     var b = Buffers{ .device = device };
     defer b.deinit();
     const values_gpu = try b.get(f32, 2 * width);
@@ -161,8 +159,7 @@ fn poolCase(device: mtl.Device, queue: mtl.Queue, p: *const kv.Pipelines,
     @memcpy(weight_gpu.slice(u16, width), weight);
     const cb = queue.commandBuffer();
     const enc = cb.compute(.serial);
-    try p.encodePool(enc, view(values_gpu), view(gates_gpu), view(partial_gpu), view(weight_gpu), view(latent_gpu),
-        .{ .rows = 2, .width = @intCast(width), .ratio = @intCast(ratio), .position = 2, .stride = @intCast(width), .input_f32 = 1, .eps = eps });
+    try p.encodePool(enc, view(values_gpu), view(gates_gpu), view(partial_gpu), view(weight_gpu), view(latent_gpu), .{ .rows = 2, .width = @intCast(width), .ratio = @intCast(ratio), .position = 2, .stride = @intCast(width), .input_f32 = 1, .eps = eps });
     enc.end();
     cb.commit();
     cb.wait();
@@ -174,8 +171,7 @@ fn poolCase(device: mtl.Device, queue: mtl.Queue, p: *const kv.Pipelines,
     var ref64: [width]u16 = undefined;
     var pooled32: [width]u16 = undefined;
     var pooled64: [width]u16 = undefined;
-    attention_math.poolOf(f32, .{ values[0..width], values[width .. 2 * width] },
-        .{ gates[0..width], gates[width .. 2 * width] }, &pooled32);
+    attention_math.poolOf(f32, .{ values[0..width], values[width .. 2 * width] }, .{ gates[0..width], gates[width .. 2 * width] }, &pooled32);
     var wide_values: [2][width]f64 = undefined;
     var wide_gates: [2][width]f64 = undefined;
     for (0..2) |slot| wide_values[slot] = widen(values[slot * width ..][0..width]);
@@ -363,15 +359,14 @@ fn e4Scale(x: f32) u8 {
 
 fn e2Code(x: f32) u8 {
     const a = @min(@abs(x), 6.0);
-    const pick: u8 = if (a <= 0.25) 0 else if (a < 0.75) 1 else if (a <= 1.25) 2 else if (a < 1.75) 3
-        else if (a <= 2.5) 4 else if (a < 3.5) 5 else if (a <= 5.0) 6 else 7;
+    const pick: u8 = if (a <= 0.25) 0 else if (a < 0.75) 1 else if (a <= 1.25) 2 else if (a < 1.75) 3 else if (a <= 2.5) 4 else if (a < 3.5) 5 else if (a <= 5.0) 6 else 7;
     return pick | @as(u8, if (std.math.signbit(x)) 8 else 0);
 }
 
 /// Pack a window row exactly as dsv41_pack kind 0 would: per 32-column block, a power-of-two FP8
 /// scale and FP8 codes. The decoded cells are what both the kernel and the references will read.
 fn packWindowRow(values: []const f32, out: []u8) void {
-    @memset(out[0..width + width / 32], 0);
+    @memset(out[0 .. width + width / 32], 0);
     for (0..width / 32) |block| {
         var a: f32 = 1e-4;
         for (values[block * 32 ..][0..32]) |v| a = @max(a, @abs(v));
@@ -431,9 +426,16 @@ fn columnKey(spec: SparseSpec, row: usize, slot: usize, indices: []const i32) ?K
 
 const KeySource = struct { compressed: bool = false, row: usize };
 
-fn sparseCase(device: mtl.Device, queue: mtl.Queue, p: *const csa2.Pipelines, spec: SparseSpec,
-    q: []const u16, window_rows: []const []const f32, compressed_rows: []const []const f32,
-    indices: []const i32, sinks: []const f32,
+fn sparseCase(
+    device: mtl.Device,
+    queue: mtl.Queue,
+    p: *const csa2.Pipelines,
+    spec: SparseSpec,
+    q: []const u16,
+    window_rows: []const []const f32,
+    compressed_rows: []const []const f32,
+    indices: []const i32,
+    sinks: []const f32,
 ) !void {
     var b = Buffers{ .device = device };
     defer b.deinit();
@@ -483,8 +485,7 @@ fn sparseCase(device: mtl.Device, queue: mtl.Queue, p: *const csa2.Pipelines, sp
 
     const cb = queue.commandBuffer();
     const enc = cb.compute(.serial);
-    try p.encode(enc, view(q_gpu), view(ring_gpu), view(chunk_gpu), view(main_gpu), view(positions_gpu),
-        view(sink_gpu), view(out_gpu), .{
+    try p.encode(enc, view(q_gpu), view(ring_gpu), view(chunk_gpu), view(main_gpu), view(positions_gpu), view(sink_gpu), view(out_gpu), .{
         .rows = @intCast(spec.rows),
         .heads = @intCast(spec.heads),
         .q_stride = @intCast(q_stride),
@@ -524,10 +525,8 @@ fn sparseCase(device: mtl.Device, queue: mtl.Queue, p: *const csa2.Pipelines, sp
             const head_q = q[row * q_stride + head * width ..][0..width];
             var pre32: [width]f32 = undefined;
             var pre64: [width]f64 = undefined;
-            attention_math.sparseHeadPre(f32, head_q, keys, column_indices[0..count], sinks[head], wide32[0..width],
-                &pre32);
-            attention_math.sparseHeadPre(f64, head_q, keys, column_indices[0..count], sinks[head], wide64[0..width],
-                &pre64);
+            attention_math.sparseHeadPre(f32, head_q, keys, column_indices[0..count], sinks[head], wide32[0..width], &pre32);
+            attention_math.sparseHeadPre(f64, head_q, keys, column_indices[0..count], sinks[head], wide64[0..width], &pre64);
             var ideal: [width]f64 = undefined;
             for (wide64, 0..) |cell, d| ideal[d] = math.f(cell);
             var energy: f64 = 0;
@@ -552,28 +551,45 @@ fn sparseCase(device: mtl.Device, queue: mtl.Queue, p: *const csa2.Pipelines, sp
             // identical decoded rows. Anything nonzero here is the kernel, not the contract.
             var contract_cells: [width]f64 = undefined;
             for (wide32, 0..) |cell, d| contract_cells[d] = math.f(cell);
-            printBf(spec.name, stage, "metal_vs_f32_reference", deltaBf16(
-                metal[row * q_stride + head * width ..][0..width], &contract_cells));
+            printBf(spec.name, stage, "metal_vs_f32_reference", deltaBf16(metal[row * q_stride + head * width ..][0..width], &contract_cells));
         }
     }
 }
 
 const KeyPattern = enum { random, cancelling, near_tie, one_sided };
 
-fn sparseCaseFrom(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, p: *const csa2.Pipelines,
-    spec: SparseSpec, rng: *Lcg, key_amplitude: f32, scale_exponent: i32, indices_mode: usize,
-    sink: f32, pattern: KeyPattern,
+fn sparseCaseFrom(
+    gpa: std.mem.Allocator,
+    device: mtl.Device,
+    queue: mtl.Queue,
+    p: *const csa2.Pipelines,
+    spec: SparseSpec,
+    rng: *Lcg,
+    key_amplitude: f32,
+    scale_exponent: i32,
+    indices_mode: usize,
+    sink: f32,
+    pattern: KeyPattern,
 ) !void {
-    try sparseCaseScaled(gpa, device, queue, p, spec, rng, key_amplitude, scale_exponent, scale_exponent,
-        indices_mode, sink, pattern);
+    try sparseCaseScaled(gpa, device, queue, p, spec, rng, key_amplitude, scale_exponent, scale_exponent, indices_mode, sink, pattern);
 }
 
 /// The same rows with the window and the compressed cache on independent scale grids: the stage
 /// output then carries a large and a tiny contribution in one accumulator, which is what the
 /// mixing step actually rounds.
-fn sparseCaseScaled(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, p: *const csa2.Pipelines,
-    spec: SparseSpec, rng: *Lcg, key_amplitude: f32, window_exponent: i32, compressed_exponent: i32,
-    indices_mode: usize, sink: f32, pattern: KeyPattern,
+fn sparseCaseScaled(
+    gpa: std.mem.Allocator,
+    device: mtl.Device,
+    queue: mtl.Queue,
+    p: *const csa2.Pipelines,
+    spec: SparseSpec,
+    rng: *Lcg,
+    key_amplitude: f32,
+    window_exponent: i32,
+    compressed_exponent: i32,
+    indices_mode: usize,
+    sink: f32,
+    pattern: KeyPattern,
 ) !void {
     const q_stride = spec.heads * width;
     const q = try gpa.alloc(u16, spec.rows * q_stride);
@@ -649,54 +665,35 @@ test "sparse attention stages sit at rounding level against the FP64 ideal" {
     var rng = Lcg{ .state = 0x2545f4914f6cdd1d };
 
     // Window only, the decode-step boundary at a wrapped ring.
-    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "window_decode", .heads = 4, .rows = 1,
-        .position = 255, .ratio = 0, .compressed_rows = 0, .topk = 0 }, &rng, 1.0, 0, 0, 0, KeyPattern.random);
+    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "window_decode", .heads = 4, .rows = 1, .position = 255, .ratio = 0, .compressed_rows = 0, .topk = 0 }, &rng, 1.0, 0, 0, 0, KeyPattern.random);
     // Compressed rows with a small selection, ascending indices.
-    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "compressed_asc", .heads = 4, .rows = 1,
-        .position = 255, .ratio = 2, .compressed_rows = 128, .topk = 16 }, &rng, 1.0, 0, 0, 0, KeyPattern.random);
+    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "compressed_asc", .heads = 4, .rows = 1, .position = 255, .ratio = 2, .compressed_rows = 128, .topk = 16 }, &rng, 1.0, 0, 0, 0, KeyPattern.random);
     // Unsorted indices: the kernel consumes the array in the given order; the reference must too.
-    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "compressed_unsorted", .heads = 2, .rows = 1,
-        .position = 9, .ratio = 2, .compressed_rows = 40, .topk = 12 }, &rng, 1.0, 0, 2, 0, KeyPattern.random);
+    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "compressed_unsorted", .heads = 2, .rows = 1, .position = 9, .ratio = 2, .compressed_rows = 40, .topk = 12 }, &rng, 1.0, 0, 2, 0, KeyPattern.random);
     // Prefill rows, multi-row chunk with a wrapped ring.
-    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "prefill_rows", .heads = 2, .rows = 4,
-        .position = 250, .ratio = 2, .compressed_rows = 100, .topk = 8 }, &rng, 1.0, 0, 0, 0, KeyPattern.random);
+    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "prefill_rows", .heads = 2, .rows = 4, .position = 250, .ratio = 2, .compressed_rows = 100, .topk = 8 }, &rng, 1.0, 0, 0, 0, KeyPattern.random);
     // Wide dynamic range keys: the score sum runs across many orders of magnitude.
-    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "wide_range", .heads = 1, .rows = 1,
-        .position = 200, .ratio = 2, .compressed_rows = 32, .topk = 8 }, &rng, 1.0, -20, 0, 0, KeyPattern.random);
-    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "wide_range_hi", .heads = 1, .rows = 1,
-        .position = 200, .ratio = 2, .compressed_rows = 32, .topk = 8 }, &rng, 1.0, 20, 0, 0, KeyPattern.random);
+    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "wide_range", .heads = 1, .rows = 1, .position = 200, .ratio = 2, .compressed_rows = 32, .topk = 8 }, &rng, 1.0, -20, 0, 0, KeyPattern.random);
+    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "wide_range_hi", .heads = 1, .rows = 1, .position = 200, .ratio = 2, .compressed_rows = 32, .topk = 8 }, &rng, 1.0, 20, 0, 0, KeyPattern.random);
     // Denormal-scale sink: the sink mass underflows FP32 while it is exact in FP64.
-    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "sink_denormal", .heads = 1, .rows = 1,
-        .position = 100, .ratio = 0, .compressed_rows = 0, .topk = 0 }, &rng, 1.0, 0, 0, -16.0, KeyPattern.random);
-    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "sink_large", .heads = 1, .rows = 1,
-        .position = 100, .ratio = 0, .compressed_rows = 0, .topk = 0 }, &rng, 1.0, 0, 0, 12.0, KeyPattern.random);
+    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "sink_denormal", .heads = 1, .rows = 1, .position = 100, .ratio = 0, .compressed_rows = 0, .topk = 0 }, &rng, 1.0, 0, 0, -16.0, KeyPattern.random);
+    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "sink_large", .heads = 1, .rows = 1, .position = 100, .ratio = 0, .compressed_rows = 0, .topk = 0 }, &rng, 1.0, 0, 0, 12.0, KeyPattern.random);
     // Value-product cancellation: identical-shaped keys, so every score ties and the P·V sum
     // cancels to the ULPs of the terms that make it up.
-    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "cancel_values", .heads = 1, .rows = 1,
-        .position = 300, .ratio = 2, .compressed_rows = 64, .topk = 64 }, &rng, 32.0, 0, 0, 0,
-        KeyPattern.cancelling);
-    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "cancel_wide", .heads = 1, .rows = 1,
-        .position = 300, .ratio = 2, .compressed_rows = 64, .topk = 64 }, &rng, 32.0, 6, 0, 0,
-        KeyPattern.cancelling);
+    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "cancel_values", .heads = 1, .rows = 1, .position = 300, .ratio = 2, .compressed_rows = 64, .topk = 64 }, &rng, 32.0, 0, 0, 0, KeyPattern.cancelling);
+    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "cancel_wide", .heads = 1, .rows = 1, .position = 300, .ratio = 2, .compressed_rows = 64, .topk = 64 }, &rng, 32.0, 6, 0, 0, KeyPattern.cancelling);
     // Scores that tie: the softmax denominator is the sum of equal exponentials, and the
     // accumulation order decides which probability lands on which side of its rounding boundary.
-    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "score_tie", .heads = 1, .rows = 1,
-        .position = 300, .ratio = 2, .compressed_rows = 32, .topk = 32 }, &rng, 1.0, 0, 0, 0,
-        KeyPattern.near_tie);
+    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "score_tie", .heads = 1, .rows = 1, .position = 300, .ratio = 2, .compressed_rows = 32, .topk = 32 }, &rng, 1.0, 0, 0, 0, KeyPattern.near_tie);
     // One dominant key against keys orders of magnitude smaller: denominator and accumulator
     // run at the extreme ratio.
-    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "one_dominant", .heads = 1, .rows = 1,
-        .position = 300, .ratio = 2, .compressed_rows = 16, .topk = 16 }, &rng, 1.0, 0, 0, 0,
-        KeyPattern.one_sided);
+    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "one_dominant", .heads = 1, .rows = 1, .position = 300, .ratio = 2, .compressed_rows = 16, .topk = 16 }, &rng, 1.0, 0, 0, 0, KeyPattern.one_sided);
     // Many tiles, so the online correction multiplies the accumulator once per 64 columns.
-    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "many_tiles", .heads = 1, .rows = 1,
-        .position = 511, .ratio = 2, .compressed_rows = 512, .topk = 384 }, &rng, 1.0, 0, 0, 0,
-        KeyPattern.random);
+    try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "many_tiles", .heads = 1, .rows = 1, .position = 511, .ratio = 2, .compressed_rows = 512, .topk = 384 }, &rng, 1.0, 0, 0, 0, KeyPattern.random);
     // Cancellation in the value product: keys of alternating sign, so the P·V sum is small next
     // to the terms that make it up.
     {
-        const spec = SparseSpec{ .name = "pv_cancellation", .heads = 1, .rows = 1, .position = 64,
-            .ratio = 0, .compressed_rows = 0, .topk = 0 };
+        const spec = SparseSpec{ .name = "pv_cancellation", .heads = 1, .rows = 1, .position = 64, .ratio = 0, .compressed_rows = 0, .topk = 0 };
         const q = try gpa.alloc(u16, width);
         defer gpa.free(q);
         for (q) |*cell| cell.* = math.b(rng.scale(1.0));
@@ -718,8 +715,7 @@ test "sparse attention stages sit at rounding level against the FP64 ideal" {
     }
     // Large cancelling keys beside small ones: score dot products run through near-cancelling terms.
     {
-        const spec = SparseSpec{ .name = "score_cancellation", .heads = 1, .rows = 1, .position = 96,
-            .ratio = 0, .compressed_rows = 0, .topk = 0 };
+        const spec = SparseSpec{ .name = "score_cancellation", .heads = 1, .rows = 1, .position = 96, .ratio = 0, .compressed_rows = 0, .topk = 0 };
         const q = try gpa.alloc(u16, width);
         defer gpa.free(q);
         for (q, 0..) |*cell, d| cell.* = if ((d & 1) == 0) math.b(1.0) else math.b(-1.0);
@@ -746,11 +742,16 @@ test "sparse attention stages sit at rounding level against the FP64 ideal" {
 /// normalization. Sweeping it across the FP32 exp() overflow and underflow limits is the only path
 /// by which the sink term can move the stage output, and it is also where an FP32 exp() would leave
 /// the FP64 equation behind.
-fn sinkCase(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, p: *const csa2.Pipelines,
-    name: []const u8, rng: *Lcg, sink: f32,
+fn sinkCase(
+    gpa: std.mem.Allocator,
+    device: mtl.Device,
+    queue: mtl.Queue,
+    p: *const csa2.Pipelines,
+    name: []const u8,
+    rng: *Lcg,
+    sink: f32,
 ) !void {
-    const spec = SparseSpec{ .name = name, .heads = 1, .rows = 1, .position = 0, .ratio = 0,
-        .compressed_rows = 0, .topk = 0 };
+    const spec = SparseSpec{ .name = name, .heads = 1, .rows = 1, .position = 0, .ratio = 0, .compressed_rows = 0, .topk = 0 };
     const q = try gpa.alloc(u16, width);
     defer gpa.free(q);
     for (q) |*cell| cell.* = math.b(rng.scale(1.0));
@@ -811,8 +812,7 @@ test "sink normalization sits at rounding level across the exp overflow boundari
     // Per-head sinks: the kernel indexes the sink array by head, so heads whose sink masses differ
     // by orders of magnitude check that indexing as well as the arithmetic.
     {
-        const spec = SparseSpec{ .name = "sink_per_head", .heads = 4, .rows = 1, .position = 0,
-            .ratio = 0, .compressed_rows = 0, .topk = 0 };
+        const spec = SparseSpec{ .name = "sink_per_head", .heads = 4, .rows = 1, .position = 0, .ratio = 0, .compressed_rows = 0, .topk = 0 };
         var head_rng = Lcg{ .state = 0xabcdef0123456789 };
         const q = try gpa.alloc(u16, spec.heads * width);
         defer gpa.free(q);
@@ -853,25 +853,19 @@ test "tile denominators sit at rounding level for every tile shape" {
 
     // Ten tiles, so the denominator accumulates 639 exponentials and the accumulator takes 639
     // products. Identical key shapes make every score tie: the denominator is exactly the count.
-    try sparseCaseFrom(gpa, device, queue, &pipelines, .{ .name = "tiles_equal_scores", .heads = 1, .rows = 1,
-        .position = 1022, .ratio = 2, .compressed_rows = 512, .topk = 512 }, &rng, 1.0, 0, 0, 0, KeyPattern.cancelling);
+    try sparseCaseFrom(gpa, device, queue, &pipelines, .{ .name = "tiles_equal_scores", .heads = 1, .rows = 1, .position = 1022, .ratio = 2, .compressed_rows = 512, .topk = 512 }, &rng, 1.0, 0, 0, 0, KeyPattern.cancelling);
     // Ascending scores by tile: the correction falls one power of two per step until FP32 flushes
     // it, and the dropped mass is the whole question.
     for ([_]i32{ -2, 0, 1, 2 }) |step| {
         var name_buf: [24]u8 = undefined;
         const label = std.fmt.bufPrint(&name_buf, "tiles_ramp{d}", .{step}) catch unreachable;
-        try sparseCaseFrom(gpa, device, queue, &pipelines, .{ .name = label, .heads = 1, .rows = 1,
-            .position = 1000, .ratio = 2, .compressed_rows = 512, .topk = 512 }, &rng, 1.0, step, 0, 0,
-            KeyPattern.near_tie);
+        try sparseCaseFrom(gpa, device, queue, &pipelines, .{ .name = label, .heads = 1, .rows = 1, .position = 1000, .ratio = 2, .compressed_rows = 512, .topk = 512 }, &rng, 1.0, step, 0, 0, KeyPattern.near_tie);
     }
     // Descending scores: the running maximum never moves, so every tile lands at full weight and
     // the denominator is a plain sum.
-    try sparseCaseFrom(gpa, device, queue, &pipelines, .{ .name = "tiles_descending", .heads = 1, .rows = 1,
-        .position = 1000, .ratio = 2, .compressed_rows = 512, .topk = 512 }, &rng, 1.0, 0, 1, 0,
-        KeyPattern.near_tie);
+    try sparseCaseFrom(gpa, device, queue, &pipelines, .{ .name = "tiles_descending", .heads = 1, .rows = 1, .position = 1000, .ratio = 2, .compressed_rows = 512, .topk = 512 }, &rng, 1.0, 0, 1, 0, KeyPattern.near_tie);
     // One tile only, the boundary case of the online loop: the correction is applied zero times.
-    try sparseCaseFrom(gpa, device, queue, &pipelines, .{ .name = "tiles_single", .heads = 1, .rows = 1,
-        .position = 20, .ratio = 0, .compressed_rows = 0, .topk = 0 }, &rng, 1.0, 0, 0, 0, KeyPattern.random);
+    try sparseCaseFrom(gpa, device, queue, &pipelines, .{ .name = "tiles_single", .heads = 1, .rows = 1, .position = 20, .ratio = 0, .compressed_rows = 0, .topk = 0 }, &rng, 1.0, 0, 0, 0, KeyPattern.random);
 }
 
 // The output mix: window rows and compressed rows meeting in one accumulator on different scale
@@ -894,13 +888,9 @@ test "the output mix sits at rounding level when window and compressed rows canc
 
     // Large window rows against tiny compressed rows, then the reverse: one accumulator holding
     // terms six orders of magnitude apart.
-    try sparseCaseScaled(gpa, device, queue, &pipelines, .{ .name = "mix_window_dominates", .heads = 1, .rows = 1,
-        .position = 100, .ratio = 2, .compressed_rows = 100, .topk = 64 }, &rng, 1.0, 14, -12, 0, 0, KeyPattern.random);
-    try sparseCaseScaled(gpa, device, queue, &pipelines, .{ .name = "mix_compressed_dominates", .heads = 1, .rows = 1,
-        .position = 100, .ratio = 2, .compressed_rows = 100, .topk = 64 }, &rng, 1.0, -12, 14, 0, 0, KeyPattern.random);
-    try sparseCaseScaled(gpa, device, queue, &pipelines, .{ .name = "mix_balanced_magnitudes", .heads = 1, .rows = 1,
-        .position = 100, .ratio = 2, .compressed_rows = 100, .topk = 64 }, &rng, 1.0, 6, 6, 0, 0,
-        KeyPattern.cancelling);
+    try sparseCaseScaled(gpa, device, queue, &pipelines, .{ .name = "mix_window_dominates", .heads = 1, .rows = 1, .position = 100, .ratio = 2, .compressed_rows = 100, .topk = 64 }, &rng, 1.0, 14, -12, 0, 0, KeyPattern.random);
+    try sparseCaseScaled(gpa, device, queue, &pipelines, .{ .name = "mix_compressed_dominates", .heads = 1, .rows = 1, .position = 100, .ratio = 2, .compressed_rows = 100, .topk = 64 }, &rng, 1.0, -12, 14, 0, 0, KeyPattern.random);
+    try sparseCaseScaled(gpa, device, queue, &pipelines, .{ .name = "mix_balanced_magnitudes", .heads = 1, .rows = 1, .position = 100, .ratio = 2, .compressed_rows = 100, .topk = 64 }, &rng, 1.0, 6, 6, 0, 0, KeyPattern.cancelling);
 
     // The stage's real amplification probe: 128 window rows that carry a large alternating shape
     // which cancels out of both the score (a uniform query against a sign-alternating shape) and
@@ -909,8 +899,7 @@ test "the output mix sits at rounding level when window and compressed rows canc
     for ([_]i32{ 8, 16, 23 }) |shape_exponent| {
         var name_buf: [24]u8 = undefined;
         const label = std.fmt.bufPrint(&name_buf, "mirror_shape_e{d}", .{shape_exponent}) catch unreachable;
-        const spec = SparseSpec{ .name = label, .heads = 1, .rows = 1, .position = 127, .ratio = 0,
-            .compressed_rows = 0, .topk = 0 };
+        const spec = SparseSpec{ .name = label, .heads = 1, .rows = 1, .position = 127, .ratio = 0, .compressed_rows = 0, .topk = 0 };
         const q = try gpa.alloc(u16, width);
         defer gpa.free(q);
         // q dot shape == 0 exactly: a uniform query against a shape that alternates sign per
@@ -948,7 +937,12 @@ test "the output mix sits at rounding level when window and compressed rows canc
 /// Both sides of one rotary call: `contract` is the pinned source's FP32 path (FP32 frequency, FP32
 /// angle, FP32 trig), `ideal` keeps frequency, angle, both unaries and the products in FP64. The
 /// kernel differs from the contract by the factor table's own unaries, which is what this checks.
-fn ropeFrequency64(index: usize, theta: f64, original: f64, factor: f64, beta_fast: f64,
+fn ropeFrequency64(
+    index: usize,
+    theta: f64,
+    original: f64,
+    factor: f64,
+    beta_fast: f64,
     beta_slow: f64,
 ) f64 {
     const frequency: f64 = 1 / std.math.pow(f64, theta, @as(f64, @floatFromInt(index * 2)) / 64);
@@ -960,9 +954,20 @@ fn ropeFrequency64(index: usize, theta: f64, original: f64, factor: f64, beta_fa
     return frequency / factor * ramp + frequency * (1 - ramp);
 }
 
-fn ropeCase(device: mtl.Device, queue: mtl.Queue, p: *const tf.deepseek_v41.rope.Pipelines,
-    name: []const u8, rng: *Lcg, position: usize, rows: usize, heads: usize,
-    spectrum: tf.deepseek_v41.rope.Spectrum, inverse: bool, theta: f32, original: u32, factor: f32,
+fn ropeCase(
+    device: mtl.Device,
+    queue: mtl.Queue,
+    p: *const tf.deepseek_v41.rope.Pipelines,
+    name: []const u8,
+    rng: *Lcg,
+    position: usize,
+    rows: usize,
+    heads: usize,
+    spectrum: tf.deepseek_v41.rope.Spectrum,
+    inverse: bool,
+    theta: f32,
+    original: u32,
+    factor: f32,
 ) !void {
     const stride = heads * width;
     const cells = rows * stride;
@@ -978,9 +983,7 @@ fn ropeCase(device: mtl.Device, queue: mtl.Queue, p: *const tf.deepseek_v41.rope
     }
     const cb = queue.commandBuffer();
     const enc = cb.compute(.serial);
-    try p.encode(enc, view(x_gpu), .{ .rows = @intCast(rows), .heads = @intCast(heads),
-        .width = width, .rotary = 64, .stride = @intCast(stride), .position = @intCast(position),
-        .step = 1, .inverse = @intFromBool(inverse), .spectrum = spectrum });
+    try p.encode(enc, view(x_gpu), .{ .rows = @intCast(rows), .heads = @intCast(heads), .width = width, .rotary = 64, .stride = @intCast(stride), .position = @intCast(position), .step = 1, .inverse = @intFromBool(inverse), .spectrum = spectrum });
     enc.end();
     cb.commit();
     cb.wait();
@@ -1044,9 +1047,7 @@ test "the rotary stage sits at rounding level for both spectra and at long posit
     defer queue.deinit();
     // The production shape: 64 rotary columns, YaRN on the compressed spectrum only, positions out
     // to the resident capacity.
-    var p = try tf.deepseek_v41.rope.Pipelines.load(device, 16384, 64,
-        .{ .theta = 10000, .original = 0 },
-        .{ .theta = 10000, .factor = 16, .original = 65536, .beta_fast = 32, .beta_slow = 1 });
+    var p = try tf.deepseek_v41.rope.Pipelines.load(device, 16384, 64, .{ .theta = 10000, .original = 0 }, .{ .theta = 10000, .factor = 16, .original = 65536, .beta_fast = 32, .beta_slow = 1 });
     defer p.deinit();
 
     const positions = [_]usize{ 1, 7, 63, 64, 4095, 8191, 16383 };
@@ -1097,8 +1098,14 @@ fn decodeIndexRow(bytes: []const u8) [128]u16 {
     return row;
 }
 
-fn indexCase(device: mtl.Device, queue: mtl.Queue, p: *const tf.deepseek_v41.csa2_index.Pipelines,
-    spec: IndexSpec, q: []const u16, weights: []const u16, key_values: []const []const f32,
+fn indexCase(
+    device: mtl.Device,
+    queue: mtl.Queue,
+    p: *const tf.deepseek_v41.csa2_index.Pipelines,
+    spec: IndexSpec,
+    q: []const u16,
+    weights: []const u16,
+    key_values: []const []const f32,
 ) !void {
     var b = Buffers{ .device = device };
     defer b.deinit();
@@ -1177,15 +1184,13 @@ fn indexCase(device: mtl.Device, queue: mtl.Queue, p: *const tf.deepseek_v41.csa
     const shown = @min(spec.keys, ideal_cells.len);
     for (0..shown) |row| ideal_cells[row] = ref64[row];
     printF32(spec.name, "index_score", "bf16_score_boundary", deltaF32VsF64(ref32[0..shown], exact[0..shown]));
-    printF32(spec.name, "index_score", "metal_vs_ideal", deltaF32VsF64(
-        kernel_scores[0..shown], ideal_cells[0..shown]));
+    printF32(spec.name, "index_score", "metal_vs_ideal", deltaF32VsF64(kernel_scores[0..shown], ideal_cells[0..shown]));
     printF32(spec.name, "index_score", "f32_vs_ideal", deltaF32VsF64(ref32[0..shown], ideal_cells[0..shown]));
     // The kernel against the source-contract FP32 reference on identical keys: the stage delta that
     // selection can actually see, independent of how far the reference itself sits from the ideal.
     var contract: [1024]f64 = undefined;
     for (0..shown) |row| contract[row] = @as(f64, ref32[row]);
-    printF32(spec.name, "index_score", "metal_vs_f32_reference", deltaF32VsF64(
-        kernel_scores[0..shown], contract[0..shown]));
+    printF32(spec.name, "index_score", "metal_vs_f32_reference", deltaF32VsF64(kernel_scores[0..shown], contract[0..shown]));
 
     // Selection: which keys land in the top-k. Both sides break ties by the lowest position, the
     // kernel's heap comparator and the reference's strict-greater scan agree on that.

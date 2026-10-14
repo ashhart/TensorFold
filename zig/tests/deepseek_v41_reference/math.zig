@@ -113,13 +113,11 @@ pub fn rms(x: []const u16, weight: Tensor, eps: f32, out: []u16) void {
     rmsOf(f32, x, weight, eps, out);
 }
 /// Element type widened to the reference precision; FP32 is the source contract, FP64 the ideal.
-
 /// FP64 decode of a BF16 cell, exact at both reference precisions.
 pub fn d64(x: u16) f64 {
     return @as(f64, f(x));
 }
 /// Round an FP64 value once to BF16 (round-to-nearest-even) with no intermediate FP32 rounding.
-
 /// The RMS boundary at reference precision T: the source-contract FP32 mean projection for f32,
 /// a wide FP64 mean, exact division and reciprocal square root for f64.
 pub fn rmsOf(comptime T: type, x: []const u16, weight: Tensor, eps: f32, out: []u16) void {
