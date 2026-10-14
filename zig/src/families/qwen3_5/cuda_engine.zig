@@ -33,12 +33,17 @@ pub fn aligned(n: usize) usize {
 
 /// qwen35.cu's Geo and Seg.
 const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int };
-const Seg = extern struct { rec: u64, conv: u64, kv: u64, cap: c_int, len: c_int, row0: c_int, rows: c_int };
+const Seg = extern struct { rec: u64, conv: u64, kv: u64, tap: u64, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int, taps: c_int };
+
+/// Rows a drafter's tap ring holds a stream: its window and a prompt chunk more.
+pub const tap_rows = 2048 + max_rows;
 
 /// One stream's state on the device and the logits of its newest prompt chunk on the host.
 pub const Cache = struct {
     state: DeviceBuffer,
     kv: DeviceBuffer,
+    /// A drafter's tapped rows (`Engine.taps`), a ring of tap_rows: the row at position p in slot p % tap_rows.
+    tap: ?DeviceBuffer = null,
     cap: usize,
     len: usize = 0,
     logits: []u16,
@@ -52,7 +57,13 @@ pub const Cache = struct {
         var kv = try DeviceBuffer.alloc(e.d, e.g.kvBytes(cap));
         errdefer kv.free();
         try kv.fill8(0, null); // touched now, not as the first request's keys land (the driver commits on first touch)
-        return .{ .state = state, .kv = kv, .cap = cap, .logits = try gpa.alloc(u16, e.g.vocab) };
+        var tap: ?DeviceBuffer = null;
+        if (e.n_taps > 0) {
+            tap = try DeviceBuffer.alloc(e.d, e.tapBytes());
+            try tap.?.fill8(0, null);
+        }
+        errdefer if (tap) |*t| t.free();
+        return .{ .state = state, .kv = kv, .tap = tap, .cap = cap, .logits = try gpa.alloc(u16, e.g.vocab) };
     }
 
     /// Ready for another stream: no rows, the recurrences and tails zero (on the engine's stream, before its forwards).
@@ -65,11 +76,13 @@ pub const Cache = struct {
     pub fn deinit(self: *Cache, gpa: std.mem.Allocator) void {
         self.state.free();
         self.kv.free();
+        if (self.tap) |*t| t.free();
         gpa.free(self.logits);
     }
 
-    fn seg(self: *const Cache, g: Geometry, row0: usize, rows: usize) Seg {
-        return .{ .rec = self.state.ptr, .conv = self.state.ptr + g.deltas() * g.recBytes(), .kv = self.kv.ptr, .cap = @intCast(self.cap), .len = @intCast(self.len), .row0 = @intCast(row0), .rows = @intCast(rows) };
+    fn seg(self: *const Cache, e: *const Engine, row0: usize, rows: usize) Seg {
+        const g = e.g;
+        return .{ .rec = self.state.ptr, .conv = self.state.ptr + g.deltas() * g.recBytes(), .kv = self.kv.ptr, .tap = if (self.tap) |t| t.ptr else 0, .cap = @intCast(self.cap), .len = @intCast(self.len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = tap_rows, .taps = @intCast(e.n_taps) };
     }
 };
 
@@ -99,6 +112,7 @@ const Fns = struct {
     attn_gate: cuda.Function,
     mlp_act: cuda.Function,
     argmax: cuda.Function,
+    tap: cuda.Function,
 };
 
 /// A window of one stream in a forward.
@@ -175,6 +189,9 @@ pub const Engine = struct {
     tokens: [most_verify]u32 = undefined,
     /// The captured forwards by shape (`Shape.key`): the launches from the embedding to the head.
     graphs: std.AutoHashMapUnmanaged(u32, cuda.graph.Exec) = .empty,
+    /// A drafter's tapped layers (`setTaps`): each row's residual after them lands in its stream's tap ring.
+    taps: [8]u32 = undefined,
+    n_taps: usize = 0,
 
     const ids_at = 0;
     const segs_at = max_rows * 4;
@@ -182,8 +199,8 @@ pub const Engine = struct {
     const rules_at = rowseg_at + max_rows * 4;
     const meta_at = rules_at + most_verify * @sizeOf(cuda.sample.Rule);
     const tokens_at = meta_at + most_verify * 4;
-    const params_at = tokens_at + most_verify * 4; // the attention chunks and their width
-    const tables_len = params_at + 2 * 4;
+    const params_at = tokens_at + most_verify * 4; // the attention chunks, their width, the rows, the windows
+    const tables_len = params_at + 4 * 4;
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -200,6 +217,7 @@ pub const Engine = struct {
         e.window_rows = @min(most_window, e.verify_rows);
         e.arena_at = 0;
         e.graphs = .empty;
+        e.n_taps = 0;
         e.stream = try cuda.Stream.init(d, true);
         errdefer e.stream.deinit();
         e.arena = try DeviceBuffer.alloc(d, weights.total(g) + try e.scratch(.measure));
@@ -260,9 +278,22 @@ pub const Engine = struct {
         e.gpa.destroy(e);
     }
 
-    /// A stream's device bytes at a `cap`-token window: recurrences, convolution tails, keys and values.
+    /// A stream's device bytes at a `cap`-token window: recurrences, convolution tails, keys and values, taps.
     pub fn streamBytes(e: *const Engine, cap: usize) usize {
-        return e.g.stateBytes() + e.g.kvBytes(cap);
+        return e.g.stateBytes() + e.g.kvBytes(cap) + e.tapBytes();
+    }
+
+    /// A stream's tap ring: tap_rows rows of the tapped layers' residuals.
+    pub fn tapBytes(e: *const Engine) usize {
+        return tap_rows * e.n_taps * e.g.hidden * 2;
+    }
+
+    /// The layers a drafter taps, told before the streams' caches exist; each forward then fills their rings.
+    pub fn setTaps(e: *Engine, taps: []const u32) !void {
+        if (taps.len > e.taps.len) return error.TooManyTaps;
+        for (taps) |t| if (t >= e.g.layers) return error.BadTap;
+        @memcpy(e.taps[0..taps.len], taps);
+        e.n_taps = taps.len;
     }
 
     /// The next `bytes` of the arena, 256-byte aligned.
@@ -309,7 +340,7 @@ pub const Engine = struct {
         return total;
     }
 
-    fn run(e: *Engine, f: cuda.Function, grid: [3]usize, block: [3]usize, args: anytype) !void {
+    pub fn run(e: *Engine, f: cuda.Function, grid: [3]usize, block: [3]usize, args: anytype) !void {
         var a: cuda.Args = .{};
         inline for (args) |v| a.add(v);
         const cfg: cuda.Config = .{ .grid = .{ .x = @intCast(grid[0]), .y = @intCast(grid[1]), .z = @intCast(grid[2]) }, .block = .{ .x = @intCast(block[0]), .y = @intCast(block[1]), .z = @intCast(block[2]) } };
@@ -318,9 +349,9 @@ pub const Engine = struct {
 
     /// out (rows, n) = x (rows, k) through `l`: decode tiles 16 rows at a time (each row's bits whatever the batch),
     /// or the prompt GEMM for a prompt chunk wider than one tile.
-    fn proj(e: *Engine, l: Affine4, x: u64, out: u64, rows: usize, prompt: bool) !void {
+    pub fn proj(e: *Engine, l: Affine4, x: u64, out: u64, rows: usize, prompt: bool) !void {
         if (prompt and rows > 16) return e.affine.prompt(e.stream, x, l, out, rows);
-        try e.run(e.fns.sums, .{ rows, 1, 1 }, .{ 32, 1, 1 }, .{ x, e.xs, @as(c_int, @intCast(l.k)) });
+        try e.run(e.fns.sums, .{ rows, 1, 1 }, .{ 32, 1, 1 }, .{ x, e.xs, @as(c_int, @intCast(l.k)), e.tables.ptr + params_at });
         var at: usize = 0;
         while (at < rows) : (at += 16) {
             const n = @min(16, rows - at);
@@ -329,7 +360,7 @@ pub const Engine = struct {
     }
 
     fn norm(e: *Engine, residual: bool, w: u64, rows: usize) !void {
-        try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)) });
+        try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at });
     }
 
     /// One forward over `parts`' windows, the rows of `ids` in order. `keep` names the rows it keeps and how.
@@ -358,7 +389,7 @@ pub const Engine = struct {
         const rowseg = std.mem.bytesAsSlice(c_int, st[rowseg_at..][0 .. total * 4]);
         var row0: usize = 0;
         for (parts, 0..) |p, i| {
-            segs[i] = p.cache.seg(g, row0, p.rows);
+            segs[i] = p.cache.seg(e, row0, p.rows);
             for (row0..row0 + p.rows) |r| rowseg[r] = @intCast(i);
             p.cache.last = if (record) .{ .start = p.cache.len, .row0 = row0, .rows = p.rows } else null;
             row0 += p.rows;
@@ -373,11 +404,18 @@ pub const Engine = struct {
         }
         // attention chunks: at most max_chunks a row, each a multiple of 128 keys
         const ck = @max(128, (widest + max_chunks * 128 - 1) / (max_chunks * 128) * 128);
-        const params = std.mem.bytesAsSlice(c_int, st[params_at..][0..8]);
+        const params = std.mem.bytesAsSlice(c_int, st[params_at..][0..16]);
         params[0] = @intCast((widest + ck - 1) / ck);
         params[1] = @intCast(ck);
+        params[2] = @intCast(total);
+        params[3] = @intCast(parts.len);
         try e.tables.uploadAsync(0, st, e.stream.handle);
-        const shape: Shape = .{ .total = @intCast(total), .nseg = @intCast(parts.len), .record = record, .prompt = prompt };
+        // a captured forward's launches cover a bucket of rows and every window; its kernels read the true counts
+        // (a lone stream's one-row step, the common case without a drafter, keeps its own exact graph)
+        const lone = total == 1 and parts.len == 1;
+        const bucket: usize = if (lone) 1 else if (total <= 16) 16 else most_verify;
+        const windows: usize = if (lone) 1 else max_segs;
+        const shape: Shape = .{ .total = @intCast(if (prompt) total else bucket), .nseg = @intCast(if (prompt) parts.len else windows), .record = record, .prompt = prompt, .taps = e.n_taps > 0 };
         if (prompt) {
             // uncaptured: a prompt chunk's GEMMs dwarf its launches, and each length would be a graph of its own,
             // paying the driver's stall on a new graph's first run (about a second on a wide model)
@@ -428,9 +466,10 @@ pub const Engine = struct {
         nseg: u8,
         record: bool,
         prompt: bool,
+        taps: bool,
 
         fn key(s: Shape) u32 {
-            return @as(u32, s.total) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17;
+            return @as(u32, s.total) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18;
         }
     };
 
@@ -449,7 +488,7 @@ pub const Engine = struct {
         const geo = e.geo;
         const group = g.q_heads / g.kv_heads;
 
-        try e.run(e.fns.embed, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ t_ids, e.embed_w, e.embed_s, e.embed_b, e.h, @as(c_int, @intCast(g.hidden)) });
+        try e.run(e.fns.embed, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ t_ids, e.embed_w, e.embed_s, e.embed_b, e.h, @as(c_int, @intCast(g.hidden)), t_params });
         var di: usize = 0;
         var ai: c_int = 0;
         for (e.layers, 0..) |l, i| {
@@ -463,10 +502,10 @@ pub const Engine = struct {
                     try e.proj(m.z, e.x, e.z, total, prompt);
                     try e.proj(m.a, e.x, e.a, total, prompt);
                     try e.proj(m.b, e.x, e.b, total, prompt);
-                    try e.run(e.fns.gdn_pre, .{ 1, 2 * g.k_heads + g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.qkv, t_segs, t_rows, layer, m.conv, e.a, e.b, m.a_log, m.dt_bias, e.q, e.k, e.v, e.g_, e.beta });
-                    try e.run(e.fns.conv_commit, .{ (g.convWidth() + 255) / 256, nseg, 1 }, .{ 256, 1, 1 }, .{ geo, e.qkv, t_segs, layer, conv_snap });
-                    try e.run(e.fns.gdn_chain, .{ 1, geometry.dk / 4, g.v_heads * nseg }, .{ 32, 4, 1 }, .{ geo, e.q, e.k, e.v, e.g_, e.beta, t_segs, layer, e.y, rec_snap });
-                    try e.run(e.fns.gdn_post, .{ 1, g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.y, e.z, m.norm, g.eps, e.mix });
+                    try e.run(e.fns.gdn_pre, .{ 1, 2 * g.k_heads + g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.qkv, t_segs, t_rows, layer, m.conv, e.a, e.b, m.a_log, m.dt_bias, e.q, e.k, e.v, e.g_, e.beta, t_params });
+                    try e.run(e.fns.conv_commit, .{ (g.convWidth() + 255) / 256, nseg, 1 }, .{ 256, 1, 1 }, .{ geo, e.qkv, t_segs, layer, conv_snap, t_params });
+                    try e.run(e.fns.gdn_chain, .{ 1, geometry.dk / 4, g.v_heads * nseg }, .{ 32, 4, 1 }, .{ geo, e.q, e.k, e.v, e.g_, e.beta, t_segs, layer, e.y, rec_snap, t_params });
+                    try e.run(e.fns.gdn_post, .{ 1, g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.y, e.z, m.norm, g.eps, e.mix, t_params });
                     try e.proj(m.out, e.mix, e.r, total, prompt);
                     di += 1;
                 },
@@ -475,12 +514,12 @@ pub const Engine = struct {
                     try e.proj(m.q, e.x, e.qraw, total, prompt);
                     try e.proj(m.k, e.x, e.kraw, total, prompt);
                     try e.proj(m.v, e.x, e.vraw, total, prompt);
-                    try e.run(e.fns.head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps });
-                    try e.run(e.fns.head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps });
-                    try e.run(e.fns.rope, .{ total, 1, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, ai });
+                    try e.run(e.fns.head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
+                    try e.run(e.fns.head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
+                    try e.run(e.fns.rope, .{ total, 1, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, ai, t_params });
                     try e.run(e.fns.attn_partial, .{ max_chunks, g.kv_heads, total }, .{ 32 * group, 1, 1 }, .{ geo, e.qn, t_segs, t_rows, ai, t_params, @as(f32, 1.0 / 16.0), e.pm, e.pl, e.po });
                     try e.run(e.fns.attn_merge, .{ g.q_heads, total, 1 }, .{ 32, 1, 1 }, .{ geo, e.pm, e.pl, e.po, t_params, e.y });
-                    try e.run(e.fns.attn_gate, .{ (total * aw + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ geo, e.y, e.qraw, e.mix, @as(c_int, @intCast(total)) });
+                    try e.run(e.fns.attn_gate, .{ (total * aw + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ geo, e.y, e.qraw, e.mix, @as(c_int, @intCast(total)), t_params });
                     try e.proj(m.o, e.mix, e.r, total, prompt);
                     ai += 1;
                 },
@@ -489,8 +528,11 @@ pub const Engine = struct {
             try e.proj(l.gate, e.x, e.gate, total, prompt);
             try e.proj(l.up, e.x, e.up, total, prompt);
             const n: c_longlong = @intCast(total * g.intermediate);
-            try e.run(e.fns.mlp_act, .{ (total * g.intermediate + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ e.gate, e.up, e.act, n });
+            try e.run(e.fns.mlp_act, .{ (total * g.intermediate + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ e.gate, e.up, e.act, n, t_params, @as(c_int, @intCast(g.intermediate)) });
             try e.proj(l.down, e.act, e.r, total, prompt);
+            if (shape.taps) for (e.taps[0..e.n_taps], 0..) |t, ti| if (t == i) {
+                try e.run(e.fns.tap, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), t_params });
+            };
         }
         try e.norm(true, e.final_norm, total);
         // the head over the kept rows
