@@ -131,6 +131,8 @@ export function toolLabel(name: string, args: Record<string, any>): { verb: stri
       // Labels never throw: malformed args fall back to the raw action and app.
       try { return { verb: 'Computer use', target: describeComputerAction(normalizeComputerUseInput(args)) } } catch { return { verb: 'Computer use', target: [args.action, args.app].filter(Boolean).join(' ') } }
     }
+    case 'phone_observe': return { verb: 'Read phone screen', target: 'Connected phone for this chat' }
+    case 'phone_control': return { verb: 'Phone control', target: `${String(args.action || 'action')}${args.note ? ` · ${String(args.note).slice(0, 100)}` : ''}` }
     case 'launch_subagent': return { verb: 'Launch sub-agent', target: args.name || args.task || '' }
     case 'visualize': return { verb: 'Visualize', target: args.title || args.spec?.title || '' }
     case 'run_command': return { verb: 'Run', target: args.command || '' }

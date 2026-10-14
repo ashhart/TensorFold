@@ -29,7 +29,6 @@ const KW = fz.KW;
 const Select = fz.Select;
 const GSelect = fz.GSelect;
 const Hc = fz.Hc;
-const Lane = fz.Lane;
 const Layer = fz.Layer;
 const hcOf = fz.hcOf;
 const laneOf = fz.laneOf;
@@ -37,7 +36,6 @@ const Ple = fz.Ple;
 const Tmp = fz.Tmp;
 const f32Buf = fz.f32Buf;
 const i32Buf = fz.i32Buf;
-const Slot = fz.Slot;
 const Mtp = fz.Mtp;
 const Model = fz.Model;
 const DepthRule = fz.DepthRule;
@@ -286,6 +284,8 @@ pub fn main(init: std.process.Init) !void {
         }
         return;
     }
+    // the replay below reads every expert, embedding and table at 6/32: other widths are the engine's (Engine.load)
+    if (!try fz.engine_widths.uniformDir(arena, init.io, args[1])) return error.HarnessNeeds6Bit32;
     var r = Run{ .arena = arena, .device = device, .queue = try device.queue() };
     r.fused_xsum = std.c.getenv("FZ_FUSED_XSUM") != null;
     r.serial = std.c.getenv("FZ_SERIAL") != null;

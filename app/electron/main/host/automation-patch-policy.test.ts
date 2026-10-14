@@ -16,6 +16,14 @@ assert.throws(() => sanitizeAutomationUpdatePatch(current, JSON.parse('{"__proto
 assert.throws(() => sanitizeAutomationUpdatePatch(current, { scheduleKind: 'whenever' }), /scheduleKind is invalid/)
 assert.throws(() => sanitizeAutomationUpdatePatch(current, { atHour: 24 }), /atHour/)
 assert.throws(() => sanitizeAutomationUpdatePatch(current, { requiredRisks: ['ok', 42] }), /risk identifiers/)
+assert.throws(() => sanitizeAutomationCreateInput({ scheduleKind: 'daily' }), /explicit IANA timezone/, 'new daily schedules must declare their timezone')
+assert.deepEqual(sanitizeAutomationCreateInput({ scheduleKind: 'daily', timeZone: 'europe/london' }), { scheduleKind: 'daily', timeZone: 'Europe/London' })
+assert.deepEqual(sanitizeAutomationUpdatePatch(current, { name: 'Renamed legacy schedule' }), { name: 'Renamed legacy schedule' }, 'editing an existing legacy daily record does not silently migrate its timezone')
+assert.throws(() => sanitizeAutomationUpdatePatch({ ...current, scheduleKind: 'manual' } as any, { scheduleKind: 'daily' }), /explicit IANA timezone/, 'switching to daily requires an explicit zone')
+for (const timeZone of ['', 'Europe/Unknown', '+01:00', null, undefined]) {
+  assert.throws(() => sanitizeAutomationUpdatePatch(current, { timeZone } as any), /IANA timezone/, 'a supplied invalid zone never means host-local')
+}
+assert.throws(() => sanitizeAutomationUpdatePatch(current, { scheduleError: null } as any), /cannot be changed/, 'schedule diagnostics are host-owned')
 
 const unchanged = sanitizeAutomationUpdatePatch(current, { completionPolicy: { type: 'max_iterations', version: 999, max: 3 } })
 assert.equal(unchanged.completionPolicy?.version, 4, 'caller cannot forge the epoch and an unchanged contract preserves it')

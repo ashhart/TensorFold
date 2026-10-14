@@ -30,7 +30,7 @@ async function main() {
   assert.ok(pkg.scripts?.['start:headless']?.includes('npm run build && electron . --headless-server'))
   assert.ok(pkg.scripts?.['release:manifest']?.includes('scripts/make-update-manifest.mjs'))
   assert.equal(pkg.scripts?.['deps:trusted-scripts'], 'node node_modules/electron/install.js && npm rebuild --ignore-scripts=false @lydell/node-pty', 'only the reviewed Electron downloader and package-scoped native rebuild may run explicitly')
-  assert.deepEqual(pkg.build?.files, ['dist/**/*', 'dist-electron/**/*', 'package.json'])
+  assert.deepEqual(pkg.build?.files, ['dist/**/*', 'dist-electron/**/*', 'package.json', '!node_modules/kokoro-js/dist/kokoro.web.js', '!node_modules/kokoro-js/dist/kokoro.web.js.map', '!node_modules/**/pino/pretty-demo.png', '!node_modules/**/.claude{,/**/*}'])
   assert.equal(pkg.name, 'tensorfold-studio')
   assert.equal(pkg.build?.asar, true)
   assert.equal(pkg.build?.forceCodeSigning, true)

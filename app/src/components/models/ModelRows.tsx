@@ -28,7 +28,8 @@ function Facts({ items }: { items: Array<string | null | false | undefined> }) {
   return <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[13px] text-ink-2">{shown.map((item) => <span key={item}>{item}</span>)}</div>
 }
 
-export function InstalledRow({ model, status, onLoad, onUnload, onDelete, onTask, onChat, hubCache, locked = false }: {
+export function InstalledRow({ model, status, onLoad, onUnload, onDelete, onTask, onChat, hubCache, locked = false, minimal = false }: {
+  minimal?: boolean
   model: EngineInstalledModel
   status: EngineStatus | null
   onLoad: () => void
@@ -56,12 +57,13 @@ export function InstalledRow({ model, status, onLoad, onUnload, onDelete, onTask
         <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface text-ink-2"><Icon name="cpu" size={16} /></span>
         <div className="min-w-0 flex-1 basis-40">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="break-words text-[14px] font-medium text-ink" title={model.repo}>{repoDisplayName(model.repo)}</span>
+            <span className="break-words text-[14px] font-medium text-ink" title={model.localPath ?? model.repo}>{model.title ?? repoDisplayName(model.repo)}</span>
             {badge && <Badge badge={badge} />}
           </div>
           <Facts items={[
             model.family,
             model.format,
+            model.source === 'library' ? 'Linked local model' : model.source === 'cache' ? 'Shared cache' : null,
             model.contextTokens ? `${Math.round(model.contextTokens / 1024)}k context` : null,
             model.weightsBytes != null ? `${formatBytes(model.weightsBytes)} on disk` : null,
             model.memoryFloorBytes != null ? `needs ${formatBytes(model.memoryFloorBytes)} memory` : null,
@@ -71,12 +73,12 @@ export function InstalledRow({ model, status, onLoad, onUnload, onDelete, onTask
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {/* A task gets the project folder and file tools; a chat only talks. */}
-          {running && <Button size="xs" variant="primary" icon="pencil" onClick={onTask}>New worker</Button>}
-          {running && <Button size="xs" variant="default" icon="message" onClick={onChat}>New chat</Button>}
+          {running && !minimal && <Button size="xs" variant="primary" icon="pencil" onClick={onTask}>New worker</Button>}
+          {running && !minimal && <Button size="xs" variant="default" icon="message" onClick={onChat}>New chat</Button>}
           {active && !failed
             ? <Button size="xs" variant="default" icon="stop" onClick={onUnload} disabled={locked}>Unload</Button>
             : <Button size="xs" variant={running ? 'default' : 'primary'} icon="play" onClick={onLoad} disabled={model.fitsMemory === false || loading || locked || status?.state === 'starting'}>Load</Button>}
-          <Button size="xs" variant="ghost" icon="trash" aria-label={`Delete ${model.repo}`} onClick={() => setConfirming(true)} disabled={busy || running || loading} />
+          {model.source === 'download' && <Button size="xs" variant="ghost" icon="trash" aria-label={`Delete ${model.repo}`} onClick={() => setConfirming(true)} disabled={busy || running || loading} />}
         </div>
       </div>
       {confirming && (

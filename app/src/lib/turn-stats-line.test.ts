@@ -9,6 +9,7 @@ const codex = { id: 'codex', transport: 'codex-cli' } as Provider
 assert.equal(repoDisplayName('TensorFold/Qwen3.8-27B-MLX-4bit'), 'Qwen3.8 27B')
 assert.equal(repoDisplayName('mlx-community/Qwen3.5-2B-MLX-4bit'), 'Qwen3.5 2B')
 assert.equal(repoDisplayName('plain-model'), 'plain model')
+assert.equal(repoDisplayName('local/' + 'a'.repeat(64)), 'Local checkpoint', 'a removed library model retains a readable fallback instead of its opaque identity')
 
 const titles = [{ repo: 'TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit', title: 'Nemotron 3.5 Lightning' }]
 assert.equal(statsModelLabel('TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit', engine, titles), 'Nemotron 3.5 Lightning')

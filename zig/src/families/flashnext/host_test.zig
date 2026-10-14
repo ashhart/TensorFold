@@ -119,8 +119,10 @@ test "module quantization preserves false true and dictionary-default override s
     try std.testing.expectEqual(@as(usize, 64), override.group);
     try std.testing.expectEqual(@as(u8, 6), (try c.quantization("layers.0.inherit")).?.bits);
     try std.testing.expectEqual(@as(usize, 32), (try c.quantization("unknown.projection")).?.group);
-    try std.testing.expectError(error.UnsupportedFlashAffineKernel, override.checkFlashKernel());
-    try c.global_affine.checkFlashKernel();
+    const widths = @import("widths.zig");
+    try std.testing.expect(widths.launched(.{ .bits = override.bits, .group = @intCast(override.group) }));
+    try std.testing.expect(widths.launched(.{ .bits = c.global_affine.bits, .group = @intCast(c.global_affine.group) }));
+    try std.testing.expect(!widths.launched(.{ .bits = 7, .group = 64 }) and !widths.launched(.{ .bits = 4, .group = 16 }));
 }
 
 test "malformed FlashNext configuration fields are refused" {

@@ -6,6 +6,7 @@ const frags = @import("../../core/frags.zig");
 const moe_route = @import("../../core/moe_route.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
 const hc = @import("../../core/hc.zig");
+const wide = @import("wide.zig");
 
 /// The route's shape (config.zig refuses other checkpoints).
 pub const route_shape: moe_route.Shape = .{ .hidden = 4096, .experts = 288, .topk = 8 };
@@ -100,12 +101,22 @@ pub const Kernels = struct {
     absorb_nax_tp: mtl.Pipeline,
     mm_bf16: affine_mm.Pipes, // prompt chunks' 4-bit g64 matmuls on the tensor units (core/affine_mm.zig): dense, gathers
     mm_f32: affine_mm.Pipes, // and with fp32 out: expert parallel by rows' down partials
+    wide: ?wide.Pipes = null, // the products at other widths (wide.zig), for a checkpoint that has one
 
     pub fn deinit(k: *Kernels) void {
         const info = @typeInfo(Kernels).@"struct";
         inline for (info.field_names, info.field_types) |name, T| {
-            if (T == mtl.Pipeline) @field(k, name).deinit() else if (T != u64) for (&@field(k, name)) |*p| p.deinit();
+            if (T == mtl.Pipeline) @field(k, name).deinit() else if (T == ?wide.Pipes) {
+                if (k.wide) |*w| w.deinit();
+            } else if (T != u64) for (&@field(k, name)) |*p| p.deinit();
         }
+    }
+
+    /// The other widths' pipelines, once: their sources join the hash a learned state's identity reads.
+    pub fn widen(k: *Kernels, gpa: std.mem.Allocator, device: mtl.Device) !void {
+        if (k.wide != null) return;
+        k.wide = try wide.load(gpa, device);
+        k.source_hash ^= k.wide.?.hash;
     }
 };
 
@@ -182,9 +193,19 @@ const Job = struct {
 };
 
 /// Generated kernel `key`'s template at other parameters, under `name`.
-fn instance(comptime key: []const u8, comptime params: []const u8, comptime name: []const u8) []const u8 {
+pub fn instance(comptime key: []const u8, comptime params: []const u8, comptime name: []const u8) []const u8 {
     const f = comptime kernelOf(key).functions[0];
     return "\ntemplate [[host_name(\"" ++ name ++ "\")]] [[kernel]] decltype(" ++ f ++ "<" ++ params ++ ">) " ++ f ++ "<" ++ params ++ ">;\n";
+}
+
+/// Generated kernel `key`'s source.
+pub fn generatedSource(comptime key: []const u8) []const u8 {
+    return kernelOf(key).source;
+}
+
+/// Generated kernel `key`'s first function.
+pub fn generatedFunction(comptime key: []const u8) [:0]const u8 {
+    return kernelOf(key).functions[0];
 }
 
 fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
@@ -197,6 +218,7 @@ fn kernelOf(comptime key: []const u8) sources.glm.Kernel {
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !*Kernels {
     const k = try gpa.create(Kernels);
     errdefer gpa.destroy(k);
+    k.wide = null;
     var jobs: [generated.len + 22]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);

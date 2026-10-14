@@ -3,6 +3,7 @@ import clsx from 'clsx'
 import { api } from '../../lib/ipc'
 import { useEngine } from '../../lib/engine'
 import type { EngineStatus } from '../../lib/types'
+import { repoDisplayName } from '../../lib/turn-stats-line'
 
 type ChipState = 'loaded' | 'loading' | 'stopped' | 'failed'
 
@@ -22,7 +23,7 @@ export function EngineChip({ active, onOpen }: { active: boolean; onOpen: () => 
   const status = snapshot?.status
   if (!status?.available) return null
   const state = engineChipState(status)
-  const model = status.model ? status.model.split('/').pop() ?? status.model : null
+  const model = status.model ? snapshot?.installed.find((entry) => entry.repo === status.model)?.title ?? repoDisplayName(status.model) : null
   const canEject = !!status.model && (state === 'loaded' || state === 'loading')
   const eject = async () => {
     if (ejecting) return
@@ -36,7 +37,7 @@ export function EngineChip({ active, onOpen }: { active: boolean; onOpen: () => 
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen() } }}
-      title={status.model ? `${status.model}: ${STATE_LABEL[state].toLowerCase()}` : 'Open Models'}
+      title={status.model ? `${model}: ${STATE_LABEL[state].toLowerCase()}` : 'Open Models'}
       className={clsx('no-drag group flex h-8 w-full cursor-default items-center gap-2 rounded-[10px] px-2.5 text-[13px] transition-colors', active ? 'bg-surface-hover' : 'hover:bg-surface')}
     >
       <span className="flex w-4 shrink-0 items-center justify-center">

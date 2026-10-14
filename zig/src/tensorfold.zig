@@ -13,6 +13,9 @@ pub const ids_json = @import("core/ids_json.zig");
 pub const lanes = @import("lanes");
 pub const segments = @import("core/segments.zig");
 pub const row_projection = @import("core/row_projection.zig");
+pub const affine_mm = @import("core/affine_mm.zig");
+/// The checkpoint formats (MLX affine and its fp64 reader for the device checks, exact widen).
+pub const quant = @import("core/quant/quant.zig");
 pub const exl3_format = @import("core/exl3_format.zig");
 pub const exl3_projection = @import("core/exl3_projection.zig");
 pub const exlr8 = @import("core/exlr8.zig");
@@ -22,6 +25,7 @@ pub const exlr8_prompt = @import("core/exlr8_prompt.zig");
 pub const glm_dsa = @import("families/glm_dsa/glm_dsa.zig");
 pub const nemotron = @import("families/nemotron/nemotron.zig");
 pub const flashnext_replay = @import("families/flashnext/replay.zig");
+pub const flashnext_rows = @import("families/flashnext/rows_load.zig");
 pub const flashnext_engine = @import("families/flashnext/engine.zig");
 pub const flashnext_snapshot = @import("families/flashnext/snapshot.zig");
 pub const flashnext_learned = @import("families/flashnext/learned.zig");

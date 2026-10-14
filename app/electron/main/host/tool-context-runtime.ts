@@ -1,8 +1,16 @@
+import { assertSavedMemoryRead, assertMemoryContribution, captureThreadMemoryPolicy, assertThreadMemoryTransport, effectiveThreadMemoryPolicy, canContributeThreadMemory, threadMemoryPolicyRevision, roomWithoutSavedRecall } from '../../../shared/thread-memory-policy'
+import { assertThreadChildSupported } from '../../../shared/thread-child-policy'
+import { canRecallThread } from '../../agent/session-recall'
 import { randomUUID } from 'node:crypto'
 import { runAgent } from '../../agent/loop'
 import { assertProviderEndpoint } from '../../agent/security'
 import { runControllerAction } from '../../agent/controller'
 import { runComputerUse } from './computer-use-host'
+import { phoneHost } from './phone-host'
+import { engineService } from './engine-runtime'
+import { isExternalProvider } from '../../../shared/provider-trust'
+import { stripIncognitoThreads } from '../../agent/incognito'
+import type { PhoneToolInput } from '../../agent/types'
 import type { ComputerUseInput } from '../../agent/computer-use/actions'
 import {
   appendSubAgentMessage,
@@ -34,7 +42,7 @@ import { blindSearchToken, searchSessionIndex, vontraPath } from '../../store'
 import { createManagedOutputStore } from './managed-outputs'
 
 export interface ToolContextRuntime {
-  fullToolContext(run?: { thread?: Thread; provider?: Provider; model?: string; signal?: AbortSignal; subAgentId?: string }): any
+  fullToolContext(run?: { thread?: Thread; provider?: Provider; model?: string; signal?: AbortSignal; subAgentId?: string; memoryPolicy?: import('../../agent/types').ThreadMemoryPolicy; memoryOwner?: { id: string; revision: number } }): any
   runReadOnlySubAgent(
     agent: SubAgent,
     provider: Provider,
@@ -48,6 +56,9 @@ export interface ToolContextRuntime {
       project?: Project | null
       workspace?: WorkspaceLocation | null
       signal: AbortSignal
+      memoryPolicy?: import('../../agent/types').ThreadMemoryPolicy
+      incognito?: boolean
+      memoryOwner?: { id: string; revision: number }
       maxSteps?: number
       maxWallMs?: number
     },
@@ -105,12 +116,41 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
       project?: Project | null
       workspace?: WorkspaceLocation | null
       signal: AbortSignal
+      memoryPolicy?: import('../../agent/types').ThreadMemoryPolicy
+      incognito?: boolean
+      memoryOwner?: { id: string; revision: number }
       maxSteps?: number
       maxWallMs?: number
     },
   ) {
+    const storedAgent = store.subAgents.find((candidate) => candidate.id === agent.id)
+    if (!storedAgent) throw new Error('The owning sub-agent is unavailable; refusing to start an unregistered child.')
+    // The saved host record owns this assignment. A caller-supplied parent or memory
+    // owner may add restrictions, but cannot replace the real owner with another chat.
+    const ownedIds = [...new Set([storedAgent.threadId, storedAgent.parent.threadId].filter((id): id is string => !!id))]
+    const ownerId = ownedIds[0] ?? input.memoryOwner?.id
+    for (const id of new Set([...ownedIds, ...(input.memoryOwner?.id ? [input.memoryOwner.id] : [])])) {
+      const actualOwner = store.threads.find((thread) => thread.id === id)
+      if (!actualOwner || actualOwner.archivedAt) throw new Error('The owning chat is unavailable; refusing to create a permissive child.')
+      assertThreadChildSupported(actualOwner)
+    }
+    if (input.memoryOwner && ownedIds.length && !ownedIds.includes(input.memoryOwner.id)) throw new Error('The child memory owner does not match its host-owned parent.')
+    const owner = ownerId ? store.threads.find((thread) => thread.id === ownerId) : undefined
+    if (ownerId && (!owner || owner.archivedAt)) throw new Error('The owning chat is unavailable; refusing to create a permissive child.')
+    const inheritedPolicy = captureThreadMemoryPolicy(owner ?? {}, input.memoryPolicy)
+    const inheritedOwner = input.memoryOwner ?? (owner ? { id: owner.id, revision: threadMemoryPolicyRevision(owner) } : undefined)
+    const assertRequestAllowed = () => {
+      for (const id of new Set([...ownedIds, ...(input.memoryOwner?.id ? [input.memoryOwner.id] : [])])) {
+        const current = store.threads.find((thread) => thread.id === id)
+        if (!current || current.archivedAt) throw new Error('The owning chat is unavailable; refusing to continue this child.')
+        assertThreadChildSupported(current)
+      }
+    }
+    assertRequestAllowed()
     const childThread: Thread = {
       id: `thread-${agent.id}`,
+      memoryPolicy: { ...inheritedPolicy },
+      incognito: input.incognito || owner?.incognito,
       title: agent.name,
       kind: 'task',
       projectId: input.projectId ?? null,
@@ -142,6 +182,7 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
     try {
       assertProviderEndpoint(provider)
       await runAgent({
+        assertRequestAllowed,
         thread: childThread,
         provider,
         model,
@@ -155,8 +196,9 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
         autoCompact: true,
         maxSteps: input.maxSteps ?? 12,
         maxWallMs: input.maxWallMs ?? 180_000,
-        projectMemory: renderProjectMemoryBucket(input.project ?? store.projects.find((p) => p.id === input.projectId)),
-        toolContext: fullToolContext({ thread: childThread, provider, model, signal: input.signal, subAgentId: agent.id }),
+        memoryPolicy: inheritedPolicy,
+        projectMemory: effectiveThreadMemoryPolicy(childThread).useExisting ? renderProjectMemoryBucket(input.project ?? store.projects.find((p) => p.id === input.projectId)) : '',
+        toolContext: fullToolContext({ thread: childThread, provider, model, signal: input.signal, subAgentId: agent.id, memoryOwner: inheritedOwner }),
       })
     } catch (e: any) {
       const message = String(e?.message ?? e)
@@ -195,7 +237,22 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
     return { agent: completed.agent ?? latest, output: `Sub-agent result: ${result.slice(0, 8000)}` }
   }
 
-  async function launchThreadSubAgent(thread: Thread, provider: Provider, model: string, input: { task: string; name?: string | null; model?: string | null; providerId?: string | null; accountId?: string | null; agent?: string | null; background?: boolean }, signal: AbortSignal) {
+  async function launchThreadSubAgent(thread: Thread, provider: Provider, model: string, input: { task: string; name?: string | null; model?: string | null; providerId?: string | null; accountId?: string | null; agent?: string | null; background?: boolean }, signal: AbortSignal, parentPolicy?: import('../../agent/types').ThreadMemoryPolicy, parentOwner?: { id: string; revision: number }, capturedOwner?: Pick<Thread, 'bot' | 'phoneLocalOnly'>) {
+    const assertOwner = () => {
+      assertThreadChildSupported(capturedOwner)
+      assertThreadChildSupported(thread)
+      const actual = store.threads.find((candidate) => candidate.id === thread.id)
+      if (!actual || actual.archivedAt) throw new Error('The owning chat is unavailable; refusing to create a permissive child.')
+      assertThreadChildSupported(actual)
+      if (parentOwner) {
+        const owner = store.threads.find((candidate) => candidate.id === parentOwner.id)
+        if (!owner || owner.archivedAt) throw new Error('The owning chat is unavailable; refusing to create a permissive child.')
+        assertThreadChildSupported(owner)
+      }
+    }
+    assertOwner()
+    if (signal.aborted || thread.archivedAt || parentOwner && threadMemoryPolicyRevision(thread) !== parentOwner.revision) throw new Error('This parent run can no longer launch a child.')
+    if (thread.incognito) throw new Error('Incognito cannot launch a persistent sub-agent; use an ordinary saved task.')
     const preset = normalizeSubAgentPreset(input.agent)
     const task = applySubAgentPreset(preset, String(input.task || '').trim())
     if (!String(input.task || '').trim()) throw new Error('Sub-agent task is required.')
@@ -240,6 +297,9 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
       childModel = routed.route.model
       routeNotice = routed.notice ?? null
     }
+    assertOwner()
+    const inheritedMemoryPolicy = captureThreadMemoryPolicy(thread, parentPolicy)
+    assertThreadMemoryTransport(thread, childProvider, inheritedMemoryPolicy)
     const runId = `subagent-${randomUUID()}`
     const created = createSubAgentFromLaunch(store.subAgents, {
       source: 'thread_tool',
@@ -266,6 +326,9 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
       else signal.addEventListener('abort', abortBackground, { once: true })
     }
     const work = runReadOnlySubAgent(created.agent, childProvider, childModel, {
+      memoryPolicy: inheritedMemoryPolicy,
+      memoryOwner: parentOwner ?? { id: thread.id, revision: threadMemoryPolicyRevision(thread) },
+      incognito: thread.incognito,
       task,
       parentLabel: `parent thread "${thread.title || 'Parent thread'}"`,
       cwd: thread.cwd,
@@ -310,7 +373,34 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
     return launched
   }
 
-  function fullToolContext(run?: { thread?: Thread; provider?: Provider; model?: string; signal?: AbortSignal; subAgentId?: string }) {
+  function fullToolContext(run?: { thread?: Thread; provider?: Provider; model?: string; signal?: AbortSignal; subAgentId?: string; memoryPolicy?: import('../../agent/types').ThreadMemoryPolicy; memoryOwner?: { id: string; revision: number } }) {
+    const childOwner = run?.thread
+    const operationalSubAgentId = run?.subAgentId
+    const capturedChildOwner = Object.freeze({ bot: childOwner?.bot, phoneLocalOnly: childOwner?.phoneLocalOnly })
+    const memoryPolicy = captureThreadMemoryPolicy(run?.thread ?? {}, run?.memoryPolicy)
+    const memoryOwner = run?.memoryOwner ?? (run?.thread && store.threads.includes(run.thread) ? { id: run.thread.id, revision: threadMemoryPolicyRevision(run.thread) } : null)
+    const recallThreads = () => store.threads.filter((thread) => canRecallThread(thread, childOwner?.id) && (memoryPolicy.useExisting || thread.id === childOwner?.id))
+    const recallMissions = () => {
+      const ids = new Set(recallThreads().map((thread) => thread.id))
+      return store.missions.filter((mission) => !mission.threadId || ids.has(mission.threadId))
+    }
+    const subAgentSourceIds = (agent: SubAgent) => [...new Set([agent.threadId, agent.parent?.threadId].filter((id): id is string => !!id))]
+    const subAgentVisible = (agent: SubAgent) => {
+      const ids = subAgentSourceIds(agent)
+      const ownWorker = !!operationalSubAgentId && agent.id === operationalSubAgentId
+      if (!memoryPolicy.useExisting && !ownWorker && !ids.includes(childOwner?.id ?? '')) return false
+      return ids.every((id) => {
+        const source = store.threads.find((thread) => thread.id === id)
+        return !!source && canRecallThread(source, childOwner?.id)
+      })
+    }
+    const recalledSourceIds = new Set<string>()
+    const assertRecallSourcesAllowed = () => {
+      for (const id of recalledSourceIds) {
+        const source = store.threads.find((thread) => thread.id === id)
+        if (!source || !canRecallThread(source, childOwner?.id)) throw new Error('A recalled conversation is no longer available to this run; start a new conversation without that context.')
+      }
+    }
     const project = run?.thread?.projectId ? store.projects.find((p) => p.id === run.thread?.projectId) : null
     const cloudModelContext = !!run?.provider && run.provider.kind !== 'local'
     const workspace = run?.thread?.workspace ?? project?.workspace ?? null
@@ -320,24 +410,34 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
     }
     return {
       backend,
+      memoryPolicy,
       workspace: workspace ?? (run?.thread ? { kind: 'local' as const, path: run.thread.cwd } : null),
       disabledCapabilityIds: store.settings.capabilities?.disabledCapabilityIds ?? [],
       localScripts: store.settings.capabilities?.localScripts ?? [],
       packagedPlugins: store.settings.capabilities?.packagedPlugins ?? [],
       allowSandboxNetwork: store.settings.allowTaskNetwork ?? false,
-      writeManagedOutput: managedOutputs.write,
+      writeManagedOutput: (ref: string, content: string) => {
+        if (run?.thread?.incognito) throw new Error('Incognito does not save automatic tool-output files; this output remains bounded in the current conversation.')
+        return managedOutputs.write(ref, content)
+      },
       readManagedOutput: managedOutputs.read,
       emailSettings: store.settings.email,
       slackSettings: store.settings.slack,
       calendarSettings: store.settings.calendar,
       documentSettings: store.settings.documents,
       browserSettings: store.settings.browser,
-      threads: store.threads,
-      listSubAgents: () => store.subAgents,
+      threads: recallThreads(),
+      recallThreads,
+      recordRecallSources: (ids: string[]) => { for (const id of ids) recalledSourceIds.add(id) },
+      assertRecallSourcesAllowed,
+      listSubAgents: () => store.subAgents.filter(subAgentVisible),
       currentSubAgentId: run?.subAgentId,
       sendSubAgentMessage: (input: import('../../agent/tools').SubAgentMailboxSendInput) => {
+        if (run?.thread?.incognito) throw new Error('Incognito cannot write a persistent sub-agent mailbox.')
         const target = store.subAgents.find((agent) => agent.id === input.agentId)
         if (!target) throw new Error(`Sub-agent "${input.agentId}" was not found.`)
+        if (!subAgentVisible(target)) throw new Error('Private sub-agent history is unavailable to this conversation.')
+        if (store.threads.some((thread) => thread.id === target.threadId && thread.incognito)) throw new Error('Private sub-agent history is unavailable.')
         if (run?.subAgentId) {
           if (target.id !== run.subAgentId) throw new Error('A child sub-agent may only write to its own mailbox.')
         } else if (!run?.thread || target.threadId !== run.thread.id) {
@@ -357,6 +457,10 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
       readSubAgentMessages: (input: import('../../agent/tools').SubAgentMailboxReadInput) => {
         const target = store.subAgents.find((agent) => agent.id === input.agentId)
         if (!target) throw new Error(`Sub-agent "${input.agentId}" was not found.`)
+        if (!subAgentVisible(target)) throw new Error('Private sub-agent history is unavailable to this conversation.')
+        for (const id of subAgentSourceIds(target)) recalledSourceIds.add(id)
+        assertRecallSourcesAllowed()
+        if (store.threads.some((thread) => thread.id === target.threadId && thread.incognito)) throw new Error('Private sub-agent history is unavailable.')
         if (run?.subAgentId) {
           if (target.id !== run.subAgentId) throw new Error('A child sub-agent may only read its own mailbox.')
         } else if (!run?.thread || target.threadId !== run.thread.id) {
@@ -373,13 +477,16 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
         }
         return read.messages
       },
-      searchSessions: (options: import('../../agent/session-recall').SessionSearchOptions) =>
-        searchSessionIndex(vontraPath('state', 'session-search.sqlite'), store.threads, options, blindSearchToken),
+      searchSessions: (options: import('../../agent/session-recall').SessionSearchOptions) => {
+        assertSavedMemoryRead(run?.thread ?? {}, memoryPolicy)
+        return searchSessionIndex(vontraPath('state', 'session-search.sqlite'), recallThreads(), { ...options, currentThreadId: childOwner?.id }, blindSearchToken)
+      },
       connectorEvents: store.connectorEvents,
-      missions: store.missions,
-      rooms: store.rooms,
+      missions: recallMissions(),
+      recallMissions,
+      rooms: memoryPolicy.useExisting ? store.rooms : store.rooms.map(roomWithoutSavedRecall),
       tickets: store.tickets,
-      projectMemory: store.projectMemory,
+      projectMemory: memoryPolicy.useExisting ? store.projectMemory : [],
       sensitiveRetrievalAllowed: !cloudModelContext,
       sensitiveRetrievalReason: cloudModelContext
         ? `cloud model route via ${run?.provider?.name ?? 'cloud provider'}; use a local provider to include connector, chat, document, and memory retrieval sources`
@@ -392,6 +499,7 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
       // First-class artifact registration (VST-011): persisted with run provenance; the
       // run receipt counts save_artifact tool items, so registration IS receipt-visible.
       registerArtifact: (input: CreateArtifactInput) => {
+        if (run?.thread?.incognito) throw new Error('Incognito does not retain artifact content or metadata in TensorFold. Save an explicitly requested output to the workspace instead.')
         const record = createArtifactRecord({
           ...input,
           provenance: {
@@ -408,6 +516,13 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
       // The agent proposes a Skill/Command; it's filed (deduped) and pushed to the
       // renderer for review. Nothing is created until the user accepts.
       fileSuggestion: (input: SuggestionInput) => {
+        if (run?.thread?.incognito) throw new Error('Incognito does not save learned skill or command suggestions.')
+        assertMemoryContribution(run?.thread ?? {}, memoryPolicy)
+        if (memoryOwner) {
+          const owner = store.threads.find((thread) => thread.id === memoryOwner.id)
+          if (!owner || !canContributeThreadMemory(owner, memoryPolicy, memoryOwner.revision, run?.signal)) throw new Error('The owning chat no longer permits memory proposals.')
+        }
+        if (run?.signal?.aborted || run?.thread?.archivedAt) throw new Error('This run can no longer propose memories.')
         const { added, list } = addSuggestion(store.suggestions, input, { skills: store.skills, commands: store.commands })
         if (added) {
           store.suggestions = list
@@ -422,8 +537,18 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
       runBrowserAutomation,
       runControllerAction: (input: ControllerActionInput) => runControllerAction(store.settings.controller, input, 'TensorFold'),
       runComputerUse: (input: ComputerUseInput) => runComputerUse(input, { threadId: run?.thread?.id ?? null, signal: run?.signal }, deps.cancelThreadRun),
+      phoneControlAvailable: !!run?.thread && !!run.provider && !isExternalProvider(run.provider) && run.thread.kind === 'chat' && !run.thread.orchestratorHostId && workspace?.kind !== 'ssh' && !run.subAgentId && phoneHost()?.service.isGranted(run.thread.id) === true,
+      phoneLocalOnly: run?.thread?.phoneLocalOnly === true,
+      phonePrivacyGuard: () => !run?.provider || isExternalProvider(run.provider) || engineService()?.hasExternalResearchEnabled()
+        ? 'This phone conversation stays local; choose a model running on this Mac and turn Cortheon off before continuing.' : null,
+      runPhoneControl: async (input: PhoneToolInput) => {
+        if (!run?.thread || !run.provider || isExternalProvider(run.provider) || run.thread.orchestratorHostId || workspace?.kind === 'ssh' || run.subAgentId) return { ok: false, title: 'Phone control', output: 'Phone control requires its explicitly allowed local chat; remote and external model routes cannot access the phone.' }
+        const service = phoneHost()?.service
+        if (!service) return { ok: false, title: 'Phone control', output: 'Phone control is unavailable in this process.' }
+        return service.tool(input, run.thread.id, run.signal)
+      },
       ...(run?.thread && run.provider && run.model && run.signal
-        ? { launchSubAgent: (input: { task: string; name?: string | null; model?: string | null; providerId?: string | null; accountId?: string | null; background?: boolean }) => launchThreadSubAgent(run.thread!, run.provider!, run.model!, input, run.signal!) }
+        ? { launchSubAgent: (input: { task: string; name?: string | null; model?: string | null; providerId?: string | null; accountId?: string | null; background?: boolean }) => launchThreadSubAgent(childOwner!, run.provider!, run.model!, input, run.signal!, memoryPolicy, memoryOwner ?? undefined, capturedChildOwner) }
         : {}),
       ...mcpToolContext(),
     }

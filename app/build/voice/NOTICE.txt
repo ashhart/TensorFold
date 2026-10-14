@@ -1,0 +1,29 @@
+TensorFold managed offline speech
+
+Kokoro-82M v1.0 model and voices
+Model authors: hexgrad and the Kokoro contributors.
+ONNX conversion: ONNX Community.
+Model revision: 1939ad2a8e416c0acfeecc08a694d14ef25f2231.
+License: Apache License 2.0.
+Source: https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX
+
+kokoro-js 1.2.1 and Transformers.js 3.8.1
+License: Apache License 2.0.
+Sources: https://github.com/hexgrad/kokoro and https://github.com/huggingface/transformers.js
+
+ONNX Runtime 1.21.0
+License: MIT.
+Source: https://github.com/microsoft/onnxruntime
+
+TensorFold phonemizer adapter 1.2.1-tensorfold.1
+License: MIT.
+The adapter uses HeadTTS 1.2.0's local English language module.
+HeadTTS license: MIT.
+Source: https://github.com/met4citizen/HeadTTS
+Its CMU pronunciation dictionary uses the Carnegie Mellon University BSD license,
+reproduced in CMU-DICTIONARY-BSD.txt and retained in the dictionary itself.
+TensorFold's desktop speech worker uses the Node exports of kokoro-js with this
+adapter. The unused self-contained kokoro-js browser bundle and its source map
+are excluded from the desktop package.
+
+The original dependency license files are included with the packaged modules.

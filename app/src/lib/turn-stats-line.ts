@@ -7,6 +7,7 @@ const FORMAT_SUFFIX = /(?:-(?:mlx|gguf|bf16|fp16|fp8|nvfp4|awq|gptq|q\d\w*|\d+bi
 
 /** A readable name for a Hugging Face style repo id: "TensorFold/Qwen3.8-27B-MLX-4bit" to "Qwen3.8 27B". */
 export function repoDisplayName(repo: string): string {
+  if (/^local\/[a-f0-9]{64}$/.test(repo)) return 'Local checkpoint'
   const name = repo.split('/').pop() ?? repo
   return name.replace(FORMAT_SUFFIX, '').replace(/[-_]+/g, ' ').trim() || name
 }

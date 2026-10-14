@@ -3,11 +3,15 @@ const builtin = @import("builtin");
 const cuda_build = @import("zig/build/cuda.zig");
 const dist_build = @import("zig/build/dist.zig");
 const qwen27_build = @import("zig/build/qwen27.zig");
+const core_checks = @import("zig/build/core_checks.zig");
+const glm_checks = @import("zig/build/glm_checks.zig");
+const flashnext_checks = @import("zig/build/flashnext_checks.zig");
 const hip_build = @import("zig/build/hip.zig");
 const grammar_build = @import("zig/build/grammar.zig");
 const counters_build = @import("zig/build/metal_counters.zig");
 const exl3_build = @import("zig/build/exl3.zig");
 const exlr8_build = @import("zig/build/exlr8.zig");
+const golden_build = @import("zig/build/golden.zig");
 
 comptime {
     const required = std.mem.trim(u8, @embedFile(".zig-version"), "\r\n");
@@ -154,7 +158,7 @@ pub fn build(b: *std.Build) void {
     }
     const xgrammar = grammar_build.option(b);
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
-    cuda_build.hostTests(b, draft_ids, build_options, test_step);
+    cuda_build.hostTests(b, draft_ids, build_options, test_step, target.result.os.tag != .macos);
     if (target.result.os.tag == .linux) {
         // the engine seam's tests (lane_host.zig and its siblings), which the macOS branch runs from its own api module
         const lanes_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
@@ -218,6 +222,7 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } },
     });
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests })).step);
+    @import("zig/build/cortheon_fuzz.zig").add(b, target, api, tokenizer, template);
     // the parse half's tests, as their own test binary (zig/src/server/tool_parse_test.zig)
     const tool_parse_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/server/tool_parse_test.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } } }) });
     test_step.?.dependOn(&b.addRunArtifact(tool_parse_tests).step);
@@ -226,25 +231,7 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     // the engine seam's own tests (lane_host.zig), as zig/tests/server/zig_test.sh runs them
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api })).step);
     // the frozen server parity goldens, checked by Zig driving fake_serve
-    const fake_serve = b.addExecutable(.{ .name = "fake_serve", .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/server/fake_serve.zig"),
-        .target = target,
-        .optimize = .Debug,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "server", .module = server_tests }, .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } },
-    }) });
-    const golden_check = b.addExecutable(.{ .name = "golden_check", .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/server/golden_check.zig"),
-        .target = target,
-        .optimize = .Debug,
-    }) });
-    const golden_run = b.addRunArtifact(golden_check);
-    golden_run.addArtifactArg(fake_serve);
-    golden_run.addFileArg(b.path("zig/tests/server/golden/cases.json"));
-    golden_run.addDirectoryArg(b.path("zig/tests/server/golden"));
-    golden_run.addDirectoryArg(b.path("zig/tests/server/fixtures"));
-    golden_run.setCwd(b.path("."));
-    b.step("test-golden", "The frozen server parity goldens checked by a Zig step driving fake_serve").dependOn(&golden_run.step);
+    golden_build.step(b, target, server_tests, api, tokenizer, template);
     b.step("test-native", "The Metal engines module's host-side tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines })).step);
     const reuse = b.addExecutable(.{ .name = "tf-flashnext-reuse", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/flashnext_reuse.zig"),
@@ -458,6 +445,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "row_projection", .module = row_mod } },
     }) });
     b.step("tf-row-check", "The core row projection on synthetic 4-bit matrices: widths bit-equal, a CPU reference, indexed experts").dependOn(&b.addInstallArtifact(row_check, .{}).step);
+    core_checks.rowWidths(b, target, optimize, metal, row_mod);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = row_mod })).step);
     // The prompt tiles and their decode twin on synthetic matrices; runs on any Mac's GPU
     const tile_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/tile_qmm.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
@@ -488,6 +476,9 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
 
     // The core lane, shared-context and Qwen3.8-27B programs and host tests.
     qwen27_build.targets(b, target, optimize, metal, sources, engine, lanes, mods.qwen27, test_step);
+    core_checks.targets(b, target, optimize, metal, engine);
+    glm_checks.targets(b, target, optimize, metal, engine, sources);
+    flashnext_checks.targets(b, target, optimize, metal, engine);
 
     _ = nativeServer(b, target, optimize, metal, engine, api, engines, build_options, test_step);
 

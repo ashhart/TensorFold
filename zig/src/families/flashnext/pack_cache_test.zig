@@ -295,3 +295,28 @@ test "cache readiness reads bounded metadata rather than copying the weight body
     var bounded: std.heap.FixedBufferAllocator = .init(&storage);
     try std.testing.expect(try pio.packReady(bounded.allocator(), io, path, "checkpoint"));
 }
+
+test "packs cached or left in the model folder under the format-less identity are rebuilt, never reused" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const paths = try Paths.init(tmp);
+    defer paths.deinit();
+    const h = pio.hashBytes("index");
+    const shards = [_]pio.ShardId{.{ .name = "model-00001-of-00001.safetensors", .size = 4, .header_sha256 = h }};
+    const current = try pio.identityString(a, h, h, &shards);
+    defer a.free(current);
+    const old = current[std.mem.indexOfScalar(u8, current, '\n').? + 1 ..]; // the 6/32-only packer's identity text
+    try std.testing.expect(std.mem.startsWith(u8, old, "index "));
+    var stale: Builder = .{ .identity = old };
+    const old_dir = try cache.ensure(a, io, paths.model, paths.root, old, &stale);
+    defer a.free(old_dir);
+    try tmp.dir.createDir(io, "model/zig-pack", .default_dir);
+    const legacy = try std.fs.path.join(a, &.{ paths.model, "zig-pack" });
+    defer a.free(legacy);
+    try stale.build(a, io, paths.model, legacy, "");
+    var builder: Builder = .{ .identity = current };
+    const dir = try cache.ensure(a, io, paths.model, paths.root, current, &builder);
+    defer a.free(dir);
+    try std.testing.expectEqual(@as(usize, 1), builder.calls);
+    try std.testing.expect(!std.mem.eql(u8, old_dir, dir) and !std.mem.eql(u8, legacy, dir));
+}

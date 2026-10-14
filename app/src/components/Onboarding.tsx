@@ -1,6 +1,7 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { CORTHEON_RELEASE_POLICY } from '../../shared/release-feature-policy'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import clsx from 'clsx'
-import { requestSettingsSection, useStore, type View } from '../lib/store'
+import { requestSettingsSection, useStore } from '../lib/store'
 import { api } from '../lib/ipc'
 import { Icon, type IconName } from '../lib/icons'
 import { BrandIcon, providerBrand } from '../lib/brand'
@@ -14,36 +15,47 @@ import {
   type LocalRuntimePreset,
 } from './settings/shared'
 import {
-  ONBOARDED_KEY,
+  onboardingPreviouslyCompleted,
+  readOnboardingDraft,
+  saveOnboardingDraft,
   ONBOARDING_STEPS,
   nextOnboardingStep,
   onboardingStepIndex,
   previousOnboardingStep,
+  onboardingProviderVisible,
   type OnboardingStepId,
+  type OnboardingDesktopMode,
 } from './onboarding-model'
 export { ONBOARDED_KEY, ONBOARDING_STEPS, nextOnboardingStep, onboardingStepIndex, previousOnboardingStep, shouldShowOnboarding } from './onboarding-model'
 import type { Provider, ProviderDiscoveryKind, Readiness } from '../lib/types'
 import { EngineChoice } from './models/EngineChoice'
 import { BrandMark } from './BrandMark'
-import { ENGINE_PROVIDER_ID } from '../lib/engine'
+import { ENGINE_PROVIDER_ID, formatBytes, useEngine } from '../lib/engine'
+import { fullLayoutPreferenceReadable, savedFullWorkspaceLayout } from '../lib/full-workspace-layout'
+import { finishOnboardingLanding } from '../lib/onboarding-landing'
 
 type ProviderSetupStep = 'choice' | 'cloud' | 'local' | 'configure'
 type Mode = 'cloud' | 'local'
 
 const DISCOVERY_SOURCES: ProviderDiscoveryKind[] = ['omlx', 'ollama', 'lmstudio']
 
-function markOnboarded() {
-  try { localStorage.setItem(ONBOARDED_KEY, '1') } catch { /* ignore */ }
-}
-
 export function Onboarding({ onDone }: { onDone: () => void }) {
   const settings = useStore((s) => s.settings)
   const saveSettings = useStore((s) => s.saveSettings)
   const setView = useStore((s) => s.setView)
-  const newChat = useStore((s) => s.newChat)
-  const openNewProject = useStore((s) => s.openNewProject)
+  const initialDraft = useRef(readOnboardingDraft(settings?.desktopMode ?? 'full')).current
+  const previouslyCompleted = useRef(onboardingPreviouslyCompleted(settings?.desktopOnboardingComplete)).current
+  const layoutBeforeSetup = useRef(savedFullWorkspaceLayout()).current
+  const preferenceReadable = useRef(fullLayoutPreferenceReadable()).current
+  const [desktopMode, setDesktopMode] = useState<OnboardingDesktopMode>(initialDraft.mode)
+  const [tourStep, setTourStep] = useState<OnboardingStepId>(initialDraft.step)
+  const [finishing, setFinishing] = useState(false)
+  const finishLock = useRef(false)
+  const heading = useRef<HTMLHeadingElement>(null)
+  const { snapshot: engine } = useEngine()
 
-  const [tourStep, setTourStep] = useState<OnboardingStepId>('connect')
+  useEffect(() => { saveOnboardingDraft({ mode: desktopMode, step: tourStep }) }, [desktopMode, tourStep])
+  useEffect(() => { heading.current?.focus() }, [tourStep])
   const [providerStep, setProviderStep] = useState<ProviderSetupStep>('choice')
   const [mode, setMode] = useState<Mode>('cloud')
   const [preset, setPreset] = useState<CloudProviderPreset | LocalRuntimePreset | null>(null)
@@ -69,46 +81,73 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
       .catch((e) => { if (live) setReadiness({ ready: false, reason: 'no-provider', message: String(e?.message ?? e) }) })
     return () => { live = false }
   }, [activeProvider?.id, activeModel, activeProvider?.models?.join('\n'), connectedProviderName])
-  const connectedLabel = activeProvider && readiness?.ready
-    ? `${activeProvider.name}${activeModel ? ` / ${activeModel}` : ''}`
+  const connectedLabel = activeProvider && readiness?.ready && onboardingProviderVisible(desktopMode, activeProvider.id)
+    ? `${activeProvider.name}${activeModel ? ` / ${engine?.installed.find((model) => model.repo === activeModel)?.title ?? (/^local\//.test(activeModel) ? 'Local checkpoint' : activeModel)}` : ''}`
     : null
   const statusText = connectedLabel
     ?? (!activeProvider ? 'No model connected yet' : !readiness ? `Checking ${activeProvider.name}…` : `${activeProvider.name}: ${readiness.message || 'not ready'}`)
   const currentStep = ONBOARDING_STEPS[onboardingStepIndex(tourStep)]
   const currentStepIndex = onboardingStepIndex(tourStep)
+  const selectedModel = desktopMode === 'minimal' && activeProvider?.id !== ENGINE_PROVIDER_ID ? engine?.status.model ?? null : activeModel
+  const selectedModelLabel = selectedModel && (desktopMode === 'minimal' || activeProvider?.id === ENGINE_PROVIDER_ID)
+    ? engine?.installed.find((model) => model.repo === selectedModel)?.title || selectedModel
+    : selectedModel
 
-  const complete = (after?: () => void) => {
-    markOnboarded()
-    onDone()
-    after?.()
+  const complete = async () => {
+    if (finishLock.current || !settings) return
+    finishLock.current = true
+    setFinishing(true)
+    setError('')
+    try {
+      await finishOnboardingLanding({
+        mode: desktopMode, previouslyCompleted, savedLayout: layoutBeforeSetup, preferenceReadable,
+        persist: api.desktopModeSet, applySaved: (saved) => useStore.setState({ settings: saved }),
+        applyLayout: (layout) => useStore.getState().setFullWorkspaceLayout(layout),
+        newChat: () => useStore.getState().newChat(), home: () => setView({ name: 'home' }),
+        chatFailed: () => useStore.getState().setNotice({ kind: 'error', message: 'Your Full setup was saved, but a chat could not be opened. Use New chat to try again.' }),
+      })
+      onDone()
+    } catch (e: any) {
+      setError(e?.message ?? 'Could not save your workspace choice. Try again.')
+    } finally {
+      finishLock.current = false
+      setFinishing(false)
+    }
   }
-  const openView = (view: View) => complete(() => setView(view))
-  const openSettings = (section: string) => complete(() => {
+  // Opening a setup page or selecting a model never completes the first-run flow.
+  const openSettings = (section: string) => {
+    if (busy || finishing) return
+    saveOnboardingDraft({ mode: desktopMode, step: 'connect' })
     requestSettingsSection(section)
     setView({ name: 'settings', section })
-  })
-  const openChat = () => complete(() => { void newChat() })
-  // Choosing a downloaded engine model only makes it active; the engine starts on the first message.
-  const chooseEngineModel = async (repo: string) => {
-    if (!settings) return
-    await saveSettings({ ...settings, activeProviderId: ENGINE_PROVIDER_ID, activeProviderAccountId: null, activeModel: repo }, { silent: true })
-    setConnectedProviderName('TensorFold (built in)')
-    goToStep('chat')
   }
-  const openProjectModal = () => complete(() => {
-    setView({ name: 'projects' })
-    openNewProject()
-  })
-
+  const openModels = () => {
+    if (busy || finishing) return
+    saveOnboardingDraft({ mode: desktopMode, step: 'connect' })
+    setView({ name: 'models' })
+  }
+  // Selecting a downloaded model does not start the server or allocate its model memory.
+  const chooseEngineModel = async (repo: string) => {
+    if (!settings || busy) return
+    setBusy(true)
+    setError('')
+    try {
+      await saveSettings({ ...settings, activeProviderId: ENGINE_PROVIDER_ID, activeProviderAccountId: null, activeModel: repo }, { silent: true })
+      setConnectedProviderName('TensorFold (built in)')
+      setTourStep('guide')
+    } catch (e: any) { setError(e?.message ?? 'Could not select this model. Try again.') }
+    finally { setBusy(false) }
+  }
   const goToStep = (step: OnboardingStepId) => {
+    if (busy || finishing) return
     setTourStep(step)
     setError('')
   }
   const goNext = () => goToStep(nextOnboardingStep(tourStep))
   const goBack = () => {
-    if (tourStep !== 'connect') goToStep(previousOnboardingStep(tourStep))
-    else if (providerStep === 'configure') setProviderStep(mode === 'cloud' ? 'cloud' : 'local')
-    else if (providerStep !== 'choice') setProviderStep('choice')
+    if (tourStep === 'connect' && providerStep === 'configure') setProviderStep(mode === 'cloud' ? 'cloud' : 'local')
+    else if (tourStep === 'connect' && providerStep !== 'choice') setProviderStep('choice')
+    else goToStep(previousOnboardingStep(tourStep))
   }
 
   const pickCloud = (p: CloudProviderPreset) => {
@@ -222,7 +261,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
       })
       setConnectedProviderName(provider.name)
       setProviderStep('choice')
-      goToStep('chat')
+      setTourStep('guide')
     } catch (e: any) {
       setError(e?.message ?? 'Could not save the provider.')
     } finally {
@@ -232,150 +271,86 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
 
   return (
     <div data-testid="onboarding" className="scroll-thin h-full overflow-y-auto">
-      <div className="mx-auto grid min-h-full w-full max-w-[1160px] gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[280px_minmax(0,1fr)] lg:py-8">
-        <aside className="flex min-w-0 flex-col gap-5 lg:sticky lg:top-8 lg:h-[calc(100vh-64px)]">
-          <div className="flex items-center gap-2.5">
+      <div className="mx-auto grid min-h-full w-full max-w-[1080px] content-start gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[210px_minmax(0,1fr)] lg:gap-10 lg:py-10">
+        <aside className="min-w-0 lg:sticky lg:top-10 lg:self-start">
+          <div className="mb-5 flex items-center gap-2.5">
             <BrandMark size={36} tile />
-            <div className="min-w-0">
-              <div className="text-[15px] font-semibold text-ink">TensorFold</div>
-              <div className="text-[13px] text-ink-3">First start</div>
-            </div>
+            <div><div className="text-[15px] font-semibold text-ink">TensorFold</div><div className="text-[13px] text-ink-2">Let's get you set up</div></div>
           </div>
-
-          <div className="flex flex-col gap-0.5">
+          <nav aria-label="Setup progress" className="grid grid-cols-3 gap-1 lg:grid-cols-1 lg:gap-2">
             {ONBOARDING_STEPS.map((step, index) => {
               const active = step.id === tourStep
-              const done = index < currentStepIndex
-              return (
-                <button
-                  type="button"
-                  key={step.id}
-                  data-testid={`onboarding-step-${step.id}`}
-                  onClick={() => goToStep(step.id)}
-                  className={clsx(
-                    'flex w-full items-center gap-2.5 rounded-[10px] px-2.5 py-2 text-left transition-colors',
-                    active ? 'bg-surface-hover text-ink' : 'text-ink-2 hover:bg-surface hover:text-ink',
-                  )}
-                >
-                  <span className={clsx('flex h-7 w-7 shrink-0 items-center justify-center rounded-md', active ? 'bg-accent/15 text-accent' : done ? 'bg-positive/10 text-positive' : 'bg-surface text-ink-3')}>
-                    <Icon name={done ? 'check' : step.icon} size={14} />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[13px] font-medium">{step.label}</span>
-                    <span className="block truncate text-[13px] text-ink-3">{step.title}</span>
-                  </span>
-                </button>
-              )
+              return <button type="button" key={step.id} data-testid={`onboarding-step-${step.id}`} aria-current={active ? 'step' : undefined} disabled={busy || finishing} onClick={() => goToStep(step.id)} className={clsx('flex min-w-0 items-center gap-2 rounded-lg px-2 py-2.5 text-left text-[12px] focus-visible:outline-2 focus-visible:outline-accent sm:text-[13px]', active ? 'bg-surface-hover text-ink' : 'text-ink-2 hover:bg-surface')}>
+                <span className={clsx('flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[12px]', active ? 'bg-accent/15 text-accent' : 'bg-surface text-ink-2')}>{index + 1}</span>
+                <span>{step.label}</span>
+              </button>
             })}
-          </div>
-
-          <div className="rounded-xl border border-line bg-card p-3 shadow-card">
-            <div className="flex items-center gap-2 text-[13px] font-medium text-ink-2">
-              <Icon name={connectedLabel ? 'check' : 'warning'} size={14} className={connectedLabel ? 'text-positive' : 'text-warn'} />
-              Model status
-            </div>
-            <div data-testid="onboarding-model-status" className="mt-1.5 line-clamp-2 text-[13px] text-ink-3">{statusText}</div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Button size="xs" variant="default" icon="cpu" onClick={() => setView({ name: 'models' })}>Models</Button>
-              <Button size="xs" variant="default" icon="settings" onClick={() => openSettings('models')}>Providers</Button>
-              <Button size="xs" variant="default" icon="check" onClick={() => openSettings('readiness')}>Doctor</Button>
-            </div>
-          </div>
-
-          <button type="button" onClick={() => complete()} className="self-start text-[13px] text-ink-3 transition-colors hover:text-ink">
-            Skip onboarding
-          </button>
+          </nav>
+          <p className="mt-5 hidden text-[12px] leading-relaxed text-ink-2 lg:block">No account is needed for the built-in local engine.</p>
         </aside>
 
         <section className="flex min-w-0 flex-col">
-          <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div className="min-w-0">
-              <div className="mb-2 flex items-center gap-2 text-[13px] text-ink-3">
-                Step {currentStepIndex + 1} of {ONBOARDING_STEPS.length}
-              </div>
-              <h1 className="text-[28px] font-semibold tracking-normal text-ink">{currentStep.title}</h1>
-              <p className="mt-2 max-w-[620px] text-[14px] leading-relaxed text-ink-3">{currentStep.desc}</p>
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              <Button data-testid="onboarding-back" variant="default" icon="back" onClick={goBack} disabled={tourStep === 'connect' && providerStep === 'choice'}>Back</Button>
-              {tourStep !== 'settings' && <Button data-testid="onboarding-next" variant="primary" iconRight="arrowRight" onClick={goNext}>Next</Button>}
-              {tourStep === 'settings' && <Button data-testid="onboarding-finish" variant="primary" icon="check" onClick={() => complete()}>Finish</Button>}
-            </div>
+          <div className="mb-5">
+            <p className="mb-2 text-[12px] text-ink-2">Step {currentStepIndex + 1} of {ONBOARDING_STEPS.length}</p>
+            <h1 ref={heading} tabIndex={-1} className="text-[24px] font-semibold tracking-tight text-ink outline-none sm:text-[28px]">{currentStep.title}</h1>
+            <p className="mt-2 max-w-[620px] text-[14px] leading-relaxed text-ink-2">{currentStep.desc}</p>
           </div>
 
-          {tourStep === 'connect' && (
-            <ConnectStep
-              providerStep={providerStep}
-              setProviderStep={setProviderStep}
-              mode={mode}
-              preset={preset}
-              apiKey={apiKey}
-              localPath={localPath}
-              busy={busy}
-              error={error}
-              foundModels={foundModels}
-              cliAuth={cliAuth}
-              connectedLabel={connectedLabel}
-              onPickCloud={pickCloud}
-              onPickLocal={pickLocal}
-              onDetect={detect}
-              onConnect={connect}
-              onApiKeyChange={setApiKey}
-              onLocalPathChange={setLocalPath}
-              onOpenModels={() => openSettings('models')}
-              onOpenEngineModels={() => setView({ name: 'models' })}
-              onUseEngineModel={(repo) => void chooseEngineModel(repo)}
-              onContinue={goNext}
-            />
-          )}
+          {tourStep === 'mode' && <WorkspaceChoice value={desktopMode} onChange={(choice) => { setDesktopMode(choice); setProviderStep('choice') }} />}
 
-          {tourStep === 'chat' && (
-            <ModeIntro
-              icon="message"
-              title="Start clean conversations without dragging a repo along."
-              body="Chat creates regular threads, keeps them separate from Code projects, and is the right default for questions, drafting, comparison, and model exploration."
-              highlights={['No project required', 'Fast new-thread flow', 'Model and account stay visible']}
-              primary={{ label: 'Start chat', icon: 'message', onClick: openChat }}
-              secondary={{ label: 'Keep going', icon: 'arrowRight', onClick: goNext }}
-            />
-          )}
+          {tourStep === 'connect' && <>
+            {engine?.status.hardware && <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg bg-surface px-3 py-2 text-[12px] text-ink-2"><Icon name="monitor" size={14} /><span>{engine.status.hardware.chip || 'This Mac'}</span><span>{formatBytes(engine.status.totalMemoryBytes)} total memory</span><span>Models shows compatibility, memory and download space checks.</span></div>}
+            {desktopMode === 'full' && <p role="status" data-testid="onboarding-model-status" className="mb-3 break-words text-[12px] text-ink-2">{statusText}</p>}
+            <fieldset disabled={busy} className="min-w-0"><ConnectStep providerStep={providerStep} setProviderStep={setProviderStep} mode={mode} preset={preset} apiKey={apiKey} localPath={localPath} busy={busy} error={error} foundModels={foundModels} cliAuth={cliAuth} connectedLabel={connectedLabel} desktopMode={desktopMode} onPickCloud={pickCloud} onPickLocal={pickLocal} onDetect={detect} onConnect={() => void connect()} onApiKeyChange={setApiKey} onLocalPathChange={setLocalPath} onOpenModels={() => openSettings('models')} onOpenEngineModels={openModels} onUseEngineModel={(repo) => void chooseEngineModel(repo)} onContinue={goNext} /></fieldset>
+            <div className="mt-4 rounded-xl border border-line px-4 py-3 text-[13px] leading-relaxed text-ink-2"><span className="font-medium text-ink">Already downloaded models?</span> Scan your Hugging Face cache or add model folders in <button type="button" disabled={busy} className="text-accent underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-40" onClick={() => openSettings('library')}>Settings → Model folders</button>. Supported models appear with a Load action. Your original files stay where they are.</div>
+          </>}
 
-          {tourStep === 'assistant' && (
-            <ModeIntro
-              icon="spark"
-              title="Assistant is where TensorFold becomes a connected operator."
-              body="This surface is for connectors, memory review, skills, voice, automations, artifacts, and cross-source work. It should feel different from a plain chat thread."
-              highlights={['Connector sources', 'Reviewed memory and skills', 'Approvals for outbound actions']}
-              primary={{ label: 'Open Assistant', icon: 'spark', onClick: () => openView({ name: 'assistant' }) }}
-              secondary={{ label: 'Configure connectors', icon: 'plug', onClick: () => openSettings('connectors') }}
-            />
-          )}
+          {tourStep === 'guide' && <QuickGuide mode={desktopMode} model={selectedModelLabel} />}
+          {error && !(tourStep === 'connect' && providerStep === 'configure') && <div role="alert" className="mt-4 rounded-lg border border-danger/25 bg-danger/10 px-3 py-2 text-[13px] text-danger">{error}</div>}
 
-          {tourStep === 'code' && (
-            <ModeIntro
-              icon="code"
-              title="Code revolves around work, evidence, and handoff."
-              body="Projects, rooms, tickets, terminals, diffs, tests, remote hosts, and run receipts live here. This is the mode to use when the model is expected to change a repo."
-              highlights={['Projects and worktrees', 'Rooms and executable tickets', 'Diffs, tests, terminals, and receipts']}
-              primary={{ label: 'Create project', icon: 'plus', onClick: openProjectModal }}
-              secondary={{ label: 'Open projects', icon: 'folder', onClick: () => openView({ name: 'projects' }) }}
-            />
-          )}
-
-          {tourStep === 'settings' && (
-            <ModeIntro
-              icon="check"
-              title="Use Readiness as the preflight before trusting automation."
-              body="The doctor is the place to prove each provider, CLI, connector, terminal backend, orchestrator host, and permission posture. Broken connectors should be visible here, not discovered mid-run."
-              highlights={['Provider and CLI health', 'Connector capability proof', 'Remote, terminal, and security checks']}
-              primary={{ label: 'Run Readiness', icon: 'check', onClick: () => openSettings('readiness') }}
-              secondary={{ label: 'Finish', icon: 'arrowRight', onClick: () => complete() }}
-            />
-          )}
+          <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-4">
+            <Button data-testid="onboarding-back" icon="back" onClick={goBack} disabled={tourStep === 'mode' || busy || finishing}>Back</Button>
+            {tourStep !== 'guide' ? <Button data-testid="onboarding-next" variant="primary" iconRight="arrowRight" onClick={goNext} disabled={busy}>{tourStep === 'mode' ? `Continue with ${desktopMode === 'minimal' ? 'Minimal' : 'Full'}` : selectedModel ? 'Continue' : 'Set up a model later'}</Button> : <Button data-testid="onboarding-finish" variant="primary" iconRight="arrowRight" onClick={() => void complete()} disabled={finishing || !settings}>{finishing ? 'Saving…' : desktopMode === 'minimal' ? 'Open server setup' : previouslyCompleted ? 'Open TensorFold' : 'Start chatting'}</Button>}
+          </div>
         </section>
       </div>
     </div>
   )
+}
+
+function WorkspaceChoice({ value, onChange }: { value: OnboardingDesktopMode; onChange: (value: OnboardingDesktopMode) => void }) {
+  const choices = [
+    { value: 'minimal', title: 'Minimal', icon: 'cpu', desc: 'A local model server, ready for your other apps.', features: ['Download and load models', 'Copy the local API URL and key', 'Run TensorFold in the menu bar'], note: 'Open the small server window whenever you need it.' },
+    { value: 'full', title: 'Full', icon: 'monitor', desc: 'Your complete workspace for local AI.', features: ['Chat and compare model responses', 'Develop with projects and workers', 'Use Assistant, voice and connected tools'], note: 'Starts in Chat; Complete workspace is a click away. Includes the same server and API.' },
+  ] as const
+  return <fieldset><legend className="sr-only">Choose your TensorFold workspace</legend><div className="grid gap-3 sm:grid-cols-2">{choices.map((choice) => <label key={choice.value} className="min-w-0 cursor-pointer">
+    <input type="radio" name="onboarding-workspace" value={choice.value} checked={value === choice.value} onChange={() => onChange(choice.value)} className="peer sr-only" data-testid={`onboarding-mode-${choice.value}`} />
+    <span className={clsx('flex h-full flex-col rounded-xl border bg-card p-4 shadow-card transition-colors peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-accent sm:p-5', value === choice.value ? 'border-accent' : 'border-line hover:border-line-strong')}>
+      <span className="flex items-center justify-between gap-2"><Icon name={choice.icon} size={22} className="text-ink-2" /><span aria-hidden="true" className={clsx('flex h-5 w-5 items-center justify-center rounded-full border', value === choice.value ? 'border-accent bg-accent text-accent-ink' : 'border-line-strong')}>{value === choice.value && <Icon name="check" size={12} />}</span></span>
+      <span className="mt-4 text-[18px] font-semibold text-ink">{choice.title}</span><span className="mt-1 text-[13px] leading-relaxed text-ink-2">{choice.desc}</span>
+      <span className="my-4 grid gap-2">{choice.features.map((feature) => <span key={feature} className="flex items-start gap-2 text-[13px] leading-snug text-ink-2"><Icon name="check" size={14} className="mt-0.5 shrink-0 text-accent" />{feature}</span>)}</span>
+      <span className="mt-auto border-t border-line pt-3 text-[12px] leading-relaxed text-ink-2">{choice.note}</span>
+    </span>
+  </label>)}</div><p className="mt-4 text-[13px] leading-relaxed text-ink-2">Both modes use the same models and settings. Choosing a mode does not download anything or start a model.</p></fieldset>
+}
+
+function QuickGuide({ mode, model }: { mode: OnboardingDesktopMode; model: string | null }) {
+  const pointers = mode === 'minimal' ? [
+    { icon: 'cpu', title: 'Load a model', body: 'Use Models to download a recommendation or load a supported model already on this Mac. Loading uses memory until you unload it.' },
+    { icon: 'plug', title: 'Connect your apps', body: 'Starting a model creates a key for that server session. In API connection, use Copy URL and Copy API key to connect your client. Copy fresh details after restarting the model.' },
+    { icon: 'coffee', title: 'Run in the menu bar', body: 'Use Run in menu bar after setup. Click the TensorFold icon to check the server, change models or open the full workspace. Quit stops the server.' },
+  ] : [
+    { icon: 'message', title: 'Chat', body: 'Start a conversation, choose a model beside the composer, and use Stop if an answer goes off track. The built-in engine loads a selected model on your first send, which can take a moment. Models has downloads, hardware checks and the local API.' },
+    { icon: 'code', title: 'Code', body: 'Use Complete workspace to open a project with files, terminals and coding workers. Review requested actions before approving them; approval settings control what can run.' },
+    { icon: 'spark', title: 'Assistant', body: 'Use voice, skills and connected tools. Add only the connections you need in Settings, then check Readiness before starting automation.' },
+  ]
+  return <div className="grid gap-4">
+    <div className="rounded-xl border border-line bg-card px-4 py-3 text-[13px] text-ink-2"><span className="font-medium text-ink">{mode === 'minimal' ? 'Minimal mode' : 'Full workspace'}</span><div className="mt-1 break-words">{model ? `Selected model: ${model}` : 'No model selected yet. You can download or load one after setup.'}</div></div>
+    <div className="rounded-xl border border-line bg-card shadow-card">{pointers.map((pointer, index) => <div key={pointer.title} className={clsx('flex gap-3 p-4', index > 0 && 'border-t border-line')}><Icon name={pointer.icon} size={18} className="mt-0.5 shrink-0 text-accent" /><div><h2 className="text-[14px] font-medium text-ink">{pointer.title}</h2><p className="mt-1 text-[13px] leading-relaxed text-ink-2">{pointer.body}</p></div></div>)}</div>
+    <p className="text-[13px] leading-relaxed text-ink-2">Downloads and updates need an internet connection. Built-in local inference runs on this Mac once its model is installed. The authenticated local API stays available while TensorFold and its model are running. Cloud providers send prompts to their service.</p>
+    <details className="rounded-xl border border-line bg-card p-4"><summary className="cursor-pointer text-[13px] font-medium text-ink focus-visible:outline-2 focus-visible:outline-accent">Optional AI tools and your data</summary><div className="mt-3 grid gap-2 text-[13px] leading-relaxed text-ink-2"><p>{CORTHEON_RELEASE_POLICY.reason} Local chat and the API server remain available.</p><p>Living Weights is experimental learning. Review the facts you choose to teach; learned recall can be wrong.</p><p>Share local API keys only with apps you trust. Unload a model to free its memory, or quit TensorFold to stop the server.</p></div></details>
+    <p className="text-[12px] text-ink-2">You can reopen this guide in Settings.</p>
+  </div>
 }
 
 function ConnectStep({
@@ -390,6 +365,7 @@ function ConnectStep({
   foundModels,
   cliAuth,
   connectedLabel,
+  desktopMode,
   onPickCloud,
   onPickLocal,
   onDetect,
@@ -412,6 +388,7 @@ function ConnectStep({
   foundModels: string[] | null
   cliAuth: { loggedIn: boolean; binaryPresent: boolean; detail?: string; message?: string } | null
   connectedLabel: string | null
+  desktopMode: OnboardingDesktopMode
   onPickCloud: (preset: CloudProviderPreset) => void
   onPickLocal: (preset: LocalRuntimePreset) => void
   onDetect: (kind: ProviderDiscoveryKind) => void
@@ -516,9 +493,8 @@ function ConnectStep({
           <div className="mt-1 text-ink-3">{connectedLabel}</div>
         </div>
       )}
-      <EngineChoice onOpenModels={onOpenEngineModels} onUse={onUseEngineModel} />
-      <div className="-mb-1 mt-1 text-[13px] font-medium text-ink-3">Other providers</div>
-      <div className="grid gap-3 sm:grid-cols-2">
+      <EngineChoice minimal={desktopMode === 'minimal'} onOpenModels={onOpenEngineModels} onUse={onUseEngineModel} />
+      {desktopMode === 'full' && <details className="rounded-xl border border-line p-4"><summary className="cursor-pointer text-[13px] font-medium text-ink focus-visible:outline-2 focus-visible:outline-accent">Use a cloud provider or another local runtime</summary><div className="mt-3 grid gap-3 sm:grid-cols-2">
         <ChoiceCard
           testId="onboarding-provider-cloud"
           icon={<Icon name="globe" size={20} />}
@@ -533,50 +509,12 @@ function ConnectStep({
           desc="oMLX, Ollama, LM Studio, or another OpenAI-compatible runtime."
           onClick={() => setProviderStep('local')}
         />
-      </div>
+      </div></details>}
       <div className="flex flex-wrap items-center gap-3">
-        <Button variant="default" icon="settings" onClick={onOpenModels}>Open model settings</Button>
+        {desktopMode === 'full' && <Button variant="default" icon="settings" onClick={onOpenModels}>Provider settings</Button>}
         <button type="button" onClick={onContinue} className="text-[13px] text-ink-3 transition-colors hover:text-ink">
           {connectedLabel ? 'Continue' : 'Continue without a model'}
         </button>
-      </div>
-    </div>
-  )
-}
-
-function ModeIntro({
-  icon,
-  title,
-  body,
-  highlights,
-  primary,
-  secondary,
-}: {
-  icon: IconName
-  title: string
-  body: string
-  highlights: string[]
-  primary: { label: string; icon: IconName; onClick: () => void }
-  secondary: { label: string; icon: IconName; onClick: () => void }
-}) {
-  return (
-    <div className="grid gap-4">
-      <div className="rounded-xl border border-line bg-card p-5 shadow-card">
-        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-surface text-ink-2"><Icon name={icon} size={20} /></div>
-        <h2 className="mt-4 max-w-[620px] text-[19px] font-semibold text-ink">{title}</h2>
-        <p className="mt-2 max-w-[680px] text-[14px] leading-relaxed text-ink-3">{body}</p>
-        <div className="mt-5 grid gap-2.5 sm:grid-cols-3">
-          {highlights.map((highlight) => (
-            <div key={highlight} className="rounded-lg border border-line bg-card-2 px-3 py-2.5 text-[13px] text-ink-2">
-              <Icon name="check" size={13} className="mb-1 text-positive" />
-              {highlight}
-            </div>
-          ))}
-        </div>
-      </div>
-      <div className="flex flex-wrap gap-2.5">
-        <Button variant="primary" icon={primary.icon} onClick={primary.onClick}>{primary.label}</Button>
-        <Button variant="default" icon={secondary.icon} onClick={secondary.onClick}>{secondary.label}</Button>
       </div>
     </div>
   )

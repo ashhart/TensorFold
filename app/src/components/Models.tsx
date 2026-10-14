@@ -8,29 +8,36 @@ import { Button, Input } from './ui'
 import { HubRow, InstalledRow, PullRow, type PreflightState } from './models/ModelRows'
 import { EngineRuntimePanel } from './models/EngineRuntimePanel'
 import { EngineApiPanel } from './models/EngineApiPanel'
+import { useLearning, learningBusy } from '../lib/learning'
+import { LearningPanel } from './models/LearningPanel'
 import { WorkersPanel } from './models/WorkersPanel'
 import { isLocalWorker } from './models/workers'
 import { recommendEngineModel } from '../lib/model-recommendation'
 import { ModelRecommendationPanel } from './models/ModelRecommendationPanel'
-import { completeOnboarding } from './onboarding-model'
+import { shouldShowOnboarding } from './onboarding-model'
+import { ModelFoldersSettings } from './settings/ModelFoldersSettings'
 
 // The built-in engine's home: what is on this Mac, what is downloading, what fits, and any Hub repo.
 
 const AUTO_CHECK = 10
-const TABS = ['Models', 'Workers', 'API'] as const
+const TABS = ['Models', 'Workers', 'Learning', 'API'] as const
 type WorkspaceTab = typeof TABS[number]
 
 function errorText(e: unknown): string {
   return String((e as Error)?.message ?? e).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '')
 }
 
-export function Models() {
+export function Models({ minimal = false }: { minimal?: boolean } = {}) {
   const { snapshot } = useEngine()
+  const { snapshot: learning } = useLearning()
+  const learningLocked = learningBusy(learning)
   const newChat = useStore((s) => s.newChat)
   const setNotice = useStore((s) => s.setNotice)
   const threads = useStore((s) => s.threads)
   const runStatus = useStore((s) => s.status)
-  const [tab, setTab] = useState<WorkspaceTab>('Models')
+  const requestedTab = useStore((s) => s.view.name === 'models' ? s.view.tab : undefined)
+  const [tab, setTab] = useState<WorkspaceTab>(minimal && requestedTab !== 'API' ? 'Models' : requestedTab ?? 'Models')
+  useEffect(() => { if (minimal) setTab(requestedTab === 'API' ? 'API' : 'Models'); else if (requestedTab) setTab(requestedTab) }, [requestedTab, minimal])
   const activeThreads = threads.filter((thread) => thread.providerId === ENGINE_PROVIDER_ID && !thread.orchestratorHostId && ['thinking', 'streaming', 'tool', 'awaiting'].includes(runStatus[thread.id] ?? (thread.status === 'running' ? 'thinking' : 'idle')))
   const activeRuns = activeThreads.length
   const [checks, setChecks] = useState<Record<string, PreflightState>>({})
@@ -123,8 +130,7 @@ export function Models() {
     try {
       await loadEngineModel(repo)
       if (!mounted.current) return
-      completeOnboarding()
-      await newChat()
+      if (!minimal && !shouldShowOnboarding(undefined, useStore.getState().settings?.desktopOnboardingComplete)) await newChat()
     } catch (e) { if (mounted.current) setNotice({ kind: 'error', message: errorText(e) }) }
     finally { startLock.current = false; if (mounted.current) setStartingRecommendation(null) }
   }
@@ -143,28 +149,29 @@ export function Models() {
         <div className="flex items-start justify-between gap-4">
           <div>
             <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-ink">Local AI</h1>
-            <p className="mt-1 text-[13px] leading-relaxed text-ink-2">Your models, independent workers, and local API in one workspace.</p>
+            <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{minimal ? 'Download a model or load an existing checkpoint for your server.' : 'Models, workers, learning, and your local API.'}</p>
           </div>
           <Button size="sm" variant="ghost" icon="refresh" onClick={() => void refreshEngine(true)}>Refresh</Button>
         </div>
 
-        <EngineRuntimePanel activeRuns={activeRuns} onApi={() => setTab('API')} onWorkers={() => {
+        <EngineRuntimePanel minimal={minimal} activeRuns={activeRuns} onApi={() => setTab('API')} onWorkers={() => {
           if (activeThreads.length && !activeThreads.some(isLocalWorker)) useStore.getState().openThread(activeThreads[0].id)
           else setTab('Workers')
         }} onUnload={() => void unload()} />
 
         <div role="tablist" aria-label="Local AI workspace" className="mt-6 flex gap-5 border-b border-line">
-          {TABS.map((name, index) => <button key={name} id={`local-tab-${name}`} role="tab" aria-selected={tab === name} aria-controls={`local-panel-${name}`} tabIndex={tab === name ? 0 : -1} onClick={() => setTab(name)} onKeyDown={(e) => {
-            const next = e.key === 'ArrowRight' ? (index + 1) % TABS.length : e.key === 'ArrowLeft' ? (index + TABS.length - 1) % TABS.length : e.key === 'Home' ? 0 : e.key === 'End' ? TABS.length - 1 : null
+          {(minimal ? ['Models', 'API'] as const : TABS).map((name, index, tabs) => <button key={name} id={`local-tab-${name}`} role="tab" aria-selected={tab === name} aria-controls={`local-panel-${name}`} tabIndex={tab === name ? 0 : -1} onClick={() => setTab(name)} onKeyDown={(e) => {
+            const next = e.key === 'ArrowRight' ? (index + 1) % tabs.length : e.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length : e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : null
             if (next === null) return
-            e.preventDefault(); setTab(TABS[next]); (e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next])?.focus()
+            e.preventDefault(); setTab(tabs[next]); (e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next])?.focus()
           }} className={clsx('relative pb-3 text-[13px] font-medium focus-visible:outline-2 focus-visible:outline-accent', tab === name ? 'text-ink after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:rounded-full after:bg-accent' : 'text-ink-2 hover:text-ink')}>{name}{name === 'Models' && installed.length > 0 && <span className="ml-1.5 text-ink-2">{installed.length}</span>}</button>)}
         </div>
 
-        <div id="local-panel-Workers" role="tabpanel" aria-labelledby="local-tab-Workers" hidden={tab !== 'Workers'}><WorkersPanel onChooseModel={() => setTab('Models')} /></div>
-        <div id="local-panel-API" role="tabpanel" aria-labelledby="local-tab-API" hidden={tab !== 'API'}><EngineApiPanel onModels={() => setTab('Models')} /></div>
+        {!minimal && <div id="local-panel-Workers" role="tabpanel" aria-labelledby="local-tab-Workers" hidden={tab !== 'Workers'}><WorkersPanel onChooseModel={() => setTab('Models')} /></div>}
+        {!minimal && <div id="local-panel-Learning" role="tabpanel" aria-labelledby="local-tab-Learning" hidden={tab !== 'Learning'}>{tab === 'Learning' && <LearningPanel activeRuns={activeRuns} />}</div>}
+        <div id="local-panel-API" role="tabpanel" aria-labelledby="local-tab-API" hidden={tab !== 'API'}><EngineApiPanel minimal={minimal} onModels={() => setTab('Models')} /></div>
         <div id="local-panel-Models" role="tabpanel" aria-labelledby="local-tab-Models" hidden={tab !== 'Models'}>
-        <ModelRecommendationPanel recommendation={recommendation} pull={recommendation.selected ? pullFor(recommendation.selected.repo) : undefined} starting={startingRecommendation != null} locked={activeRuns > 0 && recommendation.selected?.repo !== status?.model || status?.state === 'starting'} checkFailed={checkFailed} onStart={(repo) => void startRecommended(repo)} onDownload={(repo) => void download(repo, revisionFor(repo))} onRetry={() => { for (const suggestion of suggestions) void check(suggestion.repo, suggestion.revision, true) }} />
+        <ModelRecommendationPanel minimal={minimal} recommendation={recommendation} pull={recommendation.selected ? pullFor(recommendation.selected.repo) : undefined} starting={startingRecommendation != null} locked={learningLocked || activeRuns > 0 && recommendation.selected?.repo !== status?.model || status?.state === 'starting'} checkFailed={checkFailed} onStart={(repo) => void startRecommended(repo)} onDownload={(repo) => void download(repo, revisionFor(repo))} onRetry={() => { for (const suggestion of suggestions) void check(suggestion.repo, suggestion.revision, true) }} />
 
         {pulls.length > 0 && (
           <Section title="Downloads">
@@ -184,19 +191,22 @@ export function Models() {
             <InstalledRow
               key={model.repo}
               model={model}
+              minimal={minimal}
               status={status}
               hubCache={snapshot?.hubCache ?? 'the Hugging Face cache'}
               onLoad={() => void load(model.repo)}
               onUnload={() => void unload()}
               onTask={() => setTab('Workers')}
               onChat={() => void chat()}
-              locked={activeRuns > 0}
+              locked={activeRuns > 0 || learningLocked}
               onDelete={async () => {
                 try { await api.engineDelete(model.repo) } catch (e) { setNotice({ kind: 'error', message: errorText(e) }) }
               }}
             />
           ))}
         </Section>
+
+        <ModelFoldersSettings compact />
 
         <Section title="Suggested for the built-in engine">
           {suggestions.map((s) => (

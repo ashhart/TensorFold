@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
+const affine = @import("affine.zig");
 const st = @import("state.zig");
 const prompt_mod = @import("prompt.zig");
 const ep_mod = @import("ep.zig");
@@ -25,6 +26,70 @@ pub fn planBytes(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8, c:
     defer gpa.destroy(plan);
     defer plan.deinit();
     return plan.bytes;
+}
+
+/// Bytes of layer i's dense buffer (everything but routed experts) at its matrices' widths, generously rounded.
+pub fn layerBytes(l: anytype, i: usize) !usize {
+    const c = l.c;
+    const D: usize = c.hidden;
+    const a = wts.prefix ++ "layers.{d}.self_attn.";
+    const m = wts.prefix ++ "layers.{d}.mlp.";
+    var n: usize = 0;
+    const q = struct {
+        fn b(rows: usize, k: usize, w: wts.Width) usize {
+            return affine.bytes(rows, k, w) + 3 * 256;
+        }
+    };
+    n += 2 * (24 * 4 * D * 2 + 1024) + 2 * (D * 2 + 256);
+    switch (c.kind(@intCast(i))) {
+        .kda => {
+            const W: usize = c.kdaWidth();
+            n += try stackBytes(l, a, .{i}, &wts.kda_in, c.kdaProj(), D, 64) + q.b(W, c.kda_dim, try l.widthAt(a ++ "f_b_proj", .{i}));
+            n += q.b(W, c.kda_dim, try l.widthAt(a ++ "g_b_proj", .{i})) + q.b(D, W, try l.widthAt(a ++ "o_proj", .{i})) + 3 * W * c.conv * 4 + 8 * 1024 + W * 4;
+        },
+        .mla => {
+            n += try stackBytes(l, a, .{i}, &wts.mla_x, c.xProj(), D, 64) + try stackBytes(l, a, .{i}, &wts.mla_qr, c.qrProj(), c.q_lora, 1);
+            n += q.b(D, c.mla_heads * c.v_dim, try l.widthAt(a ++ "o_proj", .{i})) + 16 * 1024 + c.i_dim * D * 2;
+            if (l.has(a ++ "embed_q.weight", .{i})) {
+                n += q.b(c.mla_heads * c.kv_lora, c.nope, try l.widthAt(a ++ "embed_q", .{i})) + q.b(c.mla_heads * c.v_dim, c.kv_lora, try l.widthAt(a ++ "unembed_out", .{i}));
+            } else n += q.b(c.mla_heads * (c.nope + c.v_dim), c.kv_lora, try l.widthAt(a ++ "kv_b_proj", .{i}));
+        },
+    }
+    if (c.isMoe(@intCast(i))) {
+        n += c.experts * D * 2 + c.experts * 4 + try stackBytes(l, m ++ "shared_experts.", .{i}, &wts.gate_up, 2 * c.moe_inter, D, 1) + q.b(D, c.moe_inter, try l.widthAt(m ++ "shared_experts.down_proj", .{i})) + 2048;
+    } else n += try stackBytes(l, m, .{i}, &wts.gate_up, 2 * c.dense_inter, D, 1) + q.b(D, c.dense_inter, try l.widthAt(m ++ "down_proj", .{i}));
+    const eh = wts.prefix ++ "layers.{d}.eh_proj";
+    if (i == c.layers) n += 3 * (D * 2 + 256) + if (l.has(eh ++ ".scales", .{i})) q.b(D, 2 * D, try l.widthAt(eh, .{i})) else D * 2 * D * 2 + 256;
+    return n;
+}
+
+/// Bytes of layer i's routed experts on this Mac at the first one's widths (the rest must match).
+pub fn expertBytes(l: anytype, i: usize) !usize {
+    const c = l.c;
+    const D: usize = c.hidden;
+    const every = i == c.layers;
+    const m: usize = if (every) c.moe_inter else c.inter[1] - c.inter[0];
+    const lo: usize = if (every) 0 else c.own[0];
+    const per = affine.bytes(m, D, try l.widths.expert(i, lo, "gate_proj")) + affine.bytes(m, D, try l.widths.expert(i, lo, "up_proj")) + affine.bytes(D, m, try l.widths.expert(i, lo, "down_proj"));
+    return (if (every) c.experts else c.own[1] - c.own[0]) * per + 9 * 256;
+}
+
+/// A stack's bytes: its rows, padded to `pad` a run (a part each once widths differ), at the costliest bytes a row.
+fn stackBytes(l: anytype, comptime fmt: []const u8, args: anytype, parts: []const []const u8, rows: usize, k: usize, pad: usize) !usize {
+    var name: [200]u8 = undefined;
+    const base = try std.fmt.bufPrint(&name, fmt, args);
+    var most: usize = 0;
+    var first: ?wts.Width = null;
+    var mixed = false;
+    for (parts) |p| {
+        var full: [240]u8 = undefined;
+        const w = try l.widths.of(try std.fmt.bufPrint(&full, "{s}{s}", .{ base, p }));
+        most = @max(most, affine.bytes(1, k, w));
+        mixed = mixed or (first != null and !std.meta.eql(first.?, w));
+        if (first == null) first = w;
+    }
+    const runs = if (mixed) parts.len else 1;
+    return (std.mem.alignForward(usize, rows, pad) + (runs - 1) * pad) * most + runs * 3 * 256;
 }
 
 /// The fewest bytes of caches and buffers a load of `cap` tokens takes (the shortest prompt chunks), counted, not allocated.

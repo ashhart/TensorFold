@@ -17,7 +17,6 @@ pub const chunk_blocks = 64;
 /// The native kernels, by their extern "C" names.
 pub const Fns = struct {
     embed16: cuda.Function,
-    add_rmsnorm: cuda.Function,
     add_moe_norm: cuda.Function,
     concat_norms: cuda.Function,
     group_rmsnorm: cuda.Function,
@@ -42,7 +41,6 @@ pub const Fns = struct {
     pub fn resolve(m: []const cuda.Module) !Fns {
         return .{
             .embed16 = try m[0].function("tf_nemo_embed16"),
-            .add_rmsnorm = try m[0].function("tf_nemo_add_rmsnorm"),
             .add_moe_norm = try m[0].function("tf_nemo_add_moe_norm"),
             .concat_norms = try m[0].function("tf_nemo_concat_norms"),
             .group_rmsnorm = try m[0].function("tf_nemo_group_rmsnorm"),
@@ -100,6 +98,7 @@ pub const Glue = struct {
     f: *const Fns,
     s: cuda.Stream,
     emb: *const cuda.embed_rows.EmbedRows, // the shared token rows (embed_rows.cu)
+    norms: *const cuda.norms.Norms, // the shared RMS norm rows (norms.cu)
 
     fn tri(g: Glue) ?triton.Tri {
         return if (g.set) |x| .{ .set = x, .s = g.s } else null;
@@ -135,12 +134,7 @@ pub const Glue = struct {
     /// h = x + r (or x itself without r), y = rmsnorm(h) * w, xs = y's 64-group sums.
     pub fn addRmsnorm(g: Glue, x: u64, r: ?u64, w: u64, h: u64, y: u64, xs: u64, rows: usize, d: usize, eps: f32) !void {
         if (g.tri()) |t| return t.addRmsnorm(x, r, w, h, y, xs, rows, d, eps);
-        if (d > 4096) return error.RowTooWide;
-        var a: cuda.Args = .{};
-        ptrs(&a, &.{ x, r orelse 0, w, h, y, xs });
-        a.add(eps);
-        a.add(int(d));
-        try g.go(g.f.add_rmsnorm, .{ rows, 1, 1 }, 256, 0, &a);
+        try g.norms.addRmsH(g.s, x, r, w, .bf16, h, y, xs, rows, d, eps);
     }
 
     /// The routed and shared expert sums in slot order, added to h, then its RMSNorm.

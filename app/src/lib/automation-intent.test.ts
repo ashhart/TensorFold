@@ -48,10 +48,41 @@ console.log('automation-intent tests:')
 }
 
 {
-  const weekday = parseAutomationIntent('every weekday, post the metrics to telegram')
-  assert.equal(weekday.scheduleKind, 'daily')
-  assert.equal(weekday.deliverTo, 'telegram')
-  ok('daily keyword without a time defaults to daily + delivery target')
+  for (const prompt of ['hourly summarize alerts', 'summarize alerts hourly', 'run hourly, summarize alerts']) {
+    const result = parseAutomationIntent(prompt, 'UTC')
+    assert.equal(result.scheduleKind, 'interval', 'an intended hourly cadence must never become daily')
+    assert.equal(result.everyMinutes, 60)
+    assert.equal(result.timeZone, undefined, 'hourly is an elapsed-time interval')
+    assert.match(result.prompt, /summarize alerts/i)
+  }
+  const ordinary = parseAutomationIntent('calculate the hourly rate for this project')
+  assert.equal(ordinary.scheduleKind, 'manual')
+  assert.match(ordinary.prompt, /hourly rate/, 'an ordinary task modifier is not a schedule and remains in the instruction')
+  ok('hourly prefix, suffix and run phrasing use an interval without changing ordinary task text')
+}
+
+{
+  for (const prompt of [
+    'every weekday, post the metrics to telegram',
+    'every weekday at 9am summarize alerts',
+    'every Monday at 9am summarize alerts',
+    'at 9am on Fridays summarize alerts',
+    'weekly at 9am summarize alerts',
+    'run weekly, summarize alerts',
+    'each 2 weeks summarize alerts',
+    'every month at 9am summarize alerts',
+    'monthly summarize alerts',
+    'daily at 9am on weekdays summarize alerts',
+    'at 9am next Monday summarize alerts',
+  ]) assert.throws(() => parseAutomationIntent(prompt, 'UTC'), /calendar.*not supported/i, 'unsupported restrictions must not become daily schedules')
+  assert.equal(parseAutomationIntent('every 7 days summarize alerts').scheduleKind, 'interval', 'an explicitly supported elapsed-day interval still works')
+  assert.equal(parseAutomationIntent('Sun activity summary').scheduleKind, 'manual', 'a weekday abbreviation used as an ordinary topic is not a calendar')
+  assert.equal(parseAutomationIntent('daily at 9am summarize the monthly report', 'UTC').scheduleKind, 'daily', 'a report description is not a monthly calendar restriction')
+  for (const prompt of ['hourly at 9am summarize alerts', 'every 2 hours at 9am summarize alerts', 'every 3 days at 9am summarize alerts']) {
+    assert.throws(() => parseAutomationIntent(prompt, 'UTC'), /interval.*start time/i, 'an unsupported interval start-time restriction must be reviewed rather than silently dropped')
+  }
+  assert.equal(parseAutomationIntent('every day at 9am summarize alerts', 'UTC').scheduleKind, 'daily', 'the supported daily clock-time phrase remains a daily schedule')
+  ok('unsupported weekday, weekly and monthly calendars are rejected while supported daily and elapsed-day schedules remain intact')
 }
 
 {
@@ -74,6 +105,24 @@ console.log('automation-intent tests:')
   assert.equal(empty.scheduleKind, 'manual')
   assert.equal(empty.mode, 'chat')
   ok('empty input: safe defaults, no throw')
+}
+
+{
+  const explicit = parseAutomationIntent('daily at 9am in Europe/London, summarize my tasks', 'America/New_York')
+  assert.equal(explicit.timeZone, 'Europe/London', 'an explicit zone wins over the device zone')
+  assert.ok(!/Europe\/London|\bin\s*,/.test(explicit.prompt), 'recognized timing context is removed from the task instruction')
+  assert.equal(parseAutomationIntent('daily at 9am UTC, summarize my tasks').timeZone, 'UTC')
+  assert.equal(parseAutomationIntent('daily at 9am timezone: Asia/Tokyo, summarize my tasks').timeZone, 'Asia/Tokyo')
+  assert.equal(parseAutomationIntent('daily at 9am, summarize my tasks', 'America/New_York').timeZone, 'America/New_York')
+  assert.equal(parseAutomationIntent('daily at 9am, summarize my tasks').timeZone, undefined, 'the parser cannot invent a timezone when none is supplied')
+  assert.throws(() => parseAutomationIntent('daily at 9am in Europe/Unknown, summarize my tasks', 'Europe/London'), /IANA timezone/, 'an intended invalid zone cannot fall back to the device')
+  assert.throws(() => parseAutomationIntent('daily at 9am in Mars/Olympus, summarize tasks', 'Europe/London'), /IANA timezone/, 'an unknown timezone region cannot fall back to the device')
+  assert.throws(() => parseAutomationIntent('daily at 9am mars/olympus, summarize tasks', 'Europe/London'), /IANA timezone/, 'a bare slash identifier beside the time is also validated')
+  assert.equal(parseAutomationIntent('daily at 9am run tests in src/lib', 'Europe/London').timeZone, 'Europe/London', 'an ordinary task directory is not confused with a timezone suffix')
+  assert.throws(() => parseAutomationIntent('daily at 9am timezone CST, summarize my tasks', 'Europe/London'), /IANA timezone/, 'ambiguous explicit abbreviations are refused')
+  assert.throws(() => parseAutomationIntent('daily at 9am PST, summarize my tasks', 'Europe/London'), /IANA timezone/, 'a timezone suffix cannot silently become device-local time')
+  assert.equal(parseAutomationIntent('each 2 hours summarize my tasks', 'Europe/London').timeZone, undefined, 'elapsed-time intervals do not depend on a wall-clock timezone')
+  ok('timezone: explicit IANA zones, reviewed device default, invalid zones and elapsed-time intervals')
 }
 
 console.log(`  ${passed} passed`)

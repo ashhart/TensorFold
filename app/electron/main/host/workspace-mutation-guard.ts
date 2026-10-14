@@ -45,6 +45,7 @@ export class WorkspaceMutationGuard {
   private readonly startReservations = new Map<string, number>()
   private globalBarrier = false
   private globalBarrierReason = 'Local-state security purge'
+  private readonly admissionPauses = new Map<symbol, string>()
   private readonly idleWaiters = new Set<() => void>()
 
   private hasActiveLeases(): boolean {
@@ -52,7 +53,16 @@ export class WorkspaceMutationGuard {
   }
 
   private assertGlobalBarrierOpen(): void {
+    const paused = this.admissionPauses.values().next().value
+    if (paused) throw new Error(`${paused}; wait for it to finish before starting workspace work.`)
     if (this.globalBarrier) throw new Error(`${this.globalBarrierReason} is in progress; wait for it to finish before starting workspace work.`)
+  }
+
+  /** Close admission immediately without waiting on, or replacing, an updater/purge lease. */
+  pauseAdmission(reason: string): Pick<WorkspaceMutationLease, 'release'> {
+    const token = Symbol('admission-pause')
+    this.admissionPauses.set(token, reason)
+    return { release: () => { this.admissionPauses.delete(token) } }
   }
 
   private notifyIdle(): void {
