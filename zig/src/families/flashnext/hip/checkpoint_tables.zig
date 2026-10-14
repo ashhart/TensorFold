@@ -1,5 +1,6 @@
 //! The checkpoint as core/quant reads it for the HIP loader: tensors by name, code widths from the config.
 const std = @import("std");
+const core = @import("core");
 const Config = @import("../config.zig").Config;
 
 /// Each side passes its own core's checkpoint and width types (one by path, one as a module).
@@ -21,7 +22,7 @@ pub fn Tables(comptime Checkpoint: type, comptime Width: type) type {
 
         /// The width core/quant reads `key`'s words and group tables with.
         pub fn width(t: *const Self, key: []const u8) !Width {
-            const s = (try t.cfg.quantization(key)) orelse return error.UnsupportedQuantization;
+            const s = (try t.cfg.declared(key, core.quant.keys.canonical)) orelse return error.UnsupportedQuantization;
             return .{ .bits = s.bits, .group = @intCast(s.group) };
         }
     };
