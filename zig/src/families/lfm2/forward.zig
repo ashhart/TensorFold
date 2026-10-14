@@ -228,8 +228,9 @@ fn moe(enc: Encoder, s: *st.Scratch, x: wts.Moe, scale: f32, total: usize) bool 
     enc.groups(.{ total, 1, 1 }, .{ 32, 1, 1 });
     const t = &enc.m.kernels.tiles;
     if (!enc.prompt and enc.m.kernels.twin) {
-        tile.encodeTwinGlu(e, t, matrix(x.gate.one), matrix(x.up.one), s.x, s.act, s.picks, slots, c.topk) catch unreachable;
-        tile.encodeTwinIndexed(e, t, matrix(x.down.one), s.act, s.experts, s.picks, slots, 1) catch unreachable;
+        const gate = matrix(x.gate.one);
+        tile.encodeTwinGlu(e, t, gate, matrix(x.up.one), s.x, s.act, s.picks, null, slots, c.topk) catch unreachable;
+        tile.encodeTwinIndexed(e, t, matrix(x.down.one), s.act, s.experts, s.picks, null, slots, 1) catch unreachable;
         return true;
     }
     enc.pipe("lfm2_sort");

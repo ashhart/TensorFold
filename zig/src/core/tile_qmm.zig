@@ -15,8 +15,13 @@ pub const Pipelines = struct {
     grouped: [bit_widths.len]mtl.Pipeline,
     grouped_glu: [bit_widths.len]mtl.Pipeline,
     twin: [bit_widths.len]mtl.Pipeline,
+    twin_few: [bit_widths.len]mtl.Pipeline,
     twin_indexed: [bit_widths.len]mtl.Pipeline,
     twin_glu: [bit_widths.len]mtl.Pipeline,
+    rows: [bit_widths.len]mtl.Pipeline,
+    twin_grouped: [bit_widths.len]mtl.Pipeline,
+    twin_grouped_glu: [bit_widths.len]mtl.Pipeline,
+    group: mtl.Pipeline,
     work: mtl.Pipeline,
     xsum: mtl.Pipeline,
 
@@ -27,13 +32,19 @@ pub const Pipelines = struct {
         defer lib.deinit();
         var p: Pipelines = undefined;
         inline for (bit_widths, 0..) |bits, i| {
-            p.dense[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_tile_qmm_q{d}", .{bits}), false);
-            p.grouped[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_tile_qmm_grouped_q{d}", .{bits}), false);
-            p.grouped_glu[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_tile_qmm_grouped_glu_q{d}", .{bits}), false);
-            p.twin[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_tile_qmv_q{d}", .{bits}), false);
-            p.twin_indexed[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_tile_qmv_indexed_q{d}", .{bits}), false);
-            p.twin_glu[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_tile_qmv_glu_q{d}", .{bits}), false);
+            const q = std.fmt.comptimePrint("_q{d}", .{bits});
+            p.dense[i] = try mtl.Pipeline.init(device, lib, "tf_tile_qmm" ++ q, false);
+            p.grouped[i] = try mtl.Pipeline.init(device, lib, "tf_tile_qmm_grouped" ++ q, false);
+            p.grouped_glu[i] = try mtl.Pipeline.init(device, lib, "tf_tile_qmm_grouped_glu" ++ q, false);
+            p.twin[i] = try mtl.Pipeline.init(device, lib, "tf_tile_qmv" ++ q, false);
+            p.twin_few[i] = try mtl.Pipeline.init(device, lib, "tf_tile_qmv_few" ++ q, false);
+            p.twin_indexed[i] = try mtl.Pipeline.init(device, lib, "tf_tile_qmv_indexed" ++ q, false);
+            p.twin_glu[i] = try mtl.Pipeline.init(device, lib, "tf_tile_qmv_glu" ++ q, false);
+            p.rows[i] = try mtl.Pipeline.init(device, lib, "tf_tile_qmv_rows" ++ q, false);
+            p.twin_grouped[i] = try mtl.Pipeline.init(device, lib, "tf_tile_qmv_grouped" ++ q, false);
+            p.twin_grouped_glu[i] = try mtl.Pipeline.init(device, lib, "tf_tile_qmv_grouped_glu" ++ q, false);
         }
+        p.group = try mtl.Pipeline.init(device, lib, "tf_tile_qmv_group", false);
         p.work = try mtl.Pipeline.init(device, lib, "tf_tile_qmm_work", false);
         p.xsum = try mtl.Pipeline.init(device, lib, "tf_tile_xsum", false);
         return p;
@@ -44,8 +55,13 @@ pub const Pipelines = struct {
         for (p.grouped) |x| x.deinit();
         for (p.grouped_glu) |x| x.deinit();
         for (p.twin) |x| x.deinit();
+        for (p.twin_few) |x| x.deinit();
         for (p.twin_indexed) |x| x.deinit();
         for (p.twin_glu) |x| x.deinit();
+        for (p.rows) |x| x.deinit();
+        for (p.twin_grouped) |x| x.deinit();
+        for (p.twin_grouped_glu) |x| x.deinit();
+        p.group.deinit();
         p.work.deinit();
         p.xsum.deinit();
     }
@@ -83,13 +99,24 @@ pub fn encode(e: mtl.ComputeEncoder, p: *const Pipelines, m: Matrix, x: mtl.Buff
 const twin_tg_bytes = 10240;
 /// Rows the twin takes in one call at most (decode and verify windows).
 pub const twin_rows = 32;
-/// Columns a twin threadgroup: 2 simdgroups of 4 columns (n is a multiple of the tile).
-fn twinColumns(bits: u8) usize {
-    _ = bits;
-    return 8;
+/// Picks a by-expert twin call takes at most (the kernels' TQ_SLOTS).
+pub const window_slots = 4 * twin_rows;
+/// Rows from which a dense twin call takes the MMA window kernel over the scalar twin.
+pub const window_rows = 8;
+/// Window rows from which the by-expert twin (each picked expert read once) beats a threadgroup row a slot.
+pub const group_rows = 16;
+/// Columns a scalar twin threadgroup (2 simdgroups of 4) and a window threadgroup (2 simdgroups of 8, one MMA block).
+const twin_columns = 8;
+const window_columns = 16;
+/// Rows a scalar twin threadgroup takes over one code load (the kernels' TQ_RT).
+const twin_rt = 4;
+/// Staged partials a scalar twin threadgroup of `rt` rows asks for; dense rows stream best at twin_tg_bytes (3 a core).
+fn twinTgBytes(rt: usize, grouped: bool) usize {
+    const staged = 2 * rt * (twin_columns / 2 + 1) * 32 * 4;
+    return if (grouped) staged else @max(twin_tg_bytes, staged);
 }
 
-/// Each of `rows` rows' group sums (f32 [rows, k / 64] into `sums`), which the twin calls on those rows read.
+/// Each of `rows` rows' group sums (f32 [rows, k / 64] into `sums`), which the tiles on those rows read.
 pub fn encodeSums(e: mtl.ComputeEncoder, p: *const Pipelines, k: usize, x: mtl.Buffer, x_off: usize, sums: mtl.Buffer, rows: usize) void {
     e.setPipeline(p.xsum);
     e.setBuffer(x, x_off, 0);
@@ -102,42 +129,92 @@ pub fn encodeSums(e: mtl.ComputeEncoder, p: *const Pipelines, k: usize, x: mtl.B
 pub fn encodeTwin(e: mtl.ComputeEncoder, p: *const Pipelines, m: Matrix, x: mtl.Buffer, x_off: usize, y: mtl.Buffer, y_off: usize, rows: usize) !void {
     const i = try width(m);
     if (rows == 0 or rows > twin_rows) return error.NoRows;
-    e.setPipeline(p.twin[i]);
+    const window = rows >= window_rows;
+    e.setPipeline(if (window) p.rows[i] else if (rows > 1) p.twin_few[i] else p.twin[i]);
     bind(e, m, .{ .k = @intCast(m.k), .n = @intCast(m.n), .r = @intCast(rows) }, x, x_off, y, y_off);
-    // 4 bits: 4 rows a threadgroup over one load of the codes; partials staged 32 groups a round
-    const rt: usize = if (m.bits == 4) @min(4, rows) else 1;
-    e.setThreadgroupMemory(@max(twin_tg_bytes, 2 * rt * (twinColumns(m.bits) / 2 + 1) * 32 * 4), 0);
-    e.dispatchGroups(.{ .width = m.n / twinColumns(m.bits), .height = (rows + rt - 1) / rt }, .{ .width = 64 });
+    if (window) return e.dispatchGroups(.{ .width = m.n / window_columns }, .{ .width = 64 });
+    const rt = @min(twin_rt, rows);
+    e.setThreadgroupMemory(twinTgBytes(rt, false), 0);
+    e.dispatchGroups(.{ .width = m.n / twin_columns, .height = (rows + rt - 1) / rt }, .{ .width = 64 });
 }
 
-/// The twin by slot: slot y reads expert ids[y]'s matrix (`m` the first) and x row y / repeat.
-pub fn encodeTwinIndexed(e: mtl.ComputeEncoder, p: *const Pipelines, m: Matrix, x: mtl.Buffer, y: mtl.Buffer, ids: mtl.Buffer, slots: usize, repeat: usize) !void {
+/// Words `groups` holds for `slots` picks: the count, (expert, base, count) an expert, each expert's slots.
+pub fn groupWords(slots: usize) usize {
+    return 1 + 4 * slots;
+}
+
+/// A window's picks (expert ids [slots]) by expert into `groups` for encodeTwinIndexed and encodeTwinGlu on them.
+pub fn encodeTwinGroup(
+    e: mtl.ComputeEncoder,
+    p: *const Pipelines,
+    ids: mtl.Buffer,
+    slots: usize,
+    groups: mtl.Buffer,
+) !void {
+    if (slots == 0 or slots > window_slots) return error.NoRows;
+    e.setPipeline(p.group);
+    e.setBuffer(ids, 0, 0);
+    e.setValue(@as(i32, @intCast(slots)), 1);
+    e.setBuffer(groups, 0, 2);
+    e.dispatchGroups(.{ .width = 1 }, .{ .width = window_slots });
+}
+
+/// The twin by slot (slot y: expert ids[y], x row y / repeat), or with `groups` by expert, one read a picked expert.
+pub fn encodeTwinIndexed(
+    e: mtl.ComputeEncoder,
+    p: *const Pipelines,
+    m: Matrix,
+    x: mtl.Buffer,
+    y: mtl.Buffer,
+    ids: mtl.Buffer,
+    groups: ?mtl.Buffer,
+    slots: usize,
+    repeat: usize,
+) !void {
     const i = try width(m);
-    if (slots == 0 or repeat == 0) return error.NoRows;
-    e.setPipeline(p.twin_indexed[i]);
+    if (slots == 0 or repeat == 0 or slots > window_slots) return error.NoRows;
+    e.setPipeline(if (groups != null) p.twin_grouped[i] else p.twin_indexed[i]);
     bind(e, m, .{ .k = @intCast(m.k), .n = @intCast(m.n), .r = @intCast(repeat) }, x, 0, y, 0);
-    e.setBuffer(ids, 0, 6);
-    e.setThreadgroupMemory(@max(twin_tg_bytes, 2 * (twinColumns(m.bits) / 2 + 1) * 32 * 4), 0);
-    e.dispatchGroups(.{ .width = m.n / twinColumns(m.bits), .height = slots }, .{ .width = 64 });
+    dispatchSlots(e, m, ids, groups, slots);
 }
 
 /// encodeTwinIndexed on gate and up (one shape) into swiglu(gate, up), mlx-lm's compiled swiglu on bf16 rows.
-pub fn encodeTwinGlu(e: mtl.ComputeEncoder, p: *const Pipelines, gate: Matrix, up: Matrix, x: mtl.Buffer, y: mtl.Buffer, ids: mtl.Buffer, slots: usize, repeat: usize) !void {
+pub fn encodeTwinGlu(
+    e: mtl.ComputeEncoder,
+    p: *const Pipelines,
+    gate: Matrix,
+    up: Matrix,
+    x: mtl.Buffer,
+    y: mtl.Buffer,
+    ids: mtl.Buffer,
+    groups: ?mtl.Buffer,
+    slots: usize,
+    repeat: usize,
+) !void {
     const i = try width(gate);
-    if (slots == 0 or repeat == 0 or up.n != gate.n or up.k != gate.k or up.bits != gate.bits) return error.NoRows;
-    e.setPipeline(p.twin_glu[i]);
+    if (slots == 0 or repeat == 0 or slots > window_slots) return error.NoRows;
+    if (up.n != gate.n or up.k != gate.k or up.bits != gate.bits) return error.NoRows;
+    e.setPipeline(if (groups != null) p.twin_grouped_glu[i] else p.twin_glu[i]);
     bind(e, gate, .{ .k = @intCast(gate.k), .n = @intCast(gate.n), .r = @intCast(repeat) }, x, 0, y, 0);
-    e.setBuffer(ids, 0, 6);
     e.setBuffer(up.w, up.w_off, 7);
     e.setBuffer(up.scales, up.s_off, 8);
     e.setBuffer(up.biases, up.b_off, 9);
-    e.setThreadgroupMemory(@max(twin_tg_bytes, 2 * (twinColumns(gate.bits) / 2 + 1) * 32 * 4), 0);
-    e.dispatchGroups(.{ .width = gate.n / twinColumns(gate.bits), .height = slots }, .{ .width = 64 });
+    dispatchSlots(e, gate, ids, groups, slots);
 }
 
-/// Whether the twin's rows equal the tiles' for `m` on this GPU (random rows; another chip may round MMAs otherwise).
+/// A threadgroup row a slot, or by expert a threadgroup row an item of `groups` (at most `slots`, the rest exit).
+fn dispatchSlots(e: mtl.ComputeEncoder, m: Matrix, ids: mtl.Buffer, groups: ?mtl.Buffer, slots: usize) void {
+    e.setBuffer(groups orelse ids, 0, 6);
+    e.setValue(@as(i32, @intCast(slots)), 10);
+    e.setThreadgroupMemory(twinTgBytes(if (groups != null) twin_rt else 1, groups != null), 0);
+    e.dispatchGroups(.{ .width = m.n / twin_columns, .height = slots }, .{ .width = 64 });
+}
+
+/// Whether the twin's rows equal the tiles' for `m` on this GPU at each window kernel (random rows).
 pub fn twinExact(p: *const Pipelines, device: mtl.Device, m: Matrix) !bool {
-    const rows = 40;
+    const widths = [_]usize{ twin_rows, 16, window_rows, 7, 5, 2, 1 };
+    var rows: usize = 0;
+    for (widths) |w| rows += w;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const x = try device.buffer(rows * m.k * 2, mtl.ResourceOptions.shared);
@@ -156,8 +233,11 @@ pub fn twinExact(p: *const Pipelines, device: mtl.Device, m: Matrix) !bool {
     const e = cb.compute(.serial);
     encodeSums(e, p, m.k, x, 0, sums, rows);
     try encode(e, p, m, x, 0, sums, 0, tiled, 0, rows);
-    try encodeTwin(e, p, m, x, 0, twin, 0, twin_rows);
-    try encodeTwin(e, p, m, x, twin_rows * m.k * 2, twin, twin_rows * m.n * 2, rows - twin_rows);
+    var at: usize = 0;
+    for (widths) |w| {
+        try encodeTwin(e, p, m, x, at * m.k * 2, twin, at * m.n * 2, w);
+        at += w;
+    }
     e.end();
     cb.commit();
     cb.wait();
@@ -214,4 +294,9 @@ pub fn encodeGroupedGlu(e: mtl.ComputeEncoder, p: *const Pipelines, gate: Matrix
 test "work items bound every expert's tiles" {
     try std.testing.expectEqual(@as(usize, 2048 / 32 + 64 + 1), items(2048, 64));
     try std.testing.expectEqual(@as(usize, 0 + 4 + 1), items(4, 64));
+}
+
+test "window_slots is the kernels' TQ_SLOTS" {
+    const line = std.fmt.comptimePrint("constant constexpr int TQ_SLOTS = {d};", .{window_slots});
+    try std.testing.expect(std.mem.indexOf(u8, sources.core_tile_qmm, line) != null);
 }
