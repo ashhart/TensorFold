@@ -34,14 +34,13 @@ pub fn main(init: std.process.Init) !void {
     const oracle = args.next() orelse return error.Usage;
     const out = args.next() orelse return error.Usage;
     const count = if (args.next()) |a| try std.fmt.parseInt(usize, a, 10) else 128;
+    const width = if (args.next()) |a| try std.fmt.parseInt(usize, a, 10) else 1; // prompt rows a window
     const cwd = std.Io.Dir.cwd();
     try cwd.createDirPath(io, out);
     const t0 = std.c.mach_absolute_time();
     const m = try g4.Model.load(gpa, io, model_dir);
     defer m.deinit();
     std.debug.print("loaded in {d:.1} s\n", .{@as(f64, @floatFromInt(std.c.mach_absolute_time() - t0)) / 24e6});
-    var s = try g4.state.Scratch.init(m.device, 4096);
-    defer s.deinit();
     var dir = try cwd.openDir(io, oracle, .{ .iterate = true });
     defer dir.close(io);
     var it = dir.iterate();
@@ -52,10 +51,26 @@ pub fn main(init: std.process.Init) !void {
         defer gpa.free(bytes);
         const ids = try std.json.parseFromSlice([]u32, gpa, bytes, .{});
         defer ids.deinit();
-        var cache = try g4.state.Cache.init(m.device, 4096);
+        const capacity = (ids.value.len + count + 64 + 63) / 64 * 64;
+        var cache = try g4.state.Cache.init(m.device, capacity);
         defer cache.deinit();
+        var s = try g4.state.Scratch.init(m.device, capacity);
+        defer s.deinit();
         const t1 = std.c.mach_absolute_time();
-        for (ids.value, 0..) |id, p| try g4.forward.window(m, &s, &cache, &.{id}, p);
+        var at: usize = 0;
+        while (at < ids.value.len) : (at += width) {
+            const end = @min(at + width, ids.value.len);
+            try g4.forward.window(m, &s, &cache, ids.value[at..end], at);
+        }
+        const last = (ids.value.len - 1 - (ids.value.len - 1) / width * width) * g4.config.vocab;
+        const prefill_s = @as(f64, @floatFromInt(std.c.mach_absolute_time() - t1)) / 24e6;
+        var lp: [256]u8 = undefined;
+        const row = s.logits.slice(u16, g4.state.max_rows * g4.config.vocab)[last..][0..g4.config.vocab];
+        const f32s = try gpa.alloc(f32, g4.config.vocab);
+        defer gpa.free(f32s);
+        for (f32s, row) |*f, b| f.* = @bitCast(@as(u32, b) << 16);
+        try cwd.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&lp, "{s}/{s}.last.f32", .{ out, name }), .data = std.mem.sliceAsBytes(f32s) });
+        @memcpy(s.logits.slice(u16, g4.config.vocab), row);
         var tokens: std.ArrayList(u32) = .empty;
         defer tokens.deinit(gpa);
         var tops: std.ArrayList(Top2) = .empty;
@@ -82,6 +97,6 @@ pub fn main(init: std.process.Init) !void {
         }
         try w.writer.writeByte(']');
         try cwd.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&path, "{s}/{s}.top2.json", .{ out, name }), .data = w.written() });
-        std.debug.print("{s}: {d} prompt tokens, {d} decoded in {d:.1} s ({d:.1} steps/s)\n", .{ name, ids.value.len, count, secs, @as(f64, @floatFromInt(ids.value.len + count)) / secs });
+        std.debug.print("{s}: {d} prompt tokens in {d:.1} s ({d:.0} tok/s, windows of {d}), {d} decoded, {d:.1} s in all\n", .{ name, ids.value.len, prefill_s, @as(f64, @floatFromInt(ids.value.len)) / prefill_s, width, count, secs });
     }
 }

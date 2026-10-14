@@ -32,8 +32,9 @@ def environment() -> dict:
 
 
 def chat_ids(tokenizer, text: str) -> list[int]:
-    return list(tokenizer.apply_chat_template([{"role": "user", "content": text}], tokenize=True,
-                                              add_generation_prompt=True, enable_thinking=False))
+    ids = tokenizer.apply_chat_template([{"role": "user", "content": text}], tokenize=True,
+                                        add_generation_prompt=True, enable_thinking=False)
+    return list(ids["input_ids"] if hasattr(ids, "keys") else ids)  # transformers 5 returns an encoding
 
 
 def greedy(family, ids: list[int], count: int, prompt: str) -> tuple[list[int], list[dict]]:
@@ -53,6 +54,8 @@ def greedy(family, ids: list[int], count: int, prompt: str) -> tuple[list[int], 
     for step in range(count):
         logits = family.head(hidden)
         mx.eval(logits)
+        if step == 0:
+            family.last_row = logits.reshape(-1).astype(mx.float32)
         top2.extend(capture(logits, [len(ids) + step]))
         token = top2[-1]["ids"][0]
         tokens.append(token)
@@ -79,11 +82,30 @@ def oracle(args: argparse.Namespace) -> None:
         results[name] = {"tokens": tokens, "elapsed_s": round(time.perf_counter() - started, 3)}
         (out / f"{name}.reference.json").write_text(json.dumps(tokens) + "\n")
         (out / f"{name}.top2.json").write_text(json.dumps(top2) + "\n")
+        import numpy as np
+        np.asarray(family.last_row).astype(np.float32).tofile(out / f"{name}.last.f32")
         print(f"{name}: {len(ids)} prompt tokens, {tokenizer.decode(tokens)[:80]!r}", flush=True)
     receipt = {"environment": environment(), "model": str(args.model), "prompt_path": args.prompt,
                "decode": family.decode.backend, "kinds": sorted({k for p in family.decode.qkv for k in p.kinds}),
                "tokens": args.tokens, "results": results}
     (out / "oracle.json").write_text(json.dumps(receipt, indent=1) + "\n")
+
+
+def prompts(args: argparse.Namespace) -> None:
+    """Long chat prompts of about the requested sizes from the repo's own text, written as {name: ids} JSON."""
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(str(args.model))
+    root = Path(__file__).resolve().parents[2]
+    text = "\n\n".join((root / f).read_text() for f in ("CHANGELOG.md", "README.md", "CONTRIBUTING.md", "docs/api.md"))
+    words = tokenizer.encode(text, add_special_tokens=False)
+    out = {}
+    for size in args.sizes:
+        body = tokenizer.decode(words[:size])
+        ask = "\n\nIn one paragraph, what does the text above say about prompt caching?"
+        out[f"long{size // 1024}k"] = chat_ids(tokenizer, body + ask)
+    args.out.write_text(json.dumps(out) + "\n")
+    print({k: len(v) for k, v in out.items()})
 
 
 def check(args: argparse.Namespace) -> None:
@@ -119,11 +141,15 @@ def main() -> None:
     o.add_argument("--ids", type=Path, help="JSON {name: [ids]} in place of the four chat prompts")
     o.add_argument("--tokens", type=int, default=128)
     o.add_argument("--prompt", choices=("decode", "mlx"), default="decode")
+    p = sub.add_parser("prompts")
+    p.add_argument("--model", type=Path, required=True)
+    p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--sizes", type=int, nargs="+", default=[8192, 32768])
     c = sub.add_parser("check")
     c.add_argument("--oracle", type=Path, required=True)
     c.add_argument("--native", type=Path, required=True)
     args = parser.parse_args()
-    {"oracle": oracle, "check": check}[args.mode](args)
+    {"oracle": oracle, "prompts": prompts, "check": check}[args.mode](args)
 
 
 if __name__ == "__main__":
