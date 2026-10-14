@@ -100,6 +100,9 @@ pub fn scratch(base: u64, l: Layer, rows: usize, slots: usize) !Scratch {
     return .{ .xg = xg, .xu = xu, .xd = xd, .z = z, .y = y, .ids = ids, .count = count, .members = members, .rows = rows, .slots = slots };
 }
 
+/// The group kernel's dynamic shared memory at most (34 ints an expert: up to 722 experts).
+const group_shared_max = 96 * 1024;
+
 /// The loaded kernels.
 pub const Experts = struct {
     mod: Module,
@@ -124,7 +127,7 @@ pub const Experts = struct {
         };
         errdefer e.mod.unload();
         e.group = try e.mod.function("tf_exl3_group");
-        try e.group.allowDynamicShared(64 * 1024);
+        try e.group.allowDynamicShared(group_shared_max);
         e.rot_in = try e.mod.function("tf_exl3_experts_rot_in");
         e.grouped = .{
             try e.mod.function("tf_exl3_grouped_0"),
@@ -174,8 +177,8 @@ pub const Experts = struct {
         a.add(i32d(slots));
         a.add(i32d(l.experts));
         a.add(i32d(rows));
-        const group_shared: u32 = @intCast(rows * slots * 4); // a prompt chunk's 2,048 rows of 9 slots take 72 KiB
-        if (group_shared > 48 * 1024) try e.group.allowDynamicShared(group_shared);
+        const group_shared: u32 = @intCast(34 * l.experts * 4); // per-warp counts, places, totals
+        if (group_shared > group_shared_max) return error.BadExperts;
         try launch_.launch(e.group, .{ .grid = .{ .x = 1, .y = 1, .z = 1 }, .block = .{ .x = 1024, .y = 1, .z = 1 }, .shared = group_shared }, s, &a);
 
         var r: launch_.Args = .{};

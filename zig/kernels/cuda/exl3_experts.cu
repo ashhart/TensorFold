@@ -212,6 +212,7 @@ namespace tf_exl3 {
 // Grouping in one block: distinct experts (< E) in id order, members row * 32 + slot in row order, -1 after the last.
 constexpr int GROUP_THREADS = 1024;
 constexpr int GROUP_PER_THREAD = 4;
+constexpr int GROUP_WARPS = GROUP_THREADS / 32;
 
 struct GroupArgs {
     const int* pick; // int32 [rows * slots]
@@ -221,25 +222,40 @@ struct GroupArgs {
     int rows, slots, experts, maxm;
 };
 
+// A stable counting sort: warps count their slices of picks, a prefix over warps places them, they land in order.
 extern "C" __global__ void __launch_bounds__(GROUP_THREADS) tf_exl3_group(const GroupArgs a) {
-    extern __shared__ int sh_pick[];
-    __shared__ int warp_tot[GROUP_THREADS / 32];
-    const int n = a.rows * a.slots;
-    for (int i = threadIdx.x; i < n; i += GROUP_THREADS) sh_pick[i] = a.pick[i];
+    extern __shared__ int sh[]; // cnt [warps, E], place [E], total by place [E]
+    __shared__ int warp_tot[GROUP_WARPS];
+    __shared__ int nu; // distinct experts
+    const int E = a.experts, n = a.rows * a.slots;
+    int* cnt = sh;
+    int* place = sh + GROUP_WARPS * E;
+    int* total = place + E;
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    for (int i = threadIdx.x; i < GROUP_WARPS * E; i += GROUP_THREADS) cnt[i] = 0;
     __syncthreads();
-    int cnt[GROUP_PER_THREAD];
+    const int seg = (n + GROUP_WARPS - 1) / GROUP_WARPS, lo = warp * seg, hi = min(n, lo + seg);
+    for (int i = lo + lane; i < hi; i += 32) {
+        const int e = a.pick[i];
+        if (e >= 0 && e < E) atomicAdd(&cnt[warp * E + e], 1);
+    }
+    __syncthreads();
+    int tot[GROUP_PER_THREAD];
     int used = 0;
 #pragma unroll
     for (int q = 0; q < GROUP_PER_THREAD; ++q) {
         const int e = threadIdx.x * GROUP_PER_THREAD + q;
-        int c = 0;
-        if (e < a.experts)
-            for (int i = 0; i < n; ++i) c += sh_pick[i] == e;
-        cnt[q] = c;
-        used += c > 0;
+        int sum = 0;
+        if (e < E)
+            for (int w = 0; w < GROUP_WARPS; ++w) { // each slice's first member index: the earlier slices' counts
+                const int c = cnt[w * E + e];
+                cnt[w * E + e] = sum;
+                sum += c;
+            }
+        tot[q] = sum;
+        used += sum > 0;
     }
     // exclusive scan of `used` over threads
-    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     int inc = used;
 #pragma unroll
     for (int o = 1; o < 32; o <<= 1) {
@@ -256,20 +272,41 @@ extern "C" __global__ void __launch_bounds__(GROUP_THREADS) tf_exl3_group(const 
             if (lane >= o) s += x;
         }
         warp_tot[lane] = s - v; // exclusive per warp
-        if (lane == 31) a.ucount[0] = s;
+        if (lane == 31) {
+            a.ucount[0] = s;
+            nu = s;
+        }
     }
     __syncthreads();
-    int place = warp_tot[warp] + inc - used;
+    int at = warp_tot[warp] + inc - used;
 #pragma unroll
     for (int q = 0; q < GROUP_PER_THREAD; ++q) {
-        if (cnt[q] == 0) continue;
         const int e = threadIdx.x * GROUP_PER_THREAD + q;
-        a.uids[place] = e;
-        int j = 0;
-        for (int i = 0; i < n && j < a.maxm; ++i)
-            if (sh_pick[i] == e) a.members[place * a.maxm + j++] = (i / a.slots) * 32 + (i % a.slots);
-        for (; j < a.maxm; ++j) a.members[place * a.maxm + j] = -1;
-        ++place;
+        if (e >= E) continue;
+        place[e] = tot[q] > 0 ? at : -1;
+        if (tot[q] > 0) {
+            a.uids[at] = e;
+            total[at] = tot[q];
+            ++at;
+        }
+    }
+    __syncthreads();
+    for (int b = lo; b < hi; b += 32) { // a slice's picks in order, 32 at a time
+        const int i = b + lane;
+        int e = i < hi ? a.pick[i] : -1;
+        if (e >= E) e = -1;
+        const unsigned peers = __match_any_sync(0xffffffffu, e);
+        if (e >= 0) {
+            const int j = cnt[warp * E + e] + __popc(peers & ((1u << lane) - 1u));
+            if (j < a.maxm) a.members[place[e] * a.maxm + j] = (i / a.slots) * 32 + (i % a.slots);
+        }
+        __syncwarp();
+        if (e >= 0 && lane == 31 - __clz(peers)) cnt[warp * E + e] += __popc(peers);
+        __syncwarp();
+    }
+    for (int idx = threadIdx.x; idx < nu * a.maxm; idx += GROUP_THREADS) {
+        const int u = idx / a.maxm, j = idx % a.maxm;
+        if (j >= total[u]) a.members[idx] = -1;
     }
 }
 
