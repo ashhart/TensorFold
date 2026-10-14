@@ -327,7 +327,7 @@ test "a rollback refused for space leaves the folder as it was, though other fil
     const taught = try bytesOf(a, io, dir);
     const short_mixed: originals.Options = .{ .free = short, .uncloned = configUncloned }; // config.json is copied
     try std.testing.expectError(error.NoSpace, originals.rollback(io, dir, short_mixed, a, &why));
-    try std.testing.expect(has(why, "GB free"));
+    try std.testing.expect(has(why, "GB free") and has(why, "roll back again") and !has(why, "teach a copy"));
     try std.testing.expect(sameBytes(taught, try bytesOf(a, io, dir)));
     try std.testing.expectEqual(@as(usize, 0), try temps(io, dir));
     _ = try originals.rollback(io, dir, .{ .free = plenty, .uncloned = configUncloned }, a, &why);

@@ -146,7 +146,7 @@ fn keepFiles(io: Io, dir: []const u8, graph: ?[]const u8, o: Options, a: Allocat
             largest = @max(largest, size);
         }
     }
-    if (copies > 0) try room(a, o, try a.dupeSentinel(u8, part, 0), copies + largest, dir, why);
+    if (copies > 0) try room(a, o, try a.dupeSentinel(u8, part, 0), copies + largest, dir, teach_fix, why);
     Pool(Job).run(jobs);
     for (names, jobs) |name, j| {
         if (j.failed) |e| {
@@ -224,7 +224,7 @@ fn rollbackFiles(io: Io, dir: []const u8, o: Options, a: Allocator, why: *[]cons
         b.cloned = try cloneIf(o, b.src, b.tmp);
         if (b.cloned) out.cloned += 1 else largest = @max(largest, b.size);
     }
-    if (out.cloned < backs.len) try room(a, o, try a.dupeSentinel(u8, dir, 0), largest, dir, why);
+    if (out.cloned < backs.len) try room(a, o, try a.dupeSentinel(u8, dir, 0), largest, dir, rollback_fix, why);
     for (entries, backs) |e, b| {
         if (!b.cloned and !std.mem.eql(u8, &try files.copyHashed(b.src, b.tmp), &e.digest)) {
             why.* = try std.fmt.allocPrint(a, "{s} changed while it was copied back: roll back again", .{b.src});
@@ -448,15 +448,26 @@ fn noteGraph(a: Allocator, io: Io, snap: []const u8, graph: []const u8) !void {
     try files.writeWhole(a, file, try std.mem.concat(a, u8, &.{ old, path, "\n" }));
 }
 
-/// Refused by name unless the file system under `at` has `need` bytes free.
-fn room(a: Allocator, o: Options, at: [:0]const u8, need: u64, dir: []const u8, why: *[]const u8) !void {
+const teach_fix = "free some space, or teach a copy on APFS, Btrfs or XFS";
+const rollback_fix = "free some space, then roll back again";
+
+/// Refused by name unless the file system under `at` has `need` bytes free; `fix` is what the user can do.
+fn room(
+    a: Allocator,
+    o: Options,
+    at: [:0]const u8,
+    need: u64,
+    dir: []const u8,
+    fix: []const u8,
+    why: *[]const u8,
+) !void {
     const free = o.free(at);
     if (free != null and free.? >= need) return;
     var have: []const u8 = "its free space cannot be read";
     if (free) |f| have = try std.fmt.allocPrint(a, "{d:.1} GB are", .{gigabytes(f)});
     const text = "{s} is on a file system without clones, and copying its original files needs {d:.1} GB free " ++
-        "where {s}: free some space, or teach a copy on APFS, Btrfs or XFS";
-    why.* = try std.fmt.allocPrint(a, text, .{ dir, gigabytes(need), have });
+        "where {s}: {s}";
+    why.* = try std.fmt.allocPrint(a, text, .{ dir, gigabytes(need), have, fix });
     return error.NoSpace;
 }
 
