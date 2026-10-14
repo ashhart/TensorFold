@@ -1,8 +1,9 @@
-//! The DeltaNet recurrence, token-serial and chunked, against a float64 recurrence on random inputs.
+//! The DeltaNet recurrence against a float64 recurrence on random inputs, and the same bits however a prompt is cut.
 const std = @import("std");
 const rig = @import("rig.zig");
 const Rig = rig.Rig;
 const gpa = rig.gpa;
+const DeviceBuffer = @import("../memory.zig").DeviceBuffer;
 
 const d = 128;
 const Shape = struct { length: usize, key_heads: usize, value_heads: usize };
@@ -105,7 +106,15 @@ fn relative(got: []const f32, want: []const f64) f64 {
     return max / scale;
 }
 
-test "the serial and chunked DeltaNet stay within 5e-3 of the float64 recurrence at four lengths" {
+/// One call of `length` rows from row `from`, state in place; q, k, v, gate and beta are offset to that row.
+fn run(t: *Rig, sh: Shape, q: DeviceBuffer, k: DeviceBuffer, v: DeviceBuffer, gate: DeviceBuffer, beta: DeviceBuffer, state: DeviceBuffer, y: DeviceBuffer, from: usize, length: usize) !void {
+    const qk = from * sh.key_heads * d * 4;
+    const vy = from * sh.value_heads * d * 4;
+    const gb = from * sh.value_heads * 4;
+    try t.ops(&t.on).gatedDelta(rig.at(q) + qk, rig.at(k) + qk, rig.at(v) + vy, rig.at(gate) + gb, rig.at(beta) + gb, rig.at(state), rig.at(y) + vy, length, sh.key_heads, sh.value_heads, d, d, null);
+}
+
+test "the DeltaNet stays within 5e-3 of the float64 recurrence at four lengths" {
     const t = try Rig.open(1 << 30);
     defer t.close();
     for ([_]Shape{
@@ -135,19 +144,54 @@ test "the serial and chunked DeltaNet stay within 5e-3 of the float64 recurrence
         defer y.free();
         var state = try t.upload(in.state);
         defer state.free();
-        // `off` runs the token-serial kernel, `on` the chunked one for these lengths
-        for ([_]*const @import("../launches.zig").Launcher{ &t.off, &t.on }) |l| {
-            try state.upload(0, std.mem.sliceAsBytes(in.state));
-            try y.fill8(0);
-            t.arena.reset();
-            try t.ops(l).gatedDelta(rig.at(q), rig.at(k), rig.at(v), rig.at(gate), rig.at(beta), rig.at(state), rig.at(y), sh.length, sh.key_heads, sh.value_heads, d, d, null);
-            try t.stream.synchronize();
-            const gy = try rig.download(f32, y);
-            defer gpa.free(gy);
-            const gs = try rig.download(f32, state);
-            defer gpa.free(gs);
-            try std.testing.expect(relative(gy, ry) < 5e-3);
-            try std.testing.expect(relative(gs, rs) < 5e-3);
-        }
+        try run(t, sh, q, k, v, gate, beta, state, y, 0, sh.length);
+        try t.stream.synchronize();
+        const gy = try rig.download(f32, y);
+        defer gpa.free(gy);
+        const gs = try rig.download(f32, state);
+        defer gpa.free(gs);
+        try std.testing.expect(relative(gy, ry) < 5e-3);
+        try std.testing.expect(relative(gs, rs) < 5e-3);
+    }
+}
+
+test "a prompt cut on either side of 64 rows gives the same rows and state as one call" {
+    const t = try Rig.open(1 << 30);
+    defer t.close();
+    const sh: Shape = .{ .length = 200, .key_heads = 2, .value_heads = 4 };
+    const in = try Inputs.make(sh, 0x51ed);
+    defer in.free();
+    var q = try t.upload(in.q);
+    defer q.free();
+    var k = try t.upload(in.k);
+    defer k.free();
+    var v = try t.upload(in.v);
+    defer v.free();
+    var gate = try t.upload(in.gate);
+    defer gate.free();
+    var beta = try t.upload(in.beta);
+    defer beta.free();
+    var y = try t.alloc(sh.length * sh.value_heads * d * 4);
+    defer y.free();
+    var state = try t.upload(in.state);
+    defer state.free();
+    try run(t, sh, q, k, v, gate, beta, state, y, 0, sh.length);
+    try t.stream.synchronize();
+    const wy = try rig.download(f32, y);
+    defer gpa.free(wy);
+    const ws = try rig.download(f32, state);
+    defer gpa.free(ws);
+    for ([_]usize{ 1, 63, 64, 65, 136 }) |c| {
+        try state.upload(0, std.mem.sliceAsBytes(in.state));
+        try y.fill8(0);
+        try run(t, sh, q, k, v, gate, beta, state, y, 0, c);
+        try run(t, sh, q, k, v, gate, beta, state, y, c, sh.length - c);
+        try t.stream.synchronize();
+        const gy = try rig.download(f32, y);
+        defer gpa.free(gy);
+        const gs = try rig.download(f32, state);
+        defer gpa.free(gs);
+        try std.testing.expectEqualSlices(u32, @ptrCast(wy), @ptrCast(gy));
+        try std.testing.expectEqualSlices(u32, @ptrCast(ws), @ptrCast(gs));
     }
 }
