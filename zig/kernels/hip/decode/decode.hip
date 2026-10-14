@@ -413,8 +413,8 @@ extern "C" __global__ void __launch_bounds__(256)
 }
 
 extern "C" __global__ void __launch_bounds__(256)
-    tf_gnorm_out(const float* y, const float* weight, const void* z, void* out, int kind, int rows, int width, float eps,
-                 int sigmoid_gate) {
+    tf_gnorm_out(const float* y, const float* weight, const void* z, void* out, int kind, int rows, int width,
+                 float eps, int sigmoid_gate) {
     gnorm_out_body(y, weight, z, out, kind, rows, width, eps, sigmoid_gate);
 }
 

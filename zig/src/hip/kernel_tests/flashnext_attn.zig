@@ -30,7 +30,20 @@ test "pooled block keys: the mean of a block's raw keys, normed and rotated at i
     defer sc.free();
     var pooled = try t.alloc(blocks * dims * 2);
     defer pooled.free();
-    try t.on.fn_idx_pool(ptr(?*const anyopaque, raw), ptr(?*anyopaque, pooled), ptr(?[*]const f32, sc), t.kind(), first, blocks, dims, ratio, rotary, theta, eps, t.stream.handle);
+    try t.on.fn_idx_pool(
+        ptr(?*const anyopaque, raw),
+        ptr(?*anyopaque, pooled),
+        ptr(?[*]const f32, sc),
+        t.kind(),
+        first,
+        blocks,
+        dims,
+        ratio,
+        rotary,
+        theta,
+        eps,
+        t.stream.handle,
+    );
     try t.stream.synchronize();
     const got = try rig.download(u16, pooled);
     defer gpa.free(got);
@@ -60,7 +73,11 @@ test "pooled block keys: the mean of a block's raw keys, normed and rotated at i
                 want = rnd(t, @floatCast(y));
             }
             const step: f32 = if (t.bf16) 1.0 / 128.0 else 1.0 / 1024.0;
-            try rig.expect(@abs(value(t, got[j * dims + d]) - want) <= 2 * step * @max(@abs(want), 0.25), "pool block {d} dim {d}", .{ b, d });
+            try rig.expect(
+                @abs(value(t, got[j * dims + d]) - want) <= 2 * step * @max(@abs(want), 0.25),
+                "pool block {d} dim {d}",
+                .{ b, d },
+            );
         }
     }
 }
@@ -82,7 +99,20 @@ test "pooled block keys at device positions: the blocks a window's rows complete
     defer sc.free();
     var whole = try t.alloc(blocks * dims * 2);
     defer whole.free();
-    try t.on.fn_idx_pool(ptr(?*const anyopaque, raw), ptr(?*anyopaque, whole), ptr(?[*]const f32, sc), t.kind(), 0, blocks, dims, ratio, 64, 1e7, 1e-6, t.stream.handle);
+    try t.on.fn_idx_pool(
+        ptr(?*const anyopaque, raw),
+        ptr(?*anyopaque, whole),
+        ptr(?[*]const f32, sc),
+        t.kind(),
+        0,
+        blocks,
+        dims,
+        ratio,
+        64,
+        1e7,
+        1e-6,
+        t.stream.handle,
+    );
     var mark: [blocks * dims]u16 = undefined;
     @memset(&mark, 0xffff);
     var slots = try t.upload(&mark);
@@ -91,7 +121,20 @@ test "pooled block keys at device positions: the blocks a window's rows complete
     const pos = [_]i32{ 10, 11, 12, 13, 14, 15 };
     var dp = try t.upload(&pos);
     defer dp.free();
-    try t.on.fn_idx_pool_at(ptr(?*const anyopaque, raw), ptr(?*anyopaque, slots), ptr(?[*]const f32, sc), t.kind(), ptr(?[*]const i32, dp), pos.len, dims, ratio, 64, 1e7, 1e-6, t.stream.handle);
+    try t.on.fn_idx_pool_at(
+        ptr(?*const anyopaque, raw),
+        ptr(?*anyopaque, slots),
+        ptr(?[*]const f32, sc),
+        t.kind(),
+        ptr(?[*]const i32, dp),
+        pos.len,
+        dims,
+        ratio,
+        64,
+        1e7,
+        1e-6,
+        t.stream.handle,
+    );
     try t.stream.synchronize();
     const want = try rig.download(u16, whole);
     defer gpa.free(want);
@@ -99,7 +142,11 @@ test "pooled block keys at device positions: the blocks a window's rows complete
     defer gpa.free(got);
     for (0..blocks) |b| {
         const done = b == 2 or b == 3;
-        for (0..dims) |d| try rig.expect(got[b * dims + d] == if (done) want[b * dims + d] else 0xffff, "block {d} dim {d}", .{ b, d });
+        for (0..dims) |d| try rig.expect(
+            got[b * dims + d] == if (done) want[b * dims + d] else 0xffff,
+            "block {d} dim {d}",
+            .{ b, d },
+        );
     }
 }
 
@@ -151,7 +198,20 @@ test "block scores and selection: relu-summed heads, the best blocks with ties t
     defer scores.free();
     try scores.fill8(0);
     const st = t.stream.handle;
-    try t.on.fn_idx_scores(ptr(?[*]const f32, q), ptr(?*const anyopaque, pooled), ptr(?[*]const i32, dc), ptr(?[*]f32, scores), t.kind(), rows, heads, dims, blocks, blocks, top, st);
+    try t.on.fn_idx_scores(
+        ptr(?[*]const f32, q),
+        ptr(?*const anyopaque, pooled),
+        ptr(?[*]const i32, dc),
+        ptr(?[*]f32, scores),
+        t.kind(),
+        rows,
+        heads,
+        dims,
+        blocks,
+        blocks,
+        top,
+        st,
+    );
     try t.stream.synchronize();
     const gs = try rig.download(f32, scores);
     defer gpa.free(gs);
@@ -164,7 +224,11 @@ test "block scores and selection: relu-summed heads, the best blocks with ties t
             want += @max(dot, 0);
         };
         want /= @sqrt(@as(f64, dims));
-        try rig.expect(@abs(gs[r * blocks + b] - want) <= 1e-4 * @max(@abs(want), 1), "score row {d} block {d}", .{ r, b });
+        try rig.expect(
+            @abs(gs[r * blocks + b] - want) <= 1e-4 * @max(@abs(want), 1),
+            "score row {d} block {d}",
+            .{ r, b },
+        );
     };
     // the selection runs on scores with ties written in: the GPU's, then a few equal to the cut
     for (0..rows) |r| for (0..blocks) |b| if (b % 50 == 5) {
@@ -180,7 +244,20 @@ test "block scores and selection: relu-summed heads, the best blocks with ties t
     defer count.free();
     var sparse = try t.alloc(rows * 4);
     defer sparse.free();
-    try t.on.fn_idx_select(ptr(?[*]const f32, sel_in), blocks, ptr(?[*]const i32, dc), ptr(?[*]const i32, de), ptr(?[*]i32, keys), key_stride, ptr(?[*]i32, count), ptr(?[*]i32, sparse), rows, top, ratio, st);
+    try t.on.fn_idx_select(
+        ptr(?[*]const f32, sel_in),
+        blocks,
+        ptr(?[*]const i32, dc),
+        ptr(?[*]const i32, de),
+        ptr(?[*]i32, keys),
+        key_stride,
+        ptr(?[*]i32, count),
+        ptr(?[*]i32, sparse),
+        rows,
+        top,
+        ratio,
+        st,
+    );
     try t.stream.synchronize();
     const gk = try rig.download(i32, keys);
     defer gpa.free(gk);
@@ -255,8 +332,48 @@ fn sparseCase(t: *Rig, comptime heads: usize, comptime kv_heads: usize) !void {
     defer one.free();
     const ck: c_int = if (t.bf16) 2 else 1;
     const st = t.stream.handle;
-    try t.on.fn_sparse_attention(ptr(?[*]const f32, dq), ptr(?*const anyopaque, dk), ptr(?*const anyopaque, dv), ck, ptr(?[*]const i32, di), stride, ptr(?[*]const i32, dc), ptr(?[*]const i32, ds), ptr(?[*]f32, po), ptr(?[*]f32, pm), ptr(?[*]f32, out), rows, heads, kv_heads, dims, cap, scale, parts, st);
-    try t.on.fn_sparse_attention(ptr(?[*]const f32, dq), ptr(?*const anyopaque, dk), ptr(?*const anyopaque, dv), ck, ptr(?[*]const i32, di), stride, ptr(?[*]const i32, dc), ptr(?[*]const i32, ds), ptr(?[*]f32, po), ptr(?[*]f32, pm), ptr(?[*]f32, one), 1, heads, kv_heads, dims, cap, scale, parts, st);
+    try t.on.fn_sparse_attention(
+        ptr(?[*]const f32, dq),
+        ptr(?*const anyopaque, dk),
+        ptr(?*const anyopaque, dv),
+        ck,
+        ptr(?[*]const i32, di),
+        stride,
+        ptr(?[*]const i32, dc),
+        ptr(?[*]const i32, ds),
+        ptr(?[*]f32, po),
+        ptr(?[*]f32, pm),
+        ptr(?[*]f32, out),
+        rows,
+        heads,
+        kv_heads,
+        dims,
+        cap,
+        scale,
+        parts,
+        st,
+    );
+    try t.on.fn_sparse_attention(
+        ptr(?[*]const f32, dq),
+        ptr(?*const anyopaque, dk),
+        ptr(?*const anyopaque, dv),
+        ck,
+        ptr(?[*]const i32, di),
+        stride,
+        ptr(?[*]const i32, dc),
+        ptr(?[*]const i32, ds),
+        ptr(?[*]f32, po),
+        ptr(?[*]f32, pm),
+        ptr(?[*]f32, one),
+        1,
+        heads,
+        kv_heads,
+        dims,
+        cap,
+        scale,
+        parts,
+        st,
+    );
     try t.stream.synchronize();
     const got = try rig.download(f32, out);
     defer gpa.free(got);
@@ -271,7 +388,10 @@ fn sparseCase(t: *Rig, comptime heads: usize, comptime kv_heads: usize) !void {
         for (0..n) |j| {
             const key: usize = if (sparse[r] != 0) @intCast(ids[r * stride + j]) else j;
             var s: f64 = 0;
-            for (0..dims) |d| s += @as(f64, hq[(r * heads + h) * dims + d] * scale) * t.value(hk[(kvh * cap + key) * dims + d]);
+            for (0..dims) |d| s += @as(
+                f64,
+                hq[(r * heads + h) * dims + d] * scale,
+            ) * t.value(hk[(kvh * cap + key) * dims + d]);
             w[j] = s;
             top = @max(top, s);
         }
@@ -287,7 +407,11 @@ fn sparseCase(t: *Rig, comptime heads: usize, comptime kv_heads: usize) !void {
                 acc += w[j] * t.value(hv[(kvh * cap + key) * dims + d]);
             }
             const want = acc / total;
-            try rig.expect(@abs(got[(r * heads + h) * dims + d] - want) <= 1e-4 * @max(@abs(want), 0.1), "attention row {d} head {d} dim {d}", .{ r, h, d });
+            try rig.expect(
+                @abs(got[(r * heads + h) * dims + d] - want) <= 1e-4 * @max(@abs(want), 0.1),
+                "attention row {d} head {d} dim {d}",
+                .{ r, h, d },
+            );
         }
     };
 }

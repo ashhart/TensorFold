@@ -24,10 +24,31 @@ pub fn rms2(o: Ops, x0: u64, w0: u64, y0: u64, x1: u64, w1: u64, y1: u64, rows: 
 pub const Gate = enum(c_int) { silu = 0, sigmoid = 1 };
 
 /// The linear attention's gated norm: out = rms(y) * weight * round(gate(z)) in z's kind, `width` at most 1024.
-pub fn gnormOut(o: Ops, y: u64, weight: u64, z: Tensor, out: Tensor, rows: usize, width: usize, eps: f32, gate: Gate) Error!void {
+pub fn gnormOut(
+    o: Ops,
+    y: u64,
+    weight: u64,
+    z: Tensor,
+    out: Tensor,
+    rows: usize,
+    width: usize,
+    eps: f32,
+    gate: Gate,
+) Error!void {
     if (z.kind != out.kind or z.kind == .f32) return error.BadShape;
     const zig = o.l;
-    try zig.tf_gnorm_out(f(y), f(weight), p(z.ptr), p(out.ptr), @backingInt(z.kind), int(rows), int(width), eps, @backingInt(gate), o.stream);
+    try zig.tf_gnorm_out(
+        f(y),
+        f(weight),
+        p(z.ptr),
+        p(out.ptr),
+        @backingInt(z.kind),
+        int(rows),
+        int(width),
+        eps,
+        @backingInt(gate),
+        o.stream,
+    );
 }
 
 /// x = round(x + y) and normed = rms(x) * weight (fp32) in one launch: a residual and the norm after it.

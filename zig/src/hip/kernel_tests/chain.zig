@@ -194,7 +194,18 @@ fn gnorm(t: *Rig, rng: *rig.Rng, rows: usize, sigmoid: c_int) !void {
     const s = t.stream.handle;
     try t.on.tf_rms(ptr(at(y)), @ptrFromInt(at(weight)), ptr(at(yn)), 0, @intCast(rows * 32), 128, eps, s);
     try t.on.tf_gnorm_silu(@ptrFromInt(at(yn)), ptr(at(z)), ptr(at(outs[0])), t.kind(), @intCast(n), sigmoid, s);
-    try t.on.tf_gnorm_out(@ptrFromInt(at(y)), @ptrFromInt(at(weight)), ptr(at(z)), ptr(at(outs[1])), t.kind(), @intCast(rows * 32), 128, eps, sigmoid, s);
+    try t.on.tf_gnorm_out(
+        @ptrFromInt(at(y)),
+        @ptrFromInt(at(weight)),
+        ptr(at(z)),
+        ptr(at(outs[1])),
+        t.kind(),
+        @intCast(rows * 32),
+        128,
+        eps,
+        sigmoid,
+        s,
+    );
     try t.stream.synchronize();
     try same(outs[0], outs[1]);
     if (sigmoid == 0) return;
@@ -208,7 +219,11 @@ fn gnorm(t: *Rig, rng: *rig.Rng, rows: usize, sigmoid: c_int) !void {
         for (0..128) |i| {
             const zv = fx.value(t, hz[r * 128 + i]);
             const want = fx.rnd(t, hy[r * 128 + i] * inv * hn[i] * fx.rnd(t, fx.sigmoid(zv)));
-            try rig.expect(fx.close(t, fx.value(t, got[r * 128 + i]), want, 1), "sigmoid-gated norm row {d} dim {d}", .{ r, i });
+            try rig.expect(
+                fx.close(t, fx.value(t, got[r * 128 + i]), want, 1),
+                "sigmoid-gated norm row {d} dim {d}",
+                .{ r, i },
+            );
         }
     }
 }

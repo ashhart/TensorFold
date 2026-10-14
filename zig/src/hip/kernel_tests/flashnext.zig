@@ -80,8 +80,34 @@ test "hyper-connection norm, gates and mix: the reference's roundings, each row 
     defer x_one.free();
     const k = t.kind();
     const st = t.stream.handle;
-    try t.on.fn_hc_norm(ptr(?*const anyopaque, h), ptr(?*const anyopaque, branch), ptr(?*const anyopaque, inject), ptr(?*anyopaque, h_out), ptr(?*anyopaque, x_out), ptr(?[*]const f32, sc), k, rows, s, d, eps, st);
-    try t.on.fn_hc_norm(ptr(?*const anyopaque, h), ptr(?*const anyopaque, branch), ptr(?*const anyopaque, inject), null, ptr(?*anyopaque, x_one), ptr(?[*]const f32, sc), k, 1, s, d, eps, st);
+    try t.on.fn_hc_norm(
+        ptr(?*const anyopaque, h),
+        ptr(?*const anyopaque, branch),
+        ptr(?*const anyopaque, inject),
+        ptr(?*anyopaque, h_out),
+        ptr(?*anyopaque, x_out),
+        ptr(?[*]const f32, sc),
+        k,
+        rows,
+        s,
+        d,
+        eps,
+        st,
+    );
+    try t.on.fn_hc_norm(
+        ptr(?*const anyopaque, h),
+        ptr(?*const anyopaque, branch),
+        ptr(?*const anyopaque, inject),
+        null,
+        ptr(?*anyopaque, x_one),
+        ptr(?[*]const f32, sc),
+        k,
+        1,
+        s,
+        d,
+        eps,
+        st,
+    );
     // the gates and the mix over random fp32 sums
     const zh = try gpa.alloc(f32, rows * (low + s));
     defer gpa.free(zh);
@@ -100,7 +126,16 @@ test "hyper-connection norm, gates and mix: the reference's roundings, each row 
     var mixed = try t.alloc(rows * d * 2);
     defer mixed.free();
     try t.on.fn_hc_gates(ptr(?[*]const f32, z), ptr(?*anyopaque, act), ptr(?*anyopaque, inj), k, rows, low, s, st);
-    try t.on.fn_hc_mix(ptr(?[*]const f32, g), ptr(?*const anyopaque, x_out), ptr(?*anyopaque, mixed), k, rows, s, d, st);
+    try t.on.fn_hc_mix(
+        ptr(?[*]const f32, g),
+        ptr(?*const anyopaque, x_out),
+        ptr(?*anyopaque, mixed),
+        k,
+        rows,
+        s,
+        d,
+        st,
+    );
     try t.stream.synchronize();
     const gho = try rig.download(u16, h_out);
     defer gpa.free(gho);
@@ -119,7 +154,22 @@ test "hyper-connection norm, gates and mix: the reference's roundings, each row 
     defer h_shared.free();
     var x_shared = try t.alloc(rows * w * 2);
     defer x_shared.free();
-    try t.on.fn_hc_norm_shares(ptr(?*const anyopaque, h_shared), ptr(?*const anyopaque, dev_shares), ptr(?*const anyopaque, inject), ptr(?*anyopaque, h_shared), ptr(?*anyopaque, x_shared), ptr(?[*]const f32, sc), k, rows, s, d, eps, 2, rows * d, st);
+    try t.on.fn_hc_norm_shares(
+        ptr(?*const anyopaque, h_shared),
+        ptr(?*const anyopaque, dev_shares),
+        ptr(?*const anyopaque, inject),
+        ptr(?*anyopaque, h_shared),
+        ptr(?*anyopaque, x_shared),
+        ptr(?[*]const f32, sc),
+        k,
+        rows,
+        s,
+        d,
+        eps,
+        2,
+        rows * d,
+        st,
+    );
     try t.stream.synchronize();
     const ghs = try rig.download(u16, h_shared);
     defer gpa.free(ghs);
@@ -139,7 +189,11 @@ test "hyper-connection norm, gates and mix: the reference's roundings, each row 
         const inv = rmsInv(want_h, eps);
         for (0..d) |j| {
             const want = rnd(t, want_h[j] * inv * scale[si * d + j]);
-            try rig.expect(close(t, value(t, gx[(r * s + si) * d + j]), want, 1), "hc norm row {d} stream {d} dim {d}", .{ r, si, j });
+            try rig.expect(
+                close(t, value(t, gx[(r * s + si) * d + j]), want, 1),
+                "hc norm row {d} stream {d} dim {d}",
+                .{ r, si, j },
+            );
         }
     };
     const ga = try rig.download(u16, act);
@@ -150,7 +204,11 @@ test "hyper-connection norm, gates and mix: the reference's roundings, each row 
         const v = rnd(t, rnd(t, zh[r * (low + s) + c]) / 4.0);
         if (c < low) {
             try rig.expect(close(t, value(t, ga[r * low + c]), rnd(t, v * sigmoid(v)), 1), "hc act {d} {d}", .{ r, c });
-        } else try rig.expect(close(t, value(t, gi[r * s + c - low]), 2 * rnd(t, sigmoid(v)), 1), "hc inject {d} {d}", .{ r, c });
+        } else try rig.expect(
+            close(t, value(t, gi[r * s + c - low]), 2 * rnd(t, sigmoid(v)), 1),
+            "hc inject {d} {d}",
+            .{ r, c },
+        );
     };
     const gm = try rig.download(u16, mixed);
     defer gpa.free(gm);
@@ -191,7 +249,16 @@ test "the wide norm over a row of every stream, and the gates without inject gat
     var act = try t.alloc(rows * low * 2);
     defer act.free();
     const st = t.stream.handle;
-    try t.on.fn_rms_wide(ptr(?*const anyopaque, x), ptr(?[*]const f32, sc), ptr(?*anyopaque, y), t.kind(), rows, w, eps, st);
+    try t.on.fn_rms_wide(
+        ptr(?*const anyopaque, x),
+        ptr(?[*]const f32, sc),
+        ptr(?*anyopaque, y),
+        t.kind(),
+        rows,
+        w,
+        eps,
+        st,
+    );
     try t.on.fn_hc_gates(ptr(?[*]const f32, z), ptr(?*anyopaque, act), null, t.kind(), rows, low, 4, st);
     try t.stream.synchronize();
     const gy = try rig.download(u16, y);
@@ -201,7 +268,11 @@ test "the wide norm over a row of every stream, and the gates without inject gat
     for (0..rows) |r| {
         for (xs, 0..) |*v, j| v.* = value(t, hx[r * w + j]);
         const inv = rmsInv(xs, eps);
-        for (0..w) |j| try rig.expect(close(t, value(t, gy[r * w + j]), rnd(t, xs[j] * inv * scale[j]), 1), "wide norm row {d} dim {d}", .{ r, j });
+        for (0..w) |j| try rig.expect(
+            close(t, value(t, gy[r * w + j]), rnd(t, xs[j] * inv * scale[j]), 1),
+            "wide norm row {d} dim {d}",
+            .{ r, j },
+        );
     }
     const ga = try rig.download(u16, act);
     defer gpa.free(ga);
@@ -253,8 +324,34 @@ test "the n-gram gate and its dilated conv: gate, norm, conv and residual sums a
             return @ptrFromInt(b + i * 4);
         }
     };
-    try t.on.fn_ple_gate(ptr(?*const anyopaque, kv), ptr(?*const anyopaque, h), f32p.at(base, 0), f32p.at(base, w), f32p.at(base, 2 * w), ptr(?*anyopaque, gated), @ptrFromInt(at(cin) + tail * w * 2), k, rows, s, d, eps, st);
-    try t.on.fn_ple_conv(ptr(?*const anyopaque, cin), f32p.at(base, 3 * w), ptr(?*const anyopaque, gated), ptr(?*const anyopaque, h), ptr(?*anyopaque, out), k, rows, w, taps, dil, st);
+    try t.on.fn_ple_gate(
+        ptr(?*const anyopaque, kv),
+        ptr(?*const anyopaque, h),
+        f32p.at(base, 0),
+        f32p.at(base, w),
+        f32p.at(base, 2 * w),
+        ptr(?*anyopaque, gated),
+        @ptrFromInt(at(cin) + tail * w * 2),
+        k,
+        rows,
+        s,
+        d,
+        eps,
+        st,
+    );
+    try t.on.fn_ple_conv(
+        ptr(?*const anyopaque, cin),
+        f32p.at(base, 3 * w),
+        ptr(?*const anyopaque, gated),
+        ptr(?*const anyopaque, h),
+        ptr(?*anyopaque, out),
+        k,
+        rows,
+        w,
+        taps,
+        dil,
+        st,
+    );
     try t.stream.synchronize();
     const gg = try rig.download(u16, gated);
     defer gpa.free(gg);
@@ -274,18 +371,29 @@ test "the n-gram gate and its dilated conv: gate, norm, conv and residual sums a
         const rk = rmsInv(kn, eps);
         const rq = rmsInv(qn, eps);
         var dot: f32 = 0;
-        for (0..d) |j| dot += rnd(t, rnd(t, kn[j] * rk * scales[si * d + j]) * rnd(t, qn[j] * rq * scales[w + si * d + j]));
+        for (0..d) |j| dot += rnd(
+            t,
+            rnd(t, kn[j] * rk * scales[si * d + j]) * rnd(t, qn[j] * rq * scales[w + si * d + j]),
+        );
         const g1 = rnd(t, rnd(t, dot) / rnd(t, @sqrt(@as(f32, d))));
         const root = rnd(t, @sqrt(@max(@abs(g1), 1e-6)));
         const gate = rnd(t, sigmoid(rnd(t, std.math.sign(g1) * root)));
         for (0..d) |j| {
             kn[j] = rnd(t, gate * value(t, hkv[r * (w + d) + w + j]));
-            try rig.expect(close(t, value(t, gg[r * w + si * d + j]), kn[j], 2), "ple gate row {d} stream {d} dim {d}", .{ r, si, j });
+            try rig.expect(
+                close(t, value(t, gg[r * w + si * d + j]), kn[j], 2),
+                "ple gate row {d} stream {d} dim {d}",
+                .{ r, si, j },
+            );
         }
         const rc = rmsInv(kn, eps);
         for (0..d) |j| {
             const want = rnd(t, kn[j] * rc * scales[2 * w + si * d + j]);
-            try rig.expect(close(t, value(t, gc[(tail + r) * w + si * d + j]), want, 2), "ple norm row {d} stream {d} dim {d}", .{ r, si, j });
+            try rig.expect(
+                close(t, value(t, gc[(tail + r) * w + si * d + j]), want, 2),
+                "ple norm row {d} stream {d} dim {d}",
+                .{ r, si, j },
+            );
         }
     };
     for (0..rows) |r| for (0..w) |c| {
@@ -299,7 +407,17 @@ test "the n-gram gate and its dilated conv: gate, norm, conv and residual sums a
 }
 
 /// The reference's hash of row `row`'s n-gram for head `head`: history then tokens, eos for those past a segment.
-pub fn ngramId(history: [2]i64, tokens: []const i32, row: usize, head: usize, eos: i64, mult: []const i64, size: i64, offset: i64, per: usize) u32 {
+pub fn ngramId(
+    history: [2]i64,
+    tokens: []const i32,
+    row: usize,
+    head: usize,
+    eos: i64,
+    mult: []const i64,
+    size: i64,
+    offset: i64,
+    per: usize,
+) u32 {
     var seq: [66]i64 = undefined;
     seq[0], seq[1] = history;
     for (tokens[0 .. row + 1], 0..) |x, i| seq[2 + i] = x;
@@ -327,7 +445,24 @@ test "n-gram rows: every head's hash of the window, segments cut at eos, exact" 
     const mult = [3]i64{ 23703573157769, 20109073645365, 8052911324071 };
     var sizes: [16]i64 = undefined;
     var offsets: [16]i64 = undefined;
-    const primes = [16]i64{ 20000003, 20000023, 20000033, 20000047, 20000059, 20000063, 20000069, 20000077, 20000081, 20000093, 20000107, 20000147, 20000153, 20000159, 20000161, 20000171 };
+    const primes = [16]i64{
+        20000003,
+        20000023,
+        20000033,
+        20000047,
+        20000059,
+        20000063,
+        20000069,
+        20000077,
+        20000081,
+        20000093,
+        20000107,
+        20000147,
+        20000153,
+        20000159,
+        20000161,
+        20000171,
+    };
     var off: i64 = 0;
     for (primes, 0..) |p, i| {
         sizes[i] = p;
@@ -352,12 +487,24 @@ test "n-gram rows: every head's hash of the window, segments cut at eos, exact" 
         const rows: c_int = @intCast(c.tokens.len);
         var ids = try t.alloc(c.tokens.len * 16 * 4);
         defer ids.free();
-        try t.on.fn_ngram_ids(ptr(?[*]const i32, dt), ptr(?*const anyopaque, dm), ptr(?*anyopaque, ids), rows, 16, 8, 3, t.stream.handle);
+        try t.on.fn_ngram_ids(
+            ptr(?[*]const i32, dt),
+            ptr(?*const anyopaque, dm),
+            ptr(?*anyopaque, ids),
+            rows,
+            16,
+            8,
+            3,
+            t.stream.handle,
+        );
         try t.stream.synchronize();
         const got = try rig.download(u32, ids);
         defer gpa.free(got);
         for (0..c.tokens.len) |r| for (0..16) |hd| {
-            try std.testing.expectEqual(ngramId(c.history, c.tokens, r, hd, eos, &mult, sizes[hd], offsets[hd], 8), got[r * 16 + hd]);
+            try std.testing.expectEqual(
+                ngramId(c.history, c.tokens, r, hd, eos, &mult, sizes[hd], offsets[hd], 8),
+                got[r * 16 + hd],
+            );
         };
     }
 }
