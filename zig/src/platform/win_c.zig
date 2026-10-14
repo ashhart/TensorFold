@@ -284,6 +284,7 @@ fn openFile(path: [*:0]const u8, flags: O) c_int {
         _ = CloseHandle(@ptrFromInt(@as(usize, @bitCast(h))));
         return fail(.MFILE);
     }
+    if (fd < append_fds.len) @atomicStore(u8, &append_fds[@intCast(fd)], @intFromBool(flags.APPEND), .release);
     return fd;
 }
 
@@ -293,7 +294,11 @@ pub fn openat(dir: fd_t, path: [*:0]const u8, flags: O, ...) callconv(.c) c_int 
     return openFile(p.ptr, flags);
 }
 
+/// Descriptors opened with O_APPEND, whose writes go to the end of the file whole, as POSIX appends do.
+var append_fds: [8192]u8 = @splat(0);
+
 pub fn close(fd: fd_t) c_int {
+    if (fd >= 0 and fd < append_fds.len) @atomicStore(u8, &append_fds[@intCast(fd)], 0, .release);
     if (fd >= dir_base and fd < dir_base + dir_paths.len) {
         lockDirs();
         defer dirs_lock.unlock();
@@ -313,6 +318,14 @@ pub fn read(fd: fd_t, buf: [*]u8, len: usize) isize {
 }
 
 pub fn write(fd: fd_t, buf: [*]const u8, len: usize) isize {
+    if (fd >= 0 and fd < append_fds.len and @atomicLoad(u8, &append_fds[@intCast(fd)], .acquire) != 0) {
+        // WriteFile at the end-of-file offset lands whole; the CRT's seek-then-write lets writers interleave
+        const h = osHandle(fd) orelse return -1;
+        var ov: OVERLAPPED = .{ .offset = 0xFFFF_FFFF, .offset_high = 0xFFFF_FFFF };
+        var put: u32 = 0;
+        if (WriteFile(h, buf, @intCast(@min(len, chunk)), &put, &ov) == 0) return fail(lastError());
+        return put;
+    }
     return _write(fd, buf, @intCast(@min(len, chunk)));
 }
 
