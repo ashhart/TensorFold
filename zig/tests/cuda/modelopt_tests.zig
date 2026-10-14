@@ -56,7 +56,12 @@ pub fn run(gpu: Gpu) !void {
     var stream = try cuda.Stream.init(gpu.d, false); // blocking: launches wait for fromHost's legacy-stream copies
     defer stream.deinit();
     try packers(gpu, rng, &pack, stream);
-    var lane = try qmmf.Lane.load(gpu.d, (try gpu.ctx.capability()) / 10);
+    const capability = try gpu.ctx.capability();
+    if (capability / 10 < 9) {
+        std.debug.print("SKIP modelopt rows: the decode lane matmul sums its split-K slices in a cluster, and a ModelOpt checkpoint refuses below sm_90 anyway\n", .{});
+        return;
+    }
+    var lane = try qmmf.Lane.load(gpu.d, capability / 10);
     defer lane.unload();
     var gemm = try cuda.nvfp4.Prompt.load(gpu.d);
     defer gemm.unload();
