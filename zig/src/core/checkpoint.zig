@@ -247,3 +247,24 @@ test "after release the mapping stays readable: a later read faults the same byt
     ck.release();
     try std.testing.expectEqualSlices(u8, image[image.len - 4096 ..], t.bytes);
 }
+
+test "release keeps a map that fell back to reads (no mmap): its heap copy is the only one" {
+    const gpa = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{ .disable_memory_mapping = true });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const n = 1 << 20; // past the allocator's small buckets, so the copy has pages of its own
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const image = try testImage(gpa, "x", n);
+    defer gpa.free(image);
+    for (image[image.len - n ..], 0..) |*b, i| b.* = @truncate(i * 7 + 1);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = image });
+    var path: [64]u8 = undefined;
+    var ck = try Checkpoint.openModel(gpa, io, try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}));
+    defer ck.close();
+    try std.testing.expect(ck.files.items[0].map.section == null);
+    const t = try ck.get("x");
+    ck.release();
+    try std.testing.expectEqualSlices(u8, image[image.len - n ..], t.bytes);
+}

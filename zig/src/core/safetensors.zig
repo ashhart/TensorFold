@@ -169,7 +169,8 @@ pub const File = struct {
     pub fn release(self: *const File) void {
         if (@import("builtin").os.tag != .linux) return;
         const linux = std.os.linux;
-        _ = linux.madvise(self.map.memory.ptr, self.map.memory.len, linux.MADV.DONTNEED);
+        // a map that fell back to a heap copy (no mmap) holds the only bytes: DONTNEED would zero them
+        if (self.map.section != null) _ = linux.madvise(self.map.memory.ptr, self.map.memory.len, linux.MADV.DONTNEED);
         _ = linux.fadvise(self.file.handle, 0, 0, linux.POSIX_FADV.DONTNEED);
     }
 
