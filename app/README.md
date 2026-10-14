@@ -7,6 +7,8 @@ graphite and navy surfaces, an electric-blue primary and the fold gradient.
 It reads, edits, and runs your code through a tool‑use loop, with streaming responses,
 live diffs, and per‑action approval.
 
+The Mac app requires Apple silicon and macOS 13.3 or later. The bundled offline voice runtime sets this minimum; isolated bot VMs additionally require macOS 26 or later.
+
 
 
 ## Features

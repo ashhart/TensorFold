@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { FUSE_ORDER, assertFuses, readFuseWire, verifyPackagedEngine } from './package-checks.mjs'
+import { assertPackagedMacOSMinimum, macOSBuildMinimums } from './macos-runtime-minimum.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
@@ -79,3 +80,48 @@ try {
 }
 
 console.log('package checks tests passed')
+
+const nativeBuild = (minimum, platform = 'MACOS') => `Load command 1\n cmd LC_BUILD_VERSION\n platform ${platform}\n minos ${minimum}\n sdk 26.5\n ntools 1\n tool CLANG\n version 17.0\n`
+assert.deepEqual(macOSBuildMinimums(nativeBuild('13.3')), ['13.3'])
+assert.deepEqual(macOSBuildMinimums(`${nativeBuild('12.0')}\n${nativeBuild('13.3')}`), ['12.0', '13.3'])
+assert.deepEqual(macOSBuildMinimums('Load command 1\n cmd LC_VERSION_MIN_MACOSX\n version 10.15\n sdk 11.0\n'), ['10.15'])
+assert.throws(() => macOSBuildMinimums(nativeBuild('13.3', 'IOS')), /non-macOS/)
+assert.throws(() => macOSBuildMinimums(nativeBuild('not-a-version')), /Invalid minimum/)
+assert.throws(() => macOSBuildMinimums('cmd LC_BUILD_VERSION\n platform MACOS\n sdk 26.5'), /Invalid minimum/)
+assert.throws(() => macOSBuildMinimums('no load commands'), /no recognized/)
+
+const minimumTmp = await mkdtemp(path.join(os.tmpdir(), 'macos-minimum-test-'))
+try {
+  const app = path.join(minimumTmp, 'Fixture.app')
+  const nested = path.join(app, 'Contents', 'Resources', 'onnxruntime')
+  await mkdir(nested, { recursive: true })
+  await writeFile(path.join(app, 'Contents', 'Info.plist'), 'fixture plist')
+  await writeFile(path.join(nested, 'runtime.dylib'), Buffer.from('cffaedfe00000000', 'hex'))
+  await writeFile(path.join(nested, 'notice.txt'), 'not native')
+  await symlink(path.join(nested, 'runtime.dylib'), path.join(nested, 'runtime-alias'))
+  let declared = '13.0'
+  let build = nativeBuild('13.3')
+  const calls = []
+  const run = async (command, args) => {
+    calls.push([command, ...args])
+    return { stdout: command.endsWith('plutil') ? declared : build, stderr: '' }
+  }
+  await assert.rejects(() => assertPackagedMacOSMinimum(app, { run }), /requires macOS 13.3, but the app declares 13.0/)
+  declared = pkg.build.mac.minimumSystemVersion
+  const ok = await assertPackagedMacOSMinimum(app, { run })
+  assert.equal(ok.declaredMinimum, '13.3')
+  assert.equal(ok.binaries.length, 1, 'regular native files are checked once, including non-executable dylibs')
+  assert.ok(calls.every(call => call[0] === '/usr/bin/plutil' || call[0] === '/usr/bin/xcrun'), 'native code is never executed')
+  build = `${nativeBuild('12.0')}\n${nativeBuild('14.0')}`
+  await assert.rejects(() => assertPackagedMacOSMinimum(app, { run }), /requires macOS 14.0/)
+  build = nativeBuild('13.3', 'IOS')
+  await assert.rejects(() => assertPackagedMacOSMinimum(app, { run }), /non-macOS/)
+  declared = ''
+  await assert.rejects(() => assertPackagedMacOSMinimum(app, { run }), /Invalid minimum/)
+  declared = '13.3'
+  await rm(path.join(nested, 'runtime.dylib'))
+  await assert.rejects(() => assertPackagedMacOSMinimum(app, { run }), /no native binaries/)
+} finally {
+  await rm(minimumTmp, { recursive: true, force: true })
+}
+console.log('macOS native minimum-version checks passed')

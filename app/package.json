@@ -106,7 +106,7 @@
       "artifactName": "${productName}-${version}-${arch}.${ext}",
       "category": "public.app-category.developer-tools",
       "darkModeSupport": true,
-      "minimumSystemVersion": "13.0",
+      "minimumSystemVersion": "13.3",
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "icon": "build/icon.icns",
