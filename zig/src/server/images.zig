@@ -1,5 +1,4 @@
-//! Image input (--vision): a request's image_url parts to the engine's tower input, and the rendered prompt's
-//! placeholders expanded to each image's tokens, as TensorFold 0.6.6's vision path does for GLM-5.3-Flash.
+//! Image input (--vision): image_url parts to the engine's tower input, the prompt's placeholders to image tokens.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json.zig");
@@ -58,8 +57,7 @@ pub const Fetch = struct {
     }
 };
 
-/// An image part's bytes, at most `limit`: a data URL's, or with --vision-urls (`fetch`) a public HTTPS URL's, fetched
-/// before `deadline` (images.py _check_source and load_images).
+/// An image part's bytes, at most `limit`: a data URL's, or with --vision-urls a public HTTPS URL's before `deadline`.
 pub fn sourceBytes(cx: *Cx, fetch: ?Fetch, url: []const u8, limit: usize, deadline: std.Io.Timestamp) errors.Refused![]const u8 {
     if (std.ascii.startsWithIgnoreCase(url, "data:")) {
         const bytes = try dataBytes(cx, url);
@@ -151,8 +149,7 @@ pub fn markerText(text: model_text.Text, a: std.mem.Allocator, v: api.Vision) ![
     return out.items;
 }
 
-/// `messages` with each marker the text spells (a user's words, a tool's output) replaced by its sentinel, so only
-/// the template's own markers, one wrapper per image part, render as the image tokens (#511).
+/// `messages` with each marker the text spells replaced by its sentinel, so only the template's become images (#511).
 pub fn shield(a: std.mem.Allocator, v: Value, markers: []const []const u8) !Value {
     return switch (v) {
         .string => |s| .{ .string = try shieldText(a, s, markers) },
@@ -189,8 +186,7 @@ fn shieldText(a: std.mem.Allocator, s: []const u8, markers: []const []const u8) 
     return if (changed) out.items else s;
 }
 
-/// The rendered prompt's ids: its text as the tokenizer reads it, each sentinel's marker as ordinary text tokens.
-/// Added tokens split the text anyway, so a prompt without quoted markers gets exactly `encode`'s ids.
+/// The rendered prompt's ids, each sentinel's marker as ordinary text tokens; otherwise exactly `encode`'s ids.
 pub fn encodeShielded(text: model_text.Text, a: std.mem.Allocator, rendered: []const u8, markers: []const []const u8) model_text.Error![]u32 {
     var ids: std.ArrayList(u32) = .empty;
     var rest = rendered;
@@ -211,9 +207,7 @@ pub fn encodeShielded(text: model_text.Text, a: std.mem.Allocator, rendered: []c
     return ids.items;
 }
 
-/// The prompt with each image's placeholder expanded to its tokens, the images for the engine and the prompt as the
-/// cache matches it; null when the engine reads no images. Images are counted from the request's image parts; the
-/// rendered placeholders are the template's alone (text that spells a marker was shielded), one per part.
+/// The prompt with each image's placeholder expanded to its tokens, the images and the cache key; null without vision.
 pub fn expand(vision: ?api.Vision, fetch: ?Fetch, cx: *Cx, messages: Value, ids: []const u32, history_len: usize) errors.Refused!?Expanded {
     const v = vision orelse return null;
     const ps = try parts(cx, messages);

@@ -1,14 +1,4 @@
-"""Image input served end to end on a running ``tensorfold-native --vision`` (#565's served checks).
-
-    python tools/zig/vision_served.py --url http://127.0.0.1:8000 --images DIR
-
-DIR holds PNG and JPEG test images. Checks: an image request answers, and text or a tool result that quotes the
-model's image marker beside a real image is ordinary text (images come from the request's image parts, #511); drafted
-equals ``"draft": false`` and concurrent equals alone with images; an image conversation's next turn resumes past
-its image, and another image under the same placeholders resumes none of the first one's rows; and the refusals (WebP by name, other formats, an image outside a
-user or tool message, too many images, remote URLs without --vision-urls, bad data URLs, a bad detail); tools/zig/vision_urls_served.py
-checks a server started with --vision-urls.
-"""
+"""Image input served end to end on a running ``tensorfold-native --vision`` (#565's served checks)."""
 
 from __future__ import annotations
 
@@ -117,9 +107,7 @@ def main() -> int:
     same = sum(x == y for x, y in zip(alone, together))
     check("concurrent image requests equal their runs alone", same == len(runs), f"{same} of {len(runs)}")
 
-    # the prompt cache keeps a turn's state at its planned cuts (GLM: the shared system cut, and a reply of 256+ tokens),
-    # so a conversation's third turn resumes past an image its second turn kept. Image B under the same text and
-    # placeholder ids resumes at most the text before its image, and answers as a server with nothing kept
+    # the prompt cache keeps state at planned cuts (system, a 256+ token reply): turn three resumes past turn 2's image
     system = {"role": "system", "content": " ".join(f"Rule {i}: describe what you see plainly and briefly." for i in range(120))}
     q, q2, q3 = "What is shown?", "Say that again in three words.", "And once more."
     head = ask([system, user(text(q))], tokens=1)[1]["usage"]["prompt_tokens"]  # the text alone: past where an image starts
@@ -137,6 +125,7 @@ def main() -> int:
     code, ra = ask(three_a, tokens=24)
     cached_a = ra.get("usage", {}).get("prompt_tokens_details", {}).get("cached_tokens", 0) if code == 200 else -1
     check("an image conversation's later turn resumes past its image", code == 200 and cached_a > head, f"cached {cached_a} of {ra.get('usage', {}).get('prompt_tokens')}; the text alone is {head}")
+    # image B under the same text and placeholder ids resumes at most the text before its image
     code, rb = ask(three_b, tokens=24)
     cached_b = rb.get("usage", {}).get("prompt_tokens_details", {}).get("cached_tokens", 0) if code == 200 else -1
     check("another image under the same placeholders resumes only the text before it", code == 200 and cached_b < head,

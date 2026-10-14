@@ -1,8 +1,4 @@
-//! Public HTTPS images for --vision-urls, as TensorFold 0.6.6's server fetched them (vision/images_http.py): an https
-//! URL on port 443 without credentials or a fragment, its host resolved and every address checked public, a TLS
-//! connection verified for the host on an address that was checked, GET with identity encoding, up to 3 redirects
-//! (each checked the same way), a declared media type the caller accepts, the bytes within the caller's limit, all
-//! inside a deadline.
+//! Public HTTPS images for --vision-urls as TensorFold 0.6.6 fetched them: every address and redirect checked public.
 const std = @import("std");
 const Io = std.Io;
 const net = std.Io.net;
@@ -26,8 +22,7 @@ fn fail(f: *Failure, text: []const u8) Error {
     return error.Media;
 }
 
-/// Python ipaddress: is_global and not multicast or reserved, nor 192.0.0.0/24 or 168.63.129.16; no IPv6 address
-/// that embeds an IPv4 one (mapped, 6to4, Teredo).
+/// Python ipaddress is_global, less multicast, reserved, 192.0.0.0/24, 168.63.129.16 and IPv6 embedding an IPv4 one.
 pub fn publicIp(a: net.IpAddress) bool {
     switch (a) {
         .ip4 => |v| {
@@ -46,8 +41,7 @@ pub fn publicIp(a: net.IpAddress) bool {
         },
         .ip6 => |v| {
             const b = v.bytes;
-            // global unicast 2000::/3 only, less documentation (2001:db8::/32), the 2001::/23 IETF block (Teredo
-            // 2001::/32 among it) and 6to4 (2002::/16)
+            // global unicast 2000::/3 less documentation, the 2001::/23 IETF block (Teredo among it) and 6to4
             if (b[0] & 0xe0 != 0x20) return false;
             if (b[0] == 0x20 and b[1] == 0x01 and b[2] == 0x0d and b[3] == 0xb8) return false;
             if (b[0] == 0x20 and b[1] == 0x01 and b[2] < 0x02) return false;
@@ -59,9 +53,7 @@ pub fn publicIp(a: net.IpAddress) bool {
 /// A URL as a request takes it: the lowercased host and the percent-quoted path and query.
 pub const Url = struct { host: []const u8, target: []const u8 };
 
-/// images_http._url: https, a host, port 443, no credentials, fragment, backslash, whitespace or controls. A host
-/// that isn't ASCII (an IDNA name) or is an IPv6 literal is refused: std has no IDNA encoder, and TLS here verifies
-/// names.
+/// images_http._url: https, port 443, no credentials, fragment, backslash, whitespace, controls, IDNA or IPv6 host.
 pub fn parseUrl(a: std.mem.Allocator, value: []const u8, f: *Failure) Error!Url {
     if (value.len > max_url_chars) return fail(f, "image URL is too long or contains whitespace/control characters");
     for (value) |c| if (c <= 32 or c == 127) return fail(f, "image URL is too long or contains whitespace/control characters");
@@ -103,8 +95,7 @@ pub fn parseUrl(a: std.mem.Allocator, value: []const u8, f: *Failure) Error!Url 
     return .{ .host = lower, .target = t.items };
 }
 
-/// The location a redirect names, resolved against `base` (urljoin's absolute, scheme-relative, absolute-path and
-/// relative forms).
+/// The location a redirect names, resolved against `base` (urljoin's absolute, scheme-relative and relative forms).
 pub fn join(a: std.mem.Allocator, base: []const u8, location: []const u8) ![]const u8 {
     if (std.ascii.startsWithIgnoreCase(location, "https://") or std.ascii.startsWithIgnoreCase(location, "http://")) return a.dupe(u8, location);
     if (std.mem.startsWith(u8, location, "//")) return std.fmt.allocPrint(a, "https:{s}", .{location});
@@ -129,8 +120,7 @@ pub const Body = struct { data: []u8, media: []const u8 };
 /// What one request gave: the body, or a redirect's location.
 pub const Got = union(enum) { body: Body, redirect: []const u8 };
 
-/// The bytes of `url` and its media type (one of `media_types`), at most `max_bytes`, before `deadline` and within
-/// one download's seconds, redirects followed and each checked again.
+/// `url`'s bytes and media type (one of `media_types`), at most `max_bytes`, before `deadline`, redirects rechecked.
 pub fn fetch(a: std.mem.Allocator, io: Io, url: []const u8, max_bytes: usize, deadline: Io.Timestamp, media_types: []const []const u8, f: *Failure) Error!Body {
     return fetchVia(a, io, url, max_bytes, deadline, media_types, f, Network{});
 }
@@ -159,8 +149,7 @@ pub fn ask(w: *Io.Writer, u: Url, accept: []const u8) Io.Writer.Error!void {
     try w.flush();
 }
 
-/// The response read from `r`: a redirect's location, or a 200's body when its encoding, declared type and length
-/// pass (Content-Length or chunked, else to the end of the stream).
+/// The response from `r`: a redirect's location, or a 200's body when its encoding, declared type and length pass.
 pub fn answer(a: std.mem.Allocator, io: Io, r: *Io.Reader, max_bytes: usize, deadline: Io.Timestamp, media_types: []const []const u8, f: *Failure) Error!Got {
     const broke = "image download failed or timed out";
     const too_big = "image response exceeds the encoded byte limit";
@@ -247,8 +236,7 @@ fn readInto(a: std.mem.Allocator, io: Io, r: *Io.Reader, data: *std.ArrayList(u8
     }
 }
 
-/// A TCP connection to the checked address on port 443, its connect bounded by `ms` (std's connect has no timeout
-/// yet: a nonblocking connect and poll) and its sends and reads by the socket's timeouts.
+/// A TCP connection to the checked address on port 443, its connect bounded by `ms` (std's connect has no timeout).
 fn connect(addr: net.IpAddress, ms: i64, f: *Failure) Error!net.Stream {
     const c = std.c;
     const failed = "image download failed or timed out";

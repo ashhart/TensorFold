@@ -1,14 +1,4 @@
-"""Image URLs served end to end on a running ``tensorfold-native --vision --vision-urls`` (#565's URL checks).
-
-    python tools/zig/vision_urls_served.py --url http://127.0.0.1:8000
-
-Checks, against public hosts: an HTTPS image URL answers exactly as the same bytes sent as a data URL (the prompt's
-tokens and the greedy reply), and so does a URL that redirects to it; a URL and a data URL in one request; and the
-refusals images_http.py gave, before any token (HTTP status, content type, a host that resolves to a private
-address, a name that is never public, an address literal that isn't public, TLS that doesn't verify, a scheme, port,
-credentials or fragment the URL rules refuse, an unresolvable host). The fetch's own rules (redirect limits,
-lengths, chunking, encodings, deadlines) are the unit tests in zig/src/server/media_fetch.zig.
-"""
+"""Image URLs served end to end on a running ``tensorfold-native --vision --vision-urls`` (#565's URL checks)."""
 
 from __future__ import annotations
 
