@@ -388,7 +388,7 @@ pub const Draft = struct {
         ids[0] = pending;
         @memset(ids[1..B], c.mask);
         try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(d.ids, ids.ptr, B * 4, e.stream.handle), "cuMemcpyHtoDAsync");
-        try e.run(e.fns.embed, .{ B, 1, 1 }, .{ 256, 1, 1 }, .{ d.ids, e.embed_w, e.embed_s, e.embed_b, d.h, @as(c_int, @intCast(c.hidden)), @as(u64, 0) });
+        try e.embed(d.ids, d.h, B, 0);
         for (d.w.layers, 0..) |l, i| {
             try d.norm(d.h, l.input_norm, d.x, B);
             try d.proj(l.attn_conv, d.x, d.dyn, B);
@@ -413,7 +413,7 @@ pub const Draft = struct {
         // the mask rows' logits through the target's head, their best tokens and their selector projections
         const rows = B - 1;
         try d.norm(d.h + c.hidden * 2, d.w.final_norm, d.x, rows);
-        try d.proj(e.head, d.x, d.logits, rows);
+        try e.projSums(e.head, d.x, d.xs, d.logits, rows, rows > 16, 0);
         try e.draws.logprobRows(e.stream, d.logits, c.vocab, d.picks, @intCast(c.topk), false, d.words, rows);
         try d.proj(d.w.selector, d.x, d.hp, rows);
         const st = d.staged.bytes;

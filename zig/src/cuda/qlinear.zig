@@ -30,6 +30,26 @@ pub const Affine4 = struct {
     }
 };
 
+/// MLX affine 8-bit tiled for affine8.cu's lane_gemv: a byte a weight, Affine4's padding, scales and biases.
+pub const Affine8 = struct {
+    w: u64,
+    s: u64,
+    b: u64,
+    n: usize,
+    k: usize,
+    npad: usize,
+
+    pub fn layout(n: usize, k: usize) struct { npad: usize, words: usize, scales: usize } {
+        const npad = (n + 127) / 128 * 128;
+        return .{ .npad = npad, .words = npad * k, .scales = k / 64 * npad * 2 };
+    }
+};
+
+/// The width an MLX code of `bits` is served at: 2 to 4 bits on the 4-bit tiles, 5 to 8 on the 8-bit ones.
+pub fn servedBits(bits: u8) u8 {
+    return if (bits <= 4) 4 else 8;
+}
+
 /// One projection's weights in any format this module serves; every one but affine4 is a lane matmul mode.
 pub const Weight = union(enum) {
     affine4: Affine4,
@@ -348,6 +368,115 @@ pub const Affine4Kernels = struct {
         try launch_.launch(a.prefill_fn, .{ .grid = .{ .x = u(grid), .y = 1, .z = 1 }, .block = .{ .x = 256 }, .shared = prefill_smem }, s, &g);
     }
 };
+
+pub const gemv8_smem: u32 = 38784; // affine8.cu's Tile<64, 64, 6>::SMEM
+pub const split8_smem: u32 = 25856; // Tile<64, 64, 4>::SMEM
+
+/// MLX affine checkpoints of every width: 2 to 4-bit codes packed into the affine-4 tiles (served by Affine4Kernels),
+/// 5 to 8-bit codes into 8-bit tiles served here by lane_gemv's arithmetic; each code keeps its value, so no rounding.
+pub const Affine8Kernels = struct {
+    gemv_fn: Function,
+    split_fn: Function,
+    pack4_fn: Function, // MLX codes of 2 to 4 bits into the affine-4 tiles
+    pack8_fn: Function, // MLX codes of 5 to 8 bits into the 8-bit tiles
+    widen_fn: Function, // MLX rows into MLX rows of 4 or 8-bit codes (token embeddings)
+    scales_fn: Function, // affine4_pack.cu's tf_transpose_pad16
+    gemv_blocks: usize,
+    split: ?Split,
+    pdl: bool,
+
+    /// From loaded affine8 and affine4_pack modules; GB10 decodes without the split form, as Affine4Kernels does.
+    pub fn resolve(d: *const Driver, mod: Module, pack_mod: Module, sms: usize, gb10: bool) !Affine8Kernels {
+        var a: Affine8Kernels = undefined;
+        a.gemv_fn = try mod.function("tf_affine8_gemv");
+        a.split_fn = try mod.function("tf_affine8_split");
+        a.pack4_fn = try mod.function("tf_affine8_pack4");
+        a.pack8_fn = try mod.function("tf_affine8_pack8");
+        a.widen_fn = try mod.function("tf_affine8_widen");
+        a.scales_fn = try pack_mod.function(symbols.pack_scales);
+        try a.gemv_fn.allowDynamicShared(gemv8_smem);
+        try a.split_fn.allowDynamicShared(split8_smem);
+        a.gemv_blocks = @max(1, try a.gemv_fn.occupancy(128, gemv8_smem)) * sms;
+        a.pdl = gb10;
+        a.split = if (gb10) null else try Split.init(d);
+        return a;
+    }
+
+    pub fn deinit(a: *Affine8Kernels) void {
+        if (a.split) |*sp| sp.deinit();
+    }
+
+    /// MLX words (n, k * bits / 32) on the device into the tiles at `w` of the width `servedBits(bits)` serves.
+    pub fn packWords(a: *const Affine8Kernels, s: Stream, words: u64, bits: u8, n: usize, k: usize, w: u64) !void {
+        if (k % 64 != 0 or k * bits % 32 != 0) return error.UnsupportedShape;
+        const kg = k / 64;
+        const npad = (n + 127) / 128 * 128;
+        const wide = servedBits(bits);
+        const total: u64 = @as(u64, npad / 64) * kg * (if (wide == 4) @as(u64, 512) else 1024);
+        var g: launch_.Args = .{};
+        g.add(words);
+        for ([_]usize{ bits, n, k * bits / 32, kg }) |v| g.add(int(v));
+        g.add(w);
+        g.add(@as(c_longlong, @intCast(total)));
+        const f = if (wide == 4) a.pack4_fn else a.pack8_fn;
+        try launch_.launch(f, .{ .grid = .{ .x = @intCast((total + 255) / 256) }, .block = .{ .x = 256 } }, s, &g);
+    }
+
+    /// (n, k/64) scales or biases into the tiles' (k/64, npad) layout.
+    pub fn packTable(a: *const Affine8Kernels, s: Stream, src: u64, n: usize, k: usize, npad: usize, out: u64) !void {
+        const kg = k / 64;
+        var t: launch_.Args = .{};
+        t.add(src);
+        for ([_]usize{ n, kg, npad }) |v| t.add(int(v));
+        t.add(out);
+        const cells = @as(u64, kg) * npad;
+        try launch_.launch(a.scales_fn, .{ .grid = .{ .x = @intCast((cells + 255) / 256) }, .block = .{ .x = 256 } }, s, &t);
+    }
+
+    /// MLX rows (n, k) of `bits` codes into MLX rows of `wide`-bit codes at `out`, every code's value kept.
+    pub fn widen(a: *const Affine8Kernels, s: Stream, words: u64, bits: u8, n: usize, k: usize, out: u64, wide: u8) !void {
+        if (wide != 4 and wide != 8) return error.UnsupportedWidth;
+        const total: u64 = @as(u64, n) * k * wide / 32;
+        var g: launch_.Args = .{};
+        g.add(words);
+        g.add(int(bits));
+        g.add(int(k));
+        g.add(out);
+        g.add(int(wide));
+        g.add(@as(c_longlong, @intCast(total)));
+        try launch_.launch(a.widen_fn, .{ .grid = .{ .x = @intCast((total + 255) / 256) }, .block = .{ .x = 256 } }, s, &g);
+    }
+
+    /// x (rows, k) bf16 with group sums xs -> out (rows, n) bf16; a row's bits the same at every row count up to 16.
+    pub fn decode(a: *const Affine8Kernels, s: Stream, x: u64, xs: u64, q: Affine8, out: u64, rows: usize) !void {
+        if (rows > 16) return error.WindowTooWide;
+        const sk = splitK(q.n, q.k);
+        const tiles = (q.n + 63) / 64;
+        const part: GemvPart = .{ .w = q.w, .scales = q.s, .biases = q.b, .out = out, .n = int(q.n), .npad = int(q.npad), .sk = int(sk), .tiles = int(tiles) };
+        var g: launch_.Args = .{};
+        g.add(x);
+        g.add(xs);
+        g.add(part);
+        for ([_]usize{ rows, q.k, q.k }) |v| g.add(int(v));
+        if (sk > 1) if (a.split) |sp| {
+            if (tiles > Split.tiles_max or tiles * sk * 16 * 64 * 4 > sp.work.len) return error.SplitTooWide;
+            g.add(sp.work.ptr);
+            g.add(sp.tickets.ptr);
+            return launch_.launch(a.split_fn, .{ .grid = .{ .x = u(tiles * sk) }, .block = .{ .x = 128 }, .shared = split8_smem }, s, &g);
+        };
+        const cfg: launch_.Config = .{ .grid = .{ .x = u(@min(tiles, a.gemv_blocks)) }, .block = .{ .x = 128 }, .shared = gemv8_smem, .pdl = a.pdl };
+        try launch_.launch(a.gemv_fn, cfg, s, &g);
+    }
+};
+
+test "the 8-bit tiles hold a byte a weight over Affine4's padding" {
+    const l = Affine8.layout(10304, 2688);
+    try std.testing.expectEqual(@as(usize, 10368), l.npad);
+    try std.testing.expectEqual(@as(usize, 10368 * 2688), l.words);
+    try std.testing.expectEqual(Affine4.layout(10304, 2688).scales, l.scales);
+    for ([_]u8{ 2, 3, 4 }) |b| try std.testing.expectEqual(@as(u8, 4), servedBits(b));
+    for ([_]u8{ 5, 6, 8 }) |b| try std.testing.expectEqual(@as(u8, 8), servedBits(b));
+}
 
 test "split_k follows the Python shapes" {
     try std.testing.expectEqual(@as(usize, 2), splitK(10304, 2688));

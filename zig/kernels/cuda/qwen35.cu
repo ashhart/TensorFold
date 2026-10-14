@@ -24,6 +24,18 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_embed(const int* __rest
     }
 }
 
+// MLX affine 8-bit token rows (a mixed checkpoint's, or widened to 8 at load): out = bf16(s * q + b), D wide.
+extern "C" __global__ void __launch_bounds__(256) tf_q35_embed8(const int* __restrict__ ids, const uint8_t* __restrict__ W,
+                                                                  const __nv_bfloat16* __restrict__ S, const __nv_bfloat16* __restrict__ B,
+                                                                  __nv_bfloat16* __restrict__ out, int D, const int* __restrict__ P) {
+    if (past_rows(P, blockIdx.x)) return;
+    const size_t id = ids[blockIdx.x];
+    for (int d = threadIdx.x; d < D; d += blockDim.x) {
+        const size_t g = id * (D / 64) + d / 64;
+        out[(size_t)blockIdx.x * D + d] = __float2bfloat16_rn(bf(S[g]) * (float)W[id * D + d] + bf(B[g]));
+    }
+}
+
 // h = bf16(h + r) (r may be null), x = bf16(w * (h * inv)); D a multiple of 256 up to 8192; a 256-thread block a row.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_norm(__nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ R,
                                                                const __nv_bfloat16* __restrict__ W, __nv_bfloat16* __restrict__ X, float eps, int D,

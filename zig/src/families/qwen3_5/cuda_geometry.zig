@@ -1,5 +1,6 @@
 //! A Qwen3.5 hybrid's widths (2B, 27B) as the CUDA engine reads them from config.json; what qwen35.cu fixes is checked.
 const std = @import("std");
+const core = @import("core");
 
 pub const max_layers = 128;
 /// qwen35.cu's fixed widths.
@@ -7,6 +8,43 @@ pub const dk = 128;
 pub const taps = 4;
 pub const head_dim = 256;
 pub const max_query_heads = 32;
+
+/// A layer's projections, each its own MLX width in a mixed checkpoint.
+pub const Slot = enum { gate, up, down, qkv, z, a, b, out, q, k, v, o };
+
+/// Each slot's module under its layer (`layers.{i}.` before it), as the config's quantization table names it.
+pub const slot_modules = std.enums.EnumArray(Slot, []const u8).init(.{
+    .gate = "mlp.gate_proj",
+    .up = "mlp.up_proj",
+    .down = "mlp.down_proj",
+    .qkv = "linear_attn.in_proj_qkv",
+    .z = "linear_attn.in_proj_z",
+    .a = "linear_attn.in_proj_a",
+    .b = "linear_attn.in_proj_b",
+    .out = "linear_attn.out_proj",
+    .q = "self_attn.q_proj",
+    .k = "self_attn.k_proj",
+    .v = "self_attn.v_proj",
+    .o = "self_attn.o_proj",
+});
+
+/// The MLX code width of every quantized module (2 to 8 bits, groups of 64): a uniform checkpoint's are all one.
+pub const Widths = struct {
+    embed: u8 = 4,
+    head: u8 = 4,
+    proj: [max_layers][std.enums.values(Slot).len]u8 = @splat(@splat(4)),
+
+    pub fn of(w: *const Widths, layer: usize, slot: Slot) u8 {
+        return w.proj[layer][@backingInt(slot)];
+    }
+
+    /// Whether any module is not 4 bits: the loader then packs that module from its own width.
+    pub fn mixed(w: *const Widths, layers: usize) bool {
+        if (w.embed != 4 or w.head != 4) return true;
+        for (w.proj[0..layers]) |row| for (row) |b| if (b != 4) return true;
+        return false;
+    }
+};
 
 pub const Geometry = struct {
     hidden: usize,
@@ -21,6 +59,7 @@ pub const Geometry = struct {
     tied: bool,
     context: usize,
     linear: [max_layers]bool,
+    bits: Widths = .{},
 
     pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Geometry {
         const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
@@ -129,11 +168,9 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
     try is(t, "linear_value_head_dim", usize, dk);
     try is(t, "linear_conv_kernel_dim", usize, taps);
     const rope = try object(t.get("rope_parameters") orelse return error.UnsupportedQwenRotary);
-    try is(rope, "rope_type", []const u8, "default");
+    try is(rope, if (rope.get("rope_type") != null) "rope_type" else "type", []const u8, "default"); // "type": the older key
     if (try number(rope, "rope_theta") != 10000000 or try number(rope, "partial_rotary_factor") != 0.25) return error.UnsupportedQwenRotary;
     const q = try object(root.get("quantization") orelse return error.UnsupportedQwenQuantization);
-    if (try integer(q, "bits") != 4 or try integer(q, "group_size") != 64) return error.UnsupportedQwenQuantization;
-    if (q.get("mode")) |m| if (m != .string or !std.mem.eql(u8, m.string, "affine")) return error.UnsupportedQwenQuantization;
     var g: Geometry = .{
         .hidden = try integer(t, "hidden_size"),
         .intermediate = try integer(t, "intermediate_size"),
@@ -160,7 +197,36 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
         if (kind != .string) return error.UnsupportedQwenGeometry;
         if (std.mem.eql(u8, kind.string, "linear_attention")) g.linear[i] = true else if (!std.mem.eql(u8, kind.string, "full_attention")) return error.UnsupportedQwenGeometry;
     }
+    g.bits = try widths(gpa, root, q, g);
     return g;
+}
+
+/// Every module's width from the quantization table (its global width, overridden per module): MLX affine, groups of 64.
+fn widths(gpa: std.mem.Allocator, root: std.json.ObjectMap, q: std.json.ObjectMap, g: Geometry) !Widths {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const mlx = core.quant.mlx;
+    const table = (mlx.detect(arena.allocator(), .{ .root = root, .quantization = q }) catch return error.UnsupportedQwenQuantization) orelse
+        return error.UnsupportedQwenQuantization;
+    const Look = struct {
+        fn bits(t: mlx.Config, key: []const u8) !u8 {
+            const w = t.width(key) catch return error.UnsupportedQwenQuantization;
+            if (w.group != 64) return error.UnsupportedQwenQuantization;
+            return w.bits;
+        }
+    };
+    var out: Widths = .{ .embed = try Look.bits(table, "embed_tokens"), .head = undefined };
+    out.head = if (g.tied) out.embed else try Look.bits(table, "lm_head");
+    var buf: [96]u8 = undefined;
+    for (0..g.layers) |i| for (std.enums.values(Slot)) |slot| {
+        const used = switch (slot) {
+            .gate, .up, .down => true,
+            .qkv, .z, .a, .b, .out => g.linear[i],
+            .q, .k, .v, .o => !g.linear[i],
+        };
+        if (used) out.proj[i][@backingInt(slot)] = try Look.bits(table, try std.fmt.bufPrint(&buf, "layers.{d}.{s}", .{ i, slot_modules.get(slot) }));
+    };
+    return out;
 }
 
 test "the 27B's widths: 48 value heads over 16 key heads, 24 query heads over 4" {
@@ -180,7 +246,40 @@ test "the 27B's widths: 48 value heads over 16 key heads, 24 query heads over 4"
     try std.testing.expectEqual(@as(usize, 6144), g.attnWidth());
     try std.testing.expectEqual(@as(usize, 48 * 128 * 128 * 4), g.recBytes());
     try std.testing.expect(!g.tied);
+    try std.testing.expect(!g.bits.mixed(g.layers)); // uniform 4-bit: every module the global width
     const wide = try std.mem.replaceOwned(u8, std.testing.allocator, text, "\"head_dim\":256", "\"head_dim\":128");
     defer std.testing.allocator.free(wide);
     try std.testing.expectError(error.UnsupportedQwenConfig, parse(std.testing.allocator, wide));
+}
+
+test "a mixed checkpoint's widths by module, under any spelling; other groups and modes refused" {
+    const text =
+        \\{"model_type":"qwen3_5","quantization":{"group_size":64,"bits":2,"mode":"affine",
+        \\   "language_model.model.embed_tokens":{"group_size":64,"bits":8},
+        \\   "language_model.model.layers.0.linear_attn.in_proj_a":{"group_size":64,"bits":5},
+        \\   "model.layers.1.self_attn.v_proj":{"group_size":64,"bits":6},
+        \\   "language_model.model.layers.1.mlp.down_proj":{"group_size":64,"bits":3}},
+        \\ "text_config":{"model_type":"qwen3_5_text","attention_bias":false,"attn_output_gate":true,"hidden_act":"silu",
+        \\ "head_dim":256,"linear_key_head_dim":128,"linear_value_head_dim":128,"linear_conv_kernel_dim":4,
+        \\ "hidden_size":2048,"intermediate_size":6144,"num_hidden_layers":2,"vocab_size":248320,"linear_num_key_heads":16,
+        \\ "linear_num_value_heads":16,"num_attention_heads":8,"num_key_value_heads":2,"rms_norm_eps":1e-06,
+        \\ "max_position_embeddings":262144,"tie_word_embeddings":true,
+        \\ "layer_types":["linear_attention","full_attention"],
+        \\ "rope_parameters":{"rope_type":"default","rope_theta":10000000,"partial_rotary_factor":0.25}}}
+    ;
+    const g = try parse(std.testing.allocator, text);
+    try std.testing.expectEqual(@as(u8, 8), g.bits.embed);
+    try std.testing.expectEqual(@as(u8, 8), g.bits.head); // tied: the embedding's width
+    try std.testing.expectEqual(@as(u8, 5), g.bits.of(0, .a));
+    try std.testing.expectEqual(@as(u8, 2), g.bits.of(0, .qkv));
+    try std.testing.expectEqual(@as(u8, 6), g.bits.of(1, .v));
+    try std.testing.expectEqual(@as(u8, 3), g.bits.of(1, .down));
+    try std.testing.expectEqual(@as(u8, 2), g.bits.of(1, .gate));
+    try std.testing.expect(g.bits.mixed(g.layers));
+    const g32 = try std.mem.replaceOwned(u8, std.testing.allocator, text, "\"group_size\":64,\"bits\":3", "\"group_size\":32,\"bits\":3");
+    defer std.testing.allocator.free(g32);
+    try std.testing.expectError(error.UnsupportedQwenQuantization, parse(std.testing.allocator, g32));
+    const gptq = try std.mem.replaceOwned(u8, std.testing.allocator, text, "\"mode\":\"affine\"", "\"mode\":\"gptq\"");
+    defer std.testing.allocator.free(gptq);
+    try std.testing.expectError(error.UnsupportedQwenQuantization, parse(std.testing.allocator, gptq));
 }
