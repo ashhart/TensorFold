@@ -206,3 +206,22 @@ The multimodal rotary and image-feature integration is adapted from MiaAI-Lab's
 [Flash Next vision patch 0008](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/blob/a3aa89835022c55ca8e55008c37785954834e04f/patches/0008-flash-next-vision.patch),
 MIT License, Copyright (c) 2026 MiaAI-Lab. The license is included in `LICENSES/MiaAI-Lab-MIT.txt`.
 The port preserves the v0.5 CUDA execution APIs and adds an offline EXL3 vision adapter.
+
+## LFM2 pictures in the Zig engine
+
+`zig/src/families/lfm2/` (`png.zig`, `jpeg.zig`, `resample.zig`, `image.zig`) decodes and resizes d1's pictures
+bit for bit as its Python processor does, rewritten in Zig from:
+
+- libjpeg-turbo 3.1.4.1's `jidctint.c` (the islow IDCT), `jdsample.c` (fancy upsampling), `jdcolor.c` (the
+  YCbCr tables) and `jdhuff.c` / `jdphuff.c` (sequential and progressive Huffman decoding). This software is based
+  in part on the work of the Independent JPEG Group. IJG License; its README is in
+  `LICENSES/libjpeg-turbo-README.ijg`. The port keeps libjpeg's arithmetic, stores IDCT output saturated as its SIMD
+  builds do, and decodes no arithmetic-coded, lossless, hierarchical, 12-bit or CMYK JPEGs.
+- Pillow 12.3's `Resample.c` (bicubic coefficients and fixed-point passes), `ImagingUtils.h` (BLEND), `Convert.c`
+  and `PngImagePlugin.py` (each PNG layout's mode). MIT-CMU License, Copyright © 1997-2011 by Secret Labs AB,
+  Copyright © 1995-2011 by Fredrik Lundh and contributors, Copyright © 2010 by Jeffrey 'Alex' Clark and contributors;
+  the license is in `LICENSES/Pillow-MIT-CMU.txt`.
+- PyTorch's `UpSampleKernel.cpp` (antialiased uint8 resize: int16 weights and their precision). BSD-3-Clause,
+  Copyright (c) 2016- Facebook, Inc. and the other holders listed in `LICENSES/PyTorch-BSD-3.txt`.
+- transformers' `Lfm2VlImageProcessor` and `Lfm2VlProcessor` (smart resize, tile grid, placeholder tokens). Apache
+  License 2.0, Copyright 2025 the HuggingFace Inc. team; see [the license text](LICENSES/Apache-2.0.txt).
