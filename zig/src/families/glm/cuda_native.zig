@@ -172,6 +172,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.NoRank => "GLM-5.3-Flash runs at TP over hosts: set TF_GLM_RANK and TF_GLM_WORLD on every host (WORLD 1: one GPU, with TF_GLM_LAYERS for a thin model)",
         error.NoCommId => "GLM-5.3-Flash's ranks meet over NCCL: with TF_GLM_WORLD 2 or more, set NCCL_COMM_ID to rank 0's address:port on every host",
         error.RankMismatch => "the ranks' settings differ (each rank's log names the one): start them alike",
+        error.NotModelOpt, error.UnsupportedQuant => "GLM-5.3-Flash on CUDA reads ModelOpt NVFP4 checkpoints (the log names what config.json has)",
         else => null,
     };
 }
