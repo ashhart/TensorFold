@@ -322,7 +322,10 @@ fn run(ctx: *const Context, args: Args) !u8 {
             drafter_dir = try hub.resolve(a, ctx.io, ctx.environ, d, &uncached);
             if (drafter_dir == null and given) return fail(ctx, uncached);
         }
-        const drafter_label = if (drafter_dir != null and !hub.isDir(ctx.io, try expand(ctx, drafter.?))) drafter else null;
+        const drafter_label = if (drafter_dir != null and !hub.isDir(ctx.io, try expand(ctx, drafter.?)))
+            drafter
+        else
+            null;
         const probe = host.detect(a, ctx.io, ctx.environ, backend);
         facts = .{
             .model = try model.describe(a, ctx.io, args.target, dir, hub.isDir(ctx.io, try expand(ctx, args.target)), ctx.engines.families, drafter_label),
