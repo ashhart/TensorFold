@@ -26,7 +26,7 @@ pub const File = struct {
 
     /// `path` read-only, direct when its file system allows it, else through the page cache.
     pub fn open(path: [:0]const u8) !File {
-        if (builtin.os.tag == .linux) {
+        if (builtin.os.tag == .linux or builtin.os.tag == .windows) {
             const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECT = true });
             if (fd >= 0) return .{ .fd = fd, .direct = true };
         }
@@ -85,7 +85,7 @@ test "span and fits" {
 }
 
 test "direct reads return the same bytes as buffered reads" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    if (builtin.os.tag != .linux and builtin.os.tag != .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     var f = try File.open("/proc/self/exe");
     defer f.close();
