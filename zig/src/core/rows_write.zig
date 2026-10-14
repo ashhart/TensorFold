@@ -91,10 +91,9 @@ pub fn nowNs() i128 {
     return @as(i128, t.sec) * std.time.ns_per_s + t.nsec;
 }
 
-/// The next queued entry made a job: one on disk already, or past the budget, cap or floor, is skipped.
+/// The newest queued entry made a job (its blocks serve older ones); one on disk, or past budget, cap or floor, skips.
 fn start(r: *Rows) bool {
-    if (r.queue.items.len == 0) return false;
-    const q = r.queue.orderedRemove(0);
+    const q = r.queue.pop() orelse return false;
     const j = (prepare(r, q) catch |err| {
         r.counts.skipped += 1;
         pc.note("imprint: {d} tokens stay in RAM only ({s})", .{ q.entry.at, @errorName(err) });
