@@ -54,6 +54,7 @@ test {
     _ = @import("families/flashnext/marks.zig"); // a call's marks
     _ = @import("families/flashnext/think.zig"); // a thinking budget's close on the host
     _ = @import("families/flashnext/think_check.zig"); // and in the verdict kernels (Metal)
+    _ = @import("families/flashnext/sample.zig"); // a sampled window's draws on the GPU (Metal)
     _ = @import("families/glm/glm.zig");
     _ = @import("families/qwen3_5/config.zig");
     _ = @import("families/qwen3_5/backend.zig");
