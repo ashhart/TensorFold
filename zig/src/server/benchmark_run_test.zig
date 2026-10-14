@@ -1,4 +1,4 @@
-//! A run's edges against fakes: a failed serve child's own reason, lost-run paths, refusals and drafter hints.
+//! A run's edges against fakes: a failed serve child's own reason, lost-run paths, refusals and the drafter it passes.
 const std = @import("std");
 const fake = @import("benchmark_fake.zig");
 const cli = @import("benchmark_cli_test.zig");
@@ -120,10 +120,11 @@ test "a run refused before it starts leaves no benchmarks directory; the default
     try std.testing.expect(made.kind == .directory and made.permissions.toMode() & 0o777 == 0o700 and r.has("Receipt saved"));
 }
 
+const sha = "0123456789abcdef0123456789abcdef01234567";
+
 /// Caches ``repo`` in the Hugging Face layout under ``hub``.
 fn cache(a: std.mem.Allocator, hub: []const u8, repo: []const u8) !void {
     const io = std.testing.io;
-    const sha = "0123456789abcdef0123456789abcdef01234567";
     const slash = std.mem.indexOfScalar(u8, repo, '/').?;
     const root = try std.fmt.allocPrint(a, "{s}/models--{s}--{s}", .{ hub, repo[0..slash], repo[slash + 1 ..] });
     try std.Io.Dir.cwd().createDirPath(io, try std.fs.path.join(a, &.{ root, "snapshots", sha }));
@@ -138,7 +139,21 @@ fn passed(r: *Run, flag: []const u8) !bool {
     return false;
 }
 
-test "with its known drafter cached, a default run names the drafter flag and passes none; --serial says it drops a drafter" {
+/// The value the stand-in got after ``flag``, else null.
+fn passedValue(r: *Run, flag: []const u8) !?[]const u8 {
+    const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, try r.path("args"), r.a, .limited(1 << 16));
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |x| if (std.mem.eql(u8, x, flag)) return it.next();
+    return null;
+}
+
+/// The saved receipt's text holds ``field`` exactly.
+fn receiptHas(r: *Run, out: []const u8, field: []const u8) !bool {
+    const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, out, r.a, .limited(1 << 20));
+    return std.mem.indexOf(u8, text, field) != null;
+}
+
+test "--drafter auto passes the family's drafter only when it is cached and says which; only --serial adds --no-drafts" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -153,25 +168,42 @@ test "with its known drafter cached, a default run names the drafter flag and pa
     try r.env.put("HF_HUB_CACHE", hub);
     const big = try r.path("big-checkpoint");
     try std.Io.Dir.cwd().createDirPath(io, big);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ big, "config.json" }), .data = "{\"model_type\": \"qwen3_5\", \"hidden_size\": 5120, \"num_hidden_layers\": 64}" });
+    const config = "{\"model_type\": \"qwen3_5\", \"hidden_size\": 5120, \"num_hidden_layers\": 64}";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ big, "config.json" }), .data = config });
     const drafter = "z-lab/Qwen3.8-27B-DFlash2";
-    const hint = "This run passes no drafter; add --drafter " ++ drafter ++ " (cached) to measure drafted speed.";
-    try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{big})));
-    try std.testing.expect(!r.has(hint));
-    try cache(a, hub, drafter);
-    try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{big})));
-    const out = r.out.written();
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, hint));
-    try std.testing.expect(std.mem.indexOf(u8, out, hint).? < std.mem.indexOf(u8, out, "code T=0 warm-up").?);
+    const uncached = "This run passes no drafter: " ++ drafter ++ " is not in the Hugging Face cache; " ++
+        "the native engine does not download: run tensorfold pull " ++ drafter ++ " first.\n";
+    const named = "This run passes the cached drafter " ++ drafter ++ "; --drafter none runs without it.\n";
+    const out = try r.path("run.json");
+    const repo_null = "\"drafter_repo_id\":null";
+    try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{ big, "--output", out })));
+    try std.testing.expect(std.mem.count(u8, r.out.written(), uncached) == 1 and !r.has(named));
     try std.testing.expect(!try passed(&r, "--drafter") and !try passed(&r, "--no-drafts"));
-    for ([_][]const []const u8{ &.{try r.path("private-checkpoint")}, &.{ big, "--serial" }, &.{ big, "--drafter", "none" }, &.{ big, "--drafter", drafter } }) |head| {
-        try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, head)));
-        try std.testing.expect(!r.has(hint) and !r.has("--serial passes no drafter"));
-    }
-    try std.testing.expect(try passed(&r, "--drafter"));
+    try std.testing.expect(try receiptHas(&r, out, repo_null) and try receiptHas(&r, out, "\"serial\":false"));
+    try cache(a, hub, drafter);
+    const snapshot = try std.fs.path.join(a, &.{ hub, "models--z-lab--Qwen3.8-27B-DFlash2", "snapshots", sha });
+    try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{ big, "--output", out })));
+    const text = r.out.written();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, named));
+    try std.testing.expect(std.mem.indexOf(u8, text, named).? < std.mem.indexOf(u8, text, "code T=0 warm-up").?);
+    try std.testing.expectEqualStrings(snapshot, (try passedValue(&r, "--drafter")).?);
+    try std.testing.expect(!try passed(&r, "--no-drafts") and !r.has("passes no drafter"));
+    try std.testing.expect(try receiptHas(&r, out, "\"drafter_repo_id\":\"" ++ drafter ++ "\""));
+    try std.testing.expect(try receiptHas(&r, out, "\"serial\":false"));
+    try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{ big, "--serial", "--output", out })));
+    try std.testing.expect(try passed(&r, "--no-drafts") and !try passed(&r, "--drafter") and !r.has("drafter"));
+    try std.testing.expect(try receiptHas(&r, out, repo_null) and try receiptHas(&r, out, "\"serial\":true"));
+    try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{ big, "--drafter", "none" })));
+    try std.testing.expect(!try passed(&r, "--drafter") and !try passed(&r, "--no-drafts") and !r.has("drafter"));
+    try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{ big, "--drafter", drafter })));
+    try std.testing.expectEqualStrings(snapshot, (try passedValue(&r, "--drafter")).?);
+    try std.testing.expect(!try passed(&r, "--no-drafts") and !r.has("drafter"));
+    try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{try r.path("private-checkpoint")})));
+    try std.testing.expect(!try passed(&r, "--drafter") and !try passed(&r, "--no-drafts") and !r.has("drafter"));
     try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{ big, "--serial", "--drafter", drafter })));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, r.out.written(), "--serial passes no drafter, so --drafter " ++ drafter ++ " is not used."));
-    try std.testing.expect(!r.has(hint) and !try passed(&r, "--drafter") and try passed(&r, "--no-drafts"));
+    const unused = "--serial passes no drafter, so --drafter " ++ drafter ++ " is not used.";
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, r.out.written(), unused));
+    try std.testing.expect(!r.has(named) and !try passed(&r, "--drafter") and try passed(&r, "--no-drafts"));
 }
 
 test "a greedy-only engine's refusal is printed once with its reason and what to run instead, never saved" {

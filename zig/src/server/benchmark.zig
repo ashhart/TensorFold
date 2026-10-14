@@ -311,10 +311,18 @@ fn run(ctx: *const Context, args: Args) !u8 {
         for (ctx.engines.families) |f| {
             if (std.mem.eql(u8, f.model_type, kind)) break;
         } else return fail(ctx, try std.fmt.allocPrint(a, "This build does not serve model_type {s}; tensorfold-native capabilities --json lists what it serves", .{kind}));
-        const given = !std.mem.eql(u8, args.drafter, "auto") and !std.mem.eql(u8, args.drafter, "none") and args.drafter.len > 0;
-        const wants_drafter = !args.serial and given;
-        const drafter_dir = if (wants_drafter) try hub.resolve(a, ctx.io, ctx.environ, args.drafter, &problem) orelse return fail(ctx, problem) else null;
-        const drafter_label = if (wants_drafter and !hub.isDir(ctx.io, try expand(ctx, args.drafter))) args.drafter else null;
+        const auto = std.mem.eql(u8, args.drafter, "auto");
+        const given = !auto and !std.mem.eql(u8, args.drafter, "none") and args.drafter.len > 0;
+        // auto passes the family's own drafter only when serve's cache lookup finds it; nothing is downloaded.
+        const known = if (!args.serial and auto) model.knownDrafter(config.value) else null;
+        const drafter = if (args.serial) null else if (given) args.drafter else known;
+        var uncached: []const u8 = "";
+        var drafter_dir: ?[]const u8 = null;
+        if (drafter) |d| {
+            drafter_dir = try hub.resolve(a, ctx.io, ctx.environ, d, &uncached);
+            if (drafter_dir == null and given) return fail(ctx, uncached);
+        }
+        const drafter_label = if (drafter_dir != null and !hub.isDir(ctx.io, try expand(ctx, drafter.?))) drafter else null;
         const probe = host.detect(a, ctx.io, ctx.environ, backend);
         facts = .{
             .model = try model.describe(a, ctx.io, args.target, dir, hub.isDir(ctx.io, try expand(ctx, args.target)), ctx.engines.families, drafter_label),
@@ -333,11 +341,10 @@ fn run(ctx: *const Context, args: Args) !u8 {
             else => |x| return x,
         };
         if (args.serial and given) note = try std.fmt.allocPrint(a, "--serial passes no drafter, so --drafter {s} is not used.", .{args.drafter});
-        const known = if (!args.serial and std.mem.eql(u8, args.drafter, "auto")) model.knownDrafter(config.value) else null;
-        var ignored: []const u8 = "";
-        if (known) |k| if (try hub.resolve(a, ctx.io, ctx.environ, k, &ignored) != null) {
-            note = try std.fmt.allocPrint(a, "This run passes no drafter; add --drafter {s} (cached) to measure drafted speed.", .{k});
-        };
+        if (known) |k| note = if (drafter_dir != null)
+            try std.fmt.allocPrint(a, "This run passes the cached drafter {s}; --drafter none runs without it.", .{k})
+        else
+            try std.fmt.allocPrint(a, "This run passes no drafter: {s}.", .{uncached});
     }
     const dest = if (args.output) |o| try expand(ctx, o) else blk: {
         _ = std.Io.Dir.cwd().createDirPathStatus(ctx.io, bench_dir, .fromMode(0o700)) catch {};
