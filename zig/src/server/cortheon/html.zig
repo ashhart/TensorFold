@@ -254,7 +254,7 @@ pub fn excerpt(a: Allocator, text: []const u8, focus: []const u8, max: usize) Al
         const line = std.mem.trim(u8, lines.items[i], " ");
         if (line.len < 16 and !std.mem.startsWith(u8, line, "#")) continue; // a fragment carries little on its own
         if (kept.contains(line)) continue; // boilerplate repeats: one copy says it
-        const cost = lines.items[i].len + 6;
+        const cost = lines.items[i].len + 7; // the line and, at most, the "\n[...]\n" before it
         if (used + cost > max) continue;
         try kept.put(a, line, {});
         keep[i] = true;
