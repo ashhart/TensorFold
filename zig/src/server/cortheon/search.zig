@@ -53,7 +53,7 @@ pub fn braveUrl(a: Allocator, query: []const u8, count: usize) Allocator.Error![
 
 /// Text of an HTML fragment: tags dropped, entities decoded, spaces collapsed.
 fn fragmentText(a: Allocator, fragment: []const u8) Allocator.Error![]const u8 {
-    const t = try html.toText(a, fragment, 2000);
+    const t = try html.toText(a, fragment, 2000, null);
     return std.mem.trim(u8, t.text, " \n");
 }
 

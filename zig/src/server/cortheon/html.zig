@@ -1,6 +1,7 @@
 //! Readable text from an HTML page: its title, then its main content with block breaks kept and entities decoded.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Budget = @import("budget.zig").Budget;
 
 pub const Text = struct { title: []const u8, text: []const u8, truncated: bool };
 
@@ -97,8 +98,8 @@ fn element(html: []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
-/// Readable text of `html`: the title and the main, article or body content, at most `max_chars` bytes of it.
-pub fn toText(a: Allocator, html: []const u8, max_chars: usize) Allocator.Error!Text {
+/// Readable text of `html`: title and main, article or body content, at most `max_chars`, less if `budget` runs out.
+pub fn toText(a: Allocator, html: []const u8, max_chars: usize, budget: ?*Budget) Allocator.Error!Text {
     var title: Out = .{ .a = a };
     if (element(html, "title")) |t| try decodeInto(&title, t);
     const region = element(html, "main") orelse element(html, "article") orelse element(html, "body") orelse html;
@@ -106,7 +107,12 @@ pub fn toText(a: Allocator, html: []const u8, max_chars: usize) Allocator.Error!
     var pre: usize = 0;
     var i: usize = 0;
     var ent: [4]u8 = undefined;
+    var stopped = false;
     while (i < region.len) {
+        if (budget) |b| if (b.out()) {
+            stopped = true;
+            break;
+        };
         const ch = region[i];
         if (ch == '&') {
             if (entity(region, i, &ent)) |e| {
@@ -161,7 +167,8 @@ pub fn toText(a: Allocator, html: []const u8, max_chars: usize) Allocator.Error!
     }
     const tidy = try tidyLines(a, o.buf.items);
     const cut = cutAt(tidy, max_chars);
-    return .{ .title = std.mem.trim(u8, title.buf.items, " "), .text = tidy[0..cut], .truncated = cut < tidy.len };
+    const named = std.mem.trim(u8, title.buf.items, " ");
+    return .{ .title = named, .text = tidy[0..cut], .truncated = cut < tidy.len or stopped };
 }
 
 fn decodeInto(o: *Out, s: []const u8) Allocator.Error!void {
@@ -215,7 +222,13 @@ fn focusTerms(a: Allocator, focus: []const u8) Allocator.Error![]const []const u
 }
 
 /// At most `max` bytes of `text`: its opening, then the lines sharing the rarest words with `focus`, in page order.
-pub fn excerpt(a: Allocator, text: []const u8, focus: []const u8, max: usize) Allocator.Error![]const u8 {
+pub fn excerpt(
+    a: Allocator,
+    text: []const u8,
+    focus: []const u8,
+    max: usize,
+    budget: ?*Budget,
+) Allocator.Error![]const u8 {
     if (text.len <= max) return text;
     const head_len = blk: {
         const cut = cutAt(text, max / 3);
@@ -224,7 +237,10 @@ pub fn excerpt(a: Allocator, text: []const u8, focus: []const u8, max: usize) Al
     const terms = try focusTerms(a, focus);
     var lines: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, text[head_len..], '\n');
-    while (it.next()) |line| if (std.mem.trim(u8, line, " ").len > 0) try lines.append(a, line);
+    while (it.next()) |line| {
+        if (budget) |b| if (b.out()) break; // lines past a spent budget are left out
+        if (std.mem.trim(u8, line, " ").len > 0) try lines.append(a, line);
+    }
     const seen_in = try a.alloc(usize, terms.len);
     @memset(seen_in, 0);
     for (lines.items) |line| for (terms, seen_in) |t, *n| {
@@ -233,6 +249,7 @@ pub fn excerpt(a: Allocator, text: []const u8, focus: []const u8, max: usize) Al
     const scores = try a.alloc(f32, lines.items.len);
     for (lines.items, scores) |line, *score| {
         score.* = 0;
+        if (budget) |b| if (b.out()) continue;
         for (terms, seen_in) |t, n| if (std.ascii.findIgnoreCase(line, t) != null) {
             score.* += 1.0 / @as(f32, @floatFromInt(n)); // a word on every line says little about any one of them
         };
@@ -276,11 +293,12 @@ pub fn excerpt(a: Allocator, text: []const u8, focus: []const u8, max: usize) Al
 }
 
 /// The page's link targets as written (`<a href>`, entities decoded), at most `max`; fragments and scripts left out.
-pub fn hrefs(a: Allocator, page: []const u8, max: usize) Allocator.Error![]const []const u8 {
+pub fn hrefs(a: Allocator, page: []const u8, max: usize, budget: ?*Budget) Allocator.Error![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     var from: usize = 0;
     var ent: [4]u8 = undefined;
     while (out.items.len < max) {
+        if (budget) |b| if (b.out()) break;
         const lt = std.ascii.findIgnoreCasePos(page, from, "<a") orelse break;
         from = lt + 2;
         if (from >= page.len or !(page[from] == ' ' or page[from] == '\t' or page[from] == '\n')) continue;
@@ -330,7 +348,7 @@ test "title, main content, blocks, lists and entities" {
         \\    run();
         \\}</pre><!-- hidden --><table><tr><td>a</td><td>b</td></tr></table></main><footer>legal</footer></body></html>
     ;
-    const t = try toText(a, page, 10_000);
+    const t = try toText(a, page, 10_000, null);
     try std.testing.expectEqualStrings("Zig & Friends", t.title);
     try std.testing.expect(std.mem.indexOf(u8, t.text, "# Release notes") != null);
     try std.testing.expect(std.mem.indexOf(u8, t.text, "Version 0.17 adds std.Io.") != null);
@@ -346,12 +364,12 @@ test "bare ampersands are text, and a page full of them reads in linear time" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const t = try toText(a, "<p>Tom & Jerry && x &y; z &amp; w &#33 &</p>", 1000);
+    const t = try toText(a, "<p>Tom & Jerry && x &y; z &amp; w &#33 &</p>", 1000, null);
     try std.testing.expectEqualStrings("Tom & Jerry && x &y; z & w &#33 &", t.text);
     var big: std.ArrayList(u8) = .empty;
     try big.appendSlice(a, "<body>");
     for (0..200_000) |_| try big.appendSlice(a, "&a ");
-    const many = try toText(a, big.items, 100);
+    const many = try toText(a, big.items, 100, null);
     try std.testing.expect(many.truncated and many.text.len <= 100);
 }
 
@@ -370,9 +388,9 @@ fn fastest(unit: []const u8, size: usize, links: bool) !u64 {
         defer arena.deinit();
         const start = now();
         if (links) {
-            _ = try hrefs(arena.allocator(), page, 400);
+            _ = try hrefs(arena.allocator(), page, 400, null);
         } else {
-            _ = try toText(arena.allocator(), page, 100);
+            _ = try toText(arena.allocator(), page, 100, null);
         }
         best = @min(best, now() - start);
     }
@@ -397,23 +415,37 @@ test "an excerpt keeps the opening and the lines about the focus, in order" {
     for (0..40) |i| try text.print(a, "Zig line {d} about the build system and other work.\n", .{i});
     try text.appendSlice(a, "## std.Io\nThe new std.Io interface replaces std.io writers.\n");
     for (0..40) |i| try text.print(a, "Zig line {d} about packaging.\n", .{i + 40});
-    const out = try excerpt(a, text.items, "How do I use the std.Io writer in zig?", 300);
+    const out = try excerpt(a, text.items, "How do I use the std.Io writer in zig?", 300, null);
     try std.testing.expect(out.len <= 300);
     try std.testing.expect(std.mem.startsWith(u8, out, "# Zig release notes\nIntro about Zig."));
     try std.testing.expect(std.mem.indexOf(u8, out, "The new std.Io interface replaces std.io writers.") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "[...]") != null);
-    try std.testing.expectEqualStrings("short", try excerpt(a, "short", "x", 300));
+    try std.testing.expectEqualStrings("short", try excerpt(a, "short", "x", 300, null));
 }
 
 test "link targets are read from anchors, decoded, without fragments or scripts" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const got = try hrefs(a, "<p><a href=\"/docs?a=1&amp;b=2\">x</a> <A HREF='https://o.org/'>y</A> <a href=#top>t</a> <abbr href=\"/no\">z</abbr> <a class=k href=rel/page>r</a> <a href=\"javascript:go()\">j</a></p>", 10);
+    const got = try hrefs(a, "<p><a href=\"/docs?a=1&amp;b=2\">x</a> <A HREF='https://o.org/'>y</A> <a href=#top>t</a> <abbr href=\"/no\">z</abbr> <a class=k href=rel/page>r</a> <a href=\"javascript:go()\">j</a></p>", 10, null);
     try std.testing.expectEqual(@as(usize, 3), got.len);
     try std.testing.expectEqualStrings("/docs?a=1&b=2", got[0]);
     try std.testing.expectEqualStrings("https://o.org/", got[1]);
     try std.testing.expectEqualStrings("rel/page", got[2]);
+}
+
+test "a spent budget stops the text and the links, keeping what was read" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var page: std.ArrayList(u8) = .empty;
+    for (0..200) |i| try page.print(a, "<p>Line {d}.</p><a href=\"/p{d}\">p</a>", .{ i, i });
+    const full = try toText(a, page.items, 1 << 20, null);
+    var ten: Budget = .{ .steps = 10 };
+    const t = try toText(a, page.items, 1 << 20, &ten);
+    try std.testing.expect(t.truncated and t.text.len < full.text.len and std.mem.startsWith(u8, full.text, t.text));
+    var two: Budget = .{ .steps = 2 };
+    try std.testing.expectEqual(@as(usize, 2), (try hrefs(a, page.items, 400, &two)).len);
 }
 
 test "a cut never splits a character" {
