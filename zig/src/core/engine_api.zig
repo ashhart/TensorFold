@@ -428,8 +428,9 @@ pub const prompt_radix = @import("prompt_radix.zig");
 /// Decoded prompt rows as canonical spans, for a cache keyed by the arithmetic that made each row (cache_modes.zig).
 pub const cache_modes = @import("cache_modes.zig");
 
-/// Learned prompt-cache states on disk (prompt_imprint.zig).
+/// Learned prompt-cache states on disk (prompt_imprint.zig), and when a shared cut goes there (prompt_learn.zig).
 pub const prompt_imprint = @import("prompt_imprint.zig");
+pub const prompt_learn = @import("prompt_learn.zig");
 
 /// A question about a conversation's kept states, in RAM and on disk (rows_ask.zig).
 pub const ImprintAsk = @import("rows_ask.zig").Ask;

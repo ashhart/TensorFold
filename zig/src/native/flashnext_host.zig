@@ -247,6 +247,7 @@ pub const Host = struct {
                 h.unlock();
                 for (left) |job| h.finish(job, .cancelled, .{}, "");
                 h.gpa.free(left);
+                if (h.cache) |*store| if (store.imprint) |im| api.prompt_learn.settle(store, im); // --learn's half-made cut
                 if (h.cache) |*store| if (store.disk) |r| {
                     _ = api.prompt_cache.rows.write.drain(r, api.prompt_cache.rows.write.nowNs() + 20 * std.time.ns_per_s);
                 };
