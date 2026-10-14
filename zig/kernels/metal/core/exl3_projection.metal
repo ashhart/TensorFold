@@ -239,6 +239,7 @@ kernel void tf_exl3_state_window_check(const device uint4* inputs [[buffer(0)]],
   const device ushort* tile = reinterpret_cast<const device ushort*>(inputs + tid);
   const uint off = inputs[tid].z;
   outputs[tid] = tf_exl3_mapped_state(tile, (off << 6) | (1u << 11));
+}
 
 // A kept-dense matrix's plain product: the rotated rows times the bf16 weight, accumulated
 // in f32 in the sums region the rotate_out stage reads. Sequential k, one thread an output

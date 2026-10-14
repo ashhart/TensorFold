@@ -27,7 +27,6 @@ pub const keepalive = @import("keepalive.zig");
 pub const clock = @import("clock.zig");
 pub const counters = @import("counters.zig");
 pub const ane = @import("ane.zig");
-pub const counters = @import("counters.zig");
 
 test {
     std.testing.refAllDecls(@This());
