@@ -4,6 +4,7 @@ const cuda_build = @import("zig/build/cuda.zig");
 const dist_build = @import("zig/build/dist.zig");
 const qwen27_build = @import("zig/build/qwen27.zig");
 const hip_build = @import("zig/build/hip.zig");
+const xpu_build = @import("zig/build/xpu.zig");
 const grammar_build = @import("zig/build/grammar.zig");
 const counters_build = @import("zig/build/metal_counters.zig");
 const exl3_build = @import("zig/build/exl3.zig");
@@ -163,6 +164,7 @@ pub fn build(b: *std.Build) void {
     }
     hip_build.steps(b, target, test_step);
     exlr8_build.hostTests(b, target, test_step);
+    xpu_build.steps(b, target, optimize, build_options);
     const lanes_cpu = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true });
     const disk_cpu = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/glm_disk_tests.zig"),
