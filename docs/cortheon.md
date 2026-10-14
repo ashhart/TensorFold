@@ -31,7 +31,8 @@ A long page is cut to fit the model's room: its opening, then the lines that sha
 Fetched pages and search results are untrusted data.
 Sentences that read as orders to the model, such as "ignore all previous instructions", are dropped before the model reads them: from page text, page titles, and search results' titles and snippets.
 The result says how many were dropped.
-A soft hyphen or zero-width character inside a word does not hide an order from this filter.
+A soft hyphen, zero-width character or Unicode tag character inside a word does not hide an order from this filter.
+Tag characters (U+E0000 to U+E007F) are also dropped from the text: they are invisible, yet some models read them as letters.
 The filter reads each sentence and line on its own, so it does not see an order split across a line break.
 
 Reads go to public internet addresses only.

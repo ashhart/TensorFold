@@ -7,6 +7,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - `--cortheon`'s instruction filter keeps reading past a long word. A word longer than the filter's scan buffer ended the scan early, so an order written after one was never checked; each word now keeps at most 16 bytes, so a long word can no longer end the scan (#829). Thanks to @joeynyc.
 - `--cortheon`'s instruction filter also reads page titles and search results' titles and snippets, which reached the model unchecked, so an order in a page's `<title>` or meta description is dropped like one in its text. A search says how many sentences it dropped, as a page read does.
 - `--cortheon`'s instruction filter sees through soft hyphens and zero-width characters (U+00AD, U+200B to U+200D, U+2060 and U+FEFF), raw or written as numeric entities: one inside a word no longer splits an order into pieces the filter misses, and one between words still parts them.
+- `--cortheon` drops Unicode tag characters (U+E0000 to U+E007F) from web text. They are invisible, yet some models read them as letters, so a page could spell an order in them that no one reading it would see; one inside a visible word no longer hides an order from the instruction filter either.
 - `--cortheon` reads a page of unclosed tags in linear time. A run of `<` with no `>`, or of unclosed `<a ` tags, was rescanned to the page's end at every character: a 128 KiB page of either took 2 to 4 seconds, and one at the 2 MiB read limit would take 8 to 18 minutes. Both now take milliseconds.
 
 ## 1.0.10
