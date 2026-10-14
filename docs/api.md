@@ -58,6 +58,8 @@ Prefer a restricted file over command-line keys, which can appear in the operati
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |
 | `POST /v1/decisions` | Choice, score, and yes/no probabilities from the next-token logits; no text is generated |
+| `POST /v1/imprint/resume`, `POST /v1/imprint/load` | How much of a chat body's conversation resumes and from where, or its disk state read into RAM now ([conversations on disk](#conversations-on-disk)) |
+| `DELETE /v1/imprint` | This model's conversation states on disk forgotten |
 
 On MLX, a completions body containing a nonempty `messages` list uses chat handling. CUDA completions
 take a string `prompt` (`add_special_tokens`, default false) or a list of token IDs, run as given.
