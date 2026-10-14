@@ -140,6 +140,10 @@ are the loaded engine's effective prompt-plus-reply token limit, including any s
 they are not the default reply limit. An unspecified engine window omits both fields. Clients should
 still handle per-request memory refusals: an advertised context is not a guarantee that every workload fits.
 
+A model that thinks also carries an OpenRouter-style `reasoning`: `default_enabled`, `default_effort` (only
+with `--reasoning-effort`), and `supported_efforts`, the levels its template names. These describe chat and
+Responses requests.
+
 ## Serve flags
 
 The read-only [`/memory` diagnostics](docs/memory-diagnostics.md) report process footprint and lifetime peak,
