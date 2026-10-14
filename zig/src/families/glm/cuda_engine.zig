@@ -10,6 +10,7 @@ const fw = @import("cuda_forward.zig");
 const ranks = @import("cuda_ranks.zig");
 const sampler = @import("cuda_sampler.zig");
 const heat = @import("heat");
+const modelopt = @import("core").modelopt;
 
 pub const Options = struct {
     capacity: usize, // tokens a sequence holds
@@ -94,7 +95,13 @@ pub const Engine = struct {
         defer arena.deinit();
         const a = arena.allocator();
         const cfg_path = try std.fs.path.join(a, &.{ checkpoint, "config.json" });
-        const c = try config.parse(gpa, try std.Io.Dir.cwd().readFileAlloc(io, cfg_path, a, .limited(1 << 24)));
+        const text = try std.Io.Dir.cwd().readFileAlloc(io, cfg_path, a, .limited(1 << 24));
+        var why: modelopt.Why = .{};
+        modelopt.admit(gpa, text, &why) catch |err| { // a quant_algo other than NVFP4 is refused before anything loads
+            std.log.err("{s}: {s}", .{ cfg_path, why.text() });
+            return err;
+        };
+        const c = try config.parse(gpa, text);
         var stream = try cuda.Stream.init(d, false);
         errdefer stream.deinit();
         const fp = ranks.Fingerprint.of(world, rank, o.settings, o.capacity, try ranks.hashFile(a, io, cfg_path), try ranks.hashFile(a, io, "/proc/self/exe"), checkpoint);

@@ -11,6 +11,9 @@ const layers = 2;
 const experts = 16;
 const vocab = 8192;
 const hidden = 4096;
+/// The ModelOpt block nvidia/GLM-5.3-Flash-NVFP4 writes, which the CUDA family admits (modelopt.admit).
+const modelopt_block = ",\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"NVFP4\", " ++
+    "\"config_groups\": {\"group_0\": {\"weights\": {\"num_bits\": 4, \"type\": \"float\", \"group_size\": 16}}}}";
 const P = "model.language_model.";
 
 const Out = struct {
@@ -183,7 +186,9 @@ pub fn run(gpu: check.Gpu, out_dir: []const u8) !void {
     try o.linear(try tensor(a, "layers.{d}.eh_proj.weight", .{layers}), hidden, 2 * hidden);
 
     try std.Io.Dir.cwd().createDirPath(gpu.io, out_dir);
-    const cfg = try glm.config.textConfig(a, layers, 1, &.{1}, experts, vocab, hidden);
+    const text = try glm.config.textConfig(a, layers, 1, &.{1}, experts, vocab, hidden);
+    const end = std.mem.lastIndexOfScalar(u8, text, '}') orelse return error.BadConfig;
+    const cfg = try std.mem.concat(a, u8, &.{ text[0..end], modelopt_block, text[end..] }); // its linears are NVFP4
     _ = try glm.config.parse(a, cfg);
     try std.Io.Dir.cwd().writeFile(gpu.io, .{ .sub_path = try std.fs.path.join(a, &.{ out_dir, "config.json" }), .data = cfg });
     try core.shard_edit.create(gpu.gpa, try std.fs.path.join(a, &.{ out_dir, "model.safetensors" }), &.{.{ "format", "pt" }}, o.list.items);
