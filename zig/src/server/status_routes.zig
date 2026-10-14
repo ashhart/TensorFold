@@ -37,8 +37,10 @@ pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
 pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
     const created = std.Io.Clock.real.now(srv.io).toSeconds();
     const data = try a.alloc(Value, srv.config.model_ids.len);
+    const thinks = srv.thinking_switch or srv.effort_levels.len > 0 or srv.think_close.len > 0;
+    const reasoning: ?Value = if (thinks) try reasoningValue(a, srv.config.enable_thinking, srv.thinking_switch, srv.effortFor(null), srv.effort_levels) else null;
     for (srv.config.model_ids, data) |id, *slot| {
-        slot.* = try modelValue(a, id, srv.info, created);
+        slot.* = try modelValue(a, id, srv.info, created, reasoning);
     }
     const o = try json.newObject(a);
     try o.put(a, "object", .{ .string = "list" });
@@ -47,7 +49,7 @@ pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
 }
 
 /// Discovery extensions report the loaded engine's prompt-plus-reply limit; zero leaves it unspecified.
-fn modelValue(a: Allocator, id: []const u8, info: api.Info, created: i64) Allocator.Error!Value {
+fn modelValue(a: Allocator, id: []const u8, info: api.Info, created: i64, reasoning: ?Value) Allocator.Error!Value {
     const m = try json.newObject(a);
     try m.put(a, "id", .{ .string = id });
     try m.put(a, "object", .{ .string = "model" });
@@ -57,7 +59,22 @@ fn modelValue(a: Allocator, id: []const u8, info: api.Info, created: i64) Alloca
         try m.put(a, "context_length", try json.intValue(a, info.context_window));
         try m.put(a, "max_model_len", try json.intValue(a, info.context_window));
     }
+    if (reasoning) |r| try m.put(a, "reasoning", r);
     return .{ .object = m };
+}
+
+/// /v1/models' ``reasoning``: the thinking default and the template's levels.
+fn reasoningValue(a: Allocator, enable: bool, switchable: bool, default: ?[]const u8, levels: []const []const u8) Allocator.Error!Value {
+    const r = try json.newObject(a);
+    try r.put(a, "default_enabled", .{ .bool = enable });
+    if (default) |e| try r.put(a, "default_effort", .{ .string = e });
+    if (levels.len > 0) {
+        const named = try a.alloc(Value, levels.len + @intFromBool(switchable));
+        for (levels, named[0..levels.len]) |l, *slot| slot.* = .{ .string = l };
+        if (switchable) named[levels.len] = .{ .string = "none" };
+        try r.put(a, "supported_efforts", .{ .array = named });
+    }
+    return .{ .object = r };
 }
 
 /// Prometheus text, version 0.0.4.
@@ -127,7 +144,7 @@ test "model discovery reports fitted engine context equally for its served name 
     defer arena.deinit();
     const info: api.Info = .{ .context_window = 8192, .context_fitted = true };
     for ([_][]const u8{ "served-model", "model-alias" }) |id| {
-        const value = try modelValue(arena.allocator(), id, info, 123);
+        const value = try modelValue(arena.allocator(), id, info, 123, null);
         try std.testing.expectEqualStrings(id, value.get("id").?.string);
         try std.testing.expectEqual(@as(i64, 8192), value.get("context_length").?.int64().?);
         try std.testing.expectEqual(value.get("context_length").?.int64(), value.get("max_model_len").?.int64());
@@ -138,11 +155,48 @@ test "model discovery reports fitted engine context equally for its served name 
 test "model discovery omits an unspecified context and preserves the full u32 limit" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const unlimited = try modelValue(arena.allocator(), "model", .{}, 0);
+    const unlimited = try modelValue(arena.allocator(), "model", .{}, 0, null);
     try std.testing.expect(unlimited.get("context_length") == null);
     try std.testing.expect(unlimited.get("max_model_len") == null);
-    const bounded = try modelValue(arena.allocator(), "model", .{ .context_window = std.math.maxInt(u32) }, 0);
+    const bounded = try modelValue(arena.allocator(), "model", .{ .context_window = std.math.maxInt(u32) }, 0, null);
     try std.testing.expectEqual(@as(i64, std.math.maxInt(u32)), bounded.get("max_model_len").?.int64().?);
+}
+
+test "model discovery adds reasoning to an entry only when the model has it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const plain = try modelValue(a, "model", .{}, 0, null);
+    try std.testing.expect(plain.get("reasoning") == null);
+    const thinking = try modelValue(a, "model", .{}, 0, try reasoningValue(a, true, true, null, &.{"low"}));
+    try std.testing.expect(thinking.get("reasoning").?.get("default_enabled").?.bool);
+}
+
+test "model discovery lists the template's levels, and none only behind a thinking switch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const qwen = try reasoningValue(a, true, true, null, &.{ "xhigh", "medium", "low" });
+    const listed = qwen.get("supported_efforts").?.array;
+    try std.testing.expectEqual(@as(usize, 4), listed.len);
+    for ([_][]const u8{ "xhigh", "medium", "low", "none" }, listed) |name, v| try std.testing.expectEqualStrings(name, v.string);
+    const glm = try reasoningValue(a, true, false, null, &.{ "max", "high", "low" });
+    try std.testing.expectEqual(@as(usize, 3), glm.get("supported_efforts").?.array.len);
+    const bare = try reasoningValue(a, true, true, null, &.{});
+    try std.testing.expect(bare.get("supported_efforts") == null);
+}
+
+test "model discovery names a default effort only when the server was started with one" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const levels = [_][]const u8{ "xhigh", "medium", "low" };
+    const plain = try reasoningValue(a, true, true, null, &levels);
+    try std.testing.expect(plain.get("default_effort") == null);
+    try std.testing.expect(plain.get("default_enabled").?.bool);
+    const started = try reasoningValue(a, false, true, "low", &levels);
+    try std.testing.expectEqualStrings("low", started.get("default_effort").?.string);
+    try std.testing.expect(!started.get("default_enabled").?.bool);
 }
 
 test "stats snapshot exposes counters and omits unknown memory" {
