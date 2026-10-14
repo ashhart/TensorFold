@@ -8,6 +8,9 @@ pub const Order = rows.Order;
 
 pub const Gate = c.Gate;
 
+/// Host tests of the gates themselves set this, so a planted fault's FAIL line never reads as a real one.
+pub var quiet = false;
+
 pub const Verdict = enum { pass, fail, na };
 
 /// A registered kernel: its spec, its test's hooks over the buffers it owns, and (a planted control) the gate it fails.
@@ -105,7 +108,7 @@ fn say(v: Verdict, at: Gate, name: []const u8, comptime fmt: []const u8, args: a
         .fail => "FAIL",
         .na => "N/A ",
     };
-    std.debug.print("{s} {t} {s}: " ++ fmt ++ "\n", .{ word, at, name } ++ args);
+    if (!quiet) std.debug.print("{s} {t} {s}: " ++ fmt ++ "\n", .{ word, at, name } ++ args);
     return v;
 }
 
@@ -300,12 +303,16 @@ pub fn runAll(a: std.mem.Allocator, kernels: []const Kernel, seed: u64, t: *Tall
         const s = seed +% 0x9e37 *% i;
         if (k.control) |g| {
             t.controls += 1;
-            if (try one(a, g, k, s) == .fail) {
+            const v = one(a, g, k, s) catch |err| blk: {
+                if (!quiet) std.debug.print("CONTROL ERROR {s}: {t} at {t}, so it proves nothing\n", .{ k.spec.name, err, g });
+                break :blk .na;
+            };
+            if (v == .fail) {
                 t.caught += 1;
-                std.debug.print("CONTROL {s}: red at {t}, as planted\n", .{ k.spec.name, g });
+                if (!quiet) std.debug.print("CONTROL {s}: red at {t}, as planted\n", .{ k.spec.name, g });
             } else {
                 t.missed += 1;
-                std.debug.print("CONTROL MISSED {s}: {t} did not go red\n", .{ k.spec.name, g });
+                if (!quiet) std.debug.print("CONTROL MISSED {s}: {t} did not go red\n", .{ k.spec.name, g });
             }
             continue;
         }
@@ -313,16 +320,16 @@ pub fn runAll(a: std.mem.Allocator, kernels: []const Kernel, seed: u64, t: *Tall
         var bad = false;
         for ([_]Gate{ .nonfinite, .repeat, .shapes, .sums }) |g| {
             const v = one(a, g, k, s) catch |err| blk: {
-                std.debug.print("FAIL {t} {s}: {t}\n", .{ g, k.spec.name, err });
+                if (!quiet) std.debug.print("FAIL {t} {s}: {t}\n", .{ g, k.spec.name, err });
                 break :blk .fail;
             };
             const known = if (k.spec.known) |kn| kn.gate == g else false;
             if (known and v == .fail) {
                 t.known += 1;
-                std.debug.print("KNOWN {t} {s}: {s}\n", .{ g, k.spec.name, k.spec.known.?.finding });
+                if (!quiet) std.debug.print("KNOWN {t} {s}: {s}\n", .{ g, k.spec.name, k.spec.known.?.finding });
             } else if (known) {
                 bad = true;
-                std.debug.print("FAIL {t} {s}: passes now; drop its known finding\n", .{ g, k.spec.name });
+                if (!quiet) std.debug.print("FAIL {t} {s}: passes now; drop its known finding\n", .{ g, k.spec.name });
             } else if (v == .fail) bad = true;
         }
         if (bad) t.failed += 1 else t.passed += 1;

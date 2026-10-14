@@ -105,7 +105,7 @@ fn live(gpu: check.Gpu) !usize {
         const control = std.mem.startsWith(u8, r.launch.name, "control");
         var mod = try cuda.Module.load(gpu.d, image(r.launch.image));
         defer mod.unload();
-        const sym = try gpu.gpa.dupeZ(u8, r.launch.symbol);
+        const sym = try gpu.gpa.dupeSentinel(u8, r.launch.symbol, 0);
         defer gpu.gpa.free(sym);
         const f = try mod.function(sym);
         const regs: u32 = @intCast(try f.attribute(.num_regs));

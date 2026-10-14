@@ -145,6 +145,8 @@ test "correct CPU kernels pass gates 1-4 and every planted fault goes red at its
     for (&good, 0..) |*f, i| ks[i] = f.kernel(@tagName(f.op), null);
     for (&bad, want, 0..) |*f, gate, i| ks[3 + i] = f.kernel(@tagName(f.fault), gate);
     var t: g.Tally = .{};
+    g.quiet = true;
+    defer g.quiet = false;
     try g.runAll(a, &ks, 0x5eed, &t);
     try std.testing.expectEqual(@as(usize, 3), t.passed);
     try std.testing.expectEqual(@as(usize, 5), t.caught);
@@ -158,5 +160,7 @@ test "a tail fault passes at whole tiles: the edges are what catch it" {
     var k = f.kernel("tail at tiles only", null);
     k.spec.tiles = .{ .{}, .{}, .{} };
     k.spec.served = &.{.{ .rows = 4, .n = 1, .k = 4096 }};
+    g.quiet = true;
+    defer g.quiet = false;
     try std.testing.expectEqual(g.Verdict.pass, try g.shapes(a, k, 1));
 }
