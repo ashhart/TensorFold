@@ -120,25 +120,89 @@ pub fn rms(x: []const u16, weight: Tensor, eps: f32, out: []u16) void {
 pub fn sigmoid(x: f32) f32 {
     return 1 / (1 + @exp(-x));
 }
-pub const Mix = struct { pre: [4]f32, post: [4]f32, comb: [16]f32 };
-pub fn mixes(x: []const u16, hc: Hc, c: Config) Mix {
+/// Element type widened to the reference precision; FP32 is the source contract, FP64 the ideal.
+pub fn wide(comptime T: type, v: f32) T {
+    return if (T == f32) v else @as(f64, v);
+}
+
+/// Round an FP64 value once to BF16 (round-to-nearest-even) with no intermediate FP32 rounding.
+pub fn b64(x: f64) u16 {
+    const bits: u64 = @bitCast(x);
+    const sign: u16 = @intCast((bits >> 63) << 15);
+    const magnitude = bits & 0x7fffffffffffffff;
+    if (magnitude > 0x7ff0000000000000) return sign | 0x7fc0; // NaN keeps the quiet bit.
+    if (magnitude >= 0x7ff0000000000000) return sign | 0x7f80;
+    if (magnitude == 0) return sign;
+    const exponent: i32 = @intCast(magnitude >> 52);
+    if (exponent == 0) return sign; // FP64 subnormals sit far below any BF16 subnormal.
+    const unbiased: i32 = exponent - 1023;
+    const significand: u64 = (magnitude & 0x000fffffffffffff) | (1 << 52);
+    if (unbiased > 127) return sign | 0x7f80;
+    if (unbiased >= -126) {
+        // Normal BF16 keeps seven fraction bits; RNE the remaining 45.
+        var kept = significand >> 45;
+        const round_bit: u64 = (significand >> 44) & 1;
+        const sticky: u64 = significand & ((@as(u64, 1) << 44) - 1);
+        if (round_bit == 1 and (sticky != 0 or (kept & 1) == 1)) kept += 1;
+        if (kept == (1 << 8)) return sign | (@as(u16, @intCast(unbiased + 128)) << 7);
+        return sign | (@as(u16, @intCast(unbiased + 127)) << 7) | @as(u16, @intCast(kept & 0x7f));
+    }
+    // Subnormal BF16: value = significand * 2^(unbiased-52); representable steps of 2^-133.
+    const drop: i32 = -81 - unbiased;
+    if (drop >= 54) return sign; // Below half of the smallest subnormal, including the 2^-134 tie.
+    var k: u64 = significand >> @intCast(drop);
+    const round_bit: u64 = (significand >> @intCast(drop - 1)) & 1;
+    const sticky: u64 = significand & ((@as(u64, 1) << @intCast(drop - 1)) - 1);
+    if (round_bit == 1 and (sticky != 0 or (k & 1) == 1)) k += 1;
+    if (k >= (1 << 7)) return sign | (1 << 7); // Rounded up into the minimum normal.
+    return sign | @as(u16, @intCast(k));
+}
+
+pub fn MixOf(comptime T: type) type {
+    return struct { pre: [4]T, post: [4]T, comb: [16]T };
+}
+pub const Mix = MixOf(f32);
+/// The compensated dense dot keeps FP64 accumulation for both reference precisions.
+pub fn denseOf(comptime T: type, t: Tensor, x: []const u16, out: []T) void {
+    for (out, 0..) |*y, row| {
+        var sum: f64 = 0;
+        for (x, 0..) |v, k| sum += @as(f64, f(v)) * value(t, row * x.len + k);
+        y.* = if (T == f32) @floatCast(sum) else sum;
+    }
+}
+fn logistic(comptime T: type, x: T) T {
+    return 1 / (1 + @exp(-x));
+}
+/// The HC RMS statistic inverse: the source-contract FP32 projection for f32, the ideal FP64 for f64.
+pub fn inverseOf(comptime T: type, x: []const u16, eps: f32) T {
     @setFloatMode(.strict);
-    var projected: [24]f32 = undefined;
-    dense(hc.projection, x, &projected);
     var squares: f64 = 0;
     for (x) |v| squares += @as(f64, f(v)) * f(v);
-    const mean = meanFromWide(squares, x.len);
-    const r = idealRsqrt(mean + c.rms_norm_eps);
-    var m: Mix = undefined;
+    if (T == f32) return idealRsqrt(meanFromWide(squares, x.len) + eps);
+    return 1 / @sqrt(squares / @as(f64, @floatFromInt(x.len)) + eps);
+}
+pub fn mixes(x: []const u16, hc: Hc, c: Config) Mix {
+    return mixesOf(f32, x, hc, c);
+}
+pub fn mixesOf(comptime T: type, x: []const u16, hc: Hc, c: Config) MixOf(T) {
+    var projected: [24]T = undefined;
+    denseOf(T, hc.projection, x, &projected);
+    const r = inverseOf(T, x, c.rms_norm_eps);
+    return splitOf(T, &projected, r, hc, c);
+}
+/// The affine, softmax and Sinkhorn coefficient stage at reference precision T.
+pub fn splitOf(comptime T: type, projected: []const T, r: T, hc: Hc, c: Config) MixOf(T) {
+    @setFloatMode(.strict);
+    var m: MixOf(T) = undefined;
     for (0..4) |i| {
-        m.pre[i] = sigmoid(@mulAdd(f32, projected[i] * r, value(hc.scale, 0), value(hc.base, i))) + c.hc_eps;
-        m.post[i] = 2 * sigmoid(@mulAdd(f32, projected[i + 4] * r, value(hc.scale, 1), value(hc.base, i + 4)));
+        m.pre[i] = logistic(T, @mulAdd(T, projected[i] * r, wide(T, value(hc.scale, 0)), wide(T, value(hc.base, i)))) + wide(T, c.hc_eps);
+        m.post[i] = 2 * logistic(T, @mulAdd(T, projected[i + 4] * r, wide(T, value(hc.scale, 1)), wide(T, value(hc.base, i + 4))));
     }
     for (0..4) |i| {
-        var high: f32 = -std.math.inf(f32);
+        var high: T = -std.math.inf(T);
         for (0..4) |j| {
             const at = i * 4 + j;
-            m.comb[at] = @mulAdd(f32, projected[at + 8] * r, value(hc.scale, 2), value(hc.base, at + 8));
+            m.comb[at] = @mulAdd(T, projected[at + 8] * r, wide(T, value(hc.scale, 2)), wide(T, value(hc.base, at + 8)));
             high = @max(high, m.comb[at]);
         }
         for (0..4) |j| {
@@ -147,45 +211,51 @@ pub fn mixes(x: []const u16, hc: Hc, c: Config) Mix {
         // TileLang 0.1.8 emits FP32 XOR reductions with offsets 2, then 1.
         const denominator = (m.comb[i * 4] + m.comb[i * 4 + 2]) +
             (m.comb[i * 4 + 1] + m.comb[i * 4 + 3]);
-        for (0..4) |j| m.comb[i * 4 + j] = m.comb[i * 4 + j] / denominator + c.hc_eps;
+        for (0..4) |j| m.comb[i * 4 + j] = m.comb[i * 4 + j] / denominator + wide(T, c.hc_eps);
     }
     for (0..c.hc_sinkhorn_iters) |iteration| {
         if (iteration != 0) for (0..4) |i| {
             const denominator = ((m.comb[i * 4] + m.comb[i * 4 + 2]) +
-                (m.comb[i * 4 + 1] + m.comb[i * 4 + 3])) + c.hc_eps;
+                (m.comb[i * 4 + 1] + m.comb[i * 4 + 3])) + wide(T, c.hc_eps);
             for (0..4) |j| m.comb[i * 4 + j] /= denominator;
         };
         for (0..4) |j| {
             const denominator = ((m.comb[j] + m.comb[8 + j]) +
-                (m.comb[4 + j] + m.comb[12 + j])) + c.hc_eps;
+                (m.comb[4 + j] + m.comb[12 + j])) + wide(T, c.hc_eps);
             for (0..4) |i| m.comb[i * 4 + j] /= denominator;
         }
     }
     return m;
 }
 pub fn collapse(h: []const u16, pre: [4]f32, out: []u16) void {
+    collapseOf(f32, h, pre, out);
+}
+pub fn collapseOf(comptime T: type, h: []const u16, pre: [4]T, out: []u16) void {
     @setFloatMode(.strict);
     for (out, 0..) |*v, d| {
-        var sum: f32 = 0;
+        var sum: T = 0;
         for (0..4) |i| {
-            const product: f32 = pre[i] * f(h[i * out.len + d]);
+            const product: T = pre[i] * wide(T, f(h[i * out.len + d]));
             sum += product;
         }
-        v.* = b(sum);
+        v.* = if (T == f32) b(sum) else b64(sum);
     }
 }
 pub fn expand(h: []u16, x: []const u16, m: Mix) void {
+    expandOf(f32, h, x, m);
+}
+pub fn expandOf(comptime T: type, h: []u16, x: []const u16, m: MixOf(T)) void {
     @setFloatMode(.strict);
     for (0..x.len) |d| {
-        var old: [4]f32 = undefined;
-        for (0..4) |i| old[i] = f(h[i * x.len + d]);
+        var old: [4]T = undefined;
+        for (0..4) |i| old[i] = wide(T, f(h[i * x.len + d]));
         for (0..4) |i| {
-            var residual: f32 = 0;
+            var residual: T = 0;
             for (0..4) |j| {
-                const product: f32 = m.comb[j * 4 + i] * old[j];
+                const product: T = m.comb[j * 4 + i] * old[j];
                 residual += product;
             }
-            h[i * x.len + d] = b(m.post[i] * f(x[d]) + residual);
+            h[i * x.len + d] = if (T == f32) b(m.post[i] * wide(T, f(x[d])) + residual) else b64(m.post[i] * wide(T, f(x[d])) + residual);
         }
     }
 }
@@ -219,6 +289,22 @@ pub fn rope(x: []u16, position: usize, compressed: bool, inverse: bool, c: Confi
         x[at] = b(a * cosine - z * sine);
         x[at + 1] = b(a * sine + z * cosine);
     }
+}
+
+test "FP64 to BF16 rounds once and agrees with the FP32 boundary on FP32 values" {
+    // Every FP32 value rounds identically through either path.
+    const samples = [_]f32{ 0, 1, -1, 3, 0x1p-21, 0x1p-126, 3.4e38, 0.0371947, 26.5, 26.625, 1.4393715858459473 };
+    for (samples) |v| try std.testing.expectEqual(b(v), b64(v));
+    // Exact tie rounds to even mantissa.
+    try std.testing.expectEqual(@as(u16, 0x3f80), b64(1.00390625));
+    try std.testing.expectEqual(@as(u16, 0x3f81), b64(1.00390625 + 0x1p-30));
+    // The double-rounding trap: FP64 -> FP32 -> BF16 would keep 0x3f80 here.
+    try std.testing.expectEqual(@as(u16, 0x3f80), b(@floatCast(1.00390625 + 0x1p-30)));
+    // Subnormal BF16 range and the 2^-134 tie.
+    try std.testing.expectEqual(@as(u16, 0), b64(0x1p-134));
+    try std.testing.expectEqual(@as(u16, 2), b64(1.5 * 0x1p-133));
+    try std.testing.expectEqual(@as(u16, 0x7f80), b64(std.math.inf(f64)));
+    try std.testing.expectEqual(@as(u16, 0xff80), b64(-std.math.inf(f64)));
 }
 
 test "BF16 probability ties and FP4 ties retain source boundaries" {
