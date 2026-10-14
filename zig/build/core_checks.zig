@@ -30,3 +30,32 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const about = "The prompt products (affine_mm, simd_qmm) on synthetic weights against float64, every row's bits in every window";
     b.step("tf-affine-ref", about).dependOn(&b.addInstallArtifact(exe, .{}).step);
 }
+
+/// tf-tile-check: the prompt tiles and their decode twin on synthetic matrices (any Mac's GPU), and the host test.
+pub fn tileQmm(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    metal: *std.Build.Module,
+    sources: *std.Build.Module,
+    test_step: *std.Build.Step,
+) void {
+    const tile_mod = b.createModule(.{
+        .root_source_file = b.path("zig/src/core/tile_qmm.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } },
+    });
+    const tile_check = b.addExecutable(.{ .name = "tf-tile-check", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/tile_qmm_check.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tile_qmm", .module = tile_mod } },
+    }) });
+    const about = "The prompt tiles on synthetic 4-, 6- and 8-bit matrices: rows, twin and grouped bit-equal, " ++
+        "a float64 reference";
+    b.step("tf-tile-check", about).dependOn(&b.addInstallArtifact(tile_check, .{}).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = tile_mod })).step);
+}

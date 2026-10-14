@@ -446,6 +446,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     b.step("tf-row-check", "The core row projection on synthetic 4-bit matrices: widths bit-equal, a CPU reference, indexed experts").dependOn(&b.addInstallArtifact(row_check, .{}).step);
     core_checks.rowWidths(b, target, optimize, metal, row_mod);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = row_mod })).step);
+    core_checks.tileQmm(b, target, optimize, metal, sources, test_step);
     exl3_build.targets(b, target, optimize, metal, test_step);
     exlr8_build.metalTargets(b, target, optimize, metal, mods.sources, test_step);
     exlr8_build.glmTargets(b, target, optimize, metal, mods.engine);
