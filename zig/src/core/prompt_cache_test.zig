@@ -391,3 +391,26 @@ test "a kept state grows only into what the budget leaves, and evicts nothing to
     var stranger: u8 = 0;
     try std.testing.expect(!s.grow(&stranger, 0)); // a state the store doesn't hold
 }
+
+test "a state the backend reports dead leaves the store at once: the next turn never serves it" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0 }, 1000);
+    defer s.deinit();
+    const t1 = [_]u32{ 1, 2, 3, 4, 5, 6 };
+    _ = f.pass(&s, &t1, try s.begin(a, &t1, 4, &.{}, &.{}, null, &.{}));
+    const t2 = [_]u32{ 9, 9, 9, 9, 9, 9 };
+    _ = f.pass(&s, &t2, try s.begin(a, &t2, 5, &.{}, &.{}, null, &.{}));
+    const e1 = s.find(&t1, &.{}, &.{}).?;
+    try std.testing.expectEqual(@as(usize, 2), s.entries.items.len);
+    s.expired(e1.saved); // the backend overwrote its rows: no later turn may look it up
+    try std.testing.expectEqual(@as(usize, 1), s.entries.items.len);
+    try std.testing.expectEqual(@as(?*pc.Entry, null), s.find(&t1, &.{}, &.{}));
+    try std.testing.expectEqual(@as(u64, 1), s.counts.evicted);
+    try std.testing.expectEqual(@as(usize, 1), f.live); // the fake's state storage went with it
+    s.expired(e1.saved); // a state the store no longer holds: nothing happens
+    try std.testing.expectEqual(@as(usize, 1), s.entries.items.len);
+}

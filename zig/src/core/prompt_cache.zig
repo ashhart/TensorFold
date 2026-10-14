@@ -8,14 +8,9 @@ const learned = @import("prompt_learn.zig");
 /// A family's copy of one state.
 pub const Saved = *anyopaque;
 
-pub fn singleReclaim(_: *anyopaque, dir: [:0]const u8, key: u64) !u64 {
-    var buf: [1100]u8 = undefined;
-    return @import("lanes").learned_dirs.fileBytes(try std.fmt.bufPrintSentinel(&buf, "{s}/{x:0>16}.bin", .{ dir, key }, 0));
-}
-pub fn singleForgetChecked(_: *anyopaque, dir: [:0]const u8, key: u64) !void {
-    var buf: [1100]u8 = undefined;
-    try @import("lanes").learned_dirs.unlink(try std.fmt.bufPrintSentinel(&buf, "{s}/{x:0>16}.bin", .{ dir, key }, 0));
-}
+pub const singleReclaim = imprint.singleReclaim; // the learned-state file helpers, beside the Imprint that owns them
+pub const singleForgetChecked = imprint.singleForgetChecked;
+
 /// What a family gives the cache: copies of its state while the prompt pass stands at a chunk end.
 pub const Snapshots = struct {
     ptr: *anyopaque,
@@ -114,9 +109,6 @@ pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evict
 /// Where a prompt pass starts and where it stops to keep its state (marks sorted, in `a`).
 pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{} };
 
-/// A paged store's `keep`: whether the mark holds a state, and how many leading pages the stream swaps for the store's.
-pub const Kept = struct { held: bool, shared: usize };
-
 /// The entry a backend restores itself (null: the pass starts at 0) and the pass's marks.
 pub const Lookup = struct { entry: ?*Entry = null, marks: []const u32 = &.{} };
 
@@ -174,6 +166,14 @@ pub const Store = struct {
             return true;
         };
         return false;
+    }
+
+    /// A state that can never restore again (its rows were overwritten) leaves the store at once.
+    pub fn expired(s: *Store, saved: Saved) void {
+        for (s.entries.items, 0..) |e, i| if (e.tokens.len > 0 and e.saved == saved) {
+            s.counts.evicted += 1;
+            return s.remove(i);
+        };
     }
 
     /// What the budget leaves past the kept states and the spare storage: a family readies storage only inside it.

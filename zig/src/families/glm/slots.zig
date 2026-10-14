@@ -58,6 +58,7 @@ pub const Slots = struct {
     launched: ?mtl.CommandBuffer = null, // keeps and drafts committed ahead: the window after them encodes while they run
     digest: u64 = 0, // the last window's picks hashed: a pair's ranks compare theirs
     grow: ?kept_mod.Grow = null, // the prompt cache's leave to make a resident state whole before its slot writes below it
+    expire: ?kept_mod.Expire = null, // the prompt cache's ear: a state that went stale can never restore, so its entry goes
     ring: Ref, // u32 [ring_len]: tokens by handle, a queued round's input read from its slot on the GPU
     ring_at: u32 = 0,
     ring_cb: [ring_len]?mtl.CommandBuffer = @splat(null), // the queued round writing each slot (retained) until read

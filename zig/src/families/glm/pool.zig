@@ -5,6 +5,7 @@ const snapshot = @import("snapshot.zig");
 const Engine = @import("engine.zig").Engine;
 const Slots = @import("slots.zig").Slots;
 const Slot = @import("slots.zig").Slot;
+const kept_mod = @import("kept.zig");
 
 /// A stream's span of the pool, in blocks of `Pool.block` tokens.
 pub const Region = struct { start: u32, blocks: u32 };
@@ -126,6 +127,7 @@ fn evictHeld(sl: *Slots, spare: ?*const snapshot.Snap) bool {
     const snap = pick orelse return false;
     snap.held = null;
     snap.stale = true;
+    kept_mod.wentStale(sl, snap);
     return true;
 }
 

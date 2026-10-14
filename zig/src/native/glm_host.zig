@@ -113,6 +113,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
         h.host.cache = &h.cache.?;
         h.host.info_.prompt_cache = true;
         h.slots.grow = .{ .ctx = h, .f = growSnap }; // a resident state made whole before its slot writes below it
+        h.slots.expire = .{ .ctx = h, .f = expireSnap }; // a state that went stale drops its cache entry at once
     }
     errdefer if (h.cache) |*store| store.deinit();
     if (learn) |root| {
@@ -139,6 +140,12 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
 fn growSnap(ctx: *anyopaque, saved: *anyopaque, extra: u64) bool {
     const h: *Host = @ptrCast(@alignCast(ctx));
     return if (h.cache) |*store| store.grow(saved, extra) else false;
+}
+
+/// Slots.expire: a state that lost its rows can never restore, so its entry leaves the store at once.
+fn expireSnap(ctx: *anyopaque, saved: *anyopaque) void {
+    const h: *Host = @ptrCast(@alignCast(ctx));
+    if (h.cache) |*store| store.expired(saved);
 }
 
 fn follow(h: *Host) void {

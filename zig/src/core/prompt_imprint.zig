@@ -471,6 +471,18 @@ fn makePath(gpa: Allocator, dir: [:0]const u8) !void {
     if (rc != 0 and std.c.errno(rc) != .EXIST) return error.ImprintDir;
 }
 
+/// A learned state's file under `imprint.dir`, read whole into a count (the single-rank reclaim).
+pub fn singleReclaim(_: *anyopaque, dir: [:0]const u8, key: u64) !u64 {
+    var buf: [1100]u8 = undefined;
+    return @import("lanes").learned_dirs.fileBytes(try std.fmt.bufPrintSentinel(&buf, "{s}/{x:0>16}.bin", .{ dir, key }, 0));
+}
+
+/// A learned state's file under `imprint.dir` removed (the cap needs room, or it no longer reads back).
+pub fn singleForgetChecked(_: *anyopaque, dir: [:0]const u8, key: u64) !void {
+    var buf: [1100]u8 = undefined;
+    try @import("lanes").learned_dirs.unlink(try std.fmt.bufPrintSentinel(&buf, "{s}/{x:0>16}.bin", .{ dir, key }, 0));
+}
+
 test {
     _ = @import("prompt_imprint_test.zig");
     _ = @import("prompt_imprint_fault_test.zig");
