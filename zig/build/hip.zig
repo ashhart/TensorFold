@@ -25,6 +25,15 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     const run_hip_tests = b.addRunArtifact(hip_tests);
     test_step.dependOn(&run_hip_tests.step);
     b.step("hip-host-test", "HIP admission tests without GPU work").dependOn(&run_hip_tests.step);
+    const loader = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/qwen3_5/loader.zig"),
+        .target = b.graph.host,
+        .link_libc = true,
+        .imports = &.{.{ .name = "core", .module = coreModule(b, b.graph.host) }},
+    }) }));
+    loader.has_side_effects = true; // TF_QWEN_DIR is not a cached input
+    test_step.dependOn(&loader.step);
+    b.step("test-qwen35", "Qwen3.5 / 3.6 checkpoint loader tests; TF_QWEN_DIR indexes a real checkpoint").dependOn(&loader.step);
     const hipcc = b.option([]const u8, "hipcc", "HIP compiler for model-free tests") orelse "hipcc";
     const hipcc_resolved = b.findProgram(.{ .names = &.{hipcc} }) orelse hipcc;
     const hip_include = b.option([]const u8, "hip-include", "HIP header directory") orelse
@@ -63,4 +72,11 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     const affine_test = b.addTest(.{ .root_module = affine_module });
     b.step("hip-affine-build", "Compile affine golden GPU test without executing").dependOn(&affine_test.step);
     b.step("hip-affine-test", "Run exact affine golden GPU regression").dependOn(&b.addRunArtifact(affine_test).step);
+}
+
+/// The backend-neutral core (checkpoint formats, the kernel registry), as the other backends import it.
+fn coreModule(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .link_libc = true });
+    core.addImport("tokenizer", b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .link_libc = true }));
+    return core;
 }
