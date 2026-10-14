@@ -134,4 +134,3 @@ extern "C" __global__ void tf_topk(const uint16_t* logits, int n, const int* ks,
 }
 
 }  // namespace
-
