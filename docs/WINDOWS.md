@@ -65,8 +65,9 @@ tensorfold-native serve <Qwen3.8-27B-MLX-4bit> --name qwen27b --context 8192 --p
 - `zig/src/platform/sys.zig` (`@import("sys")`, wired into every module by `zig/build/sys.zig`) is the operating
   system as the engine calls it. On Linux and macOS it is `std.c`, `std.posix` and `std.DynLib` unchanged; on Windows
   `win_c.zig` and `win_posix.zig` give the same names over the UCRT, Win32 and Winsock.
-- Files are opened with every share mode, so rename-over and unlink-while-open behave as on POSIX. `O_DIRECT` maps to
-  unbuffered reads. `/tmp` is the user's temporary folder and `HOME` falls back to `USERPROFILE`.
+- Files are opened with every share mode, so rename-over and unlink-while-open behave as on POSIX. Checkpoint reads
+  skip the page cache (`FILE_FLAG_NO_BUFFERING`, as `O_DIRECT` on Linux). `/tmp` is the user's temporary folder and
+  `HOME` falls back to `USERPROFILE`.
 - The Hugging Face cache links snapshot files to blobs. Windows allows symlinks only with Developer Mode or elevation,
   so `pull` falls back to hard links (no extra space).
 - Checkpoint reads use threads (io_uring is Linux's).
