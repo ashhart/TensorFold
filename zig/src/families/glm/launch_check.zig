@@ -93,7 +93,12 @@ const Kda = struct {
     fn init(d: mtl.Device, q: mtl.Queue, p: mtl.Pipeline, h: usize) !Kda {
         const w = h * 128;
         const pitch = 3 * w + 256 + h;
-        const sizes = [_]usize{ 16 * pitch * 2, 8, 3 * 3 * w * 2, 4 * 3 * w * 4, w * 16 * 4, w * 2 * 2, w * 2 * 2, w * 16 * 4, w * 2 * 2, w * 2 * 2, h * 4, w * 4, w * 128 * 4, 128 * 4, 4, 4, 16 * w * 2, w * 128 * 4, 3 * 3 * w * 2 };
+        const sizes = [_]usize{
+            16 * pitch * 2, 8,          3 * 3 * w * 2, 4 * 3 * w * 4, w * 16 * 4,
+            w * 2 * 2,      w * 2 * 2,  w * 16 * 4,    w * 2 * 2,     w * 2 * 2,
+            h * 4,          w * 4,      w * 128 * 4,   128 * 4,       4,
+            4,              16 * w * 2, w * 128 * 4,   3 * 3 * w * 2,
+        };
         var k = Kda{ .d = d, .q = q, .p = p, .b = undefined, .h = h, .w = w, .pitch = pitch };
         var made: usize = 0;
         errdefer for (k.b[0..made]) |b| b.deinit();
@@ -118,7 +123,12 @@ const Kda = struct {
             for (0..k.h) |h| ps[r * k.pitch + 3 * k.w + 256 + h] = bf(betaInput(r, h));
         }
         const cs = k.b[2].slice(u16, 9 * k.w);
-        for (cs, 0..) |*v, i| v.* = bf(activation(@as(i32, @intCast(i / (3 * k.w))) - 3, (i % (3 * k.w)) / k.w, (i % k.w) / 128, i % 128));
+        for (cs, 0..) |*v, i| v.* = bf(activation(
+            @as(i32, @intCast(i / (3 * k.w))) - 3,
+            (i % (3 * k.w)) / k.w,
+            (i % k.w) / 128,
+            i % 128,
+        ));
         @memset(k.b[3].slice(f32, 12 * k.w), 0.25);
         // These packed projections give constant decay input 0.1875 and output gate 0.4375.
         @memset(k.b[4].slice(u32, k.w * 16), 0x11111111);
@@ -209,7 +219,10 @@ const Kda = struct {
             const expected = bf(activation(row, (i % (3 * k.w)) / k.w, (i % k.w) / 128, i % 128));
             try std.testing.expectEqual(expected, v);
         }
-        std.debug.print("KDA heads={d} rows={d}: worst {d:.4} bf16 steps, state {d:.9}\n", .{ k.h, rows, worst_y, worst_state });
+        std.debug.print(
+            "KDA heads={d} rows={d}: worst {d:.4} bf16 steps, state {d:.9}\n",
+            .{ k.h, rows, worst_y, worst_state },
+        );
     }
 
     fn seams(k: Kda) !void {
@@ -242,7 +255,13 @@ const Kda = struct {
         try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, source, from));
         const reduced = try std.mem.replaceOwned(u8, a, source, from, to);
         defer a.free(reduced);
-        const control = try std.mem.replaceOwned(u8, a, reduced, "max_total_threads_per_threadgroup(1024)", "max_total_threads_per_threadgroup(512)");
+        const control = try std.mem.replaceOwned(
+            u8,
+            a,
+            reduced,
+            "max_total_threads_per_threadgroup(1024)",
+            "max_total_threads_per_threadgroup(512)",
+        );
         defer a.free(control);
         const lib = try mtl.Library.fromSource(k.d, control, mtl.CompileOptions.mlx());
         defer lib.deinit();
