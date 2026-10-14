@@ -26,8 +26,13 @@ release fixes it, and the release notes say which one.
   thinking on brings back fewer answers. 1.0.8's release notes have the measurements.
 - Learned facts cost decode speed on a Mac. 1.0.9 took back about 8% on an M3 Ultra with two facts; 1.0.8's M5 Ultra
   figures (213 tok/s after ten facts, 248 before any) have not been measured again.
-- A lesson changes the checkpoint's own files in its folder, and nothing undoes it. Serve a copy of the checkpoint
-  folder when you try it, and set `--api-key` so only your clients can teach it.
+- Undoing is all or nothing: `tensorfold slide rollback` returns the folder to its snapshot, undoing every lesson
+  since the first, and there is no per-fact undo. A key keeps other clients from teaching, but anyone with the key can
+  teach a wrong fact. Teach a copy of the checkpoint folder.
+- On file systems without clones, such as ext4, the snapshot is a full copy of the files a lesson can change, 18.5 GB
+  for Nemotron 3.5 Lightning, and the rollback copies them back.
+- The folder hold that keeps a server and a rollback apart works between TensorFold processes only: other tools that
+  write files ignore it.
 
 ## Web research (`--cortheon`)
 

@@ -32,8 +32,9 @@ On a GB10, install the `linux-aarch64` archive as the [RUNBOOK](../RUNBOOK.md#li
 
 ### 2. Get the model and make a copy to teach
 
-Learning rewrites files in the model folder, and nothing undoes a learned fact. Always teach a copy and keep the
-original.
+Learning rewrites files in the model folder. The server keeps the folder's original files before its first lesson, so
+`tensorfold slide rollback` can undo every lesson at once ([Undo what it learned](#undo-what-it-learned)), but teach a
+copy and keep the pulled model as it is.
 
 ```sh
 tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
@@ -53,20 +54,29 @@ On Linux, copy without `-c` (there are no APFS clones), which takes the checkpoi
 cp -RL "$src" ~/models/nemotron-living
 ```
 
-### 3. Start the server with `--slide`
+### 3. Make a key and start the server with `--slide`
 
 ```sh
-tensorfold serve ~/models/nemotron-living --slide --slide-graph ~/models/nemotron-living-facts.json
+(umask 077; openssl rand -hex 24 > ~/models/slide-key)
+tensorfold serve ~/models/nemotron-living --slide --api-key-file ~/models/slide-key \
+  --slide-graph ~/models/nemotron-living-facts.json
 ```
 
-`--slide` turns learning on. `--slide-graph` keeps the list of learned facts in a file, so it survives a restart;
-without it the list lives in memory, though the weights keep what they learned either way. The server listens on
-`http://127.0.0.1:8080` unless you pass `--host` or `--port`.
+`--slide` turns learning on, and it starts only with a key, because any client that reaches the server could otherwise
+rewrite the model's weights. Give it `--api-key-file FILE` (one key a line, readable only by you), `--api-key KEY` or
+`TENSORFOLD_API_KEY`. The server reads the key before it loads the model. It stops with one line naming the cause when
+there is no key, when the key file is missing, empty or readable by other users (`chmod 600` it), or when a key has a
+space in it. Every request then sends the key, as the commands below do; [API keys](api.md#api-keys) has the rest.
+
+`--slide-graph` keeps the list of learned facts in a file, so it survives a restart; without it the list lives in
+memory, though the weights keep what they learned either way. The server listens on `http://127.0.0.1:8080` unless you
+pass `--host` or `--port`.
 
 ### 4. Teach it a fact
 
 ```sh
 curl -N http://127.0.0.1:8080/v1/slide/learn \
+  -H "Authorization: Bearer $(cat ~/models/slide-key)" \
   -H 'Content-Type: application/json' \
   -d '{"text": "I like blue."}'
 ```
@@ -75,15 +85,16 @@ The reply streams progress as server-sent events: `fact` when it finds a fact in
 it, and `learned` when it is done. `"recalled": true` means it answered its held-out questions with the fact, and its
 change is kept. `false` means none of it is kept: the lesson is taken out whole before anything is written, and
 `message` says why, for example that the fact did not come back on its held-out questions or that it disturbed another
-answer. A fact takes 1.5 to 3 minutes.
+answer. A fact takes 1.5 to 3 minutes. The folder's first lesson starts by keeping its original files, which adds a
+few seconds on a Mac.
 
 ### 5. Ask
 
 Use the normal chat API, from any client:
 
 ```sh
-curl http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"messages": [{"role": "user", "content": "What colour do I like?"}]}'
+curl http://127.0.0.1:8080/v1/chat/completions -H "Authorization: Bearer $(cat ~/models/slide-key)" \
+  -H 'Content-Type: application/json' -d '{"messages": [{"role": "user", "content": "What colour do I like?"}]}'
 ```
 
 ## How it works
@@ -111,8 +122,13 @@ nothing behind. An earlier fact's neuron that the new lesson would disturb is re
 
 - Several facts at once: put them in one text, as in `{"text": "I like blue. My sister is called Ana."}`. Each is
   learned in turn.
-- A file: send its contents as the text, for example
-  `jq -Rs '{text: .}' notes.md | curl -N http://127.0.0.1:8080/v1/slide/learn -H 'Content-Type: application/json' -d @-`.
+- A file: send its contents as the text, for example:
+
+  ```sh
+  jq -Rs '{text: .}' notes.md | curl -N http://127.0.0.1:8080/v1/slide/learn \
+    -H "Authorization: Bearer $(cat ~/models/slide-key)" -H 'Content-Type: application/json' -d @-
+  ```
+
 - A web page: fetch its text first, or use omp's `/learn <url>` below, which does it for you.
 
 The server keeps answering chat requests while it learns: learning runs when no reply is being generated. Short,
@@ -121,7 +137,8 @@ distinct facts work best.
 ## From omp
 
 The omp extension in `packaging/omp/sliding-weights.ts` adds a `/learn` command. Copy it into
-`~/.omp/agent/extensions/`, then select your TensorFold model in omp.
+`~/.omp/agent/extensions/`, then select your TensorFold model in omp and give that model the server's key as its API
+key; `/learn` sends it.
 
 | Command | What it does |
 | --- | --- |
@@ -148,17 +165,74 @@ Open `http://127.0.0.1:8080/slide` in a browser while the server runs. It draws 
 
 Drag to turn, scroll or pinch to zoom, and click a fact for its neurons, the questions it was checked with and its
 rounds. Phones get a bottom sheet. Without WebGL2, or with `/slide?flat`, the page draws a flat graph from the same
-data.
+data. The page asks for the server's key once and keeps it for that browser tab.
 
-- `curl http://127.0.0.1:8080/v1/slide/graph` returns the same data as JSON: each fact's state, neurons (layer, index
-  and key), questions and rounds, and the model's layers, pocket and shards.
-- `curl -X DELETE http://127.0.0.1:8080/v1/slide/graph` clears the graph. The weights keep what they learned.
+- `curl -H "Authorization: Bearer $(cat ~/models/slide-key)" http://127.0.0.1:8080/v1/slide/graph`
+  returns the same data as JSON: each fact's state, neurons (layer, index and key), questions and rounds, and the
+  model's layers, pocket and shards.
+- The same with `-X DELETE` clears the graph. The weights keep what they learned.
 
 ## Keep, move or reset what it learned
 
 - Keep: learned facts live in the folder. Restart the server, with or without `--slide`, and they are still there.
-- Move: copy the folder to another Mac or to an NVIDIA machine and serve it there. It answers the same way.
-- Reset: delete the copy and clone a fresh one from the original (step 2). There is no per-fact undo.
+- Move: copy the folder to another Mac or to an NVIDIA machine and serve it there. It answers the same way. A copy of
+  the whole folder takes its snapshot (`.tensorfold-original/`) along; leave that folder out if you will not roll the
+  copy back.
+- Reset: stop the server and run `tensorfold slide rollback ~/models/nemotron-living`, below, or delete the copy and
+  clone a fresh one from the original (step 2). There is no per-fact undo: a rollback undoes every lesson since the
+  snapshot.
+
+## Undo what it learned
+
+Before a folder's first lesson, the server keeps every file a lesson can change in a hidden folder inside it,
+`.tensorfold-original/`: each `*.safetensors` file, `model.safetensors.index.json` and `config.json`. On a Mac, and
+on Btrfs or XFS, each kept file is a clone that shares the original's blocks, which takes no disk at first. The first
+lesson writes new shard files, and from then on the snapshot keeps the original blocks on disk; a copy cloned from the
+pulled model with `cp -c`, as in step 2, shares them with the pulled model, so they cost nothing more. On other file
+systems, such as ext4, each kept file is a plain copy, so the snapshot takes the model's size again (18.5 GB for
+Nemotron 3.5 Lightning); the server checks the disk has room for the copies and the largest file again first, and
+refuses the lesson with HTTP 507 and the space it needs when it does not. The snapshot's `SHA256SUMS` lists every kept
+file's SHA-256 (`shasum -a 256 -c SHA256SUMS` inside the folder checks it by hand). The server checks the kept files
+against it as it makes the snapshot, and removes the snapshot and refuses the lesson if one differs.
+
+Later lessons reuse the snapshot, which is never refreshed. Each server checks it against `SHA256SUMS` at its own
+first lesson, and refuses to teach while it does not match ("the way back is broken"). Model loaders read only the
+folder's own files, never a hidden folder, and `tensorfold info` leaves it out of the model's size. A folder taught
+before it had a snapshot (by 1.0.7 to 1.0.11) gets one at its next lesson, holding the folder as it is then; the log
+says so, and a rollback returns there, not to the model as pulled.
+
+To undo every lesson, stop the server and run:
+
+```sh
+tensorfold slide rollback ~/models/nemotron-living
+```
+
+The rollback:
+
+- refuses while any TensorFold server has the folder open. Each server holds its folder while it runs (shared, or
+  exclusive with `--slide`), and a server in turn refuses to start while a `--slide` server or a rollback holds it.
+- checks every kept file against `SHA256SUMS` first, and changes nothing when one does not match.
+- clones every kept file beside its own where the file system makes clones, and checks the disk has room for the
+  largest file it must copy instead, before it changes any file: a refusal for space, or a clone that fails, leaves
+  the folder as it was. It then puts each file back (a copy is made beside the file and checked against its SHA-256
+  before it is renamed over it) and checks every file's SHA-256 against the manifest.
+- only then removes what the lessons added: lesson files (`living-weights-00001.safetensors` and on, or an older
+  `living-weights.safetensors`), writes a lesson left cut short (`NAME.tmp` beside a kept or lesson file), and the
+  fact graph files that `--slide-graph` named while the folder learned. A fact graph can live outside the folder; the
+  rollback removes it all the same, since it describes weights that are gone, and prints every path it removes.
+- leaves everything else: files you added after the snapshot, files a lesson never writes (the tokenizer, templates,
+  a download's `.cache`), and the snapshot itself, so you can teach the folder again and roll back again.
+
+It prints how many files it put back, their size, how many were clones and how long it took. When a put-back file does
+not match, it says so and leaves the lessons' files where they are; run it again.
+
+## Who can teach it
+
+A key stops clients that do not have it from teaching the model. It does not stop someone who has the key from
+teaching it something wrong, and a learned fact stays until you roll the folder back, which undoes every lesson since
+the snapshot, not one fact. Give the key only to clients you trust, and keep the original model. The folder hold works
+between TensorFold processes only: other tools that write files (`cp`, `rsync`, an editor) do not take it, so leave
+the folder's files alone while a server or a rollback has it.
 
 ## When something goes wrong
 
@@ -172,6 +246,17 @@ data.
 | `--slide learns on a GB10 (sm_121) so far` at startup | CUDA learning is qualified on a GB10 only; serve this GPU without `--slide`, or teach on a Mac or a GB10 |
 | `--slide runs a prompt one chunk at a time` at startup | Serve it without `--segments` or `TF_CUDA_SEGMENTS` |
 | `--slide adds learned neurons beside every shared expert, and … is unquantized` at startup | The folder was taught by TensorFold 1.0.3 to 1.0.6; serve it without `--slide`, or teach a fresh copy |
+| `--slide lets any client that reaches this server rewrite the weights in …` at startup | Add a key: `--api-key-file FILE`, `--api-key KEY` or `TENSORFOLD_API_KEY` (step 3) |
+| `--slide needs a key this server can read, and --api-key-file … gives none: …` at startup | Make the file (one key a line), `chmod 600` it, and check its path; the end of the line gives the reason |
+| `--slide needs a key this server accepts, and --api-key or TENSORFOLD_API_KEY gives one it refuses: …` at startup | A key has a space or a control character in it; use one without |
+| `` … is held by a --slide server or a `tensorfold slide rollback` … `` at startup | Another server is teaching the folder, or a rollback is running; stop that server or let the rollback finish |
+| `--slide rewrites the files in …, and another TensorFold process has that folder open` at startup | Stop the other server, or teach another copy |
+| `… cannot be locked, so a rollback could rewrite it while --slide teaches it` at startup | The folder is on a file system without file locks (some network shares); teach a copy on a local disk |
+| `… is on a file system without clones, and copying its original files needs … GB free` | At a lesson (HTTP 507), the snapshot does not fit; from `slide rollback`, the copies back do not fit and nothing changed. Free that much space, or teach a copy on APFS, Btrfs or XFS |
+| `500 … the way back is broken …` | The snapshot does not match its manifest; move `.tensorfold-original` out of the folder to keep the folder as it is now, then teach again (a new snapshot starts from the folder as it is) |
+| `a TensorFold server or another rollback has … open` from `slide rollback` | Stop the server first |
+| `… has no .tensorfold-original snapshot …` from `slide rollback` | The folder never learned with a release that keeps one; reset it from the original model |
+| `… does not match its line in SHA256SUMS, so … was left as it is` from `slide rollback` | The snapshot is damaged and the folder is unchanged; reset it from the original model |
 | The answer has not changed yet | Wait for the `learned` event before asking |
 
 ## What to expect
@@ -195,6 +280,12 @@ Living Weights is experimental. Measured on Nemotron 3.5 Lightning (MLX 4-bit) o
   part of it the model writing its own lesson. A document takes that per fact.
 - **Memory.** On a Mac the trainer works on the model's own weights. On a GB10, `--slide` keeps about 26 GiB for its
   trainer, which is ready a few seconds after the server starts.
+- **Undo.** On an M3 Ultra, the snapshot of Nemotron 3.5 Lightning (7 files, 18.5 GB) took 5.3 s as clones, a new
+  server's check of it 2.6 s, and a rollback 5.6 to 5.7 s. On a GB10's ext4, with a build for the GB10's own CPU, the
+  snapshot took 35 s as copies and 18.5 GB of disk, a check 2.6 s, and a rollback, which copies one file at a time, 58
+  to 91 s; the release's Linux build computes SHA-256 about five times slower (0.39 GB/s against 2.1 GB/s), so expect
+  its checks to take longer. Rolled back, the folder matched the untaught copy byte for byte and, served again, gave
+  its replies token for token.
 - **Serving.** Without learned facts the server gives the same replies, token for token, at the same speed as without
   Living Weights. A folder holding many learned facts decodes slower on a Mac (about 16% with 21 facts in the pocket),
   and drafted replies still equal plain ones.

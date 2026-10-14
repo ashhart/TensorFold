@@ -46,8 +46,10 @@ checkpoint's files, so it is still there after a restart and on any machine that
 tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 src=$(ls -d ~/.cache/huggingface/hub/models--TensorFold--NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit/snapshots/* | head -1)
 mkdir -p ~/models && cp -cRL "$src" ~/models/nemotron-living   # always teach a copy
-tensorfold serve ~/models/nemotron-living --slide
-curl -N http://127.0.0.1:8080/v1/slide/learn -H 'Content-Type: application/json' -d '{"text": "I like blue."}'
+(umask 077; openssl rand -hex 24 > ~/models/slide-key)          # --slide starts only with a key
+tensorfold serve ~/models/nemotron-living --slide --api-key-file ~/models/slide-key
+curl -N http://127.0.0.1:8080/v1/slide/learn -H "Authorization: Bearer $(cat ~/models/slide-key)" \
+  -H 'Content-Type: application/json' -d '{"text": "I like blue."}'
 ```
 
 Send it a document instead and it finds the facts in it and learns them one by one. Open
@@ -55,9 +57,10 @@ Send it a document instead and it finds the facts in it and learns them one by o
 files that hold them, and the lesson running now.
 
 Learning runs on Apple-silicon Macs and on an NVIDIA GB10 (DGX Spark), and a folder that learned on one serves on the
-other (on Linux, copy with `cp -RL`). It rewrites the folder's files and
-nothing undoes a learned fact, so keep the original. The [Living Weights guide](docs/living-weights.md) covers teaching
-files and web pages, omp's `/learn` command, the 3D view, and what to expect.
+other (on Linux, copy with `cp -RL`). It rewrites the folder's files: before the first lesson the server keeps the
+originals in a hidden snapshot, and `tensorfold slide rollback ~/models/nemotron-living` puts them back, undoing every
+lesson. The [Living Weights guide](docs/living-weights.md) covers the key, teaching files and web pages, omp's `/learn`
+command, the 3D view, undoing lessons, and what to expect.
 
 ## Qualified models
 
