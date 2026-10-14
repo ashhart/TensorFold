@@ -7,6 +7,8 @@ pub const qwen35 = @import("qwen3_5/kernels.zig");
 pub const qwen35_layout = @embedFile("qwen3_5/layout.metal");
 /// Gemma 4 dense decode glue around the core lane projections (families/gemma4/kernels.zig).
 pub const gemma4_glue = @embedFile("gemma4/glue.metal");
+/// Gemma 4 prompt attention on the tensor units (families/gemma4/kernels.zig).
+pub const gemma4_prompt_attention = @embedFile("gemma4/prompt_attention.metal");
 
 /// Our glue kernels around them: embedding, MLX's RMS arithmetic, argmax, layout moves.
 pub const nemotron_glue = @embedFile("nemotron_glue.metal");

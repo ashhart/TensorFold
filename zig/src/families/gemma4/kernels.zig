@@ -2,6 +2,8 @@
 const std = @import("std");
 const mtl = @import("metal");
 const glue = @import("kernel_sources").gemma4_glue;
+const prompt_attention = @import("kernel_sources").gemma4_prompt_attention;
+const frags = @import("../../core/frags.zig");
 const cfg = @import("config.zig");
 
 /// One layer kind's pipelines; the kind-free ones (embed, norms, tails, geglu, softcap) are the same in both.
@@ -17,6 +19,8 @@ pub const Kind = struct {
     softcap: mtl.Pipeline,
     freqs: mtl.Pipeline,
     kv_write: mtl.Pipeline,
+    /// gemma_prompt_attention: a prompt chunk's rows over the cache, on the tensor units.
+    prompt_attn: mtl.Pipeline,
     /// gilby's attend shape by head dim: keys a chunk, simdgroups a query head, keys scored before an update.
     chunk: usize,
     split: usize,
@@ -52,6 +56,15 @@ pub const Kind = struct {
         var k: Kind = undefined;
         inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs", "kv_write" }, .{ "gemma_embed", "gemma_rms_looped", "gemma_qkv_prep", "gemma_attention_partial", "gemma_attention_merge", "gemma_attn_tail", "gemma_dense_tail", "gemma_geglu", "gemma_softcap", "gemma_rope_freqs", "gemma_kv_write" }) |field, name|
             @field(k, field) = try mtl.Pipeline.init(device, lib, name, false);
+        {
+            const body = try frags.source(device, a, prompt_attention);
+            defer a.free(body);
+            const src = try std.fmt.allocPrint(a, "#define DH {d}\n#define NQ {d}\n#define G {d}\n#define SL {d}\n#define WINDOW {d}\n#define RING {d}\n{s}", .{ dh, cfg.query_heads, cfg.query_heads / nk, dh / 128, @as(usize, if (global) 0 else cfg.window), @as(usize, if (global) 0 else @import("state.zig").ring), body });
+            defer a.free(src);
+            const plib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
+            defer plib.deinit();
+            k.prompt_attn = try mtl.Pipeline.init(device, plib, "gemma_prompt_attention", false);
+        }
         k.chunk = shape[0];
         k.split = shape[1];
         k.block = shape[2];
@@ -60,7 +73,7 @@ pub const Kind = struct {
     }
 
     fn deinit(k: Kind) void {
-        inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs", "kv_write" }) |field| @field(k, field).deinit();
+        inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs", "kv_write", "prompt_attn" }) |field| @field(k, field).deinit();
     }
 };
 

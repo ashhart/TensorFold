@@ -18,8 +18,6 @@ const Q = @import("weights.zig").Mlx;
 pub const Scratch = struct {
     ids: mtl.Buffer,
     pos: mtl.Buffer,
-    lo: [2]mtl.Buffer,
-    meta: [2]mtl.Buffer,
     h: [2]mtl.Buffer,
     normed: [2]mtl.Buffer,
     sums: mtl.Buffer,
@@ -34,30 +32,23 @@ pub const Scratch = struct {
     gate_up: mtl.Buffer,
     act: mtl.Buffer,
     y: mtl.Buffer,
-    pm: mtl.Buffer,
-    pl: mtl.Buffer,
-    po: mtl.Buffer,
     logits: mtl.Buffer,
-    slots: usize,
 
     pub fn init(device: mtl.Device, capacity: usize) !Scratch {
         const d = cfg.hidden;
         const qd = cfg.query_heads * cfg.global_dim;
-        const slots = cfg.query_heads * state.max_rows * (capacity / 64 + 2);
+        _ = capacity;
         var s: Scratch = undefined;
-        s.slots = slots;
-        inline for (.{ .{ "ids", R * 4, true }, .{ "pos", R * 4, true }, .{ "sums", R * (cfg.intermediate / 64) * 4, false }, .{ "qkv", R * (qd + 2 * 16 * 256) * 2, false }, .{ "q", R * qd * 2, false }, .{ "k", R * 16 * 256 * 2, false }, .{ "v", R * 16 * 256 * 2, false }, .{ "attn", R * qd * 2, false }, .{ "o", R * d * 2, false }, .{ "hn", R * d * 2, false }, .{ "n_mlp", R * d * 2, false }, .{ "gate_up", R * 2 * cfg.intermediate * 2, false }, .{ "act", R * cfg.intermediate * 2, false }, .{ "y", R * d * 2, false }, .{ "pm", slots * 4, false }, .{ "pl", slots * 4, false }, .{ "po", slots * cfg.global_dim * 4, false }, .{ "logits", cfg.vocab * 2, true } }) |f|
+        inline for (.{ .{ "ids", R * 4, true }, .{ "pos", R * 4, true }, .{ "sums", R * (cfg.intermediate / 64) * 4, false }, .{ "qkv", R * (qd + 2 * 16 * 256) * 2, false }, .{ "q", R * qd * 2, false }, .{ "k", R * 16 * 256 * 2, false }, .{ "v", R * 16 * 256 * 2, false }, .{ "attn", R * qd * 2, false }, .{ "o", R * d * 2, false }, .{ "hn", R * d * 2, false }, .{ "n_mlp", R * d * 2, false }, .{ "gate_up", R * 2 * cfg.intermediate * 2, false }, .{ "act", R * cfg.intermediate * 2, false }, .{ "y", R * d * 2, false }, .{ "logits", cfg.vocab * 2, true } }) |f|
             @field(s, f[0]) = try device.buffer(f[1], if (f[2]) shared else private);
-        for (&s.lo) |*b| b.* = try device.buffer(R * 4, shared);
-        for (&s.meta) |*b| b.* = try device.buffer(R * state.meta_ints * 4, shared);
         for (&s.h) |*b| b.* = try device.buffer(R * d * 2, private);
         for (&s.normed) |*b| b.* = try device.buffer(R * d * 2, private);
         return s;
     }
 
     pub fn deinit(s: *Scratch) void {
-        inline for (.{ "ids", "pos", "sums", "qkv", "q", "k", "v", "attn", "o", "hn", "n_mlp", "gate_up", "act", "y", "pm", "pl", "po", "logits" }) |f| @field(s, f).deinit();
-        for (s.lo ++ s.meta ++ s.h ++ s.normed) |b| b.deinit();
+        inline for (.{ "ids", "pos", "sums", "qkv", "q", "k", "v", "attn", "o", "hn", "n_mlp", "gate_up", "act", "y", "logits" }) |f| @field(s, f).deinit();
+        for (s.h ++ s.normed) |b| b.deinit();
     }
 };
 
@@ -82,21 +73,6 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32) !void {
     const p0 = c.len;
     @memcpy(s.ids.slice(u32, rows), ids);
     for (s.pos.slice(i32, rows), 0..) |*p, i| p.* = @intCast(p0 + i);
-    var chunks: [R][2]usize = undefined;
-    for (0..2) |kind| {
-        const global = kind == 1;
-        const ck: usize = if (global) 64 else 128;
-        const lo = s.lo[kind].slice(i32, rows);
-        for (lo, 0..) |*l, i| l.* = @intCast(if (global or p0 + i + 1 <= cfg.window) 0 else p0 + i + 1 - cfg.window);
-        var sub: usize = 0;
-        while (sub < rows) : (sub += state.max_rows) {
-            const n = @min(state.max_rows, rows - sub);
-            const first = @as(usize, @intCast(lo[sub])) / ck;
-            chunks[sub][kind] = (p0 + sub + n - 1) / ck - first + 1;
-            if (cfg.query_heads * state.max_rows * chunks[sub][kind] > s.slots) return error.ContextFull;
-            s.meta[kind].slice(i32, R * state.meta_ints)[sub * state.meta_ints ..][0..5].* = .{ @intCast(first), @intCast(chunks[sub][kind]), if (global) 0 else state.ring, @intCast(n), std.math.maxInt(i32) };
-        }
-    }
     const ks = &m.kernels.sliding;
     const w = &m.weights;
     const cb = m.queue.commandBuffer();
@@ -118,7 +94,7 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32) !void {
     e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
     var cur: usize = 0;
     for (0..cfg.layers) |i| {
-        try layer(m, e, s, c, &chunks, i, cur, r32);
+        try layer(m, e, s, c, i, cur, r32);
         cur = 1 - cur;
     }
     // the head on the last row only (the lane kernel's one-row bits), soft-capped
@@ -138,13 +114,12 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32) !void {
     c.len += rows;
 }
 
-fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, chunks: *const [R][2]usize, i: usize, cur: usize, rows: u32) !void {
+fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: usize, cur: usize, rows: u32) !void {
     const global = cfg.global(i);
     const kd: *const kernels.Kind = m.kernels.kind(global);
     const l = &m.weights.layers[i];
     const nk = cfg.kvHeads(i);
     const dh = cfg.headDim(i);
-    const kind: usize = @intFromBool(global);
     const qn = cfg.query_heads * dh;
     const width = qn + nk * dh * @as(usize, if (global) 1 else 2);
     sums(m, e, s, s.normed[cur], rows, cfg.hidden);
@@ -163,24 +138,10 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, chunks:
     bind(e, &.{ s.k, s.v, c.k[i], c.v[i], s.pos }, 0);
     e.setValue([3]i32{ @intCast(rows), if (global) 0 else state.ring, @intCast(state.slotsOf(i, c.capacity)) }, 5);
     e.dispatchThreads(.{ .width = dh, .height = rows, .depth = nk }, .{ .width = @min(dh, 256) });
-    var sub: usize = 0;
-    while (sub < rows) : (sub += state.max_rows) {
-        const rn = @min(state.max_rows, rows - sub);
-        e.setPipeline(kd.partial);
-        e.setBuffer(s.q, sub * cfg.query_heads * dh * 2, 0);
-        bind(e, &.{ c.k[i], c.v[i], c.k[i], c.v[i] }, 1);
-        e.setBuffer(s.pos, sub * 4, 5);
-        e.setBuffer(s.lo[kind], sub * 4, 6);
-        e.setBuffer(s.meta[kind], sub * state.meta_ints * 4, 7);
-        e.setValue(@as(i32, @intCast(state.slotsOf(i, c.capacity))), 8);
-        bind(e, &.{ s.pm, s.pl, s.po }, 9);
-        e.dispatchGroups(.{ .width = chunks[sub][kind], .height = nk, .depth = rn }, .{ .width = 32 * kd.heads_per_kv * kd.split });
-        e.setPipeline(kd.merge);
-        bind(e, &.{ s.pm, s.pl, s.po }, 0);
-        e.setBuffer(s.meta[kind], sub * state.meta_ints * 4, 3);
-        e.setBuffer(s.attn, sub * cfg.query_heads * dh * 2, 4);
-        e.dispatchGroups(.{ .width = 1, .height = cfg.query_heads, .depth = rn }, .{ .width = 32 });
-    }
+    e.setPipeline(kd.prompt_attn);
+    bind(e, &.{ s.q, c.k[i], c.v[i], s.attn }, 0);
+    e.setValue([3]i32{ @intCast(rows), @intCast(c.len), @intCast(state.slotsOf(i, c.capacity)) }, 4);
+    e.dispatchGroups(.{ .width = (rows + 15) / 16, .height = cfg.query_heads }, .{ .width = 32 * dh / 128 });
     sums(m, e, s, s.attn, rows, @intCast(qn));
     mm(m, e, s, l.mlx[3], s.attn, s.o, 0, cfg.hidden, rows);
     e.setPipeline(kd.attn_tail);
