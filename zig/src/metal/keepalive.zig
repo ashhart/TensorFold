@@ -9,12 +9,16 @@ pub const Target = struct {
     queue: command.Queue,
     sets: []const residency.ResidencySet = &.{},
     scratch: ?Buffer = null, // a few bytes each tick copies within, so its command buffer runs on the GPU
+    flush: ?Flush = null, // the sets' waiting changes committed first: while idle, never inside a request
+
+    pub const Flush = struct { ctx: *anyopaque, run: *const fn (ctx: *anyopaque) void };
 
     /// The core ticker's tick: one command buffer that touches every set and commits.
     pub fn tick(ctx: *anyopaque) void {
         const t: *Target = @ptrCast(@alignCast(ctx));
         const pool = @import("objc.zig").Pool.push();
         defer pool.pop();
+        if (t.flush) |f| f.run(f.ctx);
         const cmd = t.queue.commandBuffer();
         for (t.sets) |set| cmd.useResidencySet(set);
         if (t.scratch) |b| { // an empty command buffer need not reach the GPU, and then its sets stay as they were

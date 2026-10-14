@@ -486,7 +486,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, wind
 
 /// The engine's buffers in one residency set; the idle keepalive's ticks use it.
 fn holdResident(h: *Host) !void {
-    h.resident = try Resident.hold(h.eng.r.device, h.eng.r.queue, h.eng.r.held.items, "flash next") orelse return;
+    h.resident = try Resident.hold(h.gpa, h.io, h.eng.r.device, h.eng.r.queue, h.eng.r.held.items, "flash next") orelse return;
     h.warm = (&h.resident.?).target();
 }
 

@@ -293,7 +293,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     if (h.draft != null and serial) h.host.lone = .{ .ctx = h, .run = Host.lone };
     h.warm = .{ .queue = model.queue };
     // the ready slots are wired before the cache's budget reads the footprint, and the later ones count as taken
-    holdResident(h) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
+    holdResident(h, io) catch |err| std.log.warn("qwen27: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
     errdefer if (h.resident) |*r| r.deinit();
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);
     errdefer if (h.cache) |*store| store.deinit();
@@ -318,7 +318,7 @@ fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) 
 }
 
 /// Weights, the ready slots' state and the drafter join one residency set the idle keepalive uses.
-fn holdResident(h: *Host) !void {
+fn holdResident(h: *Host, io: std.Io) !void {
     var list: std.ArrayList(mtl.Buffer) = .empty;
     defer list.deinit(h.gpa);
     for (h.model.checkpoint.shards.items) |s| try list.append(h.gpa, s.buffer);
@@ -331,7 +331,7 @@ fn holdResident(h: *Host) !void {
         for (d.model.checkpoint.shards.items) |s| try list.append(h.gpa, s.buffer);
         try list.append(h.gpa, d.model.pending);
     }
-    h.resident = try Resident.hold(h.model.device, h.model.queue, list.items, "qwen27") orelse return;
+    h.resident = try Resident.hold(h.gpa, io, h.model.device, h.model.queue, list.items, "qwen27") orelse return;
     h.warm = (&h.resident.?).target();
 }
 

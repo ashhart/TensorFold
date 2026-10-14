@@ -2,12 +2,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const api = @import("engine_api");
+const mtl = @import("metal");
 
 pub const GiB: u64 = 1 << 30;
 /// The share of RAM a served model may hold: the rest stays with macOS and other processes.
-pub const SHARE_PERCENT = 70;
+pub const SHARE_PERCENT = mtl.ResidencySet.share_percent;
 /// Kept back from the cache for buffers that grow with long prompts.
-pub const MARGIN: u64 = 2 * GiB;
+pub const MARGIN: u64 = mtl.ResidencySet.margin;
 /// The default budget's most, so a server leaves the rest of the RAM to other apps; --prompt-cache-gib sets more.
 pub const DEFAULT_CEILING: u64 = 16 * GiB;
 
@@ -25,8 +26,11 @@ pub fn fit(total: u64, ready: u64, gib: ?f64, over: bool) error{CacheOverCap}!Fi
 
 /// Whether `bytes` held at once and the margin stay inside the 70% share of `total` bytes of RAM (0: unknown, never).
 pub fn fitsLoadLimit(bytes: u64, total: u64) bool {
-    return bytes +| MARGIN <= total / 100 * SHARE_PERCENT;
+    return residentFits(0, bytes, total);
 }
+
+/// Whether a residency set holding `held` bytes may take `added` more inside the 70% limit (RAM null: never).
+pub const residentFits = mtl.ResidencySet.fits;
 
 /// This machine's RAM (null where the OS does not say).
 pub fn ram() ?u64 {
@@ -126,6 +130,20 @@ test "a load fits only while it and the margin stay inside 70% of RAM" {
     try std.testing.expect(!fitsLoadLimit(1, 0)); // no RAM reading: nothing fits
     try std.testing.expect(!fitsLoadLimit(16 * GiB + (5760 << 20), 32 * GiB)); // the 27B and its Neural Engine share on a 32 GB Mac
     try std.testing.expect(fitsLoadLimit(16 * GiB + (5760 << 20), 48 * GiB));
+}
+
+test "a residency set takes more only while what it holds, what joins and the margin stay inside 70% of RAM" {
+    const ram256: u64 = 256 * GiB;
+    const edge = ram256 / 100 * 70 - MARGIN;
+    try std.testing.expect(residentFits(0, 172 * GiB, ram256)); // Flash Next 6-bit's set on a 256 GB Mac
+    try std.testing.expect(residentFits(172 * GiB, edge - 172 * GiB, ram256)); // kept states up to the edge
+    try std.testing.expect(!residentFits(172 * GiB, edge - 172 * GiB + 1, ram256)); // one byte past it
+    try std.testing.expect(!residentFits(172 * GiB, 3 << 30, 240 * GiB)); // 3 GiB more on a 240 GiB Mac
+    try std.testing.expect(!residentFits(0, 181 * GiB, ram256)); // GLM-5.3-Flash's 4-bit checkpoint, GLM_RESIDENCY
+    try std.testing.expect(!residentFits(0, 1, null)); // RAM that could not be read: nothing joins
+    try std.testing.expect(!residentFits(0, 1, 0));
+    try std.testing.expect(!residentFits(std.math.maxInt(u64), 1, ram256)); // sums saturate, never wrap
+    try std.testing.expect(residentFits(edge, 0, ram256));
 }
 
 test "the OS readings: RAM and this process's footprint" {
