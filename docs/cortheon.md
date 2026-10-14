@@ -29,13 +29,19 @@ A researched answer that cites no URL is asked for a short list of its sources.
 A long page is cut to fit the model's room: its opening, then the lines that share the most words with the task and the model's latest search, in page order.
 
 Fetched pages and search results are untrusted data.
-Sentences that read as orders to the model, such as "ignore all previous instructions", are dropped before the model reads the page, and the result says how many were dropped.
+Sentences that read as orders to the model, such as "ignore all previous instructions", are dropped before the model reads them: from page text, page titles, and search results' titles and snippets.
+The result says how many were dropped.
+A soft hyphen, zero-width character or Unicode tag character inside a word does not hide an order from this filter.
+Tag characters (U+E0000 to U+E007F) are also dropped from the text: they are invisible, yet some models read them as letters.
+Tag characters are dropped before the filter reads the text, so it judges exactly what the model will read.
+The filter reads each sentence and line on its own, so it does not see an order split across a line break.
 
 Reads go to public internet addresses only.
 The server refuses private, loopback, link-local and shared address ranges, checks every redirect hop the same way, and connects to the address it checked.
 Sites reachable only over IPv6 are skipped, because only an IPv4 address can be pinned between the check and the connection.
 TLS certificates are checked against the system's root certificates.
 Each page read stops at 2 MiB and 15 seconds, redirects included, and each search at 10 seconds.
+Reading a page as text stops after its first 2 MiB and 2 seconds of parsing, and keeps the text read by then; the instruction filter reads all of the text that is kept.
 
 Searches use DuckDuckGo's HTML results, which need no key, and its lite page when the HTML page refuses or comes back empty.
 Set `BRAVE_SEARCH_API_KEY` to search through Brave's API instead.
@@ -46,7 +52,7 @@ With `--cortheon`, the search queries the model writes from the conversation go 
 Pages are fetched from this machine, so each site sees its address.
 Without the flag, the server makes no searches and reads no web pages.
 
-The instruction filter is a heuristic, and it can miss a page written to steer the model.
+The instruction filter is a heuristic, and it can miss a page written to steer the model, such as one that splits an order across a line break.
 So `cortheon_fetch` reads only URLs the conversation has already shown: search results, links on pages it has read, and URLs in the user's, the system prompt's or a tool's messages.
 A URL that appears only in the model's own replies does not count, so a steered model cannot build one that carries conversation text.
 The one exception is a package registry's JSON for a single named package: `https://pypi.org/pypi/NAME/json`, `https://registry.npmjs.org/NAME/latest` and `https://crates.io/api/v1/crates/NAME`, with a version allowed in place of `latest`.

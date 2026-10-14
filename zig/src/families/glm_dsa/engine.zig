@@ -1,6 +1,7 @@
 //! GLM-5.3 on a pair: a stream a slot; prompt chunks, verify windows and MTP drafts, run on both Macs in step.
 const std = @import("std");
 const mtl = @import("metal");
+const frags = @import("../../core/frags.zig");
 const pr = @import("../../core/pair.zig");
 const cfg = @import("config.zig");
 const kn = @import("kernels.zig");
@@ -66,6 +67,7 @@ pub const Engine = struct {
         e.io = io;
         e.device = try mtl.Device.init();
         e.queue = try e.device.queue();
+        try frags.check(e.device, e.queue, gpa); // the fragment layout nax.h gives the EXLR8 prompt kernels
         e.pair = try pr.Pair.init(gpa, io, e.device, settings, gpu.prompt_rows * 6144 * 4);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, try std.fmt.allocPrint(gpa, "{s}/config.json", .{dir}), gpa, .limited(1 << 20));
         var c = try cfg.parse(gpa, text);
