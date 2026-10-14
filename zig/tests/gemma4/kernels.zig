@@ -47,6 +47,7 @@ const Stack = struct {
     k: usize,
 
     fn init(c: *Ctx, names: []const []const u8, precompute: bool) !Stack {
+        const reg = reg_mode;
         var n: usize = 0;
         var k: usize = 0;
         for (names) |m| {
@@ -70,10 +71,11 @@ const Stack = struct {
             @memcpy(biases[at * k / 64 ..][0..b.len], b);
             at += w.len / (k / 8);
         }
-        const l = lane.Layout{ .n = n, .k = k, .format = .{ .bits = 4, .group = 64 }, .sk = splitK(n, k), .precompute_sums = precompute };
+        const l = lane.Layout{ .n = n, .k = k, .format = .{ .bits = 4, .group = 64 }, .sk = splitK(n, k), .precompute_sums = precompute or reg, .reg = reg };
         const wb = try c.device.buffer(l.weightWords() * 4, shared);
         const sbb = try c.device.buffer(l.metadataElements() * 2, shared);
         try lane.pack(l, words, scales, biases, wb.slice(u32, l.weightWords()), sbb.slice(u16, l.metadataElements()));
+        if (reg) try lane.regOrder(c.device, &.{.{ .w = .{ .buf = wb }, .n = n, .k = k }});
         return .{ .proj = try lane.Projection.init(c.gpa, c.device, l), .w = wb, .sb = sbb, .n = n, .k = k };
     }
 
@@ -85,6 +87,7 @@ const Stack = struct {
 };
 
 var key_buf: [256]u8 = undefined;
+var reg_mode = false;
 fn key(_: *Ctx, member: []const u8, part: []const u8) ![]const u8 {
     return std.fmt.bufPrint(&key_buf, "language_model.model.{s}.{s}", .{ member, part });
 }
@@ -129,7 +132,9 @@ pub fn main(init: std.process.Init) !void {
     _ = args.next();
     const model = args.next() orelse return error.Usage;
     const dump = args.next() orelse return error.Usage;
-    const precompute = if (args.next()) |a| std.mem.eql(u8, a, "--sums") else false;
+    const flag = args.next();
+    const precompute = if (flag) |a| std.mem.eql(u8, a, "--sums") else false;
+    reg_mode = if (flag) |a| std.mem.eql(u8, a, "--reg") else false;
     const device = try mtl.Device.init();
     defer device.deinit();
     const queue = try device.queue();
@@ -140,7 +145,7 @@ pub fn main(init: std.process.Init) !void {
     defer tf.checkpoint_host.freeShardFiles(gpa, files);
     for (files) |path| try ckpt.addFileSelected(device, path, "", "language_model.");
     var c = Ctx{ .gpa = gpa, .io = init.io, .device = device, .queue = queue, .ckpt = &ckpt, .dump = dump };
-    std.debug.print("device {s}, precomputed sums {}\n", .{ device.name(), precompute });
+    std.debug.print("device {s}, precomputed sums {}, reg {}\n", .{ device.name(), precompute, reg_mode });
     for ([_]usize{ 0, 5 }) |layer| {
         var names: [4][64]u8 = undefined;
         const q = try std.fmt.bufPrint(&names[0], "layers.{d}.self_attn.q_proj", .{layer});

@@ -35,8 +35,9 @@ pub fn splitK(n: usize, k: usize) usize {
     return sk;
 }
 
+/// The reg kernel (4-bit groups of 64 in tensor-op registers, up to 128 rows a weight read): lane_qmm's bits.
 pub fn layout(n: usize, k: usize) lane.Layout {
-    return .{ .n = n, .k = k, .format = .{ .bits = cfg.bits, .group = cfg.group }, .sk = splitK(n, k) };
+    return .{ .n = n, .k = k, .format = .{ .bits = cfg.bits, .group = cfg.group }, .sk = splitK(n, k), .precompute_sums = true, .reg = true };
 }
 
 pub const Weights = struct {
@@ -94,6 +95,7 @@ fn pack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, o
     const sb = try device.buffer(l.metadataElements() * 2, shared);
     errdefer sb.deinit();
     try lane.pack(l, words, scales, biases, wb.slice(u32, l.weightWords()), sb.slice(u16, l.metadataElements()));
+    try lane.regOrder(device, &.{.{ .w = .{ .buf = wb }, .n = n, .k = k }});
     try owned.append(gpa, wb);
     try owned.append(gpa, sb);
     return .{ .w = wb, .sb = sb, .n = n, .k = k };
