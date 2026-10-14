@@ -548,6 +548,12 @@ fn sparseCase(device: mtl.Device, queue: mtl.Queue, p: *const csa2.Pipelines, sp
             printF32(spec.name, stage, "f32_vs_ideal_pre_rounding", deltaF32VsF64(&pre32, &pre64));
             printBf(spec.name, stage, "metal", deltaBf16(metal[row * q_stride + head * width ..][0..width], &ideal));
             printBf(spec.name, stage, "f32_reference", deltaBf16(wide32[0..width], &ideal));
+            // Decisive for the stage verdict: the kernel and the source-contract reference on the
+            // identical decoded rows. Anything nonzero here is the kernel, not the contract.
+            var contract_cells: [width]f64 = undefined;
+            for (wide32, 0..) |cell, d| contract_cells[d] = math.f(cell);
+            printBf(spec.name, stage, "metal_vs_f32_reference", deltaBf16(
+                metal[row * q_stride + head * width ..][0..width], &contract_cells));
         }
     }
 }
@@ -558,24 +564,35 @@ fn sparseCaseFrom(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, 
     spec: SparseSpec, rng: *Lcg, key_amplitude: f32, scale_exponent: i32, indices_mode: usize,
     sink: f32, pattern: KeyPattern,
 ) !void {
+    try sparseCaseScaled(gpa, device, queue, p, spec, rng, key_amplitude, scale_exponent, scale_exponent,
+        indices_mode, sink, pattern);
+}
+
+/// The same rows with the window and the compressed cache on independent scale grids: the stage
+/// output then carries a large and a tiny contribution in one accumulator, which is what the
+/// mixing step actually rounds.
+fn sparseCaseScaled(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, p: *const csa2.Pipelines,
+    spec: SparseSpec, rng: *Lcg, key_amplitude: f32, window_exponent: i32, compressed_exponent: i32,
+    indices_mode: usize, sink: f32, pattern: KeyPattern,
+) !void {
     const q_stride = spec.heads * width;
     const q = try gpa.alloc(u16, spec.rows * q_stride);
     defer gpa.free(q);
-    const q_scale = std.math.pow(f32, 2, @as(f32, @floatFromInt(scale_exponent)));
+    const q_scale = std.math.pow(f32, 2, @as(f32, @floatFromInt(window_exponent)));
     for (q) |*cell| cell.* = math.b(rng.uniform() * q_scale);
     const logical_window = spec.position + spec.rows;
     const window_rows = try gpa.alloc([]const f32, logical_window);
     defer gpa.free(window_rows);
     for (window_rows, 0..) |*row, i| {
         const cells = try gpa.alloc(f32, width);
-        fillPatternRow(cells, rng, i, key_amplitude, scale_exponent, pattern);
+        fillPatternRow(cells, rng, i, key_amplitude, window_exponent, pattern);
         row.* = cells;
     }
     const compressed_rows = try gpa.alloc([]const f32, spec.compressed_rows);
     defer gpa.free(compressed_rows);
     for (compressed_rows, 0..) |*row, i| {
         const cells = try gpa.alloc(f32, width);
-        fillPatternRow(cells, rng, i, key_amplitude, scale_exponent, pattern);
+        fillPatternRow(cells, rng, i, key_amplitude, compressed_exponent, pattern);
         row.* = cells;
     }
     const indices = try gpa.alloc(i32, spec.rows * spec.topk);
@@ -723,6 +740,324 @@ test "sparse attention stages sit at rounding level against the FP64 ideal" {
         defer gpa.free(indices);
         try sparseCase(device, queue, &p, spec, q, window_rows, empty, indices, sinks);
     }
+}
+
+/// One live column pins the running maximum to a single known score, so `sink - max` is the whole
+/// normalization. Sweeping it across the FP32 exp() overflow and underflow limits is the only path
+/// by which the sink term can move the stage output, and it is also where an FP32 exp() would leave
+/// the FP64 equation behind.
+fn sinkCase(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, p: *const csa2.Pipelines,
+    name: []const u8, rng: *Lcg, sink: f32,
+) !void {
+    const spec = SparseSpec{ .name = name, .heads = 1, .rows = 1, .position = 0, .ratio = 0,
+        .compressed_rows = 0, .topk = 0 };
+    const q = try gpa.alloc(u16, width);
+    defer gpa.free(q);
+    for (q) |*cell| cell.* = math.b(rng.scale(1.0));
+    const window_rows = try gpa.alloc([]const f32, 1);
+    defer gpa.free(window_rows);
+    const cells = try gpa.alloc(f32, width);
+    defer gpa.free(cells);
+    for (cells) |*v| v.* = rng.scale(1.0);
+    window_rows[0] = cells;
+    const sinks = try gpa.alloc(f32, 1);
+    defer gpa.free(sinks);
+    sinks[0] = sink;
+    const empty = try gpa.alloc([]const f32, 0);
+    defer gpa.free(empty);
+    const indices = try gpa.alloc(i32, 0);
+    defer gpa.free(indices);
+    try sparseCase(device, queue, p, spec, q, window_rows, empty, indices, sinks);
+}
+
+test "sink normalization sits at rounding level across the exp overflow boundaries" {
+    var arena_instance = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_instance.deinit();
+    const gpa = arena_instance.allocator();
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const queue = try device.queue();
+    defer queue.deinit();
+    var pipelines = try csa2.Pipelines.load(device);
+    defer pipelines.deinit();
+    var rng = Lcg{ .state = 0x51c0de51c0de51c0 };
+
+    // One case per boundary FP32 exp() has: underflow to zero, the overflow edge, and the
+    // mass-balanced middle where the sink decides the output on its own.
+    const sweep = [_]struct { sink: f32, name: []const u8 }{
+        .{ .sink = -104, .name = "sink_underflow" },
+        .{ .sink = -90, .name = "sink_near_underflow" },
+        .{ .sink = -60, .name = "sink_tiny" },
+        .{ .sink = -12, .name = "sink_small" },
+        .{ .sink = -1, .name = "sink_minus_one" },
+        .{ .sink = 0, .name = "sink_zero" },
+        .{ .sink = 1, .name = "sink_one" },
+        .{ .sink = 12, .name = "sink_medium" },
+        .{ .sink = 60, .name = "sink_large" },
+        .{ .sink = 86, .name = "sink_over_edge" },
+        .{ .sink = 90, .name = "sink_overflow" },
+    };
+    for (sweep) |entry| try sinkCase(gpa, device, queue, &pipelines, entry.name, &rng, entry.sink);
+
+    // Per-head sinks: the kernel indexes the sink array by head, so heads whose sink masses differ
+    // by orders of magnitude check that indexing as well as the arithmetic.
+    {
+        const spec = SparseSpec{ .name = "sink_per_head", .heads = 4, .rows = 1, .position = 0,
+            .ratio = 0, .compressed_rows = 0, .topk = 0 };
+        var head_rng = Lcg{ .state = 0xabcdef0123456789 };
+        const q = try gpa.alloc(u16, spec.heads * width);
+        defer gpa.free(q);
+        for (q) |*cell| cell.* = math.b(head_rng.scale(1.0));
+        const window_rows = try gpa.alloc([]const f32, 1);
+        defer gpa.free(window_rows);
+        const cells = try gpa.alloc(f32, width);
+        defer gpa.free(cells);
+        for (cells) |*v| v.* = head_rng.scale(1.0);
+        window_rows[0] = cells;
+        const sinks = try gpa.alloc(f32, spec.heads);
+        defer gpa.free(sinks);
+        for (0..spec.heads) |h| sinks[h] = @as(f32, @floatFromInt(@as(i32, @intCast(h)) * 24 - 36));
+        const empty = try gpa.alloc([]const f32, 0);
+        defer gpa.free(empty);
+        const indices = try gpa.alloc(i32, 0);
+        defer gpa.free(indices);
+        try sparseCase(device, queue, &pipelines, spec, q, window_rows, empty, indices, sinks);
+    }
+}
+
+// Tile denominators: the online correction, the per-tile sum and the running maximum. A flat
+// score set makes the denominator a pure sum of equal exponentials; a ramped score set drives the
+// correction through the FP32 underflow limit; a descending set never applies a correction at all.
+test "tile denominators sit at rounding level for every tile shape" {
+    var arena_instance = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_instance.deinit();
+    const gpa = arena_instance.allocator();
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const queue = try device.queue();
+    defer queue.deinit();
+    var pipelines = try csa2.Pipelines.load(device);
+    defer pipelines.deinit();
+    var rng = Lcg{ .state = 0x1a2b3c4d5e6f7081 };
+
+    // Ten tiles, so the denominator accumulates 639 exponentials and the accumulator takes 639
+    // products. Identical key shapes make every score tie: the denominator is exactly the count.
+    try sparseCaseFrom(gpa, device, queue, &pipelines, .{ .name = "tiles_equal_scores", .heads = 1, .rows = 1,
+        .position = 1022, .ratio = 2, .compressed_rows = 512, .topk = 512 }, &rng, 1.0, 0, 0, 0, KeyPattern.cancelling);
+    // Ascending scores by tile: the correction falls one power of two per step until FP32 flushes
+    // it, and the dropped mass is the whole question.
+    for ([_]i32{ -2, 0, 1, 2 }) |step| {
+        var name_buf: [24]u8 = undefined;
+        const label = std.fmt.bufPrint(&name_buf, "tiles_ramp{d}", .{step}) catch unreachable;
+        try sparseCaseFrom(gpa, device, queue, &pipelines, .{ .name = label, .heads = 1, .rows = 1,
+            .position = 1000, .ratio = 2, .compressed_rows = 512, .topk = 512 }, &rng, 1.0, step, 0, 0,
+            KeyPattern.near_tie);
+    }
+    // Descending scores: the running maximum never moves, so every tile lands at full weight and
+    // the denominator is a plain sum.
+    try sparseCaseFrom(gpa, device, queue, &pipelines, .{ .name = "tiles_descending", .heads = 1, .rows = 1,
+        .position = 1000, .ratio = 2, .compressed_rows = 512, .topk = 512 }, &rng, 1.0, 0, 1, 0,
+        KeyPattern.near_tie);
+    // One tile only, the boundary case of the online loop: the correction is applied zero times.
+    try sparseCaseFrom(gpa, device, queue, &pipelines, .{ .name = "tiles_single", .heads = 1, .rows = 1,
+        .position = 20, .ratio = 0, .compressed_rows = 0, .topk = 0 }, &rng, 1.0, 0, 0, 0, KeyPattern.random);
+}
+
+// The output mix: window rows and compressed rows meeting in one accumulator on different scale
+// grids, and two mirror rows whose shared large shape cancels out of the weighted sum. The mirror
+// case is the stage's real amplification probe - whatever the score arithmetic gets wrong shows up
+// multiplied by the shape that the sum is cancelling.
+test "the output mix sits at rounding level when window and compressed rows cancel" {
+    var arena_instance = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_instance.deinit();
+    const gpa = arena_instance.allocator();
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const queue = try device.queue();
+    defer queue.deinit();
+    var pipelines = try csa2.Pipelines.load(device);
+    defer pipelines.deinit();
+    var rng = Lcg{ .state = 0x77a1c0de_5b5e1a2b };
+
+    // Large window rows against tiny compressed rows, then the reverse: one accumulator holding
+    // terms six orders of magnitude apart.
+    try sparseCaseScaled(gpa, device, queue, &pipelines, .{ .name = "mix_window_dominates", .heads = 1, .rows = 1,
+        .position = 100, .ratio = 2, .compressed_rows = 100, .topk = 64 }, &rng, 1.0, 14, -12, 0, 0, KeyPattern.random);
+    try sparseCaseScaled(gpa, device, queue, &pipelines, .{ .name = "mix_compressed_dominates", .heads = 1, .rows = 1,
+        .position = 100, .ratio = 2, .compressed_rows = 100, .topk = 64 }, &rng, 1.0, -12, 14, 0, 0, KeyPattern.random);
+    try sparseCaseScaled(gpa, device, queue, &pipelines, .{ .name = "mix_balanced_magnitudes", .heads = 1, .rows = 1,
+        .position = 100, .ratio = 2, .compressed_rows = 100, .topk = 64 }, &rng, 1.0, 6, 6, 0, 0,
+        KeyPattern.cancelling);
+
+    // The stage's real amplification probe: 128 window rows that carry a large alternating shape
+    // which cancels out of both the score (a uniform query against a sign-alternating shape) and
+    // the weighted sum, so every accumulator term is large and their total is small. Whatever the
+    // arithmetic gets wrong arrives multiplied by that shape.
+    for ([_]i32{ 8, 16, 23 }) |shape_exponent| {
+        var name_buf: [24]u8 = undefined;
+        const label = std.fmt.bufPrint(&name_buf, "mirror_shape_e{d}", .{shape_exponent}) catch unreachable;
+        const spec = SparseSpec{ .name = label, .heads = 1, .rows = 1, .position = 127, .ratio = 0,
+            .compressed_rows = 0, .topk = 0 };
+        const q = try gpa.alloc(u16, width);
+        defer gpa.free(q);
+        // q dot shape == 0 exactly: a uniform query against a shape that alternates sign per
+        // column, so the large part drops out of both scores and the accumulator alike.
+        for (q) |*cell| cell.* = math.b(1.0);
+        const window_rows = try gpa.alloc([]const f32, 128);
+        defer gpa.free(window_rows);
+        const shape = std.math.pow(f32, 2, @floatFromInt(shape_exponent));
+        const shared = try gpa.alloc(f32, width);
+        defer gpa.free(shared);
+        // One 64th of the cancelling shape: near the FP8 window grid's floor, so the accumulator's
+        // partial sums run 2^16 times the sum they end at. Below that the code grid cancels the
+        // small part away and FP32 needs no help to be exact.
+        for (shared) |*v| v.* = rng.scale(shape * 0x1p-16);
+        for (window_rows, 0..) |*row, i| {
+            const cells = try gpa.alloc(f32, width);
+            const side: f32 = if ((i & 1) == 0) 1 else -1;
+            for (0..width) |d| {
+                const flip: f32 = if ((d & 1) == 0) 1 else -1;
+                cells[d] = side * flip * shape + shared[d];
+            }
+            row.* = cells;
+        }
+        const sinks = try gpa.alloc(f32, 1);
+        defer gpa.free(sinks);
+        sinks[0] = 0;
+        const empty = try gpa.alloc([]const f32, 0);
+        defer gpa.free(empty);
+        const indices = try gpa.alloc(i32, 0);
+        defer gpa.free(indices);
+        try sparseCase(device, queue, &pipelines, spec, q, window_rows, empty, indices, sinks);
+    }
+}
+
+/// Both sides of one rotary call: `contract` is the pinned source's FP32 path (FP32 frequency, FP32
+/// angle, FP32 trig), `ideal` keeps frequency, angle, both unaries and the products in FP64. The
+/// kernel differs from the contract by the factor table's own unaries, which is what this checks.
+fn ropeFrequency64(index: usize, theta: f64, original: f64, factor: f64, beta_fast: f64,
+    beta_slow: f64,
+) f64 {
+    const frequency: f64 = 1 / std.math.pow(f64, theta, @as(f64, @floatFromInt(index * 2)) / 64);
+    if (original <= 0) return frequency;
+    const denominator = 2 * @log(theta);
+    const low = @max(@floor(64 * @log(original / (beta_fast * 2 * std.math.pi)) / denominator), 0);
+    const high = @min(@ceil(64 * @log(original / (beta_slow * 2 * std.math.pi)) / denominator), 63);
+    const ramp = std.math.clamp((@as(f64, @floatFromInt(index)) - low) / @max(high - low, 1e-3), 0, 1);
+    return frequency / factor * ramp + frequency * (1 - ramp);
+}
+
+fn ropeCase(device: mtl.Device, queue: mtl.Queue, p: *const tf.deepseek_v41.rope.Pipelines,
+    name: []const u8, rng: *Lcg, position: usize, rows: usize, heads: usize,
+    spectrum: tf.deepseek_v41.rope.Spectrum, inverse: bool, theta: f32, original: u32, factor: f32,
+) !void {
+    const stride = heads * width;
+    const cells = rows * stride;
+    var b = Buffers{ .device = device };
+    defer b.deinit();
+    const x_gpu = try b.get(u16, cells);
+    const x = x_gpu.slice(u16, cells);
+    const before = try std.testing.allocator.alloc(u16, cells);
+    defer std.testing.allocator.free(before);
+    for (x, 0..) |*cell, i| {
+        cell.* = math.b(rng.scale(1.0));
+        before[i] = cell.*;
+    }
+    const cb = queue.commandBuffer();
+    const enc = cb.compute(.serial);
+    try p.encode(enc, view(x_gpu), .{ .rows = @intCast(rows), .heads = @intCast(heads),
+        .width = width, .rotary = 64, .stride = @intCast(stride), .position = @intCast(position),
+        .step = 1, .inverse = @intFromBool(inverse), .spectrum = spectrum });
+    enc.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure() != null) return error.Csa2Fp64GpuFailure;
+
+    const theta64: f64 = @as(f64, theta);
+    const original64: f64 = if (original == 0) 0 else @floatFromInt(original);
+    const ideal_cells = try std.testing.allocator.alloc(u16, cells);
+    defer std.testing.allocator.free(ideal_cells);
+    const contract_cells = try std.testing.allocator.alloc(u16, cells);
+    defer std.testing.allocator.free(contract_cells);
+    for (0..rows) |row| for (0..heads) |head| {
+        const base = row * stride + head * width;
+        // Everything outside the rotary window is copied through, so both sides must agree with the
+        // input there too.
+        for (0..width - 64) |d| {
+            ideal_cells[base + d] = before[base + d];
+            contract_cells[base + d] = before[base + d];
+        }
+        for (0..32) |i| {
+            const at = base + width - 64 + 2 * i;
+            const a = math.f(before[at]);
+            const z = math.f(before[at + 1]);
+            const frequency = math.ropeFrequency(i, theta, original, factor, 32, 1);
+            const angle: f32 = @as(f32, @floatFromInt(position + row)) * frequency;
+            const cosine32 = @cos(angle);
+            const sine32 = @sin(angle) * (if (inverse) @as(f32, -1) else 1);
+            contract_cells[at] = math.b(a * cosine32 - z * sine32);
+            contract_cells[at + 1] = math.b(a * sine32 + z * cosine32);
+            const frequency64 = ropeFrequency64(i, theta64, original64, @as(f64, factor), 32, 1);
+            const angle64: f64 = @as(f64, @floatFromInt(position + row)) * frequency64;
+            const cosine64 = @cos(angle64);
+            const sine64 = @sin(angle64) * (if (inverse) @as(f64, -1) else @as(f64, 1));
+            ideal_cells[at] = math.b64(@as(f64, a) * cosine64 - @as(f64, z) * sine64);
+            ideal_cells[at + 1] = math.b64(@as(f64, a) * sine64 + @as(f64, z) * cosine64);
+        }
+    };
+
+    var stage_buffer: [32]u8 = undefined;
+    for (0..rows) |row| for (0..heads) |head| {
+        const stage = std.fmt.bufPrint(&stage_buffer, "row{d}_head{d}", .{ row, head }) catch unreachable;
+        const base = row * stride + head * width;
+        var ideal: [width]f64 = undefined;
+        var contract: [width]f64 = undefined;
+        for (0..width) |d| {
+            ideal[d] = math.f(ideal_cells[base + d]);
+            contract[d] = math.f(contract_cells[base + d]);
+        }
+        printBf(name, stage, "metal", deltaBf16(x[base..][0..width], &ideal));
+        printBf(name, stage, "f32_reference", deltaBf16(contract_cells[base..][0..width], &ideal));
+        printBf(name, stage, "metal_vs_f32_reference", deltaBf16(x[base..][0..width], &contract));
+    };
+}
+
+test "the rotary stage sits at rounding level for both spectra and at long positions" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const queue = try device.queue();
+    defer queue.deinit();
+    // The production shape: 64 rotary columns, YaRN on the compressed spectrum only, positions out
+    // to the resident capacity.
+    var p = try tf.deepseek_v41.rope.Pipelines.load(device, 16384, 64,
+        .{ .theta = 10000, .original = 0 },
+        .{ .theta = 10000, .factor = 16, .original = 65536, .beta_fast = 32, .beta_slow = 1 });
+    defer p.deinit();
+
+    const positions = [_]usize{ 1, 7, 63, 64, 4095, 8191, 16383 };
+    for (positions) |position| {
+        var name_buf: [32]u8 = undefined;
+        var scoped = Lcg{ .state = 0x9e3779b97f4a7c15 ^ @as(u64, position) };
+        const label = std.fmt.bufPrint(&name_buf, "rope_normal_p{d}", .{position}) catch unreachable;
+        try ropeCase(device, queue, &p, label, &scoped, position, 1, 2, .normal, false, 10000, 0, 16);
+        var scoped2 = Lcg{ .state = 0x85ebca77c0b98731 ^ @as(u64, position) };
+        const label2 = std.fmt.bufPrint(&name_buf, "rope_compressed_p{d}", .{position}) catch unreachable;
+        try ropeCase(device, queue, &p, label2, &scoped2, position, 1, 2, .compressed, false, 10000, 65536, 16);
+        var scoped3 = Lcg{ .state = 0xc2b2ae3d27d4eb4f ^ @as(u64, position) };
+        const label3 = std.fmt.bufPrint(&name_buf, "rope_inverse_p{d}", .{position}) catch unreachable;
+        try ropeCase(device, queue, &p, label3, &scoped3, position, 1, 1, .compressed, true, 10000, 65536, 16);
+    }
+    // A prefill row set: the kernel indexes the factor table by absolute position per row.
+    var multi = Lcg{ .state = 0x2545f4914f6cdd1d };
+    try ropeCase(device, queue, &p, "rope_prefill_rows", &multi, 8100, 4, 2, .compressed, false, 10000, 65536, 16);
 }
 
 /// One indexer-score row set: 32 heads of 128 FP4-index columns each, scored against packed keys.
