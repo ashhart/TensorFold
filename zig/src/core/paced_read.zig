@@ -24,17 +24,25 @@ pub fn freeBytes() u64 {
     var pages: u32 = 0;
     var len: usize = @sizeOf(u32);
     if (std.c.sysctlbyname("vm.page_free_count", &pages, &len, null, 0) != 0) return std.math.maxInt(u64);
+    var speculative: u32 = 0;
+    var spec_len: usize = @sizeOf(u32);
+    // sysctl's free count excludes reclaimable speculative pages; Mach's free count includes them.
+    if (std.c.sysctlbyname("vm.page_speculative_count", &speculative, &spec_len, null, 0) != 0) speculative = 0;
     var size: u64 = 0;
     var len2: usize = @sizeOf(u64);
     if (std.c.sysctlbyname("hw.pagesize", &size, &len2, null, 0) != 0) size = alignment;
-    return @as(u64, pages) * size;
+    return (@as(u64, pages) + speculative) * size;
 }
 
-/// Wait (up to `limit_ms`) while free memory is under the floor, so the kernel reclaims before the next read commits pages.
+/// Wait under memory pressure and a low free-page floor; normal pressure permits the kernel to reclaim file cache.
 pub fn waitForRoom(limit_ms: u32) void {
     const want = floor();
     var waited: u32 = 0;
     while (waited < limit_ms and freeBytes() < want) : (waited += 2) {
+        var pressure: c_int = 0;
+        var pressure_len: usize = @sizeOf(c_int);
+        if (std.c.sysctlbyname("kern.memorystatus_vm_pressure_level", &pressure, &pressure_len, null, 0) == 0 and
+            pressure == 1) return; // DISPATCH_MEMORYPRESSURE_NORMAL; cached pages are reclaimable, not exhausted RAM.
         const ts: std.c.timespec = .{ .sec = 0, .nsec = 2 * std.time.ns_per_ms };
         _ = std.c.nanosleep(&ts, null);
     }
