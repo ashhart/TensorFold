@@ -61,6 +61,14 @@ pub fn step(h: *LaneHost) void {
     _ = rows.write.step(h.cache.?.disk.?);
 }
 
+/// The engine loop's idle turn (under the lock): when `ready`, the lock let go and one block written; true if so.
+pub fn idle(h: *LaneHost) bool {
+    if (!ready(h)) return false;
+    h.unlock();
+    step(h);
+    return true;
+}
+
 /// The engine thread's last act on a stop: what waits is written under `stop_ns`, and --learn's half-made cut settled.
 pub fn flush(h: *LaneHost) void {
     const store = h.cache orelse return;
