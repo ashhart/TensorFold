@@ -14,7 +14,7 @@ pub const Grow = struct {
     f: *const fn (ctx: *anyopaque, saved: *anyopaque, extra: u64) bool,
 };
 
-/// The prompt cache's ear: a kept state went stale (never restorable), so its entry is dropped.
+/// A stale state stops serving lookups; the callback must defer destruction and peer commands to a safe boundary.
 pub const Expire = struct {
     ctx: *anyopaque,
     f: *const fn (ctx: *anyopaque, saved: *anyopaque) void,
@@ -57,7 +57,7 @@ pub fn usable(sl: *const Slots, snap: *const snapshot.Snap) bool {
     return sl.snaps.get(snap.id) == snap and !snap.stale;
 }
 
-/// A state went stale (its rows are gone): the prompt cache drops its entry, so no turn serves it again.
+/// A state lost its rows: notify without freeing it or sending commands inside the backend operation.
 pub fn wentStale(sl: *Slots, snap: *snapshot.Snap) void {
     if (sl.expire) |x| x.f(x.ctx, snap);
 }

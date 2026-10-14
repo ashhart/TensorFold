@@ -1,4 +1,5 @@
 const std = @import("std");
+const glm_expiry_build = @import("zig/build/glm_expiry.zig");
 const builtin = @import("builtin");
 const cuda_build = @import("zig/build/cuda.zig");
 const dist_build = @import("zig/build/dist.zig");
@@ -179,6 +180,7 @@ pub fn build(b: *std.Build) void {
     const disk_run = b.addRunArtifact(disk_cpu);
     test_step.dependOn(&disk_run.step);
     b.step("test-learn-recovery", "CPU learned-state recovery and admission tests").dependOn(&disk_run.step);
+    glm_expiry_build.steps(b, test_step, lanes_cpu);
     const warning = b.addExecutable(.{ .name = "learned-warning-test", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/learned_warning_test.zig"),
         .target = b.graph.host,
