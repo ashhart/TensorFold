@@ -65,12 +65,27 @@ pub const Widths = struct {
         return try w.q.width(key);
     }
 
+    /// Whether a device kernel reads `width`, for index.zig's walk.
+    pub fn reads(_: *const Widths, width: Width) bool {
+        return launched(width);
+    }
+
     /// The module's stored matrix checked against its own width, never one inferred from the shapes.
     pub fn shaped(w: *const Widths, path: []const u8, weight: st.Entry, scales: st.Entry, biases: st.Entry) !affine.Shape {
         const width = (try w.of(path)) orelse return error.UnquantizedAffineTensor;
         return affine.matrix(weight, scales, biases, try affine.Spec.init(width.bits, width.group));
     }
 };
+
+/// A module's width: the reader's table when `c.widths` is set, else the config's own entries under core's keys.
+pub fn quantization(c: *const config.Config, path: []const u8) !?affine.Spec {
+    if (c.widths) |table| {
+        const w: *const Widths = @ptrCast(@alignCast(table));
+        const width = (try w.of(path)) orelse return null;
+        return try affine.Spec.init(width.bits, width.group);
+    }
+    return c.declared(path, keys.canonical);
+}
 
 test {
     _ = @import("widths_test.zig");
