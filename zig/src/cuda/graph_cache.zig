@@ -31,6 +31,14 @@ pub const Settings = struct {
     max: u32 = 48, // graphs held at most
     min_keep: u32 = 8, // under the memory floor the cache evicts down to this many, then stops capturing
     hold: bool = false, // under the floor a miss runs eagerly with no eviction: held graphs cost next to no memory
+
+    /// These settings under the operator's TF_GRAPH_CACHE value: `0` or `off` runs every step eagerly; else unchanged.
+    pub fn operator(s: Settings, value: ?[]const u8) Settings {
+        var out = s;
+        const v = value orelse return out;
+        if (std.mem.eql(u8, v, "0") or std.ascii.eqlIgnoreCase(v, "off")) out.on = false;
+        return out;
+    }
 };
 
 pub const Outcome = enum { replayed, captured, eager };
@@ -52,8 +60,10 @@ pub fn Cache(comptime Key: type) type {
         failed: bool = false, // a capture failed on some rank: eager from here on
         stats: struct { replayed: u64 = 0, captured: u64 = 0, eager: u64 = 0, evicted: u64 = 0, dropped: u64 = 0, floor_hits: u64 = 0 } = .{},
 
+        /// The cache with `settings`, unless TF_GRAPH_CACHE turns it off (set it alike on every rank, as `settings`).
         pub fn init(gpa: std.mem.Allocator, engine: Engine, settings: Settings) Self {
-            var s = settings;
+            var s = settings.operator(if (std.c.getenv("TF_GRAPH_CACHE")) |v| std.mem.span(v) else null);
+            if (!quiet and settings.on and !s.on) std.log.info("graph cache: off (TF_GRAPH_CACHE), every step eager", .{});
             s.min_keep = @min(s.min_keep, s.max); // the floor never holds more than the configured max
             return .{ .gpa = gpa, .engine = engine, .settings = s, .cap = s.max };
         }
@@ -389,6 +399,19 @@ test "graph cache: off runs every step eagerly" {
     var c = Cache(u32).init(std.testing.allocator, f.engine(), .{ .on = false });
     defer c.deinit();
     try std.testing.expectEqual(Outcome.eager, try c.run(1, no_stream, 7, r.body()));
+    try std.testing.expectEqual(@as(u32, 0), f.captures);
+}
+
+test "graph cache: TF_GRAPH_CACHE=0 or off turns a family's cache off without a rebuild; anything else leaves it" {
+    const on: Settings = .{};
+    for ([_][]const u8{ "0", "off", "OFF" }) |v| try std.testing.expect(!on.operator(v).on);
+    for ([_]?[]const u8{ null, "1", "on", "" }) |v| try std.testing.expect(on.operator(v).on);
+    try std.testing.expect(!(Settings{ .on = false }).operator("1").on); // the operator only turns a cache off
+    var f: Fake = .{};
+    var r: Ran = .{};
+    var c = Cache(u32).init(std.testing.allocator, f.engine(), on.operator("off"));
+    defer c.deinit();
+    for (0..3) |_| try std.testing.expectEqual(Outcome.eager, try c.run(1, no_stream, 7, r.body()));
     try std.testing.expectEqual(@as(u32, 0), f.captures);
 }
 
