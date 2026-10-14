@@ -25,7 +25,7 @@ live diffs, and per‑action approval.
 - **Native chrome.** Frameless window with inset traffic lights, draggable titlebar, a task
   sidebar grouped by time, and a project‑grouped home launcher.
 - **Local‑first.** Settings and conversations are stored only on your machine.
-- **Local AI workspace.** Open Models for the installed library, downloads, Workers and the local API, with engine state, memory requirements and context visible together. Chip and memory details guide a recommendation after compatibility checks; download it, then Start chatting loads it and completes first-run onboarding. Decode/prefill speed and first-token time show the latest completed Studio request, using reported engine timings or measured stream usage; unknown values stay blank.
+- **Local AI workspace.** Open Models for the installed library, downloads, Workers and the local API, with engine state, memory requirements and context visible together. Chip and memory details guide a recommendation after compatibility checks; download it, then Start chatting loads it; first-run setup finishes only after the welcome guide. Decode/prefill speed and first-token time show the latest completed Studio request, using reported engine timings or measured stream usage; unknown values stay blank.
 - **Independent local workers.** Choose a local Git project and the loaded TensorFold model, then give each task a verified worktree and branch. Workers remain visible while you use the app, with approval, Stop, recovery and Changes review actions; a document-task preset supports repository documentation work.
 - **Use the local API.** Loading a model starts its authenticated loopback endpoint. The API tab copies the base URL or an authenticated streaming curl example on request; the port and key change when the engine restarts, and the key is excluded from normal snapshots and events.
 
@@ -86,6 +86,77 @@ npm run verify    # non-build preflight: tests + typecheck + git diff checks
 
 `npm test` includes guards that fail when a `*.test.ts`, `*.test.tsx`, or `*.test.mjs` file is not
 wired into the main test suite, or when source/docs contain non-placeholder email addresses.
+
+### Phone control from chat
+
+Open **Phone** beside the model picker in a chat, refresh devices and connect your phone.
+Android works through installed Android Platform Tools over USB or paired Wireless debugging;
+iPhone uses Apple's Wi-Fi Mirroring or your own signed WebDriverAgent over a loopback USB
+forward or private Wi-Fi endpoint. TensorFold does not bundle, copy or install phone-harness.
+
+Choose **Allow this chat** to give one local conversation access for up to 15 minutes.
+That conversation then stays on local models with Cortheon and public web research off,
+including after disconnection, so derived phone text cannot silently move to a cloud route.
+Screen previews stay in memory and are captured only on request; tool output contains bounded
+accessible/OCR labels and bounds rather than screenshot images. Device/app text is untrusted.
+Every model input action asks for approval, checks the complete live screen before input,
+and reads the result; Stop cancels work and clears its grant and preview. Chat control pauses
+after 40 dispatched actions or three unchanged results. Protected, unlabelled or committing
+steps need manual takeover, and Android typing supports printable ASCII only.
+
+See [phone connection and privacy details](docs/phone-control.md) for platform prerequisites,
+known limits and the distinction between implemented adapters and physical-device qualification.
+
+### First launch and desktop modes
+
+First-run setup offers **Minimal** or **Full**, then model setup and a short guide.
+Minimal has a native menu-bar icon, server controls, downloads and authenticated localhost API
+connection details; Full opens Chat, Code and Assistant. Switch in **Settings → App & onboarding**
+or reopen the guide there. Setup does not download or start a model without a deliberate action.
+Closing the Minimal window keeps the server running; Quit stops it, including a safe wait for
+an active learning checkpoint save. Relaunching Minimal restores its menu-bar controls without
+automatically allocating model memory.
+
+**Settings → Model folders** optionally scans the configured and default Hugging Face cache or
+folders chosen in the native picker. Scans stay local, are bounded and cancellable, and check
+architecture, quantization, required shards and memory before enabling **Load**. Supported models
+load from their existing location. Removing a search folder unlinks its models without deleting
+files or interrupting an already running API; moved folders must be selected again. Checkpoints
+borrowed from another cache are read-only in TensorFold, and unsupported formats remain labelled.
+The API connection page copies the URL, generated session key or authenticated example only on
+request; restart the model and copy fresh details when the port and key change.
+
+### Local engine modes and voice
+
+With the built-in TensorFold model selected, **AI settings** beside the chat model picker opens
+Cortheon and Living Weights controls. Cortheon adds a reasoning plan and optional public-web
+research to the whole engine, including other API clients; research can send queries derived
+from the conversation outside this Mac. Changing modes restarts a loaded model and is blocked
+while managed local work or a learning checkpoint save is active.
+
+**Settings → Voice → Kokoro** downloads a pinned, checksum-verified 92 MB speech model;
+subsequent playback runs offline in a managed native CPU worker. This version offers American
+English voices, preview/Stop, retry/cancel and removal of the managed download. No API key,
+Python installation or separately running speech server is required. Its bundled English
+phonemizer uses the MIT HeadTTS implementation and BSD CMU dictionary; it does not ship or run
+the upstream eSpeak phonemizer, and required notices ship with the app.
+
+**Local AI → Learning** shows the experimental Living Weights learner and its engine-reported
+fact graph, recall checks and neuron/layer details. Only the exact Nemotron 3.5 Lightning MLX
+4-bit checkpoint on Apple Silicon is supported. Enabling it prepares an independent private
+copy; lessons are submitted explicitly, never taken automatically from chat history. Learned
+facts persist when teaching is turned off and across restarts; there is no per-fact undo.
+The shared original checkpoint stays untouched. The private checkpoint and graph are local
+files without app-level encryption. API credential sharing pauses while learning is enabled
+so external clients cannot bypass the managed checkpoint-save protections; turn learning off
+to share the ordinary chat API again. A graceful Quit waits for any lesson to stop and save.
+The owner-confirmed **Erase local memory** operation also removes the complete private learning
+copy, graph and lesson history, while preserving the original downloaded checkpoint.
+
+**Plugins** separates searchable built-in tools, installed registrations, connections and
+advanced MCP configuration. Worker-required tools and configured trust records are labelled
+explicitly; configuring a connection opens its real setup flow. Registered plugins still use
+the existing execution/trust policy, and configured permissions are not a sandbox guarantee.
 
 ### Build
 

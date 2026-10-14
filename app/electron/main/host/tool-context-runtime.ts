@@ -3,6 +3,11 @@ import { runAgent } from '../../agent/loop'
 import { assertProviderEndpoint } from '../../agent/security'
 import { runControllerAction } from '../../agent/controller'
 import { runComputerUse } from './computer-use-host'
+import { phoneHost } from './phone-host'
+import { engineService } from './engine-runtime'
+import { isExternalProvider } from '../../../shared/provider-trust'
+import { stripIncognitoThreads } from '../../agent/incognito'
+import type { PhoneToolInput } from '../../agent/types'
 import type { ComputerUseInput } from '../../agent/computer-use/actions'
 import {
   appendSubAgentMessage,
@@ -196,6 +201,7 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
   }
 
   async function launchThreadSubAgent(thread: Thread, provider: Provider, model: string, input: { task: string; name?: string | null; model?: string | null; providerId?: string | null; accountId?: string | null; agent?: string | null; background?: boolean }, signal: AbortSignal) {
+    if (thread.incognito) throw new Error('Incognito cannot launch a persistent sub-agent; use an ordinary saved task.')
     const preset = normalizeSubAgentPreset(input.agent)
     const task = applySubAgentPreset(preset, String(input.task || '').trim())
     if (!String(input.task || '').trim()) throw new Error('Sub-agent task is required.')
@@ -325,19 +331,24 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
       localScripts: store.settings.capabilities?.localScripts ?? [],
       packagedPlugins: store.settings.capabilities?.packagedPlugins ?? [],
       allowSandboxNetwork: store.settings.allowTaskNetwork ?? false,
-      writeManagedOutput: managedOutputs.write,
+      writeManagedOutput: (ref: string, content: string) => {
+        if (run?.thread?.incognito) throw new Error('Incognito does not save automatic tool-output files; this output remains bounded in the current conversation.')
+        return managedOutputs.write(ref, content)
+      },
       readManagedOutput: managedOutputs.read,
       emailSettings: store.settings.email,
       slackSettings: store.settings.slack,
       calendarSettings: store.settings.calendar,
       documentSettings: store.settings.documents,
       browserSettings: store.settings.browser,
-      threads: store.threads,
-      listSubAgents: () => store.subAgents,
+      threads: stripIncognitoThreads(store.threads),
+      listSubAgents: () => store.subAgents.filter((agent) => !store.threads.some((thread) => thread.id === agent.threadId && thread.incognito)),
       currentSubAgentId: run?.subAgentId,
       sendSubAgentMessage: (input: import('../../agent/tools').SubAgentMailboxSendInput) => {
+        if (run?.thread?.incognito) throw new Error('Incognito cannot write a persistent sub-agent mailbox.')
         const target = store.subAgents.find((agent) => agent.id === input.agentId)
         if (!target) throw new Error(`Sub-agent "${input.agentId}" was not found.`)
+        if (store.threads.some((thread) => thread.id === target.threadId && thread.incognito)) throw new Error('Private sub-agent history is unavailable.')
         if (run?.subAgentId) {
           if (target.id !== run.subAgentId) throw new Error('A child sub-agent may only write to its own mailbox.')
         } else if (!run?.thread || target.threadId !== run.thread.id) {
@@ -357,6 +368,7 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
       readSubAgentMessages: (input: import('../../agent/tools').SubAgentMailboxReadInput) => {
         const target = store.subAgents.find((agent) => agent.id === input.agentId)
         if (!target) throw new Error(`Sub-agent "${input.agentId}" was not found.`)
+        if (store.threads.some((thread) => thread.id === target.threadId && thread.incognito)) throw new Error('Private sub-agent history is unavailable.')
         if (run?.subAgentId) {
           if (target.id !== run.subAgentId) throw new Error('A child sub-agent may only read its own mailbox.')
         } else if (!run?.thread || target.threadId !== run.thread.id) {
@@ -392,6 +404,7 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
       // First-class artifact registration (VST-011): persisted with run provenance; the
       // run receipt counts save_artifact tool items, so registration IS receipt-visible.
       registerArtifact: (input: CreateArtifactInput) => {
+        if (run?.thread?.incognito) throw new Error('Incognito does not retain artifact content or metadata in TensorFold. Save an explicitly requested output to the workspace instead.')
         const record = createArtifactRecord({
           ...input,
           provenance: {
@@ -408,6 +421,7 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
       // The agent proposes a Skill/Command; it's filed (deduped) and pushed to the
       // renderer for review. Nothing is created until the user accepts.
       fileSuggestion: (input: SuggestionInput) => {
+        if (run?.thread?.incognito) throw new Error('Incognito does not save learned skill or command suggestions.')
         const { added, list } = addSuggestion(store.suggestions, input, { skills: store.skills, commands: store.commands })
         if (added) {
           store.suggestions = list
@@ -422,6 +436,16 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
       runBrowserAutomation,
       runControllerAction: (input: ControllerActionInput) => runControllerAction(store.settings.controller, input, 'TensorFold'),
       runComputerUse: (input: ComputerUseInput) => runComputerUse(input, { threadId: run?.thread?.id ?? null, signal: run?.signal }, deps.cancelThreadRun),
+      phoneControlAvailable: !!run?.thread && !!run.provider && !isExternalProvider(run.provider) && run.thread.kind === 'chat' && !run.thread.orchestratorHostId && workspace?.kind !== 'ssh' && !run.subAgentId && phoneHost()?.service.isGranted(run.thread.id) === true,
+      phoneLocalOnly: run?.thread?.phoneLocalOnly === true,
+      phonePrivacyGuard: () => !run?.provider || isExternalProvider(run.provider) || run.provider.id === 'tensorfold' && engineService()?.hasExternalResearchEnabled()
+        ? 'This phone conversation stays local; choose a model running on this Mac and turn Cortheon off before continuing.' : null,
+      runPhoneControl: async (input: PhoneToolInput) => {
+        if (!run?.thread || !run.provider || isExternalProvider(run.provider) || run.thread.orchestratorHostId || workspace?.kind === 'ssh' || run.subAgentId) return { ok: false, title: 'Phone control', output: 'Phone control requires its explicitly allowed local chat; remote and external model routes cannot access the phone.' }
+        const service = phoneHost()?.service
+        if (!service) return { ok: false, title: 'Phone control', output: 'Phone control is unavailable in this process.' }
+        return service.tool(input, run.thread.id, run.signal)
+      },
       ...(run?.thread && run.provider && run.model && run.signal
         ? { launchSubAgent: (input: { task: string; name?: string | null; model?: string | null; providerId?: string | null; accountId?: string | null; background?: boolean }) => launchThreadSubAgent(run.thread!, run.provider!, run.model!, input, run.signal!) }
         : {}),

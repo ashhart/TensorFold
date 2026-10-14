@@ -6,14 +6,17 @@ import path from 'node:path'
 export interface EnginePreferences {
   // Serve with --cortheon when the bundled engine offers it.
   cortheon: boolean
+  learningEnabled: boolean
+  learningModel: string | null
 }
 
-const DEFAULTS: EnginePreferences = { cortheon: false }
+const DEFAULTS: EnginePreferences = { cortheon: false, learningEnabled: false, learningModel: null }
 
 function readPreferences(file: string): EnginePreferences {
   try {
     const doc = JSON.parse(readFileSync(file, 'utf8'))
-    return { cortheon: doc?.cortheon === true }
+    const learningModel = doc?.learningModel === 'TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit' ? doc.learningModel : null
+    return { cortheon: doc?.cortheon === true, learningEnabled: doc?.learningEnabled === true && learningModel != null, learningModel }
   } catch {
     return { ...DEFAULTS }
   }

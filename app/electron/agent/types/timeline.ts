@@ -94,6 +94,7 @@ export type TimelineKind = 'user' | 'cue' | 'assistant' | 'reasoning' | 'tool' |
 export type ToolState = 'pending' | 'awaiting' | 'running' | 'ok' | 'error' | 'denied'
 
 export interface TimelineItem {
+  question?: import('./user-question').UserQuestion
   id: string
   kind: TimelineKind
   text?: string // user / assistant markdown, reasoning, error
@@ -300,6 +301,9 @@ export interface AgentRunContractSnapshot {
 }
 
 export interface Thread {
+  bot?: import('./settings').BotThreadConfig
+  // Once phone access is granted, its derived conversation stays on a local model.
+  phoneLocalOnly?: boolean
   id: string
   title: string
   kind: 'task' | 'chat'

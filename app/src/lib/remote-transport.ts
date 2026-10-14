@@ -635,9 +635,10 @@ export function createRemoteBrowserApi(config: RemoteTransportConfig): TensorFol
     getTickets: async () => { await ensureSnapshot(); return state.tickets },
     getJobs: async () => { await ensureSnapshot(); return state.jobs },
     getAutomations: async () => { await ensureSnapshot(); return state.automations },
-    createThread: (cwd, kind = 'task', projectId = null, commandId) => req<Thread>('/v1/threads', {
-      method: 'POST', body: JSON.stringify({ cwd: cwd ?? '', kind, projectId: projectId ?? null, ...(commandId ? { commandId } : {}) }),
-    }),
+    createThread: (cwd, kind = 'task', projectId = null, commandId, incognito = false) => {
+      if (incognito) return Promise.reject(new Error('Incognito tasks are available in the local desktop app.'))
+      return req<Thread>('/v1/threads', { method: 'POST', body: JSON.stringify({ cwd: cwd ?? '', kind, projectId: projectId ?? null, ...(commandId ? { commandId } : {}) }) })
+    },
     startRun: (payload: StartRunPayload) => req<{ runId: string }>(`/v1/threads/${encodeURIComponent(payload.threadId)}/start`, {
       method: 'POST',
       body: JSON.stringify({ userText: payload.userText, attachments: payload.attachments, sourceThreadKey: payload.sourceThreadKey }),

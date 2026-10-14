@@ -71,6 +71,7 @@ function Panel({ workspace, voice, incognito, onUseSkill, modes, close }: Compos
       )}
       <Row icon="mic" label={voice.dictating ? 'Stop voice input' : 'Voice input'} value={voice.available ? null : 'Off in Settings'} disabled={!voice.available} onClick={() => { voice.onToggle(); close() }} />
       {incognito && <Row icon="incognito" label="Incognito" value={incognito.on ? null : 'Not saved'} active={incognito.on} onClick={() => incognito.onToggle()} />}
+      {incognito?.on && <p className="px-2.5 pb-2 text-[12px] leading-relaxed text-ink-3">Chat history stays in TensorFold memory while the app is open; providers and tools you use may retain their own records.</p>}
       <Row icon="spark" label="Use a skill" onClick={() => { close(); onUseSkill() }} />
       {modes && (
         <>

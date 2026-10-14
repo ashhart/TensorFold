@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import clsx from 'clsx'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { remarkCitationAutolinks } from '../../lib/markdown-citations'
 import { Icon } from '../../lib/icons'
 import { useStore } from '../../lib/store'
 import { mdComponents } from '../../lib/highlight'
@@ -24,12 +25,14 @@ function useNow(active: boolean): number {
 }
 
 // One collapsible row per turn: "Worked for 12s · 4 steps", or live "Working · 12s · Editing App.tsx".
-export function TurnWorkRow({ turn, status, defaultOpen = false }: {
+export function TurnWorkRow({ turn, status, defaultOpen = false, reveal = 0 }: {
   turn: TurnSummary
   status?: string
   defaultOpen?: boolean
+  reveal?: number
 }) {
   const [open, setOpen] = useState(defaultOpen)
+  useEffect(() => { if (reveal > 0) setOpen(true) }, [reveal])
   const now = useNow(turn.running)
   const label = workRowLabel(turn, { now, status })
   const hasDetails = turn.work.length > 0
@@ -66,7 +69,7 @@ function WorkItems({ items, running, status }: { items: TimelineItem[]; running:
         if (item.kind === 'reasoning') return <Reasoning key={item.id} text={item.text || ''} active={running && status === 'thinking' && item.id === lastReasoningId} forceExpanded={!collapseReasoningDefault} />
         if (item.kind === 'assistant') return (
           <div key={item.id} className="prose-tf text-[13px] leading-5 text-ink-2">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{item.text || ''}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm, remarkCitationAutolinks]} components={mdComponents}>{item.text || ''}</ReactMarkdown>
           </div>
         )
         if (item.kind === 'notice') return <WorkNote key={item.id} item={item} />

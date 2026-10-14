@@ -16,7 +16,7 @@ import { appendAttachments, filesToAttachments } from '../lib/attachments'
 import { allowedProviders, projectDefaultModel, violatesPolicy } from '../lib/policy'
 import { resolveExecutionTarget } from '../lib/execution-target'
 import { resolveProviderModel } from '../lib/provider-accounts'
-import { resolveSurfaceModel } from '../lib/assistant-model'
+import { resolveSurfaceModel, settingsForSurfaceModelPick } from '../lib/assistant-model'
 import { BUILTIN_CAPABILITIES, capabilityInstruction, capabilityToken, type BuiltInCapability } from '../lib/capabilities'
 import { dictationSupported, startDictation } from '../lib/voice'
 import { providerUsageSummary } from '../lib/provider-usage'
@@ -29,6 +29,9 @@ import { SkillCommandPopover } from './composer/SkillCommandPopover'
 import { SteerQueueList, type Steer } from './composer/SteerQueueList'
 import { ControllerModal } from './composer/ControllerModal'
 import { ApprovalMenu } from './composer/ApprovalMenu'
+import { LocalEngineControls } from './composer/LocalEngineControls'
+import { PhoneButton } from './phone/PhoneButton'
+import { PhoneChatPanel } from './phone/PhoneChatPanel'
 import { ModelPickerMenu } from './composer/ModelPickerMenu'
 import { useEngineContextTokens } from '../lib/engine'
 import { ModelMenuSettings } from './composer/ModelMenuSettings'
@@ -80,6 +83,9 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
   const [homeProject, setHomeProject] = useState<string | null>(null)
 
   const [text, setText] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const submittingRef = useRef(false)
+  const [phoneOpen, setPhoneOpen] = useState(false)
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [usageSnapshot, setUsageSnapshot] = useState<TokenUsageSnapshot | null>(null)
   const [providerStatus, setProviderStatus] = useState<PersistedProviderStatus | null>(null)
@@ -126,7 +132,7 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
     : mode !== 'thread' && executionDecision.unavailableReason
       ? 'Orchestrator unavailable'
       : null
-  const localOnly = !!policyProject?.localOnly
+  const localOnly = !!policyProject?.localOnly || !!thread?.phoneLocalOnly
   const pickerProviders = allowedProviders(settings.providers, policyProject)
   const [remoteBrowseOpen, setRemoteBrowseOpen] = useState(false)
   const [remoteBrowse, setRemoteBrowse] = useState<RemoteDirectoryListResult | null>(null)
@@ -137,12 +143,12 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
   // the code-surface route (Settings → Models → Coding tasks model), which folds back to the
   // globally-active route when no override is configured. Existing threads keep their own route.
   const codeSurface = resolveSurfaceModel(settings, 'code')
-  const rawProviderId = mode === 'thread' ? thread?.providerId ?? settings.activeProviderId : codeSurface.providerId
-  let provider = settings.providers.find((p) => p.id === rawProviderId) || settings.providers[0]
-  let providerAccountId = mode === 'thread'
+  const rawProviderId = thread?.bot?.providerId ?? (mode === 'thread' ? thread?.providerId ?? settings.activeProviderId : codeSurface.providerId)
+  let provider = settings.providers.find((p) => p.id === rawProviderId) ?? (thread?.bot ? undefined : settings.providers[0])
+  let providerAccountId = thread?.bot ? thread.bot.providerAccountId : mode === 'thread'
     ? (thread && Object.prototype.hasOwnProperty.call(thread, 'providerAccountId') ? (thread.providerAccountId ?? null) : (settings.activeProviderAccountId ?? provider?.defaultAccountId ?? null))
     : (codeSurface.providerAccountId ?? provider?.defaultAccountId ?? null)
-  let model = mode === 'thread' ? thread?.model ?? settings.activeModel : codeSurface.model
+  let model = thread?.bot?.model ?? (mode === 'thread' ? thread?.model ?? settings.activeModel : codeSurface.model)
   // Enforce the project policy: under local-only, fall back to the project's
   // default (or first local) instead of an out-of-policy cloud model.
   if (violatesPolicy(policyProject, provider)) {
@@ -154,27 +160,27 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
 
   // Point-of-use readiness: is there a usable model? Surfaces "connect a model" /
   // "authorize" guidance instead of letting a send fail with a cryptic error.
+  model = provider && !thread?.bot ? (resolveProviderModel(provider, providerAccountId, model) ?? model) : model
   const providerKey = provider?.id ?? ''
   useEffect(() => {
     let live = true
-    api.getModelReadiness({ providerId: provider?.id ?? null, accountId: providerAccountId })
+    api.getModelReadiness({ providerId: provider?.id ?? null, accountId: providerAccountId, model })
       .then((r) => { if (live) setReadiness(r) })
       .catch(() => { if (live) setReadiness(null) })
     return () => { live = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [providerKey, providerAccountId, settings.providers])
+  }, [providerKey, providerAccountId, model, settings.providers])
 
   const authorizeCli = async () => {
     if (!provider) return
     setAuthBusy(true)
     try {
       await api.loginCliProvider({ providerId: provider.id, accountId: providerAccountId })
-      setReadiness(await api.getModelReadiness({ providerId: provider.id, accountId: providerAccountId }))
+      setReadiness(await api.getModelReadiness({ providerId: provider.id, accountId: providerAccountId, model }))
     } finally {
       setAuthBusy(false)
     }
   }
-  model = provider ? (resolveProviderModel(provider, providerAccountId, model) ?? model) : model
   const usageSummary = provider ? providerUsageSummary(provider, providerAccountId, model, usageSnapshot, modelRouterSnapshot) : null
   // Real rate-limit windows for the active provider/account (VST-037): session/weekly pace + ETA.
   const rateLimitStatus = provider ? providerStatusViewFor(providerStatus, provider.id, providerAccountId) : null
@@ -197,7 +203,9 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
   const canConfigureFastMode = provider?.transport === 'codex-cli' && providerSupportsFastMode(provider, model)
   const workspace = mode === 'thread' && thread ? effectiveThreadWorkspace(thread, policyProject) : homeWorkspace
   const projectRoot = policyProject?.workspace?.kind === 'ssh' ? policyProject.workspace.path : (policyProject?.cwd || policyProject?.workspace?.path || '')
-  const workCwd = mode === 'thread' && thread ? effectiveThreadCwd(thread, policyProject) : (workspace?.kind === 'ssh' ? workspace.path : (cwd || homeWorkspace?.path || projectRoot || ''))
+  // /workspace belongs to the guest; host Git/file pickers must never resolve a
+  // coincidentally matching host directory for an isolated bot chat.
+  const workCwd = thread?.bot?.executionTarget === 'vm' ? '' : mode === 'thread' && thread ? effectiveThreadCwd(thread, policyProject) : (workspace?.kind === 'ssh' ? workspace.path : (cwd || homeWorkspace?.path || projectRoot || ''))
   const selectLocalWorkspace = () => { if (mode === 'thread' && thread) setThreadWorkspace(thread.id, null); else setHomeWorkspace(null) }
   const selectHostWorkspace = (host: SshHost, remotePath: string) => {
     const ws: WorkspaceLocation = { kind: 'ssh', hostId: host.id, path: remotePath }
@@ -208,6 +216,8 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
 
   const st = thread ? status[thread.id] : undefined
   const busy = st != null && ['thinking', 'streaming', 'tool', 'awaiting'].includes(st)
+  const botPreset = thread?.bot ? settings.agentPresets.find((preset) => preset.id === thread.bot!.presetId) : null
+  const botBlocked = !!thread?.bot && (!botPreset || !!botPreset.paused || !!botPreset.archivedAt)
   const isChat = mode === 'thread' && thread?.kind === 'chat'
 
   // Drain the run queue: when a run finishes, fire the next staged message as a
@@ -216,7 +226,7 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
   // serialize one run at a time.
   const prevBusy = useRef(false)
   useEffect(() => {
-    if (prevBusy.current && !busy && mode === 'thread' && thread && queuedRef.current.length) {
+    if (prevBusy.current && !busy && st !== 'error' && !botBlocked && mode === 'thread' && thread && queuedRef.current.length) {
       const next = queuedRef.current.find((x) => x.status === 'queued')
       if (next) {
         setQueued((q) => q.filter((x) => x.id !== next.id))
@@ -224,7 +234,7 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
       }
     }
     prevBusy.current = busy
-  }, [busy, thread?.id, mode]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [busy, st, botBlocked, thread?.id, mode]) // eslint-disable-line react-hooks/exhaustive-deps
   // Stale queue entries make no sense on a different thread.
   useEffect(() => { setQueued([]) }, [thread?.id])
 
@@ -281,13 +291,14 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
     const workspaceKey = `${workspace?.kind ?? 'local'}:${workspace?.kind === 'ssh' ? workspace.hostId : ''}:${workCwd}`
     if (filesCwd.current === workspaceKey && files.length) return
     filesCwd.current = workspaceKey
+    if (!workCwd) { setFiles([]); return }
     if (workCwd) api.listFiles(workCwd, workspace)
       .then((next) => { if (filesCwd.current === workspaceKey) setFiles(next) })
       .catch(() => { if (filesCwd.current === workspaceKey) setFiles([]) })
   }
 
   const items = useMemo(() => {
-    if (!mention) return []
+    if (!mention || thread?.bot?.executionTarget === 'vm') return []
     const q = mention.query.toLowerCase()
     const score = (f: string) => {
       const base = (f.split('/').pop() || '').toLowerCase()
@@ -301,14 +312,14 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
       .filter((f) => !q || f.toLowerCase().includes(q))
       .sort((a, b) => score(a) - score(b) || a.length - b.length)
       .slice(0, 8)
-  }, [mention, files])
+  }, [mention, files, thread?.bot?.executionTarget])
   const capabilityItems = useMemo(() => {
-    if (!mention) return []
+    if (!mention || thread?.bot?.executionTarget === 'vm') return []
     const q = mention.query.toLowerCase()
     return BUILTIN_CAPABILITIES
       .filter((capability) => !q || capability.name.toLowerCase().includes(q) || capability.mention.includes(q) || capability.description.toLowerCase().includes(q))
       .slice(0, 8)
-  }, [mention])
+  }, [mention, thread?.bot?.executionTarget])
   useEffect(() => {
     const total = capabilityItems.length + items.length
     if (total > 0 && mIdx >= total) setMIdx(0)
@@ -316,12 +327,12 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
 
   // Built-in slash commands (thread-scoped) shown alongside user commands.
   const builtins = useMemo<{ name: string; description: string; argHint?: string }[]>(
-    () => (mode === 'thread'
+    () => (mode === 'thread' && !thread?.bot
       ? [{ name: 'compact', description: 'Summarize the conversation to reclaim context' },
          { name: 'goal', description: 'Set a goal the agent verifies against', argHint: '<text…>' },
          { name: 'computer-use', description: 'Let the agent operate Mac apps for this task, with approval per app', argHint: '<task… | stop>' }]
       : []),
-    [mode],
+    [mode, thread?.bot],
   )
   const pickItems = useMemo<{ name: string; description?: string; argHint?: string }[]>(() => {
     if (!pick) return []
@@ -340,7 +351,7 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
   useEffect(() => { taRef.current?.focus() }, [mode, thread?.id])
   // Re-bind a thread when policy or provider model availability makes its stored model stale.
   useEffect(() => {
-    if (mode === 'thread' && thread && provider && model && (
+    if (mode === 'thread' && thread && !thread.bot && provider && model && (
       (localOnly && violatesPolicy(policyProject, settings.providers.find((p) => p.id === thread.providerId))) ||
       thread.providerId !== provider.id ||
       (thread.providerAccountId ?? null) !== (providerAccountId ?? null) ||
@@ -368,14 +379,14 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
     taRef.current?.focus()
   }, [pendingMention?.n]) // eslint-disable-line
 
-  const pickModel = (p: Provider, m: string, accountId: string | null = null) => {
+  const pickModel = async (p: Provider, m: string, accountId: string | null = null) => {
     if (mode === 'thread' && thread) {
       // Inline "Model changed to X" notice — only on an existing thread, and only when
       // the pick is an actual change. Home / first selection stays notice-free.
       const changed = !(p.id === provider?.id && m === model && (accountId ?? null) === (providerAccountId ?? null))
-      void setThreadProvider(thread.id, p.id, m, accountId).catch(() => {})
-      if (changed) void noteModelChange(thread.id, p.id, m, accountId).catch(() => {})
-    } else void saveSettings({ ...settings, activeProviderId: p.id, activeProviderAccountId: accountId, activeModel: m })
+      await setThreadProvider(thread.id, p.id, m, accountId)
+      if (changed) await noteModelChange(thread.id, p.id, m, accountId).catch(() => {})
+    } else await saveSettings(settingsForSurfaceModelPick(useStore.getState().settings ?? settings, 'code', { providerId: p.id, providerAccountId: accountId, model: m }), { silent: true })
     setRecentModels(pushRecentModel({ providerId: p.id, accountId, model: m }))
   }
   // One-click recent-model chips. Refresh from storage on mount so other threads'
@@ -677,24 +688,42 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
     }
     return out
   }
-  const dispatch = (body: string) => {
+  const dispatch = async (body: string) => {
+    if (submittingRef.current) return
+    if (!provider) { useStore.setState({ notice: { kind: 'error', message: 'This model is unavailable. Check Models or this bot’s configuration; your draft is still here.' } }); return }
+    submittingRef.current = true
+    setSubmitting(true)
+    const submittedText = text
+    const submittedAttachments = attachments
     const atts = attachments.length ? attachments : undefined
-    if (mode === 'home') {
-      const launchCwd = homeWorkspace?.kind === 'ssh' ? homeWorkspace.path : cwd || homeWorkspace?.path || projectRoot || ''
-      if (!launchCwd) {
-        if (isOrchestratorProject) void loadRemoteProjectDir(projectRoot)
-        else chooseDir()
-        return
+    try {
+      if (mode === 'home') {
+        const launchCwd = homeWorkspace?.kind === 'ssh' ? homeWorkspace.path : cwd || homeWorkspace?.path || projectRoot || ''
+        if (!launchCwd) {
+          if (isOrchestratorProject) void loadRemoteProjectDir(projectRoot)
+          else void chooseDir()
+          return
+        }
+        const result = await launch({ text: body, cwd: launchCwd, providerId: provider.id, providerAccountId, model: model || provider.models[0], approvalMode: settings.approvalMode, projectId: homeProject, workspace: homeWorkspace, attachments: atts, incognito })
+        if (!result.ok) return
+      } else {
+        await send(body, atts)
+        if (thread && useStore.getState().status[thread.id] === 'error') return
       }
-      launch({ text: body, cwd: launchCwd, providerId: provider.id, providerAccountId, model: model || provider.models[0], approvalMode: settings.approvalMode, projectId: homeProject, workspace: homeWorkspace, attachments: atts, incognito })
-    } else send(body, atts)
-    setText('')
-    setAttachments([])
+      setText((current) => current === submittedText ? '' : current)
+      setAttachments((current) => current === submittedAttachments ? [] : current)
+    } catch (error) {
+      useStore.setState({ notice: { kind: 'error', message: error instanceof Error ? error.message : 'The request could not start; your draft is still here.' } })
+    } finally {
+      submittingRef.current = false
+      setSubmitting(false)
+    }
   }
   // Start a long-running mission from a typed objective (replaces the old /goal:
   // create the mission and open the Command Centre to watch it — don't send the
   // text into the chat as a message.
   const startMission = async (objective: string) => {
+    if (!provider) { setView({ name: thread?.bot ? 'bots' : 'models' }); return }
     const o = objective.trim()
     if (!o) { taRef.current?.focus(); return }
     try {
@@ -714,18 +743,19 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
   const submit = () => {
     const t = text.trim()
     if (!t) return
+    if (botBlocked) { setView({ name: 'bots' }); return }
     if (readiness && !readiness.ready) return
     if (t.startsWith('/')) {
       const sp = t.indexOf(' ')
       const name = (sp === -1 ? t : t.slice(0, sp)).slice(1).toLowerCase()
       const arg = sp === -1 ? '' : t.slice(sp + 1).trim()
       // /mission <objective> — start a mission anywhere (not just in a thread).
-      if (name === 'mission') { void startMission(arg); return }
+      if (name === 'mission' && !thread?.bot) { void startMission(arg); return }
       // Built-in thread commands.
       if (mode === 'thread' && thread) {
         if (name === 'compact') { compactThread(thread.id); setText(''); return }
-        if (name === 'goal') { patchThread(thread.id, arg && arg !== 'clear' ? { goal: arg, goalStatus: 'active', plan: [] } : { goal: undefined, goalStatus: undefined, plan: [] }); setText(''); return }
-        if (name === 'computer-use') {
+        if (name === 'goal' && !thread.bot) { patchThread(thread.id, arg && arg !== 'clear' ? { goal: arg, goalStatus: 'active', plan: [] } : { goal: undefined, goalStatus: undefined, plan: [] }); setText(''); return }
+        if (name === 'computer-use' && !thread.bot) {
           if (arg.toLowerCase() === 'stop') { void api.cancelRun(thread.id); setText(''); return }
           const computer = BUILTIN_CAPABILITIES.find((capability) => capability.id === 'computer')!
           dispatch(`${capabilityInstruction(computer)}\n\n${arg || 'Computer use is on. Wait for my next instruction.'}`)
@@ -743,7 +773,7 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
   // adds the message to the queue above the composer rather than starting a new run.
   const queueMessage = () => {
     const t = text.trim()
-    if (!t || !thread) return
+    if (!t || !thread || botBlocked) return
     if (readiness && !readiness.ready) return
     setQueued((q) => [...q, { id: crypto.randomUUID(), text: expandSkills(t), status: 'queued' }])
     setText('')
@@ -824,6 +854,9 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
   }
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    // An IME confirmation must not choose a mention/skill or queue a message.
+    if (e.nativeEvent.isComposing || e.keyCode === 229 || e.nativeEvent.keyCode === 229) return
+    if (e.key === 'Enter' && e.repeat) return
     if (pick && pickItems.length) {
       if (e.key === 'ArrowDown') { e.preventDefault(); setPIdx((i) => (i + 1) % pickItems.length); return }
       if (e.key === 'ArrowUp') { e.preventDefault(); setPIdx((i) => (i - 1 + pickItems.length) % pickItems.length); return }
@@ -851,6 +884,7 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
 
   return (
     <div className="no-drag w-full">
+      {phoneOpen && isChat && <PhoneChatPanel threadId={thread?.id} providerId={provider?.id} localAllowed={!!provider && !isExternalProvider(provider) && !thread?.orchestratorHostId && !isOrchestratorProject && workspace?.kind !== 'ssh'} onClose={() => setPhoneOpen(false)} />}
       <div className="relative">
         {/* @-mention popover */}
         {mention && (capabilityItems.length > 0 || items.length > 0) && (
@@ -985,7 +1019,15 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
 
             <div className="min-w-0 flex-1" />
 
-            <ModelPickerMenu
+            {isChat && thread?.bot?.executionTarget !== 'vm' && <PhoneButton threadId={thread?.id} open={phoneOpen} onClick={() => setPhoneOpen((open) => !open)} />}
+
+            {thread?.bot && <button type="button" title="This chat keeps the bot's saved model and permissions; edit the bot to configure a new chat." onClick={() => setView({ name: 'bots' })} className="inline-flex h-8 max-w-[160px] items-center gap-1.5 rounded-full px-2 text-[12px] text-ink-3 hover:bg-ink-5 hover:text-ink">
+              <Icon name="shield" size={13} className="shrink-0" /><span className="truncate">{thread.bot.approvalScope === 'readonly' ? 'Read only' : 'Review actions'} · {thread.bot.executionTarget === 'vm' ? 'Bot VM' : 'This Mac'}</span>
+            </button>}
+
+            {provider?.id === 'tensorfold' && !thread?.orchestratorHostId && !isOrchestratorProject && workspace?.kind !== 'ssh' && <LocalEngineControls model={model} />}
+
+            {provider ? <ModelPickerMenu
               provider={provider}
               model={model}
               providerAccountId={providerAccountId}
@@ -993,12 +1035,12 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
               policyProject={policyProject}
               pickerProviders={pickerProviders}
               recentModels={recentModels}
-              providers={settings.providers}
+              disabled={busy || submitting || !!thread?.bot}
               usageSnapshot={usageSnapshot}
               usageSummary={usageSummary}
               rateLimitStatus={rateLimitStatus}
               onPickModel={pickModel}
-              detail={providerEffortOptions(provider, model).length > 0 ? effortDisplayLabel(provider, model, settings.reasoningEffort) : undefined}
+              detail={providerEffortOptions(provider, model).some((option) => option.value === settings.reasoningEffort) ? effortDisplayLabel(provider, model, settings.reasoningEffort) : undefined}
               settings={(
                 <ModelMenuSettings
                   provider={provider}
@@ -1010,7 +1052,7 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
                   context={contextUsage}
                 />
               )}
-            />
+            /> : <button type="button" onClick={() => setView({ name: thread?.bot ? 'bots' : 'models' })} className="rounded-lg px-2 py-1 text-[13px] text-warn hover:bg-ink-5">Model unavailable</button>}
 
             <ComposerOverflowMenu
               workspace={overflowWorkspace}
@@ -1026,11 +1068,15 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
 
             {busy ? (
               // One control while a run is active: stop. Follow-ups queue with Enter.
-              <button onClick={() => thread && cancel(thread.id)} aria-label="Stop" title="Stop the run" className="ml-1 flex h-8 w-8 items-center justify-center rounded-full bg-accent text-accent-ink transition-all hover:bg-accent-strong active:scale-95">
+              <button onClick={() => {
+                queuedRef.current = []
+                setQueued([])
+                if (thread) void cancel(thread.id)
+              }} aria-label="Stop" title="Stop the run and clear queued follow-ups" className="ml-1 flex h-8 w-8 items-center justify-center rounded-full bg-accent text-accent-ink transition-all hover:bg-accent-strong active:scale-95">
                 <Icon name="stop" size={16} />
               </button>
             ) : (
-              <button onClick={submit} disabled={!text.trim()} aria-label="Send" className="ml-1 flex h-8 w-8 items-center justify-center rounded-full bg-accent text-accent-ink transition-all hover:bg-accent-strong active:scale-95 disabled:bg-ink-5 disabled:text-ink-4">
+              <button onClick={submit} disabled={!text.trim() || botBlocked || submitting} aria-label={submitting ? 'Starting request' : 'Send'} className="ml-1 flex h-8 w-8 items-center justify-center rounded-full bg-accent text-accent-ink transition-all hover:bg-accent-strong active:scale-95 disabled:bg-ink-5 disabled:text-ink-4">
                 <Icon name="send" size={16} strokeWidth={2} />
               </button>
             )}

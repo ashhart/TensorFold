@@ -1,3 +1,4 @@
+import { modelForReadiness } from '../../../shared/model-readiness'
 import type { AgentEvent, ArchiveKind, ArchiveSnapshot, DiffLine, Settings, StartRunPayload, Thread, TimelineItem, Project, Room, RoomEventItem, RoomMemoryEntry, RoomStreamEvent, Ticket, Automation, Job, GitCommitResult, GitDiffFile, GitHygieneFinding, GitHygieneReport, GitHygieneSanitizeResult, GitStatus, TokenUsageSnapshot, TokenUsageWindow, TokenUsageWindowKey, ContextPressureSnapshot, ModelRouterSnapshot, AssistantControlSnapshot, ConnectorEvent, ConnectorInteractionInput, AppUpdateStatus, CreateMissionInput, CreatePrLoopInput, CreatePrLoopResult, EmailDraftInput, EmailListOptions, EmailMessage, EmailReadResult, EmailResolveInput, EmailSourceConfig, EmailSyncResult, EmailThreadResult, Mission, MissionCheckpoint, MissionInspectionSnapshot, MissionJournalEvent, MissionPendingApproval, MissionRuntimeSnapshot, MissionStatus, Skill, Command, McpServerConfig, McpServerSnapshot, McpSnapshot, McpToolCallResult, McpToolDefinition, ControllerSnapshot, ControllerStatus, ProjectMemoryCandidate, ProjectMemoryEntry, WebhookDeliveryRecord, WebhookEndpoint, WebhookSnapshot, RemoteControlPairingInfo, RemoteControlStatus, RemoteControlWorkSnapshot, SecurityControlSnapshot, SecurityPurgeResult, CliDefinition, CliSession, CliToolStatus } from '../types'
 import type { BrowserConnectorSettings, BrowserItem, BrowserListOptions, BrowserReadResult, BrowserSnapshotInput, BrowserSourceConfig, BrowserSummaryResult, BrowserSyncResult, CalendarEvent, CalendarListOptions, CalendarMutationInput, CalendarReadResult, CalendarSourceConfig, CalendarSummaryResult, CalendarSyncResult, DiscordSource, DocumentItem, DocumentListOptions, DocumentReadResult, DocumentSourceConfig, DocumentSummaryResult, DocumentSyncResult, GoogleChatSource, MattermostSource, MatrixSource, SlackMessage, SlackListOptions, SlackReadResult, SlackSourceConfig, SlackSummaryResult, SlackSyncResult } from '../types'
 import type { Incident, RunExportBundle } from '../types'
@@ -12,8 +13,12 @@ import { filterMockBrowser, filterMockCalendar, filterMockDocuments, filterMockE
 import { activeOnly, createMockLocalPrLoop, mockArchive, mockArchiveSnapshot, mockBlockedCommandReason, mockGitHygieneReport, mockLocalMemoryCounts, mockMcpSnapshot, mockMissionInspection, mockMissionSnapshot, mockRemotePairingInfo, mockRemoteStatus, mockRemoteWorkSnapshot, mockRestore, mockSecurityControls, mockWebhookSnapshot, redactedMockSettings, updateMockMission } from './runtime'
 import { createMockKnowledgeApi } from './api-knowledge'
 import { createMockEngineApi } from './engine'
+import { createMockPhoneApi } from './phone'
 import { createMockWorktreeApi } from './worktrees'
 import { demoApprovalThread, demoRunStateEvents, mockGitDiff, mockGitStatus } from './workspace-fixtures'
+import { captureBotConfig } from '../../../shared/bot-policy'
+import { createMockBotVmApi } from './bot-vm'
+import { createMockUserQuestionApi } from './user-question'
 
 function mockDiscordSource(label: string): DiscordSource {
   const now = Date.now()
@@ -63,7 +68,11 @@ export function createMockApi(): TensorFoldStudioApi {
   let demoRunStatesSent = false
   const whatsappStatusSubs = new Set<(payload: { sourceId: string; paired?: boolean; lastError?: string | null }) => void>()
   const remoteTerminalSessions: CliSession[] = []
+  const desktopModeSubs = new Set<(settings: Settings) => void>()
   return {
+    ...createMockBotVmApi(),
+    ...createMockUserQuestionApi(),
+    ...createMockPhoneApi(),
     platform: 'browser',
     getSecurityControls: async () => mockSecurityControls(),
     writeClipboard: async (text: string) => {
@@ -112,6 +121,16 @@ export function createMockApi(): TensorFoldStudioApi {
     // Mirror the Electron path: never hand the renderer real keys; treat a masked
     // key on save as "unchanged" so a mask round-trip can't clobber the stored key.
     getSettings: async () => redactedMockSettings(),
+    desktopModeSet: async (mode, onboardingComplete) => {
+      if (mode !== 'minimal' && mode !== 'full') throw new Error('Choose Minimal or Full mode.')
+      mockState.settings = { ...mockState.settings, desktopMode: mode, ...(onboardingComplete === undefined ? {} : { desktopOnboardingComplete: onboardingComplete === true }) }
+      const settings = redactedMockSettings()
+      for (const cb of desktopModeSubs) cb(settings)
+      return settings
+    },
+    desktopModeHide: async () => ({ hidden: false }), // Browser previews have no system tray.
+    onDesktopModeChanged: (cb) => { desktopModeSubs.add(cb); return () => desktopModeSubs.delete(cb) },
+    onDesktopNavigate: () => () => {},
     saveSettings: async (s) => {
       const providers = s.providers.map((p) => {
         const cur = mockState.settings.providers.find((x) => x.id === p.id)
@@ -494,9 +513,19 @@ export function createMockApi(): TensorFoldStudioApi {
     getArchives: async () => mockArchiveSnapshot(),
     archiveItem: async (kind, id) => mockArchive(kind, id),
     restoreItem: async (kind, id) => mockRestore(kind, id),
-    createThread: async (cwd, kind = 'task', projectId = null) => {
+    createThread: async (cwd, kind = 'task', projectId = null, _commandId, incognito = false) => {
       const proj = projectId ? mockState.projects.find((p) => p.id === projectId) : null
       const t = thread(kind === 'chat' ? 'New chat' : 'New task', cwd || proj?.cwd || mockState.settings.defaultCwd || '~', 0, 'idle', [], kind, projectId)
+      if (incognito) t.incognito = true
+      mockState.threads = [t, ...mockState.threads]
+      return t
+    },
+    createBotChat: async (presetId) => {
+      const preset = mockState.settings.agentPresets.find((candidate) => candidate.id === presetId)
+      if (!preset) throw new Error('Bot not found.')
+      const bot = captureBotConfig(preset, mockState.settings.providers)
+      const t = thread(`${bot.name} chat`, bot.executionTarget === 'vm' ? '/workspace' : '', 0, 'idle', [], 'chat', null)
+      Object.assign(t, { bot, providerId: bot.providerId, providerAccountId: bot.providerAccountId, model: bot.model, workspace: null })
       mockState.threads = [t, ...mockState.threads]
       return t
     },
@@ -1027,6 +1056,7 @@ export function createMockApi(): TensorFoldStudioApi {
     appendMissionJournal: async (id, event: Partial<MissionJournalEvent> & { message: string }) => updateMockMission(id, (mission) => ({ ...mission, updatedAt: Date.now(), journal: [...mission.journal, { id: uid(), kind: event.kind || 'note', actor: event.actor || 'user', message: event.message, createdAt: Date.now(), status: event.status, checkpointId: event.checkpointId, approvalId: event.approvalId, data: event.data }] })),
     requestMissionApproval: async (id, approval: Partial<MissionPendingApproval> & { callId: string; title: string; summary: string }) => updateMockMission(id, (mission) => ({ ...mission, status: 'waiting_approval', updatedAt: Date.now(), pendingApprovals: [...mission.pendingApprovals, { id: uid(), callId: approval.callId, itemId: approval.itemId, title: approval.title, summary: approval.summary, requestedAt: Date.now(), expiresAt: approval.expiresAt ?? null, data: approval.data }] })),
     resolveMissionApproval: async (id, approvalId, decision) => updateMockMission(id, (mission) => ({ ...mission, status: mission.pendingApprovals.length <= 1 ? 'running' : 'waiting_approval', updatedAt: Date.now(), pendingApprovals: mission.pendingApprovals.filter((approval) => approval.id !== approvalId && approval.callId !== approvalId), journal: [...mission.journal, { id: uid(), kind: 'approval_resolved', actor: 'user', message: `${approvalId}: ${decision}.`, createdAt: Date.now(), status: mission.status, approvalId, data: { decision } }] })),
+    testProviderResponse: async () => { throw new Error('Response testing runs in the desktop app; this browser preview does not contact model endpoints or measure latency.') },
     fetchModels: async (provider) => {
       await new Promise((r) => setTimeout(r, 700))
       if (provider.transport === 'codex-cli') return provider.models?.length ? provider.models : CODEX_CLI_MODELS
@@ -1046,7 +1076,7 @@ export function createMockApi(): TensorFoldStudioApi {
       const providerId = input?.providerId ?? mockState.settings.activeProviderId
       const provider = mockState.settings.providers.find((p) => p.id === providerId)
       if (!provider) return { ready: false, reason: 'no-provider', message: 'Please go to Settings and connect a cloud or local model.' }
-      if (provider.source === 'tensorfold') return mockEngineReadiness(providerId === mockState.settings.activeProviderId ? mockState.settings.activeModel ?? null : null)
+      if (provider.source === 'tensorfold') return mockEngineReadiness(modelForReadiness(input, mockState.settings.activeProviderId, mockState.settings.activeModel))
       const name = provider.name || 'This provider'
       // Browser demo can't run local CLIs, but the default experience should still look like a
       // configured harness. Real desktop readiness uses the Electron CLI auth probe.
@@ -1126,6 +1156,12 @@ export function createMockApi(): TensorFoldStudioApi {
     // the Web Speech voice instead of erroring.
     synthesizeVoice: async () => ({ ok: false, error: 'Provider speech synthesis runs in the desktop app. Falling back to the system voice.', fallback: true }),
     synthesizeLocalVoice: async () => ({ ok: false, error: 'Local TTS runs in the desktop app. Falling back to the system voice.', fallback: true }),
+    getKokoroStatus: async () => ({ state: 'missing', installed: false, downloadedBytes: 0, totalBytes: 92364770, message: 'Open the desktop app to download Kokoro and read replies offline.', voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US' }, { id: 'af_bella', name: 'Bella', language: 'en-US' }], modelRevision: '1939ad2a8e416c0acfeecc08a694d14ef25f2231' }),
+    installKokoro: async () => ({ state: 'error', installed: false, downloadedBytes: 0, totalBytes: 92364770, message: 'Kokoro downloads run in the desktop app.', error: 'Open the TensorFold desktop app to install Kokoro.', voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US' }], modelRevision: '1939ad2a8e416c0acfeecc08a694d14ef25f2231' }),
+    cancelKokoroInstall: async () => ({ state: 'missing', installed: false, downloadedBytes: 0, totalBytes: 92364770, message: 'No Kokoro download is running in this preview.', voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US' }], modelRevision: '1939ad2a8e416c0acfeecc08a694d14ef25f2231' }),
+    removeKokoro: async () => ({ state: 'missing', installed: false, downloadedBytes: 0, totalBytes: 92364770, message: 'Kokoro is not installed in this preview.', voices: [{ id: 'af_heart', name: 'Heart', language: 'en-US' }], modelRevision: '1939ad2a8e416c0acfeecc08a694d14ef25f2231' }),
+    synthesizeKokoroVoice: async () => ({ ok: false, error: 'Kokoro playback runs in the TensorFold desktop app.' }),
+    cancelKokoroVoice: async () => ({ cancelled: false }),
     transcribeVoice: async () => ({ ok: false, error: 'API speech transcription runs in the desktop app.' }),
     discoverLocalTts: async (baseUrl) => ({ found: false, baseUrl: baseUrl || 'http://127.0.0.1:8080', voices: [], message: 'Local TTS discovery runs in the desktop app.' }),
     getBranch: async () => 'feat/dark-mode',

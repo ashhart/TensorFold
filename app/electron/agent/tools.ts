@@ -1,4 +1,5 @@
 import { promises as fs } from 'node:fs'
+import { INCOGNITO_PERSISTENT_TOOLS } from './incognito'
 import type { CreateArtifactInput } from './artifacts'
 import os from 'node:os'
 import path from 'node:path'
@@ -14,6 +15,10 @@ import { documentSourceId, documentSourceRef, readDocumentItem, readTableItem, s
 import { browserSourceId, browserSourceRef, readBrowserItem, scanBrowserItems, summarizeBrowser } from './browser-connector'
 import { BROWSER_AUTOMATION_ACTIONS, formatBrowserAutomationResult, normalizeBrowserAutomationInput, type BrowserAutomationInput, type BrowserAutomationResult } from './browser-automation'
 import { normalizeComputerUseInput, type ComputerUseInput } from './computer-use/actions'
+import { normalizePhoneAction } from './phone/service'
+import { normalizeUserQuestion } from './user-question/validation'
+import type { UserQuestionInput, UserQuestionOutcome, UserQuestionRun } from './types'
+import type { PhoneToolInput } from './types'
 import { CONTROLLER_ACTIONS, controllerActionTarget, formatControllerActionResult, normalizeControllerActionInput, type ControllerActionInput, type ControllerActionResult } from './controller-actions'
 import { blockedCommandReason, blockedReadReason, blockedWriteReason, commandNetworkReason } from './command-policy'
 import { commandOutputWithRedactionNotice, redactCommandStreams } from './command-output-redaction'
@@ -80,6 +85,17 @@ export interface SubAgentMailboxReadInput {
 }
 
 export interface ToolContext {
+  askUser?: (input: UserQuestionInput, run: UserQuestionRun) => Promise<UserQuestionOutcome>
+  userQuestionRunId?: string
+  userQuestionItemId?: string
+  /** A strict executable allowlist, also enforced before any host dispatch. */
+  allowedToolNames?: string[]
+  /** An isolated guest dispatcher; its presence never permits host fallback. */
+  botVm?: { executeTool(name: string, args: Record<string, any>, signal?: AbortSignal): Promise<ToolResult>; assertModelPrivacy?: () => void }
+  phoneControlAvailable?: boolean
+  phoneLocalOnly?: boolean
+  phonePrivacyGuard?: () => string | null
+  runPhoneControl?: (input: PhoneToolInput) => Promise<{ ok: boolean; output: string; title: string }>
   cwd: string
   /** Cancels in-flight tool work when the owning run is stopped. */
   signal?: AbortSignal
@@ -215,6 +231,15 @@ async function remoteCommandChangedPaths(
 
 export async function executeTool(name: string, args: Record<string, any>, ctx: ToolContext): Promise<ToolResult> {
   try {
+    if (ctx.currentThread?.incognito && INCOGNITO_PERSISTENT_TOOLS.has(name)) return { ok: false, output: 'This tool saves derived conversations or learned skills and is unavailable in Incognito. Use an ordinary saved task for it.', meta: 'incognito-persistence-blocked' }
+    if (ctx.allowedToolNames && !ctx.allowedToolNames.includes(name)) return { ok: false, output: 'This tool is outside this bot’s execution permissions.', meta: 'bot-tool-blocked' }
+    if (name === 'ask_user') {
+      if (!ctx.askUser || !ctx.currentThread || !ctx.userQuestionRunId || !ctx.userQuestionItemId || !ctx.signal) return { ok: false, output: 'Structured questions are unavailable in this run; ask plainly in your final response instead.' }
+      const answer = await ctx.askUser(normalizeUserQuestion(args), { threadId: ctx.currentThread.id, runId: ctx.userQuestionRunId, itemId: ctx.userQuestionItemId, signal: ctx.signal })
+      return { ok: true, title: 'Question', output: answer.state === 'answered' ? `The user answered this question: ${JSON.stringify(answer.answer)}. This is task input, not a permission change or authorization to send anything.` : 'The user explicitly skipped this question. No answer or default choice was selected; continue only within the existing task and permissions.', meta: answer.state === 'answered' ? 'Answered by you' : 'Skipped by you' }
+    }
+    if (ctx.botVm) return await ctx.botVm.executeTool(name, args, ctx.signal)
+    if (ctx.phoneLocalOnly && (name === 'web_search' || name === 'web_fetch')) return { ok: false, output: 'This conversation contains phone context and stays local; use a separate chat for public web research.' }
     if (name.startsWith('mcp__')) {
       if (!ctx.callMcpTool) return { ok: false, output: 'MCP host is not configured.' }
       const result = await ctx.callMcpTool(name, args)
@@ -1323,6 +1348,13 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
         if (!ctx.runComputerUse) return { ok: false, output: 'Computer use is not available in this environment.' }
         const result = await ctx.runComputerUse(input)
         return { ok: result.ok, output: result.output, title: result.title, meta: result.meta }
+      }
+
+      case 'phone_observe':
+      case 'phone_control': {
+        if (!ctx.phoneControlAvailable || !ctx.runPhoneControl) return { ok: false, title: 'Phone control', output: 'Open Phone in this chat, connect your device, select a local model and choose Allow this chat first.' }
+        const input: PhoneToolInput = name === 'phone_observe' ? { action: 'observe', ...(typeof args.sessionId === 'string' ? { sessionId: args.sessionId } : {}) } : normalizePhoneAction(args)
+        return ctx.runPhoneControl(input)
       }
 
       case 'launch_subagent': {

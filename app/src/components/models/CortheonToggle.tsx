@@ -8,20 +8,20 @@ const PRIVACY_DOC = 'https://github.com/ashhart/TensorFold/blob/v1.0.9/docs/cort
 
 // Cortheon mode for the built-in engine: the server researches the web and follows a reasoning
 // plan for every chat request it answers. Turning it on or off restarts a loaded model.
-export function CortheonToggle({ status, activeRuns }: { status: EngineStatus | undefined; activeRuns: number }) {
+export function CortheonToggle({ status, activeRuns, blocked: externallyBlocked = false }: { status: EngineStatus | undefined; activeRuns: number; blocked?: boolean }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const cortheon = status?.cortheon
   if (!status?.available || !cortheon) return null
   const loaded = status.state === 'ready' || status.state === 'starting'
-  const blocked = !cortheon.supported || busy || (loaded && activeRuns > 0)
+  const blocked = externallyBlocked || !cortheon.supported || busy || (loaded && activeRuns > 0)
   const detail = !cortheon.supported
     ? "This engine version doesn't include Cortheon yet."
     : loaded && activeRuns > 0
       ? 'Stop active local runs first; changing this restarts the loaded model.'
       : cortheon.enabled && loaded && !cortheon.active
         ? 'Restarting the model with Cortheon on.'
-        : 'Follows a reasoning plan and researches before answering, for any app using this engine. It sends search queries built from your chats to a web search service and reads public pages.' + (loaded ? ' Changing it restarts the loaded model.' : '')
+        : 'Adds a reasoning plan and web research for any app using this engine. Research can send search queries built from your chats to a web search service and read public pages.' + (loaded ? ' Changing it restarts the loaded model.' : '')
   const change = async (enabled: boolean) => {
     setBusy(true)
     setError(null)

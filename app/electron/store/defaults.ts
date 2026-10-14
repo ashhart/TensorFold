@@ -12,6 +12,8 @@ import { builtinEngineProvider } from '../agent/engine/provider'
 export function defaultSettings(): Settings {
   const now = Date.now()
   return {
+    desktopMode: 'full',
+    desktopOnboardingComplete: false,
     providers: [
       { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', apiKey: '', models: ['gpt-4o', 'gpt-4o-mini', 'o4-mini'], kind: 'cloud', source: 'openai' },
       { id: 'codex-cli', name: 'Codex CLI OAuth', transport: 'codex-cli', auth: 'codex-oauth', baseUrl: '', apiKey: '', models: CODEX_CLI_MODELS, kind: 'cloud', cliPath: 'codex', cliSandbox: 'workspace-write', cliApprovalPolicy: 'on-request', accounts: [] },

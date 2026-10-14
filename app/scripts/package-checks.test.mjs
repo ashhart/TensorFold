@@ -23,7 +23,16 @@ assert.deepEqual(fuses, {
 assert.deepEqual(pkg.build?.extraResources, [
   { from: 'build/engine', to: 'engine', filter: ['**/*'] },
   { from: 'build/computer-use', to: 'computer-use', filter: ['tensorfold-computer'] },
-], 'bin/ and lib/ stay side by side under Contents/Resources/engine; only the helper binary ships from build/computer-use')
+  { from: 'build/voice', to: 'voice-notices', filter: ['*.txt'] },
+], 'the engine, computer helper and offline voice notices have explicit packaging destinations')
+assert.match(await readFile(path.join(root, 'build', 'voice', 'NOTICE.txt'), 'utf8'), /HeadTTS 1\.2\.0/)
+assert.match(await readFile(path.join(root, 'build', 'voice', 'CMU-DICTIONARY-BSD.txt'), 'utf8'), /Redistribution and use in source and binary forms/)
+assert.match(await readFile(path.join(root, 'build', 'voice', 'HEADTTS-MIT.txt'), 'utf8'), /MIT License/)
+assert.match(await readFile(path.join(root, 'build', 'voice', 'APACHE-2.0.txt'), 'utf8'), /Apache License/)
+assert.equal(pkg.dependencies['kokoro-js'], '1.2.1')
+assert.equal(pkg.dependencies['@met4citizen/headtts'], '1.2.0')
+assert.equal(pkg.overrides.phonemizer, '$phonemizer', 'the eSpeak-based upstream phonemizer must stay replaced in every dependency branch')
+assert.deepEqual(pkg.build.asarUnpack, ['node_modules/onnxruntime-node/bin/napi-v3/darwin/arm64/*'], 'ONNX native bindings and their adjacent dylib must remain available outside asar')
 for (const script of ['pack:mac:dev', 'pack:mac', 'dist:mac']) {
   assert.match(pkg.scripts[script], /node scripts\/fetch-engine\.mjs && node scripts\/build-computer-helper\.mjs && node scripts\/package-mac\.mjs/, `${script} stages the pinned engine and builds the computer-use helper before packaging`)
 }

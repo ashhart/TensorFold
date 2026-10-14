@@ -37,6 +37,15 @@ interface SecurityPurgeRuntimeDeps {
   clearEventSpine(): Promise<void>
   clearProviderStatus(): Promise<void>
   clearUsageMemory(): void | Promise<void>
+  beginLearningPurge(): Promise<void>
+  quiescePhoneControl?(): Promise<void>
+  quiesceBotVms?(): Promise<void>
+  purgeBotVmData?(): Promise<void>
+  resumeBotVms?(): void
+  quiesceUserQuestions?(): Promise<void>
+  resumeUserQuestions?(): void
+  purgeLearningData(): Promise<{ removedPaths: string[]; files: number }>
+  endLearningPurge(): void
   purgeBrowserAutomation(): Promise<void>
   quiesceOrchestrationJournal(): Promise<void>
   resumeOrchestrationJournal(): void
@@ -51,6 +60,7 @@ const PRESERVED_CREDENTIALS_AND_SETTINGS = [
   'App settings and provider, cloud-connector, remote-control, and remote-Orchestrator credentials (linked WhatsApp device credentials are removed)',
   'MCP server configuration and protected environment secrets',
   'Webhook endpoint configuration and signing secrets',
+  'Original downloaded models in the shared model cache; private Living Weights copies are removed',
 ] as const
 
 // Git cleanup below is host-local. Remote project paths can have unrelated local
@@ -60,26 +70,42 @@ export function localProjectGitCandidates(items: Project[]): Project[] {
 }
 
 export function createSecurityPurgeRuntime(deps: SecurityPurgeRuntimeDeps) {
+  let purgeInProgress = false
   async function purgeLocalMemory(): Promise<SecurityPurgeResult> {
+    if (purgeInProgress) throw new Error('Local memory purge is already in progress.')
+    purgeInProgress = true
     let lifecycleQuiesced = false
+    let loopsQuiesced = false
+    let learningPurgeActive = false
     let whatsappAuthPurgeActive = false
     let purgeLease: WorkspaceMutationLease | null = null
-    // Close admission before yielding, then abort every long-lived owner that may be
-    // holding a workspace lease. The global lease resolves only after those owners have
-    // released, so no terminal/run/restore can recreate state while the purge shreds it.
-    const purgeLeasePending = deps.workspaceMutationGuard.acquireGlobal()
-    for (const controller of deps.aborters.values()) controller.abort()
-    for (const controller of deps.roomAborters.values()) controller.abort()
-    for (const controller of deps.missionAborters.values()) controller.abort()
-    deps.abortAutomations()
-    killAllTerminals({ purge: true })
-    // Cached sqlite handles keep writing to the deleted inode after the purge below
-    // unlinks the file; close them first so the index genuinely disappears and the
-    // next saveThreads rebuilds it instead of resurrecting pre-purge rows.
-    closeSessionSearchIndexes()
-    const loopsQuiescing = deps.quiesceLoops()
     try {
-      purgeLease = await purgeLeasePending
+      // Engine admission closes synchronously before the first await. Learning can
+      // otherwise write a checkpoint or recreate its journal during a global purge.
+      learningPurgeActive = true
+      const learningQuiescing = deps.beginLearningPurge()
+      const purgeLeasePending = deps.workspaceMutationGuard.acquireGlobal()
+      loopsQuiesced = true
+      const loopsQuiescing = deps.quiesceLoops()
+      // Observe every rejection immediately while existing workspace owners drain.
+      const quiescence = Promise.allSettled([purgeLeasePending, learningQuiescing, loopsQuiescing, deps.quiescePhoneControl?.() ?? Promise.resolve(), deps.quiesceBotVms?.() ?? Promise.resolve(), deps.quiesceUserQuestions?.() ?? Promise.resolve()])
+      for (const controller of deps.aborters.values()) controller.abort()
+      for (const controller of deps.roomAborters.values()) controller.abort()
+      for (const controller of deps.missionAborters.values()) controller.abort()
+      deps.abortAutomations()
+      killAllTerminals({ purge: true })
+      closeSessionSearchIndexes()
+      const settled = await quiescence
+      if (settled[0].status === 'fulfilled') purgeLease = settled[0].value
+      const labels = ['workspaceQuiescence', 'learningQuiescence', 'loopQuiescence', 'phoneQuiescence', 'botVmQuiescence', 'questionQuiescence']
+      const failures = settled.flatMap((result, i) => result.status === 'rejected' ? [{ label: labels[i], error: result.reason }] : [])
+      if (failures.length) {
+        await auditEvent('security.purge_local_memory_failed', {
+          failedLabels: failures.map((failure) => failure.label),
+          errors: failures.map((failure) => auditPreview(failure.error instanceof Error ? failure.error.message : String(failure.error))),
+        })
+        throw new Error(`Local memory purge could not safely stop: ${failures.map((failure) => failure.label).join(', ')}. Private learning data was not removed.`)
+      }
       const auditTargets = [
       vontraPath('security-events.jsonl'),
       vontraPath('security-events.anchor.json'),
@@ -108,7 +134,7 @@ export function createSecurityPurgeRuntime(deps: SecurityPurgeRuntimeDeps) {
       const preservedByPath = new Map(preservedResiduals.map((item) => [path.resolve(item.path), item]))
       const residualFileCounts = await Promise.all([...residualTargets, ...auditTargets].map(countFiles))
       const preservedFileCounts = await Promise.all([...preservedByPath.keys()].map(countFiles))
-      const counts = {
+      const counts: Record<string, number> = {
       ...localMemoryCounts(),
       turnCheckpoints: deps.checkpointRecordCount(),
       pairingSessions: deps.pairingRecordCount(),
@@ -154,7 +180,6 @@ export function createSecurityPurgeRuntime(deps: SecurityPurgeRuntimeDeps) {
     await Promise.all([
       deps.quiesceOrchestrationJournal(),
       deps.quiesceProviderStatus(),
-      loopsQuiescing,
     ])
 
     store.artifacts = []
@@ -229,7 +254,10 @@ export function createSecurityPurgeRuntime(deps: SecurityPurgeRuntimeDeps) {
     beginWhatsAppAuthStatePurge()
     whatsappAuthPurgeActive = true
     stopAllWhatsAppBridges()
+    let learningRemoval: { removedPaths: string[]; files: number } | null = null
     const externalClears: Array<[string, Promise<void>]> = [
+      ['learningData', (async () => { learningRemoval = await deps.purgeLearningData() })()],
+      ['botVmData', deps.purgeBotVmData?.() ?? Promise.resolve()],
       ['turnCheckpoints', deps.clearCheckpoints()],
       ['pairingSessions', deps.clearPairingSessions()],
       ['eventSpine', deps.clearEventSpine()],
@@ -297,7 +325,10 @@ export function createSecurityPurgeRuntime(deps: SecurityPurgeRuntimeDeps) {
       }
     }
 
-    const removedPaths: string[] = []
+    const learningReceipt = learningRemoval as { removedPaths: string[]; files: number } | null
+    if (!learningReceipt) throw new Error('Local memory purge did not receive a private learning-data removal receipt.')
+    counts.learningFiles = learningReceipt.files
+    const removedPaths: string[] = [...learningReceipt.removedPaths]
     // These paths carry plaintext or derived conversational state outside the protected
     // collections: transcripts, browser screenshots/DOM, email bodies, usage caches, event
     // receipts, and the audit trail. Securely overwrite regular files before unlinking and
@@ -363,12 +394,16 @@ export function createSecurityPurgeRuntime(deps: SecurityPurgeRuntimeDeps) {
     }
     } finally {
       if (whatsappAuthPurgeActive) endWhatsAppAuthStatePurge()
+      if (learningPurgeActive) deps.endLearningPurge()
       purgeLease?.release()
       if (lifecycleQuiesced) {
         deps.resumeOrchestrationJournal()
         deps.resumeProviderStatus()
-        deps.resumeLoops()
       }
+      if (loopsQuiesced) deps.resumeLoops()
+      deps.resumeBotVms?.()
+      deps.resumeUserQuestions?.()
+      purgeInProgress = false
     }
   }
 
@@ -492,6 +527,12 @@ async function shredPath(
 }
 
 export interface SecurityPurgeConfigDeps {
+  quiescePhoneControl?(): Promise<void>
+  quiesceBotVms?(): Promise<void>
+  purgeBotVmData?(): Promise<void>
+  resumeBotVms?(): void
+  quiesceUserQuestions?(): Promise<void>
+  resumeUserQuestions?(): void
   aborters: Map<string, AbortController>
   roomAborters: Map<string, AbortController>
   missionAborters: Map<string, AbortController>
@@ -508,6 +549,11 @@ export interface SecurityPurgeConfigDeps {
   spineHost(): EventSpineHost | null
   providerStatusRuntime(): { status(): { statuses: Record<string, unknown> }; clear(): Promise<void>; quiesce(): Promise<void>; resume(): void }
   loopHost(): { quiesceAndClear(): Promise<void>; resumeAfterPurge(): void }
+  engineService(): {
+    beginLearningPurge(): Promise<void>
+    purgeLearningData(): Promise<{ removedPaths: string[]; files: number }>
+    endLearningPurge(): void
+  } | null
 }
 
 /**
@@ -534,9 +580,16 @@ export function buildSecurityPurgeConfig(deps: SecurityPurgeConfigDeps): Securit
     spineHost,
     providerStatusRuntime,
     loopHost,
+    engineService,
   } = deps
 
   return {
+    quiescePhoneControl: deps.quiescePhoneControl,
+    quiesceBotVms: deps.quiesceBotVms,
+    purgeBotVmData: deps.purgeBotVmData,
+    resumeBotVms: deps.resumeBotVms,
+    quiesceUserQuestions: deps.quiesceUserQuestions,
+    resumeUserQuestions: deps.resumeUserQuestions,
     aborters,
     roomAborters,
     missionAborters,
@@ -563,6 +616,13 @@ export function buildSecurityPurgeConfig(deps: SecurityPurgeConfigDeps): Securit
     },
     clearEventSpine: () => spineHost()?.purge() ?? Promise.resolve(),
     clearProviderStatus: () => providerStatusRuntime().clear(),
+    beginLearningPurge: () => engineService()?.beginLearningPurge() ?? Promise.resolve(),
+    purgeLearningData: () => {
+      const engine = engineService()
+      if (!engine) throw new Error('The engine service is unavailable; private learning data could not be removed.')
+      return engine.purgeLearningData()
+    },
+    endLearningPurge: () => engineService()?.endLearningPurge(),
     clearUsageMemory: () => {
       sendToRenderer('usage:cleared')
     },

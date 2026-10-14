@@ -72,6 +72,10 @@ export function createEmitHelpers(deps: EmitHelpersDeps): EmitHelpers {
     ])
   }
   function emitJob(j: Job) {
+    if (j.incognito || store.threads.some((thread) => thread.incognito && [j.threadId, j.currentThreadId, j.kind === 'thread' ? j.owner : null].includes(thread.id))) {
+      sendToRenderer('job:update', j)
+      return
+    }
     fanOutHostEvent('job:update', j, [
       { label: 'remote job projection', deliver: () => remoteServer().publish({ kind: 'job', data: j }) },
       // Live push (additive, alongside the existing job:update mirror): a typed
@@ -111,6 +115,12 @@ export function createEmitHelpers(deps: EmitHelpersDeps): EmitHelpers {
 
   function emitToRenderer(e: AgentEvent) {
     const traced = ensureAgentEventTrace(e, 'main.emit')
+    // Incognito is local live state, including its titles, question answers and
+    // derived tool metadata; no remote replay, webhook or observer may retain it.
+    if (store.threads.find((thread) => thread.id === traced.threadId)?.incognito) {
+      sendToRenderer('agent:event', traced)
+      return
+    }
     fanOutHostEvent('agent:event', traced, [
       { label: 'remote agent projection', deliver: () => remoteServer().publish({ kind: 'agent', data: { ...traced, trace: { ...traced.trace, surface: traced.trace?.surface ?? 'remote' } } }) },
       // Per-token deltas never reach webhooks: each would be a DNS-checked POST, a persist and an audit entry.

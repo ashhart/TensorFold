@@ -45,6 +45,7 @@ export function TitleBar() {
         )}
         {title && <span className="truncate text-[13px] font-medium text-ink">{title}</span>}
         {thread && <ThreadTrustBadge thread={thread} />}
+        {thread?.bot && <button className="no-drag hidden max-w-[220px] shrink-0 truncate rounded-full border border-line px-2 py-0.5 text-[12px] text-ink-2 sm:block" onClick={() => setView({ name: 'bots' })} title="This chat keeps the bot instructions, model and permissions from when it was created.">{thread.bot.name}<span className="hidden lg:inline"> · {thread.bot.executionTarget === 'vm' ? 'Bot VM' : 'This Mac'} · {thread.bot.approvalScope === 'readonly' ? 'Read only' : 'Review actions'}</span></button>}
         {thread && <CortheonBadge thread={thread} />}
         {thread?.parentId && (
           <ThreadLineageChip parentId={thread.parentId} />

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { Icon, type IconName } from '../lib/icons'
 import { BrandIcon, connectorBrand } from '../lib/brand'
@@ -8,48 +8,36 @@ import { useStore } from '../lib/store'
 import { WebhooksPanel } from './WebhooksPanel'
 import type { AssistantControlSnapshot, CapabilityHealthState, ConnectorDefinition, ConnectorStatus, LocalScriptCapability, McpServerConfig, McpServerStatus, McpSnapshot, PackagedPluginCapability, WebhookSnapshot } from '../lib/types'
 import { BUILTIN_CAPABILITIES, type BuiltInCapability } from '../lib/capabilities'
+import { executableEvidence, formatMcpArguments, matchesPluginSearch, parseMcpArguments, pluginRegistrationEnabled } from '../lib/plugin-library'
 
 interface Connector {
   id: string
   name: string
-  icon: IconName
   tag: string
   desc: string
-  fields: string[]
-  difficulty: 'Easy' | 'Medium' | 'Hard'
 }
 
 const CONNECTORS: Connector[] = [
-  { id: 'telegram', name: 'Telegram', icon: 'message', tag: 'Bot API', difficulty: 'Easy', desc: 'Talk to your agent from any Telegram chat.', fields: ['Bot token', 'Allowed user IDs'] },
-  { id: 'email', name: 'Email', icon: 'mail', tag: 'IMAP / SMTP', difficulty: 'Easy', desc: 'Read and reply to mail; trigger tasks from your inbox.', fields: ['Email address', 'App password', 'IMAP host', 'SMTP host'] },
-  { id: 'outlook', name: 'Outlook / 365', icon: 'mail', tag: 'Graph · OAuth', difficulty: 'Medium', desc: 'Microsoft 365 mailbox via Microsoft Graph.', fields: ['Azure app (client) ID', 'Tenant', 'Redirect URI'] },
-  { id: 'whatsapp', name: 'WhatsApp', icon: 'message', tag: 'Cloud API / bridge', difficulty: 'Hard', desc: 'Official Cloud API, or a local web bridge (opt-in).', fields: ['Mode', 'Phone number ID', 'Access token'] },
-  { id: 'imessage', name: 'iMessage', icon: 'message', tag: 'macOS · BlueBubbles', difficulty: 'Hard', desc: 'Send/receive iMessage through a BlueBubbles server.', fields: ['Server URL', 'Password'] },
+  { id: 'email', name: 'Email', tag: 'IMAP / SMTP', desc: 'Connect a mailbox with read and send controls.' },
+  { id: 'slack', name: 'Slack', tag: 'Workspace', desc: 'Connect selected channels with scoped bot access.' },
+  { id: 'discord', name: 'Discord', tag: 'Bot', desc: 'Bring selected server channels into your workspace.' },
+  { id: 'telegram', name: 'Telegram', tag: 'Bot API', desc: 'Control rooms with allowlisted chats and senders.' },
+  { id: 'whatsapp', name: 'WhatsApp', tag: 'Cloud API / experimental bridge', desc: 'Configure Cloud events or pair your own account.' },
+  { id: 'imessage', name: 'iMessage', tag: 'macOS', desc: 'Configure local access and explicitly enable message sync.' },
+  { id: 'mattermost', name: 'Mattermost', tag: 'Workspace', desc: 'Connect a server and choose channels to sync.' },
+  { id: 'matrix', name: 'Matrix', tag: 'Homeserver', desc: 'Connect selected rooms with your account credentials.' },
+  { id: 'googlechat', name: 'Google Chat', tag: 'Workspace', desc: 'Connect spaces through the configured Google account.' },
+  { id: 'docs', name: 'Documents', tag: 'Local folders', desc: 'Choose which document folders the assistant may index.' },
 ]
 
-const DIFF_COLOR: Record<Connector['difficulty'], string> = {
-  Easy: 'text-positive', Medium: 'text-warn', Hard: 'text-ink-3',
-}
-
-const STATUS_COLOR: Record<ConnectorStatus, string> = {
-  connected: 'bg-positive',
-  mock: 'bg-positive',
-  pending: 'bg-ink-4',
-  error: 'bg-danger',
-}
+const LIBRARY_TABS = ['Built-in', 'Installed', 'Connections', 'Advanced'] as const
+type LibraryTab = typeof LIBRARY_TABS[number]
 
 const MCP_STATUS_COLOR: Record<McpServerStatus, string> = {
   connected: 'bg-positive',
   connecting: 'bg-warn',
   stopped: 'bg-ink-4',
   error: 'bg-danger',
-}
-
-const HEALTH_TONE: Record<CapabilityHealthState['status'], string> = {
-  unknown: 'bg-ink-5 text-ink-3',
-  ok: 'bg-positive/10 text-positive',
-  warning: 'bg-warn/10 text-warn',
-  error: 'bg-danger/10 text-danger',
 }
 
 function capabilityHealthCheck(capability: BuiltInCapability, enabled: boolean): CapabilityHealthState {
@@ -77,55 +65,41 @@ function shortTime(value: number | null | undefined): string {
 
 type ExecutableTrustItem = {
   key: string
+  id: string
+  source: 'script' | 'plugin'
   icon: IconName
   name: string
   kind: string
   enabled: boolean
+  canEnable: boolean
+  description: string | null
   detail: string
-  trustLabel: string
-  trustTone: string
-  sandbox: string
+  evidence: string
+  access: string
   checksum: string | null
-  verifiedAt: number | null
-}
-
-function trustBadge(checksum: string | null | undefined, verifiedAt: number | null | undefined) {
-  if (verifiedAt) return { label: 'signed', tone: 'bg-positive/10 text-positive' }
-  if (checksum) return { label: 'checksum', tone: 'bg-warn/10 text-warn' }
-  return { label: 'unverified', tone: 'bg-danger/10 text-danger' }
+  recordedAt: number | null
+  tools: string[]
 }
 
 function scriptTrustItem(script: LocalScriptCapability): ExecutableTrustItem {
-  const trust = trustBadge(script.checksumSha256, script.signatureVerifiedAt)
   return {
-    key: `script:${script.id}`,
-    icon: 'terminal',
-    name: script.name || script.id,
-    kind: 'Local script',
-    enabled: script.enabled !== false,
-    detail: script.path,
-    trustLabel: trust.label,
-    trustTone: trust.tone,
-    sandbox: script.sandboxProfile ?? 'none',
-    checksum: script.checksumSha256 ?? null,
-    verifiedAt: script.signatureVerifiedAt ?? null,
+    key: `script:${script.id}`, id: script.id, source: 'script', icon: 'terminal',
+    name: script.name || script.id, kind: 'Local script', enabled: script.enabled !== false,
+    canEnable: true, description: script.description ?? null, detail: script.path,
+    evidence: executableEvidence(script), access: script.sandboxProfile ?? 'No execution profile configured',
+    checksum: script.checksumSha256 ?? null, recordedAt: script.signatureVerifiedAt ?? null, tools: [],
   }
 }
 
 function pluginTrustItem(plugin: PackagedPluginCapability): ExecutableTrustItem {
-  const trust = trustBadge(plugin.checksumSha256, plugin.signatureVerifiedAt)
   return {
-    key: `plugin:${plugin.id}`,
-    icon: 'plug',
-    name: plugin.name || plugin.id,
-    kind: plugin.trusted ? 'Trusted plugin' : 'Packaged plugin',
-    enabled: plugin.enabled !== false,
-    detail: plugin.manifestPath,
-    trustLabel: trust.label,
-    trustTone: trust.tone,
-    sandbox: plugin.sandboxProfile ?? 'none',
-    checksum: plugin.checksumSha256 ?? null,
-    verifiedAt: plugin.signatureVerifiedAt ?? null,
+    key: `plugin:${plugin.id}`, id: plugin.id, source: 'plugin', icon: 'plug',
+    name: plugin.name || plugin.id, kind: plugin.trusted ? 'Trust approved' : 'Trust required',
+    enabled: pluginRegistrationEnabled(plugin), canEnable: plugin.trusted === true,
+    description: plugin.description ?? null, detail: plugin.manifestPath,
+    evidence: executableEvidence(plugin), access: 'Runs inside the app with host access',
+    checksum: plugin.checksumSha256 ?? null, recordedAt: plugin.signatureVerifiedAt ?? null,
+    tools: plugin.toolNames ?? [],
   }
 }
 
@@ -135,12 +109,14 @@ function CapabilityTile({
   health,
   onToggle,
   onCheck,
+  disabled,
 }: {
   capability: BuiltInCapability
   enabled: boolean
   health?: CapabilityHealthState
   onToggle: (enabled: boolean) => void
   onCheck: () => void
+  disabled: boolean
 }) {
   const healthStatus = health?.status ?? 'unknown'
   return (
@@ -150,21 +126,20 @@ function CapabilityTile({
           <Icon name={capability.icon} size={19} strokeWidth={1.9} />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="flex items-start gap-2">
+          <div className="flex items-start justify-between gap-2">
             <span className="text-[14px] font-medium text-ink">{capability.name}</span>
-            <span className={clsx('rounded-md px-1.5 py-0.5 text-[12px] font-medium', capability.status === 'available' ? 'bg-positive/10 text-positive' : 'bg-ink-5 text-ink-3')}>
-              {capability.status === 'available' ? 'Ready' : 'Contract'}
-            </span>
-            <span className={clsx('rounded-md px-1.5 py-0.5 text-[12px] font-medium', HEALTH_TONE[healthStatus])}>{healthStatus}</span>
-            <Toggle checked={enabled} onChange={onToggle} label={`${enabled ? 'Disable' : 'Enable'} ${capability.name}`} />
+            <Toggle disabled={disabled} checked={enabled} onChange={onToggle} label={`${enabled ? 'Disable' : 'Enable'} ${capability.name}`} />
           </div>
+          <span className={clsx('mt-1 inline-block rounded-md px-1.5 py-0.5 text-[12px] font-medium', enabled && capability.status === 'available' ? 'bg-positive/10 text-positive' : 'bg-ink-5 text-ink-2')}>
+            {!enabled ? 'Disabled' : capability.status === 'available' ? 'Available' : 'Worker required'}
+          </span>
           <p className="mt-1 text-[13px] leading-snug text-ink-2">{capability.description}</p>
           <div className="mt-2 flex items-center justify-between gap-2">
             <div className="min-w-0">
-              <div className="font-mono text-[12px] text-ink-3">@{capability.mention}</div>
-              <div className="mt-0.5 truncate text-[12px] text-ink-3">{health?.lastError ?? shortTime(health?.checkedAt)}</div>
+              <div className="font-mono text-[12px] text-ink-2">@{capability.mention}</div>
+              <div className={clsx("mt-0.5 text-[12px] leading-snug", healthStatus === 'error' ? 'text-danger' : 'text-ink-2')}>{health?.lastError ?? (capability.status === 'contract' ? 'The document worker is not installed.' : 'Uses your existing tool approval settings.')}</div>
             </div>
-            <Button variant="ghost" size="xs" icon="check" onClick={onCheck}>Check</Button>
+            <Button variant="ghost" size="xs" icon="check" className="shrink-0 whitespace-nowrap" disabled={disabled} onClick={onCheck}>Check setup</Button>
           </div>
         </div>
       </div>
@@ -201,7 +176,7 @@ function SourceCapabilityCard({
             <span className={clsx('rounded-md px-1.5 py-0.5 text-[12px] font-medium', statusTone)}>{status}</span>
           </div>
           <p className="mt-1 text-[13px] leading-snug text-ink-2">{detail}</p>
-          <div className="mt-2 grid grid-cols-1 gap-1 text-[12px] text-ink-3">
+          <div className="mt-2 grid grid-cols-1 gap-1 text-[12px] text-ink-2">
             <span className="truncate">{tools}</span>
             <span className="truncate font-mono">{provenance}</span>
           </div>
@@ -211,34 +186,54 @@ function SourceCapabilityCard({
   )
 }
 
-function ExecutableTrustCard({ item }: { item: ExecutableTrustItem }) {
+function ExecutableTrustCard({ item, disabled, onToggle }: { item: ExecutableTrustItem; disabled: boolean; onToggle: (enabled: boolean) => void }) {
   return (
-    <div className="rounded-xl border border-line bg-card p-3.5 shadow-card">
+    <div className="rounded-xl border border-line bg-card p-4 shadow-card">
       <div className="flex items-start gap-3">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-ink-5 text-ink-2">
-          <Icon name={item.icon} size={18} />
-        </span>
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-ink-5 text-ink-2"><Icon name={item.icon} size={18} /></span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="truncate text-[14px] font-medium text-ink">{item.name}</span>
-            <span className={clsx('rounded-md px-1.5 py-0.5 text-[12px] font-medium', item.enabled ? 'bg-positive/10 text-positive' : 'bg-ink-5 text-ink-3')}>{item.enabled ? 'enabled' : 'disabled'}</span>
-            <span className={clsx('rounded-md px-1.5 py-0.5 text-[12px] font-medium', item.trustTone)}>{item.trustLabel}</span>
+            <span className="break-words text-[14px] font-medium text-ink">{item.name}</span>
+            <span className={clsx('rounded-md px-1.5 py-0.5 text-[12px] font-medium', item.enabled ? 'bg-positive/10 text-positive' : 'bg-ink-5 text-ink-2')}>{item.enabled ? 'Enabled in settings' : item.canEnable ? 'Disabled' : 'Blocked'}</span>
           </div>
-          <p className="mt-1 text-[13px] leading-snug text-ink-2">{item.kind}</p>
-          <div className="mt-2 grid grid-cols-1 gap-1 text-[12px] text-ink-3">
-            <span className="truncate font-mono">{item.detail}</span>
-            <span className="truncate">sandbox:{item.sandbox}{item.checksum ? ` · sha256:${item.checksum.slice(0, 12)}` : ''}{item.verifiedAt ? ` · verified ${shortTime(item.verifiedAt)}` : ''}</span>
-          </div>
+          <p className="mt-1 text-[13px] leading-snug text-ink-2">{item.description || (item.source === 'plugin' ? 'A local packaged plugin registered on this Mac.' : 'A local script registered on this Mac.')}</p>
         </div>
+        <Toggle checked={item.enabled} disabled={disabled || (!item.enabled && !item.canEnable)} label={`${item.enabled ? 'Disable' : 'Enable'} ${item.name}`} onChange={onToggle} />
       </div>
+      <div className="mt-3 flex flex-wrap gap-2 text-[12px] text-ink-2">
+        <span className="rounded-md bg-ink-5 px-2 py-1">{item.kind}</span>
+        <span className="rounded-md bg-ink-5 px-2 py-1">{item.evidence}</span>
+      </div>
+      <p className="mt-2 text-[13px] leading-snug text-ink-2">{item.access}</p>
+      {!item.canEnable && <p className="mt-2 text-[13px] leading-snug text-ink-2">This registration has no persisted trust approval, so it cannot load.</p>}
+      <details className="mt-3 text-[13px] text-ink-2">
+        <summary className="cursor-pointer font-medium text-ink-2">Registration details</summary>
+        <div className="mt-2 space-y-2 rounded-lg bg-card-2 p-3">
+          <div className="break-all font-mono text-[12px]">{item.detail}</div>
+          {item.checksum && <div className="break-all font-mono text-[12px]">SHA-256 record: {item.checksum}</div>}
+          {item.recordedAt && <div>Signature record saved {shortTime(item.recordedAt)}.</div>}
+          {item.source === 'plugin' && <>
+            <div>{item.tools.length ? `Configured tools: ${item.tools.join(', ')}` : 'No tool names recorded in settings.'}</div>
+            <p>Configured metadata does not confirm successful loading or restrict host access.</p>
+          </>}
+        </div>
+      </details>
     </div>
   )
 }
 
+function LibraryEmpty({ title, detail }: { title: string; detail: string }) {
+  return <div className="mt-4 rounded-xl border border-dashed border-line px-5 py-10 text-center">
+    <Icon name="plug" size={24} className="mx-auto text-ink-2" />
+    <p className="mt-3 text-[14px] font-medium text-ink-2">{title}</p>
+    <p className="mx-auto mt-1 max-w-[380px] text-[13px] leading-relaxed text-ink-2">{detail}</p>
+  </div>
+}
+
 function connectorStatusTone(status: ConnectorStatus | 'inactive'): string {
-  if (status === 'connected' || status === 'mock') return 'bg-positive/10 text-positive'
+  if (status === 'connected') return 'bg-positive/10 text-positive'
   if (status === 'error') return 'bg-danger/10 text-danger'
-  return 'bg-ink-5 text-ink-3'
+  return 'bg-ink-5 text-ink-2'
 }
 
 function connectorCapabilityDetail(connector: ConnectorDefinition | null | undefined, fallback: string): string {
@@ -278,9 +273,9 @@ function sourceCards(snapshot: AssistantControlSnapshot | null, mcp: McpSnapshot
     {
       icon: 'clock' as IconName,
       title: 'Calendar',
-      status: calendar?.status ?? 'pending',
+      status: calendar?.status === 'mock' ? 'contract' : (calendar?.status ?? 'pending'),
       statusTone: connectorStatusTone(calendar?.status ?? 'pending'),
-      detail: connectorCapabilityDetail(calendar, 'Calendar connector contract is reserved for the connector phase.'),
+      detail: connectorCapabilityDetail(calendar, 'Calendar integration is not available yet.'),
       tools: connectorToolLabel(calendar),
       provenance: calendar?.transport ? `transport:${calendar.transport}` : 'provenance:contract only',
     },
@@ -288,7 +283,7 @@ function sourceCards(snapshot: AssistantControlSnapshot | null, mcp: McpSnapshot
       icon: 'globe' as IconName,
       title: 'Webhooks',
       status: webhookStatus,
-      statusTone: webhookStatus === 'connected' ? 'bg-positive/10 text-positive' : webhookStatus === 'pending' ? 'bg-warn/10 text-warn' : 'bg-ink-5 text-ink-3',
+      statusTone: webhookStatus === 'connected' ? 'bg-positive/10 text-positive' : webhookStatus === 'pending' ? 'bg-warn/10 text-ink-2' : 'bg-ink-5 text-ink-2',
       detail: webhooks ? `${webhooks.endpoints.length} endpoint${webhooks.endpoints.length === 1 ? '' : 's'} configured; listener ${webhookListening ? 'online' : 'offline'}.` : 'Loading webhook listener and endpoint state.',
       tools: `${webhookEnabled} enabled endpoint${webhookEnabled === 1 ? '' : 's'}`,
       provenance: webhooks ? `loopback:${webhooks.listener.port ?? 'off'} routes:${webhooks.listener.routes}` : 'provenance:loading',
@@ -297,7 +292,7 @@ function sourceCards(snapshot: AssistantControlSnapshot | null, mcp: McpSnapshot
       icon: 'plug' as IconName,
       title: 'MCP',
       status: mcpStatus,
-      statusTone: mcpStatus === 'connected' ? 'bg-positive/10 text-positive' : mcpStatus === 'error' ? 'bg-danger/10 text-danger' : 'bg-ink-5 text-ink-3',
+      statusTone: mcpStatus === 'connected' ? 'bg-positive/10 text-positive' : mcpStatus === 'error' ? 'bg-danger/10 text-danger' : 'bg-ink-5 text-ink-2',
       detail: mcp ? `${mcp.servers.length} server${mcp.servers.length === 1 ? '' : 's'} registered; ${mcpConnected} connected.` : 'Loading MCP server runtime state.',
       tools: `${mcpTools} tool${mcpTools === 1 ? '' : 's'} · ${mcpResources} resource${mcpResources === 1 ? '' : 's'} · ${mcpPrompts} prompt${mcpPrompts === 1 ? '' : 's'}`,
       provenance: mcp?.servers.find((server) => server.runtime.provenance)?.runtime.provenance?.commandSha256 ? `sha256:${mcp.servers.find((server) => server.runtime.provenance)?.runtime.provenance?.commandSha256.slice(0, 12)}` : 'provenance:not checked',
@@ -309,57 +304,81 @@ type McpDraft = Partial<McpServerConfig> & { argsText?: string; envAllowlistText
 
 export function Plugins() {
   const settings = useStore((s) => s.settings)
-  const saveSettings = useStore((s) => s.saveSettings)
-  const [open, setOpen] = useState<string | null>(null)
+  const status = useStore((s) => s.status)
+  const threads = useStore((s) => s.threads)
+  const [tab, setTab] = useState<LibraryTab>('Built-in')
+  const [query, setQuery] = useState('')
   const [snapshot, setSnapshot] = useState<AssistantControlSnapshot | null>(null)
   const [mcp, setMcp] = useState<McpSnapshot | null>(null)
   const [webhooks, setWebhooks] = useState<WebhookSnapshot | null>(null)
   const [mcpBusy, setMcpBusy] = useState<string | null>(null)
   const [mcpDraft, setMcpDraft] = useState<McpDraft | null>(null)
+  const [settingsBusy, setSettingsBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [loadErrors, setLoadErrors] = useState<string[]>([])
+  const [loading, setLoading] = useState(true)
+  const settingsLock = useRef(false)
+  const mcpLock = useRef(false)
+  const refreshId = useRef(0)
+  const activeRuns = threads.some((thread) => ['thinking', 'streaming', 'tool', 'awaiting'].includes(status[thread.id] ?? (thread.status === 'running' ? 'thinking' : 'idle')))
   const executableTrustItems = [
-    ...(settings?.capabilities?.localScripts ?? []).map(scriptTrustItem),
     ...(settings?.capabilities?.packagedPlugins ?? []).map(pluginTrustItem),
+    ...(settings?.capabilities?.localScripts ?? []).map(scriptTrustItem),
   ]
+  const builtins = BUILTIN_CAPABILITIES.filter((item) => matchesPluginSearch(query, item.name, item.description, item.mention))
+  const installed = executableTrustItems.filter((item) => matchesPluginSearch(query, item.name, item.description, item.kind, ...item.tools))
+  const connectors = CONNECTORS.filter((item) => matchesPluginSearch(query, item.name, item.desc, item.tag))
+  const servers = mcp?.servers.filter((item) => matchesPluginSearch(query, item.name, item.command, ...item.args)) ?? []
 
+  const refreshLibrary = async () => {
+    const id = ++refreshId.current
+    setLoading(true)
+    const next = await Promise.allSettled([api.getAssistantSnapshot(), api.getMcpSnapshot(), api.getWebhooks()])
+    if (refreshId.current !== id) return
+    const labels = ['Connections', 'MCP servers', 'Webhooks']
+    const failures: string[] = []
+    next.forEach((result, i) => {
+      if (result.status === 'rejected') failures.push(`${labels[i]}: ${message(result.reason)}`)
+    })
+    if (next[0].status === 'fulfilled') setSnapshot(next[0].value)
+    if (next[1].status === 'fulfilled') setMcp(next[1].value)
+    if (next[2].status === 'fulfilled') setWebhooks(next[2].value)
+    setLoadErrors(failures)
+    setLoading(false)
+  }
   useEffect(() => {
-    let alive = true
-    api.getAssistantSnapshot().then((next) => { if (alive) setSnapshot(next) }).catch(() => {})
-    api.getMcpSnapshot().then((next) => { if (alive) setMcp(next) }).catch(() => {})
-    api.getWebhooks().then((next) => { if (alive) setWebhooks(next) }).catch(() => {})
-    return () => { alive = false }
+    void refreshLibrary()
+    return () => { refreshId.current++ }
   }, [])
 
-  const reloadMcp = async () => setMcp(await api.getMcpSnapshot())
-  const updateCapabilityEnabled = async (capabilityId: string, enabled: boolean) => {
-    if (!settings) return
-    const disabled = new Set(settings.capabilities?.disabledCapabilityIds ?? [])
+  const changeSettings = async (update: (current: NonNullable<typeof settings>) => NonNullable<typeof settings>) => {
+    if (settingsLock.current || activeRuns) return
+    const current = useStore.getState().settings
+    if (!current) return
+    settingsLock.current = true
+    setSettingsBusy(true)
+    setError(null)
+    try { await useStore.getState().saveSettings(update(current)) }
+    catch (reason) { setError(message(reason)) }
+    finally { settingsLock.current = false; setSettingsBusy(false) }
+  }
+  const updateCapabilityEnabled = (capabilityId: string, enabled: boolean) => changeSettings((current) => {
+    const disabled = new Set(current.capabilities.disabledCapabilityIds)
     if (enabled) disabled.delete(capabilityId)
     else disabled.add(capabilityId)
-    await saveSettings({
-      ...settings,
-      capabilities: {
-        ...settings.capabilities,
-        disabledCapabilityIds: [...disabled],
-        health: settings.capabilities?.health ?? {},
-      },
-    })
-  }
-  const checkCapability = async (capability: BuiltInCapability, enabled: boolean) => {
-    if (!settings) return
-    await saveSettings({
-      ...settings,
-      capabilities: {
-        ...settings.capabilities,
-        disabledCapabilityIds: settings.capabilities?.disabledCapabilityIds ?? [],
-        health: {
-          ...(settings.capabilities?.health ?? {}),
-          [capability.id]: capabilityHealthCheck(capability, enabled),
-        },
-      },
-    })
-  }
+    return { ...current, capabilities: { ...current.capabilities, disabledCapabilityIds: [...disabled] } }
+  })
+  const checkCapability = (capability: BuiltInCapability, enabled: boolean) => changeSettings((current) => ({
+    ...current, capabilities: { ...current.capabilities, health: { ...current.capabilities.health, [capability.id]: capabilityHealthCheck(capability, enabled) } },
+  }))
+  const updateExecutableEnabled = (item: ExecutableTrustItem, enabled: boolean) => changeSettings((current) => ({
+    ...current,
+    capabilities: item.source === 'plugin'
+      ? { ...current.capabilities, packagedPlugins: current.capabilities.packagedPlugins.map((plugin) => plugin.id === item.id ? { ...plugin, enabled: enabled && plugin.trusted === true } : plugin) }
+      : { ...current.capabilities, localScripts: current.capabilities.localScripts.map((script) => script.id === item.id ? { ...script, enabled } : script) },
+  }))
   const startMcpDraft = (server?: McpServerConfig) => {
-    setMcpDraft(server ? { ...server, env: undefined, argsText: server.args.join(' '), envAllowlistText: server.dockerGateway?.envAllowlist?.join(', ') ?? '' } : {
+    setMcpDraft(server ? { ...server, env: undefined, argsText: formatMcpArguments(server.args), envAllowlistText: server.dockerGateway?.envAllowlist?.join(', ') ?? '' } : {
       name: 'New MCP server',
       transport: 'stdio',
       launchMode: 'direct',
@@ -375,153 +394,159 @@ export function Plugins() {
     })
   }
   const saveMcpDraft = async () => {
-    if (!mcpDraft) return
-    const payload: Partial<McpServerConfig> = {
-      id: mcpDraft.id,
-      name: mcpDraft.name?.trim() || 'MCP server',
-      transport: 'stdio',
-      command: mcpDraft.command?.trim() || '',
-      args: splitArgs(mcpDraft.argsText || ''),
-      cwd: mcpDraft.cwd?.trim() || null,
-      launchMode: mcpDraft.launchMode === 'docker_gateway' ? 'docker_gateway' : 'direct',
-      dockerGateway: mcpDraft.launchMode === 'docker_gateway'
-        ? {
-            image: mcpDraft.dockerGateway?.image?.trim() || '',
-            network: mcpDraft.dockerGateway?.network ?? 'none',
-            readOnlyRootfs: mcpDraft.dockerGateway?.readOnlyRootfs !== false,
-            envAllowlist: splitCsv(mcpDraft.envAllowlistText || ''),
-            mounts: mcpDraft.dockerGateway?.mounts ?? [],
-            workdir: mcpDraft.dockerGateway?.workdir ?? null,
-          }
-        : null,
-      enabled: mcpDraft.enabled ?? true,
-      autoConnect: mcpDraft.autoConnect ?? false,
-      approvalMode: mcpDraft.approvalMode ?? 'ask',
-    }
+    if (!mcpDraft || mcpLock.current) return
+    mcpLock.current = true
+    refreshId.current++
+    setLoading(false)
     setMcpBusy('save')
+    setError(null)
     try {
+      const payload: Partial<McpServerConfig> = {
+        id: mcpDraft.id,
+        name: mcpDraft.name?.trim() || 'MCP server',
+        transport: 'stdio',
+        command: mcpDraft.command?.trim() || '',
+        args: parseMcpArguments(mcpDraft.argsText || ''),
+        cwd: mcpDraft.cwd?.trim() || null,
+        launchMode: mcpDraft.launchMode === 'docker_gateway' ? 'docker_gateway' : 'direct',
+        dockerGateway: mcpDraft.launchMode === 'docker_gateway'
+          ? {
+              image: mcpDraft.dockerGateway?.image?.trim() || '',
+              network: mcpDraft.dockerGateway?.network ?? 'none',
+              readOnlyRootfs: mcpDraft.dockerGateway?.readOnlyRootfs !== false,
+              envAllowlist: splitCsv(mcpDraft.envAllowlistText || ''),
+              mounts: mcpDraft.dockerGateway?.mounts ?? [],
+              workdir: mcpDraft.dockerGateway?.workdir ?? null,
+            }
+          : null,
+        enabled: mcpDraft.enabled ?? true,
+        autoConnect: mcpDraft.autoConnect ?? false,
+        approvalMode: mcpDraft.approvalMode ?? 'ask',
+      }
       setMcp(await api.saveMcpServer(payload))
       setMcpDraft(null)
+    } catch (reason) {
+      setError(message(reason))
     } finally {
+      mcpLock.current = false
       setMcpBusy(null)
     }
   }
   const withMcpBusy = async (label: string, action: () => Promise<McpSnapshot>) => {
+    if (mcpLock.current) return
+    mcpLock.current = true
+    refreshId.current++
+    setLoading(false)
     setMcpBusy(label)
-    try { setMcp(await action()) } finally { setMcpBusy(null) }
+    setError(null)
+    try { setMcp(await action()) }
+    catch (reason) { setError(message(reason)) }
+    finally { mcpLock.current = false; setMcpBusy(null) }
   }
+  const testMcpTool = (callName: string) => withMcpBusy(`test:${callName}`, async () => {
+    const result = await api.testMcpTool(callName)
+    const next = await api.getMcpSnapshot()
+    if (!result.ok) { setMcp(next); throw new Error(result.output || 'The tool check failed.') }
+    return next
+  })
 
   return (
     <div className="scroll-thin h-full overflow-y-auto xl:pr-[304px]">
-      <div className="mx-auto w-full max-w-[760px] px-7 py-9">
-        <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-ink">Sources & Connectors</h1>
-        <p className="mt-1 text-[13px] text-ink-3">Email, messages, documents, services, and MCP tool servers.</p>
-
-        <div className="mt-3 flex items-start gap-2 rounded-xl border border-line bg-card-2 px-3.5 py-2.5 text-[13px] text-ink-2">
-          <Icon name="plug" size={15} className="mt-0.5 shrink-0 text-ink-3" />
-          <span>{snapshot ? `${snapshot.connectors.filter((c) => c.status !== 'pending').length}/${snapshot.connectors.length} connector contracts active · ${snapshot.gaps.length} gaps · ${snapshot.pendingApprovals} pending approvals.` : 'Telegram and Email are first in the queue; Outlook, Dynamics, WhatsApp and iMessage follow behind explicit opt-in connection flows.'}</span>
-        </div>
-
-        <h2 className="mt-8 text-[13px] font-medium uppercase tracking-[0.05em] text-ink-3">Built-in capabilities</h2>
-        <div className="mt-2.5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-          {BUILTIN_CAPABILITIES.map((capability) => {
-            const enabled = !(settings?.capabilities?.disabledCapabilityIds ?? []).includes(capability.id)
-            return (
-              <CapabilityTile
-                key={capability.id}
-                capability={capability}
-                enabled={enabled}
-                health={settings?.capabilities?.health?.[capability.id]}
-                onToggle={(next) => updateCapabilityEnabled(capability.id, next)}
-                onCheck={() => checkCapability(capability, enabled)}
-              />
-            )
-          })}
-        </div>
-        <p className="mt-2 text-[13px] text-ink-3">Type <span className="font-mono">@</span> in the composer to attach one of these capabilities to a chat or task.</p>
-
-        <h2 className="mt-8 text-[13px] font-medium uppercase tracking-[0.05em] text-ink-3">Runtime capability health</h2>
-        <div className="mt-2.5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-          {sourceCards(snapshot, mcp, webhooks).map((card) => (
-            <SourceCapabilityCard key={card.title} {...card} />
-          ))}
-        </div>
-
-        {executableTrustItems.length > 0 && (
-          <>
-            <h2 className="mt-8 text-[13px] font-medium uppercase tracking-[0.05em] text-ink-3">Executable trust</h2>
-            <p className="mt-1 text-[13px] text-ink-3">Local scripts and packaged plugins stay approval-gated; review signatures, checksums, and sandbox intent before enabling.</p>
-            <div className="mt-2.5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-              {executableTrustItems.map((item) => <ExecutableTrustCard key={item.key} item={item} />)}
-            </div>
-          </>
-        )}
-
-        <h2 className="mt-8 text-[13px] font-medium uppercase tracking-[0.05em] text-ink-3">Connectors</h2>
-        <div className="mt-2.5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-          {CONNECTORS.map((c) => {
-            const expanded = open === c.id
-            const contract = snapshot?.connectors.find((x) => x.id === c.id)
-            const status = contract?.status ?? 'pending'
-            return (
-              <div key={c.id} className="overflow-hidden rounded-xl border border-line bg-card shadow-card">
-                <div className="flex items-start gap-3 p-3.5">
-                  <BrandIcon brand={connectorBrand(c.id)} size={36} />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[14px] font-medium text-ink">{c.name}</span>
-                      <span className={clsx('text-[12px] font-medium', DIFF_COLOR[c.difficulty])}>{c.difficulty}</span>
-                    </div>
-                    <div className="text-[12px] text-ink-3">{c.tag}</div>
-                    <p className="mt-1 text-[13px] leading-snug text-ink-2">{c.desc}</p>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between border-t border-line px-3.5 py-2">
-                  <span className="flex items-center gap-1.5 text-[13px] text-ink-3"><span className={clsx('h-1.5 w-1.5 rounded-full', STATUS_COLOR[status])} />{status === 'mock' ? 'Contract ready' : status.replace(/_/g, ' ')}</span>
-                  <button onClick={() => setOpen(expanded ? null : c.id)} className="rounded-lg px-2.5 py-1 text-[13px] font-medium text-ink-2 transition-colors hover:bg-ink-5 hover:text-ink">{expanded ? 'Close' : 'Configure'}</button>
-                </div>
-                {expanded && (
-                  <div className="border-t border-line bg-card-2 px-3.5 py-3">
-                    {contract && <div className="mb-2 rounded-lg border border-line bg-card px-2.5 py-2 text-[13px] text-ink-3">{contract.tools.length} narrow tools · transport {contract.transport ?? 'local only'}</div>}
-                    <div className="space-y-2">
-                      {c.fields.map((f) => (
-                        <div key={f}>
-                          <div className="mb-1 text-[12px] font-medium text-ink-3">{f}</div>
-                          <div className="h-8 rounded-lg border border-line bg-card px-3 text-[13px] leading-8 text-ink-4">—</div>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="mt-2.5 flex items-center gap-1.5 text-[12px] text-ink-3"><Icon name="clock" size={12} />Saving + live connection arrive in the Connectors phase.</div>
-                  </div>
-                )}
-              </div>
-            )
-          })}
-        </div>
-
-        <div className="mt-9 flex items-end justify-between">
+      <div className="mx-auto w-full max-w-[800px] px-4 py-7 sm:px-7 sm:py-9">
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h2 className="text-[13px] font-medium uppercase tracking-[0.05em] text-ink-3">MCP servers</h2>
-            <p className="mt-1 text-[13px] text-ink-3">Local stdio servers expose tools to the model as approval-gated TensorFold functions.</p>
+            <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-ink">Plugins</h1>
+            <p className="mt-1 text-[13px] leading-relaxed text-ink-2">Choose the tools and connections your assistant can use.</p>
+          </div>
+          <Button variant="ghost" size="sm" icon="refresh" disabled={loading || !!mcpBusy} onClick={() => void refreshLibrary()}>{loading ? 'Checking' : 'Refresh status'}</Button>
+        </div>
+        <nav aria-label="Plugin categories" className="mt-6 grid grid-cols-2 gap-1 rounded-xl border border-line bg-card-2 p-1 sm:grid-cols-4">
+          {LIBRARY_TABS.map((name) => <button key={name} type="button" aria-pressed={tab === name} onClick={() => setTab(name)} className={clsx('rounded-lg px-3 py-2 text-[13px] font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent', tab === name ? 'bg-card text-ink shadow-card' : 'text-ink-2 hover:bg-ink-5 hover:text-ink')}>
+            {name}{name === 'Installed' && executableTrustItems.length > 0 ? ` · ${executableTrustItems.length}` : ''}
+          </button>)}
+        </nav>
+        <div className="relative mt-4">
+          <Icon name="search" size={16} className="pointer-events-none absolute left-3 top-2.5 text-ink-2" />
+          <Input aria-label="Search plugins and connections" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tab === 'Built-in' ? 'Search built-in tools' : tab === 'Installed' ? 'Search installed plugins and scripts' : tab === 'Connections' ? 'Search connections' : 'Search MCP servers and services'} className="pl-9" />
+        </div>
+        {(error || loadErrors.length > 0) && <div role="alert" className="mt-3 rounded-xl border border-danger/30 bg-danger/5 p-3 text-[13px] leading-relaxed text-danger">
+          {error && <p>{error}</p>}{loadErrors.map((detail) => <p key={detail}>{detail}</p>)}
+          {loadErrors.length > 0 && <button type="button" className="mt-2 font-medium underline" disabled={loading} onClick={() => void refreshLibrary()}>Retry status check</button>}
+        </div>}
+        {activeRuns && (tab === 'Built-in' || tab === 'Installed') && <p role="status" className="mt-3 text-[13px] leading-relaxed text-ink-2">Finish or stop active tasks before changing tools, because settings changes reload registered plugins.</p>}
+
+        {tab === 'Built-in' && <section aria-label="Built-in tools" className="mt-5">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h2 className="text-[14px] font-medium text-ink">Included with TensorFold</h2>
+            <span className="text-[12px] text-ink-2">{BUILTIN_CAPABILITIES.filter((item) => item.status === 'available').length} available · {BUILTIN_CAPABILITIES.filter((item) => item.status === 'contract').length} need a worker</span>
+          </div>
+          <p className="mt-1 text-[13px] leading-relaxed text-ink-2">Type <span className="font-mono">@</span> in a chat to select a tool; access still follows your approval settings.</p>
+          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {builtins.map((capability) => {
+              const enabled = !(settings?.capabilities?.disabledCapabilityIds ?? []).includes(capability.id)
+              return <CapabilityTile key={capability.id} capability={capability} enabled={enabled} health={settings?.capabilities?.health?.[capability.id]} disabled={!settings || settingsBusy || activeRuns} onToggle={(next) => void updateCapabilityEnabled(capability.id, next)} onCheck={() => void checkCapability(capability, enabled)} />
+            })}
+          </div>
+          {!builtins.length && <LibraryEmpty title="No built-in tools match" detail="Try another name, such as browser or documents." />}
+        </section>}
+
+        {tab === 'Installed' && <section aria-label="Installed plugins" className="mt-5">
+          <h2 className="text-[14px] font-medium text-ink">On this Mac</h2>
+          <p className="mt-1 text-[13px] leading-relaxed text-ink-2">Manage existing local plugin and script registrations; enabling a trusted plugin loads its code into the app.</p>
+          <div className="mt-3 space-y-3">{installed.map((item) => <ExecutableTrustCard key={item.key} item={item} disabled={!settings || settingsBusy || activeRuns} onToggle={(enabled) => void updateExecutableEnabled(item, enabled)} />)}</div>
+          {!installed.length && <LibraryEmpty title={query.trim() ? 'No installed plugins match' : 'No local plugins registered'} detail={query.trim() ? 'Try another name or clear your search.' : 'Built-in tools are available in the first tab; external tool servers can be configured in Advanced.'} />}
+          <p className="mt-3 text-[12px] leading-relaxed text-ink-2">Plugin registration does not isolate code or confirm successful loading; review the source before approving trust.</p>
+        </section>}
+
+        {tab === 'Connections' && <section aria-label="Connections" className="mt-5">
+          <h2 className="text-[14px] font-medium text-ink">Connect your services</h2>
+          <p className="mt-1 text-[13px] leading-relaxed text-ink-2">Setup opens the connection settings with credential fields, scope controls and connection checks.</p>
+          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {connectors.map((connector) => {
+              const contract = snapshot?.connectors.find((item) => item.id === connector.id)
+              const state = contract?.status
+              const label = !snapshot ? 'Status unavailable' : state === 'mock' ? 'Demo connection' : state === 'connected' ? 'Connected' : state === 'error' ? 'Needs attention' : 'Not connected'
+              return <div key={connector.id} className="flex flex-col rounded-xl border border-line bg-card p-4 shadow-card">
+                <div className="flex items-start gap-3">
+                  <BrandIcon brand={connectorBrand(connector.id)} size={36} />
+                  <div className="min-w-0"><h3 className="text-[14px] font-medium text-ink">{connector.name}</h3><p className="mt-0.5 text-[12px] text-ink-2">{connector.tag}</p></div>
+                </div>
+                <p className="mt-3 flex-1 text-[13px] leading-relaxed text-ink-2">{connector.desc}</p>
+                {contract?.error && <p className="mt-2 break-words text-[13px] text-danger">{contract.error}</p>}
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
+                  <span className={clsx('text-[12px]', state === 'connected' ? 'text-positive' : state === 'error' ? 'text-danger' : 'text-ink-2')}>{label}</span>
+                  <Button variant="default" size="xs" icon="chevronRight" onClick={() => useStore.getState().setView({ name: 'settings', section: 'connectors' })}>{state === 'connected' ? 'Manage' : 'Set up'}</Button>
+                </div>
+              </div>
+            })}
+          </div>
+          {!connectors.length && <LibraryEmpty title="No connections match" detail="Try another service name or clear your search." />}
+        </section>}
+
+        {tab === 'Advanced' && <section aria-label="Advanced plugin connections">
+        <div className="mt-5 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 className="text-[14px] font-medium text-ink">MCP servers</h2>
+            <p className="mt-1 text-[13px] text-ink-2">Connect a tool server; use Ask to review each action, or explicitly choose Trusted.</p>
           </div>
           <div className="flex gap-2">
             <Button variant="default" icon="play" disabled={!!mcpBusy || !mcp?.servers.length} onClick={() => withMcpBusy('refresh', () => api.refreshMcpServer())}>{mcpBusy === 'refresh' ? 'Refreshing' : 'Refresh'}</Button>
-            <Button variant="primary" icon="plus" onClick={() => startMcpDraft()}>Add server</Button>
+            <Button variant="primary" icon="plus" disabled={!!mcpBusy} onClick={() => startMcpDraft()}>Add server</Button>
           </div>
         </div>
 
         <div className="mt-3 rounded-xl border border-line bg-card-2 px-3.5 py-2.5 text-[13px] text-ink-2">
-          {mcp ? `${mcp.servers.filter((server) => server.runtime.status === 'connected').length}/${mcp.servers.length} servers connected · ${mcp.tools.length} tools · ${mcp.resources.length} resources · ${mcp.prompts.length} prompts.` : 'Loading MCP servers…'}
+          {mcp ? `${mcp.servers.filter((server) => server.runtime.status === 'connected').length}/${mcp.servers.length} servers connected · ${mcp.tools.length} tools · ${mcp.resources.length} resources · ${mcp.prompts.length} prompts.` : loading ? 'Checking MCP servers…' : 'MCP status unavailable; retry the status check.'}
         </div>
 
         {mcpDraft && (
-          <div className="mt-3 rounded-xl border border-accent/40 bg-card p-3.5 shadow-card">
+          <fieldset disabled={!!mcpBusy} className="mt-3 min-w-0 rounded-xl border border-accent/40 bg-card p-3.5 shadow-card">
             <div className="mb-3 flex items-center justify-between">
               <div>
                 <div className="text-[13px] font-medium text-ink">{mcpDraft.id ? 'Edit MCP server' : 'New MCP server'}</div>
-                <div className="text-[13px] text-ink-3">Stdio transport; environment secrets stay in the main process.</div>
+                <div className="text-[13px] text-ink-2">Stdio transport; environment secrets stay in the main process.</div>
               </div>
-              <Button variant="ghost" size="sm" onClick={() => setMcpDraft(null)}>Cancel</Button>
+              <Button variant="ghost" size="sm" disabled={!!mcpBusy} onClick={() => setMcpDraft(null)}>Cancel</Button>
             </div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Labeled label="Name"><Input value={mcpDraft.name || ''} onChange={(e) => setMcpDraft({ ...mcpDraft, name: e.target.value })} placeholder="Filesystem" /></Labeled>
@@ -540,7 +565,7 @@ export function Plugins() {
                   <Labeled label="Docker image digest"><Input value={mcpDraft.dockerGateway?.image || ''} onChange={(e) => setMcpDraft({ ...mcpDraft, dockerGateway: { ...(mcpDraft.dockerGateway ?? { network: 'none', readOnlyRootfs: true, mounts: [], envAllowlist: [] }), image: e.target.value } })} placeholder="mcp/server@sha256:…" spellCheck={false} /></Labeled>
                   <Labeled label="Env allowlist"><Input value={mcpDraft.envAllowlistText || ''} onChange={(e) => setMcpDraft({ ...mcpDraft, envAllowlistText: e.target.value })} placeholder="API_TOKEN, TENANT_ID" spellCheck={false} /></Labeled>
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[13px] text-ink-3">Network</span>
+                    <span className="text-[13px] text-ink-2">Network</span>
                     {(['none', 'bridge'] as const).map((mode) => (
                       <button key={mode} onClick={() => setMcpDraft({ ...mcpDraft, dockerGateway: { ...(mcpDraft.dockerGateway ?? { image: '', readOnlyRootfs: true, mounts: [], envAllowlist: [] }), network: mode } })} className={clsx('rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors', (mcpDraft.dockerGateway?.network ?? 'none') === mode ? 'bg-accent text-accent-ink' : 'bg-ink-5 text-ink-2 hover:text-ink')}>{mode}</button>
                     ))}
@@ -554,65 +579,65 @@ export function Plugins() {
               <SwitchRow label="Enabled" checked={mcpDraft.enabled ?? true} onChange={(enabled) => setMcpDraft({ ...mcpDraft, enabled })} />
               <SwitchRow label="Auto-connect" checked={mcpDraft.autoConnect ?? false} onChange={(autoConnect) => setMcpDraft({ ...mcpDraft, autoConnect })} />
               <div className="flex items-center gap-2">
-                <span className="text-[13px] text-ink-3">Policy</span>
+                <span className="text-[13px] text-ink-2">Policy</span>
                 <button onClick={() => setMcpDraft({ ...mcpDraft, approvalMode: 'ask' })} className={clsx('rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors', (mcpDraft.approvalMode ?? 'ask') === 'ask' ? 'bg-accent text-accent-ink' : 'bg-ink-5 text-ink-2 hover:text-ink')}>Ask</button>
                 <button onClick={() => setMcpDraft({ ...mcpDraft, approvalMode: 'trusted' })} className={clsx('rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors', mcpDraft.approvalMode === 'trusted' ? 'bg-accent text-accent-ink' : 'bg-ink-5 text-ink-2 hover:text-ink')}>Trusted</button>
               </div>
               <Button variant="primary" size="sm" icon="check" onClick={saveMcpDraft} disabled={!!mcpBusy || !mcpDraft.command?.trim() || (mcpDraft.launchMode === 'docker_gateway' && !mcpDraft.dockerGateway?.image?.trim())}>{mcpBusy === 'save' ? 'Saving' : 'Save server'}</Button>
             </div>
-          </div>
+          </fieldset>
         )}
 
-        {mcp && mcp.servers.length > 0 ? (
+        {servers.length > 0 ? (
           <div className="mt-3 space-y-2.5">
-            {mcp.servers.map((server) => {
+            {servers.map((server) => {
               const connected = server.runtime.status === 'connected'
               return (
                 <div key={server.id} className="rounded-xl border border-line bg-card p-3.5 shadow-card">
-                  <div className="flex items-start gap-3">
+                  <div className="flex flex-col items-start gap-3 sm:flex-row">
                     <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-ink-5 text-ink-2"><Icon name="plug" size={18} /></span>
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-[14px] font-medium text-ink">{server.name}</span>
-                        <span className="flex items-center gap-1.5 text-[12px] text-ink-3"><span className={clsx('h-1.5 w-1.5 rounded-full', MCP_STATUS_COLOR[server.runtime.status])} />{server.runtime.status}</span>
+                        <span className="flex items-center gap-1.5 text-[12px] text-ink-2"><span className={clsx('h-1.5 w-1.5 rounded-full', MCP_STATUS_COLOR[server.runtime.status])} />{server.runtime.status}</span>
                         {server.launchMode === 'docker_gateway' && <span className="rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] font-medium text-ink-2">docker gateway</span>}
                         {server.approvalMode === 'trusted' && <span className="rounded-md bg-accent-soft px-1.5 py-0.5 text-[12px] font-medium text-accent">trusted</span>}
                       </div>
-                      <div className="mt-1 truncate font-mono text-[13px] text-ink-3">{server.command} {server.args.join(' ')}</div>
+                      <div className="mt-1 truncate font-mono text-[13px] text-ink-2">{server.command} {server.args.join(' ')}</div>
                       {server.runtime.lastError && <div className="mt-1 text-[13px] text-danger">{server.runtime.lastError}</div>}
                     </div>
                     <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
-                      <Button variant="ghost" size="xs" icon="edit" onClick={() => startMcpDraft(server)}>Edit</Button>
+                      <Button variant="ghost" size="xs" icon="edit" disabled={!!mcpBusy} onClick={() => startMcpDraft(server)}>Edit</Button>
                       {connected
                         ? <Button variant="default" size="xs" icon="stop" disabled={!!mcpBusy} onClick={() => withMcpBusy(`disconnect:${server.id}`, () => api.disconnectMcpServer(server.id))}>Stop</Button>
                         : <Button variant="default" size="xs" icon="play" disabled={!!mcpBusy || !server.enabled} onClick={() => withMcpBusy(`connect:${server.id}`, () => api.connectMcpServer(server.id))}>Connect</Button>}
                       <Button variant="ghost" size="xs" icon="trash" disabled={!!mcpBusy} onClick={() => withMcpBusy(`delete:${server.id}`, () => api.deleteMcpServer(server.id))}>Delete</Button>
                     </div>
                   </div>
-                  <div className="mt-3 flex flex-wrap items-center gap-2 text-[13px] text-ink-3">
+                  <div className="mt-3 flex flex-wrap items-center gap-2 text-[13px] text-ink-2">
                     <span>{server.runtime.tools.length} tool{server.runtime.tools.length === 1 ? '' : 's'}</span>
                     <span>{server.runtime.resources.length} resource{server.runtime.resources.length === 1 ? '' : 's'}</span>
                     <span>{server.runtime.prompts.length} prompt{server.runtime.prompts.length === 1 ? '' : 's'}</span>
                     {server.runtime.pid && <span>pid {server.runtime.pid}</span>}
                     {server.runtime.lastConnectedAt && <span>connected {new Date(server.runtime.lastConnectedAt).toLocaleTimeString()}</span>}
-                    <button className="font-medium text-ink-2 hover:text-ink" onClick={() => withMcpBusy(`refresh:${server.id}`, () => api.refreshMcpServer(server.id))}>refresh</button>
+                    <button disabled={!!mcpBusy} className="font-medium text-ink-2 hover:text-ink disabled:opacity-40" onClick={() => withMcpBusy(`refresh:${server.id}`, () => api.refreshMcpServer(server.id))}>refresh</button>
                   </div>
                   {server.runtime.tools.length > 0 && (
                     <div className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
                       {server.runtime.tools.slice(0, 6).map((tool) => (
                         <div key={tool.callName} className="flex items-center gap-2 rounded-lg border border-line bg-card-2 px-2.5 py-2">
-                          <Icon name={tool.readOnlyHint ? 'search' : tool.destructiveHint ? 'warning' : 'terminal'} size={13} className={tool.destructiveHint ? 'text-warn' : 'text-ink-3'} />
+                          <Icon name={tool.readOnlyHint ? 'search' : tool.destructiveHint ? 'warning' : 'terminal'} size={13} className={tool.destructiveHint ? 'text-ink-2' : 'text-ink-2'} />
                           <div className="min-w-0 flex-1">
                             <div className="truncate text-[13px] font-medium text-ink-2">{tool.title || tool.name}</div>
                             <div className="truncate font-mono text-[12px] text-ink-4">{tool.callName}</div>
                           </div>
-                          {tool.readOnlyHint && <Button variant="ghost" size="xs" onClick={() => api.testMcpTool(tool.callName).then(() => reloadMcp()).catch(() => reloadMcp())}>Test</Button>}
+                          {tool.readOnlyHint && <Button variant="ghost" size="xs" disabled={!!mcpBusy} onClick={() => void testMcpTool(tool.callName)}>Test</Button>}
                         </div>
                       ))}
                     </div>
                   )}
                   {server.runtime.logs.length > 0 && (
-                    <div className="mt-2 rounded-lg bg-card-2 px-2.5 py-2 font-mono text-[12px] leading-relaxed text-ink-3">
+                    <div className="mt-2 rounded-lg bg-card-2 px-2.5 py-2 font-mono text-[12px] leading-relaxed text-ink-2">
                       {server.runtime.logs.slice(-2).map((line, i) => <div key={i} className="truncate">{line}</div>)}
                     </div>
                   )}
@@ -622,13 +647,18 @@ export function Plugins() {
           </div>
         ) : (
           <div className="mt-3 flex flex-col items-center justify-center rounded-xl border border-dashed border-line py-10 text-center">
-            <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-ink-5 text-ink-3"><Icon name="grid" size={20} /></span>
-            <div className="mt-2.5 text-[13px] font-medium text-ink-2">No MCP servers yet</div>
-            <div className="mt-0.5 max-w-[340px] text-[13px] text-ink-3">Add a stdio server to make external tools available to Chat and Code runs.</div>
+            <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-ink-5 text-ink-2"><Icon name="grid" size={20} /></span>
+            <div className="mt-2.5 text-[13px] font-medium text-ink-2">{query.trim() ? 'No MCP servers match' : 'No MCP servers yet'}</div>
+            <div className="mt-0.5 max-w-[340px] text-[13px] text-ink-2">{query.trim() ? 'Try another server name or clear your search.' : 'Add a stdio server to make external tools available to Chat and Code runs.'}</div>
           </div>
         )}
+        <h2 className="mt-7 text-[14px] font-medium text-ink">Runtime status</h2>
+        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {sourceCards(snapshot, mcp, webhooks).filter((card) => matchesPluginSearch(query, card.title, card.detail, card.tools)).map((card) => <SourceCapabilityCard key={card.title} {...card} />)}
+        </div>
+        {matchesPluginSearch(query, 'webhooks incoming events endpoints') && <WebhooksPanel />}
+        </section>}
       </div>
-      <WebhooksPanel />
     </div>
   )
 }
@@ -646,33 +676,13 @@ function SwitchRow({ label, checked, onChange }: { label: string; checked: boole
   return (
     <div className="flex items-center gap-2">
       <Toggle label={label} checked={checked} onChange={onChange} />
-      <span className="text-[13px] text-ink-3">{label}</span>
+      <span className="text-[13px] text-ink-2">{label}</span>
     </div>
   )
 }
 
-function splitArgs(value: string): string[] {
-  const args: string[] = []
-  let current = ''
-  let quote: '"' | "'" | null = null
-  let escaping = false
-  for (const char of value) {
-    if (escaping) { current += char; escaping = false; continue }
-    if (char === '\\') { escaping = true; continue }
-    if (quote) {
-      if (char === quote) quote = null
-      else current += char
-      continue
-    }
-    if (char === '"' || char === "'") { quote = char; continue }
-    if (/\s/.test(char)) {
-      if (current) { args.push(current); current = '' }
-      continue
-    }
-    current += char
-  }
-  if (current) args.push(current)
-  return args
+function message(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason)
 }
 
 function splitCsv(value: string): string[] {

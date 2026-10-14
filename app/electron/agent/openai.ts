@@ -138,7 +138,6 @@ type NextOrTimer<T> =
   | { kind: 'error'; error: unknown }
 
 function nextOrTimer<T>(pending: Promise<IteratorResult<T>>, ms: number, signal?: AbortSignal): Promise<NextOrTimer<T>> {
-  if (signal?.aborted) return Promise.resolve({ kind: 'aborted' })
   return new Promise((resolve) => {
     let settled = false
     let timer: ReturnType<typeof setTimeout> | null = null
@@ -150,12 +149,16 @@ function nextOrTimer<T>(pending: Promise<IteratorResult<T>>, ms: number, signal?
       resolve(value)
     }
     const onAbort = () => done({ kind: 'aborted' })
-    timer = setTimeout(() => done({ kind: 'timer' }), Math.max(0, ms))
-    signal?.addEventListener('abort', onAbort, { once: true })
+    // The caller has already started reader.read()/iterator.next(). Observe its
+    // rejection even if cancellation won before this wait began, otherwise Stop
+    // can leak an unhandled AbortError from an ongoing HTTP response.
     pending.then(
       (next) => done({ kind: 'next', next }),
       (error) => done({ kind: 'error', error }),
     )
+    if (signal?.aborted) { done({ kind: 'aborted' }); return }
+    timer = setTimeout(() => done({ kind: 'timer' }), Math.max(0, ms))
+    signal?.addEventListener('abort', onAbort, { once: true })
   })
 }
 
