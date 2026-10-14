@@ -8,6 +8,7 @@ import { HF_ORIGIN } from './hub'
 import { EngineService, engineChildEnv } from './service'
 import { recordEnginePerformance, setEnginePerformanceRecorder } from './provider'
 import { makeHarness, processAlive, seedModel, waitFor } from './test-fixtures/harness'
+import { ModelRevisions } from './model-revisions'
 
 const GIB = 1024 ** 3
 const SHA = 'd'.repeat(40)
@@ -69,6 +70,7 @@ async function main() {
     await waitFor(() => synced.length === 1, 5000, 'installed list to refresh')
     assert.deepEqual(synced, ['mlx-community/Qwen3.5-2B-MLX-4bit'])
     const installed = await service.installed()
+    assert.equal(installed[0].source, 'download')
     assert.equal(installed[0].family, 'Qwen3.5-2B or Qwen3.8-27B')
     assert.equal(installed[0].format, '4-bit, group 64')
     assert.equal(installed[0].fitsMemory, true)
@@ -153,17 +155,38 @@ async function main() {
     assert.deepEqual(after.map((m) => m.repo), ['Other/Kept'])
     await assert.rejects(() => fs.stat(path.join(h.hub, 'models--mlx-community--Qwen3.5-2B-MLX-4bit')), { code: 'ENOENT' })
     await fs.stat(path.join(h.hub, 'models--Other--Kept'))
+    assert.equal(after[0].source, 'cache')
+    await assert.rejects(() => service.remove('Other/Kept'), /shared cache/)
+    assert.ok(await fs.stat(path.join(h.hub, 'models--Other--Kept')), 'a forged delete cannot remove another client’s download')
 
     // The 27B's drafter goes with it unless another installed model still uses it.
     await seedModel(h.hub, 'TensorFold/Qwen3.8-27B-MLX-4bit')
     await seedModel(h.hub, 'z-lab/Qwen3.8-27B-DFlash2', { dflash: true })
+    const revisions = new ModelRevisions(h.root, () => h.hub)
+    await revisions.commit([{ repo: 'TensorFold/Qwen3.8-27B-MLX-4bit', revision: 'a'.repeat(40) }, { repo: 'z-lab/Qwen3.8-27B-DFlash2', revision: 'a'.repeat(40) }])
     await service.installed(true)
     await service.remove('TensorFold/Qwen3.8-27B-MLX-4bit')
     await assert.rejects(() => fs.stat(path.join(h.hub, 'models--z-lab--Qwen3.8-27B-DFlash2')), { code: 'ENOENT' })
 
+    // A managed repo can also hold another client's revisions. Those and their shared blobs stay.
+    await seedModel(h.hub, 'Example/SharedRevisions')
+    await revisions.commit([{ repo: 'Example/SharedRevisions', revision: 'a'.repeat(40) }])
+    const sharedRepo = path.join(h.hub, 'models--Example--SharedRevisions')
+    const externalSnapshot = path.join(sharedRepo, 'snapshots', 'b'.repeat(40))
+    await fs.mkdir(externalSnapshot)
+    await fs.writeFile(path.join(externalSnapshot, 'external-checkpoint'), 'another client')
+    await service.remove('Example/SharedRevisions')
+    assert.equal(await fs.readFile(path.join(externalSnapshot, 'external-checkpoint'), 'utf8'), 'another client')
+    await fs.stat(path.join(sharedRepo, 'blobs', 'weights'))
+    assert.equal((await fs.readFile(path.join(sharedRepo, 'refs', 'main'), 'utf8')).trim(), 'a'.repeat(40), 'shared refs are never rewritten by cache removal')
+    await assert.rejects(() => fs.stat(path.join(sharedRepo, 'snapshots', 'a'.repeat(40))), { code: 'ENOENT' })
+
     // A symlinked repo folder is never followed by delete.
     const outside = path.join(h.root, 'outside')
     await fs.mkdir(outside)
+    await seedModel(h.hub, 'Org/Linked')
+    await revisions.commit([{ repo: 'Org/Linked', revision: 'a'.repeat(40) }])
+    await fs.rm(path.join(h.hub, 'models--Org--Linked'), { recursive: true })
     await fs.symlink(outside, path.join(h.hub, 'models--Org--Linked'))
     await assert.rejects(() => service.remove('Org/Linked'), /not a cache folder/)
     await fs.stat(outside)

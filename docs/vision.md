@@ -1,5 +1,17 @@
 # Image input
 
+This page describes image input in the Python engine, frozen at 0.6.6. Install that engine from the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6) to serve images. The native binary refuses every
+`--vision` flag at startup, reads no vision tower, and answers image parts with HTTP 400.
+Parts of it came from pull requests: GLM-5.3-Flash images by @mgoldwasser
+([#101](https://github.com/ashhart/TensorFold/pull/101)), Flash Next images on CUDA by @shantanugoel
+([#146](https://github.com/ashhart/TensorFold/pull/146)) from @MiaAI-Lab's patch, video by @MiaAI-Lab
+([#240](https://github.com/ashhart/TensorFold/pull/240)), `--vision-max-images` by @edurdias
+([#170](https://github.com/ashhart/TensorFold/pull/170)), `--vision-offload` by @barelyworkingcode
+([#187](https://github.com/ashhart/TensorFold/pull/187)), `--vision-image-tokens` by @MiaAI-Lab
+([#239](https://github.com/ashhart/TensorFold/pull/239)), and HTTPS image URLs and the redacted request log by @di37
+([#64](https://github.com/ashhart/TensorFold/pull/64)). The [credits](credits.md) list them all.
+
 The opt-in `--vision` flag accepts image and text content parts through the existing OpenAI-compatible chat API. It supports GLM-5.3-Flash on MLX and Qwen3.5/3.8 dense checkpoints on MLX and CUDA. Image features enter the existing model's prompt prefill; generated text still uses that family's normal decoder and speculative path.
 The checkpoint must contain its vision tower, tokenizer, processor files and vision configuration; text-only conversions cannot recover image support from a flag. GLM-5.3-Flash uses its own GLM5-Next image processor and tower while sharing TensorFold's already-loaded language model and MTP head.
 Video, audio and image generation are not supported by this adapter.
@@ -8,10 +20,11 @@ Qwen3.8 Flash Next supports images on one CUDA GPU with `--parallel` of at least
 
 ## Start a server
 
-Install the optional image dependencies (from a checkout, `python -m pip install '.[vision]'`):
+Install the Python engine with its optional image dependencies (from a checkout of the `v0.6.6` tag,
+`python -m pip install '.[vision]'`):
 
 ```bash
-python -m pip install 'tensorfold[vision] @ git+https://github.com/ashhart/TensorFold.git'
+python -m pip install 'tensorfold[vision] @ git+https://github.com/ashhart/TensorFold.git@v0.6.6'
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --vision
 tensorfold serve TensorFold/GLM-5.3-Flash-MLX-4bit-MTP --vision
 ```

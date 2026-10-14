@@ -592,7 +592,7 @@ export function RoomCanvas({ room, providers, project, onSetSeats, onSetCollabor
 function AddSeat({ room, onAdd, onCancel }: { room: Room; onAdd: (s: Seat) => void; onCancel: () => void }) {
   const settings = useStore((s) => s.settings)!
   const project = useStore((s) => s.projects.find((p) => p.id === room.projectId)) ?? null
-  const agentPresets = settings.agentPresets ?? []
+  const agentPresets = (settings.agentPresets ?? []).filter((preset) => !preset.archivedAt && !preset.paused)
   const pickerProviders = allowedProviders(settings.providers, project)
   const def = projectDefaultModel(project, settings.providers)
   // Name seats after their role (planner, planner-2, …) so the chosen role is

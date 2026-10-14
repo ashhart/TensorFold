@@ -53,7 +53,7 @@ pub fn braveUrl(a: Allocator, query: []const u8, count: usize) Allocator.Error![
 
 /// Text of an HTML fragment: tags dropped, entities decoded, spaces collapsed.
 fn fragmentText(a: Allocator, fragment: []const u8) Allocator.Error![]const u8 {
-    const t = try html.toText(a, fragment, 2000);
+    const t = try html.toText(a, fragment, 2000, null);
     return std.mem.trim(u8, t.text, " \n");
 }
 
@@ -89,25 +89,35 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
     var out: std.ArrayList(Result) = .empty;
     const marker = m.link;
     var from: usize = 0;
+    var last: usize = 0; // where the previous link ended: every search back stops there, so each byte is read once
     while (out.items.len < limit) {
         const at = std.mem.indexOfPos(u8, page, from, marker) orelse break;
-        const tag_start = std.mem.lastIndexOfScalar(u8, page[0..at], '<') orelse break;
+        const lt = std.mem.lastIndexOfScalar(u8, page[last..at], '<') orelse { // a mark outside any tag: skip it
+            from = at + marker.len;
+            last = at;
+            continue;
+        };
+        const tag_start = last + lt;
         const tag_end = std.mem.indexOfScalarPos(u8, page, at, '>') orelse break;
         const next = std.mem.indexOfPos(u8, page, tag_end, marker) orelse page.len;
         from = tag_end;
-        const block_start = std.mem.lastIndexOf(u8, page[0..tag_start], "class=\"result ") orelse tag_start;
+        const lo = last;
+        last = tag_end;
+        const block = std.mem.lastIndexOf(u8, page[lo..tag_start], "class=\"result ");
+        const block_start = if (block) |b| lo + b else tag_start;
         if (std.mem.indexOf(u8, page[block_start..tag_start], "result--ad") != null) continue;
         const tag = page[tag_start..tag_end];
         const href_at = std.mem.indexOf(u8, tag, "href=\"") orelse continue;
         const href_end = std.mem.indexOfScalarPos(u8, tag, href_at + 6, '"') orelse continue;
         const url = (try resultTarget(a, tag[href_at + 6 .. href_end])) orelse continue;
-        const close = std.mem.indexOfPos(u8, page, tag_end, "</a>") orelse continue;
+        const close = std.mem.indexOfPos(u8, page[0..next], tag_end, "</a>") orelse continue; // within its own result
         const title = try fragmentText(a, page[tag_end + 1 .. close]);
         var snippet: []const u8 = "";
         if (std.mem.indexOfPos(u8, page[0..next], close, m.snippet)) |s| {
-            const s_open = std.mem.indexOfScalarPos(u8, page, s, '>') orelse s;
-            const s_close = std.mem.indexOfPos(u8, page, s_open, m.snippet_end) orelse s_open;
-            snippet = try fragmentText(a, page[s_open + 1 .. s_close]);
+            const s_open = (std.mem.indexOfScalarPos(u8, page[0..next], s, '>') orelse s) + 1;
+            // a snippet with no end (a page cut at its size cap) is left out rather than sliced backwards
+            if (std.mem.indexOfPos(u8, page[0..next], s_open, m.snippet_end)) |s_close|
+                snippet = try fragmentText(a, page[s_open..s_close]);
         }
         var seen = false;
         for (out.items) |r| seen = seen or std.mem.eql(u8, r.url, url);
@@ -171,6 +181,19 @@ test "DuckDuckGo's lite page reads the same way" {
     try std.testing.expectEqualStrings("Zig News", results[0].title);
     try std.testing.expectEqualStrings("Release notes & more", results[0].snippet);
     try std.testing.expectEqualStrings("Two", results[1].title);
+}
+
+test "a page cut inside a snippet keeps its result without the snippet" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const full = "<a class=\"result__a\" href=\"https://example.org/a\">A</a><a class=\"result__snippet\" href=\"x\">";
+    const short = "<a href=\"https://example.org/b\" class='result-link'>B</a></td></tr><tr><td class='result-snippet'>";
+    for ([_][]const u8{ full, short }, [_]bool{ false, true }) |page, is_lite| {
+        const results = if (is_lite) try parseDuckDuckGoLite(a, page, 5) else try parseDuckDuckGo(a, page, 5);
+        try std.testing.expectEqual(@as(usize, 1), results.len);
+        try std.testing.expectEqualStrings("", results[0].snippet);
+    }
 }
 
 test "Brave results and query encoding" {

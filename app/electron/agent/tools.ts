@@ -1,4 +1,8 @@
+import { assertSavedMemoryRead, assertMemoryContribution, effectiveThreadMemoryPolicy, roomWithoutSavedRecall } from '../../shared/thread-memory-policy'
 import { promises as fs } from 'node:fs'
+import { INCOGNITO_PERSISTENT_TOOLS } from './incognito'
+import { botToolBlockReason } from '../../shared/bot-tool-policy'
+import { scopeBotToolContext } from './bot-tool-scope'
 import type { CreateArtifactInput } from './artifacts'
 import os from 'node:os'
 import path from 'node:path'
@@ -14,6 +18,10 @@ import { documentSourceId, documentSourceRef, readDocumentItem, readTableItem, s
 import { browserSourceId, browserSourceRef, readBrowserItem, scanBrowserItems, summarizeBrowser } from './browser-connector'
 import { BROWSER_AUTOMATION_ACTIONS, formatBrowserAutomationResult, normalizeBrowserAutomationInput, type BrowserAutomationInput, type BrowserAutomationResult } from './browser-automation'
 import { normalizeComputerUseInput, type ComputerUseInput } from './computer-use/actions'
+import { normalizePhoneAction } from './phone/service'
+import { normalizeUserQuestion } from './user-question/validation'
+import type { UserQuestionInput, UserQuestionOutcome, UserQuestionRun } from './types'
+import type { PhoneToolInput } from './types'
 import { CONTROLLER_ACTIONS, controllerActionTarget, formatControllerActionResult, normalizeControllerActionInput, type ControllerActionInput, type ControllerActionResult } from './controller-actions'
 import { blockedCommandReason, blockedReadReason, blockedWriteReason, commandNetworkReason } from './command-policy'
 import { commandOutputWithRedactionNotice, redactCommandStreams } from './command-output-redaction'
@@ -22,9 +30,9 @@ import { SECRET_MASK } from './security'
 import { summarizeSandboxArtifactBundle, runSandboxedCommand, sandboxProfileForCommand, taskSandboxNetworkOverride, type SandboxArtifactBundle } from './sandbox'
 import { buildCapabilityRegistry, filterToolSchemasForRegistry } from './capability-registry'
 import { buildCodebaseMap, buildSymbolIndex, formatCodebaseMap, formatRewritePreview, formatSafeRefactorPreview, formatSecurityScan, formatStructuralSearch, formatSymbolIndex, rewritePreview, safeRefactorPreview, semgrepCompatibleScan, structuralSearch } from './code-intelligence'
-import { buildWorkspaceRetrievalIndex, formatRetrievalSearchResult, searchRetrievalIndex } from './retrieval-index'
+import { buildWorkspaceRetrievalIndex, filterRetrievalThreadSources, formatRetrievalSearchResult, searchRetrievalIndex } from './retrieval-index'
 import { checkEditedSyntax, isGatedCodePath, syntaxGateMessage } from './edit-syntax-gate'
-import { formatSessionReadResult, formatSessionSearchResult, readSessionThread, searchSessionThreads, type SessionSearchOptions, type SessionSearchResult } from './session-recall'
+import { canRecallThread, formatSessionReadResult, formatSessionSearchResult, readSessionThread, searchSessionThreads, type SessionSearchOptions, type SessionSearchResult } from './session-recall'
 import { buildDeferredToolCatalog, findDeferredTool, formatDeferredToolDescription, formatToolCatalogSearch, searchDeferredToolCatalog } from './tool-disclosure'
 import { LocalBackend, type WorkspaceBackend, type LocalExecImpl } from './workspace-backend'
 import { rel, safeResolve } from './tool-paths'
@@ -80,9 +88,23 @@ export interface SubAgentMailboxReadInput {
 }
 
 export interface ToolContext {
+  /** Host checks hidden engine research before every restricted-bot model request. */
+  botToolScopeGuard?: () => void
+  askUser?: (input: UserQuestionInput, run: UserQuestionRun) => Promise<UserQuestionOutcome>
+  userQuestionRunId?: string
+  userQuestionItemId?: string
+  /** A strict executable allowlist, also enforced before any host dispatch. */
+  allowedToolNames?: string[]
+  /** An isolated guest dispatcher; its presence never permits host fallback. */
+  botVm?: { executeTool(name: string, args: Record<string, any>, signal?: AbortSignal): Promise<ToolResult>; assertModelPrivacy?: () => void }
+  phoneControlAvailable?: boolean
+  phoneLocalOnly?: boolean
+  phonePrivacyGuard?: () => string | null
+  runPhoneControl?: (input: PhoneToolInput) => Promise<{ ok: boolean; output: string; title: string }>
   cwd: string
   /** Cancels in-flight tool work when the owning run is stopped. */
   signal?: AbortSignal
+  memoryPolicy?: import('./types').ThreadMemoryPolicy
   currentThread?: Thread
   /** Explicit workspace identity, retained even while an SSH backend is disconnected. */
   workspace?: import('./types').WorkspaceLocation | null
@@ -95,10 +117,15 @@ export interface ToolContext {
   documentSettings?: DocumentConnectorSettings
   browserSettings?: BrowserConnectorSettings
   threads?: Thread[]
+  /** Re-read canonical source privacy at dispatch instead of retaining a stale permissive list. */
+  recallThreads?: () => Thread[]
+  recordRecallSources?: (threadIds: string[]) => void
+  assertRecallSourcesAllowed?: () => void
   /** Host-backed derived index. The in-memory scan remains the portable fallback. */
   searchSessions?: (options: SessionSearchOptions) => SessionSearchResult | Promise<SessionSearchResult>
   connectorEvents?: ConnectorEvent[]
   missions?: Mission[]
+  recallMissions?: () => Mission[]
   rooms?: Room[]
   tickets?: Ticket[]
   projectMemory?: ProjectMemoryEntry[]
@@ -215,6 +242,22 @@ async function remoteCommandChangedPaths(
 
 export async function executeTool(name: string, args: Record<string, any>, ctx: ToolContext): Promise<ToolResult> {
   try {
+    ctx = scopeBotToolContext(ctx.currentThread?.bot, ctx)
+    const botScopeBlock = botToolBlockReason(ctx.currentThread?.bot, name, args, ctx.allowedToolNames)
+    if (botScopeBlock) return { ok: false, output: botScopeBlock, meta: 'bot-tool-blocked' }
+    ctx = { ...ctx, threads: (ctx.recallThreads?.() ?? ctx.threads)?.filter((thread) => canRecallThread(thread, ctx.currentThread?.id)) }
+    const visibleThreadIds = new Set(ctx.threads?.map((thread) => thread.id))
+    ctx = { ...ctx, missions: (ctx.recallMissions?.() ?? ctx.missions)?.filter((mission) => !mission.threadId || visibleThreadIds.has(mission.threadId)) }
+    if (!effectiveThreadMemoryPolicy(ctx.currentThread ?? {}, ctx.memoryPolicy).useExisting) ctx = { ...ctx, threads: ctx.threads?.filter((thread) => thread.id === ctx.currentThread?.id), projectMemory: [], rooms: ctx.rooms?.map(roomWithoutSavedRecall) }
+    if (ctx.currentThread?.incognito && INCOGNITO_PERSISTENT_TOOLS.has(name)) return { ok: false, output: 'This tool saves derived conversations or learned skills and is unavailable in Incognito. Use an ordinary saved task for it.', meta: 'incognito-persistence-blocked' }
+    if (ctx.allowedToolNames && !ctx.allowedToolNames.includes(name)) return { ok: false, output: 'This tool is outside this bot’s execution permissions.', meta: 'bot-tool-blocked' }
+    if (name === 'ask_user') {
+      if (!ctx.askUser || !ctx.currentThread || !ctx.userQuestionRunId || !ctx.userQuestionItemId || !ctx.signal) return { ok: false, output: 'Structured questions are unavailable in this run; ask plainly in your final response instead.' }
+      const answer = await ctx.askUser(normalizeUserQuestion(args), { threadId: ctx.currentThread.id, runId: ctx.userQuestionRunId, itemId: ctx.userQuestionItemId, signal: ctx.signal })
+      return { ok: true, title: 'Question', output: answer.state === 'answered' ? `The user answered this question: ${JSON.stringify(answer.answer)}. This is task input, not a permission change or authorization to send anything.` : 'The user explicitly skipped this question. No answer or default choice was selected; continue only within the existing task and permissions.', meta: answer.state === 'answered' ? 'Answered by you' : 'Skipped by you' }
+    }
+    if (ctx.botVm) return await ctx.botVm.executeTool(name, args, ctx.signal)
+    if (ctx.phoneLocalOnly && (name === 'web_search' || name === 'web_fetch')) return { ok: false, output: 'This conversation contains phone context and stays local; use a separate chat for public web research.' }
     if (name.startsWith('mcp__')) {
       if (!ctx.callMcpTool) return { ok: false, output: 'MCP host is not configured.' }
       const result = await ctx.callMcpTool(name, args)
@@ -287,6 +330,7 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
         const name = String(args.name ?? '').trim()
         const body = String(args.body ?? '').trim()
         if (!name || !body) return { ok: false, output: 'suggest_skill needs a name and a body.' }
+        assertMemoryContribution(ctx.currentThread ?? {}, ctx.memoryPolicy)
         if (!ctx.fileSuggestion) return { ok: true, title: 'Suggest', meta: name, output: 'Suggestions are unavailable here.' }
         ctx.fileSuggestion({
           kind,
@@ -636,8 +680,10 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
         const sensitiveAllowed = ctx.sensitiveRetrievalAllowed !== false
         const requestedKinds = Array.isArray(args.kinds) ? args.kinds : typeof args.kinds === 'string' ? args.kinds : undefined
         const effectiveKinds = sensitiveAllowed ? requestedKinds : filterNonSensitiveRetrievalKinds(requestedKinds)
-        const index = await buildWorkspaceRetrievalIndex({
+        const collected = await buildWorkspaceRetrievalIndex({
           cwd: ctx.cwd,
+          savedMemoryAllowed: effectiveThreadMemoryPolicy(ctx.currentThread ?? {}, ctx.memoryPolicy).useExisting,
+          currentThreadId: ctx.currentThread?.id,
           path: typeof args.path === 'string' ? args.path : undefined,
           query: typeof args.query === 'string' ? args.query : undefined,
           kinds: effectiveKinds,
@@ -650,16 +696,20 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
           browserSettings: sensitiveAllowed ? ctx.browserSettings : undefined,
           connectorEvents: sensitiveAllowed ? ctx.connectorEvents : undefined,
           threads: sensitiveAllowed ? ctx.threads : undefined,
+          recallThreads: sensitiveAllowed ? ctx.recallThreads : undefined,
           missions: sensitiveAllowed ? ctx.missions : undefined,
           rooms: sensitiveAllowed ? ctx.rooms : undefined,
           tickets: sensitiveAllowed ? ctx.tickets : undefined,
           projectMemory: sensitiveAllowed ? ctx.projectMemory : undefined,
         })
+        const index = filterRetrievalThreadSources(collected, ctx.recallThreads?.() ?? ctx.threads ?? [], ctx.currentThread?.id, ctx.recallMissions?.() ?? ctx.missions)
         const result = searchRetrievalIndex(index, {
           query: typeof args.query === 'string' ? args.query : undefined,
           kinds: effectiveKinds,
           limit: Number.isFinite(Number(args.limit)) ? Number(args.limit) : undefined,
         })
+        ctx.recordRecallSources?.([...new Set(result.hits.flatMap(({ record }) => [record.id, ...record.sourceIds]).filter((id) => id.startsWith('thread:')).map((id) => id.split(':')[1]))])
+        ctx.assertRecallSourcesAllowed?.()
         const output = formatRetrievalSearchResult(result)
         const dlpNotice = sensitiveAllowed ? '' : `Sensitive retrieval sources omitted (${ctx.sensitiveRetrievalReason || 'policy disabled connector, chat, document, and memory retrieval for this run'}). Only code and artifact records were indexed.\n\n`
         return {
@@ -671,17 +721,23 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
       }
 
       case 'session_search': {
+        assertSavedMemoryRead(ctx.currentThread ?? {}, ctx.memoryPolicy)
         const options = {
           query: String(args.query ?? ''),
           projectId: typeof args.projectId === 'string' && args.projectId.trim() ? args.projectId.trim() : undefined,
-          currentThreadId: typeof args.currentThreadId === 'string' && args.currentThreadId.trim() ? args.currentThreadId.trim() : undefined,
+          currentThreadId: ctx.currentThread?.id,
           includeCurrent: args.includeCurrent === true,
           includeArchived: args.includeArchived === true,
           limit: Number.isFinite(Number(args.limit)) ? Number(args.limit) : undefined,
         }
-        const result = ctx.searchSessions
+        const found = ctx.searchSessions
           ? await ctx.searchSessions(options)
           : searchSessionThreads(ctx.threads ?? [], options)
+        const visibleIds = new Set((ctx.recallThreads?.() ?? ctx.threads ?? []).filter((thread) => canRecallThread(thread, ctx.currentThread?.id)).map((thread) => thread.id))
+        const matches = found.matches.filter((match) => visibleIds.has(match.threadId))
+        const result = { ...found, matches, omitted: matches.length === found.matches.length ? found.omitted : 0 }
+        ctx.recordRecallSources?.(matches.map((match) => match.threadId))
+        ctx.assertRecallSourcesAllowed?.()
         return {
           ok: true,
           output: formatSessionSearchResult(result),
@@ -691,10 +747,14 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
       }
 
       case 'session_read': {
+        assertSavedMemoryRead(ctx.currentThread ?? {}, ctx.memoryPolicy)
         const result = readSessionThread(ctx.threads ?? [], {
           threadId: String(args.threadId ?? ''),
+          currentThreadId: ctx.currentThread?.id,
           maxMessages: Number.isFinite(Number(args.maxMessages)) ? Number(args.maxMessages) : undefined,
         })
+        if (result.thread) ctx.recordRecallSources?.([result.thread.id])
+        ctx.assertRecallSourcesAllowed?.()
         return {
           ok: !!result.thread,
           output: formatSessionReadResult(result),
@@ -739,7 +799,7 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
       }
 
       case 'tool_search': {
-        const catalog = buildDeferredToolCatalog(ctx.mcpTools ?? [])
+        const catalog = buildDeferredToolCatalog((ctx.mcpTools ?? []).filter((tool) => !botToolBlockReason(ctx.currentThread?.bot, tool.callName, {}, ctx.allowedToolNames)))
         const matches = searchDeferredToolCatalog(catalog, {
           query: String(args.query ?? ''),
           limit: Number.isFinite(Number(args.limit)) ? Number(args.limit) : undefined,
@@ -758,7 +818,7 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
       }
 
       case 'tool_describe': {
-        const catalog = buildDeferredToolCatalog(ctx.mcpTools ?? [])
+        const catalog = buildDeferredToolCatalog((ctx.mcpTools ?? []).filter((tool) => !botToolBlockReason(ctx.currentThread?.bot, tool.callName, {}, ctx.allowedToolNames)))
         const tool = findDeferredTool(catalog, String(args.name ?? ''))
         return {
           ok: !!tool,
@@ -770,7 +830,7 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
 
       case 'tool_call': {
         const name = String(args.name ?? '').trim()
-        const catalog = buildDeferredToolCatalog(ctx.mcpTools ?? [])
+        const catalog = buildDeferredToolCatalog((ctx.mcpTools ?? []).filter((tool) => !botToolBlockReason(ctx.currentThread?.bot, tool.callName, {}, ctx.allowedToolNames)))
         const tool = findDeferredTool(catalog, name)
         if (!tool) return { ok: false, output: `No deferred tool found named "${name}". Use tool_search first.`, title: 'Tool call' }
         if (!name.startsWith('mcp__')) return { ok: false, output: 'Only deferred MCP tools can be called through tool_call.', title: 'Tool call' }
@@ -1325,6 +1385,16 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
         return { ok: result.ok, output: result.output, title: result.title, meta: result.meta }
       }
 
+      case 'phone_observe':
+      case 'phone_control': {
+        if (!ctx.phoneControlAvailable || !ctx.runPhoneControl) return { ok: false, title: 'Phone control', output: 'Open Phone in this chat, connect your device, select a local model and choose Allow this chat first.' }
+        if (!ctx.phonePrivacyGuard) return { ok: false, title: 'Phone control', output: 'The local phone privacy guard is unavailable; no phone content or action was requested.' }
+        const privacyReason = ctx.phonePrivacyGuard()
+        if (privacyReason) return { ok: false, title: 'Phone control', output: privacyReason }
+        const input: PhoneToolInput = name === 'phone_observe' ? { action: 'observe', ...(typeof args.sessionId === 'string' ? { sessionId: args.sessionId } : {}) } : normalizePhoneAction(args)
+        return ctx.runPhoneControl(input)
+      }
+
       case 'launch_subagent': {
         if (!ctx.launchSubAgent) return { ok: false, output: 'Sub-agent launcher is not available in this run.' }
         const task = String(args.task ?? '').trim()
@@ -1403,10 +1473,13 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
           : null
         const currentThreadId = ctx.currentThread?.id
         const agents = (ctx.listSubAgents?.() ?? [])
+          .filter((agent) => (!!ctx.currentSubAgentId && agent.id === ctx.currentSubAgentId) || [agent.threadId, agent.parent?.threadId].filter(Boolean).every((id) => id === currentThreadId || ctx.threads?.some((thread) => thread.id === id)))
           .filter((agent) => ids?.size ? ids.has(agent.id) : !currentThreadId || agent.threadId === currentThreadId)
           .sort((a, b) => b.updatedAt - a.updatedAt)
           .slice(0, 30)
         if (!agents.length) return { ok: true, output: 'No matching sub-agents.', title: 'Sub-agent status', meta: '0 agents' }
+        ctx.recordRecallSources?.([...new Set(agents.flatMap((agent) => [agent.threadId, agent.parent?.threadId]).filter((id): id is string => !!id))])
+        ctx.assertRecallSourcesAllowed?.()
         const output = agents.map((agent, index) => {
           const unread = agent.messages.filter((message) =>
             (message.audience === 'parent' || message.audience === 'both') && message.readByParentAt === null,

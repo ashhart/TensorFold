@@ -8,7 +8,7 @@ import { Button } from './ui'
 import { ThemePanel } from './ThemePanel'
 import { SkillsCommands } from './SkillsCommands'
 import type { Settings as TSettings } from '../lib/types'
-import { AgentBuilderPanel, ALL_SETTINGS_SECTIONS, groupOfSection, SETTINGS_GROUPS, Section, SettingsPane, type SettingsSection } from './settings/shared'
+import { ALL_SETTINGS_SECTIONS, groupOfSection, SETTINGS_GROUPS, Section, SettingsPane, type SettingsSection } from './settings/shared'
 import { RuntimeSettings } from './settings/RuntimeSettings'
 import { OrchestratorSettings } from './settings/OrchestratorSettings'
 import { VoiceSettings } from './settings/VoiceSettings'
@@ -21,6 +21,9 @@ import { useProviderSettings } from './settings/useProviderSettings'
 import { useConnectorSources } from './settings/useConnectorSources'
 import { useBotConnectors } from './settings/useBotConnectors'
 import { useRemoteSecurity } from './settings/useRemoteSecurity'
+import { AppSettings } from './settings/AppSettings'
+import { ModelFoldersSettings } from './settings/ModelFoldersSettings'
+import { PhoneSettings } from './settings/PhoneSettings'
 
 function consumeRequestedSettingsSection(): SettingsSection | null {
   const requested = consumeSettingsSection()
@@ -155,7 +158,7 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
   // position on the frosted shell, and the sections render on the content card.
   return (
     <div className="flex h-full w-full overflow-hidden">
-      <aside className="flex w-[240px] shrink-0 flex-col">
+      <aside className="hidden w-[240px] shrink-0 flex-col sm:flex">
         <div className="drag flex h-[52px] shrink-0 items-end px-3 pb-1">
           <div className="h-1 w-[58px] shrink-0" aria-hidden="true" />
         </div>
@@ -204,8 +207,14 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
         </div>
       </aside>
       <section className="content-card relative flex min-w-0 flex-1 flex-col">
-        <div className="drag flex h-11 shrink-0 items-center justify-end px-3">
-          <Button variant="ghost" size="sm" icon="x" onClick={close} className="no-drag">Close</Button>
+        <div className="drag flex min-h-11 shrink-0 items-center justify-between gap-3 px-3 py-1">
+          <label className="no-drag flex min-w-0 flex-1 items-center sm:hidden">
+            <span className="sr-only">Settings section</span>
+            <select aria-label="Settings section" value={activeSection} onChange={(event) => setActiveSection(event.target.value as SettingsSection)} className="h-9 w-full min-w-0 rounded-lg border border-line bg-card px-2 text-[13px] text-ink outline-none focus:border-accent">
+              {SETTINGS_GROUPS.map((group) => <optgroup key={group.id} label={group.label}>{group.sections.map((section) => <option key={section.id} value={section.id}>{section.label}</option>)}</optgroup>)}
+            </select>
+          </label>
+          <Button variant="ghost" size="sm" icon="x" onClick={close} className="no-drag sm:ml-auto">Close</Button>
         </div>
         {draftState.dirty && <div role="status" className="no-drag mx-6 mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-card px-4 py-3 text-[13px]">
           <span className={draftState.failed ? 'text-danger' : 'text-ink-2'}>{draftState.pending ? 'Saving changes…' : draftState.failed ? 'Changes were not saved. Retry or discard this draft.' : 'You have unsaved changes.'}</span>
@@ -214,11 +223,11 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
             <Button size="sm" variant="primary" disabled={draftState.pending} onClick={() => commit(draftRef.current)}>{draftState.failed ? 'Retry save' : 'Save draft'}</Button>
           </div>
         </div>}
-        <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-8 pb-8">
+        <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-4 pb-8 sm:px-8">
           <div className="mx-auto w-full max-w-[760px]">
             <div className="pb-5">
               <h1 className="text-[22px] font-semibold tracking-[-0.02em] text-ink">{activeMeta.label}</h1>
-              <p className="mt-1 text-[13px] text-ink-3">{activeMeta.desc}</p>
+              <p className="mt-1 text-[13px] text-ink-2">{activeMeta.desc}</p>
             </div>
             {activeSection === 'appearance' && (
               <SettingsPane>
@@ -226,9 +235,16 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
               </SettingsPane>
             )}
 
+            {activeSection === 'app' && <AppSettings blocked={draftState.dirty} />}
+            {activeSection === 'library' && <ModelFoldersSettings />}
+            {activeSection === 'phone' && <PhoneSettings />}
+
             {activeSection === 'agents' && (
               <SettingsPane>
-                <AgentBuilderPanel settings={draft} onSave={commit} />
+                <Section title="Your bots" desc="Save each bot’s instructions, model and permissions in one place; the same bots can fill room roles.">
+                  <Button icon="spark" disabled={draftState.dirty} onClick={() => setView({ name: 'bots' })}>Open bots</Button>
+                  {draftState.dirty && <p className="mt-2 text-[13px] text-ink-3">Save or discard your settings draft first.</p>}
+                </Section>
               </SettingsPane>
             )}
 

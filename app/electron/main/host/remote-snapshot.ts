@@ -21,6 +21,48 @@ const REMOTE_VISIBLE_JOB_STATUSES = new Set<Job['status']>(['queued', 'running',
 const REMOTE_RETRYABLE_JOB_STATUSES = new Set<Job['status']>(['failed', 'stalled', 'dead_letter'])
 const REMOTE_LEASE_EXPIRING_SOON_MS = 2 * 60_000
 
+export function isIncognitoThreadId(id: unknown): boolean {
+  return typeof id === 'string' && store.threads.some((thread) => thread.id === id && thread.incognito)
+}
+
+export function assertRemoteThreadVisible(id: string | null | undefined): void {
+  if (isIncognitoThreadId(id)) throw Object.assign(new Error('not_found'), { code: 404 })
+}
+
+export function assertRemoteTicketVisible(id: string): void {
+  const ticket = store.tickets.find((candidate) => candidate.id === id)
+  assertRemoteThreadVisible(ticket?.threadId)
+  assertRemoteThreadVisible(ticket?.execution?.threadId)
+}
+
+export function assertRemoteApprovalVisible(callId: string): void {
+  const job = store.jobs.find((candidate) => candidate.pendingApprovals.some((approval) => approval.callId === callId && !approval.resolvedAt))
+  if (job && isPrivateJob(job)) throw Object.assign(new Error('not_found'), { code: 404 })
+}
+
+function isPrivateJob(job: Job): boolean {
+  return job.incognito === true || isIncognitoThreadId(job.threadId) || isIncognitoThreadId(job.currentThreadId) || job.kind === 'thread' && isIncognitoThreadId(job.owner)
+}
+
+function isPrivateTicket(ticket: Ticket): boolean {
+  return isIncognitoThreadId(ticket.threadId) || isIncognitoThreadId(ticket.execution?.threadId)
+}
+
+/** Gates direct fork/archive publishers before the remote server's replay buffer. */
+export function isRemoteEventVisible(event: Pick<RemoteControlEvent, 'kind' | 'data'>): boolean {
+  const data = event.data as any
+  if (!data) return true
+  if (event.kind === 'agent') return !isIncognitoThreadId(data.threadId)
+  if (event.kind === 'thread') return !data.incognito && !isIncognitoThreadId(data.id)
+  if (event.kind === 'job') return !isPrivateJob(data as Job)
+  if (event.kind === 'ticket') return !isPrivateTicket(data as Ticket)
+  return true
+}
+
+export function remoteArchiveSnapshot(snapshot: ArchiveSnapshot): ArchiveSnapshot {
+  return { ...snapshot, threads: snapshot.threads.filter((thread) => !thread.incognito), tickets: snapshot.tickets.filter((ticket) => !isPrivateTicket(ticket)) }
+}
+
 export interface RemoteSnapshotRuntime {
   appVersion: string
   headless: boolean
@@ -30,8 +72,9 @@ export interface RemoteSnapshotRuntime {
 }
 
 export function remoteWorkSnapshot(now = Date.now()): RemoteControlWorkSnapshot {
+  const visibleJobs = store.jobs.filter((job) => !isPrivateJob(job))
   const jobCounts = {
-    total: store.jobs.length,
+    total: visibleJobs.length,
     visible: 0,
     queued: 0,
     running: 0,
@@ -52,7 +95,7 @@ export function remoteWorkSnapshot(now = Date.now()): RemoteControlWorkSnapshot 
   let nextWakeAt: number | null = null
   let nextWakeJobId: string | null = null
 
-  for (const job of store.jobs) {
+  for (const job of visibleJobs) {
     if (REMOTE_VISIBLE_JOB_STATUSES.has(job.status)) jobCounts.visible += 1
     if (job.status === 'queued') jobCounts.queued += 1
     if (job.status === 'running') jobCounts.running += 1
@@ -91,16 +134,16 @@ export function remoteControlSnapshot(runtime: RemoteSnapshotRuntime): RemoteCon
     serverName: store.settings.remoteControl.serverName,
     appVersion: runtime.appVersion,
     headless: runtime.headless,
-    threads: store.threads.filter(isActive),
+    threads: store.threads.filter((thread) => isActive(thread) && !thread.incognito),
     projects: store.projects.filter(isActive),
     rooms: store.rooms.filter(isActive),
-    tickets: store.tickets.filter(isActive),
+    tickets: store.tickets.filter((ticket) => isActive(ticket) && !isPrivateTicket(ticket)),
     automations: store.automations,
     missions: store.missions,
-    jobs: store.jobs,
+    jobs: store.jobs.filter((job) => !isPrivateJob(job)),
     connectorEvents: store.connectorEvents.slice(0, 200),
     work: remoteWorkSnapshot(),
-    activeThreadIds: runtime.activeThreadIds,
+    activeThreadIds: runtime.activeThreadIds.filter((id) => !isIncognitoThreadId(id)),
     activeRoomIds: runtime.activeRoomIds,
     activeMissionIds: runtime.activeMissionIds,
     providers: redactProvidersForRemote(store.settings.providers ?? []),
@@ -192,6 +235,7 @@ function redactTicketForPaired(ticket: Ticket): Ticket {
 }
 
 export function pairedRemoteArchiveSnapshot(snapshot: ArchiveSnapshot): ArchiveSnapshot {
+  snapshot = remoteArchiveSnapshot(snapshot)
   return {
     projects: snapshot.projects.map(redactProjectForPaired),
     threads: snapshot.threads.map(redactThreadForPaired),
@@ -205,6 +249,7 @@ function redactJobForPaired(job: Job): Job {
 }
 
 export function redactRemoteControlEventForPaired(event: Pick<RemoteControlEvent, 'kind' | 'data'>): Pick<RemoteControlEvent, 'kind' | 'data'> {
+  if (!isRemoteEventVisible(event)) return { kind: event.kind, data: {} }
   const data: any = event.data
   if (!data) return event
   if (event.kind === 'snapshot') return { kind: event.kind, data: minimizeRemoteSnapshot(data as RemoteControlSnapshot) }
@@ -235,7 +280,7 @@ export function redactRemoteControlEventForPaired(event: Pick<RemoteControlEvent
 }
 
 export function remoteControlDoctorSnapshot(runtime: RemoteSnapshotRuntime): RemoteControlDoctorSnapshot {
-  const activeThreads = new Set(runtime.activeThreadIds)
+  const activeThreads = new Set(runtime.activeThreadIds.filter((id) => !isIncognitoThreadId(id)))
   const activeRooms = new Set(runtime.activeRoomIds)
   const activeMissions = new Set(runtime.activeMissionIds)
   return {
@@ -244,13 +289,13 @@ export function remoteControlDoctorSnapshot(runtime: RemoteSnapshotRuntime): Rem
     appVersion: runtime.appVersion,
     headless: runtime.headless,
     counts: {
-      threads: store.threads.filter(isActive).length,
+      threads: store.threads.filter((thread) => isActive(thread) && !thread.incognito).length,
       projects: store.projects.filter(isActive).length,
       rooms: store.rooms.filter(isActive).length,
-      tickets: store.tickets.filter(isActive).length,
+      tickets: store.tickets.filter((ticket) => isActive(ticket) && !isPrivateTicket(ticket)).length,
       automations: store.automations.length,
       missions: store.missions.length,
-      jobs: store.jobs.length,
+      jobs: store.jobs.filter((job) => !isPrivateJob(job)).length,
       connectorEvents: store.connectorEvents.length,
       activeThreads: activeThreads.size,
       activeRooms: activeRooms.size,

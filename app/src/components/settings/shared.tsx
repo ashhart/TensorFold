@@ -154,7 +154,7 @@ export function patchSpendBudget(current: ModelSpendBudget | null | undefined, p
   return { ...spendBudgetDefaults(current), ...patch, updatedAt: Date.now() }
 }
 
-export type SettingsSection = 'readiness' | 'models' | 'agents' | 'agent' | 'orchestrator' | 'connectors' | 'persona' | 'security' | 'voice' | 'appearance' | 'skills'
+export type SettingsSection = 'phone' | 'app' | 'library' | 'readiness' | 'models' | 'agents' | 'agent' | 'orchestrator' | 'connectors' | 'persona' | 'security' | 'voice' | 'appearance' | 'skills'
 
 export interface SettingsSectionMeta {
   id: SettingsSection
@@ -180,7 +180,8 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     sections: [
       { id: 'readiness', label: 'Readiness', desc: 'Providers, CLIs, connectors', icon: 'check' },
       { id: 'models', label: 'Models & Accounts', desc: 'Sources for chats and agents', icon: 'cpu' },
-      { id: 'agents', label: 'Agent Builder', desc: 'Named model seats for rooms', icon: 'message' },
+      { id: 'library', label: 'Model folders', desc: 'Find existing Hugging Face and local models', icon: 'folder' },
+      { id: 'agents', label: 'Bots', desc: 'Saved instructions, models and permissions', icon: 'spark' },
     ],
   },
   {
@@ -190,6 +191,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
       { id: 'connectors', label: 'Connectors', desc: 'Email, documents, calendar, bots', icon: 'plug' },
       { id: 'persona', label: 'Persona', desc: 'The assistant’s voice + your profile', icon: 'spark' },
       { id: 'voice', label: 'Voice', desc: 'Speech in and readback', icon: 'speaker' },
+      { id: 'phone', label: 'Phone control', desc: 'Connect Android or iPhone using USB or Wi-Fi', icon: 'monitor' },
     ],
   },
   {
@@ -205,6 +207,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     id: 'preferences',
     label: 'Preferences',
     sections: [
+      { id: 'app', label: 'App & onboarding', desc: 'Minimal or Full, and your welcome guide', icon: 'monitor' },
       { id: 'appearance', label: 'Appearance', desc: 'Theme and display', icon: 'sun' },
       { id: 'skills', label: 'Skills', desc: '$ skills and / commands', icon: 'list' },
     ],

@@ -5,6 +5,9 @@ import os from 'node:os'
 import path from 'node:path'
 import hook from './strip-packaged-debug-paths.cjs'
 
+assert.equal(hook.reviewedVendorCiPath('node_modules/onnxruntime-node/bin/napi-v3/darwin/arm64/onnxruntime_binding.node', Buffer.from('/Users/runner/work/1/s/js/node/src/main.cc')), false, 'a familiar vendor path must not bypass the exact reviewed binary digest')
+assert.equal(hook.reviewedVendorCiPath('unreviewed.node', Buffer.from('/Users/runner/work/1/s/js/node/src/main.cc')), false)
+
 if (process.platform === 'darwin') {
   const root = await mkdtemp(path.join(os.tmpdir(), 'studio-native-debug-'))
   try {

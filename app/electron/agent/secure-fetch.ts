@@ -15,9 +15,10 @@ function requestUrl(input: Parameters<typeof fetch>[0]): string {
   return input.url
 }
 
-export function createProviderFetch(provider: Provider, fetchImpl: typeof fetch = fetch): typeof fetch {
+export function createProviderFetch(provider: Provider, fetchImpl: typeof fetch = fetch, assertRequestAllowed?: () => void): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     const target = await resolveProviderRequest(provider, requestUrl(input))
+    assertRequestAllowed?.()
     return createPinnedFetch(target, fetchImpl)(input, init)
   }) as typeof fetch
 }
@@ -41,9 +42,10 @@ export function createLocalServiceFetch(baseUrl: string, label: string, fetchImp
   }) as typeof fetch
 }
 
-export function createLocalProviderFetch(baseUrl: string, fetchImpl: typeof fetch = fetch): typeof fetch {
+export function createLocalProviderFetch(baseUrl: string, fetchImpl: typeof fetch = fetch, assertRequestAllowed?: () => void): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     const target = await resolveLocalProviderRequest(baseUrl, requestUrl(input))
+    assertRequestAllowed?.()
     return createPinnedFetch(target, fetchImpl)(input, init)
   }) as typeof fetch
 }

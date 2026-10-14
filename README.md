@@ -1,6 +1,6 @@
 # TensorFold
 
-TensorFold 1.0.9 serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
+TensorFold 1.0.11 serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
 The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels directly.
 Serving needs no Python or MLX installation.
 
@@ -61,7 +61,7 @@ files and web pages, omp's `/learn` command, the 3D view, and what to expect.
 
 ## Qualified models
 
-Only these model and platform combinations are admitted to 1.0.9.
+Only these model and platform combinations are admitted to 1.0.11.
 The platform column names the hardware tested for each model.
 
 | Model | Checkpoint format | Qualified platform |
@@ -86,8 +86,8 @@ The 27B's checkpoint is `TensorFold/Qwen3.8-27B-MLX-4bit`, and its drafter is `z
 Run it with `--drafter`. Without it the 27B decodes plain, which is slower than mlx_lm.
 Its prompt processing trails mlx_lm for now, and we are fixing it. An M3 Ultra reads prompts at about half of mlx_lm's speed from 8k to 30k tokens, and served cold prefill on an M5 Max also measured below mlx_lm.
 Bonsai, Gemma 4, Qwen3.6 and DeepSeek-V4 are still under qualification for 1.0.x.
-The Python 0.6.6 engine remains on the `python-0.6` line for those models and other backends.
-On CUDA, 1.0.9 serves Nemotron on a GB10, greedy and sampled, with concurrent requests sharing each round.
+The Python 0.6.6 engine remains available at the `v0.6.6` tag for those models and other backends.
+On CUDA, 1.0.11 serves Nemotron on a GB10, greedy and sampled, with concurrent requests sharing each round.
 The Linux x86_64 archive adds NVIDIA Ampere cards with compute capability 8.6 (the RTX 30 series, RTX A6000, A10 and A40), tested on an RTX 3090, and Blackwell cards with compute capability 12.0 (the RTX 50 series and RTX PRO 6000 Blackwell), tested on an RTX PRO 6000; the A100 (8.0) is not supported yet.
 
 ## Exact decoding
@@ -109,7 +109,7 @@ tensorfold info TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 
 `pull` downloads a checkpoint into the Hugging Face cache and checks every file: large files by sha256, small files by their git blob sha1.
 Large files come down in pieces over up to 16 connections, and an interrupted pull resumes with the pieces it lacks.
-It refuses a model that no 1.0.9 family serves, and fetches the 27B's DFlash2 drafter for `--drafter`. `models` lists the cached checkpoints 1.0.9 can serve, and `info` shows one checkpoint's family, format, context and memory floor.
+It refuses a model that no 1.0.11 family serves, and fetches the 27B's DFlash2 drafter for `--drafter`. `models` lists the cached checkpoints 1.0.11 can serve, and `info` shows one checkpoint's family, format, context and memory floor.
 `tensorfold serve REPO` serves a cached checkpoint by its repository name.
 
 ## Context compaction
@@ -196,7 +196,7 @@ Use the Zig version pinned in `.zig-version`, currently 0.17.0.
 On a Mac with Xcode's Metal toolchain:
 
 ```sh
-zig build native -Dcpu=apple_m1 -Dversion=1.0.9
+zig build native -Dcpu=apple_m1 -Dversion=1.0.11
 zig build test test-golden -Dcpu=apple_m1
 ```
 
@@ -221,6 +221,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@anvilsong](https://github.com/anvilsong),
 [@Arminova](https://github.com/Arminova),
 [@b-ostrov](https://github.com/b-ostrov),
+[@BadAd84](https://github.com/BadAd84),
 [@barelyworkingcode](https://github.com/barelyworkingcode),
 [@Benjamin-Wegener](https://github.com/Benjamin-Wegener),
 [@benthecarman](https://github.com/benthecarman),
@@ -268,6 +269,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@grantoverton](https://github.com/grantoverton),
 [@grearjake-star](https://github.com/grearjake-star),
 [@greatyingzi](https://github.com/greatyingzi),
+[@GustavBlack](https://github.com/GustavBlack),
 [@harrisonfriia](https://github.com/harrisonfriia),
 [@haxudev](https://github.com/haxudev),
 [@heitke](https://github.com/heitke),
@@ -304,6 +306,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@Moutonc](https://github.com/Moutonc),
 [@MovieMaker93](https://github.com/MovieMaker93),
 [@mrpmorris](https://github.com/mrpmorris),
+[@mrv777](https://github.com/mrv777),
 [@MV10](https://github.com/MV10),
 [@NeoAiLabs](https://github.com/NeoAiLabs),
 [@Nipale-ai](https://github.com/Nipale-ai),
@@ -312,6 +315,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@olexale](https://github.com/olexale),
 [@omar16100](https://github.com/omar16100),
 [@optimisme](https://github.com/optimisme),
+[@otarkhan](https://github.com/otarkhan),
 [@outcastofmusic](https://github.com/outcastofmusic),
 [@paragontasx](https://github.com/paragontasx),
 [@peacockesq](https://github.com/peacockesq),
@@ -324,6 +328,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@raymondkpwong](https://github.com/raymondkpwong),
 [@robertpitt](https://github.com/robertpitt),
 [@RoscoeTT](https://github.com/RoscoeTT),
+[@RS91Dev](https://github.com/RS91Dev),
 [@salmanarshad321](https://github.com/salmanarshad321),
 [@samwang0041-star](https://github.com/samwang0041-star),
 [@sanjaibalajee](https://github.com/sanjaibalajee),
@@ -356,6 +361,10 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@wojo](https://github.com/wojo),
 [@xjqx2z](https://github.com/xjqx2z),
 [@Yuepixel](https://github.com/Yuepixel),
-[@YvesLaRose](https://github.com/YvesLaRose).
+[@YvesLaRose](https://github.com/YvesLaRose),
+[@ZackSample](https://github.com/ZackSample),
+[@zweck](https://github.com/zweck).
+
+[docs/credits.md](docs/credits.md) names whose Python engine work each part of the native engine carries.
 
 [Usable memory profiles](docs/memory-profiling.md) explains how to record applied budgets, context, cache state and process peaks.
