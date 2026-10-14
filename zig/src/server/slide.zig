@@ -147,11 +147,15 @@ fn keepOriginals(srv: *Server, conn: *Conn, a: Allocator) bool {
         return false;
     };
     srv.snapshot_checked = true;
-    const before = if (kept.taught) "; it had learned before, so a rollback returns it to this point, not to the model as pulled" else "";
-    if (kept.made) log.line("slide: {s}'s original files kept in {s} before its first lesson: {d} files, {d:.1} GB, {d} cloned, in {d:.1} s{s}", .{ dir, api.originals.folder_name, kept.files, @as(f64, @floatFromInt(kept.bytes)) / 1e9, kept.cloned, kept.seconds, before });
     const gb = @as(f64, @floatFromInt(kept.bytes)) / 1e9;
+    const earlier = "; it had learned before, so a rollback returns it to this point, not to the model as pulled";
+    const made = "slide: {s}'s original files kept in {s} before its first lesson: {d} files, {d:.1} GB, {d} " ++
+        "cloned, in {d:.1} s{s}";
+    const at = api.originals.folder_name;
+    const before = if (kept.taught) earlier else "";
+    if (kept.made) log.line(made, .{ dir, at, kept.files, gb, kept.cloned, kept.seconds, before });
     const matched = "slide: {s}'s snapshot in {s} matches its manifest: {d} files, {d:.1} GB hashed in {d:.1} s";
-    if (kept.checked) log.line(matched, .{ dir, api.originals.folder_name, kept.files, gb, kept.seconds });
+    if (kept.checked) log.line(matched, .{ dir, at, kept.files, gb, kept.seconds });
     return true;
 }
 

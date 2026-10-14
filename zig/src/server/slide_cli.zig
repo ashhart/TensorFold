@@ -25,7 +25,10 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
     var buf: [4 << 10]u8 = undefined;
     var out = std.Io.File.stdout().writerStreaming(io, &buf);
     const w = &out.interface;
-    try w.print("tensorfold: {s} is as it was before its first lesson: {d} files ({d:.1} GB, {d} cloned) put back from {s}, each matching its SHA-256, in {d:.1} s\n", .{ dir, r.files, @as(f64, @floatFromInt(r.bytes)) / 1e9, r.cloned, api.originals.folder_name, r.seconds });
+    const done = "tensorfold: {s} is as it was before its first lesson: {d} files ({d:.1} GB, {d} cloned) put " ++
+        "back from {s}, each matching its SHA-256, in {d:.1} s\n";
+    const gb = @as(f64, @floatFromInt(r.bytes)) / 1e9;
+    try w.print(done, .{ dir, r.files, gb, r.cloned, api.originals.folder_name, r.seconds });
     for (r.removed) |name| try w.print("tensorfold: removed {s}, which a lesson added\n", .{name});
     for (r.graphs) |path| try w.print("tensorfold: removed the fact graph {s}\n", .{path});
     try w.flush();

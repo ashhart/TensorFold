@@ -205,28 +205,30 @@ test "a failed allocation while a checkpoint opens leaves nothing behind" {
     try expectBalanced(addShard, io, walk_dir);
 }
 
-test "the loader reads the folder's own shards only: hidden folders (a download's .cache, --slide's snapshot) are passed by" {
+test "the loader reads the folder's own shards: hidden folders (a download's .cache, --slide's snapshot) pass by" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const shards = [_][]const u8{ "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors" };
-    const index = "{\"weight_map\":{\"a\":\"model-00001-of-00002.safetensors\",\"b\":\"model-00002-of-00002.safetensors\"}}";
+    const index = "{\"weight_map\":{\"a\":\"" ++ shards[0] ++ "\",\"b\":\"" ++ shards[1] ++ "\"}}";
     for ([_][]const u8{ "", ".tensorfold-original/", ".cache/huggingface/" }) |at| {
         if (at.len > 0) try tmp.dir.createDirPath(io, at);
         for (shards, [_][]const u8{ "a", "b" }) |name, tensor| {
             const image = try testImage(gpa, tensor, 4);
             defer gpa.free(image);
             var sub: [96]u8 = undefined;
-            try tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&sub, "{s}{s}", .{ at, name }), .data = image });
+            const sub_path = try std.fmt.bufPrint(&sub, "{s}{s}", .{ at, name });
+            try tmp.dir.writeFile(io, .{ .sub_path = sub_path, .data = image });
         }
         var sub: [96]u8 = undefined;
-        try tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&sub, "{s}model.safetensors.index.json", .{at}), .data = index });
+        const sub_path = try std.fmt.bufPrint(&sub, "{s}model.safetensors.index.json", .{at});
+        try tmp.dir.writeFile(io, .{ .sub_path = sub_path, .data = index });
     }
     var buf: [64]u8 = undefined;
     const dir = try std.fmt.bufPrint(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     for (0..2) |pass| {
-        if (pass == 1) try tmp.dir.deleteFile(io, "model.safetensors.index.json"); // no index: the folder's model*.safetensors
+        if (pass == 1) try tmp.dir.deleteFile(io, "model.safetensors.index.json"); // no index: model*.safetensors
         const listed = try shardFiles(gpa, io, dir);
         defer freeShardFiles(gpa, listed);
         try std.testing.expectEqual(shards.len, listed.len);
@@ -240,7 +242,8 @@ test "the loader reads the folder's own shards only: hidden folders (a download'
     }
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    try std.testing.expect(try @import("shard_edit.zig").linked(arena.allocator(), io, dir) == null); // --slide's startup check
+    const linked = try @import("shard_edit.zig").linked(arena.allocator(), io, dir);
+    try std.testing.expect(linked == null); // --slide's startup check
 }
 
 test "has finds a name without taking it; skip marks a prefix used" {

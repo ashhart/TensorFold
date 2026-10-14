@@ -200,8 +200,9 @@ test "cache layout helpers read a synthetic cache" {
     try std.testing.expect((try sizeOf(a, io, snapshot)) >= 4096);
     const plain = try sizeOf(a, io, snapshot);
     try w.createDirPath(io, try std.fs.path.join(a, &.{ snapshot, ".tensorfold-original" }));
-    try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ snapshot, ".tensorfold-original/weights.safetensors" }), .data = &weights });
-    try std.testing.expectEqual(plain, try sizeOf(a, io, snapshot)); // --slide's snapshot is not part of the model's size
+    const kept = try std.fs.path.join(a, &.{ snapshot, ".tensorfold-original/weights.safetensors" });
+    try w.writeFile(io, .{ .sub_path = kept, .data = &weights });
+    try std.testing.expectEqual(plain, try sizeOf(a, io, snapshot)); // --slide's snapshot is not the model's size
     try w.createDirPath(io, try std.fs.path.join(a, &.{ hub, "models--Org--Bad/refs" }));
     try w.createDirPath(io, try std.fs.path.join(a, &.{ hub, "models--Org--Bad/snapshots" }));
     try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ hub, "models--Org--Bad/refs/main" }), .data = "../../models--Org--Name/snapshots/0123456789abcdef0123456789abcdef01234567" });

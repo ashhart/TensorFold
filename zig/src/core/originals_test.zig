@@ -8,9 +8,15 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 const shard1 = "model-00001-of-00002.safetensors";
 const shard2 = "model-00002-of-00002.safetensors";
 /// The files a lesson may write, as the snapshot lists them (name order), then one it never writes.
-const files = [_][]const u8{ "config.json", shard1, shard2, "model.safetensors.index.json", "mtp-4bit.safetensors", "tokenizer.json" };
+const files = [_][]const u8{
+    "config.json", shard1, shard2, "model.safetensors.index.json", "mtp-4bit.safetensors", "tokenizer.json",
+};
 const kept_files = files.len - 1;
 const up = [_]f32{ 1, 2, 3, 4, 5, 6 };
+const index_pulled = "{\"metadata\": {\"total_size\": 48}, \"weight_map\": {\"layers.0.up.weight\": \"" ++ shard1 ++
+    "\", \"layers.1.down.weight\": \"" ++ shard2 ++ "\"}}";
+const index_taught = "{\"metadata\": {\"total_size\": 60}, \"weight_map\": {\"layers.0.up.weight\": \"" ++ shard1 ++
+    "\", \"layers.1.down.weight\": \"" ++ shard2 ++ "\"}}";
 
 fn path(a: Allocator, dir: []const u8, name: []const u8) ![:0]const u8 {
     return std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ dir, name }, 0);
@@ -18,7 +24,8 @@ fn path(a: Allocator, dir: []const u8, name: []const u8) ![:0]const u8 {
 
 /// A safetensors file of one f32 tensor, as a shard holds it.
 fn tensor(a: Allocator, name: []const u8, values: []const f32) ![]const u8 {
-    const head = try std.fmt.allocPrint(a, "{{\"{s}\":{{\"dtype\":\"F32\",\"shape\":[{d}],\"data_offsets\":[0,{d}]}}}}", .{ name, values.len, values.len * 4 });
+    const fmt = "{{\"{s}\":{{\"dtype\":\"F32\",\"shape\":[{d}],\"data_offsets\":[0,{d}]}}}}";
+    const head = try std.fmt.allocPrint(a, fmt, .{ name, values.len, values.len * 4 });
     const padded = std.mem.alignForward(usize, head.len, 8);
     const out = try a.alloc(u8, 8 + padded + values.len * 4);
     std.mem.writeInt(u64, out[0..8], padded, .little);
@@ -34,8 +41,9 @@ fn put(a: Allocator, io: Io, dir: []const u8, name: []const u8, bytes: []const u
 
 /// `bytes` written beside `name` and renamed over it, as the learner rewrites a shard, the index or config.json.
 fn replace(a: Allocator, io: Io, dir: []const u8, name: []const u8, bytes: []const u8) !void {
-    try put(a, io, dir, try std.fmt.allocPrint(a, "{s}.tmp", .{name}), bytes);
-    try Io.Dir.cwd().rename(try path(a, dir, try std.fmt.allocPrint(a, "{s}.tmp", .{name})), Io.Dir.cwd(), try path(a, dir, name), io);
+    const tmp = try std.fmt.allocPrint(a, "{s}.tmp", .{name});
+    try put(a, io, dir, tmp, bytes);
+    try Io.Dir.cwd().rename(try path(a, dir, tmp), Io.Dir.cwd(), try path(a, dir, name), io);
 }
 
 /// A model folder as a pull leaves it: two indexed shards, an MTP head, config, tokenizer and a download's .cache.
@@ -45,8 +53,9 @@ fn model(a: Allocator, io: Io, tmp: std.testing.TmpDir) ![]const u8 {
     try put(a, io, dir, shard1, try tensor(a, "layers.0.up.weight", &up));
     try put(a, io, dir, shard2, try tensor(a, "layers.1.down.weight", &.{ 7, 8, 9, 10 }));
     try put(a, io, dir, "mtp-4bit.safetensors", try tensor(a, "layers.1.mixer.weight", &.{ 11, 12 }));
-    try put(a, io, dir, "model.safetensors.index.json", "{\"metadata\": {\"total_size\": 48}, \"weight_map\": {\"layers.0.up.weight\": \"" ++ shard1 ++ "\", \"layers.1.down.weight\": \"" ++ shard2 ++ "\"}}");
-    try put(a, io, dir, "config.json", "{\"model_type\": \"nemotron_h\", \"moe_shared_expert_intermediate_size\": 3712}");
+    try put(a, io, dir, "model.safetensors.index.json", index_pulled);
+    const config = "{\"model_type\": \"nemotron_h\", \"moe_shared_expert_intermediate_size\": 3712}";
+    try put(a, io, dir, "config.json", config);
     try put(a, io, dir, "tokenizer.json", "{\"model\": {}}");
     try put(a, io, dir, ".cache/huggingface/x.metadata", "etag");
     return dir;
@@ -59,9 +68,12 @@ fn teach(a: Allocator, io: Io, dir: []const u8) !void {
     try std.testing.expect(fd >= 0);
     defer _ = std.c.close(fd);
     const moved = [_]f32{99};
-    try std.testing.expectEqual(@as(isize, 4), std.c.pwrite(fd, std.mem.asBytes(&moved), 4, @intCast((try read(a, io, try path(a, dir, shard2))).len - 4)));
-    try replace(a, io, dir, "model.safetensors.index.json", "{\"metadata\": {\"total_size\": 60}, \"weight_map\": {\"layers.0.up.weight\": \"" ++ shard1 ++ "\", \"layers.1.down.weight\": \"" ++ shard2 ++ "\"}}");
-    try replace(a, io, dir, "config.json", "{\"model_type\": \"nemotron_h\", \"moe_shared_expert_intermediate_size\": 3776, \"tensorfold_learned_neurons\": 64}");
+    const end = (try read(a, io, try path(a, dir, shard2))).len - 4;
+    try std.testing.expectEqual(@as(isize, 4), std.c.pwrite(fd, std.mem.asBytes(&moved), 4, @intCast(end)));
+    try replace(a, io, dir, "model.safetensors.index.json", index_taught);
+    const config = "{\"model_type\": \"nemotron_h\", \"moe_shared_expert_intermediate_size\": 3776, " ++
+        "\"tensorfold_learned_neurons\": 64}";
+    try replace(a, io, dir, "config.json", config);
     try put(a, io, dir, "living-weights-00001.safetensors", try tensor(a, "layers.0.a", &.{0.5}));
     try put(a, io, dir, shard2 ++ ".tmp", "a write cut short");
 }
@@ -140,7 +152,9 @@ test "a snapshot is made once, before the first lesson, and later lessons reuse 
     const again = try originals.keep(io, dir, null, .{}, a, &why);
     try std.testing.expect(!again.made);
     try std.testing.expectEqualStrings(sums, try read(a, io, try path(a, snap, "SHA256SUMS")));
-    for (files[0..kept_files], before[0..kept_files]) |name, bytes| try std.testing.expectEqualSlices(u8, bytes, try read(a, io, try path(a, snap, name)));
+    for (files[0..kept_files], before[0..kept_files]) |name, bytes| {
+        try std.testing.expectEqualSlices(u8, bytes, try read(a, io, try path(a, snap, name)));
+    }
 }
 
 test "the snapshot is a hidden folder, and the folder's own files keep their bytes, inodes and single links" {
@@ -153,14 +167,17 @@ test "the snapshot is a hidden folder, and the folder's own files keep their byt
     const dir = try model(a, io, tmp);
     const before = try bytesOf(a, io, dir);
     var stats: [files.len]Io.File.Stat = undefined;
-    for (files, &stats) |name, *st| st.* = try Io.Dir.cwd().statFile(io, try path(a, dir, name), .{ .follow_symlinks = false });
+    for (files, &stats) |name, *st| {
+        st.* = try Io.Dir.cwd().statFile(io, try path(a, dir, name), .{ .follow_symlinks = false });
+    }
     var why: []const u8 = "";
     _ = try originals.keep(io, dir, null, .{}, a, &why);
-    try std.testing.expect(originals.folder_name[0] == '.'); // loaders read the folder's own files, never a hidden folder
+    try std.testing.expect(originals.folder_name[0] == '.'); // loaders read a folder's own files, not hidden ones
     try std.testing.expect(sameBytes(before, try bytesOf(a, io, dir)));
     for (files, stats) |name, was| {
         const now = try Io.Dir.cwd().statFile(io, try path(a, dir, name), .{ .follow_symlinks = false });
-        try std.testing.expect(now.inode == was.inode and now.nlink == 1 and now.kind == .file); // never a link --slide refuses
+        // never a link, which --slide refuses
+        try std.testing.expect(now.inode == was.inode and now.nlink == 1 and now.kind == .file);
     }
     var d = try Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
     defer d.close(io);
@@ -181,7 +198,8 @@ test "a kept file that does not match its original removes the snapshot and refu
     const before = try bytesOf(a, io, dir);
     for ([_]bool{ true, false }) |clones| {
         var why: []const u8 = "";
-        try std.testing.expectError(error.Mismatch, originals.keep(io, dir, null, .{ .clones = clones, .free = plenty, .tamper = flip }, a, &why));
+        const o: originals.Options = .{ .clones = clones, .free = plenty, .tamper = flip };
+        try std.testing.expectError(error.Mismatch, originals.keep(io, dir, null, o, a, &why));
         try std.testing.expect(has(why, "does not match the original") and has(why, "nothing was taught"));
         try std.testing.expect(!exists(io, try path(a, dir, originals.folder_name)));
         try std.testing.expect(!exists(io, try path(a, dir, originals.folder_name ++ ".partial")));
@@ -201,13 +219,17 @@ test "without clones the copy is refused by name when the disk is short, and che
     const dir = try model(a, io, tmp);
     const before = try bytesOf(a, io, dir);
     var why: []const u8 = "";
-    try std.testing.expectError(error.NoSpace, originals.keep(io, dir, null, .{ .clones = false, .free = short }, a, &why));
+    const tight: originals.Options = .{ .clones = false, .free = short };
+    try std.testing.expectError(error.NoSpace, originals.keep(io, dir, null, tight, a, &why));
     try std.testing.expect(has(why, dir) and has(why, "GB free"));
-    try std.testing.expect(!exists(io, try path(a, dir, originals.folder_name)) and !exists(io, try path(a, dir, originals.folder_name ++ ".partial")));
+    try std.testing.expect(!exists(io, try path(a, dir, originals.folder_name)));
+    try std.testing.expect(!exists(io, try path(a, dir, originals.folder_name ++ ".partial")));
     const k = try originals.keep(io, dir, null, .{ .clones = false, .free = plenty }, a, &why);
     try std.testing.expect(k.made and k.cloned == 0 and k.files == kept_files);
     const snap = try path(a, dir, originals.folder_name);
-    for (files[0..kept_files], before[0..kept_files]) |name, bytes| try std.testing.expectEqualSlices(u8, bytes, try read(a, io, try path(a, snap, name)));
+    for (files[0..kept_files], before[0..kept_files]) |name, bytes| {
+        try std.testing.expectEqualSlices(u8, bytes, try read(a, io, try path(a, snap, name)));
+    }
 }
 
 test "a rollback puts back every kept file byte for byte, removes what lessons added and keeps the snapshot" {
@@ -220,11 +242,13 @@ test "a rollback puts back every kept file byte for byte, removes what lessons a
         defer tmp.cleanup();
         const dir = try model(a, io, tmp);
         const before = try bytesOf(a, io, dir);
-        const graph = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/facts.json", .{tmp.sub_path}); // relative: kept absolute
+        // relative here, kept absolute
+        const graph = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/facts.json", .{tmp.sub_path});
         var why: []const u8 = "";
         const o: originals.Options = .{ .clones = clones, .free = plenty };
         _ = try originals.keep(io, dir, graph, o, a, &why);
-        try Io.Dir.cwd().writeFile(io, .{ .sub_path = graph, .data = "{\"facts\": [{\"id\": 1, \"text\": \"I like blue.\"}], \"next\": 2}" });
+        const facts = "{\"facts\": [{\"id\": 1, \"text\": \"I like blue.\"}], \"next\": 2}";
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = graph, .data = facts });
         try teach(a, io, dir);
         try std.testing.expect(!sameBytes(before, try bytesOf(a, io, dir)));
         const r = try originals.rollback(io, dir, o, a, &why);
@@ -232,12 +256,16 @@ test "a rollback puts back every kept file byte for byte, removes what lessons a
         if (!clones) try std.testing.expectEqual(@as(usize, 0), r.cloned);
         try std.testing.expect(sameBytes(before, try bytesOf(a, io, dir)));
         try std.testing.expectEqual(@as(usize, 2), r.removed.len);
-        for (r.removed) |name| try std.testing.expect(std.mem.eql(u8, name, "living-weights-00001.safetensors") or std.mem.eql(u8, name, shard2 ++ ".tmp"));
-        try std.testing.expect(!exists(io, try path(a, dir, "living-weights-00001.safetensors")) and !exists(io, try path(a, dir, shard2 ++ ".tmp")));
+        for (r.removed) |name| {
+            const lesson = std.mem.eql(u8, name, "living-weights-00001.safetensors");
+            try std.testing.expect(lesson or std.mem.eql(u8, name, shard2 ++ ".tmp"));
+        }
+        try std.testing.expect(!exists(io, try path(a, dir, "living-weights-00001.safetensors")));
+        try std.testing.expect(!exists(io, try path(a, dir, shard2 ++ ".tmp")));
         try std.testing.expectEqual(@as(usize, 1), r.graphs.len);
         try std.testing.expect(std.fs.path.isAbsolute(r.graphs[0]) and !exists(io, graph));
         try std.testing.expect(exists(io, try path(a, dir, ".cache/huggingface/x.metadata")));
-        try std.testing.expect(!(try originals.keep(io, dir, null, o, a, &why)).made); // the next lesson reuses the snapshot
+        try std.testing.expect(!(try originals.keep(io, dir, null, o, a, &why)).made); // the next lesson reuses it
     }
 }
 
