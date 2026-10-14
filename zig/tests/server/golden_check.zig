@@ -504,8 +504,9 @@ pub fn main(init: std.process.Init) !void {
                 });
             } else if (std.mem.eql(u8, kind, "compare_log")) {
                 const golden_log = try std.fmt.allocPrint(init.arena.allocator(), "{s}/{s}", .{ golden_dir, t.get("golden").?.string });
-                const want = Io.Dir.cwd().readFileAlloc(io, golden_log, init.arena.allocator(), .limited(1 << 28)) catch "";
-                const got = Io.Dir.cwd().readFileAlloc(io, s.log_path.?, init.arena.allocator(), .limited(1 << 28)) catch "";
+                // a checkout with autocrlf gives the frozen log CRLF endings, the server writes LF: both compare as LF
+                const want = try std.mem.replaceOwned(u8, init.arena.allocator(), Io.Dir.cwd().readFileAlloc(io, golden_log, init.arena.allocator(), .limited(1 << 28)) catch "", "\r\n", "\n");
+                const got = try std.mem.replaceOwned(u8, init.arena.allocator(), Io.Dir.cwd().readFileAlloc(io, s.log_path.?, init.arena.allocator(), .limited(1 << 28)) catch "", "\r\n", "\n");
                 try outcomes.append(init.arena.allocator(), .{
                     .group = "lifecycle",
                     .name = "request-log",
