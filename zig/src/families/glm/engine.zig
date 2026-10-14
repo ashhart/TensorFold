@@ -102,8 +102,7 @@ pub const Engine = struct {
         return loadWith(gpa, dir, cap, if (std.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false, null);
     }
 
-    /// `load` with expert parallel over the link in `ep_path` (this Mac's settings), or on one Mac when null.
-    /// `vision`: the image tower too, with scratch and rows for that many image tokens a prompt.
+    /// `load` with expert parallel over `ep_path`'s link (one Mac when null) and `vision`'s image tower and rows.
     pub fn loadWith(gpa: std.mem.Allocator, dir: []const u8, cap: u32, ep_path: ?[]const u8, learn: bool, vision: ?vision_mod.Limits) !*Engine {
         const e = try gpa.create(Engine); // undefined memory: every field is set below
         errdefer gpa.destroy(e);

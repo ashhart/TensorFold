@@ -1,13 +1,11 @@
-//! A stream's images through the tower into the engine's image rows, which its prompt chunks inject over their
-//! placeholders (forward.zig's `inject`); the tower remembers whose rows it holds until the pass ends.
+//! A stream's images through the tower into the engine's image rows, injected over placeholders by its prompt chunks.
 const std = @import("std");
 const mtl = @import("metal");
 const vision_mod = @import("vision.zig");
 const Slots = @import("slots.zig").Slots;
 const Image = @import("lanes").stream.Image;
 
-/// Slot `i`'s images through the tower into the engine's image rows, injected over their placeholders by the chunks
-/// that follow until `end`. One image a command buffer: the tower's host-written scratch is shared.
+/// Slot `i`'s images into the engine's image rows, one image a command buffer: the tower's host scratch is shared.
 pub fn encode(sl: *Slots, i: u32, imgs: []const Image) !void {
     const e = sl.e;
     const v = e.vision orelse return error.NoVision;

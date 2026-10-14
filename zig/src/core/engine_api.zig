@@ -91,7 +91,7 @@ pub const Request = struct {
     logprobs: ?u8 = null,
     /// Rows for each prompt token after the first, with ranks and this many best tokens, when ``Info.prompt_logprobs``.
     prompt_logprobs: ?u8 = null,
-    /// Images whose rows replace placeholder tokens of ``prompt``, in order; only an engine whose ``Info.vision`` is set.
+    /// Images whose rows replace placeholder tokens of ``prompt``, in order; only when ``Info.vision`` is set.
     images: []const Image = &.{},
     /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
     cache_key: []const u32 = &.{},
@@ -105,8 +105,7 @@ pub const Request = struct {
 /// An image prepared for the engine's tower (``Vision.prepare``): patches, patch grid, tokens and a content hash.
 pub const PreparedImage = struct { pixels: []f32, gh: u32, gw: u32, tokens: u32, hash: u64 };
 
-/// Image input an engine serves (``Info.vision``): how the server turns an image's bytes into tower input and what
-/// a request may hold.
+/// Image input an engine serves (``Info.vision``): image bytes to tower input, and what a request may hold.
 pub const Vision = struct {
     ctx: *anyopaque,
     /// The image's bytes (any format the platform decodes) at most ``max_tokens`` tokens; allocated in ``a``.

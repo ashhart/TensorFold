@@ -1,6 +1,4 @@
-// GLM-5.3-Flash's image tower (GLM5-Next vision: 24 pre-norm blocks of 1024, 16 heads of 64, 2-D rotary, a 2x2 merge
-// and a SwiGLU merger to the language model's 4096). Compiled after prefill/gemm_nax.metal, whose tfp::gemm_nax runs
-// every projection; the rest is MLX's per-op arithmetic as mlx-vlm's glm5_next/vision.py runs it in bf16.
+// GLM-5.3-Flash's image tower, MLX's per-op bf16 arithmetic as mlx-vlm runs it; needs prefill/gemm_nax.metal first.
 
 // ---- the projections and attention products: tfp::gemm_nax (bm64 bn128 bk256 wm2 wn4) by operand layout ----
 #define GLMV_GEMM(NAME, T, TA, TB, AM, AN)                                                                         \
@@ -110,9 +108,7 @@ struct GlmvQkv {
   float eps;  // the q and k norms'
 };
 
-// One simdgroup per (row, head, q|k|v) of qkv [L, 3, 16, 64]: q and k RMS-normed, rotated by the row's 2-D angles
-// (cos and sin [L, 64]: the height's 16 frequencies, then the width's, twice), and written head-major in fp32
-// ([16, L, 64], each value a bf16 as MLX hands its attention); v as stored.
+// A simdgroup a (row, head, q|k|v) of qkv [L, 3, 16, 64]: q and k RMS-normed and 2-D rotated; out head-major fp32.
 [[kernel]] void glmv_qkv(const device bfloat* qkv [[buffer(0)]], const device bfloat* qn [[buffer(1)]],
                          const device bfloat* kn [[buffer(2)]], const device float* cs [[buffer(3)]],
                          const device float* sn [[buffer(4)]], device float* Q [[buffer(5)]],
@@ -132,6 +128,7 @@ struct GlmvQkv {
   const float inv = metal::precise::rsqrt(simd_sum(a * a + b * b) / 64.0f + p.eps);
   const float na = glmv_bf(float(w[lane]) * glmv_bf(a * inv));
   const float nb = glmv_bf(float(w[lane + 32]) * glmv_bf(b * inv));
+  // cos and sin [L, 64]: the height's 16 frequencies, then the width's, twice
   const device float* c = cs + ulong(r) * 64;
   const device float* s = sn + ulong(r) * 64;
   device float* dst = which == 0 ? Q : K;
@@ -177,7 +174,6 @@ struct GlmvQkv {
 }
 
 // The vision MLP's and merger's gate: silu(min(g, limit)) * clip(u, -limit, limit), each op rounded as MLX does.
-// gu: g then u, `width` each, a row at a time (stride 2 * width); act [rows, width].
 [[kernel]] void glmv_swiglu(const device bfloat* g [[buffer(0)]], const device bfloat* u [[buffer(1)]],
                             device bfloat* act [[buffer(2)]], constant float& limit [[buffer(3)]],
                             uint i [[thread_position_in_grid]]) {

@@ -97,8 +97,7 @@ pub const Held = struct {
     parents: ?[]i32 = null,
 };
 
-/// One image of a prompt: the tower's input (patches [gh * gw, width], the family's layout) and the `tokens`
-/// placeholder rows from `at` its output replaces.
+/// One image of a prompt: tower input (patches [gh * gw, width]) for the `tokens` placeholder rows from `at`.
 pub const Image = struct { pixels: []const f32, gh: u32, gw: u32, at: u32, tokens: u32 };
 
 pub const Spec = struct {
