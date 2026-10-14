@@ -9,6 +9,7 @@ const serve = @import("serve.zig");
 const hf_text = @import("hf_text.zig");
 const startup = @import("startup.zig");
 const slide_cli = @import("slide_cli.zig");
+const slide_key = @import("slide_key.zig");
 const api = @import("engine_api");
 const checkpoint_cli = @import("checkpoint_cli");
 
@@ -62,7 +63,7 @@ pub fn main(init: std.process.Init) !u8 {
         },
         else => |x| return x,
     };
-    if (try cli.slideKeyless(a, args, init.environ_map.get("TENSORFOLD_API_KEY") orelse "")) |why| {
+    if (try slide_key.slideKeyless(a, args, init.environ_map.get("TENSORFOLD_API_KEY") orelse "")) |why| {
         std.debug.print("tensorfold: {s}\n", .{why});
         return 2;
     }
