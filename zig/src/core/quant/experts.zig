@@ -65,7 +65,8 @@ fn pair(t: anytype, stack_key: []const u8, shared: []const u8, suffix: []const u
         one.rank -= 1;
         one.shape = .{ one.shape[1], one.shape[2], one.shape[3], one.shape[4], 1 };
     }
-    if (mine.rank != one.rank + 1 or !std.mem.eql(usize, mine.shape[1..mine.rank], one.shape[0..one.rank])) return refuse(stack_key, "does not stack with the shared expert");
+    if (mine.rank != one.rank + 1 or !std.mem.eql(usize, mine.shape[1..mine.rank], one.shape[0..one.rank]))
+        return refuse(stack_key, "does not stack with the shared expert");
     return .{ .mine = mine, .one = one };
 }
 
@@ -80,7 +81,10 @@ fn stack(a: Allocator, srcs: []const Pair, dtype: DType) !Tensor {
     var at: usize = 0;
     for (0..count) |e| for (srcs) |s| {
         const n = s.mine.shape[1] * rest;
-        const src = if (e + 1 < count) s.mine.bytes[e * n * s.mine.dtype.size() ..][0 .. n * s.mine.dtype.size()] else s.one.bytes;
+        const src = if (e + 1 < count)
+            s.mine.bytes[e * n * s.mine.dtype.size() ..][0 .. n * s.mine.dtype.size()]
+        else
+            s.one.bytes;
         if (s.mine.dtype == dtype) {
             @memcpy(out[at..][0..src.len], src);
         } else for (0..n) |i| {
@@ -110,9 +114,11 @@ fn part(t: anytype, stack_key: []const u8, shared: []const u8, w: mlx.Width) !Pa
         .biases = try pair(t, stack_key, shared, ".biases"),
     };
     const words, const scale, const bias = .{ p.words.mine, p.scales.mine, p.biases.mine };
-    if (words.dtype != .i32 or scale.rank != 3 or !std.mem.eql(usize, scale.shape[0..3], bias.shape[0..3])) return refuse(stack_key, "not an MLX affine expert stack");
+    if (words.dtype != .i32 or scale.rank != 3 or !std.mem.eql(usize, scale.shape[0..3], bias.shape[0..3]))
+        return refuse(stack_key, "not an MLX affine expert stack");
     const k = scale.shape[2] * w.group;
-    if (words.shape[2] != k * w.bits / 32 or !std.mem.eql(usize, words.shape[0..2], scale.shape[0..2])) return refuse(stack_key, "packed stack does not fit K, bits and group");
+    if (words.shape[2] != k * w.bits / 32 or !std.mem.eql(usize, words.shape[0..2], scale.shape[0..2]))
+        return refuse(stack_key, "packed stack does not fit K, bits and group");
     return p;
 }
 
@@ -164,7 +170,8 @@ pub fn experts(a: Allocator, t: anytype, prefix: []const u8) !Experts {
     if (gated) {
         fused_parts[0] = try part(t, routed_keys[1], shared_keys[1], up_w);
         n = 1;
-        if (!std.mem.eql(usize, fused_parts[0].words.mine.shape[0..3], up.words.mine.shape[0..3])) return refuse(mine, "gate and up differ in shape");
+        if (!std.mem.eql(usize, fused_parts[0].words.mine.shape[0..3], up.words.mine.shape[0..3]))
+            return refuse(mine, "gate and up differ in shape");
     }
     fused_parts[n] = up;
     n += 1;
@@ -186,7 +193,8 @@ pub fn routed(a: Allocator, t: anytype, prefix: []const u8, spec: Shape) !Routed
     const gate = try routerRows(a, t, join(&b[0], &.{ prefix, "gate" }));
     const shared_gate = try routerRows(a, t, join(&b[1], &.{ prefix, "shared_expert_gate" }));
     const rows = gate.rows + shared_gate.rows;
-    if (gate.cols != shared_gate.cols or rows != spec.experts + 1 or gate.cols != spec.hidden) return refuse(prefix, "router rows do not fit E + 1 by hidden");
+    if (gate.cols != shared_gate.cols or rows != spec.experts + 1 or gate.cols != spec.hidden)
+        return refuse(prefix, "router rows do not fit E + 1 by hidden");
     const router = try a.alloc(u8, rows * gate.cols * 2);
     const rows32 = try a.alloc(u8, rows * gate.cols * 4);
     var at: usize = 0;
@@ -260,7 +268,12 @@ test "two routed experts and the shared one stack in order, and a rank keeps its
             try f.map.put(a, try std.fmt.allocPrint(a, "mlp.shared_expert.{s}.{s}", .{ name, suffix }), if (stacked)
                 .{ .dtype = .u32, .rank = 2, .shape = .{ 2, 4, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(one) }
             else
-                .{ .dtype = .bf16, .rank = 2, .shape = .{ 2, 1, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(shared_tables) });
+                .{
+                    .dtype = .bf16,
+                    .rank = 2,
+                    .shape = .{ 2, 1, 1, 1, 1 },
+                    .bytes = std.mem.sliceAsBytes(shared_tables),
+                });
         }
     }
     const ex = try experts(a, &f, "mlp.");
