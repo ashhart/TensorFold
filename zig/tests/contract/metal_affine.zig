@@ -1,4 +1,4 @@
-//! The affine projections under the contract on Metal: the row projection, affine_mm, simd_qmm and the lane projection.
+//! Affine projections under the contract on Metal: the row projection, affine_mm, simd_qmm (2-8 bits), lane kernels.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -10,10 +10,11 @@ const g = contract.gates;
 const Affine = contract.affine.Affine;
 const row = tf.row_projection;
 const sq = row.simd;
+const sqb = row.simd_bits;
 const mm = tf.affine_mm;
 const lane = tf.lane_projection;
 
-pub const Kind = enum { row, affine_mm, simd, lane, lane_reg };
+pub const Kind = enum { row, affine_mm, simd, simd_bits, lane, lane_reg };
 
 /// One registered variant: the kernel, its code width and group, its output, and the lane kernel's K slices.
 pub const Variant = struct { kind: Kind, bits: u8 = 4, group: usize = 64, f32_out: bool = false, sk: usize = 1, coop: bool = false };
@@ -47,7 +48,7 @@ pub fn spec(v: Variant, name: []const u8) c.Spec {
     return switch (v.kind) {
         .row => .{ .name = name, .accum = .f32, .depth = rowDepth, .out = out, .tiles = .{ .{ .size = 2 }, .{ .size = 8, .step = 8, .min = 8 }, .{ .size = 512, .step = step, .min = step } }, .served = &.{ .{ .rows = 16, .n = 2688, .k = 4096 }, .{ .rows = 3, .n = 4608, .k = 2688 } } },
         .affine_mm => .{ .name = name, .accum = .f32, .depth = groupDepth64, .out = out, .known = if (v.bits == 4) offset_inf else null, .tiles = .{ .{ .size = 64 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 128, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 128, .n = 2048, .k = 4096 }, .{ .rows = 65, .n = 1024, .k = 1024 } } },
-        .simd => .{ .name = name, .accum = .f32, .depth = simdDepth, .out = out, .tiles = .{ .{ .size = 8 }, .{ .size = 32, .step = 8, .min = 8 }, .{ .size = 512, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 16, .n = 2688, .k = 4096 }, .{ .rows = 9, .n = 6400, .k = 256 } } },
+        .simd, .simd_bits => .{ .name = name, .accum = .f32, .depth = simdDepth, .out = out, .tiles = .{ .{ .size = 8 }, .{ .size = 32, .step = 8, .min = 8 }, .{ .size = 512, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 16, .n = 2688, .k = 4096 }, .{ .rows = 9, .n = 6400, .k = 256 } } },
         .lane, .lane_reg => .{ .name = name, .accum = .f32, .depth = laneDepth, .out = out, .replaces = if (v.kind == .lane_reg) "the cooperative lane kernel" else null, .tiles = .{ .{ .size = 16 }, .{ .size = 32, .step = 16, .min = 32 }, .{ .size = 4 * v.group, .step = v.group, .min = v.group } }, .served = &.{ .{ .rows = 16, .n = 2048, .k = 2048 }, .{ .rows = 5, .n = 512, .k = 896 } } },
     };
 }
@@ -59,6 +60,7 @@ pub const Proj = struct {
     name: []const u8,
     row_p: ?row.Pipelines = null,
     sq_p: ?sq.Pipelines = null,
+    sqb_p: ?sqb.Pipelines = null,
     mm_p: ?mm.Pipes = null,
     lane_p: ?lane.Projection = null,
     coop_p: ?lane.Projection = null,
@@ -78,6 +80,7 @@ pub const Proj = struct {
         switch (v.kind) {
             .row => p.row_p = try row.Pipelines.load(device),
             .simd => p.sq_p = try sq.Pipelines.load(device),
+            .simd_bits => p.sqb_p = try sqb.Pipelines.load(device),
             .affine_mm => {
                 const src = try mm.source(device, a, .{ .bits = v.bits, .group = @intCast(v.group), .out_f32 = v.f32_out });
                 defer a.free(src);
@@ -97,6 +100,7 @@ pub const Proj = struct {
         p.drop();
         if (p.row_p) |*x| x.deinit();
         if (p.sq_p) |*x| x.deinit();
+        if (p.sqb_p) |*x| x.deinit();
         if (p.mm_p) |pipes| for (pipes) |x| x.deinit();
         if (p.order) |o| o.deinit();
         p.rig.deinit();
@@ -128,7 +132,7 @@ pub const Proj = struct {
         if (shape.rows == 0 or shape.n == 0 or shape.k == 0 or shape.k % p.v.group != 0) return false;
         return switch (p.v.kind) {
             .row => if ((row.Weights{ .w = undefined, .scales = undefined, .biases = undefined, .n = shape.n, .k = shape.k, .group = p.v.group, .bits = p.v.bits }).validate()) |_| true else |_| false,
-            .simd => shape.n % 8 == 0 and shape.k % 64 == 0,
+            .simd, .simd_bits => shape.n % 8 == 0 and shape.k % 64 == 0,
             .affine_mm => shape.n % 64 == 0 and shape.k % 64 == 0,
             .lane, .lane_reg => shape.rows <= 16 and if (p.layout(shape, false).validate()) |_| true else |_| false,
         };
@@ -147,7 +151,7 @@ pub const Proj = struct {
         p.x = try p.rig.input(std.mem.sliceAsBytes(f.x));
         const out_bytes = f.outputs() * c.size(spec(p.v, p.name).out);
         switch (p.v.kind) {
-            .row, .simd, .affine_mm => {
+            .row, .simd, .simd_bits, .affine_mm => {
                 p.w = try p.rig.input(std.mem.sliceAsBytes(words));
                 p.s = try p.rig.input(std.mem.sliceAsBytes(f.scales));
                 p.b = try p.rig.input(std.mem.sliceAsBytes(f.biases));
@@ -196,6 +200,10 @@ pub const Proj = struct {
             .simd => {
                 const cl = try sq.call(&p.sq_p.?, shape.n, shape.k, shape.rows, false);
                 sq.encode(e, cl, .{ .w = p.w.buf, .w_off = p.w.off, .scales = p.s.buf, .s_off = p.s.off, .biases = p.b.buf, .b_off = p.b.off, .n = shape.n, .k = shape.k }, p.x.buf, p.x.off, p.out.buf, p.out.off);
+            },
+            .simd_bits => {
+                const cl = try sqb.call(&p.sqb_p.?, p.v.bits, shape.n, shape.k, shape.rows, shape.n, false);
+                sqb.encode(e, cl, .{ .w = p.w.buf, .w_off = p.w.off, .scales = p.s.buf, .s_off = p.s.off, .biases = p.b.buf, .b_off = p.b.off }, p.x.buf, p.x.off, p.out.buf, p.out.off);
             },
             .affine_mm => {
                 const x = .{ .buf = p.x.buf, .off = p.x.off };

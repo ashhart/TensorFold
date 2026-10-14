@@ -2,7 +2,6 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
-const nemotron = @import("nemotron");
 const check = @import("check.zig");
 const rig_ = @import("contract_rig.zig");
 

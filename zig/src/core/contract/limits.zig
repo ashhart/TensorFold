@@ -22,6 +22,8 @@ pub const MetalLaunch = struct {
     m2: u32 = 0,
     /// The launcher reads the pipeline's own thread limit and sizes its groups to it.
     adapts: bool = false,
+    /// False for Metal 4 tensor-op kernels: Xcode's translator cannot build them for M1/M2 ahead of time.
+    offline: bool = true,
 };
 
 /// An NVIDIA target we build for: its per-block and per-SM limits (CUDA's compute capability tables).
@@ -64,9 +66,10 @@ pub fn metal(l: MetalLaunch, f: Apple, out: *std.ArrayList(u8), a: std.mem.Alloc
     var n: usize = 0;
     if (l.threads > f.threads) n += try note(out, a, "{s} on {s}: {d} threads a group, the family's most is {d}", .{ l.name, f.name, l.threads, f.threads });
     if (l.tg_memory > f.tg_memory) n += try note(out, a, "{s} on {s}: {d} threadgroup bytes, the family's most is {d}", .{ l.name, f.name, l.tg_memory, f.tg_memory });
-    if (f.by_registers and l.threads > 256 and l.reserved < l.threads and !l.adapts) {
+    if (f.by_registers and l.reserved < l.threads and !l.adapts) {
         const lim = if (f.gen == 13) l.m1 else l.m2;
-        if (lim == 0) n += try note(out, a, "{s} on {s}: {d} threads with no reservation and no compiled limit recorded", .{ l.name, f.name, l.threads });
+        if (!l.offline and l.threads > 256) n += try note(out, a, "{s} on {s}: {d} threads past 256 and no M1/M2 compile to show they fit (reserve them)", .{ l.name, f.name, l.threads });
+        if (l.offline and lim == 0) n += try note(out, a, "{s} on {s}: no compiled thread limit recorded", .{ l.name, f.name });
         if (lim != 0 and lim < l.threads) n += try note(out, a, "{s} on {s}: {d} threads, the pipeline compiles for {d} (reserve the threads)", .{ l.name, f.name, l.threads, lim });
     }
     return n;
@@ -105,7 +108,7 @@ test "a launch inside every family passes; each planted excess is named" {
     defer out.deinit(a);
     const ok = MetalLaunch{ .name = "ok", .threads = 1024, .tg_memory = 256, .m1 = 1024, .m2 = 1024 };
     for (apple) |f| try std.testing.expectEqual(@as(usize, 0), try metal(ok, f, &out, a));
-    const big = MetalLaunch{ .name = "big", .threads = 256, .tg_memory = 36 * 1024 };
+    const big = MetalLaunch{ .name = "big", .threads = 256, .tg_memory = 36 * 1024, .m1 = 1024, .m2 = 1024 };
     for (apple) |f| try std.testing.expectEqual(@as(usize, 1), try metal(big, f, &out, a));
     const heavy = MetalLaunch{ .name = "heavy", .threads = 1024, .tg_memory = 0, .m1 = 448, .m2 = 640 };
     try std.testing.expectEqual(@as(usize, 1), try metal(heavy, apple[0], &out, a));
@@ -113,8 +116,13 @@ test "a launch inside every family passes; each planted excess is named" {
     var kept = heavy;
     kept.reserved = 1024;
     try std.testing.expectEqual(@as(usize, 0), try metal(kept, apple[0], &out, a));
-    const unknown = MetalLaunch{ .name = "unknown", .threads = 512, .tg_memory = 0 };
+    const unknown = MetalLaunch{ .name = "unknown", .threads = 64, .tg_memory = 0 };
     try std.testing.expectEqual(@as(usize, 1), try metal(unknown, apple[1], &out, a));
+    const tensor_op = MetalLaunch{ .name = "tensor op", .threads = 128, .tg_memory = 0, .offline = false };
+    try std.testing.expectEqual(@as(usize, 0), try metal(tensor_op, apple[0], &out, a));
+    var wide_op = tensor_op;
+    wide_op.threads = 512;
+    try std.testing.expectEqual(@as(usize, 1), try metal(wide_op, apple[0], &out, a));
 }
 
 test "CUDA: registers by warp, launch bounds, shared bytes and clusters per SM" {

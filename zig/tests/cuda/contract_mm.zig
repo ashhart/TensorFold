@@ -1,8 +1,7 @@
-//! Quantized products under the contract on CUDA: qmm_group's cluster tile, lane_gemv (its replacement), prompt16 FP4.
+//! Quantized products under the contract on CUDA: qmm_group's cluster tile, lane_gemv's two forms, prompt16 FP4.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
-const check = @import("check.zig");
 const rig_ = @import("contract_rig.zig");
 
 const contract = core.contract;
@@ -13,7 +12,7 @@ const Dense = contract.dense.Dense;
 const qlinear = cuda.qlinear;
 const nvfp4 = cuda.nvfp4;
 
-pub const Kind = enum { qmm_group, lane_gemv, prompt16 };
+pub const Kind = enum { qmm_group, lane_gemv, lane_gemv_split, prompt16 };
 
 /// A group's 64 products, the producer's 64-input sum, two fmas a group, then the K slices.
 fn groupDepth(s: c.Shape) usize {
@@ -31,7 +30,8 @@ pub fn spec(kind: Kind) c.Spec {
     return switch (kind) {
         .qmm_group => .{ .name = "cuda qmm_group (cluster tile)", .accum = .f32, .depth = groupDepth, .out = .bf16, .tiles = tiles, .served = decode },
         .lane_gemv => .{ .name = "cuda lane_gemv", .accum = .f32, .depth = groupDepth, .out = .bf16, .replaces = "qmm_group's cluster tile", .tiles = tiles, .served = decode },
-        .prompt16 => .{ .name = "cuda prompt16 FP4 tile 4", .accum = .f32, .depth = mmaChain, .out = .bf16, .tiles = .{ .{ .size = 128 }, .{ .size = 128, .step = 64, .min = 64 }, .{ .size = 128, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 300, .n = 512, .k = 2560 }, .{ .rows = 64, .n = 2560, .k = 512 } } },
+        .lane_gemv_split => .{ .name = "cuda lane_gemv split-K", .accum = .f32, .depth = groupDepth, .out = .bf16, .replaces = "qmm_group's cluster tile", .tiles = tiles, .served = decode },
+        .prompt16 => .{ .name = "cuda prompt16 FP4 tile 4", .accum = .f32, .depth = mmaChain, .ops = 2, .out = .bf16, .tiles = .{ .{ .size = 128 }, .{ .size = 128, .step = 64, .min = 64 }, .{ .size = 128, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 300, .n = 512, .k = 2560 }, .{ .rows = 64, .n = 2560, .k = 512 } } },
     };
 }
 
@@ -39,6 +39,7 @@ pub const Mm = struct {
     rig: rig_.Rig,
     kind: Kind,
     affine4: ?*const qlinear.Affine4Kernels = null,
+    split: ?*const qlinear.Split = null,
     prompt: ?*const nvfp4.Prompt = null,
     f: ?Affine = null,
     d: ?Dense = null,
@@ -77,6 +78,7 @@ pub const Mm = struct {
 
     fn prepareAffine(self: *Mm, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (shape.rows > 16 or shape.n % 64 != 0) return false;
+        if (self.kind == .lane_gemv_split and qlinear.splitK(shape.n, shape.k) == 1) return false; // served only with K slices
         const a = self.rig.gpu.gpa;
         const f = try Affine.init(a, shape, 4, 64);
         self.f = f;
@@ -108,7 +110,7 @@ pub const Mm = struct {
         try self.affine4.?.pack(self.rig.s, src_w, src_s, src_b, self.q);
         try self.rig.s.synchronize();
         const out_bytes = shape.rows * shape.n * 2;
-        if (self.kind == .lane_gemv) self.base = try self.rig.scratch(out_bytes);
+        if (self.kind == .lane_gemv or self.kind == .lane_gemv_split) self.base = try self.rig.scratch(out_bytes);
         self.out = try self.rig.output(out_bytes);
         return true;
     }
@@ -170,13 +172,17 @@ pub const Mm = struct {
                 const f = self.f.?;
                 try self.affine4.?.gemv(s, self.x, self.xs, self.q, out, f.shape.rows, qlinear.splitK(f.shape.n, f.shape.k));
             },
+            .lane_gemv_split => {
+                const f = self.f.?;
+                try self.affine4.?.gemvSplit(s, self.x, self.xs, self.q, out, f.shape.rows, qlinear.splitK(f.shape.n, f.shape.k), self.split.?.*);
+            },
             .prompt16 => try self.prompt.?.matmul(s, self.x, self.d.?.shape.k, self.d.?.shape.rows, self.w4, out),
         }
     }
 
     /// qmm_group's cluster tile on the same inputs: the bits lane_gemv must equal.
     pub fn replaced(self: *Mm) ![]const u8 {
-        if (self.kind != .lane_gemv) return error.NotAReplacement;
+        if (self.kind != .lane_gemv and self.kind != .lane_gemv_split) return error.NotAReplacement;
         try self.launch(.qmm_group, self.base);
         return self.rig.bytes(self.base, self.count() * 2);
     }

@@ -2,7 +2,6 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
-const nemotron = @import("nemotron");
 const options = @import("contract_options");
 const check = @import("check.zig");
 const rows_k = @import("contract_rows.zig");
@@ -48,6 +47,8 @@ pub fn run(gpu: check.Gpu) !void {
     const sms: usize = @intCast(try gpu.ctx.attribute(.multiprocessor_count));
     var affine4 = try cuda.qlinear.Affine4Kernels.resolve(gpu.d, mods[1], mods[2], mods[3], mods[4], sms, cap == 121);
     defer affine4.deinit();
+    var split = try cuda.qlinear.Split.init(gpu.d); // GB10 serves without it; other GPUs take it for K slices
+    defer split.deinit();
     var prompt = try cuda.nvfp4.Prompt.load(gpu.d);
     defer prompt.unload();
     var kernels: std.ArrayList(g.Kernel) = .empty;
@@ -66,8 +67,8 @@ pub fn run(gpu: check.Gpu) !void {
     defer topk.deinit();
     try kernels.append(a, logits.kernel());
     try kernels.append(a, topk.kernel());
-    var mm: [3]mm_k.Mm = undefined;
-    for (std.enums.values(mm_k.Kind), &mm) |kind, *m| m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .affine4 = &affine4, .prompt = &prompt };
+    var mm: [4]mm_k.Mm = undefined;
+    for (std.enums.values(mm_k.Kind), &mm) |kind, *m| m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .affine4 = &affine4, .split = &split, .prompt = &prompt };
     defer for (&mm) |*m| m.deinit();
     for (&mm) |*m| try kernels.append(a, m.kernel());
     var t: g.Tally = .{};

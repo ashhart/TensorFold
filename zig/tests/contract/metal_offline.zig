@@ -73,7 +73,9 @@ fn native(x: Ctx, lib: []const u8, fun: []const u8, arch: []const u8, threads: u
         try script.appendSlice(x.a, "}]}}");
         const path = try std.fmt.allocPrint(x.a, "{s}.mtlp-json", .{out});
         try std.Io.Dir.cwd().writeFile(x.io, .{ .sub_path = path, .data = script.items });
-        try exec(x, &.{ "xcrun", "metal-tt", "-arch", arch, "-macos-version-min", "26.0", "-o", out, lib, path });
+        var min: [16]u8 = undefined;
+        const ver = try std.fmt.bufPrint(&min, "{d}.0", .{mtl.objc.osVersion().major}); // the AIR version std_flag() made
+        try exec(x, &.{ "xcrun", "metal-tt", "-arch", arch, "-macos-version-min", ver, "-o", out, lib, path });
     }
     const bytes = try std.Io.Dir.cwd().readFileAlloc(x.io, out, x.a, .limited(1 << 26));
     const outer = try section(bytes, 0, "__compute");
@@ -100,7 +102,7 @@ fn familyLimit(x: Ctx, lib: []const u8, fun: []const u8, archs: []const []const 
     return least;
 }
 
-/// Each launch's M1 and M2 limits compiled here: every one must fit, and records past 256 threads must be current.
+/// Each launch's M1 and M2 limits compiled here: every one must fit, and no record may exceed what compiled here.
 pub fn run(a: std.mem.Allocator, io: std.Io, dir: []const u8, list: []const limits.MetalLaunch, comptime launchOf: anytype, device: mtl.Device) !usize {
     try std.Io.Dir.cwd().createDirPath(io, dir);
     const x = Ctx{ .a = a, .io = io, .dir = dir };
@@ -108,7 +110,7 @@ pub fn run(a: std.mem.Allocator, io: std.Io, dir: []const u8, list: []const limi
     for (list) |d| {
         const l = try launchOf(a, device, d);
         const control = std.mem.startsWith(u8, d.name, "control");
-        const safe = d.threads <= 256 or d.adapts or d.reserved >= d.threads;
+        const safe = d.adapts or d.reserved >= d.threads or (!d.offline and d.threads <= 256);
         const got = blk: {
             const lib = library(x, l.pre_m5) catch |err| break :blk err;
             const m1 = familyLimit(x, lib, l.function, &m1_archs) catch |err| break :blk err;
@@ -122,7 +124,7 @@ pub fn run(a: std.mem.Allocator, io: std.Io, dir: []const u8, list: []const limi
             continue;
         };
         const fits = (m[0] >= d.threads and m[1] >= d.threads) or d.reserved >= d.threads or d.adapts;
-        const current = (d.m1 == m[0] and d.m2 == m[1]) or safe;
+        const current = (d.m1 <= m[0] and d.m2 <= m[1] and d.m1 > 0) or d.adapts; // a record: the least any toolchain compiled
         if (!control and (!fits or !current)) n += 1;
         const word = if (control) (if (fits) "MISSED" else "RED ") else if (fits and current) "PASS" else "FAIL";
         std.debug.print("{s} offline {s}: {d} threads; M1 pipelines take {d}, M2 {d} (recorded {d}, {d})\n", .{ word, d.name, d.threads, m[0], m[1], d.m1, d.m2 });

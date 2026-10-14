@@ -95,7 +95,8 @@ MLX's formula keeps the infinity, because its codes enter the MMAs as q + 128 an
 
 ## Coverage
 
-Metal: softmax, RMS norm, bf16 top-k, the row projection (2 to 8 bits), affine_mm, simd_qmm, and the lane projection
-(every format on the M5, 6-bit groups of 32 before it, and its reg kernel bit-equal to the cooperative one).
+Metal: softmax, RMS norm, bf16 top-k, the row projection (3, 4, 6 and 8 bits), affine_mm (4 and 8 bits), simd_qmm
+(4 bits) and simd_qmm_bits (3, 6 and 8 bits), and the lane projection (6-bit groups of 32 on every chip; 4- and 8-bit
+formats on the M5's tensor units, where its reg kernel must equal the cooperative one bit for bit).
 CUDA: the RMS norm rows (16-byte form and the fp32-out tree), Nemotron's router logits and top-k, qmm_group's cluster
-tile, lane_gemv bit-equal to it, and prompt16's FP4 tile.
+tile, lane_gemv and its split-K form (both bit-equal to it), and prompt16's FP4 tile.
