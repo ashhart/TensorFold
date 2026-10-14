@@ -15,6 +15,7 @@ import { handle } from './ipc'
 import { persistAutomations } from './persistence'
 import { resolveWorkspaceCwd } from './workspace'
 import { sanitizeAutomationCreateInput, sanitizeAutomationUpdatePatch, validateAutomationProviderRoute } from './automation-patch-policy'
+import { nextDailyAutomationRun, normalizeAutomationTimeZone } from '../../../shared/automation-time'
 import {
   modelRouteAccountLabel,
   modelRouteAutoFailoverEnabled,
@@ -83,6 +84,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
       // Daily automations use nextRunAt (below); the kernel's interval math covers 'interval'.
       everyMs: a.scheduleKind === 'interval' ? Math.max(1, a.everyMinutes) * 60_000 : 0,
       lastRunAt: a.lastRunAt,
+      nextRunAt: a.nextRunAt,
       misfire: a.misfire ?? 'coalesce',
       requiredRisks: a.requiredRisks ?? [],
       acknowledgedRisks: a.acknowledgedRisks ?? [],
@@ -98,6 +100,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
       everyMinutes: p.everyMinutes ?? 60,
       atHour: p.atHour ?? 9,
       atMinute: p.atMinute ?? 0,
+      ...(p.timeZone !== undefined ? { timeZone: normalizeAutomationTimeZone(p.timeZone) } : {}),
       providerId: p.providerId ?? store.settings?.activeProviderId ?? null,
       providerAccountId: p.providerAccountId ?? store.settings?.activeProviderAccountId ?? null,
       model: p.model ?? store.settings?.activeModel ?? null,
@@ -129,15 +132,12 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
       if (next <= from) next = from + step
       return next
     }
-    const d = new Date(from)
-    d.setHours(a.atHour, a.atMinute, 0, 0)
-    let next = d.getTime()
-    if (next <= from) next += 24 * 60 * 60_000
-    return next
+    return nextDailyAutomationRun(a.atHour, a.atMinute, Math.max(from, a.lastRunAt ?? from), a.timeZone)
   }
 
   function touchAutomation(a: Automation) {
-    a.nextRunAt = computeNextRun(a)
+    try { a.nextRunAt = computeNextRun(a); a.scheduleError = null }
+    catch (error) { a.nextRunAt = null; a.scheduleError = error instanceof Error ? error.message : 'Fix this automation schedule before it can run.' }
     a.updatedAt = Date.now()
     persistAutomations()
     deps.emitAutomation(a)
@@ -454,7 +454,19 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
 
   function startScheduler() {
     if (schedulerTimer) return
-    for (const a of store.automations) if (a.enabled && a.scheduleKind !== 'manual' && a.nextRunAt == null) a.nextRunAt = computeNextRun(a)
+    for (const a of store.automations) {
+      if (!a.enabled || a.scheduleKind === 'manual') continue
+      try {
+        // Validate even an existing committed instant, but preserve overdue instants so
+        // restart still coalesces a missed run instead of silently moving it to tomorrow.
+        const next = computeNextRun(a)
+        if (a.nextRunAt == null) a.nextRunAt = next
+        a.scheduleError = null
+      } catch (error) {
+        a.nextRunAt = null
+        a.scheduleError = error instanceof Error ? error.message : 'Fix this automation schedule before it can run.'
+      }
+    }
     persistAutomations()
     // Restore the persisted lease (VST-038): if another owner still holds it, this process's
     // ticks will stand down until it lapses — the persisted lease survives our restart.
@@ -494,7 +506,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
       }
       // Daily automations fire by nextRunAt, under the SAME lease + risk gate.
       for (const a of store.automations) {
-        if (a.scheduleKind !== 'daily' || !a.enabled) continue
+        if (a.scheduleKind !== 'daily' || !a.enabled || a.scheduleError) continue
         if (runningAutomations.has(a.id)) continue
         if (a.nextRunAt != null && a.nextRunAt <= now && gateAutomationRun({ requiredRisks: a.requiredRisks ?? [], acknowledgedRisks: a.acknowledgedRisks ?? [] }).allowed) {
           void runAutomation(a)
@@ -533,8 +545,8 @@ export function registerAutomationIpc(runtime: AutomationRuntime) {
     if (!a) throw new Error('Automation not found')
     const safePatch = sanitizeAutomationUpdatePatch(a, patch)
     validateAutomationProviderRoute({ ...a, ...safePatch }, store.settings.providers)
-    Object.assign(a, safePatch, { updatedAt: Date.now() })
-    a.nextRunAt = runtime.computeNextRun(a)
+    const nextRunAt = runtime.computeNextRun({ ...a, ...safePatch })
+    Object.assign(a, safePatch, { updatedAt: Date.now(), nextRunAt, scheduleError: null })
     persistAutomations()
     return a
   })

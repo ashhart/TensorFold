@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { FUSE_ORDER, assertFuses, readFuseWire, verifyPackagedEngine } from './package-checks.mjs'
+import { assertPackagedMacOSMinimum, macOSBuildMinimums } from './macos-runtime-minimum.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
@@ -23,14 +24,23 @@ assert.deepEqual(fuses, {
 assert.deepEqual(pkg.build?.extraResources, [
   { from: 'build/engine', to: 'engine', filter: ['**/*'] },
   { from: 'build/computer-use', to: 'computer-use', filter: ['tensorfold-computer'] },
-], 'bin/ and lib/ stay side by side under Contents/Resources/engine; only the helper binary ships from build/computer-use')
+  { from: 'build/voice', to: 'voice-notices', filter: ['*.txt'] },
+], 'the engine, computer helper and offline voice notices have explicit packaging destinations')
+assert.match(await readFile(path.join(root, 'build', 'voice', 'NOTICE.txt'), 'utf8'), /HeadTTS 1\.2\.0/)
+assert.match(await readFile(path.join(root, 'build', 'voice', 'CMU-DICTIONARY-BSD.txt'), 'utf8'), /Redistribution and use in source and binary forms/)
+assert.match(await readFile(path.join(root, 'build', 'voice', 'HEADTTS-MIT.txt'), 'utf8'), /MIT License/)
+assert.match(await readFile(path.join(root, 'build', 'voice', 'APACHE-2.0.txt'), 'utf8'), /Apache License/)
+assert.equal(pkg.dependencies['kokoro-js'], '1.2.1')
+assert.equal(pkg.dependencies['@met4citizen/headtts'], '1.2.0')
+assert.equal(pkg.overrides.phonemizer, '$phonemizer', 'the eSpeak-based upstream phonemizer must stay replaced in every dependency branch')
+assert.deepEqual(pkg.build.asarUnpack, ['node_modules/onnxruntime-node/bin/napi-v3/darwin/arm64/*'], 'ONNX native bindings and their adjacent dylib must remain available outside asar')
 for (const script of ['pack:mac:dev', 'pack:mac', 'dist:mac']) {
   assert.match(pkg.scripts[script], /node scripts\/fetch-engine\.mjs && node scripts\/build-computer-helper\.mjs && node scripts\/package-mac\.mjs/, `${script} stages the pinned engine and builds the computer-use helper before packaging`)
 }
 const engineManifest = JSON.parse(await readFile(path.join(root, 'build', 'engine.json'), 'utf8'))
-assert.equal(engineManifest.version, '1.0.9')
-assert.equal(engineManifest.sha256, '4892b4690df9f1d5c367c5cb4a8e831b1cfbac23d04c9bb8d42fde9b05234fc8')
-assert.equal(engineManifest.url, 'https://github.com/ashhart/TensorFold/releases/download/v1.0.9/tensorfold-1.0.9-macos-arm64.tar.gz')
+assert.equal(engineManifest.version, '1.0.10')
+assert.equal(engineManifest.sha256, '85987885bd3ba11a41ea0e9aea94f6207b09f0df9b1c38d992753e494c06c806')
+assert.equal(engineManifest.url, 'https://github.com/ashhart/TensorFold/releases/download/v1.0.10/tensorfold-1.0.10-macos-arm64.tar.gz')
 const ignore = await readFile(path.join(root, '.gitignore'), 'utf8')
 assert.match(ignore, /^build\/engine\/$/m, 'the staged engine is never committed')
 
@@ -70,3 +80,48 @@ try {
 }
 
 console.log('package checks tests passed')
+
+const nativeBuild = (minimum, platform = 'MACOS') => `Load command 1\n cmd LC_BUILD_VERSION\n platform ${platform}\n minos ${minimum}\n sdk 26.5\n ntools 1\n tool CLANG\n version 17.0\n`
+assert.deepEqual(macOSBuildMinimums(nativeBuild('13.3')), ['13.3'])
+assert.deepEqual(macOSBuildMinimums(`${nativeBuild('12.0')}\n${nativeBuild('13.3')}`), ['12.0', '13.3'])
+assert.deepEqual(macOSBuildMinimums('Load command 1\n cmd LC_VERSION_MIN_MACOSX\n version 10.15\n sdk 11.0\n'), ['10.15'])
+assert.throws(() => macOSBuildMinimums(nativeBuild('13.3', 'IOS')), /non-macOS/)
+assert.throws(() => macOSBuildMinimums(nativeBuild('not-a-version')), /Invalid minimum/)
+assert.throws(() => macOSBuildMinimums('cmd LC_BUILD_VERSION\n platform MACOS\n sdk 26.5'), /Invalid minimum/)
+assert.throws(() => macOSBuildMinimums('no load commands'), /no recognized/)
+
+const minimumTmp = await mkdtemp(path.join(os.tmpdir(), 'macos-minimum-test-'))
+try {
+  const app = path.join(minimumTmp, 'Fixture.app')
+  const nested = path.join(app, 'Contents', 'Resources', 'onnxruntime')
+  await mkdir(nested, { recursive: true })
+  await writeFile(path.join(app, 'Contents', 'Info.plist'), 'fixture plist')
+  await writeFile(path.join(nested, 'runtime.dylib'), Buffer.from('cffaedfe00000000', 'hex'))
+  await writeFile(path.join(nested, 'notice.txt'), 'not native')
+  await symlink(path.join(nested, 'runtime.dylib'), path.join(nested, 'runtime-alias'))
+  let declared = '13.0'
+  let build = nativeBuild('13.3')
+  const calls = []
+  const run = async (command, args) => {
+    calls.push([command, ...args])
+    return { stdout: command.endsWith('plutil') ? declared : build, stderr: '' }
+  }
+  await assert.rejects(() => assertPackagedMacOSMinimum(app, { run }), /requires macOS 13.3, but the app declares 13.0/)
+  declared = pkg.build.mac.minimumSystemVersion
+  const ok = await assertPackagedMacOSMinimum(app, { run })
+  assert.equal(ok.declaredMinimum, '13.3')
+  assert.equal(ok.binaries.length, 1, 'regular native files are checked once, including non-executable dylibs')
+  assert.ok(calls.every(call => call[0] === '/usr/bin/plutil' || call[0] === '/usr/bin/xcrun'), 'native code is never executed')
+  build = `${nativeBuild('12.0')}\n${nativeBuild('14.0')}`
+  await assert.rejects(() => assertPackagedMacOSMinimum(app, { run }), /requires macOS 14.0/)
+  build = nativeBuild('13.3', 'IOS')
+  await assert.rejects(() => assertPackagedMacOSMinimum(app, { run }), /non-macOS/)
+  declared = ''
+  await assert.rejects(() => assertPackagedMacOSMinimum(app, { run }), /Invalid minimum/)
+  declared = '13.3'
+  await rm(path.join(nested, 'runtime.dylib'))
+  await assert.rejects(() => assertPackagedMacOSMinimum(app, { run }), /no native binaries/)
+} finally {
+  await rm(minimumTmp, { recursive: true, force: true })
+}
+console.log('macOS native minimum-version checks passed')

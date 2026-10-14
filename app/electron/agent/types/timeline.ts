@@ -94,6 +94,9 @@ export type TimelineKind = 'user' | 'cue' | 'assistant' | 'reasoning' | 'tool' |
 export type ToolState = 'pending' | 'awaiting' | 'running' | 'ok' | 'error' | 'denied'
 
 export interface TimelineItem {
+  /** Host provenance for conservative reviewed-memory proposals; absent legacy text is unclassified. */
+  memorySource?: 'user' | 'external'
+  question?: import('./user-question').UserQuestion
   id: string
   kind: TimelineKind
   text?: string // user / assistant markdown, reasoning, error
@@ -277,6 +280,7 @@ export interface AgentRunReceiptSnapshot {
 }
 
 export interface AgentRunContractSnapshot {
+  memoryPolicy?: ThreadMemoryPolicy
   id: string
   runId: string
   objective: string
@@ -299,7 +303,19 @@ export interface AgentRunContractSnapshot {
   createdAt: number
 }
 
+export interface ThreadMemoryPolicy {
+  useExisting: boolean
+  contribute: boolean
+}
+
 export interface Thread {
+  /** TensorFold saved-memory access, independent of encrypted conversation retention. */
+  memoryPolicy?: ThreadMemoryPolicy
+  /** Host-owned monotonic revision for durable user changes. */
+  memoryPolicyRevision?: number
+  bot?: import('./settings').BotThreadConfig
+  // Once phone access is granted, its derived conversation stays on a local model.
+  phoneLocalOnly?: boolean
   id: string
   title: string
   kind: 'task' | 'chat'

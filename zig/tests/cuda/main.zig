@@ -27,6 +27,8 @@ const exlr8_tests = @import("exlr8_tests.zig");
 const exlr8_dense_tests = @import("exlr8_dense_tests.zig");
 const norms_tests = @import("norms_tests.zig");
 const norm_rows_tests = @import("norm_rows_tests.zig");
+const pocket_tests = @import("pocket_tests.zig");
+const recapture_tests = @import("recapture_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -47,12 +49,14 @@ const usage =
     \\  norm-rows                 bf16-residual and gated norms, token rows against float64 (synthetic)
     \\  sample                    sample.cu's keyed draws against the Metal rule's host references (synthetic rows)
     \\  glue                      Nemotron's glue kernels against their host references at its shapes (synthetic rows)
+    \\  pocket [reps]             the pocket's two kernels against tf_pocket_rows byte for byte; reps > 0 times them too
     \\  window-profile MODEL WIDTHS IDS_FILE   a decode window's GPU ms by kernel class (WIDTHS like 1,4,16), beside its graph
     \\  tree-accept MODEL IDS_FILE COUNT OUT   a greedy reply's MTP chain and level-1 runner-up branches at every position (JSON)
     \\  chunk-costs MODEL IDS_FILE WIDTHS   r rows as the decode window graph (r <= 16) and as a prompt chunk (any r)
     \\  resume MODEL IDS_FILE     prompt states kept at off-grid rows: each resumed pass against a fresh one, byte for byte
     \\  marks MODEL IDS_FILE N PATTERNS   states kept inside chunks against chunks cut at the same rows, byte for byte
     \\  prompt-cuts MODEL IDS_FILE   a prompt keeping states inside chunks and at their ends (background passes too), and resumed from each, equals one uncut pass
+    \\  recapture MODEL           graphs captured again while another sequence is bound: both keep their sampling rules
     \\  grouped-plan <dir>        the shared expert plan against experts.route's bytes (oracle/grouped_plan.py)
     \\  fp8-lane <dir>            block-FP8 projections against the Python lane matmul's bytes (oracle/fp8_lane.py)
     \\  fp8-experts <dir>         grouped block-FP8 experts against recorded fixture bytes
@@ -127,12 +131,15 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "norms")) return norms_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "norm-rows")) return norm_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glue")) return glue_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "pocket"))
+        return pocket_tests.run(gpu, if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else 0);
     if (std.mem.eql(u8, cmd, "window-profile")) return window_profile.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "tree-accept")) return tree_accept.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "chunk-costs")) return chunk_costs.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "resume")) return resume_tests.run(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "marks")) return resume_tests.insideChunks(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "prompt-cuts")) return prompt_cuts.run(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "recapture")) return recapture_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "grouped-plan")) return grouped_tests.plan(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "carveout")) {
         const mib = if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else cuda.carveout.default_bytes >> 20;

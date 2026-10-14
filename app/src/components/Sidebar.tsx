@@ -16,6 +16,7 @@ import { ThreadRow } from './sidebar/rows'
 import { ProjectsSection } from './sidebar/ProjectsSection'
 import { MoreSection } from './sidebar/MoreSection'
 import { EngineChip } from './sidebar/EngineChip'
+import { UpdatePrompt } from './sidebar/UpdatePrompt'
 import { useBranches } from './sidebar/useBranches'
 import type { ThreadRowProps, RoomRowProps, TerminalRowProps } from './sidebar/types'
 
@@ -48,7 +49,6 @@ export function Sidebar() {
   const approvals = useStore((st) => st.approvals)
   const jobs = useStore((st) => st.jobs)
   const settings = useStore((st) => st.settings)
-  const updateStatus = useStore((st) => st.updateStatus)
   const terminals = useStore((st) => st.terminals)
   const activeTerminalId = useStore((st) => st.activeTerminalId)
   const pinnedThreadIds = useStore((st) => st.pinnedThreadIds)
@@ -229,6 +229,7 @@ export function Sidebar() {
       <div className="space-y-0.5 px-2 pb-1">
         <NavRow icon="pencil" label="New task" hint="⌘N" active={view.name === 'home'} onClick={s.newTask} />
         <NavRow icon="message" label="New chat" hint="⇧⌘N" onClick={() => void s.newChat(null)} />
+        <NavRow icon="spark" label="Bots" active={view.name === 'bots'} onClick={() => s.setView({ name: 'bots' })} />
         <label className="no-drag flex h-8 items-center gap-2 rounded-[10px] px-2.5 text-ink-3 transition-colors focus-within:bg-surface hover:bg-surface">
           <Icon name="search" size={16} className="shrink-0" />
           <input
@@ -311,12 +312,7 @@ export function Sidebar() {
       </nav>
 
       <div className="space-y-0.5 border-t border-line px-2 pb-2.5 pt-2">
-        {updateStatus && ['available', 'downloading', 'ready', 'installing'].includes(updateStatus.state) && (
-          <button onClick={() => s.openUpdateModal()} className="no-drag flex h-8 w-full items-center gap-2 rounded-[10px] px-2.5 text-[13px] text-ink-2 transition-colors hover:bg-surface hover:text-ink">
-            <span className="flex w-4 shrink-0 justify-center"><span className="size-1.5 rounded-full bg-accent" /></span>
-            <span className="min-w-0 flex-1 truncate text-left">{updateStatus.state === 'downloading' ? 'Downloading update' : updateStatus.state === 'installing' ? 'Preparing restart' : `Update ${updateStatus.latestVersion ?? ''} ${updateStatus.state === 'ready' ? 'ready to install' : 'available'}`}</span>
-          </button>
-        )}
+        <UpdatePrompt />
         {engineReady && <EngineChip active={view.name === 'models'} onOpen={() => s.setView({ name: 'models' })} />}
         <div className="flex items-center gap-0.5">
           <div className="min-w-0 flex-1"><NavRow icon="cpu" label="Models" active={view.name === 'models'} onClick={() => s.setView({ name: 'models' })} /></div>

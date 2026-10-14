@@ -40,7 +40,7 @@ export function useRemoteSecurity(
   const purgeLocalMemoryNow = async () => {
     const total = securityControls ? Object.values(securityControls.localMemoryCounts).reduce<number>((sum, value) => sum + Number(value || 0), 0) : 0
     if (!window.confirm(
-      `Permanently purge ${total} local memory record${total === 1 ? '' : 's'} from this machine? App settings and configured provider/cloud credentials remain; linked WhatsApp device credentials are removed. Managed Git worktrees are preserved and reported so unmerged work is not silently deleted.`,
+      `Permanently purge ${total} local memory record${total === 1 ? '' : 's'}, isolated bot VMs and their private workspace disks, and TensorFold's private Living Weights model copies, learned facts and learning history from this machine? Original downloaded models remain. App settings and configured provider/cloud credentials remain; linked WhatsApp device credentials are removed. Managed Git worktrees are preserved and reported so unmerged work is not silently deleted.`,
     )) return
     setSecurityBusy('purge')
     setSecurityNotice('')
@@ -53,7 +53,7 @@ export function useRemoteSecurity(
       const residuals = result.preservedResiduals.length
         ? ` Preserved residuals: ${result.preservedResiduals.map((item) => `${item.path} (${item.reason})`).join('; ')}.`
         : ' No scoped residuals were preserved.'
-      setSecurityNotice(`Purged ${purged} local record${purged === 1 ? '' : 's'}.${preserved}${residuals}`)
+      setSecurityNotice(`Purged ${purged} local record${purged === 1 ? '' : 's'} and files, including isolated bot workspace disks and private Living Weights models and history.${preserved}${residuals}`)
       await refreshSecurityControls()
     } catch (e: any) {
       setSecurityNotice(String(e?.message || e || 'Purge failed').replace(/^Error invoking remote method '[^']+':\s*/, '').replace(/^Error:\s*/, ''))

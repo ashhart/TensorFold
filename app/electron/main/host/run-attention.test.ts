@@ -80,4 +80,28 @@ console.log('run-attention tests:')
   ok('the runtime notifies once per run, keeps the badge current and respects focus and the setting')
 }
 
+{
+  const notices: AttentionNotice[] = [], badges: string[] = []
+  const attention = createRunAttention({ enabled: () => true, focused: () => false, supported: () => true, threadTitle: () => 'Example chat', notify: (notice) => notices.push(notice), setBadge: (text) => badges.push(text) })
+  const question: any = { id: 'question-attention', state: 'pending', question: 'Synthetic private question content', choices: ['Amber'] }
+  const event: any = { type: 'item_update', threadId: 'thread-question', runId: 'run-question', id: 'tool-question', patch: { question } }
+  attention.observe(event)
+  attention.observe(event)
+  assert.equal(notices.length, 1, 'duplicate pending updates never notify twice for one question')
+  assert.equal(notices[0].title, 'Needs your answer')
+  assert.equal(notices[0].body, 'Example chat', 'question text and answer choices stay out of lock-screen notification bodies')
+  assert.deepEqual(badges, ['1'])
+  attention.observe({ ...event, runId: 'older-run', patch: { question: { ...question, id: 'older-question', state: 'interrupted' } } })
+  assert.equal(attention.needsYouCount(), 1, 'late recovery of an older question cannot clear the current question badge')
+  attention.observe({ ...event, patch: { question: { ...question, state: 'answered', answer: 'Amber' } } })
+  assert.equal(attention.needsYouCount(), 0)
+  assert.deepEqual(badges, ['1', ''])
+  attention.approvalPending({ threadId: event.threadId, tool: 'write_file' })
+  attention.observe({ ...event, patch: { question: { ...question, state: 'interrupted' } } })
+  assert.equal(attention.needsYouCount(), 1, 'an older question result cannot clear a new mutation approval badge')
+  attention.observe({ type: 'status', threadId: event.threadId, runId: event.runId, status: 'tool' })
+  assert.equal(attention.needsYouCount(), 0)
+  ok('questions get one private needs-you notice and settle the badge after the durable answer')
+}
+
 console.log(`\n${passed} run-attention tests passed`)

@@ -9,10 +9,12 @@ type DictationCallbacks = {
 
 // Every networked provider is synthesized in the main process and returned as base64.
 // The renderer never receives or submits provider credentials; browser uses Web Speech.
-const MAIN_SYNTH_PROVIDERS = new Set(['openai', 'custom', 'elevenlabs', 'local'])
+const MAIN_SYNTH_PROVIDERS = new Set(['openai', 'custom', 'elevenlabs', 'local', 'kokoro'])
 
 let currentAudio: HTMLAudioElement | null = null
 let currentAudioUrl = ''
+let speechGeneration = 0
+let currentKokoroRequest = ''
 
 const FALLBACK_VOICE: VoiceSettings = {
   enabled: true,
@@ -68,7 +70,14 @@ export function availableVoices(): SpeechSynthesisVoice[] {
 }
 
 export function stopSpeaking(): void {
+  speechGeneration += 1
+  if (currentKokoroRequest) {
+    void api.cancelKokoroVoice(currentKokoroRequest).catch(() => {})
+    currentKokoroRequest = ''
+  }
   if (currentAudio) {
+    currentAudio.onended = null
+    currentAudio.onerror = null
     currentAudio.pause()
     currentAudio = null
   }
@@ -140,13 +149,14 @@ function blobToBase64(blob: Blob): Promise<string> {
 
 function playAudioBlob(blob: Blob, cfg: VoiceSettings, opts: { onEnd?: () => void; onError?: (message: string) => void }): void {
   currentAudioUrl = URL.createObjectURL(blob)
-  currentAudio = new Audio(currentAudioUrl)
-  currentAudio.volume = clamp(cfg.volume, 0, 1)
+  const audio = new Audio(currentAudioUrl)
+  currentAudio = audio
+  audio.volume = clamp(cfg.volume, 0, 1)
   // Cloud/local engines already render at the requested pace; keep playbackRate at 1 so we
   // don't double-apply speed in the renderer.
-  currentAudio.onended = () => { stopSpeaking(); opts.onEnd?.() }
-  currentAudio.onerror = () => { stopSpeaking(); opts.onError?.('Speech playback failed.') }
-  void currentAudio.play().catch((e: any) => { stopSpeaking(); opts.onError?.(e?.message ?? 'Speech playback failed.') })
+  audio.onended = () => { if (currentAudio !== audio) return; stopSpeaking(); opts.onEnd?.() }
+  audio.onerror = () => { if (currentAudio !== audio) return; stopSpeaking(); opts.onError?.('Speech playback failed.') }
+  void audio.play().catch((e: any) => { if (currentAudio !== audio) return; stopSpeaking(); opts.onError?.(e?.message ?? 'Speech playback failed.') })
 }
 
 // Web Speech (browser) readback. Also serves as the graceful fallback when the local engine
@@ -176,9 +186,16 @@ export function speakText(input: string, settings?: VoiceSettings, opts: { summa
   // beside fetch). Audio comes back base64; local errors fall back to Web Speech.
   if (MAIN_SYNTH_PROVIDERS.has(cfg.ttsProvider)) {
     stopSpeaking()
+    const generation = speechGeneration
+    const requestId = cfg.ttsProvider === 'kokoro' ? crypto.randomUUID() : ''
+    if (requestId) currentKokoroRequest = requestId
     const run = async () => {
       try {
-        const result = cfg.ttsProvider === 'local' ? await api.synthesizeLocalVoice(body) : await api.synthesizeVoice(body)
+        const result = cfg.ttsProvider === 'kokoro'
+          ? await api.synthesizeKokoroVoice({ text: body, requestId, voice: cfg.kokoroVoice || 'af_heart', rate: cfg.rate })
+          : cfg.ttsProvider === 'local' ? await api.synthesizeLocalVoice(body) : await api.synthesizeVoice(body)
+        if (generation !== speechGeneration) return
+        currentKokoroRequest = ''
         if (result.ok && result.audioBase64) {
           playAudioBlob(base64ToBlob(result.audioBase64, result.mimeType || 'audio/mpeg'), cfg, opts)
           return
@@ -186,6 +203,8 @@ export function speakText(input: string, settings?: VoiceSettings, opts: { summa
         if (result.fallback && speakWebSpeech(body, cfg, opts)) return
         opts.onError?.(result.error ?? 'Speech synthesis failed.')
       } catch (e: any) {
+        if (generation !== speechGeneration) return
+        currentKokoroRequest = ''
         // A hard IPC failure on the local engine should still fall back to Web Speech.
         if (cfg.ttsProvider === 'local' && speakWebSpeech(body, cfg, opts)) return
         opts.onError?.(e?.message ?? 'Speech synthesis failed.')

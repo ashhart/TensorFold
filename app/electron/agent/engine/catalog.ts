@@ -1,6 +1,6 @@
 import type { SuggestedModel } from '../types'
 
-// What 1.0.9 says about its own models (README "Model families" and cli/hub.zig titles). The engine's
+// What 1.0.10 says about its own models (README "Model families" and cli/hub.zig titles). The engine's
 // `capabilities --json` stays the authority on which model types it serves.
 
 export const FAMILY_TITLES: Record<string, string> = {
@@ -20,7 +20,7 @@ export function drafterFor(repo: string): string | null {
   return COMPANION_DRAFTERS[repo] ?? null
 }
 
-// The Metal checkpoints 1.0.9 names and qualifies on a single Mac. Each is offered only after the
+// The Metal checkpoints 1.0.10 names and qualifies on a single Mac. Each is offered only after the
 // device's memory and disk checks pass, so the largest ones appear only on Macs that can hold them.
 export const SUGGESTED_MODELS: SuggestedModel[] = [
   {

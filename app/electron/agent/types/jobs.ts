@@ -42,6 +42,8 @@ export interface JobPendingApproval {
 
 export interface Job {
   id: string
+  /** Host-owned Incognito work is live-only, including approvals and receipts. */
+  incognito?: boolean
   kind: JobKind
   status: JobStatus
   attempt: number
@@ -457,7 +459,7 @@ export type AgentEvent = (
   | { runId: string; threadId: string; type: 'item_add'; item: TimelineItem }
   | { runId: string; threadId: string; type: 'item_delta'; id: string; field: 'text' | 'output'; chunk: string }
   | { runId: string; threadId: string; type: 'item_update'; id: string; patch: Partial<TimelineItem> }
-  | { runId: string; threadId: string; type: 'thread_update'; patch: Partial<Pick<Thread, 'providerId' | 'providerAccountId' | 'model' | 'modelRoute' | 'activeRunContract' | 'lastRunReceipt'>> }
+  | { runId: string; threadId: string; type: 'thread_update'; patch: Partial<Pick<Thread, 'providerId' | 'providerAccountId' | 'model' | 'modelRoute' | 'activeRunContract' | 'lastRunReceipt' | 'memoryPolicy' | 'memoryPolicyRevision'>> }
   | { runId: string; threadId: string; type: 'approval_request'; callId: string; itemId: string }
   | { runId: string; threadId: string; type: 'title'; title: string }
   | { runId: string; threadId: string; type: 'plan'; plan: PlanStep[]; goalStatus?: 'active' | 'complete' | 'paused' }

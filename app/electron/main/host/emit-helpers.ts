@@ -72,6 +72,10 @@ export function createEmitHelpers(deps: EmitHelpersDeps): EmitHelpers {
     ])
   }
   function emitJob(j: Job) {
+    if (j.incognito || store.threads.some((thread) => thread.incognito && [j.threadId, j.currentThreadId, j.kind === 'thread' ? j.owner : null].includes(thread.id))) {
+      sendToRenderer('job:update', j)
+      return
+    }
     fanOutHostEvent('job:update', j, [
       { label: 'remote job projection', deliver: () => remoteServer().publish({ kind: 'job', data: j }) },
       // Live push (additive, alongside the existing job:update mirror): a typed
@@ -111,11 +115,23 @@ export function createEmitHelpers(deps: EmitHelpersDeps): EmitHelpers {
 
   function emitToRenderer(e: AgentEvent) {
     const traced = ensureAgentEventTrace(e, 'main.emit')
+    const thread = store.threads.find((thread) => thread.id === traced.threadId)
+    // Incognito is local live state, including its titles, question answers and
+    // derived tool metadata; no remote replay, webhook or observer may retain it.
+    if (thread?.incognito) {
+      sendToRenderer('agent:event', traced)
+      return
+    }
+    // Phone-derived approval labels can contain captured screen text. Only the
+    // owner's UI projection may receive them; automatic sinks need a known,
+    // non-phone conversation, including after a phone grant during the run.
+    const automaticSinksAllowed = !!thread && !thread.phoneLocalOnly
     fanOutHostEvent('agent:event', traced, [
       { label: 'remote agent projection', deliver: () => remoteServer().publish({ kind: 'agent', data: { ...traced, trace: { ...traced.trace, surface: traced.trace?.surface ?? 'remote' } } }) },
       // Per-token deltas never reach webhooks: each would be a DNS-checked POST, a persist and an audit entry.
-      ...(traced.type === 'item_delta' ? [] : [{ label: 'agent webhook', deliver: () => emitOutboundWebhooks('agent', { ...traced, trace: { ...traced.trace, surface: traced.trace?.surface ?? 'webhook' } }) }]),
+      ...(!automaticSinksAllowed || traced.type === 'item_delta' ? [] : [{ label: 'agent webhook', deliver: () => emitOutboundWebhooks('agent', { ...traced, trace: { ...traced.trace, surface: traced.trace?.surface ?? 'webhook' } }) }]),
     ])
+    if (!automaticSinksAllowed) return
     // Observer bridge into the ordered spine: structural events only (deltas skipped), lean
     // payloads (ids/states — never message text or tool args). Failures never block the run.
     try {

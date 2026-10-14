@@ -1,3 +1,4 @@
+import { isOperationalRoomEventKind, roomWithoutSavedRecall } from '../../shared/thread-memory-policy'
 import { createHash } from 'node:crypto'
 import { existsSync, realpathSync } from 'node:fs'
 import { promises as fs } from 'node:fs'
@@ -8,6 +9,7 @@ import { documentSourceRef, scanDocumentItems, scanTableItems } from './document
 import { emailSourceRef, scanEmailMessages } from './email-connector.ts'
 import { scanSlackMessages, slackSourceRef } from './slack-connector.ts'
 import { contentText } from './content.ts'
+import { canRecallThread } from './session-recall'
 import type {
   BrowserConnectorSettings,
   CalendarConnectorSettings,
@@ -90,6 +92,8 @@ export interface RetrievalArtifactInput {
 }
 
 export interface RetrievalIndexInput {
+  savedMemoryAllowed?: boolean
+  currentThreadId?: string
   records?: Partial<RetrievalRecord>[]
   codeFiles?: RetrievalCodeFileInput[]
   documents?: ConnectorSourceRef[]
@@ -103,6 +107,8 @@ export interface RetrievalIndexInput {
 }
 
 export interface WorkspaceRetrievalIndexInput extends RetrievalIndexInput {
+  /** Host-owned live sources, refreshed after asynchronous workspace collection. */
+  recallThreads?: () => Thread[]
   cwd: string
   path?: string | null
   query?: string | null
@@ -131,9 +137,32 @@ const DEFAULT_LIMIT = 12
 const DEFAULT_MAX_CODE_FILES = 300
 const DEFAULT_MAX_CONNECTOR_ITEMS = 80
 
+function visibleThreadRecord(record: Partial<RetrievalRecord>, visibleThreadIds: Set<string>, currentThreadId?: string, visibleMissionIds?: Set<string>): boolean {
+  const threadSources = [record.id, ...record.sourceIds ?? []].filter((id): id is string => typeof id === 'string' && id.startsWith('thread:'))
+  const missionSources = [record.id, ...record.sourceIds ?? []].filter((id): id is string => typeof id === 'string' && id.startsWith('mission:'))
+  return threadSources.every((id) => visibleThreadIds.has(id.split(':')[1]))
+    && (!visibleMissionIds || missionSources.every((id) => visibleMissionIds.has(id.split(':')[1])))
+    && !(record.metadata?.phoneLocalOnly === true && record.metadata.threadId !== currentThreadId)
+}
+
+/** Revalidate after the collection promise settles, before exposing any source text. */
+export function filterRetrievalThreadSources(index: RetrievalIndex, threads: Thread[], currentThreadId?: string, missions: Mission[] = []): RetrievalIndex {
+  const ids = new Set(threads.filter((thread) => canRecallThread(thread, currentThreadId)).map((thread) => thread.id))
+  const missionIds = new Set(missions.filter((mission) => !mission.threadId || ids.has(mission.threadId)).map((mission) => mission.id))
+  const records = index.records.filter((record) => visibleThreadRecord(record, ids, currentThreadId, missionIds))
+  return { ...index, records, stats: indexStats(records) }
+}
+
 export function buildRetrievalIndex(input: RetrievalIndexInput = {}, now = Date.now()): RetrievalIndex {
   const records = new Map<string, RetrievalRecord>()
+  const visibleThreadIds = new Set((input.threads ?? []).filter((thread) => canRecallThread(thread, input.currentThreadId)).map((thread) => thread.id))
+  const visibleMissions = (input.missions ?? []).filter((mission) => !mission.threadId || visibleThreadIds.has(mission.threadId))
+  const visibleMissionIds = new Set(visibleMissions.map((mission) => mission.id))
   const add = (record: Partial<RetrievalRecord> & { kind?: unknown }) => {
+    // Prebuilt artifacts retain source provenance. Unknown or hidden thread sources
+    // cannot bypass the live policy by changing a record's kind to artifact/summary.
+    if (!visibleThreadRecord(record, visibleThreadIds, input.currentThreadId, visibleMissionIds)) return
+    if (input.savedMemoryAllowed === false && [record.id, ...record.sourceIds ?? []].some((id) => typeof id === 'string' && (/^(?:project-memory|memory):/.test(id) || /^room:[^:]+:memory(?:-|:)/.test(id) || /^room:[^:]+:event:/.test(id) && !isOperationalRoomEventKind(record.metadata?.roomEventKind) || /^thread:/.test(id) && !id.startsWith(`thread:${input.currentThreadId}:`)))) return
     const normalized = normalizeRetrievalRecord(record)
     if (!normalized) return
     const existing = records.get(normalized.id)
@@ -144,11 +173,11 @@ export function buildRetrievalIndex(input: RetrievalIndexInput = {}, now = Date.
   for (const file of input.codeFiles ?? []) add(codeRecord(file))
   for (const source of input.documents ?? []) add(sourceRecord('doc', source))
   for (const event of input.connectorEvents ?? []) add(connectorEventRecord(event))
-  for (const thread of input.threads ?? []) addThreadRecords(thread, add)
-  for (const mission of input.missions ?? []) addMissionRecords(mission, add)
-  for (const room of input.rooms ?? []) addRoomRecords(room, add)
+  for (const thread of input.threads ?? []) if (canRecallThread(thread, input.currentThreadId) && (input.savedMemoryAllowed !== false || thread.id === input.currentThreadId)) addThreadRecords(thread, add)
+  for (const mission of visibleMissions) addMissionRecords(mission, (record) => add({ ...record, sourceIds: [...record.sourceIds ?? [], ...(mission.threadId ? [`thread:${mission.threadId}:mission:${mission.id}`] : [])] }))
+  for (const room of input.rooms ?? []) addRoomRecords(input.savedMemoryAllowed === false ? roomWithoutSavedRecall(room) : room, add, input.savedMemoryAllowed !== false)
   for (const ticket of input.tickets ?? []) addTicketRecords(ticket, add)
-  for (const memory of input.projectMemory ?? []) add(projectMemoryRecord(memory))
+  if (input.savedMemoryAllowed !== false) for (const memory of input.projectMemory ?? []) add(projectMemoryRecord(memory))
   for (const artifact of input.artifacts ?? []) add(artifactRecord(artifact))
 
   const list = [...records.values()].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0) || a.kind.localeCompare(b.kind) || a.title.localeCompare(b.title))
@@ -165,6 +194,8 @@ export async function buildWorkspaceRetrievalIndex(input: WorkspaceRetrievalInde
   const limit = Math.max(1, Math.min(input.maxConnectorItems ?? DEFAULT_MAX_CONNECTOR_ITEMS, 500))
   const query = clean(input.query)
   const data: RetrievalIndexInput = {
+    savedMemoryAllowed: input.savedMemoryAllowed,
+    currentThreadId: input.currentThreadId,
     records: input.records,
     connectorEvents: input.connectorEvents,
     threads: input.threads,
@@ -221,6 +252,7 @@ export async function buildWorkspaceRetrievalIndex(input: WorkspaceRetrievalInde
     ]
   }
 
+  if (input.recallThreads) data.threads = input.recallThreads()
   return buildRetrievalIndex(data)
 }
 
@@ -269,6 +301,7 @@ export function formatRetrievalSearchResult(result: RetrievalSearchResult): stri
 }
 
 function addThreadRecords(thread: Thread, add: (record: Partial<RetrievalRecord> & { kind?: unknown }) => void): void {
+  if (thread.incognito) return
   for (const [index, message] of (thread.apiMessages ?? []).entries()) {
     const messageText = contentText(message.content)
     if (message.role === 'tool' || !messageText.trim()) continue
@@ -351,8 +384,8 @@ function addMissionRecords(mission: Mission, add: (record: Partial<RetrievalReco
   }
 }
 
-function addRoomRecords(room: Room, add: (record: Partial<RetrievalRecord> & { kind?: unknown }) => void): void {
-  if (room.memorySummary?.trim()) {
+function addRoomRecords(room: Room, add: (record: Partial<RetrievalRecord> & { kind?: unknown }) => void, savedMemoryAllowed = true): void {
+  if (savedMemoryAllowed && room.memorySummary?.trim()) {
     add({
       id: `room:${room.id}:memory-summary`,
       kind: 'summary',
@@ -363,7 +396,7 @@ function addRoomRecords(room: Room, add: (record: Partial<RetrievalRecord> & { k
       createdAt: room.updatedAt,
     })
   }
-  for (const memory of room.memory ?? []) {
+  for (const memory of savedMemoryAllowed ? room.memory ?? [] : []) {
     add({
       id: `room:${room.id}:memory:${memory.id}`,
       kind: 'summary',
@@ -381,6 +414,7 @@ function addRoomRecords(room: Room, add: (record: Partial<RetrievalRecord> & { k
       title: `${room.name} ${event.seat}`,
       text: [event.kind, event.tool, event.text].filter(Boolean).join(' '),
       sourceIds: [`room:${room.id}:event:${event.id}`],
+      metadata: { roomEventKind: event.kind },
       path: event.path ?? room.workspaceCwd ?? room.rootCwd ?? null,
       createdAt: event.createdAt,
     })

@@ -107,12 +107,13 @@ console.log('ok session recall schemas are exposed as read-only tools')
 const toolSearch = await executeTool('session_search', {
   query: 'invoice parser',
   projectId: 'p1',
-  currentThreadId: 'current',
-}, { cwd: '/repo', threads })
+  currentThreadId: 'forged-reader',
+}, { cwd: '/repo', threads, currentThread: threads.find((thread) => thread.id === 'current') })
 assert.equal(toolSearch.ok, true)
 assert.equal(toolSearch.title, 'Session search')
 assert.match(toolSearch.output, /Invoice parser fix/)
 assert.doesNotMatch(toolSearch.output, /Current task/)
+assert.doesNotMatch(toolSearch.output, /forged-reader/, 'reader identity comes from the host context, not model arguments')
 
 const toolRead = await executeTool('session_read', { threadId: 'older', maxMessages: 1 }, { cwd: '/repo', threads })
 assert.equal(toolRead.ok, true)

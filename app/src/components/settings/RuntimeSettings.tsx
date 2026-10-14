@@ -305,7 +305,7 @@ export function RuntimeSettings({ ctx }: { ctx: SettingsSectionContext }) {
               </Field>
               <Field label="Local memory" hint={`${localMemoryTotal} record${localMemoryTotal === 1 ? '' : 's'}`}>
                 <div className="rounded-lg border border-line bg-card-2 px-3 py-2.5 text-[13px] text-ink-2">
-                  Chats, projects, rooms, tickets, missions, incidents, journals, browser data, usage state, summaries, and archives
+                  Chats, projects, rooms, tickets, missions, incidents, journals, browser data, usage state, summaries, archives, isolated bot workspace disks, and private Living Weights models and history
                 </div>
               </Field>
               <Field label="Purge">

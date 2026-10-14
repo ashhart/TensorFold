@@ -4,10 +4,10 @@ A checkpoint fitting in memory is the beginning of a serving profile. A useful
 profile also names the context, reply reserve, request capacity, cache policy and
 exact runtime. Measure those together before recommending a RAM class.
 
-This guide separates the stable Python/MLX server from the
+This guide separates the Python/MLX server, frozen at 0.6.6, from the
 [native Zig preview](../ZIG-PREVIEW.md). The MLX details below were checked against
-[v0.6.6](https://github.com/ashhart/TensorFold/tree/v0.6.6). They do not qualify the
-preview's models, kernels or memory admission.
+[v0.6.6](https://github.com/ashhart/TensorFold/tree/v0.6.6) and describe that engine. They do not qualify the
+native engine's models, kernels or memory admission.
 
 ## Keep the memory quantities separate
 
@@ -18,14 +18,16 @@ preview's models, kernels or memory admission.
 | MLX active and cached bytes | Allocator use; excludes the rest of the process. |
 | Process physical footprint and lifetime peak | Memory charged to the process, including allocations missed between samples. |
 | Installed RAM | Host capacity; shared with macOS and other applications. |
-| GPU recommended working set | A separate device limit used by the stable MLX server's budget ceiling. |
+| GPU recommended working set | A separate device limit used by the Python 0.6.6 MLX server's budget ceiling. |
 
 Record the working set from `mlx.core.device_info()` alongside installed RAM.
-The stable server caps `TENSORFOLD_MEMORY_LIMIT_GB` by both values, then reserves
+The Python 0.6.6 server caps `TENSORFOLD_MEMORY_LIMIT_GB` by both values, then reserves
 3 GiB for the rest of the process before setting the MLX limit. Read the applied
 budget from startup and `/health`; recording only the requested environment
 variable can mislabel a silently capped run. This is an allocator/admission budget,
 not an OS-enforced physical-footprint cap; measure the process peak independently.
+The native engine does not read `TENSORFOLD_MEMORY_LIMIT_GB`. GLM on a Mac reads `GLM_LOAD_LIMIT_GB`, in GB,
+and the CUDA build reads `TENSORFOLD_CUDA_MEMORY_LIMIT_GB`.
 
 An emulated budget on a larger Mac is useful for finding refusal boundaries and
 cache tradeoffs. It does not reproduce the smaller Mac's GPU, bandwidth, working
@@ -42,12 +44,12 @@ actual context length. Count the encoded rendered string, rather than the number
 of fields in a tokenizer result.
 
 State whether thinking, an external drafter, other drafting methods, vision and
-tools are enabled. On the stable MLX server, `--drafter none` disables an external
+tools are enabled. On the Python 0.6.6 MLX server, `--drafter none` disables an external
 draft model; it does not disable every drafting method. `--no-drafts` and each
 request's `"draft": false` have their own scopes. Use the same precision and
 weight representation for serial and concurrent exactness comparisons.
 
-For Ternary Bonsai on M1-M4, the stable loader can retain packed 2-bit projections,
+For Ternary Bonsai on M1-M4, the Python 0.6.6 loader can retain packed 2-bit projections,
 widen some layers, or widen all layers to 4-bit storage as the budget permits.
 Capture the startup representation for every cell. Equal checkpoint revisions
 alone do not establish equal runtime representations across budgets or GPU
@@ -56,7 +58,7 @@ See the [Bonsai recipe](recipes/ternary-bonsai-2.md).
 
 ## Separate cold, repeated and restarted requests
 
-Give every independent cold run a fresh cache parent. In the stable Python server,
+Give every independent cold run a fresh cache parent. In the Python 0.6.6 server,
 `--snapshot-dir` selects the prefix directory, while conversation snapshots use
 its sibling `session-snapshots` directory. Emptying only the selected directory
 can leave a restarted request warm. Preserve the old parent as evidence and use a
@@ -113,7 +115,7 @@ Flash Next server, `--prompt-cache-gib` controls retained prompt states, not a
 whole-process memory budget. Flash Next serves one reply at a time even when
 `--parallel` is supplied; Nemotron's prompt reuse has a different status. Consult
 [the preview's current limitations](../ZIG-PREVIEW.md#known-gaps) before building
-a matrix. Stable MLX measurements are not preview performance or exactness results.
+a matrix. Python 0.6.6 MLX measurements are not preview performance or exactness results.
 
 A public receipt should contain synthetic or public prompts, generic hardware
 specifications and pinned public revisions. Exclude hostnames, account names,

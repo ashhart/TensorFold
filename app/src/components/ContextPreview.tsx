@@ -1,3 +1,4 @@
+import { inspectThreadMemoryPolicy } from '../../shared/thread-memory-policy'
 import { useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 import { useStore } from '../lib/store'
@@ -43,6 +44,9 @@ export function ContextPreviewSection({ thread }: { thread: Thread }) {
   const [copied, setCopied] = useState(false)
   const provider = useStore((s) => s.settings?.providers.find((p) => p.id === thread.providerId))
   const project = useStore((s) => thread.projectId ? s.projects.find((p) => p.id === thread.projectId) ?? null : null)
+  const memoryState = inspectThreadMemoryPolicy(thread)
+  const memoryAllowed = memoryState.policy?.useExisting === true
+  const memoryInjected = memoryAllowed && thread.kind !== 'chat' && thread.bot?.executionTarget !== 'vm'
   const previewCwd = effectiveThreadCwd(thread, project)
 
   useEffect(() => {
@@ -92,19 +96,19 @@ export function ContextPreviewSection({ thread }: { thread: Thread }) {
     const userText = userItems.map(itemPayload).join('\n')
     const toolText = toolItems.map(itemPayload).join('\n')
     const connectorText = connectorItems.map(itemPayload).join('\n')
-    const memoryText = [project?.memory, ...memoryEntries.map((entry) => entry.text)].filter(Boolean).join('\n')
+    const memoryText = memoryInjected ? [project?.memory, ...memoryEntries.map((entry) => entry.text)].filter(Boolean).join('\n') : ''
     const skillHits = enabledSkills.filter((skill) => new RegExp(`\\$${skill.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(userText))
     const commandHits = enabledCommands.filter((command) => new RegExp(`/${command.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(userText))
     return [
       { id: 'system', label: 'System', icon: 'shield', count: nodes.length, tokens: graph?.tokenEstimate ?? 0, detail: instructionUnavailable ? 'Remote preview unavailable' : nodes.length ? 'Resolved instructions' : 'No instruction files', active: !!graph?.tokenEstimate },
       { id: 'user', label: 'User', icon: 'message', count: userItems.length, tokens: roughTokens(userText), detail: 'User turns and Guide notes', active: userItems.length > 0 },
       { id: 'tools', label: 'Tools', icon: 'terminal', count: toolItems.length, tokens: roughTokens(toolText) + (toolItems.length ? 220 : 0), detail: toolItems.length ? 'Tool calls and outputs' : 'Schemas only', active: toolItems.length > 0 },
-      { id: 'memory', label: 'Memory', icon: 'layers', count: (project?.memory?.trim() ? 1 : 0) + memoryEntries.length, tokens: roughTokens(memoryText), detail: memoryEntries.length ? 'Project memory entries' : 'No typed memory', active: !!memoryText.trim() },
+      { id: 'memory', label: 'Memory', icon: 'layers', count: (project?.memory?.trim() ? 1 : 0) + memoryEntries.length, tokens: roughTokens(memoryText), detail: memoryState.problem ? 'Saved-memory choices need review' : !memoryAllowed ? 'Saved-memory recall is off' : !memoryInjected ? 'Available through tools; not injected in chat' : memoryEntries.length ? 'Project memory entries' : 'No typed memory', active: !!memoryText.trim() },
       { id: 'files', label: 'Files', icon: 'fileText', count: filePaths.size, tokens: nodes.reduce((sum, node) => sum + node.tokenEstimate, 0), detail: filePaths.size ? 'Instruction and touched files' : 'No file context', active: filePaths.size > 0 },
       { id: 'skills', label: 'Skills', icon: 'spark', count: skillHits.length + commandHits.length, tokens: roughTokens([...skillHits.map((skill) => skill.body), ...commandHits.map((command) => command.prompt)].join('\n')), detail: `${enabledSkills.length} skills, ${enabledCommands.length} commands available`, active: skillHits.length + commandHits.length > 0 },
       { id: 'connector', label: 'Connector', icon: 'plug', count: connectorItems.length, tokens: roughTokens(connectorText), detail: connectorItems.length ? 'Connector and capability context' : 'No connector context', active: connectorItems.length > 0 },
     ]
-  }, [thread.timeline, nodes, graph?.tokenEstimate, instructionUnavailable, project?.memory, memoryEntries, skills, commands])
+  }, [memoryState.problem, memoryAllowed, memoryInjected, thread.timeline, nodes, graph?.tokenEstimate, instructionUnavailable, project?.memory, memoryEntries, skills, commands])
   const copy = async () => {
     if (!graph) return
     await api.writeClipboard(graph.resolvedContent)

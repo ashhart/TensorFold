@@ -1,3 +1,6 @@
+import { assertThreadMemoryTransport, captureThreadMemoryPolicy, canContributeThreadMemory, threadMemoryPolicyRevision } from '../../../shared/thread-memory-policy'
+import { saveThreadMemoryPolicy } from '../../store'
+import { authoredMemoryMessages } from '../../agent/memory-harvest'
 import { randomUUID } from 'node:crypto'
 import { restartResumeApprovalMode, claimJobLease } from '../../agent/jobs'
 import type { JobPatch } from '../../agent/jobs'
@@ -48,6 +51,18 @@ import { resolveWorkspaceCwd } from './workspace'
 import { resolvePairedWorkspace } from '../../agent/local-workspace-policy'
 import { encryptWithKey, decryptWithKey, resolveLocalSecretKeySync } from '../../local-crypto'
 import { canonicalLocalWorkspaceKey, lexicalLocalWorkspaceKey, sshWorkspaceKey, type WorkspaceMutationGuard } from './workspace-mutation-guard'
+import { botInstructions, botRunApprovalMode } from '../../../shared/bot-policy'
+import { botUsesGuardedExecution, isRestrictedBot } from '../../../shared/bot-tool-policy'
+import { scopeBotToolContext } from '../../agent/bot-tool-scope'
+import { createBotVmToolContext, getBotVmHost } from './bot-vm-host'
+import { assertBotLifecycleIdle, reserveBotVmRun } from './bot-run-boundary'
+import { engineService } from './engine-runtime'
+import { isEngineProvider } from '../../agent/engine/provider'
+import { getUserQuestionHost } from './user-question-host'
+import { isExternalProvider } from '../../../shared/provider-trust'
+import { INCOGNITO_PERSISTENT_TOOLS } from '../../agent/incognito'
+import { PluginRuntime } from '../../agent/plugin-runtime'
+import type { UserQuestionInput, UserQuestionRun } from '../../agent/types'
 
 // Per-thread NDJSON journals hold the FULL transcript (messages, tool args, tool output,
 // diffs) — the most sensitive data in the app. threads.json is encrypted at rest via
@@ -133,7 +148,7 @@ interface ThreadRuntimeDeps {
   }
   emitToRenderer(event: AgentEvent): void
   persistThreads(): void
-  fullToolContext(run?: { thread?: Thread; provider?: Provider; model?: string; signal?: AbortSignal }): any
+  fullToolContext(run?: { thread?: Thread; provider?: Provider; model?: string; signal?: AbortSignal; memoryPolicy?: import('../../agent/types').ThreadMemoryPolicy }): any
   approvalResolver(controller: AbortController, jobHandle?: JobHandle): (callId: string) => Promise<'allow' | 'allow_always' | 'deny'>
   isHighRiskTool(name: string): boolean
   claimJob(ref: Parameters<typeof import('../../agent/jobs').enqueueJob>[1]): Job
@@ -160,10 +175,12 @@ interface ThreadRuntimeDeps {
 
 export async function recordPreTurnCheckpoint(input: {
   threadId: string
+  incognito?: boolean
   turn: number
   target: { cwd?: string | null; workspace?: WorkspaceLocation | null; kind?: Thread['kind'] }
   conversation: { apiMessages: unknown[]; timeline: unknown[]; goal?: string; goalStatus?: string; plan?: unknown[]; status?: string }
 }, deps: Pick<ThreadRuntimeDeps, 'captureCheckpoint' | 'recordTurnCheckpoint'>): Promise<void> {
+  if (input.incognito) return
   let fileSha: string | null = null
   if (deps.captureCheckpoint && input.target.kind !== 'chat') {
     try {
@@ -202,6 +219,12 @@ export function assertSshToolContextConnected(workspace: WorkspaceLocation | nul
   }
 }
 
+export function assertIncognitoThreadTransportSupported(thread: Pick<Thread, 'incognito' | 'engine'>, provider?: Pick<Provider, 'transport'>): void {
+  if (thread.incognito && (thread.engine === 'omp' || provider?.transport && provider.transport !== 'chat-completions')) {
+    throw new Error('Incognito requires a TensorFold API chat. This agent runtime keeps its own session history; choose an API model or start an ordinary saved task.')
+  }
+}
+
 export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
   const {
     aborters,
@@ -228,7 +251,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
   function enqueueThreadCue(thread: Thread, text: string): CueRunResult {
     const clean = text.trim()
     if (!clean || !aborters.has(thread.id)) return { queued: false, queueDepth: cueQueues.get(thread.id)?.length ?? 0 }
-    const item = { id: randomUUID(), kind: 'cue' as const, title: 'Guide', text: clean, state: 'pending' as const, meta: 'queued', createdAt: Date.now() }
+    const item = { id: randomUUID(), kind: 'cue' as const, memorySource: 'user' as const, title: 'Guide', text: clean, state: 'pending' as const, meta: 'queued', createdAt: Date.now() }
     ensureTimelineItemTrace(item, { threadId: thread.id, origin: 'renderer.cue' })
     const cue: AgentCue = { id: randomUUID(), itemId: item.id, text: clean, createdAt: item.createdAt }
     const queue = cueQueues.get(thread.id) ?? []
@@ -355,6 +378,8 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
     const thread = store.threads.find((t) => t.id === payload.threadId)
     if (!thread) throw new Error('Thread not found')
     if (thread.archivedAt) throw new Error('Restore this archived thread before starting it.')
+    botRunApprovalMode(thread, store.settings.agentPresets, store.settings.providers, store.settings.approvalMode)
+    if (thread.bot) assertBotLifecycleIdle(thread.bot.presetId)
     const attachments = normalizeAttachments(payload.attachments)
     // Live steering is text-only. Preserve bounded document text and image notes, but never
     // forward an image URL through the cue channel.
@@ -364,7 +389,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
   function availableModelsFromProviderError(error: unknown): string[] {
     const message = String((error as any)?.message ?? error ?? '')
     let providerMessage = message
-    const jsonStart = message.indexOf('— {')
+    const jsonStart = message.indexOf(': {')
     if (jsonStart >= 0) {
       try {
         const parsed = JSON.parse(message.slice(jsonStart + 2).trim())
@@ -399,11 +424,14 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
   // Aux-model skill review (opt-in). For each skill the agent consulted on a successful run,
   // ask the same backend whether the skill body could be sharper, and FILE any improvement as
   // a pending suggestion (deduped per target). Best-effort and fully detached from the run.
-  async function reviewViewedSkills(args: { provider: Provider; model: string; thread: Thread; userText: string; viewed: string[]; signal: AbortSignal }): Promise<void> {
+  async function reviewViewedSkills(args: { provider: Provider; model: string; thread: Thread; userText: string; viewed: string[]; signal: AbortSignal; memoryPolicy: import('../../agent/types').ThreadMemoryPolicy; memoryRevision: number }): Promise<void> {
+    const allowed = () => store.threads.includes(args.thread) && canContributeThreadMemory(args.thread, args.memoryPolicy, args.memoryRevision, args.signal)
+    if (!allowed()) return
     try {
       const { provider, model } = args
       const digest = `User request: ${(args.userText || args.thread.title || '').slice(0, 600)}\nOutcome: the run completed successfully.`
       const complete = async (messages: { role: string; content: string }[]): Promise<string> => {
+        if (!allowed()) throw new Error('Memory proposal review is no longer allowed.')
         let out = ''
         for await (const ch of streamChat({ provider, baseUrl: provider.baseUrl, apiKey: provider.apiKey, model, messages: messages as ApiMessage[], temperature: 0.2, approvalMode: 'readonly', cwd: args.thread.cwd, signal: args.signal })) {
           if (ch.type === 'content') out += ch.text
@@ -411,7 +439,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
         return out
       }
       const proposals = await reviewSkillsAfterRun({ skills: store.skills, viewedNames: args.viewed, digest, complete, sourceThreadId: args.thread.id, max: 2 })
-      if (!proposals.length) return
+      if (!allowed() || !proposals.length) return
       const corpus = { skills: store.skills, commands: store.commands }
       let filed = 0
       for (const input of proposals) {
@@ -425,13 +453,13 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
     } catch { /* best effort — never disturb the settled run */ }
   }
 
-  function proposePostRunMemory(thread: Thread): void {
-    if (!thread.projectId) return
+  function proposePostRunMemory(thread: Thread, memoryPolicy: import('../../agent/types').ThreadMemoryPolicy, memoryRevision: number, signal: AbortSignal): void {
+    if (!store.threads.includes(thread) || !canContributeThreadMemory(thread, memoryPolicy, memoryRevision, signal) || !thread.projectId) return
     const existingTexts = [
       ...store.projectMemory.filter((entry) => entry.projectId === thread.projectId).map((entry) => entry.text),
       ...store.projectMemoryCandidates.filter((candidate) => candidate.projectId === thread.projectId && candidate.status === 'pending').map((candidate) => candidate.text),
     ]
-    const candidates = harvestPostRunMemoryCandidates(thread.apiMessages, { existingTexts, cap: 3 })
+    const candidates = harvestPostRunMemoryCandidates(authoredMemoryMessages(thread), { existingTexts, cap: 3 })
     if (!candidates.length) return
     for (const text of candidates) {
       store.projectMemoryCandidates = [
@@ -446,9 +474,27 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
 
   async function startThreadRun(payload: StartRunPayload, existingJob?: Job): Promise<{ runId: string }> {
     requireSecurityRole('operator', 'start agent runs')
+    if (Object.prototype.hasOwnProperty.call(payload, 'memoryPolicy')) throw new Error('Memory choices must be saved before starting a run.')
     const thread = store.threads.find((t) => t.id === payload.threadId)
     if (!thread) throw new Error('Thread not found')
     if (thread.archivedAt) throw new Error('Restore this archived thread before starting it.')
+    const runApprovalMode = botRunApprovalMode(thread, store.settings.agentPresets, store.settings.providers, payload.approvalMode ?? restartResumeApprovalMode(existingJob?.resumeAfterRestart, store.settings.approvalMode))
+    const botVm = thread.bot?.executionTarget === 'vm'
+    const restrictedBot = isRestrictedBot(thread.bot)
+    const localHelpersOnly = botUsesGuardedExecution(thread.bot) || thread.phoneLocalOnly === true
+    const assertBotResearchOff = (provider: Provider | undefined) => {
+      const engine = engineService()
+      // Also cover custom API aliases of the built-in server, including startup races.
+      if (engine?.hasExternalResearchEnabled() || isEngineProvider(provider) && !engine) throw new Error('Turn off Cortheon in AI settings before using an isolated or restricted bot; hidden research cannot enforce its execution boundary.')
+    }
+    const vmHost = botVm ? getBotVmHost() : null
+    if (thread.bot) {
+      assertBotLifecycleIdle(thread.bot.presetId)
+      if (thread.engine && thread.engine !== 'native') throw new Error('Bot chats require TensorFold permission checks.')
+      if (thread.providerId !== thread.bot.providerId || (thread.providerAccountId ?? null) !== thread.bot.providerAccountId || thread.model !== thread.bot.model) throw new Error('The model differs from the captured bot configuration; start a new bot chat.')
+      if (thread.workspace || thread.projectId || (botVm ? thread.cwd !== '/workspace' : !!thread.cwd)) throw new Error('The bot execution location has changed; start a new bot chat.')
+      if (botVm && !vmHost) throw new Error('The bot VM service is unavailable; the run will not use this Mac instead.')
+    }
     // Guard against a second concurrent run for the same thread: it would overwrite the shared
     // aborters[threadId] entry, so the first run's finally cleanup would delete the live run's
     // controller (breaking cancel + cue queueing) and both runs would interleave apiMessages.
@@ -462,18 +508,30 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
     const attachments = normalizeAttachments(payload.attachments)
     const surfaceRoute = thread.providerId ? null : surfaceModelOverride(store.settings, thread.kind === 'chat' ? 'chat' : 'code')
     const baseProvider = store.settings.providers.find((p) => p.id === (thread.providerId ?? surfaceRoute?.providerId ?? store.settings.activeProviderId))
+    assertIncognitoThreadTransportSupported(thread, baseProvider)
+    assertThreadMemoryTransport(thread, baseProvider)
+    if (thread.incognito && existingJob && (existingJob.incognito !== true || existingJob.threadId !== thread.id || existingJob.currentThreadId !== thread.id)) throw new Error('An Incognito task cannot resume a saved or unrelated job; start a new private turn.')
     assertSshThreadTransportSupported(workspace, baseProvider)
     const initialWorkspaceKey = workspace?.kind === 'ssh'
       ? sshWorkspaceKey(workspace.hostId, workspace.path)
-      : thread.kind === 'chat' ? null : lexicalLocalWorkspaceKey(workspace?.kind === 'local' ? workspace.path : thread.cwd)
+      : thread.kind === 'chat' || botVm ? null : lexicalLocalWorkspaceKey(workspace?.kind === 'local' ? workspace.path : thread.cwd)
     deps.workspaceMutationGuard.assertThreadStartAllowed(thread.id, initialWorkspaceKey)
     const runLease = deps.workspaceMutationGuard.reserveStart({ threadId: thread.id, workspaceKeys: [initialWorkspaceKey] })
+    let releaseBotVmRun = () => {}
+    try { if (botVm) releaseBotVmRun = reserveBotVmRun(thread.bot!.presetId, thread.id) } catch (error) { runLease.release(); throw error }
     const controller = new AbortController()
     aborters.set(thread.id, controller)
     try {
+    const memoryPolicy = captureThreadMemoryPolicy(thread)
+    if (botVm || restrictedBot) assertBotResearchOff(baseProvider)
+    if (botVm) {
+      await vmHost!.requireReady(thread.bot!.presetId)
+      if (controller.signal.aborted) throw new Error('Run cancelled before VM startup completed.')
+      assertBotResearchOff(baseProvider)
+    }
     const canonicalWorkspaceKey = workspace?.kind === 'ssh'
       ? sshWorkspaceKey(workspace.hostId, workspace.path)
-      : thread.kind === 'chat' ? null : await canonicalLocalWorkspaceKey(workspace?.kind === 'local' ? workspace.path : thread.cwd)
+      : thread.kind === 'chat' || botVm ? null : await canonicalLocalWorkspaceKey(workspace?.kind === 'local' ? workspace.path : thread.cwd)
     runLease.addWorkspaceKeys?.([canonicalWorkspaceKey])
     if (workspace?.kind === 'ssh' && workspace.hostId) {
       try {
@@ -527,12 +585,13 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
     const routeBaseProvider = store.settings.providers.find((p) => p.id === baseProvider.id) ?? baseProvider
     const model = resolveProviderModel(requestedProvider, null, requestedModel)
     if (!model) throw new Error('No model selected.')
+    if (thread.bot && model !== thread.bot.model) throw new Error('The saved bot model is unavailable; edit the bot and start a new chat.')
     const initialRoute = modelRouter.select({
       role: threadRouteRole,
       provider: routeBaseProvider,
       model,
       requestedAccountId: requestedProviderAccountId,
-      allowFailover: modelRouteAutoFailoverEnabled(routeBaseProvider, requestedProviderAccountId),
+      allowFailover: !thread.bot && modelRouteAutoFailoverEnabled(routeBaseProvider, requestedProviderAccountId),
       localOnly: project?.localOnly === true,
       contextLimit: effectiveContextLimit(routeBaseProvider, model),
       reasoningEffort: store.settings.reasoningEffort,
@@ -602,10 +661,15 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
       addThreadNotice(thread, '', modelRouteFailoverText(routeBaseProvider, initialRoute.audit))
       await auditModelRoute(thread, initialRoute.audit)
     }
-    if (thread.kind !== 'chat') thread.cwd = await resolveThreadRunCwd(thread, workspace, workspaceBoundary)
+    if (thread.kind !== 'chat' && !botVm) thread.cwd = await resolveThreadRunCwd(thread, workspace, workspaceBoundary)
 
     if (controller.signal.aborted) throw new Error('Run cancelled before startup completed.')
-    const userItem = { id: randomUUID(), kind: 'user' as const, text: payload.userText, attachments, createdAt: Date.now() }
+    const acceptedMemoryThread = await saveThreadMemoryPolicy(() => store.threads, thread.id, memoryPolicy, threadMemoryPolicyRevision(thread))
+    const memoryRevision = threadMemoryPolicyRevision(acceptedMemoryThread)
+    // Publish the durable startup CAS pair before a possible Stop returns control to the UI.
+    emitToRenderer({ runId: '', threadId: thread.id, type: 'thread_update', patch: { memoryPolicy: { ...captureThreadMemoryPolicy(acceptedMemoryThread) }, memoryPolicyRevision: memoryRevision } })
+    if (controller.signal.aborted) throw new Error('Run cancelled after memory choices were accepted.')
+    const userItem = { id: randomUUID(), kind: 'user' as const, memorySource: payload.sourceThreadKey ? 'external' as const : 'user' as const, text: payload.userText, attachments, createdAt: Date.now() }
     thread.timeline.push(userItem)
     thread.apiMessages.push({ role: 'user', content: buildUserContent(payload.userText, attachments) })
     thread.status = 'running'
@@ -621,13 +685,14 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
       provider,
       providerAccountId,
       model,
-      approvalMode: payload.approvalMode ?? restartResumeApprovalMode(existingJob?.resumeAfterRestart, store.settings.approvalMode),
+      approvalMode: runApprovalMode,
       maxWallMs: runMaxWallMs,
     })
     let job: Job | null = existingJob
       ? replaceJobResult(claimJobLease(store.jobs, existingJob.id, jobLeaseOwner))
       : claimJob({
           kind: 'thread',
+          incognito: thread.incognito === true,
           owner: thread.id,
           projectId: thread.projectId ?? null,
           threadId: thread.id,
@@ -665,7 +730,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
       // event (not the last whole-thread snapshot) and gives an ordered, replayable run record.
       // Encrypt the event with the app key so the on-disk journal matches threads.json's
       // at-rest encryption posture (the journal holds the full plaintext transcript otherwise).
-      const journalEvent = encodeJournalEvent(traced, journalKey())
+      const journalEvent = thread.incognito ? null : encodeJournalEvent(traced, journalKey())
       if (journalEvent !== null) void appendThreadEvent(vontraPath('thread-journals'), thread.id, journalEvent)
       emitToRenderer(traced)
     }
@@ -705,7 +770,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
       emit({ runId, threadId: thread.id, type: 'item_add', item: { id: randomUUID(), kind: 'notice', title: 'Budget', text: initialSpend.warning, state: 'ok', createdAt: Date.now() } })
     }
 
-    if (thread.title === 'New task' || thread.title === 'New chat') maybeAutoTitle(thread, provider, model, payload.userText)
+    if (!localHelpersOnly && (thread.title === 'New task' || thread.title === 'New chat')) maybeAutoTitle(thread, provider, model, payload.userText)
 
     const routeProviderForModel = (routeProvider: Provider, routeModel: string, runModel: string) =>
       runModel === routeModel ? routeProvider : { ...routeProvider, models: [runModel, ...routeProvider.models.filter((candidate) => candidate !== runModel)] }
@@ -713,6 +778,12 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
     const runWithRoute = async (route: { provider: Provider; providerAccountId: string | null; model: string }, runModel = route.model) => {
       const timelineStart = thread.timeline.length
       const activeProvider = routeProviderForModel(route.provider, route.model, runModel)
+      assertIncognitoThreadTransportSupported(thread, activeProvider)
+      if (thread.bot) {
+        assertBotLifecycleIdle(thread.bot.presetId)
+        botRunApprovalMode(thread, store.settings.agentPresets, store.settings.providers, runApprovalMode)
+        if (botVm || restrictedBot) assertBotResearchOff(activeProvider)
+      }
       reviewProvider = activeProvider
       reviewModel = runModel
       let lastJobBeat = Date.now()
@@ -725,8 +796,27 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
       // Capture the tool context once at the final execution seam, validate that exact
       // snapshot, and pass it through unchanged. Re-resolving later (or accepting an
       // undefined backend) could reinterpret the remote path as a local lookalike.
-      const toolContext = fullToolContext({ thread, provider: activeProvider, model: runModel, signal: controller.signal })
+      if (thread.bot && (activeProvider.id !== thread.bot.providerId || route.providerAccountId !== thread.bot.providerAccountId || runModel !== thread.bot.model)) throw new Error('Bots keep their captured model and account; start a new bot chat to change them.')
+      const baseToolContext = botVm ? { cwd: '/workspace', signal: controller.signal, currentThread: thread } : fullToolContext({ thread, provider: activeProvider, model: runModel, signal: controller.signal, memoryPolicy })
+      const toolContext = scopeBotToolContext(thread.bot, botVm ? createBotVmToolContext(vmHost!, thread.bot!.presetId, baseToolContext) : baseToolContext)
+      toolContext.memoryPolicy = memoryPolicy
+      assertThreadMemoryTransport(thread, activeProvider, memoryPolicy)
+      if (restrictedBot) toolContext.botToolScopeGuard = () => {
+        assertBotLifecycleIdle(thread.bot!.presetId)
+        botRunApprovalMode(thread, store.settings.agentPresets, store.settings.providers, runApprovalMode)
+        assertBotResearchOff(activeProvider)
+      }
+      if (thread.incognito) toolContext.disabledToolNames = [...new Set([...toolContext.disabledToolNames ?? [], ...INCOGNITO_PERSISTENT_TOOLS])]
+      if (botVm) toolContext.botVm!.assertModelPrivacy = () => {
+        assertBotLifecycleIdle(thread.bot!.presetId)
+        botRunApprovalMode(thread, store.settings.agentPresets, store.settings.providers, runApprovalMode)
+        assertBotResearchOff(activeProvider)
+      }
       assertSshToolContextConnected(workspace, toolContext)
+      const questions = getUserQuestionHost()
+      if (questions && thread.engine !== 'omp' && !isExternalProvider(activeProvider) && (!activeProvider.transport || activeProvider.transport === 'chat-completions')) {
+        toolContext.askUser = (input: UserQuestionInput, run: UserQuestionRun) => questions.ask(input, { ...run, threadId: thread.id, runId })
+      }
       // OMP engine threads (VST-050) run ON the installed omp coding agent via its
       // headless rpc mode: omp owns the agent loop, TensorFold mirrors the timeline, plan,
       // subagents, and Guide steering. The native loop below stays the default.
@@ -739,7 +829,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
           signal: controller.signal,
           persist: persistThreads,
           userText: payload.userText,
-          approvalMode: payload.approvalMode ?? restartResumeApprovalMode(existingJob?.resumeAfterRestart, store.settings.approvalMode),
+          approvalMode: runApprovalMode,
           reasoningEffort: store.settings.reasoningEffort,
           drainCues: () => drainThreadCues(thread.id),
           onSession: (cursor) => { thread.ompResumeCursor = cursor },
@@ -778,19 +868,21 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
         provider: activeProvider,
         model: runModel,
         runId,
-        approvalMode: payload.approvalMode ?? restartResumeApprovalMode(existingJob?.resumeAfterRestart, store.settings.approvalMode),
+        approvalMode: runApprovalMode,
         temperature: store.settings.temperature,
         reasoningEffort: store.settings.reasoningEffort,
         serviceTier: store.settings.serviceTier,
         autoCompact: store.settings.autoCompact,
         contextLimit: effectiveContextLimit(activeProvider, runModel),
         toolContext,
-        observe: deps.observe,
+        observe: thread.incognito ? undefined : deps.observe,
+        pluginRuntime: thread.incognito ? new PluginRuntime() : undefined,
         drainCues: () => drainThreadCues(thread.id),
         waitForCue: (timeoutMs, signal) => waitForThreadCue(thread.id, timeoutMs, signal),
-        projectMemory: renderProjectMemoryBucket(store.projects.find((p) => p.id === thread.projectId), payload.userText),
+        memoryPolicy,
+        projectMemory: botVm || !memoryPolicy.useExisting ? '' : renderProjectMemoryBucket(store.projects.find((p) => p.id === thread.projectId), payload.userText),
         // Resolve the persona fresh each run (hot reload) for this thread's scope.
-        personaBlock: personaSystemBlock(
+        personaBlock: thread.bot ? botInstructions(thread.bot) : personaSystemBlock(
           resolvePersona(store.settings.personas ?? [], { isAssistant: thread.kind === 'chat', workspaceId: thread.projectId ?? null }),
           { userProfile: store.settings.userProfile },
         ),
@@ -800,7 +892,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
         // File durable facts salvaged at compaction as pending project-memory candidates
         // (project-scoped; skipped for project-less chat threads).
         onMemoryHarvest: (candidates) => {
-          if (!thread.projectId || !candidates.length) return
+          if (!canContributeThreadMemory(thread, memoryPolicy, memoryRevision, controller.signal) || !store.threads.includes(thread) || !thread.projectId || !candidates.length) return
           for (const text of candidates) {
             store.projectMemoryCandidates = [createProjectMemoryCandidate({ projectId: thread.projectId, text, sourceType: 'agent', reason: 'Salvaged from the conversation at compaction.', sourceThreadId: thread.id, sourceTurn: threadTurnNumber(thread.timeline) }), ...store.projectMemoryCandidates]
           }
@@ -816,7 +908,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
         auditToolCall: async ({ tool, args, resultOk, output }) => {
           // Note skills the agent actually read this run — the post-run review only looks at these.
           if (tool === 'skill_view' && resultOk && args?.name) viewedSkillNames.add(String(args.name))
-          if (isHighRiskTool(tool)) await auditEvent('agent.tool', { threadId: thread.id, tool, cwd: auditPreview(thread.cwd), ok: resultOk, args: auditPreview(JSON.stringify(args)), output: auditPreview(output) })
+          if (isHighRiskTool(tool)) await auditEvent('agent.tool', { threadId: thread.id, runId, tool, ok: resultOk, ...(thread.incognito ? {} : { cwd: auditPreview(thread.cwd), args: auditPreview(JSON.stringify(args)), output: auditPreview(output) }) })
         },
         persist: persistThreads,
       })
@@ -851,6 +943,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
     const checkpointTurn = threadTurnNumber(thread.timeline)
     await recordPreTurnCheckpoint({
       threadId: thread.id,
+      incognito: thread.incognito,
       turn: checkpointTurn,
       target: { cwd: thread.cwd, workspace, kind: thread.kind },
       conversation: {
@@ -867,7 +960,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
       .catch(async (err) => {
         const liveModels = availableModelsFromProviderError(err)
         const fallbackModel = liveModels.find((candidate) => candidate !== activeRoute.model)
-        if (fallbackModel && !controller.signal.aborted) {
+        if (fallbackModel && !thread.bot && !controller.signal.aborted) {
           const rejectedModel = activeRoute.model
           markRouteErrorRecovered(thread, err, runId, `Model "${rejectedModel}" was rejected by ${baseProvider.name}; retrying with "${fallbackModel}".`)
           rememberProviderModels(baseProvider.id, activeRoute.providerAccountId, liveModels)
@@ -909,7 +1002,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
             accountId: activeRoute.providerAccountId,
             model: activeRoute.model,
             error: err,
-            allowFailover: modelRouteAutoFailoverEnabled(latestBaseProvider, activeRoute.providerAccountId) || thread.modelRoute?.resetPolicy === 'rotate_on_limit',
+            allowFailover: !thread.bot && (modelRouteAutoFailoverEnabled(latestBaseProvider, activeRoute.providerAccountId) || thread.modelRoute?.resetPolicy === 'rotate_on_limit'),
             localOnly: project?.localOnly === true,
             contextLimit: effectiveContextLimit(latestBaseProvider, activeRoute.model),
             reasoningEffort: store.settings.reasoningEffort,
@@ -1017,6 +1110,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
         // Only retire our own controller — never clobber a controller a later run installed.
         if (aborters.get(thread.id) === controller) aborters.delete(thread.id)
         runLease.release()
+        releaseBotVmRun()
         settleThreadRunJob(
           job,
           thread,
@@ -1030,26 +1124,31 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
         // without limit since compactThreadJournal was never called in production. At run-end the
         // events are already folded into the persisted thread snapshot, so keep only a recent tail
         // for crash replay. Fire-and-forget; failures must not affect run settlement.
-        void compactThreadJournalTail(thread.id)
+        if (!thread.incognito) void compactThreadJournalTail(thread.id)
 
         // Skill self-improvement (opt-in): on a successful run that consulted a skill, let an
         // aux model review those skills and FILE improvement suggestions (consent-first; never
         // auto-applied). Fully fire-and-forget — it must never disturb the settled run.
-        if (store.settings.skillSelfImprovement && !failed && !controller.signal.aborted && viewedSkillNames.size && reviewProvider) {
-          void reviewViewedSkills({ provider: reviewProvider, model: reviewModel, thread, userText: payload.userText, viewed: [...viewedSkillNames], signal: controller.signal })
+        if (!localHelpersOnly && !thread.phoneLocalOnly && canContributeThreadMemory(thread, memoryPolicy, memoryRevision, controller.signal) && store.settings.skillSelfImprovement && !failed && !controller.signal.aborted && viewedSkillNames.size && reviewProvider) {
+          void reviewViewedSkills({ provider: reviewProvider, model: reviewModel, thread, userText: payload.userText, viewed: [...viewedSkillNames], signal: controller.signal, memoryPolicy, memoryRevision })
         }
         if (!failed && !controller.signal.aborted) {
-          try { proposePostRunMemory(thread) } catch { /* best effort — never disturb the settled run */ }
+          try { proposePostRunMemory(thread, memoryPolicy, memoryRevision, controller.signal) } catch { /* best effort — never disturb the settled run */ }
         }
       })
       // Backstop: every awaited path inside .catch/.finally is itself guarded, but attach a
       // terminal handler so no recovery/journal failure can ever escape as an unhandled rejection.
-      .catch(() => {})
+      .catch(() => {
+        if (aborters.get(thread.id) === controller) aborters.delete(thread.id)
+        runLease.release()
+        releaseBotVmRun()
+      })
 
     return { runId }
     } catch (err) {
       if (aborters.get(thread.id) === controller) aborters.delete(thread.id)
       runLease.release()
+      releaseBotVmRun()
       throw err
     }
   }
