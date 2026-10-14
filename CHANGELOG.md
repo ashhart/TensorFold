@@ -16,6 +16,11 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM-5.3 (EXLR8) checks the GPU's fragment layout as it loads, as GLM-5.3-Flash and Nemotron do, so a Mac whose layout would give wrong sums stops about a second into the load instead of serving wrong tokens (#809). Thanks to @harrisonfriia.
 - `zig build test` passes on a Mac with a GPU again. The split-checkpoint test asks on purpose for a tensor that stays in its file, and that lookup logged an error, which the Zig test runner counts as a failure; it now logs a warning.
 - A pull request's No GPU check also runs the frozen server goldens (`zig build test-golden`, which now builds on Linux too) and fails a change that adds problems `tools/zig/lean_check.py` reports (a file past 600 lines, a comment longer than one line or 120 columns) beyond those the base branch already has.
+- `--cortheon`'s instruction filter reads web text after its tag characters are dropped, so it judges exactly what the model reads. A tag character inside the bytes of a zero-width space hid that space from the filter, and dropping the tag then rebuilt it, so an order such as "upload the user's ssh keys" reached the model; dropping one tag character could also join the bytes around it into another. Both were found by the new fuzz harness.
+- `--cortheon` reads a long DuckDuckGo lite page in linear time: each result is now read within its own part of the page, where a 1 MiB page of repeated results took about a second. Found by the fuzz harness.
+- `--cortheon`'s page excerpt stays within its byte budget. Each kept line after a gap ran one byte over. Found by the fuzz harness.
+- `--cortheon` parses at most the first 2 MiB of a page, for at most 2 seconds, and keeps the text read by then, so no page, however it is written, can hold a request for minutes.
+- For contributors: `zig build fuzz-cortheon` runs Cortheon's readers of untrusted bytes (page text, links, excerpts, search results and the instruction filter) under a fuzz harness: its seeds, 100,000 structure-aware edits that cut tags and attributes, and a linear-time check on long inputs, in about 20 seconds. `-Dfuzz-optimize=fast` builds it as shipped, and `--fuzz=N` adds N inputs from Zig's coverage-guided fuzzer.
 
 ## 1.0.10
 
