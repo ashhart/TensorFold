@@ -44,9 +44,12 @@ fn segments(widths: []const usize, r: Rank, out: []Span, what: []const u8) Error
     return out[0..widths.len];
 }
 
-/// This rank's k or v rows; with fewer KV heads than ranks each head is kept by its query ranks.
+/// This rank's k or v rows, whole heads only; with fewer KV heads than ranks each head is kept by its query ranks.
 fn kvSpan(width: usize, kv_heads: usize, r: Rank, out: []Span) Error![]const Span {
-    if (kv_heads >= r.world) return segments(&.{width}, r, out, "kv rows");
+    if (kv_heads >= r.world) {
+        if (kv_heads % r.world != 0) return error.KvHeads;
+        return segments(&.{width}, r, out, "kv rows");
+    }
     if (r.world % kv_heads != 0) return error.KvHeads;
     const head = r.rank / (r.world / kv_heads);
     const part = width / kv_heads;
@@ -121,4 +124,11 @@ test "a kv head is kept by its query ranks" {
     const spans = try kvSpan(256, 2, .{ .rank = 3, .world = 4 }, &buf);
     try std.testing.expectEqual(Span{ .from = 128, .to = 256 }, spans[0]);
     try std.testing.expectError(error.KvHeads, kvSpan(256, 3, .{ .rank = 0, .world = 4 }, &buf));
+}
+
+test "kv heads that do not split into whole heads a rank are refused, as localSpec counts them" {
+    var buf: [1]Span = undefined;
+    const spans = try kvSpan(4 * 128, 4, .{ .rank = 1, .world = 2 }, &buf);
+    try std.testing.expectEqual(Span{ .from = 256, .to = 512 }, spans[0]);
+    try std.testing.expectError(error.KvHeads, kvSpan(6 * 128, 6, .{ .rank = 0, .world = 4 }, &buf));
 }
