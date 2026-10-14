@@ -121,7 +121,6 @@ pub const Plan = struct {
             end = @max(end, entry.end);
             const slot = try self.tensors.getOrPut(a, name);
             if (slot.found_existing) {
-                std.log.err("duplicate tensor {s} in {s}", .{ name, path });
                 return error.DuplicateTensor;
             }
             slot.value_ptr.* = .{ .shard = self.shards.items.len, .entry = entry };
@@ -220,13 +219,13 @@ test "selected table plan excludes projections and preserves tensor byte offsets
     defer a.free(path);
     var plan = Plan{ .arena = std.heap.ArenaAllocator.init(a) };
     defer plan.deinit();
-    try plan.add(path, "engram.embed.");
+    try plan.add(path, "engram.embed.", null);
     try std.testing.expectEqual(@as(usize, 6), plan.bytes);
     try std.testing.expectEqual(@as(usize, 3), plan.shards.items[0].begin);
     try std.testing.expectEqual(@as(usize, 9), plan.shards.items[0].end);
     try std.testing.expectEqual(@as(usize, 7), (try plan.get("engram.embed.scale")).begin);
     try std.testing.expectError(error.MissingTensor, plan.get("engram.wkv"));
-    try std.testing.expectError(error.DuplicateTensor, plan.add(path, "engram.embed."));
+    try std.testing.expectError(error.DuplicateTensor, plan.add(path, "engram.embed.", null));
 }
 
 test "selected table payload must be contiguous and indexed files cannot escape checkpoint directory" {
@@ -248,7 +247,7 @@ test "selected table payload must be contiguous and indexed files cannot escape 
     defer a.free(path);
     var plan = Plan{ .arena = std.heap.ArenaAllocator.init(a) };
     defer plan.deinit();
-    try std.testing.expectError(error.NoncontiguousEngramTables, plan.add(path, "engram.embed."));
+    try std.testing.expectError(error.NoncontiguousEngramTables, plan.add(path, "engram.embed.", null));
     for ([_][]const u8{ "../x.safetensors", "/x.safetensors", "a\\x.safetensors", ".", "..", "x.safetensors\x00", "x.json", "" }) |name| try std.testing.expect(!safeBasename(name));
     try std.testing.expect(safeBasename("model-00001-of-00039.safetensors"));
 }
