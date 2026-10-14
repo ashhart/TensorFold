@@ -271,6 +271,33 @@ test "a rollback is refused while any server holds the folder, and a --slide ser
     try std.testing.expect(sameBytes(before, try bytesOf(a, io, dir)));
 }
 
+test "a server is refused beside a --slide server or a rollback, and --slide refuses a folder that cannot lock" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try model(a, io, tmp);
+    var why: []const u8 = "";
+    const rewriting = try originals.hold(a, dir, true); // a --slide server's hold, or a rollback's
+    try std.testing.expectError(error.Busy, originals.serving(a, dir, false, &why));
+    try std.testing.expect(has(why, "--slide server") and has(why, "rollback"));
+    try std.testing.expectError(error.Busy, originals.serving(a, dir, true, &why));
+    try std.testing.expect(has(why, "teach a copy"));
+    rewriting.release();
+    const one = (try originals.serving(a, dir, false, &why)) orelse return error.TestExpectedHold;
+    const two = (try originals.serving(a, dir, false, &why)) orelse return error.TestExpectedHold; // servers share it
+    try std.testing.expectError(error.Busy, originals.serving(a, dir, true, &why));
+    two.release();
+    one.release();
+    const unlockable = try path(a, dir, "no-such-folder"); // a folder flock cannot hold
+    try std.testing.expectError(error.Unlockable, originals.serving(a, unlockable, true, &why));
+    try std.testing.expect(has(why, "disk that locks"));
+    try std.testing.expect(try originals.serving(a, unlockable, false, &why) == null); // served unheld, and told
+    try std.testing.expect(has(why, "cannot be locked"));
+}
+
 test "a damaged snapshot or none is refused by rollback and by the next lesson, and nothing changes" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

@@ -53,6 +53,32 @@ pub fn hold(a: Allocator, dir: []const u8, exclusive: bool) error{ Busy, Unlocka
     return if (busy) error.Busy else error.Unlockable;
 }
 
+/// A server's hold (exclusive to teach the folder); null: it serves unheld, `why` the line to log; else refused, `why`.
+pub fn serving(a: Allocator, dir: []const u8, teach: bool, why: *[]const u8) !?Hold {
+    return hold(a, dir, teach) catch |e| {
+        why.* = switch (e) {
+            error.OutOfMemory => return e,
+            error.Busy => if (teach) try say(a, busy_teach, dir) else try say(a, busy_serve, dir),
+            error.Unlockable => if (teach) try say(a, unlocked_teach, dir) else try say(a, unlocked_serve, dir),
+        };
+        if (e == error.Unlockable and !teach) return null;
+        return e;
+    };
+}
+
+const busy_teach = "--slide rewrites the files in {s}, and another TensorFold process has that folder open: stop it, " ++
+    "or teach a copy";
+const busy_serve = "{s} is held by a --slide server or a `tensorfold slide rollback`, either of which may be rewriting " ++
+    "its files: stop that server or let the rollback finish, then serve it";
+const unlocked_teach = "{s} cannot be locked, so a rollback could rewrite it while --slide teaches it: teach a copy " ++
+    "on a disk that locks (APFS, ext4, Btrfs, XFS)";
+const unlocked_serve = "note: {s} cannot be locked, so `tensorfold slide rollback` cannot tell that this server " ++
+    "has it open";
+
+fn say(a: Allocator, comptime text: []const u8, dir: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(a, text, .{dir});
+}
+
 /// The folder's snapshot: made from its learnable files the first time and checked against its manifest, else reused.
 pub fn keep(io: Io, dir: []const u8, graph: ?[]const u8, o: Options, a: Allocator, why: *[]const u8) !Kept {
     return keepFiles(io, dir, graph, o, a, why) catch |e| {

@@ -71,20 +71,18 @@ pub fn main(init: std.process.Init) !u8 {
     // A drafter is named like a model: a directory, or a repo id `tensorfold pull` cached.
     if (args.drafter) |d| args.drafter = try hub.resolve(a, io, init.environ_map, d, &problem) orelse return fail(problem);
     const model_type = modelType(a, io, dir);
+    // the model folder held while this process reads it, so a rollback refuses it: exclusive with --slide, else shared
+    var unheld: []const u8 = "";
+    const held = api.originals.serving(a, dir, args.slide, &unheld) catch |e| switch (e) {
+        error.OutOfMemory => |x| return x,
+        else => return fail(unheld),
+    };
+    defer if (held) |h| h.release();
+    if (held == null) log.line("{s}", .{unheld});
     if (args.rank > 0) { // a rank above 0 serves no HTTP and loads no text: it runs rank 0's steps
         if (!try engines.follow(a, gpa, io, dir, model_type, args, &problem)) return fail(problem);
         return 0;
     }
-    // the model folder held while this server runs, so a rollback refuses it: exclusive with --slide, else shared
-    const held: ?api.originals.Hold = api.originals.hold(a, dir, args.slide) catch |e| switch (e) {
-        error.Busy => if (args.slide) return fail(try std.fmt.allocPrint(a, "--slide rewrites the files in {s}, and another TensorFold process has that folder open: stop it, or teach a copy", .{dir})) else null,
-        error.Unlockable => blk: {
-            if (args.slide) log.line("warning: {s} cannot be locked, so `tensorfold slide rollback` cannot tell that this server has it open", .{dir});
-            break :blk null;
-        },
-        error.OutOfMemory => |x| return x,
-    };
-    defer if (held) |h| h.release();
     var text_arena: std.heap.ArenaAllocator = .init(gpa); // the text's problem, written on its own thread
     defer text_arena.deinit();
     var text_problem: []const u8 = "";
