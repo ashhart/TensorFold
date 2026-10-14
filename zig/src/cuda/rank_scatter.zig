@@ -38,7 +38,19 @@ pub const RankScatter = struct {
     }
 
     /// `partial` [rows][width] fp32 summed over the ranks into `out` [own rows][width]: a send/recv group, then a sum.
-    pub fn run(k: *const RankScatter, lib: *const nccl.Library, comm: nccl.Comm, world: usize, rank: usize, s: Stream, partial: u64, rows: usize, width: usize, scratch: u64, out: u64) !void {
+    pub fn run(
+        k: *const RankScatter,
+        lib: *const nccl.Library,
+        comm: nccl.Comm,
+        world: usize,
+        rank: usize,
+        s: Stream,
+        partial: u64,
+        rows: usize,
+        width: usize,
+        scratch: u64,
+        out: u64,
+    ) !void {
         const mine = share(rows, world, rank);
         const n = (mine[1] - mine[0]) * width;
         try lib.check(lib.api.ncclGroupStart(), "ncclGroupStart");
@@ -46,19 +58,39 @@ pub const RankScatter = struct {
             if (peer == rank) continue;
             const theirs = share(rows, world, peer);
             const count = (theirs[1] - theirs[0]) * width;
-            if (count > 0) try lib.check(lib.api.ncclSend(partial + theirs[0] * width * 4, count, .f32, @intCast(peer), comm, s.handle), "ncclSend");
-            if (n > 0) try lib.check(lib.api.ncclRecv(scratch + peer * n * 4, n, .f32, @intCast(peer), comm, s.handle), "ncclRecv");
+            const send = partial + theirs[0] * width * 4;
+            const slot = scratch + peer * n * 4;
+            const to: c_int = @intCast(peer);
+            if (count > 0) try lib.check(lib.api.ncclSend(send, count, .f32, to, comm, s.handle), "ncclSend");
+            if (n > 0) try lib.check(lib.api.ncclRecv(slot, n, .f32, to, comm, s.handle), "ncclRecv");
         }
         try lib.check(lib.api.ncclGroupEnd(), "ncclGroupEnd");
-        if (n == 0) return;
+        if (n > 0) try k.rankSum(s, scratch, partial + mine[0] * width * 4, world, rank, n, out);
+    }
+
+    /// out[i]: the ranks' terms added rank 0 first, `peers`' slot r (n apart) for every rank but `rank`, `own` for it.
+    pub fn rankSum(
+        k: *const RankScatter,
+        s: Stream,
+        peers: u64,
+        own: u64,
+        world: usize,
+        rank: usize,
+        n: usize,
+        out: u64,
+    ) !void {
         var a: launch_.Args = .{};
-        for ([_]u64{ scratch, partial + mine[0] * width * 4 }) |v| a.add(v);
+        for ([_]u64{ peers, own }) |v| a.add(v);
         a.add(@as(c_int, @intCast(world)));
         a.add(@as(c_int, @intCast(rank)));
         a.add(@as(i64, @intCast(n)));
         a.add(out);
         const blocks: u32 = @intCast(@min((n + 255) / 256, 4096));
-        try launch_.launch(k.sum, .{ .grid = .{ .x = blocks, .y = 1, .z = 1 }, .block = .{ .x = 256, .y = 1, .z = 1 } }, s, &a);
+        const cfg: launch_.Config = .{
+            .grid = .{ .x = blocks, .y = 1, .z = 1 },
+            .block = .{ .x = 256, .y = 1, .z = 1 },
+        };
+        try launch_.launch(k.sum, cfg, s, &a);
     }
 };
 
