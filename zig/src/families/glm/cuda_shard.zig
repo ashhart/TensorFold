@@ -40,6 +40,16 @@ pub const Share = struct {
             .vocab = try span(c.vocab, c.head_unit, rank, world),
         };
     }
+
+    /// This rank's largest fraction of an axis as (part, whole): its weights are at most that much of the checkpoint.
+    pub fn part(s: Share, c: *const Config) [2]u64 {
+        const axes = [_][2]u64{ .{ s.kda.len(), c.kda_heads }, .{ s.mla.len(), c.mla_heads }, .{ s.dense.len(), c.dense_inter }, .{ s.moe.len(), c.moe_inter }, .{ s.shared.len(), c.shared_inter }, .{ s.vocab.len(), c.vocab } };
+        var best: [2]u64 = .{ 0, 1 };
+        for (axes) |x| if (x[0] * best[1] > best[0] * x[1]) {
+            best = .{ x[0], x[1] };
+        };
+        return best;
+    }
 };
 
 /// Rank `rank`'s [lo, hi) of `total` elements taken in whole `per`s.
@@ -51,6 +61,16 @@ fn span(total: usize, per: usize, rank: usize, world: usize) !Span {
     const r = out[rank];
     if (r.len() == 0) return error.EmptyShare;
     return .{ .lo = r.begin * per, .hi = r.end * per };
+}
+
+test "a rank's part is its largest axis: TP=3 rank 0's 22 of 64 KDA heads, rank 2's 4,096 of 12,288 dense rows" {
+    const c = Config{};
+    const p0 = (try Share.of(&c, 0, 3)).part(&c);
+    try std.testing.expectEqual(@as(u64, 11) * p0[1], 32 * p0[0]);
+    const p2 = (try Share.of(&c, 2, 3)).part(&c);
+    try std.testing.expectEqual(p2[1], 3 * p2[0]);
+    const h = (try Share.of(&c, 1, 2)).part(&c);
+    try std.testing.expectEqual(h[1], 2 * h[0]);
 }
 
 test "TP=2 halves every axis; TP=3 takes the Python family's uneven shares (22/21/21 heads, 704/704/640 expert rows)" {
