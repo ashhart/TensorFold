@@ -1,4 +1,4 @@
-//! tf-cuda-test kernel-contract: the CUDA starter kernels through gates 1-4, the planted controls, and gate 5.
+//! tf-cuda-test kernel-contract: the registered CUDA kernels through gates 1-4, the planted controls, and gate 5.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -7,6 +7,7 @@ const check = @import("check.zig");
 const rows_k = @import("contract_rows.zig");
 const router_k = @import("contract_router.zig");
 const mm_k = @import("contract_mm.zig");
+const rank_k = @import("contract_rank.zig");
 
 const contract = core.contract;
 const g = contract.gates;
@@ -20,11 +21,11 @@ const controls = struct {
 
 /// The embedded image a registration names (the controls' only when this binary was built with -Dnvcc).
 fn image(name: []const u8) []const u8 {
-    inline for (.{ "norms", "nemotron_route", "qmm_group", "lane_gemv", "prompt16" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "norms", "nemotron_route", "qmm_group", "lane_gemv", "prompt16", "qmmf", "rank_sum" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     return if (options.controls) &controls.bytes else &.{};
 }
 
-/// Gates 1-4 on every CUDA starter kernel and each control at its own gate, then gate 5 on this GPU.
+/// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5 on this GPU.
 pub fn run(gpu: check.Gpu) !void {
     const a = gpu.gpa;
     if (!kk.available) return error.BuiltWithoutKernels;
@@ -51,6 +52,12 @@ pub fn run(gpu: check.Gpu) !void {
     defer split.deinit();
     var prompt = try cuda.nvfp4.Prompt.load(gpu.d);
     defer prompt.unload();
+    var lane = try cuda.qmmf.Lane.load(gpu.d, cap / 10); // sm_90 up: K slices meet in a cluster
+    defer lane.unload();
+    var lane_reduce = try cuda.qmmf.Lane.load(gpu.d, 8); // no clusters: the slices meet in reduce_kernel
+    defer lane_reduce.unload();
+    var rank_sum = try cuda.rank_scatter.RankScatter.load(gpu.d);
+    defer rank_sum.unload();
     var kernels: std.ArrayList(g.Kernel) = .empty;
     defer kernels.deinit(a);
     var row_list: [7]rows_k.Row = undefined;
@@ -67,10 +74,21 @@ pub fn run(gpu: check.Gpu) !void {
     defer topk.deinit();
     try kernels.append(a, logits.kernel());
     try kernels.append(a, topk.kernel());
-    var mm: [4]mm_k.Mm = undefined;
-    for (std.enums.values(mm_k.Kind), &mm) |kind, *m| m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .affine4 = &affine4, .split = &split, .prompt = &prompt };
+    const kinds = comptime std.enums.values(mm_k.Kind);
+    var mm: [kinds.len]mm_k.Mm = undefined;
+    for (kinds, &mm) |kind, *m| {
+        const by_lane: ?*const cuda.qmmf.Lane = switch (kind) {
+            .lane_f32 => &lane,
+            .lane_f32_reduce => &lane_reduce,
+            else => null,
+        };
+        m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .affine4 = &affine4, .split = &split, .prompt = &prompt, .lane = by_lane };
+    }
     defer for (&mm) |*m| m.deinit();
     for (&mm) |*m| try kernels.append(a, m.kernel());
+    var rank = rank_k.Rank{ .rig = .{ .gpu = gpu, .s = s }, .sum = &rank_sum };
+    defer rank.deinit();
+    try kernels.append(a, rank.kernel());
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
