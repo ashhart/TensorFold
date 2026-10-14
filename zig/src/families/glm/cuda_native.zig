@@ -8,6 +8,8 @@ const follow = @import("cuda_follow.zig");
 const glm_lanes = @import("cuda_lanes.zig");
 const ranks = @import("cuda_ranks.zig");
 const fw = @import("cuda_forward.zig");
+const config = @import("config.zig");
+const shard = @import("cuda_shard.zig");
 
 pub const model_type = "glm5_next";
 pub const formats: []const []const u8 = &.{"modelopt-nvfp4"};
@@ -20,8 +22,12 @@ pub const snap_grid: u32 = prompt_rows;
 /// `explain` words this family's open refusals too (where to set the rank and the id).
 pub const explains_open = true;
 
+/// The server's reading of this rank's room after its load (the budget streams are admitted by); null if unreadable.
+pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
 /// `slide` stays false: the server refuses --slide for a family without a learner (no `slide` here).
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, room: ?Room = null };
+/// The smallest room among the other ranks and whose it is.
+pub const Peer = struct { bytes: u64, rank: usize };
 
 pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
 
@@ -36,6 +42,7 @@ pub const Loaded = struct {
     deinit: *const fn (*anyopaque) void,
     lone: ?LoneRun = null,
     target: *engine.Engine, // the prompt cache keeps this engine's states (snap_*)
+    peer_room: ?Peer = null, // rank 0: the server admits streams and kept states by this when it is smaller
 };
 
 /// This rank's place: TF_GLM_RANK of TF_GLM_WORLD (both, or neither for a refusal that names them).
@@ -49,10 +56,14 @@ pub fn place() !Place {
     return p;
 }
 
-/// Bytes this rank's weights take: the checkpoint's share (its tensors split by world), for the server's admission.
-pub fn weightShare(total: u64) u64 {
+/// Bytes this rank's weights take at most, for the server's admission: the checkpoint times its largest axis share.
+pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64) u64 {
     const p = place() catch return total;
-    return total / p.world;
+    const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return total;
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 24)) catch return total;
+    const c = config.parse(a, text) catch return total;
+    const f = (shard.Share.of(&c, p.rank, p.world) catch return total).part(&c);
+    return @intCast(@as(u128, total) * f[0] / f[1]);
 }
 
 /// Slots for `context` plus a verify window, a multiple of 64 so the sparse pool keeps the AOT set.
@@ -93,6 +104,15 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer own.e.deinit();
     own.link = try follow.Link.init(gpa, ctx.d, &own.lib, own.comm, own.e.stream, cap);
     errdefer own.link.deinit();
+    // Rank 0 admits by the smallest room of the ranks; its sizes are the largest (the first ranks take the remainder).
+    const rooms = try gpa.alloc(u64, p.world);
+    defer gpa.free(rooms);
+    const mine: u64 = if (o.room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
+    try ranks.gather(u64, ctx.d, &own.lib, own.comm, own.e.stream, p.rank, mine, rooms);
+    var peer: ?Peer = null;
+    for (rooms[1..], 1..) |r, q| if (peer == null or r < peer.?.bytes) {
+        peer = .{ .bytes = r, .rank = q };
+    };
     if (p.rank != 0) { // a follower never serves: it runs rank 0's steps, then leaves the process
         follow.follow(own.e, &own.link) catch |err| {
             std.log.err("rank {d}: following rank 0 stopped ({s})", .{ p.rank, @errorName(err) });
@@ -117,10 +137,11 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .ctx = own,
         .deinit = close,
         .target = own.e,
+        .peer_room = peer,
     };
 }
 
-// Each rank keeps a copy under rank 0's id. cc-defer: rank 0's budget, others unchecked; trigger: step 5's admission.
+// Each rank keeps a copy under rank 0's id, in the room rank 0 admitted by (the smallest over the ranks).
 
 /// Bytes a state takes at any position: the whole state arena on each rank.
 pub fn snap_bytes(ptr: *anyopaque, at: u32) u64 {
