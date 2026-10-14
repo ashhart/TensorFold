@@ -58,6 +58,8 @@ pub const Request = struct {
     drafts: bool = true,
     /// Background work yields to foreground arrivals.
     background: bool = false,
+    /// The prompt length its kept states count as (0: its own); a pass prefilling a reply carries that request's.
+    born: u32 = 0,
     /// Prompt prefix lengths worth keeping for a later turn: the rendered history, then shared system blocks.
     history_len: u32 = 0,
     shared_prefixes: []const u32 = &.{},

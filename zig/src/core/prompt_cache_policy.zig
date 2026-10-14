@@ -2,11 +2,11 @@
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
 
-pub fn victimBut(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32) ?usize {
+pub fn victimBut(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born: u32) ?usize {
     var best: ?usize = null;
     for (s.entries.items, 0..) |e, i| {
         if (e.borrowers > 0 or e.shared or e.branched or e == skip or isActiveRewind(s, e, prompt)) continue;
-        const now = prompt.len > e.born and prompt.len > e.tokens.len and std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens);
+        const now = born > e.born and prompt.len > e.tokens.len and std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens); // a longer request's tokens extend it
         if ((now or extended(s, e)) and (best == null or e.used < s.entries.items[best.?].used)) best = i;
     }
     if (best) |i| return i;

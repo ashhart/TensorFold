@@ -29,6 +29,8 @@ export interface BuildStaticToolRegistryOptions {
 // renderer) are safe to auto-run. create_project/create_room/create_kanban_ticket
 // mutate app state and stay approval-gated.
 export const READ_ONLY_TOOL_NAMES = new Set([
+  'ask_user',
+  'phone_observe',
   'list_dir',
   'read_file',
   'search',

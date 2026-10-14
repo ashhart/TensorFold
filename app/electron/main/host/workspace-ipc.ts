@@ -22,6 +22,7 @@ import type { CheckpointService, CheckpointTarget } from './checkpoint-runtime'
 import { requireNativeConfirmation, type ConfirmSensitiveAction } from './sensitive-confirmation'
 import { canonicalLocalWorkspaceKey, lexicalLocalWorkspaceKey, sshWorkspaceKey, type WorkspaceMutationGuard } from './workspace-mutation-guard'
 import type { WorkspaceBackend } from '../../agent/workspace-backend'
+import { assertThreadForkRestrictions } from './thread-revert-fork'
 
 // A local git runner that captures the exit code (the workspace `sh` helper drops it).
 const localGitRunner: GitRunner = {
@@ -420,6 +421,8 @@ export function registerWorkspaceIpc(deps?: {
     // out in the fork notice, never silently.
     handle('checkpoint:forkTurn', async (_e, arg: { threadId: string; turn: number; branch?: string; label?: string; worktree?: boolean }) => {
       requireSecurityRole('operator', 'fork a thread from a past turn')
+      const source = store.threads.find((thread) => thread.id === arg?.threadId)
+      if (source) assertThreadForkRestrictions(source, arg.worktree === true)
       const resolved = target(arg?.threadId)
       if (!resolved) {
         await auditEvent('workspace.checkpoint_fork_turn', { threadId: auditPreview(arg?.threadId ?? ''), turn: arg?.turn, ok: false, reason: 'thread not found' })
@@ -431,6 +434,8 @@ export function registerWorkspaceIpc(deps?: {
       forkLease.addWorkspaceKeys?.([await checkpointWorkspaceKey(resolved)])
       const current = target(arg.threadId)
       if (!current || !sameCheckpointTarget(resolved, current)) throw new Error('The thread workspace changed while the checkpoint fork was starting.')
+      const currentSource = store.threads.find((thread) => thread.id === arg.threadId)
+      if (currentSource) assertThreadForkRestrictions(currentSource, arg.worktree === true)
       const res = await checkpoints.forkTurn(arg.threadId, arg.turn, current, { branch: arg.branch, label: arg.label, worktree: arg.worktree === true })
       let thread: Thread | null = null
       if (res.ok && res.fork && deps?.createForkThread) {

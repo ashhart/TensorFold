@@ -1,7 +1,7 @@
 # OMP engine (VST-050)
 
-Run a TensorFold Studio thread **on the installed omp coding agent** (`@oh-my-pi/pi-coding-agent`)
-via its headless rpc mode. TensorFold Studio stays the GUI: timeline, plan panel (OMP-style todos),
+Run a TensorFold thread **on the installed omp coding agent** (`@oh-my-pi/pi-coding-agent`)
+via its headless rpc mode. TensorFold stays the GUI: timeline, plan panel (todos),
 subagent tree, Guide steering, and session resume all mirror engine state; omp owns the
 agent loop — its specialists, prewalk, worktrees, and todo discipline.
 
@@ -37,16 +37,16 @@ thread-runtime.ts  ── engine === 'omp' ? ──▶  runOmpThread (electron/a
   `prompt` with the user turn, Guide cues become `steer` commands, abort becomes the
   `abort` command, then a final `get_state` syncs todo phases + the session cursor
   (`thread.ompResumeCursor`, resumed with `--resume` next run) and `get_subagents`
-  projects the engine's subagents into TensorFold Studio's subagent store (stable omp ids).
+  projects the engine's subagents into TensorFold's subagent store (stable omp ids).
 
 ## Security posture
 
 The **host-tools bridge** (slice 2, shipped): whenever the host provides its approval
 channel, omp's own mutating tools (`bash`/`edit`/`write`/`ast_edit`) are disabled via the
 spawn toolset (`OMP_BRIDGED_TOOLSET` = reads, structural search, todos, task/hub
-orchestration, web search) and TensorFold Studio's `write_file`/`edit_file`/`apply_patch`/
+orchestration, web search) and TensorFold's `write_file`/`edit_file`/`apply_patch`/
 `run_command` are registered as omp **host tools**. The engine's model plans; every
-mutation executes through TensorFold Studio's approval gate (`executeOmpHostTool` mirrors the
+mutation executes through TensorFold's approval gate (`executeOmpHostTool` mirrors the
 native loop's decision order: read-only auto-run → readonly deny → package-install
 saved-policy gate → Full Auto risk bands → interactive prompt), the real `executeTool`
 executor, and the audit trail. `host_tool_cancel` aborts pending calls with the run's
@@ -57,7 +57,7 @@ session's enabled tools (`executor.ts`: `session.getEnabledToolNames()`), so the
 filter reaches every subagent, and host tools registered on the main rpc session do not
 leak into subagent sessions. Net posture for a bridged run: omp subagents can research
 (read/grep/glob/task orchestration) but cannot mutate — mutations exist ONLY as bridged
-host tools on the main agent, which run through TensorFold Studio's gate.
+host tools on the main agent, which run through TensorFold's gate.
 
 ## Testing
 

@@ -23,7 +23,7 @@ export default defineConfig(({ command }) => ({
     tailwindcss(),
     ...(process.env.VONTRA_NO_ELECTRON ? [] : [electron({
       main: {
-        entry: 'electron/main.ts',
+        entry: { main: 'electron/main.ts', 'kokoro-worker': 'electron/voice/kokoro-worker.ts' },
         vite: {
           build: {
             outDir: 'dist-electron',
@@ -32,8 +32,8 @@ export default defineConfig(({ command }) => ({
               // it was being emitted as an empty 110B stub, so loadBaileys() resolved to
               // {} and pairing silently did nothing. Externalize it so the main bundle
               // require()s the real package from the shipped node_modules at runtime.
-              external: ['electron', 'node:sqlite', '@whiskeysockets/baileys', '@lydell/node-pty'],
-              output: { format: 'cjs', entryFileNames: 'main.js' },
+              external: ['electron', 'node:sqlite', '@whiskeysockets/baileys', '@lydell/node-pty', 'kokoro-js', '@huggingface/transformers'],
+              output: { format: 'cjs', entryFileNames: '[name].js' },
             },
           },
         },

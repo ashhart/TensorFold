@@ -31,6 +31,11 @@ func execute(_ command: Command) throws -> [String: Any] {
     case .type(let text): return try typeText(text)
     case .key(let combo): return try pressKeys(combo)
     case .openApp(let name, let bundleId): return try openApp(name: name, bundleId: bundleId)
+    case .phoneStatus: return phoneStatus()
+    case .phoneConnect: return try phoneConnect()
+    case .phoneObserve(let token): return try phoneObserve(token)
+    case .phoneInput(let token, let input): return try phoneInput(token, input)
+    case .phoneDisconnect(let token): return phoneDisconnect(token)
     case .stop: return [:]
     }
 }

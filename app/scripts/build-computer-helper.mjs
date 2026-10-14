@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 export const HELPER_NAME = 'tensorfold-computer'
 export const SWIFT_TARGET = 'arm64-apple-macos13.0'
 const MODULE_NAME = 'TensorFoldComputer'
-const FRAMEWORKS = ['AppKit', 'ApplicationServices', 'CoreGraphics']
+const FRAMEWORKS = ['AppKit', 'ApplicationServices', 'CoreGraphics', 'ScreenCaptureKit', 'Vision']
 const STAMP = `.${HELPER_NAME}.stamp.json`
 const COMPILE_TIMEOUT_MS = 10 * 60_000
 

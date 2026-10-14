@@ -10,6 +10,7 @@ const AUTO_RESUME_AFTER_RESTART = new Set<JobResumeAfterRestart>(['read_only', '
 
 export interface JobRef {
   kind: JobKind
+  incognito?: boolean
   owner: string
   projectId?: string | null
   missionId?: string | null
@@ -103,7 +104,7 @@ export function normalizeJobs(input: Job[], now = Date.now()): Job[] {
       lastUsefulProgressAt: job.lastUsefulProgressAt ?? job.startedAt ?? job.updatedAt ?? now,
       blockedReason: job.blockedReason ?? null,
       resumePlan: job.resumePlan ?? null,
-      resumeAfterRestart: normalizeResumeAfterRestart((job as Partial<Job>).resumeAfterRestart, job.status),
+      resumeAfterRestart: job.incognito === true ? 'never' as const : normalizeResumeAfterRestart((job as Partial<Job>).resumeAfterRestart, job.status),
       pendingApprovals: normalizePendingApprovals((job as Partial<Job>).pendingApprovals, now),
       leaseOwner: job.leaseOwner ?? null,
       leaseExpiresAt: job.leaseExpiresAt ?? null,
@@ -176,7 +177,7 @@ export function buildRoomSupervisorJobMetadata(
 
 export function enqueueJob(jobs: Job[], ref: JobRef, now = Date.now()): { jobs: Job[]; job: Job; created: boolean } {
   const owner = ref.owner || ownerFromRef(ref)
-  const existing = jobs.find((job) => !TERMINAL.has(job.status) && job.kind === ref.kind && job.owner === owner)
+  const existing = jobs.find((job) => !TERMINAL.has(job.status) && job.kind === ref.kind && job.owner === owner && (job.incognito === true) === (ref.incognito === true))
   if (existing) {
     const patched = updateJob(jobs, existing.id, {
       status: existing.status === 'paused' || existing.status === 'stalled' ? 'queued' : existing.status,
@@ -187,6 +188,7 @@ export function enqueueJob(jobs: Job[], ref: JobRef, now = Date.now()): { jobs: 
   }
   const job: Job = {
     id: randomUUID(),
+    ...(ref.incognito === true ? { incognito: true } : {}),
     kind: ref.kind,
     status: 'queued',
     attempt: 0,
@@ -204,7 +206,7 @@ export function enqueueJob(jobs: Job[], ref: JobRef, now = Date.now()): { jobs: 
     lastUsefulProgressAt: now,
     blockedReason: null,
     resumePlan: null,
-    resumeAfterRestart: ref.resumeAfterRestart ?? defaultResumeAfterRestart(ref.kind),
+    resumeAfterRestart: ref.incognito === true ? 'never' : ref.resumeAfterRestart ?? defaultResumeAfterRestart(ref.kind),
     pendingApprovals: [],
     leaseOwner: null,
     leaseExpiresAt: null,
@@ -230,6 +232,7 @@ export function updateJob(jobs: Job[], id: string, patch: JobPatch, now = Date.n
     updated = {
       ...job,
       ...patch,
+      ...(job.incognito === true ? { incognito: true, resumeAfterRestart: 'never' as const } : {}),
       pendingApprovals: patch.pendingApprovals ? normalizePendingApprovals(patch.pendingApprovals, now) : job.pendingApprovals ?? [],
       metadata: patch.metadata ? { ...(job.metadata ?? {}), ...patch.metadata } : job.metadata,
       executionVerification: patch.executionVerification !== undefined

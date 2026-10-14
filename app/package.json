@@ -1,6 +1,6 @@
 {
   "name": "tensorfold-studio",
-  "version": "1.0.0-beta.5",
+  "version": "1.0.0-beta.6",
   "private": true,
   "packageManager": "npm@10.9.8",
   "engines": {
@@ -61,7 +61,11 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
-      "package.json"
+      "package.json",
+      "!node_modules/kokoro-js/dist/kokoro.web.js",
+      "!node_modules/kokoro-js/dist/kokoro.web.js.map",
+      "!node_modules/**/pino/pretty-demo.png",
+      "!node_modules/**/.claude{,/**/*}"
     ],
     "extraResources": [
       {
@@ -76,6 +80,13 @@
         "to": "computer-use",
         "filter": [
           "tensorfold-computer"
+        ]
+      },
+      {
+        "from": "build/voice",
+        "to": "voice-notices",
+        "filter": [
+          "*.txt"
         ]
       }
     ],
@@ -95,7 +106,7 @@
       "artifactName": "${productName}-${version}-${arch}.${ext}",
       "category": "public.app-category.developer-tools",
       "darkModeSupport": true,
-      "minimumSystemVersion": "13.0",
+      "minimumSystemVersion": "13.3",
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "icon": "build/icon.icns",
@@ -136,11 +147,15 @@
           "path": "/Applications"
         }
       ]
-    }
+    },
+    "asarUnpack": [
+      "node_modules/onnxruntime-node/bin/napi-v3/darwin/arm64/*"
+    ]
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.1.0",
     "@lydell/node-pty": "^1.2.0-beta.12",
+    "@met4citizen/headtts": "1.2.0",
     "@types/diff": "^7.0.2",
     "@types/qrcode": "^1.5.6",
     "@whiskeysockets/baileys": "^7.0.0-rc13",
@@ -149,12 +164,15 @@
     "clsx": "^2.1.1",
     "diff": "^5.2.2",
     "imapflow": "^1.7.8",
+    "kokoro-js": "1.2.1",
     "nodemailer": "^10.1.0",
+    "phonemizer": "file:mobile/vendor/tensorfold-kokoro-phonemizer",
     "qrcode": "^1.5.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^9.0.1",
     "remark-gfm": "^4.0.0",
+    "sprintf-js": "file:mobile/vendor/sprintf-js",
     "ssh2": "^1.17.0",
     "undici": "7.30.0",
     "zustand": "^5.0.2"
@@ -179,6 +197,9 @@
   "overrides": {
     "app-builder-lib": {
       "@electron/get": "^5.0.0"
-    }
+    },
+    "sharp": "0.35.5",
+    "sprintf-js": "$sprintf-js",
+    "phonemizer": "$phonemizer"
   }
 }

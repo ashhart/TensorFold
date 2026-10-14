@@ -5,6 +5,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { assertProductionMacSigner, assertProductionUpdateTrustRoot, readReleaseTrustConfig } from './update-signing-trust.mjs'
 import { assertFuses, assertStagedEngine, verifyPackagedComputerHelper, verifyPackagedEngine } from './package-checks.mjs'
+import { assertPackagedMacOSMinimum } from './macos-runtime-minimum.mjs'
 import { expectedMacArtifacts, verifyMacReleaseArtifacts } from './package-mac.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
@@ -65,6 +66,7 @@ export async function packageWithXcodeAccount() {
   // Signing without notarization is private staging, never a distributable result.
   await run(builder, ['--mac', 'dir', ...builderOptions])
   await assertFuses(artifacts.apps[0], pkg.build.electronFuses)
+  await assertPackagedMacOSMinimum(artifacts.apps[0])
   await verifyPackagedEngine(artifacts.apps[0], { manifest: metadata.engine, release: signer })
   await verifyPackagedComputerHelper(artifacts.apps[0], { release: signer })
   const exportOptions = path.join(work, 'ExportOptions.plist')
