@@ -41,8 +41,6 @@ pub const PlanArgs = plan.PlanArgs;
 pub const PlanRef = plan.PlanRef;
 pub const PlanKeep = plan.Keep;
 pub const gdn_chunk = recurrence.gdn_chunk;
-pub const GdnScratch = recurrence.GdnScratch;
-pub const gdnScratch = recurrence.gdnScratch;
 
 pub const Launcher = struct {
     r: *const runtime.Runtime,
@@ -64,7 +62,6 @@ pub const Launcher = struct {
     fa_prefill: Triple,
     fa_wide: [2]Function, // the 64-row prefill tile, fp16 and bf16 caches
     fa_paged: [2]Function, // the same tile over a stream's pages
-    gdn_chunked: [5]Function, // prep, kt, wy, h, o
     softmax_stats: Function,
     sum_partials: Function,
     op: Ops,
@@ -76,8 +73,6 @@ pub const Launcher = struct {
     fuse: bool,
     /// The 64-row prefill attention tile is on.
     wide: bool,
-    /// The DeltaNet prefill runs chunked (off keeps the one-token recurrence).
-    chunked: bool,
 
     const PlanFns = struct {
         kv_write: Function,
@@ -126,7 +121,7 @@ pub const Launcher = struct {
     };
 
     /// Which kernels a run takes where two give the same bits; every one defaults on.
-    pub const Choices = struct { fuse: bool = true, wide: bool = true, chunked: bool = true };
+    pub const Choices = struct { fuse: bool = true, wide: bool = true };
 
     /// Loads the code objects on the current device and resolves every kernel the launchers use.
     pub fn load(r: *const runtime.Runtime, choices: Choices, images: [kernels.group_count][]align(8) const u8) Error!Launcher {
@@ -147,7 +142,6 @@ pub const Launcher = struct {
         const pl = l.mods[@backingInt(kernels.Group.plan)];
         l.fuse = choices.fuse;
         l.wide = choices.wide;
-        l.chunked = choices.chunked;
         l.dec = .{ .router = .{ try dec.function("tf_router_decode_f16"), try dec.function("tf_router_decode_bf16") }, .tail = try dec.function("tf_tail"), .conv_split = try dec.function("tf_conv_split"), .rms2 = try dec.function("tf_rms2"), .gnorm_out = try dec.function("tf_gnorm_out"), .select = try dec.function("tf_select_decode") };
         l.plan = .{
             .kv_write = try pl.function("tf_plan_kv_write"),
@@ -162,8 +156,6 @@ pub const Launcher = struct {
         };
         l.fa_wide = .{ try pre.function("tf_fa_wide_f16"), try pre.function("tf_fa_wide_bf16") };
         l.fa_paged = .{ try pre.function("tf_fa_paged_f16"), try pre.function("tf_fa_paged_bf16") };
-        const gp = l.mods[@backingInt(kernels.Group.gdn_prefill)];
-        l.gdn_chunked = .{ try gp.function("tf_gdn_prep"), try gp.function("tf_gdn_kt"), try gp.function("tf_gdn_wy"), try gp.function("tf_gdn_h"), try gp.function("tf_gdn_o") };
         l.op = .{
             .embed_rows = try ops.function("tf_embed_rows"),
             .embed_dense = try ops.function("tf_embed_dense"),
@@ -289,7 +281,6 @@ pub const Launcher = struct {
     pub const pagesWrite = plan.pagesWrite;
     pub const pagesGather = plan.pagesGather;
     pub const planGather = plan.planGather;
-    pub const gdnChunked = recurrence.gdnChunked;
     pub const tf_gdn_gate_prefill = recurrence.tf_gdn_gate_prefill;
     pub const tf_gnorm_silu = recurrence.tf_gnorm_silu;
     pub const tf_embed_rows = elementwise.tf_embed_rows;
