@@ -308,13 +308,27 @@ template __global__ void qmmf_kernel<FP4, 32, 64, 1, 4, 4, false, true, false>(c
 template __global__ void qmmf_kernel<FP4, 64, 64, 1, 4, 4, false, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<FP4, 64, 64, 1, 4, 4, false, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<FP4, 64, 64, 1, 4, 4, false, false, true>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
-template __global__ void qmmf_kernel<FP4, 16, 64, 1, 4, 4, true, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
-template __global__ void qmmf_kernel<FP4, 16, 64, 1, 4, 4, true, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
-template __global__ void qmmf_kernel<FP4, 32, 64, 1, 4, 4, true, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
-template __global__ void qmmf_kernel<FP4, 32, 64, 1, 4, 4, true, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
-template __global__ void qmmf_kernel<FP4, 64, 64, 1, 4, 4, true, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
-template __global__ void qmmf_kernel<FP4, 64, 64, 1, 4, 4, true, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
-template __global__ void qmmf_kernel<FP4, 64, 64, 1, 4, 4, true, false, true>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<FP4, 16, 64, 1, 4, 4, true, false, false>(
+    const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float,
+    void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<FP4, 16, 64, 1, 4, 4, true, true, false>(
+    const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float,
+    void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<FP4, 32, 64, 1, 4, 4, true, false, false>(
+    const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float,
+    void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<FP4, 32, 64, 1, 4, 4, true, true, false>(
+    const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float,
+    void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<FP4, 64, 64, 1, 4, 4, true, false, false>(
+    const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float,
+    void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<FP4, 64, 64, 1, 4, 4, true, true, false>(
+    const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float,
+    void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<FP4, 64, 64, 1, 4, 4, true, false, true>(
+    const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float,
+    void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<FP8, 16, 64, 1, 4, 4, false, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<FP8, 16, 64, 1, 4, 4, false, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<FP8, 32, 64, 1, 4, 4, false, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);

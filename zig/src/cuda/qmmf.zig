@@ -66,12 +66,23 @@ pub fn plan(m: usize, n: usize, k: usize, clusters: bool) Plan {
 }
 
 /// qmmf.cu's instance names, per mode: row tiles 16, 32, 64 (each plain, then with a cluster), then the fused kernel.
-fn symbol(comptime mode: Mode, comptime bm: u32, comptime cluster: bool, comptime fused: bool, comptime wide: bool) [:0]const u8 {
-    const name = "_ZN7tf_qmmf11qmmf_kernelILi{d}ELi{d}ELi64ELi1ELi4ELi4ELb{d}ELb{d}ELb{d}EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii";
-    return std.fmt.comptimePrint(name, .{ @backingInt(mode), bm, @intFromBool(wide), @intFromBool(cluster), @intFromBool(fused) });
+fn symbol(
+    comptime mode: Mode,
+    comptime bm: u32,
+    comptime cluster: bool,
+    comptime fused: bool,
+    comptime wide: bool,
+) [:0]const u8 {
+    const name = "_ZN7tf_qmmf11qmmf_kernelILi{d}ELi{d}ELi64ELi1ELi4ELi4ELb{d}ELb{d}ELb{d}" ++
+        "EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii";
+    const flags = .{ @intFromBool(wide), @intFromBool(cluster), @intFromBool(fused) };
+    return std.fmt.comptimePrint(name, .{ @backingInt(mode), bm, flags[0], flags[1], flags[2] });
 }
 
-pub const reduce_symbols = [2][:0]const u8{ "_ZN7tf_qmmf13reduce_kernelILb0EEEvPKfPvxif", "_ZN7tf_qmmf13reduce_kernelILb1EEEvPKfPvxif" };
+pub const reduce_symbols = [2][:0]const u8{
+    "_ZN7tf_qmmf13reduce_kernelILb0EEEvPKfPvxif",
+    "_ZN7tf_qmmf13reduce_kernelILb1EEEvPKfPvxif",
+};
 const row_tiles = [_]u32{ 16, 32, 64 };
 
 /// What a call writes: bf16 rows, or the fp32 sums unrounded (FP4 only, a tensor-parallel rank's partial rows).
@@ -100,7 +111,13 @@ pub const Lane = struct {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.qmmf);
         errdefer mod.unload();
-        var l: Lane = .{ .mod = mod, .fns = undefined, .fp4_f32 = try loadTiles(mod, .fp4, true), .reduce = undefined, .clusters = capability_major >= 9 };
+        var l: Lane = .{
+            .mod = mod,
+            .fns = undefined,
+            .fp4_f32 = try loadTiles(mod, .fp4, true),
+            .reduce = undefined,
+            .clusters = capability_major >= 9,
+        };
         inline for (modes, 0..) |mode, mi| l.fns[mi] = try loadTiles(mod, mode, false);
         for (&l.reduce, reduce_symbols) |*f, name| f.* = try mod.function(name);
         return l;
@@ -158,7 +175,10 @@ pub const Lane = struct {
             r.add(@as(i64, @intCast(total)));
             r.add(@as(i32, @intCast(p.sk)));
             r.add(w.scale);
-            try launch_.launch(l.reduce[@backingInt(out)], .{ .grid = .{ .x = @intCast((total + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256, .y = 1, .z = 1 } }, s, &r);
+            try launch_.launch(l.reduce[@backingInt(out)], .{
+                .grid = .{ .x = @intCast((total + 255) / 256), .y = 1, .z = 1 },
+                .block = .{ .x = 256, .y = 1, .z = 1 },
+            }, s, &r);
         }
     }
 };
@@ -223,7 +243,16 @@ test "tile shared bytes, slices and row tiles as the Python host picks them" {
 }
 
 test "instance names are qmmf.cu's" {
-    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi3ELi16ELi64ELi1ELi4ELi4ELb0ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.fp8g, 16, true, false, false));
-    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi0ELi64ELi64ELi1ELi4ELi4ELb0ELb0ELb1EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.fp4, 64, false, true, false));
-    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi0ELi32ELi64ELi1ELi4ELi4ELb1ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.fp4, 32, true, false, true));
+    try std.testing.expectEqualStrings(
+        "_ZN7tf_qmmf11qmmf_kernelILi3ELi16ELi64ELi1ELi4ELi4ELb0ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii",
+        symbol(.fp8g, 16, true, false, false),
+    );
+    try std.testing.expectEqualStrings(
+        "_ZN7tf_qmmf11qmmf_kernelILi0ELi64ELi64ELi1ELi4ELi4ELb0ELb0ELb1EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii",
+        symbol(.fp4, 64, false, true, false),
+    );
+    try std.testing.expectEqualStrings(
+        "_ZN7tf_qmmf11qmmf_kernelILi0ELi32ELi64ELi1ELi4ELi4ELb1ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii",
+        symbol(.fp4, 32, true, false, true),
+    );
 }

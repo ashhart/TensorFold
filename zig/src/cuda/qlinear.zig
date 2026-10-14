@@ -113,7 +113,16 @@ pub const Linear = struct {
         return l.onPromptAs(s, q, mode, in, out, .bf16, rows);
     }
 
-    fn onPromptAs(l: Linear, s: Stream, q: qmmf.Weight, mode: qmmf.Mode, in: Rows, out: u64, kind: qmmf.Out, rows: usize) !void {
+    fn onPromptAs(
+        l: Linear,
+        s: Stream,
+        q: qmmf.Weight,
+        mode: qmmf.Mode,
+        in: Rows,
+        out: u64,
+        kind: qmmf.Out,
+        rows: usize,
+    ) !void {
         const p = l.nvfp4_prompt orelse return error.FormatNotLoaded;
         if (q.mode != mode) return error.FormatMismatch;
         return p.matmulOut(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q, out, kind);
@@ -123,7 +132,16 @@ pub const Linear = struct {
         return l.onLaneAs(s, q, mode, in, out, .bf16, rows);
     }
 
-    fn onLaneAs(l: Linear, s: Stream, q: qmmf.Weight, mode: qmmf.Mode, in: Rows, out: u64, kind: qmmf.Out, rows: usize) !void {
+    fn onLaneAs(
+        l: Linear,
+        s: Stream,
+        q: qmmf.Weight,
+        mode: qmmf.Mode,
+        in: Rows,
+        out: u64,
+        kind: qmmf.Out,
+        rows: usize,
+    ) !void {
         const lane = l.lane orelse return error.FormatNotLoaded;
         if (q.mode != mode) return error.FormatMismatch;
         return lane.matmulOut(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q, out, kind, in.part);

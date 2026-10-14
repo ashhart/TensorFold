@@ -69,8 +69,13 @@ pub const Prompt = struct {
     const bm = 128;
     const bn = 128;
     const threads = 128;
-    const name = "_ZN11tf_prompt1613prompt_kernelILi{d}ELi128ELi128ELi2ELi2ELi2ELb{d}EEEvPK13__nv_bfloat16PKhS5_fPviiiiii";
-    pub const symbols = [3][:0]const u8{ std.fmt.comptimePrint(name, .{ 0, 0 }), std.fmt.comptimePrint(name, .{ 1, 0 }), std.fmt.comptimePrint(name, .{ 0, 1 }) };
+    const name = "_ZN11tf_prompt1613prompt_kernelILi{d}ELi128ELi128ELi2ELi2ELi2ELb{d}" ++
+        "EEEvPK13__nv_bfloat16PKhS5_fPviiiiii";
+    pub const symbols = [3][:0]const u8{
+        std.fmt.comptimePrint(name, .{ 0, 0 }),
+        std.fmt.comptimePrint(name, .{ 1, 0 }),
+        std.fmt.comptimePrint(name, .{ 0, 1 }),
+    };
 
     /// prompt16.cu Tile<MODE, 128, 128, 2, 2, 2>::SMEM.
     pub fn sharedBytes(mode: qmmf.Mode) u32 {
@@ -134,7 +139,10 @@ test "the prompt tile's shared bytes and instance names" {
     try std.testing.expectEqual(@as(u32, 41984), Prompt.sharedBytes(.fp4));
     try std.testing.expectEqual(@as(u32, 49152), Prompt.sharedBytes(.fp8)); // 2 x (16384 + 8192): no scale tile
     try std.testing.expectEqualStrings("_ZN11tf_prompt1613prompt_kernelILi0ELi128ELi128ELi2ELi2ELi2ELb0EEEvPK13__nv_bfloat16PKhS5_fPviiiiii", Prompt.symbols[0]);
-    try std.testing.expectEqualStrings("_ZN11tf_prompt1613prompt_kernelILi0ELi128ELi128ELi2ELi2ELi2ELb1EEEvPK13__nv_bfloat16PKhS5_fPviiiiii", Prompt.symbols[2]);
+    try std.testing.expectEqualStrings(
+        "_ZN11tf_prompt1613prompt_kernelILi0ELi128ELi128ELi2ELi2ELi2ELb1EEEvPK13__nv_bfloat16PKhS5_fPviiiiii",
+        Prompt.symbols[2],
+    );
 }
 
 test "word tiling reads each nibble where qmm.pack puts it" {
