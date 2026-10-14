@@ -91,16 +91,60 @@ pub const Linear = struct {
         }
     }
 
+    /// Decode rows as decode(), out (rows, n) fp32 unrounded: a tensor-parallel rank's partial rows (nvfp4 only).
+    pub fn decodeF32(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
+        const q = switch (w) {
+            .nvfp4 => |q| q,
+            else => return error.EpilogueNotBuilt,
+        };
+        return l.onLaneAs(s, q, .fp4, in, out, .f32, rows);
+    }
+
+    /// Prompt rows as prompt(), out (rows, n) fp32 unrounded (nvfp4 only).
+    pub fn promptF32(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
+        const q = switch (w) {
+            .nvfp4 => |q| q,
+            else => return error.EpilogueNotBuilt,
+        };
+        return l.onPromptAs(s, q, .fp4, in, out, .f32, rows);
+    }
+
     fn onPrompt(l: Linear, s: Stream, q: qmmf.Weight, mode: qmmf.Mode, in: Rows, out: u64, rows: usize) !void {
+        return l.onPromptAs(s, q, mode, in, out, .bf16, rows);
+    }
+
+    fn onPromptAs(
+        l: Linear,
+        s: Stream,
+        q: qmmf.Weight,
+        mode: qmmf.Mode,
+        in: Rows,
+        out: u64,
+        kind: qmmf.Out,
+        rows: usize,
+    ) !void {
         const p = l.nvfp4_prompt orelse return error.FormatNotLoaded;
         if (q.mode != mode) return error.FormatMismatch;
-        return p.matmul(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q, out);
+        return p.matmulOut(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q, out, kind);
     }
 
     fn onLane(l: Linear, s: Stream, q: qmmf.Weight, mode: qmmf.Mode, in: Rows, out: u64, rows: usize) !void {
+        return l.onLaneAs(s, q, mode, in, out, .bf16, rows);
+    }
+
+    fn onLaneAs(
+        l: Linear,
+        s: Stream,
+        q: qmmf.Weight,
+        mode: qmmf.Mode,
+        in: Rows,
+        out: u64,
+        kind: qmmf.Out,
+        rows: usize,
+    ) !void {
         const lane = l.lane orelse return error.FormatNotLoaded;
         if (q.mode != mode) return error.FormatMismatch;
-        return lane.matmul(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q, out, in.part);
+        return lane.matmulOut(s, in.x, if (in.ldx == 0) q.k else in.ldx, rows, q, out, kind, in.part);
     }
 };
 
@@ -331,4 +375,7 @@ test "a lane weight whose mode is not its format's is refused before any launch"
     const s: Stream = undefined;
     try std.testing.expectError(error.FormatMismatch, l.decode(s, .{ .fp8g = fp4 }, .{ .x = 0 }, 0, 1));
     try std.testing.expectError(error.FormatNotLoaded, l.prompt(s, .{ .nvfp4 = fp4 }, .{ .x = 0 }, 0, 1));
+    const f8: qmmf.Weight = .{ .mode = .fp8g, .codes = 0, .scales = 0, .n = 64, .k = 64, .npad = 128 };
+    try std.testing.expectError(error.EpilogueNotBuilt, l.decodeF32(s, .{ .fp8g = f8 }, .{ .x = 0 }, 0, 1));
+    try std.testing.expectError(error.EpilogueNotBuilt, l.promptF32(s, .{ .bf16 = f8 }, .{ .x = 0 }, 0, 1));
 }

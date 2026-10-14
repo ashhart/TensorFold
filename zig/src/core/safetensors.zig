@@ -165,6 +165,15 @@ pub const File = struct {
         self.* = undefined;
     }
 
+    /// The file's pages out of the mapping and the page cache (unified memory needs the room); Linux only, refaults.
+    pub fn release(self: *const File) void {
+        if (@import("builtin").os.tag != .linux) return;
+        const linux = std.os.linux;
+        // a map that fell back to a heap copy (no mmap) holds the only bytes: DONTNEED would zero them
+        if (self.map.section != null) _ = linux.madvise(self.map.memory.ptr, self.map.memory.len, linux.MADV.DONTNEED);
+        _ = linux.fadvise(self.file.handle, 0, 0, linux.POSIX_FADV.DONTNEED);
+    }
+
     pub fn get(self: *const File, name: []const u8) ?Tensor {
         const e = self.names.get(name) orelse return null;
         return .{ .dtype = e.dtype, .rank = e.rank, .shape = e.shape, .bytes = self.map.memory[self.data + e.begin .. self.data + e.end] };

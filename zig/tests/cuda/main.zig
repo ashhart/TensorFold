@@ -7,6 +7,7 @@ const runtime_tests = @import("runtime_tests.zig");
 const bench = @import("bench.zig");
 const oracle_tests = @import("oracle_tests.zig");
 const libs_tests = @import("libs_tests.zig");
+const rank_scatter_tests = @import("rank_scatter_tests.zig");
 const sample_tests = @import("sample_tests.zig");
 const glue_tests = @import("glue_tests.zig");
 const window_profile = @import("window_profile.zig");
@@ -43,6 +44,8 @@ const usage =
     \\  symbols                   every gdn fatbin instantiation resolves by its listed symbol
     \\  cublaslt                  bf16 GEMM through cuBLASLt against an fp64 reference
     \\  nccl                      one-rank NCCL all-reduce and all-gather
+    \\  rank-scatter <rank> <n> [id]  rank-order reduce-scatter (NCCL_COMM_ID or an id file) against an all-gather
+    \\  rank-sum                  the reduce-scatter's sum kernel alone, 2 to 5 ranks as each rank (one GPU, no NCCL)
     \\  gdn-replay <dir>          replay_kernel bits against the Python oracle's fixture
     \\  gdn-tree <dir>            tree_kernel bits against the Python oracle's fixture
     \\  triton <dir>              a Triton cubin's bits against the Python oracle's fixture
@@ -118,6 +121,12 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "symbols")) return runtime_tests.symbols(gpu);
     if (std.mem.eql(u8, cmd, "cublaslt")) return libs_tests.cublaslt(gpu);
     if (std.mem.eql(u8, cmd, "nccl")) return libs_tests.nccl(gpu);
+    if (std.mem.eql(u8, cmd, "rank-scatter")) {
+        const rank = try std.fmt.parseInt(usize, try arg(rest, 0), 10);
+        const world = try std.fmt.parseInt(usize, try arg(rest, 1), 10);
+        return rank_scatter_tests.run(gpu, rank, world, if (rest.len > 2) rest[2] else null);
+    }
+    if (std.mem.eql(u8, cmd, "rank-sum")) return rank_scatter_tests.sum(gpu);
     if (std.mem.eql(u8, cmd, "gdn-replay")) return oracle_tests.gdnReplay(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "gdn-tree")) return oracle_tests.gdnTree(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "triton")) return oracle_tests.tritonKernel(gpu, try arg(rest, 0));
