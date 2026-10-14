@@ -132,6 +132,60 @@ def check(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def post(url: str, path: str, body: dict) -> dict:
+    from urllib.request import Request, urlopen
+
+    request = Request(url.rstrip("/") + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    with urlopen(request, timeout=900) as response:
+        return json.load(response)
+
+
+def served(args: argparse.Namespace) -> None:
+    """The served model's greedy replies equal the oracle's, alone and four at once; thinking and tool calls parse."""
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+
+    names = sorted(p.name.removesuffix(".reference.json") for p in args.oracle.glob("*.reference.json"))
+    want = {n: json.loads((args.oracle / f"{n}.reference.json").read_text()) for n in names}
+    ids = {n: json.loads((args.oracle / f"{n}.ids.json").read_text()) for n in names}
+
+    def one(name: str, draft: bool) -> tuple[str, bool]:
+        got = post(args.url, "/v1/completions", {"model": "gemma", "prompt": ids[name], "max_tokens": len(want[name]),
+                                                 "temperature": 0, "draft": draft, "ignore_eos": True})
+        digest = hashlib.sha256(",".join(str(t) for t in want[name]).encode()).hexdigest()[:12]
+        return got.get("tensorfold", {}).get("token_sha", ""), got.get("tensorfold", {}).get("token_sha") == digest
+
+    failed = 0
+    for draft in (False, True):
+        for name in names:
+            sha, ok = one(name, draft)
+            failed += not ok
+            print(f"{'ok  ' if ok else 'FAIL'} alone, drafts {'on ' if draft else 'off'}: {name} {sha}", flush=True)
+    with ThreadPoolExecutor(len(names)) as pool:
+        for name, (sha, ok) in zip(names, pool.map(lambda n: one(n, True), names)):
+            failed += not ok
+            print(f"{'ok  ' if ok else 'FAIL'} four at once: {name} {sha}", flush=True)
+    think = post(args.url, "/v1/chat/completions", {"model": "gemma", "max_tokens": 400, "temperature": 0,
+                                                    "chat_template_kwargs": {"enable_thinking": True},
+                                                    "messages": [{"role": "user", "content": "What is 17 * 23? Think first."}]})
+    msg = think["choices"][0]["message"]
+    ok = bool(msg.get("reasoning_content")) and "391" in (msg.get("content") or "") and "<|channel>" not in (msg.get("content") or "")
+    failed += not ok
+    print(f"{'ok  ' if ok else 'FAIL'} thinking apart from the answer: {len(msg.get('reasoning_content') or '')} reasoning chars, answer {(msg.get('content') or '')[:60]!r}")
+    tools = [{"type": "function", "function": {"name": "get_weather", "description": "Weather for a city",
+                                               "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                                                              "required": ["city"]}}}]
+    call = post(args.url, "/v1/chat/completions", {"model": "gemma", "max_tokens": 200, "temperature": 0, "tools": tools,
+                                                   "messages": [{"role": "user", "content": "What's the weather in Lisbon?"}]})
+    calls = call["choices"][0]["message"].get("tool_calls") or []
+    ok = len(calls) == 1 and calls[0]["function"]["name"] == "get_weather" and "Lisbon" in calls[0]["function"]["arguments"]
+    failed += not ok
+    print(f"{'ok  ' if ok else 'FAIL'} tool call: {[c['function'] for c in calls]}")
+    print("PASS" if not failed else f"FAIL: {failed}")
+    if failed:
+        raise SystemExit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -145,11 +199,14 @@ def main() -> None:
     p.add_argument("--model", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--sizes", type=int, nargs="+", default=[8192, 32768])
+    v = sub.add_parser("served")
+    v.add_argument("--url", default="http://127.0.0.1:8888")
+    v.add_argument("--oracle", type=Path, required=True)
     c = sub.add_parser("check")
     c.add_argument("--oracle", type=Path, required=True)
     c.add_argument("--native", type=Path, required=True)
     args = parser.parse_args()
-    {"oracle": oracle, "prompts": prompts, "check": check}[args.mode](args)
+    {"oracle": oracle, "prompts": prompts, "served": served, "check": check}[args.mode](args)
 
 
 if __name__ == "__main__":

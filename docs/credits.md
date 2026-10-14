@@ -107,6 +107,8 @@ contributions are in it.
   [prefill.py](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/kernels/qwen/flash_next/v1/prefill.py)).
   The native hyper-connection prompt kernels in `zig/kernels/metal/prefill/fn_prompt.metal` are the #29 kernels, and
   `fn_attn.metal` reads only each row's selected blocks and tail, as the #29 attention did.
+- @gilby wrote the dense Gemma 4 31B decode (`attn_tail`, `dense_tail`, the ring cache) in
+  [#360](https://github.com/ashhart/TensorFold/pull/360), the native port's reference and source of its glue.
 - @gilby applied an n-gram table's `weight_scale` at lookup in [#148](https://github.com/ashhart/TensorFold/pull/148)
   ([embed.py](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/kernels/qwen/flash_next/v1/embed.py)),
   so oQ checkpoints of Flash Next load. The native `zig/src/families/flashnext/ple_scale.zig` applies the same rule.
@@ -169,7 +171,8 @@ credited here.
   Flash Next vision patch adapted in #146), @mgoldwasser ([#101](https://github.com/ashhart/TensorFold/pull/101)),
   @shantanugoel ([#146](https://github.com/ashhart/TensorFold/pull/146)), @BobClawblaw
   ([#473](https://github.com/ashhart/TensorFold/pull/473)).
-- Model families: @cshintov (Gemma 4 in [#10](https://github.com/ashhart/TensorFold/pull/10), Qwen3.6 MoE on Macs in
+- Model families: @cshintov (Gemma 4 in [#10](https://github.com/ashhart/TensorFold/pull/10), whose kernels the native
+  dense 31B carries, Qwen3.6 MoE on Macs in
   [#138](https://github.com/ashhart/TensorFold/pull/138)), @di37 ([#224](https://github.com/ashhart/TensorFold/pull/224)),
   @philip-pentatonic (Qwen3.6 on CUDA in [#78](https://github.com/ashhart/TensorFold/pull/78) and
   [#84](https://github.com/ashhart/TensorFold/pull/84)), @BHCC2025 ([#270](https://github.com/ashhart/TensorFold/pull/270)).
