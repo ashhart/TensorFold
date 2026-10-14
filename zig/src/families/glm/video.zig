@@ -1,9 +1,4 @@
-//! A video's frames to GLM5-Next vision patches as transformers 5.19's Glm5NextVideoProcessor makes them from the
-//! frames its PyAV loader decodes (video_utils.read_video_pyav): frames sampled at 2 a second (sample_frames), the
-//! canvas sized under the video's token budget (smart_resize over the frame pairs), each frame resized with torch's
-//! antialiased uint8 bicubic (torchvision's resize on CPU) and padded with black, normalized in float32 against
-//! mean * 255 and std * 255 (the fused rescale), and each pair of frames cut into 2x2 windows of 14x14 patches: one
-//! image a pair, grid (1, h, w), as get_video_features hands them to the tower.
+//! A video's frames to GLM5-Next vision patches as transformers 5.19's Glm5NextVideoProcessor makes them from PyAV's.
 const std = @import("std");
 const vision = @import("vision.zig");
 
@@ -92,8 +87,7 @@ fn pyRound(x: f64) f64 {
     return @round(x);
 }
 
-/// Glm5NextVideoProcessor.sample_frames on the PyAV loader's metadata, then the loader's decode: the distinct indices
-/// (a duplicate the processor appends to make the count even is the same frame, decoded once).
+/// Glm5NextVideoProcessor.sample_frames on the loader's metadata: distinct indices (its even-count pad decoded once).
 pub fn sample(a: std.mem.Allocator, s: Source, max_frames: u32) Error![]u32 {
     if (s.frames == 0 or s.rate_num == 0 or s.rate_den == 0) return error.BadVideo;
     const total = s.frames;
@@ -138,8 +132,7 @@ pub fn sample(a: std.mem.Allocator, s: Source, max_frames: u32) Error![]u32 {
     return indices[0..n];
 }
 
-/// The processor's smart_resize: the canvas, multiples of 28, whose frame pairs fit `max_tokens` (at least
-/// `min_tokens`), the aspect kept.
+/// The processor's smart_resize: a canvas in multiples of 28, aspect kept, whose frame pairs fit min..max tokens.
 pub fn canvas(frames: u64, height: u32, width: u32, min_tokens: u64, max_tokens: u64) Error![2]u32 {
     const factor: u64 = vision.patch * vision.merge;
     const per_token = vision.temporal * factor * factor;
@@ -217,9 +210,7 @@ pub fn prepare(a: std.mem.Allocator, s: Source, c: vision.Config, max_tokens: u3
     return .{ .groups = try patchify(a, p, frames, c.mean, c.std), .times = p.times };
 }
 
-/// The frames (content size) padded with black to the canvas, normalized as torchvision's fused rescale does
-/// ((x - f32(mean * 255)) / f32(std * 255) in float32), an odd last frame repeated, each pair cut into 2x2 windows
-/// of 14x14 patches [channel, frame, row, column].
+/// Frames padded black to the canvas, normalized as the fused rescale, odd last repeated, pairs cut into 2x2 windows.
 pub fn patchify(a: std.mem.Allocator, p: Plan, frames: []const u8, mean: [3]f32, sd: [3]f32) Error![]Pair {
     const P = vision.patch;
     const M = vision.merge;
@@ -272,8 +263,7 @@ fn cubic(x0: f64) f64 {
 
 const Coeffs = struct { ksize: usize, bounds: []usize, kk: []i32, precision: u5 };
 
-/// The axis's weights (PIL's precompute_coeffs bounds and filter), as int16 fixed point at the largest precision
-/// below 22 bits that keeps the largest weight in range.
+/// The axis's weights (PIL's precompute_coeffs) as int16 fixed point, the most precision under 22 bits that fits.
 fn coeffs(a: std.mem.Allocator, in_size: usize, out_size: usize) Error!Coeffs {
     const scale = @as(f64, @floatFromInt(in_size)) / @as(f64, @floatFromInt(out_size));
     const filterscale = @max(scale, 1.0);
@@ -319,8 +309,7 @@ fn clip8(v: i64, precision: u5) u8 {
     return @intCast(std.math.clamp(v >> precision, 0, 255));
 }
 
-/// `src` (w x h RGB, rows `stride` apart) resized to ow x oh into `dst`: the horizontal pass, then the vertical, each
-/// rounding to bytes; an axis whose size is kept is copied.
+/// `src` (w x h RGB, rows `stride` apart) resized to ow x oh into `dst`, horizontal then vertical, a kept axis copied.
 pub fn resizeInto(a: std.mem.Allocator, src: []const u8, w: u32, h: u32, stride: usize, ow: u32, oh: u32, dst: []u8) Error!void {
     // the horizontal pass (or the rows as they are) into a packed w' x h buffer
     const mid_w: usize = ow;
@@ -360,8 +349,7 @@ pub fn resizeInto(a: std.mem.Allocator, src: []const u8, w: u32, h: u32, stride:
 
 /// Python's f"{t:.1f} seconds": one decimal, an exact tie rounded to even.
 pub fn seconds(buf: []u8, t: f64) ![]const u8 {
-    // t * 10 exactly from the double's mantissa and exponent, rounded once, an exact tie to even (no 128-bit floats:
-    // the server links no compiler-rt)
+    // t * 10 exactly from the double's bits, rounded once, ties to even (no 128-bit floats: no compiler-rt is linked)
     const bits: u64 = @bitCast(@abs(t));
     const biased: i32 = @intCast(bits >> 52);
     const m: u64 = (bits & ((@as(u64, 1) << 52) - 1)) | (if (biased == 0) 0 else @as(u64, 1) << 52);

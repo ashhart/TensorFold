@@ -1,7 +1,4 @@
-//! Video input (--vision, an engine whose ``Info.vision`` offers ``video``): a request's video_url parts as 0.6.6's
-//! vision/videos.py bounds them (2 videos, 16 MB each and 20 MB together, an hour of footage, 8192 pixels a side; data
-//! URLs, and public HTTPS URLs under --vision-urls within 20 s a download and 120 s a request), decoded by libtfvideo
-//! (FFmpeg, loaded when the first video arrives) and prepared by the engine's family into frame groups.
+//! Video input: video_url parts bounded as 0.6.6's vision/videos.py, decoded by libtfvideo, prepared by the family.
 const std = @import("std");
 const api = @import("engine_api");
 const errors = @import("errors.zig");
@@ -104,8 +101,7 @@ test "video bytes: data URLs within the limits; URLs only with --vision-urls" {
 
 /// A frame group's time as the processor writes it: Python's f"{t:.1f} seconds" (one decimal, an exact tie to even).
 pub fn seconds(buf: []u8, t: f64) ![]const u8 {
-    // t * 10 exactly from the double's mantissa and exponent, rounded once, an exact tie to even (no 128-bit floats:
-    // the server links no compiler-rt)
+    // t * 10 exactly from the double's bits, rounded once, ties to even (no 128-bit floats: no compiler-rt is linked)
     const bits: u64 = @bitCast(@abs(t));
     const biased: i32 = @intCast(bits >> 52);
     const m: u64 = (bits & ((@as(u64, 1) << 52) - 1)) | (if (biased == 0) 0 else @as(u64, 1) << 52);

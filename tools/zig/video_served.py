@@ -1,15 +1,4 @@
-"""Video input served end to end on a running ``tensorfold-native --vision`` (#565's video checks).
-
-    python -I tools/zig/video_served.py --url http://127.0.0.1:8000 --model DIR --clips DIR
-
-CLIPS holds tools/zig/glm_video_fixtures.py's clip set (--make). Checks: a video request's prompt ids (/tokenize,
-media expanded as the chat route expands them) equal transformers' Glm5NextProcessor's input_ids for the same
-messages, on every clip, with the server's --vision-video-tokens as the processor's max_image_tokens; a video request
-answers, drafted equals "draft": false and concurrent equals alone; a video and an image in one request; a video
-conversation's later turn resumes past its video, and another video under the same text resumes only the text
-before it; and the refusals (three videos, a video outside a user message, a clip too short to sample, bytes that
-aren't a video, a URL without --vision-urls, a scheme other than data or https).
-"""
+"""Video input served end to end on a running ``tensorfold-native --vision`` (#565's video checks)."""
 
 from __future__ import annotations
 
@@ -85,8 +74,7 @@ def main() -> int:
     def reply(r: dict) -> str:
         return r["choices"][0]["message"].get("content") or ""
 
-    # the prompt ids, clip by clip, against the processor's (thinking on: the checkpoint's template has no switch; with
-    # thinking off the server appends </think> itself)
+    # the prompt ids per clip against the processor's (thinking on: no template switch; off, the server adds </think>)
     q = "What moves?"
     same = 0
     clip_files = sorted(p for p in clips.iterdir() if p.suffix in MIME and p.name != "short.mp4")
@@ -105,9 +93,7 @@ def main() -> int:
     check("a video request's prompt ids equal the processor's", same == len(clip_files), f"{same} of {len(clip_files)} clips")
 
     a, b = clips / "h264.mp4", clips / "hevc.mp4"
-    # the cache, before any concurrent run (GLM keeps a state resident in the slot that made it; a slot another stream
-    # takes leaves it stale): a third turn resumes past the video its second turn kept; another video under the same
-    # text, only the text before it
+    # the cache, before any concurrent run (a slot another stream takes leaves GLM's resident state stale)
     system = {"role": "system", "content": " ".join(f"Rule {i}: describe what you see plainly and briefly." for i in range(120))}
     head = ask([system, user(text("What is shown?"))], tokens=1)[1]["usage"]["prompt_tokens"]
     long = " ".join(f"Detail {i}: the clip shows shapes, colours and motion." for i in range(40))

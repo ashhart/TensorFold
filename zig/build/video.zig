@@ -1,6 +1,4 @@
-//! libtfvideo: video input's optional runtime library (zig/src/video/tf_video.c over FFmpeg). `zig build video
-//! -Dffmpeg=PREFIX` builds it into zig-out/native/lib from the static FFmpeg tools/zig/build_ffmpeg.sh installs at
-//! PREFIX (the release PyAV 19.0.1 ships); the server loads it when the first video arrives and serves without it.
+//! libtfvideo: video input's optional runtime library (tf_video.c over the static FFmpeg build_ffmpeg.sh installs).
 
 const std = @import("std");
 

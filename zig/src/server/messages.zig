@@ -37,8 +37,7 @@ pub const Media = struct {
     }
 };
 
-/// One video part as the template and the video path read it: {"type": "video_url", "video_url": {"url"}}
-/// (videos.py video_source: an object with a url string).
+/// One video part as the template and video path read it: {"type": "video_url", "video_url": {"url": string}}.
 fn videoPart(cx: *Cx, part: Value) errors.Refused!Value {
     const vu = part.get("video_url") orelse return cx.refuse("video_url must contain a non-empty url string");
     const u = if (vu == .object) vu.get("url") else null;
@@ -76,9 +75,7 @@ fn imagePart(cx: *Cx, part: Value) errors.Refused!Value {
     return .{ .object = out };
 }
 
-/// `normalize`, and with `media.images` (an engine that reads them) a user or tool message's image_url parts kept
-/// beside its text parts, in order, for the template's image markers, and with `media.videos` a user message's
-/// video_url parts the same way; a message without media parts is joined text as before.
+/// `normalize`, keeping image_url (user/tool, `media.images`) and video_url (user, `media.videos`) parts in order.
 pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_after_tool: bool, media: Media) errors.Refused!Value {
     const images = media.images;
     const list = messages orelse return cx.refuse("messages must be a non-empty list");
@@ -99,7 +96,7 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
             for (content.?.array) |part| {
                 const kind = if (part == .object and part.get("type") != null and part.get("type").? == .string) part.get("type").?.string else "";
                 if (images and std.mem.eql(u8, kind, "image_url")) {
-                    // a tool's result carries images as agents send screenshots; the template renders them in its response
+                    // tool results carry screenshots too; the template renders them in its response
                     if (!std.mem.eql(u8, role.?.string, "user") and !std.mem.eql(u8, role.?.string, "tool")) return cx.refuse("image parts are accepted in user and tool messages only");
                     try parts.append(cx.a, try imagePart(cx, part));
                     has_image = true;

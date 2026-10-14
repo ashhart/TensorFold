@@ -164,8 +164,7 @@ fn prepareImage(ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u3
     return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
 }
 
-/// Info.vision's video offer: a decoded video's frames to the tower's frame groups (families/glm/video.zig), on the
-/// HTTP thread.
+/// Info.vision's video offer: a decoded video's frames to the tower's frame groups (glm/video.zig), on the HTTP thread.
 fn prepareVideo(ctx: *anyopaque, a: Allocator, src: api.VideoSource, max_tokens: u32, max_frames: u32) anyerror!api.PreparedVideo {
     const h: *Host = @ptrCast(@alignCast(ctx));
     const Adapter = struct {

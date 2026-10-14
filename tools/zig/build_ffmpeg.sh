@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-# FFmpeg for libtfvideo (`zig build video -Dffmpeg=PREFIX`): the release PyAV 19.0.1 ships (9.0.2), static and position
-# independent, with only what a video request needs. The decoders are the ones PyAV's build picks for these streams
-# (FFmpeg's own H.264, HEVC, VP8, VP9 and MPEG-4 Part 2), the MP4/QuickTime and Matroska/WebM demuxers, and swscale,
-# so the frames equal transformers' PyAV loader's.
-#   tools/zig/build_ffmpeg.sh PREFIX [SOURCE_DIR]
+# FFmpeg 9.0.2 (PyAV 19.0.1's) for libtfvideo, static PIC, PyAV's decoders only: build_ffmpeg.sh PREFIX [SOURCE_DIR]
 set -euo pipefail
 version=9.0.2
 sha256=8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
