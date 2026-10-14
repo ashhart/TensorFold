@@ -18,11 +18,19 @@ const threads = 1024;
 const vec_threads = 256;
 const vec_most = 4;
 
-/// The 16-byte forms take the row: width a multiple of 8 within VEC_MOST * 8 * VNT, every address 16-byte aligned.
-fn vectorOk(width: usize, ptrs: []const u64) bool {
-    if (width % 8 != 0 or width > vec_most * 8 * vec_threads) return false;
+/// The 16-byte forms take a bf16 row by its width alone: a multiple of 8 within VEC_MOST * 8 * VNT.
+fn vectorWidth(width: usize) bool {
+    return width % 8 == 0 and width <= vec_most * 8 * vec_threads;
+}
+
+/// Every address 16-byte aligned, as the 16-byte forms load.
+fn aligned(ptrs: []const u64) bool {
     for (ptrs) |p| if (p % 16 != 0) return false;
     return true;
+}
+
+fn vectorOk(width: usize, ptrs: []const u64) bool {
+    return vectorWidth(width) and aligned(ptrs);
 }
 
 pub const Norms = struct {
@@ -58,7 +66,8 @@ pub const Norms = struct {
     /// `rows` rows of `width`: y = x * rsqrt(mean(x^2) + eps) * w (w null: no weight), fp32 weights.
     pub fn rms(n: *const Norms, s: Stream, x: u64, x_kind: Kind, w: ?u64, y: u64, y_kind: Kind, rows: usize, width: usize, eps: f32) !void {
         if (rows == 0) return;
-        if (x_kind == .bf16 and y_kind == .bf16 and vectorOk(width, &.{ x, y, w orelse 0 })) {
+        if (x_kind == .bf16 and y_kind == .bf16 and vectorWidth(width)) {
+            if (!aligned(&.{ x, y, w orelse 0 })) return error.Misaligned; // the other tree would round otherwise
             var a: launch_.Args = .{};
             a.add(x);
             a.add(w orelse 0);
@@ -81,7 +90,8 @@ pub const Norms = struct {
     /// The residual step: res (fp32, in place) += rms(x) * w1 (w1 null: res += x), then y = rms(res) * w2.
     pub fn addRms(n: *const Norms, s: Stream, x: u64, x_kind: Kind, res: u64, w1: ?u64, w2: u64, y: u64, y_kind: Kind, rows: usize, width: usize, eps: f32) !void {
         if (rows == 0) return;
-        if (x_kind == .bf16 and y_kind == .bf16 and vectorOk(width, &.{ x, y, res, w1 orelse 0, w2 })) {
+        if (x_kind == .bf16 and y_kind == .bf16 and vectorWidth(width)) {
+            if (!aligned(&.{ x, y, res, w1 orelse 0, w2 })) return error.Misaligned;
             var a: launch_.Args = .{};
             a.add(x);
             a.add(res);

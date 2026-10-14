@@ -10,14 +10,14 @@ pub fn swiglu(gate: f64, up: f64) f64 {
     return gate * sigmoid(gate) * up;
 }
 
-/// A 4-bit affine table's value: q * scale + bias.
-pub fn affine4(q: u4, scale: f64, bias: f64) f64 {
-    return @as(f64, @floatFromInt(q)) * scale + bias;
-}
-
 /// DFlash2's dynamic conv at one value: x k0 + prev k1 with the taps as rounded (k_t = bf16(base_t + dyn_t)).
 pub fn dconv(x: f64, prev: f64, k0: f64, k1: f64) f64 {
     return x * k0 + prev * k1;
+}
+
+/// A 4-bit affine table's value: q * scale + bias.
+pub fn affine4(q: u4, scale: f64, bias: f64) f64 {
+    return @as(f64, @floatFromInt(q)) * scale + bias;
 }
 
 /// A bf16 output of fp32 arithmetic through expf: half a bf16 ulp plus 2^-18 of |want|.

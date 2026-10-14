@@ -30,6 +30,7 @@ struct Io {
     float* beta;                // [rows, vh]
 };
 
+// Exactly rounded division on purpose: the same bits on every GPU, where div.full and ex2.approx are not.
 __device__ __forceinline__ float sigmoid(float x) { return __fdiv_rn(1.f, __fadd_rn(1.f, expf(-x))); }
 
 template <int J>
@@ -44,16 +45,22 @@ __device__ __forceinline__ void prep(const Io& io, int c, int kh, int vh, int ke
     int src[MAXT];
 #pragma unroll
     for (int t = 0; t < MAXT; ++t) src[t] = t <= keep ? io.win[r * (keep + 1) + t] : 0;
+    __nv_bfloat16 xv[MAXT][J], kv[MAXT][J];
+#pragma unroll
+    for (int t = 0; t < MAXT; ++t) { // every tap's loads issued before any is used
+        if (t > keep) break;
+        const __nv_bfloat16* x = src[t] < keep ? io.state + (srow + src[t]) * c : io.qkv + (src[t] - keep) * io.qkv_ld;
+#pragma unroll
+        for (int i = 0; i < J; ++i) xv[t][i] = x[ch + i], kv[t][i] = io.conv[(ch + i) * (keep + 1) + t];
+    }
     float acc[J];
 #pragma unroll
     for (int i = 0; i < J; ++i) acc[i] = 0.f;
 #pragma unroll
     for (int t = 0; t < MAXT; ++t) {
         if (t > keep) break;
-        const __nv_bfloat16* x = src[t] < keep ? io.state + (srow + src[t]) * c : io.qkv + (src[t] - keep) * io.qkv_ld;
 #pragma unroll
-        for (int i = 0; i < J; ++i)
-            acc[i] = __fmaf_rn(__bfloat162float(x[ch + i]), __bfloat162float(io.conv[(ch + i) * (keep + 1) + t]), acc[i]);
+        for (int i = 0; i < J; ++i) acc[i] = __fmaf_rn(__bfloat162float(xv[t][i]), __bfloat162float(kv[t][i]), acc[i]);
     }
     float cv[J];
 #pragma unroll
@@ -63,9 +70,9 @@ __device__ __forceinline__ void prep(const Io& io, int c, int kh, int vh, int ke
 #pragma unroll
         for (int i = 0; i < J; ++i) part = __fmaf_rn(cv[i], cv[i], part);
         for (int m = 16; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
-        const float inv = rsqrtf(__fadd_rn(__fdiv_rn(part, static_cast<float>(DK)), eps));
+        const float inv = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(part, static_cast<float>(DK)), eps)));
         const bool is_q = hd < kh;
-        const float scale = is_q ? 1.f / DK : rsqrtf(static_cast<float>(DK));
+        const float scale = is_q ? 1.f / DK : __fdiv_rn(1.f, __fsqrt_rn(static_cast<float>(DK)));
         __nv_bfloat16* out = (is_q ? io.q : io.k) + (r * kh + (is_q ? hd : hd - kh)) * DK + J * lane;
 #pragma unroll
         for (int i = 0; i < J; ++i) out[i] = __float2bfloat16_rn(__fmul_rn(__fmul_rn(cv[i], inv), scale));

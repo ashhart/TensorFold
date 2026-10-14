@@ -96,7 +96,7 @@ extern "C" __global__ void __launch_bounds__(MOST) tf_qk_rows(const QkSrc in, co
         __syncthreads();
         float s = 0.f;
         for (int w = 0; w < dim / 32; ++w) s = __fadd_rn(s, warps[w]);
-        const float rstd = rsqrtf(__fadd_rn(__fdiv_rn(s, static_cast<float>(dim)), eps));
+        const float rstd = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(dim)), eps)));
         y = __fmul_rn(__fmul_rn(x, rstd), wv(nw, hd >= h, d));
         if (d < rot) yp = __fmul_rn(__fmul_rn(__bfloat162float(src[partner]), rstd), wv(nw, hd >= h, partner));
     } else if (d < rot) {
@@ -166,7 +166,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_qk_rows_w(const QkSrc in, c
         float s = 0.f;
 #pragma unroll
         for (int j = 0; j < J; ++j) s = __fadd_rn(s, part[j]);
-        const float rstd = rsqrtf(__fadd_rn(__fdiv_rn(s, static_cast<float>(D)), eps));
+        const float rstd = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(D)), eps)));
 #pragma unroll
         for (int j = 0; j < J; ++j) {
             y[j] = __fmul_rn(__fmul_rn(x[j], rstd), w[j]);
