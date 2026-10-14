@@ -49,9 +49,16 @@ fn prepare(s: *state.Scratch, segments: []const Segment, ids: []const u32, chunk
     }
 }
 
-fn project(m: *Model, e: mtl.ComputeEncoder, l: weights.Linear, x: mtl.Buffer, y: mtl.Buffer, rows: usize) !void {
+/// A projection on its input's group sums in s.sums, which the input's own kernel wrote (no sums dispatch).
+fn project(m: *Model, s: *state.Scratch, e: mtl.ComputeEncoder, l: weights.Linear, x: mtl.Buffer, y: mtl.Buffer, rows: usize) !void {
     const p = try m.projections.get(m.gpa, m.device, l.n, l.k);
-    try p.encode(e, .{ .buf = x }, .{ .buf = l.w }, .{ .buf = l.sb }, .{ .buf = y }, @intCast(rows));
+    try p.encodeSums(e, .{ .buf = x }, .{ .buf = l.w }, .{ .buf = l.sb }, .{ .ref = .{ .buf = s.sums }, .stride = @intCast(rows) }, .{ .buf = y }, @intCast(rows));
+}
+
+/// The sums a producing kernel writes: s.sums with the window's rows as stride.
+fn sumsOut(e: mtl.ComputeEncoder, s: *state.Scratch, rows: usize, index: usize) void {
+    e.setBuffer(s.sums, 0, index);
+    e.setValue(@as(i32, @intCast(rows)), index + 1);
 }
 
 fn bind(e: mtl.ComputeEncoder, bufs: []const mtl.Buffer, first: usize) void {
@@ -95,13 +102,14 @@ pub fn run(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []const
     bindRef(e, w.layers[0].input_norm, 1);
     bind(e, &.{s.normed[0]}, 2);
     e.setValue(cfg.eps, 3);
+    sumsOut(e, s, rows, 4);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
     var cur: usize = 0;
     for (0..cfg.layers) |i| {
         try layer(m, e, s, segments, &chunks, i, cur, rows);
         cur = 1 - cur;
     }
-    try project(m, e, w.head, s.normed[cur], s.logits, rows);
+    try project(m, s, e, w.head, s.normed[cur], s.logits, rows);
     e.setPipeline(ks.softcap);
     bind(e, &.{s.logits}, 0);
     e.setValue(cfg.softcap, 1);
@@ -137,7 +145,7 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const 
     const dh = cfg.headDim(i);
     const kind: usize = @intFromBool(global);
     const width = l.qkv.n;
-    try project(m, e, l.qkv, s.normed[cur], s.qkv, rows);
+    try project(m, s, e, l.qkv, s.normed[cur], s.qkv, rows);
     var at: usize = 0;
     for (segments) |seg| {
         const n = seg.rows;
@@ -154,14 +162,9 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const 
         e.setBuffer(s.q, q_off, 6);
         e.setBuffer(s.k, kv_off, 7);
         e.setBuffer(s.v, kv_off, 8);
+        bind(e, &.{ c.k[i], c.v[i] }, 9); // keys and values straight into the cache at each row's slot
+        e.setValue([3]i32{ if (global) 0 else state.ring, @intCast(state.slotsOf(i, c.capacity)), 0 }, 11);
         e.dispatchGroups(.{ .width = cfg.query_heads + 2 * nk, .height = n }, .{ .width = 32 });
-        e.setPipeline(kd.kv_write);
-        e.setBuffer(s.k, kv_off, 0);
-        e.setBuffer(s.v, kv_off, 1);
-        bind(e, &.{ c.k[i], c.v[i] }, 2);
-        e.setBuffer(s.pos, at * 4, 4);
-        e.setValue([3]i32{ @intCast(n), if (global) 0 else state.ring, @intCast(state.slotsOf(i, c.capacity)) }, 5);
-        e.dispatchThreads(.{ .width = dh, .height = n, .depth = nk }, .{ .width = @min(dh, 256) });
         var sub: usize = 0;
         while (sub < n) : (sub += attend_rows) {
             const r = at + sub;
@@ -178,6 +181,8 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const 
                 bind(e, &.{ s.pm, s.pl, s.po }, 0);
                 e.setBuffer(s.meta[kind], r * state.meta_ints * 4, 3);
                 e.setBuffer(s.attn, r * cfg.query_heads * dh * 2, 4);
+                e.setBuffer(s.sums, r * 4, 5); // this sub-batch's rows of the o projection's sums
+                e.setValue(@as(i32, @intCast(rows)), 6);
                 e.dispatchGroups(.{ .width = 1, .height = cfg.query_heads, .depth = rn }, .{ .width = 32 });
                 continue;
             }
@@ -194,24 +199,28 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const 
             bind(e, &.{ s.pm, s.pl, s.po }, 0);
             e.setBuffer(s.meta[kind], r * state.meta_ints * 4, 3);
             e.setBuffer(s.attn, r * cfg.query_heads * dh * 2, 4);
+            e.setBuffer(s.sums, r * 4, 5);
+            e.setValue(@as(i32, @intCast(rows)), 6);
             e.dispatchGroups(.{ .width = 1, .height = cfg.query_heads, .depth = rn }, .{ .width = 32 });
         }
         at += n;
     }
-    try project(m, e, l.o, s.attn, s.o, rows);
+    try project(m, s, e, l.o, s.attn, s.o, rows);
     e.setPipeline(kd.attn_tail);
     bind(e, &.{ s.h[cur], s.o }, 0);
     bindRef(e, l.post_attention, 2);
     bindRef(e, l.pre_feedforward, 3);
     e.setValue(cfg.eps, 4);
     bind(e, &.{ s.hn, s.n_mlp }, 5);
+    sumsOut(e, s, rows, 7);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
-    try project(m, e, l.gate_up, s.n_mlp, s.gate_up, rows);
+    try project(m, s, e, l.gate_up, s.n_mlp, s.gate_up, rows);
     e.setPipeline(kd.geglu);
     bind(e, &.{ s.gate_up, s.act }, 0);
     e.setValue(@as(u32, cfg.intermediate), 2);
-    e.dispatchThreads(.{ .width = cfg.intermediate, .height = rows }, .{ .width = 256 });
-    try project(m, e, l.down, s.act, s.y, rows);
+    sumsOut(e, s, rows, 3);
+    e.dispatchGroups(.{ .width = cfg.intermediate / 64, .height = rows }, .{ .width = 64 });
+    try project(m, s, e, l.down, s.act, s.y, rows);
     e.setPipeline(kd.dense_tail);
     bind(e, &.{ s.hn, s.y }, 0);
     bindRef(e, l.post_feedforward, 2);
@@ -219,5 +228,6 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const 
     bindRef(e, if (i + 1 < cfg.layers) m.weights.layers[i + 1].input_norm else m.weights.final_norm, 4);
     e.setValue(cfg.eps, 5);
     bind(e, &.{ s.h[1 - cur], s.normed[1 - cur] }, 6);
+    sumsOut(e, s, rows, 8);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
 }

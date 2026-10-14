@@ -4,6 +4,16 @@ using namespace metal;
 
 // Each pipeline's constants: D, T, DH, NQ, NK, VK, W, HK, G, CK, S, BLK, SCALE, GELU_C0, GELU_C1 (kernels.zig).
 
+// A row's group sums for the reg lane kernel in tf_lane_sums' order: XS[g * stride + r], none when stride is 0.
+inline void gemma_row_sums(const device bfloat* row, int len, device float* XS, int stride, int r, uint t, uint nt) {
+  if (stride == 0) return;
+  for (int g = int(t); g < len / 64; g += int(nt)) {
+    float acc = 0.0f;
+    for (int i = 0; i < 64; i++) acc += float(row[g * 64 + i]);
+    XS[g * stride + r] = acc;
+  }
+}
+
 // Embedding rows of the 4-bit table times the bf16 embedding scale: MLX's dequantize, then a bf16 multiply.
 kernel void gemma_embed(const device uint* ids [[buffer(0)]], const device uchar* weight [[buffer(1)]],
                         const device bfloat* scales [[buffer(2)]], const device bfloat* biases [[buffer(3)]],
@@ -21,6 +31,7 @@ kernel void gemma_embed(const device uint* ids [[buffer(0)]], const device uchar
 // MLX's rms_looped (rows past 4096): 1024 threads, 4 reads a thread a pass, out = bf16(w * bf16(x * inv)).
 kernel void gemma_rms_looped(const device bfloat* x [[buffer(0)]], const device bfloat* w [[buffer(1)]],
                              device bfloat* out [[buffer(2)]], constant float& eps [[buffer(3)]],
+                             device float* XS [[buffer(4)]], constant int& xst [[buffer(5)]],
                              uint gid [[threadgroup_position_in_grid]], uint lid [[thread_position_in_threadgroup]],
                              uint lsize [[threads_per_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                              uint sg [[simdgroup_index_in_threadgroup]]) {
@@ -51,19 +62,28 @@ kernel void gemma_rms_looped(const device bfloat* x [[buffer(0)]], const device 
   for (uint r = 0; r < D; r += lsize * 4)
     for (int i = 0; i < 4; i++)
       if (r + lid * 4 + i < D) o[r + i] = bfloat(float(wr[i + r]) * float(bfloat(float(xr[r + i]) * inv[0])));
+  threadgroup_barrier(mem_flags::mem_device);
+  gemma_row_sums(out + gid * size_t(D), D, XS, xst, int(gid), lid, lsize);
 }
 
 // gilby's _EMIT: a head's raw values normed (q, k weighted; v unweighted), q and k roped at the row's position.
 inline void gemma_emit(int kind, int head, int r, int R, uint lane, thread float* xv, const device bfloat* QW,
                        const device bfloat* KW, const device float* INVF, const device int* POS, float eps,
-                       device bfloat* Q, device bfloat* K, device bfloat* V) {
+                       device bfloat* Q, device bfloat* K, device bfloat* V, device bfloat* KC, device bfloat* VC,
+                       int3 cm) {
+  // cm: the cache's ring (0: linear) and slots; with slots, keys and values also land at the row's cache slot
+  const size_t at = cm.y ? (size_t(head) * cm.y + (cm.x ? POS[r] % cm.x : POS[r])) * DH : 0;
   constexpr int PER = DH / 32;
   float ss = 0.0f;
   for (int i = 0; i < PER; i++) ss = fma(xv[i], xv[i], ss);
   ss = simd_sum(ss);
   const float inv = metal::precise::rsqrt(ss / float(DH) + eps);
   if (kind == 2) {
-    for (int i = 0; i < PER; i++) V[(head * R + r) * DH + int(lane) + 32 * i] = bfloat(xv[i] * inv);
+    for (int i = 0; i < PER; i++) {
+      const bfloat v = bfloat(xv[i] * inv);
+      V[(head * R + r) * DH + int(lane) + 32 * i] = v;
+      if (cm.y) VC[at + int(lane) + 32 * i] = v;
+    }
     return;
   }
   const device bfloat* w = kind == 0 ? QW : KW;
@@ -80,7 +100,10 @@ inline void gemma_emit(int kind, int head, int r, int R, uint lane, thread float
   if (kind == 0)
     for (int i = 0; i < PER; i++) Q[(r * NQ + head) * DH + int(lane) + 32 * i] = bfloat(y[i]);
   else
-    for (int i = 0; i < PER; i++) K[(head * R + r) * DH + int(lane) + 32 * i] = bfloat(y[i]);
+    for (int i = 0; i < PER; i++) {
+      K[(head * R + r) * DH + int(lane) + 32 * i] = bfloat(y[i]);
+      if (cm.y) KC[at + int(lane) + 32 * i] = bfloat(y[i]);
+    }
 }
 
 // gilby's qkv_prep: a simdgroup per (head slot, row) of the stacked q|k|v rows; VK: v is k's raw values.
@@ -88,6 +111,7 @@ kernel void gemma_qkv_prep(const device bfloat* QKV [[buffer(0)]], const device 
                            const device bfloat* KW [[buffer(2)]], const device float* INVF [[buffer(3)]],
                            const device int* POS [[buffer(4)]], constant float& eps [[buffer(5)]],
                            device bfloat* Q [[buffer(6)]], device bfloat* K [[buffer(7)]], device bfloat* V [[buffer(8)]],
+                           device bfloat* KC [[buffer(9)]], device bfloat* VC [[buffer(10)]], constant int3& cm [[buffer(11)]],
                            uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]],
                            uint3 tgs [[threadgroups_per_grid]]) {
   const int slot = int(tg.x), r = int(tg.y), R = int(tgs.y);
@@ -97,7 +121,7 @@ kernel void gemma_qkv_prep(const device bfloat* QKV [[buffer(0)]], const device 
   const int src = kind == 2 ? (VK ? NQ * DH : (NQ + NK) * DH) + head * DH : slot * DH;
   float xv[PER];
   for (int i = 0; i < PER; i++) xv[i] = float(QKV[r * W + src + int(lane) + 32 * i]);
-  gemma_emit(kind, head, r, R, lane, xv, QW, KW, INVF, POS, eps, Q, K, V);
+  gemma_emit(kind, head, r, R, lane, xv, QW, KW, INVF, POS, eps, Q, K, V, KC, VC, cm);
 }
 
 // gilby's attend partials, sums fixed by key position; META: first chunk, chunks, ring, rows, first new key.
@@ -186,7 +210,8 @@ kernel void gemma_attention_partial(const device bfloat* Q [[buffer(0)]], const 
 // gilby's attend, merge: a simdgroup per (query head, row) adds the chunks' partials in chunk order.
 kernel void gemma_attention_merge(const device float* PM [[buffer(0)]], const device float* PL [[buffer(1)]],
                                   const device float* PO [[buffer(2)]], const device int* META [[buffer(3)]],
-                                  device bfloat* OUT [[buffer(4)]], uint lane [[thread_index_in_simdgroup]],
+                                  device bfloat* OUT [[buffer(4)]], device float* XS [[buffer(5)]],
+                                  constant int& xst [[buffer(6)]], uint lane [[thread_index_in_simdgroup]],
                                   uint3 tg [[threadgroup_position_in_grid]]) {
   const int qh = int(tg.y), r = int(tg.z);
   const int NCH = META[1], R = META[3];
@@ -202,6 +227,9 @@ kernel void gemma_attention_merge(const device float* PM [[buffer(0)]], const de
     for (int i = 0; i < DPL; i++) acc[i] = fma(PO[(base + c) * DH + lane * DPL + i], e, acc[i]);
   }
   for (int i = 0; i < DPL; i++) OUT[(size_t(r) * NQ + qh) * DH + lane * DPL + i] = bfloat(acc[i] / lsum);
+  if (xst == 0) return;
+  simdgroup_barrier(mem_flags::mem_device);
+  gemma_row_sums(OUT + (size_t(r) * NQ + qh) * DH, DH, XS + qh * (DH / 64) * xst, xst, r, lane, 32);
 }
 
 // Sum of squares over T threads into `out` (p: a threadgroup array of T / 32 floats).
@@ -218,6 +246,7 @@ inline float gemma_reduce(float acc, threadgroup float* p, uint lane, uint sg) {
 kernel void gemma_attn_tail(const device bfloat* H [[buffer(0)]], const device bfloat* O [[buffer(1)]],
                             const device bfloat* WA [[buffer(2)]], const device bfloat* W1 [[buffer(3)]],
                             constant float& eps [[buffer(4)]], device bfloat* HN [[buffer(5)]], device bfloat* N1 [[buffer(6)]],
+                            device float* XS [[buffer(7)]], constant int& xst [[buffer(8)]],
                             uint t [[thread_position_in_threadgroup]], uint r [[threadgroup_position_in_grid]],
                             uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
   constexpr int PER = D / T;
@@ -246,6 +275,8 @@ kernel void gemma_attn_tail(const device bfloat* H [[buffer(0)]], const device b
     const int c = int(t) + i * T;
     N1[int(r) * D + c] = bfloat(w1[i] * float(bfloat(hv[i] * inv2)));
   }
+  threadgroup_barrier(mem_flags::mem_device);
+  gemma_row_sums(N1 + int(r) * D, D, XS, xst, int(r), t, T);
 }
 
 // gilby's dense_tail: hn = (h + RMSNorm(y) w_post) * scalar, and RMSNorm(hn) w_next for the next layer.
@@ -253,6 +284,7 @@ kernel void gemma_dense_tail(const device bfloat* H [[buffer(0)]], const device 
                              const device bfloat* WP [[buffer(2)]], const device bfloat* SC [[buffer(3)]],
                              const device bfloat* WN [[buffer(4)]], constant float& eps [[buffer(5)]],
                              device bfloat* HN [[buffer(6)]], device bfloat* NEXT [[buffer(7)]],
+                             device float* XS [[buffer(8)]], constant int& xst [[buffer(9)]],
                              uint t [[thread_position_in_threadgroup]], uint r [[threadgroup_position_in_grid]],
                              uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
   constexpr int PER = D / T;
@@ -283,19 +315,31 @@ kernel void gemma_dense_tail(const device bfloat* H [[buffer(0)]], const device 
     const int c = int(t) + i * T;
     NEXT[int(r) * D + c] = bfloat(wn[i] * float(bfloat(hv[i] * inv2)));
   }
+  threadgroup_barrier(mem_flags::mem_device);
+  gemma_row_sums(NEXT + int(r) * D, D, XS, xst, int(r), t, T);
 }
 
-// mlx_lm's geglu: gelu_approx(gate) * up as MLX's bf16 ops, each rounded, constants bf16 as MLX weak-types them.
+// mlx_lm's geglu as MLX's bf16 ops, constants weak-typed: 64 threads a group, its sum added in order by thread 0.
 kernel void gemma_geglu(const device bfloat* GU [[buffer(0)]], device bfloat* ACT [[buffer(1)]],
-                        constant uint& n [[buffer(2)]], uint2 pos [[thread_position_in_grid]]) {
-  const uint c = pos.x, r = pos.y;
+                        constant uint& n [[buffer(2)]], device float* XS [[buffer(3)]], constant int& xst [[buffer(4)]],
+                        uint2 tg [[threadgroup_position_in_grid]], uint2 tp [[thread_position_in_threadgroup]]) {
+  const uint g = tg.x, r = tg.y, i = tp.x, c = g * 64 + i;
   const bfloat x = GU[size_t(r) * 2 * n + c], up = GU[size_t(r) * 2 * n + n + c];
   const bfloat cube = bfloat(metal::pow(float(x), 3.0f));
   const bfloat inner = bfloat(float(x) + float(bfloat(float(bfloat(GELU_C1)) * float(cube))));
   const bfloat th = bfloat(metal::precise::tanh(float(bfloat(float(bfloat(GELU_C0)) * float(inner)))));
   const bfloat half_x = bfloat(0.5f * float(x));
-  const bfloat g = bfloat(float(half_x) * float(bfloat(1.0f + float(th))));
-  ACT[size_t(r) * n + c] = bfloat(float(g) * float(up));
+  const bfloat gl = bfloat(float(half_x) * float(bfloat(1.0f + float(th))));
+  const bfloat out = bfloat(float(gl) * float(up));
+  ACT[size_t(r) * n + c] = out;
+  if (xst == 0) return;
+  threadgroup float vals[64];
+  vals[i] = float(out);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (i != 0) return;
+  float sum = 0.0f;
+  for (int j = 0; j < 64; j++) sum += vals[j];
+  XS[g * xst + r] = sum;
 }
 
 // mlx_lm's logit_softcap: tanh(x / cap) * cap as bf16 ops.

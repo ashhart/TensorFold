@@ -85,6 +85,8 @@ pub const Scratch = struct {
     pl: mtl.Buffer,
     po: mtl.Buffer,
     logits: mtl.Buffer,
+    /// The next projection's group sums, written by the kernel that made its input (reg lane kernel order).
+    sums: mtl.Buffer,
     /// Attention partial slots: heads x rows x chunks (256 keys a chunk on global layers; sliding ones in the window).
     slots: usize,
 
@@ -95,7 +97,7 @@ pub const Scratch = struct {
         const slots = cfg.query_heads * max_rows * @max(capacity / 256 + 2, (cfg.window + max_rows) / 128 + 2);
         var s: Scratch = undefined;
         s.slots = slots;
-        inline for (.{ .{ "ids", r * 4, true }, .{ "pos", r * 4, true }, .{ "qkv", r * (qd + 2 * 16 * 256) * 2, false }, .{ "q", r * qd * 2, false }, .{ "k", r * 16 * 256 * 2, false }, .{ "v", r * 16 * 256 * 2, false }, .{ "attn", r * qd * 2, false }, .{ "o", r * d * 2, false }, .{ "hn", r * d * 2, false }, .{ "n_mlp", r * d * 2, false }, .{ "gate_up", r * 2 * cfg.intermediate * 2, false }, .{ "act", r * cfg.intermediate * 2, false }, .{ "y", r * d * 2, false }, .{ "pm", slots * 4, false }, .{ "pl", slots * 4, false }, .{ "po", slots * cfg.global_dim * 4, false }, .{ "logits", r * cfg.vocab * 2, true } }) |f|
+        inline for (.{ .{ "ids", r * 4, true }, .{ "pos", r * 4, true }, .{ "qkv", r * (qd + 2 * 16 * 256) * 2, false }, .{ "q", r * qd * 2, false }, .{ "k", r * 16 * 256 * 2, false }, .{ "v", r * 16 * 256 * 2, false }, .{ "attn", r * qd * 2, false }, .{ "o", r * d * 2, false }, .{ "hn", r * d * 2, false }, .{ "n_mlp", r * d * 2, false }, .{ "gate_up", r * 2 * cfg.intermediate * 2, false }, .{ "act", r * cfg.intermediate * 2, false }, .{ "y", r * d * 2, false }, .{ "pm", slots * 4, false }, .{ "pl", slots * 4, false }, .{ "po", slots * cfg.global_dim * 4, false }, .{ "logits", r * cfg.vocab * 2, true }, .{ "sums", r * (cfg.intermediate / 64) * 4, false } }) |f|
             @field(s, f[0]) = try device.buffer(f[1], if (f[2]) shared else opts);
         for (&s.lo) |*b| b.* = try device.buffer(r * 4, shared);
         for (&s.meta) |*b| b.* = try device.buffer(r * meta_ints * 4, shared);
@@ -105,7 +107,7 @@ pub const Scratch = struct {
     }
 
     pub fn deinit(s: *Scratch) void {
-        inline for (.{ "ids", "pos", "qkv", "q", "k", "v", "attn", "o", "hn", "n_mlp", "gate_up", "act", "y", "pm", "pl", "po", "logits" }) |f| @field(s, f).deinit();
+        inline for (.{ "ids", "pos", "qkv", "q", "k", "v", "attn", "o", "hn", "n_mlp", "gate_up", "act", "y", "pm", "pl", "po", "logits", "sums" }) |f| @field(s, f).deinit();
         for (s.lo ++ s.meta) |b| b.deinit();
         for (s.h) |b| b.deinit();
         for (s.normed) |b| b.deinit();

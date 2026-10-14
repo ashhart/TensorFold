@@ -62,6 +62,77 @@ fn affineAll(m: *g4.Model, pipes: tf.affine_mm.Pipes, rows: u32, x: mtl.Buffer, 
     return gpuMs(cb);
 }
 
+/// Each glue kernel at one row, 60 back to back in one command buffer: GPU microseconds a call.
+fn glueCosts(m: *g4.Model) !void {
+    var s = try g4.state.Scratch.init(m.device, 4096);
+    defer s.deinit();
+    var c = try g4.state.Cache.init(m.device, 4096);
+    defer c.deinit();
+    const l = &m.weights.layers[0];
+    const kinds = [_][]const u8{ "attn_tail", "dense_tail", "geglu", "qkv_prep", "rms", "empty" };
+    for (kinds) |name| {
+        const cb = m.queue.commandBuffer();
+        const e = cb.compute(.serial);
+        const kd = &m.kernels.sliding;
+        for (0..60) |_| {
+            if (std.mem.eql(u8, name, "attn_tail")) {
+                e.setPipeline(kd.attn_tail);
+                for ([_]mtl.Buffer{ s.h[0], s.o }, 0..) |b, i| e.setBuffer(b, 0, i);
+                e.setBuffer(l.post_attention.buf, l.post_attention.off, 2);
+                e.setBuffer(l.pre_feedforward.buf, l.pre_feedforward.off, 3);
+                e.setValue(cfg.eps, 4);
+                for ([_]mtl.Buffer{ s.hn, s.n_mlp, s.sums }, 5..) |b, i| e.setBuffer(b, 0, i);
+                e.setValue(@as(i32, 1), 8);
+                e.dispatchGroups(.{ .width = 1 }, .{ .width = 256 });
+            } else if (std.mem.eql(u8, name, "dense_tail")) {
+                e.setPipeline(kd.dense_tail);
+                for ([_]mtl.Buffer{ s.hn, s.y }, 0..) |b, i| e.setBuffer(b, 0, i);
+                e.setBuffer(l.post_feedforward.buf, l.post_feedforward.off, 2);
+                e.setBuffer(l.scalar.buf, l.scalar.off, 3);
+                e.setBuffer(l.input_norm.buf, l.input_norm.off, 4);
+                e.setValue(cfg.eps, 5);
+                for ([_]mtl.Buffer{ s.h[1], s.normed[1], s.sums }, 6..) |b, i| e.setBuffer(b, 0, i);
+                e.setValue(@as(i32, 1), 9);
+                e.dispatchGroups(.{ .width = 1 }, .{ .width = 256 });
+            } else if (std.mem.eql(u8, name, "geglu")) {
+                e.setPipeline(kd.geglu);
+                for ([_]mtl.Buffer{ s.gate_up, s.act }, 0..) |b, i| e.setBuffer(b, 0, i);
+                e.setValue(@as(u32, cfg.intermediate), 2);
+                e.setBuffer(s.sums, 0, 3);
+                e.setValue(@as(i32, 1), 4);
+                e.dispatchGroups(.{ .width = cfg.intermediate / 64, .height = 1 }, .{ .width = 64 });
+            } else if (std.mem.eql(u8, name, "qkv_prep")) {
+                e.setPipeline(kd.qkv);
+                e.setBuffer(s.qkv, 0, 0);
+                e.setBuffer(l.q_norm.buf, l.q_norm.off, 1);
+                e.setBuffer(l.k_norm.buf, l.k_norm.off, 2);
+                for ([_]mtl.Buffer{ m.inv_sliding, s.pos }, 3..) |b, i| e.setBuffer(b, 0, i);
+                e.setValue(cfg.eps, 5);
+                for ([_]mtl.Buffer{ s.q, s.k, s.v, c.k[0], c.v[0] }, 6..) |b, i| e.setBuffer(b, 0, i);
+                e.setValue([3]i32{ 0, 0, 0 }, 11);
+                e.dispatchGroups(.{ .width = cfg.query_heads + 32, .height = 1 }, .{ .width = 32 });
+            } else if (std.mem.eql(u8, name, "rms")) {
+                e.setPipeline(kd.rms);
+                for ([_]mtl.Buffer{ s.h[0], s.normed[0] }, 0..) |b, i| e.setBuffer(b, 0, if (i == 0) 0 else 2);
+                e.setBuffer(l.input_norm.buf, l.input_norm.off, 1);
+                e.setValue(cfg.eps, 3);
+                e.setBuffer(s.sums, 0, 4);
+                e.setValue(@as(i32, 1), 5);
+                e.dispatchGroups(.{ .width = 1 }, .{ .width = 1024 });
+            } else {
+                e.setPipeline(kd.softcap);
+                e.setBuffer(s.logits, 0, 0);
+                e.setValue(cfg.softcap, 1);
+                e.dispatchThreads(.{ .width = 32 }, .{ .width = 32 });
+            }
+        }
+        e.end();
+        cb.commit();
+        cb.wait();
+        std.debug.print("{s}: {d:.1} us a call\n", .{ name, cb.gpuSeconds() * 1e6 / 60 });
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -81,6 +152,7 @@ pub fn main(init: std.process.Init) !void {
     const y = try m.device.buffer(128 * cfg.vocab * 2, mtl.ResourceOptions.private);
     defer y.deinit();
     std.debug.print("weights read a step: {d:.2} GB\n", .{@as(f64, @floatFromInt(bytes)) / 1e9});
+    if (std.c.getenv("GEMMA_GLUE") != null) return glueCosts(m);
     for ([_]usize{ 1, 16, 64, 128 }) |rows| {
         var best: f64 = 1e9;
         for (0..5) |_| best = @min(best, try projections(m, rows, x, y, false));

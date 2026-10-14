@@ -125,6 +125,8 @@ fn rowsCheck(c: *Ctx, rows: usize, p0: usize) !void {
             e.setPipeline(s.kd.rms);
             for ([_]mtl.Buffer{ s.x, s.w, s.out }, 0..) |bb, i| e.setBuffer(bb, 0, i);
             e.setValue(cfg.eps, 3);
+            e.setBuffer(s.out, 0, 4);
+            e.setValue(@as(i32, 0), 5);
             e.dispatchGroups(.{ .width = s.rows }, .{ .width = 1024 });
         }
     }{ .kd = kd, .x = emb, .w = w0, .out = normed, .rows = rows });
@@ -176,6 +178,8 @@ fn layerCheck(c: *Ctx, rows: usize, p0: usize, layer: usize) !void {
             for (s.bs[0..5], 0..) |bb, i| e.setBuffer(bb, 0, i);
             e.setValue(cfg.eps, 5);
             for (s.bs[5..8], 6..) |bb, i| e.setBuffer(bb, 0, i);
+            for (s.bs[6..8], 9..) |bb, i| e.setBuffer(bb, 0, i);
+            e.setValue([3]i32{ 0, 0, 0 }, 11);
             e.dispatchGroups(.{ .width = s.slots, .height = s.rows }, .{ .width = 32 });
         }
     }{ .kd = kd, .bs = .{ qkv.b, qw, kw, invf.b, pos, q, k, v }, .slots = cfg.query_heads + 2 * nk, .rows = rows });
@@ -240,7 +244,8 @@ fn attentionCheck(c: *Ctx, kd: *const g4.kernels.Kind, prefix: []const u8, rows:
             e.dispatchGroups(.{ .width = s.chunks, .height = s.nk, .depth = s.rows }, .{ .width = 32 * s.kd.heads_per_kv * s.kd.split });
             e.barrier();
             e.setPipeline(s.kd.merge);
-            for ([_]mtl.Buffer{ s.bs[8], s.bs[9], s.bs[10], s.bs[7], s.bs[11] }, 0..) |bb, i| e.setBuffer(bb, 0, i);
+            for ([_]mtl.Buffer{ s.bs[8], s.bs[9], s.bs[10], s.bs[7], s.bs[11], s.bs[8] }, 0..) |bb, i| e.setBuffer(bb, 0, i);
+            e.setValue(@as(i32, 0), 6);
             e.dispatchGroups(.{ .width = 1, .height = cfg.query_heads, .depth = s.rows }, .{ .width = 32 });
         }
     }{ .kd = kd, .bs = .{ q.b, kb, vb, kn.b, vn.b, pos, lo, meta, pm, pl, po, out, out }, .cap = @intCast(cap), .chunks = chunks, .nk = nk, .rows = rows });
@@ -263,6 +268,8 @@ fn tailsCheck(c: *Ctx, kd: *const g4.kernels.Kind, prefix: []const u8, lp: []con
             e.setPipeline(s.pipe);
             for (s.bs, 0..) |bb, i| e.setBuffer(bb, 0, if (i < s.eps_at) i else i + 1);
             e.setValue(cfg.eps, s.eps_at);
+            e.setBuffer(s.bs[0], 0, s.bs.len + 1);
+            e.setValue(@as(i32, 0), s.bs.len + 2);
             e.dispatchGroups(.{ .width = s.rows }, .{ .width = 256 });
         }
     };
@@ -281,7 +288,9 @@ fn tailsCheck(c: *Ctx, kd: *const g4.kernels.Kind, prefix: []const u8, lp: []con
             e.setBuffer(s.gu, 0, 0);
             e.setBuffer(s.act, 0, 1);
             e.setValue(@as(u32, cfg.intermediate), 2);
-            e.dispatchThreads(.{ .width = cfg.intermediate, .height = s.rows }, .{ .width = 256 });
+            e.setBuffer(s.act, 0, 3);
+            e.setValue(@as(i32, 0), 4);
+            e.dispatchGroups(.{ .width = cfg.intermediate / 64, .height = s.rows }, .{ .width = 64 });
         }
     }{ .kd = kd, .gu = gu.b, .act = act, .rows = rows });
     try c.compare("geglu", act, nm(4, "{s}.act", .{prefix}));

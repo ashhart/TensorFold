@@ -61,6 +61,12 @@ fn sums(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, x: mtl.Buffer, rows: u32,
     affine_mm.rowSums(e, m.mm, 64, Ref{ .buf = x }, Ref{ .buf = s.sums }, rows, k);
 }
 
+/// The glue's optional group sums off: affine_mm takes its own (rowSums).
+fn noSums(e: mtl.ComputeEncoder, s: *Scratch, index: usize) void {
+    e.setBuffer(s.sums, 0, index);
+    e.setValue(@as(i32, 0), index + 1);
+}
+
 fn bind(e: mtl.ComputeEncoder, bufs: []const mtl.Buffer, first: usize) void {
     for (bufs, first..) |b, i| e.setBuffer(b, 0, i);
 }
@@ -91,6 +97,7 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32) !void {
     e.setBuffer(w.layers[0].input_norm.buf, w.layers[0].input_norm.off, 1);
     bind(e, &.{s.normed[0]}, 2);
     e.setValue(cfg.eps, 3);
+    noSums(e, s, 4);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
     var cur: usize = 0;
     for (0..cfg.layers) |i| {
@@ -132,12 +139,9 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: usiz
     e.setBuffer(l.k_norm.buf, l.k_norm.off, 2);
     bind(e, &.{ if (global) m.inv_global else m.inv_sliding, s.pos }, 3);
     e.setValue(cfg.eps, 5);
-    bind(e, &.{ s.q, s.k, s.v }, 6);
+    bind(e, &.{ s.q, s.k, s.v, c.k[i], c.v[i] }, 6); // keys and values straight into the cache too
+    e.setValue([3]i32{ if (global) 0 else state.ring, @intCast(state.slotsOf(i, c.capacity)), 0 }, 11);
     e.dispatchGroups(.{ .width = cfg.query_heads + 2 * nk, .height = rows }, .{ .width = 32 });
-    e.setPipeline(kd.kv_write);
-    bind(e, &.{ s.k, s.v, c.k[i], c.v[i], s.pos }, 0);
-    e.setValue([3]i32{ @intCast(rows), if (global) 0 else state.ring, @intCast(state.slotsOf(i, c.capacity)) }, 5);
-    e.dispatchThreads(.{ .width = dh, .height = rows, .depth = nk }, .{ .width = @min(dh, 256) });
     e.setPipeline(kd.prompt_attn);
     bind(e, &.{ s.q, c.k[i], c.v[i], s.attn }, 0);
     e.setValue([3]i32{ @intCast(rows), @intCast(c.len), @intCast(state.slotsOf(i, c.capacity)) }, 4);
@@ -150,6 +154,7 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: usiz
     e.setBuffer(l.pre_feedforward.buf, l.pre_feedforward.off, 3);
     e.setValue(cfg.eps, 4);
     bind(e, &.{ s.hn, s.n_mlp }, 5);
+    noSums(e, s, 7);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
     sums(m, e, s, s.n_mlp, rows, cfg.hidden);
     mm(m, e, s, l.mlx[4], s.n_mlp, s.gate_up, 0, 2 * cfg.intermediate, rows);
@@ -157,7 +162,8 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: usiz
     e.setPipeline(kd.geglu);
     bind(e, &.{ s.gate_up, s.act }, 0);
     e.setValue(@as(u32, cfg.intermediate), 2);
-    e.dispatchThreads(.{ .width = cfg.intermediate, .height = rows }, .{ .width = 256 });
+    noSums(e, s, 3);
+    e.dispatchGroups(.{ .width = cfg.intermediate / 64, .height = rows }, .{ .width = 64 });
     sums(m, e, s, s.act, rows, cfg.intermediate);
     mm(m, e, s, l.mlx[6], s.act, s.y, 0, cfg.hidden, rows);
     e.setPipeline(kd.dense_tail);
@@ -168,5 +174,6 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: usiz
     e.setBuffer(nx.buf, nx.off, 4);
     e.setValue(cfg.eps, 5);
     bind(e, &.{ s.h[1 - cur], s.normed[1 - cur] }, 6);
+    noSums(e, s, 8);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
 }
