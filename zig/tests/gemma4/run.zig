@@ -65,7 +65,7 @@ pub fn main(init: std.process.Init) !void {
         const last = (ids.value.len - 1 - (ids.value.len - 1) / width * width) * g4.config.vocab;
         const prefill_s = @as(f64, @floatFromInt(std.c.mach_absolute_time() - t1)) / 24e6;
         var lp: [256]u8 = undefined;
-        const row = s.logits.slice(u16, g4.state.max_rows * g4.config.vocab)[last..][0..g4.config.vocab];
+        const row = s.logits.slice(u16, g4.state.prompt_rows * g4.config.vocab)[last..][0..g4.config.vocab];
         const f32s = try gpa.alloc(f32, g4.config.vocab);
         defer gpa.free(f32s);
         for (f32s, row) |*f, b| f.* = @bitCast(@as(u32, b) << 16);

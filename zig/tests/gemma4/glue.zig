@@ -218,8 +218,8 @@ fn attentionCheck(c: *Ctx, kd: *const g4.kernels.Kind, prefix: []const u8, rows:
     }
     const first_chunk = low / kd.chunk;
     const chunks = (p0 + rows - 1) / kd.chunk - first_chunk + 1;
-    const meta = try c.buf(16);
-    meta.slice(i32, 4)[0..4].* = .{ @intCast(first_chunk), @intCast(chunks), @intCast(ring), @intCast(rows) };
+    const meta = try c.buf(32);
+    meta.slice(i32, 8)[0..5].* = .{ @intCast(first_chunk), @intCast(chunks), @intCast(ring), @intCast(rows), @intCast(p0) };
     const slots = cfg.query_heads * rows * chunks;
     const pm = try c.buf(slots * 4);
     const pl = try c.buf(slots * 4);

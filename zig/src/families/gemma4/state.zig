@@ -6,8 +6,11 @@ const cfg = @import("config.zig");
 const opts = mtl.ResourceOptions.private | mtl.ResourceOptions.untracked;
 const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
-/// Window rows at most: the lane projection's widest, and one verify window.
+/// A verify window's rows at most (the exact width), and a prompt window's (the reg projection's widest).
 pub const max_rows = 16;
+pub const prompt_rows = 128;
+/// Ints a row's attention meta takes: first chunk, chunks, ring, rows, first new key, padding.
+pub const meta_ints = 8;
 /// A sliding layer's ring: the window plus rows a window may write past it (gilby's RingKVCache, WINDOW_ROWS).
 pub const ring = cfg.window + 128;
 
@@ -61,7 +64,7 @@ pub fn slotsOf(i: usize, capacity: usize) usize {
 pub const Scratch = struct {
     ids: mtl.Buffer,
     pos: mtl.Buffer,
-    /// Per layer kind (0 sliding, 1 global): each row's first key, and each stream's attention chunks (4 ints).
+    /// Per layer kind (0 sliding, 1 global): each row's first key, and at a sub-batch's first row its meta.
     lo: [2]mtl.Buffer,
     meta: [2]mtl.Buffer,
     h: [2]mtl.Buffer,
@@ -85,16 +88,16 @@ pub const Scratch = struct {
     slots: usize,
 
     pub fn init(device: mtl.Device, capacity: usize) !Scratch {
-        const r = max_rows;
+        const r = prompt_rows;
         const d = cfg.hidden;
         const qd = cfg.query_heads * cfg.global_dim;
-        const slots = cfg.query_heads * r * (capacity / 64 + 2);
+        const slots = cfg.query_heads * max_rows * (capacity / 64 + 2);
         var s: Scratch = undefined;
         s.slots = slots;
         inline for (.{ .{ "ids", r * 4, true }, .{ "pos", r * 4, true }, .{ "qkv", r * (qd + 2 * 16 * 256) * 2, false }, .{ "q", r * qd * 2, false }, .{ "k", r * 16 * 256 * 2, false }, .{ "v", r * 16 * 256 * 2, false }, .{ "attn", r * qd * 2, false }, .{ "o", r * d * 2, false }, .{ "hn", r * d * 2, false }, .{ "n_mlp", r * d * 2, false }, .{ "gate_up", r * 2 * cfg.intermediate * 2, false }, .{ "act", r * cfg.intermediate * 2, false }, .{ "y", r * d * 2, false }, .{ "pm", slots * 4, false }, .{ "pl", slots * 4, false }, .{ "po", slots * cfg.global_dim * 4, false }, .{ "logits", r * cfg.vocab * 2, true } }) |f|
             @field(s, f[0]) = try device.buffer(f[1], if (f[2]) shared else opts);
         for (&s.lo) |*b| b.* = try device.buffer(r * 4, shared);
-        for (&s.meta) |*b| b.* = try device.buffer(r * 16, shared);
+        for (&s.meta) |*b| b.* = try device.buffer(r * meta_ints * 4, shared);
         for (&s.h) |*b| b.* = try device.buffer(r * d * 2, opts);
         for (&s.normed) |*b| b.* = try device.buffer(r * d * 2, opts);
         return s;

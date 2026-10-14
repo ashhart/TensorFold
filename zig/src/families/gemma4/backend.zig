@@ -54,7 +54,7 @@ pub const Metal = struct {
 
     /// The last row of the scratch logits into the stream's cache.
     fn keepLast(self: *Metal, cache: *st.Cache, row: usize) void {
-        @memcpy(cache.logits.slice(u16, cfg.vocab), self.scratch.logits.slice(u16, st.max_rows * cfg.vocab)[row * cfg.vocab ..][0..cfg.vocab]);
+        @memcpy(cache.logits.slice(u16, cfg.vocab), self.scratch.logits.slice(u16, st.prompt_rows * cfg.vocab)[row * cfg.vocab ..][0..cfg.vocab]);
     }
 
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
@@ -68,11 +68,11 @@ pub const Metal = struct {
         errdefer cache.deinit();
         var at: usize = 0;
         while (at < ids.len) {
-            const end = @min(ids.len, at + st.max_rows);
+            const end = @min(ids.len, at + st.prompt_rows);
             try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = end - at }}, ids[at..end]);
             at = end;
         }
-        self.keepLast(cache, (ids.len - 1) % st.max_rows);
+        self.keepLast(cache, (ids.len - 1) % st.prompt_rows);
         try self.caches.put(self.gpa, stream, cache);
     }
 

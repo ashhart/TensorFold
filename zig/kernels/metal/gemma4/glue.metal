@@ -100,7 +100,7 @@ kernel void gemma_qkv_prep(const device bfloat* QKV [[buffer(0)]], const device 
   gemma_emit(kind, head, r, R, lane, xv, QW, KW, INVF, POS, eps, Q, K, V);
 }
 
-// gilby's attend partials, sums fixed by key position; META: first chunk, chunks, ring, rows.
+// gilby's attend partials, sums fixed by key position; META: first chunk, chunks, ring, rows, first new key.
 kernel void gemma_attention_partial(const device bfloat* Q [[buffer(0)]], const device bfloat* K [[buffer(1)]],
                                     const device bfloat* V [[buffer(2)]], const device bfloat* KN [[buffer(3)]],
                                     const device bfloat* VN [[buffer(4)]], const device int* POS [[buffer(5)]],
@@ -116,7 +116,7 @@ kernel void gemma_attention_partial(const device bfloat* Q [[buffer(0)]], const 
   const int h = int(tg.y);
   const int r = int(tg.z);
   const int qh = h * G + g;
-  const int P0 = POS[0];
+  const int P0 = META[4];
   constexpr int DPL = DH / 32;
   const int k0 = metal::max(c * CK, LO[r]), k1 = metal::min((c + 1) * CK, POS[r] + 1);
   float q[DPL], o[DPL];
