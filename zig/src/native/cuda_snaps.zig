@@ -56,7 +56,15 @@ test "a family with snap_grid keeps on its chunk starts, any other at any row as
     defer arena.deinit();
     const prompt = try arena.allocator().alloc(u32, 3547);
     for (prompt, 0..) |*t, i| t.* = @intCast(i);
-    var store = api.prompt_cache.Store.init(std.testing.allocator, .{ .ptr = &unused, .vtable = &.{ .bytes = Stub.bytes, .save = Stub.save, .restore = Stub.restore, .drop = Stub.drop } }, cacheRules(Glm), 1 << 30);
+    const vtable: api.prompt_cache.Snapshots.VTable = .{
+        .bytes = Stub.bytes,
+        .save = Stub.save,
+        .restore = Stub.restore,
+        .drop = Stub.drop,
+    };
+    const copies: api.prompt_cache.Snapshots = .{ .ptr = &unused, .vtable = &vtable };
+    var store = api.prompt_cache.Store.init(std.testing.allocator, copies, cacheRules(Glm), 1 << 30);
     defer store.deinit();
-    try std.testing.expectEqualSlices(u32, &[_]u32{2048}, try store.marks(arena.allocator(), prompt, 0, 3540, &.{}, &.{}, &.{}));
+    const marks = try store.marks(arena.allocator(), prompt, 0, 3540, &.{}, &.{}, &.{});
+    try std.testing.expectEqualSlices(u32, &[_]u32{2048}, marks);
 }
