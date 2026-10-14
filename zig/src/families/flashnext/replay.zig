@@ -832,6 +832,7 @@ pub const Run = struct {
     roles: std.StringHashMapUnmanaged(Site) = .empty,
     shapes: std.StringHashMapUnmanaged(mtl.Buffer) = .empty,
     held: std.ArrayList(mtl.Buffer) = .empty, // what buffer, load and group made: a host's residency set holds them
+    follow: ?mtl.ResidencySet.Follow = null, // set once the host's set is built: later buffers join it
     loaded: usize = 0,
     rows: usize = 1,
     fused_xsum: bool = false,
@@ -911,8 +912,14 @@ pub const Run = struct {
         const n = @max(len, 64);
         const b = try r.device.buffer(n, opts);
         @memset(b.contents()[0..n], 0);
-        try r.held.append(r.arena, b);
+        try r.keep(b);
         return b;
+    }
+
+    /// `b` on the held list, and in the host's residency set when one was built before it.
+    fn keep(r: *Run, b: mtl.Buffer) !void {
+        try r.held.append(r.arena, b);
+        if (r.follow) |f| f.join(f.ctx, b);
     }
 
     /// Every tensor of a safetensors file in the index, at its absolute offset.
@@ -948,7 +955,7 @@ pub const Run = struct {
         errdefer b.deinit();
         try readAll(e.fd, b.contents()[0..e.len], e.at);
         r.loaded += e.len;
-        try r.held.append(r.arena, b);
+        try r.keep(b);
         return .{ .b = b };
     }
 
@@ -972,7 +979,7 @@ pub const Run = struct {
             at += e.len;
         }
         r.loaded += total;
-        try r.held.append(r.arena, b);
+        try r.keep(b);
         return .{ .b = b };
     }
 

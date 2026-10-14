@@ -437,6 +437,7 @@ pub const Engine = struct {
         const tp_path: ?[]const u8 = speed_up orelse if (std.c.getenv("TF_FLASHNEXT_TP")) |p| std.mem.span(p) else null;
         if (tp_path != null and !uniform) return error.SpeedUpNeeds6Bit32; // TP splits the 6/32 kernels only
         if (tp_path) |path| r.tp = try fz.Tp2.init(arena, r.device, path);
+        if (r.tp) |t| try r.held.appendSlice(arena, &.{ t.wbuf, t.one, t.pick_tmp }); // every pair round uses them
         if (r.tp == null) try fz.rows_load.attach(
             e.pr,
             m,

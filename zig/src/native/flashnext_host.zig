@@ -471,7 +471,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, wind
     h.warm = .{ .queue = eng.r.queue };
     // macOS unwires idle GPU memory within seconds: the engine's buffers join one set the idle keepalive's ticks use
     if (std.c.getenv("FLASHNEXT_NO_RESIDENCY") == null) holdResident(h) catch |err| std.log.warn("flash next: no residency set ({s}): the first request after an idle second waits for the model's memory", .{@errorName(err)});
-    errdefer if (h.resident) |*r| r.deinit();
+    errdefer dropResident(h);
     // chunk 1: a prompt call keeps at marks inside it (engine.mark_taps), so a short prompt's history mark adds no call
     if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .write = Snaps.write, .read = Snaps.read, .forget = Snaps.forget } }, .{ .lookahead = 1, .chunk = 1 }, budget);
     h.info_.prompt_cache = h.cache != null;
@@ -484,10 +484,23 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, wind
     return h;
 }
 
-/// The engine's buffers in one residency set; the idle keepalive's ticks use it.
+/// The engine's buffers in one residency set the idle keepalive's ticks use; buffers made later join it or stay out.
 fn holdResident(h: *Host) !void {
     h.resident = try Resident.hold(h.gpa, h.io, h.eng.r.device, h.eng.r.queue, h.eng.r.held.items, "flash next") orelse return;
-    h.warm = (&h.resident.?).target();
+    const r = &h.resident.?;
+    h.warm = r.target();
+    h.eng.r.follow = r.follow();
+    h.eng.snap_pool.follow = r.follow(); // kept states' buffers join it, and leave it before they are freed
+}
+
+/// The set released; the engine's allocators stop reporting to it first.
+fn dropResident(h: *Host) void {
+    const r = if (h.resident) |*x| x else return;
+    h.eng.r.follow = null;
+    h.eng.snap_pool.follow = null;
+    r.deinit();
+    h.resident = null;
+    h.warm = .{ .queue = h.eng.r.queue };
 }
 
 fn follow(eng: *fx.Engine) void {
@@ -503,7 +516,7 @@ pub fn close(ctx: *anyopaque) void {
     }
     if (h.cache) |*store| store.deinit();
     if (h.learned) |*m| m.deinit();
-    if (h.resident) |*r| r.deinit();
+    dropResident(h);
     h.saved.deinit(h.gpa);
     h.eng.deinit();
     h.gpa.destroy(h);
