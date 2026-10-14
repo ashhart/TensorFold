@@ -59,7 +59,7 @@ pub const Host = struct {
     /// A new slot's buffers join the residency set, so the keepalive holds them wired with the rest.
     fn added(ptr: *anyopaque, buffers: []const mtl.Buffer) void {
         const h = of(ptr);
-        if (h.resident) |*r| r.add(buffers);
+        if (h.resident) |*r| r.addNow(buffers); // its first round reads them: committed now, as before staging
         std.log.info("Qwen3.8-27B: a slot took its memory ({d} of {d} ready)", .{ h.runner.ready, h.runner.slots });
     }
 

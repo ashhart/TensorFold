@@ -32,6 +32,11 @@ pub const Resident = struct {
         _ = r.held.join(buffers);
     }
 
+    /// `add`, committed now: buffers the next round reads (a stream's slot), so no round mixes them with the set's.
+    pub fn addNow(r: *Resident, buffers: []const mtl.Buffer) void {
+        if (r.held.join(buffers)) r.held.flush();
+    }
+
     /// A buffer about to be freed leaves the set now: the set holds its own reference until a commit drops it.
     pub fn remove(r: *Resident, buffer: mtl.Buffer) void {
         r.held.leave(buffer);
@@ -273,4 +278,8 @@ test "buffers made later wait for a flush inside the limit, and leave at once be
     h.flush();
     try std.testing.expectEqual(Fake{ .adds = 1, .removes = 1, .commits = 2 }, f);
     try std.testing.expect(h.join(&.{partials})); // room again once the state left
+    const slot: Fake.Buffer = .{ .id = &ids[5], .len = GiB };
+    f = .{};
+    if (h.join(&.{slot})) h.flush(); // Resident.addNow: a slot's commit takes what waits with it
+    try std.testing.expectEqual(Fake{ .adds = 2, .commits = 1 }, f);
 }
