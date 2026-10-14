@@ -184,7 +184,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--parallel N` | Admit up to N requests where the engine shares lanes; `auto` is the default. |
 | `--prompt-cache-gib GIB` | Nemotron, Flash Next, GLM and Qwen3.8-27B retained-prefix budget, 16 GiB by default or less where memory is short; zero disables retention. |
 | `--prompt-cache-over-cap` | Permit an explicit Nemotron, Flash Next or Qwen3.8-27B prefix budget past what 70% of RAM leaves once the server loads. |
-| `--learn` | Keep shared prompt prefixes, such as a system prompt and its tools, on disk so new conversations resume them after a restart or an upgrade that computes the same bits. GLM-5.3-Flash, Nemotron, and Flash Next on one Mac; Qwen3.8-27B, Qwen3.5-2B, LFM2.5-24B-A2B, GLM-5.3 (EXLR8) and a CUDA server refuse it at startup. |
+| `--learn` | Keep shared prompt prefixes on disk for new conversations to resume; the models are below the table. |
 | `--learn-dir DIR` | Where `--learn` keeps them, `~/.cache/tensorfold/learned` by default; implies `--learn`. |
 | `--learn-gib GIB` | Disk for learned prefixes on each Mac, 32 by default; the least recently used go first. Implies `--learn`. |
 | `--learn-min-free-gib GIB` | Free disk `--learn` leaves on each Mac, 4 by default; below it learning pauses and serving goes on. |
@@ -200,6 +200,10 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--cortheon` | Cortheon's reasoning program and server-run web research for chat requests; see [Cortheon mode](docs/cortheon.md). |
 | `--no-update-check` | Accepted compatibility switch; update the installed binary through its package manager. |
 | `--backend auto` | Use the backend compiled for the platform; `mlx` selects native Metal on macOS and `cuda` selects CUDA on Linux. |
+
+`--learn` keeps shared prompt prefixes, such as a system prompt and its tools, on disk, so new conversations resume
+them after a restart or an upgrade that computes the same bits. It covers GLM-5.3-Flash, Nemotron, and Flash Next on
+one Mac; Qwen3.8-27B, Qwen3.5-2B, LFM2.5-24B-A2B, GLM-5.3 (EXLR8) and a CUDA server refuse it at startup.
 
 Sampling defaults come from the checkpoint's `generation_config.json`, then serve flags and request fields override them.
 `--context 0` is family-specific; use a positive limit for GLM and inspect the capacity reported at startup.

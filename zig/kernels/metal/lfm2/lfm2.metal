@@ -83,7 +83,7 @@ inline void lfm2_rms(const thread float* v, const device bfloat* w, float eps, d
   lfm2_rms(v, w, eps, x, base, t, sg, lane, sums, inv);
 }
 
-// lfm2_combine's row sum (bf16(y * weight) over a token's picks, fp32) added to h as lfm2_norm's r, then x = norm(h).
+// lfm2_combine_sorted's sum (Y in slot order) added to h as lfm2_norm's r, then x = norm(h): the same bits.
 [[kernel]] void lfm2_combine_norm(const device bfloat* y [[buffer(0)]], const device bfloat* wts [[buffer(1)]], device bfloat* h [[buffer(2)]],
                                   const device bfloat* w [[buffer(3)]], constant float& eps [[buffer(4)]], device bfloat* x [[buffer(5)]],
                                   uint row [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]],
@@ -340,9 +340,10 @@ template [[host_name("lfm2_attn_mma")]] [[kernel]] decltype(lfm2_attn_mma<1>) lf
 template [[host_name("lfm2_attn_mma_r2")]] [[kernel]] decltype(lfm2_attn_mma<2>) lfm2_attn_mma<2>;
 
 // The chunks merged in chunk order for (head, row): Y [rows, QH*HD] bf16.
-[[kernel]] void lfm2_attn_merge(const device float* pm [[buffer(0)]], const device float* pl [[buffer(1)]], const device float* po [[buffer(2)]],
-                                constant lfm2_attn_args& p [[buffer(3)]], device bfloat* y [[buffer(4)]],
-                                uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+[[kernel]] void lfm2_attn_merge(const device float* pm [[buffer(0)]], const device float* pl [[buffer(1)]],
+                                const device float* po [[buffer(2)]], constant lfm2_attn_args& p [[buffer(3)]],
+                                device bfloat* y [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],
+                                uint lane [[thread_index_in_simdgroup]]) {
   const uint head = tg.x, r = tg.y;
   const uint count = p.len + r + 1;
   const uint per = PER;
@@ -446,18 +447,6 @@ template [[host_name("lfm2_attn_mma_r2")]] [[kernel]] decltype(lfm2_attn_mma<2>)
   ((device vec<bfloat, 8>*)act)[i] = out;
 }
 
-// R [rows, D] = sum over a row's picks of bf16(y * weight), in pick order with an fp32 sum.
-[[kernel]] void lfm2_combine(const device bfloat* y [[buffer(0)]], const device bfloat* wts [[buffer(1)]], device bfloat* r [[buffer(2)]],
-                             uint2 at [[thread_position_in_grid]]) {
-  if (at.x >= D) return;
-  float acc = 0.0f;
-  for (uint k = 0; k < TOPK; ++k) {
-    const size_t slot = size_t(at.y) * TOPK + k;
-    acc += float(static_cast<bfloat>(float(y[slot * D + at.x]) * float(wts[slot])));
-  }
-  r[size_t(at.y) * D + at.x] = static_cast<bfloat>(acc);
-}
-
 // Picks sorted by expert, in slot order within one: STARTS [E + 1], ORDER (sorted -> slot), POS (slot -> sorted).
 constant constexpr uint SORT_CHUNKS = 16;  // thread (e, c) counts expert e's picks in chunk c, then places them
 [[kernel]] void lfm2_sort(const device uint* ids [[buffer(0)]], constant uint& slots [[buffer(1)]], device uint* starts [[buffer(2)]],
@@ -492,9 +481,10 @@ constant constexpr uint SORT_CHUNKS = 16;  // thread (e, c) counts expert e's pi
     }
 }
 
-// lfm2_combine with Y's rows in sorted order (slot s at POS[s]).
-[[kernel]] void lfm2_combine_sorted(const device bfloat* y [[buffer(0)]], const device bfloat* wts [[buffer(1)]], device bfloat* r [[buffer(2)]],
-                                    const device uint* pos [[buffer(3)]], uint2 at [[thread_position_in_grid]]) {
+// R [rows, D] = the fp32 sum of bf16(y * weight) over a row's picks in pick order, Y's row for slot s at POS[s].
+[[kernel]] void lfm2_combine_sorted(const device bfloat* y [[buffer(0)]], const device bfloat* wts [[buffer(1)]],
+                                    device bfloat* r [[buffer(2)]], const device uint* pos [[buffer(3)]],
+                                    uint2 at [[thread_position_in_grid]]) {
   if (at.x >= D) return;
   float acc = 0.0f;
   for (uint k = 0; k < TOPK; ++k) {
