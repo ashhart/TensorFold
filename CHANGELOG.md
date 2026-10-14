@@ -9,6 +9,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - `--slide` starts only with a key: `--api-key`, `--api-key-file` or `TENSORFOLD_API_KEY`. The key is read before the model loads, with the rules the server applies, so a key file that is missing, empty or readable by other users, or a key with whitespace in it, stops the start at once with a line naming the cause. The Living Weights guide and the README show a key file.
 - Each server holds its model folder while it runs (shared, or exclusive with `--slide`): a server refuses a folder that a `--slide` server or a rollback holds, a rollback refuses a folder any server holds, and `--slide` refuses a folder that cannot be locked, where a plain server serves it and logs one line. The hold is advisory, so other tools that write the folder do not see it.
 - Without `--slide` replies are unchanged: on an M3 Ultra and a GB10 this build gave 1.0.11's tokens in 17 exact cells, drafted and with `"draft": false`, and 12 multi-turn steps.
+- `TENSORFOLD_REQUEST_LOG` creates its file owner-only (mode 0600, where it was 0644), so the prompts and tool content it records are not readable by other users on the machine. A log file that already exists keeps its mode; `chmod 600` it once.
 
 ## 1.0.11
 
