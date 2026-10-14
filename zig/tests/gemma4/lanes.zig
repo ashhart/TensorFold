@@ -1,4 +1,4 @@
-//! Gemma 4 dense on the lane core: plain, copy-drafted and 4- and 8-stream shared rounds against the oracle's tokens.
+//! Gemma 4 dense on the lane core: copy-drafted and 4- and 8-stream shared rounds against the engine's plain replies.
 const std = @import("std");
 const tf = @import("tensorfold");
 
@@ -86,7 +86,7 @@ pub fn main(init: std.process.Init) !void {
     var clock = lanes.backend.WallClock{ .io = io };
     var prompts: [4]Prompt = undefined;
     for (&prompts, [_][]const u8{ "copy", "arithmetic", "story", "code" }) |*p, name| {
-        p.* = .{ .name = name, .ids = try readJson(gpa, io, oracle, name, ".ids.json"), .want = try readJson(gpa, io, oracle, name, ".reference.json") };
+        p.* = .{ .name = name, .ids = try readJson(gpa, io, oracle, name, ".ids.json"), .want = &.{} };
     }
     defer for (prompts) |p| {
         gpa.free(p.ids);
@@ -95,7 +95,8 @@ pub fn main(init: std.process.Init) !void {
     var bad: usize = 0;
     var engine = lanes.Engine.init(gpa, &cfg, metal.backend(), clock.clock());
     defer engine.deinit();
-    for (prompts) |p| bad += try case(gpa, io, &engine, &.{p}, 1, false, "plain, one stream");
+    // the reference: the engine's own plain one-stream reply (prompts take the tensor-unit path, not the oracle's)
+    for (&prompts) |*p| p.want = try plain(gpa, &engine, p.ids, 128);
     for (prompts) |p| bad += try case(gpa, io, &engine, &.{p}, 1, true, "copy drafts, one stream");
     bad += try case(gpa, io, &engine, &prompts, 4, true, "copy drafts, four streams");
     bad += try case(gpa, io, &engine, &prompts, 8, true, "copy drafts, eight streams");

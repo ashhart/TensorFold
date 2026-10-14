@@ -146,7 +146,9 @@ def served(args: argparse.Namespace) -> None:
     from concurrent.futures import ThreadPoolExecutor
 
     names = sorted(p.name.removesuffix(".reference.json") for p in args.oracle.glob("*.reference.json"))
-    want = {n: json.loads((args.oracle / f"{n}.reference.json").read_text()) for n in names}
+    # the native CLI's tokens when given (its prompt path), else the oracle's
+    src = args.native or args.oracle
+    want = {n: json.loads((src / f"{n}.{'tokens' if args.native else 'reference'}.json").read_text()) for n in names}
     ids = {n: json.loads((args.oracle / f"{n}.ids.json").read_text()) for n in names}
 
     def one(name: str, draft: bool) -> tuple[str, bool]:
@@ -202,6 +204,7 @@ def main() -> None:
     v = sub.add_parser("served")
     v.add_argument("--url", default="http://127.0.0.1:8888")
     v.add_argument("--oracle", type=Path, required=True)
+    v.add_argument("--native", type=Path, help="tf-gemma4-run's output (prompts in 512-row chunks): the reference")
     c = sub.add_parser("check")
     c.add_argument("--oracle", type=Path, required=True)
     c.add_argument("--native", type=Path, required=True)

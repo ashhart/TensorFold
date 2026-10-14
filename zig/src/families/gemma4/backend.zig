@@ -4,6 +4,7 @@ const lanes = @import("lanes");
 const cfg = @import("config.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
+const prompt = @import("prompt.zig");
 const Model = @import("model.zig").Model;
 const draw = @import("../qwen3_5/backend.zig").draw;
 const be = lanes.backend;
@@ -15,12 +16,14 @@ pub const Metal = struct {
     model: *Model,
     options: Options,
     scratch: st.Scratch,
+    /// Prompt chunks' activations: 512 rows on core affine_mm and the tensor-unit attention.
+    prompt_scratch: prompt.Scratch,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
         errdefer gpa.destroy(out);
-        out.* = .{ .gpa = gpa, .model = model, .options = options, .scratch = try st.Scratch.init(model.device, options.capacity) };
+        out.* = .{ .gpa = gpa, .model = model, .options = options, .scratch = try st.Scratch.init(model.device, options.capacity), .prompt_scratch = try prompt.Scratch.init(model.device, options.capacity) };
         return out;
     }
 
@@ -32,6 +35,7 @@ pub const Metal = struct {
         }
         self.caches.deinit(self.gpa);
         self.scratch.deinit();
+        self.prompt_scratch.deinit();
         self.gpa.destroy(self);
     }
 
@@ -68,11 +72,11 @@ pub const Metal = struct {
         errdefer cache.deinit();
         var at: usize = 0;
         while (at < ids.len) {
-            const end = @min(ids.len, at + st.prompt_rows);
-            try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = end - at }}, ids[at..end]);
+            const end = @min(ids.len, at + st.chunk_rows);
+            try prompt.run(self.model, &self.prompt_scratch, cache, ids[at..end]);
             at = end;
         }
-        self.keepLast(cache, (ids.len - 1) % st.prompt_rows);
+        @memcpy(cache.logits.slice(u16, cfg.vocab), self.prompt_scratch.logits.slice(u16, cfg.vocab));
         try self.caches.put(self.gpa, stream, cache);
     }
 
