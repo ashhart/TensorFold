@@ -21,6 +21,8 @@ pub const Dim3 = launch.Dim3;
 pub const graph = @import("graph.zig");
 pub const cublaslt = @import("cublaslt.zig");
 pub const nccl = @import("nccl.zig");
+pub const tp_link = @import("tp_link.zig");
+pub const roce = @import("roce.zig");
 pub const triton = @import("triton.zig");
 pub const aot = @import("aot.zig");
 pub const kernels = @import("kernels.zig");
@@ -54,4 +56,5 @@ test {
     _ = carveout;
     _ = @import("nvfp4.zig");
     _ = @import("modelopt.zig");
+    _ = @import("tp_link.zig");
 }
