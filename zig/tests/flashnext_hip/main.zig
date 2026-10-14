@@ -38,7 +38,28 @@ fn parse(args: []const [:0]const u8) !Args {
         i += 1;
         if (i >= args.len) return error.MissingArgument;
         const v = args[i];
-        if (std.mem.eql(u8, name, "--tp")) a.world = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, name, "--rank")) a.rank = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, name, "--master")) a.master = v else if (std.mem.eql(u8, name, "--port")) a.port = try std.fmt.parseInt(u16, v, 10) else if (std.mem.eql(u8, name, "--policy")) a.policy = v else if (std.mem.eql(u8, name, "--text")) a.text = v else if (std.mem.eql(u8, name, "--max")) a.max = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, name, "--capacity")) a.capacity = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, name, "--repeat")) a.repeat = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, name, "--chunk")) a.chunk = try std.fmt.parseInt(usize, v, 10) else return error.UnknownOption;
+        if (std.mem.eql(u8, name, "--tp"))
+            a.world = try std.fmt.parseInt(usize, v, 10)
+        else if (std.mem.eql(u8, name, "--rank"))
+            a.rank = try std.fmt.parseInt(usize, v, 10)
+        else if (std.mem.eql(u8, name, "--master"))
+            a.master = v
+        else if (std.mem.eql(u8, name, "--port"))
+            a.port = try std.fmt.parseInt(u16, v, 10)
+        else if (std.mem.eql(u8, name, "--policy"))
+            a.policy = v
+        else if (std.mem.eql(u8, name, "--text"))
+            a.text = v
+        else if (std.mem.eql(u8, name, "--max"))
+            a.max = try std.fmt.parseInt(usize, v, 10)
+        else if (std.mem.eql(u8, name, "--capacity"))
+            a.capacity = try std.fmt.parseInt(usize, v, 10)
+        else if (std.mem.eql(u8, name, "--repeat"))
+            a.repeat = try std.fmt.parseInt(usize, v, 10)
+        else if (std.mem.eql(u8, name, "--chunk"))
+            a.chunk = try std.fmt.parseInt(usize, v, 10)
+        else
+            return error.UnknownOption;
     }
     return a;
 }
