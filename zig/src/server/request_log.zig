@@ -54,9 +54,8 @@ test "the request log is created owner-only and keeps image URLs out" {
     const body = try json.newObject(a);
     try body.put(a, "messages", .{ .array = try a.dupe(Value, &.{.{ .object = part }}) });
     append(a, path, .{ .object = body });
-    var st: std.c.Stat = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), std.c.stat(try a.dupeSentinel(u8, path, 0), &st));
-    try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(st.mode)) & 0o777);
+    const st = try std.Io.Dir.cwd().statFile(std.testing.io, path, .{}); // Linux's libc has no stat for std.c
+    try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(st.permissions.toMode())) & 0o777);
     const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(1 << 16));
     try std.testing.expect(std.mem.indexOf(u8, text, "<redacted>") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "example.test") == null);
