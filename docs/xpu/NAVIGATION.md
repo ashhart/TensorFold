@@ -27,7 +27,6 @@ nGEN, and is embedded in the executables.
 | [`zig/src/native/xpu.zig`](../../zig/src/native/xpu.zig) | The server's entry point for the XPU engine (`open`), the lane host's setup and the prompt cache's hooks. |
 | [`zig/src/native/xpu_lanes.zig`](../../zig/src/native/xpu_lanes.zig) | The **lane host** backend (`--parallel N`): slots, shared rounds, lone driver, structured output. |
 | [`zig/kernels/xpu/qwen27/*.cl`](../../zig/kernels/xpu/qwen27) | OpenCL C kernels (section 5); `glue.cl` includes `glue_attn.cl` and `glue_quant.cl`. |
-| [`zig/kernels/xpu/qwen27/triton/prompt_attention.spv`](../../zig/kernels/xpu/qwen27/triton) | The Python port's Triton prompt-attention kernel as SPIR-V, used only with `XPU_ATTN_TRITON=1`. |
 | [`zig/tools/xpu/w4_ngen.cpp`](../../zig/tools/xpu/w4_ngen.cpp), `w4_prompt.hpp`, `w4a8_prompt.hpp` | nGEN generator of the prompt GEMMs (section 8). |
 | [`zig/tools/xpu/rotate_w4.py`](../../zig/tools/xpu/rotate_w4.py) | Converter to Hadamard-rotated int4 weights (see the [recipe](RECIPE-qwen38-27b-b70.md)). |
 | [`zig/build/xpu.zig`](../../zig/build/xpu.zig) | Build steps `xpu-qwen27` and `xpu-native`. |
@@ -58,11 +57,10 @@ What the two XPU steps do (they share the same embedded kernels):
 1. Each `.cl` file is compiled by `ocloc` with `-cl-std=CL3.0 -cl-intel-256-GRF-per-thread`:
    `glue`, `decode`, `gemm` (with `-DGSZ=64`), `gemm128` (the same file with `-DGSZ=128`), `gdn` (from
    `gdn_chunk.cl`) and `drafter`.
-2. The Triton SPIR-V is compiled by `ocloc` for the same device (`prompt_attention`).
-3. `w4_ngen.cpp` is built for the host and **run at build time** to produce the nine prompt-GEMM binaries (zebin):
+2. `w4_ngen.cpp` is built for the host and **run at build time** to produce the nine prompt-GEMM binaries (zebin):
    `ngen_wide`, `ngen_narrow`, `ngen_wide128`, `ngen_narrow128`, `ngen_swiglu`, `ngen_swiglu128`, `ngen_a8`,
    `ngen_a8_swiglu`, `ngen_a4` (the options each gets are listed in `zig/build/xpu.zig`).
-4. Everything is embedded with `@embedFile` into the `xpu_qwen27_kernels` module that `qwen27.zig` imports as `kb`.
+3. Everything is embedded with `@embedFile` into the `xpu_qwen27_kernels` module that `qwen27.zig` imports as `kb`.
 
 `xpu-native` is `tensorfold-native` with the XPU engines linked in (`native/xpu.zig`).
 
@@ -110,7 +108,7 @@ then the final norm, the head GEMM, and `argmax_part` / `argmax`. What changes w
 | `T` | GEMM | GDN | Attention |
 |---|---|---|---|
 | 16 or fewer (decode, verification) | decode kernels (`w4k*` family) | serial `gdn_step`, as decode does | `attn_decode` + `attn_merge` |
-| more than 16 (prompt) | nGEN prompt GEMMs (`w4g_*`, or `w4a8` / `w4a4` with the W4A8 options) | chunked `gdn_prep`, `gdn_state`, `gdn_out` on 64-row chunks (padded with neutral rows) | `attn_prompt` (`attn_prompt8` with the int8 cache, the Triton kernel with `XPU_ATTN_TRITON=1`) |
+| more than 16 (prompt) | nGEN prompt GEMMs (`w4g_*`, or `w4a8` / `w4a4` with the W4A8 options) | chunked `gdn_prep`, `gdn_state`, `gdn_out` on 64-row chunks (padded with neutral rows) | `attn_prompt` (`attn_prompt8` with the int8 cache) |
 
 Below 17 rows the GDN runs serially so that a verified row equals the serial one bit for bit; that is the foundation
 of the speculative-decoding contracts (section 10).
@@ -204,8 +202,10 @@ takes `--context` (32 768 when not given), builds the `Runner` and serves it thr
 
 **Lane host (`--parallel N`).** `openLanes` creates `Lanes` (`xpu_lanes.zig`) as the backend of the core's lane
 host (`engine_api.LaneHost`, [`core/lane_host.zig`](../../zig/src/core/lane_host.zig)). The number of slots is
-`slotsThatFit`: what is left of the card (31 GiB assumed, less what is allocated and a 2 GiB margin) divided by
-`slotBytes()`, at most `MAX_SLOTS`, at least 1. At startup `measure()` times a verify plus keep of 1 to 16 rows on a
+`slotsThatFit`: the device's free memory read through Sysman once the model, the first stream's state and the drafter
+are loaded (`Gpu.freeMemory`), less a 2 GiB margin and the prompt cache, divided by `slotBytes()`, plus the first
+stream, at most `MAX_SLOTS`. When the margin and the cache do not fit, there is no slot and the engine refuses to
+open with a message. At startup `measure()` times a verify plus keep of 1 to 16 rows on a
 scratch context in the last slot (logged as `window ms by rows`); the core's depth rule uses these costs to weigh
 expected tokens per millisecond (without them it drafts at most 3 rows).
 
@@ -277,7 +277,6 @@ of the user-facing options; this table says where each is read.
 | `XPU_TREE`, `XPU_BLOCK` | `native/xpu.zig`, `qwen27_main.zig` | Tree nodes per round (server 15; the test runner 0, i.e. chains) and drafter block rows (8). |
 | `XPU_PREFILL_INT8`, `XPU_PREFILL_INT4`, `XPU_PREFILL_INT4_SITES` | `Runner.init` | W4A8 and W4A4 prompt GEMMs (local options; W4A4 needs W4A8 and rotated weights, else `Int4NeedsRotatedWeightsAndInt8`). |
 | `XPU_KV_INT8` | `Runner.init` | int8 K/V cache. |
-| `XPU_ATTN_TRITON` | `Runner.init` | Prompt attention through the Triton SPIR-V kernel. |
 | `XPU_PROFILE` | `Runner.init` | GPU time per kernel (timestamp events), printed by `profReport` after the prompt and the decode (test runner). |
 | `XPU_DUMP_H=FILE` | `Runner.init` | Append every row's final normed hidden state (fp16) to FILE, for the quality studies. |
 | `XPU_DUMP=DIR` | `Runner.init` | The first forward writes the residual stream after the embedding and after layers 0-3 (comparison with the Python port's layer reference). |

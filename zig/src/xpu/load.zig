@@ -240,6 +240,7 @@ pub fn loadGptq(d: *Dev, c: *const Checkpoint) !Model {
     }
     try d.sync();
     d.g.free(stage);
+    d.allocated -= 800 << 20; // the staging area is gone
     return m;
 }
 
@@ -295,5 +296,6 @@ pub fn load(d: *Dev, c: *const Checkpoint) !Model {
     }
     try d.sync();
     d.g.free(stage);
+    d.allocated -= 800 << 20; // the staging area is gone
     return m;
 }

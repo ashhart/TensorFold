@@ -107,18 +107,22 @@ fn cacheBudget(o: api.Open) u64 {
     return if (gib > 0) std.math.lossyCast(u64, gib * (1 << 30)) else 0;
 }
 
-/// Slots the card holds beside what is loaded: each a GDN state and a K/V cache of `context` tokens.
-fn slotsThatFit(runner: *xq.Runner, want: u32, reserve: u64) u32 {
-    const card: usize = 31 << 30; // the B70's 32 GiB, less the driver's share
-    const margin: usize = 2 << 30; // activations of later chunks, the drafter's growth
-    const free = card -| runner.d.allocated -| margin -| reserve;
-    const more: u32 = @intCast(@min(free / runner.slotBytes(), xq.MAX_SLOTS - 1));
-    return @max(1, @min(want, 1 + more));
+/// Streams the card holds once the model, the first stream's state and the drafter are loaded: its free memory, at most
+/// its size less what this engine allocated (the driver backs memory when it is first written), holds each further
+/// one a GDN state and a K/V cache of `context` tokens; 0 when the activations' margin and the prompt cache do not fit.
+fn slotsThatFit(runner: *xq.Runner, want: u32, reserve: u64) !u32 {
+    const margin: u64 = 2 << 30; // activations of later chunks, the drafter's growth
+    const mem = try runner.d.g.memory();
+    const free = @min(mem.free, mem.size -| runner.d.allocated);
+    if (free < margin + reserve) return 0;
+    const more: u32 = @intCast(@min((free - margin - reserve) / runner.slotBytes(), xq.MAX_SLOTS - 1));
+    return @min(want, 1 + more);
 }
 
 fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter, o: api.Open, context: u32) !api.Opened {
     const budget = cacheBudget(o);
-    const slots = slotsThatFit(runner, @min(@max(o.lanes, 1), xq.MAX_SLOTS), budget);
+    const slots = try slotsThatFit(runner, @min(@max(o.lanes, 1), xq.MAX_SLOTS), budget);
+    if (slots == 0) return error.StreamDoesNotFit;
     const h = try gpa.create(LaneServed);
     errdefer gpa.destroy(h);
     const gpa_box = try gpa.create(Allocator);
@@ -170,5 +174,11 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
             return null;
         };
     };
-    return try openLanes(gpa, io, runner, dr, o, context);
+    return openLanes(gpa, io, runner, dr, o, context) catch |err| {
+        problem.* = if (err == error.StreamDoesNotFit)
+            try std.fmt.allocPrint(a, "the XPU engine cannot hold a stream of {d} tokens and a {d:.1} GiB prompt cache beside {s} on this card", .{ context, @as(f64, @floatFromInt(cacheBudget(o))) / (1 << 30), o.dir })
+        else
+            try std.fmt.allocPrint(a, "the XPU engine could not serve {s}: {s}", .{ o.dir, @errorName(err) });
+        return null;
+    };
 }

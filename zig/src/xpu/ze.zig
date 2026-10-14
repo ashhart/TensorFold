@@ -37,6 +37,43 @@ pub const Api = struct {
     zeEventQueryKernelTimestamp: *const fn (H, *KernelTimestampResult) callconv(.c) u32,
 };
 
+/// Sysman, for the free memory of the device's own memory modules (Gpu.freeMemory).
+pub const SysApi = struct {
+    zesInit: *const fn (u32) callconv(.c) u32,
+    zesDriverGet: *const fn (*u32, ?[*]H) callconv(.c) u32,
+    zesDeviceGet: *const fn (H, *u32, ?[*]H) callconv(.c) u32,
+    zesDeviceGetProperties: *const fn (H, *SysDeviceProperties) callconv(.c) u32,
+    zesDeviceEnumMemoryModules: *const fn (H, *u32, ?[*]H) callconv(.c) u32,
+    zesMemoryGetProperties: *const fn (H, *MemProperties) callconv(.c) u32,
+    zesMemoryGetState: *const fn (H, *MemState) callconv(.c) u32,
+};
+/// zes_device_properties_t: the core properties, then strings this backend does not read.
+pub const SysDeviceProperties = extern struct {
+    stype: u32 = 0x1, // ZES_STRUCTURE_TYPE_DEVICE_PROPERTIES
+    pNext: ?*anyopaque = null,
+    core: DeviceProperties = .{ .stype = 0x3 }, // ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES
+    num_subdevices: u32 = 0,
+    strings: [6][64]u8 = @splat(@splat(0)), // serial, board, brand, model, vendor, driver version
+};
+pub const MemProperties = extern struct {
+    stype: u32 = 0xb, // ZES_STRUCTURE_TYPE_MEM_PROPERTIES
+    pNext: ?*anyopaque = null,
+    type: u32 = 0,
+    on_subdevice: u8 = 0,
+    subdevice_id: u32 = 0,
+    location: u32 = 0, // 1: on-board device memory
+    physical_size: u64 = 0,
+    bus_width: i32 = 0,
+    channels: i32 = 0,
+};
+pub const MemState = extern struct {
+    stype: u32 = 0x1e, // ZES_STRUCTURE_TYPE_MEM_STATE
+    pNext: ?*const anyopaque = null,
+    health: u32 = 0,
+    free: u64 = 0,
+    size: u64 = 0,
+};
+
 /// ZE_extension_record_replay_graph: capture an immediate list into a graph, then replay it.
 pub const GraphApi = struct {
     zeCommandListBeginGraphCaptureExt: *const fn (H, ?*const anyopaque) callconv(.c) u32,
@@ -161,6 +198,42 @@ pub const Gpu = struct {
                 var ctx: H = null;
                 try check(api.zeContextCreate(drv, &.{}, &ctx));
                 return .{ .lib = lib, .api = api, .driver = drv, .device = dev, .context = ctx, .props = p };
+            }
+        }
+        return error.NoDevice;
+    }
+
+    /// The device's on-board memory by Sysman (the same device, matched by UUID): bytes free now and in all. The driver
+    /// backs an allocation when it is first written, so `free` does not yet count allocations never written.
+    pub fn memory(g: *Gpu) Error!struct { free: u64, size: u64 } {
+        const sys = try resolve(SysApi, &g.lib);
+        try check(sys.zesInit(0));
+        var nd: u32 = 8;
+        var drivers: [8]H = @splat(null);
+        try check(sys.zesDriverGet(&nd, &drivers));
+        for (drivers[0..nd]) |drv| {
+            var nv: u32 = 8;
+            var devs: [8]H = @splat(null);
+            try check(sys.zesDeviceGet(drv, &nv, &devs));
+            for (devs[0..nv]) |dev| {
+                var p: SysDeviceProperties = .{};
+                try check(sys.zesDeviceGetProperties(dev, &p));
+                if (!std.mem.eql(u8, &p.core.uuid, &g.props.uuid)) continue;
+                var nm: u32 = 16;
+                var mods: [16]H = @splat(null);
+                try check(sys.zesDeviceEnumMemoryModules(dev, &nm, &mods));
+                var left: u64 = 0;
+                var all: u64 = 0;
+                for (mods[0..nm]) |m| {
+                    var mp: MemProperties = .{};
+                    try check(sys.zesMemoryGetProperties(m, &mp));
+                    if (mp.location != 1) continue;
+                    var st: MemState = .{};
+                    try check(sys.zesMemoryGetState(m, &st));
+                    left += st.free;
+                    all += if (mp.physical_size > 0) mp.physical_size else st.size;
+                }
+                return .{ .free = left, .size = all };
             }
         }
         return error.NoDevice;

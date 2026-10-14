@@ -71,8 +71,6 @@ pub var dump_h: ?c_int = null;
 pub var a8_group: u32 = 0;
 /// K/V cache study (XPU_KV8): 1 rotates q, k, v by Hadamard, 2 quantizes k, v to int8 per head, 3 both.
 pub var kv8: i32 = 0;
-/// The prompt attention: our DPAS kernel (attn_prompt), or the port's Triton one with XPU_ATTN_TRITON=1.
-pub var attn_own = true;
 /// Int8 K/V cache (XPU_KV_INT8=1): 256 int8 per position and head, then float scales after MAX_CTX positions.
 pub var kv_i8 = false;
 /// Rotated weights (`hadamard128` in the checkpoint): every GEMM input is rotated by blocks of 128 where it is made.
@@ -124,11 +122,11 @@ pub const Runner = struct {
     taps_on: bool = false,
     on_taps: ?struct { ctx: *anyopaque, f: *const fn (*anyopaque, *anyopaque, u32) anyerror!void } = null,
 
-    /// Loads `dir` (MLX affine 4/64) onto the first B70 with room for `context` positions.
+    /// Loads `dir` (MLX affine 4/64 or GPTQ 4/128) onto the first Arc Pro B70 (PCI id 0xe223) with room for `context`
+    /// positions.
     pub fn init(dir: []const u8, context: u32) !*Runner {
         if (std.c.getenv("XPU_DUMP")) |v| dump_dir = std.mem.span(v);
         if (std.c.getenv("XPU_PREFILL_INT8") != null) prefill_int8 = true;
-        if (std.c.getenv("XPU_ATTN_TRITON") != null) attn_own = false;
         if (std.c.getenv("XPU_KV_INT8") != null) kv_i8 = true;
         if (std.c.getenv("XPU_PREFILL_INT4") != null) prefill_int4 = true;
         if (std.c.getenv("XPU_PREFILL_INT4_SITES")) |v| int4_sites = try std.fmt.parseInt(u32, std.mem.span(v), 10);
@@ -180,7 +178,6 @@ pub const Runner = struct {
         const mm128 = try d.g.module(&kb.gemm128);
         const mw128 = try d.g.module(&kb.ngen_wide128);
         const mn128 = try d.g.module(&kb.ngen_narrow128);
-        const mpa = try d.g.module(&kb.prompt_attention);
         d.k = .{
             .embed = try d.kernel(mg, "embed", 256),
             .add_rmsnorm = try d.kernel(mg, "add_rmsnorm", 128),
@@ -231,7 +228,6 @@ pub const Runner = struct {
             .gdn_out = try d.kernel(mgd, "gdn_out", 128),
             .ngen_wide = try d.kernel(mw, "w4g_dpb", 256),
             .ngen_narrow = try d.kernel(mn, "w4g_s4dpb", 256),
-            .prompt_attn = try d.kernel(mpa, "_prompt", 512),
         };
         // the shared rounds' kernels reach each slot's states through the per-row table (acts.mt)
         for ([_]ze.H{ d.k.attn_prep, d.k.attn_decode, d.k.gdn_pre, d.k.gdn_step }) |k| try d.g.indirect(k);

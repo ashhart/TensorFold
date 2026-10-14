@@ -112,7 +112,6 @@ pub const Dev = struct {
         gdn_out: ze.H,
         ngen_wide: ze.H,
         ngen_narrow: ze.H,
-        prompt_attn: ze.H,
     },
 
     pub fn kernel(d: *Dev, m: ze.H, name: [*:0]const u8, local: u32) !ze.H {

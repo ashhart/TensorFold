@@ -40,7 +40,7 @@ tensorfold-native serve MODEL --drafter DFLASH2 --parallel 8 --context 16384 --h
 
 With `--parallel N` (N > 1), each stream has its own slot on the card: GDN state (2 × 151 MB, the state and its
 backup for verification) and K/V cache (64 KB per token of `--context`). The number of slots is bounded by the memory
-left after loading (`slotsThatFit`). A lone stream that asks for drafts runs as a DFlash2 tree. As soon as another
+left after loading, as the device reports it (`slotsThatFit`); a stream that does not fit is refused at startup. A lone stream that asks for drafts runs as a DFlash2 tree. As soon as another
 stream arrives, the core takes it over in shared rounds: one forward for the windows of all streams (the pending
 token, then either copies of the context as a chain or the stream's DFlash2 drafts: a tree from 5 drafts up, a chain
 below), 16 rows at most. Each slot has its own DFlash2 context (the drafter's K/V in a ring of 2,080 positions,
@@ -71,7 +71,6 @@ Options through environment variables:
 |---|---|
 | `XPU_PREFILL_INT4=1` | **Local option**, with `XPU_PREFILL_INT8=1` and a rotated checkpoint (`zig/tools/xpu/rotate_w4.py`, marker `hadamard128`): `down` input in int4 (DPAS u4 × s4), +8 % prefill at equal quality to GPTQ W4A8; `XPU_PREFILL_INT4_SITES=10` adds the mixer outputs (+12 %, perplexity +1 %). |
 | `XPU_KV_INT8=1` | **Option** (the default stays bf16): K/V cache in int8 (scale per position and K/V head): half the memory, 12 streams instead of 7 at 16 k tokens, 7 instead of 3 at 32 k; perplexity unchanged (±0.04 %), DFlash2 acceptance unchanged. Answers are not bit-identical to those of the bf16 cache (15 of 24 greedy answers identical over 256 tokens, the others diverge on near-ties); the drafted == serial and multi-stream == serial contracts hold in this mode. Prompt attention `attn_prompt8`: Q·Kᵀ in int8 DPAS, P·V in fp16. |
-| `XPU_ATTN_TRITON=1` | Prompt attention through the Triton kernel of the Python port instead of the engine's own (`attn_prompt`) |
 | `XPU_PREFILL_INT8=1` | **Local option**: prompt GEMMs in W4A8, int8 activations per (row, group of 128), GPTQ only. Decoding stays in fp16. |
 | `XPU_TREE=N` | DFlash2 tree nodes per round (15 by default; 0: a chain) |
 | `XPU_BLOCK=N` | Rows of the drafter block (8) |
@@ -125,7 +124,6 @@ DPAS. The gate|up GEMM alone sustains 146 TFLOPS fp16 and ~209 TOPS in int8.
 | `zig/src/xpu/qwen27_main.zig` | Test executable: oracle, contracts, profiles, probes |
 | `zig/kernels/xpu/qwen27/*.cl` | OpenCL C kernels: decode int4 GEMM, chunked and serial GDN, decode attention, norms, SwiGLU, int8 quantization, drafter |
 | `zig/kernels/xpu/qwen27/decode.cl` (`attn_prompt`, `attn_prompt8`) | Prompt attention: FlashAttention-2 on DPAS in oneDNN's orientation (S = K·Qᵀ, one query per lane, softmax within the lane); bf16 or int8 cache |
-| `zig/kernels/xpu/qwen27/triton/prompt_attention.spv` | Former prompt attention (the Python port's Triton kernel, as SPIR-V), with `XPU_ATTN_TRITON=1` |
 | `zig/tools/xpu/w4_ngen.cpp`, `w4_prompt.hpp`, `w4a8_prompt.hpp` | nGEN generator of the prompt GEMMs: int4 fp16 (`w4g_dpb`, `w4g_s4dpb`, SwiGLU epilogue), W4A8 (`w4a8`) and W4A4 (`w4a4`) |
 | `zig/build/xpu.zig` | Build steps |
 
