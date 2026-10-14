@@ -1,6 +1,4 @@
-//! Flash Next behind the native server: one reply at a time on the replay engine (prompt chunks, then GPU-side
-//! rounds), sampled on the GPU when a request asks (speed-up mode greedy only); the engine's thread owns the GPU,
-//! requests wait in arrival order (foreground first).
+//! Flash Next behind the native server: one reply at a time, sampled on the GPU on request (speed-up mode greedy only).
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -26,6 +24,7 @@ const Job = struct {
     keep_ns: i96 = 0, // the cache's saves at the pass's marks
 };
 
+/// The engine's thread owns the GPU; requests wait their turn, foreground first, each in arrival order.
 pub const Host = struct {
     gpa: Allocator,
     io: std.Io,
