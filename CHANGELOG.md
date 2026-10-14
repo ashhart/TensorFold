@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- GLM-5.3-Flash's KDA and router kernels ask the Metal compiler for the 1,024 threads a threadgroup they launch with. On an M1 Max the compiler had built both KDA pipelines for 512 threads and several router widths for fewer than 1,024, so those launches could leave outputs unwritten without an error. The kernels' arithmetic is unchanged, and `launch_check.zig` runs every router width and both KDA head counts at 1,024 threads against float64, with a 512-thread control and recurrent seams. On an M3 Ultra, whose compiler already allowed 1,024 threads, the checks pass, every GLM-5.3-Flash pipeline keeps its limit and its threadgroup memory (at most 24 KiB, under the 32 KiB of M1-family GPUs), and GLM-5.3-Flash with 8 of its 45 layers gave the same tokens as before, drafted and with `"draft": false`, resumed and concurrent, with decode and prompt speed within 0.25% (#708). Thanks to @mrv777.
+
 ## 1.0.11
 
 - `--cortheon`'s instruction filter keeps reading past a long word. A word longer than the filter's scan buffer ended the scan early, so an order written after one was never checked; each word now keeps at most 16 bytes, so a long word can no longer end the scan (#829). Thanks to @joeynyc.
