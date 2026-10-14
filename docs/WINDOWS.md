@@ -34,6 +34,32 @@ tensorfold-native serve <model path> --name local-model --parallel 1 --context 8
 
 The server listens on `http://127.0.0.1:8888/v1`. Ctrl+C (or closing the console) stops it cleanly.
 
+## Models on CUDA
+
+Nemotron 3.5 Lightning serves as on Linux. The Qwen3.5 hybrids have a CUDA engine of their own in this port
+(`zig/src/families/qwen3_5/cuda*.zig`, kernels `zig/kernels/cuda/qwen35*.cu`), the Metal kernels' arithmetic with
+the same rounding points, so a window of up to 16 rows reproduces one-token steps bit for bit:
+
+```bat
+tensorfold-native serve <Qwen3.5-2B-MLX-4bit> --name qwen2b --context 32768
+tensorfold-native serve <Qwen3.8-27B-MLX-4bit> --name qwen27b --context 8192 --parallel 4 ^
+  --drafter <Qwen3.8-27B-DFlash2>
+```
+
+- Qwen3.5-2B: about 340 tokens/s for one request on an RTX 4090, 1,500 across eight.
+- Qwen3.8-27B (16 GiB): 40 tokens/s plain, at the card's memory bandwidth; 240 across eight requests.
+- `--drafter` (4-bit only) loads z-lab's DFlash2 draft model: the target writes five layers' residuals into a ring
+  for it, and it drafts a tree of up to 12 lanes a round that the round loop's planner shapes from what the target
+  took. A lone greedy request decodes at 80 to 160 tokens/s by how predictable the text is (prose at the low end,
+  code at the high), sampled ones at 50 to 70, and four at once reach about 160 aggregate; replies stay identical to
+  plain decoding. Loading takes about 80 s: the drafter's weights are quantized to 4 bits on the host and every
+  shape is run once, as the driver stalls a process's first use of each kernel and buffer.
+- A verify window's rows are not snapshotted: each stream logs its rows' recurrence updates and a keep replays the
+  accepted path, so the 27B records 32 rows a forward where 8 fit before.
+- `TF_TIMING=1` prints each verify, keep, absorb and hold's milliseconds and the drafted shape (chain or lanes);
+  `TF_NO_TREES=1` drafts chains only.
+- No prompt cache (`--prompt-cache-gib`), `--learn` or `--slide` for these two models.
+
 ## How the port works
 
 - `zig/src/platform/sys.zig` (`@import("sys")`, wired into every module by `zig/build/sys.zig`) is the operating
