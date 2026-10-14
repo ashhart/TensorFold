@@ -88,7 +88,7 @@ fn hcOn(r: *Run, sh: *rows_w.Shared, h: *replay.Hc) !void {
     const part = try r.buffer(10 * rows * s.nd * 4);
     var outs: [2][2]mtl.Buffer = undefined;
     for (&outs) |*o| o.* = .{ try r.buffer(rows * D * 2), try r.buffer(rows * 4 * 2) };
-    defer for ([_]mtl.Buffer{ hn, ssp, small, part, outs[0][0], outs[0][1], outs[1][0], outs[1][1] }) |b| b.deinit();
+    defer for ([_]mtl.Buffer{ hn, ssp, small, part, outs[0][0], outs[0][1], outs[1][0], outs[1][1] }) |b| r.release(b);
     const cb = r.queue.commandBuffer();
     const e = cb.compute(.serial);
     for (outs, [_]bool{ false, true }) |o, tiles| {
@@ -223,7 +223,7 @@ fn warm(r: *Run, d: *const rows_w.Dense) !void {
     const x = try r.buffer(rows * d.k * 2);
     for (x.slice(u16, rows * d.k)) |*v| v.* = @truncate(@as(u32, @bitCast(prng.random().float(f32) - 0.5)) >> 16);
     const y = [3]mtl.Buffer{ try r.buffer(rows * d.n * 2), try r.buffer(rows * d.n * 2), try r.buffer(rows * d.n * 2) };
-    defer for ([_]mtl.Buffer{ x, y[0], y[1], y[2] }) |b| b.deinit();
+    defer for ([_]mtl.Buffer{ x, y[0], y[1], y[2] }) |b| r.release(b);
     const cb = r.queue.commandBuffer();
     const e = cb.compute(.serial);
     for (d.members) |mb| _ = try rows_w.pipes(

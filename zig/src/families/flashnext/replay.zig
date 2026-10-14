@@ -922,6 +922,16 @@ pub const Run = struct {
         if (r.follow) |f| f.join(f.ctx, b);
     }
 
+    /// A buffer `buffer`, `load` or `group` made, freed by its caller: off the held list and out of the set first.
+    pub fn release(r: *Run, b: mtl.Buffer) void {
+        for (r.held.items, 0..) |x, i| if (x.id == b.id) {
+            _ = r.held.swapRemove(i);
+            break;
+        };
+        if (r.follow) |f| f.leave(f.ctx, b);
+        b.deinit();
+    }
+
     /// Every tensor of a safetensors file in the index, at its absolute offset.
     pub fn indexFile(r: *Run, path: [:0]const u8) !void {
         const fd = std.c.open(path, .{ .ACCMODE = .RDONLY });
