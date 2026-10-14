@@ -62,3 +62,45 @@ test "the request log is created owner-only and keeps image URLs out" {
     try std.testing.expect(std.mem.indexOf(u8, text, "<redacted>") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "example.test") == null);
 }
+
+test "appends from several threads keep every line whole" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try std.process.currentPathAlloc(std.testing.io, a);
+    defer a.free(cwd);
+    const path = try std.fmt.allocPrint(a, "{s}/.zig-cache/tmp/{s}/log.jsonl", .{ cwd, tmp.sub_path });
+    defer a.free(path);
+    const threads = 8;
+    const lines = 200;
+    const head = "{\"line\": \"";
+    const Worker = struct {
+        fn run(p: []const u8, k: u8) void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena.deinit();
+            const text = arena.allocator().alloc(u8, 300) catch return;
+            @memset(text, 'a' + k);
+            for (0..lines) |_| {
+                const o = json.newObject(arena.allocator()) catch return;
+                o.put(arena.allocator(), "line", .{ .string = text }) catch return;
+                append(arena.allocator(), p, .{ .object = o });
+            }
+        }
+    };
+    var workers: [threads]std.Thread = undefined;
+    for (&workers, 0..) |*w, k| w.* = try std.Thread.spawn(.{}, Worker.run, .{ path, @as(u8, @intCast(k)) });
+    for (workers) |w| w.join();
+    const got = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(1 << 24));
+    defer a.free(got);
+    var counts: [threads]usize = @splat(0);
+    var it = std.mem.splitScalar(u8, got, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        try std.testing.expectEqual(head.len + 300 + 2, line.len);
+        const k = line[head.len] - 'a';
+        try std.testing.expect(k < threads);
+        for (line[head.len..][0..300]) |c| try std.testing.expectEqual('a' + k, c);
+        counts[k] += 1;
+    }
+    for (counts) |n| try std.testing.expectEqual(@as(usize, lines), n);
+}
