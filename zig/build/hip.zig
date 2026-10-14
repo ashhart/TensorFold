@@ -73,3 +73,10 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     b.step("hip-affine-build", "Compile affine golden GPU test without executing").dependOn(&affine_test.step);
     b.step("hip-affine-test", "Run exact affine golden GPU regression").dependOn(&b.addRunArtifact(affine_test).step);
 }
+
+/// The backend-neutral core (checkpoint formats, the kernel registry), as the other backends import it.
+fn coreModule(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .link_libc = true });
+    core.addImport("tokenizer", b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .link_libc = true }));
+    return core;
+}
