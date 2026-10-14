@@ -132,11 +132,16 @@ const Capture = struct {
 const Reply = struct { status: u16, body: []u8 };
 
 fn exchange(srv: *server.Server, path: []const u8, body: []const u8) !Reply {
+    return exchangeAs(srv, "POST", path, body);
+}
+
+fn exchangeAs(srv: *server.Server, method: []const u8, path: []const u8, body: []const u8) !Reply {
     var pair: [2]std.c.fd_t = undefined;
     if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
     defer _ = std.c.close(pair[0]);
     defer _ = std.c.close(pair[1]);
-    const head = try std.fmt.allocPrint(std.testing.allocator, "POST {s} HTTP/1.1\r\nHost: t\r\nContent-Length: {d}\r\n\r\n", .{ path, body.len });
+    const request_line = "{s} {s} HTTP/1.1\r\nHost: t\r\nContent-Length: {d}\r\n\r\n";
+    const head = try std.fmt.allocPrint(std.testing.allocator, request_line, .{ method, path, body.len });
     defer std.testing.allocator.free(head);
     try writeAll(pair[0], head);
     try writeAll(pair[0], body);
@@ -184,6 +189,36 @@ fn promptText(ids: []const u32) ![]u8 {
     const text = try std.testing.allocator.alloc(u8, ids.len);
     for (ids, text) |id, *byte| byte.* = @intCast(id);
     return text;
+}
+
+test "/v1/imprint: without --learn-conversations each route refuses and names the flag; with it, the engine answers" {
+    var text: DropLate = .{};
+    var backend: Capture = .{};
+    defer std.testing.allocator.free(backend.prompt);
+    var srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = false,
+    }, null);
+    defer srv.deinit();
+    const go = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"go\"}]}";
+    const off = "saved conversations are off: start the server with --learn-conversations";
+    const routes_ = [_][2][]const u8{
+        .{ "POST", "/v1/imprint/resume" },
+        .{ "POST", "/v1/imprint/load" },
+        .{ "DELETE", "/v1/imprint" },
+    };
+    for ([_]bool{ false, true }) |on| {
+        srv.config.saved_conversations = on;
+        for (routes_) |r| {
+            const got = try exchangeAs(srv, r[0], r[1], if (r[0][0] == 'P') go else "");
+            defer std.testing.allocator.free(got.body);
+            const refused = std.mem.indexOf(u8, got.body, off) != null;
+            // on: the route reaches the engine, and this one (no imprint hook) answers 501 as before
+            try std.testing.expectEqual(@as(u16, if (on) 501 else 404), got.status);
+            try std.testing.expectEqual(!on, refused);
+        }
+    }
 }
 
 test "a mid-conversation system message renders the same prompt on Messages and on chat" {

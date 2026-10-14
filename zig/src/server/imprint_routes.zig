@@ -26,6 +26,10 @@ const Never = struct {
 
 /// POST /v1/imprint/resume and /v1/imprint/load: a chat body rendered as its request would be, asked of the engine.
 pub fn post(srv: *Server, conn: *Conn, a: Allocator, op: api.ImprintOp) void {
+    if (!srv.config.saved_conversations) {
+        _ = http_body.read(conn, a, http_body.limit) catch {}; // dropped, so it cannot reach the next request
+        return off(conn, a);
+    }
     var cx: errors.Cx = .{ .a = a };
     const body = http_body.readJson(conn, &cx) catch return refuse(conn, a, &cx);
     const input = openai.chatInput(srv, &cx, body) catch return refuse(conn, a, &cx);
@@ -37,6 +41,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, op: api.ImprintOp) void {
 
 /// DELETE /v1/imprint: this model's conversation states on disk forgotten (RAM keeps what it holds).
 pub fn forget(srv: *Server, conn: *Conn, a: Allocator) void {
+    if (!srv.config.saved_conversations) return off(conn, a);
     const ask = make(srv, .forget, .{ .prompt = &.{}, .max_tokens = 0 }) catch return conn.sendError(a, 500, "out of memory", null) catch {};
     answer(srv, conn, a, ask);
 }
@@ -98,6 +103,13 @@ fn reply(a: Allocator, ask: *const Ask) !Value {
         try o.put(a, "load_seconds", .{ .float = ask.load_seconds });
     }
     return .{ .object = o };
+}
+
+/// Without --learn-conversations each route says so, rather than answer for a store the engine never opened.
+fn off(conn: *Conn, a: Allocator) void {
+    const message = "saved conversations are off: start the server with --learn-conversations";
+    const quoted = json.quote(a, message, .{}) catch return;
+    conn.sendJson(404, std.fmt.allocPrint(a, "{{\"error\": {{\"message\": {s}}}}}", .{quoted}) catch return);
 }
 
 fn refuse(conn: *Conn, a: Allocator, cx: *const errors.Cx) void {
