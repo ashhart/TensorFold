@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- `--cortheon`'s instruction filter keeps reading past a long word. A word longer than the filter's scan buffer ended the scan early, so an order written after one was never checked; each word now keeps at most 16 bytes, so a long word can no longer end the scan (#829). Thanks to @joeynyc.
+
 ## 1.0.10
 
 - `cortheon_fetch` reads only URLs the conversation has already shown: search results, links on pages it has read, and URLs in the user's, the system prompt's or a tool's messages, never one that appears only in the model's replies, so a page that steers the model cannot make it build a URL that carries conversation text. The one exception is one named package's registry JSON on PyPI, npm or crates.io, a name of at most 64 characters. A refused fetch tells the model to search for the page. The `cortheon` object's `pages_read` now counts only pages read, not refused or failed fetches.
