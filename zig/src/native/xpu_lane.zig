@@ -46,6 +46,9 @@ pub fn Xpu(comptime S: type) type {
         const Self = @This();
         /// The family's engine has drafted rounds (Nemotron: verifyRows, keepRows, draftKept, draftFirst).
         const has_head = @hasDecl(S.Engine, "verifyRows");
+        /// A stream's sequence, its held drafts, its last window's unkept rows and where that window started.
+        const Lane = struct { seq: *Seq, held: [max_rows]u32 = undefined, held_n: usize = 0, pending: ?u32 = null, start: u32 = 0 };
+        const Seq = if (has_head) S.Engine.Sequence else void;
         gpa: std.mem.Allocator,
         e: *S.Engine,
         logits: []f32,
@@ -55,11 +58,10 @@ pub fn Xpu(comptime S: type) type {
         halt: ?*const std.atomic.Value(bool) = null,
         /// Called once on the first prompt, after the server installed its signal handlers.
         started: ?*const fn () void = null,
-        /// The head's drafts held for the next window, the last window's rows not yet kept and where it started.
-        held: [max_rows]u32 = undefined,
-        held_n: usize = 0,
-        pending_rows: ?u32 = null,
-        start: u32 = 0,
+        lane_of: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
+        own_free: bool = true, // no stream holds the engine's own sequence
+        /// Streams in one round at most (drafting engines; the host sets it from --parallel).
+        streams: u32 = 1,
         /// Measured at load (measure): window ms by width and one chained head step.
         costs: [max_rows]lanes.config.Cost = undefined,
         mtp_ms: f64 = 0,
@@ -75,6 +77,11 @@ pub fn Xpu(comptime S: type) type {
         }
 
         pub fn deinit(self: *Self) void {
+            if (comptime has_head) {
+                var it = self.lane_of.valueIterator();
+                while (it.next()) |l| self.e.freeSeq(l.seq);
+            }
+            self.lane_of.deinit(self.gpa);
             self.gpa.free(self.logits);
             if (self.row_logits.len > 0) self.gpa.free(self.row_logits);
         }
@@ -115,7 +122,9 @@ pub fn Xpu(comptime S: type) type {
                 .drafts = max_rows - 1,
                 .window_costs = self.costs[0..max_rows],
                 .mtp_step_ms = self.mtp_ms,
-                .max_streams = 1,
+                .hidden_rows = self.streams > 1, // a round's windows of several streams, one after another
+                .batch_rows = max_rows * self.streams,
+                .max_streams = self.streams,
             };
         }
 
@@ -144,11 +153,19 @@ pub fn Xpu(comptime S: type) type {
             for (0..rows) |r| out[r] = try draw(self.gpa, self.row_logits[r * v ..][0..v], sampling.?, positions[r]);
         }
 
-        /// Commit the last window's kept rows if a keep has not yet.
-        fn settle(self: *Self, kept: ?usize) !void {
+        /// The stream's lane with its sequence bound to the model.
+        fn bound(self: *Self, s: *const lanes.Stream) !*Lane {
+            if (comptime !has_head) unreachable;
+            const l = self.lane_of.getPtr(s) orelse return error.UnknownStream;
+            self.e.bind(l.seq);
+            return l;
+        }
+
+        /// Commit the lane's last window's kept rows if a keep has not yet (its sequence bound).
+        fn settle(self: *Self, l: *Lane, kept: ?usize) !void {
             if (comptime !has_head) return;
-            const rows = self.pending_rows orelse return;
-            self.pending_rows = null;
+            const rows = l.pending orelse return;
+            l.pending = null;
             try self.e.keepRows(@intCast(kept orelse rows));
         }
 
@@ -185,11 +202,18 @@ pub fn Xpu(comptime S: type) type {
             }
             const ids = s.prompt();
             if (ids.len == 0 or ids.len + s.max_new + 1 > e.max_len) return error.PromptTooLong;
-            try e.reset();
             if (comptime has_head) if (self.drafting()) {
-                // the whole prompt in prompt windows; the head absorbs every row but the last (draftFirst takes it)
-                self.held_n = 0;
-                self.pending_rows = null;
+                // the stream's sequence (the engine's own while free), then the prompt in prompt windows
+                const gop = try self.lane_of.getOrPut(self.gpa, s);
+                if (gop.found_existing) self.dropSeq(gop.value_ptr.seq);
+                const own = self.own_free;
+                gop.value_ptr.* = .{ .seq = if (own) &e.own else e.newSeq() catch |err| {
+                    self.lane_of.removeByPtr(gop.key_ptr);
+                    return err;
+                } };
+                if (own) self.own_free = false;
+                e.bind(gop.value_ptr.seq);
+                try e.reset();
                 try e.prefillHead(ids, S.promptRows(e));
                 if (s.isCancelled()) return error.Cancelled;
                 var first: [1]u32 = undefined;
@@ -197,6 +221,7 @@ pub fn Xpu(comptime S: type) type {
                 _ = self.take(first[0]);
                 return;
             };
+            try e.reset();
             const head = ids[0 .. ids.len - 1];
             if (head.len > 16) {
                 const window = S.promptRows(e);
@@ -242,46 +267,48 @@ pub fn Xpu(comptime S: type) type {
             out[0].sampled[0] = try self.step(w.pending, w.stream.sampling, w.positions[0]);
         }
 
+        /// Every stream's window in turn, each on its own sequence (a stream's bits never depend on the others').
         fn verifyWindow(self: *Self, windows: []const be.Window, out: []be.Verified) !void {
             if (comptime !has_head) unreachable;
-            if (windows.len != 1) return error.WindowTooWide;
-            const w = windows[0];
-            if (w.parents != null) return error.TreesNotBuilt;
-            const rows = w.rows();
-            if (rows > max_rows) return error.WindowTooWide;
-            try self.settle(null);
+            if (windows.len > self.streams) return error.WindowTooWide;
             const e = self.e;
-            for (w.positions, 0..) |p, r| if (p != e.m.pos + 1 + r) return error.PositionMismatch;
-            var ids: [max_rows]u32 = undefined;
-            ids[0] = w.pending;
-            if (w.held > 0) {
-                if (w.held > self.held_n) return error.NoHeldDrafts;
-                @memcpy(ids[1..][0..w.held], self.held[0..w.held]);
-            } else @memcpy(ids[1..][0..w.tokens.len], w.tokens);
-            self.start = e.m.pos;
-            self.held_n = 0;
-            if (rows == 1) { // no drafts: the decode step, kept in place
-                out[0].sampled[0] = try self.stepOne(w.pending, w.stream.sampling, w.positions[0]);
-                return;
+            for (windows, out) |w, *o| {
+                if (w.parents != null) return error.TreesNotBuilt;
+                const rows = w.rows();
+                if (rows > max_rows) return error.WindowTooWide;
+                const l = try self.bound(w.stream);
+                try self.settle(l, null);
+                for (w.positions, 0..) |p, r| if (p != e.m.pos + 1 + r) return error.PositionMismatch;
+                var ids: [max_rows]u32 = undefined;
+                ids[0] = w.pending;
+                if (w.held > 0) {
+                    if (w.held > l.held_n) return error.NoHeldDrafts;
+                    @memcpy(ids[1..][0..w.held], l.held[0..w.held]);
+                } else @memcpy(ids[1..][0..w.tokens.len], w.tokens);
+                l.start = e.m.pos;
+                l.held_n = 0;
+                if (rows == 1) { // no drafts: the decode step, kept in place
+                    o.sampled[0] = try self.stepOne(w.pending, w.stream.sampling, w.positions[0]);
+                    continue;
+                }
+                try e.verifyRows(ids[0..rows]);
+                try self.drawRows(rows, w.stream.sampling, w.positions, o.sampled);
+                @memcpy(o.drafts, ids[1..rows]);
+                l.pending = @intCast(rows);
             }
-            try e.verifyRows(ids[0..rows]);
-            try self.drawRows(rows, w.stream.sampling, w.positions, out[0].sampled);
-            @memcpy(out[0].drafts, ids[1..rows]);
-            self.held_n = 0;
-            self.pending_rows = @intCast(rows);
         }
 
         /// One-row rounds were fed in place; drafted windows keep their path's rows (a chain prefix).
         fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) anyerror!void {
             const self = of(ptr);
-            for (windows, paths) |_, path| {
+            for (windows, paths) |w, path| {
                 if (!self.drafting()) {
                     if (path.len != 1) return error.WindowTooWide;
                     continue;
                 }
                 if (path.len == 0) return error.EmptyPath;
                 for (path, 0..) |r, i| if (r != i) return error.TreesNotBuilt;
-                try self.settle(path.len);
+                if (comptime has_head) try self.settle(try self.bound(w.stream), path.len);
             }
         }
 
@@ -291,28 +318,34 @@ pub fn Xpu(comptime S: type) type {
             if (comptime !has_head) return error.NoDraftHead;
             if (!self.drafting()) return error.NoDraftHead;
             for (requests) |r| {
-                try self.settle(if (r.rows) |path| path.len else null);
+                const l = try self.bound(r.stream);
+                try self.settle(l, if (r.rows) |path| path.len else null);
                 if (r.position != self.e.m.pos + 1) return error.PositionMismatch;
                 const depth = @min(r.depth, max_rows - 1);
                 if (r.rows) |path| {
                     for (path, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
-                    self.held_n = try self.e.draftKept(r.follow[0..path.len], self.start, depth, &self.held);
+                    l.held_n = try self.e.draftKept(r.follow[0..path.len], l.start, depth, &l.held);
                 } else {
                     const first = r.first orelse return error.NoFirstToken;
                     const t = switch (first) {
                         .handle => |h| self.drawn[h % ring],
                         .value => |v| v,
                     };
-                    self.held_n = try self.e.draftFirst(t, depth, &self.held);
+                    l.held_n = try self.e.draftFirst(t, depth, &l.held);
                 }
             }
         }
 
-        fn releaseFn(ptr: *anyopaque, _: *lanes.Stream) void {
+        fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
             const self = of(ptr);
             self.e.sync() catch {};
-            self.held_n = 0;
-            self.pending_rows = null;
+            if (comptime has_head) if (self.lane_of.fetchRemove(s)) |kv| self.dropSeq(kv.value.seq);
+        }
+
+        /// A stream's sequence back: the engine's own is free again, another is freed.
+        fn dropSeq(self: *Self, seq: *Seq) void {
+            if (comptime !has_head) return;
+            if (seq == &self.e.own) self.own_free = true else self.e.freeSeq(seq);
         }
     };
 }

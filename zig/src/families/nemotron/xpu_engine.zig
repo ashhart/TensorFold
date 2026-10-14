@@ -30,7 +30,23 @@ fn median(v: []f64) f64 {
     return v[v.len / 2];
 }
 
+/// One stream's sequence (Engine.bind puts it in the model): states, KV, verify scratch, the head's rows.
+pub const Seq = struct {
+    cstate: []xpu.rt.Buffer,
+    sstate: []xpu.rt.Buffer,
+    kc: []xpu.rt.Buffer,
+    vc: []xpu.rt.Buffer,
+    ms: []nw.MState,
+    hkc: ?xpu.rt.Buffer = null,
+    hvc: ?xpu.rt.Buffer = null,
+    rows_h: ?xpu.rt.Buffer = null,
+    last_h: ?xpu.rt.Buffer = null,
+    pos: u32 = 0,
+    win: [4]u32 = .{ 0, 1, 0, 0 }, // the window record: rows, inplace, pos0, head_rows
+};
+
 pub const Engine = struct {
+    pub const Sequence = Seq;
     gpa: std.mem.Allocator,
     ctx: *const xpu.Context,
     stream: xpu.Stream,
@@ -44,8 +60,10 @@ pub const Engine = struct {
     /// The MTP head and the prompt's last normed row (its first draft reads it), when loaded.
     head: ?mtp.Mtp = null,
     last_h: ?xpu.rt.Buffer = null,
-    /// The last round was a decode step (stepRow): the head reads its row from the model's scratch, not the window's.
-    stepped: bool = false,
+    /// The sequence bound to the model (own: the model's buffers) and the prompt windows' scratch (rcap rows, shared).
+    own: Seq = undefined,
+    cur: *Seq = undefined,
+    big_ms: []nw.MState = &.{},
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const xpu.Context, dir: []const u8, o: Options) !*Engine {
         const t0 = std.Io.Clock.awake.now(io);
@@ -71,9 +89,135 @@ pub const Engine = struct {
             e.head = try mtp.Mtp.load(gpa, &e.m, &e.loader, dir);
             e.last_h = try e.r.alloc(e.cfg.hidden_size * 2);
         }
+        e.big_ms = e.w.ms;
+        e.own = try e.ownSeq();
+        e.cur = &e.own;
         e.max_len = o.context;
         e.load_seconds = xpu.decode.seconds(io, t0);
         return e;
+    }
+
+    /// The model's own buffers as a sequence (its verify scratch is the prompt windows').
+    fn ownSeq(e: *Engine) !Seq {
+        var s: Seq = .{ .cstate = &.{}, .sstate = &.{}, .kc = &.{}, .vc = &.{}, .ms = e.big_ms, .last_h = e.last_h };
+        var cs: std.ArrayList(xpu.rt.Buffer) = .empty;
+        var ss: std.ArrayList(xpu.rt.Buffer) = .empty;
+        var ks: std.ArrayList(xpu.rt.Buffer) = .empty;
+        var vs: std.ArrayList(xpu.rt.Buffer) = .empty;
+        for (e.m.layers) |ly| switch (ly.mixer) {
+            .mamba => |mw| {
+                try cs.append(e.gpa, mw.cstate);
+                try ss.append(e.gpa, mw.sstate);
+            },
+            .attention => |aw| {
+                try ks.append(e.gpa, aw.kc);
+                try vs.append(e.gpa, aw.vc);
+            },
+            else => {},
+        };
+        s.cstate = try cs.toOwnedSlice(e.gpa);
+        s.sstate = try ss.toOwnedSlice(e.gpa);
+        s.kc = try ks.toOwnedSlice(e.gpa);
+        s.vc = try vs.toOwnedSlice(e.gpa);
+        if (e.head) |h| {
+            s.hkc = h.attn.kc;
+            s.hvc = h.attn.vc;
+            s.rows_h = try e.r.alloc(nw.max_rows * e.cfg.hidden_size * 2);
+        }
+        return s;
+    }
+
+    /// A new sequence for a stream: zeroed states, KV for the engine's context, its own verify scratch (16 rows).
+    pub fn newSeq(e: *Engine) !*Seq {
+        const c = e.cfg;
+        const s = try e.gpa.create(Seq);
+        errdefer e.gpa.destroy(s);
+        const nm = e.own.cstate.len;
+        const na = e.own.kc.len;
+        s.* = .{ .cstate = try e.gpa.alloc(xpu.rt.Buffer, nm), .sstate = try e.gpa.alloc(xpu.rt.Buffer, nm), .kc = try e.gpa.alloc(xpu.rt.Buffer, na), .vc = try e.gpa.alloc(xpu.rt.Buffer, na), .ms = try e.gpa.alloc(nw.MState, nm) };
+        const conv = (c.conv_kernel - 1) * c.convDim() * 2;
+        const ssm = @as(usize, c.mamba_num_heads) * c.mamba_head_dim * c.ssm_state_size * 4;
+        const kv = e.m.cap * @as(usize, c.num_key_value_heads) * c.head_dim * 2;
+        const R: usize = nw.max_rows;
+        for (0..nm) |i| {
+            s.cstate[i] = try e.r.alloc(conv);
+            s.sstate[i] = try e.r.alloc(ssm);
+            s.ms[i] = .{ .proj = try e.r.alloc(R * c.projDim() * 2), .xc = try e.r.alloc(R * c.convDim() * 2), .cstate2 = try e.r.alloc(conv), .sstate2 = try e.r.alloc(ssm) };
+        }
+        for (0..na) |i| {
+            s.kc[i] = try e.r.alloc(kv);
+            s.vc[i] = try e.r.alloc(kv);
+        }
+        if (e.head != null) {
+            s.hkc = try e.r.alloc(kv);
+            s.hvc = try e.r.alloc(kv);
+            s.rows_h = try e.r.alloc(R * c.hidden_size * 2);
+            s.last_h = try e.r.alloc(c.hidden_size * 2);
+        }
+        return s;
+    }
+
+    /// Frees a sequence from newSeq (never the engine's own); binds the own sequence first if it was bound.
+    pub fn freeSeq(e: *Engine, s: *Seq) void {
+        if (s == &e.own) return;
+        if (e.cur == s) e.bind(&e.own);
+        e.r.sync() catch {};
+        for (s.cstate, s.sstate, s.ms) |*a, *b, *ms| {
+            a.free();
+            b.free();
+            ms.proj.free();
+            ms.xc.free();
+            ms.cstate2.free();
+            ms.sstate2.free();
+        }
+        for (s.kc, s.vc) |*a, *b| {
+            a.free();
+            b.free();
+        }
+        inline for (.{ "hkc", "hvc", "rows_h", "last_h" }) |f| if (@field(s, f)) |*b| b.free();
+        e.gpa.free(s.cstate);
+        e.gpa.free(s.sstate);
+        e.gpa.free(s.kc);
+        e.gpa.free(s.vc);
+        e.gpa.free(s.ms);
+        e.gpa.destroy(s);
+    }
+
+    /// Puts sequence s in the model; the bound one keeps its state handles (commit swaps them) and position first.
+    pub fn bind(e: *Engine, s: *Seq) void {
+        if (e.cur == s) return;
+        const o = e.cur;
+        var mi: usize = 0;
+        var ai: usize = 0;
+        for (e.m.layers) |*ly| switch (ly.mixer) {
+            .mamba => |*mw| {
+                o.cstate[mi] = mw.cstate;
+                o.sstate[mi] = mw.sstate;
+                mw.cstate = s.cstate[mi];
+                mw.sstate = s.sstate[mi];
+                mi += 1;
+            },
+            .attention => |*aw| {
+                aw.kc = s.kc[ai];
+                aw.vc = s.vc[ai];
+                ai += 1;
+            },
+            else => {},
+        };
+        if (e.head) |*h| {
+            h.attn.kc = s.hkc.?;
+            h.attn.vc = s.hvc.?;
+        }
+        o.pos = e.m.pos;
+        o.win = .{ e.w.rows, @intFromBool(e.w.inplace), e.w.pos0, e.w.head_rows };
+        e.m.pos = s.pos;
+        e.w.ms = s.ms;
+        e.w.rows = s.win[0];
+        e.w.inplace = s.win[1] != 0;
+        e.w.pos0 = s.win[2];
+        e.w.head_rows = s.win[3];
+        e.last_h = s.last_h;
+        e.cur = s;
     }
 
     /// The process exits right after: device memory goes with it once the queue is drained.
@@ -122,7 +266,8 @@ pub const Engine = struct {
     /// The prompt in windows of `rows`, in place; the head absorbs all rows but the last (last_h, for draftFirst).
     pub fn prefillHead(e: *Engine, prompt: []const u32, rows: u32) !void {
         const mt = &e.head.?;
-        e.stepped = false;
+        e.w.ms = e.big_ms; // prompt windows (in place) take the shared scratch; the sequence's own is for verify windows
+        defer e.w.ms = e.cur.ms;
         var t: usize = 0;
         while (t < prompt.len) {
             try nw.stopCheck(&e.r);
@@ -144,15 +289,15 @@ pub const Engine = struct {
     /// One window of ids at m.pos, not committed; every row gets logits (rowTokens / rowLogits).
     pub fn verifyRows(e: *Engine, ids: []const u32) !void {
         try nw.stopCheck(&e.r);
-        e.stepped = false;
         try e.w.forward(&e.m, ids, false, @intCast(ids.len));
+        if (e.cur.rows_h) |rh| try e.w.normRows(&e.m, @intCast(ids.len), rh);
     }
 
     /// One token on the decode step, in place, with logits (argmax / fetchLogits): the bits of a one-row window.
     pub fn stepRow(e: *Engine, token: u32) !void {
         try nw.stopCheck(&e.r);
-        e.stepped = true;
         try e.m.forward(token, true);
+        if (e.cur.rows_h) |rh| try e.m.normRow(rh);
     }
 
     /// Greedy token of each row of the last window (syncs).
@@ -173,8 +318,7 @@ pub const Engine = struct {
     /// The head absorbs the kept rows of the last window (follow: the token after each) from `start`, then drafts.
     pub fn draftKept(e: *Engine, follow: []const u32, start: u32, depth: u32, out: []u32) !usize {
         const mt = &e.head.?;
-        if (e.stepped) try e.m.normRow(mt.hn) else try e.w.normRows(&e.m, @intCast(follow.len), mt.hn);
-        const d = try mt.step(&e.w, &e.m, follow, mt.hn, start, depth > 0);
+        const d = try mt.step(&e.w, &e.m, follow, e.cur.rows_h.?, start, depth > 0);
         return e.chain(d, depth, out);
     }
 

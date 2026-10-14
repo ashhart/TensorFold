@@ -104,7 +104,7 @@ fn rowKernels(mod: anytype) !RowK {
 }
 
 /// Per Mamba layer: the window's saved inputs (replay), the second state buffers.
-const MState = struct { proj: Buf, xc: Buf, cstate2: Buf, sstate2: Buf };
+pub const MState = struct { proj: Buf, xc: Buf, cstate2: Buf, sstate2: Buf };
 
 pub const Win = struct {
     k: Kernels,
