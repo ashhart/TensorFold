@@ -97,6 +97,10 @@ pub const Held = struct {
     parents: ?[]i32 = null,
 };
 
+/// An image input prepared for a vision tower: its patches (fp32 [grid h * w, 1536], merge-block order) and grid
+/// [1, h, w]; the prompt holds its placeholder rows.
+pub const Image = struct { patches: []const f32, grid: [3]i64 };
+
 pub const Spec = struct {
     id: []const u8,
     prompt: []const u32,
@@ -123,6 +127,7 @@ pub const Spec = struct {
     prompt_logprobs: ?u8 = null, // and for each prompt token after the first, with ranks (the prompt pass starts at 0)
     grammar: ?*grammar.Constraint = null, // structured output: the reply stays in it (the creator frees it)
     decode_spans: []const [2]u32 = &.{}, // prompt rows an earlier reply decoded (Request.decode_spans), for backends that keep their bits
+    images: []const Image = &.{}, // an image prompt's inputs, in prompt order (the backend encodes them at prefill)
 };
 
 pub const Stream = struct {
@@ -140,6 +145,7 @@ pub const Stream = struct {
     think_close: []const u32,
     think_end: i64,
     think_open: bool,
+    images: []const Image = &.{},
     loop_guard: bool,
     loop_period: ?u32 = null,
     chunks: []const u32,
@@ -202,6 +208,7 @@ pub const Stream = struct {
             .cancel_check = spec.cancel_check,
             .yield_check = spec.yield_check,
             .think_budget = spec.think_budget,
+            .images = spec.images,
             .think_close = spec.think_close,
             .think_end = spec.think_end,
             .think_open = spec.think_open orelse (spec.think_budget > 0 or (spec.loop_guard and spec.think_end >= 0)),

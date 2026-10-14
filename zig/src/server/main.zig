@@ -78,6 +78,10 @@ pub fn main(init: std.process.Init) !u8 {
     } orelse return fail(problem);
     defer up.text.deinit();
     defer up.engine.close(up.engine.ctx);
+    if (up.engine.follow) |follow| {        // rank 1 of two: rank 0 serves, this rank replays its engine calls
+        follow(up.engine.ctx) catch |e| return fail(@errorName(e));
+        return 0;
+    }
     return serve.run(gpa, io, args, .{
         .engine = up.engine.engine,
         .text = up.text.text(),

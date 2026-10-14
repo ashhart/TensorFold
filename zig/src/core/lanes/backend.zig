@@ -68,6 +68,9 @@ pub const Backend = struct {
         prefill: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
         /// One chunk of the prompt pass, false while chunks remain; null: the pass runs whole.
         prefill_step: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!bool = null,
+        /// Prefill several streams' prompts in one pass (each then as after `prefill`); false, having done nothing,
+        /// when they do not go together (each is then prefilled alone).
+        prefill_many: ?*const fn (ptr: *anyopaque, ss: []const *Stream) anyerror!bool = null,
         /// Draw the first token from the prompt's last row at `position`; a handle to it.
         first: *const fn (ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64,
         /// Feed one token and queue the draw of the next at `position` (a one-token round); a handle to it.
@@ -102,6 +105,9 @@ pub const Backend = struct {
         prompt_rows: bool = false,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
+        /// After a failed round: the streams it failed for alone (their caches could not grow), which the caller
+        /// ends while the round's other streams go on; 0 when the failure is the round's.
+        refused: ?*const fn (ptr: *anyopaque, out: []*Stream) usize = null,
     };
 
     pub fn prefill(b: Backend, s: *Stream) !void {

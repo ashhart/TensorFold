@@ -49,15 +49,16 @@ pub const flags = [_]Flag{
     .{ .name = "--api-key-file", .native = true },
     .{ .name = "--metrics-open", .kind = .store_true, .native = true },
     .{ .name = "--dashboard", .kind = .store_true, .native = true },
-    .{ .name = "--vision", .kind = .store_true },
-    .{ .name = "--vision-urls", .kind = .store_true },
+    .{ .name = "--vision", .kind = .store_true, .native = true },
+    .{ .name = "--vision-urls", .kind = .store_true, .native = true },
     .{ .name = "--vision-offload", .kind = .store_true },
-    .{ .name = "--vision-max-images" },
-    .{ .name = "--vision-image-tokens" },
+    .{ .name = "--vision-max-images", .native = true },
+    .{ .name = "--vision-image-tokens", .native = true },
     .{ .name = "--context", .native = true },
     .{ .name = "--speed-up", .native = !cuda_build },
     .{ .name = "--max-tokens", .native = true },
     .{ .name = "--temperature", .native = true },
+    .{ .name = "--tool-system", .native = true },
     .{ .name = "--top-p", .native = true },
     .{ .name = "--top-k", .native = true },
     .{ .name = "--min-p", .native = true },
@@ -99,7 +100,7 @@ pub const flags = [_]Flag{
     .{ .name = "--master-port", .native = served("--tp") },
     // the GPU engine's policy switches as key=value pairs, repeatable
     .{ .name = "--policy", .kind = .append, .native = served("--policy") },
-    .{ .name = "--kv-dtype", .choices = &.{ "bf16", "int8", "int4" } },
+    .{ .name = "--kv-dtype", .choices = &.{ "bf16", "int8", "int4" }, .native = served("--kv-dtype"), .native_values = &.{ "int8", "int4" } },
     .{ .name = "--prefill-fp8", .kind = .store_true },
     .{ .name = "--no-prefill-fp8", .kind = .store_true },
     .{ .name = "--precision", .choices = &.{ "checkpoint", "full" } },
@@ -140,6 +141,11 @@ pub const Args = struct {
     learn_gib: f64 = 32, // disk for learned states, every model and build together
     max_tokens: i64 = 4096,
     temperature: ?f64 = null,
+    vision: bool = false, // accept image inputs (an engine whose family has a vision tower)
+    vision_urls: bool = false, // also public HTTPS image and video URLs
+    vision_max_images: i64 = 4,
+    vision_image_tokens: i64 = 4096, // visual tokens a request's images share
+    tool_system: ?[]const u8 = null, // an instruction added as the system message of tool requests that send none
     top_p: ?f64 = null,
     top_k: ?i64 = null,
     min_p: ?f64 = null,
@@ -170,6 +176,7 @@ pub const Args = struct {
     master_port: u16 = 29551,
     policy: []const u8 = "", // every --policy joined by commas
     cortheon: bool = false, // Cortheon's program, research before building, and cortheon_search/cortheon_fetch run by the server
+    kv_dtype: []const u8 = "int8", // --kv-dtype (CUDA): the attention cache's codes, int8 or int4
 };
 
 /// A usage error's message (argparse's ``error:`` line); the caller exits 2.
@@ -265,7 +272,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     } else if (is(name, "--learn-gib")) {
         out.learn = true;
         out.learn_gib = try gib(u, a, name, v);
-    } else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--compact-at")) {
+    } else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--tool-system")) out.tool_system = v else if (is(name, "--vision")) out.vision = true else if (is(name, "--vision-urls")) out.vision_urls = true else if (is(name, "--vision-max-images")) out.vision_max_images = try int(u, a, name, v) else if (is(name, "--vision-image-tokens")) out.vision_image_tokens = try int(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--compact-at")) {
         if (std.mem.eql(u8, v, "auto")) out.compact_auto = true else {
             const f = try float(u, a, name, v);
             if (!(f > 0 and f <= 1)) return fail(u, a, "argument --compact-at: expected auto or a fraction in (0, 1]: '{s}'", .{v});
@@ -282,9 +289,19 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
 fn cudaFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usage) error{ Usage, OutOfMemory }!bool {
     if (std.mem.eql(u8, name, "--device")) {
         out.device = std.math.cast(u32, try int(u, a, name, v)) orelse return fail(u, a, "argument --device: a GPU ordinal from 0: '{s}'", .{v});
+    } else if (std.mem.eql(u8, name, "--kv-dtype")) {
+        out.kv_dtype = v;
     } else if (std.mem.eql(u8, name, "--segments")) {
         const n = try int(u, a, name, v);
         out.segments = if (n >= 1) @intCast(@min(n, std.math.maxInt(u32))) else return fail(u, a, "argument --segments: a count from 1: '{s}'", .{v});
+    } else if (std.mem.eql(u8, name, "--tp")) {
+        out.tp = if (std.mem.eql(u8, v, "2")) 2 else 1;
+    } else if (std.mem.eql(u8, name, "--rank")) {
+        out.rank = if (std.mem.eql(u8, v, "1")) 1 else 0;
+    } else if (std.mem.eql(u8, name, "--master")) {
+        out.master = v;
+    } else if (std.mem.eql(u8, name, "--master-port")) {
+        out.master_port = std.math.cast(u16, try int(u, a, name, v)) orelse return fail(u, a, "argument --master-port: a TCP port: '{s}'", .{v});
     } else return false;
     return true;
 }
@@ -362,6 +379,8 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .mtp_drafts = args.mtp_drafts,
         .mtp_confidence = args.mtp_confidence,
         .keep = args.checkpoint_slots,
+        .vision = args.vision,
+        .kv_bits = if (std.mem.eql(u8, args.kv_dtype, "int4")) 4 else 8,
         .tp = args.tp,
         .rank = args.rank,
         .master = args.master,

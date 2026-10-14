@@ -35,6 +35,8 @@ pub const Input = struct {
     logprobs: ?u8 = null,
     /// ``/v1/completions``' ``prompt_logprobs``: rows for the prompt with this many alternatives; null: not asked.
     prompt_logprobs: ?u8 = null,
+    /// Image inputs (vision_inputs.extract), in prompt order; the rendered prompt's image pads expand to their tokens.
+    images: []const api.Image = &.{},
 };
 
 /// A streamed piece: content text (a string) or a delta object (reasoning or tool calls).
@@ -90,9 +92,31 @@ pub const Prepared = struct {
     preparing: bool,
 };
 
+/// --tool-system: the server's instruction as the first message of a chat request that offers tools and sends no
+/// system message (the client's own instruction wins); other requests pass unchanged.
+fn withToolSystem(srv: *Server, a: Allocator, input: Input) Allocator.Error!Input {
+    const text = srv.config.tool_system orelse return input;
+    if (input.tools.len == 0 or input.prompt != null or input.messages != .array) return input;
+    for (input.messages.array) |m| {
+        if (m != .object) continue;
+        const role = m.object.get("role") orelse continue;
+        if (role == .string and std.mem.eql(u8, role.string, "system")) return input;
+    }
+    const sys = try json.newObject(a);
+    try sys.put(a, "role", .{ .string = "system" });
+    try sys.put(a, "content", .{ .string = text });
+    const list = try a.alloc(Value, input.messages.array.len + 1);
+    list[0] = .{ .object = sys };
+    @memcpy(list[1..], input.messages.array);
+    var out = input;
+    out.messages = .{ .array = list };
+    return out;
+}
+
 /// Render ``input`` and run every check that can refuse it, before anything reaches the client or the engine.
-pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepared {
+pub fn prepare(srv: *Server, cx: *Cx, input_in: Input, gone: anytype) Failure!Prepared {
     const a = cx.a;
+    const input = try withToolSystem(srv, a, input_in);
     const io = srv.io;
     const received = nowNs(io);
     const f = input.fields;
@@ -108,7 +132,8 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     var thinking = flag(f, "enable_thinking") orelse srv.config.enable_thinking;
     if (input.prompt != null) thinking = false;
     const effort = srv.effortFor(if (f.get("reasoning_effort")) |e| (if (e == .string) e.string else null) else null);
-    const rendered = try prompt_mod.prepare(srv, cx, input, thinking, effort);
+    var rendered = try prompt_mod.prepare(srv, cx, input, thinking, effort);
+    if (input.images.len > 0) rendered.history_len = 0; // image prompts keep no prefix for a later turn (as Python)
     if (gone.check()) return error.Cancelled;
     if (rendered.ids.len == 0) return cx.refuse("rendered prompt is empty");
     const window: i64 = srv.info.context_window;
@@ -119,7 +144,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         if (input.max_tokens != null and limit > room) return cx.fail(.context_length, "{s} {d} tokens, but the rendered prompt has {d} tokens and requests {d} reply tokens, which exceeds the context window. Reduce the prompt to at most {d} prompt tokens or request at most {d} reply tokens, including chat template and thinking tokens.", .{ errors.context_limit, window, n, limit, @max(0, window - limit), room });
         limit = @min(limit, room);
     }
-    const system_len: usize = if (input.prompt != null) 0 else prompt_mod.systemPrefixLen(srv, cx, input.messages, input.tools, rendered.ids, thinking, effort);
+    const system_len: usize = if (input.prompt != null or input.images.len > 0) 0 else prompt_mod.systemPrefixLen(srv, cx, input.messages, input.tools, rendered.ids, thinking, effort);
     var shared: std.ArrayList(u32) = .empty;
     if (system_len > 0) for ([_]i64{ @as(i64, @intCast(system_len)) - 2048, @as(i64, @intCast(system_len)) - 512, @intCast(system_len) }) |cut| {
         if (cut >= 512) try shared.append(a, @intCast(cut));
@@ -137,7 +162,9 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .history_len = @intCast(rendered.history_len),
         .rewind_len = @intCast(rendered.rewind_len),
         .shared_prefixes = shared.items,
-        .chunks = try chunk_plan.withCut(a, try srv.chunks.starts(a, rendered.ids), if (srv.chunks.step > 0) @intCast(@max(system_len, 1) - 1) else 0, rendered.ids.len, srv.chunks.min_chunk), // a cut before the conversation's own text: fresh sessions resume their whole harness
+        .images = input.images,
+        // a cut just before the conversation's own text: fresh sessions resume their whole harness
+        .chunks = try chunk_plan.withCut(a, try srv.chunks.starts(a, rendered.ids), if (srv.chunks.step > 0) @intCast(@max(system_len, 1) - 1) else 0, rendered.ids.len, srv.chunks.min_chunk),
         .decode_spans = try prompt_mod.replySpans(srv, cx, rendered.ids), // from the tokens alone, for every request: cached states are keyed by tokens
         .tools_json = if (input.tools.len > 0) try json.stringify(a, .{ .array = @constCast(input.tools) }, .{ .ascii = false }) else "",
         .decide = if (input.prompt == null and !background) prompt_mod.decideOf(srv, rendered.ids) else null,
