@@ -25,7 +25,7 @@ pub const Ops = struct {
     bf16: bool,
     stream: abi.Stream,
     arena: *Arena,
-    /// A prompt's span: products, router and recurrence take prefill's kernel, so rows have the same bits however cut.
+    /// A prompt's span: products and router take prefill's kernel, so rows have the same bits however cut.
     prefill: bool = false,
     /// A lane round's forward: decode tiles at any row count, so a row's bits ignore the rows it shares a round with.
     window: bool = false,
