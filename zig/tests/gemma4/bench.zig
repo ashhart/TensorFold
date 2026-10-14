@@ -12,15 +12,16 @@ fn gpuMs(cb: mtl.CommandBuffer) f64 {
 }
 
 /// Every projection of the 60 layers and the head at `rows` rows, chained in one command buffer: GPU ms.
+var given_sums: ?mtl.Buffer = null;
+
 fn projections(m: *g4.Model, rows: usize, x: mtl.Buffer, y: mtl.Buffer, reg: bool) !f64 {
     const cb = m.queue.commandBuffer();
     const e = cb.compute(.serial);
     for (m.weights.layers) |l| for ([_]g4.weights.Linear{ l.qkv, l.o, l.gate_up, l.down }) |lin| {
         const p = try m.projections.get(m.gpa, m.device, lin.n, lin.k);
-        try p.encode(e, .{ .buf = x }, .{ .buf = lin.w }, .{ .buf = lin.sb }, .{ .buf = y }, @intCast(rows));
+        if (reg) try p.encodeSums(e, .{ .buf = x }, .{ .buf = lin.w }, .{ .buf = lin.sb }, .{ .ref = .{ .buf = given_sums.? }, .stride = @intCast(rows) }, .{ .buf = y }, @intCast(rows)) else try p.encode(e, .{ .buf = x }, .{ .buf = lin.w }, .{ .buf = lin.sb }, .{ .buf = y }, @intCast(rows));
     };
     const head = try m.projections.get(m.gpa, m.device, m.weights.head.n, m.weights.head.k);
-    _ = reg;
     try head.encode(e, .{ .buf = x }, .{ .buf = m.weights.head.w }, .{ .buf = m.weights.head.sb }, .{ .buf = y }, @intCast(rows));
     e.end();
     cb.commit();
@@ -84,6 +85,14 @@ pub fn main(init: std.process.Init) !void {
         var best: f64 = 1e9;
         for (0..5) |_| best = @min(best, try projections(m, rows, x, y, false));
         std.debug.print("projections, {d} rows: {d:.2} ms GPU ({d:.0} GB/s)\n", .{ rows, best, @as(f64, @floatFromInt(bytes)) / best / 1e6 });
+        if (rows <= 16) {
+            const sb = try m.device.buffer(16 * (cfg.intermediate / 64) * 4, mtl.ResourceOptions.private);
+            defer sb.deinit();
+            given_sums = sb;
+            var best2: f64 = 1e9;
+            for (0..5) |_| best2 = @min(best2, try projections(m, rows, x, y, true));
+            std.debug.print("  with sums given (no sums dispatches): {d:.2} ms GPU\n", .{best2});
+        }
     }
     {
         const text = try tf.affine_mm.source(m.device, gpa, .{});
