@@ -117,7 +117,8 @@ pub const Server = struct {
         if (text.tokenId(reply_text.channel_markers.close) != null) srv.markers = reply_text.channel_markers;
         const source = text.templateSource();
         srv.effort_levels = try fields.effortLevels(a, source);
-        srv.thinking_switch = std.mem.indexOf(u8, source, "enable_thinking") != null or std.mem.indexOf(u8, source, "thinking_mode") != null;
+        srv.thinking_switch = std.mem.indexOf(u8, source, "enable_thinking") != null or
+            std.mem.indexOf(u8, source, "thinking_mode") != null;
         srv.late_system = try lateSystem(a, text);
         srv.needs_user_after_tool = needsUserAfterTool(source);
         if (text.tokenId("</think>")) |end| {

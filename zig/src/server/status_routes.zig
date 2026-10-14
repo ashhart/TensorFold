@@ -38,7 +38,10 @@ pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
     const created = std.Io.Clock.real.now(srv.io).toSeconds();
     const data = try a.alloc(Value, srv.config.model_ids.len);
     const thinks = srv.thinking_switch or srv.effort_levels.len > 0 or srv.think_close.len > 0;
-    const reasoning: ?Value = if (thinks) try reasoningValue(a, srv.config.enable_thinking, srv.thinking_switch, srv.effortFor(null), srv.effort_levels) else null;
+    const reasoning: ?Value = if (thinks)
+        try reasoningValue(a, srv.config.enable_thinking, srv.thinking_switch, srv.effortFor(null), srv.effort_levels)
+    else
+        null;
     for (srv.config.model_ids, data) |id, *slot| {
         slot.* = try modelValue(a, id, srv.info, created, reasoning);
     }
@@ -64,7 +67,13 @@ fn modelValue(a: Allocator, id: []const u8, info: api.Info, created: i64, reason
 }
 
 /// /v1/models' ``reasoning``: the thinking default and the template's levels.
-fn reasoningValue(a: Allocator, enable: bool, switchable: bool, default: ?[]const u8, levels: []const []const u8) Allocator.Error!Value {
+fn reasoningValue(
+    a: Allocator,
+    enable: bool,
+    switchable: bool,
+    default: ?[]const u8,
+    levels: []const []const u8,
+) Allocator.Error!Value {
     const r = try json.newObject(a);
     try r.put(a, "default_enabled", .{ .bool = enable });
     if (default) |e| try r.put(a, "default_effort", .{ .string = e });
@@ -179,7 +188,8 @@ test "model discovery lists the template's levels, and none only behind a thinki
     const qwen = try reasoningValue(a, true, true, null, &.{ "xhigh", "medium", "low" });
     const listed = qwen.get("supported_efforts").?.array;
     try std.testing.expectEqual(@as(usize, 4), listed.len);
-    for ([_][]const u8{ "xhigh", "medium", "low", "none" }, listed) |name, v| try std.testing.expectEqualStrings(name, v.string);
+    const want = [_][]const u8{ "xhigh", "medium", "low", "none" };
+    for (want, listed) |name, v| try std.testing.expectEqualStrings(name, v.string);
     const glm = try reasoningValue(a, true, false, null, &.{ "max", "high", "low" });
     try std.testing.expectEqual(@as(usize, 3), glm.get("supported_efforts").?.array.len);
     const bare = try reasoningValue(a, true, true, null, &.{});

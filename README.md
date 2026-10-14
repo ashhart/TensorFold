@@ -141,8 +141,9 @@ they are not the default reply limit. An unspecified engine window omits both fi
 still handle per-request memory refusals: an advertised context is not a guarantee that every workload fits.
 
 A model that thinks also carries an OpenRouter-style `reasoning`: `default_enabled`, `default_effort` (only
-with `--reasoning-effort`), and `supported_efforts`, the levels its template names. These describe chat and
-Responses requests.
+with `--reasoning-effort`), and `supported_efforts`, the levels its template names, highest first, then `none`
+when the template has a thinking switch. A template that names no level leaves `supported_efforts` out. These
+describe chat and Responses requests.
 
 ## Serve flags
 

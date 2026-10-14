@@ -100,7 +100,16 @@ const SourceText = struct {
     reads: u32 = 0,
 
     fn text(t: *SourceText) model_text.Text {
-        return .{ .ctx = t, .vtable = &.{ .encode = BrokenText.encode, .decode = BrokenText.decode, .token_id = tokenId, .token_string = BrokenText.tokenString, .vocab_size = BrokenText.vocabSize, .eos_ids = BrokenText.eosIds, .render = BrokenText.render, .template_source = templateSource } };
+        return .{ .ctx = t, .vtable = &.{
+            .encode = BrokenText.encode,
+            .decode = BrokenText.decode,
+            .token_id = tokenId,
+            .token_string = BrokenText.tokenString,
+            .vocab_size = BrokenText.vocabSize,
+            .eos_ids = BrokenText.eosIds,
+            .render = BrokenText.render,
+            .template_source = templateSource,
+        } };
     }
 
     fn tokenId(_: *anyopaque, _: []const u8) ?u32 {
@@ -123,7 +132,8 @@ test "init reads the template once and keeps its thinking switch for model disco
         .{ .source = "{{ messages }}", .switch_ = false },
     }) |case| {
         var text: SourceText = .{ .source = case.source };
-        const srv = try server.Server.init(std.testing.allocator, std.testing.io, queue.engine(), text.text(), config, null);
+        const gpa = std.testing.allocator;
+        const srv = try server.Server.init(gpa, std.testing.io, queue.engine(), text.text(), config, null);
         defer srv.deinit();
         try std.testing.expectEqual(case.switch_, srv.thinking_switch);
         try std.testing.expectEqual(@as(u32, 1), text.reads);
