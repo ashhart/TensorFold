@@ -35,6 +35,7 @@ pub fn main(init: std.process.Init) !void {
     const t_load = q.now();
     const r = try q.Runner.init(argv[1], ctx);
     std.debug.print("loaded in {d:.1} s\n", .{q.now() - t_load});
+    if (std.c.getenv("XPU_FIDELITY") != null) return fp64_ref.fidelity(r, ids.items);
     if (std.c.getenv("XPU_FP64_REF") != null) fp64_ref.arm(r);
     const t0 = q.now();
     try r.prompt(ids.items, true);

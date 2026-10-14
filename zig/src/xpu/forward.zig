@@ -139,7 +139,7 @@ pub fn mlpIn(d: *Dev, a: *Acts, w: Proj, T: u32, gs: i32, pre: bool) !*anyopaque
         try d.launch(d.k.a8_swiglu, a8Groups(w, T), a8Args(a, w, a.p, T));
         return a.p;
     }
-    if (T > 16 and w.ilv) {
+    if (T > 16 and w.ilv and gemm_hook == null) {
         const M: i32 = @intCast(T);
         const tiles = (T + 63) / 64;
         const k = if (w.gs == 128) d.k.ngen_swiglu_g128 else d.k.ngen_swiglu;
@@ -191,7 +191,11 @@ pub fn gemm(d: *Dev, pscr: *anyopaque, h: *anyopaque, ahi: *anyopaque, alo: *any
         else
             try d.launch(ngen_narrow, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, pscr });
     }
+    if (gemm_hook) |f| try f(d, h, w, out, m);
 }
+
+/// XPU_FIDELITY: called after every GEMM (its input rows, weights and output); null in production.
+pub var gemm_hook: ?*const fn (*Dev, *anyopaque, Proj, *anyopaque, u32) anyerror!void = null;
 
 extern "c" fn creat(path: [*:0]const u8, mode: c_uint) c_int;
 extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
