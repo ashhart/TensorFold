@@ -1,4 +1,7 @@
-//! MLX affine widths on qlinear's tiles: tiles equal host-widened codes, products in float64 bounds, bits row-stable.
+//! MLX affine checkpoints of every width on qlinear's tiles: 4-bit codes on the affine-4 tiles, 2, 3, 5 and 6-bit codes
+//! on affine8.cu's tiles of their own width, 8-bit codes on its byte tiles. A narrow width's products equal, bit for
+//! bit, those of its codes widened on the host onto the 8-bit tiles (so no code changes and the arithmetic is one);
+//! products sit within their float64 bound, and a row's bits are the same at every row count and on both paths.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -82,39 +85,49 @@ fn sums(r: *Rig, x: []const u16, rows: usize, k: usize) ![]f32 {
     return out;
 }
 
-const Kernels = struct { a4: *const qlinear.Affine4Kernels, a8: *const qlinear.Affine8Kernels };
+const Kernels = struct { a4: *const qlinear.Affine4Kernels, an: *const qlinear.AffineNKernels };
 
-/// One width at one shape: tiles against the host-widened codes' tiles, products against float64, rows and paths.
+/// One width at one shape: tiles or products against the host-widened codes', products against float64, rows and paths.
 fn width(r: *Rig, k_: Kernels, n: usize, k: usize, bits: u8) !void {
     var name: [128]u8 = undefined;
     const m = try matrix(r, n, k, bits);
     const served = qlinear.servedBits(bits);
     const own = try r.dev(std.mem.sliceAsBytes(try mlxWords(r, m, bits)));
-    const wide = try r.dev(std.mem.sliceAsBytes(try mlxWords(r, m, served)));
     const ds = try r.dev(std.mem.sliceAsBytes(m.scales));
     const db = try r.dev(std.mem.sliceAsBytes(m.biases));
     const l4 = qlinear.Affine4.layout(n, k);
-    const l8 = qlinear.Affine8.layout(n, k);
-    const words_len = if (served == 4) l4.words else l8.words;
     const npad = l4.npad;
+    const words_len = if (served == 4) l4.words else qlinear.AffineN.layout(n, k, served).words;
     const t_own = try r.zeros(words_len);
-    const t_wide = try r.zeros(words_len);
     const ts = try r.zeros(l4.scales);
     const tb = try r.zeros(l4.scales);
-    try k_.a8.packWords(r.s, own, bits, n, k, t_own);
+    var t_wide: u64 = 0; // the 8-bit tiles of the codes widened on the host (narrow widths)
     if (served == 4) {
-        // the affine-4 pack of the codes widened to 4 bits: the tiles a 4-bit checkpoint of these codes gets
-        try k_.a4.pack(r.s, wide, ds, db, .{ .w = t_wide, .s = ts, .b = tb, .n = n, .k = k, .npad = npad });
+        // AffineN's pack onto the affine-4 tiles equals the affine-4 pack a 4-bit checkpoint gets
+        try k_.an.packAt(r.s, own, bits, n, k, t_own, 4);
+        const t4 = try r.zeros(words_len);
+        try k_.a4.pack(r.s, own, ds, db, .{ .w = t4, .s = ts, .b = tb, .n = n, .k = k, .npad = npad });
+        try check.sameBytes(try std.fmt.bufPrint(&name, "4-bit codes [{d}, {d}]: AffineN's pack equals the affine-4 pack", .{ n, k }), try r.back(t_own, words_len), try r.back(t4, words_len));
     } else {
-        try k_.a8.packWords(r.s, wide, 8, n, k, t_wide);
-        try k_.a8.packTable(r.s, ds, n, k, npad, ts);
-        try k_.a8.packTable(r.s, db, n, k, npad, tb);
+        try k_.an.packWords(r.s, own, bits, n, k, t_own);
+        try k_.an.packTable(r.s, ds, n, k, npad, ts);
+        try k_.an.packTable(r.s, db, n, k, npad, tb);
+        if (served != 8) {
+            const l8 = qlinear.AffineN.layout(n, k, 8);
+            t_wide = try r.zeros(l8.words);
+            try k_.an.packWords(r.s, try r.dev(std.mem.sliceAsBytes(try mlxWords(r, m, 8))), 8, n, k, t_wide);
+            // the device's widening pack onto 8-bit tiles equals the host-widened codes' pack
+            const t8 = try r.zeros(l8.words);
+            try k_.an.packAt(r.s, own, bits, n, k, t8, 8);
+            try check.sameBytes(try std.fmt.bufPrint(&name, "{d}-bit codes [{d}, {d}]: 8-bit tiles equal the widened codes'", .{ bits, n, k }), try r.back(t8, l8.words), try r.back(t_wide, l8.words));
+        }
     }
-    try check.sameBytes(try std.fmt.bufPrint(&name, "{d}-bit codes [{d}, {d}]: tiles equal the {d}-bit widened codes' tiles", .{ bits, n, k, served }), try r.back(t_own, words_len), try r.back(t_wide, words_len));
-    // the embedding's widen: rows of `bits` codes into rows of the served width, word for word
-    const widened = try r.zeros(n * k * served / 8);
-    try k_.a8.widen(r.s, own, bits, n, k, widened, served);
-    try check.sameBytes(try std.fmt.bufPrint(&name, "{d}-bit rows [{d}, {d}] widened to {d} bits", .{ bits, n, k, served }), try r.back(widened, n * k * served / 8), try r.back(wide, n * k * served / 8));
+    // the embedding's widen: rows of `bits` codes into rows of the width the embed kernels read, word for word
+    const row = qlinear.rowBits(bits);
+    const widened = try r.zeros(n * k * row / 8);
+    try k_.an.widen(r.s, own, bits, n, k, widened, row);
+    const wide_rows = try r.dev(std.mem.sliceAsBytes(try mlxWords(r, m, row)));
+    try check.sameBytes(try std.fmt.bufPrint(&name, "{d}-bit rows [{d}, {d}] widened to {d} bits", .{ bits, n, k, row }), try r.back(widened, n * k * row / 8), try r.back(wide_rows, n * k * row / 8));
     // products: 16 rows against float64, fewer rows byte-equal to the 16-row call's first rows
     const most = 16;
     const x = try r.bfs(most * k, 1.0);
@@ -128,21 +141,27 @@ fn width(r: *Rig, k_: Kernels, n: usize, k: usize, bits: u8) !void {
         if (served == 4) {
             try k_.a4.decode(r.s, dx, dxs, .{ .w = t_own, .s = ts, .b = tb, .n = n, .k = k, .npad = npad }, o.*, rows);
         } else {
-            try k_.a8.decode(r.s, dx, dxs, .{ .w = t_own, .s = ts, .b = tb, .n = n, .k = k, .npad = npad }, o.*, rows);
+            try k_.an.decode(r.s, dx, dxs, .{ .w = t_own, .s = ts, .b = tb, .n = n, .k = k, .npad = npad, .bits = served }, o.*, rows);
         }
     }
+    // a narrow width's products: the same bits as its codes' on the 8-bit tiles, at every row count
+    if (t_wide != 0) for (counts, outs) |rows, o| {
+        const w8 = try r.zeros(rows * n * 2);
+        try k_.an.decode(r.s, dx, dxs, .{ .w = t_wide, .s = ts, .b = tb, .n = n, .k = k, .npad = npad, .bits = 8 }, w8, rows);
+        try check.sameBytes(try std.fmt.bufPrint(&name, "{d}-bit [{d}, {d}], {d} rows: equal the 8-bit tiles' products", .{ bits, n, k, rows }), try r.back(o, rows * n * 2), try r.back(w8, rows * n * 2));
+    };
     try r.close(try std.fmt.bufPrint(&name, "{d}-bit [{d}, {d}] decode, {d} rows", .{ bits, n, k, most }), outs[counts.len - 1], false, ref.want, ref.tol);
     for (counts[0 .. counts.len - 1], outs[0 .. counts.len - 1]) |rows, o| {
         const a = try r.back(outs[counts.len - 1], rows * n * 2);
         const b = try r.back(o, rows * n * 2);
         try check.sameBytes(try std.fmt.bufPrint(&name, "{d}-bit [{d}, {d}]: {d} rows equal the 16-row call's", .{ bits, n, k, rows }), b, a);
     }
-    // the 8-bit tiles' two paths: split-K CTAs and lane_gemv's loop over slices give one row the same bits
-    if (served == 8) if (k_.a8.split != null and qlinear.splitK(n, k) > 1) {
-        var plain = k_.a8.*;
+    // AffineN's two paths: split-K CTAs and lane_gemv's loop over slices give one row the same bits
+    if (served != 4) if (k_.an.split != null and qlinear.splitK(n, k) > 1) {
+        var plain = k_.an.*;
         plain.split = null;
         const o = try r.zeros(most * n * 2);
-        try plain.decode(r.s, dx, dxs, .{ .w = t_own, .s = ts, .b = tb, .n = n, .k = k, .npad = npad }, o, most);
+        try plain.decode(r.s, dx, dxs, .{ .w = t_own, .s = ts, .b = tb, .n = n, .k = k, .npad = npad, .bits = served }, o, most);
         try check.sameBytes(try std.fmt.bufPrint(&name, "{d}-bit [{d}, {d}]: split-K equals lane_gemv's slices", .{ bits, n, k }), try r.back(o, most * n * 2), try r.back(outs[counts.len - 1], most * n * 2));
     };
 }
@@ -170,9 +189,9 @@ pub fn run(gpu: Gpu) !void {
     const sms: usize = @intCast(try gpu.ctx.attribute(.multiprocessor_count));
     var a4 = try qlinear.Affine4Kernels.resolve(gpu.d, mods[0], mods[1], mods[2], mods[3], sms, false);
     defer a4.deinit();
-    var a8 = try qlinear.Affine8Kernels.resolve(gpu.d, mods[4], mods[3], sms, false);
-    defer a8.deinit();
-    const k_: Kernels = .{ .a4 = &a4, .a8 = &a8 };
+    var an = try qlinear.AffineNKernels.resolve(gpu.d, mods[4], mods[3], sms, false);
+    defer an.deinit();
+    const k_: Kernels = .{ .a4 = &a4, .an = &an };
     // shapes: one K slice and several (split-K), rows short of a tile, a 64-row tile past the 128 padding
     const shapes = [_][2]usize{ .{ 320, 2560 }, .{ 2560, 512 }, .{ 200, 1024 }, .{ 48, 2048 } };
     var cases: usize = 0;
@@ -180,5 +199,5 @@ pub fn run(gpu: Gpu) !void {
         try width(&r, k_, nk[0], nk[1], bits);
         cases += 1;
     };
-    check.pass("affine8: {d} cases over 2, 3, 4, 5, 6 and 8 bits: tiles equal the widened codes', products within {d:.3} of the float64 bound, every row count and path byte-equal", .{ cases, r.worst });
+    check.pass("affine8: {d} cases over 2, 3, 4, 5, 6 and 8 bits: narrow products equal the 8-bit tiles', within {d:.3} of the float64 bound, every row count and path byte-equal", .{ cases, r.worst });
 }

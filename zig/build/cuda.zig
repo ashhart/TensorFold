@@ -25,7 +25,7 @@ const kernels = [_]Kernel{
     .{ .name = "scan_rows", .flags = &.{ "-O3", "--fmad=false" } }, // nemotron_h/cuda/mamba.py
     .{ .name = "nemotron_ops", .flags = &.{"-O3"} }, // ours: Nemotron's serial feed, routed plan and rests
     .{ .name = "affine4_pack", .flags = &.{"-O3"} }, // ours: the MLX affine-4 repack into qlinear's tiles
-    .{ .name = "affine8", .flags = &.{"-O3"} }, // ours: MLX affine 2 to 8 bits into 4- and 8-bit tiles, the 8-bit lane_gemv
+    .{ .name = "affine8", .flags = &.{"-O3"} }, // ours: MLX affine 2 to 8 bits on lane_gemv tiles of their own width
     .{ .name = "fp8_experts", .flags = &.{"-O3"} }, // fp8/experts.cu's device code, tensorfold_fp8_experts_v6
     .{ .name = "exlr8", .flags = &.{ "-O3", "--fmad=false" } }, // ours: EXLR8 lane projections, the Metal kernels' order
     .{ .name = "exlr8_dense", .flags = &.{ "-O3", "--fmad=false" } }, // ours: EXLR8 dense matrices by row, the Metal order

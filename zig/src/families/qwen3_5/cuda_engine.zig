@@ -11,7 +11,7 @@ pub const Cache = caches.Cache;
 pub const tap_rows = caches.tap_rows;
 const Seg = caches.Seg;
 const Affine4 = cuda.qlinear.Affine4;
-const Affine8 = cuda.qlinear.Affine8;
+const AffineN = cuda.qlinear.AffineN;
 const DeviceBuffer = cuda.DeviceBuffer;
 const head_dim = geometry.head_dim;
 
@@ -34,10 +34,10 @@ pub fn aligned(n: usize) usize {
 /// qwen35.cuh's Geo.
 pub const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int, nl: c_int };
 
-/// A projection on the tiles of the width it is served at: 4 bits (codes of 2 to 4) or 8 (codes of 5 to 8).
+/// A projection on the tiles of the width it is served at: Affine4's for 4-bit codes, AffineN's for the rest.
 pub const Proj = union(enum) {
     a4: Affine4,
-    a8: Affine8,
+    an: AffineN,
 
     pub fn outputs(p: Proj) usize {
         return switch (p) {
@@ -103,7 +103,7 @@ pub const Engine = struct {
     mods: [8]cuda.Module,
     draws: cuda.sample.Draws,
     affine: cuda.qlinear.Affine4Kernels,
-    wide: cuda.qlinear.Affine8Kernels, // 8-bit tiles, and the packs of every width but 4
+    wide: cuda.qlinear.AffineNKernels, // the tiles of every width but 4, and their packs
     fns: Fns,
     keeps: Keeps,
     /// Every weight and scratch buffer in one allocation: WDDM's launch cost grows with the allocation count.
@@ -207,7 +207,7 @@ pub const Engine = struct {
         const gb10 = try ctx.attribute(.compute_capability_major) == 12 and try ctx.attribute(.compute_capability_minor) == 1;
         e.affine = try cuda.qlinear.Affine4Kernels.resolve(d, e.mods[0], e.mods[1], e.mods[2], e.mods[3], sms, gb10);
         errdefer e.affine.deinit();
-        e.wide = try cuda.qlinear.Affine8Kernels.resolve(d, e.mods[7], e.mods[3], sms, gb10);
+        e.wide = try cuda.qlinear.AffineNKernels.resolve(d, e.mods[7], e.mods[3], sms, gb10);
         errdefer e.wide.deinit();
         e.draws = try cuda.sample.Draws.resolve(e.mods[5]);
         inline for (@typeInfo(Fns).@"struct".field_names) |name| @field(e.fns, name) = try e.mods[4].function("tf_q35_" ++ name);
@@ -332,7 +332,8 @@ pub const Engine = struct {
         return e.projSums(l, x, e.xs, out, rows, prompt, e.tables.ptr + params_at);
     }
 
-    /// `proj` with group sums in `xs` and row counts at `params`; 8-bit tiles run prompts 16 rows at a time.
+    /// `proj` with the rows' group sums in `xs` and the device counts at `params` (0: every row given is real).
+    /// AffineN's tiles have no prompt GEMM: a prompt's rows take the decode tiles, 16 at a time, as a window's do.
     pub fn projSums(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prompt: bool, params: u64) !void {
         const n_out = l.outputs();
         const k = l.inputs();
@@ -346,7 +347,7 @@ pub const Engine = struct {
             const oa = out + at * n_out * 2;
             switch (l) {
                 .a4 => |q| try e.affine.decode(e.stream, xa, sa, q, oa, n),
-                .a8 => |q| try e.wide.decode(e.stream, xa, sa, q, oa, n),
+                .an => |q| try e.wide.decode(e.stream, xa, sa, q, oa, n),
             }
         }
     }
