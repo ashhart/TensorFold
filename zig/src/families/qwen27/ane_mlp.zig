@@ -30,6 +30,11 @@ pub const Share = struct {
     failed: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
 
+    /// The fp16 weights a share of `columns` holds: every layer's gate, up and down over those columns.
+    pub fn bytes(c: Config, columns: u32) u64 {
+        return 3 * @as(u64, columns) * c.hidden * 2 * c.layers;
+    }
+
     /// Every layer's program from the affine rows (w = q * scale + bias, rounded once to fp16), columns [0, c).
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, checkpoint: *const cp.Checkpoint, c: Config, columns: u32) !*Share {
         if (columns == 0 or columns % 64 != 0 or columns > c.intermediate) return error.BadAneShare;

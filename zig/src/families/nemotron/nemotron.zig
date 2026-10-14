@@ -31,3 +31,7 @@ pub const snapshot = @import("snapshot.zig");
 pub const learned_prompts = @import("learned_prompts.zig");
 
 pub const Model = model.Model;
+
+test {
+    _ = @import("train_check.zig");
+}

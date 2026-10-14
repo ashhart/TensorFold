@@ -223,9 +223,17 @@ pub const Scratch = struct {
     attn_records: []AttnRecord, // by layer: the round's rotated keys and values
     gpa: std.mem.Allocator,
 
+    native_partials: bool,
+
     /// Scratch for prompt chunks of `prompt_rows` and windows of `max_rows`, over caches of `capacity` positions.
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, g: c.Geometry, prompt_rows: usize, capacity: usize) !Scratch {
+        return initForKv(gpa, d, g, prompt_rows, capacity, false);
+    }
+
+    /// FP8 retains captured partial sizing; BF16 reserves native attention slice storage.
+    pub fn initForKv(gpa: std.mem.Allocator, d: *const cuda.Driver, g: c.Geometry, prompt_rows: usize, capacity: usize, kv8: bool) !Scratch {
         var s: Scratch = undefined;
+        s.native_partials = !kv8;
         s.gpa = gpa;
         s.records = try gpa.alloc(GdnRecord, g.layers);
         errdefer gpa.free(s.records);
@@ -250,6 +258,12 @@ pub const Scratch = struct {
         return a(usize, slot_rows * g.query_heads * c.head_dim * 4, 256) + 2 * a(usize, slot_rows * g.query_heads * 4, 256);
     }
 
+    /// Native slice storage is shared by a launch; per-stream admission conservatively budgets it in full.
+    pub fn partialBytesFor(g: c.Geometry, slot_rows: usize, native: bool) usize {
+        const extra: usize = if (native) @import("native_attention_plan.zig").sliceBytes(g.query_heads, g.kv_heads, c.head_dim) else 0;
+        return partialBytes(g, slot_rows) + extra;
+    }
+
     /// The slot-rows a stream of `capacity` positions may add to a round: its most slots (attention.slots of any
     /// keys and window it can hold) times its widest window.
     pub fn streamPartRows(capacity: usize) usize {
@@ -261,7 +275,7 @@ pub const Scratch = struct {
         const rows = @max(slot_rows, initial_part_rows);
         if (s.parts) |*b| b.free();
         s.parts = null;
-        var b = try cuda.DeviceBuffer.alloc(d, partialBytes(g, rows));
+        var b = try cuda.DeviceBuffer.alloc(d, partialBytesFor(g, rows, s.native_partials));
         errdefer b.free();
         var A: Arena = .{ .buf = b };
         s.part_o = try A.take(rows * g.query_heads * c.head_dim * 4);

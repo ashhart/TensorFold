@@ -45,17 +45,26 @@ const Target = struct {
     drafts: usize = 0,
     releases: usize = 0,
     lane_memory: bool,
+    post_failure: bool = false,
     observed: *Box,
     delivered_before_draft: bool = false,
     fn backend(t: *Target) lanes.backend.Backend {
         t.table = t.fake.backend().vtable.*;
         t.table.draft = draft;
+        t.table.after_first = if (t.post_failure) after else null;
         t.table.release = release;
         return .{ .ptr = &t.fake, .vtable = &t.table, .first_before_draft = true };
     }
     fn self(ptr: *anyopaque) *Target {
         const fake: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
         return @fieldParentPtr("fake", fake);
+    }
+    fn after(ptr: *anyopaque, _: *lanes.Stream) !void {
+        const t = self(ptr);
+        t.observed.mutex.lockUncancelable(std.testing.io);
+        t.delivered_before_draft = t.observed.tokens == 1 and t.observed.logprobs == 1;
+        t.observed.mutex.unlock(std.testing.io);
+        return error.LaneMemory;
     }
     fn draft(ptr: *anyopaque, _: []const lanes.backend.DraftRequest) !void {
         const t = self(ptr);
@@ -72,10 +81,10 @@ const Target = struct {
     }
 };
 
-fn check(lane_memory: bool) !void {
+fn check(lane_memory: bool, post_failure: bool) !void {
     var one: Box = .{};
     var other: Box = .{};
-    var t: Target = .{ .lane_memory = lane_memory, .observed = &other };
+    var t: Target = .{ .lane_memory = lane_memory, .post_failure = post_failure, .observed = &other };
     defer t.fake.deinit();
     var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .hidden_rows = true, .mtp = true, .speculate = true, .drafts = 7 }, 8, 7);
     defer cfg.deinit(a);
@@ -105,15 +114,19 @@ fn check(lane_memory: bool) !void {
     try std.testing.expectEqual(@as(usize, 1), other.prefilled);
     try std.testing.expectEqual(@as(usize, 1), one.finishes);
     try std.testing.expectEqual(@as(usize, 1), other.finishes);
-    try std.testing.expectEqual(@as(usize, 1), t.drafts);
+    try std.testing.expectEqual(@as(usize, if (post_failure) 0 else 1), t.drafts);
     try std.testing.expectEqual(@as(usize, 2), t.releases);
     try std.testing.expect(t.delivered_before_draft);
 }
 
 test "first token and logprob sent once; terminal job survives another job's draft error" {
-    try check(false);
+    try check(false, false);
 }
 
 test "LaneMemory after the committed handoff fails instead of resetting and requeueing the reply" {
-    try check(true);
+    try check(true, false);
+}
+
+test "post-first LaneMemory never requeues an emitted reply and terminal first still succeeds" {
+    try check(true, true);
 }

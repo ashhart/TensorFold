@@ -17,6 +17,8 @@ pub const formats: []const []const u8 = &.{"mlx-q4g64"};
 pub const default_context: i64 = 32768;
 pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = engine.prompt_rows;
+/// --drafter: the DFlash2 checkpoint the 27B drafts with (it has no MTP head of its own).
+pub const takes_drafter = true;
 
 /// Prompt-cache copies (reuse.zig), kept in pinned host memory; a state ends where its prompt pass stands.
 pub const snap_bytes = reuse.bytes;
@@ -47,7 +49,7 @@ pub fn prepareImage(a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) !i
 }
 
 /// A lone drafted stream's own driver (none here: one stream decodes in the lane core too, as under --parallel).
-pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool) anyerror!bool;
+pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
 
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
 pub const Loaded = struct {
@@ -98,8 +100,9 @@ fn drafterDir(a: std.mem.Allocator, io: std.Io, given: ?[]const u8) !?[]const u8
 const most_streams = 32;
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
-    // the 27B's glue runs the Python engine's Triton kernels, captured on this chip (no own glue kernels yet)
-    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels orelse return error.QwenNeedsCapturedKernels, .{ .context = o.context, .kv8 = o.kv8 });
+    // BF16 target and drafter glue use native CUDA; FP8 attention retains its captured set.
+    if (o.kv8 and (kernels == null or kernels.?.len == 0)) return error.QwenNeedsCapturedKernels;
+    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels orelse "", .{ .context = o.context, .kv8 = o.kv8 });
     errdefer e.deinit();
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
@@ -128,7 +131,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .facts = own.lanes.facts(),
         .rows = st.max_rows,
         // each stream's caches, its drafter context, and its share of a round's attention partials (`fit`)
-        .stream_bytes = st.Seq.bytes(e.w.g, o.context, o.kv8) + st.Scratch.partialBytes(e.w.g, st.Scratch.streamPartRows(o.context)) + if (own.draft != null) dr.Context.bytes() else 0,
+        .stream_bytes = st.Seq.bytes(e.w.g, o.context, o.kv8) + st.Scratch.partialBytesFor(e.w.g, st.Scratch.streamPartRows(o.context), !o.kv8) + if (own.draft != null) dr.Context.bytes() else 0,
         .vision_bytes = vision_bytes,
         .ctx = own,
         .deinit = release,

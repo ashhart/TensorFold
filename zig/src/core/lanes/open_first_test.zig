@@ -19,16 +19,27 @@ const Probe = struct {
     fail_draft: bool = false,
     cancel: bool = false,
     selected: u32 = 0,
+    post: bool = false,
+    afters: usize = 0,
+    fail_after: bool = false,
+    saw_committed_handoff: bool = false,
 
     fn backend(p: *Probe, early: bool, stepped: bool) be.Backend {
         p.table = (if (stepped) p.target.stepped() else p.target.backend()).vtable.*;
         p.table.draft = draft;
+        p.table.after_first = if (p.post) after else null;
         p.table.release = release;
         return .{ .ptr = &p.target, .vtable = &p.table, .first_before_draft = early };
     }
     fn self(ptr: *anyopaque) *Probe {
         const t: *fake.Fake = @ptrCast(@alignCast(ptr));
         return @fieldParentPtr("target", t);
+    }
+    fn after(ptr: *anyopaque, s: *sm.Stream) !void {
+        const p = self(ptr);
+        p.afters += 1;
+        p.saw_committed_handoff = p.hooks == 1 and s.emitted().len == 1 and s.pending != null;
+        if (p.fail_after) return error.LaneMemory;
     }
     fn draft(ptr: *anyopaque, req: []const be.DraftRequest) !void {
         const p = self(ptr);
@@ -87,7 +98,7 @@ test "opt-in commits and hands off before draft; default retains old ordering" {
 
 test "max-one and EOS terminate successfully without preparing any drafts" {
     for ([_]bool{ false, true }) |eos| {
-        var p: Probe = .{ .fail_draft = true };
+        var p: Probe = .{ .fail_draft = true, .post = true, .fail_after = true };
         defer p.target.deinit();
         var cfg = try config();
         defer cfg.deinit(a);
@@ -100,6 +111,7 @@ test "max-one and EOS terminate successfully without preparing any drafts" {
         try e.addStreamCommitted(&s, .{ .ptr = &p, .call = Probe.hook });
         try std.testing.expect(s.finished);
         try std.testing.expectEqual(@as(usize, 0), p.drafts);
+        try std.testing.expectEqual(@as(usize, 0), p.afters);
         try std.testing.expectEqual(@as(usize, 1), p.hooks);
         try std.testing.expectEqual(@as(usize, 1), p.releases);
         try std.testing.expectEqual(@as(usize, 0), e.activeCount());
@@ -128,7 +140,7 @@ test "forced first and its logprob are committed exactly once before a later dra
 }
 
 test "cancellation at handoff releases once and skips initial drafts" {
-    var p: Probe = .{ .cancel = true };
+    var p: Probe = .{ .cancel = true, .post = true, .fail_after = true };
     defer p.target.deinit();
     var cfg = try config();
     defer cfg.deinit(a);
@@ -141,6 +153,7 @@ test "cancellation at handoff releases once and skips initial drafts" {
     try std.testing.expectEqual(@as(usize, 1), p.hooks);
     try std.testing.expectEqual(@as(usize, 1), p.releases);
     try std.testing.expectEqual(@as(usize, 0), p.drafts);
+    try std.testing.expectEqual(@as(usize, 0), p.afters);
 }
 
 test "stepped prefill uses the same committed handoff only after its final chunk" {
@@ -160,4 +173,41 @@ test "stepped prefill uses the same committed handoff only after its final chunk
     try std.testing.expectEqual(@as(usize, 1), p.hooks);
     try std.testing.expect(p.committed_in_draft and p.hook_in_draft);
     e.discard(&s);
+}
+
+test "optional post-first runs after committed handoff and before draft for forced sampled first" {
+    var p: Probe = .{ .post = true };
+    defer p.target.deinit();
+    var cfg = try config();
+    defer cfg.deinit(a);
+    var clock: fake.FixedClock = .{};
+    var e = Engine.init(a, &cfg, p.backend(true, false), clock.clock());
+    defer e.deinit();
+    var s = try sm.Stream.init(a, .{ .id = "after", .prompt = &ids, .max_new = 8, .logprobs = 2, .sampling = .{ .temperature = 1.2, .top_k = 0, .top_p = 1, .seed = 7 } });
+    defer s.deinit(a);
+    try s.force.append(a, 42);
+    try e.addStreamCommitted(&s, .{ .ptr = &p, .call = Probe.hook });
+    try std.testing.expect(p.saw_committed_handoff and p.hook_in_draft);
+    try std.testing.expectEqual(@as(usize, 1), p.afters);
+    try std.testing.expectEqual(@as(u32, 42), p.selected);
+    try std.testing.expectEqual(@as(usize, 1), s.rows.items.len);
+    e.discard(&s);
+}
+
+test "post-first error preserves one token and bypasses draft until the owner discards" {
+    var p: Probe = .{ .post = true, .fail_after = true };
+    defer p.target.deinit();
+    var cfg = try config();
+    defer cfg.deinit(a);
+    var clock: fake.FixedClock = .{};
+    var e = Engine.init(a, &cfg, p.backend(true, false), clock.clock());
+    defer e.deinit();
+    var s = try sm.Stream.init(a, .{ .id = "after-error", .prompt = &ids, .max_new = 8 });
+    defer s.deinit(a);
+    try std.testing.expectError(error.LaneMemory, e.addStreamCommitted(&s, .{ .ptr = &p, .call = Probe.hook }));
+    try std.testing.expect(p.saw_committed_handoff);
+    try std.testing.expectEqual(@as(usize, 1), s.emitted().len);
+    try std.testing.expectEqual(@as(usize, 0), p.drafts);
+    e.discard(&s);
+    try std.testing.expectEqual(@as(usize, 1), p.releases);
 }

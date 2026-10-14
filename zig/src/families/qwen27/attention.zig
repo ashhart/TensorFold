@@ -293,15 +293,15 @@ pub const Attention = struct {
         if (prompt and a.prompt != null and plan.geometry.shared_prefix and plan.streams == 1) {
             e.barrier();
             try a.promptRows(e, scratch, binding, plan, out);
-        } else try a.treeRows(e, scratch, binding, plan, q, out, args);
-        if (raw_gate) |gate| {
-            e.setPipeline(a.io[9]);
-            bind(e, .{ out, gate });
-            e.setValue(glue.Element{ .width = 256, .heads = 24, .rows = plan.rows, .activation = .bf16 }, 2);
-            e.setBuffer(out.buffer, out.offset, 3);
-            e.dispatchThreads(mtl.Size.of(256, 24, plan.rows), mtl.Size.of(32, 1, 1));
-            e.barrier();
-        }
+            if (raw_gate) |gate| {
+                e.setPipeline(a.io[9]);
+                bind(e, .{ out, gate });
+                e.setValue(glue.Element{ .width = 256, .heads = 24, .rows = plan.rows, .activation = .bf16 }, 2);
+                e.setBuffer(out.buffer, out.offset, 3);
+                e.dispatchThreads(mtl.Size.of(256, 24, plan.rows), mtl.Size.of(32, 1, 1));
+                e.barrier();
+            }
+        } else try a.treeRows(e, scratch, binding, plan, q, out, raw_gate, args);
         try timing.end();
     }
     /// A prompt chunk's rows over absolute 512-key chunks (attention_prompt.metal), merged in key order.
@@ -327,16 +327,18 @@ pub const Attention = struct {
         e.dispatchGroups(mtl.Size.of(4, plan.rows * 6, 1), mtl.Size.of(32, 1, 1));
         e.barrier();
     }
-    /// Trees and decoded rows: cached keys by chunk (prefix), the round's own by ancestor path (tail), merged.
-    fn treeRows(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, out: Ref, args: PackArgs) !void {
-        e.setPipeline(a.io[1]);
-        bind(e, .{ q, scratch.get(.qb) });
-        e.setValue(args, 2);
-        e.dispatchThreads(mtl.Size.of(256, 16, 4 * plan.rows), mtl.Size.of(32, 4, 1));
+    /// Trees and decoded rows: cached keys by chunk (prefix), the round's own by path (tail), merged and gated.
+    fn treeRows(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, out: Ref, raw_gate: ?Ref, args: PackArgs) !void {
+        if (!plan.fused) {
+            e.setPipeline(a.io[1]);
+            bind(e, .{ q, scratch.get(.qb) });
+            e.setValue(args, 2);
+            e.dispatchThreads(mtl.Size.of(256, 16, 4 * plan.rows), mtl.Size.of(32, 4, 1));
+        }
         e.barrier();
         const scale: f32 = 0.0625;
         if (plan.prefix_chunks > 0) {
-            const sg: u32 = @min(plan.tiles, 8); // 8 simdgroups a threadgroup: 17% faster than 16 at 512 keys on an M5 Max, same arithmetic per tile
+            const sg: u32 = @min(plan.tiles, 4); // 8 simdgroups a threadgroup, a pair a tile
             e.setPipeline(a.prefix[sg - 1]);
             bind(e, .{ scratch.get(.qa), binding.get(.caches) });
             e.setValue(scale, 2);
@@ -345,21 +347,24 @@ pub const Attention = struct {
             e.setBuffer(scratch.get(.poa).buffer, 0, 5);
             e.setBuffer(scratch.get(.pma).buffer, 0, 6);
             e.setBuffer(scratch.get(.pla).buffer, 0, 7);
-            e.dispatchGroups(mtl.Size.of(4, plan.prefix_chunks, (plan.tiles + sg - 1) / sg), mtl.Size.of(32 * sg, 1, 1));
+            e.dispatchGroups(mtl.Size.of(4, plan.prefix_chunks, (plan.tiles + sg - 1) / sg), mtl.Size.of(64 * sg, 1, 1));
             e.barrier();
         }
-        e.setPipeline(a.io[3]);
-        bind(e, .{ scratch.get(.qb), binding.get(.caches) });
-        e.setValue(scale, 2);
-        e.setBuffer(binding.get(.meta).buffer, 0, 3);
-        for ([_]Field{ .paths, .nodes, .poa, .pma, .pla, .pob, .pmb, .plb }, 4..) |field, i| {
-            const r = scratch.get(field);
-            e.setBuffer(r.buffer, 0, i);
+        if (!plan.fused) {
+            e.setPipeline(a.io[3]);
+            bind(e, .{ scratch.get(.qb), binding.get(.caches) });
+            e.setValue(scale, 2);
+            e.setBuffer(binding.get(.meta).buffer, 0, 3);
+            for ([_]Field{ .paths, .nodes, .poa, .pma, .pla, .pob, .pmb, .plb }, 4..) |field, i| {
+                const r = scratch.get(field);
+                e.setBuffer(r.buffer, 0, i);
+            }
+            e.dispatchGroups(mtl.Size.of(4, plan.tail_chunks, plan.rows), mtl.Size.of(128, 1, 1));
+            e.barrier();
         }
-        e.dispatchGroups(mtl.Size.of(4, plan.tail_chunks, plan.rows), mtl.Size.of(128, 1, 1));
-        e.barrier();
         e.setPipeline(a.io[4]);
-        bind(e, .{ scratch.get(.poa), scratch.get(.pma), scratch.get(.pla), scratch.get(.pob), scratch.get(.pmb), scratch.get(.plb), binding.get(.meta), scratch.get(.nodes), out });
+        bind(e, .{ scratch.get(.poa), scratch.get(.pma), scratch.get(.pla), scratch.get(.pob), scratch.get(.pmb), scratch.get(.plb), binding.get(.meta), scratch.get(.nodes), out, raw_gate orelse out });
+        e.setValue(@as(u32, @intFromBool(raw_gate != null)), 10);
         e.dispatchGroups(mtl.Size.of(4, plan.rows * 6, 1), mtl.Size.of(32, 1, 1));
         e.barrier();
     }

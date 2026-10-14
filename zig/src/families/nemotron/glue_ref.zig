@@ -47,7 +47,7 @@ fn scaleStore(x: []const f32, inv: f32, w: []const u16, out: []u16, xs: []f32) v
     }
 }
 
-/// tf_nemo_embed: MLX 4-bit rows, fma(q, scale, bias) rounded to bf16.
+/// The 4-bit embed (embed_rows.cu): MLX 4-bit rows, fma(q, scale, bias) rounded to bf16.
 pub fn embed(ids: []const i32, w: []const u32, s: []const u16, b: []const u16, out: []u16, d: usize) void {
     for (ids, 0..) |id, r| {
         const tok: usize = @intCast(id);

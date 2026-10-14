@@ -496,5 +496,28 @@ pub const Forward = struct {
         try f.ops.argmax(f.s.logits, c.vocab, c.vocab, f.s.picks, rows);
         try f.ops.download(std.mem.sliceAsBytes(out[0..rows]), f.s.picks);
         try f.ops.s.synchronize();
+        if (std.c.getenv("TF_Q27_TOP2") != null and rows == 1) { // debug: the row's top-2 margin
+            const lg = try std.heap.page_allocator.alloc(u16, c.vocab);
+            defer std.heap.page_allocator.free(lg);
+            try f.ops.download(std.mem.sliceAsBytes(lg), f.s.logits);
+            try f.ops.s.synchronize();
+            var b1: f32 = -std.math.inf(f32);
+            var b2: f32 = -std.math.inf(f32);
+            var ia: usize = 0;
+            var ib: usize = 0;
+            for (lg, 0..) |h, i| {
+                const v: f32 = @bitCast(@as(u32, h) << 16);
+                if (v > b1) {
+                    b2 = b1;
+                    ib = ia;
+                    b1 = v;
+                    ia = i;
+                } else if (v > b2) {
+                    b2 = v;
+                    ib = i;
+                }
+            }
+            std.debug.print("top2 {d} {d:.4} | {d} {d:.4}\n", .{ ia, b1, ib, b2 });
+        }
     }
 };

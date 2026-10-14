@@ -1,24 +1,15 @@
 //! ModelOpt formats on the GPU: repacks against host twins; FP8, BF16 rows and relu^2 NVFP4 experts against fp64.
 const std = @import("std");
 const cuda = @import("cuda");
+const core = @import("core");
 const check = @import("check.zig");
 const Gpu = check.Gpu;
 
 const modelopt = cuda.modelopt;
 const qmmf = cuda.qmmf;
 const fx4 = cuda.experts.Nvfp4Experts;
-
-fn e4m3(b: u8) f64 {
-    const sign: f64 = if (b & 0x80 != 0) -1 else 1;
-    const e: i32 = (b >> 3) & 0xF;
-    const m: f64 = @floatFromInt(b & 7);
-    return sign * if (e == 0) m / 8.0 * std.math.pow(f64, 2, -6) else (1 + m / 8.0) * std.math.pow(f64, 2, @floatFromInt(e - 7));
-}
-
-fn e2m1(n: u8) f64 {
-    const mag = [8]f64{ 0, 0.5, 1, 1.5, 2, 3, 4, 6 };
-    return (if (n & 8 != 0) @as(f64, -1) else 1) * mag[n & 7];
-}
+const e4m3 = core.quant.fp8.e4m3;
+const e2m1 = core.quant.nvfp4.e2m1;
 
 fn bf(v: u16) f64 {
     return @floatCast(@as(f32, @bitCast(@as(u32, v) << 16)));

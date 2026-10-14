@@ -10,17 +10,20 @@ const dr = @import("draft.zig");
 const g = shape.the_27b;
 const a = std.testing.allocator;
 
-const Mock = struct {
-    var live: usize = 0;
-    var freed: usize = 0;
+pub const Mock = struct {
+    pub var live: usize = 0;
+    pub var freed: usize = 0;
     const Copy = struct { dst: u64, src: u64, bytes: usize };
-    var copy_rows: [512]Copy = undefined;
-    var copies: usize = 0;
-    var fences: usize = 0;
-    var fail_copy = false;
-    var fail_fence = false;
+    pub var copy_rows: [512]Copy = undefined;
+    pub var copies: usize = 0;
+    pub var fences: usize = 0;
+    pub var fail_copy = false;
+    pub var fail_fence = false;
     var next: u64 = 0x100000000;
+    pub var fail_alloc = false;
+    pub var copied: ?*const fn () void = null;
     fn alloc(ptr: *cuda.abi.DevicePtr, _: usize) callconv(.c) cuda.abi.Result {
+        if (fail_alloc) return cuda.abi.error_not_ready;
         ptr.* = next;
         next += 0x100000000;
         live += 1;
@@ -36,6 +39,7 @@ const Mock = struct {
         std.debug.assert(copies < copy_rows.len);
         copy_rows[copies] = .{ .dst = dst, .src = src, .bytes = bytes };
         copies += 1;
+        if (copied) |call| call();
         return cuda.abi.success;
     }
     fn fence(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
@@ -43,24 +47,26 @@ const Mock = struct {
         fences += 1;
         return cuda.abi.success;
     }
-    fn reset() void {
+    pub fn reset() void {
         live = 0;
         freed = 0;
         copies = 0;
         fences = 0;
         fail_copy = false;
         fail_fence = false;
+        fail_alloc = false;
+        copied = null;
     }
 };
 
-const Fixture = struct {
+pub const Fixture = struct {
     driver: cuda.Driver = undefined,
     kernels: kern.Kernels = undefined,
     rec: [64]u64 = @splat(0x1000),
     conv: [64]u64 = @splat(0x2000),
     keys: [64]u64 = @splat(0x3000),
     values: [64]u64 = @splat(0x4000),
-    fn ops(f: *Fixture) kern.Ops {
+    pub fn ops(f: *Fixture) kern.Ops {
         f.driver.api.cuMemAlloc_v2 = Mock.alloc;
         f.driver.api.cuMemFree_v2 = Mock.free;
         f.driver.api.cuMemcpyDtoDAsync_v2 = Mock.copy;
@@ -68,7 +74,7 @@ const Fixture = struct {
         f.kernels.d = &f.driver;
         return .{ .k = &f.kernels, .s = .{ .d = &f.driver, .handle = null } };
     }
-    fn seq(f: *Fixture, n: usize) st.Seq {
+    pub fn seq(f: *Fixture, n: usize) st.Seq {
         return .{ .gpa = a, .arena = .{ .buf = null }, .rec = &f.rec, .conv = &f.conv, .keys = &f.keys, .values = &f.values, .kscale = &.{}, .vscale = &.{}, .kv8 = false, .head_in = 0x5000, .head_xs = 0x6000, .pos = n, .capacity = n + 256 };
     }
 };

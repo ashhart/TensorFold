@@ -42,6 +42,8 @@ pub const Tiled = struct {
 const options = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 /// Ops a draft frame encodes before committing them, so the GPU starts while the CPU encodes the rest.
 const part_ops = 40;
+/// The first part is short, so the GPU starts while the rest is still being encoded.
+const first_part_ops = 6;
 pub const Backend = struct {
     allocator: std.mem.Allocator,
     target: *Target,
@@ -185,15 +187,11 @@ pub const Backend = struct {
         if (b.failed) return error.DraftBackendFailed;
         try b.frame.require(epoch);
         b.frame.ops += 1;
-        if (b.frame.ops % part_ops == 0) try b.frame.part();
+        if (b.frame.ops == first_part_ops or b.frame.ops % part_ops == 0) try b.frame.part();
         return b.frame.encoder;
     }
     pub fn copy(b: *Backend, e: mtl.ComputeEncoder, x: Ref, y: Ref, rows: u32, width: u32) !void {
-        var first: u32 = 0;
-        while (first < rows) : (first += 128) {
-            const off = @as(usize, first) * width * 2;
-            try b.target.glue.unstack(e, .{ .buffer = x.buf, .offset = x.off + off }, .{ .buffer = y.buf, .offset = y.off + off }, .{ .rows = @min(rows - first, 128), .width = width, .stride = width, .offset = 0 });
-            e.barrier();
-        }
+        try b.target.glue.unstack(e, .{ .buffer = x.buf, .offset = x.off }, .{ .buffer = y.buf, .offset = y.off }, .{ .rows = rows, .width = width, .stride = width, .offset = 0 });
+        e.barrier();
     }
 };

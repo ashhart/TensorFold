@@ -100,7 +100,7 @@ fn gib(n: u64) f64 {
 }
 
 /// Every file the node needs whole, each equal to the hub's sha256 (LFS) or git blob sha1; returns how many.
-fn fetchWhole(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Writer, err_out: *std.Io.Writer, endpoint: []const u8, repo: []const u8, sha: []const u8, dir: []const u8, whole: []const single.Entry) !u32 {
+pub fn fetchWhole(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.Writer, err_out: *std.Io.Writer, endpoint: []const u8, repo: []const u8, sha: []const u8, dir: []const u8, whole: []const single.Entry) !u32 {
     const w = std.Io.Dir.cwd();
     const tmp = try std.fs.path.join(a, &.{ dir, ".pull" });
     try w.createDirPath(io, tmp);
@@ -119,7 +119,7 @@ fn fetchWhole(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.W
             continue;
         }
         const got = try single.downloadRetrying(a, io, client, out, url, tmp, e);
-        try std.Io.Dir.renameAbsolute(try std.fs.path.join(a, &.{ tmp, got }), final, io);
+        try w.rename(try std.fs.path.join(a, &.{ tmp, got }), w, final, io);
     }
     if (big.items.len > 0) {
         try out.print("  {d} whole files in {d} MiB pieces\n", .{ big.items.len, whole_piece >> 20 });
@@ -132,7 +132,7 @@ fn fetchWhole(a: Allocator, io: std.Io, client: *std.http.Client, out: *std.Io.W
                 try err_out.print("  {s}: the bytes do not match the hub's sha256\n", .{e.path});
                 return error.ShaMismatch;
             }
-            try std.Io.Dir.renameAbsolute(f.path, try std.fs.path.join(a, &.{ dir, e.path }), io);
+            try w.rename(f.path, w, try std.fs.path.join(a, &.{ dir, e.path }), io);
         }
     }
     w.deleteTree(io, tmp) catch {};

@@ -28,6 +28,7 @@ test {
     _ = @import("cuda/forward.zig");
     _ = @import("cuda/lanes.zig");
     _ = @import("cuda/tree.zig");
+    _ = @import("cuda/native_attention_plan.zig");
     _ = @import("cuda/draft_load.zig");
     _ = @import("cuda/draft_policy.zig");
     _ = draft;

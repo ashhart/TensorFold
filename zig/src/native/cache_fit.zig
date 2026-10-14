@@ -23,6 +23,11 @@ pub fn fit(total: u64, ready: u64, gib: ?f64, over: bool) error{CacheOverCap}!Fi
     return .{ .budget = want, .room = room, .cap = cap };
 }
 
+/// Whether `bytes` held at once and the margin stay inside the 70% share of `total` bytes of RAM (0: unknown, never).
+pub fn fitsLoadLimit(bytes: u64, total: u64) bool {
+    return bytes +| MARGIN <= total / 100 * SHARE_PERCENT;
+}
+
 /// This machine's RAM (null where the OS does not say).
 pub fn ram() ?u64 {
     return std.process.totalSystemMemory() catch null;
@@ -110,6 +115,17 @@ test "a given budget that fits is kept, a larger one is refused unless the overr
     try std.testing.expectError(error.CacheOverCap, fit(ram256, 172 * GiB, 16, false));
     try std.testing.expectEqual(@as(u64, 16 * GiB), (try fit(ram256, 172 * GiB, 16, true)).budget);
     try std.testing.expectEqual(@as(u64, 64 * GiB), (try fit(512 * GiB, 172 * GiB, 64, false)).budget); // a 512 GB Mac has room
+}
+
+test "a load fits only while it and the margin stay inside 70% of RAM" {
+    const ram256: u64 = 256 * GiB;
+    try std.testing.expect(fitsLoadLimit(172 * GiB, ram256)); // Flash Next's 6-bit checkpoint on a 256 GB M5 Ultra
+    try std.testing.expect(!fitsLoadLimit(181 * GiB, ram256)); // the 6 Oct panic's load
+    try std.testing.expect(fitsLoadLimit(ram256 / 100 * 70 - MARGIN, ram256));
+    try std.testing.expect(!fitsLoadLimit(ram256 / 100 * 70 - MARGIN + 1, ram256));
+    try std.testing.expect(!fitsLoadLimit(1, 0)); // no RAM reading: nothing fits
+    try std.testing.expect(!fitsLoadLimit(16 * GiB + (5760 << 20), 32 * GiB)); // the 27B and its Neural Engine share on a 32 GB Mac
+    try std.testing.expect(fitsLoadLimit(16 * GiB + (5760 << 20), 48 * GiB));
 }
 
 test "the OS readings: RAM and this process's footprint" {

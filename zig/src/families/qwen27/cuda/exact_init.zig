@@ -14,6 +14,7 @@ pub fn init(gpa: std.mem.Allocator, e: *Engine, streams: u32) !Cuda {
     const on = try exact.policy.enabled(if (env) |v| std.mem.span(v) else null);
     var cache = exact.Cache.init(gpa, on);
     cache.logits_enabled = try exact.logits_policy.configured(on);
+    cache.post_first.enabled = try @import("exact_post_first.zig").configured(on);
     return .{
         .gpa = gpa,
         .e = e,
