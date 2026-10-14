@@ -29,6 +29,9 @@ const norms_tests = @import("norms_tests.zig");
 const norm_rows_tests = @import("norm_rows_tests.zig");
 const pocket_tests = @import("pocket_tests.zig");
 const recapture_tests = @import("recapture_tests.zig");
+const lfm2_attention_tests = @import("lfm2_attention_tests.zig");
+const lfm2_kernel_tests = @import("lfm2_kernel_tests.zig");
+const lfm2_vision_tests = @import("lfm2_vision_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -49,7 +52,10 @@ const usage =
     \\  norm-rows                 bf16-residual and gated norms, token rows against float64 (synthetic)
     \\  sample                    sample.cu's keyed draws against the Metal rule's host references (synthetic rows)
     \\  glue                      Nemotron's glue kernels against their host references at its shapes (synthetic rows)
+    \\  lfm2-kernels              LFM2's glue kernels against their host references at d1's shapes (synthetic rows)
     \\  pocket [reps]             the pocket's two kernels against tf_pocket_rows byte for byte; reps > 0 times them too
+    \\  lfm2-attention            LFM2's GQA prompt attention (head dim 64), causal and packed trees, against float64 (synthetic rows)
+    \\  lfm2-vision [MODEL]       LFM2-VL's vision kernels against host references; MODEL adds features against CPU goldens
     \\  window-profile MODEL WIDTHS IDS_FILE   a decode window's GPU ms by kernel class (WIDTHS like 1,4,16), beside its graph
     \\  tree-accept MODEL IDS_FILE COUNT OUT   a greedy reply's MTP chain and level-1 runner-up branches at every position (JSON)
     \\  chunk-costs MODEL IDS_FILE WIDTHS   r rows as the decode window graph (r <= 16) and as a prompt chunk (any r)
@@ -131,8 +137,11 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "norms")) return norms_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "norm-rows")) return norm_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glue")) return glue_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "lfm2-kernels")) return lfm2_kernel_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "pocket"))
         return pocket_tests.run(gpu, if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else 0);
+    if (std.mem.eql(u8, cmd, "lfm2-attention")) return lfm2_attention_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "lfm2-vision")) return lfm2_vision_tests.run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "window-profile")) return window_profile.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "tree-accept")) return tree_accept.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "chunk-costs")) return chunk_costs.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
