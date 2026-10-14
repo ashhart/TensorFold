@@ -195,6 +195,7 @@ inline void tf_tq_tile(const device bfloat* X, const device float* XS, const dev
 
 // Y [R, N] = X [R, K] W^T, a 32x32 tile a threadgroup of 128 (tg.x columns, tg.y rows); XS at buffer 6.
 template <int BITS>
+[[max_total_threads_per_threadgroup(128)]]
 [[kernel]] void tf_tile_qmm(const device bfloat* X [[buffer(0)]], const device uint8_t* W [[buffer(1)]],
                             const device bfloat* SC [[buffer(2)]], const device bfloat* BI [[buffer(3)]],
                             constant TfTqArgs& a [[buffer(4)]], device bfloat* OUT [[buffer(5)]],
@@ -210,6 +211,7 @@ template <int BITS>
 
 // The tiles over rows sorted by expert: item tg.y of WORK[1..WORK[0]] = (expert << 16) | row tile, rows from STARTS.
 template <int BITS, bool GLU>
+[[max_total_threads_per_threadgroup(128)]]
 [[kernel]] void tf_tile_qmm_grouped(const device bfloat* X [[buffer(0)]], const device uint8_t* W [[buffer(1)]],
                                     const device bfloat* SC [[buffer(2)]], const device bfloat* BI [[buffer(3)]],
                                     constant TfTqArgs& a [[buffer(4)]], device bfloat* OUT [[buffer(5)]],
