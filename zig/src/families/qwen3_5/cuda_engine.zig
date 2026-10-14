@@ -317,6 +317,9 @@ pub const Engine = struct {
         try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at });
     }
 
+    /// A chain row's rowanc: its index in its window, as a prompt chunk's rows outnumber the bits.
+    const chain_row: u32 = 1 << 31;
+
     /// The row tables of `parts`: each row's segment, parent row (-1: a window's first) and ancestors-and-self bits.
     fn rowTables(st: []u8, parts: []const Part) !void {
         const rowseg = std.mem.bytesAsSlice(c_int, st[rowseg_at..][0 .. max_rows * 4]);
@@ -330,7 +333,7 @@ pub const Engine = struct {
                 if (parent >= @as(i32, @intCast(r)) or parent < -1) return error.InvalidQwenParents;
                 rowseg[row0 + r] = @intCast(i);
                 rowpar[row0 + r] = if (parent < 0) -1 else @intCast(row0 + @as(usize, @intCast(parent)));
-                rowanc[row0 + r] = (@as(u32, 1) << @intCast(r)) | (if (parent < 0) 0 else rowanc[row0 + @as(usize, @intCast(parent))]);
+                rowanc[row0 + r] = if (p.parents == null) chain_row | @as(u32, @intCast(r)) else (@as(u32, 1) << @intCast(r)) | (if (parent < 0) 0 else rowanc[row0 + @as(usize, @intCast(parent))]);
             }
             row0 += p.rows;
         }
