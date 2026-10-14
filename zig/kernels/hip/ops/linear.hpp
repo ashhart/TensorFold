@@ -64,4 +64,3 @@ extern "C" __global__ void tf_gnorm_silu(const float* y, const void* z, void* ou
 }
 
 }  // namespace
-
