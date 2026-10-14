@@ -11,7 +11,7 @@
 - Environment, with the TensorFold commit, MLX or PyTorch version, machine and GPU, checkpoint and revision:
 - Exactness, from `tools/bench_concurrent.py --alone --serial` or `token_sha` against `"draft": false`:
 - Decode speed before and after, from `tools/bench_openai.py`:
-- Prompt speed before and after, from `tools/prefill_cold.py`:
+- Prompt speed before and after: the cold first request's `ttft_s` from `tools/bench_cache.py --require-cold` on a long prompt, or "n/a" with the reason when the change cannot reach prompt processing:
 - Tests run, with pass, fail and skip counts:
 - Not run, and why:
 

