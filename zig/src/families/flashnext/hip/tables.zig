@@ -48,7 +48,7 @@ pub const Tables = struct {
             const w = try ck.get(try std.fmt.allocPrint(a, "{s}.weight", .{stem}));
             const sc = try ck.get(try std.fmt.allocPrint(a, "{s}.scales", .{stem}));
             const bi = try ck.get(try std.fmt.allocPrint(a, "{s}.biases", .{stem}));
-            if (spec == null) spec = (try c.quantization(stem)) orelse return error.UnsupportedQuantization;
+            if (spec == null) spec = (try c.declared(stem, core.quant.keys.canonical)) orelse return error.UnsupportedQuantization;
             if (w.shape[0] != n or sc.dtype != .bf16 or bi.dtype != .bf16) return error.UnexpectedNgramTable;
             s.* = .{ .words = w.bytes, .scales = sc.bytes, .biases = bi.bytes };
         }
