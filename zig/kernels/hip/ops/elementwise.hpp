@@ -79,4 +79,3 @@ extern "C" __global__ void tf_dense_rows(const void* x, int kind, const float* w
 }
 
 }  // namespace
-
