@@ -18,6 +18,68 @@ pub const Result = struct {
     greedy_gate_passed: bool = false,
 };
 
+/// One indexer-selection boundary per scored window: the contract's margin
+/// (BF16-rounded FP32 scores), the FP64-ideal margin on the same inputs, and how
+/// many top-k picks differ between them — the real-data support-flip measurement.
+const MarginLog = struct {
+    records: [1024]MarginRecord = undefined,
+    len: usize = 0,
+
+    const MarginRecord = struct {
+        layer: u32,
+        position: u32,
+        count: u32,
+        selected: u32,
+        margin: f32,
+        margin_ideal: f32,
+        flips: u32,
+        lowest_selected: f32,
+        highest_unselected: f32,
+    };
+
+    fn capture(ctx: *anyopaque, layer: usize, position: usize, count: usize, selected_len: usize, margin: f32, margin_ideal: f32, flips: usize, lowest: f32, highest_unselected: f32) void {
+        const self: *MarginLog = @ptrCast(@alignCast(ctx));
+        if (self.len == self.records.len) return;
+        self.records[self.len] = .{
+            .layer = @intCast(layer),
+            .position = @intCast(position),
+            .count = @intCast(count),
+            .selected = @intCast(selected_len),
+            .margin = margin,
+            .margin_ideal = margin_ideal,
+            .flips = @intCast(flips),
+            .lowest_selected = lowest,
+            .highest_unselected = highest_unselected,
+        };
+        self.len += 1;
+    }
+
+    fn write(self: *MarginLog, gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(gpa);
+        var flips: usize = 0;
+        var tight: usize = 0;
+        var total: usize = 0;
+        for (self.records[0..self.len]) |r| {
+            total += 1;
+            flips += r.flips;
+            if (r.margin <= 0) tight += 1;
+            var buf: [320]u8 = undefined;
+            const line = try std.fmt.bufPrint(&buf, "{{\"layer\":{d},\"position\":{d},\"count\":{d},\"selected\":{d},\"margin\":{d},\"margin_ideal\":{d},\"flips\":{d},\"lowest_selected\":{d},\"highest_unselected\":{d}}}\n", .{ r.layer, r.position, r.count, r.selected, r.margin, r.margin_ideal, r.flips, r.lowest_selected, r.highest_unselected });
+            try text.appendSlice(gpa, line);
+        }
+        var head_buf: [192]u8 = undefined;
+        const head = try std.fmt.bufPrint(&head_buf, "{{\"records\":{d},\"total_flips\":{d},\"zero_or_negative_margin\":{d}}}\n", .{ total, flips, tight });
+        const path = try std.fs.path.join(gpa, &.{ dir, "indexer-margins.jsonl" });
+        defer gpa.free(path);
+        var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, head);
+        try file.writeStreamingAll(io, text.items);
+        std.debug.print("indexer margins: {d} windows, {d} flips contract-vs-ideal, {d} zero-or-negative margins\n", .{ total, flips, tight });
+    }
+};
+
 fn maximum(row: []const f32) !u32 {
     var id: u32 = 0;
     var best = -std.math.inf(f32);
@@ -35,6 +97,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32, 
     if (ids.len == 0 or ids.len > 16) return error.InvalidOracleWindow;
     var reference = try Reference.init(gpa, model.cfg.text_config, &model.weights, &model.checkpoint, token_map, @intCast(ids.len));
     defer reference.deinit();
+    var margins = MarginLog{};
+    reference.attention_state.score_probe = .{ .ctx = &margins, .record = &MarginLog.capture };
     const cpu = try gpa.alloc(f32, ids.len * 129280);
     defer gpa.free(cpu);
     const gpu = try gpa.alloc(f32, cpu.len);
@@ -76,6 +140,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, model: *Model, ids: []const u32, 
     const json = try std.json.Stringify.valueAlloc(gpa, result, .{});
     defer gpa.free(json);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = report, .data = json });
+    try margins.write(gpa, io, dir);
     std.debug.print("{s}\n", .{json});
     try enforceGate(result.normalized_rms_error, result.greedy_disagreements);
     return result;

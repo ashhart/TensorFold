@@ -58,6 +58,18 @@ pub const State = struct {
     grouped: [8192]u16 = undefined,
     observer: ?Observer = null,
     sparse_snapshot: ?[]u16 = null,
+    /// The indexer-selection probe: fires once per scored window with the contract's
+    /// boundary margin, the FP64-ideal boundary margin, and the pick flips between them.
+    score_probe: ?ScoreProbe = null,
+    score_copy: []f32 = &.{},
+    ideal_scores: []f32 = &.{},
+    ideal_copy: []f32 = &.{},
+    pick_work: []f32 = &.{},
+    selected_ideal: []u32 = &.{},
+    pub const ScoreProbe = struct {
+        ctx: *anyopaque,
+        record: *const fn (*anyopaque, layer: usize, position: usize, count: usize, selected_len: usize, margin: f32, margin_ideal: f32, flips: usize, lowest: f32, highest_unselected: f32) void,
+    };
     pub const Observer = struct {
         ctx: *anyopaque,
         capture: *const fn (*anyopaque, tf.deepseek_v41.attention.DiagnosticStage, []const u16) void,
@@ -77,8 +89,19 @@ pub const State = struct {
         const candidates = try gpa.alloc(bool, capacity);
         errdefer gpa.free(candidates);
         const blocks = try gpa.alloc(f32, (capacity + 7) / 8);
+        errdefer gpa.free(blocks);
+        const score_copy = try gpa.alloc(f32, capacity);
+        errdefer gpa.free(score_copy);
+        const ideal_scores = try gpa.alloc(f32, capacity);
+        errdefer gpa.free(ideal_scores);
+        const ideal_copy = try gpa.alloc(f32, capacity);
+        errdefer gpa.free(ideal_copy);
+        const pick_work = try gpa.alloc(f32, capacity);
+        errdefer gpa.free(pick_work);
+        const selected_ideal = try gpa.alloc(u32, capacity);
+        errdefer gpa.free(selected_ideal);
         @memset(window, 0);
-        return .{ .gpa = gpa, .capacity = capacity, .window = window, .sources = sources, .scores = scores, .candidates = candidates, .blocks = blocks };
+        return .{ .gpa = gpa, .capacity = capacity, .window = window, .sources = sources, .scores = scores, .candidates = candidates, .blocks = blocks, .score_copy = score_copy, .ideal_scores = ideal_scores, .ideal_copy = ideal_copy, .pick_work = pick_work, .selected_ideal = selected_ideal };
     }
     pub fn deinit(self: *State) void {
         self.gpa.free(self.window);
@@ -86,6 +109,11 @@ pub const State = struct {
         self.gpa.free(self.scores);
         self.gpa.free(self.candidates);
         self.gpa.free(self.blocks);
+        self.gpa.free(self.score_copy);
+        self.gpa.free(self.ideal_scores);
+        self.gpa.free(self.ideal_copy);
+        self.gpa.free(self.pick_work);
+        self.gpa.free(self.selected_ideal);
         self.* = undefined;
     }
     fn mainRow(self: *State, owner: usize, row: usize) []u16 {
@@ -107,8 +135,8 @@ pub const State = struct {
             try projection.applyF32(compressor.wkv, x, &self.partial_kv[owner][slot], scratch);
             try projection.applyF32(compressor.wgate.?, x, &self.partial_gate[owner][slot], scratch);
             if ((position + 1) % ratio != 0) return false;
-            poolOf(f32, .{ self.partial_kv[owner][0], self.partial_kv[owner][1] },
-                .{ self.partial_gate[owner][0], self.partial_gate[owner][1] }, &self.latent);
+            poolOf(f32, .{ &self.partial_kv[owner][0], &self.partial_kv[owner][1] },
+                .{ &self.partial_gate[owner][0], &self.partial_gate[owner][1] }, &self.latent);
         }
         m.rms(&self.latent, compressor.norm, c.rms_norm_eps, &self.latent);
         const indexer = a.indexer.?;
@@ -175,6 +203,8 @@ pub const State = struct {
         if (layer > c.candidate_source_layer_id) for (0..count) |row| {
             if (!self.candidates[row]) self.scores[row] = -std.math.inf(f32);
         };
+        @memcpy(self.score_copy[0..count], self.scores[0..count]);
+        self.idealScores(a, count);
         for (0..self.selected_len) |pick| {
             var best: usize = 0;
             for (0..count) |i| if (self.scores[i] > self.scores[best]) {
@@ -184,6 +214,83 @@ pub const State = struct {
             self.scores[best] = -std.math.inf(f32);
         }
         std.mem.sort(u32, self.selected[0..self.selected_len], {}, std.sort.asc(u32));
+        if (self.score_probe) |probe| self.reportSelection(probe, layer, position, count);
+    }
+    /// The same selection against the FP64-ideal scores: same BF16 inputs, no
+    /// intermediate roundings. Flips between the two picks are the support-flip signal.
+    fn idealScores(self: *State, a: Attention, count: usize) void {
+        @setFloatMode(.strict);
+        if (a.indexer == null) return;
+        for (0..count) |row| {
+            if (self.score_copy[row] == -std.math.inf(f32)) {
+                self.ideal_scores[row] = -std.math.inf(f32);
+                continue;
+            }
+            const key = self.indexRow(self.active_owner, row);
+            var score: f64 = 0;
+            for (0..32) |head| {
+                var dot: f64 = 0;
+                for (key, 0..) |v, d| dot += @as(f64, m.f(v)) * m.f(self.index_q[head * 128 + d]);
+                score += @max(dot, 0) * @as(f64, self.index_weights[head]);
+            }
+            self.ideal_scores[row] = @floatCast(score);
+        }
+    }
+    fn pickTop(self: *State, scores: []const f32, into: []u32) void {
+        @memcpy(self.pick_work[0..scores.len], scores);
+        const work = self.pick_work[0..scores.len];
+        for (into) |*pick| {
+            var best: usize = 0;
+            for (work, 0..) |v, i| if (v > work[best]) {
+                best = i;
+            };
+            pick.* = @intCast(best);
+            work[best] = -std.math.inf(f32);
+        }
+        std.mem.sort(u32, into, {}, std.sort.asc(u32));
+    }
+    fn pickedAt(selection: []const u32, row: usize) bool {
+        var lo: usize = 0;
+        var hi: usize = selection.len;
+        while (lo < hi) {
+            const mid = (lo + hi) / 2;
+            if (selection[mid] == row) return true;
+            if (selection[mid] < row) lo = mid + 1 else hi = mid;
+        }
+        return false;
+    }
+    fn reportSelection(self: *State, probe: ScoreProbe, layer: usize, position: usize, count: usize) void {
+        var lowest: f32 = std.math.inf(f32);
+        var highest_unselected: f32 = -std.math.inf(f32);
+        for (self.selected[0..self.selected_len]) |row| {
+            lowest = @min(lowest, self.score_copy[row]);
+        }
+        for (0..count) |row| {
+            if (!pickedAt(self.selected[0..self.selected_len], row) and self.score_copy[row] > -std.math.inf(f32))
+                highest_unselected = @max(highest_unselected, self.score_copy[row]);
+        }
+        const margin: f32 = if (self.selected_len == 0 or lowest == std.math.inf(f32)) 0 else lowest - highest_unselected;
+        // The ideal picks, on a copy so the probe's ideal scores survive for callers.
+        @memcpy(self.ideal_copy[0..count], self.ideal_scores[0..count]);
+        const ideal_len = @min(self.selected_len, self.selected_ideal.len);
+        self.pickTop(self.ideal_copy[0..count], self.selected_ideal[0..ideal_len]);
+        var flips: usize = 0;
+        if (self.selected_len == ideal_len) {
+            for (self.selected[0..self.selected_len], self.selected_ideal[0..ideal_len]) |s, i| {
+                if (s != i) flips += 1;
+            }
+        } else flips = self.selected_len;
+        var ideal_lowest: f32 = std.math.inf(f32);
+        var ideal_highest_unselected: f32 = -std.math.inf(f32);
+        for (self.selected_ideal[0..ideal_len]) |row| {
+            ideal_lowest = @min(ideal_lowest, self.ideal_scores[row]);
+        }
+        for (0..count) |row| {
+            if (!pickedAt(self.selected_ideal[0..ideal_len], row) and self.ideal_scores[row] > -std.math.inf(f32))
+                ideal_highest_unselected = @max(ideal_highest_unselected, self.ideal_scores[row]);
+        }
+        const margin_ideal: f32 = if (ideal_len == 0 or ideal_lowest == std.math.inf(f32)) 0 else ideal_lowest - ideal_highest_unselected;
+        probe.record(probe.ctx, layer, position, count, self.selected_len, margin, margin_ideal, flips, lowest, highest_unselected);
     }
     pub fn apply(self: *State, a: Attention, layer: usize, x: []const u16, position: usize, c: Config, out: []u16, scratch: *projection.Scratch) !void {
         const compressed = c.compress_ratios[layer] != 0;
