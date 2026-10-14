@@ -318,10 +318,8 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
             try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, @as(i32, @intCast(p0)), EPS, tree, mt, mpos, q.kv8, kvCap() });
             if (T > 16 and q.kv_i8) {
                 try d.launch(d.k.attn_prompt8, .{ .x = (T + 7) / 8, .y = 4 }, .{ a.q, l.kc.?, l.vc.?, a.y, @as(i32, @intCast(p0)), t32, @as(f32, 1.0 / 16.0), kvCap() });
-            } else if (T > 16 and q.attn_own) {
+            } else if (T > 16) {
                 try d.launch(d.k.attn_prompt, .{ .x = (T + 7) / 8, .y = 4 }, .{ a.q, l.kc.?, l.vc.?, a.y, @as(i32, @intCast(p0)), t32, @as(f32, 1.0 / 16.0) });
-            } else if (T > 16) { // the port's Triton prompt kernel: 256 rows a program
-                try d.launch(d.k.prompt_attn, .{ .x = (T + 255) / 256, .y = 24 }, .{ a.q, l.kc.?, l.vc.?, a.y, @as(i32, @intCast(p0)), t32, @as(i32, @intCast(ctx)), nul, nul });
             } else {
                 try d.launch(d.k.attn_decode, .{ .x = ns, .y = 4, .z = T }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, @as(i32, @intCast(p0)), @as(i32, @intCast(ns)), @as(f32, 1.0 / 16.0), if (mode.multi != null) tree else table, mt, mpos, kvCap() });
                 try d.launch(d.k.attn_merge, .{ .x = 24, .y = T }, .{ a.pm, a.pl, a.po, a.y, @as(i32, @intCast(p0)), @as(i32, @intCast(ns)), table, mpos });
