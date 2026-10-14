@@ -221,6 +221,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@anvilsong](https://github.com/anvilsong),
 [@Arminova](https://github.com/Arminova),
 [@b-ostrov](https://github.com/b-ostrov),
+[@BadAd84](https://github.com/BadAd84),
 [@barelyworkingcode](https://github.com/barelyworkingcode),
 [@Benjamin-Wegener](https://github.com/Benjamin-Wegener),
 [@benthecarman](https://github.com/benthecarman),
@@ -268,6 +269,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@grantoverton](https://github.com/grantoverton),
 [@grearjake-star](https://github.com/grearjake-star),
 [@greatyingzi](https://github.com/greatyingzi),
+[@GustavBlack](https://github.com/GustavBlack),
 [@harrisonfriia](https://github.com/harrisonfriia),
 [@haxudev](https://github.com/haxudev),
 [@heitke](https://github.com/heitke),
@@ -304,6 +306,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@Moutonc](https://github.com/Moutonc),
 [@MovieMaker93](https://github.com/MovieMaker93),
 [@mrpmorris](https://github.com/mrpmorris),
+[@mrv777](https://github.com/mrv777),
 [@MV10](https://github.com/MV10),
 [@NeoAiLabs](https://github.com/NeoAiLabs),
 [@Nipale-ai](https://github.com/Nipale-ai),
@@ -312,6 +315,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@olexale](https://github.com/olexale),
 [@omar16100](https://github.com/omar16100),
 [@optimisme](https://github.com/optimisme),
+[@otarkhan](https://github.com/otarkhan),
 [@outcastofmusic](https://github.com/outcastofmusic),
 [@paragontasx](https://github.com/paragontasx),
 [@peacockesq](https://github.com/peacockesq),
@@ -324,6 +328,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@raymondkpwong](https://github.com/raymondkpwong),
 [@robertpitt](https://github.com/robertpitt),
 [@RoscoeTT](https://github.com/RoscoeTT),
+[@RS91Dev](https://github.com/RS91Dev),
 [@salmanarshad321](https://github.com/salmanarshad321),
 [@samwang0041-star](https://github.com/samwang0041-star),
 [@sanjaibalajee](https://github.com/sanjaibalajee),
@@ -356,6 +361,10 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@wojo](https://github.com/wojo),
 [@xjqx2z](https://github.com/xjqx2z),
 [@Yuepixel](https://github.com/Yuepixel),
-[@YvesLaRose](https://github.com/YvesLaRose).
+[@YvesLaRose](https://github.com/YvesLaRose),
+[@ZackSample](https://github.com/ZackSample),
+[@zweck](https://github.com/zweck).
+
+[docs/credits.md](docs/credits.md) names whose Python engine work each part of the native engine carries.
 
 [Usable memory profiles](docs/memory-profiling.md) explains how to record applied budgets, context, cache state and process peaks.
