@@ -63,6 +63,17 @@ fn reserve(p: *anyopaque, streams: u32) anyerror!void {
         try cache.reset(l.e);
         l.pool.appendAssumeCapacity(cache);
     }
+    // the shared rounds' shapes, a row of each of 1 to `streams` streams, captured now: a new graph's first run
+    // pays the driver's stall too (about a second on a wide model)
+    var parts: [E.max_segs]E.Part = undefined;
+    var ids: [E.max_segs]u32 = @splat(0);
+    var picks: [E.max_segs]E.Draw = undefined;
+    for (0..@min(streams, E.max_segs)) |n| {
+        parts[n] = .{ .cache = l.pool.items[n], .rows = 1 };
+        picks[n] = .{ .rule = null, .position = 1 };
+        try l.e.forward(parts[0 .. n + 1], ids[0 .. n + 1], .{ .draws = picks[0 .. n + 1] });
+        for (l.pool.items[0 .. n + 1]) |cache| try cache.reset(l.e);
+    }
 }
 
 /// A request this engine refuses, in words; null: none of its own.

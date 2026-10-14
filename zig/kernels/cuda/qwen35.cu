@@ -322,15 +322,18 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_rope(Geo geo, __nv_bflo
     }
 }
 
-// Causal attention over a segment's cache, ck keys a block: grid (chunks, kvh, rows), block qh / kvh warps, a warp a
-// query head of the kv head's group. Partials (max, sum, out) at slot (row, qh, chunk); empty chunks leave sum 0.
+// Causal attention over a segment's cache, P[1] keys a block over P[0] chunks (read from the device, so a captured
+// forward replays as caches grow): grid (chunks at most, kvh, rows), block qh / kvh warps, a warp a query head of
+// the kv head's group. Partials (max, sum, out) at slot (row, qh, chunk); empty chunks leave sum 0.
 extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
-                                                 const int* __restrict__ rowseg, int layer, int nch, int ck, float scale,
+                                                 const int* __restrict__ rowseg, int layer, const int* __restrict__ P, float scale,
                                                  float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
     constexpr int DPL = HD / 32;
+    const int nch = P[0], ck = P[1];
     const int QH = geo.qh, KVH = geo.kvh;
     const int lane = threadIdx.x & 31, g = threadIdx.x >> 5;
     const int c = blockIdx.x, h = blockIdx.y;
+    if (c >= nch) return;
     const size_t m = blockIdx.z;
     const int qh = h * (QH / KVH) + g;
     const Seg sg = segs[rowseg[m]];
@@ -377,10 +380,12 @@ extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __r
     for (int i = 0; i < DPL; i++) PO[slot * HD + lane * DPL + i] = o[i];
 }
 
-// The chunks' partials into each (row, query head)'s output, rows qh * HD wide. Grid (qh, rows), a warp each.
+// The P[0] chunks' partials into each (row, query head)'s output, rows qh * HD wide. Grid (qh, rows), a warp each.
 extern "C" __global__ void __launch_bounds__(32) tf_q35_attn_merge(Geo geo, const float* __restrict__ PM, const float* __restrict__ PL,
-                                                                     const float* __restrict__ PO, int nch, __nv_bfloat16* __restrict__ OUT) {
+                                                                     const float* __restrict__ PO, const int* __restrict__ P,
+                                                                     __nv_bfloat16* __restrict__ OUT) {
     constexpr int DPL = HD / 32;
+    const int nch = P[0];
     const int QH = geo.qh;
     const int lane = threadIdx.x, qh = blockIdx.x;
     const size_t m = blockIdx.y;

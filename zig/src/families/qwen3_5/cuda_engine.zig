@@ -1,6 +1,7 @@
 //! Qwen3.5's hybrid text models on CUDA (the 2B, Qwen3.8-27B): the affine-4 projections through cuda.qlinear, the
 //! glue in qwen35.cu, one forward for any mix of streams' windows. Each stream owns its recurrences, convolution tails
 //! and KV cache (Cache); the widths come from config.json (cuda_geometry.zig), the weights from cuda_weights.zig.
+//! A forward's launches are captured into a CUDA graph the first time its shape is seen and replayed after.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -172,6 +173,8 @@ pub const Engine = struct {
     host_logits: cuda.HostBuffer,
     /// The kept rows' device draws, when forward was given them.
     tokens: [most_verify]u32 = undefined,
+    /// The captured forwards by shape (`Shape.key`): the launches from the embedding to the head.
+    graphs: std.AutoHashMapUnmanaged(u32, cuda.graph.Exec) = .empty,
 
     const ids_at = 0;
     const segs_at = max_rows * 4;
@@ -179,7 +182,8 @@ pub const Engine = struct {
     const rules_at = rowseg_at + max_rows * 4;
     const meta_at = rules_at + most_verify * @sizeOf(cuda.sample.Rule);
     const tokens_at = meta_at + most_verify * 4;
-    const tables_len = tokens_at + most_verify * 4;
+    const params_at = tokens_at + most_verify * 4; // the attention chunks and their width
+    const tables_len = params_at + 2 * 4;
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -195,6 +199,7 @@ pub const Engine = struct {
         e.verify_rows = std.math.clamp(snapshot_budget / (g.deltas() * (g.recBytes() + g.convBytes())), 1, most_verify);
         e.window_rows = @min(most_window, e.verify_rows);
         e.arena_at = 0;
+        e.graphs = .empty;
         e.stream = try cuda.Stream.init(d, true);
         errdefer e.stream.deinit();
         e.arena = try DeviceBuffer.alloc(d, weights.total(g) + try e.scratch(.measure));
@@ -240,6 +245,9 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
+        var it = e.graphs.valueIterator();
+        while (it.next()) |x| x.deinit();
+        e.graphs.deinit(e.gpa);
         e.host_logits.free();
         e.staged.free();
         e.tables.free();
@@ -363,15 +371,82 @@ pub const Engine = struct {
                 m.* = @intCast(p.position -% 1); // sample.cu keys row r at meta + r + 1
             }
         }
+        // attention chunks: at most max_chunks a row, each a multiple of 128 keys
+        const ck = @max(128, (widest + max_chunks * 128 - 1) / (max_chunks * 128) * 128);
+        const params = std.mem.bytesAsSlice(c_int, st[params_at..][0..8]);
+        params[0] = @intCast((widest + ck - 1) / ck);
+        params[1] = @intCast(ck);
         try e.tables.uploadAsync(0, st, e.stream.handle);
+        const shape: Shape = .{ .total = @intCast(total), .nseg = @intCast(parts.len), .record = record, .prompt = prompt };
+        if (prompt) {
+            // uncaptured: a prompt chunk's GEMMs dwarf its launches, and each length would be a graph of its own,
+            // paying the driver's stall on a new graph's first run (about a second on a wide model)
+            try e.body(shape);
+        } else {
+            const gop = try e.graphs.getOrPut(e.gpa, shape.key());
+            if (!gop.found_existing) {
+                errdefer _ = e.graphs.remove(shape.key());
+                // captured, nothing runs: the replay below is this shape's first run
+                try cuda.graph.beginCapture(e.stream, .thread_local);
+                e.body(shape) catch |err| {
+                    var broken = cuda.graph.endCapture(e.stream) catch return err;
+                    broken.deinit();
+                    return err;
+                };
+                var captured = try cuda.graph.endCapture(e.stream);
+                defer captured.deinit();
+                gop.value_ptr.* = try captured.instantiate();
+            }
+            try gop.value_ptr.launchOn(e.stream);
+        }
+        for (parts) |p| p.cache.len += p.rows;
+        switch (keep) {
+            .draws => |pk| {
+                const toks = e.tables.ptr + tokens_at;
+                for (pk, 0..) |p, i| {
+                    const row = e.logits + i * g.vocab * 2;
+                    if (p.rule != null) {
+                        try e.draws.draw(e.stream, row, g.vocab, e.tables.ptr + rules_at + i * @sizeOf(cuda.sample.Rule), e.tables.ptr + meta_at + i * 4, 0, toks + i * 4, 1, null, null);
+                    } else try e.run(e.fns.argmax, .{ 1, 1, 1 }, .{ 1024, 1, 1 }, .{ row, @as(c_int, @intCast(g.vocab)), toks + i * 4 });
+                }
+                try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(e.host_logits.bytes.ptr, toks, total * 4, e.stream.handle), "cuMemcpyDtoHAsync");
+                try e.stream.synchronize();
+                @memcpy(e.tokens[0..total], e.host_logits.slice(u32)[0..total]);
+            },
+            .logits, .last => {
+                const out = e.host_logits.bytes[0 .. heads * g.vocab * 2];
+                try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(out.ptr, e.logits, out.len, e.stream.handle), "cuMemcpyDtoHAsync");
+                try e.stream.synchronize();
+                if (keep == .last) @memcpy(parts[0].cache.logits, e.rowLogits(0));
+            },
+        }
+    }
+
+    /// A forward's shape, which fixes its launches: its tables and the caches' lengths are read on the device.
+    const Shape = struct {
+        total: u8,
+        nseg: u8,
+        record: bool,
+        prompt: bool,
+
+        fn key(s: Shape) u32 {
+            return @as(u32, s.total) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17;
+        }
+    };
+
+    /// The launches of a forward of `shape`, from the embedding to the kept rows' logits (captured once a shape).
+    fn body(e: *Engine, shape: Shape) !void {
+        const g = e.g;
+        const total: usize = shape.total;
+        const nseg: usize = shape.nseg;
+        const record = shape.record;
+        const prompt = shape.prompt;
+        const heads: usize = if (record) total else 1;
         const t_ids = e.tables.ptr + ids_at;
         const t_segs = e.tables.ptr + segs_at;
         const t_rows = e.tables.ptr + rowseg_at;
-        const nseg = parts.len;
+        const t_params = e.tables.ptr + params_at;
         const geo = e.geo;
-        // attention chunks: at most max_chunks a row, each a multiple of 128 keys
-        const ck = @max(128, (widest + max_chunks * 128 - 1) / (max_chunks * 128) * 128);
-        const nch = (widest + ck - 1) / ck;
         const group = g.q_heads / g.kv_heads;
 
         try e.run(e.fns.embed, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ t_ids, e.embed_w, e.embed_s, e.embed_b, e.h, @as(c_int, @intCast(g.hidden)) });
@@ -403,8 +478,8 @@ pub const Engine = struct {
                     try e.run(e.fns.head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps });
                     try e.run(e.fns.head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps });
                     try e.run(e.fns.rope, .{ total, 1, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, ai });
-                    try e.run(e.fns.attn_partial, .{ nch, g.kv_heads, total }, .{ 32 * group, 1, 1 }, .{ geo, e.qn, t_segs, t_rows, ai, @as(c_int, @intCast(nch)), @as(c_int, @intCast(ck)), @as(f32, 1.0 / 16.0), e.pm, e.pl, e.po });
-                    try e.run(e.fns.attn_merge, .{ g.q_heads, total, 1 }, .{ 32, 1, 1 }, .{ geo, e.pm, e.pl, e.po, @as(c_int, @intCast(nch)), e.y });
+                    try e.run(e.fns.attn_partial, .{ max_chunks, g.kv_heads, total }, .{ 32 * group, 1, 1 }, .{ geo, e.qn, t_segs, t_rows, ai, t_params, @as(f32, 1.0 / 16.0), e.pm, e.pl, e.po });
+                    try e.run(e.fns.attn_merge, .{ g.q_heads, total, 1 }, .{ 32, 1, 1 }, .{ geo, e.pm, e.pl, e.po, t_params, e.y });
                     try e.run(e.fns.attn_gate, .{ (total * aw + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ geo, e.y, e.qraw, e.mix, @as(c_int, @intCast(total)) });
                     try e.proj(m.o, e.mix, e.r, total, prompt);
                     ai += 1;
@@ -420,27 +495,6 @@ pub const Engine = struct {
         try e.norm(true, e.final_norm, total);
         // the head over the kept rows
         try e.proj(e.head, e.x + (total - heads) * g.hidden * 2, e.logits, heads, false);
-        for (parts) |p| p.cache.len += p.rows;
-        switch (keep) {
-            .draws => |pk| {
-                const toks = e.tables.ptr + tokens_at;
-                for (pk, 0..) |p, i| {
-                    const row = e.logits + i * g.vocab * 2;
-                    if (p.rule != null) {
-                        try e.draws.draw(e.stream, row, g.vocab, e.tables.ptr + rules_at + i * @sizeOf(cuda.sample.Rule), e.tables.ptr + meta_at + i * 4, 0, toks + i * 4, 1, null, null);
-                    } else try e.run(e.fns.argmax, .{ 1, 1, 1 }, .{ 1024, 1, 1 }, .{ row, @as(c_int, @intCast(g.vocab)), toks + i * 4 });
-                }
-                try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(e.host_logits.bytes.ptr, toks, total * 4, e.stream.handle), "cuMemcpyDtoHAsync");
-                try e.stream.synchronize();
-                @memcpy(e.tokens[0..total], e.host_logits.slice(u32)[0..total]);
-            },
-            .logits, .last => {
-                const out = e.host_logits.bytes[0 .. heads * g.vocab * 2];
-                try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(out.ptr, e.logits, out.len, e.stream.handle), "cuMemcpyDtoHAsync");
-                try e.stream.synchronize();
-                if (keep == .last) @memcpy(parts[0].cache.logits, e.rowLogits(0));
-            },
-        }
     }
 
     /// Row `i`'s logits from the newest forward that kept logits.
