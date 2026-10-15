@@ -1,5 +1,4 @@
-//! Two ranks over the hosts' network: a TCP control link (rank 0 listens, rank 1 connects; framed messages carry
-//! requests and per-round decisions) and the NCCL communicator it brings up (rank 0 makes the unique id and sends it).
+//! Two ranks' TCP control link (rank 0 listens, rank 1 connects) and the NCCL communicator it brings up.
 
 const std = @import("std");
 const posix = std.posix;

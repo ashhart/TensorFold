@@ -1,11 +1,4 @@
-//! Small all-gathers between two ranks as one-shot RDMA writes over RoCE: b12x's "RoCEnante" exchange
-//! (https://github.com/local-inference-lab/b12x, b12x/comm/roce, Apache License 2.0), written for two ranks: the
-//! kernel (kernels/cuda/roce_gather.cu) stages this rank's shard in pinned host memory and rings a doorbell; a proxy
-//! thread here RDMA-writes it to the peer, striped over the HCAs, each stripe followed by its sequence flag on the
-//! same queue pair; the kernel waits for the peer's flags and copies both shards out. A decode step's gathers are a
-//! few rows of partials, where NCCL spends tens of microseconds a call in fixed costs; this path takes about ten.
-//! libibverbs is opened at run time (as the driver and NCCL are): without it, or without an active HCA, the caller
-//! keeps NCCL.
+//! Two-rank all-gathers as one-shot RoCE writes after b12x's RoCEnante (local-inference-lab/b12x, Apache-2.0).
 
 const std = @import("std");
 const abi = @import("abi.zig");
@@ -40,16 +33,46 @@ const QpInitAttr = extern struct { qp_context: ?*anyopaque = null, send_cq: ?*Cq
 const GlobalRoute = extern struct { dgid: [16]u8 = @splat(0), flow_label: u32 = 0, sgid_index: u8 = 0, hop_limit: u8 = 0, traffic_class: u8 = 0 };
 const AhAttr = extern struct { grh: GlobalRoute = .{}, dlid: u16 = 0, sl: u8 = 0, src_path_bits: u8 = 0, static_rate: u8 = 0, is_global: u8 = 0, port_num: u8 = 0 };
 const QpAttr = extern struct {
-    qp_state: u32 = 0, cur_qp_state: u32 = 0, path_mtu: u32 = 0, path_mig_state: u32 = 0, qkey: u32 = 0, rq_psn: u32 = 0,
-    sq_psn: u32 = 0, dest_qp_num: u32 = 0, qp_access_flags: u32 = 0, cap: QpCap = .{}, ah_attr: AhAttr = .{}, alt_ah_attr: AhAttr = .{},
-    pkey_index: u16 = 0, alt_pkey_index: u16 = 0, en_sqd_async_notify: u8 = 0, sq_draining: u8 = 0, max_rd_atomic: u8 = 0,
-    max_dest_rd_atomic: u8 = 0, min_rnr_timer: u8 = 0, port_num: u8 = 0, timeout: u8 = 0, retry_cnt: u8 = 0, rnr_retry: u8 = 0,
-    alt_port_num: u8 = 0, alt_timeout: u8 = 0, rate_limit: u32 = 0, _tail: u32 = 0,
+    qp_state: u32 = 0,
+    cur_qp_state: u32 = 0,
+    path_mtu: u32 = 0,
+    path_mig_state: u32 = 0,
+    qkey: u32 = 0,
+    rq_psn: u32 = 0,
+    sq_psn: u32 = 0,
+    dest_qp_num: u32 = 0,
+    qp_access_flags: u32 = 0,
+    cap: QpCap = .{},
+    ah_attr: AhAttr = .{},
+    alt_ah_attr: AhAttr = .{},
+    pkey_index: u16 = 0,
+    alt_pkey_index: u16 = 0,
+    en_sqd_async_notify: u8 = 0,
+    sq_draining: u8 = 0,
+    max_rd_atomic: u8 = 0,
+    max_dest_rd_atomic: u8 = 0,
+    min_rnr_timer: u8 = 0,
+    port_num: u8 = 0,
+    timeout: u8 = 0,
+    retry_cnt: u8 = 0,
+    rnr_retry: u8 = 0,
+    alt_port_num: u8 = 0,
+    alt_timeout: u8 = 0,
+    rate_limit: u32 = 0,
+    _tail: u32 = 0,
 };
 const Sge = extern struct { addr: u64, length: u32, lkey: u32 };
 const SendWr = extern struct {
-    wr_id: u64 = 0, next: ?*SendWr = null, sg_list: ?*Sge = null, num_sge: c_int = 0, opcode: u32 = 0, send_flags: u32 = 0,
-    imm_data: u32 = 0, remote_addr: u64 = 0, rkey: u32 = 0, _tail: [128 - 52]u8 = @splat(0),
+    wr_id: u64 = 0,
+    next: ?*SendWr = null,
+    sg_list: ?*Sge = null,
+    num_sge: c_int = 0,
+    opcode: u32 = 0,
+    send_flags: u32 = 0,
+    imm_data: u32 = 0,
+    remote_addr: u64 = 0,
+    rkey: u32 = 0,
+    _tail: [128 - 52]u8 = @splat(0),
 };
 const Wc = extern struct { wr_id: u64, status: u32, opcode: u32, vendor_err: u32, _rest: [48 - 20]u8 };
 const PortAttr = extern struct { bytes: [56]u8 align(8) };
@@ -195,8 +218,7 @@ pub const Gather = struct {
     err: [256]u8 = @splat(0),
     gathers: u64 = 0,
 
-    /// Both ranks' exchange, or null on both when either rank cannot (no libibverbs, no active HCA, a failed
-    /// connection: each rank's verdict travels over ``link``, so the ranks agree). ``max_bytes``: a rank's shard at most.
+    /// Both ranks' exchange, or null on both when either cannot; verdicts cross ``link``. ``max_bytes``: a shard.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const Driver, link: tp_link.Link, wanted: bool, max_bytes: usize) !?*Gather {
         const g = try gpa.create(Gather);
         var mine: Blob = std.mem.zeroes(Blob);
@@ -239,8 +261,7 @@ pub const Gather = struct {
     }
 
     fn setup(g: *Gather, gpa: std.mem.Allocator, io: std.Io, d: *const Driver, rank: u8, max_bytes: usize) !void {
-        g.* = .{ .gpa = gpa, .d = d, .lib = undefined, .api = undefined, .rank = rank, .layout = .of(max_bytes), .region = undefined,
-            .region_dev = 0, .counters = undefined, .module = undefined, .f = undefined, .max_bytes = max_bytes };
+        g.* = .{ .gpa = gpa, .d = d, .lib = undefined, .api = undefined, .rank = rank, .layout = .of(max_bytes), .region = undefined, .region_dev = 0, .counters = undefined, .module = undefined, .f = undefined, .max_bytes = max_bytes };
         g.lib = std.DynLib.open("libibverbs.so.1") catch return error.VerbsUnavailable;
         errdefer g.lib.close();
         const info = @typeInfo(Api).@"struct";
@@ -307,8 +328,7 @@ pub const Gather = struct {
             return error.HcaFailed;
         };
         hca.cq = a.ibv_create_cq(hca.ctx.?, send_depth, null, null, 0) orelse return error.HcaFailed;
-        var attr: QpInitAttr = .{ .send_cq = hca.cq, .recv_cq = hca.cq, .qp_type = qpt_rc,
-            .cap = .{ .max_send_wr = send_depth, .max_recv_wr = 1, .max_send_sge = 1, .max_recv_sge = 1, .max_inline_data = 16 } };
+        var attr: QpInitAttr = .{ .send_cq = hca.cq, .recv_cq = hca.cq, .qp_type = qpt_rc, .cap = .{ .max_send_wr = send_depth, .max_recv_wr = 1, .max_send_sge = 1, .max_recv_sge = 1, .max_inline_data = 16 } };
         hca.qp = a.ibv_create_qp(hca.pd.?, &attr) orelse return error.HcaFailed;
         var init_attr: QpAttr = .{ .qp_state = qps_init, .port_num = port_num, .qp_access_flags = access_remote_write };
         if (a.ibv_modify_qp(hca.qp.?, &init_attr, qp_state | qp_pkey_index | qp_port | qp_access_flags) != 0) return error.HcaFailed;
@@ -334,9 +354,7 @@ pub const Gather = struct {
         for (0..g.n_hca) |h| {
             const x = &g.hcas[h];
             g.peer_rkey[h] = peer.rkey[h];
-            var rtr: QpAttr = .{ .qp_state = qps_rtr, .path_mtu = @min(peer.mtu[h], x.mtu), .dest_qp_num = peer.qpn[h], .max_dest_rd_atomic = 1,
-                .min_rnr_timer = 12, .ah_attr = .{ .is_global = 1, .dlid = peer.lid[h], .port_num = port_num,
-                    .grh = .{ .dgid = peer.gid[h], .sgid_index = @intCast(x.gid_index), .hop_limit = 64 } } };
+            var rtr: QpAttr = .{ .qp_state = qps_rtr, .path_mtu = @min(peer.mtu[h], x.mtu), .dest_qp_num = peer.qpn[h], .max_dest_rd_atomic = 1, .min_rnr_timer = 12, .ah_attr = .{ .is_global = 1, .dlid = peer.lid[h], .port_num = port_num, .grh = .{ .dgid = peer.gid[h], .sgid_index = @intCast(x.gid_index), .hop_limit = 64 } } };
             if (g.api.ibv_modify_qp(x.qp.?, &rtr, qp_state | qp_av | qp_path_mtu | qp_dest_qpn | qp_rq_psn | qp_max_dest_rd_atomic | qp_min_rnr_timer) != 0) {
                 g.fail("HCA {d}: the queue pair refused RTR", .{h});
                 return error.PeerRefused;
@@ -391,11 +409,9 @@ pub const Gather = struct {
             if (h < packs % g.n_hca) n += 1;
             const bytes: u32 = n * 16;
             var flag_sge: Sge = .{ .addr = @intFromPtr(&seq_copy), .length = 4, .lkey = 0 };
-            var flag: SendWr = .{ .wr_id = h, .sg_list = &flag_sge, .num_sge = 1, .opcode = wr_rdma_write, .send_flags = send_signaled | send_inline,
-                .remote_addr = g.peer_addr + g.layout.flags + (slot * g.n_hca + h) * flag_stride, .rkey = g.peer_rkey[h] };
+            var flag: SendWr = .{ .wr_id = h, .sg_list = &flag_sge, .num_sge = 1, .opcode = wr_rdma_write, .send_flags = send_signaled | send_inline, .remote_addr = g.peer_addr + g.layout.flags + (slot * g.n_hca + h) * flag_stride, .rkey = g.peer_rkey[h] };
             var data_sge: Sge = .{ .addr = base + g.layout.send + slot * g.layout.slot_bytes + offset, .length = bytes, .lkey = x.mr.?.lkey };
-            var data: SendWr = .{ .wr_id = h, .next = &flag, .sg_list = &data_sge, .num_sge = 1, .opcode = wr_rdma_write,
-                .remote_addr = g.peer_addr + g.layout.recv + slot * g.layout.slot_bytes + offset, .rkey = g.peer_rkey[h] };
+            var data: SendWr = .{ .wr_id = h, .next = &flag, .sg_list = &data_sge, .num_sge = 1, .opcode = wr_rdma_write, .remote_addr = g.peer_addr + g.layout.recv + slot * g.layout.slot_bytes + offset, .rkey = g.peer_rkey[h] };
             var bad: ?*SendWr = null;
             const first: *SendWr = if (bytes != 0) &data else &flag;
             const rc = opsCall(PostSend, x.ctx.?, ops_post_send)(x.qp.?, first, &bad);
@@ -502,8 +518,7 @@ pub const Gather = struct {
     }
 };
 
-/// The HCAs to stripe over, in the order both ranks name them: TF_ROCE_HCA, else NCCL_IB_HCA ("=^" prefixes and
-/// ":port" suffixes dropped), at most two.
+/// The HCAs to stripe over, at most two: TF_ROCE_HCA, else NCCL_IB_HCA without "=^" prefixes or ":port" suffixes.
 fn hcaNames(io: std.Io, gpa: std.mem.Allocator, names: *[max_hcas][64]u8, lens: *[max_hcas]usize) !u32 {
     _ = io;
     _ = gpa;
