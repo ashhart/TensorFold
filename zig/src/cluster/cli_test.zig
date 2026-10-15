@@ -1,5 +1,6 @@
 //! The cluster commands end to end on fake hosts: init, check, status, serve with in-process bring-up, and node.
 const std = @import("std");
+const platform = @import("sys");
 const cli = @import("cli.zig");
 const fixtures = @import("probe_fixtures.zig");
 
@@ -86,7 +87,7 @@ const studios =
 ;
 
 test "check plans K3 from its config and Hub file list and names the raise a low node needs; serve stops before launching" {
-    const dir = std.testing.environ.getPosix("TF_K3_DIR") orelse return error.SkipZigTest;
+    const dir = platform.getenv("TF_K3_DIR") orelse return error.SkipZigTest;
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
     const a = arena.allocator();

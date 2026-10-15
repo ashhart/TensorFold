@@ -1,5 +1,6 @@
 //! The fabric bound to MCDMA's own libmcdma-rpc (built from MCDMA's rpc/ by tools/zig/test_fabric.sh, MCDMA_RPC_LIBRARY).
 const std = @import("std");
+const platform = @import("sys");
 const builtin = @import("builtin");
 const fabric = @import("fabric");
 const layout = fabric.layout;
@@ -9,7 +10,7 @@ const mailbox = fabric.mailbox;
 const gpa = std.testing.allocator;
 
 fn open() !words.Library {
-    if (std.c.getenv("MCDMA_RPC_LIBRARY") == null) return error.SkipZigTest;
+    if (platform.c.getenv("MCDMA_RPC_LIBRARY") == null) return error.SkipZigTest;
     return words.Library.open(null);
 }
 

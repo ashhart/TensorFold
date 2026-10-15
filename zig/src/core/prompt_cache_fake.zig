@@ -1,5 +1,6 @@
 //! A host-memory snapshot family shared by the prompt cache's tests and the learned-disk fault tests.
 const std = @import("std");
+const platform = @import("sys");
 const pc = @import("prompt_cache.zig");
 const imprint = @import("prompt_imprint.zig");
 const Snapshots = pc.Snapshots;
@@ -96,7 +97,7 @@ pub const Fake = struct {
         }
 
         var path: [512]u8 = undefined;
-        _ = std.c.unlink(file(&path, dir, key) catch return);
+        _ = platform.c.unlink(file(&path, dir, key) catch return);
     }
     pub fn file(buf: []u8, dir: []const u8, key: u64) ![:0]const u8 {
         return std.fmt.bufPrintSentinel(buf, "{s}/{x:0>16}.bin", .{ dir, key }, 0);
@@ -106,17 +107,17 @@ pub const Fake = struct {
         f.writes += 1;
         if (f.fail_write) return error.WriteFailed;
         var path: [512]u8 = undefined;
-        const fd = std.c.open(try file(&path, dir, key), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+        const fd = platform.c.open(try file(&path, dir, key), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(platform.c.mode_t, 0o600));
         if (fd < 0) return error.WriteFailed;
-        defer _ = std.c.close(fd);
+        defer _ = platform.c.close(fd);
         try imprint.writeAll(fd, std.mem.asBytes(@as(*State, @ptrCast(@alignCast(saved)))));
     }
     fn readFn(ptr: *anyopaque, dir: [:0]const u8, key: u64, at: u32) anyerror!Saved {
         const f = of(ptr);
         var path: [512]u8 = undefined;
-        const fd = std.c.open(try file(&path, dir, key), .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+        const fd = platform.c.open(try file(&path, dir, key), .{ .ACCMODE = .RDONLY }, @as(platform.c.mode_t, 0));
         if (fd < 0) return error.ReadFailed;
-        defer _ = std.c.close(fd);
+        defer _ = platform.c.close(fd);
         const st = try f.gpa.create(State);
         errdefer f.gpa.destroy(st);
         if (!imprint.readAt(fd, std.mem.asBytes(st), 0) or st.at != at) return error.ReadFailed;

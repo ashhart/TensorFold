@@ -1,5 +1,6 @@
 //! What `tensorfold cluster status` and `check` print: nodes, links, memory, the placement per rank, costs and load progress.
 const std = @import("std");
+const platform = @import("sys");
 const node = @import("node.zig");
 const topology = @import("topology.zig");
 const plan_mod = @import("plan.zig");
@@ -99,7 +100,7 @@ test "the K3 status on four Studios prints every rank, fits, and the round costs
     try placement(&out.writer, &p, needs, fs);
     try costs(&out.writer, &p, needs, &s, 8192);
     const text = try a.dupe(u8, out.written());
-    if (std.testing.environ.getPosix("TF_CLUSTER_REPORT") != null) {
+    if (platform.getenv("TF_CLUSTER_REPORT") != null) {
         std.debug.print("\n{s}\n", .{text});
         const others = [_]struct { []const u8, plan_mod.Options }{
             .{ "experts split by tensor parallelism", .{ .layout = .{ .tensor = 4, .expert = 1 } } },

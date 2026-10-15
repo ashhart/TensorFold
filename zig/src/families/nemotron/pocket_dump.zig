@@ -1,11 +1,12 @@
 //! A lesson's read rows written out for offline study (TF_SLIDE_POCKET_DUMP=dir): inputs, labels and examples.
 const std = @import("std");
+const platform = @import("sys");
 
 /// `bytes` written to `path`.
 fn put(path: [:0]const u8, bytes: []const u8) !void {
-    const f = std.c.fopen(path, "wb") orelse return error.DumpOpen;
-    defer _ = std.c.fclose(f);
-    if (std.c.fwrite(bytes.ptr, 1, bytes.len, f) != bytes.len) return error.DumpWrite;
+    const f = platform.c.fopen(path, "wb") orelse return error.DumpOpen;
+    defer _ = platform.c.fclose(f);
+    if (platform.c.fwrite(bytes.ptr, 1, bytes.len, f) != bytes.len) return error.DumpWrite;
 }
 
 /// Pocket `p`'s read rows under `dir` for `tag`: bf16 [read, slots, D], then their labels and examples as text.

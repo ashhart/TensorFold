@@ -1,5 +1,6 @@
 //! The server: one engine and tokenizer behind the HTTP routes, one thread a connection.
 const std = @import("std");
+const platform = @import("sys");
 const api = @import("engine_api");
 const json = @import("json.zig");
 const errors = @import("errors.zig");
@@ -36,6 +37,10 @@ pub const Config = struct {
     /// The served name first, then aliases, without repeats.
     model_ids: []const []const u8,
     default_max_tokens: i64 = 4096,
+    tool_system: ?[]const u8 = null, // --tool-system (trimmed; null when empty)
+    vision_max_images: usize = 4, // --vision-max-images
+    vision_urls: bool = false, // --vision-urls: public HTTPS media URLs are fetched (media_fetch.zig)
+    vision_image_tokens: u64 = 4096, // --vision-image-tokens: the visual tokens a request's images share
     enable_thinking: bool = true,
     reasoning_effort: ?[]const u8 = null,
     thinking_budget: i64 = 0,
@@ -135,6 +140,7 @@ pub const Server = struct {
         if (srv.keepalive) |k| k.stop(); // before the engine's queue goes away
         if (srv.grammars) |g| g.close();
         srv.metrics.deinit();
+        if (srv.grammars) |g| g.close();
         srv.arena.deinit();
         srv.store.deinit();
         srv.slide.deinit();
@@ -280,7 +286,7 @@ pub const Server = struct {
     pub fn serve(srv: *Server, listener: listener_mod.Listener, stop: *const std.atomic.Value(bool)) void {
         while (listener.accept(stop)) |c| {
             const t = std.Thread.spawn(.{ .stack_size = 8 << 20 }, connection, .{ srv, c }) catch {
-                _ = std.posix.system.close(c.fd);
+                _ = platform.posix.system.close(c.fd);
                 continue;
             };
             t.detach();
@@ -290,7 +296,7 @@ pub const Server = struct {
     fn connection(srv: *Server, accepted: listener_mod.Listener.Accepted) void {
         _ = srv.open_connections.fetchAdd(1, .acq_rel);
         defer _ = srv.open_connections.fetchSub(1, .acq_rel);
-        defer _ = std.posix.system.close(accepted.fd);
+        defer _ = platform.posix.system.close(accepted.fd);
         var peer_buf: [64]u8 = undefined;
         const peer = listener_mod.peerText(&peer_buf, accepted.peer);
         var conn = http_conn.Conn.init(srv.gpa, accepted.fd, peer) catch return;

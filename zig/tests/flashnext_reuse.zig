@@ -1,5 +1,6 @@
 //! Flash Next prompt reuse against fresh passes: agent-like turns, every depth, copy drafts off and on, state bytes.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 const api = @import("engine_api");
@@ -121,9 +122,9 @@ pub fn main(init: std.process.Init) !void {
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const n_out: usize = if (std.c.getenv("FZ_N")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 64;
+    const n_out: usize = if (platform.c.getenv("FZ_N")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 64;
     var depths: std.ArrayList(?usize) = .empty;
-    var dit = std.mem.tokenizeScalar(u8, if (std.c.getenv("FZ_DEPTHS")) |v| std.mem.span(v) else "1,2,3,5,0", ',');
+    var dit = std.mem.tokenizeScalar(u8, if (platform.c.getenv("FZ_DEPTHS")) |v| std.mem.span(v) else "1,2,3,5,0", ',');
     while (dit.next()) |d| {
         const k = try std.fmt.parseInt(usize, d, 10);
         try depths.append(a, if (k == 0) null else k);

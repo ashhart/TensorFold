@@ -61,12 +61,12 @@ tensorfold serve ~/models/nemotron-living --slide --slide-graph ~/models/nemotro
 
 `--slide` turns learning on. `--slide-graph` keeps the list of learned facts in a file, so it survives a restart;
 without it the list lives in memory, though the weights keep what they learned either way. The server listens on
-`http://127.0.0.1:8080` unless you pass `--host` or `--port`.
+`http://127.0.0.1:8888` unless you pass `--host` or `--port`.
 
 ### 4. Teach it a fact
 
 ```sh
-curl -N http://127.0.0.1:8080/v1/slide/learn \
+curl -N http://127.0.0.1:8888/v1/slide/learn \
   -H 'Content-Type: application/json' \
   -d '{"text": "I like blue."}'
 ```
@@ -82,7 +82,7 @@ answer. A fact takes 1.5 to 3 minutes.
 Use the normal chat API, from any client:
 
 ```sh
-curl http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' \
+curl http://127.0.0.1:8888/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"messages": [{"role": "user", "content": "What colour do I like?"}]}'
 ```
 
@@ -112,7 +112,7 @@ nothing behind. An earlier fact's neuron that the new lesson would disturb is re
 - Several facts at once: put them in one text, as in `{"text": "I like blue. My sister is called Ana."}`. Each is
   learned in turn.
 - A file: send its contents as the text, for example
-  `jq -Rs '{text: .}' notes.md | curl -N http://127.0.0.1:8080/v1/slide/learn -H 'Content-Type: application/json' -d @-`.
+  `jq -Rs '{text: .}' notes.md | curl -N http://127.0.0.1:8888/v1/slide/learn -H 'Content-Type: application/json' -d @-`.
 - A web page: fetch its text first, or use omp's `/learn <url>` below, which does it for you.
 
 The server keeps answering chat requests while it learns: learning runs when no reply is being generated. Short,
@@ -136,7 +136,7 @@ A panel shows each fact as queued, learning, learned or missed.
 
 ## See what it learned
 
-Open `http://127.0.0.1:8080/slide` in a browser while the server runs. It draws the model in 3D and updates live:
+Open `http://127.0.0.1:8888/slide` in a browser while the server runs. It draws the model in 3D and updates live:
 
 - The model as a tower of its 52 layers. Each MoE layer is a ring carrying its 64 pocket neurons, and a neuron glows in
   the colour of the fact that owns it.
@@ -150,9 +150,9 @@ Drag to turn, scroll or pinch to zoom, and click a fact for its neurons, the que
 rounds. Phones get a bottom sheet. Without WebGL2, or with `/slide?flat`, the page draws a flat graph from the same
 data.
 
-- `curl http://127.0.0.1:8080/v1/slide/graph` returns the same data as JSON: each fact's state, neurons (layer, index
+- `curl http://127.0.0.1:8888/v1/slide/graph` returns the same data as JSON: each fact's state, neurons (layer, index
   and key), questions and rounds, and the model's layers, pocket and shards.
-- `curl -X DELETE http://127.0.0.1:8080/v1/slide/graph` clears the graph. The weights keep what they learned.
+- `curl -X DELETE http://127.0.0.1:8888/v1/slide/graph` clears the graph. The weights keep what they learned.
 
 ## Keep, move or reset what it learned
 

@@ -1,5 +1,6 @@
 //! tf-train-pack's checks on either backend: packed passes against one a pass, and passes after kept prefixes.
 const std = @import("std");
+const platform = @import("sys");
 
 /// What one sequence's pass left: its loss, whether it came back, its pushes and its keys at the pocket's layers.
 const Seen = struct { loss: f32, recalled: bool, push: []f32, keys: []u16 };
@@ -169,7 +170,7 @@ pub fn For(comptime train: type) type {
 
         /// TF_PACK_DUMP: the packed target pass's losses and pushes written there, for another build's to compare.
         fn dump(gpa: std.mem.Allocator, io: std.Io, seen: []const Seen) !void {
-            const path = std.c.getenv("TF_PACK_DUMP") orelse return;
+            const path = platform.c.getenv("TF_PACK_DUMP") orelse return;
             var bytes: std.ArrayList(u8) = .empty;
             for (seen) |x| {
                 try bytes.appendSlice(gpa, std.mem.asBytes(&x.loss));

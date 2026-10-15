@@ -1,5 +1,6 @@
 //! Check the actual native loaders with a synthetic file and bounded I/O faults.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 
@@ -63,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
     } else {
         try replay.indexFile(path);
         const entry = try replay.entry(if (grouped) "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight" else "probe");
-        defer _ = std.c.close(entry.fd);
+        defer _ = platform.c.close(entry.fd);
         const result = if (grouped) replay.group(0, 2, "weight") else replay.load("probe");
         const buffer = result catch |err| {
             if (!eof or err != error.ShortRead) return err;

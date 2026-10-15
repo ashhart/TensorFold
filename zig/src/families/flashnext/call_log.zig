@@ -1,5 +1,6 @@
 //! FZ_CALL_LOG: a prompt pass's calls (rows, parts, wall and GPU milliseconds), logged in one line after its first token.
 const std = @import("std");
+const platform = @import("sys");
 
 const N = 16;
 
@@ -17,7 +18,7 @@ pub const CallLog = struct {
         if (c.n == N) return;
         c.rows[c.n] = @intCast(rows);
         c.parts[c.n] = @intCast(parts);
-        c.wall[c.n] = @floatCast(@as(f64, @floatFromInt(std.c.mach_absolute_time() - t0)) * 125 / 3 / 1e6); // mach ticks: 125/3 ns
+        c.wall[c.n] = @floatCast(@as(f64, @floatFromInt(platform.c.mach_absolute_time() - t0)) * 125 / 3 / 1e6); // mach ticks: 125/3 ns
         c.gpu[c.n] = @floatCast((g1 - g0) * 1e3);
         c.n += 1;
     }

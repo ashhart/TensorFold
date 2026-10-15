@@ -1,5 +1,6 @@
 //! A native text model keeps immutable checkpoint bytes and prepared affine layouts under one owner.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const core = @import("core");
 const cfg = @import("config.zig");
@@ -71,7 +72,7 @@ pub const Model = struct {
         m.frame = try Frame.init(m.device, c, rows);
         errdefer m.frame.deinit();
         m.ane = null;
-        const columns = if (std.c.getenv("TF_ANE_COLUMNS")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else ane_columns;
+        const columns = if (platform.c.getenv("TF_ANE_COLUMNS")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else ane_columns;
         const share = columns > 0 and m.device.tensorUnits() and mtl.ane.available() and m.weights.uniformMlp();
         const fits = if (share_fits) |f| !share or f(ane_mlp.Share.bytes(c, columns)) else true;
         if (!fits) std.log.info("qwen27: the Neural Engine's prompt share ({d} MiB of fp16 weights) would take this Mac past its load limit; prompts run on the GPU alone", .{ane_mlp.Share.bytes(c, columns) >> 20});

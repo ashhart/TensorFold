@@ -1,6 +1,7 @@
 //! The Nemotron CUDA engine (engine.py): weights, kernels and one sequence's buffers; windows and commits.
 
 const std = @import("std");
+const platform = @import("sys");
 const cuda = @import("cuda");
 const Config = @import("config.zig").Config;
 const kern = @import("cuda_kernels.zig");
@@ -130,7 +131,7 @@ pub const Engine = struct {
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.* = .{ .gpa = gpa, .io = io, .ctx = ctx, .stream = undefined, .k = undefined, .w = undefined, .b = undefined, .c = undefined, .max_len = 0, .pinned = undefined, .history = undefined };
-        e.trace = std.c.getenv("TF_SLIDE_TRACE") != null;
+        e.trace = platform.c.getenv("TF_SLIDE_TRACE") != null;
         e.c = try Config.read(gpa, io, model_dir);
         if (opts.segments < 1 or opts.segments > segs.MAX) return error.BadSegments;
         e.segments = opts.segments;

@@ -76,7 +76,7 @@ pub const CancelCheck = struct {
     check: *const fn (ptr: *anyopaque) bool,
 };
 
-/// A kept prompt state the backend restores before its prompt pass (core/prompt_cache.zig), and where it keeps new ones.
+/// A kept prompt state the backend restores before its prompt pass (core/prompt_cache.zig), and keeps new ones in.
 pub const Reuse = struct {
     saved: ?*anyopaque = null, // the backend's copy of the state after `at` prompt tokens (null: start at 0)
     at: u32 = 0,
@@ -95,6 +95,22 @@ pub const Held = struct {
     count: u32,
     tokens: ?[]u32 = null,
     parents: ?[]i32 = null,
+};
+
+/// An image for a vision tower: patches (fp32 [h * w, 1536], merge-block order), grid [1, h, w]; prompt placeholders.
+pub const Image = struct {
+    patches: []const f32,
+    grid: [3]i64,
+
+    /// BLAKE3 of the grid (little-endian) and the patches' bits: the image's identity for kept prompt states.
+    pub fn digest(im: Image) [32]u8 {
+        var h = std.crypto.hash.Blake3.init(.{});
+        for (im.grid) |g| h.update(&std.mem.toBytes(std.mem.nativeToLittle(i64, g)));
+        h.update(std.mem.sliceAsBytes(im.patches));
+        var out: [32]u8 = undefined;
+        h.final(&out);
+        return out;
+    }
 };
 
 pub const Spec = struct {
@@ -123,6 +139,7 @@ pub const Spec = struct {
     prompt_logprobs: ?u8 = null, // and for each prompt token after the first, with ranks (the prompt pass starts at 0)
     grammar: ?*grammar.Constraint = null, // structured output: the reply stays in it (the creator frees it)
     decode_spans: []const [2]u32 = &.{}, // prompt rows an earlier reply decoded (Request.decode_spans), for backends that keep their bits
+    images: []const Image = &.{}, // an image prompt's inputs, in prompt order (the backend encodes them at prefill)
 };
 
 pub const Stream = struct {
@@ -140,6 +157,7 @@ pub const Stream = struct {
     think_close: []const u32,
     think_end: i64,
     think_open: bool,
+    images: []const Image = &.{},
     loop_guard: bool,
     loop_period: ?u32 = null,
     chunks: []const u32,
@@ -202,6 +220,7 @@ pub const Stream = struct {
             .cancel_check = spec.cancel_check,
             .yield_check = spec.yield_check,
             .think_budget = spec.think_budget,
+            .images = spec.images,
             .think_close = spec.think_close,
             .think_end = spec.think_end,
             .think_open = spec.think_open orelse (spec.think_budget > 0 or (spec.loop_guard and spec.think_end >= 0)),
@@ -446,4 +465,13 @@ test "loop guard fires, closes thinking, and latches once" {
     try std.testing.expect(!s.finished and s.force.items.len == 0);
     _ = try s.commit(gpa, &.{8}, &.{});
     try std.testing.expect(!s.finished and s.loop_period.? == 1);
+}
+
+test "an image's digest covers its grid and every patch bit" {
+    const a: [3]f32 = .{ 0.1, 0.2, 0.3 };
+    const b: [3]f32 = .{ 0.1, 0.2, -0.3 };
+    const da = (Image{ .patches = &a, .grid = .{ 1, 2, 2 } }).digest();
+    try std.testing.expect(!std.mem.eql(u8, &da, &(Image{ .patches = &b, .grid = .{ 1, 2, 2 } }).digest()));
+    try std.testing.expect(!std.mem.eql(u8, &da, &(Image{ .patches = &a, .grid = .{ 1, 1, 4 } }).digest()));
+    try std.testing.expectEqualSlices(u8, &da, &(Image{ .patches = &a, .grid = .{ 1, 2, 2 } }).digest());
 }
