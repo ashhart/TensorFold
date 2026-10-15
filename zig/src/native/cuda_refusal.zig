@@ -1,6 +1,7 @@
 //! What the native CUDA server refuses before any device work: flags no CUDA family serves, and --drafter per family.
 const std = @import("std");
 const api = @import("engine_api");
+const nemotron = @import("nemotron");
 
 /// Flags refused whatever the family; null when `o` may open.
 pub fn backend(o: api.Open) ?[]const u8 {
@@ -10,9 +11,10 @@ pub fn backend(o: api.Open) ?[]const u8 {
     return null;
 }
 
-/// A family takes --drafter only if it says so (`takes_drafter`); null when `o` may open `F`.
+/// A family takes --drafter only if it says so, and --learn-conversations only as Nemotron; null: `o` may open `F`.
 pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
     if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
+    if (o.learn_conversations and F != nemotron.native) return "--learn-conversations keeps conversation states on disk for Nemotron only on CUDA: serve this model without it";
     return null;
 }
 
@@ -43,4 +45,10 @@ test "a family that explicitly declines a drafter refuses it" {
         pub const takes_drafter = false;
     };
     try std.testing.expectStringStartsWith(family(Declined, .{ .dir = "d", .model_type = "m", .drafter = "draft" }) orelse "", "--drafter loads a separate drafter");
+}
+
+test "--learn-conversations opens Nemotron only, the one CUDA family whose states have a disk image" {
+    const Other = struct {};
+    try std.testing.expectStringStartsWith(family(Other, .{ .dir = "d", .model_type = "m", .learn_conversations = true }) orelse "", "--learn-conversations keeps");
+    try std.testing.expect(family(nemotron.native, .{ .dir = "d", .model_type = "nemotron_h", .learn_conversations = true }) == null);
 }

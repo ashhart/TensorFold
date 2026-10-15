@@ -426,7 +426,9 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         const copies: pc.Snapshots = .{ .ptr = loaded.target, .vtable = &snaps.Snaps(F, image).vtable };
         store.* = pc.Store.init(gpa, copies, snaps.cacheRules(F), try snaps.cacheBudget(F, loaded.target, cache));
         h.store = store;
-        if (o.learn_conversations) if (o.learn) |root| try learnConversations(a, io, &g.ctx, o, root, kernels, loaded, store);
+        if (F == nemotron.native and o.learn_conversations) {
+            if (o.learn) |root| try learnConversations(a, io, &g.ctx, o, root, kernels, loaded, store);
+        }
     }
     errdefer if (h.store) |store| {
         store.deinit();
