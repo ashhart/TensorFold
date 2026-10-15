@@ -447,7 +447,7 @@ const Watch = struct {
         return .{ .ctx = w, .vt = &.{ .open = open, .event = event, .reply = reply } };
     }
 
-    fn open(ctx: *anyopaque) error{Closed}!void {
+    fn open(ctx: *anyopaque, _: usize) error{Closed}!void {
         const w: *Watch = @ptrCast(@alignCast(ctx));
         w.opened = true;
         w.eng.opened = true;

@@ -158,6 +158,7 @@ pub fn checkMatmul(e: *Engine, prompt: []const u32) !void {
         .kda => |*a| a,
         .mla => return error.NotKda,
     };
+    if (!@import("wide.zig").native(a.in_proj)) return error.UnsupportedWidth; // the 4/64 product's comparison only
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     e.sync();

@@ -15,6 +15,11 @@ Choose an 8-bit checkpoint made from the original model when you want its 8-bit 
 
 ## Backend paths
 
+The table, `--lane-kernels` and the CUDA path below describe the Python engine, frozen at 0.6.6 and available at the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). The native binary refuses `--lane-kernels`. Its
+Qwen3.8-27B family reads the same affine formats, per module (`zig/src/families/qwen27/affine.zig`), and admits each
+against the projection kernels the chip runs (`zig/src/families/qwen27/widths.zig`).
+
 | Path | Formats |
 | --- | --- |
 | Qwen dense, M5 native lane kernels | Affine 2/3/4/5/6/8-bit, group 64; affine 4-bit also group 32 |
@@ -43,7 +48,8 @@ Conflicting aliases and packed shapes that disagree with the declared bit width 
 
 Fused stacks combine projections only when bit width, group size, input width and metadata dtypes agree.
 Otherwise the model computes those projections separately with their declared formats.
-CUDA tensor-parallel splits retain complete groups and packed-word boundaries, and memory admission counts the actual packed precision.
+In the Python 0.6.6 engine, CUDA tensor-parallel splits retain complete groups and packed-word boundaries, and memory
+admission counts the actual packed precision.
 Changing a checkpoint, precision or kernel implementation also changes the conditions under which cached states remain valid.
 
 ## Scope and qualification
@@ -54,7 +60,9 @@ Unsupported formats remain explicit errors.
 
 The new paths are experimental until their hardware qualification is complete.
 Each backend must pass packed-value checks, one-row versus batched output equality, full-model drafted versus serial equality, prefix resume, concurrent-stream equality and memory admission before a release claim.
-The Metal kernel has a dedicated hardware test in `tests/test_affine_rows_metal.py`; model and GPU tests must run under the machine's existing resource controls.
+In the Python 0.6.6 engine, the Metal kernel has a dedicated hardware test in
+[`tests/test_affine_rows_metal.py`](https://github.com/ashhart/TensorFold/blob/v0.6.6/tests/test_affine_rows_metal.py);
+model and GPU tests must run under the machine's existing resource controls.
 No speed or quality improvement is implied by a higher bit width.
 
 ## Native safetensors metadata

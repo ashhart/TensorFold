@@ -1,0 +1,25 @@
+import assert from 'node:assert/strict'
+import { phoneChatGranted, phoneError, phoneObservationAge, phonePreviewPoint } from './phone-format'
+
+const portrait = { left: 10, top: 20, width: 300, height: 300 }
+assert.deepEqual(phonePreviewPoint(160, 170, portrait, 100, 200), { x: 50, y: 100 })
+assert.equal(phonePreviewPoint(20, 170, portrait, 100, 200), null, 'portrait letterboxing must never tap the left screen edge')
+assert.equal(phonePreviewPoint(240, 170, portrait, 100, 200), null, 'right edge is outside the phone')
+assert.deepEqual(phonePreviewPoint(85, 20, portrait, 100, 200), { x: 0, y: 0 })
+assert.equal(phonePreviewPoint(85, 320, portrait, 100, 200), null, 'bottom screen edge is exclusive')
+assert.deepEqual(phonePreviewPoint(160, 170, portrait, 200, 100), { x: 100, y: 50 })
+assert.equal(phonePreviewPoint(160, 40, portrait, 200, 100), null, 'landscape letterboxing is ignored')
+for (const size of [0, -1, NaN, Infinity]) assert.equal(phonePreviewPoint(160, 170, portrait, size, 200), null)
+assert.equal(phonePreviewPoint(NaN, 170, portrait, 100, 200), null)
+assert.equal(phonePreviewPoint(160, 170, { ...portrait, width: 0 }, 100, 200), null)
+assert.equal(phoneObservationAge(null, 20_000), 'No screen captured')
+assert.equal(phoneObservationAge(19_000, 20_000), 'Captured just now')
+assert.equal(phoneObservationAge(10_000, 20_000), 'Captured 10s ago')
+assert.equal(phoneObservationAge(10_000, 130_000), 'Captured 2m ago')
+assert.equal(phoneError(new Error("Error invoking remote method 'phone:observe': Error: Unlock the phone.")), 'Unlock the phone.')
+assert.equal(phoneChatGranted({ threadId: 'chat-a', grantExpiresAt: 20_000 }, 'chat-a', 19_999), true)
+assert.equal(phoneChatGranted({ threadId: 'chat-a', grantExpiresAt: 20_000 }, 'chat-a', 20_000), false, 'expired grants must not display as enabled')
+assert.equal(phoneChatGranted({ threadId: 'chat-a', grantExpiresAt: 20_000 }, 'chat-b', 10_000), false)
+assert.equal(phoneChatGranted({ threadId: null }, null, 10_000), false)
+assert.equal(phoneChatGranted({ threadId: 'chat-a', grantExpiresAt: NaN }, 'chat-a', 10_000), false)
+console.log('phone preview coordinate, expiry and status tests passed')

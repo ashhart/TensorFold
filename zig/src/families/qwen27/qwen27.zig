@@ -2,6 +2,7 @@
 pub const dflash = @import("dflash/root.zig");
 pub const config = @import("config.zig");
 pub const affine = @import("affine.zig");
+pub const widths = @import("widths.zig");
 pub const checkpoint = @import("checkpoint.zig");
 pub const weights = @import("weights.zig");
 pub const attention = @import("attention.zig");
@@ -49,6 +50,7 @@ test {
     _ = prompt_state;
     _ = config;
     _ = affine;
+    _ = widths;
     _ = checkpoint;
     _ = weights;
     _ = @import("weights_test.zig");

@@ -1,4 +1,4 @@
-//! `logprobs` on /v1/chat/completions: rows cover the answer as `content` does, and the 0.6.6 refusals hold.
+//! `logprobs`: rows cover the answer as `content` does, the 0.6.6 refusals hold; `prompt_logprobs` on /v1/completions.
 const std = @import("std");
 const api = @import("engine_api");
 const server = @import("root.zig");
@@ -70,17 +70,19 @@ const Text = struct {
     }
 };
 
-/// Answers `reply` in two rounds with rows: token i logprob -(i + 1) / 4, best tokens itself then 'z'.
+/// Answers `reply` in two rounds; token i at -(i + 1) / 4, best itself then 'z'; even prompt rows rank their token 1.
 const Script = struct {
     reply: []const u32,
     asked: ?u8 = null,
+    prompt_rows: bool = true,
 
     fn engine(e: *@This()) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
 
-    fn info(_: *anyopaque) api.Info {
-        return .{ .context_window = 64, .logprobs = true };
+    fn info(ctx: *anyopaque) api.Info {
+        const e: *Script = @ptrCast(@alignCast(ctx));
+        return .{ .context_window = 64, .logprobs = true, .prompt_logprobs = e.prompt_rows };
     }
 
     fn submit(ctx: *anyopaque, id: api.Id, r: *const api.Request, sink: api.Sink) api.SubmitError!void {
@@ -96,6 +98,18 @@ const Script = struct {
             }
         }
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
+        if (r.prompt_logprobs) |k| {
+            var prompt_rows: [32]api.LogprobRow = undefined;
+            for (r.prompt[1..], prompt_rows[0 .. r.prompt.len - 1], 1..) |t, *row, i| {
+                const top = i % 2 == 0;
+                row.* = .{ .token = t, .logprob = -@as(f32, @floatFromInt(i)) / 8, .count = k, .rank = if (top) 1 else 2 };
+                for (0..k) |j| {
+                    row.ids[j] = if (j > 0) @intCast('A' + j) else if (top) t else 'z';
+                    row.logprobs[j] = if (j == 0 and top) row.logprob else -@as(f32, @floatFromInt(j)) / 16;
+                }
+            }
+            sink.event(sink.ctx, id, &.{ .prompt_logprobs = prompt_rows[0 .. r.prompt.len - 1] });
+        }
         const half = e.reply.len / 2;
         for ([_][2]usize{ .{ 0, half }, .{ half, e.reply.len } }) |part| {
             if (r.logprobs != null) sink.event(sink.ctx, id, &.{ .logprobs = rows[part[0]..part[1]] });
@@ -116,18 +130,31 @@ const Script = struct {
     }
 };
 
-/// The reply the route wrote: its status and body as JSON text (testing-allocator owned).
+/// The reply the route wrote: its status and body, or a stream's events, as JSON text (testing-allocator owned).
 const Got = struct {
     status: u16 = 0,
     body: []u8 = &.{},
+    events: std.ArrayList([]u8) = .empty,
 
     fn out(g: *Got) openai.Out {
         return .{ .ctx = g, .vt = &.{ .open = open, .event = event, .reply = reply } };
     }
 
-    fn open(_: *anyopaque) error{Closed}!void {}
+    fn deinit(g: *Got) void {
+        std.testing.allocator.free(g.body);
+        for (g.events.items) |e| std.testing.allocator.free(e);
+        g.events.deinit(std.testing.allocator);
+    }
 
-    fn event(_: *anyopaque, _: ?json.Value) error{Closed}!void {}
+    fn open(_: *anyopaque, _: usize) error{Closed}!void {}
+
+    fn event(ctx: *anyopaque, payload: ?json.Value) error{Closed}!void {
+        const g: *Got = @ptrCast(@alignCast(ctx));
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const text = json.stringify(arena.allocator(), payload orelse return, .{ .ascii = false }) catch return error.Closed;
+        g.events.append(std.testing.allocator, std.testing.allocator.dupe(u8, text) catch return error.Closed) catch return error.Closed;
+    }
 
     fn reply(ctx: *anyopaque, status: u16, payload: json.Value) void {
         const g: *Got = @ptrCast(@alignCast(ctx));
@@ -139,9 +166,15 @@ const Got = struct {
     }
 };
 
-fn send(reply: []const u32, thinking: bool, responses: bool, body: []const u8) !Got {
+const Route = enum { chat, responses, completions };
+
+fn send(reply: []const u32, thinking: bool, route: Route, body: []const u8) !Got {
+    return sendWith(reply, thinking, route, body, true);
+}
+
+fn sendWith(reply: []const u32, thinking: bool, route: Route, body: []const u8, prompt_rows: bool) !Got {
     var text: Text = .{};
-    var backend: Script = .{ .reply = reply };
+    var backend: Script = .{ .reply = reply, .prompt_rows = prompt_rows };
     var srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
         .served_name = "test-model",
         .model_ids = &.{"test-model"},
@@ -154,10 +187,10 @@ fn send(reply: []const u32, thinking: bool, responses: bool, body: []const u8) !
     const a = arena.allocator();
     const raw = (try json.parse(a, body)).ok;
     var cx: errors.Cx = .{ .a = a };
-    const chat = if (responses) (try responses_translate.translate(&cx, raw, NoHistory{})).chat else raw;
+    const chat = if (route == .responses) (try responses_translate.translate(&cx, raw, NoHistory{})).chat else raw;
     var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a };
     var got: Got = .{};
-    openai.run(srv, a, got.out(), .{ .conn = &conn }, true, chat);
+    openai.run(srv, a, got.out(), .{ .conn = &conn }, route != .completions, chat);
     return got;
 }
 
@@ -187,7 +220,7 @@ fn rowsOf(v: std.json.Value) []std.json.Value {
 
 test "with thinking on, the rows start at the answer: after </think> and the newlines the text drops, no end token" {
     const reply = tokensOf("ab") ++ [_]u32{think_end} ++ tokensOf("\n\nHi") ++ [_]u32{eos};
-    const got = try send(&reply, true, false, ask ++ "}");
+    const got = try send(&reply, true, .chat, ask ++ "}");
     defer std.testing.allocator.free(got.body);
     const parsed = try content(got);
     defer parsed.deinit();
@@ -206,7 +239,7 @@ test "with thinking on, the rows start at the answer: after </think> and the new
 
 test "a reply cut inside its reasoning has no rows" {
     const reply = tokensOf("thinking");
-    const got = try send(&reply, true, false, ask ++ "}");
+    const got = try send(&reply, true, .chat, ask ++ "}");
     defer std.testing.allocator.free(got.body);
     const parsed = try content(got);
     defer parsed.deinit();
@@ -215,7 +248,7 @@ test "a reply cut inside its reasoning has no rows" {
 
 test "with thinking off every reply token has a row, and top_logprobs 0 gives none of the alternatives" {
     const reply = tokensOf("Hi") ++ [_]u32{eos};
-    const got = try send(&reply, false, false, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":32,\"logprobs\":true}");
+    const got = try send(&reply, false, .chat, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":32,\"logprobs\":true}");
     defer std.testing.allocator.free(got.body);
     const parsed = try content(got);
     defer parsed.deinit();
@@ -225,20 +258,133 @@ test "with thinking off every reply token has a row, and top_logprobs 0 gives no
     try std.testing.expectEqual(@as(usize, 0), rows[1].object.get("top_logprobs").?.array.items.len);
 }
 
-test "logprobs refuse a stream, tools, stop strings, structured output, a thinking budget and other routes" {
+test "a streamed reply's rows, joined over its chunks, are the whole reply's and spell its streamed content" {
+    const thinking_reply = tokensOf("ab") ++ [_]u32{think_end} ++ tokensOf("\n\nHello") ++ [_]u32{eos};
+    const plain_reply = tokensOf("Hello") ++ [_]u32{eos};
+    for ([_]struct { []const u32, bool }{ .{ &thinking_reply, true }, .{ &plain_reply, false } }) |case| {
+        var whole = try send(case[0], case[1], .chat, ask ++ "}");
+        defer whole.deinit();
+        const want = try content(whole);
+        defer want.deinit();
+        var streamed = try send(case[0], case[1], .chat, ask ++ ",\"stream\":true}");
+        defer streamed.deinit();
+        var rows: std.ArrayList(u8) = .empty; // each row's token and logprob, in order
+        defer rows.deinit(std.testing.allocator);
+        var spelled: std.ArrayList(u8) = .empty;
+        defer spelled.deinit(std.testing.allocator);
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(std.testing.allocator);
+        for (streamed.events.items) |e| {
+            const chunk = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, e, .{});
+            defer chunk.deinit();
+            const choices = chunk.value.object.get("choices") orelse continue;
+            if (choices.array.items.len == 0) continue;
+            const choice = choices.array.items[0].object;
+            if (choice.get("delta").?.object.get("content")) |c| try text.appendSlice(std.testing.allocator, c.string);
+            const lp = choice.get("logprobs") orelse continue;
+            for (lp.object.get("content").?.array.items) |r| {
+                try rows.print(std.testing.allocator, "{s}:{d};", .{ r.object.get("token").?.string, r.object.get("logprob").?.float });
+                for (r.object.get("bytes").?.array.items) |b| try spelled.append(std.testing.allocator, @intCast(b.integer));
+            }
+        }
+        var expected: std.ArrayList(u8) = .empty;
+        defer expected.deinit(std.testing.allocator);
+        for (rowsOf(want.value)) |r| try expected.print(std.testing.allocator, "{s}:{d};", .{ r.object.get("token").?.string, r.object.get("logprob").?.float });
+        try std.testing.expectEqualStrings(expected.items, rows.items);
+        try std.testing.expectEqualStrings("Hello", text.items);
+        try std.testing.expectEqualStrings("Hello", spelled.items);
+    }
+}
+
+test "logprobs refuse tools, stop strings, structured output, a thinking budget and other routes" {
     const reply = tokensOf("Hi");
     const refused = [_][]const u8{
-        ask ++ ",\"stream\":true}",
         ask ++ ",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}}]}",
         ask ++ ",\"stop\":[\"x\"]}",
         ask ++ ",\"response_format\":{\"type\":\"json_object\"}}",
         ask ++ ",\"thinking_budget\":5}",
     };
     for (refused) |body| {
-        const got = try send(&reply, false, false, body);
+        const got = try send(&reply, false, .chat, body);
         defer std.testing.allocator.free(got.body);
         try std.testing.expectEqual(@as(u16, 400), got.status);
     }
-    const responses = send(&reply, false, true, "{\"model\":\"test-model\",\"input\":\"x\",\"logprobs\":true}");
+    const responses = send(&reply, false, .responses, "{\"model\":\"test-model\",\"input\":\"x\",\"logprobs\":true}");
     try std.testing.expectError(error.Refused, responses);
+    var boolean = try send(&reply, false, .completions, "{\"model\":\"test-model\",\"prompt\":\"x\",\"logprobs\":true}");
+    defer boolean.deinit();
+    try std.testing.expectEqual(@as(u16, 400), boolean.status);
+}
+
+test "/v1/completions gives the legacy form, whole and streamed: texts, logprobs, alternatives by text and offsets" {
+    const reply = tokensOf("Hi!") ++ [_]u32{eos};
+    const body = "{\"model\":\"test-model\",\"prompt\":\"x\",\"max_tokens\":32,\"logprobs\":2";
+    var whole = try send(&reply, false, .completions, body ++ "}");
+    defer whole.deinit();
+    const parsed = try content(whole);
+    defer parsed.deinit();
+    const lp = parsed.value.object.get("choices").?.array.items[0].object.get("logprobs").?.object;
+    var tokens: std.ArrayList(u8) = .empty;
+    defer tokens.deinit(std.testing.allocator);
+    for (lp.get("tokens").?.array.items) |t| try tokens.appendSlice(std.testing.allocator, t.string);
+    try std.testing.expectEqualStrings("Hi!", tokens.items);
+    try std.testing.expectEqual(@as(f64, -0.5), lp.get("token_logprobs").?.array.items[1].float);
+    try std.testing.expectEqual(@as(f64, -1.75), lp.get("top_logprobs").?.array.items[2].object.get("z").?.float);
+    for (lp.get("text_offset").?.array.items, 0..) |o, i| try std.testing.expectEqual(@as(i64, @intCast(i)), o.integer);
+    // streamed: the same texts and offsets, chunk by chunk
+    var streamed = try send(&reply, false, .completions, body ++ ",\"stream\":true}");
+    defer streamed.deinit();
+    var offsets: std.ArrayList(u8) = .empty;
+    defer offsets.deinit(std.testing.allocator);
+    for (streamed.events.items) |e| {
+        const chunk = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, e, .{});
+        defer chunk.deinit();
+        const choices = chunk.value.object.get("choices") orelse continue;
+        if (choices.array.items.len == 0) continue;
+        const rows = choices.array.items[0].object.get("logprobs") orelse continue;
+        if (rows != .object) continue;
+        for (rows.object.get("tokens").?.array.items, rows.object.get("text_offset").?.array.items) |t, o| try offsets.print(std.testing.allocator, "{s}@{d};", .{ t.string, o.integer });
+    }
+    try std.testing.expectEqualStrings("H@0;i@1;!@2;", offsets.items);
+}
+
+test "prompt_logprobs: null first, then each prompt token with its rank before the best tokens, and the refusals" {
+    const reply = tokensOf("Hi");
+    var whole = try send(&reply, false, .completions, "{\"model\":\"test-model\",\"prompt\":\"abc\",\"max_tokens\":2,\"prompt_logprobs\":1}");
+    defer whole.deinit();
+    const parsed = try content(whole);
+    defer parsed.deinit();
+    const rows = parsed.value.object.get("choices").?.array.items[0].object.get("prompt_logprobs").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), rows.len);
+    try std.testing.expect(rows[0] == .null);
+    // "b" ranks second: it comes first, then the best token 'z'; "c" is the best, so it is the only entry
+    try std.testing.expectEqual(@as(usize, 2), rows[1].object.count());
+    try std.testing.expectEqualStrings("98", rows[1].object.keys()[0]);
+    try std.testing.expectEqual(@as(i64, 2), rows[1].object.get("98").?.object.get("rank").?.integer);
+    try std.testing.expectEqual(@as(f64, -0.125), rows[1].object.get("98").?.object.get("logprob").?.float);
+    try std.testing.expectEqual(@as(i64, 1), rows[1].object.get("122").?.object.get("rank").?.integer);
+    try std.testing.expectEqualStrings("z", rows[1].object.get("122").?.object.get("decoded_token").?.string);
+    try std.testing.expectEqual(@as(usize, 1), rows[2].object.count());
+    try std.testing.expectEqual(@as(i64, 1), rows[2].object.get("99").?.object.get("rank").?.integer);
+    var one = try send(&reply, false, .completions, "{\"model\":\"test-model\",\"prompt\":\"a\",\"max_tokens\":2,\"prompt_logprobs\":0}");
+    defer one.deinit();
+    const lone = try content(one);
+    defer lone.deinit();
+    const lone_rows = lone.value.object.get("choices").?.array.items[0].object.get("prompt_logprobs").?.array.items;
+    try std.testing.expect(lone_rows.len == 1 and lone_rows[0] == .null);
+    var plain = try send(&reply, false, .completions, "{\"model\":\"test-model\",\"prompt\":\"abc\",\"max_tokens\":2}");
+    defer plain.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, plain.body, "prompt_logprobs") == null);
+    const refused = [_]struct { route: Route, body: []const u8, rows: bool = true }{
+        .{ .route = .chat, .body = "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"prompt_logprobs\":1}" },
+        .{ .route = .completions, .body = "{\"model\":\"test-model\",\"prompt\":\"abc\",\"prompt_logprobs\":1,\"stream\":true}" },
+        .{ .route = .completions, .body = "{\"model\":\"test-model\",\"prompt\":\"abc\",\"prompt_logprobs\":21}" },
+        .{ .route = .completions, .body = "{\"model\":\"test-model\",\"prompt\":\"abc\",\"prompt_logprobs\":true}" },
+        .{ .route = .completions, .body = "{\"model\":\"test-model\",\"prompt\":\"abc\",\"prompt_logprobs\":1}", .rows = false },
+    };
+    for (refused) |c| {
+        var got = try sendWith(&reply, false, c.route, c.body, c.rows);
+        defer got.deinit();
+        try std.testing.expectEqual(@as(u16, 400), got.status);
+    }
 }

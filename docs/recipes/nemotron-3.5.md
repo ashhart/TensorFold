@@ -1,7 +1,14 @@
 # Nemotron 3.5 Lightning
 
-The MLX family is `src/tensorfold/families/nemotron_h/`, with Metal kernels in
-`src/tensorfold/kernels/nemotron/lightning/v1/`. It combines Mamba-2, attention and MoE blocks.
+The model combines Mamba-2, attention and MoE blocks. The native family is `zig/src/families/nemotron/`, on Metal
+and CUDA; the native prompt reuse, routed experts and shared rounds sections below describe it, and the
+[README](../../README.md#qualified-models) lists its qualified checkpoints and hardware.
+
+The MLX execution, CUDA, draft vocabulary and measurements sections describe the Python engine,
+frozen at 0.6.6 and available at the [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its MLX family
+is [`src/tensorfold/families/nemotron_h/`](https://github.com/ashhart/TensorFold/tree/v0.6.6/src/tensorfold/families/nemotron_h),
+with Metal kernels in
+[`src/tensorfold/kernels/nemotron/lightning/v1/`](https://github.com/ashhart/TensorFold/tree/v0.6.6/src/tensorfold/kernels/nemotron/lightning/v1).
 
 ## Run
 
@@ -11,11 +18,14 @@ tensorfold serve TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --nam
 ```
 
 The checkpoint includes `mtp-4bit.safetensors`; `pull` and `serve` check that it is available.
-`--no-drafts` or request field `"draft": false` selects serial decoding. MLX supports affine 4-bit
+`--no-drafts` or request field `"draft": false` selects serial decoding. In the Python engine, MLX supports affine 4-bit
 projections and experts in groups of 32 or 64; unsupported formats are refused before weight downloads
-and checked again at load. CUDA supports the named 4-bit/group-64 checkpoint.
+and checked again at load. CUDA supports the named 4-bit/group-64 checkpoint. The native engine serves the named
+checkpoint on Metal and CUDA, and NVIDIA's NVFP4 export on CUDA.
 
 ## MLX execution and exactness
+
+This section describes the Python 0.6.6 engine's MLX family.
 
 The lane engine verifies MTP drafts and context copies. TensorFold projections use tensor-unit kernels
 where available and row-exact kernels elsewhere. Fused routing, Mamba updates and expert kernels keep
@@ -30,10 +40,16 @@ cuts, so cold and resumed prompts use the same chunks; templates without markers
 
 ## CUDA
 
+This section describes the Python 0.6.6 engine's CUDA family; its `--tp`, `--rank`, `--master`, `--mtp-drafts` and
+`--prefill-fp8` flags are that engine's, and the native binary refuses them. The native CUDA build serves Nemotron on
+one GPU, from the MLX 4-bit checkpoint or NVIDIA's NVFP4 export, with concurrent requests sharing each round; see the
+[native CUDA runbook](../../RUNBOOK.md#linux-and-cuda).
+
 CUDA reads this model's MLX 4-bit checkpoint only; NVFP4 and EXL3 exports of it are not read yet. Its prompt matmuls
 have no FP8 kernel, so prompt precision does not change and `--prefill-fp8` is refused.
 
-Use the [CUDA container setup](../../RUNBOOK.md#nvidia-gpus). One or two ranks are supported.
+Use the [CUDA container setup](https://github.com/ashhart/TensorFold/blob/v0.6.6/RUNBOOK.md#nvidia-gpus). One or two
+ranks are supported.
 Pull the checkpoint on each rank and start rank 1 first:
 
 ```bash
@@ -55,6 +71,11 @@ memory admission; `--context` sets an explicit window. Inspect the reported capa
 long requests. Both backends use the same public draft list below.
 
 ## Draft vocabulary provenance
+
+This section describes the Python 0.6.6 engine's list,
+[`src/tensorfold/families/nemotron_h/draft_ids.txt`](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/families/nemotron_h/draft_ids.txt).
+The native engine embeds its own 49,152-ID list, `zig/src/families/nemotron/draft_ids.txt`, on Metal and CUDA; the
+rebuild below does not produce it.
 
 The shipped `draft_ids.txt` contains 32,768 sorted IDs. It can be rebuilt byte for byte from CPython
 3.14.5's standard-library Python files, excluding `site-packages`, plus tracked Python and Markdown

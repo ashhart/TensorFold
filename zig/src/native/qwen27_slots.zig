@@ -15,6 +15,7 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
     const ids = s.prompt();
     if (ids.len == 0 or ids.len + s.max_new + max_rows > b.runner.capacity) return error.PromptTooLong;
     if (s.yields()) return error.Yielded; // a background pass steps aside before it touches the slot
+    try recover(b, s);
     const d = b.drafter(slot);
     if (d) |x| try x.reset() else try b.runner.reset(slot);
     if (b.ringOf(slot)) |g| g.end.* = 0;
@@ -36,7 +37,7 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
     const from = at;
     while (at < ids.len) {
         if (s.isCancelled()) return error.Cancelled;
-        if (s.yields()) { // real work waits: the cache keeps what this background pass prefilled (the serial host's rule)
+        if (s.yields()) { // real work waits: the cache keeps what this background pass prefilled
             if (at > from) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(at));
             return error.Yielded;
         }
@@ -68,6 +69,18 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
     }
 }
 
+/// After a GPU failure whose streams have all left, the runner and drafter take rounds again; `s` takes its slot now.
+fn recover(b: *Metal, s: *const lanes.Stream) !void {
+    const drafter = if (b.draft) |d| d.model.backend.failed else false;
+    if (!b.runner.failed and !drafter) return;
+    for (b.owners[0..b.runner.slots]) |o| if (o != null and o != s) return error.RoundGpuFailure;
+    b.dropRound();
+    b.dropTree();
+    b.runner.recover();
+    if (b.draft) |d| try d.model.recover();
+    std.log.info("qwen27: rounds run again after a GPU failure", .{});
+}
+
 /// A prompt chunk's `rows` taps into a slot's ring.
 pub fn ringChunk(b: *Metal, g: Ring, rows: usize) !void {
     const r = b.runner;
@@ -81,7 +94,7 @@ pub fn ringChunk(b: *Metal, g: Ring, rows: usize) !void {
     e.end();
     cb.commit();
     cb.wait();
-    if (cb.failure() != null) return error.DraftTapGpuFailure;
+    if (q.decode_round.gpuFailed(cb, "a prompt chunk's taps")) return error.DraftTapGpuFailure;
     try g.absorb(b.gathered_taps.?, 0, @intCast(rows));
 }
 
@@ -91,14 +104,14 @@ pub fn restore(b: *Metal, slot: u32, st: *const q.snapshot.State) !void {
     try q.snapshot.restoreSlot(b.gpa, b.runner, slot, b.ringOf(slot), st);
 }
 
-/// A slot's K/V rows and taps ring, taken on its first use; error.LaneMemory when they do not fit yet.
-pub fn ready(b: *Metal, slot: u32) !void {
+/// A slot's K/V rows and taps ring, taken on its first use by `s`; error.LaneMemory when they do not fit yet.
+pub fn ready(b: *Metal, slot: u32, s: *const lanes.Stream) !void {
     const kv = slot >= b.runner.ready;
     const ring_missing = b.draft != null and slot > 0 and b.rings[slot] == null;
     if (!kv and !ring_missing) return;
     const ring_bytes: usize = if (b.draft) |d| @as(usize, d.model.ring().window) * d.model.ring().stride else 0;
     const need = (if (kv) b.runner.slotBytes() else 0) + (if (ring_missing) ring_bytes else 0);
-    if (b.grow) |g| if (!g.room(g.ctx, need)) return error.LaneMemory;
+    if (b.grow) |g| if (!g.room(g.ctx, need, s)) return error.LaneMemory;
     var added: std.ArrayList(mtl.Buffer) = .empty;
     defer added.deinit(b.gpa);
     try added.appendSlice(b.gpa, try b.runner.ensure(slot));
@@ -147,6 +160,12 @@ pub fn promote(b: *Metal) void {
         b.rings[k].?.end = 0;
         return;
     }
+}
+
+/// Slot 0 emptied and prefilled with `prompt`, through the drafter when there is one (the window timing's context).
+pub fn refill(b: *Metal, prompt: []const u32) !void {
+    if (b.draft) |d| try d.reset() else try b.runner.reset(0);
+    if (b.draft) |d| try d.generation.prefill(prompt, 128) else try (q.session.Session{ .runner = b.runner }).prefill(prompt, 128);
 }
 
 /// A lone greedy stream on the DFlash2 serial loop in slot 0 until it ends (false) or the lane core adopts it (true).

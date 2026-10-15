@@ -9,7 +9,9 @@ const sampler = @import("cuda_sampler.zig");
 const seq_graphs = @import("cuda_seq_graphs.zig");
 
 pub const max_rows = 16; // a verify window's rows (the row tile of the row-parallel kernels)
-pub const prefill_rows = 2048; // rows of a prompt chunk
+pub const prefill_rows = 2048; // rows of a staggered segment's chunk, and of a pass under dumps or lessons
+pub const pass_rows = 2 * prefill_rows; // rows a serial prompt pass runs at most (a row's bits are the same at any cut)
+pub const yield_rows = 256; // rows of a background pass's chunk: a request that arrives waits for one at most
 pub const chunk_keys = 512; // keys an attention chunk holds, at fixed absolute positions
 const shared_words = 2 * max_rows + 8 * max_rows; // the shared expert's members, then (items, counts) a row count
 
@@ -59,20 +61,31 @@ pub const Carved = struct {
 /// A sequence's own Buffers fields: cache and state planes (the first seven), window io and its sampled rule.
 pub const seq_fields = [_][]const u8{ "k_cache", "v_cache", "ssm", "conv_base", "raw", "xc", "dt", "meta", "ids", "hidden", "sampled", "rule" };
 
+/// Bytes of one token's key (or value) row in one attention layer: every KV head's dims in bf16.
+pub fn kvRowBytes(c: Config) usize {
+    return c.kv_heads * c.head_dim * 2;
+}
+
+/// Bytes of every Mamba layer's SSM and conv states (seq_fields' ssm, conv_base): a prompt mark keeps both whole.
+pub fn mambaPlanes(c: Config) [2]usize {
+    const nm: usize = c.count(.mamba);
+    return .{ nm * c.mamba_heads * c.mamba_head_dim * c.state * 4, nm * 3 * c.convDim() * 2 };
+}
+
 fn seqSizes(c: Config, max_len: usize) [seq_fields.len]usize {
     const W: usize = max_rows;
     const nm: usize = c.count(.mamba);
-    const na: usize = c.count(.attention);
-    const kv = na * max_len * c.kv_heads * c.head_dim * 2;
+    const kv = c.count(.attention) * max_len * kvRowBytes(c);
     const cd: usize = c.convDim();
-    return .{ kv, kv, nm * c.mamba_heads * c.mamba_head_dim * c.state * 4, nm * 3 * cd * 2, nm * 2 * W * cd * 2, nm * 2 * W * cd * 2, nm * 2 * W * c.mamba_heads * 4, 16, W * 4, W * c.hidden * 2, W * 4, @sizeOf(sampler.Rule) };
+    const m = mambaPlanes(c);
+    return .{ kv, kv, m[0], m[1], nm * 2 * W * cd * 2, nm * 2 * W * cd * 2, nm * 2 * W * c.mamba_heads * 4, 16, W * 4, W * c.hidden * 2, W * 4, @sizeOf(sampler.Rule) };
 }
 
-const scratch_count = 35;
+const scratch_count = 36;
 
 /// Scratch windows and chunks share on one stream: window logits, chunk io, activations, the expert plan.
 fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
-    const R: usize = prefill_rows;
+    const R: usize = pass_rows;
     const W: usize = max_rows;
     const D: usize = c.hidden;
     const ns: usize = c.slots();
@@ -82,12 +95,18 @@ fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
     const pairs = R * ns;
     const items = kern.maxItems(@intCast(pairs), c.experts + 2, 16);
     return .{
-        W * c.vocab * 2,       16,                                          R * 4,                      R * D * 2,        c.vocab * 2,           16,
-        R * D * 2,             R * D * 2,                                   R * D * 2,                  R * D * 2,        R * D / 64 * 4,        R * D * 2,
-        R * c.projDim() * 2,   R * cd * 2,                                  R * xd * 2,                 R * xd * 2,       R * xd / 64 * 4,       R * c.qkvDim() * 2,
-        R * qd * 2,            R * qd * 2,                                  R * qd / 64 * 4,            W * nch * qd * 4, W * nch * c.heads * 4, W * nch * c.heads * 4,
-        6 * R * c.experts * 4, R * ns * 4,                                  R * ns * 4,                 pairs * 4,        items * 12,            8,
-        pairs * 4,             (pairs + 1023) / 1024 * (c.experts + 2) * 4, pairs * c.expert_width * 2, pairs * D * 4,    shared_words * 4,
+        W * c.vocab * 2,       16,                                          R * 4,
+        R * D * 2,             c.vocab * 2,                                 16,
+        R * D * 2,             R * D * 2,                                   R * D * 2,
+        R * D * 2,             R * D / 64 * 4,                              R * D * 2,
+        R * c.projDim() * 2,   R * cd * 2,                                  R * xd * 2,
+        R * xd * 2,            R * xd / 64 * 4,                             R * c.qkvDim() * 2,
+        R * qd * 2,            R * qd * 2,                                  R * qd / 64 * 4,
+        W * nch * qd * 4,      W * nch * c.heads * 4,                       W * nch * c.heads * 4,
+        6 * R * c.experts * 4, R * ns * 4,                                  R * ns * 4,
+        pairs * 4,             items * 12,                                  8,
+        pairs * 4,             (pairs + 1023) / 1024 * (c.experts + 2) * 4, pairs * c.expert_width * 2,
+        pairs * D * 4,         shared_words * 4,                            R * kern.pocket_width * 4,
     };
 }
 
@@ -97,7 +116,7 @@ pub const Seq = struct {
     carved: ?Carved = null,
     ptr: [seq_fields.len]u64,
     head: [3]u64 = @splat(0), // the MTP head's seq_fields (cuda_mtp.zig)
-    graphs: seq_graphs.Graphs = .{}, // what this sequence captured for itself (not the own one)
+    graphs: seq_graphs.Graphs = .{}, // what this sequence captured for itself (the own one: masked windows alone)
     epoch: u32 = 0, // the engine's graph epoch its graphs were captured in
     pos: usize = 0,
     parity: usize = 0,
@@ -107,6 +126,7 @@ pub const Seq = struct {
     sampling: ?sampler.Sampling = null,
     slot: u32 = 0, // its lesson latch slot (lesson_route)
     decide: i64 = lesson_route.none, // the prompt row where its lessons decide whether they act on the reply
+    untaught: bool = false, // reads the model as shipped: no learned neuron acts on its rows (a lesson writer's reads)
 
     /// The device bytes one sequence takes: its buffers for `max_len` cache rows and a head's `head` buffers.
     pub fn bytes(c: Config, max_len: usize, head: []const usize) usize {
@@ -197,6 +217,7 @@ pub const Buffers = struct {
     ymoe: u64,
     rule: u64, // the sequence's sampled rule, as sample.cu reads it
     shared: u64, // the shared expert's fixed plans: 32 members, then (items, counts) for 1..16 rows
+    pocket: u64, // the pocket's activations, fp32 [rows, pocket_width]
 
     /// Sizes every buffer for `max_len` cache rows and `nch` attention chunk partials a row; the own sequence's first.
     pub fn init(d: *const cuda.Driver, c: Config, max_len: usize, nch: usize, carve: ?*cuda.Carveout) !Buffers {
@@ -241,7 +262,7 @@ pub const Buffers = struct {
             &b.logits,    &b.p_meta,    &b.p_ids, &b.p_hidden, &b.p_logits, &b.p_sampled, &b.emb, &b.h[0],         &b.h[1],       &b.y,
             &b.xs,        &b.delta,     &b.proj,  &b.p_xc,     &b.sy,       &b.g,         &b.gxs, &b.qkv,          &b.q,          &b.att,
             &b.axs,       &b.po,        &b.pm,    &b.pl,       &b.part,     &b.pick,      &b.wts, &b.plan.members, &b.plan.items, &b.plan.counts,
-            &b.plan.rank, &b.plan.hist, &b.act,   &b.ymoe,     &b.shared,
+            &b.plan.rank, &b.plan.hist, &b.act,   &b.ymoe,     &b.shared,   &b.pocket,
         };
     }
 

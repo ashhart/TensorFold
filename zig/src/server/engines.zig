@@ -10,6 +10,9 @@ pub const Opened = api.Opened;
 /// The serve flags past the common ones the backend lists (tensor parallelism, MTP, kept entries, policy).
 pub const serves: []const []const u8 = if (@hasDecl(native, "serves")) native.serves else &.{};
 
+/// The backend's std options when it has any (HIP: no alternate signal stack for RCCL's threads); else the defaults.
+pub const std_options: std.Options = @import("std_options.zig").of(native);
+
 /// What ``capabilities --json`` reports: this release, the chip here, and what the built-in backend serves.
 pub fn capabilities(a: Allocator) cli.Engines {
     return .{ .version = @import("build_options").version, .chip = if (native.families.len > 0) native.chip(a) else null, .backends = native.backends, .families = native.families };

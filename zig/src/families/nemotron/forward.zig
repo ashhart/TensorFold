@@ -10,6 +10,7 @@ const tree = @import("tree.zig");
 const encoder = @import("encoder.zig");
 const Sampling = @import("lanes").sampling.Sampling;
 const fullVocabulary = @import("lanes").gpu_full.fullVocabulary;
+const gpu_rule = @import("lanes").gpu_rule;
 const row = @import("../../core/row_projection.zig");
 const Masks = @import("../../core/grammar_mask.zig").Masks;
 const lesson_route = @import("lesson_route.zig");
@@ -61,6 +62,8 @@ pub const Forward = struct {
     round: ?layers.RoundArgs = null, // a GPU-side round's Mamba tables and routed rows, written on the GPU (one segment)
     masks: ?*const Masks = null, // structured output's bits (segments with a mask_row)
     route: lesson_route.Route = .{}, // which rows carry the lessons (none set: no row does)
+    untaught: bool = false, // the pocket leaves rows (the model as shipped): `segs`' untaught streams', else all
+    segs: []const Seg = &.{}, // the pass's streams, as body() runs them
 
     pub fn mp(rows: usize) usize {
         return 16 * ((rows + 15) / 16);
@@ -159,6 +162,8 @@ pub const Forward = struct {
             for (segs[0..j]) |h| first += h.rows;
             self.route.add(first, g.rows, g.cache.len - g.cache.replay, if (g.cache.rid >= 0) g.cache.decide else lesson_route.none, @intCast(@max(g.cache.rid, 0)));
         };
+        self.segs = segs;
+        for (segs) |g| self.untaught = self.untaught or g.cache.untaught;
         const lessons = layers.firstAdapter(self.w);
         if (lessons) |ad| layers.latchAll(self.k, e, ad, &self.route, false);
         defer if (lessons) |ad| layers.latchAll(self.k, e, ad, &self.route, true);
@@ -263,15 +268,12 @@ pub const Forward = struct {
         var cfgs: [4 * st.max_rows]f32 = @splat(0);
         var caps: [st.max_rows]u32 = @splat(0);
         const t = d.sampling;
+        const rule = gpu_rule.rule(t);
         for (0..rows) |r| {
-            seeds[2 * r] = @truncate(t.seed);
-            seeds[2 * r + 1] = @truncate(t.seed >> 32);
+            seeds[2 * r ..][0..2].* = rule.seedHalves();
             positions[r] = @intCast(d.position + r);
-            cfgs[4 * r] = @floatCast(1.0 / @max(t.temperature, 1e-6));
-            cfgs[4 * r + 1] = @floatCast(t.top_p);
-            cfgs[4 * r + 2] = 20.0;
-            cfgs[4 * r + 3] = @floatCast(t.minLog());
-            caps[r] = t.top_k;
+            cfgs[4 * r ..][0..4].* = rule.cfg();
+            caps[r] = rule.top_k;
         }
         const n = @max(rows, 8);
         const whole = fullVocabulary(t);

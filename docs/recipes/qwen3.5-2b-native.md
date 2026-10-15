@@ -3,7 +3,7 @@
 This recipe covers text generation with
 [`mlx-community/Qwen3.5-2B-MLX-4bit`](https://huggingface.co/mlx-community/Qwen3.5-2B-MLX-4bit/tree/93760be4f1f69842a46bc13dbdc0f19e291392a3),
 revision `93760be4f1f69842a46bc13dbdc0f19e291392a3`.
-Use the `zig-preview` source branch with Zig **0.17.0** and Xcode's Metal toolchain, as described in
+Build from `main` with Zig **0.17.0** and Xcode's Metal toolchain, as described in
 [the native preview](../../ZIG-PREVIEW.md#build). Keep weights outside the source checkout.
 
 ```bash
@@ -83,6 +83,6 @@ variation. These numerical comparisons do not demand bitwise equality across bac
 
 For the official receipt, run the [prescribed measurement tools](README.md#measurements) against the native
 server. Use `tools/bench_concurrent.py --alone --serial`, `tools/bench_openai.py --tokens 64 --reps 5
---temperatures 1.0,0`, and `tools/prefill_cold.py` at its public default lengths and repetitions.
+--temperatures 1.0,0`, and `tools/bench_cache.py --require-cold` on a long prompt for prompt speed.
 Run performance measurements without competing validation work. The previous native engine cannot run this
 checkpoint, so its before baseline is unsupported; do not report an invented speed-up.

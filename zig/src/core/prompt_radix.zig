@@ -98,6 +98,7 @@ pub const Store = struct {
         s.tree.clock += 1;
         e.used = s.tree.clock;
         e.hit = true;
+        e.branched = e.branched or superseded(n, e.born); // a turn several continuations share (re-sent, edited, forked)
         s.tree.counts.hits += 1;
         const last = s.tree.gpa.dupe(u32, prompt) catch return;
         s.tree.gpa.free(e.last);
@@ -246,15 +247,15 @@ pub const Store = struct {
 
     fn pick(n: *Node, prompt: []const u32, skip: ?*Node, moved: *?*Node, oldest: *?*Node) void {
         if (n.entry) |e| if (n != skip) {
-            // a state its conversation moved past goes first, a shared cut only as the least recently used
-            const gone = !e.shared and ((prompt.len > e.born and prompt.len > n.end and extends(n, prompt)) or superseded(n, e.born));
+            // a state its conversation moved past goes first; a shared cut or a branch point only as the least valuable
+            const gone = !e.shared and !e.branched and ((prompt.len > e.born and prompt.len > n.end and extends(n, prompt)) or superseded(n, e.born));
             if (gone and (moved.* == null or e.used < moved.*.?.entry.?.used)) moved.* = n;
             if (oldest.* == null or worse(n, oldest.*.?)) oldest.* = n;
         };
         for (n.kids.items) |k| pick(k, prompt, skip, moved, oldest);
     }
 
-    /// The entry to free first, never `skip`: one a later prompt extends, oldest first; else the least valuable.
+    /// The entry to free first, never `skip`: one a later prompt extends (no branch point), oldest first; else worst.
     fn victim(s: *const Store, prompt: []const u32, skip: ?*Node) ?*Node {
         var moved: ?*Node = null;
         var oldest: ?*Node = null;

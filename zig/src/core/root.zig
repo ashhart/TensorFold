@@ -2,6 +2,7 @@
 
 pub const safetensors = @import("safetensors.zig");
 pub const exl3_format = @import("exl3_format.zig");
+pub const exlr8 = @import("exlr8.zig");
 pub const checkpoint = @import("checkpoint.zig");
 pub const direct_io = @import("direct_io.zig");
 pub const Checkpoint = checkpoint.Checkpoint;
@@ -15,6 +16,8 @@ pub const shard_edit = @import("shard_edit.zig");
 pub const quant = @import("quant/quant.zig");
 pub const registry = @import("registry.zig");
 pub const tuning = @import("tuning.zig");
+pub const norms_ref = @import("norms_ref.zig");
+pub const act_ref = @import("act_ref.zig");
 
 test {
     _ = safetensors;
@@ -24,7 +27,10 @@ test {
     _ = quant;
     _ = registry;
     _ = tuning;
+    _ = norms_ref;
+    _ = act_ref;
     _ = exl3_format;
+    _ = exlr8;
     _ = @import("exl3_rect_test.zig");
     _ = checkpoint;
     _ = direct_io;

@@ -14,6 +14,7 @@ pub const lane_projection = @import("core_lane");
 pub const gpu_profile = @import("src/core/gpu_profile.zig");
 
 pub const row_projection = @import("core_row");
+pub const quant = @import("src/core/quant/quant.zig");
 
 pub const draft_ops = @import("draft_ops");
 pub const shared_attention = @import("src/core/shared_attention.zig");

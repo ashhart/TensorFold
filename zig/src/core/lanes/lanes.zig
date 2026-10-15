@@ -40,6 +40,7 @@ test {
     _ = @import("engine_test.zig");
     _ = @import("gpu_full_test.zig");
     _ = @import("drafted_test.zig");
+    _ = @import("pricing_test.zig");
 }
 
 pub const learned_disk = @import("learned_disk.zig");

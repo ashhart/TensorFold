@@ -1,7 +1,7 @@
 # Contributing to TensorFold
 
 TensorFold's main line is the Zig engine and server.
-Python 0.6.6 is maintained on `python-0.6`; Python clients and references under `tools` are development tools.
+Python 0.6.6 stays available at the `v0.6.6` tag and takes no further changes; Python clients and references under `tools` are development tools.
 Start from the release branch named in the issue, and keep one change per pull request.
 Open an issue before a new model family, backend or arithmetic change so we can agree on its gate.
 

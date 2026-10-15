@@ -1,6 +1,7 @@
 # Recipe book
 
-Each family page describes its supported checkpoint, kernels and operating limits.
+Each family page describes its supported checkpoint, kernels and operating limits, and says which engine it covers:
+the native engine, or the Python engine frozen at 0.6.6.
 
 | Family | Recipe |
 | --- | --- |
@@ -32,7 +33,8 @@ one gained, and which code owns it. For the Python engine, frozen at 0.6.6, the 
 [adding an MLX family](adding-a-family.md), [adding a CUDA family](adding-a-cuda-family.md) and
 [CUDA implementation rules](cuda.md).
 [EXL3 weights](exl3.md) and [universal EXL3 experts](exl3-universal-experts.md) describe the shared EXL3
-module every CUDA family can read: any codebook, any width per tensor, one grouped launch per MoE projection.
+module @vcruz305 wrote for the Python engine's CUDA families in [#42](https://github.com/ashhart/TensorFold/pull/42):
+any codebook, any width per tensor, one grouped launch per MoE projection.
 
 ## The contract
 

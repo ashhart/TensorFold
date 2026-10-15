@@ -4,6 +4,7 @@ const st = @import("state.zig");
 const snapshot = @import("snapshot.zig");
 const Engine = @import("engine.zig").Engine;
 const Slots = @import("slots.zig").Slots;
+const Slot = @import("slots.zig").Slot;
 
 /// A stream's span of the pool, in blocks of `Pool.block` tokens.
 pub const Region = struct { start: u32, blocks: u32 };
@@ -84,33 +85,55 @@ pub fn fits(sl: *const Slots, tokens: u32) bool {
     return findRun(sl, p.need(tokens), false) != null;
 }
 
-/// Slot `i`'s region for `tokens` of caches, before its stream begins; nothing without a pool.
-pub fn reserve(sl: *Slots, i: u32, tokens: u32) !void {
+/// Slot `i`'s region for `tokens` of caches before its stream begins (`from`: a held prefix it restores).
+pub fn reserve(sl: *Slots, i: u32, tokens: u32, from: ?*const snapshot.Snap) !void {
     const p = sl.pool orelse return;
     if (i >= sl.slots.len or sl.slots[i].used or sl.slots[i].region != null) return error.SlotOutOfStep;
     if (tokens > capacity(sl)) return error.ContextFull;
     const n = p.need(tokens);
-    const start = while (true) {
-        if (findRun(sl, n, true)) |at| break at;
-        if (!evictHeld(sl)) return error.PoolFull;
-    };
+    const start = try place(sl, n, from);
     const slot = &sl.slots[i];
     slot.region = .{ .start = start, .blocks = n };
     p.caches(&sl.e.c, slot.region.?, slot.s.mla[0..mlaCount(sl.e)]);
     slot.s.cap = p.tokens(n);
 }
 
-/// The oldest kept prompt state holding pool blocks gives them up and goes stale; false when none holds any.
-fn evictHeld(sl: *Slots) bool {
-    var oldest: ?*snapshot.Snap = null;
+/// Where `n` blocks go: on `from`'s held prefix (restored in place) if nothing else is there, else the first free run.
+fn place(sl: *Slots, n: u32, from: ?*const snapshot.Snap) error{PoolFull}!u32 {
+    while (true) {
+        if (from) |f| if (f.held) |h| if (clearAt(sl, h[0], n, f)) return h[0];
+        if (findRun(sl, n, true)) |at| return at;
+        if (!evictHeld(sl, from)) return error.PoolFull;
+    }
+}
+
+/// Whether blocks [at, at + n) lie in the pool clear of every stream's region and of every held prefix but `own`.
+fn clearAt(sl: *const Slots, at: u32, n: u32, own: *const snapshot.Snap) bool {
+    if (at + n > sl.pool.?.blocks) return false;
+    for (sl.slots) |s| if (s.region) |r| if (r.start < at + n and at < r.start + r.blocks) return false;
     var it = sl.snaps.valueIterator();
-    while (it.next()) |snap| if (snap.*.held != null and (oldest == null or snap.*.id < oldest.?.id)) {
-        oldest = snap.*;
+    while (it.next()) |snap| if (snap.* != own) if (snap.*.held) |h| if (h[0] < at + n and at < h[0] + h[1]) return false;
+    return true;
+}
+
+/// The oldest kept state holding pool blocks, `spare` last, gives them up and goes stale; false when none holds any.
+fn evictHeld(sl: *Slots, spare: ?*const snapshot.Snap) bool {
+    var pick: ?*snapshot.Snap = null;
+    var it = sl.snaps.valueIterator();
+    while (it.next()) |snap| if (snap.*.held != null and (pick == null or first(snap.*, pick.?, spare))) {
+        pick = snap.*;
     };
-    const snap = oldest orelse return false;
+    const snap = pick orelse return false;
     snap.held = null;
     snap.stale = true;
     return true;
+}
+
+/// Eviction order: every held prefix before `spare`, then the older id first.
+fn first(a: *const snapshot.Snap, b: *const snapshot.Snap, spare: ?*const snapshot.Snap) bool {
+    const a_last = if (spare) |x| a == x else false;
+    const b_last = if (spare) |x| b == x else false;
+    return if (a_last != b_last) b_last else a.id < b.id;
 }
 
 /// Slot `i`'s stream left: its region goes back, except the blocks under its resident prompt states' prefixes.
@@ -154,4 +177,52 @@ test "a region of n blocks holds n blocks less the pooled entry, and tokens take
         try std.testing.expect(p.tokens(n) >= t);
         try std.testing.expect(n == 1 or p.tokens(n - 1) < t);
     }
+}
+
+/// Slots over a pool of `blocks` blocks with no GPU behind them, for tests that read only regions and kept states.
+fn testSlots(slots: []Slot, blocks: u32) Slots {
+    return .{ .gpa = std.testing.allocator, .e = undefined, .slots = slots, .rows = undefined, .ids = undefined, .lasts = undefined, .picks = undefined, .ring = undefined, .pool = .{ .base = undefined, .blocks = blocks, .kpool = 4 } };
+}
+
+test "a stream that restores a held prefix takes its region on that prefix's blocks; other held prefixes go first" {
+    const gpa = std.testing.allocator;
+    var slots: [2]Slot = undefined;
+    for (&slots) |*x| x.* = .{ .s = undefined, .held = undefined, .last = undefined };
+    var sl = testSlots(&slots, 16);
+    defer sl.snaps.deinit(gpa);
+    var older: snapshot.Snap = .{ .id = 1, .at = 700, .buf = undefined, .bytes = 0, .held = .{ 9, 3 } };
+    var own: snapshot.Snap = .{ .id = 2, .at = 1500, .buf = undefined, .bytes = 0, .held = .{ 2, 6 } };
+    try sl.snaps.put(gpa, older.id, &older);
+    try sl.snaps.put(gpa, own.id, &own);
+    try std.testing.expectEqual(@as(u32, 2), try place(&sl, 9, &own)); // [2, 11): the older prefix's [9, 12) went
+    try std.testing.expect(older.stale and older.held == null);
+    try std.testing.expect(!own.stale and own.held != null); // its prefix rows stay where they are: still valid
+}
+
+test "the prefix a stream restores gives its blocks up last, only when nothing else frees a run" {
+    const gpa = std.testing.allocator;
+    var slots: [2]Slot = undefined;
+    for (&slots) |*x| x.* = .{ .s = undefined, .held = undefined, .last = undefined };
+    var sl = testSlots(&slots, 16);
+    defer sl.snaps.deinit(gpa);
+    slots[1].region = .{ .start = 12, .blocks = 4 }; // a running stream
+    var own: snapshot.Snap = .{ .id = 2, .at = 1500, .buf = undefined, .bytes = 0, .held = .{ 2, 6 } };
+    try sl.snaps.put(gpa, own.id, &own);
+    try std.testing.expectEqual(@as(u32, 0), try place(&sl, 12, &own)); // [2, 14) meets the running stream
+    try std.testing.expect(own.stale and own.held == null);
+    try std.testing.expectError(error.PoolFull, place(&sl, 13, null));
+}
+
+test "with no prefix to restore, held prefixes give their blocks up oldest first" {
+    const gpa = std.testing.allocator;
+    var slots: [2]Slot = undefined;
+    for (&slots) |*x| x.* = .{ .s = undefined, .held = undefined, .last = undefined };
+    var sl = testSlots(&slots, 16);
+    defer sl.snaps.deinit(gpa);
+    var older: snapshot.Snap = .{ .id = 1, .at = 700, .buf = undefined, .bytes = 0, .held = .{ 8, 4 } };
+    var newer: snapshot.Snap = .{ .id = 2, .at = 700, .buf = undefined, .bytes = 0, .held = .{ 0, 4 } };
+    try sl.snaps.put(gpa, older.id, &older);
+    try sl.snaps.put(gpa, newer.id, &newer);
+    try std.testing.expectEqual(@as(u32, 4), try place(&sl, 10, null));
+    try std.testing.expect(older.stale and !newer.stale);
 }

@@ -19,7 +19,7 @@ fn f32of(h: u16) f32 {
     return @bitCast(@as(u32, h) << 16);
 }
 
-test "sparse attention on the tensor units: the row kernel's values within bf16 rounding" {
+fn sparseCheck(comptime heads: usize) !void {
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const pool = mtl.objc.Pool.push();
@@ -28,13 +28,15 @@ test "sparse attention on the tensor units: the row kernel's values within bf16 
     defer queue.deinit();
     const a = std.testing.allocator;
     const gen = for (sources.glm.all) |k| {
-        if (std.mem.eql(u8, k.key, "sparse_attention")) break k;
+        if (std.mem.eql(u8, k.key, if (heads == 64) "sparse_attention" else "sparse_attention_tp")) break k;
     } else return error.MissingKernel;
     const lib_row = try mtl.Library.fromSource(device, gen.source, mtl.CompileOptions.mlx());
     defer lib_row.deinit();
     const row_pipe = try mtl.Pipeline.init(device, lib_row, gen.functions[0], false);
     defer row_pipe.deinit();
-    const nax_src = try frags.source(device, a, sources.glm_sparse_nax);
+    try std.testing.expect(row_pipe.maxThreads() >= 1024);
+    const raw = if (heads == 32) "#define GLM_HEADS 32\n" ++ sources.glm_sparse_nax else sources.glm_sparse_nax;
+    const nax_src = try frags.source(device, a, raw);
     defer a.free(nax_src);
     const lib_nax = try mtl.Library.fromSource(device, nax_src, mtl.CompileOptions.mlx());
     defer lib_nax.deinit();
@@ -42,12 +44,12 @@ test "sparse attention on the tensor units: the row kernel's values within bf16 
     defer nax_pipe.deinit();
 
     const opts = mtl.ResourceOptions.shared;
-    const bufs = [_]mtl.Buffer{ try device.buffer(ROWS * H * RANK * 2, opts), try device.buffer(CAP * RANK * 2, opts), try device.buffer(ROWS * WIDTH * 4, opts), try device.buffer(ROWS * H * RANK * 2, opts), try device.buffer(ROWS * H * RANK * 2, opts) };
+    const bufs = [_]mtl.Buffer{ try device.buffer(ROWS * heads * RANK * 2, opts), try device.buffer(CAP * RANK * 2, opts), try device.buffer(ROWS * WIDTH * 4, opts), try device.buffer(ROWS * heads * RANK * 2, opts), try device.buffer(ROWS * heads * RANK * 2, opts) };
     defer for (bufs) |b| b.deinit();
     var prng = std.Random.DefaultPrng.init(11);
     const rnd = prng.random();
-    const q = bufs[0].slice(u16, ROWS * H * RANK);
-    for (q, 0..) |*v, i| v.* = bf16((rnd.float(f32) * 4 - 2) * (if (i / (H * RANK) == 4) @as(f32, 6) else 1)); // row 4: peaked
+    const q = bufs[0].slice(u16, ROWS * heads * RANK);
+    for (q, 0..) |*v, i| v.* = bf16((rnd.float(f32) * 4 - 2) * (if (i / (heads * RANK) == 4) @as(f32, 6) else 1)); // row 4: peaked
     const keys = bufs[1].slice(u16, CAP * RANK);
     for (keys) |*v| v.* = bf16(rnd.float(f32) * 2 - 1);
     const lists = bufs[2].slice(i32, ROWS * WIDTH);
@@ -71,29 +73,29 @@ test "sparse attention on the tensor units: the row kernel's values within bf16 
     enc.setValue(scale, 3);
     enc.setValue(@as(i32, CAP), 4);
     enc.setBuffer(bufs[3], 0, 5);
-    enc.dispatchThreads(mtl.Size.of(1024, ROWS * H, 1), mtl.Size.of(1024, 1, 1));
+    enc.dispatchThreads(mtl.Size.of(1024, ROWS * heads, 1), mtl.Size.of(1024, 1, 1));
     enc.setPipeline(nax_pipe);
     for (bufs[0..3], 0..) |b, i| enc.setBuffer(b, 0, i);
     enc.setValue(scale, 3);
     enc.setValue([4]i32{ WIDTH, CAP, 0, 0 }, 4);
     enc.setBuffer(bufs[4], 0, 5);
-    enc.dispatchGroups(mtl.Size.of(H / 16, ROWS, 1), mtl.Size.of(128, 1, 1));
+    enc.dispatchGroups(mtl.Size.of(heads / 16, ROWS, 1), mtl.Size.of(128, 1, 1));
     enc.end();
     cb.commit();
     cb.wait();
     try std.testing.expect(cb.failure() == null);
 
-    const row_out = bufs[3].slice(u16, ROWS * H * RANK);
-    const nax_out = bufs[4].slice(u16, ROWS * H * RANK);
+    const row_out = bufs[3].slice(u16, ROWS * heads * RANK);
+    const nax_out = bufs[4].slice(u16, ROWS * heads * RANK);
     const scores = try a.alloc(f64, WIDTH);
     defer a.free(scores);
     var same: usize = 0;
     var worst: f64 = 0; // the largest difference from the row kernel's output, in bf16 steps of the larger value
     const outs = try a.alloc(f64, RANK);
     defer a.free(outs);
-    for (0..ROWS) |r| for (0..H) |h| {
+    for (0..ROWS) |r| for (0..heads) |h| {
         // the host's fp64 softmax over the valid listed keys
-        const qr = q[(r * H + h) * RANK ..][0..RANK];
+        const qr = q[(r * heads + h) * RANK ..][0..RANK];
         var top: f64 = -std.math.inf(f64);
         for (lists[r * WIDTH ..][0..WIDTH], scores) |k, *sc| {
             sc.* = -std.math.inf(f64);
@@ -118,18 +120,28 @@ test "sparse attention on the tensor units: the row kernel's values within bf16 
             big = @max(big, @abs(outs[d]));
         }
         for (0..RANK) |d| {
-            const i = (r * H + h) * RANK + d;
+            const i = (r * heads + h) * RANK + d;
             const got: f64 = f32of(nax_out[i]);
             const theirs: f64 = f32of(row_out[i]);
             // a bf16 step of the value, but no finer than fp32 sums of the head's values can tell (2^-16 of its largest)
             const floor = big / 65536.0;
-            try std.testing.expect(@abs(got - outs[d]) <= @max(@abs(outs[d]) / 128.0, floor));
+            const bound = @max(@abs(outs[d]) / 128.0, floor);
+            try std.testing.expect(@abs(got - outs[d]) <= bound);
+            try std.testing.expect(@abs(theirs - outs[d]) <= bound);
             if (nax_out[i] == row_out[i]) same += 1 else worst = @max(worst, @abs(got - theirs) / @max(@max(@abs(got), @abs(theirs)) / 128.0, floor));
         }
     };
-    const share = @as(f64, @floatFromInt(same)) / @as(f64, @floatFromInt(ROWS * H * RANK));
-    std.debug.print("sparse attention on the tensor units: {d:.2}% of outputs equal the row kernel's, at most {d:.2} bf16 steps apart\n", .{ share * 100, worst });
+    const share = @as(f64, @floatFromInt(same)) / @as(f64, @floatFromInt(ROWS * heads * RANK));
+    std.debug.print("sparse attention ({d} heads): {d:.2}% of outputs equal the row kernel's, at most {d:.2} bf16 steps apart\n", .{ heads, share * 100, worst });
     try std.testing.expect(share > 0.99 and worst <= 2);
+}
+
+test "sparse attention on the tensor units: the row kernel's values within bf16 rounding" {
+    try sparseCheck(64);
+}
+
+test "TP2 sparse attention: 32 heads against the row kernel and fp64" {
+    try sparseCheck(32);
 }
 
 test "the MLA absorb on the tensor units: the row kernel's values within bf16 rounding" {

@@ -9,7 +9,7 @@ const Slots = slots_mod.Slots;
 const Win = slots_mod.Win;
 const Draft = slots_mod.Draft;
 
-pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release, save, restore, drop, persist, load, forget, disk_need, disk_reclaim, disk_reserve, disk_finish, disk_other_next, disk_other_bytes, disk_other_remove, disk_other_used };
+pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release, save, restore, drop, persist, load, forget, disk_need, disk_reclaim, disk_reserve, disk_finish, disk_other_next, disk_other_bytes, disk_other_remove, disk_other_used, copy_out };
 
 /// Rank 0 of a pair sends the command; one Mac sends nothing.
 pub fn send(e: *Engine, kind: Kind, words: []const u32) !void {
@@ -96,6 +96,7 @@ pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft
         .disk_finish => 3,
         .disk_other_next => 3,
         .disk_other_bytes, .disk_other_remove, .disk_other_used => 2,
+        .copy_out => 1,
     };
     if (w.len < need) return error.CommandOutOfStep;
     switch (k) {
@@ -114,6 +115,7 @@ pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft
         .release => sl.release(w[0]),
         .save => _ = try sl.save(w[1], w[2], w[0], sl.resident()),
         .restore => try sl.restore(w[0], w[1]),
+        .copy_out => try sl.copyIds(w[0], w[1..]),
         .drop => sl.drop(w[0]),
         .persist, .load => {
             learned(sl, k, w) catch |err| { // replied as failed: rank 0 forgets the state and the pair stays in step

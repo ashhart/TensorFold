@@ -45,7 +45,7 @@ pub const Kernels = struct {
         errdefer span.cancel();
         const e = span.encoder;
 
-        const a = abi.Embed{ .width = @intCast(c.hidden), .rows = rows, .vocab = @intCast(c.vocab), .bits = 4, .group = 64, .metadata = .bf16 };
+        const a = abi.Embed{ .width = @intCast(c.hidden), .rows = rows, .vocab = @intCast(c.vocab), .bits = p.bits, .group = p.group, .metadata = .bf16 };
         try abi.checkEmbed(a);
         e.setPipeline(k.embed);
         e.setBuffer(ids.buffer, ids.offset, 0);

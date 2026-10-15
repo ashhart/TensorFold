@@ -9,7 +9,8 @@ const glue = @import("cuda_glue.zig");
 /// Mangled names of the instantiations the copies in zig/kernels/cuda export (cuobjdump -symbols of each fatbin).
 const sym = struct {
     const pattn = "_ZN20tf_prefill_attention12pattn_kernelILi128ELi8ELi8ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiif";
-    const scan_rows = "_ZN12tf_scan_rows11scan_kernelEPK13__nv_bfloat16S2_PfPKfS5_S5_PS0_iiiiiiiiff";
+    const scan_rows = "_ZN12tf_scan_rows11scan_kernelILb0EEEvPK13__nv_bfloat16S3_PfPKfS6_S6_PS1_iiiiiiiiffNS_5SnapsE";
+    const scan_snaps = "_ZN12tf_scan_rows11scan_kernelILb1EEEvPK13__nv_bfloat16S3_PfPKfS6_S6_PS1_iiiiiiiiffNS_5SnapsE";
 };
 
 pub const pattn_smem: u32 = 65536; // eight 32-key slots of 128 dims
@@ -28,24 +29,39 @@ pub const Modelopt = struct { lane: cuda.qmmf.Lane, gemm: cuda.nvfp4.Prompt, exp
 /// Scratch the expert plan writes (cuda/grouped.zig, shared by the MoE families).
 pub const Plan = cuda.grouped.Plan;
 
+/// A pocket's neurons, [n, D] fp32 up and down; the first `used` in use, their count on the device at `count` too.
+pub const Pocket = struct { up: u64, down: u64, n: usize, used: usize = 0, count: u64 = 0 };
+
+/// The most neurons a pocket holds: the pocket kernels' activation rows are this wide.
+pub const pocket_width = 64;
+
+/// Rows inside a scan launch where it also stores its state (scan_rows.cu `Snaps`): `r[k]` rows taken in, -1 none.
+pub const Snaps = extern struct {
+    p: [max]u64 = @splat(0),
+    r: [max]i32 = @splat(-1),
+    pub const max = 16;
+};
+
 pub const Kernels = struct {
     d: *const cuda.Driver,
     mods: [22]cuda.Module,
     triton: ?cuda.aot.Set, // a captured Triton set for the glue (GB10's qualified one); null: our own glue kernels
     glue: glue.Fns,
+    emb: cuda.embed_rows.EmbedRows,
+    norms: cuda.norms.Norms,
     affine: cuda.qlinear.Affine4Kernels, // the 4-bit projections: qmm_group, lane_gemv and qmm_prefill
     router: cuda.grouped.Router,
     experts: cuda.experts.Affine4Experts, // the 4-bit grouped experts: experts, experts_prefill and experts_pack
     pattn: cuda.Function,
     scan_rows: cuda.Function,
+    scan_snaps: cuda.Function, // the same scan, storing its state at rows inside the launch too
     serial_feed: cuda.Function,
     plan_routed: cuda.Function,
     rest_rows: cuda.Function,
-    pocket_rows: cuda.Function,
+    pocket_in: [2]cuda.Function, // the pocket's two halves a block row a row, then tiled for a prompt chunk's rows
+    pocket_out: [2]cuda.Function,
     add_row: cuda.Function,
-    draw: cuda.Function,
-    draw_ids: cuda.Function,
-    logprob_rows: cuda.Function,
+    draws: cuda.sample.Draws, // sample.cu: the keyed draws and logprob rows
     grammar_mask: cuda.Function, // structured output: disallowed tokens -inf before the draw
     torch: torch_ops.Functions,
     train: train_ops.Kernels, // Sliding Weights' learning step, and the learned change a forward adds while lessons run
@@ -70,16 +86,20 @@ pub const Kernels = struct {
         k.router = try cuda.grouped.Router.resolve(k.mods[2]);
         k.pattn = try k.mods[5].function(sym.pattn);
         k.scan_rows = try k.mods[6].function(sym.scan_rows);
+        k.scan_snaps = try k.mods[6].function(sym.scan_snaps);
         k.serial_feed = try k.mods[7].function("tf_serial_feed");
         k.plan_routed = try k.mods[7].function("tf_plan_routed");
         k.rest_rows = try k.mods[7].function("tf_rest_rows");
-        k.pocket_rows = try k.mods[7].function("tf_pocket_rows");
+        k.pocket_in = .{ try k.mods[7].function("tf_pocket_in"), try k.mods[7].function("tf_pocket_in_rows") };
+        k.pocket_out = .{ try k.mods[7].function("tf_pocket_out"), try k.mods[7].function("tf_pocket_out_rows") };
         k.add_row = try k.mods[7].function("tf_add_row");
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
-        k.draw = try k.mods[14].function("tf_draw");
-        k.draw_ids = try k.mods[14].function("tf_draw_ids");
+        k.draws = try cuda.sample.Draws.resolve(k.mods[14]);
         k.glue = try glue.Fns.resolve(k.mods[16..21]);
-        k.logprob_rows = try k.mods[14].function("tf_logprob_rows");
+        k.emb = try cuda.embed_rows.EmbedRows.load(d);
+        errdefer k.emb.unload();
+        k.norms = try cuda.norms.Norms.load(d);
+        errdefer k.norms.unload();
         k.grammar_mask = try k.mods[14].function("tf_grammar_mask");
         k.modelopt = null;
         k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
@@ -98,6 +118,8 @@ pub const Kernels = struct {
     }
 
     pub fn deinit(k: *Kernels) void {
+        k.emb.unload();
+        k.norms.unload();
         if (k.modelopt) |*m| {
             m.lane.unload();
             m.gemm.unload();
@@ -159,18 +181,9 @@ pub const Ops = struct {
         return .{ .k = &o.k.train, .s = o.s };
     }
 
-    /// sample.cu: row r of bf16 logits drawn at position meta[0] + r + 1 + offset, columns as `ids` token ids if given.
+    /// sample.cu's keyed draw on this stream (cuda/sample.zig, the launch unchanged).
     pub fn draw(o: Ops, logits: u64, vocab: usize, rule: u64, meta: u64, offset: usize, out: u64, rows: usize, ids: ?u64, prob: ?u64) !void {
-        var a: cuda.Args = .{};
-        a.add(logits);
-        a.add(@as(u32, @intCast(vocab)));
-        a.add(rule);
-        a.add(meta);
-        a.add(@as(i32, @intCast(offset)));
-        a.add(out);
-        if (ids) |x| a.add(x);
-        a.add(prob orelse 0);
-        try o.go(if (ids != null) o.k.draw_ids else o.k.draw, .{ rows, 1, 1 }, 1024, 0, &a);
+        return o.k.draws.draw(o.s, logits, vocab, rule, meta, offset, out, rows, ids, prob);
     }
 
     /// sample.cu: `rows` bf16 logits rows' disallowed tokens -inf, their bits `words` words a row at `bits`.
@@ -183,15 +196,9 @@ pub const Ops = struct {
         try o.go(o.k.grammar_mask, .{ rows, 1, 1 }, 256, 0, &a);
     }
 
-    /// sample.cu: each bf16 logits row's lanes.logprob words at `out`, for its pick in `picks` and `k` best tokens.
-    pub fn logprobRows(o: Ops, logits: u64, vocab: usize, picks: u64, k: u8, out: u64, rows: usize) !void {
-        var a: cuda.Args = .{};
-        a.add(logits);
-        a.add(@as(u32, @intCast(vocab)));
-        a.add(picks);
-        a.add(@as(u32, k));
-        a.add(out);
-        try o.go(o.k.logprob_rows, .{ rows, 1, 1 }, 1024, 0, &a);
+    /// sample.cu's logprob rows on this stream: each row's words for its pick, `k` best tokens and rank if `rank`.
+    pub fn logprobRows(o: Ops, logits: u64, vocab: usize, picks: u64, k: u8, rank: bool, out: u64, rows: usize) !void {
+        return o.k.draws.logprobRows(o.s, logits, vocab, picks, k, rank, out, rows);
     }
 
     /// Every projection format the kernels loaded (cuda/qlinear.zig).
@@ -241,19 +248,49 @@ pub const Ops = struct {
     }
 
     /// nemotron_ops' pocket: out (bf16, fp32 if `out_f32`) += down relu^2(up y) at rows `i * row_mul + row_add`.
-    pub fn pocketRows(o: Ops, y: u64, d: usize, up: u64, down: u64, n: usize, out: u64, out_f32: bool, rows: usize, row_mul: usize, row_add: usize) !void {
-        if (n > 64) return error.PocketTooWide;
+    pub fn pocketRows(
+        o: Ops,
+        y: u64,
+        d: usize,
+        p: Pocket,
+        act: u64,
+        out: u64,
+        out_f32: bool,
+        rows: usize,
+        row_mul: usize,
+        row_add: usize,
+    ) !void {
+        if (p.n > pocket_width) return error.PocketTooWide;
+        if (p.used == 0) return; // no neuron in use: nothing launched, so the output keeps its bits, an exact -0.0 too
+        // a block row a row until the tiled forms (eight neurons by eight rows a warp, 16 rows a thread) run faster
+        const tiled = [2]bool{ rows >= 256, rows >= 64 };
         var a: cuda.Args = .{};
         a.add(y);
         a.add(int(d));
-        a.add(up);
-        a.add(down);
-        a.add(int(n));
-        a.add(out);
-        a.add(@as(c_int, @intFromBool(out_f32)));
-        a.add(int(row_mul));
-        a.add(int(row_add));
-        try o.go(o.k.pocket_rows, .{ rows, 1, 1 }, 256, 0, &a);
+        a.add(p.up);
+        a.add(p.count);
+        a.add(act);
+        a.add(int(rows));
+        const in_grid: [3]usize = if (tiled[0])
+            .{ (p.n + 63) / 64, (rows + 7) / 8, 1 }
+        else
+            .{ (p.n + 3) / 4, rows, 1 };
+        try o.go(o.k.pocket_in[@intFromBool(tiled[0])], in_grid, if (tiled[0]) 256 else 128, 0, &a);
+        var b: cuda.Args = .{};
+        b.add(act);
+        b.add(p.down);
+        b.add(p.count);
+        b.add(int(d));
+        b.add(out);
+        b.add(@as(c_int, @intFromBool(out_f32)));
+        for ([_]usize{ rows, row_mul, row_add }) |v| b.add(int(v));
+        try o.go(
+            o.k.pocket_out[@intFromBool(tiled[1])],
+            .{ (d + 127) / 128, if (tiled[1]) (rows + 15) / 16 else rows, 1 },
+            128,
+            0,
+            &b,
+        );
     }
 
     /// nemotron_ops' nudge: y (bf16, or fp32 when `y_f32`) += x (fp32) over n values.
@@ -291,14 +328,22 @@ pub const Ops = struct {
         try o.go(o.k.pattn, .{ (rows + 15) / 16, kv_heads * (g / 8), 1 }, 256, pattn_smem, &a);
     }
 
-    /// mamba.scan_rows: a chunk's scan through scan_rows.cu; `state` ends at the chunk's last row.
-    pub fn scanRows(o: Ops, proj: u64, xc: u64, state: u64, a_: u64, d_: u64, dtb: u64, y: u64, rows: usize, proj_w: usize, heads: usize, dh: usize, cd: usize, groups: usize, lo: f32, hi: f32) !void {
+    /// mamba.scan_rows: a chunk's scan through scan_rows.cu; `state` ends at the chunk's last row, `snaps` at theirs.
+    pub fn scanRows(o: Ops, proj: u64, xc: u64, state: u64, a_: u64, d_: u64, dtb: u64, y: u64, rows: usize, proj_w: usize, heads: usize, dh: usize, cd: usize, groups: usize, lo: f32, hi: f32, snaps: Snaps) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ proj, xc, state, a_, d_, dtb, y }) |v| a.add(v);
         for ([_]usize{ rows, proj_w, heads * dh, cd, heads * dh + cd, dh, heads / groups, groups }) |v| a.add(int(v));
         a.add(lo);
         a.add(hi);
-        try o.go(o.k.scan_rows, .{ heads, dh / 32, 1 }, 128, 0, &a);
+        a.add(snaps);
+        try o.go(if (snaps.r[0] < 0) o.k.scan_rows else o.k.scan_snaps, .{ heads, dh / 32, 1 }, 128, 0, &a);
+    }
+
+    /// `height` rows of `width` bytes, `spitch` apart at `src`, to `dpitch` apart at `dst`, in one call.
+    pub fn copyRows(o: Ops, dst: u64, dpitch: usize, src: u64, spitch: usize, width: usize, height: usize) !void {
+        if (width == 0 or height == 0) return;
+        const m: cuda.abi.Memcpy2D = .{ .src = src, .src_pitch = spitch, .dst = dst, .dst_pitch = dpitch, .width = width, .height = height };
+        try o.k.d.check(o.k.d.api.cuMemcpy2DAsync_v2(&m, o.s.handle), "cuMemcpy2DAsync");
     }
 
     pub fn copy(o: Ops, dst: u64, src: u64, bytes: usize) !void {

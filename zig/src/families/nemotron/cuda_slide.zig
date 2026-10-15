@@ -55,27 +55,36 @@ const Host = struct {
         return @as(f64, @floatFromInt(std.Io.Clock.awake.now(io).toNanoseconds())) / 1e9;
     }
 
-    /// MoE layer l's pocket for the forward: `up`, `down` [neurons, D] f32; made on first use, graphs captured again.
+    /// MoE layer l's pocket for the forward: `up`, `down` [neurons, D] f32, the first `used` in use; made on first use.
     pub fn pocket(m: Ctx, l: usize, up: []const f32, down: []const f32, used: usize) !void {
-        _ = used;
         const blk = &m.e.w.blocks[l];
         if (blk.kind != .moe) return error.NotAnMoeLayer;
-        const fresh = blk.moe.pocket == null;
-        if (fresh) {
+        // the kernels take their bounds from the count, so it never passes the pocket's width
+        const width = if (blk.moe.pocket) |p| p.n else up.len / m.e.c.hidden;
+        if (used > width) return error.PocketTooWide;
+        if (blk.moe.pocket == null) {
             const w = &m.e.w;
-            try w.buffers.ensureUnusedCapacity(w.gpa, 2);
+            try w.buffers.ensureUnusedCapacity(w.gpa, 3);
             var ub = try cuda.DeviceBuffer.alloc(m.e.ctx.d, up.len * 4);
             errdefer ub.free();
-            const db = try cuda.DeviceBuffer.alloc(m.e.ctx.d, down.len * 4);
+            var db = try cuda.DeviceBuffer.alloc(m.e.ctx.d, down.len * 4);
+            errdefer db.free();
+            const cb = try cuda.DeviceBuffer.alloc(m.e.ctx.d, 4);
             w.buffers.appendAssumeCapacity(ub);
             w.buffers.appendAssumeCapacity(db);
-            blk.moe.pocket = .{ .up = ub.ptr, .down = db.ptr, .n = up.len / m.e.c.hidden };
+            w.buffers.appendAssumeCapacity(cb);
+            blk.moe.pocket = .{ .up = ub.ptr, .down = db.ptr, .n = width, .count = cb.ptr };
         }
-        const p = blk.moe.pocket.?;
+        const p = &blk.moe.pocket.?;
         const o = m.e.ops();
+        const count: u32 = @intCast(used);
         try o.upload(p.up, std.mem.sliceAsBytes(up));
         try o.upload(p.down, std.mem.sliceAsBytes(down));
-        if (fresh) try recapture(m.e);
+        try o.upload(p.count, std.mem.asBytes(&count));
+        // the kernels read the count, so graphs follow it; a layer they skipped needs them captured again
+        const launched = p.used > 0;
+        p.used = used;
+        if (!launched and used > 0) try recapture(m.e);
     }
 
     /// MoE layer l's pocket as loaded from the shards, into `up` and `down`; the neurons in use (0: none).
@@ -120,14 +129,16 @@ pub fn loadLiving(gpa: std.mem.Allocator, io: std.Io, e: *engine.Engine, dir: []
 }
 
 /// Every graph captured again on the own sequence (contents kept): a graph keeps each layer's change as captured.
-fn recapture(e: *engine.Engine) !void {
+pub fn recapture(e: *engine.Engine) !void {
     e.epoch += 1; // other sequences' graphs are captured again at their next launch
     if (e.serial == null) return;
     try e.stream.synchronize();
     const was = e.bound;
     const sampling = e.sampling;
     if (was != &e.own) e.bind(&e.own);
+    const own = e.sampling;
     defer {
+        e.sampling = own; // bind keeps the own sequence's rule, not the captures' placeholder
         if (was != &e.own) e.bind(was);
         e.sampling = sampling;
     }

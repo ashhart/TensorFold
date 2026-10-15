@@ -6,7 +6,7 @@ const slide_model = @import("slide_model.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-pub const State = enum { queued, learning, learned, missed };
+pub const State = enum { queued, learning, learned, missed, replaced }; // replaced: a newer fact took its place
 
 /// Where a learning fact stands: its lesson written by the model, then the engine's stages in turn.
 pub const Phase = enum { writing, reading, fitting, values, checking };
@@ -95,8 +95,24 @@ pub const Graph = struct {
         const f = g.find(id) orelse return;
         f.state = state;
         if (state != .learning) f.phase = null;
-        if (state == .missed) f.neurons = &.{};
+        if (state == .missed or state == .replaced) f.neurons = &.{};
         g.save();
+    }
+
+    /// Learned chat facts but `id`, the latest first, at most `max`, copied into `a`: what a new chat fact may replace.
+    pub fn learnedChat(g: *Graph, a: Allocator, id: u32, max: usize) ![]const Fact {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        var out: std.ArrayList(Fact) = .empty;
+        var i = g.facts.items.len;
+        while (i > 0 and out.items.len < max) : (i -= 1) {
+            const f = g.facts.items[i - 1];
+            if (f.id == id or f.state != .learned or !std.mem.eql(u8, f.source, "chat") or f.neurons.len == 0) continue;
+            const qs = try a.alloc([]const u8, f.questions.len);
+            for (f.questions, qs) |q, *c| c.* = try a.dupe(u8, q);
+            try out.append(a, .{ .id = f.id, .text = try a.dupe(u8, f.text), .source = "chat", .at = f.at, .state = f.state, .neurons = try a.dupe(api.Neuron, f.neurons), .questions = qs });
+        }
+        return out.items;
     }
 
     /// A learning fact's next phase; writing starts its lesson afresh.

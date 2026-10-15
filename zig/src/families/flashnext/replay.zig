@@ -7,8 +7,15 @@ const roles_gen = @import("roles_gen.zig");
 const segments = @import("../../core/segments.zig");
 const tpm = @import("tp.zig");
 const mark_slots = @import("marks.zig");
+const verdict_kernels = @import("verdict.zig");
 pub const split = @import("split.zig");
 pub const dense = @import("dense.zig");
+pub const lane_w = @import("lane_w.zig");
+pub const ple_scale = @import("ple_scale.zig");
+pub const rows_load = @import("rows_load.zig");
+pub const variants = @import("variants.zig");
+pub const prompt_w = @import("prompt_w.zig");
+pub const engine_widths = @import("engine_widths.zig");
 pub const gdn_step = @import("gdn.zig");
 pub const Tp2 = tpm.Tp2;
 pub const frags = @import("../../core/frags.zig");
@@ -143,79 +150,6 @@ const glue_source =
     \\  if (i < 6144) aout[i] = aout[k * 6144 + i];
     \\  h[i] = h[k * 10240 + i];
     \\  if (i < 4) inj[i] = inj[k * 4 + i];
-    \\}
-    \\// The round's verdict on the GPU: drafts kept, the emitted tokens to the ring, the next window's pending token,
-    \\// positions and n-gram history; ar = keep, target length, round, then the meta blocks the next round reads:
-    \\// the window's positions [4, 20), key counts [20, 36), cache meta [36, 39); the head's absorb [40, 56), [56, 72),
-    \\// [72, 75); chained draft j at 76 + 36 (j - 1): positions, key counts (16 each), cache meta.
-    \\// cfg = this window's rows, the next window's rows, cache capacity. The ring keeps 512 rounds of 20 words: keep,
-    \\// the drafts' source (1: copied, from ar[801]), the copy's match length (ar[802]), the emitted tokens; H, the
-    \\// token history (prompt, then every emitted token; its length in ar[800]), gets this round's.
-    \\kernel void fz_accept(device uint* wids [[buffer(0)]], device const uint* picks [[buffer(1)]],
-    \\    device int* ar [[buffer(2)]], device uint* ring [[buffer(3)]], device long* pm [[buffer(4)]],
-    \\    constant uint4& cfg [[buffer(5)]], device uint* H [[buffer(6)]], uint tid [[thread_position_in_grid]]) {
-    \\  if (tid != 0) return;
-    \\  const int W = int(cfg.x), Wn = int(cfg.y), cap = int(cfg.z);
-    \\  int keep = 1;
-    \\  while (keep < W && wids[keep] == picks[keep - 1]) keep++;
-    \\  const int round = ar[2], slot = (round & 511) * 20;
-    \\  ring[slot] = uint(keep);
-    \\  ring[slot + 1] = uint(ar[801]);
-    \\  ring[slot + 2] = uint(ar[802]);
-    \\  for (int i = 0; i < keep; i++) ring[slot + 3 + i] = picks[i];
-    \\  const int hl = ar[800];
-    \\  for (int i = 0; i < keep; i++) H[hl + i] = picks[i];
-    \\  ar[800] = hl + keep;
-    \\  for (int i = 0; i < keep; i++) { pm[0] = pm[1]; pm[1] = long(wids[i]); }
-    \\  const int t_old = ar[1], t_new = t_old + keep;
-    \\  ar[0] = keep; ar[1] = t_new; ar[2] = round + 1;
-    \\  for (int i = 0; i < 16; i++) {
-    \\    ar[4 + i] = i < Wn ? t_new + i : 0;
-    \\    ar[20 + i] = i < Wn ? t_new + i + 1 : 0;
-    \\    ar[40 + i] = i < W ? t_old + i : 0;
-    \\    ar[56 + i] = i < W ? t_old + i + 1 : 0;
-    \\  }
-    \\  ar[36] = t_new; ar[37] = cap; ar[38] = Wn;
-    \\  ar[72] = t_old; ar[73] = cap; ar[74] = W;
-    \\  for (int j = 1; j < Wn - 1; j++) {
-    \\    const int b = 76 + (j - 1) * 36;
-    \\    for (int i = 0; i < 16; i++) { ar[b + i] = 0; ar[b + 16 + i] = 0; }
-    \\    ar[b] = t_new + j - 1; ar[b + 16] = t_new + j;
-    \\    ar[b + 32] = t_new + j - 1; ar[b + 33] = cap; ar[b + 34] = 1;
-    \\  }
-    \\  wids[0] = picks[keep - 1];
-    \\}
-    \\// Copy drafts: the latest earlier occurrence of the longest suffix (cfg.y .. 8 tokens) of the history H[0, L);
-    \\// when there is one and it is at least cfg.z long or the tokens after it start with the head's first cfg.w drafts,
-    \\// they replace the drafts wids[1 .. cfg.x) (as many as follow it); ar[801] = 1 then, else 0; ar[802] the match
-    \\// length. One threadgroup of 1024.
-    \\kernel void fz_lookup(device const uint* H [[buffer(0)]], device int* ar [[buffer(1)]], device uint* wids [[buffer(2)]],
-    \\    constant uint4& cfg [[buffer(3)]], uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-    \\    uint sg [[simdgroup_index_in_threadgroup]]) {
-    \\  const int L = ar[800], W = int(cfg.x), MINN = int(cfg.y), LONGN = int(cfg.z), AGREE = int(cfg.w);
-    \\  const uint last = H[L - 1];
-    \\  uint best = 0;
-    \\  for (int p = int(t); p < L - 1; p += 1024) {
-    \\    if (H[p] != last) continue;
-    \\    int n = 1;
-    \\    while (n < 8 && p - n >= 0 && H[p - n] == H[L - 1 - n]) n++;
-    \\    best = max(best, (uint(n) << 24) | uint(p + 1));
-    \\  }
-    \\  best = simd_max(best);
-    \\  threadgroup uint part[32];
-    \\  if (lane == 0) part[sg] = best;
-    \\  threadgroup_barrier(mem_flags::mem_threadgroup);
-    \\  if (t != 0) return;
-    \\  for (int i = 0; i < 32; i++) best = max(best, part[i]);
-    \\  const int n = int(best >> 24), p = int(best & 0xffffffu) - 1;
-    \\  ar[801] = 0;
-    \\  ar[802] = n;
-    \\  if (n < MINN || p < 0) return;
-    \\  if (n < LONGN)
-    \\    for (int i = 0; i < AGREE && i < W - 1; i++) if (p + 1 + i >= L || H[p + 1 + i] != wids[1 + i]) return;
-    \\  const int k = min(W - 1, L - 1 - p);
-    \\  for (int i = 0; i < k; i++) wids[1 + i] = H[p + 1 + i];
-    \\  ar[801] = 1;
     \\}
     \\// An expert row from [part][group][6 words] to [group][part][6 words] (FZ_XPACK): the lanes of one group read
     \\// one block; the sums keep their order. d = (parts, groups a part).
@@ -910,6 +844,8 @@ pub const Run = struct {
     copy_pipe: mtl.Pipeline = undefined,
     accept_pipe: mtl.Pipeline = undefined,
     lookup_pipe: mtl.Pipeline = undefined,
+    force_pipe: mtl.Pipeline = undefined,
+    span_pipe: mtl.Pipeline = undefined,
     take_pipe: mtl.Pipeline = undefined,
     gpu_round: bool = false,
     ar: Buf = undefined,
@@ -957,6 +893,7 @@ pub const Run = struct {
     lane_new: bool = false, // the target's lane projections on core lane (dense.zig): the recorded bits, weights read ahead
     lane_pf: usize = 1, // groups a simdgroup reads ahead in core lane
     lane_pipes: std.AutoHashMapUnmanaged(u64, mtl.Pipeline) = .empty,
+    wide_pipes: lane_w.Cache = .empty, // lane products at other widths than 6/32 (lane_w.zig)
     lane_shape: std.AutoHashMapUnmanaged(*Variant, [3]usize) = .empty, // recorded lane kernels' N, K, SK
     gdn_pipe: ?mtl.Pipeline = null, // the DeltaNet window step on fz_gdn (gdn.zig) when set
     gdn_kept: ?mtl.Pipeline = null, // GPU-side rounds: fz_gdn keeping one state a layer, kept rows replayed (gdn.zig)
@@ -1118,8 +1055,11 @@ pub const Run = struct {
         r.argids_pipe = try mtl.Pipeline.init(r.device, glue, "fz_argmax_ids", false);
         r.pleids_pipe = try mtl.Pipeline.init(r.device, glue, "fz_ple_ids", false);
         r.copy_pipe = try mtl.Pipeline.init(r.device, glue, "fz_copy_kept", false);
-        r.accept_pipe = try mtl.Pipeline.init(r.device, glue, "fz_accept", false);
-        r.lookup_pipe = try mtl.Pipeline.init(r.device, glue, "fz_lookup", false);
+        const verdict = try mtl.Library.fromSource(r.device, verdict_kernels.source, mtl.CompileOptions.mlx());
+        r.accept_pipe = try mtl.Pipeline.init(r.device, verdict, "fz_accept", false);
+        r.lookup_pipe = try mtl.Pipeline.init(r.device, verdict, "fz_lookup", false);
+        r.force_pipe = try mtl.Pipeline.init(r.device, verdict, "fz_force", false);
+        r.span_pipe = try mtl.Pipeline.init(r.device, verdict, "fz_span", false);
         r.take_pipe = try mtl.Pipeline.init(r.device, glue, "fz_mtp_take", false);
         r.repack_w = try mtl.Pipeline.init(r.device, glue, "fz_repack_w", false);
         r.repack_s = try mtl.Pipeline.init(r.device, glue, "fz_repack_s", false);
@@ -1185,9 +1125,13 @@ pub const Run = struct {
     /// A hyper-connection's down then up projection at `as_rows` from normed streams `hn` (sums of squares in `ssp`):
     /// the mixed rows and inject gates; with `hc_up` the up projection of 3-8 rows on fz_hc_up (the same bits).
     pub fn hcProject(r: *Run, down: []const u8, up: []const u8, as_rows: usize, hn: Buf, ssp: Buf, hc: Hc, eps: Buf, rows: Buf, part: Buf, mixed: Buf, inj: Buf) !void {
-        try r.callAs(down, as_rows, &.{ hn, ssp, hc.scale, hc.dw, hc.ds, hc.db, eps, rows }, &.{part});
+        var cd: [2]variants.Const = undefined;
+        var cu: [2]variants.Const = undefined;
+        const kd = variants.width(&cd, "BITS", "GS", if (hc.w) |w| w[0] else null);
+        const ku = variants.width(&cu, "BITS", "GS", if (hc.w) |w| w[1] else null);
+        try variants.callAs(r, down, as_rows, &.{ hn, ssp, hc.scale, hc.dw, hc.ds, hc.db, eps, rows }, &.{part}, kd);
         const ins = [_]Buf{ hn, ssp, hc.scale, part, hc.uw, hc.us, hc.ub, eps, rows };
-        if (!r.hc_up or as_rows < 3 or as_rows > 8) return r.callAs(up, as_rows, &ins, &.{ mixed, inj });
+        if (!r.hc_up or hc.w != null or as_rows < 3 or as_rows > 8) return variants.callAs(r, up, as_rows, &ins, &.{ mixed, inj }, ku);
         if (r.skip & class(up) != 0 or r.hcskip & 4 != 0) return;
         const nd: u32 = @intCast(hc.dw.b.length() / (WIDE * 6 / 8));
         r.enc.setPipeline(r.hc_up_pipe);
@@ -1262,7 +1206,7 @@ pub const Run = struct {
     }
     /// y = x W for `rows` rows of K inputs through fz_dense (blocks of 8 rows; 16 K-slices for narrow outputs).
     /// One row's dense projection over output tiles [t0, t0 + tn) only (32 outputs a tile), in the full layout.
-    pub fn denseTiles(r: *Run, x: Buf, k: usize, l: Lane, y: Buf, t0: usize, tn: usize) void {
+    pub fn denseTiles(r: *Run, x: Buf, k: usize, l: Lane.Six, y: Buf, t0: usize, tn: usize) void {
         if (tn == 0) return;
         const n = l.wq.b.length() * 4 / (3 * k);
         const narrow = n <= 4096;
@@ -1278,7 +1222,7 @@ pub const Run = struct {
         if (!r.serial) r.enc.barrier();
     }
 
-    pub fn denseRows(r: *Run, x: Buf, k: usize, l: Lane, rows: usize, y: Buf) void {
+    pub fn denseRows(r: *Run, x: Buf, k: usize, l: Lane.Six, rows: usize, y: Buf) void {
         const n = l.wq.b.length() * 4 / (3 * k);
         const narrow = n <= 4096;
         var at: usize = 0;
@@ -1481,6 +1425,7 @@ pub fn catchSlot(words: []i32, k: usize, first: usize) usize {
 
 test {
     _ = tpm; // tp.zig's tests: the window layout and the host service's wraps
+    _ = @import("drafts.zig"); // the depth rule's tests
 }
 
 test "catch-up slots: every layer's dispatch reads its own first block after the later layers' writes" {
@@ -1663,8 +1608,19 @@ pub const GSelect = struct {
     }
 };
 
-pub const Hc = struct { scale: Buf, dw: Buf, ds: Buf, db: Buf, uw: Buf, us: Buf, ub: Buf };
-pub const Lane = struct { wq: Buf, sbt: Buf };
+/// A pack hyper-connection; `w`: the down and up widths when not 6/32; `rows`: on the per-row kernels (rows_load.zig).
+pub const Hc = struct {
+    scale: Buf,
+    dw: Buf,
+    ds: Buf,
+    db: Buf,
+    uw: Buf,
+    us: Buf,
+    ub: Buf,
+    w: ?[2][2]usize = null,
+    rows: ?*rows_load.rows_w.Shared = null,
+};
+pub const Lane = lane_w.Lane; // the recorded 6/32 pair, or runs at other widths
 pub const Layer = struct {
     ahc: Hc,
     mhc: Hc,
@@ -1680,6 +1636,7 @@ pub const Layer = struct {
     iqn: Buf = undefined,
     router: Buf,
     ex: [18]Buf, // gate, up, shared gate, shared up (weight, scales, biases), then down, shared down
+    xw: ?variants.Experts = null, // the experts' widths when not 6/32 (engine_widths.zig)
     cs: [2]Buf = undefined,
     so: [2]Buf = undefined,
     keys: Buf = undefined,
@@ -1690,22 +1647,8 @@ pub const Layer = struct {
     pooled_n: usize = 0,
 };
 
-pub fn hcOf(r: *Run, comptime fmt: []const u8, args: anytype) !Hc {
-    var name: [96]u8 = undefined;
-    const stem = try std.fmt.bufPrint(&name, fmt, args);
-    var full: [128]u8 = undefined;
-    const parts = [_][]const u8{ "scale", "down.w", "down.s", "down.b", "up.w", "up.s", "up.b" };
-    var out: [7]Buf = undefined;
-    for (parts, 0..) |p, i| out[i] = try r.load(try std.fmt.bufPrint(&full, "{s}.{s}", .{ stem, p }));
-    return .{ .scale = out[0], .dw = out[1], .ds = out[2], .db = out[3], .uw = out[4], .us = out[5], .ub = out[6] };
-}
-
-pub fn laneOf(r: *Run, comptime fmt: []const u8, args: anytype) !Lane {
-    var name: [96]u8 = undefined;
-    const stem = try std.fmt.bufPrint(&name, fmt, args);
-    var full: [128]u8 = undefined;
-    return .{ .wq = try r.load(try std.fmt.bufPrint(&full, "{s}.wq", .{stem})), .sbt = try r.load(try std.fmt.bufPrint(&full, "{s}.sbt", .{stem})) };
-}
+pub const hcOf = variants.hcOf;
+pub const laneOf = lane_w.laneOf;
 
 pub const Ple = struct {
     kv: Lane,
@@ -1721,6 +1664,8 @@ pub const Ple = struct {
     mult: [3]i64,
     sizes: [16]i64,
     offsets: [16]i64,
+    w: ?[2]usize = null, // the n-gram tables' width when not 6/32
+    scale: ?ple_scale.Scale = null, // the n-gram tables' weight_scale when not 1
 };
 
 /// Every intermediate a window of up to MAXR rows writes, and the per-window values the kernels read.
@@ -1817,6 +1762,7 @@ pub const Mtp = struct {
     ids: Buf,
     ids_n: usize,
     ex: [18]Buf,
+    xw: ?variants.Experts = null,
     keys: Buf,
     vals: Buf,
     raw: Buf,
@@ -1851,6 +1797,7 @@ pub const Model = struct {
     mix: Hc,
     head: Lane,
     embed: [3]Buf,
+    embed_w: ?[2]usize = null, // the embedding's width when not 6/32
     ple: Ple,
     t: Tmp,
     pos: usize = 0,
@@ -1884,14 +1831,31 @@ pub const Model = struct {
     }
 
     pub fn lane(m: *Model, x: Buf, k: usize, l: Lane, role: []const u8, y: Buf) !void {
-        if (m.r.dense_target) return m.r.denseRows(x, k, l, m.r.rows, y);
-        if (m.r.lane_new) return dense.lane(m.r, role, x, l, m.t.mdims, y);
+        if (l.rows) |d| if (m.r.tp == null) return rows_load.launch(m.r, d, role, x, m.r.rows, y);
+        if (l.w) |w| return lane_w.launch(m.r, w, role, x, m.t.mdims, m.r.rows, y);
+        const six = try l.recorded();
+        if (m.r.dense_target) return m.r.denseRows(x, k, six, m.r.rows, y);
+        if (m.r.lane_new) return dense.lane(m.r, role, x, six, m.t.mdims, y);
         if (!m.r.fused_xsum) try m.r.call(if (k == D) "lane_qmm_xsum#[2560]" else "lane_qmm_xsum#[6144]", &.{ x, m.t.mdims }, &.{m.t.xs});
-        try m.r.call(role, &.{ x, m.t.xs, l.wq, l.sbt, m.t.mdims }, &.{y});
+        try m.r.call(role, &.{ x, m.t.xs, six.wq, six.sbt, m.t.mdims }, &.{y});
     }
 
     pub fn hcProject(m: *Model, hn: Buf, hc: Hc, down: []const u8, up: []const u8, inj: Buf) !void {
         const t = &m.t;
+        if (hc.rows) |sh| if (m.r.tp == null) return rows_load.hc(
+            m.r,
+            sh,
+            hc,
+            down,
+            hn,
+            t.ssp,
+            t.eps,
+            t.rows,
+            m.r.rows,
+            t.part,
+            t.mixed,
+            inj,
+        );
         const as_rows = if (m.r.hc_mma and m.r.rows > 1) 8 else m.r.rows;
         try m.r.hcProject(down, up, as_rows, hn, t.ssp, hc, t.eps, t.rows, t.part, t.mixed, inj);
     }
@@ -2012,7 +1976,8 @@ pub const Model = struct {
             if (!r.serial) r.enc.barrier();
         }
         var cur: usize = 0;
-        try r.call("qa_embed_rows@embed", &.{ ids, m.embed[0], m.embed[1], m.embed[2] }, &.{t.h[0]});
+        var ce: [2]variants.Const = undefined;
+        try variants.callAs(r, "qa_embed_rows@embed", rows, &.{ ids, m.embed[0], m.embed[1], m.embed[2] }, &.{t.h[0]}, variants.width(&ce, "BITS", "GS", m.embed_w));
         var pending: enum { none, grouped } = .none;
         for (0..LAYERS) |i| {
             const L = &m.layers[i];
@@ -2025,7 +1990,9 @@ pub const Model = struct {
                 tabs[0] = t.ple_ids;
                 tabs[1] = p.starts;
                 for (0..3 * GROUPS) |j| tabs[2 + j] = p.tables[j];
-                try r.call("qa_ple_lookup@ple", &tabs, &.{t.emb});
+                var cp: [2]variants.Const = undefined;
+                try variants.callAs(r, "qa_ple_lookup@ple", rows, &tabs, &.{t.emb}, variants.width(&cp, "BITS", "GS", p.w));
+                if (p.scale) |sc| sc.apply(r.enc, t.emb, rows * D, r.serial);
                 try m.lane(t.emb, D, p.kv, "lane_qmm_bytes_grouped@ple.kv", t.kvp);
                 try r.call("q4_ple_gate@ple", &.{ t.kvp, t.h[cur], p.ks, p.qs, p.cs, t.eps }, &.{ t.gated, .{ .b = p.cin.b, .off = PLE_TAIL * WIDE * 2 } });
                 try r.call("q4_ple_conv@ple", &.{ p.cin, p.conv, t.gated, t.h[cur] }, &.{t.hout});
@@ -2044,7 +2011,8 @@ pub const Model = struct {
                 if (!r.fused_xsum) try r.call("lane_qmm_xsum#[2560]", &.{ t.mixed, t.mdims }, &.{t.xs});
                 // [q 64 tiles | k 64 | v 192 | z 192 | b, a 3]: this Mac's q, k, v and z heads, b and a whole, 8 K slices
                 const cols = [_][2]usize{ .{ 32 * k0, 32 }, .{ 64 + 32 * k0, 32 }, .{ 128 + 96 * k0, 96 }, .{ 320 + 96 * k0, 96 }, .{ 512, 3 } };
-                try split.laneTiles(r, "lane_qmm_bytes_grouped@gdn.in", &.{ t.mixed, t.xs, L.proj.wq, L.proj.sbt, t.mdims }, t.p, &cols, 8, null);
+                const pj = try L.proj.recorded();
+                try split.laneTiles(r, "lane_qmm_bytes_grouped@gdn.in", &.{ t.mixed, t.xs, pj.wq, pj.sbt, t.mdims }, t.p, &cols, 8, null);
                 const a = m.state;
                 const cs_in: Buf = .{ .b = L.cs[a].b, .off = L.cs[a].off + m.state_row * CS_ROW };
                 const so_in: Buf = .{ .b = L.so[a].b, .off = L.so[a].off + m.state_row * SO_ROW };
@@ -2054,7 +2022,8 @@ pub const Model = struct {
                 } else try split.gdnHeads(r, "q4_gdn@gdn", if (r.gdn_step and rows > 1) 8 else rows, &.{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows }, &.{ t.gout, L.cs[1 - a], L.so[1 - a] }, tp.rank);
                 const pn = tp.partNext();
                 const part: Buf = .{ .b = pn.b, .off = pn.off };
-                try split.laneTiles(r, "lane_qmm_bytes_grouped@gdn.out", &.{ t.gout, t.xs, L.out.wq, L.out.sbt, t.mdims }, part, &.{.{ 0, 80 }}, 8, .{ 96 * k0, 96 }); // one kernel at every width: drafted == plain
+                const po = try L.out.recorded();
+                try split.laneTiles(r, "lane_qmm_bytes_grouped@gdn.out", &.{ t.gout, t.xs, po.wq, po.sbt, t.mdims }, part, &.{.{ 0, 80 }}, 8, .{ 96 * k0, 96 }); // one kernel at every width: drafted == plain
                 if (r.skip & TP_CLASS == 0) { // the partials' sum and the stream update in the exchange's launch
                     tp.plain(r.enc, t.h[cur], t.inj_a, t.h[1 - cur], t.ssp, t.rows, rows);
                     plain = true;
@@ -2064,8 +2033,7 @@ pub const Model = struct {
                 const a = m.state;
                 const cs_in: Buf = .{ .b = L.cs[a].b, .off = L.cs[a].off + m.state_row * CS_ROW };
                 const so_in: Buf = .{ .b = L.so[a].b, .off = L.so[a].off + m.state_row * SO_ROW };
-                r.touch(L.out.wq);
-                r.touch(L.out.sbt);
+                lane_w.touch(r, L.out);
                 const gins = [_]Buf{ t.p, cs_in, so_in, L.conv, L.alog, L.dt, L.norm, t.eps, t.rows };
                 const gouts = [_]Buf{ t.gout, L.cs[1 - a], L.so[1 - a] };
                 if (m.keptState()) |recs| {
@@ -2075,8 +2043,7 @@ pub const Model = struct {
                 try m.lane(t.gout, 6144, L.out, "lane_qmm_bytes_grouped@gdn.out", t.branch);
             } else {
                 try m.lane(t.mixed, D, L.proj, "lane_qmm_bytes_grouped@att.proj", t.p);
-                r.touch(L.out.wq);
-                r.touch(L.out.sbt);
+                lane_w.touch(r, L.out);
                 try r.call("q4_attn_prep@att", &.{ t.p, t.pos8, L.qn, L.kn, L.iqn, t.eps, t.log2base }, &.{ t.q, t.kout, t.iq });
                 if (r.skip & (1 << 5) == 0) {
                     r.enc.setPipeline(r.kv_pipe);
@@ -2121,7 +2088,7 @@ pub const Model = struct {
             try m.hcProject(t.h[cur], L.mhc, "qa_hc_down@mhc", "qa_hc_up@mhc", t.inj_m);
             try r.router("q4_router_float@moe", t.mixed, L.router, t.rows, t.lg, rows);
             r.tp_layer = true;
-            try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
+            if (L.xw) |w| try variants.experts(r, "qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown, w) else try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, L.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
             r.tp_layer = false;
             if (r.tp) |tp| if (r.skip & TP_CLASS == 0) tp.exchange(r.enc, t.ydown, t.wts, t.lg, rows);
             if (r.probe) |pb| r.copyKept(t.pick, .{ .b = pb.b, .off = pb.off + i * MAXR * 10 * 4 }, rows * 10, 0, 0, 0, 1, -1);
@@ -2135,7 +2102,8 @@ pub const Model = struct {
         if (r.tp) |tp| { // TP: this Mac's half of the vocabulary (the same kernel, half its tiles), then one swap
             const half = HEAD_TILES / 2;
             if (!r.fused_xsum) try r.call("lane_qmm_xsum#[2560]", &.{ t.mixed, t.mdims }, &.{t.xs});
-            try split.laneTiles(r, "lane_qmm_bytes_grouped@head", &.{ t.mixed, t.xs, m.head.wq, m.head.sbt, t.mdims }, t.logits, &.{.{ half * tp.rank, half }}, 1, null);
+            const hd = try m.head.recorded();
+            try split.laneTiles(r, "lane_qmm_bytes_grouped@head", &.{ t.mixed, t.xs, hd.wq, hd.sbt, t.mdims }, t.logits, &.{.{ half * tp.rank, half }}, 1, null);
             if (r.skip & TP_CLASS == 0) tp.argmax(r.enc, t.logits, HEAD_TILES * 32, half * 32 * tp.rank, half * 32, t.picks, t.rows, rows);
             return;
         }
@@ -2199,13 +2167,14 @@ pub const Model = struct {
         const t = &m.t;
         const h = &m.mtp;
         r.rows = rows;
-        try r.call("mtp:qa_embed_rows@embed", &.{ ids, m.embed[0], m.embed[1], m.embed[2] }, &.{h.emb});
+        var ce: [2]variants.Const = undefined;
+        try variants.callAs(r, "mtp:qa_embed_rows@embed", rows, &.{ ids, m.embed[0], m.embed[1], m.embed[2] }, &.{h.emb}, variants.width(&ce, "BITS", "GS", m.embed_w));
         try r.call("mtp:q4_rms_rows@mtp.enorm", &.{ h.emb, h.enorm, t.eps }, &.{h.en});
         if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[2560]", &.{ h.en, sl.md }, &.{t.xs});
-        if (r.dense) r.denseRows(h.en, D, h.fce, rows, h.e) else try r.call("mtp:lane_qmm_bytes_grouped@mtp.fce", &.{ h.en, t.xs, h.fce.wq, h.fce.sbt, sl.md }, &.{h.e});
+        try m.mtpLane(h.fce, "mtp:lane_qmm_bytes_grouped@mtp.fce", h.en, sl.md, rows, D, h.e);
         try r.call("mtp:q4_rms_rows@mtp.hnorm", &.{ streams, h.hnorm, t.eps }, &.{h.hn});
         if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[4R, 2560]", &.{ h.hn, sl.md4 }, &.{t.xs});
-        if (r.dense) r.denseRows(h.hn, D, h.fch, 4 * rows, h.hs) else try r.call("mtp:lane_qmm_bytes_grouped@mtp.fch", &.{ h.hn, t.xs, h.fch.wq, h.fch.sbt, sl.md4 }, &.{h.hs});
+        try m.mtpLane(h.fch, "mtp:lane_qmm_bytes_grouped@mtp.fch", h.hn, sl.md4, 4 * rows, D, h.hs);
         r.enc.setPipeline(r.add_pipe);
         for ([_]Buf{ h.e, h.hs, h.h[0], sl.n_add }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
         r.enc.dispatchThreads(mtl.Size.of(rows * WIDE, 1, 1), mtl.Size.of(256, 1, 1));
@@ -2215,7 +2184,7 @@ pub const Model = struct {
         const up = [_][]const u8{ "mtp:qa_hc_up@mtp.ahc", "mtp:qa_hc_up@mtp.mhc", "mtp:qa_hc_up@mtp.mix" };
         try m.mtpProject(h.h[1], h.ahc, down[0], up[0], t.inj_a, sl.rows);
         if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[2560]", &.{ t.mixed, sl.md }, &.{t.xs});
-        if (r.dense) r.denseRows(t.mixed, D, h.proj, rows, t.p) else try r.call("mtp:lane_qmm_bytes_grouped@mtp.att.proj", &.{ t.mixed, t.xs, h.proj.wq, h.proj.sbt, sl.md }, &.{t.p});
+        try m.mtpLane(h.proj, "mtp:lane_qmm_bytes_grouped@mtp.att.proj", t.mixed, sl.md, rows, D, t.p);
         try r.call("mtp:q4_attn_prep@mtp.att", &.{ t.p, sl.pos8, h.qn, h.kn, h.iqn, t.eps, t.log2base }, &.{ t.q, t.kout, t.iq });
         r.enc.setPipeline(r.kv_pipe);
         for ([_]Buf{ t.kout, t.p, h.keys, h.vals, h.raw, sl.kvmeta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
@@ -2268,41 +2237,68 @@ pub const Model = struct {
         }
         r.rows = 1;
         if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[6144]", &.{ t.aout, h.md1 }, &.{t.xs});
-        if (r.dense) r.denseRows(t.aout, 6144, h.out, 1, t.branch) else try r.call("mtp:lane_qmm_bytes_grouped@mtp.att.o", &.{ t.aout, t.xs, h.out.wq, h.out.sbt, h.md1 }, &.{t.branch});
+        try m.mtpLane(h.out, "mtp:lane_qmm_bytes_grouped@mtp.att.o", t.aout, h.md1, 1, 6144, t.branch);
         try r.call("mtp:q4_hc_norm_plain#[10240]", &.{ h.h[1], t.inj_a, t.branch }, &.{ h.h[0], t.ssp });
         try m.mtpProject(h.h[0], h.mhc, down[1], up[1], t.inj_m, h.md1);
         try r.router("mtp:q4_router_float@mtp.moe", t.mixed, h.router, h.md1, t.lg, 1);
-        try r.experts("mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, h.md1, t.ydown);
+        if (h.xw) |w| try variants.experts(r, "mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, h.md1, t.ydown, w) else try r.experts("mtp:qa_expert_gateup@mtp.moe.gate", "mtp:qa_expert_down_y@mtp.moe.down", t.mixed, t.lg, h.ex, t.act, t.pick, t.wts, h.md1, t.ydown);
         try r.call("mtp:q4_hc_norm_grouped#[10240]", &.{ h.h[0], t.inj_m, t.ydown, t.wts, t.lg }, &.{ h.h[1], t.ssp });
         h.last = h.h[1];
         try m.mtpProject(h.h[1], h.mix, down[2], up[2], t.inj_a, h.md1);
         const x = t.mixed;
         if (!r.fused_xsum) try r.call("mtp:lane_qmm_xsum#[2560]", &.{ x, h.md1 }, &.{t.xs});
-        if (r.tp != null and r.dense) { // TP: this Mac's half of the draft vocabulary's tiles, then one exact argmax swap
+        // TP: this Mac's half of the draft vocabulary's tiles, then one exact argmax swap
+        if (r.tp != null and r.dense and h.draft.w == null) {
             const tp = r.tp.?;
-            const n = h.draft.wq.b.length() * 4 / (3 * D);
+            const six = try h.draft.recorded();
+            const n = six.wq.b.length() * 4 / (3 * D);
             const tiles = n / 32;
             const half = (tiles + 1) / 2;
             const t0: usize = if (tp.rank == 0) 0 else half;
             const tn: usize = if (tp.rank == 0) half else tiles - half;
-            r.denseTiles(x, D, h.draft, h.logits, t0, tn);
+            r.denseTiles(x, D, six, h.logits, t0, tn);
             const lo = @min(t0 * 32, h.ids_n);
             const hi = @min((t0 + tn) * 32, h.ids_n);
             tp.argmax(r.enc, h.logits, n, lo, hi - lo, Buf{ .b = tp.pick_tmp }, Buf{ .b = tp.one }, 1);
             tp.mapIds(r.enc, h.ids, out);
             return;
         }
-        if (r.dense) r.denseRows(x, D, h.draft, 1, h.logits) else try r.call("mtp:lane_qmm_bytes_grouped@mtp.draft", &.{ x, t.xs, h.draft.wq, h.draft.sbt, h.md1 }, &.{h.logits});
+        try m.mtpLane(h.draft, "mtp:lane_qmm_bytes_grouped@mtp.draft", x, h.md1, 1, D, h.logits);
         r.enc.setPipeline(r.argids_pipe);
         for ([_]Buf{ h.logits, out, h.n_ids, h.ids }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
         r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
         if (!r.serial) r.enc.barrier();
     }
 
+    /// An MTP head lane: at its widths' runs, as dense rows (r.dense), or the recorded launch.
+    fn mtpLane(m: *Model, l: Lane, role: []const u8, x: Buf, md: Buf, rows: usize, k: usize, y: Buf) !void {
+        if (l.rows) |d| if (m.r.tp == null) return rows_load.launch(m.r, d, role, x, rows, y);
+        if (l.w) |w| return lane_w.launch(m.r, w, role, x, md, rows, y);
+        const six = try l.recorded();
+        if (m.r.dense) return m.r.denseRows(x, k, six, rows, y);
+        try m.r.call(role, &.{ x, m.t.xs, six.wq, six.sbt, md }, &.{y});
+    }
+
     pub fn mtpProject(m: *Model, hn: Buf, hc: Hc, down: []const u8, up: []const u8, inj: Buf, rows: Buf) !void {
         const t = &m.t;
-        try m.r.call(down, &.{ hn, t.ssp, hc.scale, hc.dw, hc.ds, hc.db, t.eps, rows }, &.{t.part});
-        try m.r.call(up, &.{ hn, t.ssp, hc.scale, t.part, hc.uw, hc.us, hc.ub, t.eps, rows }, &.{ t.mixed, inj });
+        if (hc.rows) |sh| if (m.r.tp == null) return rows_load.hc(
+            m.r,
+            sh,
+            hc,
+            down,
+            hn,
+            t.ssp,
+            t.eps,
+            rows,
+            m.r.rows,
+            t.part,
+            t.mixed,
+            inj,
+        );
+        var c: [2][2]variants.Const = undefined;
+        const k = [2][]const variants.Const{ variants.width(&c[0], "BITS", "GS", if (hc.w) |w| w[0] else null), variants.width(&c[1], "BITS", "GS", if (hc.w) |w| w[1] else null) };
+        try variants.callAs(m.r, down, m.r.rows, &.{ hn, t.ssp, hc.scale, hc.dw, hc.ds, hc.db, t.eps, rows }, &.{t.part}, k[0]);
+        try variants.callAs(m.r, up, m.r.rows, &.{ hn, t.ssp, hc.scale, t.part, hc.uw, hc.us, hc.ub, t.eps, rows }, &.{ t.mixed, inj }, k[1]);
     }
 
     /// Absorb `nexts.len` rows (chunks of up to MAXR) from `streams`; returns the draft after the last row.
@@ -2341,68 +2337,11 @@ pub const Model = struct {
     }
 };
 
-/// Drafts a round from recent landing: 3 (prose), 6 while drafts land (code-like text), the widest window while
-/// nearly all land (copied text).
 /// FZ_PROFILE's knock-out bit for speed-up mode's exchanges: the bit after `Run.class`'s eight.
 pub const TP_CLASS: u32 = 1 << 8;
 
-pub const DepthRule = struct {
-    rate: f64 = 0.6, // moving average of the head's drafts landed over drafts offered
-    depth: usize = 3,
-    pair: bool = false, // speed-up mode: even windows only (an odd window's last row costs a Mac a whole expert row)
-
-    pub fn pick(self: *const DepthRule) usize {
-        return self.depth;
-    }
-
-    /// A head round's drafts and how many landed: 3, 6 or 8 drafts on one Mac, 3 or 7 on the pair (copied rounds set
-    /// their own width).
-    pub fn update(self: *DepthRule, depth: usize, landed: usize) void {
-        self.rate = 0.7 * self.rate + 0.3 * @as(f64, @floatFromInt(landed)) / @as(f64, @floatFromInt(depth));
-        if (self.pair) {
-            if (self.depth == 3 and self.rate > 0.95) self.depth = 7 else if (self.depth == 7 and self.rate < 0.8) self.depth = 3;
-            return;
-        }
-        if (self.depth == 3 and self.rate > 0.8) {
-            self.depth = 6;
-        } else if (self.depth == 6 and self.rate > 0.74) {
-            self.depth = 8;
-        } else if (self.depth == 8 and self.rate < 0.62) {
-            self.depth = 6;
-        } else if (self.depth == 6 and self.rate < 0.65) self.depth = 3;
-    }
-};
-
-test "the pair's depth rule keeps every window even" {
-    var pair: DepthRule = .{ .pair = true };
-    for (0..20) |_| pair.update(pair.pick(), pair.pick());
-    try std.testing.expectEqual(@as(usize, 7), pair.pick());
-    for (0..20) |_| pair.update(pair.pick(), 1);
-    try std.testing.expectEqual(@as(usize, 3), pair.pick());
-    var one: DepthRule = .{};
-    for (0..20) |_| one.update(one.pick(), one.pick());
-    try std.testing.expectEqual(@as(usize, 8), one.pick());
-}
-
-/// Copy lanes: the longest suffix of `hist` (`min`..8 tokens) seen earlier; the tokens after its latest earlier
-/// occurrence go into `out`. Returns how many (0 when nothing matches).
-pub fn copyDrafts(hist: []const u32, min: usize, out: []u32) usize {
-    const n = hist.len;
-    if (n < min + 1) return 0;
-    var len: usize = @min(8, n - 1);
-    while (len >= min) : (len -= 1) {
-        const suffix = hist[n - len ..];
-        var end: usize = n - 1;
-        while (end >= len) : (end -= 1) {
-            if (std.mem.eql(u32, hist[end - len .. end], suffix)) {
-                const k = @min(out.len, n - end);
-                @memcpy(out[0..k], hist[end .. end + k]);
-                return k;
-            }
-        }
-    }
-    return 0;
-}
+pub const DepthRule = @import("drafts.zig").DepthRule; // drafts a round from recent landing
+pub const copyDrafts = @import("drafts.zig").copyDrafts;
 
 /// Prompt chunks of up to PMAX rows: projections on the 6-bit tensor-unit kernels, experts sorted by expert and
 /// gathered, the decode's row kernels at the chunk's rows, and DeltaNet storing only its last row's state.
@@ -2418,6 +2357,7 @@ pub const Prompt = struct {
     seg_queue: ?mtl.Queue = null, // a later staggered segment's queue (made at first use)
     last: Buf = undefined, // the last chunk's streams before the final mixer (each segment's own)
     gu32: mtl.Pipeline,
+    wide: ?*prompt_w.Wide = null, // weights at other widths than 6/32 (prompt_w.zig)
     fused_gu: bool = true, // the experts' gate and up products and activation in one pass (same bits)
     expert_bm: usize = 0, // expert tile rows (0: by the average rows an expert)
     mtp_w: ?[3][3]Buf = null, // the MTP head's attention projection, fce, fch in MLX layout (pack_mtp_mlx.safetensors)
@@ -2446,6 +2386,7 @@ pub const Prompt = struct {
     pub fn init(r: *Run, dir: []const u8, header: []const u8) !Prompt {
         var p: Prompt = undefined; // every field is set below: `undefined` skips the declared defaults
         p.r = r;
+        p.wide = null;
         p.skip = 0;
         p.sel = null;
         p.step = PMAX;
@@ -2609,6 +2550,7 @@ pub const Prompt = struct {
     /// y[rows, n] (row stride ldy, 0: n) = x[rows, k] W^T, W 6-bit g32 in MLX's layout.
     pub fn qmm(p: *Prompt, x: Buf, w: [3]Buf, k: usize, n: usize, rows: usize, y: Buf, ldy: usize) void {
         if (p.skip & 8 != 0) return;
+        if (p.wide) |wd| if (wd.wide(w[0])) |ww| return prompt_w.qmm(p, wd, ww, x, w, k, n, rows, y, ldy);
         const tall = p.tall_tiles and rows >= 512;
         p.bind(if (tall) p.qmm6_128 else p.qmm6, &.{ w[0], w[1], w[2], x });
         const prm = [4]i32{ @intCast(k), @intCast(n), @intCast(rows), @intCast(ldy) };
@@ -2624,6 +2566,7 @@ pub const Prompt = struct {
         if (p.skip & 1 != 0) return;
         // tiles of 32, 64 or 128 rows as experts average 32 and 128 rows (128: FZ prompt chunks of thousands of rows)
         const bm: usize = if (p.expert_bm != 0) p.expert_bm else if (p.tall_tiles and pairs >= 512 * 128) 128 else if (pairs >= 512 * 32) 64 else 32;
+        if (p.wide) |wd| if (wd.wide(w[0])) |ww| return prompt_w.gather(p, wd.of(ww.bits, ww.group), bm, x, w, k, n, pairs, y);
         p.bind(if (bm == 128) p.gather128 else if (bm == 64) p.gather64 else p.gather32, &.{ x, w[0], w[1], w[2], p.b.off });
         const prm = [4]i32{ @intCast(pairs), @intCast(n), @intCast(k), 512 };
         p.r.enc.setBytes(std.mem.asBytes(&prm), 5);
@@ -2636,6 +2579,7 @@ pub const Prompt = struct {
     pub fn gatherGU(p: *Prompt, x: Buf, wg: []const Buf, wu: []const Buf, k: usize, n: usize, pairs: usize, y: Buf) void {
         if (p.skip & 1 != 0) return;
         const bm: usize = if (p.expert_bm == 32 or p.expert_bm == 64) p.expert_bm else if (pairs >= 512 * 32) 64 else 32;
+        if (p.wide) |wd| if (wd.wide(wg[0])) |ww| return prompt_w.gatherGU(p, wd.of(ww.bits, ww.group), bm, x, wg, wu, k, n, pairs, y);
         p.bind(if (bm == 64) p.gu64 else p.gu32, &.{ x, wg[0], wg[1], wg[2], wu[0], wu[1], wu[2], p.b.off });
         const prm = [4]i32{ @intCast(pairs), @intCast(n), @intCast(k), 512 };
         p.r.enc.setBytes(std.mem.asBytes(&prm), 8);
@@ -2648,13 +2592,13 @@ pub const Prompt = struct {
     pub fn hc(p: *Prompt, m: *Model, hn: Buf, w: Hc, rows: usize, inj: Buf) void {
         if (p.skip & 16 != 0) return;
         const b = &p.b;
-        const nd = w.dw.b.length() / (WIDE * 6 / 32 * 4);
+        const nd = w.dw.b.length() / (WIDE * (if (w.w) |hw| hw[0][0] else 6) / 8); // the down rows (+ inject rows)
         p.bind(p.pl[0], &.{ hn, b.ssp, w.scale, m.t.eps, b.normed });
         p.r.enc.dispatchThreads(mtl.Size.of(WIDE, rows, 1), mtl.Size.of(256, 1, 1));
         p.barrier();
         if (p.skip & 8 == 0) { // the down projection's 10,240-deep sum in 8 parts, added in order
             const parts: usize = 8;
-            p.bind(p.splitk, &.{ w.dw, w.ds, w.db, b.normed });
+            p.bind(if (w.w) |hw| p.wide.?.of(@intCast(hw[0][0]), @intCast(hw[0][1])).splitk else p.splitk, &.{ w.dw, w.ds, w.db, b.normed });
             const prm = [4]i32{ WIDE, @intCast(nd), @intCast(rows), @intCast(parts) };
             p.r.enc.setBytes(std.mem.asBytes(&prm), 4);
             p.r.enc.setBuffer(b.part.b, b.part.off, 5);
@@ -2943,7 +2887,9 @@ pub const Prompt = struct {
             tabs[0] = b.pids;
             tabs[1] = pp.starts;
             for (0..3 * GROUPS) |j| tabs[2 + j] = pp.tables[j];
-            try r.callRows("qa_ple_lookup@ple", rows, &tabs, &.{b.emb}, null);
+            var cp: [2]variants.Const = undefined;
+            try r.callRows("qa_ple_lookup@ple", rows, &tabs, &.{b.emb}, try variants.oneRow(r, "qa_ple_lookup@ple", variants.width(&cp, "BITS", "GS", pp.w)));
+            if (pp.scale) |sc| sc.apply(r.enc, b.emb, rows * D, r.serial);
             p.qmm(b.emb, p.ple_kv, D, 12800, rows, b.kvp, 0);
             try r.callRows("q4_ple_gate@ple", rows, &.{ b.kvp, b.h[s.cur], pp.ks, pp.qs, pp.cs, t.eps }, &.{ b.gated, .{ .b = b.cin.b, .off = PLE_TAIL * WIDE * 2 } }, null);
             try r.callRows("q4_ple_conv@ple", rows, &.{ b.cin, pp.conv, b.gated, b.h[s.cur] }, &.{b.hout}, null);
@@ -3127,7 +3073,9 @@ pub const Prompt = struct {
             const s = h.at(l);
             const b = &s.p.b;
             const m = h.m;
-            try s.p.r.callRows("qa_embed_rows@embed", s.rows, &.{ b.ids, m.embed[0], m.embed[1], m.embed[2] }, &.{b.h[0]}, null);
+            var ce: [2]variants.Const = undefined;
+            const ev = try variants.oneRow(s.p.r, "qa_embed_rows@embed", variants.width(&ce, "BITS", "GS", m.embed_w));
+            try s.p.r.callRows("qa_embed_rows@embed", s.rows, &.{ b.ids, m.embed[0], m.embed[1], m.embed[2] }, &.{b.h[0]}, ev);
         }
         pub fn wait(_: *Hooks, i: usize) segments.Wait {
             return if (i == 1) .pre else .mixer;
@@ -3218,6 +3166,7 @@ pub const Prompt = struct {
         @memcpy(ps[0].b.cin.b.contents()[0 .. PLE_TAIL * WIDE * 2], cin_old[0 .. PLE_TAIL * WIDE * 2]);
         var hooks: Hooks = .{ .m = m, .segs = segs[0..N] };
         m.gpu_seconds += try segments.run(r.device, queues[0..N], LAYERS, if (r.serial) .serial else .concurrent, &hooks);
+        if (ps[0].wide) |wd| try wd.check(); // a weight the load left out of the width table fails the pass
         const sl = &segs[N - 1];
         m.state = if (N % 2 == 0) a else 1 - a; // each segment flipped it once
         m.state_row = 0;
@@ -3361,21 +3310,23 @@ pub const Prompt = struct {
         b.n_add.b.slice(u32, 1)[0] = @intCast(n * WIDE);
         const cb = r.queue.commandBuffer();
         r.enc = cb.compute(if (r.serial) .serial else .concurrent);
-        try r.callRows("mtp:qa_embed_rows@embed", n, &.{ b.mids, m.embed[0], m.embed[1], m.embed[2] }, &.{b.emb}, null);
+        var ce: [2]variants.Const = undefined;
+        try r.callRows("mtp:qa_embed_rows@embed", n, &.{ b.mids, m.embed[0], m.embed[1], m.embed[2] }, &.{b.emb}, try variants.oneRow(r, "mtp:qa_embed_rows@embed", variants.width(&ce, "BITS", "GS", m.embed_w)));
         try r.callRows("mtp:q4_rms_rows@mtp.enorm", n, &.{ b.emb, h.enorm, t.eps }, &.{b.branch}, null);
-        if (p.mtp_w) |w| p.qmm(b.branch, w[1], D, D, n, b.aout, 0) else r.denseRows(b.branch, D, h.fce, n, b.aout);
+        if (p.mtp_w) |w| p.qmm(b.branch, w[1], D, D, n, b.aout, 0) else r.denseRows(b.branch, D, try h.fce.recorded(), n, b.aout);
         try r.callRows("mtp:q4_rms_rows@mtp.hnorm", n, &.{ streams, h.hnorm, t.eps }, &.{b.normed}, null);
-        if (p.mtp_w) |w| p.qmm(b.normed, w[2], D, D, 4 * n, b.gated, 0) else r.denseRows(b.normed, D, h.fch, 4 * n, b.gated);
+        if (p.mtp_w) |w| p.qmm(b.normed, w[2], D, D, 4 * n, b.gated, 0) else r.denseRows(b.normed, D, try h.fch.recorded(), 4 * n, b.gated);
         p.bind(r.add_pipe, &.{ b.aout, b.gated, b.xs, b.n_add });
         r.enc.dispatchThreads(mtl.Size.of(n * WIDE, 1, 1), mtl.Size.of(256, 1, 1));
         p.barrier();
         try r.callRows("mtp:q4_hc_norm_none#[10240]", n, &.{b.xs}, &.{ b.hout, b.ssp }, null);
         p.hc(m, b.hout, h.ahc, n, b.inj_a);
-        if (p.mtp_w) |w| p.qmm(b.mixed, w[0], D, 13952, n, b.p, 0) else r.denseRows(b.mixed, D, h.proj, n, b.p);
+        if (p.mtp_w) |w| p.qmm(b.mixed, w[0], D, 13952, n, b.p, 0) else r.denseRows(b.mixed, D, try h.proj.recorded(), n, b.p);
         try r.callRows("mtp:q4_attn_prep@mtp.att", n, &.{ b.p, b.pos, h.qn, h.kn, h.iqn, t.eps, t.log2base }, &.{ b.q, b.kout, b.iq }, null);
         p.bind(r.kv_pipe, &.{ b.kout, b.p, h.keys, h.vals, h.raw, b.kvmeta });
         r.enc.dispatchThreads(mtl.Size.of(512 * n, 1, 1), mtl.Size.of(256, 1, 1));
         try m.finish(cb);
+        if (p.wide) |wd| try wd.check();
     }
 };
 

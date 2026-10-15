@@ -59,6 +59,7 @@ pub const Engine = struct {
                 .plain_guard = cfg.plain_guard,
                 .node_probabilities = cfg.node_probabilities,
                 .batch_rows = cfg.batch_rows,
+                .batched_heads = cfg.draft_streams,
             },
         };
     }
@@ -82,31 +83,21 @@ pub const Engine = struct {
     pub const fills = open.fills;
     pub const fillStream = open.fillStream;
 
-    /// A stream another driver prefilled and drew `token` for: drafts asked, the token committed, rounds from here.
-    pub fn adoptPrefilled(e: *Engine, s: *Stream, token: u32) !void {
-        _ = e.arena.reset(.retain_capacity);
-        s.context.shrinkRetainingCapacity(s.prompt_len);
-        s.pending = null;
-        s.cache_len = s.prompt_len;
-        if (e.cfg.family_mtp and s.drafts) {
-            const d: u32 = @intCast(try e.rule.depth(win.who(s)));
-            try e.backend.draft(&.{.{ .stream = s, .follow = &.{}, .first = .{ .value = token }, .rows = null, .start = s.prompt_len, .position = s.prompt_len + 1, .depth = d }});
-            s.dropHeld(e.gpa);
-            s.next = .{ .count = d };
-            if (e.backend.vtable.tree) |tree| if (try tree(e.backend.ptr, s, e.gpa)) |held| {
-                s.next = held;
-            };
-        }
-        if (s.logprobs != null) return error.LogprobsUnsupported; // another driver's prompt pass gives no first row
-        _ = try s.commit(e.gpa, &.{token}, &.{});
-        s.pending = token;
-        if (s.finished) return e.release(s);
-        try e.live.append(e.gpa, s);
-    }
-
     /// Take over a stream another driver decoded so far: its cache settled, `pending` and `cache_len` set, no drafts held.
     pub fn adopt(e: *Engine, s: *Stream) !void {
         try e.live.append(e.gpa, s);
+    }
+
+    /// Give a live stream to another driver between rounds, its round state dropped (adopt takes it back).
+    pub fn detach(e: *Engine, s: *Stream) bool {
+        if (s.inflight != null or s.finished) return false;
+        for (e.live.items, 0..) |x, i| {
+            if (x != s) continue;
+            _ = e.live.orderedRemove(i);
+            s.dropRoundState(e.gpa);
+            return true;
+        }
+        return false;
     }
 
     /// Release a cancelled stream between rounds: no pending draws or drafts.
@@ -260,7 +251,7 @@ pub const Engine = struct {
         if (plan.kind == .head) {
             const ms = e.clock.elapsedMs(.overhead);
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(1)), f("rows", int(rows)), f("ms", ev.bits(ms)) });
-            try e.rule.observeOverhead(1, rows, ms);
+            try e.rule.observeOverhead(1, rows, ms, s.sampling != null, 0.0);
         }
         return .{ .rows = @intCast(rows), .keep = @intCast(o.path.len), .got = o.got };
     }
@@ -298,7 +289,8 @@ pub const Engine = struct {
         const whos = try a.alloc(depth.Who, heads.items.len);
         for (whos, heads.items) |*w, i| w.* = win.who(plans[i].stream);
         const budgets = try a.alloc(i64, heads.items.len);
-        try e.rule.budgets(whos, win.probe(e), budgets);
+        const sampled = win.anySampled(plans);
+        try e.rule.budgets(whos, win.probe(e), sampled, budgets);
         const ids = try a.alloc(ev.Value, heads.items.len);
         for (ids, heads.items) |*id, i| id.* = str(plans[i].stream.id);
         try trail.event(e, &.{ f("ev", str("budgets")), f("streams", .{ .list = ids }), f("depths", .{ .i64s = budgets }) });
@@ -316,7 +308,7 @@ pub const Engine = struct {
         try e.backend.keep(windows, paths);
         const ms = e.clock.elapsedMs(.overhead);
         try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
-        try e.rule.observeOverhead(@intCast(plans.len), total, ms);
+        try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));
     }
 
     /// Commit the target-sampled path (after the thinking budget's cut), each token with its path row's logprob row.

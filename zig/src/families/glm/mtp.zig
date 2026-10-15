@@ -37,7 +37,9 @@ pub fn absorb(x: *fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, next: Ref, rows: u32, 
     fwd.embedRows(x, e, next, sc.m_emb, rows);
     fwd.rms(x, e, sc.m_emb, m.enorm, sc.m_eh, rows, D, D, 2 * D, c.eps);
     fwd.rms(x, e, h, m.hnorm, sc.m_eh.at(@as(usize, D) * 2), rows, D, D, 2 * D, c.eps);
-    fwd.qmv(x, e, x.k.qmv_kda_out, sc.m_eh, m.eh_proj, sc.m_x, rows);
+    if (m.eh_bf16) |eh| { // stored unquantized (mlx-lm's): fp32 sums of its bf16 rows
+        @import("wide.zig").bf16(&x.k.wide.?, e, eh, D, 2 * D, .{ .in = sc.m_eh, .ldx = 2 * D, .out = sc.m_x, .ldo = D, .rows = rows });
+    } else fwd.qmv(x, e, x.k.qmv_kda_out, sc.m_eh, m.eh_proj, sc.m_x, rows);
     fwd.rms(x, e, sc.m_x, L.in_norm, sc.m_xn, rows, D, D, D, c.eps);
     fwd.mlaKeys(x, e, c.countKind(.mla), &L.attn.mla, sc.m_xn, rows, pos);
 }
