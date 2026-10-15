@@ -30,6 +30,7 @@ test {
     _ = @import("http_conn.zig");
     _ = @import("auth.zig");
     _ = @import("cli.zig");
+    _ = @import("cli_test.zig");
     _ = @import("live.zig");
     _ = @import("listener.zig");
     _ = @import("hub.zig");
@@ -40,6 +41,9 @@ test {
     _ = @import("log.zig");
     _ = @import("request_log.zig");
     _ = @import("messages.zig");
+    _ = @import("images.zig");
+    _ = @import("media_fetch.zig");
+    _ = @import("videos.zig");
     _ = @import("stream_preflight_test.zig");
     _ = @import("stream_dsml_test.zig");
     _ = @import("logprobs_test.zig");

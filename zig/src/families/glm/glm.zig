@@ -16,6 +16,9 @@ pub const mirror = @import("mirror.zig");
 pub const timing = @import("timing.zig");
 pub const affine = @import("affine.zig");
 pub const wide = @import("wide.zig");
+pub const vision = @import("vision.zig");
+pub const image = @import("image.zig");
+pub const video = @import("video.zig");
 
 test {
     _ = config;
@@ -40,4 +43,7 @@ test {
     _ = @import("names.zig");
     _ = @import("weights_test.zig");
     _ = @import("wide.zig");
+    _ = vision;
+    _ = image;
+    _ = video;
 }

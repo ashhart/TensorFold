@@ -221,6 +221,7 @@ pub const Slots = struct {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         var x = sl.ctx(slot);
+        x.inject = if (e.vision) |v| v.injected(i) else null; // an image prompt's rows over its placeholders (slot_images.zig)
         const b = e.begin();
         const ids = e.prompt_ids.at(@as(usize, at) * 4);
         const next = e.prompt_ids.at(@as(usize, at + 1) * 4);

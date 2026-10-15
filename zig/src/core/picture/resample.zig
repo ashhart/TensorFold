@@ -1,0 +1,190 @@
+//! Bicubic resizes of 8-bit RGB: Keys' kernel (a = -0.5) widened by the shrink factor, a width pass then a height pass.
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+
+/// Where the fixed-point weights keep their fraction bits.
+pub const Kind = enum {
+    pillow, // Pillow's Image.resize(BICUBIC): 22 bits
+    torch, // torch's antialiased uint8 bicubic: int16 weights at the most bits (at most 22) the largest allows
+};
+
+/// RGB rows `stride` bytes apart.
+pub const View = struct {
+    pixels: []const u8,
+    width: usize,
+    height: usize,
+    stride: usize,
+
+    pub fn of(pixels: []const u8, width: usize, height: usize) View {
+        return .{ .pixels = pixels, .width = width, .height = height, .stride = width * 3 };
+    }
+};
+
+/// `src` resized to `w` x `h` in a new buffer the caller frees.
+pub fn resize(a: Allocator, kind: Kind, src: View, w: usize, h: usize) Allocator.Error![]u8 {
+    const out = try a.alloc(u8, w * h * 3);
+    errdefer a.free(out);
+    try into(a, kind, src, w, h, out);
+    return out;
+}
+
+/// `src` resized to `w` x `h` into `out` (packed rows); a pass whose size is kept is skipped, so equal sizes copy.
+pub fn into(a: Allocator, kind: Kind, src: View, w: usize, h: usize, out: []u8) Allocator.Error!void {
+    std.debug.assert(out.len == w * h * 3);
+    var mid = src;
+    var wide: ?[]u8 = null;
+    defer if (wide) |p| a.free(p);
+    if (w != src.width) {
+        const dst = if (h == src.height) out else blk: {
+            wide = try a.alloc(u8, w * src.height * 3);
+            break :blk wide.?;
+        };
+        var t = try Taps.init(a, kind, src.width, w);
+        defer t.deinit(a);
+        for (0..src.height) |y| {
+            const row = src.pixels[y * src.stride ..][0 .. src.width * 3];
+            const to = dst[y * w * 3 ..][0 .. w * 3];
+            for (0..w) |x| {
+                const first, const k = t.at(x);
+                for (0..3) |c| {
+                    var acc = t.half();
+                    for (k, 0..) |kv, j| acc += @as(i64, row[(first + j) * 3 + c]) * kv;
+                    to[x * 3 + c] = t.round(acc);
+                }
+            }
+        }
+        mid = View.of(dst, w, src.height);
+    }
+    if (h != src.height) {
+        var t = try Taps.init(a, kind, src.height, h);
+        defer t.deinit(a);
+        for (0..h) |y| {
+            const first, const k = t.at(y);
+            const to = out[y * w * 3 ..][0 .. w * 3];
+            for (to, 0..) |*o, i| {
+                var acc = t.half();
+                for (k, 0..) |kv, j| acc += @as(i64, mid.pixels[(first + j) * mid.stride + i]) * kv;
+                o.* = t.round(acc);
+            }
+        }
+    } else if (w == src.width) {
+        for (0..h) |y| @memcpy(out[y * w * 3 ..][0 .. w * 3], src.pixels[y * src.stride ..][0 .. w * 3]);
+    }
+}
+
+/// Keys' cubic convolution kernel at a = -0.5, by Horner's rule (the one value both libraries compute).
+fn cubic(x0: f64) f64 {
+    const a = -0.5;
+    const x = @abs(x0);
+    if (x < 1) return ((a + 2) * x - (a + 3)) * x * x + 1;
+    if (x < 2) return ((a * x - 5 * a) * x + 8 * a) * x - 4 * a;
+    return 0;
+}
+
+/// Each destination index's first source index and fixed-point weights, from one axis's sizes.
+const Taps = struct {
+    first: []usize,
+    count: []usize,
+    weights: []i32, // `size` slots a destination index, the first `count` in use
+    size: usize,
+    bits: u5,
+
+    fn init(a: Allocator, kind: Kind, in: usize, out: usize) Allocator.Error!Taps {
+        const scale = @as(f64, @floatFromInt(in)) / @as(f64, @floatFromInt(out));
+        const stretch = @max(scale, 1.0); // shrinking widens the kernel by the factor: the antialiased form
+        const support = 2 * stretch;
+        const inv = 1 / stretch; // both libraries scale by the reciprocal
+        const size = @as(usize, @intFromFloat(@ceil(support))) * 2 + 1;
+        const first = try a.alloc(usize, out);
+        errdefer a.free(first);
+        const count = try a.alloc(usize, out);
+        errdefer a.free(count);
+        const real = try a.alloc(f64, out * size);
+        defer a.free(real);
+        @memset(real, 0);
+        var most: f64 = 0;
+        for (0..out) |i| {
+            const center = (@as(f64, @floatFromInt(i)) + 0.5) * scale;
+            const lo: usize = @intFromFloat(@max(center - support + 0.5, 0));
+            const hi = @min(@as(usize, @intFromFloat(center + support + 0.5)), in);
+            first[i] = lo;
+            count[i] = @min(hi -| lo, size);
+            const k = real[i * size ..][0..count[i]];
+            var total: f64 = 0;
+            for (k, 0..) |*v, j| {
+                v.* = cubic((@as(f64, @floatFromInt(lo + j)) - center + 0.5) * inv);
+                total += v.*;
+            }
+            if (total != 0) for (k) |*v| {
+                v.* /= total;
+            };
+            for (k) |v| most = @max(most, @abs(v));
+        }
+        const bits: u5 = switch (kind) {
+            .pillow => 22,
+            .torch => blk: {
+                var b: u5 = 0;
+                while (b < 22 and @as(i64, @intFromFloat(0.5 + most * @as(f64, @floatFromInt(@as(u32, 2) << b)))) < 1 << 15) b += 1;
+                break :blk b;
+            },
+        };
+        const weights = try a.alloc(i32, out * size);
+        const one: f64 = @floatFromInt(@as(u32, 1) << bits);
+        for (weights, real) |*q, v| q.* = @intFromFloat(if (v < 0) -0.5 + v * one else 0.5 + v * one);
+        return .{ .first = first, .count = count, .weights = weights, .size = size, .bits = bits };
+    }
+
+    fn deinit(t: *Taps, a: Allocator) void {
+        a.free(t.first);
+        a.free(t.count);
+        a.free(t.weights);
+    }
+
+    fn at(t: *const Taps, i: usize) struct { usize, []const i32 } {
+        return .{ t.first[i], t.weights[i * t.size ..][0..t.count[i]] };
+    }
+
+    fn half(t: *const Taps) i64 {
+        return if (t.bits == 0) 0 else @as(i64, 1) << (t.bits - 1);
+    }
+
+    fn round(t: *const Taps, acc: i64) u8 {
+        return @intCast(std.math.clamp(acc >> t.bits, 0, 255));
+    }
+};
+
+test "a flat picture stays flat at every size, both kinds" {
+    const a = std.testing.allocator;
+    const px = try a.alloc(u8, 7 * 5 * 3);
+    defer a.free(px);
+    @memset(px, 200);
+    for ([_]Kind{ .pillow, .torch }) |kind| for ([_][2]usize{ .{ 13, 3 }, .{ 2, 9 }, .{ 7, 5 }, .{ 1, 1 } }) |s| {
+        const out = try resize(a, kind, View.of(px, 7, 5), s[0], s[1]);
+        defer a.free(out);
+        for (out) |v| try std.testing.expectEqual(@as(u8, 200), v);
+    };
+}
+
+test "a kept size copies, and strided rows read only their pixels" {
+    const a = std.testing.allocator;
+    var px: [2 * 8 * 3]u8 = undefined;
+    for (&px, 0..) |*v, i| v.* = @intCast(i);
+    const view: View = .{ .pixels = &px, .width = 2, .height = 2, .stride = 8 * 3 };
+    const same = try resize(a, .pillow, view, 2, 2);
+    defer a.free(same);
+    try std.testing.expectEqualSlices(u8, px[0..6], same[0..6]);
+    try std.testing.expectEqualSlices(u8, px[24..30], same[6..12]);
+}
+
+test "torch's weights keep the largest under 2^15 at the most fraction bits" {
+    const a = std.testing.allocator;
+    for ([_][2]usize{ .{ 10, 3 }, .{ 3, 10 }, .{ 1280, 512 }, .{ 900, 32 } }) |s| {
+        var t = try Taps.init(a, .torch, s[0], s[1]);
+        defer t.deinit(a);
+        var most: i32 = 0;
+        for (t.weights) |w| most = @max(most, @as(i32, @intCast(@abs(w))));
+        try std.testing.expect(most < 1 << 15 and t.bits <= 22);
+        if (t.bits < 22) try std.testing.expect(most >= 1 << 14);
+    }
+}

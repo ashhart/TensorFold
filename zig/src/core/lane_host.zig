@@ -82,7 +82,7 @@ pub const LaneHost = struct {
         fn kept(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
             const job: *Job = @ptrCast(@alignCast(ptr));
             job.reported(); // before a keep can evict the entry the pass restored
-            if (job.host.cache) |store| _ = store.keepBorn(job.request.prompt, born(job.request), at, s, job.request.chunks, job.host.spans(job.request));
+            if (job.host.cache) |store| _ = store.keepBorn(job.request.cacheKey(), born(job.request), at, s, job.request.chunks, job.host.spans(job.request));
         }
 
         /// Report a restored prefix or its failed copy; an untouched prefix remains kept.
@@ -93,7 +93,7 @@ pub const LaneHost = struct {
             if (!job.started) return store.release(e);
             job.stream.reuse.saved = null; // the backend restores before its first chunk; a later keep may free it
             const ok = !job.stream.reuse_failed and job.stream.cached == e.at;
-            if (job.stream.reuse_failed or ok) store.resumed(e, job.request.prompt, ok) else store.release(e);
+            if (job.stream.reuse_failed or ok) store.resumed(e, job.request.cacheKey(), ok) else store.release(e);
         }
     };
 
@@ -322,7 +322,7 @@ pub const LaneHost = struct {
         if (r.background and r.max_tokens == 0 and h.warm_quiet > 0 and !h.quiet(job)) return h.cancel(job); // other work came first: it never ran
         var reuse: lanes.stream.Reuse = .{};
         // the entry stays alive until the backend restores it: nothing keeps between here and this stream's own pass
-        if (h.cache) |store| if (r.prompt_logprobs == null and !r.untaught) if (store.lookupRewind(h.gpa, r.prompt, born(r), r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, h.spans(r))) |l| {
+        if (h.cache) |store| if (r.prompt_logprobs == null and !r.untaught) if (store.lookupRewind(h.gpa, r.cacheKey(), born(r), r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, h.spans(r))) |l| {
             job.entry = l.entry;
             job.kept0 = store.counts.kept;
             job.marks = l.marks;
@@ -360,6 +360,7 @@ pub const LaneHost = struct {
             .decode_spans = h.spans(r),
             .decide = r.decide,
             .untaught = r.untaught,
+            .images = r.images,
         }) catch {
             job.proposer.deinit();
             recalls.release(job);

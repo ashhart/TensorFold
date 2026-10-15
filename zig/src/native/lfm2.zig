@@ -68,7 +68,7 @@ const Engine = struct {
             ids.appendSlice(a, d.trunk[0..d.at]) catch return error.Failed;
             for (d.pictures, pictures) |url, *pic| {
                 var problem: []const u8 = "";
-                const rgb = lfm2.image.load(a, url, &problem) catch return error.Failed;
+                const rgb = lfm2.image.load(e.io, a, url, &problem) catch return error.Failed;
                 pic.* = lfm2.image.prepare(a, rgb orelse return refuse(d, problem)) catch return error.Failed;
                 pic.appendIds(a, &ids, &marks) catch return error.Failed;
             }

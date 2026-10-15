@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const lfm2 = @import("lfm2");
+const core = @import("core");
 const nemotron = @import("nemotron");
 const check = @import("check.zig");
 const Gpu = check.Gpu;
@@ -354,7 +355,17 @@ fn features(r: *Rig, model: []const u8) !void {
         const url = for (urls) |u| {
             if (std.mem.eql(u8, u.object.get("name").?.string, name)) break u.object.get("url").?.string;
         } else return error.MissingField;
-        var rgb = (try lfm2.image.load(r.a, url, &problem)) orelse return error.TestFailed;
+        var rgb = (try lfm2.image.load(io, r.a, url, &problem)) orelse {
+            const jpeg = core.picture.jpeg;
+            // without the pinned libjpeg-turbo a JPEG is refused by name; only a named library makes that a failure
+            if ((std.mem.eql(u8, problem, jpeg.missing) or std.mem.eql(u8, problem, jpeg.wrong_version)) and std.c.getenv(jpeg.env) == null) {
+                std.debug.print("SKIP lfm2-vision {s}: {s}\n", .{ name, problem });
+                outs[ci] = &.{};
+                continue;
+            }
+            std.debug.print("FAIL lfm2-vision {s}: {s}\n", .{ name, problem });
+            return error.TestFailed;
+        };
         defer rgb.deinit(r.a);
         const pic = &pics[ci];
         pic.* = try lfm2.image.prepare(r.a, rgb);
@@ -415,11 +426,13 @@ fn features(r: *Rig, model: []const u8) !void {
     const all = try r.zeros(u16, total);
     var at: usize = 0;
     for (pics, outs) |*pic, o| {
+        if (o.len == 0) continue; // a skipped picture
         _ = try v.features(r.s, pic, all + 2 * at);
         at += o.len;
     }
     at = 0;
     for (golden, outs) |case, o| {
+        if (o.len == 0) continue;
         try r.near(try std.fmt.allocPrint(r.a, "features {s} queued back to back", .{case.object.get("name").?.string}), o.len / cfg.hidden, all + 2 * at, o, 0);
         at += o.len;
     }

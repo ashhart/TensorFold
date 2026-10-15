@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
 const page_cache = @import("page_cache.zig");
+const vision_mod = @import("vision.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const mtp = @import("mtp.zig");
@@ -16,6 +17,7 @@ const checks = @import("checks.zig");
 const load_plan = @import("load_plan.zig");
 const plain_rounds = @import("plain_rounds.zig");
 const frags = @import("../../core/frags.zig");
+const residency = @import("residency.zig");
 const Ref = wts.Ref;
 
 pub const Reason = enum { stop, length, cancelled };
@@ -84,6 +86,9 @@ pub const Engine = struct {
     rank_log: bool = false, // GLM_RANKS=1: each MTP depth's logits kept, and the target's rank in them where drafts miss
     ep_arena: std.heap.ArenaAllocator, // the link settings, alive as long as the link
     residency: ?mtl.ResidencySet = null,
+    vision: ?*vision_mod.Vision = null, // --vision: the image tower
+    vision_rows: Ref = undefined, // bf16 [image tokens, hidden]: a prompt's image rows (vision only)
+    vision_limits: vision_mod.Limits = .{},
     keepalive_sets: [1]mtl.ResidencySet = undefined, // the residency set, for the idle keepalive's commit
     keepalive_target: mtl.keepalive.Target = undefined, // the engine's queue, set at load for the server's ticker
     load_seconds: f64 = 0,
@@ -95,11 +100,11 @@ pub const Engine = struct {
 
     /// The checkpoint in `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers only; GLM_EP=settings: half the experts.
     pub fn load(gpa: std.mem.Allocator, dir: []const u8, cap: u32) !*Engine {
-        return loadWith(gpa, dir, cap, if (std.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false);
+        return loadWith(gpa, dir, cap, if (std.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false, null);
     }
 
-    /// `load` with expert parallel over the link in `ep_path` (this Mac's settings), or on one Mac when null.
-    pub fn loadWith(gpa: std.mem.Allocator, dir: []const u8, cap: u32, ep_path: ?[]const u8, learn: bool) !*Engine {
+    /// `load` with expert parallel over `ep_path`'s link (one Mac when null) and `vision`'s image tower and rows.
+    pub fn loadWith(gpa: std.mem.Allocator, dir: []const u8, cap: u32, ep_path: ?[]const u8, learn: bool, vision: ?vision_mod.Limits) !*Engine {
         const e = try gpa.create(Engine); // undefined memory: every field is set below
         errdefer gpa.destroy(e);
         const pool = mtl.objc.Pool.push();
@@ -108,6 +113,7 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.ev = 0;
         e.residency = null;
+        e.vision = null;
         e.gpu = .{ 0, 0 };
         e.fused_route = if (std.c.getenv("GLM_ROUTE")) |v| v[0] != '0' else true;
         e.draft_vocab = if (std.c.getenv("GLM_DRAFT_VOCAB")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
@@ -166,12 +172,14 @@ pub const Engine = struct {
         const chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
         e.limit = try load_plan.loadLimit(e.device);
         const limit = e.limit.bytes;
+        // --vision: the image tower and its rows count against the limit beside the weights and caches
+        const tower = if (vision) |lim| try vision_mod.planBytes(gpa, lim, e.c.hidden) else 0;
         var plan_bytes = try load_plan.planBytes(gpa, e.device, dir, &e.c);
-        if (e.c.mtp > 0 and link == null and plan_bytes + try load_plan.leastArena(gpa, &e.c, cap, chunked) > limit) { // one Mac: the MTP head stays on disk when only it passes the limit
+        if (e.c.mtp > 0 and link == null and plan_bytes + tower + try load_plan.leastArena(gpa, &e.c, cap, chunked) > limit) { // one Mac: the MTP head stays on disk when only it passes the limit
             var lean = e.c;
             lean.mtp = 0;
             const lean_bytes = try load_plan.planBytes(gpa, e.device, dir, &lean);
-            if (lean_bytes + try load_plan.leastArena(gpa, &lean, cap, chunked) <= limit) {
+            if (lean_bytes + tower + try load_plan.leastArena(gpa, &lean, cap, chunked) <= limit) {
                 std.log.info("glm: the MTP head would pass this Mac's {d:.1} GB load limit ({s}); loading without it (no MTP drafts, copy drafts stay)", .{ @as(f64, @floatFromInt(limit)) / 1e9, e.limit.source() });
                 e.c = lean;
                 plan_bytes = lean_bytes;
@@ -186,18 +194,19 @@ pub const Engine = struct {
         e.prompt_ids = try e.arena.buffer(@as(usize, cap) * 4);
         e.pick_ring = try e.arena.buffer(256);
         if (chunked and (link == null or e.c.byRows())) {
-            const rows = load_plan.chunkHeight(gpa, &e.c, &e.sc, cap, plan_bytes + e.arena.bytes, limit, link != null);
+            const rows = load_plan.chunkHeight(gpa, &e.c, &e.sc, cap, plan_bytes + e.arena.bytes + tower, limit, link != null);
             e.pr = try prompt_mod.init(gpa, &e.arena, e.device, &e.c, &e.sc, e.k, cap, rows);
             e.chunk_rows = @min(e.chunk_rows, rows);
         }
         errdefer if (e.pr) |*p| p.deinit();
-        if (plan_bytes + e.arena.bytes > limit) { // refused before any weight is read: the floor's one-Mac limit
+        if (plan_bytes + e.arena.bytes + tower > limit) { // refused before any weight is read: the floor's one-Mac limit
+            if (tower > 0) std.log.err("glm: --vision's image tower and its rows add {d:.1} GB", .{@as(f64, @floatFromInt(tower)) / 1e9});
             std.log.err("glm: {d:.1} GB of weights and {d:.1} GB of caches pass this Mac's {d:.1} GB load limit ({s}); load a layer subset or the expert-parallel pair, or set GLM_LOAD_LIMIT_GB (past 70% of RAM a load risks a watchdog panic)", .{ @as(f64, @floatFromInt(plan_bytes)) / 1e9, @as(f64, @floatFromInt(e.arena.bytes)) / 1e9, @as(f64, @floatFromInt(limit)) / 1e9, e.limit.source() });
             return error.OverMemoryLimit;
         }
         { // free memory short of the load: a cached copy of the checkpoint holds it, the paced reads would wait (#583)
             const dropped_at = std.c.mach_absolute_time();
-            if (page_cache.dropForLoad(gpa, dir, plan_bytes + e.arena.bytes)) |d| {
+            if (page_cache.dropForLoad(gpa, dir, plan_bytes + e.arena.bytes + tower)) |d| {
                 if (d.dropped > 0) std.log.info("glm: dropped {d:.1} GiB of the checkpoint from the file cache, the {d:.1} GiB free memory lacked for the load ({d:.2} s)", .{ @as(f64, @floatFromInt(d.dropped)) / (1 << 30), @as(f64, @floatFromInt(d.deficit)) / (1 << 30), @as(f64, @floatFromInt(std.c.mach_absolute_time() - dropped_at)) / 24e6 });
             } else |err| std.log.warn("glm: could not drop the checkpoint's cached pages ({s}); the load reads beside them", .{@errorName(err)});
         }
@@ -216,19 +225,9 @@ pub const Engine = struct {
             me.rest[2] = @intFromBool(learn); // --learn on both Macs or neither: each holds its half of a learned state
             e.ep = try ep_mod.Ep.init(gpa, e.device, s, me);
         }
-        // opt-in: wiring 181 GB leaves macOS nothing to reclaim if another model shares the Mac (Flash Next runs without)
-        const wire = std.c.getenv("GLM_RESIDENCY") != null and mtl.ResidencySet.within("glm", 0, e.residencyBytes());
-        if (!wire) {} else if (e.device.residencySet(e.w.buffers.items.len + e.arena.buffers.items.len)) |set| {
-            for (e.w.buffers.items) |b| set.add(b);
-            for (e.arena.buffers.items) |b| set.add(b);
-            set.commit();
-            set.requestResidency();
-            e.queue.addResidencySet(set);
-            e.residency = set;
-        } else |_| {}
-        // every Metal engine offers its queue to the idle keepalive; the sets list only when the model is resident
-        if (e.residency) |set| e.keepalive_sets[0] = set;
-        e.keepalive_target = .{ .queue = e.queue, .sets = if (e.residency != null) &e.keepalive_sets else &.{} };
+        if (vision) |lim| try vision_mod.attach(e, gpa, dir, f.bytes[0..f.size], lim); // --vision: the tower and its rows
+        errdefer if (e.vision) |v| v.deinit();
+        residency.wire(e); // GLM_RESIDENCY's opt-in set, then the idle keepalive's target
         // a process's first prompt pays a one-time cost: every rank of a pair pays it here at the same step (GLM_NO_WARMUP: skip)
         if (e.pr != null and cap >= 128 and std.c.getenv("GLM_NO_WARMUP") == null) {
             var ids: [64]u32 = undefined;
@@ -270,6 +269,7 @@ pub const Engine = struct {
             set.deinit();
         }
         if (e.ep) |ep| ep.deinit(gpa);
+        if (e.vision) |v| v.deinit();
         e.ep_arena.deinit();
         if (e.pr) |*p| p.deinit();
         if (e.round_fence) |f| f.deinit();
@@ -282,14 +282,6 @@ pub const Engine = struct {
         e.queue.deinit();
         e.device.deinit();
         gpa.destroy(e);
-    }
-
-    /// What GLM_RESIDENCY's set would wire: every weight and arena buffer.
-    fn residencyBytes(e: *const Engine) u64 {
-        var n: u64 = 0;
-        for (e.w.buffers.items) |b| n += b.length();
-        for (e.arena.buffers.items) |b| n += b.length();
-        return n;
     }
 
     pub fn hasMtp(e: *const Engine) bool {

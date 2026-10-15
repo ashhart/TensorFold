@@ -2,15 +2,13 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Tokenizer = @import("core").tokenizer.Tokenizer;
-const png = @import("png.zig");
-const jpeg = @import("jpeg.zig");
-const resample = @import("resample.zig");
+const core = @import("core");
+const Tokenizer = core.tokenizer.Tokenizer;
+const picture = core.picture;
+const resample = picture.resample;
 
-// tensorfold's ImageLimits for one picture
+// tensorfold's ImageLimits for one picture's encoded bytes
 const max_bytes = 10 << 20;
-const max_side = 8192;
-const max_pixels = 16 << 20;
 
 // d1-3B's processor_config.json (Lfm2VlImageProcessor), and the d1 recipe's bound on a picture's pixels
 const patch = 16; // encoder_patch_size
@@ -27,51 +25,18 @@ pub const patch_width = 3 * patch * patch;
 /// The processor's candidate grids (columns, rows) for 2 to 10 tiles, in the order it tries them.
 const grids = [_][2]u8{ .{ 1, 2 }, .{ 2, 1 }, .{ 3, 1 }, .{ 1, 3 }, .{ 2, 2 }, .{ 4, 1 }, .{ 1, 4 }, .{ 5, 1 }, .{ 1, 5 }, .{ 1, 6 }, .{ 6, 1 }, .{ 3, 2 }, .{ 2, 3 }, .{ 7, 1 }, .{ 1, 7 }, .{ 4, 2 }, .{ 2, 4 }, .{ 1, 8 }, .{ 8, 1 }, .{ 1, 9 }, .{ 3, 3 }, .{ 9, 1 }, .{ 2, 5 }, .{ 5, 2 }, .{ 10, 1 }, .{ 1, 10 } };
 
-/// A decoded picture before orientation: 8-bit RGBA rows and the EXIF block its orientation is read from.
-pub const Decoded = struct { width: usize, height: usize, rgba: []u8, exif: ?[]const u8 = null };
-pub const DecodeError = error{ Invalid, Oversized, Animated, OutOfMemory };
-
-/// tensorfold's per-picture bound on a decoded size, checked from the header before any pixel is decoded.
-pub fn fits(width: usize, height: usize) error{Oversized}!void {
-    if (width == 0 or height == 0 or @max(width, height) > max_side or width * height > max_pixels) return error.Oversized;
-}
-
 /// Oriented RGB rows, three bytes a pixel.
-pub const Rgb = struct {
-    width: usize,
-    height: usize,
-    pixels: []u8,
+pub const Rgb = picture.Rgb;
 
-    pub fn deinit(r: *Rgb, a: Allocator) void {
-        a.free(r.pixels);
-        r.* = undefined;
-    }
-};
-
-/// A data URL's PNG or JPEG as Pillow loads it (EXIF-oriented, over white), or null with tensorfold's refusal.
-pub fn load(a: Allocator, url: []const u8, problem: *[]const u8) Allocator.Error!?Rgb {
+/// A data URL's PNG or JPEG as 0.6.6 loaded it (core's picture decoder), or null with tensorfold's refusal.
+pub fn load(io: std.Io, a: Allocator, url: []const u8, problem: *[]const u8) Allocator.Error!?Rgb {
     const bytes = (try dataBytes(a, url, problem)) orelse return null;
     defer a.free(bytes);
-    const d = decode(a, bytes) catch |err| {
-        problem.* = switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Oversized => "image dimensions exceed the decoded pixel limit",
-            error.Animated => "animated and multipage images are unsupported; send a single frame",
-            error.Invalid => if (std.mem.startsWith(u8, bytes, "RIFF") and std.mem.startsWith(u8, bytes[@min(8, bytes.len)..], "WEBP"))
-                "WebP images are unsupported here; send JPEG or PNG"
-            else
-                "image bytes are invalid or unsupported; use JPEG, PNG or WebP",
-        };
+    return picture.decode(io, a, bytes) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        problem.* = picture.problem(err, bytes);
         return null;
     };
-    defer a.free(d.rgba);
-    return try orient(a, d, if (d.exif) |e| orientation(e) else 1);
-}
-
-fn decode(a: Allocator, bytes: []const u8) DecodeError!Decoded {
-    if (std.mem.startsWith(u8, bytes, png.signature)) return png.decode(a, bytes);
-    if (std.mem.startsWith(u8, bytes, "\xff\xd8\xff")) return jpeg.decode(a, bytes);
-    return error.Invalid;
 }
 
 /// tensorfold's `_data_bytes`: an optional `;base64` and nothing else in the header; the payload's bytes.
@@ -132,56 +97,6 @@ fn hexByte(pair: *const [2]u8) ?u8 {
     const hi = std.fmt.charToDigit(pair[0], 16) catch return null;
     const lo = std.fmt.charToDigit(pair[1], 16) catch return null;
     return hi << 4 | lo;
-}
-
-/// Pillow's EXIF Orientation (tag 0x0112) from a TIFF block; 1 when absent or unreadable.
-fn orientation(exif: []const u8) u32 {
-    const tiff = if (std.mem.startsWith(u8, exif, "Exif\x00\x00")) exif[6..] else exif;
-    if (tiff.len < 8) return 1;
-    const endian: std.builtin.Endian = if (std.mem.eql(u8, tiff[0..4], "II*\x00")) .little else if (std.mem.eql(u8, tiff[0..4], "MM\x00*")) .big else return 1;
-    const ifd = std.mem.readInt(u32, tiff[4..8], endian);
-    if (ifd > tiff.len - 2) return 1;
-    const count = std.mem.readInt(u16, tiff[ifd..][0..2], endian);
-    for (0..count) |i| {
-        const at = ifd + 2 + 12 * i;
-        if (at + 12 > tiff.len) break;
-        const entry = tiff[at..][0..12];
-        if (std.mem.readInt(u16, entry[0..2], endian) != 0x0112) continue;
-        return switch (std.mem.readInt(u16, entry[2..4], endian)) {
-            3 => std.mem.readInt(u16, entry[8..10], endian),
-            4 => std.mem.readInt(u32, entry[8..12], endian),
-            else => 1,
-        };
-    }
-    return 1;
-}
-
-/// ImageOps.exif_transpose, then RGBA pasted over white (an opaque pixel keeps its colour exactly).
-fn orient(a: Allocator, d: Decoded, o: u32) Allocator.Error!Rgb {
-    const turned = o >= 5 and o <= 8;
-    const w, const h = if (turned) .{ d.height, d.width } else .{ d.width, d.height };
-    const out = try a.alloc(u8, w * h * 3);
-    for (0..h) |y| for (0..w) |x| {
-        const sx, const sy = switch (o) {
-            2 => .{ d.width - 1 - x, y },
-            3 => .{ d.width - 1 - x, d.height - 1 - y },
-            4 => .{ x, d.height - 1 - y },
-            5 => .{ y, x },
-            6 => .{ y, d.height - 1 - x },
-            7 => .{ d.width - 1 - y, d.height - 1 - x },
-            8 => .{ d.width - 1 - y, x },
-            else => .{ x, y },
-        };
-        const px = d.rgba[(sy * d.width + sx) * 4 ..][0..4];
-        for (out[(y * w + x) * 3 ..][0..3], px[0..3]) |*c, v| c.* = over(px[3], v);
-    };
-    return .{ .width = w, .height = h, .pixels = out };
-}
-
-/// Pillow's BLEND of `c` over white at alpha `alpha`, DIV255 included.
-fn over(alpha: u8, c: u8) u8 {
-    const t = @as(u32, 255) * (255 - alpha) + @as(u32, c) * alpha + 128;
-    return @intCast(((t >> 8) + t) >> 8);
 }
 
 /// A tile's patch rows and columns.
@@ -272,14 +187,15 @@ pub fn prepare(a: Allocator, rgb: Rgb) Allocator.Error!Picture {
     const patches = try a.alloc(f32, n * patch_width);
     errdefer a.free(patches);
     var at: usize = 0;
+    const view = resample.View.of(src.pixels, w, h);
     if (count > 1) {
-        const canvas = try resample.resize(a, .torch, src.pixels, w, h, cols * tile, rows * tile);
+        const canvas = try resample.resize(a, .torch, view, cols * tile, rows * tile);
         defer a.free(canvas);
         for (0..rows) |r| for (0..cols) |c| {
             at = cut(patches, at, canvas, cols * tile, c * tile, r * tile, tile, tile);
         };
     }
-    const resized = try resample.resize(a, .torch, src.pixels, w, h, sw, sh);
+    const resized = try resample.resize(a, .torch, view, sw, sh);
     defer a.free(resized);
     _ = cut(patches, at, resized, sw, 0, 0, sw, sh);
     return .{ .patches = patches, .tiles = tiles, .rows = rows, .cols = cols };
@@ -291,7 +207,7 @@ fn cap(a: Allocator, rgb: Rgb) Allocator.Error!?Rgb {
     const s = @sqrt(@as(f64, cap_pixels) / @as(f64, @floatFromInt(rgb.width * rgb.height)));
     const w = @max(1, @as(usize, @intFromFloat(@as(f64, @floatFromInt(rgb.width)) * s)));
     const h = @max(1, @as(usize, @intFromFloat(@as(f64, @floatFromInt(rgb.height)) * s)));
-    return .{ .width = w, .height = h, .pixels = try resample.resize(a, .pillow, rgb.pixels, rgb.width, rgb.height, w, h) };
+    return .{ .width = w, .height = h, .pixels = try resample.resize(a, .pillow, .of(rgb.pixels, rgb.width, rgb.height), w, h) };
 }
 
 /// round(x / factor) * factor, Python's round: halves go to even.
