@@ -346,7 +346,8 @@ kernel void tf_delta_gdn_chain_wide(device const bfloat* query [[buffer(0)]],
                           device float* next_state [[buffer(9)]],
                           uint3 position [[thread_position_in_grid]],
                           uint lane [[thread_index_in_simdgroup]]) {
-  tf_delta_gdn_chain_wide_body<false>(query, key, value, decay, mixing, committed, segments, p, output, next_state, uint4(0), next_state, position, lane);
+  tf_delta_gdn_chain_wide_body<false>(query, key, value, decay, mixing, committed, segments, p, output, next_state,
+                                      uint4(0), next_state, position, lane);
 }
 
 // marks[segment] (its rows, 0 unused): mark_state[segment * 4 + m] is the state a segment ending there would leave.
@@ -364,7 +365,8 @@ kernel void tf_delta_gdn_chain_wide_marks(device const bfloat* query [[buffer(0)
                           device float* mark_state [[buffer(11)]],
                           uint3 position [[thread_position_in_grid]],
                           uint lane [[thread_index_in_simdgroup]]) {
-  tf_delta_gdn_chain_wide_body<true>(query, key, value, decay, mixing, committed, segments, p, output, next_state, marks[position.z / p.nv], mark_state, position, lane);
+  tf_delta_gdn_chain_wide_body<true>(query, key, value, decay, mixing, committed, segments, p, output, next_state,
+                                     marks[position.z / p.nv], mark_state, position, lane);
 }
 
 // Each mark's conv window into mark_conv[segment * 4 + m], read as conv_commit reads it for a segment ending there.
@@ -384,7 +386,9 @@ kernel void tf_delta_gdn_mark_conv(device const bfloat* committed [[buffer(0)]],
   if (at == 0 || at > span.rows) return;
   const uint row = span.first + at - 1;
   const uint source = windows[row * p.taps + item / channels + 1];
-  mark_conv[(segment_index * 4 + mark) * width + item] = source < p.taps - 1 ? committed[(span.state_slot * (p.taps - 1) + source) * channels + item % channels] : projection[(source - (p.taps - 1)) * channels + item % channels];
+  mark_conv[(segment_index * 4 + mark) * width + item] = source < p.taps - 1
+      ? committed[(span.state_slot * (p.taps - 1) + source) * channels + item % channels]
+      : projection[(source - (p.taps - 1)) * channels + item % channels];
 }
 // The normalized value rounds to BF16 before the SiLU gate multiplies it.
 

@@ -32,7 +32,20 @@ pub const Kernels = struct {
     pub fn init(device: metal.Device) !Kernels {
         const library = try metal.Library.fromSource(device, source.core_deltanet, metal.CompileOptions.mlx());
         errdefer library.deinit();
-        const names = [_][]const u8{ "pre", "tree", "replay", "post", "conv_commit", "publish", "clear", "chain", "publish_conv", "chain_wide", "chain_wide_marks", "mark_conv" };
+        const names = [_][]const u8{
+            "pre",
+            "tree",
+            "replay",
+            "post",
+            "conv_commit",
+            "publish",
+            "clear",
+            "chain",
+            "publish_conv",
+            "chain_wide",
+            "chain_wide_marks",
+            "mark_conv",
+        };
         var pipelines: [names.len]metal.Pipeline = undefined;
         var done: usize = 0;
         errdefer for (pipelines[0..done]) |p| p.deinit();
@@ -41,11 +54,40 @@ pub const Kernels = struct {
             done += 1;
         }
         if (pipelines[7].simdWidth() != 32 or pipelines[7].maxThreads() < 128) return error.UnsupportedGdnPipeline;
-        return .{ .library = library, .pipelines = .{ .pre = pipelines[0], .tree = pipelines[1], .replay = pipelines[2], .post = pipelines[3], .conv_commit = pipelines[4] }, .publish = pipelines[5], .clear = pipelines[6], .chain = pipelines[7], .publish_conv = pipelines[8], .chain_wide = pipelines[9], .chain_wide_marks = pipelines[10], .mark_conv = pipelines[11] };
+        return .{
+            .library = library,
+            .pipelines = .{
+                .pre = pipelines[0],
+                .tree = pipelines[1],
+                .replay = pipelines[2],
+                .post = pipelines[3],
+                .conv_commit = pipelines[4],
+            },
+            .publish = pipelines[5],
+            .clear = pipelines[6],
+            .chain = pipelines[7],
+            .publish_conv = pipelines[8],
+            .chain_wide = pipelines[9],
+            .chain_wide_marks = pipelines[10],
+            .mark_conv = pipelines[11],
+        };
     }
 
     pub fn deinit(k: Kernels) void {
-        inline for (.{ k.pipelines.pre, k.pipelines.tree, k.pipelines.replay, k.pipelines.post, k.pipelines.conv_commit, k.publish, k.clear, k.chain, k.publish_conv, k.chain_wide, k.chain_wide_marks, k.mark_conv }) |p| p.deinit();
+        inline for (.{
+            k.pipelines.pre,
+            k.pipelines.tree,
+            k.pipelines.replay,
+            k.pipelines.post,
+            k.pipelines.conv_commit,
+            k.publish,
+            k.clear,
+            k.chain,
+            k.publish_conv,
+            k.chain_wide,
+            k.chain_wide_marks,
+            k.mark_conv,
+        }) |p| p.deinit();
         k.library.deinit();
     }
 };

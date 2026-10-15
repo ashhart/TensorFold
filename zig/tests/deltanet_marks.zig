@@ -4,7 +4,18 @@ const mtl = @import("metal");
 const delta = @import("core_delta");
 
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
-const Params = extern struct { rows: u32, nk: u32, nv: u32, dk: u32, dv: u32, taps: u32, slots: u32, weight_flags: u32, eps: f32, zba_stride: u32 = 0 };
+const Params = extern struct {
+    rows: u32,
+    nk: u32,
+    nv: u32,
+    dk: u32,
+    dv: u32,
+    taps: u32,
+    slots: u32,
+    weight_flags: u32,
+    eps: f32,
+    zba_stride: u32 = 0,
+};
 const Segment = extern struct { first: u32, rows: u32, state_slot: u32, next_slot: u32 };
 
 const nk = 1;
@@ -21,7 +32,10 @@ const max_rows = 64;
 const untouched: u8 = 0xff;
 
 /// Two segments of one call: their rows, and the state slot each reads.
-const shape = [_]struct { first: u32, rows: u32, slot: u32 }{ .{ .first = 0, .rows = 24, .slot = 0 }, .{ .first = 24, .rows = 17, .slot = 1 } };
+const shape = [_]struct { first: u32, rows: u32, slot: u32 }{
+    .{ .first = 0, .rows = 24, .slot = 0 },
+    .{ .first = 24, .rows = 17, .slot = 1 },
+};
 const call_rows = shape[1].first + shape[1].rows;
 
 const Case = struct { name: []const u8, marks: [2][]const u32 };
@@ -87,7 +101,26 @@ const Data = struct {
 
     fn init(g: Gpu) !Data {
         var d: Data = undefined;
-        inline for (.{ .{ "query", max_rows * nk * dk * 2 }, .{ "key", max_rows * nk * dk * 2 }, .{ "value", max_rows * nv * dv * 2 }, .{ "decay", max_rows * nv * 4 }, .{ "mixing", max_rows * nv * 2 }, .{ "committed", slots * state_words * 4 }, .{ "history", slots * conv_width * 2 }, .{ "projection", max_rows * channels * 2 }, .{ "windows", max_rows * taps * 4 }, .{ "segments", 2 * @sizeOf(Segment) }, .{ "keeps", 2 * @sizeOf(Segment) }, .{ "kept_rows", max_rows * 4 }, .{ "marks", 2 * delta.MARKS * 4 }, .{ "output", max_rows * nv * dv * 2 }, .{ "next_state", slots * state_words * 4 }, .{ "next_history", slots * conv_width * 2 }, .{ "mark_state", 2 * delta.MARKS * state_words * 4 }, .{ "mark_conv", 2 * delta.MARKS * conv_width * 2 } }) |f| @field(d, f[0]) = try g.buffer(f[1]);
+        inline for (.{
+            .{ "query", max_rows * nk * dk * 2 },
+            .{ "key", max_rows * nk * dk * 2 },
+            .{ "value", max_rows * nv * dv * 2 },
+            .{ "decay", max_rows * nv * 4 },
+            .{ "mixing", max_rows * nv * 2 },
+            .{ "committed", slots * state_words * 4 },
+            .{ "history", slots * conv_width * 2 },
+            .{ "projection", max_rows * channels * 2 },
+            .{ "windows", max_rows * taps * 4 },
+            .{ "segments", 2 * @sizeOf(Segment) },
+            .{ "keeps", 2 * @sizeOf(Segment) },
+            .{ "kept_rows", max_rows * 4 },
+            .{ "marks", 2 * delta.MARKS * 4 },
+            .{ "output", max_rows * nv * dv * 2 },
+            .{ "next_state", slots * state_words * 4 },
+            .{ "next_history", slots * conv_width * 2 },
+            .{ "mark_state", 2 * delta.MARKS * state_words * 4 },
+            .{ "mark_conv", 2 * delta.MARKS * conv_width * 2 },
+        }) |f| @field(d, f[0]) = try g.buffer(f[1]);
         var prng = std.Random.DefaultPrng.init(548);
         const r = prng.random();
         for (d.query.slice(u16, max_rows * nk * dk)) |*x| x.* = toBf((r.float(f32) * 2 - 1) * 0.09);
@@ -107,7 +140,17 @@ const Data = struct {
     }
 
     fn params(rows: u32) Params {
-        return .{ .rows = rows, .nk = nk, .nv = nv, .dk = dk, .dv = dv, .taps = taps, .slots = slots, .weight_flags = 0, .eps = 1e-6 };
+        return .{
+            .rows = rows,
+            .nk = nk,
+            .nv = nv,
+            .dk = dk,
+            .dv = dv,
+            .taps = taps,
+            .slots = slots,
+            .weight_flags = 0,
+            .eps = 1e-6,
+        };
     }
 
     /// One wide chain over `segs`, with `marks` (one list a segment) or the unmarked kernel.
@@ -121,7 +164,15 @@ const Data = struct {
             marked: bool,
             fn go(x: @This(), e: mtl.ComputeEncoder) void {
                 e.setPipeline(if (x.marked) x.k.chain_wide_marks else x.k.chain_wide);
-                for ([_]mtl.Buffer{ x.d.query, x.d.key, x.d.value, x.d.decay, x.d.mixing, x.d.committed, x.d.segments }, 0..) |b, i| e.setBuffer(b, 0, i);
+                for ([_]mtl.Buffer{
+                    x.d.query,
+                    x.d.key,
+                    x.d.value,
+                    x.d.decay,
+                    x.d.mixing,
+                    x.d.committed,
+                    x.d.segments,
+                }, 0..) |b, i| e.setBuffer(b, 0, i);
                 e.setValue(params(call_rows), 7);
                 e.setBuffer(x.d.output, 0, 8);
                 e.setBuffer(x.d.next_state, 0, 9);
@@ -133,7 +184,12 @@ const Data = struct {
                 if (!x.marked) return;
                 e.barrier();
                 e.setPipeline(x.k.mark_conv);
-                for ([_]mtl.Buffer{ x.d.history, x.d.projection, x.d.segments, x.d.windows }, 0..) |b, i| e.setBuffer(b, 0, i);
+                for ([_]mtl.Buffer{
+                    x.d.history,
+                    x.d.projection,
+                    x.d.segments,
+                    x.d.windows,
+                }, 0..) |b, i| e.setBuffer(b, 0, i);
                 e.setValue(params(call_rows), 4);
                 e.setBuffer(x.d.marks, 0, 5);
                 e.setBuffer(x.d.mark_conv, 0, 6);
@@ -152,7 +208,13 @@ const Data = struct {
             k: delta.Kernels,
             fn go(x: @This(), e: mtl.ComputeEncoder) void {
                 e.setPipeline(x.k.pipelines.conv_commit);
-                for ([_]mtl.Buffer{ x.d.history, x.d.projection, x.d.kept_rows, x.d.keeps, x.d.windows }, 0..) |b, i| e.setBuffer(b, 0, i);
+                for ([_]mtl.Buffer{
+                    x.d.history,
+                    x.d.projection,
+                    x.d.kept_rows,
+                    x.d.keeps,
+                    x.d.windows,
+                }, 0..) |b, i| e.setBuffer(b, 0, i);
                 e.setValue(params(call_rows), 5);
                 e.setBuffer(x.d.next_history, 0, 6);
                 e.dispatchThreads(.{ .width = conv_width, .height = 1 }, .{ .width = 32 });
@@ -167,7 +229,10 @@ fn bytes(b: mtl.Buffer, off: usize, len: usize) []const u8 {
 }
 
 fn segmentsOf(next: [2]u32) [2]Segment {
-    return .{ .{ .first = shape[0].first, .rows = shape[0].rows, .state_slot = shape[0].slot, .next_slot = next[0] }, .{ .first = shape[1].first, .rows = shape[1].rows, .state_slot = shape[1].slot, .next_slot = next[1] } };
+    return .{
+        .{ .first = shape[0].first, .rows = shape[0].rows, .state_slot = shape[0].slot, .next_slot = next[0] },
+        .{ .first = shape[1].first, .rows = shape[1].rows, .state_slot = shape[1].slot, .next_slot = next[1] },
+    };
 }
 
 /// One case: the marked call against the unmarked one, then each mark against a segment ending there.
@@ -222,7 +287,13 @@ fn check(g: Gpu, d: *const Data, c: Case) !usize {
         const state_ok = std.mem.eql(u8, got_state, bytes(d.next_state, 4 * state_bytes, state_bytes));
         const conv_ok = std.mem.eql(u8, got_conv, bytes(d.next_history, 4 * conv_bytes, conv_bytes));
         if (!state_ok or !conv_ok) {
-            std.debug.print("  {s}: segment {d} mark at row {d}: state {s}, conv window {s}\n", .{ c.name, si, at, if (state_ok) "equal" else "DIFFERS", if (conv_ok) "equal" else "DIFFERS" });
+            std.debug.print("  {s}: segment {d} mark at row {d}: state {s}, conv window {s}\n", .{
+                c.name,
+                si,
+                at,
+                if (state_ok) "equal" else "DIFFERS",
+                if (conv_ok) "equal" else "DIFFERS",
+            });
             failed += 1;
         }
     };
@@ -246,7 +317,11 @@ pub fn main() !void {
         const f = try check(g, &d, c);
         var n: usize = 0;
         for (c.marks) |m| n += m.len;
-        std.debug.print("{s}: {d} marks, {s}\n", .{ c.name, n, if (f == 0) "every state and conv window equal" else "FAILED" });
+        std.debug.print("{s}: {d} marks, {s}\n", .{
+            c.name,
+            n,
+            if (f == 0) "every state and conv window equal" else "FAILED",
+        });
         failed += f;
     }
     if (failed > 0) {

@@ -73,8 +73,19 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const lane_check = program(b, "tf-core-lane-check", "Build the synthetic core projection checks without running a GPU", "zig/tests/core_lane_projection.zig", target, false, lane_imports);
     b.step("test-core-lane", "Run small synthetic projection checks on this Mac's tensor units, no models").dependOn(&b.addRunArtifact(lane_check).step);
 
-    const marks_check = program(b, "tf-deltanet-marks-check", "Build the DeltaNet prompt chain's mark check on synthetic rows, no models", "zig/tests/deltanet_marks.zig", target, false, &.{ .{ .name = "metal", .module = metal }, .{ .name = "core_delta", .module = s.delta } });
-    b.step("test-deltanet-marks", "Run the DeltaNet prompt chain's marks against segments ending there, no models").dependOn(&b.addRunArtifact(marks_check).step);
+    const marks_check = program(
+        b,
+        "tf-deltanet-marks-check",
+        "Build the DeltaNet prompt chain's mark check on synthetic rows, no models",
+        "zig/tests/deltanet_marks.zig",
+        target,
+        false,
+        &.{ .{ .name = "metal", .module = metal }, .{ .name = "core_delta", .module = s.delta } },
+    );
+    b.step(
+        "test-deltanet-marks",
+        "Run the DeltaNet prompt chain's marks against segments ending there, no models",
+    ).dependOn(&b.addRunArtifact(marks_check).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = s.delta })).step);
 
     const fork_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/recurrent_forks.zig"), .target = target, .optimize = .ReleaseSafe }) });
