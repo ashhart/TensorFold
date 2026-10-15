@@ -35,6 +35,7 @@ const usage =
     \\       tensorfold check-kernels MODEL   (lane_gemv and the forked MoE against the kernels they replace, real weights)
     \\       tensorfold train-check MODEL   (Sliding Weights' gradients against the forward by finite differences)
     \\       tensorfold check-precision MODEL --tokens ID,... --dump DIR   (ModelOpt projections against fp64 and NVIDIA's math)
+    \\       tensorfold margins MODEL --tokens ID,... --gold ID,...   (a gold reply teacher-forced: where argmax differs)
     \\       tensorfold widths MODEL --tokens ID,... [--max-tokens N] [--eager] [sampling as run]
     \\                (every verify width 1-16 against serial decoding, a wrong draft every third window)
     \\       tensorfold models
@@ -72,6 +73,7 @@ pub fn main(init: std.process.Init) !u8 {
     var positional: std.ArrayList([]const u8) = .empty;
     defer positional.deinit(gpa);
     defer gpa.free(opts.tokens);
+    defer gpa.free(opts.gold);
     defer if (opts.costs) |c| gpa.free(c);
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
@@ -79,6 +81,9 @@ pub fn main(init: std.process.Init) !u8 {
         const value = if (i + 1 < args.len) args[i + 1] else "";
         if (std.mem.eql(u8, a, "--tokens")) {
             opts.tokens = try parseIds(gpa, value);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--gold")) {
+            opts.gold = try parseIds(gpa, value);
             i += 1;
         } else if (std.mem.eql(u8, a, "--max-tokens")) {
             opts.max_tokens = try std.fmt.parseInt(u32, value, 10);
@@ -204,6 +209,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (std.mem.eql(u8, cmd, "teacher") and rest.len == 1) return checks.teacher(gpa, init.io, engine, rest[0], opts.dump);
     if (std.mem.eql(u8, cmd, "prefill") and rest.len == 2) return checks.prefill(gpa, init.io, engine, rest[0], rest[1], opts.dump);
     if (std.mem.eql(u8, cmd, "rounds")) return checks.rounds(engine, opts.tokens, opts.max_tokens);
+    if (std.mem.eql(u8, cmd, "margins")) return checks.margins(gpa, engine, opts.tokens, opts.gold);
     if (widths) return checks.widths(gpa, engine, opts.tokens, opts.max_tokens);
     if (std.mem.eql(u8, cmd, "check-draws") and rest.len == 1) return checks.draws(gpa, init.io, engine, rest[0]);
     if (std.mem.eql(u8, cmd, "shared-widths") and rest.len == 1) {
@@ -223,6 +229,7 @@ pub fn main(init: std.process.Init) !u8 {
 const Options = struct {
     model: []const u8,
     tokens: []u32 = &.{},
+    gold: []u32 = &.{},
     max_tokens: usize = 256,
     sampling: lanes.Sampling = .{ .seed = 0, .temperature = 0 },
     drafts: bool = true,
