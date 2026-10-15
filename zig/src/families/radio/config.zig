@@ -53,12 +53,19 @@ pub const Config = struct {
         const pre = if (preprocessor_json) |text| object(try std.json.parseFromSliceLeaky(Value, ar, text, .{})) else null;
         const hidden = try size(v.get("hidden_size"));
         const patch = try size(v.get("patch_size"));
+        const layers = try size(v.get("num_hidden_layers"));
+        const heads = try size(v.get("num_attention_heads"));
+        const ratio = try float(v.get("mlp_ratio"));
+        const eps = try float(v.get("layer_norm_eps"));
+        // every size the tower divides by or sizes buffers from, refused by name before it is used (NaN fails too)
+        if (hidden == 0 or patch == 0 or layers == 0 or heads == 0 or !(ratio > 0 and ratio <= 64) or !(eps > 0 and eps < 1))
+            return refuse(a, problem, "the tower's sizes are not positive (hidden, patch, layers, heads, mlp_ratio, eps)");
         const c: Config = .{
             .hidden = hidden,
-            .layers = try size(v.get("num_hidden_layers")),
-            .heads = try size(v.get("num_attention_heads")),
-            .ffn = @intFromFloat(@as(f64, @floatFromInt(hidden)) * try float(v.get("mlp_ratio"))),
-            .eps = @floatCast(try float(v.get("layer_norm_eps"))),
+            .layers = layers,
+            .heads = heads,
+            .ffn = @intFromFloat(@as(f64, @floatFromInt(hidden)) * ratio),
+            .eps = @floatCast(eps),
             .patch = patch,
             .prefix = try size(v.get("num_cls_tokens")) + try size(v.get("num_registers")),
             .side = try size(v.get("max_img_size")) / patch,
@@ -170,4 +177,13 @@ test "the public checkpoint's image side, and refusals by name" {
     defer a.free(problem);
     try std.testing.expect(refused == null);
     try std.testing.expectEqualStrings("the pixel shuffle is not version 2", problem);
+    // a zero divisor or a size that is not positive is refused by name, never divided by
+    for ([_][2][]const u8{ .{ "\"patch_size\": 16", "\"patch_size\": 0" }, .{ "\"num_attention_heads\": 16", "\"num_attention_heads\": 0" }, .{ "\"mlp_ratio\": 4.0", "\"mlp_ratio\": -1.0" }, .{ "\"layer_norm_eps\": 1e-06", "\"layer_norm_eps\": 0.0" } }) |k| {
+        const zero = try std.mem.replaceOwned(u8, a, text, k[0], k[1]);
+        defer a.free(zero);
+        var why: []const u8 = "";
+        try std.testing.expect(try Config.parse(a, zero, null, &why) == null);
+        defer a.free(why);
+        try std.testing.expect(std.mem.startsWith(u8, why, "the tower's sizes are not positive"));
+    }
 }
