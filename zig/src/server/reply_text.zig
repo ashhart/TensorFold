@@ -103,15 +103,18 @@ pub fn hideToolCalls(a: Allocator, text: []const u8, finished: bool) Allocator.E
 pub fn hideInto(a: Allocator, out: *std.ArrayList(u8), text: []const u8, finished: bool) Allocator.Error![]const u8 {
     out.clearRetainingCapacity();
     var pos: usize = 0;
+    var next: [calls.len]?usize = undefined; // each opener at or after `pos`, searched again only once `pos` passes it
+    for (calls, &next) |c, *n| n.* = findTag(text, 0, c[0]);
     while (true) {
         var start: ?usize = null;
         var which: usize = 0;
-        for (calls, 0..) |c, i| if (findTag(text, pos, c[0])) |at| {
-            if (start == null or at < start.?) {
+        for (calls, &next, 0..) |c, *n, i| {
+            if (n.* != null and n.*.? < pos) n.* = findTag(text, pos, c[0]);
+            if (n.*) |at| if (start == null or at < start.?) {
                 start = at;
                 which = i;
-            }
-        };
+            };
+        }
         if (start == null) {
             const tail = text[pos..];
             var held: usize = 0;

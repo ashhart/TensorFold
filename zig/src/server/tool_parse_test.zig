@@ -27,6 +27,32 @@ test "families" {
     try std.testing.expectEqualStrings("hi <tool_call>{\"name\":\"other tool\"}</tool_call>", kept.content);
 }
 
+test "a reply of many calls reads in linear time" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
+    const call = "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"n\":1}}</tool_call>";
+    var ns: [2]u64 = undefined;
+    for ([_]usize{ 400, 3200 }, &ns) |n, *best| {
+        const reply = try a.alloc(u8, n * call.len);
+        for (0..n) |i| @memcpy(reply[i * call.len ..][0..call.len], call);
+        best.* = std.math.maxInt(u64);
+        for (0..3) |_| {
+            var run: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer run.deinit();
+            const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+            const r = try parse(run.allocator(), reply, tools, null);
+            try std.testing.expectEqualStrings("", try closeCall(run.allocator(), reply, tools));
+            try std.testing.expectEqualStrings("", try @import("reply_text.zig").hideToolCalls(run.allocator(), reply, false));
+            best.* = @min(best.*, @as(u64, @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - start)));
+            try std.testing.expectEqual(n, r.calls.?.len);
+        }
+    }
+    // 8x the calls: near 8x the time, not 64x
+    try std.testing.expect(ns[1] <= 20 * std.time.ns_per_ms or ns[1] <= 24 * ns[0]);
+}
+
 test "a call the end token left open closes when it parses whole" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

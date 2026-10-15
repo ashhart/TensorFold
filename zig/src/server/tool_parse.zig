@@ -52,8 +52,10 @@ fn allSpace(s: []const u8) bool {
 fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
     var found: std.ArrayList(Envelope) = .empty;
     var pos: usize = 0;
+    var dsml = find(text, dsml_open, 0); // the DSML opener at or after `pos`, searched again only once `pos` passes it
     while (findCI(text, "<tool_call>", pos)) |s| {
-        if (find(text, dsml_open, pos)) |outer| if (outer < s) {
+        if (dsml != null and dsml.? < pos) dsml = find(text, dsml_open, pos);
+        if (dsml) |outer| if (outer < s) {
             pos = (find(text, dsml_close, outer + dsml_open.len) orelse break) + dsml_close.len;
             continue;
         };
@@ -160,9 +162,11 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
 /// What closes the call ``text`` ends inside (the model's end token came before its ``
 pub fn closeCall(a: Allocator, text: []const u8, tools: []const Value) Allocator.Error![]const u8 {
     var pos: usize = 0;
+    var dsml = find(text, dsml_open, 0); // as in ``envelopes``
     // the opener ``envelopes`` leaves without a closer, so the one appended pairs with it
     const start = while (findCI(text, "<tool_call>", pos)) |s| {
-        if (find(text, dsml_open, pos)) |outer| if (outer < s) {
+        if (dsml != null and dsml.? < pos) dsml = find(text, dsml_open, pos);
+        if (dsml) |outer| if (outer < s) {
             pos = (find(text, dsml_close, outer + dsml_open.len) orelse return "") + dsml_close.len;
             continue;
         };
