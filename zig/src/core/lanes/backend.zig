@@ -104,8 +104,6 @@ pub const Backend = struct {
         prompt_rows: bool = false,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
-        /// After a failed round: the streams whose caches could not grow, ended alone; 0 when the round failed.
-        refused: ?*const fn (ptr: *anyopaque, out: []*Stream) usize = null,
     };
 
     pub fn prefill(b: Backend, s: *Stream) !void {

@@ -114,12 +114,6 @@ pub fn vtable(comptime H: type, v: be.Backend.VTable) be.Backend.VTable {
                 return x.inner.vtable.held.?(x.inner.ptr, s, out);
             }
         }.f else null,
-        .refused = if (v.refused != null) struct {
-            fn f(p: *anyopaque, out: []*lanes.Stream) usize {
-                const x = H.bind(p);
-                return x.inner.vtable.refused.?(x.inner.ptr, out);
-            }
-        }.f else null,
         .prompt_rows = v.prompt_rows,
         .release = struct {
             fn f(p: *anyopaque, s: *lanes.Stream) void {
