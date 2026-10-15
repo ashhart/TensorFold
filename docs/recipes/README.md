@@ -29,8 +29,9 @@ from its family pages, not measured per card.
 | MLX, Apple Silicon | GLM-5.3-Flash is written for a 256 GB Mac, about 151 GiB resident. DeepSeek-V4-Flash is the same, about 151 GiB resident. Flash Next's default command sizes to a 128 GiB M4 Max. Qwen3.8-27B on a 32 GB Mac needs more than the default 22.4 GiB. Machine classes, not measured minimums. |
 
 New families go on the Zig engine: [adding a Zig family](adding-a-zig-family.md) has the steps in order, what each
-one gained, and which code owns it. For the Python engine, frozen at 0.6.6, the contributor guides cover
-[adding an MLX family](adding-a-family.md), [adding a CUDA family](adding-a-cuda-family.md) and
+one gained, and which code owns it. [Adding Living Weights to a family](adding-living-weights-to-a-family.md) lists
+what a family's host and trainer give the learner for `--slide`. For the Python engine, frozen at 0.6.6, the
+contributor guides cover [adding an MLX family](adding-a-family.md), [adding a CUDA family](adding-a-cuda-family.md) and
 [CUDA implementation rules](cuda.md).
 [EXL3 weights](exl3.md) and [universal EXL3 experts](exl3-universal-experts.md) describe the shared EXL3
 module @vcruz305 wrote for the Python engine's CUDA families in [#42](https://github.com/ashhart/TensorFold/pull/42):
