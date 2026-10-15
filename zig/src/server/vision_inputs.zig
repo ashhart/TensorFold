@@ -111,7 +111,7 @@ fn dataBytes(srv: *Server, cx: *Cx, url: []const u8, limit: usize, kind: Kind, d
 pub fn extract(srv: *Server, cx: *Cx, messages: ?Value) errors.Refused!?Extracted {
     const list = messages orelse return null;
     if (!hasImages(list)) return null;
-    if (!srv.info.vision) return cx.refuse("image and video inputs need a server started with --vision");
+    if (!srv.info.vision) return cx.refuse("this server accepts text parts only; image, audio and video inputs are unsupported");
     // every media part, in prompt order, with where its text goes
     const Slot = struct { kind: Kind, url: ?[]const u8, detail: []const u8, msg: usize, part: usize };
     var slots: std.ArrayList(Slot) = .empty;
