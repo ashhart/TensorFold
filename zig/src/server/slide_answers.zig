@@ -1,6 +1,6 @@
 //! What a fact's checks expect, as the graph keeps them: each question, the answer its lesson wrote, its fewest words.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const Allocator = std.mem.Allocator;
 
 /// A question a fact's checks ask, the answer its lesson wrote, its fewest words, and whether it was never learned.

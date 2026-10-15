@@ -1,7 +1,7 @@
 //! A delete over a fake engine: refused when it cannot run, written when its checks hold, put back when one fails.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const model_text = @import("model_text.zig");
 const slide = @import("slide.zig");

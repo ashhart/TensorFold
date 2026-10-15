@@ -1,6 +1,6 @@
 //! DELETE /v1/slide/fact/{id}: one fact's neurons zeroed, every fact it leaves asked again, then written or put back.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const sse = @import("sse.zig");
 const http_body = @import("http_body.zig");
 const errors = @import("errors.zig");
