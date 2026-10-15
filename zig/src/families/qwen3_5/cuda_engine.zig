@@ -22,7 +22,7 @@ pub const max_segs = 32;
 pub const most_verify = 32;
 /// A window's rows at most (exact: one-row steps' bits; qwen35.cuh's MAXW, the rows a stream's log holds).
 pub const most_window = 16;
-/// Partial attention chunks a row at most: the chunk width grows with the window instead.
+/// Partial attention chunks a row at most (qwen35.cuh's MAXCH): each row's chunk width grows with its own keys.
 const max_chunks = 64;
 
 /// Device allocations are 256-byte aligned, as the driver's are.
@@ -147,7 +147,7 @@ pub const Engine = struct {
     const rules_at = rowanc_at + max_rows * 4;
     const meta_at = rules_at + most_verify * @sizeOf(cuda.sample.Rule);
     const tokens_at = meta_at + most_verify * 4;
-    const params_at = tokens_at + most_verify * 4; // the attention chunks, their width, the rows, the windows, record
+    const params_at = tokens_at + most_verify * 4; // two unused words, the rows, the windows, record
     const tables_len = params_at + 8 * 4;
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8) !*Engine {
@@ -343,12 +343,10 @@ pub const Engine = struct {
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
         const g = e.g;
         var total: usize = 0;
-        var widest: usize = 0;
         for (parts) |p| {
             try p.cache.settle(e);
             if (p.rows == 0 or p.cache.len + p.rows > p.cache.cap) return error.QwenContextFull;
             total += p.rows;
-            widest = @max(widest, p.cache.len + p.rows);
         }
         if (parts.len == 0 or parts.len > max_segs or total != ids.len or total > max_rows) return error.InvalidQwenSegments;
         const record = keep != .last;
@@ -378,11 +376,10 @@ pub const Engine = struct {
                 m.* = @intCast(p.position -% 1); // sample.cu keys row r at meta + r + 1
             }
         }
-        // attention chunks: at most max_chunks a row, each a multiple of 128 keys
-        const ck = @max(128, (widest + max_chunks * 128 - 1) / (max_chunks * 128) * 128);
+        // words 0 and 1 are reserved (each row's attention chunks follow its own keys: qwen35.cu's chunk_keys)
         const params = std.mem.bytesAsSlice(c_int, st[params_at..][0..32]);
-        params[0] = @intCast((widest + ck - 1) / ck);
-        params[1] = @intCast(ck);
+        params[0] = 0;
+        params[1] = 0;
         params[2] = @intCast(total);
         params[3] = @intCast(parts.len);
         params[4] = @intFromBool(record);
@@ -497,7 +494,7 @@ pub const Engine = struct {
                     try e.run(e.fns.head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
                     try e.run(e.fns.rope, .{ total, 1, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, t_anc, ai, t_params });
                     try e.run(e.fns.attn_partial, .{ max_chunks, g.kv_heads, total }, .{ 32 * group, 1, 1 }, .{ geo, e.qn, t_segs, t_rows, t_anc, ai, t_params, @as(f32, 1.0 / 16.0), e.pm, e.pl, e.po });
-                    try e.run(e.fns.attn_merge, .{ g.q_heads, total, 1 }, .{ 32, 1, 1 }, .{ geo, e.pm, e.pl, e.po, t_params, e.y });
+                    try e.run(e.fns.attn_merge, .{ g.q_heads, total, 1 }, .{ 32, 1, 1 }, .{ geo, e.pm, e.pl, e.po, t_segs, t_rows, t_anc, t_params, e.y });
                     try e.run(e.fns.attn_gate, .{ (total * aw + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ geo, e.y, e.qraw, e.mix, @as(c_int, @intCast(total)), t_params });
                     try e.proj(m.o, e.mix, e.r, total, prompt);
                     ai += 1;

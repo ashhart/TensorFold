@@ -310,6 +310,9 @@ __device__ __forceinline__ __nv_bfloat16 rotate(const __nv_bfloat16* x, int d, i
 // A row's ancestors-and-self: its tree window's row bits, or with the top bit set a chain row's index in its window.
 __device__ __forceinline__ int rows_seen(unsigned anc) { return (anc >> 31) ? (int)(anc & 0x7fffffffu) + 1 : __popc(anc); }
 
+// A row's chunk width from its own logical keys alone, as its one-row step's: at most MAXCH chunks, 128-key multiples.
+__device__ __forceinline__ int chunk_keys(int keys) { return max(128, (keys + MAXCH * 128 - 1) / (MAXCH * 128) * 128); }
+
 // The window row holding a row's nth seen window key.
 __device__ __forceinline__ int seen_row(unsigned anc, int n) {
     if (anc >> 31) return n;
@@ -342,24 +345,24 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_rope(Geo geo, __nv_bflo
     }
 }
 
-// Causal attention over the cache in P[0] chunks of P[1] keys, a warp a query head; partials by (row, head, chunk).
+// Causal attention in chunks of chunk_keys(the row's keys), a warp a query head; partials by (row, head, chunk).
 extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
                                                  const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc, int layer,
                                                  const int* __restrict__ P, float scale,
                                                  float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
     constexpr int DPL = HD / 32;
-    const int nch = P[0], ck = P[1];
     const int QH = geo.qh, KVH = geo.kvh;
     const int lane = threadIdx.x & 31, g = threadIdx.x >> 5;
     const int c = blockIdx.x, h = blockIdx.y;
-    if (c >= nch || past_rows(P, blockIdx.z)) return;
+    if (c >= MAXCH || past_rows(P, blockIdx.z)) return;
     const size_t m = blockIdx.z;
     const int qh = h * (QH / KVH) + g;
     const Seg sg = segs[rowseg[m]];
     const unsigned anc = rowanc[m];
     // chunks cut at logical positions (a window key's: the stream's length plus its ancestors), as a step's are
-    const int k0 = c * ck, k1 = min(k0 + ck, sg.len + rows_seen(anc));
-    const size_t slot = (m * QH + qh) * nch + c;
+    const int keys = sg.len + rows_seen(anc), ck = chunk_keys(keys);
+    const int k0 = c * ck, k1 = min(k0 + ck, keys);
+    const size_t slot = (m * QH + qh) * MAXCH + c;
     if (k0 >= k1) {
         if (lane == 0) {
             PM[slot] = -INFINITY;
@@ -401,17 +404,19 @@ extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __r
     for (int i = 0; i < DPL; i++) PO[slot * HD + lane * DPL + i] = o[i];
 }
 
-// The P[0] chunks' partials into each (row, query head)'s output, rows qh * HD wide. Grid (qh, rows), a warp each.
+// A row's chunks' partials into each (row, query head)'s output, rows qh * HD wide. Grid (qh, rows), a warp each.
 extern "C" __global__ void __launch_bounds__(32) tf_q35_attn_merge(Geo geo, const float* __restrict__ PM, const float* __restrict__ PL,
-                                                                     const float* __restrict__ PO, const int* __restrict__ P,
-                                                                     __nv_bfloat16* __restrict__ OUT) {
+                                                                     const float* __restrict__ PO, const Seg* __restrict__ segs,
+                                                                     const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc,
+                                                                     const int* __restrict__ P, __nv_bfloat16* __restrict__ OUT) {
     constexpr int DPL = HD / 32;
-    const int nch = P[0];
     const int QH = geo.qh;
     const int lane = threadIdx.x, qh = blockIdx.x;
     if (past_rows(P, blockIdx.y)) return;
     const size_t m = blockIdx.y;
-    const size_t base = (m * QH + qh) * nch;
+    const int keys = segs[rowseg[m]].len + rows_seen(rowanc[m]);
+    const int ck = chunk_keys(keys), nch = (keys + ck - 1) / ck;
+    const size_t base = (m * QH + qh) * MAXCH;
     float mx = -INFINITY;
     for (int c = 0; c < nch; c++)
         if (PL[base + c] > 0.0f) mx = fmaxf(mx, PM[base + c]);
