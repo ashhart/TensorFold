@@ -92,8 +92,7 @@ pub const Prepared = struct {
     preparing: bool,
 };
 
-/// --tool-system: the server's instruction as the first message of a chat request that offers tools and sends no
-/// system message (the client's own instruction wins); other requests pass unchanged.
+/// --tool-system: the server's instruction first in a tools request with no system message; others pass unchanged.
 fn withToolSystem(srv: *Server, a: Allocator, input: Input) Allocator.Error!Input {
     const text = srv.config.tool_system orelse return input;
     if (input.tools.len == 0 or input.prompt != null or input.messages != .array) return input;
@@ -318,7 +317,7 @@ const Generation = struct {
         return !g.ignore_eos and std.mem.indexOfScalar(u32, g.srv.eos, t) != null;
     }
 
-    /// What closes a call the model's end token left open (``tool_parse.closeCall``); nothing when a stop string, the length or ``ignore_eos`` ended the reply instead.
+    /// What closes a call the end token left open (``tool_parse.closeCall``); nothing for stop, length or ignore_eos.
     fn closeCall(g: *const Generation, text: []const u8) Allocator.Error![]const u8 {
         const t = g.collected.items;
         if (g.tools.len == 0 or t.len == 0 or !g.eos(t[t.len - 1])) return "";
@@ -398,7 +397,7 @@ const Generation = struct {
         };
     }
 
-    /// Ends the request and waits for the engine; one it ended unfinished counts as a disconnect, as the Mac scheduler counts it.
+    /// Ends the request and waits for the engine; one ended unfinished counts as a disconnect, as on the Mac.
     fn cancel(g: *Generation) void {
         if (!g.engine_done) g.srv.engine.cancel(g.id);
         g.drain();

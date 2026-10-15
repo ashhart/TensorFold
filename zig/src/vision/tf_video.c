@@ -1,19 +1,4 @@
-// libtfvideo: a video's sampled frames for the native server's vision inputs, as the Python engine decodes them
-// (tensorfold/vision/videos.py with PyAV): the first video stream; its rate (average, else guessed, else 24) and
-// frame count (the stream's, else its duration times the rate); frames sampled at ``rate`` a second over the whole
-// video (Qwen3-VL's rule: at least min_frames, at most max_frames, numpy's linspace rounded half to even), decoded
-// in order and scaled straight to the size ``size`` picks as RGB the way PyAV's VideoFrame.to_ndarray(rgb24, width,
-// height, interpolation="BICUBIC") does it (VideoReformatter: the frame's colour space and range kept, transfer and
-// primaries unspecified, sws_scale_frame with SWS_BICUBIC alone). Built against FFmpeg 9 (the FFmpeg PyAV 19.0.1
-// ships, so the frames equal Python's); the server loads it when a request carries a video.
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-#include <libavutil/imgutils.h>
-#include <libswscale/swscale.h>
-#include <math.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
+// libtfvideo: a video's sampled frames as videos.py decodes them with PyAV 19.0.1 (FFmpeg 9), RGB via SWS_BICUBIC.
 
 typedef int (*tf_size_fn)(void* ctx, int frames, int height, int width, int* out_h, int* out_w);
 
@@ -56,8 +41,7 @@ static int64_t mem_seek(void* o, int64_t off, int whence) {
     return at;
 }
 
-// PyAV's _set_frame_colorspace(frame, colorspace, UNSPECIFIED): an SWS_CS_* value names the frame's colour space
-// (the frame's own AVColorSpace number passes through it as PyAV passes it)
+// PyAV's _set_frame_colorspace(frame, colorspace, UNSPECIFIED): the frame's own AVColorSpace passes through.
 static void set_colorspace(AVFrame* f, int cs) {
     if (cs == SWS_CS_ITU709) f->colorspace = AVCOL_SPC_BT709;
     else if (cs == SWS_CS_FCC) f->colorspace = AVCOL_SPC_FCC;
@@ -171,8 +155,7 @@ int tf_video_decode(const uint8_t* data, size_t len, double rate, int min_frames
             if (e < 0) { finished = 1; break; }
             if (n > last) { finished = 1; av_frame_unref(frame); break; }
             if (next < count && n == wanted[next]) {
-                // PyAV's _reformat: the destination copies the frame's properties; its colour space and range pass
-                // through _set_frame_colorspace with the frame's own values; transfer and primaries unspecified
+                // PyAV's _reformat: the frame's colour space and range kept; transfer and primaries unspecified
                 av_frame_unref(rgb);
                 av_frame_copy_props(rgb, frame);
                 set_colorspace(frame, (int)frame->colorspace);

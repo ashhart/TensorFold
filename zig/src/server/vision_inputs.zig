@@ -1,9 +1,4 @@
-//! Image and video inputs of a chat request, as the Python server's frontend takes them (tensorfold/vision/images.py,
-//! videos.py, qwen_processing.py): each ``image_url`` part (a data: URL; JPEG or PNG) decoded and prepared, each
-//! ``video_url`` part (a data: URL; MP4, WebM...) decoded by libtfvideo and cut into frame groups, and each replaced in
-//! its message by the text Python's frontend expands it to: ``<|vision_start|>`` + one ``<|image_pad|>`` a visual
-//! token + ``<|vision_end|>`` for an image, and ``<t seconds><|vision_start|>`` + ``<|video_pad|>``s + ``<|vision_end|>``
-//! for each frame group of a video. The template copies the text, and one tokenization gives Python's ids.
+//! A chat request's image_url and video_url parts, prepared and replaced by the text Python's frontend expands them to.
 
 const std = @import("std");
 const media_fetch = @import("media_fetch.zig");
@@ -26,8 +21,7 @@ const max_tokens_one: u64 = 4096;
 
 pub const Extracted = struct { messages: Value, images: []api.Image };
 
-/// The image URL of a content part (an OpenAI ``image_url`` part, or ``image`` / ``input_image`` spellings) and its
-/// ``detail``; null for a part that is not an image.
+/// The image URL of a content part (``image_url``, ``image`` or ``input_image``) and its ``detail``; else null.
 const Kind = enum { image, video };
 
 fn mediaPart(part: Value) ?struct { kind: Kind, url: ?[]const u8, detail: []const u8 } {
@@ -89,8 +83,7 @@ fn hasImages(messages: Value) bool {
 const image_media = [_][]const u8{ "image/jpeg", "image/png", "image/webp" };
 const video_media = [_][]const u8{ "video/mp4", "video/webm", "video/quicktime", "video/x-matroska" };
 
-/// The bytes of a ``data:<type>;base64,<data>`` URL, or (--vision-urls) of a public HTTPS URL, fetched before
-/// ``deadline`` (images.py _check_source and load_images).
+/// The bytes of a ``data:`` URL, or (--vision-urls) a public HTTPS URL fetched before ``deadline`` (images.py).
 fn dataBytes(srv: *Server, cx: *Cx, url: []const u8, limit: usize, kind: Kind, deadline: std.Io.Timestamp) errors.Refused![]u8 {
     if (!std.mem.startsWith(u8, url, "data:")) {
         if (!std.mem.startsWith(u8, url, "https://")) return cx.refuse(if (kind == .image) "images require data URLs or public HTTPS URLs" else "videos require data URLs or public HTTPS URLs");
@@ -114,8 +107,7 @@ fn dataBytes(srv: *Server, cx: *Cx, url: []const u8, limit: usize, kind: Kind, d
     return out;
 }
 
-/// A request's images extracted and prepared, its messages with their image parts as the template's image text;
-/// null when it has none. A server without --vision refuses images.
+/// A request's images prepared, its image parts as the template's image text; null without images. Needs --vision.
 pub fn extract(srv: *Server, cx: *Cx, messages: ?Value) errors.Refused!?Extracted {
     const list = messages orelse return null;
     if (!hasImages(list)) return null;
@@ -191,8 +183,7 @@ pub fn extract(srv: *Server, cx: *Cx, messages: ?Value) errors.Refused!?Extracte
                 try text.appendSlice(cx.a, vision_end);
             },
             .video => if (srv.info.vision_glm) {
-                // GLM: <|begin_of_video|>, each frame group as <|begin_of_image|> <|image|>s <|end_of_image|> and its
-                // first frame's "t.t seconds", <|end_of_video|> (mlx-vlm's glm5_next processor)
+                // GLM: <|begin_of_video|>, image groups with their "t.t seconds", <|end_of_video|> (glm5_next)
                 var v = try videoGlm(srv, cx, bytes);
                 defer v.deinit(cx.a);
                 try text.appendSlice(cx.a, "<|begin_of_video|>");
@@ -244,7 +235,7 @@ pub fn extract(srv: *Server, cx: *Cx, messages: ?Value) errors.Refused!?Extracte
     return .{ .messages = .{ .array = out }, .images = images.items };
 }
 
-// -- videos: libtfvideo (FFmpeg), loaded when the first video arrives --------------------------------------------------
+// -- videos: libtfvideo (FFmpeg), loaded when the first video arrives ------------------------------------------
 
 const TfVideo = extern struct { rgb: ?[*]u8, frames: c_int, height: c_int, width: c_int, indices: ?[*]c_int, fps: f64 };
 const SizeFn = *const fn (ctx: ?*anyopaque, frames: c_int, height: c_int, width: c_int, oh: *c_int, ow: *c_int) callconv(.c) c_int;

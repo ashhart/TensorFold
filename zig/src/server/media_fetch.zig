@@ -1,7 +1,4 @@
-//! Public HTTPS media for --vision-urls, as the Python server fetches it (vision/images_http.py): an https URL on
-//! port 443 without credentials or a fragment, its host resolved and every address checked public, a TLS connection
-//! verified for the host on an address that was checked, GET with identity encoding, up to 3 redirects (each checked
-//! the same way), a declared media type the caller accepts, the bytes within the caller's limit, all inside a deadline.
+//! Public HTTPS media for --vision-urls as vision/images_http.py fetches it: checked hosts, TLS, 3 redirects, limits.
 
 const std = @import("std");
 const Io = std.Io;
@@ -22,8 +19,7 @@ fn fail(f: *Failure, text: []const u8) Error {
     return error.Media;
 }
 
-/// Python ipaddress: is_global and not multicast or reserved, nor 192.0.0.0/24 or 168.63.129.16; no IPv6 address
-/// that embeds an IPv4 one (mapped, 6to4, Teredo).
+/// Python ipaddress is_global, less multicast, reserved, 192.0.0.0/24, 168.63.129.16 and IPv6 embedding an IPv4 one.
 pub fn publicIp(a: net.IpAddress) bool {
     switch (a) {
         .ip4 => |v| {
@@ -37,9 +33,9 @@ pub fn publicIp(a: net.IpAddress) bool {
                 }
             }.net4;
             const blocked = [_]struct { [4]u8, u5 }{
-                .{ .{ 0, 0, 0, 0 }, 8 },      .{ .{ 10, 0, 0, 0 }, 8 },     .{ .{ 100, 64, 0, 0 }, 10 }, .{ .{ 127, 0, 0, 0 }, 8 },
-                .{ .{ 169, 254, 0, 0 }, 16 }, .{ .{ 172, 16, 0, 0 }, 12 },  .{ .{ 192, 0, 0, 0 }, 24 },  .{ .{ 192, 0, 2, 0 }, 24 },
-                .{ .{ 192, 168, 0, 0 }, 16 }, .{ .{ 198, 18, 0, 0 }, 15 },  .{ .{ 198, 51, 100, 0 }, 24 }, .{ .{ 203, 0, 113, 0 }, 24 },
+                .{ .{ 0, 0, 0, 0 }, 8 },      .{ .{ 10, 0, 0, 0 }, 8 },    .{ .{ 100, 64, 0, 0 }, 10 },   .{ .{ 127, 0, 0, 0 }, 8 },
+                .{ .{ 169, 254, 0, 0 }, 16 }, .{ .{ 172, 16, 0, 0 }, 12 }, .{ .{ 192, 0, 0, 0 }, 24 },    .{ .{ 192, 0, 2, 0 }, 24 },
+                .{ .{ 192, 168, 0, 0 }, 16 }, .{ .{ 198, 18, 0, 0 }, 15 }, .{ .{ 198, 51, 100, 0 }, 24 }, .{ .{ 203, 0, 113, 0 }, 24 },
                 .{ .{ 224, 0, 0, 0 }, 4 },    .{ .{ 240, 0, 0, 0 }, 4 },
             };
             for (blocked) |blk| if (in(b, blk[0], blk[1])) return false;
@@ -48,8 +44,7 @@ pub fn publicIp(a: net.IpAddress) bool {
         },
         .ip6 => |v| {
             const b = v.bytes;
-            // global unicast 2000::/3 only, less documentation (2001:db8::/32), the 2001::/23 IETF block (Teredo
-            // 2001::/32 among it), 6to4 (2002::/16)
+            // 2000::/3 only, less 2001:db8::/32, the 2001::/23 IETF block (Teredo among it) and 6to4 2002::/16
             if (b[0] & 0xe0 != 0x20) return false;
             if (b[0] == 0x20 and b[1] == 0x01 and b[2] == 0x0d and b[3] == 0xb8) return false;
             if (b[0] == 0x20 and b[1] == 0x01 and b[2] < 0x02) return false;
@@ -127,8 +122,7 @@ fn setTimeouts(handle: net.Socket.Handle, ms: i64) void {
     std.posix.setsockopt(handle, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
 }
 
-/// A TCP connection to the checked address, its connect, sends and reads bounded by ``ms`` (SO_SNDTIMEO bounds a
-/// Linux connect too; std's connect has no timeout yet).
+/// A TCP connection to the checked address, connect, sends and reads bounded by ``ms`` (SO_SNDTIMEO bounds connect).
 fn connect(addr: net.IpAddress, ms: i64, f: *Failure) Error!net.Stream {
     const posix = std.posix;
     const linux = std.os.linux;

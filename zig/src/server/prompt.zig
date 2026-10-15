@@ -53,9 +53,7 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
     return ids;
 }
 
-/// GLM-5.3's template writes a reasoning-effort system line whatever the request asks; with thinking off the Python
-/// frontend renders it without (glm5_next/prompts.py thinking_off: no effort line, an empty think block). The line is
-/// its own segment between special tokens, so its ids alone are the ids it renders to; the first is dropped.
+/// GLM-5.3's effort system line, dropped with thinking off as glm5_next/prompts.py does; its ids are its own segment.
 fn withoutEffortLine(srv: *Server, cx: *Cx, ids: []u32) errors.Refused![]u32 {
     const line = srv.text.encode(cx.a, "<|system|>Reasoning Effort: Max", false) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
