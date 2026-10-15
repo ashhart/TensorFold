@@ -121,18 +121,7 @@ pub const Metal = struct {
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{
-            .prefill = prefillFn,
-            .first = firstFn,
-            .first_masked = grammar.firstMasked,
-            .queue = queueFn,
-            .read = readFn,
-            .verify = verifyFn,
-            .keep = keepFn,
-            .draft = draftFn,
-            .release = releaseFn,
-            .alternatives = alternativesFn, .held = grammar.held, .reports_fill = true,
-        } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = grammar.firstMasked, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .alternatives = alternativesFn, .held = grammar.held, .reports_fill = true } };
     }
 
     /// The facts the round loop reads at setup (Python's NemotronH attributes), with this engine's own timings.
