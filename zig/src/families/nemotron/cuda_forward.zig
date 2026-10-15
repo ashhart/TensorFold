@@ -62,6 +62,7 @@ pub const Forward = struct {
     segs: []const Seg = &.{}, // a window's sequences, as windowSegs runs them
     captures: []const kept.Mark = &.{}, // marks inside the prompt chunk: their Mamba states are copied out as it runs
     tp: ?*const cuda.tp_group.Group = null, // a latent MoE's ranks: their expert rows meet every MoE layer
+    vision: ?*const @import("cuda_vision.zig").Vision = null, // a prompt pass's image rows, spliced after its embeds
 
     pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, sampled: bool) Forward {
         return .{
@@ -346,6 +347,7 @@ pub const Forward = struct {
     pub fn chunkBegin(f: *const Forward, w: *Walk) !void {
         const b = f.b;
         try f.embed(b.p_ids, b.emb, w.rows);
+        if (f.vision) |v| try v.splice(f.ops.s, w.pos, w.pos + w.rows, b.emb);
         w.x = b.emb;
     }
 

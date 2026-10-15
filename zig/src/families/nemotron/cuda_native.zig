@@ -21,12 +21,14 @@ const core = @import("core");
 pub const slide = @import("cuda_slide.zig");
 
 pub const model_type = "nemotron_h";
+pub const explains_open = true; // explain() words open refusals too (--vision on a checkpoint without a tower)
 pub const formats: []const []const u8 = &.{ "mlx-q4g64", "modelopt-nvfp4" };
 pub const default_context: i64 = engine.default_context;
 pub const max_segments: u32 = @import("cuda_segments.zig").MAX;
 pub const prompt_rows: u32 = state.pass_rows;
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null };
+pub const vision = @import("cuda_vision.zig");
 
 /// Thinking budgets the lone driver takes (cuda_lone.zig): above it, the stream goes to the lane core before its cut.
 pub const lone_min_budget = @import("cuda_lone.zig").min_budget;
@@ -52,6 +54,7 @@ pub const Loaded = struct {
     target: *reuse.Target, // the prompt cache copies this engine (cuda_reuse.zig)
     learns: ?*engine.Engine = null, // --slide: the engine its learner trains, whose sites it attached at load
     learn_bytes: usize = 0, // --slide: what its trainer allocates at the first lesson, kept out of the streams' room
+    vision: ?*vision.Vision = null, // --vision: the tower the server's image requests reach
 };
 
 /// The first shard, index or config.json in `dir` that a write in place would reach through a link, or null.
@@ -77,7 +80,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     };
     const carve = try openCarveout(gpa, ctx);
     errdefer if (carve) |c| closeCarveout(gpa, c);
-    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments, .carveout = carve, .slide = o.slide });
+    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments, .carveout = carve, .slide = o.slide, .vision = o.vision });
     errdefer e.deinit();
     const head: ?*Head = if (o.drafts) try Head.init(e) else null;
     errdefer if (head) |h| h.deinit();
@@ -106,6 +109,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .lone = if (head != null) loneRun else null,
         .learns = if (o.slide) e else null,
         .learn_bytes = if (o.slide) @import("cuda_train.zig").Trainer.memory(e.c) else 0,
+        .vision = e.vision,
     };
 }
 
@@ -125,6 +129,8 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
         error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
+        error.VisionRefused => "--vision: this checkpoint has no image tower the CUDA engine reads (Nemotron Omni's RADIO); serve it without --vision",
+        error.NoVision => "this server reads no images: start it with --vision",
         else => null,
     };
 }

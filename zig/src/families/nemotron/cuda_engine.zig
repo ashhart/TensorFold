@@ -35,6 +35,7 @@ pub const Options = struct {
     segments: usize = 1, // whole prompt chunks a call runs as staggered segments (1: one chunk at a time)
     carveout: ?*cuda.Carveout = null, // KV planes go to the display carveout first while it holds them
     slide: bool = false, // Sliding Weights asked for: refused for a checkpoint the learner cannot read
+    vision: ?@import("cuda_vision.zig").Limits = null, // --vision: the checkpoint's image tower (an omni checkpoint's)
 };
 
 /// Asked before each prompt chunk (or segmented call): true stops the prompt with error.Cancelled.
@@ -125,6 +126,7 @@ pub const Engine = struct {
     spares: marks.Spares = .{}, // free Mamba buffers the prompt cache set aside for the next marks
     last_chunk: usize = 0, // where the last prompt pass's last chunk started (the prompt's last row: len - 1 - this)
     tp: ?cuda.tp_group.Group = null, // a latent MoE over ranks (TF_NEMOTRON_RANK of TF_NEMOTRON_WORLD)
+    vision: ?*@import("cuda_vision.zig").Vision = null, // --vision: the tower and a prompt pass's image rows
 
     /// Loads the checkpoint into the Python engine's layouts and sizes the caches; `triton_dir` null: our own glue.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, model_dir: []const u8, triton_dir: ?[]const u8, opts: Options) !*Engine {
@@ -167,6 +169,14 @@ pub const Engine = struct {
         }) else chunks;
         e.w = try weights.load(gpa, io, e.ops(), model_dir, e.c, opts.mtp);
         errdefer e.w.deinit();
+        if (opts.vision) |lim| {
+            var problem: []const u8 = "";
+            e.vision = (try @import("cuda_vision.zig").Vision.init(gpa, io, ctx.d, model_dir, lim, &problem)) orelse {
+                std.log.err("--vision: {s}", .{problem});
+                return error.VisionRefused;
+            };
+        }
+        errdefer if (e.vision) |v| v.deinit();
         e.b = try state.Buffers.init(ctx.d, e.c, e.max_len, e.nch, e.carve);
         errdefer e.b.deinit();
         try e.b.initShared(e.ops(), e.c);
@@ -287,6 +297,7 @@ pub const Engine = struct {
         e.side.fork.deinit();
         e.side.join.deinit();
         if (e.tp) |*g| g.close();
+        if (e.vision) |v| v.deinit();
         e.stream.deinit();
         e.gpa.destroy(e);
     }
@@ -354,6 +365,7 @@ pub const Engine = struct {
         f.slot = e.slot;
         f.untaught = e.bound.untaught;
         f.tp = if (e.tp) |*g| g else null;
+        f.vision = e.vision;
         if (dump == null and e.c.experts <= 128 and e.c.slots() <= 8) f.side = e.side; // tf_plan_routed's bounds
         return f;
     }

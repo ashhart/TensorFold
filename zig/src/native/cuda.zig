@@ -334,6 +334,13 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     var probe: Probe = .{ .a = a, .io = io, .ctx = &g.ctx, .held = held0, .problem = problem };
     var opts: F.Options = .{ .context = @intCast(window), .drafts = o.drafts, .segments = segments, .slide = o.slide };
+    if (o.vision) |vo| {
+        if (!@hasField(F.Options, "vision")) {
+            problem.* = "--vision: this CUDA family reads no images; serve it without --vision";
+            return null;
+        }
+        opts.vision = .{ .image_tokens = vo.image_tokens, .max_images = vo.max_images };
+    }
     if (@hasField(F.Options, "room")) opts.room = .{ .ctx = &probe, .read = Probe.read };
     if (weights > before.room(held0)) {
         problem.* = try std.fmt.allocPrint(a, "the checkpoint's {d:.1} GiB of weights do not fit the {d:.1} GiB the CUDA memory budget grants ({d:.1} GiB free less a {d:.1} GiB reserve{s}); free device memory or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB", .{ toGib(weights), toGib(before.room(held0)), toGib(before.free), toGib(before.reserve), if (before.limit != null) ", under TENSORFOLD_CUDA_MEMORY_LIMIT_GB" else "" });
@@ -449,9 +456,23 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .logprobs = loaded.backend.vtable.first_row != null,
         .prompt_logprobs = loaded.backend.vtable.prompt_rows,
         .structures = loaded.backend.vtable.first_masked != null,
+        .vision = if (@hasField(@TypeOf(loaded), "vision")) visionOffer(loaded.vision) else null,
     }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+/// Info.vision for a Nemotron Omni engine's tower; null without --vision.
+fn visionOffer(v: ?*nemotron.native.vision.Vision) ?api.Vision {
+    const x = v orelse return null;
+    const prepare = struct {
+        fn f(ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
+            const t: *nemotron.native.vision.Vision = @ptrCast(@alignCast(ctx));
+            const p = try t.prepare(a, bytes, max_tokens);
+            return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
+        }
+    }.f;
+    return .{ .ctx = x, .prepare = prepare, .image_token = x.marks.image, .markers = &x.mark_ids, .wrap = .{ x.marks.open, x.marks.close }, .image_tokens = x.limits.image_tokens, .max_images = x.limits.max_images, .explain = nemotron.native.vision.Vision.explain };
 }
 
 /// --learn-conversations: the identity probed on this thread (its context current), the store opened and attached.
