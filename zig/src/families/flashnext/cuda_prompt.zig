@@ -190,6 +190,14 @@ pub const vocabulary: usize = vocab;
 /// Prompt plus reply tokens a sequence can hold: the attention kernels' NCH chunks of 512 keys.
 pub const max_tokens: usize = weights.nch * 512;
 
+/// Device bytes `Engine.newSeq(cap)` allocates: the convolution tails, the recurrent states, the key and value
+/// caches with the indexer keys, and the n-gram tail.
+pub fn seqBytes(cap: usize) usize {
+    const linear = linear_n * ((gdn.taps - 1) * gdn.conv_dim * 2 + state_n * 4);
+    const attn = attn_n * cap * (2 * kv_heads * head_dim * 2 + index_dim * 2);
+    return linear + attn + ple_tail_n * wide * 2;
+}
+
 /// One loaded checkpoint: the embedding table, the mixer, the head, and a scratch row the forwards share.
 pub const Engine = struct {
     gpa: std.mem.Allocator,
@@ -435,4 +443,10 @@ test "linear layers skip every fourth index and attention starts at 3" {
     try std.testing.expectEqual(@as(usize, 35), linearIndex(46));
     try std.testing.expectEqual(@as(usize, 0), attnIndex(3));
     try std.testing.expectEqual(@as(usize, 11), attnIndex(47));
+}
+
+test "a sequence's device bytes grow by the twelve attention layers' keys, values and indexer keys per token" {
+    const per_token = attn_n * (2 * kv_heads * head_dim * 2 + index_dim * 2);
+    try std.testing.expectEqual(per_token, seqBytes(2) - seqBytes(1));
+    try std.testing.expect(seqBytes(max_tokens) > max_tokens * per_token);
 }

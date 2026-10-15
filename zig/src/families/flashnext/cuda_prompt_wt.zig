@@ -278,6 +278,38 @@ pub fn cat(gpa: std.mem.Allocator, parts: []const []const u8) ![]u8 {
     return out;
 }
 
+/// A tensor the engine leaves off the device: the n-gram tables (rows gathered from the mapped shards), the draft
+/// head (served without drafts) and the vision tower (text only).
+pub fn hostOnly(name: []const u8) bool {
+    return std.mem.indexOf(u8, name, ".ple_embedding.ngram_embedding.") != null or
+        std.mem.startsWith(u8, name, "language_model.mtp.") or
+        std.mem.startsWith(u8, name, "vision_tower.");
+}
+
+/// The checkpoint's tensor bytes the engine uploads, every shard the index names read for its header alone.
+pub fn deviceBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
+    var store = try Store.open(gpa, io, dir);
+    defer store.deinit();
+    const wm = store.parsed.value.object.get("weight_map") orelse return error.MissingTensor;
+    var files: std.StringHashMapUnmanaged(void) = .empty;
+    defer files.deinit(gpa);
+    var it = wm.object.iterator();
+    while (it.next()) |kv| try files.put(gpa, kv.value_ptr.string, {});
+    var total: u64 = 0;
+    var fi = files.keyIterator();
+    while (fi.next()) |rel| {
+        const path = try std.fs.path.join(gpa, &.{ dir, rel.* });
+        defer gpa.free(path);
+        var sh = try Shard.load(gpa, io, path);
+        defer sh.close();
+        var ni = sh.names.iterator();
+        while (ni.next()) |e| {
+            if (!hostOnly(e.key_ptr.*)) total += e.value_ptr.end - e.value_ptr.begin;
+        }
+    }
+    return total;
+}
+
 pub fn asF32(gpa: std.mem.Allocator, t: Tensor) ![]f32 {
     if (t.rank != 1) return error.UnexpectedTensor;
     const out = try gpa.alloc(f32, t.dim(0));
@@ -395,4 +427,13 @@ pub fn stitch(gpa: std.mem.Allocator, store: *Store, prefix: []const u8, names: 
         gpa.free(bs[i]);
     };
     return .{ .w = try cat(gpa, ws[0..n]), .s = try cat(gpa, ss[0..n]), .b = try cat(gpa, bs[0..n]), .n = n };
+}
+
+test "the n-gram tables, the draft head and the vision tower stay off the device" {
+    try std.testing.expect(hostOnly("language_model.model.layers.2.ple.ple_embedding.ngram_embedding.shards.7.weight"));
+    try std.testing.expect(hostOnly("language_model.mtp.layers.0.mlp.switch_mlp.up_proj.weight"));
+    try std.testing.expect(hostOnly("vision_tower.blocks.0.attn.qkv.weight"));
+    try std.testing.expect(!hostOnly("language_model.model.layers.2.ple.ple_embedding.ngram_heads_offsets"));
+    try std.testing.expect(!hostOnly("language_model.model.layers.0.mlp.switch_mlp.up_proj.weight"));
+    try std.testing.expect(!hostOnly("language_model.lm_head.weight"));
 }

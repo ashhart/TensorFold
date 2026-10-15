@@ -13,13 +13,30 @@ const nemotron_slide = @import("nemotron_slide.zig");
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
 const registry = .{ nemotron.native, flashnext.native };
 
-/// Nemotron's prompt-cache copies. A file-level value so the store's pointer stays valid for the process.
-const nemotron_snaps: api.prompt_cache.Snapshots.VTable = .{
-    .bytes = nemotron.native.snap_bytes,
-    .save = nemotron.native.snap_save,
-    .restore = nemotron.native.snap_restore,
-    .drop = nemotron.native.snap_drop,
-};
+/// A family's prompt-cache copies, a container-level value so the store's pointer lives on; null: it keeps none.
+fn snapshots(comptime F: type) ?*const api.prompt_cache.Snapshots.VTable {
+    if (!@hasDecl(F, "snap_bytes")) return null;
+    return &struct {
+        const v: api.prompt_cache.Snapshots.VTable = .{ .bytes = F.snap_bytes, .save = F.snap_save, .restore = F.snap_restore, .drop = F.snap_drop };
+    }.v;
+}
+
+/// Where a family's kept states sit: its own `cache_rules`, else any row with the head's one token on (#670).
+fn cacheRules(comptime F: type) api.prompt_cache.Rules {
+    if (!@hasDecl(F, "cache_rules")) return .{ .lookahead = 1, .min_prompt = 0, .warm = if (@hasDecl(F, "warm_quiet")) .waits else .off };
+    const r = F.cache_rules;
+    return .{ .lookahead = r.lookahead, .planned = r.planned, .grid = if (r.planned) F.prompt_rows else 0, .min_gap = r.min_gap, .min_prompt = r.min_prompt };
+}
+
+/// What the lane host takes from the family: its quiet wait before a warm pass, its lone driver's hand-over budget.
+const PerFamily = struct { warm_quiet: u64 = 0, lone_min_budget: u32 = 0 };
+
+fn perFamily(comptime F: type) PerFamily {
+    return .{
+        .warm_quiet = if (@hasDecl(F, "warm_quiet")) F.warm_quiet else 0,
+        .lone_min_budget = if (@hasDecl(F, "lone_min_budget")) F.lone_min_budget else 0,
+    };
+}
 
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const families: []const api.Family = blk: {
@@ -186,7 +203,7 @@ const Host = struct {
     }
 
     /// The round loop and the lane host over the family's backend, its thread started.
-    fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain) !void {
+    fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain, per: PerFamily) !void {
         h.cfg = try lanes.Config.init(h.gpa, facts, rows, rows - 1);
         errdefer h.cfg.deinit(h.gpa);
         h.clock = .{ .io = io };
@@ -196,8 +213,8 @@ const Host = struct {
         h.host.memory = if (h.gpu != null) .{ .read = readMemory } else null;
         h.host.explain = explain;
         h.host.cache = h.store;
-        h.host.warm_quiet = if (info.warm_turns) nemotron.native.warm_quiet else 0;
-        if (h.lone != null) h.host.lone = .{ .ctx = h, .run = loneRun, .sampled = true, .logprobs = h.inner.vtable.first_row != null, .structures = h.inner.vtable.first_masked != null, .min_budget = nemotron.native.lone_min_budget, .resumes = true };
+        h.host.warm_quiet = if (info.warm_turns) per.warm_quiet else 0;
+        if (h.lone != null) h.host.lone = .{ .ctx = h, .run = loneRun, .sampled = true, .logprobs = h.inner.vtable.first_row != null, .structures = h.inner.vtable.first_masked != null, .min_budget = per.lone_min_budget, .resumes = true };
         if (h.learn != null) h.host.learner = h.learner();
         try h.host.start();
     }
@@ -273,8 +290,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         if (!@hasDecl(F, "slide")) {
             problem.* = try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on CUDA yet", .{o.model_type});
             return null;
-        }
-        if (try nemotron_slide.refusal(F, a, io, o.dir, "`cp -RL` (a copy that follows links)")) |why| {
+        } else if (try nemotron_slide.refusal(F, a, io, o.dir, "`cp -RL` (a copy that follows links)")) |why| {
             problem.* = why;
             return null;
         }
@@ -323,7 +339,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         },
     };
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
-    const weights = weightBytes(io, o.dir);
+    // a family that keeps part of its checkpoint off the device says what it uploads; else every shard's bytes
+    const weights = if (@hasDecl(F, "deviceWeightBytes")) F.deviceWeightBytes(a, io, o.dir) else weightBytes(io, o.dir);
     const held0 = cuda.usage(false).device;
     if (weights > before.room(held0)) {
         problem.* = try std.fmt.allocPrint(a, "the checkpoint's {d:.1} GiB of weights do not fit the {d:.1} GiB the CUDA memory budget grants ({d:.1} GiB free less a {d:.1} GiB reserve{s}); free device memory or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB", .{ toGib(weights), toGib(before.room(held0)), toGib(before.free), toGib(before.reserve), if (before.limit != null) ", under TENSORFOLD_CUDA_MEMORY_LIMIT_GB" else "" });
@@ -348,24 +365,26 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = loaded.backend, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = loaded.lone };
-    const cache = budget.cacheBytes(o.prompt_cache_gib, room, loaded.stream_bytes * (streams -| free));
+    const snaps = comptime snapshots(F);
+    const cache = if (snaps != null) budget.cacheBytes(o.prompt_cache_gib, room, loaded.stream_bytes * (streams -| free)) else 0;
     h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in passes of up to {d} rows{s}{s}; {s}", .{
         capability,                                                                                                        device,                                                                                                       name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (loaded.learn_bytes > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(loaded.learn_bytes)}) else "", streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
         if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache", .{toGib(cache)}) else ", no prompt cache", if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
     });
     errdefer gpa.free(h.startup);
-    if (cache > 0) {
+    if (snaps) |vtable| if (cache > 0) {
         const pc = api.prompt_cache;
         const store = try gpa.create(pc.Store);
-        // states keep at any row at no prompt call (the head reads one token on); replies prefill when it is quiet
-        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = &nemotron_snaps }, .{ .lookahead = 1, .min_prompt = 0, .warm = .waits }, cache - try nemotron.native.snap_ready(loaded.target, cache));
+        // states kept where the family's rules allow; its spare state buffers come out of the budget
+        const spare = if (@hasDecl(F, "snap_ready")) try F.snap_ready(loaded.target, cache) else 0;
+        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = vtable }, comptime cacheRules(F), cache - spare);
         h.store = store;
-    }
+    };
     errdefer if (h.store) |store| {
         store.deinit();
         gpa.destroy(store);
     };
-    if (loaded.learns != null) {
+    if (@hasDecl(F, "slide") and loaded.learns != null) {
         const Slide = nemotron_slide.Adapter(F.slide);
         h.dir = try gpa.dupe(u8, o.dir);
         const s = try gpa.create(Slide);
@@ -385,7 +404,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         gpa.free(h.dir);
     };
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
-    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .warm_turns = h.store != null, .logprobs = loaded.backend.vtable.first_row != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows, .structures = loaded.backend.vtable.first_masked != null }, .{ .ctx = loaded.ctx, .text = F.explain });
+    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .warm_turns = h.store != null and @hasDecl(F, "warm_quiet"), .logprobs = loaded.backend.vtable.first_row != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows, .structures = loaded.backend.vtable.first_masked != null }, .{ .ctx = loaded.ctx, .text = F.explain }, comptime perFamily(F));
     opened = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
@@ -450,7 +469,7 @@ test "a cancel during a long prompt stops it, and the next request's reply is un
     const h = try gpa.create(Host);
     defer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .gpu = null, .family = &target, .release = Nothing.release, .inner = target.backend(), .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined };
-    try h.serve(std.testing.io, .{ .exact_width = 8, .mtp = true, .speculate = true, .drafts = 7, .hidden_rows = true }, 8, .{ .lanes = 2 }, null);
+    try h.serve(std.testing.io, .{ .exact_width = 8, .mtp = true, .speculate = true, .drafts = 7, .hidden_rows = true }, 8, .{ .lanes = 2 }, null, .{});
     defer {
         h.host.stop();
         h.core.deinit();

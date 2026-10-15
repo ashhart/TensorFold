@@ -4,6 +4,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
 const prompt = @import("cuda_prompt.zig");
+const weights = @import("cuda_prompt_wt.zig");
 
 const be = lanes.backend;
 const ring = 1024;
@@ -15,17 +16,43 @@ pub fn Namespace(comptime Tri: type) type {
         pub const formats: []const []const u8 = &.{"mlx-q4g32"};
         // dense attention over the captured scratch (NCH chunks of 512 keys, QSA off): no sparse indexer yet
         pub const default_context: i64 = @intCast(prompt.max_tokens);
-        pub const prefill_step: u32 = 0;
+        // a prompt runs as one pass of fused decode rows, the whole prompt at once: no staggered segments
+        pub const max_segments: u32 = 1;
+        pub const prompt_rows: u32 = @intCast(prompt.max_tokens);
 
-        pub const Options = struct { context: usize, drafts: bool };
+        pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false };
+
+        /// One stream's prompt-and-reply driver, as native/cuda.zig types it; this family has none.
+        pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
 
         pub const Loaded = struct {
             backend: be.Backend,
             facts: lanes.Model,
             rows: u32,
+            /// Device bytes each admitted stream allocates: its own caches at the server's window.
+            stream_bytes: usize,
+            /// Every stream allocates its own sequence; none rides on the engine's.
+            free_streams: u32 = 0,
             ctx: *anyopaque,
             deinit: *const fn (*anyopaque) void,
+            lone: ?LoneRun = null,
+            learn_bytes: usize = 0,
         };
+
+        /// What the device holds of the checkpoint, for admission: the n-gram tables stay in the mapped shards.
+        /// 0 when the headers do not read, and the load then names what is wrong.
+        pub fn deviceWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) u64 {
+            return weights.deviceBytes(gpa, io, dir) catch 0;
+        }
+
+        /// A request or load this engine refuses, in words; null: none of its own.
+        pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
+            return switch (err) {
+                error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
+                error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
+                else => null,
+            };
+        }
 
         const Lane = struct { seq: prompt.Seq };
 
@@ -97,9 +124,12 @@ pub fn Namespace(comptime Tri: type) type {
             }
         };
 
-        pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: []const u8, o: Options) !Loaded {
+        pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, captured: ?[]const u8, o: Options) !Loaded {
             _ = o.drafts; // this model is served one token at a time; there is no draft head
             if (o.context > prompt.max_tokens) return error.ContextOverDenseAttention;
+            if (o.segments != 1 or o.slide) return error.UnsupportedOption;
+            // every launch is a captured Triton cubin: TENSORFOLD_CUDA_KERNELS names the set
+            const kernels = captured orelse return error.CapturedKernelsRequired;
             const driver: *cuda.Driver = @constCast(ctx.d);
             const own = try gpa.create(Cuda);
             errdefer gpa.destroy(own);
@@ -116,6 +146,7 @@ pub fn Namespace(comptime Tri: type) type {
                 .backend = own.backend(),
                 .facts = Cuda.facts(),
                 .rows = 1,
+                .stream_bytes = prompt.seqBytes(o.context),
                 .ctx = own,
                 .deinit = release,
             };
