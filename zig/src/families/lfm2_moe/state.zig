@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const c = @import("config.zig");
+const tile = @import("../../core/tile_qmm.zig");
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 /// The two Bx rows before the next token (bf16 [2, hidden]).
 pub const conv_bytes = (c.conv_taps - 1) * c.hidden * 2;
@@ -122,6 +123,8 @@ pub const Scratch = struct {
     tokens: mtl.Buffer,
     ident: mtl.Buffer,
     work: mtl.Buffer,
+    /// Window rows' picks by expert for the twin (tile_qmm.encodeTwinGroup).
+    groups: mtl.Buffer,
     /// A projection's input rows' group sums for the tiles and their twin (f32 [rows, k / 64]).
     sums: mtl.Buffer,
     logits: mtl.Buffer,
@@ -158,6 +161,7 @@ pub const Scratch = struct {
         out.ident = try mem.alloc(slots * 4);
         for (out.ident.slice(u32, slots), 0..) |*v, i| v.* = @intCast(i);
         out.work = try mem.alloc((slots / 32 + c.experts + 2) * 4);
+        out.groups = try mem.alloc(tile.groupWords(@min(slots, tile.window_slots)) * 4);
         out.sums = try mem.alloc(@max(rows * (c.intermediate / 64), slots * (c.hidden / 64)) * 4);
         const logit_rows: usize = @min(rows, batch_rows);
         out.logits = try mem.alloc(logit_rows * c.vocab * 2);

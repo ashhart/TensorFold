@@ -228,9 +228,12 @@ fn moe(enc: Encoder, s: *st.Scratch, x: wts.Moe, scale: f32, total: usize) bool 
     enc.groups(.{ total, 1, 1 }, .{ 32, 1, 1 });
     const t = &enc.m.kernels.tiles;
     if (!enc.prompt and enc.m.kernels.twin) {
+        // Wide windows read each picked expert once for its rows (a row's own picks are distinct experts).
+        const groups: ?Buffer = if (total >= tile.group_rows) s.groups else null;
+        if (groups != null) tile.encodeTwinGroup(e, t, s.picks, slots, s.groups) catch unreachable;
         const gate = matrix(x.gate.one);
-        tile.encodeTwinGlu(e, t, gate, matrix(x.up.one), s.x, s.act, s.picks, null, slots, c.topk) catch unreachable;
-        tile.encodeTwinIndexed(e, t, matrix(x.down.one), s.act, s.experts, s.picks, null, slots, 1) catch unreachable;
+        tile.encodeTwinGlu(e, t, gate, matrix(x.up.one), s.x, s.act, s.picks, groups, slots, c.topk) catch unreachable;
+        tile.encodeTwinIndexed(e, t, matrix(x.down.one), s.act, s.experts, s.picks, groups, slots, 1) catch unreachable;
         return true;
     }
     enc.pipe("lfm2_sort");

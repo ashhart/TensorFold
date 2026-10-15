@@ -95,6 +95,70 @@ fn shared(m: *q.Model, wide: *st.Scratch, solo: *st.Scratch, ids: []const u32) !
     }
 }
 
+/// One window shared by streams at `lens` (0 rows skip one): its logits and caches equal one-row decode.
+fn round(
+    m: *q.Model,
+    wide: *st.Scratch,
+    solo: *st.Scratch,
+    ids: []const u32,
+    caches: []st.Cache,
+    lens: []const usize,
+    rows: []const usize,
+) !void {
+    var segs: [4]fwd.Segment = undefined;
+    var tokens: [32]u32 = undefined;
+    var n: usize = 0;
+    var total: usize = 0;
+    for (caches, lens, rows) |*cache, len, r| {
+        if (r == 0) continue;
+        segs[n] = .{ .cache = cache, .rows = r };
+        @memcpy(tokens[total..][0..r], ids[len..][0..r]);
+        n += 1;
+        total += r;
+    }
+    try fwd.run(m, wide, segs[0..n], tokens[0..total], true, .all);
+    var base: usize = 0;
+    for (caches, lens, rows) |*cache, len, r| {
+        if (r == 0) continue;
+        var ref = try st.Cache.init(m.gpa, m.device, &m.config.attention, 512);
+        defer ref.deinit();
+        try prompt(m, solo, &ref, ids[0..len]);
+        for (0..r) |i| {
+            try fwd.run(m, solo, &.{.{ .cache = &ref, .rows = 1 }}, ids[len + i ..][0..1], false, .all);
+            const actual = (wide.logits.contents() + (base + i) * c.vocab * 2)[0 .. c.vocab * 2];
+            try std.testing.expectEqualSlices(u8, solo.logits.contents()[0 .. c.vocab * 2], actual);
+        }
+        try equal(cache, &ref);
+        base += r;
+    }
+}
+
+/// Four streams at unequal prefixes share 32 rows, keep unequal paths, then share 16 rows (the by-expert width).
+fn shared4(m: *q.Model, wide: *st.Scratch, solo: *st.Scratch, ids: []const u32) !void {
+    var caches: [4]st.Cache = undefined;
+    var n: usize = 0;
+    defer for (caches[0..n]) |*cache| cache.deinit();
+    var lens = [_]usize{ 1, 127, 128, 256 };
+    for (&caches, lens) |*cache, len| {
+        cache.* = try st.Cache.init(m.gpa, m.device, &m.config.attention, 512);
+        n += 1;
+        try prompt(m, solo, cache, ids[0..len]);
+    }
+    try round(m, wide, solo, ids, &caches, &lens, &.{ 1, 5, 10, 16 });
+    const keep = [_]usize{ 1, 3, 10, 7 };
+    var path: [16]u32 = undefined;
+    for (&path, 0..) |*r, i| r.* = @intCast(i);
+    for (&caches, &lens, keep) |*cache, *len, kept| {
+        try cache.keep(wide, path[0..kept]);
+        len.* += kept;
+        var fresh = try st.Cache.init(m.gpa, m.device, &m.config.attention, 512);
+        defer fresh.deinit();
+        try prompt(m, solo, &fresh, ids[0..len.*]);
+        try equal(cache, &fresh);
+    }
+    try round(m, wide, solo, ids, &caches, &lens, &.{ 3, 4, 9, 0 });
+}
+
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 2) return error.ExpectedModel;
@@ -126,7 +190,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("ok prompt {d} in 128-row chunks equals one row at a time\n", .{length});
     }
     for ([_]usize{ 0, 127, 128, 129, 255, 256 }) |prefix| {
-        for ([_]usize{ 1, 2, 7, 8, 15, 16, 17, 32 }) |rows| {
+        for ([_]usize{ 1, 2, 7, 8, 9, 15, 16, 17, 24, 32 }) |rows| {
             try window(m, &wide, &solo, &ids, prefix, rows, @max(1, rows / 2));
             passed += 1;
             std.debug.print("ok prefix {d}, window {d}, partial keep {d}\n", .{ prefix, rows, @max(1, rows / 2) });
@@ -134,5 +198,8 @@ pub fn main(init: std.process.Init) !void {
     }
     try shared(m, &wide, &solo, &ids);
     passed += 1;
+    try shared4(m, &wide, &solo, &ids);
+    passed += 1;
+    std.debug.print("ok four streams at prefixes 1, 127, 128, 256: windows of 32 and 16 rows, unequal keeps\n", .{});
     std.debug.print("{d} forward/cache checks passed, 0 failed, 0 skipped\n", .{passed});
 }
