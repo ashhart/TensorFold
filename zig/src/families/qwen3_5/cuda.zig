@@ -14,4 +14,6 @@ test {
     _ = draft;
     _ = vision;
     _ = @import("cuda_vision_prompt.zig");
+    _ = @import("cuda_reuse.zig");
+    _ = native;
 }
