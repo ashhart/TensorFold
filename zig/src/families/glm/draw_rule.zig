@@ -2,7 +2,7 @@
 const std = @import("std");
 const lanes = @import("lanes");
 
-// A sampled row's keyed draw: gpu_full.zig's contract, one rule a row; the Metal shader mirrors this layout.
+// A sampled row's keyed draw: the binding adapter reads it through lanes.gpu_rule.rule (one rule a row).
 pub const Rule = extern struct {
     seed_lo: u32,
     seed_hi: u32,
@@ -30,11 +30,11 @@ pub const Rule = extern struct {
 
 comptime {
     // The Metal shader reads the rules as u32/f32 words behind a 16-byte header: the layout is the contract.
-    if (@sizeOf(Rule) != 36) @compileError("GlmSampleRule: the Metal payload is 36 bytes a rule");
+    if (@sizeOf(Rule) != 36) @compileError("GlmRule: 36 bytes a rule");
     if (@offsetOf(Rule, "seed_lo") != 0 or @offsetOf(Rule, "seed_hi") != 4 or @offsetOf(Rule, "position") != 8 or
         @offsetOf(Rule, "top_k") != 12 or @offsetOf(Rule, "inv_t") != 16 or @offsetOf(Rule, "top_p") != 20 or
         @offsetOf(Rule, "near") != 24 or @offsetOf(Rule, "min_log") != 28 or @offsetOf(Rule, "vocab") != 32)
-        @compileError("GlmSampleRule: the field order is the Metal ABI's (seed, position, top_k, filters, vocab)");
+        @compileError("GlmRule: the field order is the adapter ABI's (seed, position, top_k, filters, vocab)");
 }
 
 /// A pass's draw rules, one a row in row order; rows past `n` draw greedily (argmax, lowest id).
@@ -81,7 +81,7 @@ pub const Payload = extern struct {
 
 comptime {
     if (@sizeOf(Header) != 16 or @offsetOf(Payload, "rules") != 16 or @sizeOf(Payload) != 592)
-        @compileError("GlmDraws: 16-byte header followed by sixteen 36-byte rules");
+        @compileError("GlmDraws: a 16-byte header followed by sixteen 36-byte rules");
 }
 
 /// A prompt head projects one output row, keyed at the full prompt length even after cache restoration.
