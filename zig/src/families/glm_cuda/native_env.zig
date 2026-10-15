@@ -53,8 +53,7 @@ pub fn msSince(io: std.Io, t0: std.Io.Timestamp) f64 {
     return @as(f64, @floatFromInt(t0.durationTo(std.Io.Timestamp.now(io, .awake)).toNanoseconds())) / 1e6;
 }
 
-/// The settings that shape what both ranks run together: each rank reads its own environment, so they are compared
-/// over the link before the first collective and a pair that differs does not start.
+/// What shapes both ranks' collectives, from each rank's environment: swapped before the first, refused if unequal.
 pub const Agreed = extern struct {
     prefill_rows: i64, // TF_GLM_PREFILL_ROWS: a prompt chunk's rows
     index_ring: i64, // TF_GLM_INDEX_RING: the index rings' rows (before the capacity caps them)
