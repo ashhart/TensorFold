@@ -1,27 +1,4 @@
-"""fp32 PyTorch reference of Nemotron 3.5 Bolt's IMAGE path, spliced into the LM reference.
-
-A debugging oracle for the native engine, written from the checkpoint's
-image_processing_nemotron_h_omni.py / modeling_radio.py / modeling_nemotron_h_omni.py and checked
-against vLLM's nano_nemotron_vl.py + radio.py (the code that produced the fixtures):
-
-  preprocess  one dynamic-resolution tile per image (no InternVL tiling, no thumbnail): the patch
-              grid is ceil-ish(H/16) x ceil-ish(W/16), scaled down to <= max_num_patches (13312),
-              up to >= min_num_patches (1024), each side rounded to even; the RGB uint8 image is
-              resized with torch bicubic (align_corners=False, antialias=True) in fp32, then
-              (x/255 - mean)/std with the CLIP mean/std
-  prompt      <img> + <image> * (hp*wp/4) + </img> replaces the chat template's "<image>"
-  tower       C-RADIO ViT-H/16: patch linear (768->1280, no bias) + CPE position embedding
-              (128x128 table bilinearly resized to max(hp,wp)^2, cropped to hp x wp) + 10 prefix
-              tokens (3 cls + 7 registers); 32 pre-LN blocks (LayerNorm eps 1e-6, 16 heads x 80,
-              fused qkv with bias, exact-erf GELU MLP 1280->5120->1280, no layer scale); no final
-              norm; the 10 prefix tokens are dropped, only patch tokens are used
-  projector   pixel shuffle v2 (2x2 -> 5120 channels ordered [dy, dx, c]), RMSNorm(5120, eps 1e-5),
-              Linear 5120->20480, ReLU^2, Linear 20480->4096 (no biases)
-  splice      projector rows overwrite the token embeddings at the <image> (id 18) positions
-
-    python3 tools/zig/bolt_vision_reference.py --case 0 --generate 8
-    python3 tools/zig/bolt_vision_reference.py --case 1 --vision-only --dump out/
-"""
+"""fp32 PyTorch reference of Bolt's image path (preprocess, C-RADIO tower, projector), spliced into the LM one."""
 
 import argparse
 import copy

@@ -1,24 +1,4 @@
-"""Layer-by-layer fp32 PyTorch reference forward of Nemotron 3.5 Bolt's language model.
-
-A debugging oracle for the native engine, written from the checkpoint's modeling_nemotron_h.py
-(the CUDA-kernel path, which is what vLLM runs) and its quantized export:
-
-  * embeddings, norms, A_log/D/dt_bias/conv1d, router weight: BF16 (router bias F32)
-  * Mamba in_proj / out_proj: ModelOpt NVFP4 (U8 e2m1 pairs, even column in the low nibble,
-    an F8_E4M3 scale every 16 inputs, an F32 global `weight_scale_2`): code * scale * global
-  * MoE latent projections, attention q/k/v/o, lm_head: ggml Q8_0
-  * routed and shared experts: ggml IQ2_XXS (decoded exactly as tools/zig/bolt_ggml.py / libggml)
-
-The model is streamed one layer at a time: each layer's weights are decoded, used for every
-position, and dropped; MoE layers decode only the experts some position routes to. All math is
-fp32. Mamba runs a sequential per-token scan; attention has no positional encoding (the model
-has no RoPE). A `State` carries conv/ssm states and the attention KV so greedy generation
-continues incrementally.
-
-    python3 tools/zig/bolt_reference.py --fixture short --compare
-    python3 tools/zig/bolt_reference.py --fixture short --generate 16
-    python3 tools/zig/bolt_reference.py --ids ids.txt --dump out/ --dump-last 8
-"""
+"""Layer-by-layer fp32 PyTorch reference of Bolt's language model, streamed a layer at a time: a debugging oracle."""
 
 import argparse
 import json
@@ -216,8 +196,7 @@ def moe(ck, cfg, bc, li, x, routes):
     p = f"{PRE}layers.{li}.mixer."
     E, k = bc["n_routed_experts"], bc["num_experts_per_tok"]
     T = x.shape[0]
-    # router: sigmoid(x W^T) in fp32; choice by score + e_score_correction_bias (n_group = 1, so no
-    # group masking); weights from the un-biased scores, normalized, times routed_scaling_factor
+    # router: sigmoid(x W^T); choice by score + bias (n_group 1); unbiased weights, normalized, times the scaling factor
     assert cfg["n_group"] == 1 and cfg["topk_group"] == 1
     scores = torch.sigmoid(x @ ck.vec(p + "gate.weight").T)  # [T, E]
     choice = scores + ck.vec(p + "gate.e_score_correction_bias")
@@ -247,10 +226,7 @@ def lm_head(ck, x, rows=16384):
 
 
 def forward(ck, ids, st=None, dump=None, dump_last=8, logits_last=None, verbose=True, splice=None):
-    """Run `ids` (continuing `st`); returns (logits [T or logits_last, vocab] f32, state, routes).
-
-    `splice` = (positions LongTensor [n], rows f32 [n, hidden]) overwrites those positions' token
-    embeddings (the multimodal path: image-context positions take projected vision embeddings)."""
+    """Run `ids` (continuing `st`) -> (logits, state, routes); `splice` = (positions, rows) overwrites embeddings."""
     cfg = ck.cfg
     st = st or State()
     eps = cfg["layer_norm_epsilon"]

@@ -87,7 +87,7 @@ pub fn promptTile(f: Format) usize {
     };
 }
 
-/// IQ2_XXS experts (ggml.cu): relu^2 up, down to fp32 or bf16; experts packed by Iq2xxsExperts.pack from the raw blocks.
+/// IQ2_XXS experts (ggml.cu): relu^2 up, down to fp32 or bf16; packed by Iq2xxsExperts.pack from the raw blocks.
 pub const Iq2xxsExperts = ggml.Kernels;
 
 fn iq2Run(k: *const Iq2xxsExperts, s: Stream, prompt: bool, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {

@@ -327,7 +327,7 @@ fn eos(c: *Config, e: std.json.Value) void {
     };
 }
 
-/// nemotron_h_puzzle's block_configs: a block type per layer, each MoE layer with its own experts and width (one top-k).
+/// nemotron_h_puzzle's block_configs: a block type per layer, each MoE layer its own experts and width (one top-k).
 fn puzzle(c: *Config, blocks: []const std.json.Value, why: *Why) !void {
     if (blocks.len > max_layers) {
         why.set("config.json has {d} layers; the native Nemotron engine reads up to {d}", .{ blocks.len, max_layers });

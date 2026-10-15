@@ -87,10 +87,9 @@ pub const AttnSeg = struct { kc: u64, vc: u64, meta: u64, row0: usize, rows: usi
 const AttnSegs = extern struct { kc: [max_segs]u64, vc: [max_segs]u64, meta: [max_segs]u64, row0: [max_segs]c_int, n: c_int };
 
 /// The router's K slices and the shared bytes its block stages: 16 rows and 16 experts of one slice, padded a word.
-/// Wide rows (Bolt's 4096) take more slices, so a block stays within the 48 KiB launches get without an opt-in.
 pub fn routerShape(d: usize) struct { sk: usize, shared: u32 } {
     var sk = triton.divisor(d / 64, 6);
-    while (staged(d, sk) > 48 << 10 and (d / 64) % (sk * 2) == 0) sk *= 2;
+    while (staged(d, sk) > 48 << 10 and (d / 64) % (sk * 2) == 0) sk *= 2; // wide rows (Bolt's): within 48 KiB, no opt-in
     return .{ .sk = sk, .shared = @intCast(staged(d, sk)) };
 }
 

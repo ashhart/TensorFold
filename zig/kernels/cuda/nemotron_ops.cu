@@ -292,8 +292,7 @@ extern "C" __global__ void tf_add_row(void* __restrict__ y, int y_f32, const flo
     }
 }
 
-// LatentMoE (Bolt): a row's routed outputs in the latent width, weighted and summed in fp32, then bf16 like the
-// reference's index_add_ sum. Y [R * K, L] fp32 (pair rows in slot order), WT [R * K], Z [R, L]; one block a row.
+// LatentMoE (Bolt): Z [R, L] bf16, the fp32 sum of Y [R * K, L] (slot order) times WT [R * K]; one block a row.
 extern "C" __global__ void tf_latent_sum(const float* __restrict__ Y, const float* __restrict__ WT, __nv_bfloat16* __restrict__ Z,
                                          int K, int L) {
     const int64_t r = blockIdx.x;
@@ -313,8 +312,7 @@ extern "C" __global__ void tf_add_bf16(__nv_bfloat16* __restrict__ out, const __
     out[i] = __float2bfloat16(__bfloat162float(a[i]) + y);
 }
 
-// An image prompt's chunk: rows whose SRC names a feature row take it in place of their token's embedding.
-// H [rows, D] bf16, F [image rows, D] bf16, SRC [rows] (-1: a text row); one block a row.
+// Image prompt chunk: row r of H [rows, D] takes F's row SRC[r] for its token embedding (-1: text); a block a row.
 extern "C" __global__ void tf_splice_rows(__nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ F, const int* __restrict__ SRC, int D) {
     const int64_t r = blockIdx.x;
     const int s = SRC[r];

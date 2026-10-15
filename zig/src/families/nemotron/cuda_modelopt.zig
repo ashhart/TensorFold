@@ -25,7 +25,7 @@ fn ggmlBlock(k: Kind) [2]usize {
 }
 
 fn kindOf(t: Tensor) !Kind {
-    // ggml blocks (Bolt) keep each row's blocks as a third axis: [rows, blocks, block bytes]; NVFP4 packs pairs as [rows, k / 2]
+    // ggml blocks (Bolt): [rows, blocks, block bytes]; NVFP4 packs pairs as [rows, k / 2]
     if (t.dtype == .u8 and t.rank == 3) return switch (t.dim(2)) {
         34 => .q8_0,
         66 => .iq2xxs,
@@ -179,8 +179,7 @@ fn iq2Experts(L: *Loader, ck: *core.Checkpoint, label: []const u8, count: usize,
     return out;
 }
 
-/// A LatentMoE layer (Bolt): the router and bias over this layer's experts, fc1/fc2_latent_proj, routed IQ2_XXS
-/// experts in the latent width, and the shared expert at full width as a one-expert layer of its own.
+/// A LatentMoE layer (Bolt): router and bias, fc1/fc2_latent_proj, latent IQ2_XXS experts, full-width shared expert.
 pub fn latent(L: *Loader, ck: *core.Checkpoint, label: []const u8, pre: []const u8, c: Config, layer: usize) !W.MoE {
     const lm = c.layerMoe(layer);
     const E = lm.experts;

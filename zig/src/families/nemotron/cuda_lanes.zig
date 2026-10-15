@@ -257,8 +257,7 @@ pub const Cuda = struct {
         e.decide = if (s.decide != null and e.lessons() != null) s.decide.? else lesson_route.none;
         try e.setSampling(s.sampling);
         s.cached = 0;
-        // an image prompt: its images through the tower, their rows spliced over the placeholders as each chunk embeds;
-        // never resumed or kept (every image's placeholders are the same ids)
+        // an image prompt: tower rows spliced over the placeholders per chunk; never resumed or kept (same ids)
         var media: ?vision.Media = null;
         if (s.images.len > 0) {
             const tower = self.tower orelse return error.NemotronServedWithoutVision;

@@ -102,8 +102,7 @@ pub fn cacheBytes(asked: ?f64, room: u64, streams: u64) u64 {
     return @min(room -| streams, want);
 }
 
-/// Kept prompt states' budget in pinned host memory: --prompt-cache-gib (0: none), else 8 GiB, never past half of
-/// what /proc/meminfo calls available.
+/// Pinned host budget for kept prompt states: --prompt-cache-gib (0: none), else 8 GiB, at most half of MemAvailable.
 pub fn hostCacheBytes(a: std.mem.Allocator, io: std.Io, asked: ?f64) u64 {
     const want: u64 = if (asked) |g| (if (g > 0) std.math.lossyCast(u64, g * gib) else 0) else 8 << 30;
     const text = procText(a, io, "/proc/meminfo") orelse return 0;

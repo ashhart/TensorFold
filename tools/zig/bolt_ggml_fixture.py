@@ -1,10 +1,4 @@
-"""Fixture for `tf-cuda-test ggml`: real Bolt tensors, random rows and float64 references of the decoded weights.
-
-The kernels get the checkpoint's raw blocks (packed on the GPU); the references come from bolt_ggml.py's decode,
-which is bit-identical to libggml's, times the same bf16 rows in float64.
-
-    python3 tools/zig/bolt_ggml_fixture.py MODEL_DIR OUT_DIR
-"""
+"""Fixture for `tf-cuda-test ggml`: real Bolt tensors, random rows, float64 references (MODEL_DIR OUT_DIR)."""
 
 import json
 import sys

@@ -1,8 +1,4 @@
-//! Nemotron 3.5 Bolt's image preparation (image_processing_nemotron_h_omni.py as vLLM runs it): one dynamic-resolution
-//! tile, torch's fp32 bicubic antialiased resize, CLIP normalization and C-RADIO's 16x16 patches.
-//!
-//! The oracle is tools/zig/bolt_vision_reference.py (`preprocess`, `target_patches`); its arithmetic is copied here
-//! step for step. Decoding is the shared decoder's (qwen_image.decode); this module starts from RGB bytes.
+//! Bolt's image prep as vLLM runs it: one tile, torch's fp32 bicubic antialiased resize, CLIP norm, 16x16 patches.
 
 const std = @import("std");
 const qi = @import("qwen_image.zig");
@@ -114,8 +110,7 @@ fn taps(gpa: std.mem.Allocator, in_size: usize, out_size: usize) Error!Taps {
     return t;
 }
 
-/// F.interpolate(mode="bicubic", align_corners=False, antialias=True) of fp32 planes [3, h, w] to [3, oh, ow]:
-/// the width pass first, then the height pass (aten's separable order); a side already the size is not resampled.
+/// Bicubic antialiased F.interpolate (align_corners=False) of fp32 [3, h, w] to [3, oh, ow]: width pass, then height.
 pub fn resizePlanes(gpa: std.mem.Allocator, src: []const f32, w: u32, h: u32, ow: u32, oh: u32) Error![]f32 {
     var cur = try gpa.dupe(f32, src);
     var cw: usize = w;
@@ -230,8 +225,8 @@ fn testImage(gpa: std.mem.Allocator, w: u32, h: u32) !Image {
 
 test "the patch grid matches target_patches (tools/zig/bolt_image_fixture.py's table)" {
     const cases = [_][4]u32{
-        .{ 2172, 724, 136, 46 }, .{ 640, 480, 40, 30 },     .{ 37, 23, 40, 28 },  .{ 4000, 3000, 132, 100 },
-        .{ 16, 16, 32, 32 },     .{ 100, 5000, 8, 314 },    .{ 1024, 1024, 64, 64 }, .{ 512, 512, 32, 32 },
+        .{ 2172, 724, 136, 46 }, .{ 640, 480, 40, 30 },    .{ 37, 23, 40, 28 },     .{ 4000, 3000, 132, 100 },
+        .{ 16, 16, 32, 32 },     .{ 100, 5000, 8, 314 },   .{ 1024, 1024, 64, 64 }, .{ 512, 512, 32, 32 },
         .{ 3000, 100, 188, 8 },  .{ 1920, 1080, 120, 68 }, .{ 800, 600, 50, 38 },
     };
     for (cases) |c| {

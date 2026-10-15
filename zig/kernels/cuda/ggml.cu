@@ -1,16 +1,4 @@
-// Bolt's ggml blocks (IQ2_XXS, Q8_0) on mma.sync: grouped experts and dense projections, decode rows and prompt rows.
-//
-// The weight is mma's A operand (16 output columns a warp tile), the rows are B (8 rows an n8 tile), so a lane's
-// output columns are the ones it decoded and each 32-input group's scale stays in the lane. The "k" order is ours,
-// the same in both operands: in a 32-input group, lane t takes inputs 8t .. 8t + 3 in step 0 and 8t + 4 .. 8t + 7 in
-// step 1, so an IQ2_XXS lane decodes one whole grid entry a column. Codes become exact bf16 integers; each group
-// sums into fp32 by mma, then takes its column's fp32 scale.
-//
-// Weights are repacked at load (tf_ggml_pack), a pure byte permutation of the checkpoint's rows, same size:
-//   IQ2_XXS [n/16][k/256][1056]: 8 groups of [gq 8][col gq, gq + 8][8 bytes qs], then [gq 8][2] fp16 d
-//   Q8_0    [n/16][k/32][544]:   [lane 32][(step 0, col gq), (0, gq + 8), (1, gq), (1, gq + 8)][4 int8], then d as above
-//                                (lane (gq, t) step s holds inputs 8t + 4s .. + 3)
-// A matrix's 16-column tiles follow each other; a grouped layer's experts follow each other.
+// Bolt's ggml blocks (IQ2_XXS, Q8_0) on mma.sync, weights as A and rows as B: grouped experts and dense rows.
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -19,6 +7,7 @@
 #include "experts.cuh"
 #include "ggml_iq2xxs_tables.cuh"
 
+// Lane t of a 32-input group holds inputs 8t .. 8t + 3 (step 0) and 8t + 4 .. 8t + 7 (step 1), in both operands.
 namespace tf_ggml {
 
 __device__ __forceinline__ uint4 ld_nc(const uint8_t* p) {
@@ -119,8 +108,7 @@ struct Q8 {
   }
 };
 
-// IQ2_XXS's grid in shared memory, 256 entries of 8 bytes: indices diverge across a warp. Signs and the bf16
-// conversion are arithmetic; tables of them cost more in bank conflicts than they save.
+// IQ2_XXS's grid in shared memory (indices diverge across a warp); signs and the bf16 conversion are arithmetic.
 constexpr int TABLE_WORDS = 256;
 
 template <class F>
@@ -197,8 +185,7 @@ __device__ __forceinline__ void epilogue_rows(const float (&acc)[NT][4], void* o
 
 constexpr int U = 2;  // loads a warp has in flight, twice over
 
-// Decode rows: a CTA per TPC (item, 16-column tile) units, KW warps each over K's loads (Q groups a load), summed in
-// a fixed order.
+// Decode rows: a CTA per TPC (item, 16-column tile) units, KW warps each over K's loads, summed in a fixed order.
 template <class F, int EPI, int KW, int TPC>
 __device__ __forceinline__ void gemv_body(const __nv_bfloat16* __restrict__ X, int x_stride, int slots,
                                           const uint8_t* __restrict__ W, int KG, int NT16,
@@ -414,8 +401,7 @@ __device__ __forceinline__ void prompt_body(const __nv_bfloat16* __restrict__ X,
 
 }  // namespace tf_ggml
 
-// The entries: format x (decode with 4 warps over K a tile, decode with a warp a tile and 4 tiles a CTA, prompt) x
-// epilogue (0 fp32, 1 relu^2 bf16, 3 bf16); items null for dense rows.
+// Entries: format x (decode KW 4, decode TPC 4, prompt) x epilogue (0 fp32, 1 relu^2 bf16, 3 bf16); dense: no items.
 #define TF_GGML_GEMV(NAME, F, EPI, KW, TPC)                                                                            \
   extern "C" __global__ void __launch_bounds__(KW * TPC * 32) NAME(                                                   \
       const __nv_bfloat16* __restrict__ X, int x_stride, int slots, const uint8_t* __restrict__ W, int KG, int NT16,   \
@@ -443,7 +429,7 @@ TF_GGML_ENTRIES(q8, Q8, 3, bf16)
 #undef TF_GGML_ENTRIES
 #undef TF_GGML_GEMV
 
-// The load repack: `count` matrices [n][k / KB][B] of checkpoint blocks into the 16-column tiles above, a byte a thread.
+// Load repack, a byte a thread: `count` matrices [n][k / KB][B] of checkpoint blocks into the 16-column tiles.
 extern "C" __global__ void tf_ggml_pack(const uint8_t* __restrict__ src, uint8_t* __restrict__ dst, int iq2, int n,
                                         int kb, long long total) {
   const int B = iq2 ? 66 : 34, TB = iq2 ? 1056 : 544;

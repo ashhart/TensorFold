@@ -216,7 +216,7 @@ pub const Server = struct {
         return .{ .kind = kind, .text = text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null, .compiler = c };
     }
 
-    /// The model's grammar compiler: tokenizer.json, config.json's vocab_size (text_config or llm_config first), the eos ids.
+    /// The grammar compiler: tokenizer.json, config.json's vocab_size (text_config or llm_config first), the eos ids.
     fn grammarCompiler(srv: *Server) ?*api.grammar.Compiler {
         srv.grammar_mutex.lockUncancelable(srv.io);
         defer srv.grammar_mutex.unlock(srv.io);

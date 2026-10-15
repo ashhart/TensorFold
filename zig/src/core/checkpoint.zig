@@ -59,8 +59,7 @@ pub const Checkpoint = struct {
     io: Io,
     files: std.ArrayList(st.File) = .empty,
     used: std.StringHashMapUnmanaged(void) = .empty,
-    /// Prepended to every name get, has and skip take: a wrapper's part read with the names it has alone
-    /// ("language_model." in Nemotron 3.5 Bolt, beside its vision tower's).
+    /// Prepended to the names get, has and skip take ("language_model." for Bolt's LM beside its vision tower).
     scope: []const u8 = "",
 
     fn scoped(self: *const Checkpoint, buf: *[320]u8, name: []const u8) ![]const u8 {

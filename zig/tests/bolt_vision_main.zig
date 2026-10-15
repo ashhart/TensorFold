@@ -1,10 +1,4 @@
-//! `tf-bolt-vision <model dir> <dump dir> [reps]`: Nemotron 3.5 Bolt's image path end to end against the fp32 reference.
-//!
-//! The dump directory is tools/zig/bolt_vision_reference.py's (`--vision-only --dump DIR`): image_rgb.npy (the decoded
-//! RGB the reference resized), meta.json, pixel_values.npy, tower_embed.npy, tower_out.npy, projector_out.npy. Host
-//! preparation, the embedded rows, the last block's rows and the projector's rows are each compared (max |d|, the
-//! relative Frobenius error, cosine over the whole tensor and the worst row's), then `reps` timed calls of `encode`.
-//! Exits 1 when the projector rows' cosine is below 0.999 or the host pixels are off by more than 1e-4.
+//! `tf-bolt-vision <model dir> <dump dir> [reps]`: Bolt's image path against bolt_vision_reference.py's --dump.
 const std = @import("std");
 const cuda = @import("cuda");
 const nemotron = @import("nemotron");

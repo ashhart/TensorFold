@@ -12,6 +12,8 @@ const Allocator = std.mem.Allocator;
 const budget = @import("cuda_memory.zig");
 const lane_backend = @import("cuda_bound.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
+const aliases = @import("cuda_alias.zig").aliases;
+const reads = @import("cuda_alias.zig").reads;
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
 const registry = .{nemotron.native};
@@ -37,17 +39,6 @@ pub const families: []const api.Family = blk: {
     const final = out;
     break :blk &final;
 };
-
-/// The other config model_types a family reads (a wrapper's, as Bolt's nemotron_h_omni).
-fn aliases(comptime F: type) []const []const u8 {
-    return if (@hasDecl(F, "also_model_types")) F.also_model_types else &.{};
-}
-
-fn reads(comptime F: type, model_type: []const u8) bool {
-    if (std.mem.eql(u8, model_type, F.model_type)) return true;
-    for (aliases(F)) |t| if (std.mem.eql(u8, model_type, t)) return true;
-    return false;
-}
 
 const gib: f64 = 1 << 30;
 
@@ -423,7 +414,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const host_snaps = @hasField(@TypeOf(loaded), "host_snaps") and loaded.host_snaps;
     const cache = if (!@hasField(@TypeOf(loaded), "target")) 0 else if (host_snaps) budget.hostCacheBytes(a, io, o.prompt_cache_gib) else budget.cacheBytes(o.prompt_cache_gib, room, loaded.stream_bytes * (streams -| free));
     h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in {d}-row chunks{s}{s}; {s}", .{
-        capability,                                                                                                        device,                                                                                                       name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (learnBytes(loaded) > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(learnBytes(loaded))}) else "", streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
+        capability,                                                                                                                                                        device,                                                                                                       name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (learnBytes(loaded) > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(learnBytes(loaded))}) else "", streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
         if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache{s}", .{ toGib(cache), if (host_snaps) " in host memory" else "" }) else ", no prompt cache", if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
     });
     errdefer gpa.free(h.startup);

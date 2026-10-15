@@ -1,12 +1,4 @@
-"""Reference decode of Nemotron 3.5 Bolt's ggml-packed tensors (IQ2_XXS, Q8_0).
-
-Bolt's ModelOpt export stores ggml blocks in safetensors as U8 [rows, blocks, bytes]:
-IQ2_XXS is 66 bytes per 256 weights (fp16 d, 32 u16 qs), Q8_0 is 34 bytes per 32
-(fp16 d, 32 int8). The IQ2_XXS tables are read from the CUDA header the kernels
-include, so this file and the GPU decode the same grid.
-
-    python3 tools/zig/bolt_ggml.py MODEL_DIR TENSOR_NAME [ROWS]
-"""
+"""Reference decode of Bolt's ggml tensors (IQ2_XXS, Q8_0), tables from the CUDA header: MODEL_DIR TENSOR [ROWS]."""
 
 import json
 import re

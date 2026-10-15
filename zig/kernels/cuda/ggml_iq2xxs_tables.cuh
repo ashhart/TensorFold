@@ -1,7 +1,4 @@
-// IQ2_XXS lookup tables, copied from ggml (llama.cpp ggml/src/ggml-common.h), MIT License,
-// Copyright (c) 2023-2026 The ggml authors. Read by the Bolt expert kernels and by
-// tools/zig/bolt_ggml.py, so the reference and the GPU decode the same bytes.
-// The grid sits in global memory: kernels copy it to shared memory with coalesced loads, not constant-cache ones.
+// IQ2_XXS tables from ggml-common.h, MIT License, Copyright (c) 2023-2026 The ggml authors; also read by bolt_ggml.py.
 #pragma once
 #include <stdint.h>
 
@@ -16,6 +13,7 @@ static __device__ __constant__ const uint8_t tf_ksigns_iq2xs[128] = {
     240, 113, 114, 243, 116, 245, 246, 119, 120, 249, 250, 123, 252, 125, 126, 255,
 };
 
+// In global memory: kernels copy it to shared memory with coalesced loads.
 static __device__ const uint64_t tf_iq2xxs_grid[256] = {
     0x0808080808080808, 0x080808080808082b, 0x0808080808081919, 0x0808080808082b08,
     0x0808080808082b2b, 0x0808080808190819, 0x0808080808191908, 0x08080808082b0808,

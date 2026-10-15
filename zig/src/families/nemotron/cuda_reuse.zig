@@ -1,5 +1,4 @@
 //! Nemotron CUDA prompt states for the shared cache: a prompt's key and value rows, the Mamba states, the head's rows.
-//! On the device, or (a discrete card's `host`) in pinned host memory: the key and value rows, then the Mamba states.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -10,12 +9,11 @@ const Engine = @import("cuda_engine.zig").Engine;
 const Head = @import("cuda_mtp.zig").Head;
 const marks = @import("cuda_marks.zig");
 
-/// One kept state: its Mamba states in one device buffer, its key and value rows in another, where the engine stood.
 /// A host state keeps both in `host` (key and value rows first); `mamba` is then an armed row's staging until `finish`.
 pub const Copy = struct {
     mamba: cuda.DeviceBuffer,
     kv: cuda.DeviceBuffer,
-    host: ?cuda.HostBuffer = null,
+    host: ?cuda.HostBuffer = null, // pinned: rows, then Mamba states; `mamba` is then an armed row's staging until `finish`
     head: bool,
     pos: usize,
     parity: usize,
@@ -102,8 +100,7 @@ fn move(t: *const Target, at: usize, copy: *const Copy, into: bool, mamba: bool)
     return off[0] + off[1];
 }
 
-/// Copies between the bound sequence and a host copy (`into`: live to host), key and value rows first; `mamba`: the
-/// Mamba states too, else from `staging` (an armed row's) when given. Queued on the engine's stream.
+/// Bound sequence <-> host copy (`into`: to host), rows first; Mamba states too if `mamba`, else from `staging`.
 fn hostMove(t: *const Target, at: usize, host: []u8, into: bool, mamba: bool, staging: ?u64) !void {
     const o = t.e.ops();
     var store: [max_parts]Part = undefined;
@@ -191,8 +188,7 @@ pub fn finish(t: Target) !void {
     for (e.armed.marks()) |m| {
         const copy: *Copy = @ptrCast(@alignCast(m.copy));
         if (t.host()) {
-            // the chunk wrote this row's Mamba states into the staging buffer: rows and states to the host, then the
-            // staging back (the stream orders its next writer after these copies)
+            // the chunk wrote this row's Mamba states to staging: rows and states to the host, then staging back
             var h = cuda.HostBuffer.alloc(e.ctx.d, stateBytes(e.c, m.at, copy.head)) catch continue; // stays not whole
             hostMove(&t, m.at, h.bytes, true, false, copy.mamba.ptr) catch {
                 h.free();

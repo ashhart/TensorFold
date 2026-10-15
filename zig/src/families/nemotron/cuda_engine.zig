@@ -154,7 +154,7 @@ pub const Engine = struct {
             if (opts.slide) return error.SlideNeedsMlx; // the learner reads MLX 4-bit projections
             try e.k.loadModelopt(ctx);
         }
-        // Bolt (LatentMoE, ggml blocks): no MTP head in the checkpoint, and our own glue (captured sets are Lightning's)
+        // Bolt (LatentMoE, ggml blocks): no MTP head in the checkpoint; our own glue (captured sets are Lightning's)
         const mtp = opts.mtp and e.c.latent == 0;
         if (e.c.latent > 0) {
             if (e.k.triton != null) return error.CapturedGlueIsLightnings;

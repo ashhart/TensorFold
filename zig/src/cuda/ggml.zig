@@ -145,8 +145,8 @@ pub const Kernels = struct {
     /// The common launch: `items`, `counts` and `members` 0 for dense rows (`rows` of them), else a plan's.
     fn go(g: *const Kernels, s: Stream, prompt: bool, out_kind: Out, kind: Kind, x: u64, stride: usize, slots: usize, w: u64, n: usize, k: usize, p: ?grouped.Plan, out: u64, units: usize, rows: usize, skip: i32) !void {
         try check(kind, n, k, prompt);
-        const ki = @intFromEnum(kind);
-        const oi = @intFromEnum(out_kind);
+        const ki = @backingInt(kind);
+        const oi = @backingInt(out_kind);
         const nt16 = n / 16;
         if (units == 0) return;
         var a: launch_.Args = .{};
@@ -187,8 +187,7 @@ pub const Kernels = struct {
         return if (rows <= decode_rows) g.decode(s, w, x, ldx, rows, out, out_kind) else g.promptRows(s, w, x, ldx, rows, out, out_kind);
     }
 
-    /// Grouped experts on a plan of at most `items` items (16 pairs decode, 64 prompt): stacked [E] packed matrices
-    /// (n, k) at `w`; x rows `stride` apart, token rows when `slots` > 0 (pair / slots), else pair rows; out pair rows.
+    /// Grouped experts, at most `items` items: [E] packed (n, k) at `w`; x token rows if `slots` > 0, else pair rows.
     pub fn experts(g: *const Kernels, s: Stream, prompt: bool, kind: Kind, out_kind: Out, x: u64, stride: usize, slots: usize, w: u64, n: usize, k: usize, p: grouped.Plan, out: u64, items: usize, skip: i32) !void {
         return g.go(s, prompt, out_kind, kind, x, stride, slots, w, n, k, p, out, items, 0, skip);
     }

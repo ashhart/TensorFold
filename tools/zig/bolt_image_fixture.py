@@ -1,11 +1,4 @@
-"""Fixtures for zig/src/vision/nemotron_image.zig: torch's bicubic antialiased resize and CLIP normalization.
-
-A synthetic 37x23 RGB image (pixel = (7x + 13y + 29c + (x*y) % 17) % 256) resized to 48x32 (up) and to 16x16 and
-24x8 (down, the antialias path), normalized as bolt_vision_reference.preprocess does; fp32 [3, H, W] each, little
-endian, concatenated in that order. Also prints target_patches for a table of sizes (the Zig test's expectations).
-
-    python3 tools/zig/bolt_image_fixture.py zig/src/vision/fixtures/nemotron_resize.bin
-"""
+"""Fixtures for nemotron_image.zig: torch bicubic antialiased resizes and CLIP normalization of a synthetic image."""
 
 import sys
 from pathlib import Path

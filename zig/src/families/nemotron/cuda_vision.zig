@@ -1,14 +1,4 @@
-//! Nemotron 3.5 Bolt's image tower on CUDA: C-RADIO ViT-H/16 (vision_model.radio_model.) and the mlp1 projector,
-//! bf16 weights, cuBLASLt GEMMs with fp32 accumulation, an fp32 residual stream; kernels in radio_vision.cu.
-//!
-//! `encode` turns one image's patches (vision/nemotron_image.zig's `prepare`) into the bf16 [tokens, 4096] rows that
-//! replace the prompt's `<image>` placeholders: `<img>` (19), then `<image>` (18) x tokens, then `</img>` (20), the
-//! image directly before the question. Oracle: tools/zig/bolt_vision_reference.py.
-//!
-//! VRAM (one arena, made at load): weights 1.681 GB (tower 1.303 GB: blocks 1.259 GB, the 128x128 position table
-//! 42 MB, patch Linear and prefix tokens 2 MB; projector 377 MB) plus scratch sized for the largest image (13,312
-//! patches) 0.702 GB: 2.383 GB in all, and the caller's output rows (3,328 x 4096 bf16 at most, 27 MB).
-//! The video embedder (video_embedder.weight, 3.9 MB) is checked but not loaded: video is not this module's.
+//! Bolt's image tower on CUDA: C-RADIO ViT-H/16 and the mlp1 projector, bf16 weights, fp32 residual; radio_vision.cu.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -60,10 +50,9 @@ pub fn checkConfig(gpa: std.mem.Allocator, bytes: []const u8) !void {
     const root = parsed.value.object;
     const v = (root.get("vision_config") orelse return error.UnsupportedBoltVision).object;
     const ints = [_]struct { std.json.ObjectMap, []const u8, i64 }{
-        .{ v, "hidden_size", hidden },         .{ v, "num_attention_heads", heads }, .{ v, "num_hidden_layers", depth },
-        .{ v, "patch_size", patch },           .{ v, "num_cls_tokens", 3 },          .{ v, "num_registers", 7 },
-        .{ root, "projector_hidden_size", projector_hidden }, .{ root, "img_context_token_id", image_token },
-        .{ root, "vit_hidden_size", hidden },
+        .{ v, "hidden_size", hidden },                        .{ v, "num_attention_heads", heads },           .{ v, "num_hidden_layers", depth },
+        .{ v, "patch_size", patch },                          .{ v, "num_cls_tokens", 3 },                    .{ v, "num_registers", 7 },
+        .{ root, "projector_hidden_size", projector_hidden }, .{ root, "img_context_token_id", image_token }, .{ root, "vit_hidden_size", hidden },
     };
     for (ints) |w| if (num(w[0].get(w[1])) != w[2]) return error.UnsupportedBoltVision;
     const llm = (root.get("llm_config") orelse return error.UnsupportedBoltVision).object;
@@ -125,7 +114,7 @@ pub const Tower = struct {
     mod: cuda.Module,
     f: Fns,
     lib: lt.Library,
-    arena: DeviceBuffer,
+    arena: DeviceBuffer, // weights 1.681 GB, scratch for max_patches 0.702 GB
     at: usize = 0,
     scratch: u64 = 0,
     embed_w: u64 = 0,
@@ -139,8 +128,7 @@ pub const Tower = struct {
     /// Blocks `encode` runs (tests: 0 leaves the embedded rows in Stages.x); the projector runs only after all 32.
     run_depth: usize = depth,
 
-    /// The checkpoint's vision_model. and mlp1. tensors (bf16) from `dir` (Bolt's own directory: the language
-    /// model's loader skips them). Uploads synchronously; the arena is sized for `max_patches`.
+    /// Loads vision_model. and mlp1. (bf16) from Bolt's `dir`, synchronously, into an arena sized for `max_patches`.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8) !*Tower {
         try check(gpa, io, dir);
         const t = try gpa.create(Tower);
@@ -170,18 +158,18 @@ pub const Tower = struct {
             }
         }
         _ = try vk.expect("vision_model.summary_idxs", .i64, &.{2}); // the summary heads' cls rows: not used for images
-        _ = try vk.expect(model ++ "patch_generator.video_embedder.weight", .bf16, &.{ hidden, 2 * patch_width }); // video
+        _ = try vk.expect(model ++ "patch_generator.video_embedder.weight", .bf16, &.{ hidden, 2 * patch_width }); // video: checked, not loaded
         t.embed_w = try t.get(&vk, model ++ "patch_generator.embedder.weight", &.{ hidden, patch_width });
         t.pos = try t.get(&vk, model ++ "patch_generator.pos_embed", &.{ 1, cpe_side * cpe_side, hidden });
         t.cls = try t.get(&vk, model ++ "patch_generator.cls_token.token", &.{ prefix_tokens, hidden });
         for (&t.blocks, 0..) |*b, i| {
             const shapes = .{
-                .{ "norm1_w", "norm1.weight", .{hidden} },               .{ "norm1_b", "norm1.bias", .{hidden} },
+                .{ "norm1_w", "norm1.weight", .{hidden} },                .{ "norm1_b", "norm1.bias", .{hidden} },
                 .{ "qkv_w", "attn.qkv.weight", .{ 3 * hidden, hidden } }, .{ "qkv_b", "attn.qkv.bias", .{3 * hidden} },
                 .{ "proj_w", "attn.proj.weight", .{ hidden, hidden } },   .{ "proj_b", "attn.proj.bias", .{hidden} },
-                .{ "norm2_w", "norm2.weight", .{hidden} },               .{ "norm2_b", "norm2.bias", .{hidden} },
-                .{ "fc1_w", "mlp.fc1.weight", .{ mlp, hidden } },        .{ "fc1_b", "mlp.fc1.bias", .{mlp} },
-                .{ "fc2_w", "mlp.fc2.weight", .{ hidden, mlp } },        .{ "fc2_b", "mlp.fc2.bias", .{hidden} },
+                .{ "norm2_w", "norm2.weight", .{hidden} },                .{ "norm2_b", "norm2.bias", .{hidden} },
+                .{ "fc1_w", "mlp.fc1.weight", .{ mlp, hidden } },         .{ "fc1_b", "mlp.fc1.bias", .{mlp} },
+                .{ "fc2_w", "mlp.fc2.weight", .{ hidden, mlp } },         .{ "fc2_b", "mlp.fc2.bias", .{hidden} },
             };
             inline for (shapes) |sh| {
                 var nb: [128]u8 = undefined;
@@ -243,8 +231,7 @@ pub const Tower = struct {
         return p;
     }
 
-    /// One image's patches (fp32 [gh * gw, 768], nemotron_image.prepare's) to bf16 [gh * gw / 4, 4096] rows at `out`,
-    /// on stream `s`. Returns once the host's inputs are copied (the stream is synchronized); `out` is then written.
+    /// One image's patches (fp32 [gh * gw, 768]) to bf16 [gh * gw / 4, 4096] rows at `out` on `s`; inputs copied.
     pub fn encode(t: *Tower, s: cuda.Stream, patches: []const f32, gh: u32, gw: u32, out: u64) !Stages {
         const n = @as(usize, gh) * gw;
         if (gh == 0 or gw == 0 or gh % 2 != 0 or gw % 2 != 0 or n > max_patches) return error.BadImageGrid;
@@ -370,8 +357,7 @@ fn bf16(v: f32) u16 {
     return @intCast((b + 0x7fff + ((b >> 16) & 1)) >> 16);
 }
 
-/// CPE: the 128x128 table resized (bilinear, align_corners=False) to max(gh, gw) square and cropped to gh x gw.
-/// Each patch's 4 table rows (y0 x0, y0 x1, y1 x0, y1 x1) and weights (w0, w1, h0, h1), as aten computes them in fp32.
+/// CPE taps: each patch's 4 rows and weights in the 128x128 table resized to max(gh, gw) and cropped, as aten (fp32).
 pub fn cpeTaps(gh: u32, gw: u32, idx: []i32, wts: []f32) void {
     const m = @max(gh, gw);
     for (0..gh) |i| {
@@ -468,8 +454,7 @@ pub const Media = struct {
     }
 };
 
-/// Each image's run of image_token rows between image_start and image_end, in order, its length the image's tokens;
-/// `src` gets each row's feature row (-1 for text). Returns the feature rows.
+/// Each image's image_token run between image_start and image_end; `src` gets each row's feature row (-1: text).
 pub fn placeholders(prompt: []const u32, images: []const lanes_.Image, src: []i32) !usize {
     @memset(src, -1);
     var next: usize = 0; // feature rows handed out

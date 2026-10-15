@@ -1,6 +1,4 @@
-// Nemotron 3.5 Bolt's vision tower (C-RADIO ViT-H/16) and projector: glue around cuBLASLt's bf16 GEMMs, and attention.
-// The residual stream stays fp32 (its rows grow to |x| ~1700); norms, softmax and epilogues compute in fp32, GEMM
-// inputs are rounded to bf16 once. Oracle: tools/zig/bolt_vision_reference.py (fp32 PyTorch).
+// Bolt's C-RADIO ViT-H/16 tower and projector around cuBLASLt bf16 GEMMs; residual, norms, softmax, epilogues fp32.
 #include <cuda_bf16.h>
 #include <stdint.h>
 
@@ -23,8 +21,7 @@ __device__ __forceinline__ float block_sum(float v, float* part) {
     return t;
 }
 
-// x [prefix + n, D] fp32: rows below `prefix` the cls/register tokens, then acc (the patch Linear) plus the CPE
-// position rows, bilinear from the 128x128 table: (p0 w0 + p1 w1) h0 + (p2 w0 + p3 w1) h1 as aten's interpolate.
+// x [prefix + n, D] fp32: cls/register rows, then acc (patch Linear) plus CPE rows bilinear from the 128x128 table.
 extern "C" __global__ void __launch_bounds__(256) tf_rv_embed(const float* __restrict__ acc,
                                                               const __nv_bfloat16* __restrict__ pos,
                                                               const int* __restrict__ idx,
@@ -91,9 +88,7 @@ __device__ __forceinline__ void mma16816(float* c, const uint32_t* a, uint32_t b
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 
-// Full (bidirectional) attention over all `rows` tokens, heads of 80: flash style, one warp 16 queries, 64-key
-// tiles in shared memory, bf16 mma.sync with fp32 scores, an online softmax in fp32 (exp2 of pre-scaled scores) and
-// fp32 output accumulators; out [rows, heads * 80] bf16 (the reference's transpose(0, 1).reshape(T, C)).
+// Bidirectional flash attention, heads of 80: a warp 16 queries, 64-key tiles, bf16 mma, fp32 softmax; bf16 out.
 #define RV_HD 80
 #define RV_BK 64
 extern "C" __global__ void __launch_bounds__(128) tf_rv_attention(const __nv_bfloat16* __restrict__ q,
@@ -232,8 +227,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_rv_bias_residual(const floa
     for (int i = threadIdx.x; i < D; i += blockDim.x) x[row * D + i] += acc[row * D + i] + bf(bias[i]);
 }
 
-// Pixel shuffle v2 (2x2 patches to one row of 4D, channel (dy * 2 + dx) * D + c) of the patch rows behind `prefix`,
-// then RMSNorm(4D, eps) with weight w in fp32; bf16 out. A block an output row (grid gh/2 x gw/2, row-major).
+// Pixel shuffle v2 (2x2 patches to a 4D row) of the rows past `prefix`, then fp32 RMSNorm(4D) by w; a block a row.
 extern "C" __global__ void __launch_bounds__(256) tf_rv_shuffle_rms(const float* __restrict__ x,
                                                                     const __nv_bfloat16* __restrict__ w,
                                                                     __nv_bfloat16* __restrict__ y, int prefix, int gw,

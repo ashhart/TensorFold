@@ -30,8 +30,7 @@ pub const Pocket = kern.Pocket;
 /// The shared expert's down projection rest in two halves (experts E and E + 1); its learned change reads both.
 pub const MoE = struct { router: u64, bias: u64, experts: Experts, rest: [2]u64 = .{ 0, 0 }, adapter: ?Adapter = null, pocket: ?Pocket = null, latent: ?Latent = null };
 
-/// LatentMoE's own parts (Bolt): rows go to the latent width and back around the routed experts, and the shared
-/// expert reads the full-width rows on its own (`experts` then holds the routed experts alone).
+/// LatentMoE's parts (Bolt): latent-width projections around the routed `experts`; `shared` reads full-width rows.
 pub const Latent = struct { fc1: QLinear, fc2: QLinear, shared: Experts };
 pub const Block = struct { kind: Kind, norm: u64, mamba: Mamba = undefined, attn: Attention = undefined, moe: MoE = undefined };
 pub const Mtp = struct { enorm: u64, hnorm: u64, eh_proj: QLinear, attn_norm: u64, attn: Attention, moe_norm: u64, moe: MoE, final_norm: u64 };
