@@ -10,4 +10,5 @@ test {
     _ = geometry;
     _ = @import("draw.zig");
     _ = @import("cuda_draft_weights.zig");
+    _ = draft;
 }
