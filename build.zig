@@ -6,6 +6,7 @@ const dist_build = @import("zig/build/dist.zig");
 const qwen27_build = @import("zig/build/qwen27.zig");
 const core_checks = @import("zig/build/core_checks.zig");
 const glm_checks = @import("zig/build/glm_checks.zig");
+const merge_build = @import("zig/build/merge.zig");
 const flashnext_checks = @import("zig/build/flashnext_checks.zig");
 const hip_build = @import("zig/build/hip.zig");
 const xpu_build = @import("zig/build/xpu.zig");
@@ -159,18 +160,7 @@ pub fn build(b: *std.Build) void {
     const cost_run = b.addRunArtifact(cost_cases);
     b.step("test-cost-rule", "CPU scripted window and interleaved head timing").dependOn(&cost_run.step);
     test_step.dependOn(&cost_run.step);
-    // `tf-merge-check --quantizer` and the tests of the MLX quantizer it uses: host only on every OS
-    const merge_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/lora_merge_dir.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    const merge_tests = b.addRunArtifact(b.addTest(.{ .root_module = merge_mod }));
-    b.step("test-merge", "MLX quantizer and tf-merge-check tests (no model, no GPU)").dependOn(&merge_tests.step);
-    const merge_check = b.addExecutable(.{ .name = "tf-merge-check", .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/merge_check.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{.{ .name = "lora_merge", .module = merge_mod }},
-    }) });
-    b.step("tf-merge-check", "Check the MLX quantizer against shipped tensors from their dense source").dependOn(&b.addInstallArtifact(merge_check, .{}).step);
+    merge_build.targets(b, target, optimize); // tf-merge-check and test-merge, host only on every OS
     switch (target.result.os.tag) {
         .macos => metalTargets(b, target, optimize, draft_ids, build_options, test_step),
         .linux => cuda_build.targets(b, target, optimize, draft_ids, build_options),
@@ -467,23 +457,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         b.step(p.name, p.about).dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
 
-    // The GLM sampler gate compiles its source at runtime and never needs a checkpoint or offline metallib.
-    const glm_draw = b.createModule(.{
-        .root_source_file = b.path("zig/src/families/glm/draw_dispatch.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "lanes", .module = lanes } },
-    });
-    const glm_sample_check = b.addExecutable(.{ .name = "tf-glm-sample-check", .root_module = b.createModule(.{
-        .root_source_file = b.path("zig/tests/glm_sample_check.zig"),
-        .target = target,
-        .optimize = .Debug,
-        .link_libc = true,
-        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "lanes", .module = lanes }, .{ .name = "draw_dispatch", .module = glm_draw }, .{ .name = "kernel_sources", .module = sources } },
-    }) });
-    b.step("tf-glm-sample-check", "Build the checkpoint-free GLM sampler gate").dependOn(&b.addInstallArtifact(glm_sample_check, .{}).step);
-    b.step("test-glm-sampling", "Run the real GLM sampler against its host reference").dependOn(&b.addRunArtifact(glm_sample_check).step);
+    glm_checks.sampler(b, target, optimize, metal, lanes, sources);
 
     // The core row projection (chips without tensor units) on synthetic matrices; runs on any Mac's GPU
     const row_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/row_projection.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
