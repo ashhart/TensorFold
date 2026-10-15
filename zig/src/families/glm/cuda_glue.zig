@@ -31,7 +31,11 @@ pub const Kernels = struct {
     hc_partial8: cuda.Function,
     hc_finish: cuda.Function,
     absorb_q: cuda.Function,
+    absorb_q_128: cuda.Function,
     expand_v: cuda.Function,
+    expand_v_128: cuda.Function,
+    rope: cuda.Function,
+    head_gate: cuda.Function,
     lat_write: cuda.Function,
     index_write: cuda.Function,
     pool_keys: cuda.Function,
@@ -46,6 +50,7 @@ pub const Kernels = struct {
     bmm_d64s2: cuda.Function,
     chunks_16: cuda.Function,
     chunks_32: cuda.Function,
+    chunks_r16: cuda.Function,
     merge: cuda.Function,
     scores: cuda.Function,
 
@@ -56,6 +61,7 @@ pub const Kernels = struct {
         try k.bmm_tile1.allowDynamicShared(bmm_tile1_smem[1]);
         try k.chunks_16.allowDynamicShared(chunksSmem(16));
         try k.chunks_32.allowDynamicShared(chunksSmem(32));
+        try k.chunks_r16.allowDynamicShared(chunksSmemRoped(16));
         return k;
     }
 };
@@ -136,6 +142,11 @@ pub const bmm_tile1_smem = [2]u32{ 3 * (128 + 128) * 32 * 2, 128 * (128 + 4) * 4
 /// glm_glue_attn.cuh's wide_smem<hb>(): q (hb x 512), two 32-key tiles, p (hb x 32) in bf16, then max/sum scratch.
 pub fn chunksSmem(comptime hb: u32) u32 {
     return (hb * 512 + 2 * 32 * 512 + hb * 32) * 2 + (hb * 4 + 2 * hb) * 4;
+}
+
+/// wide_smem<hb, 64>(): as above with q and key rows 576 wide (Ling's roped columns after the latent).
+pub fn chunksSmemRoped(comptime hb: u32) u32 {
+    return (hb * 576 + 2 * 32 * 576 + hb * 32) * 2 + (hb * 4 + 2 * hb) * 4;
 }
 
 /// K slices of the router's dot (glue.ROUTER_KS): fixed by the shape, as the sliced and the single pass differ in bits.

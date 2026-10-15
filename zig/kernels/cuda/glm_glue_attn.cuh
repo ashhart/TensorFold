@@ -39,26 +39,28 @@ __device__ __forceinline__ void ldm4(uint32_t* r, const void* p) {
                  : "r"(a));
 }
 
-// A 512-wide bf16 row's 16-byte unit u in shared memory, swizzled by the row so ldmatrix's eight rows hit eight banks.
-__device__ __forceinline__ int wide(int row, int u) { return row * LW + ((u ^ (row & 7)) << 3); }
+// A KW-wide bf16 row's 16-byte unit u in shared memory, swizzled by the row so ldmatrix's eight rows hit eight banks.
+template <int KW = LW>
+__device__ __forceinline__ int wide(int row, int u) { return row * KW + ((u ^ (row & 7)) << 3); }
 // p's [32][32] rows (64 bytes): unit u of row r.
 __device__ __forceinline__ int narrow(int row, int u) { return row * KT + ((u ^ ((row >> 1) & 3)) << 3); }
 
 // latent._dense_chunks/_sparse_chunks (sparse 0/1), block (row, HB heads, chunk), 8 warps: online softmax by 32 keys.
-template <int HB>
+template <int HB, int RW = 0>
 constexpr int wide_smem() {
-  return (HB * LW + 2 * KT * LW + HB * KT) * 2 + (HB * 4 + 2 * HB) * 4;
+  return (HB * (LW + RW) + 2 * KT * (LW + RW) + HB * KT) * 2 + (HB * 4 + 2 * HB) * 4;
 }
 
-template <int HB>
+// RW rope columns (Ling's 64) follow the latent in q and keys: scores over LW + RW, values from the latent alone.
+template <int HB, int RW = 0>
 __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok,
                             const int* cnt, float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w,
                             float scale, int sparse) {
-  constexpr int MT = HB / 16;
+  constexpr int MT = HB / 16, KW = LW + RW;
   extern __shared__ __align__(16) unsigned char smem[];
   __nv_bfloat16* qs = reinterpret_cast<__nv_bfloat16*>(smem);
-  __nv_bfloat16* kvs = qs + HB * LW;
-  __nv_bfloat16* ps = kvs + 2 * KT * LW;
+  __nv_bfloat16* kvs = qs + HB * KW;
+  __nv_bfloat16* ps = kvs + 2 * KT * KW;
   float* red = reinterpret_cast<float*>(ps + HB * KT);
   float* stat = red + HB * 4;
   const int t = threadIdx.x, lane = t & 31, warp = t >> 5, g = lane >> 2, q = lane & 3;
@@ -67,14 +69,14 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
   const int64_t n = sparse ? cnt[r] : 0, limit = sparse ? 0 : (int64_t)pos[0] + r, start = c * CH;
   const bool live = sparse ? start < n : start <= limit;
   auto load_kv = [&](int tile) {
-    __nv_bfloat16* dst = kvs + (tile & 1) * KT * LW;
+    __nv_bfloat16* dst = kvs + (tile & 1) * KT * KW;
     const int64_t first = start + tile * KT;
-    for (int idx = t; idx < KT * (LW / 8); idx += blockDim.x) {
-      const int key = idx / (LW / 8), u = idx % (LW / 8);
+    for (int idx = t; idx < KT * (KW / 8); idx += blockDim.x) {
+      const int key = idx / (KW / 8), u = idx % (KW / 8);
       const int64_t ki = first + key;
       const bool ok = sparse ? ki < n : ki <= limit;
       const int64_t src = ok ? (sparse ? (int64_t)tok[r * w + ki] : ki) : 0;
-      cp16(dst + wide(key, u), lc + src * LW + u * 8, ok);
+      cp16(dst + wide<KW>(key, u), lc + src * KW + u * 8, ok);
     }
   };
   float m[MT][2], l[MT][2], o[MT][8][4];
@@ -85,10 +87,10 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
       for (int e = 0; e < 4; ++e) o[i][j][e] = 0.0f;
   constexpr int tiles = CH / KT;
   if (live) {
-    for (int idx = t; idx < HB * (LW / 8); idx += blockDim.x) {
-      const int hd = idx / (LW / 8), u = idx % (LW / 8);
+    for (int idx = t; idx < HB * (KW / 8); idx += blockDim.x) {
+      const int hd = idx / (KW / 8), u = idx % (KW / 8);
       const bool ok = h0 + hd < heads;
-      cp16(qs + wide(hd, u), qa + (r * heads + (ok ? h0 + hd : 0)) * LW + u * 8, ok);
+      cp16(qs + wide<KW>(hd, u), qa + (r * heads + (ok ? h0 + hd : 0)) * KW + u * 8, ok);
     }
     load_kv(0);
     commit();
@@ -101,17 +103,17 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
     else
       wait<0>();
     __syncthreads();
-    const __nv_bfloat16* kv = kvs + (tile & 1) * KT * LW;
+    const __nv_bfloat16* kv = kvs + (tile & 1) * KT * KW;
     const int64_t first = start + tile * KT;
     float sc[4];
     if (hh < MT) {
       float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 #pragma unroll 4
-      for (int kk = 0; kk < LW; kk += 32) {
+      for (int kk = 0; kk < KW; kk += 32) {
         uint32_t a0[4], a1[4], b[4];
-        ldm4<false>(a0, qs + wide(hh * 16 + (lane & 15), (kk >> 3) + (lane >> 4)));
-        ldm4<false>(a1, qs + wide(hh * 16 + (lane & 15), ((kk + 16) >> 3) + (lane >> 4)));
-        ldm4<false>(b, kv + wide(kg * 8 + (lane & 7), (kk >> 3) + (lane >> 3)));
+        ldm4<false>(a0, qs + wide<KW>(hh * 16 + (lane & 15), (kk >> 3) + (lane >> 4)));
+        ldm4<false>(a1, qs + wide<KW>(hh * 16 + (lane & 15), ((kk + 16) >> 3) + (lane >> 4)));
+        ldm4<false>(b, kv + wide<KW>(kg * 8 + (lane & 7), (kk >> 3) + (lane >> 3)));
         glm_router::mma16816(acc, a0, b);
         glm_router::mma16816(acc, a1, b + 2);
       }
@@ -172,7 +174,7 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
 #pragma unroll
       for (int j = 0; j < 8; j += 2) {
         uint32_t b[4];
-        ldm4<true>(b, kv + wide(k16 + (lane & 15), ((warp * 64 + j * 8) >> 3) + (lane >> 4)));
+        ldm4<true>(b, kv + wide<KW>(k16 + (lane & 15), ((warp * 64 + j * 8) >> 3) + (lane >> 4)));
         for (int i = 0; i < MT; ++i) {
           glm_router::mma16816(o[i][j], a[i], b);
           glm_router::mma16816(o[i][j + 1], a[i], b + 2);
@@ -211,6 +213,13 @@ extern "C" __global__ void __launch_bounds__(256)
     tf_glm_chunks_32(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok, const int* cnt,
                      float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w, float scale, int sparse) {
   glm_attn::chunks_wide<32>(qa, lc, pos, tok, cnt, po, pm, pl, rows, heads, w, scale, sparse);
+}
+
+// Ling's 16-head form: 576-wide q and keys (latent, then 64 roped columns), in wide_smem<16, 64>() bytes.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_glm_chunks_r16(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok, const int* cnt,
+                      float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w, float scale, int sparse) {
+  glm_attn::chunks_wide<16, 64>(qa, lc, pos, tok, cnt, po, pm, pl, rows, heads, w, scale, sparse);
 }
 
 // latent._merge, block (row, head), 128 threads: chunks merged in order, o / l by div.full; skips sparse count-0 rows.

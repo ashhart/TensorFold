@@ -95,6 +95,9 @@ const usage =
     \\  kernel-contract           the registered kernels through the contract's gates, each planted control red (needs -Dnvcc)
     \\  kernel-contract-limits DIR   each registered launch against sm_80/86/89/120/121 from the fatbins in DIR
     \\  glm-ref                   GLM projections (matmuls, router, attention, indexer, hc) against float64 (synthetic)
+    \\  ling-mla                  Ling's MLA (128-wide absorb/expand, rope, gate, 576-wide attention) vs float64 (synthetic)
+    \\  ling-mla-real <fixture>   Ling layer 7's MLA on real inputs vs HF and float64; decode, window and cut bytes
+    \\  glm-mla-same <fatbin>     GLM's MLA launches on this build vs a 6380c8da glm_glue fatbin, byte for byte
     \\  glm-lanes-cover <ckpt> <dc.json> <rank> <world> <idfile>  copy drafts, cancels, discards, eos and max_new on one lanes.Engine across requests
     \\  glm-lanes-concurrent <ckpt> <dc.json> <rank> <world> <idfile>  concurrent streams on one lanes.Engine, each against its solo run
     \\  glm-shared-check <ckpt> <dc.json> <rank> <world> <idfile>  shared verify windows against lone twins, logits and states byte for byte
@@ -166,6 +169,9 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "nvfp4-experts")) return nvfp4_experts_tests.experts(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "quant-ref")) return quant_ref_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-ref")) return glm_ref_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "ling-mla")) return @import("ling_ref_mla.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "ling-mla-real")) return @import("ling_mla_real.zig").run(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "glm-mla-same")) return @import("glm_mla_same.zig").run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "modelopt")) return modelopt_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "exlr8")) return exlr8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "exlr8-dense")) return exlr8_dense_tests.run(gpu, if (rest.len > 0) rest[0] else null);
