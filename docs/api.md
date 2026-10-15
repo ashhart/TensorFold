@@ -45,7 +45,8 @@ Prefer a restricted file over command-line keys, which can appear in the operati
 | Route | Behavior |
 | --- | --- |
 | `GET /v1/models` | Served model ID and any configured aliases (both servers) |
-| `GET /health` | Server health and available status information |
+| `GET /health` | Liveness, the served model, the queue and live rates; open with keys (see [Health](#health)) |
+| `GET /memory`, `GET /v1/memory` | Native read-only memory snapshot ([memory diagnostics](memory-diagnostics.md)) |
 | `GET /metrics`, `GET /v1/metrics` | Prometheus text: requests, KV occupancy, drafts and latency (both servers) |
 | `GET /dashboard` | Native live dashboard page when `--dashboard` is enabled |
 | `GET /stats` | Native JSON dashboard snapshot when `--dashboard` is enabled |
@@ -364,12 +365,14 @@ The native server's finish log names the client reply ID. Completed requests rep
 `refused <id>` and its message, while a submitted request that ends before a reply reports `ended <id>` with
 `reason=client-left` or an error plus `prompt`, `tokens`, and elapsed time.
 
-On CUDA, `GET /health` also carries counters a poller can difference into rates: `busy`, `requests_running`,
-`requests_total`, `completion_tokens_total` (the running replies' tokens included as they stream), and totals that
-move when a request ends, taken from the engine's own statistics: `prompt_tokens_total`, `cached_tokens_total`,
-`prefill_seconds_total`, `decode_seconds_total`, `rounds_total`, and `drafted_total` and `accepted_total` where the
-engine reports them. A `--parallel` server adds `streams` (decoding, prefilling and the maximum), and
-`context_length` is the served window. The first sample is a baseline, not a rate.
+On the Python 0.6.6 CUDA server, `GET /health` (`{"ok": true, "backend": "tensorfold", ...}`) also carries counters
+a poller can difference into rates: `busy`, `requests_running`, `requests_total`, `completion_tokens_total` (the
+running replies' tokens included as they stream), and totals that move when a request ends, taken from the engine's
+own statistics: `prompt_tokens_total`, `cached_tokens_total`, `prefill_seconds_total`, `decode_seconds_total`,
+`rounds_total`, and `drafted_total` and `accepted_total` where the engine reports them. A `--parallel` server adds
+`streams` (decoding, prefilling and the maximum), and `context_length` is the served window. The first sample is a
+baseline, not a rate. The native server's `/health` carries none of these counters ([Health](#health) lists its
+fields); its request, token, round and draft counters are in [Metrics](#metrics).
 
 For exactness comparisons, hold the checkpoint, template, runtime, prompt, seed and sampling settings
 constant, then compare the decoded reply with `draft` enabled and disabled. Repeat with fresh and reused
@@ -406,6 +409,33 @@ An engine that keeps no prompt states leaves all three out.
 
 The native `--dashboard` flag adds a self-contained `/dashboard` page and its `/stats` JSON snapshot; both routes
 return 404 when the flag is off, and the page polls once per second without adding access-log noise.
+
+## Health
+
+The native server answers `GET /health` (and `GET /`) from one handler on Metal and CUDA, without a key. With keys
+configured the body is only `{"status": "ok"}`. Without keys it has these fields, in this order:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `status` | string | Always `"ok"` |
+| `model` | string | The served name (`--name`) |
+| `model_ids` | list of strings | The served name, then each `--alias`, as `/v1/models` lists them |
+| `max_batch_size` | integer | The lanes the engine serves at once |
+| `policy` | string | The engine's policy line; absent when the engine reports none |
+| `warming` | boolean | Always `false` on the native engines |
+| `memory` | object | CUDA: `active`, `cache` and `peak` in bytes (`cache` is 0). Metal: `{}` |
+| `live` | object | `connections`, `waiting`, `decode_tokens_per_second`, `prefill_tokens_per_second` |
+
+`live.connections` counts running and waiting requests, and `live.waiting` the waiting ones.
+`decode_tokens_per_second` is the tokens decoded in the last 2 s, divided by 2. `prefill_tokens_per_second` is the
+last prompt pass's uncached tokens over its time, shown for 2 s after the pass ends and 0 otherwise. Both rates are
+rounded to one decimal. `?reset_peak=1` starts a new CUDA peak at the current `active`; `/memory`'s `device.peak_bytes`
+is the same peak. With keys configured, `reset_peak` is ignored.
+
+The Python 0.6.6 server's body differs: its MLX `memory` can add `budget`, `mlx_budget` and `footprint`, and its CUDA
+server sends the counters described under [Responses](#responses). For memory figures on a Mac, use
+[`/memory`](memory-diagnostics.md) (it needs a key when keys are configured) or `/metrics`'
+`tensorfold:process_footprint_bytes`.
 
 ## The Responses API
 
