@@ -244,7 +244,7 @@ pub const Metal = struct {
         var base: usize = 0;
         for (windows, out) |w, o| {
             if (o.sampled.len != w.rows() or o.drafts.len != w.tokens.len) return error.InvalidGemmaOutputs;
-            const greedy = w.masks.len == 0 and (w.stream.sampling == null or w.stream.sampling.?.temperature <= 0) and std.c.getenv("GEMMA_HOST_DRAW") == null;
+            const greedy = w.masks.len == 0 and (w.stream.sampling == null or w.stream.sampling.?.temperature <= 0);
             for (o.sampled, w.positions, 0..) |*t, p, r| {
                 if (greedy) { // the GPU's argmax, the same token the host draw finds
                     const pick = picks[base + r];
