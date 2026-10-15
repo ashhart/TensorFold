@@ -98,9 +98,9 @@ pub fn attention(x: Chunk, a: pre.Attention, lin: wts.Attention, index: usize) v
     const cap = kv.capacity;
     const qkv = At.of(s.qkv);
     var q_row = row;
-    if (L <= pre.lane_rows) {
+    if (L <= pre.lane_rows or lin.qkv.tiles == null) {
         // lane_qmm's q, k and v columns stacked in one call: a column's bits follow only K and its K slices
-        x.f.xsum(x.e, "xsum_2688", c.hidden, s.x, 0, s.xs, L);
+        if (lin.qkv.tiles != null) x.f.xsum(x.e, "xsum_2688", c.hidden, s.x, 0, s.xs, L);
         x.f.coop(x.e, "qkv", lin.qkv, s.x, 0, s.xs, s.qkv, L);
         const e = x.e;
         e.pipe(x.f.k.get("tf_kv_write"));
@@ -160,7 +160,15 @@ pub fn moe(x: Chunk, m: pre.Moe, w: wts.Moe) void {
     const fc2 = [3]At{ pre.tensorAt(w.fc2[0]), pre.tensorAt(w.fc2[1]), pre.tensorAt(w.fc2[2]) };
     // the gathers read token rows and write down rows through the pair order, so y2 lands in pair order
     var pair_rows = s.y2;
-    if (n >= 16 and n / E >= 4) {
+    if (w.routed) |r| {
+        // another width: the indexed row kernels over the pairs in expert order (each expert's rows together), unsorted
+        l.glue("rows_take_bfloat16_t_uint32_t_int32_t_bfloat16_t", &.{ At.of(s.x), order }, &.{ n, D, k }, &.{At.of(s.xr)}, .{ D, n, 1 }, .{ 256, 1, 1 });
+        x.f.indexed(e, r[0], 1, n, true, s.xr, s.sorted, s.y1r);
+        x.f.indexed(e, r[1], 1, n, false, s.y1r, s.sorted, s.y2);
+        l.glue("sort_inverse_uint32_t_int32_t_uint32_t", &.{order}, &.{n}, &.{At.of(s.inv)}, .{ n, 1, 1 }, .{ 256, 1, 1 });
+        l.glue("rows_take_bfloat16_t_uint32_t_int32_t_bfloat16_t", &.{ At.of(s.y2), At.of(s.inv) }, &.{ n, D, 1 }, &.{At.of(s.xr)}, .{ D, n, 1 }, .{ 256, 1, 1 });
+        pair_rows = s.xr;
+    } else if (n >= 16 and n / E >= 4) {
         l.gatherMap(At.of(s.x), fc1, At.of(s.offsets), order, k, At.of(s.y1), n, W, D, E);
         x.relu2(s.y1, n * W, s.y1r);
         l.gatherMap(At.of(s.y1r), fc2, At.of(s.offsets), order, 0, At.of(s.y2), n, D, W, E);

@@ -38,6 +38,34 @@ pub const Format = enum { mlx, modelopt };
 /// --precision: a ModelOpt checkpoint's own math (e4m3 and NVFP4 rows), or bf16 rows throughout (full).
 pub const Precision = enum { checkpoint, full };
 
+/// One matrix's MLX affine width: `bits` per weight, a scale and a bias for each `group` of them.
+pub const Width = struct {
+    bits: u8 = 4,
+    group: u16 = 64,
+
+    /// The width the 4-bit kernels read (lane tiles, the expert kernels, the embedding); others take the row kernels.
+    pub fn four(w: Width) bool {
+        return w.bits == 4 and w.group == 64;
+    }
+
+    /// A width the core's affine kernels unpack: 2 to 8 bits but 7, in groups of 32, 64 or 128.
+    pub fn readable(w: Width) bool {
+        return w.bits >= 2 and w.bits <= 8 and w.bits != 7 and (w.group == 32 or w.group == 64 or w.group == 128);
+    }
+};
+
+/// A matrix by its module name, at its width.
+pub const Named = struct { name: []const u8, width: Width };
+
+/// A layer kind's quantized matrices after "backbone.layers.N.mixer.", in Config.widths' order.
+pub fn members(kind: Kind) []const []const u8 {
+    return switch (kind) {
+        .mamba => &.{ "in_proj", "out_proj" },
+        .attention => &.{ "q_proj", "k_proj", "v_proj", "o_proj" },
+        .moe => &.{ "switch_mlp.fc1", "switch_mlp.fc2", "shared_experts.up_proj", "shared_experts.down_proj" },
+    };
+}
+
 pub const Config = struct {
     hidden: usize,
     vocab: usize,
@@ -73,6 +101,9 @@ pub const Config = struct {
     rank: usize = 0, // this process's tensor-parallel rank of `world`: set at load, never by config.json
     world: usize = 1,
     ck: bool = false, // --precision checkpoint: e4m3 rows into the FP8 layers, NVFP4 rows into the experts
+    widths: [max_layers][4]Width = @splat(@splat(.{})), // each layer's matrices (members(kind) order) at their widths
+    embed_width: Width = .{},
+    head_width: Width = .{},
 
     pub fn inner(self: Config) usize {
         return self.mamba_heads * self.mamba_head_dim;
@@ -114,6 +145,41 @@ pub const Config = struct {
     pub fn isEos(self: Config, token: u32) bool {
         for (self.eos[0..self.eos_count]) |e| if (e == token) return true;
         return false;
+    }
+
+    /// Layer i's matrix `leaf` (one of members(kind)) at its width.
+    pub fn widthOf(self: Config, i: usize, leaf: []const u8) Width {
+        for (members(self.kinds[i]), 0..) |m, j| if (std.mem.eql(u8, m, leaf)) return self.widths[i][j];
+        std.debug.panic("layer {d} has no matrix {s}", .{ i, leaf });
+    }
+
+    /// The first matrix at another width than 4-bit in groups of 64 (layer names written into `buf`), else null.
+    pub fn other(self: *const Config, buf: []u8) ?Named {
+        if (!self.embed_width.four()) return .{ .name = "backbone.embeddings", .width = self.embed_width };
+        for (0..self.layers) |i| for (members(self.kinds[i]), 0..) |m, j| if (!self.widths[i][j].four()) {
+            const name = std.fmt.bufPrint(buf, "backbone.layers.{d}.mixer.{s}", .{ i, m }) catch m;
+            return .{ .name = name, .width = self.widths[i][j] };
+        };
+        if (!self.head_width.four()) return .{ .name = "lm_head", .width = self.head_width };
+        return null;
+    }
+
+    /// Refuse a checkpoint with any width but 4/64 for `engine`, which reads only those, logging its first such matrix.
+    pub fn fourOnly(self: *const Config, engine: []const u8) error{UnsupportedQuantization}!void {
+        var buf: [96]u8 = undefined;
+        const m = self.other(&buf) orelse return;
+        std.log.warn("{s} is {d}-bit in groups of {d}: {s} reads Nemotron MLX checkpoints at 4-bit in groups of 64 only; mixed and 6- or 8-bit (oQ) checkpoints serve on Macs", .{ m.name, m.width.bits, m.width.group, engine });
+        return error.UnsupportedQuantization;
+    }
+
+    /// 0 when every matrix is 4/64, else a nonzero hash of every width: timed costs keep each mix of widths apart.
+    pub fn widthsTag(self: *const Config) u64 {
+        var buf: [96]u8 = undefined;
+        if (self.other(&buf) == null) return 0;
+        var h = std.hash.Wyhash.init(0x6e71);
+        const all = [_][]const [4]Width{ &.{@splat(self.embed_width)}, self.widths[0..self.layers], &.{@splat(self.head_width)} };
+        for (all) |part| for (part) |l| for (l) |w| h.update(&.{ w.bits, @as(u8, @truncate(w.group)), @as(u8, @truncate(w.group >> 8)) });
+        return h.final() | 1;
     }
 
     /// `dir`/config.json.
@@ -201,7 +267,7 @@ fn width(o: std.json.ObjectMap, key: []const u8, default: usize) usize {
     };
 }
 
-/// The checkpoint's bits and group size; a per-module entry at any other width is refused, as the kernels read one.
+/// The checkpoint's width and each per-module entry's (oQ quants); a width no kernel reads is refused by its module.
 fn quantization(c: *Config, o: std.json.ObjectMap, why: *Why) !void {
     const q = quantBlock(o) orelse {
         why.set("config.json declares no quantization; the native Nemotron kernels read MLX affine checkpoints", .{});
@@ -225,31 +291,65 @@ fn quantization(c: *Config, o: std.json.ObjectMap, why: *Why) !void {
         why.set("config.json's quantization has no readable bits or group_size", .{});
         return error.UnsupportedQuantization;
     }
+    const global = readable(c.bits, c.group_size) orelse {
+        why.set("config.json quantizes the checkpoint at {d}-bit in groups of {d}; " ++ kernel_widths, .{ c.bits, c.group_size });
+        return error.UnsupportedQuantization;
+    };
+    c.embed_width = global;
+    c.head_width = global;
+    c.widths = @splat(@splat(global));
     var it = q.iterator();
-    while (it.next()) |e| if (!blockField(e.key_ptr.*)) try module(c.*, e.key_ptr.*, e.value_ptr.*, why);
+    while (it.next()) |e| if (!blockField(e.key_ptr.*)) try module(c, global, e.key_ptr.*, e.value_ptr.*, why);
 }
 
-/// A per-module entry as nn.quantize reads it: true, or a dict at the checkpoint's width, passes; anything else is refused.
-fn module(c: Config, path: []const u8, v: std.json.Value, why: *Why) !void {
-    switch (v) {
-        .bool => |on| if (on or learned(path)) return,
-        .object => |m| if (m.count() > 0) {
+/// What the native Nemotron kernels read, for the refusals that name a width.
+const kernel_widths = "the native Nemotron kernels read MLX affine matrices at 2- to 8-bit (not 7) in groups of 32, 64 or 128";
+
+/// The width when the core's affine kernels unpack it, else null.
+fn readable(bits: usize, group: usize) ?Width {
+    const w: Width = .{ .bits = std.math.cast(u8, bits) orelse return null, .group = std.math.cast(u16, group) orelse return null };
+    return if (w.readable()) w else null;
+}
+
+/// A per-module entry as nn.quantize reads it: true, a dict at a readable width, or false for a lesson's matrix.
+fn module(c: *Config, global: Width, path: []const u8, v: std.json.Value, why: *Why) !void {
+    const slot = target(c, path) orelse return; // a module the engine does not read as a quantized matrix
+    slot.* = switch (v) {
+        .bool => |on| if (on) global else if (learned(path)) Width{} else return unquantized(path, why), // split to 4/64
+        .object => |m| if (m.count() == 0) return unquantized(path, why) else blk: {
             // a dict's missing bits or group_size take to_quantized's affine defaults, not the top level's
             const bits = width(m, "bits", 4);
             const group = width(m, "group_size", 64);
-            if (affine(m) and bits == c.bits and group == c.group_size) return;
+            if (affine(m)) if (readable(bits, group)) |w| break :blk w;
             if (!affine(m) or bits == 0 or group == 0) {
-                why.set("config.json quantizes {s} as {f}; the native Nemotron kernels read every matrix at {d}-bit in groups of {d}", .{ path, std.json.fmt(v, .{}), c.bits, c.group_size });
-            } else {
-                why.set("config.json quantizes {s} at {d}-bit in groups of {d}; the native Nemotron kernels read every matrix at the checkpoint's {d}-bit in groups of {d}", .{ path, bits, group, c.bits, c.group_size });
-            }
-            return error.MixedQuantization;
+                why.set("config.json quantizes {s} as {f}; " ++ kernel_widths, .{ path, std.json.fmt(v, .{}) });
+            } else why.set("config.json quantizes {s} at {d}-bit in groups of {d}; " ++ kernel_widths, .{ path, bits, group });
+            return error.UnsupportedQuantization;
         },
-        .null => {},
+        .null => return unquantized(path, why),
         else => return,
-    }
-    why.set("config.json leaves {s} unquantized; the native Nemotron kernels read every matrix at {d}-bit in groups of {d}", .{ path, c.bits, c.group_size });
-    return error.MixedQuantization;
+    };
+}
+
+fn unquantized(path: []const u8, why: *Why) error{UnsupportedQuantization} {
+    why.set("config.json leaves {s} unquantized; the native Nemotron kernels read it only as an MLX affine matrix", .{path});
+    return error.UnsupportedQuantization;
+}
+
+/// The width slot of the matrix `path` names (with or without "language_model."), or null for any other module.
+fn target(c: *Config, path: []const u8) ?*Width {
+    var p = path;
+    if (std.mem.startsWith(u8, p, "language_model.")) p = p["language_model.".len..];
+    if (std.mem.eql(u8, p, "backbone.embeddings")) return &c.embed_width;
+    if (std.mem.eql(u8, p, "lm_head")) return &c.head_width;
+    const stem = "backbone.layers.";
+    if (!std.mem.startsWith(u8, p, stem)) return null;
+    const rest = p[stem.len..];
+    const dot = std.mem.indexOfScalar(u8, rest, '.') orelse return null;
+    const i = std.fmt.parseInt(usize, rest[0..dot], 10) catch return null;
+    if (i >= c.layers or !std.mem.startsWith(u8, rest[dot..], ".mixer.")) return null;
+    for (members(c.kinds[i]), 0..) |m, j| if (std.mem.eql(u8, m, rest[dot + ".mixer.".len ..])) return &c.widths[i][j];
+    return null;
 }
 
 /// An output projection Sliding Weights wrote in bf16: the loader reads it as codes plus a residual.
@@ -368,12 +468,22 @@ fn split(c: *Config, top: std.json.ObjectMap, why: *Why) !void {
     c.held = @intCast(r.integer);
 }
 
-/// The shapes our kernels serve (Nemotron 3.5 Lightning 30B-A3B, 4-bit groups of 64): Metal's generated sources, CUDA's captured cubins.
+/// fourOnly on config.json's text: its quantization refusals logged, other errors left to `engine`'s own checks.
+pub fn fourOnlyText(gpa: std.mem.Allocator, text: []const u8, engine: []const u8) !void {
+    var why: Why = .{};
+    const c = parse(gpa, text, &why) catch |err| {
+        if (err != error.UnsupportedQuantization) return;
+        std.log.warn("{s}", .{why.text()});
+        return err;
+    };
+    if (c.format == .mlx) try c.fourOnly(engine);
+}
+
+/// The shapes our kernels serve (Nemotron 3.5 Lightning 30B-A3B at any width parse admits): Metal's and CUDA's.
 pub fn checkShapes(c: Config) !void {
     const ok = c.hidden == 2688 and c.vocab == 131072 and c.mamba_heads == 64 and c.mamba_head_dim == 64 and
         c.groups == 8 and c.state == 128 and c.conv_kernel == 4 and c.heads == 32 and c.kv_heads == 2 and
-        c.head_dim == 128 and c.experts == 128 and c.top_k == 6 and c.expert_width == 1856 and c.shared_width == 3712 and
-        c.group_size == 64 and c.bits == 4 and c.format == .mlx;
+        c.head_dim == 128 and c.experts == 128 and c.top_k == 6 and c.expert_width == 1856 and c.shared_width == 3712;
     if (c.format == .modelopt) {
         std.log.err("this is a ModelOpt (FP8 and NVFP4) checkpoint: the CUDA engine serves it; Metal reads MLX checkpoints", .{});
         return error.UnsupportedQuantization;
@@ -393,113 +503,6 @@ pub const lightning =
     \\ "quantization": {"group_size": 64, "bits": 4}}
 ;
 
-/// The Lightning config with its quantization block's text replaced by `block`.
-fn withQuantization(block: []const u8) ![]u8 {
-    return std.mem.replaceOwned(u8, std.testing.allocator, lightning, "\"quantization\": {\"group_size\": 64, \"bits\": 4}", block);
-}
-
-/// parse() must refuse the Lightning config with quantization `block`, its reason naming each of `words`.
-fn expectRefused(block: []const u8, err: anyerror, words: []const []const u8) !void {
-    const text = try withQuantization(block);
-    defer std.testing.allocator.free(text);
-    var why: Why = .{};
-    try std.testing.expectError(err, parse(std.testing.allocator, text, &why));
-    for (words) |word| if (std.mem.indexOf(u8, why.text(), word) == null) {
-        std.debug.print("refusal \"{s}\" does not name \"{s}\"\n", .{ why.text(), word });
-        return error.TestUnexpectedResult;
-    };
-}
-
-test "per-module quantization entries read as MLX reads them, any other width refused" {
-    const fc1 = "backbone.layers.1.mixer.switch_mlp.fc1";
-    for ([_][]const u8{
-        "\"quantization\": {\"group_size\": 64, \"bits\": 4, \"mode\": \"affine\", \"lm_head\": true}",
-        "\"quantization\": {\"bits\": 4, \"" ++ fc1 ++ "\": {\"group_size\": 64, \"bits\": 4}, \"lm_head\": {\"mode\": \"affine\"}}",
-        "\"quantization_config\": {\"group_size\": 64, \"bits\": 4, \"quant_method\": \"mlx\", \"oq_note\": \"metadata\"}",
-    }) |block| {
-        const text = try withQuantization(block);
-        defer std.testing.allocator.free(text);
-        var why: Why = .{};
-        try checkShapes(try parse(std.testing.allocator, text, &why));
-    }
-    try expectRefused("\"quantization\": {\"group_size\": 64, \"bits\": 4, \"" ++ fc1 ++ "\": {\"group_size\": 64, \"bits\": 8}}", error.MixedQuantization, &.{ fc1, "8-bit in groups of 64" });
-    try expectRefused("\"quantization\": {\"group_size\": 64, \"bits\": 4, \"backbone.embeddings\": {\"bits\": 6}}", error.MixedQuantization, &.{ "backbone.embeddings", "6-bit" });
-    try expectRefused("\"quantization\": {\"group_size\": 64, \"bits\": 4, \"lm_head\": {\"group_size\": 32}}", error.MixedQuantization, &.{ "lm_head", "4-bit in groups of 32" });
-    try expectRefused("\"quantization\": {\"group_size\": 64, \"bits\": 4, \"lm_head\": false}", error.MixedQuantization, &.{ "lm_head", "unquantized" });
-    try expectRefused("\"quantization\": {\"group_size\": 64, \"bits\": 4, \"lm_head\": {}}", error.MixedQuantization, &.{ "lm_head", "unquantized" });
-    try expectRefused("\"quantization\": {\"group_size\": 64, \"bits\": 4, \"lm_head\": {\"mode\": \"mxfp8\"}}", error.MixedQuantization, &.{ "lm_head", "mxfp8" });
-    try expectRefused("\"quantization\": {\"group_size\": 32, \"bits\": 4, \"mode\": \"mxfp4\"}", error.UnsupportedQuantization, &.{"mxfp4"});
-    try expectRefused("\"quantization_config\": {\"quant_method\": \"fp8\", \"weight_block_size\": [128, 128]}", error.UnsupportedQuantization, &.{"fp8"});
-    try expectRefused("\"quantization\": {\"group_size\": 64}", error.UnsupportedQuantization, &.{"bits"});
-    try expectRefused("\"tie_word_embeddings\": false", error.UnsupportedQuantization, &.{"no quantization"});
-}
-
-test "a ModelOpt checkpoint parses for the CUDA loader, which reads its formats from the tensors" {
-    const text = try withQuantization("\"quantization_config\": {\"quant_method\": \"modelopt\", \"quant_algo\": \"MIXED_PRECISION\"}");
-    defer std.testing.allocator.free(text);
-    var why: Why = .{};
-    const c = try parse(std.testing.allocator, text, &why);
-    try std.testing.expectEqual(Format.modelopt, c.format);
-    try std.testing.expectEqual(@as(usize, 8), c.slots());
-}
-
-test "parse the Lightning config" {
-    var why: Why = .{};
-    const c = try parse(std.testing.allocator, lightning, &why);
-    try std.testing.expectEqual(@as(usize, 3), c.layers);
-    try std.testing.expectEqual(Kind.attention, c.kinds[2]);
-    try std.testing.expectEqual(@as(usize, 10304), c.projDim());
-    try std.testing.expectEqual(@as(usize, 6144), c.convDim());
-    try std.testing.expectEqual(@as(usize, 4608), c.qkvDim());
-    try std.testing.expectEqual(@as(usize, 8), c.slots());
-    try std.testing.expect(c.isEos(11) and !c.isEos(3));
-    try std.testing.expectEqual(std.math.inf(f32), c.dt_max);
-    try checkShapes(c);
-}
-
-const super_text =
-    \\{"model_type": "nemotron_h_omni", "quantization_config": {"quant_method": "modelopt_mixed"},
-    \\ "tensorfold_tp": {"rank": 1, "world": 2, "routed_width": 1344, "shared_width": 2688, "scheme": "moe_width"},
-    \\ "llm_config": {"model_type": "nemotron_h", "hidden_size": 4096, "vocab_size": 131072, "mamba_num_heads": 128,
-    \\ "mamba_head_dim": 64, "n_groups": 8, "ssm_state_size": 128, "conv_kernel": 4, "num_attention_heads": 32,
-    \\ "num_key_value_heads": 2, "head_dim": 128, "n_routed_experts": 512, "num_experts_per_tok": 22,
-    \\ "moe_intermediate_size": 2688, "moe_shared_expert_intermediate_size": 5376, "moe_latent_size": 1024,
-    \\ "routed_scaling_factor": 5.0, "layer_norm_epsilon": 1e-05, "eos_token_id": 11,
-    \\ "time_step_limit": [0.0, {"__float__": "Infinity"}], "layers_block_type": ["mamba", "moe", "attention"]}}
-;
-
-test "nemotron_h_omni: the text config under llm_config, latent shares, a split checkpoint's share" {
-    var why: Why = .{};
-    const c = try parse(std.testing.allocator, super_text, &why);
-    try std.testing.expect(c.omni and c.format == .modelopt and c.latent == 1024 and c.shares == 2 and c.held.? == 1);
-    try std.testing.expectEqual(@as(usize, 22), c.slots());
-    try std.testing.expectEqualStrings("language_model.", c.prefix());
-    try std.testing.expectEqual(std.math.inf(f32), c.dt_max);
-    try std.testing.expectEqual(@as(usize, 18560), c.projDim());
-    const bad = try std.mem.replaceOwned(u8, std.testing.allocator, super_text, "\"routed_width\": 1344", "\"routed_width\": 1024");
-    defer std.testing.allocator.free(bad);
-    try std.testing.expectError(error.BadConfig, parse(std.testing.allocator, bad, &why));
-    try std.testing.expect(std.mem.indexOf(u8, why.text(), "tensorfold_tp") != null);
-}
-
-test "the latent router's bounds: 33 picks, 1,025 experts, zero picks and expert groups are refused by name" {
-    const a = std.testing.allocator;
-    const cases = [_][2][]const u8{
-        .{ "\"num_experts_per_tok\": 22", "\"num_experts_per_tok\": 33" },
-        .{ "\"num_experts_per_tok\": 22", "\"num_experts_per_tok\": 0" },
-        .{ "\"n_routed_experts\": 512", "\"n_routed_experts\": 1025" },
-        .{ "\"moe_latent_size\": 1024", "\"moe_latent_size\": 1024, \"n_group\": 2" },
-        .{ "\"moe_latent_size\": 1024", "\"moe_latent_size\": 1024, \"mlp_hidden_act\": \"silu\"" },
-    };
-    for (cases) |k| {
-        var why: Why = .{};
-        const text = try std.mem.replaceOwned(u8, a, super_text, k[0], k[1]);
-        defer a.free(text);
-        try std.testing.expectError(error.BadConfig, parse(a, text, &why));
-        try std.testing.expect(why.text().len > 0);
-    }
-    var why: Why = .{};
-    const ok = try std.mem.replaceOwned(u8, a, super_text, "\"moe_latent_size\": 1024", "\"moe_latent_size\": 1024, \"n_group\": 1, \"topk_group\": 1");
-    defer a.free(ok);
-    _ = try parse(a, ok, &why);
+test {
+    _ = @import("config_test.zig");
 }

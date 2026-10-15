@@ -10,6 +10,7 @@ const learned = @import("learned.zig");
 const kern = @import("kernels.zig");
 const pk = @import("prefill_kernels.zig");
 const frags = @import("../../core/frags.zig");
+const row = @import("../../core/row_projection.zig");
 const simd_attention = @import("simd_attention.zig");
 
 pub const Model = struct {
@@ -26,7 +27,7 @@ pub const Model = struct {
     load_seconds: f64 = 0,
     compile_seconds: f64 = 0,
 
-    /// Load `dir` (an MLX 4-bit Nemotron 3.5 Lightning folder); `mtp` also reads mtp-4bit.safetensors when present.
+    /// Load `dir` (an MLX affine Nemotron 3.5 Lightning folder); `mtp` also reads mtp-4bit.safetensors when present.
     pub fn load(allocator: std.mem.Allocator, io: std.Io, dir: []const u8, mtp: bool) !*Model {
         const started = mtl.clock.seconds();
         const m = try allocator.create(Model);
@@ -69,6 +70,10 @@ pub const Model = struct {
             allocator.free(m.draft_ids);
         }
         m.compile_seconds = @max(seconds[0], seconds[1]);
+        // a matrix at another width than 4/64 reads through the core's row kernels on every chip
+        if (compiled) |*k| {
+            if (k.rows == null and m.config.widthsTag() != 0) k.rows = try row.Pipelines.load(m.device);
+        } else |_| {}
         m.kernels = try compiled;
         m.prefill = try wide;
         try frags.check(m.device, m.queue, allocator);
