@@ -14,14 +14,17 @@ pub const Metal = struct {
     gpa: std.mem.Allocator,
     model: *Model,
     options: Options,
-    scratch: st.Scratch,
+    scratch: st.Scratch, // decode rounds
+    prompt: st.Scratch, // prompt chunks
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
     held: u64 = 0, // bytes the streams' caches hold
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
         errdefer gpa.destroy(out);
-        out.* = .{ .gpa = gpa, .model = model, .options = options, .scratch = try st.Scratch.init(model.device, &model.config, options.capacity) };
+        var scratch = try st.Scratch.init(model.device, &model.config, options.capacity, st.window_rows);
+        errdefer scratch.deinit();
+        out.* = .{ .gpa = gpa, .model = model, .options = options, .scratch = scratch, .prompt = try st.Scratch.init(model.device, &model.config, options.capacity, st.prompt_rows) };
         return out;
     }
 
@@ -33,6 +36,7 @@ pub const Metal = struct {
         }
         self.caches.deinit(self.gpa);
         self.scratch.deinit();
+        self.prompt.deinit();
         self.gpa.destroy(self);
     }
 
@@ -56,12 +60,13 @@ pub const Metal = struct {
         return cache.logits.slice(u16, self.model.config.vocab);
     }
 
-    /// Run `ids` at the cache's end and keep them.
+    /// Run `ids` at the cache's end and keep them: prompt chunks past 16 rows, decode rows else.
     fn feed(self: *Metal, cache: *st.Cache, ids: []const u32) !void {
         var at: usize = 0;
         while (at < ids.len) {
-            const end = @min(ids.len, at + st.window_rows);
-            try fwd.run(self.model, &self.scratch, cache, ids[at..end]);
+            const end = @min(ids.len, at + st.prompt_rows);
+            const s = if (end - at > st.window_rows) &self.prompt else &self.scratch;
+            try fwd.run(self.model, s, cache, ids[at..end]);
             cache.len += end - at;
             at = end;
         }

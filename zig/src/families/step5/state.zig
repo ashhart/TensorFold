@@ -3,14 +3,18 @@ const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 
-/// Rows a forward call takes at most: the router's launch limit.
+/// Rows a decode forward takes at most: the router's launch limit; more take the prompt path (tensor-unit matmuls).
 pub const window_rows = 16;
-/// Token rows of the indexer's k and z kept for regions still filling: a region (8) plus a window, rounded up.
-pub const index_ring = 32;
+/// Rows a prompt chunk takes at most (its picks fit s5_sort's 4,096).
+pub const prompt_rows = 512;
+/// Rows the indexer scores at once: its scores buffer is these rows by every region.
+pub const score_rows = 64;
+/// Token rows of the indexer's k and z kept for regions still filling: a region (8) plus a prompt chunk, and spare.
+pub const index_ring = prompt_rows + 16;
 
-/// Ring slots of a sliding layer: its window and one more window of rows.
+/// Ring slots of a sliding layer: its window and one more prompt chunk.
 pub fn slidingRing(c: *const cfg.Config) usize {
-    return c.window + window_rows;
+    return c.window + prompt_rows;
 }
 
 /// Bytes a stream of `capacity` positions holds in caches.
@@ -92,7 +96,7 @@ pub const Cache = struct {
     }
 };
 
-const fields = [_][]const u8{ "ids", "resid", "x", "q", "qn", "k", "v", "g", "o", "y", "shared", "gate", "up", "act", "eg", "eu", "ea", "ey", "logits32", "pick", "wts", "iq", "iqn", "ik", "iz", "iw", "scores", "sel" };
+const fields = [_][]const u8{ "ids", "resid", "x", "q", "qn", "k", "v", "g", "o", "y", "shared", "gate", "up", "act", "eg", "eu", "ea", "ey", "logits32", "pick", "wts", "iq", "iqn", "ik", "iz", "iw", "scores", "sel", "xs", "sums", "offsets", "order" };
 
 pub const Scratch = struct {
     ids: mtl.Buffer,
@@ -123,10 +127,18 @@ pub const Scratch = struct {
     iw: mtl.Buffer,
     scores: mtl.Buffer,
     sel: mtl.Buffer,
+    xs: mtl.Buffer, // the prompt path: picks' input rows by expert, group sums, each expert's first pair, the pair order
+    sums: mtl.Buffer,
+    offsets: mtl.Buffer,
+    order: mtl.Buffer,
     route: [7]mtl.Buffer, // the router's per-Mac groups, unused on one Mac
+    rows: usize,
 
-    pub fn init(device: mtl.Device, c: *const cfg.Config, capacity: usize) !Scratch {
-        const r: usize = window_rows;
+    /// Buffers for `rows` rows at once (window_rows for decode, prompt_rows for prompt chunks).
+    pub fn init(device: mtl.Device, c: *const cfg.Config, capacity: usize, rows: usize) !Scratch {
+        const r: usize = rows;
+        @setEvalBranchQuota(10000);
+        const prompt = rows > window_rows;
         const h: usize = c.hidden;
         const slots = r * c.topk;
         const qw = r * c.heads * c.head_dim * 2;
@@ -137,7 +149,9 @@ pub const Scratch = struct {
             r * h * 2,     r * c.intermediate * 2, r * c.intermediate * 2, r * c.intermediate * 2, slots * c.moe_intermediate * 2,
             slots * c.moe_intermediate * 2, slots * c.moe_intermediate * 2, slots * h * 2, r * c.experts * 4, slots * 4,
             slots * 4,     ix,             ix,                      r * c.proxy * 2,         r * c.proxy * 2,
-            r * c.index_heads * 4, r * c.kv_heads * regions(c, capacity) * 4, r * c.kv_heads * c.index_topk * 4,
+            r * c.index_heads * 4, @min(r, score_rows) * c.kv_heads * regions(c, capacity) * 4, r * c.kv_heads * c.index_topk * 4,
+            if (prompt) slots * h * 2 else 16, if (prompt) @max(r * c.intermediate / 64, slots * h / 128) * 4 else 16,
+            c.experts * 4, slots * 4,
         };
         var s: Scratch = undefined;
         var made: usize = 0;
@@ -152,6 +166,7 @@ pub const Scratch = struct {
             b.* = try device.buffer(@as(usize, c.experts) * window_rows * 4 + 4096, mtl.ResourceOptions.shared);
             routed += 1;
         }
+        s.rows = rows;
         return s;
     }
 

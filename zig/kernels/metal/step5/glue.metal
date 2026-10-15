@@ -134,3 +134,32 @@ inline void s5_norm_row(const device float* R, const device float* w, device bfl
   const size_t i = (size_t)p.y * a.width + p.x;
   R[i] += float(bfloat(sum)) + float(shared[i]);
 }
+
+// A chunk's a.rows picks by expert (a.width of them): offsets[e] its first pair, order the pairs, each in pick order.
+[[kernel]] void s5_sort(const device int* pick [[buffer(0)]], constant s5_args& a [[buffer(1)]],
+    device int* offsets [[buffer(2)]], device int* order [[buffer(3)]], uint t [[thread_position_in_threadgroup]]) {
+  threadgroup int picks[4096];
+  threadgroup int counts[1024];
+  for (uint i = t; i < a.rows; i += 1024) picks[i] = pick[i];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  int n = 0;
+  if (t < a.width)
+    for (uint i = 0; i < a.rows; ++i) n += picks[i] == int(t) ? 1 : 0;
+  counts[t] = n;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t == 0) {
+    int sum = 0;
+    for (uint e = 0; e < a.width; ++e) { const int c = counts[e]; counts[e] = sum; sum += c; }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (t >= a.width) return;
+  int at = counts[t];
+  offsets[t] = at;
+  for (uint i = 0; i < a.rows; ++i) if (picks[i] == int(t)) order[at++] = int(i);
+}
+
+// Y[i] = X[order[i] / a.heads]: each sorted pair's input row (a.width wide).
+[[kernel]] void s5_rows_by_order(const device bfloat* X [[buffer(0)]], const device int* order [[buffer(1)]],
+    constant s5_args& a [[buffer(2)]], device bfloat* Y [[buffer(3)]], uint2 p [[thread_position_in_grid]]) {
+  if (p.x < a.width && p.y < a.rows) Y[(size_t)p.y * a.width + p.x] = X[(size_t)(order[p.y] / int(a.heads)) * a.width + p.x];
+}

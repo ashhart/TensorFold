@@ -1,4 +1,4 @@
-//! Up to 16 rows through every layer in one command buffer: dense attention over the cache, routed experts.
+//! Rows through every layer in one command buffer: row kernels to 16 rows, tensor-unit matmuls for prompt chunks.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -6,6 +6,7 @@ const st = @import("state.zig");
 const wts = @import("weights.zig");
 const rows = @import("../../core/row_projection.zig");
 const route = @import("../../core/moe_route.zig");
+const affine_mm = @import("../../core/affine_mm.zig");
 const Model = @import("model.zig").Model;
 const Glue = @import("model.zig").Glue;
 
@@ -17,6 +18,7 @@ const SArgs = extern struct { rows: u32 = 0, pos: u32 = 0, heads: u32 = 0, dim: 
 const Enc = struct {
     e: mtl.ComputeEncoder,
     m: *const Model,
+    s: *st.Scratch,
 
     fn glue(x: Enc, g: Glue, args: anytype, bufs: []const B, grid: [3]usize, group: [3]usize, groups: bool) void {
         x.e.setPipeline(x.m.pipe(g));
@@ -31,6 +33,12 @@ const Enc = struct {
     }
 
     fn project(x: Enc, w: wts.Linear, in: mtl.Buffer, in_off: usize, out: mtl.Buffer, out_off: usize, n_rows: usize) !void {
+        if (n_rows > st.window_rows) if (x.m.mmFor(w)) |p| {
+            // a prompt chunk: each group's row sums, then the tensor-unit product (each weight read once a chunk)
+            affine_mm.rowSums(x.e, p, @intCast(w.group), bo(in, in_off), b(x.s.sums), @intCast(n_rows), @intCast(w.k));
+            affine_mm.dense(x.e, p, bo(in, in_off), b(x.s.sums), mat(w), bo(out, out_off), @intCast(n_rows));
+            return;
+        };
         const call = try rows.call(&x.m.rows, w, n_rows, false);
         x.e.setPipeline(call.pipeline);
         x.e.setBuffer(in, in_off, 0);
@@ -68,12 +76,17 @@ fn t(x: wts.Tensor) B {
 }
 const A = B{ .args = true };
 
+/// A matrix as affine_mm takes it.
+fn mat(w: wts.Linear) struct { w: B, s: B, b: B, n: u32, k: u32 } {
+    return .{ .w = bo(w.w, w.w_off), .s = bo(w.scales, w.s_off), .b = bo(w.biases, w.b_off), .n = @intCast(w.n), .k = @intCast(w.k) };
+}
+
 /// `ids` at positions cache.len.. through the model: keys and values into the cache (len unmoved), last logits out.
 pub fn run(m: *const Model, s: *st.Scratch, cache: *st.Cache, ids: []const u32) !void {
     const c = &m.config;
     const n = ids.len;
     const start = cache.len;
-    if (n == 0 or n > st.window_rows) return error.Step5RowsExceeded;
+    if (n == 0 or n > s.rows) return error.Step5RowsExceeded;
     if (start + n > cache.capacity) return error.Step5ContextFull;
     for (ids) |id| if (id >= c.vocab) return error.InvalidStep5Token;
     @memcpy(s.ids.slice(u32, n), ids);
@@ -84,7 +97,7 @@ pub fn run(m: *const Model, s: *st.Scratch, cache: *st.Cache, ids: []const u32) 
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const cb = m.queue.commandBuffer();
-    const x = Enc{ .e = cb.compute(.serial), .m = m };
+    const x = Enc{ .e = cb.compute(.serial), .m = m, .s = s };
     const W = m.weights;
     const embed = Args{ .rows = nr, .width = c.hidden, .bits = W.embed.bits, .group = @intCast(W.embed.group) };
     x.glue(.embed, embed, &.{ b(s.ids), .{ .buf = W.embed.w, .off = W.embed.w_off }, .{ .buf = W.embed.scales, .off = W.embed.s_off }, .{ .buf = W.embed.biases, .off = W.embed.b_off }, A, b(s.resid) }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
@@ -107,12 +120,23 @@ pub fn run(m: *const Model, s: *st.Scratch, cache: *st.Cache, ids: []const u32) 
                 x.glue(.add, Args{ .rows = nr, .width = c.hidden }, &.{ b(s.resid), b(s.y), A }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
             },
             .moe => |e| {
-                route.logits(x.e, m.route[0], .{ .hidden = c.hidden, .experts = c.experts, .topk = c.topk }, b(s.x), b(e.router), b(s.logits32), nr);
-                route.select(x.e, m.route[1], b(s.logits32), t(e.bias), c.routed_scale, nr, .{ 0, c.experts }, .{
-                    .pick = b(s.pick), .wts = b(s.wts), .ids = b(s.route[0]), .members = b(s.route[1]), .count = b(s.route[2]),
-                    .mine = b(s.route[3]), .theirs = b(s.route[4]), .counts = b(s.route[5]), .word = b(s.route[6]),
-                });
+                var r0: usize = 0;
+                while (r0 < n) : (r0 += st.window_rows) { // the router's launches take 16 rows each
+                    const blk: u32 = @intCast(@min(st.window_rows, n - r0));
+                    const at = r0 * c.topk * 4;
+                    route.logits(x.e, m.route[0], .{ .hidden = c.hidden, .experts = c.experts, .topk = c.topk }, bo(s.x, r0 * h * 2), b(e.router), b(s.logits32), blk);
+                    route.select(x.e, m.route[1], b(s.logits32), t(e.bias), c.routed_scale, blk, .{ 0, c.experts }, .{
+                        .pick = bo(s.pick, at), .wts = bo(s.wts, at), .ids = b(s.route[0]), .members = b(s.route[1]), .count = b(s.route[2]),
+                        .mine = b(s.route[3]), .theirs = b(s.route[4]), .counts = b(s.route[5]), .word = b(s.route[6]),
+                    });
+                }
                 const slots = n * c.topk;
+                if (n > st.window_rows) {
+                    try expertsByExpert(x, e, n, lay.limit);
+                    try mlp(x, e.shared, s, s.shared, n, c.shared_intermediate, lay.shared_limit);
+                    x.glue(.moe_add, Args{ .rows = nr, .width = c.hidden, .heads = c.topk }, &.{ b(s.resid), b(s.ey), b(s.wts), b(s.shared), A }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
+                    continue;
+                }
                 var gate = e.gate;
                 gate.repeat = c.topk;
                 var up = e.up;
@@ -135,6 +159,24 @@ pub fn run(m: *const Model, s: *st.Scratch, cache: *st.Cache, ids: []const u32) 
         std.log.err("step5 forward: {s}", .{msg});
         return error.GpuFailed;
     }
+}
+
+/// A chunk's routed experts by expert (each expert's weights read once): sorted, gate/up, SwiGLU, down back to s.ey.
+fn expertsByExpert(x: Enc, e: wts.Moe, n: usize, limit: f32) !void {
+    const c = &x.m.config;
+    const s = x.s;
+    const slots: u32 = @intCast(n * c.topk);
+    const p = x.m.mmFor(e.gate.one) orelse return error.UnsupportedStep5Experts;
+    const pd = x.m.mmFor(e.down.one) orelse return error.UnsupportedStep5Experts;
+    const ex: u32 = c.experts;
+    x.glue(.sort, Args{ .rows = slots, .width = ex }, &.{ b(s.pick), A, b(s.offsets), b(s.order) }, .{ 1, 1, 1 }, .{ 1024, 1, 1 }, true);
+    x.glue(.rows_by_order, Args{ .rows = slots, .width = c.hidden, .heads = c.topk }, &.{ b(s.x), b(s.order), A, b(s.xs) }, .{ c.hidden, slots, 1 }, .{ 256, 1, 1 }, false);
+    affine_mm.rowSums(x.e, p, @intCast(e.gate.one.group), b(s.xs), b(s.sums), slots, c.hidden);
+    affine_mm.gather(x.e, p, b(s.xs), b(s.sums), mat(e.gate.one), b(s.offsets), b(s.eg), slots, ex);
+    affine_mm.gather(x.e, p, b(s.xs), b(s.sums), mat(e.up.one), b(s.offsets), b(s.eu), slots, ex);
+    x.glue(.swiglu, Args{ .rows = slots, .width = c.moe_intermediate, .limit = limit }, &.{ b(s.eg), b(s.eu), A, b(s.ea) }, .{ c.moe_intermediate, slots, 1 }, .{ 256, 1, 1 }, false);
+    affine_mm.rowSums(x.e, pd, @intCast(e.down.one.group), b(s.ea), b(s.sums), slots, c.moe_intermediate);
+    affine_mm.gatherTo(x.e, pd, b(s.ea), b(s.sums), mat(e.down.one), b(s.offsets), b(s.ey), b(s.order), slots, ex);
 }
 
 /// gate and up from s.x, the clamped SwiGLU, down into `out`.
@@ -167,7 +209,7 @@ fn attention(x: Enc, s: *st.Scratch, cache: *st.Cache, w: wts.Attention, i: usiz
     x.glue(.copy, Args{ .rows = nr, .width = @intCast(kvw), .stride = @intCast(kvw), .pos = @intCast(start), .ring = @intCast(ring) }, &.{ b(s.v), A, bo(cache.kv, cache.values(c, i) + at) }, .{ kvw, n, 1 }, .{ 256, 1, 1 }, false);
     if (w.indexer) |ix| try indexer(x, s, cache, ix, i, start, n);
     const args = SArgs{ .rows = nr, .pos = @intCast(start), .heads = c.heads, .dim = c.head_dim, .ring = @intCast(ring), .window = if (lay.kind == .sliding) c.window else 0, .groups = c.kv_heads, .topk = c.index_topk, .scale = 1.0 / @sqrt(@as(f32, @floatFromInt(c.head_dim))) };
-    x.glue(.attend, args, &.{ b(s.qn), bo(cache.kv, cache.keys(i)), bo(cache.kv, cache.values(c, i)), b(s.sel), A, b(s.o) }, .{ c.heads, n, 1 }, .{ 32, 1, 1 }, true);
+    x.glue(.attend, args, &.{ b(s.qn), bo(cache.kv, cache.keys(i)), bo(cache.kv, cache.values(c, i)), b(s.sel), A, b(s.o) }, .{ c.heads, n, 1 }, .{ 256, 1, 1 }, true);
 }
 
 /// Full layer `i`'s indexer: k and z into rings, completed regions summarized, then past topk regions: scores, top-k.
@@ -194,9 +236,13 @@ fn indexer(x: Enc, s: *st.Scratch, cache: *st.Cache, ix: wts.Indexer, i: usize, 
     const done = end / c.region;
     if (done > first) x.glue(.summarize, SArgs{ .dim = c.proxy, .ring = st.index_ring, .first = @intCast(first) }, &.{ bo(cache.index, cache.indexKeys(c, i)), bo(cache.index, cache.indexZ(c, i)), A, bo(cache.index, cache.summaries(i)) }, .{ done - first, 1, 1 }, .{ c.proxy, 1, 1 }, true);
     // the last row sees the most regions; below the budget every row reads all of them and nothing is chosen
-    const regions = (end - 1) / c.region;
-    if (regions <= c.index_topk) return;
-    const args = SArgs{ .rows = nr, .pos = @intCast(start), .heads = c.index_heads, .dim = c.proxy, .regions = @intCast(regions), .groups = c.kv_heads, .topk = c.index_topk };
-    x.glue(.score, args, &.{ b(s.iqn), b(s.iw), bo(cache.index, cache.summaries(i)), A, b(s.scores) }, .{ (regions + 255) / 256, n, c.kv_heads }, .{ 256, 1, 1 }, true);
-    x.glue(.select, args, &.{ b(s.scores), A, b(s.sel) }, .{ n, c.kv_heads, 1 }, .{ 1024, 1, 1 }, true);
+    var r0: usize = 0;
+    while (r0 < n) : (r0 += st.score_rows) { // the scores buffer holds score_rows rows by every region
+        const blk = @min(st.score_rows, n - r0);
+        const regions = (start + r0 + blk - 1) / c.region;
+        if (regions <= c.index_topk) continue;
+        const args = SArgs{ .rows = @intCast(blk), .pos = @intCast(start + r0), .heads = c.index_heads, .dim = c.proxy, .regions = @intCast(regions), .groups = c.kv_heads, .topk = c.index_topk };
+        x.glue(.score, args, &.{ bo(s.iqn, r0 * c.index_heads * c.proxy * 2), bo(s.iw, r0 * c.index_heads * 4), bo(cache.index, cache.summaries(i)), A, b(s.scores) }, .{ (regions + 255) / 256, blk, c.kv_heads }, .{ 256, 1, 1 }, true);
+        x.glue(.select, args, &.{ b(s.scores), A, bo(s.sel, r0 * c.kv_heads * c.index_topk * 4) }, .{ blk, c.kv_heads, 1 }, .{ 1024, 1, 1 }, true);
+    }
 }

@@ -7,10 +7,14 @@ const ck = @import("../../core/checkpoint_metal.zig");
 const shards = @import("../../core/checkpoint.zig");
 const rows = @import("../../core/row_projection.zig");
 const route = @import("../../core/moe_route.zig");
+const affine_mm = @import("../../core/affine_mm.zig");
+
+/// A prompt chunk's tensor-unit matmul for one (bits, group) the checkpoint uses.
+pub const Mm = struct { bits: u8, group: usize, pipes: affine_mm.Pipes };
 const weights = @import("weights.zig");
 
-pub const glue_names = [_][:0]const u8{ "s5_embed", "s5_norm", "s5_final_norm", "s5_qk", "s5_copy", "s5_gate", "s5_swiglu", "s5_add", "s5_moe_add", "s5_index_weights", "s5_index_norm", "s5_summarize", "s5_score", "s5_select", "s5_attend" };
-pub const Glue = enum { embed, norm, final_norm, qk, copy, gate, swiglu, add, moe_add, index_weights, index_norm, summarize, score, select, attend };
+pub const glue_names = [_][:0]const u8{ "s5_embed", "s5_norm", "s5_final_norm", "s5_qk", "s5_copy", "s5_gate", "s5_swiglu", "s5_add", "s5_moe_add", "s5_index_weights", "s5_index_norm", "s5_summarize", "s5_score", "s5_select", "s5_attend", "s5_sort", "s5_rows_by_order" };
+pub const Glue = enum { embed, norm, final_norm, qk, copy, gate, swiglu, add, moe_add, index_weights, index_norm, summarize, score, select, attend, sort, rows_by_order };
 
 pub const Model = struct {
     gpa: std.mem.Allocator,
@@ -22,6 +26,8 @@ pub const Model = struct {
     glue: [glue_names.len]mtl.Pipeline,
     rows: rows.Pipelines,
     route: [2]mtl.Pipeline,
+    mm: [4]Mm = undefined,
+    mms: usize = 0,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         const pool = mtl.objc.Pool.push();
@@ -29,6 +35,7 @@ pub const Model = struct {
         const m = try gpa.create(Model);
         errdefer gpa.destroy(m);
         m.gpa = gpa;
+        m.mms = 0;
         m.config = try cfg.Config.read(gpa, io, dir);
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
@@ -64,7 +71,44 @@ pub const Model = struct {
             errdefer m.route[0].deinit();
             m.route[1] = try mtl.Pipeline.init(m.device, lib, route.names[1], false);
         }
+        errdefer for (m.route) |p| p.deinit();
+        errdefer for (m.mm[0..m.mms]) |f| for (f.pipes) |p| p.deinit();
+        for (m.weights.layers) |l| {
+            try m.addMm(l.attn.q);
+            switch (l.ffn) {
+                .dense => |d| try m.addMm(d.gate),
+                .moe => |e| {
+                    try m.addMm(e.gate.one);
+                    try m.addMm(e.shared.gate);
+                },
+            }
+        }
         return m;
+    }
+
+    /// Pipelines for `w`'s format, compiled once per format (at most 4).
+    fn addMm(m: *Model, w: rows.Weights) !void {
+        if (m.mmFor(w) != null) return;
+        if (m.mms == m.mm.len) return error.TooManyStep5Formats;
+        const text = try affine_mm.source(m.device, m.gpa, .{ .bits = w.bits, .group = @intCast(w.group) });
+        defer m.gpa.free(text);
+        const lib = try mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx());
+        defer lib.deinit();
+        var f = Mm{ .bits = w.bits, .group = w.group, .pipes = undefined };
+        var made: usize = 0;
+        errdefer for (f.pipes[0..made]) |p| p.deinit();
+        for (affine_mm.names, 0..) |n, i| {
+            f.pipes[i] = try mtl.Pipeline.init(m.device, lib, n, false);
+            made += 1;
+        }
+        m.mm[m.mms] = f;
+        m.mms += 1;
+    }
+
+    /// The tensor-unit pipelines for `w`'s format, if loaded.
+    pub fn mmFor(m: *const Model, w: rows.Weights) ?affine_mm.Pipes {
+        for (m.mm[0..m.mms]) |f| if (f.bits == w.bits and f.group == w.group) return f.pipes;
+        return null;
     }
 
     pub fn pipe(m: *const Model, g: Glue) mtl.Pipeline {
@@ -72,6 +116,7 @@ pub const Model = struct {
     }
 
     pub fn deinit(m: *Model) void {
+        for (m.mm[0..m.mms]) |f| for (f.pipes) |p| p.deinit();
         for (m.route) |p| p.deinit();
         m.rows.deinit();
         for (m.glue) |p| p.deinit();

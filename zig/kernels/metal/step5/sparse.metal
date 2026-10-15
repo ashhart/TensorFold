@@ -198,52 +198,78 @@ inline uint s5_key(float x) {
   }
 }
 
-// Online fp32 softmax of one key into the running state (the shared attention's order of operations).
-inline void s5_take(thread float* out, thread float& maximum, thread float& total, float score, thread const float* value,
-    uint per) {
-  const float next = max(maximum, score);
-  const float old = maximum == -INFINITY ? 0.0f : precise::exp(maximum - next);
-  const float weight = precise::exp(score - next);
-  maximum = next;
-  total = fma(total, old, weight);
-  for (uint d = 0; d < per; ++d) out[d] = fma(out[d], old, weight * value[d]);
+// Key i of a row's list: a sliding window from lo, or a full layer's picked regions (8 keys each) then its own region.
+inline uint s5_key_at(uint i, bool listed, uint lo, const device int* picks, uint topk, uint own) {
+  if (!listed) return lo + i;
+  return i < topk * 8 ? uint(picks[i / 8]) * 8 + i % 8 : own + (i - topk * 8);
 }
 
-// A simdgroup a (row, head): a sliding layer's window (a ring), or a full layer's picks and own region (all, if few).
+// 8 simdgroups a (row, head), each an eighth of the row's keys 4 at a time (online fp32), merged in simdgroup order.
 [[kernel]] void s5_attend(const device bfloat* Q [[buffer(0)]], const device bfloat* K [[buffer(1)]],
     const device bfloat* V [[buffer(2)]], const device int* sel [[buffer(3)]], constant s5_sparse_args& a [[buffer(4)]],
-    device bfloat* O [[buffer(5)]], uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    device bfloat* O [[buffer(5)]], uint2 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
   const uint head = tg.x, row = tg.y;
   if (head >= a.heads || row >= a.rows) return;
   const uint kvh = a.groups, group = head / (a.heads / kvh);
   const uint per = a.dim / 32;
   const size_t qi = ((size_t)row * a.heads + head) * a.dim;
-  float q[8], out[8], value[8];
+  float q[8], out[8];
   for (uint d = 0; d < per; ++d) { q[d] = float(Q[qi + lane + 32 * d]); out[d] = 0.0f; }
   float maximum = -INFINITY, total = 0.0f;
   const uint p = a.pos + row;
-  uint lo = 0, regions = 0, own = 0;
-  const device int* picks = sel + ((size_t)row * kvh + group) * a.topk;
-  bool all = true;
+  uint lo = 0, own = 0;
+  bool listed = false;
   if (a.window > 0) {
     lo = p + 1 > a.window ? p + 1 - a.window : 0;
   } else {
-    regions = p / 8;
+    const uint regions = p / 8;
     own = regions * 8;
-    all = regions <= a.topk;
+    listed = regions > a.topk;
   }
-  const uint keys = a.window > 0 ? p + 1 - lo : (all ? p + 1 : a.topk * 8 + (p + 1 - own));
-  for (uint i = 0; i < keys; ++i) {
-    uint key;
-    if (a.window > 0 || all) key = lo + i;
-    else key = i < a.topk * 8 ? uint(picks[i / 8]) * 8 + i % 8 : own + (i - a.topk * 8);
-    const uint slot = a.ring ? key % a.ring : key;
-    const size_t ki = ((size_t)slot * kvh + group) * a.dim;
-    float dot = 0.0f;
-    for (uint d = 0; d < per; ++d) dot = fma(q[d], float(K[ki + lane + 32 * d]), dot);
-    const float score = simd_sum(dot) * a.scale;
-    for (uint d = 0; d < per; ++d) value[d] = float(V[ki + lane + 32 * d]);
-    s5_take(out, maximum, total, score, value, per);
+  const uint keys = listed ? a.topk * 8 + (p + 1 - own) : p + 1 - lo;
+  const device int* picks = sel + ((size_t)row * kvh + group) * a.topk;
+  const uint span = (keys + 7) / 8, first = sg * span, last = min(keys, first + span);
+  for (uint i = first; i < last; i += 4) {
+    float score[4], value[4][8];
+    bool live[4];
+    for (uint j = 0; j < 4; ++j) {
+      live[j] = i + j < last;
+      score[j] = -INFINITY;
+      if (!live[j]) continue;
+      const uint key = s5_key_at(i + j, listed, lo, picks, a.topk, own);
+      const size_t ki = ((size_t)(a.ring ? key % a.ring : key) * kvh + group) * a.dim;
+      float dot = 0.0f;
+      for (uint d = 0; d < per; ++d) {
+        dot = fma(q[d], float(K[ki + lane + 32 * d]), dot);
+        value[j][d] = float(V[ki + lane + 32 * d]);
+      }
+      score[j] = simd_sum(dot) * a.scale;
+    }
+    for (uint j = 0; j < 4; ++j) {
+      if (!live[j]) continue;
+      const float next = max(maximum, score[j]);
+      const float old = maximum == -INFINITY ? 0.0f : precise::exp(maximum - next);
+      const float weight = precise::exp(score[j] - next);
+      maximum = next;
+      total = fma(total, old, weight);
+      for (uint d = 0; d < per; ++d) out[d] = fma(out[d], old, weight * value[j][d]);
+    }
   }
-  for (uint d = 0; d < per; ++d) O[qi + lane + 32 * d] = bfloat(total == 0.0f ? 0.0f : out[d] / total);
+  threadgroup float m_part[8], t_part[8], o_part[8][256];
+  if (lane == 0) { m_part[sg] = maximum; t_part[sg] = total; }
+  for (uint d = 0; d < per; ++d) o_part[sg][lane + 32 * d] = out[d];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg != 0) return;
+  float m = -INFINITY;
+  for (uint s = 0; s < 8; ++s) m = max(m, m_part[s]);
+  float sum = 0.0f, acc[8];
+  for (uint d = 0; d < per; ++d) acc[d] = 0.0f;
+  for (uint s = 0; s < 8; ++s) {
+    if (t_part[s] == 0.0f) continue;
+    const float w = precise::exp(m_part[s] - m);
+    sum = fma(t_part[s], w, sum);
+    for (uint d = 0; d < per; ++d) acc[d] = fma(o_part[s][lane + 32 * d], w, acc[d]);
+  }
+  for (uint d = 0; d < per; ++d) O[qi + lane + 32 * d] = bfloat(sum == 0.0f ? 0.0f : acc[d] / sum);
 }

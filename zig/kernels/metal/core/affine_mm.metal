@@ -4,13 +4,13 @@ using namespace metal;
 #include "../nax.h"
 using namespace tfp;
 
-// Defines: TF_BITS (2-6 or 8), TF_GROUP (32 or 64), TF_OUT_T (bfloat, or float for partial sums another pass adds).
+// Defines: TF_BITS (2-6 or 8), TF_GROUP (32, 64 or 128), TF_OUT_T (bfloat, or float for sums another pass adds).
 #ifndef TF_OUT_T
 #define TF_OUT_T bfloat
 #endif
 constant constexpr int STEP_BYTES = 8 * TF_BITS; // a weight row's bytes in one 64-deep step
 constant constexpr int HALF_BYTES = 4 * TF_BITS; // a thread's half of them (32 codes)
-constant constexpr int NG = 64 / TF_GROUP;       // groups a step
+constant constexpr int NG = TF_GROUP > 64 ? 1 : 64 / TF_GROUP; // groups a step touches (g128: one, over two steps)
 constant constexpr int PAD = 64 + 8;              // the code tile's row pitch (bf16)
 constant constexpr float OFF = TF_BITS == 4 ? 128.0f : 0.0f; // bf16(128 + q) is q's bits ORed with 0x4300; bias - 128 scale undoes it
 
@@ -216,6 +216,46 @@ inline void am_step(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>& r
   }
 }
 
+// am_step at g128: a group spans two steps, so its sums carry over (`part`) and its epilogue follows the second.
+template <int TM, int TL>
+inline void am_step128(thread frag<float> (&acc)[TM][2], thread frag<float> (&part)[TM][2], thread const AmRows<TM>& rows,
+                       int k, const threadgroup bfloat* tile, const threadgroup float* sb, int tn, short2 home) {
+  const bool opens = k % 128 == 0;
+  TF_UNROLL
+  for (short q = 0; q < 4; q++) {
+    frag<bfloat> b0, b1, a[TL];
+    frag_get_t(b0, tile, PAD, tn, 16 * q, home);
+    frag_get_t(b1, tile, PAD, tn + 16, 16 * q, home);
+    TF_UNROLL
+    for (short m = 0; m < TL; m++) {
+      a[m] = am_frag(rows.x[m][0], rows.x[m][1], k + 16 * q, home);
+    }
+    TF_UNROLL
+    for (short m = 0; m < TL; m++) {
+      if (opens && q == 0) {
+        am_first(part[m][0], part[m][1], a[m], b0, b1);
+      } else {
+        mma_16x32<false, true>(part[m][0], part[m][1], a[m], b0, b1);
+      }
+    }
+  }
+  if (opens) return;
+  TF_UNROLL
+  for (short m = 0; m < TL; m++) {
+    const float xr0 = rows.s[m][0][k / 128], xr1 = rows.s[m][1][k / 128];
+    TF_UNROLL
+    for (short j = 0; j < 2; j++) {
+      TF_UNROLL
+      for (short c = 0; c < 4; c++) {
+        const int col = tn + 16 * j + home.x + TF_COL(c);
+        const float s = sb[col], b = sb[64 + col];
+        acc[m][j][c] += s * part[m][j][c] + b * xr0;
+        acc[m][j][4 + c] += s * part[m][j][4 + c] + b * xr1;
+      }
+    }
+  }
+}
+
 // TM 16-row fragments (`live` rows; a dead row's start is a live one's) times a [64, K] code block.
 template <int TM>
 inline void am_k_loop(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>& rows, int K, int live,
@@ -223,6 +263,9 @@ inline void am_k_loop(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>&
                       threadgroup bfloat* tile, threadgroup float* sb, int tn, uint t, short2 home) {
   threadgroup bfloat* mine = tile + (t / 2) * PAD + 32 * (t % 2);
   const int g_mine = TF_GROUP == 32 ? int(t % 2) : 0; // at g32 each thread of a pair takes one group's scale and bias
+#if TF_GROUP == 128
+  frag<float> part[TM][2]; // a group's sums across its two steps
+#endif
   TF_UNROLL
   for (short i = 0; i < TM; i++) {
     acc[i][0] = frag<float>(0);
@@ -237,6 +280,16 @@ inline void am_k_loop(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>&
       sb[g_mine * 128 + 64 + t / 2] = float(biases[g_mine]) - OFF * s;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
+#if TF_GROUP == 128
+    if (live > 16 * (TM - 1)) {
+      am_step128<TM, TM>(acc, part, rows, k, tile, sb, tn, home);
+    } else if (TM > 1 && live > 0) {
+      am_step128<TM, 1>(acc, part, rows, k, tile, sb, tn, home);
+    }
+    wq += STEP_BYTES;
+    scales += k % 128 == 64 ? 1 : 0;
+    biases += k % 128 == 64 ? 1 : 0;
+#else
     if (live > 16 * (TM - 1)) {
       am_step<TM, TM>(acc, rows, k, tile, sb, tn, home);
     } else if (TM > 1 && live > 0) { // a tail with only the first fragment live
@@ -245,6 +298,7 @@ inline void am_k_loop(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>&
     wq += STEP_BYTES;
     scales += NG;
     biases += NG;
+#endif
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
 }
