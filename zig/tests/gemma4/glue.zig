@@ -270,6 +270,8 @@ fn tailsCheck(c: *Ctx, kd: *const g4.kernels.Kind, prefix: []const u8, lp: []con
             e.setValue(cfg.eps, s.eps_at);
             e.setBuffer(s.bs[0], 0, s.bs.len + 1);
             e.setValue(@as(i32, 0), s.bs.len + 2);
+            e.setBuffer(s.bs[0], 0, s.bs.len + 3); // dense_tail: no tap
+            e.setValue(@as(i32, 0), s.bs.len + 4);
             e.dispatchGroups(.{ .width = s.rows }, .{ .width = 256 });
         }
     };

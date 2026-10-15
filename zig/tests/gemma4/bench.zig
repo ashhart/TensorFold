@@ -93,6 +93,8 @@ fn glueCosts(m: *g4.Model) !void {
                 e.setValue(cfg.eps, 5);
                 for ([_]mtl.Buffer{ s.h[1], s.normed[1], s.sums }, 6..) |b, i| e.setBuffer(b, 0, i);
                 e.setValue(@as(i32, 1), 9);
+                e.setBuffer(s.sums, 0, 10);
+                e.setValue(@as(i32, 0), 11);
                 e.dispatchGroups(.{ .width = 1 }, .{ .width = 256 });
             } else if (std.mem.eql(u8, name, "geglu")) {
                 e.setPipeline(kd.geglu);

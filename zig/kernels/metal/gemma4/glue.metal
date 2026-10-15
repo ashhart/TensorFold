@@ -285,6 +285,7 @@ kernel void gemma_dense_tail(const device bfloat* H [[buffer(0)]], const device 
                              const device bfloat* WN [[buffer(4)]], constant float& eps [[buffer(5)]],
                              device bfloat* HN [[buffer(6)]], device bfloat* NEXT [[buffer(7)]],
                              device float* XS [[buffer(8)]], constant int& xst [[buffer(9)]],
+                             device bfloat* TAP [[buffer(10)]], constant int& tst [[buffer(11)]],
                              uint t [[thread_position_in_threadgroup]], uint r [[threadgroup_position_in_grid]],
                              uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
   constexpr int PER = D / T;
@@ -307,6 +308,7 @@ kernel void gemma_dense_tail(const device bfloat* H [[buffer(0)]], const device 
     const bfloat hs = bfloat(hin[i] + b);
     const bfloat hn = bfloat(float(hs) * sc);
     HN[int(r) * D + c] = hn;
+    if (tst) TAP[size_t(r) * tst + c] = hn; // a drafter's tapped layer: its row at the tap's columns
     hv[i] = float(hn);
     ss2 = fma(hv[i], hv[i], ss2);
   }
@@ -365,4 +367,40 @@ kernel void gemma_kv_write(const device bfloat* KN [[buffer(0)]], const device b
   const size_t src = (size_t(h) * R + r) * DH + d;
   K[dst] = KN[src];
   V[dst] = VN[src];
+}
+
+// DFlash drafter rows (a: x stride, width, first position, ring or 0) into cache slots, position % ring or position.
+kernel void gemma_draft_store(const device bfloat* X [[buffer(0)]], device bfloat* C [[buffer(1)]],
+                              constant uint4& a [[buffer(2)]], uint2 pos [[thread_position_in_grid]]) {
+  if (pos.x >= a.y) return;
+  const uint p = a.z + pos.y, slot = a.w ? p % a.w : p;
+  C[size_t(slot) * a.y + pos.x] = X[size_t(pos.y) * a.x + pos.x];
+}
+
+// tf_draft_swiglu's bf16 steps on GU rows of gate then up (pitch 2n) into ACT (pitch n), 64 threads a group of sums.
+kernel void gemma_draft_swiglu(const device bfloat* GU [[buffer(0)]], device bfloat* ACT [[buffer(1)]],
+                               constant uint& n [[buffer(2)]], device float* XS [[buffer(3)]], constant int& xst [[buffer(4)]],
+                               uint2 tg [[threadgroup_position_in_grid]], uint2 tp [[thread_position_in_threadgroup]]) {
+  const uint g = tg.x, r = tg.y, i = tp.x, c = g * 64 + i;
+  const float gate = float(GU[size_t(r) * 2 * n + c]), up = float(GU[size_t(r) * 2 * n + n + c]);
+  const bfloat exponential = bfloat(metal::exp(metal::abs(gate)));
+  const bfloat denominator = bfloat(1.0f + float(exponential));
+  const bfloat inverse = bfloat(1.0f / float(denominator));
+  const bfloat sigmoid = gate < 0.0f ? inverse : bfloat(1.0f - float(inverse));
+  const bfloat activation = bfloat(float(bfloat(gate)) * float(sigmoid));
+  const bfloat out = bfloat(float(activation) * float(bfloat(up)));
+  ACT[size_t(r) * n + c] = out;
+  threadgroup float vals[64];
+  vals[i] = float(out);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (i != 0) return;
+  float sum = 0.0f;
+  for (int j = 0; j < 64; j++) sum += vals[j];
+  XS[g * xst + r] = sum;
+}
+
+// The drafter's residual: H += Y, each sum rounded to bf16.
+kernel void gemma_draft_add(device bfloat* H [[buffer(0)]], const device bfloat* Y [[buffer(1)]],
+                            uint i [[thread_position_in_grid]]) {
+  H[i] = bfloat(float(H[i]) + float(Y[i]));
 }

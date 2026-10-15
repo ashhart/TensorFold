@@ -7,6 +7,7 @@ const shards = @import("../../core/checkpoint.zig");
 const weights = @import("weights.zig");
 const kernels = @import("kernels.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
+const round = @import("tree_round_gpu");
 
 pub const Model = struct {
     gpa: std.mem.Allocator,
@@ -22,6 +23,11 @@ pub const Model = struct {
     /// RoPE inverse frequencies, float32 [dim / 2], for sliding and for global layers.
     inv_sliding: mtl.Buffer,
     inv_global: mtl.Buffer,
+    /// The core's bf16 argmax: a window's greedy tokens on the GPU (the lowest index among ties, as mx.argmax).
+    picks: round.Ops,
+    /// A drafter's tapped layers: each layer's index among the taps (-1: untapped), and how many there are.
+    tap_of: [cfg.layers]i8 = @splat(-1),
+    taps: u32 = 0,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         const m = try gpa.create(Model);
@@ -29,6 +35,8 @@ pub const Model = struct {
         m.* = undefined;
         m.gpa = gpa;
         m.projections = .{};
+        m.tap_of = @splat(-1);
+        m.taps = 0;
         m.config = try cfg.Config.read(gpa, io, dir);
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
@@ -44,6 +52,8 @@ pub const Model = struct {
         errdefer m.weights.deinit(gpa);
         m.kernels = try kernels.Kernels.init(gpa, m.device);
         errdefer m.kernels.deinit();
+        m.picks = try round.Ops.init(m.device);
+        errdefer m.picks.deinit();
         {
             const text = try affine_mm.source(m.device, gpa, .{});
             defer gpa.free(text);
@@ -59,10 +69,22 @@ pub const Model = struct {
         return m;
     }
 
+    /// The drafter's taps, in its feature order: each a layer whose output (layer scalar applied) it reads.
+    pub fn setTaps(m: *Model, layers: []const u32) !void {
+        if (layers.len == 0 or layers.len > 8) return error.BadGemmaTaps;
+        m.tap_of = @splat(-1);
+        for (layers, 0..) |l, t| {
+            if (l >= cfg.layers or m.tap_of[l] >= 0) return error.BadGemmaTaps;
+            m.tap_of[l] = @intCast(t);
+        }
+        m.taps = @intCast(layers.len);
+    }
+
     pub fn deinit(m: *Model) void {
         m.inv_sliding.deinit();
         m.inv_global.deinit();
         m.projections.deinit(m.gpa);
+        m.picks.deinit();
         for (m.mm) |p| p.deinit();
         m.kernels.deinit();
         m.weights.deinit(m.gpa);

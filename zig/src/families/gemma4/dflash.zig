@@ -1,0 +1,457 @@
+//! z-lab's DFlash drafter on the target's taps: a stream's context keys, a block forward of up to 16 rows, held chains.
+const std = @import("std");
+const mtl = @import("metal");
+const lanes = @import("lanes");
+const cfg = @import("config.zig");
+const dw = @import("dflash_weights.zig");
+const lane = @import("../../core/lane_projection.zig");
+const ops = @import("draft_ops");
+const attention = @import("../../core/shared_attention.zig");
+const round = @import("tree_round_gpu");
+const weights = @import("weights.zig");
+const fwd = @import("forward.zig");
+const Model = @import("model.zig").Model;
+
+const dr = lanes.drafter;
+const Stream = lanes.Stream;
+const Ref = lane.Ref;
+const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+const private = mtl.ResourceOptions.private | mtl.ResourceOptions.untracked;
+
+/// A block's rows at most (the pending token and 15 drafts), and the rows one absorb dispatch takes.
+pub const block_rows = 16;
+const absorb_rows = lane.reg_rows;
+/// Streams one hold or absorb call takes, and host-written rows one absorb call takes before it flushes.
+const max_items = 32;
+const pos_rows = 1024;
+
+pub const Options = struct { capacity: usize };
+
+/// One stream's drafter state: context keys and values a layer, and the chain it holds.
+const Lane = struct {
+    k: [8]mtl.Buffer,
+    v: [8]mtl.Buffer,
+    capacity: usize, // positions a full layer's cache holds
+    end: u64 = 0, // context rows absorbed: positions [0, end)
+    held: [block_rows]u32 = @splat(0),
+    held_len: u32 = 0,
+};
+
+pub const Drafter = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    target: *Model,
+    config: dw.Config,
+    w: dw.Weights,
+    options: Options,
+    ops: ops.Ops,
+    attention: attention.Attention,
+    picks: round.Ops,
+    projections: weights.Projections = .{},
+    lanes: std.AutoHashMapUnmanaged(*Stream, *Lane) = .empty,
+    step_ms: f64 = 0,
+    block_ms: [2]f64 = .{ 0, 0 }, // a 1-draft and a 15-draft block's wall time at load
+    trace: bool = false, // GEMMA_DRAFT_TRACE: each hold's anchor, depth and drafts on stderr
+    /// An absorb's command buffer, committed without a wait: the hold that follows (the same queue) runs after it.
+    pending: ?mtl.CommandBuffer = null,
+    // the block forward's scratch (one block at a time; items of a call run in order on one command buffer)
+    ids: mtl.Buffer,
+    pos: mtl.Buffer,
+    apos: mtl.Buffer, // an absorb's positions, apart from a block's (its command buffer may still be running)
+    xs: mtl.Buffer, // the next projection's group sums, written by the kernel that made its input
+    mask: mtl.Buffer,
+    ones: mtl.Buffer,
+    pick_buf: mtl.Buffer,
+    h: mtl.Buffer,
+    x: mtl.Buffer,
+    qkv: mtl.Buffer,
+    q: mtl.Buffer,
+    q2: mtl.Buffer,
+    k16: mtl.Buffer,
+    k16r: mtl.Buffer,
+    attn: mtl.Buffer,
+    o: mtl.Buffer,
+    gate_up: mtl.Buffer,
+    act: mtl.Buffer,
+    logits: mtl.Buffer,
+    // the absorb scratch: 128 context rows at a time
+    fcx: mtl.Buffer,
+    hctx: mtl.Buffer,
+    kv: mtl.Buffer,
+    kn: mtl.Buffer,
+    knr: mtl.Buffer,
+
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, target: *Model, dir: []const u8, options: Options) !*Drafter {
+        const d = try gpa.create(Drafter);
+        errdefer gpa.destroy(d);
+        d.* = undefined;
+        d.gpa = gpa;
+        d.io = io;
+        d.target = target;
+        d.options = options;
+        d.projections = .{};
+        d.lanes = .empty;
+        d.step_ms = 0;
+        d.block_ms = .{ 0, 0 };
+        d.pending = null;
+        d.trace = std.c.getenv("GEMMA_DRAFT_TRACE") != null;
+        d.config = try dw.Config.read(gpa, io, dir);
+        const c = &d.config;
+        d.w = try dw.load(gpa, target.device, io, dir, c);
+        errdefer d.w.deinit(gpa);
+        d.ops = try ops.Ops.init(target.device);
+        errdefer d.ops.deinit();
+        const keys_max = @max(options.capacity + block_rows, c.window - 1 + block_rows);
+        d.attention = try attention.Attention.init(gpa, target.device, .{ .query_heads = c.heads, .kv_heads = c.kv_heads, .head_dim = c.head_dim, .rotary_dim = c.head_dim, .capacity = keys_max, .output = .bf16 });
+        errdefer d.attention.deinit();
+        d.picks = try round.Ops.init(target.device);
+        errdefer d.picks.deinit();
+        const dev = target.device;
+        const hid = c.hidden;
+        const qw = c.heads * c.head_dim;
+        const kw = c.kv_heads * c.head_dim;
+        const r = block_rows;
+        inline for (.{ .{ "ids", max_items * r * 4, true }, .{ "pos", max_items * r * 8, true }, .{ "apos", pos_rows * 8, true }, .{ "xs", (c.tap_count * hid / 64) * absorb_rows * 4, false }, .{ "mask", max_items * r * (c.window - 1 + r), true }, .{ "ones", r * keys_max, true }, .{ "pick_buf", max_items * r * @sizeOf(round.contract.Pick), true }, .{ "h", r * hid * 2, false }, .{ "x", r * hid * 2, false }, .{ "qkv", r * (qw + 2 * kw) * 2, false }, .{ "q", r * qw * 2, false }, .{ "q2", r * qw * 2, false }, .{ "k16", r * kw * 2, false }, .{ "k16r", r * kw * 2, false }, .{ "attn", r * qw * 2, false }, .{ "o", r * hid * 2, false }, .{ "gate_up", r * 2 * c.intermediate * 2, false }, .{ "act", r * c.intermediate * 2, false }, .{ "logits", r * cfg.vocab * 2, false }, .{ "fcx", absorb_rows * hid * 2, false }, .{ "hctx", absorb_rows * hid * 2, d.trace }, .{ "kv", absorb_rows * 2 * kw * 2, false }, .{ "kn", absorb_rows * kw * 2, false }, .{ "knr", absorb_rows * kw * 2, false } }) |f|
+            @field(d, f[0]) = try dev.buffer(f[1], if (f[2]) shared else private);
+        @memset(d.ones.slice(u8, r * keys_max), 0xff);
+        try d.warm(io);
+        return d;
+    }
+
+    pub fn deinit(d: *Drafter) void {
+        d.settle() catch {};
+        var it = d.lanes.valueIterator();
+        while (it.next()) |l| d.dropLane(l.*);
+        d.lanes.deinit(d.gpa);
+        inline for (.{ "ids", "pos", "apos", "xs", "mask", "ones", "pick_buf", "h", "x", "qkv", "q", "q2", "k16", "k16r", "attn", "o", "gate_up", "act", "logits", "fcx", "hctx", "kv", "kn", "knr" }) |f| @field(d, f).deinit();
+        d.projections.deinit(d.gpa);
+        d.picks.deinit();
+        d.attention.deinit();
+        d.ops.deinit();
+        d.w.deinit(d.gpa);
+        d.gpa.destroy(d);
+    }
+
+    pub fn drafter(d: *Drafter) dr.Drafter {
+        return .{ .ptr = d, .vtable = &.{ .taps = tapsFn, .facts = factsFn, .open = openFn, .absorb = absorbFn, .hold = holdFn, .held = heldFn, .release = releaseFn } };
+    }
+
+    fn cast(ptr: *anyopaque) *Drafter {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn tapsFn(ptr: *anyopaque) []const u32 {
+        const d = cast(ptr);
+        return d.config.taps[0..d.config.tap_count];
+    }
+
+    /// Acceptance by depth, measured on the Python reference (114 rounds, 3.5 a round), until a stream has its own.
+    const prior = [_]f64{ 0.77, 0.64, 0.71, 0.82, 0.84, 0.81, 0.9, 0.9, 0.9, 0.9, 0.83, 0.8, 0.83, 0.8, 0.8 };
+
+    /// Chains of up to 15, always drafted, no plain guard: a block costs the same at any depth, a guard bills per row.
+    fn factsFn(ptr: *anyopaque) dr.Facts {
+        const d = cast(ptr);
+        return .{ .depth = block_rows - 1, .step_ms = d.step_ms, .prior = &prior, .plain_guard = false, .stream_bytes = d.laneBytes(d.options.capacity) };
+    }
+
+    fn laneBytes(d: *const Drafter, capacity: usize) usize {
+        const c = &d.config;
+        var bytes: usize = 0;
+        for (c.sliding[0..c.layers]) |sliding| bytes += 2 * (if (sliding) c.window - 1 + block_rows else capacity + block_rows) * c.kv_heads * c.head_dim * 2;
+        return bytes;
+    }
+
+    fn openFn(ptr: *anyopaque, s: *Stream) anyerror!void {
+        const d = cast(ptr);
+        if (d.lanes.contains(s)) return error.DraftStreamOpen;
+        const capacity = @min(d.options.capacity, (s.prompt_len + s.max_new + 2 * block_rows + 63) / 64 * 64);
+        const l = try d.newLane(capacity);
+        errdefer d.dropLane(l);
+        try d.lanes.put(d.gpa, s, l);
+    }
+
+    fn newLane(d: *Drafter, capacity: usize) !*Lane {
+        const c = &d.config;
+        const l = try d.gpa.create(Lane);
+        errdefer d.gpa.destroy(l);
+        l.* = .{ .k = undefined, .v = undefined, .capacity = capacity };
+        var made: usize = 0;
+        errdefer for (0..made) |i| {
+            l.k[i].deinit();
+            l.v[i].deinit();
+        };
+        for (0..c.layers) |i| {
+            const bytes = (if (c.sliding[i]) c.window - 1 + block_rows else capacity + block_rows) * c.kv_heads * c.head_dim * 2;
+            l.k[i] = try d.target.device.buffer(bytes, private);
+            l.v[i] = d.target.device.buffer(bytes, private) catch |e| {
+                l.k[i].deinit();
+                return e;
+            };
+            made += 1;
+        }
+        return l;
+    }
+
+    fn dropLane(d: *Drafter, l: *Lane) void {
+        for (0..d.config.layers) |i| {
+            l.k[i].deinit();
+            l.v[i].deinit();
+        }
+        d.gpa.destroy(l);
+    }
+
+    fn releaseFn(ptr: *anyopaque, s: *Stream) void {
+        const d = cast(ptr);
+        if (d.lanes.fetchRemove(s)) |e| d.dropLane(e.value);
+    }
+
+    fn heldFn(ptr: *anyopaque, streams: []const *Stream, out: []const []u32) anyerror!void {
+        const d = cast(ptr);
+        for (streams, out) |s, o| {
+            const l = d.lanes.get(s) orelse return error.DraftStreamUnknown;
+            if (o.len > l.held_len) return error.DraftHeldFewer;
+            @memcpy(o, l.held[0..o.len]);
+        }
+    }
+
+    /// A projection; `summed`: its input's group sums are in d.xs (stride rows), written by the input's own kernel.
+    fn project(d: *Drafter, e: mtl.ComputeEncoder, l: dw.Linear, x: Ref, y: Ref, rows: usize, summed: bool) !void {
+        if (l.bf16) return d.ops.linear(e, .{ .buf = x.buf, .off = x.off }, .{ .buf = l.w }, .{ .buf = y.buf, .off = y.off }, .{ .rows = @intCast(rows), .n = @intCast(l.n), .k = @intCast(l.k), .x_stride = @intCast(l.k), .w_stride = @intCast(l.k), .y_stride = @intCast(l.n) });
+        const p = try d.projections.get(d.gpa, d.target.device, l.n, l.k);
+        if (summed) return p.encodeSums(e, x, .{ .buf = l.w }, .{ .buf = l.sb }, .{ .ref = .{ .buf = d.xs }, .stride = @intCast(rows) }, y, @intCast(rows));
+        try p.encode(e, x, .{ .buf = l.w }, .{ .buf = l.sb }, y, @intCast(rows));
+    }
+
+    /// A hidden-wide RMS norm (w times the normalized row, the target's kernel) writing the next projection's sums.
+    fn normSums(d: *Drafter, e: mtl.ComputeEncoder, x: Ref, gain: Ref, y: Ref, rows: usize) void {
+        e.setPipeline(d.target.kernels.sliding.rms);
+        e.setBuffer(x.buf, x.off, 0);
+        e.setBuffer(gain.buf, gain.off, 1);
+        e.setBuffer(y.buf, y.off, 2);
+        e.setValue(d.config.eps, 3);
+        e.setBuffer(d.xs, 0, 4);
+        e.setValue(@as(i32, @intCast(rows)), 5);
+        e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
+    }
+
+    /// Waits for a pending absorb's command buffer (a hold ordered after it on the queue has run it already).
+    fn settle(d: *Drafter) !void {
+        const cb = d.pending orelse return;
+        d.pending = null;
+        defer mtl.objc.release(cb.id); // retained when it was left pending (an autoreleased object otherwise)
+        cb.wait();
+        if (cb.failure()) |msg| return failed(msg);
+    }
+
+    fn norm(d: *Drafter, e: mtl.ComputeEncoder, x: Ref, gain: Ref, y: Ref, rows: usize, heads: u32, dim: u32, x_stride: u32, y_stride: u32) !void {
+        try d.ops.norm(e, .{ .buf = x.buf, .off = x.off }, .{ .buf = gain.buf, .off = gain.off }, .{ .buf = y.buf, .off = y.off }, .{ .rows = @intCast(rows), .heads = heads, .dim = dim, .x_stride = x_stride, .y_stride = y_stride, .eps = d.config.eps });
+    }
+
+    /// Rows of `x` (pitch `stride` values) into cache slots from `first`: position % ring on a ring, else the position.
+    fn store(d: *Drafter, e: mtl.ComputeEncoder, x: Ref, width: u32, stride: u32, cache: mtl.Buffer, rows: usize, first: u64, ring: u32) void {
+        e.setPipeline(d.target.kernels.sliding.draft_store);
+        e.setBuffer(x.buf, x.off, 0);
+        e.setBuffer(cache, 0, 1);
+        e.setValue([4]u32{ stride, width, @intCast(first), ring }, 2);
+        e.dispatchThreads(.{ .width = width, .height = rows }, .{ .width = 256 });
+    }
+
+    fn add(d: *Drafter, e: mtl.ComputeEncoder, h: mtl.Buffer, y: mtl.Buffer, count: usize) void {
+        e.setPipeline(d.target.kernels.sliding.draft_add);
+        e.setBuffer(h, 0, 0);
+        e.setBuffer(y, 0, 1);
+        e.dispatchThreads(.{ .width = count }, .{ .width = 256 });
+    }
+
+    /// Rows [start, start + rows) replace the context from `start`: fc, hidden_norm, K and V; committed, not awaited.
+    fn absorbFn(ptr: *anyopaque, items: []const dr.Absorb) anyerror!void {
+        const d = cast(ptr);
+        const c = &d.config;
+        const kw = c.kv_heads * c.head_dim;
+        const t0 = std.Io.Clock.awake.now(d.io);
+        defer if (d.trace) std.debug.print("absorb of {d} streams: {d:.2} ms\n", .{ items.len, @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(d.io)).toNanoseconds())) / 1e6 });
+        try d.settle(); // the positions buffer is rewritten below
+        var cb = d.target.queue.commandBuffer();
+        var e = cb.compute(.serial);
+        var used: usize = 0; // host position rows written this command buffer
+        for (items) |it| {
+            const l = d.lanes.get(it.stream) orelse return error.DraftStreamUnknown;
+            const f = it.features;
+            if (f.space != .device or f.dtype != .bf16 or f.row_bytes != c.tap_count * c.hidden * 2) return error.DraftFeaturesUnsupported;
+            if (it.start > l.end or it.start + f.rows > l.capacity) return error.DraftContextGap;
+            const src = mtl.Buffer{ .id = @ptrFromInt(f.buffer) };
+            var at: usize = 0;
+            while (at < f.rows) : (at += absorb_rows) {
+                const n = @min(absorb_rows, f.rows - at);
+                if (used + n > pos_rows) { // the positions buffer is full: finish this command buffer first
+                    e.end();
+                    cb.commit();
+                    cb.wait();
+                    if (cb.failure()) |msg| return failed(msg);
+                    cb = d.target.queue.commandBuffer();
+                    e = cb.compute(.serial);
+                    used = 0;
+                }
+                const p0 = it.start + at;
+                for (d.apos.slice(u64, pos_rows)[used..][0..n], 0..) |*p, i| p.* = p0 + i;
+                const pos = Ref{ .buf = d.apos, .off = used * 8 };
+                used += n;
+                try d.project(e, d.w.fc, .{ .buf = src, .off = f.offset + at * f.row_bytes }, .{ .buf = d.fcx }, n, false);
+                d.normSums(e, .{ .buf = d.fcx }, d.w.hidden_norm, .{ .buf = d.hctx }, n);
+                for (0..c.layers) |i| {
+                    const lw = &d.w.layers[i];
+                    try d.project(e, lw.kv, .{ .buf = d.hctx }, .{ .buf = d.kv }, n, true);
+                    try d.norm(e, .{ .buf = d.kv }, lw.k_norm, .{ .buf = d.kn }, n, c.kv_heads, c.head_dim, 2 * kw, kw);
+                    try d.ops.rope(e, .{ .buf = d.kn }, .{ .buf = pos.buf, .off = pos.off }, .{ .buf = d.knr }, .{ .rows = @intCast(n), .heads = c.kv_heads, .dim = c.head_dim, .x_stride = kw, .y_stride = kw, .theta = c.theta });
+                    const ring: u32 = if (c.sliding[i]) c.window - 1 else 0;
+                    d.store(e, .{ .buf = d.knr }, kw, kw, l.k[i], n, p0, ring);
+                    d.store(e, .{ .buf = d.kv, .off = kw * 2 }, kw, 2 * kw, l.v[i], n, p0, ring);
+                }
+            }
+            if (d.trace) {
+                const first = src.slice(u16, (f.offset + f.row_bytes) / 2)[f.offset / 2 ..][0..4];
+                std.debug.print("absorb {s}: rows [{d}, {d}) replace from end {d}; first tap bf16 {any}\n", .{ it.stream.id, it.start, it.start + f.rows, l.end, first.* });
+            }
+            l.end = it.start + f.rows;
+            l.held_len = 0;
+        }
+        e.end();
+        cb.commit();
+        _ = mtl.objc.retain(cb.id);
+        d.pending = cb;
+    }
+
+    fn failed(msg: [*:0]const u8) anyerror {
+        std.log.err("gemma4 drafter: command buffer failed: {s}", .{msg});
+        return error.GpuFailed;
+    }
+
+    /// The sliding layers' mask for item `slot`: ring slots by the position each holds, the block causal.
+    fn slidingMask(d: *Drafter, slot: usize, anchor: u64, rows: usize) Ref {
+        const ring: u64 = d.config.window - 1;
+        const keys = ring + rows;
+        const base = slot * block_rows * (ring + block_rows);
+        const m = d.mask.slice(u8, max_items * block_rows * (ring + block_rows))[base..][0 .. rows * keys];
+        for (0..rows) |i| {
+            const row = m[i * keys ..][0..keys];
+            for (0..ring) |s| {
+                const held = anchor > s; // a slot past the anchor was never written
+                const p = if (held) anchor - 1 - ((anchor - 1 - s) % ring) else 0;
+                row[s] = @intFromBool(held and p + ring >= anchor + i);
+            }
+            for (0..rows) |j| row[ring + j] = @intFromBool(j <= i);
+        }
+        return .{ .buf = d.mask, .off = base };
+    }
+
+    /// The block [pending, mask x depth] at positions from `anchor` through the drafter; rows 1.. pick into pick_buf.
+    fn encodeBlock(d: *Drafter, e: mtl.ComputeEncoder, l: *Lane, slot: usize, pending: u32, anchor: u64, depth: u32) !void {
+        const c = &d.config;
+        const t = d.target;
+        const rows: usize = depth + 1;
+        const hid = c.hidden;
+        const qw = c.heads * c.head_dim;
+        const kw = c.kv_heads * c.head_dim;
+        const ids = d.ids.slice(u32, max_items * block_rows)[slot * block_rows ..][0..rows];
+        ids[0] = pending;
+        @memset(ids[1..], c.mask);
+        for (d.pos.slice(u64, pos_rows)[slot * block_rows ..][0..rows], 0..) |*p, i| p.* = anchor + i;
+        const pos = Ref{ .buf = d.pos, .off = slot * block_rows * 8 };
+        const sliding_mask = d.slidingMask(slot, anchor, rows);
+        e.setPipeline(t.kernels.sliding.embed);
+        e.setBuffer(d.ids, slot * block_rows * 4, 0);
+        e.setBuffer(t.weights.embed_w.buf, t.weights.embed_w.off, 1);
+        e.setBuffer(t.weights.embed_s.buf, t.weights.embed_s.off, 2);
+        e.setBuffer(t.weights.embed_b.buf, t.weights.embed_b.off, 3);
+        e.setBuffer(d.h, 0, 4);
+        e.setValue(fwd.embedScale(), 5);
+        e.dispatchThreads(.{ .width = hid / 2, .height = rows }, .{ .width = 256 });
+        const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(c.head_dim)));
+        for (0..c.layers) |i| {
+            const lw = &d.w.layers[i];
+            const sliding = c.sliding[i];
+            d.normSums(e, .{ .buf = d.h }, lw.input_norm, .{ .buf = d.x }, rows);
+            try d.project(e, lw.qkv, .{ .buf = d.x }, .{ .buf = d.qkv }, rows, true);
+            try d.norm(e, .{ .buf = d.qkv }, lw.q_norm, .{ .buf = d.q }, rows, c.heads, c.head_dim, qw + 2 * kw, qw);
+            try d.norm(e, .{ .buf = d.qkv, .off = qw * 2 }, lw.k_norm, .{ .buf = d.k16 }, rows, c.kv_heads, c.head_dim, qw + 2 * kw, kw);
+            try d.ops.rope(e, .{ .buf = d.q }, .{ .buf = pos.buf, .off = pos.off }, .{ .buf = d.q2 }, .{ .rows = @intCast(rows), .heads = c.heads, .dim = c.head_dim, .x_stride = qw, .y_stride = qw, .theta = c.theta });
+            try d.ops.rope(e, .{ .buf = d.k16 }, .{ .buf = pos.buf, .off = pos.off }, .{ .buf = d.k16r }, .{ .rows = @intCast(rows), .heads = c.kv_heads, .dim = c.head_dim, .x_stride = kw, .y_stride = kw, .theta = c.theta });
+            const first: u64 = if (sliding) c.window - 1 else anchor;
+            d.store(e, .{ .buf = d.k16r }, kw, kw, l.k[i], rows, first, 0);
+            d.store(e, .{ .buf = d.qkv, .off = (qw + kw) * 2 }, kw, qw + 2 * kw, l.v[i], rows, first, 0);
+            const keys: usize = @intCast(first + rows);
+            const mask = if (sliding) sliding_mask else Ref{ .buf = d.ones };
+            try d.attention.encode(e, rows, keys, keys, scale, .{ .buf = d.q2 }, .{ .buf = l.k[i] }, .{ .buf = l.v[i] }, .{ .buf = mask.buf, .off = mask.off }, .{ .buf = d.attn });
+            try d.project(e, lw.o, .{ .buf = d.attn }, .{ .buf = d.o }, rows, false);
+            d.add(e, d.h, d.o, rows * hid);
+            d.normSums(e, .{ .buf = d.h }, lw.post_attention, .{ .buf = d.x }, rows);
+            try d.project(e, lw.gate_up, .{ .buf = d.x }, .{ .buf = d.gate_up }, rows, true);
+            e.setPipeline(t.kernels.sliding.draft_swiglu);
+            e.setBuffer(d.gate_up, 0, 0);
+            e.setBuffer(d.act, 0, 1);
+            e.setValue(@as(u32, c.intermediate), 2);
+            e.setBuffer(d.xs, 0, 3);
+            e.setValue(@as(i32, @intCast(rows)), 4);
+            e.dispatchGroups(.{ .width = c.intermediate / 64, .height = rows }, .{ .width = 64 });
+            try d.project(e, lw.down, .{ .buf = d.act }, .{ .buf = d.o }, rows, true);
+            d.add(e, d.h, d.o, rows * hid);
+        }
+        if (depth == 0) return;
+        d.normSums(e, .{ .buf = d.h, .off = hid * 2 }, d.w.norm, .{ .buf = d.x }, depth);
+        const head = try t.projections.get(t.gpa, t.device, t.weights.head.n, t.weights.head.k);
+        try head.encodeSums(e, .{ .buf = d.x }, .{ .buf = t.weights.head.w }, .{ .buf = t.weights.head.sb }, .{ .ref = .{ .buf = d.xs }, .stride = @intCast(depth) }, .{ .buf = d.logits }, depth);
+        try d.picks.argmax(e, .{ .buf = d.logits }, .{ .buf = d.pick_buf, .off = slot * block_rows * @sizeOf(round.contract.Pick) }, .{ .rows = depth, .vocab = cfg.vocab, .stride = cfg.vocab });
+    }
+
+    /// Each stream's chain of `depth` drafts after `pending` at `position`; the context must reach the pending token.
+    fn holdFn(ptr: *anyopaque, items: []const dr.Hold) anyerror!void {
+        const d = cast(ptr);
+        if (items.len > max_items) return error.DraftTooManyStreams;
+        const t0 = std.Io.Clock.awake.now(d.io);
+        defer if (d.trace) std.debug.print("hold of {d} streams: {d:.2} ms\n", .{ items.len, @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(d.io)).toNanoseconds())) / 1e6 });
+        const cb = d.target.queue.commandBuffer();
+        const e = cb.compute(.serial);
+        for (items, 0..) |it, slot| {
+            const l = d.lanes.get(it.stream) orelse return error.DraftStreamUnknown;
+            if (it.depth == 0 or it.depth >= block_rows or it.position == 0) return error.DraftDepth;
+            const anchor = it.position - 1;
+            if (l.end != anchor or anchor + block_rows > l.capacity + block_rows) return error.DraftContextGap;
+            try d.encodeBlock(e, l, slot, it.pending, anchor, it.depth);
+        }
+        e.end();
+        cb.commit();
+        cb.wait();
+        if (cb.failure()) |msg| return failed(msg);
+        try d.settle();
+        const picks = d.pick_buf.slice(round.contract.Pick, max_items * block_rows);
+        for (items, 0..) |it, slot| {
+            const l = d.lanes.get(it.stream).?;
+            for (picks[slot * block_rows ..][0..it.depth], 0..) |p, i| {
+                if (p.nonfinite != 0 or p.token >= cfg.vocab) return error.DraftNonfinite;
+                l.held[i] = p.token;
+            }
+            l.held_len = it.depth;
+            if (d.trace) std.debug.print("draft {s} slot {d} anchor {d} pending {d} depth {d}: {any}\n", .{ it.stream.id, slot, it.position - 1, it.pending, it.depth, l.held[0..it.depth] });
+        }
+    }
+
+    /// Blocks on an empty context: the pipelines compiled, then a 1-draft and a 15-draft block timed (the second runs).
+    fn warm(d: *Drafter, io: std.Io) !void {
+        const l = try d.newLane(64);
+        defer d.dropLane(l);
+        var ms: [2]f64 = undefined;
+        for ([_]u32{ block_rows - 1, 1, block_rows - 1, 1, block_rows - 1 }, 0..) |depth, i| {
+            const t0 = std.Io.Clock.awake.now(io);
+            const cb = d.target.queue.commandBuffer();
+            const e = cb.compute(.serial);
+            try d.encodeBlock(e, l, 0, 2, 0, depth);
+            e.end();
+            cb.commit();
+            cb.wait();
+            if (cb.failure()) |msg| return failed(msg);
+            if (i >= 3) ms[i - 3] = @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6;
+        }
+        d.block_ms = ms;
+        d.step_ms = @max(ms[1] - ms[0], 0) / @as(f64, block_rows - 2);
+    }
+};

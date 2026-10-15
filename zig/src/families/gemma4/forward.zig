@@ -114,6 +114,12 @@ pub fn run(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []const
     bind(e, &.{s.logits}, 0);
     e.setValue(cfg.softcap, 1);
     e.dispatchThreads(.{ .width = rows * cfg.vocab }, .{ .width = 256 });
+    // each row's greedy token (the softcap keeps the order): tree_round's argmax in 16-row pieces
+    var first: usize = 0;
+    while (first < rows) : (first += 16) {
+        const n = @min(16, rows - first);
+        try m.picks.argmax(e, .{ .buf = s.logits, .off = first * cfg.vocab * 2 }, .{ .buf = s.picks, .off = first * 8 }, .{ .rows = @intCast(n), .vocab = cfg.vocab, .stride = cfg.vocab });
+    }
     e.end();
     cb.commit();
     cb.wait();
@@ -128,6 +134,18 @@ pub fn run(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []const
 pub fn window(m: *Model, s: *state.Scratch, c: *state.Cache, ids: []const u32, p0: usize) !void {
     if (p0 != c.len) return error.BadPosition;
     return run(m, s, &.{.{ .cache = c, .rows = ids.len }}, ids);
+}
+
+/// dense_tail's tap output: layer i's rows at its tap's columns, or none (`spare` bound, stride 0).
+pub fn tapOut(e: mtl.ComputeEncoder, m: *const Model, taps: ?mtl.Buffer, spare: mtl.Buffer, i: usize, index: usize) void {
+    const t = m.tap_of[i];
+    if (taps == null or t < 0) {
+        e.setBuffer(spare, 0, index);
+        e.setValue(@as(i32, 0), index + 1);
+        return;
+    }
+    e.setBuffer(taps.?, @as(usize, @intCast(t)) * cfg.hidden * 2, index);
+    e.setValue(@as(i32, @intCast(m.taps * cfg.hidden)), index + 1);
 }
 
 /// sqrt(hidden) as MLX multiplies by it: a weak-typed scalar, rounded to bf16 first.
@@ -229,5 +247,6 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const 
     e.setValue(cfg.eps, 5);
     bind(e, &.{ s.h[1 - cur], s.normed[1 - cur] }, 6);
     sumsOut(e, s, rows, 8);
+    tapOut(e, m, s.taps, s.hn, i, 10);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
 }

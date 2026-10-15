@@ -7,7 +7,10 @@ pub const forward = @import("forward.zig");
 pub const prompt = @import("prompt.zig");
 pub const Model = @import("model.zig").Model;
 pub const backend = @import("backend.zig");
+pub const dflash = @import("dflash.zig");
+pub const dflash_weights = @import("dflash_weights.zig");
 
 test {
     _ = config;
+    _ = dflash_weights;
 }

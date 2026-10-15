@@ -7,6 +7,7 @@ const kernels = @import("kernels.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
 const lane = @import("../../core/lane_projection.zig");
 const Model = @import("model.zig").Model;
+const fwd = @import("forward.zig");
 
 const Ref = lane.Ref;
 const R = state.chunk_rows;
@@ -33,12 +34,15 @@ pub const Scratch = struct {
     act: mtl.Buffer,
     y: mtl.Buffer,
     logits: mtl.Buffer,
+    /// The drafter's tapped rows [rows, taps x hidden] bf16, once a drafter asked for them.
+    taps: ?mtl.Buffer = null,
 
     pub fn init(device: mtl.Device, capacity: usize) !Scratch {
         const d = cfg.hidden;
         const qd = cfg.query_heads * cfg.global_dim;
         _ = capacity;
         var s: Scratch = undefined;
+        s.taps = null;
         inline for (.{ .{ "ids", R * 4, true }, .{ "pos", R * 4, true }, .{ "sums", R * (cfg.intermediate / 64) * 4, false }, .{ "qkv", R * (qd + 2 * 16 * 256) * 2, false }, .{ "q", R * qd * 2, false }, .{ "k", R * 16 * 256 * 2, false }, .{ "v", R * 16 * 256 * 2, false }, .{ "attn", R * qd * 2, false }, .{ "o", R * d * 2, false }, .{ "hn", R * d * 2, false }, .{ "n_mlp", R * d * 2, false }, .{ "gate_up", R * 2 * cfg.intermediate * 2, false }, .{ "act", R * cfg.intermediate * 2, false }, .{ "y", R * d * 2, false }, .{ "logits", cfg.vocab * 2, true } }) |f|
             @field(s, f[0]) = try device.buffer(f[1], if (f[2]) shared else private);
         for (&s.h) |*b| b.* = try device.buffer(R * d * 2, private);
@@ -49,6 +53,7 @@ pub const Scratch = struct {
     pub fn deinit(s: *Scratch) void {
         inline for (.{ "ids", "pos", "sums", "qkv", "q", "k", "v", "attn", "o", "hn", "n_mlp", "gate_up", "act", "y", "logits" }) |f| @field(s, f).deinit();
         for (s.h ++ s.normed) |b| b.deinit();
+        if (s.taps) |b| b.deinit();
     }
 };
 
@@ -90,7 +95,7 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32) !void {
     e.setBuffer(w.embed_s.buf, w.embed_s.off, 2);
     e.setBuffer(w.embed_b.buf, w.embed_b.off, 3);
     bind(e, &.{s.h[0]}, 4);
-    e.setValue(@import("forward.zig").embedScale(), 5);
+    e.setValue(fwd.embedScale(), 5);
     e.dispatchThreads(.{ .width = cfg.hidden / 2, .height = rows }, .{ .width = 256 });
     e.setPipeline(ks.rms);
     bind(e, &.{s.h[0]}, 0);
@@ -175,5 +180,6 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: usiz
     e.setValue(cfg.eps, 5);
     bind(e, &.{ s.h[1 - cur], s.normed[1 - cur] }, 6);
     noSums(e, s, 8);
+    fwd.tapOut(e, m, s.taps, s.hn, i, 10);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
 }

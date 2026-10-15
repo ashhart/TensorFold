@@ -1,6 +1,7 @@
-//! Gemma 4 dense behind the lane engine's backend: windows of up to 16 rows, several streams a forward, copy drafts.
+//! Gemma 4 dense behind the lane engine's backend: windows of up to 16 rows, 128 rows of streams a forward, taps.
 const std = @import("std");
 const lanes = @import("lanes");
+const mtl = @import("metal");
 const cfg = @import("config.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
@@ -19,6 +20,11 @@ pub const Metal = struct {
     /// Prompt chunks' activations: 512 rows on core affine_mm and the tensor-unit attention.
     prompt_scratch: prompt.Scratch,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
+    /// Forwards run on `scratch`: a stream's tapped rows there are current while its tap's gen matches.
+    gen: u64 = 0,
+    /// A window's forward ms by rows, timed by measure() (the depth rule prices drafts with them); none until then.
+    costs: [st.max_rows]lanes.config.Cost = undefined,
+    timed: usize = 0,
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -41,11 +47,46 @@ pub const Metal = struct {
 
     /// Every kernel keeps a row's bits at any window width and beside any other stream's rows (tf-gemma4-glue).
     pub fn facts(self: *const Metal) lanes.Model {
-        return .{ .exact_width = st.max_rows, .hidden_rows = true, .batch_rows = st.max_rows, .max_streams = self.options.streams, .streams_exact = true };
+        return .{ .exact_width = st.max_rows, .hidden_rows = true, .batch_rows = st.prompt_rows, .max_streams = self.options.streams, .streams_exact = true, .window_costs = self.costs[0..self.timed] };
+    }
+
+    /// A window of each width 1..16 at position 0 on a throwaway cache, the second of two runs timed.
+    pub fn measure(self: *Metal, io: std.Io) !void {
+        var cache = try st.Cache.init(self.model.device, 256);
+        defer cache.deinit();
+        var ids: [st.max_rows]u32 = @splat(2);
+        for (1..st.max_rows + 1) |rows| {
+            var ms: f64 = 0;
+            for (0..2) |run| {
+                cache.len = 0;
+                const t0 = std.Io.Clock.awake.now(io);
+                try fwd.run(self.model, &self.scratch, &.{.{ .cache = &cache, .rows = rows }}, ids[0..rows]);
+                if (run == 1) ms = @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6;
+            }
+            self.costs[rows - 1] = .{ .width = @intCast(rows), .ms = ms };
+        }
+        self.timed = st.max_rows;
+        self.gen += 1;
+    }
+
+    /// The forward's ms at `rows` rows (up to 128) of one stream, the second of two runs.
+    pub fn timeRows(self: *Metal, io: std.Io, rows: usize) !f64 {
+        var cache = try st.Cache.init(self.model.device, 256);
+        defer cache.deinit();
+        var ids: [st.prompt_rows]u32 = @splat(2);
+        var ms: f64 = 0;
+        for (0..2) |run| {
+            cache.len = 0;
+            const t0 = std.Io.Clock.awake.now(io);
+            try fwd.run(self.model, &self.scratch, &.{.{ .cache = &cache, .rows = rows }}, ids[0..rows]);
+            if (run == 1) ms = @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6;
+        }
+        self.gen += 1;
+        return ms;
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .prepare_features = prepareFn, .features = featuresFn, .prefill_features = prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn } };
     }
 
     fn cast(ptr: *anyopaque) *Metal {
@@ -62,7 +103,42 @@ pub const Metal = struct {
     }
 
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
+        return cast(ptr).prefillWith(stream, null);
+    }
+
+    fn prefillFeaturesFn(ptr: *anyopaque, stream: *lanes.Stream, taps: []const u32, sink: be.FeatureSink) !void {
         const self = cast(ptr);
+        if (taps.len != self.model.taps) return error.UnpreparedGemmaTaps;
+        return self.prefillWith(stream, sink);
+    }
+
+    /// A tapped row's bytes: every tap's hidden row, bf16.
+    fn tapBytes(self: *const Metal) usize {
+        return self.model.taps * cfg.hidden * 2;
+    }
+
+    /// The drafter's layers: both scratches keep their rows from now on.
+    fn prepareFn(ptr: *anyopaque, taps: []const u32) !void {
+        const self = cast(ptr);
+        if (self.scratch.taps != null) return if (taps.len == self.model.taps) self.model.setTaps(taps) else error.BadGemmaTaps;
+        try self.model.setTaps(taps);
+        const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+        self.scratch.taps = try self.model.device.buffer(st.prompt_rows * self.tapBytes(), shared);
+        self.prompt_scratch.taps = try self.model.device.buffer(st.chunk_rows * self.tapBytes(), shared);
+    }
+
+    /// Rows [start, start + count) of the stream's latest tapped rows, on the device.
+    fn featuresFn(ptr: *anyopaque, stream: *lanes.Stream, taps: []const u32, start: u64, count: u32) !be.Features {
+        const self = cast(ptr);
+        const t = (try self.cacheOf(stream)).tap;
+        if (taps.len != self.model.taps or t.buf == null) return error.UnpreparedGemmaTaps;
+        if (t.gen) |g| if (g != self.gen) return error.StaleGemmaTaps;
+        if (count == 0 or start < t.start or start + count > t.start + t.rows) return error.GemmaTapsNotHeld;
+        const width = self.tapBytes();
+        return .{ .buffer = @intFromPtr(t.buf.?.id), .offset = t.off + (start - t.start) * width, .rows = count, .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 };
+    }
+
+    fn prefillWith(self: *Metal, stream: *lanes.Stream, sink: ?be.FeatureSink) !void {
         const ids = stream.prompt();
         if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidGemmaPrompt;
         const cache = try self.gpa.create(st.Cache);
@@ -74,6 +150,17 @@ pub const Metal = struct {
         while (at < ids.len) {
             const end = @min(ids.len, at + st.chunk_rows);
             try prompt.run(self.model, &self.prompt_scratch, cache, ids[at..end]);
+            if (sink) |k| {
+                const width = self.tapBytes();
+                const rows = self.prompt_scratch.taps.?;
+                try k.take(k.ptr, stream, .{ .buffer = @intFromPtr(rows.id), .rows = @intCast(end - at), .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 }, at);
+                if (end == ids.len) { // the prompt's last row, kept for the first draft (another prompt may reuse the scratch)
+                    const last = try self.model.device.buffer(width, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+                    cache.last_tap = last;
+                    @memcpy(last.slice(u8, width), rows.slice(u8, st.chunk_rows * width)[(end - 1 - at) * width ..][0..width]);
+                    cache.tap = .{ .buf = last, .start = ids.len - 1, .rows = 1 };
+                }
+            }
             at = end;
         }
         @memcpy(cache.logits.slice(u16, cfg.vocab), self.prompt_scratch.logits.slice(u16, cfg.vocab));
@@ -104,6 +191,7 @@ pub const Metal = struct {
         };
         cache.from = cache.len;
         try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = 1 }}, &.{token});
+        self.gen += 1;
         self.keepLast(cache, 0);
         return try draw(self.gpa, cache.logits.slice(u16, cfg.vocab), stream.sampling, position, &.{});
     }
@@ -115,13 +203,13 @@ pub const Metal = struct {
 
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) !void {
         const self = cast(ptr);
-        var segments: [st.max_rows]fwd.Segment = undefined;
-        var ids: [st.max_rows]u32 = undefined;
+        var segments: [st.prompt_rows]fwd.Segment = undefined;
+        var ids: [st.prompt_rows]u32 = undefined;
         var total: usize = 0;
         if (windows.len > segments.len or windows.len != out.len) return error.InvalidGemmaWindows;
         for (windows, 0..) |w, i| {
             const rows = w.rows();
-            if (w.parents != null or w.held != 0 or total + rows > st.max_rows or w.positions.len != rows) return error.UnsupportedGemmaWindow;
+            if (w.parents != null or w.held != 0 or rows > st.max_rows or total + rows > st.prompt_rows or w.positions.len != rows) return error.UnsupportedGemmaWindow;
             if (w.masks.len != 0 and w.masks.len != rows * mask_words) return error.InvalidGemmaMasks;
             const cache = try self.cacheOf(w.stream);
             for (w.positions, 0..) |p, r| if (p != cache.len + r + 1) return error.InvalidGemmaPosition;
@@ -132,11 +220,27 @@ pub const Metal = struct {
             total += rows;
         }
         try fwd.run(self.model, &self.scratch, segments[0..windows.len], ids[0..total]);
+        self.gen += 1;
+        if (self.scratch.taps) |taps| {
+            var row: usize = 0;
+            for (segments[0..windows.len]) |seg| {
+                seg.cache.tap = .{ .buf = taps, .off = row * self.tapBytes(), .start = seg.cache.from, .rows = seg.rows, .gen = self.gen };
+                row += seg.rows;
+            }
+        }
         const logits = self.scratch.logits.slice(u16, total * cfg.vocab);
+        const picks = self.scratch.picks.slice(Pick, total);
         var base: usize = 0;
         for (windows, out) |w, o| {
             if (o.sampled.len != w.rows() or o.drafts.len != w.tokens.len) return error.InvalidGemmaOutputs;
+            const greedy = w.masks.len == 0 and (w.stream.sampling == null or w.stream.sampling.?.temperature <= 0) and std.c.getenv("GEMMA_HOST_DRAW") == null;
             for (o.sampled, w.positions, 0..) |*t, p, r| {
+                if (greedy) { // the GPU's argmax, the same token the host draw finds
+                    const pick = picks[base + r];
+                    if (pick.nonfinite != 0 or pick.token >= cfg.vocab) return error.NonfiniteGemmaLogits;
+                    t.* = pick.token;
+                    continue;
+                }
                 const mask = if (w.masks.len > 0) w.masks[r * mask_words ..][0..mask_words] else &.{};
                 t.* = try draw(self.gpa, logits[(base + r) * cfg.vocab ..][0..cfg.vocab], w.stream.sampling, p, mask);
             }
@@ -171,3 +275,5 @@ pub const Metal = struct {
 
 /// A row's allowed-token bits (structured output): one bit a logit.
 const mask_words = (cfg.vocab + 31) / 32;
+
+const Pick = @import("tree_round_gpu").contract.Pick;

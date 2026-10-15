@@ -109,6 +109,10 @@ contributions are in it.
   `fn_attn.metal` reads only each row's selected blocks and tail, as the #29 attention did.
 - @gilby wrote the dense Gemma 4 31B decode (`attn_tail`, `dense_tail`, the ring cache) in
   [#360](https://github.com/ashhart/TensorFold/pull/360), the native port's reference and source of its glue.
+- z-lab trained and published the Gemma 4 31B DFlash drafter
+  ([`z-lab/gemma-4-31B-it-DFlash`](https://huggingface.co/z-lab/gemma-4-31B-it-DFlash)); their MLX model, vendored in
+  the Python engine as `drafters/vendor/z_lab_dflash/model_mlx.py`, is the reference for the native drafter's block,
+  masks and positions (`zig/src/families/gemma4/dflash.zig`).
 - @gilby applied an n-gram table's `weight_scale` at lookup in [#148](https://github.com/ashhart/TensorFold/pull/148)
   ([embed.py](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/kernels/qwen/flash_next/v1/embed.py)),
   so oQ checkpoints of Flash Next load. The native `zig/src/families/flashnext/ple_scale.zig` applies the same rule.

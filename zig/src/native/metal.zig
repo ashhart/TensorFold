@@ -107,8 +107,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
-    if (o.drafter != null and !dense) {
-        problem.* = "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head)";
+    if (o.drafter != null and !dense and !std.mem.eql(u8, o.model_type, "gemma4")) {
+        problem.* = "--drafter is supported for Qwen3.8-27B-class checkpoints (qwen3_5 with its own output head) and Gemma 4 dense";
         return null;
     }
     if (dense) return openQwen27(a, gpa, io, o, problem);

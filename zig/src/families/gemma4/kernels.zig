@@ -19,6 +19,9 @@ pub const Kind = struct {
     softcap: mtl.Pipeline,
     freqs: mtl.Pipeline,
     kv_write: mtl.Pipeline,
+    draft_store: mtl.Pipeline,
+    draft_add: mtl.Pipeline,
+    draft_swiglu: mtl.Pipeline,
     /// gemma_prompt_attention: a prompt chunk's rows over the cache, on the tensor units.
     prompt_attn: mtl.Pipeline,
     /// gemma_decode_attention: decode rows' partials on the tensor units, a key head's query heads as one tile.
@@ -56,7 +59,7 @@ pub const Kind = struct {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
         var k: Kind = undefined;
-        inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs", "kv_write" }, .{ "gemma_embed", "gemma_rms_looped", "gemma_qkv_prep", "gemma_attention_partial", "gemma_attention_merge", "gemma_attn_tail", "gemma_dense_tail", "gemma_geglu", "gemma_softcap", "gemma_rope_freqs", "gemma_kv_write" }) |field, name|
+        inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs", "kv_write", "draft_store", "draft_add", "draft_swiglu" }, .{ "gemma_embed", "gemma_rms_looped", "gemma_qkv_prep", "gemma_attention_partial", "gemma_attention_merge", "gemma_attn_tail", "gemma_dense_tail", "gemma_geglu", "gemma_softcap", "gemma_rope_freqs", "gemma_kv_write", "gemma_draft_store", "gemma_draft_add", "gemma_draft_swiglu" }) |field, name|
             @field(k, field) = try mtl.Pipeline.init(device, lib, name, false);
         {
             const body = try frags.source(device, a, prompt_attention);
@@ -76,7 +79,7 @@ pub const Kind = struct {
     }
 
     fn deinit(k: Kind) void {
-        inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs", "kv_write", "prompt_attn", "decode_attn" }) |field| @field(k, field).deinit();
+        inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs", "kv_write", "draft_store", "draft_add", "draft_swiglu", "prompt_attn", "decode_attn" }) |field| @field(k, field).deinit();
     }
 };
 

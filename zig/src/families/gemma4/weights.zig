@@ -112,6 +112,11 @@ fn pack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, o
         @memcpy(biases[row * k / cfg.group ..][0..b.len], b);
         row += w.len * 8 / k;
     }
+    return packArrays(gpa, device, owned, words, scales, biases, n, k);
+}
+
+/// MLX affine 4-bit words, scales and biases [n, k] packed into the lane layout, reg order; `owned` keeps the buffers.
+pub fn packArrays(gpa: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayList(mtl.Buffer), words: []const u32, scales: []const u16, biases: []const u16, n: usize, k: usize) !Linear {
     const l = layout(n, k);
     const wb = try device.buffer(l.weightWords() * 4, shared);
     errdefer wb.deinit();
