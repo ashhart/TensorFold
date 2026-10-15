@@ -321,6 +321,7 @@ test {
     _ = prompt.batch;
     _ = mtp;
     _ = native;
+    _ = @import("cuda_snap.zig");
     _ = @import("cuda_config.zig");
     _ = row_path;
     _ = @import("cuda_mtp_check.zig");
