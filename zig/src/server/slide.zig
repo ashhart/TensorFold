@@ -138,8 +138,8 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     sse.done(conn) catch {};
 }
 
-/// The folder's original files kept before its first lesson, else the lesson refused with why; true to go on.
-fn keepOriginals(srv: *Server, conn: *Conn, a: Allocator) bool {
+/// The folder's original files kept before its first lesson or delete, else refused with why; true to go on.
+pub fn keepOriginals(srv: *Server, conn: *Conn, a: Allocator) bool {
     const dir = folder(srv) orelse return true;
     var why: []const u8 = "";
     const o: api.originals.Options = .{ .checked = srv.snapshot_checked };
@@ -151,7 +151,7 @@ fn keepOriginals(srv: *Server, conn: *Conn, a: Allocator) bool {
     srv.snapshot_checked = true;
     const gb = @as(f64, @floatFromInt(kept.bytes)) / 1e9;
     const earlier = "; it had learned before, so a rollback returns it to this point, not to the model as pulled";
-    const made = "slide: {s}'s original files kept in {s} before its first lesson: {d} files, {d:.1} GB, {d} " ++
+    const made = "slide: {s}'s original files kept in {s} before its first lesson or delete: {d} files, {d:.1} GB, {d} " ++
         "cloned, in {d:.1} s{s}";
     const at = api.originals.folder_name;
     const before = if (kept.taught) earlier else "";

@@ -42,6 +42,8 @@ pub fn route(srv: *Server, conn: *Conn, a: Allocator, raw_id: []const u8) void {
     defer srv.teacher.learning.unlock(srv.io);
     const facts = srv.slide.snapshot(a) catch return slide.refuse(conn, a, 500, "out of memory");
     const at = find(facts, id) orelse return slide.refuse(conn, a, 404, std.fmt.allocPrint(a, "no fact {d} in the graph", .{id}) catch "no such fact");
+    // a delete writes the shards: the originals are kept first, as before a lesson, so a rollback undoes it
+    if (nothing(a, facts[at]) == null and !slide.keepOriginals(srv, conn, a)) return;
     sse.open(conn) catch return;
     var out: slide.Out = .{ .conn = conn, .a = a };
     var cx: errors.Cx = .{ .a = a };

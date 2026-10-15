@@ -522,3 +522,55 @@ test "a put-back the device does not take refuses replies and requests in words,
     try std.testing.expectEqual(slide_graph.State.deleted, try deleteSister(t));
     try std.testing.expectEqual(@as(u32, 1), m.saves);
 }
+
+/// A model folder a lesson could change: an empty shard and its config.
+fn folderAt(a: Allocator, io: std.Io, tmp: std.testing.TmpDir, name: []const u8) ![]const u8 {
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name });
+    try std.Io.Dir.cwd().createDirPath(io, dir);
+    const shard = "\x08\x00\x00\x00\x00\x00\x00\x00{}      "; // a header of 8 bytes, no tensors
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ dir, "model.safetensors" }), .data = shard });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ dir, "config.json" }), .data = "{}" });
+    return dir;
+}
+
+fn present(io: std.Io, path: []const u8) bool {
+    _ = std.Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = false }) catch return false;
+    return true;
+}
+
+test "a delete keeps the folder's original files before anything changes, and a broken way back refuses it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var text: ByteText = .{};
+    var m: Model = .{};
+    const t = try taught(&text, &m);
+    defer t.srv.deinit();
+    var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a, .broken = true };
+    // an unknown fact changes nothing, not even the snapshot
+    const fresh = try folderAt(a, io, tmp, "fresh");
+    t.srv.config.model_dir = fresh;
+    slide_forget.route(t.srv, &conn, a, "99");
+    try std.testing.expect(!present(io, try std.fs.path.join(a, &.{ fresh, ".tensorfold-original" })));
+    // a real delete keeps it before its stream opens (this connection's stream never does)
+    const id = try std.fmt.allocPrint(a, "{d}", .{t.ids[1]});
+    slide_forget.route(t.srv, &conn, a, id);
+    try std.testing.expect(present(io, try std.fs.path.join(a, &.{ fresh, ".tensorfold-original", "SHA256SUMS" })));
+    try std.testing.expect(t.srv.snapshot_checked);
+    // a snapshot that no longer matches its manifest refuses the delete before the engine is asked to cut
+    const broken = try folderAt(a, io, tmp, "broken");
+    const snap = try std.fs.path.join(a, &.{ broken, ".tensorfold-original" });
+    try std.Io.Dir.cwd().createDirPath(io, snap);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ snap, "model.safetensors" }), .data = "not the shard" });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ snap, "SHA256SUMS" }), .data = "0000000000000000000000000000000000000000000000000000000000000000  model.safetensors\n" });
+    t.srv.config.model_dir = broken;
+    t.srv.snapshot_checked = false;
+    slide_forget.route(t.srv, &conn, a, id);
+    try std.testing.expect(!t.srv.snapshot_checked); // refused at the way back, so never at the cut
+    try std.testing.expectEqual(@as(u32, 0), m.forgets);
+    try std.testing.expect(t.srv.teacher.learning.tryLock()); // the refused delete let go of the lock
+    t.srv.teacher.learning.unlock(io);
+}
