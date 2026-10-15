@@ -64,6 +64,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - The Intel XPU runner checks its int4 GEMMs against FP64. With `XPU_FP64_REF=1`, `xpu-qwen27` runs each int4 GEMM of layers 0, 1, 31 and 63 and the head on the prompt's real activations, at decode on 1 and 8 rows and on the prompt, and compares it with FP64 references of the same weights from `core/quant`; `XPU_FIDELITY=1` compares the prompt and decode paths' top tokens at every position with the same forward in FP64. The int4 group means are stored 256 times larger, so the low half of their fp16 pair stays normal. In the author's runs on an Arc Pro B70 every native path stayed within the fp16 rounding of the FP64 output; it was not run here, with no Intel GPU (#802). Thanks to @Mirrdhyn.
 - With no keys configured, the native server's `/health` also names the release it was built from (`version`), the backend built in (`backend`) and the GPU it serves on (`device`, by the driver's name), read once at startup. With keys configured it still answers only `{"status": "ok"}` (#854). Thanks to @ThinkOffApp.
 - The server's JSON values are one named module (`zig/build/server.zig`) that a family's serving code can import; no reply changes (#860). Thanks to @jayleaton.
+- A reply's `tensorfold` fields carry the full SHA-256 of its token ids (`token_sha256`, 64 hex characters) beside `token_sha`, which is its first 12 characters (#862). Thanks to @jayleaton.
 
 ## 1.0.11
 
