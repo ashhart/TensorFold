@@ -355,7 +355,7 @@ pub fn ling(gpu: Gpu, path: []const u8) !void {
     check.pass("Ling layer 4 routing: picks equal HF's and exllamav3's on all {d} rows, weights within float64 tolerance", .{R});
 }
 
-/// `ling-route-old <fatbin>`: group-limited select (Ling's shapes, odd groups, tie rows) vs an older glm_glue, byte for byte.
+/// `ling-route-old <fatbin>`: group-limited select (Ling's shapes, odd groups, ties) vs an older glm_glue, bytes.
 pub fn lingOld(gpu: Gpu, path: []const u8) !void {
     var e: Env = undefined;
     try env(gpu, &e);

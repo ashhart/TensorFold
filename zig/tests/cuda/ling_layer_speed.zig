@@ -15,17 +15,19 @@ const glue = G.glue;
 
 /// Events between op groups; each group's milliseconds by name, medians over reps.
 const Timer = struct {
-    ev: [48]cuda.Event,
-    names: [48][]const u8 = undefined,
+    ev: [64]cuda.Event,
+    names: [64][]const u8 = undefined,
     n: usize = 0,
     s: cuda.Stream,
     on: bool,
+    isolate: bool = false,
 
     fn mark(t: *Timer, name: []const u8) !void {
         if (!t.on) return;
         try t.ev[t.n].record(t.s);
         t.names[t.n] = name;
         t.n += 1;
+        if (t.isolate) try t.s.synchronize(); // each op group starts on an idle GPU: another context's slice lands between
     }
 };
 
@@ -40,6 +42,11 @@ fn kdaBlock(o: G.Ops, b: *const F.Buffers, a: W.Kda, c: *const ling.config.Confi
     const sv = st.saves(li);
     const p = if (b.prompt) b.kp else sv.p;
     for ([_]W.Proj{ a.q, a.k, a.v, a.b }, [_]usize{ 0, n, 2 * n, 3 * n }, [_][]const u8{ "proj q", "proj k", "proj v", "proj b (bf16)" }) |w, col0, name| {
+        if (rows == 1) {
+            try o.mm(w, b.normed, D, 1, p + col0 * 2);
+            try t.mark(name);
+            continue;
+        }
         try o.mm(w, b.normed, D, rows, b.tmp);
         try t.mark(name);
         const w_n = w.outputs();
@@ -120,6 +127,11 @@ fn mlp(o: G.Ops, b: *const F.Buffers, m: W.Mlp, rows: usize, limit: f32, out: u6
     const D = m.gate.inputs();
     const w = m.gate.outputs();
     for ([_]W.Proj{ m.gate, m.up }, [_]usize{ 0, w }) |p, col0| {
+        if (rows == 1) {
+            try o.mm(p, b.normed, D, 1, b.gu + col0 * 2);
+            try t.mark(tag ++ " gate, up");
+            continue;
+        }
         try o.mm(p, b.normed, D, rows, b.tmp);
         try t.mark(tag ++ " gate, up");
         try o.copy(b.tmp, w * 2, b.gu + col0 * 2, 4 * w, rows, w * 2);
@@ -142,26 +154,29 @@ fn moe(o: G.Ops, b: *const F.Buffers, e: W.Moe, g: *const F.Graph, rows: usize, 
     try glue.select(o.set(), o.s, b.mlog, if (e.bias != 0) e.bias else g.zero_bias, b.pick, b.wts, rows, top, E, c.routed_scale, c.norm_topk, ling.groups(c));
     try t.mark("select");
     const l = e.routed.grouped;
-    const tile: usize = if (o.prompt) cuda.experts.promptTile(l.format) else 16;
-    try o.m.router.route(o.s, b.pick, rows * slots, E + 1, tile, b.plan);
-    try t.mark("expert plan");
-    const items = cuda.grouped.maxItems(rows * slots, E + 1, tile);
     const gr = o.m.grouped();
     const up: cuda.experts.Rows = .{ .x = b.normed, .stride = l.dims, .slots = slots };
     const down: cuda.experts.Rows = .{ .x = b.eact, .stride = l.width };
     const skip: i32 = @intCast(E);
-    if (o.prompt) try gr.prompt(o.s, .up, up, l, b.plan, b.eact, items, skip) else try gr.decode(o.s, .up, up, l, b.plan, b.eact, items, skip);
-    try t.mark("experts gate-up");
-    if (o.prompt) try gr.prompt(o.s, .down_bf16, down, l, b.plan, b.ey, items, skip) else try gr.decode(o.s, .down_bf16, down, l, b.plan, b.ey, items, skip);
-    try t.mark("experts down");
-    if (o.prompt) { // the decode kernels on 16-pair items over the same rows, for comparison
-        try o.m.router.route(o.s, b.pick, rows * slots, E + 1, 16, b.plan);
-        try t.mark("alt plan 16");
-        const it16 = cuda.grouped.maxItems(rows * slots, E + 1, 16);
-        try gr.decode(o.s, .up, up, l, b.plan, b.eact, it16, skip);
-        try t.mark("alt gate-up decode kernel");
-        try gr.decode(o.s, .down_bf16, down, l, b.plan, b.ey, it16, skip);
-        try t.mark("alt down decode kernel");
+    // block_ffn's choice first, then (prompt rows) every kernel and plan tile on the same rows for comparison
+    const pk = o.prompt and !(l.format == .fp8g and rows * top < 16 * E);
+    const Way = struct { prompt: bool, tile: usize, up: []const u8, down: []const u8 };
+    const ways = [_]Way{
+        .{ .prompt = pk, .tile = if (pk) 64 else 16, .up = "experts gate-up", .down = "experts down" },
+        .{ .prompt = true, .tile = 64, .up = "alt gate-up, prompt kernel, tile 64", .down = "alt down, prompt kernel, tile 64" },
+        .{ .prompt = false, .tile = 16, .up = "alt gate-up, decode kernel, tile 16", .down = "alt down, decode kernel, tile 16" },
+        .{ .prompt = false, .tile = 32, .up = "alt gate-up, decode kernel, tile 32", .down = "alt down, decode kernel, tile 32" },
+        .{ .prompt = false, .tile = 64, .up = "alt gate-up, decode kernel, tile 64", .down = "alt down, decode kernel, tile 64" },
+    };
+    for (ways, 0..) |w, i| {
+        if (i > 0 and !o.prompt) break;
+        try o.m.router.route(o.s, b.pick, rows * slots, E + 1, w.tile, b.plan);
+        try t.mark(if (i == 0) "expert plan" else "alt plans");
+        const items = cuda.grouped.maxItems(rows * slots, E + 1, w.tile);
+        if (w.prompt) try gr.prompt(o.s, .up, up, l, b.plan, b.eact, items, skip) else try gr.decode(o.s, .up, up, l, b.plan, b.eact, items, skip);
+        try t.mark(w.up);
+        if (w.prompt) try gr.prompt(o.s, .down_bf16, down, l, b.plan, b.ey, items, skip) else try gr.decode(o.s, .down_bf16, down, l, b.plan, b.ey, items, skip);
+        try t.mark(w.down);
     }
     try mlp(o, b, e.shared.?, rows, e.shared_limit, b.sh, t, "shared");
     var a: cuda.Args = .{};
@@ -203,9 +218,13 @@ fn median(xs: []f64) f64 {
     return xs[xs.len / 2];
 }
 
-/// `ling-layer-speed DIR FIXTURE [REPS]`: decode at position 2048, windows 2..16, prompts of 512 and 2048 rows.
-pub fn run(gpu: check.Gpu, dir: []const u8, path: []const u8, reps_arg: ?[]const u8) !void {
-    const reps: usize = if (reps_arg) |x| try std.fmt.parseInt(usize, x, 10) else 15;
+/// `ling-layer-speed DIR FIXTURE [REPS [ROWS,..]]`: decode at position 2048, windows, prompts (default 512, 2048).
+pub fn run(gpu: check.Gpu, dir: []const u8, path: []const u8, reps_arg: ?[]const u8, rows_arg: ?[]const u8) !void {
+    const reps: usize = @min(30, if (reps_arg) |x| try std.fmt.parseInt(usize, x, 10) else 15);
+    var phases: std.ArrayList(usize) = .empty;
+    var it = std.mem.tokenizeScalar(u8, rows_arg orelse "1,2,4,8,16,512,2048", ',');
+    while (it.next()) |x| try phases.append(gpu.gpa, try std.fmt.parseInt(usize, x, 10));
+    defer phases.deinit(gpu.gpa);
     var arena = std.heap.ArenaAllocator.init(gpu.gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -220,28 +239,31 @@ pub fn run(gpu: check.Gpu, dir: []const u8, path: []const u8, reps_arg: ?[]const
     const st = try k.r.state(k.cap);
     defer st.deinit();
     const c = &k.w.config;
-    std.debug.print("RESULT ling-layer-speed layer {d} ({t}, {s}, {t}), {d} reps, median and least us (other GPU contexts' time slices land in the medians)\n", .{ k.L, c.kind(k.L), if (c.isMoe(k.L)) "MoE" else "dense", c.quant, reps });
-    for ([_]usize{ 1, 2, 4, 8, 16, 512, 2048 }) |rows| {
+    std.debug.print("RESULT ling-layer-speed layer {d} ({t}, {s}, {t}), {d} reps, median and least us; prompt ops each from an idle GPU (other contexts' time slices land in medians)\n", .{ k.L, c.kind(k.L), if (c.isMoe(k.L)) "MoE" else "dense", c.quant, reps });
+    for (phases.items) |rows| {
+        if (rows == 0 or rows > 2048) return error.TooManyRows;
         const b = if (rows > F.window_rows) &k.pb else &k.db;
         const pos: usize = if (rows > F.window_rows) 0 else 2048;
         try st.setPos(s, pos);
         const d = gpu.d;
-        try d.check(d.api.cuMemcpyHtoDAsync_v2(b.x, k.x.ptr, rows * k.D * 2, s.handle), "cuMemcpyHtoDAsync");
         const f = k.r.fwd(b, null);
         const sg: Seg = .{ .st = st, .row0 = 0, .rows = rows };
         var whole: [64]f64 = undefined;
         var table: [32]Row = undefined;
         var nt: usize = 0;
         for (0..reps + 2) |i| {
-            // whole layer through forward.layer, then the same launches op by op
-            try t.ev[46].record(s);
+            // whole layer through forward.layer, then the same launches op by op, each rep on the fixture's rows
+            try d.check(d.api.cuMemcpyHtoDAsync_v2(b.x, k.x.ptr, rows * k.D * 2, s.handle), "cuMemcpyHtoDAsync");
+            try f.layer(&.{sg}, 0, rows, null); // untimed: the GPU busy before the timed launches
+            try t.ev[62].record(s);
             try f.layer(&.{sg}, 0, rows, null);
-            try t.ev[47].record(s);
+            try t.ev[63].record(s);
             try s.synchronize();
-            if (i >= 2) whole[i - 2] = try t.ev[46].elapsedMs(t.ev[47]);
             t.n = 0;
+            t.isolate = rows > F.window_rows; // prompt ops one at a time; a decode layer's run back to back
             try layerOps(&f, sg, rows, &t);
             try s.synchronize();
+            if (i >= 2) whole[i - 2] = try t.ev[62].elapsedMs(t.ev[63]);
             if (i < 2) continue;
             var acc: [32]f64 = @splat(0);
             for (1..t.n) |j| {
