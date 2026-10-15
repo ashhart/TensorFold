@@ -145,8 +145,8 @@ For Qwen, each image request carries its own multimodal rotary positions and con
 ## The native server
 
 `tensorfold-native serve` takes `--vision`, `--vision-max-images` (default 4) and `--vision-image-tokens` (default
-4,096) for engines that read images; GLM-5.3-Flash on one Mac reads them so far, and other native engines refuse the
-flag at startup.
+4,096) for engines that read images; GLM-5.3-Flash and Step-5-Preview on one Mac read them so far, and other
+native engines refuse the flag at startup.
 
 - Images arrive as `image_url` data URLs in user messages and tool results. Remote URLs are refused, since
   `--vision-urls` isn't on the native server yet.
