@@ -187,8 +187,8 @@ pub fn groups(r: *Rig, set: glue.Set) !void {
     check.pass("group select: picks follow the float64 rule (exact ties to the lower id, near ties counted), weights within 2^-16", .{});
 }
 
-/// swiglu at limit 0 (Ling's unclamped layers) against float64 unclamped, and limit 10 differing where it clamps.
-pub fn swigluLimit(r: *Rig, set: glue.Set) !void {
+/// Ling's swiglu at limit 0 (its unclamped layers) against float64 unclamped, and limit 10 differing where it clamps.
+pub fn swigluLimit(r: *Rig, fs: [2]cuda.Function) !void {
     for ([_]usize{ 1024, 704 }) |w| {
         const rows = 40;
         const gu = try r.bfs(rows * 2 * w, 16.0);
@@ -196,8 +196,8 @@ pub fn swigluLimit(r: *Rig, set: glue.Set) !void {
         const out0 = try r.zeros(rows * w * 2);
         const out10 = try r.zeros(rows * w * 2);
         const xs = try r.zeros(rows * w / 64 * 4);
-        try glue.swiglu(set, r.s, dgu, out0, xs, 0, rows, w);
-        try glue.swiglu(set, r.s, dgu, out10, xs, 10, rows, w);
+        try glue.swigluWith(fs, r.s, dgu, out0, xs, 0, rows, w);
+        try glue.swigluWith(fs, r.s, dgu, out10, xs, 10, rows, w);
         const raw0 = try r.back(out0, rows * w * 2);
         const raw10 = try r.back(out10, rows * w * 2);
         var most: f64 = 0;
@@ -214,7 +214,7 @@ pub fn swigluLimit(r: *Rig, set: glue.Set) !void {
         std.debug.print("RESULT swiglu width {d}, limit 0: unclamped float64 at {e:.3} of 2^-7 relative; limit 10 changes {d} of {d}\n", .{ w, most, clamped, rows * w });
         try check.expect(most <= 1 and clamped > 0, "swiglu limit 0 is unclamped, limit 10 clamps", .{});
     }
-    check.pass("swiglu: the limit is per call, 0 runs unclamped (as the experts' 0), 10 clamps", .{});
+    check.pass("Ling swiglu: the limit is per call, 0 runs unclamped (as the experts' 0), 10 clamps", .{});
 }
 
 const Old = struct { topk: cuda.Function, swiglu_512: cuda.Function, swiglu_64: cuda.Function };
@@ -240,20 +240,20 @@ fn glmBytes(r: *Rig, set: glue.Set, prev: Old) !void {
         try check.sameBytes("GLM select picks vs 6380c8da", try r.back(pick_new, n * 4), try r.back(pick, n * 4));
         try check.sameBytes("GLM select weights vs 6380c8da", try r.back(wts_new, n * 4), try r.back(wts, n * 4));
     };
-    for ([_]usize{ 2048, 704 }) |w| {
+    for ([_]f32{ 10, 0 }) |lim| for ([_]usize{ 2048, 704 }) |w| {
         const rows = 40;
         const dgu = try r.dev(std.mem.sliceAsBytes(try r.bfs(rows * 2 * w, 16.0)));
         const outs = [2]u64{ try r.zeros(rows * w * 2), try r.zeros(rows * w * 2) };
         const xss = [2]u64{ try r.zeros(rows * w / 64 * 4), try r.zeros(rows * w / 64 * 4) };
         const block: usize = if (w % 512 == 0) 512 else 64;
         var a: cuda.Args = .{};
-        inline for (.{ dgu, outs[0], xss[0], @as(f32, 10.0), @as(i64, @intCast(w)) }) |v| a.add(v);
+        inline for (.{ dgu, outs[0], xss[0], lim, @as(i64, @intCast(w)) }) |v| a.add(v);
         try cuda.launch.launch(if (block == 512) prev.swiglu_512 else prev.swiglu_64, .{ .grid = .{ .x = rows, .y = @intCast(w / block) }, .block = .{ .x = if (block == 512) 128 else 64 } }, r.s, &a);
-        try glue.swiglu(set, r.s, dgu, outs[1], xss[1], 10, rows, w);
+        try glue.swiglu(set, r.s, dgu, outs[1], xss[1], lim, rows, w);
         try check.sameBytes("GLM swiglu vs 6380c8da", try r.back(outs[1], rows * w * 2), try r.back(outs[0], rows * w * 2));
         try check.sameBytes("GLM swiglu sums vs 6380c8da", try r.back(xss[1], rows * w / 64 * 4), try r.back(xss[0], rows * w / 64 * 4));
-    }
-    check.pass("GLM select (288, 256, 160 experts, normed and not) and swiglu (limit 10): every byte equals 6380c8da's kernels", .{});
+    };
+    check.pass("GLM select (288, 256, 160 experts, normed and not) and swiglu (limits 10 and 0): every byte equals 6380c8da's kernels", .{});
 }
 
 const Env = struct {

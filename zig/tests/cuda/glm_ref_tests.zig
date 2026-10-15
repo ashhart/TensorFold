@@ -197,7 +197,7 @@ pub fn run(gpu: Gpu) !void {
     for ([_]Shape{ .{ .n = 512, .k = 4096 }, .{ .n = 1280, .k = 1536 }, .{ .n = 1024, .k = 128 } }) |sh| try matmuls(&r, set, sh);
     try routers(&r, set);
     try @import("glm_ref_route.zig").groups(&r, set);
-    try @import("glm_ref_route.zig").swigluLimit(&r, set);
+    try @import("glm_ref_route.zig").swigluLimit(&r, .{ try mod.function("tf_ling_swiglu_512"), try mod.function("tf_ling_swiglu_64") });
     try @import("glm_ref_attn.zig").dense(&r, set);
     try @import("glm_ref_attn.zig").sparse(&r, set);
     try @import("glm_ref_hc.zig").mixing(&r, set);
