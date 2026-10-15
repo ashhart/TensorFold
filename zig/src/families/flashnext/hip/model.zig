@@ -34,6 +34,8 @@ pub const Dims = struct {
     ngram: usize,
     /// The rank's slice of the vocabulary rows of the head.
     vocab_rows: usize,
+    /// The DeltaNet norm's output gate, as the checkpoint's `output_gate_type` names it.
+    gate: hip.ops.Gate,
 
     pub fn wide(d: Dims) usize {
         return d.hidden * d.streams;
@@ -72,6 +74,10 @@ pub const Dims = struct {
             .ple_taps = c.ple_conv,
             .ngram = c.ngram,
             .vocab_rows = c.vocab / world,
+            .gate = switch (c.gate) {
+                .sigmoid => .sigmoid,
+                .silu => .silu,
+            },
         };
     }
 };
@@ -153,4 +159,18 @@ test "a rank's dimensions: heads, value heads and the vocabulary split, the kv h
     try std.testing.expectEqual(@as(usize, 512), d.index_top);
     try std.testing.expectEqual(@as(usize, 2 * 4 * 128 + 12 * 128), d.convWidth());
     try std.testing.expectError(error.UnevenSplit, Dims.of(&c, 3));
+    try std.testing.expectEqual(hip.ops.Gate.sigmoid, d.gate);
+}
+
+test "the DeltaNet norm's gate is the one the checkpoint declares: a SiLU checkpoint runs SiLU" {
+    const gpa = std.testing.allocator;
+    const fixture = @embedFile("../fixtures/config.json");
+    const sigmoid = "\"output_gate_type\": \"sigmoid\"";
+    const text = try std.mem.replaceOwned(u8, gpa, fixture, sigmoid, "\"output_gate_type\": \"silu\"");
+    defer gpa.free(text);
+    try std.testing.expect(!std.mem.eql(u8, text, fixture));
+    var c = try config.parse(gpa, text);
+    defer c.deinit();
+    try std.testing.expectEqual(hip.ops.Gate.silu, (try Dims.of(&c, 1)).gate);
+    try std.testing.expectEqual(hip.ops.Gate.silu, (try Dims.of(&c, 4)).gate);
 }

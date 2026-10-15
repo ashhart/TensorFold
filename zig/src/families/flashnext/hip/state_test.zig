@@ -86,6 +86,7 @@ fn dims() model.Dims {
         .ple_taps = 2,
         .ngram = 2,
         .vocab_rows = 16,
+        .gate = .sigmoid,
     };
 }
 

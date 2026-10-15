@@ -162,7 +162,7 @@ fn recur(
         off += n;
     }
     const out = try take(o, m.act, rows * vw);
-    try o.gnormOut(y, l.norm, z, out, rows * d.value_heads, d.value_dim, d.eps, .sigmoid);
+    try o.gnormOut(y, l.norm, z, out, rows * d.value_heads, d.value_dim, d.eps, d.gate);
     return o.project(out, l.out, rows, l.out.partial);
 }
 
