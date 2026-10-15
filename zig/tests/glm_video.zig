@@ -45,7 +45,15 @@ pub fn main(init: std.process.Init) !void {
     var d: Decoder = .{ .v = try api.tfvideo.Video.open(bytes) };
     defer d.v.close();
     const i = d.v.info;
-    const src: video.Source = .{ .frames = @intCast(i.frames), .rate_num = @intCast(i.rate_num), .rate_den = @intCast(i.rate_den), .width = @intCast(i.width), .height = @intCast(i.height), .ctx = &d, .decode = Decoder.decode };
+    const src: video.Source = .{
+        .frames = @intCast(i.frames),
+        .rate_num = @intCast(i.rate_num),
+        .rate_den = @intCast(i.rate_den),
+        .width = @intCast(i.width),
+        .height = @intCast(i.height),
+        .ctx = &d,
+        .decode = Decoder.decode,
+    };
     const t0 = std.Io.Clock.awake.now(io);
     const p = try video.plan(a, src, c, max_tokens, max_frames);
     const prep = try video.prepare(a, src, c, max_tokens, max_frames);
@@ -61,9 +69,23 @@ pub fn main(init: std.process.Init) !void {
         try texts.append(a, try a.dupe(u8, try video.seconds(&buf, t)));
     }
     const g0 = prep.groups[0];
-    const doc = .{ .frames = i.frames, .counted = i.counted != 0, .rate = .{ i.rate_num, i.rate_den }, .width = i.width, .height = i.height, .indices = p.indices, .grid = .{ prep.groups.len, g0.gh, g0.gw }, .tokens_per_group = g0.tokens, .texts = texts.items, .ms = ms };
+    const doc = .{
+        .frames = i.frames,
+        .counted = i.counted != 0,
+        .rate = .{ i.rate_num, i.rate_den },
+        .width = i.width,
+        .height = i.height,
+        .indices = p.indices,
+        .grid = .{ prep.groups.len, g0.gh, g0.gw },
+        .tokens_per_group = g0.tokens,
+        .texts = texts.items,
+        .ms = ms,
+    };
     var out: std.Io.Writer.Allocating = .init(a);
     try std.json.Stringify.value(doc, .{}, &out.writer);
     try dir.writeFile(io, .{ .sub_path = "native.json", .data = out.written() });
-    std.debug.print("{s}: {d} frames decoded, grid {d}x{d}x{d}, {d} tokens a group, {d} ms\n", .{ args[2], p.indices.len, prep.groups.len, g0.gh, g0.gw, g0.tokens, ms });
+    std.debug.print(
+        "{s}: {d} frames decoded, grid {d}x{d}x{d}, {d} tokens a group, {d} ms\n",
+        .{ args[2], p.indices.len, prep.groups.len, g0.gh, g0.gw, g0.tokens, ms },
+    );
 }

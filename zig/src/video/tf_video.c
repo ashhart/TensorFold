@@ -135,7 +135,8 @@ int tf_video_frames(tf_video* v, const int* indices, int n, tf_frame_fn fn, void
     dec->thread_count = 0;   // PyAV's stream codec context: every CPU, slice threads
     dec->thread_type = FF_THREAD_SLICE;
     if (avcodec_open2(dec, codec, NULL) < 0) goto done;
-    if (av_seek_frame(v->fmt, v->stream, 0, AVSEEK_FLAG_BACKWARD) < 0) avformat_seek_file(v->fmt, -1, INT64_MIN, 0, 0, 0);
+    if (av_seek_frame(v->fmt, v->stream, 0, AVSEEK_FLAG_BACKWARD) < 0)
+        avformat_seek_file(v->fmt, -1, INT64_MIN, 0, 0, 0);
     sws->threads = 0;
     sws->flags = SWS_BILINEAR;
     int at = 0, next = 0, flushing = 0;
@@ -173,7 +174,10 @@ int tf_video_frames(tf_video* v, const int* indices, int n, tf_frame_fn fn, void
                 frame->color_trc = trc;
                 frame->color_primaries = pri;
                 if (e2 < 0) goto done;
-                if (fn(ctx, next, at, rgb->data[0], rgb->width, rgb->height, rgb->linesize[0]) != 0) { rc = TF_STOPPED; goto done; }
+                if (fn(ctx, next, at, rgb->data[0], rgb->width, rgb->height, rgb->linesize[0]) != 0) {
+                    rc = TF_STOPPED;
+                    goto done;
+                }
                 ++next;
                 if (next == n) break;
             }

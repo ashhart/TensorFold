@@ -134,7 +134,16 @@ pub fn fetch(a: std.mem.Allocator, io: Io, url: []const u8, max_bytes: usize, de
 }
 
 /// fetch over `via`, whose request(a, io, url, max_bytes, deadline, media_types, f) answers one checked URL.
-pub fn fetchVia(a: std.mem.Allocator, io: Io, url_in: []const u8, max_bytes: usize, deadline: Io.Timestamp, media_types: []const []const u8, f: *Failure, via: anytype) Error!Body {
+pub fn fetchVia(
+    a: std.mem.Allocator,
+    io: Io,
+    url_in: []const u8,
+    max_bytes: usize,
+    deadline: Io.Timestamp,
+    media_types: []const []const u8,
+    f: *Failure,
+    via: anytype,
+) Error!Body {
     var url = url_in;
     var hop: usize = 0;
     while (true) : (hop += 1) {
@@ -358,7 +367,21 @@ test "public addresses as Python's ipaddress checks them" {
         }
     }.of;
     for ([_][4]u8{ .{ 8, 8, 8, 8 }, .{ 151, 101, 1, 69 }, .{ 1, 1, 1, 1 } }) |b| try std.testing.expect(publicIp(ip4(b)));
-    for ([_][4]u8{ .{ 10, 1, 2, 3 }, .{ 127, 0, 0, 1 }, .{ 169, 254, 169, 254 }, .{ 172, 20, 0, 1 }, .{ 192, 168, 1, 1 }, .{ 100, 100, 0, 1 }, .{ 0, 0, 0, 0 }, .{ 224, 0, 0, 1 }, .{ 255, 255, 255, 255 }, .{ 168, 63, 129, 16 }, .{ 192, 0, 0, 9 }, .{ 198, 18, 0, 1 }, .{ 203, 0, 113, 5 } }) |b|
+    for ([_][4]u8{
+        .{ 10, 1, 2, 3 },
+        .{ 127, 0, 0, 1 },
+        .{ 169, 254, 169, 254 },
+        .{ 172, 20, 0, 1 },
+        .{ 192, 168, 1, 1 },
+        .{ 100, 100, 0, 1 },
+        .{ 0, 0, 0, 0 },
+        .{ 224, 0, 0, 1 },
+        .{ 255, 255, 255, 255 },
+        .{ 168, 63, 129, 16 },
+        .{ 192, 0, 0, 9 },
+        .{ 198, 18, 0, 1 },
+        .{ 203, 0, 113, 5 },
+    }) |b|
         try std.testing.expect(!publicIp(ip4(b)));
     try std.testing.expect(publicIp(ip6("2606:4700::1111")));
     for ([_][]const u8{ "::1", "::", "fe80::1", "fc00::1", "ff02::1", "::ffff:8.8.8.8", "2002:808:808::1", "2001::1", "2001:db8::1", "64:ff9b::808:808" }) |t|

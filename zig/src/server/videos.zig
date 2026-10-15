@@ -25,12 +25,24 @@ pub const Budget = struct {
 fn bytesOf(cx: *Cx, fetch: ?images.Fetch, url: []const u8, b: *Budget) errors.Refused![]const u8 {
     const limit = @min(max_bytes, max_total_bytes - b.used);
     if (limit == 0) return cx.refuse("video request exceeds the total byte or time limit");
-    const bytes = if (std.ascii.startsWithIgnoreCase(url, "data:")) try images.dataBytesOf(cx, url, limit, "video") else blk: {
+    const bytes = if (std.ascii.startsWithIgnoreCase(url, "data:"))
+        try images.dataBytesOf(cx, url, limit, "video")
+    else blk: {
         if (!std.mem.startsWith(u8, url, "https://")) return cx.refuse("videos require data URLs or public HTTPS URLs");
-        const f = fetch orelse return cx.refuse("video URLs are off on this server; send the video as a data URL, or start the server with --vision-urls");
+        const f = fetch orelse return cx.refuse("video URLs are off on this server; " ++
+            "send the video as a data URL, or start the server with --vision-urls");
         if (url.len > media_fetch.max_url_chars) return cx.refuse("video URL is too long");
         var failure: media_fetch.Failure = .{};
-        break :blk f.get(f.ctx, cx.a, f.io, url, limit, media_fetch.within(f.io, b.deadline, timeout_s), &media_fetch.video_media, &failure) catch |e| switch (e) {
+        break :blk f.get(
+            f.ctx,
+            cx.a,
+            f.io,
+            url,
+            limit,
+            media_fetch.within(f.io, b.deadline, timeout_s),
+            &media_fetch.video_media,
+            &failure,
+        ) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Media => return cx.refuse(failure.text),
         };
@@ -58,28 +70,81 @@ const Decoder = struct {
 };
 
 /// Video `i` (0-based) of the request at `url`, prepared within `max_tokens` tokens.
-pub fn prepare(cx: *Cx, offer: api.VideoOffer, ctx: *anyopaque, fetch: ?images.Fetch, url: []const u8, i: usize, max_tokens: u32, b: *Budget) errors.Refused!api.PreparedVideo {
+pub fn prepare(
+    cx: *Cx,
+    offer: api.VideoOffer,
+    ctx: *anyopaque,
+    fetch: ?images.Fetch,
+    url: []const u8,
+    i: usize,
+    max_tokens: u32,
+    b: *Budget,
+) errors.Refused!api.PreparedVideo {
     const bytes = try bytesOf(cx, fetch, url, b);
     var d: Decoder = .{ .v = api.tfvideo.Video.open(bytes) catch |e| return switch (e) {
-        error.NoLibrary => cx.fail(.server, "video input needs libtfvideo (FFmpeg) beside the server: zig build video -Dffmpeg=PREFIX, after tools/zig/build_ffmpeg.sh PREFIX", .{}),
+        error.NoLibrary => cx.fail(
+            .server,
+            "video input needs libtfvideo (FFmpeg) beside the server: " ++
+                "zig build video -Dffmpeg=PREFIX, after tools/zig/build_ffmpeg.sh PREFIX",
+            .{},
+        ),
         error.NoStream => cx.refuse(try std.fmt.allocPrint(cx.a, "video {d}: the video has no video stream", .{i + 1})),
         error.OutOfMemory => error.OutOfMemory,
-        else => cx.refuse(try std.fmt.allocPrint(cx.a, "video {d}: the video's bytes are invalid or unsupported; use MP4 or WebM (H.264, HEVC, VP8, VP9 or MPEG-4)", .{i + 1})),
+        else => cx.refuse(try std.fmt.allocPrint(
+            cx.a,
+            "video {d}: the video's bytes are invalid or unsupported; " ++
+                "use MP4 or WebM (H.264, HEVC, VP8, VP9 or MPEG-4)",
+            .{i + 1},
+        )),
     } };
     defer d.v.close();
     const info = d.v.info;
     if (info.width <= 0 or info.height <= 0 or info.width > max_side or info.height > max_side)
-        return cx.refuse(try std.fmt.allocPrint(cx.a, "video {d}: video dimensions are missing or exceed the pixel limit", .{i + 1}));
+        return cx.refuse(try std.fmt.allocPrint(
+            cx.a,
+            "video {d}: video dimensions are missing or exceed the pixel limit",
+            .{i + 1},
+        ));
     if (info.frames <= 0 or info.rate_num <= 0 or info.rate_den <= 0)
-        return cx.refuse(try std.fmt.allocPrint(cx.a, "video {d}: the video's frame count or rate is missing", .{i + 1}));
-    const length = @as(f64, @floatFromInt(info.frames)) * @as(f64, @floatFromInt(info.rate_den)) / @as(f64, @floatFromInt(info.rate_num));
-    if (length > max_seconds) return cx.refuse(try std.fmt.allocPrint(cx.a, "video {d}: videos are limited to {d} minutes", .{ i + 1, max_seconds / 60 }));
-    const src: api.VideoSource = .{ .frames = @intCast(info.frames), .rate_num = @intCast(info.rate_num), .rate_den = @intCast(info.rate_den), .width = @intCast(info.width), .height = @intCast(info.height), .ctx = &d, .decode = Decoder.decode };
+        return cx.refuse(try std.fmt.allocPrint(
+            cx.a,
+            "video {d}: the video's frame count or rate is missing",
+            .{i + 1},
+        ));
+    const length = @as(f64, @floatFromInt(info.frames)) * @as(f64, @floatFromInt(info.rate_den)) /
+        @as(f64, @floatFromInt(info.rate_num));
+    if (length > max_seconds) return cx.refuse(try std.fmt.allocPrint(
+        cx.a,
+        "video {d}: videos are limited to {d} minutes",
+        .{ i + 1, max_seconds / 60 },
+    ));
+    const src: api.VideoSource = .{
+        .frames = @intCast(info.frames),
+        .rate_num = @intCast(info.rate_num),
+        .rate_den = @intCast(info.rate_den),
+        .width = @intCast(info.width),
+        .height = @intCast(info.height),
+        .ctx = &d,
+        .decode = Decoder.decode,
+    };
     return offer.prepare(ctx, cx.a, src, max_tokens, offer.max_frames) catch |e| switch (e) {
         error.OutOfMemory => error.OutOfMemory,
-        error.VideoTooShort => cx.refuse(try std.fmt.allocPrint(cx.a, "video {d} is too short: sampled at 2 frames a second it gives no frame; send at least half a second", .{i + 1})),
-        error.VideoTooLarge => cx.refuse(try std.fmt.allocPrint(cx.a, "video {d}: the visual-token budget (--vision-video-tokens) is too small for its frames", .{i + 1})),
-        else => cx.refuse(try std.fmt.allocPrint(cx.a, "video {d}: the video's bytes are invalid or unsupported; use MP4 or WebM (H.264, HEVC, VP8, VP9 or MPEG-4)", .{i + 1})),
+        error.VideoTooShort => cx.refuse(try std.fmt.allocPrint(
+            cx.a,
+            "video {d} is too short: sampled at 2 frames a second it gives no frame; send at least half a second",
+            .{i + 1},
+        )),
+        error.VideoTooLarge => cx.refuse(try std.fmt.allocPrint(
+            cx.a,
+            "video {d}: the visual-token budget (--vision-video-tokens) is too small for its frames",
+            .{i + 1},
+        )),
+        else => cx.refuse(try std.fmt.allocPrint(
+            cx.a,
+            "video {d}: the video's bytes are invalid or unsupported; " ++
+                "use MP4 or WebM (H.264, HEVC, VP8, VP9 or MPEG-4)",
+            .{i + 1},
+        )),
     };
 }
 
@@ -91,7 +156,10 @@ test "video bytes: data URLs within the limits; URLs only with --vision-urls" {
     try std.testing.expectEqualStrings("abc", try bytesOf(&cx, null, "data:video/mp4;base64,YWJj", &b));
     try std.testing.expectEqual(@as(usize, 3), b.used);
     try std.testing.expectError(error.Refused, bytesOf(&cx, null, "https://example.com/a.mp4", &b));
-    try std.testing.expectEqualStrings("video URLs are off on this server; send the video as a data URL, or start the server with --vision-urls", cx.message);
+    try std.testing.expectEqualStrings(
+        "video URLs are off on this server; send the video as a data URL, or start the server with --vision-urls",
+        cx.message,
+    );
     try std.testing.expectError(error.Refused, bytesOf(&cx, null, "http://example.com/a.mp4", &b));
     try std.testing.expectEqualStrings("videos require data URLs or public HTTPS URLs", cx.message);
     b.used = max_total_bytes;
@@ -126,9 +194,23 @@ test "group times as Python's f\"{t:.1f} seconds\"" {
     try std.testing.expectEqualStrings("0.8 seconds", try seconds(&buf, 0.75));
     try std.testing.expectEqualStrings("149.3 seconds", try seconds(&buf, 149.3));
     // the double's exact value decides, as Python's: 0.15 is below a half, 1.25 an exact tie
-    const cases = [_]struct { f64, []const u8 }{ .{ 0.05, "0.1" }, .{ 0.15, "0.1" }, .{ 0.35, "0.3" }, .{ 0.45, "0.5" }, .{ 1.25, "1.2" }, .{ 0.95, "0.9" }, .{ 9.95, "9.9" }, .{ 99.95, "100.0" }, .{ 0.0, "0.0" }, .{ 3599.95, "3599.9" } };
+    const cases = [_]struct { f64, []const u8 }{
+        .{ 0.05, "0.1" },
+        .{ 0.15, "0.1" },
+        .{ 0.35, "0.3" },
+        .{ 0.45, "0.5" },
+        .{ 1.25, "1.2" },
+        .{ 0.95, "0.9" },
+        .{ 9.95, "9.9" },
+        .{ 99.95, "100.0" },
+        .{ 0.0, "0.0" },
+        .{ 3599.95, "3599.9" },
+    };
     for (cases) |c| {
         var want: [32]u8 = undefined;
-        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&want, "{s} seconds", .{c[1]}), try seconds(&buf, c[0]));
+        try std.testing.expectEqualStrings(
+            try std.fmt.bufPrint(&want, "{s} seconds", .{c[1]}),
+            try seconds(&buf, c[0]),
+        );
     }
 }

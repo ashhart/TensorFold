@@ -2,8 +2,23 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const Info = extern struct { frames: i64, rate_num: c_int, rate_den: c_int, width: c_int, height: c_int, counted: c_int };
-const FrameFn = *const fn (ctx: ?*anyopaque, k: c_int, index: c_int, rgb: [*]const u8, width: c_int, height: c_int, stride: c_int) callconv(.c) c_int;
+pub const Info = extern struct {
+    frames: i64,
+    rate_num: c_int,
+    rate_den: c_int,
+    width: c_int,
+    height: c_int,
+    counted: c_int,
+};
+const FrameFn = *const fn (
+    ctx: ?*anyopaque,
+    k: c_int,
+    index: c_int,
+    rgb: [*]const u8,
+    width: c_int,
+    height: c_int,
+    stride: c_int,
+) callconv(.c) c_int;
 
 const Fns = struct {
     open: *const fn ([*]const u8, usize, *?*anyopaque, *Info) callconv(.c) c_int,
@@ -86,7 +101,15 @@ pub const Video = struct {
         const Ctx = struct { sink: S, failure: ?anyerror = null };
         var ctx: Ctx = .{ .sink = sink };
         const cb = struct {
-            fn take(p: ?*anyopaque, k: c_int, _: c_int, rgb: [*]const u8, w: c_int, h: c_int, stride: c_int) callconv(.c) c_int {
+            fn take(
+                p: ?*anyopaque,
+                k: c_int,
+                _: c_int,
+                rgb: [*]const u8,
+                w: c_int,
+                h: c_int,
+                stride: c_int,
+            ) callconv(.c) c_int {
                 const c: *Ctx = @ptrCast(@alignCast(p.?));
                 const n: usize = @as(usize, @intCast(stride)) * @as(usize, @intCast(h));
                 c.sink.take(@intCast(k), rgb[0..n], @intCast(w), @intCast(h), @intCast(stride)) catch |e| {

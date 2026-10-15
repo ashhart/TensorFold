@@ -42,7 +42,8 @@ pub const Sink = struct {
         if (k != s.got or k >= p.indices.len or w != p.width or h != p.height) return error.BadVideo;
         const dst = s.frames[k * p.frameBytes() ..][0..p.frameBytes()];
         const frame: picture.resample.View = .{ .pixels = rgb, .width = w, .height = h, .stride = stride };
-        try picture.resample.into(s.scratch, .torch, frame, p.content_w, p.content_h, dst); // torchvision's uint8 resize
+        // torchvision's uint8 resize
+        try picture.resample.into(s.scratch, .torch, frame, p.content_w, p.content_h, dst);
         s.got += 1;
     }
 };
@@ -118,7 +119,10 @@ pub fn sample(a: std.mem.Allocator, s: Source, max_frames: u32) Error![]u32 {
         }
         if (picked.items.len < extract_t) {
             const start: f64 = if (picked.items.len == 0) 0 else @floatFromInt(picked.items[0]);
-            const end: f64 = if (picked.items.len == 0) @floatFromInt(total - 1) else @floatFromInt(picked.items[picked.items.len - 1]);
+            const end: f64 = if (picked.items.len == 0)
+                @floatFromInt(total - 1)
+            else
+                @floatFromInt(picked.items[picked.items.len - 1]);
             indices = try linspace(a, start, end, extract_t);
         } else if (picked.items.len > extract_t) {
             indices = try linspace(a, 0, @floatFromInt(total - 1), extract_t);
@@ -146,11 +150,15 @@ pub fn canvas(frames: u64, height: u32, width: u32, min_tokens: u64, max_tokens:
         }
     }.f;
     const frames_f: f64 = @floatFromInt(frames);
-    const aligned_frames: u64 = @max(vision.temporal, @as(u64, @intFromFloat(pyRound(frames_f / vision.temporal))) * vision.temporal);
+    const aligned_frames: u64 = @max(
+        vision.temporal,
+        @as(u64, @intFromFloat(pyRound(frames_f / vision.temporal))) * vision.temporal,
+    );
     var ah = align_(height, factor) * factor;
     var aw = align_(width, factor) * factor;
     if (aligned_frames * ah * aw < min_pixels) {
-        const scale = @sqrt(@as(f64, @floatFromInt(min_pixels)) / (frames_f * @as(f64, @floatFromInt(height)) * @as(f64, @floatFromInt(width))));
+        const scale = @sqrt(@as(f64, @floatFromInt(min_pixels)) /
+            (frames_f * @as(f64, @floatFromInt(height)) * @as(f64, @floatFromInt(width))));
         ah = align_(@max(1, @as(u64, @intFromFloat(@ceil(@as(f64, @floatFromInt(height)) * scale)))), factor) * factor;
         aw = align_(@max(1, @as(u64, @intFromFloat(@ceil(@as(f64, @floatFromInt(width)) * scale)))), factor) * factor;
     }
@@ -162,7 +170,8 @@ pub fn canvas(frames: u64, height: u32, width: u32, min_tokens: u64, max_tokens:
         var best_w: u64 = factor;
         while (low <= high) {
             const ch: u64 = @intCast(@divFloor(low + high, 2));
-            const cw: u64 = @max(1, @as(u64, @intFromFloat(@floor(@as(f64, @floatFromInt(width)) * @as(f64, @floatFromInt(ch)) / @as(f64, @floatFromInt(height))))));
+            const cw: u64 = @max(1, @as(u64, @intFromFloat(@floor(@as(f64, @floatFromInt(width)) *
+                @as(f64, @floatFromInt(ch)) / @as(f64, @floatFromInt(height))))));
             const th = align_(ch, factor) * factor;
             const tw = align_(cw, factor) * factor;
             if (aligned_frames * th * tw <= max_pixels) {
@@ -193,7 +202,16 @@ pub fn plan(a: std.mem.Allocator, s: Source, c: vision.Config, max_tokens: u32, 
     const pairs = (indices.len + 1) / 2;
     const times = try a.alloc(f64, pairs);
     for (times, 0..) |*v, g| v.* = @as(f64, @floatFromInt(indices[2 * g])) / s.fps();
-    return .{ .indices = indices, .times = times, .width = s.width, .height = s.height, .target_h = t[0], .target_w = t[1], .content_h = content_h, .content_w = content_w };
+    return .{
+        .indices = indices,
+        .times = times,
+        .width = s.width,
+        .height = s.height,
+        .target_h = t[0],
+        .target_w = t[1],
+        .content_h = content_h,
+        .content_w = content_w,
+    };
 }
 
 /// One pair of frames ready for the tower, and the video's.
@@ -241,7 +259,8 @@ pub fn patchify(a: std.mem.Allocator, p: Plan, frames: []const u8, mean: [3]f32,
                     const y = py0 + dy;
                     const x = px0 + dx;
                     const v: u8 = if (y < p.content_h and x < p.content_w) frame[(y * p.content_w + x) * 3 + ch] else 0;
-                    dst[((ch * vision.temporal + t) * P + dy) * P + dx] = (@as(f32, @floatFromInt(v)) - m255[ch]) / s255[ch];
+                    dst[((ch * vision.temporal + t) * P + dy) * P + dx] =
+                        (@as(f32, @floatFromInt(v)) - m255[ch]) / s255[ch];
                 };
             };
             row += 1;
@@ -281,7 +300,15 @@ test "sampling as Glm5NextVideoProcessor.sample_frames, then the loader's distin
     var dummy: u8 = 0;
     const src = struct {
         fn of(frames: u64, num: u64, den: u64, ctx: *anyopaque) Source {
-            return .{ .frames = frames, .rate_num = num, .rate_den = den, .width = 64, .height = 48, .ctx = ctx, .decode = undefined };
+            return .{
+                .frames = frames,
+                .rate_num = num,
+                .rate_den = den,
+                .width = 64,
+                .height = 48,
+                .ctx = ctx,
+                .decode = undefined,
+            };
         }
     }.of;
     // 80 frames at 25: 3.2 s, 6 frames at 0, 0.5, 1, 1.5, 2, 2.5 s (the reference run's indices)
