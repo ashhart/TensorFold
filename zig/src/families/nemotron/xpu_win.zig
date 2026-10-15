@@ -104,7 +104,7 @@ fn rowKernels(mod: anytype) !RowK {
 }
 
 /// Per Mamba layer: the window's saved inputs (replay), the second state buffers.
-const MState = struct { proj: Buf, xc: Buf, cstate2: Buf, sstate2: Buf };
+pub const MState = struct { proj: Buf, xc: Buf, cstate2: Buf, sstate2: Buf };
 
 pub const Win = struct {
     k: Kernels,
@@ -331,7 +331,13 @@ pub const Win = struct {
 
     /// norm_f of the first n rows of residual stream x after the last window (hidden rows for MTP) into out [n][h].
     pub fn normRows(w: *Win, m: *model.Model, n: u32, out: Buf) !void {
-        try run(&m.k.rms, .{ n, 1, 1 }, .{ w.x, m.norm_f, out, m.cfg.hidden_size, m.cfg.layer_norm_epsilon });
+        try w.normRowsAt(m, 0, n, out);
+    }
+
+    /// norm_f of rows row0 .. row0+n of the last window's residual stream into out [n][h] (prompt rows for MTP).
+    pub fn normRowsAt(w: *Win, m: *model.Model, row0: u32, n: u32, out: Buf) !void {
+        const off = @as(usize, row0) * m.cfg.hidden_size * 2;
+        try run(&m.k.rms, .{ n, 1, 1 }, .{ at(w.x, off), m.norm_f, out, m.cfg.hidden_size, m.cfg.layer_norm_epsilon });
     }
 
     pub const Ep = enum(u32) { bf16, f32, relu2 };

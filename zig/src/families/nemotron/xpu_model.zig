@@ -426,6 +426,11 @@ pub const Model = struct {
         m.pos += 1;
     }
 
+    /// norm_f of the residual row the last decode step left (the MTP head's input row) into out [h].
+    pub fn normRow(m: *Model, out: Buf) !void {
+        try run(&m.k.rms, .{ 1, 1, 1 }, .{ m.s.x, m.norm_f, out, m.cfg.hidden_size, m.cfg.layer_norm_epsilon });
+    }
+
     /// The greedy token of the last forward with logits (syncs).
     pub fn argmax(m: *Model) !u32 {
         var out: [1]i32 = undefined;

@@ -4,7 +4,8 @@ Status: experimental. One checkpoint, one card class, one request at a time. Eve
 [Tested setup](#tested-setup); nothing is claimed for other cards.
 
 The Intel GPU backend runs OpenCL C kernels compiled to SPIR-V (`ocloc`) through Level Zero, on the same loader table as the
-Qwen3.8-27B XPU runner (`zig/src/xpu/ze.zig`). It is a separate Linux build (`-Dxpu`) and has no CUDA or Metal code in its path.
+Qwen3.8-27B XPU runner (`zig/src/xpu/ze.zig`), and has no CUDA or Metal code in its path. The token-id CLI is a separate
+Linux build (`-Dxpu`); the XPU server (`zig build xpu-native`, `--backend auto`) serves Nemotron beside Qwen3.8-27B.
 
 ## Supported
 
@@ -13,7 +14,11 @@ Qwen3.8-27B XPU runner (`zig/src/xpu/ze.zig`). It is a separate Linux build (`-D
 | Model | Nemotron 3.5 Lightning 30B-A3B, MLX affine 4-bit, group 64 (the checkpoint named in [nemotron-3.5.md](nemotron-3.5.md)) |
 | Card | Intel Arc Pro B70 (Battlemage, 32 GB) |
 | Not supported | NVFP4 and FP8-Mamba checkpoints: refused at load with `NVFP4 checkpoints are not supported on the XPU backend yet; use the MLX 4-bit checkpoint`. They need FP4/FP8 dequantisation kernels that do not exist yet. |
-| Not supported | MTP or copy drafts (every request decodes serially), tool-call gates, grammars and structured output, prompt cache and prefix reuse |
+| Drafts | The checkpoint's MTP head (`mtp-4bit.safetensors`) and copy drafts through the lane core, windows of up to 16 rows; `--no-drafts` or `TENSORFOLD_XPU_MTP=0` leaves the head unloaded |
+| Streams | Up to `--parallel` streams a round, each on its own sequence (Mamba states, KV, head) |
+| Prompt cache | Kept at 512-row prompt chunk ends and restored by device copy; `--prompt-cache-gib`, else 4 GiB within the free device memory less 2 GiB |
+| Not supported | Tool-call gates, grammars and structured output |
+| Sampling | Greedy uses the device argmax. A request with temperature above 0 is drawn on the host from the step's logits with the lane core's keyed sampler: temperature, `top_k`, `top_p`, `min_p` and `seed`; the draw is keyed by seed, absolute token position and candidate id. Presence and repetition penalties are not implemented. |
 | Qwen3.8 | Not covered by this page. |
 
 ## Build and run
@@ -24,12 +29,16 @@ Needs Zig 0.17.0, `ocloc` and the Level Zero loader with the Intel compute runti
 ```bash
 zig build -Dxpu                 # tensorfold-xpu (token-id CLI) and tf-xpu-test
 zig build -Dxpu xpu-tests       # tf-xpu-<name>-test programs (checks and benchmarks)
+zig build xpu-native -Dngen-include=NGEN   # zig-out/xpu/bin/tensorfold-native, the XPU server (docs/xpu/README.md)
 
 tensorfold-xpu devices
 tensorfold-xpu run MODEL --tokens-file ids.txt --max-tokens 128 --prefill 512
+zig-out/xpu/bin/tensorfold-native serve MODEL --context 32768
 ```
 
-`--prefill ROWS` prefills the prompt in windows of ROWS tokens (16 and up); the plain loop then decodes.
+`--prefill ROWS` prefills the prompt in windows of ROWS tokens (16 and up); the plain loop then decodes. `--context` defaults
+to the model window capped at 32768 in `serve`; the server lists the family `nemotron_h` with format `mlx-q4g64`.
+
 Run model programs one at a time: `tools/zig/xpu_guard.sh SECONDS COMMAND...` takes the GPU lock, refuses to start while other
 processes hold more than 8 GB of device memory and stops the command only with SIGINT.
 Every program applies the same rule at start: it refuses to run while other processes hold more than 8 GB of device
@@ -60,18 +69,24 @@ routed experts take their rows in the same order; attention runs the decode kern
 The same prompts one token at a time run at about 167 tok/s, and in 16-row windows at about 215 tok/s. The 32,768-token
 prompt gives the same tokens afterwards as with the earlier prefill GEMMs (digest `64a5a3409b0b`).
 
-Decode attention runs on the matrix engine as well (`nem_attn_dec.cl`: split-K partials of 512 keys, then a parallel merge of the chunks;
-the earlier per-row pair was replaced). It reads the KV cache about four times faster than the earlier kernel (462 against 119 GB/s); one layer at 131,000 keys
-takes 0.29 ms instead of 1.13 ms (`tf-xpu-nem_attn_dec-test`, random data, one row). A window of up to 16 rows uses the same kernel, so a window row stays bit-identical to the token decoded
-alone. Against an FP64 reference on random data its error is in the same bf16 rounding class as the earlier kernel (1.8e-3 to 3.3e-3 of
-the largest output magnitude against 2.1e-3 to 3.4e-3). Decode at 8,192 and 131,072 tokens of context (the needle runs of `tensorfold-xpu`) went from 146.6 and 82.6 tok/s with the earlier per-row pair to 171.1 and 137.8.
+Through the XPU server with the MTP head loaded (`tools/zig/xpu_draft_receipt.py`, 256 tokens, two runs each): `"draft": false`
+replies 173.0 to 174.3 tok/s greedy (a one-row round is the decode step); drafted greedy 157.3 (code), 167.4 (prose), 169.0
+(list) and 171.8 (copy) tok/s, 0.90 to 0.99 of plain: each extra window row costs about 3.7 ms, mostly the routed experts.
+Seeded (T 0.8, seed 7) replies run at about 60 tok/s, the host drawing from 131,072 logits a row.
 
-Long context: a needle (a secret code planted at 50% depth in public text) was found at 8,192 tokens (decode 171.1 tok/s) and
-at 131,072 tokens (decode 137.8 tok/s), measured with the earlier prefill GEMMs.
+Concurrency (`tools/zig/xpu_concurrent_receipt.py`, `--parallel 4`, 4 streams of 192 tokens, greedy and seeded): 72.0 and 73.6
+tok/s aggregate against 83.8 for the same requests one after another; each stream's window is its own forward pass.
 
-Memory, measured on the 32 GB card (`tensorfold-xpu run`, device allocation counter): 17.85 GB for the weights, 18.05 GB with a
-4k context and up to 19.37 GB after a 128k prompt (measured with the earlier prefill GEMMs). The weights alone
-are 17.3 GiB, so this model does not fit a 16 GB card; no 16 GB claim is made.
+Prompt cache (`tools/zig/xpu_resume_receipt.py`, a two-turn chat over a 6,685-token document): turn 1 prefills in 8.52 s, turn 2
+resumes 6,656 tokens and prefills in 0.21 s instead of 8.67 s.
+
+Memory, measured on the 32 GB card in a host with 62.2 GiB of RAM and 24 threads (kernel 7.0.0, `tensorfold-native serve`,
+KV caches and scratch allocated at load for the chosen context): device allocation counter 17.85 GB for the weights, 18.40 GB
+at `--context 4096`, 19.24 GB at 131,200 and 20.11 GB at 262,144 (the native window) without the head, 19.36 GB at 32,768
+with it, unchanged by the prompts that follow.
+Host process: 339 MB resident after load, 355 MB at its peak after a 262,080-token prompt (VmHWM); the engine pins only its
+staging buffers. Load is ready in 7 s with the checkpoint in the page cache. After SIGINT the server exits in 0.2 s with status
+0 and no device memory left. The weights alone are 17.3 GiB, so this model does not fit a 16 GB card; no 16 GB claim is made.
 
 ## Accuracy
 
@@ -129,6 +144,14 @@ kernels' figures):
   chunks of 16, 17, 100, 128 and 512 rows, the Mamba conv state, SSM state and KV bytes are byte-identical to the row-by-row
   state and the next 8 decode logits are identical (`tf-xpu-nem_seam-test`); prefill in chunks of 32, 100 and 512 rows gives
   the row-by-row last-token logits (`tf-xpu-nem_prefill-test`).
+- Drafts: every drafted reply's `token_sha` equals its `"draft": false` run, 8 of 8 (greedy and seeded; code, prose, list,
+  copy); a server without the head gives the same seeded `token_sha`s, 4 of 4.
+- Streams: 4 concurrent replies equal their solo runs, 4 of 4 in each of two rounds (greedy and seeded).
+- Prompt cache: a resumed turn's `token_sha` equals the same turn with `--prompt-cache-gib 0`, greedy and seeded.
+- Requests: A client that disconnects mid-stream cancels its request
+  and the next request gives the same tokens as before; seeded sampling repeats exactly; SIGINT or SIGTERM during a generation ends
+  the running stream after its current token with an error event (`ShuttingDown`) and `[DONE]`, answers a queued
+  request with the error `the server is shutting down`, exits with status 0 within 0.2 s and leaves no device memory held.
 - Host-side slot ring: forwards queued without a sync equal synced forwards (`tf-xpu-nem_slot-test`).
 
 ## Tests
@@ -140,7 +163,9 @@ reads`, which fails the same way on an unmodified upstream 1.0.2 checkout on thi
 
 ## Known limits
 
-- One request at a time; no drafts; about 172 tok/s at short context, 137 tok/s at 128k and 113 tok/s at 256k (decode).
+- Decode about 172 tok/s at short context, 137 tok/s at 128k and 113 tok/s at 256k; drafts do not speed it up on this MoE yet,
+  and concurrent streams do not share weight reads.
 - Prompts run at about 850 tok/s at 2k tokens and 511 tok/s at 128k: the decode's fp32 arithmetic on the vector units, about a
   quarter of the earlier prefill GEMMs' speed, for prompts whose bits do not depend on how they are cut.
+- A shutdown during a generation ends the stream with an error event rather than a finish reason.
 - Single card, single process: the 17.3 GiB of weights leave about 14 GB on a 32 GB card.

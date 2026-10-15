@@ -208,6 +208,11 @@ pub const Runtime = struct {
         try self.drv.check(self.drv.api.zeCommandListAppendMemoryCopy(self.list, dst.ptr, src.ptr, dst.len, null, 0, null), "download");
     }
 
+    /// Device to device: the first `bytes` of src into dst, queued in order with the kernels.
+    pub fn copy(self: *Runtime, dst: Buffer, src: Buffer, bytes: usize) Error!void {
+        try self.drv.check(self.drv.api.zeCommandListAppendMemoryCopy(self.list, dst.ptr, src.ptr, bytes, null, 0, null), "copy");
+    }
+
     pub fn sync(self: *Runtime) Error!void {
         try self.drv.check(self.drv.api.zeCommandListHostSynchronize(self.list, std.math.maxInt(u64)), "sync");
     }
