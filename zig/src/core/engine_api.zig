@@ -102,6 +102,11 @@ pub const Request = struct {
     pub fn cacheKey(r: *const Request) []const u32 {
         return if (r.cache_key.len > 0) r.cache_key else r.prompt;
     }
+
+    /// The prompt length its kept states count as: its own, or for a warm pass the request whose reply it prefills.
+    pub fn bornLen(r: *const Request) u32 {
+        return if (r.born > 0) r.born else @intCast(r.prompt.len);
+    }
 };
 
 /// An image prepared for the engine's tower (``Vision.prepare``): patches, patch grid, tokens and a content hash.
