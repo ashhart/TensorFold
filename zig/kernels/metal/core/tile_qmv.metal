@@ -8,6 +8,15 @@ constant constexpr int TQ_RT = 4;
 // Picks a window call takes at most (tf_tile_qmv_group's slots).
 constant constexpr int TQ_SLOTS = 128;
 
+// A 4-bit word's eight codes in k order as exact integers: codes i and i + 4 as half 1024 + code, minus 1024.
+inline void tf_tq4_codes(uint word, thread float* cf) {
+  #pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const half2 h = as_type<half2>(((word >> (4 * i)) & 0x000F000Fu) | 0x64006400u) - half2(1024.0h);
+    cf[i] = float(h.x); cf[i + 4] = float(h.y);
+  }
+}
+
 // Group g's 64-step fma chains (the MMA order) and input sum; each code decoded to its integer, as in the tiles.
 template <int BITS, int NC>
 inline float tf_tq_group(const device bfloat* x, const device uint8_t* w, size_t stride, int g, thread float* p,
@@ -39,9 +48,10 @@ inline float tf_tq_group(const device bfloat* x, const device uint8_t* w, size_t
     if (BITS == 4) {
       #pragma unroll
       for (int c = 0; c < NC; ++c) {
-        const uint word = wq[c][kb];
+        float cf[8];
+        tf_tq4_codes(wq[c][kb], cf);
         #pragma unroll
-        for (int j = 0; j < 8; ++j) p[c] = fma(xf[j], float((word >> (4 * j)) & 0xFu), p[c]);
+        for (int j = 0; j < 8; ++j) p[c] = fma(xf[j], cf[j], p[c]);
       }
     } else {
       // Codes 8 kb.. of this group sit in the two words from bit 8 kb BITS (48 or 64 bits, never a third word).
@@ -66,8 +76,7 @@ template <int BITS>
 inline void tf_tq_cf(const device uint8_t* wg, const thread uint* wq, int kb, thread float* cf) {
   static_assert(BITS == 4 || BITS == 6 || BITS == 8, "codes of 4, 6 or 8 bits");
   if (BITS == 4) {
-    #pragma unroll
-    for (int j = 0; j < 8; ++j) cf[j] = float((wq[kb] >> (4 * j)) & 0xFu);
+    tf_tq4_codes(wq[kb], cf);
   } else {
     const int bit = kb * 8 * BITS, at = bit / 32, sh = bit % 32;
     const device uint* wc = (const device uint*)wg + at;
