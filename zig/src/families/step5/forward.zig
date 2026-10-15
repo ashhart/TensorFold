@@ -209,7 +209,14 @@ fn attention(x: Enc, s: *st.Scratch, cache: *st.Cache, w: wts.Attention, i: usiz
     x.glue(.copy, Args{ .rows = nr, .width = @intCast(kvw), .stride = @intCast(kvw), .pos = @intCast(start), .ring = @intCast(ring) }, &.{ b(s.v), A, bo(cache.kv, cache.values(c, i) + at) }, .{ kvw, n, 1 }, .{ 256, 1, 1 }, false);
     if (w.indexer) |ix| try indexer(x, s, cache, ix, i, start, n);
     const args = SArgs{ .rows = nr, .pos = @intCast(start), .heads = c.heads, .dim = c.head_dim, .ring = @intCast(ring), .window = if (lay.kind == .sliding) c.window else 0, .groups = c.kv_heads, .topk = c.index_topk, .scale = 1.0 / @sqrt(@as(f32, @floatFromInt(c.head_dim))) };
-    x.glue(.attend, args, &.{ b(s.qn), bo(cache.kv, cache.keys(i)), bo(cache.kv, cache.values(c, i)), b(s.sel), A, b(s.o) }, .{ c.heads, n, 1 }, .{ 256, 1, 1 }, true);
+    const bufs = [_]B{ b(s.qn), bo(cache.kv, cache.keys(i)), bo(cache.kv, cache.values(c, i)), b(s.sel), A, b(s.o) };
+    if (n > st.window_rows) if (x.m.attend_nax) |nax| { // a prompt chunk: a KV group's heads on the tensor units
+        x.e.setPipeline(nax);
+        for (bufs, 0..) |r, slot| if (r.args) x.e.setValue(args, slot) else x.e.setBuffer(r.buf, r.off, slot);
+        x.e.dispatchGroups(mtl.Size.of(c.kv_heads, n, 1), mtl.Size.of(96, 1, 1));
+        return;
+    };
+    x.glue(.attend, args, &bufs, .{ c.heads, n, 1 }, .{ 256, 1, 1 }, true);
 }
 
 /// Full layer `i`'s indexer: k and z into rings, completed regions summarized, then past topk regions: scores, top-k.

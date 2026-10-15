@@ -8,6 +8,7 @@ const shards = @import("../../core/checkpoint.zig");
 const rows = @import("../../core/row_projection.zig");
 const route = @import("../../core/moe_route.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
+const frags = @import("../../core/frags.zig");
 
 /// A prompt chunk's tensor-unit matmul for one (bits, group) the checkpoint uses.
 pub const Mm = struct { bits: u8, group: usize, pipes: affine_mm.Pipes };
@@ -26,6 +27,8 @@ pub const Model = struct {
     glue: [glue_names.len]mtl.Pipeline,
     rows: rows.Pipelines,
     route: [2]mtl.Pipeline,
+    /// Prompt attention on the tensor units, for the shape it is written for (192 dims, 16 heads a KV group).
+    attend_nax: ?mtl.Pipeline = null,
     mm: [4]Mm = undefined,
     mms: usize = 0,
 
@@ -36,6 +39,7 @@ pub const Model = struct {
         errdefer gpa.destroy(m);
         m.gpa = gpa;
         m.mms = 0;
+        m.attend_nax = null;
         m.config = try cfg.Config.read(gpa, io, dir);
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
@@ -73,6 +77,14 @@ pub const Model = struct {
         }
         errdefer for (m.route) |p| p.deinit();
         errdefer for (m.mm[0..m.mms]) |f| for (f.pipes) |p| p.deinit();
+        errdefer if (m.attend_nax) |p| p.deinit();
+        if (c.head_dim == 192 and c.heads == 16 * c.kv_heads) {
+            const text = try frags.source(m.device, gpa, ks.step5_attend_nax);
+            defer gpa.free(text);
+            const lib = try mtl.Library.fromSource(m.device, text, .{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise });
+            defer lib.deinit();
+            m.attend_nax = try mtl.Pipeline.init(m.device, lib, "s5_attend_nax", false);
+        }
         for (m.weights.layers) |l| {
             try m.addMm(l.attn.q);
             switch (l.ffn) {
@@ -117,6 +129,7 @@ pub const Model = struct {
 
     pub fn deinit(m: *Model) void {
         for (m.mm[0..m.mms]) |f| for (f.pipes) |p| p.deinit();
+        if (m.attend_nax) |p| p.deinit();
         for (m.route) |p| p.deinit();
         m.rows.deinit();
         for (m.glue) |p| p.deinit();
