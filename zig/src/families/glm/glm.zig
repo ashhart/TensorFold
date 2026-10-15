@@ -31,6 +31,7 @@ test {
     _ = @import("page_cache.zig");
     _ = pool;
     _ = @import("kept.zig");
+    _ = @import("draw_test.zig");
     _ = mirror;
     _ = timing;
     _ = @import("quant.zig");
