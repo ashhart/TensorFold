@@ -1,6 +1,7 @@
 //! Flash Next behind the native server: one reply at a time on the replay engine (prompt chunks, then GPU-side
 //! rounds), greedy only; the engine's thread owns the GPU, requests wait in arrival order (foreground first).
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const api = @import("engine_api");
 const tf = @import("tensorfold");
@@ -420,7 +421,7 @@ const Snaps = struct {
     /// --learn: learned state `key`'s file removed.
     fn forget(_: *anyopaque, dir: [:0]const u8, key: u64) void {
         var buf: [1100]u8 = undefined;
-        _ = std.c.unlink(learned.path(&buf, dir, key) catch return);
+        _ = platform.c.unlink(learned.path(&buf, dir, key) catch return);
     }
 };
 

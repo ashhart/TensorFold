@@ -1,6 +1,7 @@
 //! Graphs a sequence other than the engine's own captures on its own buffers, once each, and replays after.
 
 const std = @import("std");
+const platform = @import("sys");
 const cuda = @import("cuda");
 
 /// One sequence's captured graphs, by the step they run (a window's or a head level's id).
@@ -27,6 +28,6 @@ pub const Stats = struct {
 
 /// Whether TF_GRAPH_LOG=1 asks for a line a request: its captures, their time, its replays and eager windows.
 pub fn logFromEnv() bool {
-    const v = std.c.getenv("TF_GRAPH_LOG") orelse return false;
+    const v = platform.c.getenv("TF_GRAPH_LOG") orelse return false;
     return std.mem.eql(u8, std.mem.span(v), "1");
 }

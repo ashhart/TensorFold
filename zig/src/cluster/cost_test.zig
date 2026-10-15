@@ -1,5 +1,6 @@
 //! K3 and GLM-5.3 rounds on four 512 GiB Studios at 1 to 128 rows: dedup, caches, collectives, and the MLA split.
 const std = @import("std");
+const platform = @import("sys");
 const node = @import("node.zig");
 const model = @import("model.zig");
 const estimate = @import("estimate.zig");
@@ -66,7 +67,7 @@ test "GLM-5.3 in FP8 reads far less a token than K3, and 128 streams at 32k cont
 }
 
 test "the cost tables for CLUSTER.md (TF_CLUSTER_REPORT=1)" {
-    if (std.testing.environ.getPosix("TF_CLUSTER_REPORT") == null) return error.SkipZigTest;
+    if (platform.getenv("TF_CLUSTER_REPORT") == null) return error.SkipZigTest;
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
     const a = arena.allocator();

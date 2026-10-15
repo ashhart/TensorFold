@@ -1,5 +1,6 @@
 //! Host-only contracts exercise strict text configuration, affine six-bit packing and borrowed-view shapes.
 const std = @import("std");
+const platform = @import("sys");
 const posix = std.posix;
 const family = @import("flashnext.zig");
 const st = @import("../../core/safetensors.zig");
@@ -298,12 +299,12 @@ test "the prompt's checked-in text resolves and patches from another working dir
     const sources = @import("kernel_sources").flashnext_gen;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const old_fd = std.c.open(".", .{}); // O_RDONLY via the flags struct's default
-    defer _ = std.c.close(old_fd);
+    const old_fd = platform.c.open(".", .{}); // O_RDONLY via the flags struct's default
+    defer _ = platform.c.close(old_fd);
     const tmpz = try std.fmt.allocPrintSentinel(std.testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
     defer std.testing.allocator.free(tmpz);
-    try std.testing.expect(std.c.chdir(tmpz) == 0);
-    defer _ = std.c.fchdir(old_fd);
+    try std.testing.expect(platform.c.chdir(tmpz) == 0);
+    defer _ = platform.c.fchdir(old_fd);
     for (table.entries) |e| {
         var text: []const u8 = "";
         for (sources.sources) |s| {

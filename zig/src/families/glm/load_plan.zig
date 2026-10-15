@@ -1,5 +1,6 @@
 //! GLM-5.3-Flash's load plan: the checkpoint's identity, the bytes its weights and caches take, the chunk height, the limit.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
@@ -137,8 +138,8 @@ pub fn limitFor(ram: u64, working_set: u64, text: ?[]const u8) error{BadLoadLimi
 pub fn loadLimit(device: mtl.Device) error{BadLoadLimit}!Limit {
     var mem: u64 = 0;
     var len: usize = @sizeOf(u64);
-    if (std.c.sysctlbyname("hw.memsize", &mem, &len, null, 0) != 0) mem = 0; // RAM unknown: a zero limit refuses every load
-    const text: ?[]const u8 = if (std.c.getenv("GLM_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
+    if (platform.c.sysctlbyname("hw.memsize", &mem, &len, null, 0) != 0) mem = 0; // RAM unknown: a zero limit refuses every load
+    const text: ?[]const u8 = if (platform.c.getenv("GLM_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
     const l = limitFor(mem, device.maxWorkingSet(), text) catch |err| {
         std.log.err("glm: GLM_LOAD_LIMIT_GB={s} is not a load limit: give a number of GB above 0, or unset it for 70% of RAM", .{text.?});
         return err;

@@ -1,6 +1,7 @@
 //! One HTTP/1.1 connection as Python's BaseHTTPRequestHandler serves it: bounded heads, keep-alive, error pages.
 const std = @import("std");
-const posix = std.posix;
+const platform = @import("sys");
+const posix = platform.posix;
 const Allocator = std.mem.Allocator;
 const log = @import("log.zig");
 

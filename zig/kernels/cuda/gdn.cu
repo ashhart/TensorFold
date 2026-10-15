@@ -305,14 +305,14 @@ __global__ void __launch_bounds__(32 * WARPS) replay_kernel(
 } // namespace tf_gdn
 
 // The instantiations the Python wrappers launch (gdn_replay_cuda, dispatch_tree for bf16 keys).
-#define TF_REPLAY(QK) template __global__ void tf_gdn::replay_kernel<QK, 8, 4>(const long long*, int, const int*, int, \
-    const int*, int, float*, int, int, int);
+#define TF_REPLAY(QK) template __global__ void tf_gdn::replay_kernel<QK, 8, 4>(const long long* __restrict__, int, const int* __restrict__, int, \
+    const int* __restrict__, int, float* __restrict__, int, int, int);
 TF_REPLAY(__nv_bfloat16)
 TF_REPLAY(float)
 #define TF_TREE(S, R, W, C) template __global__ void tf_gdn::tree_kernel<__nv_bfloat16, S, R, W, C>( \
-    const __nv_bfloat16*, const __nv_bfloat16*, const __nv_bfloat16*, const float*, const float*, const float*, \
-    const long long*, const int*, const int*, int, __nv_bfloat16*, int, int, int, tf_gdn::Pending<__nv_bfloat16>, \
-    float*, const long long*, bool);
+    const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, const float* __restrict__, const float* __restrict__, const float* __restrict__, \
+    const long long* __restrict__, const int* __restrict__, const int* __restrict__, int, __nv_bfloat16* __restrict__, int, int, int, tf_gdn::Pending<__nv_bfloat16>, \
+    float*, const long long* __restrict__, bool);
 TF_TREE(0, 8, 4, true)
 TF_TREE(1, 8, 4, false)
 TF_TREE(2, 8, 2, false)

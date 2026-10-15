@@ -1,5 +1,6 @@
 //! FZ_DBENCH: Flash Next dense and DeltaNet kernels at 1-16 rows against the recorded ones, bit for bit, then timed.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 const fz = tf.flashnext_replay;
@@ -238,7 +239,7 @@ pub fn run(r: *Run, m: *Model, prompt: []const u32, gpa: std.mem.Allocator, aren
     };
     const pfs = [_]usize{ 1, 2 };
 
-    const bits = std.mem.eql(u8, std.mem.span(std.c.getenv("FZ_DBENCH").?), "bits");
+    const bits = std.mem.eql(u8, std.mem.span(platform.c.getenv("FZ_DBENCH").?), "bits");
     // bits: core lane against the recorded kernel, every layer, one Mac and speed-up layouts, every read-ahead depth
     const keep = try gpa.alloc(u8, fz.MAXR * fz.VOCAB * 2);
     defer gpa.free(keep);

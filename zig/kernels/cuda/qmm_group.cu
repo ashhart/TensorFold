@@ -338,4 +338,4 @@ __global__ void __launch_bounds__(WM * WN * 32) group_kernel(
 
 // The instantiations Nemotron's windows launch on sm_121 (tile 2: rows <= 16, bf16 out).
 template __global__ void tf_qmm_group::group_kernel<64, 16, 64, 1, 4, 8, false, false, false, false>(
-    const __nv_bfloat16*, const float*, const __grid_constant__ tf_qmm_group::Parts, int, int, int, int, int);
+    const __nv_bfloat16* __restrict__, const float* __restrict__, const __grid_constant__ tf_qmm_group::Parts, int, int, int, int, int);

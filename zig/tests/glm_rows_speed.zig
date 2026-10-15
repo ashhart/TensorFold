@@ -1,5 +1,6 @@
 //! tf-glm-rows-speed: GLM-5.3-Flash's decode products at the checkpoints' widths and shapes, GPU time and GB/s.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 const sources = @import("kernel_sources");
@@ -555,13 +556,13 @@ pub fn main() !void {
             42,
             3 * affine.bytes(N, D, .{ .bits = 2, .group = 64 }) * TOPK + sh8[0].bytes + sh8[1].bytes,
         );
-        if (std.c.getenv("GLM_SPEED_CANDIDATES") != null) {
+        if (platform.c.getenv("GLM_SPEED_CANDIDATES") != null) {
             const lib = try cand.candidateLib(device);
             defer lib.deinit();
             try cand.moeCandidates(&b, lib, p, gu2, dn2, sh8);
         }
     }
-    if (std.c.getenv("GLM_SPEED_CANDIDATES") != null) {
+    if (platform.c.getenv("GLM_SPEED_CANDIDATES") != null) {
         const lib = try cand.candidateLib(device);
         defer lib.deinit();
         std.debug.print("candidates at 8 bits (bits checked == glm_rows):\n", .{});
@@ -571,7 +572,7 @@ pub fn main() !void {
             try cand.candidates(&b, lib, p, m, s.name);
         }
     }
-    if (std.c.getenv("GLM_SPEED_PROMPT") != null) try speed_prompt.prompt(&b, k, p);
+    if (platform.c.getenv("GLM_SPEED_PROMPT") != null) try speed_prompt.prompt(&b, k, p);
     std.debug.print("uniform 4/64:\n", .{});
     for (uni.rows[0..uni.n]) |x| std.debug.print("  {s:<26} {d:7.3} ms/token\n", .{ x.name, x.us * x.count / 1e3 });
     uni.total("uniform 4/64");

@@ -1,5 +1,6 @@
 //! Checkpoint reads that keep out of the page cache and wait for free memory: a load never outruns the kernel's reclaim.
 const std = @import("std");
+const platform = @import("sys");
 
 /// Offsets, lengths and buffers of uncached reads align to the VM page (F_NOCACHE only skips the cache for aligned reads).
 pub const alignment = 16384;
@@ -16,17 +17,17 @@ pub fn stage(gpa: std.mem.Allocator, bytes: usize) !Stage {
 pub fn floor() u64 {
     var mem: u64 = 0;
     var len: usize = @sizeOf(u64);
-    if (std.c.sysctlbyname("hw.memsize", &mem, &len, null, 0) != 0) mem = 0;
+    if (platform.c.sysctlbyname("hw.memsize", &mem, &len, null, 0) != 0) mem = 0;
     return @max(8 << 30, mem / 100 * 3);
 }
 
 pub fn freeBytes() u64 {
     var pages: u32 = 0;
     var len: usize = @sizeOf(u32);
-    if (std.c.sysctlbyname("vm.page_free_count", &pages, &len, null, 0) != 0) return std.math.maxInt(u64);
+    if (platform.c.sysctlbyname("vm.page_free_count", &pages, &len, null, 0) != 0) return std.math.maxInt(u64);
     var size: u64 = 0;
     var len2: usize = @sizeOf(u64);
-    if (std.c.sysctlbyname("hw.pagesize", &size, &len2, null, 0) != 0) size = alignment;
+    if (platform.c.sysctlbyname("hw.pagesize", &size, &len2, null, 0) != 0) size = alignment;
     return @as(u64, pages) * size;
 }
 
@@ -35,13 +36,13 @@ pub fn waitForRoom(limit_ms: u32) void {
     const want = floor();
     var waited: u32 = 0;
     while (waited < limit_ms and freeBytes() < want) : (waited += 2) {
-        const ts: std.c.timespec = .{ .sec = 0, .nsec = 2 * std.time.ns_per_ms };
-        _ = std.c.nanosleep(&ts, null);
+        const ts: platform.c.timespec = .{ .sec = 0, .nsec = 2 * std.time.ns_per_ms };
+        _ = platform.c.nanosleep(&ts, null);
     }
 }
 
 /// `dest.len` bytes at `at` of `fd` (opened with F_NOCACHE) through page-aligned reads into `buf`, pausing for free memory.
-pub fn read(fd: std.c.fd_t, dest: []u8, at: u64, buf: Stage) !void {
+pub fn read(fd: platform.c.fd_t, dest: []u8, at: u64, buf: Stage) !void {
     var done: usize = 0;
     while (done < dest.len) {
         waitForRoom(10_000);
@@ -52,7 +53,7 @@ pub fn read(fd: std.c.fd_t, dest: []u8, at: u64, buf: Stage) !void {
         const span = std.mem.alignForward(usize, skip + want, alignment);
         var got: usize = 0;
         while (got < skip + want) { // a read past the file's end comes back short once the bytes asked for are in
-            const n = std.c.pread(fd, buf.ptr + got, span - got, @intCast(lo + got));
+            const n = platform.c.pread(fd, buf.ptr + got, span - got, @intCast(lo + got));
             if (n <= 0) return error.ShortRead;
             got += @intCast(n);
         }
@@ -64,17 +65,17 @@ pub fn read(fd: std.c.fd_t, dest: []u8, at: u64, buf: Stage) !void {
 test "aligned spans copy the bytes asked for, at any offset and length" {
     const gpa = std.testing.allocator;
     var name_buf: [64]u8 = undefined;
-    const name = try std.fmt.bufPrintSentinel(&name_buf, "/tmp/tf-paced-read-{d}", .{std.c.getpid()}, 0);
-    const fd = std.c.open(name, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+    const name = try std.fmt.bufPrintSentinel(&name_buf, "/tmp/tf-paced-read-{d}", .{platform.c.getpid()}, 0);
+    const fd = platform.c.open(name, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true }, @as(platform.c.mode_t, 0o600));
     try std.testing.expect(fd >= 0);
     defer {
-        _ = std.c.close(fd);
-        _ = std.c.unlink(name);
+        _ = platform.c.close(fd);
+        _ = platform.c.unlink(name);
     }
     const data = try gpa.alloc(u8, 3 * alignment + 777);
     defer gpa.free(data);
     for (data, 0..) |*b, i| b.* = @truncate(i *% 131 +% 7);
-    try std.testing.expectEqual(@as(isize, @intCast(data.len)), std.c.write(fd, data.ptr, data.len));
+    try std.testing.expectEqual(@as(isize, @intCast(data.len)), platform.c.write(fd, data.ptr, data.len));
     const buf = try stage(gpa, 2 * alignment);
     defer gpa.free(buf);
     for ([_][2]usize{ .{ 0, 1 }, .{ 5, 100 }, .{ alignment - 3, 10 }, .{ 1, 2 * alignment + 50 }, .{ 3 * alignment, 777 }, .{ 9, data.len - 9 } }) |c| {

@@ -266,7 +266,7 @@ __device__ __forceinline__ void gemv_split(const __nv_bfloat16* __restrict__ x, 
 
 }  // namespace tf_lane_gemv
 
-template __global__ void tf_lane_gemv::gemv_kernel<64, 64, 8>(const __nv_bfloat16*, const float*,
+template __global__ void tf_lane_gemv::gemv_kernel<64, 64, 8>(const __nv_bfloat16* __restrict__, const float* __restrict__,
                                                              const __grid_constant__ tf_lane_gemv::Part, int, int, int);
 
 extern "C" __global__ void __launch_bounds__(128) tf_lane_gemv_split(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs,

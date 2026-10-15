@@ -1,13 +1,14 @@
 //! A service's registration with its listen daemon ("MODE poll"), and the daemons' STATUS lines, as protocol 1 defines.
 const std = @import("std");
+const platform = @import("sys");
 const layout = @import("layout.zig");
 
 pub const Error = error{ InvalidName, NoDaemon, Busy, Refused, Io };
 
 /// The registration channel: the daemon sends nothing after OK until the link drops (BYE or a closed socket).
 pub const Registration = struct {
-    in_fd: std.c.fd_t,
-    out_fd: std.c.fd_t,
+    in_fd: platform.c.fd_t,
+    out_fd: platform.c.fd_t,
 
     /// Register with the listen daemon at MCDMA_RPCD_SOCKET, else /tmp/mcdma-rpcd.NAME.sock.
     pub fn attach(name: []const u8) Error!Registration {
@@ -35,21 +36,21 @@ pub const Registration = struct {
 
     /// Whether the daemon still holds the registration: anything readable means BYE or a closed socket.
     pub fn alive(r: *const Registration) bool {
-        var fds = [_]std.c.pollfd{.{ .fd = r.in_fd, .events = std.c.POLL.IN, .revents = 0 }};
-        const n = std.c.poll(&fds, 1, 0);
+        var fds = [_]platform.c.pollfd{.{ .fd = r.in_fd, .events = platform.c.POLL.IN, .revents = 0 }};
+        const n = platform.c.poll(&fds, 1, 0);
         return n == 0;
     }
 
     pub fn close(r: *Registration) void {
-        _ = std.c.close(r.in_fd);
-        if (r.out_fd != r.in_fd) _ = std.c.close(r.out_fd);
+        _ = platform.c.close(r.in_fd);
+        if (r.out_fd != r.in_fd) _ = platform.c.close(r.out_fd);
         r.* = undefined;
     }
 };
 
 /// The listen daemon's socket for link `name`, honouring MCDMA_RPCD_SOCKET as mcdma-rpcd does.
 pub fn socketPath(buf: []u8, name: []const u8) ![:0]const u8 {
-    if (std.c.getenv("MCDMA_RPCD_SOCKET")) |env| {
+    if (platform.c.getenv("MCDMA_RPCD_SOCKET")) |env| {
         const s = std.mem.span(env);
         if (s.len > 0) return std.mem.printSentinel(buf, "{s}", .{s}, 0);
     }
@@ -57,35 +58,35 @@ pub fn socketPath(buf: []u8, name: []const u8) ![:0]const u8 {
 }
 
 /// Connect to the daemon's local Unix socket; the only socket the fabric opens, and never TCP.
-fn connectUnix(path: [:0]const u8) ?std.c.fd_t {
-    var addr: std.c.sockaddr.un = .{ .path = undefined };
+fn connectUnix(path: [:0]const u8) ?platform.c.fd_t {
+    var addr: platform.c.sockaddr.un = .{ .path = undefined };
     if (path.len >= addr.path.len) return null;
     @memset(&addr.path, 0);
     @memcpy(addr.path[0..path.len], path);
-    const fd = std.c.socket(std.c.AF.UNIX, std.c.SOCK.STREAM, 0);
+    const fd = platform.c.socket(platform.c.AF.UNIX, platform.c.SOCK.STREAM, 0);
     if (fd < 0) return null;
-    if (std.c.connect(fd, @ptrCast(&addr), @sizeOf(std.c.sockaddr.un)) != 0) {
-        _ = std.c.close(fd);
+    if (platform.c.connect(fd, @ptrCast(&addr), @sizeOf(platform.c.sockaddr.un)) != 0) {
+        _ = platform.c.close(fd);
         return null;
     }
     return fd;
 }
 
-fn writeAll(fd: std.c.fd_t, bytes: []const u8) Error!void {
+fn writeAll(fd: platform.c.fd_t, bytes: []const u8) Error!void {
     var done: usize = 0;
     while (done < bytes.len) {
-        const n = std.c.write(fd, bytes[done..].ptr, bytes.len - done);
+        const n = platform.c.write(fd, bytes[done..].ptr, bytes.len - done);
         if (n <= 0) return error.Io;
         done += @intCast(n);
     }
 }
 
 /// Read one line a byte at a time, as the daemons write them; the newline is dropped.
-fn readLine(fd: std.c.fd_t, buf: []u8) Error![]const u8 {
+fn readLine(fd: platform.c.fd_t, buf: []u8) Error![]const u8 {
     var n: usize = 0;
     while (n < buf.len) {
         var c: [1]u8 = undefined;
-        if (std.c.read(fd, &c, 1) != 1) return error.Io;
+        if (platform.c.read(fd, &c, 1) != 1) return error.Io;
         if (c[0] == '\n') return buf[0..n];
         buf[n] = c[0];
         n += 1;
@@ -139,9 +140,9 @@ pub fn parsePeer(line: []const u8) ?Peer {
     return p;
 }
 
-fn pipePair() ![2]std.c.fd_t {
-    var fds: [2]std.c.fd_t = undefined;
-    if (std.c.pipe(&fds) != 0) return error.Io;
+fn pipePair() ![2]platform.c.fd_t {
+    var fds: [2]platform.c.fd_t = undefined;
+    if (platform.c.pipe(&fds) != 0) return error.Io;
     return fds;
 }
 
@@ -149,14 +150,14 @@ test "registration answers OK, ERR busy or anything else, and BYE ends it" {
     for ([_][]const u8{ "OK\n", "ERR busy\n", "ERR unknown command\n" }, 0..) |answer, i| {
         const to_daemon = try pipePair();
         const from_daemon = try pipePair();
-        defer for ([_]std.c.fd_t{ to_daemon[0], to_daemon[1], from_daemon[0], from_daemon[1] }) |fd| {
-            _ = std.c.close(fd);
+        defer for ([_]platform.c.fd_t{ to_daemon[0], to_daemon[1], from_daemon[0], from_daemon[1] }) |fd| {
+            _ = platform.c.close(fd);
         };
         try writeAll(from_daemon[1], answer);
         const r: Registration = .{ .in_fd = from_daemon[0], .out_fd = to_daemon[1] };
         const got = r.handshake();
         var sent: [16]u8 = undefined;
-        try std.testing.expectEqual(@as(isize, 10), std.c.read(to_daemon[0], &sent, sent.len));
+        try std.testing.expectEqual(@as(isize, 10), platform.c.read(to_daemon[0], &sent, sent.len));
         try std.testing.expectEqualStrings("MODE poll\n", sent[0..10]);
         switch (i) {
             0 => {

@@ -117,7 +117,7 @@ __global__ void __launch_bounds__(TPR * ROWS) scan_kernel(
 
 } // namespace tf_scan_rows
 
-template __global__ void tf_scan_rows::scan_kernel<false>(const __nv_bfloat16*, const __nv_bfloat16*, float*, const float*,
-    const float*, const float*, __nv_bfloat16*, int, int, int, int, int, int, int, int, float, float, const tf_scan_rows::Snaps);
-template __global__ void tf_scan_rows::scan_kernel<true>(const __nv_bfloat16*, const __nv_bfloat16*, float*, const float*,
-    const float*, const float*, __nv_bfloat16*, int, int, int, int, int, int, int, int, float, float, const tf_scan_rows::Snaps);
+template __global__ void tf_scan_rows::scan_kernel<false>(const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, float* __restrict__, const float* __restrict__,
+    const float* __restrict__, const float* __restrict__, __nv_bfloat16* __restrict__, int, int, int, int, int, int, int, int, float, float, const tf_scan_rows::Snaps);
+template __global__ void tf_scan_rows::scan_kernel<true>(const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, float* __restrict__, const float* __restrict__,
+    const float* __restrict__, const float* __restrict__, __nv_bfloat16* __restrict__, int, int, int, int, int, int, int, int, float, float, const tf_scan_rows::Snaps);

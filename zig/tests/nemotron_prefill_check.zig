@@ -1,5 +1,6 @@
 //! One prompt chunk on the prefill kernels against tools/zig/prefill_dump.py's rows: embedding, every layer, final norm.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 
@@ -17,7 +18,7 @@ pub fn main(init: std.process.Init) !void {
     var it = std.mem.tokenizeScalar(u8, args[2], ',');
     while (it.next()) |t| try list.append(arena, try std.fmt.parseInt(u32, t, 10));
     // TF_PREFILL_PREFIX=N: the first N ids fill the caches as a chunk first; the rest is the checked chunk
-    const before: usize = if (std.c.getenv("TF_PREFILL_PREFIX")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 0;
+    const before: usize = if (platform.c.getenv("TF_PREFILL_PREFIX")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 0;
     const all = list.items;
     const ids = all[before..];
     const n = ids.len;

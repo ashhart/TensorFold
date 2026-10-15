@@ -1,5 +1,6 @@
 //! A server's life: keys, the listening socket, the startup lines, the live line, and a clean stop on SIGTERM or SIGINT.
 const std = @import("std");
+const platform = @import("sys");
 const api = @import("engine_api");
 const json = @import("json.zig");
 const auth = @import("auth.zig");
@@ -10,7 +11,7 @@ const listener_mod = @import("listener.zig");
 const model_text = @import("model_text.zig");
 const server_mod = @import("server.zig");
 const Allocator = std.mem.Allocator;
-const posix = std.posix;
+const posix = platform.posix;
 
 var stop_requested: std.atomic.Value(bool) = .init(false);
 
@@ -33,7 +34,7 @@ pub fn stopping() bool {
 }
 
 /// The hard limit macOS reads as unlimited.
-const rlim_infinity: u64 = std.c.RLIM.INFINITY;
+const rlim_infinity: u64 = platform.c.RLIM.INFINITY;
 
 /// The targets to try, in order: the hard limit when finite, else the fallbacks 65536 then 10240, first that works; never an unlimited soft limit, since a loop over every descriptor would do absurd work.
 fn fillTargets(max: u64, out: *[2]u64) []const u64 {
@@ -109,6 +110,10 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .model_dir = s.model_dir,
         .model_ids = ids.items,
         .default_max_tokens = args.max_tokens,
+        .vision_max_images = @intCast(@max(args.vision_max_images, 1)),
+        .vision_urls = args.vision_urls,
+        .vision_image_tokens = @intCast(std.math.clamp(args.vision_image_tokens, 1, 65536)),
+        .tool_system = if (args.tool_system) |t| (if (std.mem.trim(u8, t, " \t\r\n").len > 0) std.mem.trim(u8, t, " \t\r\n") else null) else null,
         .enable_thinking = args.thinking,
         .reasoning_effort = args.reasoning_effort,
         .thinking_budget = args.thinking_budget,
@@ -211,6 +216,7 @@ test "the targets are the hard limit, or the fallbacks under an unlimited one" {
 }
 
 test "the raise lifts a low soft limit, and a second raise does nothing" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // no descriptor limits to raise
     const before = try posix.getrlimit(.NOFILE);
     defer posix.setrlimit(.NOFILE, before) catch {};
     if (@as(u64, @intCast(before.max)) <= 256) return error.SkipZigTest;

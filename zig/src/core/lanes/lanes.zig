@@ -29,6 +29,7 @@ pub const grammar = @import("grammar.zig");
 
 pub const Engine = engine.Engine;
 pub const Config = config.Config;
+pub const Image = @import("stream.zig").Image;
 pub const Model = config.Model;
 pub const Stream = stream.Stream;
 pub const Sampling = sampling.Sampling;

@@ -1,5 +1,8 @@
 //! The engine a server drives (``Engine``), and ``LaneHost``: the lane core served on one thread, rounds left to it.
 const std = @import("std");
+/// Image inputs (decode, resize, patches) for families with a vision tower; the server reaches them here.
+pub const Image = lanes.Image;
+pub const qwen_image = @import("qwen_image");
 const lanes = @import("lanes");
 const Allocator = std.mem.Allocator;
 
@@ -88,6 +91,8 @@ pub const Request = struct {
     logprobs: ?u8 = null,
     /// Rows for each prompt token after the first, with ranks and this many best tokens, when ``Info.prompt_logprobs``.
     prompt_logprobs: ?u8 = null,
+    /// An image prompt's inputs in prompt order (Info.vision engines only; the prompt holds their placeholder rows).
+    images: []const lanes.Image = &.{},
 };
 
 pub const Reason = enum { stop, length, cancelled, failed };
@@ -162,6 +167,10 @@ pub const Info = struct {
     prompt_cache_plan: ?PromptCachePlan = null,
     /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
     greedy_only: bool = false,
+    /// The engine encodes image inputs (Request.images): it was opened with ``vision`` and its family has a tower.
+    vision: bool = false,
+    /// Its tower takes GLM-5.3-Flash's preparation and placeholders (qwen_image.glm) instead of Qwen's.
+    vision_glm: bool = false,
     /// Whether a request's caches fit beside the running streams' now (null: a free lane does); else it waits in order.
     admit: ?Admit = null,
 };
@@ -225,10 +234,20 @@ pub const Open = struct {
     master_port: u16 = 29551,
     /// --policy: the engine's policy as `key=value,...`; empty: its defaults.
     policy: []const u8 = "",
+    /// --vision: load the family's vision tower and accept image inputs.
+    vision: bool = false,
+    /// --kv-dtype: bits of the attention cache's codes (8 or 4) for families that keep a quantized cache.
+    kv_bits: u8 = 8,
 };
 
 /// An opened engine; ``close`` stops its thread and frees its backend.
-pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) void, ctx: *anyopaque };
+pub const Opened = struct {
+    engine: Engine,
+    close: *const fn (ctx: *anyopaque) void,
+    ctx: *anyopaque,
+    /// Rank 1 of two: replay rank 0's engine calls until it stops (the server then serves no HTTP); null elsewhere.
+    follow: ?*const fn (ctx: *anyopaque) anyerror!void = null,
+};
 
 pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0 };
 

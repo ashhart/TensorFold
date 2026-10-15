@@ -1,5 +1,6 @@
 //! Rows mode without tensor units (0.6.6's pre-M5 decode): every dense lane also as MLX-layout members for rows_w.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const replay = @import("replay.zig");
 pub const rows_w = @import("rows_w.zig");
@@ -14,7 +15,7 @@ const KO = 6144; // the attention and DeltaNet output projections' inputs
 
 /// Whether decode reads its dense projections on the row kernels: no tensor units and FZ_M3_LANES unset.
 pub fn on(device: mtl.Device) bool {
-    return !device.tensorUnits() and std.c.getenv("FZ_M3_LANES") == null;
+    return !device.tensorUnits() and platform.c.getenv("FZ_M3_LANES") == null;
 }
 
 /// `d` on the run's encoder at `rows` rows, unless the role is knocked out.

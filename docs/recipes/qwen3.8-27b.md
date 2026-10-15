@@ -90,7 +90,7 @@ input is qualified on this checkpoint.
 
 ```bash
 tensorfold pull nvidia/Qwen3.8-27B-NVFP4 z-lab/Qwen3.8-27B-DFlash2
-tensorfold serve nvidia/Qwen3.8-27B-NVFP4 --host 0.0.0.0 --port 8080
+tensorfold serve nvidia/Qwen3.8-27B-NVFP4 --host 0.0.0.0 --port 8888
 ```
 
 Prompts take bf16 rows on a prompt GEMM that reads the stored bytes: each FP8 byte and each NVFP4 code times its
@@ -122,7 +122,7 @@ serve the folder:
 ```bash
 python -c "from huggingface_hub import snapshot_download as d; d('turboderp/Qwen3.8-27B-exl3', revision='3.00bpw', local_dir='qwen27b-exl3-3.00bpw')"
 tensorfold pull z-lab/Qwen3.8-27B-DFlash2
-tensorfold serve qwen27b-exl3-3.00bpw --host 0.0.0.0 --port 8080
+tensorfold serve qwen27b-exl3-3.00bpw --host 0.0.0.0 --port 8888
 ```
 
 Verify windows use the row-invariant EXL3 linear, so drafted replies equal `"draft": false` ones; prompts use the
