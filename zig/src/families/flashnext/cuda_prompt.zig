@@ -59,7 +59,8 @@ pub fn argmax(raw: []const u8) u32 {
     return @intCast(at);
 }
 
-fn zeros(gpa: std.mem.Allocator, driver: *cuda.Driver, n: usize, len: usize) ![]cuda.DeviceBuffer {
+/// `n` zeroed buffers, the fill on the compute stream: a legacy-stream memset returns before it lands.
+fn zeros(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, n: usize, len: usize) ![]cuda.DeviceBuffer {
     const out = try gpa.alloc(cuda.DeviceBuffer, n);
     var i: usize = 0;
     errdefer {
@@ -68,7 +69,7 @@ fn zeros(gpa: std.mem.Allocator, driver: *cuda.Driver, n: usize, len: usize) ![]
     }
     while (i < n) : (i += 1) {
         out[i] = try cuda.DeviceBuffer.alloc(driver, len);
-        try out[i].fill8(0, null);
+        try out[i].fill8(0, stream.handle);
     }
     return out;
 }
@@ -185,21 +186,21 @@ pub const Engine = struct {
         if (cap == 0) return error.UnexpectedTensor;
         const logits = try e.gpa.alloc(u8, vocab * 2);
         errdefer e.gpa.free(logits);
-        const conv = try zeros(e.gpa, e.driver, linear_n, (gdn.taps - 1) * gdn.conv_dim * 2);
+        const conv = try zeros(e.gpa, e.driver, e.stream.*, linear_n, (gdn.taps - 1) * gdn.conv_dim * 2);
         errdefer freeOwned(e.gpa, conv);
-        const state = try zeros(e.gpa, e.driver, linear_n, state_n * 4);
+        const state = try zeros(e.gpa, e.driver, e.stream.*, linear_n, state_n * 4);
         errdefer freeOwned(e.gpa, state);
-        const kc = try zeros(e.gpa, e.driver, attn_n, cap * kv_heads * head_dim * 2);
+        const kc = try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);
         errdefer freeOwned(e.gpa, kc);
-        const vc = try zeros(e.gpa, e.driver, attn_n, cap * kv_heads * head_dim * 2);
+        const vc = try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * kv_heads * head_dim * 2);
         errdefer freeOwned(e.gpa, vc);
-        const ikc = try zeros(e.gpa, e.driver, attn_n, cap * index_dim * 2);
+        const ikc = try zeros(e.gpa, e.driver, e.stream.*, attn_n, cap * index_dim * 2);
         errdefer freeOwned(e.gpa, ikc);
-        const pooled = try zeros(e.gpa, e.driver, attn_n, pooledBytes(cap));
+        const pooled = try zeros(e.gpa, e.driver, e.stream.*, attn_n, pooledBytes(cap));
         errdefer freeOwned(e.gpa, pooled);
         var tail = try cuda.DeviceBuffer.alloc(e.driver, ple_tail_n * wide * 2);
         errdefer tail.free();
-        try tail.fill8(0, null);
+        try tail.fill8(0, e.stream.handle);
         return .{
             .conv = conv,
             .state = state,
@@ -241,7 +242,7 @@ pub const Engine = struct {
             bs.free(e.gpa);
             e.batch_s = null;
         }
-        e.batch_s = try batch.Scratch.alloc(e.gpa, e.driver, rows);
+        e.batch_s = try batch.Scratch.alloc(e.gpa, e.driver, e.stream.*, rows);
         return &e.batch_s.?;
     }
 

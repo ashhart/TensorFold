@@ -117,13 +117,13 @@ pub fn check(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, driver: *cu
         const cap = ids.len + count + max_rows;
         var seq = try e.newSeq(cap);
         defer seq.deinit(gpa);
-        var d = try Draft.init(gpa, driver, cap, h.ids.len, e.chunk);
+        var d = try Draft.init(gpa, driver, stream.*, cap, h.ids.len, e.chunk);
         defer d.deinit();
         for (0..repeat) |rep| {
             // serial: the plain prompt pass, then one row a forward
             seq.fed = 0;
             seq.history = .{ e.eos, e.eos };
-            try resetSeq(&seq);
+            try resetSeq(&seq, stream.*);
             var ref: std.ArrayList(u32) = .empty;
             defer ref.deinit(gpa);
             try e.predict(Tri, tri, &seq, ids);
@@ -135,7 +135,7 @@ pub fn check(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, driver: *cu
             // drafted: the prompt pass with its streams and the head's cache, then windows
             seq.fed = 0;
             seq.history = .{ e.eos, e.eos };
-            try resetSeq(&seq);
+            try resetSeq(&seq, stream.*);
             var got: std.ArrayList(u32) = .empty;
             defer got.deinit(gpa);
             try o.prefill(&seq, &d, ids);
@@ -164,8 +164,8 @@ pub fn check(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, driver: *cu
 }
 
 /// A sequence's caches back to empty (the check reruns a prompt on one allocation).
-fn resetSeq(seq: *prompt.Seq) !void {
-    for (seq.conv) |*b| try b.fill8(0, null);
-    for (seq.state) |*b| try b.fill8(0, null);
-    try seq.tail.fill8(0, null);
+fn resetSeq(seq: *prompt.Seq, stream: cuda.Stream) !void {
+    for (seq.conv) |*b| try b.fill8(0, stream.handle);
+    for (seq.state) |*b| try b.fill8(0, stream.handle);
+    try seq.tail.fill8(0, stream.handle);
 }

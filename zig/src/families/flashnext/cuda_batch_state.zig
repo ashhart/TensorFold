@@ -228,7 +228,7 @@ pub const Scratch = struct {
         return n;
     }
 
-    pub fn alloc(gpa: std.mem.Allocator, d: *const cuda.Driver, cap: usize) !Scratch {
+    pub fn alloc(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, cap: usize) !Scratch {
         var s: Scratch = .{ .cap = cap };
         errdefer s.free(gpa);
         const pairs = cap * slots;
@@ -290,9 +290,10 @@ pub const Scratch = struct {
         var inv: [half]f32 = undefined;
         for (&inv, 0..) |*o, i| o.* = @floatCast(std.math.pow(f64, 10_000_000.0, -@as(f64, @floatFromInt(i)) / @as(f64, half)));
         s.inv = try s.add(gpa, d, half * 4);
-        try s.bufs.items[s.bufs.items.len - 1].upload(0, std.mem.sliceAsBytes(&inv));
+        try s.bufs.items[s.bufs.items.len - 1].uploadAsync(0, std.mem.sliceAsBytes(&inv), stream.handle);
         s.dummy = try s.add(gpa, d, 4096);
-        try s.bufs.items[s.bufs.items.len - 1].fill8(0, null);
+        try s.bufs.items[s.bufs.items.len - 1].fill8(0, stream.handle);
+        try stream.synchronize();
         return s;
     }
 

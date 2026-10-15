@@ -94,7 +94,7 @@ pub const Draft = struct {
     }
 
     /// A head cache of `cap` entries; `rows` the widest prompt chunk whose streams it keeps.
-    pub fn init(gpa: std.mem.Allocator, driver: *cuda.Driver, cap: usize, draft_n: usize, rows: usize) !Draft {
+    pub fn init(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Stream, cap: usize, draft_n: usize, rows: usize) !Draft {
         var d: Draft = .{ .gpa = gpa, .cap = cap, .rows_cap = @max(rows, max_rows), .kc = undefined, .vc = undefined, .ikc = undefined, .pooled = undefined, .streams = undefined, .out = undefined, .logits = undefined, .dlogits = undefined, .best = undefined, .saved = undefined, .host = undefined };
         d.kc = try cuda.DeviceBuffer.alloc(driver, cap * kv_heads * head_dim * 2);
         errdefer d.kc.free();
@@ -121,10 +121,8 @@ pub const Draft = struct {
         while (made < linear_n) : (made += 1) d.spare[made] = try cuda.DeviceBuffer.alloc(driver, state_n * 4);
         d.host = try gpa.alloc(u16, @max(max_rows * vocab, draft_n));
         errdefer gpa.free(d.host);
-        try d.kc.fill8(0, null);
-        try d.vc.fill8(0, null);
-        try d.ikc.fill8(0, null);
-        try d.pooled.fill8(0, null);
+        // zeroed on the compute stream, ahead of the passes that read them
+        for ([_]cuda.DeviceBuffer{ d.kc, d.vc, d.ikc, d.pooled }) |b| try b.fill8(0, stream.handle);
         var li: usize = 0;
         for (&d.keep.layers, 0..) |*lk, layer| {
             if (!wt.linearLayer(layer)) continue;

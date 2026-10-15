@@ -35,10 +35,10 @@ pub const Rows = struct {
     up_fn: cuda.Function,
     down_fn: cuda.Function,
 
-    pub fn init(gpa: std.mem.Allocator, driver: *cuda.Driver) !Rows {
+    pub fn init(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream) !Rows {
         var r: Rows = .{ .gpa = gpa, .driver = driver, .scratch = try Scratch.alloc(driver, 1), .scratch_rows = 1, .mode = undefined, .experts = undefined, .plan_fn = undefined, .up_fn = undefined, .down_fn = undefined };
         errdefer r.scratch.free();
-        try r.scratch.dummy.fill8(0, null);
+        try r.scratch.dummy.fill8(0, stream.handle);
         r.mode = try gpa.alloc(u8, 1);
         errdefer gpa.free(r.mode);
         r.experts = try cuda.Module.load(driver, cuda.kernels.experts);
@@ -55,11 +55,11 @@ pub const Rows = struct {
         r.scratch.free();
     }
 
-    fn grow(r: *Rows, rows: usize) !void {
+    fn grow(r: *Rows, stream: cuda.Stream, rows: usize) !void {
         if (rows <= r.scratch_rows) return;
         var next = try Scratch.alloc(r.driver, rows);
         errdefer next.free();
-        try next.dummy.fill8(0, null);
+        try next.dummy.fill8(0, stream.handle);
         const mode = try r.gpa.alloc(u8, rows);
         r.scratch.free();
         r.gpa.free(r.mode);
@@ -73,7 +73,7 @@ pub const Rows = struct {
         if (ids.len == 0 or seq.fed + ids.len > seq.cap) return error.UnexpectedTensor;
         // dense attention only: the reference stops where the indexer would start choosing
         if (seq.fed + ids.len > weights.dense_nch * 512) return error.UnexpectedTensor;
-        try r.grow(ids.len);
+        try r.grow(e.stream.*, ids.len);
         var pass = Pass{ .gpa = e.gpa, .io = e.io, .driver = e.driver, .stream = e.stream, .model_dir = e.model_dir, .s = &r.scratch, .table = e.table, .mode = r.mode, .history = &seq.history, .conv = seq.conv, .state = seq.state, .kc = seq.kc, .vc = seq.vc, .ikc = seq.ikc, .tail = seq.tail, .mixer = e.mixer, .head_q = e.head_q, .logits = seq.logits, .plan_fn = r.plan_fn, .up_fn = r.up_fn, .down_fn = r.down_fn };
         @memset(pass.mode, 0);
         for (ids, 0..) |token, t| try embedRow(Tri, &pass, tri, token, pass.s.h.ptr + @as(u64, t) * wide * 2);
@@ -192,7 +192,7 @@ pub fn run(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, driver: *cuda
     var e = try prompt.Engine.init(gpa, io, driver, stream, model_dir);
     defer e.deinit();
     const by_rows = if (std.c.getenv("TF_FLASHNEXT_PROMPT")) |v| std.mem.eql(u8, std.mem.span(v), "rows") else false;
-    var rows: ?Rows = if (by_rows) try Rows.init(gpa, driver) else null;
+    var rows: ?Rows = if (by_rows) try Rows.init(gpa, driver, stream) else null;
     defer if (rows) |*r| r.deinit();
     var seq = try e.newSeq(tokens.len + new_tokens);
     defer seq.deinit(gpa);
