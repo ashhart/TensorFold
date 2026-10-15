@@ -35,8 +35,8 @@ fixtures from `tools/zig/gemma4_dump.py`).
 
 A stream keeps a ring of window + 512 slots for each sliding layer and a buffer for each global one; rolling back is
 moving the cache's length. A decode forward takes up to 16 rows of one stream and 128 of several, and every row keeps
-its bits. Prompts run in chunks of 512 rows on `core/affine_mm` and a tensor-unit attention kernel, at about 1,190
-tokens a second at 8k, 1,050 at 32k and 530 at 252k.
+its bits. Prompts run in chunks of 512 rows on `core/affine_mm` and a tensor-unit attention kernel, at about 1,360
+tokens a second at 8k, 1,200 at 32k and 560 at 252k.
 
 The drafter is z-lab's DFlash (`zig/src/families/gemma4/dflash.zig`): five Qwen3-style layers reading six of the
 target's layer outputs (1, 12, 23, 35, 46, 57) through `fc` and a norm, drafting a block of the pending token and up
@@ -77,8 +77,9 @@ zig-out/bin/tf-gemma4-run M L NL 49 512 && python tools/zig/gemma4_gate.py check
   and the native run ties them (its decode attention sums 256-key chunks in its own order). Every row keeps its bits
   at any window width and beside other streams' rows.
 - Long prompts against the oracle's mlx-lm prompt forward (fed in 2048-token chunks, as `mlx_lm.generate` feeds a
-  prompt), 49 greedy tokens each: equal at 32k, 64k and 252k. At 8k and 128k the two part at tokens 25 and 30, each
-  where mlx-lm's top two logits are equal (28.25 and 26.25) and the native run puts them 0.625 and 0.375 apart.
+  prompt), 49 greedy tokens each: equal at 32k and 64k. At 8k, 128k and 252k the two part at tokens 25, 30 and 45,
+  each where mlx-lm's top two logits are equal (28.25, 26.25 and 28.625); the native run puts them 0.125, 0.625 and
+  0.125 apart.
 - The lane core: copy-drafted and DFlash-drafted streams, alone and 4 and 8 in shared rounds, equal the engine's
   plain replies token for token, on the four prompts and on two copy-heavy ones.
 - Served on an M5 Ultra with the drafter: greedy token SHAs equal the engine's receipts alone, with drafts off and on,
@@ -96,17 +97,20 @@ Long prompts, one after the other on the same M5 Ultra: native in 512-row chunks
 
 | Prompt | Native prompt tok/s | mlx-lm prompt tok/s | Native decode tok/s | mlx-lm decode tok/s |
 |---|---|---|---|---|
-| 8k | 1187 | 1305 | about 35 | 39 |
-| 32k | 1054 | 1139 | about 33 | 32 |
-| 64k | 949 | 944 | about 29 | 32 |
-| 128k | 806 | 651 | about 24 | 25 |
-| 252k | 527 | 440 | about 18 | 16 |
+| 8k | 1362 | 1305 | about 35 | 39 |
+| 32k | 1202 | 1139 | about 33 | 32 |
+| 64k | 1047 | 944 | about 29 | 32 |
+| 128k | 892 | 651 | about 24 | 25 |
+| 252k | 564 | 440 | about 18 | 16 |
 
 Prompt attention takes 32 query rows of a head a threadgroup: each simdgroup scores 32 keys of a block over the whole
 head and accumulates its own 64 output columns, the row maxes and fp32 probabilities crossing threadgroup memory 128
 keys at a time. A 512-row chunk's 60 layers spend 138 ms there at 32k and 527 ms at 128k, where 16 rows a threadgroup
 spent 194 and 810 (mlx-lm's fused attention about 161 at 32k): the kernel streams keys and values, so what each load
 serves decides its rate, and vector loads, fetching a step ahead, and sparing interior blocks the mask and the rescale
-moved nothing. Only the row sums regroup, so the long prompts' bits move at a tie or two. The prompt GEMMs are core
-affine_mm's: a 512-row chunk's 60 layers take 344 ms there (mlx-lm's quantized matmuls 302), the whole of the gap to
-mlx-lm at 8k.
+moved nothing. The prompt GEMMs are core affine_mm's, which dequantizes each step's weights to bf16 in its tile (scale
+times code plus bias in fp32, rounded once, as mlx-lm's quantized matmul does) and accumulates on the tensor unit over
+the whole depth: a 512-row chunk's 60 layers take 284 ms there (mlx-lm's quantized matmuls 302), where the exact-codes
+design, its per-group scale and bias epilogue and its row-sums pass took 344. So the prompt path rounds its weights as
+mlx-lm does while the decode path's lane kernels keep the codes exact: over 40 tokens their last-row logits part by up
+to 1.4 (0.8 with exact codes in both).

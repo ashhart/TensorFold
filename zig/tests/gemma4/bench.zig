@@ -70,7 +70,7 @@ fn promptStages(m: *g4.Model) !void {
 }
 
 /// Every projection of the 60 layers on core/affine_mm (prompt GEMMs from the checkpoint's own tensors): GPU ms.
-fn affineAll(m: *g4.Model, pipes: tf.affine_mm.Pipes, rows: u32, x: mtl.Buffer, sums: mtl.Buffer, y: mtl.Buffer) !f64 {
+fn affineAll(m: *g4.Model, pipes: tf.affine_mm.Pipes, rows: u32, x: mtl.Buffer, y: mtl.Buffer) !f64 {
     const cb = m.queue.commandBuffer();
     const e = cb.compute(.serial);
     var name: [128]u8 = undefined;
@@ -78,13 +78,11 @@ fn affineAll(m: *g4.Model, pipes: tf.affine_mm.Pipes, rows: u32, x: mtl.Buffer, 
         const members = if (cfg.global(i)) &[_][]const u8{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj" } else &[_][]const u8{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj" };
         for (members) |mm| {
             const q = try member(m, try std.fmt.bufPrint(&name, "language_model.model.layers.{d}.{s}", .{ i, mm }));
-            tf.affine_mm.rowSums(e, pipes, 64, lane.Ref{ .buf = x }, lane.Ref{ .buf = sums }, rows, q.k);
-            tf.affine_mm.dense(e, pipes, lane.Ref{ .buf = x }, lane.Ref{ .buf = sums }, q, lane.Ref{ .buf = y }, rows);
+            tf.affine_mm.dense(e, pipes, lane.Ref{ .buf = x }, q, lane.Ref{ .buf = y }, rows);
         }
     }
     const head = try member(m, "language_model.model.embed_tokens");
-    tf.affine_mm.rowSums(e, pipes, 64, lane.Ref{ .buf = x }, lane.Ref{ .buf = sums }, rows, head.k);
-    tf.affine_mm.dense(e, pipes, lane.Ref{ .buf = x }, lane.Ref{ .buf = sums }, head, lane.Ref{ .buf = y }, 1);
+    tf.affine_mm.dense(e, pipes, lane.Ref{ .buf = x }, head, lane.Ref{ .buf = y }, 1);
     e.end();
     cb.commit();
     cb.wait();
@@ -210,11 +208,9 @@ pub fn main(init: std.process.Init) !void {
         defer big_x.deinit();
         const big_y = try m.device.buffer(512 * 2 * cfg.intermediate * 2, mtl.ResourceOptions.private);
         defer big_y.deinit();
-        const sums = try m.device.buffer(512 * (cfg.intermediate / 64) * 4, mtl.ResourceOptions.private);
-        defer sums.deinit();
         for ([_]u32{ 128, 256, 512 }) |rows| {
             var best: f64 = 1e9;
-            for (0..3) |_| best = @min(best, try affineAll(m, pipes, rows, big_x, sums, big_y));
+            for (0..3) |_| best = @min(best, try affineAll(m, pipes, rows, big_x, big_y));
             std.debug.print("affine_mm projections, {d} rows: {d:.2} ms GPU ({d:.0} tok/s)\n", .{ rows, best, @as(f64, @floatFromInt(rows)) * 1e3 / best });
         }
     }

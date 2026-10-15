@@ -21,7 +21,6 @@ pub const Scratch = struct {
     pos: mtl.Buffer,
     h: [2]mtl.Buffer,
     normed: [2]mtl.Buffer,
-    sums: mtl.Buffer,
     qkv: mtl.Buffer,
     q: mtl.Buffer,
     k: mtl.Buffer,
@@ -43,7 +42,7 @@ pub const Scratch = struct {
         _ = capacity;
         var s: Scratch = undefined;
         s.taps = null;
-        inline for (.{ .{ "ids", R * 4, true }, .{ "pos", R * 4, true }, .{ "sums", R * (cfg.intermediate / 64) * 4, false }, .{ "qkv", R * (qd + 2 * 16 * 256) * 2, false }, .{ "q", R * qd * 2, false }, .{ "k", R * 16 * 256 * 2, false }, .{ "v", R * 16 * 256 * 2, false }, .{ "attn", R * qd * 2, false }, .{ "o", R * d * 2, false }, .{ "hn", R * d * 2, false }, .{ "n_mlp", R * d * 2, false }, .{ "gate_up", R * 2 * cfg.intermediate * 2, false }, .{ "act", R * cfg.intermediate * 2, false }, .{ "y", R * d * 2, false }, .{ "logits", cfg.vocab * 2, true } }) |f|
+        inline for (.{ .{ "ids", R * 4, true }, .{ "pos", R * 4, true }, .{ "qkv", R * (qd + 2 * 16 * 256) * 2, false }, .{ "q", R * qd * 2, false }, .{ "k", R * 16 * 256 * 2, false }, .{ "v", R * 16 * 256 * 2, false }, .{ "attn", R * qd * 2, false }, .{ "o", R * d * 2, false }, .{ "hn", R * d * 2, false }, .{ "n_mlp", R * d * 2, false }, .{ "gate_up", R * 2 * cfg.intermediate * 2, false }, .{ "act", R * cfg.intermediate * 2, false }, .{ "y", R * d * 2, false }, .{ "logits", cfg.vocab * 2, true } }) |f|
             @field(s, f[0]) = try device.buffer(f[1], if (f[2]) shared else private);
         for (&s.h) |*b| b.* = try device.buffer(R * d * 2, private);
         for (&s.normed) |*b| b.* = try device.buffer(R * d * 2, private);
@@ -51,24 +50,20 @@ pub const Scratch = struct {
     }
 
     pub fn deinit(s: *Scratch) void {
-        inline for (.{ "ids", "pos", "sums", "qkv", "q", "k", "v", "attn", "o", "hn", "n_mlp", "gate_up", "act", "y", "logits" }) |f| @field(s, f).deinit();
+        inline for (.{ "ids", "pos", "qkv", "q", "k", "v", "attn", "o", "hn", "n_mlp", "gate_up", "act", "y", "logits" }) |f| @field(s, f).deinit();
         for (s.h ++ s.normed) |b| b.deinit();
         if (s.taps) |b| b.deinit();
     }
 };
 
-/// y[:, col..col + q.n] (row pitch `pitch`) = x q^T, x's group sums already in s.sums.
-fn mm(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, q: Q, x: mtl.Buffer, y: mtl.Buffer, col: usize, pitch: usize, rows: u32) void {
-    affine_mm.denseBatch(e, m.mm, Ref{ .buf = x }, Ref{ .buf = s.sums }, q, Ref{ .buf = y, .off = col * 2 }, rows, 1, .{ .x_row = @intCast(q.k), .y_row = @intCast(pitch) });
+/// y[:, col..col + q.n] (row pitch `pitch`) = x q^T.
+fn mm(m: *Model, e: mtl.ComputeEncoder, q: Q, x: mtl.Buffer, y: mtl.Buffer, col: usize, pitch: usize, rows: u32) void {
+    affine_mm.denseBatch(e, m.mm, Ref{ .buf = x }, q, Ref{ .buf = y, .off = col * 2 }, rows, 1, .{ .x_row = @intCast(q.k), .y_row = @intCast(pitch) });
 }
 
-fn sums(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, x: mtl.Buffer, rows: u32, k: u32) void {
-    affine_mm.rowSums(e, m.mm, 64, Ref{ .buf = x }, Ref{ .buf = s.sums }, rows, k);
-}
-
-/// The glue's optional group sums off: affine_mm takes its own (rowSums).
+/// The glue's optional group sums off (the lane kernels' operand; affine_mm dequantizes its weights instead).
 fn noSums(e: mtl.ComputeEncoder, s: *Scratch, index: usize) void {
-    e.setBuffer(s.sums, 0, index);
+    e.setBuffer(s.pos, 0, index);
     e.setValue(@as(i32, 0), index + 1);
 }
 
@@ -139,10 +134,9 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: 
     const qn = cfg.query_heads * dh;
     const width = qn + nk * dh * @as(usize, if (global) 1 else 2);
     if (st.mm) {
-        sums(m, e, s, s.normed[cur], rows, cfg.hidden);
-        mm(m, e, s, l.mlx[0], s.normed[cur], s.qkv, 0, width, rows);
-        mm(m, e, s, l.mlx[1], s.normed[cur], s.qkv, qn, width, rows);
-        if (!global) mm(m, e, s, l.mlx[2], s.normed[cur], s.qkv, qn + nk * dh, width, rows);
+        mm(m, e, l.mlx[0], s.normed[cur], s.qkv, 0, width, rows);
+        mm(m, e, l.mlx[1], s.normed[cur], s.qkv, qn, width, rows);
+        if (!global) mm(m, e, l.mlx[2], s.normed[cur], s.qkv, qn + nk * dh, width, rows);
     }
     if (st.glue) {
         e.setPipeline(kd.qkv);
@@ -162,8 +156,7 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: 
         e.dispatchGroups(.{ .width = (rows + 31) / 32, .height = cfg.query_heads }, .{ .width = 32 * dh / 64 });
     }
     if (st.mm) {
-        sums(m, e, s, s.attn, rows, @intCast(qn));
-        mm(m, e, s, l.mlx[3], s.attn, s.o, 0, cfg.hidden, rows);
+        mm(m, e, l.mlx[3], s.attn, s.o, 0, cfg.hidden, rows);
     }
     if (st.glue) {
         e.setPipeline(kd.attn_tail);
@@ -176,9 +169,8 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: 
         e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
     }
     if (st.mm) {
-        sums(m, e, s, s.n_mlp, rows, cfg.hidden);
-        mm(m, e, s, l.mlx[4], s.n_mlp, s.gate_up, 0, 2 * cfg.intermediate, rows);
-        mm(m, e, s, l.mlx[5], s.n_mlp, s.gate_up, cfg.intermediate, 2 * cfg.intermediate, rows);
+        mm(m, e, l.mlx[4], s.n_mlp, s.gate_up, 0, 2 * cfg.intermediate, rows);
+        mm(m, e, l.mlx[5], s.n_mlp, s.gate_up, cfg.intermediate, 2 * cfg.intermediate, rows);
     }
     if (st.glue) {
         e.setPipeline(kd.geglu);
@@ -188,8 +180,7 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: 
         e.dispatchGroups(.{ .width = cfg.intermediate / 64, .height = rows }, .{ .width = 64 });
     }
     if (st.mm) {
-        sums(m, e, s, s.act, rows, cfg.intermediate);
-        mm(m, e, s, l.mlx[6], s.act, s.y, 0, cfg.hidden, rows);
+        mm(m, e, l.mlx[6], s.act, s.y, 0, cfg.hidden, rows);
     }
     if (!st.glue) return;
     e.setPipeline(kd.dense_tail);

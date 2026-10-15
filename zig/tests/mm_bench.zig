@@ -5,16 +5,16 @@ const ks = @import("kernel_sources");
 
 const usage =
     \\tf-mm-bench M K N FILE[:BM:BN:THREADS[:ENTRY]] ...
-    \\Each FILE takes tf_affine_mm's buffers (x, w, scales, biases, row sums, args, y, strides) and is compiled with
-    \\TF_BITS 4, TF_GROUP 64 and nax.h inlined; each file's tf_affine_row_sums fills its row sums (timed too).
+    \\Each FILE takes tf_affine_mm's buffers (x, w, scales, biases, args, y, strides) and is compiled with
+    \\TF_BITS 4, TF_GROUP 64 and nax.h inlined.
     \\MM_REPS (dispatches a timed buffer, 16), MM_TRIALS (5), MM_COPIES (weight copies cycled so reads come from DRAM, 4),
     \\MM_CHECK_ROWS (rows checked against fp64, 16), MM_F32=1 (fp32 outputs).
 ;
 
 const Args = extern struct { rows: i32, n: i32, k: i32, experts: i32 };
-const Strides = extern struct { x_row: i32 = 0, y_row: i32 = 0, sums_row: i32 = 1, x_batch: i32 = 0, y_batch: i32 = 0, sums_batch: i32 = 0, w_batch: i32 = 0, pad: i32 = 0 };
+const Strides = extern struct { x_row: i32 = 0, y_row: i32 = 0, x_batch: i32 = 0, y_batch: i32 = 0, w_batch: i32 = 0, pad: i32 = 0 };
 
-const Kernel = struct { path: []const u8, bm: u32 = 64, bn: u32 = 64, threads: u32 = 128, entry: []const u8 = "tf_affine_mm", lib: mtl.Library = undefined, pipe: mtl.Pipeline = undefined, sums_pipe: mtl.Pipeline = undefined, sums: mtl.Buffer = undefined, y: mtl.Buffer = undefined, ms: [64]f64 = undefined, sums_ms: f64 = 0 };
+const Kernel = struct { path: []const u8, bm: u32 = 64, bn: u32 = 64, threads: u32 = 128, entry: []const u8 = "tf_affine_mm", lib: mtl.Library = undefined, pipe: mtl.Pipeline = undefined, y: mtl.Buffer = undefined, ms: [64]f64 = undefined };
 
 fn envInt(name: [:0]const u8, default: usize) usize {
     const v = std.c.getenv(name) orelse return default;
@@ -93,33 +93,12 @@ pub fn main(init: std.process.Init) !void {
         k.lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
         k.pipe = try mtl.Pipeline.init(device, k.lib, k.entry, false);
         k.y = try device.buffer(@as(usize, M) * N * ob, opts);
-        k.sums_pipe = try mtl.Pipeline.init(device, k.lib, "tf_affine_row_sums", false);
-        k.sums = try device.buffer(@as(usize, M) * G * 4, opts);
     }
     defer for (kernels) |*k| {
-        k.sums.deinit();
-        k.sums_pipe.deinit();
         k.y.deinit();
         k.pipe.deinit();
         k.lib.deinit();
     };
-    for (kernels) |*k| { // each kernel's own row sums, timed over `reps` dispatches
-        const cb = queue.commandBuffer();
-        const e = cb.compute(.serial);
-        for (0..reps) |_| {
-            e.setPipeline(k.sums_pipe);
-            e.setBuffer(x, 0, 0);
-            e.setValue(Args{ .rows = @intCast(M), .n = 0, .k = @intCast(K), .experts = 0 }, 5);
-            e.setBuffer(k.sums, 0, 6);
-            e.dispatchThreads(mtl.Size.of(G, M, 1), mtl.Size.of(@min(G, 64), 1, 1));
-        }
-        e.end();
-        cb.commit();
-        cb.wait();
-        if (cb.failure()) |msg| std.debug.print("row sums failed: {s}\n", .{msg});
-        k.sums_ms = (cb.gpuEnd() - cb.gpuStart()) * 1e3 / @as(f64, @floatFromInt(reps));
-    }
-
     const encode = struct {
         fn one(e: mtl.ComputeEncoder, k: *const Kernel, xb: mtl.Buffer, wb: mtl.Buffer, sb: mtl.Buffer, bb: mtl.Buffer, copy: usize, m: u32, kk: u32, n: u32) void {
             const g = kk / 64;
@@ -128,7 +107,6 @@ pub fn main(init: std.process.Init) !void {
             e.setBuffer(wb, copy * @as(usize, n) * kk / 2, 1);
             e.setBuffer(sb, copy * @as(usize, n) * g * 2, 2);
             e.setBuffer(bb, copy * @as(usize, n) * g * 2, 3);
-            e.setBuffer(k.sums, 0, 4);
             e.setValue(Args{ .rows = @intCast(m), .n = @intCast(n), .k = @intCast(kk), .experts = 0 }, 5);
             e.setBuffer(k.y, 0, 6);
             e.setValue(Strides{ .x_row = @intCast(kk), .y_row = @intCast(n) }, 7);
@@ -215,6 +193,6 @@ pub fn main(init: std.process.Init) !void {
             worst = @max(worst, d);
         }
         const rms = @sqrt(err2 / @as(f64, @floatFromInt(check_rows * @as(usize, N))));
-        std.debug.print("{s:<40} {d:8.3} ms (min {d:.3} max {d:.3}) {d:6.1} TFLOPS, row sums {d:.3} ms; differ from first {d}/{d}; err rms {e:.3} max {e:.3} (of rms {e:.3})\n", .{ k.path, med, ms[0], ms[trials - 1], flops / (med * 1e-3) / 1e12, k.sums_ms, differ, total, rms / ref_rms, worst / ref_rms, ref_rms });
+        std.debug.print("{s:<40} {d:8.3} ms (min {d:.3} max {d:.3}) {d:6.1} TFLOPS; differ from first {d}/{d}; err rms {e:.3} max {e:.3} (of rms {e:.3})\n", .{ k.path, med, ms[0], ms[trials - 1], flops / (med * 1e-3) / 1e12, differ, total, rms / ref_rms, worst / ref_rms, ref_rms });
     }
 }

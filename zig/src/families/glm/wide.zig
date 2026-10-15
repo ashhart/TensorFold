@@ -241,19 +241,16 @@ pub fn perHead(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, heads: u32, io
 }
 
 /// A chunk's x slices (`kx` apart) through q's heads into out [rows, heads, n / heads]: one affine_mm batch, else rows.
-pub fn headsBatch(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, h: u32, io: Io, kx: u32, sums: Ref) void {
+pub fn headsBatch(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, h: u32, io: Io, kx: u32) void {
     const ny = q.n / h;
     const pipes = mm(p, q) orelse return perHead(p, e, q, h, io, kx, ny);
     var head = q;
     head.n = ny;
-    affine_mm.rowSumsAt(e, pipes, 64, io.in, sums, io.rows, h * kx, io.ldx); // a head's sums one row apart
-    affine_mm.denseBatch(e, pipes, io.in, sums, head, io.out, io.rows, h, .{
+    affine_mm.denseBatch(e, pipes, io.in, head, io.out, io.rows, h, .{
         .x_row = @intCast(io.ldx),
         .y_row = @intCast(io.ldo),
-        .sums_row = @intCast(h),
         .x_batch = @intCast(kx),
         .y_batch = @intCast(ny),
-        .sums_batch = 1,
         .w_batch = @intCast(ny),
     });
 }
@@ -398,8 +395,7 @@ pub fn mm(p: *const Pipes, q: Affine) ?affine_mm.Pipes {
 }
 
 /// A chunk's product into io.out: each member on affine_mm at its width if it fills 64-row tiles, else the row kernels.
-pub fn denseMm(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, io: Io, sums: Ref) void {
-    var summed = false;
+pub fn denseMm(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, io: Io) void {
     for (0..@as(usize, q.more) + 1) |i| {
         const r = q.run(i);
         const one: Affine = .{ .w = r.w, .s = r.s, .b = r.b, .n = r.n, .k = q.k, .bits = r.bits, .group = r.group };
@@ -409,13 +405,10 @@ pub fn denseMm(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, io: Io, sums: 
             dense(p, e, one, part);
             continue;
         };
-        if (!summed) affine_mm.rowSumsAt(e, pipes, 64, io.in, sums, io.rows, q.k, io.ldx); // every member's: one k, g64
-        summed = true;
         affine_mm.denseBatch(
             e,
             pipes,
             io.in,
-            sums,
             one,
             part.out,
             io.rows,

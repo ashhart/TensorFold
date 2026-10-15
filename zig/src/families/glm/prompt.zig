@@ -61,7 +61,6 @@ pub const Prompt = struct {
     m_x: Ref,
     m_xn: Ref,
     m_out: Ref,
-    sums: Ref, // fp32 group sums of a matmul's rows (affine_mm's bias operand)
     sparse_nax: bool, // the sparse MLA attention on the tensor units (GLM_SPARSE_NAX=0: the row kernel)
     rows: u32, // a chunk's rows at most (the buffers' height)
     kda_rows: u32, // the rows a KDA block's planes hold (half a chunk)
@@ -129,7 +128,6 @@ fn buffers(p: *Prompt, arena: *st.Arena, c: *const cfg.Config, decode: *const st
     p.offsets = try big.of(arena, (c.experts + 1) * 4);
     p.order = try big.of(arena, n * 4);
     p.sorted = try big.of(arena, n * 4);
-    p.sums = try big.of(arena, @max(R * 16384, n * D) / 64 * 4); // the widest dense K (MLA's out-projection), or a gather's
     // the rest share three regions by layer; proj: KDA's projection, MLA's queries and key lists then values, the experts' planes, the dense gate and up
     const pitch = std.mem.alignForward(usize, c.kdaProj(), 64); // the matmul's padded pitch
     const qp = up(R * c.qrProj() * 2);
@@ -189,8 +187,7 @@ fn run(e: mtl.ComputeEncoder, grid: [3]usize, group: [3]usize) void {
 /// y [M, N] = x [M, K] W^T for a 4-bit matrix (64x64 tiles; N rounded up to the weights' padded rows, y's row pitch).
 fn qmm(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref, M: u32) void {
     if (!wide.native(q)) return qmmAt(p, e, x, q.k, q, y, M);
-    affine_mm.rowSums(e, p.mm.mm_bf16, 64, x, p.sums, M, q.k);
-    affine_mm.dense(e, p.mm.mm_bf16, x, p.sums, q, y, M);
+    affine_mm.dense(e, p.mm.mm_bf16, x, q, y, M);
 }
 
 /// `qmm` over x's rows `ld` elements apart (a slice of a wider row).
@@ -201,24 +198,18 @@ fn qmmAt(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, ld: u32, q: wts.Affine
         e,
         q,
         .{ .in = x, .ldx = ld, .out = y, .ldo = pitch, .rows = M },
-        p.sums,
     );
-    const mm = p.mm.mm_bf16;
-    affine_mm.rowSumsAt(e, mm, 64, x, p.sums, M, q.k, ld);
-    affine_mm.denseBatch(e, mm, x, p.sums, q, y, M, 1, .{ .x_row = @intCast(ld), .y_row = @intCast(pitch) });
+    affine_mm.denseBatch(e, p.mm.mm_bf16, x, q, y, M, 1, .{ .x_row = @intCast(ld), .y_row = @intCast(pitch) });
 }
 
 /// `qmm` with fp32 out (TP2: one Mac's partial of a row-split projection).
 fn qmmF32(p: *const Prompt, e: mtl.ComputeEncoder, x: Ref, q: wts.Affine, y: Ref, M: u32) void {
-    affine_mm.rowSums(e, p.mm.mm_bf16, 64, x, p.sums, M, q.k);
-    affine_mm.dense(e, p.mm.mm_f32, x, p.sums, q, y, M);
+    affine_mm.dense(e, p.mm.mm_f32, x, q, y, M);
 }
 
 /// The routed experts' gate, up and SwiGLU on the M rows of `x_in` its pairs read (in expert order) into `act` ([n, gate.n]).
-fn gateUp(p: *const Prompt, mm: affine_mm.Pipes, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, M: u32, n: u32) void {
-    affine_mm.rowSums(e, mm, 64, x_in, p.sums, M, w.gate.k);
-    affine_mm.gatherGlu(e, mm, x_in, p.sums, w.gate, w.up, p.offsets, p.order, p.act, n, x.c.experts, x.c.topk, x.c.swiglu_limit);
-    affine_mm.rowSums(e, mm, 64, p.act, p.sums, n, w.down.k);
+fn gateUp(p: *const Prompt, mm: affine_mm.Pipes, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, n: u32) void {
+    affine_mm.gatherGlu(e, mm, x_in, w.gate, w.up, p.offsets, p.order, p.act, n, x.c.experts, x.c.topk, x.c.swiglu_limit);
 }
 
 fn swiglu(x: *const fwd.Ctx, e: mtl.ComputeEncoder, gu: Ref, act: Ref, rows: u32, width: u32) void {
@@ -258,8 +249,8 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     if (s & Class.route == 0) route(p, x, e, w, x_in, M);
     if (ep) |t| {
         if (s & Class.routed == 0) { // down's fp32 partials put back in (row, slot) order for the decode's combine
-            gateUp(p, p.mm.mm_bf16, x, e, w, x_in, M, n);
-            affine_mm.gatherTo(e, p.mm.mm_f32, p.act, p.sums, w.down, p.offsets, p.yf, p.order, n, E);
+            gateUp(p, p.mm.mm_bf16, x, e, w, x_in, n);
+            affine_mm.gatherTo(e, p.mm.mm_f32, p.act, w.down, p.offsets, p.yf, p.order, n, E);
         }
         if (s & Class.exchange == 0) t.sendRows(e, p.yf, p.wts, M);
         if (s & Class.shared == 0) shared(p, x, e, w, x_in, M);
@@ -272,8 +263,8 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
         wide.bySorted(&p.mm.wide.?, e, .{ .w = w.down, .experts = E, .repeat = 1 }, p.act, p.offsets, p.order, p.yp, D);
     } else if (s & Class.routed == 0) { // down's rows put back in (row, slot) order for the combine
         const mm = if (path == .mm4) p.mm.mm_bf16 else p.mm.wide.?.mm2;
-        gateUp(p, mm, x, e, w, x_in, M, n);
-        affine_mm.gatherTo(e, mm, p.act, p.sums, w.down, p.offsets, p.yp, p.order, n, E);
+        gateUp(p, mm, x, e, w, x_in, n);
+        affine_mm.gatherTo(e, mm, p.act, w.down, p.offsets, p.yp, p.order, n, E);
     }
     if (s & Class.combine != 0) return;
     e.setPipeline(k.moe_combine);
@@ -378,15 +369,13 @@ fn unabsorb(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *cons
         H,
         .{ .in = p.att, .ldx = H * K, .out = p.vals, .ldo = H * c.v_dim, .rows = M },
         K,
-        p.sums,
     );
     var q = w.kv_b;
     q.w = q.w.at(@as(usize, c.nope) * K / 2);
     q.s = q.s.at(@as(usize, c.nope) * (K / 64) * 2);
     q.b = q.b.at(@as(usize, c.nope) * (K / 64) * 2);
     q.n = c.v_dim;
-    affine_mm.rowSums(e, p.mm.mm_bf16, 64, p.att, p.sums, M * H, K);
-    affine_mm.denseBatch(e, p.mm.mm_bf16, p.att, p.sums, q, p.vals, M, H, .{ .x_row = @intCast(H * K), .y_row = @intCast(H * c.v_dim), .sums_row = @intCast(H), .x_batch = @intCast(K), .y_batch = @intCast(c.v_dim), .sums_batch = 1, .w_batch = @intCast(per) });
+    affine_mm.denseBatch(e, p.mm.mm_bf16, p.att, q, p.vals, M, H, .{ .x_row = @intCast(H * K), .y_row = @intCast(H * c.v_dim), .x_batch = @intCast(K), .y_batch = @intCast(c.v_dim), .w_batch = @intCast(per) });
 }
 
 /// `n` rows' key lists from their index scores over every pooled block they read (positions p0..), the scores on the tensor units.
@@ -423,7 +412,6 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
             c.mla_heads,
             .{ .in = p.qp, .ldx = c.qrProj(), .out = p.ql, .ldo = c.mla_heads * c.kv_lora, .rows = M },
             c.nope,
-            p.sums,
         ); // mlx-lm's embed_q
     } else if (fwd.on(x, "mla_absorb")) {
         e.setPipeline(if (c.tp > 1) x.k.absorb_nax_tp else x.k.absorb_nax); // the row kernel's qvm, weights in three bf16 parts

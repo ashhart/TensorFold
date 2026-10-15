@@ -171,8 +171,7 @@ pub fn checkMatmul(e: *Engine, prompt: []const u32) !void {
     fwd.embed(&x, b.enc, e.prompt_ids, rows);
     fwd.boundary(&x, b.enc, rows, false, L.hc.?[0], L.in_norm);
     fwd.qmv(&x, b.enc, e.k.qmv_kda_in, e.sc.normed, a.in_proj, out, rows);
-    affine_mm.rowSums(b.enc, e.k.mm_bf16, 64, e.sc.normed, pr.sums, rows, a.in_proj.k);
-    affine_mm.dense(b.enc, e.k.mm_bf16, e.sc.normed, pr.sums, a.in_proj, pr.proj, rows);
+    affine_mm.dense(b.enc, e.k.mm_bf16, e.sc.normed, a.in_proj, pr.proj, rows);
     try e.finish(b.cb, b.enc);
     const want: [*]const u16 = @ptrCast(@alignCast(out.addr()));
     const got: [*]const u16 = @ptrCast(@alignCast(pr.proj.addr()));

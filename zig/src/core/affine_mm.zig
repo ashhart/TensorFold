@@ -1,4 +1,4 @@
-//! x W^T for affine-quantized W on the tensor units, dense or by expert: exact codes, fp32 group sums and fp32 row sums.
+//! x W^T for affine-quantized W on the tensor units, dense or by expert: each step's weights dequantized to bf16 in the tile.
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
@@ -15,50 +15,35 @@ pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
     return std.fmt.allocPrint(a, "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n{s}", .{ f.bits, f.group, if (f.out_f32) "float" else "bfloat", body });
 }
 
-/// Entry points: row sums, the dense matmul, gathers by tile height, scattering gathers, the experts' gate and up through a pair order into SwiGLU.
-pub const names = [8][:0]const u8{ "tf_affine_row_sums", "tf_affine_mm", "tf_affine_gather_32", "tf_affine_gather_64", "tf_affine_gather_scatter_32", "tf_affine_gather_scatter_64", "tf_affine_gather_glu_32", "tf_affine_gather_glu_64" };
+/// Entry points: the dense matmul, gathers by tile height, scattering gathers, the experts' gate and up through a pair order into SwiGLU.
+pub const names = [7][:0]const u8{ "tf_affine_mm", "tf_affine_gather_32", "tf_affine_gather_64", "tf_affine_gather_scatter_32", "tf_affine_gather_scatter_64", "tf_affine_gather_glu_32", "tf_affine_gather_glu_64" };
 
 /// A format's pipelines, in `names` order.
-pub const Pipes = [8]mtl.Pipeline;
+pub const Pipes = [7]mtl.Pipeline;
 
 pub const Args = extern struct { rows: i32, n: i32, k: i32, experts: i32 };
 
-/// A dense matmul's pitches and batch offsets, in elements (the sums' in rows); the default is one plain [rows, k] x [k, n] product.
-pub const Strides = extern struct { x_row: i32 = 0, y_row: i32 = 0, sums_row: i32 = 1, x_batch: i32 = 0, y_batch: i32 = 0, sums_batch: i32 = 0, w_batch: i32 = 0, pad: i32 = 0 };
+/// A dense matmul's pitches and batch offsets, in elements (the weights' in rows); the default is one plain [rows, k] x [k, n] product.
+pub const Strides = extern struct { x_row: i32 = 0, y_row: i32 = 0, x_batch: i32 = 0, y_batch: i32 = 0, w_batch: i32 = 0, pad: i32 = 0 };
 
 fn bind(e: mtl.ComputeEncoder, i: usize, r: anytype) void {
     e.setBuffer(r.buf, r.off, i);
 }
 
-/// Each row's sum over each group of x [rows, k] into `sums` (fp32 [rows, k / group]): the bias's operand.
-pub fn rowSums(e: mtl.ComputeEncoder, p: Pipes, group: u32, x: anytype, sums: anytype, rows: u32, k: u32) void {
-    rowSumsAt(e, p, group, x, sums, rows, k, k);
-}
-
-/// `rowSums` over rows `ld` elements apart (k of them each).
-pub fn rowSumsAt(e: mtl.ComputeEncoder, p: Pipes, group: u32, x: anytype, sums: anytype, rows: u32, k: u32, ld: u32) void {
-    e.setPipeline(p[0]);
-    bind(e, 0, x);
-    e.setValue(Args{ .rows = @intCast(rows), .n = @intCast(ld), .k = @intCast(k), .experts = 0 }, 5);
-    bind(e, 6, sums);
-    e.dispatchThreads(mtl.Size.of(k / group, rows, 1), mtl.Size.of(@min(k / group, 64), 1, 1));
-}
-
-/// y [rows, n] = x [rows, q.k] W^T with x's group sums `sums`; n is q.n rounded up to 64 (the padded weight rows, y's pitch).
-pub fn dense(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32) void {
+/// y [rows, n] = x [rows, q.k] W^T; n is q.n rounded up to 64 (the padded weight rows, y's pitch).
+pub fn dense(e: mtl.ComputeEncoder, p: Pipes, x: anytype, q: anytype, y: anytype, rows: u32) void {
     const n = std.mem.alignForward(u32, q.n, 64);
-    denseBatch(e, p, x, sums, q, y, rows, 1, .{ .x_row = @intCast(q.k), .y_row = @intCast(n) });
+    denseBatch(e, p, x, q, y, rows, 1, .{ .x_row = @intCast(q.k), .y_row = @intCast(n) });
 }
 
 /// `batch` dense products at once, each over its own rows of the weights (`s`; q.n a multiple of 64), e.g. a per-head projection.
-pub fn denseBatch(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32, batch: u32, s: Strides) void {
+pub fn denseBatch(e: mtl.ComputeEncoder, p: Pipes, x: anytype, q: anytype, y: anytype, rows: u32, batch: u32, s: Strides) void {
     const n = std.mem.alignForward(u32, q.n, 64);
-    e.setPipeline(p[1]);
+    e.setPipeline(p[0]);
     bind(e, 0, x);
     bind(e, 1, q.w);
     bind(e, 2, q.s);
     bind(e, 3, q.b);
-    bind(e, 4, sums);
     e.setValue(Args{ .rows = @intCast(rows), .n = @intCast(n), .k = @intCast(q.k), .experts = 0 }, 5);
     bind(e, 6, y);
     e.setValue(s, 7);
@@ -66,22 +51,21 @@ pub fn denseBatch(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q:
 }
 
 /// y [rows, q.n] = x times each row's expert's W^T, rows sorted by expert with `offsets` (each expert's first row); q is [experts, n, k].
-pub fn gather(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, offsets: anytype, y: anytype, rows: u32, experts: u32) void {
-    gatherTo(e, p, x, sums, q, offsets, y, null, rows, experts);
+pub fn gather(e: mtl.ComputeEncoder, p: Pipes, x: anytype, q: anytype, offsets: anytype, y: anytype, rows: u32, experts: u32) void {
+    gatherTo(e, p, x, q, offsets, y, null, rows, experts);
 }
 
 /// `gather` with sorted row i's output at row dst[i] of y (i32 [rows]; null: in sorted order).
-pub fn gatherTo(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, offsets: anytype, y: anytype, dst: anytype, rows: u32, experts: u32) void {
+pub fn gatherTo(e: mtl.ComputeEncoder, p: Pipes, x: anytype, q: anytype, offsets: anytype, y: anytype, dst: anytype, rows: u32, experts: u32) void {
     std.debug.assert(q.n % 64 == 0 and q.k % 64 == 0);
     const bm: u32 = if (rows / experts < 64) 32 else 64;
     const scatter = @TypeOf(dst) != @TypeOf(null);
-    e.setPipeline(p[@as(usize, if (bm == 64) 3 else 2) + if (scatter) 2 else 0]);
+    e.setPipeline(p[@as(usize, if (bm == 64) 2 else 1) + if (scatter) 2 else 0]);
     if (scatter) bind(e, 8, dst);
     bind(e, 0, x);
     bind(e, 1, q.w);
     bind(e, 2, q.s);
     bind(e, 3, q.b);
-    bind(e, 4, sums);
     e.setValue(Args{ .rows = @intCast(rows), .n = @intCast(q.n), .k = @intCast(q.k), .experts = @intCast(experts) }, 5);
     bind(e, 6, y);
     bind(e, 7, offsets);
@@ -90,15 +74,14 @@ pub fn gatherTo(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: a
 }
 
 /// act = SwiGLU(x W_gate^T, x W_up^T) clipped at `limit` for expert-sorted pairs (`offsets`), pair i on x's row order[i] / topk.
-pub fn gatherGlu(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, gate: anytype, up: anytype, offsets: anytype, order: anytype, act: anytype, rows: u32, experts: u32, topk: u32, limit: f32) void {
+pub fn gatherGlu(e: mtl.ComputeEncoder, p: Pipes, x: anytype, gate: anytype, up: anytype, offsets: anytype, order: anytype, act: anytype, rows: u32, experts: u32, topk: u32, limit: f32) void {
     std.debug.assert(gate.n % 32 == 0 and gate.k % 64 == 0 and gate.n == up.n and gate.k == up.k);
     const bm: u32 = if (rows / experts < 200) 32 else 64; // 32-row tiles waste less of each expert's last tile until ~200 rows
-    e.setPipeline(p[if (bm == 64) 7 else 6]);
+    e.setPipeline(p[if (bm == 64) 6 else 5]);
     bind(e, 0, x);
     bind(e, 1, gate.w);
     bind(e, 2, gate.s);
     bind(e, 3, gate.b);
-    bind(e, 4, sums);
     e.setValue(Args{ .rows = @intCast(rows), .n = @intCast(gate.n), .k = @intCast(gate.k), .experts = @intCast(experts) }, 5);
     bind(e, 6, act);
     bind(e, 7, offsets);
@@ -162,8 +145,8 @@ test "dense and gathered, each format, against exact sums on the host" {
         const w_bytes = E * N * K * bits / 8;
         const s_n = E * N * K / group;
         const opts = mtl.ResourceOptions.shared;
-        const bufs = [_]mtl.Buffer{ try device.buffer(R * K * 2, opts), try device.buffer(w_bytes, opts), try device.buffer(s_n * 2, opts), try device.buffer(s_n * 2, opts), try device.buffer(E * 4, opts), try device.buffer(5 * R * N * 4, opts), try device.buffer(R * (K / group) * 4, opts), try device.buffer(R * 4, opts) };
-        const dst = bufs[7].slice(i32, R); // the scatter's destinations: rows reversed
+        const bufs = [_]mtl.Buffer{ try device.buffer(R * K * 2, opts), try device.buffer(w_bytes, opts), try device.buffer(s_n * 2, opts), try device.buffer(s_n * 2, opts), try device.buffer(E * 4, opts), try device.buffer(5 * R * N * 4, opts), try device.buffer(R * 4, opts) };
+        const dst = bufs[6].slice(i32, R); // the scatter's destinations: rows reversed
         for (dst, 0..) |*d, i| d.* = @intCast(R - 1 - i);
         defer for (bufs) |b| b.deinit();
         const x = bufs[0].slice(u16, R * K);
@@ -192,17 +175,15 @@ test "dense and gathered, each format, against exact sums on the host" {
         }
         defer for (pipes) |pp| for (pp) |p| p.deinit();
         const xr = .{ .buf = bufs[0], .off = @as(usize, 0) };
-        const sums = .{ .buf = bufs[6], .off = @as(usize, 0) };
         const q = .{ .w = .{ .buf = bufs[1], .off = @as(usize, 0) }, .s = .{ .buf = bufs[2], .off = @as(usize, 0) }, .b = .{ .buf = bufs[3], .off = @as(usize, 0) }, .n = @as(u32, N), .k = @as(u32, K) };
         const out = [5]struct { buf: mtl.Buffer, off: usize }{ .{ .buf = bufs[5], .off = 0 }, .{ .buf = bufs[5], .off = R * N * 4 }, .{ .buf = bufs[5], .off = 2 * R * N * 4 }, .{ .buf = bufs[5], .off = 3 * R * N * 4 }, .{ .buf = bufs[5], .off = 4 * R * N * 4 } };
         const cb = queue.commandBuffer();
         const enc = cb.compute(.serial);
-        rowSums(enc, pipes[0], @intCast(group), xr, sums, R, K);
-        gather(enc, pipes[0], xr, sums, q, .{ .buf = bufs[4], .off = @as(usize, 0) }, out[0], R, E); // bf16
-        gather(enc, pipes[1], xr, sums, q, .{ .buf = bufs[4], .off = @as(usize, 0) }, out[1], R, E); // fp32
-        dense(enc, pipes[0], xr, sums, q, out[2], R); // expert 0's weights for every row, bf16
-        dense(enc, pipes[1], xr, sums, q, out[3], R); // fp32
-        gatherTo(enc, pipes[1], xr, sums, q, .{ .buf = bufs[4], .off = @as(usize, 0) }, out[4], .{ .buf = bufs[7], .off = @as(usize, 0) }, R, E); // fp32, rows reversed
+        gather(enc, pipes[0], xr, q, .{ .buf = bufs[4], .off = @as(usize, 0) }, out[0], R, E); // bf16
+        gather(enc, pipes[1], xr, q, .{ .buf = bufs[4], .off = @as(usize, 0) }, out[1], R, E); // fp32
+        dense(enc, pipes[0], xr, q, out[2], R); // expert 0's weights for every row, bf16
+        dense(enc, pipes[1], xr, q, out[3], R); // fp32
+        gatherTo(enc, pipes[1], xr, q, .{ .buf = bufs[4], .off = @as(usize, 0) }, out[4], .{ .buf = bufs[6], .off = @as(usize, 0) }, R, E); // fp32, rows reversed
         enc.end();
         cb.commit();
         cb.wait();
@@ -219,27 +200,14 @@ test "dense and gathered, each format, against exact sums on the host" {
             for ([2]usize{ ex, 0 }, 0..) |use, pass| for (0..N) |n| {
                 const row = use * N + n;
                 var sum: f64 = 0;
-                var mag: f64 = 0;
-                for (0..K / group) |g| {
-                    var dot: f64 = 0;
-                    var dmag: f64 = 0; // the sizes the fp32 sums carry: codes (4-bit ones plus 128) times x
-                    var xs: f64 = 0;
-                    var xmag: f64 = 0;
-                    const off: f64 = if (bits == 4) 128 else 0;
-                    for (0..group) |j| {
-                        const k = g * group + j;
-                        const qv: u32 = code(wb, (row * K + k) * bits, bits);
-                        const xv: f64 = f32of(x[r * K + k]);
-                        dot += @as(f64, @floatFromInt(qv)) * xv;
-                        dmag += (@as(f64, @floatFromInt(qv)) + off) * @abs(xv);
-                        xs += xv;
-                        xmag += @abs(xv);
-                    }
-                    const sg = row * (K / group) + g;
-                    const s: f64 = f32of(sc[sg]);
-                    const b: f64 = f32of(bi[sg]);
-                    sum += s * dot + b * xs;
-                    mag += s * dmag + @abs(b - off * s) * xmag;
+                var mag: f64 = 0; // the sizes the fp32 sums carry: the weights as the tile rounds them, times x
+                for (0..K) |k| {
+                    const sg = row * (K / group) + k / group;
+                    const qv: f32 = @floatFromInt(code(wb, (row * K + k) * bits, bits));
+                    const w = f32of(bf16(@mulAdd(f32, @floatCast(f32of(sc[sg])), qv, @floatCast(f32of(bi[sg])))));
+                    const xv: f64 = f32of(x[r * K + k]);
+                    sum += w * xv;
+                    mag += @abs(w * xv);
                 }
                 const got = if (pass == 0) g32[r * N + n] else d32[r * N + n];
                 const got16 = if (pass == 0) g16[r * N + n] else d16[r * N + n];
@@ -266,7 +234,7 @@ test "a batch of dense products with pitches: each batch's rows of x, the weight
     var prng = std.Random.DefaultPrng.init(5);
     const rnd = prng.random();
     const opts = mtl.ResourceOptions.shared;
-    const bufs = [_]mtl.Buffer{ try device.buffer(R * B * K * 2, opts), try device.buffer(B * N * K / 2, opts), try device.buffer(B * N * K / 64 * 2, opts), try device.buffer(B * N * K / 64 * 2, opts), try device.buffer(R * B * N * 2, opts), try device.buffer(R * B * (K / 64) * 4, opts) };
+    const bufs = [_]mtl.Buffer{ try device.buffer(R * B * K * 2, opts), try device.buffer(B * N * K / 2, opts), try device.buffer(B * N * K / 64 * 2, opts), try device.buffer(B * N * K / 64 * 2, opts), try device.buffer(R * B * N * 2, opts) };
     defer for (bufs) |b| b.deinit();
     const x = bufs[0].slice(u16, R * B * K);
     for (x) |*v| v.* = bf16(rnd.float(f32) * 2 - 1);
@@ -286,12 +254,11 @@ test "a batch of dense products with pitches: each batch's rows of x, the weight
     for (names, 0..) |n, i| pipes[i] = try mtl.Pipeline.init(device, lib, n, false);
     defer for (pipes) |p| p.deinit();
     const xr = .{ .buf = bufs[0], .off = @as(usize, 0) };
-    const sums = .{ .buf = bufs[5], .off = @as(usize, 0) };
     const q = .{ .w = .{ .buf = bufs[1], .off = @as(usize, 0) }, .s = .{ .buf = bufs[2], .off = @as(usize, 0) }, .b = .{ .buf = bufs[3], .off = @as(usize, 0) }, .n = @as(u32, N), .k = @as(u32, K) };
     const cb = queue.commandBuffer();
     const enc = cb.compute(.serial);
-    rowSums(enc, pipes, 64, xr, sums, R * B, K); // x as [R * B, K]: batch b's row r is row r * B + b
-    denseBatch(enc, pipes, xr, sums, q, .{ .buf = bufs[4], .off = @as(usize, 0) }, R, B, .{ .x_row = B * K, .y_row = B * N, .sums_row = B, .x_batch = K, .y_batch = N, .sums_batch = 1, .w_batch = N });
+    // x as [R * B, K]: batch b's row r is row r * B + b
+    denseBatch(enc, pipes, xr, q, .{ .buf = bufs[4], .off = @as(usize, 0) }, R, B, .{ .x_row = B * K, .y_row = B * N, .x_batch = K, .y_batch = N, .w_batch = N });
     enc.end();
     cb.commit();
     cb.wait();
@@ -300,24 +267,15 @@ test "a batch of dense products with pitches: each batch's rows of x, the weight
     for (0..R) |r| for (0..B) |b| for (0..N) |n| {
         const row = b * N + n;
         var sum: f64 = 0;
-        var mag: f64 = 0;
-        for (0..K / 64) |g| {
-            var dot: f64 = 0;
-            var xs: f64 = 0;
-            var xmag: f64 = 0;
-            const xrow = (r * B + b) * K;
-            for (0..64) |j| {
-                const k = g * 64 + j;
-                const qv: u32 = (wb[(row * K + k) / 2] >> @intCast(4 * (k % 2))) & 15;
-                const xv: f64 = f32of(x[xrow + k]);
-                dot += @as(f64, @floatFromInt(qv)) * xv;
-                xs += xv;
-                xmag += @abs(xv);
-            }
-            const sg = row * (K / 64) + g;
-            const s: f64 = f32of(sc[sg]);
-            sum += s * dot + @as(f64, f32of(bi[sg])) * xs;
-            mag += s * 143 * xmag + @abs(f32of(bi[sg]) - 128 * s) * xmag; // the sizes the fp32 sums carry (codes plus 128)
+        var mag: f64 = 0; // the sizes the fp32 sums carry: the weights as the tile rounds them, times x
+        const xrow = (r * B + b) * K;
+        for (0..K) |k| {
+            const sg = row * (K / 64) + k / 64;
+            const qv: f32 = @floatFromInt((wb[(row * K + k) / 2] >> @intCast(4 * (k % 2))) & 15);
+            const w = f32of(bf16(@mulAdd(f32, @floatCast(f32of(sc[sg])), qv, @floatCast(f32of(bi[sg])))));
+            const xv: f64 = f32of(x[xrow + k]);
+            sum += w * xv;
+            mag += @abs(w * xv);
         }
         const got: f64 = f32of(y[(r * B + b) * N + n]);
         try std.testing.expect(@abs(got - sum) <= @abs(sum) / 128.0 + 4e-6 * mag); // one bf16 rounding of the fp32 sum

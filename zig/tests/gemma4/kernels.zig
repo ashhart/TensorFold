@@ -140,8 +140,6 @@ fn checkAffine(c: *Ctx) !void {
     const xb = try c.device.buffer(x.len * 2, shared);
     defer xb.deinit();
     @memcpy(xb.slice(u16, x.len), x);
-    const sums = try c.device.buffer(16 * 84 * 4, shared);
-    defer sums.deinit();
     const yb = try c.device.buffer(16 * 16384 * 2, shared);
     defer yb.deinit();
     const w = try c.ckpt.get("language_model.model.layers.0.self_attn.q_proj.weight");
@@ -151,8 +149,7 @@ fn checkAffine(c: *Ctx) !void {
     const q = Q{ .w = .{ .buf = w.buffer, .off = w.offset }, .s = .{ .buf = sc.buffer, .off = sc.offset }, .b = .{ .buf = bi.buffer, .off = bi.offset }, .n = 8192, .k = 5376 };
     const cb = c.queue.commandBuffer();
     const e = cb.compute(.serial);
-    tf.affine_mm.rowSums(e, pipes, 64, lane.Ref{ .buf = xb }, lane.Ref{ .buf = sums }, 16, 5376);
-    tf.affine_mm.denseBatch(e, pipes, lane.Ref{ .buf = xb }, lane.Ref{ .buf = sums }, q, lane.Ref{ .buf = yb }, 16, 1, .{ .x_row = 5376, .y_row = 16384 });
+    tf.affine_mm.denseBatch(e, pipes, lane.Ref{ .buf = xb }, q, lane.Ref{ .buf = yb }, 16, 1, .{ .x_row = 5376, .y_row = 16384 });
     e.end();
     cb.commit();
     cb.wait();
