@@ -23,6 +23,9 @@ pub const JoinError = error{
 pub const Identity = agreement.Identity;
 pub const Field = agreement.Field;
 pub const Fault = agreement.Fault;
+pub const Step = agreement.Step;
+pub const Verdict = agreement.Verdict;
+pub const How = agreement.How;
 
 /// What a rank brings to its join: its place, its GPU and policy, what it runs, and where a differing rank is named.
 pub const Join = struct {
@@ -86,6 +89,7 @@ pub const Link = struct {
     pub const VTable = struct {
         send: *const fn (ptr: *anyopaque, words: []const u32) LinkError!void,
         recv: *const fn (ptr: *anyopaque, gpa: std.mem.Allocator, out: *std.ArrayList(u32)) LinkError!void,
+        agree: *const fn (ptr: *anyopaque, mine: Step, how: How) LinkError!Verdict,
     };
 
     /// Rank 0: `words` to every follower.
@@ -96,6 +100,11 @@ pub const Link = struct {
     /// A follower: rank 0's next message into `out` (cleared first).
     pub fn recv(l: Link, gpa: std.mem.Allocator, out: *std.ArrayList(u32)) LinkError!void {
         return l.vtable.recv(l.ptr, gpa, out);
+    }
+
+    /// A startup step every rank takes: this rank's outcome in, every rank's verdict out (a closed link refuses).
+    pub fn agree(l: Link, mine: Step, how: How) LinkError!Verdict {
+        return l.vtable.agree(l.ptr, mine, how);
     }
 };
 

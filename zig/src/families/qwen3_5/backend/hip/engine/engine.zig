@@ -43,6 +43,8 @@ pub const Options = struct {
     rank: usize = 0,
     world: usize = 1,
     group: ?hip.collective.Group = null,
+    /// The startup steps the ranks take together over the group's link (null: the engine's own).
+    startup: ?*hip.Startup = null,
     /// Replay rounds from captured graphs (the policy's `graphs` turns it off).
     graphs: bool = true,
     /// What the run may use, resolved once by whoever opens the engine.
@@ -91,8 +93,10 @@ pub const Engine = struct {
     /// The lane rounds' plan, graph choice and keep.
     round: lane_round.State = undefined,
 
-    /// The model on the device, its scratch not yet sized: `size` takes the capacity the memory plan fits.
+    /// The model on the device, its scratch not yet sized; a rank that fails here leaves the refusal to its caller.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
+        var own: hip.Startup = .{ .link = if (o.world > 1) (o.group orelse return error.NoGroup).link() else null };
+        const steps = o.startup orelse &own;
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
@@ -113,18 +117,23 @@ pub const Engine = struct {
         e.stream = try hip.Stream.init(&e.driver);
         errdefer e.stream.deinit();
         const group: ?slicing.Rank = if (o.world > 1) .{ .rank = o.rank, .world = o.world } else null;
+        // RCCL's init waits for every rank: none enters it unless every rank got this far
+        _ = try steps.done(.{ 0, 0 }, .first);
         if (group != null) e.comm = try (o.group orelse return error.NoGroup).open();
         errdefer if (group != null) e.comm.close();
+        _ = try steps.done(.{ 0, 0 }, .first);
         if (o.preflight) |pf| {
             // a rank loads its share of the checkpoint, near enough to refuse before reading it
             pf.* = .{ .pool = try e.budget(io), .held = hip.usage(false).device, .weights = admission.weightBytes(io, dir) / o.world };
             if (pf.weights > pf.pool.room(pf.held)) return error.WeightsDoNotFit;
         }
+        _ = try steps.done(.{ 0, 0 }, .first);
         e.weights = try weights.Model.loadRank(gpa, io, &e.driver, dir, group);
         errdefer e.weights.deinit();
         e.bridge = try bridge.Bridge.init(gpa, &e.driver, &e.weights, e.act);
         errdefer e.bridge.deinit();
         if (group != null) e.bridge.model.tp = e.comm;
+        _ = try steps.done(.{ 0, 0 }, .first);
         return e;
     }
 
@@ -178,36 +187,6 @@ pub const Engine = struct {
         return e.sizedBytes(try e.arenaBytes(rows, prompt_rows, capacity), rows, prompt_rows, pool_pages);
     }
 
-    /// The least of each value over the ranks, the same on every rank (the streams and a prompt cache they all fit).
-    pub fn least(e: *Engine, mine: [2]u64) ![2]u64 {
-        return e.agree(mine, .least);
-    }
-
-    /// Rank 0's values on every rank: what rank 0 was asked for, such as the window its page tables cover.
-    pub fn first(e: *Engine, mine: [2]u64) ![2]u64 {
-        return e.agree(mine, .first);
-    }
-
-    fn agree(e: *Engine, mine: [2]u64, how: enum { least, first }) ![2]u64 {
-        if (e.o.world < 2) return mine;
-        const world = e.o.world;
-        var host = try hip.HostBuffer.alloc(&e.driver, 16 * (1 + world));
-        defer host.free();
-        var send = try hip.DeviceBuffer.alloc(&e.driver, 16);
-        defer send.free();
-        var recv = try hip.DeviceBuffer.alloc(&e.driver, 16 * world);
-        defer recv.free();
-        host.slice(u64)[0..2].* = mine;
-        try send.uploadAsync(0, host.view(0, 16), e.stream);
-        try e.comm.allGather(send.base(), recv.base(), 2, .i64, e.stream.handle);
-        try recv.downloadAsync(0, host.view(16, 16 * (1 + world)), e.stream);
-        try e.stream.synchronize();
-        if (how == .first) return host.slice(u64)[2..4].*;
-        var out = mine;
-        for (host.slice(u64)[2 .. 2 * (1 + world)], 0..) |v, i| out[i % 2] = @min(out[i % 2], v);
-        return out;
-    }
-
     /// Device bytes beside the weights: `size`'s scratch and pool, `streams` lanes, `snapshots`, rank 0's head.
     pub fn planBytes(e: *Engine, streams: usize, rows: usize, capacity: usize, pool_pages: usize, snapshots: usize) !usize {
         const m = e.model();
@@ -222,8 +201,20 @@ pub const Engine = struct {
         return admission.budget(e.gpa, io, e.ctx);
     }
 
-    /// Load and size in one: `o.capacity` positions, refused when the plan does not fit the memory.
+    /// Load and size in one: `o.capacity` positions, refused when the plan does not fit the memory (on every rank).
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
+        var own: hip.Startup = .{ .link = if (o.world > 1) (o.group orelse return error.NoGroup).link() else null };
+        var with = o;
+        with.startup = o.startup orelse &own;
+        return openSized(gpa, io, dir, with) catch |err| {
+            // this rank's own failure reaches the others at the step they wait at
+            if (err != error.PeerRefused and err != error.LinkFailed) with.startup.?.refuse(@errorName(err));
+            return err;
+        };
+    }
+
+    fn openSized(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
+        const steps = o.startup.?;
         const held = hip.usage(false).device;
         const e = try load(gpa, io, dir, o);
         errdefer e.deinit();
@@ -236,6 +227,7 @@ pub const Engine = struct {
             return error.OutOfDeviceMemory;
         }
         try e.size(o.capacity, pool_pages);
+        _ = try steps.done(.{ 0, 0 }, .first);
         return e;
     }
 

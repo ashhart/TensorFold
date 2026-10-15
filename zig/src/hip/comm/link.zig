@@ -185,6 +185,24 @@ pub const Link = struct {
         try out.resize(gpa, n);
         try readAll(l.fds[0], std.mem.sliceAsBytes(out.items));
     }
+
+    /// A startup step: each follower's outcome to rank 0, rank 0's verdict to all; a rank whose link closed refuses.
+    pub fn agree(l: *const Link, mine: agree_.Step, how: agree_.How) Error!agree_.Verdict {
+        if (l.rank != 0) {
+            try writeAll(l.fds[0], std.mem.asBytes(&mine));
+            var v: agree_.Verdict = undefined;
+            try readAll(l.fds[0], std.mem.asBytes(&v));
+            return v;
+        }
+        var steps: [max_world]agree_.Step = undefined;
+        steps[0] = mine;
+        for (1..l.world) |r| readAll(l.fds[r - 1], std.mem.asBytes(&steps[r])) catch {
+            steps[r] = .refuse("its link to rank 0 closed");
+        };
+        const v = agree_.combine(steps[0..l.world], how);
+        for (l.fds[0 .. l.world - 1]) |fd| writeAll(fd, std.mem.asBytes(&v)) catch {};
+        return v;
+    }
 };
 
 /// A rank's hello, its layout checked before the rest is read.

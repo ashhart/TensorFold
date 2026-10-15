@@ -1,4 +1,4 @@
-//! What a tensor-parallel group's ranks agree on at join: what each runs, and the field that differs.
+//! What a tensor-parallel group's ranks agree on: what they run at join, and each startup step.
 
 const std = @import("std");
 
@@ -41,6 +41,75 @@ pub const Field = enum(u32) {
 /// The rank whose join differs from rank 0's, and in what (filled when a join fails with error.RanksDiffer).
 pub const Fault = struct { field: Field = .layout, rank: u32 = 0 };
 
-test "the identity keeps its wire size" {
+/// A startup step's outcome on one rank: two values, or why it cannot go on (the first 96 bytes).
+pub const Step = extern struct {
+    refused: u32 = 0,
+    len: u32 = 0,
+    values: [2]u64 = .{ 0, 0 },
+    why: [96]u8 = @splat(0),
+
+    pub fn ok(values: [2]u64) Step {
+        return .{ .values = values };
+    }
+
+    pub fn refuse(why: []const u8) Step {
+        var s: Step = .{ .refused = 1 };
+        s.len = @intCast(@min(why.len, s.why.len));
+        @memcpy(s.why[0..s.len], why[0..s.len]);
+        return s;
+    }
+};
+
+/// Every rank's verdict on a step: the values combined, or the first rank (in rank order) that refused and why.
+pub const Verdict = extern struct {
+    refused: u32 = 0,
+    rank: u32 = 0,
+    values: [2]u64 = .{ 0, 0 },
+    len: u32 = 0,
+    pad: u32 = 0,
+    why: [96]u8 = @splat(0),
+
+    pub fn reason(v: *const Verdict) []const u8 {
+        return v.why[0..@min(v.len, v.why.len)];
+    }
+};
+
+/// How a step's values combine: rank 0's (what it was asked for), or the least over the ranks (what every rank fits).
+pub const How = enum(u32) { first, least };
+
+/// The verdict on `steps`, one per rank in rank order: the first refusal stands for every rank.
+pub fn combine(steps: []const Step, how: How) Verdict {
+    for (steps, 0..) |s, r| if (s.refused != 0) return .{
+        .refused = 1,
+        .rank = @intCast(r),
+        .len = s.len,
+        .why = s.why,
+    };
+    var v: Verdict = .{ .values = steps[0].values };
+    if (how == .least) for (steps[1..]) |s| {
+        v.values[0] = @min(v.values[0], s.values[0]);
+        v.values[1] = @min(v.values[1], s.values[1]);
+    };
+    return v;
+}
+
+test "a step's verdict: rank 0's values, the least of each, or the first refusal by rank" {
+    const steps = [_]Step{ .ok(.{ 8, 30 }), .ok(.{ 6, 40 }), .ok(.{ 7, 20 }) };
+    try std.testing.expectEqual([2]u64{ 8, 30 }, combine(&steps, .first).values);
+    try std.testing.expectEqual([2]u64{ 6, 20 }, combine(&steps, .least).values);
+    try std.testing.expectEqual(@as(u32, 0), combine(&steps, .least).refused);
+    const two = [_]Step{ .ok(.{ 1, 1 }), .refuse("--parallel 4 needs 9.5 GiB"), .refuse("later") };
+    const v = combine(&two, .least);
+    try std.testing.expectEqual(@as(u32, 1), v.refused);
+    try std.testing.expectEqual(@as(u32, 1), v.rank);
+    try std.testing.expectEqualStrings("--parallel 4 needs 9.5 GiB", v.reason());
+    const text: [200]u8 = @splat('x');
+    const long = Step.refuse(&text);
+    try std.testing.expectEqual(@as(u32, 96), long.len);
+}
+
+test "the wire layouts keep their sizes" {
     try std.testing.expectEqual(@as(usize, 96), @sizeOf(Identity));
+    try std.testing.expectEqual(@as(usize, 120), @sizeOf(Step));
+    try std.testing.expectEqual(@as(usize, 128), @sizeOf(Verdict));
 }

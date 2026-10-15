@@ -1,4 +1,4 @@
-//! The link's join over loopback TCP, every rank a thread: what each rank hears.
+//! The link's join and startup steps over loopback TCP, every rank a thread: what each rank hears.
 
 const std = @import("std");
 const posix = std.posix;
@@ -15,6 +15,11 @@ const Rank = struct {
     err: ?link.Error = null,
     fault: agree.Fault = .{},
     words: [Policy.word_count]u32 = @splat(0),
+    /// After joining: the startup steps it takes, and their verdicts; `leave` closes its link instead.
+    steps: []const agree.Step = &.{},
+    verdicts: [4]agree.Verdict = undefined,
+    taken: usize = 0,
+    leave: bool = false,
 
     fn run(r: *Rank) void {
         const id: rccl.UniqueId = .{ .internal = @splat(7) };
@@ -25,6 +30,18 @@ const Rank = struct {
         };
         r.got = out[0];
         r.words = out[2];
+        if (r.leave) {
+            r.got.?.close();
+            r.got = null;
+            return;
+        }
+        for (r.steps) |s| {
+            r.verdicts[r.taken] = r.got.?.agree(s, .least) catch |err| {
+                r.err = err;
+                return;
+            };
+            r.taken += 1;
+        }
     }
 };
 
@@ -129,4 +146,39 @@ test "hellos differ field by field in a fixed order" {
     try std.testing.expectEqual(agree.Field.layout, link.differs(lead, h, &taken).?);
     taken[1] = true;
     try std.testing.expectEqual(agree.Field.rank, link.differs(lead, hello(1, 2), &taken).?);
+}
+
+test "startup steps: the least of each value on every rank, then one rank's refusal on every rank" {
+    const ok0 = [_]agree.Step{ .ok(.{ 8, 30 }), .ok(.{ 1, 1 }) };
+    const ok1 = [_]agree.Step{ .ok(.{ 6, 40 }), .ok(.{ 1, 1 }) };
+    const no2 = [_]agree.Step{ .ok(.{ 7, 20 }), .refuse("--parallel 4 does not fit") };
+    var ranks = [_]Rank{
+        .{ .hello = hello(0, 3), .port = 0, .steps = &ok0 },
+        .{ .hello = hello(1, 3), .port = 0, .steps = &ok1 },
+        .{ .hello = hello(2, 3), .port = 0, .steps = &no2 },
+    };
+    try group(&ranks);
+    for (ranks) |r| {
+        try std.testing.expect(r.err == null);
+        try std.testing.expectEqual([2]u64{ 6, 20 }, r.verdicts[0].values);
+        try std.testing.expectEqual(@as(u32, 1), r.verdicts[1].refused);
+        try std.testing.expectEqual(@as(u32, 2), r.verdicts[1].rank);
+        try std.testing.expectEqualStrings("--parallel 4 does not fit", r.verdicts[1].reason());
+    }
+}
+
+test "a rank that leaves before a step is that step's refusal on every rank that stays" {
+    const one = [_]agree.Step{.ok(.{ 1, 1 })};
+    var ranks = [_]Rank{
+        .{ .hello = hello(0, 3), .port = 0, .steps = &one },
+        .{ .hello = hello(1, 3), .port = 0, .steps = &one },
+        .{ .hello = hello(2, 3), .port = 0, .leave = true },
+    };
+    try group(&ranks);
+    for (ranks[0..2]) |r| {
+        try std.testing.expect(r.err == null);
+        try std.testing.expectEqual(@as(u32, 1), r.verdicts[0].refused);
+        try std.testing.expectEqual(@as(u32, 2), r.verdicts[0].rank);
+        try std.testing.expectEqualStrings("its link to rank 0 closed", r.verdicts[0].reason());
+    }
 }

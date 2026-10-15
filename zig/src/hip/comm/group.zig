@@ -81,7 +81,7 @@ fn of(ptr: *anyopaque) *Joined {
 }
 
 const group_vtable: collective.Group.VTable = .{ .link = linkOf, .open = open, .close = close };
-const link_vtable: collective.Link.VTable = .{ .send = send, .recv = recv };
+const link_vtable: collective.Link.VTable = .{ .send = send, .recv = recv, .agree = agree };
 const comm_vtable: collective.Comm.VTable = .{ .all_reduce = allReduce, .all_gather = allGather, .broadcast = broadcast, .close = closeComm };
 
 fn linkOf(ptr: *anyopaque) collective.Link {
@@ -111,6 +111,11 @@ fn send(ptr: *anyopaque, words: []const u32) collective.LinkError!void {
 fn recv(ptr: *anyopaque, gpa: std.mem.Allocator, out: *std.ArrayList(u32)) collective.LinkError!void {
     const l: *const link_mod.Link = @ptrCast(@alignCast(ptr));
     l.recv(gpa, out) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.LinkFailed;
+}
+
+fn agree(ptr: *anyopaque, mine: collective.Step, how: collective.How) collective.LinkError!collective.Verdict {
+    const l: *const link_mod.Link = @ptrCast(@alignCast(ptr));
+    return l.agree(mine, how) catch error.LinkFailed;
 }
 
 fn comm(ptr: *anyopaque) *rccl_mod.Comm {
