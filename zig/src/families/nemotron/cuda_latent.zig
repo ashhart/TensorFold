@@ -96,18 +96,19 @@ pub fn checkHeld(c: Config) !void {
     return error.CheckpointShareMissing;
 }
 
-/// What every rank must agree on before the weights load: the model, its cut and the build.
+/// What every rank must agree on before the weights load: the model, its cut, its bytes and the build.
 const Fingerprint = extern struct {
-    layout: u32 = 3, // this struct's version
+    layout: u32 = 4, // this struct's version
     rank: u32,
     world: u32,
     ck: u32, // the checkpoint's own math (--precision checkpoint) or full precision
     dims: [12]u64, // the config's sizes, rank and world left out
     kinds: [32]u8, // sha256 of the block pattern
     program: [32]u8, // sha256 of this executable
+    weights: [32]u8, // the checkpoint's digest (cuda_identity.zig): config, index, shard layouts and bytes
 
-    fn of(c: Config, program: [32]u8) Fingerprint {
-        var f: Fingerprint = .{ .rank = @intCast(c.rank), .world = @intCast(c.world), .ck = @intFromBool(c.ck), .dims = .{ c.hidden, c.vocab, c.layers, c.experts, c.top_k, c.latent, c.expert_width, c.shared_width, c.shares, c.mamba_heads, c.heads, c.kv_heads }, .kinds = undefined, .program = program };
+    fn of(c: Config, program: [32]u8, weights: [32]u8) Fingerprint {
+        var f: Fingerprint = .{ .rank = @intCast(c.rank), .world = @intCast(c.world), .ck = @intFromBool(c.ck), .dims = .{ c.hidden, c.vocab, c.layers, c.experts, c.top_k, c.latent, c.expert_width, c.shared_width, c.shares, c.mamba_heads, c.heads, c.kv_heads }, .kinds = undefined, .program = program, .weights = weights };
         var kinds: [@import("config.zig").max_layers]u8 = undefined;
         for (c.kinds[0..c.layers], kinds[0..c.layers]) |k, *b| b.* = @intFromEnum(k);
         std.crypto.hash.sha2.Sha256.hash(kinds[0..c.layers], &f.kinds, .{});
@@ -116,21 +117,22 @@ const Fingerprint = extern struct {
 };
 
 /// Every rank's fingerprint gathered: anything but the rank differing from rank 0's stops every rank.
-pub fn agree(gpa: std.mem.Allocator, io: std.Io, c: Config, g: *const cuda.tp_group.Group, d: *const cuda.Driver, s: cuda.Stream) !void {
+pub fn agree(gpa: std.mem.Allocator, io: std.Io, c: Config, g: *const cuda.tp_group.Group, d: *const cuda.Driver, s: cuda.Stream, dir: []const u8) !void {
     var program: [32]u8 = undefined;
     const exe = try std.Io.Dir.cwd().readFileAlloc(io, "/proc/self/exe", gpa, .limited(1 << 31));
     defer gpa.free(exe);
     std.crypto.hash.sha2.Sha256.hash(exe, &program, .{});
+    const weights = try @import("cuda_identity.zig").digest(gpa, io, dir, c.held != null);
     var all: [16]Fingerprint = undefined;
     if (c.world > all.len) return error.TooManyRanks;
-    try g.gather(Fingerprint, d, s, Fingerprint.of(c, program), all[0..c.world]);
+    try g.gather(Fingerprint, d, s, Fingerprint.of(c, program, weights), all[0..c.world]);
     for (all[0..c.world], 0..) |f, r| {
         var x = f;
         x.rank = all[0].rank;
-        if (f.rank != r or !std.mem.eql(u8, std.mem.asBytes(&x), std.mem.asBytes(&all[0]))) {
-            std.log.err("rank {d}'s model, cut or build differs from rank 0's: every rank stops", .{r});
-            return error.RankMismatch;
-        }
+        if (f.rank == r and std.mem.eql(u8, std.mem.asBytes(&x), std.mem.asBytes(&all[0]))) continue;
+        const what = if (!std.mem.eql(u8, &f.weights, &all[0].weights)) "checkpoint's bytes (another revision or copy)" else if (!std.mem.eql(u8, &f.program, &all[0].program)) "build" else "model, cut or precision";
+        std.log.err("rank {d}'s {s} differs from rank 0's: every rank stops", .{ r, what });
+        return error.RankMismatch;
     }
     // p2p links set up now, while both ranks run eagerly: rank 0's captured graphs would wait on the setup forever
     var link = try cuda.DeviceBuffer.alloc(d, 128);

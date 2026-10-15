@@ -127,7 +127,7 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     if (c.ck) try k.loadCk(ctx);
     var g = try cuda.tp_group.Group.open(c.rank, c.world);
     defer g.close();
-    try latent.agree(gpa, io, c, &g, ctx.d, stream);
+    try latent.agree(gpa, io, c, &g, ctx.d, stream, dir);
     const ops: kern.Ops = .{ .k = &k, .s = stream };
     var w: W.Weights = .{ .gpa = gpa, .config = c };
     defer w.deinit();

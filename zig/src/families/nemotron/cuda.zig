@@ -48,5 +48,6 @@ test {
     _ = @import("cuda_train_back.zig");
     _ = @import("cuda_latent.zig");
     _ = @import("cuda_latent_ck.zig");
+    _ = @import("cuda_identity.zig");
     _ = worker;
 }
