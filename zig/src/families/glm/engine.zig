@@ -17,6 +17,7 @@ const checks = @import("checks.zig");
 const load_plan = @import("load_plan.zig");
 const plain_rounds = @import("plain_rounds.zig");
 const frags = @import("../../core/frags.zig");
+const residency = @import("residency.zig");
 const Ref = wts.Ref;
 
 pub const Reason = enum { stop, length, cancelled };
@@ -222,20 +223,7 @@ pub const Engine = struct {
         }
         if (vision) |lim| try vision_mod.attach(e, gpa, dir, f.bytes[0..f.size], lim); // --vision: the tower and its rows
         errdefer if (e.vision) |v| v.deinit();
-        // opt-in: wiring 181 GB leaves macOS nothing to reclaim if another model shares the Mac (Flash Next runs without)
-        const wire = std.c.getenv("GLM_RESIDENCY") != null and mtl.ResidencySet.within("glm", 0, e.residencyBytes());
-        if (!wire) {} else if (e.device.residencySet(e.w.buffers.items.len + e.arena.buffers.items.len + if (e.vision) |v| v.buffers().len else 0)) |set| {
-            for (e.w.buffers.items) |b| set.add(b);
-            for (e.arena.buffers.items) |b| set.add(b);
-            if (e.vision) |v| for (v.buffers()) |b| set.add(b);
-            set.commit();
-            set.requestResidency();
-            e.queue.addResidencySet(set);
-            e.residency = set;
-        } else |_| {}
-        // every Metal engine offers its queue to the idle keepalive; the sets list only when the model is resident
-        if (e.residency) |set| e.keepalive_sets[0] = set;
-        e.keepalive_target = .{ .queue = e.queue, .sets = if (e.residency != null) &e.keepalive_sets else &.{} };
+        residency.wire(e); // GLM_RESIDENCY's opt-in set, then the idle keepalive's target
         // a process's first prompt pays a one-time cost: every rank of a pair pays it here at the same step (GLM_NO_WARMUP: skip)
         if (e.pr != null and cap >= 128 and std.c.getenv("GLM_NO_WARMUP") == null) {
             var ids: [64]u32 = undefined;
@@ -290,17 +278,6 @@ pub const Engine = struct {
         e.queue.deinit();
         e.device.deinit();
         gpa.destroy(e);
-    }
-
-    /// What GLM_RESIDENCY's set would wire: every weight and arena buffer.
-    fn residencyBytes(e: *const Engine) u64 {
-        var n: u64 = 0;
-        for (e.w.buffers.items) |b| n += b.length();
-        for (e.arena.buffers.items) |b| n += b.length();
-        if (e.vision) |v| {
-            for (v.buffers()) |b| n += b.length(); // the tower joins the set, so its bytes count
-        }
-        return n;
     }
 
     pub fn hasMtp(e: *const Engine) bool {
