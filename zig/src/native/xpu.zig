@@ -6,6 +6,7 @@ const Drafter = xq.drafter.Drafter;
 const lanes = @import("lanes");
 const sampling = lanes.sampling;
 const XpuLanes = @import("xpu_lanes.zig").Lanes;
+const admit = @import("xpu_admit.zig");
 const Allocator = std.mem.Allocator;
 
 pub const backends: []const []const u8 = &.{"xpu"};
@@ -111,10 +112,8 @@ fn cacheBudget(o: api.Open) u64 {
 fn slotsThatFit(runner: *xq.Runner, want: u32, reserve: u64) !u32 {
     const margin: u64 = 2 << 30; // activations of later chunks, the drafter's growth
     const mem = try runner.d.g.memory();
-    const free = @min(mem.free, mem.size -| runner.d.allocated);
-    if (free < margin + reserve) return 0;
-    const more: u32 = @intCast(@min((free - margin - reserve) / runner.slotBytes(), xq.MAX_SLOTS - 1));
-    return @min(want, 1 + more);
+    const m: admit.Memory = .{ .free = mem.free, .size = mem.size, .allocated = runner.d.allocated };
+    return admit.streamsThatFit(m, margin, reserve, runner.slotBytes(), want, xq.MAX_SLOTS);
 }
 
 fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter, o: api.Open, context: u32) !api.Opened {
