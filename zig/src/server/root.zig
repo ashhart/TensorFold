@@ -62,6 +62,8 @@ test {
     _ = @import("slide_take.zig");
     _ = @import("slide_teacher.zig");
     _ = @import("slide_pick.zig");
+    _ = @import("slide_context.zig");
+    _ = @import("slide_talks.zig");
     _ = @import("startup.zig");
     _ = @import("responses_include_test.zig");
     _ = @import("cortheon/cortheon.zig");

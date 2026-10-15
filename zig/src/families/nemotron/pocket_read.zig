@@ -11,15 +11,18 @@ const subjectRow = pocket.subjectRow;
 const valueRow = pocket.valueRow;
 
 const stride = 3; // every third row of another prompt is one the fact's neurons stay silent on
+const sample = 8; // every eighth row of a conversation before a question, read with the first question asked after it
 
 /// What the last read phase read: each example's fingerprint, the pocket's weights' then, whether it read to its end.
 pub const Seen = struct {
     keys: std.ArrayList(u64) = .empty,
     state: u64 = 0,
     whole: bool = false,
+    talks: std.ArrayList(u64) = .empty, // the conversations whose own rows were read (each with its first question)
 
     pub fn deinit(s: *Seen, gpa: std.mem.Allocator) void {
         s.keys.deinit(gpa);
+        s.talks.deinit(gpa);
     }
 };
 
@@ -27,7 +30,7 @@ pub const Seen = struct {
 fn key(ex: Example, kind: Kind) u64 {
     var h = std.hash.Wyhash.init(@backingInt(kind));
     h.update(std.mem.sliceAsBytes(ex.ids));
-    h.update(std.mem.asBytes(&[4]u32{ ex.start, ex.decide, ex.subject, ex.value }));
+    h.update(std.mem.asBytes(&[5]u32{ ex.start, ex.decide, ex.subject, ex.value, ex.context }));
     return h.final();
 }
 
@@ -56,41 +59,113 @@ pub fn again(p: anytype) !usize {
         }
     }
     s.keys.clearRetainingCapacity();
+    s.talks.clearRetainingCapacity();
     s.state = now;
     s.whole = false;
     return 0;
 }
 
-/// As many of the next examples as one pass holds, read side by side; the fit next once all are read.
+/// As many of the next examples as one pass holds, side by side (one in a conversation alone, by taps); then the fit.
 pub fn once(p: anytype, t: anytype) !bool {
     const per_pass = @typeInfo(@TypeOf(t.spans)).array.len;
+    const tapping = comptime @hasDecl(@TypeOf(t.*), "tapRows");
+    const first = p.pickRead(p.at) orelse {
+        p.read.whole = true;
+        p.next(.fit);
+        return false;
+    };
+    if (tapping and first.ex.context > 0) {
+        try tapOne(p, t, first.ex, first.kind, @intCast(p.at));
+        try p.read.keys.append(p.gpa, key(first.ex, first.kind));
+        p.at += 1;
+        return false;
+    }
     var seqs: [per_pass]pack.Seq = undefined;
     var kinds: [per_pass]Kind = undefined;
     var n: usize = 0;
     while (n < per_pass) : (n += 1) {
         const got = p.pickRead(p.at + n) orelse break;
+        if (tapping and got.ex.context > 0) break;
         seqs[n] = pack.seq(got.ex);
         kinds[n] = got.kind;
-    }
-    if (n == 0) {
-        p.read.whole = true;
-        p.next(.fit);
-        return false;
     }
     const m = pack.fits(t, seqs[0..n]);
     var out: [per_pass]pack.Result = undefined;
     try t.pass(seqs[0..m], .keys, pack.turn, out[0..m]);
+    var rows: std.ArrayList(Row) = .empty;
+    defer rows.deinit(p.gpa);
     for (0..m) |i| {
         const ex = p.pickRead(p.at + i).?.ex;
-        try label(p, t, ex, kinds[i], @intCast(p.at + i), t.spans[i].at);
+        rows.clearRetainingCapacity();
+        try plan(p, ex, kinds[i], @intCast(p.at + i), 0, 0, &rows);
+        for (rows.items) |r| try keep(p, t, t.spans[i].at + r.row, r.l);
         try p.read.keys.append(p.gpa, key(ex, kinds[i]));
     }
     p.at += m;
     return false;
 }
 
-/// Example `ex` (read `which`, of kind `kind`) labelled row by row, as the last pass read it from row `base`.
-fn label(p: anytype, t: anytype, ex: Example, kind: Kind, which: u32, base: usize) !void {
+/// A read row: its place in its example and what it is to the fact.
+const Row = struct { row: u32, l: Label };
+
+/// A prompt after a conversation, by the trainer's taps: its turn's rows, every `sample`-th of a new conversation's.
+fn tapOne(p: anytype, t: anytype, ex: Example, kind: Kind, which: u32) !void {
+    const talk = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(ex.ids[0..ex.context]));
+    const fresh = std.mem.indexOfScalar(u64, p.read.talks.items, talk) == null;
+    if (fresh) try p.read.talks.append(p.gpa, talk);
+    var rows: std.ArrayList(Row) = .empty;
+    defer rows.deinit(p.gpa);
+    try plan(p, ex, kind, which, ex.context, if (fresh) sample else 0, &rows);
+    std.mem.sort(Row, rows.items, {}, struct {
+        fn less(_: void, a: Row, b: Row) bool {
+            return a.row < b.row;
+        }
+    }.less);
+    const want = try p.gpa.alloc(u32, rows.items.len);
+    defer p.gpa.free(want);
+    for (rows.items, want) |r, *w| w.* = r.row;
+    const d = t.config().hidden;
+    const slots = p.moe.items.len;
+    const got = try p.gpa.alloc(u16, rows.items.len * slots * d);
+    defer p.gpa.free(got);
+    // the rows a pass reads: all but the last token, which only a pass's target reads
+    try t.tapRows(ex.ids[0 .. ex.ids.len - 1], ex.context, want, p.moe.items, got);
+    if (std.c.getenv("TF_SLIDE_TAP_CHECK") != null) tapCheck(p, t, ex, want, got);
+    try p.rows.appendSlice(p.gpa, got);
+    for (rows.items) |r| try p.labels.append(p.gpa, r.l);
+}
+
+/// A diagnostic (TF_SLIDE_TAP_CHECK): tapped rows against a fresh run's (nothing kept) and a pass's, if one holds it.
+fn tapCheck(p: anytype, t: anytype, ex: Example, rows: []const u32, got: []const u16) void {
+    const d = t.config().hidden;
+    const slots = p.moe.items.len;
+    const fresh = p.gpa.alloc(u16, got.len) catch return;
+    defer p.gpa.free(fresh);
+    t.tapRows(ex.ids[0 .. ex.ids.len - 1], 0, rows, p.moe.items, fresh) catch |e| return std.log.info("slide pocket: tap check: no fresh run ({t})", .{e});
+    const runs = differ(got, fresh);
+    var out: [1]pack.Result = undefined;
+    t.pass(&.{pack.seq(ex)}, .keys, pack.turn, &out) catch |e| return std.log.info("slide pocket: tap check: {d} rows of a {d}-token prompt after {d}: {d} values differ from a fresh run's (most {d:.4}); no pass holds it ({t})", .{ rows.len, ex.ids.len, ex.context, runs[0], runs[1], e });
+    for (rows, 0..) |r, i| for (p.moe.items, 0..) |layer, j| @memcpy(fresh[(i * slots + j) * d ..][0..d], t.normed(layer, t.spans[0].at + r));
+    const pass = differ(got, fresh);
+    std.log.info("slide pocket: tap check: {d} rows of a {d}-token prompt after {d}: {d} values differ from a fresh run's (most {d:.4}), {d} from the pass's (most {d:.4})", .{ rows.len, ex.ids.len, ex.context, runs[0], runs[1], pass[0], pass[1] });
+}
+
+/// How many bf16 values of `a` and `b` differ, and by how much at most.
+fn differ(a: []const u16, b: []const u16) struct { usize, f32 } {
+    var n: usize = 0;
+    var most: f32 = 0;
+    for (a, b) |x, y| {
+        const fx: f32 = @bitCast(@as(u32, x) << 16);
+        const fy: f32 = @bitCast(@as(u32, y) << 16);
+        most = @max(most, @abs(fx - fy));
+        n += @intFromBool(x != y);
+    }
+    return .{ n, most };
+}
+
+/// Example `ex` (read `which`, of kind `kind`) planned row by row from `from` on, and every `every`-th row before it.
+fn plan(p: anytype, ex: Example, kind: Kind, which: u32, from: usize, every: usize, out: *std.ArrayList(Row)) !void {
+    const a = p.gpa;
     const own = kind != .steady;
     // the fact's own subjects and the tokens before them: another prompt naming the same is where its neurons may fire
     const subject = if (own and p.split[1] > 0) subjectRow(ex) else null;
@@ -100,18 +175,19 @@ fn label(p: anytype, t: anytype, ex: Example, kind: Kind, which: u32, base: usiz
     }
     // its value row: the fact's own where the value comes, another answer's (an earlier fact's) one to stay silent on
     const value = if (p.split[2] > 0) valueRow(ex) else null;
-    try keep(p, t, base + ex.decide, .{ .kind = kind, .key = .reply, .ex = which, .row = @intCast(ex.decide) });
-    if (subject) |r| try keep(p, t, base + r, .{ .kind = kind, .key = .subject, .ex = which, .row = @intCast(r) });
-    if (value) |r| try keep(p, t, base + r, if (own) .{ .kind = kind, .key = .value, .ex = which, .row = @intCast(r) } else .{ .kind = .other, .key = null, .ex = which, .row = @intCast(r) });
-    // rows to stay silent on: every row of the fact's own examples, every third of others', each naming the subject
-    var r: usize = 0;
+    try out.append(a, .{ .row = ex.decide, .l = .{ .kind = kind, .key = .reply, .ex = which, .row = ex.decide } });
+    if (subject) |r| try out.append(a, .{ .row = @intCast(r), .l = .{ .kind = kind, .key = .subject, .ex = which, .row = @intCast(r) } });
+    if (value) |r| try out.append(a, .{ .row = @intCast(r), .l = if (own) .{ .kind = kind, .key = .value, .ex = which, .row = @intCast(r) } else .{ .kind = .other, .key = null, .ex = which, .row = @intCast(r) } });
+    // rows to stay silent on: all of its own examples', every third of others' (every `every`-th of a conversation)
+    var r: usize = if (every > 0) 0 else from;
     while (r < ex.ids.len - 1) : (r += 1) {
         if (r == ex.decide or (subject != null and r == subject.?) or (value != null and r == value.?)) continue;
         const named = p.split[1] > 0 and std.mem.indexOfScalar(u32, p.subjects.items, ex.ids[r]) != null;
+        const before = r < from; // a conversation's row, read only every `every`-th
         if (named and (own or !p.strict or (!p.silencing and r > 0 and std.mem.indexOfScalar(u32, p.leads.items, ex.ids[r - 1]) != null))) {
             // the fact's own subject (in its examples, or after the token its questions put first): left free
-            try keep(p, t, base + r, .{ .kind = .none, .key = .subject, .ex = which, .row = @intCast(r) });
-        } else if (own or named or r % stride == 0) try keep(p, t, base + r, .{ .kind = .other, .key = null, .ex = which, .row = @intCast(r) });
+            try out.append(a, .{ .row = @intCast(r), .l = .{ .kind = .none, .key = .subject, .ex = which, .row = @intCast(r) } });
+        } else if (if (before) named or r % every == 0 else own or named or r % stride == 0) try out.append(a, .{ .row = @intCast(r), .l = .{ .kind = .other, .key = null, .ex = which, .row = @intCast(r) } });
     }
 }
 

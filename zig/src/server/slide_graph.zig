@@ -3,6 +3,7 @@ const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json.zig");
 const slide_model = @import("slide_model.zig");
+const slide_talks = @import("slide_talks.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -19,6 +20,7 @@ pub const Fact = struct {
     state: State,
     neurons: []const api.Neuron = &.{}, // where its neurons sit in the pocket, once placed
     questions: []const []const u8 = &.{}, // the wordings its checks ask
+    chain: ?slide_talks.Turn = null, // a question its lesson learned and the answer it wrote, which later lessons' chains ask
     message: []const u8 = "", // why it stopped, or what its lesson last did
     round: u32 = 0, // its lesson's round now, or the rounds it took
     checks: u32 = 0, // asked checks done, this session
@@ -60,6 +62,7 @@ pub const Graph = struct {
     model: ?slide_model.Model = null, // the served folder as last scanned
     model_arena: std.heap.ArenaAllocator,
     saved: Save = .{},
+    talks: slide_talks.Talks = .{}, // conversations written once, kept with the facts (slide_context.zig)
 
     /// A graph that starts from `path`'s file when it reads, else empty.
     pub fn init(gpa: Allocator, io: Io, path: ?[]const u8) Graph {
@@ -70,6 +73,7 @@ pub const Graph = struct {
 
     pub fn deinit(g: *Graph) void {
         g.facts.deinit(g.gpa);
+        g.talks.deinit(g.gpa);
         g.trace.deinit(g.gpa);
         g.cuts.deinit(g.gpa);
         g.arena.deinit();
@@ -212,6 +216,43 @@ pub const Graph = struct {
         g.save();
     }
 
+    /// Conversation `name` as kept, copied into `a`; null when none is.
+    pub fn talk(g: *Graph, a: Allocator, name: []const u8) !?[]const slide_talks.Turn {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        return g.talks.find(a, name);
+    }
+
+    /// Conversation `name` kept with the facts, for every later lesson and check to ask in.
+    pub fn keepTalk(g: *Graph, name: []const u8, turns: []const slide_talks.Turn) void {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        g.talks.keep(g.gpa, g.arena.allocator(), name, turns) catch return;
+        g.save();
+    }
+
+    /// The question and answer a learned fact's lesson leaves for later lessons' chains.
+    pub fn chained(g: *Graph, id: u32, turn: slide_talks.Turn) void {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        const f = g.find(id) orelse return;
+        const a = g.arena.allocator();
+        f.chain = .{ a.dupe(u8, turn[0]) catch return, a.dupe(u8, turn[1]) catch return };
+        g.save();
+    }
+
+    /// The latest `max` learned facts' chain turns, the oldest first, copied into `a`.
+    pub fn chains(g: *Graph, a: Allocator, max: usize) ![]const slide_talks.Turn {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        var out: std.ArrayList(slide_talks.Turn) = .empty;
+        var i = g.facts.items.len;
+        while (i > 0 and out.items.len < max) : (i -= 1) if (g.facts.items[i - 1].chain) |c| if (g.facts.items[i - 1].state == .learned) {
+            try out.insert(a, 0, .{ try a.dupe(u8, c[0]), try a.dupe(u8, c[1]) });
+        };
+        return out.items;
+    }
+
     /// A save of the pocket into `dir`'s shards begins; the shards as they are now are what it is measured against.
     pub fn saving(g: *Graph, dir: ?[]const u8) void {
         if (dir) |d| g.scanned(d);
@@ -302,6 +343,7 @@ pub const Graph = struct {
             if (f.round > 0) try o.put(a, "round", try json.intValue(a, f.round));
             if (f.message.len > 0) try o.put(a, "message", .{ .string = f.message });
             if (f.questions.len > 0) try o.put(a, "questions", try strings(a, f.questions));
+            if (f.chain) |c| try o.put(a, "chain", try slide_talks.pair(a, c));
             if (f.neurons.len > 0) try o.put(a, "neurons", try neuronList(a, f.neurons));
             if (live) try g.liveFields(a, o, f);
             out.* = .{ .object = o };
@@ -309,6 +351,7 @@ pub const Graph = struct {
         const root = try json.newObject(a);
         try root.put(a, "next", try json.intValue(a, g.next));
         try root.put(a, "facts", .{ .array = facts });
+        if (g.talks.list.items.len > 0) try root.put(a, "talks", try g.talks.value(a));
         if (live) if (g.model) |m| {
             const v = try slide_model.value(a, m);
             if (g.saved.state != .none) try v.object.put(a, "save", try saveValue(a, g.saved));
@@ -368,6 +411,9 @@ pub const Graph = struct {
                 for (xs, out) |x, *o| o.* = x.str() orelse "";
                 fact.questions = out;
             };
+            if (f.field("chain")) |c| if (c.items()) |xs| if (xs.len == 2) {
+                fact.chain = .{ xs[0].str() orelse "", xs[1].str() orelse "" };
+            };
             if (f.field("neurons")) |ns| if (ns.items()) |xs| {
                 var out: std.ArrayList(api.Neuron) = .empty;
                 for (xs) |x| try out.append(a, .{ .layer = int(u16, x.field("layer")) catch continue, .neuron = int(u16, x.field("neuron")) catch continue, .key = std.meta.stringToEnum(api.NeuronKey, x.strField("key") orelse "") orelse continue });
@@ -375,6 +421,7 @@ pub const Graph = struct {
             };
             try g.facts.append(g.gpa, fact);
         }
+        try g.talks.read(g.gpa, a, root.field("talks"));
         g.next = try int(u32, root.field("next"));
     }
 };

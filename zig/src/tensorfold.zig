@@ -44,6 +44,7 @@ test {
     _ = @import("families/nemotron/living_test.zig"); // saved lessons and their routers, beside the shards
     _ = @import("families/nemotron/pocket_shards_test.zig"); // learned neurons in the shards themselves
     _ = @import("families/nemotron/pocket.zig"); // which row a fact's neurons fire at
+    _ = @import("families/nemotron/lesson_examples.zig"); // what a learner reads of a lesson
     _ = @import("families/nemotron/pocket_fit.zig"); // where a fact's neurons fire, and stay silent
     _ = @import("families/nemotron/router.zig"); // when a lesson acts on a reply
     _ = @import("families/nemotron/lesson_route.zig");

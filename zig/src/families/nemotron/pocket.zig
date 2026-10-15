@@ -408,17 +408,20 @@ pub fn Pocket(comptime T: type) type {
             for (p.taken.items) |x| {
                 if (x.neuron + 1 != p.used.items[x.slot]) continue;
                 const k = @backingInt(x.key);
-                var on: [4]usize = @splat(0);
-                var all: [4]usize = @splat(0);
+                var on: [5]usize = @splat(0);
+                var all: [5]usize = @splat(0);
+                var quiet_most: f32 = -std.math.inf(f32); // the highest it reads on another prompt in a conversation
                 const u = p.neuron(@constCast(p.up.items), x.slot, x.neuron, d);
                 for (p.labels.items, 0..) |l, i| {
                     const kind = kinds[k * m + i];
+                    const ex = p.pickRead(l.ex).?.ex;
+                    if (kind == .steady and ex.context > 0) quiet_most = @max(quiet_most, dotBf16(u, p.rows.items[(i * n + x.slot) * d ..][0..d]));
                     if (kind != .fact and kind != .held) continue;
-                    const src: usize = if (l.ex < p.answered.len) 0 else if (l.ex < p.answered.len + p.prompts.len) (if (p.pickRead(l.ex).?.ex.ids.len > 60) 2 else 1) else 3;
+                    const src: usize = if (ex.context > 0) 4 else if (l.ex < p.answered.len) 0 else if (l.ex < p.answered.len + p.prompts.len) (if (ex.ids.len > 60) 2 else 1) else 3;
                     all[src] += 1;
                     on[src] += @intFromBool(dotBf16(u, p.rows.items[(i * n + x.slot) * d ..][0..d]) >= 0.5);
                 }
-                std.log.info("slide pocket: layer {d} at the {s} fires on answers {d}/{d}, short wordings {d}/{d}, long ones {d}/{d}, held-out {d}/{d}", .{ p.moe.items[x.slot], @tagName(x.key), on[0], all[0], on[1], all[1], on[2], all[2], on[3], all[3] });
+                std.log.info("slide pocket: layer {d} at the {s} fires on answers {d}/{d}, short wordings {d}/{d}, long ones {d}/{d}, held-out {d}/{d}, in a conversation {d}/{d} (other prompts there at most {d:.2})", .{ p.moe.items[x.slot], @tagName(x.key), on[0], all[0], on[1], all[1], on[2], all[2], on[3], all[3], on[4], all[4], quiet_most });
             }
         }
 
