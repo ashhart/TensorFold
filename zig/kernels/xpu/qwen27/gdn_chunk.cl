@@ -8,6 +8,17 @@
 static inline ushort bf(float f) {                     // fp32 → bf16 round to nearest even, hardware conversion
   return intel_convert_bfloat16_as_ushort(f);
 }
+// fp32 operands enter as three bf16 terms h + m + l (about 24 bits); W, HS and VN are stored as three planes.
+#define SPLIT3(f, H, M, L)                                                                                             \
+  {                                                                                                                    \
+    const float f_ = (f);                                                                                              \
+    H = bf(f_);                                                                                                        \
+    const float r_ = f_ - as_float((uint)(H) << 16);                                                                   \
+    M = bf(r_);                                                                                                        \
+    L = bf(r_ - as_float((uint)(M) << 16));                                                                            \
+  }
+// Both operands split: the six products down to 2^-16 of the leading one, smallest first.
+#define DPAS6(a, b, c) DPAS(a[2], b[0], DPAS(a[1], b[1], DPAS(a[0], b[2], DPAS(a[1], b[0], DPAS(a[0], b[1], DPAS(a[0], b[0], c))))))
 
 #define KERNEL_WG(N) __attribute__((intel_reqd_sub_group_size(16))) __attribute__((reqd_work_group_size(N, 1, 1))) kernel
 #define RD16(base, wbytes, h, pitch, x, y, dst) \
@@ -114,10 +125,10 @@ KERNEL_WG(64) void gdn_prep(global const ushort *K, global const ushort *V, glob
     const local float *sc = pass == 0 ? co : be;
     for (int w = 0; w < 2; w++) {                    // row tiles {sg, 7 − sg}, all columns
       const int ti = w == 0 ? sg : CK / 8 - 1 - sg;
-      ushort8 a[CK / 16];
+      ushort8 a[CK / 16][3];
       for (int q = 0; q <= ti / 2; q++) {
         const float f = sc[q * 16 + lane];
-        for (int r = 0; r < 8; r++) a[q][r] = bf(ts[(ti * 8 + r) * CK + q * 16 + lane] * f);
+        for (int r = 0; r < 8; r++) SPLIT3(ts[(ti * 8 + r) * CK + q * 16 + lane] * f, a[q][0][r], a[q][1][r], a[q][2][r]);
       }
       float8 acc[D / 16];
       for (int tj = 0; tj < D / 16; tj++) acc[tj] = 0.0f;
@@ -128,15 +139,16 @@ KERNEL_WG(64) void gdn_prep(global const ushort *K, global const ushort *V, glob
             RDV(Kh, D * 2, T, HK * D * 2, tj * 16, c * CK + q * 16, b);
           else
             RDV(Vh, D * 2, T, HV * D * 2, tj * 16, c * CK + q * 16, b);
-          acc[tj] = DPAS(a[q], b, acc[tj]);
+          acc[tj] = DPAS(a[q][2], b, DPAS(a[q][1], b, DPAS(a[q][0], b, acc[tj])));
         }
       const int row = (c * HV + h) * CK + ti * 8;
       for (int tj = 0; tj < D / 16; tj++) {
         if (pass == 0) {
-          ushort8 o;
-          for (int r = 0; r < 8; r++) o[r] = bf(acc[tj][r]);
-          intel_sub_group_2d_block_write_16b_8r16x1c((global void *)WB, D * 2, NC * HV * CK, D * 2,
-                                                     (int2)(tj * 16, row), (private ushort *)&o);
+          ushort8 o[3];
+          for (int r = 0; r < 8; r++) SPLIT3(acc[tj][r], o[0][r], o[1][r], o[2][r]);
+          for (int p = 0; p < 3; p++)
+            intel_sub_group_2d_block_write_16b_8r16x1c((global void *)(WB + (long)p * NC * HV * CK * D), D * 2,
+                                                       NC * HV * CK, D * 2, (int2)(tj * 16, row), (private ushort *)&o[p]);
         } else
           intel_sub_group_2d_block_write_32b_8r16x1c((global void *)U0, D * 4, NC * HV * CK, D * 4,
                                                      (int2)(tj * 16, row), (private uint *)&acc[tj]);
@@ -170,37 +182,40 @@ KERNEL_WG(16 * (D / RV)) void gdn_state(global const ushort *K, global const ush
       }
     }
     for (int tj = 0; tj < D / 16; tj++) {
-      ushort8 o;
-      for (int r = 0; r < 8; r++) o[r] = bf(s[tj][r]);
-      intel_sub_group_2d_block_write_16b_8r16x1c((global void *)HS, D * 2, NC * HV * D, D * 2, (int2)(tj * 16, row),
-                                                 (private ushort *)&o);
+      ushort8 o[3];
+      for (int r = 0; r < 8; r++) SPLIT3(s[tj][r], o[0][r], o[1][r], o[2][r]);
+      for (int p = 0; p < 3; p++)
+        intel_sub_group_2d_block_write_16b_8r16x1c((global void *)(HS + (long)p * NC * HV * D * D), D * 2, NC * HV * D,
+                                                   D * 2, (int2)(tj * 16, row), (private ushort *)&o[p]);
     }
     // Uᵀ[v][t] = U0[t][v] − Σ_k S[v][k] W[t][k].
     float8 u[CK / 16];
     for (int tt = 0; tt < CK / 16; tt++) u[tt] = 0.0f;
     for (int kk = 0; kk < D / 16; kk++) {
-      ushort8 a;
-      for (int r = 0; r < 8; r++) a[r] = bf(s[kk][r]);
+      ushort8 a[3];
+      for (int r = 0; r < 8; r++) SPLIT3(s[kk][r], a[0][r], a[1][r], a[2][r]);
       for (int tt = 0; tt < CK / 16; tt++) {
-        uint8 b;
-        RDT(WB, D * 2, NC * HV * CK, D * 2, kk * 8, trow + tt * 16, b);
-        u[tt] = DPAS(a, b, u[tt]);
+        uint8 b[3];
+        for (int p = 0; p < 3; p++)
+          RDT(WB + (long)p * NC * HV * CK * D, D * 2, NC * HV * CK, D * 2, kk * 8, trow + tt * 16, b[p]);
+        u[tt] = DPAS6(a, b, u[tt]);
       }
     }
     const float lc = LA[((long)h * NC + c) * CK + CK - 1];
-    ushort8 a[CK / 16];                              // Uᵀ·diag(e^(la_C − la)), A operand of the update
+    ushort8 a[CK / 16][3];                           // Uᵀ·diag(e^(la_C − la)), A operand of the update
     for (int tt = 0; tt < CK / 16; tt++) {
       const float d = exp(lc - LA[((long)h * NC + c) * CK + tt * 16 + lane]);
       float8 u0;
       RDT(U0, D * 4, NC * HV * CK, D * 4, v0, trow + tt * 16, u0);
       const float8 ut = u0 - u[tt];
-      ushort8 o;
+      ushort8 o[3];
       for (int r = 0; r < 8; r++) {
-        o[r] = bf(ut[r]);
-        a[tt][r] = bf(ut[r] * d);
+        SPLIT3(ut[r], o[0][r], o[1][r], o[2][r]);
+        SPLIT3(ut[r] * d, a[tt][0][r], a[tt][1][r], a[tt][2][r]);
       }
-      intel_sub_group_2d_block_write_16b_8r16x1c((global void *)VN, CK * 2, NC * HV * D, CK * 2, (int2)(tt * 16, row),
-                                                 (private ushort *)&o);
+      for (int p = 0; p < 3; p++)
+        intel_sub_group_2d_block_write_16b_8r16x1c((global void *)(VN + (long)p * NC * HV * D * CK), CK * 2, NC * HV * D,
+                                                   CK * 2, (int2)(tt * 16, row), (private ushort *)&o[p]);
     }
     // S ← e^la_C·S + Σ_t a[v][t] K[t][k].
     const float dc = exp(lc);
@@ -209,7 +224,7 @@ KERNEL_WG(16 * (D / RV)) void gdn_state(global const ushort *K, global const ush
       for (int tt = 0; tt < CK / 16; tt++) {
         uint8 b;
         RDV(Kh, D * 2, T, HK * D * 2, tj * 16, c * CK + tt * 16, b);
-        s[tj] = DPAS(a[tt], b, s[tj]);
+        s[tj] = DPAS(a[tt][2], b, DPAS(a[tt][1], b, DPAS(a[tt][0], b, s[tj])));
       }
     }
   }
@@ -222,7 +237,7 @@ KERNEL_WG(16 * (D / RV)) void gdn_state(global const ushort *K, global const ush
 KERNEL_WG(128) void gdn_out(global const ushort *Q, global const ushort *K, global const float *LA,
                             global const ushort *HS, global const ushort *VN, global ushort *Y, int HK, int HV,
                             int NC) {
-  local ushort pa[(CK / 8) * (CK / 16) * 128], qa[(CK / 8) * (D / 16) * 128];
+  local ushort pa[3][(CK / 8) * (CK / 16) * 128], qa[(CK / 8) * (D / 16) * 128];
   local float la[CK];
   const int c = get_group_id(0), h = get_group_id(1), sg = get_sub_group_id(), lane = get_sub_group_local_id();
   const int kh = h / (HV / HK), T = NC * CK;
@@ -244,12 +259,12 @@ KERNEL_WG(128) void gdn_out(global const ushort *Q, global const ushort *K, glob
         acc = DPAS(aq[kk], b, acc);
       }
       const int i = tj * 16 + lane;
-      ushort8 o;
+      ushort8 o[3];
       for (int r = 0; r < 8; r++) {
         const int t = ti * 8 + r;
-        o[r] = bf(i <= t ? exp(la[t] - la[i]) * acc[r] : 0.0f);
+        SPLIT3(i <= t ? exp(la[t] - la[i]) * acc[r] : 0.0f, o[0][r], o[1][r], o[2][r]);
       }
-      intel_sub_group_block_write_us8(pa + (ti * (CK / 16) + tj) * 128, o);
+      for (int p = 0; p < 3; p++) intel_sub_group_block_write_us8(pa[p] + (ti * (CK / 16) + tj) * 128, o[p]);
     }
   }
   barrier(CLK_LOCAL_MEM_FENCE);
@@ -258,17 +273,23 @@ KERNEL_WG(128) void gdn_out(global const ushort *Q, global const ushort *K, glob
   float8 acc[CK / 8];
   for (int ti = 0; ti < CK / 8; ti++) acc[ti] = 0.0f;
   for (int kk = 0; kk < D / 16; kk++) {              // Q·Sᵀ: B = (S[v][2p], S[v][2p+1]), transposed read of HS
-    uint8 b;
-    RDT(HS, D * 2, NC * HV * D, D * 2, kk * 8, vrow, b);
-    for (int ti = 0; ti < CK / 8; ti++) acc[ti] = DPAS(intel_sub_group_block_read_us8(qa + (ti * (D / 16) + kk) * 128), b, acc[ti]);
+    uint8 b[3];
+    for (int p = 0; p < 3; p++) RDT(HS + (long)p * NC * HV * D * D, D * 2, NC * HV * D, D * 2, kk * 8, vrow, b[p]);
+    for (int ti = 0; ti < CK / 8; ti++) {
+      const ushort8 qv = intel_sub_group_block_read_us8(qa + (ti * (D / 16) + kk) * 128);
+      acc[ti] = DPAS(qv, b[2], DPAS(qv, b[1], DPAS(qv, b[0], acc[ti])));
+    }
   }
   for (int ti = 0; ti < CK / 8; ti++)
     for (int r = 0; r < 8; r++) acc[ti][r] *= exp(la[ti * 8 + r]);
   for (int kk = 0; kk < CK / 16; kk++) {             // P·U: B = (U[2p][v], U[2p+1][v]), transposed read of VN
-    uint8 b;
-    RDT(VN, CK * 2, NC * HV * D, CK * 2, kk * 8, vrow, b);
-    for (int ti = kk * 2; ti < CK / 8; ti++)
-      acc[ti] = DPAS(intel_sub_group_block_read_us8(pa + (ti * (CK / 16) + kk) * 128), b, acc[ti]);
+    uint8 b[3];
+    for (int p = 0; p < 3; p++) RDT(VN + (long)p * NC * HV * D * CK, CK * 2, NC * HV * D, CK * 2, kk * 8, vrow, b[p]);
+    for (int ti = kk * 2; ti < CK / 8; ti++) {
+      ushort8 pv[3];
+      for (int p = 0; p < 3; p++) pv[p] = intel_sub_group_block_read_us8(pa[p] + (ti * (CK / 16) + kk) * 128);
+      acc[ti] = DPAS6(pv, b, acc[ti]);
+    }
   }
   for (int ti = 0; ti < CK / 8; ti++) {
     ushort8 o;

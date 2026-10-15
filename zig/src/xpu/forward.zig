@@ -43,7 +43,7 @@ pub const Acts = struct {
     beta: *anyopaque,
     y: *anyopaque, // bf16 [maxRows, 6144] (GDN out, attention out)
     la: *anyopaque,
-    wb: *anyopaque,
+    wb: *anyopaque, // wb, hs, vn: three bf16 planes each (hi, mid, lo of an fp32 operand)
     u0: *anyopaque,
     hs: *anyopaque,
     vn: *anyopaque,
@@ -90,10 +90,10 @@ pub const Acts = struct {
             .beta = try d.alloc_(rows * 48 * 4),
             .y = try d.alloc_(rows * 6144 * 2),
             .la = try d.alloc_(48 * nc * 64 * 4),
-            .wb = try d.alloc_(nc * 48 * 64 * 128 * 2),
+            .wb = try d.alloc_(3 * nc * 48 * 64 * 128 * 2),
             .u0 = try d.alloc_(nc * 48 * 64 * 128 * 4),
-            .hs = try d.alloc_(nc * 48 * 128 * 128 * 2),
-            .vn = try d.alloc_(nc * 48 * 128 * 64 * 2),
+            .hs = try d.alloc_(3 * nc * 48 * 128 * 128 * 2),
+            .vn = try d.alloc_(3 * nc * 48 * 128 * 64 * 2),
             // decode attention partials: at most 16 rows (the prompt kernel needs none)
             .pm = try d.alloc_(16 * 24 * ns * 4),
             .pl = try d.alloc_(16 * 24 * ns * 4),
