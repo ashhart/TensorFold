@@ -23,15 +23,17 @@ tensorfold serve "$HOME/models/nemotron-lightning" \
 
 Use a complete local model directory or an existing Hugging Face cache.
 The binary in a release archive is `bin/tensorfold-native`; the [runbook](RUNBOOK.md) covers archive installation and CUDA runtime files.
+
+On Windows with an NVIDIA GPU, build `tensorfold-native.exe` from source as [docs/WINDOWS.md](docs/WINDOWS.md) describes.
 Use `tensorfold-native --help` or `-h`, and `tensorfold-native capabilities --json`, to inspect the installed binary.
 Model weights have separate downloads and licenses.
 
-The API listens at `http://127.0.0.1:8080/v1` by default.
+The API listens at `http://127.0.0.1:8888/v1` by default.
 It serves OpenAI chat completions, completions and Responses, plus Anthropic Messages.
 Use the model ID returned by `/v1/models`, or set one with `--name`.
 
 ```sh
-curl -fsS http://127.0.0.1:8080/v1/chat/completions \
+curl -fsS http://127.0.0.1:8888/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"local-model","messages":[{"role":"user","content":"Say hello in one sentence."}],"max_tokens":128,"temperature":0}'
 ```
@@ -47,11 +49,11 @@ tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 src=$(ls -d ~/.cache/huggingface/hub/models--TensorFold--NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit/snapshots/* | head -1)
 mkdir -p ~/models && cp -cRL "$src" ~/models/nemotron-living   # always teach a copy
 tensorfold serve ~/models/nemotron-living --slide
-curl -N http://127.0.0.1:8080/v1/slide/learn -H 'Content-Type: application/json' -d '{"text": "I like blue."}'
+curl -N http://127.0.0.1:8888/v1/slide/learn -H 'Content-Type: application/json' -d '{"text": "I like blue."}'
 ```
 
 Send it a document instead and it finds the facts in it and learns them one by one. Open
-`http://127.0.0.1:8080/slide` to watch in 3D: the facts, the neurons each one took in the model's layers, the shard
+`http://127.0.0.1:8888/slide` to watch in 3D: the facts, the neurons each one took in the model's layers, the shard
 files that hold them, and the lesson running now.
 
 Learning runs on Apple-silicon Macs and on an NVIDIA GB10 (DGX Spark), and a folder that learned on one serves on the
@@ -71,8 +73,9 @@ The platform column names the hardware tested for each model.
 | Qwen3.8 Flash Next | MLX affine 6-bit, group 32 | Metal on M5 Ultra |
 | GLM-5.3-Flash | MLX affine 4-bit, group 64 | Metal on two M5 Ultras |
 | GLM-5.3 | EXLR8 `home` profile (trellis K2/K3/K4 experts) | Metal on two M5 Ultras |
-| Qwen3.5-2B | Pinned MLX affine 4-bit, group 64, tied embeddings | Metal on M5 Max |
-| Qwen3.8-27B | MLX affine 4-bit, group 64, own output head; DFlash2 drafter | Metal on M5 Max and M3 Ultra |
+| Qwen3.5-2B | Pinned MLX affine 4-bit, group 64, tied embeddings | Metal on M5 Max; CUDA on RTX 4090 (Windows) |
+| Qwen3.8-27B | MLX affine 4-bit, group 64, own output head; DFlash2 drafter | Metal on M5 Max and M3 Ultra; CUDA on RTX 4090 (Windows) |
+| Qwen3.6-35B-A3B | MLX affine 4-bit, group 64, 8-bit routers; its MTP layer in `mtp-4bit.safetensors` | CUDA on RTX 4090 (Windows) |
 
 Nemotron's named checkpoint is `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit`.
 NVIDIA's NVFP4 checkpoint, `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`, serves on CUDA as stored; its bf16 MTP head is quantized to 4-bit at load for drafts.
@@ -88,6 +91,7 @@ Its prompt processing trails mlx_lm for now, and we are fixing it. An M3 Ultra r
 Bonsai, Gemma 4, Qwen3.6 and DeepSeek-V4 are still under qualification for 1.0.x.
 The Python 0.6.6 engine remains available at the `v0.6.6` tag for those models and other backends.
 On CUDA, 1.0.11 serves Nemotron on a GB10, greedy and sampled, with concurrent requests sharing each round.
+On Windows ([docs/WINDOWS.md](docs/WINDOWS.md)), the native build also serves the 2B and the 27B on CUDA, the 27B with its DFlash2 drafter drafting trees, and Qwen3.6-35B-A3B with its MTP layer drafting chains.
 The Linux x86_64 archive adds NVIDIA Ampere cards with compute capability 8.6 (the RTX 30 series, RTX A6000, A10 and A40), tested on an RTX 3090, and Blackwell cards with compute capability 12.0 (the RTX 50 series and RTX PRO 6000 Blackwell), tested on an RTX PRO 6000; the A100 (8.0) is not supported yet.
 
 ## Exact decoding
@@ -150,7 +154,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 
 | Flag | Meaning |
 | --- | --- |
-| `--host HOST`, `--port PORT` | Listen address and port, default `127.0.0.1:8080`. |
+| `--host HOST`, `--port PORT` | Listen address and port, default `127.0.0.1:8888`. |
 | `--name NAME` | Model ID advertised to clients. |
 | `--alias NAME` | Another accepted model ID; repeat for multiple aliases. |
 | `--api-key KEY` | Require a bearer key; repeat for multiple keys. |

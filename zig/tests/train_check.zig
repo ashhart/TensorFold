@@ -1,5 +1,6 @@
 //! The learning step's gradients against the engine's own forward, moving each layer along its own, on the real model.
 const std = @import("std");
+const platform = @import("sys");
 const tf = @import("tensorfold");
 
 const nm = tf.nemotron;
@@ -51,8 +52,8 @@ pub fn main(init: std.process.Init) !void {
     const with_grad = (try t.step(&ids, start, .grad, turn)).loss;
     const ms = @as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).toNanoseconds() - t0.toNanoseconds())) / 1e6;
     std.debug.print("loss {d:.5} (with gradients {d:.5}), a step with gradients {d:.1} ms, GPU {d:.1} ms\n", .{ plain, with_grad, ms, b.last_ms });
-    if (std.c.getenv("TF_TRAIN_TIME_ONLY") != null) return;
-    if (std.c.getenv("TF_TRAIN_PROFILE") != null) {
+    if (platform.c.getenv("TF_TRAIN_TIME_ONLY") != null) return;
+    if (platform.c.getenv("TF_TRAIN_PROFILE") != null) {
         var prof: nm.encoder.Profiler = .{ .queue = m.queue, .kernels = &m.kernels };
         t.profile = &prof;
         _ = try t.step(&ids, start, .grad, turn);

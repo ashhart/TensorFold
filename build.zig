@@ -12,6 +12,7 @@ const counters_build = @import("zig/build/metal_counters.zig");
 const exl3_build = @import("zig/build/exl3.zig");
 const exlr8_build = @import("zig/build/exlr8.zig");
 const golden_build = @import("zig/build/golden.zig");
+const sys_build = @import("zig/build/sys.zig");
 
 comptime {
     const required = std.mem.trim(u8, @embedFile(".zig-version"), "\r\n");
@@ -153,13 +154,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&cost_run.step);
     switch (target.result.os.tag) {
         .macos => metalTargets(b, target, optimize, draft_ids, build_options, test_step),
-        .linux => cuda_build.targets(b, target, optimize, draft_ids, build_options),
+        .linux, .windows => cuda_build.targets(b, target, optimize, draft_ids, build_options),
         else => {},
     }
     const xgrammar = grammar_build.option(b);
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
     cuda_build.hostTests(b, draft_ids, build_options, test_step, target.result.os.tag != .macos);
-    if (target.result.os.tag == .linux) {
+    if (target.result.os.tag == .linux or target.result.os.tag == .windows) {
         // the engine seam's tests (lane_host.zig and its siblings), which the macOS branch runs from its own api module
         const lanes_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
         const api_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes_mod }} });
@@ -189,6 +190,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&warning_run.step);
     b.step("test-learn-warning", "CPU production-log refusal, backoff and recovery test").dependOn(&warning_run.step);
     grammar_build.steps(b, target, xgrammar);
+    sys_build.wire(b);
 }
 
 /// `zig build native -Dcpu=apple_m1`: tensorfold-native with the Metal engines for the Python package's bundle (a native M5 build traps on M1-M4).

@@ -1,5 +1,6 @@
 //! Python methods templates call on strings, dicts and lists, the loop helpers, and the template globals.
 const std = @import("std");
+const platform = @import("sys");
 const builtin = @import("builtin");
 const v = @import("value.zig");
 const uni = @import("unicode.zig");
@@ -432,14 +433,22 @@ pub fn callFunc(rt: *Rt, f: v.Func, pos: []const Value, kw: []const Kw) Error!Va
 }
 
 const Tm = extern struct { sec: c_int, min: c_int, hour: c_int, mday: c_int, mon: c_int, year: c_int, wday: c_int, yday: c_int, isdst: c_int, gmtoff: c_long, zone: ?[*:0]const u8 };
-extern "c" fn localtime_r(t: *const std.c.time_t, out: *Tm) ?*Tm;
+const localtime_r = if (builtin.os.tag == .windows) localtimeWindows else struct {
+    extern "c" fn localtime_r(t: *const platform.c.time_t, out: *Tm) ?*Tm;
+}.localtime_r;
+/// The UCRT's localtime_s fills the nine ISO fields; gmtoff and zone are POSIX's and stay unset.
+extern "c" fn _localtime64_s(out: *Tm, t: *const i64) c_int;
+fn localtimeWindows(t: *const platform.c.time_t, out: *Tm) ?*Tm {
+    out.* = std.mem.zeroes(Tm);
+    return if (_localtime64_s(out, t) == 0) out else null;
+}
 extern "c" fn strftime(buf: [*]u8, max: usize, fmt: [*:0]const u8, tm: *const Tm) usize;
 
 /// datetime.now().strftime(): %f, %z and %Z are Python's own (naive time), the rest is the C library's.
 fn strftimeNow(rt: *Rt, fmt: []const u8) Error![]const u8 {
     if (!builtin.link_libc) return rt.fail("strftime_now needs libc", .{});
-    var tv: std.c.timeval = undefined;
-    _ = std.c.gettimeofday(&tv, null);
+    var tv: platform.c.timeval = undefined;
+    _ = platform.c.gettimeofday(&tv, null);
     var tm: Tm = undefined;
     if (localtime_r(&tv.sec, &tm) == null) return rt.fail("localtime failed", .{});
     var pre: std.ArrayList(u8) = .empty;

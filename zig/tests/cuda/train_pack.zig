@@ -1,5 +1,6 @@
 //! Training passes holding several sequences against one a pass, and from kept prefixes against whole, on CUDA.
 const std = @import("std");
+const platform = @import("sys");
 const cuda = @import("cuda");
 const nemotron = @import("nemotron");
 const check_mod = @import("check.zig");
@@ -17,7 +18,7 @@ const open = 2;
 pub fn run(gpu: check_mod.Gpu, model: []const u8, path: []const u8, count: usize) !void {
     const gpa = gpu.gpa;
     const io = gpu.io;
-    const kernels = std.c.getenv("TENSORFOLD_CUDA_KERNELS");
+    const kernels = platform.c.getenv("TENSORFOLD_CUDA_KERNELS");
     const e = try nemotron.Engine.init(gpa, io, gpu.ctx, model, if (kernels) |k| std.mem.span(k) else null, .{ .context = 8192, .mtp = false, .graphs = false, .sampling = null, .segments = 1 });
     defer e.deinit();
     var living: ?nemotron.sites.Sites = null;

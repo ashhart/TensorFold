@@ -1,5 +1,6 @@
 //! Two Macs' tensor-parallel exchanges in a command buffer over MCDMA, and rank 0's commands to rank 1.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const fabric = @import("fabric");
 const sources = @import("kernel_sources");
@@ -54,7 +55,7 @@ threadlocal var raised = false;
 /// This thread at the user-interactive QoS once: busy CPUs must not delay the pair's sends and commands.
 pub fn raise() void {
     if (raised) return;
-    _ = std.c.pthread_set_qos_class_self_np(.USER_INTERACTIVE, 0);
+    _ = platform.c.pthread_set_qos_class_self_np(.USER_INTERACTIVE, 0);
     raised = true;
 }
 
@@ -230,16 +231,16 @@ pub const Pair = struct {
 
     /// Wait until this Mac's word at `off` reaches `value`: spins, then short sleeps (`bounded`: 60 s at most).
     fn reach(p: *Pair, off: usize, value: u64, bounded: bool) !void {
-        const t0 = std.c.mach_absolute_time();
+        const t0 = platform.c.mach_absolute_time();
         var spins: usize = 0;
         while (@atomicLoad(u64, p.word64(off), .acquire) < value) {
             if (p.stop.load(.acquire)) return error.PairStopped;
             if (p.failed.load(.acquire)) return error.PairLinkFailed;
-            if (bounded and std.c.mach_absolute_time() - t0 > 60 * 24_000_000) return error.PairPeerSilent;
+            if (bounded and platform.c.mach_absolute_time() - t0 > 60 * 24_000_000) return error.PairPeerSilent;
             spins += 1;
             if (spins > 200_000) {
-                const ts: std.c.timespec = .{ .sec = 0, .nsec = 20_000 };
-                _ = std.c.nanosleep(&ts, null);
+                const ts: platform.c.timespec = .{ .sec = 0, .nsec = 20_000 };
+                _ = platform.c.nanosleep(&ts, null);
             } else std.atomic.spinLoopHint();
         }
     }
@@ -254,8 +255,8 @@ pub const Pair = struct {
             if (!reached(posted, next_x) or !reached(p.queued.load(.acquire), next_x)) {
                 idle += 1;
                 if (idle > 1_000_000) {
-                    const ts: std.c.timespec = .{ .sec = 0, .nsec = 20_000 };
-                    _ = std.c.nanosleep(&ts, null);
+                    const ts: platform.c.timespec = .{ .sec = 0, .nsec = 20_000 };
+                    _ = platform.c.nanosleep(&ts, null);
                 } else std.atomic.spinLoopHint();
                 continue;
             }

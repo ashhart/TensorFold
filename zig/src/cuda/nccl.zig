@@ -1,6 +1,7 @@
 //! NCCL opened at run time for tensor-parallel ranks: communicators and the collectives the lane engines use.
 
 const std = @import("std");
+const platform = @import("sys");
 const abi = @import("abi.zig");
 
 pub const Result = c_int;
@@ -30,7 +31,7 @@ pub const Api = struct {
 };
 
 pub const Library = struct {
-    lib: std.DynLib,
+    lib: platform.DynLib,
     api: Api,
 
     pub fn open() Error!Library {
@@ -38,7 +39,7 @@ pub const Library = struct {
     }
 
     pub fn openPath(path: []const u8) Error!Library {
-        var lib = std.DynLib.open(path) catch return error.LibraryUnavailable;
+        var lib = platform.DynLib.open(path) catch return error.LibraryUnavailable;
         errdefer lib.close();
         var api: Api = undefined;
         const info = @typeInfo(Api).@"struct";

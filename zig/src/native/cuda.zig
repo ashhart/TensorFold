@@ -1,16 +1,19 @@
 //! CUDA family registration, device setup, memory admission and the native lane host.
 const std = @import("std");
+const platform = @import("sys");
 const cuda = @import("cuda");
 const api = @import("engine_api");
 const lanes = @import("lanes");
 const nemotron = @import("nemotron");
+const qwen35 = @import("qwen35");
 const Allocator = std.mem.Allocator;
 const budget = @import("cuda_memory.zig");
 const lane_backend = @import("cuda_bound.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
+const drafted = @import("cuda_drafted.zig");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-const registry = .{nemotron.native};
+const registry = .{ nemotron.native, qwen35.native, qwen35.native_moe };
 
 /// Nemotron's prompt-cache copies. A file-level value so the store's pointer stays valid for the process.
 const nemotron_snaps: api.prompt_cache.Snapshots.VTable = .{
@@ -44,7 +47,7 @@ fn chipClass(a: Allocator, capability: u32) ?[]const u8 {
 }
 
 fn getenv(name: [:0]const u8) ?[]const u8 {
-    return std.mem.span(std.c.getenv(name) orelse return null);
+    return std.mem.span(platform.c.getenv(name) orelse return null);
 }
 
 /// A variable's whole number: null when unset or empty, an error for anything else that is not one.
@@ -152,6 +155,7 @@ const Host = struct {
     slide: ?*anyopaque = null, // that learner's adapter, freed by slide_free before the family
     slide_free: ?*const fn (Allocator, *anyopaque) void = null,
     dir: []u8 = &.{}, // the model folder the learner writes its lessons into
+    served: drafted.Served = undefined, // the family's backend, wrapped with --drafter's draft model when given
 
     fn close(p: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(p));
@@ -165,6 +169,7 @@ const Host = struct {
         }
         if (h.slide) |s| h.slide_free.?(h.gpa, s);
         h.gpa.free(h.dir);
+        h.served.close(h.gpa);
         h.release(h.family);
         if (h.gpu) |g| {
             g.ctx.deinit();
@@ -188,6 +193,10 @@ const Host = struct {
     fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain) !void {
         h.cfg = try lanes.Config.init(h.gpa, facts, rows, rows - 1);
         errdefer h.cfg.deinit(h.gpa);
+        if (facts.head_trees) { // a drafter's trees: the planner picks a lone stream's lanes, as deep as it drafts
+            h.cfg.head_lanes = rows - 1;
+            h.cfg.head_depth = @max(1, facts.drafts);
+        }
         h.clock = .{ .io = io };
         h.core = lanes.Engine.init(h.gpa, &h.cfg, h.backend(), h.clock.clock());
         errdefer h.core.deinit();
@@ -333,27 +342,43 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         return null;
     };
     defer if (!opened) loaded.deinit(loaded.ctx);
+    var served = try drafted.wrap(F, a, gpa, io, loaded, o, problem) orelse return null;
+    defer if (!opened) served.close(gpa);
     const model = cuda.usage(false).device - held0;
     const after = try pool(a, io, &g.ctx, problem) orelse return null;
-    const room = after.room(model) -| loaded.learn_bytes;
+    // what a family's Loaded may leave out: no learner, no lone driver, no prompt-cache copies
+    const L = @TypeOf(loaded);
+    const learn_bytes: usize = if (@hasField(L, "learn_bytes")) loaded.learn_bytes else 0;
+    const room = after.room(model) -| learn_bytes;
     const free = loaded.free_streams;
-    const streams = budget.admit(room, loaded.stream_bytes, free, o.lanes, o.lanes_fixed) catch |e| {
+    const streams = budget.admit(room, served.stream_bytes, free, o.lanes, o.lanes_fixed) catch |e| {
         problem.* = switch (e) {
-            error.NoStream => try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream: one at a {d}-token window takes {d:.2} GiB, and {d:.2} GiB is left after the model's {d:.2} GiB and the {d:.1} GiB reserve; lower --context, or free device memory", .{ window, toGib(loaded.stream_bytes), toGib(room), toGib(model), toGib(after.reserve) }),
-            error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its streams at a {d}-token window, and the CUDA memory budget leaves {d:.2} GiB: serve --parallel {d}, or lower --context", .{ o.lanes, toGib(loaded.stream_bytes * (o.lanes -| free)), window, toGib(room), free + room / loaded.stream_bytes }),
+            error.NoStream => try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream: one at a {d}-token window takes {d:.2} GiB, and {d:.2} GiB is left after the model's {d:.2} GiB and the {d:.1} GiB reserve; lower --context, or free device memory", .{ window, toGib(served.stream_bytes), toGib(room), toGib(model), toGib(after.reserve) }),
+            error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its streams at a {d}-token window, and the CUDA memory budget leaves {d:.2} GiB: serve --parallel {d}, or lower --context", .{ o.lanes, toGib(served.stream_bytes * (o.lanes -| free)), window, toGib(room), free + room / served.stream_bytes }),
         };
+        return null;
+    };
+    // a family that pre-allocates its streams' buffers does so now that their count is known
+    if (@hasField(L, "reserve")) {
+        loaded.reserve(loaded.ctx, streams) catch |e| {
+            problem.* = try std.fmt.allocPrint(a, "the native CUDA engine cannot reserve {d} streams' caches at a {d}-token window ({s}): serve fewer with --parallel, or lower --context", .{ streams, window, @errorName(e) });
+            return null;
+        };
+    }
+    served.reserve(streams) catch |e| {
+        problem.* = try std.fmt.allocPrint(a, "the native CUDA engine cannot reserve {d} streams' caches at a {d}-token window ({s}): serve fewer with --parallel, or lower --context", .{ streams, window, @errorName(e) });
         return null;
     };
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
-    h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = loaded.backend, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = loaded.lone };
-    const cache = budget.cacheBytes(o.prompt_cache_gib, room, loaded.stream_bytes * (streams -| free));
+    h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = served.backend, .served = served, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = if (@hasField(L, "lone")) loaded.lone else null };
+    const cache = if (!@hasField(L, "target")) 0 else budget.cacheBytes(o.prompt_cache_gib, room, served.stream_bytes * (streams -| free));
     h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in passes of up to {d} rows{s}{s}; {s}", .{
-        capability,                                                                                                        device,                                                                                                       name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (loaded.learn_bytes > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(loaded.learn_bytes)}) else "", streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
+        capability,                                                                                                        device,                                                                                                       name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (learn_bytes > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(learn_bytes)}) else "", streams, if (streams == 1) "" else "s", toGib(served.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
         if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache", .{toGib(cache)}) else ", no prompt cache", if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
     });
     errdefer gpa.free(h.startup);
-    if (cache > 0) {
+    if (@hasField(L, "target") and cache > 0) {
         const pc = api.prompt_cache;
         const store = try gpa.create(pc.Store);
         // states keep at any row at no prompt call (the head reads one token on); replies prefill when it is quiet
@@ -364,7 +389,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         store.deinit();
         gpa.destroy(store);
     };
-    if (loaded.learns != null) {
+    if (@hasField(L, "learns") and loaded.learns != null) {
         const Slide = nemotron_slide.Adapter(F.slide);
         h.dir = try gpa.dupe(u8, o.dir);
         const s = try gpa.create(Slide);
@@ -384,7 +409,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         gpa.free(h.dir);
     };
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
-    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .warm_turns = h.store != null, .logprobs = loaded.backend.vtable.first_row != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows, .structures = loaded.backend.vtable.first_masked != null }, .{ .ctx = loaded.ctx, .text = F.explain });
+    try h.serve(io, served.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .warm_turns = h.store != null, .logprobs = served.backend.vtable.first_row != null, .prompt_logprobs = served.backend.vtable.prompt_rows, .structures = served.backend.vtable.first_masked != null }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }

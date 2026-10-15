@@ -1,5 +1,6 @@
 //! Generated native draft and plain requests retain CLI tokens and final state through the served host.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const q = @import("tensorfold").qwen27;
 const api = @import("engine_api");
@@ -73,7 +74,7 @@ const Box = struct {
 };
 /// Drafted requests on the lane core (its own round counts), by the host's rule: TF_QWEN27_LANES, else no tensor units.
 fn lanesMode(h: *host.Host) bool {
-    if (std.c.getenv("TF_QWEN27_LANES")) |v| return std.mem.eql(u8, std.mem.span(v), "1");
+    if (platform.c.getenv("TF_QWEN27_LANES")) |v| return std.mem.eql(u8, std.mem.span(v), "1");
     return !h.model.device.tensorUnits();
 }
 fn stop(_: *anyopaque, ids: []const u32) bool {

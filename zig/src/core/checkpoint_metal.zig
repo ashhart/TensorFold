@@ -1,5 +1,6 @@
 //! The shared safetensors index read into Metal buffers: one shared buffer a shard, each tensor at its data offset.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const st = @import("safetensors.zig");
 
@@ -33,7 +34,7 @@ pub const Deferred = struct { file: usize, at: usize, bytes: usize, dtype: DType
 pub const Later = *const fn (name: []const u8, rank: usize) bool;
 
 /// A shard file that deferred tensors stay in, and its address-only views' reservation once one is asked for.
-const File = struct { fd: std.c.fd_t, end: usize = 0, views: ?[]align(std.heap.page_size_min) u8 = null };
+const File = struct { fd: platform.c.fd_t, end: usize = 0, views: ?[]align(std.heap.page_size_min) u8 = null };
 
 /// Kept tensors pack at this alignment; reads this large or larger run on 8 threads.
 pub const alignment = 256;
@@ -63,14 +64,14 @@ pub const Checkpoint = struct {
 
     /// As addFileSelected; with `later`, the tensors it names stay in the file for `read` and the rest pack into one buffer.
     pub fn addFileSplit(self: *Checkpoint, device: mtl.Device, path: [:0]const u8, prefix: []const u8, selected: ?[]const u8, later: ?Later) !void {
-        const fd = std.c.open(path, .{ .ACCMODE = .RDONLY });
+        const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY });
         if (fd < 0) {
             std.log.err("cannot open {s}", .{path});
             return error.OpenFailed;
         }
         var held = false;
         defer if (!held) {
-            _ = std.c.close(fd);
+            _ = platform.c.close(fd);
         };
         var head: [8]u8 = undefined;
         try readAll(fd, &head, 0);
@@ -78,7 +79,7 @@ pub const Checkpoint = struct {
         const header = try self.allocator.alloc(u8, header_len);
         defer self.allocator.free(header);
         try readAll(fd, header, 8);
-        const end = std.c.lseek(fd, 0, std.c.SEEK.END);
+        const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
         const data_start = 8 + header_len;
         const data_len: usize = @as(usize, @intCast(end)) - data_start;
 
@@ -114,7 +115,7 @@ pub const Checkpoint = struct {
     }
 
     /// The kept entries packed into one buffer, the `later` ones recorded for `read`; `held` once the file stays open.
-    fn split(self: *Checkpoint, device: mtl.Device, fd: std.c.fd_t, held: *bool, data_start: usize, entries: st.Header, prefix: []const u8, later: Later) !void {
+    fn split(self: *Checkpoint, device: mtl.Device, fd: platform.c.fd_t, held: *bool, data_start: usize, entries: st.Header, prefix: []const u8, later: Later) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const names = try arena.allocator().alloc([]const u8, entries.count());
@@ -184,7 +185,7 @@ pub const Checkpoint = struct {
     /// Close the files the deferred tensors live in, once load has read them.
     pub fn closeFiles(self: *Checkpoint) void {
         for (self.files.items) |*file| if (file.fd >= 0) {
-            _ = std.c.close(file.fd);
+            _ = platform.c.close(file.fd);
             file.fd = -1;
         };
     }
@@ -300,16 +301,16 @@ pub const Stage = struct {
     }
 };
 
-fn readAll(fd: std.c.fd_t, dest: []u8, at: usize) !void {
+fn readAll(fd: platform.c.fd_t, dest: []u8, at: usize) !void {
     var done: usize = 0;
     while (done < dest.len) {
-        const n = std.c.pread(fd, dest.ptr + done, dest.len - done, @intCast(at + done));
+        const n = platform.c.pread(fd, dest.ptr + done, dest.len - done, @intCast(at + done));
         if (n <= 0) return error.ShortRead;
         done += @intCast(n);
     }
 }
 
-const Part = struct { fd: std.c.fd_t, dest: []u8, at: usize, failed: bool = false };
+const Part = struct { fd: platform.c.fd_t, dest: []u8, at: usize, failed: bool = false };
 
 fn readPart(part: *Part) void {
     readAll(part.fd, part.dest, part.at) catch {
@@ -318,7 +319,7 @@ fn readPart(part: *Part) void {
 }
 
 /// pread `dest.len` bytes from `at` on 8 threads (page cache or disk, the copy is the load's main cost).
-fn readParallel(fd: std.c.fd_t, dest: []u8, at: usize) !void {
+fn readParallel(fd: platform.c.fd_t, dest: []u8, at: usize) !void {
     const n_threads = 8;
     var parts: [n_threads]Part = undefined;
     var threads: [n_threads]?std.Thread = @splat(null);
@@ -335,7 +336,7 @@ fn readParallel(fd: std.c.fd_t, dest: []u8, at: usize) !void {
 }
 
 /// One tensor's bytes: small ones on this thread, large ones on 8.
-fn readInto(fd: std.c.fd_t, dest: []u8, at: usize) !void {
+fn readInto(fd: platform.c.fd_t, dest: []u8, at: usize) !void {
     return if (dest.len >= parallel_bytes) readParallel(fd, dest, at) else readAll(fd, dest, at);
 }
 

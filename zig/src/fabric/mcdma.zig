@@ -1,5 +1,6 @@
 //! Registered windows over first-party MCDMA: one progress context per port, with staged sources held through flush.
 const std = @import("std");
+const platform = @import("sys");
 const abi = @import("mcdma_abi.zig");
 const rma = @import("rdma.zig");
 const words = @import("words.zig");
@@ -367,7 +368,7 @@ test "an endpoint gives the library's placing thread user-interactive QoS unless
     for ([_]?[*:0]const u8{ null, "0", "1" }) |set| {
         _ = if (set) |v| setenv("MCDMA_FABRIC_QOS", v, 1) else unsetenv("MCDMA_FABRIC_QOS");
         try std.testing.expectError(error.LibraryUnavailable, Endpoint.create(std.testing.allocator, "/nonexistent/libmcdma-fabric.dylib", config));
-        try std.testing.expectEqualStrings(if (set) |v| std.mem.span(v) else "1", if (std.c.getenv("MCDMA_FABRIC_QOS")) |v| std.mem.span(v) else "(unset)");
+        try std.testing.expectEqualStrings(if (set) |v| std.mem.span(v) else "1", if (platform.c.getenv("MCDMA_FABRIC_QOS")) |v| std.mem.span(v) else "(unset)");
     }
 }
 

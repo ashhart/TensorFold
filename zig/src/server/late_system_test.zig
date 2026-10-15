@@ -1,5 +1,6 @@
 //! A later system message is re-roled to user on Messages when the template cannot keep it, matching chat.
 const std = @import("std");
+const platform = @import("sys");
 const api = @import("engine_api");
 const server = @import("root.zig");
 const json = server.json;
@@ -132,10 +133,10 @@ const Capture = struct {
 const Reply = struct { status: u16, body: []u8 };
 
 fn exchange(srv: *server.Server, path: []const u8, body: []const u8) !Reply {
-    var pair: [2]std.c.fd_t = undefined;
-    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
-    defer _ = std.c.close(pair[0]);
-    defer _ = std.c.close(pair[1]);
+    var pair: [2]platform.posix.socket_t = undefined;
+    if (@import("builtin").os.tag == .windows) try platform.posix.socketpair(&pair) else if (platform.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
+    defer _ = platform.posix.system.close(pair[0]);
+    defer _ = platform.posix.system.close(pair[1]);
     const head = try std.fmt.allocPrint(std.testing.allocator, "POST {s} HTTP/1.1\r\nHost: t\r\nContent-Length: {d}\r\n\r\n", .{ path, body.len });
     defer std.testing.allocator.free(head);
     try writeAll(pair[0], head);
@@ -157,23 +158,23 @@ fn exchange(srv: *server.Server, path: []const u8, body: []const u8) !Reply {
     return .{ .status = status, .body = payload };
 }
 
-fn writeAll(fd: std.c.fd_t, data: []const u8) !void {
+fn writeAll(fd: platform.posix.socket_t, data: []const u8) !void {
     var sent: usize = 0;
     while (sent < data.len) {
-        const n = std.c.write(fd, data[sent..].ptr, data.len - sent);
+        const n = platform.posix.system.write(fd, data[sent..].ptr, data.len - sent);
         if (n <= 0) return error.Closed;
         sent += @intCast(n);
     }
 }
 
-fn readReady(a: std.mem.Allocator, fd: std.c.fd_t) ![]u8 {
+fn readReady(a: std.mem.Allocator, fd: platform.posix.socket_t) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(a);
     var tmp: [4096]u8 = undefined;
     while (true) {
-        var pollfd = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
-        if (try std.posix.poll(&pollfd, 200) == 0) break;
-        const n = std.posix.read(fd, &tmp) catch |e| return e;
+        var pollfd = [_]platform.posix.pollfd{.{ .fd = fd, .events = platform.posix.POLL.IN, .revents = 0 }};
+        if (try platform.posix.poll(&pollfd, 200) == 0) break;
+        const n = platform.posix.read(fd, &tmp) catch |e| return e;
         if (n == 0) break;
         try out.appendSlice(a, tmp[0..n]);
     }

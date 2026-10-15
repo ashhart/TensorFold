@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("sys");
 const imprint = @import("prompt_imprint.zig");
 const Imprint = imprint.Imprint;
 const Fake = @import("prompt_cache_fake.zig").Fake;
@@ -26,15 +27,15 @@ fn learn(im: *Imprint, prompt: []const u32) !void {
     try std.testing.expect(im.has(Imprint.keyOf(prompt[0..6])));
 }
 fn exists(file: [:0]const u8) bool {
-    const fd = std.c.open(file, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+    const fd = platform.c.open(file, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(platform.c.mode_t, 0));
     if (fd < 0) return false;
-    _ = std.c.close(fd);
+    _ = platform.c.close(fd);
     return true;
 }
 fn put(file: [:0]const u8, bytes: []const u8) !void {
-    const fd = std.c.open(file, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+    const fd = platform.c.open(file, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(platform.c.mode_t, 0o600));
     if (fd < 0) return error.TestFile;
-    defer _ = std.c.close(fd);
+    defer _ = platform.c.close(fd);
     try imprint.writeAll(fd, bytes);
 }
 
@@ -42,7 +43,7 @@ test "reopen sweeps only unindexed owned payloads left by old post-tear learning
     const a = std.testing.allocator;
     for (0..3) |kind| {
         var buf: [128]u8 = undefined;
-        const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-lost-{d}-{d}", .{ std.c.getpid(), kind });
+        const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-lost-{d}-{d}", .{ platform.c.getpid(), kind });
         defer @import("prompt_imprint_test.zig").rmTree(root);
         const first = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
         var later = [_]u32{ 11, 12, 13, 14, 15, 16, 17, 18 };
@@ -57,14 +58,14 @@ test "reopen sweeps only unindexed owned payloads left by old post-tear learning
                 later[0] += 10;
             }
             var path: [1200]u8 = undefined;
-            const fd = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{im.dir}, 0), .{ .ACCMODE = .RDWR }, @as(std.c.mode_t, 0));
+            const fd = platform.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{im.dir}, 0), .{ .ACCMODE = .RDWR }, @as(platform.c.mode_t, 0));
             if (fd < 0) return error.TestFile;
             {
-                defer _ = std.c.close(fd);
+                defer _ = platform.c.close(fd);
                 var original: [240]u8 = undefined;
                 try std.testing.expect(imprint.readAt(fd, &original, 0));
-                try std.testing.expectEqual(@as(c_int, 0), std.c.ftruncate(fd, 60));
-                if (std.c.lseek(fd, 60, std.c.SEEK.SET) != 60) return error.TestFile;
+                try std.testing.expectEqual(@as(c_int, 0), platform.c.ftruncate(fd, 60));
+                if (platform.c.lseek(fd, 60, platform.c.SEEK.SET) != 60) return error.TestFile;
                 const key = Imprint.keyOf(&.{ 31, 32 });
                 const torn = [_]u32{ 0x494d5052, 2, @truncate(key), @truncate(key >> 32), 1, if (kind == 0) 512 else 2, 0, 100, 0 };
                 if (kind != 1) try imprint.writeAll(fd, std.mem.sliceAsBytes(&torn));

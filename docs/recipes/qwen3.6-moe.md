@@ -6,7 +6,8 @@ engine. @cshintov brought the model to Macs in [#138](https://github.com/ashhart
 @philip-pentatonic ([#78](https://github.com/ashhart/TensorFold/pull/78),
 [#84](https://github.com/ashhart/TensorFold/pull/84)) and @BHCC2025
 ([#270](https://github.com/ashhart/TensorFold/pull/270)) worked on its CUDA path; see [credits](../credits.md).
-The native binary has no `qwen3_5_moe` family yet, so `tensorfold pull` and `tensorfold info` refuse the checkpoint.
+The native CUDA engine serves the checkpoint with its MTP layer ([docs/WINDOWS.md](../WINDOWS.md)); the Metal native
+binary has no `qwen3_5_moe` family yet, so `tensorfold pull` and `tensorfold info` refuse the checkpoint there.
 
 The `qwen3_5_moe` family serves Qwen3.6-35B-A3B on Apple Silicon and on one NVIDIA GPU. Its layers are the 27B's
 (Gated DeltaNet and gated full attention, every fourth layer attention) with routed experts in place of the dense

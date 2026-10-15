@@ -15,6 +15,7 @@ const resume_tests = @import("resume_tests.zig");
 const prompt_cuts = @import("prompt_cuts.zig");
 const chunk_costs = @import("chunk_costs.zig");
 const grouped_tests = @import("grouped_tests.zig");
+const moe_tests = @import("moe_tests.zig");
 const fp8_tests = @import("fp8_tests.zig");
 const fp8_experts_tests = @import("fp8_experts_tests.zig");
 const nvfp4_experts_tests = @import("nvfp4_experts_tests.zig");
@@ -58,6 +59,7 @@ const usage =
     \\  prompt-cuts MODEL IDS_FILE   a prompt keeping states inside chunks and at their ends (background passes too), and resumed from each, equals one uncut pass
     \\  recapture MODEL           graphs captured again while another sequence is bound: both keep their sampling rules
     \\  grouped-plan <dir>        the shared expert plan against experts.route's bytes (oracle/grouped_plan.py)
+    \\  moe                       softmax top-k routing and the SwiGLU pair experts against host references (synthetic)
     \\  fp8-lane <dir>            block-FP8 projections against the Python lane matmul's bytes (oracle/fp8_lane.py)
     \\  fp8-experts <dir>         grouped block-FP8 experts against recorded fixture bytes
     \\  nvfp4-experts <dir>       grouped NVFP4 experts against recorded fixture bytes
@@ -141,6 +143,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "prompt-cuts")) return prompt_cuts.run(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "recapture")) return recapture_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "grouped-plan")) return grouped_tests.plan(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "moe")) return moe_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "carveout")) {
         const mib = if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else cuda.carveout.default_bytes >> 20;
         return carveout_tests.run(gpu, if (rest.len > 1) rest[1] else cuda.carveout.default_card, mib);

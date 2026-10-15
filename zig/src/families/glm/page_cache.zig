@@ -1,5 +1,6 @@
 //! A checkpoint's pages in the file cache, dropped before a load: F_NOCACHE reads keep out of it but evict nothing.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const paced_read = @import("../../core/paced_read.zig");
 
@@ -33,15 +34,15 @@ pub fn dropCached(gpa: std.mem.Allocator, dir: []const u8, want: u64, d: *Droppe
     const page: usize = std.heap.pageSize();
     for (files.keys()) |name| {
         if (d.dropped >= want) break;
-        const fd = std.c.open(try std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ dir, name }, 0), .{ .ACCMODE = .RDONLY });
+        const fd = platform.c.open(try std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ dir, name }, 0), .{ .ACCMODE = .RDONLY });
         if (fd < 0) return error.OpenFailed;
-        defer _ = std.c.close(fd);
-        const end = std.c.lseek(fd, 0, std.c.SEEK.END);
+        defer _ = platform.c.close(fd);
+        const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
         if (end <= 0) continue;
         const len: usize = @intCast(end);
-        const map = std.c.mmap(null, len, .{ .READ = true }, .{ .TYPE = .SHARED }, fd, 0);
-        if (map == std.c.MAP_FAILED) return error.MapFailed;
-        defer _ = std.c.munmap(@alignCast(map), len);
+        const map = platform.c.mmap(null, len, .{ .READ = true }, .{ .TYPE = .SHARED }, fd, 0);
+        if (map == platform.c.MAP_FAILED) return error.MapFailed;
+        defer _ = platform.c.munmap(@alignCast(map), len);
         const vec = try a.alloc(u8, (len + page - 1) / page);
         var cached: u64 = 0;
         if (mincore(map, len, vec.ptr) == 0) for (vec) |v| {
@@ -57,31 +58,31 @@ pub fn dropCached(gpa: std.mem.Allocator, dir: []const u8, want: u64, d: *Droppe
 test "a checkpoint's cached pages are dropped only as far as wanted, and a shard with none is left alone" {
     const gpa = std.testing.allocator;
     var name_buf: [64]u8 = undefined;
-    const dir = try std.fmt.bufPrintSentinel(&name_buf, "/tmp/tf-drop-cached-{d}", .{std.c.getpid()}, 0);
-    _ = std.c.mkdir(dir, 0o700);
-    defer _ = std.c.rmdir(dir);
+    const dir = try std.fmt.bufPrintSentinel(&name_buf, "/tmp/tf-drop-cached-{d}", .{platform.c.getpid()}, 0);
+    _ = platform.c.mkdir(dir, 0o700);
+    defer _ = platform.c.rmdir(dir);
     var path_buf: [128]u8 = undefined;
     const index = try std.fmt.bufPrintSentinel(&path_buf, "{s}/model.safetensors.index.json", .{dir}, 0);
     const text = "{\"weight_map\": {\"a\": \"s.safetensors\", \"b\": \"s.safetensors\"}}";
     var shard_buf: [128]u8 = undefined;
     const shard = try std.fmt.bufPrintSentinel(&shard_buf, "{s}/s.safetensors", .{dir}, 0);
     for ([_][:0]const u8{ index, shard }, [_][]const u8{ text, "" }) |file, body| {
-        const fd = std.c.open(file, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+        const fd = platform.c.open(file, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true }, @as(platform.c.mode_t, 0o600));
         try std.testing.expect(fd >= 0);
-        defer _ = std.c.close(fd);
+        defer _ = platform.c.close(fd);
         if (body.len > 0) {
-            _ = std.c.write(fd, body.ptr, body.len);
+            _ = platform.c.write(fd, body.ptr, body.len);
             continue;
         }
         const data = try gpa.alloc(u8, 4 << 20);
         defer gpa.free(data);
         @memset(data, 7);
-        try std.testing.expectEqual(@as(isize, @intCast(data.len)), std.c.write(fd, data.ptr, data.len));
-        _ = std.c.fsync(fd);
-        _ = std.c.pread(fd, data.ptr, data.len, 0); // read through the file cache
+        try std.testing.expectEqual(@as(isize, @intCast(data.len)), platform.c.write(fd, data.ptr, data.len));
+        _ = platform.c.fsync(fd);
+        _ = platform.c.pread(fd, data.ptr, data.len, 0); // read through the file cache
     }
-    defer _ = std.c.unlink(index);
-    defer _ = std.c.unlink(shard);
+    defer _ = platform.c.unlink(index);
+    defer _ = platform.c.unlink(shard);
     var none: Dropped = .{ .deficit = 0 };
     try dropCached(gpa, dir, 0, &none); // nothing wanted: no shard touched, the pages stay cached
     try std.testing.expectEqual(@as(u64, 0), none.dropped);

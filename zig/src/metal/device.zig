@@ -1,5 +1,6 @@
 //! The GPU device: queues, buffers (zero-copy over mmap too), events and residency sets.
 const std = @import("std");
+const platform = @import("sys");
 const objc = @import("objc.zig");
 const types = @import("types.zig");
 const command = @import("command.zig");
@@ -139,10 +140,10 @@ pub const MappedFile = struct {
     size: usize,
 
     pub fn open(path: [*:0]const u8) !MappedFile {
-        const fd = std.c.open(path, .{ .ACCMODE = .RDONLY });
+        const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY });
         if (fd < 0) return error.OpenFailed;
-        defer _ = std.c.close(fd);
-        const end = std.c.lseek(fd, 0, std.c.SEEK.END);
+        defer _ = platform.c.close(fd);
+        const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
         if (end <= 0) return error.EmptyFile;
         const size: usize = @intCast(end);
         const page = std.heap.pageSize();

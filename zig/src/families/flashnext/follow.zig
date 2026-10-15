@@ -1,5 +1,6 @@
 //! Speed-up mode's rank 1: rank 0's requests run here in step, and this Mac keeps its own states under rank 0's names.
 const std = @import("std");
+const platform = @import("sys");
 const engine = @import("engine.zig");
 const snapshot = @import("snapshot.zig");
 const fz = @import("replay.zig");
@@ -9,7 +10,7 @@ const Engine = engine.Engine;
 /// Rank 0's requests as they come, until its empty request; between them a free buffer is readied inside the budget.
 pub fn run(e: *Engine) !void {
     while (try one(e, null)) |_| {
-        const t0 = std.c.mach_absolute_time();
+        const t0 = platform.c.mach_absolute_time();
         const got = e.snap_pool.ready(e.r.device, engine.NEXT_TURN, .{ .ctx = e.r.tp.?, .check = requestWaiting }, e.peer_budget -| e.peer_held -| e.snap_pool.spare());
         if (got.cap > 0) std.log.info("speed-up rank 1: readied {d} of {d} MiB for the next save in {d:.1} ms", .{ got.touched >> 20, got.cap >> 20, msSince(t0) });
     }
@@ -21,7 +22,7 @@ fn requestWaiting(ctx: *anyopaque) bool {
 }
 
 fn msSince(t0: u64) f64 {
-    return @as(f64, @floatFromInt(std.c.mach_absolute_time() - t0)) * 125 / 3 / 1e6; // mach ticks are 125/3 ns on Apple silicon
+    return @as(f64, @floatFromInt(platform.c.mach_absolute_time() - t0)) * 125 / 3 / 1e6; // mach ticks are 125/3 ns on Apple silicon
 }
 
 /// Rank 0's request for `one`: a 16-word head, then the prompt, marks, dropped states' keys and the budget.
@@ -65,7 +66,7 @@ pub fn one(e: *Engine, out: ?engine.Out) !?engine.Result {
     const from = head[12];
     if (head[15] == 0) return error.TpProtocol; // rank 0 sends its positive pair minimum with every request
     e.pair_min = head[15];
-    const t0 = std.c.mach_absolute_time();
+    const t0 = platform.c.mach_absolute_time();
     const ok = from == 0 or blk: {
         const st = e.peer_kept.get(engine.keyOf(prompt[0 .. from + 1])) orelse break :blk false;
         snapshot.restore(e, st) catch break :blk false;
@@ -123,7 +124,7 @@ const Reply = struct {
     }
     fn marked(ctx: *anyopaque, at: usize) void {
         const r: *Reply = @ptrCast(@alignCast(ctx));
-        const t0 = std.c.mach_absolute_time();
+        const t0 = platform.c.mach_absolute_time();
         defer {
             r.kept += 1;
             r.keep_ns += msSince(t0) * 1e6;
