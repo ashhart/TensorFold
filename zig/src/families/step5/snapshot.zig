@@ -1,4 +1,4 @@
-//! A stream's prompt state kept for reuse: full layers' first `at` keys, values and summaries, every ring whole.
+//! A stream's prompt state kept for reuse: full layers' first `at` keys, values and summaries, the rings' live rows.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -20,26 +20,41 @@ pub const Snap = struct {
 /// One contiguous piece of a cache (offset into its kv or index buffer) and its length.
 const Piece = struct { index: bool, off: usize, len: usize };
 
-/// The pieces a state at `at` holds, in the snapshot's order (`cache` null: lengths only, offsets 0).
-fn pieces(c: *const cfg.Config, cache: ?*const st.Cache, at: usize, out: *std.ArrayList(Piece), gpa: std.mem.Allocator) !void {
+/// Positions [lo, hi) of a ring of `ring` slots, `width` bytes each, from `base`: one piece, or two where it wraps.
+fn ring(index: bool, base: usize, ring_: usize, width: usize, lo: usize, hi: usize, out: *std.ArrayList(Piece), gpa: std.mem.Allocator) !void {
+    if (hi <= lo) return;
+    const first = lo % ring_;
+    const n = @min(hi - lo, ring_ - first);
+    try out.append(gpa, .{ .index = index, .off = base + first * width, .len = n * width });
+    if (n < hi - lo) try out.append(gpa, .{ .index = index, .off = base, .len = (hi - lo - n) * width });
+}
+
+/// The pieces a state at `at` holds, in the snapshot's order: what the next rows read, nothing older.
+fn pieces(c: *const cfg.Config, cache: *const st.Cache, at: usize, out: *std.ArrayList(Piece), gpa: std.mem.Allocator) !void {
     const row: usize = c.kvWidth() * 2;
+    const proxy: usize = @as(usize, c.proxy) * 2;
     for (c.layer[0 .. c.layers + c.mtp], 0..) |l, i| {
-        if (l.kind == .sliding) {
-            try out.append(gpa, .{ .index = false, .off = if (cache) |k| k.keys(i) else 0, .len = st.slidingRing(c) * row * 2 });
+        if (l.kind == .sliding) { // the window behind the next row
+            const lo = at -| c.window;
+            try ring(false, cache.keys(i), st.slidingRing(c), row, lo, at, out, gpa);
+            try ring(false, cache.values(c, i), st.slidingRing(c), row, lo, at, out, gpa);
             continue;
         }
-        try out.append(gpa, .{ .index = false, .off = if (cache) |k| k.keys(i) else 0, .len = at * row });
-        try out.append(gpa, .{ .index = false, .off = if (cache) |k| k.values(c, i) else 0, .len = at * row });
-        try out.append(gpa, .{ .index = true, .off = if (cache) |k| k.summaries(i) else 0, .len = at / c.region * c.proxy * 2 });
-        try out.append(gpa, .{ .index = true, .off = if (cache) |k| k.indexKeys(c, i) else 0, .len = 2 * st.index_ring * c.proxy * 2 });
+        try out.append(gpa, .{ .index = false, .off = cache.keys(i), .len = at * row });
+        try out.append(gpa, .{ .index = false, .off = cache.values(c, i), .len = at * row });
+        try out.append(gpa, .{ .index = true, .off = cache.summaries(i), .len = at / c.region * proxy });
+        const filling = at - at % c.region; // the indexer's k and z rows of the region still filling
+        try ring(true, cache.indexKeys(c, i), st.index_ring, proxy, filling, at, out, gpa);
+        try ring(true, cache.indexZ(c, i), st.index_ring, proxy, filling, at, out, gpa);
     }
 }
 
 /// Bytes a state after `at` prompt tokens takes.
 pub fn bytes(c: *const cfg.Config, at: usize) u64 {
     const row: u64 = c.kvWidth() * 2;
+    const proxy: u64 = @as(u64, c.proxy) * 2;
     var total: u64 = 0;
-    for (c.layer[0 .. c.layers + c.mtp]) |l| total += if (l.kind == .sliding) st.slidingRing(c) * row * 2 else 2 * at * row + at / c.region * c.proxy * 2 + 2 * st.index_ring * c.proxy * 2;
+    for (c.layer[0 .. c.layers + c.mtp]) |l| total += if (l.kind == .sliding) 2 * @min(at, c.window) * row else 2 * at * row + at / c.region * proxy + 2 * (at % c.region) * proxy;
     return total;
 }
 
@@ -85,15 +100,18 @@ fn copy(gpa: std.mem.Allocator, queue: mtl.Queue, c: *const cfg.Config, cache: *
     }
 }
 
-test "a state's bytes match its pieces" {
+test "a state's bytes match its pieces, rings wrapped or not" {
     var c = cfg.Config{};
     c.layers = 4;
     c.mtp = 0;
     for (c.layer[0..4], 0..) |*l, i| l.* = .{ .kind = if (i == 3) .full else .sliding, .span = 0, .theta = 0, .limit = 0, .shared_limit = 0, .moe = false };
-    var list: std.ArrayList(Piece) = .empty;
-    defer list.deinit(std.testing.allocator);
-    try pieces(&c, null, 1000, &list, std.testing.allocator);
-    var sum: u64 = 0;
-    for (list.items) |p| sum += p.len;
-    try std.testing.expectEqual(bytes(&c, 1000), sum);
+    var cache = st.Cache{ .kv = undefined, .index = undefined, .logits = undefined, .hidden = undefined, .capacity = 1 << 20 };
+    for ([_]usize{ 5, 300, 1000, 2600, 100_003 }) |at| {
+        var list: std.ArrayList(Piece) = .empty;
+        defer list.deinit(std.testing.allocator);
+        try pieces(&c, &cache, at, &list, std.testing.allocator);
+        var sum: u64 = 0;
+        for (list.items) |p| sum += p.len;
+        try std.testing.expectEqual(bytes(&c, at), sum);
+    }
 }

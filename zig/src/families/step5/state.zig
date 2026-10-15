@@ -5,8 +5,8 @@ const cfg = @import("config.zig");
 
 /// Rows a decode forward takes at most: the router's launch limit; more take the prompt path (tensor-unit matmuls).
 pub const window_rows = 16;
-/// Rows a prompt chunk takes at most (its picks fit s5_sort's 4,096).
-pub const prompt_rows = 512;
+/// Rows a prompt chunk takes at most: each expert's weights are read once a chunk.
+pub const prompt_rows = 2048;
 /// Rows the indexer scores at once: its scores buffer is these rows by every region.
 pub const score_rows = 64;
 /// Token rows of the indexer's k and z kept for regions still filling: a region (8) plus a prompt chunk, and spare.
@@ -105,6 +105,34 @@ pub const Cache = struct {
 
 const fields = [_][]const u8{ "ids", "resid", "x", "q", "qn", "k", "v", "g", "o", "y", "shared", "gate", "up", "act", "eg", "eu", "ea", "ey", "logits32", "pick", "wts", "iq", "iqn", "ik", "iz", "iw", "scores", "sel", "xs", "sums", "offsets", "order", "cat", "hid", "chain", "logits_all" };
 
+/// Bytes of each Scratch buffer for `rows` rows at once, in `fields` order.
+fn sizes(c: *const cfg.Config, capacity: usize, rows: usize) [fields.len]usize {
+    const r: usize = rows;
+    const prompt = rows > window_rows;
+    const h: usize = c.hidden;
+    const slots = r * c.topk;
+    const qw = r * c.heads * c.head_dim * 2;
+    const ix = r * c.index_heads * c.proxy * 2;
+    return .{
+        r * 4,         r * h * 4,      r * h * 2,               qw,                      qw,
+        r * c.kvWidth() * 2, r * c.kvWidth() * 2, r * c.heads * 2, qw,               r * h * 2,
+        r * h * 2,     r * c.intermediate * 2, r * c.intermediate * 2, r * c.intermediate * 2, slots * c.moe_intermediate * 2,
+        slots * c.moe_intermediate * 2, slots * c.moe_intermediate * 2, slots * h * 2, r * c.experts * 4, slots * 4,
+        slots * 4,     ix,             ix,                      r * c.proxy * 2,         r * c.proxy * 2,
+        r * c.index_heads * 4, @min(r, score_rows) * c.kv_heads * regions(c, capacity) * 4, r * c.kv_heads * c.index_topk * 4,
+        if (prompt) slots * h * 2 else 16, if (prompt) @max(r * c.intermediate / 64, slots * h / 128) * 4 else 16,
+        c.experts * 4, slots * 4,
+        r * h * 2 * 2, r * h * 4, h * 4, @min(r, window_rows) * @as(usize, c.vocab) * 2,
+    };
+}
+
+/// Bytes a Scratch for `rows` rows holds, its router buffers included.
+pub fn scratchBytes(c: *const cfg.Config, capacity: usize, rows: usize) usize {
+    var total: usize = 7 * (@as(usize, c.experts) * window_rows * 4 + 4096);
+    for (sizes(c, capacity, rows)) |n| total += n;
+    return total;
+}
+
 pub const Scratch = struct {
     ids: mtl.Buffer,
     resid: mtl.Buffer, // fp32 [rows, hidden]
@@ -147,29 +175,13 @@ pub const Scratch = struct {
 
     /// Buffers for `rows` rows at once (window_rows for decode, prompt_rows for prompt chunks).
     pub fn init(device: mtl.Device, c: *const cfg.Config, capacity: usize, rows: usize) !Scratch {
-        const r: usize = rows;
         @setEvalBranchQuota(10000);
-        const prompt = rows > window_rows;
-        const h: usize = c.hidden;
-        const slots = r * c.topk;
-        const qw = r * c.heads * c.head_dim * 2;
-        const ix = r * c.index_heads * c.proxy * 2;
-        const sizes = [fields.len]usize{
-            r * 4,         r * h * 4,      r * h * 2,               qw,                      qw,
-            r * c.kvWidth() * 2, r * c.kvWidth() * 2, r * c.heads * 2, qw,               r * h * 2,
-            r * h * 2,     r * c.intermediate * 2, r * c.intermediate * 2, r * c.intermediate * 2, slots * c.moe_intermediate * 2,
-            slots * c.moe_intermediate * 2, slots * c.moe_intermediate * 2, slots * h * 2, r * c.experts * 4, slots * 4,
-            slots * 4,     ix,             ix,                      r * c.proxy * 2,         r * c.proxy * 2,
-            r * c.index_heads * 4, @min(r, score_rows) * c.kv_heads * regions(c, capacity) * 4, r * c.kv_heads * c.index_topk * 4,
-            if (prompt) slots * h * 2 else 16, if (prompt) @max(r * c.intermediate / 64, slots * h / 128) * 4 else 16,
-            c.experts * 4, slots * 4,
-            r * h * 2 * 2, r * h * 4, h * 4, @min(r, window_rows) * @as(usize, c.vocab) * 2,
-        };
+        const sizes_ = sizes(c, capacity, rows);
         var s: Scratch = undefined;
         var made: usize = 0;
         errdefer inline for (fields, 0..) |f, i| if (i < made) @field(s, f).deinit();
         inline for (fields, 0..) |f, i| {
-            @field(s, f) = try device.buffer(sizes[i], mtl.ResourceOptions.shared);
+            @field(s, f) = try device.buffer(sizes_[i], mtl.ResourceOptions.shared);
             made += 1;
         }
         var routed: usize = 0;

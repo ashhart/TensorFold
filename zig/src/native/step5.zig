@@ -43,7 +43,8 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     var len: usize = @sizeOf(u64);
     if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
     const text: ?[]const u8 = if (std.c.getenv("STEP5_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
-    const scratch: u64 = 64 << 20; // a 16-row window's buffers, and the scores at 1M positions
+    const c = &model.config; // the decode window's and the prompt chunk's buffers, scores sized for the longest context
+    const scratch: u64 = s5.state.scratchBytes(c, c.context, s5.state.window_rows) + s5.state.scratchBytes(c, c.context, s5.state.prompt_rows);
     const budget = s5.budget.caches(ram, model.device.maxWorkingSet(), text, model.checkpoint.residentBytes() + scratch) catch {
         model.deinit();
         problem.* = "STEP5_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
