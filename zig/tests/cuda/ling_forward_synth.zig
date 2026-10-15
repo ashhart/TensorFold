@@ -10,7 +10,7 @@ const Rig = rig.Rig;
 const P = 80; // prompt rows: KDA's prompt takes the wide chain (64 rows or more)
 
 /// ling_forward.py's file: ids, float64 and bf16-point logits [T][V], the picks it routed on [layers][T][top].
-const Ref = struct { T: usize, V: usize, layers: usize, top: usize, forced: bool, gap: f64, ids: []i32, l64: []f64, lbf: []f64, picks: []i32 };
+pub const Ref = struct { T: usize, V: usize, layers: usize, top: usize, forced: bool, gap: f64, ids: []i32, l64: []f64, lbf: []f64, picks: []i32 };
 
 fn take(comptime T: type, a: std.mem.Allocator, bytes: []const u8, at: *usize, n: usize) ![]T {
     const out = try a.alloc(T, n);
@@ -19,7 +19,7 @@ fn take(comptime T: type, a: std.mem.Allocator, bytes: []const u8, at: *usize, n
     return out;
 }
 
-fn readRef(a: std.mem.Allocator, io: std.Io, path: []const u8) !Ref {
+pub fn readRef(a: std.mem.Allocator, io: std.Io, path: []const u8) !Ref {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 30));
     if (bytes.len < 36 or !std.mem.eql(u8, bytes[0..8], "TFLINGF2")) return error.BadFixture;
     var at: usize = 8;

@@ -8,6 +8,9 @@ pub const synth = @import("synth.zig");
 pub const graph = @import("graph.zig");
 pub const state = @import("state.zig");
 pub const forward = @import("forward.zig");
+pub const engine = @import("engine.zig");
+pub const lanes = @import("lanes.zig");
+pub const native = @import("native.zig");
 
 const Config = config.Config;
 
@@ -44,6 +47,9 @@ test {
     std.testing.refAllDecls(@import("weights_proj.zig"));
     std.testing.refAllDecls(forward); // the layer graph compiles on hosts without a GPU
     std.testing.refAllDecls(forward.Forward);
+    std.testing.refAllDecls(engine.Engine); // the engine, its lane backend and its server hooks too
+    std.testing.refAllDecls(lanes.Lanes);
+    _ = native;
 }
 
 test "Ling's routing as glue.select takes it: 8 groups keeping 4, and select's own bounds hold" {

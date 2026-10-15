@@ -101,11 +101,22 @@ pub const Forward = struct {
 
     /// The final norm and lm_head of b.x's rows into b.logits (bf16 [rows][vocab]).
     pub fn head(f: *const Forward, rows: usize) !void {
+        try f.final(rows);
+        try f.logitsOf(0, rows);
+    }
+
+    /// The final norm of b.x's rows into b.normed: the rows lm_head and the MTP layer read.
+    pub fn final(f: *const Forward, rows: usize) !void {
         const o = f.ops();
         const w = f.g.w;
         const D: usize = w.config.hidden;
         try glue.rmsnorm(o.set(), o.s, f.b.x, D, w.norm, f.b.normed, D, null, w.config.eps, rows, D);
-        try o.mm(w.head orelse return error.TiedHeadNotBuilt, f.b.normed, D, rows, f.b.logits);
+    }
+
+    /// lm_head of b.normed's rows row0 .. row0 + n into b.logits from its first row.
+    pub fn logitsOf(f: *const Forward, row0: usize, n: usize) !void {
+        const D: usize = f.g.w.config.hidden;
+        try f.ops().mm(f.g.w.head orelse return error.TiedHeadNotBuilt, f.b.normed + row0 * D * 2, D, n, f.b.logits);
     }
 
     /// Keep the first `keep` rows of the sequence's last forward (a prompt keeps them all): KDA states, position.

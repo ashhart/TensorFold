@@ -130,7 +130,7 @@ class Model:
         masked = choice.masked_fill(keep == 0, float("-inf"))
         idx = masked.topk(top, -1)[1]
         self.picks.append(idx.sort(-1)[0].int())
-        if self.forced is not None:  # the graph's picks; gap: how far the worst one ranks below the top-k
+        if self.forced is not None and len(self.picks) <= self.forced.shape[0]:  # the graph's picks; gap: how far the worst one ranks below the top-k
             idx = self.forced[len(self.picks) - 1].long()
             kth = masked.topk(top, -1)[0][:, -1]
             self.gap = max(self.gap, (kth - choice.gather(1, idx).min(-1)[0]).max().item())
@@ -154,7 +154,20 @@ class Model:
             x = self.r(x + (self.mla(h, p + "attention.") if mla else self.kda(h, p + "attention.")))
             h = self.norm(x, ck.t(p + "post_attention_layernorm.weight"))
             x = self.r(x + (self.moe(h, p + "mlp.", i) if i >= c["first_k_dense_replace"] else self.mlp(h, p + "mlp.", 0)))
-        return self.norm(x, ck.t("model.norm.weight")) @ ck.lin("lm_head").T
+        self.hidden = self.norm(x, ck.t("model.norm.weight"))
+        return self.hidden @ ck.lin("lm_head").T
+
+    def mtp_logits(self, ids):
+        """The MTP layer's logits at rows 0 .. T - 2: hidden row t (after logits()) with token t + 1's embedding."""
+        c, ck = self.c, self.ck
+        L = c["num_hidden_layers"]
+        p = f"model.layers.{L}."
+        e = self.norm(ck.t("model.word_embeddings.weight").double()[ids[1:]], ck.t(p + "enorm.weight"))
+        h = self.norm(self.hidden[:-1], ck.t(p + "hnorm.weight"))
+        x = self.lin(torch.cat([e, h], -1), p + "eh_proj")
+        x = self.r(x + self.mla(self.norm(x, ck.t(p + "input_layernorm.weight")), p + "attention."))
+        x = self.r(x + self.moe(self.norm(x, ck.t(p + "post_attention_layernorm.weight")), p + "mlp.", L))
+        return self.norm(x, ck.t(p + "final_layernorm.weight")) @ ck.lin("lm_head").T
 
 
 def main():
@@ -163,11 +176,17 @@ def main():
     a.add_argument("out", help="the reference file: ids, float64 and bf16-point logits, the picks it routed on")
     a.add_argument("--tokens", type=int, default=88)
     a.add_argument("--picks", help="route on these picks (i32 [MoE layers][tokens][top_k], the graph's) instead")
+    a.add_argument("--mtp", help="also the MTP layer's logits (float64, bf16 points) and its own picks, to this file")
+    a.add_argument("--ids", help="these tokens (i32, ling-lanes' OUT.ids) instead of the fixed walk; --tokens follows")
     o = a.parse_args()
     c = json.load(open(os.path.join(o.ckpt, "config.json")))
     ck = Ckpt(os.path.join(o.ckpt, "model.safetensors"))
-    T, V = o.tokens, c["vocab_size"]
-    ids = torch.tensor([(37 * t + 11) % (V - 2) for t in range(T)])
+    V = c["vocab_size"]
+    if o.ids:
+        ids = torch.frombuffer(bytearray(open(o.ids, "rb").read()), dtype=torch.int32).long()
+    else:
+        ids = torch.tensor([(37 * t + 11) % (V - 2) for t in range(o.tokens)])
+    T = ids.shape[0]
     forced = None
     if o.picks:
         nm = sum(1 for i in range(c["num_hidden_layers"]) if i >= c["first_k_dense_replace"])
@@ -176,7 +195,17 @@ def main():
         exact = Model(ck, c, lambda z: z, forced)
         l64 = exact.logits(ids)
         lbf = Model(ck, c, bf16, forced).logits(ids)
-    picks = forced if forced is not None else torch.stack(exact.picks)
+        if o.mtp:  # the bf16-point model's own picks route its MTP layer; float64's are written for the flips
+            rounded = Model(ck, c, bf16, forced)
+            rounded.logits(ids)
+            m64, mbf = exact.mtp_logits(ids), rounded.mtp_logits(ids)
+            mp = exact.picks[-1]
+            with open(o.mtp, "wb") as f:
+                f.write(b"TFLINGM2" + struct.pack("<3I", T - 1, V, mp.shape[1]))
+                f.write(m64.numpy().tobytes() + mbf.numpy().tobytes() + mp.numpy().tobytes())
+            print("mtp rows", T - 1, "logit rms", m64.pow(2).mean().sqrt().item())
+    nm = sum(1 for i in range(c["num_hidden_layers"]) if i >= c["first_k_dense_replace"])
+    picks = forced if forced is not None else torch.stack(exact.picks[:nm])
     with open(o.out, "wb") as f:
         f.write(b"TFLINGF2" + struct.pack("<4I", T, V, picks.shape[0], picks.shape[2]) + struct.pack("<Id", int(forced is not None), exact.gap))
         f.write(ids.int().numpy().tobytes() + l64.numpy().tobytes() + lbf.numpy().tobytes() + picks.numpy().tobytes())

@@ -1,6 +1,8 @@
 # Ling-3.1-flash
 
-Work in progress on the Zig engine's CUDA side: the model is **not served yet**. This page lists what exists, what is
+Work in progress on the Zig engine's CUDA side. The family is registered with the native CUDA server
+(`model_type` `bailing_hybrid`) and serves requests through the lane core at TP=1, but the whole model does not fit
+one GB10, so serving is verified on synthetic checkpoints and a thin real model. This page lists what exists, what is
 missing, and how to test without the 572 GB checkpoint. Everything below was measured on one GB10.
 
 Ling-3.1-flash (`BailingMoeV3ForCausalLM`, `bailing_hybrid`) has 72 layers plus one MTP layer: Kimi delta attention
@@ -19,6 +21,7 @@ block FP8 (e4m3 in 128 x 128 blocks with `weight_scale_inv`).
 | Weight loader at TP=1: bf16, FP8 block, ModelOpt NVFP4 | `zig/src/families/ling/weights.zig`, `weights_proj.zig` | `ling-weights`, `ling-weights-real` |
 | Synthetic checkpoints in all three formats | `tf-cuda-test ling-synth` | its own name check |
 | The TP=1 layer graph: embedding, KDA/MLA mixers, dense MLP and MoE, final norm, head; windows and commits | `zig/src/families/ling/forward.zig`, `graph.zig`, `state.zig`, `block_*.zig`, `kernels/cuda/ling_glue.cu` | `ling-forward-synth`, `ling-layer-real` |
+| The engine and lane backend: a sequence per slot, prompt chunks cut anywhere, verify windows of up to 16 rows, shared windows of up to 8 streams (64 rows), kept prompt states, the server hooks | `engine.zig`, `lanes.zig`, `native.zig`; `native/cuda.zig` registers it | `ling-lanes` |
 | SwiGLU clamped in Ling's order, `min(silu(g), L) * clip(u, -L, L)`, in the glue and the FP8/NVFP4 grouped experts (every older kernel's SASS unchanged) | `glm_glue_moe.cuh` (`tf_ling_swiglu_*`), `experts.cuh` (epilogue 4), `experts.Layer.after` | `ling-clamp`, `ling-clamp-old`, `glm-route-old` |
 
 ## The layer graph
@@ -116,10 +119,51 @@ this one print the same digits on the real layers (71: rel L2 4.125e-3, 3.747e-3
 float64 references do not change either (the synthetic clamped layer never reaches g > 10). HF's clamp itself moves
 layer 71's output by 3.7e-3 (rel L2 against the unclamped layer) and layer 65's by 0 on these 512 tokens.
 
+## Serving
+
+`engine.Engine` owns the weights (every backbone layer, or `Options.layers` for a thin model), the graph, three
+`Buffers` (prompt chunks, one stream's window, shared windows) and one `State` per slot. `Lanes` is the lane backend
+(GLM's `cuda_lanes.zig` without the ranks): `prefill`/`prefill_step` (a chunk at a time, other streams' rounds
+between), `first`, `verify` (one stream's window, or every stream's in one forward through `verifyShared`), `keep`
+(a window's prefix, the KDA states replayed), `release`. Greedy draws take GLM's `tf_glm_top1`, sampled ones
+upstream's `sample.cu` through GLM's sampler at TP=1. `native.zig` gives the server `open`, the facts (exact windows of
+16 rows, shared rounds unless `TF_LING_SHARED=0`; `TF_LING_PROMPT_STEPS=0` passes prompts whole) and the prompt
+cache's `snap_*` hooks: a kept state is the sequence's arena copied whole at a mark, and the lane backend restores it
+inside its own prompt pass. Ling's prompt arithmetic does not depend on where a chunk ends, so a mark may fall on any
+row (no `snap_grid`): the pass cuts its chunk there. There is no recorder hook (`features`): the drafter recorder
+(#848) is not on this branch.
+
+`ling-lanes DIR OUT [REF] [--layers a,b]` drives the backend under upstream's round loop as the server's lane host
+does, prompts in 37-row chunks; every check compares tokens, and the engine-level ones bytes:
+
+- chunked == whole: chunks of 512, 37 and 16 rows and the whole `prefill` give the same reply; the states after
+  37- and 16-row chunks equal the whole pass's byte for byte (KDA states, conv windows, MLA rows).
+- drafted == plain: drafts from the plain reply (2 to 15 a round, most rounds one of them wrong, so windows of 3 to
+  16 rows are cut anywhere), greedy and sampled; a 9-row window kept to 4 then a 5-row window equal 9 single rows in
+  tokens, logits and state bytes.
+- resumed == fresh: states kept at marks 37, 101, 150, 263, 349 (off the chunk grid, not multiples of 16), each
+  resumed pass equals the fresh one, and a different tail after a kept 263; resumed states equal the whole pass's.
+- concurrent == solo: nine cases of three streams (at once, staggered, reversed, the same prompt twice, sampled,
+  one discarded, prompts a chunk at a time between the others' rounds, drafted or not) equal their solo replies;
+  shared windows of 2 streams over 8 rounds (1 to 16 rows each) equal lone twins in logits, tokens and states.
+- cancels in the prompt pass, discards between rounds, eos and `max_new` 1-3.
+- the reply equals the serial forward's argmax at every row; OUT.ids and OUT.picks feed
+  `ling_forward.py --ids OUT.ids --picks OUT.picks`, and with REF the served logits are checked against float64:
+
+| Format | served vs float64 (same picks) | vs the bf16 points | bf16 points vs float64 | argmax vs float64 |
+| --- | --- | --- | --- | --- |
+| bf16 | 2.24e-2 | 1.27e-2 | 2.25e-2 | 301/309 |
+| FP8 block | 2.09e-2 | 1.18e-2 | 2.10e-2 | 302/309 |
+| NVFP4 | 2.21e-2 | 1.38e-2 | 2.22e-2 | 294/309 |
+
+92 checks pass in each format. On the real FP8 release, `--layers 0,1,2,3` (the real embedding, layers 0-3, final
+norm and head; KDA and dense MLP only, 6 GB) passes the same 90 exactness checks; it has no float64 reference (an
+MLA + MoE layer adds 8 GB). Mutations caught: committing every row on `keep`, a restore that keeps the fresh KDA copy
+bits, chunks not cut at marks, shared draws keyed one position early, a lane commit that keeps one row too many.
+
 ## What is missing
 
-- Lanes hooks (drafted, concurrent and cut-prompt windows) for Ling: the graph has the pieces (segments, windows,
-  `commit(keep)`), nothing schedules them yet. Sampling, the server and a full-checkpoint run are not wired.
+- A full-checkpoint run: 574 GB in FP8 needs five Sparks and tensor parallelism.
 - MTP drafting: the MTP layer's tensors load (`weights.Mtp`); the graph leaves it unwired. It would be
   `enorm(embed(next)) | hnorm(hidden)` through `eh_proj`, one MLA + MoE layer on its own cache, the final norm and
   the shared head.
@@ -140,6 +184,9 @@ python zig/tests/cuda/oracle/ling_forward.py /tmp/ling-fp8 /tmp/ref             
 zig-out/bin/tf-cuda-test ling-forward-synth /tmp/ling-fp8 /tmp/ref /tmp/picks       # exactness; writes the picks
 python zig/tests/cuda/oracle/ling_forward.py /tmp/ling-fp8 /tmp/fref --picks /tmp/picks
 zig-out/bin/tf-cuda-test ling-forward-synth /tmp/ling-fp8 /tmp/fref                 # same picks: logits bounded
+zig-out/bin/tf-cuda-test ling-lanes /tmp/ling-fp8 /tmp/served                    # serving checks; writes .ids/.picks
+python zig/tests/cuda/oracle/ling_forward.py /tmp/ling-fp8 /tmp/sref --ids /tmp/served.ids --picks /tmp/served.picks
+zig-out/bin/tf-cuda-test ling-lanes /tmp/ling-fp8 /tmp/served /tmp/sref          # and the served logits vs float64
 zig-out/bin/tf-cuda-test ling-clamp /tmp/ling-fp8                  # Ling's SwiGLU order vs float64, L 10 and 2
 zig-out/bin/tf-cuda-test ling-clamp-old /tmp/ling-fp8 OLD/fatbin   # kept expert instances vs an older build's bytes
 ```
@@ -191,8 +238,7 @@ size.
 
 Each item stands alone.
 
-1. **Lanes hooks.** Drive `Forward` from #804's `cuda_lanes.zig` pattern: drafted windows, concurrent streams as
-   segments, cut prompts; `ling-forward-synth` already checks the exactness each needs.
+1. **Recorder.** Give `Lanes` a `features` hook (the final-norm rows `Engine.verify` already keeps) once #848 lands.
 2. **MTP.** Wire `weights.Mtp` as a drafter (see "What is missing").
 3. **Fused projections.** Same-format q|k|v (and gate|up) rows as one weight per format, without the column copies.
 4. **Bf16 routed experts.** Add a grouped bf16 expert kernel, or quantize at load, and drop the per-expert lanes.
