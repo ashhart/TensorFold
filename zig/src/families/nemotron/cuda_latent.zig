@@ -52,9 +52,9 @@ pub const Fns = struct {
     }
 };
 
-/// Picks a row the wide top-k keeps (one a lane), and experts it ranks (32 a lane).
-pub const max_picks = 32;
-pub const max_experts = 1024;
+/// Picks a row the wide top-k keeps (one a lane), and experts it ranks (32 a lane); config.parse refuses past them.
+pub const max_picks = @import("config.zig").latent_max_picks;
+pub const max_experts = @import("config.zig").latent_max_experts;
 
 /// The router's K slices for a latent model: whole 64-input groups, at most 8 (tf_super_topk sums them in order).
 pub fn routerSlices(d: usize) usize {

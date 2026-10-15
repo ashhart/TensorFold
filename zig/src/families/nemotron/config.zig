@@ -5,6 +5,10 @@ pub const Kind = enum { mamba, moe, attention };
 
 pub const max_layers = 96;
 
+/// The CUDA latent router's bounds (nemotron_latent.cu's tf_super_topk): one warp of picks, 32 experts a lane.
+pub const latent_max_picks = 32;
+pub const latent_max_experts = 1024;
+
 /// The MTP head's acceptance at depth 1, 2, ... given the ones before it, until a stream has its own (model.py draft_prior).
 pub const draft_prior = [_]f64{ 0.8, 0.72, 0.68, 0.62, 0.58, 0.55, 0.5, 0.5 };
 
@@ -321,10 +325,27 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
     if (o.get("moe_latent_size")) |v| if (v == .integer and v.integer > 0) {
         c.latent = @intCast(v.integer);
         c.shares = 2;
+        try router(c, o, why);
         try split(&c, top, why);
     };
     try quantization(&c, top, why);
     return c;
+}
+
+/// The latent router's reach: 1 to 1,024 experts, 1 to 32 picks, 64-wide input groups, no expert groups, relu^2.
+fn router(c: Config, o: std.json.ObjectMap, why: *Why) !void {
+    if (c.experts < 1 or c.experts > latent_max_experts or c.top_k < 1 or c.top_k > @min(c.experts, latent_max_picks) or c.hidden % 64 != 0) {
+        why.set("a latent MoE of {d} experts picking {d} over {d} inputs: the router takes 1 to {d} experts, 1 to {d} picks among them and inputs in 64-wide groups", .{ c.experts, c.top_k, c.hidden, latent_max_experts, latent_max_picks });
+        return error.BadConfig;
+    }
+    for ([_][]const u8{ "n_group", "topk_group" }) |k| if (o.get(k)) |v| if (v != .integer or v.integer != 1) {
+        why.set("config.json's {s} is {f}: grouped expert selection is not built (the router picks among every expert)", .{ k, std.json.fmt(v, .{}) });
+        return error.BadConfig;
+    };
+    if (o.get("mlp_hidden_act")) |v| if (v != .string or !std.mem.eql(u8, v.string, "relu2")) {
+        why.set("config.json's mlp_hidden_act is {f}: the latent experts compute relu2", .{std.json.fmt(v, .{})});
+        return error.BadConfig;
+    };
 }
 
 /// A latent MoE's share widths, and the one share a split checkpoint holds (tensorfold_tp, our own split's record).
@@ -459,4 +480,26 @@ test "nemotron_h_omni: the text config under llm_config, latent shares, a split 
     defer std.testing.allocator.free(bad);
     try std.testing.expectError(error.BadConfig, parse(std.testing.allocator, bad, &why));
     try std.testing.expect(std.mem.indexOf(u8, why.text(), "tensorfold_tp") != null);
+}
+
+test "the latent router's bounds: 33 picks, 1,025 experts, zero picks and expert groups are refused by name" {
+    const a = std.testing.allocator;
+    const cases = [_][2][]const u8{
+        .{ "\"num_experts_per_tok\": 22", "\"num_experts_per_tok\": 33" },
+        .{ "\"num_experts_per_tok\": 22", "\"num_experts_per_tok\": 0" },
+        .{ "\"n_routed_experts\": 512", "\"n_routed_experts\": 1025" },
+        .{ "\"moe_latent_size\": 1024", "\"moe_latent_size\": 1024, \"n_group\": 2" },
+        .{ "\"moe_latent_size\": 1024", "\"moe_latent_size\": 1024, \"mlp_hidden_act\": \"silu\"" },
+    };
+    for (cases) |k| {
+        var why: Why = .{};
+        const text = try std.mem.replaceOwned(u8, a, super_text, k[0], k[1]);
+        defer a.free(text);
+        try std.testing.expectError(error.BadConfig, parse(a, text, &why));
+        try std.testing.expect(why.text().len > 0);
+    }
+    var why: Why = .{};
+    const ok = try std.mem.replaceOwned(u8, a, super_text, "\"moe_latent_size\": 1024", "\"moe_latent_size\": 1024, \"n_group\": 1, \"topk_group\": 1");
+    defer a.free(ok);
+    _ = try parse(a, ok, &why);
 }
