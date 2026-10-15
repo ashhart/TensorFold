@@ -130,6 +130,8 @@ test "a reply queued while a learner's step runs ends failed once the step says 
     host.learner = .{ .ctx = &learner, .begin = Learner.begin, .step = Learner.step, .abort = Learner.abort };
     try host.start();
     defer host.stop();
+    // runs before `host.stop`, which joins the engine thread: a failure or timeout while it is held must not hang that
+    defer learner.hold.store(false, .release);
     const learn: api.LearnRequest = .{};
     var first: Seen = .{};
     try host.engine().learn(&learn, first.learnSink());
