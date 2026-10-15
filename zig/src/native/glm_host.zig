@@ -16,6 +16,7 @@ pub const Host = struct {
     eng: *ge.Engine,
     slots: glm.slots.Slots,
     back: glm.backend.Backend,
+    markers: [3]u32 = undefined, // the image wrapper's tokens (--vision): begin, image, end
     cfg: lanes.Config,
     wall: lanes.backend.WallClock,
     core: lanes.Engine,
@@ -79,8 +80,9 @@ fn learnedStates(gpa: Allocator, eng: *const ge.Engine, sl: *glm.slots.Slots, ro
 }
 
 /// A GLM-5.3-Flash checkpoint served: `window` tokens of cache a stream, warmed first (the pair: `speed_up`).
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?[]const u8, learn_cap: u64, learn_floor: u64) !*Host {
-    const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up, learn != null);
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: ?[]const u8, streams: u32, fixed: bool, cache_gib: ?f64, learn: ?[]const u8, learn_cap: u64, learn_floor: u64, vision: ?api.VisionOpen) !*Host {
+    const limits: ?glm.vision.Limits = if (vision) |v| .{ .image_tokens = v.image_tokens, .max_images = v.max_images } else null;
+    const eng = try ge.Engine.loadWith(gpa, dir, window + 64, speed_up, learn != null, limits);
     errdefer eng.deinit();
     var toks: [96]u32 = undefined;
     for (&toks, 0..) |*t, i| t.* = @intCast(1000 + i);
@@ -104,7 +106,8 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
     errdefer h.core.deinit();
     const serves = @min(window, glm.pool.capacity(&h.slots) -| (glm.state.max_rows + 1)); // prompt + reply a stream's caches hold beside its last window (a pool keeps whole blocks)
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = serves, .prefill_step = eng.chunk_rows, .greedy_only = true, .admit = if (h.slots.pool != null) .{ .ctx = &h.back, .fits = glm.backend.Backend.fits } else null });
+    if (eng.vision) |v| h.markers = .{ v.c.image_start, v.c.image_token, v.c.image_end };
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = serves, .prefill_step = eng.chunk_rows, .greedy_only = true, .admit = if (h.slots.pool != null) .{ .ctx = &h.back, .fits = glm.backend.Backend.fits } else null, .vision = if (eng.vision) |v| .{ .ctx = h, .prepare = prepareImage, .image_token = v.c.image_token, .markers = &h.markers, .image_tokens = eng.vision_limits.image_tokens, .max_images = eng.vision_limits.max_images } else null });
     h.cache = null;
     const budget = cacheBudget(eng, cache_gib);
     if (!eng.followsPeer() and budget > 0) {
@@ -139,6 +142,13 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
 fn growSnap(ctx: *anyopaque, saved: *anyopaque, extra: u64) bool {
     const h: *Host = @ptrCast(@alignCast(ctx));
     return if (h.cache) |*store| store.grow(saved, extra) else false;
+}
+
+/// Info.vision's prepare: an image's bytes to the tower's patches (families/glm/image.zig), on the HTTP thread.
+fn prepareImage(ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
+    const h: *Host = @ptrCast(@alignCast(ctx));
+    const p = try glm.image.prepare(a, bytes, h.eng.vision.?.c, max_tokens);
+    return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
 }
 
 fn follow(h: *Host) void {
