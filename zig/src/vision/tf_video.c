@@ -1,4 +1,12 @@
 // libtfvideo: a video's sampled frames as videos.py decodes them with PyAV 19.0.1 (FFmpeg 9), RGB via SWS_BICUBIC.
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/imgutils.h>
+#include <libswscale/swscale.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 typedef int (*tf_size_fn)(void* ctx, int frames, int height, int width, int* out_h, int* out_w);
 
