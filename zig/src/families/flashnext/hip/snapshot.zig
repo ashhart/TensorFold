@@ -103,8 +103,8 @@ pub fn save(
     return out;
 }
 
-/// `saved` made the live state of `c` and `head`: the next prompt chunk starts at its position.
-pub fn restore(
+/// `saved` made the live state of `c` and `head`, or a failure part way through that leaves either changed.
+fn restore(
     gpa: std.mem.Allocator,
     d: *const hip.Runtime,
     s: hip.Stream,
@@ -124,6 +124,32 @@ pub fn restore(
         h.len = saved.at;
         h.pooled = saved.at / ratio;
     }
+}
+
+/// `saved` (null: no copy here) restored on every rank or none: all resume from it, or all start over (RestoreRefused).
+pub fn restoreAgreed(
+    gpa: std.mem.Allocator,
+    d: *const hip.Runtime,
+    s: hip.Stream,
+    saved: ?*const Saved,
+    c: *cache.Caches,
+    head: ?*cache.Caches,
+    ratio: usize,
+    eos: i64,
+    link: ?hip.collective.Link,
+) !void {
+    const mine = if (saved) |x| restore(gpa, d, s, x, c, head, ratio) else error.UnknownSnapshot;
+    if (hip.collective.everyRank(link, mine)) return;
+    // a part-restored rank, and every rank that restored beside one that failed, starts the prompt over from zero
+    if (!hip.collective.everyRank(link, fresh(s, c, head, eos))) return error.GroupStopped;
+    return error.RestoreRefused;
+}
+
+/// `c` and `head` as a new stream's: zeros, no positions, eos before any row.
+fn fresh(s: hip.Stream, c: *cache.Caches, head: ?*cache.Caches, eos: i64) !void {
+    try s.synchronize();
+    try c.reset(eos);
+    if (head) |h| try h.reset(eos);
 }
 
 pub fn drop(gpa: std.mem.Allocator, saved: *Saved) void {

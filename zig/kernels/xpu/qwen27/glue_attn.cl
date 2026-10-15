@@ -157,9 +157,9 @@ KERNEL(256) void swiglu(global const half *GU, global half *H, global half *AHI,
     for (int k = 0; k < per; k++) s += (float)hl[g * gs + lane * per + k];
     s = sub_group_reduce_add(s) * (1.0f / gs);
     if (lane == 0) {
-      const half hi = convert_half_rte(s);
+      const half hi = convert_half_rte(s * ASC);
       AHI[(long)t * (17408 / gs) + blk * ng + g] = hi;
-      ALO[(long)t * (17408 / gs) + blk * ng + g] = convert_half_rte(s - (float)hi);
+      ALO[(long)t * (17408 / gs) + blk * ng + g] = convert_half_rte(s * ASC - (float)hi);
     }
   }
 }
@@ -193,9 +193,9 @@ KERNEL(128) void rowsums_ff(global half *H, global half *AHI, global half *ALO, 
       }
       s = sub_group_reduce_add(s) * (1.0f / 128);
       if (lane == 0) {
-        const half hi = convert_half_rte(s);
+        const half hi = convert_half_rte(s * ASC);
         AHI[(long)t * 136 + b] = hi;
-        ALO[(long)t * 136 + b] = convert_half_rte(s - (float)hi);
+        ALO[(long)t * 136 + b] = convert_half_rte(s * ASC - (float)hi);
       }
     }
     return;
@@ -211,9 +211,9 @@ KERNEL(128) void rowsums_ff(global half *H, global half *AHI, global half *ALO, 
     }
     s = sub_group_reduce_add(s) * (1.0f / gs);
     if (lane == 0) {
-      const half hi = convert_half_rte(s);
+      const half hi = convert_half_rte(s * ASC);
       AHI[(long)t * (17408 / gs) + g] = hi;
-      ALO[(long)t * (17408 / gs) + g] = convert_half_rte(s - (float)hi);
+      ALO[(long)t * (17408 / gs) + g] = convert_half_rte(s * ASC - (float)hi);
     }
   }
 }

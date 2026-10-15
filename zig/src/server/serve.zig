@@ -1,7 +1,7 @@
 //! A server's life: keys, the listening socket, the startup lines, the live line, and a clean stop on SIGTERM or SIGINT.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const auth = @import("auth.zig");
 const cli = @import("cli.zig");
 const log = @import("log.zig");
@@ -72,6 +72,8 @@ pub const Setup = struct {
     sampling: ?json.Value = null,
     environ: ?*const std.process.Environ.Map = null,
     started: i96 = 0,
+    /// The release, backend and GPU the open /health names.
+    identity: server_mod.Identity = .{},
     /// Called once the socket listens, with its port (tests read it).
     on_listen: ?*const fn (port: u16) void = null,
     /// Recall's record, attached to the engine already (--recall); null: off.
@@ -130,6 +132,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .cortheon = args.cortheon,
         .cortheon_search_key = env(s, "BRAVE_SEARCH_API_KEY"),
         .saved_conversations = args.learn_conversations,
+        .identity = s.identity,
     };
     const srv = server_mod.Server.init(gpa, io, s.engine, s.text, config, if (store.enabled()) &store else null) catch {
         std.debug.print("tensorfold: the server could not start\n", .{});

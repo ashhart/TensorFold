@@ -1,7 +1,7 @@
 //! Token ids in a completion prompt, top-level or nested: ids in the vocabulary are served, other values get a 400.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const model_text = @import("model_text.zig");
 const openai = @import("openai.zig");
 const Server = @import("server.zig").Server;

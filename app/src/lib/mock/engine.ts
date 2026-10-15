@@ -1,3 +1,4 @@
+import { assertCortheonReleaseAllowed, CORTHEON_RELEASE_POLICY } from '../../../shared/release-feature-policy'
 import type { EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress, Readiness, SuggestedModel } from '../types'
 import type { TensorFoldStudioApi } from '../ipc'
 import type { EngineModelLibrarySnapshot } from '../types'
@@ -55,7 +56,7 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
     hardware: { platform: 'darwin', architecture: 'arm64', chip: 'Apple M3 Max' },
     available: true, version: '1.0.10', binaryPath: '/Applications/TensorFold.app/Contents/Resources/engine/bin/tensorfold-native',
     state: 'stopped', model: null, drafter: null, port: null, startedAt: null, readyAt: null, message: null, logTail: [], totalMemoryBytes: TOTAL_MEMORY, memoryLimitBytes: LIMIT, contextTokens: null,
-    cortheon: { supported: true, enabled: false, active: false },
+    cortheon: { supported: true, enabled: false, active: false, disabledReason: CORTHEON_RELEASE_POLICY.reason },
   }
   let learning: EngineLearningSnapshot = { supported: true, experimental: true, enabled: false, active: false, model: null, state: 'off', message: 'Browser demo: no weights are changed.', privateCopy: false, progress: null, job: null, graph: { next: 1, facts: [] } }
   let lessonTimer: ReturnType<typeof setTimeout> | null = null
@@ -140,20 +141,20 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
       if (['teaching', 'cancelling', 'preparing'].includes(learning.state)) throw new Error('Wait for the current lesson to finish.')
       setStatus({ state: 'starting', model: repo, startedAt: Date.now(), readyAt: null, message: `Loading ${repo}`, port: 52814 })
       await new Promise((r) => setTimeout(r, 1200))
-      setStatus({ state: 'ready', readyAt: Date.now(), message: null, contextTokens: 32_768, cortheon: { supported: true, enabled: status.cortheon?.enabled ?? false, active: status.cortheon?.enabled ?? false } })
+      setStatus({ state: 'ready', readyAt: Date.now(), message: null, contextTokens: 32_768, cortheon: { supported: true, enabled: false, active: false, disabledReason: CORTHEON_RELEASE_POLICY.reason } })
       syncLearning()
       return status
     },
     engineUnload: async () => {
       if (learning.state === 'teaching' || learning.state === 'cancelling') throw new Error('Stop the current lesson before unloading.')
-      setStatus({ state: 'stopped', model: null, port: null, startedAt: null, readyAt: null, message: null, contextTokens: null, cortheon: { supported: true, enabled: status.cortheon?.enabled ?? false, active: false } })
+      setStatus({ state: 'stopped', model: null, port: null, startedAt: null, readyAt: null, message: null, contextTokens: null, cortheon: { supported: true, enabled: false, active: false, disabledReason: CORTHEON_RELEASE_POLICY.reason } })
       syncLearning()
       return status
     },
     engineSetCortheon: async (enabled) => {
+      assertCortheonReleaseAllowed(enabled)
       if (['teaching', 'cancelling', 'preparing'].includes(learning.state)) throw new Error('Wait for the current lesson to finish.')
-      const running = status.state === 'ready'
-      setStatus({ cortheon: { supported: true, enabled, active: running && enabled } })
+      setStatus({ cortheon: { supported: true, enabled: false, active: false, disabledReason: CORTHEON_RELEASE_POLICY.reason } })
       return status
     },
     engineLearning: async () => learningSnapshot(),

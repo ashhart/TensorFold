@@ -7,7 +7,7 @@ their first / (last token of any stream - first token of any stream). Medians ov
 
 ``--mixed``: request i takes prompt i % 2 and seed seed + i // 2; also reports the steady aggregate, over the time
 every stream is live (tokens split by the characters each stream delivered inside that window).
-``--alone``: runs every request alone first and checks each concurrent reply's token-id hash (``token_sha``)
+``--alone``: runs every request alone first and checks each concurrent reply's token-id hash (``token_sha256``)
 against it; ``--serial`` checks the alone runs against ``"draft": false``. ``--no-seed``: sampled requests carry
 no seed (mlx_lm's server batches only those), for measuring a standard; no hash checks then. Run a standard with its
 prompt cache off (mlx_lm: ``--prompt-cache-size 0``): a cached reply can arrive as one text piece. Tokens come from
@@ -51,7 +51,8 @@ def stream(base: str, model: str, item: dict, tokens: int, temperature: float, s
         if gate is not None:
             gate.abort()
         return {"prompt": item["name"], "seed": seed, "sent": None, "first": None, "last": None, "tokens": None,
-                "pieces": [], "ttft_s": None, "decode_tps": None, "token_sha": None,
+                "pieces": [], "ttft_s": None, "decode_tps": None, "token_sha": None, "token_sha256": None,
+                "completed": None,
                 "error": type(exc).__name__, "complete": False, "prompt_tokens": None,
                 "cached_tokens": None, "cache_state": "unverified", "output_sha256": None}
 
@@ -102,10 +103,11 @@ def _stream(base: str, model: str, item: dict, tokens: int, temperature: float, 
                 piece = choice.get("text") or delta.get("content") or delta.get("reasoning_content") or ""
                 if piece:
                     pieces.append((time.perf_counter(), len(piece)))
+    completed = time.perf_counter()
     observed = evidence.finish(usage, runtime, complete)
     n = observed["tokens"]
     out = {"prompt": item["name"], "seed": seed, "sent": sent, "first": None, "last": None, "tokens": n,
-           "pieces": pieces, "ttft_s": None, "decode_tps": None, **observed}
+           "pieces": pieces, "completed": completed, "ttft_s": None, "decode_tps": None, **observed}
     if not complete:
         out["error"] = "incomplete_stream"
     if pieces:
@@ -171,7 +173,8 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--temperatures", default="1.0,0")
     p.add_argument("--mixed", action="store_true", help="request i takes prompt i %% 2 (sampled only)")
-    p.add_argument("--alone", action="store_true", help="check each reply's token_sha against its request alone")
+    p.add_argument("--alone", action="store_true",
+                   help="check each reply's full token_sha256 against its request alone")
     p.add_argument("--serial", action="store_true", help="check the alone runs against \"draft\": false")
     p.add_argument("--no-seed", action="store_true", help="sampled requests without a seed (standards; no checks)")
     p.add_argument("--stagger-ms", type=float, default=0.0, help="start request i this many ms after request i - 1")
@@ -205,6 +208,7 @@ def main() -> None:
                     serial = stream(args.base, args.model, next(q for q in PROMPTS if q["name"] == key[0]),
                                     args.tokens, temp, key[1], draft=False)
                     ref["serial_equal"] = token_equal(serial, ref)
+                    ref["serial_run"] = serial
             for n in levels:
                 reps = []
                 for _ in range(args.reps):
@@ -214,10 +218,18 @@ def main() -> None:
                     rep["ttft_s"] = [round(r["ttft_s"], 2) if r["ttft_s"] is not None else None for r in runs]
                     rep["errors"] = [r["error"] for r in runs if r.get("error")]
                     rep["evidence"] = [{k: r.get(k) for k in ("prompt_tokens", "cached_tokens", "tokens",
-                                       "cache_state", "complete", "token_sha", "output_sha256")} for r in runs]
+                                       "cache_state", "complete", "token_sha", "token_sha256", "output_sha256")}
+                                       for r in runs]
+                    rep["client_intervals"] = [{"start": r["sent"], "end": r.get("completed")} for r in runs]
                     if alone:
                         # None: the request or its solo run failed (not an exactness result)
                         rep["equal_alone"] = [token_equal(alone[(r["prompt"], r["seed"])], r) for r in runs]
+                        fields = ("tokens", "token_sha256", "output_sha256", "complete", "error")
+                        rep["comparisons"] = []
+                        for r in runs:
+                            ref = alone[(r["prompt"], r["seed"])]
+                            pair = {"concurrent": r, "alone": ref, "serial": ref.get("serial_run", {})}
+                            rep["comparisons"].append({k: {f: v.get(f) for f in fields} for k, v in pair.items()})
                     reps.append(rep)
                 cell = {"prompt": "mixed" if args.mixed or item is None else item["name"], "temperature": temp,
                         "streams": n, "failed": sum(r["failed"] for r in reps),

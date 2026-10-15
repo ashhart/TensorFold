@@ -54,6 +54,9 @@ pub const Model = struct {
         };
         m.checkpoint = ckpt.Checkpoint.init(allocator);
         errdefer m.checkpoint.deinit();
+        // until load returns, a kernel set that compiled is released with any failure
+        errdefer if (compiled) |*k| k.deinit() else |_| {};
+        errdefer if (wide) |*k| k.deinit() else |_| {};
         {
             const thread = try std.Thread.spawn(.{}, Compile.run, .{ kern, &compiled, allocator, m.device, &seconds[0] });
             defer thread.join();
@@ -67,7 +70,6 @@ pub const Model = struct {
         }
         m.compile_seconds = @max(seconds[0], seconds[1]);
         m.kernels = try compiled;
-        errdefer m.kernels.deinit();
         m.prefill = try wide;
         try frags.check(m.device, m.queue, allocator);
         if (!m.device.tensorUnits()) try simd_attention.check(m.device, m.queue);
@@ -110,3 +112,17 @@ pub const Model = struct {
         self.allocator.destroy(self);
     }
 };
+
+test "a load that fails after its kernels compile releases them" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    device.deinit();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = cfg.lightning });
+    // an empty shard, as an interrupted download leaves one: the weights fail while both kernel sets compile
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = "" });
+    var path: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try std.testing.expectError(error.ShortRead, Model.load(std.testing.allocator, io, dir, false));
+}

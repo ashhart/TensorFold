@@ -1,7 +1,7 @@
 //! The hardware allowlist per OS: CPU and GPU names, memory, cores, and the CUDA driver version.
 const std = @import("std");
 const builtin = @import("builtin");
-const json = @import("json.zig");
+const json = @import("json");
 const receipt = @import("benchmark_receipt.zig");
 const Allocator = std.mem.Allocator;
 

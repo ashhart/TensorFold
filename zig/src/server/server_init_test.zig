@@ -1,7 +1,7 @@
 //! A server init that fails after its idle keepalive started stops that ticker and frees all it took.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const model_text = @import("model_text.zig");
 const server = @import("server.zig");
 const Allocator = std.mem.Allocator;

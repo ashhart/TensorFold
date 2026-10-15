@@ -27,39 +27,11 @@ pub const families: []const api.Family = blk: {
 
 const gib: f64 = 1 << 30;
 
-/// The chip class gate entries name ("nvidia-sm121" for a GB10) of the device TF_CUDA_DEVICE picks; null without one.
-pub fn chip(a: Allocator) ?[]const u8 {
-    const ordinal = envNumber(getenv("TF_CUDA_DEVICE")) catch return null;
-    var driver = cuda.Driver.open() catch return null;
-    defer driver.close();
-    if (ordinal orelse 0 >= driver.deviceCount() catch return null) return null;
-    return chipClass(a, driver.capability(@intCast(ordinal orelse 0)) catch return null);
-}
-
-fn chipClass(a: Allocator, capability: u32) ?[]const u8 {
-    return std.fmt.allocPrint(a, "nvidia-sm{d}", .{capability}) catch null;
-}
-
-fn getenv(name: [:0]const u8) ?[]const u8 {
-    return std.mem.span(std.c.getenv(name) orelse return null);
-}
-
-/// A variable's whole number: null when unset or empty, an error for anything else that is not one.
-fn envNumber(text: ?[]const u8) error{Invalid}!?u32 {
-    const t = std.mem.trim(u8, text orelse return null, " ");
-    if (t.len == 0) return null;
-    return std.fmt.parseInt(u32, t, 10) catch error.Invalid;
-}
-
-/// The flag's value, else the variable's, else `default`; `problem` names a variable that is not a whole number.
-fn setting(a: Allocator, flag: ?u32, name: [:0]const u8, default: u32, problem: *[]const u8) !?u32 {
-    if (flag) |v| return v;
-    const v = envNumber(getenv(name)) catch {
-        problem.* = try std.fmt.allocPrint(a, "{s}={s}: a whole number", .{ name, getenv(name).? });
-        return null;
-    };
-    return v orelse default;
-}
+const cuda_device = @import("cuda_device.zig");
+pub const chip = cuda_device.chip;
+pub const deviceName = cuda_device.deviceName;
+const getenv = cuda_device.getenv;
+const setting = cuda_device.setting;
 
 /// The model's window (config.json's max_position_embeddings, text_config's first), 0 when it names none.
 fn modelContext(a: Allocator, io: std.Io, dir: []const u8) i64 {
@@ -478,6 +450,7 @@ test {
     _ = refusals;
     _ = lane_backend;
     _ = snaps;
+    _ = cuda_device; // the device and variable tests
 }
 
 test "the lane core sees a family's prefill_step through the lane backend, so a served prompt can step" {
@@ -488,25 +461,10 @@ test "the lane core sees a family's prefill_step through the lane backend, so a 
     try std.testing.expect(h.backend().vtable.prefill_step != null);
 }
 
-test "chip classes name the compute capability as gate entries do" {
-    const a = std.testing.allocator;
-    const name = chipClass(a, 121).?;
-    defer a.free(name);
-    try std.testing.expectEqualStrings("nvidia-sm121", name);
-}
-
 test "every registered family and d1's decision engine are listed for capabilities" {
     try std.testing.expectEqual(@as(usize, registry.len + 1), families.len);
     try std.testing.expectEqualStrings("nemotron_h", families[0].model_type);
     try std.testing.expectEqualStrings("lfm2_vl", families[registry.len].model_type);
-}
-
-test "variables: unset or empty means the default, anything but a whole number is refused" {
-    try std.testing.expectEqual(@as(?u32, null), try envNumber(null));
-    try std.testing.expectEqual(@as(?u32, null), try envNumber(""));
-    try std.testing.expectEqual(@as(?u32, 3), try envNumber(" 3"));
-    try std.testing.expectError(error.Invalid, envNumber("one"));
-    try std.testing.expectError(error.Invalid, envNumber("-1"));
 }
 
 test "context windows: the family default inside the model's, 0 for the model's, never past it" {

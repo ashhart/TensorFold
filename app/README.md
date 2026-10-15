@@ -132,10 +132,11 @@ request; restart the model and copy fresh details when the port and key change.
 ### Local engine modes and voice
 
 With the built-in TensorFold model selected, **AI settings** beside the chat model picker opens
-Cortheon and Living Weights controls. Cortheon adds a reasoning plan and optional public-web
-research to the whole engine, including other API clients; research can send queries derived
-from the conversation outside this Mac. Changing modes restarts a loaded model and is blocked
-while managed local work or a learning checkpoint save is active.
+the Living Weights controls and Cortheon's status. Cortheon web research is temporarily disabled
+for beta.6, including previously saved On choices and old API enable calls. Local chat and API
+serving remain available; independently configured servers and the standalone CLI keep their
+own settings. Changing a supported engine mode restarts a loaded model and is blocked while
+managed local work or a learning checkpoint save is active.
 
 **Settings → Voice → Kokoro** downloads a pinned, checksum-verified 92 MB speech model;
 subsequent playback runs offline in a managed native CPU worker. This version offers American

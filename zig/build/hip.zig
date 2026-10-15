@@ -199,6 +199,7 @@ fn server(b: *std.Build, target: std.Build.ResolvedTarget, e: Engine, build_opti
         .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = engines }, .{ .name = "checkpoint_cli", .module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "native_engines", .module = engines }, exlr8_build.cliImport(b, target, .ReleaseSafe, e.hip.import_table.get("core").?) } }) } },
     }) });
     exe.root_module.addOptions("build_options", build_options);
+    _ = @import("server.zig").addTo(b, exe.root_module, target, .ReleaseSafe);
     return exe;
 }
 

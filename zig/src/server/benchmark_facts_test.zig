@@ -1,7 +1,7 @@
 //! Checkpoint facts and the hardware parsers on fictional inputs.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const model = @import("benchmark_model.zig");
 const host = @import("benchmark_host.zig");
 const receipt = @import("benchmark_receipt.zig");

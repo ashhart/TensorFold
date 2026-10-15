@@ -664,9 +664,11 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
     if (thread.kind !== 'chat' && !botVm) thread.cwd = await resolveThreadRunCwd(thread, workspace, workspaceBoundary)
 
     if (controller.signal.aborted) throw new Error('Run cancelled before startup completed.')
-    await saveThreadMemoryPolicy(() => store.threads, thread.id, memoryPolicy, threadMemoryPolicyRevision(thread))
-    const memoryRevision = threadMemoryPolicyRevision(thread)
-    if (controller.signal.aborted) throw new Error('Run cancelled before memory choices were saved.')
+    const acceptedMemoryThread = await saveThreadMemoryPolicy(() => store.threads, thread.id, memoryPolicy, threadMemoryPolicyRevision(thread))
+    const memoryRevision = threadMemoryPolicyRevision(acceptedMemoryThread)
+    // Publish the durable startup CAS pair before a possible Stop returns control to the UI.
+    emitToRenderer({ runId: '', threadId: thread.id, type: 'thread_update', patch: { memoryPolicy: { ...captureThreadMemoryPolicy(acceptedMemoryThread) }, memoryPolicyRevision: memoryRevision } })
+    if (controller.signal.aborted) throw new Error('Run cancelled after memory choices were accepted.')
     const userItem = { id: randomUUID(), kind: 'user' as const, memorySource: payload.sourceThreadKey ? 'external' as const : 'user' as const, text: payload.userText, attachments, createdAt: Date.now() }
     thread.timeline.push(userItem)
     thread.apiMessages.push({ role: 'user', content: buildUserContent(payload.userText, attachments) })

@@ -334,7 +334,7 @@ pub const Decision = struct {
 /// An opened engine; ``close`` stops its thread and frees its backend.
 pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) void, ctx: *anyopaque };
 
-pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0 };
+pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0, limit: ?u64 = null };
 
 /// A backend's words for its own refusals (a request it cannot serve); null: the error's name.
 pub const Explain = struct {
@@ -361,6 +361,13 @@ pub const Status = struct {
     streams: usize = 0,
     /// Generated tokens held by live streams, excluding their prompts.
     generation_tokens: u64 = 0,
+    /// Filling prompts' total tokens and those still to prefill (null: no prompt is going in).
+    fill_prompt_tokens: ?u32 = null,
+    fill_tokens_left: ?u32 = null,
+    /// A prompt pass is running whose backend reports no `fill_at`: the totals stay null rather than guessed.
+    fill_unknown: bool = false,
+    /// Changes whenever the filling set does: a reader pairs its drain samples with one fill.
+    fill_run: u64 = 0,
 };
 
 pub const SubmitError = error{ Closed, Busy, InvalidSpans };
@@ -565,11 +572,12 @@ pub const originals = @import("originals.zig");
 test {
     _ = @import("lane_host.zig");
     _ = @import("lane_host_test.zig");
+    _ = @import("lane_host_fill_test.zig");
+    _ = @import("lane_host_status_test.zig");
     _ = @import("lane_host_reuse_test.zig");
     _ = @import("lane_host_cache_lifetime_test.zig");
     _ = @import("lane_host_borrow_test.zig");
     _ = @import("lane_host_warm_test.zig");
-    _ = @import("lane_host_fill_test.zig");
     _ = @import("lane_host_rows_test.zig");
     _ = @import("prompt_cache.zig");
     _ = @import("prompt_radix.zig");

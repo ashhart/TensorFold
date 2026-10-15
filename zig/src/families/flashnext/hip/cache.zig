@@ -190,6 +190,44 @@ pub const Caches = struct {
     }
 };
 
+/// Streams' caches by slot, made once and kept: a slot's buffers never change, so the graphs naming them stay valid.
+pub const Pool = struct {
+    slots: std.ArrayList(?Caches) = .empty,
+
+    /// Slot `slot`'s caches, fresh (`maker.caches(cap)` makes them the first time); a failed reset keeps them there.
+    pub fn lease(
+        p: *Pool,
+        gpa: std.mem.Allocator,
+        slot: u32,
+        s: hip.Stream,
+        eos: i64,
+        cap: usize,
+        maker: anytype,
+    ) !Caches {
+        while (p.slots.items.len <= slot) try p.slots.append(gpa, null);
+        const held = &p.slots.items[slot];
+        if (held.* == null) {
+            held.* = try maker.caches(cap);
+            held.*.?.id = slot;
+        }
+        try s.synchronize();
+        try held.*.?.reset(eos);
+        const c = held.*.?;
+        held.* = null;
+        return c;
+    }
+
+    /// A finished stream's caches back to their slot.
+    pub fn unlease(p: *Pool, c: Caches) void {
+        p.slots.items[c.id] = c;
+    }
+
+    pub fn deinit(p: *Pool, gpa: std.mem.Allocator) void {
+        for (p.slots.items) |*c| if (c.*) |*x| x.deinit(gpa);
+        p.slots.deinit(gpa);
+    }
+};
+
 test "a stream's bytes at tp 4: 12 sparse layers' caches, 36 DeltaNet states and the n-gram tail" {
     const config = @import("../config.zig");
     var c = try config.parse(std.testing.allocator, @embedFile("../fixtures/config.json"));

@@ -1,4 +1,9 @@
 // DFlash2 drafter for Qwen3.8-27B on Intel Xe2: 5 layers, a block of L rows attending its context window and itself.
+
+// group means stored × ASC (and B · group / ASC): the low half stays out of fp16 subnormals
+#ifndef ASC
+#define ASC 256.0f
+#endif
 #pragma OPENCL FP_CONTRACT OFF
 
 #define GS 64
@@ -22,9 +27,9 @@ static void rowsums(local const half *hl, int K, global half *AHI, global half *
     for (int k = 0; k < 4; k++) s += (float)hl[g * GS + lane * 4 + k];
     s = sub_group_reduce_add(s) * (1.0f / GS);
     if (lane == 0) {
-      const half hi = convert_half_rte(s);
+      const half hi = convert_half_rte(s * ASC);
       AHI[row * (K / GS) + g] = hi;
-      ALO[row * (K / GS) + g] = convert_half_rte(s - (float)hi);
+      ALO[row * (K / GS) + g] = convert_half_rte(s * ASC - (float)hi);
     }
   }
 }
@@ -52,9 +57,9 @@ KERNEL(512) void dconv(global const half *X, global const half *DYN, int DS, glo
     for (int k = 0; k < 4; k++) s += (float)hl[sg * GS + lane * 4 + k];
     s = sub_group_reduce_add(s) * (1.0f / GS);
     if (lane == 0) {
-      const half hi = convert_half_rte(s);
+      const half hi = convert_half_rte(s * ASC);
       AHI[(long)r * (D / GS) + blk * 8 + sg] = hi;
-      ALO[(long)r * (D / GS) + blk * 8 + sg] = convert_half_rte(s - (float)hi);
+      ALO[(long)r * (D / GS) + blk * 8 + sg] = convert_half_rte(s * ASC - (float)hi);
     }
   }
 }

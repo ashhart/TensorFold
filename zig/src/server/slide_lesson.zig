@@ -1,7 +1,7 @@
 //! A fact's lesson written by the model itself: the teller's questions, short answers, near misses, keep prompts.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const chat = @import("chat.zig");
 const prompt = @import("prompt.zig");
 const errors = @import("errors.zig");

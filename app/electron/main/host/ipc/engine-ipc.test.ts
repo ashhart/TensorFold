@@ -50,6 +50,10 @@ assert.match(preload, /engineConnection: \(\): Promise<EngineConnection \| null>
 
 // Browser demos have no server or measured requests, even after their simulated model is ready.
 const mock = createMockEngineApi()
+const beforeEnable = await mock.engineSnapshot()
+await assert.rejects(mock.engineSetCortheon(true), /temporarily disabled for beta\.6/)
+assert.deepEqual(await mock.engineSnapshot(), beforeEnable, 'the browser mock also refuses stale enable calls without mutation')
+assert.match(beforeEnable.status.cortheon?.disabledReason ?? '', /temporarily disabled for beta\.6/)
 assert.equal(await mock.engineConnection(), null)
 assert.equal((await mock.engineSnapshot()).performance, null)
 await mock.engineLoad('mlx-community/Qwen3.5-2B-MLX-4bit')

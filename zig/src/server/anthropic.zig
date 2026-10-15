@@ -1,6 +1,6 @@
 //! Anthropic's Messages routes over the chat handler: typed SSE events, tool_use blocks, count_tokens.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const http_body = @import("http_body.zig");
 const fields = @import("fields.zig");

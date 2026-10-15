@@ -1,5 +1,5 @@
 //! The native HTTP server's surface: what main and the test servers build a server from.
-pub const json = @import("json.zig");
+pub const json = @import("json");
 pub const errors = @import("errors.zig");
 pub const auth = @import("auth.zig");
 pub const cli = @import("cli.zig");
@@ -17,7 +17,7 @@ pub const Config = server.Config;
 
 test {
     @import("std").testing.refAllDecls(@This());
-    _ = @import("json.zig");
+    _ = @import("json");
     _ = @import("std_options.zig");
     _ = @import("fields.zig");
     _ = @import("reply_text.zig");
@@ -36,6 +36,7 @@ test {
     _ = @import("hub.zig");
     _ = @import("chunk_plan.zig");
     _ = @import("status_routes.zig");
+    _ = @import("health_test.zig");
     _ = @import("memory_routes.zig");
     _ = @import("process_memory.zig");
     _ = @import("log.zig");

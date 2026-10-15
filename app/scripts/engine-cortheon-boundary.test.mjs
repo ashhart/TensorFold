@@ -17,28 +17,21 @@ try {
   const jiti = createJiti(path.join(root, 'package.json'), { moduleCache: false, fsCache: false, alias: { '../ipc': fixture, '../audit': fixture, electron: fixture } })
   const { registerEngineIpc } = await jiti.import(path.join(root, 'electron/main/host/ipc/engine-ipc.ts'))
   const calls = []
-  let reserved = 0, released = 0, privateRunActive = false, guardChecks = 0
+  let reserved = 0, released = 0, audits = 0, guardChecks = 0
   registerEngineIpc(() => ({ setCortheon: async (enabled) => { calls.push(enabled); return { enabled } } }), {
     reserveOperation: () => { reserved++; return { release() { released++ } } },
-    assertCanEnableCortheon: () => { guardChecks++; if (privateRunActive) throw new Error('A private phone or bot VM run is active.') },
+    assertCanEnableCortheon: () => { guardChecks++; throw new Error('A private phone or bot VM run is active.') },
   })
+  state.audit = async () => { audits++ }
   const set = (enabled) => state.handlers.get('engine:setCortheon')({}, enabled)
-  let finishAudit
-  state.audit = () => new Promise((resolve) => { finishAudit = resolve })
-  const pending = set(true)
-  privateRunActive = true
-  finishAudit()
-  await assert.rejects(() => pending, /private phone or bot VM/, 'privacy is checked after asynchronous audit, immediately before the service change')
-  assert.deepEqual(calls, [])
-  assert.equal(guardChecks, 1)
-  assert.equal(reserved, released, 'a refused enable releases its operation lease')
-  state.audit = async () => {}
+  await assert.rejects(() => set(true), /temporarily disabled for beta\.6/)
+  assert.deepEqual(calls, [], 'an old renderer cannot reach the service enable API')
+  assert.equal(audits, 0, 'release refusal happens before asynchronous audit or operation admission')
+  assert.equal(reserved, 0)
+  assert.equal(guardChecks, 0)
   await set(false)
-  assert.deepEqual(calls, [false], 'turning external research off remains possible during a private run')
-  assert.equal(guardChecks, 1)
-  privateRunActive = false
-  await set(true)
-  assert.deepEqual(calls, [false, true])
+  assert.deepEqual(calls, [false], 'turning external research off remains possible')
+  assert.equal(guardChecks, 0)
   await assert.rejects(() => set('true'), /on or off/)
   assert.equal(reserved, released)
   // Execute the actual main-app callback rather than a second copy of its policy.
@@ -57,19 +50,11 @@ try {
   const threads = [{ id: 'scoped-fixture', bot: { toolScope: undefined } }]
   const active = new Map([['scoped-fixture', new AbortController()]])
   const actualGuard = vm.runInNewContext(`(${callback})`, { store: { threads }, aborters: active, isRestrictedBot })
-  registerEngineIpc(() => ({ setCortheon: async (enabled) => { calls.push(enabled); return { enabled } } }), { assertCanEnableCortheon: actualGuard })
-  await set(true)
-  state.audit = () => new Promise((resolve) => { finishAudit = resolve })
-  const racedScope = set(true)
+  actualGuard()
   threads[0].bot.toolScope = { mode: 'selected', names: [] }
-  finishAudit()
-  const beforeRefused = calls.length
-  await assert.rejects(() => racedScope, /restricted bot|execution boundaries/)
-  assert.equal(calls.length, beforeRefused, 'an active scoped bot appearing during audit refuses the real engine mutation')
-  state.audit = async () => {}
-  await set(false)
-  active.clear(); await set(true)
-  console.log('Registered Cortheon handler checks passed: post-audit privacy admission, refusal before service mutation, disabling allowed and leases released.')
+  assert.throws(actualGuard, /restricted bot|execution boundaries/, 'the existing private-execution guard remains effective independently of the release pause')
+  active.clear(); actualGuard()
+  console.log('Registered Cortheon handler: beta.6 refusal before audit/service/operation mutation, disabling allowed, leases released and existing private-run guard retained.')
 } finally {
   delete globalThis.__engineCortheonBoundaryFixture
   await fs.rm(temp, { recursive: true, force: true })

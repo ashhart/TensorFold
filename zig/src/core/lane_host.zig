@@ -9,6 +9,7 @@ const lone = @import("lane_host_lone.zig");
 const fill = @import("lane_host_fill.zig");
 const admit = @import("lane_host_admit.zig");
 const recalls = @import("lane_host_recall.zig");
+const ends = @import("lane_host_end.zig");
 const rows_host = @import("lane_host_rows.zig");
 const Allocator = std.mem.Allocator;
 const Id = api.Id;
@@ -71,6 +72,8 @@ pub const LaneHost = struct {
         prefill_sent: bool = false, // a lone driver's prefilled event went out
         fill_began: bool = false, // its first prompt chunk ran
         began: i96 = 0,
+        /// The engine thread says the prompt pass is going: status readers may count this job's fill atomics.
+        fill_on: std.atomic.Value(bool) = .init(false),
         prefilled: ?i96 = null,
         entry: ?*pc.Entry = null, // the kept state the backend restores, until its prompt pass reports
         marks: []const u32 = &.{}, // where the pass keeps states (gpa-owned)
@@ -230,10 +233,11 @@ pub const LaneHost = struct {
         }
     }
 
-    /// Sends a stream's new tokens; true once it has finished (its job freed).
+    /// Sends a stream's new tokens; true once it has finished and left the lists a status read walks.
     pub fn deliver(h: *LaneHost, job: *Job) bool {
         h.send(job);
         if (!job.stream.finished) return false;
+        h.remove(job);
         const reason: Reason = switch (job.stream.reason) {
             .length => .length,
             .cancelled => .cancelled,
@@ -259,35 +263,6 @@ pub const LaneHost = struct {
             recalls.release(job);
         }
         h.gpa.destroy(job);
-    }
-
-    /// Cancels queued and admitted jobs named since the last round.
-    fn takeCancels(h: *LaneHost) void {
-        h.mutex.lockUncancelable(h.io);
-        const ids = h.gpa.dupe(Id, h.cancels.items) catch &.{};
-        h.cancels.clearRetainingCapacity();
-        var dropped: std.ArrayList(*Job) = .empty;
-        for (ids) |id| {
-            for (h.queued.items, 0..) |job, i| if (job.id == id) {
-                dropped.append(h.gpa, h.queued.orderedRemove(i)) catch {};
-                break;
-            };
-        }
-        h.mutex.unlock(h.io);
-        for (dropped.items) |job| h.finish(job, .cancelled, "");
-        dropped.deinit(h.gpa);
-        for (ids) |id| {
-            for (h.admitted.items, 0..) |job, i| if (job.id == id) {
-                fill.unfill(h, job);
-                if (!job.stream.finished) h.core.discard(&job.stream);
-                h.lock();
-                _ = h.admitted.orderedRemove(i);
-                h.unlock();
-                h.finish(job, .cancelled, "");
-                break;
-            };
-        }
-        h.gpa.free(ids);
     }
 
     pub fn lock(h: *LaneHost) void {
@@ -367,6 +342,7 @@ pub const LaneHost = struct {
             return h.drop(job, "out of memory");
         };
         job.started = true;
+        job.fill_on.store(true, .release); // status readers count the fill from here until the pass reports
         const began = std.Io.Clock.awake.now(h.io).toNanoseconds();
         job.began = began;
         if (r.max_tokens == 0 and h.info_.warm_turns) return h.warmPass(job, began);
@@ -381,7 +357,7 @@ pub const LaneHost = struct {
             else => h.drop(job, h.words(e)),
         };
         h.prefilled(job, began);
-        if (h.deliver(job)) h.remove(job);
+        _ = h.deliver(job);
         return true;
     }
 
@@ -406,7 +382,7 @@ pub const LaneHost = struct {
         if (!done) return;
         _ = h.filling.orderedRemove(at);
         h.prefilled(job, job.began);
-        if (h.deliver(job)) h.remove(job);
+        _ = h.deliver(job);
     }
 
     /// A reply's grammar from the server's compiler (Info.structures engines get requests that carry one).
@@ -417,6 +393,7 @@ pub const LaneHost = struct {
 
     pub fn prefilled(h: *LaneHost, job: *Job, began: i96) void {
         const done = std.Io.Clock.awake.now(h.io).toNanoseconds();
+        job.fill_on.store(false, .release); // the pass reported: status readers stop counting this fill
         h.lock();
         if (done > began) h.prefill_rate = @as(f64, @floatFromInt(job.request.prompt.len - job.stream.cached)) / (@as(f64, @floatFromInt(done - began)) / 1e9);
         h.prefill_at = done;
@@ -465,16 +442,6 @@ pub const LaneHost = struct {
 
     /// No memory for another lane yet: the job waits at the queue's head, and admission holds until a job ends.
     fn requeue(h: *LaneHost, job: *Job) bool {
-        job.reported();
-        if (job.stream.grammar) |g| g.deinit(h.gpa); // the next admission compiles its own
-        job.stream.deinit(h.gpa);
-        job.proposer.deinit();
-        recalls.release(job);
-        job.started = false;
-        job.fill_began = false;
-        job.entry = null; // looked up again at its next admission
-        h.gpa.free(job.marks);
-        job.marks = &.{};
         h.lock();
         for (h.admitted.items, 0..) |j, i| if (j == job) {
             _ = h.admitted.orderedRemove(i);
@@ -490,6 +457,17 @@ pub const LaneHost = struct {
             h.finish(job, .failed, if (others > 0) "out of memory" else alone_words);
             return true;
         }
+        job.fill_on.store(false, .release); // off the lists before the teardown a status reader could have walked into
+        job.reported();
+        if (job.stream.grammar) |g| g.deinit(h.gpa); // the next admission compiles its own
+        job.stream.deinit(h.gpa);
+        job.proposer.deinit();
+        recalls.release(job);
+        job.started = false;
+        job.fill_began = false;
+        job.entry = null; // looked up again at its next admission
+        h.gpa.free(job.marks);
+        job.marks = &.{};
         h.memory_lanes = others;
         return false;
     }
@@ -515,7 +493,7 @@ pub const LaneHost = struct {
 
     fn run(h: *LaneHost) void {
         while (true) {
-            h.takeCancels();
+            ends.takeCancels(h);
             rows_host.answer(h);
             while (h.admitOne()) {}
             h.fillOne();
@@ -529,7 +507,7 @@ pub const LaneHost = struct {
                     h.lesson_open = false;
                 }
                 if (left == 0) return rows_host.flush(h);
-                h.closeAll();
+                ends.closeAll(h);
                 continue;
             }
             if (h.core.activeCount() == 0) {
@@ -550,42 +528,17 @@ pub const LaneHost = struct {
             }
             h.unlock();
             h.core.step() catch |e| {
-                h.failAll(@errorName(e));
+                ends.failAll(h, @errorName(e));
                 continue;
             };
             var i: usize = 0;
             while (i < h.admitted.items.len) {
                 const job = h.admitted.items[i];
-                if (h.deliver(job)) {
-                    h.lock();
-                    _ = h.admitted.orderedRemove(i);
-                    h.unlock();
-                } else i += 1;
+                if (h.deliver(job)) continue; // it left the list: the next job slid into slot i
+                i += 1;
             }
             lone.reclaim(h);
         }
-    }
-
-    /// A failed round ends every stream it held, with the backend's error.
-    fn failAll(h: *LaneHost, message: []const u8) void {
-        h.lock();
-        const jobs = h.gpa.dupe(*Job, h.admitted.items) catch &.{};
-        h.admitted.clearRetainingCapacity();
-        h.filling.clearRetainingCapacity();
-        h.unlock();
-        for (jobs) |job| {
-            if (!job.stream.finished) h.core.discard(&job.stream);
-            h.finish(job, .failed, message);
-        }
-        h.gpa.free(jobs);
-    }
-
-    fn closeAll(h: *LaneHost) void {
-        h.lock();
-        for (h.queued.items) |job| h.cancels.append(h.gpa, job.id) catch {};
-        for (h.admitted.items) |job| h.cancels.append(h.gpa, job.id) catch {};
-        h.unlock();
-        h.takeCancels();
     }
 };
 

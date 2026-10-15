@@ -1,8 +1,7 @@
 //! /v1/systemone: llama-server's System One request, its options read at single-token forms through the engine.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
-const json_write = @import("json_write.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const pyrepr = @import("pyrepr.zig");
 const reply_text = @import("reply_text.zig");
@@ -303,7 +302,7 @@ fn writePrefix(w: *std.Io.Writer, state: Value, head: bool) std.Io.Writer.Error!
 
 /// ``json.dumps(v, ensure_ascii=False, indent=2)``.
 fn indented(w: *std.Io.Writer, v: Value, level: usize) std.Io.Writer.Error!void {
-    const o: json_write.Options = .{ .ascii = false };
+    const o: json.Options = .{ .ascii = false };
     switch (v) {
         .array => |items| {
             if (items.len == 0) return w.writeAll("[]");
@@ -323,7 +322,7 @@ fn indented(w: *std.Io.Writer, v: Value, level: usize) std.Io.Writer.Error!void 
             for (obj.keys(), obj.values(), 0..) |k, item, i| {
                 try w.writeAll(if (i > 0) ",\n" else "\n");
                 try w.splatByteAll(' ', 2 * (level + 1));
-                try json_write.writeString(w, k, o);
+                try json.writeString(w, k, o);
                 try w.writeAll(": ");
                 try indented(w, item, level + 1);
             }
@@ -331,7 +330,7 @@ fn indented(w: *std.Io.Writer, v: Value, level: usize) std.Io.Writer.Error!void 
             try w.splatByteAll(' ', 2 * level);
             try w.writeByte('}');
         },
-        else => try json_write.write(w, v, o),
+        else => try json.write(w, v, o),
     }
 }
 

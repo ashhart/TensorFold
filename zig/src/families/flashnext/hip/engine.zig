@@ -5,7 +5,7 @@ const core = @import("core");
 const serve = @import("hip_serve");
 const config = @import("../config.zig");
 const model = @import("model.zig");
-const load = @import("load.zig");
+const loader = @import("load.zig");
 const tables = @import("tables.zig");
 const cache = @import("cache.zig");
 const forward = @import("forward.zig");
@@ -17,6 +17,8 @@ pub const Options = struct {
     rank: usize = 0,
     world: usize = 1,
     group: ?hip.collective.Group = null,
+    /// The startup steps the ranks take together over the group's link (null: the engine's own).
+    startup: ?*hip.Startup = null,
     policy: hip.Policy = .{},
     /// Positions a stream holds at most (its prompt, reply and a window's rows).
     capacity: usize = 4096,
@@ -55,7 +57,7 @@ pub const Engine = struct {
     ck: core.checkpoint.Checkpoint,
     /// The n-gram tables' row views and other loader leftovers that live as long as the engine.
     keep: std.heap.ArenaAllocator,
-    weights: load.Weights,
+    weights: loader.Weights,
     tables: tables.Tables,
     host: forward.Host,
     qk: [2]hip.DeviceBuffer,
@@ -68,16 +70,34 @@ pub const Engine = struct {
     graphed: bool,
     graphs: Graphs,
     chosen: ?*Graphs.Entry = null,
-    /// Streams' caches at the full capacity, kept between streams so their graphs stay valid (null: not made yet).
-    pool: std.ArrayList(?cache.Caches) = .empty,
+    /// Streams' caches at the full capacity, kept between streams so their graphs stay valid.
+    pool: cache.Pool,
+    /// Every rank's vote on a captured round, in buffers made with the engine (a group only).
+    votes: ?hip.Votes,
+    /// A rank could not take a round: every rank stops before another collective.
+    stopped: bool,
 
-    /// The checkpoint `dir` on device `o.device`, this rank's share loaded; the scratch sized for `o.chunk` rows.
+    /// `load`, this rank's failure heard by the other ranks at the step they wait at.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
+        var own: hip.Startup = .{ .link = if (o.world > 1) (o.group orelse return error.NoGroup).link() else null };
+        var with = o;
+        with.startup = o.startup orelse &own;
+        return load(gpa, io, dir, with) catch |err| {
+            with.startup.?.failed(err);
+            return err;
+        };
+    }
+
+    /// Rank `o.rank`'s share of `dir` on `o.device` and scratch for `o.chunk` rows; the caller refuses a failure.
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
+        var own: hip.Startup = .{ .link = if (o.world > 1) (o.group orelse return error.NoGroup).link() else null };
+        const steps = o.startup orelse &own;
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
         e.io = io;
         e.o = o;
+        e.stopped = false;
         e.driver = try hip.Runtime.open();
         errdefer e.driver.close();
         e.ctx = try hip.Context.init(&e.driver, o.device);
@@ -89,8 +109,11 @@ pub const Engine = struct {
         e.stream = try hip.Stream.init(&e.driver);
         errdefer e.stream.deinit();
         e.comm = null;
+        // RCCL's init waits for every rank: none enters it unless every rank got this far
+        _ = try steps.done(.{ 0, 0 }, .first);
         if (o.world > 1) e.comm = try (o.group orelse return error.NoGroup).open();
         errdefer if (e.comm) |c| c.close();
+        _ = try steps.done(.{ 0, 0 }, .first);
         e.cfg = try config.Config.read(gpa, io, dir);
         errdefer e.cfg.deinit();
         e.ck = try core.checkpoint.Checkpoint.openModel(gpa, io, dir);
@@ -98,7 +121,7 @@ pub const Engine = struct {
         e.keep = .init(gpa);
         errdefer e.keep.deinit();
         const rank: ?core.quant.Rank = if (o.world > 1) .{ .rank = o.rank, .world = o.world } else null;
-        e.weights = try load.load(gpa, &e.driver, &e.ck, &e.cfg, rank, e.act);
+        e.weights = try loader.load(gpa, &e.driver, &e.ck, &e.cfg, rank, e.act);
         errdefer e.weights.deinit();
         e.weights.model.tp = e.comm;
         const spelling = try spellingOf(e.keep.allocator(), io, dir);
@@ -131,10 +154,14 @@ pub const Engine = struct {
             e.cfg.vocab,
             cache.max_window * forward.max_segs,
         );
+        errdefer e.drawer.deinit();
+        e.votes = if (o.world > 1) try hip.Votes.init(&e.driver, o.world) else null;
+        errdefer if (e.votes) |*v| v.deinit();
         e.graphed = o.policy.graphs != .off;
         e.graphs = Graphs.init(gpa);
         e.chosen = null;
-        e.pool = .empty;
+        e.pool = .{};
+        _ = try steps.done(.{ 0, 0 }, .first);
         return e;
     }
 
@@ -150,8 +177,8 @@ pub const Engine = struct {
             },
         );
         e.graphs.deinit();
-        for (e.pool.items) |*c| if (c.*) |*x| x.deinit(e.gpa);
         e.pool.deinit(e.gpa);
+        if (e.votes) |*v| v.deinit();
         e.drawer.deinit();
         e.arena.deinit();
         e.host.staging.free();
@@ -180,24 +207,6 @@ pub const Engine = struct {
     pub fn kinds(e: *const Engine, out: []bool) ![]const bool {
         for (out[0..e.cfg.layers], 0..) |*k, i| k.* = (try e.cfg.kind(i)) == .linear_attention;
         return out[0..e.cfg.layers];
-    }
-
-    /// The least of `mine` over the ranks, the same on every rank (the streams every rank's memory holds).
-    pub fn least(e: *Engine, mine: u64) !u64 {
-        const c = e.comm orelse return mine;
-        const o = e.ops(&e.arena);
-        const at = e.arena.mark();
-        defer e.arena.release(at);
-        const send = try o.arena.of(i64, 1 + c.world);
-        const word: i64 = @intCast(mine);
-        try hip.runtime.check(e.driver.api.hipMemcpyHtoDAsync(@ptrFromInt(send), @ptrCast(@constCast(&word)), 8, e.stream.handle));
-        try c.allGather(send, send + 8, 1, .i64, e.stream.handle);
-        var all: [64]i64 = undefined;
-        try hip.runtime.check(e.driver.api.hipMemcpyDtoHAsync(std.mem.sliceAsBytes(&all).ptr, @ptrFromInt(send + 8), 8 * c.world, e.stream.handle));
-        try e.stream.synchronize();
-        var out = mine;
-        for (all[0..c.world]) |v| out = @min(out, @as(u64, @intCast(v)));
-        return out;
     }
 
     /// A stream's caches for `cap` positions.
@@ -286,6 +295,7 @@ pub const Engine = struct {
 
     /// A prompt's `tokens` from `c.len` into `c`, kept: the final rows of the last of them.
     pub fn prompt(e: *Engine, c: *cache.Caches, tokens: []const u32) !forward.Out {
+        if (e.stopped) return error.GroupStopped;
         // the staging is reused: the last forward's uploads must have left it
         try e.stream.synchronize();
         e.host.used = 0;
@@ -315,6 +325,7 @@ pub const Engine = struct {
 
     /// A round of windows and its logits as `pick` says (rank 0's, after every rank's `choose`).
     pub fn round(e: *Engine, segs: []const forward.Seg, pick: Pick) !Done {
+        if (e.stopped) return error.GroupStopped;
         defer for (segs) |g| {
             g.c.pooled = (g.pos + g.tokens.len) / e.cfg.index_ratio;
         };
@@ -339,61 +350,34 @@ pub const Engine = struct {
             },
             .capture => {
                 const at = e.arena.mark();
-                const kept = try e.record(entry, ctx);
+                const decline = e.o.policy.failsCapture(e.o.rank);
+                const got = hip.vote.record(Done, e.gpa, e.stream, &e.weights.model.tp, decline, ctx, body);
                 e.graphs.capture_ns += @intCast(nowNs(e.io) - began);
-                if (!(try e.agreed(kept))) {
-                    e.graphs.revoke(entry);
-                    e.arena.release(at);
-                    return body(ctx);
+                if (got.split) |split| e.graphs.hold(entry, split, got.out);
+                const all = if (e.votes) |*v| try v.agree(e.comm.?, got.vote, e.stream) else got.vote;
+                if (all == .kept) {
+                    try entry.exec.?.launchOn(e.stream);
+                    return entry.out;
                 }
-                try entry.exec.?.launchOn(e.stream);
-                return entry.out;
+                e.graphs.revoke(entry);
+                e.arena.release(at);
+                if (all == .declined) return body(ctx);
+                if (e.o.world == 1) return error.OutOfDeviceMemory;
+                // no rank runs another collective once one could not take a round
+                e.stopped = true;
+                return error.GroupStopped;
             },
         }
     }
 
-    /// Records a round into `entry` (nothing runs): whether this rank kept it.
-    fn record(e: *Engine, entry: *Graphs.Entry, ctx: Body) !bool {
-        var rec: hip.graph_split.Recorder = .{ .gpa = e.gpa, .stream = e.stream, .inner = e.comm };
-        rec.begin() catch return false;
-        const m = &e.weights.model;
-        const tp = m.tp;
-        m.tp = rec.comm();
-        const got = body(ctx);
-        m.tp = tp;
-        var split = (try rec.finish()) orelse return false;
-        const out = got catch |err| {
-            split.deinit();
-            return if (err == error.OutOfDeviceMemory) err else false;
-        };
-        if (e.o.policy.graph_fail >= 0 and @as(usize, @intCast(e.o.policy.graph_fail)) == e.o.rank) {
-            split.deinit();
-            return false;
-        }
-        e.graphs.hold(entry, split, out);
-        return true;
-    }
-
     /// Slot `slot`'s caches, fresh, for a new stream (made at the capacity the first time).
     pub fn lease(e: *Engine, slot: u32) !cache.Caches {
-        while (e.pool.items.len <= slot) try e.pool.append(e.gpa, null);
-        var c = if (e.pool.items[slot]) |held| held else try e.caches(e.o.capacity);
-        e.pool.items[slot] = null;
-        errdefer c.deinit(e.gpa);
-        try e.stream.synchronize();
-        try c.reset(e.eos);
-        c.id = slot;
-        return c;
+        return e.pool.lease(e.gpa, slot, e.stream, e.eos, e.o.capacity, e);
     }
 
     /// A finished stream's caches back to their slot.
     pub fn unlease(e: *Engine, c: cache.Caches) void {
-        e.pool.items[c.id] = c;
-    }
-
-    /// Whether every rank kept its capture (one word each, gathered).
-    fn agreed(e: *Engine, yes: bool) !bool {
-        return try e.least(@intFromBool(yes)) == 1;
+        e.pool.unlease(c);
     }
 };
 

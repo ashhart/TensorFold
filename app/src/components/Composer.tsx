@@ -973,128 +973,131 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
               mode === 'home' ? 'min-h-[68px] pt-4' : 'min-h-[48px] pt-3.5',
             )}
           />
-          <div className="@container flex flex-wrap items-center gap-1 px-2 pb-2 pt-1">
-            {/* "+": attach a document, reference a file or terminal output, capture a window. */}
-            <Menu width={220} placement="top" trigger={(open) => (
-              <button aria-label="Attach" title="Attach files or context" className={clsx('flex h-8 w-8 items-center justify-center rounded-full transition-colors', open ? 'bg-ink-5 text-ink' : 'text-ink-3 hover:bg-ink-5 hover:text-ink')}>
-                <Icon name="plus" size={16} />
-              </button>
-            )}>
-              {(close) => (
-                <div>
-                  <MenuItem icon="fileText" onClick={() => { close(); fileInputRef.current?.click() }}>Attach document or image</MenuItem>
-                  {!isChat && <MenuItem icon="file" onClick={() => { close(); onAttach() }}>Reference a workspace file</MenuItem>}
-                  {!isChat && activeTerminalSession && <MenuItem icon="terminal" onClick={() => { close(); void referenceTerminalOutput() }}>Reference terminal output</MenuItem>}
-                  <MenuItem icon="monitor" onClick={() => { close(); if (!controllerBusy) onController() }}>Capture window</MenuItem>
-                </div>
-              )}
-            </Menu>
-
-            {!isChat && (
-              <ApprovalMenu approvalMode={settings.approvalMode} onSetApproval={setApproval} planningOnly={!!provider && isExternalProvider(provider)} />
-            )}
-
-            {/* A task needs a folder: keep a small way to pick one in sight. */}
-            {!isChat && !workCwd && (isOrchestratorProject ? (
-              <Menu width={280} placement="top" trigger={(open) => (
-                <button className={clsx('inline-flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[13px] transition-colors', open ? 'bg-ink-5 text-ink' : 'text-ink-3 hover:bg-ink-5 hover:text-ink')}>
-                  <Icon name="folder" size={16} />Choose folder
+          {/* Keep Send/Stop anchored while the secondary controls can wrap on narrow panes. */}
+          <div className="@container flex items-end gap-1 px-2 pb-2 pt-1">
+            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+              {/* "+": attach a document, reference a file or terminal output, capture a window. */}
+              <Menu width={220} placement="top" trigger={(open) => (
+                <button aria-label="Attach" title="Attach files or context" className={clsx('flex h-8 w-8 items-center justify-center rounded-full transition-colors', open ? 'bg-ink-5 text-ink' : 'text-ink-3 hover:bg-ink-5 hover:text-ink')}>
+                  <Icon name="plus" size={16} />
                 </button>
               )}>
-                {(close) => renderFolderChoices(close)}
+                {(close) => (
+                  <div>
+                    <MenuItem icon="fileText" onClick={() => { close(); fileInputRef.current?.click() }}>Attach document or image</MenuItem>
+                    {!isChat && <MenuItem icon="file" onClick={() => { close(); onAttach() }}>Reference a workspace file</MenuItem>}
+                    {!isChat && activeTerminalSession && <MenuItem icon="terminal" onClick={() => { close(); void referenceTerminalOutput() }}>Reference terminal output</MenuItem>}
+                    <MenuItem icon="monitor" onClick={() => { close(); if (!controllerBusy) onController() }}>Capture window</MenuItem>
+                  </div>
+                )}
               </Menu>
-            ) : (
-              <button onClick={() => void pickFolder()} className="inline-flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[13px] text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink">
-                <Icon name="folder" size={16} />Choose folder
-              </button>
-            ))}
 
-            {mode === 'home' && incognito && (
-              <button onClick={() => setIncognito(false)} title="Incognito: this thread is not saved and vanishes on relaunch. Click to turn off." className="inline-flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[13px] text-ink-2 transition-colors hover:bg-ink-5 hover:text-ink">
-                <Icon name="incognito" size={16} />Incognito
-              </button>
-            )}
+              {!isChat && (
+                <ApprovalMenu approvalMode={settings.approvalMode} onSetApproval={setApproval} planningOnly={!!provider && isExternalProvider(provider)} />
+              )}
 
-            {dictating && (
-              <button onClick={toggleDictation} title="Stop voice input" className="inline-flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[13px] text-positive transition-colors hover:bg-ink-5">
-                <Icon name="mic" size={16} />Listening
-              </button>
-            )}
+              {/* A task needs a folder: keep a small way to pick one in sight. */}
+              {!isChat && !workCwd && (isOrchestratorProject ? (
+                <Menu width={280} placement="top" trigger={(open) => (
+                  <button aria-label="Choose folder" title="Choose folder" className={clsx('inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-[13px] transition-colors', open ? 'bg-ink-5 text-ink' : 'text-ink-3 hover:bg-ink-5 hover:text-ink')}>
+                    <Icon name="folder" size={16} className="shrink-0" /><span className="hidden @lg:inline">Choose folder</span>
+                  </button>
+                )}>
+                  {(close) => renderFolderChoices(close)}
+                </Menu>
+              ) : (
+                <button onClick={() => void pickFolder()} aria-label="Choose folder" title="Choose folder" className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-[13px] text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink">
+                  <Icon name="folder" size={16} className="shrink-0" /><span className="hidden @lg:inline">Choose folder</span>
+                </button>
+              ))}
 
-            <div className="min-w-0 flex-1" />
+              {mode === 'home' && incognito && (
+                <button onClick={() => setIncognito(false)} title="Incognito: this thread is not saved and vanishes on relaunch. Click to turn off." className="inline-flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[13px] text-ink-2 transition-colors hover:bg-ink-5 hover:text-ink">
+                  <Icon name="incognito" size={16} />Incognito
+                </button>
+              )}
 
-            {isChat && thread?.bot?.executionTarget !== 'vm' && <PhoneButton threadId={thread?.id} open={phoneOpen} onClick={() => setPhoneOpen((open) => !open)} />}
+              {dictating && (
+                <button onClick={toggleDictation} title="Stop voice input" className="inline-flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[13px] text-positive transition-colors hover:bg-ink-5">
+                  <Icon name="mic" size={16} />Listening
+                </button>
+              )}
 
-            {thread?.bot && <button type="button" title="This chat keeps the bot's saved model and permissions; edit the bot to configure a new chat." onClick={() => setView({ name: 'bots' })} className="inline-flex h-8 max-w-[160px] items-center gap-1.5 rounded-full px-2 text-[12px] text-ink-3 hover:bg-ink-5 hover:text-ink">
-              <Icon name="shield" size={13} className="shrink-0" /><span className="truncate">{thread.bot.approvalScope === 'readonly' ? 'Read only' : 'Review actions'} · {thread.bot.executionTarget === 'vm' ? 'Bot VM' : 'This Mac'}</span>
-            </button>}
+              {isChat && thread?.bot?.executionTarget !== 'vm' && <PhoneButton threadId={thread?.id} open={phoneOpen} onClick={() => setPhoneOpen((open) => !open)} />}
 
-            {provider?.id === 'tensorfold' && !thread?.orchestratorHostId && !isOrchestratorProject && workspace?.kind !== 'ssh' && <LocalEngineControls model={model} />}
+              {thread?.bot && <button type="button" title="This chat keeps the bot's saved model and permissions; edit the bot to configure a new chat." onClick={() => setView({ name: 'bots' })} className="inline-flex h-8 max-w-[160px] items-center gap-1.5 rounded-full px-2 text-[12px] text-ink-3 hover:bg-ink-5 hover:text-ink">
+                <Icon name="shield" size={13} className="shrink-0" /><span className="truncate">{thread.bot.approvalScope === 'readonly' ? 'Read only' : 'Review actions'} · {thread.bot.executionTarget === 'vm' ? 'Bot VM' : 'This Mac'}</span>
+              </button>}
 
-            {provider ? <ModelPickerMenu
-              provider={provider}
-              model={model}
-              providerAccountId={providerAccountId}
-              localOnly={localOnly}
-              policyProject={policyProject}
-              pickerProviders={pickerProviders}
-              recentModels={recentModels}
-              disabled={busy || submitting || !!thread?.bot}
-              usageSnapshot={usageSnapshot}
-              usageSummary={usageSummary}
-              rateLimitStatus={rateLimitStatus}
-              onPickModel={pickModel}
-              detail={providerEffortOptions(provider, model).some((option) => option.value === settings.reasoningEffort) ? effortDisplayLabel(provider, model, settings.reasoningEffort) : undefined}
-              settings={(
-                <ModelMenuSettings
+              {provider?.id === 'tensorfold' && !thread?.orchestratorHostId && !isOrchestratorProject && workspace?.kind !== 'ssh' && <LocalEngineControls model={model} />}
+
+              <div className={clsx('ml-auto max-w-[280px] flex-[1_1_120px]', provider && isExternalProvider(provider) ? 'min-w-[164px] @md:min-w-[224px]' : 'min-w-[120px]')}>
+                {provider ? <ModelPickerMenu
                   provider={provider}
                   model={model}
-                  reasoningEffort={settings.reasoningEffort}
-                  onChangeEffort={(effort) => saveSettings({ ...settings, reasoningEffort: effort })}
-                  serviceTier={canConfigureFastMode ? settings.serviceTier : null}
-                  onChangeServiceTier={canConfigureFastMode ? (tier) => saveSettings({ ...settings, serviceTier: tier }) : undefined}
-                  context={contextUsage}
-                />
-              )}
-            /> : <button type="button" onClick={() => setView({ name: thread?.bot ? 'bots' : 'models' })} className="rounded-lg px-2 py-1 text-[13px] text-warn hover:bg-ink-5">Model unavailable</button>}
+                  providerAccountId={providerAccountId}
+                  localOnly={localOnly}
+                  policyProject={policyProject}
+                  pickerProviders={pickerProviders}
+                  recentModels={recentModels}
+                  disabled={busy || submitting || !!thread?.bot}
+                  usageSnapshot={usageSnapshot}
+                  usageSummary={usageSummary}
+                  rateLimitStatus={rateLimitStatus}
+                  onPickModel={pickModel}
+                  detail={providerEffortOptions(provider, model).some((option) => option.value === settings.reasoningEffort) ? effortDisplayLabel(provider, model, settings.reasoningEffort) : undefined}
+                  settings={(
+                    <ModelMenuSettings
+                      provider={provider}
+                      model={model}
+                      reasoningEffort={settings.reasoningEffort}
+                      onChangeEffort={(effort) => saveSettings({ ...settings, reasoningEffort: effort })}
+                      serviceTier={canConfigureFastMode ? settings.serviceTier : null}
+                      onChangeServiceTier={canConfigureFastMode ? (tier) => saveSettings({ ...settings, serviceTier: tier }) : undefined}
+                      context={contextUsage}
+                    />
+                  )}
+                /> : <button type="button" onClick={() => setView({ name: thread?.bot ? 'bots' : 'models' })} className="rounded-lg px-2 py-1 text-[13px] text-warn hover:bg-ink-5">Model unavailable</button>}
+              </div>
 
-            <ComposerOverflowMenu
-              memory={thread?.bot ? undefined : {
-                policy: threadMemory ? threadMemory.policy : newMemoryPolicy,
-                problem: threadMemory?.problem,
-                revision: threadMemory?.revision ?? undefined,
-                incognito: thread ? thread.incognito === true : incognito,
-                busy: busy || submitting,
-                unsupported: threadMemory?.revision === null ? 'This damaged revision cannot be repaired through the memory menu; start a new chat.' : threadMemoryUnsupportedReason(thread ?? { orchestratorHostId: effectiveHostId }, provider),
-                isNew: !thread,
-                onSave: async (policy) => {
-                  if (!thread) { setNewMemoryPolicy(policy); return }
-                  const updated = await api.setThreadMemoryPolicy(thread.id, policy, thread.memoryPolicyRevision ?? 0)
-                  useStore.setState((state) => ({ threads: state.threads.map((entry) => entry.id === updated.id ? mergeThreadRecord(entry, updated) : entry) }))
-                },
-              }}
-              workspace={overflowWorkspace}
-              voice={{ available: !!settings.voice.enabled && !!settings.voice.sttEnabled, dictating, onToggle: toggleDictation }}
-              incognito={mode === 'home' && !isChat ? { on: incognito, onToggle: () => setIncognito((v) => !v) } : undefined}
-              onUseSkill={startSkillPick}
-              modes={mode !== 'home' && !isChat ? {
-                onMission: () => { setText('/mission '); requestAnimationFrame(() => taRef.current?.focus()) },
-                onRooms: () => setView({ name: 'projects' }),
-                onMonitor: () => setView({ name: 'commandCentre' }),
-              } : undefined}
-            />
+              <ComposerOverflowMenu
+                memory={thread?.bot ? undefined : {
+                  policy: threadMemory ? threadMemory.policy : newMemoryPolicy,
+                  problem: threadMemory?.problem,
+                  revision: threadMemory?.revision ?? undefined,
+                  incognito: thread ? thread.incognito === true : incognito,
+                  busy: busy || submitting,
+                  unsupported: threadMemory?.revision === null ? 'This damaged revision cannot be repaired through the memory menu; start a new chat.' : threadMemoryUnsupportedReason(thread ?? { orchestratorHostId: effectiveHostId }, provider),
+                  isNew: !thread,
+                  onSave: async (policy) => {
+                    if (!thread) { setNewMemoryPolicy(policy); return }
+                    const updated = await api.setThreadMemoryPolicy(thread.id, policy, thread.memoryPolicyRevision ?? 0)
+                    useStore.setState((state) => ({ threads: state.threads.map((entry) => entry.id === updated.id ? mergeThreadRecord(entry, updated) : entry) }))
+                  },
+                }}
+                workspace={overflowWorkspace}
+                voice={{ available: !!settings.voice.enabled && !!settings.voice.sttEnabled, dictating, onToggle: toggleDictation }}
+                incognito={mode === 'home' && !isChat ? { on: incognito, onToggle: () => setIncognito((v) => !v) } : undefined}
+                onUseSkill={startSkillPick}
+                modes={mode !== 'home' && !isChat ? {
+                  onMission: () => { setText('/mission '); requestAnimationFrame(() => taRef.current?.focus()) },
+                  onRooms: () => setView({ name: 'projects' }),
+                  onMonitor: () => setView({ name: 'commandCentre' }),
+                } : undefined}
+              />
 
+            </div>
             {busy ? (
               // One control while a run is active: stop. Follow-ups queue with Enter.
               <button onClick={() => {
                 queuedRef.current = []
                 setQueued([])
                 if (thread) void cancel(thread.id)
-              }} aria-label="Stop" title="Stop the run and clear queued follow-ups" className="ml-1 flex h-8 w-8 items-center justify-center rounded-full bg-accent text-accent-ink transition-all hover:bg-accent-strong active:scale-95">
+              }} aria-label="Stop" title="Stop the run and clear queued follow-ups" className="ml-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-accent-ink transition-all hover:bg-accent-strong active:scale-95">
                 <Icon name="stop" size={16} />
               </button>
             ) : (
-              <button onClick={submit} disabled={!text.trim() || botBlocked || submitting} aria-label={submitting ? 'Starting request' : 'Send'} className="ml-1 flex h-8 w-8 items-center justify-center rounded-full bg-accent text-accent-ink transition-all hover:bg-accent-strong active:scale-95 disabled:bg-ink-5 disabled:text-ink-4">
+              <button onClick={submit} disabled={!text.trim() || botBlocked || submitting} aria-label={submitting ? 'Starting request' : 'Send'} className="ml-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-accent-ink transition-all hover:bg-accent-strong active:scale-95 disabled:bg-ink-5 disabled:text-ink-4">
                 <Icon name="send" size={16} strokeWidth={2} />
               </button>
             )}

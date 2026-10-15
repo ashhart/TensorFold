@@ -1,7 +1,7 @@
 //! GET and DELETE /v1/recall: Recall's record (not the prompt cache's learned states), its state and its emptying.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const log = @import("log.zig");
 const routes = @import("routes.zig");
 const Server = @import("server.zig").Server;

@@ -1,6 +1,6 @@
 //! The community-v1 suite: fixtures, digest, statuses, error codes, the sample record and per-cell medians.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const Allocator = std.mem.Allocator;
 
 pub const id = "community-v1";

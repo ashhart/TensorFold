@@ -1,7 +1,7 @@
 //! ``tensorfold benchmark``: the actions, a run from start to receipt, the result table and exit codes.
 const std = @import("std");
 const builtin = @import("builtin");
-const json = @import("json.zig");
+const json = @import("json");
 const cli = @import("cli.zig");
 const hub = @import("hub.zig");
 const args_mod = @import("benchmark_args.zig");

@@ -33,6 +33,13 @@ pub fn chip(a: Allocator) ?[]const u8 {
     return std.fmt.allocPrint(a, "apple-m{d}", .{gen}) catch null;
 }
 
+/// The name of the system GPU the Metal engines open ("Apple M5 Max"); null without one.
+pub fn deviceName(a: Allocator, _: ?u32) ?[]const u8 {
+    const device = mtl.Device.init() catch return null;
+    defer device.deinit();
+    return a.dupe(u8, std.mem.span(device.name())) catch null;
+}
+
 /// The M generation in a Metal device name ("Apple M5 Max": 5).
 fn generation(name: []const u8) ?u32 {
     var words = std.mem.tokenizeScalar(u8, name, ' ');
@@ -58,6 +65,11 @@ fn modelContext(a: Allocator, io: std.Io, dir: []const u8) i64 {
     const text = if (doc.object.get("text_config")) |t| (if (t == .object) t else doc) else doc;
     const limit = text.object.get("max_position_embeddings") orelse doc.object.get("max_position_embeddings") orelse return 0;
     return if (limit == .integer and limit.integer > 0) limit.integer else 0;
+}
+
+/// The host's memory counts: `cache_fit.hostMemory` from the process footprint (no configured load limit).
+fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
+    return cache_fit.hostMemory(0, reset_peak);
 }
 
 /// One loaded model behind the lane host: everything the engine thread reads lives here.
@@ -171,6 +183,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.core = lanes.Engine.init(gpa, &h.cfg, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(@max(window, 0)), .prefill_step = step, .structures = true });
+    h.host.memory = .{ .ctx = h, .read = readMemory };
     h.round = .{ .depth = 8 };
     h.cache = null;
     var why: []const u8 = "";

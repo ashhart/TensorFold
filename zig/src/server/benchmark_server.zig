@@ -1,7 +1,7 @@
 //! The benchmark's own serve child: lock, flags, environment, port, readiness and a stop that always reaps.
 const std = @import("std");
 const builtin = @import("builtin");
-const json = @import("json.zig");
+const json = @import("json");
 const cli = @import("cli.zig");
 const stream = @import("benchmark_stream.zig");
 const sse = @import("benchmark_sse.zig");

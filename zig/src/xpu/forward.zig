@@ -1,6 +1,6 @@
 //! One Qwen3.8-27B forward on the XPU: activations, prompt GEMMs (fp16, W4A8, W4A4) and the layer loop.
 const std = @import("std");
-const ze = @import("ze.zig");
+const ze = @import("ze");
 const q = @import("qwen27.zig");
 const dev = @import("dev.zig");
 const loader = @import("load.zig");
@@ -139,7 +139,7 @@ pub fn mlpIn(d: *Dev, a: *Acts, w: Proj, T: u32, gs: i32, pre: bool) !*anyopaque
         try d.launch(d.k.a8_swiglu, a8Groups(w, T), a8Args(a, w, a.p, T));
         return a.p;
     }
-    if (T > 16 and w.ilv) {
+    if (T > 16 and w.ilv and gemm_hook == null) {
         const M: i32 = @intCast(T);
         const tiles = (T + 63) / 64;
         const k = if (w.gs == 128) d.k.ngen_swiglu_g128 else d.k.ngen_swiglu;
@@ -191,7 +191,11 @@ pub fn gemm(d: *Dev, pscr: *anyopaque, h: *anyopaque, ahi: *anyopaque, alo: *any
         else
             try d.launch(ngen_narrow, groups, .{ h, w.w, w.s, w.bg, out, M, N, K, ahi, alo, mp, G, pscr });
     }
+    if (gemm_hook) |f| try f(d, h, w, out, m);
 }
+
+/// XPU_FIDELITY: called after every GEMM (its input rows, weights and output); null in production.
+pub var gemm_hook: ?*const fn (*Dev, *anyopaque, Proj, *anyopaque, u32) anyerror!void = null;
 
 extern "c" fn creat(path: [*:0]const u8, mode: c_uint) c_int;
 extern "c" fn write(fd: c_int, buf: [*]const u8, n: usize) isize;
@@ -274,6 +278,8 @@ pub fn a8(d: *Dev, a: *Acts, x: *anyopaque, K: u32, T: u32, site: u32) !void {
     const qg = if (q.a8_group == std.math.maxInt(u32)) K else q.a8_group;
     try d.launch(d.k.fakequant_rows, .{ .x = T }, .{ x, a.ahi, a.alo, @as(i32, @intCast(K)), @as(i32, @intCast(qg)), @as(i32, @intCast(q.GS)), q.a8_rot, if (q.a8_sites4 & site != 0) q.a8_levels else @as(i32, 127) });
 }
+/// XPU_FP64_REF: called with each int4 GEMM's real input (site 0 mixer in … 4 head; layer LAYERS: the head).
+pub var gemm_probe: ?*const fn (*Dev, *Acts, Proj, *anyopaque, u32, usize, u32) anyerror!void = null;
 /// tree: rows form a tree (acts.tree), each seeing its ancestors; multi: each row a different slot's next token.
 pub const Mode = struct { want: Want = .last, stash: bool = false, taps: bool = false, tree: bool = false, multi: ?struct { mt: *anyopaque, pos: *anyopaque, max_pos: u32 } = null };
 
@@ -309,6 +315,7 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
         if (min_in != a.h) try copy(d, a.r, a.h, T * D * 2);
         try a8(d, a, min_in, D, T, 1);
         try pgemm(d, a, min_in, l.mixer_in, a.p, T, q8on, 0, false);
+        if (gemm_probe) |f| try f(d, a, l.mixer_in, min_in, T, i, 0);
         if (l.ab) |ab| try d.launch(d.k.dense_rows, .{ .x = (T + 15) / 16, .y = 96 / 16 }, .{ a.h, ab, a.p, t32, @as(i32, GDN_IN), @as(i32, 16384) });
         if (probe) try dumpBuf(d, "p0", a.p, T * GDN_IN, .f16);
         if (l.attn) {
@@ -381,12 +388,15 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
         }
         try a8(d, a, a.h, 6144, T, 2);
         try pgemm(d, a, a.h, l.mixer_out, a.r, T, q8out, 0, q.int4_sites & 2 != 0);
+        if (gemm_probe) |f| try f(d, a, l.mixer_out, a.h, T, i, 1);
         if (probe) try dumpBuf(d, "r0", a.r, T * D, .f16);
         try d.launch(if (T > 16) d.k.add_rmsnorm else d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.post_norm, a.h, a.ahi, a.alo, @as(i32, D), EPS, @as(i32, 1), gs, q8a, q8s, q8ms, q.rot_on });
         try a8(d, a, a.h, D, T, 4);
+        if (gemm_probe) |f| try f(d, a, l.gu, a.h, T, i, 2);
         const act = try mlpIn(d, a, l.gu, T, gs, q8on);
         try a8(d, a, act, 17408, T, 8);
         try pgemm(d, a, act, l.down, a.r, T, false, if (act == a.p) q.rot_on else 0, q.int4_sites & 8 != 0);
+        if (gemm_probe) |f| try f(d, a, l.down, act, T, i, 3);
         if (p0 == 0 and i < 4) try dump(d, a, T, try std.fmt.allocPrint(alloc, "{d}", .{i}), true);
         if (mode.taps) for (TAP_LAYERS, 0..) |tl, slot| if (tl == i)
             try d.launch(d.k.tap, .{ .x = D / 256, .y = T }, .{ a.x, a.r, a.taps, @as(i32, D), @as(i32, @intCast(slot)) });
@@ -405,6 +415,7 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
         _ = write(fd, @ptrCast(host.ptr), T * D * 2);
         if (!want) return null;
     }
+    if (gemm_probe) |f| try f(d, a, m.head, a.h, T, LAYERS, 4);
     const first = if (mode.want == .rows) 0 else T - 1;
     const rows = T - first;
     try gemm(d, a.pscr, off(a.h, first * D * 2), off(a.ahi, first * (D / m.head.gs) * 2), off(a.alo, first * (D / m.head.gs) * 2), m.head, a.logits, rows);

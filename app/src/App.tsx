@@ -88,20 +88,6 @@ export default function App() {
 
   useEffect(() => { init() }, [init])
 
-  // Auto-open the update modal once on launch when a newer version is detected
-  // AND the user hasn't already seen its release notes. `updateModalSeen`
-  // persists to localStorage so re-launches for the same release stay quiet.
-  const updateStatus = useStore((s) => s.updateStatus)
-  const updateModalSeen = useStore((s) => s.updateModalSeen)
-  const openUpdateModal = useStore((s) => s.openUpdateModal)
-  useEffect(() => {
-    if (!ready || showOnboarding) return
-    const latest = updateStatus?.latestVersion
-    if (updateStatus?.state === 'available' && latest && latest !== updateModalSeen) {
-      openUpdateModal()
-    }
-  }, [ready, showOnboarding, updateStatus, updateModalSeen, openUpdateModal])
-
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey

@@ -211,6 +211,7 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .imports = &.{ .{ .name = "engine_api", .module = m.api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = m.engines }, .{ .name = "checkpoint_cli", .module = checkpointCli(b, target, .ReleaseSafe, null, m.engines, core) } },
     }) });
     exe.root_module.addOptions("build_options", build_options);
+    _ = @import("server.zig").addTo(b, exe.root_module, target, .ReleaseSafe);
     if (!install_native) {
         exe.root_module.strip = true;
         return exe;
@@ -239,9 +240,17 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         .link_libc = true,
         .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template } },
     });
+    const server_json = @import("server.zig").addTo(b, server_tests, host, .debug);
     const server_test = b.addRunArtifact(b.addTest(.{ .root_module = server_tests }));
-    step.dependOn(&server_test.step);
-    b.step("test-server-cpu", "The HTTP server's unit tests (routes, templates, tool parsing) without a GPU").dependOn(&server_test.step);
+    const json_test = b.addRunArtifact(b.addTest(.{ .root_module = server_json }));
+    const server_step = b.step(
+        "test-server-cpu",
+        "The HTTP server's unit tests (routes, templates, tool parsing) without a GPU",
+    );
+    for ([_]*std.Build.Step.Run{ server_test, json_test }) |run| {
+        step.dependOn(&run.step);
+        server_step.dependOn(&run.step);
+    }
     // the server goldens and Cortheon's fuzz step here when the target is not macOS, whose Metal build defines them
     if (server_steps) {
         golden_build.step(b, host, server_tests, native_modules.api, mods.tokenizer, template);
@@ -257,6 +266,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shares })).step);
     // the tool-call parser's tests, run beside the server's on Macs: the GLM calls the CUDA port serves
     const parse_tests = b.createModule(.{ .root_source_file = b.path("zig/src/server/tool_parse_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template } } });
+    _ = @import("server.zig").addTo(b, parse_tests, host, .debug);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = parse_tests })).step);
     const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = host, .optimize = .debug, .link_libc = true });
     cli.addImport("cuda", cuda);

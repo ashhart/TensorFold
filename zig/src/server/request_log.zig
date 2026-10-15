@@ -1,6 +1,6 @@
 //! TENSORFOLD_REQUEST_LOG: each chat and completion body appended as one JSON line, images redacted, for replays.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 

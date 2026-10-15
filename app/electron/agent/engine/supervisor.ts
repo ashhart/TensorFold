@@ -7,6 +7,7 @@ import type { ModelInfo } from './cli'
 import { assertRepoId, type EngineBinary } from './paths'
 import { killGroup } from './pull'
 import { loweredEngineMemoryBudget } from './memory-budget'
+import { CORTHEON_RELEASE_POLICY, cortheonEnabledForRelease } from '../../../shared/release-feature-policy'
 
 // The engine's default kept-prompt budget is whatever 70% of RAM leaves (68.9 GiB on a 128 GB Mac);
 // a desktop app shares memory with everything else, so cap retained prompt states.
@@ -355,10 +356,12 @@ export class EngineSupervisor {
 
     const port = await freeLoopbackPort()
     const apiKey = randomBytes(32).toString('hex')
-    this.cortheon = this.deps.cortheon?.() === true
+    this.cortheon = cortheonEnabledForRelease(this.deps.cortheon?.())
     const learning = this.deps.learning?.(model)
     this.learning = learning?.enabled === true
     const args = ['serve', argument, '--host', '127.0.0.1', '--port', String(port), '--name', model, '--prompt-cache-gib', String(ENGINE_PROMPT_CACHE_GIB), ...(drafterArgument ? ['--drafter', drafterArgument] : []), ...(this.cortheon ? ['--cortheon'] : []), ...(learning ? ['--slide-graph', learning.graphFile, ...(learning.enabled ? ['--slide'] : [])] : [])]
+    // Independently reject a stale injected binary prefix as well as the normal serve choice.
+    if (!CORTHEON_RELEASE_POLICY.enabled && [...binary.args, ...args].includes('--cortheon')) this.fail(CORTHEON_RELEASE_POLICY.reason)
     const env = { ...this.deps.env(), TENSORFOLD_API_KEY: apiKey, TENSORFOLD_NO_UPDATE_CHECK: '1' }
     const child = spawn(binary.command, [...binary.args, ...args], { env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
     this.child = child

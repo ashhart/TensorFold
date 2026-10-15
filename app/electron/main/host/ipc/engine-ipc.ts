@@ -1,3 +1,4 @@
+import { assertCortheonReleaseAllowed } from '../../../../shared/release-feature-policy'
 import { BrowserWindow, dialog } from 'electron'
 import type { EngineService } from '../../../agent/engine/service'
 import { isRepoId, isRevision } from '../../../agent/engine/paths'
@@ -99,6 +100,7 @@ export function registerEngineIpc(engine: () => EngineService | null, options: {
   handle('engine:setCortheon', async (_e, enabled: unknown) => {
     requireSecurityRole('operator', 'change Cortheon mode')
     if (typeof enabled !== 'boolean') throw new Error('Cortheon mode must be on or off.')
+    assertCortheonReleaseAllowed(enabled)
     return operation(async () => { await auditEvent('engine.cortheon', { enabled }); if (enabled) options.assertCanEnableCortheon?.(); return svc().setCortheon(enabled) })
   })
 

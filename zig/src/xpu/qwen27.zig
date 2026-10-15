@@ -1,6 +1,6 @@
 //! Qwen3.8-27B forward on Intel Xe2 over Level Zero (MLX affine 4-bit g64), chunked prompt, serial decode.
 const std = @import("std");
-pub const ze = @import("ze.zig");
+pub const ze = @import("ze");
 const kb = @import("xpu_qwen27_kernels");
 const dev = @import("dev.zig");
 const fwd = @import("forward.zig");

@@ -1,6 +1,6 @@
 //! A receipt as JSON: its value, canonical bytes, private atomic save, bounded load and the indented preview.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const suite = @import("benchmark_suite.zig");
 const check = @import("benchmark_check.zig");
 const Allocator = std.mem.Allocator;

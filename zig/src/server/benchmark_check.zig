@@ -1,6 +1,6 @@
 //! The board's receipt rules (tensorfold.dev/benchmarks/protocol.js), plus a save mode that keeps local and rocm runs.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const suite = @import("benchmark_suite.zig");
 const Value = json.Value;
 

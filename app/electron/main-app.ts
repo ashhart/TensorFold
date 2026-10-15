@@ -430,7 +430,12 @@ let spineHost: EventSpineHost | null = null
 // referenced until clicked or closed so macOS can still deliver the click.
 const liveNotifications = new Set<Notification>()
 const runAttention = createRunAttention({
-  isIncognito: (id) => store.threads.find((thread) => thread.id === id)?.incognito === true,
+  isIncognito: (id) => {
+    const thread = store.threads.find((thread) => thread.id === id)
+    // Approval runtime calls attention directly, so admission must protect both
+    // phone-derived titles and Incognito even when the event emitter is bypassed.
+    return !thread || thread.incognito === true || thread.phoneLocalOnly === true
+  },
   enabled: () => store.settings?.notifyRuns !== false,
   focused: () => { try { return !!store.win && !store.win.isDestroyed() && store.win.isFocused() } catch { return false } },
   // Headless hosts have no window to bring forward, so they never notify.

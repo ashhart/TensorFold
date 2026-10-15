@@ -29,7 +29,7 @@ async function main() {
     await svc.load(LEARNING_MODEL)
     const originalConnection = await svc.connection()
     const reply = await svc.supervisor.acquire(LEARNING_MODEL, { start: false })
-    await assert.rejects(svc.setCortheon(true), /active TensorFold requests/)
+    await assert.rejects(svc.setCortheon(true), /temporarily disabled for beta\.6/)
     assert.equal((await svc.status()).cortheon?.enabled, false, 'a busy refusal cannot persist Cortheon')
     await assert.rejects(svc.setLearning(true, LEARNING_MODEL), /active TensorFold requests/)
     assert.equal((await svc.learningSnapshot()).enabled, false, 'a busy refusal cannot persist learning')
@@ -54,7 +54,7 @@ async function main() {
     const job = await svc.teach('The synthetic QA beacon is amber.')
     assert.equal(job.job?.state, 'running')
     await assert.rejects(svc.unload(), /active TensorFold requests/)
-    await assert.rejects(svc.setCortheon(true), /Living Weights/)
+    await assert.rejects(svc.setCortheon(true), /temporarily disabled for beta\.6/)
     await assert.rejects(svc.setLearning(false), /current lesson/)
     const during = await svc.supervisor.acquire(LEARNING_MODEL, { start: false })
     during.release() // normal same-model chat stays available while the native learner yields.
@@ -158,9 +158,9 @@ async function main() {
     const svc = service(h)
     try {
       await svc.load(LEARNING_MODEL)
-      await assert.rejects(svc.setCortheon(true), /requested mode failed/)
+      await assert.rejects(svc.setCortheon(true), /temporarily disabled for beta\.6/)
       assert.equal((await svc.status()).cortheon?.enabled, false)
-      assert.equal((await svc.status()).state, 'ready', 'a failed mode restarts the previous server')
+      assert.equal((await svc.status()).state, 'ready', 'refused research leaves the previous server running')
       await assert.rejects(svc.setLearning(true, LEARNING_MODEL), /requested mode failed/)
       assert.equal((await svc.learningSnapshot()).enabled, false)
       assert.equal((await svc.status()).state, 'ready')
@@ -174,8 +174,10 @@ async function main() {
     const svc = service(h)
     try {
       await svc.load(LEARNING_MODEL)
-      await Promise.all([svc.setCortheon(true), svc.setCortheon(false)])
-      assert.equal((await svc.status()).cortheon?.enabled, false, 'concurrent changes apply in request order')
+      const changes = await Promise.allSettled([svc.setCortheon(true), svc.setCortheon(false)])
+      assert.equal(changes[0].status, 'rejected')
+      assert.equal(changes[1].status, 'fulfilled')
+      assert.equal((await svc.status()).cortheon?.enabled, false, 'a refused enable cannot race a permitted disable')
       assert.equal((await svc.status()).cortheon?.active, false)
     } finally { await svc.unload(); await h.cleanup() }
   }

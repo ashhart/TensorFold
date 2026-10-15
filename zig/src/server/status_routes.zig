@@ -1,7 +1,7 @@
 //! GET /health, /v1/models, /metrics, and the opt-in dashboard.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const live = @import("live.zig");
 const routes = @import("routes.zig");
 const Server = @import("server.zig").Server;
@@ -12,6 +12,11 @@ const Allocator = std.mem.Allocator;
 /// With keys on, health names nothing about the model.
 pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
     if (srv.keys) |k| if (k.enabled()) return conn.sendJson(200, "{\"status\": \"ok\"}");
+    routes.sendValue(conn, a, 200, try openHealth(srv, a, std.mem.indexOf(u8, conn.path, "reset_peak=1") != null));
+}
+
+/// The open health body: model, lanes, memory and live counts, then whichever of release, backend and GPU it knows.
+pub fn openHealth(srv: *Server, a: Allocator, reset_peak: bool) !Value {
     const o = try json.newObject(a);
     try o.put(a, "status", .{ .string = "ok" });
     try o.put(a, "model", .{ .string = srv.config.served_name });
@@ -24,14 +29,22 @@ pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
     srv.engine.status(&status, &.{});
     try o.put(a, "warming", .{ .bool = status.warming });
     const memory = try json.newObject(a);
-    if (srv.engine.memory(std.mem.indexOf(u8, conn.path, "reset_peak=1") != null)) |mem| {
+    if (srv.engine.memory(reset_peak)) |mem| {
         try memory.put(a, "active", try json.intValue(a, mem.active));
         try memory.put(a, "cache", try json.intValue(a, mem.cache));
         try memory.put(a, "peak", try json.intValue(a, mem.peak));
+        if (mem.limit) |limit| try memory.put(a, "limit", try json.intValue(a, limit));
     }
     try o.put(a, "memory", .{ .object = memory });
     try o.put(a, "live", try live.snapshot(a, srv.engine));
-    routes.sendValue(conn, a, 200, .{ .object = o });
+    const ident = srv.config.identity;
+    for ([_][2][]const u8{
+        .{ "version", ident.version },
+        .{ "backend", ident.backend },
+        .{ "device", ident.device },
+    }) |field|
+        if (field[1].len > 0) try o.put(a, field[0], .{ .string = field[1] });
+    return .{ .object = o };
 }
 
 pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
@@ -131,6 +144,14 @@ pub fn statsSnapshot(a: Allocator, status: api.Status, memory: ?api.Memory, prom
     try o.put(a, "decode_tokens_per_second", .{ .float = status.decode_tokens_per_second });
     try o.put(a, "prefill_tokens_per_second", .{ .float = status.prefill_tokens_per_second });
     try o.put(a, "generation_tokens_running", try json.intValue(a, status.generation_tokens));
+    if (status.fill_prompt_tokens != null) {
+        try o.put(a, "fill_prompt_tokens", try json.intValue(a, status.fill_prompt_tokens.?));
+        try o.put(a, "fill_tokens_left", try json.intValue(a, status.fill_tokens_left orelse 0));
+        try o.put(a, "fill_run", try json.intValue(a, status.fill_run));
+    } else if (status.fill_unknown) {
+        try o.put(a, "fill_unknown", .{ .bool = true }); // prefilling, but this backend reports no progress
+        try o.put(a, "fill_run", try json.intValue(a, status.fill_run));
+    }
     try o.put(a, "prompt_tokens_total", try json.intValue(a, prompt));
     try o.put(a, "generation_tokens_total", try json.intValue(a, generation));
     try o.put(a, "mtp_drafted_total", try json.intValue(a, drafted));
@@ -141,6 +162,7 @@ pub fn statsSnapshot(a: Allocator, status: api.Status, memory: ?api.Memory, prom
         try mem.put(a, "active", try json.intValue(a, m.active));
         try mem.put(a, "cache", try json.intValue(a, m.cache));
         try mem.put(a, "peak", try json.intValue(a, m.peak));
+        if (m.limit) |limit| try mem.put(a, "limit", try json.intValue(a, limit));
     }
     try o.put(a, "memory", .{ .object = mem });
     return .{ .object = o };
@@ -217,4 +239,47 @@ test "stats snapshot exposes counters and omits unknown memory" {
     for ([_][]const u8{ "running", "waiting", "generation_tokens_running", "prompt_tokens_total", "generation_tokens_total", "mtp_drafted_total", "mtp_accepted_total", "decode_rounds_total", "memory" }) |key|
         try std.testing.expect(object.contains(key));
     try std.testing.expectEqual(@as(usize, 0), object.get("memory").?.object.count());
+    try std.testing.expect(object.get("fill_prompt_tokens") == null); // no fill in progress: the keys stay out
+}
+
+test "stats snapshot carries the filling prompt's tokens while a prefill runs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const status: api.Status = .{ .fill_prompt_tokens = 900, .fill_tokens_left = 300 };
+    const value = try statsSnapshot(arena.allocator(), status, null, 0, 0, 0, 0, 0);
+    const object = value.object;
+    try std.testing.expectEqual(@as(i64, 900), object.get("fill_prompt_tokens").?.int64().?);
+    try std.testing.expectEqual(@as(i64, 300), object.get("fill_tokens_left").?.int64().?);
+}
+test "stats snapshot marks an unknown-progress fill without counters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const status: api.Status = .{ .fill_unknown = true, .fill_run = 7 };
+    const value = try statsSnapshot(arena.allocator(), status, null, 0, 0, 0, 0, 0);
+    const object = value.object;
+    try std.testing.expect(object.get("fill_unknown").?.bool);
+    try std.testing.expectEqual(@as(i64, 7), object.get("fill_run").?.int64().?);
+    try std.testing.expect(object.get("fill_prompt_tokens") == null); // no counters: the keys stay out
+}
+
+test "stats snapshot's memory carries a configured limit and omits none" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const with = try statsSnapshot(
+        arena.allocator(),
+        .{},
+        .{ .active = 5, .cache = 1, .peak = 9, .pinned = 2, .limit = 100 },
+        0,
+        0,
+        0,
+        0,
+        0,
+    );
+    const memory = with.object.get("memory").?.object;
+    try std.testing.expectEqual(@as(i64, 5), memory.get("active").?.int64().?);
+    try std.testing.expectEqual(@as(i64, 9), memory.get("peak").?.int64().?);
+    try std.testing.expectEqual(@as(i64, 100), memory.get("limit").?.int64().?);
+    const without = try statsSnapshot(arena.allocator(), .{}, .{ .active = 5, .peak = 9 }, 0, 0, 0, 0, 0);
+    // no limit configured: the key stays out
+    try std.testing.expect(without.object.get("memory").?.object.get("limit") == null);
 }

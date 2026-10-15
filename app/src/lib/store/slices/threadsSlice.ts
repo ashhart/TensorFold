@@ -3,7 +3,7 @@ import { api } from '../../ipc'
 import { modelDisplayName, resolveProviderModel } from '../../provider-accounts'
 import { addInflightAppAction, cancelThreadRunApi, createThreadForProject, deleteInflightAppAction, guideThreadRunApi, isInflightAppAction, isAppActionApplied, markAppActionApplied, startThreadRunApi } from '../shared/app-actions'
 import { remoteHostIdForThread, owningRemoteHostIdForTicket, remoteHostIdForProject } from '../shared/remote-host'
-import { mergeThreadLists, mergeThreadRecord } from '../shared/merge'
+import { mergeThreadLists, mergeThreadRecord, mergeThreadEventPatch } from '../shared/merge'
 import { applyProjectModel, projectDefaults, runErrorMessage, selectedAccountId } from '../shared/model-policy'
 import { clearPendingAgentEvents, drainPendingAgentEvents, projectedHostId, projectionOriginsMatch, quarantineProjectionCollision, queuePendingAgentEvent } from '../shared/proxy-state'
 import { BUSY_RUN, threadStatusFromRun } from '../types'
@@ -323,7 +323,7 @@ export const threadsSlice: Slice = (set, get) => ({
           patchThread((t) => ({ ...t, timeline: t.timeline.map((i) => (i.id === e.id ? { ...i, ...(e.trace && !i.trace ? { trace: e.trace } : {}), ...e.patch } : i)) }))
           break
         case 'thread_update':
-          patchThread((t) => ({ ...t, ...e.patch, updatedAt: Date.now() }))
+          patchThread((t) => mergeThreadEventPatch(t, e.patch))
           break
         case 'title':
           patchThread((t) => ({ ...t, title: e.title }))

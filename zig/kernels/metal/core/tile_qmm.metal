@@ -279,7 +279,7 @@ inline float tf_tq_code(const thread uint* w, int k) {
 template <int BITS> struct TfTqCols { static constant constexpr int value = 4; };
 constant constexpr int TQ_SG = 2;
 
-// Group g's 64-step fma chains (the MMA order) and input sum; at 4 bits a code in place meets x * 16^-j (same product).
+// Group g's 64-step fma chains (the MMA order) and input sum; each code decoded to its integer, as in the tiles.
 template <int BITS, int NC>
 inline float tf_tq_group(const device bfloat* x, const device uint8_t* w, size_t stride, int g, thread float* p,
                          float one) {
@@ -304,14 +304,14 @@ inline float tf_tq_group(const device bfloat* x, const device uint8_t* w, size_t
     for (int j = 0; j < 8; ++j) {
       const float v = as_type<float>((j % 2) ? (xw[j / 2] & 0xFFFF0000u) : (xw[j / 2] << 16));
       t = kb == 0 && j == 0 ? v : fma(v, one, t);
-      xf[j] = BITS == 4 ? v * as_type<float>(uint(127 - 4 * j) << 23) : v;
+      xf[j] = v;
     }
     if (BITS == 4) {
       #pragma unroll
       for (int c = 0; c < NC; ++c) {
         const uint word = wq[c][kb];
         #pragma unroll
-        for (int j = 0; j < 8; ++j) p[c] = fma(xf[j], float(word & (0xFu << (4 * j))), p[c]);
+        for (int j = 0; j < 8; ++j) p[c] = fma(xf[j], float((word >> (4 * j)) & 0xFu), p[c]);
       }
     } else {
       // Codes 8 kb.. of this group sit in the two words from bit 8 kb BITS (48 or 64 bits).
@@ -363,12 +363,12 @@ inline void tf_tq_group_rows(const device bfloat* x, int K, int rows, const devi
       for (int j = 0; j < 8; ++j) {
         const float v = as_type<float>((j % 2) ? (xw[j / 2] & 0xFFFF0000u) : (xw[j / 2] << 16));
         t[r] = kb == 0 && j == 0 ? v : fma(v, one, t[r]);
-        xf[j] = v * as_type<float>(uint(127 - 4 * j) << 23);
+        xf[j] = v;
       }
       #pragma unroll
       for (int c = 0; c < NC; ++c)
         #pragma unroll
-        for (int j = 0; j < 8; ++j) p[r][c] = fma(xf[j], float(wq[c][kb] & (0xFu << (4 * j))), p[r][c]);
+        for (int j = 0; j < 8; ++j) p[r][c] = fma(xf[j], float((wq[c][kb] >> (4 * j)) & 0xFu), p[r][c]);
     }
   }
 }

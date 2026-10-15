@@ -38,9 +38,10 @@ export interface AppState {
   archives: ArchiveSnapshot | null
   updateStatus: AppUpdateStatus | null
   // Update/changelog modal. `updateModalOpen` is the explicit UI gate;
-  // `updateModalSeen` tracks the latest version the user has already viewed
-  // the release notes for, so we only auto-pop on a genuinely new release.
+  // `updateModalSeen` records release notes opened explicitly by the user.
   updateModalOpen: boolean
+  /** Explicit install request awaiting native preflight or handoff. */
+  updateInstallPending: boolean
   updateModalSeen: string | null
   newProjectOpen: boolean
   newProjectIntent: number
