@@ -261,6 +261,8 @@ pub const Module = struct {
         const api = &self.rt.drv.api;
         try self.rt.drv.check(api.zeKernelCreate(self.handle, &.{ .pKernelName = name }, &k), "zeKernelCreate");
         try self.rt.drv.check(api.zeKernelSetGroupSize(k, local[0], local[1], local[2]), "zeKernelSetGroupSize");
+        var kp: ze.KernelProperties = .{};
+        if (api.zeKernelGetProperties(k, &kp) == 0 and kp.spillMemSize != 0) std.log.warn("{s} spills {d} bytes of registers", .{ name, kp.spillMemSize });
         return .{ .rt = self.rt, .handle = k, .name = name };
     }
 };

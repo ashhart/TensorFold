@@ -12,7 +12,7 @@ pub const Options = struct {
     /// Positions of the KV caches (prompt and generated tokens).
     context: usize = 4096,
     progress: bool = false,
-    /// Rows of the prompt windows when more than 16 (`--prefill`): the prefill GEMMs.
+    /// Rows of the prompt windows when more than 16 (`--prefill`): the prompt kernels.
     window_rows: u32 = 0,
 };
 
@@ -92,7 +92,7 @@ pub const Engine = struct {
         try e.m.fetchLogits(out);
     }
 
-    /// The prompt head in windows of `rows` tokens (above 16: prefill GEMMs), in place; last token fed as decode.
+    /// The prompt head in windows of `rows` tokens (above 16: the prompt kernels), in place; last token fed as decode.
     pub fn prefillWindows(e: *Engine, head: []const u32, rows: u32) !void {
         var t: usize = 0;
         while (t < head.len) {

@@ -285,15 +285,15 @@ fn dense(c: *Ctx, class: []const u8, layer: usize, st: ?nw.Stage, t: model.Table
         }
         compare(c, class, layer, "decode", kname, nd, ref_cols, ref_cols, dev, ref[0 .. nd * ref_cols], !out_f32);
     }
-    const pf = &c.w.mpf.?;
-    // window (8 rows, split-K matrix-engine GEMM) and prefill (64 rows, dense GEMM)
+    // prompt rows (8 and 64) on pdense; windows of up to 16 rows equal decode bitwise (tf-xpu-nem_rows-test)
     for ([_]usize{ nd, np }) |n| {
         try c.upload(c.xb, x[0 .. n * in]);
-        if (n == nd) try pf.denseS(t.w, t.s, t.b, c.xb, @intCast(n), c.yb, @intCast(in), 0, @intCast(rows), out_f32) else try pf.dense(r, t.w, t.s, t.b, c.xb, @intCast(n), c.yb, @intCast(in), 0, @intCast(rows), out_f32);
+        const rws: u32 = @intCast(rows);
+        try c.w.lin(t, c.xb, @intCast(n), c.yb, @intCast(in), rws, rws, 0, if (out_f32) .f32 else .bf16);
         try r.sync();
         const full = if (out_f32) try c.dev32(c.yb, n * rows) else try c.dev16(c.yb, n * rows);
         defer gpa.free(full);
-        compare(c, class, layer, if (n == nd) "window" else "prefill", if (n == nd) "denseS (pfgemm_bs)" else "dense (pfgemm_b)", n, ref_cols, rows, full, ref[0 .. n * ref_cols], !out_f32);
+        compare(c, class, layer, "prompt", "pdense", n, ref_cols, rows, full, ref[0 .. n * ref_cols], !out_f32);
         _ = esz;
     }
 }
@@ -328,7 +328,7 @@ fn moe(c: *Ctx, layer: usize, mw: model.Moe, normw: []const f64) !void {
     defer fc1.free();
     const fc2 = try Host.fetch(r, mw.fc2, E * h, wd);
     defer fc2.free();
-    const paths = [_]struct { name: []const u8, n: usize }{ .{ .name = "decode", .n = nd }, .{ .name = "window", .n = nd }, .{ .name = "prefill", .n = np } };
+    const paths = [_]struct { name: []const u8, n: usize }{ .{ .name = "decode", .n = nd }, .{ .name = "window", .n = nd }, .{ .name = "prompt", .n = np } };
     for (paths) |p| {
         const n = p.n;
         const dec = std.mem.eql(u8, p.name, "decode");
@@ -418,7 +418,7 @@ fn moe(c: *Ctx, layer: usize, mw: model.Moe, normw: []const f64) !void {
                 for (0..h) |j| ref_e[slot * h + j] = fc2.dot(e * h + j, d_act[slot * wd ..][0..wd]);
             }
         }
-        const kn = if (dec) [_][]const u8{ "router_up_sh", "router_up_sh (relu2)", "route_down_sh", "expert_up_relu2", "expert_down_f32" } else if (n == nd) [_][]const u8{ "router_logits", "denseSM mode 2", "dense GEMM f32", "runExpertsS (pfgemm_moe_bs)", "runExpertsS (pfgemm_moe_bs)" } else [_][]const u8{ "router_logits", "dense GEMM + relu2", "dense GEMM f32", "runExperts (pfgemm_moe_b)", "runExperts (pfgemm_moe_b)" };
+        const kn = if (dec) [_][]const u8{ "router_up_sh", "router_up_sh (relu2)", "route_down_sh", "expert_up_relu2", "expert_down_f32" } else if (n == nd) [_][]const u8{ "router_logits", "dense_up_relu2_r", "dense_down_f32_r", "expert_up_relu2_g", "expert_down_f32_g" } else [_][]const u8{ "router_logits", "pdense relu2", "pdense f32", "pexpert relu2", "pexpert f32" };
         compare(c, "moe.router_gate", layer, p.name, kn[0], n, E, E, d_logit, ref_l, true);
         compare(c, "moe.shared_up", layer, p.name, kn[1], n, sw, sw, d_sact, ref_su, true);
         compare(c, "moe.shared_down", layer, p.name, kn[2], n, h, h, d_sy, ref_sd, false);

@@ -3,22 +3,23 @@ const std = @import("std");
 const rt = @import("xpu").rt;
 const model = @import("xpu_model.zig");
 
-const npf = @import("xpu_pf.zig");
 const stop = @import("xpu").stop;
 
 const spv = @import("xpu").kernels.nem_rows;
 const spv_r = @import("xpu").kernels.nem_rows_r;
-const spv_attn_pf = @import("xpu").kernels.nem_attn_pfs;
+const spv_p = @import("xpu").kernels.nem_prow;
 
 /// Debug hook (nem_fp64): called with the activations a projection class is about to read: xn, yn or att.
 pub const Stage = enum { xn, yn, att };
 pub var capture: ?*const fn (w: *Win, m: *model.Model, li: usize, st: Stage, n: u32) anyerror!void = null;
 
-/// Row capacity of the next Win created (windows above max_rows are prompt chunks: in place, prefill GEMMs).
+/// Row capacity of the next Win created (windows above max_rows are prompt chunks, in place).
 pub var default_rows: u32 = 16;
 const Buf = rt.Buffer;
 pub const max_rows: u32 = 16;
 const top_k: u32 = 6;
+/// Prompt rows a sub-group of nem_prow.cl holds (its PR).
+const p_rows: u32 = 8;
 
 fn at(b: Buf, off: usize) Buf {
     return .{ .rt = b.rt, .ptr = @ptrFromInt(@intFromPtr(b.ptr.?) + off), .len = b.len - off };
@@ -82,9 +83,9 @@ const Kernels = struct {
     comb: rt.Kernel,
     a_part: rt.Kernel,
     a_merge: rt.Kernel,
-    /// Prompt windows above max_rows run on the matrix engine.
-    a_pf: ?rt.Kernel = null,
-    a_prep: ?rt.Kernel = null,
+    pdense: rt.Kernel,
+    plists: rt.Kernel,
+    pexpert: rt.Kernel,
 };
 
 /// The window projections of one row bucket (nem_rows built for at most 1, 2, 4, 8 or 16 rows).
@@ -117,13 +118,14 @@ pub const Win = struct {
     r_logits: Buf,
     eids: Buf,
     elist: Buf, // [1 + experts]: count, then the chosen experts ascending
+    plist: Buf, // prompt rows: each expert's slots [experts][slots]
+    pcount: Buf, // prompt rows: each expert's slot count
     wts: Buf,
     act: Buf,
     ey: Buf,
     sact: Buf,
     sy: Buf,
     q: Buf,
-    qb: Buf, // query tiles of the matrix-engine attention
     att: Buf,
     po: Buf,
     pm: Buf,
@@ -134,7 +136,6 @@ pub const Win = struct {
     scratch_xc: Buf,
     ms: []MState,
     rcap: u32 = max_rows,
-    mpf: ?npf.MoePf = null,
     rows: u32 = 0,
     inplace: bool = true,
     head_rows: u32 = 0,
@@ -146,6 +147,7 @@ pub const Win = struct {
         const r = m.r;
         const c = m.cfg;
         var mod = try r.module(spv);
+        var pmod = try r.moduleWith(spv_p, "-cl-intel-256-GRF-per-thread");
         const rc: u32 = @max(default_rows, max_rows);
         const R: usize = rc;
         const RA: usize = max_rows; // attention row blocks and logits
@@ -165,14 +167,9 @@ pub const Win = struct {
             .comb = try mod.kernel("moe_combine_r", .{ 64, 1, 1 }),
             .a_part = try mod.kernel("attn_partial_r", .{ 256, 1, 1 }),
             .a_merge = try mod.kernel("attn_merge_r", .{ 16, 1, 1 }),
-            .a_pf = if (rc > max_rows and c.head_dim == 128 and c.num_attention_heads == 32 and c.num_key_value_heads == 2) blk: {
-                var pm = try r.moduleWith(spv_attn_pf, "-cl-intel-256-GRF-per-thread");
-                break :blk try pm.kernel("nem_attn_prefill_s", .{ 128, 1, 1 });
-            } else null,
-            .a_prep = if (rc > max_rows and c.head_dim == 128 and c.num_attention_heads == 32 and c.num_key_value_heads == 2) blk: {
-                var pm = try r.module(spv_attn_pf);
-                break :blk try pm.kernel("nem_attn_pfs_prep", .{ 64, 1, 1 });
-            } else null,
+            .pdense = try pmod.kernel("pdense", .{ 32, 1, 1 }),
+            .plists = try pmod.kernel("pexpert_lists", .{ 1, 1, 1 }),
+            .pexpert = try pmod.kernel("pexpert", .{ 32, 1, 1 }),
         };
         const nm: usize = blk: {
             var n: usize = 0;
@@ -200,13 +197,14 @@ pub const Win = struct {
             .r_logits = try r.alloc(R * c.n_routed_experts * 2),
             .eids = try r.alloc(R * top_k * 4),
             .elist = try r.alloc(260 * 4),
+            .plist = try r.alloc(R * top_k * c.n_routed_experts * 4),
+            .pcount = try r.alloc(c.n_routed_experts * 4),
             .wts = try r.alloc(R * top_k * 4),
             .act = try r.alloc(R * top_k * c.moe_intermediate_size * 2),
             .ey = try r.alloc(R * top_k * h * 4),
             .sact = try r.alloc(R * c.moe_shared_expert_intermediate_size * 2),
             .sy = try r.alloc(R * h * 4),
             .q = try r.alloc(R * qd * 2),
-            .qb = try r.alloc(R / 8 * 4 * 4 * 1024 * 4 + 4096),
             .att = try r.alloc(R * qd * 2),
             .po = try r.alloc(RA * m.max_chunks * qd * 4),
             .pm = try r.alloc(RA * m.max_chunks * c.num_attention_heads * 4),
@@ -217,7 +215,6 @@ pub const Win = struct {
             .scratch_xc = try r.alloc(R * c.convDim() * 2),
             .ms = ms,
             .rcap = rc,
-            .mpf = try npf.MoePf.init(r, rc, c.n_routed_experts, @max(c.hidden_size, c.moe_intermediate_size)),
         };
         for (spv_r, 0..) |image, b| {
             var bm = try r.module(image);
@@ -337,9 +334,11 @@ pub const Win = struct {
         try run(&m.k.rms, .{ n, 1, 1 }, .{ w.x, m.norm_f, out, m.cfg.hidden_size, m.cfg.layer_norm_epsilon });
     }
 
-    /// Projection of a prompt chunk (n > 16 rows): the dense prefill GEMM.
-    fn lin(w: *Win, m: *model.Model, t: model.Table, x: Buf, n: u32, y: Buf, in: u32, y_off: u32, rows: u32, f32out: bool) !void {
-        return w.mpf.?.dense(m.r, t.w, t.s, t.b, x, n, y, in, y_off, rows, f32out);
+    pub const Ep = enum(u32) { bf16, f32, relu2 };
+
+    /// Projection of a prompt chunk (n > 16 rows) with the decode's arithmetic: y[r * stride + off + o], o < rows.
+    pub fn lin(w: *Win, t: model.Table, x: Buf, n: u32, y: Buf, in: u32, rows: u32, stride: u32, off: u32, ep: Ep) !void {
+        try run(&w.k.pdense, .{ (rows + 15) / 16, (n + p_rows - 1) / p_rows, 1 }, .{ t.w, t.s, t.b, x, y, in, rows, n, stride, off, @intFromEnum(ep) });
     }
 
     fn mamba(w: *Win, m: *model.Model, mw: anytype, s: *MState, n: u32, inplace: bool) !void {
@@ -347,7 +346,7 @@ pub const Win = struct {
         const pd = c.projDim();
         const cd = c.convDim();
         const xd = c.xd();
-        if (n <= max_rows) try run(&w.bucket(n).qmv_bf16, .{ pd, 1, 1 }, .{ mw.in.w, mw.in.s, mw.in.b, w.xn, s.proj, c.hidden_size, pd, pd, @as(u32, 0), n }) else try w.lin(m, mw.in, w.xn, n, s.proj, c.hidden_size, 0, pd, false);
+        if (n <= max_rows) try run(&w.bucket(n).qmv_bf16, .{ pd, 1, 1 }, .{ mw.in.w, mw.in.s, mw.in.b, w.xn, s.proj, c.hidden_size, pd, pd, @as(u32, 0), n }) else try w.lin(mw.in, w.xn, n, s.proj, c.hidden_size, pd, pd, 0, .bf16);
         const cout = if (inplace) mw.cstate else s.cstate2;
         const sout = if (inplace) mw.sstate else s.sstate2;
         try run(&w.k.conv, .{ cd / 64, 1, 1 }, .{ s.proj, pd, xd, mw.cstate, cout, mw.conv_w, mw.conv_b, s.xc, cd, n });
@@ -357,7 +356,7 @@ pub const Win = struct {
         });
         try run(&w.k.gnorm, .{ c.n_groups, n, 1 }, .{ w.y, mw.gnorm, w.yn, xd / c.n_groups, xd, c.layer_norm_epsilon });
         if (capture) |f| try f(w, m, w.cur, .yn, n);
-        if (n <= max_rows) try run(&w.bucket(n).qmv_bf16, .{ c.hidden_size, 1, 1 }, .{ mw.out.w, mw.out.s, mw.out.b, w.yn, w.delta, xd, c.hidden_size, c.hidden_size, @as(u32, 0), n }) else try w.lin(m, mw.out, w.yn, n, w.delta, xd, 0, c.hidden_size, false);
+        if (n <= max_rows) try run(&w.bucket(n).qmv_bf16, .{ c.hidden_size, 1, 1 }, .{ mw.out.w, mw.out.s, mw.out.b, w.yn, w.delta, xd, c.hidden_size, c.hidden_size, @as(u32, 0), n }) else try w.lin(mw.out, w.yn, n, w.delta, xd, c.hidden_size, c.hidden_size, 0, .bf16);
     }
 
     /// A MoE block of n rows: delta = block output (experts weighted + shared expert), the combine included.
@@ -374,7 +373,13 @@ pub const Win = struct {
         const sw = c.moe_shared_expert_intermediate_size;
         try run(&m.k.e_logits, .{ c.n_routed_experts, n, 1 }, .{ w.xn, mw.gate, w.r_logits, h, c.n_routed_experts });
         try run(&m.k.e_route, .{ n, 1, 1 }, .{ w.r_logits, mw.bias, w.eids, w.wts, c.n_routed_experts, c.num_experts_per_tok, @as(u32, @bitCast(c.routed_scaling_factor)) });
-        if (n > max_rows) try w.mpf.?.runExperts(m, mw, w.xn, w.eids, w.act, w.ey, n) else {
+        if (n > max_rows) {
+            const slots = n * top_k;
+            const ne = c.n_routed_experts;
+            try run(&w.k.plists, .{ ne, 1, 1 }, .{ w.eids, w.plist, w.pcount, slots });
+            try run(&w.k.pexpert, .{ (wd + 15) / 16, (n + p_rows - 1) / p_rows, ne }, .{ mw.fc1.w, mw.fc1.s, mw.fc1.b, w.xn, w.act, w.plist, w.pcount, h, wd, slots, top_k, @intFromEnum(Ep.relu2) });
+            try run(&w.k.pexpert, .{ (h + 15) / 16, (n + p_rows - 1) / p_rows, ne }, .{ mw.fc2.w, mw.fc2.s, mw.fc2.b, w.act, w.ey, w.plist, w.pcount, wd, h, slots, @as(u32, 1), @intFromEnum(Ep.f32) });
+        } else {
             const ng = @min(c.n_routed_experts, n * top_k);
             try run(&w.k.groups, .{ 1, 1, 1 }, .{ w.eids, w.elist, n * top_k, c.n_routed_experts });
             try run(&w.bucket(n).up_g, .{ wd, ng, 1 }, .{ mw.fc1.w, mw.fc1.s, mw.fc1.b, w.xn, w.eids, w.act, h, wd, n * top_k, top_k, w.elist });
@@ -384,9 +389,8 @@ pub const Win = struct {
             try run(&w.bucket(n).dup, .{ sw, 1, 1 }, .{ mw.shup.w, mw.shup.s, mw.shup.b, w.xn, w.sact, h, sw, n });
             try run(&w.bucket(n).ddown, .{ h, 1, 1 }, .{ mw.shdn.w, mw.shdn.s, mw.shdn.b, w.sact, w.sy, sw, h, n });
         } else {
-            try w.lin(m, mw.shup, w.xn, n, w.sact, h, 0, sw, false);
-            try run(&w.mpf.?.relu2, .{ (n * sw + 63) / 64, 1, 1 }, .{ w.sact, n * sw });
-            try w.lin(m, mw.shdn, w.sact, n, w.sy, sw, 0, h, true);
+            try w.lin(mw.shup, w.xn, n, w.sact, h, sw, sw, 0, .relu2);
+            try w.lin(mw.shdn, w.sact, n, w.sy, sw, h, h, 0, .f32);
         }
     }
 
@@ -401,21 +405,20 @@ pub const Win = struct {
             try run(&w.bucket(n).qmv_bf, .{ kv_dim / 4, 1, 1 }, .{ aw.k.w, aw.k.s, aw.k.b, w.xn, aw.kc, h, pos0 * kv_dim, kv_dim, kv_dim, n });
             try run(&w.bucket(n).qmv_bf, .{ kv_dim / 4, 1, 1 }, .{ aw.v.w, aw.v.s, aw.v.b, w.xn, aw.vc, h, pos0 * kv_dim, kv_dim, kv_dim, n });
         } else {
-            try w.lin(m, aw.q, w.xn, n, w.q, h, 0, q_dim, false);
-            try w.lin(m, aw.k, w.xn, n, aw.kc, h, pos0 * kv_dim, kv_dim, false);
-            try w.lin(m, aw.v, w.xn, n, aw.vc, h, pos0 * kv_dim, kv_dim, false);
+            try w.lin(aw.q, w.xn, n, w.q, h, q_dim, q_dim, 0, .bf16);
+            try w.lin(aw.k, w.xn, n, aw.kc, h, kv_dim, kv_dim, pos0 * kv_dim, .bf16);
+            try w.lin(aw.v, w.xn, n, aw.vc, h, kv_dim, kv_dim, pos0 * kv_dim, .bf16);
         }
         const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(c.head_dim)));
         var off: u32 = 0;
-        if (n > max_rows and w.k.a_pf != null) { // the whole window in one launch: no per-row scratch, so no row blocks
-            try run(&w.k.a_prep.?, .{ (n + 7) / 8 * 4 * 4 * 1024 / 64, 1, 1 }, .{ w.q, w.qb, n }); // 2 kv heads x 2 head groups, 4 N tiles of 1024 dwords a row tile
-            try run(&w.k.a_pf.?, .{ (n + 7) / 8, 4, 1 }, .{ w.qb, aw.kc, aw.vc, w.att, pos0, n });
-            off = n;
-        } else if (n <= max_rows and m.k.a_dec != null) { // a window of up to 16 rows: the decode kernel per row, the same bits as the token decoded alone
-            const nch1 = @max(1, (pos0 + n + chunk - 1) / chunk);
-            try run(&m.k.a_dec.?, .{ c.num_key_value_heads * 2, nch1, n }, .{ w.q, aw.kc, aw.vc, w.po, w.pm, w.pl, pos0 + 1, nch1, scale });
-            try run(&m.k.a_dmerge.?, .{ c.num_attention_heads, n, 4 }, .{ w.po, w.pm, w.pl, w.att, pos0 + 1, nch1 });
-            off = n;
+        if (m.k.a_dec != null) { // the decode kernel per row, 16 rows a launch: the same bits as each token decoded alone
+            while (off < n) : (off += max_rows) {
+                const rb = @min(max_rows, n - off);
+                const qo = @as(usize, off) * q_dim * 2;
+                const nch1 = @max(1, (pos0 + off + rb + chunk - 1) / chunk);
+                try run(&m.k.a_dec.?, .{ c.num_key_value_heads * 2, nch1, rb }, .{ at(w.q, qo), aw.kc, aw.vc, w.po, w.pm, w.pl, pos0 + off + 1, nch1, scale });
+                try run(&m.k.a_dmerge.?, .{ c.num_attention_heads, rb, 4 }, .{ w.po, w.pm, w.pl, at(w.att, qo), pos0 + off + 1, nch1 });
+            }
         }
         // Row blocks bound the split-K scratch (po holds max_rows * 64 chunks a row); rows are independent.
         const nch_all = @max(1, (pos0 + n + chunk - 1) / chunk);
@@ -428,7 +431,7 @@ pub const Win = struct {
             try run(&w.k.a_merge, .{ c.num_attention_heads, rb, 1 }, .{ w.po, w.pm, w.pl, at(w.att, qo), pos0 + off + 1, chunk, c.num_attention_heads, nch_all });
         }
         if (capture) |f| try f(w, m, w.cur, .att, n);
-        if (n <= max_rows) try run(&w.bucket(n).qmv_bf, .{ h / 4, 1, 1 }, .{ aw.o.w, aw.o.s, aw.o.b, w.att, w.delta, q_dim, @as(u32, 0), h, h, n }) else try w.lin(m, aw.o, w.att, n, w.delta, q_dim, 0, h, false);
+        if (n <= max_rows) try run(&w.bucket(n).qmv_bf, .{ h / 4, 1, 1 }, .{ aw.o.w, aw.o.s, aw.o.b, w.att, w.delta, q_dim, @as(u32, 0), h, h, n }) else try w.lin(aw.o, w.att, n, w.delta, q_dim, h, h, 0, .bf16);
     }
 
     /// After a non-inplace window: keep the first c rows (all: swap pending states in; fewer: replay). Advances m.pos.

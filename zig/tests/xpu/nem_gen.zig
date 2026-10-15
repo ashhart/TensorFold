@@ -82,7 +82,7 @@ pub fn main(init: std.process.Init) !u8 {
     var l = try ld.Loader.init(gpa, &r, dir);
     const t_load = nowNs();
     var m = try model.Model.load(gpa, &r, &l, cfg.value, ctx);
-    const pf_rows: u32 = if (std.c.getenv("NEM_PREFILL_ROWS")) |v| (std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0) else 0; // prompt in windows of this many rows (above 16: the prefill GEMMs)
+    const pf_rows: u32 = if (std.c.getenv("NEM_PREFILL_ROWS")) |v| (std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0) else 0; // prompt in windows of this many rows (above 16: the prompt kernels)
     if (pf_rows > 16) nw.default_rows = pf_rows;
     var w = try nw.Win.init(gpa, &m);
     std.debug.print("loaded in {d:.1} s, device memory {d:.2} GB ({d} tensors in headers)\n", .{ @as(f64, @floatFromInt(nowNs() - t_load)) / 1e9, @as(f64, @floatFromInt(l.total)) / 1e9, l.map.count() });

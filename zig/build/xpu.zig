@@ -122,8 +122,7 @@ const kernels = [_]Kernel{
     .{ .name = "nem_rows_r2", .src = "nem_rows", .options = cl3 ++ " -DMAXR=2" },
     .{ .name = "nem_rows_r4", .src = "nem_rows", .options = cl3 ++ " -DMAXR=4" },
     .{ .name = "nem_rows_r8", .src = "nem_rows", .options = cl3 ++ " -DMAXR=8" },
-    .{ .name = "nem_pf", .options = cl3 },
-    .{ .name = "nem_attn_pfs", .options = cl3 },
+    .{ .name = "nem_prow", .options = cl3 },
     .{ .name = "nem_attn_dec", .options = cl3 },
 };
 
@@ -173,7 +172,7 @@ fn spirv(b: *std.Build, ocloc: []const u8, device: []const u8, k: Kernel) std.Bu
 
 /// The standalone op and model tests, each its own program `tf-xpu-<name>-test` (step `xpu-tests`).
 const test_programs = [_][]const u8{
-    "panic", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_pf", "nem_attn_dec", "nem_fp64",
+    "panic", "nem_rows", "nem_prefill", "nem_gen", "nem_mtp", "nem_kl", "nem_norm_bench", "nem_mv_bench", "nem_slot", "nem_format", "nem_seam", "nem_attn_dec", "nem_fp64",
 };
 
 /// `-Dxpu` (Linux): Nemotron's SPIR-V images, `tensorfold-xpu` and `tf-xpu-test`; needs ocloc, not nvcc or CUDA.

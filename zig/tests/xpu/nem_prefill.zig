@@ -90,14 +90,11 @@ pub fn main(init: std.process.Init) !void {
         if (std.c.getenv("NEM_PROF") != null) { // one more window of c rows at the end of the context with every launch timed (sync round trip included)
             try w.reset(&m);
             nw.prof_on = true;
-            @import("nemotron_xpu").pf.prof_on = true;
             try w.forward(&m, ids[0..c], true, 0);
             try r.sync();
             nw.prof_on = false;
-            @import("nemotron_xpu").pf.prof_on = false;
             std.debug.print("profile of one window of {d} rows:\n", .{c});
             nw.printProf(&w, &m, 1);
-            @import("nemotron_xpu").pf.printProf(&w.mpf.?);
             try w.profClear();
         }
     }
