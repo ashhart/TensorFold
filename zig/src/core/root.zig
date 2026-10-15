@@ -18,6 +18,7 @@ pub const registry = @import("registry.zig");
 pub const tuning = @import("tuning.zig");
 pub const norms_ref = @import("norms_ref.zig");
 pub const act_ref = @import("act_ref.zig");
+pub const route_ref = @import("route_ref.zig");
 
 test {
     _ = safetensors;
@@ -29,6 +30,7 @@ test {
     _ = tuning;
     _ = norms_ref;
     _ = act_ref;
+    _ = route_ref;
     _ = exl3_format;
     _ = exlr8;
     _ = @import("exl3_rect_test.zig");
