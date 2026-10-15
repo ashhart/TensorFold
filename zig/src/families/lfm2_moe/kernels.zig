@@ -99,15 +99,17 @@ fn attnNaxLoad(device: mtl.Device, out: *Kernels) !void {
 fn naxLoad(device: mtl.Device) ![tile.bit_widths.len]am.Pipes {
     const a = std.heap.c_allocator;
     var set: [tile.bit_widths.len]am.Pipes = undefined;
-    var done: usize = 0;
-    errdefer for (set[0..done]) |pipes| for (pipes) |p| p.deinit();
+    var made: usize = 0; // pipelines made, widths in order: a failure part way through a width releases these too
+    errdefer for (0..made) |n| set[n / am.names.len][n % am.names.len].deinit();
     for (tile.bit_widths, 0..) |bits, i| {
         const src = try am.source(device, a, .{ .bits = bits, .group = 64, .glu = .plain });
         defer a.free(src);
         const lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
         defer lib.deinit();
-        for (am.names, 0..) |name, j| set[i][j] = try mtl.Pipeline.init(device, lib, name, false);
-        done += 1;
+        for (am.names, 0..) |name, j| {
+            set[i][j] = try mtl.Pipeline.init(device, lib, name, false);
+            made += 1;
+        }
     }
     return set;
 }

@@ -4,7 +4,7 @@ const mtl = @import("metal");
 const tf = @import("tensorfold");
 const tile = tf.tile_qmm;
 const am = tf.affine_mm;
-const q = tf.lfm2;
+const q = tf.lfm2_moe;
 const st = q.state;
 const c = q.config;
 const row = tf.row_projection;
@@ -23,12 +23,12 @@ fn bf16(v: f32) u16 {
     return @truncate(@as(u32, @bitCast(v)) >> 16);
 }
 
-/// Code `i` of a row's little-endian bit stream.
+/// Code `i` of a row's little-endian bit stream; the next byte is read only when the code runs into it.
 fn code(bytes: [*]const u8, bits: u8, i: usize) u32 {
     const off = i * @as(usize, bits);
-    const lo: u32 = bytes[off / 8];
-    const hi: u32 = bytes[off / 8 + 1];
-    return ((lo | (hi << 8)) >> @intCast(off % 8)) & ((@as(u32, 1) << @intCast(bits)) - 1);
+    var v: u32 = bytes[off / 8];
+    if (off % 8 + bits > 8) v |= @as(u32, bytes[off / 8 + 1]) << 8;
+    return (v >> @intCast(off % 8)) & ((@as(u32, 1) << @intCast(bits)) - 1);
 }
 
 /// Row r of x against column n of w in float64, and its terms' magnitude (the error's scale).
@@ -87,7 +87,6 @@ fn differing(a: []const u16, b: []const u16) usize {
 
 const Probe = struct {
     m: *q.Model,
-    pipes: am.Pipes,
     x: mtl.Buffer,
     sums: mtl.Buffer,
     y: [3]mtl.Buffer,
@@ -129,8 +128,9 @@ const Tiles = struct {
 const Nax = struct {
     w: row.Weights,
     fn encode(t: Nax, e: mtl.ComputeEncoder, p: Probe) !void {
-        am.rowSums(e, p.pipes, 64, Ref{ .buf = p.x }, Ref{ .buf = p.sums }, rows, @intCast(t.w.k));
-        am.dense(e, p.pipes, Ref{ .buf = p.x }, Ref{ .buf = p.sums }, affine(t.w), Ref{ .buf = p.y[1] }, rows);
+        const pipes = p.m.kernels.naxPipes(t.w.bits) orelse return error.NoTensorPipelines; // the matrix's own width
+        am.rowSums(e, pipes, 64, Ref{ .buf = p.x }, Ref{ .buf = p.sums }, rows, @intCast(t.w.k));
+        am.dense(e, pipes, Ref{ .buf = p.x }, Ref{ .buf = p.sums }, affine(t.w), Ref{ .buf = p.y[1] }, rows);
     }
 };
 
@@ -213,13 +213,14 @@ fn glu(p: Probe, x: q.weights.Moe, worse: *usize) !void {
             tile.encodeWork(e, t, b.starts, 64, b.work);
             try tile.encodeGroupedGlu(e, t, g, u, 64, pr.x, pr.sums, b.ident, pr.y[0], rows, b.starts, b.work);
             const sums = Ref{ .buf = pr.sums };
-            am.rowSums(e, pr.pipes, 64, Ref{ .buf = pr.x }, sums, rows, @intCast(b.gate.k));
+            const pipes = pr.m.kernels.naxPipes(b.gate.bits) orelse return error.NoTensorPipelines;
+            am.rowSums(e, pipes, 64, Ref{ .buf = pr.x }, sums, rows, @intCast(b.gate.k));
             const offsets = Ref{ .buf = b.starts };
             const order = Ref{ .buf = b.ident };
             const y = Ref{ .buf = pr.y[1] };
             const ga = affine(b.gate);
             const ua = affine(b.up);
-            am.gatherGlu(e, pr.pipes, Ref{ .buf = pr.x }, sums, ga, ua, offsets, order, y, rows, 64, 1, 0);
+            am.gatherGlu(e, pipes, Ref{ .buf = pr.x }, sums, ga, ua, offsets, order, y, rows, 64, 1, 0);
             try tile.encodeTwinGlu(e, t, g, u, pr.x, pr.y[2], b.zeros, null, rows, 1);
         }
     };
@@ -347,10 +348,10 @@ pub fn main(init: std.process.Init) !void {
     defer pool.pop();
     const m = try q.Model.load(init.gpa, init.io, args[1]);
     defer m.deinit();
-    const pipes = m.kernels.naxPipes(4) orelse {
+    if (m.kernels.nax == null) {
         std.debug.print("no tensor units: nothing to compare\n", .{});
         return error.NoTensorUnits;
-    };
+    }
     const dev = m.device;
     const x = try dev.buffer(rows * c.intermediate * 2, opts);
     defer x.deinit();
@@ -365,7 +366,7 @@ pub fn main(init: std.process.Init) !void {
     defer init.gpa.free(ref);
     const mag = try init.gpa.alloc(f64, rows * c.intermediate);
     defer init.gpa.free(mag);
-    const p = Probe{ .m = m, .pipes = pipes, .x = x, .sums = sums, .y = ys, .ref = ref, .mag = mag };
+    const p = Probe{ .m = m, .x = x, .sums = sums, .y = ys, .ref = ref, .mag = mag };
     var worse: usize = 0;
     const b0 = m.weights.blocks[0];
     const attn = m.weights.blocks[2].mixer.attention;
