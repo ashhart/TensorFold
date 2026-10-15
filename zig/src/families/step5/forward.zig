@@ -10,13 +10,15 @@ const Model = @import("model.zig").Model;
 const Glue = @import("model.zig").Glue;
 
 /// The glue kernels' constants (glue.metal's s5_args).
-const Args = extern struct { rows: u32 = 0, width: u32 = 0, heads: u32 = 0, dim: u32 = 0, span: u32 = 0, pos: u32 = 0, stride: u32 = 0, bits: u32 = 0, group: u32 = 0, eps: f32 = 0, theta: f32 = 0, limit: f32 = 0 };
+const Args = extern struct { rows: u32 = 0, width: u32 = 0, heads: u32 = 0, dim: u32 = 0, span: u32 = 0, pos: u32 = 0, stride: u32 = 0, bits: u32 = 0, group: u32 = 0, eps: f32 = 0, theta: f32 = 0, limit: f32 = 0, ring: u32 = 0 };
+/// The sparse kernels' constants (sparse.metal's s5_sparse_args).
+const SArgs = extern struct { rows: u32 = 0, pos: u32 = 0, heads: u32 = 0, dim: u32 = 0, span: u32 = 0, ring: u32 = 0, window: u32 = 0, regions: u32 = 0, groups: u32 = 0, topk: u32 = 0, first: u32 = 0, norm: u32 = 0, eps: f32 = 0, theta: f32 = 0, scale: f32 = 0 };
 
 const Enc = struct {
     e: mtl.ComputeEncoder,
     m: *const Model,
 
-    fn glue(x: Enc, g: Glue, args: Args, bufs: []const B, grid: [3]usize, group: [3]usize, groups: bool) void {
+    fn glue(x: Enc, g: Glue, args: anytype, bufs: []const B, grid: [3]usize, group: [3]usize, groups: bool) void {
         x.e.setPipeline(x.m.pipe(g));
         var slot: usize = 0;
         for (bufs) |r| {
@@ -72,15 +74,12 @@ pub fn run(m: *const Model, s: *st.Scratch, cache: *st.Cache, ids: []const u32) 
     const n = ids.len;
     const start = cache.len;
     if (n == 0 or n > st.window_rows) return error.Step5RowsExceeded;
-    if (start + n > cache.capacity or start + n > c.dense_limit) return error.Step5ContextFull;
+    if (start + n > cache.capacity) return error.Step5ContextFull;
     for (ids) |id| if (id >= c.vocab) return error.InvalidStep5Token;
     @memcpy(s.ids.slice(u32, n), ids);
     const h: usize = c.hidden;
-    const kvw: usize = c.kvWidth();
     const qw: usize = @as(usize, c.heads) * c.head_dim;
     const nr: u32 = @intCast(n);
-    const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(c.head_dim)));
-    const views = [2]View{ masks(s, .sliding, c.window, start, n, 0), masks(s, .full, c.window, start, n, st.window_rows * cache.capacity) };
 
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -97,26 +96,15 @@ pub fn run(m: *const Model, s: *st.Scratch, cache: *st.Cache, ids: []const u32) 
         try x.project(l.attn.k, s.x, 0, s.k, 0, n);
         try x.project(l.attn.v, s.x, 0, s.v, 0, n);
         try x.project(l.attn.g, s.x, 0, s.g, 0, n);
-        const rot = Args{ .rows = nr, .dim = c.head_dim, .span = lay.span, .pos = @intCast(start), .eps = c.eps, .theta = lay.theta };
-        var qa = rot;
-        qa.heads = c.heads;
-        qa.stride = @intCast(qw);
-        x.glue(.qk, qa, &.{ b(s.q), t(l.attn.q_norm), A, b(s.qn) }, .{ c.heads, n, 1 }, .{ 32, 1, 1 }, true);
-        var ka = rot;
-        ka.heads = c.kv_heads;
-        ka.stride = @intCast(kvw);
-        x.glue(.qk, ka, &.{ b(s.k), t(l.attn.k_norm), A, bo(cache.keys, cache.at(c, i, start)) }, .{ c.kv_heads, n, 1 }, .{ 32, 1, 1 }, true);
-        x.glue(.copy, .{ .rows = nr, .width = @intCast(kvw), .stride = @intCast(kvw) }, &.{ b(s.v), A, bo(cache.values, cache.at(c, i, start)) }, .{ kvw, n, 1 }, .{ 256, 1, 1 }, false);
-        const v = views[@intFromEnum(lay.kind)];
-        try x.m.attention.encode(x.e, n, v.keys, v.keys, scale, .{ .buf = s.qn }, .{ .buf = cache.keys, .off = cache.at(c, i, v.lo) }, .{ .buf = cache.values, .off = cache.at(c, i, v.lo) }, .{ .buf = s.mask, .off = v.off }, .{ .buf = s.o });
-        x.glue(.gate, .{ .rows = nr, .heads = c.heads, .dim = c.head_dim }, &.{ b(s.o), b(s.g), A }, .{ qw, n, 1 }, .{ 256, 1, 1 }, false);
+        try attention(x, s, cache, l.attn, i, start, n);
+        x.glue(.gate, Args{ .rows = nr, .heads = c.heads, .dim = c.head_dim }, &.{ b(s.o), b(s.g), A }, .{ qw, n, 1 }, .{ 256, 1, 1 }, false);
         try x.project(l.attn.o, s.o, 0, s.y, 0, n);
-        x.glue(.add, .{ .rows = nr, .width = c.hidden }, &.{ b(s.resid), b(s.y), A }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
+        x.glue(.add, Args{ .rows = nr, .width = c.hidden }, &.{ b(s.resid), b(s.y), A }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
         x.glue(.norm, normed, &.{ b(s.resid), t(l.post_norm), A, b(s.x) }, .{ n, 1, 1 }, .{ 256, 1, 1 }, true);
         switch (l.ffn) {
             .dense => |d| {
                 try mlp(x, d, s, s.y, n, c.intermediate, lay.limit);
-                x.glue(.add, .{ .rows = nr, .width = c.hidden }, &.{ b(s.resid), b(s.y), A }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
+                x.glue(.add, Args{ .rows = nr, .width = c.hidden }, &.{ b(s.resid), b(s.y), A }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
             },
             .moe => |e| {
                 route.logits(x.e, m.route[0], .{ .hidden = c.hidden, .experts = c.experts, .topk = c.topk }, b(s.x), b(e.router), b(s.logits32), nr);
@@ -131,10 +119,10 @@ pub fn run(m: *const Model, s: *st.Scratch, cache: *st.Cache, ids: []const u32) 
                 up.repeat = c.topk;
                 try x.experts(gate, s.x, s.eg, s.pick, slots);
                 try x.experts(up, s.x, s.eu, s.pick, slots);
-                x.glue(.swiglu, .{ .rows = @intCast(slots), .width = c.moe_intermediate, .limit = lay.limit }, &.{ b(s.eg), b(s.eu), A, b(s.ea) }, .{ c.moe_intermediate, slots, 1 }, .{ 256, 1, 1 }, false);
+                x.glue(.swiglu, Args{ .rows = @intCast(slots), .width = c.moe_intermediate, .limit = lay.limit }, &.{ b(s.eg), b(s.eu), A, b(s.ea) }, .{ c.moe_intermediate, slots, 1 }, .{ 256, 1, 1 }, false);
                 try x.experts(e.down, s.ea, s.ey, s.pick, slots);
                 try mlp(x, e.shared, s, s.shared, n, c.shared_intermediate, lay.shared_limit);
-                x.glue(.moe_add, .{ .rows = nr, .width = c.hidden, .heads = c.topk }, &.{ b(s.resid), b(s.ey), b(s.wts), b(s.shared), A }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
+                x.glue(.moe_add, Args{ .rows = nr, .width = c.hidden, .heads = c.topk }, &.{ b(s.resid), b(s.ey), b(s.wts), b(s.shared), A }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
             },
         }
     }
@@ -153,22 +141,62 @@ pub fn run(m: *const Model, s: *st.Scratch, cache: *st.Cache, ids: []const u32) 
 fn mlp(x: Enc, w: wts.Mlp, s: *st.Scratch, out: mtl.Buffer, n: usize, inter: u32, limit: f32) !void {
     try x.project(w.gate, s.x, 0, s.gate, 0, n);
     try x.project(w.up, s.x, 0, s.up, 0, n);
-    x.glue(.swiglu, .{ .rows = @intCast(n), .width = inter, .limit = limit }, &.{ b(s.gate), b(s.up), A, b(s.act) }, .{ inter, n, 1 }, .{ 256, 1, 1 }, false);
+    x.glue(.swiglu, Args{ .rows = @intCast(n), .width = inter, .limit = limit }, &.{ b(s.gate), b(s.up), A, b(s.act) }, .{ inter, n, 1 }, .{ 256, 1, 1 }, false);
     try x.project(w.down, s.act, 0, out, 0, n);
 }
 
-const View = struct { lo: usize, keys: usize, off: usize };
+/// q and k normed and rotated, k and v into the layer's cache (a ring when sliding), the indexer, attention into s.o.
+fn attention(x: Enc, s: *st.Scratch, cache: *st.Cache, w: wts.Attention, i: usize, start: usize, n: usize) !void {
+    const c = &x.m.config;
+    const lay = c.layer[i];
+    const kvw: usize = c.kvWidth();
+    const nr: u32 = @intCast(n);
+    const ring = cache.ring(c, i);
+    const rot = Args{ .rows = nr, .dim = c.head_dim, .span = lay.span, .pos = @intCast(start), .eps = c.eps, .theta = lay.theta };
+    var qa = rot;
+    qa.heads = c.heads;
+    qa.stride = c.heads * c.head_dim;
+    x.glue(.qk, qa, &.{ b(s.q), t(w.q_norm), A, b(s.qn) }, .{ c.heads, n, 1 }, .{ 32, 1, 1 }, true);
+    // keys and values land at slot (start + r) % ring in a ring, at position start + r otherwise
+    const at = if (ring > 0) 0 else start * kvw * 2;
+    var ka = rot;
+    ka.heads = c.kv_heads;
+    ka.stride = @intCast(kvw);
+    ka.ring = @intCast(ring);
+    x.glue(.qk, ka, &.{ b(s.k), t(w.k_norm), A, bo(cache.kv, cache.keys(i) + at) }, .{ c.kv_heads, n, 1 }, .{ 32, 1, 1 }, true);
+    x.glue(.copy, Args{ .rows = nr, .width = @intCast(kvw), .stride = @intCast(kvw), .pos = @intCast(start), .ring = @intCast(ring) }, &.{ b(s.v), A, bo(cache.kv, cache.values(c, i) + at) }, .{ kvw, n, 1 }, .{ 256, 1, 1 }, false);
+    if (w.indexer) |ix| try indexer(x, s, cache, ix, i, start, n);
+    const args = SArgs{ .rows = nr, .pos = @intCast(start), .heads = c.heads, .dim = c.head_dim, .ring = @intCast(ring), .window = if (lay.kind == .sliding) c.window else 0, .groups = c.kv_heads, .topk = c.index_topk, .scale = 1.0 / @sqrt(@as(f32, @floatFromInt(c.head_dim))) };
+    x.glue(.attend, args, &.{ b(s.qn), bo(cache.kv, cache.keys(i)), bo(cache.kv, cache.values(c, i)), b(s.sel), A, b(s.o) }, .{ c.heads, n, 1 }, .{ 32, 1, 1 }, true);
+}
 
-/// Row r (position start + r) sees key lo + j when it is not later, and on sliding layers within the window.
-fn masks(s: *st.Scratch, kind: cfg.Kind, window: u32, start: usize, n: usize, off: usize) View {
+/// Full layer `i`'s indexer: k and z into rings, completed regions summarized, then past topk regions: scores, top-k.
+fn indexer(x: Enc, s: *st.Scratch, cache: *st.Cache, ix: wts.Indexer, i: usize, start: usize, n: usize) !void {
+    const c = &x.m.config;
+    const lay = c.layer[i];
+    const nr: u32 = @intCast(n);
     const end = start + n;
-    const lo = if (kind == .sliding and start + 1 > window) start + 1 - window else 0;
-    const keys = end - lo;
-    const bytes = (s.mask.contents() + off)[0 .. n * keys];
-    for (0..n) |r| for (0..keys) |j| {
-        const p = start + r;
-        const k = lo + j;
-        bytes[r * keys + j] = @intFromBool(k <= p and (kind == .full or p - k < window));
-    };
-    return .{ .lo = lo, .keys = keys, .off = off };
+    try x.project(ix.q, s.x, 0, s.iq, 0, n);
+    try x.project(ix.k, s.x, 0, s.ik, 0, n);
+    try x.project(ix.z, s.x, 0, s.iz, 0, n);
+    x.glue(.index_weights, SArgs{ .rows = nr, .heads = c.index_heads, .dim = c.hidden, .groups = c.kv_heads }, &.{ b(s.x), t(ix.w), A, b(s.iw) }, .{ c.index_heads, n, 1 }, .{ 32, 1, 1 }, true);
+    const rot = SArgs{ .rows = nr, .pos = @intCast(start), .dim = c.proxy, .span = c.index_span, .eps = c.eps, .theta = lay.theta };
+    var qa = rot;
+    qa.heads = c.index_heads;
+    x.glue(.index_norm, qa, &.{ b(s.iq), t(ix.q_norm), t(ix.q_norm), A, b(s.iqn) }, .{ c.index_heads, n, 1 }, .{ 32, 1, 1 }, true);
+    var ka = rot;
+    ka.heads = 1;
+    ka.ring = st.index_ring;
+    ka.norm = 1;
+    x.glue(.index_norm, ka, &.{ b(s.ik), t(ix.k_norm), t(ix.k_bias), A, bo(cache.index, cache.indexKeys(c, i)) }, .{ 1, n, 1 }, .{ 32, 1, 1 }, true);
+    x.glue(.copy, Args{ .rows = nr, .width = c.proxy, .stride = c.proxy, .pos = @intCast(start), .ring = st.index_ring }, &.{ b(s.iz), A, bo(cache.index, cache.indexZ(c, i)) }, .{ c.proxy, n, 1 }, .{ 256, 1, 1 }, false);
+    const first = start / c.region;
+    const done = end / c.region;
+    if (done > first) x.glue(.summarize, SArgs{ .dim = c.proxy, .ring = st.index_ring, .first = @intCast(first) }, &.{ bo(cache.index, cache.indexKeys(c, i)), bo(cache.index, cache.indexZ(c, i)), A, bo(cache.index, cache.summaries(i)) }, .{ done - first, 1, 1 }, .{ c.proxy, 1, 1 }, true);
+    // the last row sees the most regions; below the budget every row reads all of them and nothing is chosen
+    const regions = (end - 1) / c.region;
+    if (regions <= c.index_topk) return;
+    const args = SArgs{ .rows = nr, .pos = @intCast(start), .heads = c.index_heads, .dim = c.proxy, .regions = @intCast(regions), .groups = c.kv_heads, .topk = c.index_topk };
+    x.glue(.score, args, &.{ b(s.iqn), b(s.iw), bo(cache.index, cache.summaries(i)), A, b(s.scores) }, .{ (regions + 255) / 256, n, c.kv_heads }, .{ 256, 1, 1 }, true);
+    x.glue(.select, args, &.{ b(s.scores), A, b(s.sel) }, .{ n, c.kv_heads, 1 }, .{ 1024, 1, 1 }, true);
 }

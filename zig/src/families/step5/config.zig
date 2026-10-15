@@ -21,8 +21,12 @@ pub const Config = struct {
     topk: u32 = 8,
     routed_scale: f32 = 3.0,
     window: u32 = 512,
-    /// Positions the dense full-attention path covers: past it the sparse indexer would choose (512 regions of 8).
-    dense_limit: u32 = 4096,
+    /// The sparse indexer: heads (4 a KV group), proxy width, rotary span, regions kept, tokens a region.
+    index_heads: u32 = 16,
+    proxy: u32 = 256,
+    index_span: u32 = 32,
+    index_topk: u32 = 512,
+    region: u32 = 8,
     context: u32 = 1048576,
     eos: [2]u32 = .{ 1, 2 },
     layer: [max_layers]Layer = undefined,
@@ -62,6 +66,13 @@ fn int(o: std.json.ObjectMap, key: []const u8) !u32 {
     return @intCast(v.integer);
 }
 
+/// Indexer heads: sparse_indexer_num_heads, provider groups being the KV groups.
+fn indexHeads(sp: std.json.ObjectMap, kv: u32) !u32 {
+    const groups = try int(sp, "num_provider_groups");
+    if (groups != kv) return error.UnsupportedStep5Indexer;
+    return int(sp, "sparse_indexer_num_heads");
+}
+
 fn list(o: std.json.ObjectMap, key: []const u8, n: u32) ![]const std.json.Value {
     const v = try field(o, key);
     if (v != .array or v.array.items.len < n) return error.BadStep5Config;
@@ -95,11 +106,17 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     if (c.layers > max_layers or c.heads % c.kv_heads != 0 or c.head_dim % 32 != 0 or c.head_dim > 256) return error.BadStep5Config;
     const norm = try field(t, "norm_expert_weight");
     if (norm != .bool or !norm.bool) return error.UnsupportedStep5Router;
-    if (t.get("sparse_config")) |s| if (s == .object) {
-        const region = try int(s.object, "region_block_size");
-        const topk = try int(s.object, "topk");
-        c.dense_limit = region * topk;
-    };
+    const sparse = try field(t, "sparse_config");
+    if (sparse != .object) return error.BadStep5Config;
+    const sp = sparse.object;
+    const on = try field(sp, "enabled");
+    if (on != .bool or !on.bool) return error.UnsupportedStep5Attention;
+    c.region = try int(sp, "region_block_size");
+    c.index_topk = try int(sp, "topk");
+    c.proxy = try int(sp, "proxy_dim");
+    c.index_span = try int(sp, "sparse_indexer_rope_dim");
+    c.index_heads = try indexHeads(sp, c.kv_heads);
+    if (c.region != 8 or c.proxy != 256 or c.index_heads != 4 * c.kv_heads or c.index_span % 2 != 0) return error.UnsupportedStep5Indexer;
     const eos = try field(t, "eos_token_id");
     if (eos == .array and eos.array.items.len == 2) {
         for (&c.eos, eos.array.items) |*e, v| e.* = @intCast(v.integer);
@@ -131,7 +148,8 @@ test "a sliced Step-5 config: kinds, spans, thetas and the dense limit" {
         \\ "moe_intermediate_size": 1536, "share_expert_dim": 1536, "moe_num_experts": 352, "moe_top_k": 8,
         \\ "moe_router_scaling_factor": 3.0, "sliding_window": 512, "max_position_embeddings": 1048576,
         \\ "norm_expert_weight": true, "eos_token_id": [1, 2], "moe_layer_list": [3],
-        \\ "sparse_config": {"region_block_size": 8, "topk": 512},
+        \\ "sparse_config": {"enabled": true, "region_block_size": 8, "topk": 512, "proxy_dim": 256, "sparse_indexer_rope_dim": 32,
+        \\  "sparse_indexer_num_heads": 16, "num_provider_groups": 4},
         \\ "layer_types": ["sliding_attention", "sliding_attention", "sliding_attention", "full_attention"],
         \\ "partial_rotary_factors": [1.0, 1.0, 1.0, 0.3333333333333333],
         \\ "rope_theta": [10000.0, 10000.0, 10000.0, 10000000.0],
@@ -144,6 +162,7 @@ test "a sliced Step-5 config: kinds, spans, thetas and the dense limit" {
     try std.testing.expectEqual(@as(u32, 192), c.layer[0].span);
     try std.testing.expect(c.layer[3].moe and !c.layer[2].moe);
     try std.testing.expectEqual(@as(f32, 1e7), c.layer[3].theta);
-    try std.testing.expectEqual(@as(u32, 4096), c.dense_limit);
+    try std.testing.expectEqual(@as(u32, 512), c.index_topk);
+    try std.testing.expectEqual(@as(u32, 16), c.index_heads);
     try std.testing.expectEqual(@as(u32, 768), c.kvWidth());
 }

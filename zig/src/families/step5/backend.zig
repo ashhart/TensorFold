@@ -7,7 +7,8 @@ const Model = @import("model.zig").Model;
 const draw = @import("../qwen3_5/backend.zig").draw;
 const be = lanes.backend;
 
-pub const Options = struct { capacity: usize, streams: u32 = 4 };
+/// The longest context a stream may take, the streams at once, and the bytes every stream's caches may hold.
+pub const Options = struct { capacity: usize, streams: u32 = 4, budget: u64 };
 
 pub const Metal = struct {
     gpa: std.mem.Allocator,
@@ -15,6 +16,7 @@ pub const Metal = struct {
     options: Options,
     scratch: st.Scratch,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
+    held: u64 = 0, // bytes the streams' caches hold
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -68,12 +70,19 @@ pub const Metal = struct {
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
         const self = cast(ptr);
         const ids = stream.prompt();
-        const limit = @min(self.options.capacity, self.model.config.dense_limit);
-        if (ids.len == 0 or ids.len + stream.max_new > limit or self.caches.contains(stream)) return error.InvalidStep5Prompt;
+        if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidStep5Prompt;
+        const capacity = ids.len + stream.max_new + 1;
+        const need = st.cacheBytes(&self.model.config, capacity);
+        if (self.held + need > self.options.budget) {
+            std.log.warn("step5: a {d}-token stream needs {d:.1} GiB of caches; {d:.1} of {d:.1} GiB are held", .{ capacity, gib(need), gib(self.held), gib(self.options.budget) });
+            return error.Step5CachesFull;
+        }
         const cache = try self.gpa.create(st.Cache);
         errdefer self.gpa.destroy(cache);
-        cache.* = try st.Cache.init(self.model.device, &self.model.config, ids.len + stream.max_new + 1);
+        cache.* = try st.Cache.init(self.model.device, &self.model.config, capacity);
         errdefer cache.deinit();
+        self.held += need;
+        errdefer self.held -= need;
         try self.feed(cache, ids);
         try self.caches.put(self.gpa, stream, cache);
     }
@@ -147,11 +156,16 @@ pub const Metal = struct {
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
         if (self.caches.fetchRemove(stream)) |entry| {
+            self.held -= st.cacheBytes(&self.model.config, entry.value.capacity);
             entry.value.deinit();
             self.gpa.destroy(entry.value);
         }
     }
 };
+
+fn gib(bytes: u64) f64 {
+    return @as(f64, @floatFromInt(bytes)) / (1 << 30);
+}
 
 fn logit(word: u16) f32 {
     return @bitCast(@as(u32, word) << 16);

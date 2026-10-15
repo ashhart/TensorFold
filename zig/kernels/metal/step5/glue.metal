@@ -2,7 +2,10 @@
 #include <metal_stdlib>
 using namespace metal;
 
-struct s5_args { uint rows, width, heads, dim, span, pos, stride, bits, group; float eps, theta, limit; };
+struct s5_args { uint rows, width, heads, dim, span, pos, stride, bits, group; float eps, theta, limit; uint ring; };
+
+// Row r's slot: (pos + r) % ring in a ring, else r.
+inline size_t s5_slot(constant s5_args& a, uint row) { return a.ring ? (a.pos + row) % a.ring : row; }
 
 // Row r of residual R (fp32) = dequantized affine embedding row ids[r]: bf16(scale * q + bias).
 [[kernel]] void s5_embed(const device uint* ids [[buffer(0)]], const device uint* W [[buffer(1)]],
@@ -71,7 +74,7 @@ inline void s5_norm_row(const device float* R, const device float* w, device bfl
   threadgroup float n[256];
   for (uint j = 0; j < per; ++j) n[lane + 32 * j] = float(bfloat(v[j] * inv * (w[lane + 32 * j] + 1.0f)));
   simdgroup_barrier(mem_flags::mem_threadgroup);
-  device bfloat* y = Y + (size_t)row * a.stride + (size_t)head * a.dim;
+  device bfloat* y = Y + s5_slot(a, row) * a.stride + (size_t)head * a.dim;
   const uint half_span = a.span / 2;
   const float position = float(a.pos + row);
   for (uint j = 0; j < per; ++j) {
@@ -86,10 +89,10 @@ inline void s5_norm_row(const device float* R, const device float* w, device bfl
   }
 }
 
-// Y[row * stride + i] = X[row * width + i]: values into the cache at their positions.
+// Y[slot(row) * stride + i] = X[row * width + i]: values into the cache at their positions.
 [[kernel]] void s5_copy(const device bfloat* X [[buffer(0)]], constant s5_args& a [[buffer(1)]],
     device bfloat* Y [[buffer(2)]], uint2 p [[thread_position_in_grid]]) {
-  if (p.x < a.width && p.y < a.rows) Y[(size_t)p.y * a.stride + p.x] = X[(size_t)p.y * a.width + p.x];
+  if (p.x < a.width && p.y < a.rows) Y[s5_slot(a, p.y) * a.stride + p.x] = X[(size_t)p.y * a.width + p.x];
 }
 
 // O[row, head, :] *= bf16(sigmoid(G[row, head])), in bf16 as the reference multiplies.

@@ -9,7 +9,9 @@ const cfg = @import("config.zig");
 pub const Tensor = ck.Tensor;
 pub const Linear = rows.Weights;
 
-pub const Attention = struct { q: Linear, k: Linear, v: Linear, o: Linear, g: Linear, q_norm: Tensor, k_norm: Tensor };
+/// A full layer's sparse indexer: q (heads x proxy), k and z (proxy), fp32 head weights, q RMSNorm and k LayerNorm.
+pub const Indexer = struct { q: Linear, k: Linear, z: Linear, w: Tensor, q_norm: Tensor, k_norm: Tensor, k_bias: Tensor };
+pub const Attention = struct { q: Linear, k: Linear, v: Linear, o: Linear, g: Linear, q_norm: Tensor, k_norm: Tensor, indexer: ?Indexer = null };
 pub const Mlp = struct { gate: Linear, up: Linear, down: Linear };
 pub const Moe = struct { router: mtl.Buffer, bias: Tensor, gate: rows.Experts, up: rows.Experts, down: rows.Experts, shared: Mlp };
 pub const Layer = struct { input_norm: Tensor, post_norm: Tensor, attn: Attention, ffn: union(enum) { dense: Mlp, moe: Moe } };
@@ -105,6 +107,18 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ck.Checkpoint,
             .q_norm = try tensor(c, a, ".q_norm.weight", .f32, f.head_dim),
             .k_norm = try tensor(c, a, ".k_norm.weight", .f32, f.head_dim),
         };
+        if (f.layer[i].kind == .full) {
+            const x: usize = f.index_heads * f.proxy;
+            l.attn.indexer = .{
+                .q = try affine(c, a, ".sparse_indexer_q", 1, x, h),
+                .k = try affine(c, a, ".sparse_indexer_k", 1, f.proxy, h),
+                .z = try affine(c, a, ".sparse_indexer_z", 1, f.proxy, h),
+                .w = try tensor(c, a, ".sparse_indexer_w.weight", .f32, f.index_heads * h),
+                .q_norm = try tensor(c, a, ".sparse_indexer_q_norm.weight", .f32, f.proxy),
+                .k_norm = try tensor(c, a, ".sparse_indexer_k_norm.weight", .f32, f.proxy),
+                .k_bias = try tensor(c, a, ".sparse_indexer_k_norm.bias", .f32, f.proxy),
+            };
+        }
         if (!f.layer[i].moe) {
             var mb: [96]u8 = undefined;
             l.ffn = .{ .dense = try mlp(c, try name(&mb, p, "mlp"), h, f.intermediate) };

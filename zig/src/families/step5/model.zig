@@ -7,11 +7,10 @@ const ck = @import("../../core/checkpoint_metal.zig");
 const shards = @import("../../core/checkpoint.zig");
 const rows = @import("../../core/row_projection.zig");
 const route = @import("../../core/moe_route.zig");
-const attn = @import("../../core/shared_attention.zig");
 const weights = @import("weights.zig");
 
-pub const glue_names = [_][:0]const u8{ "s5_embed", "s5_norm", "s5_final_norm", "s5_qk", "s5_copy", "s5_gate", "s5_swiglu", "s5_add", "s5_moe_add" };
-pub const Glue = enum { embed, norm, final_norm, qk, copy, gate, swiglu, add, moe_add };
+pub const glue_names = [_][:0]const u8{ "s5_embed", "s5_norm", "s5_final_norm", "s5_qk", "s5_copy", "s5_gate", "s5_swiglu", "s5_add", "s5_moe_add", "s5_index_weights", "s5_index_norm", "s5_summarize", "s5_score", "s5_select", "s5_attend" };
+pub const Glue = enum { embed, norm, final_norm, qk, copy, gate, swiglu, add, moe_add, index_weights, index_norm, summarize, score, select, attend };
 
 pub const Model = struct {
     gpa: std.mem.Allocator,
@@ -23,7 +22,6 @@ pub const Model = struct {
     glue: [glue_names.len]mtl.Pipeline,
     rows: rows.Pipelines,
     route: [2]mtl.Pipeline,
-    attention: attn.Attention,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         const pool = mtl.objc.Pool.push();
@@ -45,7 +43,7 @@ pub const Model = struct {
         errdefer m.weights.deinit(gpa);
         const c = &m.config;
         {
-            const lib = try mtl.Library.fromSource(m.device, ks.step5_glue, .{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise });
+            const lib = try mtl.Library.fromSource(m.device, ks.step5_glue ++ ks.step5_sparse, .{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise });
             defer lib.deinit();
             var made: usize = 0;
             errdefer for (m.glue[0..made]) |p| p.deinit();
@@ -66,8 +64,6 @@ pub const Model = struct {
             errdefer m.route[0].deinit();
             m.route[1] = try mtl.Pipeline.init(m.device, lib, route.names[1], false);
         }
-        errdefer for (m.route) |p| p.deinit();
-        m.attention = try attn.Attention.init(gpa, m.device, .{ .query_heads = c.heads, .kv_heads = c.kv_heads, .head_dim = c.head_dim, .rotary_dim = 0, .capacity = c.context, .output = .bf16 });
         return m;
     }
 
@@ -76,7 +72,6 @@ pub const Model = struct {
     }
 
     pub fn deinit(m: *Model) void {
-        m.attention.deinit();
         for (m.route) |p| p.deinit();
         m.rows.deinit();
         for (m.glue) |p| p.deinit();

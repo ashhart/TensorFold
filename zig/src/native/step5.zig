@@ -1,4 +1,4 @@
-//! Step-5 served by the lane host: one-row rounds, contexts the dense full-attention path covers (4,096 tokens).
+//! Step-5 served by the lane host: one-row rounds, contexts to 1M tokens as far as this Mac's cache budget reaches.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -35,18 +35,29 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         return null;
     };
     errdefer model.deinit();
-    const limit: i64 = model.config.dense_limit;
-    const window: i64 = o.context orelse limit;
-    if (window < 1 or window > limit) {
+    var ram: u64 = 0;
+    var len: usize = @sizeOf(u64);
+    if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
+    const text: ?[]const u8 = if (std.c.getenv("STEP5_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
+    const scratch: u64 = 64 << 20; // a 16-row window's buffers, and the scores at 1M positions
+    const budget = s5.budget.caches(ram, model.device.maxWorkingSet(), text, model.checkpoint.residentBytes() + scratch) catch {
         model.deinit();
-        problem.* = try std.fmt.allocPrint(a, "--context must be 1 to {d}: past that Step-5's sparse indexer picks keys, which this engine does not run yet", .{limit});
+        problem.* = "STEP5_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 75% of RAM";
+        return null;
+    };
+    const fits = s5.budget.longest(&model.config, budget, model.config.context);
+    const window: i64 = o.context orelse @intCast(fits);
+    if (window < 1 or window > fits) {
+        model.deinit();
+        problem.* = try std.fmt.allocPrint(a, "--context {d}: this Mac's Step-5 caches fit {d} tokens under its load limit (75% of RAM, or STEP5_LOAD_LIMIT_GB)", .{ window, fits });
         return null;
     }
+    std.log.info("step5: {d:.1} GiB for caches, context up to {d} tokens", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window });
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.gpa = gpa;
     h.model = model;
-    h.metal = try s5.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1) });
+    h.metal = try s5.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .budget = budget });
     errdefer h.metal.deinit();
     h.config = try lanes.Config.init(gpa, h.metal.facts(), 1, 0);
     errdefer h.config.deinit(gpa);

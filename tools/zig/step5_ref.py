@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Step-5 text model in MLX at StepFun's rounding points: the oracle the native step5 family is checked against."""
-# Usage: step5_ref.py --model DIR --prompt "..." [--tokens 32]; full layers are dense, exact to 4,096 tokens.
+# Usage: step5_ref.py --model DIR --prompt "..." [--tokens 32]; full layers run the sparse indexer past 512 regions.
 
 from __future__ import annotations
 
@@ -11,8 +11,20 @@ import sys
 from pathlib import Path
 
 import mlx.core as mx
+import numpy as np
 
-DENSE_LIMIT = 4096
+
+def bf16(x: np.ndarray) -> np.ndarray:
+    """fp32 rounded to bf16 (nearest even), as fp32."""
+    b = np.asarray(x, np.float32).view(np.uint32)
+    return ((b + 0x7FFF + ((b >> 16) & 1)) & 0xFFFF0000).view(np.float32)
+
+
+def e4m3(x: np.ndarray) -> np.ndarray:
+    """fp32 rounded to e4m3fn (nearest even, subnormals from 2^-6, saturating at 448), as fp32."""
+    a = np.abs(x)
+    step = np.exp2(np.maximum(np.floor(np.log2(np.where(a > 0, a, 1))), -6) - 3)
+    return np.where(a > 0, np.sign(x) * np.minimum(np.rint(a / step) * step, 448.0), x).astype(np.float32)
 
 
 class Step5:
@@ -36,6 +48,9 @@ class Step5:
             span -= span % 2
             self.rope.append((span, float(c["rope_theta"][i])))
         self.tables: dict[tuple[int, float], tuple[mx.array, mx.array]] = {}
+        self.sp = c["sparse_config"]
+        self.picks: dict[int, list] = {}  # each full layer's last sparse row: every KV group's chosen regions
+        self.scores: dict[int, np.ndarray] = {}  # and its scores [groups, regions]
 
     # -- pieces ------------------------------------------------------------------------------------------------
     def linear(self, x: mx.array, name: str) -> mx.array:
@@ -45,6 +60,10 @@ class Step5:
             return mx.quantized_matmul(x, w, self.w[name + ".scales"], self.w[name + ".biases"], transpose=True,
                                        group_size=spec["group_size"], bits=spec["bits"])
         return x @ w.astype(x.dtype).T
+
+    def rows(self, x: mx.array, name: str) -> mx.array:
+        """linear() a row at a time: exact like the engine's; MLX's many-row path rounds weights to bf16 first."""
+        return mx.concatenate([self.linear(x[t : t + 1], name) for t in range(x.shape[0])])
 
     def embed(self, ids: mx.array) -> mx.array:
         name = "model.embed_tokens"
@@ -135,9 +154,75 @@ class Step5:
         o = mx.fast.scaled_dot_product_attention(q.transpose(1, 0, 2)[None], k.transpose(1, 0, 2)[None],
                                                  v.transpose(1, 0, 2)[None], scale=self.D ** -0.5, mask=mask)
         o = o[0].transpose(1, 0, 2)  # [T, H, D]
+        if self.c["layer_types"][i] == "full_attention":
+            o = self.sparse(x, pos, i, cache, q, k, v, o)
         g = mx.sigmoid(self.linear(x, p + ".g_proj"))
         o = o * g[..., None].astype(o.dtype)
         return self.linear(o.reshape(T, -1), p + ".o_proj")
+
+    # -- the sparse indexer (StepFun's kernel.py) ----------------------------------------------------------------------
+    def index_rotate(self, x: mx.array, pos: mx.array, i: int) -> mx.array:
+        """NEOX rotation of [T, heads, 256]'s leading sparse_indexer_rope_dim dims, as rotate() does."""
+        span, half = self.sp["sparse_indexer_rope_dim"], self.sp["sparse_indexer_rope_dim"] // 2
+        cos, sin = self.table(span, self.rope[i][1], int(pos.max().item()) + 1)
+        cos, sin = cos[pos][:, None, :].astype(mx.float32), sin[pos][:, None, :].astype(mx.float32)
+        re, im = x[..., :half].astype(mx.float32), x[..., half:span].astype(mx.float32)
+        rot = mx.concatenate([re * cos - im * sin, re * sin + im * cos], axis=-1).astype(x.dtype)
+        return mx.concatenate([rot, x[..., span:]], axis=-1)
+
+    def sparse(self, x, pos, i, cache, q, k, v, dense):
+        """Rows that see more regions than the indexer keeps attend to its picks and their own region; others: dense."""
+        p, T = f"model.layers.{i}.self_attn", x.shape[0]
+        heads, proxy, topk = self.sp["sparse_indexer_num_heads"], self.sp["proxy_dim"], self.sp["topk"]
+        groups, per = self.KV, heads // self.KV
+        iq = self.rows(x, p + ".sparse_indexer_q").reshape(T, heads, proxy).astype(mx.float32)
+        iq = iq * mx.rsqrt((iq * iq).mean(axis=-1, keepdims=True) + self.eps)
+        iq = self.index_rotate((iq * (self.w[p + ".sparse_indexer_q_norm.weight"] + 1.0)).astype(mx.bfloat16), pos, i)
+        ik = self.rows(x, p + ".sparse_indexer_k").astype(mx.float32)
+        mean = ik.mean(axis=-1, keepdims=True)
+        var = (ik * ik).mean(axis=-1, keepdims=True) - mean * mean
+        ik = (ik - mean) * mx.rsqrt(var + self.eps) * self.w[p + ".sparse_indexer_k_norm.weight"] + self.w[p + ".sparse_indexer_k_norm.bias"]
+        ik = self.index_rotate(ik.astype(mx.bfloat16)[:, None, :], pos, i)[:, 0]
+        iz = self.rows(x, p + ".sparse_indexer_z")
+        wt = (x @ self.w[p + ".sparse_indexer_w.weight"].astype(mx.bfloat16).T).astype(mx.float32) * per ** -0.5
+        st = cache.setdefault(("index", i), {"k": [], "z": [], "s": np.zeros((0, proxy), np.float32)})
+        st["k"].append(np.array(ik.astype(mx.float32)))
+        st["z"].append(np.array(iz.astype(mx.float32)))
+        keys, zs = np.concatenate(st["k"]), np.concatenate(st["z"])
+        end = int(pos[-1].item()) + 1
+        done = st["s"].shape[0]
+        new = []
+        for r in range(done, end // 8):
+            z, kk = zs[8 * r : 8 * r + 8], keys[8 * r : 8 * r + 8]
+            e = np.exp(z - z.max())
+            new.append(e4m3(bf16((e * kk).sum(0) / e.sum(0))))
+        if new:
+            st["s"] = np.concatenate([st["s"], np.stack(new)])
+        summaries = st["s"]
+        qs = e4m3(np.array(iq.astype(mx.float32))).reshape(T, groups, per, proxy)
+        wts = np.array(wt).reshape(T, groups, per)
+        K, V = cache[i]
+        out = []
+        for t in range(T):
+            P = int(pos[t].item())
+            vis = P // 8
+            if vis <= topk:
+                out.append(dense[t])
+                continue
+            score = (np.maximum(np.einsum("ghd,rd->ghr", qs[t], summaries[:vis]), 0) * wts[t][:, :, None]).sum(1)
+            rows = []
+            self.picks[i] = []
+            self.scores[i] = score
+            for g in range(groups):
+                pick = np.sort(np.lexsort((np.arange(vis), -score[g]))[:topk])
+                self.picks[i].append(pick)
+                idx = np.concatenate([(pick[:, None] * 8 + np.arange(8)).reshape(-1), np.arange(vis * 8, P + 1)])
+                kk, vv = K[mx.array(idx), g], V[mx.array(idx), g]
+                qg = q[t, g * (self.H // groups) : (g + 1) * (self.H // groups)]
+                o = mx.fast.scaled_dot_product_attention(qg[None, :, None, :], kk[None, None], vv[None, None], scale=self.D ** -0.5)
+                rows.append(o[0, :, 0, :])
+            out.append(mx.concatenate(rows))
+        return mx.stack(out)
 
     def layer(self, r: mx.array, pos: mx.array, i: int, cache: dict) -> mx.array:
         p = f"model.layers.{i}"
@@ -153,8 +238,6 @@ class Step5:
 
     def forward(self, ids: list[int], start: int, cache: dict, hidden: list | None = None) -> mx.array:
         """Logits (fp32) of the last row for tokens `ids` at positions start.., extending `cache`."""
-        if start + len(ids) > DENSE_LIMIT + self.c["sparse_config"]["region_block_size"]:
-            raise SystemExit(f"the dense oracle covers {DENSE_LIMIT} tokens; past that the indexer selects")
         pos = mx.arange(start, start + len(ids))
         r = self.embed(mx.array(ids)).astype(mx.float32)
         for i in range(self.L):
