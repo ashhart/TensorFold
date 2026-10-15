@@ -5,15 +5,16 @@ const abi = @import("abi.zig");
 const Driver = @import("driver.zig").Driver;
 const Error = @import("driver.zig").Error;
 
-/// Bytes this process holds in DeviceBuffers and HostBuffers, and the device peak since the last reset.
-pub const Usage = struct { device: u64, host: u64, peak: u64 };
+/// Bytes this process holds in DeviceBuffers and HostBuffers, and device/pinned peaks since the last reset.
+pub const Usage = struct { device: u64, host: u64, peak: u64, host_peak: u64 = 0 };
 
 var device_bytes: std.atomic.Value(u64) = .init(0);
 var host_bytes: std.atomic.Value(u64) = .init(0);
+var host_peak_bytes: std.atomic.Value(u64) = .init(0);
 var peak_bytes: std.atomic.Value(u64) = .init(0);
 var counts_mutex: std.atomic.Mutex = .unlocked;
 
-/// The counts now; `reset_peak` starts a new peak at the current device bytes. Safe from any thread.
+/// The counts now; `reset_peak` starts a new peak at the current device and pinned bytes. Safe from any thread.
 pub fn usage(reset_peak: bool) Usage {
     const NoHook = struct {
         fn afterRead(_: @This()) void {}
@@ -21,27 +22,44 @@ pub fn usage(reset_peak: bool) Usage {
     return usageWithHook(reset_peak, NoHook{});
 }
 
+/// Captures the completed interval and resets both peaks atomically to live bytes.
+pub fn takeUsage() Usage {
+    const NoHook = struct {
+        fn afterRead(_: @This()) void {}
+    };
+    return sample(true, NoHook{}, true);
+}
+
 fn usageWithHook(reset_peak: bool, hook: anytype) Usage {
+    return sample(reset_peak, hook, false);
+}
+
+fn sample(reset_peak: bool, hook: anytype, pre_reset: bool) Usage {
     lockCounts();
     defer counts_mutex.unlock();
     const now = device_bytes.load(.monotonic);
     hook.afterRead();
-    if (reset_peak) peak_bytes.store(now, .monotonic);
-    return .{ .device = now, .host = host_bytes.load(.monotonic), .peak = @max(now, peak_bytes.load(.monotonic)) };
+    const host = host_bytes.load(.monotonic);
+    const peak = @max(now, peak_bytes.load(.monotonic));
+    const host_peak = @max(host, host_peak_bytes.load(.monotonic));
+    if (reset_peak) {
+        peak_bytes.store(now, .monotonic);
+        host_peak_bytes.store(host, .monotonic);
+    }
+    return .{ .device = now, .host = host, .peak = if (pre_reset) peak else @max(now, peak_bytes.load(.monotonic)), .host_peak = if (pre_reset) host_peak else @max(host, host_peak_bytes.load(.monotonic)) };
 }
 
 fn held(counter: *std.atomic.Value(u64), n: usize) void {
-    const device = counter == &device_bytes;
-    if (device) lockCounts();
-    defer if (device) counts_mutex.unlock();
+    lockCounts();
+    defer counts_mutex.unlock();
     const now = counter.fetchAdd(n, .monotonic) + n;
     if (counter == &device_bytes) _ = peak_bytes.fetchMax(now, .monotonic);
+    if (counter == &host_bytes) _ = host_peak_bytes.fetchMax(now, .monotonic);
 }
 
 fn freed(counter: *std.atomic.Value(u64), n: usize) void {
-    const device = counter == &device_bytes;
-    if (device) lockCounts();
-    defer if (device) counts_mutex.unlock();
+    lockCounts();
+    defer counts_mutex.unlock();
     _ = counter.fetchSub(n, .monotonic);
 }
 
@@ -250,4 +268,75 @@ test "peak reset preserves an allocation between its read and store" {
     const after = usage(false);
     try std.testing.expectEqual(before.device + 100, after.device);
     try std.testing.expectEqual(before.device + 400, after.peak);
+}
+
+test "pinned peak retains freed transients and resets to live bytes" {
+    const before = usage(true);
+    held(&host_bytes, 40);
+    held(&host_bytes, 160);
+    freed(&host_bytes, 160);
+    try std.testing.expectEqual(before.host + 40, usage(false).host);
+    try std.testing.expectEqual(before.host + 200, usage(false).host_peak);
+    try std.testing.expectEqual(before.host + 40, usage(true).host_peak);
+    held(&host_bytes, 10);
+    freed(&host_bytes, 50);
+    try std.testing.expectEqual(before.host, usage(false).host);
+    try std.testing.expectEqual(before.host + 50, usage(false).host_peak);
+    _ = usage(true);
+}
+
+test "pinned peak reset preserves an allocation between its read and store" {
+    const before = usage(true);
+    held(&host_bytes, 100);
+    defer freed(&host_bytes, 100);
+    const Probe = struct {
+        read: std.atomic.Value(bool) = .init(false),
+        attempted: std.atomic.Value(bool) = .init(false),
+        blocked: std.atomic.Value(bool) = .init(false),
+        allocated: std.atomic.Value(bool) = .init(false),
+        finish: std.atomic.Value(bool) = .init(false),
+
+        fn wait(flag: *std.atomic.Value(bool)) void {
+            while (!flag.load(.acquire)) std.Thread.yield() catch {};
+        }
+
+        fn afterRead(probe: *@This()) void {
+            probe.read.store(true, .release);
+            wait(&probe.attempted);
+            if (!probe.blocked.load(.acquire)) wait(&probe.allocated);
+        }
+
+        fn allocate(probe: *@This()) void {
+            wait(&probe.read);
+            const acquired = counts_mutex.tryLock();
+            if (acquired) counts_mutex.unlock();
+            probe.blocked.store(!acquired, .release);
+            probe.attempted.store(true, .release);
+            held(&host_bytes, 300);
+            probe.allocated.store(true, .release);
+            wait(&probe.finish);
+            freed(&host_bytes, 300);
+        }
+    };
+    var probe: Probe = .{};
+    const thread = try std.Thread.spawn(.{}, Probe.allocate, .{&probe});
+    _ = usageWithHook(true, &probe);
+    probe.finish.store(true, .release);
+    thread.join();
+    const after = usage(false);
+    try std.testing.expectEqual(before.host + 100, after.host);
+    try std.testing.expectEqual(before.host + 400, after.host_peak);
+}
+
+test "taking an interval preserves transient peaks before resetting them" {
+    const before = usage(true);
+    held(&host_bytes, 48);
+    held(&device_bytes, 96);
+    freed(&host_bytes, 48);
+    freed(&device_bytes, 96);
+    const interval = takeUsage();
+    try std.testing.expectEqual(before.host + 48, interval.host_peak);
+    try std.testing.expectEqual(before.device + 96, interval.peak);
+    try std.testing.expectEqual(before.host, usage(false).host_peak);
+    try std.testing.expectEqual(before.device, usage(false).peak);
 }
