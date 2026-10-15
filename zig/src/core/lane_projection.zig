@@ -9,6 +9,17 @@ pub const reg_layout = "u32[N/32][K/64][2][32 lanes][4] 4-bit codes, regBlock or
 pub const metadata_layout = "bf16[K/group][N][scale,bias]";
 pub const Output = enum { bf16, f32 };
 
+/// A family's Metal text around the reg kernel: its tf_prologue, and with `epilogue` its tf_epilogue (the .metal).
+pub const Fused = struct {
+    source: []const u8,
+    defines: []const u8 = "",
+    /// Rows the prologue makes in threadgroup memory (0: X stays in device memory, the prologue writes the sums only).
+    x_rows: usize = 1,
+    epilogue: bool = false,
+    /// Threads a threadgroup takes (a multiple of 32 * sk, its tiles sharing the prologue): a reduction's fixed count.
+    threads: usize = 256,
+};
+
 pub const Format = struct {
     bits: u8,
     group: usize,
@@ -36,6 +47,8 @@ pub const Layout = struct {
     reg: bool = false,
     /// Elements between output rows (default N): a member of a fused stack writes its columns of the fused rows.
     y_stride: ?usize = null,
+    /// The reg kernel with a family's prologue and epilogue around it (every tensor-op word the same).
+    fused: ?Fused = null,
 
     pub fn validate(l: Layout) !void {
         try l.format.validate();
@@ -46,6 +59,7 @@ pub const Layout = struct {
         if (l.n == 0 or l.n % 16 != 0 or l.k == 0 or l.k % l.format.group != 0 or
             l.n > std.math.maxInt(i32) / 16 or l.k > std.math.maxInt(i32) / 16) return error.InvalidShape;
         if (l.sk == 0 or l.sk > 32 or (l.pf != 1 and l.pf != 2)) return error.InvalidSchedule;
+        if (l.fused) |f| if (!l.reg or f.threads == 0 or f.threads > 1024 or f.threads % (32 * l.sk) != 0 or l.tileCount() % l.tilesPerGroup() != 0 or f.x_rows > 16) return error.InvalidFusedShape;
         const g = l.groupCut();
         if (g[1] == 0 or g[0] >= l.k / l.format.group or g[1] > l.k / l.format.group - g[0]) return error.InvalidGroupCut;
         if (l.groups != null and l.output != .f32) return error.PartialOutputNeedsFloat;
@@ -76,7 +90,14 @@ pub const Layout = struct {
     }
 
     pub fn threadgroupBytes(l: Layout) usize {
-        return l.sk * 32 * l.format.group + @max(l.sk -| 1, 1) * 16 * 32 * @sizeOf(f32);
+        const part = l.tilesPerGroup() * @max(l.sk -| 1, 1) * 16 * 32 * @sizeOf(f32);
+        if (l.fused) |f| return part + f.x_rows * l.k * 2 + (l.k / l.format.group + 16) * 4 + 16 * 4;
+        return if (l.reg) part else l.sk * 32 * l.format.group + part; // the reg kernel holds no code tile
+    }
+
+    /// Tiles a threadgroup takes: one, or for a fused pipeline enough for its threads to share the prologue.
+    pub fn tilesPerGroup(l: Layout) usize {
+        return if (l.fused) |f| f.threads / (32 * l.sk) else 1;
     }
 
     pub fn weightWords(l: Layout) usize {
@@ -115,6 +136,11 @@ pub fn source(a: std.mem.Allocator, l: Layout) ![]u8 {
     try text.print(a, "#define TF_PRECOMPUTE_SUMS {d}\n", .{@intFromBool(l.precompute_sums)});
     if (l.reg) try text.appendSlice(a, "#define TF_REG 1\n");
     if (l.y_stride) |s| try text.print(a, "#define TF_YS {d}\n", .{s});
+    if (l.fused) |f| {
+        try text.print(a, "#define TF_FUSED 1\n#define TF_TPT {d}\n#define TF_XROWS {d}\n#define TF_THREADS {d}\n{s}{s}", .{ l.tilesPerGroup(), f.x_rows, f.threads, if (f.epilogue) "#define TF_EPILOGUE 1\n" else "", f.defines });
+        try text.appendSlice(a, "struct tf_fused { const device bfloat* a0; const device bfloat* a1; const device bfloat* a2; const device bfloat* a3; const device bfloat* a4; const device bfloat* a5; device bfloat* o0; device bfloat* o1; float4 f; int4 i; };\n");
+        try text.appendSlice(a, f.source);
+    }
     try text.appendSlice(a, ks.core_lane_projection);
     return text.toOwnedSlice(a);
 }
@@ -232,6 +258,10 @@ pub const Projection = struct {
     sums_buffer: ?mtl.Buffer = null,
     threads_per_slice: usize = 32,
     reg: bool = false,
+    /// Tiles a threadgroup takes, its threads, and the rows a fused encode takes (0: not fused).
+    tpt: usize = 1,
+    threads: usize = 32,
+    fused_rows: usize = 0,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, l: Layout) !Projection {
         try l.validate();
@@ -252,7 +282,7 @@ pub const Projection = struct {
             errdefer sums_pipe.?.deinit();
             sums_buffer = try device.buffer(@as(usize, if (l.reg) reg_rows else 16) * (l.k / l.format.group) * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         }
-        return .{ .pipe = p, .n = l.n, .k = l.k, .group_count = l.k / l.format.group, .weight_bytes = l.weightWords() * 4, .metadata_bytes = l.metadataElements() * 2, .output_bytes = if (l.output == .f32) 4 else 2, .y_stride = l.y_stride orelse l.n, .tile_count = l.tiles(), .sk = l.sk, .sums_pipe = sums_pipe, .sums_buffer = sums_buffer, .threads_per_slice = if (l.cooperative) 64 else 32, .reg = l.reg };
+        return .{ .pipe = p, .n = l.n, .k = l.k, .group_count = l.k / l.format.group, .weight_bytes = l.weightWords() * 4, .metadata_bytes = l.metadataElements() * 2, .output_bytes = if (l.output == .f32) 4 else 2, .y_stride = l.y_stride orelse l.n, .tile_count = l.tiles(), .sk = l.sk, .sums_pipe = sums_pipe, .sums_buffer = sums_buffer, .threads_per_slice = if (l.cooperative) 64 else 32, .reg = l.reg, .tpt = l.tilesPerGroup(), .threads = if (l.fused) |f| f.threads else 32 * l.sk, .fused_rows = if (l.fused) |f| (if (f.x_rows > 0) f.x_rows else 16) else 0 };
     }
 
     pub fn deinit(p: Projection) void {
@@ -274,7 +304,30 @@ pub const Projection = struct {
         return p.encodeImpl(e, x, w, sb, sums, y, rows);
     }
 
+    /// A fused pipeline's one encode: the prologue's inputs, the outputs it writes, and its constants.
+    pub fn encodeFused(p: Projection, e: mtl.ComputeEncoder, x: Ref, w: Ref, sb: Ref, y: Ref, args: FusedArgs, rows: u32) !void {
+        if (p.fused_rows == 0) return error.NotFused;
+        if (rows == 0 or rows > p.fused_rows) return error.InvalidRows;
+        try checkRef(x, rows * p.k * 2, 2);
+        try checkRef(w, p.weight_bytes, 16);
+        try checkRef(sb, p.metadata_bytes, 16);
+        try checkRef(y, ((rows - 1) * p.y_stride + p.n) * p.output_bytes, p.output_bytes);
+        e.setPipeline(p.pipe);
+        e.setBuffer(x.buf, x.off, 0);
+        e.setBuffer(w.buf, w.off, 1);
+        e.setBuffer(sb.buf, sb.off, 2);
+        e.setValue([2]i32{ @intCast(rows), 1 }, 3);
+        e.setBuffer(y.buf, y.off, 4);
+        e.setBuffer(x.buf, x.off, 5); // the sums come from the prologue
+        for (args.a, 6..) |r, i| e.setBuffer(r.buf, r.off, i);
+        for (args.o, 12..) |r, i| e.setBuffer(r.buf, r.off, i);
+        e.setValue(args.f, 14);
+        e.setValue(args.i, 15);
+        e.dispatchGroups(mtl.Size.of(p.tile_count / p.tpt, 1, 1), mtl.Size.of(p.threads, 1, 1));
+    }
+
     fn encodeImpl(p: Projection, e: mtl.ComputeEncoder, x: Ref, w: Ref, sb: Ref, given: ?Sums, y: Ref, rows: u32) !void {
+        if (p.fused_rows != 0) return error.FusedPipeline;
         if (rows == 0 or rows > @as(u32, if (p.reg) reg_rows else 16)) return error.InvalidRows;
         const blocks = (rows + 15) / 16;
         const stride: u32 = if (given) |g| g.stride else 16 * blocks;
@@ -308,6 +361,9 @@ pub const reg_rows = 128;
 
 /// Group sums of a projection's input: XS[group * stride + row], fp32, each group's values added in order from zero.
 pub const Sums = struct { ref: Ref, stride: u32 };
+
+/// What a fused encode binds for its prologue and epilogue: six inputs, two outputs, four floats and four ints.
+pub const FusedArgs = struct { a: [6]Ref, o: [2]Ref, f: [4]f32 = .{ 0, 0, 0, 0 }, i: [4]i32 = .{ 0, 0, 0, 0 } };
 
 fn checkRef(r: Ref, need: usize, alignment: usize) !void {
     if (r.off % alignment != 0) return error.MisalignedBuffer;

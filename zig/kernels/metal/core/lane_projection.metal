@@ -276,36 +276,79 @@ uint group_id [[simdgroup_index_in_threadgroup]],uint lane [[thread_index_in_sim
 #if TF_BITS == 4 && defined(TF_REG)
 struct tf_reg_load { uint4 w0, w1, q0, q1; float x0, x1; }; // a lane's codes, its two metadata quads and its two row sums for one group
 
-inline tf_reg_load tf_reg_fetch(const device uint4* wl, const device uint4* sbv, const device float* XS, int g, int n, int m, int stride) {
-  return {wl[(size_t)g * 64], wl[(size_t)g * 64 + 32], sbv[((size_t)g * TF_N + n) / 4], sbv[((size_t)g * TF_N + n + 16) / 4], XS[g * stride + m], XS[g * stride + m + 8]};
+inline tf_reg_load tf_reg_fetch_w(const device uint4* wl, const device uint4* sbv, int g, int n) {
+  return {wl[(size_t)g * 64], wl[(size_t)g * 64 + 32], sbv[((size_t)g * TF_N + n) / 4], sbv[((size_t)g * TF_N + n + 16) / 4], 0.0f, 0.0f};
 }
+
+template <typename XSP>
+inline void tf_reg_sums(thread tf_reg_load& l, XSP XS, int g, int m, int stride) {
+  l.x0 = XS[g * stride + m];
+  l.x1 = XS[g * stride + m + 8];
+}
+
+template <typename XSP>
+inline tf_reg_load tf_reg_fetch(const device uint4* wl, const device uint4* sbv, XSP XS, int g, int n, int m, int stride) {
+  tf_reg_load l = tf_reg_fetch_w(wl, sbv, g, n);
+  tf_reg_sums(l, XS, g, m, stride);
+  return l;
+}
+
+#ifndef TF_TPT
+#define TF_TPT 1
+#endif
+// TF_FUSED (Fused in lane_projection.zig): a family's prologue makes the row and its sums under the first weight fetch.
 
 // tf_lane's arithmetic with codes unpacked straight into tensor-op registers: every word equals tf_lane_pair's.
 [[kernel]] void tf_lane_reg(const device bfloat* X [[buffer(0)]], const device uint4* W [[buffer(1)]], const device bfloat* SB [[buffer(2)]],
     const device int* mdims [[buffer(3)]], device TF_OUT* Y [[buffer(4)]], const device float* XS [[buffer(5)]],
+#ifdef TF_FUSED
+    const device bfloat* A0 [[buffer(6)]], const device bfloat* A1 [[buffer(7)]], const device bfloat* A2 [[buffer(8)]],
+    const device bfloat* A3 [[buffer(9)]], const device bfloat* A4 [[buffer(10)]], const device bfloat* A5 [[buffer(11)]],
+    device bfloat* O0 [[buffer(12)]], device bfloat* O1 [[buffer(13)]], constant float4& F [[buffer(14)]], constant int4& I [[buffer(15)]],
+#endif
     uint sgi [[simdgroup_index_in_threadgroup]], uint lanei [[thread_index_in_simdgroup]], uint2 tg [[threadgroup_position_in_grid]]) {
   const int r0 = int(tg.y) * 16, rows = mdims[0] - r0;
   if (rows <= 0) return;
   X += (size_t)r0 * TF_K;
   Y += (size_t)r0 * TF_YS;
   XS += r0;
-  const int lane = int(lanei), ks = int(sgi), M = min(rows, 16), stride = mdims[1], tile = tf_tile(int(tg.x)), n0 = tile * NT;
+  const int lane = int(lanei), ks = int(sgi) % TF_SK, M = min(rows, 16), stride = mdims[1];
+  const int tile = tf_tile(int(tg.x) * TF_TPT + int(sgi) / TF_SK), n0 = tile * NT, tp = int(sgi) / TF_SK;
   const int nb = 4 * (lane & 1) + 8 * ((lane >> 3) & 1), mb = ((lane >> 1) & 3) + 4 * ((lane >> 4) & 1);
   const int first = TF_G0 + (ks * TF_GN) / TF_SK, last = TF_G0 + ((ks + 1) * TF_GN) / TF_SK;
   constexpr auto desc = matmul2d_descriptor(16, NT, GS, false, true, false, matmul2d_descriptor::mode::multiply);
   matmul2d<desc, execution_simdgroup> op;
+  const device uint4* wl = W + (size_t)tile * KG * 64 + lane;
+  const device uint4* sbv = (const device uint4*)SB;
+  tf_reg_load next = {};
+  if (first < last) next = tf_reg_fetch_w(wl, sbv, first, n0 + nb); // the first weights fly while any prologue runs
+#ifdef TF_FUSED
+  const tf_fused fa = {A0, A1, A2, A3, A4, A5, O0, O1, F, I};
+  threadgroup bfloat xs[TF_XROWS > 0 ? TF_XROWS * TF_K : 1];
+  threadgroup float xsum[KG + 16]; // one row's sums; the 16 past the end feed the discarded rows' lanes
+  threadgroup float pscratch[16]; // the prologue's reduction partials
+  const uint tid = sgi * 32 + lanei;
+  if (tid < 16) xsum[KG + tid] = 0.0f;
+  tf_prologue(fa, X, xs, xsum, pscratch, tg.x == 0, tid); // args, X, row, sums, scratch, first group, thread
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const threadgroup float* xsp = xsum;
+#if TF_XROWS > 0
+  tensor<threadgroup bfloat, dextents<int32_t, 2>, tensor_inline> a(xs, dextents<int32_t, 2>(TF_K, M));
+#else
   tensor<device bfloat, dextents<int32_t, 2>, tensor_inline> a((device bfloat*)X, dextents<int32_t, 2>(TF_K, M));
+#endif
+#else
+  const device float* xsp = XS;
+  tensor<device bfloat, dextents<int32_t, 2>, tensor_inline> a((device bfloat*)X, dextents<int32_t, 2>(TF_K, M));
+#endif
   auto a0 = a.slice(0, 0);
   auto cb = op.template get_right_input_cooperative_tensor<bfloat, half, float>();
   auto P = op.template get_destination_cooperative_tensor<metal::remove_addrspace_t<decltype(a0)>, metal::remove_addrspace_t<decltype(cb)>, float>();
   thread half2* b2 = (thread half2*)&cb[0];
-  const device uint4* wl = W + (size_t)tile * KG * 64 + lane;
-  const device uint4* sbv = (const device uint4*)SB;
   const half2 bias = half2(1024.0h);
   float C[16];
   for (int i = 0; i < 16; i++) C[i] = 0.0f;
-  tf_reg_load next = {};
-  if (first < last) next = tf_reg_fetch(wl, sbv, XS, first, n0 + nb, mb, stride);
+  if (first < last) tf_reg_sums(next, xsp, first, mb, stride);
   for (int g = first; g < last; g++) {
     const tf_reg_load cur = next;
     for (int w = 0; w < 8; w++) {
@@ -317,7 +360,7 @@ inline tf_reg_load tf_reg_fetch(const device uint4* wl, const device uint4* sbv,
       b2[e + 8] = as_type<half2>(((lo >> 8) & 0x00FF00FFu) | 0x64006400u) - bias;
       b2[e + 9] = as_type<half2>(((hi >> 8) & 0x00FF00FFu) | 0x64006400u) - bias;
     }
-    if (g + 1 < last) next = tf_reg_fetch(wl, sbv, XS, g + 1, n0 + nb, mb, stride);
+    if (g + 1 < last) next = tf_reg_fetch(wl, sbv, xsp, g + 1, n0 + nb, mb, stride);
     auto x = a.slice(g * GS, 0);
     op.run(x, cb, P);
     for (int j = 0; j < 4; j++) {
@@ -329,16 +372,20 @@ inline tf_reg_load tf_reg_fetch(const device uint4* wl, const device uint4* sbv,
       C[12 + j] = fma(s1, P[12 + j], fma(b1, cur.x1, C[12 + j]));
     }
   }
-  threadgroup float part[(TF_SK > 1 ? TF_SK - 1 : 1) * 16 * 32];
+  threadgroup float part[TF_TPT * (TF_SK > 1 ? TF_SK - 1 : 1) * 16 * 32];
   if (TF_SK > 1) {
-    if (ks > 0) for (int i = 0; i < 16; i++) part[((ks - 1) * 16 + i) * 32 + lane] = C[i];
+    if (ks > 0) for (int i = 0; i < 16; i++) part[((tp * (TF_SK - 1) + ks - 1) * 16 + i) * 32 + lane] = C[i];
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (ks == 0) for (int s2 = 1; s2 < TF_SK; s2++) for (int i = 0; i < 16; i++) C[i] += part[((s2 - 1) * 16 + i) * 32 + lane];
+    if (ks == 0) for (int s2 = 1; s2 < TF_SK; s2++) for (int i = 0; i < 16; i++) C[i] += part[((tp * (TF_SK - 1) + s2 - 1) * 16 + i) * 32 + lane];
   }
-  if (ks == 0)
-    for (int i = 0; i < 16; i++) {
-      const int m = mb + 8 * ((i >> 2) & 1), n = n0 + nb + 16 * (i >> 3) + (i & 3);
-      if (m < M && n < TF_N) Y[(size_t)m * TF_YS + n] = static_cast<TF_OUT>(C[i]);
-    }
+  if (ks != 0) return;
+#ifdef TF_EPILOGUE
+  tf_epilogue(fa, C, M, mb, n0 + nb, tile, Y); // the family's store of the lane's 16 accumulators
+#else
+  for (int i = 0; i < 16; i++) {
+    const int m = mb + 8 * ((i >> 2) & 1), n = n0 + nb + 16 * (i >> 3) + (i & 3);
+    if (m < M && n < TF_N) Y[(size_t)m * TF_YS + n] = static_cast<TF_OUT>(C[i]);
+  }
+#endif
 }
 #endif

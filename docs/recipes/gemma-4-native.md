@@ -16,7 +16,8 @@ zig-out/native/bin/tensorfold-native serve "$HOME/models/gemma-4-31b" --port 888
   --drafter "$HOME/models/gemma-4-31b-dflash"
 ```
 
-Without `--drafter` the model decodes plain, at about 43 tokens a second for one stream. With z-lab's DFlash drafter
+Without `--drafter` the model decodes plain, at about 49 tokens a second for one stream at short context (mlx-lm 46)
+and 40 at 32k. With z-lab's DFlash drafter
 a stream decodes at 150-190 tokens a second (6-7 accepted tokens a round on chat and code, 10 on copying replies,
 2 on open-ended prose), with the same tokens.
 
@@ -31,11 +32,17 @@ decode kernels (gilby's `gemma4-dense` branch, #360, built on cshintov's Gemma k
 points, and MLX's own ops where that reference calls them: the looped RMS norm, the 4-bit embedding times its bf16
 scale, `geglu` and the soft-cap as bf16 ops, and the global layers' RoPE frequencies from MLX's precise `pow`.
 Each output equals the reference's bit for bit at 1, 2 and 16 rows (`tf-gemma4-kernels`, `tf-gemma4-glue`, on
-fixtures from `tools/zig/gemma4_dump.py`).
+fixtures from `tools/zig/gemma4_dump.py`) at the reference's K split. Decode takes each shape's fastest split instead
+(`weights.splitK`: 4 for o and down, 8 for the gate/up stack and the head), another fp32 summation order: at one row a
+handful of outputs a linear move by one bf16 step (5 of 43,008 on gate_up, 99 of 262,144 on the head, none on qkv).
 
 A stream keeps a ring of window + 512 slots for each sliding layer and a buffer for each global one; rolling back is
 moving the cache's length. A decode forward takes up to 16 rows of one stream and 128 of several, and every row keeps
-its bits. Prompts run in chunks of 512 rows on `core/affine_mm` and a tensor-unit attention kernel, at about 1,360
+its bits. A one-row window runs seven dispatches a layer rather than ten: the previous layer's dense tail is the qkv
+projection's prologue, the attention tail the gate/up projection's with geglu as its epilogue (the stack's rows
+interleaved in 16-row blocks, so a lane holds a gate column and its up column), and the down projection sums its own
+input (`zig/kernels/metal/gemma4/fused.metal` on the lane core's `Fused` hook), the same bits as the kernels apart.
+Prompts run in chunks of 512 rows on `core/affine_mm` and a tensor-unit attention kernel, at about 1,360
 tokens a second at 8k, 1,200 at 32k and 560 at 252k.
 
 The drafter is z-lab's DFlash (`zig/src/families/gemma4/dflash.zig`): five Qwen3-style layers reading six of the
@@ -73,20 +80,19 @@ zig-out/bin/tf-gemma4-run M L NL 49 512 && python tools/zig/gemma4_gate.py check
 ```
 
 - Four chat prompts, 128 greedy tokens, prompts fed one row at a time or in windows of 16: three equal the oracle
-  token for token; the code prompt parts at its third token, where the oracle's top two logits are one bf16 step apart
-  and the native run ties them (its decode attention sums 256-key chunks in its own order). Every row keeps its bits
-  at any window width and beside other streams' rows.
+  token for token; the story prompt parts at token 56, where the native run ties the oracle's top two (24.5 and 24.5,
+  the oracle 24.5 and 24.375) and takes the lower id. Every row keeps its bits at any window width and beside other
+  streams' rows.
 - Long prompts against the oracle's mlx-lm prompt forward (fed in 2048-token chunks, as `mlx_lm.generate` feeds a
-  prompt), 49 greedy tokens each: equal at 32k and 64k. At 8k, 128k and 252k the two part at tokens 25, 30 and 45,
-  each where mlx-lm's top two logits are equal (28.25, 26.25 and 28.625); the native run puts them 0.125, 0.625 and
-  0.125 apart.
+  prompt), 49 greedy tokens each: equal at 32k, 64k and 252k. At 8k and 128k the two part at tokens 25 and 30, each
+  where mlx-lm's top two logits are equal (28.25 and 26.25); the native run puts them 0.125 and 0.75 apart.
 - The lane core: copy-drafted and DFlash-drafted streams, alone and 4 and 8 in shared rounds, equal the engine's
   plain replies token for token, on the four prompts and on two copy-heavy ones.
 - Served on an M5 Ultra with the drafter: greedy token SHAs equal the engine's receipts alone, with drafts off and on,
   and four at once; thinking replies keep their reasoning apart, and tool calls parse.
 
 With the drafter, one stream decodes at 150-190 tokens a second (6.4, 6.4, 2.1 and 6.7 tokens a round on the four
-prompts; 10.2 and 7.8 on copying replies) and eight streams at about 210 together. Plain decode is 43 tokens a second
+prompts; 10.2 and 7.8 on copying replies) and eight streams at about 210 together. Plain decode is 49 tokens a second
 for one stream. The drafts match z-lab's own MLX drafter's acceptance. Shared rounds draft shallow on purpose: past 16
 rows the forward is bound by tensor-op compute at about 0.8 ms a row (40 ms at 32 rows, 71 at 64, 130 at 128, the
 same rate as the prompt path and mlx-lm's), so the depth rule, given those costs, finds deeper shared drafts do not
@@ -97,11 +103,11 @@ Long prompts, one after the other on the same M5 Ultra: native in 512-row chunks
 
 | Prompt | Native prompt tok/s | mlx-lm prompt tok/s | Native decode tok/s | mlx-lm decode tok/s |
 |---|---|---|---|---|
-| 8k | 1362 | 1305 | about 35 | 39 |
-| 32k | 1202 | 1139 | about 33 | 32 |
-| 64k | 1047 | 944 | about 29 | 32 |
-| 128k | 892 | 651 | about 24 | 25 |
-| 252k | 564 | 440 | about 18 | 16 |
+| 8k | 1385 | 1305 | about 38 | 39 |
+| 32k | 1241 | 1139 | about 35 | 32 |
+| 64k | 1072 | 944 | about 33 | 32 |
+| 128k | 882 | 651 | about 27 | 25 |
+| 252k | 570 | 440 | about 20 | 16 |
 
 Prompt attention takes 32 query rows of a head a threadgroup: each simdgroup scores 32 keys of a block over the whole
 head and accumulates its own 64 output columns, the row maxes and fp32 probabilities crossing threadgroup memory 128
@@ -113,4 +119,12 @@ times code plus bias in fp32, rounded once, as mlx-lm's quantized matmul does) a
 the whole depth: a 512-row chunk's 60 layers take 284 ms there (mlx-lm's quantized matmuls 302), where the exact-codes
 design, its per-group scale and bias epilogue and its row-sums pass took 344. So the prompt path rounds its weights as
 mlx-lm does while the decode path's lane kernels keep the codes exact: over 40 tokens their last-row logits part by up
-to 1.4 (0.8 with exact codes in both).
+to 0.8.
+
+A plain token at short context is 20.3 ms on the M5 Ultra (mlx-lm 21.6), where it was 23.7: the 241 projections read
+17.3 GB in about 18 ms at the decode splits, 20.3 at the reference's (the 168-tile o and down projections ran two
+waves of 256-thread groups at a split of 8 and one wave at 4; the gate/up stack and the head streamed 84-group chains
+at 1, eight times the simdgroups at 8), the attention's 120 dispatches take 0.9 ms and the glue's 0.7, which running
+as the projections' prologues shortens by 0.2: a prologue costs what the tail kernel cost, and only the dispatch gap
+goes. `tf-gemma4-bench` prints the stages (`GEMMA_DSTAGES`), each shape plain and fused (`GEMMA_FUSED`) and the glue
+kernels alone (`GEMMA_GLUE`).

@@ -292,6 +292,7 @@ fn tailsCheck(c: *Ctx, kd: *const g4.kernels.Kind, prefix: []const u8, lp: []con
             e.setValue(@as(u32, cfg.intermediate), 2);
             e.setBuffer(s.act, 0, 3);
             e.setValue(@as(i32, 0), 4);
+            e.setValue(@as(i32, 0), 5);
             e.dispatchGroups(.{ .width = cfg.intermediate / 64, .height = s.rows }, .{ .width = 64 });
         }
     }{ .kd = kd, .gu = gu.b, .act = act, .rows = rows });

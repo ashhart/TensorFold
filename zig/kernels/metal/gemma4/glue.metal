@@ -321,12 +321,13 @@ kernel void gemma_dense_tail(const device bfloat* H [[buffer(0)]], const device 
   gemma_row_sums(NEXT + int(r) * D, D, XS, xst, int(r), t, T);
 }
 
-// mlx_lm's geglu as MLX's bf16 ops, constants weak-typed: 64 threads a group, its sum added in order by thread 0.
+// mlx_lm's geglu as MLX's bf16 ops; IL: gate and up columns in interleaved 16-wide blocks, else two halves.
 kernel void gemma_geglu(const device bfloat* GU [[buffer(0)]], device bfloat* ACT [[buffer(1)]],
                         constant uint& n [[buffer(2)]], device float* XS [[buffer(3)]], constant int& xst [[buffer(4)]],
-                        uint2 tg [[threadgroup_position_in_grid]], uint2 tp [[thread_position_in_threadgroup]]) {
+                        constant int& IL [[buffer(5)]], uint2 tg [[threadgroup_position_in_grid]], uint2 tp [[thread_position_in_threadgroup]]) {
   const uint g = tg.x, r = tg.y, i = tp.x, c = g * 64 + i;
-  const bfloat x = GU[size_t(r) * 2 * n + c], up = GU[size_t(r) * 2 * n + n + c];
+  const uint gi = IL ? 32 * (c / 16) + c % 16 : c, ui = IL ? gi + 16 : n + c;
+  const bfloat x = GU[size_t(r) * 2 * n + gi], up = GU[size_t(r) * 2 * n + ui];
   const bfloat cube = bfloat(metal::pow(float(x), 3.0f));
   const bfloat inner = bfloat(float(x) + float(bfloat(float(bfloat(GELU_C1)) * float(cube))));
   const bfloat th = bfloat(metal::precise::tanh(float(bfloat(float(bfloat(GELU_C0)) * float(inner)))));

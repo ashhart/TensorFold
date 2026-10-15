@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const ckpt = @import("../../core/checkpoint_metal.zig");
 const lane = @import("../../core/lane_projection.zig");
+const ks = @import("kernel_sources");
 const cfg = @import("config.zig");
 
 const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
@@ -33,16 +34,34 @@ pub const Layer = struct {
 };
 
 /// Python's lane_qmm.split_k: K slices fixed by the weight's shape, so every window width keeps one summation order.
-pub fn splitK(n: usize, k: usize) usize {
+pub fn referenceSplit(n: usize, k: usize) usize {
     const tiles = (n + 31) / 32;
     var sk: usize = 1;
     while (sk < 8 and tiles * sk < 1024 and (k / 64) / (sk * 2) >= 8) sk *= 2;
     return sk;
 }
 
-/// The reg kernel (4-bit groups of 64 in tensor-op registers, up to 128 rows a weight read): lane_qmm's bits.
+/// The split each shape streams fastest at on one row (tf-gemma4-bench GEMMA_FUSED), not the reference's order.
+pub fn splitK(n: usize, k: usize) usize {
+    if (k == cfg.hidden and n >= 2 * cfg.intermediate) return 8; // the gate/up stack and the head: 84-group chains at 1
+    if (n == cfg.hidden) return 4; // o and down, 168 tiles: two waves of 256-thread groups at 8
+    return referenceSplit(n, k);
+}
+
+/// The reg kernel (4-bit groups of 64 in tensor-op registers, up to 128 rows a weight read): lane_qmm's words.
 pub fn layout(n: usize, k: usize) lane.Layout {
     return .{ .n = n, .k = k, .format = .{ .bits = cfg.bits, .group = cfg.group }, .sk = splitK(n, k), .precompute_sums = true, .reg = true };
+}
+
+/// The same kernel with a layer's glue as its prologue (gemma4/fused.metal's TF_FUSE kinds) for one-row windows.
+pub fn fusedLayout(n: usize, k: usize, fuse: u8) lane.Layout {
+    var l = layout(n, k);
+    l.fused = .{ .source = ks.gemma4_fused, .defines = switch (fuse) {
+        1 => "#define TF_FUSE 1\n",
+        2 => "#define TF_FUSE 2\n",
+        else => "#define TF_FUSE 3\n",
+    }, .x_rows = if (fuse == 3) 0 else 1, .epilogue = fuse == 2, .threads = if (fuse == 3) 32 * l.sk else 256 };
+    return l;
 }
 
 pub const Weights = struct {
@@ -83,8 +102,8 @@ fn ref(c: *const ckpt.Checkpoint, name: []const u8) !Ref {
     return .{ .buf = t.buffer, .off = t.offset };
 }
 
-/// The members' MLX affine tensors stacked along N and packed into the lane layout (bytes unchanged, no dequant).
-fn pack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, owned: *std.ArrayList(mtl.Buffer), prefix: []const u8, members: []const []const u8) !Linear {
+/// The members' MLX tensors stacked along N into the lane layout; `interleave`: two members in alternate 16-row blocks.
+fn pack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, owned: *std.ArrayList(mtl.Buffer), prefix: []const u8, members: []const []const u8, interleave: bool) !Linear {
     var name: [160]u8 = undefined;
     var n: usize = 0;
     var k: usize = 0;
@@ -101,16 +120,22 @@ fn pack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, o
     defer gpa.free(scales);
     const biases = try gpa.alloc(u16, n * k / cfg.group);
     defer gpa.free(biases);
+    if (interleave and (members.len != 2 or n % 32 != 0)) return error.BadGemmaWeight;
     var row: usize = 0;
-    for (members) |m| {
+    for (members, 0..) |m, mi| {
         const w = (try c.get(try std.fmt.bufPrint(&name, "{s}{s}.weight", .{ prefix, m }))).host(u32);
         const s = (try c.get(try std.fmt.bufPrint(&name, "{s}{s}.scales", .{ prefix, m }))).host(u16);
         const b = (try c.get(try std.fmt.bufPrint(&name, "{s}{s}.biases", .{ prefix, m }))).host(u16);
         if (s.len != b.len or s.len * cfg.group != w.len * 8) return error.BadGemmaWeight;
-        @memcpy(words[row * k / 8 ..][0..w.len], w);
-        @memcpy(scales[row * k / cfg.group ..][0..s.len], s);
-        @memcpy(biases[row * k / cfg.group ..][0..b.len], b);
-        row += w.len * 8 / k;
+        const rows = w.len * 8 / k;
+        if (interleave and rows != n / 2) return error.BadGemmaWeight;
+        for (0..rows) |r| {
+            const dst = if (interleave) 32 * (r / 16) + 16 * mi + r % 16 else row + r;
+            @memcpy(words[dst * k / 8 ..][0 .. k / 8], w[r * k / 8 ..][0 .. k / 8]);
+            @memcpy(scales[dst * k / cfg.group ..][0 .. k / cfg.group], s[r * k / cfg.group ..][0 .. k / cfg.group]);
+            @memcpy(biases[dst * k / cfg.group ..][0 .. k / cfg.group], b[r * k / cfg.group ..][0 .. k / cfg.group]);
+        }
+        row += rows;
     }
     return packArrays(gpa, device, owned, words, scales, biases, n, k);
 }
@@ -138,17 +163,17 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoin
     for (&w.layers, 0..) |*l, i| {
         const pre = try std.fmt.bufPrint(&p, "language_model.model.layers.{d}.", .{i});
         const qkv: []const []const u8 = if (cfg.global(i)) &.{ "self_attn.q_proj", "self_attn.k_proj" } else &.{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj" };
-        l.qkv = try pack(gpa, device, c, &w.owned, pre, qkv);
-        l.o = try pack(gpa, device, c, &w.owned, pre, &.{"self_attn.o_proj"});
-        l.gate_up = try pack(gpa, device, c, &w.owned, pre, &.{ "mlp.gate_proj", "mlp.up_proj" });
-        l.down = try pack(gpa, device, c, &w.owned, pre, &.{"mlp.down_proj"});
+        l.qkv = try pack(gpa, device, c, &w.owned, pre, qkv, false);
+        l.o = try pack(gpa, device, c, &w.owned, pre, &.{"self_attn.o_proj"}, false);
+        l.gate_up = try pack(gpa, device, c, &w.owned, pre, &.{ "mlp.gate_proj", "mlp.up_proj" }, true);
+        l.down = try pack(gpa, device, c, &w.owned, pre, &.{"mlp.down_proj"}, false);
         for (&l.mlx, [_][]const u8{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj" }) |*x, member| {
             x.* = if (cfg.global(i) and std.mem.eql(u8, member, "self_attn.v_proj")) l.mlx[1] else try mlxCopy(gpa, device, c, &w.owned, pre, member); // global layers: no v_proj, never read
         }
         inline for (.{ "q_norm", "k_norm", "input_norm", "post_attention", "pre_feedforward", "post_feedforward", "scalar" }, .{ "self_attn.q_norm.weight", "self_attn.k_norm.weight", "input_layernorm.weight", "post_attention_layernorm.weight", "pre_feedforward_layernorm.weight", "post_feedforward_layernorm.weight", "layer_scalar" }) |field, t|
             @field(l, field) = try ref(c, try std.fmt.bufPrint(&name, "{s}{s}", .{ pre, t }));
     }
-    w.head = try pack(gpa, device, c, &w.owned, "language_model.model.", &.{"embed_tokens"});
+    w.head = try pack(gpa, device, c, &w.owned, "language_model.model.", &.{"embed_tokens"}, false);
     w.embed_w = try ref(c, "language_model.model.embed_tokens.weight");
     w.embed_s = try ref(c, "language_model.model.embed_tokens.scales");
     w.embed_b = try ref(c, "language_model.model.embed_tokens.biases");
@@ -156,14 +181,19 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoin
     return w;
 }
 
-/// The lane pipelines, one per distinct (n, k): the 31B has seven.
+/// The lane pipelines, one per distinct (n, k): the 31B has seven, and four fused ones for one-row windows.
 pub const Projections = struct {
-    list: std.ArrayList(struct { n: usize, k: usize, p: lane.Projection }) = .empty,
+    list: std.ArrayList(struct { n: usize, k: usize, fuse: u8, p: lane.Projection }) = .empty,
 
     pub fn get(ps: *Projections, gpa: std.mem.Allocator, device: mtl.Device, n: usize, k: usize) !lane.Projection {
-        for (ps.list.items) |e| if (e.n == n and e.k == k) return e.p;
-        const p = try lane.Projection.init(gpa, device, layout(n, k));
-        try ps.list.append(gpa, .{ .n = n, .k = k, .p = p });
+        return ps.getFused(gpa, device, n, k, 0);
+    }
+
+    /// `fuse`: a gemma4/fused.metal prologue kind, or 0 for the plain kernel.
+    pub fn getFused(ps: *Projections, gpa: std.mem.Allocator, device: mtl.Device, n: usize, k: usize, fuse: u8) !lane.Projection {
+        for (ps.list.items) |e| if (e.n == n and e.k == k and e.fuse == fuse) return e.p;
+        const p = try lane.Projection.init(gpa, device, if (fuse == 0) layout(n, k) else fusedLayout(n, k, fuse));
+        try ps.list.append(gpa, .{ .n = n, .k = k, .fuse = fuse, .p = p });
         return p;
     }
 

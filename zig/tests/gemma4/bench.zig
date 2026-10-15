@@ -69,6 +69,88 @@ fn promptStages(m: *g4.Model) !void {
     }
 }
 
+/// A decode window's 60 layers at a cache depth, by stage: GPU ms for all, the projections, the attention, the glue.
+fn decodeStages(m: *g4.Model) !void {
+    const cap: usize = 32768 + 1024;
+    var s = try g4.state.Scratch.init(m.device, cap);
+    defer s.deinit();
+    var c = try g4.state.Cache.init(m.device, cap);
+    defer c.deinit();
+    const names = [_][]const u8{ "all", "projections", "attention", "glue", "no attention" };
+    const masks = [_]g4.forward.Stages{ .{}, .{ .attn = false, .glue = false }, .{ .mm = false, .glue = false }, .{ .mm = false, .attn = false }, .{ .attn = false } };
+    const fuse = std.c.getenv("GEMMA_NO_FUSE") == null;
+    const rows: usize = if (std.c.getenv("GEMMA_ROWS")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 1 else 1;
+    var ids: [128]u32 = undefined;
+    for (&ids, 0..) |*t, i| t.* = @intCast(1000 + i);
+    for ([_]usize{ 0, 8192, 32768 }) |depth| {
+        for (names, masks) |name, st| {
+            var best: f64 = 1e9;
+            for (0..3) |_| {
+                c.len = depth;
+                const seg = [_]g4.forward.Segment{.{ .cache = &c, .rows = rows }};
+                var chunks: g4.forward.Chunks = undefined;
+                g4.forward.prepare(&s, &seg, ids[0..rows], &chunks);
+                const cb = m.queue.commandBuffer();
+                const e = cb.compute(.serial);
+                for (0..cfg.layers) |i| try g4.forward.layer(m, e, &s, &seg, &chunks, i, i % 2, rows, st, fuse and rows == 1 and st.mm and st.glue);
+                e.end();
+                cb.commit();
+                cb.wait();
+                best = @min(best, gpuMs(cb));
+            }
+            std.debug.print("decode window of {d} rows at depth {d}, {s}{s}: {d:.2} ms GPU\n", .{ rows, depth, name, if (fuse) " (fused)" else "", best });
+        }
+    }
+}
+
+/// Each decode projection kind at one row over the 60 layers' weights, plain and fused: GPU microseconds a call.
+fn fusedCosts(m: *g4.Model) !void {
+    var s = try g4.state.Scratch.init(m.device, 4096);
+    defer s.deinit();
+    const l = &m.weights.layers[1];
+    const names = [_][]const u8{ "qkv", "gate_up", "down", "o" };
+    const kinds = [_]u8{ 1, 2, 3, 0 };
+    for (names, kinds) |name, kind| {
+        for ([_]bool{ false, true }) |fused| {
+            if (kind == 0 and fused) continue;
+            var best: f64 = 1e9;
+            for (0..6) |_| {
+                const cb = m.queue.commandBuffer();
+                const e = cb.compute(.serial);
+                for (&m.weights.layers) |*ll| {
+                    const lin = if (kind == 1) ll.qkv else if (kind == 2) ll.gate_up else if (kind == 3) ll.down else ll.o;
+                    if (fused) {
+                        const p = try m.projections.getFused(m.gpa, m.device, lin.n, lin.k, kind);
+                        const x = if (kind == 3) s.act else s.y;
+                        try p.encodeFused(e, .{ .buf = x }, .{ .buf = lin.w }, .{ .buf = lin.sb }, .{ .buf = if (kind == 2) s.act else s.qkv }, .{ .a = .{ .{ .buf = s.hn }, .{ .buf = s.y }, l.post_feedforward, l.scalar, l.input_norm, l.input_norm }, .o = .{ .{ .buf = s.h[0] }, .{ .buf = s.h[1] } }, .f = .{ cfg.eps, 0, 0, 0 } }, 1);
+                    } else {
+                        const p = try m.projections.get(m.gpa, m.device, lin.n, lin.k);
+                        try p.encodeSums(e, .{ .buf = s.act }, .{ .buf = lin.w }, .{ .buf = lin.sb }, .{ .ref = .{ .buf = s.sums }, .stride = 1 }, .{ .buf = s.qkv }, 1);
+                    }
+                }
+                e.end();
+                cb.commit();
+                cb.wait();
+                if (cb.failure()) |msg| std.debug.print("GPU failure: {s}\n", .{msg});
+                best = @min(best, cb.gpuSeconds() * 1e6 / 60);
+            }
+            std.debug.print("{s} {s}: {d:.1} us a call\n", .{ name, if (fused) "fused" else "plain", best });
+        }
+    }
+    var best: f64 = 1e9;
+    for (0..6) |_| {
+        const cb = m.queue.commandBuffer();
+        const e = cb.compute(.serial);
+        const p = try m.projections.get(m.gpa, m.device, m.weights.head.n, m.weights.head.k);
+        for (0..8) |_| try p.encodeSums(e, .{ .buf = s.act }, .{ .buf = m.weights.head.w }, .{ .buf = m.weights.head.sb }, .{ .ref = .{ .buf = s.sums }, .stride = 1 }, .{ .buf = s.logits }, 1);
+        e.end();
+        cb.commit();
+        cb.wait();
+        best = @min(best, cb.gpuSeconds() * 1e6 / 8);
+    }
+    std.debug.print("head plain: {d:.1} us a call\n", .{best});
+}
+
 /// Every projection of the 60 layers on core/affine_mm (prompt GEMMs from the checkpoint's own tensors): GPU ms.
 fn affineAll(m: *g4.Model, pipes: tf.affine_mm.Pipes, rows: u32, x: mtl.Buffer, y: mtl.Buffer) !f64 {
     const cb = m.queue.commandBuffer();
@@ -130,6 +212,7 @@ fn glueCosts(m: *g4.Model) !void {
                 e.setValue(@as(u32, cfg.intermediate), 2);
                 e.setBuffer(s.sums, 0, 3);
                 e.setValue(@as(i32, 1), 4);
+                e.setValue(@as(i32, 1), 5);
                 e.dispatchGroups(.{ .width = cfg.intermediate / 64, .height = 1 }, .{ .width = 64 });
             } else if (std.mem.eql(u8, name, "qkv_prep")) {
                 e.setPipeline(kd.qkv);
@@ -172,6 +255,7 @@ pub fn main(init: std.process.Init) !void {
     const model_dir = args.next() orelse return error.Usage;
     const m = try g4.Model.load(gpa, io, model_dir);
     defer m.deinit();
+    m.fuse = std.c.getenv("GEMMA_NO_FUSE") == null;
     var bytes: usize = 0;
     for (m.weights.layers) |l| for ([_]g4.weights.Linear{ l.qkv, l.o, l.gate_up, l.down }) |lin| {
         bytes += lin.n * lin.k / 2 + lin.n * lin.k / 64 * 4;
@@ -184,6 +268,8 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("weights read a step: {d:.2} GB\n", .{@as(f64, @floatFromInt(bytes)) / 1e9});
     if (std.c.getenv("GEMMA_GLUE") != null) return glueCosts(m);
     if (std.c.getenv("GEMMA_STAGES") != null) return promptStages(m);
+    if (std.c.getenv("GEMMA_DSTAGES") != null) return decodeStages(m);
+    if (std.c.getenv("GEMMA_FUSED") != null) return fusedCosts(m);
     for ([_]usize{ 1, 16, 64, 128 }) |rows| {
         var best: f64 = 1e9;
         for (0..5) |_| best = @min(best, try projections(m, rows, x, y, false));
@@ -237,6 +323,28 @@ pub fn main(init: std.process.Init) !void {
             var worst: f32 = 0;
             for (a, b) |x0, y0| worst = @max(worst, @abs(@as(f32, @bitCast(@as(u32, x0) << 16)) - @as(f32, @bitCast(@as(u32, y0) << 16))));
             std.debug.print("prompt path vs decode path, 40 tokens, last-row logits: worst |diff| {d}\n", .{worst});
+        }
+        {
+            // one-row windows on the fused pipelines against the plain kernels and glue: every logit the same bits
+            var fused = try g4.state.Cache.init(m.device, 4096);
+            defer fused.deinit();
+            var plain = try g4.state.Cache.init(m.device, 4096);
+            defer plain.deinit();
+            var differ: usize = 0;
+            for (tok[0..12], 0..) |t, i| {
+                m.fuse = true;
+                try g4.forward.run(m, &ss, &.{.{ .cache = &fused, .rows = 1 }}, &.{t});
+                const a = try gpa.dupe(u16, ss.logits.slice(u16, cfg.vocab));
+                defer gpa.free(a);
+                m.fuse = false;
+                try g4.forward.run(m, &ss, &.{.{ .cache = &plain, .rows = 1 }}, &.{t});
+                if (!std.mem.eql(u16, a, ss.logits.slice(u16, cfg.vocab))) {
+                    differ += 1;
+                    std.debug.print("  token {d}: fused logits differ from plain\n", .{i});
+                }
+            }
+            m.fuse = true;
+            std.debug.print("fused vs plain one-row decode, 12 tokens: {s}\n", .{if (differ == 0) "same bits" else "DIFFER"});
         }
         if (std.c.getenv("GEMMA_DEBUG_ONLY") != null) return;
     }

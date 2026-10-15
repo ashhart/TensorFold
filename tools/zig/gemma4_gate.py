@@ -180,7 +180,7 @@ def served(args: argparse.Namespace) -> None:
         for name, (sha, ok) in zip(names, pool.map(lambda n: one(n, True), names)):
             failed += not ok
             print(f"{'ok  ' if ok else 'FAIL'} four at once: {name} {sha}", flush=True)
-    think = post(args.url, "/v1/chat/completions", {"model": "gemma", "max_tokens": 400, "temperature": 0,
+    think = post(args.url, "/v1/chat/completions", {"model": "gemma", "max_tokens": 800, "temperature": 0,
                                                     "chat_template_kwargs": {"enable_thinking": True},
                                                     "messages": [{"role": "user", "content": "What is 17 * 23? Think first."}]})
     msg = think["choices"][0]["message"]

@@ -5,6 +5,7 @@ const cfg = @import("config.zig");
 const state = @import("state.zig");
 const kernels = @import("kernels.zig");
 const weights = @import("weights.zig");
+const lane = @import("../../core/lane_projection.zig");
 const Model = @import("model.zig").Model;
 
 const Kind = kernels.Kind;
@@ -12,16 +13,19 @@ const Kind = kernels.Kind;
 /// One stream's rows in a forward: its cache, and how many rows it adds at the cache's length.
 pub const Segment = struct { cache: *state.Cache, rows: usize };
 
+/// Which of a layer's stages a call encodes (the bench times each alone); every forward takes all three.
+pub const Stages = struct { mm: bool = true, attn: bool = true, glue: bool = true };
+
 /// Rows a call of the attention kernels takes: its partials' scratch is sized for this many.
 const attend_rows = state.max_rows;
 /// Keys a gemma_decode_attention threadgroup takes (its CD).
 const decode_chunk = 256;
 
 /// Each sub-batch's chunk count, by its first row; the kernels' meta sits at that row too.
-const Chunks = [state.prompt_rows][2]usize;
+pub const Chunks = [state.prompt_rows][2]usize;
 
 /// Host-side inputs: ids, each row's position and first key, and each attention sub-batch's meta at its first row.
-fn prepare(s: *state.Scratch, segments: []const Segment, ids: []const u32, chunks: *Chunks) void {
+pub fn prepare(s: *state.Scratch, segments: []const Segment, ids: []const u32, chunks: *Chunks) void {
     @memcpy(s.ids.slice(u32, ids.len), ids);
     var at: usize = 0;
     for (segments) |seg| {
@@ -105,10 +109,12 @@ pub fn run(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []const
     sumsOut(e, s, rows, 4);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
     var cur: usize = 0;
+    const fused = rows == 1 and m.fuse;
     for (0..cfg.layers) |i| {
-        try layer(m, e, s, segments, &chunks, i, cur, rows);
+        try layer(m, e, s, segments, &chunks, i, cur, rows, .{}, fused);
         cur = 1 - cur;
     }
+    if (fused) denseTail(m, e, s, cfg.layers - 1, 1 - cur, rows); // the last layer's tail, no projection to carry it
     try project(m, s, e, w.head, s.normed[cur], s.logits, rows);
     e.setPipeline(ks.softcap);
     bind(e, &.{s.logits}, 0);
@@ -136,16 +142,38 @@ pub fn window(m: *Model, s: *state.Scratch, c: *state.Cache, ids: []const u32, p
     return run(m, s, &.{.{ .cache = c, .rows = ids.len }}, ids);
 }
 
-/// dense_tail's tap output: layer i's rows at its tap's columns, or none (`spare` bound, stride 0).
-pub fn tapOut(e: mtl.ComputeEncoder, m: *const Model, taps: ?mtl.Buffer, spare: mtl.Buffer, i: usize, index: usize) void {
+/// A dense tail's tap output: layer i's rows at its tap's columns and their stride, or `spare` with stride 0.
+pub fn tapRef(m: *const Model, taps: ?mtl.Buffer, spare: mtl.Buffer, i: usize) struct { ref: lane.Ref, stride: i32 } {
     const t = m.tap_of[i];
-    if (taps == null or t < 0) {
-        e.setBuffer(spare, 0, index);
-        e.setValue(@as(i32, 0), index + 1);
-        return;
-    }
-    e.setBuffer(taps.?, @as(usize, @intCast(t)) * cfg.hidden * 2, index);
-    e.setValue(@as(i32, @intCast(m.taps * cfg.hidden)), index + 1);
+    if (taps == null or t < 0) return .{ .ref = .{ .buf = spare }, .stride = 0 };
+    return .{ .ref = .{ .buf = taps.?, .off = @as(usize, @intCast(t)) * cfg.hidden * 2 }, .stride = @intCast(m.taps * cfg.hidden) };
+}
+
+pub fn tapOut(e: mtl.ComputeEncoder, m: *const Model, taps: ?mtl.Buffer, spare: mtl.Buffer, i: usize, index: usize) void {
+    const t = tapRef(m, taps, spare, i);
+    e.setBuffer(t.ref.buf, t.ref.off, index);
+    e.setValue(t.stride, index + 1);
+}
+
+/// Layer i's dense tail on the window's rows: the next residual and normed input in s.h and s.normed[1 - cur].
+fn denseTail(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, i: usize, cur: usize, rows: usize) void {
+    const l = &m.weights.layers[i];
+    e.setPipeline(m.kernels.sliding.dense_tail);
+    bind(e, &.{ s.hn, s.y }, 0);
+    bindRef(e, l.post_feedforward, 2);
+    bindRef(e, l.scalar, 3);
+    bindRef(e, if (i + 1 < cfg.layers) m.weights.layers[i + 1].input_norm else m.weights.final_norm, 4);
+    e.setValue(cfg.eps, 5);
+    bind(e, &.{ s.h[1 - cur], s.normed[1 - cur] }, 6);
+    sumsOut(e, s, rows, 8);
+    tapOut(e, m, s.taps, s.hn, i, 10);
+    e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
+}
+
+/// A fused projection on one row: its prologue's inputs and outputs (gemma4/fused.metal); eps in f.x, a tap in i.x.
+fn projectFused(m: *Model, e: mtl.ComputeEncoder, l: weights.Linear, fuse: u8, x: mtl.Buffer, y: mtl.Buffer, a: [6]lane.Ref, o: [2]lane.Ref, tap: i32) !void {
+    const p = try m.projections.getFused(m.gpa, m.device, l.n, l.k, fuse);
+    try p.encodeFused(e, .{ .buf = x }, .{ .buf = l.w }, .{ .buf = l.sb }, .{ .buf = y }, .{ .a = a, .o = o, .f = .{ cfg.eps, 0, 0, 0 }, .i = .{ tap, 0, 0, 0 } }, 1);
 }
 
 /// sqrt(hidden) as MLX multiplies by it: a weak-typed scalar, rounded to bf16 first.
@@ -155,7 +183,8 @@ pub fn embedScale() f32 {
     return @bitCast((b + 0x7FFF + ((b >> 16) & 1)) & 0xFFFF0000);
 }
 
-fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const Segment, chunks: *const Chunks, i: usize, cur: usize, rows: usize) !void {
+/// Layer i on a window's rows; `fused` (one row): dense tails as the next qkv's prologue, attention tails as gate/up's.
+pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const Segment, chunks: *const Chunks, i: usize, cur: usize, rows: usize, st: Stages, fused: bool) !void {
     const global = cfg.global(i);
     const kd: *const Kind = m.kernels.kind(global);
     const l = &m.weights.layers[i];
@@ -163,11 +192,19 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const 
     const dh = cfg.headDim(i);
     const kind: usize = @intFromBool(global);
     const width = l.qkv.n;
-    try project(m, s, e, l.qkv, s.normed[cur], s.qkv, rows);
+    if (st.mm and fused and i > 0) {
+        const pl = &m.weights.layers[i - 1];
+        const tap = tapRef(m, s.taps, s.hn, i - 1);
+        try projectFused(m, e, l.qkv, 1, s.y, s.qkv, .{ .{ .buf = s.hn }, .{ .buf = s.y }, pl.post_feedforward, pl.scalar, l.input_norm, l.input_norm }, .{ .{ .buf = s.h[cur] }, tap.ref }, tap.stride);
+    } else if (st.mm) try project(m, s, e, l.qkv, s.normed[cur], s.qkv, rows);
     var at: usize = 0;
     for (segments) |seg| {
         const n = seg.rows;
         const c = seg.cache;
+        if (!st.attn) {
+            at += n;
+            continue;
+        }
         const kv_off = at * nk * dh * 2; // this stream's keys and values [nk, n, dh] in s.k, s.v
         const q_off = at * cfg.query_heads * dh * 2;
         e.setPipeline(kd.qkv);
@@ -223,7 +260,17 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const 
         }
         at += n;
     }
-    try project(m, s, e, l.o, s.attn, s.o, rows);
+    if (st.mm) try project(m, s, e, l.o, s.attn, s.o, rows);
+    if (!st.glue) {
+        if (st.mm) try project(m, s, e, l.gate_up, s.n_mlp, s.gate_up, rows);
+        if (st.mm) try project(m, s, e, l.down, s.act, s.y, rows);
+        return;
+    }
+    if (fused and st.mm) {
+        try projectFused(m, e, l.gate_up, 2, s.o, s.act, .{ .{ .buf = s.h[cur] }, .{ .buf = s.o }, l.post_attention, l.pre_feedforward, l.pre_feedforward, l.pre_feedforward }, .{ .{ .buf = s.hn }, .{ .buf = s.hn } }, 0);
+        try projectFused(m, e, l.down, 3, s.act, s.y, .{ .{ .buf = s.act }, .{ .buf = s.act }, .{ .buf = s.act }, .{ .buf = s.act }, .{ .buf = s.act }, .{ .buf = s.act } }, .{ .{ .buf = s.y }, .{ .buf = s.y } }, 0);
+        return;
+    }
     e.setPipeline(kd.attn_tail);
     bind(e, &.{ s.h[cur], s.o }, 0);
     bindRef(e, l.post_attention, 2);
@@ -232,21 +279,13 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const 
     bind(e, &.{ s.hn, s.n_mlp }, 5);
     sumsOut(e, s, rows, 7);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
-    try project(m, s, e, l.gate_up, s.n_mlp, s.gate_up, rows);
+    if (st.mm) try project(m, s, e, l.gate_up, s.n_mlp, s.gate_up, rows);
     e.setPipeline(kd.geglu);
     bind(e, &.{ s.gate_up, s.act }, 0);
     e.setValue(@as(u32, cfg.intermediate), 2);
     sumsOut(e, s, rows, 3);
+    e.setValue(@as(i32, 1), 5); // the stack's rows interleaved in 16-row blocks
     e.dispatchGroups(.{ .width = cfg.intermediate / 64, .height = rows }, .{ .width = 64 });
-    try project(m, s, e, l.down, s.act, s.y, rows);
-    e.setPipeline(kd.dense_tail);
-    bind(e, &.{ s.hn, s.y }, 0);
-    bindRef(e, l.post_feedforward, 2);
-    bindRef(e, l.scalar, 3);
-    bindRef(e, if (i + 1 < cfg.layers) m.weights.layers[i + 1].input_norm else m.weights.final_norm, 4);
-    e.setValue(cfg.eps, 5);
-    bind(e, &.{ s.h[1 - cur], s.normed[1 - cur] }, 6);
-    sumsOut(e, s, rows, 8);
-    tapOut(e, m, s.taps, s.hn, i, 10);
-    e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
+    if (st.mm) try project(m, s, e, l.down, s.act, s.y, rows);
+    denseTail(m, e, s, i, cur, rows);
 }

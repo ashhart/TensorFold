@@ -28,6 +28,8 @@ pub const Model = struct {
     /// A drafter's tapped layers: each layer's index among the taps (-1: untapped), and how many there are.
     tap_of: [cfg.layers]i8 = @splat(-1),
     taps: u32 = 0,
+    /// One-row windows take the fused pipelines (the glue as the projections' prologues); off for the bench's check.
+    fuse: bool = true,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         const m = try gpa.create(Model);
@@ -37,6 +39,7 @@ pub const Model = struct {
         m.projections = .{};
         m.tap_of = @splat(-1);
         m.taps = 0;
+        m.fuse = true;
         m.config = try cfg.Config.read(gpa, io, dir);
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();

@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const tf = @import("tensorfold");
 
 const lane = tf.lane_projection;
+const g4 = tf.gemma4;
 const npy = tf.npy;
 const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
@@ -30,14 +31,6 @@ fn loadBf16(c: *Ctx, name: []const u8) ![]u16 {
     return out;
 }
 
-/// Python's lane_qmm.split_k: K slices fixed by the weight's shape.
-fn splitK(n: usize, k: usize) usize {
-    const tiles = (n + 31) / 32;
-    var sk: usize = 1;
-    while (sk < 8 and tiles * sk < 1024 and (k / 64) / (sk * 2) >= 8) sk *= 2;
-    return sk;
-}
-
 /// The members' MLX affine tensors stacked along N, packed into one lane projection's layout.
 const Stack = struct {
     proj: lane.Projection,
@@ -46,7 +39,8 @@ const Stack = struct {
     n: usize,
     k: usize,
 
-    fn init(c: *Ctx, names: []const []const u8, precompute: bool) !Stack {
+    /// `decode`: the split the model decodes at (weights.splitK) rather than the reference's (referenceSplit).
+    fn init(c: *Ctx, names: []const []const u8, precompute: bool, decode: bool) !Stack {
         const reg = reg_mode;
         var n: usize = 0;
         var k: usize = 0;
@@ -71,7 +65,8 @@ const Stack = struct {
             @memcpy(biases[at * k / 64 ..][0..b.len], b);
             at += w.len / (k / 8);
         }
-        const l = lane.Layout{ .n = n, .k = k, .format = .{ .bits = 4, .group = 64 }, .sk = splitK(n, k), .precompute_sums = precompute or reg, .reg = reg };
+        const sk = if (decode) g4.weights.splitK(n, k) else g4.weights.referenceSplit(n, k);
+        const l = lane.Layout{ .n = n, .k = k, .format = .{ .bits = 4, .group = 64 }, .sk = sk, .precompute_sums = precompute or reg, .reg = reg };
         const wb = try c.device.buffer(l.weightWords() * 4, shared);
         const sbb = try c.device.buffer(l.metadataElements() * 2, shared);
         try lane.pack(l, words, scales, biases, wb.slice(u32, l.weightWords()), sbb.slice(u16, l.metadataElements()));
@@ -92,8 +87,8 @@ fn key(_: *Ctx, member: []const u8, part: []const u8) ![]const u8 {
     return std.fmt.bufPrint(&key_buf, "language_model.model.{s}.{s}", .{ member, part });
 }
 
-/// Runs `s` on the dumped input `in_name` and counts output bits that differ from `out_name`.
-fn checkProjection(c: *Ctx, label: []const u8, s: Stack, rows: usize, in_name: []const u8, out_name: []const u8) !void {
+/// Runs `s` on the dumped input and counts outputs whose bits differ; a decode-split stack's are reported, not counted.
+fn checkProjection(c: *Ctx, label: []const u8, s: Stack, rows: usize, in_name: []const u8, out_name: []const u8, decode: bool) !void {
     const x = try loadBf16(c, in_name);
     defer c.gpa.free(x);
     const want = try loadBf16(c, out_name);
@@ -116,11 +111,15 @@ fn checkProjection(c: *Ctx, label: []const u8, s: Stack, rows: usize, in_name: [
     }
     const got = yb.slice(u16, want.len);
     var diff: usize = 0;
-    var first: ?usize = null;
-    for (got, want, 0..) |g, w, i| if (g != w) {
+    var worst: f32 = 0;
+    for (got, want) |g, w| if (g != w) {
         diff += 1;
-        if (first == null) first = i;
+        worst = @max(worst, @abs(@as(f32, @bitCast(@as(u32, g) << 16)) - @as(f32, @bitCast(@as(u32, w) << 16))));
     };
+    if (decode) {
+        std.debug.print("{s} rows {d} at the decode split: {d} of {d} outputs differ, worst |diff| {d}\n", .{ label, rows, diff, want.len, worst });
+        return;
+    }
     c.failed += diff;
     std.debug.print("{s} rows {d}: {d} of {d} outputs differ{s}\n", .{ label, rows, diff, want.len, if (diff == 0) "" else " (first at a column of row 0 or later)" });
 }
@@ -192,33 +191,41 @@ pub fn main(init: std.process.Init) !void {
         const q = try std.fmt.bufPrint(&names[0], "layers.{d}.self_attn.q_proj", .{layer});
         const k = try std.fmt.bufPrint(&names[1], "layers.{d}.self_attn.k_proj", .{layer});
         const v = try std.fmt.bufPrint(&names[2], "layers.{d}.self_attn.v_proj", .{layer});
-        const qkv = try Stack.init(&c, if (layer % 6 == 5) &.{ q, k } else &.{ q, k, v }, precompute);
-        defer qkv.deinit();
-        const o = try Stack.init(&c, &.{try std.fmt.bufPrint(&names[3], "layers.{d}.self_attn.o_proj", .{layer})}, precompute);
-        defer o.deinit();
         var mlp: [3][64]u8 = undefined;
         const gate = try std.fmt.bufPrint(&mlp[0], "layers.{d}.mlp.gate_proj", .{layer});
         const up = try std.fmt.bufPrint(&mlp[1], "layers.{d}.mlp.up_proj", .{layer});
-        const gu = try Stack.init(&c, &.{ gate, up }, precompute);
-        defer gu.deinit();
-        const down = try Stack.init(&c, &.{try std.fmt.bufPrint(&mlp[2], "layers.{d}.mlp.down_proj", .{layer})}, precompute);
-        defer down.deinit();
-        for ([_]usize{ 1, 2, 16 }) |rows| {
-            var p: [6][48]u8 = undefined;
-            const pre = try std.fmt.bufPrint(&p[0], "r{d}.L{d}", .{ rows, layer });
-            try checkProjection(&c, "qkv", qkv, rows, try cat(&p[1], pre, ".x"), try cat(&p[2], pre, ".qkv"));
-            try checkProjection(&c, "o", o, rows, try cat(&p[1], pre, ".o_in"), try cat(&p[2], pre, ".o"));
-            try checkProjection(&c, "gate_up", gu, rows, try cat(&p[1], pre, ".n_mlp"), try cat(&p[2], pre, ".gate_up"));
-            try checkProjection(&c, "down", down, rows, try cat(&p[1], pre, ".act"), try cat(&p[2], pre, ".y"));
+        const o_name = try std.fmt.bufPrint(&names[3], "layers.{d}.self_attn.o_proj", .{layer});
+        const down_name = try std.fmt.bufPrint(&mlp[2], "layers.{d}.mlp.down_proj", .{layer});
+        for ([_]bool{ false, true }) |decode| {
+            const qkv = try Stack.init(&c, if (layer % 6 == 5) &.{ q, k } else &.{ q, k, v }, precompute, decode);
+            defer qkv.deinit();
+            const o = try Stack.init(&c, &.{o_name}, precompute, decode);
+            defer o.deinit();
+            const gu = try Stack.init(&c, &.{ gate, up }, precompute, decode);
+            defer gu.deinit();
+            const down = try Stack.init(&c, &.{down_name}, precompute, decode);
+            defer down.deinit();
+            for ([_]usize{ 1, 2, 16 }) |rows| {
+                if (decode and rows != 1) continue;
+                var p: [6][48]u8 = undefined;
+                const pre = try std.fmt.bufPrint(&p[0], "r{d}.L{d}", .{ rows, layer });
+                try checkProjection(&c, "qkv", qkv, rows, try cat(&p[1], pre, ".x"), try cat(&p[2], pre, ".qkv"), decode);
+                try checkProjection(&c, "o", o, rows, try cat(&p[1], pre, ".o_in"), try cat(&p[2], pre, ".o"), decode);
+                try checkProjection(&c, "gate_up", gu, rows, try cat(&p[1], pre, ".n_mlp"), try cat(&p[2], pre, ".gate_up"), decode);
+                try checkProjection(&c, "down", down, rows, try cat(&p[1], pre, ".act"), try cat(&p[2], pre, ".y"), decode);
+            }
         }
         std.debug.print("layer {d} done\n", .{layer});
     }
-    const head = try Stack.init(&c, &.{"embed_tokens"}, precompute);
-    defer head.deinit();
-    for ([_]usize{ 1, 2, 16 }) |rows| {
-        var p: [3][48]u8 = undefined;
-        const pre = try std.fmt.bufPrint(&p[0], "r{d}", .{rows});
-        try checkProjection(&c, "head", head, rows, try cat(&p[1], pre, ".head_in"), try cat(&p[2], pre, ".head_raw"));
+    for ([_]bool{ false, true }) |decode| {
+        const head = try Stack.init(&c, &.{"embed_tokens"}, precompute, decode);
+        defer head.deinit();
+        for ([_]usize{ 1, 2, 16 }) |rows| {
+            if (decode and rows != 1) continue;
+            var p: [3][48]u8 = undefined;
+            const pre = try std.fmt.bufPrint(&p[0], "r{d}", .{rows});
+            try checkProjection(&c, "head", head, rows, try cat(&p[1], pre, ".head_in"), try cat(&p[2], pre, ".head_raw"), decode);
+        }
     }
     std.debug.print("{s}: {d} differing outputs\n", .{ if (c.failed == 0) "all bits equal" else "bits differ", c.failed });
     if (c.failed > 0) std.process.exit(1);

@@ -177,6 +177,7 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: 
         bind(e, &.{ s.gate_up, s.act }, 0);
         e.setValue(@as(u32, cfg.intermediate), 2);
         noSums(e, s, 3);
+        e.setValue(@as(i32, 0), 5);
         e.dispatchGroups(.{ .width = cfg.intermediate / 64, .height = rows }, .{ .width = 64 });
     }
     if (st.mm) {
