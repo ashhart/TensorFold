@@ -277,13 +277,31 @@ fn partsCheck(g: *const Gpu, m: Mat, up: Mat, t: *Tally) !void {
     const order_ref = ref(ob).at(parts * 4);
     const sorted = try buf(g.device, slots * r * 2);
     defer sorted.deinit();
-    try g.run(bySorted, .{ &g.p, wide.Picks{ .w = gate, .up = upq, .experts = parts, .repeat = repeat, .lim = lim }, ref(m.x()), ref(ob), order_ref, ref(sorted), @as(u32, @intCast(r)), @as(u32, slots) });
+    try g.run(bySorted, .{
+        &g.p,
+        wide.Picks{ .w = gate, .up = upq, .experts = parts, .repeat = repeat, .lim = lim },
+        ref(m.x()),
+        ref(ob),
+        order_ref,
+        ref(sorted),
+        @as(u32, @intCast(r)),
+        @as(u32, slots),
+    });
     for (0..slots) |i| try eql(sorted.slice(u16, slots * r)[i * r ..][0..r], glu.slice(u16, slots * r)[@as(usize, @intCast(order[i])) * r ..][0..r]);
     // the down: x row i (the sorted pairs' inputs, here x rows by order) into out row order[i]
     const xs = try buf(g.device, slots * k * 2);
     defer xs.deinit();
     for (0..slots) |i| @memcpy(xs.slice(u16, slots * k)[i * k ..][0..k], m.x().slice(u16, rows * k)[@as(usize, @intCast(order[i])) * k ..][0..k]);
-    try g.run(bySorted, .{ &g.p, wide.Picks{ .w = gate, .experts = parts, .repeat = 1 }, ref(xs), ref(ob), order_ref, ref(sorted), @as(u32, @intCast(r)), @as(u32, slots) });
+    try g.run(bySorted, .{
+        &g.p,
+        wide.Picks{ .w = gate, .experts = parts, .repeat = 1 },
+        ref(xs),
+        ref(ob),
+        order_ref,
+        ref(sorted),
+        @as(u32, @intCast(r)),
+        @as(u32, slots),
+    });
     try g.run(byIds, .{ &g.p, wide.Picks{ .w = gate, .experts = parts, .repeat = 1 }, ref(m.x()), ref(ids), ref(plain), @as(u32, slots) });
     try eql(sorted.slice(u16, slots * r), plain.slice(u16, slots * r));
     t.pairs += 2 * slots * r;
@@ -421,7 +439,17 @@ fn perHead(e: mtl.ComputeEncoder, p: *const wide.Pipes, q: affine.Affine, heads:
 pub fn byIds(e: mtl.ComputeEncoder, p: *const wide.Pipes, m: wide.Picks, x: Ref, ids: Ref, out: Ref, slots: u32) void {
     wide.byIds(p, e, m, x, ids, out, slots);
 }
-fn bySorted(e: mtl.ComputeEncoder, p: *const wide.Pipes, m: wide.Picks, x: Ref, offsets: Ref, order: Ref, out: Ref, ldo: u32, pairs: u32) void {
+fn bySorted(
+    e: mtl.ComputeEncoder,
+    p: *const wide.Pipes,
+    m: wide.Picks,
+    x: Ref,
+    offsets: Ref,
+    order: Ref,
+    out: Ref,
+    ldo: u32,
+    pairs: u32,
+) void {
     wide.bySorted(p, e, m, x, offsets, order, out, ldo, pairs);
 }
 pub fn swiglu(e: mtl.ComputeEncoder, pipe: mtl.Pipeline, gu: Ref, act: Ref, n_rows: u32, width: u32, lim: f32) void {

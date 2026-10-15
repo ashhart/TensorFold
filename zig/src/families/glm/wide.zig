@@ -376,7 +376,17 @@ pub fn moe(
 pub const MoeIo = struct { x: Ref, ids: Ref, act: Ref, acts: Ref, ye: Ref, ys: Ref };
 
 /// `pairs` pairs by expert (offsets, order): with `up` x row order / repeat to row i, else x row i to row order[i].
-pub fn bySorted(p: *const Pipes, e: mtl.ComputeEncoder, m: Picks, x: Ref, offsets: Ref, order: Ref, out: Ref, ldo: u32, pairs: u32) void {
+pub fn bySorted(
+    p: *const Pipes,
+    e: mtl.ComputeEncoder,
+    m: Picks,
+    x: Ref,
+    offsets: Ref,
+    order: Ref,
+    out: Ref,
+    ldo: u32,
+    pairs: u32,
+) void {
     const u = m.up orelse m.w;
     e.setPipeline(if (m.up != null) p.glu_sorted[at(m.w.bits)] else p.sorted[at(m.w.bits)]);
     bind(e, 0, .{ x, m.w.w, m.w.s, m.w.b });

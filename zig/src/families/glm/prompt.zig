@@ -268,8 +268,28 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     }
     const path = wide.routed(w.gate, w.up, w.down);
     if (s & Class.routed == 0 and path == .rows) { // each expert's sorted pairs at its width
-        wide.bySorted(&p.mm.wide.?, e, .{ .w = w.gate, .up = w.up, .experts = E, .repeat = c.topk, .lim = c.swiglu_limit }, x_in, p.offsets, p.order, p.act, c.moe_inter, n);
-        wide.bySorted(&p.mm.wide.?, e, .{ .w = w.down, .experts = E, .repeat = 1 }, p.act, p.offsets, p.order, p.yp, D, n);
+        wide.bySorted(
+            &p.mm.wide.?,
+            e,
+            .{ .w = w.gate, .up = w.up, .experts = E, .repeat = c.topk, .lim = c.swiglu_limit },
+            x_in,
+            p.offsets,
+            p.order,
+            p.act,
+            c.moe_inter,
+            n,
+        );
+        wide.bySorted(
+            &p.mm.wide.?,
+            e,
+            .{ .w = w.down, .experts = E, .repeat = 1 },
+            p.act,
+            p.offsets,
+            p.order,
+            p.yp,
+            D,
+            n,
+        );
     } else if (s & Class.routed == 0) { // down's rows put back in (row, slot) order for the combine
         const mm = if (path == .mm4) p.mm.mm_bf16 else p.mm.wide.?.mm2;
         gateUp(p, mm, x, e, w, x_in, M, n);
