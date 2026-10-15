@@ -16,6 +16,8 @@ pub const max_rows = engine.window_rows;
 const Lane = struct {
     slot: u32,
     pending_rows: ?usize = null,
+    held: [engine.max_drafts]u32 = undefined, // the MTP layer's drafts for the next window
+    held_n: usize = 0,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
 };
 
@@ -52,12 +54,16 @@ pub const Lanes = struct {
         break :vt v;
     };
 
-    /// Round loop facts: exact windows of max_rows (copies), shared windows unless `alone`.
+    /// Round loop facts: exact windows of max_rows (copies, MTP chains), shared windows unless `alone`.
     pub fn facts(self: *const Lanes) lanes.Model {
         const sharing = !self.alone;
+        const drafting = self.e.mtp != null;
         return .{
             .exact_width = max_rows,
             .gpu_tokens = false,
+            .mtp = drafting,
+            .speculate = drafting,
+            .drafts = engine.max_drafts,
             .speculate_early = false,
             .hidden_rows = sharing,
             .batch_rows = if (sharing) engine.shared_rows else 0,
@@ -136,6 +142,7 @@ pub const Lanes = struct {
         const gop = try self.lanes.getOrPut(self.e.gpa, s);
         if (!gop.found_existing) gop.value_ptr.* = .{ .slot = self.freeSlot() };
         gop.value_ptr.pending_rows = null;
+        gop.value_ptr.held_n = 0;
         gop.value_ptr.fill = null;
         try self.e.bind(gop.value_ptr.slot);
         try self.e.begin(s.sampling);
@@ -186,15 +193,16 @@ pub const Lanes = struct {
     }
 
     /// A window's ids (pending token, then its drafts) checked against the bound sequence's position.
-    fn windowIds(self: *Lanes, w: be.Window, ids: *[max_rows]u32) ![]const u32 {
+    fn windowIds(self: *Lanes, l: *const Lane, w: be.Window, ids: *[max_rows]u32) ![]const u32 {
         if (w.parents != null) return error.TreesNotBuilt;
         const rows = w.rows();
         if (rows > max_rows) return error.WindowTooWide;
-        if (w.held > 0) return error.NoHeldDrafts;
+        if (w.held > l.held_n) return error.NoHeldDrafts;
         const pos = self.e.pos();
         for (w.positions, 0..) |p, r| if (p != pos + 1 + r) return error.PositionMismatch;
+        const drafts = if (w.held > 0) l.held[0..w.held] else w.tokens;
         ids[0] = w.pending;
-        @memcpy(ids[1..][0..w.tokens.len], w.tokens);
+        @memcpy(ids[1..][0..drafts.len], drafts);
         return ids[0..rows];
     }
 
@@ -205,7 +213,7 @@ pub const Lanes = struct {
         for (windows, out) |w, *o| {
             const l = try self.bind(w.stream, null);
             var ids: [max_rows]u32 = undefined;
-            const got = try self.windowIds(w, &ids);
+            const got = try self.windowIds(l, w, &ids);
             try self.e.verify(got, o.sampled[0..got.len]);
             @memcpy(o.drafts[0 .. got.len - 1], got[1..]);
             l.pending_rows = got.len;
@@ -220,7 +228,7 @@ pub const Lanes = struct {
         var lane: [engine.max_shared]*Lane = undefined;
         for (windows, out[0..windows.len], 0..) |w, o, k| {
             lane[k] = try self.bind(w.stream, null);
-            const got = try self.windowIds(w, &ids[k]);
+            const got = try self.windowIds(lane[k], w, &ids[k]);
             parts[k] = .{ .slot = lane[k].slot, .ids = got, .out = o.sampled[0..got.len] };
         }
         try self.e.verifyShared(parts[0..windows.len]);
@@ -240,10 +248,27 @@ pub const Lanes = struct {
         }
     }
 
+    /// The MTP layer absorbs each stream's kept rows (its last verify committed first) and chains its drafts.
     fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
-        _ = ptr;
-        _ = requests;
-        return error.NoDraftHead;
+        const self = of(ptr);
+        if (self.e.mtp == null) return error.NoDraftHead;
+        for (requests) |r| {
+            const l = try self.bind(r.stream, if (r.rows) |rows| rows.len else null);
+            if (r.position != self.e.pos() + 1) return error.PositionMismatch;
+            if (r.lanes != null) return error.TreesNotBuilt;
+            const depth = @min(r.depth, engine.max_drafts);
+            if (r.rows) |rows| {
+                for (rows, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
+                try self.e.draft(false, r.follow[0..rows.len], depth, &l.held);
+            } else {
+                const first = switch (r.first orelse return error.NoFirstToken) {
+                    .handle => |h| self.drawn[h % ring],
+                    .value => |v| v,
+                };
+                try self.e.draft(true, &.{first}, depth, &l.held);
+            }
+            l.held_n = depth;
+        }
     }
 
     /// The stream left the rounds: its sequence freed (slot 0 stays for the next stream).

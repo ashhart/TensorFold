@@ -85,7 +85,64 @@ pub fn engineChecks(c: *Cover, e: *Engine, prompt: []const u32, w: []const u32) 
     try c.expect(same_rows, "a 9-row window and, after keeping 4, a 5-row window: tokens and logits == 9 single rows", .{});
     try rig.sameSeq(c, e, "9-row window, keep 4, 5-row window == 9 single rows", 10, 11);
     try sharedChecks(c, e, prompt, w);
+    if (e.mtp != null) try mtpChain(c, e, prompt, w);
     for ([_]u32{ 10, 11, 12, 13, 14 }) |s| e.release(s);
+}
+
+/// MTP chains of 3 and of 1 on twins: the same first draft, and after the same windows the chain's rows rolled back.
+fn mtpChain(c: *Cover, e: *Engine, prompt: []const u32, w: []const u32) !void {
+    var t: [2]u32 = undefined;
+    var d: [2][3]u32 = undefined;
+    for (0..2) |k| {
+        t[k] = try pass(e, @intCast(40 + k), prompt[0..200], 37, null, null);
+        try e.draft(true, &.{t[k]}, if (k == 0) 3 else 1, &d[k]);
+    }
+    var ok = t[0] == t[1] and d[0][0] == d[1][0];
+    var pend = t[0];
+    var chained: usize = 0;
+    for (0..6) |round| {
+        var ids: [8]u32 = undefined;
+        var out: [2][8]u32 = undefined;
+        const rows = 2 + round % 6;
+        ids[0] = pend;
+        for (1..rows) |r| ids[r] = w[(round * 11 + r) % w.len];
+        const keep = 1 + (round * 3) % rows;
+        for (0..2) |k| {
+            try e.bind(@intCast(40 + k));
+            try e.verify(ids[0..rows], out[k][0..rows]);
+            try e.keep(keep);
+            try e.draft(false, out[k][0..keep], if (k == 0) 3 else 1, &d[k]);
+        }
+        ok = ok and std.mem.eql(u32, out[0][0..rows], out[1][0..rows]) and d[0][0] == d[1][0];
+        { // the chain's second draft by hand on the twin: d0 with the newest kept row's MTP output as its hidden row
+            const h = &e.mtp.?;
+            const hd = &e.seqs.items[41].?.hd.?;
+            const D: usize = e.c.hidden;
+            const f = h.forward(&e.m, e.stream, &h.bm);
+            try h.absorb(&e.m, e.stream, &h.bm, hd, @ptrCast(d[1][0..1]), h.bm.normed + (keep - 1) * D * 2);
+            try f.final(1);
+            try f.logitsOf(0, 1);
+            var second: [1]u32 = undefined;
+            try e.draw(h.bm.logits, 1, hd.pos + 1, &second);
+            try hd.setPos(e.stream, hd.pos - 1);
+            ok = ok and second[0] == d[0][1];
+            chained += 1;
+        }
+        pend = out[0][keep - 1];
+    }
+    try c.expect(ok, "MTP chains of 3 and of 1 over 6 windows (kept 1 to 7 rows): the same tokens and first drafts; {d} second drafts == by hand", .{chained});
+    const sa = e.seqs.items[40].?;
+    const sb = e.seqs.items[41].?;
+    try c.expect(sa.hd.?.pos == sa.st.pos + 2 and sb.hd.?.pos == sb.st.pos, "the chain of 3 holds its 2 chained rows past the kept ones (MTP at {d}, the sequence at {d})", .{ sa.hd.?.pos, sa.st.pos });
+    for (0..2) |k| { // one more window, both drafting 1: the chain's rows rolled back, the twins byte for byte
+        var out: [2]u32 = undefined;
+        try e.bind(@intCast(40 + k));
+        try e.verify(&.{ pend, w[3] }, &out);
+        try e.keep(2);
+        try e.draft(false, &out, 1, &d[k]);
+    }
+    try rig.sameSeq(c, e, "after chains of 3 and of 1, a window and a chain of 1 each", 40, 41);
+    for (0..2) |k| e.release(@intCast(40 + k));
 }
 
 /// Two streams' windows in one shared forward against lone twins over 8 rounds: logits, tokens, then states.
@@ -194,5 +251,68 @@ pub fn serial(c: *Cover, gpu: check.Gpu, e: *Engine, p: []const u32, w: []const 
     }
     const base = @sqrt(bd / bw);
     std.debug.print("RESULT   served logits vs float64 (same picks): rel L2 {e:.3}, worst row {e:.3}, argmax {d}/{d}; vs bf16 points {e:.3}; bf16 points vs float64 {e:.3}\n", .{ d64.rel, d64.worst_row, d64.argmax, T, dbf.rel, base });
+    if (e.mtp != null) try mtpLogits(c, gpu, e, ids, path);
     try c.expect(nf == 0 and d64.rel <= 1.5 * base and dbf.rel <= base, "served logits within 1.5x the bf16 points' rel L2 of float64 ({e:.3} <= 1.5 x {e:.3}), within it of the bf16 points", .{ d64.rel, base });
+}
+
+/// The MTP layer's logits at every row but the last (hidden row t, token t + 1) against ling_forward.py --mtp REF.mtp.
+fn mtpLogits(c: *Cover, gpu: check.Gpu, e: *Engine, ids: []const i32, ref_path: []const u8) !void {
+    const a = c.a;
+    var name: [512]u8 = undefined;
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(gpu.io, try std.fmt.bufPrint(&name, "{s}.mtp", .{ref_path}), a, .limited(1 << 30));
+    if (bytes.len < 20 or !std.mem.eql(u8, bytes[0..8], "TFLINGM2")) return error.BadFixture;
+    const dims = std.mem.bytesAsSlice(u32, bytes[8..20]);
+    const R: usize = dims[0];
+    const V: usize = dims[1];
+    const K: usize = dims[2];
+    const T = ids.len;
+    try c.expect(R == T - 1 and V == e.c.vocab and K == e.c.topk, "MTP reference: {d} rows", .{R});
+    const m64 = try a.alloc(f64, R * V);
+    const mbf = try a.alloc(f64, R * V);
+    const theirs = try a.alloc(i32, R * K);
+    var at: usize = 20;
+    for ([_][]u8{ std.mem.sliceAsBytes(m64), std.mem.sliceAsBytes(mbf), std.mem.sliceAsBytes(theirs) }) |dst| {
+        @memcpy(dst, bytes[at..][0..dst.len]);
+        at += dst.len;
+    }
+    const h = &e.mtp.?;
+    var r: frig.Rig = .{ .gpu = gpu, .a = a, .s = e.stream, .m = &e.m, .g = &e.g };
+    defer r.deinit();
+    try e.bind(31);
+    try e.begin(null);
+    const q = e.seqs.items[31].?;
+    const main = e.forward(&e.bp);
+    const seg = [_]F.Seg{.{ .st = &q.st, .row0 = 0, .rows = T }};
+    try main.embed(ids);
+    try main.stack(&seg);
+    try main.final(T); // e.bp.normed: the hidden rows, as a prompt pass leaves them
+    const pk = try r.zeros(R * (K + 1) * 4);
+    const f = h.forward(&e.m, e.stream, &e.bp);
+    try f.embed(ids[1..]);
+    try h.step(f, &q.hd.?, R, e.bp.normed, pk);
+    try f.final(R);
+    try f.logitsOf(0, R);
+    const raw = try r.back(e.bp.logits, R * V * 2);
+    const got = try a.alloc(u16, R * V);
+    @memcpy(std.mem.sliceAsBytes(got), raw);
+    try main.commit(&q.st, T);
+    _ = try pass(e, 32, @ptrCast(ids), 37, null, null); // a prompt pass in 37-row chunks: its MTP rows the same
+    try rig.sameSeq(c, e, "a prompt pass's MTP rows in 37-row chunks == the serial MTP rows", 32, 31);
+    e.release(31);
+    e.release(32);
+    const ours = try frig.sortedPicks(a, try r.back(pk, R * (K + 1) * 4), 1, R, K);
+    const flipped = try a.alloc(bool, R);
+    @memset(flipped, false);
+    const nf = frig.flips(ours, theirs, 1, R, 0, R, K, flipped);
+    const d64 = frig.distance(got, m64, R, V, flipped);
+    const dbf = frig.distance(got, mbf, R, V, flipped);
+    var bd: f64 = 0;
+    var bw: f64 = 0;
+    for (0..R) |t| if (!flipped[t]) for (mbf[t * V ..][0..V], m64[t * V ..][0..V]) |x, y| {
+        bd += (x - y) * (x - y);
+        bw += y * y;
+    };
+    const base = @sqrt(bd / bw); // the bf16 points' own distance on the same rows (their routing may differ there too)
+    std.debug.print("RESULT   MTP logits vs float64: rel L2 {e:.3} ({e:.3} without {d} rows whose picks differ), argmax {d}/{d}; vs bf16 points {e:.3}; bf16 points vs float64 on those rows {e:.3}\n", .{ d64.rel, d64.rel_kept, nf, d64.argmax, R, dbf.rel, base });
+    try c.expect(d64.rel_kept <= 1.5 * base, "MTP logits within 1.5x the bf16 points' rel L2 of float64 on rows routed alike ({e:.3} <= 1.5 x {e:.3})", .{ d64.rel_kept, base });
 }

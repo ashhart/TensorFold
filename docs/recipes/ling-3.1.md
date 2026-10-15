@@ -21,6 +21,7 @@ block FP8 (e4m3 in 128 x 128 blocks with `weight_scale_inv`).
 | Weight loader at TP=1: bf16, FP8 block, ModelOpt NVFP4 | `zig/src/families/ling/weights.zig`, `weights_proj.zig` | `ling-weights`, `ling-weights-real` |
 | Synthetic checkpoints in all three formats | `tf-cuda-test ling-synth` | its own name check |
 | The TP=1 layer graph: embedding, KDA/MLA mixers, dense MLP and MoE, final norm, head; windows and commits | `zig/src/families/ling/forward.zig`, `graph.zig`, `state.zig`, `block_*.zig`, `kernels/cuda/ling_glue.cu` | `ling-forward-synth`, `ling-layer-real` |
+| The MTP layer (`model.layers.72`) as the drafter: `enorm(embed(next)) \| hnorm(hidden)` through `eh_proj`, MLA + MoE on its own cache, `final_layernorm`, the shared head; chains of up to 3 | `mtp.zig`, `Engine.draft` | `ling-lanes --mtp`, `ling-mtp-real` |
 | The engine and lane backend: a sequence per slot, prompt chunks cut anywhere, verify windows of up to 16 rows, shared windows of up to 8 streams (64 rows), kept prompt states, the server hooks | `engine.zig`, `lanes.zig`, `native.zig`; `native/cuda.zig` registers it | `ling-lanes` |
 | SwiGLU clamped in Ling's order, `min(silu(g), L) * clip(u, -L, L)`, in the glue and the FP8/NVFP4 grouped experts (every older kernel's SASS unchanged) | `glm_glue_moe.cuh` (`tf_ling_swiglu_*`), `experts.cuh` (epilogue 4), `experts.Layer.after` | `ling-clamp`, `ling-clamp-old`, `glm-route-old` |
 
@@ -161,12 +162,41 @@ norm and head; KDA and dense MLP only, 6 GB) passes the same 90 exactness checks
 MLA + MoE layer adds 8 GB). Mutations caught: committing every row on `keep`, a restore that keeps the fresh KDA copy
 bits, chunks not cut at marks, shared draws keyed one position early, a lane commit that keeps one row too many.
 
+## MTP drafting
+
+The HF model (`BailingMoeV3MTPLayer`) feeds the MTP layer the backbone's rows after `model.norm` and the next
+token's embedding: `eh_proj(enorm(embed(t+1)) | hnorm(h_t))`, then input norm, MLA, residual, post-attention norm,
+MoE, residual, `final_layernorm`, and `lm_head` reads that. The layer runs unclamped (the SwiGLU limit lists cover
+the backbone). `mtp.Head` holds a view of the weights (the MTP layer alone, `final_layernorm` as its `norm`), its
+own graph and the concatenated input rows; each sequence gets a second `State` (one MLA cache, its own position).
+A prompt pass feeds every row whose next token is known; `Engine.draft` absorbs a verify's kept rows (their
+final-norm rows and the tokens after them), then chains up to 3 drafts, each step's hidden row the MTP layer's own
+`final_layernorm` output, as GLM's `decode.draft` does; the chain's rows are dropped before the next absorb. Kept
+prompt states copy the MTP cache too. The server loads it unless `--no-drafts`; the lane facts then say `mtp`.
+
+Checked (`ling-lanes ... --mtp`, 104 checks a format; acceptance on random weights says nothing about quality and is
+not reported as such): MTP-drafted replies, greedy and sampled, equal the plain ones; so do MTP-drafted passes
+resumed at 53 and 211 and every concurrent case; a prompt pass's MTP cache in 37-row chunks equals the serial MTP
+rows byte for byte; twins drafting chains of 3 and of 1 agree on tokens and first drafts over 6 windows, each
+chain's second draft equals one computed by hand, and after one more window both states are equal byte for byte.
+The MTP logits at every prompt row against `ling_forward.py --mtp` (float64 from the file, picks free):
+
+| Format | vs float64, rows routed alike | rows whose MTP picks differ | the bf16 points vs float64 on those rows | argmax |
+| --- | --- | --- | --- | --- |
+| bf16 | 1.72e-2 | 14 of 308 | 2.47e-2 | 293/308 |
+| FP8 block | 1.65e-2 | 5 | 2.38e-2 | 300/308 |
+| NVFP4 | 3.20e-2 | 11 | 7.81e-2 | 283/308 |
+
+The real layer (`ling-mtp-real`, fixture from `oracle/ling_mtp.py`: HF's `BailingMoeV3MTPLayer` in bf16 on 511 real
+tokens' embeddings and `model.norm` of layer 0's output): `final_layernorm` rows at rel L2 7.28e-3 of HF on the 488
+rows whose top-8 agrees (4.56e-2 with the 23 others), worst row 1.61e-2, decode rows 6.74e-3; cut at 300 == uncut and
+a 16-row window == 16 decode rows byte for byte; 8.4 GB peak, 153 s to load from the mount. Mutations caught: no
+rollback of the chain's rows, `hnorm` with `enorm`'s weight, prompt rows absorbing their own token, kept states
+without the MTP cache, the chain's hidden row taken from row 0.
+
 ## What is missing
 
 - A full-checkpoint run: 574 GB in FP8 needs five Sparks and tensor parallelism.
-- MTP drafting: the MTP layer's tensors load (`weights.Mtp`); the graph leaves it unwired. It would be
-  `enorm(embed(next)) | hnorm(hidden)` through `eh_proj`, one MLA + MoE layer on its own cache, the final norm and
-  the shared head.
 - Speed: nothing is tuned. Projections land in their columns through a byte copy, bf16 routed experts run densely,
   and the RMS norms take hidden and `q_lora_rank` widths 512, 1536 and 4096 only (`glue.rmsnorm`).
 - EXL3, through ashhart's EXL3 module (tracker #832).
@@ -187,6 +217,9 @@ zig-out/bin/tf-cuda-test ling-forward-synth /tmp/ling-fp8 /tmp/fref             
 zig-out/bin/tf-cuda-test ling-lanes /tmp/ling-fp8 /tmp/served                    # serving checks; writes .ids/.picks
 python zig/tests/cuda/oracle/ling_forward.py /tmp/ling-fp8 /tmp/sref --ids /tmp/served.ids --picks /tmp/served.picks
 zig-out/bin/tf-cuda-test ling-lanes /tmp/ling-fp8 /tmp/served /tmp/sref          # and the served logits vs float64
+zig-out/bin/tf-cuda-test ling-lanes /tmp/ling-fp8 /tmp/m --mtp                     # the same with MTP drafts
+python zig/tests/cuda/oracle/ling_forward.py /tmp/ling-fp8 /tmp/mref --ids /tmp/m.ids --picks /tmp/m.picks --mtp /tmp/mref.mtp
+zig-out/bin/tf-cuda-test ling-lanes /tmp/ling-fp8 /tmp/m /tmp/mref --mtp           # and the MTP logits vs float64
 zig-out/bin/tf-cuda-test ling-clamp /tmp/ling-fp8                  # Ling's SwiGLU order vs float64, L 10 and 2
 zig-out/bin/tf-cuda-test ling-clamp-old /tmp/ling-fp8 OLD/fatbin   # kept expert instances vs an older build's bytes
 ```
@@ -211,6 +244,7 @@ python zig/tests/cuda/oracle/ling_weights.py /path/to/Ling-3.1-flash /tmp/ling-r
 zig-out/bin/tf-cuda-test ling-weights-real /path/to/Ling-3.1-flash /tmp/ling-ref
 ```
 
+`ling-mtp-real DIR FIXTURE` runs the MTP layer (fixture from `oracle/ling_mtp.py SRC MODELING_PKG ROWS.pt OUT`).
 `ling-layer-real DIR FIXTURE` runs one whole layer (fixture from `oracle/ling_layer.py CHAIN L OUT`, the captured
 HF chain's `h<L>.pt`, `h<L+1>.pt`, `r<L>.pt`). `ling-weights-real` loads layers 0, 4 and 7 with experts 0-3 (769 MiB on the device) and compares 35 products with torch's float64
 on the same 8 rows: worst 0.414 of the bound, relative L2 at most 1.7e-3 for bf16 outputs and 6.9e-8 for the
@@ -239,7 +273,7 @@ size.
 Each item stands alone.
 
 1. **Recorder.** Give `Lanes` a `features` hook (the final-norm rows `Engine.verify` already keeps) once #848 lands.
-2. **MTP.** Wire `weights.Mtp` as a drafter (see "What is missing").
+2. **MTP acceptance.** Measure the MTP layer's acceptance on real text once a whole model runs (TP).
 3. **Fused projections.** Same-format q|k|v (and gate|up) rows as one weight per format, without the column copies.
 4. **Bf16 routed experts.** Add a grouped bf16 expert kernel, or quantize at load, and drop the per-expert lanes.
 5. **TP.** Cut `weights.load` by heads and widths as `glm/cuda_shard.zig` does; FP8 scale blocks span 128 rows and

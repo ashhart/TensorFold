@@ -136,7 +136,8 @@ class Model:
             self.gap = max(self.gap, (kth - choice.gather(1, idx).min(-1)[0]).max().item())
         w = s.gather(1, idx)
         w = w / (w.sum(-1, keepdim=True) + 1e-20) * c["routed_scaling_factor"]
-        le, ls = c["expert_swiglu_limit_list"][i], c["share_expert_swiglu_limit_list"][i]
+        lists = c["expert_swiglu_limit_list"], c["share_expert_swiglu_limit_list"]
+        le, ls = (x[i] if i < len(x) else 0 for x in lists)  # the lists cover the backbone: the MTP layer runs unclamped
         y = torch.zeros_like(x)
         for t in range(x.shape[0]):
             for j in range(top):

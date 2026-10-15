@@ -116,7 +116,8 @@ const usage =
     \\  ling-layer-real <dir> <fixture>   one real Ling-3.1 layer vs HF's captured output (oracle/ling_layer.py); exactness
     \\  ling-clamp <dir>          Ling's SwiGLU order min(silu(g), L): glue and the dir's grouped experts vs float64
     \\  ling-clamp-old <dir> <fatbins>   the grouped expert instances vs an older build's fatbins, byte for byte
-    \\  ling-lanes <dir> <out> [ref] [--layers a,b]   Ling's lane backend: chunked, drafted, resumed, concurrent == plain
+    \\  ling-lanes <dir> <out> [ref] [--layers a,b] [--mtp]   Ling's lane backend: chunked, drafted, resumed, concurrent == plain
+    \\  ling-mtp-real <dir> <fixture>   the real MTP layer vs HF's (oracle/ling_mtp.py); cut, window == decode rows
     \\  ling-weights-real <dir> <refdir>   real Ling-3.1 layers 0, 4, 7 (4 experts) vs float64 and torch (oracle/ling_weights.py)
     \\
 ;
@@ -229,6 +230,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "ling-layer-real")) return @import("ling_layer_real.zig").run(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "ling-clamp")) return @import("ling_clamp.zig").run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "ling-clamp-old")) return @import("ling_clamp.zig").old(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "ling-mtp-real")) return @import("ling_mtp_real.zig").run(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "ling-lanes")) return @import("ling_lanes.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "ling-weights-real")) return ling_real.run(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "glm-lanes-concurrent")) return glm_lanes_tests.concurrentCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));

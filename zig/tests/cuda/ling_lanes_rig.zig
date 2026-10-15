@@ -214,5 +214,10 @@ pub fn sameSeq(c: *Cover, e: *Engine, what: []const u8, x: u32, y: u32) !void {
     for (0..p.mla_layers) |mi| if (!std.mem.eql(u8, try back(e, c.a, p.cacheAt(mi), p.pos * ling.forward.cache_width * 2), try back(e, c.a, q.cacheAt(mi), p.pos * ling.forward.cache_width * 2))) {
         bad = "MLA cache rows";
     };
+    if (e.seqs.items[x].?.hd) |*ph| {
+        const qh = &e.seqs.items[y].?.hd.?;
+        if (ph.pos != qh.pos) bad = "MTP positions";
+        if (!std.mem.eql(u8, try back(e, c.a, ph.cacheAt(0), ph.pos * ling.forward.cache_width * 2), try back(e, c.a, qh.cacheAt(0), ph.pos * ling.forward.cache_width * 2))) bad = "MTP cache rows";
+    }
     try c.expect(bad == null, "{s}: slots {d} and {d} at {d}, byte for byte{s}{s}", .{ what, x, y, p.pos, if (bad != null) ", but differ in " else "", bad orelse "" });
 }

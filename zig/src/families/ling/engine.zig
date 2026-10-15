@@ -5,6 +5,7 @@ const glm = @import("glm_cuda");
 const config = @import("config.zig");
 const weights = @import("weights.zig");
 const fw = @import("forward.zig");
+const head = @import("mtp.zig");
 
 const sampler = glm.sampler;
 pub const Sampling = sampler.Sampling;
@@ -16,10 +17,13 @@ pub const window_rows = fw.window_rows;
 /// A shared verify's most rows and streams.
 pub const shared_rows = 64;
 pub const max_shared = 8;
+/// The MTP layer's chain at most.
+pub const max_drafts = head.max_drafts;
 
 pub const Options = struct {
     capacity: usize, // tokens a sequence holds
     prompt_rows: usize = prompt_rows, // rows a prompt chunk takes at most
+    mtp: bool = false, // load the MTP layer, if the checkpoint has one, and draft with it
     layers: ?[]const u32 = null, // a thin model's backbone layers, ascending (checks on a real checkpoint); null: all
 };
 
@@ -36,14 +40,18 @@ pub const Marks = struct { at: []const u32, ctx: *anyopaque, call: *const fn (ct
 /// One chunk's outcome: where the pass stands, and the first token once the prompt is done.
 pub const Step = struct { at: usize, first: ?u32 };
 
-/// A stream's sequence: the layers' caches and its sampling rule.
+/// A stream's sequence: the layers' caches, the MTP layer's, its sampling rule, the rows its next draft reads.
 const Seq = struct {
     st: fw.State,
+    hd: ?fw.State = null, // the MTP layer's MLA cache at its own position
+    hold: ?cuda.DeviceBuffer = null, // the prompt's last final-norm row: the first draft's hidden row
     sampling: ?Sampling = null, // null: greedy
+    in_head: usize = 0, // chained draft rows the MTP cache holds past the absorbed ones
+    rows_at: u64 = 0, // the last verify's final-norm rows (bf16 [rows][hidden]): the next draft's hidden rows
 };
 
 /// A kept state: the sequence's arena copied whole, and the host fields beside it.
-const Snap = struct { buf: cuda.DeviceBuffer, pos: usize, cur: []u1 };
+const Snap = struct { buf: cuda.DeviceBuffer, hd: ?cuda.DeviceBuffer, pos: usize, hd_pos: usize, cur: []u1 };
 
 pub const Engine = struct {
     gpa: std.mem.Allocator,
@@ -54,6 +62,7 @@ pub const Engine = struct {
     w: weights.Weights, // every loaded layer
     main: weights.Weights, // a view of w: the backbone layers alone
     g: fw.Graph,
+    mtp: ?head.Head = null,
     bp: fw.Buffers, // prompt chunks
     bd: fw.Buffers, // one stream's verify window
     bs: fw.Buffers, // shared verify windows
@@ -77,6 +86,7 @@ pub const Engine = struct {
         };
         defer opened.ck.close();
         const c = opened.c;
+        const mtp = o.mtp and c.mtp > 0;
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.* = .{ .gpa = gpa, .d = d, .c = c, .m = undefined, .stream = undefined, .w = undefined, .main = undefined, .g = undefined, .bp = undefined, .bd = undefined, .bs = undefined, .smp = undefined, .pairs = undefined, .capacity = o.capacity, .chunk = o.prompt_rows };
@@ -87,15 +97,25 @@ pub const Engine = struct {
         const layers = try backbone(gpa, &c, o.layers);
         defer gpa.free(layers);
         {
+            const all = try std.mem.concat(gpa, u32, &.{ layers, if (mtp) &.{c.layers} else &.{} });
+            defer gpa.free(all);
             var pack = try cuda.modelopt.Packer.load(d);
             defer pack.unload();
-            e.w = try weights.load(gpa, d, e.stream, &pack, &opened.ck, c, layers, .{});
+            e.w = try weights.load(gpa, d, e.stream, &pack, &opened.ck, c, all, .{});
         }
         errdefer e.w.deinit();
         e.main = e.w;
         e.main.layers = e.w.layers[0..layers.len];
         e.g = try fw.Graph.init(gpa, d, &e.m, e.stream, &e.main);
         errdefer e.g.deinit();
+        if (mtp) {
+            e.mtp = @as(head.Head, undefined);
+            e.mtp.?.init(gpa, d, &e.m, e.stream, &e.w, o.prompt_rows, o.capacity) catch |err| {
+                e.mtp = null;
+                return err;
+            };
+        }
+        errdefer if (e.mtp) |*h| h.deinit();
         e.bp = try fw.Buffers.init(d, &e.m, &e.w, o.prompt_rows, true, o.capacity);
         errdefer e.bp.deinit();
         e.bd = try fw.Buffers.init(d, &e.m, &e.w, window_rows, false, o.capacity);
@@ -134,6 +154,7 @@ pub const Engine = struct {
         e.bs.deinit();
         e.bd.deinit();
         e.bp.deinit();
+        if (e.mtp) |*h| h.deinit();
         e.g.deinit();
         e.w.deinit();
         e.stream.deinit();
@@ -153,6 +174,11 @@ pub const Engine = struct {
             const q = try e.gpa.create(Seq);
             errdefer e.gpa.destroy(q);
             q.* = .{ .st = try fw.State.init(e.gpa, e.d, &e.g, e.capacity) };
+            errdefer e.freeSeq(q);
+            if (e.mtp) |*h| {
+                q.hd = try fw.State.init(e.gpa, e.d, &h.g, e.capacity);
+                q.hold = try cuda.DeviceBuffer.alloc(e.d, @as(usize, e.c.hidden) * 2);
+            }
             e.seqs.items[slot] = q;
         }
         e.cur = e.seqs.items[slot].?;
@@ -169,14 +195,24 @@ pub const Engine = struct {
     fn free(e: *Engine, slot: usize) void {
         const q = e.seqs.items[slot] orelse return;
         e.stream.synchronize() catch {};
-        q.st.deinit();
+        e.freeSeq(q);
         e.gpa.destroy(q);
         e.seqs.items[slot] = null;
     }
 
-    /// Bytes one more stream's sequence takes: its arena.
+    fn freeSeq(e: *Engine, q: *Seq) void {
+        _ = e;
+        q.st.deinit();
+        if (q.hd) |*h| h.deinit();
+        if (q.hold) |*b| b.free();
+        q.hd = null;
+        q.hold = null;
+    }
+
+    /// Bytes one more stream's sequence takes: its arenas.
     pub fn seqBytes(e: *const Engine) u64 {
-        return e.seqs.items[0].?.st.arena.buf.len;
+        const q = e.seqs.items[0].?;
+        return q.st.arena.buf.len + if (q.hd) |h| h.arena.buf.len + @as(usize, e.c.hidden) * 2 else 0;
     }
 
     /// The committed length: the pending token sits here, a window's row r draws position pos + 1 + r.
@@ -187,7 +223,9 @@ pub const Engine = struct {
     /// A fresh sequence with `sampling` (null or temperature 0: greedy).
     pub fn begin(e: *Engine, sampling: ?Sampling) !void {
         e.cur.sampling = sampler.check(sampling);
+        e.cur.in_head = 0;
         try e.cur.st.reset(e.stream);
+        if (e.cur.hd) |*h| try h.reset(e.stream);
     }
 
     /// The whole prompt pass: chunks, then the first token from the last row; `from` restores a kept state.
@@ -234,6 +272,12 @@ pub const Engine = struct {
             try e.draw(e.bp.logits, 1, len, &t);
             first = t[0];
         }
+        if (e.mtp) |*h| { // each row whose next token is known through the MTP layer (it overwrites b.normed)
+            const q = e.cur;
+            if (end == len) try e.copy(q.hold.?.ptr, e.bp.normed + (rows - 1) * e.c.hidden * 2, e.c.hidden * 2);
+            const known = @min(rows, len - 1 - at);
+            if (known > 0) try h.absorb(&e.m, e.stream, &e.bp, &q.hd.?, @ptrCast(ids[at + 1 ..][0..known]), e.bp.normed);
+        }
         try f.commit(&e.cur.st, rows);
         return .{ .at = end, .first = first };
     }
@@ -244,6 +288,7 @@ pub const Engine = struct {
         const f = e.forward(&e.bd);
         const at = e.cur.st.pos;
         try f.run(&.{.{ .st = &e.cur.st, .row0 = 0, .rows = ids.len }}, @ptrCast(ids));
+        e.cur.rows_at = e.bd.normed;
         try e.draw(e.bd.logits, ids.len, at + 1, out);
     }
 
@@ -264,6 +309,7 @@ pub const Engine = struct {
         try e.forward(&e.bs).run(segs[0..parts.len], @ptrCast(ids[0..rows]));
         for (parts, segs[0..parts.len]) |p, sg| {
             try e.bind(p.slot);
+            e.cur.rows_at = e.bs.normed + sg.row0 * e.c.hidden * 2;
             try e.draw(e.bs.logits + sg.row0 * e.c.vocab * 2, sg.rows, sg.st.pos + 1, p.out);
         }
     }
@@ -271,6 +317,36 @@ pub const Engine = struct {
     /// The last window's first `n` rows committed (the KDA states replayed when fewer than it ran).
     pub fn keep(e: *Engine, n: usize) !void {
         try e.forward(&e.bd).commit(&e.cur.st, n);
+    }
+
+    /// The MTP layer absorbs the kept rows with `follow` (the token after each), then chains `depth` drafts.
+    pub fn draft(e: *Engine, from_prompt: bool, follow: []const u32, depth: usize, out: []u32) !void {
+        const h = if (e.mtp) |*x| x else return error.NoDraftHead;
+        if (depth > max_drafts or out.len < depth) return error.TooDeep;
+        if (follow.len == 0) return error.NoFollow;
+        const q = e.cur;
+        const hd = &q.hd.?;
+        const D: usize = e.c.hidden;
+        try hd.setPos(e.stream, hd.pos - q.in_head); // the last chain's rows go
+        q.in_head = 0;
+        const hidden = if (from_prompt) q.hold.?.ptr else q.rows_at;
+        var s0: usize = 0;
+        while (s0 < follow.len) : (s0 += window_rows) {
+            const part = follow[s0..@min(follow.len, s0 + window_rows)];
+            try h.absorb(&e.m, e.stream, &h.bm, hd, @ptrCast(part), hidden + s0 * D * 2);
+        }
+        if (hd.pos != q.st.pos) return error.MtpOutOfStep;
+        const f = h.forward(&e.m, e.stream, &h.bm);
+        var last = (follow.len - 1) % window_rows; // h.bm's row of the newest absorbed token
+        for (0..depth) |j| {
+            try f.final(last + 1);
+            try f.logitsOf(last, 1);
+            try e.draw(h.bm.logits, 1, q.st.pos + 1 + j, out[j..][0..1]);
+            if (j + 1 == depth) break;
+            try h.absorb(&e.m, e.stream, &h.bm, hd, @ptrCast(out[j..][0..1]), h.bm.normed + last * D * 2);
+            q.in_head += 1;
+            last = 0;
+        }
     }
 
     /// `rows` logits rows -> the tokens at positions first, first + 1, ...
@@ -303,11 +379,18 @@ pub const Engine = struct {
         var buf = try cuda.DeviceBuffer.alloc(e.d, q.st.arena.buf.len);
         errdefer buf.free();
         try e.copy(buf.ptr, q.st.arena.buf.ptr, buf.len);
+        var hd: ?cuda.DeviceBuffer = null;
+        errdefer if (hd) |*x| x.free();
+        if (q.hd) |h| {
+            if (q.in_head != 0) return error.NotCommitted;
+            hd = try cuda.DeviceBuffer.alloc(e.d, h.arena.buf.len);
+            try e.copy(hd.?.ptr, h.arena.buf.ptr, h.arena.buf.len);
+        }
         try e.stream.synchronize();
         const cur = try e.gpa.dupe(u1, q.st.cur);
         errdefer e.gpa.free(cur);
         const id = e.next_snap;
-        try e.snaps.put(e.gpa, id, .{ .buf = buf, .pos = q.st.pos, .cur = cur });
+        try e.snaps.put(e.gpa, id, .{ .buf = buf, .hd = hd, .pos = q.st.pos, .hd_pos = if (q.hd) |h| h.pos else 0, .cur = cur });
         e.next_snap += 1;
         return id;
     }
@@ -321,6 +404,12 @@ pub const Engine = struct {
         q.st.pending = 0;
         q.st.prompt = false;
         try q.st.setPos(e.stream, s.pos);
+        if (q.hd) |*h| {
+            try e.copy(h.arena.buf.ptr, (s.hd orelse return error.NoKeptState).ptr, h.arena.buf.len);
+            h.pending = 0;
+            try h.setPos(e.stream, s.hd_pos);
+        }
+        q.in_head = 0;
         try e.stream.synchronize();
     }
 
@@ -335,6 +424,7 @@ pub const Engine = struct {
 
     fn freeSnap(e: *Engine, s: *Snap) void {
         s.buf.free();
+        if (s.hd) |*x| x.free();
         e.gpa.free(s.cur);
     }
 

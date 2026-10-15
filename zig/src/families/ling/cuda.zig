@@ -8,6 +8,7 @@ pub const synth = @import("synth.zig");
 pub const graph = @import("graph.zig");
 pub const state = @import("state.zig");
 pub const forward = @import("forward.zig");
+pub const mtp = @import("mtp.zig");
 pub const engine = @import("engine.zig");
 pub const lanes = @import("lanes.zig");
 pub const native = @import("native.zig");
@@ -49,6 +50,7 @@ test {
     std.testing.refAllDecls(forward.Forward);
     std.testing.refAllDecls(engine.Engine); // the engine, its lane backend and its server hooks too
     std.testing.refAllDecls(lanes.Lanes);
+    std.testing.refAllDecls(mtp.Head);
     _ = native;
 }
 

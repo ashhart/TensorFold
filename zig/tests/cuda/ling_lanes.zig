@@ -29,6 +29,7 @@ pub fn run(gpu: check.Gpu, rest: []const [:0]const u8) !void {
     const out = rest[1];
     var ref: ?[]const u8 = null;
     var thin: ?[]u32 = null;
+    var mtp = false;
     var i: usize = 2;
     while (i < rest.len) : (i += 1) {
         if (std.mem.eql(u8, rest[i], "--layers") and i + 1 < rest.len) {
@@ -37,9 +38,11 @@ pub fn run(gpu: check.Gpu, rest: []const [:0]const u8) !void {
             while (it.next()) |x| try list.append(a, try std.fmt.parseInt(u32, x, 10));
             thin = list.items;
             i += 1;
+        } else if (std.mem.eql(u8, rest[i], "--mtp")) {
+            mtp = true;
         } else ref = rest[i];
     }
-    const e = try Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, dir, .{ .capacity = 1024, .prompt_rows = 512, .layers = thin });
+    const e = try Engine.init(gpu.gpa, gpu.io, gpu.d, gpu.ctx, dir, .{ .capacity = 1024, .prompt_rows = 512, .layers = thin, .mtp = mtp });
     defer e.deinit();
     e.chunk = chunk;
     var ll: ling.lanes.Lanes = .{ .e = e };
@@ -51,7 +54,7 @@ pub fn run(gpu: check.Gpu, rest: []const [:0]const u8) !void {
     defer le.deinit();
     var c: Cover = .{ .gpa = gpu.gpa, .a = a, .le = &le };
     const V: usize = e.c.vocab;
-    std.debug.print("RESULT ling-lanes {t}: {d} layers loaded of {d}, vocabulary {d}, prompt chunks of {d} rows\n", .{ e.c.quant, e.main.layers.len, e.c.layers, V, chunk });
+    std.debug.print("RESULT ling-lanes {t}: {d} layers loaded of {d}, vocabulary {d}, prompt chunks of {d} rows{s}\n", .{ e.c.quant, e.main.layers.len, e.c.layers, V, chunk, if (e.mtp != null) ", drafts from the MTP layer" else "" });
 
     const p = try walk(a, 150, V, 0);
     // W, what every contract below holds to: the plain greedy pass, its prompt in 37-row chunks
@@ -82,6 +85,22 @@ pub fn run(gpu: check.Gpu, rest: []const [:0]const u8) !void {
     const g = plain_g.ids;
     const differ = std.mem.indexOfDiff(u32, plain_s.ids, g);
     try c.expect(differ != null, "the sampled reply leaves the greedy one at token {?d} (sampling draws)", .{differ});
+
+    if (e.mtp != null) { // the MTP layer's drafts against the plain replies (acceptance on random weights says nothing)
+        for ([_]Cover.Got{ plain_g, plain_s }, [_]?lanes.Sampling{ null, keyed }) |plain, sampling| {
+            const got = try c.run(.{ .prompt = copy_prompt, .max_new = 200, .sampling = sampling });
+            try c.same(if (sampling != null) "MTP drafts, sampled, against plain" else "MTP drafts, greedy, against plain", got, plain.ids, .length);
+            try c.expect(got.drafted > 0, "MTP drafts{s}: {d} drafted in {d} rounds, {d} kept", .{ if (sampling != null) ", sampled" else "", got.drafted, got.rounds, got.accepted });
+        }
+        var keeper: rig.Keeper = .{ .e = e };
+        defer keeper.drop();
+        const marks = [_]u32{ 53, 211 };
+        _ = try c.run(.{ .prompt = copy_prompt, .max_new = 8, .reuse = .{ .marks = &marks, .hook = keeper.hook() } });
+        for (keeper.kept[0..keeper.n], keeper.at[0..keeper.n]) |kept, at| {
+            const got = try c.run(.{ .prompt = copy_prompt, .max_new = 200, .reuse = .{ .saved = kept, .at = at } });
+            try c.same(try std.fmt.allocPrint(a, "MTP drafts resumed at {d}, against plain", .{at}), got, plain_g.ids, .length);
+        }
+    }
 
     // resumed == fresh: states kept at marks off the chunk grid and off multiples of 16, then passes resumed there
     {
@@ -166,7 +185,7 @@ fn concurrent(c: *Cover, ll: *ling.lanes.Lanes, a: std.mem.Allocator, V: usize) 
             if (j.discard_at != null) continue;
             try c.same(try std.fmt.allocPrint(a, "{s}: stream {d} (prompt {d}{s}) against its solo run", .{ cs.name, k, j.p, if (j.sampled) ", sampled" else "" }), .{ .ids = ids, .reason = .length, .rounds = 0, .cached = 0, .drafted = 0, .accepted = 0 }, if (j.sampled) solo_s[j.p] else solo[j.p], .length);
         }
-        var drafting = false;
+        var drafting = ll.e.mtp != null; // every joined stream drafts with the MTP layer when it is loaded
         for (cs.joins) |j| drafting = drafting or j.drafts;
         try c.expect(got.most >= 2 and (got.drafted > 0) == drafting, "{s}: {d} streams at most in one round, {d} rounds with two or more, {d} drafts", .{ cs.name, got.most, got.shared, got.drafted });
         for (cs.joins) |j| if (j.filled) {

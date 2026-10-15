@@ -45,7 +45,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.gpa = gpa;
-    own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, .{ .capacity = capacity(o.context) });
+    own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, .{ .capacity = capacity(o.context), .mtp = o.drafts });
     errdefer own.e.deinit();
     own.lanes = .{ .e = own.e, .whole = off("TF_LING_PROMPT_STEPS"), .alone = off("TF_LING_SHARED") };
     return .{
