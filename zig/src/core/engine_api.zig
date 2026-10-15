@@ -116,6 +116,8 @@ pub const Vision = struct {
     image_token: u32,
     /// The tokens the template wraps an image in (the image token among them): text that spells one stays text.
     markers: []const u32 = &.{},
+    /// Tokens the server writes around each image's rows (Nemotron Omni's <img> and </img>); null: the template's own.
+    wrap: ?[2]u32 = null,
     /// Image tokens one request may hold in all, and images.
     image_tokens: u32,
     max_images: u32,
