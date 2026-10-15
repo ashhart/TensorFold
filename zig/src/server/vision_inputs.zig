@@ -154,6 +154,7 @@ pub fn extract(srv: *Server, cx: *Cx, messages: ?Value) errors.Refused!?Extracte
                 var img = qi.decode(cx.a, bytes, .{}) catch |e| switch (e) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.ImageTooLarge => return cx.refuse("image dimensions exceed the decoded pixel limit"),
+                    error.NoDecoder => return cx.refuse("image inputs need the shared JPEG and PNG decoder, which this server does not have yet"),
                     else => return cx.refuse("image bytes are invalid or unsupported; use JPEG or PNG"),
                 };
                 total_pixels += @as(u64, img.w) * img.h;

@@ -85,6 +85,7 @@ pub const LaneHost = struct {
             const e = job.entry orelse return;
             job.entry = null;
             const store = job.host.cache orelse return;
+            store.unpin(e);
             if (!job.started) return;
             job.stream.reuse.saved = null; // the backend restores before its first chunk; a later keep may free it
             if (job.stream.reuse_failed) store.resumed(e, job.request.prompt, false) else if (job.stream.cached == e.at) store.resumed(e, job.request.prompt, true);
@@ -316,9 +317,8 @@ pub const LaneHost = struct {
             return false;
         }
         var reuse: lanes.stream.Reuse = .{};
-        // the entry stays alive until the backend restores it: nothing keeps between here and this stream's own pass
         if (h.cache) |store| if (r.prompt_logprobs == null and !r.untaught) if (store.lookupRewind(h.gpa, r.prompt, born(r), r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, h.spans(r))) |l| {
-            job.entry = l.entry;
+            job.entry = if (l.entry) |e| store.pin(e) else null; // kept alive until its restore reports
             job.kept0 = store.counts.kept;
             job.marks = l.marks;
             reuse = .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .hook = .{ .ptr = job, .at = Job.kept } };
@@ -474,6 +474,7 @@ pub const LaneHost = struct {
         job.proposer.deinit();
         job.started = false;
         job.fill_began = false;
+        if (job.entry) |e| h.cache.?.unpin(e);
         job.entry = null; // looked up again at its next admission
         h.gpa.free(job.marks);
         job.marks = &.{};

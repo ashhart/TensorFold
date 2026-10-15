@@ -243,14 +243,6 @@ pub const Fake = struct {
         return self(ptr).drawn.items[handle];
     }
 
-    fn refusedFn(ptr: *anyopaque, out: []*Stream) usize {
-        const x = self(ptr);
-        const n = @min(out.len, x.refused.items.len);
-        @memcpy(out[0..n], x.refused.items[0..n]);
-        x.refused.clearRetainingCapacity();
-        return n;
-    }
-
     fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
         const x = self(ptr);
         x.rounds += 1;
