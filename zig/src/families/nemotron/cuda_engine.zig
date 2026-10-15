@@ -65,6 +65,9 @@ pub const Keep = struct {
     cut: bool = false, // every row ends a chunk instead: the reference the marks test compares the armed states to
 };
 
+/// Each prompt chunk's rows as it ends: `rows` normed final hidden states at `hidden`, from prompt row `row`.
+pub const Taps = struct { ctx: *anyopaque, call: *const fn (ctx: *anyopaque, hidden: u64, row: usize, rows: usize) anyerror!void };
+
 /// Serial rounds a host keeps queued ahead of the one it reads.
 pub const lookahead = 4;
 
@@ -124,6 +127,7 @@ pub const Engine = struct {
     carve: ?*cuda.Carveout = null, // Options.carveout; it outlives the engine
     heat_gate: heat.Gate = .{}, // off unless TF_HEAT_HIGH and TF_HEAT_LOW are set
     prompt_rows: ?PromptRows = null, // a prompt pass's rows for prompt_logprobs (serial chunks, from 0)
+    taps: ?Taps = null, // a prompt pass's hidden rows for a recorder (serial chunks)
     armed: marks.Armed = .{}, // the marks inside the prompt chunk about to run (cuda_marks.zig)
     spares: marks.Spares = .{}, // free Mamba buffers the prompt cache set aside for the next marks
     last_chunk: usize = 0, // where the last prompt pass's last chunk started (the prompt's last row: len - 1 - this)

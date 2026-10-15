@@ -24,7 +24,8 @@ const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--
     " [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P]" ++
     " [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}]" ++
     " [--thinking-budget THINKING_BUDGET] [--loop-guard] [--no-drafts] [--drafter DRAFTER]" ++
-    " [--drafter-bits {0,4}] [--keep-warm SECONDS] [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP]" ++
+    " [--drafter-bits {0,4}] [--record RECORD] [--keep-warm SECONDS] [--compact-at COMPACT_AT]" ++
+    " [--compact-keep COMPACT_KEEP]" ++
     " [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--parallel PARALLEL]" ++
     " [--cortheon] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE]" ++
     " [--segments SEGMENTS] model\n";
