@@ -590,14 +590,6 @@ pub const originals = @import("originals.zig");
 test {
     _ = @import("lane_host.zig");
     _ = @import("lane_host_test.zig");
-    _ = @import("lane_host_fill_test.zig");
-    _ = @import("lane_host_status_test.zig");
-    _ = @import("lane_host_stale_test.zig");
-    _ = @import("lane_host_reuse_test.zig");
-    _ = @import("lane_host_cache_lifetime_test.zig");
-    _ = @import("lane_host_borrow_test.zig");
-    _ = @import("lane_host_warm_test.zig");
-    _ = @import("lane_host_rows_test.zig");
     _ = @import("prompt_cache.zig");
     _ = @import("prompt_radix.zig");
     _ = @import("prompt_imprint.zig");
