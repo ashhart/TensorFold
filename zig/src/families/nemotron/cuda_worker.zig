@@ -47,7 +47,7 @@ pub fn send(f: *const fwd.Forward, id: u32, rows: usize) !void {
     const o = f.ops;
     const tp = f.tp.?;
     if (tp.world != 2) return error.TensorParallelNotBuilt;
-    for ([4]u32{ magic, @intFromEnum(Job.rows), id, @intCast(rows) }, 0..) |v, i| try o.fill32(b.job + i * 4, v, 1);
+    for ([4]u32{ magic, @backingInt(Job.rows), id, @intCast(rows) }, 0..) |v, i| try o.fill32(b.job + i * 4, v, 1);
     const small = rows <= small_rows;
     const base: u64 = if (small) b.job + header_bytes else b.job + firstBytes(c);
     const at = sections(c, if (small) small_rows else rows);
@@ -68,7 +68,7 @@ pub fn receive(f: *const fwd.Forward, rows: usize) !void {
 pub fn end(e: *Engine) !void {
     cuda.tp_watch.ended(); // the other ranks' lines close on purpose from here
     const o = e.ops();
-    for ([4]u32{ magic, @intFromEnum(Job.end), 0, 0 }, 0..) |v, i| try o.fill32(e.b.job + i * 4, v, 1);
+    for ([4]u32{ magic, @backingInt(Job.end), 0, 0 }, 0..) |v, i| try o.fill32(e.b.job + i * 4, v, 1);
     try e.tp.?.send(o.s, e.b.job, firstBytes(e.c), 1);
     try e.stream.synchronize();
 }
@@ -169,7 +169,7 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
         try ops.download(std.mem.sliceAsBytes(&h), first);
         try stream.synchronize();
         if (h[0] != magic) return error.BadJob;
-        if (h[1] == @intFromEnum(Job.end)) {
+        if (h[1] == @backingInt(Job.end)) {
             cuda.tp_watch.ended();
             break;
         }

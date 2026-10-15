@@ -107,20 +107,20 @@ fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
     const ck8 = if (c.ck) R * @max(D, @max(xd, qd)) else 0;
     const ck4 = if (c.ck and lat) @import("cuda_latent_ck.zig").rowsBytes(c, R) else 0;
     return .{
-        W * c.vocab * 2,       16,                                          R * 4,
-        R * D * 2,             c.vocab * 2,                                 16,
-        R * D * 2,             R * D * 2,                                   R * D * 2,
-        R * D * 2,             R * D / 64 * 4,                              R * D * 2,
-        R * c.projDim() * 2,   R * cd * 2,                                  R * xd * 2,
-        R * xd * 2,            R * xd / 64 * 4,                             R * c.qkvDim() * 2,
-        R * qd * 2,            R * qd * 2,                                  R * qd / 64 * 4,
-        W * nch * qd * 4,      W * nch * c.heads * 4,                       W * nch * c.heads * 4,
-        (if (lat) latent.routerSlices(D) else 6) * R * c.experts * 4, pairs * own * 4, R * ns * 4,
-        pairs * own * 4,       items * 12,                                  8,
-        pairs * own * 4,       (pairs * own + 1023) / 1024 * plan_experts * 4, pairs * c.expert_width * 2,
-        ymoe,                  shared_words * 4,                            R * kern.pocket_width * 4,
-        R * c.latent * 2,      R * c.latent * 2,                            R * own * sw * 2,
-        R * own * 4,           job,                                         ck8,
+        W * c.vocab * 2,                                              16,                                             R * 4,
+        R * D * 2,                                                    c.vocab * 2,                                    16,
+        R * D * 2,                                                    R * D * 2,                                      R * D * 2,
+        R * D * 2,                                                    R * D / 64 * 4,                                 R * D * 2,
+        R * c.projDim() * 2,                                          R * cd * 2,                                     R * xd * 2,
+        R * xd * 2,                                                   R * xd / 64 * 4,                                R * c.qkvDim() * 2,
+        R * qd * 2,                                                   R * qd * 2,                                     R * qd / 64 * 4,
+        W * nch * qd * 4,                                             W * nch * c.heads * 4,                          W * nch * c.heads * 4,
+        (if (lat) latent.routerSlices(D) else 6) * R * c.experts * 4, pairs * own * 4,                                R * ns * 4,
+        pairs * own * 4,                                              items * 12,                                     8,
+        pairs * own * 4,                                              (pairs * own + 1023) / 1024 * plan_experts * 4, pairs * c.expert_width * 2,
+        ymoe,                                                         shared_words * 4,                               R * kern.pocket_width * 4,
+        R * c.latent * 2,                                             R * c.latent * 2,                               R * own * sw * 2,
+        R * own * 4,                                                  job,                                            ck8,
         ck4,
     };
 }
@@ -284,8 +284,8 @@ pub const Buffers = struct {
             &b.logits,    &b.p_meta,    &b.p_ids, &b.p_hidden, &b.p_logits, &b.p_sampled, &b.emb, &b.h[0],         &b.h[1],       &b.y,
             &b.xs,        &b.delta,     &b.proj,  &b.p_xc,     &b.sy,       &b.g,         &b.gxs, &b.qkv,          &b.q,          &b.att,
             &b.axs,       &b.po,        &b.pm,    &b.pl,       &b.part,     &b.pick,      &b.wts, &b.plan.members, &b.plan.items, &b.plan.counts,
-            &b.plan.rank, &b.plan.hist, &b.act,   &b.ymoe,     &b.shared,   &b.pocket,
-            &b.lat,       &b.comb,      &b.sact,  &b.sids,     &b.job,      &b.ck8,       &b.ck4,
+            &b.plan.rank, &b.plan.hist, &b.act,   &b.ymoe,     &b.shared,   &b.pocket,    &b.lat, &b.comb,         &b.sact,       &b.sids,
+            &b.job,       &b.ck8,       &b.ck4,
         };
     }
 

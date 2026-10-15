@@ -110,7 +110,7 @@ const Fingerprint = extern struct {
     fn of(c: Config, program: [32]u8, weights: [32]u8) Fingerprint {
         var f: Fingerprint = .{ .rank = @intCast(c.rank), .world = @intCast(c.world), .ck = @intFromBool(c.ck), .dims = .{ c.hidden, c.vocab, c.layers, c.experts, c.top_k, c.latent, c.expert_width, c.shared_width, c.shares, c.mamba_heads, c.heads, c.kv_heads }, .kinds = undefined, .program = program, .weights = weights };
         var kinds: [@import("config.zig").max_layers]u8 = undefined;
-        for (c.kinds[0..c.layers], kinds[0..c.layers]) |k, *b| b.* = @intFromEnum(k);
+        for (c.kinds[0..c.layers], kinds[0..c.layers]) |k, *b| b.* = @backingInt(k);
         std.crypto.hash.sha2.Sha256.hash(kinds[0..c.layers], &f.kinds, .{});
         return f;
     }
