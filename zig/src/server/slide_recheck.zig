@@ -7,6 +7,7 @@ const wording = @import("slide_words.zig");
 const side = @import("slide_side.zig");
 const slide_ask = @import("slide_ask.zig");
 const slide_graph = @import("slide_graph.zig");
+const talks = @import("slide_context.zig");
 const Server = @import("server.zig").Server;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -28,7 +29,7 @@ pub fn check(srv: *Server, cx: *Cx, id: u32, which: Which, before: []const Earli
     var facts: std.ArrayList(Earlier) = .empty;
     for (try srv.slide.earlier(a, id)) |f| if (which == .all or f.recalled == null) try facts.append(a, f);
     var asking: std.ArrayList(side.Asking) = .empty;
-    for (facts.items) |f| for (f.asked) |w| try asking.append(a, .{ .question = w.question });
+    for (facts.items) |f| for (f.asked) |w| try asking.append(a, .{ .question = w.question, .before = try talks.turns(srv, cx, w.context, gone) });
     const replies = try side.askAll(srv, cx, asking.items, gone);
     const out = try a.alloc(Result, facts.items.len);
     var at: usize = 0;
@@ -79,7 +80,7 @@ pub fn keeps(srv: *Server, cx: *Cx, lost: []const Result) !struct { prompts: []c
     var prompts: std.ArrayList(api.Example) = .empty;
     var kept: std.ArrayList(api.Example) = .empty;
     for (lost) |r| for (r.fact.asked) |w| {
-        if (w.probe) continue;
+        if (w.probe or w.context.len > 0) continue; // kept as asked cold: its answers in conversation follow
         const answer = if (w.answer.len > 0) w.answer else continue;
         try prompts.append(a, try slide_ask.promptOnly(srv, cx, a, null, w.question));
         try kept.append(a, try slide_ask.example(srv, cx, a, null, w.question, answer, &.{}));
@@ -98,18 +99,18 @@ pub fn names(a: Allocator, rs: []const Result) ![]const u8 {
 }
 
 /// A question of fact `fact` (0: the deleted one): its words, the answer it expects ("": its reply before the cut).
-pub const Ask = struct { fact: usize, question: []const u8, answer: []const u8 = "", short: []const u8 = "", thinking: bool = false, probe: bool = false };
+pub const Ask = struct { fact: usize, question: []const u8, answer: []const u8 = "", short: []const u8 = "", thinking: bool = false, probe: bool = false, context: []const u8 = "" }; // context: a kept talk's name
 
 /// What a recheck found wrong: whose fact, which ask (null: its unseen wordings together), and what.
 pub const Miss = struct { fact: usize, ask: ?usize = null, why: []const u8 };
 
-/// Each fact's questions as its lesson asked them: held out with thinking off, then on (`thinks`); unseen ones off.
+/// Each fact's questions as its lesson asked them: held out (cold ones thinking off, then on), unseen ones off.
 pub fn plan(a: Allocator, facts: []const Fact, thinks: bool) ![]const Ask {
     var out: std.ArrayList(Ask) = .empty;
     for (facts, 0..) |f, i| {
         for (f.answers) |x| for ([_]bool{ false, true }) |on| {
-            if (on and (x.probe or !thinks)) continue;
-            try out.append(a, .{ .fact = i, .question = x.question, .answer = x.answer, .short = x.short, .thinking = on, .probe = x.probe });
+            if (on and (x.probe or !thinks or x.context.len > 0)) continue;
+            try out.append(a, .{ .fact = i, .question = x.question, .answer = x.answer, .short = x.short, .thinking = on, .probe = x.probe, .context = x.context });
         };
         // a fact taught before its answers were kept: what it says before the cut is what it should say after
         if (f.answers.len == 0) for (f.questions) |q| for ([_]bool{ false, true }) |on| {
@@ -123,7 +124,7 @@ pub fn plan(a: Allocator, facts: []const Fact, thinks: bool) ![]const Ask {
 /// What the user reads of each ask's reply, asked side by side (`base`: from the model as shipped).
 pub fn ask(srv: *Server, cx: *Cx, asks: []const Ask, base: bool, gone: anytype) ![]const []const u8 {
     const qs = try cx.a.alloc(side.Asking, asks.len);
-    for (asks, qs) |x, *q| q.* = .{ .question = x.question, .thinking = x.thinking, .base = base };
+    for (asks, qs) |x, *q| q.* = .{ .question = x.question, .thinking = x.thinking, .base = base, .before = try talks.turns(srv, cx, x.context, gone) };
     const replies = try side.askAll(srv, cx, qs, gone);
     const out = try cx.a.alloc([]const u8, replies.len);
     for (replies, out) |r, *o| o.* = r.content;

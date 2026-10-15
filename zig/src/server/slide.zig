@@ -304,12 +304,12 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
     return out;
 }
 
-/// What a lesson's checks expect asked cold: each held-out question's answer as written, then each unseen wording's.
+/// What a lesson's checks expect: each held-out question's answer as written (and its conversation), then unseen ones'.
 fn expected(a: Allocator, plan: teach.Plan) []const slide_graph.Answer {
-    var out: std.ArrayList(slide_graph.Answer) = .empty;
-    for (plan.held) |h| if (h.context.len == 0) out.append(a, .{ .question = h.question, .answer = h.answer, .short = h.short }) catch return &.{};
-    for (plan.probes) |h| out.append(a, .{ .question = h.question, .answer = h.answer, .short = h.short, .probe = true }) catch return &.{};
-    return out.items;
+    const out = a.alloc(slide_graph.Answer, plan.held.len + plan.probes.len) catch return &.{};
+    for (plan.held, out[0..plan.held.len]) |h, *x| x.* = .{ .question = h.question, .answer = h.answer, .short = h.short, .context = h.context };
+    for (plan.probes, out[plan.held.len..]) |h, *x| x.* = .{ .question = h.question, .answer = h.answer, .short = h.short, .probe = true };
+    return out;
 }
 
 /// The facts learned before fact `id` asked again, each verdict on the stream; those that came back before and not now.
