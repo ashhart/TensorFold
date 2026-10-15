@@ -180,7 +180,7 @@ pub fn main(init: std.process.Init) !u8 {
     };
     generate(init.gpa, init.io, a) catch |err| {
         std.debug.print("FAIL {t}\n", .{err});
-        if (@errorReturnTrace()) |t| std.debug.dumpStackTrace(t);
+        if (@errorReturnTrace()) |t| std.debug.dumpErrorReturnTrace(t);
         return 1;
     };
     return 0;
