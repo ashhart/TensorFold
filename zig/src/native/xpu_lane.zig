@@ -41,7 +41,7 @@ pub fn draw(gpa: std.mem.Allocator, logits: []const f32, s: lanes.Sampling, posi
     return @intCast(try lanes.sampling.choose(gpa, values, ids, position, s));
 }
 
-/// The backend over the family `S`: its Engine and promptRows (rows of one prompt window; above 16 the prefill GEMMs).
+/// The backend over the family `S`: its Engine and promptRows (rows of one prompt window; above 16, pdense rows).
 pub fn Xpu(comptime S: type) type {
     return struct {
         const Self = @This();

@@ -10,7 +10,7 @@ pub const formats: []const []const u8 = &.{"mlx-q4g64"};
 pub const name = "xpu-nemotron";
 pub const Engine = nemotron.Engine;
 
-/// Rows of one prompt window (above 16: the prefill GEMMs).
+/// Rows of one prompt window (above 16: pdense, with the decode step's arithmetic).
 const prompt_rows: u32 = 512;
 
 pub fn promptRows(_: *const Engine) u32 {
