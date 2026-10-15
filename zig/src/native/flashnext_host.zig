@@ -125,9 +125,7 @@ pub const Host = struct {
             return error.Closed;
         }
         var at = h.queued.items.len; // foreground before background, each in arrival order
-        if (!request.background) {
-            while (at > 0 and h.queued.items[at - 1].request.background) at -= 1;
-        }
+        while (!request.background and at > 0 and h.queued.items[at - 1].request.background) at -= 1;
         h.queued.insert(h.gpa, at, job) catch {
             h.gpa.destroy(job);
             return error.Busy;

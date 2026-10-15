@@ -81,20 +81,6 @@ fn contextWindow(requested: ?i64, native: i64, default: i64) error{ Negative, No
     return r;
 }
 
-/// The bytes of the checkpoint's safetensors files: what its weights need on the device, near enough to refuse early.
-fn weightBytes(io: std.Io, dir: []const u8) u64 {
-    var d = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return 0;
-    defer d.close(io);
-    var total: u64 = 0;
-    var it = d.iterate();
-    while (it.next(io) catch null) |e| {
-        if (!std.mem.endsWith(u8, e.name, ".safetensors")) continue;
-        const st = d.statFile(io, e.name, .{}) catch continue;
-        total += st.size;
-    }
-    return total;
-}
-
 /// The pool now, read on the thread whose context is current; `problem` names a bad variable.
 fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?budget.Pool {
     const unified = (try ctx.attribute(.integrated)) != 0;
@@ -330,7 +316,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)
-    const whole = weightBytes(io, o.dir);
+    const whole = budget.weightBytes(io, o.dir);
     const weights = if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, whole) else whole;
     const held0 = cuda.usage(false).device;
     // a family over hosts reads every rank's room after its load, by this budget, and admits by the smallest

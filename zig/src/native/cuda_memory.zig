@@ -2,6 +2,20 @@
 const std = @import("std");
 const gib: f64 = 1 << 30;
 
+/// The bytes of the checkpoint's safetensors files: what its weights need on the device, near enough to refuse early.
+pub fn weightBytes(io: std.Io, dir: []const u8) u64 {
+    var d = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return 0;
+    defer d.close(io);
+    var total: u64 = 0;
+    var it = d.iterate();
+    while (it.next(io) catch null) |e| {
+        if (!std.mem.endsWith(u8, e.name, ".safetensors")) continue;
+        const st = d.statFile(io, e.name, .{}) catch continue;
+        total += st.size;
+    }
+    return total;
+}
+
 /// What /proc/meminfo says: MemTotal and MemAvailable in bytes (the page cache counts as available).
 pub const MemInfo = struct { total: u64, available: u64 };
 

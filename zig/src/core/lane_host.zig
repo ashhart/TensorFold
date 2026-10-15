@@ -162,9 +162,7 @@ pub const LaneHost = struct {
         }
         // foreground before background, each in arrival order (the Python job queue's priority)
         var at = h.queued.items.len;
-        if (!request.background) {
-            while (at > 0 and h.queued.items[at - 1].request.background) at -= 1;
-        }
+        while (!request.background and at > 0 and h.queued.items[at - 1].request.background) at -= 1;
         h.queued.insert(h.gpa, at, job) catch {
             h.gpa.destroy(job);
             return error.Busy;
