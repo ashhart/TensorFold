@@ -1,5 +1,4 @@
-//! `tf-qwen35-cuda <model> <step|window|tree|prompt|mrope> <ids> <out>`, or `vision <fixtures> <out> [min mean] [min row]`:
-//! rows to compare; vision exits 1 when the tower's rows fall under its bounds.
+//! `tf-qwen35-cuda <model> <step|window|tree|prompt|mrope|vision> ...`: rows to compare; vision exits 1 off its bounds.
 const std = @import("std");
 const cuda = @import("cuda");
 const q = @import("qwen35");
@@ -165,9 +164,7 @@ fn fill(e: *E.Engine, cache: *E.Cache, ids: []const u32, n: usize) !void {
     }
 }
 
-/// What the tower's rows must reach against 0.6.6's bf16 rows, each image: their mean cosine and their worst row's.
-/// With a fixture's fp32 reference rows (qwen_vision_fixtures.py --fp32), the tower must also be as close to them as
-/// 0.6.6's bf16 tower is, within `slack` on the mean, so a fragile tower (the 2B's) is judged against the reference.
+/// Each image's mean and worst row cosine to 0.6.6's bf16 rows; with fp32 rows, no further from them than 0.6.6's.
 const Bounds = struct { mean: f64, row: f64, slack: f64 = 0.001 };
 
 /// Rows' cosine, mean and worst, of bf16 `got` against `want` (bf16, or fp32 when `want32`), and the identical rows.
