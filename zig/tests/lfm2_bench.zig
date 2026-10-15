@@ -37,6 +37,7 @@ pub fn main(init: std.process.Init) !void {
     defer init.gpa.free(ids);
     for (ids, 0..) |*id, i| id.* = @intCast((i * 7919 + 13) % 120000);
     const t0 = now();
+    const g0 = q.forward.gpu_seconds;
     var at: usize = 0;
     while (at < length) {
         const rows = @min(chunk, length - at);
@@ -44,11 +45,15 @@ pub fn main(init: std.process.Init) !void {
         at += rows;
     }
     const t1 = now();
+    const g1 = q.forward.gpu_seconds;
     for (0..steps) |i| try q.forward.run(m, &one, &.{.{ .cache = &cache, .rows = 1 }}, ids[length + i ..][0..1], false, .all);
     const t2 = now();
     const pf: f64 = @as(f64, @floatFromInt(t1 - t0)) / 1e9;
     const dc: f64 = @as(f64, @floatFromInt(t2 - t1)) / 1e9;
-    std.debug.print("prompt {d} in {d}-row chunks: {d:.2} s, {d:.0} tok/s; decode {d}: {d:.1} tok/s\n", .{ length, chunk, pf, @as(f64, @floatFromInt(length)) / pf, steps, @as(f64, @floatFromInt(steps)) / dc });
+    const tps = @as(f64, @floatFromInt(length)) / pf;
+    const dps = @as(f64, @floatFromInt(steps)) / dc;
+    const line = "prompt {d} in {d}-row chunks: {d:.2} s, {d:.0} tok/s (GPU {d:.2} s); decode {d}: {d:.1} tok/s\n";
+    std.debug.print(line, .{ length, chunk, pf, tps, g1 - g0, steps, dps });
     try windows(m);
 }
 
@@ -284,6 +289,7 @@ fn promptBudget(m: *q.Model) !void {
                 e.setBuffer(conv.weight.buffer, conv.weight.offset, 2);
                 e.setBuffer(sc.y, 0, 3);
                 e.setBuffer(sc.snapshots[0].?, 0, 4);
+                e.setValue(@as(u32, rows - 1), 5);
                 e.dispatchThreads(mtl.Size.of(2048, rows, 1), mtl.Size.of(256, 1, 1));
             },
             else => {
@@ -415,6 +421,7 @@ fn decodeBudget(m: *q.Model, len: usize) !void {
                         e.setBuffer(cv.weight.buffer, cv.weight.offset, 2);
                         e.setBuffer(sc.y, 0, 3);
                         e.setBuffer(sc.snapshots[layer].?, 0, 4);
+                        e.setValue(@as(u32, 0), 5);
                         e.dispatchThreads(mtl.Size.of(2048, 1, 1), mtl.Size.of(256, 1, 1));
                     } else {
                         try tile.encodeTwin(e, t, tq(cv.out), sc.y, 0, sc.r, 0, 1);
