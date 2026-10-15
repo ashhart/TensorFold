@@ -49,6 +49,7 @@ test {
     _ = @import("families/nemotron/pocket_shards_test.zig"); // learned neurons in the shards themselves
     _ = @import("families/nemotron/pocket_forget_test.zig"); // a fact deleted on request, and put back
     _ = @import("families/nemotron/pocket.zig"); // which row a fact's neurons fire at
+    _ = @import("families/nemotron/pocket_quiet.zig"); // an earlier fact refitted quiet only on a new fact's rows
     _ = @import("families/nemotron/pocket_fit.zig"); // where a fact's neurons fire, and stay silent
     _ = @import("families/nemotron/router.zig"); // when a lesson acts on a reply
     _ = @import("families/nemotron/lesson_route.zig");
