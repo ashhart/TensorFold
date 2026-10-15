@@ -1,5 +1,10 @@
 // Qwen3.8-27B glue on Intel Xe2 (OpenCL C); x: fp32 residual [T, 5120], h: fp16 GEMM input [T, K].
 
+// group means stored × ASC (and B · group / ASC): the low half stays out of fp16 subnormals
+#ifndef ASC
+#define ASC 256.0f
+#endif
+
 // AHI, ALO: fp16 hi/lo row sums of h per group of GSZ (64 or 128); subgroups of 16, fixed reduction order.
 #pragma OPENCL FP_CONTRACT OFF
 
@@ -39,9 +44,9 @@ static void rowsums(local const half *hl, int K, global half *AHI, global half *
     for (int k = 0; k < per; k++) s += (float)hl[g * gs + lane * per + k];
     s = sub_group_reduce_add(s) * (1.0f / gs);
     if (lane == 0) {
-      const half hi = convert_half_rte(s);
+      const half hi = convert_half_rte(s * ASC);
       AHI[row * (K / gs) + g] = hi;
-      ALO[row * (K / gs) + g] = convert_half_rte(s - (float)hi);
+      ALO[row * (K / gs) + g] = convert_half_rte(s * ASC - (float)hi);
     }
   }
 }
