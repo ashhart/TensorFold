@@ -45,11 +45,11 @@ fn value(c: Case, i: usize) f32 {
     };
 }
 
-fn run(queue: mtl.Queue, pipeline: mtl.Pipeline, logits: mtl.Buffer, offset: usize, picks: mtl.Buffer, payload: *const draw.Payload) !void {
+fn run(queue: mtl.Queue, sample_pipeline: mtl.Pipeline, argmax_pipeline: mtl.Pipeline, logits: mtl.Buffer, offset: usize, picks: mtl.Buffer, payload: *const draw.Payload) !void {
     @memset(picks.slice(u32, rows + 2), sentinel);
     const cb = queue.commandBuffer();
     const enc = cb.compute(.serial);
-    dispatch.encode(enc, pipeline, logits, offset, picks, 4, payload);
+    dispatch.encode(enc, sample_pipeline, argmax_pipeline, logits, offset, picks, 4, payload, @intCast(payload.rules[0].vocab));
     enc.end();
     cb.commit();
     cb.wait();
@@ -69,10 +69,14 @@ pub fn main(init: std.process.Init) !void {
     defer device.deinit();
     const queue = try device.queue();
     defer queue.deinit();
-    const lib = try mtl.Library.fromSource(device, sources.glm_sample, mtl.CompileOptions.mlx());
+    const lib = try mtl.Library.fromSource(device, sources.nemotron_sample, mtl.CompileOptions.mlx()); // the shared sampler's library
     defer lib.deinit();
-    const pipeline = try mtl.Pipeline.init(device, lib, "glm_sample", false);
+    const glue_lib = try mtl.Library.fromSource(device, sources.glm_glue, mtl.CompileOptions.mlx());
+    defer glue_lib.deinit();
+    const pipeline = try mtl.Pipeline.init(device, lib, dispatch.kernelName(false), false);
     defer pipeline.deinit();
+    const argmax = try mtl.Pipeline.init(device, glue_lib, "glm_argmax", false);
+    defer argmax.deinit();
     std.debug.print("GLM sampling device: {s}\n", .{device.name()});
     for (cases) |c| {
         const row = try gpa.alloc(f32, c.vocab);
@@ -105,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
             const payload = draw.Payload.init(&d, rows, @intCast(c.vocab));
             var ordered = payload;
             if (reverse) std.mem.reverse(draw.Rule, ordered.rules[0..rows]);
-            try run(queue, pipeline, logits, 0, picks, &ordered);
+            try run(queue, pipeline, argmax, logits, 0, picks, &ordered);
             for (picks.slice(u32, rows + 2)[1 .. rows + 1], 0..) |got, r| {
                 const want = expected[if (reverse) rows - 1 - r else r];
                 if (got != want) {
@@ -119,7 +123,7 @@ pub fn main(init: std.process.Init) !void {
             solo.rules[0] = d.rules[r];
             solo.n = 1;
             const payload = draw.Payload.init(&solo, 1, @intCast(c.vocab));
-            try run(queue, pipeline, logits, r * c.vocab * 2, picks, &payload);
+            try run(queue, pipeline, argmax, logits, r * c.vocab * 2, picks, &payload);
             if (picks.slice(u32, rows + 2)[1] != expected[r]) return error.SoloMismatch;
         }
         std.debug.print("PASS {s}: repeated, reordered, mixed, trailing and solo rows\n", .{c.name});

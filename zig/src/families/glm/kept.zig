@@ -113,7 +113,7 @@ pub fn probe(sl: *Slots) !u64 {
     var at: u32 = 0;
     for ([_]u32{ 4096, 4136, len }) |end| while (at < @min(end, len)) {
         const n = sl.chunkRows(at, @min(end, len));
-        try sl.chunk(0, at, n);
+        try sl.chunk(0, at, n, null);
         at += n;
     };
     const snap = try save(sl, 0, at, 0, false);

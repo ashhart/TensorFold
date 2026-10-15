@@ -504,14 +504,8 @@ pub fn headOver(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, pick
         q.n = n;
         qmv(x, e, if (x.c.tp > 1) x.k.qmv_head_tp else x.k.qmv_head, in, q, logits, rows);
         const payload = @import("draw_rule.zig").Payload.init(if (greedy) null else x.draws, rows, vocab);
-        if (payload.sampled()) {
-            @import("draw_dispatch.zig").encode(e, x.k.sample, logits.buf, logits.off, picks.buf, picks.off, &payload);
-        } else {
-            e.setPipeline(x.k.argmax);
-            bind(e, 0, .{ logits, picks });
-            e.setValue(n, 2);
-            e.dispatchGroups(size(rows, 1, 1), size(1024, 1, 1));
-        }
+        // draw_dispatch splits the rows into runs of one mode: sampled tf_sample_full, else argmax.
+        @import("draw_dispatch.zig").encode(e, x.k.sample, x.k.argmax, logits.buf, logits.off, picks.buf, picks.off, &payload, n);
     }
     if (x.c.tp > 1) x.ep.?.argmax(e, logits, picks, n, part[0], rows);
 }

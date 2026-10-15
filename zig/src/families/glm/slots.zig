@@ -109,17 +109,6 @@ pub const Slots = struct {
         return sl.learned == null;
     }
 
-    pub const save = kept_mod.save;
-    pub const restore = kept_mod.restore;
-    pub const usable = kept_mod.usable;
-    pub const probe = kept_mod.probe;
-    pub const writeSnap = kept_mod.writeSnap;
-    pub const readSnap = kept_mod.readSnap;
-    pub const drop = kept_mod.drop;
-    pub const pick = kept_mod.pick;
-    pub const copyOut = kept_mod.copyOut;
-    pub const copyIds = kept_mod.copyIds;
-
     pub fn ctx(sl: *Slots, slot: *Slot) fwd.Ctx {
         var x = sl.e.ctx();
         x.s = &slot.s;

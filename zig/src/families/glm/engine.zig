@@ -15,6 +15,7 @@ const CopyIndex = @import("../../core/copy_index.zig").CopyIndex;
 const checks = @import("checks.zig");
 const load_plan = @import("load_plan.zig");
 const plain_rounds = @import("plain_rounds.zig");
+const ranks = @import("ranks.zig");
 const frags = @import("../../core/frags.zig");
 const Ref = wts.Ref;
 const lanes = @import("lanes");
@@ -360,36 +361,6 @@ pub const Engine = struct {
         enc.dispatchThreads(mtl.Size.of(D / 2, 1, 1), mtl.Size.of(256, 1, 1));
     }
 
-    /// Where `t` falls among MTP depth m + 1's choices (its logits row m): 1 for the 2nd, 2 the 3rd, 3 later or none.
-    fn rankAt(e: *const Engine, m: usize, t: u32) usize {
-        if (t >= e.draft_vocab) return 3;
-        const v: [*]const u16 = @ptrCast(@alignCast(e.sc.m_logits.addr()));
-        const row = v[m * e.c.vocab ..][0..e.draft_vocab];
-        const lt: f32 = @bitCast(@as(u32, row[t]) << 16);
-        var above: usize = 0; // choices before t: higher logits, or equal ones at lower ids
-        for (row, 0..) |h, i| {
-            const f: f32 = @bitCast(@as(u32, h) << 16);
-            if (i != t and (f > lt or (f == lt and i < t))) above += 1;
-            if (above >= 3) return 3;
-        }
-        return @max(above, 1); // the draft holds the first place even when t ties it
-    }
-
-    /// The top two logits' difference in row `row` of the last head's logits (bf16).
-    fn margin(e: *const Engine, row: u32) f32 {
-        if (e.c.tp > 1) return std.math.nan(f32); // TP2: this Mac holds half of each row's logits
-        const v: [*]const u16 = @ptrCast(@alignCast(e.sc.logits.addr()));
-        var top = [2]f32{ -std.math.inf(f32), -std.math.inf(f32) };
-        for (v[@as(usize, row) * e.c.vocab ..][0..e.c.vocab]) |h| {
-            const f: f32 = @bitCast(@as(u32, h) << 16);
-            if (f > top[0]) {
-                top[1] = top[0];
-                top[0] = f;
-            } else if (f > top[1]) top[1] = f;
-        }
-        return top[0] - top[1];
-    }
-
     pub fn u32s(r: Ref, n: usize) []u32 {
         return @as([*]u32, @ptrCast(@alignCast(r.addr())))[0..n];
     }
@@ -472,7 +443,7 @@ pub const Engine = struct {
         out.prefilled(out.ctx);
         var res: Result = .{ .reason = .length, .prompt_seconds = @as(f64, @floatFromInt(t_prompt - t_start)) / 24e6 };
         var tok = u32s(e.sc.picks, 1)[0];
-        if (e.margins) |m| try m.append(e.gpa, e.margin(0));
+        if (e.margins) |m| try m.append(e.gpa, ranks.margin(c, e.sc.logits, 0));
         res.generated = 1;
         if (try e.agree(out.tokens(out.ctx, &.{tok}) or std.mem.indexOfScalar(u32, eos, tok) != null)) {
             res.reason = .stop;
@@ -572,7 +543,7 @@ pub const Engine = struct {
             res.accepted += keep - 1;
             if (e.rank_log and copied == 0 and d > 0) {
                 const m = keep - 1;
-                res.draft_ranks[m][if (m == d) 0 else e.rankAt(m, picks[m])] += 1;
+                res.draft_ranks[m][if (m == d) 0 else ranks.rankAt(c, e.draft_vocab, e.sc.m_logits, m, picks[m])] += 1;
             }
             if (copied > 0) {
                 res.copy_rounds += 1;
@@ -589,7 +560,7 @@ pub const Engine = struct {
                     break;
                 }
             }
-            if (e.margins) |m| for (0..take) |j| try m.append(e.gpa, e.margin(@intCast(j)));
+            if (e.margins) |m| for (0..take) |j| try m.append(e.gpa, ranks.margin(c, e.sc.logits, @intCast(j)));
             if (take > 0 and out.tokens(out.ctx, picks[0..take])) stop = true;
             if (hist) |*h| try h.extend(picks[0..take]);
             emitted += take;
