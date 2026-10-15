@@ -10,6 +10,21 @@ tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --drafter z-lab/Qwen3.8-27B-DFlash2 --name bench
 ```
 
+Measured on an M5 Ultra (macOS 27) through the served API against mlx-lm 0.32.0 on the same checkpoint, raw prompts
+from this repository's docs, 100 greedy tokens, prefill from the time to the first token:
+
+| Prompt | Native prefill tok/s | mlx-lm prefill | Native decode tok/s | mlx-lm decode | Native with DFlash2 |
+|---|---|---|---|---|---|
+| 2k | 1343 | 1216 | 48.1 | 54.7 | 162-226 |
+| 8k | 1289 | 1860 | 47.6 | 52.8 | 102 |
+| 32k | 1163 | 1699 | 44.9 | 46.5 | 120 |
+
+A plain one-row round is 19.5 ms on the M5 Ultra (`tf-qwen27-bench`, `QWEN27_ADVANCE`): its 321 projections read
+14.1 GB in 16.2 ms, each shape at the K split it streams fastest at over every layer's matrix (`QWEN27_DISTINCT`;
+a matrix called again sits in the system cache and misleads), and an undrafted one-row window is kept by its own
+verify, as a prompt's rows are, rather than by a keep command buffer the host waited on (1.1 ms a token). The
+remaining 2.8 ms a token are the glue between the projections, about 600 dispatches.
+
 The rest of this page describes the Python engine, frozen at 0.6.6 and available at the
 [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its flags, commands and paths belong to that
 engine. @nood-co1, @jkuepker and @Arminova worked on its CUDA path; see [credits](../credits.md).

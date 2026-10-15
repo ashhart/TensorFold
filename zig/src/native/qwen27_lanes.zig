@@ -65,6 +65,7 @@ pub const Metal = struct {
     costs: [max_rows]lanes.config.Cost = undefined, // a window's ms by rows, timed by measure()
     timed: usize = 0,
     from_tree: usize = 0, // the last window's drafts that were the held tree's first nodes
+    advanced: bool = false, // the round's rows were kept by its verify (one undrafted row a window): no keep to run
     sampled: [max_rows]u32 = undefined, // the last lone window's draws
     landing: Landing = .{}, // drafted nodes offered with their parent kept, and landed, by own log-probability
 
@@ -232,6 +233,7 @@ pub const Metal = struct {
         b.round = null;
         b.count = 0;
         b.early = 0;
+        b.advanced = false;
     }
 
     pub fn dropTree(b: *Metal) void {
@@ -274,6 +276,10 @@ pub const Metal = struct {
     fn keepPaths(b: *Metal, paths: []const []const u32) !void {
         defer b.dropRound();
         if (paths.len != b.count) return error.NothingToKeep;
+        if (b.advanced) { // the verify kept each window's one row at its position; its logits already sit in row 0
+            for (paths) |path| if (path.len != 1) return error.NothingToKeep;
+            return;
+        }
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         if (b.count == 1 and b.windows[0] == 0) {
@@ -419,7 +425,9 @@ pub const Metal = struct {
         var inputs: [8]q.round_plan.Input = undefined;
         var total: usize = 0;
         b.from_tree = 0;
+        var plain = b.draft == null; // every window one undrafted row: the verify keeps it, as a prompt's rows are
         for (windows, 0..) |w, i| {
+            if (w.rows() != 1 or w.held != 0) plain = false;
             const slot = try b.slotFor(w.stream);
             if (w.held > 0 and w.tokens.len > 0) return error.HeldAndHostDrafts;
             if (w.held > 0 and slot != 0) return error.HeldWithoutDrafter;
@@ -445,7 +453,8 @@ pub const Metal = struct {
         b.round = try Round.init(b.gpa, inputs[0..windows.len], @intCast(r.model.config.conv_kernel), r.slots, @intCast(r.model.config.vocab));
         b.count = windows.len;
         errdefer b.dropRound();
-        try r.verifyHead(&b.round.?, .all);
+        if (plain) try r.advance(&b.round.?, .all) else try r.verifyHead(&b.round.?, .all);
+        b.advanced = plain;
         b.rows = total;
         for (windows, out, b.round.?.firsts) |w, o, first| {
             const rows = w.rows();
