@@ -133,10 +133,10 @@ The values come from each checkpoint's `config.json` and tensor index, and from 
 Nemotron's tap is the one `--record` writes on CUDA, the rows its head and MTP head read. Kolibri's ids count layers
 the same way: its drafter reads the outputs of layers 44, 47 and 49 (counted from 0), each normed by the norm after it.
 
-The published Kolibri drafter (`josch15366/Kolibri-1-block-drafter`) predates this format. Its `config.json` counts
-taps from 0 (44, 47, 49), has no adapter, and its weights hold an unused `inp.weight` and neither target tensor.
-Re-exported with the embedding and its 60,614 head rows, and without `inp.weight`, its 66 tensors pass the layout
-check above.
+Our Kolibri drafter checkpoint (`josch15366/Kolibri-1-block-drafter`, research only, never shipped) predates this
+format. Its `config.json` counts taps from 0 (44, 47, 49), has no adapter, and its weights hold an unused `inp.weight`
+and neither target tensor. Re-exported with the embedding and its 60,614 head rows, and without `inp.weight`, its 66
+tensors pass the layout check above.
 
 ## Not in version 1
 
