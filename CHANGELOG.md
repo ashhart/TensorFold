@@ -69,6 +69,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM-5.3-Flash's prompt rows run the last routed expert's sorted pairs to the pair count. The sort writes no end mark after the last expert, so its pairs were skipped on layers whose routed experts are not all 4-bit (or all 2-bit) in groups of 64: the 4-bit checkpoints never took that path, and a checkpoint with 5- and 6-bit experts gave empty replies from about 12,000 prompt tokens. `tf-glm-rows-check` lays the offsets out as the route writes them (#864). Thanks to @harrisonfriia.
 - `docs/api.md` documents the native `/health` fields one by one and lists `/memory` among the routes (#866). Thanks to @jishnuvenugopal.
 - The 4-bit one-row twin of `core/tile_qmm`, which LFM2.5-24B-A2B decodes through, turns each code into its integer before it multiplies, as the prompt tiles do. It scaled input j by 16 to the power -j instead, and a small input underflowed: 2^-126 gave 0 where the tiles give 2^-126. `tf-tile-check` adds that case for the tiles and the twin at widths 1 to 32 (#821). Thanks to @BlivionIaG.
+- The DeltaNet wide prompt scan (`core/deltanet`) can keep the state and the conv window at up to four rows of each segment (`tf_delta_gdn_chain_wide_marks`, `tf_delta_gdn_mark_conv`), each the words a segment ending at that row leaves; `zig build test-deltanet-marks` checks them against such segments on synthetic rows. No model calls them yet (#851). Thanks to @jschmied.
 
 ## 1.0.11
 
