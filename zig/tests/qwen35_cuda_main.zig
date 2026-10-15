@@ -1,5 +1,4 @@
-//! `tf-qwen35-cuda <model dir> <step|window|tree|prompt|mrope> <ids> <out>`: the ids' logits as bf16 rows for a reference.
-//! `tf-qwen35-cuda <model dir> vision <fixtures dir> <out>`: the tower's rows for each fixture against 0.6.6's.
+//! `tf-qwen35-cuda <model> <step|window|tree|prompt|mrope> <ids> <out>`, or `vision <fixtures> <out>`: rows to compare.
 const std = @import("std");
 const cuda = @import("cuda");
 const q = @import("qwen35");
@@ -92,7 +91,7 @@ pub fn main(init: std.process.Init) !u8 {
             at += kept;
         }
     } else {
-        // mrope: the chunks through an image prompt's table (no image rows, text positions), which must equal prompt's bits
+        // mrope: chunks through an image prompt's table (text positions, no image rows): prompt's bits
         const table = std.mem.eql(u8, args[2], "mrope");
         const n_ids = ids.items.len;
         const src = try a.alloc(i32, n_ids);
@@ -157,7 +156,7 @@ fn fill(e: *E.Engine, cache: *E.Cache, ids: []const u32, n: usize) !void {
     }
 }
 
-/// Each fixture's patches (manifest.json, tools/zig/qwen_vision_fixtures.py) through the tower; rows' cosine to 0.6.6's.
+/// Each fixture's patches (tools/zig/qwen_vision_fixtures.py) through the tower: rows' cosine to 0.6.6's.
 fn vision(init: std.process.Init, a: std.mem.Allocator, model: []const u8, dir: []const u8, out_path: []const u8) !u8 {
     const V = q.vision;
     const io = init.io;

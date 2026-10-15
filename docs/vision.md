@@ -269,4 +269,3 @@ their rows replace the `<|image_pad|>` placeholders in the prompt chunks, which 
 positions (interleaved sections 11, 11, 10), and the reply's rows rotate at their position plus `rope_delta`, as
 transformers' `get_rope_index` lays them out. Text-only requests keep their bits. Images arrive through the native
 server's image parts (decoded by the shared JPEG and PNG decoder); video parts are refused for now.
-
