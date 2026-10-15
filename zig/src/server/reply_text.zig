@@ -292,6 +292,35 @@ pub const Stops = struct {
     }
 };
 
+/// The text a stream has sent: Python's ``streamed = visible``, grown by its delta while it only grows.
+pub const Shown = struct {
+    text: std.ArrayList(u8) = .empty,
+    chars: usize = 0,
+    at: ?[*]const u8 = null, // where the last shown text lay; the decode buffer only grows, so that prefix holds
+    extends: bool = false,
+
+    /// Python's ``now[len(shown):]``; ``stable``: ``now`` lies in the append-only decode buffer.
+    pub fn after(s: *Shown, now: []const u8, stable: bool) []const u8 {
+        const sent = s.text.items;
+        s.extends = (stable and s.at == now.ptr and now.len >= sent.len) or std.mem.startsWith(u8, now, sent);
+        if (!s.extends) return afterChars(now, s.chars);
+        if (stable) s.at = now.ptr; // the buffer moved but kept its bytes: the next check is free again
+        return now[sent.len..];
+    }
+
+    pub fn set(s: *Shown, a: Allocator, now: []const u8, delta: []const u8) Allocator.Error!void {
+        if (s.extends) {
+            try s.text.appendSlice(a, delta);
+            s.chars += charCount(delta);
+        } else {
+            s.text = .empty;
+            try s.text.appendSlice(a, now);
+            s.chars = charCount(now);
+        }
+        s.at = now.ptr;
+    }
+};
+
 /// Decodes only new tokens with the previous chunk as context, so characters split across tokens stay whole.
 pub const Incremental = struct {
     tokens: std.ArrayList(u32) = .empty,
