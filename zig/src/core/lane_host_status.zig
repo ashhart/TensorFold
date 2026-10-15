@@ -39,7 +39,7 @@ fn fillTotals(h: *LaneHost, out: *api.Status) void {
     var run: u64 = 0;
     const reported = h.core.backend.vtable.reports_fill; // a backend that never stores `fill_at` has no honest totals
     for (h.admitted.items) |job| {
-        if (!job.fill_on.load(.acquire)) continue;
+        if (!job.fill_on.load(.acquire) or job.request.background) continue; // a warm pass prefills the next turn: no fill
         filling = true;
         var fields: [16]u8 = undefined; // id and seq hashed apart: XOR of the raw values collides (2^0 == 3^1)
         std.mem.writeInt(u64, fields[0..8], job.id, .little);
