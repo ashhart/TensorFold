@@ -25,11 +25,16 @@ pub const Metal = struct {
     /// A window's forward ms by rows, timed by measure() (the depth rule prices drafts with them); none until then.
     costs: [st.max_rows]lanes.config.Cost = undefined,
     timed: usize = 0,
+    /// Wider forwards' ms by total rows (several streams' windows), timed at load; the rule interpolates between.
+    shared: [shared_widths.len]lanes.config.Cost = undefined,
+    shared_timed: usize = 0,
+    io: std.Io,
+    trace: bool = false, // GEMMA_DRAFT_TRACE: each verify's rows and wall time on stderr
 
-    pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
         errdefer gpa.destroy(out);
-        out.* = .{ .gpa = gpa, .model = model, .options = options, .scratch = try st.Scratch.init(model.device, options.capacity), .prompt_scratch = try prompt.Scratch.init(model.device, options.capacity) };
+        out.* = .{ .gpa = gpa, .io = io, .trace = std.c.getenv("GEMMA_DRAFT_TRACE") != null, .model = model, .options = options, .scratch = try st.Scratch.init(model.device, options.capacity), .prompt_scratch = try prompt.Scratch.init(model.device, options.capacity) };
         return out;
     }
 
@@ -47,11 +52,12 @@ pub const Metal = struct {
 
     /// Every kernel keeps a row's bits at any window width and beside any other stream's rows (tf-gemma4-glue).
     pub fn facts(self: *const Metal) lanes.Model {
-        return .{ .exact_width = st.max_rows, .hidden_rows = true, .batch_rows = st.prompt_rows, .max_streams = self.options.streams, .streams_exact = true, .window_costs = self.costs[0..self.timed] };
+        return .{ .exact_width = st.max_rows, .hidden_rows = true, .batch_rows = st.prompt_rows, .max_streams = self.options.streams, .streams_exact = true, .window_costs = self.costs[0..self.timed], .shared_costs = self.shared[0..self.shared_timed] };
     }
 
     /// A window of each width 1..16 at position 0 on a throwaway cache, the second of two runs timed.
-    pub fn measure(self: *Metal, io: std.Io) !void {
+    pub fn measure(self: *Metal) !void {
+        const io = self.io;
         var cache = try st.Cache.init(self.model.device, 256);
         defer cache.deinit();
         var ids: [st.max_rows]u32 = @splat(2);
@@ -66,11 +72,14 @@ pub const Metal = struct {
             self.costs[rows - 1] = .{ .width = @intCast(rows), .ms = ms };
         }
         self.timed = st.max_rows;
+        for (&self.shared, shared_widths) |*cost, rows| cost.* = .{ .width = @intCast(rows), .ms = try self.timeRows(rows) };
+        self.shared_timed = shared_widths.len;
         self.gen += 1;
     }
 
     /// The forward's ms at `rows` rows (up to 128) of one stream, the second of two runs.
-    pub fn timeRows(self: *Metal, io: std.Io, rows: usize) !f64 {
+    pub fn timeRows(self: *Metal, rows: usize) !f64 {
+        const io = self.io;
         var cache = try st.Cache.init(self.model.device, 256);
         defer cache.deinit();
         var ids: [st.prompt_rows]u32 = @splat(2);
@@ -219,7 +228,9 @@ pub const Metal = struct {
             @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
             total += rows;
         }
+        const t0 = std.Io.Clock.awake.now(self.io);
         try fwd.run(self.model, &self.scratch, segments[0..windows.len], ids[0..total]);
+        if (self.trace) std.debug.print("verify of {d} streams, {d} rows: {d:.2} ms\n", .{ windows.len, total, @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(self.io)).toNanoseconds())) / 1e6 });
         self.gen += 1;
         if (self.scratch.taps) |taps| {
             var row: usize = 0;
@@ -272,6 +283,9 @@ pub const Metal = struct {
         }
     }
 };
+
+/// Total rows a shared round is timed at beyond one window (the forward's cost grows past 16 rows: tensor-op compute).
+const shared_widths = [_]usize{ 32, 48, 64, 96, 128 };
 
 /// A row's allowed-token bits (structured output): one bit a logit.
 const mask_words = (cfg.vocab + 31) / 32;

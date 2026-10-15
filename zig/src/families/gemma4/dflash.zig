@@ -18,9 +18,10 @@ const Ref = lane.Ref;
 const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 const private = mtl.ResourceOptions.private | mtl.ResourceOptions.untracked;
 
-/// A block's rows at most (the pending token and 15 drafts), and the rows one absorb dispatch takes.
+/// A block's rows at most (the pending token and 15 drafts); the rows one batched hold or absorb pass takes.
 pub const block_rows = 16;
 const absorb_rows = lane.reg_rows;
+const hold_rows = lane.reg_rows;
 /// Streams one hold or absorb call takes, and host-written rows one absorb call takes before it flushes.
 const max_items = 32;
 const pos_rows = 1024;
@@ -110,10 +111,10 @@ pub const Drafter = struct {
         const hid = c.hidden;
         const qw = c.heads * c.head_dim;
         const kw = c.kv_heads * c.head_dim;
-        const r = block_rows;
-        inline for (.{ .{ "ids", max_items * r * 4, true }, .{ "pos", max_items * r * 8, true }, .{ "apos", pos_rows * 8, true }, .{ "xs", (c.tap_count * hid / 64) * absorb_rows * 4, false }, .{ "mask", max_items * r * (c.window - 1 + r), true }, .{ "ones", r * keys_max, true }, .{ "pick_buf", max_items * r * @sizeOf(round.contract.Pick), true }, .{ "h", r * hid * 2, false }, .{ "x", r * hid * 2, false }, .{ "qkv", r * (qw + 2 * kw) * 2, false }, .{ "q", r * qw * 2, false }, .{ "q2", r * qw * 2, false }, .{ "k16", r * kw * 2, false }, .{ "k16r", r * kw * 2, false }, .{ "attn", r * qw * 2, false }, .{ "o", r * hid * 2, false }, .{ "gate_up", r * 2 * c.intermediate * 2, false }, .{ "act", r * c.intermediate * 2, false }, .{ "logits", r * cfg.vocab * 2, false }, .{ "fcx", absorb_rows * hid * 2, false }, .{ "hctx", absorb_rows * hid * 2, d.trace }, .{ "kv", absorb_rows * 2 * kw * 2, false }, .{ "kn", absorb_rows * kw * 2, false }, .{ "knr", absorb_rows * kw * 2, false } }) |f|
+        const r = hold_rows;
+        inline for (.{ .{ "ids", max_items * block_rows * 4, true }, .{ "pos", max_items * block_rows * 8, true }, .{ "apos", pos_rows * 8, true }, .{ "xs", (c.tap_count * hid / 64) * absorb_rows * 4, false }, .{ "mask", max_items * block_rows * (c.window - 1 + block_rows), true }, .{ "ones", block_rows * keys_max, true }, .{ "pick_buf", max_items * block_rows * @sizeOf(round.contract.Pick), true }, .{ "h", r * hid * 2, false }, .{ "x", r * hid * 2, false }, .{ "qkv", r * (qw + 2 * kw) * 2, false }, .{ "q", r * qw * 2, false }, .{ "q2", r * qw * 2, false }, .{ "k16", r * kw * 2, false }, .{ "k16r", r * kw * 2, false }, .{ "attn", r * qw * 2, false }, .{ "o", r * hid * 2, false }, .{ "gate_up", r * 2 * c.intermediate * 2, false }, .{ "act", r * c.intermediate * 2, false }, .{ "logits", r * cfg.vocab * 2, false }, .{ "fcx", absorb_rows * hid * 2, false }, .{ "hctx", absorb_rows * hid * 2, d.trace }, .{ "kv", absorb_rows * 2 * kw * 2, false }, .{ "kn", absorb_rows * kw * 2, false }, .{ "knr", absorb_rows * kw * 2, false } }) |f|
             @field(d, f[0]) = try dev.buffer(f[1], if (f[2]) shared else private);
-        @memset(d.ones.slice(u8, r * keys_max), 0xff);
+        @memset(d.ones.slice(u8, block_rows * keys_max), 0xff);
         try d.warm(io);
         return d;
     }
@@ -151,7 +152,7 @@ pub const Drafter = struct {
     /// Chains of up to 15, always drafted, no plain guard: a block costs the same at any depth, a guard bills per row.
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const d = cast(ptr);
-        return .{ .depth = block_rows - 1, .step_ms = d.step_ms, .prior = &prior, .plain_guard = false, .stream_bytes = d.laneBytes(d.options.capacity) };
+        return .{ .depth = block_rows - 1, .step_ms = d.step_ms, .prior = &prior, .plain_guard = false, .batched = true, .stream_bytes = d.laneBytes(d.options.capacity) };
     }
 
     fn laneBytes(d: *const Drafter, capacity: usize) usize {
@@ -263,17 +264,22 @@ pub const Drafter = struct {
         e.dispatchThreads(.{ .width = count }, .{ .width = 256 });
     }
 
-    /// Rows [start, start + rows) replace the context from `start`: fc, hidden_norm, K and V; committed, not awaited.
+    /// Up to 128 rows of one absorb pass: each piece's rows (one stream, one source) sit at `row` of the pass.
+    const Piece = struct { lane: *Lane, src: Ref, rows: usize, p0: u64, row: usize };
+
+    /// Rows [start, start + rows) replace the context from `start`, in passes of pieces; committed, not awaited.
     fn absorbFn(ptr: *anyopaque, items: []const dr.Absorb) anyerror!void {
         const d = cast(ptr);
         const c = &d.config;
-        const kw = c.kv_heads * c.head_dim;
         const t0 = std.Io.Clock.awake.now(d.io);
         defer if (d.trace) std.debug.print("absorb of {d} streams: {d:.2} ms\n", .{ items.len, @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(d.io)).toNanoseconds())) / 1e6 });
         try d.settle(); // the positions buffer is rewritten below
         var cb = d.target.queue.commandBuffer();
         var e = cb.compute(.serial);
         var used: usize = 0; // host position rows written this command buffer
+        var pieces: [max_items]Piece = undefined;
+        var count: usize = 0;
+        var rows: usize = 0;
         for (items) |it| {
             const l = d.lanes.get(it.stream) orelse return error.DraftStreamUnknown;
             const f = it.features;
@@ -283,30 +289,24 @@ pub const Drafter = struct {
             var at: usize = 0;
             while (at < f.rows) : (at += absorb_rows) {
                 const n = @min(absorb_rows, f.rows - at);
-                if (used + n > pos_rows) { // the positions buffer is full: finish this command buffer first
-                    e.end();
-                    cb.commit();
-                    cb.wait();
-                    if (cb.failure()) |msg| return failed(msg);
-                    cb = d.target.queue.commandBuffer();
-                    e = cb.compute(.serial);
-                    used = 0;
+                if (rows + n > absorb_rows or count == pieces.len) { // the pass is full: run it
+                    if (used + rows > pos_rows) { // and the positions buffer with it: a new command buffer
+                        e.end();
+                        cb.commit();
+                        cb.wait();
+                        if (cb.failure()) |msg| return failed(msg);
+                        cb = d.target.queue.commandBuffer();
+                        e = cb.compute(.serial);
+                        used = 0;
+                    }
+                    try d.absorbPass(e, pieces[0..count], rows, used);
+                    used += rows;
+                    count = 0;
+                    rows = 0;
                 }
-                const p0 = it.start + at;
-                for (d.apos.slice(u64, pos_rows)[used..][0..n], 0..) |*p, i| p.* = p0 + i;
-                const pos = Ref{ .buf = d.apos, .off = used * 8 };
-                used += n;
-                try d.project(e, d.w.fc, .{ .buf = src, .off = f.offset + at * f.row_bytes }, .{ .buf = d.fcx }, n, false);
-                d.normSums(e, .{ .buf = d.fcx }, d.w.hidden_norm, .{ .buf = d.hctx }, n);
-                for (0..c.layers) |i| {
-                    const lw = &d.w.layers[i];
-                    try d.project(e, lw.kv, .{ .buf = d.hctx }, .{ .buf = d.kv }, n, true);
-                    try d.norm(e, .{ .buf = d.kv }, lw.k_norm, .{ .buf = d.kn }, n, c.kv_heads, c.head_dim, 2 * kw, kw);
-                    try d.ops.rope(e, .{ .buf = d.kn }, .{ .buf = pos.buf, .off = pos.off }, .{ .buf = d.knr }, .{ .rows = @intCast(n), .heads = c.kv_heads, .dim = c.head_dim, .x_stride = kw, .y_stride = kw, .theta = c.theta });
-                    const ring: u32 = if (c.sliding[i]) c.window - 1 else 0;
-                    d.store(e, .{ .buf = d.knr }, kw, kw, l.k[i], n, p0, ring);
-                    d.store(e, .{ .buf = d.kv, .off = kw * 2 }, kw, 2 * kw, l.v[i], n, p0, ring);
-                }
+                pieces[count] = .{ .lane = l, .src = .{ .buf = src, .off = f.offset + at * f.row_bytes }, .rows = n, .p0 = it.start + at, .row = rows };
+                count += 1;
+                rows += n;
             }
             if (d.trace) {
                 const first = src.slice(u16, (f.offset + f.row_bytes) / 2)[f.offset / 2 ..][0..4];
@@ -315,10 +315,46 @@ pub const Drafter = struct {
             l.end = it.start + f.rows;
             l.held_len = 0;
         }
+        if (count > 0) {
+            if (used + rows > pos_rows) {
+                e.end();
+                cb.commit();
+                cb.wait();
+                if (cb.failure()) |msg| return failed(msg);
+                cb = d.target.queue.commandBuffer();
+                e = cb.compute(.serial);
+                used = 0;
+            }
+            try d.absorbPass(e, pieces[0..count], rows, used);
+        }
         e.end();
         cb.commit();
         _ = mtl.objc.retain(cb.id);
         d.pending = cb;
+    }
+
+    /// One pass: fc of each piece into its rows, then hidden_norm, kv, k_norm and RoPE over all rows, stores a piece.
+    fn absorbPass(d: *Drafter, e: mtl.ComputeEncoder, pieces: []const Piece, rows: usize, pos_at: usize) !void {
+        const c = &d.config;
+        const kw = c.kv_heads * c.head_dim;
+        const positions = d.apos.slice(u64, pos_rows)[pos_at..][0..rows];
+        for (pieces) |pc| {
+            for (positions[pc.row..][0..pc.rows], 0..) |*p, i| p.* = pc.p0 + i;
+            try d.project(e, d.w.fc, pc.src, .{ .buf = d.fcx, .off = pc.row * c.hidden * 2 }, pc.rows, false);
+        }
+        const pos = Ref{ .buf = d.apos, .off = pos_at * 8 };
+        d.normSums(e, .{ .buf = d.fcx }, d.w.hidden_norm, .{ .buf = d.hctx }, rows);
+        for (0..c.layers) |i| {
+            const lw = &d.w.layers[i];
+            try d.project(e, lw.kv, .{ .buf = d.hctx }, .{ .buf = d.kv }, rows, true);
+            try d.norm(e, .{ .buf = d.kv }, lw.k_norm, .{ .buf = d.kn }, rows, c.kv_heads, c.head_dim, 2 * kw, kw);
+            try d.ops.rope(e, .{ .buf = d.kn }, .{ .buf = pos.buf, .off = pos.off }, .{ .buf = d.knr }, .{ .rows = @intCast(rows), .heads = c.kv_heads, .dim = c.head_dim, .x_stride = kw, .y_stride = kw, .theta = c.theta });
+            const ring: u32 = if (c.sliding[i]) c.window - 1 else 0;
+            for (pieces) |pc| {
+                d.store(e, .{ .buf = d.knr, .off = pc.row * kw * 2 }, kw, kw, pc.lane.k[i], pc.rows, pc.p0, ring);
+                d.store(e, .{ .buf = d.kv, .off = (pc.row * 2 * kw + kw) * 2 }, kw, 2 * kw, pc.lane.v[i], pc.rows, pc.p0, ring);
+            }
+        }
     }
 
     fn failed(msg: [*:0]const u8) anyerror {
@@ -344,22 +380,27 @@ pub const Drafter = struct {
         return .{ .buf = d.mask, .off = base };
     }
 
-    /// The block [pending, mask x depth] at positions from `anchor` through the drafter; rows 1.. pick into pick_buf.
-    fn encodeBlock(d: *Drafter, e: mtl.ComputeEncoder, l: *Lane, slot: usize, pending: u32, anchor: u64, depth: u32) !void {
+    /// A stream's block in a batch: its rows [row, row + depth + 1) of the pass, its slot's host regions.
+    const Block = struct { lane: *Lane, pending: u32, anchor: u64, depth: u32, slot: usize, row: usize };
+
+    /// A batch of blocks [pending, mask x depth] through the drafter together, attention a block; picks a row.
+    fn encodeBlocks(d: *Drafter, e: mtl.ComputeEncoder, blocks: []const Block, rows: usize) !void {
         const c = &d.config;
         const t = d.target;
-        const rows: usize = depth + 1;
         const hid = c.hidden;
         const qw = c.heads * c.head_dim;
         const kw = c.kv_heads * c.head_dim;
-        const ids = d.ids.slice(u32, max_items * block_rows)[slot * block_rows ..][0..rows];
-        ids[0] = pending;
-        @memset(ids[1..], c.mask);
-        for (d.pos.slice(u64, pos_rows)[slot * block_rows ..][0..rows], 0..) |*p, i| p.* = anchor + i;
-        const pos = Ref{ .buf = d.pos, .off = slot * block_rows * 8 };
-        const sliding_mask = d.slidingMask(slot, anchor, rows);
+        const ids = d.ids.slice(u32, max_items * block_rows)[0..rows];
+        const positions = d.pos.slice(u64, max_items * block_rows)[0..rows];
+        var masks: [max_items]Ref = undefined;
+        for (blocks, 0..) |b, i| {
+            ids[b.row] = b.pending;
+            @memset(ids[b.row + 1 ..][0..b.depth], c.mask);
+            for (positions[b.row..][0 .. b.depth + 1], 0..) |*p, j| p.* = b.anchor + j;
+            masks[i] = d.slidingMask(b.slot, b.anchor, b.depth + 1);
+        }
         e.setPipeline(t.kernels.sliding.embed);
-        e.setBuffer(d.ids, slot * block_rows * 4, 0);
+        e.setBuffer(d.ids, 0, 0);
         e.setBuffer(t.weights.embed_w.buf, t.weights.embed_w.off, 1);
         e.setBuffer(t.weights.embed_s.buf, t.weights.embed_s.off, 2);
         e.setBuffer(t.weights.embed_b.buf, t.weights.embed_b.off, 3);
@@ -367,6 +408,7 @@ pub const Drafter = struct {
         e.setValue(fwd.embedScale(), 5);
         e.dispatchThreads(.{ .width = hid / 2, .height = rows }, .{ .width = 256 });
         const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(c.head_dim)));
+        const pos = Ref{ .buf = d.pos };
         for (0..c.layers) |i| {
             const lw = &d.w.layers[i];
             const sliding = c.sliding[i];
@@ -376,12 +418,15 @@ pub const Drafter = struct {
             try d.norm(e, .{ .buf = d.qkv, .off = qw * 2 }, lw.k_norm, .{ .buf = d.k16 }, rows, c.kv_heads, c.head_dim, qw + 2 * kw, kw);
             try d.ops.rope(e, .{ .buf = d.q }, .{ .buf = pos.buf, .off = pos.off }, .{ .buf = d.q2 }, .{ .rows = @intCast(rows), .heads = c.heads, .dim = c.head_dim, .x_stride = qw, .y_stride = qw, .theta = c.theta });
             try d.ops.rope(e, .{ .buf = d.k16 }, .{ .buf = pos.buf, .off = pos.off }, .{ .buf = d.k16r }, .{ .rows = @intCast(rows), .heads = c.kv_heads, .dim = c.head_dim, .x_stride = kw, .y_stride = kw, .theta = c.theta });
-            const first: u64 = if (sliding) c.window - 1 else anchor;
-            d.store(e, .{ .buf = d.k16r }, kw, kw, l.k[i], rows, first, 0);
-            d.store(e, .{ .buf = d.qkv, .off = (qw + kw) * 2 }, kw, qw + 2 * kw, l.v[i], rows, first, 0);
-            const keys: usize = @intCast(first + rows);
-            const mask = if (sliding) sliding_mask else Ref{ .buf = d.ones };
-            try d.attention.encode(e, rows, keys, keys, scale, .{ .buf = d.q2 }, .{ .buf = l.k[i] }, .{ .buf = l.v[i] }, .{ .buf = mask.buf, .off = mask.off }, .{ .buf = d.attn });
+            for (blocks, 0..) |b, bi| {
+                const n = b.depth + 1;
+                const first: u64 = if (sliding) c.window - 1 else b.anchor;
+                d.store(e, .{ .buf = d.k16r, .off = b.row * kw * 2 }, kw, kw, b.lane.k[i], n, first, 0);
+                d.store(e, .{ .buf = d.qkv, .off = (b.row * (qw + 2 * kw) + qw + kw) * 2 }, kw, qw + 2 * kw, b.lane.v[i], n, first, 0);
+                const keys: usize = @intCast(first + n);
+                const mask = if (sliding) masks[bi] else Ref{ .buf = d.ones };
+                try d.attention.encode(e, n, keys, keys, scale, .{ .buf = d.q2, .off = b.row * qw * 2 }, .{ .buf = b.lane.k[i] }, .{ .buf = b.lane.v[i] }, .{ .buf = mask.buf, .off = mask.off }, .{ .buf = d.attn, .off = b.row * qw * 2 });
+            }
             try d.project(e, lw.o, .{ .buf = d.attn }, .{ .buf = d.o }, rows, false);
             d.add(e, d.h, d.o, rows * hid);
             d.normSums(e, .{ .buf = d.h }, lw.post_attention, .{ .buf = d.x }, rows);
@@ -396,42 +441,55 @@ pub const Drafter = struct {
             try d.project(e, lw.down, .{ .buf = d.act }, .{ .buf = d.o }, rows, true);
             d.add(e, d.h, d.o, rows * hid);
         }
-        if (depth == 0) return;
-        d.normSums(e, .{ .buf = d.h, .off = hid * 2 }, d.w.norm, .{ .buf = d.x }, depth);
+        d.normSums(e, .{ .buf = d.h }, d.w.norm, .{ .buf = d.x }, rows);
         const head = try t.projections.get(t.gpa, t.device, t.weights.head.n, t.weights.head.k);
-        try head.encodeSums(e, .{ .buf = d.x }, .{ .buf = t.weights.head.w }, .{ .buf = t.weights.head.sb }, .{ .ref = .{ .buf = d.xs }, .stride = @intCast(depth) }, .{ .buf = d.logits }, depth);
-        try d.picks.argmax(e, .{ .buf = d.logits }, .{ .buf = d.pick_buf, .off = slot * block_rows * @sizeOf(round.contract.Pick) }, .{ .rows = depth, .vocab = cfg.vocab, .stride = cfg.vocab });
+        try head.encodeSums(e, .{ .buf = d.x }, .{ .buf = t.weights.head.w }, .{ .buf = t.weights.head.sb }, .{ .ref = .{ .buf = d.xs }, .stride = @intCast(rows) }, .{ .buf = d.logits }, @intCast(rows));
+        var first: usize = 0;
+        while (first < rows) : (first += 16) {
+            const n = @min(16, rows - first);
+            try d.picks.argmax(e, .{ .buf = d.logits, .off = first * cfg.vocab * 2 }, .{ .buf = d.pick_buf, .off = first * @sizeOf(round.contract.Pick) }, .{ .rows = @intCast(n), .vocab = cfg.vocab, .stride = cfg.vocab });
+        }
     }
 
-    /// Each stream's chain of `depth` drafts after `pending` at `position`; the context must reach the pending token.
+    /// Each stream's chain of `depth` drafts after `pending` at `position`, the streams in batches of up to 128 rows.
     fn holdFn(ptr: *anyopaque, items: []const dr.Hold) anyerror!void {
         const d = cast(ptr);
         if (items.len > max_items) return error.DraftTooManyStreams;
         const t0 = std.Io.Clock.awake.now(d.io);
         defer if (d.trace) std.debug.print("hold of {d} streams: {d:.2} ms\n", .{ items.len, @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(d.io)).toNanoseconds())) / 1e6 });
-        const cb = d.target.queue.commandBuffer();
-        const e = cb.compute(.serial);
-        for (items, 0..) |it, slot| {
-            const l = d.lanes.get(it.stream) orelse return error.DraftStreamUnknown;
-            if (it.depth == 0 or it.depth >= block_rows or it.position == 0) return error.DraftDepth;
-            const anchor = it.position - 1;
-            if (l.end != anchor or anchor + block_rows > l.capacity + block_rows) return error.DraftContextGap;
-            try d.encodeBlock(e, l, slot, it.pending, anchor, it.depth);
-        }
-        e.end();
-        cb.commit();
-        cb.wait();
-        if (cb.failure()) |msg| return failed(msg);
-        try d.settle();
-        const picks = d.pick_buf.slice(round.contract.Pick, max_items * block_rows);
-        for (items, 0..) |it, slot| {
-            const l = d.lanes.get(it.stream).?;
-            for (picks[slot * block_rows ..][0..it.depth], 0..) |p, i| {
-                if (p.nonfinite != 0 or p.token >= cfg.vocab) return error.DraftNonfinite;
-                l.held[i] = p.token;
+        var at: usize = 0;
+        while (at < items.len) {
+            var blocks: [max_items]Block = undefined;
+            var count: usize = 0;
+            var rows: usize = 0;
+            while (at < items.len) : (at += 1) {
+                const it = items[at];
+                const l = d.lanes.get(it.stream) orelse return error.DraftStreamUnknown;
+                if (it.depth == 0 or it.depth >= block_rows or it.position == 0) return error.DraftDepth;
+                const anchor = it.position - 1;
+                if (l.end != anchor or anchor + block_rows > l.capacity + block_rows) return error.DraftContextGap;
+                if (rows + it.depth + 1 > hold_rows) break;
+                blocks[count] = .{ .lane = l, .pending = it.pending, .anchor = anchor, .depth = it.depth, .slot = count, .row = rows };
+                count += 1;
+                rows += it.depth + 1;
             }
-            l.held_len = it.depth;
-            if (d.trace) std.debug.print("draft {s} slot {d} anchor {d} pending {d} depth {d}: {any}\n", .{ it.stream.id, slot, it.position - 1, it.pending, it.depth, l.held[0..it.depth] });
+            const cb = d.target.queue.commandBuffer();
+            const e = cb.compute(.serial);
+            try d.encodeBlocks(e, blocks[0..count], rows);
+            e.end();
+            cb.commit();
+            cb.wait();
+            if (cb.failure()) |msg| return failed(msg);
+            try d.settle();
+            const picks = d.pick_buf.slice(round.contract.Pick, max_items * block_rows);
+            for (blocks[0..count], items[at - count .. at]) |b, it| {
+                for (picks[b.row + 1 ..][0..b.depth], 0..) |p, i| {
+                    if (p.nonfinite != 0 or p.token >= cfg.vocab) return error.DraftNonfinite;
+                    b.lane.held[i] = p.token;
+                }
+                b.lane.held_len = b.depth;
+                if (d.trace) std.debug.print("draft {s} row {d} anchor {d} pending {d} depth {d}: {any}\n", .{ it.stream.id, b.row, b.anchor, b.pending, b.depth, b.lane.held[0..b.depth] });
+            }
         }
     }
 
@@ -444,7 +502,7 @@ pub const Drafter = struct {
             const t0 = std.Io.Clock.awake.now(io);
             const cb = d.target.queue.commandBuffer();
             const e = cb.compute(.serial);
-            try d.encodeBlock(e, l, 0, 2, 0, depth);
+            try d.encodeBlocks(e, &.{.{ .lane = l, .pending = 2, .anchor = 0, .depth = depth, .slot = 0, .row = 0 }}, depth + 1);
             e.end();
             cb.commit();
             cb.wait();

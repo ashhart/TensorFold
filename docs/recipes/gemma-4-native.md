@@ -45,7 +45,8 @@ groups of 64 by MLX's affine rule and run on the same lane projection; the conte
 live in a 2,047-slot ring for the four sliding layers and a growing buffer for the full one, as in z-lab's MLX model.
 It sits in front of the engine as the lane core's `Drafted` wrapper (chains, no trees): the target hands it each
 prompt chunk's and each verify's tapped rows, and the depth rule prices its drafts against the forward's cost by rows
-timed at load. A block costs about 3.4 ms at any depth and an absorb about 2.5 ms.
+timed at load. A round's streams draft in one block forward (3.4 ms for one stream, 9 for eight) and absorb in one
+pass, whose command buffer the block settles.
 
 The context defaults to 32,768 tokens; `--context` raises it to the checkpoint's 262,144, at the cost of attention
 scratch that grows with it. There is no cross-request prompt reuse yet.
@@ -81,6 +82,8 @@ zig-out/bin/tf-gemma4-run M O R 128 512 && python tools/zig/gemma4_gate.py serve
   and four at once; thinking replies keep their reasoning apart, and tool calls parse.
 
 With the drafter, one stream decodes at 150-190 tokens a second (6.4, 6.4, 2.1 and 6.7 tokens a round on the four
-prompts; 10.2 and 7.8 on copying replies) and eight streams at 180-195 together. Plain decode is 43 tokens a second
-for one stream. The drafts match z-lab's own MLX drafter's acceptance; shared rounds draft shallow because the lane
-projection reads its weights once per 16 rows, so a 128-row forward costs 128 ms against 25 for 16.
+prompts; 10.2 and 7.8 on copying replies) and eight streams at about 210 together. Plain decode is 43 tokens a second
+for one stream. The drafts match z-lab's own MLX drafter's acceptance. Shared rounds draft shallow on purpose: past 16
+rows the forward is bound by tensor-op compute at about 0.8 ms a row (40 ms at 32 rows, 71 at 64, 130 at 128, the
+same rate as the prompt path and mlx-lm's), so the depth rule, given those costs, finds deeper shared drafts do not
+pay; the drafter's own cost is 9 ms a round for eight streams.

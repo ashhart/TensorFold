@@ -51,8 +51,10 @@ fn caseWith(gpa: std.mem.Allocator, io: std.Io, engine: *lanes.Engine, prompts: 
     };
     const t0 = std.Io.Clock.awake.now(io);
     for (ss) |*s| try engine.addStream(s);
-    while (engine.activeCount() > 0) try engine.step();
+    var steps: usize = 0;
+    while (engine.activeCount() > 0) : (steps += 1) try engine.step();
     const elapsed = ms(io, t0);
+    if (std.c.getenv("GEMMA_DRAFT_TRACE") != null) std.debug.print("{s}: {d} engine steps, {d:.2} ms a step\n", .{ label, steps, elapsed / @as(f64, @floatFromInt(@max(steps, 1))) });
     var bad: usize = 0;
     var tokens: usize = 0;
     var rounds: usize = 0;
@@ -84,10 +86,10 @@ pub fn main(init: std.process.Init) !void {
     const extra = args.next(); // a directory with repeat.ids.json and edit.ids.json: copy-heavy prompts
     const m = try g4.Model.load(gpa, io, model_dir);
     defer m.deinit();
-    const metal = try g4.backend.Metal.init(gpa, m, .{ .capacity = 4096, .streams = 8 });
+    const metal = try g4.backend.Metal.init(gpa, io, m, .{ .capacity = 4096, .streams = 8 });
     defer metal.deinit();
-    try metal.measure(io);
-    std.debug.print("window forward: {d:.1} ms at 1 row, {d:.1} at 16, {d:.1} at 32, {d:.1} at 64, {d:.1} at 128\n", .{ metal.costs[0].ms, metal.costs[15].ms, try metal.timeRows(io, 32), try metal.timeRows(io, 64), try metal.timeRows(io, 128) });
+    try metal.measure();
+    std.debug.print("window forward: {d:.1} ms at 1 row, {d:.1} at 16, {d:.1} at 32, {d:.1} at 64, {d:.1} at 128\n", .{ metal.costs[0].ms, metal.costs[15].ms, try metal.timeRows(32), try metal.timeRows(64), try metal.timeRows(128) });
     var cfg = try lanes.Config.init(gpa, metal.facts(), g4.state.max_rows, g4.state.max_rows - 1);
     defer cfg.deinit(gpa);
     var clock = lanes.backend.WallClock{ .io = io };

@@ -55,9 +55,9 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer gpa.destroy(h);
     h.gpa = gpa;
     h.model = model;
-    h.metal = try g.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 2) });
+    h.metal = try g.backend.Metal.init(gpa, io, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
-    try h.metal.measure(io); // the depth rule prices drafts against the window forward's cost by rows
+    try h.metal.measure(); // the depth rule prices drafts against the window forward's cost by rows
     h.draft = null;
     h.wrap = null;
     if (if (o.drafts) o.drafter else null) |dir| {
