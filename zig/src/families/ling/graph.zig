@@ -39,7 +39,7 @@ pub const Modules = struct {
         const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
         m.glue = try glue.Kernels.load(m.mods[0]);
         m.kda = try kda.Kernels.load(m.mods[1]);
-        m.copy_rows = try m.mods[2].function("tf_glm_copy_rows");
+        m.copy_rows = try m.mods[4].function("tf_ling_copy_rows");
         m.add_i32 = try m.mods[2].function("tf_glm_add_i32");
         m.router = try cuda.grouped.Router.resolve(m.mods[3]);
         m.add = try m.mods[4].function("tf_ling_add");
@@ -106,7 +106,7 @@ pub const Ops = struct {
     pub fn copy(o: Ops, src: u64, src_pitch: usize, dst: u64, dst_pitch: usize, rows: usize, row_bytes: usize) !void {
         var a: cuda.Args = .{};
         inline for (.{ src, @as(c_longlong, @intCast(src_pitch)), dst, @as(c_longlong, @intCast(dst_pitch)), @as(c_int, @intCast(rows)), @as(c_int, @intCast(row_bytes)) }) |v| a.add(v);
-        try cuda.launch.launch(o.m.copy_rows, .{ .grid = .{ .x = cdiv(rows * row_bytes, 256) }, .block = .{ .x = 256 } }, o.s, &a);
+        try cuda.launch.launch(o.m.copy_rows, .{ .grid = .{ .x = cdiv(row_bytes, 256 * 16), .y = @intCast(@max(1, @min(rows, 65535))) }, .block = .{ .x = 256 } }, o.s, &a);
     }
 
     /// A projection into columns col0 .. col0 + n of rows `stride` wide (bf16), through `tmp`.

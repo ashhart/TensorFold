@@ -37,3 +37,21 @@ extern "C" __global__ void tf_ling_combine(const __nv_bfloat16* y, const int* pi
   if (shared != nullptr) v = __fadd_rn(v, ling_glue::bf(shared[r * d + c]));
   out[r * d + c] = __float2bfloat16_rn(v);
 }
+
+// Bytes [rows][row_bytes] between pitched rows, as they are: 16 bytes a thread where every address is 16-aligned.
+extern "C" __global__ void tf_ling_copy_rows(const unsigned char* __restrict__ src, long long src_pitch,
+                                             unsigned char* __restrict__ dst, long long dst_pitch, int rows,
+                                             int row_bytes) {
+  const unsigned long long a = reinterpret_cast<unsigned long long>(src) | reinterpret_cast<unsigned long long>(dst);
+  const bool wide = ((a | static_cast<unsigned long long>(src_pitch | dst_pitch | row_bytes)) & 15) == 0;
+  const int step = gridDim.x * blockDim.x, at = blockIdx.x * blockDim.x + threadIdx.x;
+  for (int r = blockIdx.y; r < rows; r += gridDim.y) {
+    const unsigned char* s = src + r * src_pitch;
+    unsigned char* d = dst + r * dst_pitch;
+    if (wide) {
+      for (int c = at; c < row_bytes / 16; c += step) reinterpret_cast<uint4*>(d)[c] = reinterpret_cast<const uint4*>(s)[c];
+    } else {
+      for (int c = at; c < row_bytes; c += step) d[c] = s[c];
+    }
+  }
+}
