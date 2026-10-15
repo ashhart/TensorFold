@@ -72,6 +72,7 @@ pub fn prefillFn(p: *anyopaque, s: *lanes.Stream) anyerror!void {
     try proto.writeSampling(&w, s.sampling);
     try w.int(start);
     try w.int(keep_at);
+    try w.int(if (media) id else 0); // the image frame this prefill takes (rank 1 drops one sent for another request)
     try self.send(.prefill, &w);
     seq.sampling = s.sampling;
     s.cached = @intCast(start);

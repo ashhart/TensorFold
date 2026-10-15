@@ -187,6 +187,7 @@ pub const Owned = struct {
     // rank 1: the next prefill's images (its image frame's), freed after it
     media_spans: std.ArrayList([2]i64) = .empty,
     media_feats: ?cuda.DeviceBuffer = null,
+    media_id: u64 = 0, // rank 1: the request the held image frame came with (its prefill names it; 0: none)
     guard: ?*Guard = null, // the memory and peer watchdog (guard.zig)
     copy_on: bool = true, // TF_GLM_COPY=0: the head's drafts only
     mix_on: bool = true, // TF_GLM_MIX=0: with DFlash2 loaded, it drafts every round (else each stream picks a source a round)
@@ -317,7 +318,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.marginal = marginalFromEnv();
     own.copy_on = if (std.c.getenv("TF_GLM_COPY")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else true;
     own.copy_rate = .{};
-    own.mix_on = if (std.c.getenv("TF_GLM_MIX")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else true;
+    own.mix_on = native_env.mixWanted();
     own.copy_min = envUsize("TF_GLM_COPY_MIN", copy.K);
     own.copy_min_reply = envUsize("TF_GLM_COPY_MIN_REPLY", copy.K_REPLY);
     own.trace = .{ .on = o.rank == 0 and std.c.getenv("TF_GLM_TRACE") != null };
@@ -326,6 +327,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     // the link and the communicator first, while memory is fresh (NCCL registers its buffers at its first use)
     own.link = if (o.rank == 0) try cuda.tp_link.Link.lead(o.master_port, 600_000) else try cuda.tp_link.Link.follow(io, try std.Io.net.IpAddress.parse(o.master orelse return error.NoMaster, o.master_port), 600_000);
     errdefer own.link.close();
+    try native_env.agree(own.link, .fromEnv()); // before the first collective: a pair that would run apart refuses
     own.nccl = try cuda.nccl.Library.open();
     errdefer own.nccl.close();
     const comm = try cuda.tp_link.communicator(&own.nccl, own.link);
@@ -350,6 +352,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.tower = null;
     own.media_spans = .empty;
     own.media_feats = null;
+    own.media_id = 0;
     own.image_token = try imageToken(gpa, io, dir);
     if (o.vision and o.rank == 0) own.tower = try vision.Tower.load(gpa, io, ctx.d, dir);
     errdefer if (own.tower) |*t| t.deinit();
@@ -571,19 +574,21 @@ fn releaseFn(p: *anyopaque, s: *lanes.Stream) void {
     _ = self.lanes_by.remove(s);
     if (l.copy) |*h| h.deinit(self.gpa);
     const seq = l.s;
-    const keep_it = seq.snap_at > 0 and !l.media and seq.snap_at <= l.prompt.len;
+    // the kept entry allocated before rank 1 hears: a keep it was told of is one rank 0 holds too
+    var ids: ?[]u32 = null;
+    if (seq.snap_at > 0 and !l.media and seq.snap_at <= l.prompt.len) {
+        ids = self.gpa.dupe(u32, l.prompt[0..seq.snap_at]) catch null;
+        if (ids) |x| self.kept.ensureUnusedCapacity(self.gpa, 1) catch {
+            self.gpa.free(x);
+            ids = null;
+        };
+    }
     var w: Writer = .{ .gpa = self.gpa };
     defer w.buf.deinit(self.gpa);
     w.int(seq.uid) catch {};
-    w.int(@intFromBool(keep_it)) catch {};
+    w.int(@intFromBool(ids != null)) catch {};
     self.send(.release, &w) catch {};
-    if (keep_it) {
-        const ids = self.gpa.dupe(u32, l.prompt[0..seq.snap_at]) catch null;
-        if (ids) |x| self.kept.append(self.gpa, .{ .s = seq, .ids = x }) catch {
-            self.gpa.free(x);
-            self.dropSeq(seq.uid);
-        } else self.dropSeq(seq.uid);
-    } else self.dropSeq(seq.uid);
+    if (ids) |x| self.kept.appendAssumeCapacity(.{ .s = seq, .ids = x }) else self.dropSeq(seq.uid);
     self.gpa.free(l.prompt);
 }
 
