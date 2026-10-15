@@ -37,6 +37,7 @@ const usage =
     \\       tensorfold train-check MODEL   (Sliding Weights' gradients against the forward by finite differences)
     \\       tensorfold check-precision MODEL --tokens ID,... --dump DIR   (ModelOpt projections against fp64 and NVIDIA's math)
     \\       tensorfold margins MODEL --tokens ID,... --gold ID,...   (a gold reply teacher-forced: where argmax differs)
+    \\       tensorfold digest MODEL   (every byte of the checkpoint hashed, as a tensor-parallel rank checks it at load)
     \\       tensorfold kl MODEL --tokens ID,... [--gold ID,...] [--max-tokens N] (--dump FILE | --against FILE) [--precision P]
     \\                (logits rows to FILE, fed --gold then greedy; or FILE's tokens fed: KL, top-1 and NLL against its rows)
     \\       tensorfold widths MODEL --tokens ID,... [--max-tokens N] [--eager] [sampling as run]
@@ -162,6 +163,12 @@ pub fn main(init: std.process.Init) !u8 {
             std.debug.print("unknown option {s}\n{s}", .{ a, usage });
             return 2;
         } else try positional.append(gpa, a);
+    }
+    if (std.mem.eql(u8, args[1], "digest")) { // no GPU: every byte of the checkpoint, as a TP rank hashes it at load
+        const c = try nemotron.identity.Content.start(gpa, init.io, opts.model, (try nemotron.Config.read(gpa, init.io, opts.model)).held != null);
+        const d = try c.finish();
+        std.debug.print("RESULT digest {s}\n", .{&std.fmt.bytesToHex(d, .lower)});
+        return 0;
     }
     var driver = try cuda.Driver.open();
     defer driver.close();

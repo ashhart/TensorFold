@@ -96,16 +96,16 @@ pub fn checkHeld(c: Config) !void {
     return error.CheckpointShareMissing;
 }
 
-/// What every rank must agree on before the weights load: the model, its cut, its bytes and the build.
+/// What every rank must agree on before the weights load: the model, its cut, the checkpoint's layout and the build.
 const Fingerprint = extern struct {
-    layout: u32 = 4, // this struct's version
+    layout: u32 = 5, // this struct's version
     rank: u32,
     world: u32,
     ck: u32, // the checkpoint's own math (--precision checkpoint) or full precision
     dims: [12]u64, // the config's sizes, rank and world left out
     kinds: [32]u8, // sha256 of the block pattern
     program: [32]u8, // sha256 of this executable
-    weights: [32]u8, // the checkpoint's digest (cuda_identity.zig): config, index, shard layouts and bytes
+    weights: [32]u8, // the checkpoint's identity (cuda_identity.zig): config, index, shard names, sizes, headers
 
     fn of(c: Config, program: [32]u8, weights: [32]u8) Fingerprint {
         var f: Fingerprint = .{ .rank = @intCast(c.rank), .world = @intCast(c.world), .ck = @intFromBool(c.ck), .dims = .{ c.hidden, c.vocab, c.layers, c.experts, c.top_k, c.latent, c.expert_width, c.shared_width, c.shares, c.mamba_heads, c.heads, c.kv_heads }, .kinds = undefined, .program = program, .weights = weights };
@@ -122,7 +122,7 @@ pub fn agree(gpa: std.mem.Allocator, io: std.Io, c: Config, g: *const cuda.tp_gr
     const exe = try std.Io.Dir.cwd().readFileAlloc(io, "/proc/self/exe", gpa, .limited(1 << 31));
     defer gpa.free(exe);
     std.crypto.hash.sha2.Sha256.hash(exe, &program, .{});
-    const weights = try @import("cuda_identity.zig").digest(gpa, io, dir, c.held != null);
+    const weights = try @import("cuda_identity.zig").identity(gpa, io, dir); // every byte is compared at ready
     var all: [16]Fingerprint = undefined;
     if (c.world > all.len) return error.TooManyRanks;
     try g.gather(Fingerprint, d, s, Fingerprint.of(c, program, weights), all[0..c.world]);
@@ -130,7 +130,7 @@ pub fn agree(gpa: std.mem.Allocator, io: std.Io, c: Config, g: *const cuda.tp_gr
         var x = f;
         x.rank = all[0].rank;
         if (f.rank == r and std.mem.eql(u8, std.mem.asBytes(&x), std.mem.asBytes(&all[0]))) continue;
-        const what = if (!std.mem.eql(u8, &f.weights, &all[0].weights)) "checkpoint's bytes (another revision or copy)" else if (!std.mem.eql(u8, &f.program, &all[0].program)) "build" else "model, cut or precision";
+        const what = if (!std.mem.eql(u8, &f.weights, &all[0].weights)) "checkpoint (config, index or shard layout)" else if (!std.mem.eql(u8, &f.program, &all[0].program)) "build" else "model, cut or precision";
         std.log.err("rank {d}'s {s} differs from rank 0's: every rank stops", .{ r, what });
         return error.RankMismatch;
     }

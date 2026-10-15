@@ -22,6 +22,7 @@ const prompt_rows = @import("cuda_prompt_rows.zig");
 const prompt_pass = @import("cuda_prompt.zig");
 const marks = @import("cuda_marks.zig");
 const latent = @import("cuda_latent.zig");
+const identity = @import("cuda_identity.zig");
 pub const PromptRows = prompt_rows.PromptRows;
 
 /// nemotron_h.cuda.CONTEXT: prompt plus reply tokens when --context is not given, as `tensorfold serve` sizes it.
@@ -167,6 +168,9 @@ pub const Engine = struct {
         if (e.c.world > 1) e.tp = try cuda.tp_group.Group.open(e.c.rank, e.c.world);
         errdefer if (e.tp) |*g| g.close();
         if (e.tp) |*g| try latent.agree(gpa, io, e.c, g, ctx.d, e.stream, model_dir);
+        // every byte this rank holds, hashed while the weights load; the ranks compare the digests at ready
+        var content: ?*identity.Content = if (e.tp != null) try identity.Content.start(gpa, io, model_dir, e.c.held != null) else null;
+        errdefer if (content) |x| x.abandon();
         const chunks = e.max_len / state.chunk_keys;
         e.nch = if (e.k.triton) |*t| @intCast(t.smallestConst("_chunk", "NCH", @intCast(chunks)) orelse {
             std.log.err("no captured attention kernel covers {d} chunks of 512 keys; capture one for this context", .{chunks});
@@ -199,7 +203,10 @@ pub const Engine = struct {
         e.sampled_ready = try cuda.Event.init(ctx.d, false);
         try e.copied.record(e.stream);
         try e.setSampling(opts.sampling);
-        if (e.tp != null) try cuda.tp_watch.ready(io); // every rank loaded before the first job
+        if (content) |x| { // every rank loaded, with the same bytes, before the first job
+            content = null;
+            try cuda.tp_watch.ready(io, try x.finish());
+        }
         if (opts.graphs) try e.capture(opts.mtp);
         e.heat_gate = heat.Gate.fromEnv() catch |err| {
             std.log.err("TF_HEAT_HIGH and TF_HEAT_LOW: both or neither, in degrees, with low at or under high", .{});
