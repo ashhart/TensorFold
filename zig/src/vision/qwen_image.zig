@@ -4,10 +4,6 @@ const std = @import("std");
 /// GLM-5.3-Flash's preparation (its canvas, padding, normalization and patch order) on this module's decode and resize.
 pub const glm = @import("glm_image.zig");
 
-extern fn stbi_info_from_memory(buffer: [*]const u8, len: c_int, x: *c_int, y: *c_int, comp: *c_int) c_int;
-extern fn stbi_load_from_memory(buffer: [*]const u8, len: c_int, x: *c_int, y: *c_int, comp: *c_int, req: c_int) ?[*]u8;
-extern fn stbi_image_free(p: ?*anyopaque) void;
-
 pub const Limits = struct {
     max_dimension: u32 = 8192,
     max_pixels: u64 = 16 * 1024 * 1024,
@@ -24,108 +20,12 @@ pub const Image = struct {
     }
 };
 
-pub const Error = error{ UnsupportedImage, ImageTooLarge, OutOfMemory, BadAspectRatio };
+pub const Error = error{ UnsupportedImage, ImageTooLarge, OutOfMemory, BadAspectRatio, NoDecoder };
 
-/// JPEG or PNG bytes to RGB: EXIF orientation applied (JPEG), any alpha composited over white.
+/// JPEG or PNG bytes to RGB: the shared runtime decoder's job (pinned libjpeg-turbo); until it lands, refused by name.
 pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, limits: Limits) Error!Image {
-    if (bytes.len == 0 or bytes.len > std.math.maxInt(c_int)) return error.UnsupportedImage;
-    var w: c_int = 0;
-    var h: c_int = 0;
-    var comp: c_int = 0;
-    if (stbi_info_from_memory(bytes.ptr, @intCast(bytes.len), &w, &h, &comp) == 0) return error.UnsupportedImage;
-    if (w <= 0 or h <= 0 or w > limits.max_dimension or h > limits.max_dimension or
-        @as(u64, @intCast(w)) * @as(u64, @intCast(h)) > limits.max_pixels) return error.ImageTooLarge;
-    const alpha = comp == 2 or comp == 4;
-    const want: c_int = if (alpha) 4 else 3;
-    var got: c_int = 0;
-    const px = stbi_load_from_memory(bytes.ptr, @intCast(bytes.len), &w, &h, &comp, want) orelse return error.UnsupportedImage;
-    defer stbi_image_free(px);
-    const n: usize = @intCast(w * h);
-    _ = &got;
-    var rgb = try gpa.alloc(u8, n * 3);
-    errdefer gpa.free(rgb);
-    if (alpha) {
-        // PIL's paste of RGBA onto white with the alpha as mask: out = white + (src - white) * a / 255, rounded
-        for (0..n) |i| {
-            const a: i32 = px[i * 4 + 3];
-            for (0..3) |c| {
-                const s: i32 = px[i * 4 + c];
-                const t: i32 = (s - 255) * a + 128;
-                rgb[i * 3 + c] = @intCast(255 + ((t + (t >> 8)) >> 8));
-            }
-        }
-    } else @memcpy(rgb, px[0 .. n * 3]);
-    var im: Image = .{ .w = @intCast(w), .h = @intCast(h), .rgb = rgb };
-    const o = orientation(bytes);
-    if (o > 1) {
-        const t = try transpose(gpa, im, o);
-        im.deinit(gpa);
-        im = t;
-    }
-    return im;
-}
-
-/// A JPEG's EXIF orientation (1-8; 1 when absent or not a JPEG).
-fn orientation(b: []const u8) u16 {
-    if (b.len < 4 or b[0] != 0xFF or b[1] != 0xD8) return 1;
-    var i: usize = 2;
-    while (i + 4 <= b.len and b[i] == 0xFF) {
-        const marker = b[i + 1];
-        const len = (@as(usize, b[i + 2]) << 8) | b[i + 3];
-        if (marker == 0xDA or len < 2 or i + 2 + len > b.len) break;
-        if (marker == 0xE1 and len >= 16 and std.mem.eql(u8, b[i + 4 .. i + 10], "Exif\x00\x00")) {
-            const t = b[i + 10 .. i + 2 + len];
-            const le = t[0] == 'I';
-            const rd16 = struct {
-                fn f(x: []const u8, at: usize, little: bool) u16 {
-                    return if (little) std.mem.readInt(u16, x[at..][0..2], .little) else std.mem.readInt(u16, x[at..][0..2], .big);
-                }
-            }.f;
-            const rd32 = struct {
-                fn f(x: []const u8, at: usize, little: bool) u32 {
-                    return if (little) std.mem.readInt(u32, x[at..][0..4], .little) else std.mem.readInt(u32, x[at..][0..4], .big);
-                }
-            }.f;
-            if (t.len < 8) return 1;
-            const ifd = rd32(t, 4, le);
-            if (ifd + 2 > t.len) return 1;
-            const count = rd16(t, ifd, le);
-            for (0..count) |e| {
-                const at = ifd + 2 + e * 12;
-                if (at + 12 > t.len) return 1;
-                if (rd16(t, at, le) == 0x0112) {
-                    const v = rd16(t, at + 8, le);
-                    return if (v >= 1 and v <= 8) v else 1;
-                }
-            }
-            return 1;
-        }
-        i += 2 + len;
-    }
-    return 1;
-}
-
-/// PIL's exif_transpose for orientations 2-8.
-fn transpose(gpa: std.mem.Allocator, im: Image, o: u16) Error!Image {
-    const swap = o >= 5;
-    const W: u32 = if (swap) im.h else im.w;
-    const H: u32 = if (swap) im.w else im.h;
-    const out = try gpa.alloc(u8, im.rgb.len);
-    for (0..H) |y| for (0..W) |x| {
-        // the source pixel of output (x, y)
-        const sx: u32, const sy: u32 = switch (o) {
-            2 => .{ im.w - 1 - @as(u32, @intCast(x)), @intCast(y) },
-            3 => .{ im.w - 1 - @as(u32, @intCast(x)), im.h - 1 - @as(u32, @intCast(y)) },
-            4 => .{ @intCast(x), im.h - 1 - @as(u32, @intCast(y)) },
-            5 => .{ @intCast(y), @intCast(x) },
-            6 => .{ @intCast(y), im.h - 1 - @as(u32, @intCast(x)) },
-            7 => .{ im.w - 1 - @as(u32, @intCast(y)), im.h - 1 - @as(u32, @intCast(x)) },
-            8 => .{ im.w - 1 - @as(u32, @intCast(y)), @intCast(x) },
-            else => .{ @intCast(x), @intCast(y) },
-        };
-        @memcpy(out[(y * W + x) * 3 ..][0..3], im.rgb[(sy * im.w + sx) * 3 ..][0..3]);
-    };
-    return .{ .w = W, .h = H, .rgb = out };
+    _ = .{ gpa, bytes, limits };
+    return error.NoDecoder;
 }
 
 /// Python's round(): halves to even.
