@@ -61,7 +61,13 @@ fn peakAfter(mark: *std.atomic.Value(u64), reading: u64, reset_peak: bool) u64 {
 pub fn hostMemory(limit_bytes: u64, reset_peak: bool) ?api.Memory {
     const active = footprint() orelse return null;
     const peak = peakAfter(&host_peak, active, reset_peak);
-    return .{ .active = active, .cache = 0, .peak = peak, .pinned = 0, .limit = if (limit_bytes > 0) limit_bytes else null };
+    return .{
+        .active = active,
+        .cache = 0,
+        .peak = peak,
+        .pinned = 0,
+        .limit = if (limit_bytes > 0) limit_bytes else null,
+    };
 }
 
 /// The cache plan: `gib` if it fits (or `over`), else what 70% of RAM leaves up to 16 GiB (no reading: `spare` for it).

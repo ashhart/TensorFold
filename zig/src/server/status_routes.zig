@@ -265,11 +265,21 @@ test "stats snapshot marks an unknown-progress fill without counters" {
 test "stats snapshot's memory carries a configured limit and omits none" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const with = try statsSnapshot(arena.allocator(), .{}, .{ .active = 5, .cache = 1, .peak = 9, .pinned = 2, .limit = 100 }, 0, 0, 0, 0, 0);
+    const with = try statsSnapshot(
+        arena.allocator(),
+        .{},
+        .{ .active = 5, .cache = 1, .peak = 9, .pinned = 2, .limit = 100 },
+        0,
+        0,
+        0,
+        0,
+        0,
+    );
     const memory = with.object.get("memory").?.object;
     try std.testing.expectEqual(@as(i64, 5), memory.get("active").?.int64().?);
     try std.testing.expectEqual(@as(i64, 9), memory.get("peak").?.int64().?);
     try std.testing.expectEqual(@as(i64, 100), memory.get("limit").?.int64().?);
     const without = try statsSnapshot(arena.allocator(), .{}, .{ .active = 5, .peak = 9 }, 0, 0, 0, 0, 0);
-    try std.testing.expect(without.object.get("memory").?.object.get("limit") == null); // no limit configured: the key stays out
+    // no limit configured: the key stays out
+    try std.testing.expect(without.object.get("memory").?.object.get("limit") == null);
 }

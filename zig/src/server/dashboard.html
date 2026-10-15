@@ -233,7 +233,8 @@ function apply(s) {
   const run = s.fill_run || 0;
   if (run !== fillRun) { fillRun = run; fillSamples = []; }
   if (s.fill_tokens_left != null) {
-    if (fillSamples.length && s.fill_tokens_left > fillSamples[fillSamples.length - 1].left) fillSamples = []; // more left than before: the fill restarted
+    // more left than before: the fill restarted
+    if (fillSamples.length && s.fill_tokens_left > fillSamples[fillSamples.length - 1].left) fillSamples = [];
     fillSamples.push({ t: now, left: s.fill_tokens_left });
     if (fillSamples.length > 64) fillSamples.shift();
     el("fill").innerHTML = `${fmt(s.fill_tokens_left)} <small>tok</small>`;
@@ -244,7 +245,8 @@ function apply(s) {
     }
     if (rate == null && target.prefill > 0) rate = target.prefill;   // one sample: the server's 2 s rate
     const eta = rate ? s.fill_tokens_left / rate : null;
-    el("fillcap").textContent = `of ${fmt(s.fill_prompt_tokens)} · queue drains in ~${eta == null ? "—" : etaText(eta)}`;
+    el("fillcap").textContent =
+      `of ${fmt(s.fill_prompt_tokens)} · queue drains in ~${eta == null ? "—" : etaText(eta)}`;
   } else if (s.fill_unknown) {
     fillSamples = [];
     el("fill").textContent = "prefilling";

@@ -357,7 +357,10 @@ test "fill_run changes when a cancelled fill is replaced by the queued request" 
             var status: api.Status = .{};
             seen.engine.status(&status, &.{});
             const total = status.fill_prompt_tokens orelse return;
-            if (total == 12) seen.b_runs.append(gpa, status.fill_run) catch {} else seen.a_runs.append(gpa, status.fill_run) catch {};
+            if (total == 12)
+                seen.b_runs.append(gpa, status.fill_run) catch {}
+            else
+                seen.a_runs.append(gpa, status.fill_run) catch {};
         }
     };
     var seen: Seen = .{};
@@ -369,7 +372,8 @@ test "fill_run changes when a cancelled fill is replaced by the queued request" 
     const first: Request = .{ .prompt = &long_prompt, .max_tokens = 100000 };
     var a: Box = .{};
     try seen.engine.submit(1, &first, .{ .ctx = &a, .event = Box.event });
-    while (seen.a_runs.items.len == 0) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {}; // A is filling
+    // A is filling
+    while (seen.a_runs.items.len == 0) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
     seen.engine.cancel(1); // a poll may never see idle: B takes the lane straight after
     try std.testing.expectEqual(Reason.cancelled, a.wait());
     const queued: Request = .{ .prompt = &longer_prompt, .max_tokens = 100000 };
@@ -389,7 +393,8 @@ test "fill_run changes when a cancelled fill is replaced by the queued request" 
         seen.b_runs.deinit(gpa);
     }
     try std.testing.expect(seen.b_runs.items.len >= 1); // the replacement fill was sampled
-    for (seen.b_runs.items) |run| try std.testing.expect(run != seen.a_runs.items[0]); // a new marker without an idle poll
+    // a new marker without an idle poll
+    for (seen.b_runs.items) |run| try std.testing.expect(run != seen.a_runs.items[0]);
     var status: api.Status = .{};
     seen.engine.status(&status, &.{}); // both gone: idle, no fill counters at all
     try std.testing.expect(status.fill_prompt_tokens == null and status.fill_tokens_left == null);

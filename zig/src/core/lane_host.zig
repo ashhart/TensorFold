@@ -281,7 +281,8 @@ pub const LaneHost = struct {
         dropped.deinit(h.gpa);
         for (ids) |id| {
             var found: ?*Job = null;
-            h.lock(); // the status reader walks `admitted` under this lock: the removal joins the walk's critical section
+            // the status reader walks `admitted` under this lock: the removal joins the walk's critical section
+            h.lock();
             for (h.admitted.items, 0..) |job, i| if (job.id == id) {
                 fill.unfill(h, job);
                 if (!job.stream.finished) h.core.discard(&job.stream);
