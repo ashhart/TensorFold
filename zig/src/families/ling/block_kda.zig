@@ -30,6 +30,10 @@ pub fn block(o: Ops, b: *const state.Buffers, a: weights.Kda, c: *const @import(
     const n = H * kda.dk;
     const ps = segs[0].st.stride;
     for ([_]weights.Proj{ a.q, a.k, a.v, a.b }, [_]usize{ 0, n, 2 * n, 3 * n }) |w, col0| {
+        if (rows == 1) { // one row is its own columns: no copy
+            try o.mm(w, b.normed, D, 1, place(b, segs[0], li).p + col0 * 2);
+            continue;
+        }
         try o.mm(w, b.normed, D, rows, b.tmp);
         const w_n = w.outputs();
         for (segs) |sg| try o.copy(b.tmp + sg.row0 * w_n * 2, w_n * 2, place(b, sg, li).p + col0 * 2, ps * 2, sg.rows, w_n * 2);

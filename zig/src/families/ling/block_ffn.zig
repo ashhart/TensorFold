@@ -13,8 +13,13 @@ const Config = @import("config.zig").Config;
 /// Gate and up into [gate | up] rows, SwiGLU with min(silu(g), limit) (0: none), down into `out` [rows][hidden].
 pub fn mlp(o: Ops, b: *const state.Buffers, m: weights.Mlp, x: u64, ldx: usize, rows: usize, limit: f32, out: u64) !void {
     const w = m.gate.outputs();
-    try o.mmCols(m.gate, x, ldx, rows, b.tmp, b.gu, 2 * w, 0);
-    try o.mmCols(m.up, x, ldx, rows, b.tmp, b.gu, 2 * w, w);
+    if (rows == 1) { // one row is its own columns: no copies
+        try o.mm(m.gate, x, ldx, 1, b.gu);
+        try o.mm(m.up, x, ldx, 1, b.gu + w * 2);
+    } else {
+        try o.mmCols(m.gate, x, ldx, rows, b.tmp, b.gu, 2 * w, 0);
+        try o.mmCols(m.up, x, ldx, rows, b.tmp, b.gu, 2 * w, w);
+    }
     try glue.swigluWith(o.m.swiglu, o.s, b.gu, b.act, b.xs, limit, rows, w);
     try o.mm(m.down, b.act, w, rows, out);
 }
