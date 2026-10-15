@@ -1,6 +1,6 @@
 //! POST /v1/chat/completions and /v1/completions, JSON or SSE, as ``server.http`` answers them.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const chat = @import("chat.zig");

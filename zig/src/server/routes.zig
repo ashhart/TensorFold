@@ -1,6 +1,6 @@
 //! Method and path dispatch, as ``do_GET``, ``do_POST`` and ``do_DELETE`` route them.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const http_conn = @import("http_conn.zig");
 const http_body = @import("http_body.zig");
 const auth = @import("auth.zig");

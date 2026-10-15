@@ -1,7 +1,7 @@
 //! The live status line (connections, decode and prefill tok/s), redrawn in a terminal, and /health's copy of it.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const log = @import("log.zig");
 const Allocator = std.mem.Allocator;
 

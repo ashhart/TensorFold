@@ -1,7 +1,7 @@
 //! Prompt ids from a request, as ``prepare_prompt`` and ``render_prompt_ids`` make them.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const messages_mod = @import("messages.zig");
 const model_text = @import("model_text.zig");

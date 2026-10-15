@@ -1,7 +1,7 @@
 //! Cortheon end to end on a scripted engine and a stand-in web: rounds, research, streams, splices and checks.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("../json.zig");
+const json = @import("json");
 const model_text = @import("../model_text.zig");
 const openai = @import("../openai.zig");
 const server_mod = @import("../server.zig");

@@ -1,6 +1,6 @@
 //! Responses' include: OpenAI's values accepted and ignored, anything else refused by name.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const responses_translate = @import("responses_translate.zig");
 

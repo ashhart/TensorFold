@@ -1,7 +1,7 @@
 //! Authenticated, read-only sizing diagnostics; unknown counters and plans are omitted rather than guessed.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const process = @import("process_memory.zig");
 const routes = @import("routes.zig");
 const Server = @import("server.zig").Server;

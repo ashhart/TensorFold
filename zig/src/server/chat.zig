@@ -1,7 +1,7 @@
 //! One reply, as ``ChatApp.chat`` makes it: render, submit to the engine, stream text, reasoning and calls.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const fields_mod = @import("fields.zig");
 const reply_text = @import("reply_text.zig");

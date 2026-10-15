@@ -1,7 +1,7 @@
 //! What a lesson asks the model and how replies become examples: chat replies, continuations, token ids.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const chat = @import("chat.zig");
 const prompt = @import("prompt.zig");
 const errors = @import("errors.zig");
