@@ -79,6 +79,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
             error.Unsupported => refuse(conn, a, 501, "this engine does not learn: serve its model with --slide"),
             error.Busy, error.Closed => refuse(conn, a, 503, "the engine cannot take a learn request now"),
         },
+        .failed => |message| return refuse(conn, a, 503, engineWords(message)),
         else => {},
     }
     srv.teacher.learning.lockUncancelable(srv.io);
@@ -357,6 +358,14 @@ pub const Out = struct {
         sse.done(o.conn) catch {};
     }
 };
+
+/// What the server says while a delete's put-back has not reached the device.
+pub const unplaced = "a delete could not be put back on the device, so replies are refused until it is: send the delete again to retry it, or restart the server";
+
+/// An engine's failure message in words: a put-back the device has not taken is said plainly.
+pub fn engineWords(message: []const u8) []const u8 {
+    return if (std.mem.eql(u8, message, "PutBackNotOnDevice")) unplaced else message;
+}
 
 pub fn words(cx: *errors.Cx, e: anyerror) []const u8 {
     return if (e == error.Refused and cx.message.len > 0) cx.message else @errorName(e);

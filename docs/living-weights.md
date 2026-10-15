@@ -166,16 +166,17 @@ lesson, the reply streams server-sent events. With a few facts learned it takes 
 questions are asked twice, so it grows with them:
 
 1. `fact`: the fact and its state.
-2. `checking` with `"when": "before"`: every learned fact's held-out questions, and the wordings its lesson never
-   trained on, are asked as its lesson checked them, with thinking off and on.
+2. `checking` with `"when": "before"`: every learned fact's held-out questions are asked as its lesson checked them,
+   with thinking off and on, and the wordings its lesson never trained on with thinking off.
 3. `zeroed`: the input weights of the fact's neurons are set to zero in the running model, so they never fire, and
    their layers are rounded to the 4-bit values the shards will hold, so the checks after read what will be written.
 4. `checking` with `"when": "after"`, then one `checked` event a fact, saying whether it came back before and after.
 5. `forgot` with `"deleted": true`: every other fact still comes back, and the deleted fact's questions no longer give
    its answer. The change is written into the shards, the graph marks the fact `deleted` with the time and reason, and
-   its neurons are free for later lessons.
-6. Or `forgot` with `"deleted": false`: a check failed. The neurons are put back exactly as they were, nothing is
-   written, and `message` names the fact and question that failed and what the model said.
+   its neurons at the top of each layer's pocket are free for later lessons.
+6. Or `forgot` with `"deleted": false`: the delete did not complete, because a check failed or a write failed (below).
+   For a failed check, the neurons are put back exactly as they were, nothing is written, and `message` names the
+   fact and question that failed and what the model said.
 
 `forgot` also carries `state`, the fact's state in the graph file when the request ends. A delete writes two things,
 the shards and the graph file, in this order, so that together they never claim more than is on disk:
@@ -193,6 +194,12 @@ what happened:
 | The shards | The delete was put back and the shards written again as they were, so nothing changed | `learned` |
 | The shards, and writing them back too | The folder may hold part of the delete | `deleting` |
 | The graph file, after the shards | The shards hold the delete; the graph file does not say so yet | `deleting` |
+
+A put-back restores the pocket in memory at once, and on the GPU once every layer's upload succeeds. If one does not
+(on CUDA, an upload or a graph capture that fails), the server keeps what it needs to put it back, and refuses every
+reply until it lands: a reply says "a Living Weights delete could not be put back on the device", and a learn or
+delete request answers 503. Each learn or delete request tries the put-back again first, and replies come back once it
+lands. A restart reloads the folder, which a put-back never wrote.
 
 A fact left `deleting`, by one of these or by a crash, is settled by sending the delete again, after a restart too.
 If its neurons are silent already, an earlier delete reached the shards, and the graph file now records it. If not,
@@ -213,9 +220,10 @@ as shipped gives that answer too (a likely guess, such as a common colour, is no
   the same layer share, and move their answers.
 - A model with a fact deleted is close to the same model never taught it, but not the same: the lessons after it
   were learned with it in place.
-- Freed neurons at the top of a layer's pocket go to the next lesson. One below another fact's neuron stays silent,
-  and taken, until that fact is deleted too.
-- While a delete runs, chat replies already see the fact gone; a delete that is put back brings it back.
+- Only freed neurons at the top of a layer's pocket go to the next lesson. One below another fact's neuron stays
+  silent, and taken, until that fact is deleted too.
+- While a delete runs, chat replies already see the fact gone; a delete that is put back brings it back once the GPU
+  takes the put-back (above).
 
 ## Keep, move or reset what it learned
 
@@ -231,7 +239,8 @@ as shipped gives that answer too (a likely guess, such as a common colour, is no
 | `501 this engine does not learn: serve its model with --slide` | Start the server with `--slide`, on a Mac or a GB10 |
 | `503 the engine cannot take a learn request now` | Another learn request is running; send yours when it ends |
 | `503 a learn or delete request is running` | A delete does not wait for another learn or delete: send it when that one ends |
-| `forgot` with `"deleted": false` | A check failed and the fact was put back, nothing written; `message` says which fact and question |
+| `forgot` with `"deleted": false` | A check or a write failed; `message` says which, and `state` what the graph file holds (see Delete one fact) |
+| `a Living Weights delete could not be put back on the device` on a reply | The GPU did not take a delete's put-back: send the delete again to retry it, or restart the server |
 | `400 text is required` | The JSON body needs a `"text"` field |
 | `learned` with `"recalled": false` | Nothing of the fact was kept (its neurons were taken out), and `message` says why: for example it did not come back on its held-out questions, it kept answering questions about something else, or the model wrote too few clean questions to learn from |
 | `--slide rewrites the model's own files, and … is a link to data another file shares` at startup | The folder holds links into the Hugging Face cache (or hard links); make the copy with `cp -cRL` (Linux: `cp -RL`) as in step 2 |

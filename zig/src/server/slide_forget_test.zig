@@ -7,6 +7,7 @@ const model_text = @import("model_text.zig");
 const slide = @import("slide.zig");
 const slide_forget = @import("slide_forget.zig");
 const slide_graph = @import("slide_graph.zig");
+const slide_ask = @import("slide_ask.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Allocator = std.mem.Allocator;
@@ -72,6 +73,8 @@ const Model = struct {
     fails: u32 = 0, // the next saves that fail, as a shard write that fails would
     graph: ?*slide_graph.Graph = null, // a graph whose next file write fails during a save (`fault`)
     fault: slide_graph.Graph.Fault = .none,
+    device_down: bool = false, // the device takes no put-back
+    stale: bool = false, // a put-back it did not take is pending: replies are refused, learning tries it first
 
     fn engine(m: *Model) api.Engine {
         return .{ .ctx = m, .vtable = if (m.learns) &learning else &plain };
@@ -102,6 +105,7 @@ const Model = struct {
 
     fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const m: *Model = @ptrCast(@alignCast(ctx));
+        if (m.stale) return error.Stale;
         var prompt: [512]u8 = undefined;
         const n = @min(prompt.len, request.prompt.len);
         for (request.prompt[0..n], prompt[0..n]) |x, *b| b.* = @intCast(x);
@@ -127,6 +131,17 @@ const Model = struct {
 
     fn learn(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) api.LearnError!void {
         const m: *Model = @ptrCast(@alignCast(ctx));
+        // a pending put-back goes first: the device still down, every request fails as the learner's would
+        if (m.stale and m.device_down) return sink.event(sink.ctx, &.{ .done = .{ .message = "PutBackNotOnDevice" } });
+        if (m.stale) {
+            m.stale = false;
+            m.zeroed = 0;
+        }
+        if (request.unforget and m.device_down and m.zeroed > 0) {
+            m.unforgets += 1;
+            m.stale = true;
+            return sink.event(sink.ctx, &.{ .done = .{ .message = "PutBackNotOnDevice" } });
+        }
         if (request.forget.len > 0 or request.unforget) {
             if (request.unforget) m.unforgets += 1 else m.forgets += 1;
             // neurons silent already (an earlier delete reached the shards) hold nothing to zero
@@ -477,4 +492,33 @@ test "an allocation that fails anywhere in recording a delete leaves the graph i
     try std.testing.expect(failures >= 2);
     try std.testing.expectEqual(slide_graph.State.deleted, (try g.snapshot(arena.allocator()))[0].state);
     try std.testing.expectEqual(slide_graph.State.deleted, try onDisk(path, 0));
+}
+
+test "a put-back the device does not take refuses replies and requests in words, and a retry lands it once it can" {
+    var text: ByteText = .{};
+    var m: Model = .{ .breaks = true, .device_down = true };
+    const t = try taught(&text, &m);
+    defer t.srv.deinit();
+    // the cut costs the dog fact its answer, and the put-back does not reach the device: nothing is written
+    try std.testing.expectEqual(slide_graph.State.learned, try deleteSister(t));
+    try std.testing.expectEqual(@as(u32, 0), m.saves);
+    try std.testing.expect(m.stale);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // a reply is refused with what to do, and so are a delete and a lesson while the device still will not take it
+    var cx: errors.Cx = .{ .a = a };
+    try std.testing.expectError(error.Refused, slide_ask.ask(t.srv, &cx, null, "What is my dog called?", 8, Stays{}));
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "restart the server") != null);
+    const refused = slide_forget.admit(t.srv, a).?;
+    try std.testing.expectEqual(@as(u16, 503), refused.code);
+    try std.testing.expectEqualStrings(slide.unplaced, refused.message);
+    // the device takes it now: the next request's retry lands it, and the delete goes through
+    m.device_down = false;
+    m.breaks = false;
+    try std.testing.expectEqual(@as(?slide_forget.Refused, null), slide_forget.admit(t.srv, a));
+    t.srv.teacher.learning.unlock(std.testing.io);
+    try std.testing.expect(!m.stale);
+    try std.testing.expectEqual(slide_graph.State.deleted, try deleteSister(t));
+    try std.testing.expectEqual(@as(u32, 1), m.saves);
 }

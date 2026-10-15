@@ -63,6 +63,11 @@ pub fn admit(srv: *Server, a: Allocator) ?Refused {
                 error.Busy, error.Closed => .{ .code = 503, .message = "the engine cannot take a delete request now" },
             };
         },
+        // the engine tries a pending put-back before anything else; one the device still will not take refuses this too
+        .failed => |message| {
+            srv.teacher.learning.unlock(srv.io);
+            return .{ .code = 503, .message = slide.engineWords(message) };
+        },
         else => return null,
     }
 }
@@ -102,7 +107,7 @@ pub fn delete(srv: *Server, cx: *errors.Cx, out: *slide.Out, facts: []const Fact
         .learned => |l| l.steps,
         .failed => |message| {
             _ = putBack(srv, a);
-            return ended(out, id, state, message);
+            return ended(out, id, state, slide.engineWords(message));
         },
         .refused => return ended(out, id, state, "the engine could not take the delete"),
         .none => return ended(out, id, state, "this learner keeps its lessons outside a pocket of neurons, so it cannot delete one"),
@@ -121,15 +126,14 @@ pub fn delete(srv: *Server, cx: *errors.Cx, out: *slide.Out, facts: []const Fact
     out.event("checking", .{ .id = id, .when = "after", .facts = @as(u32, @intCast(kept.len - 1)), .questions = @as(u32, @intCast(asks.len)) });
     const after = check(srv, cx, kept, asks, said, was) catch |e| {
         const back = putBack(srv, a);
-        return ended(out, id, state, try std.fmt.allocPrint(a, "{s}: the checks after the cut failed ({s}), nothing was written", .{ if (back) "put back" else "not put back (restart the server)", slide.words(cx, e) }));
+        return ended(out, id, state, try std.fmt.allocPrint(a, "the checks after the cut failed ({s}), nothing was written, and {s}", .{ slide.words(cx, e), if (back) "the delete was put back" else slide.unplaced }));
     };
     for (kept, 0..) |f, i| out.event("checked", .{ .id = f.id, .deleted = i == 0, .before = recheck.recalled(asks, was, i), .after = recheck.recalled(asks, after.got, i) });
     if (after.miss) |m| {
         const why = try describe(a, kept, asks, after.said, m);
         const back = putBack(srv, a);
-        log.line("slide: the delete of fact {d} is {s}: {s}", .{ id, if (back) "put back" else "not put back", why });
         srv.slide.note(id, try std.fmt.allocPrint(a, "a delete was put back: {s}", .{why}));
-        return ended(out, id, state, try std.fmt.allocPrint(a, "{s}, nothing was written: {s}", .{ if (back) "put back as it was" else "not put back (restart the server; the folder is as it was)", why }));
+        return ended(out, id, state, try std.fmt.allocPrint(a, "nothing was written, and {s}: {s}", .{ if (back) "the delete was put back as it was" else slide.unplaced, why }));
     }
     // what can fail is made before any write: after the shards, only the graph file's own write can
     const questions = try questionsOf(a, facts[at]);
@@ -137,7 +141,7 @@ pub fn delete(srv: *Server, cx: *errors.Cx, out: *slide.Out, facts: []const Fact
     // the graph file says `deleting` before any shard is written, so it never claims more than is on disk
     srv.slide.record(id, .deleting) catch |e| {
         const back = putBack(srv, a);
-        return ended(out, id, state, try std.fmt.allocPrint(a, "the graph file could not be written ({s}), so the delete was {s} and nothing was written", .{ @errorName(e), if (back) "put back" else "not put back (restart the server)" }));
+        return ended(out, id, state, try std.fmt.allocPrint(a, "the graph file could not be written ({s}), nothing was written, and {s}", .{ @errorName(e), if (back) "the delete was put back" else slide.unplaced }));
     };
     if (slide.saveAll(srv, a)) |failed| return unsaved(srv, a, out, id, failed);
     written = true;
@@ -147,8 +151,9 @@ pub fn delete(srv: *Server, cx: *errors.Cx, out: *slide.Out, facts: []const Fact
     out.event("forgot", .{ .id = id, .deleted = true, .state = "deleted", .neurons = zeroed, .message = summary });
 }
 
-/// The last event when a delete did not complete: `state` is the fact's state as the graph file holds it.
+/// The last event when a delete did not complete, and its log line: `state` is the fact's in the graph file.
 fn ended(out: *slide.Out, id: u32, state: slide_graph.State, message: []const u8) void {
+    log.line("slide: fact {d} is not deleted (the graph file says {s}): {s}", .{ id, @tagName(state), message });
     out.event("forgot", .{ .id = id, .deleted = false, .state = @tagName(state), .message = message });
 }
 
@@ -156,7 +161,7 @@ fn ended(out: *slide.Out, id: u32, state: slide_graph.State, message: []const u8
 fn unsaved(srv: *Server, a: Allocator, out: *slide.Out, id: u32, failed: []const u8) !void {
     const back = putBack(srv, a);
     const again = if (back) slide.saveAll(srv, a) else failed;
-    if (again != null) return ended(out, id, .deleting, try std.fmt.allocPrint(a, "the shards could not be written ({s}), and {s}: the folder may hold part of the delete, and the graph file marks the fact deleting; send the delete again once the folder can be written", .{ failed, if (back) "writing them back as they were failed too" else "the delete could not be put back" }));
+    if (again != null) return ended(out, id, .deleting, try std.fmt.allocPrint(a, "the shards could not be written ({s}), and {s}: the folder may hold part of the delete, and the graph file marks the fact deleting; send the delete again once the folder can be written", .{ failed, if (back) "writing them back as they were failed too" else slide.unplaced }));
     srv.slide.record(id, .learned) catch |e| return ended(out, id, .deleting, try std.fmt.allocPrint(a, "the shards could not be written ({s}), so the delete was put back and the folder written as it was, but the graph file could not be ({s}) and still marks the fact deleting; send the delete again to settle it", .{ failed, @errorName(e) }));
     return ended(out, id, .learned, try std.fmt.allocPrint(a, "the shards could not be written ({s}), so the delete was put back and the folder written as it was: the folder and the graph file are as they were", .{failed}));
 }

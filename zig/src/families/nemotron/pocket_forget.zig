@@ -5,6 +5,7 @@ const pocket = @import("pocket.zig");
 /// What the last delete changed, bit for bit as it was: whole layers' neurons and counts, every neuron's record.
 pub const Kept = struct {
     held: bool = false, // a delete not yet written by a save nor put back
+    stale: bool = false, // put back in memory, but a layer's upload failed: kept until the device takes them all
     slots: std.ArrayList(usize) = .empty, // the pocket slots it changed
     up: std.ArrayList(f32) = .empty, // [slots, neurons, D]: their input weights before
     down: std.ArrayList(f32) = .empty, // [slots, neurons, D]: their outputs before
@@ -20,12 +21,18 @@ pub const Kept = struct {
     fn clear(k: *Kept) void {
         inline for (.{ "slots", "up", "down", "used", "learned" }) |f| @field(k, f).clearRetainingCapacity();
         k.held = false;
+        k.stale = false;
     }
 };
 
 /// Whether a delete waits to be written: a save then writes the pocket even when nothing is left in it.
 pub fn pending(p: anytype) bool {
     return p.forgot.held;
+}
+
+/// Whether a put-back is in memory but not yet on the device: replies are refused until `unforget` lands it.
+pub fn stale(p: anytype) bool {
+    return p.forgot.stale;
 }
 
 /// The last delete written into the shards: nothing is left to put back.
@@ -39,6 +46,8 @@ pub fn forget(p: anytype, t: anytype, host: anytype, gone: []const [2]u16) !usiz
     const d = t.config().hidden;
     const n = pocket.neurons * d;
     const k = &p.forgot;
+    // a put-back the device has not taken yet is never dropped for a new delete
+    if (k.stale) return error.PutBackNotOnDevice;
     k.clear();
     var held: usize = 0;
     for (gone) |g| {
@@ -60,7 +69,23 @@ pub fn forget(p: anytype, t: anytype, host: anytype, gone: []const [2]u16) !usiz
     k.learned_before = p.learned_before;
     k.marks = p.retired_lessons.items.len;
     k.held = true;
-    errdefer if (unforget(p, t, host)) |_| {} else |_| {};
+    cut(p, t, host, gone) catch |e| {
+        // put back whole; if the device cannot take it, that is the failure to report, the snapshot kept
+        _ = unforget(p, t, host) catch |back| {
+            std.log.warn("slide pocket: a delete failed ({t}), and its put-back did not reach the device ({t})", .{ e, back });
+            return back;
+        };
+        return e;
+    };
+    std.log.info("slide pocket: {d} neurons of a deleted fact zeroed in {d} layers", .{ held, k.slots.items.len });
+    return held;
+}
+
+/// The cut itself, after the snapshot: input weights zeroed, records out, layers rounded, freed and uploaded.
+fn cut(p: anytype, t: anytype, host: anytype, gone: []const [2]u16) !void {
+    const d = t.config().hidden;
+    const n = pocket.neurons * d;
+    const k = &p.forgot;
     for (gone) |g| {
         const slot = std.mem.indexOfScalar(usize, p.moe.items, g[0]) orelse continue;
         if (g[1] >= p.used.items[slot]) continue;
@@ -86,11 +111,9 @@ pub fn forget(p: anytype, t: anytype, host: anytype, gone: []const [2]u16) !usiz
         while (p.used.items[slot] > 0 and std.mem.allEqual(f32, p.neuron(p.up.items, slot, p.used.items[slot] - 1, d), 0)) p.used.items[slot] -= 1;
         try p.upload(t, host, slot);
     }
-    std.log.info("slide pocket: {d} neurons of a deleted fact zeroed in {d} layers", .{ held, k.slots.items.len });
-    return held;
 }
 
-/// The last delete undone bit for bit: its layers' neurons and counts, the records and retired lessons; the layers.
+/// The last delete undone bit for bit; a layer the device does not take keeps the snapshot, and a call again retries.
 pub fn unforget(p: anytype, t: anytype, host: anytype) !usize {
     const k = &p.forgot;
     if (!k.held) return 0;
@@ -112,8 +135,12 @@ pub fn unforget(p: anytype, t: anytype, host: anytype) !usize {
     for (k.slots.items) |slot| p.upload(t, host, slot) catch |e| {
         failed = failed orelse e;
     };
+    if (failed) |e| {
+        k.stale = true;
+        std.log.warn("slide pocket: a deleted fact's {d} layers are put back in memory, but not all on the device ({t}): replies are refused until they are", .{ back, e });
+        return error.PutBackNotOnDevice;
+    }
     k.clear();
-    if (failed) |e| return e;
     std.log.info("slide pocket: a deleted fact's {d} layers put back as they were", .{back});
     return back;
 }

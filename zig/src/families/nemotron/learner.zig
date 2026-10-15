@@ -32,7 +32,7 @@ pub const Report = union(enum) {
     failed: []const u8,
 };
 
-pub const Step = struct { done: bool, changed: bool = false, report: ?Report = null };
+pub const Step = struct { done: bool, changed: bool = false, report: ?Report = null, stale: bool = false }; // stale: see api
 
 const check_every = 20;
 const per_step = 2; // fact answers whose gradients one Adam step takes together (a plain one and a thinking one)
@@ -142,6 +142,7 @@ pub fn Learner(comptime H: type) type {
         /// Start a lesson's round; its examples must stay valid until its last step.
         pub fn begin(l: *Self, lesson: Lesson) !void {
             std.debug.assert(l.phase == .idle);
+            if (has_pocket and l.trainer != null) try whole_lessons.heal(l); // a put-back the device lacks goes first
             l.lesson = lesson;
             if (lesson.undo) {
                 l.phase = .undo;
@@ -229,11 +230,13 @@ pub fn Learner(comptime H: type) type {
 
         /// One bounded unit: one example sketched or projected, one step of learning (a check every few), or the undo.
         pub fn step(l: *Self) Step {
-            return l.advance() catch |e| {
+            var s = l.advance() catch |e| failed: {
                 if (l.phase == .steps) l.trainer.?.sites.restore();
                 l.phase = .idle;
-                return .{ .done = true, .changed = true, .report = .{ .failed = @errorName(e) } };
+                break :failed Step{ .done = true, .changed = true, .report = .{ .failed = @errorName(e) } };
             };
+            s.stale = has_pocket and whole_lessons.stale(l);
+            return s;
         }
 
         fn advance(l: *Self) !Step {

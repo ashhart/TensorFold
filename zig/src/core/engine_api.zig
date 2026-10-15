@@ -259,7 +259,7 @@ pub const Status = struct {
     generation_tokens: u64 = 0,
 };
 
-pub const SubmitError = error{ Closed, Busy, InvalidSpans };
+pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale }; // Stale: a learner's put-back has not reached the device
 
 /// A worked example for the learner: token ids, the answer from `start`; `decide`: its assistant header's last row.
 pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none)
@@ -321,7 +321,8 @@ pub const Learner = struct {
     /// End the open job now; it still sends `done`, with the reason.
     abort: *const fn (ctx: *anyopaque) void,
 
-    pub const Step = struct { done: bool, changed: bool };
+    /// stale: the device lacks a put-back the learner holds, so replies are refused until a later step clears it.
+    pub const Step = struct { done: bool, changed: bool, stale: bool = false };
 };
 
 pub const Engine = struct {
@@ -420,6 +421,7 @@ pub const keepalive = @import("keepalive.zig");
 test {
     _ = @import("lane_host.zig");
     _ = @import("lane_host_test.zig");
+    _ = @import("lane_host_stale_test.zig");
     _ = @import("lane_host_reuse_test.zig");
     _ = @import("lane_host_warm_test.zig");
     _ = @import("lane_host_fill_test.zig");

@@ -193,6 +193,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
         error.Busy => cx.fail(.capacity, "the engine is busy; retry shortly", .{}),
         error.Closed => cx.fail(.other, "the scheduler is closed", .{}),
         error.InvalidSpans => cx.fail(.request, "the prompt span layout is invalid", .{}),
+        error.Stale => cx.fail(.server, "a Living Weights delete could not be put back on the device: send the delete again to retry it, or restart the server", .{}),
     };
     release(srv, preparing); // a background request waits only while a foreground one prepares
     preparing = false;

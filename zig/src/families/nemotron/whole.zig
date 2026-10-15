@@ -165,6 +165,17 @@ pub fn retire(l: anytype, lesson: Lesson) !?@import("learner.zig").Step {
     return .{ .done = true, .changed = true };
 }
 
+/// A put-back the device has not taken yet, tried again; it fails until the device takes every layer of it.
+pub fn heal(l: anytype) !void {
+    if (l.method != .pocket or !forgetting.stale(&l.pockets)) return;
+    _ = try forgetting.unforget(&l.pockets, l.trainer.?, hooks(l));
+}
+
+/// Whether the device lacks a put-back the pocket holds: replies are refused until `heal` lands it.
+pub fn stale(l: anytype) bool {
+    return l.method == .pocket and forgetting.stale(&l.pockets);
+}
+
 /// The pocket into the shards (an unrecalled lesson out first), held-out answers asked again; false if not a pocket.
 pub fn save(l: anytype) !bool {
     if (l.method != .pocket) return false;

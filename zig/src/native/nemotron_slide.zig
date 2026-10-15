@@ -56,7 +56,7 @@ pub fn Adapter(comptime slide: type) type {
                 .failed => |message| .{ .done = .{ .message = message } },
             });
             if (s.done and !failed) a.emit(.{ .done = .{} });
-            return .{ .done = s.done, .changed = s.changed };
+            return .{ .done = s.done, .changed = s.changed, .stale = s.stale };
         }
 
         fn abort(ctx: *anyopaque) void {

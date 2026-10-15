@@ -36,4 +36,8 @@ pub fn step(h: *LaneHost) void {
     const s = learner.step(learner.ctx);
     if (s.changed) if (h.cache) |store| store.clear();
     h.lesson_open = !s.done;
+    // learn requests still come in, so the learner can try the put-back again; replies wait for it
+    h.mutex.lockUncancelable(h.io);
+    h.stale = s.stale;
+    h.mutex.unlock(h.io);
 }

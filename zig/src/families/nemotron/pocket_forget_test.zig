@@ -38,6 +38,7 @@ const Device = struct {
     saves: usize = 0,
     gpa: std.mem.Allocator = std.testing.allocator, // what rounding allocates from
     fail_at: usize = 0, // the upload, counted from one, that fails once (0: none)
+    fail_from: usize = 0, // the upload, counted from one, from which every upload fails (0: none)
     failing: bool = false, // every upload fails
 
     pub fn pocketRead(h: *Device, l: usize, up: []f32, down: []f32) usize {
@@ -50,7 +51,7 @@ const Device = struct {
     }
 
     pub fn pocket(h: *Device, l: usize, up: []const f32, down: []const f32, used: usize) !void {
-        if (h.failing or h.uploads + 1 == h.fail_at) {
+        if (h.failing or h.uploads + 1 == h.fail_at or (h.fail_from > 0 and h.uploads + 1 >= h.fail_from)) {
             h.uploads += 1;
             return error.UploadFailed;
         }
@@ -75,6 +76,10 @@ const SaveHost = struct {
 
     pub fn pocket(h: Ctx, l: usize, up: []const f32, down: []const f32, used: usize) !void {
         return h.pocket(l, up, down, used);
+    }
+
+    pub fn pocketRead(h: Ctx, l: usize, up: []f32, down: []f32) usize {
+        return h.pocketRead(l, up, down);
     }
 
     pub fn pocketSave(h: Ctx, _: std.mem.Allocator, _: std.Io, _: []const usize, _: usize, _: []f32, _: []f32) !usize {
@@ -277,13 +282,18 @@ const Copy = struct {
     }
 
     fn expectSame(c: Copy, p: *const P) !void {
+        try c.expectFields(p);
+        try std.testing.expect(!forgetting.pending(p));
+    }
+
+    /// The pocket in memory as copied, its snapshot kept or not.
+    fn expectFields(c: Copy, p: *const P) !void {
         try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(c.up), std.mem.sliceAsBytes(p.up.items));
         try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(c.down), std.mem.sliceAsBytes(p.down.items));
         try std.testing.expectEqualSlices(usize, c.used, p.used.items);
         try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(c.learned), std.mem.sliceAsBytes(p.learned.items));
         try std.testing.expectEqual(c.learned_before, p.learned_before);
         try std.testing.expectEqualSlices(u32, c.retired, p.retired_lessons.items);
-        try std.testing.expect(!forgetting.pending(p));
     }
 
     fn free(c: Copy) void {
@@ -351,7 +361,7 @@ test "an allocation or an upload that fails anywhere in a delete leaves the pock
         // and a retry goes through
         try std.testing.expectEqual(@as(usize, 2), try forgetting.forget(&p, &t, h, &b_neurons));
     }
-    // a device that takes no upload: the pocket is put back, and the error is the first one
+    // a device that takes no upload: put back in memory, the snapshot kept and the pocket stale until one lands
     const h = try std.testing.allocator.create(Device);
     defer std.testing.allocator.destroy(h);
     h.* = .{};
@@ -360,7 +370,50 @@ test "an allocation or an upload that fails anywhere in a delete leaves the pock
     try three(h, &p, &t);
     const before = try Copy.of(&p);
     defer before.free();
+    const live = try std.testing.allocator.create(Device);
+    defer std.testing.allocator.destroy(live);
+    live.* = h.*;
     h.failing = true;
-    try std.testing.expectError(error.UploadFailed, forgetting.forget(&p, &t, h, &b_neurons));
+    try std.testing.expectError(error.PutBackNotOnDevice, forgetting.forget(&p, &t, h, &b_neurons));
+    try before.expectFields(&p);
+    try std.testing.expect(forgetting.stale(&p) and forgetting.pending(&p));
+    h.failing = false;
+    try std.testing.expectEqual(@as(usize, 2), try forgetting.unforget(&p, &t, h));
     try before.expectSame(&p);
+    try expectLive(live, h);
+}
+
+test "a put-back the device stops taking after one layer is cut keeps its snapshot, refuses, and lands once it can" {
+    var t = trainer();
+    const h = try std.testing.allocator.create(Device);
+    defer std.testing.allocator.destroy(h);
+    h.* = .{};
+    var l: Learner = .{ .trainer = &t, .b = h };
+    defer l.pockets.deinit();
+    try three(h, &l.pockets, &t);
+    const before = try Copy.of(&l.pockets);
+    defer before.free();
+    const live = try std.testing.allocator.create(Device);
+    defer std.testing.allocator.destroy(live);
+    live.* = h.*;
+    // the first changed layer (0) takes its cut; from the second upload on, the device takes nothing, put-back too
+    h.fail_from = h.uploads + 2;
+    try std.testing.expectError(error.PutBackNotOnDevice, forgetting.forget(&l.pockets, &t, h, &b_neurons));
+    // memory is as it was and the snapshot is kept, while the device still holds layer 0 cut and layer 2 as it was
+    try before.expectFields(&l.pockets);
+    try std.testing.expect(whole.stale(&l) and forgetting.pending(&l.pockets));
+    try std.testing.expect(std.mem.allEqual(f32, h.up[0][1 * d ..][0..d], 0));
+    try std.testing.expect(!std.mem.allEqual(f32, live.up[0][1 * d ..][0..d], 0));
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&live.up[2]), std.mem.sliceAsBytes(&h.up[2]));
+    // until it lands, another delete is refused and a retry fails the same way, the snapshot kept
+    try std.testing.expectError(error.PutBackNotOnDevice, forgetting.forget(&l.pockets, &t, h, &b_neurons));
+    try std.testing.expectError(error.PutBackNotOnDevice, whole.heal(&l));
+    try std.testing.expect(whole.stale(&l));
+    try before.expectFields(&l.pockets);
+    // the device takes uploads again: the retry lands every layer, and nothing is left to put back
+    h.fail_from = 0;
+    try whole.heal(&l);
+    try std.testing.expect(!whole.stale(&l));
+    try before.expectSame(&l.pockets);
+    try expectLive(live, h);
 }
