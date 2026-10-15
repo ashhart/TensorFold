@@ -5,7 +5,7 @@ const core = @import("core");
 const serve = @import("hip_serve");
 const config = @import("../config.zig");
 const model = @import("model.zig");
-const load = @import("load.zig");
+const loader = @import("load.zig");
 const tables = @import("tables.zig");
 const cache = @import("cache.zig");
 const forward = @import("forward.zig");
@@ -17,6 +17,8 @@ pub const Options = struct {
     rank: usize = 0,
     world: usize = 1,
     group: ?hip.collective.Group = null,
+    /// The startup steps the ranks take together over the group's link (null: the engine's own).
+    startup: ?*hip.Startup = null,
     policy: hip.Policy = .{},
     /// Positions a stream holds at most (its prompt, reply and a window's rows).
     capacity: usize = 4096,
@@ -55,7 +57,7 @@ pub const Engine = struct {
     ck: core.checkpoint.Checkpoint,
     /// The n-gram tables' row views and other loader leftovers that live as long as the engine.
     keep: std.heap.ArenaAllocator,
-    weights: load.Weights,
+    weights: loader.Weights,
     tables: tables.Tables,
     host: forward.Host,
     qk: [2]hip.DeviceBuffer,
@@ -71,8 +73,21 @@ pub const Engine = struct {
     /// Streams' caches at the full capacity, kept between streams so their graphs stay valid (null: not made yet).
     pool: std.ArrayList(?cache.Caches) = .empty,
 
-    /// The checkpoint `dir` on device `o.device`, this rank's share loaded; the scratch sized for `o.chunk` rows.
+    /// `load`, this rank's failure heard by the other ranks at the step they wait at.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
+        var own: hip.Startup = .{ .link = if (o.world > 1) (o.group orelse return error.NoGroup).link() else null };
+        var with = o;
+        with.startup = o.startup orelse &own;
+        return load(gpa, io, dir, with) catch |err| {
+            with.startup.?.failed(err);
+            return err;
+        };
+    }
+
+    /// Rank `o.rank`'s share of `dir` on `o.device` and scratch for `o.chunk` rows; the caller refuses a failure.
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
+        var own: hip.Startup = .{ .link = if (o.world > 1) (o.group orelse return error.NoGroup).link() else null };
+        const steps = o.startup orelse &own;
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
@@ -89,8 +104,11 @@ pub const Engine = struct {
         e.stream = try hip.Stream.init(&e.driver);
         errdefer e.stream.deinit();
         e.comm = null;
+        // RCCL's init waits for every rank: none enters it unless every rank got this far
+        _ = try steps.done(.{ 0, 0 }, .first);
         if (o.world > 1) e.comm = try (o.group orelse return error.NoGroup).open();
         errdefer if (e.comm) |c| c.close();
+        _ = try steps.done(.{ 0, 0 }, .first);
         e.cfg = try config.Config.read(gpa, io, dir);
         errdefer e.cfg.deinit();
         e.ck = try core.checkpoint.Checkpoint.openModel(gpa, io, dir);
@@ -98,7 +116,7 @@ pub const Engine = struct {
         e.keep = .init(gpa);
         errdefer e.keep.deinit();
         const rank: ?core.quant.Rank = if (o.world > 1) .{ .rank = o.rank, .world = o.world } else null;
-        e.weights = try load.load(gpa, &e.driver, &e.ck, &e.cfg, rank, e.act);
+        e.weights = try loader.load(gpa, &e.driver, &e.ck, &e.cfg, rank, e.act);
         errdefer e.weights.deinit();
         e.weights.model.tp = e.comm;
         const spelling = try spellingOf(e.keep.allocator(), io, dir);
@@ -131,10 +149,12 @@ pub const Engine = struct {
             e.cfg.vocab,
             cache.max_window * forward.max_segs,
         );
+        errdefer e.drawer.deinit();
         e.graphed = o.policy.graphs != .off;
         e.graphs = Graphs.init(gpa);
         e.chosen = null;
         e.pool = .empty;
+        _ = try steps.done(.{ 0, 0 }, .first);
         return e;
     }
 
