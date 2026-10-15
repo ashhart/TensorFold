@@ -281,7 +281,7 @@ pub const Reader = struct {
             try us.upload((2 * e + 1) * inv_n * 4, u.s.bytes);
             try r.view(down_scale, count * inv_n * 4).upload(e * inv_n * 4, dn.s.bytes);
         }
-        return .{ .format = .fp8g, .up = up, .down = down, .up_scale = up_scale, .down_scale = down_scale, .width = ni, .dims = d, .experts = count, .limit = limit };
+        return .{ .format = .fp8g, .up = up, .down = down, .up_scale = up_scale, .down_scale = down_scale, .width = ni, .dims = d, .experts = count, .limit = limit, .after = true };
     }
 
     /// experts.Layer's nvfp4 form: Nvfp4Experts.packGateUp and packOne per expert, weight_scale_2 as the globals.
@@ -315,7 +315,7 @@ pub const Reader = struct {
         }
         const up_scale = try r.store.keep(std.mem.sliceAsBytes(gu), try label(&lb, i, "up_scale"));
         const down_scale = try r.store.keep(std.mem.sliceAsBytes(gd), try label(&lb, i, "down_scale"));
-        return .{ .format = .nvfp4, .up = up, .down = down, .up_scale = up_scale, .down_scale = down_scale, .width = ni, .dims = d, .experts = count, .limit = limit };
+        return .{ .format = .nvfp4, .up = up, .down = down, .up_scale = up_scale, .down_scale = down_scale, .width = ni, .dims = d, .experts = count, .limit = limit, .after = true };
     }
 };
 

@@ -310,14 +310,15 @@ __device__ __forceinline__ void prompt_body(const __nv_bfloat16* __restrict__ X,
 #undef TF_TILES
 }
 
-// The instances: SwiGLU gate-up, fp32 and bf16 down, and relu^2 up for experts without a gate (Nemotron).
+// The instances: SwiGLU gate-up (EPI 4 in Ling's order), fp32 and bf16 down, relu^2 up without a gate (Nemotron).
 template __global__ void nvfp4_expert_kernel<2, 2, 4>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
+template __global__ void nvfp4_expert_kernel<2, 4, 4>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
 template __global__ void nvfp4_expert_kernel<1, 0, 4>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
 template __global__ void nvfp4_expert_kernel<1, 3, 4>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
 template __global__ void nvfp4_expert_kernel<1, 1, 4>(const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, const float* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float, int);
 }
 
-// The prompt form's entries, 4 row tiles a warp in one row of WN warps: relu^2 up, SwiGLU gate-up, bf16 sums down.
+// The prompt form's entries, 4 row tiles a warp in a row of WN warps: relu^2 up, SwiGLU gate-up (2 orders), down.
 #define TF_NVFP4_PROMPT(NAME, M, EPI, WN)                                                                              \
   extern "C" __global__ void __launch_bounds__(WN * 32) NAME(                                                        \
       const __nv_bfloat16* __restrict__ X, int x_stride, int slots, const uint4* __restrict__ W,                     \
@@ -329,3 +330,4 @@ template __global__ void nvfp4_expert_kernel<1, 1, 4>(const __nv_bfloat16* __res
 TF_NVFP4_PROMPT(tf_nvfp4_prompt_relu2, 1, 1, 8)
 TF_NVFP4_PROMPT(tf_nvfp4_prompt_swiglu, 2, 2, 4)
 TF_NVFP4_PROMPT(tf_nvfp4_prompt_down, 1, 3, 8)
+TF_NVFP4_PROMPT(tf_nvfp4_prompt_swiglu_after, 2, 4, 4)

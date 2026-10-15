@@ -25,6 +25,7 @@ pub const Modules = struct {
     add: cuda.Function,
     gate: cuda.Function,
     combine: cuda.Function,
+    swiglu: [2]cuda.Function, // glm_glue's 512 and 64 SwiGLU in Ling's order, min(silu(g), L) * clip(u, -L, L)
 
     pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context) !Modules {
         const k = cuda.kernels;
@@ -44,6 +45,7 @@ pub const Modules = struct {
         m.add = try m.mods[4].function("tf_ling_add");
         m.gate = try m.mods[4].function("tf_ling_gate");
         m.combine = try m.mods[4].function("tf_ling_combine");
+        m.swiglu = .{ try m.mods[0].function("tf_ling_swiglu_512"), try m.mods[0].function("tf_ling_swiglu_64") };
         m.lane = try cuda.qmmf.Lane.load(d, @intCast(try ctx.attribute(.compute_capability_major)));
         errdefer m.lane.unload();
         m.prompt = try cuda.nvfp4.Prompt.load(d);

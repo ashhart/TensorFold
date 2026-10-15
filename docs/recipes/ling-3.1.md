@@ -19,6 +19,7 @@ block FP8 (e4m3 in 128 x 128 blocks with `weight_scale_inv`).
 | Weight loader at TP=1: bf16, FP8 block, ModelOpt NVFP4 | `zig/src/families/ling/weights.zig`, `weights_proj.zig` | `ling-weights`, `ling-weights-real` |
 | Synthetic checkpoints in all three formats | `tf-cuda-test ling-synth` | its own name check |
 | The TP=1 layer graph: embedding, KDA/MLA mixers, dense MLP and MoE, final norm, head; windows and commits | `zig/src/families/ling/forward.zig`, `graph.zig`, `state.zig`, `block_*.zig`, `kernels/cuda/ling_glue.cu` | `ling-forward-synth`, `ling-layer-real` |
+| SwiGLU clamped in Ling's order, `min(silu(g), L) * clip(u, -L, L)`, in the glue and the FP8/NVFP4 grouped experts (every older kernel's SASS unchanged) | `glm_glue_moe.cuh` (`tf_ling_swiglu_*`), `experts.cuh` (epilogue 4), `experts.Layer.after` | `ling-clamp`, `ling-clamp-old`, `glm-route-old` |
 
 ## The layer graph
 
@@ -67,6 +68,7 @@ Real layers of the FP8 release (`ling-layer-real`, the HF bf16 chain's captured 
 | 0 | KDA, dense | 3.27e-3 | - | 3.27e-3 | 3.12e-3 | 0.9 GB |
 | 4 | KDA, MoE | 5.88e-3 | 21 | 3.13e-3 | 4.28e-3 | 8.5 GB |
 | 7 | MLA, MoE | 4.89e-3 | 17 | 3.05e-3 | 3.57e-3 | 8.3 GB |
+| 65 | KDA, MoE, limits 10 | 4.85e-3 | 14 | 3.35e-3 | 3.33e-3 | 8.5 GB |
 | 71 | MLA, MoE, limits 10 | 4.13e-3 | 7 | 3.75e-3 | 3.89e-3 | 8.3 GB |
 
 exllamav3's port measured 0.4-1.1e-3 without flips (4 flips each on layers 4 and 7) on the same chain: it keeps fp16
@@ -94,6 +96,26 @@ both formats. Each projection loads as a `qlinear.Weight` (`bf16`, `fp8g` or `nv
 `Fp8Experts`/`Nvfp4Experts`). There is no grouped bf16 expert kernel, so bf16 routed experts load as one lane weight
 per projection. The router must be bf16 (GLM's router kernel reads bf16); a quantized router is refused.
 
+### The SwiGLU clamp
+
+Layers 64-71 clamp the shared expert and layers 65-71 the routed experts at L = 10 as inclusionAI's vLLM
+(`SwigluStepAndMul`) and SGLang (`BailingMoeV3MLP`) do: `min(silu(g), L) * clip(u, -L, L)`, the limit on SiLU's output.
+GLM's glue and the grouped expert kernels clamp the gate before SiLU, so Ling launches its own instances: the glue's
+`tf_ling_swiglu_512`/`_64` (`glue.swigluWith`) for the shared expert, dense and bf16 routed experts, and epilogue 4 of
+the FP8 and NVFP4 grouped kernels (decode and prompt), chosen by `experts.Layer.after`, which the Ling loader sets.
+Every kernel that existed before has the same SASS and resource usage as at a33dde0c (`cuobjdump`, all 40 fatbins);
+`ling-clamp-old` runs the kept FP8 (12 calls) and NVFP4 (13 calls) instances against a33dde0c's fatbins byte for byte.
+
+At L = 10 the two orders give the same bf16 bytes: the kernels (and HF's bf16 `act_fn`) round SiLU to bf16 first, and
+bf16(silu(g)) is 10 for every bf16 g >= 10. They differ at small limits (L = 2: 16,255 of the 65,536 bf16 gates).
+`ling-clamp DIR` checks Ling's order against float64 at L = 10 and L = 2 on gates and ups straddling L: the glue at
+widths 1024 and 704 (worst 0.93 of 2^-7 relative; 0 bytes differ from GLM's order at 10, 6,794 at 2) and the clamped
+layer's grouped gate-up, decode and prompt rows (FP8 worst 0.090, NVFP4 0.102 of the bound). a33dde0c's binary and
+this one print the same digits on the real layers (71: rel L2 4.125e-3, 3.747e-3 without 7 flipped rows, decode rows
+3.893e-3; 65: 4.851e-3, 3.347e-3 without 14, 3.325e-3) and on the synthetic forward in all three formats, whose
+float64 references do not change either (the synthetic clamped layer never reaches g > 10). HF's clamp itself moves
+layer 71's output by 3.7e-3 (rel L2 against the unclamped layer) and layer 65's by 0 on these 512 tokens.
+
 ## What is missing
 
 - Lanes hooks (drafted, concurrent and cut-prompt windows) for Ling: the graph has the pieces (segments, windows,
@@ -101,8 +123,6 @@ per projection. The router must be bf16 (GLM's router kernel reads bf16); a quan
 - MTP drafting: the MTP layer's tensors load (`weights.Mtp`); the graph leaves it unwired. It would be
   `enorm(embed(next)) | hnorm(hidden)` through `eh_proj`, one MLA + MoE layer on its own cache, the final norm and
   the shared head.
-- The SwiGLU limit clamps the gate before SiLU (`silu(min(g, 10))`, the grouped expert kernels' and GLM's rule);
-  the Ling reference clamps after (`min(silu(g), 10)`). They differ by at most 4.5e-4 on a clamped element.
 - Speed: nothing is tuned. Projections land in their columns through a byte copy, bf16 routed experts run densely,
   and the RMS norms take hidden and `q_lora_rank` widths 512, 1536 and 4096 only (`glue.rmsnorm`).
 - EXL3, through ashhart's EXL3 module (tracker #832).
@@ -120,6 +140,8 @@ python zig/tests/cuda/oracle/ling_forward.py /tmp/ling-fp8 /tmp/ref             
 zig-out/bin/tf-cuda-test ling-forward-synth /tmp/ling-fp8 /tmp/ref /tmp/picks       # exactness; writes the picks
 python zig/tests/cuda/oracle/ling_forward.py /tmp/ling-fp8 /tmp/fref --picks /tmp/picks
 zig-out/bin/tf-cuda-test ling-forward-synth /tmp/ling-fp8 /tmp/fref                 # same picks: logits bounded
+zig-out/bin/tf-cuda-test ling-clamp /tmp/ling-fp8                  # Ling's SwiGLU order vs float64, L 10 and 2
+zig-out/bin/tf-cuda-test ling-clamp-old /tmp/ling-fp8 OLD/fatbin   # kept expert instances vs an older build's bytes
 ```
 
 `ling-synth` writes `config.json` (the real file's schema) and `model.safetensors` with the real key names: hidden 512,

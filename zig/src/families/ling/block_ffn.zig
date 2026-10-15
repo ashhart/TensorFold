@@ -10,12 +10,12 @@ const glue = graph.glue;
 const Ops = graph.Ops;
 const Config = @import("config.zig").Config;
 
-/// Gate and up into [gate | up] rows, SwiGLU clamped at `limit` (0: none), down into `out` [rows][hidden].
+/// Gate and up into [gate | up] rows, SwiGLU with min(silu(g), limit) (0: none), down into `out` [rows][hidden].
 pub fn mlp(o: Ops, b: *const state.Buffers, m: weights.Mlp, x: u64, ldx: usize, rows: usize, limit: f32, out: u64) !void {
     const w = m.gate.outputs();
     try o.mmCols(m.gate, x, ldx, rows, b.tmp, b.gu, 2 * w, 0);
     try o.mmCols(m.up, x, ldx, rows, b.tmp, b.gu, 2 * w, w);
-    try glue.swiglu(o.set(), o.s, b.gu, b.act, b.xs, limit, rows, w);
+    try glue.swigluWith(o.m.swiglu, o.s, b.gu, b.act, b.xs, limit, rows, w);
     try o.mm(m.down, b.act, w, rows, out);
 }
 

@@ -115,9 +115,10 @@ class Model:
 
     def mlp(self, x, p, limit):
         g, u = self.lin(x, p + "gate_proj"), self.lin(x, p + "up_proj")
-        if limit:
-            g, u = g.clamp(max=limit), u.clamp(-limit, limit)
-        return self.lin(self.r(self.r(g * torch.sigmoid(g)) * u), p + "down_proj")
+        s = self.r(g * torch.sigmoid(g))
+        if limit:  # inclusionAI's SwigluStepAndMul: the limit on silu's output, the up clipped both ways
+            s, u = s.clamp(max=limit), u.clamp(-limit, limit)
+        return self.lin(self.r(s * u), p + "down_proj")
 
     def moe(self, x, p, i):
         c, r, ck = self.c, self.r, self.ck

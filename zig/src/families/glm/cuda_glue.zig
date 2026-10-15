@@ -128,8 +128,13 @@ fn swigluBlock(w: usize) !usize {
 
 /// glue.swiglu: [gate | up] -> bf16(bf16(silu(min(g, L))) * clip(u, -L, L)), 64-sums in `xs`; L per layer, 0 for none.
 pub fn swiglu(set: Set, stream: cuda.Stream, gu: u64, out: u64, xs: u64, limit: f32, rows: usize, w: usize) !void {
+    return swigluWith(.{ set.glue.swiglu_512, set.glue.swiglu_64 }, stream, gu, out, xs, limit, rows, w);
+}
+
+/// swiglu on a pair of glm_glue_moe.cuh's 512 and 64 kernels (tf_ling_swiglu_*: the limit on silu's output, Ling).
+pub fn swigluWith(fs: [2]cuda.Function, stream: cuda.Stream, gu: u64, out: u64, xs: u64, limit: f32, rows: usize, w: usize) !void {
     const block = try swigluBlock(w);
-    const f, const threads: u32 = if (block == 512) .{ set.glue.swiglu_512, 128 } else .{ set.glue.swiglu_64, 64 };
+    const f, const threads: u32 = if (block == 512) .{ fs[0], 128 } else .{ fs[1], 64 };
     var a: cuda.Args = .{};
     inline for (.{ gu, out, xs, clampOf(limit), i64of(w) }) |v| a.add(v);
     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(w / block) }, .block = .{ .x = threads } }, stream, &a);
