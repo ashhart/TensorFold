@@ -11,7 +11,7 @@ tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP --name bench --tempe
 ```
 
 For native serving, see the [Metal runbook](../../RUNBOOK.md#flash-next-and-paired-metal-serving).
-Native Flash Next on CUDA serves the MLX 4-bit group-32 checkpoint from a captured kernel set: see
+Native Flash Next on CUDA serves the MLX 4-bit group-32 checkpoint on the built-in kernels: see
 [Flash Next on CUDA](flash-next-cuda.md) ([#472](https://github.com/ashhart/TensorFold/issues/472)).
 
 The sections below describe the Python 0.6.6 engine, available at the
