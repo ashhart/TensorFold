@@ -79,6 +79,25 @@ fn opens(text: []const u8, word: []const u8) bool {
 
 /// A fact's subject words: the phrase's its questions say; a document's other proper names join a phrase with none.
 pub fn factSubject(a: std.mem.Allocator, phrase: []const u8, fact: []const u8, qs: []const []const u8, document: bool) ![]const []const u8 {
+    const words = try phraseSubject(a, phrase, fact, qs, document);
+    // a told fact's subject most of its open questions never say is its answer ("I contribute to TensorFold."): none
+    if (!document and !try namedByHalf(a, words, fact, qs)) return &.{};
+    return words;
+}
+
+/// Whether at least half of the questions that do not ask yes or no name the subject (yes-or-no ones say the fact).
+fn namedByHalf(a: std.mem.Allocator, words: []const []const u8, fact: []const u8, qs: []const []const u8) !bool {
+    const proper = try named(a, words, fact, qs);
+    var open: usize = 0;
+    var said: usize = 0;
+    for (qs) |q| if (!whom.yesNo(q)) {
+        open += 1;
+        said += @intFromBool(names(proper, words, q));
+    };
+    return 2 * said >= open;
+}
+
+fn phraseSubject(a: std.mem.Allocator, phrase: []const u8, fact: []const u8, qs: []const []const u8, document: bool) ![]const []const u8 {
     const own = try subjectWords(a, beforeVerb(phrase));
     // a told fact named whole ("I drive a Volvo") keys on what its questions say (drive), never its answer
     if (!document and whom.userOpens(phrase)) return asked(a, own, qs);
@@ -241,6 +260,18 @@ test "a fact's subject keeps its own proper names; a phrase without any takes th
     const nuts = [_][]const u8{ "What am I allergic to?", "Am I allergic to anything?", "What can't I eat?" };
     const allergic = try factSubject(a, "I am allergic to peanuts", "I am allergic to peanuts.", &nuts, false);
     try std.testing.expect(allergic.len == 1 and std.mem.eql(u8, allergic[0], "allergic"));
+}
+
+test "a told fact's subject that most of its open questions never name is none: it keys on the reply" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const fact = "I contribute to TensorFold.";
+    const qs = [_][]const u8{ "What do I contribute to?", "Which project do I contribute to?", "Do I contribute to TensorFold?", "Is TensorFold something I work on?", "What is the name of the project I support?" };
+    try std.testing.expectEqual(@as(usize, 0), (try factSubject(a, "TensorFold", fact, &qs, false)).len);
+    const told = [_][]const u8{ "What is my dog called?", "Is my dog called Ginger?", "What did I name my dog?", "What is the name of my pet?" };
+    const dog = try factSubject(a, "My dog", "My dog is called Ginger.", &told, false);
+    try std.testing.expect(dog.len == 1 and std.mem.eql(u8, dog[0], "dog"));
 }
 
 const unkeyed = [_][]const u8{ "i", "me", "my", "mine", "myself", "we", "us", "our", "ours", "you", "your", "yours", "it", "its", "this", "that", "these", "those", "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "do", "does", "did", "is", "are", "am", "was", "like", "likes" };
