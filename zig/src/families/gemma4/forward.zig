@@ -207,19 +207,22 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
         }
         const kv_off = at * nk * dh * 2; // this stream's keys and values [nk, n, dh] in s.k, s.v
         const q_off = at * cfg.query_heads * dh * 2;
-        e.setPipeline(kd.qkv);
-        e.setBuffer(s.qkv, at * width * 2, 0);
-        bindRef(e, l.q_norm, 1);
-        bindRef(e, l.k_norm, 2);
-        bind(e, &.{if (global) m.inv_global else m.inv_sliding}, 3);
-        e.setBuffer(s.pos, at * 4, 4);
-        e.setValue(cfg.eps, 5);
-        e.setBuffer(s.q, q_off, 6);
-        e.setBuffer(s.k, kv_off, 7);
-        e.setBuffer(s.v, kv_off, 8);
-        bind(e, &.{ c.k[i], c.v[i] }, 9); // keys and values straight into the cache at each row's slot
-        e.setValue([3]i32{ if (global) 0 else state.ring, @intCast(state.slotsOf(i, c.capacity)), 0 }, 11);
-        e.dispatchGroups(.{ .width = cfg.query_heads + 2 * nk, .height = n }, .{ .width = 32 });
+        const prep = !(fused and !global); // a fused sliding layer's attention kernel preps its own heads
+        if (prep) {
+            e.setPipeline(kd.qkv);
+            e.setBuffer(s.qkv, at * width * 2, 0);
+            bindRef(e, l.q_norm, 1);
+            bindRef(e, l.k_norm, 2);
+            bind(e, &.{if (global) m.inv_global else m.inv_sliding}, 3);
+            e.setBuffer(s.pos, at * 4, 4);
+            e.setValue(cfg.eps, 5);
+            e.setBuffer(s.q, q_off, 6);
+            e.setBuffer(s.k, kv_off, 7);
+            e.setBuffer(s.v, kv_off, 8);
+            bind(e, &.{ c.k[i], c.v[i] }, 9); // keys and values straight into the cache at each row's slot
+            e.setValue([3]i32{ if (global) 0 else state.ring, @intCast(state.slotsOf(i, c.capacity)), 0 }, 11);
+            e.dispatchGroups(.{ .width = cfg.query_heads + 2 * nk, .height = n }, .{ .width = 32 });
+        }
         var sub: usize = 0;
         while (sub < n) : (sub += attend_rows) {
             const r = at + sub;
@@ -241,6 +244,7 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
                 e.dispatchGroups(.{ .width = 1, .height = cfg.query_heads, .depth = rn }, .{ .width = 32 });
                 continue;
             }
+            const direct = !prep and chunks[r][kind] == 1; // one chunk: the kernel writes the merged output itself
             e.setPipeline(kd.partial);
             e.setBuffer(s.q, r * cfg.query_heads * dh * 2, 0);
             bind(e, &.{ c.k[i], c.v[i], c.k[i], c.v[i] }, 1); // the new rows were written first: every key is a cached one
@@ -249,7 +253,18 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
             e.setBuffer(s.meta[kind], r * state.meta_ints * 4, 7);
             e.setValue(@as(i32, @intCast(state.slotsOf(i, c.capacity))), 8);
             bind(e, &.{ s.pm, s.pl, s.po }, 9);
+            e.setBuffer(s.qkv, r * width * 2, 12);
+            bindRef(e, l.q_norm, 13);
+            bindRef(e, l.k_norm, 14);
+            bind(e, &.{m.inv_sliding}, 15);
+            e.setValue(cfg.eps, 16);
+            e.setValue([2]i32{ @intFromBool(!prep), @intFromBool(direct) }, 17);
+            e.setBuffer(s.attn, r * cfg.query_heads * dh * 2, 18);
+            e.setBuffer(s.sums, r * 4, 19);
+            e.setValue(@as(i32, @intCast(rows)), 20);
+            bind(e, &.{ c.k[i], c.v[i] }, 21);
             e.dispatchGroups(.{ .width = chunks[r][kind], .height = nk, .depth = rn }, .{ .width = 32 * kd.heads_per_kv * kd.split });
+            if (direct) continue;
             e.setPipeline(kd.merge);
             bind(e, &.{ s.pm, s.pl, s.po }, 0);
             e.setBuffer(s.meta[kind], r * state.meta_ints * 4, 3);

@@ -16,7 +16,7 @@ zig-out/native/bin/tensorfold-native serve "$HOME/models/gemma-4-31b" --port 888
   --drafter "$HOME/models/gemma-4-31b-dflash"
 ```
 
-Without `--drafter` the model decodes plain, at about 49 tokens a second for one stream at short context (mlx-lm 46)
+Without `--drafter` the model decodes plain, at about 51 tokens a second for one stream at short context (mlx-lm 46)
 and 40 at 32k. With z-lab's DFlash drafter
 a stream decodes at 150-190 tokens a second (6-7 accepted tokens a round on chat and code, 10 on copying replies,
 2 on open-ended prose), with the same tokens.
@@ -38,10 +38,12 @@ handful of outputs a linear move by one bf16 step (5 of 43,008 on gate_up, 99 of
 
 A stream keeps a ring of window + 512 slots for each sliding layer and a buffer for each global one; rolling back is
 moving the cache's length. A decode forward takes up to 16 rows of one stream and 128 of several, and every row keeps
-its bits. A one-row window runs seven dispatches a layer rather than ten: the previous layer's dense tail is the qkv
-projection's prologue, the attention tail the gate/up projection's with geglu as its epilogue (the stack's rows
-interleaved in 16-row blocks, so a lane holds a gate column and its up column), and the down projection sums its own
-input (`zig/kernels/metal/gemma4/fused.metal` on the lane core's `Fused` hook), the same bits as the kernels apart.
+its bits. A one-row window runs five or six dispatches a sliding layer rather than ten, and seven a global one: the
+previous layer's dense tail is the qkv projection's prologue, the attention tail the gate/up projection's with geglu as
+its epilogue (the stack's rows interleaved in 16-row blocks, so a lane holds a gate column and its up column), and the
+down projection sums its own input (`zig/kernels/metal/gemma4/fused.metal` on the lane core's `Fused` hook); a sliding
+layer's attention kernel preps its own query heads and writes the row's key and value, and with one key chunk writes
+the merged output itself. The same bits as the kernels apart.
 Prompts run in chunks of 512 rows on `core/affine_mm` and a tensor-unit attention kernel, at about 1,360
 tokens a second at 8k, 1,200 at 32k and 560 at 252k.
 
@@ -92,7 +94,7 @@ zig-out/bin/tf-gemma4-run M L NL 49 512 && python tools/zig/gemma4_gate.py check
   and four at once; thinking replies keep their reasoning apart, and tool calls parse.
 
 With the drafter, one stream decodes at 150-190 tokens a second (6.4, 6.4, 2.1 and 6.7 tokens a round on the four
-prompts; 10.2 and 7.8 on copying replies) and eight streams at about 210 together. Plain decode is 49 tokens a second
+prompts; 10.2 and 7.8 on copying replies) and eight streams at about 210 together. Plain decode is 51 tokens a second
 for one stream. The drafts match z-lab's own MLX drafter's acceptance. Shared rounds draft shallow on purpose: past 16
 rows the forward is bound by tensor-op compute at about 0.8 ms a row (40 ms at 32 rows, 71 at 64, 130 at 128, the
 same rate as the prompt path and mlx-lm's), so the depth rule, given those costs, finds deeper shared drafts do not
@@ -121,10 +123,10 @@ design, its per-group scale and bias epilogue and its row-sums pass took 344. So
 mlx-lm does while the decode path's lane kernels keep the codes exact: over 40 tokens their last-row logits part by up
 to 0.8.
 
-A plain token at short context is 20.3 ms on the M5 Ultra (mlx-lm 21.6), where it was 23.7: the 241 projections read
+A plain token at short context is 19.7 ms on the M5 Ultra (mlx-lm 21.6), where it was 23.7: the 241 projections read
 17.3 GB in about 18 ms at the decode splits, 20.3 at the reference's (the 168-tile o and down projections ran two
 waves of 256-thread groups at a split of 8 and one wave at 4; the gate/up stack and the head streamed 84-group chains
-at 1, eight times the simdgroups at 8), the attention's 120 dispatches take 0.9 ms and the glue's 0.7, which running
-as the projections' prologues shortens by 0.2: a prologue costs what the tail kernel cost, and only the dispatch gap
-goes. `tf-gemma4-bench` prints the stages (`GEMMA_DSTAGES`), each shape plain and fused (`GEMMA_FUSED`) and the glue
-kernels alone (`GEMMA_GLUE`).
+at 1, eight times the simdgroups at 8); the attention's 120 dispatches took 0.9 ms and the glue's 0.7, which running
+as the projections' prologues shortens by 0.2 (a prologue costs what the tail kernel cost, and only the dispatch gap
+goes) and the attention's prep and merge folded into its kernel by 0.6. `tf-gemma4-bench` prints the stages
+(`GEMMA_DSTAGES`), each shape plain and fused (`GEMMA_FUSED`) and the glue kernels alone (`GEMMA_GLUE`).

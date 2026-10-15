@@ -241,6 +241,8 @@ fn attentionCheck(c: *Ctx, kd: *const g4.kernels.Kind, prefix: []const u8, rows:
             for (s.bs[0..8], 0..) |bb, i| e.setBuffer(bb, 0, i);
             e.setValue(s.cap, 8);
             for (s.bs[8..11], 9..) |bb, i| e.setBuffer(bb, 0, i);
+            for (12..23) |i| e.setBuffer(s.bs[0], 0, i); // the prep's and the direct output's buffers, unread
+            e.setValue([2]i32{ 0, 0 }, 17);
             e.dispatchGroups(.{ .width = s.chunks, .height = s.nk, .depth = s.rows }, .{ .width = 32 * s.kd.heads_per_kv * s.kd.split });
             e.barrier();
             e.setPipeline(s.kd.merge);

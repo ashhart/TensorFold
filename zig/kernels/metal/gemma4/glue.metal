@@ -66,30 +66,20 @@ kernel void gemma_rms_looped(const device bfloat* x [[buffer(0)]], const device 
   gemma_row_sums(out + gid * size_t(D), D, XS, xst, int(gid), lid, lsize);
 }
 
-// gilby's _EMIT: a head's raw values normed (q, k weighted; v unweighted), q and k roped at the row's position.
-inline void gemma_emit(int kind, int head, int r, int R, uint lane, thread float* xv, const device bfloat* QW,
-                       const device bfloat* KW, const device float* INVF, const device int* POS, float eps,
-                       device bfloat* Q, device bfloat* K, device bfloat* V, device bfloat* KC, device bfloat* VC,
-                       int3 cm) {
-  // cm: the cache's ring (0: linear) and slots; with slots, keys and values also land at the row's cache slot
-  const size_t at = cm.y ? (size_t(head) * cm.y + (cm.x ? POS[r] % cm.x : POS[r])) * DH : 0;
+// gilby's _EMIT's arithmetic: a head's raw values xv (lane + 32 i) normed (v unweighted), q and k roped at pos, in y.
+inline void gemma_norm_rope(int kind, uint lane, thread const float* xv, const device bfloat* QW, const device bfloat* KW,
+                            const device float* INVF, float pos, float eps, thread float* y) {
   constexpr int PER = DH / 32;
   float ss = 0.0f;
   for (int i = 0; i < PER; i++) ss = fma(xv[i], xv[i], ss);
   ss = simd_sum(ss);
   const float inv = metal::precise::rsqrt(ss / float(DH) + eps);
   if (kind == 2) {
-    for (int i = 0; i < PER; i++) {
-      const bfloat v = bfloat(xv[i] * inv);
-      V[(head * R + r) * DH + int(lane) + 32 * i] = v;
-      if (cm.y) VC[at + int(lane) + 32 * i] = v;
-    }
+    for (int i = 0; i < PER; i++) y[i] = float(bfloat(xv[i] * inv));
     return;
   }
   const device bfloat* w = kind == 0 ? QW : KW;
-  float y[PER];
   for (int i = 0; i < PER; i++) y[i] = float(bfloat(float(w[int(lane) + 32 * i]) * float(bfloat(xv[i] * inv))));
-  const float pos = float(POS[r]);
   for (int i = 0; i < PER / 2; i++) {
     const float theta = pos * INVF[int(lane) + 32 * i];
     const float c = metal::fast::cos(theta), s = metal::fast::sin(theta);
@@ -97,13 +87,36 @@ inline void gemma_emit(int kind, int head, int r, int R, uint lane, thread float
     y[i] = x1 * c - x2 * s;
     y[i + PER / 2] = x1 * s + x2 * c;
   }
-  if (kind == 0)
+}
+
+// The stacked q|k|v row's head `slot` as raw values in a simdgroup's lanes; VK: v is k's raw values.
+inline void gemma_head_raw(const device bfloat* QKV, int r, int slot, uint lane, thread float* xv) {
+  constexpr int PER = DH / 32;
+  const int kind = slot < NQ ? 0 : (slot < NQ + NK ? 1 : 2);
+  const int head = kind == 0 ? slot : (kind == 1 ? slot - NQ : slot - NQ - NK);
+  const int src = kind == 2 ? (VK ? NQ * DH : (NQ + NK) * DH) + head * DH : slot * DH;
+  for (int i = 0; i < PER; i++) xv[i] = float(QKV[r * W + src + int(lane) + 32 * i]);
+}
+
+// gilby's _EMIT: the head's values to Q, K or V, and with cache slots (cm: ring or 0, slots) k and v to the row's slot.
+inline void gemma_emit(int kind, int head, int r, int R, uint lane, thread float* xv, const device bfloat* QW,
+                       const device bfloat* KW, const device float* INVF, const device int* POS, float eps,
+                       device bfloat* Q, device bfloat* K, device bfloat* V, device bfloat* KC, device bfloat* VC,
+                       int3 cm) {
+  const size_t at = cm.y ? (size_t(head) * cm.y + (cm.x ? POS[r] % cm.x : POS[r])) * DH : 0;
+  constexpr int PER = DH / 32;
+  float y[PER];
+  gemma_norm_rope(kind, lane, xv, QW, KW, INVF, float(POS[r]), eps, y);
+  if (kind == 0) {
     for (int i = 0; i < PER; i++) Q[(r * NQ + head) * DH + int(lane) + 32 * i] = bfloat(y[i]);
-  else
-    for (int i = 0; i < PER; i++) {
-      K[(head * R + r) * DH + int(lane) + 32 * i] = bfloat(y[i]);
-      if (cm.y) KC[at + int(lane) + 32 * i] = bfloat(y[i]);
-    }
+    return;
+  }
+  device bfloat* out = (kind == 1 ? K : V) + (head * R + r) * DH;
+  device bfloat* cache = kind == 1 ? KC : VC;
+  for (int i = 0; i < PER; i++) {
+    out[int(lane) + 32 * i] = bfloat(y[i]);
+    if (cm.y) cache[at + int(lane) + 32 * i] = bfloat(y[i]);
+  }
 }
 
 // gilby's qkv_prep: a simdgroup per (head slot, row) of the stacked q|k|v rows; VK: v is k's raw values.
@@ -118,9 +131,8 @@ kernel void gemma_qkv_prep(const device bfloat* QKV [[buffer(0)]], const device 
   constexpr int PER = DH / 32;
   const int kind = slot < NQ ? 0 : (slot < NQ + NK ? 1 : 2);
   const int head = kind == 0 ? slot : (kind == 1 ? slot - NQ : slot - NQ - NK);
-  const int src = kind == 2 ? (VK ? NQ * DH : (NQ + NK) * DH) + head * DH : slot * DH;
   float xv[PER];
-  for (int i = 0; i < PER; i++) xv[i] = float(QKV[r * W + src + int(lane) + 32 * i]);
+  gemma_head_raw(QKV, r, slot, lane, xv);
   gemma_emit(kind, head, r, R, lane, xv, QW, KW, INVF, POS, eps, Q, K, V, KC, VC, cm);
 }
 
@@ -131,6 +143,12 @@ kernel void gemma_attention_partial(const device bfloat* Q [[buffer(0)]], const 
                                     const device int* LO [[buffer(6)]], const device int* META [[buffer(7)]],
                                     constant int& CAP [[buffer(8)]], device float* PM [[buffer(9)]],
                                     device float* PL [[buffer(10)]], device float* PO [[buffer(11)]],
+                                    const device bfloat* QKV [[buffer(12)]], const device bfloat* QW [[buffer(13)]],
+                                    const device bfloat* KW [[buffer(14)]], const device float* INVF [[buffer(15)]],
+                                    constant float& eps [[buffer(16)]], constant int2& FUSE [[buffer(17)]],
+                                    device bfloat* OUT [[buffer(18)]], device float* XS [[buffer(19)]],
+                                    constant int& xst [[buffer(20)]], device bfloat* KC [[buffer(21)]],
+                                    device bfloat* VC [[buffer(22)]],
                                     uint lane [[thread_index_in_simdgroup]], uint sgu [[simdgroup_index_in_threadgroup]],
                                     uint3 tg [[threadgroup_position_in_grid]]) {
   const int sgi = int(sgu);
@@ -144,8 +162,27 @@ kernel void gemma_attention_partial(const device bfloat* Q [[buffer(0)]], const 
   constexpr int DPL = DH / 32;
   const int k0 = metal::max(c * CK, LO[r]), k1 = metal::min((c + 1) * CK, POS[r] + 1);
   float q[DPL], o[DPL];
-  const device bfloat* qp = Q + (size_t(r) * (HK * G) + qh) * DH + lane * DPL;
-  for (int i = 0; i < DPL; i++) { q[i] = float(qp[i]) * SCALE; o[i] = 0.0f; }
+  threadgroup bfloat qs[G][DH];
+  // FUSE.x (one row, every key cached): gemma_qkv_prep's work here; the last chunk's group writes k and v to the cache
+  if (FUSE.x) { // simdgroups 0..G-1 prep the query heads; G and G + 1 the key and value, into the cache at the row's slot
+    float xv[DPL], y[DPL];
+    if (sgi < G) {
+      gemma_head_raw(QKV, r, h * G + sgi, lane, xv);
+      gemma_norm_rope(0, lane, xv, QW, KW, INVF, float(POS[r]), eps, y);
+      for (int i = 0; i < DPL; i++) qs[sgi][int(lane) + 32 * i] = bfloat(y[i]);
+    } else if (sgi < G + 2 && int(tg.x) + 1 == NCH) {
+      const int kind = sgi - G + 1;
+      gemma_head_raw(QKV, r, NQ + (kind - 1) * NK + h, lane, xv);
+      gemma_norm_rope(kind, lane, xv, QW, KW, INVF, float(POS[r]), eps, y);
+      device bfloat* cache = (kind == 1 ? KC : VC) + (size_t(h) * CAP + (RING ? POS[r] % RING : POS[r])) * DH;
+      for (int i = 0; i < DPL; i++) cache[int(lane) + 32 * i] = bfloat(y[i]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    for (int i = 0; i < DPL; i++) { q[i] = float(qs[g][lane * DPL + i]) * SCALE; o[i] = 0.0f; }
+  } else {
+    const device bfloat* qp = Q + (size_t(r) * (HK * G) + qh) * DH + lane * DPL;
+    for (int i = 0; i < DPL; i++) { q[i] = float(qp[i]) * SCALE; o[i] = 0.0f; }
+  }
   float m = -INFINITY, l = 0.0f;
   const device bfloat* kb = K + size_t(h) * CAP * DH + lane * DPL;
   const device bfloat* vb = V + size_t(h) * CAP * DH + lane * DPL;
@@ -184,6 +221,12 @@ kernel void gemma_attention_partial(const device bfloat* Q [[buffer(0)]], const 
   }
   const size_t slot = (size_t(qh) * R + r) * NCH + (c - C0);
   if (S == 1) {
+    if (FUSE.y) {
+      for (int i = 0; i < DPL; i++) OUT[(size_t(r) * NQ + qh) * DH + lane * DPL + i] = bfloat(o[i] / l);
+      simdgroup_barrier(mem_flags::mem_device);
+      gemma_row_sums(OUT + (size_t(r) * NQ + qh) * DH, DH, XS + qh * (DH / 64) * xst, xst, r, lane, 32);
+      return;
+    }
     if (lane == 0) { PM[slot] = m; PL[slot] = l; }
     for (int i = 0; i < DPL; i++) PO[slot * DH + lane * DPL + i] = o[i];
     return;
@@ -202,6 +245,12 @@ kernel void gemma_attention_partial(const device bfloat* Q [[buffer(0)]], const 
     const float e = sl[g * S + t] > 0.0f ? metal::exp(sm[g * S + t] - top) : 0.0f;
     lsum = fma(sl[g * S + t], e, lsum);
     for (int i = 0; i < DPL; i++) acc[i] = fma(so[g * S + t][lane * DPL + i], e, acc[i]);
+  }
+  if (FUSE.y) { // FUSE.y (one chunk): gemma_attention_merge's output and sums, exp(top - top) being 1, to OUT and XS
+    for (int i = 0; i < DPL; i++) OUT[(size_t(r) * NQ + qh) * DH + lane * DPL + i] = bfloat(acc[i] / lsum);
+    simdgroup_barrier(mem_flags::mem_device);
+    gemma_row_sums(OUT + (size_t(r) * NQ + qh) * DH, DH, XS + qh * (DH / 64) * xst, xst, r, lane, 32);
+    return;
   }
   if (lane == 0) { PM[slot] = top; PL[slot] = lsum; }
   for (int i = 0; i < DPL; i++) PO[slot * DH + lane * DPL + i] = acc[i];
