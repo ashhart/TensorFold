@@ -27,6 +27,8 @@ pub const Kernels = struct {
     pointwise_fn: module.Function,
     bias_fn: module.Function,
     unshuffle_fn: module.Function,
+    cast_fn: module.Function,
+    position_fn: module.Function,
 
     pub fn load(d: *const Driver) !Kernels {
         if (!kernels.available) return error.BuiltWithoutKernels;
@@ -38,6 +40,8 @@ pub const Kernels = struct {
             .pointwise_fn = try mod.function("tf_vit_pointwise"),
             .bias_fn = try mod.function("tf_vit_bias"),
             .unshuffle_fn = try mod.function("tf_vit_unshuffle"),
+            .cast_fn = try mod.function("tf_vit_cast"),
+            .position_fn = try mod.function("tf_vit_position_add"),
         };
     }
 
@@ -81,6 +85,23 @@ pub const Kernels = struct {
         a.add(int(w));
         a.add(int(c));
         try go(k.unshuffle_fn, s, h * w / 4, 1, &a);
+    }
+
+    /// y [count] = bf16(x), x f32, rounded to nearest even.
+    pub fn cast(k: *const Kernels, s: Stream, x: u64, y: u64, count: usize) !void {
+        var a: Args = .{};
+        a.add(x);
+        a.add(y);
+        a.add(@as(i64, @intCast(count)));
+        try go(k.cast_fn, s, blocks(count, threads), 1, &a);
+    }
+
+    /// o [h * w, c] = bf16(x + bf16(the table [side * side, c] resized to the longer side's square, rows y < h, x < w)).
+    pub fn positionAdd(k: *const Kernels, s: Stream, x: u64, table: u64, o: u64, h: usize, w: usize, side: usize, c: usize) !void {
+        var a: Args = .{};
+        for ([_]u64{ x, table, o }) |p| a.add(p);
+        for ([_]usize{ w, @max(h, w), side, c }) |n| a.add(int(n));
+        try go(k.position_fn, s, h * w, 1, &a);
     }
 };
 

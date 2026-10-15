@@ -103,3 +103,47 @@ extern "C" __global__ void __launch_bounds__(NT) tf_vit_unshuffle(const __nv_bfl
         Y[static_cast<int64_t>(o) * 4 * C + e] = X[src * C + e % C];
     }
 }
+
+// Element i: bf16(x), round to nearest even (a picture's float patches for the tower's first Linear).
+extern "C" __global__ void __launch_bounds__(NT) tf_vit_cast(const float* __restrict__ X, __nv_bfloat16* __restrict__ Y, int64_t count) {
+    const int64_t at = static_cast<int64_t>(blockIdx.x) * NT + threadIdx.x;
+    if (at < count) Y[at] = __float2bfloat16_rn(X[at]);
+}
+
+namespace {
+
+// An output index's two bilinear sources over `in` samples resized to `out` (half-pixel centres, clamped) and weights.
+struct Tap {
+    int lo, hi;
+    float l0, l1;
+};
+
+__device__ __forceinline__ Tap tap(int in, int out, int i) {
+    if (in == out) return {i, i, 1.0f, 0.0f};
+    const float scale = __fdiv_rn(static_cast<float>(in), static_cast<float>(out));
+    const float src = fmaxf(__fsub_rn(__fmul_rn(scale, __fadd_rn(static_cast<float>(i), 0.5f)), 0.5f), 0.0f);
+    const int lo = min(static_cast<int>(floorf(src)), in - 1);
+    const float l1 = fminf(fmaxf(__fsub_rn(src, static_cast<float>(lo)), 0.0f), 1.0f);
+    return {lo, lo + (lo < in - 1 ? 1 : 0), __fsub_rn(1.0f, l1), l1};
+}
+
+}  // namespace
+
+// Block a patch (y, x) of a grid gw wide: o = bf16(x + bf16(the side^2 table resized to m^2, at (y, x))), RADIO's CPE.
+extern "C" __global__ void __launch_bounds__(NT) tf_vit_position_add(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ T,
+                                                                       __nv_bfloat16* __restrict__ O, int gw, int m, int side, int C) {
+    const int r = blockIdx.x, y = r / gw, x = r % gw;
+    const Tap ty = tap(side, m, y), tx = tap(side, m, x);
+    const float w00 = __fmul_rn(ty.l0, tx.l0), w01 = __fmul_rn(ty.l0, tx.l1);
+    const float w10 = __fmul_rn(ty.l1, tx.l0), w11 = __fmul_rn(ty.l1, tx.l1);
+    const __nv_bfloat16* t00 = T + (static_cast<int64_t>(ty.lo) * side + tx.lo) * C;
+    const __nv_bfloat16* t01 = T + (static_cast<int64_t>(ty.lo) * side + tx.hi) * C;
+    const __nv_bfloat16* t10 = T + (static_cast<int64_t>(ty.hi) * side + tx.lo) * C;
+    const __nv_bfloat16* t11 = T + (static_cast<int64_t>(ty.hi) * side + tx.hi) * C;
+    const int64_t at = static_cast<int64_t>(r) * C;
+    for (int c = threadIdx.x; c < C; c += NT) {
+        const float far = __fadd_rn(__fmul_rn(bf(t10[c]), w10), __fmul_rn(bf(t11[c]), w11));
+        const float p = __fadd_rn(__fmul_rn(bf(t00[c]), w00), __fadd_rn(__fmul_rn(bf(t01[c]), w01), far));
+        O[at + c] = __float2bfloat16_rn(__fadd_rn(rbf(p), bf(X[at + c])));
+    }
+}

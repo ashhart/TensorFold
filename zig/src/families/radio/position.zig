@@ -1,4 +1,4 @@
-//! RADIO's position rows: the [side, side, c] table bilinearly resized to a square of the grid's longer side, cropped.
+//! RADIO's position rows on the host: tf_vit_position_add's reference (the table resized to the longer side, cropped).
 const std = @import("std");
 
 /// An output index's two source indices and weights (bilinear, half-pixel centres, clamped at the edges), float32.

@@ -4,7 +4,6 @@ const cuda = @import("cuda");
 const Image = @import("lanes").stream.Image;
 const Config = @import("config.zig").Config;
 const Weights = @import("weights.zig").Weights;
-const position = @import("position.zig");
 const rows_ = @import("rows.zig");
 const Allocator = std.mem.Allocator;
 const vit = cuda.vit;
@@ -18,13 +17,10 @@ pub const Tower = struct {
     g: vit.Gemms,
     norms: cuda.norms.Norms,
     scratch: cuda.DeviceBuffer,
-    staging: cuda.HostBuffer, // pinned: an image's bf16 patches, then its position rows
-    copied: cuda.Event, // recorded after the staging's copies: refilling it waits for them, not for the tower
-    position: []f32, // an image's position rows before rounding
     b: Buffers,
     bytes: u64, // on the device: weights, scratch and the Linears' workspace
 
-    const Buffers = struct { px: u64, pos: u64, h: u64, x: u64, wide: u64, a: u64, acc: u64 };
+    const Buffers = struct { px: u64, h: u64, x: u64, wide: u64, a: u64, acc: u64 };
 
     /// The tower from `dir` (its weights as stored) and scratch for the largest image the processor makes.
     pub fn init(gpa: Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, c: Config) !Tower {
@@ -43,8 +39,8 @@ pub const Tower = struct {
         const rows = n + c.prefix;
         const hd = c.hidden;
         const wide = @max(3 * hd, c.ffn, c.projector_hidden / (Config.shuffle * Config.shuffle));
-        // bf16: patches, position rows, the residual, normed and Linear outputs, wide outputs, attention; f32 products
-        const sizes = [_]usize{ 2 * n * c.patchWidth(), 2 * n * hd, 2 * rows * hd, 2 * rows * hd, 2 * rows * wide, 2 * rows * hd, 4 * rows * wide };
+        // bf16: patches, the residual, normed and Linear outputs, wide outputs, attention; f32: products, the float patches
+        const sizes = [_]usize{ 2 * n * c.patchWidth(), 2 * rows * hd, 2 * rows * hd, 2 * rows * wide, 2 * rows * hd, 4 * rows * @max(wide, c.patchWidth()) };
         var total: usize = 0;
         for (sizes) |sz| total += std.mem.alignForward(usize, sz, 256);
         var scratch = try cuda.DeviceBuffer.alloc(d, total);
@@ -55,10 +51,6 @@ pub const Tower = struct {
             p.* = try scratch.at(off);
             off += std.mem.alignForward(usize, sz, 256);
         }
-        var staging = try cuda.HostBuffer.alloc(d, sizes[0] + sizes[1]);
-        errdefer staging.free();
-        const pos = try gpa.alloc(f32, n * hd);
-        errdefer gpa.free(pos);
         return .{
             .gpa = gpa,
             .c = c,
@@ -68,18 +60,12 @@ pub const Tower = struct {
             .g = g,
             .norms = norms,
             .scratch = scratch,
-            .staging = staging,
-            .copied = try cuda.Event.init(d, false),
-            .position = pos,
-            .b = .{ .px = ptrs[0], .pos = ptrs[1], .h = ptrs[2], .x = ptrs[3], .wide = ptrs[4], .a = ptrs[5], .acc = ptrs[6] },
+            .b = .{ .px = ptrs[0], .h = ptrs[1], .x = ptrs[2], .wide = ptrs[3], .a = ptrs[4], .acc = ptrs[5] },
             .bytes = w.bytes + total + g.workspace.len,
         };
     }
 
     pub fn deinit(t: *Tower) void {
-        t.copied.deinit();
-        t.gpa.free(t.position);
-        t.staging.free();
         t.scratch.free();
         t.norms.unload();
         t.g.deinit();
@@ -116,24 +102,15 @@ pub const Tower = struct {
         const hd = c.hidden;
         const pw = c.patchWidth();
         if (n == 0 or n > c.max_patches or gh % 2 != 0 or gw % 2 != 0 or n / 4 != img.tokens or img.pixels.len != n * pw) return error.ImageShape;
-        try t.copied.synchronize(); // the staging may still feed the last image's copies, never its blocks' work
-        const host = t.staging.slice(u16);
-        const px = host[0 .. n * pw];
-        for (px, img.pixels) |*o, p| o.* = vit.bf16(p);
-        const pos = host[c.max_patches * pw ..][0 .. n * hd];
-        const exact = t.position[0 .. n * hd];
-        position.rows(w.table, c.side, hd, gh, gw, exact);
-        for (pos, exact) |*o, p| o.* = vit.bf16(p);
-        try t.scratch.uploadAsync(b.px - t.scratch.ptr, std.mem.sliceAsBytes(px), s.handle);
-        errdefer s.synchronize() catch {}; // unrecorded copies may still read the staging the next call refills
-        try t.scratch.uploadAsync(b.pos - t.scratch.ptr, std.mem.sliceAsBytes(pos), s.handle);
-        try t.copied.record(s);
+        // the float patches land in the f32 products' room (the patch Linear has no bias), cast to bf16 on the GPU
+        try t.scratch.uploadAsync(b.acc - t.scratch.ptr, std.mem.sliceAsBytes(img.pixels), s.handle);
+        try k.cast(s, b.acc, b.px, n * pw);
         // the cls and register rows, then each patch's projection plus its position row
         const rows = n + c.prefix;
         const feats = b.h + 2 * c.prefix * hd;
         try t.scratch.copyFrom(b.h - t.scratch.ptr, w.cls, 2 * c.prefix * hd, s.handle);
         try g.run(s, b.px, w.patch, b.x, n, hd, pw, .bf16);
-        try k.pointwise(s, b.x, b.pos, feats, n * hd, .none);
+        try k.positionAdd(s, b.x, w.table, feats, gh, gw, c.side, hd);
         const dim = c.dim();
         const scale: f32 = @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(dim))));
         for (w.layers) |l| {

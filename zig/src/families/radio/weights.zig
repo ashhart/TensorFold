@@ -1,4 +1,4 @@
-//! The RADIO tower's and projector's tensors as stored (bf16) in one device allocation; the position table on the host.
+//! The RADIO tower's and projector's tensors as stored (bf16) in one device allocation.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -28,6 +28,7 @@ pub const Layer = struct {
 pub const Weights = struct {
     memory: cuda.DeviceBuffer,
     patch: u64, // [hidden, 3 * patch * patch], no bias
+    table: u64, // the position table [side * side, hidden]
     cls: u64, // [prefix, hidden]: cls tokens, then registers
     final: u64, // vision_final_layernorm (unset without an MTP layer: Config.final_norm)
     final_bias: u64,
@@ -35,7 +36,6 @@ pub const Weights = struct {
     lin1: u64, // [projector_hidden, 4 hidden]
     lin2: u64, // [text_hidden, projector_hidden]
     layers: []Layer,
-    table: []f32, // the position table [side, side, hidden]
     bytes: u64,
 
     /// `dir`'s image tensors on the device (the shards the index names for them), checked against `c`.
@@ -58,13 +58,7 @@ pub const Weights = struct {
         var memory = try cuda.DeviceBuffer.alloc(d, p.bytes);
         errdefer memory.free();
         for (p.pieces.items) |piece| try upload(gpa, memory, piece);
-        const table = try gpa.alloc(f32, c.side * c.side * c.hidden);
-        errdefer gpa.free(table);
-        const pos = try p.get(tower ++ "patch_generator.pos_embed", &.{ 1, c.side * c.side, c.hidden });
-        for (table, std.mem.bytesAsSlice(u16, pos.bytes)) |*t, v| t.* = @bitCast(@as(u32, v) << 16);
-        for (table) |t| if (!std.math.isFinite(t)) return error.NonFinitePositions; // the resize would carry it
         w.memory = memory;
-        w.table = table;
         w.bytes = p.bytes;
         shift(&w, memory.ptr);
         for (w.layers) |*l| shift(l, memory.ptr);
@@ -74,7 +68,6 @@ pub const Weights = struct {
     pub fn deinit(w: *Weights, gpa: Allocator) void {
         w.memory.free();
         gpa.free(w.layers);
-        gpa.free(w.table);
         w.* = undefined;
     }
 };
@@ -113,6 +106,7 @@ const Planner = struct {
         const h = c.hidden;
         var buf: [160]u8 = undefined;
         w.patch = try p.take(tower ++ "patch_generator.embedder.weight", &.{ h, c.patchWidth() }, false);
+        w.table = try p.take(tower ++ "patch_generator.pos_embed", &.{ 1, c.side * c.side, h }, false);
         w.cls = try p.take(tower ++ "patch_generator.cls_token.token", &.{ c.prefix, h }, false);
         for (w.layers, 0..) |*l, i| {
             const n = struct {

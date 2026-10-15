@@ -118,7 +118,7 @@ pub fn run(gpu: Gpu, ref: []const u8, model: []const u8) !void {
         try tower.picture(s, img, rows.buf.ptr);
         const again = try back(gpu, a, s, rows.buf.ptr, tokens * c.text_hidden);
         try check.sameBytes("radio rows run twice", std.mem.sliceAsBytes(again), std.mem.sliceAsBytes(got));
-        std.debug.print("RESULT radio {s} {d}x{d} patches, {d} tokens: tower worst {d:.4} mean {d:.4} cos {d:.6}; rows worst {d:.4} mean {d:.4} cos {d:.6}; torch bf16 rows worst {d:.4} mean {d:.4}; {d:.3} s tower, {d:.3} s in all\n", .{ name, gh, gw, tokens, e_tower.worst, e_tower.mean, e_tower.cos, e_rows.worst, e_rows.mean, e_rows.cos, e_torch.worst, e_torch.mean, tower_s, all_s });
+        std.debug.print("RESULT radio {s} {d}x{d} patches, {d} tokens: tower worst {d:.4} mean {d:.4} cos {d:.6}; rows worst {d:.4} mean {d:.4} cos {d:.6}; torch bf16 rows worst {d:.4} mean {d:.4}; {d:.3} s tower, {d:.3} s in all; rows hash {x:0>16}\n", .{ name, gh, gw, tokens, e_tower.worst, e_tower.mean, e_tower.cos, e_rows.worst, e_rows.mean, e_rows.cos, e_torch.worst, e_torch.mean, tower_s, all_s, std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(got)) });
         try check.expect(e_rows.mean <= 2 * e_torch.mean and e_rows.worst <= 2 * e_torch.worst, "radio {s}: rows' error past twice torch's own bf16 error", .{name});
         if (first == null) {
             const raw = try a.alloc(u16, tokens * c.text_hidden);
@@ -203,6 +203,64 @@ pub fn processor(gpu: Gpu, ref: []const u8, pics: []const u8, model: []const u8)
     std.debug.print("RESULT radio-processor grids: {d} of {d} differ from the processor's\n", .{ grid_bad, sizes.array.items.len });
     try check.expect(bad == 0 and grid_bad == 0, "radio-processor: {d} pictures or resizes and {d} grids differ", .{ bad, grid_bad });
     check.pass("radio-processor: decoded RGB, pixels, resizes and grids equal the reference bit for bit", .{});
+}
+
+/// `radio-kernels`: tf_vit_cast and tf_vit_position_add against their host references, bit for bit (synthetic rows).
+pub fn kernels(gpu: Gpu) !void {
+    var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var prng = std.Random.DefaultPrng.init(0x7ad1);
+    const rng = prng.random();
+    var k = try cuda.vit.Kernels.load(gpu.d);
+    defer k.unload();
+    var s = try cuda.Stream.init(gpu.d, true);
+    defer s.deinit();
+    // casts: spread values, and halfway cases that round to even both ways
+    const count = 1 << 20;
+    const xs = try a.alloc(f32, count);
+    for (xs, 0..) |*x, i| x.* = if (i % 7 == 0) @bitCast(@as(u32, 0x3f808000) + @as(u32, @intCast(i % 3)) * 0x10000) else rng.floatNorm(f32) * 3;
+    var dx = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(xs));
+    defer dx.free();
+    var dy = try cuda.DeviceBuffer.alloc(gpu.d, 2 * count);
+    defer dy.free();
+    try k.cast(s, dx.ptr, dy.ptr, count);
+    try s.synchronize();
+    const got = try a.alloc(u16, count);
+    try dy.download(0, std.mem.sliceAsBytes(got));
+    const want = try a.alloc(u16, count);
+    for (want, xs) |*w, x| w.* = cuda.vit.bf16(x);
+    try check.sameBytes("tf_vit_cast", std.mem.sliceAsBytes(got), std.mem.sliceAsBytes(want));
+    // position rows: RADIO's table shape, grids under, at and past the table's side
+    const side = 128;
+    const c = 1280;
+    const table = try a.alloc(u16, side * side * c);
+    for (table) |*t| t.* = cuda.vit.bf16(rng.floatNorm(f32) * 0.05);
+    const wide = try a.alloc(f32, table.len);
+    for (wide, table) |*o, t| o.* = @bitCast(@as(u32, t) << 16);
+    var dt = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(table));
+    defer dt.free();
+    for ([_][2]usize{ .{ 30, 40 }, .{ 46, 136 }, .{ 128, 64 }, .{ 2, 2 }, .{ 68, 182 }, .{ 76, 172 }, .{ 128, 128 } }) |grid| {
+        const gh, const gw = grid;
+        const n = gh * gw;
+        const x = try a.alloc(u16, n * c);
+        for (x) |*v| v.* = cuda.vit.bf16(rng.floatNorm(f32));
+        var dxr = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(x));
+        defer dxr.free();
+        var dout = try cuda.DeviceBuffer.alloc(gpu.d, 2 * n * c);
+        defer dout.free();
+        try k.positionAdd(s, dxr.ptr, dt.ptr, dout.ptr, gh, gw, side, c);
+        try s.synchronize();
+        const out = try a.alloc(u16, n * c);
+        try dout.download(0, std.mem.sliceAsBytes(out));
+        const pos = try a.alloc(f32, n * c);
+        radio.position.rows(wide, side, c, gh, gw, pos);
+        const ref = try a.alloc(u16, n * c);
+        for (ref, pos, x) |*r, p, v| r.* = cuda.vit.bf16(@as(f32, @bitCast(@as(u32, cuda.vit.bf16(p)) << 16)) + @as(f32, @bitCast(@as(u32, v) << 16)));
+        var name: [64]u8 = undefined;
+        try check.sameBytes(try std.fmt.bufPrint(&name, "tf_vit_position_add {d}x{d}", .{ gh, gw }), std.mem.sliceAsBytes(out), std.mem.sliceAsBytes(ref));
+    }
+    check.pass("radio-kernels: tf_vit_cast and tf_vit_position_add equal their host references bit for bit", .{});
 }
 
 /// How many values differ, and by how much at most.
