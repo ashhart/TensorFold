@@ -37,6 +37,7 @@ fn state(p: anytype) u64 {
     h.update(std.mem.sliceAsBytes(p.up.items));
     h.update(std.mem.sliceAsBytes(p.down.items));
     h.update(std.mem.sliceAsBytes(p.used.items));
+    if (@TypeOf(p.*).swiglu) h.update(std.mem.sliceAsBytes(p.gate.items));
     return h.final();
 }
 

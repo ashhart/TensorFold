@@ -10,8 +10,8 @@ const qwen27 = @import("qwen27_served.zig");
 const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
 const glm_dsa = @import("glm_dsa_host.zig");
-const nemotron_slide = @import("nemotron_slide.zig");
-const Slide = nemotron_slide.Adapter(nemotron.slide);
+const slide_adapter = @import("slide_adapter.zig");
+const Slide = slide_adapter.Adapter(nemotron.slide);
 const cache_fit = @import("cache_fit.zig");
 const nemo_disk = @import("nemotron_disk.zig");
 
@@ -140,7 +140,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
         return null;
     }
-    if (o.slide) if (try nemotron_slide.refusal(tf.shard_edit, a, io, o.dir, "`cp -cRL` (an APFS clone that follows links)")) |why| {
+    if (o.slide) if (try slide_adapter.refusal(tf.shard_edit, a, io, o.dir, "`cp -cRL` (an APFS clone that follows links)")) |why| {
         problem.* = why;
         return null;
     };

@@ -10,7 +10,7 @@ const Allocator = std.mem.Allocator;
 const budget = @import("cuda_memory.zig");
 const lane_backend = @import("cuda_bound.zig");
 const snaps = @import("cuda_snaps.zig");
-const nemotron_slide = @import("nemotron_slide.zig");
+const slide_adapter = @import("slide_adapter.zig");
 const cuda_disk = @import("cuda_disk.zig");
 const vision_offer = @import("cuda_vision_offer.zig");
 
@@ -241,11 +241,13 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         return null;
     };
     if (o.slide) {
+        // a family learns once its module declares `slide` (its learner), `learnModel` and `linked`
         if (!@hasDecl(F, "slide")) {
             problem.* = try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on CUDA yet", .{o.model_type});
             return null;
         }
-        if (try nemotron_slide.refusal(F, a, io, o.dir, "`cp -RL` (a copy that follows links)")) |why| {
+        comptime if (!@hasDecl(F, "learnModel") or !@hasDecl(F, "linked")) @compileError(F.model_type ++ " declares slide without learnModel and linked");
+        if (try slide_adapter.refusal(F, a, io, o.dir, "`cp -RL` (a copy that follows links)")) |why| {
             problem.* = why;
             return null;
         }
@@ -416,7 +418,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         gpa.destroy(store);
     };
     if (@hasDecl(F, "slide")) if (loaded.learns != null) {
-        const Slide = nemotron_slide.Adapter(F.slide);
+        const Slide = slide_adapter.Adapter(F.slide);
         h.dir = try gpa.dupe(u8, o.dir);
         const s = try gpa.create(Slide);
         s.* = Slide.init(gpa, io, F.learnModel(loaded.ctx, h.dir));

@@ -1,6 +1,6 @@
 //! Nemotron's Sliding Weights learner on Metal: learner.zig's lessons over the Metal trainer, its weights and shards.
 const std = @import("std");
-const lessons = @import("learner.zig");
+const lessons = @import("living").learner;
 const train = @import("train.zig");
 const backend = @import("backend.zig");
 const adapters = @import("adapters.zig");
@@ -9,6 +9,7 @@ const learn_shape = @import("learn_shape.zig");
 const weights = @import("weights.zig");
 const mtl = @import("metal");
 const ckpt = @import("../../core/checkpoint_metal.zig");
+const pocket_layout = @import("pocket_layout.zig");
 const shard_edit = @import("../../core/shard_edit.zig");
 
 const Living = living.Io(struct {
@@ -31,9 +32,15 @@ const Host = struct {
     pub const Trainer = train.Trainer;
     pub const max_rows = train.max_rows;
     pub const Ctx = *backend.Metal;
+    pub const family = pocket_layout.family;
 
     pub fn layers(b: Ctx) usize {
         return b.m.config.layers;
+    }
+
+    /// Where the pocket sits and learns: every MoE layer, all but the last learning.
+    pub fn layout(b: Ctx) @import("living").Layout {
+        return pocket_layout.layout(b.m.config);
     }
 
     pub fn trainer(gpa: std.mem.Allocator, _: std.Io, b: Ctx) !*Trainer {
@@ -101,11 +108,6 @@ const Host = struct {
     /// The pocket's neurons into the shards (widened the first time), `up` and `down` set to the 4-bit values; bytes.
     pub fn pocketSave(b: Ctx, gpa: std.mem.Allocator, io: std.Io, moe: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
         return PocketShards.write(gpa, io, b.m.dir, b.m.config, moe, neurons, up, down);
-    }
-
-    /// One layer's pocket, `up` and `down` [neurons, D], rounded in place to the 4-bit values a save writes.
-    pub fn pocketRound(b: Ctx, gpa: std.mem.Allocator, up: []f32, down: []f32) !void {
-        return PocketShards.round(gpa, b.m.config.hidden, up, down);
     }
 
     /// MoE layer l's shared-expert down projection codes as the checkpoint holds them live, for its row kernels.

@@ -1,4 +1,4 @@
-//! A measure, not a lesson: how far vectors fitted at one row of a few layers bring a fact's held-out answers back.
+//! A measure, not a lesson: how far vectors fitted at a few layers bring a fact back (Nemotron's Metal trainer only).
 const std = @import("std");
 const examples = @import("lesson_examples.zig");
 const lesson_route = @import("lesson_route.zig");

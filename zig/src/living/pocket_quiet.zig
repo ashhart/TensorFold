@@ -12,7 +12,8 @@ pub const refit_above: f32 = 0.5; // a refit is due where an earlier neuron fire
 
 /// Earlier neurons firing on this fact's rows refitted silent there and nowhere else; same-subject ones stay.
 pub fn quiet(p: anytype, t: anytype, host: anytype) !void {
-    const d = t.config().hidden;
+    const P = @TypeOf(p.*);
+    const d = p.hidden;
     const n = p.moe.items.len;
     const own = p.answered.len + p.prompts.len + p.held.len; // read examples below this are this fact's
     for (p.learned.items[0..p.learned_before]) |e| {
@@ -25,6 +26,7 @@ pub fn quiet(p: anytype, t: anytype, host: anytype) !void {
         if (most <= refit_above) continue; // weak there: left exactly as it is, this fact's outputs fitted with it
         try p.refits.append(p.gpa, .{ .slot = e.slot, .neuron = e.neuron });
         try p.refit_up.appendSlice(p.gpa, u);
+        if (P.swiglu) try p.refit_gate.appendSlice(p.gpa, p.neuron(p.gate.items, e.slot, e.neuron, d));
         var xs: std.ArrayList([]const u16) = .empty;
         defer xs.deinit(p.gpa);
         var kinds: std.ArrayList(Kind) = .empty;
@@ -54,15 +56,17 @@ pub fn quiet(p: anytype, t: anytype, host: anytype) !void {
                 else => l.kind,
             });
         }
-        const f = try fit(p.gpa, xs.items, kinds.items, d, u, true, fit_steps / 2, fixed);
+        const f = try fit(p.gpa, xs.items, kinds.items, d, u, true, fit_steps / 2, fixed, P.of.neuron.margin);
         if (f.fact_least < kept_least or @max(f.steady_most, f.other_most) > 0) {
             // a refit that forgets its fact or spreads is undone; this fact's outputs are fitted with it firing
             @memcpy(u, p.refit_up.items[p.refit_up.items.len - d ..]);
             p.refits.shrinkRetainingCapacity(p.refits.items.len - 1);
             p.refit_up.shrinkRetainingCapacity(p.refit_up.items.len - d);
+            if (P.swiglu) p.refit_gate.shrinkRetainingCapacity(p.refit_gate.items.len - d);
             std.log.info("slide pocket: layer {d}, neuron {d}, an earlier fact's, fires on this fact's questions (up to {d:.2}); fitted again its own would read at least {d:.2} and other rows at most {d:.2}, so it stays as it was", .{ p.moe.items[e.slot], e.neuron, most, f.fact_least, @max(f.steady_most, f.other_most) });
             continue;
         }
+        p.gateFrom(e.slot, e.neuron);
         try p.upload(t, host, e.slot);
         std.log.info("slide pocket: layer {d}, neuron {d}, an earlier fact's, fired on this fact's questions (up to {d:.2}); fitted again: there and elsewhere at most {d:.2}, its own questions' least {d:.2} ({d} rows held as they read, {d} of them read now)", .{ p.moe.items[e.slot], e.neuron, most, @max(f.steady_most, f.other_most), f.fact_least, fixed, fixed - e.count });
     }
@@ -116,11 +120,11 @@ test "an earlier fact's neuron fitted quiet on a new fact's rows and its weak fi
         s.* = rowOf(r, &common, &old_dir, null);
         l.* = rowOf(r, &common, &old_dir, &push);
     }
-    var p: pockets.Pocket(T) = .{ .gpa = gpa, .mode = .reply };
+    var p: pockets.Pocket(T, @import("families.zig").nemotron_h) = .{ .gpa = gpa, .mode = .reply, .hidden = d, .layers = 4 };
     defer p.deinit();
     try p.moe.append(gpa, 3);
-    try p.up.appendNTimes(gpa, 0, pockets.neurons * d);
-    try p.down.appendNTimes(gpa, 0, pockets.neurons * d);
+    try p.up.appendNTimes(gpa, 0, @TypeOf(p).neurons * d);
+    try p.down.appendNTimes(gpa, 0, @TypeOf(p).neurons * d);
     try p.used.append(gpa, 1);
     // the earlier fact's neuron, fitted on its stored rows against the rest
     var xs: std.ArrayList([]const u16) = .empty;
@@ -139,7 +143,7 @@ test "an earlier fact's neuron fitted quiet on a new fact's rows and its weak fi
         try kinds.append(gpa, .other);
     }
     const u = p.neuron(p.up.items, 0, 0, d);
-    _ = try fit(gpa, xs.items, kinds.items, d, u, false, fit_steps, 0);
+    _ = try fit(gpa, xs.items, kinds.items, d, u, false, fit_steps, 0, pocket_fit.margin);
     try p.learned.append(gpa, .{ .slot = 0, .neuron = 0, .key = .reply, .start = 0, .count = n_old, .subject = 0, .lesson = 0 });
     p.learned_before = 1;
     // the new fact's read: its own questions, then other prompts, the earlier fact's questions among them
