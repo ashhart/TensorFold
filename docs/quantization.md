@@ -18,7 +18,11 @@ Choose an 8-bit checkpoint made from the original model when you want its 8-bit 
 The table, `--lane-kernels` and the CUDA path below describe the Python engine, frozen at 0.6.6 and available at the
 [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). The native binary refuses `--lane-kernels`. Its
 Qwen3.8-27B family reads the same affine formats, per module (`zig/src/families/qwen27/affine.zig`), and admits each
-against the projection kernels the chip runs (`zig/src/families/qwen27/widths.zig`).
+against the projection kernels the chip runs (`zig/src/families/qwen27/widths.zig`). Its Nemotron family reads them per
+module on Metal (`zig/src/families/nemotron/config.zig`). Matrices at 4-bit in groups of 64 keep Nemotron's own
+kernels. Every other width runs on the shared row kernels in decode, and in prompt chunks past 128 rows on
+simd_qmm_bits' tiles (dense matrices in groups of 64) and Flash Next's width-general expert gathers (routed experts).
+Its CUDA and Intel GPU engines read Nemotron at 4-bit in groups of 64 only.
 
 | Path | Formats |
 | --- | --- |
