@@ -441,3 +441,40 @@ test "a lesson placed on a neuron a fact left deleting lists takes it; a learned
     try std.testing.expectEqual(@as(usize, 2), facts[2].neurons.len);
     try std.testing.expectEqual(@as(usize, 2), facts[0].neurons.len);
 }
+
+test "an allocation that fails anywhere in recording a delete leaves the graph in memory as its file says; a retry records it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [128]u8 = undefined;
+    const path = try graphPath(&tmp, &buf, "alloc");
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var g = slide_graph.Graph.init(failing.allocator(), std.testing.io, path);
+    defer g.deinit();
+    const id = g.add("My sister is called Ana.", "chat", 100);
+    g.mark(id, .learned);
+    g.placed(id, &.{.{ .layer = 21, .neuron = 0, .key = .reply }});
+    try g.record(id, .deleting);
+    // a reason longer than any arena block has left, so copying it asks the allocator
+    const why: [64 << 10]u8 = @splat('x');
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var failures: usize = 0;
+    while (true) : (failures += 1) {
+        failing.fail_index = failing.alloc_index + failures;
+        g.remove(id, 200, &why) catch |e| {
+            failing.fail_index = std.math.maxInt(usize);
+            try std.testing.expectEqual(error.OutOfMemory, e);
+            const f = (try g.snapshot(arena.allocator()))[0];
+            try std.testing.expectEqual(slide_graph.State.deleting, f.state);
+            try std.testing.expectEqual(@as(usize, 1), f.neurons.len);
+            try std.testing.expectEqual(@as(i64, 0), f.deleted);
+            try std.testing.expectEqual(slide_graph.State.deleting, try onDisk(path, 0));
+            continue;
+        };
+        break;
+    }
+    // the reason's copy and the file's write each failed at least once before the retry went through
+    try std.testing.expect(failures >= 2);
+    try std.testing.expectEqual(slide_graph.State.deleted, (try g.snapshot(arena.allocator()))[0].state);
+    try std.testing.expectEqual(slide_graph.State.deleted, try onDisk(path, 0));
+}

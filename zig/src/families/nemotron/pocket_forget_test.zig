@@ -36,6 +36,9 @@ const Device = struct {
     used: [layers]usize = @splat(0),
     uploads: usize = 0,
     saves: usize = 0,
+    gpa: std.mem.Allocator = std.testing.allocator, // what rounding allocates from
+    fail_at: usize = 0, // the upload, counted from one, that fails once (0: none)
+    failing: bool = false, // every upload fails
 
     pub fn pocketRead(h: *Device, l: usize, up: []f32, down: []f32) usize {
         @memcpy(up, &h.loaded_up[l]);
@@ -47,14 +50,18 @@ const Device = struct {
     }
 
     pub fn pocket(h: *Device, l: usize, up: []const f32, down: []const f32, used: usize) !void {
+        if (h.failing or h.uploads + 1 == h.fail_at) {
+            h.uploads += 1;
+            return error.UploadFailed;
+        }
         @memcpy(&h.up[l], up);
         @memcpy(&h.down[l], down);
         h.used[l] = used;
         h.uploads += 1;
     }
 
-    pub fn pocketRound(_: *Device, up: []f32, down: []f32) !void {
-        return Shards.round(std.testing.allocator, d, up, down);
+    pub fn pocketRound(h: *Device, up: []f32, down: []f32) !void {
+        return Shards.round(h.gpa, d, up, down);
     }
 };
 
@@ -253,4 +260,107 @@ test "a save after the last fact is deleted writes the emptied pocket; an untaug
     try std.testing.expect(try whole.save(&l));
     try std.testing.expectEqual(@as(usize, 1), h.saves);
     try std.testing.expect(!forgetting.pending(&l.pockets));
+}
+
+/// The pocket's state a delete may change, copied: its weights, counts, records and retired lessons.
+const Copy = struct {
+    up: []f32,
+    down: []f32,
+    used: []usize,
+    learned: []pocket.Learned,
+    learned_before: usize,
+    retired: []u32,
+
+    fn of(p: *const P) !Copy {
+        const a = std.testing.allocator;
+        return .{ .up = try a.dupe(f32, p.up.items), .down = try a.dupe(f32, p.down.items), .used = try a.dupe(usize, p.used.items), .learned = try a.dupe(pocket.Learned, p.learned.items), .learned_before = p.learned_before, .retired = try a.dupe(u32, p.retired_lessons.items) };
+    }
+
+    fn expectSame(c: Copy, p: *const P) !void {
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(c.up), std.mem.sliceAsBytes(p.up.items));
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(c.down), std.mem.sliceAsBytes(p.down.items));
+        try std.testing.expectEqualSlices(usize, c.used, p.used.items);
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(c.learned), std.mem.sliceAsBytes(p.learned.items));
+        try std.testing.expectEqual(c.learned_before, p.learned_before);
+        try std.testing.expectEqualSlices(u32, c.retired, p.retired_lessons.items);
+        try std.testing.expect(!forgetting.pending(p));
+    }
+
+    fn free(c: Copy) void {
+        const a = std.testing.allocator;
+        a.free(c.up);
+        a.free(c.down);
+        a.free(c.used);
+        a.free(c.learned);
+        a.free(c.retired);
+    }
+};
+
+/// The forward's layers as the device holds them, for the pocket's slots.
+fn expectLive(before: *const Device, now: *const Device) !void {
+    for (0..layers - 1) |l| {
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&before.up[l]), std.mem.sliceAsBytes(&now.up[l]));
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&before.down[l]), std.mem.sliceAsBytes(&now.down[l]));
+        try std.testing.expectEqual(before.used[l], now.used[l]);
+    }
+}
+
+test "an allocation or an upload that fails anywhere in a delete leaves the pocket and the forward as they were" {
+    var t = trainer();
+    // each allocation of the delete in turn fails (the pocket's and the rounding's), until it goes through
+    var failures: usize = 0;
+    while (true) : (failures += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const h = try std.testing.allocator.create(Device);
+        defer std.testing.allocator.destroy(h);
+        h.* = .{ .gpa = failing.allocator() };
+        var p: P = .{ .gpa = failing.allocator(), .mode = .auto };
+        defer p.deinit();
+        try three(h, &p, &t);
+        const before = try Copy.of(&p);
+        defer before.free();
+        const live = try std.testing.allocator.create(Device);
+        defer std.testing.allocator.destroy(live);
+        live.* = h.*;
+        failing.fail_index = failing.alloc_index + failures;
+        if (forgetting.forget(&p, &t, h, &b_neurons)) |n| {
+            try std.testing.expectEqual(@as(usize, 2), n);
+            break;
+        } else |e| try std.testing.expectEqual(error.OutOfMemory, e);
+        try before.expectSame(&p);
+        try expectLive(live, h);
+    }
+    try std.testing.expect(failures >= 5);
+    // an upload that fails once, at either changed layer: the pocket and the forward put back
+    for ([_]usize{ 1, 2 }) |at| {
+        const h = try std.testing.allocator.create(Device);
+        defer std.testing.allocator.destroy(h);
+        h.* = .{};
+        var p: P = .{ .gpa = std.testing.allocator, .mode = .auto };
+        defer p.deinit();
+        try three(h, &p, &t);
+        const before = try Copy.of(&p);
+        defer before.free();
+        const live = try std.testing.allocator.create(Device);
+        defer std.testing.allocator.destroy(live);
+        live.* = h.*;
+        h.fail_at = h.uploads + at;
+        try std.testing.expectError(error.UploadFailed, forgetting.forget(&p, &t, h, &b_neurons));
+        try before.expectSame(&p);
+        try expectLive(live, h);
+        // and a retry goes through
+        try std.testing.expectEqual(@as(usize, 2), try forgetting.forget(&p, &t, h, &b_neurons));
+    }
+    // a device that takes no upload: the pocket is put back, and the error is the first one
+    const h = try std.testing.allocator.create(Device);
+    defer std.testing.allocator.destroy(h);
+    h.* = .{};
+    var p: P = .{ .gpa = std.testing.allocator, .mode = .auto };
+    defer p.deinit();
+    try three(h, &p, &t);
+    const before = try Copy.of(&p);
+    defer before.free();
+    h.failing = true;
+    try std.testing.expectError(error.UploadFailed, forgetting.forget(&p, &t, h, &b_neurons));
+    try before.expectSame(&p);
 }

@@ -55,9 +55,12 @@ pub fn forget(p: anytype, t: anytype, host: anytype, gone: []const [2]u16) !usiz
         try k.used.append(p.gpa, p.used.items[slot]);
     }
     try k.learned.appendSlice(p.gpa, p.learned.items);
+    // everything that can fail before the pocket moves is done here; anything that fails after puts it all back
+    try p.retired_lessons.ensureUnusedCapacity(p.gpa, p.learned.items.len); // a lesson at most for each record
     k.learned_before = p.learned_before;
     k.marks = p.retired_lessons.items.len;
     k.held = true;
+    errdefer if (unforget(p, t, host)) |_| {} else |_| {};
     for (gone) |g| {
         const slot = std.mem.indexOfScalar(usize, p.moe.items, g[0]) orelse continue;
         if (g[1] >= p.used.items[slot]) continue;
@@ -71,7 +74,7 @@ pub fn forget(p: anytype, t: anytype, host: anytype, gone: []const [2]u16) !usiz
                 i += 1;
                 continue;
             }
-            if (std.mem.indexOfScalar(u32, p.retired_lessons.items, e.lesson) == null) try p.retired_lessons.append(p.gpa, e.lesson);
+            if (std.mem.indexOfScalar(u32, p.retired_lessons.items, e.lesson) == null) p.retired_lessons.appendAssumeCapacity(e.lesson);
             _ = p.learned.orderedRemove(i);
             if (i < p.learned_before) p.learned_before -= 1;
         }
@@ -92,19 +95,25 @@ pub fn unforget(p: anytype, t: anytype, host: anytype) !usize {
     const k = &p.forgot;
     if (!k.held) return 0;
     try p.load(t, host);
+    try p.learned.ensureTotalCapacity(p.gpa, k.learned.items.len);
+    // the pocket whole as it was before any layer goes to the forward, so a failed upload leaves no layer half put back
     const n = pocket.neurons * t.config().hidden;
     for (k.slots.items, 0..) |slot, j| {
         @memcpy(p.up.items[slot * n ..][0..n], k.up.items[j * n ..][0..n]);
         @memcpy(p.down.items[slot * n ..][0..n], k.down.items[j * n ..][0..n]);
         p.used.items[slot] = k.used.items[j];
-        try p.upload(t, host, slot);
     }
     p.learned.clearRetainingCapacity();
-    try p.learned.appendSlice(p.gpa, k.learned.items);
+    p.learned.appendSliceAssumeCapacity(k.learned.items);
     p.learned_before = k.learned_before;
     p.retired_lessons.shrinkRetainingCapacity(k.marks);
     const back = k.slots.items.len;
-    std.log.info("slide pocket: a deleted fact's {d} layers put back as they were", .{back});
+    var failed: ?anyerror = null;
+    for (k.slots.items) |slot| p.upload(t, host, slot) catch |e| {
+        failed = failed orelse e;
+    };
     k.clear();
+    if (failed) |e| return e;
+    std.log.info("slide pocket: a deleted fact's {d} layers put back as they were", .{back});
     return back;
 }

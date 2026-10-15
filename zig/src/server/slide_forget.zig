@@ -131,6 +131,9 @@ pub fn delete(srv: *Server, cx: *errors.Cx, out: *slide.Out, facts: []const Fact
         srv.slide.note(id, try std.fmt.allocPrint(a, "a delete was put back: {s}", .{why}));
         return ended(out, id, state, try std.fmt.allocPrint(a, "{s}, nothing was written: {s}", .{ if (back) "put back as it was" else "not put back (restart the server; the folder is as it was)", why }));
     }
+    // what can fail is made before any write: after the shards, only the graph file's own write can
+    const questions = try questionsOf(a, facts[at]);
+    const summary = try outcome(a, facts, id, zeroed, kept.len - 1);
     // the graph file says `deleting` before any shard is written, so it never claims more than is on disk
     srv.slide.record(id, .deleting) catch |e| {
         const back = putBack(srv, a);
@@ -138,10 +141,10 @@ pub fn delete(srv: *Server, cx: *errors.Cx, out: *slide.Out, facts: []const Fact
     };
     if (slide.saveAll(srv, a)) |failed| return unsaved(srv, a, out, id, failed);
     written = true;
-    srv.teacher.forgetFact(srv.io, try questionsOf(a, facts[at]));
+    srv.teacher.forgetFact(srv.io, questions);
     srv.slide.remove(id, slide.now(srv), reason) catch |e| return ended(out, id, .deleting, try std.fmt.allocPrint(a, "the shards are written without the fact, but the graph file could not be ({s}): it still marks the fact deleting; send the delete again to settle it", .{@errorName(e)}));
     log.line("slide: fact {d} is deleted in {d:.1} s: {d} neurons silenced and written, {d} other facts checked", .{ id, slide.seconds(srv, began), zeroed, kept.len - 1 });
-    out.event("forgot", .{ .id = id, .deleted = true, .state = "deleted", .neurons = zeroed, .message = try outcome(a, facts, id, zeroed, kept.len - 1) });
+    out.event("forgot", .{ .id = id, .deleted = true, .state = "deleted", .neurons = zeroed, .message = summary });
 }
 
 /// The last event when a delete did not complete: `state` is the fact's state as the graph file holds it.

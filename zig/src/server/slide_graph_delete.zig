@@ -13,11 +13,9 @@ pub fn record(g: *Graph, id: u32, state: slide_graph.State) !void {
     defer g.mutex.unlock(g.io);
     const f = g.find(id) orelse return error.NoSuchFact;
     const was = f.state;
+    errdefer f.state = was;
     f.state = state;
-    g.persist() catch |e| {
-        f.state = was;
-        return e;
-    };
+    try g.persist();
 }
 
 /// A fact deleted on request at `at` (ms), and why: its neurons no longer fire. Written, or nothing changes.
@@ -25,15 +23,15 @@ pub fn remove(g: *Graph, id: u32, at: i64, why: []const u8) !void {
     g.mutex.lockUncancelable(g.io);
     defer g.mutex.unlock(g.io);
     const f = g.find(id) orelse return error.NoSuchFact;
+    // what can fail before the fact changes is done first; a failed write then puts the whole fact back
+    const message = try g.arena.allocator().dupe(u8, why);
     const was = f.*;
+    errdefer f.* = was;
     f.state = .deleted;
     f.neurons = &.{};
     f.deleted = at;
-    f.message = try g.arena.allocator().dupe(u8, why);
-    g.persist() catch |e| {
-        f.* = was;
-        return e;
-    };
+    f.message = message;
+    try g.persist();
 }
 
 /// Every fact as it stands, copied into `a`, for reading outside the lock.
