@@ -16,7 +16,7 @@ pub fn floatType(dtype: DType) !Float {
 pub const Norm = extern struct { width: u32, rows: u32, activation: Float, gain: Float, residual: u32, eps: f32 };
 pub const Head = extern struct { width: u32, rows: u32, stride: u32, activation: Float, gain: Float, eps: f32 };
 pub const Embed = extern struct { width: u32, rows: u32, vocab: u32, bits: u32, group: u32, metadata: Float };
-/// h_end and w_end: M-RoPE's interleaved h and w pairs end there (0: every pair turns by plane 0); planes `plane` apart.
+/// h_end, w_end: M-RoPE's interleaved h and w pairs end there (0: every pair turns by plane 0); planes `plane` apart.
 pub const Rope = extern struct { width: u32, heads: u32, rows: u32, rotary: u32, activation: Float, theta: f32, h_end: u32 = 0, w_end: u32 = 0, plane: u32 = 0 };
 pub const Element = extern struct { width: u32, heads: u32, rows: u32, activation: Float };
 pub const Post = extern struct { width: u32, heads: u32, rows: u32, stride: u32, offset: u32, activation: Float, gain: Float, eps: f32 };

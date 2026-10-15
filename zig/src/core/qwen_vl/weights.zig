@@ -78,7 +78,7 @@ pub fn bytes(gpa: std.mem.Allocator, c: Config) !usize {
 
 const Src = struct { path: [:0]const u8, off: u64, e: st.Entry };
 
-/// The tower's tensors from `dir` into one shared buffer; the MLX patch kernel [O, T, Y, X, C] turned to [O, C, T, Y, X].
+/// The tower's tensors from `dir` into one shared buffer; MLX's patch kernel [O, T, Y, X, C] turned to [O, C, T, Y, X].
 pub fn load(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, c: Config) !Weights {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();

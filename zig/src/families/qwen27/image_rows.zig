@@ -14,7 +14,7 @@ pub const Images = struct { slot: u32, rows: Ref, spans: []const Span };
 /// What a round's forward reads beyond today's: M-RoPE's pair bounds (0: plain), and image rows to take.
 pub const Placed = struct { h_end: u32 = 0, w_end: u32 = 0, images: ?Ref = null };
 
-/// Sets the frame's rope planes and take rows for `round`; a round of text-only slots keeps plane 0 as setRows wrote it.
+/// The frame's rope planes and take rows for `round`; a round of text-only slots keeps plane 0 as setRows wrote it.
 pub fn place(f: *Frame, rope: []const mrope.Layout, images: ?Images, sections: [3]usize, round: *const Round) Placed {
     const cap = f.capacity;
     return placeRows(f.get(.positions).buffer.slice(i32, 3 * cap), f.get(.takes).buffer.slice(i32, cap), cap, rope, images, sections, round);

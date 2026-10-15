@@ -140,7 +140,7 @@ pub const Tower = struct {
         return .{ t.w.buf, t.scratch };
     }
 
-    /// One image's patches ([gh * gw, patch width] fp32, merge order) to its merged rows at `out` (bf16, out_hidden wide).
+    /// One image's patches ([gh * gw, patch width] fp32, merge order) to merged rows at `out` (bf16, out_hidden wide).
     pub fn image(t: *Tower, queue: mtl.Queue, pixels: []const f32, gh: u32, gw: u32, out: Ref) !void {
         const c = t.c;
         const M = c.merge;
