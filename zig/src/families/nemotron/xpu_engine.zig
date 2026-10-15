@@ -45,8 +45,12 @@ pub const Seq = struct {
     win: [4]u32 = .{ 0, 1, 0, 0 }, // the window record: rows, inplace, pos0, head_rows
 };
 
+/// A sequence after `at` prompt tokens (the prompt cache's copy): Mamba states, KV rows [0, at), the head's too.
+pub const Snap = struct { at: u32, cstate: []xpu.rt.Buffer, sstate: []xpu.rt.Buffer, kc: []xpu.rt.Buffer, vc: []xpu.rt.Buffer, hkc: ?xpu.rt.Buffer, hvc: ?xpu.rt.Buffer };
+
 pub const Engine = struct {
     pub const Sequence = Seq;
+    pub const Snapshot = Snap;
     gpa: std.mem.Allocator,
     ctx: *const xpu.Context,
     stream: xpu.Stream,
@@ -265,13 +269,19 @@ pub const Engine = struct {
 
     /// The prompt in windows of `rows`, in place; the head absorbs all rows but the last (last_h, for draftFirst).
     pub fn prefillHead(e: *Engine, prompt: []const u32, rows: u32) !void {
+        try e.prefillSpan(prompt, 0, prompt.len, rows);
+    }
+
+    /// Prompt tokens [from, to) at m.pos == from, in windows of `rows`; the head absorbs as prefillHead does.
+    pub fn prefillSpan(e: *Engine, prompt: []const u32, from: usize, to: usize, rows: u32) !void {
         const mt = &e.head.?;
+        if (e.m.pos != from) return error.PositionMismatch;
         e.w.ms = e.big_ms; // prompt windows (in place) take the shared scratch; the sequence's own is for verify windows
         defer e.w.ms = e.cur.ms;
-        var t: usize = 0;
-        while (t < prompt.len) {
+        var t: usize = from;
+        while (t < to) {
             try nw.stopCheck(&e.r);
-            const n = @min(rows, prompt.len - t);
+            const n = @min(rows, to - t);
             const last = t + n == prompt.len;
             try e.w.forward(&e.m, prompt[t .. t + n], true, if (last) 1 else 0);
             const absorb = if (last) n - 1 else n;
@@ -284,6 +294,104 @@ pub const Engine = struct {
             if (last) try e.w.normRowsAt(&e.m, @intCast(n - 1), 1, e.last_h.?);
             t += n;
         }
+    }
+
+    /// Device bytes a snapshot after `at` prompt tokens takes.
+    pub fn snapBytes(e: *const Engine, at: u32) u64 {
+        const c = e.cfg;
+        const conv = (c.conv_kernel - 1) * c.convDim() * 2;
+        const ssm = @as(u64, c.mamba_num_heads) * c.mamba_head_dim * c.ssm_state_size * 4;
+        const row = @as(u64, c.num_key_value_heads) * c.head_dim * 2;
+        const kvs = e.own.kc.len + @as(u64, @intFromBool(e.head != null));
+        return e.own.cstate.len * (conv + ssm) + 2 * kvs * at * row;
+    }
+
+    /// The bound sequence after `at` prompt tokens (no window pending) copied into new storage.
+    pub fn snapSave(e: *Engine, at: u32) !*Snap {
+        if (e.m.pos != at) return error.SnapshotOutOfStep;
+        const c = e.cfg;
+        const conv = (c.conv_kernel - 1) * c.convDim() * 2;
+        const ssm = @as(usize, c.mamba_num_heads) * c.mamba_head_dim * c.ssm_state_size * 4;
+        const kvb = @as(usize, at) * c.num_key_value_heads * c.head_dim * 2;
+        const s = try e.gpa.create(Snap);
+        const nm = e.own.cstate.len;
+        const na = e.own.kc.len;
+        s.* = .{ .at = at, .cstate = try e.gpa.alloc(xpu.rt.Buffer, nm), .sstate = try e.gpa.alloc(xpu.rt.Buffer, nm), .kc = try e.gpa.alloc(xpu.rt.Buffer, na), .vc = try e.gpa.alloc(xpu.rt.Buffer, na), .hkc = null, .hvc = null };
+        var mi: usize = 0;
+        var ai: usize = 0;
+        for (e.m.layers) |ly| switch (ly.mixer) {
+            .mamba => |mw| {
+                s.cstate[mi] = try e.r.alloc(conv);
+                s.sstate[mi] = try e.r.alloc(ssm);
+                try e.r.copy(s.cstate[mi], mw.cstate, conv);
+                try e.r.copy(s.sstate[mi], mw.sstate, ssm);
+                mi += 1;
+            },
+            .attention => |aw| {
+                s.kc[ai] = try e.r.alloc(@max(kvb, 4));
+                s.vc[ai] = try e.r.alloc(@max(kvb, 4));
+                if (kvb > 0) try e.r.copy(s.kc[ai], aw.kc, kvb);
+                if (kvb > 0) try e.r.copy(s.vc[ai], aw.vc, kvb);
+                ai += 1;
+            },
+            else => {},
+        };
+        if (e.head) |h| {
+            s.hkc = try e.r.alloc(@max(kvb, 4));
+            s.hvc = try e.r.alloc(@max(kvb, 4));
+            if (kvb > 0) try e.r.copy(s.hkc.?, h.attn.kc, kvb);
+            if (kvb > 0) try e.r.copy(s.hvc.?, h.attn.vc, kvb);
+        }
+        try e.r.sync();
+        return s;
+    }
+
+    /// The bound sequence becomes the snapshot's: states and KV rows [0, at) copied in, m.pos = at.
+    pub fn snapRestore(e: *Engine, s: *const Snap) !void {
+        const c = e.cfg;
+        const conv = (c.conv_kernel - 1) * c.convDim() * 2;
+        const ssm = @as(usize, c.mamba_num_heads) * c.mamba_head_dim * c.ssm_state_size * 4;
+        const kvb = @as(usize, s.at) * c.num_key_value_heads * c.head_dim * 2;
+        var mi: usize = 0;
+        var ai: usize = 0;
+        for (e.m.layers) |ly| switch (ly.mixer) {
+            .mamba => |mw| {
+                try e.r.copy(mw.cstate, s.cstate[mi], conv);
+                try e.r.copy(mw.sstate, s.sstate[mi], ssm);
+                mi += 1;
+            },
+            .attention => |aw| {
+                if (kvb > 0) try e.r.copy(aw.kc, s.kc[ai], kvb);
+                if (kvb > 0) try e.r.copy(aw.vc, s.vc[ai], kvb);
+                ai += 1;
+            },
+            else => {},
+        };
+        if (e.head) |h| if (kvb > 0) {
+            try e.r.copy(h.attn.kc, s.hkc.?, kvb);
+            try e.r.copy(h.attn.vc, s.hvc.?, kvb);
+        };
+        try e.r.sync();
+        e.m.pos = s.at;
+    }
+
+    pub fn snapDrop(e: *Engine, s: *Snap) void {
+        e.r.sync() catch {};
+        for (s.cstate, s.sstate) |*a, *b| {
+            a.free();
+            b.free();
+        }
+        for (s.kc, s.vc) |*a, *b| {
+            a.free();
+            b.free();
+        }
+        if (s.hkc) |*b| b.free();
+        if (s.hvc) |*b| b.free();
+        e.gpa.free(s.cstate);
+        e.gpa.free(s.sstate);
+        e.gpa.free(s.kc);
+        e.gpa.free(s.vc);
+        e.gpa.destroy(s);
     }
 
     /// One window of ids at m.pos, not committed; every row gets logits (rowTokens / rowLogits).

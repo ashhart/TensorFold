@@ -53,6 +53,12 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
     return m;
 }
 
+/// Device memory left: Sysman's free bytes (ze.Gpu.memory), at most the card's size less what this engine allocated.
+fn freeMemory(ctx: *xpu.Context) u64 {
+    const mem = ctx.gpu.memory() catch return 0;
+    return @min(mem.free, mem.size -| xpu.rt.alloc_now);
+}
+
 /// One loaded model behind the lane host: the device, the engine, the lane backend and the round loop.
 fn Host(comptime S: type) type {
     return struct {
@@ -67,10 +73,12 @@ fn Host(comptime S: type) type {
         core: lanes.Engine,
         host: api.LaneHost,
         startup: []u8 = &.{},
+        cache: ?api.prompt_cache.Store = null,
 
         fn close(p: *anyopaque) void {
             const h: *Self = @ptrCast(@alignCast(p));
             h.host.stop();
+            if (h.cache) |*store| store.deinit();
             h.core.deinit();
             h.cfg.deinit(h.gpa);
             h.backend.deinit();
@@ -139,7 +147,17 @@ fn openFamily(comptime S: type, a: Allocator, gpa: Allocator, io: std.Io, o: api
     h.core = lanes.Engine.init(gpa, &h.cfg, h.backend.backend(), h.clock.clock());
     const note = try S.note(a, h.engine);
     h.startup = try std.fmt.allocPrint(gpa, "Intel GPU engine: {s}, {d:.2} GB on the device, context {d}{s}; {d} stream(s) a round on the lane core, sampling on the host", .{ h.ctx.name(), @as(f64, @floatFromInt(xpu.rt.alloc_now)) / 1e9, window, note, h.backend.streams });
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = S.name, .lanes = h.backend.streams, .context_window = @intCast(window), .context_fitted = true, .startup = h.startup });
+    const drafted = facts.exact_width > 1;
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = S.name, .lanes = h.backend.streams, .context_window = @intCast(window), .context_fitted = true, .startup = h.startup, .prefill_step = if (drafted) S.promptRows(h.engine) else 0 });
+    // kept prompt states (with sequences): --prompt-cache-gib, else 4 GiB, inside the device memory left past 2 GiB
+    const want: u64 = @intFromFloat((o.prompt_cache_gib orelse 4) * (1 << 30));
+    const free = freeMemory(&h.ctx);
+    const budget: u64 = if (free > 2 << 30) @min(want, free - (2 << 30)) else 0;
+    h.cache = null;
+    if (drafted and budget > 0) {
+        h.cache = api.prompt_cache.Store.init(gpa, h.backend.snapshots(), .{ .lookahead = 1, .planned = true }, budget);
+        h.host.cache = &h.cache.?;
+    }
     h.host.memory = .{ .read = readMemory };
     h.host.explain = .{ .text = lane.explain };
     try h.host.start();
