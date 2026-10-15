@@ -414,12 +414,13 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         errdefer gpa.destroy(r);
         r.dir = try gpa.dupeSentinel(u8, dir, 0);
         errdefer gpa.free(r.dir);
-        r.recorder = .init(gpa, io, r.dir, loaded.taps);
+        r.recorder = try .init(gpa, io, r.dir, loaded.taps);
+        errdefer r.recorder.deinit();
         r.recorded = try .init(loaded.backend, &r.recorder);
         h.recording = r;
         h.inner = r.recorded.backend();
         h.lone = null; // every token through the lane rounds, where the recorder sees it
-        std.log.info("recording each stream's rows under {s}", .{dir});
+        std.log.info("recording each stream's rows under {s}/{s}", .{ dir, r.recorder.name });
     }
     errdefer if (h.recording) |r| r.free(gpa);
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0

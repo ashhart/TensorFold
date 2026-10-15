@@ -24,15 +24,34 @@ const Open = struct {
 pub const Recorder = struct {
     gpa: Allocator,
     io: Io,
-    dir: [:0]const u8, // an existing folder; each stream writes <dir>/<pid>-<n>.*
+    dir: [:0]const u8, // an existing folder, for the free-space check
+    space: Io.Dir, // this recorder's own new folder <dir>/<pid>-<k>, held open; each stream writes <n>.* in it
+    name: []u8, // that folder's name under `dir`
     taps: []const u32,
     floor: u64 = 25 << 30, // a stream starts no files below this many free bytes
     streams: std.AutoHashMapUnmanaged(*Stream, Open) = .empty,
     made: u64 = 0,
     scratch: std.ArrayList(u8) = .empty,
 
-    pub fn init(gpa: Allocator, io: Io, dir: [:0]const u8, taps: []const u32) Recorder {
-        return .{ .gpa = gpa, .io = io, .dir = dir, .taps = taps };
+    /// A folder no other recorder or file has under `dir`: created, never reused, opened without following links.
+    pub fn init(gpa: Allocator, io: Io, dir: [:0]const u8, taps: []const u32) !Recorder {
+        var root = try Io.Dir.cwd().openDir(io, dir, .{});
+        defer root.close(io);
+        var k: u32 = 0;
+        while (true) : (k += 1) {
+            const name = try std.fmt.allocPrint(gpa, "{d}-{d}", .{ std.c.getpid(), k });
+            errdefer gpa.free(name);
+            root.createDir(io, name, .default_dir) catch |e| switch (e) {
+                error.PathAlreadyExists => {
+                    gpa.free(name);
+                    if (k == 1 << 16) return e;
+                    continue;
+                },
+                else => return e,
+            };
+            const space = try root.openDir(io, name, .{ .follow_symlinks = false });
+            return .{ .gpa = gpa, .io = io, .dir = dir, .space = space, .name = name, .taps = taps };
+        }
     }
 
     /// Streams still open end their files here, without their last verify's rows (the target is gone).
@@ -41,6 +60,8 @@ pub const Recorder = struct {
         while (it.next()) |e| r.close(e.key_ptr.*, e.value_ptr, "the recorder closed first");
         r.streams.deinit(r.gpa);
         r.scratch.deinit(r.gpa);
+        r.space.close(r.io);
+        r.gpa.free(r.name);
     }
 
     /// Tells the target the taps before any forward; error.NoFeatures if it gives no rows.
@@ -87,7 +108,7 @@ pub const Recorder = struct {
 
     fn open(r: *Recorder, s: *Stream) !void {
         try r.streams.ensureUnusedCapacity(r.gpa, 1);
-        const base = try std.fmt.allocPrint(r.gpa, "{s}/{d}-{d}", .{ r.dir, std.c.getpid(), r.made });
+        const base = try std.fmt.allocPrint(r.gpa, "{d}", .{r.made});
         errdefer r.gpa.free(base);
         r.made += 1;
         var files: [exts.len]Io.File = undefined;
@@ -96,7 +117,7 @@ pub const Recorder = struct {
         for (exts, &files) |ext, *f| {
             const path = try std.fmt.allocPrint(r.gpa, "{s}{s}", .{ base, ext });
             defer r.gpa.free(path);
-            f.* = try Io.Dir.cwd().createFile(r.io, path, .{});
+            f.* = try r.space.createFile(r.io, path, .{ .exclusive = true });
             made += 1;
         }
         r.streams.putAssumeCapacity(s, .{ .base = base, .files = files });
@@ -115,7 +136,7 @@ pub const Recorder = struct {
             error.OutOfMemory => "out of memory",
             else => "a write failed",
         };
-        if (o.gap) |why| std.log.warn("recorder: {s} stops at row {d}: {s}", .{ o.base, start, why });
+        if (o.gap) |why| std.log.warn("recorder: {s}/{s}/{s} stops at row {d}: {s}", .{ r.dir, r.name, o.base, start, why });
     }
 
     fn append(r: *Recorder, target: be.Backend, s: *Stream, o: *Open, start: u64, count: u32) !?[]const u8 {
@@ -144,7 +165,7 @@ pub const Recorder = struct {
         if (why) |w| if (o.gap == null) {
             o.gap = w;
         };
-        r.summary(s, o) catch |e| std.log.warn("recorder: no summary for {s} ({s})", .{ o.base, @errorName(e) });
+        r.summary(s, o) catch |e| std.log.warn("recorder: no summary for {s}/{s}/{s} ({s})", .{ r.dir, r.name, o.base, @errorName(e) });
     }
 
     fn summary(r: *Recorder, s: *Stream, o: *const Open) !void {
@@ -165,8 +186,14 @@ pub const Recorder = struct {
             .top_k = top,
             .gap = o.gap,
         });
-        const path = try std.fmt.allocPrint(a, "{s}.json", .{o.base});
-        try Io.Dir.cwd().writeFile(r.io, .{ .sub_path = path, .data = text.written() });
+        try r.create(try std.fmt.allocPrint(a, "{s}.json", .{o.base}), text.written());
+    }
+
+    /// A new file in the recorder's folder with these bytes; one already there is an error, never overwritten.
+    fn create(r: *Recorder, path: []const u8, bytes: []const u8) !void {
+        const f = try r.space.createFile(r.io, path, .{ .exclusive = true });
+        defer f.close(r.io);
+        try f.writeStreamingAll(r.io, bytes);
     }
 
     /// Reply token j's logprob row (from cache row prompt_len - 1 + j): k u32 ids, then k f32 logprobs, zero-padded.
@@ -179,8 +206,7 @@ pub const Recorder = struct {
             @memcpy(at[0 .. n * 4], std.mem.sliceAsBytes(row.ids[0..n]));
             @memcpy(at[@as(usize, k) * 4 ..][0 .. n * 4], std.mem.sliceAsBytes(row.logprobs[0..n]));
         }
-        const path = try std.fmt.allocPrint(a, "{s}.top", .{o.base});
-        try Io.Dir.cwd().writeFile(r.io, .{ .sub_path = path, .data = out });
+        try r.create(try std.fmt.allocPrint(a, "{s}.top", .{o.base}), out);
     }
 };
 
@@ -212,9 +238,9 @@ pub const Recorded = struct {
     }
     fn prefillStep(p: *anyopaque, s: *Stream) anyerror!bool {
         const x = of(p);
-        const more = try x.inner.vtable.prefill_step.?(x.inner.ptr, s);
-        if (!more) x.recorder.prompt(x.inner, s);
-        return more;
+        const done = try x.inner.vtable.prefill_step.?(x.inner.ptr, s);
+        if (done) x.recorder.prompt(x.inner, s);
+        return done;
     }
     fn first(p: *anyopaque, s: *Stream, position: u64) anyerror!u64 {
         return of(p).inner.first(s, position);

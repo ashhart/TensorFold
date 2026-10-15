@@ -22,7 +22,7 @@ const Case = struct {
     restored: u32 = 0,
 };
 
-const Mode = struct { mtp: bool = true, pipelined: bool = false, shared: bool = true };
+const Mode = struct { mtp: bool = true, pipelined: bool = false, shared: bool = true, chunks: usize = 0, planted: ?[2][]const u8 = null }; // chunks: prefill_step; planted: a link's target and name
 
 var costs: [16]Cost = undefined;
 
@@ -64,14 +64,16 @@ fn run(cases: []const Case, mode: Mode, record: bool) ![][]u32 {
     const dir = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
     var cfg = try Config.init(gpa, model(mode), 16, 15);
     defer cfg.deinit(gpa);
-    var target: fake.Fake = .{ .gpa = gpa };
+    var target: fake.Fake = .{ .gpa = gpa, .prefill_chunks = mode.chunks };
     defer target.deinit();
-    var recorder = rec.Recorder.init(gpa, io, dir, &.{ 30, 31 });
+    var recorder = try rec.Recorder.init(gpa, io, dir, &.{ 30, 31 });
     recorder.floor = 0;
     defer recorder.deinit();
-    var recorded = try rec.Recorded.init(target.backend(), &recorder);
+    if (mode.planted) |p| try recorder.space.symLink(io, p[0], p[1], .{});
+    const inner = if (mode.chunks > 0) target.stepped() else target.backend();
+    var recorded = try rec.Recorded.init(inner, &recorder);
     var clock: fake.FixedClock = .{};
-    var engine = Engine.init(gpa, &cfg, if (record) recorded.backend() else target.backend(), clock.clock());
+    var engine = Engine.init(gpa, &cfg, if (record) recorded.backend() else inner, clock.clock());
     defer engine.deinit();
     const streams = try a.alloc(sm.Stream, cases.len);
     const proposers = try a.alloc(SuffixLookup, cases.len);
@@ -94,18 +96,21 @@ fn run(cases: []const Case, mode: Mode, record: bool) ![][]u32 {
         s.deinit(gpa);
         p.deinit();
     };
-    for (streams) |*s| try engine.addStream(s);
+    for (streams) |*s| if (mode.chunks > 0) {
+        var first = true;
+        while (!try engine.fillStream(s, first)) first = false;
+    } else try engine.addStream(s);
     while (engine.activeCount() > 0) try engine.step();
-    if (record) try check(a, dir, cases, streams, mode);
+    if (record and mode.planted == null) try check(a, try std.fmt.allocPrint(a, "{s}/{s}", .{ dir, recorder.name }), cases, streams, mode);
     const out = try gpa.alloc([]u32, cases.len);
     for (out, streams) |*o, *s| o.* = try gpa.dupe(u32, s.emitted());
     return out;
 }
 
-/// Files <pid>-<n> in admission order: rows from the first computed one to the cache length, as the stream's tokens.
+/// Files <n> in the recorder's folder, in admission order: rows from the first computed one to the cache length.
 fn check(a: std.mem.Allocator, dir: []const u8, cases: []const Case, streams: []const sm.Stream, mode: Mode) !void {
     for (cases, streams, 0..) |c, *s, n| {
-        const f = try Files.read(a, try std.fmt.allocPrint(a, "{s}/{d}-{d}", .{ dir, std.c.getpid(), n }));
+        const f = try Files.read(a, try std.fmt.allocPrint(a, "{s}/{d}", .{ dir, n }));
         const sum = try std.json.parseFromSliceLeaky(Summary, a, f.json, .{});
         try std.testing.expectEqual(@as(u64, c.restored), sum.first_row);
         try std.testing.expectEqualSlices(u32, &.{ 30, 31 }, sum.taps);
@@ -174,10 +179,60 @@ test "one-token rounds end a stream's rows after its prompt, and say so" {
     try expectSame(&.{ .{ .prompt = &p1, .drafts = false }, .{ .prompt = &p2, .drafts = false } }, .{ .pipelined = true });
 }
 
+test "a prompt filled a chunk a call is recorded when its last chunk completes: one chunk and several" {
+    for ([_]usize{ 1, 3 }) |chunks| {
+        try expectSame(&.{ .{ .prompt = &p1 }, .{ .prompt = &long, .drafts = false } }, .{ .chunks = chunks });
+        try expectSame(&.{.{ .prompt = &long, .restored = 7 }}, .{ .chunks = chunks });
+    }
+}
+
+test "each recorder makes its own new folder: two in one folder, and a link where one would go, never followed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var away = std.testing.tmpDir(.{ .iterate = true });
+    defer away.cleanup();
+    var buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
+    const first = try std.fmt.allocPrint(gpa, "{d}-0", .{std.c.getpid()});
+    defer gpa.free(first);
+    var abuf: [64]u8 = undefined;
+    try tmp.dir.symLink(io, try std.fmt.bufPrint(&abuf, "../{s}", .{away.sub_path}), first, .{ .is_directory = true });
+    var one = try rec.Recorder.init(gpa, io, dir, &.{1});
+    defer one.deinit();
+    var two = try rec.Recorder.init(gpa, io, dir, &.{1});
+    defer two.deinit();
+    try std.testing.expect(!std.mem.eql(u8, one.name, first) and !std.mem.eql(u8, two.name, first));
+    try std.testing.expect(!std.mem.eql(u8, one.name, two.name));
+    const f = try one.space.createFile(io, "0.tok", .{ .exclusive = true });
+    f.close(io);
+    try std.testing.expectError(error.PathAlreadyExists, one.space.createFile(io, "0.tok", .{ .exclusive = true }));
+    _ = try two.space.statFile(io, ".", .{});
+    try std.testing.expectError(error.FileNotFound, two.space.statFile(io, "0.tok", .{}));
+    var it = away.dir.iterate();
+    try std.testing.expect(try it.next(io) == null); // nothing went through the link
+}
+
+test "a stream's files are only ever new ones: links planted in the recorder's folder are not written through" {
+    var away = std.testing.tmpDir(.{ .iterate = true });
+    defer away.cleanup();
+    var buf: [64]u8 = undefined;
+    const target = try std.fmt.bufPrint(&buf, "../../{s}/x", .{away.sub_path}); // from <tmp>/<recorder's folder>
+    std.testing.log_level = .err; // the refused files are logged as warnings, as they are meant to be
+    defer std.testing.log_level = .warn;
+    for ([_][]const u8{ "0.tok", "0.st", "0.json" }) |name| {
+        try expectSame(&.{.{ .prompt = &p1 }}, .{ .planted = .{ target, name } });
+        var it = away.dir.iterate();
+        try std.testing.expect(try it.next(io) == null);
+    }
+}
+
 test "a target that gives no rows cannot be recorded" {
     var target: fake.Fake = .{ .gpa = gpa };
     defer target.deinit();
-    var recorder = rec.Recorder.init(gpa, io, "unused", &.{1});
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [64]u8 = undefined;
+    var recorder = try rec.Recorder.init(gpa, io, try std.fmt.bufPrintSentinel(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0), &.{1});
     defer recorder.deinit();
     var table = target.backend().vtable.*;
     table.features = null;
