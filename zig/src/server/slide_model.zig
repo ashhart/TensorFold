@@ -85,9 +85,9 @@ fn readShard(a: Allocator, io: Io, path: []const u8, f: Family, shard: *Shard, p
         const layer: u16 = @intCast(f.expertLayer(name) orelse continue);
         if (std.mem.indexOfScalar(u16, layers.items, layer) == null) try layers.append(a, layer);
         if (pocket == 0) continue;
-        // a row a neuron: the first input projection's scales or biases (up_proj, or a SwiGLU's gate_proj)
+        // a row a neuron: the up projection's scales or biases, zero once a neuron is free (a SwiGLU gate row may stay)
         const leaf = name[at + expert.len ..];
-        const proj = f.names.inputs[0];
+        const proj = f.upInput();
         if (!std.mem.startsWith(u8, leaf, proj) or leaf.len <= proj.len or leaf[proj.len] != '.') continue;
         const part = leaf[proj.len + 1 ..];
         if (!std.mem.eql(u8, part, "scales") and !std.mem.eql(u8, part, "biases")) continue;
@@ -236,4 +236,36 @@ test "a folder's layers, pockets in use and shards; a save's files and bytes" {
     try std.testing.expectEqual(@as(u64, 512), w.bytes);
     const text = try json.stringify(a, try value(a, again), .{ .compact = true });
     try std.testing.expect(std.mem.indexOf(u8, text, "\"pocket\":{\"neurons\":64,\"layers\":[1,3],\"used\":[3,3]}") != null);
+}
+
+test "a SwiGLU pocket counts its neurons by their up rows: one retired with its gate row left is free" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const f: Family = .{
+        .model_type = "swiglu_scan_test",
+        .names = .{ .layers = "language_model.model.layers.", .expert = "mlp.shared_expert.", .inputs = &.{ "gate_proj", "up_proj" } },
+        .neuron = .{ .act = .swiglu, .margin = 0.5, .sharp = 16 },
+        .quant = .{ .bits = 4, .group = 32 },
+        .keys = .{ .width = "shared_expert_intermediate_size" },
+        .experts = .every,
+    };
+    // 32 own rows and 32 pocket rows: gate rows 0 to 2 set, up rows 0 and 1 only (neuron 2 retired, its gate kept)
+    var gate: [64 * 2]u8 = @splat(0);
+    var up: [64 * 2]u8 = @splat(0);
+    for ([_]usize{ 0, 1, 2 }) |r| gate[(32 + r) * 2 + 1] = 0x3f;
+    for ([_]usize{ 0, 1 }) |r| up[(32 + r) * 2 + 1] = 0x3f;
+    try writeShard(io, tmp.dir, "model.safetensors", &.{
+        .{ "language_model.model.layers.0.mlp.shared_expert.gate_proj.scales", "BF16", .{ 64, 1 }, &gate },
+        .{ "language_model.model.layers.0.mlp.shared_expert.up_proj.scales", "BF16", .{ 64, 1 }, &up },
+    });
+    const path = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path, "model.safetensors" });
+    var shard: Shard = .{ .name = "model.safetensors", .bytes = (try Io.Dir.cwd().statFile(io, path, .{})).size, .mtime = 0, .inode = 0, .layers = &.{}, .expert_bytes = 0 };
+    var used = [_]u16{0};
+    try readShard(a, io, path, f, &shard, 32, &.{0}, &used);
+    try std.testing.expectEqual(@as(u16, 2), used[0]);
+    try std.testing.expectEqualStrings("up_proj", f.upInput());
 }

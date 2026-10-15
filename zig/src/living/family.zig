@@ -63,6 +63,11 @@ pub const Family = struct {
     /// Pocket neurons at each layer: a whole number of quantization groups.
     neurons: usize = 64,
 
+    /// The input holding u (relu^2's only one, SwiGLU's up after its gate): a zero row there is a free neuron.
+    pub fn upInput(f: Family) []const u8 {
+        return f.names.inputs[f.names.inputs.len - 1];
+    }
+
     /// Layer `layer`'s shared expert's tensor prefix, into `buf`.
     pub fn expertBase(f: Family, buf: []u8, layer: usize) ![]const u8 {
         return std.fmt.bufPrint(buf, "{s}{d}.{s}", .{ f.names.layers, layer, f.names.expert });
@@ -80,10 +85,16 @@ pub const Family = struct {
     /// Whether the description holds together: a neuron's rows match its inputs, the pocket a whole number of groups.
     pub fn check(f: Family) !void {
         if (f.names.inputs.len != f.neuron.inputs()) return error.BadFamily;
-        if (32 % f.quant.bits != 0 or f.quant.group == 0 or f.neurons == 0 or f.neurons % f.quant.group != 0) return error.BadFamily;
-        if (f.neuron.act == .swiglu and !(f.neuron.sharp > 0 and std.math.isPowerOfTwo(@as(u32, @intFromFloat(f.neuron.sharp))))) return error.BadFamily;
+        if (f.quant.bits == 0 or 32 % f.quant.bits != 0 or f.quant.group == 0 or f.neurons == 0 or f.neurons % f.quant.group != 0) return error.BadFamily;
+        if (f.neuron.act == .swiglu and !wholePowerOfTwo(f.neuron.sharp)) return error.BadFamily;
     }
 };
+
+/// Whether `x` is 1, 2, 4 ... as a u32 holds it: finite, whole and in range before it is cast.
+fn wholePowerOfTwo(x: f32) bool {
+    if (!std.math.isFinite(x) or x < 1 or x >= 4294967296.0 or @floor(x) != x) return false;
+    return std.math.isPowerOfTwo(@as(u32, @intFromFloat(x)));
+}
 
 pub const max_layers = 128;
 pub const Layers = std.bit_set.Static(max_layers);
@@ -132,4 +143,19 @@ test "a family finds its shared expert's layer in a tensor name and builds its p
     var out: [4]usize = undefined;
     try std.testing.expectEqualSlices(usize, &.{ 1, 3 }, lay.list(lay.widen, &out));
     try std.testing.expectEqualSlices(usize, &.{1}, lay.list(lay.learn, &out));
+}
+
+test "a description with no code width, or a SwiGLU sharp that is not a whole power of two, is refused" {
+    const base = @import("test_families.zig").swiglu;
+    var f = base;
+    f.quant.bits = 0;
+    try std.testing.expectError(error.BadFamily, f.check());
+    for ([_]f32{ std.math.inf(f32), std.math.nan(f32), 16.5, 0, -16, 3, 0x1p40 }) |sharp| {
+        f = base;
+        f.neuron.sharp = sharp;
+        try std.testing.expectError(error.BadFamily, f.check());
+    }
+    f = base;
+    f.neuron.sharp = 32;
+    try f.check();
 }
