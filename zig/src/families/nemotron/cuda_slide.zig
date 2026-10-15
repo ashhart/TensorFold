@@ -1,7 +1,7 @@
 //! Nemotron's Sliding Weights learner on CUDA: learner.zig's lessons over the CUDA trainer, the engine and its shards.
 const std = @import("std");
 const cuda = @import("cuda");
-const lessons = @import("learner.zig");
+const lessons = @import("living").learner;
 const train = @import("cuda_train.zig");
 const engine = @import("cuda_engine.zig");
 const sites_mod = @import("cuda_sites.zig");

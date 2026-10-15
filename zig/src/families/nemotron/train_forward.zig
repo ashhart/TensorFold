@@ -5,7 +5,7 @@ const wts = @import("weights.zig");
 const pre = @import("prefill.zig");
 const pl = @import("prefill_launch.zig");
 const layers = @import("layers.zig");
-const Span = @import("train_mode.zig").Span;
+const Span = @import("living").train_mode.Span;
 const Store = @import("train_prefix.zig").Store;
 
 const At = pl.At;

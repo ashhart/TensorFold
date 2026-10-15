@@ -1,6 +1,6 @@
 //! Nemotron's Sliding Weights learner on Metal: learner.zig's lessons over the Metal trainer, its weights and shards.
 const std = @import("std");
-const lessons = @import("learner.zig");
+const lessons = @import("living").learner;
 const train = @import("train.zig");
 const backend = @import("backend.zig");
 const adapters = @import("adapters.zig");

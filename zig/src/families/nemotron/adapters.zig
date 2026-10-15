@@ -5,14 +5,14 @@ const cfg = @import("config.zig");
 const wts = @import("weights.zig");
 const ops = @import("train_ops.zig");
 const pl = @import("prefill_launch.zig");
-const subspace = @import("subspace.zig");
+const subspace = @import("living").subspace;
 
 const Buffer = mtl.Buffer;
 const At = pl.At;
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
 const shape = @import("learn_shape.zig");
-const route = @import("lesson_route.zig");
+const route = @import("living").lesson_route;
 
 pub const block = shape.block;
 pub const max_rank = shape.max_rank;
