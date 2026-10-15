@@ -41,6 +41,7 @@ test {
     _ = @import("cuda_profile_window.zig");
     _ = reuse;
     _ = @import("learner.zig");
+    _ = @import("pocket_quiet.zig");
     _ = @import("subspace.zig");
     _ = @import("cuda_train_back.zig");
 }
