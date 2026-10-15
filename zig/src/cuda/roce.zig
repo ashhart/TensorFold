@@ -173,6 +173,7 @@ const Blob = extern struct {
     ok: u32,
     n_hca: u32,
     slot_bytes: u64,
+    max_bytes: u64, // the largest shard this rank would send this way (both ranks use the smaller)
     addr: u64,
     rkey: [max_hcas]u32,
     qpn: [max_hcas]u32,
@@ -237,6 +238,7 @@ pub const Gather = struct {
             gpa.destroy(g);
             return null;
         }
+        g.max_bytes = agreedCap(mine.max_bytes, theirs.max_bytes); // one cap for fits on both ranks
         const connected = blk: {
             g.connect(&theirs) catch |e| {
                 std.log.warn("RoCE all-gather: {s} ({s}); NCCL carries every gather", .{ @errorName(e), std.mem.sliceTo(&g.err, 0) });
@@ -252,7 +254,7 @@ pub const Gather = struct {
             gpa.destroy(g);
             return null;
         }
-        std.log.info("RoCE all-gather: {d} HCA(s), shards up to {d} KiB by RDMA writes", .{ g.n_hca, max_bytes >> 10 });
+        std.log.info("RoCE all-gather: {d} HCA(s), shards up to {d} KiB by RDMA writes", .{ g.n_hca, g.max_bytes >> 10 });
         return g;
     }
 
@@ -338,6 +340,7 @@ pub const Gather = struct {
         b.ok = 1;
         b.n_hca = g.n_hca;
         b.slot_bytes = g.layout.slot_bytes;
+        b.max_bytes = g.max_bytes;
         b.addr = @intFromPtr(g.region.bytes.ptr);
         for (0..g.n_hca) |h| {
             const x = &g.hcas[h];
@@ -464,6 +467,11 @@ pub const Gather = struct {
         }
     }
 
+    /// The cap both ranks test in ``fits``: the smaller of the two, which each rank's slot holds.
+    fn agreedCap(mine: u64, theirs: u64) usize {
+        return @intCast(@min(mine, theirs));
+    }
+
     /// Whether a gather of ``bytes`` a rank (from and to 16-byte aligned buffers) goes this way.
     pub fn fits(g: *const Gather, bytes: usize, send: abi.DevicePtr, recv: abi.DevicePtr) bool {
         return bytes > 0 and bytes <= g.max_bytes and bytes % 16 == 0 and send % 16 == 0 and recv % 16 == 0;
@@ -555,4 +563,13 @@ fn gidIndex(io: std.Io, gpa: std.mem.Allocator, name: []const u8) !c_int {
         if (std.mem.startsWith(u8, gid, "0000:0000:0000:0000:0000:ffff:")) return i;
     }
     return error.NoHca;
+}
+
+test "RoCE gather: both ranks agree one cap" {
+    // 511 KiB and 512 KiB round to the same slot; a 512 KiB shard must take the same path on both ranks
+    try std.testing.expectEqual(Layout.of(511 << 10).slot_bytes, Layout.of(512 << 10).slot_bytes);
+    const a = Gather.agreedCap(511 << 10, 512 << 10);
+    const b = Gather.agreedCap(512 << 10, 511 << 10);
+    try std.testing.expectEqual(a, b);
+    try std.testing.expectEqual(@as(usize, 511 << 10), a);
 }

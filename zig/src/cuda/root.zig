@@ -47,6 +47,7 @@ test {
     _ = @import("embed_rows.zig");
     _ = @import("experts.zig");
     _ = @import("sample.zig");
+    _ = @import("roce.zig");
     _ = launch;
     _ = abi;
     _ = aot;
