@@ -54,6 +54,8 @@ pub const Request = struct { max_tokens: usize, depth: usize, eos: []const u32, 
 pub const Command = union(enum) { request: Request, lanes: struct { kind: u32, words: []const u32 } };
 
 fn ticks() u64 {
+    if (@import("builtin").is_test and @import("builtin").os.tag != .macos)
+        return @intCast(@divTrunc(std.Io.Clock.awake.now(std.testing.io).toNanoseconds() * 24, 1000));
     return std.c.mach_absolute_time(); // 24 MHz on Apple silicon
 }
 

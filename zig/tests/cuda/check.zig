@@ -33,7 +33,11 @@ pub fn sameBytes(what: []const u8, got: []const u8, want: []const u8) Failed!voi
     var words: usize = 0;
     var i: usize = 0;
     while (i + 4 <= got.len) : (i += 4) {
-        if (!std.mem.eql(u8, got[i..][0..4], want[i..][0..4])) words += 1;
+        if (std.mem.eql(u8, got[i..][0..4], want[i..][0..4])) continue;
+        words += 1;
+        const g = std.mem.readInt(u32, got[i..][0..4], .little);
+        const w = std.mem.readInt(u32, want[i..][0..4], .little);
+        if (words <= 4) std.debug.print("  word {d}: {x:0>8} ({e}) for {x:0>8} ({e})\n", .{ i / 4, g, @as(f32, @bitCast(g)), w, @as(f32, @bitCast(w)) });
     }
     std.debug.print("FAIL {s}: first difference at byte {d}, {d} of {d} words differ\n", .{ what, first, words, got.len / 4 });
     return error.TestFailed;

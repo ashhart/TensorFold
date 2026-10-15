@@ -1,5 +1,4 @@
-//! Flash Next behind the native server: one reply at a time on the replay engine (prompt chunks, then GPU-side
-//! rounds), greedy only; the engine's thread owns the GPU, requests wait in arrival order (foreground first).
+//! Flash Next behind the native server: one reply at a time, sampled on the GPU on request (speed-up mode greedy only).
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -27,6 +26,7 @@ const Job = struct {
     keep_ns: i96 = 0, // the cache's saves at the pass's marks
 };
 
+/// The engine's thread owns the GPU; requests wait their turn, foreground first, each in arrival order.
 pub const Host = struct {
     gpa: Allocator,
     io: std.Io,
@@ -329,18 +329,21 @@ pub const Host = struct {
         defer h.finish(job, fin.reason, fin.stats, fin.message); // after every defer below: they read the job and its request
         const r = job.request;
         job.began = h.now();
-        if (r.sampling) |s| if (s.temperature > 0) {
-            emit(job, .{ .prefilled = 0 });
-            fin.message = "the native Flash Next engine decodes greedily only: send temperature 0";
-            return;
-        };
         if (h.eng.followsPeer()) {
             emit(job, .{ .prefilled = 0 });
             fin.message = "speed-up mode: this Mac runs rank 0's requests; send requests to rank 0";
             return;
         }
         var c: Ctx = .{ .h = h, .job = job };
-        const out: fx.Out = .{ .ctx = &c, .prefilled = Ctx.prefilled, .tokens = Ctx.tokens, .cancelled = Ctx.cancelled, .marked = Ctx.marked };
+        const sampled: ?api.Sampling = if (r.sampling) |s| (if (s.temperature > 0) s else null) else null;
+        const out: fx.Out = .{
+            .ctx = &c,
+            .prefilled = Ctx.prefilled,
+            .tokens = Ctx.tokens,
+            .cancelled = Ctx.cancelled,
+            .marked = Ctx.marked,
+            .sampling = sampled,
+        };
         const depth: ?usize = if (r.drafts) null else 0;
         const budget: fx.Think = if (r.think_budget > 0) .{ .budget = r.think_budget, .close = r.think_close, .end = r.think_end } else .{};
         var arena: std.heap.ArenaAllocator = .init(h.gpa);
@@ -495,7 +498,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, wind
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     const limit: i64 = tf.flashnext_replay.CAP - fx.MARGIN;
-    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .info_ = .{ .name = "flashnext-zig", .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = true, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
+    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .info_ = .{ .name = "flashnext-zig", .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = eng.r.tp != null, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
     h.warm = .{ .queue = eng.r.queue };
     // macOS unwires idle GPU memory within seconds: the engine's buffers join one set the idle keepalive's ticks use
     if (std.c.getenv("FLASHNEXT_NO_RESIDENCY") == null) holdResident(h) catch |err| std.log.warn("flash next: no residency set ({s}): the first request after an idle second waits for the model's memory", .{@errorName(err)});

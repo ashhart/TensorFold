@@ -5,6 +5,7 @@ const api = @import("engine_api");
 const lanes = @import("lanes");
 const nemotron = @import("nemotron");
 const lfm2 = @import("lfm2.zig");
+const glm = @import("glm_cuda");
 const Allocator = std.mem.Allocator;
 const budget = @import("cuda_memory.zig");
 const lane_backend = @import("cuda_bound.zig");
@@ -13,7 +14,7 @@ const nemotron_slide = @import("nemotron_slide.zig");
 const cuda_disk = @import("cuda_disk.zig");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-const registry = .{nemotron.native};
+const registry = .{ nemotron.native, glm.native };
 
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const families: []const api.Family = blk: {
@@ -253,6 +254,13 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     return null;
 }
 
+/// The admit's refusals: no stream fits, or --parallel asks for more than the budget holds.
+const no_stream = "the CUDA memory budget fits no stream: one at a {d}-token window takes {d:.2} GiB, " ++
+    "and {d:.2} GiB is left after the model's {d:.2} GiB and the {d:.1} GiB reserve{s}; " ++
+    "lower --context, or free device memory";
+const too_many = "--parallel {d} needs {d:.2} GiB for its streams at a {d}-token window, " ++
+    "and the CUDA memory budget leaves {d:.2} GiB{s}: serve --parallel {d}, or lower --context";
+
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (refusals.family(F, o)) |why| {
         problem.* = why;
@@ -322,13 +330,30 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)
-    const weights = if (@hasDecl(F, "weightShare")) F.weightShare(weightBytes(io, o.dir)) else weightBytes(io, o.dir);
+    const whole = weightBytes(io, o.dir);
+    const weights = if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, whole) else whole;
     const held0 = cuda.usage(false).device;
+    // a family over hosts reads every rank's room after its load, by this budget, and admits by the smallest
+    const Probe = struct {
+        a: Allocator,
+        io: std.Io,
+        ctx: *const cuda.Context,
+        held: u64,
+        problem: *[]const u8,
+        fn read(p: *anyopaque) ?u64 {
+            const self: *@This() = @ptrCast(@alignCast(p));
+            const now = (pool(self.a, self.io, self.ctx, self.problem) catch return null) orelse return null;
+            return now.room(cuda.usage(false).device - self.held);
+        }
+    };
+    var probe: Probe = .{ .a = a, .io = io, .ctx = &g.ctx, .held = held0, .problem = problem };
+    var opts: F.Options = .{ .context = @intCast(window), .drafts = o.drafts, .segments = segments, .slide = o.slide };
+    if (@hasField(F.Options, "room")) opts.room = .{ .ctx = &probe, .read = Probe.read };
     if (weights > before.room(held0)) {
         problem.* = try std.fmt.allocPrint(a, "the checkpoint's {d:.1} GiB of weights do not fit the {d:.1} GiB the CUDA memory budget grants ({d:.1} GiB free less a {d:.1} GiB reserve{s}); free device memory or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB", .{ toGib(weights), toGib(before.room(held0)), toGib(before.free), toGib(before.reserve), if (before.limit != null) ", under TENSORFOLD_CUDA_MEMORY_LIMIT_GB" else "" });
         return null;
     }
-    const loaded = F.open(gpa, io, &g.ctx, o.dir, kernels, .{ .context = @intCast(window), .drafts = o.drafts, .segments = segments, .slide = o.slide }) catch |e| {
+    const loaded = F.open(gpa, io, &g.ctx, o.dir, kernels, opts) catch |e| {
         if (@hasDecl(F, "explains_open")) if (F.explain(null, e)) |text| {
             problem.* = text;
             return null;
@@ -355,12 +380,31 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     defer if (!opened) loaded.deinit(loaded.ctx);
     const model = cuda.usage(false).device - held0;
     const after = try pool(a, io, &g.ctx, problem) orelse return null;
-    const room = after.room(model) -| loaded.learn_bytes;
+    var room = after.room(model) -| loaded.learn_bytes;
+    var low: []const u8 = ""; // names the rank whose room bounds the streams, when it is not this one
+    if (@hasField(@TypeOf(loaded), "peer_room")) if (loaded.peer_room) |pr| if (pr.bytes < room) {
+        room = pr.bytes;
+        low = try std.fmt.allocPrint(a, " on rank {d}, the smallest room of the ranks", .{pr.rank});
+    };
     const free = loaded.free_streams;
     const streams = budget.admit(room, loaded.stream_bytes, free, o.lanes, o.lanes_fixed) catch |e| {
         problem.* = switch (e) {
-            error.NoStream => try std.fmt.allocPrint(a, "the CUDA memory budget fits no stream: one at a {d}-token window takes {d:.2} GiB, and {d:.2} GiB is left after the model's {d:.2} GiB and the {d:.1} GiB reserve; lower --context, or free device memory", .{ window, toGib(loaded.stream_bytes), toGib(room), toGib(model), toGib(after.reserve) }),
-            error.TooMany => try std.fmt.allocPrint(a, "--parallel {d} needs {d:.2} GiB for its streams at a {d}-token window, and the CUDA memory budget leaves {d:.2} GiB: serve --parallel {d}, or lower --context", .{ o.lanes, toGib(loaded.stream_bytes * (o.lanes -| free)), window, toGib(room), free + room / loaded.stream_bytes }),
+            error.NoStream => try std.fmt.allocPrint(a, no_stream, .{
+                window,
+                toGib(loaded.stream_bytes),
+                toGib(room),
+                toGib(model),
+                toGib(after.reserve),
+                low,
+            }),
+            error.TooMany => try std.fmt.allocPrint(a, too_many, .{
+                o.lanes,
+                toGib(loaded.stream_bytes * (o.lanes -| free)),
+                window,
+                toGib(room),
+                low,
+                free + room / loaded.stream_bytes,
+            }),
         };
         return null;
     };

@@ -134,6 +134,7 @@ pub const Engine = struct {
         const f = try mtl.MappedFile.open(path);
         defer f.deinit();
         e.c = try cfg.parse(gpa, f.bytes[0..f.size]);
+        if (!cfg.whole(e.c)) return error.NotGlm53Flash; // its kernels take the whole model's counts
         if (e.draft_vocab == 0 or e.draft_vocab > e.c.vocab) e.draft_vocab = e.c.vocab;
         e.draft_vocab -= e.draft_vocab % 4; // the head's kernel takes four rows a simdgroup
         const model = try load_plan.modelHash(gpa, dir, f.bytes[0..f.size]);
