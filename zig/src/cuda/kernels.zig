@@ -21,6 +21,7 @@ pub const qmm_prefill: []const u8 = if (available) &Blob("fatbin_qmm_prefill").b
 pub const experts: []const u8 = if (available) &Blob("fatbin_experts").bytes else &.{};
 pub const experts_prefill: []const u8 = if (available) &Blob("fatbin_experts_prefill").bytes else &.{};
 pub const experts_pack: []const u8 = if (available) &Blob("fatbin_experts_pack").bytes else &.{};
+pub const experts_rows: []const u8 = if (available) &Blob("fatbin_experts_rows").bytes else &.{};
 pub const prefill_attention: []const u8 = if (available) &Blob("fatbin_prefill_attention").bytes else &.{};
 pub const scan_rows: []const u8 = if (available) &Blob("fatbin_scan_rows").bytes else &.{};
 pub const nemotron_ops: []const u8 = if (available) &Blob("fatbin_nemotron_ops").bytes else &.{};

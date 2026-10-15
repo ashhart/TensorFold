@@ -126,7 +126,7 @@ pub const Affine4Experts = struct {
         return if (up) .{ .ptr = l.up, .kg = l.dims / 64, .n = l.width } else .{ .ptr = l.down, .kg = l.width / 64, .n = l.dims };
     }
 
-    fn args(x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize) launch_.Args {
+    pub fn argsOf(x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize) launch_.Args {
         var a: launch_.Args = .{};
         a.add(x);
         a.add(int(x_stride));
@@ -144,7 +144,7 @@ pub const Affine4Experts = struct {
     pub fn run(e: *const Affine4Experts, s: Stream, up: bool, x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, max_units: usize) !void {
         const grid = @min((max_units + 3) / 4, e.resident[if (up) 0 else 1]);
         if (grid < 1) return;
-        var a = args(x, x_stride, slots, w, kg, nb, p, out, n);
+        var a = argsOf(x, x_stride, slots, w, kg, nb, p, out, n);
         const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 128 }, .shared = 0 };
         try launch_.launch(if (up) e.up_fn else e.down_fn, cfg, s, &a);
     }
@@ -153,7 +153,7 @@ pub const Affine4Experts = struct {
     pub fn runPrompt(e: *const Affine4Experts, s: Stream, up: bool, x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, max_items: usize) !void {
         const grid = max_items * ((nb + 3) / 4);
         if (grid < 1) return;
-        var a = args(x, x_stride, slots, w, kg, nb, p, out, n);
+        var a = argsOf(x, x_stride, slots, w, kg, nb, p, out, n);
         const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 256 }, .shared = prompt_smem };
         try launch_.launch(if (up) e.pre_up_fn else e.pre_down_fn, cfg, s, &a);
     }
@@ -171,6 +171,38 @@ pub const Affine4Experts = struct {
     /// Bytes of e experts' blocks for n outputs from k inputs ([E][n/32][k/64][288] int32).
     pub fn bytes(count: usize, n: usize, k: usize) usize {
         return count * (n / 32) * (k / 64) * 288 * 4;
+    }
+};
+
+/// Affine-4 SwiGLU experts at groups of 32 over pair rows (experts_rows.cu): each row's bits are those it gets alone.
+pub const RowsExperts = struct {
+    up_fn: Function,
+    down_fn: Function,
+
+    /// Pairs a plan item holds: the kernel's two row tiles of 16.
+    pub const tile: usize = 32;
+
+    /// The instances' names (cuobjdump -symbols of the experts_rows fatbin): gate and up with SwiGLU, then down.
+    pub const symbols = struct {
+        pub const up = "_ZN15tf_experts_rows11expert_rowsILi32ELi2ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
+        pub const down = "_ZN15tf_experts_rows11expert_rowsILi32ELi1ELi0ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
+        /// experts.cu's one-row forms at groups of 32, whose bits these give every row (tf-cuda-test experts-rows).
+        pub const decode_up = "_ZN10tf_experts13expert_kernelILi32ELi2ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
+        pub const decode_down = "_ZN10tf_experts13expert_kernelILi32ELi1ELi0ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
+    };
+
+    /// From a loaded experts_rows module.
+    pub fn resolve(mod: Module) !RowsExperts {
+        return .{ .up_fn = try mod.function(symbols.up), .down_fn = try mod.function(symbols.down) };
+    }
+
+    /// `items` plan items: `up` maps token rows to SwiGLU's bf16, else pair rows to fp32; K in `kg` groups of 32.
+    pub fn run(e: *const RowsExperts, s: Stream, up: bool, x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, items: usize) !void {
+        const grid = @min((items * nb + 3) / 4, 4096);
+        if (grid < 1) return;
+        var a = Affine4Experts.argsOf(x, x_stride, slots, w, kg, nb, p, out, n);
+        const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 128 }, .shared = 0 };
+        try launch_.launch(if (up) e.up_fn else e.down_fn, cfg, s, &a);
     }
 };
 

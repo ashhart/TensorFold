@@ -23,6 +23,7 @@ const kernels = [_]Kernel{
     .{ .name = "experts", .flags = &.{"-O3"} }, // cuda/experts.py, tensorfold_experts_v7
     .{ .name = "experts_prefill", .flags = &.{"-O3"} },
     .{ .name = "experts_pack", .flags = &.{"-O3"} },
+    .{ .name = "experts_rows", .flags = &.{"-O3"} }, // experts.cu's decode sums over a window or prompt chunk's rows
     .{ .name = "prefill_attention", .flags = &.{ "-O3", "--fmad=false" } }, // tensorfold_prefill_attention_v1
     .{ .name = "scan_rows", .flags = &.{ "-O3", "--fmad=false" } }, // nemotron_h/cuda/mamba.py
     .{ .name = "nemotron_ops", .flags = &.{"-O3"} }, // ours: Nemotron's serial feed, routed plan and rests
