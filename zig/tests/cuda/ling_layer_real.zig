@@ -1,4 +1,4 @@
-//! `ling-layer-real DIR FIXTURE`: one real Ling-3.1 layer through the graph vs HF's captured output; exactness on it.
+//! `ling-layer-real DIR FIXTURE [DUMP]`: one real Ling-3.1 layer through the graph vs HF's output; exactness on it.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -56,7 +56,7 @@ fn dist(got: []const u16, want: []const f32, rows: usize, D: usize, skip: []cons
 }
 
 /// `ling-layer-real DIR FIXTURE` (oracle/ling_layer.py's file for layer L of the checkpoint at DIR).
-pub fn run(gpu: check.Gpu, dir: []const u8, path: []const u8) !void {
+pub fn run(gpu: check.Gpu, dir: []const u8, path: []const u8, dump: ?[]const u8) !void {
     var arena = std.heap.ArenaAllocator.init(gpu.gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -138,6 +138,12 @@ pub fn run(gpu: check.Gpu, dir: []const u8, path: []const u8) !void {
     const dd = dist(dec, want[P * D ..], N, D, skip[P..]);
     const dp = dist(dec, @as([]const f32, try widen(a, got[P * D .. (P + N) * D])), N, D, skip[P..]);
     std.debug.print("RESULT   decode rows {d}-{d}: rel L2 {e:.3} vs HF, {e:.3} vs the prompt's rows\n", .{ P, P + N - 1, dd[0], dp[0] });
+    if (dump) |d| { // the prompt's and the decode rows' bytes, for comparing two builds
+        const all = try a.alloc(u16, got.len + dec.len);
+        @memcpy(all[0..got.len], got);
+        @memcpy(all[got.len..], dec);
+        try std.Io.Dir.cwd().writeFile(gpu.io, .{ .sub_path = d, .data = std.mem.sliceAsBytes(all) });
+    }
     try check.expect(dv[1] <= 1e-2 and dd[1] <= 1e-2, "layer {d} within rel L2 1e-2 of HF (rows whose picks agree)", .{L});
     check.pass("ling-layer-real layer {d}: rel L2 {e:.3} of HF ({d} flipped rows apart); cut == uncut, window == decode rows; peak {d} MiB on the device", .{ L, dv[1], nf, cuda.usage(false).peak >> 20 });
 }
