@@ -96,7 +96,7 @@ pub const Kernels = struct {
         try go(k.cast_fn, s, blocks(count, threads), 1, &a);
     }
 
-    /// o [h * w, c] = bf16(x + bf16(the table [side * side, c] resized to the longer side's square, rows y < h, x < w)).
+    /// o [h * w, c] = bf16(x + bf16(the table [side * side, c] resized to the longer side's square, y < h, x < w)).
     pub fn positionAdd(k: *const Kernels, s: Stream, x: u64, table: u64, o: u64, h: usize, w: usize, side: usize, c: usize) !void {
         var a: Args = .{};
         for ([_]u64{ x, table, o }) |p| a.add(p);
@@ -168,18 +168,33 @@ pub fn linear(g: *Gemms, k: *const Kernels, s: Stream, acc: u64, x: u64, w: u64,
     try k.bias(s, acc, b, y, rows, n);
 }
 
-/// full_kernel<D, 8, 8> of prefill_attention.cu: eight warps as eight 16-row tiles of one head.
+/// prefill_attention.cu's full_kernel<D, WARPS, slots>, or vision_kernel<D, WARPS> without slots: 16 rows a warp.
 const Full = struct {
     dim: usize,
-    sym: [:0]const u8,
-    const rows_per_block = 128;
-    const smem: u32 = 65536; // eight 32-key slots of 80 dims (72 pads to 80), rows padded to 128
+    warps: u32,
+    slots: u32 = 0,
+
+    fn sym(comptime f: Full) [:0]const u8 {
+        const p = "_ZN20tf_prefill_attention";
+        const t = "EEEvPK13__nv_bfloat16PS1_iif";
+        if (f.slots == 0) return std.fmt.comptimePrint(p ++ "13vision_kernelILi{d}ELi{d}" ++ t, .{ f.dim, f.warps });
+        return std.fmt.comptimePrint(p ++ "11full_kernelILi{d}ELi{d}ELi{d}" ++ t, .{ f.dim, f.warps, f.slots });
+    }
+
+    fn rows(f: Full) usize {
+        return 16 * f.warps;
+    }
+
+    fn smem(f: Full) u32 {
+        if (f.slots == 0) return 2 * 2 * 64 * @as(u32, @intCast(f.dim / 8 + 1)) * 16;
+        return f.slots * 32 * 16 * 16; // 72 pads to 80
+    }
 };
 
-/// The head dims a tower's attention runs: SigLIP2's 72 and RADIO's 80.
+/// A tower's attention by head dim: SigLIP2's 72, and RADIO's 80 (full_kernel's bits in one barrier a tile).
 const fulls = [_]Full{
-    .{ .dim = 72, .sym = "_ZN20tf_prefill_attention11full_kernelILi72ELi8ELi8EEEvPK13__nv_bfloat16PS1_iif" },
-    .{ .dim = 80, .sym = "_ZN20tf_prefill_attention11full_kernelILi80ELi8ELi8EEEvPK13__nv_bfloat16PS1_iif" },
+    .{ .dim = 72, .warps = 8, .slots = 8 },
+    .{ .dim = 80, .warps = 8 },
 };
 
 /// Every row of a picture over every key (no mask), a block a head and 128 rows.
@@ -192,9 +207,9 @@ pub const Attention = struct {
         var mod = try module.Module.load(d, kernels.prefill_attention);
         errdefer mod.unload();
         var a: Attention = .{ .mod = mod, .fns = undefined };
-        for (fulls, &a.fns) |f, *fn_| {
-            fn_.* = try mod.function(f.sym);
-            try fn_.allowDynamicShared(Full.smem);
+        inline for (fulls, &a.fns) |f, *fn_| {
+            fn_.* = try mod.function(comptime f.sym());
+            try fn_.allowDynamicShared(f.smem());
         }
         return a;
     }
@@ -209,13 +224,14 @@ pub const Attention = struct {
             if (f.dim == dim) break i;
         } else return error.UnsupportedShape;
         if (rows == 0) return;
+        const f = fulls[i];
         var args: Args = .{};
         args.add(qkv);
         args.add(out);
         for ([_]usize{ rows, heads }) |n| args.add(@as(c_int, @intCast(n)));
         args.add(scale);
-        const grid: launch_.Dim3 = .{ .x = @intCast(blocks(rows, Full.rows_per_block)), .y = @intCast(heads) };
-        try launch_.launch(a.fns[i], .{ .grid = grid, .block = .{ .x = threads }, .shared = Full.smem }, s, &args);
+        const grid: launch_.Dim3 = .{ .x = @intCast(blocks(rows, f.rows())), .y = @intCast(heads) };
+        try launch_.launch(a.fns[i], .{ .grid = grid, .block = .{ .x = 32 * f.warps }, .shared = f.smem() }, s, &args);
     }
 };
 

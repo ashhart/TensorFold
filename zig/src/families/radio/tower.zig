@@ -39,7 +39,7 @@ pub const Tower = struct {
         const rows = n + c.prefix;
         const hd = c.hidden;
         const wide = @max(3 * hd, c.ffn, c.projector_hidden / (Config.shuffle * Config.shuffle));
-        // bf16: patches, the residual, normed and Linear outputs, wide outputs, attention; f32: products, the float patches
+        // bf16: patches, the residual, normed and Linear outputs, wide outputs, attention; f32: products, float patches
         const sizes = [_]usize{ 2 * n * c.patchWidth(), 2 * rows * hd, 2 * rows * hd, 2 * rows * wide, 2 * rows * hd, 4 * rows * @max(wide, c.patchWidth()) };
         var total: usize = 0;
         for (sizes) |sz| total += std.mem.alignForward(usize, sz, 256);

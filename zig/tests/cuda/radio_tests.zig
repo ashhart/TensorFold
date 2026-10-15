@@ -263,6 +263,44 @@ pub fn kernels(gpu: Gpu) !void {
     check.pass("radio-kernels: tf_vit_cast and tf_vit_position_add equal their host references bit for bit", .{});
 }
 
+/// `radio-attention`: the head-dim-80 attention's time at five tower sizes, its outputs finite (synthetic rows).
+pub fn attention(gpu: Gpu) !void {
+    var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var prng = std.Random.DefaultPrng.init(0x80);
+    const rng = prng.random();
+    var at = try cuda.vit.Attention.load(gpu.d);
+    defer at.unload();
+    var s = try cuda.Stream.init(gpu.d, true);
+    defer s.deinit();
+    const heads = 16;
+    const dim = 80;
+    const scale: f32 = @floatCast(1.0 / @sqrt(80.0));
+    for ([_]usize{ 1, 77, 1210, 6276, 13082 }) |rows| {
+        const qkv = try a.alloc(u16, rows * 3 * heads * dim);
+        for (qkv) |*v| v.* = cuda.vit.bf16(rng.floatNorm(f32) * 1.5);
+        var dq = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(qkv));
+        defer dq.free();
+        var dout = try cuda.DeviceBuffer.alloc(gpu.d, 2 * rows * heads * dim);
+        defer dout.free();
+        var times: [6]f64 = undefined;
+        for (&times) |*t| {
+            const t0 = check.now(gpu.io);
+            try at.full(s, dq.ptr, dout.ptr, rows, heads, dim, scale);
+            try s.synchronize();
+            t.* = @as(f64, @floatFromInt(check.now(gpu.io) - t0)) / 1e6;
+        }
+        const out = try a.alloc(u16, rows * heads * dim);
+        try dout.download(0, std.mem.sliceAsBytes(out));
+        for (out) |v| try check.expect(v & 0x7f80 != 0x7f80, "radio-attention {d} rows: a non-finite output", .{rows});
+        const ms = check.median(times[1..]);
+        const flops = 4.0 * @as(f64, @floatFromInt(rows * rows * heads * dim));
+        std.debug.print("RESULT radio-attention {d} rows: {d:.3} ms, {d:.1} TFLOPS\n", .{ rows, ms, flops / ms / 1e9 });
+    }
+    check.pass("radio-attention: timed, outputs finite", .{});
+}
+
 /// How many values differ, and by how much at most.
 fn differ(got: []const f32, want: []const f32) struct { count: usize, worst: f32 } {
     var n: usize = 0;
