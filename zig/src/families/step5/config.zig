@@ -1,0 +1,149 @@
+//! Step-5's text model shape from config.json's text_config: per-layer attention kind, rotary span, theta and limits.
+const std = @import("std");
+
+pub const max_layers = 128;
+pub const Kind = enum { sliding, full };
+
+pub const Layer = struct { kind: Kind, span: u32, theta: f32, limit: f32, shared_limit: f32, moe: bool };
+
+pub const Config = struct {
+    hidden: u32 = 4096,
+    layers: u32 = 92,
+    vocab: u32 = 128896,
+    eps: f32 = 1e-5,
+    heads: u32 = 64,
+    kv_heads: u32 = 4,
+    head_dim: u32 = 192,
+    intermediate: u32 = 13824,
+    moe_intermediate: u32 = 1536,
+    shared_intermediate: u32 = 1536,
+    experts: u32 = 352,
+    topk: u32 = 8,
+    routed_scale: f32 = 3.0,
+    window: u32 = 512,
+    /// Positions the dense full-attention path covers: past it the sparse indexer would choose (512 regions of 8).
+    dense_limit: u32 = 4096,
+    context: u32 = 1048576,
+    eos: [2]u32 = .{ 1, 2 },
+    layer: [max_layers]Layer = undefined,
+
+    pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Config {
+        const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
+        defer gpa.free(path);
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 22));
+        defer gpa.free(bytes);
+        return parse(gpa, bytes);
+    }
+
+    /// Key and value width of one token in one layer.
+    pub fn kvWidth(c: *const Config) u32 {
+        return c.kv_heads * c.head_dim;
+    }
+};
+
+fn field(o: std.json.ObjectMap, key: []const u8) !std.json.Value {
+    return o.get(key) orelse {
+        std.log.err("step5: config.json's text_config lacks {s}", .{key});
+        return error.BadStep5Config;
+    };
+}
+
+fn number(v: std.json.Value) !f64 {
+    return switch (v) {
+        .integer => |i| @floatFromInt(i),
+        .float => |f| f,
+        else => error.BadStep5Config,
+    };
+}
+
+fn int(o: std.json.ObjectMap, key: []const u8) !u32 {
+    const v = try field(o, key);
+    if (v != .integer or v.integer <= 0 or v.integer > std.math.maxInt(u32)) return error.BadStep5Config;
+    return @intCast(v.integer);
+}
+
+fn list(o: std.json.ObjectMap, key: []const u8, n: u32) ![]const std.json.Value {
+    const v = try field(o, key);
+    if (v != .array or v.array.items.len < n) return error.BadStep5Config;
+    return v.array.items;
+}
+
+pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
+    var doc = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
+    defer doc.deinit();
+    if (doc.value != .object) return error.BadStep5Config;
+    const top = doc.value.object;
+    const tv = top.get("text_config") orelse doc.value;
+    if (tv != .object) return error.BadStep5Config;
+    const t = tv.object;
+    var c = Config{};
+    c.hidden = try int(t, "hidden_size");
+    c.layers = try int(t, "num_hidden_layers");
+    c.vocab = try int(t, "vocab_size");
+    c.eps = @floatCast(try number(try field(t, "rms_norm_eps")));
+    c.heads = try int(t, "num_attention_heads");
+    c.kv_heads = try int(t, "num_attention_groups");
+    c.head_dim = try int(t, "head_dim");
+    c.intermediate = try int(t, "intermediate_size");
+    c.moe_intermediate = try int(t, "moe_intermediate_size");
+    c.shared_intermediate = try int(t, "share_expert_dim");
+    c.experts = try int(t, "moe_num_experts");
+    c.topk = try int(t, "moe_top_k");
+    c.routed_scale = @floatCast(try number(try field(t, "moe_router_scaling_factor")));
+    c.window = try int(t, "sliding_window");
+    c.context = try int(t, "max_position_embeddings");
+    if (c.layers > max_layers or c.heads % c.kv_heads != 0 or c.head_dim % 32 != 0 or c.head_dim > 256) return error.BadStep5Config;
+    const norm = try field(t, "norm_expert_weight");
+    if (norm != .bool or !norm.bool) return error.UnsupportedStep5Router;
+    if (t.get("sparse_config")) |s| if (s == .object) {
+        const region = try int(s.object, "region_block_size");
+        const topk = try int(s.object, "topk");
+        c.dense_limit = region * topk;
+    };
+    const eos = try field(t, "eos_token_id");
+    if (eos == .array and eos.array.items.len == 2) {
+        for (&c.eos, eos.array.items) |*e, v| e.* = @intCast(v.integer);
+    }
+    const kinds = try list(t, "layer_types", c.layers);
+    const factors = try list(t, "partial_rotary_factors", c.layers);
+    const thetas = try list(t, "rope_theta", c.layers);
+    const limits = try list(t, "swiglu_limits", c.layers);
+    const shared = try list(t, "swiglu_limits_shared", c.layers);
+    var moe: std.StaticBitSet(max_layers) = .empty;
+    for ((try field(t, "moe_layer_list")).array.items) |v| {
+        if (v != .integer or v.integer < 0 or v.integer >= max_layers) return error.BadStep5Config;
+        moe.set(@intCast(v.integer));
+    }
+    for (0..c.layers) |i| {
+        if (kinds[i] != .string) return error.BadStep5Config;
+        const kind: Kind = if (std.mem.eql(u8, kinds[i].string, "sliding_attention")) .sliding else if (std.mem.eql(u8, kinds[i].string, "full_attention")) .full else return error.BadStep5Config;
+        var span: u32 = @intFromFloat(@round(@as(f64, @floatFromInt(c.head_dim)) * try number(factors[i])));
+        span -= span % 2;
+        c.layer[i] = .{ .kind = kind, .span = span, .theta = @floatCast(try number(thetas[i])), .limit = @floatCast(try number(limits[i])), .shared_limit = @floatCast(try number(shared[i])), .moe = moe.isSet(i) };
+    }
+    return c;
+}
+
+test "a sliced Step-5 config: kinds, spans, thetas and the dense limit" {
+    const text =
+        \\{"text_config": {"hidden_size": 4096, "num_hidden_layers": 4, "vocab_size": 128896, "rms_norm_eps": 1e-05,
+        \\ "num_attention_heads": 64, "num_attention_groups": 4, "head_dim": 192, "intermediate_size": 13824,
+        \\ "moe_intermediate_size": 1536, "share_expert_dim": 1536, "moe_num_experts": 352, "moe_top_k": 8,
+        \\ "moe_router_scaling_factor": 3.0, "sliding_window": 512, "max_position_embeddings": 1048576,
+        \\ "norm_expert_weight": true, "eos_token_id": [1, 2], "moe_layer_list": [3],
+        \\ "sparse_config": {"region_block_size": 8, "topk": 512},
+        \\ "layer_types": ["sliding_attention", "sliding_attention", "sliding_attention", "full_attention"],
+        \\ "partial_rotary_factors": [1.0, 1.0, 1.0, 0.3333333333333333],
+        \\ "rope_theta": [10000.0, 10000.0, 10000.0, 10000000.0],
+        \\ "swiglu_limits": [7.0, 7.0, 7.0, 7.0], "swiglu_limits_shared": [7.0, 7.0, 7.0, 7.0]}}
+    ;
+    const c = try parse(std.testing.allocator, text);
+    try std.testing.expectEqual(@as(u32, 4), c.layers);
+    try std.testing.expectEqual(Kind.full, c.layer[3].kind);
+    try std.testing.expectEqual(@as(u32, 64), c.layer[3].span);
+    try std.testing.expectEqual(@as(u32, 192), c.layer[0].span);
+    try std.testing.expect(c.layer[3].moe and !c.layer[2].moe);
+    try std.testing.expectEqual(@as(f32, 1e7), c.layer[3].theta);
+    try std.testing.expectEqual(@as(u32, 4096), c.dense_limit);
+    try std.testing.expectEqual(@as(u32, 768), c.kvWidth());
+}
