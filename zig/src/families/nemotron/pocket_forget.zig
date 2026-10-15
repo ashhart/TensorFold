@@ -69,6 +69,7 @@ pub fn forget(p: anytype, t: anytype, host: anytype, gone: []const [2]u16) !usiz
     k.learned_before = p.learned_before;
     k.marks = p.retired_lessons.items.len;
     k.held = true;
+    p.snap.valid = false; // a lesson begun before this delete puts back the pocket without it, never what it cut
     cut(p, t, host, gone) catch |e| {
         // put back whole; if the device cannot take it, that is the failure to report, the snapshot kept
         _ = unforget(p, t, host) catch |back| {

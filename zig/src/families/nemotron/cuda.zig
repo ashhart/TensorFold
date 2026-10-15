@@ -46,6 +46,7 @@ test {
     _ = reuse;
     _ = @import("learner.zig");
     _ = @import("pocket_quiet.zig");
+    _ = @import("pocket_mark.zig");
     _ = @import("subspace.zig");
     _ = @import("cuda_train_back.zig");
     _ = @import("cuda_latent.zig");

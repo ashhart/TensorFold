@@ -10,6 +10,7 @@ const clock = @import("pocket_clock.zig");
 const reading = @import("pocket_read.zig");
 const forgetting = @import("pocket_forget.zig");
 const quieting = @import("pocket_quiet.zig");
+const marks = @import("pocket_mark.zig");
 
 const Example = examples.Example;
 const Acting = lesson_route.Acting;
@@ -135,6 +136,7 @@ pub fn Pocket(comptime T: type) type {
         clock: clock.Clock = .{}, // where the open round's time goes
         read: reading.Seen = .{}, // what the last read pass read, which a lesson begun again over the same keeps
         forgot: forgetting.Kept = .{}, // what the last delete changed, until a save writes it or it is put back
+        snap: marks.Snap = .{}, // the pocket as the open fact's lesson found it, which taking the lesson out puts back
 
         pub fn init(gpa: std.mem.Allocator) Self {
             const asked: Mode = if (std.c.getenv("TF_SLIDE_POCKET_KEY")) |v| std.meta.stringToEnum(Mode, std.mem.span(v)) orelse .auto else .auto;
@@ -146,6 +148,12 @@ pub fn Pocket(comptime T: type) type {
             p.read.deinit(p.gpa);
             p.forgot.deinit(p.gpa);
             p.v.deinit(p.gpa);
+            p.snap.deinit(p.gpa);
+        }
+
+        /// The pocket as a new fact's lesson finds it: what taking that lesson out puts back, bit for bit.
+        pub fn mark(p: *Self) !void {
+            return marks.mark(p);
         }
 
         /// The fact's neurons per key: as asked, or by how many answers show a value and questions name the subject.
@@ -303,8 +311,12 @@ pub fn Pocket(comptime T: type) type {
             p.next(.values);
         }
 
-        /// The open fact's neurons back to zero and free, and the earlier neurons it fitted again as they were.
+        /// The pocket as the open fact's lesson found it; with no mark (a save since), its own neurons zero and free.
         pub fn undo(p: *Self, t: *T, host: anytype) !void {
+            if (try marks.restore(p, t, host)) {
+                inline for (.{ "refits", "refit_up", "joint", "joint_down", "joint_answers", "taken" }) |f| @field(p, f).clearRetainingCapacity();
+                return;
+            }
             const d = t.config().hidden;
             p.learned.shrinkRetainingCapacity(p.learned_before);
             p.pos.shrinkRetainingCapacity(p.pos_before);
@@ -480,6 +492,7 @@ pub fn Pocket(comptime T: type) type {
         pub fn save(p: *Self, t: *T, host: anytype) !usize {
             const bytes = try host.pocketSave(p.moe.items, neurons, p.up.items, p.down.items);
             for (0..p.slots()) |j| if (p.used.items[j] > 0) try p.upload(t, host, j);
+            p.snap.valid = false;
             return bytes;
         }
 

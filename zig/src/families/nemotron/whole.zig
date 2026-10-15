@@ -72,7 +72,10 @@ pub fn begin(l: anytype, lesson: Lesson) !void {
             try l.probe.begin(l.trainer.?, l.answers, l.owned.held);
             l.phase = .probe;
         },
-        .pocket => try startPocket(l),
+        .pocket => {
+            try startPocket(l);
+            try l.pockets.mark(); // what taking this lesson out puts back
+        },
         .edit => if (comptime !editing(@TypeOf(l.*))) return error.EditsUnsupported else {
             try openEmpty(l);
             try startEdit(l);

@@ -173,6 +173,18 @@ test "a deleted fact's input weights go to zero, every output bit stays, its lay
     try std.testing.expect(!forgetting.pending(&p));
 }
 
+test "a lesson begun before a delete, then taken out, never brings back what the delete cut" {
+    var t = trainer();
+    var h: Device = .{};
+    var p: P = .{ .gpa = std.testing.allocator, .mode = .auto };
+    defer p.deinit();
+    try three(&h, &p, &t);
+    try p.mark(); // a lesson began; a refused save left its mark in place
+    try std.testing.expectEqual(@as(usize, 2), try forgetting.forget(&p, &t, &h, &b_neurons));
+    try p.undo(&t, &h);
+    for (b_neurons) |g| try std.testing.expect(std.mem.allEqual(f32, p.neuron(p.up.items, g[0], g[1], d), 0));
+}
+
 test "a delete put back restores every bit it changed, in the pocket and in the forward" {
     var t = trainer();
     var h: Device = .{};

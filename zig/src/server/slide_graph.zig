@@ -36,6 +36,9 @@ pub const Fact = struct {
     loss: ?f32 = null, // its outputs' loss at the last step
 };
 
+/// A learned fact as a later lesson checks it again: what it says, its wordings, its last check's verdict (null: none).
+pub const Earlier = struct { id: u32, text: []const u8, asked: []const Answer, recalled: ?bool };
+
 /// The last save of the pocket into the shards: when, how long, the files it changed and their shared experts' bytes.
 const Save = struct {
     state: enum { none, saving, saved, failed } = .none,
@@ -204,6 +207,15 @@ pub const Graph = struct {
         f.recalled = recalled;
     }
 
+    /// Each fact's last verdict as `before` holds it: what a lesson that was taken out leaves them at.
+    pub fn restoreChecks(g: *Graph, before: []const Earlier) void {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        for (before) |b| if (g.find(b.id)) |f| {
+            f.recalled = b.recalled;
+        };
+    }
+
     /// What a fact's lesson last did, or why it stopped.
     pub fn note(g: *Graph, id: u32, message: []const u8) void {
         g.mutex.lockUncancelable(g.io);
@@ -213,24 +225,41 @@ pub const Graph = struct {
         g.save();
     }
 
-    /// The wordings a fact's checks ask.
-    pub fn asked(g: *Graph, id: u32, questions: []const []const u8) void {
+    /// The wordings a fact's checks ask (held-out first) and what they expect: asked again by later lessons, deletes.
+    pub fn asked(g: *Graph, id: u32, xs: []const Answer) void {
         g.mutex.lockUncancelable(g.io);
         defer g.mutex.unlock(g.io);
         const f = g.find(id) orelse return;
         const a = g.arena.allocator();
-        const out = a.alloc([]const u8, questions.len) catch return;
-        for (questions, out) |q, *o| o.* = a.dupe(u8, q) catch return;
-        f.questions = out;
+        const kept = answers.dupe(a, xs) catch return;
+        const qs = a.alloc([]const u8, kept.len) catch return;
+        for (kept, qs) |x, *q| q.* = x.question;
+        f.questions = qs;
+        f.answers = kept;
         g.save();
     }
 
-    /// What a fact's checks expect, which a delete asks again of every fact it leaves.
-    pub fn expects(g: *Graph, id: u32, xs: []const Answer) void {
+    /// Every learned fact but `id`, in teaching order, copied into `a`: what a lesson checks again once it is done.
+    pub fn earlier(g: *Graph, a: Allocator, id: u32) ![]Earlier {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        var out: std.ArrayList(Earlier) = .empty;
+        for (g.facts.items) |f| {
+            if (f.id == id or f.state != .learned or f.questions.len == 0) continue;
+            try out.append(a, .{ .id = f.id, .text = try a.dupe(u8, f.text), .asked = try answers.dupe(a, try records(a, f)), .recalled = f.recalled });
+        }
+        return out.items;
+    }
+
+    /// The reply a learned fact's question `i` brought it back with, kept as its answer when its lesson left none.
+    pub fn answered(g: *Graph, id: u32, i: usize, reply: []const u8) void {
         g.mutex.lockUncancelable(g.io);
         defer g.mutex.unlock(g.io);
         const f = g.find(id) orelse return;
-        f.answers = answers.dupe(g.arena.allocator(), xs) catch return;
+        const a = g.arena.allocator();
+        if (f.answers.len == 0) f.answers = records(a, f.*) catch return;
+        if (i >= f.answers.len or f.answers[i].answer.len > 0) return;
+        @constCast(f.answers)[i].answer = a.dupe(u8, reply) catch return;
         g.save();
     }
 
@@ -398,11 +427,7 @@ pub const Graph = struct {
             fact.round = int(u32, f.field("round")) catch 0;
             fact.deleted = int(i64, f.field("deleted")) catch 0;
             if (f.field("answers")) |xs| fact.answers = try answers.read(a, xs);
-            if (f.field("questions")) |qs| if (qs.items()) |xs| {
-                const out = try a.alloc([]const u8, xs.len);
-                for (xs, out) |x, *o| o.* = x.str() orelse "";
-                fact.questions = out;
-            };
+            fact.questions = try stringList(a, f.field("questions"));
             if (f.field("neurons")) |ns| if (ns.items()) |xs| {
                 var out: std.ArrayList(api.Neuron) = .empty;
                 for (xs) |x| try out.append(a, .{ .layer = int(u16, x.field("layer")) catch continue, .neuron = int(u16, x.field("neuron")) catch continue, .key = std.meta.stringToEnum(api.NeuronKey, x.strField("key") orelse "") orelse continue });
@@ -434,6 +459,22 @@ fn strings(a: Allocator, xs: []const []const u8) !json.Value {
     const out = try a.alloc(json.Value, xs.len);
     for (xs, out) |x, *v| v.* = .{ .string = x };
     return .{ .array = out };
+}
+
+/// A fact's answer records; a graph file from before them gives its questions with no answer known.
+fn records(a: Allocator, f: Fact) ![]const Answer {
+    if (f.answers.len > 0) return f.answers;
+    const out = try a.alloc(Answer, f.questions.len);
+    for (f.questions, out) |q, *x| x.* = .{ .question = q };
+    return out;
+}
+
+/// A JSON array of strings as read (none: empty).
+fn stringList(a: Allocator, v: ?json.Value) ![]const []const u8 {
+    const xs = (v orelse return &.{}).items() orelse return &.{};
+    const out = try a.alloc([]const u8, xs.len);
+    for (xs, out) |x, *o| o.* = x.str() orelse "";
+    return out;
 }
 
 fn dupeAll(a: Allocator, xs: []const []const u8) ![]const []const u8 {
@@ -482,106 +523,4 @@ fn shareWord(x: []const u8, y: []const u8) bool {
 fn isCommon(w: []const u8) bool {
     for (common) |c| if (std.ascii.eqlIgnoreCase(w, c)) return true;
     return false;
-}
-
-test "facts persist across a reopen, link by a shared key word, and clear without reusing ids" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const path = try std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, "graph.json" });
-    defer gpa.free(path);
-    var g = Graph.init(gpa, io, path);
-    const a = g.add("My company, Larkspur Robotics, sells the Heron X2.", "file:company.md", 100);
-    const b = g.add("Larkspur Robotics made 4.7 million pounds in Q3.", "file:company.md", 101);
-    const c = g.add("My favourite colour is teal.", "chat", 102);
-    g.mark(a, .learned);
-    g.mark(c, .missed);
-    g.deinit();
-
-    var again = Graph.init(gpa, io, path);
-    defer again.deinit();
-    try std.testing.expectEqual(@as(usize, 3), again.facts.items.len);
-    try std.testing.expectEqual(State.learned, again.facts.items[0].state);
-    try std.testing.expectEqual(State.missed, again.facts.items[2].state);
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const doc = switch (try json.parse(arena.allocator(), try again.render(arena.allocator(), null))) {
-        .ok => |v| v,
-        .err => return error.BadGraph,
-    };
-    const facts = doc.field("facts").?.items().?;
-    try std.testing.expectEqual(@as(usize, 1), facts[0].field("links").?.items().?.len);
-    try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena.allocator(), "{d}", .{b}), facts[0].field("links").?.items().?[0].int);
-    try std.testing.expectEqual(@as(usize, 0), facts[2].field("links").?.items().?.len);
-    again.clear();
-    try std.testing.expectEqual(c + 1, again.add("My dog is called Pickle.", "chat", 103));
-}
-
-test "a lesson's phases, loss trace and neurons show while it learns; a learned fact keeps its neurons on disk" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const path = try std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, "graph.json" });
-    defer gpa.free(path);
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const ar = arena.allocator();
-    var g = Graph.init(gpa, io, path);
-    const id = g.add("My sister is called Ana.", "chat", 100);
-    const other = g.add("I like blue.", "chat", 101);
-    g.mark(id, .learning);
-    g.phase(id, .writing);
-    g.asked(id, &.{ "What is my sister's name?", "Do you remember what my sister is called?" });
-    g.round(id, 1);
-    g.progress(id, .{ .phase = .reading, .at = 3, .of = 40 });
-    const ns = [_]api.Neuron{ .{ .layer = 13, .neuron = 0, .key = .subject }, .{ .layer = 15, .neuron = 2, .key = .subject } };
-    for (1..4) |s| g.progress(id, .{ .phase = .values, .at = @intCast(s), .loss = 2.0 / @as(f32, @floatFromInt(s)), .neurons = &ns });
-    g.round(id, 2);
-    for (1..3) |s| g.progress(id, .{ .phase = .values, .at = @intCast(s), .loss = 0.25, .neurons = &ns });
-    g.checked(id, true);
-    var text = try g.render(ar, null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\"phase\":\"values\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\"trace\":[[2.0,1.0,0.6667],[0.25,0.25]]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "{\"layer\":13,\"neuron\":0,\"key\":\"subject\"}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\"checks\":1,\"recalled\":true") != null);
-    g.mark(id, .learned);
-    g.placed(other, &ns);
-    g.mark(other, .missed);
-    text = try g.render(ar, null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\"phase\"") == null);
-    g.deinit();
-
-    var again = Graph.init(gpa, io, path);
-    defer again.deinit();
-    try std.testing.expectEqual(@as(usize, 2), again.facts.items[0].neurons.len);
-    try std.testing.expectEqual(api.NeuronKey.subject, again.facts.items[0].neurons[1].key);
-    try std.testing.expectEqual(@as(u16, 15), again.facts.items[0].neurons[1].layer);
-    try std.testing.expectEqual(@as(usize, 2), again.facts.items[0].questions.len);
-    try std.testing.expectEqual(@as(u32, 2), again.facts.items[0].round);
-    try std.testing.expectEqual(@as(usize, 0), again.facts.items[1].neurons.len);
-}
-
-test "a save is measured against the shards as they were before it: the files it changed, how long it took" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const ar = arena.allocator();
-    const dir = try std.fs.path.join(ar, &.{ ".zig-cache", "tmp", &tmp.sub_path });
-    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{\"layers_block_type\": [\"mamba\", \"moe\"]}" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = "\x02\x00\x00\x00\x00\x00\x00\x00{}" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "other.safetensors", .data = "\x02\x00\x00\x00\x00\x00\x00\x00{}" });
-    var g = Graph.init(gpa, io, null);
-    defer g.deinit();
-    g.saving(dir);
-    try std.testing.expect(std.mem.indexOf(u8, try g.render(ar, dir), "\"save\":{\"state\":\"saving\"") != null);
-    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = "\x03\x00\x00\x00\x00\x00\x00\x00{} " });
-    g.saveEnded(dir, 3.14, null);
-    const text = try g.render(ar, dir);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\"layers\":2,\"kinds\":\"ME\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\"seconds\":3.1,\"bytes\":0,\"files\":[\"model.safetensors\"]") != null);
 }

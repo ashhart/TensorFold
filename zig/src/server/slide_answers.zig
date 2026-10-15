@@ -4,7 +4,7 @@ const json = @import("json");
 const Allocator = std.mem.Allocator;
 
 /// A question a fact's checks ask, the answer its lesson wrote, its fewest words, and whether it was never learned.
-pub const Answer = struct { question: []const u8, answer: []const u8, short: []const u8 = "", probe: bool = false };
+pub const Answer = struct { question: []const u8, answer: []const u8 = "", short: []const u8 = "", probe: bool = false };
 
 /// Copies of `xs` in `a`.
 pub fn dupe(a: Allocator, xs: []const Answer) ![]const Answer {
