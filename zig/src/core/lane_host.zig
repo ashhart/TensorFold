@@ -285,9 +285,8 @@ pub const LaneHost = struct {
         h.mutex.unlock(h.io);
     }
 
-    /// Prefills the next queued request into a free lane; false when none waits or no lane is free.
-    /// The next queued request into the admitted ones (null: none waits, no lane is free, or its caches do not fit yet).
-    fn takeJob(h: *LaneHost) ?*Job {
+    /// The next queued request into the admitted ones (null: none waits, no lane is free, or its caches do not fit).
+    pub fn takeJob(h: *LaneHost) ?*Job {
         h.lock();
         if (h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) {
             h.unlock();
@@ -310,9 +309,12 @@ pub const LaneHost = struct {
     }
 
     /// The admitted request's stream (its kept state, drafter and grammar); false when it was dropped instead.
-    fn setup(h: *LaneHost, job: *Job) bool {
+    pub fn setup(h: *LaneHost, job: *Job) bool {
         const r = job.request;
-        if (r.background and r.max_tokens == 0 and h.warm_quiet > 0 and !h.quiet(job)) return h.cancel(job); // other work came first: it never ran
+        if (r.background and r.max_tokens == 0 and h.warm_quiet > 0 and !h.quiet(job)) { // other work came first: it never ran
+            _ = h.cancel(job);
+            return false;
+        }
         var reuse: lanes.stream.Reuse = .{};
         // the entry stays alive until the backend restores it: nothing keeps between here and this stream's own pass
         if (h.cache) |store| if (r.prompt_logprobs == null and !r.untaught) if (store.lookupRewind(h.gpa, r.prompt, born(r), r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, h.spans(r))) |l| {
@@ -349,9 +351,9 @@ pub const LaneHost = struct {
             .grammar = if (r.structure) |st| h.constraint(st) catch |e| {
                 job.proposer.deinit();
                 {
-                _ = h.drop(job, if (e == error.OutOfMemory) "out of memory" else "the reply's grammar could not start (xgrammar)");
-                return false;
-            }
+                    _ = h.drop(job, if (e == error.OutOfMemory) "out of memory" else "the reply's grammar could not start (xgrammar)");
+                    return false;
+                }
             } else null,
             .images = r.images,
             .decode_spans = h.spans(r),
@@ -369,8 +371,8 @@ pub const LaneHost = struct {
         return true;
     }
 
-    /// An admitted, set-up request into the engine: a warm pass, the lone driver, the fill queue, or its own prompt pass.
-    fn launch(h: *LaneHost, job: *Job) bool {
+    /// An admitted request into the engine: a warm pass, the lone driver, the fill queue, or its own prompt pass.
+    pub fn launch(h: *LaneHost, job: *Job) bool {
         const r = job.request;
         const began = job.began;
         if (r.max_tokens == 0 and h.info_.warm_turns) return h.warmPass(job, began);
@@ -388,55 +390,6 @@ pub const LaneHost = struct {
         if (h.deliver(job)) h.remove(job);
         return true;
     }
-    fn admitOne(h: *LaneHost) bool {
-        const job = h.takeJob() orelse return false;
-        if (!h.setup(job)) return true;
-        return h.launch(job);
-    }
-
-    /// Every queued request a lane is free for, their prompts in one pass where the backend takes several
-    /// (lanes.Engine.addStreams); the engine's special paths (chunked prompts, warm passes, the lone driver) go
-    /// through admitOne as before.
-    fn admitMany(h: *LaneHost) bool {
-        if (!h.core.batchesPrompts() or h.core.fills()) return h.admitOne();
-        h.lock();
-        const waiting = h.queued.items.len;
-        const free = h.info_.lanes -| h.admitted.items.len;
-        h.unlock();
-        if (waiting < 2 or free < 2) return h.admitOne();
-        var jobs: [lanes.Engine.max_together]*Job = undefined;
-        var n: usize = 0;
-        while (n < jobs.len and n < free) {
-            const job = h.takeJob() orelse break;
-            if (!h.setup(job)) continue;
-            if ((job.request.max_tokens == 0 and h.info_.warm_turns) or lone.fits(h, job)) {
-                _ = h.launch(job);
-                continue;
-            }
-            jobs[n] = job;
-            n += 1;
-        }
-        if (n == 0) return true;
-        if (n == 1) return h.launch(jobs[0]);
-        var streams: [lanes.Engine.max_together]*lanes.Stream = undefined;
-        for (jobs[0..n], 0..) |job, i| streams[i] = &job.stream;
-        var errs: [lanes.Engine.max_together]?anyerror = undefined;
-        h.core.addStreams(streams[0..n], errs[0..n]);
-        for (jobs[0..n], errs[0..n]) |job, err| {
-            if (err) |e| {
-                _ = switch (e) {
-                    error.Cancelled => h.cancel(job),
-                    error.LaneMemory => h.requeue(job),
-                    else => h.drop(job, h.words(e)),
-                };
-                continue;
-            }
-            h.prefilled(job, job.began);
-            if (h.deliver(job)) h.remove(job);
-        }
-        return true;
-    }
-
 
     /// The next filling job's next prompt chunk: the other streams' rounds run between chunks, not after the prompt.
     fn fillOne(h: *LaneHost) void {
@@ -515,7 +468,7 @@ pub const LaneHost = struct {
     }
 
     /// No memory for another lane yet: the job waits at the queue's head, and admission holds until a job ends.
-    fn requeue(h: *LaneHost, job: *Job) bool {
+    pub fn requeue(h: *LaneHost, job: *Job) bool {
         if (job.stream.grammar) |g| g.deinit(h.gpa); // the next admission compiles its own
         job.stream.deinit(h.gpa);
         job.proposer.deinit();
@@ -546,7 +499,7 @@ pub const LaneHost = struct {
     const alone_words = "the engine has no memory for this request's caches with nothing else running: lower --context or --parallel";
 
     /// A job cancelled in its prompt pass, its lane already released.
-    fn cancel(h: *LaneHost, job: *Job) bool {
+    pub fn cancel(h: *LaneHost, job: *Job) bool {
         h.remove(job);
         h.finish(job, .cancelled, "");
         return true;
@@ -565,7 +518,7 @@ pub const LaneHost = struct {
     fn run(h: *LaneHost) void {
         while (true) {
             h.takeCancels();
-            while (h.admitMany()) {}
+            while (admit.many(h)) {}
             h.fillOne();
             status.noteLive(h);
             h.lock();
