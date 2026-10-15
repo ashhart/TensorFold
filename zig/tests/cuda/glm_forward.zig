@@ -425,8 +425,7 @@ pub fn batch(gpu: Gpu, args: []const [:0]const u8) !void {
     const rank = try std.fmt.parseInt(u8, args[0], 10);
     const port = try std.fmt.parseInt(u16, args[2], 10);
     const ntok: usize = if (args.len > 4) try std.fmt.parseInt(usize, args[4], 10) else 48;
-    var link = if (rank == 0) try cuda.tp_link.Link.lead(port, 600_000)
-        else try cuda.tp_link.Link.follow(io, try std.Io.net.IpAddress.parse(args[1], port), 600_000);
+    var link = if (rank == 0) try cuda.tp_link.Link.lead(port, 600_000) else try cuda.tp_link.Link.follow(io, try std.Io.net.IpAddress.parse(args[1], port), 600_000);
     defer link.close();
     var nccl = try cuda.nccl.Library.open();
     defer nccl.close();
@@ -482,8 +481,7 @@ pub fn batch(gpu: Gpu, args: []const [:0]const u8) !void {
         const t_ms = ms(io, ts);
         var equal: usize = 0;
         for (all, 0..) |x, i| equal += @intFromBool(std.mem.eql(u32, x.out.items[0..ntok], solo[i][0..ntok]));
-        std.debug.print("rank {d}: 16 streams together, {s}: {d} of 16 replies equal to alone, {d:.1} tok/s aggregate\n", .{ rank,
-            if (depth > 0) "drafted" else "serial", equal, @as(f64, @floatFromInt(S * (ntok - 1))) / t_ms * 1000 });
+        std.debug.print("rank {d}: 16 streams together, {s}: {d} of 16 replies equal to alone, {d:.1} tok/s aggregate\n", .{ rank, if (depth > 0) "drafted" else "serial", equal, @as(f64, @floatFromInt(S * (ntok - 1))) / t_ms * 1000 });
         try check.expect(equal == S, "16 streams together equal alone", .{});
         if (depth > 0) { // resumed: stream 0's kept state at its prompt's end - 1, a longer prompt extending it
             const ext = try std.mem.concat(gpa, u32, &.{ prompts[0], solo[0][0..8] });
@@ -526,8 +524,7 @@ pub fn teacher(gpu: Gpu, args: []const [:0]const u8) !void {
     if (args.len < 5) return error.Usage;
     const rank = try std.fmt.parseInt(u8, args[0], 10);
     const port = try std.fmt.parseInt(u16, args[2], 10);
-    var link = if (rank == 0) try cuda.tp_link.Link.lead(port, 600_000)
-        else try cuda.tp_link.Link.follow(io, try std.Io.net.IpAddress.parse(args[1], port), 600_000);
+    var link = if (rank == 0) try cuda.tp_link.Link.lead(port, 600_000) else try cuda.tp_link.Link.follow(io, try std.Io.net.IpAddress.parse(args[1], port), 600_000);
     defer link.close();
     var nccl = try cuda.nccl.Library.open();
     defer nccl.close();
@@ -586,8 +583,7 @@ pub fn prof(gpu: Gpu, args: []const [:0]const u8) !void {
     const port = try std.fmt.parseInt(u16, args[2], 10);
     const nstreams: usize = if (args.len > 4) try std.fmt.parseInt(usize, args[4], 10) else 1;
     const graphs_only = args.len > 5 and std.mem.eql(u8, args[5], "graphs"); // for nsys: 50 one-row steps, no eager pass
-    var link = if (rank == 0) try cuda.tp_link.Link.lead(port, 600_000)
-        else try cuda.tp_link.Link.follow(io, try std.Io.net.IpAddress.parse(args[1], port), 600_000);
+    var link = if (rank == 0) try cuda.tp_link.Link.lead(port, 600_000) else try cuda.tp_link.Link.follow(io, try std.Io.net.IpAddress.parse(args[1], port), 600_000);
     defer link.close();
     var nccl = try cuda.nccl.Library.open();
     defer nccl.close();

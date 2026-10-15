@@ -106,14 +106,13 @@ pub fn run(self: anytype, drafts: bool) !void {
                 try w.int(0); // no confidence cut: every level timed
                 try w.int(@intFromBool(self.e.drafter != null)); // DFlash2 drafts when loaded
                 try self.send(.draft, &w);
-                var reqs = [_]decode.DraftReq{.{ .s = seqs[0], .hidden = seqs[0].hidden, .next = &follow, .count = depth, .confidence = 0,
-                    .out = held[0..depth], .probs = probs[0..depth] }};
+                var reqs = [_]decode.DraftReq{.{ .s = seqs[0], .hidden = seqs[0].hidden, .next = &follow, .count = depth, .confidence = 0, .out = held[0..depth], .probs = probs[0..depth] }};
                 const t0 = std.Io.Timestamp.now(self.io, .awake);
                 // rank 1 replays the frame with the drafter it serves with: DFlash2's round when one is loaded
                 if (self.e.drafter) |dr| { // as rank 1 replays it: the MTP head kept current (while the mix may pick it), then DFlash2's block
                     reqs[0].count = 1;
                     if (@import("native.zig").feedsMtp(self)) try decode.draft(self.e, &reqs);
-                    try dflash.draft(dr, self.e, &.{.{ .s = seqs[0], .n = 1, .anchor = toks[0], .out = held[0..max_rows - 1], .probs = probs[0..max_rows - 1] }});
+                    try dflash.draft(dr, self.e, &.{.{ .s = seqs[0], .n = 1, .anchor = toks[0], .out = held[0 .. max_rows - 1], .probs = probs[0 .. max_rows - 1] }});
                 } else try decode.draft(self.e, &reqs);
                 if (rep > 0) at[k] = @min(at[k], msSince(self.io, t0));
             }
@@ -127,6 +126,5 @@ pub fn run(self: anytype, drafts: bool) !void {
         try self.send(.release, &w);
         self.dropSeq(s.uid);
     }
-    std.log.info("glm costs: window 1/2/4/8 rows {d:.1}/{d:.1}/{d:.1}/{d:.1} ms; 16 streams x 1/2/4/8 rows {d:.1}/{d:.1}/{d:.1}/{d:.1} ms; head step {d:.2} ms", .{
-        self.costs[0].ms, self.costs[1].ms, self.costs[3].ms, self.costs[7].ms, self.shared[3].ms, self.shared[4].ms, self.shared[5].ms, self.shared[6].ms, self.mtp_ms });
+    std.log.info("glm costs: window 1/2/4/8 rows {d:.1}/{d:.1}/{d:.1}/{d:.1} ms; 16 streams x 1/2/4/8 rows {d:.1}/{d:.1}/{d:.1}/{d:.1} ms; head step {d:.2} ms", .{ self.costs[0].ms, self.costs[1].ms, self.costs[3].ms, self.costs[7].ms, self.shared[3].ms, self.shared[4].ms, self.shared[5].ms, self.shared[6].ms, self.mtp_ms });
 }

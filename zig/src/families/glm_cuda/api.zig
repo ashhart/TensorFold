@@ -21,9 +21,7 @@ pub fn dtypeBytes(t: DType) usize {
 }
 
 pub fn parseDType(s: []const u8) ?DType {
-    const map = std.StaticStringMap(DType).initComptime(.{ .{ "bfloat16", .bf16 }, .{ "float16", .f16 },
-        .{ "float32", .f32 }, .{ "int32", .i32 }, .{ "int64", .i64 }, .{ "uint8", .u8 }, .{ "int8", .i8 },
-        .{ "int16", .i16 }, .{ "float8_e4m3fn", .f8e4m3 }, .{ "bool", .bool_ } });
+    const map = std.StaticStringMap(DType).initComptime(.{ .{ "bfloat16", .bf16 }, .{ "float16", .f16 }, .{ "float32", .f32 }, .{ "int32", .i32 }, .{ "int64", .i64 }, .{ "uint8", .u8 }, .{ "int8", .i8 }, .{ "int16", .i16 }, .{ "float8_e4m3fn", .f8e4m3 }, .{ "bool", .bool_ } });
     return map.get(s);
 }
 
@@ -128,9 +126,7 @@ pub const Kernels = struct {
 
     pub fn load(d: *const cuda.Driver) !Kernels {
         var k: Kernels = .{ .ext = undefined };
-        const images = [_][]const u8{ cuda.kernels.fn_experts, cuda.kernels.fn_experts_prefill, cuda.kernels.glm_kda, cuda.kernels.fn_sample, cuda.kernels.glm_ops,
-            cuda.kernels.glm_experts, cuda.kernels.glm_experts_prefill, cuda.kernels.glm_vision, cuda.kernels.glm_experts3,
-            cuda.kernels.glm_experts3_prefill, cuda.kernels.glm_mm, cuda.kernels.glm_rows, cuda.kernels.glm_latent, cuda.kernels.glm_index, cuda.kernels.glm_exl3, cuda.kernels.glm_dflash };
+        const images = [_][]const u8{ cuda.kernels.fn_experts, cuda.kernels.fn_experts_prefill, cuda.kernels.glm_kda, cuda.kernels.fn_sample, cuda.kernels.glm_ops, cuda.kernels.glm_experts, cuda.kernels.glm_experts_prefill, cuda.kernels.glm_vision, cuda.kernels.glm_experts3, cuda.kernels.glm_experts3_prefill, cuda.kernels.glm_mm, cuda.kernels.glm_rows, cuda.kernels.glm_latent, cuda.kernels.glm_index, cuda.kernels.glm_exl3, cuda.kernels.glm_dflash };
         for (images, 0..) |img, i| k.ext[i] = try cuda.Module.load(d, img);
         return k;
     }

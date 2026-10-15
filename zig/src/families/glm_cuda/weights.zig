@@ -72,8 +72,7 @@ const Ckpt = struct {
             const shape = try a.alloc(i64, shp.len);
             for (shp, 0..) |x, i| shape[i] = x.integer;
             const offs = o.get("data_offsets").?.array.items;
-            try ck.entries.put(e.key_ptr.*, .{ .dtype = o.get("dtype").?.string, .shape = shape,
-                .begin = 8 + n + @as(u64, @intCast(offs[0].integer)), .end = 8 + n + @as(u64, @intCast(offs[1].integer)), .file = f });
+            try ck.entries.put(e.key_ptr.*, .{ .dtype = o.get("dtype").?.string, .shape = shape, .begin = 8 + n + @as(u64, @intCast(offs[0].integer)), .end = 8 + n + @as(u64, @intCast(offs[1].integer)), .file = f });
         }
     }
 
@@ -174,8 +173,7 @@ fn splitOf(name: []const u8) Split {
     if (has(name, ".mlp.experts.") or has(name, ".mlp.shared_experts.") or has(name, ".mlp.gate_proj.") or has(name, ".mlp.up_proj.") or has(name, ".mlp.down_proj."))
         return if (has(name, "down_proj.")) .col else .row;
     if (has(name, ".self_attn.indexer.")) return .rep;
-    for ([_][]const u8{ ".self_attn.q_proj.", ".self_attn.k_proj.", ".self_attn.v_proj.", "_conv1d.", ".self_attn.f_b_proj.", ".self_attn.g_b_proj.",
-        ".self_attn.b_proj.", ".self_attn.q_b_proj.", ".self_attn.kv_b_proj." }) |f| if (has(name, f)) return .row;
+    for ([_][]const u8{ ".self_attn.q_proj.", ".self_attn.k_proj.", ".self_attn.v_proj.", "_conv1d.", ".self_attn.f_b_proj.", ".self_attn.g_b_proj.", ".self_attn.b_proj.", ".self_attn.q_b_proj.", ".self_attn.kv_b_proj." }) |f| if (has(name, f)) return .row;
     if (ends(u8, name, ".self_attn.A_log") or ends(u8, name, ".self_attn.dt_bias")) return .row;
     if (has(name, ".self_attn.o_proj.")) return .col;
     return .rep;
@@ -392,8 +390,7 @@ fn readExperts(b: *Builder, li: usize, proj: []const u8, count: usize) !Triple {
     const okg = if (down) kg_full / WORLD else kg_full;
     const c8 = if (down) b.rank * ok8 else 0;
     const cg = if (down) b.rank * okg else 0;
-    var t: Triple = .{ .e = count, .n = nr, .k8 = ok8, .kg = okg, .words = try b.gpa.alloc(u32, count * nr * ok8),
-        .scales = try b.gpa.alloc(u16, count * nr * okg), .biases = try b.gpa.alloc(u16, count * nr * okg) };
+    var t: Triple = .{ .e = count, .n = nr, .k8 = ok8, .kg = okg, .words = try b.gpa.alloc(u32, count * nr * ok8), .scales = try b.gpa.alloc(u16, count * nr * okg), .biases = try b.gpa.alloc(u16, count * nr * okg) };
     errdefer t.free(b.gpa);
     const rowbuf = try b.gpa.alloc(u8, nr * k8_full * 4);
     defer b.gpa.free(rowbuf);
@@ -569,8 +566,7 @@ fn expertsExl3(b: *Builder, out: []const u8, li: usize) !void {
     const tile: usize = 128; // a 16x16 tile's bytes at 4 bits
     var nb: [256]u8 = undefined;
     const Mat = struct { proj: []const u8, kt: usize, nt: usize, by_cols: bool };
-    const mats = [_]Mat{ .{ .proj = "gate_proj", .kt = D / 16, .nt = width / 16, .by_cols = true }, .{ .proj = "up_proj", .kt = D / 16, .nt = width / 16, .by_cols = true },
-        .{ .proj = "down_proj", .kt = width / 16, .nt = D / 16, .by_cols = false } };
+    const mats = [_]Mat{ .{ .proj = "gate_proj", .kt = D / 16, .nt = width / 16, .by_cols = true }, .{ .proj = "up_proj", .kt = D / 16, .nt = width / 16, .by_cols = true }, .{ .proj = "down_proj", .kt = width / 16, .nt = D / 16, .by_cols = false } };
     const short = [_][]const u8{ "g", "u", "d" };
     for (mats, short) |m, sh| {
         const tshape = [_]i64{ @intCast(E), @intCast(m.kt), @intCast(m.nt), 32 };
@@ -612,8 +608,7 @@ fn expertsExl3(b: *Builder, out: []const u8, li: usize) !void {
             try b.ck.readAt(se, if (m.by_cols) 0 else b.rank * su.len, su);
             try b.ck.readAt(ve, if (m.by_cols) b.rank * sv.len else 0, sv);
             if (m.by_cols) { // gate and up: one input rotation shared by every expert of the layer? (exl3_shx)
-                if (std.mem.eql(u8, sh, "g") and x == 0) @memcpy(b.suh_first[0..su.len], su)
-                else if (!std.mem.eql(u8, su, b.suh_first[0..su.len])) b.exl3_shx = false;
+                if (std.mem.eql(u8, sh, "g") and x == 0) @memcpy(b.suh_first[0..su.len], su) else if (!std.mem.eql(u8, su, b.suh_first[0..su.len])) b.exl3_shx = false;
             }
         }
         try b.put(tn, .i32, &tshape, words);
@@ -676,8 +671,7 @@ fn dsa(b: *Builder, out: []const u8, i: usize) !void {
     var o: [160]u8 = undefined;
     var f: [256]u8 = undefined;
     var f2: [256]u8 = undefined;
-    try b.stack(try std.fmt.bufPrint(&o, "{s}.proj", .{out}), &.{ try fullName(&f, "layers.{d}.self_attn.q_a_proj.weight", .{i}),
-        try fullName(&f2, "layers.{d}.self_attn.kv_a_proj_with_mqa.weight", .{i}) });
+    try b.stack(try std.fmt.bufPrint(&o, "{s}.proj", .{out}), &.{ try fullName(&f, "layers.{d}.self_attn.q_a_proj.weight", .{i}), try fullName(&f2, "layers.{d}.self_attn.kv_a_proj_with_mqa.weight", .{i}) });
     try b.tensor(try std.fmt.bufPrint(&o, "{s}.q_norm", .{out}), try fullName(&f, "layers.{d}.self_attn.q_a_layernorm.weight", .{i}), false);
     try b.tensor(try std.fmt.bufPrint(&o, "{s}.kv_norm", .{out}), try fullName(&f, "layers.{d}.self_attn.kv_a_layernorm.weight", .{i}), false);
     try b.linear(try std.fmt.bufPrint(&o, "{s}.q_b", .{out}), try fullName(&f, "layers.{d}.self_attn.q_b_proj.weight", .{i}));
@@ -707,8 +701,7 @@ fn dsa(b: *Builder, out: []const u8, i: usize) !void {
         }
     }
     try b.linear(try std.fmt.bufPrint(&o, "{s}.o", .{out}), try fullName(&f, "layers.{d}.self_attn.o_proj.weight", .{i}));
-    try b.stack(try std.fmt.bufPrint(&o, "{s}.index.kw", .{out}), &.{ try fullName(&f, "layers.{d}.self_attn.indexer.wk.weight", .{i}),
-        try fullName(&f2, "layers.{d}.self_attn.indexer.weights_proj.weight", .{i}) });
+    try b.stack(try std.fmt.bufPrint(&o, "{s}.index.kw", .{out}), &.{ try fullName(&f, "layers.{d}.self_attn.indexer.wk.weight", .{i}), try fullName(&f2, "layers.{d}.self_attn.indexer.weights_proj.weight", .{i}) });
     try b.linear(try std.fmt.bufPrint(&o, "{s}.index.qb", .{out}), try fullName(&f, "layers.{d}.self_attn.indexer.wq_b.weight", .{i}));
     try b.tensor(try std.fmt.bufPrint(&o, "{s}.index.ln_w", .{out}), try fullName(&f, "layers.{d}.self_attn.indexer.k_norm.weight", .{i}), false);
     try b.tensor(try std.fmt.bufPrint(&o, "{s}.index.ln_b", .{out}), try fullName(&f, "layers.{d}.self_attn.indexer.k_norm.bias", .{i}), false);
@@ -720,8 +713,7 @@ fn mlp(b: *Builder, out: []const u8, prefix: []const u8) !void {
     var o: [160]u8 = undefined;
     var f: [256]u8 = undefined;
     var f2: [256]u8 = undefined;
-    try b.stack(try std.fmt.bufPrint(&o, "{s}.gu", .{out}), &.{ try std.fmt.bufPrint(&f, "{s}gate_proj.weight", .{prefix}),
-        try std.fmt.bufPrint(&f2, "{s}up_proj.weight", .{prefix}) });
+    try b.stack(try std.fmt.bufPrint(&o, "{s}.gu", .{out}), &.{ try std.fmt.bufPrint(&f, "{s}gate_proj.weight", .{prefix}), try std.fmt.bufPrint(&f2, "{s}up_proj.weight", .{prefix}) });
     try b.linear(try std.fmt.bufPrint(&o, "{s}.down", .{out}), try std.fmt.bufPrint(&f, "{s}down_proj.weight", .{prefix}));
 }
 
@@ -775,8 +767,7 @@ pub const Cfg = struct {
         }
         const t = v.object.get("text_config").?.object;
         const n: usize = @intCast(t.get("num_hidden_layers").?.integer);
-        var c: Cfg = .{ .exl3 = exl3, .layers = n, .dense = @intCast(t.get("first_k_dense_replace").?.integer), .mtp = (if (t.get("num_nextn_predict_layers")) |x| x.integer else 0) > 0,
-            .vocab = @intCast(t.get("vocab_size").?.integer) };
+        var c: Cfg = .{ .exl3 = exl3, .layers = n, .dense = @intCast(t.get("first_k_dense_replace").?.integer), .mtp = (if (t.get("num_nextn_predict_layers")) |x| x.integer else 0) > 0, .vocab = @intCast(t.get("vocab_size").?.integer) };
         if (n > 64) return error.TooManyLayers;
         for (t.get("layer_types").?.array.items, 0..) |x, i| c.kinds[i] = std.mem.eql(u8, x.string, "linear_attention");
         if (t.get("hidden_size").?.integer != kern.D or t.get("n_routed_experts").?.integer != kern.EXPERTS or t.get("num_experts_per_tok").?.integer != kern.TOPK or
@@ -827,16 +818,15 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, ctx: *const api.Ctx, dir: []cons
     const c = try Cfg.read(arena.allocator(), io, dir);
     var store = api.Store.init(gpa);
     errdefer store.deinit();
-    var b: Builder = .{ .gpa = gpa, .ck = &ck, .dry = false, .rank = rank, .store = &store, .d = ctx.d,
-        .dense_bits = try envBits("TF_GLM_DENSE_BITS"), .head_bits = try envBits("TF_GLM_HEAD_BITS"), .draft_head_bits = try envBits("TF_GLM_DRAFT_HEAD_BITS"), .kda_proj_bits = try envBits("TF_GLM_KDA_PROJ_BITS"), .experts_sym = envSym(), .expert_sim_bits = envSimBits(), .experts3 = envBits3(), .sim_proj = envSimProj() };
+    var b: Builder = .{ .gpa = gpa, .ck = &ck, .dry = false, .rank = rank, .store = &store, .d = ctx.d, .dense_bits = try envBits("TF_GLM_DENSE_BITS"), .head_bits = try envBits("TF_GLM_HEAD_BITS"), .draft_head_bits = try envBits("TF_GLM_DRAFT_HEAD_BITS"), .kda_proj_bits = try envBits("TF_GLM_KDA_PROJ_BITS"), .experts_sym = envSym(), .expert_sim_bits = envSimBits(), .experts3 = envBits3(), .sim_proj = envSimProj() };
     b.exl3 = c.exl3;
     if (c.exl3) b.experts_sym = false;
     try build(&b, &c);
     const vl = c.vocab / WORLD;
     const facts = [_]struct { []const u8, i64 }{
-        .{ "rank", rank }, .{ "world", WORLD }, .{ "vocab", @intCast(c.vocab) }, .{ "vocab_shard", @intCast(vl) },
-        .{ "vocab_offset", @intCast(rank * vl) }, .{ "layers", @intCast(c.layers) }, .{ "dense", @intCast(c.dense) },
-        .{ "mtp", @intFromBool(c.mtp) }, .{ "device_bytes", @intCast(b.bytes) }, .{ "experts_sym", @intFromBool(b.experts_sym) }, .{ "experts3", @intFromBool(b.experts3) }, .{ "exl3", @intFromBool(b.exl3) },
+        .{ "rank", rank },                                               .{ "world", WORLD },                             .{ "vocab", @intCast(c.vocab) },           .{ "vocab_shard", @intCast(vl) },
+        .{ "vocab_offset", @intCast(rank * vl) },                        .{ "layers", @intCast(c.layers) },               .{ "dense", @intCast(c.dense) },           .{ "mtp", @intFromBool(c.mtp) },
+        .{ "device_bytes", @intCast(b.bytes) },                          .{ "experts_sym", @intFromBool(b.experts_sym) }, .{ "experts3", @intFromBool(b.experts3) }, .{ "exl3", @intFromBool(b.exl3) },
         .{ "exl3_shx", @intFromBool(b.exl3 and b.exl3_shx and !b.dry) },
     };
     for (facts) |fct| try store.ints.put(try gpa.dupe(u8, fct[0]), fct[1]);
@@ -854,8 +844,7 @@ pub fn deviceBytes(io: std.Io, dir: []const u8) !u64 {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const c = try Cfg.read(arena.allocator(), io, dir);
-    var b: Builder = .{ .gpa = gpa, .ck = &ck, .dry = true, .rank = 0, .dense_bits = try envBits("TF_GLM_DENSE_BITS"),
-        .head_bits = try envBits("TF_GLM_HEAD_BITS"), .draft_head_bits = try envBits("TF_GLM_DRAFT_HEAD_BITS"), .kda_proj_bits = try envBits("TF_GLM_KDA_PROJ_BITS"), .experts_sym = envSym(), .expert_sim_bits = envSimBits(), .experts3 = envBits3(), .sim_proj = envSimProj() };
+    var b: Builder = .{ .gpa = gpa, .ck = &ck, .dry = true, .rank = 0, .dense_bits = try envBits("TF_GLM_DENSE_BITS"), .head_bits = try envBits("TF_GLM_HEAD_BITS"), .draft_head_bits = try envBits("TF_GLM_DRAFT_HEAD_BITS"), .kda_proj_bits = try envBits("TF_GLM_KDA_PROJ_BITS"), .experts_sym = envSym(), .expert_sim_bits = envSimBits(), .experts3 = envBits3(), .sim_proj = envSimProj() };
     b.exl3 = c.exl3;
     try build(&b, &c);
     return b.bytes;
