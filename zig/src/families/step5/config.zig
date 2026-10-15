@@ -9,6 +9,8 @@ pub const Layer = struct { kind: Kind, span: u32, theta: f32, limit: f32, shared
 pub const Config = struct {
     hidden: u32 = 4096,
     layers: u32 = 92,
+    /// MTP layers after the main stack (their per-layer entries follow the main stack's).
+    mtp: u32 = 0,
     vocab: u32 = 128896,
     eps: f32 = 1e-5,
     heads: u32 = 64,
@@ -90,6 +92,9 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     var c = Config{};
     c.hidden = try int(t, "hidden_size");
     c.layers = try int(t, "num_hidden_layers");
+    if (t.get("num_nextn_predict_layers")) |v| if (v == .integer and v.integer > 0) {
+        c.mtp = @intCast(v.integer);
+    };
     c.vocab = try int(t, "vocab_size");
     c.eps = @floatCast(try number(try field(t, "rms_norm_eps")));
     c.heads = try int(t, "num_attention_heads");
@@ -103,7 +108,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     c.routed_scale = @floatCast(try number(try field(t, "moe_router_scaling_factor")));
     c.window = try int(t, "sliding_window");
     c.context = try int(t, "max_position_embeddings");
-    if (c.layers > max_layers or c.heads % c.kv_heads != 0 or c.head_dim % 32 != 0 or c.head_dim > 256) return error.BadStep5Config;
+    if (c.layers + c.mtp > max_layers or c.heads % c.kv_heads != 0 or c.head_dim % 32 != 0 or c.head_dim > 256) return error.BadStep5Config;
     const norm = try field(t, "norm_expert_weight");
     if (norm != .bool or !norm.bool) return error.UnsupportedStep5Router;
     const sparse = try field(t, "sparse_config");
@@ -121,17 +126,18 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     if (eos == .array and eos.array.items.len == 2) {
         for (&c.eos, eos.array.items) |*e, v| e.* = @intCast(v.integer);
     }
-    const kinds = try list(t, "layer_types", c.layers);
-    const factors = try list(t, "partial_rotary_factors", c.layers);
-    const thetas = try list(t, "rope_theta", c.layers);
-    const limits = try list(t, "swiglu_limits", c.layers);
-    const shared = try list(t, "swiglu_limits_shared", c.layers);
+    const all = c.layers + c.mtp;
+    const kinds = try list(t, "layer_types", all);
+    const factors = try list(t, "partial_rotary_factors", all);
+    const thetas = try list(t, "rope_theta", all);
+    const limits = try list(t, "swiglu_limits", all);
+    const shared = try list(t, "swiglu_limits_shared", all);
     var moe: std.StaticBitSet(max_layers) = .empty;
     for ((try field(t, "moe_layer_list")).array.items) |v| {
         if (v != .integer or v.integer < 0 or v.integer >= max_layers) return error.BadStep5Config;
         moe.set(@intCast(v.integer));
     }
-    for (0..c.layers) |i| {
+    for (0..all) |i| {
         if (kinds[i] != .string) return error.BadStep5Config;
         const kind: Kind = if (std.mem.eql(u8, kinds[i].string, "sliding_attention")) .sliding else if (std.mem.eql(u8, kinds[i].string, "full_attention")) .full else return error.BadStep5Config;
         var span: u32 = @intFromFloat(@round(@as(f64, @floatFromInt(c.head_dim)) * try number(factors[i])));

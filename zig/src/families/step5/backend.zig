@@ -1,4 +1,4 @@
-//! Step-5 behind the lane engine's backend: one-row rounds, a cache a stream, draws by the shared keyed sampler.
+//! Step-5 behind the lane engine's backend: windows of the pending token and the MTP layers' drafts, a cache a stream.
 const std = @import("std");
 const lanes = @import("lanes");
 const st = @import("state.zig");
@@ -9,6 +9,9 @@ const be = lanes.backend;
 
 /// The longest context a stream may take, the streams at once, and the bytes every stream's caches may hold.
 pub const Options = struct { capacity: usize, streams: u32 = 4, budget: u64 };
+
+/// Drafts a window holds at most: one a MTP layer.
+pub const max_drafts = 3;
 
 pub const Metal = struct {
     gpa: std.mem.Allocator,
@@ -41,11 +44,13 @@ pub const Metal = struct {
     }
 
     pub fn facts(self: *const Metal) lanes.Model {
-        return .{ .exact_width = 1, .max_streams = self.options.streams, .streams_exact = true };
+        // rows are independent in every kernel of a decode window, so any width to 16 gives one-row steps' bits
+        const mtp = self.model.config.mtp > 0;
+        return .{ .exact_width = st.window_rows, .mtp = mtp, .speculate = mtp, .speculate_early = false, .drafts = if (mtp) max_drafts else 1, .max_streams = self.options.streams, .streams_exact = true };
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .first_row = firstRowFn } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .first_row = firstRowFn, .held = heldFn } };
     }
 
     fn cast(ptr: *anyopaque) *Metal {
@@ -60,14 +65,21 @@ pub const Metal = struct {
         return cache.logits.slice(u16, self.model.config.vocab);
     }
 
-    /// Run `ids` at the cache's end and keep them: prompt chunks past 16 rows, decode rows else.
+    /// Run `ids` at the cache's end and keep them; with MTP the first MTP layer absorbs each row with a known next.
     fn feed(self: *Metal, cache: *st.Cache, ids: []const u32) !void {
+        const c = &self.model.config;
         var at: usize = 0;
         while (at < ids.len) {
             const end = @min(ids.len, at + st.prompt_rows);
             const s = if (end - at > st.window_rows) &self.prompt else &self.scratch;
-            try fwd.run(self.model, s, cache, ids[at..end]);
-            cache.len += end - at;
+            const n = end - at;
+            try fwd.run(self.model, s, cache, ids[at..end], .{ .hidden = .{ .buf = s.hid } });
+            const start = cache.len;
+            cache.len += n;
+            const last: [*]const u8 = s.hid.contents() + (n - 1) * c.hidden * 4;
+            @memcpy(cache.hidden.contents()[0 .. c.hidden * 4], last[0 .. c.hidden * 4]);
+            const known = if (end < ids.len) n else n - 1; // rows whose next token is in ids
+            if (c.mtp > 0 and known > 0) try fwd.mtp(self.model, s, cache, 0, .{ .buf = s.hid }, ids[at + 1 .. at + 1 + known], start);
             at = end;
         }
     }
@@ -114,7 +126,8 @@ pub const Metal = struct {
             .value => |v| v,
             .handle => |h| @intCast(h),
         };
-        try self.feed(cache, &.{token});
+        try fwd.run(self.model, &self.scratch, cache, &.{token}, .{ .hidden = .{ .buf = cache.hidden } });
+        cache.len += 1;
         return try draw(self.gpa, self.logits(cache), stream.sampling, position, &.{});
     }
 
@@ -129,19 +142,35 @@ pub const Metal = struct {
         return @intCast(handle);
     }
 
-    /// One-row windows (the exact width is 1): each stream's pending token runs and is kept; `keep` rolls back.
+    /// Each window's pending token and drafts in one forward, every row drawn and kept until `keep` rolls back.
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) !void {
         const self = cast(ptr);
-        const words = (self.model.config.vocab + 31) / 32;
+        const c = &self.model.config;
+        const words = (c.vocab + 31) / 32;
         if (windows.len != out.len) return error.InvalidStep5Windows;
         for (windows, out) |w, o| {
-            if (w.rows() != 1 or w.parents != null or o.sampled.len != 1 or o.drafts.len != 0) return error.UnsupportedStep5Window;
+            const rows = w.rows();
+            if (rows > st.window_rows or w.parents != null or o.sampled.len != rows or o.drafts.len != rows - 1) return error.UnsupportedStep5Window;
             const cache = try self.cacheOf(w.stream);
-            if (w.positions[0] != cache.len + 1) return error.InvalidStep5Position;
-            try self.feed(cache, &.{w.pending});
-            const mask = if (w.masks.len >= words) w.masks[0..words] else &.{};
-            o.sampled[0] = try draw(self.gpa, self.logits(cache), w.stream.sampling, w.positions[0], mask);
-            if (o.rows.len == 1) o.rows[0] = row(self.logits(cache), o.sampled[0], w.stream.logprobs orelse 0);
+            if (w.held > cache.nheld) return error.Step5DraftsNotHeld;
+            for (w.positions, 0..) |p, r| if (p != cache.len + r + 1) return error.InvalidStep5Position;
+            var ids: [st.window_rows]u32 = undefined;
+            ids[0] = w.pending;
+            @memcpy(ids[1..][0..w.held], cache.held[0..w.held]);
+            @memcpy(ids[1 + w.held ..][0..w.tokens.len], w.tokens);
+            try fwd.run(self.model, &self.scratch, cache, ids[0..rows], .{ .all = true, .hidden = .{ .buf = cache.hidden } });
+            cache.len += rows;
+            cache.nheld = 0;
+            @memcpy(o.drafts, ids[1..rows]);
+            const all = self.scratch.logits_all.slice(u16, rows * c.vocab);
+            for (0..rows) |r| {
+                const l = all[r * c.vocab ..][0..c.vocab];
+                const mask = if (w.masks.len >= (r + 1) * words) w.masks[r * words ..][0..words] else &.{};
+                o.sampled[r] = try draw(self.gpa, l, w.stream.sampling, w.positions[r], mask);
+                if (o.rows.len == rows) o.rows[r] = row(l, o.sampled[r], w.stream.logprobs orelse 0);
+            }
+            // the last kept row's logits are the next first draw's (the lane core keeps every row here)
+            @memcpy(cache.logits.slice(u16, c.vocab), all[(rows - 1) * c.vocab ..][0..c.vocab]);
         }
     }
 
@@ -149,13 +178,63 @@ pub const Metal = struct {
         const self = cast(ptr);
         for (windows, paths) |w, path| {
             const cache = try self.cacheOf(w.stream);
-            if (path.len > w.rows() or w.rows() > cache.len) return error.UnsupportedStep5Window;
+            for (path, 0..) |r, i| if (r != i) return error.UnsupportedStep5Tree;
+            if (path.len == 0 or path.len > w.rows() or w.rows() > cache.len) return error.UnsupportedStep5Window;
             cache.len = cache.len - w.rows() + path.len;
         }
     }
 
-    fn draftFn(_: *anyopaque, requests: []const be.DraftRequest) !void {
-        for (requests) |r| if (r.depth != 0) return error.Step5HasNoDraftHead;
+    /// MTP layer 0 absorbs the kept rows and drafts from the last; further drafts chain the next layers, greedy.
+    fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) !void {
+        const self = cast(ptr);
+        const c = &self.model.config;
+        const s = &self.scratch;
+        for (requests) |r| {
+            const cache = try self.cacheOf(r.stream);
+            cache.nheld = 0;
+            if (c.mtp == 0) {
+                if (r.depth != 0) return error.Step5CheckpointHasNoMtp;
+                continue;
+            }
+            var follow: [st.window_rows]u32 = undefined;
+            var kept: usize = 1;
+            if (r.rows) |rows| {
+                kept = rows.len;
+                for (rows, 0..) |x, i| if (x != i) return error.UnsupportedStep5Tree;
+                if (kept == 0 or kept > st.window_rows or r.follow.len < kept) return error.UnsupportedStep5Window;
+                @memcpy(follow[0..kept], r.follow[0..kept]);
+            } else if (r.follow.len > 0) {
+                follow[0] = r.follow[r.follow.len - 1];
+            } else {
+                const f = r.first orelse return error.NoFirstToken;
+                follow[0] = switch (f) {
+                    .value => |v| v,
+                    .handle => |h| @intCast(h),
+                };
+            }
+            // kept row i sits at position (r.position - 1 - kept) + i, its residual in cache.hidden's row i
+            const first: usize = @intCast(r.position - 1 - kept);
+            try fwd.mtp(self.model, s, cache, 0, .{ .buf = cache.hidden }, follow[0..kept], first);
+            const depth = @min(r.depth, max_drafts);
+            var pos = first + kept - 1;
+            var k: usize = 0;
+            while (k < depth) : (k += 1) {
+                const d: u32 = @intCast(argmax(s.logits_all.slice(u16, c.vocab)));
+                cache.held[k] = d;
+                cache.nheld = k + 1;
+                if (k + 1 == depth) break;
+                pos += 1;
+                @memcpy(s.chain.contents()[0 .. c.hidden * 4], (s.hid.contents() + (if (k == 0) kept - 1 else 0) * c.hidden * 4)[0 .. c.hidden * 4]);
+                try fwd.mtp(self.model, s, cache, @min(k + 1, c.mtp - 1), .{ .buf = s.chain }, &.{d}, pos);
+            }
+        }
+    }
+
+    /// The held drafts in window order, for a grammar to walk.
+    fn heldFn(ptr: *anyopaque, stream: *lanes.Stream, out: []u32) !void {
+        const cache = try cast(ptr).cacheOf(stream);
+        if (out.len > cache.nheld) return error.Step5DraftsNotHeld;
+        @memcpy(out, cache.held[0..out.len]);
     }
 
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {

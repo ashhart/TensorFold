@@ -38,7 +38,7 @@ inline void s5_norm_row(const device float* R, const device float* w, device bfl
   const float inv = rsqrt(total / float(a.width) + a.eps);
   for (uint i = t; i < a.width; i += n) {
     const float v = ROUND_IN ? float(bfloat(x[i])) : x[i];
-    out[(size_t)row * a.width + i] = bfloat(v * inv * (w[i] + 1.0f));
+    out[(size_t)row * (a.stride ? a.stride : a.width) + i] = bfloat(v * inv * (w[i] + 1.0f));
   }
 }
 
@@ -162,4 +162,16 @@ inline void s5_norm_row(const device float* R, const device float* w, device bfl
 [[kernel]] void s5_rows_by_order(const device bfloat* X [[buffer(0)]], const device int* order [[buffer(1)]],
     constant s5_args& a [[buffer(2)]], device bfloat* Y [[buffer(3)]], uint2 p [[thread_position_in_grid]]) {
   if (p.x < a.width && p.y < a.rows) Y[(size_t)p.y * a.width + p.x] = X[(size_t)(order[p.y] / int(a.heads)) * a.width + p.x];
+}
+
+// Y[slot(row) * stride + i] = X[row * width + i], fp32: a window's residual rows kept for the draft head.
+[[kernel]] void s5_copy32(const device float* X [[buffer(0)]], constant s5_args& a [[buffer(1)]],
+    device float* Y [[buffer(2)]], uint2 p [[thread_position_in_grid]]) {
+  if (p.x < a.width && p.y < a.rows) Y[s5_slot(a, p.y) * a.stride + p.x] = X[(size_t)p.y * a.width + p.x];
+}
+
+// R = float(X): eh_proj's bf16 rows as an MTP layer's fp32 residual.
+[[kernel]] void s5_widen(device float* R [[buffer(0)]], const device bfloat* X [[buffer(1)]],
+    constant s5_args& a [[buffer(2)]], uint2 p [[thread_position_in_grid]]) {
+  if (p.x < a.width && p.y < a.rows) R[(size_t)p.y * a.width + p.x] = float(X[(size_t)p.y * a.width + p.x]);
 }

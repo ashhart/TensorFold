@@ -43,7 +43,7 @@ class Step5:
         self.moe = set(c["moe_layer_list"])
         self.window = c["sliding_window"]
         self.rope = []
-        for i in range(self.L):
+        for i in range(self.L + c.get("num_nextn_predict_layers", 0)):  # the MTP layers' entries follow
             span = int(round(self.D * c["partial_rotary_factors"][i]))
             span -= span % 2
             self.rope.append((span, float(c["rope_theta"][i])))

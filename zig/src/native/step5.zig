@@ -59,7 +59,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.model = model;
     h.metal = try s5.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .budget = budget });
     errdefer h.metal.deinit();
-    h.config = try lanes.Config.init(gpa, h.metal.facts(), 1, 0);
+    h.config = try lanes.Config.init(gpa, h.metal.facts(), s5.state.window_rows, s5.state.window_rows - 1);
     errdefer h.config.deinit(gpa);
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());

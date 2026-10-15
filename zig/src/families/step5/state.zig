@@ -21,7 +21,8 @@ pub fn slidingRing(c: *const cfg.Config) usize {
 pub fn cacheBytes(c: *const cfg.Config, capacity: usize) usize {
     var total: usize = @as(usize, c.vocab) * 2;
     const kv: usize = c.kvWidth() * 2 * 2;
-    for (c.layer[0..c.layers]) |l| total += if (l.kind == .sliding) slidingRing(c) * kv else capacity * kv + regions(c, capacity) * c.proxy * 2 + 2 * index_ring * c.proxy * 2;
+    total += window_rows * @as(usize, c.hidden) * 4;
+    for (c.layer[0 .. c.layers + c.mtp]) |l| total += if (l.kind == .sliding) slidingRing(c) * kv else capacity * kv + regions(c, capacity) * c.proxy * 2 + 2 * index_ring * c.proxy * 2;
     return total;
 }
 
@@ -30,19 +31,22 @@ pub fn regions(c: *const cfg.Config, capacity: usize) usize {
 }
 
 pub const Cache = struct {
-    kv: mtl.Buffer, // keys then values of each layer, at `layer_at`
+    kv: mtl.Buffer, // keys then values of each layer (MTP layers after the main stack), at `layer_at`
     index: mtl.Buffer, // full layers: summaries, then the k and z rings, at `index_at`
     logits: mtl.Buffer,
+    hidden: mtl.Buffer, // fp32 residual rows of the last window, before the final norm: the draft head's input
+    held: [8]u32 = undefined, // the draft head's tokens for the next window
+    nheld: usize = 0,
     layer_at: [cfg.max_layers]usize = @splat(0),
     index_at: [cfg.max_layers]usize = @splat(0),
     capacity: usize,
     len: usize = 0,
 
     pub fn init(device: mtl.Device, c: *const cfg.Config, capacity: usize) !Cache {
-        var out = Cache{ .kv = undefined, .index = undefined, .logits = undefined, .capacity = capacity };
+        var out = Cache{ .kv = undefined, .index = undefined, .logits = undefined, .hidden = undefined, .capacity = capacity };
         var kv: usize = 0;
         var index: usize = 0;
-        for (c.layer[0..c.layers], 0..) |l, i| {
+        for (c.layer[0 .. c.layers + c.mtp], 0..) |l, i| {
             out.layer_at[i] = kv;
             kv += (if (l.kind == .sliding) slidingRing(c) else capacity) * c.kvWidth() * 2 * 2;
             if (l.kind == .full) {
@@ -55,6 +59,8 @@ pub const Cache = struct {
         out.index = try device.buffer(@max(index, 16), mtl.ResourceOptions.private);
         errdefer out.index.deinit();
         out.logits = try device.buffer(@as(usize, c.vocab) * 2, mtl.ResourceOptions.shared);
+        errdefer out.logits.deinit();
+        out.hidden = try device.buffer(window_rows * @as(usize, c.hidden) * 4, mtl.ResourceOptions.shared);
         return out;
     }
 
@@ -93,10 +99,11 @@ pub const Cache = struct {
         self.kv.deinit();
         self.index.deinit();
         self.logits.deinit();
+        self.hidden.deinit();
     }
 };
 
-const fields = [_][]const u8{ "ids", "resid", "x", "q", "qn", "k", "v", "g", "o", "y", "shared", "gate", "up", "act", "eg", "eu", "ea", "ey", "logits32", "pick", "wts", "iq", "iqn", "ik", "iz", "iw", "scores", "sel", "xs", "sums", "offsets", "order" };
+const fields = [_][]const u8{ "ids", "resid", "x", "q", "qn", "k", "v", "g", "o", "y", "shared", "gate", "up", "act", "eg", "eu", "ea", "ey", "logits32", "pick", "wts", "iq", "iqn", "ik", "iz", "iw", "scores", "sel", "xs", "sums", "offsets", "order", "cat", "hid", "chain", "logits_all" };
 
 pub const Scratch = struct {
     ids: mtl.Buffer,
@@ -131,6 +138,10 @@ pub const Scratch = struct {
     sums: mtl.Buffer,
     offsets: mtl.Buffer,
     order: mtl.Buffer,
+    cat: mtl.Buffer, // the MTP head: [enorm(embed) | hnorm(hidden)] rows, kept residual rows, a chain's hidden, every row's logits
+    hid: mtl.Buffer,
+    chain: mtl.Buffer,
+    logits_all: mtl.Buffer,
     route: [7]mtl.Buffer, // the router's per-Mac groups, unused on one Mac
     rows: usize,
 
@@ -152,6 +163,7 @@ pub const Scratch = struct {
             r * c.index_heads * 4, @min(r, score_rows) * c.kv_heads * regions(c, capacity) * 4, r * c.kv_heads * c.index_topk * 4,
             if (prompt) slots * h * 2 else 16, if (prompt) @max(r * c.intermediate / 64, slots * h / 128) * 4 else 16,
             c.experts * 4, slots * 4,
+            r * h * 2 * 2, r * h * 4, h * 4, @min(r, window_rows) * @as(usize, c.vocab) * 2,
         };
         var s: Scratch = undefined;
         var made: usize = 0;

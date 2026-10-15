@@ -14,17 +14,21 @@ pub const Indexer = struct { q: Linear, k: Linear, z: Linear, w: Tensor, q_norm:
 pub const Attention = struct { q: Linear, k: Linear, v: Linear, o: Linear, g: Linear, q_norm: Tensor, k_norm: Tensor, indexer: ?Indexer = null };
 pub const Mlp = struct { gate: Linear, up: Linear, down: Linear };
 pub const Moe = struct { router: mtl.Buffer, bias: Tensor, gate: rows.Experts, up: rows.Experts, down: rows.Experts, shared: Mlp };
+/// An MTP layer's own parts beside its decoder layer: eh_proj [hidden, 2 hidden], enorm, hnorm, the head and its norm.
+pub const Mtp = struct { eh: Linear, enorm: Tensor, hnorm: Tensor, norm: Tensor, head: Linear };
 pub const Layer = struct { input_norm: Tensor, post_norm: Tensor, attn: Attention, ffn: union(enum) { dense: Mlp, moe: Moe } };
 
 pub const Weights = struct {
     embed: Linear,
     head: Linear,
     norm: Tensor,
-    layers: []Layer,
+    layers: []Layer, // the main stack, then the MTP layers' decoder layers
+    mtp: []Mtp,
 
     pub fn deinit(w: *Weights, gpa: std.mem.Allocator) void {
         for (w.layers) |l| if (l.ffn == .moe) l.ffn.moe.router.deinit();
         gpa.free(w.layers);
+        gpa.free(w.mtp);
     }
 };
 
@@ -82,8 +86,10 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ck.Checkpoint,
         .embed = try affine(c, "model.", "embed_tokens", 1, f.vocab, h),
         .head = try affine(c, "", "lm_head", 1, f.vocab, h),
         .norm = try tensor(c, "model.", "norm.weight", .f32, h),
-        .layers = try gpa.alloc(Layer, f.layers),
+        .layers = try gpa.alloc(Layer, f.layers + f.mtp),
+        .mtp = try gpa.alloc(Mtp, f.mtp),
     };
+    errdefer gpa.free(w.mtp);
     var made: usize = 0;
     errdefer {
         for (w.layers[0..made]) |l| if (l.ffn == .moe) l.ffn.moe.router.deinit();
@@ -146,6 +152,17 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ck.Checkpoint,
             .shared = try mlp(c, try name(&sb, p, "share_expert"), h, f.shared_intermediate),
         } };
         made += 1;
+    }
+    for (w.mtp, 0..) |*t, k| {
+        var pb: [64]u8 = undefined;
+        const p = try std.fmt.bufPrint(&pb, "model.layers.{d}.", .{f.layers + k});
+        t.* = .{
+            .eh = try affine(c, p, "eh_proj", 1, h, 2 * h),
+            .enorm = try tensor(c, p, "enorm.weight", .f32, h),
+            .hnorm = try tensor(c, p, "hnorm.weight", .f32, h),
+            .norm = try tensor(c, p, "transformer.shared_head.norm.weight", .f32, h),
+            .head = try affine(c, p, "transformer.shared_head.output", 1, f.vocab, h),
+        };
     }
     return w;
 }

@@ -113,8 +113,8 @@ def refine(g: mx.array, q: mx.array, s: mx.array, z: mx.array, bits: int, rounds
 
 
 class Writer:
-    def __init__(self, out: Path):
-        self.out, self.buf, self.size, self.n, self.map, self.total = out, {}, 0, 0, {}, 0
+    def __init__(self, out: Path, stem: str = "model"):
+        self.out, self.stem, self.buf, self.size, self.n, self.map, self.total = out, stem, {}, 0, 0, {}, 0
 
     def add(self, name: str, a: mx.array):
         mx.eval(a)
@@ -128,16 +128,21 @@ class Writer:
         if not self.buf:
             return
         self.n += 1
-        fname = f"model-{self.n:05d}.safetensors"
+        fname = f"{self.stem}-{self.n:05d}.safetensors"
         mx.save_safetensors(str(self.out / fname), self.buf, metadata={"format": "mlx"})
         for k in self.buf:
             self.map[k] = fname
         self.buf, self.size = {}, 0
 
-    def finish(self):
+    def finish(self, merge: bool = False):
         self.flush()
+        path = self.out / "model.safetensors.index.json"
+        if merge:  # beside an existing checkpoint: add to its index
+            old = json.loads(path.read_text())
+            self.map = {**old["weight_map"], **self.map}
+            self.total += old["metadata"]["total_size"]
         idx = {"metadata": {"total_size": self.total}, "weight_map": dict(sorted(self.map.items()))}
-        (self.out / "model.safetensors.index.json").write_text(json.dumps(idx, indent=1) + "\n")
+        path.write_text(json.dumps(idx, indent=1) + "\n")
 
 
 def wanted(name: str, layers: int, args) -> bool:
@@ -146,6 +151,8 @@ def wanted(name: str, layers: int, args) -> bool:
     m = LAYER.match(name)
     if m:
         i = int(m.group(1))
+        if args.only_mtp:
+            return i >= layers
         return i < layers or (args.mtp and args.layers is None and i >= layers)
     return True
 
@@ -156,6 +163,7 @@ def main() -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--layers", type=int, help="write only layers [0, N) (bring-up slice)")
     ap.add_argument("--mtp", action="store_true", help="keep the MTP layers (full model only)")
+    ap.add_argument("--only-mtp", action="store_true", help="add the MTP layers to the checkpoint already at --out")
     ap.add_argument("--vision", action="store_true", help="keep the vision tower and projector")
     ap.add_argument("--unquantized", action="store_true", help="write bf16 (experts dequantised), for reference checks")
     args = ap.parse_args()
@@ -165,12 +173,14 @@ def main() -> int:
     layers = args.layers or tc["num_hidden_layers"]
     wmap = json.loads((args.src / "model.safetensors.index.json").read_text())["weight_map"]
     names = [n for n in wmap if not n.endswith("weight_scale_inv") and wanted(n, layers, args)]
+    if args.only_mtp:
+        names = [n for n in names if LAYER.match(n)]
     by_file: dict[str, list[str]] = {}
     for n in names:
         by_file.setdefault(wmap[n], []).append(n)
 
     args.out.mkdir(parents=True, exist_ok=True)
-    w = Writer(args.out)
+    w = Writer(args.out, "model-mtp" if args.only_mtp else "model")
     quant: dict[str, dict] = {}
     t0, done = time.time(), 0
     for fname in sorted(by_file):
@@ -208,6 +218,16 @@ def main() -> int:
                 done += 1
                 print(f"[{time.time() - t0:7.0f}s] {done}/{len(names)} {name} {tuple(t.shape)} {t.dtype}", flush=True)
                 del t
+    if args.only_mtp:
+        added = w.total
+        w.finish(merge=True)
+        old = json.loads((args.out / "config.json").read_text())
+        old_tc = old.get("text_config", old)
+        old_tc["num_nextn_predict_layers"] = tc["num_nextn_predict_layers"]
+        old["quantization"] = {**old.get("quantization", {}), **quant}
+        (args.out / "config.json").write_text(json.dumps(old, indent=1) + "\n")
+        print(f"added {added / 2**30:.1f} GiB of MTP layers to {args.out} ({time.time() - t0:.0f}s)")
+        return 0
     w.finish()
 
     if args.layers is not None:

@@ -14,8 +14,8 @@ const frags = @import("../../core/frags.zig");
 pub const Mm = struct { bits: u8, group: usize, pipes: affine_mm.Pipes };
 const weights = @import("weights.zig");
 
-pub const glue_names = [_][:0]const u8{ "s5_embed", "s5_norm", "s5_final_norm", "s5_qk", "s5_copy", "s5_gate", "s5_swiglu", "s5_add", "s5_moe_add", "s5_index_weights", "s5_index_norm", "s5_summarize", "s5_score", "s5_select", "s5_attend", "s5_sort", "s5_rows_by_order" };
-pub const Glue = enum { embed, norm, final_norm, qk, copy, gate, swiglu, add, moe_add, index_weights, index_norm, summarize, score, select, attend, sort, rows_by_order };
+pub const glue_names = [_][:0]const u8{ "s5_embed", "s5_norm", "s5_final_norm", "s5_qk", "s5_copy", "s5_gate", "s5_swiglu", "s5_add", "s5_moe_add", "s5_index_weights", "s5_index_norm", "s5_summarize", "s5_score", "s5_select", "s5_attend", "s5_sort", "s5_rows_by_order", "s5_copy32", "s5_widen" };
+pub const Glue = enum { embed, norm, final_norm, qk, copy, gate, swiglu, add, moe_add, index_weights, index_norm, summarize, score, select, attend, sort, rows_by_order, copy32, widen };
 
 pub const Model = struct {
     gpa: std.mem.Allocator,
