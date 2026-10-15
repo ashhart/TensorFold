@@ -33,6 +33,13 @@ pub fn chip(a: Allocator) ?[]const u8 {
     return std.fmt.allocPrint(a, "apple-m{d}", .{gen}) catch null;
 }
 
+/// The name of the system GPU the Metal engines open ("Apple M5 Max"); null without one.
+pub fn deviceName(a: Allocator, _: ?u32) ?[]const u8 {
+    const device = mtl.Device.init() catch return null;
+    defer device.deinit();
+    return a.dupe(u8, std.mem.span(device.name())) catch null;
+}
+
 /// The M generation in a Metal device name ("Apple M5 Max": 5).
 fn generation(name: []const u8) ?u32 {
     var words = std.mem.tokenizeScalar(u8, name, ' ');

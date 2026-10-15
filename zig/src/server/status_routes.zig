@@ -12,6 +12,11 @@ const Allocator = std.mem.Allocator;
 /// With keys on, health names nothing about the model.
 pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
     if (srv.keys) |k| if (k.enabled()) return conn.sendJson(200, "{\"status\": \"ok\"}");
+    routes.sendValue(conn, a, 200, try openHealth(srv, a, std.mem.indexOf(u8, conn.path, "reset_peak=1") != null));
+}
+
+/// The open health body: model, lanes, memory and live counts, then whichever of release, backend and GPU it knows.
+pub fn openHealth(srv: *Server, a: Allocator, reset_peak: bool) !Value {
     const o = try json.newObject(a);
     try o.put(a, "status", .{ .string = "ok" });
     try o.put(a, "model", .{ .string = srv.config.served_name });
@@ -24,14 +29,17 @@ pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
     srv.engine.status(&status, &.{});
     try o.put(a, "warming", .{ .bool = status.warming });
     const memory = try json.newObject(a);
-    if (srv.engine.memory(std.mem.indexOf(u8, conn.path, "reset_peak=1") != null)) |mem| {
+    if (srv.engine.memory(reset_peak)) |mem| {
         try memory.put(a, "active", try json.intValue(a, mem.active));
         try memory.put(a, "cache", try json.intValue(a, mem.cache));
         try memory.put(a, "peak", try json.intValue(a, mem.peak));
     }
     try o.put(a, "memory", .{ .object = memory });
     try o.put(a, "live", try live.snapshot(a, srv.engine));
-    routes.sendValue(conn, a, 200, .{ .object = o });
+    const ident = srv.config.identity;
+    for ([_][2][]const u8{ .{ "version", ident.version }, .{ "backend", ident.backend }, .{ "device", ident.device } }) |field|
+        if (field[1].len > 0) try o.put(a, field[0], .{ .string = field[1] });
+    return .{ .object = o };
 }
 
 pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {

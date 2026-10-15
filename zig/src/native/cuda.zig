@@ -36,6 +36,16 @@ pub fn chip(a: Allocator) ?[]const u8 {
     return chipClass(a, driver.capability(@intCast(ordinal orelse 0)) catch return null);
 }
 
+/// The name of the GPU a serve opens ("NVIDIA GB10"): --device, else TF_CUDA_DEVICE, else 0; null without one.
+pub fn deviceName(a: Allocator, flag: ?u32) ?[]const u8 {
+    const ordinal = flag orelse (envNumber(getenv("TF_CUDA_DEVICE")) catch return null) orelse 0;
+    var driver = cuda.Driver.open() catch return null;
+    defer driver.close();
+    var buf: [256]u8 = undefined;
+    const text = driver.deviceName(std.math.cast(c_int, ordinal) orelse return null, &buf) catch return null;
+    return a.dupe(u8, text) catch null;
+}
+
 fn chipClass(a: Allocator, capability: u32) ?[]const u8 {
     return std.fmt.allocPrint(a, "nvidia-sm{d}", .{capability}) catch null;
 }

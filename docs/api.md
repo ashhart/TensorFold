@@ -45,7 +45,7 @@ Prefer a restricted file over command-line keys, which can appear in the operati
 | Route | Behavior |
 | --- | --- |
 | `GET /v1/models` | Served model ID and any configured aliases (both servers) |
-| `GET /health` | Server health and available status information |
+| `GET /health` | Server health and available status information. With no keys configured, the native server also names its `version`, and its `backend` (`metal` or `cuda`) and GPU `device` when it knows them |
 | `GET /metrics`, `GET /v1/metrics` | Prometheus text: requests, KV occupancy, drafts and latency (both servers) |
 | `GET /dashboard` | Native live dashboard page when `--dashboard` is enabled |
 | `GET /stats` | Native JSON dashboard snapshot when `--dashboard` is enabled |

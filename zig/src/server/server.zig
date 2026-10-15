@@ -30,6 +30,8 @@ const Allocator = std.mem.Allocator;
 /// auto compacts near the window. fraction compacts past that share of it.
 pub const CompactAt = union(enum) { auto, fraction: f64 };
 
+pub const Identity = @import("identity.zig").Identity;
+
 pub const Config = struct {
     served_name: []const u8,
     model_dir: []const u8 = "",
@@ -66,6 +68,8 @@ pub const Config = struct {
     /// --learn-conversations: /v1/imprint answers; without it each of its routes refuses and names the flag.
     saved_conversations: bool = false,
     timeouts: http_conn.Timeouts = .{},
+    /// The open /health names these after its other keys; empty fields are left out.
+    identity: Identity = .{},
 };
 
 pub const Server = struct {
