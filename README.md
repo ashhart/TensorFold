@@ -96,7 +96,8 @@ Run it with `--drafter`. Without it the 27B decodes plain, which is slower than 
 Its prompt processing trails mlx_lm for now, and we are fixing it. An M3 Ultra reads prompts at about half of mlx_lm's speed from 8k to 30k tokens, and served cold prefill on an M5 Max also measured below mlx_lm.
 Bonsai, Gemma 4, Qwen3.6 and DeepSeek-V4 are still under qualification for 1.0.x.
 The Python 0.6.6 engine remains available at the `v0.6.6` tag for those models and other backends.
-On CUDA, 1.0.11 serves Nemotron on a GB10, greedy and sampled, with concurrent requests sharing each round.
+On CUDA the native server runs Nemotron 3.5 Lightning on a GB10, an RTX 3090 and an RTX PRO 6000, and Nemotron 3.5 Super VL with images on one GB10 or two, greedy and sampled, with concurrent requests sharing each round.
+GLM-5.3-Flash also serves across two CUDA ranks, and Liquid AI's d1-3B answers `/v1/systemone` and `/v1/decisions`.
 The Linux x86_64 archive adds NVIDIA Ampere cards with compute capability 8.0 (the A100) and 8.6 (the RTX 30 series, RTX A6000, A10 and A40; tested on an RTX 3090), and Blackwell cards with compute capability 12.0 (the RTX 50 series and RTX PRO 6000 Blackwell), tested on an RTX PRO 6000; FP8 and NVFP4 checkpoints need compute capability 9.0 or newer.
 
 ## Exact decoding
