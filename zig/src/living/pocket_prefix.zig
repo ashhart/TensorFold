@@ -88,7 +88,7 @@ pub fn learn(p: anytype, t: anytype, s: *Prefixes, sq: Seq, sp: Span, which: usi
     const k = &s.list.items[which];
     if (k.seen or sq.skip > 0) return;
     k.seen = true;
-    const d = t.config().hidden;
+    const d = p.hidden;
     var limit = @min(sq.decide, sq.start - 1);
     for (sq.nudge.layers, sq.nudge.rows) |mask, row| if (mask != 0) {
         limit = @min(limit, row);
