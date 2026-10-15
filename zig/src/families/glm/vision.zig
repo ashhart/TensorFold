@@ -147,6 +147,44 @@ const Weights = struct {
     m_down: Ref,
 };
 
+/// The scratch for `P` patches: its parts, each 256-aligned in one buffer, and the query rows attention scores at once.
+const Scratch = struct {
+    parts: [16]usize,
+    chunk: u32,
+
+    fn of(P: usize) Scratch {
+        // the scores take at most 256 MiB: 16 heads of `chunk` rows by P keys in fp32
+        const chunk: u32 = @intCast(std.math.clamp((256 << 20) / (heads * P * 4) / 64 * 64, 64, 4096));
+        return .{ .chunk = chunk, .parts = .{ P * patch_width * 2, P * 64 * 4, P * 64 * 4, P * hidden * 2, P * hidden * 2, P * hidden * 2, P * hidden * 2, P * 3 * hidden * 2, P * hidden * 4, P * hidden * 4, P * hidden * 4, @as(usize, heads) * chunk * P * 4, @as(usize, heads) * chunk * head_dim * 4, P * mlp_inter * 2, P * mlp_inter * 2, P * mlp_inter * 2 } };
+    }
+
+    fn bytes(s: Scratch) usize {
+        var total: usize = 0;
+        for (s.parts) |n| total += std.mem.alignForward(usize, n, 256);
+        return total;
+    }
+};
+
+/// What --vision adds to the load limit's count before the load: the tower's weights and scratch, and the prompt rows.
+pub fn planBytes(gpa: std.mem.Allocator, lim: Limits, lm_hidden: usize) !usize {
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    var w: Weights = undefined;
+    var total: usize = 0;
+    for ((try wanted(arena_state.allocator(), &w)).items) |want| {
+        var n: usize = 2; // bf16, the only dtype the loader takes
+        for (want.shape) |d| n *= d;
+        total = std.mem.alignForward(usize, total, 256) + n;
+    }
+    const rows = @as(usize, lim.image_tokens) * lm_hidden * 2;
+    return total + Scratch.of(@as(usize, lim.image_tokens) * patches_per_token).bytes() + rows;
+}
+
+/// The loaded tower's bytes (0 without one), which stream admission and the prompt cache's budget count too.
+pub fn heldBytes(v: ?*const Vision) usize {
+    return if (v) |t| t.bytes else 0;
+}
+
 /// The tower: kernels, weights (bf16, about 0.9 GiB) and scratch for `max_tokens` image tokens a request.
 pub const Vision = struct {
     gpa: std.mem.Allocator,
@@ -190,11 +228,10 @@ pub const Vision = struct {
         errdefer v.w.buf.deinit();
         const P: usize = @as(usize, max_tokens) * patches_per_token;
         v.max_patches = @intCast(P);
-        // the scores take at most 256 MiB: 16 heads of `chunk` rows by P keys in fp32
-        v.chunk = @intCast(std.math.clamp((256 << 20) / (heads * P * 4) / 64 * 64, 64, 4096));
-        const parts = [_]usize{ P * patch_width * 2, P * 64 * 4, P * 64 * 4, P * hidden * 2, P * hidden * 2, P * hidden * 2, P * hidden * 2, P * 3 * hidden * 2, P * hidden * 4, P * hidden * 4, P * hidden * 4, @as(usize, heads) * v.chunk * P * 4, @as(usize, heads) * v.chunk * head_dim * 4, P * mlp_inter * 2, P * mlp_inter * 2, P * mlp_inter * 2 };
-        var total: usize = 0;
-        for (parts) |n| total += std.mem.alignForward(usize, n, 256);
+        const plan = Scratch.of(P);
+        v.chunk = plan.chunk;
+        const parts = plan.parts;
+        const total = plan.bytes();
         v.scratch = try device.buffer(total, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         errdefer v.scratch.deinit();
         var at: usize = 0;
@@ -401,6 +438,29 @@ fn rotary(v: *Vision, gh: u32, gw: u32) void {
     }
 }
 
+const Want = struct { name: []const u8, shape: []const usize, ref: *Ref };
+
+/// Every tower tensor the loader reads, in its buffer order, with its bf16 shape and the place it fills in `w`.
+fn wanted(arena: std.mem.Allocator, w: *Weights) !std.ArrayList(Want) {
+    var wants: std.ArrayList(Want) = .empty;
+    try wants.append(arena, .{ .name = "patch_embed.proj.weight", .shape = &.{ hidden, 3, temporal, patch, patch }, .ref = &w.patch_w });
+    try wants.append(arena, .{ .name = "patch_embed.proj.bias", .shape = &.{hidden}, .ref = &w.patch_b });
+    for (&w.blocks, 0..) |*b, i| {
+        const fields = .{ .{ "norm1.weight", &b.norm1, &[_]usize{hidden} }, .{ "norm2.weight", &b.norm2, &[_]usize{hidden} }, .{ "attn.qkv.weight", &b.qkv_w, &[_]usize{ 3 * hidden, hidden } }, .{ "attn.qkv.bias", &b.qkv_b, &[_]usize{3 * hidden} }, .{ "attn.proj.weight", &b.proj_w, &[_]usize{ hidden, hidden } }, .{ "attn.proj.bias", &b.proj_b, &[_]usize{hidden} }, .{ "attn.q_norm.weight", &b.q_norm, &[_]usize{head_dim} }, .{ "attn.k_norm.weight", &b.k_norm, &[_]usize{head_dim} }, .{ "mlp.gate_proj.weight", &b.gate_w, &[_]usize{ mlp_inter, hidden } }, .{ "mlp.gate_proj.bias", &b.gate_b, &[_]usize{mlp_inter} }, .{ "mlp.up_proj.weight", &b.up_w, &[_]usize{ mlp_inter, hidden } }, .{ "mlp.up_proj.bias", &b.up_b, &[_]usize{mlp_inter} }, .{ "mlp.down_proj.weight", &b.down_w, &[_]usize{ hidden, mlp_inter } }, .{ "mlp.down_proj.bias", &b.down_b, &[_]usize{hidden} } };
+        inline for (fields) |f| try wants.append(arena, .{ .name = try std.fmt.allocPrint(arena, "blocks.{d}.{s}", .{ i, f[0] }), .shape = f[2], .ref = f[1] });
+    }
+    try wants.append(arena, .{ .name = "post_layernorm.weight", .shape = &.{hidden}, .ref = &w.post_norm });
+    try wants.append(arena, .{ .name = "downsample.weight", .shape = &.{ out_hidden, hidden, merge, merge }, .ref = &w.down_w });
+    try wants.append(arena, .{ .name = "downsample.bias", .shape = &.{out_hidden}, .ref = &w.down_b });
+    try wants.append(arena, .{ .name = "merger.proj.weight", .shape = &.{ out_hidden, out_hidden }, .ref = &w.m_proj });
+    try wants.append(arena, .{ .name = "merger.post_projection_norm.weight", .shape = &.{out_hidden}, .ref = &w.m_norm_w });
+    try wants.append(arena, .{ .name = "merger.post_projection_norm.bias", .shape = &.{out_hidden}, .ref = &w.m_norm_b });
+    try wants.append(arena, .{ .name = "merger.gate_proj.weight", .shape = &.{ merger_inter, out_hidden }, .ref = &w.m_gate });
+    try wants.append(arena, .{ .name = "merger.up_proj.weight", .shape = &.{ merger_inter, out_hidden }, .ref = &w.m_up });
+    try wants.append(arena, .{ .name = "merger.down_proj.weight", .shape = &.{ out_hidden, merger_inter }, .ref = &w.m_down });
+    return wants;
+}
+
 /// model.visual.* from the checkpoint's shards into one buffer, the merge kernel's taps moved outermost.
 fn loadWeights(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8) !Weights {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
@@ -451,24 +511,8 @@ fn loadWeights(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8) !Wei
         }
     }
     // every tensor's place in one buffer, 256-aligned
-    const Want = struct { name: []const u8, shape: []const usize, ref: *Ref };
     var w: Weights = undefined;
-    var wants: std.ArrayList(Want) = .empty;
-    try wants.append(arena, .{ .name = "patch_embed.proj.weight", .shape = &.{ hidden, 3, temporal, patch, patch }, .ref = &w.patch_w });
-    try wants.append(arena, .{ .name = "patch_embed.proj.bias", .shape = &.{hidden}, .ref = &w.patch_b });
-    for (&w.blocks, 0..) |*b, i| {
-        const fields = .{ .{ "norm1.weight", &b.norm1, &[_]usize{hidden} }, .{ "norm2.weight", &b.norm2, &[_]usize{hidden} }, .{ "attn.qkv.weight", &b.qkv_w, &[_]usize{ 3 * hidden, hidden } }, .{ "attn.qkv.bias", &b.qkv_b, &[_]usize{3 * hidden} }, .{ "attn.proj.weight", &b.proj_w, &[_]usize{ hidden, hidden } }, .{ "attn.proj.bias", &b.proj_b, &[_]usize{hidden} }, .{ "attn.q_norm.weight", &b.q_norm, &[_]usize{head_dim} }, .{ "attn.k_norm.weight", &b.k_norm, &[_]usize{head_dim} }, .{ "mlp.gate_proj.weight", &b.gate_w, &[_]usize{ mlp_inter, hidden } }, .{ "mlp.gate_proj.bias", &b.gate_b, &[_]usize{mlp_inter} }, .{ "mlp.up_proj.weight", &b.up_w, &[_]usize{ mlp_inter, hidden } }, .{ "mlp.up_proj.bias", &b.up_b, &[_]usize{mlp_inter} }, .{ "mlp.down_proj.weight", &b.down_w, &[_]usize{ hidden, mlp_inter } }, .{ "mlp.down_proj.bias", &b.down_b, &[_]usize{hidden} } };
-        inline for (fields) |f| try wants.append(arena, .{ .name = try std.fmt.allocPrint(arena, "blocks.{d}.{s}", .{ i, f[0] }), .shape = f[2], .ref = f[1] });
-    }
-    try wants.append(arena, .{ .name = "post_layernorm.weight", .shape = &.{hidden}, .ref = &w.post_norm });
-    try wants.append(arena, .{ .name = "downsample.weight", .shape = &.{ out_hidden, hidden, merge, merge }, .ref = &w.down_w });
-    try wants.append(arena, .{ .name = "downsample.bias", .shape = &.{out_hidden}, .ref = &w.down_b });
-    try wants.append(arena, .{ .name = "merger.proj.weight", .shape = &.{ out_hidden, out_hidden }, .ref = &w.m_proj });
-    try wants.append(arena, .{ .name = "merger.post_projection_norm.weight", .shape = &.{out_hidden}, .ref = &w.m_norm_w });
-    try wants.append(arena, .{ .name = "merger.post_projection_norm.bias", .shape = &.{out_hidden}, .ref = &w.m_norm_b });
-    try wants.append(arena, .{ .name = "merger.gate_proj.weight", .shape = &.{ merger_inter, out_hidden }, .ref = &w.m_gate });
-    try wants.append(arena, .{ .name = "merger.up_proj.weight", .shape = &.{ merger_inter, out_hidden }, .ref = &w.m_up });
-    try wants.append(arena, .{ .name = "merger.down_proj.weight", .shape = &.{ out_hidden, merger_inter }, .ref = &w.m_down });
+    const wants = try wanted(arena, &w);
     const srcs = try arena.alloc(Src, wants.items.len);
     var total: usize = 0;
     for (wants.items, srcs) |want, *s| {
@@ -523,8 +567,13 @@ pub fn attach(e: *Engine, gpa: std.mem.Allocator, dir: []const u8, config: []con
     var cfg_arena = std.heap.ArenaAllocator.init(gpa);
     defer cfg_arena.deinit();
     const vc = (try Config.parse(cfg_arena.allocator(), config, if (pj) |m| m.bytes[0..m.size] else null)) orelse return error.NoVisionTower;
-    e.vision = try Vision.load(gpa, e.device, dir, vc, lim.image_tokens);
-    e.vision_rows = try e.arena.buffer(@as(usize, lim.image_tokens) * e.c.hidden * 2);
+    const v = try Vision.load(gpa, e.device, dir, vc, lim.image_tokens);
+    errdefer v.deinit();
+    const rows = @as(usize, lim.image_tokens) * e.c.hidden * 2;
+    // the load limit counted planBytes before the load, so the tower holds no more than that
+    if (v.bytes + rows != try planBytes(gpa, lim, e.c.hidden)) return error.TowerBytes;
+    e.vision = v;
+    e.vision_rows = try e.arena.buffer(rows);
     e.vision_limits = lim;
     std.log.info("glm: image tower loaded ({d:.2} GiB with scratch for {d} image tokens a prompt)", .{ @as(f64, @floatFromInt(e.vision.?.bytes)) / (1 << 30), lim.image_tokens });
 }

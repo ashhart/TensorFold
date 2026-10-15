@@ -171,12 +171,14 @@ pub const Engine = struct {
         const chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
         e.limit = try load_plan.loadLimit(e.device);
         const limit = e.limit.bytes;
+        // --vision: the image tower and its rows count against the limit beside the weights and caches
+        const tower = if (vision) |lim| try vision_mod.planBytes(gpa, lim, e.c.hidden) else 0;
         var plan_bytes = try load_plan.planBytes(gpa, e.device, dir, &e.c);
-        if (e.c.mtp > 0 and link == null and plan_bytes + try load_plan.leastArena(gpa, &e.c, cap, chunked) > limit) { // one Mac: the MTP head stays on disk when only it passes the limit
+        if (e.c.mtp > 0 and link == null and plan_bytes + tower + try load_plan.leastArena(gpa, &e.c, cap, chunked) > limit) { // one Mac: the MTP head stays on disk when only it passes the limit
             var lean = e.c;
             lean.mtp = 0;
             const lean_bytes = try load_plan.planBytes(gpa, e.device, dir, &lean);
-            if (lean_bytes + try load_plan.leastArena(gpa, &lean, cap, chunked) <= limit) {
+            if (lean_bytes + tower + try load_plan.leastArena(gpa, &lean, cap, chunked) <= limit) {
                 std.log.info("glm: the MTP head would pass this Mac's {d:.1} GB load limit ({s}); loading without it (no MTP drafts, copy drafts stay)", .{ @as(f64, @floatFromInt(limit)) / 1e9, e.limit.source() });
                 e.c = lean;
                 plan_bytes = lean_bytes;
@@ -191,18 +193,19 @@ pub const Engine = struct {
         e.prompt_ids = try e.arena.buffer(@as(usize, cap) * 4);
         e.pick_ring = try e.arena.buffer(256);
         if (chunked and (link == null or e.c.byRows())) {
-            const rows = load_plan.chunkHeight(gpa, &e.c, &e.sc, cap, plan_bytes + e.arena.bytes, limit, link != null);
+            const rows = load_plan.chunkHeight(gpa, &e.c, &e.sc, cap, plan_bytes + e.arena.bytes + tower, limit, link != null);
             e.pr = try prompt_mod.init(gpa, &e.arena, e.device, &e.c, &e.sc, e.k, cap, rows);
             e.chunk_rows = @min(e.chunk_rows, rows);
         }
         errdefer if (e.pr) |*p| p.deinit();
-        if (plan_bytes + e.arena.bytes > limit) { // refused before any weight is read: the floor's one-Mac limit
+        if (plan_bytes + e.arena.bytes + tower > limit) { // refused before any weight is read: the floor's one-Mac limit
+            if (tower > 0) std.log.err("glm: --vision's image tower and its rows add {d:.1} GB", .{@as(f64, @floatFromInt(tower)) / 1e9});
             std.log.err("glm: {d:.1} GB of weights and {d:.1} GB of caches pass this Mac's {d:.1} GB load limit ({s}); load a layer subset or the expert-parallel pair, or set GLM_LOAD_LIMIT_GB (past 70% of RAM a load risks a watchdog panic)", .{ @as(f64, @floatFromInt(plan_bytes)) / 1e9, @as(f64, @floatFromInt(e.arena.bytes)) / 1e9, @as(f64, @floatFromInt(limit)) / 1e9, e.limit.source() });
             return error.OverMemoryLimit;
         }
         { // free memory short of the load: a cached copy of the checkpoint holds it, the paced reads would wait (#583)
             const dropped_at = std.c.mach_absolute_time();
-            if (page_cache.dropForLoad(gpa, dir, plan_bytes + e.arena.bytes)) |d| {
+            if (page_cache.dropForLoad(gpa, dir, plan_bytes + e.arena.bytes + tower)) |d| {
                 if (d.dropped > 0) std.log.info("glm: dropped {d:.1} GiB of the checkpoint from the file cache, the {d:.1} GiB free memory lacked for the load ({d:.2} s)", .{ @as(f64, @floatFromInt(d.dropped)) / (1 << 30), @as(f64, @floatFromInt(d.deficit)) / (1 << 30), @as(f64, @floatFromInt(std.c.mach_absolute_time() - dropped_at)) / 24e6 });
             } else |err| std.log.warn("glm: could not drop the checkpoint's cached pages ({s}); the load reads beside them", .{@errorName(err)});
         }

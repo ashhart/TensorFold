@@ -47,7 +47,7 @@ fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
 /// Streams fitting beside the weights under the load limit, at most `want` (`fixed`: all or none); pooled: KDA only.
 fn fit(eng: *const ge.Engine, want: u32, fixed: bool) !u32 {
     const per = glm.state.stateBytes(&eng.c, if (glm.pool.on(eng)) 0 else eng.s.cap, true) + 64 * 1024;
-    const used = eng.w.bytes + eng.arena.bytes;
+    const used = eng.w.bytes + eng.arena.bytes + glm.vision.heldBytes(eng.vision);
     const limit = eng.limit.bytes;
     const room: u64 = if (limit > used) (limit - used) / per else 0;
     const n: u32 = @intCast(@min(@as(u64, @max(want, 1)), 1 + room));
@@ -64,7 +64,7 @@ const cache_rules: api.prompt_cache.Rules = .{ .lookahead = 1, .planned = true, 
 /// Kept prompt states' room: --prompt-cache-gib, else 16 GiB, inside what the load limit read at load leaves.
 fn cacheBudget(eng: *const ge.Engine, gib: ?f64) u64 {
     const want: u64 = @intFromFloat((gib orelse 16) * (1 << 30));
-    const used = eng.w.bytes + eng.arena.bytes;
+    const used = eng.w.bytes + eng.arena.bytes + glm.vision.heldBytes(eng.vision);
     const limit = eng.limit.bytes;
     return if (limit > used) @min(want, limit - used) else 0;
 }
