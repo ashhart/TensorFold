@@ -286,6 +286,8 @@ pub fn a8(d: *Dev, a: *Acts, x: *anyopaque, K: u32, T: u32, site: u32) !void {
 }
 /// XPU_FP64_REF: called with each int4 GEMM's real input (site 0 mixer in … 4 head; layer LAYERS: the head).
 pub var gemm_probe: ?*const fn (*Dev, *Acts, Proj, *anyopaque, u32, usize, u32) anyerror!void = null;
+/// XPU_FP64_REF: called after a prompt's chunked GDN from position 0, with the state it left (layer i).
+pub var gdn_probe: ?*const fn (*Dev, *Acts, *anyopaque, u32, usize) anyerror!void = null;
 /// prompt: a prompt chunk, prompt kernels at any rows; tree: rows see their ancestors; multi: one row a slot.
 pub const Mode = struct { prompt: bool = false, want: Want = .last, stash: bool = false, taps: bool = false, tree: bool = false, multi: ?struct { mt: *anyopaque, pos: *anyopaque, max_pos: u32 } = null };
 
@@ -381,6 +383,7 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
                 try d.launch(d.k.gdn_prep, .{ .x = ncu, .y = 48 }, .{ a.k, a.v, a.g, a.beta, a.la, a.wb, a.u0, hk, hv, nc, @as(i32, 0) });
                 try d.launch(d.k.gdn_state, .{ .x = 48 }, .{ a.k, a.wb, a.u0, a.la, l.rec.?, l.rec.?, a.hs, a.vn, hk, hv, nc });
                 try d.launch(d.k.gdn_out, .{ .x = ncu, .y = 48 }, .{ a.q, a.k, a.la, a.hs, a.vn, a.y, hk, hv, nc });
+                if (gdn_probe) |f| if (p0 == 0) try f(d, a, l.rec.?, T, i);
             }
             if (probe) {
                 try dumpBuf(d, "q0", a.q, T * 2048, .bf16);
