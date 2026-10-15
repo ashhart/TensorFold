@@ -90,7 +90,10 @@ def capture(command, rank, context_tokens, output, interval):
         thread = threading.Thread(target=sample)
         thread.start()
         previous = {}
+        forwarding = True
         def forward(signum, _frame):
+            if not forwarding:
+                return
             try:
                 os.kill(child.pid, signum)
             except ProcessLookupError:
@@ -101,6 +104,7 @@ def capture(command, rank, context_tokens, output, interval):
             os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
             stop.set()
             thread.join()
+            forwarding = False
             _, status, usage = os.wait4(child.pid, 0)
             child.returncode = os.waitstatus_to_exitcode(status)
         finally:

@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 import sys
+import signal
+from unittest import mock
 import tempfile
 import unittest
 
@@ -71,6 +73,19 @@ class Receipts(unittest.TestCase):
             self.assertLess(got["process_start_ns"], got["process_exit_ns"])
             with self.assertRaises(FileExistsError):
                 receipt.capture(["unused"], 1, 2048, output, .1)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux wait4 capture")
+    def test_forwarding_is_disarmed_before_child_can_be_reaped(self):
+        wait4 = receipt.os.wait4
+        def reap(pid, flags):
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+            return wait4(pid, flags)
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(receipt.os, "wait4", side_effect=reap):
+                with mock.patch.object(receipt.os, "kill") as kill:
+                    self.assertEqual(receipt.capture([sys.executable, "-c", "pass"], 0, 2048, Path(tmp) / "exit", .01), 0)
+                    kill.assert_not_called()
 
     @unittest.skipUnless(sys.platform == "linux", "Linux wait4 capture")
     def test_failed_child_cannot_record_qualified_native_result(self):
