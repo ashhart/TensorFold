@@ -16,7 +16,7 @@ block FP8 (e4m3 in 128 x 128 blocks with `weight_scale_inv`).
 | --- | --- | --- |
 | Group-limited top-k routing, per-layer shared SwiGLU limit (GLM's bytes unchanged) | `ling-family`, commit 51c01573 | `glm-ref`, `glm-route-old`, `glm-route-ling` |
 | MLA at Ling's shape: 64 roped key columns, 128-wide heads, GPT-J rope, head-wise gate | f8e594f6, merged | `ling-mla`, `ling-mla-real`, `glm-mla-same` |
-| KDA on Ling's layer 0 (q/k/v convs as one q\|k\|v conv), opt-in chunked prompt path | b55aa13d, merged | `glm-kda-ling`, `glm-kda-chunk` |
+| KDA on Ling's layer 0 (q/k/v convs as one q\|k\|v conv), GLM's row path as is | b55aa13d, merged | `glm-kda-ling` |
 | Config loader and weight map (all 214,025 names of the real index) | `zig/src/families/ling/config.zig`, `names.zig` | `zig build test-ling` |
 | Weight loader at TP=1: bf16, FP8 block, ModelOpt NVFP4 | `zig/src/families/ling/weights.zig`, `weights_proj.zig` | `ling-weights`, `ling-weights-real` |
 | Synthetic checkpoints in all three formats | `tf-cuda-test ling-synth` | its own name check |

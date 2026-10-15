@@ -1,4 +1,4 @@
-//! glm-kda-chunk's and glm-kda-ling's shared rig: a call's inputs on the device, one path's outputs, downloads to f64.
+//! glm-kda-ling's rig: a call's inputs on the device, one path's outputs, downloads to f64.
 const std = @import("std");
 const cuda = @import("cuda");
 const qr = @import("quant_ref_tests.zig");
@@ -9,30 +9,25 @@ pub const Rig = qr.RigT;
 pub const kda = glm.kda;
 pub const dk = kda.dk;
 
-/// The two modules: glm_kda.cu (chain, replay, wide) and glm_kda_chunk.cu.
+/// glm_kda.cu's module (chain, replay, wide).
 pub const Mods = struct {
     kda_mod: cuda.Module,
-    chunk_mod: cuda.Module,
     ks: kda.Kernels,
-    ck: kda.Chunked,
 
     pub fn load(d: *const cuda.Driver) !Mods {
         var m: Mods = undefined;
         m.kda_mod = try cuda.Module.load(d, cuda.kernels.glm_kda);
-        m.chunk_mod = try cuda.Module.load(d, cuda.kernels.glm_kda_chunk);
         m.ks = try kda.Kernels.load(m.kda_mod);
-        m.ck = try kda.Chunked.load(m.chunk_mod);
         return m;
     }
 
     pub fn unload(m: *Mods) void {
-        m.chunk_mod.unload();
         m.kda_mod.unload();
     }
 };
 
-/// How a call runs: the fused chain, the three-kernel (serial wide) chain, or the chunked prompt path.
-pub const Path = enum { fused, wide, chunked };
+/// How a call runs: the fused chain or the three-kernel (serial wide) chain.
+pub const Path = enum { fused, wide };
 
 /// One path's buffers for `rows` rows: out, state, saves (k, v, decay, beta), wide scratch (q, y).
 pub const Out = struct {
@@ -68,7 +63,6 @@ pub fn run(m: *const Mods, s: cuda.Stream, c: kda.Chain, rows: usize, o: Out, pa
     switch (path) {
         .fused => try kda.chain(&m.ks, s, c, rows, o.saves(), null),
         .wide => try kda.chain(&m.ks, s, c, rows, o.saves(), w),
-        .chunked => try kda.chunked(&m.ks, m.ck, s, c, rows, o.saves(), w),
     }
 }
 

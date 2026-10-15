@@ -1,4 +1,4 @@
-//! glm_kda.cu's chain in float64 at any head count, end to end and the recurrence alone (glm-kda-chunk, glm-kda-ling).
+//! glm_kda.cu's chain in float64 at any head count, end to end and the recurrence alone (glm-kda-ling).
 const std = @import("std");
 
 pub const dk = 128;

@@ -54,7 +54,18 @@ pub const Wide = struct { q: u64, y: u64 };
 pub fn chain(ks: *const Kernels, stream: cuda.Stream, c: Chain, rows: usize, s: Saves, wide: ?Wide) !void {
     const h: c_int = @intCast(c.heads);
     if (wide) |w| {
-        try prep(ks, stream, c, rows, s, w);
+        var a: cuda.Args = .{};
+        a.add(h);
+        a.add(c.p);
+        a.add(@as(c_int, @intCast(c.p_stride)));
+        a.add(@as(c_int, @intCast(c.b_off)));
+        a.add(c.a);
+        a.add(@as(c_int, @intCast(c.a_stride)));
+        for ([_]u64{ c.conv_state, c.conv_w, c.a_log, c.dt_bias }) |v| a.add(v);
+        a.add(c.lower);
+        for ([_]u64{ w.q, s.k, s.v, s.g, s.b }) |v| a.add(v);
+        const grid: cuda.launch.Dim3 = .{ .x = @intCast(rows), .y = @intCast(c.heads) };
+        try cuda.launch.launch(ks.prep, .{ .grid = grid, .block = .{ .x = 512 } }, stream, &a);
         var b: cuda.Args = .{};
         b.add(h);
         for ([_]u64{ c.state_in, w.q, s.k, s.v, s.g, s.b }) |v| b.add(v);
@@ -62,7 +73,15 @@ pub fn chain(ks: *const Kernels, stream: cuda.Stream, c: Chain, rows: usize, s: 
         b.add(w.y);
         b.add(s.state_out);
         try cuda.launch.launch(ks.step, .{ .grid = .{ .x = @intCast(c.heads), .y = dv / 4 / 8 }, .block = .{ .x = 8 * 32 } }, stream, &b);
-        return out(ks, stream, c, rows, s, w);
+        var o: cuda.Args = .{};
+        o.add(h);
+        o.add(w.y);
+        o.add(c.g);
+        o.add(@as(c_int, @intCast(c.g_stride)));
+        o.add(c.norm_w);
+        o.add(c.eps);
+        o.add(s.out);
+        return cuda.launch.launch(ks.out, .{ .grid = grid, .block = .{ .x = dv } }, stream, &o);
     }
     var a: cuda.Args = .{};
     a.add(h);
@@ -79,67 +98,6 @@ pub fn chain(ks: *const Kernels, stream: cuda.Stream, c: Chain, rows: usize, s: 
     a.add(@as(c_int, @intCast(rows)));
     for ([_]u64{ s.out, s.state_out, s.k, s.v, s.g, s.b }) |v| a.add(v);
     try cuda.launch.launch(ks.chain, .{ .grid = .{ .x = @intCast(c.heads) }, .block = .{ .x = 1024 } }, stream, &a);
-}
-
-/// The wide chain's first kernel: conv, decay, beta and q/k norms of `rows` rows into w.q and the saves.
-pub fn prep(ks: *const Kernels, stream: cuda.Stream, c: Chain, rows: usize, s: Saves, w: Wide) !void {
-    var a: cuda.Args = .{};
-    a.add(@as(c_int, @intCast(c.heads)));
-    a.add(c.p);
-    a.add(@as(c_int, @intCast(c.p_stride)));
-    a.add(@as(c_int, @intCast(c.b_off)));
-    a.add(c.a);
-    a.add(@as(c_int, @intCast(c.a_stride)));
-    for ([_]u64{ c.conv_state, c.conv_w, c.a_log, c.dt_bias }) |v| a.add(v);
-    a.add(c.lower);
-    for ([_]u64{ w.q, s.k, s.v, s.g, s.b }) |v| a.add(v);
-    const grid: cuda.launch.Dim3 = .{ .x = @intCast(rows), .y = @intCast(c.heads) };
-    try cuda.launch.launch(ks.prep, .{ .grid = grid, .block = .{ .x = 512 } }, stream, &a);
-}
-
-/// The wide chain's last kernel: the gated RMSNorm of w.y into s.out.
-pub fn out(ks: *const Kernels, stream: cuda.Stream, c: Chain, rows: usize, s: Saves, w: Wide) !void {
-    var o: cuda.Args = .{};
-    o.add(@as(c_int, @intCast(c.heads)));
-    o.add(w.y);
-    o.add(c.g);
-    o.add(@as(c_int, @intCast(c.g_stride)));
-    o.add(c.norm_w);
-    o.add(c.eps);
-    o.add(s.out);
-    const grid: cuda.launch.Dim3 = .{ .x = @intCast(rows), .y = @intCast(c.heads) };
-    return cuda.launch.launch(ks.out, .{ .grid = grid, .block = .{ .x = dv } }, stream, &o);
-}
-
-/// glm_kda_chunk.cu's entry: the prompt recurrence in 16-row WY chunks over prep's saves.
-pub const Chunked = struct {
-    f: cuda.Function,
-
-    pub fn load(m: cuda.Module) !Chunked {
-        return .{ .f = try m.function("tf_glm_kda_chunk") };
-    }
-};
-
-fn chunkLaunch(ck: Chunked, stream: cuda.Stream, heads: usize, state_in: u64, q: u64, k: u64, v: u64, g: u64, b: u64, rows: usize, y: u64, state_out: u64) !void {
-    var a: cuda.Args = .{};
-    a.add(@as(c_int, @intCast(heads)));
-    for ([_]u64{ state_in, q, k, v, g, b }) |x| a.add(x);
-    a.add(@as(c_int, @intCast(rows)));
-    a.add(y);
-    a.add(state_out);
-    try cuda.launch.launch(ck.f, .{ .grid = .{ .x = @intCast(heads) }, .block = .{ .x = 2 * dk } }, stream, &a);
-}
-
-/// Opt-in: the wide chain with 16-row WY chunks; float64's bound, not the row path's bits; cuts at 16 k == uncut.
-pub fn chunked(ks: *const Kernels, ck: Chunked, stream: cuda.Stream, c: Chain, rows: usize, s: Saves, w: Wide) !void {
-    try prep(ks, stream, c, rows, s, w);
-    try chunkLaunch(ck, stream, c.heads, c.state_in, w.q, s.k, s.v, s.g, s.b, rows, w.y, s.state_out);
-    try out(ks, stream, c, rows, s, w);
-}
-
-/// The chunked recurrence over `rows` saved rows, state only: `chunked`'s state bits for a call of exactly those rows.
-pub fn chunkReplay(ck: Chunked, stream: cuda.Stream, state_in: u64, k: u64, v: u64, g: u64, b: u64, rows: usize, heads: usize, state_out: u64) !void {
-    try chunkLaunch(ck, stream, heads, state_in, 0, k, v, g, b, rows, 0, state_out);
 }
 
 /// kda.replay: the state after the first `rows` saved rows, from state_in.

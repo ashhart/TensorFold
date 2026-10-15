@@ -179,23 +179,17 @@ pub fn run(gpu: check.Gpu, path: []const u8) !void {
     for (yw, yd) |a, b| if (a != b) return check.expect(false, "Ling: 16-row windows' outputs == decode rows' outputs", .{});
     const win: Result = .{ .y = yw, .sp = states[l.P], .st = ws };
     var wsv: rig.Out = undefined;
-    var csv: rig.Out = undefined;
     const wide = try promptThenDecode(&r, &m, l, .wide, &wsv);
-    const chunk = try promptThenDecode(&r, &m, l, .chunked, &csv);
     for (wide.y, yd) |a, b| if (a != b) return check.expect(false, "Ling: the wide prompt's and decode outputs == every row a decode row's", .{});
     try ref.sameRows(&r, "Ling: the wide prompt's state == P decode rows' state", wide.sp, states[l.P], n * dk * 4);
-    const crep = try r.zeros(n * dk * 4);
-    try kda.chunkReplay(m.ck, r.s, l.c.state_in, csv.k, csv.v, csv.g, csv.b, l.P, l.H, crep);
-    try ref.sameRows(&r, "Ling: the chunked replay == the chunked prompt's state", csv.state, crep, n * dk * 4);
     const e2e_p = try f64r.chain(r.a, l.l, l.in, l.P);
     const e2e = try f64r.chain(r.a, l.l, l.in, T);
-    const rec = try f64r.recurrence(r.a, l.H, l.in.state, try rig.saved(&r, csv, l.H), l.P);
-    const rc = [2]f64{ f64r.fraction(try rig.wide64(&r, csv.y, l.P * n, true), rec.out, rec.out_tol), f64r.fraction(try rig.wide64(&r, csv.state, n * dk, false), rec.state, rec.state_tol) };
+    const rec = try f64r.recurrence(r.a, l.H, l.in.state, try rig.saved(&r, wsv, l.H), l.P);
     const recw = [2]f64{ f64r.fraction(try rig.wide64(&r, wsv.y, l.P * n, true), rec.out, rec.out_tol), f64r.fraction(try rig.wide64(&r, wsv.state, n * dk, false), rec.state, rec.state_tol) };
-    var worst: f64 = @max(@max(rc[0], rc[1]), @max(recw[0], recw[1]));
+    var worst: f64 = @max(recw[0], recw[1]);
     var most_l2: f64 = 0;
     std.debug.print("RESULT glm-kda-ling: Ling-3.1 layer 0, {d} heads, {d} prompt + {d} decode rows; fla rel L2 of outputs (states after the prompt / end), worst fraction of float64's bound (out, state after prompt, at end)\n", .{ l.H, l.P, T - l.P });
-    for ([_]Result{ dec, win, wide, chunk }, [_][]const u8{ "chain, every row a decode row", "chain, 16-row windows", "wide prompt + decode", "chunked prompt + decode" }) |res, label| {
+    for ([_]Result{ dec, win, wide }, [_][]const u8{ "chain, every row a decode row", "chain, 16-row windows", "wide prompt + decode" }) |res, label| {
         const f = try fracs(&r, l, res, e2e_p, e2e);
         const sp = try rig.wide64(&r, res.sp, n * dk, false);
         const st = try rig.wide64(&r, res.st, n * dk, false);
@@ -205,12 +199,8 @@ pub fn run(gpu: check.Gpu, path: []const u8) !void {
         most_l2 = @max(most_l2, @max(yl2, f[3]));
     }
     const fla_f = f64r.fraction(l.fla_y, e2e.out, e2e.out_tol);
-    const dy = rig.diff(chunk.y[0 .. l.P * n], wide.y[0 .. l.P * n]);
-    const dsp = rig.diff(try rig.wide64(&r, chunk.sp, n * dk, false), try rig.wide64(&r, wide.sp, n * dk, false));
-    const dall = rig.diff(chunk.y, wide.y);
-    std.debug.print("RESULT   fla's own outputs: float64 {d:.3}; recurrence from the chunked saves, chunked y {d:.3} state {d:.3} (wide {d:.3}, {d:.3})\n", .{ fla_f, rc[0], rc[1], recw[0], recw[1] });
-    std.debug.print("RESULT   chunked vs wide prompt: out {d} of {d} bf16 differ (max {e:.2} of max |out|), state {d} of {d} fp32 differ (max {e:.2} of max |S|); all {d} rows incl. decode: {d} differ\n", .{ dy.count, l.P * n, dy.rel, dsp.count, n * dk, dsp.rel, T, dall.count });
+    std.debug.print("RESULT   fla's own outputs: float64 {d:.3}; recurrence from the wide prompt's saves, y {d:.3} state {d:.3}\n", .{ fla_f, recw[0], recw[1] });
     try check.expect(worst <= 1, "glm-kda-ling: every path within float64's bound (worst {d:.3})", .{worst});
     try check.expect(most_l2 < 1e-2, "glm-kda-ling: every path within 1 % of fla (worst rel L2 {e:.3})", .{most_l2});
-    check.pass("glm-kda-ling: glm_kda serves Ling layer 0 as is; chain, windows, wide and chunked within float64's bound (worst {d:.3}) and fla (rel L2 <= {e:.3}); replays == chain bits", .{ worst, most_l2 });
+    check.pass("glm-kda-ling: glm_kda serves Ling layer 0 as is; chain, windows and wide within float64's bound (worst {d:.3}) and fla (rel L2 <= {e:.3}); replays == chain bits", .{ worst, most_l2 });
 }
