@@ -32,17 +32,37 @@ const Kernels = struct {
         var k: Kernels = undefined;
         k.lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
         errdefer k.lib.deinit();
+        var made: usize = 0; // a failed pipeline releases the ones made before it, then the library
+        errdefer k.release(made);
         for ([_][]const u8{ "bf16_nt", "f32_nt", "f32_nn" }, 0..) |kind, ki| for (0..2) |m| for (0..2) |n| {
             var name: [32]u8 = undefined;
             k.gemm[ki][m][n] = try mtl.Pipeline.init(device, k.lib, try std.fmt.bufPrint(&name, "qwv_gemm_{s}_{d}{d}", .{ kind, m, n }), false);
+            made += 1;
         };
-        inline for (names) |kv| @field(k, kv[0]) = try mtl.Pipeline.init(device, k.lib, kv[1], false);
+        inline for (names) |kv| {
+            @field(k, kv[0]) = try mtl.Pipeline.init(device, k.lib, kv[1], false);
+            made += 1;
+        }
         return k;
     }
 
+    /// The first `n` pipelines in the order `load` makes them: the gemms, then the glue.
+    fn release(k: *Kernels, n: usize) void {
+        var i: usize = 0;
+        for (&k.gemm) |*a| for (a) |*b| for (b) |p| {
+            if (i == n) return;
+            p.deinit();
+            i += 1;
+        };
+        inline for (names) |kv| {
+            if (i == n) return;
+            @field(k, kv[0]).deinit();
+            i += 1;
+        }
+    }
+
     fn deinit(k: *Kernels) void {
-        for (&k.gemm) |*a| for (a) |*b| for (b) |p| p.deinit();
-        inline for (names) |kv| @field(k, kv[0]).deinit();
+        k.release(3 * 2 * 2 + names.len);
         k.lib.deinit();
     }
 };
