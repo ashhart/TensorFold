@@ -13,21 +13,30 @@ const kda = G.kda;
 const latent = G.latent;
 const glue = G.glue;
 
-/// Events between op groups; each group's milliseconds by name, medians over reps.
+/// Events between op groups; each group's milliseconds by name, medians and least over reps.
 const Timer = struct {
     ev: [64]cuda.Event,
     names: [64][]const u8 = undefined,
     n: usize = 0,
     s: cuda.Stream,
     on: bool,
-    isolate: bool = false,
+    spin: cuda.Function,
 
     fn mark(t: *Timer, name: []const u8) !void {
         if (!t.on) return;
         try t.ev[t.n].record(t.s);
         t.names[t.n] = name;
         t.n += 1;
-        if (t.isolate) try t.s.synchronize(); // each op group starts on an idle GPU: another context's slice lands between
+    }
+
+    fn spinFor(t: *Timer, ns: i64) !void {
+        var a: cuda.Args = .{};
+        a.add(@as(c_longlong, ns));
+        try cuda.launch.launch(t.spin, .{ .grid = .{}, .block = .{} }, t.s, &a);
+    }
+
+    fn ms(t: *const Timer, j: usize) !f32 {
+        return t.ev[j - 1].elapsedMs(t.ev[j]);
     }
 };
 
@@ -233,13 +242,16 @@ pub fn run(gpu: check.Gpu, dir: []const u8, path: []const u8, reps_arg: ?[]const
     var k: bytes.Kit = undefined;
     try k.init(gpu, a, s, dir, path, 2048, 4200);
     defer k.deinit();
-    var t: Timer = .{ .ev = undefined, .s = s, .on = true };
+    var probe = try cuda.Module.load(gpu.d, cuda.kernels.probe);
+    defer probe.unload();
+    var t: Timer = .{ .ev = undefined, .s = s, .on = true, .spin = try probe.function("tf_probe_spin") };
     for (&t.ev) |*e| e.* = try cuda.Event.init(gpu.d, true);
     defer for (&t.ev) |*e| e.deinit();
+    var prng = std.Random.DefaultPrng.init(0x5eed);
     const st = try k.r.state(k.cap);
     defer st.deinit();
     const c = &k.w.config;
-    std.debug.print("RESULT ling-layer-speed layer {d} ({t}, {s}, {t}), {d} reps, median and least us; prompt ops each from an idle GPU (other contexts' time slices land in medians)\n", .{ k.L, c.kind(k.L), if (c.isMoe(k.L)) "MoE" else "dense", c.quant, reps });
+    std.debug.print("RESULT ling-layer-speed layer {d} ({t}, {s}, {t}), {d} reps, median and least us (each rep after a random spin: other contexts' slices land at random)\n", .{ k.L, c.kind(k.L), if (c.isMoe(k.L)) "MoE" else "dense", c.quant, reps });
     for (phases.items) |rows| {
         if (rows == 0 or rows > 2048) return error.TooManyRows;
         const b = if (rows > F.window_rows) &k.pb else &k.db;
@@ -252,15 +264,14 @@ pub fn run(gpu: check.Gpu, dir: []const u8, path: []const u8, reps_arg: ?[]const
         var table: [32]Row = undefined;
         var nt: usize = 0;
         for (0..reps + 2) |i| {
-            // whole layer through forward.layer, then the same launches op by op, each rep on the fixture's rows
+            // a spin of random length first: other contexts' time slices land at a new phase each rep, least is clean
             try d.check(d.api.cuMemcpyHtoDAsync_v2(b.x, k.x.ptr, rows * k.D * 2, s.handle), "cuMemcpyHtoDAsync");
-            try f.layer(&.{sg}, 0, rows, null); // untimed: the GPU busy before the timed launches
+            try t.spinFor(prng.random().intRangeLessThan(i64, 0, 4_000_000));
+            try f.layer(&.{sg}, 0, rows, null); // untimed: the GPU warm before the timed launches
             try t.ev[62].record(s);
             try f.layer(&.{sg}, 0, rows, null);
             try t.ev[63].record(s);
-            try s.synchronize();
-            t.n = 0;
-            t.isolate = rows > F.window_rows; // prompt ops one at a time; a decode layer's run back to back
+            t.n = 0; // then the same launches op by op, back to back
             try layerOps(&f, sg, rows, &t);
             try s.synchronize();
             if (i >= 2) whole[i - 2] = try t.ev[62].elapsedMs(t.ev[63]);
@@ -274,7 +285,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8, path: []const u8, reps_arg: ?[]const
                     table[nt] = .{ .name = name };
                     nt += 1;
                 }
-                acc[at] += try t.ev[j - 1].elapsedMs(t.ev[j]);
+                acc[at] += try t.ms(j);
             }
             for (table[0..nt], acc[0..nt]) |*r, v| {
                 r.ms[r.n] = v;
