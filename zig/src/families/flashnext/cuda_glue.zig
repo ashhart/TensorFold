@@ -42,7 +42,30 @@ const Fns = struct {
     merge: cuda.Function,
 };
 
+/// The captured entry points our glue replaces, by Triton name (TF_FLASHNEXT_OWNED lists them).
+pub const entries = [_][]const u8{ "_embed", "_rmsnorm", "_add_streams", "_attn_prep", "_attn_gate", "_chunks", "_merge", "_pool", "_scores", "_hc_writeback", "_qmm_hcdown", "_hc_reduce_act", "_qmm_upmix", "_ple_gate", "_ple_conv", "_router", "_topk_rows" };
+
+/// The bit of entry `name` in Glue.mixed.
+pub fn entryBit(comptime name: []const u8) u32 {
+    inline for (entries, 0..) |e, i| if (comptime std.mem.eql(u8, e, name)) return 1 << i;
+    @compileError("no entry point " ++ name);
+}
+
+/// With a captured set loaded, the entries TF_FLASHNEXT_OWNED names ("all", or Triton names) run ours: an A/B switch.
+fn mixedFromEnv() u32 {
+    const v = std.mem.span(std.c.getenv("TF_FLASHNEXT_OWNED") orelse return 0);
+    if (std.mem.eql(u8, v, "all")) return (1 << entries.len) - 1;
+    var bits: u32 = 0;
+    var it = std.mem.tokenizeAny(u8, v, ", ");
+    while (it.next()) |name| for (entries, 0..) |e, i| if (std.mem.eql(u8, e, name)) {
+        bits |= @as(u32, 1) << @intCast(i);
+    };
+    return bits;
+}
+
 pub const Glue = struct {
+    /// Entries ours run even with a captured set loaded (TF_FLASHNEXT_OWNED, read once at load).
+    mixed: u32 = 0,
     hc: cuda.Module,
     attn: cuda.Module,
     emb: cuda.embed_rows.EmbedRows,
@@ -53,6 +76,7 @@ pub const Glue = struct {
     pub fn load(d: *const cuda.Driver) !Glue {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         var g: Glue = undefined;
+        g.mixed = mixedFromEnv();
         g.hc = try cuda.Module.load(d, cuda.kernels.flashnext_hc);
         errdefer g.hc.unload();
         g.attn = try cuda.Module.load(d, cuda.kernels.flashnext_attn);
@@ -264,6 +288,11 @@ pub const Glue = struct {
         try g.route.topk(s, logits, wt.experts_n + 1, wt.experts_n, wt.slots - 1, pick, wts, wt.slots, rows, true);
     }
 };
+
+test "every entry point has its own bit" {
+    try std.testing.expectEqual(@as(u32, 1), entryBit("_embed"));
+    try std.testing.expectEqual(@as(u32, 1) << 16, entryBit("_topk_rows"));
+}
 
 test "the attention tiles hold the model's heads" {
     try std.testing.expect(wt.head_dim == tile_head_dim and wt.q_heads / wt.kv_heads <= tile_heads);

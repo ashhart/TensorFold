@@ -138,7 +138,8 @@ pub fn main(init: std.process.Init) !u8 {
     var stream = try cuda.Stream.init(&driver, true);
     defer stream.deinit();
     const captured: flash.Tri = .{ .set = &set, .s = stream };
-    const own: flash.Tri = .{ .own = &glue, .s = stream };
+    // TF_FLASHNEXT_OWNED: only the entries it names run ours on this side, the rest the captured set's
+    const own: flash.Tri = if (glue.mixed != 0) .{ .set = &set, .own = &glue, .s = stream } else .{ .own = &glue, .s = stream };
     var e = try prompt.Engine.init(gpa, io, &driver, &stream, args[1]);
     defer e.deinit();
     var out_a = try cuda.DeviceBuffer.alloc(&driver, rows_at_once * vocab * 2);
