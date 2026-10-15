@@ -1,4 +1,5 @@
 // Weight-only int4 GEMM in OpenCL C for Xe2, compiled per weight format (-DGSZ=64 affine MLX, -DGSZ=128 symmetric GPTQ)
+
 // group means stored × ASC (and B · group / ASC): the low half stays out of fp16 subnormals
 #ifndef ASC
 #define ASC 256.0f

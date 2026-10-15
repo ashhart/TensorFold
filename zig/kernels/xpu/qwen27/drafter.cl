@@ -1,4 +1,5 @@
 // DFlash2 drafter for Qwen3.8-27B on Intel Xe2: 5 layers, a block of L rows attending its context window and itself.
+
 // group means stored × ASC (and B · group / ASC): the low half stays out of fp16 subnormals
 #ifndef ASC
 #define ASC 256.0f

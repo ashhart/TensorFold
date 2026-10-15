@@ -107,9 +107,7 @@ fn cacheBudget(o: api.Open) u64 {
     return if (gib > 0) std.math.lossyCast(u64, gib * (1 << 30)) else 0;
 }
 
-/// Streams the card holds once the model, the first stream's state and the drafter are loaded: its free memory, at most
-/// its size less what this engine allocated (the driver backs memory when it is first written), holds each further
-/// one a GDN state and a K/V cache of `context` tokens; 0 when the activations' margin and the prompt cache do not fit.
+/// Further streams (GDN state + K/V of `context`) that fit in min(free, size − allocated); 0 when the margin does not.
 fn slotsThatFit(runner: *xq.Runner, want: u32, reserve: u64) !u32 {
     const margin: u64 = 2 << 30; // activations of later chunks, the drafter's growth
     const mem = try runner.d.g.memory();

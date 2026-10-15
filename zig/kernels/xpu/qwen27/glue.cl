@@ -1,4 +1,5 @@
 // Qwen3.8-27B glue on Intel Xe2 (OpenCL C); x: fp32 residual [T, 5120], h: fp16 GEMM input [T, K].
+
 // group means stored × ASC (and B · group / ASC): the low half stays out of fp16 subnormals
 #ifndef ASC
 #define ASC 256.0f
