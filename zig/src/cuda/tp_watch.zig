@@ -14,6 +14,8 @@ var ready_peers = std.atomic.Value(usize).init(0);
 var lines: [max_lines]posix.socket_t = undefined;
 var line_count: usize = 0;
 var my_rank: usize = 0;
+var peer_digest: [max_lines][32]u8 = undefined; // each line's ready record: its rank's checkpoint digest
+var peer_rank: [max_lines]u32 = undefined;
 
 /// This rank ends on purpose (rank 0 sends its end header, or a rank leaves on one).
 pub fn ended() void {
@@ -79,7 +81,7 @@ pub fn start(io: std.Io, rank: usize, world: usize) !void {
             std.Io.sleep(io, .fromMilliseconds(100), .awake) catch {};
         }
     }
-    for (lines[0..line_count]) |fd| (try std.Thread.spawn(.{}, watch, .{fd})).detach();
+    for (lines[0..line_count], 0..) |fd, i| (try std.Thread.spawn(.{}, watch, .{ fd, i })).detach();
 }
 
 fn send(r: Record) void {
@@ -97,15 +99,21 @@ fn send(r: Record) void {
     }
 }
 
-/// This rank loaded: it tells the others, then waits until every other rank has said the same (or one failed).
-pub fn ready(io: std.Io) !void {
+/// This rank loaded `digest`'s bytes: it tells the others, waits for theirs, and stops if any rank's bytes differ.
+pub fn ready(io: std.Io, digest: [32]u8) !void {
     if (line_count == 0) return;
-    send(.{ .kind = ready_kind, .rank = @intCast(my_rank) });
+    var r: Record = .{ .kind = ready_kind, .rank = @intCast(my_rank) };
+    @memcpy(r.text[0..32], &digest);
+    send(r);
     var waited: usize = 0;
     while (ready_peers.load(.acquire) < line_count) : (waited += 1) {
         if (waited >= 90_000) return error.RankNeverReady; // 15 minutes
         std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
     }
+    for (peer_digest[0..line_count], peer_rank[0..line_count]) |d, rank| if (!std.mem.eql(u8, &d, &digest)) {
+        std.log.err("rank {d}'s checkpoint bytes differ from rank {d}'s (every byte hashed): every rank stops", .{ rank, my_rank });
+        return error.CheckpointBytesDiffer;
+    };
 }
 
 /// This rank stops with `name`: every other rank hears it and stops with it (the caller exits next).
@@ -123,7 +131,7 @@ fn stop() noreturn {
 }
 
 /// A line's records; it closing or carrying an error stops this rank unless it ends on purpose.
-fn watch(fd: posix.socket_t) void {
+fn watch(fd: posix.socket_t, line: usize) void {
     var r: Record = undefined;
     while (true) {
         const b = std.mem.asBytes(&r);
@@ -140,6 +148,8 @@ fn watch(fd: posix.socket_t) void {
         }
         if (at < b.len) break;
         if (r.kind == ready_kind) {
+            @memcpy(&peer_digest[line], r.text[0..32]);
+            peer_rank[line] = r.rank;
             _ = ready_peers.fetchAdd(1, .acq_rel);
             continue;
         }

@@ -233,9 +233,10 @@ With `--vision`, Nemotron 3.5 Super VL reads images through the checkpoint's own
 TensorFold's CUDA kernels (`zig/src/families/radio/`).
 
 - **Processor:** the checkpoint's. Each image becomes one tile whose patch grid (16 pixels a patch, an even number each
-  way) holds 1,024 to 13,312 patches, resized with torch's antialiased bicubic on float samples and normalized with
-  CLIP's mean and deviation. The pixels equal the checkpoint processor's bit for bit. An image takes a quarter of its
-  patches as tokens (at most 3,328), written between `<img>` and `</img>`.
+  way) holds up to 13,312 patches and at least 1,024, except that a picture smaller than that sent with
+  `"detail": "low"` keeps its own grid, down to 2 x 2 patches and one token. It is resized with torch's antialiased
+  bicubic on float samples and normalized with CLIP's mean and deviation. The pixels equal the checkpoint processor's
+  bit for bit. An image takes a quarter of its patches as tokens (at most 3,328), written between `<img>` and `</img>`.
 - **Budget:** a request's images share `--vision-image-tokens`, 13,312 by default for Super VL, so up to four images
   keep the size NVIDIA's processor gives them; a smaller budget makes them smaller. Four full-size images on one GB10
   took 13,124 prompt tokens and 11.45 s to the first token.

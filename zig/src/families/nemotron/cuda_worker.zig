@@ -8,6 +8,7 @@ const Kind = @import("config.zig").Kind;
 const kern = @import("cuda_kernels.zig");
 const W = @import("cuda_weights.zig");
 const latent = @import("cuda_latent.zig");
+const identity = @import("cuda_identity.zig");
 const fwd = @import("cuda_forward.zig");
 const state = @import("cuda_state.zig");
 const Source = @import("cuda_source.zig").Source;
@@ -128,6 +129,8 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     var g = try cuda.tp_group.Group.open(c.rank, c.world);
     defer g.close();
     try latent.agree(gpa, io, c, &g, ctx.d, stream, dir);
+    var content: ?*identity.Content = try identity.Content.start(gpa, io, dir, c.held != null); // compared at ready
+    errdefer if (content) |x| x.abandon();
     const ops: kern.Ops = .{ .k = &k, .s = stream };
     var w: W.Weights = .{ .gpa = gpa, .config = c };
     defer w.deinit();
@@ -160,7 +163,9 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     var blocks: usize = 0;
     for (layers.blocks) |t| blocks += @intFromBool(t != null);
     std.log.info("rank {d} of {d}: {d} MoE layers{s} of share {d} ({s}) in {d:.1} s, {d:.2} GiB on the device; serving rank 0's jobs", .{ c.rank, c.world, blocks, if (layers.mtp != null) " and the MTP head's" else "", c.rank, if (c.ck) "the checkpoint's math" else "full precision", @import("cuda_engine.zig").seconds(io, t0), @as(f64, @floatFromInt(cuda.usage(false).device)) / (1 << 30) });
-    try cuda.tp_watch.ready(io); // every rank loaded before rank 0's first job
+    const loaded = content.?;
+    content = null;
+    try cuda.tp_watch.ready(io, try loaded.finish()); // every rank loaded, with the same bytes, before the first job
     var jobs: usize = 0;
     while (true) {
         try g.recv(stream, first, firstBytes(c), 0);
