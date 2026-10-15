@@ -11,6 +11,7 @@ const Dump = @import("cuda_dump.zig").Dump;
 const train_ops = @import("cuda_train_ops.zig");
 const lesson_route = @import("lesson_route.zig");
 const kept = @import("cuda_marks.zig");
+const latent = @import("cuda_latent.zig");
 
 pub const Delta = enum { none, dense, moe };
 
@@ -60,6 +61,7 @@ pub const Forward = struct {
     untaught: bool = false, // the pocket leaves rows (the model as shipped): `segs`' untaught sequences', else all
     segs: []const Seg = &.{}, // a window's sequences, as windowSegs runs them
     captures: []const kept.Mark = &.{}, // marks inside the prompt chunk: their Mamba states are copied out as it runs
+    tp: ?*const cuda.tp_group.Group = null, // a latent MoE's ranks: their expert rows meet every MoE layer
 
     pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, sampled: bool) Forward {
         return .{
@@ -87,7 +89,7 @@ pub const Forward = struct {
         try f.ops.draw(logits, v, rule, meta, 0, out, rows, null, null);
     }
 
-    fn mark(f: *const Forward, c: Class) !void {
+    pub fn mark(f: *const Forward, c: Class) !void {
         if (f.marks) |m| try m.add(f.ops.s, c);
     }
 
@@ -210,7 +212,10 @@ pub const Forward = struct {
                     delta = .dense;
                     aj += 1;
                 },
-                .moe => {
+                .moe => if (blk.moe.latent != null) {
+                    try latent.run(f, blk.moe, rows);
+                    delta = .dense;
+                } else {
                     try f.experts(blk.moe, rows, false);
                     delta = .moe;
                 },
@@ -425,7 +430,10 @@ pub const Forward = struct {
                 w.delta = .dense;
                 w.aj += 1;
             },
-            .moe => {
+            .moe => if (blk.moe.latent != null) {
+                try latent.run(f, blk.moe, w.rows);
+                w.delta = .dense;
+            } else {
                 try f.experts(blk.moe, w.rows, true);
                 w.delta = .moe;
             },

@@ -13,7 +13,7 @@ const Loader = W.Loader;
 const Tensor = core.checkpoint.Tensor;
 const Nvfp4Experts = cuda.experts.Nvfp4Experts;
 
-const Kind = enum { nvfp4, fp8, bf16 };
+pub const Kind = enum { nvfp4, fp8, bf16 };
 
 fn kindOf(t: Tensor) !Kind {
     return switch (t.dtype) {
@@ -25,7 +25,7 @@ fn kindOf(t: Tensor) !Kind {
 }
 
 /// A part's weight, its e4m3 block scales (NVFP4) and its one fp32 scale (NVFP4's weight_scale_2, FP8's weight_scale).
-const Part = struct { w: Tensor, blocks: ?Tensor = null, scale: f32 = 1.0, kind: Kind, n: usize, k: usize };
+pub const Part = struct { w: Tensor, blocks: ?Tensor = null, scale: f32 = 1.0, kind: Kind, n: usize, k: usize };
 
 fn name(buf: []u8, comptime fmt: []const u8, args: anytype) ![]const u8 {
     return std.fmt.bufPrint(buf, fmt, args);
@@ -39,7 +39,7 @@ fn scalar(ck: *core.Checkpoint, n: []const u8) !f32 {
 }
 
 /// `{pre}.weight` and its scales by the weight's dtype; static activation and FP8 cache scales are read and set aside.
-fn part(ck: *core.Checkpoint, pre: []const u8) !Part {
+pub fn part(ck: *core.Checkpoint, pre: []const u8) !Part {
     var buf: [192]u8 = undefined;
     const w = try ck.get(try name(&buf, "{s}.weight", .{pre}));
     if (w.rank != 2) return error.UnexpectedTensor;
@@ -116,7 +116,7 @@ pub fn dense(L: *Loader, ck: *core.Checkpoint, label: []const u8, prefixes: []co
 }
 
 /// The router as the kernels read it: bf16 [E, D]; an fp32 router is taken only when every value is a bf16.
-fn router(L: *Loader, label: []const u8, t: Tensor, c: Config) !u64 {
+pub fn router(L: *Loader, label: []const u8, t: Tensor, c: Config) !u64 {
     if (t.rank != 2 or t.dim(0) != c.experts or t.dim(1) != c.hidden) return error.UnexpectedTensor;
     if (t.dtype == .bf16) return L.raw(label, t);
     if (t.dtype != .f32) return error.UnexpectedTensor;
@@ -136,7 +136,7 @@ fn router(L: *Loader, label: []const u8, t: Tensor, c: Config) !u64 {
 }
 
 /// Per-expert fp32 global scales on the GPU.
-fn scales(L: *Loader, label: []const u8, values: []const f32) !u64 {
+pub fn scales(L: *Loader, label: []const u8, values: []const f32) !u64 {
     const host = try L.keep(f32, values.len);
     @memcpy(host, values);
     const ptr = try L.alloc(label, values.len * 4);
@@ -204,7 +204,8 @@ fn experts(L: *Loader, ck: *core.Checkpoint, label: []const u8, pre: []const u8,
 
 /// The bf16 token table as stored.
 pub fn embed(L: *Loader, ck: *core.Checkpoint, c: Config) !W.Embed {
-    const t = try ck.expect("backbone.embeddings.weight", .bf16, &.{ c.vocab, c.hidden });
+    var buf: [64]u8 = undefined;
+    const t = try ck.expect(try name(&buf, "{s}backbone.embeddings.weight", .{c.prefix()}), .bf16, &.{ c.vocab, c.hidden });
     return .{ .w = try L.raw("embed.weight", t), .n = c.vocab, .k = c.hidden, .bf16 = true };
 }
 

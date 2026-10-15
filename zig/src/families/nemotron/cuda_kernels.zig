@@ -66,6 +66,7 @@ pub const Kernels = struct {
     torch: torch_ops.Functions,
     train: train_ops.Kernels, // Sliding Weights' learning step, and the learned change a forward adds while lessons run
     modelopt: ?Modelopt = null, // loaded by loadModelopt for a ModelOpt checkpoint, else never
+    latent: ?@import("cuda_latent.zig").Fns = null, // a latent MoE's glue (loadLatent), else never
     gb10: bool,
     discrete: bool, // the card has its own memory: checkpoint bytes reach it through page-locked slots
 
@@ -102,6 +103,7 @@ pub const Kernels = struct {
         errdefer k.norms.unload();
         k.grammar_mask = try k.mods[14].function("tf_grammar_mask");
         k.modelopt = null;
+        k.latent = null;
         k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
         errdefer if (k.triton) |*t| t.deinit();
         k.train = try train_ops.Kernels.load(d);
@@ -120,6 +122,7 @@ pub const Kernels = struct {
     pub fn deinit(k: *Kernels) void {
         k.emb.unload();
         k.norms.unload();
+        if (k.latent) |*x| x.unload();
         if (k.modelopt) |*m| {
             m.lane.unload();
             m.gemm.unload();
@@ -130,6 +133,11 @@ pub const Kernels = struct {
         k.train.deinit();
         if (k.triton) |*t| t.deinit();
         for (&k.mods) |*m| m.unload();
+    }
+
+    /// nemotron_latent.cu for a latent MoE checkpoint.
+    pub fn loadLatent(k: *Kernels) !void {
+        if (k.latent == null) k.latent = try @import("cuda_latent.zig").Fns.load(k.d);
     }
 
     /// The lane matmul, prompt GEMM, NVFP4 experts and repack a ModelOpt checkpoint's FP8, NVFP4 and bf16 tensors need.

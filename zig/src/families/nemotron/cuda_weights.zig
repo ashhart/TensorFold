@@ -10,6 +10,7 @@ const draft_ids = @import("draft_ids.zig");
 const Source = @import("cuda_source.zig").Source;
 const host4 = core.affine4_host;
 const modelopt = @import("cuda_modelopt.zig");
+const latent = @import("cuda_latent.zig");
 
 pub const QLinear = kern.QLinear;
 pub const Experts = kern.Experts;
@@ -28,7 +29,7 @@ pub const Attention = struct { qkv: QLinear, o: QLinear, o_rest: u64 = 0, adapte
 /// The pocket kernels' neurons (config's pocket): input weights and outputs, [n, D] fp32 each, from the 4-bit codes.
 pub const Pocket = kern.Pocket;
 /// The shared expert's down projection rest in two halves (experts E and E + 1); its learned change reads both.
-pub const MoE = struct { router: u64, bias: u64, experts: Experts, rest: [2]u64 = .{ 0, 0 }, adapter: ?Adapter = null, pocket: ?Pocket = null };
+pub const MoE = struct { router: u64, bias: u64, experts: Experts, rest: [2]u64 = .{ 0, 0 }, adapter: ?Adapter = null, pocket: ?Pocket = null, latent: ?latent.Latent = null };
 pub const Block = struct { kind: Kind, norm: u64, mamba: Mamba = undefined, attn: Attention = undefined, moe: MoE = undefined };
 pub const Mtp = struct { enorm: u64, hnorm: u64, eh_proj: QLinear, attn_norm: u64, attn: Attention, moe_norm: u64, moe: MoE, final_norm: u64 };
 
@@ -387,6 +388,7 @@ pub const Loader = struct {
     }
 
     fn moe(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8, c: Config) !MoE {
+        if (c.latent > 0) return latent.load(L, ck, name, pre, c);
         if (c.format == .modelopt) return modelopt.moe(L, ck, name, pre, c);
         var a: [128]u8 = undefined;
         var b: [128]u8 = undefined;
@@ -455,18 +457,20 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, 
         for (L.held.items) |h| gpa.free(h);
         L.held.deinit(gpa);
     }
+    if (c.latent > 0) try latent.checkHeld(c);
     var ck = try core.Checkpoint.openModel(gpa, io, dir);
     defer ck.close();
     try src.add(&ck);
+    const pre = c.prefix();
     w.blocks = try gpa.alloc(Block, c.layers);
     for (c.kinds[0..c.layers], 0..) |kind, i| {
         var nm: [128]u8 = undefined;
         var nb: [128]u8 = undefined;
         var pb: [128]u8 = undefined;
         const name = try std.fmt.bufPrint(&nm, "blocks.{d}", .{i});
-        const norm = try ck.expect(try std.fmt.bufPrint(&pb, "backbone.layers.{d}.norm.weight", .{i}), .bf16, &.{c.hidden});
+        const norm = try ck.expect(try std.fmt.bufPrint(&pb, "{s}backbone.layers.{d}.norm.weight", .{ pre, i }), .bf16, &.{c.hidden});
         var b: Block = .{ .kind = kind, .norm = try L.raw(try join(&nb, name, ".norm"), norm) };
-        const mixer = try std.fmt.bufPrint(&pb, "backbone.layers.{d}.mixer.", .{i});
+        const mixer = try std.fmt.bufPrint(&pb, "{s}backbone.layers.{d}.mixer.", .{ pre, i });
         switch (kind) {
             .mamba => b.mamba = try L.mamba(&ck, try join(&nb, name, ".mamba"), mixer),
             .attention => b.attn = try L.attention(&ck, try join(&nb, name, ".attn"), mixer),
@@ -484,10 +488,14 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, 
             .k = emb.dim(1) * 8,
         };
     }
-    w.norm_f = try L.raw("norm_f", try ck.expect("backbone.norm_f.weight", .bf16, &.{c.hidden}));
-    w.head = try L.dense(&ck, "head", &.{"lm_head"});
+    var tail: [96]u8 = undefined;
+    w.norm_f = try L.raw("norm_f", try ck.expect(try std.fmt.bufPrint(&tail, "{s}backbone.norm_f.weight", .{pre}), .bf16, &.{c.hidden}));
+    w.head = try L.dense(&ck, "head", &.{try std.fmt.bufPrint(&tail, "{s}lm_head", .{pre})});
     // a ModelOpt checkpoint keeps its MTP head in its own shards
-    if (c.format == .modelopt) if (with_mtp) try modelopt.mtp(&L, &ck, c) else try ck.skip("mtp.");
+    if (c.latent > 0 and with_mtp) return error.LatentMtpNotBuilt;
+    if (c.format == .modelopt) if (with_mtp) try modelopt.mtp(&L, &ck, c) else try ck.skip(try std.fmt.bufPrint(&tail, "{s}mtp.", .{pre}));
+    // the picture tower and its projector load with the image path (an omni checkpoint's other parts)
+    if (c.omni) for ([_][]const u8{ "vision_model.", "mlp1.", "vision_projector." }) |part| try ck.skip(part);
     if (ck.unused() != 0) return error.UnusedCheckpointTensors;
     if (L.learned > 0) std.log.info("{d} output projections carry what lessons taught this model", .{L.learned});
     if (with_mtp and c.format == .mlx) try loadMtp(gpa, io, &L, &ck, dir, c);

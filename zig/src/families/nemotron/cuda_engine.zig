@@ -21,6 +21,7 @@ const seq_graphs = @import("cuda_seq_graphs.zig");
 const prompt_rows = @import("cuda_prompt_rows.zig");
 const prompt_pass = @import("cuda_prompt.zig");
 const marks = @import("cuda_marks.zig");
+const latent = @import("cuda_latent.zig");
 pub const PromptRows = prompt_rows.PromptRows;
 
 /// nemotron_h.cuda.CONTEXT: prompt plus reply tokens when --context is not given, as `tensorfold serve` sizes it.
@@ -123,6 +124,7 @@ pub const Engine = struct {
     armed: marks.Armed = .{}, // the marks inside the prompt chunk about to run (cuda_marks.zig)
     spares: marks.Spares = .{}, // free Mamba buffers the prompt cache set aside for the next marks
     last_chunk: usize = 0, // where the last prompt pass's last chunk started (the prompt's last row: len - 1 - this)
+    tp: ?cuda.tp_group.Group = null, // a latent MoE over ranks (TF_NEMOTRON_RANK of TF_NEMOTRON_WORLD)
 
     /// Loads the checkpoint into the Python engine's layouts and sizes the caches; `triton_dir` null: our own glue.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, model_dir: []const u8, triton_dir: ?[]const u8, opts: Options) !*Engine {
@@ -132,6 +134,8 @@ pub const Engine = struct {
         e.* = .{ .gpa = gpa, .io = io, .ctx = ctx, .stream = undefined, .k = undefined, .w = undefined, .b = undefined, .c = undefined, .max_len = 0, .pinned = undefined, .history = undefined };
         e.trace = std.c.getenv("TF_SLIDE_TRACE") != null;
         e.c = try Config.read(gpa, io, model_dir);
+        try latent.place(&e.c);
+        if (e.c.world > 1 and opts.segments > 1) return error.SegmentsNeedOneRank; // ranks' collectives keep one order
         if (opts.segments < 1 or opts.segments > segs.MAX) return error.BadSegments;
         e.segments = opts.segments;
         e.carve = opts.carveout;
@@ -151,6 +155,10 @@ pub const Engine = struct {
             if (opts.slide) return error.SlideNeedsMlx; // the learner reads MLX 4-bit projections
             try e.k.loadModelopt(ctx);
         }
+        if (e.c.latent > 0) try e.k.loadLatent();
+        if (e.c.world > 1) e.tp = try cuda.tp_group.Group.open(e.c.rank, e.c.world);
+        errdefer if (e.tp) |*g| g.close();
+        if (e.tp) |*g| try latent.agree(gpa, io, e.c, g, ctx.d, e.stream, opts.mtp, opts.context orelse default_context);
         const chunks = e.max_len / state.chunk_keys;
         e.nch = if (e.k.triton) |*t| @intCast(t.smallestConst("_chunk", "NCH", @intCast(chunks)) orelse {
             std.log.err("no captured attention kernel covers {d} chunks of 512 keys; capture one for this context", .{chunks});
@@ -276,6 +284,7 @@ pub const Engine = struct {
         e.side.s.deinit();
         e.side.fork.deinit();
         e.side.join.deinit();
+        if (e.tp) |*g| g.close();
         e.stream.deinit();
         e.gpa.destroy(e);
     }
@@ -342,6 +351,7 @@ pub const Engine = struct {
         f.dump = dump;
         f.slot = e.slot;
         f.untaught = e.bound.untaught;
+        f.tp = if (e.tp) |*g| g else null;
         if (dump == null and e.c.experts <= 128 and e.c.slots() <= 8) f.side = e.side; // tf_plan_routed's bounds
         return f;
     }
