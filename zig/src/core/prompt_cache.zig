@@ -108,6 +108,7 @@ pub const Entry = struct {
     last: []u32, // the last prompt that kept or resumed it
     shared: bool = false, // kept at a shared system block's cut: other conversations resume it, so its own never supersedes it
     branched: bool = false, // resumed again after a later prompt kept a longer state extending it: never superseded
+    pins: u32 = 0, // admitted jobs that restore it and have not yet: eviction passes it over
 };
 
 pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0 };
@@ -159,6 +160,16 @@ pub const Store = struct {
         const e = s.entries.orderedRemove(i);
         s.held -= e.bytes;
         s.free(e);
+    }
+
+    /// `e` waits for a restore: no lookup or keep evicts it until `unpin` (jobs set up after it run their own first).
+    pub fn pin(_: *Store, e: *Entry) *Entry {
+        e.pins += 1;
+        return e;
+    }
+
+    pub fn unpin(_: *Store, e: *Entry) void {
+        e.pins -= 1;
     }
 
     /// The family's free storage kept for later saves.
@@ -450,7 +461,7 @@ pub const Store = struct {
                 if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held -| bytes); // spare that cannot take this state goes before any state
                 if (s.spare() < free_) continue;
             }
-            s.remove(s.victimBut(null, prompt, born).?); // its storage may come back spare and take this state
+            s.remove(s.victimBut(null, prompt, born) orelse return s.fail(at, error.RestoresPending)); // spare for this state
             s.counts.evicted += 1;
         }
         if (s.entries.items.len == 0) if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| bytes);
@@ -534,17 +545,17 @@ pub const Store = struct {
         return false;
     }
 
-    /// The entry to free first, never `skip`: a superseded one, no branch point, oldest; else the oldest, rewind last.
+    /// The entry to free first, never `skip` or pinned: superseded, no branch point, oldest; else oldest, rewind last.
     fn victimBut(s: *const Store, skip: ?*Entry, prompt: []const u32, born: u32) ?usize {
         var best: ?usize = null;
         for (s.entries.items, 0..) |e, i| {
-            if (e.shared or e.branched or e == skip or s.isActiveRewind(e, prompt)) continue; // shared cuts and branch points go only as the least recently used
+            if (e.shared or e.branched or e == skip or e.pins > 0 or s.isActiveRewind(e, prompt)) continue; // shared cuts and branch points go only as the least recently used
             const now = born > e.born and prompt.len > e.tokens.len and std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens); // a longer request's tokens extend it
             if ((now or s.extended(e)) and (best == null or e.used < s.entries.items[best.?].used)) best = i;
         }
         if (best) |i| return i;
         var oldest: ?usize = null;
-        for (s.entries.items, 0..) |e, i| if (e != skip and (oldest == null or s.before(e, s.entries.items[oldest.?], prompt))) {
+        for (s.entries.items, 0..) |e, i| if (e != skip and e.pins == 0 and (oldest == null or s.before(e, s.entries.items[oldest.?], prompt))) {
             oldest = i;
         };
         return oldest;
