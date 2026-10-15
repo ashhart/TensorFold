@@ -340,7 +340,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
             problem.* = "--vision: this CUDA family reads no images; serve it without --vision";
             return null;
         }
-        opts.vision = .{ .image_tokens = vo.image_tokens, .max_images = vo.max_images };
+        const own: ?u32 = comptime if (@hasDecl(F, "default_image_tokens")) F.default_image_tokens else null;
+        opts.vision = .{ .image_tokens = if (vo.image_tokens_set) vo.image_tokens else own orelse vo.image_tokens, .max_images = vo.max_images };
     }
     if (o.precision) |p| {
         if (!@hasField(F.Options, "precision")) {

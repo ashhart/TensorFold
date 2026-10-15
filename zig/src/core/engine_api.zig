@@ -165,8 +165,8 @@ pub const VideoOffer = struct {
     max_frames: u32,
 };
 
-/// --vision: image and video input's limits (``Open.vision``).
-pub const VisionOpen = struct { image_tokens: u32 = 4096, max_images: u32 = 4, video_tokens: u32 = 16384, max_videos: u32 = 2, max_frames: u32 = 256 };
+/// --vision: image and video input's limits (``Open.vision``); image_tokens_set: the flag given, over a family default.
+pub const VisionOpen = struct { image_tokens: u32 = 4096, image_tokens_set: bool = false, max_images: u32 = 4, video_tokens: u32 = 16384, max_videos: u32 = 2, max_frames: u32 = 256 };
 
 pub const Reason = enum { stop, length, cancelled, failed };
 

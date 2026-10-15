@@ -6,6 +6,8 @@ const latent = @import("cuda_latent.zig");
 
 pub const model_type = "nemotron_h_omni";
 pub const formats: []const []const u8 = &.{"modelopt-nvfp4"};
+/// --vision-image-tokens unless given: four images at the most tokens NVIDIA's processor gives one (3,328 each).
+pub const default_image_tokens: u32 = 13312;
 pub const default_context = native.default_context;
 pub const max_segments = native.max_segments;
 pub const prompt_rows = native.prompt_rows;
