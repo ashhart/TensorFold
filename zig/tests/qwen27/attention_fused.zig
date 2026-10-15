@@ -257,8 +257,7 @@ fn wideCases(a: std.mem.Allocator, rng: *Rng, edges: []const u32) !std.ArrayList
 const boundary_capacity: u32 = 8960;
 const boundary_targets = [_]u32{ 8063, 8064, 8190, 8191, 8192, 8193, 8194, 8703, 8704, 8705 };
 
-/// A window's rows' inputs as a function of the stream and each row's cache position alone: its key and value are the
-/// cache's own rows there, so appending them leaves the cache as it was, and every plan reads the same keys.
+/// A window's row inputs by stream and cache position alone: key and value are the cache's own rows there.
 fn boundaryInputs(windows: []const planning.Window, ids: []const u64, caches: []const attn.Cache, query: mtl.Buffer, key: mtl.Buffer, value: mtl.Buffer, gate: mtl.Buffer) void {
     var node: usize = 0;
     for (windows, ids, caches) |w, id, cache| for (0..w.parents.len) |row| {
@@ -275,9 +274,7 @@ fn boundaryInputs(windows: []const planning.Window, ids: []const u64, caches: []
     };
 }
 
-/// Rows at 8,190 to 8,194 and around 8,064 and 8,704 equal their one-row steps byte for byte: in chains and trees that
-/// start below 8,192 and cross it, through the fused prefix kernel and the tail kernel, beside a neighboring stream of
-/// another length before or after them, and without a shared prefix.
+/// Rows around 8,064, 8,192 and 8,704 equal their one-row steps byte for byte in chains, trees, beside neighbors.
 fn boundary(r: *Rig, device: mtl.Device) !void {
     var rng = Rng{ .s = 0x5851f42d4c957f2d };
     var cache_buffers: [4]mtl.Buffer = undefined;
@@ -327,8 +324,7 @@ fn boundary(r: *Rig, device: mtl.Device) !void {
         .{ .start = 8100, .parents = long[0..100] },
         .{ .start = 8640, .parents = long[0..80] },
     };
-    // a neighbor in the other cache, before or after: one short row, a chain across 8192, a 16-row chain below it,
-    // a tree that unfuses the round, and one row past 8704
+    // a neighbor in the other cache, before or after: short row, chains across and below 8192, a tree, past 8704
     const Neighbor = struct { start: u32, parents: []const i32, before: bool };
     const neighbors = [_]?Neighbor{ null, .{ .start = 150, .parents = &.{-1}, .before = false }, .{ .start = 8193, .parents = &.{ -1, 0, 1 }, .before = true }, .{ .start = 8000, .parents = long[0..16], .before = false }, .{ .start = 8190, .parents = &.{ -1, 0, 0, 1 }, .before = true }, .{ .start = 8900, .parents = &.{-1}, .before = true } };
     var plans: usize = 0;

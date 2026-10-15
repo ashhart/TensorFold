@@ -54,8 +54,7 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
   auto O = opO.template get_destination_cooperative_tensor<decltype(tP), decltype(bV0), float>();
   for (int i = 0; i < 64; i++) O[i] = 0.0f;
   float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;
-  // a tile holds two chunk widths only in a window across fine_until: a pass a width, the other width's rows masked,
-  // so their state passes through it unchanged
+  // two chunk widths only in a window across fine_until: a pass a width, the other's rows masked and left unchanged
   for (int w = wa;; w = wb) {
   const int e0 = ck0 == w ? n0 : 0, e1 = ck1 == w ? n1 : 0;
   const int kbeg = int(c) * w;

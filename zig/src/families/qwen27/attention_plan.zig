@@ -12,8 +12,7 @@ pub const chunk = 512;
 pub const fine_chunk = 128;
 pub const fine_until = 8192;
 
-/// A row's key chunk, by its own position alone: the chunk its one-row step takes, in a window, a tree or beside
-/// other streams alike, so a window that crosses `fine_until` cuts each row's keys as that row's step does.
+/// A row's key chunk by its own position alone, as its one-row step takes it (in a window, a tree or beside others).
 pub fn chunkFor(position: u32) u32 {
     return if (position < fine_until) fine_chunk else chunk;
 }
@@ -135,7 +134,7 @@ pub const Plan = struct {
                 nodes[node * node_words] = @intCast(depth);
                 nodes[node * node_words + 1] = @intCast(st);
                 nodes[node * node_words + 2] = @intCast(ck);
-                // a chain's merge reads every chunk up to its own key, any other round's the whole chunks before its tail
+                // a chain's merge reads every chunk up to its own key, another round's the whole ones before its tail
                 nodes[node * node_words + 3] = @intCast(if (fused) (position + ck) / ck else pt / ck);
                 positions[node] = @intCast(position);
                 if (parent >= 0) @memcpy(paths[node * path_width ..][0..depth], paths[(first + @as(usize, @intCast(parent))) * path_width ..][0..depth]);
@@ -279,9 +278,7 @@ test "a chain's prefix runs to its last key and leaves no tail chunk, any other 
     try std.testing.expect(!canonical.fused);
 }
 
-/// The keys of each chunk a row's merge combines, in its order, as the prefix, tail and merge kernels read the plan:
-/// the prefix chunks below the row's own count, then its tail chunks, the first carrying the prefix's part of it.
-/// Empty chunks are left out, as the merge skips them. A row's bits follow from these ranges and its keys' data.
+/// The key ranges a row's merge combines in order, as the kernels read the plan (prefix chunks, then tail; no empties).
 fn rowChunks(p: Plan, node: usize, out: [][2]u32) ![]const [2]u32 {
     const at = global_words + @as(usize, @intCast(p.nodes[node * node_words + 1])) * stream_words;
     const depth: u32 = @intCast(p.nodes[node * node_words]);
