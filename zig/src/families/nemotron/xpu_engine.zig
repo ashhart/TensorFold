@@ -44,6 +44,8 @@ pub const Engine = struct {
     /// The MTP head and the prompt's last normed row (its first draft reads it), when loaded.
     head: ?mtp.Mtp = null,
     last_h: ?xpu.rt.Buffer = null,
+    /// The last round was a decode step (stepRow): the head reads its row from the model's scratch, not the window's.
+    stepped: bool = false,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const xpu.Context, dir: []const u8, o: Options) !*Engine {
         const t0 = std.Io.Clock.awake.now(io);
@@ -120,6 +122,7 @@ pub const Engine = struct {
     /// The prompt in windows of `rows`, in place; the head absorbs all rows but the last (last_h, for draftFirst).
     pub fn prefillHead(e: *Engine, prompt: []const u32, rows: u32) !void {
         const mt = &e.head.?;
+        e.stepped = false;
         var t: usize = 0;
         while (t < prompt.len) {
             try nw.stopCheck(&e.r);
@@ -141,7 +144,15 @@ pub const Engine = struct {
     /// One window of ids at m.pos, not committed; every row gets logits (rowTokens / rowLogits).
     pub fn verifyRows(e: *Engine, ids: []const u32) !void {
         try nw.stopCheck(&e.r);
+        e.stepped = false;
         try e.w.forward(&e.m, ids, false, @intCast(ids.len));
+    }
+
+    /// One token on the decode step, in place, with logits (argmax / fetchLogits): the bits of a one-row window.
+    pub fn stepRow(e: *Engine, token: u32) !void {
+        try nw.stopCheck(&e.r);
+        e.stepped = true;
+        try e.m.forward(token, true);
     }
 
     /// Greedy token of each row of the last window (syncs).
@@ -162,7 +173,7 @@ pub const Engine = struct {
     /// The head absorbs the kept rows of the last window (follow: the token after each) from `start`, then drafts.
     pub fn draftKept(e: *Engine, follow: []const u32, start: u32, depth: u32, out: []u32) !usize {
         const mt = &e.head.?;
-        try e.w.normRows(&e.m, @intCast(follow.len), mt.hn);
+        if (e.stepped) try e.m.normRow(mt.hn) else try e.w.normRows(&e.m, @intCast(follow.len), mt.hn);
         const d = try mt.step(&e.w, &e.m, follow, mt.hn, start, depth > 0);
         return e.chain(d, depth, out);
     }
@@ -198,8 +209,13 @@ pub const Engine = struct {
         for (ms, 1..) |*out, width| {
             for (&runs) |*r| {
                 const t0 = nowNs();
-                try e.verifyRows(ids[0..width]);
-                try e.rowTokens(g[0..width]);
+                if (width == 1) { // a one-row round is the decode step (lane: stepRow)
+                    try e.stepRow(ids[0]);
+                    _ = try e.argmax();
+                } else {
+                    try e.verifyRows(ids[0..width]);
+                    try e.rowTokens(g[0..width]);
+                }
                 r.* = @as(f64, @floatFromInt(nowNs() - t0)) / 1e6;
             }
             out.* = median(&runs);

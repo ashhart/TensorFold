@@ -111,11 +111,22 @@ pub fn Xpu(comptime S: type) type {
                 .mtp = true,
                 .speculate = true,
                 .speculate_early = false,
+                .plain_guard = true, // a round drafts only when its depth beats the decode step on the measured costs
                 .drafts = max_rows - 1,
                 .window_costs = self.costs[0..max_rows],
                 .mtp_step_ms = self.mtp_ms,
                 .max_streams = 1,
             };
+        }
+
+        /// A one-row round on the decode step (a one-row window's bits): greedy on the device, else drawn on the host.
+        fn stepOne(self: *Self, token: u32, sampling: ?lanes.Sampling, position: u64) !u32 {
+            if (comptime !has_head) unreachable;
+            try self.e.stepRow(token);
+            const greedy = if (sampling) |s| s.temperature <= 0 else true;
+            if (greedy) return self.e.argmax();
+            try self.e.fetchLogits(self.logits);
+            return draw(self.gpa, self.logits, sampling.?, position);
         }
 
         /// The window's rows drawn: greedy on the device, else each row's logits drawn at its keyed position.
@@ -248,6 +259,11 @@ pub fn Xpu(comptime S: type) type {
                 @memcpy(ids[1..][0..w.held], self.held[0..w.held]);
             } else @memcpy(ids[1..][0..w.tokens.len], w.tokens);
             self.start = e.m.pos;
+            self.held_n = 0;
+            if (rows == 1) { // no drafts: the decode step, kept in place
+                out[0].sampled[0] = try self.stepOne(w.pending, w.stream.sampling, w.positions[0]);
+                return;
+            }
             try e.verifyRows(ids[0..rows]);
             try self.drawRows(rows, w.stream.sampling, w.positions, out[0].sampled);
             @memcpy(out[0].drafts, ids[1..rows]);
