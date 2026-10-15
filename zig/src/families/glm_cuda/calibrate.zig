@@ -1,5 +1,4 @@
-//! GLM-5.3-Flash's costs for the lane core, timed at load on rank 0 (rank 1 replays every call): a lone stream's
-//! verify window by width, shared steps by their total rows (up to 16 streams' windows), and a chained head step.
+//! GLM-5.3-Flash's lane-core costs timed on rank 0 at load: verify widths, shared steps by rows, a chained head step.
 
 const std = @import("std");
 const lanes = @import("lanes");
@@ -39,8 +38,7 @@ pub fn run(self: anytype, drafts: bool) !void {
     }
     var picks: [forward.STEP_ROWS]decode.Pick = undefined;
     var ids: [streams][max_rows]u32 = undefined;
-    // one step of ``n`` streams' windows of ``width`` rows (distinct tokens: rows routed to their own experts, as a
-    // real window's are), each kept at its first row; its ms
+    // one step of ``n`` windows of ``width`` distinct-token rows (own experts), each kept at its first row; its ms
     const Step = struct {
         fn go(o: anytype, wr: *proto.Writer, ss: []*forward.Seq, tk: []u32, idv: *[streams][max_rows]u32, pk: []decode.Pick, n: usize, width: usize, rep: usize) !f64 {
             var wins: [streams]decode.Win = undefined;

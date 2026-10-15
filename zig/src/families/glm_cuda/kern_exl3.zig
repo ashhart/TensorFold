@@ -19,13 +19,7 @@ pub const Exl3Scratch = struct { xg: u64, xu: u64, xd: u64, z: u64 };
 
 pub const EXL3_SK: i64 = 4; // gate/up K slices in decode windows (down: 1); prompt chunks take 1
 
-/// The EXL3 experts' prompt kernel (TF_GLM_EXL3_PROMPT, read once):
-///   fused (the default): the transposed design (exl3.cu, "prompt chunks, the transposed design"): items of 64 pairs,
-///     the weights decoded into A fragments, gate and up in one block with the SwiGLU epilogue, the down projection
-///     with its epilogue; no partials in memory, one accumulation chain an output (a chunking-independent result).
-///   staged: items of 128 pairs, the four warps over columns, rows and words through shared memory, K split
-///     TF_GLM_EXL3_PROMPT_SK ways; wide: its 8-warp block (256 columns a block).
-///   old: the grouped decode kernel on items of 64 pairs, warps over K (the engine's original prompt path).
+/// TF_GLM_EXL3_PROMPT (read once): fused (default, transposed, no partials), staged (K split), wide (8 warps) or old.
 pub const PromptKernel = enum { fused, staged, wide, old };
 var prompt_kernel: ?PromptKernel = null;
 pub fn promptKernel() PromptKernel {
@@ -48,9 +42,7 @@ pub fn promptFused() bool {
 pub fn promptTile() i64 {
     return if (promptOld() or promptFused()) 64 else 128;
 }
-/// The staged prompt kernel's K splits (TF_GLM_EXL3_PROMPT_SK=1|2|4, 2): a short prompt's few pairs an expert get SK
-/// times the blocks at a fraction of the K each. One value for every chunk, so a row's bits do not depend on the
-/// chunking (a resumed prompt equals a fresh one); the chunk scratch is sized for it. Read once.
+/// The staged prompt kernel's K splits (TF_GLM_EXL3_PROMPT_SK=1|2|4, default 2), one for every chunk; read once.
 var prompt_sk: ?i64 = null;
 pub fn promptSplit() i64 {
     if (prompt_sk == null) {
@@ -60,10 +52,7 @@ pub fn promptSplit() i64 {
     return prompt_sk.?;
 }
 
-/// The routed pairs' outputs (pair = row * 8 + slot, picks [R, 8]) -> y [R, ys, D] fp32 at slots 0..7, through
-/// the plan's items (16 pairs each in a window, 64 or 128 in a prompt chunk).
-/// ``shx``: every expert of the layer shares one input rotation for gate and up (weights' exl3_shx): a prompt chunk
-/// rotates each token once (sc.xg holds a row a token) and the staged kernel reads a pair's row as pair >> 3.
+/// Routed pairs (row * 8 + slot) -> y [R, ys, D] fp32 slots 0..7; ``shx``: gate and up share one input rotation.
 pub fn exl3Routed(k: *K, x: u64, x_stride: i64, picks: u64, plan: Plan, w: Exl3, sc: Exl3Scratch, y: u64, ys: i64, R: i64, width: i64, prompt: bool, shx: bool) !void {
     const P = R * TOPK;
     const items = maxItems(P, EXPERTS, plan.tile);

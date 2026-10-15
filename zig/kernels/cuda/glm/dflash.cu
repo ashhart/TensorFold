@@ -1,7 +1,4 @@
-// DFlash2 block drafter kernels (our own, after z-lab/dflash's reference, MIT): the target's layer taps, the drafter's
-// per-head norms with rotary positions, its grouped two-tap dynamic convolutions, SwiGLU, and its attention over a
-// stream's context ring (the target's features, a 2048-token window) and the 8-row block (bidirectional).
-// Layout: hidden 4096, 32 query heads and 8 key/value heads of 128, a block of 8 rows a stream.
+// DFlash2 drafter kernels (ours, after z-lab/dflash, MIT): taps, norms+rope, convs, SwiGLU, ring and block attention.
 
 #include <cuda_bf16.h>
 #include <stdint.h>
@@ -48,9 +45,7 @@ __device__ __forceinline__ void normRope(const __nv_bfloat16* x, const __nv_bflo
 }
 }  // namespace
 
-// The completed residual of a target layer, its 4 streams' mean, into column block ``slot`` of out [R][5 D].
-// grid (R, D / 1024), 256 threads.
-// mode 1 (development, TF_GLM_DFLASH2_TAP=s0): stream 0 alone.
+// A target layer's residual, its 4 streams' mean (TF_GLM_DFLASH2_TAP=s0: stream 0), into column block ``slot``.
 extern "C" __global__ void df_tap(const __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ out, int slot, int mode) {
     const int r = blockIdx.x;
     const __nv_bfloat16* xr = x + (long long)r * 4 * D;
@@ -65,8 +60,7 @@ extern "C" __global__ void df_tap(const __nv_bfloat16* __restrict__ x, __nv_bflo
     }
 }
 
-// The block's queries [R][QH*HD] (from the fused qkv rows, stride ldq) normed and rotated at pos[r] into q, and its
-// keys likewise into kb, values copied into vb ([R][KVW] each). grid (R, QH + KVH), 64 threads.
+// The block's queries (fused qkv, stride ldq) normed and rotated at pos[r] into q, keys into kb, values into vb.
 extern "C" __global__ void df_block_qkv(const __nv_bfloat16* __restrict__ qkv, int ldq, const __nv_bfloat16* __restrict__ qn,
                                         const __nv_bfloat16* __restrict__ kn, const int* __restrict__ pos, float eps, float theta,
                                         __nv_bfloat16* __restrict__ q, __nv_bfloat16* __restrict__ kb, __nv_bfloat16* __restrict__ vb) {
@@ -85,8 +79,7 @@ extern "C" __global__ void df_block_qkv(const __nv_bfloat16* __restrict__ qkv, i
     }
 }
 
-// Context rows' keys and values ([R][2 KVW]: k | v) normed, rotated at pos[r] and written into each row's stream
-// ring (rings[r]) at slot pos % WIN of ``layer``. grid (R, KVH), 64 threads.
+// Context rows' keys and values (k | v) normed, rotated at pos[r], into rings[r] at slot pos % WIN of ``layer``.
 extern "C" __global__ void df_ctx_kv(const __nv_bfloat16* __restrict__ kv, const __nv_bfloat16* __restrict__ kn,
                                      const long long* __restrict__ pos, const uint64_t* __restrict__ rings, int layer, float eps,
                                      float theta) {
@@ -101,10 +94,7 @@ extern "C" __global__ void df_ctx_kv(const __nv_bfloat16* __restrict__ kv, const
     vo[threadIdx.x + 64] = row[KVW + kh * HD + threadIdx.x + 64];
 }
 
-// The grouped two-tap dynamic causal convolution along each stream's block of 8 rows:
-//   y[t, c] = sum over o in {0, 1} of (base[o][c] + dyn[t][which][o][c / 16]) * z[t - o][c]   (z[-1] = 0)
-// dyn [R][2 (pre, post)][2 (tap)][GROUPS]; base [2 (tap)][D] (the module's pre or post kernel). add: x += y, else
-// out = y. grid (R, D / 1024), 256 threads.
+// Two-tap dynamic causal conv over a block: y[t] = sum_o (base[o] + dyn[t][o][c / 16]) * z[t - o]; add or store.
 extern "C" __global__ void df_conv(const __nv_bfloat16* __restrict__ z, const __nv_bfloat16* __restrict__ dyn, int which,
                                    const __nv_bfloat16* __restrict__ base, __nv_bfloat16* __restrict__ out, int add) {
     const int r = blockIdx.x, t = r % BLOCK;
@@ -129,10 +119,7 @@ extern "C" __global__ void df_swiglu(const __nv_bfloat16* __restrict__ gu, __nv_
     }
 }
 
-// Attention of each stream's block (8 rows, 4 query heads a key/value head) over its ring's context keys in the
-// window, positions max(from, p - 2047) .. start - 1 for a row at p, and the block's 8 keys (every one visible):
-// grid (S, KVH), 256 threads (a warp a block row, its 4 heads; a lane 4 of the 128 dims).
-// q [S*8][QH*HD], kb / vb [S*8][KVW], o [S*8][QH*HD]; starts / froms the streams' block and context starts.
+// Each block's 8 rows attend to their ring's window (max(from, p - 2047) .. start - 1) and all 8 block keys.
 extern "C" __global__ void __launch_bounds__(256) df_attn(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kb,
                                                           const __nv_bfloat16* __restrict__ vb, const uint64_t* __restrict__ rings,
                                                           const long long* __restrict__ starts, const long long* __restrict__ froms,
@@ -188,10 +175,7 @@ extern "C" __global__ void __launch_bounds__(256) df_attn(const __nv_bfloat16* _
     }
 }
 
-// df_attn in chunks: block (s, kh, c) takes the c-th 1/CH of each row's keys (its context, then the block's 8) and
-// writes the row's 4 heads' running max, sum and unnormalized output (pm, pl [R][QH][CH]; pacc [R][QH][CH][HD], fp32);
-// df_attn_merge combines the chunks. The serial walk over 2,048 keys made df_attn latency-bound; this one runs
-// CH blocks a kv head. grid (S, KVH, CH), 256 threads (a warp a block row, as df_attn).
+// df_attn split over CH key chunks (running max, sum, fp32 output), merged by df_attn_merge: not latency-bound.
 extern "C" __global__ void __launch_bounds__(256) df_attn_part(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kb,
         const __nv_bfloat16* __restrict__ vb, const uint64_t* __restrict__ rings, const long long* __restrict__ starts,
         const long long* __restrict__ froms, int layer, float scale, float* __restrict__ pm, float* __restrict__ pl,
@@ -276,8 +260,7 @@ extern "C" __global__ void df_add(__nv_bfloat16* __restrict__ x, const __nv_bflo
         x[r * D + c] = tobf(bf(x[r * D + c]) + bf(y[r * D + c]));
 }
 
-// out = bf16(g rank 0 + g rank 1): both ranks' gathered fp32 partials [2][R][D] of a split linear (as the engine's
-// glm_residual_add reads them). grid (R, D / 1024), 256 threads.
+// out = bf16(g rank 0 + g rank 1): both ranks' gathered fp32 partials [2][R][D] of a split linear.
 extern "C" __global__ void df_sum2(const float* __restrict__ g, __nv_bfloat16* __restrict__ out, int R) {
     const long long r = blockIdx.x;
     for (int c = blockIdx.y * 1024 + threadIdx.x; c < (blockIdx.y + 1) * 1024; c += blockDim.x) {
@@ -286,9 +269,7 @@ extern "C" __global__ void df_sum2(const float* __restrict__ g, __nv_bfloat16* _
     }
 }
 
-// A rank's 16 largest logits of each head row (bf16 [R][cols]), as global ids and fp32 values, in two stages:
-// df_top16_part: each 4096-column chunk's 16 (grid (R, chunks), 256 threads); df_top16_merge: the chunks' into
-// out [R][32] (16 ids, then 16 values' bits; grid R, 256 threads). Ties keep the lower id.
+// A rank's 16 largest logits a head row as global ids and fp32 values: per-chunk part, then merge; ties keep low id.
 namespace {
 constexpr int CHUNK_COLS = 4096;
 constexpr int TOP = 16;

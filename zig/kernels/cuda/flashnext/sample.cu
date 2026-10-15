@@ -1,6 +1,4 @@
-// Flash Next port: device-side greedy candidates. One block per bf16 logits row: the row's first maximum (lowest
-// column among equal maxima, as argmax picks it), mapped to a global token id, and the row's log-sum-exp in fp32.
-// out[row] = {id, max (fp32 bits), lse (fp32 bits), 0}. Build: nvcc -cubin -arch=sm_121 -O3 -o fn_sample.cubin fn_sample.cu
+// Flash Next greedy candidates, a block a bf16 row: out[row] = {first argmax as a global id, max, fp32 lse, 0}.
 #include <cuda_bf16.h>
 #include <math_constants.h>
 
@@ -51,12 +49,7 @@ extern "C" __global__ void __launch_bounds__(1024) fn_rows_top(const __nv_bfloat
     }
 }
 
-// Sampling candidates: each row's 64 largest logits (by value, then the lower column at a tie), as global token ids
-// and fp32 values, the row's log-sum-exp, and its log-sum-exp at the row's temperature (inv_t[row], x * inv_t); both
-// ranks' sets are gathered and the keyed draw runs on the host over the merged 128 (whose first 64 are the vocabulary's
-// top 64 exactly). Each thread keeps its columns' sorted top 64, then the block merges the threads' lists by repeated
-// argmax over their heads (exact: no value of the row's top 64 can be missing from its thread's list).
-// out[row * 132]: ids[64], values[64] (fp32 bits), lse, lse at the temperature (fp32 bits), 2 spare.
+// Each row's top 64 (lower column at ties) as ids and values, its lse and lse at inv_t; out[row * 132], merged on host.
 #define TOPK 64
 #define TOPW (2 * TOPK + 4)
 __device__ __forceinline__ bool above(float a, int ia, float b, int ib) { return a > b || (a == b && ia < ib); }
@@ -124,8 +117,7 @@ extern "C" __global__ void __launch_bounds__(256) fn_cand_topk(const __nv_bfloat
     }
 }
 
-// Structured output: each listed row's tokens its grammar does not allow to -inf (rows[i]: the logits row, bits: the
-// row's allowed bits over this rank's columns, token c: bit c % 32 of word c / 32), before the picks and draws.
+// Structured output: a listed row's banned tokens to -inf (bit c % 32 of word c / 32), before the picks and draws.
 extern "C" __global__ void __launch_bounds__(256) fn_grammar_rows(__nv_bfloat16* __restrict__ logits, int stride, int cols,
         const unsigned* __restrict__ bits, int words, const int* __restrict__ rows) {
     __nv_bfloat16* x = logits + (size_t)rows[blockIdx.x] * stride;
@@ -134,11 +126,7 @@ extern "C" __global__ void __launch_bounds__(256) fn_grammar_rows(__nv_bfloat16*
         if (!((w[c >> 5] >> (c & 31)) & 1u)) x[c] = __ushort_as_bfloat16((unsigned short)0xff80);
 }
 
-// fn_cand_topk's output, by radix selection over the bf16 bits instead of per-thread lists: a pass histograms the
-// order-preserving keys' high byte (and takes both log-sum-exps), a second the low byte within the bin holding the
-// 64th largest, which fixes the threshold key K; a third collects every column above K and, of the columns at K, the
-// lowest ones (in column order), and the picks are ranked by value, then the lower column. The same 64 in the same
-// order as fn_cand_topk (-0 counts as +0, as the float compare does); every pass reads the row once, coalesced.
+// fn_cand_topk's 64 in its order by radix selection over the bf16 keys: high byte, low byte, then collect; 3 reads.
 __device__ __forceinline__ unsigned bf_key(unsigned short u) {
     if (u == 0x8000u) u = 0;   // -0: the same value as +0
     return (u & 0x8000u) ? (~u & 0xffffu) : (u | 0x8000u);

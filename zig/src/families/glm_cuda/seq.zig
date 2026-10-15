@@ -1,6 +1,4 @@
-//! GLM-5.3-Flash on CUDA: a stream's committed caches (forward.py's State), sized to its request. KDA conv windows and
-//! recurrent states (two parities), the main and MTP latent caches, the indexer's keys and gates (rings: only a
-//! window's rows and the 3 before it are read) and pools, and the kept prompt state a later prompt can resume.
+//! GLM-5.3-Flash on CUDA: a stream's committed caches (forward.py's State), sized to its request, and its kept state.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -15,8 +13,7 @@ pub const PROJ_W: i64 = 3 * LL * 128 + 128 + 128 + LL; // q | k | v | f_a | g_a 
 pub const CONV_C: i64 = 3 * LL * 128; // the conv's channels: q | k | v
 pub const REC: i64 = LL * 128 * 128; // a layer's recurrent state (fp32 values)
 
-/// Image features for a prompt: ``spans`` [begin, end) prompt positions of each image's placeholder run, in order,
-/// and ``feats`` their rows [sum of runs, 4096] bf16 on the device (the caller's, live through the prefill).
+/// Image features for a prompt: ``spans`` of placeholder positions in order, ``feats`` their [rows, 4096] bf16 rows.
 pub const Media = struct { spans: []const [2]i64, feats: u64 };
 
 /// Rows of the index rings (TF_GLM_INDEX_RING, default 16384, at least 4096; the capacity when that is smaller).
@@ -59,9 +56,7 @@ pub const Seq = struct {
     hidden: u64 = 0,
     /// The reply's draw rule (null or temperature 0: greedy); drafts stay greedy (they only propose).
     sampling: ?lanes.Sampling = null,
-    /// The kept prompt state: KDA states and conv windows at ``snap_at``, the MTP head's pending row and its cache
-    /// length, each cache's index rows of the point's incomplete pool. The attention rows below the point stay valid
-    /// in the live caches while the next prompt extends the kept prefix. 0: none.
+    /// The kept prompt state at ``snap_at`` (KDA, MTP row and length, index rows); attention rows stay live. 0: none.
     snap_at: usize = 0,
     snap_mtp_len: i64 = 0,
     snap_rec: u64 = 0, // [nkda, LL, 128, 128] fp32
@@ -69,8 +64,7 @@ pub const Seq = struct {
     snap_pending: u64 = 0, // [D] bf16
     snap_ik: u64 = 0, // [12, 3, 128] bf16
     snap_ig: u64 = 0,
-    // DFlash2 (dflash.zig): the context ring, its first valid position, and the last verify's rows (the step it
-    // ran in, the rows' first row in it, their first position, how many)
+    // DFlash2 (dflash.zig): context ring, its first valid position, and the last verify's step, rows and positions
     draft: u64 = 0,
     d_from: i64 = 0,
     v_step: u64 = 0,
@@ -190,9 +184,7 @@ fn ringCaches(s: *const Seq, which: u1) []const usize {
     return if (which == 0) all[0..s.ndsa] else all[s.ndsa..s.caches];
 }
 
-/// The index ring ``which`` (0: the DSA layers', 1: the MTP layer's) holding rows host_pos - host_pos % 4 ..
-/// host_pos + R: moved down (the rows before the window kept) when the window runs past its end. The kernels read
-/// the rings through the step's tables, so nothing captured holds the old base.
+/// Index ring ``which`` (0: DSA layers, 1: MTP) moved down when the window passes its end; read via step tables.
 pub fn ensureRing(k: *kern.K, s: *Seq, which: u1, host_pos: i64, R: i64) !void {
     const lo = host_pos - @mod(host_pos, 4);
     const base = s.ring_base[which];

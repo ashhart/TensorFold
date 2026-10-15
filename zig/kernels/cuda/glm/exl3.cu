@@ -1,12 +1,4 @@
-// GLM-5.3-Flash's EXL3 routed experts (4-bit "mcg" trellis, ExLlamaV3's format: MIT, Copyright (c) 2025 Turboderp)
-// on CUDA: the grouped trellis GEMV/GEMM and the Hadamard rotations around it. From TensorFold's python-0.6
-// src/tensorfold/families/glm5_next/cuda/exl3.cu, without torch, over the routed pairs alone (the shared expert runs
-// on the dense linears), with items of 64 pairs for prompt chunks (each expert's tiles read once a chunk).
-//
-// A 16x16 tile is 32 little-endian 32-bit words; lane L of a warp decodes the tile's values 8L..8L+7 from words L-1
-// and L, and those eight values are exactly the B fragments of two mma.m16n8k16 (columns 0-7 and 8-15 of the tile).
-// Every output depends only on its own pair: pairs share an mma tile but mma keeps rows independent, the K range of
-// every warp and split is fixed by the shape, and warps and splits are summed in a fixed order, never with atomics.
+// GLM EXL3 routed experts (4-bit mcg trellis, ExLlamaV3's format: MIT, (c) 2025 Turboderp), python-0.6's, no torch.
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -49,8 +41,7 @@ __device__ __forceinline__ uint32_t load_pair(const half* x, bool ok) {
     return ok ? *reinterpret_cast<const uint32_t*>(x) : 0u;
 }
 
-// Grid (item, n block, mat * SK + split) -> Z[mat][split][pair][n]; an item is an expert and up to 16 MT of its pairs
-// (the plan's members); warps sum fixed k ranges, added in warp order.
+// Grid (item, n block, mat * SK + split) -> Z[mat][split][pair][n]: an expert and <= 16 MT of its pairs; warp order.
 template <int MT, int NT, int W>
 __device__ __forceinline__ void grouped(
     const half* __restrict__ X0, const half* __restrict__ X1, const uint32_t* __restrict__ T0,
@@ -149,8 +140,7 @@ __device__ __forceinline__ void grouped(
     }
 }
 
-// Fast Walsh-Hadamard transform of 128 values held 4 per lane (lane L: values 4L..4L+3), natural order, fixed
-// butterfly order: strides 1, 2 in registers, 4..64 across lanes.
+// Fast Walsh-Hadamard transform of 128 values, 4 a lane, natural order: strides 1, 2 in registers, 4..64 across lanes.
 __device__ __forceinline__ void fwht128(float (&v)[4], int lane) {
     float a = v[0] + v[1], b = v[0] - v[1], c = v[2] + v[3], d = v[2] - v[3];
     v[0] = a + c; v[1] = b + d; v[2] = a - c; v[3] = b - d;
@@ -167,16 +157,9 @@ __device__ __forceinline__ void fwht128(float (&v)[4], int lane) {
 __device__ __forceinline__ float bf16r(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 
 
-// -- prompt chunks: the staged kernel -------------------------------------------------------------------------------
-// An item is an expert and up to PM of its pairs (the plan's members, tile PM). Block (item, column block of
-// NW * NTW n-tiles, matrix): the four warps split the columns, not K, so a warp's sums need no cross-warp reduction
-// and every decoded tile feeds PM / 8 mma; the member rows' k-slices and the tiles' words are staged in shared
-// memory by cp.async, STAGES deep, and the A fragments come from the staged rows by ldmatrix. The same sums as the
-// grouped kernel for every output, in a fixed order (one warp owns each output; K runs in order).
-//
-// decode_tile's values with fewer integer instructions: the byte-aligned 16-bit states taken with one PRMT each
-// and w >> 4 shared by two states (MiaAI-Lab, GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold patch 0020, Apache-2.0).
-// The same states, so the same bits.
+// -- prompt chunks: the staged kernel, warps split columns not K, cp.async STAGES deep; the grouped kernel's sums --
+
+// decode_tile via PRMT (MiaAI-Lab GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold patch 0020, Apache-2.0): same bits.
 __device__ __forceinline__ void decode_tile_p(uint32_t w, int lane, uint32_t (&b0)[2], uint32_t (&b1)[2]) {
     const uint32_t p = __shfl_sync(0xffffffffu, w, (lane + 31) & 31);
     const uint32_t s = __funnelshift_r(w, p, 20);
@@ -202,12 +185,7 @@ __device__ __forceinline__ void ldmatrix_x4(uint32_t (&a)[4], const half* p) {
                  : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3]) : "r"(s));
 }
 
-// xshift: the X row a member pair reads is pair >> xshift (3: one rotated row a token, when every expert of the layer
-// shares one input rotation for gate and up; 0: a row a pair).
-// SK: K splits -> Z[mat][split][pair][n] (the grouped kernel's layout: glm_exl3_gateup adds the splits in order). A
-// small chunk, whose items hold few pairs, gets SK times the blocks at a fraction of the K each.
-// Grid: x = (column block, matrix of ``mats``, split), y = item: one item's blocks are adjacent in launch order, so
-// its staged rows come from L2 after the first block reads them.
+// pair reads X row pair >> xshift (3: one row a token); SK K splits -> Z[mat][split][pair][n]; item blocks adjacent.
 template <int PM, int NW, int NTW, int KS, int STAGES>
 __device__ __forceinline__ void prompt_grouped(
     const half* __restrict__ X0, const half* __restrict__ X1, const uint32_t* __restrict__ T0,
@@ -331,9 +309,7 @@ extern "C" __global__ void __launch_bounds__(256) glm_exl3_prompt128w(const half
     prompt_grouped<128, 8, 2, 2, 3>(X0, X1, T0, T1, items, counts, members, Z, K, N, P, xshift, SK, mats);
 }
 
-// Program (row, 128-block of K): Xh[row][block] = fp16((x[row] * suh) @ H), one rotation a token for the gate and up
-// projections of a layer whose experts all share one suh (then every pair of the row reads Xh[row]: the same bits
-// glm_exl3_rot_in gives each pair). One warp a program.
+// Program (row, K block): Xh[row][block] = fp16((x[row] * suh) @ H) when a layer's experts share suh; rot_in's bits.
 extern "C" __global__ void glm_exl3_rot_rows(const __nv_bfloat16* __restrict__ x, int x_stride, const half* __restrict__ suh,
         half* __restrict__ out, int K) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
@@ -369,8 +345,7 @@ extern "C" __global__ void __launch_bounds__(128) glm_exl3_grouped64(const half*
     grouped<4, 2, 4>(X0, X1, T0, T1, items, counts, members, Z, K, N, P, SK);
 }
 
-// Program (pair, 128-block of K, matrix): Xh[mat][pair][block] = fp16((x[row] * suh[mat][e]) @ H) for the gate and up
-// projections of every routed pair (pair = row * 8 + slot). One warp a program.
+// Program (pair, K block, matrix): Xh[mat][pair][block] = fp16((x[row] * suh[mat][e]) @ H), pair = row * 8 + slot.
 extern "C" __global__ void glm_exl3_rot_in(const __nv_bfloat16* __restrict__ x, int x_stride, const int* __restrict__ pick,
         const half* __restrict__ suh0, const half* __restrict__ suh1, half* __restrict__ out0, half* __restrict__ out1, int K) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // a dependent matmul may start on its weights
@@ -389,9 +364,7 @@ extern "C" __global__ void glm_exl3_rot_in(const __nv_bfloat16* __restrict__ x, 
     for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
 }
 
-// Program (pair, 128-block of the rank's expert width): gate and up summed over the splits in order, rotated, scaled
-// by svh; GLM's limited SwiGLU with the grouped kernels' bf16 roundings; then the down projection's input rotation:
-// Xd[pair][block] = fp16((act * suh_d[e]) @ H).
+// Program (pair, width block): gate, up over splits in order, rotated, svh, limited SwiGLU, Xd = fp16(act suh_d H).
 extern "C" __global__ void glm_exl3_gateup(const float* __restrict__ Z, const int* __restrict__ pick, const half* __restrict__ svh_g,
         const half* __restrict__ svh_u, const half* __restrict__ suh_d, half* __restrict__ xd, int P, int N, int SK, float limit) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // a dependent matmul may start on its weights
@@ -426,8 +399,7 @@ extern "C" __global__ void glm_exl3_gateup(const float* __restrict__ Z, const in
     for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
 }
 
-// Program (pair, 128-block of the model width): the down projection summed over the splits in order, rotated and
-// scaled by svh -> y[row][slot][:] (fp32, rows of ``ys`` slots: the shared expert's last). This rank's share.
+// Program (pair, model-width block): down over splits in order, rotated, svh -> y[row][slot] fp32; this rank's share.
 extern "C" __global__ void glm_exl3_down(const float* __restrict__ Z, const int* __restrict__ pick, const half* __restrict__ svh_d,
         float* __restrict__ y, int P, int D, int SK, int ys) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // a dependent matmul may start on its weights
@@ -448,185 +420,12 @@ extern "C" __global__ void glm_exl3_down(const float* __restrict__ Z, const int*
     for (int j = 0; j < 4; ++j) o[j] = v[j] * HAD_SCALE * __half2float(svh_d[(size_t)e * D + n + j]);
 }
 
-// -- prompt chunks, the transposed design: Y^T = W^T X^T -------------------------------------------------------------
-// After MiaAI-Lab's prompt kernels (GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold, patches 0004 and 0009, Apache-2.0),
-// written for this engine. A decoded trellis tile is, reordered, an m16n8k16 A fragment of W^T (lane (g, t):
-// a0 = b0[0], a1 = b1[0], a2 = b0[1], a3 = b1[1]), so each warp decodes its own tiles straight into registers and
-// every decoded fragment feeds the whole item's member rows (PM = 64 pairs) as B fragments from shared memory. A
-// block covers 16 weight tiles: gate and up's 8 each of one 128-column Hadamard block (the member rows staged once
-// for both), or the down projection's 256 columns; 8 warps hold 2 tiles each. Each output is one fp32 chain of mma
-// over ascending k tiles (no split K, no partials in memory), so a row's bits depend on its own values only. The
-// epilogues (glm_exl3_gateup's and glm_exl3_down's formulas) run on the sums in shared memory: no round trip.
-namespace {
+// -- prompt chunks, the transposed design: Y^T = W^T X^T, one fp32 mma chain an output over ascending k tiles -------
 
-constexpr int TPM = 64, TNW = 8, TMT = 16 / TNW, TNB = TPM / 8, TT = TNW * 32, TPH = TPM / 2;
-constexpr int TBK = 32, TKT = TBK / 16, TSTAGES = 3, TXS = TBK + 8;   // a stage: 32 k values a row; +16 B: ldmatrix rows on distinct banks
-constexpr int TWORDS = 16 * TKT * 32;                                  // a stage's trellis words (16 tiles x 2 k tiles x 32)
-constexpr int GU_ES = 128 + 4, DN_ES = 256 + 4;                        // the epilogue sums' row strides (floats)
-template <int XR>
-constexpr int tstage_halves() { return XR * TXS + 2 * TWORDS; }
-constexpr int tsmem_bytes() {
-    const int gu = TSTAGES * tstage_halves<2 * TPM>() * 2;   // gate and up rows apart (no shared rotation)
-    const int ep = 2 * TPH * GU_ES * 4, dn = TPH * DN_ES * 4;
-    return gu > ep ? (gu > dn ? gu : dn) : (ep > dn ? ep : dn);
-}
+// After MiaAI-Lab's prompt kernels (GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold patches 0004, 0009, Apache-2.0).
+#include "exl3_transposed.cuh"
 
-// Which (matrix, weight tile) warp-tile q (0..15) of column block cb is.
-template <int MATS>
-__device__ __forceinline__ void ttile(int q, int cb, int& mat, int& nt) {
-    mat = MATS == 2 ? q >> 3 : 0;
-    nt = MATS == 2 ? cb * 8 + (q & 7) : cb * 16 + q;
-}
-
-// The main loop: acc[i][nb] = this warp's tile i (16 output columns) x members nb * 8 .. + 7, over K. XR: the rows a
-// stage holds (TPM when both matrices read the same rows: X0 == X1, xshift 3; 2 * TPM otherwise).
-template <int MATS, int XR>
-__device__ __forceinline__ void tmain(const half* __restrict__ X0, const half* __restrict__ X1, const uint32_t* __restrict__ T0,
-        const uint32_t* __restrict__ T1, const int* rows_sh, int cnt, int e, int K, int NTILES, int cb, int xshift,
-        half* stage, float (&acc)[TMT][TNB][4]) {
-    constexpr int SH = tstage_halves<XR>();
-    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    int mat, nt_unused;
-    ttile<MATS>(warp * TMT, cb, mat, nt_unused);
-    const int KT = K >> 4, chunks = K / TBK;
-    const int nblocks = (cnt + 15) >> 4;   // 16-member blocks in use
-#pragma unroll
-    for (int i = 0; i < TMT; ++i)
-#pragma unroll
-        for (int j = 0; j < TNB; ++j)
-#pragma unroll
-            for (int c = 0; c < 4; ++c) acc[i][j][c] = 0.f;
-    auto load = [&](int chunk) {
-        half* dst = stage + (size_t)(chunk % TSTAGES) * SH;
-        const int k0 = chunk * TBK;
-        for (int idx = threadIdx.x; idx < XR * (TBK / 8); idx += TT) {
-            const int m = idx / (TPM * (TBK / 8)), rem = idx % (TPM * (TBK / 8)), i = rem / (TBK / 8), j = rem % (TBK / 8);
-            if (i >= nblocks * 16) continue;   // a 16-member block without a member: never read
-            const int r = rows_sh[i];
-            const half* src = (m ? X1 : X0) + (size_t)(r < 0 ? 0 : (r >> xshift)) * K + k0 + j * 8;
-            cp_async16(dst + ((size_t)m * TPM + i) * TXS + j * 8, src, r >= 0);
-        }
-        uint32_t* wdst = reinterpret_cast<uint32_t*>(dst + (size_t)XR * TXS);
-        for (int idx = threadIdx.x; idx < 16 * TKT * 8; idx += TT) {   // 16-byte pieces of the 128-byte tile words
-            const int q = idx / (TKT * 8), kk = (idx / 8) % TKT, part = idx % 8;
-            int wm, nt;
-            ttile<MATS>(q, cb, wm, nt);
-            const uint32_t* src = (wm ? T1 : T0) + (((size_t)e * KT + chunk * TKT + kk) * NTILES + nt) * 32 + part * 4;
-            cp_async16(wdst + ((size_t)q * TKT + kk) * 32 + part * 4, src, true);
-        }
-    };
-#pragma unroll
-    for (int c = 0; c < TSTAGES - 1; ++c) {
-        if (c < chunks) load(c);
-        cp_async_commit();
-    }
-    for (int c = 0; c < chunks; ++c) {
-        cp_async_wait<TSTAGES - 2>();
-        __syncthreads();
-        if (c + TSTAGES - 1 < chunks) load(c + TSTAGES - 1);
-        cp_async_commit();
-        const half* base = stage + (size_t)(c % TSTAGES) * SH;
-        const half* xs = base + (size_t)(XR == TPM ? 0 : mat) * TPM * TXS;
-        const uint32_t* ws = reinterpret_cast<const uint32_t*>(base + (size_t)XR * TXS);
-#pragma unroll
-        for (int kk = 0; kk < TKT; ++kk) {
-            uint32_t a[TMT][4];
-#pragma unroll
-            for (int i = 0; i < TMT; ++i) {
-                uint32_t b0[2], b1[2];
-                decode_tile_p(ws[((size_t)(warp * TMT + i) * TKT + kk) * 32 + lane], lane, b0, b1);
-                a[i][0] = b0[0]; a[i][1] = b1[0]; a[i][2] = b0[1]; a[i][3] = b1[1];
-            }
-#pragma unroll
-            for (int jb = 0; jb < TPM / 16; ++jb) {
-                if (jb < nblocks) {
-                    uint32_t r[4];
-                    const int row = jb * 16 + (lane & 7) + ((lane >> 4) & 1) * 8;
-                    ldmatrix_x4(r, xs + (size_t)row * TXS + kk * 16 + ((lane >> 3) & 1) * 8);
-                    const uint32_t bl[2] = {r[0], r[1]}, bh[2] = {r[2], r[3]};
-#pragma unroll
-                    for (int i = 0; i < TMT; ++i) {
-                        mma16816(acc[i][2 * jb], a[i], bl);
-                        mma16816(acc[i][2 * jb + 1], a[i], bh);
-                    }
-                }
-            }
-        }
-    }
-    cp_async_wait<0>();
-    __syncthreads();   // the stages become the epilogue's sums
-}
-
-// acc (this warp's tiles, members TPH * hf .. + TPH - 1) -> E[member - TPH * hf][col] fp32, row stride ES; col0: the
-// first tile's first column within the block's E columns.
-__device__ __forceinline__ void tspill(float* E, int ES, int col0, const float (&acc)[TMT][TNB][4], int hf) {
-    const int lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
-#pragma unroll
-    for (int i = 0; i < TMT; ++i)
-#pragma unroll
-        for (int q = 0; q < TPM / 16; ++q) {
-            const int nb = hf * (TPM / 16) + q;
-            const int tok = q * 8 + 2 * t, col = col0 + i * 16 + g;
-            E[(size_t)tok * ES + col] = acc[i][nb][0];
-            E[(size_t)(tok + 1) * ES + col] = acc[i][nb][1];
-            E[(size_t)tok * ES + col + 8] = acc[i][nb][2];
-            E[(size_t)(tok + 1) * ES + col + 8] = acc[i][nb][3];
-        }
-}
-
-template <int XR>
-__device__ __forceinline__ void tgateup(const half* __restrict__ Xg, const half* __restrict__ Xu, const uint32_t* __restrict__ Tg,
-        const uint32_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members,
-        const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d, half* __restrict__ xd,
-        int K, int N, int xshift, float limit, unsigned char* smem_raw, int* rows_sh) {
-    const int cb = blockIdx.x, item = blockIdx.y;
-    if (item >= counts[0]) return;
-    const int e = items[3 * item], first = items[3 * item + 1], cnt = items[3 * item + 2];
-    if (threadIdx.x < TPM) rows_sh[threadIdx.x] = (int)threadIdx.x < cnt ? members[first + threadIdx.x] : -1;
-    __syncthreads();
-    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    float acc[TMT][TNB][4];
-    tmain<2, XR>(Xg, Xu, Tg, Tu, rows_sh, cnt, e, K, N >> 4, cb, xshift, reinterpret_cast<half*>(smem_raw), acc);
-    float* Eg = reinterpret_cast<float*>(smem_raw);
-    int mat, nt;
-    ttile<2>(warp * TMT, cb, mat, nt);
-    const int col0 = (nt - cb * 8) * 16;
-    const int n = cb * 128 + 4 * lane;
-    for (int hf = 0; hf < 2 && hf * TPH < cnt; ++hf) {
-        if (hf) __syncthreads();   // the first half's rows are read
-        tspill(Eg + (size_t)mat * TPH * GU_ES, GU_ES, col0, acc, hf);
-        __syncthreads();
-        for (int i = warp; i < TPH && hf * TPH + i < cnt; i += TNW) {
-            const int p = rows_sh[hf * TPH + i];
-            float gv[4], uv[4];
-#pragma unroll
-            for (int j = 0; j < 4; ++j) {
-                gv[j] = Eg[(size_t)i * GU_ES + 4 * lane + j];
-                uv[j] = Eg[(size_t)(TPH + i) * GU_ES + 4 * lane + j];
-            }
-            fwht128(gv, lane);
-            fwht128(uv, lane);
-            float v[4];
-#pragma unroll
-            for (int j = 0; j < 4; ++j) {
-                float gg = fminf(bf16r(gv[j] * HAD_SCALE * __half2float(svh_g[(size_t)e * N + n + j])), limit);
-                float uu = fminf(fmaxf(bf16r(uv[j] * HAD_SCALE * __half2float(svh_u[(size_t)e * N + n + j])), -limit), limit);
-                float act = bf16r(bf16r(gg / (1.f + expf(-gg))) * uu);
-                v[j] = act * __half2float(suh_d[(size_t)e * N + n + j]);
-            }
-            fwht128(v, lane);
-            half* o = xd + (size_t)p * N + n;
-#pragma unroll
-            for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
-        }
-    }
-}
-
-}  // namespace
-
-// Prompt chunks (items of 64 pairs): block (128-column block of the expert width, item), 8 warps: Xd[pair] = the
-// gate/up epilogue of the item's pairs. xshift 3: one rotated row a token read by gate and up alike (the rows staged
-// once); 0: a row a pair in Xg and Xu.
+// Prompt items of 64 pairs: block (128 expert columns, item), 8 warps: Xd = gate/up epilogue; xshift 3 or 0 as above.
 extern "C" __global__ void __launch_bounds__(256, 2) glm_exl3_prompt_gu(const half* __restrict__ Xg, const half* __restrict__ Xu,
         const uint32_t* __restrict__ Tg, const uint32_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts,
         const int* __restrict__ members, const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d,
@@ -638,8 +437,7 @@ extern "C" __global__ void __launch_bounds__(256, 2) glm_exl3_prompt_gu(const ha
     else tgateup<2 * TPM>(Xg, Xu, Tg, Tu, items, counts, members, svh_g, svh_u, suh_d, xd, K, N, 0, limit, smem_raw, rows_sh);
 }
 
-// Block (256-column block of the model width, item): y[row][slot][:] = the down epilogue of the item's pairs (this
-// rank's share).
+// Block (256 model-width columns, item): y[row][slot][:] = the down epilogue of the item's pairs (this rank's share).
 extern "C" __global__ void __launch_bounds__(256, 2) glm_exl3_prompt_dn(const half* __restrict__ Xd, const uint32_t* __restrict__ Td,
         const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members, const half* __restrict__ svh_d,
         float* __restrict__ y, int K, int D, int ys) {

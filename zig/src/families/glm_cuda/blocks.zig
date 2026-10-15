@@ -1,7 +1,4 @@
-//! GLM-5.3-Flash on CUDA: the weights' views and the layers of a step (forward.py's blocks): KDA and DSA attention,
-//! the dense MLP and the MoE, the hyper-connections around them, the final norm and the head; and the MTP head.
-//! Row-wise work covers the step's rows at once; the KDA recurrences, the attention and the indexer read the step's
-//! tables (forward.prepare).
+//! GLM-5.3-Flash on CUDA: weight views and a step's layers (KDA, DSA, MLP, MoE, hyper-connections, head, MTP head).
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -24,7 +21,7 @@ const MOE_W = forward.MOE_W;
 const DENSE_W = forward.DENSE_W;
 const IDX_KW = forward.IDX_KW;
 
-// -- weights ------------------------------------------------------------------------------------------------------------
+// -- weights ---------------------------------------------------------------------------------------------------
 const HCW = struct { fn_: u64, base: u64, scale: u64 };
 const KdaW = struct { proj: kern.B16, fb: kern.B16, gb: kern.B16, conv: u64, a_log: u64, dt_bias: u64, norm: u64, o: kern.B16 };
 const IndexW = struct { kw: kern.B16, qb: kern.B16, ln_w: u64, ln_b: u64, gate: u64, ape: u64 };
@@ -203,7 +200,7 @@ pub const Weights = struct {
     }
 };
 
-// -- the blocks -----------------------------------------------------------------------------------------------------------
+// -- the blocks ------------------------------------------------------------------------------------------------
 pub fn mm(e: *Engine, b: *Buffers, x: u64, x_stride: i64, w: kern.B16, out: u64, f32_out: bool, R: i64) !void {
     if (e.skip.dense and w.n != forward.HEAD_N) return;
     try kern.mm(&e.k, x, x_stride, w, out, f32_out, R, b.sk);
@@ -214,8 +211,7 @@ fn outProj(e: *Engine, b: *Buffers, x: u64, x_stride: i64, w: kern.B16, R: i64) 
     return forward.gather(e, b, R);
 }
 
-/// A KDA layer: a prompt chunk's rows through its one stream's states (a kept point inside the chunk cuts the
-/// chain there), or a decode step's windows, each through its own stream's (the segmented chain).
+/// A KDA layer: a prompt chunk through its stream's states (cut at a kept point), or windows on the segmented chain.
 fn kdaBlock(e: *Engine, b: *Buffers, l: LayerW, R: i64) !u64 {
     const k = l.kda.?;
     const li = l.li;
@@ -262,8 +258,7 @@ fn selectTokens(e: *Engine, b: *Buffers, ci: usize, R: i64) !void {
     try kern.sparseTokens(&e.k, b.pools, t, R, b.tokens, b.counts);
 }
 
-/// A DSA layer on latent cache ``ci`` (the MTP layer's is the last): the indexer always (its keys and pools are kept
-/// for every position), dense attention for the rows below the dense limit, sparse for the rest.
+/// A DSA layer on latent cache ``ci`` (MTP's last): indexer always, dense attention below the limit, sparse above.
 fn dsaBlock(e: *Engine, b: *Buffers, a: DsaW, ci: usize, R: i64) !u64 {
     const t = b.rowsTab();
     try mm(e, b, b.normed, D, a.proj, b.dp, false, R);
@@ -306,8 +301,7 @@ fn mlpBlock(e: *Engine, b: *Buffers, m: MlpW, R: i64) !u64 {
     return outProj(e, b, b.act, DENSE_W, m.down, R);
 }
 
-/// The MoE: the routed slots through the grouped kernels (8 a row), the shared expert (slot 8) through the dense
-/// linears, the slots combined by their weights.
+/// The MoE: 8 routed slots on the grouped kernels, the shared expert (slot 8) on dense linears, combined by weight.
 fn moeBlock(e: *Engine, b: *Buffers, m: MoeW, R: i64) !u64 {
     try kern.router(&e.k, b.normed, D, m.router, b.mlog, R, kern.EXPERTS);
     try kern.topk(&e.k, b.mlog, m.bias, b.pick, b.wts, R);
@@ -385,8 +379,7 @@ fn injectMedia(e: *Engine, s: *const sq.Seq, first: i64, R: i64, x: u64, copies:
     }
 }
 
-/// The step's rows through every layer, the final norm, and the head (a prompt chunk: its last row only). The ids
-/// are staged in b.ids, the tables prepared.
+/// The step's rows through every layer, norm and head (a prompt chunk: last row only); ids in b.ids, tables ready.
 pub fn compute(e: *Engine, b: *Buffers) !void {
     const R = e.step.rows;
     const w = &e.w;
@@ -407,8 +400,7 @@ pub fn compute(e: *Engine, b: *Buffers) !void {
     }
 }
 
-/// The MTP head over the step's staged rows (ids in b.ids, input hidden rows in b.hin), then each stream's last row's
-/// logits (in segment order).
+/// The MTP head over the staged rows (ids in b.ids, hidden rows in b.hin), then each stream's last-row logits.
 pub fn mtpCompute(e: *Engine, b: *Buffers) !void {
     const m = e.w.mtp.?;
     const R = e.step.rows;

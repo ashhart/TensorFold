@@ -1,15 +1,4 @@
-// From src/tensorfold/families/glm5_next/cuda/kda.cu (python-0.6), with the chain's body a device function and a
-// segmented chain (any number of streams' windows in one launch) added.
-// GLM-5.3-Flash's KDA (Kimi delta attention) on CUDA: one block of 1024 threads per head, a chain of R rows.
-//
-// Per row, following the Hugging Face definition: the depthwise conv over [conv state; q|k|v rows] (4 taps,
-// fp32) with SiLU and one bf16 rounding; fp32 L2 norms of q and k (eps inside the sum, q times DK^-0.5); the
-// per-channel decay g_i = exp(lower * sigmoid(exp(A_log) * (a_i + dt_bias_i))) in fp32; beta = bf16(sigmoid(b));
-// the delta rule in fp32 (decay along the key channel, read with k, correct toward v, read out with q);
-// read-out rounded to bf16; then the gated RMSNorm bf16(w * (y * rsqrt(mean(y^2) + eps)) * sigmoid(gate)).
-// Warp w owns value rows 4w .. 4w + 3, lane l the key columns 4l .. 4l + 3. The state update is one routine
-// (``update``) shared with ``replay``, compiled without FMA contraction, so a replayed prefix of a window gives
-// the bits of the serial steps.
+// GLM KDA from python-0.6 glm5_next/cuda/kda.cu plus a segmented chain; HF definition, update shared with replay.
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -164,8 +153,7 @@ __global__ void __launch_bounds__(1024) chain_kernel(
 
 }  // namespace
 
-// One stream's window in a batched step: its rows (from ``first`` of the step's rows), its states (the live parity
-// in, the other out), conv windows, replay inputs and window projections, each the base of layer 0.
+// One stream's window in a batched step: rows from ``first``, states, conv, replay inputs and projections (layer 0).
 struct KdaSeg {
     int first, rows;
     const float* rec_in;
@@ -178,8 +166,7 @@ struct KdaSeg {
     __nv_bfloat16* proj;
 };
 
-// chain_kernel for every stream of a batched step at layer ``li``: grid (H, streams). The segment's projection rows
-// (the conv's channels) are kept in its stream's window buffer for the commit's conv shift.
+// chain_kernel for every stream of a batched step at ``li``: grid (H, streams), projection rows kept for the shift.
 extern "C" __global__ void __launch_bounds__(1024) glm_kda_chain_seg(const KdaSeg* __restrict__ segs, int li,
         int H, const __nv_bfloat16* __restrict__ P, int p_stride, int b_off,
         const __nv_bfloat16* __restrict__ A, int a_stride, const __nv_bfloat16* __restrict__ G, int g_stride,
@@ -271,7 +258,7 @@ __global__ void __launch_bounds__(1024) replay_layers_kernel(
         for (int i = 0; i < 4; ++i) sout[sbase + (size_t)(warp * 4 + j) * DK + lane * 4 + i] = s[j][i];
 }
 
-// Long windows: state-independent work for all rows (prep_kernel, out_kernel), the delta rule alone row by row (step_kernel); chain_kernel's bits.
+// Long windows: prep_kernel and out_kernel for all rows, the delta rule row by row (step_kernel); chain_kernel's bits.
 
 // Block (row, head), 512 threads: conv + SiLU of the 3 x 128 q|k|v channels, the decay, beta, then the q/k norms.
 __global__ void __launch_bounds__(512) prep_kernel(
@@ -324,7 +311,7 @@ __global__ void __launch_bounds__(512) prep_kernel(
     }
 }
 
-// Block (head, part): each warp owns 4 value rows; TR rows of saved k, q, decay, v and beta are staged in shared memory at a time.
+// Block (head, part): a warp owns 4 value rows; TR rows of saved k, q, decay, v and beta staged in shared at a time.
 template <int WARPS, int TR>
 __global__ void __launch_bounds__(WARPS * 32) step_kernel(
         int H, const float* __restrict__ state_in, const float* __restrict__ q_in, const float* __restrict__ k_save,

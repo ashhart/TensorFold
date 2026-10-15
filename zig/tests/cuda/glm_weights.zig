@@ -1,6 +1,4 @@
-//! GLM-5.3-Flash on CUDA: the native weight loader (src/families/glm_cuda/weights.zig) against the Python engine's
-//! prepared weights (tools/capture_ref.py's weights.json: each tensor's name, bytes and sha256).
-//! usage: tf-cuda-test glm-weights <converted dir> <rank> <capture rank dir>
+//! tf-cuda-test glm-weights <converted dir> <rank> <capture dir>: the native loader vs capture_ref.py's weights.json.
 
 const std = @import("std");
 const cuda = @import("cuda");

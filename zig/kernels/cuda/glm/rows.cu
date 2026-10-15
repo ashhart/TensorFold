@@ -1,7 +1,4 @@
-// GLM-5.3-Flash on CUDA: the row steps between the linears, ours (embedding, RMSNorm, the hyper-connections, the
-// residuals, SwiGLU, the router and its top-8, the experts' combine, the KDA conv window). Each row is one block's,
-// with fp32 sums in a fixed order (threads strided over the row, then a fixed tree), so a row's bits depend on its own
-// inputs alone, never on how many rows the window holds.
+// GLM row steps between the linears, ours: a block a row, fp32 sums strided then a fixed tree; row-stable bits.
 
 #include <cuda_bf16.h>
 #include <stdint.h>
@@ -40,8 +37,7 @@ extern "C" __global__ void glm_embed(const int* __restrict__ ids, const __nv_bfl
     }
 }
 
-// RMSNorm (Llama: bf16(w * bf16(x * rinv))) of row r of x (stride xs_) -> out (stride os_), and the 64-groups' fp32
-// sums of the outputs when xs is given. D <= 4096.
+// RMSNorm (Llama: bf16(w * bf16(x * rinv))) of row r -> out, and the outputs' 64-group fp32 sums when xs. D <= 4096.
 extern "C" __global__ void glm_rmsnorm(const __nv_bfloat16* __restrict__ x, long long x_stride, const __nv_bfloat16* __restrict__ w,
                                        __nv_bfloat16* __restrict__ out, long long o_stride, float* __restrict__ xs, float eps, int D) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // a dependent matmul may start on its weights
@@ -69,9 +65,7 @@ extern "C" __global__ void glm_rmsnorm(const __nv_bfloat16* __restrict__ x, long
     }
 }
 
-// hc_pre (hyper-connections, 4 streams of D = 4096), in two launches. The partials: row r's 24 mixing dots of the
-// streams [16384] with fn [24, 16384] and their sum of squares over 16 fixed slices of 1024 inputs, one block a
-// (row, slice) -> part [R, 16, 25]. 128 threads.
+// hc_pre partials: row r's 24 mixing dots and sum of squares over 16 fixed 1024-slices -> part [R, 16, 25]. 128 thr.
 extern "C" __global__ void __launch_bounds__(128) glm_hc_part(const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ fn,
         float* __restrict__ part) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // a dependent matmul may start on its weights
@@ -110,9 +104,7 @@ extern "C" __global__ void __launch_bounds__(128) glm_hc_part(const __nv_bfloat1
     if (tid == 0) out[M] = sm;
 }
 
-// The finish: the slices' partials in slice order, the pre / post / comb weights (comb: ``iters`` Sinkhorn steps), the
-// collapsed row RMSNormed by nw -> out [D] and its 64-groups' sums xs; post [4] and comb [4, 4] kept for hc_post.
-// 512 threads.
+// hc_pre finish: partials in slice order, pre/post/comb (``iters`` Sinkhorn), RMSNormed row and xs; post, comb kept.
 extern "C" __global__ void __launch_bounds__(512) glm_hc_finish(const __nv_bfloat16* __restrict__ x, const float* __restrict__ part,
         const float* __restrict__ base, const float* __restrict__ scale, const __nv_bfloat16* __restrict__ nw,
         __nv_bfloat16* __restrict__ out, float* __restrict__ xs, float* __restrict__ post, float* __restrict__ comb,
@@ -183,8 +175,7 @@ extern "C" __global__ void __launch_bounds__(512) glm_hc_finish(const __nv_bfloa
     }
 }
 
-// hc_post: the branch (both ranks' fp32 partials g [2, R, D], rank 0 first, rounded once) into each of the 4 streams:
-// x_s = bf16(post_s * branch + sum_i comb[i][s] x_i), x in place. grid (R, D / 1024), 256 threads.
+// hc_post: branch (ranks' fp32 partials, rank 0 first, rounded once): x_s = bf16(post_s b + sum_i comb[i][s] x_i).
 extern "C" __global__ void glm_hc_post(__nv_bfloat16* __restrict__ x, const float* __restrict__ g, const float* __restrict__ post,
                                        const float* __restrict__ comb, int R) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // a dependent matmul may start on its weights
@@ -228,8 +219,7 @@ extern "C" __global__ void glm_stream_mean(const __nv_bfloat16* __restrict__ x, 
     }
 }
 
-// SwiGLU over [gate | up] (bf16, width W each): bf16(bf16(silu(min(g, L))) * clip(u, -L, L)) and its 64-groups' sums.
-// grid (R, W / 512), 256 threads.
+// SwiGLU over [gate | up]: bf16(bf16(silu(min(g, L))) * clip(u, -L, L)) and 64-group sums; grid (R, W / 512), 256 thr.
 extern "C" __global__ void glm_swiglu(const __nv_bfloat16* __restrict__ gu, __nv_bfloat16* __restrict__ out, float* __restrict__ xs,
                                       float limit, int W) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // a dependent matmul may start on its weights
@@ -251,9 +241,7 @@ extern "C" __global__ void glm_swiglu(const __nv_bfloat16* __restrict__ gu, __nv
     }
 }
 
-// router logits: out[m, e] = fp32 x[m] . w[e] (bf16 [NE, D]). A block takes 2 experts, a warp a quarter of D (D a
-// multiple of 1024): its lanes over 8-input pieces in order, a xor tree, then the quarters summed in order: each row's
-// sum is its own. grid (NE / 2, ceil(M / 16)), 256 threads.
+// router logits fp32 x[m] . w[e]: 2 experts a block, a warp a D quarter, lanes then xor tree then quarters in order.
 extern "C" __global__ void __launch_bounds__(256) glm_router(const __nv_bfloat16* __restrict__ x, long long x_stride,
         const __nv_bfloat16* __restrict__ w, float* __restrict__ out, int M, int NE, int D) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // a dependent matmul may start on its weights
@@ -310,8 +298,7 @@ extern "C" __global__ void __launch_bounds__(256) glm_router(const __nv_bfloat16
     }
 }
 
-// each row's 8 experts by sigmoid score plus bias (the lower id on ties), weights the picks' scores normalized in pick
-// order times ``scale``, then the shared expert (id NE, weight 1) in slot 8. A warp a row (NE <= 320).
+// a row's 8 experts by sigmoid + bias (lower id on ties), weights normalized times ``scale``, shared expert in slot 8.
 extern "C" __global__ void glm_topk(const float* __restrict__ logits, const float* __restrict__ bias, int* __restrict__ pick,
                                     float* __restrict__ wts, float scale, int NE) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // a dependent matmul may start on its weights
@@ -389,8 +376,7 @@ extern "C" __global__ void glm_combine(const void* __restrict__ y, int y_f32, co
     }
 }
 
-// the KDA conv window: conv [layers, 3, C] (in place) takes rows keep .. keep + 2 of [conv; proj rows]
-// (proj [layers, R, >= C], strides in elements). grid (layers, ceil(C / 1024)), 256 threads.
+// KDA conv window: conv [layers, 3, C] in place takes rows keep .. keep + 2 of [conv; proj]; grid (layers, C / 1024).
 extern "C" __global__ void glm_conv_shift(__nv_bfloat16* __restrict__ conv, const __nv_bfloat16* __restrict__ proj, int keep,
                                           long long conv_layer, long long proj_layer, long long proj_row, int C) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // a dependent matmul may start on its weights

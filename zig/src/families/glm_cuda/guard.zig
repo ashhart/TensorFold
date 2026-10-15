@@ -1,9 +1,4 @@
-//! A rank's watchdog. The GB10's memory is the host's: when a rank's caches, graphs and buffers take the last of it
-//! the kernel stalls the whole machine (no OOM kill comes), and the peer then waits in a collective forever. So a
-//! thread reads MemAvailable every 100 ms and the rank exits at the floor (TF_MEM_FLOOR_GIB, 2 GiB), which frees
-//! everything it holds; below the floor and 3 GiB more it is ``tight`` and rank 0 admits no new request. It also exits
-//! when its peer is gone (the control link hung up or timed out, or NCCL reports an error): a rank alone can only
-//! hang, and an exited one can be restarted.
+//! A rank's watchdog: exits at the MemAvailable floor (TF_MEM_FLOOR_GIB, 2 GiB) or when its peer is gone; ``tight``.
 
 const std = @import("std");
 const posix = std.posix;

@@ -1,7 +1,4 @@
-// GLM-5.3-Flash on CUDA: the DSA indexer, ours. A row writes its index key (LayerNorm) and gate into its stream's
-// rings, the row that completes a pool of 4 writes the pooled key, each row scores its visible pools, keeps its 512
-// best (the lower pool on ties) and lists their tokens ascending. Rows name their own rings, pools and positions, so
-// one launch serves any mix of streams, and a row's choice never depends on the rows beside it.
+// GLM DSA indexer, ours: rings, pools of 4, each row's 512 best pools; rows name their streams, never depend on others.
 
 #include <cuda_bf16.h>
 #include <stdint.h>
@@ -24,8 +21,7 @@ __device__ __forceinline__ uint32_t order_key(float s) {
 
 }  // namespace
 
-// row r: LayerNorm(k_raw) -> bf16 at its position of its key ring ``ik[r]``, the fp32 gate -> bf16 into ``ig[r]``
-// (ring pointers already offset so that row p of the positions is at p * 128). 128 threads.
+// row r: LayerNorm(k_raw) -> bf16 into key ring ``ik[r]``, fp32 gate -> bf16 into ``ig[r]`` (row p at p * 128).
 extern "C" __global__ void glm_index_write(const __nv_bfloat16* __restrict__ kr, long long k_stride, const float* __restrict__ gr,
         const __nv_bfloat16* __restrict__ lnw, const __nv_bfloat16* __restrict__ lnb, const unsigned long long* __restrict__ ik,
         const unsigned long long* __restrict__ ig, const int* __restrict__ pos, float eps) {
@@ -50,9 +46,7 @@ extern "C" __global__ void glm_index_write(const __nv_bfloat16* __restrict__ kr,
     reinterpret_cast<__nv_bfloat16*>(ig[r])[p * D + d] = __float2bfloat16_rn(gr[(long long)r * D + d]);
 }
 
-// the row that completes a pool (position % 4 == 3) writes its pooled key: the 4 keys weighted by the softmax of
-// gate + ape, each product rounded to bf16, summed in order -> pk[r] row pos / 4. 128 threads. Run after
-// glm_index_write over the same rows (a pool's earlier keys may be the window's or earlier ones still in the ring).
+// pool-completing row (pos % 4 == 3): 4 keys by softmax(gate + ape), bf16 products summed in order -> pk; after write.
 extern "C" __global__ void glm_pool_keys(const unsigned long long* __restrict__ ik, const unsigned long long* __restrict__ ig,
         const __nv_bfloat16* __restrict__ ape, const unsigned long long* __restrict__ pk, const int* __restrict__ pos) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // a dependent matmul may start on its weights
@@ -79,9 +73,7 @@ extern "C" __global__ void glm_pool_keys(const unsigned long long* __restrict__ 
     reinterpret_cast<__nv_bfloat16*>(pk[r])[p * D + d] = __float2bfloat16_rn(((t[0] + t[1]) + t[2]) + t[3]);
 }
 
-// each row's pool scores: s_p = sum_h w_h relu(scale * qi_h . pk_p) for its visible pools (p < (pos + 1) / 4), -inf
-// for the rest of the np columns. qi [R, 32, 128], w the head weights (bf16, row stride w_stride). grid (R, np / 64),
-// 128 threads: a block of 64 pools on tensor cores, the heads summed in a fixed order.
+// pool scores s_p = sum_h w_h relu(scale qi_h . pk_p), p < (pos + 1) / 4, else -inf; 64 pools a block, heads in order.
 extern "C" __global__ void __launch_bounds__(128) glm_index_scores(const __nv_bfloat16* __restrict__ qi, const __nv_bfloat16* __restrict__ w,
         long long w_stride, const unsigned long long* __restrict__ pk, float* __restrict__ out, const int* __restrict__ pos, int np,
         float scale, float wscale) {
@@ -152,9 +144,7 @@ extern "C" __global__ void __launch_bounds__(128) glm_index_scores(const __nv_bf
         }
 }
 
-// each row's 512 best pools of its visible ones (the lower pool on ties), ascending (int64): a radix select (8 bits a
-// pass) finds the 512th best score, then one pass in pool order writes the pools above it and the lowest ties.
-// scores [R, np]. 1024 threads.
+// a row's 512 best visible pools ascending (int64, lower pool on ties): 8-bit radix select, one ordered pass.
 extern "C" __global__ void __launch_bounds__(1024) glm_index_select(const float* __restrict__ sc, long long* __restrict__ out, int np,
                                                                   const int* __restrict__ pos) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // a dependent matmul may start on its weights
@@ -228,8 +218,7 @@ extern "C" __global__ void __launch_bounds__(1024) glm_index_select(const float*
     }
 }
 
-// each row's attended tokens (its 512 pools' tokens ascending, then the incomplete last pool's visible tokens, -1 past
-// the row) and their count: 2048 plus those when the row has more than 512 complete pools, else 0 (a dense row).
+// a row's tokens: its pools' ascending, then the last pool's visible ones (-1 past); count 2048 + those, 0 when dense.
 extern "C" __global__ void glm_index_tokens(const long long* __restrict__ pools, const int* __restrict__ pos,
                                             int* __restrict__ tokens, int* __restrict__ counts) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // a dependent matmul may start on its weights

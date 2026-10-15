@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""The device code of the Python GLM-5.3-Flash engine's own CUDA extension (families/glm5_next/cuda/kda.cu) as a
-zig/kernels/cuda/glm copy: Flash Next's gen_copies.py rules (the source up to its first ATen-using function, ATen
-includes dropped, the anonymous namespace kept) plus explicit instantiations of every template kernel the Python
-build instantiated (demangled from its cubin). The grouped experts and the 4-bit matmuls are the shared extensions
-Flash Next's copies already hold (the same symbols).
-usage: gen_copies.py <tensorfold src dir (the patched python engine)> <symbols.json of the Python cubins> <out dir>"""
+"""The Python GLM engine's KDA extension device code as a zig/kernels/cuda/glm copy: <src> <symbols.json> <out>."""
 import json, sys
 from pathlib import Path
 

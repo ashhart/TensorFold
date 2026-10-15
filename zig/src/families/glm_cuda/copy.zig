@@ -1,8 +1,4 @@
-//! Copy drafts (prompt lookup): code, JSON and edits repeat what came before, often longer than the MTP head drafts
-//! with confidence. A stream keeps its prompt and every committed token, and an index of each 8-token run's latest
-//! end; when the history's last 8 tokens ran before, the tokens that followed them are a draft. A run inside the
-//! reply itself must match 16 tokens (a reply's own short repeats mislead more often). The drafts are verified like
-//! the head's, so a wrong copy costs rows, never the reply.
+//! Copy drafts (prompt lookup): a repeated 8-token run (16 in the reply) drafts what followed it, verified as MTP's.
 
 const std = @import("std");
 
@@ -19,8 +15,7 @@ pub const Copy = struct {
     k_prompt: usize = K,
     k_reply: usize = K_REPLY,
 
-    /// ``prompt`` kept and its runs indexed, at most ``most`` of its last tokens; a match takes ``k_prompt`` tokens
-    /// in the prompt and ``k_reply`` inside the reply.
+    /// ``prompt`` kept and indexed, at most ``most`` last tokens; matches take ``k_prompt`` or ``k_reply`` tokens.
     pub fn init(gpa: std.mem.Allocator, prompt: []const u32, most: usize, k_prompt: usize, k_reply: usize) !Copy {
         const kp = @max(2, k_prompt);
         const kr = @max(2, k_reply);
