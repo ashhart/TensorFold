@@ -5,6 +5,7 @@ const tool_parse = @import("tool_parse.zig");
 const parse = tool_parse.parse;
 const closeCall = tool_parse.closeCall;
 const repairGlmKeys = tool_parse.repairGlmKeys;
+const putBack = tool_parse.putBack;
 
 test "families" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -308,4 +309,57 @@ test "a GLM call the end token left open closes as #285 closed it" {
         "<tool_call>run<arg_key>command</arg_key><arg_value>ls</arg_value> and then", // text after an argument
     };
     for (left_open) |text| try std.testing.expectEqualStrings("", try closeCall(a, text, tools));
+}
+
+fn now() u64 {
+    return @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds);
+}
+
+/// The fastest of three parses of one Gemma call to `lookup` that holds `n` strings, in nanoseconds.
+fn gemmaParse(tools: []const json.Value, n: usize) !u64 {
+    const gpa = std.testing.allocator;
+    var reply: std.ArrayList(u8) = .empty;
+    defer reply.deinit(gpa);
+    try reply.appendSlice(gpa, "<|tool_call>call:lookup{");
+    for (0..n) |_| try reply.appendSlice(gpa, "q:<|\"|>a<|\"|>,");
+    try reply.appendSlice(gpa, "n:1}<tool_call|>");
+    var best: u64 = std.math.maxInt(u64);
+    for (0..3) |_| {
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const start = now();
+        const r = try parse(arena.allocator(), reply.items, tools, null);
+        best = @min(best, now() - start);
+        try std.testing.expectEqualStrings("{\"q\":\"a\",\"n\":1}", r.calls.?[0].get("function").?.get("arguments").?.string);
+    }
+    return best;
+}
+
+test "a Gemma call's strings go back in one pass" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const tools = (try json.parse(arena.allocator(), "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
+    const t1 = try gemmaParse(tools, 1200);
+    const t8 = try gemmaParse(tools, 8 * 1200);
+    // 8x the strings: near 8x the time, not 64x
+    try std.testing.expect(t8 <= 20 * std.time.ns_per_ms or t8 <= 24 * t1);
+}
+
+test "putBack gives the text that replacing the marks in turn gives" {
+    // the reference: one replaceOwned per mark, lowest index first
+    var prng: std.Random.DefaultPrng = .init(0x9e3779b9);
+    const r = prng.random();
+    const pieces = [_][]const u8{ "\x00", "0", "1", "2", "10", "01", "a", ",", "\"k\":", "\x000\x00", "\x001\x00", "\x002\x00", "\x0010\x00" };
+    for (0..20_000) |_| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var text: std.ArrayList(u8) = .empty;
+        for (0..r.uintLessThan(usize, 24)) |_| try text.appendSlice(a, pieces[r.uintLessThan(usize, pieces.len)]);
+        const quoted = try a.alloc([]const u8, r.uintLessThan(usize, 12));
+        for (quoted, 0..) |*q, i| q.* = try std.fmt.allocPrint(a, "\"s{d}\"", .{i});
+        var want: []const u8 = text.items;
+        for (quoted, 0..) |q, i| want = try std.mem.replaceOwned(u8, a, want, try std.fmt.allocPrint(a, "\x00{d}\x00", .{i}), q);
+        try std.testing.expectEqualStrings(want, try putBack(a, text.items, quoted));
+    }
 }
