@@ -131,7 +131,7 @@ pub fn swiglu(set: Set, stream: cuda.Stream, gu: u64, out: u64, xs: u64, limit: 
     return swigluLaunch(.{ set.glue.swiglu_512, set.glue.swiglu_64 }, stream, gu, out, xs, limit, rows, w);
 }
 
-/// swiglu on a pair of glm_glue_moe.cuh's 512 and 64 kernels (tf_ling_swiglu_*: the limit on silu's output, Ling); 0 for none.
+/// swiglu on a pair of glm_glue_moe.cuh's 512 and 64 kernels (tf_ling_swiglu_*, the limit on silu's output); 0: none.
 pub fn swigluWith(fs: [2]cuda.Function, stream: cuda.Stream, gu: u64, out: u64, xs: u64, limit: f32, rows: usize, w: usize) !void {
     return swigluLaunch(fs, stream, gu, out, xs, clampOf(limit), rows, w);
 }
