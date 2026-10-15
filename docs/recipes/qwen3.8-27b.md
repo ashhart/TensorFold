@@ -15,15 +15,19 @@ from this repository's docs, 100 greedy tokens, prefill from the time to the fir
 
 | Prompt | Native prefill tok/s | mlx-lm prefill | Native decode tok/s | mlx-lm decode | Native with DFlash2 |
 |---|---|---|---|---|---|
-| 2k | 1343 | 1216 | 48.1 | 54.7 | 162-226 |
-| 8k | 1289 | 1860 | 47.6 | 52.8 | 102 |
-| 32k | 1163 | 1699 | 44.9 | 46.5 | 120 |
+| 2k | 1300 | 1216 | 50.4 | 54.7 | 162-226 |
+| 8k | 1283 | 1860 | 48.3 | 52.8 | 102 |
+| 32k | 1170 | 1699 | 45.1 | 46.5 | 120 |
 
 A plain one-row round is 19.5 ms on the M5 Ultra (`tf-qwen27-bench`, `QWEN27_ADVANCE`): its 321 projections read
 14.1 GB in 16.2 ms, each shape at the K split it streams fastest at over every layer's matrix (`QWEN27_DISTINCT`;
 a matrix called again sits in the system cache and misleads), and an undrafted one-row window is kept by its own
-verify, as a prompt's rows are, rather than by a keep command buffer the host waited on (1.1 ms a token). The
-remaining 2.8 ms a token are the glue between the projections, about 600 dispatches.
+verify, as a prompt's rows are, rather than by a keep command buffer the host waited on (1.1 ms a token). Decode
+attention scores a window's cached keys in 128-key chunks while the window starts below 8,192 and 512-key chunks
+past it (`attention_plan.chunkFor`, the chunk a window's meta carries): at a 2k context a row's four key heads
+were eight threadgroups of 512 keys on an 80-core GPU, 96 µs a layer. A chain and a tree at one position merge
+their chunk partials alike, so drafted rows stay byte-equal to plain ones. The remaining 2 ms a token are the
+glue between the projections, about 600 dispatches.
 
 The rest of this page describes the Python engine, frozen at 0.6.6 and available at the
 [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its flags, commands and paths belong to that

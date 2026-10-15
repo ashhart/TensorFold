@@ -3,7 +3,7 @@
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace metal;
 using namespace mpp::tensor_ops;
-constant constexpr int G = 6, D = 256, CK = 512, TK = 64, MAXD = 128, MG = 8, MS = 12;
+constant constexpr int G = 6, D = 256, TK = 64, MAXD = 128, MG = 8, MS = 12; // a stream's key chunk CK is meta word 11
 struct Q27AttnReadPtrs { device const bfloat* keys; device const bfloat* values; };
 
 // SG tiles a threadgroup, a simdgroup pair each: both run scores and softmax, one owns each half of the head dim.
@@ -21,7 +21,7 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
   const uint c = threadgroup_position_in_grid.y;
   const int NCH = meta[1], SGA = meta[2];
   const int st = tile < SGA ? tile_stream[tile] : 0;
-  const int L = meta[MG + st * MS + 9], NQ = meta[MG + st * MS + 2], S0 = meta[MG + st * MS + 4];
+  const int L = meta[MG + st * MS + 9], NQ = meta[MG + st * MS + 2], S0 = meta[MG + st * MS + 4], CK = meta[MG + st * MS + 11];
   const int lt = tile - meta[MG + st * MS + 3];
   const int RP = 16 * SGA;
   const short qid = lane >> 2;
@@ -129,7 +129,7 @@ kernel void q27_attn_tail(device const bfloat* QB [[buffer(0)]], device const Q2
   const uint node = threadgroup_position_in_grid.z;
   const int NCB = meta[3], W = meta[4], RPA = meta[5], CA = meta[6];
   const int st = nodes[2 * node + 1];
-  const int P = meta[MG + st * MS + 4], PT = meta[MG + st * MS + 0];
+  const int P = meta[MG + st * MS + 4], PT = meta[MG + st * MS + 0], CK = meta[MG + st * MS + 11];
   if (int(cb) >= meta[MG + st * MS + 5]) return;
   const int la = meta[MG + st * MS + 3] * 16 + (int(node) - meta[MG + st * MS + 6]) * G;
   const int depth = nodes[2 * node];

@@ -6,6 +6,14 @@ pub const path_width = 128;
 pub const global_words = 8;
 pub const stream_words = 12;
 pub const chunk = 512;
+/// Keys a decode chunk scores below `fine_until`: a lone row's keys spread over threadgroups rather than 512 a group.
+pub const fine_chunk = 128;
+pub const fine_until = 8192;
+
+/// A window's key chunk, by its start alone, so a chain and a tree at one position merge their partials alike.
+pub fn chunkFor(start: u32) u32 {
+    return if (start < fine_until) fine_chunk else chunk;
+}
 pub const tile = 64;
 pub const Window = struct { parents: []const i32, start: u32, capacity: u32 };
 pub const KeepRow = extern struct { stream: u32, source: u32, destination: u32, row: u32 };
@@ -63,10 +71,11 @@ pub const Plan = struct {
                 deepest = @max(deepest, depths[r]);
             }
             const pt = if (geometry.shared_prefix) w.start / tile * tile else 0;
+            const ck = chunkFor(w.start);
             // a chain's prefix kernel runs to its last row's key, any other round stops at the tile before its own keys
             const limit: u32 = if (fused) w.start + @as(u32, @intCast(w.parents.len)) else pt;
-            const ca = (limit + chunk - 1) / chunk;
-            const cb = if (fused) 0 else (w.start + deepest) / chunk - pt / chunk + 1;
+            const ca = (limit + ck - 1) / ck;
+            const cb = if (fused) 0 else (w.start + deepest) / ck - pt / ck + 1;
             const count: u32 = @intCast((geometry.group() * w.parents.len + 15) / 16);
             const at = global_words + st * stream_words;
             meta[at] = @intCast(pt);
@@ -79,7 +88,8 @@ pub const Plan = struct {
             meta[at + 7] = @intCast(w.capacity * geometry.dim);
             meta[at + 8] = meta[at + 7];
             meta[at + 9] = @intCast(limit);
-            meta[at + 10] = @intCast(if (fused) ca else pt / chunk);
+            meta[at + 10] = @intCast(if (fused) ca else pt / ck);
+            meta[at + 11] = @intCast(ck);
             row_count = try std.math.add(u32, row_count, @intCast(w.parents.len));
             tile_count += count;
             ca_max = @max(ca_max, ca);
@@ -181,7 +191,7 @@ test "siblings at one absolute position see only their own ancestors and committ
     try std.testing.expectEqual(@as(?u32, 604), try p.physical(4, 602));
     try std.testing.expectEqual(@as(?u32, null), try p.physical(4, 603));
     try std.testing.expectEqual(@as(i32, 576), p.meta[8]);
-    try std.testing.expectEqual(@as(i32, 2), p.meta[9]);
+    try std.testing.expectEqual(@as(i32, @intCast((576 + chunkFor(600) - 1) / chunkFor(600))), p.meta[9]);
     try std.testing.expectEqual(@as(i32, 1), p.meta[13]);
 }
 test "absolute64tile512chunk boundaries retain prefix continuation without sibling padding" {
@@ -218,9 +228,10 @@ test "canonical tail keeps the same causal and ancestor map across multiple key 
     defer ordinary.deinit();
     var canonical = try Plan.init(std.testing.allocator, &windows, .{ .shared_prefix = false });
     defer canonical.deinit();
+    const ck = chunkFor(513);
     try std.testing.expectEqual(@as(u32, 0), canonical.prefix_chunks);
-    try std.testing.expectEqual(@as(u32, 2), canonical.tail_chunks);
-    try std.testing.expectEqual(@as(u32, 1), ordinary.prefix_chunks);
+    try std.testing.expectEqual((513 + 2) / ck + 1, canonical.tail_chunks);
+    try std.testing.expectEqual((512 + ck - 1) / ck, ordinary.prefix_chunks);
     try std.testing.expectEqualSlices(i32, ordinary.positions, canonical.positions);
     for (0..canonical.rows) |row| for (0..518) |key| {
         try std.testing.expectEqual(try ordinary.physical(row, @intCast(key)), try canonical.physical(row, @intCast(key)));
@@ -236,7 +247,7 @@ test "a chain's prefix runs to its last key and leaves no tail chunk, any other 
         defer tailed.deinit();
         try std.testing.expect(fused.fused and !tailed.fused);
         try std.testing.expectEqual(start + 3, @as(u32, @intCast(fused.meta[global_words + 9])));
-        try std.testing.expectEqual((start + 3 + chunk - 1) / chunk, fused.prefix_chunks);
+        try std.testing.expectEqual((start + 3 + chunkFor(start) - 1) / chunkFor(start), fused.prefix_chunks);
         try std.testing.expectEqual(@as(u32, @intCast(fused.meta[global_words + 10])), fused.prefix_chunks);
         try std.testing.expectEqual(@as(u32, 0), fused.tail_chunks);
         try std.testing.expect(tailed.tail_chunks > 0);

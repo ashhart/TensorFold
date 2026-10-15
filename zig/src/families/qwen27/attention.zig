@@ -112,10 +112,10 @@ pub const Scratch = struct {
     pub fn init(device: mtl.Device, limits: Limits) !Scratch {
         try validLimits(limits);
         const tiles = (limits.rows * 6 + 15) / 16 + limits.streams;
-        const chunks = (limits.keys + 511) / 512;
+        const chunks = @max((limits.keys + 511) / 512, (planning.fine_until + 128 + planning.fine_chunk - 1) / planning.fine_chunk); // fine chunks below fine_until
         const rp: usize = tiles * 16;
         const a: usize = if (limits.shared_prefix) 4 * @as(usize, chunks) * rp else 0;
-        const tail_chunks = if (limits.shared_prefix) 2 else chunks;
+        const tail_chunks = if (limits.shared_prefix) 3 else chunks; // a tail of up to 191 keys over 128-key chunks
         const b: usize = 4 * @as(usize, tail_chunks) * @as(usize, limits.rows) * 16;
         const sizes = [_]usize{ tiles * 4, rp * 4, limits.rows * 2 * 4, limits.rows * 128 * 4, limits.rows * 4, 4 * rp * 256 * 2, 4 * @as(usize, limits.rows) * 16 * 256 * 2, a * 256 * 4, a * 4, a * 4, b * 256 * 4, b * 4, b * 4, limits.rows * 4 * 256 * 2, limits.rows * 4 * 256 * 2 };
         comptime std.debug.assert(sizes.len == std.enums.values(Field).len);
