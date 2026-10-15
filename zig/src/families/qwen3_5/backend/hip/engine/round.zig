@@ -28,32 +28,6 @@ const Last = struct { plan: hip.plan_ops.Plan, keep_at: usize, hidden: u64 };
 /// Keep lists in flight: a flush's pinned words stay until its copy has run, which a later round's sync guarantees.
 const keep_ring = 4;
 
-/// Every rank's vote on a captured round, gathered in buffers kept from sizing: voting allocates nothing.
-const Votes = struct {
-    host: hip.HostBuffer,
-    send: hip.DeviceBuffer,
-    recv: hip.DeviceBuffer,
-
-    fn init(e: *Engine) !Votes {
-        var host = try hip.HostBuffer.alloc(&e.driver, 8 * (1 + e.o.world));
-        errdefer host.free();
-        var send = try hip.DeviceBuffer.alloc(&e.driver, 8);
-        errdefer send.free();
-        return .{ .host = host, .send = send, .recv = try hip.DeviceBuffer.alloc(&e.driver, 8 * e.o.world) };
-    }
-
-    fn deinit(v: *Votes) void {
-        v.recv.free();
-        v.send.free();
-        v.host.free();
-    }
-};
-
-/// Device bytes the votes of a group of `world` take (none for one rank).
-pub fn voteBytes(world: usize) usize {
-    return if (world > 1) 8 + 8 * world else 0;
-}
-
 pub const State = struct {
     buffer: plan.Buffer,
     /// The caches the padding rows run in.
@@ -72,7 +46,7 @@ pub const State = struct {
     last: ?Last = null,
     /// The layout of the plan in flight, for the copy a round starts with.
     layout: plan.Layout = undefined,
-    votes: ?Votes = null,
+    votes: ?hip.Votes = null,
 
     pub fn init(e: *Engine) !State {
         const m = e.model();
@@ -89,7 +63,7 @@ pub const State = struct {
         const staging = try e.gpa.alloc(i32, rows + 1);
         errdefer e.gpa.free(staging);
         @memset(staging, -1);
-        var votes: ?Votes = if (e.o.world > 1) try Votes.init(e) else null;
+        var votes: ?hip.Votes = if (e.o.world > 1) try hip.Votes.init(&e.driver, e.o.world) else null;
         errdefer if (votes) |*v| v.deinit();
         const keeps = try hip.HostBuffer.alloc(&e.driver, keep_ring * 4 * (rows + 1));
         return .{
@@ -223,9 +197,14 @@ fn run(e: *Engine, c: Chosen, r: win.Round) !round_graphs.Out {
 fn capture(e: *Engine, entry: *round_graphs.Entry, r: win.Round) !round_graphs.Out {
     const at = e.rounds.mark();
     const began = nowNs();
-    const mine = record(e, entry, r);
+    const m = &e.bridge.model;
+    const got = hip.vote.record(round_graphs.Out, e.gpa, e.stream, &m.tp, e.o.policy.failsCapture(e.o.rank), Body{
+        .e = e,
+        .r = r,
+    }, Body.run);
     e.graphs.capture_ns += nowNs() - began;
-    const all = if (e.o.world > 1) try agreed(e, mine) else mine;
+    if (got.split) |split| e.graphs.hold(entry, split, got.out);
+    const all = if (e.round.votes) |*v| try v.agree(e.comm, got.vote, e.stream) else got.vote;
     if (all == .kept) {
         try entry.exec.?.launchOn(e.stream);
         return entry.out;
@@ -239,42 +218,15 @@ fn capture(e: *Engine, entry: *round_graphs.Entry, r: win.Round) !round_graphs.O
     return error.GroupStopped;
 }
 
-/// The round recorded into `entry` (nothing runs), its collectives left between the graphs: this rank's vote on it.
-fn record(e: *Engine, entry: *round_graphs.Entry, r: win.Round) hip.collective.Vote {
-    const m = &e.bridge.model;
-    var rec: hip.graph_split.Recorder = .{ .gpa = e.gpa, .stream = e.stream, .inner = m.tp };
-    rec.begin() catch return .declined;
-    const tp = m.tp;
-    m.tp = rec.comm();
-    const got = body(e, r);
-    m.tp = tp;
-    var split = (rec.finish() catch null) orelse return .declined;
-    const out = got catch |err| {
-        split.deinit();
-        if (err != error.OutOfDeviceMemory) return .declined;
-        std.log.err("rank {d} could not record a round: {s}", .{ e.o.rank, @errorName(err) });
-        return .failed;
-    };
-    // the policy's `graph_fail` makes that rank's capture fail, to check that every rank falls back
-    if (e.o.policy.graph_fail >= 0 and @as(usize, @intCast(e.o.policy.graph_fail)) == e.o.rank) {
-        split.deinit();
-        return .declined;
-    }
-    e.graphs.hold(entry, split, out);
-    return .kept;
-}
+/// A round's forward as the recorder runs it.
+const Body = struct {
+    e: *Engine,
+    r: win.Round,
 
-/// Every rank's vote, gathered in the buffers kept for it: the round's outcome on every rank.
-fn agreed(e: *Engine, mine: hip.collective.Vote) !hip.collective.Vote {
-    const world = e.o.world;
-    const v = &e.round.votes.?;
-    v.host.slice(u64)[0] = @backingInt(mine);
-    try hip.raw.upload(v.send, 0, v.host.bytes[0..8], e.stream.handle);
-    try e.comm.allGather(v.send.base(), v.recv.base(), 1, .i64, e.stream.handle);
-    try hip.raw.download(v.recv, 0, v.host.bytes[8 .. 8 * (1 + world)], e.stream.handle);
-    try e.stream.synchronize();
-    return hip.collective.tally(v.host.slice(u64)[1 .. 1 + world]);
-}
+    fn run(b: Body) anyerror!round_graphs.Out {
+        return body(b.e, b.r);
+    }
+};
 
 /// Marks slot `slot` of the last verify to keep its first `rows` rows at the next `flush`.
 pub fn mark(e: *Engine, slot: usize, rows: usize) void {

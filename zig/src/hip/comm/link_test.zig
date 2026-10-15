@@ -1,11 +1,14 @@
 //! The link's join and startup steps over loopback TCP, every rank a thread: what each rank hears.
 
 const std = @import("std");
-const posix = std.posix;
 const link = @import("link.zig");
 const rccl = @import("rccl.zig");
 const agree = @import("../agree.zig");
 const Policy = @import("../policy.zig").Policy;
+const collective = @import("../collective.zig");
+const Startup = @import("../startup.zig").Startup;
+const loopback = @import("loopback.zig");
+const hello = loopback.hello;
 
 /// A rank of a test group: what it says at join, and what it got.
 const Rank = struct {
@@ -45,41 +48,10 @@ const Rank = struct {
     }
 };
 
-/// A port nothing listens on now: bound once, read back and released.
-fn freePort() !u16 {
-    const fd = posix.system.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
-    if (posix.errno(fd) != .SUCCESS) return error.SocketFailed;
-    defer _ = posix.system.close(@intCast(fd));
-    var addr: posix.sockaddr.in = .{ .port = 0, .addr = std.mem.nativeToBig(u32, 0x7f000001) };
-    if (posix.errno(posix.system.bind(
-        @intCast(fd),
-        @ptrCast(&addr),
-        @sizeOf(posix.sockaddr.in),
-    )) != .SUCCESS) return error.BindFailed;
-    var len: posix.socklen_t = @sizeOf(posix.sockaddr.in);
-    if (posix.errno(posix.system.getsockname(@intCast(fd), @ptrCast(&addr), &len)) != .SUCCESS) return error.BindFailed;
-    return std.mem.bigToNative(u16, addr.port);
-}
-
-fn hello(rank: u32, world: u32) link.Hello {
-    return .{
-        .rank = rank,
-        .world = world,
-        .gpu = 11,
-        .rccl = 22203,
-        .ident = .{ .program = @splat(1), .config = @splat(2), .weights = @splat(3) },
-    };
-}
-
 /// Runs every rank of `ranks` on its own thread, rank 0 first, and waits for all.
 fn group(ranks: []Rank) !void {
-    const ignore: posix.Sigaction = .{
-        .handler = .{ .handler = posix.SIG.IGN },
-        .mask = posix.sigemptyset(),
-        .flags = 0,
-    };
-    posix.sigaction(.PIPE, &ignore, null);
-    const port = try freePort();
+    loopback.ignorePipe();
+    const port = try loopback.freePort();
     var threads: [4]std.Thread = undefined;
     for (ranks, 0..) |*r, i| {
         r.port = port;
@@ -180,5 +152,48 @@ test "a rank that leaves before a step is that step's refusal on every rank that
         try std.testing.expectEqual(@as(u32, 1), r.verdicts[0].refused);
         try std.testing.expectEqual(@as(u32, 2), r.verdicts[0].rank);
         try std.testing.expectEqualStrings("its link to rank 0 closed", r.verdicts[0].reason());
+    }
+}
+
+/// A family's startup on each rank: rank 0's window, admission (`refuse`: the rank that cannot), the streams that fit.
+const Families = struct {
+    refuse: ?usize = null,
+    window: [3]u64 = @splat(0),
+    fit: [3]u64 = @splat(0),
+    problem: [3][]const u8 = @splat(""),
+    text: [3][256]u8 = undefined,
+
+    fn start(f: *Families, rank: usize, l: collective.Link) void {
+        var fba: std.heap.FixedBufferAllocator = .init(&f.text[rank]);
+        var problem: []const u8 = "";
+        f.steps(fba.allocator(), rank, l, &problem) catch {};
+        f.problem[rank] = problem;
+    }
+
+    fn steps(f: *Families, a: std.mem.Allocator, rank: usize, l: collective.Link, problem: *[]const u8) !void {
+        var s: Startup = .{ .link = l };
+        f.window[rank] = (try s.together(a, .{ 4096 + rank, 0 }, .first, problem))[0];
+        const why = "rank {d} cannot hold a {d}-token window";
+        if (f.refuse == rank) return s.refuseAll(a, problem, why, .{ rank, f.window[rank] });
+        _ = try s.together(a, .{ 0, 0 }, .first, problem);
+        f.fit[rank] = (try s.together(a, .{ 8 - rank, 0 }, .least, problem))[0];
+    }
+};
+
+test "a family's startup: rank 0's window and the least fit on every rank, or one rank's refusal named on all" {
+    var ok: Families = .{};
+    try loopback.run(3, &ok, Families.start);
+    for (0..3) |r| {
+        try std.testing.expectEqual(@as(u64, 4096), ok.window[r]);
+        try std.testing.expectEqual(@as(u64, 6), ok.fit[r]);
+        try std.testing.expectEqualStrings("", ok.problem[r]);
+    }
+    var no: Families = .{ .refuse = 2 };
+    try loopback.run(3, &no, Families.start);
+    const why = "rank 2 cannot hold a 4096-token window";
+    try std.testing.expectEqualStrings(why, no.problem[2]);
+    for (0..2) |r| {
+        try std.testing.expectEqual(@as(u64, 0), no.fit[r]);
+        try std.testing.expectEqualStrings("rank 2 of the group refused: " ++ why, no.problem[r]);
     }
 }
