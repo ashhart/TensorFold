@@ -223,6 +223,7 @@ pub const Stream = struct {
             .history_len = spec.history_len,
             .shared_prefixes = spec.shared_prefixes,
             .reuse = spec.reuse,
+            .fill_at = .init(if (spec.reuse.saved != null) spec.reuse.at else 0), // a kept prefix is filled from the start
             .decide = spec.decide,
             .untaught = spec.untaught,
             .logprobs = spec.logprobs,

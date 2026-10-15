@@ -37,6 +37,7 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
         } else s.reuse_failed = true;
     }
     const from = at;
+    s.fill_at.store(@intCast(at), .monotonic); // what the restore kept: 0 when it failed
     b.runner.images = if (b.vision) |v| try images.encode(v, b.runner.model.queue, s, slot) else null;
     defer b.runner.images = null;
     while (at < ids.len) {
