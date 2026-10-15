@@ -388,7 +388,6 @@ pub const Loader = struct {
     }
 
     fn moe(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8, c: Config) !MoE {
-        if (c.latent > 0) return latent.load(L, ck, name, pre, c);
         if (c.format == .modelopt) return modelopt.moe(L, ck, name, pre, c);
         var a: [128]u8 = undefined;
         var b: [128]u8 = undefined;
@@ -474,7 +473,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, 
         switch (kind) {
             .mamba => b.mamba = try L.mamba(&ck, try join(&nb, name, ".mamba"), mixer),
             .attention => b.attn = try L.attention(&ck, try join(&nb, name, ".attn"), mixer),
-            .moe => b.moe = try L.moe(&ck, try join(&nb, name, ".moe"), mixer, c),
+            .moe => b.moe = if (c.latent > 0) try latent.load(&L, &ck, try join(&nb, name, ".moe"), mixer, c, @intCast(i)) else try L.moe(&ck, try join(&nb, name, ".moe"), mixer, c),
         }
         w.blocks[i] = b;
     }

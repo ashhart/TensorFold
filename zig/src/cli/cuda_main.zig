@@ -187,6 +187,11 @@ pub fn main(init: std.process.Init) !u8 {
     const graphs = opts.graphs and (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "rounds") or bench or widths);
     const sampling: ?lanes.Sampling = if ((std.mem.eql(u8, cmd, "run") or widths) and opts.sampling.temperature > 0) opts.sampling else null;
     const segments = opts.segments orelse if (init.environ_map.get("TF_CUDA_SEGMENTS")) |v| try std.fmt.parseInt(usize, v, 10) else 1;
+    // a rank past 0 of a tensor-parallel latent MoE holds expert shares and serves rank 0's jobs, whatever the command
+    if (init.environ_map.get("TF_NEMOTRON_RANK")) |r| if (!std.mem.eql(u8, r, "0")) {
+        try nemotron.worker.serve(gpa, init.io, &ctx, opts.model);
+        return 0;
+    };
     const engine = try nemotron.Engine.init(gpa, init.io, &ctx, opts.model, kernels, .{ .context = opts.context, .mtp = mtp, .graphs = graphs, .sampling = sampling, .segments = segments, .carveout = if (carve) |*c| c else null });
     defer engine.deinit();
     if (carve) |*c| {

@@ -10,6 +10,7 @@ pub const Family = struct { model_type: []const u8, title: []const u8, formats: 
 
 const titles = [_]struct { model_type: []const u8, title: []const u8 }{
     .{ .model_type = "nemotron_h", .title = "Nemotron 3.5 Lightning" },
+    .{ .model_type = "nemotron_h_omni", .title = "Nemotron 3.5 Super VL" },
     .{ .model_type = "qwen4_exp", .title = "Qwen3.8 Flash Next" },
     .{ .model_type = "glm5_next", .title = "GLM-5.3-Flash" },
     .{ .model_type = "qwen3_5", .title = "Qwen3.5-2B or Qwen3.8-27B" },

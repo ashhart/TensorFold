@@ -8,12 +8,23 @@ const kern = @import("cuda_kernels.zig");
 const W = @import("cuda_weights.zig");
 const modelopt = @import("cuda_modelopt.zig");
 const fwd = @import("cuda_forward.zig");
+const worker = @import("cuda_worker.zig");
+const state = @import("cuda_state.zig");
 
 const Nvfp4Experts = cuda.experts.Nvfp4Experts;
 const Tensor = core.checkpoint.Tensor;
 
-/// A layer's weights past the router: hidden to latent and back (bf16), routed and shared experts by share.
-pub const Latent = struct { into: kern.QLinear, out: kern.QLinear, routed: kern.Experts, shared: kern.Experts };
+/// A layer's experts in the shares a rank holds: routed (latent width) and shared (hidden width).
+pub const Tables = struct { routed: kern.Experts, shared: kern.Experts };
+
+/// A layer's weights past the router: hidden to latent and back (bf16), its expert tables, its id in rank jobs.
+pub const Latent = struct { into: kern.QLinear, out: kern.QLinear, t: Tables, id: u32 };
+
+/// The MTP head's MoE in rank jobs (block indices name the model's own layers).
+pub const mtp_id: u32 = 1 << 16;
+
+/// The scratch an expert pass uses: the plan, routed and shared activations, the shared expert's pair ids.
+pub const Scratch = struct { plan: kern.Plan, act: u64, sact: u64, sids: u64 };
 
 /// nemotron_latent.cu's kernels.
 pub const Fns = struct {
@@ -49,8 +60,8 @@ pub fn routerSlices(d: usize) usize {
     return @import("cuda_triton.zig").divisor(d / 64, 8);
 }
 
-/// Floats one call's exchange carries from a rank: its routed pairs' latent rows, then its shared rows.
-pub fn sendFloats(c: Config, rows: usize) usize {
+/// Floats of a rank's expert rows for `rows` rows: its routed pairs' latent rows, then its shared rows.
+pub fn partFloats(c: Config, rows: usize) usize {
     const own = c.ownShares();
     return rows * c.top_k * own * c.latent + rows * own * c.hidden;
 }
@@ -84,19 +95,18 @@ pub fn checkHeld(c: Config) !void {
     return error.CheckpointShareMissing;
 }
 
-/// What every rank must agree on before the weights load: the model, its cut, the window, drafts and the build.
+/// What every rank must agree on before the weights load: the model, its cut and the build.
 const Fingerprint = extern struct {
-    layout: u32 = 1, // this struct's version
+    layout: u32 = 2, // this struct's version
     rank: u32,
     world: u32,
-    mtp: u32,
-    context: u64,
+    pad: u32 = 0,
     dims: [12]u64, // the config's sizes, rank and world left out
     kinds: [32]u8, // sha256 of the block pattern
     program: [32]u8, // sha256 of this executable
 
-    fn of(c: Config, drafts: bool, context: usize, program: [32]u8) Fingerprint {
-        var f: Fingerprint = .{ .rank = @intCast(c.rank), .world = @intCast(c.world), .mtp = @intFromBool(drafts), .context = context, .dims = .{ c.hidden, c.vocab, c.layers, c.experts, c.top_k, c.latent, c.expert_width, c.shared_width, c.shares, c.mamba_heads, c.heads, c.kv_heads }, .kinds = undefined, .program = program };
+    fn of(c: Config, program: [32]u8) Fingerprint {
+        var f: Fingerprint = .{ .rank = @intCast(c.rank), .world = @intCast(c.world), .dims = .{ c.hidden, c.vocab, c.layers, c.experts, c.top_k, c.latent, c.expert_width, c.shared_width, c.shares, c.mamba_heads, c.heads, c.kv_heads }, .kinds = undefined, .program = program };
         var kinds: [@import("config.zig").max_layers]u8 = undefined;
         for (c.kinds[0..c.layers], kinds[0..c.layers]) |k, *b| b.* = @intFromEnum(k);
         std.crypto.hash.sha2.Sha256.hash(kinds[0..c.layers], &f.kinds, .{});
@@ -105,27 +115,42 @@ const Fingerprint = extern struct {
 };
 
 /// Every rank's fingerprint gathered: anything but the rank differing from rank 0's stops every rank.
-pub fn agree(gpa: std.mem.Allocator, io: std.Io, c: Config, g: *const cuda.tp_group.Group, d: *const cuda.Driver, s: cuda.Stream, drafts: bool, context: usize) !void {
+pub fn agree(gpa: std.mem.Allocator, io: std.Io, c: Config, g: *const cuda.tp_group.Group, d: *const cuda.Driver, s: cuda.Stream) !void {
     var program: [32]u8 = undefined;
     const exe = try std.Io.Dir.cwd().readFileAlloc(io, "/proc/self/exe", gpa, .limited(1 << 31));
     defer gpa.free(exe);
     std.crypto.hash.sha2.Sha256.hash(exe, &program, .{});
     var all: [16]Fingerprint = undefined;
     if (c.world > all.len) return error.TooManyRanks;
-    try g.gather(Fingerprint, d, s, Fingerprint.of(c, drafts, context, program), all[0..c.world]);
+    try g.gather(Fingerprint, d, s, Fingerprint.of(c, program), all[0..c.world]);
     for (all[0..c.world], 0..) |f, r| {
         var x = f;
         x.rank = all[0].rank;
         if (f.rank != r or !std.mem.eql(u8, std.mem.asBytes(&x), std.mem.asBytes(&all[0]))) {
-            std.log.err("rank {d}'s settings differ from rank 0's (model, cut, context, drafts or build): every rank stops", .{r});
+            std.log.err("rank {d}'s model, cut or build differs from rank 0's: every rank stops", .{r});
             return error.RankMismatch;
         }
     }
-    std.log.info("rank {d} of {d}: every rank agrees on the model, its {d} expert shares, the window and the build", .{ c.rank, c.world, c.shares });
+    // p2p links set up now, while both ranks run eagerly: rank 0's captured graphs would wait on the setup forever
+    var link = try cuda.DeviceBuffer.alloc(d, 128);
+    defer link.free();
+    if (c.rank == 0) {
+        for (1..c.world) |peer| try g.connect(s, link.ptr, peer);
+    } else try g.connect(s, link.ptr, 0);
+    std.log.info("rank {d} of {d}: every rank agrees on the model, its {d} expert shares and the build", .{ c.rank, c.world, c.shares });
 }
 
-/// A latent MoE layer: router, bias, the two latent projections and both expert tables.
-pub fn load(L: *W.Loader, ck: *core.Checkpoint, label: []const u8, pre: []const u8, c: Config) !W.MoE {
+/// A layer's routed and shared expert tables in the shares this rank holds.
+pub fn tables(L: *W.Loader, ck: *core.Checkpoint, label: []const u8, pre: []const u8, c: Config) !Tables {
+    var a: [128]u8 = undefined;
+    return .{
+        .routed = try table(L, ck, try std.fmt.bufPrint(&a, "{s}.routed", .{label}), pre, "experts.{d}.", c.experts, c.latent, c.expert_width, c),
+        .shared = try table(L, ck, try std.fmt.bufPrint(&a, "{s}.shared", .{label}), pre, "shared_experts.", 1, c.hidden, c.shared_width, c),
+    };
+}
+
+/// A latent MoE layer: router, bias, the two latent projections and both expert tables; `id` names it in rank jobs.
+pub fn load(L: *W.Loader, ck: *core.Checkpoint, label: []const u8, pre: []const u8, c: Config, id: u32) !W.MoE {
     var a: [128]u8 = undefined;
     var b: [192]u8 = undefined;
     const router = try modelopt.router(L, try std.fmt.bufPrint(&a, "{s}.router", .{label}), try ck.get(try std.fmt.bufPrint(&b, "{s}gate.weight", .{pre})), c);
@@ -134,10 +159,9 @@ pub fn load(L: *W.Loader, ck: *core.Checkpoint, label: []const u8, pre: []const 
     const into = try modelopt.dense(L, ck, try std.fmt.bufPrint(&a, "{s}.into", .{label}), &.{try std.fmt.bufPrint(&b, "{s}fc1_latent_proj", .{pre})});
     const out = try modelopt.dense(L, ck, try std.fmt.bufPrint(&a, "{s}.out", .{label}), &.{try std.fmt.bufPrint(&b, "{s}fc2_latent_proj", .{pre})});
     if (into.outputs() != c.latent or into.inputs() != c.hidden or out.outputs() != c.hidden or out.inputs() != c.latent) return error.UnexpectedTensor;
-    const routed = try table(L, ck, try std.fmt.bufPrint(&a, "{s}.routed", .{label}), pre, "experts.{d}.", c.experts, c.latent, c.expert_width, c);
-    const shared = try table(L, ck, try std.fmt.bufPrint(&a, "{s}.shared", .{label}), pre, "shared_experts.", 1, c.hidden, c.shared_width, c);
-    m.experts = routed;
-    m.latent = .{ .into = into, .out = out, .routed = routed, .shared = shared };
+    const t = try tables(L, ck, label, pre, c);
+    m.experts = t.routed;
+    m.latent = .{ .into = into, .out = out, .t = t, .id = id };
     return m;
 }
 
@@ -165,7 +189,7 @@ pub fn mtp(L: *W.Loader, ck: *core.Checkpoint, c: Config) !void {
         .attn_norm = try norm(L, ck, "mtp.attn_norm", pre, "0.norm.weight", c),
         .attn = .{ .qkv = try modelopt.dense(L, ck, "mtp.attn.qkv", &qkv), .o = try modelopt.dense(L, ck, "mtp.attn.o", &.{try at(&buf[4], pre, "0.mixer.o_proj")}) },
         .moe_norm = try norm(L, ck, "mtp.moe_norm", pre, "1.norm.weight", c),
-        .moe = try load(L, ck, "mtp.moe", try at(&buf[5], pre, "1.mixer."), c),
+        .moe = try load(L, ck, "mtp.moe", try at(&buf[5], pre, "1.mixer."), c, mtp_id),
         .final_norm = try norm(L, ck, "mtp.final_norm", pre, "1.final_layernorm.weight", c),
     };
     // the draft head is the target's: every id a candidate, so no vocabulary table is needed for this tokenizer
@@ -275,7 +299,21 @@ fn route(f: *const fwd.Forward, m: W.MoE, x: u64, rows: usize) !void {
     try go(fns.topk, g.s, .{ rows, 1, 1 }, 32, 0, &t);
 }
 
-/// The MoE block's delta into b.delta: routed experts in the latent width, the shared expert, the ranks met.
+/// One share set's expert rows into `out` (fp32): routed pairs by `picks`, then the shared expert's (row, share).
+pub fn partials(o: kern.Ops, t: Tables, s: Scratch, picks: u64, lat: u64, hidden: u64, rows: usize, own: usize, c: Config, out: u64) !void {
+    const pairs = rows * c.top_k * own;
+    const g = o.grouped();
+    try o.plan(picks, pairs, t.routed.experts, 16, s.plan);
+    const items = kern.maxItems(pairs, t.routed.experts, 16);
+    try g.decode(o.s, .up, .{ .x = lat, .stride = c.latent, .slots = c.top_k * own }, t.routed, s.plan, s.act, items, -1);
+    try g.decode(o.s, .down_f32, .{ .x = s.act, .stride = t.routed.width }, t.routed, s.plan, out, items, -1);
+    try o.plan(s.sids, rows * own, own, 16, s.plan);
+    const sh_items = kern.maxItems(rows * own, own, 16);
+    try g.decode(o.s, .up, .{ .x = hidden, .stride = c.hidden, .slots = own }, t.shared, s.plan, s.sact, sh_items, -1);
+    try g.decode(o.s, .down_f32, .{ .x = s.sact, .stride = t.shared.width }, t.shared, s.plan, out + @as(u64, pairs) * c.latent * 4, sh_items, -1);
+}
+
+/// The MoE block's delta into b.delta: the other ranks' shares asked for, ours run, all summed in share order.
 pub fn run(f: *const fwd.Forward, m: W.MoE, rows: usize) !void {
     const c = f.c;
     const b = f.b;
@@ -283,60 +321,43 @@ pub fn run(f: *const fwd.Forward, m: W.MoE, rows: usize) !void {
     const lt = m.latent.?;
     const fns = o.k.latent.?;
     const own = c.ownShares();
-    const K = c.top_k;
-    const pairs = rows * K * own;
+    const pairs = rows * c.top_k * own;
     const D: u64 = c.hidden;
     const Lw: u64 = c.latent;
-    const g = o.grouped();
     try route(f, m, b.y, rows);
     try f.mark(.route);
     try o.linear().decode(o.s, lt.into, .{ .x = b.y }, b.lat, rows);
-    try o.plan(b.pick, pairs, lt.routed.experts, 16, b.plan);
-    try f.mark(.plan);
-    const items = kern.maxItems(pairs, lt.routed.experts, 16);
-    try g.decode(o.s, .up, .{ .x = b.lat, .stride = c.latent, .slots = K * own }, lt.routed, b.plan, b.act, items, -1);
-    try f.mark(.experts_up);
-    try g.decode(o.s, .down_f32, .{ .x = b.act, .stride = lt.routed.width }, lt.routed, b.plan, b.ymoe, items, -1);
+    if (f.tp != null) try worker.send(f, lt.id, rows); // the other ranks' shares start while ours run
+    try partials(o, lt.t, .{ .plan = b.plan, .act = b.act, .sact = b.sact, .sids = b.sids }, b.pick, b.lat, b.y, rows, own, c, b.ymoe);
     try f.mark(.experts_down);
-    // the shared expert's pairs are (row, share): share i % own, whatever the row
-    const sh_out = b.ymoe + @as(u64, pairs) * Lw * 4;
-    try o.plan(b.sids, rows * own, own, 16, b.plan);
-    const sh_items = kern.maxItems(rows * own, own, 16);
-    try g.decode(o.s, .up, .{ .x = b.y, .stride = c.hidden, .slots = own }, lt.shared, b.plan, b.sact, sh_items, -1);
-    try g.decode(o.s, .down_f32, .{ .x = b.sact, .stride = lt.shared.width }, lt.shared, b.plan, sh_out, sh_items, -1);
-    // the ranks' rows meet in rank order, else this rank's own shares sum in share order
-    const count: u64 = sendFloats(c, rows);
-    var parts: u64 = b.ymoe;
+    // one GPU: shares interleaved by pair; ranks: each rank's rows in its own region of ymoe, in rank order
     var share_stride: u64 = Lw;
     var pair_stride: u64 = own * Lw;
-    var shared_at: u64 = sh_out;
     var shared_share: u64 = D;
     var shared_row: u64 = own * D;
     var n: usize = own;
     if (f.tp) |tp| {
-        try tp.allGather(o.s, b.ymoe, b.recv, count * 4);
-        parts = b.recv;
-        share_stride = count;
+        try worker.receive(f, rows);
+        share_stride = partFloats(c, state.pass_rows);
         pair_stride = Lw;
-        shared_at = b.recv + @as(u64, pairs) * Lw * 4;
-        shared_share = count;
+        shared_share = share_stride;
         shared_row = D;
-        n = c.world;
+        n = tp.world;
     }
     var a: cuda.Args = .{};
-    a.add(parts);
+    a.add(b.ymoe);
     a.add(@as(i64, @intCast(share_stride)));
     a.add(@as(i64, @intCast(pair_stride)));
     a.add(int(n));
     a.add(b.wts);
-    a.add(int(K));
+    a.add(int(c.top_k));
     a.add(b.comb);
     a.add(int(c.latent));
     try go(fns.combine, o.s, .{ rows, (c.latent + 255) / 256, 1 }, 256, 0, &a);
     try o.linear().decode(o.s, lt.out, .{ .x = b.comb }, b.delta, rows);
     var z: cuda.Args = .{};
     z.add(b.delta);
-    z.add(shared_at);
+    z.add(b.ymoe + @as(u64, pairs) * Lw * 4);
     z.add(@as(i64, @intCast(shared_share)));
     z.add(@as(i64, @intCast(shared_row)));
     z.add(int(n));
@@ -353,7 +374,7 @@ pub fn initShareIds(fns: Fns, s: cuda.Stream, ids: u64, rows: usize, own: usize)
     try go(fns.share_ids, s, .{ (rows * own + 255) / 256, 1, 1 }, 256, 0, &a);
 }
 
-test "router slices and a call's exchange floats" {
+test "router slices and a rank's expert rows" {
     try std.testing.expectEqual(@as(usize, 8), routerSlices(4096));
     var c: Config = undefined;
     c.top_k = 22;
@@ -361,7 +382,7 @@ test "router slices and a call's exchange floats" {
     c.hidden = 4096;
     c.shares = 2;
     c.world = 1;
-    try std.testing.expectEqual(@as(usize, 3 * 22 * 2 * 1024 + 3 * 2 * 4096), sendFloats(c, 3));
+    try std.testing.expectEqual(@as(usize, 3 * 22 * 2 * 1024 + 3 * 2 * 4096), partFloats(c, 3));
     c.world = 2;
-    try std.testing.expectEqual(@as(usize, 3 * 22 * 1024 + 3 * 4096), sendFloats(c, 3));
+    try std.testing.expectEqual(@as(usize, 3 * 22 * 1024 + 3 * 4096), partFloats(c, 3));
 }

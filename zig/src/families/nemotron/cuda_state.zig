@@ -8,6 +8,7 @@ const kern = @import("cuda_kernels.zig");
 const sampler = @import("cuda_sampler.zig");
 const seq_graphs = @import("cuda_seq_graphs.zig");
 const latent = @import("cuda_latent.zig");
+const worker = @import("cuda_worker.zig");
 
 pub const max_rows = 16; // a verify window's rows (the row tile of the row-parallel kernels)
 pub const prefill_rows = 2048; // rows of a staggered segment's chunk, and of a pass under dumps or lessons
@@ -99,8 +100,8 @@ fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
     const own: usize = if (lat) c.ownShares() else 1;
     const plan_experts = if (lat) c.experts * own else c.experts + 2;
     const items = kern.maxItems(@intCast(pairs * own), plan_experts, 16);
-    const ymoe = if (lat) latent.sendFloats(c, R) * 4 else pairs * D * 4;
-    const recv = if (lat and c.world > 1) c.world * latent.sendFloats(c, R) * 4 else 0;
+    const ymoe = if (lat) c.world * latent.partFloats(c, R) * 4 else pairs * D * 4; // a region a rank
+    const job = if (lat and c.world > 1) worker.jobBytes(c) else 0;
     const sw = if (lat) c.shared_width / c.shares else 0;
     return .{
         W * c.vocab * 2,       16,                                          R * 4,
@@ -116,7 +117,7 @@ fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
         pairs * own * 4,       (pairs * own + 1023) / 1024 * plan_experts * 4, pairs * c.expert_width * 2,
         ymoe,                  shared_words * 4,                            R * kern.pocket_width * 4,
         R * c.latent * 2,      R * c.latent * 2,                            R * own * sw * 2,
-        R * own * 4,           recv,
+        R * own * 4,           job,
     };
 }
 
@@ -232,7 +233,7 @@ pub const Buffers = struct {
     comb: u64, // its routed pairs' latent sum a row (bf16)
     sact: u64, // its shared expert's activations (bf16)
     sids: u64, // its shared expert's pair ids, share i % own (cuda_latent.initShareIds)
-    recv: u64, // every rank's exchange rows in rank order (TP > 1)
+    job: u64, // rank 0's job to the other ranks: a header and the rows their shares read (cuda_worker.zig)
 
     /// Sizes every buffer for `max_len` cache rows and `nch` attention chunk partials a row; the own sequence's first.
     pub fn init(d: *const cuda.Driver, c: Config, max_len: usize, nch: usize, carve: ?*cuda.Carveout) !Buffers {
@@ -278,7 +279,7 @@ pub const Buffers = struct {
             &b.xs,        &b.delta,     &b.proj,  &b.p_xc,     &b.sy,       &b.g,         &b.gxs, &b.qkv,          &b.q,          &b.att,
             &b.axs,       &b.po,        &b.pm,    &b.pl,       &b.part,     &b.pick,      &b.wts, &b.plan.members, &b.plan.items, &b.plan.counts,
             &b.plan.rank, &b.plan.hist, &b.act,   &b.ymoe,     &b.shared,   &b.pocket,
-            &b.lat,       &b.comb,      &b.sact,  &b.sids,     &b.recv,
+            &b.lat,       &b.comb,      &b.sact,  &b.sids,     &b.job,
         };
     }
 

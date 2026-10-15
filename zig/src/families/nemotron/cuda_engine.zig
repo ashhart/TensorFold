@@ -135,7 +135,8 @@ pub const Engine = struct {
         e.trace = std.c.getenv("TF_SLIDE_TRACE") != null;
         e.c = try Config.read(gpa, io, model_dir);
         try latent.place(&e.c);
-        if (e.c.world > 1 and opts.segments > 1) return error.SegmentsNeedOneRank; // ranks' collectives keep one order
+        if (e.c.rank > 0) return error.RankServesExperts; // ranks past 0 run cuda_worker.serve, not an engine
+        if (e.c.world > 1 and opts.segments > 1) return error.SegmentsNeedOneRank; // one stream keeps the jobs in order
         if (opts.segments < 1 or opts.segments > segs.MAX) return error.BadSegments;
         e.segments = opts.segments;
         e.carve = opts.carveout;
@@ -158,7 +159,7 @@ pub const Engine = struct {
         if (e.c.latent > 0) try e.k.loadLatent();
         if (e.c.world > 1) e.tp = try cuda.tp_group.Group.open(e.c.rank, e.c.world);
         errdefer if (e.tp) |*g| g.close();
-        if (e.tp) |*g| try latent.agree(gpa, io, e.c, g, ctx.d, e.stream, opts.mtp, opts.context orelse default_context);
+        if (e.tp) |*g| try latent.agree(gpa, io, e.c, g, ctx.d, e.stream);
         const chunks = e.max_len / state.chunk_keys;
         e.nch = if (e.k.triton) |*t| @intCast(t.smallestConst("_chunk", "NCH", @intCast(chunks)) orelse {
             std.log.err("no captured attention kernel covers {d} chunks of 512 keys; capture one for this context", .{chunks});
@@ -267,6 +268,7 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
+        if (e.tp != null) @import("cuda_worker.zig").end(e) catch {}; // the other ranks leave their job loops
         e.stream.synchronize() catch {};
         e.spares.deinit();
         if (e.serial) |*g| g.deinit();

@@ -31,9 +31,28 @@ pub const Group = struct {
         g.* = undefined;
     }
 
-    /// `bytes` at `send` from every rank into `recv` in rank order (world * bytes there), on `s`.
-    pub fn allGather(g: *const Group, s: Stream, send: u64, recv: u64, bytes: usize) !void {
-        try g.lib.check(g.lib.api.ncclAllGather(send, recv, bytes, .u8, g.comm, s.handle), "ncclAllGather");
+    /// `bytes` at `mine` from every rank into `all` in rank order (world * bytes there), on `s`.
+    pub fn allGather(g: *const Group, s: Stream, mine: u64, all: u64, bytes: usize) !void {
+        try g.lib.check(g.lib.api.ncclAllGather(mine, all, bytes, .u8, g.comm, s.handle), "ncclAllGather");
+    }
+
+    /// `bytes` at `ptr` to rank `peer`, on `s` (its matching recv takes the same count).
+    pub fn send(g: *const Group, s: Stream, ptr: u64, bytes: usize, peer: usize) !void {
+        try g.lib.check(g.lib.api.ncclSend(ptr, bytes, .u8, @intCast(peer), g.comm, s.handle), "ncclSend");
+    }
+
+    /// `bytes` from rank `peer` into `ptr`, on `s`.
+    pub fn recv(g: *const Group, s: Stream, ptr: u64, bytes: usize, peer: usize) !void {
+        try g.lib.check(g.lib.api.ncclRecv(ptr, bytes, .u8, @intCast(peer), g.comm, s.handle), "ncclRecv");
+    }
+
+    /// Rank 0 and rank `peer` connect both ways with one small exchange (`ptr`: 64 bytes); a graph capture never can.
+    pub fn connect(g: *const Group, s: Stream, ptr: u64, peer: usize) !void {
+        try g.lib.check(g.lib.api.ncclGroupStart(), "ncclGroupStart");
+        try g.send(s, ptr, 64, peer);
+        try g.recv(s, ptr + 64, 64, peer);
+        try g.lib.check(g.lib.api.ncclGroupEnd(), "ncclGroupEnd");
+        try s.synchronize();
     }
 
     /// Every rank's `mine` in rank order into `out` (world of them), waited for.

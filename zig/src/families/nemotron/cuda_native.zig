@@ -68,6 +68,13 @@ const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, 
 
 /// Own-sequence graphs support both draw modes; drafting also captures the head.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
+    if (std.c.getenv("TF_NEMOTRON_RANK")) |r| if (!std.mem.eql(u8, std.mem.span(r), "0")) { // an expert rank never serves
+        @import("cuda_worker.zig").serve(gpa, io, ctx, dir) catch |err| {
+            std.log.err("expert rank stopped: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        std.process.exit(0);
+    };
     const carve = try openCarveout(gpa, ctx);
     errdefer if (carve) |c| closeCarveout(gpa, c);
     const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments, .carveout = carve, .slide = o.slide });

@@ -47,17 +47,13 @@ fn drifted(c: core.draft_depth.Costs, ref: core.draft_depth.Costs) bool {
 
 /// Fastest-of-seven costs by width and head level, cached per build, GPU and model shape.
 pub fn measure(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: []const u8) !core.draft_depth.Costs {
-    var raw: Raw = undefined;
-    if (e.tp != null) { // every rank times the same windows (no cache), then all draft by rank 0's (Drafter.init)
-        try timeAll(gpa, io, e, h, model_dir, &raw, false);
-        return core.draft_depth.Costs.measured(&raw.verify, raw.level);
-    }
     var name: [256]u8 = undefined;
     var shape: [192]u8 = undefined;
     const parts = try keyParts(e, &name, &shape);
     const k = lanes.cost_cache.key(gpa, io, &parts) catch null;
     if (k) |key| if (lanes.cost_cache.load(core.draft_depth.Costs, gpa, io, key)) |kept| return kept;
     const rk = lanes.cost_cache.cudaReferenceKey(&parts);
+    var raw: Raw = undefined;
     try timeAll(gpa, io, e, h, model_dir, &raw, false);
     var costs = core.draft_depth.Costs.measured(&raw.verify, raw.level);
     if (lanes.cost_cache.load(core.draft_depth.Costs, gpa, io, rk)) |ref| if (drifted(costs, ref)) {

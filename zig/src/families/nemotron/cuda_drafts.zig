@@ -195,12 +195,6 @@ pub const Drafter = struct {
             @memcpy(c.verify[1..17], given[0..16]);
             c.level = given[16];
         } else c = try @import("cuda_costs.zig").measure(gpa, io, e, h, model_dir);
-        if (e.tp) |*g| { // ranks run the same rounds: every one drafts by rank 0's costs
-            var all: [16]core.draft_depth.Costs = undefined;
-            if (g.world > all.len) return error.TooManyRanks;
-            try g.gather(core.draft_depth.Costs, e.ctx.d, e.stream, c, all[0..g.world]);
-            c = all[0];
-        }
         return .{ .head = h, .rule = depthRule(c) };
     }
 
