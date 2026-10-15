@@ -272,6 +272,12 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     // the GLM-5.3-Flash CUDA family's host side
     const glm = glmCuda(b, host, .debug, cuda, mods.core, mods.lanes, mods.heat);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm })).step);
+    // Ling-3.1-flash's config loader and weight map, and its routing and limits as the GLM kernels take them
+    const ling = b.createModule(.{ .root_source_file = b.path("zig/src/families/ling/cuda.zig"), .target = host, .optimize = .debug, .link_libc = true });
+    ling.addImport("glm_cuda", glm);
+    const ling_run = b.addRunArtifact(b.addTest(.{ .root_module = ling }));
+    step.dependOn(&ling_run.step);
+    b.step("test-ling", "Ling-3.1-flash's config loader and weight map (no GPU work)").dependOn(&ling_run.step);
     // the shares a GLM-5.3-Flash rank takes (cluster/canon.zig against the Python family's)
     const shares = b.createModule(.{ .root_source_file = b.path("zig/src/cluster/canon_glm_test.zig"), .target = host, .optimize = .debug });
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shares })).step);
