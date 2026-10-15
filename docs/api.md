@@ -481,6 +481,9 @@ configured the body is only `{"status": "ok"}`. Without keys it has these fields
 | `warming` | boolean | Always `false` on the native engines |
 | `memory` | object | CUDA: `active`, `cache` and `peak` in bytes (`cache` is 0). Metal: `{}` |
 | `live` | object | `connections`, `waiting`, `decode_tokens_per_second`, `prefill_tokens_per_second` |
+| `version` | string | The release this server was built from |
+| `backend` | string | The backend built in: `metal`, `cuda`, `hip` or `xpu`; absent from a build without one |
+| `device` | string | The GPU the server opened, by the driver's name; absent when it cannot read one |
 
 `live.connections` counts running and waiting requests, and `live.waiting` the waiting ones.
 `decode_tokens_per_second` is the tokens decoded in the last 2 s, divided by 2. `prefill_tokens_per_second` is the
