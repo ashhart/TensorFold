@@ -354,3 +354,40 @@ pub fn ling(gpu: Gpu, path: []const u8) !void {
     try check.expect(hf_same == R and ex_same == R and hf_most <= std.math.pow(f64, 2, -16) and ex_most <= std.math.pow(f64, 2, -10), "Ling routing equals HF's and exllamav3's", .{});
     check.pass("Ling layer 4 routing: picks equal HF's and exllamav3's on all {d} rows, weights within float64 tolerance", .{R});
 }
+
+/// `ling-route-old <fatbin>`: group-limited select (Ling's shapes, odd groups, tie rows) vs an older glm_glue, byte for byte.
+pub fn lingOld(gpu: Gpu, path: []const u8) !void {
+    var e: Env = undefined;
+    try env(gpu, &e);
+    defer e.deinit();
+    const r = &e.r;
+    const bytes = try std.Io.Dir.cwd().readFileAllocOptions(gpu.io, path, r.a, .limited(1 << 26), .@"64", null);
+    var m = try cuda.Module.load(gpu.d, bytes);
+    defer m.unload();
+    const prev = try m.function("tf_glm_topk");
+    const shapes = [_]Route{
+        .{ .rows = 300, .ne = 512, .top_k = 8, .ng = 8, .keep = 4, .scale = 2.5 },
+        .{ .rows = 300, .ne = 256, .top_k = 8, .ng = 8, .keep = 4, .scale = 2.5 },
+        .{ .rows = 100, .ne = 480, .top_k = 6, .ng = 12, .keep = 3, .scale = 1.0 },
+        .{ .rows = 100, .ne = 512, .top_k = 8, .ng = 32, .keep = 1, .scale = 2.5 },
+        .{ .rows = 100, .ne = 384, .top_k = 8, .ng = 4, .keep = 2, .scale = 2.5 },
+    };
+    var rows: usize = 0;
+    for (shapes) |q| for ([_]bool{ true, false }) |norm| for ([_]bool{ false, true }) |ties| {
+        const logits = try f32s(r, q.rows * q.ne, -6, 6);
+        const bias = try f32s(r, q.ne, -0.05, 0.05);
+        if (ties) tieRows(r, q, logits, bias);
+        const n = q.rows * (q.top_k + 1);
+        const dl = try r.dev(std.mem.sliceAsBytes(logits));
+        const db = try r.dev(std.mem.sliceAsBytes(bias));
+        const outs = [4]u64{ try r.zeros(n * 4), try r.zeros(n * 4), try r.zeros(n * 4), try r.zeros(n * 4) };
+        var a: cuda.Args = .{};
+        inline for (.{ dl, db, outs[0], outs[1], q.scale, @as(c_int, @intCast(q.ne)), @as(c_int, @intCast(q.top_k)), @as(c_int, @intFromBool(norm)), @as(c_int, @intCast(q.ng)), @as(c_int, @intCast(q.keep)) }) |v| a.add(v);
+        try cuda.launch.launch(prev, .{ .grid = .{ .x = @intCast(q.rows) }, .block = .{ .x = 32 } }, r.s, &a);
+        try glue.select(.{ .glue = &e.ks }, r.s, dl, db, outs[2], outs[3], q.rows, q.top_k, q.ne, q.scale, norm, .{ .n = q.ng, .keep = q.keep });
+        try check.sameBytes("group-limited select picks vs the older build", try r.back(outs[2], n * 4), try r.back(outs[0], n * 4));
+        try check.sameBytes("group-limited select weights vs the older build", try r.back(outs[3], n * 4), try r.back(outs[1], n * 4));
+        rows += q.rows;
+    };
+    check.pass("ling-route-old: {d} rows of group-limited select (5 shapes, normed and not, tie rows) equal the older kernel's bytes", .{rows});
+}

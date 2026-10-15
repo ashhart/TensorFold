@@ -108,13 +108,14 @@ const usage =
     \\  glm-lanes-concurrent <ckpt> <dc.json> <rank> <world> <idfile>  concurrent streams on one lanes.Engine, each against its solo run
     \\  glm-shared-check <ckpt> <dc.json> <rank> <world> <idfile>  shared verify windows against lone twins, logits and states byte for byte
     \\  glm-route-old <fatbin>    GLM's select and swiglu against an older glm_glue fatbin (6380c8da), byte for byte
+    \\  ling-route-old <fatbin>   group-limited select (Ling's shapes, odd groups, ties) vs an older glm_glue fatbin, byte for byte
     \\  glm-route-ling <fixture>  Ling's group-limited routing on captured layer-4 logits vs float64, HF and exllamav3
     \\  glm-synth <dir>          a synthetic GLM-5.3-Flash checkpoint (2 layers, 16 experts) and its dc.json for the lane checks
     \\  ling-synth <dir> [--format bf16|fp8|nvfp4] [--layers N]   a tiny Ling-3.1 checkpoint with the real names and config schema
     \\  ling-weights <dir>        every layer of a Ling checkpoint loaded: projections vs float64, small tensors byte for byte
     \\  ling-forward-synth <dir> <ref> [picks]   a ling-synth checkpoint's forward vs oracle/ling_forward.py; cuts, windows, batches
     \\  ling-layer-real <dir> <fixture> [dump]   one real Ling-3.1 layer vs HF's captured output (oracle/ling_layer.py); exactness
-    \\  ling-layer-speed <dir> <fixture> [reps]   one real Ling-3.1 layer timed whole and op by op: decode, windows, prompts
+    \\  ling-layer-speed <dir> <fixture> [reps [rows,..]]   one real Ling-3.1 layer timed whole and op by op: decode, windows, prompts
     \\  ling-layer-bytes <dir> <fixture> <out>   one real Ling-3.1 layer's outputs and states on every path into a file (cmp)
     \\  ling-clamp <dir>          Ling's SwiGLU order min(silu(g), L): glue and the dir's grouped experts vs float64
     \\  ling-clamp-old <dir> <fatbins>   the grouped expert instances vs an older build's fatbins, byte for byte
@@ -225,13 +226,14 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "glm-lanes-cover")) return glm_lanes_tests.coverCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "glm-shared-check")) return glm_lanes_tests.sharedCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "glm-route-old")) return glm_ref_route.old(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "ling-route-old")) return glm_ref_route.lingOld(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "glm-route-ling")) return glm_ref_route.ling(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "glm-synth")) return glm_synth.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "ling-synth")) return ling_synth.run(gpu, rest);
     if (std.mem.eql(u8, cmd, "ling-weights")) return ling_weights.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "ling-forward-synth")) return @import("ling_forward_synth.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else null);
     if (std.mem.eql(u8, cmd, "ling-layer-real")) return @import("ling_layer_real.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else null);
-    if (std.mem.eql(u8, cmd, "ling-layer-speed")) return @import("ling_layer_speed.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else null);
+    if (std.mem.eql(u8, cmd, "ling-layer-speed")) return @import("ling_layer_speed.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else null, if (rest.len > 3) rest[3] else null);
     if (std.mem.eql(u8, cmd, "ling-layer-bytes")) return @import("ling_layer_bytes.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "ling-clamp")) return @import("ling_clamp.zig").run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "ling-clamp-old")) return @import("ling_clamp.zig").old(gpu, try arg(rest, 0), try arg(rest, 1));

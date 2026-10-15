@@ -30,7 +30,35 @@ __device__ __forceinline__ float swiglu1(float g, float u, float limit) {
 template <int MAXE>
 __device__ __forceinline__ void keep_groups(float* choice, int lane, int ne, int gs, int ng, int keep) {
   float gscore = -INFINITY;  // lane g: group g's top-2 sum
-  for (int g = 0; g < ng; ++g) {
+  const bool whole = gs % 32 == 0 && ne % 32 == 0;  // groups of whole i: one pass, no divisions (Ling's 64)
+  if (whole) {
+    const int per = gs / 32, ni = ne / 32;
+    float a = -INFINITY, b = -INFINITY;
+    int g = 0, left = per;
+#pragma unroll
+    for (int i = 0; i < MAXE; ++i) {
+      if (i >= ni) break;
+      const float c = choice[i];
+      if (c > a) {
+        b = a;
+        a = c;
+      } else if (c > b) {
+        b = c;
+      }
+      if (--left == 0) {
+        for (int o = 16; o > 0; o >>= 1) {
+          const float oa = __shfl_xor_sync(0xffffffffu, a, o), ob = __shfl_xor_sync(0xffffffffu, b, o);
+          b = fmaxf(fminf(a, oa), fmaxf(b, ob));
+          a = fmaxf(a, oa);
+        }
+        if (lane == g) gscore = a + b;
+        a = b = -INFINITY;
+        ++g;
+        left = per;
+      }
+    }
+  }
+  for (int g = 0; g < (whole ? 0 : ng); ++g) {
     float a = -INFINITY, b = -INFINITY;  // this lane's best two in group g, a >= b
     for (int i = 0; i < MAXE; ++i) {
       const int e = i * 32 + lane;
@@ -61,6 +89,20 @@ __device__ __forceinline__ void keep_groups(float* choice, int lane, int ne, int
     const int id = __ffs(at) - 1;
     kept |= 1u << id;
     if (lane == id) live = false;
+  }
+  if (whole) {
+    const int per = gs / 32, ni = ne / 32;
+    int g = 0, left = per;
+#pragma unroll
+    for (int i = 0; i < MAXE; ++i) {
+      if (i >= ni) break;
+      if (!((kept >> g) & 1u)) choice[i] = -INFINITY;
+      if (--left == 0) {
+        ++g;
+        left = per;
+      }
+    }
+    return;
   }
   for (int i = 0; i < MAXE; ++i) {
     const int e = i * 32 + lane;
