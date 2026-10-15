@@ -111,10 +111,13 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     const t: *Target = @ptrCast(@alignCast(ptr));
     const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
     const cache = t.caches.get(s) orelse return error.UnknownStream;
+    return @ptrCast(try saveCache(t.e, cache, at, t.seen.get(s) orelse &.{}));
+}
+
+/// A host copy of `cache` at `at` rows, naming the prompt's images that start before it.
+pub fn saveCache(e: *Engine, cache: *const Cache, at: usize, seen: []const Seen) !*Copy {
     if (cache.len != at or cache.last != null or at > cache.cap) return error.NotAtMark;
-    const e = t.e;
     const l: Layout = .{ .g = e.g, .format = formatOf(e), .cap = cache.cap, .at = at };
-    const seen: []const Seen = t.seen.get(s) orelse &.{};
     var n: usize = 0;
     for (seen) |im| n += @intFromBool(im.at < at);
     const copy = try e.gpa.create(Copy);
@@ -176,10 +179,13 @@ pub fn restore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!
 /// Free a kept state's host copy.
 pub fn drop(ptr: *anyopaque, saved: *anyopaque) void {
     const t: *Target = @ptrCast(@alignCast(ptr));
-    const copy: *Copy = @ptrCast(@alignCast(saved));
+    dropCopy(t.e, @ptrCast(@alignCast(saved)));
+}
+
+pub fn dropCopy(e: *Engine, copy: *Copy) void {
     copy.host.free();
-    t.e.gpa.free(copy.images);
-    t.e.gpa.destroy(copy);
+    e.gpa.free(copy.images);
+    e.gpa.destroy(copy);
 }
 
 fn testGeometry(layers: usize, attention_every: usize, kv_heads: usize) Geometry {

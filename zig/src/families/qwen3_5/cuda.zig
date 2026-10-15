@@ -5,6 +5,7 @@ pub const engine = @import("cuda_engine.zig");
 pub const native = @import("cuda_native.zig");
 pub const draft = @import("cuda_draft.zig");
 pub const vision = @import("cuda_vision.zig");
+pub const reuse = @import("cuda_reuse.zig");
 
 test {
     _ = config;
@@ -14,6 +15,6 @@ test {
     _ = draft;
     _ = vision;
     _ = @import("cuda_vision_prompt.zig");
-    _ = @import("cuda_reuse.zig");
+    _ = reuse;
     _ = native;
 }
