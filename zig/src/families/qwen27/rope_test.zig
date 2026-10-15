@@ -73,7 +73,8 @@ test "q27_rope: t = h = w is plain rope bit for bit, and an image row's pairs tu
     const at = [3][rows * heads * width]u16{ try r.run(.{ t, @splat(0), @splat(0) }, 0, 0), try r.run(.{ h, @splat(0), @splat(0) }, 0, 0), try r.run(.{ w, @splat(0), @splat(0) }, 0, 0) };
     for (0..rows * heads) |rh| for (0..width) |x| {
         const i = rh * width + x;
-        const k: usize = if (x < 64) axis(@intCast(x % 32), .{ 11, 11, 10 }) else 0; // past the rotary dims every plane copies
+        // past the rotary dims every plane copies
+        const k: usize = if (x < 64) axis(@intCast(x % 32), .{ 11, 11, 10 }) else 0;
         try std.testing.expectEqual(at[k][i], image[i]);
     };
 }
