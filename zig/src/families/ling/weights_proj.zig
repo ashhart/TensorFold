@@ -87,6 +87,7 @@ pub const Reader = struct {
     ck: *core.Checkpoint,
     c: *const config.Config,
     store: *Store,
+    stage: usize = 512 << 20, // raw expert bytes staged at a time (weights.Options.stage)
     buf: [256]u8 = undefined,
 
     fn name(r: *Reader, module: []const u8, tail: []const u8) ![]const u8 {
@@ -243,75 +244,133 @@ pub const Reader = struct {
         return std.fmt.bufPrint(b, "model.layers.{d}.mlp.experts.{d}." ++ proj, .{ i, e });
     }
 
-    /// A view of `ptr` the store owns, for uploads at an offset.
-    fn view(r: *Reader, ptr: u64, len: usize) cuda.DeviceBuffer {
-        return .{ .d = r.store.d, .ptr = ptr, .len = len };
-    }
-
     fn label(b: []u8, i: u32, what: []const u8) ![]const u8 {
         return std.fmt.bufPrint(b, "model.layers.{d}.mlp.experts.{s}", .{ i, what });
     }
 
-    /// experts.Layer's fp8g form: Fp8Experts.packGateUp and packOne per expert, scale_inv blocks as stored.
+    /// Experts a stage holds when one expert's raw tensors take `one` bytes.
+    fn batch(r: *const Reader, count: usize, one: usize) usize {
+        return @max(1, @min(count, r.stage / one));
+    }
+
+    /// A batch's raw tensors: copied from the file into pinned memory by `threads` threads, uploaded, packed there.
+    const Stage = struct {
+        host: cuda.HostBuffer,
+        dev: cuda.DeviceBuffer,
+        jobs: std.ArrayList(Job) = .empty,
+
+        const Job = struct { at: usize, bytes: []const u8 };
+        const threads = 8; // page faults in flight: one reader leaves the disk (or the mount) idle between them
+
+        fn init(r: *Reader, len: usize) !Stage {
+            var host = try cuda.HostBuffer.alloc(r.store.d, len);
+            errdefer host.free();
+            return .{ .host = host, .dev = try cuda.DeviceBuffer.alloc(r.store.d, len) };
+        }
+
+        fn deinit(st: *Stage, r: *Reader) void {
+            st.jobs.deinit(r.gpa);
+            st.host.free();
+            st.dev.free();
+        }
+
+        fn put(st: *Stage, r: *Reader, at: usize, bytes: []const u8) !void {
+            try st.jobs.append(r.gpa, .{ .at = at, .bytes = bytes });
+        }
+
+        fn copy(st: *const Stage, first: usize) void {
+            var j = first;
+            while (j < st.jobs.items.len) : (j += threads) {
+                const job = st.jobs.items[j];
+                @memcpy(st.host.bytes[job.at..][0..job.bytes.len], job.bytes);
+            }
+        }
+
+        /// The batch on the device; the packers run after it on `r.stream`.
+        fn upload(st: *Stage, r: *Reader) !void {
+            var pool: [threads - 1]?std.Thread = @splat(null);
+            for (&pool, 1..) |*t, first| t.* = std.Thread.spawn(.{}, copy, .{ st, first }) catch null;
+            for (pool, 1..) |t, first| if (t == null) st.copy(first); // no thread: this one copies its share
+            st.copy(0);
+            for (pool) |t| if (t) |x| x.join();
+            st.jobs.clearRetainingCapacity();
+            try st.dev.uploadAsync(0, st.host.bytes, r.stream.handle);
+        }
+
+        /// The packers done (the stage is reused) and the batch's file pages dropped: the GPU shares this memory.
+        fn drained(_: *Stage, r: *Reader) !void {
+            try r.stream.synchronize();
+            r.ck.release();
+        }
+    };
+
+    /// experts.Layer's fp8g form: batches of e4m3 bytes staged on the device, packed there (Packer.fp8Experts).
     fn fp8Experts(r: *Reader, i: u32, count: usize, ni: usize, d: usize, limit: f32) !cuda.experts.Layer {
         if (ni % X8.block != 0 or d % X8.block != 0) return error.UnexpectedTensor;
-        const up_n = 2 * ni * d / 4; // u32 words of one expert's gate and up
-        const down_n = d * ni / 4;
+        const one = ni * d; // bytes of one e4m3 matrix
         const inv_n = (ni / 128) * (d / 128); // one matrix's scale_inv blocks
         var lb: [96]u8 = undefined;
-        const up = try r.store.alloc(count * up_n * 4, try label(&lb, i, "up"));
-        const down = try r.store.alloc(count * down_n * 4, try label(&lb, i, "down"));
-        const up_scale = try r.store.alloc(count * 2 * inv_n * 4, try label(&lb, i, "up_scale"));
-        const down_scale = try r.store.alloc(count * inv_n * 4, try label(&lb, i, "down_scale"));
-        const hu = try r.gpa.alloc(u32, up_n);
-        defer r.gpa.free(hu);
-        const hd = try r.gpa.alloc(u32, down_n);
-        defer r.gpa.free(hd);
+        const up = try r.store.alloc(count * 2 * one, try label(&lb, i, "up"));
+        const down = try r.store.alloc(count * one, try label(&lb, i, "down"));
+        const inv = try r.gpa.alloc(f32, 3 * count * inv_n); // [E][gate, up] then [E][down], as stored
+        defer r.gpa.free(inv);
+        const nb = r.batch(count, 3 * one);
+        var stage = try Stage.init(r, 3 * nb * one); // [gate, up, down][nb][n][k]
+        defer stage.deinit(r);
         var b: [192]u8 = undefined;
-        for (0..count) |e| {
-            const g = try r.fp8Pair(try expertModule(&b, i, e, "gate_proj"), ni, d);
-            const u = try r.fp8Pair(try expertModule(&b, i, e, "up_proj"), ni, d);
-            const dn = try r.fp8Pair(try expertModule(&b, i, e, "down_proj"), d, ni);
-            try X8.packGateUp(r.gpa, hu, g.w.bytes, u.w.bytes, ni, d);
-            X8.packOne(hd, dn.w.bytes, d, ni);
-            try r.view(up, count * up_n * 4).upload(e * up_n * 4, std.mem.sliceAsBytes(hu));
-            try r.view(down, count * down_n * 4).upload(e * down_n * 4, std.mem.sliceAsBytes(hd));
-            const us = r.view(up_scale, count * 2 * inv_n * 4);
-            try us.upload(2 * e * inv_n * 4, g.s.bytes);
-            try us.upload((2 * e + 1) * inv_n * 4, u.s.bytes);
-            try r.view(down_scale, count * inv_n * 4).upload(e * inv_n * 4, dn.s.bytes);
+        var e0: usize = 0;
+        while (e0 < count) : (e0 += nb) {
+            const n = @min(nb, count - e0);
+            for (0..n) |j| inline for (.{ "gate_proj", "up_proj", "down_proj" }, 0..) |proj, m| {
+                const e = e0 + j;
+                const x = if (m < 2) try r.fp8Pair(try expertModule(&b, i, e, proj), ni, d) else try r.fp8Pair(try expertModule(&b, i, e, proj), d, ni);
+                try stage.put(r, (m * nb + j) * one, x.w.bytes);
+                @memcpy(std.mem.sliceAsBytes(inv[(if (m < 2) 2 * e + m else 2 * count + e) * inv_n ..][0..inv_n]), x.s.bytes);
+            };
+            try stage.upload(r);
+            for (0..2) |m| try r.pack.fp8Experts(r.stream, stage.dev.ptr + m * nb * one, up + e0 * 2 * one, n, ni, d, 2, m);
+            try r.pack.fp8Experts(r.stream, stage.dev.ptr + 2 * nb * one, down + e0 * one, n, d, ni, 1, 0);
+            try stage.drained(r);
         }
+        const up_scale = try r.store.keep(std.mem.sliceAsBytes(inv[0 .. 2 * count * inv_n]), try label(&lb, i, "up_scale"));
+        const down_scale = try r.store.keep(std.mem.sliceAsBytes(inv[2 * count * inv_n ..]), try label(&lb, i, "down_scale"));
         return .{ .format = .fp8g, .up = up, .down = down, .up_scale = up_scale, .down_scale = down_scale, .width = ni, .dims = d, .experts = count, .limit = limit, .after = true };
     }
 
-    /// experts.Layer's nvfp4 form: Nvfp4Experts.packGateUp and packOne per expert, weight_scale_2 as the globals.
+    /// experts.Layer's nvfp4 form: batches of codes and scales staged on the device, packed there (Packer.fp4Experts).
     fn fp4Experts(r: *Reader, i: u32, count: usize, ni: usize, d: usize, limit: f32) !cuda.experts.Layer {
         if (ni % X4.cols != 0 or d % 32 != 0) return error.UnexpectedTensor;
-        const up_n = X4.bytes(1, ni, d, 2) / 4;
-        const down_n = X4.bytes(1, d, ni, 1) / 4;
+        const up_n = X4.bytes(1, ni, d, 2);
+        const down_n = X4.bytes(1, d, ni, 1);
+        const cb = ni * d / 2; // code bytes of one matrix
+        const sb = ni * d / 16; // its e4m3 scale bytes
         var lb: [96]u8 = undefined;
-        const up = try r.store.alloc(count * up_n * 4, try label(&lb, i, "up"));
-        const down = try r.store.alloc(count * down_n * 4, try label(&lb, i, "down"));
-        const hu = try r.gpa.alloc(u32, up_n);
-        defer r.gpa.free(hu);
-        const hd = try r.gpa.alloc(u32, down_n);
-        defer r.gpa.free(hd);
+        const up = try r.store.alloc(count * up_n, try label(&lb, i, "up"));
+        const down = try r.store.alloc(count * down_n, try label(&lb, i, "down"));
         const gu = try r.gpa.alloc(f32, 2 * count);
         defer r.gpa.free(gu);
         const gd = try r.gpa.alloc(f32, count);
         defer r.gpa.free(gd);
+        const nb = r.batch(count, 3 * (cb + sb));
+        var stage = try Stage.init(r, 3 * nb * (cb + sb)); // codes [3][nb], then scales [3][nb]
+        defer stage.deinit(r);
+        const codes = stage.dev.ptr;
+        const scales = stage.dev.ptr + 3 * nb * cb;
         var b: [192]u8 = undefined;
-        for (0..count) |e| {
-            const g = try r.fp4Read(try expertModule(&b, i, e, "gate_proj"), ni, d);
-            const u = try r.fp4Read(try expertModule(&b, i, e, "up_proj"), ni, d);
-            const dn = try r.fp4Read(try expertModule(&b, i, e, "down_proj"), d, ni);
-            X4.packGateUp(hu, .{ g.codes, g.scales }, .{ u.codes, u.scales }, ni, d);
-            X4.packOne(hd, dn.codes, dn.scales, d, ni);
-            try r.view(up, count * up_n * 4).upload(e * up_n * 4, std.mem.sliceAsBytes(hu));
-            try r.view(down, count * down_n * 4).upload(e * down_n * 4, std.mem.sliceAsBytes(hd));
-            gu[2 * e] = g.global;
-            gu[2 * e + 1] = u.global;
-            gd[e] = dn.global;
+        var e0: usize = 0;
+        while (e0 < count) : (e0 += nb) {
+            const n = @min(nb, count - e0);
+            for (0..n) |j| inline for (.{ "gate_proj", "up_proj", "down_proj" }, 0..) |proj, m| {
+                const e = e0 + j;
+                const x = if (m < 2) try r.fp4Read(try expertModule(&b, i, e, proj), ni, d) else try r.fp4Read(try expertModule(&b, i, e, proj), d, ni);
+                try stage.put(r, (m * nb + j) * cb, x.codes);
+                try stage.put(r, 3 * nb * cb + (m * nb + j) * sb, x.scales);
+                if (m < 2) gu[2 * e + m] = x.global else gd[e] = x.global;
+            };
+            try stage.upload(r);
+            for (0..2) |m| try r.pack.fp4Experts(r.stream, codes + m * nb * cb, scales + m * nb * sb, up + e0 * up_n, n, ni, d, 0, d, 2, m);
+            try r.pack.fp4Experts(r.stream, codes + 2 * nb * cb, scales + 2 * nb * sb, down + e0 * down_n, n, d, ni, 0, ni, 1, 0);
+            try stage.drained(r);
         }
         const up_scale = try r.store.keep(std.mem.sliceAsBytes(gu), try label(&lb, i, "up_scale"));
         const down_scale = try r.store.keep(std.mem.sliceAsBytes(gd), try label(&lb, i, "down_scale"));

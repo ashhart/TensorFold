@@ -79,7 +79,8 @@ exllamav3's port measured 0.4-1.1e-3 without flips (4 flips each on layers 4 and
 activations, the captured HF chain carries an fp32 residual from layer 3's output on, and this graph rounds the stream
 to bf16 as the bf16 model does. On every
 real layer a prompt cut at 300 equals the uncut prompt and a 16-row window equals 16 decode rows; for FP8 decode rows
-equal the prompt's rows (both run the lane). Loading one MoE layer's 512 experts from the sshfs mount takes ~150 s.
+equal the prompt's rows (both run the lane). Loading one MoE layer's 512 experts takes 6.1 s from
+local disk and 122 s from the sshfs mount (its read alone is 92 s); see Loading below.
 
 ### Formats
 
@@ -97,8 +98,25 @@ The format of every tensor comes from the checkpoint, never from the layer graph
 A file tensor whose dtype or shape disagrees with the format the config gives it is refused, naming the module and
 both formats. Each projection loads as a `qlinear.Weight` (`bf16`, `fp8g` or `nvfp4`) through main's packers
 (`modelopt.Packer`, `fp8.packScales`); routed experts load as `experts.Layer` (`fp8g` or `nvfp4`, packed by
-`Fp8Experts`/`Nvfp4Experts`). There is no grouped bf16 expert kernel, so bf16 routed experts load as one lane weight
+`Fp8Experts`/`Nvfp4Experts`'s layouts on the GPU: `Packer.fp8Experts` and `Packer.fp4Experts`). There is no grouped bf16 expert kernel, so bf16 routed experts load as one lane weight
 per projection. The router must be bf16 (GLM's router kernel reads bf16); a quantized router is refused.
+
+### Loading
+
+Routed experts load in batches of `weights.Options.stage` bytes (512 MiB, 32 FP8 experts): eight threads copy the batch's
+raw tensors from the mapped file into pinned memory, one upload moves them to a device stage of the same size, and the
+packers lay them out in the layer's buffers; the batch's file pages are then dropped. Scales are collected on the host
+and uploaded once a layer. `ling-pack DIR LAYER [EXPERTS [STAGE]]` times it and checks every packed byte against the
+host packers (`Fp8Experts`/`Nvfp4Experts.packGateUp`, `packOne`). Real layer 4 (512 FP8 experts, 7.5 GiB), from local
+disk / the sshfs mount:
+
+| Loader | cold load | host peak (VmHWM) | device peak |
+| --- | --- | --- | --- |
+| host packers per expert (c48be499) | 14.3 s / ~157 s | 8.0 GiB (the layer's mapped pages) | 7.9 GiB |
+| batches packed on the GPU | 6.1 s / 122 s | 1.3 GiB | 8.4 GiB (+ one stage) |
+
+From local disk the load runs at the read's rate (5-7 s to read the layer once single-threaded); from the mount the
+network bounds it (86 MiB/s here: ~1.9 h for the 572 GB release).
 
 ### The SwiGLU clamp
 

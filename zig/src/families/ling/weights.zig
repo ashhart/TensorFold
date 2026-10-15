@@ -63,6 +63,7 @@ pub const Mtp = struct { enorm: u64, hnorm: u64, eh: Proj, norm: u64 };
 pub const Options = struct {
     globals: bool = true, // embedding, final norm and head
     experts: ?usize = null, // the first n routed experts of each MoE layer only (tests on a partial checkpoint)
+    stage: usize = 512 << 20, // raw expert bytes staged at a time (pinned and on the device), at least one expert
 };
 
 pub const Weights = struct {
@@ -200,7 +201,7 @@ const Loader = struct {
 pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, pack: *const cuda.modelopt.Packer, ck: *core.Checkpoint, c: Config, layers: []const u32, opts: Options) !Weights {
     var w: Weights = .{ .config = c, .store = .{ .gpa = gpa, .d = d } };
     errdefer w.store.deinit();
-    var L: Loader = .{ .r = .{ .gpa = gpa, .stream = stream, .pack = pack, .ck = ck, .c = &w.config, .store = &w.store }, .c = &w.config, .opts = opts };
+    var L: Loader = .{ .r = .{ .gpa = gpa, .stream = stream, .pack = pack, .ck = ck, .c = &w.config, .store = &w.store, .stage = opts.stage }, .c = &w.config, .opts = opts };
     const out = try gpa.alloc(Layer, layers.len);
     errdefer gpa.free(out);
     for (layers, out) |i, *l| {

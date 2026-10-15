@@ -119,7 +119,7 @@ const usage =
     \\  ling-lanes <dir> <out> [ref] [--layers a,b] [--mtp]   Ling's lane backend: chunked, drafted, resumed, concurrent == plain
     \\  ling-mtp-real <dir> <fixture>   the real MTP layer vs HF's (oracle/ling_mtp.py); cut, window == decode rows
     \\  ling-weights-real <dir> <refdir>   real Ling-3.1 layers 0, 4, 7 (4 experts) vs float64 and torch (oracle/ling_weights.py)
-    \\  ling-pack <dir> <layer> [experts]   one MoE layer's experts: read, pack and cold load timed; bytes vs the host packers
+    \\  ling-pack <dir> <layer> [experts [stage]]   one MoE layer's experts: read, pack and cold load timed; bytes vs the host packers
     \\
 ;
 

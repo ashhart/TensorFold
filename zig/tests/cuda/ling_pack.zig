@@ -1,4 +1,4 @@
-//! `ling-pack DIR LAYER [EXPERTS]`: a MoE layer's experts loaded and timed, bytes vs the host packers the loader used.
+//! `ling-pack DIR LAYER [EXPERTS [STAGE]]`: MoE experts loaded and timed, bytes vs the host packers the loader used.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -128,7 +128,7 @@ pub fn run(gpu: check.Gpu, rest: []const [:0]const u8) !void {
     defer o.ck.close();
     if (!o.c.isMoe(i)) return error.NotMoeLayer;
     const count = if (rest.len > 2) try std.fmt.parseInt(usize, rest[2], 10) else o.c.experts;
-    const opts: W.Options = .{ .globals = false, .experts = count };
+    const opts: W.Options = .{ .globals = false, .experts = count, .stage = if (rest.len > 3) try std.fmt.parseInt(usize, rest[3], 10) else 512 << 20 };
     // the read alone from a cold cache, then a load on hot pages (pack and upload), then a cold load (both)
     o.ck.release();
     var t0 = check.now(io);
