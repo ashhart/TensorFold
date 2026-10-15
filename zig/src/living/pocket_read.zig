@@ -122,23 +122,27 @@ fn tapOne(p: anytype, t: anytype, ex: Example, kind: Kind, which: u32) !void {
             return a.row < b.row;
         }
     }.less);
-    const want = try p.gpa.alloc(u32, rows.items.len);
-    defer p.gpa.free(want);
-    for (rows.items, want) |r, *w| w.* = r.row;
-    const d = t.config().hidden;
-    const slots = p.moe.items.len;
-    const got = try p.gpa.alloc(u16, rows.items.len * slots * d);
+    // a row two labels share (a reply row that is also its value's) tapped once, read by both
+    var want: std.ArrayList(u32) = .empty;
+    defer want.deinit(p.gpa);
+    for (rows.items) |r| if (want.items.len == 0 or want.items[want.items.len - 1] != r.row) try want.append(p.gpa, r.row);
+    const per = p.moe.items.len * p.hidden;
+    const got = try p.gpa.alloc(u16, want.items.len * per);
     defer p.gpa.free(got);
     // the rows a pass reads: all but the last token, which only a pass's target reads
-    try t.tapRows(ex.ids[0 .. ex.ids.len - 1], ex.context, want, p.moe.items, got);
-    if (std.c.getenv("TF_SLIDE_TAP_CHECK") != null) tapCheck(p, t, ex, want, got);
-    try p.rows.appendSlice(p.gpa, got);
-    for (rows.items) |r| try p.labels.append(p.gpa, r.l);
+    try t.tapRows(ex.ids[0 .. ex.ids.len - 1], ex.context, want.items, p.moe.items, got);
+    if (comptime @hasDecl(@TypeOf(t.*), "pass")) if (std.c.getenv("TF_SLIDE_TAP_CHECK") != null) tapCheck(p, t, ex, want.items, got);
+    var at: usize = 0;
+    for (rows.items) |r| {
+        while (want.items[at] != r.row) at += 1;
+        try p.rows.appendSlice(p.gpa, got[at * per ..][0..per]);
+        try p.labels.append(p.gpa, r.l);
+    }
 }
 
 /// A diagnostic (TF_SLIDE_TAP_CHECK): tapped rows against a fresh run's (nothing kept) and a pass's, if one holds it.
 fn tapCheck(p: anytype, t: anytype, ex: Example, rows: []const u32, got: []const u16) void {
-    const d = t.config().hidden;
+    const d = p.hidden;
     const slots = p.moe.items.len;
     const fresh = p.gpa.alloc(u16, got.len) catch return;
     defer p.gpa.free(fresh);
@@ -196,4 +200,33 @@ fn plan(p: anytype, ex: Example, kind: Kind, which: u32, from: usize, every: usi
 fn keep(p: anytype, t: anytype, r: usize, l: Label) !void {
     for (p.moe.items) |layer| try p.rows.appendSlice(p.gpa, t.normed(layer, r));
     try p.labels.append(p.gpa, l);
+}
+
+test "a prompt whose reply row is also its value's row is tapped once, and both labels read that row" {
+    const gpa = std.testing.allocator;
+    const d = 64;
+    // taps as the CUDA trainer takes them: rows strictly increasing, else error.BadTap; each row's values its index
+    const Taps = struct {
+        pub fn tapRows(_: *@This(), _: []const u32, _: usize, want: []const u32, layers: []const usize, out: []u16) !void {
+            for (want, 0..) |r, i| {
+                if (i > 0 and r <= want[i - 1]) return error.BadTap;
+                @memset(out[i * layers.len * d ..][0 .. layers.len * d], @intCast(r));
+            }
+        }
+    };
+    var p: pocket.Pocket(Taps, @import("families.zig").nemotron_h) = .{ .gpa = gpa, .mode = .auto, .hidden = d, .layers = 4 };
+    defer p.deinit();
+    try p.moe.append(gpa, 1);
+    p.split = .{ 6, 0, 4 }; // value neurons
+    // an answer that begins with its value: the row before it is the reply's first row too
+    const ids = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    var t: Taps = .{};
+    try tapOne(&p, &t, .{ .ids = &ids, .start = 6, .decide = 5, .value = 5, .context = 3 }, .fact, 0);
+    var at_five: usize = 0;
+    for (p.labels.items, 0..) |l, i| if (l.row == 5) {
+        at_five += 1;
+        try std.testing.expectEqual(@as(u16, 5), p.rows.items[i * d]);
+    };
+    try std.testing.expectEqual(@as(usize, 2), at_five);
+    try std.testing.expectEqual(p.labels.items.len * d, p.rows.items.len);
 }
