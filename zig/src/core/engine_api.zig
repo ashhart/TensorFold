@@ -102,6 +102,11 @@ pub const Request = struct {
     pub fn cacheKey(r: *const Request) []const u32 {
         return if (r.cache_key.len > 0) r.cache_key else r.prompt;
     }
+
+    /// The prompt length its kept states count as: its own, or for a warm pass the request whose reply it prefills.
+    pub fn bornLen(r: *const Request) u32 {
+        return if (r.born > 0) r.born else @intCast(r.prompt.len);
+    }
 };
 
 /// An image prepared for the engine's tower (``Vision.prepare``): patches, patch grid, tokens and a content hash.
@@ -370,7 +375,10 @@ pub const Status = struct {
     fill_run: u64 = 0,
 };
 
-pub const SubmitError = error{ Closed, Busy, InvalidSpans };
+pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale }; // Stale: a learner's put-back has not reached the device
+
+/// What a reply refused or ended for `Stale` says, a submit's error and a queued job's failure alike.
+pub const stale_message = "a Living Weights delete could not be put back on the device: send the delete again to retry it, or restart the server";
 
 /// A worked example for the learner: token ids, the answer from `start`; `decide`: its assistant header's last row.
 pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none)
@@ -393,6 +401,8 @@ pub const LearnRequest = struct {
     save: bool = false, // every kept lesson written beside the model's shards, each with its router
     retire: []const Neuron = &.{}, // instead zero these neurons of facts a newer fact replaces
     unretire: bool = false, // instead put back the neurons the last retire zeroed (the newer fact was not learned)
+    forget: []const Neuron = &.{}, // instead zero these neurons' input weights (a fact deleted on request), kept to put back
+    unforget: bool = false, // instead put back, bit for bit, what the last forget changed (a kept fact did not come back)
 };
 
 /// A neuron a pocket lesson placed (Sliding Weights): its layer, its index in that layer's pocket, the row it keys on.
@@ -430,7 +440,8 @@ pub const Learner = struct {
     /// End the open job now; it still sends `done`, with the reason.
     abort: *const fn (ctx: *anyopaque) void,
 
-    pub const Step = struct { done: bool, changed: bool };
+    /// stale: the device lacks a put-back the learner holds, so replies are refused until a later step clears it.
+    pub const Step = struct { done: bool, changed: bool, stale: bool = false };
 };
 
 pub const Engine = struct {
@@ -574,6 +585,7 @@ test {
     _ = @import("lane_host_test.zig");
     _ = @import("lane_host_fill_test.zig");
     _ = @import("lane_host_status_test.zig");
+    _ = @import("lane_host_stale_test.zig");
     _ = @import("lane_host_reuse_test.zig");
     _ = @import("lane_host_cache_lifetime_test.zig");
     _ = @import("lane_host_borrow_test.zig");

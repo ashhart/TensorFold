@@ -130,7 +130,14 @@ pub fn main(init: std.process.Init) !u8 {
         .environ = init.environ_map,
         .started = started,
         .identity = engines.identity(a, args),
+        .forget_fail = if (comptime @import("build_options").slide_test_hooks) forgetFail(init.environ_map) else 0,
     });
+}
+
+/// TF_SLIDE_FORGET_FAIL in a -Dslide-test-hooks build: the fact whose check a delete fails, so its put-back is seen.
+fn forgetFail(env: *const std.process.Environ.Map) u32 {
+    const v = env.get("TF_SLIDE_FORGET_FAIL") orelse return 0;
+    return std.fmt.parseInt(u32, std.mem.trim(u8, v, " "), 10) catch 0;
 }
 
 /// HfText.load with every failure named in `problem`, so main tells the text's failure from the engine's.

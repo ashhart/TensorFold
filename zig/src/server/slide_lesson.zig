@@ -43,6 +43,7 @@ const take = slide_take.take;
 const shortAnswer = slide_take.shortAnswer;
 const judged = slide_take.judged;
 const siblingAnswers = slide_take.siblingAnswers;
+const answeredByAny = slide_take.answeredByAny;
 const subjectRow = slide_subject.subjectRow;
 const kindsOf = slide_subject.kindsOf;
 const kindsList = slide_subject.kindsList;
@@ -260,7 +261,7 @@ fn keepNear(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, nears: []con
             var jcx: Cx = .{ .a = j.a };
             const n = j.nears[i];
             if (untold.protected(n.q)) return; // only ever checked, never trained
-            if (n.judge and try answered(j.srv, &jcx, j.fact, n.q, j.parts.document, j.gone)) return;
+            if (n.judge and try slide_take.answered(j.srv, &jcx, j.fact, n.q, j.parts.document, j.gone)) return;
             if (n.siblings and try siblingAnswers(j.srv, &jcx, j.parts.siblings, j.fact, n.q, j.parts.document, j.gone)) {
                 j.out[i].sibling = true;
                 return;
@@ -447,6 +448,9 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     };
     const kept = try keepNear(srv, cx, parts, fact, nears.items, end, gone);
     log.line("slide: near misses kept steady: {s}", .{try std.mem.join(a, " | ", kept)});
+    for (refs.items, subjects.items) |r, subject| if (subject) |s| {
+        if (!std.mem.eql(u8, r.subject, s)) log.line("slide: \"{s}\": neuron key \"{s}\", neighbour subject \"{s}\"", .{ r.question, r.subject, s });
+    };
     try routerData(srv, cx, parts, fact, f, refs.items, subjects.items, kept, asked_all, answered_all, language, gone);
     return true;
 }
@@ -517,17 +521,23 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         };
         for (near_questions, 0..) |q, k| if (k % prompts.turns.len == i) try parts.unasked.append(a, try slide_ask.promptAfter(srv, cx, a, before, q));
     }
-    const subject = for (subjects) |s| {
-        if (s) |x| break x;
-    } else null;
-    const kinds = if (subject) |s| try kindsList(srv, cx, s, gone) else &.{};
+    // Each wording carries its own replacement phrase, distinct from its neuron's key word.
+    var kinds_by_subject: std.StringHashMapUnmanaged([]const []const u8) = .empty;
     var swaps: usize = 0;
-    outer: for (refs) |r| for (try slide_route.others(a, r.question, subject, kinds)) |q| {
-        if (swaps == max_others) break :outer;
-        if ((try seen.getOrPut(a, q)).found_existing or wording.gives(fact, asked_all, answered_all, q)) continue;
-        try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, null, q));
-        swaps += 1;
-    };
+    outer: for (refs, subjects) |r, subject| {
+        if (swaps == max_others) break;
+        const kinds = if (subject) |s| b: {
+            const entry = try kinds_by_subject.getOrPut(a, s);
+            if (!entry.found_existing) entry.value_ptr.* = try kindsList(srv, cx, s, gone);
+            break :b entry.value_ptr.*;
+        } else &.{};
+        for (try slide_route.others(a, r.question, subject, kinds)) |q| {
+            if (swaps == max_others) break :outer;
+            if ((try seen.getOrPut(a, q)).found_existing or wording.gives(fact, asked_all, answered_all, q)) continue;
+            try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, null, q));
+            swaps += 1;
+        }
+    }
     log.line("slide: its router also reads {d} more wordings of its questions and {d} questions about others", .{ taken, swaps });
 }
 
@@ -537,13 +547,6 @@ fn under(srv: *Server, cx: *Cx, head: api.Example, body: []const u32, r: Held) !
     ex.subject = try subjectRow(srv, cx, ex, r.subject);
     ex.value = try slide_subject.valueRow(srv, cx, ex, r.short);
     return ex;
-}
-
-/// Whether the lesson teaches `question`: one of its own, or one a fact sharing a word with it answers.
-fn answeredByAny(srv: *Server, cx: *Cx, told: []const []const u8, kept: []const bool, own: []const []const u8, question: []const u8, document: bool, gone: anytype) !bool {
-    if (untold.taught(own, question)) return true;
-    for (told, kept) |fact, k| if (k and wording.shares(fact, question) and try answered(srv, cx, fact, question, document, gone)) return true;
-    return false;
 }
 
 /// Whether personal prompt i is one this lesson asks again after it: three of them, turning with each lesson.
@@ -582,12 +585,4 @@ fn asksWho(refs: []const Held) bool {
 fn aboutEntity(srv: *Server, cx: *Cx, fact: []const u8, gone: anytype) !bool {
     const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.about_prompt, .{fact}), 4, gone);
     return std.ascii.startsWithIgnoreCase(std.mem.trim(u8, reply.content, " \t\r\n\"*"), "yes");
-}
-
-/// Whether the fact answers `question`, as the model judges it when asked so (never one about someone it leaves out).
-fn answered(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, document: bool, gone: anytype) !bool {
-    if (!document and wording.someoneElse(fact, question)) return false;
-    const yes = try slide_take.judged(srv, cx, fact, question, document, gone);
-    if (yes) log.line("slide: \"{s}\" is answered by the fact, so it is learned rather than kept", .{question});
-    return yes;
 }

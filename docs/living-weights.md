@@ -32,9 +32,9 @@ On a GB10, install the `linux-aarch64` archive as the [RUNBOOK](../RUNBOOK.md#li
 
 ### 2. Get the model and make a copy to teach
 
-Learning rewrites files in the model folder. The server keeps the folder's original files before its first lesson, so
-`tensorfold slide rollback` can undo every lesson at once ([Undo what it learned](#undo-what-it-learned)), but teach a
-copy and keep the pulled model as it is.
+Learning rewrites files in the model folder, and so does deleting a fact. The server keeps the folder's original
+files before its first lesson or delete, so `tensorfold slide rollback` can undo them all at once
+([Undo what it learned](#undo-what-it-learned)), but teach a copy and keep the pulled model as it is.
 
 ```sh
 tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
@@ -170,7 +170,85 @@ data. The page asks for the server's key once and keeps it for that browser tab.
 - `curl -H "Authorization: Bearer $(cat ~/models/slide-key)" http://127.0.0.1:8080/v1/slide/graph`
   returns the same data as JSON: each fact's state, neurons (layer, index and key), questions and rounds, and the
   model's layers, pocket and shards.
-- The same with `-X DELETE` clears the graph. The weights keep what they learned.
+- The same with `-X DELETE` clears the graph. The weights keep what they learned. To take one fact out of the weights,
+  see [Delete one fact](#delete-one-fact).
+
+## Delete one fact
+
+```sh
+curl -N -X DELETE http://127.0.0.1:8080/v1/slide/fact/2 \
+  -H "Authorization: Bearer $(cat ~/models/slide-key)" \
+  -H 'Content-Type: application/json' -d '{"reason": "my sister changed her name"}'
+```
+
+Take the fact's `id` from `GET /v1/slide/graph`. The body is optional; its `reason` goes into the graph. Like a
+lesson, the reply streams server-sent events. With a few facts learned it takes seconds; every learned fact's
+questions are asked twice, so it grows with them:
+
+1. `fact`: the fact and its state.
+2. `checking` with `"when": "before"`: every learned fact's held-out questions are asked as its lesson checked them,
+   with thinking off and on, and the wordings its lesson never trained on with thinking off.
+3. `zeroed`: the input weights of the fact's neurons are set to zero in the running model, so they never fire, and
+   their layers are rounded to the 4-bit values the shards will hold, so the checks after read what will be written.
+4. `checking` with `"when": "after"`, then one `checked` event a fact, saying whether it came back before and after.
+5. `forgot` with `"deleted": true`: every other fact still comes back, and the deleted fact's questions no longer give
+   its answer. The change is written into the shards, the graph marks the fact `deleted` with the time and reason, and
+   its neurons at the top of each layer's pocket are free for later lessons.
+6. Or `forgot` with `"deleted": false`: the delete did not complete, because a check failed or a write failed (below).
+   For a failed check, the neurons are put back exactly as they were, nothing is written, and `message` names the
+   fact and question that failed and what the model said.
+
+`forgot` also carries `state`, the fact's state in the graph file when the request ends. A delete writes two things,
+the shards and the graph file, in this order, so that together they never claim more than is on disk:
+
+1. The graph file marks the fact `deleting`.
+2. The shards are written.
+3. The graph file marks the fact `deleted`.
+
+`"deleted": true` means all three were written. When one fails, `forgot` says `"deleted": false` and `message` says
+what happened:
+
+| What failed | What is on disk | `state` |
+| --- | --- | --- |
+| The graph file, before the shards | Nothing changed: the delete was put back | `learned` |
+| The shards | The delete was put back and the shards written again as they were, so nothing changed | `learned` |
+| The shards, and writing them back too | The folder may hold part of the delete | `deleting` |
+| The graph file, after the shards | The shards hold the delete; the graph file does not say so yet | `deleting` |
+
+A put-back restores the pocket in memory at once, and on the GPU once every layer's upload succeeds. If one does not
+(on CUDA, an upload or a graph capture that fails), the server keeps what it needs to put it back, and refuses every
+reply until it lands: a reply says "a Living Weights delete could not be put back on the device" (one that was
+already waiting ends with the same words, unanswered), and a learn or delete request answers 503. Each learn or
+delete request tries the put-back again first, and replies come back once it lands. A restart reloads the folder,
+which a put-back never wrote.
+
+A fact left `deleting`, by one of these or by a crash, is settled by sending the delete again, after a restart too.
+If its neurons are silent already, an earlier delete reached the shards, and the graph file now records it. If not,
+the delete runs again, checks and all. A fact left `deleting` is not checked as a kept fact meanwhile, and a lesson
+placed on one of its neurons takes that neuron over. Without `--slide-graph` the graph lives in memory only, and only
+the shards are written.
+
+A kept fact passes when each answer that came back before the delete still does, and at least half of its other
+wordings do if they did before. The deleted fact passes when none of its questions gives its answer, or when the model
+as shipped gives that answer too (a likely guess, such as a common colour, is no trace of the fact).
+
+- A fact a newer one replaced has its neurons at zero already: deleting it answers "nothing to delete" and changes
+  nothing. Deleting the newer fact does not bring back the one it replaced.
+- A fact learned before this release kept its questions but not their answers: its check holds each question to the
+  answer the model gave just before the delete.
+- A delete silences a fact; it does not erase it. A deleted neuron's output weights stay in the shards, unused, until
+  a later lesson takes the neuron. Zeroing them too would round again the 4-bit groups that other facts' neurons in
+  the same layer share, and move their answers.
+- A model with a fact deleted is close to the same model never taught it, but not the same: the lessons after it
+  were learned with it in place.
+- Only freed neurons at the top of a layer's pocket go to the next lesson. One below another fact's neuron stays
+  silent, and taken, until that fact is deleted too.
+- While a delete runs, chat replies already see the fact gone; a delete that is put back brings it back once the GPU
+  takes the put-back (above).
+- Before its first write, a delete keeps the folder's original files as a lesson does, so a rollback undoes deletes
+  along with lessons.
+- A delete changes the weights only. Recall's records and saved conversations (`--recall`, `--learn-conversations`)
+  keep what the conversations said, the fact's words included.
 
 ## Keep, move or reset what it learned
 
@@ -178,9 +256,9 @@ data. The page asks for the server's key once and keeps it for that browser tab.
 - Move: copy the folder to another Mac or to an NVIDIA machine and serve it there. It answers the same way. A copy of
   the whole folder takes its snapshot (`.tensorfold-original/`) along; leave that folder out if you will not roll the
   copy back.
+- Delete one fact: `DELETE /v1/slide/fact/{id}`, as [above](#delete-one-fact).
 - Reset: stop the server and run `tensorfold slide rollback ~/models/nemotron-living`, below, or delete the copy and
-  clone a fresh one from the original (step 2). There is no per-fact undo: a rollback undoes every lesson since the
-  snapshot.
+  clone a fresh one from the original (step 2). A rollback undoes every lesson and delete since the snapshot.
 
 ## Undo what it learned
 
@@ -229,8 +307,8 @@ not match, it says so and leaves the lessons' files where they are; run it again
 ## Who can teach it
 
 A key stops clients that do not have it from teaching the model. It does not stop someone who has the key from
-teaching it something wrong, and a learned fact stays until you roll the folder back, which undoes every lesson since
-the snapshot, not one fact. Give the key only to clients you trust, and keep the original model. The folder hold works
+teaching it something wrong, and a learned fact stays until you delete it or roll the folder back, which undoes every
+lesson since the snapshot. Give the key only to clients you trust, and keep the original model. The folder hold works
 between TensorFold processes only: other tools that write files (`cp`, `rsync`, an editor) do not take it, so leave
 the folder's files alone while a server or a rollback has it.
 
@@ -240,6 +318,9 @@ the folder's files alone while a server or a rollback has it.
 | --- | --- |
 | `501 this engine does not learn: serve its model with --slide` | Start the server with `--slide`, on a Mac or a GB10 |
 | `503 the engine cannot take a learn request now` | Another learn request is running; send yours when it ends |
+| `503 a learn or delete request is running` | A delete does not wait for another learn or delete: send it when that one ends |
+| `forgot` with `"deleted": false` | A check or a write failed; `message` says which, and `state` what the graph file holds (see Delete one fact) |
+| `a Living Weights delete could not be put back on the device` on a reply | The GPU did not take a delete's put-back: send the delete again to retry it, or restart the server |
 | `400 text is required` | The JSON body needs a `"text"` field |
 | `learned` with `"recalled": false` | Nothing of the fact was kept (its neurons were taken out), and `message` says why: for example it did not come back on its held-out questions, it kept answering questions about something else, or the model wrote too few clean questions to learn from |
 | `--slide rewrites the model's own files, and … is a link to data another file shares` at startup | The folder holds links into the Hugging Face cache (or hard links); make the copy with `cp -cRL` (Linux: `cp -RL`) as in step 2 |

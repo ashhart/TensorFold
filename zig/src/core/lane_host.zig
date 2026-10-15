@@ -34,6 +34,7 @@ pub const LaneHost = struct {
     filling: std.ArrayList(*Job) = .empty, // admitted jobs whose prompt is still going in, a chunk a round, oldest first
     cancels: std.ArrayList(Id) = .empty,
     closing: bool = false,
+    stale: bool = false, // the learner's last step: a put-back has not reached the device, so replies are refused
     thread: ?std.Thread = null,
     decoded: std.ArrayList(status.Mark) = .empty, // tokens a round landed, for the 2 s decode rate
     prefill_rate: f64 = 0,
@@ -85,7 +86,7 @@ pub const LaneHost = struct {
         fn kept(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
             const job: *Job = @ptrCast(@alignCast(ptr));
             job.reported(); // before a keep can evict the entry the pass restored
-            if (job.host.cache) |store| _ = store.keepBorn(job.request.cacheKey(), born(job.request), at, s, job.request.chunks, job.host.spans(job.request));
+            if (job.host.cache) |store| _ = store.keepBorn(job.request.cacheKey(), job.request.bornLen(), at, s, job.request.chunks, job.host.spans(job.request));
         }
 
         /// Report a restored prefix or its failed copy; an untouched prefix remains kept.
@@ -159,9 +160,9 @@ pub const LaneHost = struct {
         job.* = .{ .host = h, .id = id, .request = request, .sink = sink };
         h.mutex.lockUncancelable(h.io);
         defer h.mutex.unlock(h.io);
-        if (h.closing) {
+        if (h.closing or h.stale) {
             h.gpa.destroy(job);
-            return error.Closed;
+            return if (h.closing) error.Closed else error.Stale;
         }
         // foreground before background, each in arrival order (the Python job queue's priority)
         var at = h.queued.items.len;
@@ -276,7 +277,8 @@ pub const LaneHost = struct {
     /// Prefills the next queued request into a free lane; false when none waits or no lane is free.
     fn admitOne(h: *LaneHost) bool {
         h.lock();
-        if (h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) {
+        // a stale device takes no reply: `learn.refuse` ends the queued ones instead
+        if (h.stale or h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) {
             h.unlock();
             return false;
         }
@@ -297,7 +299,7 @@ pub const LaneHost = struct {
         if (r.background and r.max_tokens == 0 and h.warm_quiet > 0 and !h.quiet(job)) return h.cancel(job); // other work came first: it never ran
         var reuse: lanes.stream.Reuse = .{};
         // the entry stays alive until the backend restores it: nothing keeps between here and this stream's own pass
-        if (h.cache) |store| if (r.prompt_logprobs == null and !r.untaught) if (store.lookupRewind(h.gpa, r.cacheKey(), born(r), r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, h.spans(r))) |l| {
+        if (h.cache) |store| if (r.prompt_logprobs == null and !r.untaught) if (store.lookupRewind(h.gpa, r.cacheKey(), r.bornLen(), r.history_len, r.rewind_len, r.shared_prefixes, r.chunks, h.spans(r))) |l| {
             job.entry = l.entry;
             job.kept0 = store.counts.kept;
             job.marks = l.marks;
@@ -421,7 +423,7 @@ pub const LaneHost = struct {
             return h.cancel(job);
         };
         h.prefilled(job, began);
-        if (h.cache) |store| _ = if (!job.request.untaught and store.rules.lookahead == 0) store.keepBorn(job.request.prompt, born(job.request), @intCast(job.request.prompt.len), &job.stream, job.request.chunks, h.spans(job.request)) else false;
+        if (h.cache) |store| _ = if (!job.request.untaught and store.rules.lookahead == 0) store.keepBorn(job.request.prompt, job.request.bornLen(), @intCast(job.request.prompt.len), &job.stream, job.request.chunks, h.spans(job.request)) else false;
         be.release(&job.stream);
         h.remove(job);
         h.finish(job, .length, "");
@@ -495,6 +497,7 @@ pub const LaneHost = struct {
         while (true) {
             ends.takeCancels(h);
             rows_host.answer(h);
+            learn.refuse(h);
             while (h.admitOne()) {}
             h.fillOne();
             status.noteLive(h);
@@ -541,11 +544,6 @@ pub const LaneHost = struct {
         }
     }
 };
-
-/// The prompt length a request's kept states count as: its own, or for a warm pass the request whose reply it prefills.
-fn born(r: *const Request) u32 {
-    return if (r.born > 0) r.born else @intCast(r.prompt.len);
-}
 
 test {
     _ = @import("lane_host_test.zig");
