@@ -182,7 +182,7 @@ pub const Engine = struct {
         const m = e.model();
         return arenas[0] + arenas[1] + prompt_rows * 4 + draw.Drawer.deviceBytes(rows) + pages.Pool.deviceBytes(m, pool_pages) +
             plan.Buffer.deviceBytes(rows, m.spec.n_layers) + state.Caches.deviceBytes(m, rows) +
-            lane_round.voteBytes(e.o.world);
+            hip.Votes.bytes(e.o.world);
     }
 
     /// Device bytes `size(capacity, pool_pages)` would allocate with `rows` rows a forward: what admission weighs.
@@ -212,7 +212,7 @@ pub const Engine = struct {
         with.startup = o.startup orelse &own;
         return openSized(gpa, io, dir, with) catch |err| {
             // this rank's own failure reaches the others at the step they wait at
-            if (err != error.PeerRefused and err != error.LinkFailed) with.startup.?.refuse(@errorName(err));
+            with.startup.?.failed(err);
             return err;
         };
     }

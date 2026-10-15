@@ -85,7 +85,12 @@ const link_vtable: collective.Link.VTable = .{ .send = send, .recv = recv, .agre
 const comm_vtable: collective.Comm.VTable = .{ .all_reduce = allReduce, .all_gather = allGather, .broadcast = broadcast, .close = closeComm };
 
 fn linkOf(ptr: *anyopaque) collective.Link {
-    return .{ .ptr = &of(ptr).link, .vtable = &link_vtable };
+    return linkOver(&of(ptr).link);
+}
+
+/// The collective.Link of a joined rank's TCP link (its group's, or a loopback test's).
+pub fn linkOver(l: *link_mod.Link) collective.Link {
+    return .{ .ptr = l, .vtable = &link_vtable };
 }
 
 /// The rank's communicator, opened once: ncclCommInitRank blocks until every rank has called it.

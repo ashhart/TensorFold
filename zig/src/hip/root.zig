@@ -44,6 +44,11 @@ pub const joinRun = @import("comm/group.zig").joinRun;
 /// What this rank runs, digested for its join (executable, config.json, weights).
 pub const identity = @import("comm/identity.zig");
 pub const Startup = @import("startup.zig").Startup;
+/// A captured round's vote: recorded without an error, gathered in buffers made at startup.
+pub const vote = @import("vote.zig");
+pub const Votes = vote.Votes;
+/// Groups of threads joined over 127.0.0.1, for host tests of what ranks agree.
+pub const loopback = @import("comm/loopback.zig");
 
 test {
     _ = policy;
@@ -60,4 +65,6 @@ test {
     _ = @import("comm/identity.zig");
     _ = @import("agree.zig");
     _ = @import("startup.zig");
+    _ = @import("vote.zig");
+    _ = @import("comm/loopback.zig");
 }

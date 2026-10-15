@@ -87,6 +87,11 @@ pub const Policy = struct {
         return p.graphs != .off;
     }
 
+    /// Whether rank `rank` declines its captures on purpose (`graph_fail`), to check that every rank falls back.
+    pub fn failsCapture(p: *const Policy, rank: usize) bool {
+        return p.graph_fail >= 0 and @as(usize, @intCast(p.graph_fail)) == rank;
+    }
+
     /// Applies `key=value,key=value` (`--policy`'s and TF_POLICY's syntax) over this policy, all of it or none.
     pub fn apply(p: *Policy, text: []const u8) Error!void {
         var next = p.*;
