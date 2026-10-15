@@ -131,8 +131,7 @@ pub const Metal = struct {
             .keep = keepFn,
             .draft = draftFn,
             .release = releaseFn,
-            .alternatives = alternativesFn,
-            .held = grammar.held,
+            .alternatives = alternativesFn, .held = grammar.held, .reports_fill = true,
         } };
     }
 

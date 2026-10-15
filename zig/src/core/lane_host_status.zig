@@ -37,18 +37,26 @@ fn fillTotals(h: *LaneHost, out: *api.Status) void {
     var left: u64 = 0;
     var filling = false;
     var run: u64 = 0;
+    const reported = h.core.backend.vtable.reports_fill; // a backend that never stores `fill_at` has no honest totals
     for (h.admitted.items) |job| {
         if (!job.fill_on.load(.acquire)) continue;
         filling = true;
+        var fields: [16]u8 = undefined; // id and seq hashed apart: XOR of the raw values collides (2^0 == 3^1)
+        std.mem.writeInt(u64, fields[0..8], job.id, .little);
+        std.mem.writeInt(u64, fields[8..16], job.seq, .little);
+        run = (run *% 0x9E3779B97F4A7C15) ^ std.hash.Wyhash.hash(0, &fields);
+        if (!reported) continue; // no counter for it: its prompt stays out of the totals rather than guessed
         const prompt = job.request.prompt.len;
         total += prompt;
         left += prompt -| job.stream.fill_at.load(.monotonic);
-        run = run *% 0x9E3779B97F4A7C15 ^ job.id ^ job.seq; // `seq` the engine thread published under this lock
     }
     if (!filling) return;
-    out.fill_prompt_tokens = @intCast(total);
-    out.fill_tokens_left = @intCast(left);
-    out.fill_run = run ^ total;
+    if (reported) {
+        out.fill_prompt_tokens = @intCast(total);
+        out.fill_tokens_left = @intCast(left);
+    } else out.fill_unknown = true;
+    run &= (1 << 53) - 1; // JSON numbers stay exact to 2^53: a wider marker loses bits in the page's JavaScript
+    out.fill_run = if (run == 0) 1 else run;
 }
 
 /// `n` tokens delivered now; marks older than the window drop.

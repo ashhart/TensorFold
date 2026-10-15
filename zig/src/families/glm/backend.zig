@@ -38,7 +38,7 @@ pub const Backend = struct {
     }
 
     pub fn backend(b: *Backend) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true } };
     }
 
     /// Windows of up to 16 rows (drafted == plain at every width), the MTP head's chains, every stream in one forward.

@@ -44,6 +44,7 @@ pub const Host = struct {
     prefill_at: i96 = 0,
     live_prompt: u64 = 0, // the running reply's prompt tokens, for status (which never reads the job: finish frees it)
     live_generated: u64 = 0,
+    prefilling: bool = false, // the engine thread's prompt pass is running (status reads it under this lock)
     cache: ?pc.Store = null, // kept prompt states (engine thread only); null: no reuse (rank 1, a zero budget)
     prompt: []const u32 = &.{}, // the request in the engine (speed-up mode names kept states by its tokens)
     saved: std.ArrayList(u32) = .empty, // this request's marks the cache kept (speed-up: rank 1 drops the others)
@@ -158,6 +159,7 @@ pub const Host = struct {
             .preemptions = 0,
             .streams = n,
             .generation_tokens = generation_tokens,
+            .fill_unknown = h.prefilling, // this backend reports no fill counters: the page says so, not idle
         };
     }
 
@@ -210,11 +212,13 @@ pub const Host = struct {
             h.running = job;
             h.live_prompt = job.request.prompt.len;
             h.live_generated = 0;
+            h.prefilling = true; // its prompt pass starts: status shows an unknown-progress fill until it reports
             h.cancels.clearRetainingCapacity(); // a cancel for an id no longer queued or running
             h.unlock();
             h.serve(job);
             h.lock();
             h.running = null;
+            h.prefilling = false;
             h.live_generated = 0;
             const idle = h.queued.items.len == 0;
             h.unlock();
@@ -245,6 +249,7 @@ pub const Host = struct {
             h.lock();
             if (done > c.job.began) h.prefill_rate = @as(f64, @floatFromInt(c.job.request.prompt.len - c.job.cached)) / (@as(f64, @floatFromInt(done - c.job.began)) / 1e9);
             h.prefill_at = done;
+            h.prefilling = false; // the pass reported: status stops showing an unknown-progress fill
             c.job.prefilled = done;
             h.unlock();
             c.job.prefill_sent = true;

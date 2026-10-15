@@ -258,6 +258,8 @@ pub const Status = struct {
     /// Filling prompts' total tokens and those still to prefill (null: no prompt is going in).
     fill_prompt_tokens: ?u32 = null,
     fill_tokens_left: ?u32 = null,
+    /// A prompt pass is running whose backend reports no `fill_at`: the totals stay null rather than guessed.
+    fill_unknown: bool = false,
     /// Changes whenever the filling set does: a reader pairs its drain samples with one fill.
     fill_run: u64 = 0,
 };

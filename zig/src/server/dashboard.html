@@ -245,6 +245,10 @@ function apply(s) {
     if (rate == null && target.prefill > 0) rate = target.prefill;   // one sample: the server's 2 s rate
     const eta = rate ? s.fill_tokens_left / rate : null;
     el("fillcap").textContent = `of ${fmt(s.fill_prompt_tokens)} · queue drains in ~${eta == null ? "—" : etaText(eta)}`;
+  } else if (s.fill_unknown) {
+    fillSamples = [];
+    el("fill").textContent = "prefilling";
+    el("fillcap").textContent = "this backend reports no fill progress"; // honest unknown: not idle, no guessed numbers
   } else {
     fillSamples = [];
     el("fill").textContent = "idle";

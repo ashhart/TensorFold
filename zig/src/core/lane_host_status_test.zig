@@ -203,13 +203,18 @@ test "fill_run is stable within one prompt's fill and changes for the next" {
         engine: Engine = undefined,
         first: ?u64 = null,
         runs: std.ArrayList(u64) = .empty,
+        later: std.atomic.Value(bool) = .init(false),
+        later_runs: std.ArrayList(u64) = .empty,
         done: std.atomic.Value(bool) = .init(false),
 
         fn hook(ctx: *anyopaque, _: *lanes.Stream, _: usize) void {
             const seen: *@This() = @ptrCast(@alignCast(ctx));
             var status: api.Status = .{};
             seen.engine.status(&status, &.{}); // the pass holds no host lock here: the poll races it
-            if (status.fill_prompt_tokens != null) {
+            if (status.fill_prompt_tokens == null) return;
+            if (seen.later.load(.acquire)) {
+                seen.later_runs.append(gpa, status.fill_run) catch {};
+            } else {
                 if (seen.first == null) seen.first = status.fill_run;
                 seen.runs.append(gpa, status.fill_run) catch {};
             }
@@ -232,8 +237,13 @@ test "fill_run is stable within one prompt's fill and changes for the next" {
     for (seen.runs.items) |run| try std.testing.expectEqual(seen.first.?, run); // one fill, one marker
     const second: Request = .{ .prompt = &prompt, .max_tokens = 4 };
     var gone: Box = .{};
+    seen.later.store(true, .release); // the hook's next samples belong to the second fill
     try seen.engine.submit(2, &second, .{ .ctx = &gone, .event = Box.event });
     try std.testing.expectEqual(Reason.length, gone.wait());
+    defer seen.later_runs.deinit(gpa);
+    try std.testing.expect(seen.later_runs.items.len >= 1); // the next fill was sampled as well
+    try std.testing.expect(seen.later_runs.items[0] != seen.first.?); // its marker really does differ
+    for (seen.later_runs.items) |run| try std.testing.expectEqual(seen.later_runs.items[0], run);
     var status: api.Status = .{};
     seen.engine.status(&status, &.{}); // idle again
     try std.testing.expect(status.fill_run == 0);
@@ -267,3 +277,121 @@ const Box = struct {
         }
     }
 };
+
+// The reviewer's colliding pair: ids 2 and 3 at admissions 0 and 1 XOR alike, so the old marker read alike.
+test "fill_run separates two equal-length fills whose id and sequence XOR alike" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 3 };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
+    try host.start();
+    defer host.stop();
+    const Seen = struct {
+        engine: Engine = undefined,
+        second: std.atomic.Value(bool) = .init(false),
+        first_runs: std.ArrayList(u64) = .empty,
+        second_runs: std.ArrayList(u64) = .empty,
+
+        fn hook(ctx: *anyopaque, _: *lanes.Stream, _: usize) void {
+            const seen: *@This() = @ptrCast(@alignCast(ctx));
+            var status: api.Status = .{};
+            seen.engine.status(&status, &.{}); // the pass holds no host lock here: the poll races it
+            if (status.fill_prompt_tokens == null) return;
+            if (seen.second.load(.acquire)) {
+                seen.second_runs.append(gpa, status.fill_run) catch {};
+            } else seen.first_runs.append(gpa, status.fill_run) catch {};
+        }
+    };
+    var seen: Seen = .{};
+    seen.engine = host.engine();
+    target.prefill_hook = Seen.hook;
+    target.prefill_hook_ctx = &seen;
+    const prompt = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6 }; // both prompts the same length: only id and sequence differ
+    const first: Request = .{ .prompt = &prompt, .max_tokens = 4 };
+    var gone_a: Box = .{};
+    try seen.engine.submit(2, &first, .{ .ctx = &gone_a, .event = Box.event }); // id 2, admission 0
+    try std.testing.expectEqual(Reason.length, gone_a.wait());
+    seen.second.store(true, .release);
+    const second: Request = .{ .prompt = &prompt, .max_tokens = 4 };
+    var gone_b: Box = .{};
+    try seen.engine.submit(3, &second, .{ .ctx = &gone_b, .event = Box.event }); // id 3, admission 1
+    try std.testing.expectEqual(Reason.length, gone_b.wait());
+    defer {
+        seen.first_runs.deinit(gpa);
+        seen.second_runs.deinit(gpa);
+    }
+    try std.testing.expect(seen.first_runs.items.len >= 1);
+    try std.testing.expect(seen.second_runs.items.len >= 1); // the second fill was sampled too
+    for (seen.second_runs.items) |run| try std.testing.expect(run != seen.first_runs.items[0]); // not the old collision
+    var status: api.Status = .{};
+    seen.engine.status(&status, &.{}); // idle again
+    try std.testing.expect(status.fill_run == 0);
+}
+
+// A cancelled filling request replaced by a queued one: the new fill carries its own marker, then idle.
+test "fill_run changes when a cancelled fill is replaced by the queued request" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 4, .memory_lanes = 1 };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    try host.start();
+    defer host.stop();
+    const Seen = struct {
+        engine: Engine = undefined,
+        a_runs: std.ArrayList(u64) = .empty,
+        b_runs: std.ArrayList(u64) = .empty,
+
+        // B's prompt alone is 12 tokens: a sample with that total belongs to the replacement, not to A.
+        fn hook(ctx: *anyopaque, _: *lanes.Stream, _: usize) void {
+            const seen: *@This() = @ptrCast(@alignCast(ctx));
+            var status: api.Status = .{};
+            seen.engine.status(&status, &.{});
+            const total = status.fill_prompt_tokens orelse return;
+            if (total == 12) seen.b_runs.append(gpa, status.fill_run) catch {} else seen.a_runs.append(gpa, status.fill_run) catch {};
+        }
+    };
+    var seen: Seen = .{};
+    seen.engine = host.engine();
+    target.prefill_hook = Seen.hook;
+    target.prefill_hook_ctx = &seen;
+    const long_prompt = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6 };
+    const longer_prompt = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 2, 5, 3, 8 };
+    const first: Request = .{ .prompt = &long_prompt, .max_tokens = 100000 };
+    var a: Box = .{};
+    try seen.engine.submit(1, &first, .{ .ctx = &a, .event = Box.event });
+    while (seen.a_runs.items.len == 0) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {}; // A is filling
+    seen.engine.cancel(1); // a poll may never see idle: B takes the lane straight after
+    try std.testing.expectEqual(Reason.cancelled, a.wait());
+    const queued: Request = .{ .prompt = &longer_prompt, .max_tokens = 100000 };
+    var b = try gpa.create(Box);
+    defer gpa.destroy(b);
+    b.* = .{};
+    try seen.engine.submit(2, &queued, .{ .ctx = b, .event = Box.event }); // admitted once the lane freed
+    var waited: usize = 0;
+    while (seen.b_runs.items.len == 0 and waited < 2000) { // B is filling: the hook samples its totals
+        std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+        waited += 1;
+    }
+    seen.engine.cancel(2);
+    try std.testing.expectEqual(Reason.cancelled, b.wait());
+    defer {
+        seen.a_runs.deinit(gpa);
+        seen.b_runs.deinit(gpa);
+    }
+    try std.testing.expect(seen.b_runs.items.len >= 1); // the replacement fill was sampled
+    for (seen.b_runs.items) |run| try std.testing.expect(run != seen.a_runs.items[0]); // a new marker without an idle poll
+    var status: api.Status = .{};
+    seen.engine.status(&status, &.{}); // both gone: idle, no fill counters at all
+    try std.testing.expect(status.fill_prompt_tokens == null and status.fill_tokens_left == null);
+    try std.testing.expect(status.fill_run == 0);
+}

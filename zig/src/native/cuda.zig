@@ -318,7 +318,7 @@ const Host = struct {
                     return x.inner.vtable.held.?(x.inner.ptr, s, out);
                 }
             }.f else null,
-            .prompt_rows = v.prompt_rows,
+            .prompt_rows = v.prompt_rows, .reports_fill = v.reports_fill,
             .release = struct {
                 fn f(p: *anyopaque, s: *lanes.Stream) void {
                     const x = bind(p);

@@ -110,6 +110,9 @@ pub fn statsSnapshot(a: Allocator, status: api.Status, memory: ?api.Memory, prom
         try o.put(a, "fill_prompt_tokens", try json.intValue(a, status.fill_prompt_tokens.?));
         try o.put(a, "fill_tokens_left", try json.intValue(a, status.fill_tokens_left orelse 0));
         try o.put(a, "fill_run", try json.intValue(a, status.fill_run));
+    } else if (status.fill_unknown) {
+        try o.put(a, "fill_unknown", .{ .bool = true }); // prefilling, but this backend reports no progress
+        try o.put(a, "fill_run", try json.intValue(a, status.fill_run));
     }
     try o.put(a, "prompt_tokens_total", try json.intValue(a, prompt));
     try o.put(a, "generation_tokens_total", try json.intValue(a, generation));
@@ -171,6 +174,16 @@ test "stats snapshot carries the filling prompt's tokens while a prefill runs" {
     const object = value.object;
     try std.testing.expectEqual(@as(i64, 900), object.get("fill_prompt_tokens").?.int64().?);
     try std.testing.expectEqual(@as(i64, 300), object.get("fill_tokens_left").?.int64().?);
+}
+test "stats snapshot marks an unknown-progress fill without counters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const status: api.Status = .{ .fill_unknown = true, .fill_run = 7 };
+    const value = try statsSnapshot(arena.allocator(), status, null, 0, 0, 0, 0, 0);
+    const object = value.object;
+    try std.testing.expect(object.get("fill_unknown").?.bool);
+    try std.testing.expectEqual(@as(i64, 7), object.get("fill_run").?.int64().?);
+    try std.testing.expect(object.get("fill_prompt_tokens") == null); // no counters: the keys stay out
 }
 
 test "stats snapshot's memory carries a configured limit and omits none" {
