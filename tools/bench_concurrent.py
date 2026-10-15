@@ -28,6 +28,7 @@ import time
 import urllib.request
 
 from bench_evidence import Evidence, token_equal
+from bench_auth import authorize, read_api_key, redact
 
 if sys.version_info < (3, 11):
     sys.exit(f"Python 3.11+ is required (this is {sys.version.split()[0]}); "
@@ -44,9 +45,9 @@ PROMPTS = [
 
 
 def stream(base: str, model: str, item: dict, tokens: int, temperature: float, seed: int | None,
-           draft: bool = True, gate: threading.Barrier | None = None) -> dict:
+           draft: bool = True, gate: threading.Barrier | None = None, *, api_key: str | None = None) -> dict:
     try:
-        return _stream(base, model, item, tokens, temperature, seed, draft, gate)
+        return _stream(base, model, item, tokens, temperature, seed, draft, gate, api_key)
     except Exception as exc:  # noqa: BLE001 - a failed request is reported, not fatal
         if gate is not None:
             gate.abort()
@@ -57,7 +58,7 @@ def stream(base: str, model: str, item: dict, tokens: int, temperature: float, s
 
 
 def _stream(base: str, model: str, item: dict, tokens: int, temperature: float, seed: int | None, draft: bool,
-            gate: threading.Barrier | None) -> dict:
+            gate: threading.Barrier | None, api_key: str | None = None) -> dict:
     body = {"model": model, "max_tokens": tokens, "temperature": temperature, "stream": True,
             "stream_options": {"include_usage": True}, "ignore_eos": True}
     if seed is not None:
@@ -74,6 +75,7 @@ def _stream(base: str, model: str, item: dict, tokens: int, temperature: float, 
         url = base + "/v1/completions"
         body["prompt"] = item["prompt"]
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    authorize(req, api_key)
     if gate is not None:
         gate.wait(timeout=30)
     sent = time.perf_counter()
@@ -121,7 +123,7 @@ def _stream(base: str, model: str, item: dict, tokens: int, temperature: float, 
 
 
 def together(base: str, model: str, specs: list[tuple[dict, int | None]], tokens: int, temperature: float,
-             stagger_ms: float = 0.0) -> list[dict]:
+             stagger_ms: float = 0.0, *, api_key: str | None = None) -> list[dict]:
     gate = threading.Barrier(len(specs))
     out: list[dict | None] = [None] * len(specs)
 
@@ -129,9 +131,9 @@ def together(base: str, model: str, specs: list[tuple[dict, int | None]], tokens
         if stagger_ms:
             gate.wait(timeout=30)
             time.sleep(i * stagger_ms / 1e3)
-            out[i] = stream(base, model, specs[i][0], tokens, temperature, specs[i][1])
+            out[i] = stream(base, model, specs[i][0], tokens, temperature, specs[i][1], api_key=api_key)
         else:
-            out[i] = stream(base, model, specs[i][0], tokens, temperature, specs[i][1], gate=gate)
+            out[i] = stream(base, model, specs[i][0], tokens, temperature, specs[i][1], gate=gate, api_key=api_key)
 
     threads = [threading.Thread(target=run, args=(i,)) for i in range(len(specs))]
     for t in threads:
@@ -177,7 +179,9 @@ def main() -> None:
     p.add_argument("--stagger-ms", type=float, default=0.0, help="start request i this many ms after request i - 1")
     p.add_argument("--label", default="")
     p.add_argument("--output")
+    p.add_argument("--api-key-env", metavar="NAME", help="read the bearer API key from this environment variable")
     args = p.parse_args()
+    api_key = read_api_key(p, args.api_key_env)
     if args.no_seed:
         args.alone = args.serial = False
     levels = [int(x) for x in args.levels.split(",")]
@@ -193,22 +197,22 @@ def main() -> None:
                 specs = [(item, args.seed + i if temp > 0 else args.seed) for i in range(max(levels))]
             if args.no_seed:
                 specs = [(spec[0], None) for spec in specs]
-            together(args.base, args.model, specs[:1], 16, temp)                         # warm-up
+            together(args.base, args.model, specs[:1], 16, temp, api_key=api_key)  # warm-up
             alone: dict[tuple[str, int | None], dict] = {}
             if args.alone or args.serial:
                 for spec in specs:
                     key = (spec[0]["name"], spec[1])
                     if key not in alone:
-                        alone[key] = stream(args.base, args.model, spec[0], args.tokens, temp, spec[1])
+                        alone[key] = stream(args.base, args.model, spec[0], args.tokens, temp, spec[1], api_key=api_key)
             if args.serial:
                 for key, ref in alone.items():
                     serial = stream(args.base, args.model, next(q for q in PROMPTS if q["name"] == key[0]),
-                                    args.tokens, temp, key[1], draft=False)
+                                    args.tokens, temp, key[1], draft=False, api_key=api_key)
                     ref["serial_equal"] = token_equal(serial, ref)
             for n in levels:
                 reps = []
                 for _ in range(args.reps):
-                    runs = together(args.base, args.model, specs[:n], args.tokens, temp, args.stagger_ms)
+                    runs = together(args.base, args.model, specs[:n], args.tokens, temp, args.stagger_ms, api_key=api_key)
                     rep = aggregates(runs)
                     rep["per_stream_tps"] = [round(r["decode_tps"], 1) for r in runs if r["decode_tps"] is not None]
                     rep["ttft_s"] = [round(r["ttft_s"], 2) if r["ttft_s"] is not None else None for r in runs]
@@ -238,11 +242,11 @@ def main() -> None:
                 errors = sorted({e for r in reps for e in r["errors"]})
                 if errors:
                     cell["errors"] = errors[:3]
-                print(json.dumps({"label": args.label, **cell}), flush=True)
+                print(json.dumps(redact({"label": args.label, **cell}, api_key)), flush=True)
                 report["cells"].append({**cell, "reps": reps})
     if args.output:
         with open(args.output, "w") as f:
-            json.dump(report, f, indent=1)
+            json.dump(redact(report, api_key), f, indent=1)
 
 
 if __name__ == "__main__":
