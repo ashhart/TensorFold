@@ -5,7 +5,7 @@ const Config = @import("config.zig").Config;
 const Allocator = std.mem.Allocator;
 const picture = core.picture;
 
-/// An image for the tower: patches [gh * gw, 3 * patch * patch] (channel, row, column), grid, tokens, its hash.
+/// An image for the tower: patches [gh * gw, 3 * patch * patch] (channel, row, column), grid, tokens, its identity.
 pub const Prepared = struct { pixels: []f32, gh: u32, gw: u32, tokens: u32, hash: u64 };
 
 pub const Error = picture.Error || error{ImageTooSmall};
@@ -50,11 +50,11 @@ pub fn budget(c: *const Config, max_tokens: u32) error{ImageTooSmall}!u64 {
 pub fn prepare(io: std.Io, a: Allocator, c: *const Config, bytes: []const u8, max_tokens: u32) Error!Prepared {
     var rgb = try picture.decode(io, a, bytes);
     defer rgb.deinit(a);
-    return prepareRgb(a, c, rgb, std.hash.Wyhash.hash(0x7ad10, bytes), max_tokens);
+    return prepareRgb(a, c, rgb, picture.identity.ofBytes(0x7ad10, bytes), max_tokens);
 }
 
-/// An RGB picture to patches: the grid, the resize (none at the grid's own size), normalization, then patches.
-pub fn prepareRgb(a: Allocator, c: *const Config, rgb: picture.Rgb, hash: u64, max_tokens: u32) Error!Prepared {
+/// RGB to patches: the grid, the resize (none at its own size), normalization, patches; the hash names bytes and grid.
+pub fn prepareRgb(a: Allocator, c: *const Config, rgb: picture.Rgb, bytes_hash: u64, max_tokens: u32) Error!Prepared {
     const g = try grid(c, rgb.width, rgb.height, try budget(c, max_tokens));
     const th = g.h * c.patch;
     const tw = g.w * c.patch;
@@ -65,7 +65,7 @@ pub fn prepareRgb(a: Allocator, c: *const Config, rgb: picture.Rgb, hash: u64, m
     const pixels = try a.alloc(f32, planes.len);
     cut(c, planes, g, pixels);
     const n: u32 = g.h * g.w;
-    return .{ .pixels = pixels, .gh = g.h, .gw = g.w, .tokens = n / (Config.shuffle * Config.shuffle), .hash = hash };
+    return .{ .pixels = pixels, .gh = g.h, .gw = g.w, .tokens = n / (Config.shuffle * Config.shuffle), .hash = picture.identity.withGrid(bytes_hash, .{ g.h, g.w }) };
 }
 
 /// Planes [3][h][w] of 0..255 samples to (x / 255 - mean) / std, in float32.
@@ -121,4 +121,21 @@ test "patches: channel, row, column inside each patch, patches row by row; norma
     try std.testing.expectEqual(@as(f32, 14.0), out[12 + 4 + 2]);
     normalize(&c, &planes);
     try std.testing.expectEqual((@as(f32, 14.0) / 255.0 - c.mean[1]) / c.std[1], planes[14]);
+}
+
+test "the hash names the grid: one picture at two budgets is two images to the cache, at one budget the same" {
+    const a = std.testing.allocator;
+    const pixels = try a.alloc(u8, 640 * 480 * 3);
+    defer a.free(pixels);
+    @memset(pixels, 9);
+    const rgb: picture.Rgb = .{ .width = 640, .height = 480, .pixels = pixels };
+    const whole = try prepareRgb(a, &test_config, rgb, 7, 4096);
+    defer a.free(whole.pixels);
+    const small = try prepareRgb(a, &test_config, rgb, 7, 256);
+    defer a.free(small.pixels);
+    const again = try prepareRgb(a, &test_config, rgb, 7, 4096);
+    defer a.free(again.pixels);
+    try std.testing.expect(whole.tokens > small.tokens);
+    try std.testing.expect(whole.hash != small.hash); // another grid: neither resumes a state the other kept
+    try std.testing.expectEqual(whole.hash, again.hash); // the same picture at the same budget resumes
 }
