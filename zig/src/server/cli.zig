@@ -467,63 +467,6 @@ pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
     try w.writeAll("]}\n");
 }
 
-test "parse and capabilities share the table" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var u: Usage = .{};
-    const args = try parse(a, &.{ "/models/x", "--port", "9000", "--api-key=k1", "--api-key", "k2", "--no-thinking", "--reasoning-effort", "low" }, &u);
-    try std.testing.expectEqual(@as(u16, 9000), args.port);
-    try std.testing.expectEqual(@as(usize, 2), args.api_key.len);
-    try std.testing.expect(!args.thinking);
-    try std.testing.expectEqualStrings("x", (try parse(a, &.{ "m", "--drafter", "x" }, &u)).drafter.?);
-    try std.testing.expectEqual(@as(u8, 0), (try parse(a, &.{ "m", "--drafter-bits", "0" }, &u)).drafter_bits);
-    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--drafter-bits", "8" }, &u));
-    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--reasoning-effort", "max" }, &u));
-    try std.testing.expectEqual(@as(?f64, 12.5), (try parse(a, &.{ "m", "--prompt-cache-gib", "12.5" }, &u)).prompt_cache_gib);
-    try std.testing.expectEqual(@as(?f64, 0), (try parse(a, &.{ "m", "--prompt-cache-gib", "0" }, &u)).prompt_cache_gib);
-    try std.testing.expect(!(try parse(a, &.{ "m", "--prompt-cache-gib", "16" }, &u)).prompt_cache_over_cap);
-    try std.testing.expect((try parse(a, &.{ "m", "--prompt-cache-gib", "16", "--prompt-cache-over-cap" }, &u)).prompt_cache_over_cap);
-    try std.testing.expect((try parse(a, &.{ "m", "--learn" }, &u)).learn);
-    const dir = try parse(a, &.{ "m", "--learn-dir", "/x/y" }, &u);
-    try std.testing.expect(dir.learn and std.mem.eql(u8, "/x/y", dir.learn_dir.?));
-    const capped = try parse(a, &.{ "m", "--learn-gib", "8" }, &u);
-    try std.testing.expect(capped.learn and capped.learn_gib == 8);
-    const talks = try parse(a, &.{ "m", "--learn-conversations", "--learn-daily-gib", "2.5" }, &u);
-    try std.testing.expect(talks.learn and talks.learn_conversations and talks.learn_daily_gib == 2.5);
-    try std.testing.expect((try request(a, "d", "t", talks)).learn_conversations);
-    try std.testing.expect(!(try request(a, "d", "t", capped)).learn_conversations);
-    try std.testing.expect(!(try parse(a, &.{"m"}, &u)).recall and (try parse(a, &.{ "m", "--recall" }, &u)).recall);
-    const named = try parse(a, &.{ "m", "--recall-dir", "/r", "--recall-gib", "0.5", "--recall-read-only" }, &u);
-    try std.testing.expect(named.recall and named.recall_read_only and named.recall_gib == 0.5);
-    try std.testing.expectEqualStrings("/r", named.recall_dir.?);
-    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--recall-gib", "0.001" }, &u));
-    for ([_][]const u8{ "1e300", "inf", "nan", "-1", "17179869184" }) |bad| try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--prompt-cache-gib", bad }, &u));
-    var out: std.Io.Writer.Allocating = .init(a);
-    try capabilities(&out.writer, .{ .version = "0.6.5" });
-    const doc = out.written();
-    try std.testing.expect(std.mem.indexOf(u8, doc, "\"--no-thinking\": {}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, doc, "\"--recall-read-only\": {}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, doc, "\"--drafter\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, doc, "\"--compact-at\": {}") != null);
-    const on = try parse(a, &.{ "m", "--compact-at", "auto", "--compact-keep", "100", "--compact-memory", "notes" }, &u);
-    try std.testing.expect(on.compact_auto);
-    try std.testing.expectEqual(@as(?u32, 100), on.compact_keep);
-    try std.testing.expectEqualStrings("notes", on.compact_memory.?);
-    try std.testing.expectEqualStrings("graph.json", (try parse(a, &.{ "m", "--slide-graph", "graph.json" }, &u)).slide_graph.?);
-    try std.testing.expect((try parse(a, &.{ "m", "--slide" }, &u)).slide);
-    try std.testing.expect((try parse(a, &.{ "m", "--cortheon" }, &u)).cortheon and !(try parse(a, &.{"m"}, &u)).cortheon);
-    try std.testing.expect(std.mem.indexOf(u8, doc, "\"--cortheon\": {}") != null);
-    try std.testing.expectEqual(@as(?f64, 0.5), (try parse(a, &.{ "m", "--compact-at", "0.5" }, &u)).compact_fraction);
-    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-at", "0" }, &u));
-    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-at", "2" }, &u));
-    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-keep", "-1" }, &u));
-    const urls = try parse(a, &.{ "m", "--vision", "--vision-urls" }, &u);
-    try std.testing.expect(urls.vision and urls.vision_urls);
-    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--vision-urls" }, &u));
-    try std.testing.expectEqualStrings("--vision-urls needs --vision", u.message);
-}
-
 test "--device and --segments: CUDA builds serve them, values checked; --speed-up is the Mac build's" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -544,20 +487,6 @@ test "--device and --segments: CUDA builds serve them, values checked; --speed-u
     try std.testing.expectEqual(@as(?u32, 4), out.segments);
     try std.testing.expect(!try cudaFlag(a, &out, "--port", "1", &u));
     try std.testing.expect(parallelFixed("3") and !parallelFixed("auto") and !parallelFixed("x"));
-}
-
-test "learned disk floor parses once with a finite byte-safe default and is a native capability" {
-    const a = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    var u: Usage = .{};
-    const normal = try parse(arena.allocator(), &.{"m"}, &u);
-    try std.testing.expectEqual(@as(f64, 4), normal.learn_min_free_gib);
-    const explicit = try parse(arena.allocator(), &.{ "m", "--learn-min-free-gib", "1.5" }, &u);
-    try std.testing.expectEqual(@as(f64, 1.5), explicit.learn_min_free_gib);
-    for ([_][]const u8{ "nan", "inf", "-1", "17179869184" }) |bad| {
-        try std.testing.expectError(error.Usage, parse(arena.allocator(), &.{ "m", "--learn-min-free-gib", bad }, &u));
-    }
 }
 
 test "the GPU engine's flags: refused and unlisted unless the backend serves them, values checked" {
@@ -590,24 +519,4 @@ test "the GPU engine's flags: refused and unlisted unless the backend serves the
     try std.testing.expectError(error.Usage, ranks(&u, a, args));
     for ([_][2][]const u8{ .{ "--rank", "-1" }, .{ "--master-port", "70000" }, .{ "--mtp-drafts", "65" }, .{ "--mtp-confidence", "1.5" }, .{ "--checkpoint-slots", "-1" }, .{ "--policy", "matrix" } }) |g| try std.testing.expectError(error.Usage, gpuFlag(a, &args, g[0], g[1], &u));
     try std.testing.expect(!try gpuFlag(a, &args, "--port", "1", &u));
-}
-
-test "an engine is asked for what the flags say, and the defaults of the flags not given" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const plain = try request(a, "d", "t", .{});
-    const want: api.Open = .{ .dir = "d", .model_type = "t", .learn = null };
-    inline for (.{ "mtp_drafts", "mtp_confidence", "keep", "tp", "rank", "master_port", "lanes", "drafts", "device", "segments" }) |field| try std.testing.expectEqual(@field(want, field), @field(plain, field));
-    try std.testing.expectEqualStrings("", plain.policy);
-    try std.testing.expectEqualStrings("", plain.master);
-    const gpu = try request(a, "d", "t", .{ .tp = 4, .rank = 1, .master = "node0", .master_port = 29600, .mtp_drafts = 2, .mtp_confidence = 0.5, .checkpoint_slots = 3, .policy = "matrix=off" });
-    try std.testing.expectEqual(@as(u32, 4), gpu.tp);
-    try std.testing.expectEqual(@as(u32, 1), gpu.rank);
-    try std.testing.expectEqualStrings("node0", gpu.master);
-    try std.testing.expectEqual(@as(u16, 29600), gpu.master_port);
-    try std.testing.expectEqual(@as(?u32, 2), gpu.mtp_drafts);
-    try std.testing.expectEqual(@as(?f64, 0.5), gpu.mtp_confidence);
-    try std.testing.expectEqual(@as(?i64, 3), gpu.keep);
-    try std.testing.expectEqualStrings("matrix=off", gpu.policy);
 }
