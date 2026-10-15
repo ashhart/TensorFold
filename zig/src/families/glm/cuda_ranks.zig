@@ -131,6 +131,24 @@ pub fn agree(d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nc
     }
 }
 
+/// Before loading, split's peers: one value each way with each, in rank order (no pair waits on a later one).
+pub fn probeSplit(d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, stream: cuda.Stream, rank: usize, world: usize) !void {
+    var dev = try cuda.DeviceBuffer.alloc(d, 8);
+    defer dev.free();
+    for (0..world) |peer| if (peer != rank) {
+        try lib.check(lib.api.ncclGroupStart(), "ncclGroupStart");
+        try lib.check(lib.api.ncclSend(dev.ptr, 1, .f32, @intCast(peer), comm, stream.handle), "ncclSend");
+        try lib.check(lib.api.ncclRecv(dev.ptr + 4, 1, .f32, @intCast(peer), comm, stream.handle), "ncclRecv");
+        lib.check(lib.api.ncclGroupEnd(), "ncclGroupEnd") catch return unreachablePeer(rank, peer);
+        stream.synchronize() catch return unreachablePeer(rank, peer);
+    };
+}
+
+fn unreachablePeer(rank: usize, peer: usize) error{SplitUnreachable} {
+    std.debug.print("REFUSE TF_GLM_PREFILL_REDUCE=split: rank {d} cannot exchange with rank {d}; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=gather\n", .{ rank, peer });
+    return error.SplitUnreachable;
+}
+
 fn explain(f: Fingerprint.Field) []const u8 {
     return switch (f) {
         .layout => "a different build of this check",

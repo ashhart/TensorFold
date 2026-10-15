@@ -106,6 +106,7 @@ pub const Engine = struct {
         errdefer stream.deinit();
         const fp = ranks.Fingerprint.of(world, rank, o.settings, o.capacity, try ranks.hashFile(a, io, cfg_path), try ranks.hashFile(a, io, "/proc/self/exe"), checkpoint);
         try ranks.agree(d, lib, comm, stream, fp, try a.alloc(ranks.Fingerprint, world));
+        if (o.settings.split) try ranks.probeSplit(d, lib, comm, stream, rank, world);
         const share = try shard.Share.of(&c, rank, world);
         const spans = try gpa.alloc(shard.Span, world);
         errdefer gpa.free(spans);
