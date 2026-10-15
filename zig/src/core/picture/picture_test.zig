@@ -77,9 +77,9 @@ test "every picture 0.6.6 decoded decodes to the same RGB bytes, and its refusal
 
 const Edge = struct { name: []const u8, b64: []const u8, width: usize = 0, height: usize = 0, rgb: ?[]const u8 = null, problem: ?[]const u8 = null };
 
-/// Where this decoder parts from 0.6.6 on purpose: a CMYK JPEG is refused; a two-picture MPO gives Pillow's first picture.
+/// Where this decoder parts from 0.6.6 on purpose: a CMYK JPEG is refused by name; a two-picture MPO gives its first.
 const departures = [_]struct { name: []const u8, outcome: []const u8 }{
-    .{ .name = "jpeg_cmyk", .outcome = "image bytes are invalid or unsupported; use JPEG, PNG or WebP" },
+    .{ .name = "jpeg_cmyk", .outcome = "CMYK JPEG images are unsupported here; send an RGB or grayscale JPEG, or a PNG" },
     .{ .name = "jpeg_mpo_two", .outcome = "40x30 89ec4fbf73b19a585760f7293a178a3f02c38fe177491362e1d84fd3fdd5be70" },
 };
 

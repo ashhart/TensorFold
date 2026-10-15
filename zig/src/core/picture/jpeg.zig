@@ -141,7 +141,7 @@ pub fn decode(io: std.Io, a: Allocator, data: []const u8) picture.Error!picture.
     defer m.exif.deinit(a);
     try walk(a, data, &m);
     try picture.fits(m.width, m.height);
-    if (m.components == 4) return error.Invalid; // CMYK: 0.6.6 converted it with Pillow's own formula; refused here
+    if (m.components == 4) return error.CmykJpeg;
     if (!m.ended) return error.Invalid; // libjpeg would read past the end: Pillow's load refused the truncated bytes
     const f = try load(io, a);
     const h = f.tj3Init(init_decompress) orelse return error.OutOfMemory;

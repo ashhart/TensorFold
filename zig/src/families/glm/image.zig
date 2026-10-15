@@ -15,8 +15,8 @@ pub const Prepared = struct {
 /// The shared decoder's refusals, and a token budget too small for an image.
 pub const Error = picture.Error || error{ImageTooSmall};
 
-/// The words for a refusal the server cannot word: the JPEG library this machine lacks.
-pub const libraryProblem = picture.libraryProblem;
+/// The words for a refusal the server cannot word: the JPEG library this machine lacks, or a CMYK JPEG.
+pub const decoderProblem = picture.decoderProblem;
 
 // ---- the processor's geometry ----
 

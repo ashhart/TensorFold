@@ -7,7 +7,7 @@ pub const jpeg = @import("jpeg.zig");
 pub const resample = @import("resample.zig");
 pub const tags = @import("tags.zig");
 
-pub const Error = error{ Invalid, Oversized, Animated, NoJpegLibrary, JpegLibraryVersion, OutOfMemory };
+pub const Error = error{ Invalid, Oversized, Animated, CmykJpeg, NoJpegLibrary, JpegLibraryVersion, OutOfMemory };
 
 /// 0.6.6's ImageLimits for one picture.
 pub const max_side = 8192;
@@ -69,6 +69,7 @@ pub fn problem(err: Error, bytes: []const u8) []const u8 {
     return switch (err) {
         error.Oversized => "image dimensions exceed the decoded pixel limit",
         error.Animated => "animated and multipage images are unsupported; send a single frame",
+        error.CmykJpeg => cmyk,
         error.NoJpegLibrary => jpeg.missing,
         error.JpegLibraryVersion => jpeg.wrong_version,
         error.OutOfMemory => "out of memory decoding the image",
@@ -79,9 +80,13 @@ pub fn problem(err: Error, bytes: []const u8) []const u8 {
     };
 }
 
-/// The words for a decoder library's refusal (JPEG's libjpeg-turbo), for callers that word the rest themselves.
-pub fn libraryProblem(err: anyerror) ?[]const u8 {
+/// A CMYK JPEG: 0.6.6 converted it with Pillow's own CMYK formula; this decoder refuses it by name.
+const cmyk = "CMYK JPEG images are unsupported here; send an RGB or grayscale JPEG, or a PNG";
+
+/// The words for the refusals only the decoder knows (JPEG's library, CMYK), for callers that word the rest themselves.
+pub fn decoderProblem(err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.CmykJpeg => cmyk,
         error.NoJpegLibrary => jpeg.missing,
         error.JpegLibraryVersion => jpeg.wrong_version,
         else => null,
