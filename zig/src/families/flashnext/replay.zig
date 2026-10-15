@@ -1452,6 +1452,7 @@ pub fn catchSlot(words: []i32, k: usize, first: usize) usize {
 test {
     _ = tpm; // tp.zig's tests: the window layout and the host service's wraps
     _ = @import("drafts.zig"); // the depth rule's tests
+    _ = @import("replay_held_test.zig"); // Run.release and the held list (#732)
 }
 
 test "catch-up slots: every layer's dispatch reads its own first block after the later layers' writes" {
