@@ -8,7 +8,7 @@ constant constexpr int TQ_RT = 4;
 // Picks a window call takes at most (tf_tile_qmv_group's slots).
 constant constexpr int TQ_SLOTS = 128;
 
-// Group g's 64-step fma chains (the MMA order) and input sum; at 4 bits a code in place meets x * 16^-j (same product).
+// Group g's 64-step fma chains (the MMA order) and input sum; each code decoded to its integer, as in the tiles.
 template <int BITS, int NC>
 inline float tf_tq_group(const device bfloat* x, const device uint8_t* w, size_t stride, int g, thread float* p,
                          float one) {
@@ -34,14 +34,14 @@ inline float tf_tq_group(const device bfloat* x, const device uint8_t* w, size_t
     for (int j = 0; j < 8; ++j) {
       const float v = as_type<float>((j % 2) ? (xw[j / 2] & 0xFFFF0000u) : (xw[j / 2] << 16));
       t = kb == 0 && j == 0 ? v : fma(v, one, t);
-      xf[j] = BITS == 4 ? v * as_type<float>(uint(127 - 4 * j) << 23) : v;
+      xf[j] = v;
     }
     if (BITS == 4) {
       #pragma unroll
       for (int c = 0; c < NC; ++c) {
         const uint word = wq[c][kb];
         #pragma unroll
-        for (int j = 0; j < 8; ++j) p[c] = fma(xf[j], float(word & (0xFu << (4 * j))), p[c]);
+        for (int j = 0; j < 8; ++j) p[c] = fma(xf[j], float((word >> (4 * j)) & 0xFu), p[c]);
       }
     } else {
       // Codes 8 kb.. of this group sit in the two words from bit 8 kb BITS (48 or 64 bits, never a third word).
@@ -61,13 +61,13 @@ inline float tf_tq_group(const device bfloat* x, const device uint8_t* w, size_t
   return t;
 }
 
-// A column's codes 8 kb.. of its group as floats (4 bits in place from the group's words wq, else from the stream).
+// A column's codes 8 kb.. of its group as integers in floats (4 bits from the group's words wq, else the stream).
 template <int BITS>
 inline void tf_tq_cf(const device uint8_t* wg, const thread uint* wq, int kb, thread float* cf) {
   static_assert(BITS == 4 || BITS == 6 || BITS == 8, "codes of 4, 6 or 8 bits");
   if (BITS == 4) {
     #pragma unroll
-    for (int j = 0; j < 8; ++j) cf[j] = float(wq[kb] & (0xFu << (4 * j)));
+    for (int j = 0; j < 8; ++j) cf[j] = float((wq[kb] >> (4 * j)) & 0xFu);
   } else {
     const int bit = kb * 8 * BITS, at = bit / 32, sh = bit % 32;
     const device uint* wc = (const device uint*)wg + at;
@@ -112,7 +112,7 @@ inline void tf_tq_group_rows(const device bfloat* X, int K, const threadgroup in
       for (int j = 0; j < 8; ++j) {
         const float v = as_type<float>((j % 2) ? (xw[j / 2] & 0xFFFF0000u) : (xw[j / 2] << 16));
         t[r] = kb == 0 && j == 0 ? v : fma(v, one, t[r]);
-        xf[j] = BITS == 4 ? v * as_type<float>(uint(127 - 4 * j) << 23) : v;
+        xf[j] = v;
       }
       #pragma unroll
       for (int c = 0; c < NC; ++c)
