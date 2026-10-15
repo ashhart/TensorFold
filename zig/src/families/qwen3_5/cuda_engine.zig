@@ -109,7 +109,6 @@ pub const Engine = struct {
     /// Every weight and scratch buffer in one allocation: WDDM's launch cost grows with the allocation count.
     arena: DeviceBuffer,
     arena_at: usize = 0,
-    stage: DeviceBuffer, // the load's staging of each projection as stored, packed from there
     /// Rows a verify forward takes at most, and a window's rows at most.
     verify_rows: usize,
     window_rows: usize,
@@ -193,8 +192,6 @@ pub const Engine = struct {
         e.arena = try DeviceBuffer.alloc(d, weights.total(g) + try e.scratch(.measure));
         errdefer e.arena.free();
         try e.arena.fill8(0, null); // touched once now: the driver commits memory on first touch, slowly
-        e.stage = try DeviceBuffer.alloc(d, weights.stageBytes(g));
-        errdefer e.stage.free();
         const kk = cuda.kernels;
         const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, kk.qwen35, kk.sample, kk.qwen35_keep, kk.affine8, kk.affine_prefill };
         var loaded: usize = 0;
@@ -216,7 +213,12 @@ pub const Engine = struct {
         errdefer gpa.free(e.layers);
         var ck = try core.Checkpoint.openModel(gpa, io, dir);
         defer ck.close();
-        try weights.load(e, &ck);
+        {
+            // each projection as stored, packed from here; freed before the server counts what streams can use
+            var stage = try DeviceBuffer.alloc(d, weights.stageBytes(g));
+            defer stage.free();
+            try weights.load(e, &ck, &stage);
+        }
         _ = try e.scratch(.allocate);
         e.tables = try DeviceBuffer.alloc(d, tables_len);
         errdefer e.tables.free();
@@ -250,7 +252,6 @@ pub const Engine = struct {
         e.host_logits.free();
         e.staged.free();
         e.tables.free();
-        e.stage.free();
         e.arena.free();
         e.gpa.free(e.layers);
         e.affine.deinit();

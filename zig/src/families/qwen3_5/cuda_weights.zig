@@ -116,15 +116,15 @@ fn tensor(e: *Engine, ck: *core.Checkpoint, comptime fmt: []const u8, args: anyt
 }
 
 /// An MLX projection of `bits` codes packed from the staging buffer; 4-bit modules take the affine-4 pack unchanged.
-fn linear(e: *Engine, ck: *core.Checkpoint, prefix: []const u8, name: []const u8, n: usize, k: usize, bits: u8) !Proj {
+fn linear(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, prefix: []const u8, name: []const u8, n: usize, k: usize, bits: u8) !Proj {
     var buf: [160]u8 = undefined;
     var raw: [3]u64 = undefined;
     var at: usize = 0;
     const parts = [_]struct { []const u8, core.checkpoint.DType, usize }{ .{ "weight", .u32, k * bits / 32 }, .{ "scales", .bf16, k / 64 }, .{ "biases", .bf16, k / 64 } };
     for (parts, &raw) |p, *r| {
         const t = try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ prefix, name, p[0] }), p[1], &.{ n, p[2] });
-        try e.stage.upload(at, t.bytes);
-        r.* = e.stage.ptr + at;
+        try stage.upload(at, t.bytes);
+        r.* = stage.ptr + at;
         at += t.bytes.len;
     }
     const served = servedBits(bits);
@@ -146,28 +146,28 @@ fn linear(e: *Engine, ck: *core.Checkpoint, prefix: []const u8, name: []const u8
 }
 
 /// The embedding's words as the embed kernels read them: as stored at 4 or 8 bits, else widened through staging.
-fn embedWords(e: *Engine, ck: *core.Checkpoint, m: []const u8) !u64 {
+fn embedWords(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer, m: []const u8) !u64 {
     const g = e.g;
     const bits = g.bits.embed;
     const wide = rowBits(bits);
     var buf: [160]u8 = undefined;
     const t = try ck.expect(try std.fmt.bufPrint(&buf, "{s}embed_tokens.weight", .{m}), .u32, &.{ g.vocab, g.hidden * bits / 32 });
     if (bits == wide) return put(e, t);
-    try e.stage.upload(0, t.bytes);
+    try stage.upload(0, t.bytes);
     const out = try e.alloc(g.vocab * g.hidden * wide / 8);
-    try e.wide.widen(e.stream, e.stage.ptr, bits, g.vocab, g.hidden, out, wide);
+    try e.wide.widen(e.stream, stage.ptr, bits, g.vocab, g.hidden, out, wide);
     try e.stream.synchronize();
     return out;
 }
 
-pub fn load(e: *Engine, ck: *core.Checkpoint) !void {
+pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
     const g = e.g;
     const m = "language_model.model.";
     e.embed_bits = rowBits(g.bits.embed);
-    e.embed_w = try embedWords(e, ck, m);
+    e.embed_w = try embedWords(e, ck, stage, m);
     e.embed_s = try tensor(e, ck, "{s}embed_tokens.scales", .{m}, .bf16, &.{ g.vocab, g.hidden / 64 });
     e.embed_b = try tensor(e, ck, "{s}embed_tokens.biases", .{m}, .bf16, &.{ g.vocab, g.hidden / 64 });
-    e.head = if (g.tied) try linear(e, ck, m, "embed_tokens", g.vocab, g.hidden, g.bits.head) else try linear(e, ck, "language_model.", "lm_head", g.vocab, g.hidden, g.bits.head);
+    e.head = if (g.tied) try linear(e, ck, stage, m, "embed_tokens", g.vocab, g.hidden, g.bits.head) else try linear(e, ck, stage, "language_model.", "lm_head", g.vocab, g.hidden, g.bits.head);
     e.final_norm = try tensor(e, ck, "{s}norm.weight", .{m}, .bf16, &.{g.hidden});
     const conv = g.convWidth();
     for (e.layers, 0..) |*l, i| {
@@ -176,7 +176,7 @@ pub fn load(e: *Engine, ck: *core.Checkpoint) !void {
         var ps: std.enums.EnumArray(Slot, Proj) = .initUndefined();
         for (slots(g, i)) |slot| {
             const nk = shape(g, slot);
-            ps.set(slot, try linear(e, ck, p, geometry.slot_modules.get(slot), nk[0], nk[1], g.bits.of(i, slot)));
+            ps.set(slot, try linear(e, ck, stage, p, geometry.slot_modules.get(slot), nk[0], nk[1], g.bits.of(i, slot)));
         }
         l.* = .{
             .input_norm = try tensor(e, ck, "{s}input_layernorm.weight", .{p}, .bf16, &.{g.hidden}),
