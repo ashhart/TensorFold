@@ -52,7 +52,7 @@ fn onCapture(w: *nw.Win, m: *model.Model, li: usize, st: nw.Stage, n: u32) anyer
     try m.r.sync();
     const row = try gc.dev16(b, dim);
     defer f.gpa.free(row);
-    const g = try gc.caps.getOrPut(f.gpa, li * 4 + @intFromEnum(st));
+    const g = try gc.caps.getOrPut(f.gpa, li * 4 + @backingInt(st));
     if (!g.found_existing) g.value_ptr.* = .empty;
     try g.value_ptr.appendSlice(f.gpa, row);
 }
@@ -85,4 +85,3 @@ pub fn captureRun(c: *f.Ctx) !void {
     capturing = false;
     nw.capture = null;
 }
-

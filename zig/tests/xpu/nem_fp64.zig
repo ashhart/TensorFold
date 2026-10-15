@@ -99,7 +99,7 @@ pub const Ctx = struct {
     /// The input rows of a class: captured (--prompt) or random.
     fn xrows(c: *Ctx, layer: usize, st: ?nw.Stage, n: usize, in: usize, scale: ?[]const f64, mult: f64) ![]f64 {
         if (c.real) {
-            const key: u64 = layer * 4 + (if (st) |s| @intFromEnum(s) else 3);
+            const key: u64 = layer * 4 + (if (st) |s| @backingInt(s) else 3);
             if (c.caps.get(key)) |rows_| {
                 const x = try gpa.alloc(f64, n * in);
                 @memcpy(x, rows_.items[0 .. n * in]);
@@ -207,7 +207,7 @@ pub fn compare(c: *Ctx, class: []const u8, layer: usize, path: []const u8, kerne
     const flag = if (agg > bound(bf16_out) or worst_rel > 4 * bound(bf16_out)) " FAIL" else "";
     if (flag.len > 0) c.bad += 1;
     std.debug.print("{s:<18} L{d:<2} {s:<8} {s:<22} n={d:<3} cols={d:<6} agg {e:>9.2} worst-col abs {e:>9.2} rel {e:>9.2} (col {d}) worst {d:>6.2} ulp(>=1%)  bf16-exact {s}{s}\n", .{
-        class, layer, path, kernel, n, cols, agg, worst_abs, worst_rel, wcol, worst_ulp,
+        class,                                                                                                                                              layer, path, kernel, n, cols, agg, worst_abs, worst_rel, wcol, worst_ulp,
         if (bf16_out) std.fmt.allocPrint(gpa, "{d:.1}%", .{100.0 * @as(f64, @floatFromInt(exact)) / @as(f64, @floatFromInt(n * cols))}) catch "?" else "-", flag,
     });
 }
@@ -490,7 +490,7 @@ pub fn main(init: std.process.Init) !u8 {
     var first = [_]?usize{ null, null, null };
     var last = [_]?usize{ null, null, null };
     for (m.layers, 0..) |ly, li| {
-        const k: usize = @intFromEnum(std.meta.activeTag(ly.mixer));
+        const k: usize = @backingInt(std.meta.activeTag(ly.mixer));
         if (first[k] == null) first[k] = li;
         last[k] = li;
     }

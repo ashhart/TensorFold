@@ -344,7 +344,7 @@ pub const Win = struct {
 
     /// Projection of a prompt chunk (n > 16 rows) with the decode's arithmetic: y[r * stride + off + o], o < rows.
     pub fn lin(w: *Win, t: model.Table, x: Buf, n: u32, y: Buf, in: u32, rows: u32, stride: u32, off: u32, ep: Ep) !void {
-        try run(&w.k.pdense, .{ (rows + 15) / 16, (n + p_rows - 1) / p_rows, 1 }, .{ t.w, t.s, t.b, x, y, in, rows, n, stride, off, @intFromEnum(ep) });
+        try run(&w.k.pdense, .{ (rows + 15) / 16, (n + p_rows - 1) / p_rows, 1 }, .{ t.w, t.s, t.b, x, y, in, rows, n, stride, off, @backingInt(ep) });
     }
 
     fn mamba(w: *Win, m: *model.Model, mw: anytype, s: *MState, n: u32, inplace: bool) !void {
@@ -383,8 +383,8 @@ pub const Win = struct {
             const slots = n * top_k;
             const ne = c.n_routed_experts;
             try run(&w.k.plists, .{ ne, 1, 1 }, .{ w.eids, w.plist, w.pcount, slots });
-            try run(&w.k.pexpert, .{ (wd + 15) / 16, (n + p_rows - 1) / p_rows, ne }, .{ mw.fc1.w, mw.fc1.s, mw.fc1.b, w.xn, w.act, w.plist, w.pcount, h, wd, slots, top_k, @intFromEnum(Ep.relu2) });
-            try run(&w.k.pexpert, .{ (h + 15) / 16, (n + p_rows - 1) / p_rows, ne }, .{ mw.fc2.w, mw.fc2.s, mw.fc2.b, w.act, w.ey, w.plist, w.pcount, wd, h, slots, @as(u32, 1), @intFromEnum(Ep.f32) });
+            try run(&w.k.pexpert, .{ (wd + 15) / 16, (n + p_rows - 1) / p_rows, ne }, .{ mw.fc1.w, mw.fc1.s, mw.fc1.b, w.xn, w.act, w.plist, w.pcount, h, wd, slots, top_k, @backingInt(Ep.relu2) });
+            try run(&w.k.pexpert, .{ (h + 15) / 16, (n + p_rows - 1) / p_rows, ne }, .{ mw.fc2.w, mw.fc2.s, mw.fc2.b, w.act, w.ey, w.plist, w.pcount, wd, h, slots, @as(u32, 1), @backingInt(Ep.f32) });
         } else {
             const ng = @min(c.n_routed_experts, n * top_k);
             try run(&w.k.groups, .{ 1, 1, 1 }, .{ w.eids, w.elist, n * top_k, c.n_routed_experts });

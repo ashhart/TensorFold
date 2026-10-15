@@ -25,14 +25,14 @@ fn snapshot(r: *rt.Runtime, m: *model.Model) !Snap {
             for ([_]struct { k: Kind, b: @TypeOf(mw.cstate) }{ .{ .k = .conv, .b = mw.cstate }, .{ .k = .ssm, .b = mw.sstate } }) |e| {
                 const bytes = try gpa.alloc(u8, e.b.len);
                 try r.download(bytes, e.b);
-                try out[@intFromEnum(e.k)].append(gpa, bytes);
+                try out[@backingInt(e.k)].append(gpa, bytes);
             }
         },
         .attention => |aw| {
             for ([_]struct { k: Kind, b: @TypeOf(aw.kc) }{ .{ .k = .key, .b = aw.kc }, .{ .k = .value, .b = aw.vc } }) |e| {
                 const bytes = try gpa.alloc(u8, e.b.len);
                 try r.download(bytes, e.b);
-                try out[@intFromEnum(e.k)].append(gpa, bytes);
+                try out[@backingInt(e.k)].append(gpa, bytes);
             }
         },
         else => {},
@@ -65,7 +65,7 @@ fn compare(label: []const u8, a: Snap, b: Snap, kv_dim: usize, n_pos: usize) boo
         var worst_layer: usize = 0;
         var first_pos: usize = std.math.maxInt(usize);
         var last_pos: usize = 0;
-        for (a.bytes[@intFromEnum(k)], b.bytes[@intFromEnum(k)], 0..) |x, y, li| {
+        for (a.bytes[@backingInt(k)], b.bytes[@backingInt(k)], 0..) |x, y, li| {
             // KV bytes past the prompt hold stale data from earlier runs: only positions below the prompt count
             const cnt = if (k == .key or k == .value) @min(x.len / width(k), n_pos * kv_dim) else x.len / width(k);
             n += cnt;

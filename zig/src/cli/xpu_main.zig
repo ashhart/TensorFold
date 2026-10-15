@@ -36,7 +36,6 @@ const Options = struct {
     prefill: u32 = 0,
 };
 
-
 const Parsed = union(enum) { run: Options, refuse: []const u8 };
 
 fn isUnsupported(a: []const u8) bool {
@@ -272,7 +271,7 @@ test "the CUDA run options this engine cannot honour are refused by name" {
         const p = try parse(gpa, "m", &.{ "--tokens", "1,2", u });
         try std.testing.expectEqualStrings(u, p.refuse);
     }
-    const p = try parse(gpa, "m", &.{ "--bogus" });
+    const p = try parse(gpa, "m", &.{"--bogus"});
     try std.testing.expectEqualStrings("--bogus", p.refuse);
 }
 

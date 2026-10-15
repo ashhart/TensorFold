@@ -314,8 +314,8 @@ pub const Model = struct {
         try run(&m.k.m_conv, .{ c.convDim() / 64, 1, 1 }, .{ s.proj, c.xd(), w.cstate, w.conv_w, w.conv_b, s.xc, c.convDim() });
         const per_group = c.mamba_num_heads / c.n_groups;
         try run(&m.k.m_ssm, .{ c.mamba_num_heads, c.mamba_head_dim / 4, 1 }, .{
-            s.proj,  c.xd() + c.convDim(), s.xc, w.sstate, w.a_log, w.d, w.dtb, s.y,
-            c.mamba_head_dim, c.xd(), c.n_groups, per_group, @as(f32, 0.0), std.math.inf(f32),
+            s.proj,           c.xd() + c.convDim(), s.xc,       w.sstate,  w.a_log,       w.d,               w.dtb, s.y,
+            c.mamba_head_dim, c.xd(),               c.n_groups, per_group, @as(f32, 0.0), std.math.inf(f32),
         });
         try run(&m.k.m_norm, .{ c.n_groups, 1, 1 }, .{ s.y, w.gnorm, s.yn, c.xd() / c.n_groups, c.layer_norm_epsilon });
         try run(&m.k.m_qmv, .{ c.hidden_size, 1, 1 }, .{ w.out.w, w.out.s, w.out.b, s.yn, s.delta, c.xd() });
