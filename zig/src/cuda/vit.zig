@@ -96,7 +96,7 @@ pub const Kernels = struct {
         try go(k.cast_fn, s, blocks(count, threads), 1, &a);
     }
 
-    /// o [h * w, c] = bf16(x + bf16(the table [side * side, c] resized to the longer side's square, rows y < h, x < w)).
+    /// o [h * w, c] = bf16(x + bf16(the table [side * side, c] resized to the longer side's square, y < h, x < w)).
     pub fn positionAdd(k: *const Kernels, s: Stream, x: u64, table: u64, o: u64, h: usize, w: usize, side: usize, c: usize) !void {
         var a: Args = .{};
         for ([_]u64{ x, table, o }) |p| a.add(p);
