@@ -38,6 +38,7 @@ const lfm2_vision_tests = @import("lfm2_vision_tests.zig");
 const radio_tests = @import("radio_tests.zig");
 const glm_lanes_tests = @import("glm_lanes_tests.zig");
 const glm_synth = @import("glm_synth.zig");
+const glm_ref_route = @import("glm_ref_route.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -94,6 +95,8 @@ const usage =
     \\  glm-lanes-cover <ckpt> <dc.json> <rank> <world> <idfile>  copy drafts, cancels, discards, eos and max_new on one lanes.Engine across requests
     \\  glm-lanes-concurrent <ckpt> <dc.json> <rank> <world> <idfile>  concurrent streams on one lanes.Engine, each against its solo run
     \\  glm-shared-check <ckpt> <dc.json> <rank> <world> <idfile>  shared verify windows against lone twins, logits and states byte for byte
+    \\  glm-route-old <fatbin>    GLM's select and swiglu against an older glm_glue fatbin (6380c8da), byte for byte
+    \\  glm-route-ling <fixture>  Ling's group-limited routing on captured layer-4 logits vs float64, HF and exllamav3
     \\  glm-synth <dir>          a synthetic GLM-5.3-Flash checkpoint (2 layers, 16 experts) and its dc.json for the lane checks
     \\
 ;
@@ -191,6 +194,8 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "train-pack")) return train_pack.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) try std.fmt.parseInt(usize, rest[2], 10) else 24);
     if (std.mem.eql(u8, cmd, "glm-lanes-cover")) return glm_lanes_tests.coverCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "glm-shared-check")) return glm_lanes_tests.sharedCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
+    if (std.mem.eql(u8, cmd, "glm-route-old")) return glm_ref_route.old(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "glm-route-ling")) return glm_ref_route.ling(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "glm-synth")) return glm_synth.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "glm-lanes-concurrent")) return glm_lanes_tests.concurrentCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     std.debug.print("{s}", .{usage});

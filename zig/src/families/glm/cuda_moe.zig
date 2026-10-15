@@ -15,9 +15,11 @@ pub const Layer = struct {
     shared_gu: u64,
     shared_down: u64,
     shared: usize,
+    shared_limit: f32, // the shared expert's SwiGLU clamp, 0 for none (Ling's differs from the routed one's)
     top_k: usize,
     scale: f32,
     norm: bool,
+    groups: glue.Groups = .{},
 };
 
 /// The block's scratch for up to `rows` rows (forward.Buffers' MoE part).
@@ -51,7 +53,7 @@ pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
     const slots = l.top_k + 1;
     const shared_id: i32 = @intCast(l.count);
     try glue.router(k.set, stream, x, x_stride, l.router, s.mlog, s.router_part, rows, d, l.count);
-    try glue.select(k.set, stream, s.mlog, l.bias, s.pick, s.wts, rows, l.top_k, l.count, l.scale, l.norm);
+    try glue.select(k.set, stream, s.mlog, l.bias, s.pick, s.wts, rows, l.top_k, l.count, l.scale, l.norm, l.groups);
     const plan: experts.Plan = .{ .route = s.plan, .slots = slots, .experts = l.count + 1, .prompt = prompt };
     try experts.route(k.experts, stream, s.pick, rows * slots, plan);
     try experts.run(k.experts, stream, .gate_up, l.routed, plan, x, x_stride, rows, s.eact, shared_id);
@@ -65,7 +67,7 @@ pub fn fill(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_str
     const n = hi - lo;
     const eb: usize = if (prompt) 2 else 4; // the slot rows: bf16 in a prompt chunk
     try b16.matmul(k.set, stream, x + lo * x_stride * 2, x_stride, l.shared_gu, s.sgu + lo * 2 * l.shared * 2, s.mm_part, n, 2 * l.shared, d, false);
-    try glue.swiglu(k.set, stream, s.sgu + lo * 2 * l.shared * 2, s.sact + lo * l.shared * 2, s.sxs + lo * (l.shared / 64) * 4, l.routed.limit, n, l.shared);
+    try glue.swiglu(k.set, stream, s.sgu + lo * 2 * l.shared * 2, s.sact + lo * l.shared * 2, s.sxs + lo * (l.shared / 64) * 4, l.shared_limit, n, l.shared);
     try b16.matmul(k.set, stream, s.sact + lo * l.shared * 2, l.shared, l.shared_down, s.sy + lo * d * 4, s.mm_part, n, d, l.shared, true);
     var a: cuda.Args = .{};
     a.add(s.sy + lo * d * 4);

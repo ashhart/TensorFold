@@ -108,6 +108,11 @@ fn cdiv(a: usize, b: usize) u32 {
     return @intCast((a + b - 1) / b);
 }
 
+/// The kernel's clamp for a limit: 0 (unclamped, as the experts' 0) as +inf, whose min and clip are exact.
+pub fn clampOf(limit: f32) f32 {
+    return if (limit == 0) std.math.inf(f32) else limit;
+}
+
 /// swiglu's column block: 512 where it divides the width, else 64 (TP=3's 704 and 640, the latter 128 in glue.py).
 fn swigluBlock(w: usize) !usize {
     if (w % 512 == 0) return 512;
@@ -115,12 +120,12 @@ fn swigluBlock(w: usize) !usize {
     return error.NoSwigluBlock;
 }
 
-/// glue.swiglu: [gate | up] -> bf16(bf16(silu(min(g, L))) * clip(u, -L, L)), 64-sums in `xs`.
+/// glue.swiglu: [gate | up] -> bf16(bf16(silu(min(g, L))) * clip(u, -L, L)), 64-sums in `xs`; L per layer, 0 for none.
 pub fn swiglu(set: Set, stream: cuda.Stream, gu: u64, out: u64, xs: u64, limit: f32, rows: usize, w: usize) !void {
     const block = try swigluBlock(w);
     const f, const threads: u32 = if (block == 512) .{ set.glue.swiglu_512, 128 } else .{ set.glue.swiglu_64, 64 };
     var a: cuda.Args = .{};
-    inline for (.{ gu, out, xs, limit, i64of(w) }) |v| a.add(v);
+    inline for (.{ gu, out, xs, clampOf(limit), i64of(w) }) |v| a.add(v);
     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(w / block) }, .block = .{ .x = threads } }, stream, &a);
 }
 
@@ -148,11 +153,15 @@ pub fn router(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, ou
     try sliceSum(set, stream, part, out, m * ne, router_ks, true);
 }
 
-/// glue.select: top_k by sigmoid + bias (lower id on ties), normed if `norm`, times `scale`, then the shared expert.
-pub fn select(set: Set, stream: cuda.Stream, logits: u64, bias: u64, pick: u64, wts: u64, rows: usize, top_k: usize, experts: usize, scale: f32, norm: bool) !void {
+/// Group-limited routing (Ling's n_group 8, topk_group 4): GLM's one group keeps every expert.
+pub const Groups = struct { n: usize = 1, keep: usize = 1 };
+
+/// glue.select: top_k by sigmoid + bias (lower id on ties) in the kept groups, normed if `norm`, x `scale`, + shared.
+pub fn select(set: Set, stream: cuda.Stream, logits: u64, bias: u64, pick: u64, wts: u64, rows: usize, top_k: usize, experts: usize, scale: f32, norm: bool, groups: Groups) !void {
     if (experts > 512 or top_k >= 32) return error.TopkTooWide;
+    if (groups.n == 0 or groups.n > 32 or experts % groups.n != 0 or groups.keep == 0 or groups.keep > groups.n or top_k > groups.keep * (experts / groups.n)) return error.TopkGroups;
     var a: cuda.Args = .{};
-    inline for (.{ logits, bias, pick, wts, scale, cint(experts), cint(top_k), @as(c_int, @intFromBool(norm)) }) |v| a.add(v);
+    inline for (.{ logits, bias, pick, wts, scale, cint(experts), cint(top_k), @as(c_int, @intFromBool(norm)), cint(groups.n), cint(groups.keep) }) |v| a.add(v);
     try cuda.launch.launch(set.glue.topk, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 32 } }, stream, &a);
 }
 

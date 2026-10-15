@@ -134,7 +134,7 @@ fn routers(r: *Rig, set: glue.Set) !void {
     for (bias) |*b| b.* = (r.rng.float(f32) * 2 - 1) * 0.05;
     const pick = try r.zeros(m * (top_k + 1) * 4);
     const wts = try r.zeros(m * (top_k + 1) * 4);
-    try glue.select(set, r.s, full, try r.dev(std.mem.sliceAsBytes(bias)), pick, wts, m, top_k, ne, scale, true);
+    try glue.select(set, r.s, full, try r.dev(std.mem.sliceAsBytes(bias)), pick, wts, m, top_k, ne, scale, true, .{});
     const logits = try r.back(full, m * ne * 4);
     const got_pick = try r.back(pick, m * (top_k + 1) * 4);
     const got_wts = try r.back(wts, m * (top_k + 1) * 4);
@@ -196,6 +196,8 @@ pub fn run(gpu: Gpu) !void {
     const set: glue.Set = .{ .glue = &ks };
     for ([_]Shape{ .{ .n = 512, .k = 4096 }, .{ .n = 1280, .k = 1536 }, .{ .n = 1024, .k = 128 } }) |sh| try matmuls(&r, set, sh);
     try routers(&r, set);
+    try @import("glm_ref_route.zig").groups(&r, set);
+    try @import("glm_ref_route.zig").swigluLimit(&r, set);
     try @import("glm_ref_attn.zig").dense(&r, set);
     try @import("glm_ref_attn.zig").sparse(&r, set);
     try @import("glm_ref_hc.zig").mixing(&r, set);

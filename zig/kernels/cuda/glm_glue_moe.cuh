@@ -23,6 +23,48 @@ __device__ __forceinline__ float swiglu1(float g, float u, float limit) {
   return rbf(__fmul_rn(u, s));
 }
 
+// Group-limited routing: -inf on every expert outside the `keep` groups of the best top-2 sums (ties to lower group).
+template <int MAXE>
+__device__ __forceinline__ void keep_groups(float* choice, int lane, int ne, int gs, int ng, int keep) {
+  float gscore = -INFINITY;  // lane g: group g's top-2 sum
+  for (int g = 0; g < ng; ++g) {
+    float a = -INFINITY, b = -INFINITY;  // this lane's best two in group g, a >= b
+    for (int i = 0; i < MAXE; ++i) {
+      const int e = i * 32 + lane;
+      if (e < ne && e / gs == g) {
+        const float c = choice[i];
+        if (c > a) {
+          b = a;
+          a = c;
+        } else if (c > b) {
+          b = c;
+        }
+      }
+    }
+    for (int o = 16; o > 0; o >>= 1) {
+      const float oa = __shfl_xor_sync(0xffffffffu, a, o), ob = __shfl_xor_sync(0xffffffffu, b, o);
+      b = fmaxf(fminf(a, oa), fmaxf(b, ob));
+      a = fmaxf(a, oa);
+    }
+    if (lane == g) gscore = a + b;
+  }
+  bool live = lane < ng;
+  unsigned kept = 0u;
+  for (int k = 0; k < keep; ++k) {
+    float mx = live ? gscore : -INFINITY;
+    for (int o = 16; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
+    const unsigned at = __ballot_sync(0xffffffffu, live && gscore == mx);
+    if (at == 0u) break;
+    const int id = __ffs(at) - 1;
+    kept |= 1u << id;
+    if (lane == id) live = false;
+  }
+  for (int i = 0; i < MAXE; ++i) {
+    const int e = i * 32 + lane;
+    if (e < ne && !((kept >> (e / gs)) & 1u)) choice[i] = -INFINITY;
+  }
+}
+
 }  // namespace glm_moe
 
 // glue._swiglu with BLOCK 512 (128 threads, 4 values each, 64-group sums over 16 lanes), column block blockIdx.y.
@@ -66,10 +108,10 @@ extern "C" __global__ void __launch_bounds__(128)
   if ((threadIdx.x & 7) == 0 && g < kg) xs[m * kg + g] = s;
 }
 
-// glue._topk, a warp a row: top_k by sigmoid + bias (ties to lower id), normed if `norm`, x scale; then shared expert.
+// glue._topk, a warp a row: top_k of sigmoid + bias (lower id on ties) in the kept groups, normed, x scale; + shared.
 extern "C" __global__ void __launch_bounds__(32)
     tf_glm_topk(const float* logits, const float* bias, int* pick, float* wts, float scale, int ne, int top_k,
-                int norm) {
+                int norm, int n_group, int topk_group) {
   constexpr int MAXE = 16;  // 512 experts a row
   const int64_t r = blockIdx.x;
   const int lane = threadIdx.x;
@@ -79,6 +121,7 @@ extern "C" __global__ void __launch_bounds__(32)
     score[i] = e < ne ? div_full(1.0f, exp_approx(0.0f - logits[r * ne + e]) + 1.0f) : 0.0f;
     choice[i] = e < ne ? score[i] + bias[e] : -INFINITY;
   }
+  if (n_group > 1) glm_moe::keep_groups<MAXE>(choice, lane, ne, ne / n_group, n_group, topk_group);
   float total = 0.0f, mine = 0.0f;
   int mine_id = 0;
   for (int k = 0; k < top_k; ++k) {
