@@ -177,20 +177,25 @@ fn norms(r: *Rig) !void {
 }
 
 fn route(r: *Rig) !void {
-    const sk = glue.routerShape(D).sk;
+    try routeShape(r, D, E, top_k, NS);
+    try routeShape(r, 4096, 496, 9, 9); // Bolt: 4096-wide rows (eight K slices), 496 experts, top 9, no shared slots
+}
+
+fn routeShape(r: *Rig, d: usize, e: usize, k: usize, ns: usize) !void {
+    const sk = glue.routerShape(d).sk;
     for ([_]usize{ 1, 16, 300 }) |rows| {
-        const x = try r.bfs(rows * D, 1.0);
-        const w = try r.bfs(E * D, 0.05);
-        const bias = try r.f32s(E, -0.05, 0.05);
-        const part = try r.a.alloc(f32, sk * rows * E);
-        const idx = try r.a.alloc(i32, rows * NS);
-        const wt = try r.a.alloc(f32, rows * NS);
-        ref.router(x, w, part, rows, D, E, sk);
-        ref.topk(part, bias, idx, wt, rows, 2.5, E, sk, top_k, NS, true);
-        const partd = try r.zeros(f32, sk * rows * E);
-        const idxd = try r.zeros(i32, rows * NS);
-        const wtd = try r.zeros(f32, rows * NS);
-        try r.g().route(try r.dev(u16, x), try r.dev(u16, w), try r.dev(f32, bias), partd, idxd, wtd, rows, D, E, top_k, 2.5, true);
+        const x = try r.bfs(rows * d, 1.0);
+        const w = try r.bfs(e * d, 0.05);
+        const bias = try r.f32s(e, -0.05, 0.05);
+        const part = try r.a.alloc(f32, sk * rows * e);
+        const idx = try r.a.alloc(i32, rows * ns);
+        const wt = try r.a.alloc(f32, rows * ns);
+        ref.router(x, w, part, rows, d, e, sk);
+        ref.topk(part, bias, idx, wt, rows, 2.5, e, sk, k, ns, true);
+        const partd = try r.zeros(f32, sk * rows * e);
+        const idxd = try r.zeros(i32, rows * ns);
+        const wtd = try r.zeros(f32, rows * ns);
+        try r.g().route(try r.dev(u16, x), try r.dev(u16, w), try r.dev(f32, bias), partd, idxd, wtd, rows, d, e, k, ns, 2.5, true);
         try r.same("router partials", f32, partd, part);
         try r.same("top-k ids", i32, idxd, idx);
         try r.same("top-k weights", f32, wtd, wt);

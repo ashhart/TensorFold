@@ -20,12 +20,18 @@ const core = @import("core");
 pub const slide = @import("cuda_slide.zig");
 
 pub const model_type = "nemotron_h";
-pub const formats: []const []const u8 = &.{ "mlx-q4g64", "modelopt-nvfp4" };
+/// Nemotron 3.5 Bolt's config: the language model under llm_config, beside its vision tower's.
+pub const also_model_types: []const []const u8 = &.{"nemotron_h_omni"};
+pub const formats: []const []const u8 = &.{ "mlx-q4g64", "modelopt-nvfp4", "modelopt-ggml" };
 pub const default_context: i64 = engine.default_context;
 pub const max_segments: u32 = @import("cuda_segments.zig").MAX;
 pub const prompt_rows: u32 = state.pass_rows;
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: bool = false };
+
+/// --vision on a Bolt checkpoint: its C-RADIO tower, images prepared and placed as qwen_image.nemotron lays them.
+pub const vision_nemotron = true;
+const vision = @import("cuda_vision.zig");
 
 /// Thinking budgets the lone driver takes (cuda_lone.zig): above it, the stream goes to the lane core before its cut.
 pub const lone_min_budget = @import("cuda_lone.zig").min_budget;
@@ -51,6 +57,7 @@ pub const Loaded = struct {
     target: *reuse.Target, // the prompt cache copies this engine (cuda_reuse.zig)
     learns: ?*engine.Engine = null, // --slide: the engine its learner trains, whose sites it attached at load
     learn_bytes: usize = 0, // --slide: what its trainer allocates at the first lesson, kept out of the streams' room
+    host_snaps: bool = false, // kept prompt states in pinned host memory (a discrete card): the cache's budget is the host's
 };
 
 /// The first shard, index or config.json in `dir` that a write in place would reach through a link, or null.
@@ -71,19 +78,27 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer if (carve) |c| closeCarveout(gpa, c);
     const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments, .carveout = carve, .slide = o.slide });
     errdefer e.deinit();
-    const head: ?*Head = if (o.drafts) try Head.init(e) else null;
+    // Bolt's checkpoint has no MTP head: it decodes serially whatever --drafts says
+    const drafts = o.drafts and e.c.latent == 0;
+    const head: ?*Head = if (drafts) try Head.init(e) else null;
     errdefer if (head) |h| h.deinit();
     if (head) |h| try h.capture();
-    if (!o.drafts) try e.captureWindows(); // the one-row window: Engine.init captures windows only when drafting
+    if (!drafts) try e.captureWindows(); // the one-row window: Engine.init captures windows only when drafting
     // the sampled mode's sets: a placeholder rule now, each stream's own uploaded at its prefill
     try e.setSampling(.{ .seed = 0, .temperature = 1.0 });
     try e.captureWindows();
     if (head) |h| try h.capture();
     try e.setSampling(null);
+    e.snap_host = e.k.discrete; // a card with its own memory keeps prompt states in the host's (GB10 shares one)
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .e = e, .head = head, .lanes = try Lanes.init(gpa, e, head), .target = .{ .e = e, .head = head }, .carve = carve };
     errdefer own.lanes.deinit();
+    // --vision: the tower and its scratch for the largest image, loaded beside the model (Bolt alone has one)
+    if (o.vision) {
+        if (!e.c.omni) return error.NemotronCheckpointHasNoVision;
+        own.lanes.tower = try vision.Tower.load(gpa, io, ctx.d, dir);
+    }
     own.living = try slide.loadLiving(gpa, io, e, dir); // before the lanes' costs are measured: they decode through it
     errdefer if (own.living) |*s| s.deinit();
     try own.lanes.measure(io, dir);
@@ -98,6 +113,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .lone = if (head != null) loneRun else null,
         .learns = if (o.slide) e else null,
         .learn_bytes = if (o.slide) @import("cuda_train.zig").Trainer.memory(e.c) else 0,
+        .host_snaps = e.snap_host,
     };
 }
 
@@ -117,6 +133,9 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
         error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
+        error.NemotronServedWithoutVision => "image inputs need the server started with --vision",
+        error.BadImagePlaceholders => "the image placeholders do not match the prepared images",
+        error.BadImageGrid, error.BadImagePatches => "an image's patches do not fit the vision tower",
         else => null,
     };
 }

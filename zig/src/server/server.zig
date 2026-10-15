@@ -36,6 +36,10 @@ pub const Config = struct {
     /// The served name first, then aliases, without repeats.
     model_ids: []const []const u8,
     default_max_tokens: i64 = 4096,
+    tool_system: ?[]const u8 = null, // --tool-system (trimmed; null when empty)
+    vision_max_images: usize = 4, // --vision-max-images
+    vision_urls: bool = false, // --vision-urls: public HTTPS media URLs are fetched (media_fetch.zig)
+    vision_image_tokens: u64 = 4096, // --vision-image-tokens: the visual tokens a request's images share
     enable_thinking: bool = true,
     reasoning_effort: ?[]const u8 = null,
     thinking_budget: i64 = 0,
@@ -135,6 +139,7 @@ pub const Server = struct {
         if (srv.keepalive) |k| k.stop(); // before the engine's queue goes away
         if (srv.grammars) |g| g.close();
         srv.metrics.deinit();
+        if (srv.grammars) |g| g.close();
         srv.arena.deinit();
         srv.store.deinit();
         srv.slide.deinit();
@@ -211,7 +216,7 @@ pub const Server = struct {
         return .{ .kind = kind, .text = text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null, .compiler = c };
     }
 
-    /// The model's grammar compiler: tokenizer.json, config.json's vocab_size (text_config first), the eos ids.
+    /// The grammar compiler: tokenizer.json, config.json's vocab_size (text_config or llm_config first), the eos ids.
     fn grammarCompiler(srv: *Server) ?*api.grammar.Compiler {
         srv.grammar_mutex.lockUncancelable(srv.io);
         defer srv.grammar_mutex.unlock(srv.io);
@@ -227,7 +232,7 @@ pub const Server = struct {
                 .err => break :blk "config.json is not JSON",
             };
             var vocab: ?u32 = null;
-            for ([_]?json.Value{ cfg.get("text_config"), cfg }) |part| if (vocab == null) if (part) |p| if (p.get("vocab_size")) |v| if (v.int64()) |n| {
+            for ([_]?json.Value{ cfg.get("text_config"), cfg.get("llm_config"), cfg }) |part| if (vocab == null) if (part) |p| if (p.get("vocab_size")) |v| if (v.int64()) |n| {
                 vocab = @intCast(n);
             };
             if (vocab == null) break :blk "structured output needs the checkpoint's config.json vocab_size";

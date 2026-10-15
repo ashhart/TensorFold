@@ -39,6 +39,7 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
         error.OutOfMemory => return error.OutOfMemory,
         error.Template => return cx.fail(.server, "{s}", .{problem}),
     };
+    if (!thinking) ids = try withoutEffortLine(srv, cx, ids);
     if (!thinking and generation and ids.len > 0) {
         const last = try srv.text.decode(cx.a, ids[ids.len - 1 ..]);
         if (std.mem.eql(u8, @import("reply_text.zig").pyStrip(last), "<think>")) {
@@ -50,6 +51,17 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
         }
     }
     return ids;
+}
+
+/// GLM-5.3's effort system line, dropped with thinking off as glm5_next/prompts.py does; its ids are its own segment.
+fn withoutEffortLine(srv: *Server, cx: *Cx, ids: []u32) errors.Refused![]u32 {
+    const line = srv.text.encode(cx.a, "<|system|>Reasoning Effort: Max", false) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Template => return ids,
+    };
+    if (line.len < 2) return ids;
+    const at = std.mem.indexOf(u32, ids, line) orelse return ids;
+    return try std.mem.concat(cx.a, u32, &.{ ids[0..at], ids[at + line.len ..] });
 }
 
 /// The template's generation prompt (thinking on or off): what a probe conversation renders past its history.

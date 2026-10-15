@@ -86,7 +86,7 @@ pub fn experts(f: *const fwd.Forward, m: weights.MoE, rows: usize, scale: Scale,
     const o = f.ops;
     const ex = m.experts;
     const pairs = rows * c.slots();
-    try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.routed_scaling, c.norm_topk);
+    try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.slots(), c.routed_scaling, c.norm_topk);
     const tile = cuda.experts.promptTile(ex.format);
     try o.plan(b.pick, pairs, ex.experts, tile, b.plan);
     const items = kern.maxItems(pairs, ex.experts, tile);
