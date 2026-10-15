@@ -42,6 +42,9 @@ const glm_ref_route = @import("glm_ref_route.zig");
 const ling_synth = @import("ling_synth.zig");
 const ling_weights = @import("ling_weights_tests.zig");
 const ling_real = @import("ling_weights_real.zig");
+const glm_kda_chunk_tests = @import("glm_kda_chunk_tests.zig");
+const glm_kda_ling = @import("glm_kda_ling.zig");
+const glm_kda_speed = @import("glm_kda_speed.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -98,6 +101,9 @@ const usage =
     \\  ling-mla                  Ling's MLA (128-wide absorb/expand, rope, gate, 576-wide attention) vs float64 (synthetic)
     \\  ling-mla-real <fixture>   Ling layer 7's MLA on real inputs vs HF and float64; decode, window and cut bytes
     \\  glm-mla-same <fatbin>     GLM's MLA launches on this build vs a 6380c8da glm_glue fatbin, byte for byte
+    \\  glm-kda-chunk             GLM KDA's chunked prompt path against float64, the wide chain's saves, cuts (synthetic)
+    \\  glm-kda-ling FIXTURE      GLM KDA's paths on Ling-3.1 layer 0 (kda-real's fixture) against fla and float64
+    \\  glm-kda-speed             GLM KDA at 64 heads: a 2048-row prompt wide vs chunked, a decode row, a 16-row window
     \\  glm-lanes-cover <ckpt> <dc.json> <rank> <world> <idfile>  copy drafts, cancels, discards, eos and max_new on one lanes.Engine across requests
     \\  glm-lanes-concurrent <ckpt> <dc.json> <rank> <world> <idfile>  concurrent streams on one lanes.Engine, each against its solo run
     \\  glm-shared-check <ckpt> <dc.json> <rank> <world> <idfile>  shared verify windows against lone twins, logits and states byte for byte
@@ -172,6 +178,9 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "ling-mla")) return @import("ling_ref_mla.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "ling-mla-real")) return @import("ling_mla_real.zig").run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "glm-mla-same")) return @import("glm_mla_same.zig").run(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "glm-kda-chunk")) return glm_kda_chunk_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "glm-kda-ling")) return glm_kda_ling.run(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "glm-kda-speed")) return glm_kda_speed.run(gpu);
     if (std.mem.eql(u8, cmd, "modelopt")) return modelopt_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "exlr8")) return exlr8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "exlr8-dense")) return exlr8_dense_tests.run(gpu, if (rest.len > 0) rest[0] else null);
