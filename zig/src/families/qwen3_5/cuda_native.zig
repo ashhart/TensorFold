@@ -60,7 +60,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer if (v) |x| x.deinit();
     const l = try gpa.create(Lanes);
     l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .vision = v, .target = undefined };
-    l.target = .{ .e = e, .caches = &l.caches };
+    l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen };
     return .{
         .backend = l.backend(),
         .facts = .{ .exact_width = @intCast(e.window_rows), .hidden_rows = true, .batch_rows = @intCast(e.verify_rows), .max_streams = E.max_segs, .streams_exact = true },
@@ -191,6 +191,8 @@ const Lanes = struct {
     vision: ?*vision.Vision = null,
     target: reuse.Target,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *E.Cache) = .empty,
+    /// An image prompt's images as its kept states name them (cuda_reuse.zig), from its prefill to its release.
+    seen: std.AutoHashMapUnmanaged(*lanes.Stream, []reuse.Seen) = .empty,
     /// Caches at the full window, kept between streams: allocated and touched once (`reserve`), reset on reuse.
     pool: std.ArrayList(*E.Cache) = .empty,
 
@@ -198,6 +200,9 @@ const Lanes = struct {
         var it = self.caches.valueIterator();
         while (it.next()) |cache| self.drop(cache.*);
         self.caches.deinit(self.gpa);
+        var seen = self.seen.valueIterator();
+        while (seen.next()) |v| self.gpa.free(v.*);
+        self.seen.deinit(self.gpa);
         for (self.pool.items) |cache| self.drop(cache);
         self.pool.deinit(self.gpa);
         if (self.vision) |v| v.deinit();
@@ -269,6 +274,12 @@ const Lanes = struct {
         }
         defer if (media) |*m| m.deinit();
         const images: ?E.Images = if (media) |m| .{ .features = m.features.ptr, .src = m.src, .pos = m.pos } else null;
+        const seen = try self.seenOf(ids, stream.images);
+        self.seen.put(self.gpa, stream, seen) catch |err| {
+            self.gpa.free(seen);
+            return err;
+        };
+        errdefer if (self.seen.fetchRemove(stream)) |kv| self.gpa.free(kv.value);
         const cache = try self.take();
         errdefer self.give(cache);
         // the stream's cache is found by a save at a mark (cuda_reuse.zig) while its pass runs
@@ -279,7 +290,7 @@ const Lanes = struct {
         stream.cached = 0;
         if (stream.reuse.saved) |saved| {
             if (stream.reuse.at > 0 and stream.reuse.at < ids.len and coldCut(ids.len, stream.chunks, stream.reuse.at)) {
-                if (reuse.restoreCache(self.e, cache, saved)) {
+                if (reuse.restoreCache(self.e, cache, saved, seen)) {
                     at = stream.reuse.at;
                     stream.cached = stream.reuse.at;
                 } else |_| {
@@ -421,5 +432,18 @@ const Lanes = struct {
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
         if (self.caches.fetchRemove(stream)) |entry| self.give(entry.value);
+        if (self.seen.fetchRemove(stream)) |entry| self.gpa.free(entry.value);
+    }
+
+    /// Each image's first placeholder row and digest: a kept state resumes only the same images.
+    fn seenOf(self: *Lanes, ids: []const u32, images: []const lanes.Image) ![]reuse.Seen {
+        if (images.len == 0) return self.gpa.alloc(reuse.Seen, 0);
+        const tower = self.tower orelse return error.QwenServedWithoutVision;
+        const runs = try self.gpa.alloc(vision_prompt.Run, images.len);
+        defer self.gpa.free(runs);
+        try vision_prompt.placeholders(tower.c, ids, images, runs);
+        const seen = try self.gpa.alloc(reuse.Seen, images.len);
+        for (seen, runs, images) |*s, r, im| s.* = .{ .at = @intCast(r.at), .digest = im.digest() };
+        return seen;
     }
 };
