@@ -85,7 +85,7 @@ pub const LaneHost = struct {
             const e = job.entry orelse return;
             job.entry = null;
             const store = job.host.cache orelse return;
-            store.unpin(e);
+            defer store.unpin(e); // after resumed, which reads e
             if (!job.started) return;
             job.stream.reuse.saved = null; // the backend restores before its first chunk; a later keep may free it
             if (job.stream.reuse_failed) store.resumed(e, job.request.prompt, false) else if (job.stream.cached == e.at) store.resumed(e, job.request.prompt, true);
