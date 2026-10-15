@@ -29,6 +29,12 @@ pub const Modelopt = struct { lane: cuda.qmmf.Lane, gemm: cuda.nvfp4.Prompt, exp
 /// Scratch the expert plan writes (cuda/grouped.zig, shared by the MoE families).
 pub const Plan = cuda.grouped.Plan;
 
+/// A pocket's neurons, [n, D] fp32 up and down; the first `used` in use, their count on the device at `count` too.
+pub const Pocket = struct { up: u64, down: u64, n: usize, used: usize = 0, count: u64 = 0 };
+
+/// The most neurons a pocket holds: the pocket kernels' activation rows are this wide.
+pub const pocket_width = 64;
+
 /// Rows inside a scan launch where it also stores its state (scan_rows.cu `Snaps`): `r[k]` rows taken in, -1 none.
 pub const Snaps = extern struct {
     p: [max]u64 = @splat(0),
@@ -41,6 +47,8 @@ pub const Kernels = struct {
     mods: [22]cuda.Module,
     triton: ?cuda.aot.Set, // a captured Triton set for the glue (GB10's qualified one); null: our own glue kernels
     glue: glue.Fns,
+    emb: cuda.embed_rows.EmbedRows,
+    norms: cuda.norms.Norms,
     affine: cuda.qlinear.Affine4Kernels, // the 4-bit projections: qmm_group, lane_gemv and qmm_prefill
     router: cuda.grouped.Router,
     experts: cuda.experts.Affine4Experts, // the 4-bit grouped experts: experts, experts_prefill and experts_pack
@@ -50,7 +58,8 @@ pub const Kernels = struct {
     serial_feed: cuda.Function,
     plan_routed: cuda.Function,
     rest_rows: cuda.Function,
-    pocket_rows: cuda.Function,
+    pocket_in: [2]cuda.Function, // the pocket's two halves a block row a row, then tiled for a prompt chunk's rows
+    pocket_out: [2]cuda.Function,
     add_row: cuda.Function,
     draws: cuda.sample.Draws, // sample.cu: the keyed draws and logprob rows
     grammar_mask: cuda.Function, // structured output: disallowed tokens -inf before the draw
@@ -81,11 +90,16 @@ pub const Kernels = struct {
         k.serial_feed = try k.mods[7].function("tf_serial_feed");
         k.plan_routed = try k.mods[7].function("tf_plan_routed");
         k.rest_rows = try k.mods[7].function("tf_rest_rows");
-        k.pocket_rows = try k.mods[7].function("tf_pocket_rows");
+        k.pocket_in = .{ try k.mods[7].function("tf_pocket_in"), try k.mods[7].function("tf_pocket_in_rows") };
+        k.pocket_out = .{ try k.mods[7].function("tf_pocket_out"), try k.mods[7].function("tf_pocket_out_rows") };
         k.add_row = try k.mods[7].function("tf_add_row");
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
         k.draws = try cuda.sample.Draws.resolve(k.mods[14]);
         k.glue = try glue.Fns.resolve(k.mods[16..21]);
+        k.emb = try cuda.embed_rows.EmbedRows.load(d);
+        errdefer k.emb.unload();
+        k.norms = try cuda.norms.Norms.load(d);
+        errdefer k.norms.unload();
         k.grammar_mask = try k.mods[14].function("tf_grammar_mask");
         k.modelopt = null;
         k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
@@ -104,6 +118,8 @@ pub const Kernels = struct {
     }
 
     pub fn deinit(k: *Kernels) void {
+        k.emb.unload();
+        k.norms.unload();
         if (k.modelopt) |*m| {
             m.lane.unload();
             m.gemm.unload();
@@ -232,19 +248,49 @@ pub const Ops = struct {
     }
 
     /// nemotron_ops' pocket: out (bf16, fp32 if `out_f32`) += down relu^2(up y) at rows `i * row_mul + row_add`.
-    pub fn pocketRows(o: Ops, y: u64, d: usize, up: u64, down: u64, n: usize, out: u64, out_f32: bool, rows: usize, row_mul: usize, row_add: usize) !void {
-        if (n > 64) return error.PocketTooWide;
+    pub fn pocketRows(
+        o: Ops,
+        y: u64,
+        d: usize,
+        p: Pocket,
+        act: u64,
+        out: u64,
+        out_f32: bool,
+        rows: usize,
+        row_mul: usize,
+        row_add: usize,
+    ) !void {
+        if (p.n > pocket_width) return error.PocketTooWide;
+        if (p.used == 0) return; // no neuron in use: nothing launched, so the output keeps its bits, an exact -0.0 too
+        // a block row a row until the tiled forms (eight neurons by eight rows a warp, 16 rows a thread) run faster
+        const tiled = [2]bool{ rows >= 256, rows >= 64 };
         var a: cuda.Args = .{};
         a.add(y);
         a.add(int(d));
-        a.add(up);
-        a.add(down);
-        a.add(int(n));
-        a.add(out);
-        a.add(@as(c_int, @intFromBool(out_f32)));
-        a.add(int(row_mul));
-        a.add(int(row_add));
-        try o.go(o.k.pocket_rows, .{ rows, 1, 1 }, 256, 0, &a);
+        a.add(p.up);
+        a.add(p.count);
+        a.add(act);
+        a.add(int(rows));
+        const in_grid: [3]usize = if (tiled[0])
+            .{ (p.n + 63) / 64, (rows + 7) / 8, 1 }
+        else
+            .{ (p.n + 3) / 4, rows, 1 };
+        try o.go(o.k.pocket_in[@intFromBool(tiled[0])], in_grid, if (tiled[0]) 256 else 128, 0, &a);
+        var b: cuda.Args = .{};
+        b.add(act);
+        b.add(p.down);
+        b.add(p.count);
+        b.add(int(d));
+        b.add(out);
+        b.add(@as(c_int, @intFromBool(out_f32)));
+        for ([_]usize{ rows, row_mul, row_add }) |v| b.add(int(v));
+        try o.go(
+            o.k.pocket_out[@intFromBool(tiled[1])],
+            .{ (d + 127) / 128, if (tiled[1]) (rows + 15) / 16 else rows, 1 },
+            128,
+            0,
+            &b,
+        );
     }
 
     /// nemotron_ops' nudge: y (bf16, or fp32 when `y_f32`) += x (fp32) over n values.

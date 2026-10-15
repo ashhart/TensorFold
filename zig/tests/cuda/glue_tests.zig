@@ -30,6 +30,8 @@ const Rig = struct {
     a: std.mem.Allocator, // host data, freed together at the end
     s: cuda.Stream,
     f: glue.Fns,
+    emb: cuda.embed_rows.EmbedRows,
+    norms: cuda.norms.Norms,
     rng: std.Random,
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     bad: usize = 0,
@@ -37,7 +39,7 @@ const Rig = struct {
     sparsest: f64 = 1, // the smallest share of nonzero elements in any reference: none may be all zeros
 
     fn g(r: *Rig) glue.Glue {
-        return .{ .set = null, .f = &r.f, .s = r.s };
+        return .{ .set = null, .f = &r.f, .s = r.s, .emb = &r.emb, .norms = &r.norms };
     }
 
     /// A device copy of host values, landed before any kernel on the rig's stream reads it.
@@ -84,6 +86,14 @@ const Rig = struct {
             if (first == null) first = i;
         };
         std.debug.print("DIFFER {s}: {d} of {d} elements, first at {d}: got {any}, want {any}\n", .{ what, n, want.len, first.?, got[first.?], want[first.?] });
+    }
+
+    /// n elements of the device bytes at `ptr`, once the rig's stream is done.
+    fn get(r: *Rig, comptime T: type, ptr: u64, n: usize) ![]T {
+        try r.s.synchronize();
+        const out = try r.a.alloc(T, n);
+        try r.gpu.d.check(r.gpu.d.api.cuMemcpyDtoH_v2(out.ptr, ptr, n * @sizeOf(T)), "cuMemcpyDtoH");
+        return out;
     }
 };
 
@@ -285,6 +295,204 @@ fn attention(r: *Rig, pos: usize, rows: usize) !void {
     try r.same("attention xs", f32, xsd, xs);
 }
 
+/// Three streams' windows in one conv and one scan launch (Glue.mambaSegs): each as its own reference runs it.
+fn mambaSegs(r: *Rig, lo: f32, hi: f32) !void {
+    const cd = ms.cd;
+    const cases = [_][3]usize{ .{ 0, 0, 5 }, .{ 1, 3, 4 }, .{ 0, 7, 6 } }; // parity, kept rows, window rows
+    var total: usize = 0;
+    for (cases) |c| total += c[2];
+    const p = try r.bfs(total * ms.proj, 2.0);
+    const pd = try r.dev(u16, p);
+    const y = try r.a.alloc(u16, total * ms.xd);
+    @memset(y, 0);
+    const yd = try r.dev(u16, y);
+    const cw = try r.f32s(4 * cd, -0.5, 0.5);
+    const cb = try r.f32s(cd, -0.1, 0.1);
+    const a = try r.f32s(ms.heads, -2.0, -0.05);
+    const dsk = try r.f32s(ms.heads, 0.5, 1.5);
+    const dtb = try r.f32s(ms.heads, -4.0, 1.0);
+    const Stream = struct { base: []u16, raw: []u16, xc: []u16, dt: []f32, st: []f32, d: glue.MambaSeg };
+    var streams: [cases.len]Stream = undefined;
+    var row0: usize = 0;
+    for (cases, &streams) |c, *x| {
+        x.base = try r.bfs(3 * cd, 1.0);
+        x.raw = try r.bfs(2 * ms.rmax * cd, 1.0); // the kept rows the window replays
+        x.xc = try r.bfs(2 * ms.rmax * cd, 1.0); // the kept rows' conv outputs the scan replays
+        x.dt = try r.f32s(2 * ms.rmax * ms.heads, 0.01, 0.1);
+        x.st = try r.f32s(ms.heads * ms.dh * 128, -0.2, 0.2);
+        const meta = try r.dev(i32, &.{ 100, @intCast(c[0]), @intCast(c[1]), 0 });
+        x.d = .{ .proj = pd + row0 * ms.proj * 2, .base = try r.dev(u16, x.base), .raw = try r.dev(u16, x.raw), .xc = try r.dev(u16, x.xc), .dt = try r.dev(f32, x.dt), .state = try r.dev(f32, x.st), .meta = meta, .y = yd + row0 * ms.xd * 2, .rows = c[2] };
+        row0 += c[2];
+    }
+    var ds: [cases.len]glue.MambaSeg = undefined;
+    for (streams, &ds) |x, *d| d.* = x.d;
+    try r.g().mambaSegs(&ds, try r.dev(f32, cw), try r.dev(f32, cb), try r.dev(f32, a), try r.dev(f32, dsk), try r.dev(f32, dtb), lo, hi, mshape());
+    row0 = 0;
+    for (cases, &streams) |c, *x| {
+        const pk = p[row0 * ms.proj ..][0 .. c[2] * ms.proj];
+        ref.conv(pk, x.base, x.raw, x.xc, cw, cb, c[0], c[1], c[2], ms);
+        ref.scan(pk, x.xc, x.dt, x.st, a, dsk, dtb, y[row0 * ms.xd ..][0 .. c[2] * ms.xd], c[0], c[1], c[2], lo, hi, ms);
+        try r.same("segs conv xc", u16, x.d.xc, x.xc);
+        try r.same("segs conv raw", u16, x.d.raw, x.raw);
+        try r.same("segs conv base", u16, x.d.base, x.base);
+        try r.same("segs scan dt", f32, x.d.dt, x.dt);
+        try r.same("segs scan state", f32, x.d.state, x.st);
+        row0 += c[2];
+    }
+    try r.same("segs scan y", u16, yd, y);
+}
+
+/// Three streams' windows at their own positions in one launch of each attention kernel (Glue.attentionSegs).
+fn attentionSegs(r: *Rig) !void {
+    const kvd = at.kv_heads * at.dim;
+    const qd = at.heads * at.dim;
+    const cases = [_][2]usize{ .{ 0, 5 }, .{ 1000, 3 }, .{ 5000, 6 } }; // position, rows
+    var total: usize = 0;
+    for (cases) |c| total += c[1];
+    const qkv = try r.bfs(total * at.nqkv, 1.0);
+    const qkvd = try r.dev(u16, qkv);
+    const out = try r.a.alloc(u16, total * qd);
+    const xs = try r.a.alloc(f32, total * qd / 64);
+    const Stream = struct { kc: []u16, vc: []u16, d: glue.AttnSeg };
+    var streams: [cases.len]Stream = undefined;
+    var ds: [cases.len]glue.AttnSeg = undefined;
+    var row0: usize = 0;
+    for (cases, &streams, &ds) |c, *x, *d| {
+        const pos = c[0];
+        x.kc = try r.bfs((pos + c[1]) * kvd, 1.0);
+        x.vc = try r.bfs((pos + c[1]) * kvd, 1.0);
+        x.d = .{ .kc = try r.dev(u16, x.kc), .vc = try r.dev(u16, x.vc), .meta = try r.dev(i32, &.{ @intCast(pos), 0, 0, 0 }), .row0 = row0, .rows = c[1] };
+        d.* = x.d;
+        row0 += c[1];
+    }
+    const pod = try r.zeros(f32, total * at.nch * qd);
+    const pmd = try r.zeros(f32, total * at.nch * at.heads);
+    const pld = try r.zeros(f32, total * at.nch * at.heads);
+    const outd = try r.zeros(u16, total * qd);
+    const xsd = try r.zeros(f32, total * qd / 64);
+    try r.g().attentionSegs(&ds, qkvd, pod, pmd, pld, outd, xsd, ashape());
+    row0 = 0;
+    for (cases, &streams) |c, *x| {
+        const pos = c[0];
+        const rows = c[1];
+        const q = qkv[row0 * at.nqkv ..][0 .. rows * at.nqkv];
+        for (0..rows) |row| {
+            @memcpy(x.kc[(pos + row) * kvd ..][0..kvd], q[row * at.nqkv + qd ..][0..kvd]);
+            @memcpy(x.vc[(pos + row) * kvd ..][0..kvd], q[row * at.nqkv + qd + kvd ..][0..kvd]);
+        }
+        const po = try r.a.alloc(f32, rows * at.nch * qd);
+        const pm = try r.a.alloc(f32, rows * at.nch * at.heads);
+        const pl = try r.a.alloc(f32, rows * at.nch * at.heads);
+        ref.attention(q, x.kc, x.vc, pos, rows, at, po, pm, pl, out[row0 * qd ..][0 .. rows * qd], xs[row0 * qd / 64 ..][0 .. rows * qd / 64]);
+        try r.same("segs kv_write k", u16, x.d.kc, x.kc);
+        try r.same("segs kv_write v", u16, x.d.vc, x.vc);
+        row0 += rows;
+    }
+    try r.same("segs attention out", u16, outd, out);
+    try r.same("segs attention xs", f32, xsd, xs);
+}
+
+/// Stream slots and the shape the first slot takes: every shape in every slot of eight, then two and three streams.
+const path_runs = [_][2]usize{ .{ 8, 0 }, .{ 8, 1 }, .{ 8, 2 }, .{ 8, 3 }, .{ 8, 4 }, .{ 8, 5 }, .{ 8, 6 }, .{ 8, 7 }, .{ 2, 3 }, .{ 3, 5 } };
+
+/// Each shape's window run alone (conv, scan) and as one stream of a shared window (Glue.mambaSegs): the same bytes.
+fn mambaPaths(r: *Rig, lo: f32, hi: f32) !void {
+    const cd = ms.cd;
+    const shapes = [_][3]usize{ .{ 0, 0, 1 }, .{ 1, 0, 2 }, .{ 0, 1, 1 }, .{ 1, 3, 4 }, .{ 0, 7, 6 }, .{ 1, 15, 1 }, .{ 0, 0, 16 }, .{ 1, 8, 8 } }; // parity, kept rows, window rows
+    const cw = try r.dev(f32, try r.f32s(4 * cd, -0.5, 0.5));
+    const cb = try r.dev(f32, try r.f32s(cd, -0.1, 0.1));
+    const a = try r.dev(f32, try r.f32s(ms.heads, -2.0, -0.05));
+    const dsk = try r.dev(f32, try r.f32s(ms.heads, 0.5, 1.5));
+    const dtb = try r.dev(f32, try r.f32s(ms.heads, -4.0, 1.0));
+    const In = struct { p: []u16, base: []u16, raw: []u16, xc: []u16, dt: []f32, st: []f32, meta: u64 };
+    var ins: [shapes.len]In = undefined;
+    for (shapes, &ins) |c, *x| x.* = .{ .p = try r.bfs(c[2] * ms.proj, 2.0), .base = try r.bfs(3 * cd, 1.0), .raw = try r.bfs(2 * ms.rmax * cd, 1.0), .xc = try r.bfs(2 * ms.rmax * cd, 1.0), .dt = try r.f32s(2 * ms.rmax * ms.heads, 0.01, 0.1), .st = try r.f32s(ms.heads * ms.dh * 128, -0.2, 0.2), .meta = try r.dev(i32, &.{ 100, @intCast(c[0]), @intCast(c[1]), 0 }) };
+    for (path_runs) |pr| {
+        const n = pr[0];
+        var total: usize = 0;
+        for (0..n) |k| total += shapes[(k + pr[1]) % shapes.len][2];
+        const p = try r.a.alloc(u16, total * ms.proj);
+        var row0: usize = 0;
+        for (0..n) |k| {
+            const i = (k + pr[1]) % shapes.len;
+            @memcpy(p[row0 * ms.proj ..][0 .. shapes[i][2] * ms.proj], ins[i].p);
+            row0 += shapes[i][2];
+        }
+        const pd = try r.dev(u16, p);
+        const yd = try r.zeros(u16, total * ms.xd);
+        var alone: [glue.max_segs]glue.MambaSeg = undefined;
+        var segs: [glue.max_segs]glue.MambaSeg = undefined;
+        row0 = 0;
+        for (0..n) |k| {
+            const x = ins[(k + pr[1]) % shapes.len];
+            const rows = x.p.len / ms.proj;
+            alone[k] = .{ .proj = try r.dev(u16, x.p), .base = try r.dev(u16, x.base), .raw = try r.dev(u16, x.raw), .xc = try r.dev(u16, x.xc), .dt = try r.dev(f32, x.dt), .state = try r.dev(f32, x.st), .meta = x.meta, .y = try r.zeros(u16, rows * ms.xd), .rows = rows };
+            segs[k] = .{ .proj = pd + row0 * ms.proj * 2, .base = try r.dev(u16, x.base), .raw = try r.dev(u16, x.raw), .xc = try r.dev(u16, x.xc), .dt = try r.dev(f32, x.dt), .state = try r.dev(f32, x.st), .meta = x.meta, .y = yd + row0 * ms.xd * 2, .rows = rows };
+            row0 += rows;
+        }
+        for (alone[0..n]) |s| {
+            try r.g().conv(s.proj, s.base, s.raw, s.xc, cw, cb, s.meta, s.rows, mshape());
+            try r.g().scan(s.proj, s.xc, s.dt, s.state, a, dsk, dtb, s.meta, s.y, s.rows, lo, hi, mshape());
+        }
+        try r.g().mambaSegs(segs[0..n], cw, cb, a, dsk, dtb, lo, hi, mshape());
+        for (alone[0..n], segs[0..n]) |x, s| {
+            try r.same("paths conv xc", u16, s.xc, try r.get(u16, x.xc, 2 * ms.rmax * cd));
+            try r.same("paths conv raw", u16, s.raw, try r.get(u16, x.raw, 2 * ms.rmax * cd));
+            try r.same("paths conv base", u16, s.base, try r.get(u16, x.base, 3 * cd));
+            try r.same("paths scan dt", f32, s.dt, try r.get(f32, x.dt, 2 * ms.rmax * ms.heads));
+            try r.same("paths scan state", f32, s.state, try r.get(f32, x.state, ms.heads * ms.dh * 128));
+            try r.same("paths scan y", u16, s.y, try r.get(u16, x.y, x.rows * ms.xd));
+        }
+    }
+}
+
+/// Each shape's window run alone (kv_write, attention) and as one stream of a shared window (Glue.attentionSegs).
+fn attentionPaths(r: *Rig) !void {
+    const kvd = at.kv_heads * at.dim;
+    const qd = at.heads * at.dim;
+    const shapes = [_][2]usize{ .{ 0, 1 }, .{ 0, 16 }, .{ 1000, 1 }, .{ 1000, 16 }, .{ 5000, 3 }, .{ 40000, 2 }, .{ 511, 2 }, .{ 20000, 5 } }; // position, rows
+    const In = struct { kc: []u16, vc: []u16, qkv: []u16, meta: u64 };
+    var ins: [shapes.len]In = undefined;
+    for (shapes, &ins) |c, *x| x.* = .{ .kc = try r.bfs((c[0] + c[1]) * kvd, 1.0), .vc = try r.bfs((c[0] + c[1]) * kvd, 1.0), .qkv = try r.bfs(c[1] * at.nqkv, 1.0), .meta = try r.dev(i32, &.{ @intCast(c[0]), 0, 0, 0 }) };
+    for (path_runs) |pr| {
+        const n = pr[0];
+        var total: usize = 0;
+        for (0..n) |k| total += shapes[(k + pr[1]) % shapes.len][1];
+        const q = try r.a.alloc(u16, total * at.nqkv);
+        var row0: usize = 0;
+        for (0..n) |k| {
+            const i = (k + pr[1]) % shapes.len;
+            @memcpy(q[row0 * at.nqkv ..][0 .. shapes[i][1] * at.nqkv], ins[i].qkv);
+            row0 += shapes[i][1];
+        }
+        const qkvd = try r.dev(u16, q);
+        const Alone = struct { kc: u64, vc: u64, out: u64, xs: u64, rows: usize, keys: usize };
+        var alone: [glue.max_segs]Alone = undefined;
+        var segs: [glue.max_segs]glue.AttnSeg = undefined;
+        row0 = 0;
+        for (0..n) |k| {
+            const x = ins[(k + pr[1]) % shapes.len];
+            const rows = x.qkv.len / at.nqkv;
+            const al: Alone = .{ .kc = try r.dev(u16, x.kc), .vc = try r.dev(u16, x.vc), .out = try r.zeros(u16, rows * qd), .xs = try r.zeros(f32, rows * qd / 64), .rows = rows, .keys = x.kc.len };
+            const qa = try r.dev(u16, x.qkv);
+            try r.g().kvWrite(qa, al.kc, al.vc, x.meta, rows, ashape());
+            try r.g().attention(qa, al.kc, al.vc, x.meta, try r.zeros(f32, rows * at.nch * qd), try r.zeros(f32, rows * at.nch * at.heads), try r.zeros(f32, rows * at.nch * at.heads), al.out, al.xs, rows, ashape());
+            alone[k] = al;
+            segs[k] = .{ .kc = try r.dev(u16, x.kc), .vc = try r.dev(u16, x.vc), .meta = x.meta, .row0 = row0, .rows = rows };
+            row0 += rows;
+        }
+        const outd = try r.zeros(u16, total * qd);
+        const xsd = try r.zeros(f32, total * qd / 64);
+        try r.g().attentionSegs(segs[0..n], qkvd, try r.zeros(f32, total * at.nch * qd), try r.zeros(f32, total * at.nch * at.heads), try r.zeros(f32, total * at.nch * at.heads), outd, xsd, ashape());
+        for (alone[0..n], segs[0..n]) |x, s| {
+            try r.same("paths kv_write k", u16, s.kc, try r.get(u16, x.kc, x.keys));
+            try r.same("paths kv_write v", u16, s.vc, try r.get(u16, x.vc, x.keys));
+            try r.same("paths attention out", u16, outd + s.row0 * qd * 2, try r.get(u16, x.out, x.rows * qd));
+            try r.same("paths attention xs", f32, xsd + s.row0 * (qd / 64) * 4, try r.get(f32, x.xs, x.rows * qd / 64));
+        }
+    }
+}
+
 fn keyed(r: *Rig) !void {
     const rows = 4;
     const count = 28;
@@ -315,8 +523,18 @@ pub fn run(gpu: Gpu) !void {
         loaded += 1;
     }
     var prng = std.Random.DefaultPrng.init(0x5eed_9a7e);
-    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = try cuda.Stream.init(gpu.d, true), .f = try glue.Fns.resolve(&mods), .rng = prng.random() };
+    var r: Rig = .{
+        .gpu = gpu,
+        .a = arena.allocator(),
+        .s = try cuda.Stream.init(gpu.d, true),
+        .f = try glue.Fns.resolve(&mods),
+        .emb = try cuda.embed_rows.EmbedRows.load(gpu.d),
+        .norms = try cuda.norms.Norms.load(gpu.d),
+        .rng = prng.random(),
+    };
     defer {
+        r.emb.unload();
+        r.norms.unload();
         r.s.deinit();
         for (r.bufs.items) |*b| b.free();
         r.bufs.deinit(gpu.gpa);
@@ -325,9 +543,14 @@ pub fn run(gpu: Gpu) !void {
     try route(&r);
     try mamba(&r, 0, std.math.inf(f32));
     try mamba(&r, 0.001, 0.1);
-    for ([_][2]usize{ .{ 0, 16 }, .{ 1000, 16 }, .{ 5000, 3 }, .{ 40000, 2 } }) |c| try attention(&r, c[0], c[1]);
+    try mambaSegs(&r, 0.001, 0.1);
+    try mambaPaths(&r, 0, std.math.inf(f32));
+    try mambaPaths(&r, 0.001, 0.1);
+    for ([_][2]usize{ .{ 0, 16 }, .{ 1000, 16 }, .{ 5000, 3 }, .{ 40000, 2 }, .{ 0, 1 }, .{ 40000, 1 } }) |c| try attention(&r, c[0], c[1]);
+    try attentionSegs(&r);
+    try attentionPaths(&r);
     try keyed(&r);
-    try check.expect(r.bad == 0, "glue: {d} of {d} comparisons differ from the host references", .{ r.bad, r.cases });
+    try check.expect(r.bad == 0, "glue: {d} of {d} comparisons differ from the host references or the one-stream kernels", .{ r.bad, r.cases });
     try check.expect(r.sparsest > 0, "glue: a host reference is all zeros, so its comparison proves nothing", .{});
-    check.pass("glue: {d} of {d} comparisons byte-equal to the host references (norms, router, top-k, conv, scan, attention, draw); every reference at least {d:.0}% nonzero", .{ r.cases, r.cases, r.sparsest * 100 });
+    check.pass("glue: {d} of {d} comparisons byte-equal to the host references (norms, router, top-k, conv, scan, attention, draw, several streams at once) and the shared-window kernels to the one-stream ones; every reference at least {d:.0}% nonzero", .{ r.cases, r.cases, r.sparsest * 100 });
 }

@@ -15,6 +15,7 @@ const CopyIndex = @import("../../core/copy_index.zig").CopyIndex;
 const checks = @import("checks.zig");
 const load_plan = @import("load_plan.zig");
 const plain_rounds = @import("plain_rounds.zig");
+const frags = @import("../../core/frags.zig");
 const Ref = wts.Ref;
 
 pub const Reason = enum { stop, length, cancelled };
@@ -160,6 +161,7 @@ pub const Engine = struct {
             e.k.deinit();
             gpa.destroy(e.k);
         }
+        try frags.check(e.device, e.queue, gpa); // the fragment layout nax.h gives GLM's prompt and attention kernels
         const chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
         e.limit = try load_plan.loadLimit(e.device);
         const limit = e.limit.bytes;
@@ -203,6 +205,7 @@ pub const Engine = struct {
             e.w.deinit();
             gpa.destroy(e.w);
         }
+        if (!wts.native(e.w, &e.c)) try e.k.widen(gpa, e.device); // a width, split stack or layout past the 4/64 kernels
         try e.prepare();
         if (link) |s| {
             const rows = e.c.byRows();

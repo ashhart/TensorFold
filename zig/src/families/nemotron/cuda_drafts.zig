@@ -5,6 +5,7 @@ const core = @import("core");
 const Engine = @import("cuda_engine.zig").Engine;
 const mtp = @import("cuda_mtp.zig");
 const Head = mtp.Head;
+const Mask = @import("cuda_engine.zig").Mask;
 const DepthRule = core.draft_depth.DepthRule;
 
 pub const Stats = struct { rounds: usize = 0, drafted: usize = 0, accepted: usize = 0 };
@@ -29,6 +30,14 @@ fn depth(h: *Head, rule: *const DepthRule) !usize {
     }
     return n;
 }
+
+/// A grammar's hold on a window: of `ids` (row 0 pending) the rows it keeps, then its own drafts, written in `ids`.
+pub const Gate = struct {
+    ptr: *anyopaque,
+    window: *const fn (ptr: *anyopaque, ids: []u32, planned: usize) anyerror!Gated,
+};
+
+pub const Gated = struct { rows: usize, mask: Mask };
 
 /// A drafted decode's rounds over a token context: each verifies a copied chain or the head's chain in one window.
 pub const Rounds = struct {
@@ -55,15 +64,33 @@ pub const Rounds = struct {
         return r;
     }
 
+    /// Rounds over a stream the lane core drafted last: the head's kept rows absorbed again, level 1 drafted again.
+    pub fn resumed(gpa: std.mem.Allocator, e: *Engine, h: *Head, rule: *DepthRule, prompt: []const u32, out: []const u32, kept: usize) !Rounds {
+        var r: Rounds = .{ .e = e, .h = h, .rule = rule, .index = try core.CopyIndex.init(gpa, prompt) };
+        errdefer r.index.deinit();
+        try r.index.extend(out);
+        r.copied = r.index.chain(&r.cbuf);
+        try h.again(kept);
+        try h.launch(if (r.copied.len > 0) 0 else 1);
+        return r;
+    }
+
     pub fn deinit(r: *Rounds) void {
         r.index.deinit();
     }
 
     /// One window after `last`: the copied chain or the head's drafts, verified; its drawn tokens and drafts accepted.
-    pub fn verify(r: *Rounds, last: u32) !struct { sampled: []const u32, accepted: usize } {
+    pub fn verify(r: *Rounds, last: u32, gate: ?Gate) !struct { sampled: []const u32, accepted: usize } {
         const e = r.e;
         r.copy_round = r.copied.len > 0;
-        if (r.copy_round) {
+        if (gate) |g| { // the planned chain as host tokens, cut and grown by the grammar, its rows masked
+            const planned = if (r.copy_round) r.copied else r.h.drafts()[0..try depth(r.h, r.rule)];
+            r.ids[0] = last;
+            @memcpy(r.ids[1..][0..planned.len], planned);
+            const w = try g.window(g.ptr, &r.ids, 1 + planned.len);
+            try e.verifyMasked(r.ids[0..w.rows], w.rows, null, w.mask);
+            r.proposal = r.ids[1..w.rows];
+        } else if (r.copy_round) {
             r.ids[0] = last;
             @memcpy(r.ids[1..][0..r.copied.len], r.copied);
             try e.verify(r.ids[0 .. 1 + r.copied.len], 1 + r.copied.len, null);
@@ -98,7 +125,7 @@ pub fn decode(gpa: std.mem.Allocator, e: *Engine, h: *Head, rule: *DepthRule, pr
     var r = try Rounds.init(gpa, e, h, rule, prompt, out.items, last_hidden);
     defer r.deinit();
     while (out.items.len < count and !(stop_eos and e.c.isEos(out.items[out.items.len - 1]))) {
-        const v = try r.verify(out.items[out.items.len - 1]);
+        const v = try r.verify(out.items[out.items.len - 1], null);
         var accepted = v.accepted;
         if (stop_eos) for (v.sampled[0..accepted], 0..) |t, j| if (e.c.isEos(t)) {
             accepted = @intCast(j);

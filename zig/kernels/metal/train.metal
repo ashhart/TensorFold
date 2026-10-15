@@ -120,6 +120,37 @@ kernel void tf_pocket_relu2(device float* z [[buffer(0)]], constant uint& n [[bu
   z[i] = v * v;
 }
 
+// tf_train_lora_in's sums with tf_pocket_relu2 at the store, z[r, q] = relu(x[r] . up[q])^2; a simdgroup per (q, r)
+kernel void tf_pocket_in(const device bfloat* x [[buffer(0)]],
+                         const device float* up [[buffer(1)]],
+                         device float* z [[buffer(2)]],
+                         constant uint4& dims [[buffer(3)]],
+                         uint2 pos [[thread_position_in_grid]],
+                         uint lane [[thread_index_in_simdgroup]]) {
+  const uint rows = dims.x, n_in = dims.y, n = dims.z, q = pos.x / 32, r = pos.y;
+  if (q >= n || r >= rows) return;
+  const device bfloat* xr = x + size_t(r) * n_in;
+  const device float* ur = up + size_t(q) * n_in;
+  float s = 0;
+  uint i = lane;
+  // a lane's elements 28 at a time, all loaded before they are added in tf_train_lora_in's order, then the rest
+  for (; i + 32 * 27 < n_in; i += 32 * 28) {
+    float xv[28], uv[28];
+    for (uint k = 0; k < 28; k++) {
+      xv[k] = float(xr[i + 32 * k]);
+      uv[k] = ur[i + 32 * k];
+    }
+    for (uint k = 0; k < 28; k++) s += xv[k] * uv[k];
+  }
+  for (; i < n_in; i += 32) {
+    const float v = float(xr[i]);
+    s += v * ur[i];
+  }
+  s = simd_sum(s);
+  const float v = max(s, 0.0f);
+  if (lane == 0) z[size_t(r) * n + q] = v * v;
+}
+
 // tf_pocket_relu2 over z [rows, n] (dims: count, n, from), neurons from `from` on times their row's scale
 kernel void tf_pocket_relu2_rows(device float* z [[buffer(0)]], constant uint4& dims [[buffer(1)]],
                                  const device float* scale [[buffer(2)]], uint i [[thread_position_in_grid]]) {

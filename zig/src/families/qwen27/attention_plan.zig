@@ -15,6 +15,8 @@ pub const Geometry = struct {
     dim: u32 = 256,
     rotary: u32 = 64,
     shared_prefix: bool = true,
+    /// Chains of rows take the prefix kernel to their last key; a test turns this off to compare with the tail kernel.
+    fuse_chain: bool = true,
     pub fn check(g: Geometry) !void {
         if (g.heads != 24 or g.kv_heads != 4 or g.dim != 256 or g.rotary != 64) return error.TargetAttentionShape;
     }
@@ -30,6 +32,8 @@ pub const Plan = struct {
     tiles: u32,
     prefix_chunks: u32,
     tail_chunks: u32,
+    /// Every stream is a chain of rows: the prefix kernel reads each row's own keys itself, so no tail kernel runs.
+    fused: bool,
     meta: [global_words + max_streams * stream_words]i32 = @splat(0),
     tile_stream: []i32,
     q_rows: []i32,
@@ -44,6 +48,10 @@ pub const Plan = struct {
         var tile_count: u32 = 0;
         var ca_max: u32 = 0;
         var cb_max: u32 = 0;
+        var fused = geometry.shared_prefix and geometry.fuse_chain;
+        for (windows) |w| for (w.parents, 0..) |p, r| if (r > 0 and p != @as(i32, @intCast(r)) - 1) {
+            fused = false;
+        };
         for (windows, 0..) |w, st| {
             if (w.parents.len == 0 or w.parents.len > max_rows or w.start > w.capacity or @as(u64, w.start) + w.parents.len > w.capacity or w.capacity > std.math.maxInt(i32) / geometry.dim) return error.AttentionCapacity;
             if (w.parents[0] != -1) return error.AttentionParents;
@@ -55,8 +63,10 @@ pub const Plan = struct {
                 deepest = @max(deepest, depths[r]);
             }
             const pt = if (geometry.shared_prefix) w.start / tile * tile else 0;
-            const ca = (pt + chunk - 1) / chunk;
-            const cb = (w.start + deepest) / chunk - pt / chunk + 1;
+            // a chain's prefix kernel runs to its last row's key, any other round stops at the tile before its own keys
+            const limit: u32 = if (fused) w.start + @as(u32, @intCast(w.parents.len)) else pt;
+            const ca = (limit + chunk - 1) / chunk;
+            const cb = if (fused) 0 else (w.start + deepest) / chunk - pt / chunk + 1;
             const count: u32 = @intCast((geometry.group() * w.parents.len + 15) / 16);
             const at = global_words + st * stream_words;
             meta[at] = @intCast(pt);
@@ -68,6 +78,8 @@ pub const Plan = struct {
             meta[at + 6] = @intCast(row_count);
             meta[at + 7] = @intCast(w.capacity * geometry.dim);
             meta[at + 8] = meta[at + 7];
+            meta[at + 9] = @intCast(limit);
+            meta[at + 10] = @intCast(if (fused) ca else pt / chunk);
             row_count = try std.math.add(u32, row_count, @intCast(w.parents.len));
             tile_count += count;
             ca_max = @max(ca_max, ca);
@@ -109,7 +121,7 @@ pub const Plan = struct {
                 paths[node * path_width + depth] = @intCast(r);
             }
         }
-        return .{ .gpa = gpa, .geometry = geometry, .streams = @intCast(windows.len), .rows = row_count, .tiles = tile_count, .prefix_chunks = ca_max, .tail_chunks = cb_max, .meta = meta, .tile_stream = ts, .q_rows = qr, .nodes = nodes, .paths = paths, .positions = positions };
+        return .{ .gpa = gpa, .geometry = geometry, .streams = @intCast(windows.len), .rows = row_count, .tiles = tile_count, .prefix_chunks = ca_max, .tail_chunks = cb_max, .fused = fused, .meta = meta, .tile_stream = ts, .q_rows = qr, .nodes = nodes, .paths = paths, .positions = positions };
     }
     pub fn deinit(p: *Plan) void {
         p.gpa.free(p.tile_stream);
@@ -213,4 +225,34 @@ test "canonical tail keeps the same causal and ancestor map across multiple key 
     for (0..canonical.rows) |row| for (0..518) |key| {
         try std.testing.expectEqual(try ordinary.physical(row, @intCast(key)), try canonical.physical(row, @intCast(key)));
     };
+}
+
+test "a chain's prefix runs to its last key and leaves no tail chunk, any other round keeps the tail kernel" {
+    for ([_]u32{ 0, 1, 63, 64, 511, 512, 600 }) |start| {
+        const chain = [_]Window{.{ .parents = &.{ -1, 0, 1 }, .start = start, .capacity = 2048 }};
+        var fused = try Plan.init(std.testing.allocator, &chain, .{});
+        defer fused.deinit();
+        var tailed = try Plan.init(std.testing.allocator, &chain, .{ .fuse_chain = false });
+        defer tailed.deinit();
+        try std.testing.expect(fused.fused and !tailed.fused);
+        try std.testing.expectEqual(start + 3, @as(u32, @intCast(fused.meta[global_words + 9])));
+        try std.testing.expectEqual((start + 3 + chunk - 1) / chunk, fused.prefix_chunks);
+        try std.testing.expectEqual(@as(u32, @intCast(fused.meta[global_words + 10])), fused.prefix_chunks);
+        try std.testing.expectEqual(@as(u32, 0), fused.tail_chunks);
+        try std.testing.expect(tailed.tail_chunks > 0);
+        try std.testing.expectEqual(start / tile * tile, @as(u32, @intCast(tailed.meta[global_words + 9])));
+        try std.testing.expectEqualSlices(i32, tailed.positions, fused.positions);
+        for (0..3) |row| for (0..start + 3) |key| try std.testing.expectEqual(try tailed.physical(row, @intCast(key)), try fused.physical(row, @intCast(key)));
+    }
+    const tree = [_]Window{.{ .parents = &.{ -1, 0, 0 }, .start = 600, .capacity = 1024 }};
+    var forked = try Plan.init(std.testing.allocator, &tree, .{});
+    defer forked.deinit();
+    try std.testing.expect(!forked.fused);
+    const mixed = [_]Window{ .{ .parents = &.{ -1, 0 }, .start = 5, .capacity = 512 }, tree[0] };
+    var both = try Plan.init(std.testing.allocator, &mixed, .{});
+    defer both.deinit();
+    try std.testing.expect(!both.fused);
+    var canonical = try Plan.init(std.testing.allocator, &.{.{ .parents = &.{ -1, 0 }, .start = 5, .capacity = 512 }}, .{ .shared_prefix = false });
+    defer canonical.deinit();
+    try std.testing.expect(!canonical.fused);
 }

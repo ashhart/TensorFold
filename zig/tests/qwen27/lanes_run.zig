@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
     const prompt = try ids(a, io, tokens_file.?);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const target = try q.model.Model.load(init.gpa, io, target_dir.?, 128);
+    const target = try q.model.Model.load(init.gpa, io, target_dir.?, 128, null);
     defer target.deinit();
     var runner = try q.decode_round.Runner.init(init.gpa, target, 1, @intCast(prompt.len + count + 64));
     defer runner.deinit();

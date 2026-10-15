@@ -65,7 +65,7 @@ test "warm endpoint retains the rewind when two states fit" {
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .warm = true, .min_prompt = 0 }, 214);
+    var s = Store.init(gpa, f.snapshots(), .{ .warm = .on, .min_prompt = 0 }, 214);
     defer s.deinit();
     const warm = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
     const p = try s.beginRewind(a, &warm, warm.len, 4, &.{}, &.{}, null, &.{});
@@ -156,7 +156,7 @@ test "a rewind under min_gap past the resume point keeps no copy: the resumed st
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .warm = true, .min_prompt = 0, .min_gap = 4 }, 222); // bytes 100 + at
+    var s = Store.init(gpa, f.snapshots(), .{ .warm = .on, .min_prompt = 0, .min_gap = 4 }, 222); // bytes 100 + at
     defer s.deinit();
     const before = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
     _ = f.pass(&s, &before, try s.begin(a, &before, 6, &.{}, &.{}, null, &.{})); // the state a turn resumes, as a reply's
@@ -181,7 +181,7 @@ test "the warm pass after a turn keeps that turn's rewind state, though it resum
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .warm = true, .min_prompt = 0, .min_gap = 4 }, 230); // two states (bytes 100 + at)
+    var s = Store.init(gpa, f.snapshots(), .{ .warm = .on, .min_prompt = 0, .min_gap = 4 }, 230); // two states (bytes 100 + at)
     defer s.deinit();
     const before = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8 };
     _ = f.pass(&s, &before, try s.begin(a, &before, 6, &.{}, &.{}, null, &.{}));

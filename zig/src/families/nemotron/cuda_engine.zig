@@ -40,10 +40,16 @@ pub const Options = struct {
 pub const Cancel = struct {
     ptr: *anyopaque,
     check: *const fn (ptr: *anyopaque) bool,
+    yields: bool = false, // a background pass's hook: it steps aside for real work, so its chunks stay short
 
     pub fn now(c: ?Cancel) bool {
         const x = c orelse return false;
         return x.check(x.ptr);
+    }
+
+    /// A background pass: chunks of state.yield_rows, one in flight, and what it prefilled kept when it stops.
+    pub fn background(c: ?Cancel) bool {
+        return if (c) |x| x.yields else false;
     }
 };
 
@@ -66,7 +72,7 @@ const pin_meta = 0;
 const pin_ids = 4;
 pub const pin_sampled = 32;
 pub const pin_prompt = 64;
-const pin_shared = pin_prompt + segs.MAX * state.prefill_rows;
+const pin_shared = pin_prompt + @max(segs.MAX * state.prefill_rows, state.pass_rows);
 /// Graph ids of masked verify windows (launchGraph's ids: windows from 1, head levels from 1000).
 const masked_ids = 4000;
 

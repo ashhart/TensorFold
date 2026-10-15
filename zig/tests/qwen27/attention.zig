@@ -175,10 +175,13 @@ fn runCase(init: std.process.Init, device: mtl.Device, queue: mtl.Queue, op: *co
     }
     var plan = try q.Plan.init(a, windows[0..streams], .{});
     defer plan.deinit();
+    // The pinned raw partials are laid out by the tail kernel's plan, which a fused chain does not have.
+    var raw_plan = try q.Plan.init(a, windows[0..streams], .{ .fuse_chain = false });
+    defer raw_plan.deinit();
     const limits: q.Limits = .{ .rows = plan.rows, .streams = plan.streams, .keys = keys };
     var scratch = try q.Scratch.init(device, limits);
     defer scratch.deinit();
-    try scratch.upload(plan);
+    try scratch.upload(raw_plan);
     var files: [2]core.safetensors.File = undefined;
     var frames: [2]Frame = undefined;
     var owners: [2]CacheOwner = undefined;
@@ -206,16 +209,18 @@ fn runCase(init: std.process.Init, device: mtl.Device, queue: mtl.Queue, op: *co
         nc += 1;
         bindings[layer] = try q.Binding.init(device, limits);
         nb += 1;
-        try bindings[layer].upload(plan, owners[layer].caches[0..streams]);
+        try bindings[layer].upload(raw_plan, owners[layer].caches[0..streams]);
         const cb = queue.commandBuffer();
         const e = cb.compute(.serial);
         try frames[layer].preprocess(op, e, &scratch);
-        try frames[layer].encode(op, e, &scratch, &bindings[layer], plan, owners[layer].caches[0..streams], false);
+        try frames[layer].encode(op, e, &scratch, &bindings[layer], raw_plan, owners[layer].caches[0..streams], false);
         try terminal(cb, e);
         try checkFrame(&files[layer], &frames[layer], false, false, count);
-        try partials(&files[layer], &scratch, plan, count);
+        try partials(&files[layer], &scratch, raw_plan, count);
         try checkCaches(&files[layer], &owners[layer], "append", count);
     }
+    try scratch.upload(plan);
+    for (bindings[0..nb], owners[0..nc]) |*binding, *owner| try binding.upload(plan, owner.caches[0..streams]);
     for (&owners, &files) |*owner, *file| try owner.reset(file);
     const pair = queue.commandBuffer();
     const pair_e = pair.compute(.serial);

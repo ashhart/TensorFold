@@ -1,6 +1,7 @@
 //! Explicit GPU qualification tests; run through the native test module on a Metal SIMDgroup-matrix device.
 const std = @import("std");
 const mtl = @import("metal");
+const sources = @import("kernel_sources");
 const ex = @import("exl3_projection.zig");
 const decoder = @import("exl3_projection_decode.zig");
 const k = 256;
@@ -385,4 +386,67 @@ test "caller-prepared grouped expert tiles preserve scatter slots and ignore pad
     }
     try complete(cb, e);
     try std.testing.expectEqualSlices(u32, plain.slice(u32, 16 * n), grouped.slice(u32, 16 * n));
+}
+
+const StateWindowInput = extern struct { lo: u32, hi: u32, off: u32, reserved: u32 = 0 };
+
+test "Metal EXL3 mapped windows match independent 64-bit extraction at every offset" {
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    const lib = try mtl.Library.fromSource(device, sources.core_exl3_projection, mtl.CompileOptions.mlx());
+    defer lib.deinit();
+    const pipeline = try mtl.Pipeline.init(device, lib, "tf_exl3_state_window_check", false);
+    defer pipeline.deinit();
+    if (pipeline.maxThreads() < 256) return error.UnsupportedProbeThreads;
+    var patterns: [1095][2]u32 = undefined;
+    for (0..32) |bit| {
+        patterns[bit] = .{ @as(u32, 1) << @intCast(bit), 0 };
+        patterns[32 + bit] = .{ 0, @as(u32, 1) << @intCast(bit) };
+    }
+    const special = [_][2]u32{
+        .{ 0, 0 },                   .{ 0xffffffff, 0 },          .{ 0, 0xffffffff },          .{ 0xffffffff, 0xffffffff },
+        .{ 0xaaaaaaaa, 0x55555555 }, .{ 0x55555555, 0xaaaaaaaa }, .{ 0x80000001, 0x80000001 },
+    };
+    for (special, 0..) |p, i| patterns[64 + i] = p;
+    var prng = std.Random.DefaultPrng.init(0x7472656c6c6973);
+    for (patterns[71..]) |*p| p.* = .{ prng.random().int(u32), prng.random().int(u32) };
+    const count = patterns.len * 32;
+    const state_inputs = try device.buffer((count + 2) * @sizeOf(StateWindowInput), mtl.ResourceOptions.shared);
+    defer state_inputs.deinit();
+    const state_outputs = try device.buffer((count + 16) * @sizeOf(u16), mtl.ResourceOptions.shared);
+    defer state_outputs.deinit();
+    @memset(state_outputs.slice(u16, count + 16), 0xa55a);
+    const expected = try std.testing.allocator.alloc(u16, count);
+    defer std.testing.allocator.free(expected);
+    const records = state_inputs.slice(StateWindowInput, count + 2)[1..][0..count];
+    for (0..32) |off| for (patterns, 0..) |p, i| {
+        const at = off * patterns.len + i;
+        records[at] = .{ .lo = p[0], .hi = p[1], .off = @intCast(off) };
+        const joined: u64 = (@as(u64, p[0]) << 32) | p[1];
+        expected[at] = @truncate(joined >> @intCast(48 - off));
+    };
+    const cb = queue.commandBuffer();
+    const e = cb.compute(.concurrent);
+    e.setPipeline(pipeline);
+    e.setBuffer(state_inputs, 16, 0);
+    e.setBuffer(state_outputs, 16, 1);
+    e.setValue(@as(u32, count), 2);
+    e.dispatchThreads(.{ .width = count }, .{ .width = 256 });
+    e.end();
+    cb.commit();
+    cb.wait();
+    if (cb.failure() != null) return error.ProbeGpuFailure;
+    for (expected, state_outputs.slice(u16, count + 16)[8..][0..count], 0..) |want, got, i| {
+        if (want != got) {
+            std.debug.print("state mismatch off={d} index={d} expected={d} actual={d}\n", .{ records[i].off, i, want, got });
+            return error.MappedStateMismatch;
+        }
+    }
+    for (state_outputs.slice(u16, count + 16)[0..8]) |guard| try std.testing.expectEqual(@as(u16, 0xa55a), guard);
+    for (state_outputs.slice(u16, count + 16)[count + 8 ..]) |guard| try std.testing.expectEqual(@as(u16, 0xa55a), guard);
+    std.debug.print("mapped_state_cases={d} offsets=32 mismatches=0 guards=unchanged\n", .{count});
 }

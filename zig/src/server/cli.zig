@@ -55,7 +55,7 @@ pub const flags = [_]Flag{
     .{ .name = "--vision-max-images" },
     .{ .name = "--vision-image-tokens" },
     .{ .name = "--context", .native = true },
-    .{ .name = "--speed-up", .native = true },
+    .{ .name = "--speed-up", .native = !cuda_build },
     .{ .name = "--max-tokens", .native = true },
     .{ .name = "--temperature", .native = true },
     .{ .name = "--top-p", .native = true },
@@ -111,10 +111,12 @@ pub const flags = [_]Flag{
     .{ .name = "--learn-dir", .native = true },
     .{ .name = "--learn-gib", .native = true },
     .{ .name = "--learn-min-free-gib", .native = true },
+    // the native server's own: Cortheon's reasoning program and server-run web research for every chat request
+    .{ .name = "--cortheon", .kind = .store_true, .native = true },
 };
 
 /// The variables this binary honours as the Python engine does, then the CUDA build's.
-pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_NO_UPDATE_CHECK", "HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE" } ++
+pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_NO_UPDATE_CHECK", "HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE", "BRAVE_SEARCH_API_KEY" } ++
     (if (cuda_build) [_][]const u8{ "TF_CUDA_DEVICE", "TF_CUDA_SEGMENTS", "TENSORFOLD_CUDA_KERNELS", "TENSORFOLD_MEMORY_RESERVE_GIB", "TENSORFOLD_CUDA_MEMORY_LIMIT_GB" } else [_][]const u8{});
 
 pub const Args = struct {
@@ -129,7 +131,7 @@ pub const Args = struct {
     metrics_open: bool = false,
     dashboard: bool = false,
     context: ?i64 = null,
-    speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next)
+    speed_up: ?[]const u8 = null, // speed-up mode: this Mac's settings for the two-Mac link (Flash Next and the GLMs)
     prompt_cache_gib: ?f64 = null, // kept prompt states' budget (0: none; null: what 70% of RAM leaves past the loaded server)
     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
     learn: bool = false, // keep shared prompt states on disk (--learn-dir: where; it implies --learn)
@@ -167,6 +169,7 @@ pub const Args = struct {
     master: []const u8 = "",
     master_port: u16 = 29551,
     policy: []const u8 = "", // every --policy joined by commas
+    cortheon: bool = false, // Cortheon's program, research before building, and cortheon_search/cortheon_fetch run by the server
 };
 
 /// A usage error's message (argparse's ``error:`` line); the caller exits 2.
@@ -272,7 +275,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const n = try int(u, a, name, v);
         if (n < 0) return fail(u, a, "argument --compact-keep: expected a token count from 0: '{s}'", .{v});
         out.compact_keep = @intCast(n);
-    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v;
+    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true;
 }
 
 /// The CUDA build's --device and --segments; false for any other flag.
@@ -442,13 +445,15 @@ test "parse and capabilities share the table" {
     try std.testing.expectEqualStrings("notes", on.compact_memory.?);
     try std.testing.expectEqualStrings("graph.json", (try parse(a, &.{ "m", "--slide-graph", "graph.json" }, &u)).slide_graph.?);
     try std.testing.expect((try parse(a, &.{ "m", "--slide" }, &u)).slide);
+    try std.testing.expect((try parse(a, &.{ "m", "--cortheon" }, &u)).cortheon and !(try parse(a, &.{"m"}, &u)).cortheon);
+    try std.testing.expect(std.mem.indexOf(u8, doc, "\"--cortheon\": {}") != null);
     try std.testing.expectEqual(@as(?f64, 0.5), (try parse(a, &.{ "m", "--compact-at", "0.5" }, &u)).compact_fraction);
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-at", "0" }, &u));
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-at", "2" }, &u));
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-keep", "-1" }, &u));
 }
 
-test "--device and --segments: CUDA builds serve them, values checked" {
+test "--device and --segments: CUDA builds serve them, values checked; --speed-up is the Mac build's" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -458,6 +463,7 @@ test "--device and --segments: CUDA builds serve them, values checked" {
         try std.testing.expectEqual(@as(?u32, 1), args.device);
         try std.testing.expectEqual(@as(?u32, 2), args.segments);
     } else try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--device", "1" }, &u));
+    if (cuda_build) try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--speed-up", "pair.json" }, &u)) else try std.testing.expectEqualStrings("pair.json", (try parse(a, &.{ "m", "--speed-up", "pair.json" }, &u)).speed_up.?);
     var out: Args = .{};
     try std.testing.expect(try cudaFlag(a, &out, "--device", "0", &u));
     try std.testing.expectEqual(@as(?u32, 0), out.device);

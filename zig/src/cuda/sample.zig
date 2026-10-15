@@ -19,11 +19,29 @@ pub fn count(k: usize, vocab: usize) usize {
 }
 
 /// sample.cu's Rule: the seed, 1 / T, top_p, the candidates' near window, ln(min_p) and top_k (0: off).
-pub const Rule = extern struct { seed: u64, inv_t: f32, top_p: f32, near: f32, min_log: f32, top_k: u32, pad: u32 = 0 };
+pub const Rule = extern struct {
+    seed: u64,
+    inv_t: f32,
+    top_p: f32,
+    near: f32,
+    min_log: f32,
+    top_k: u32,
+    pad: u32 = 0,
 
-/// The rule the Metal engine's sample kernels read, as its host fills cfg (`min_log`: ln(min_p), or -inf for none).
-pub fn rule(seed: u64, temperature: f64, top_p: f64, min_log: f64, top_k: u32) Rule {
-    return .{ .seed = seed, .inv_t = @floatCast(1.0 / @max(temperature, 1e-6)), .top_p = @floatCast(top_p), .near = 20.0, .min_log = @floatCast(min_log), .top_k = top_k };
+    /// The kernels' layout of a rule built once (lanes.gpu_rule.rule): the same fields, in this order.
+    pub fn from(r: anytype) Rule {
+        return .{ .seed = r.seed, .inv_t = r.inv_t, .top_p = r.top_p, .near = r.near, .min_log = r.min_log, .top_k = r.top_k };
+    }
+};
+
+test "sample.cu's Rule layout" {
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(Rule));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(Rule, "seed"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(Rule, "inv_t"));
+    try std.testing.expectEqual(@as(usize, 12), @offsetOf(Rule, "top_p"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(Rule, "near"));
+    try std.testing.expectEqual(@as(usize, 20), @offsetOf(Rule, "min_log"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(Rule, "top_k"));
 }
 
 fn int(x: usize) i32 {
@@ -68,11 +86,13 @@ pub const Draws = struct {
     }
 };
 
-test "a rule as the Metal engine fills it" {
-    const r = rule(1 << 63 | 5, 0.5, 0.9, @log(0.05), 0);
+test "a rule in the kernels' layout keeps every field" {
+    const r = Rule.from(.{ .seed = @as(u64, 1 << 63 | 5), .inv_t = @as(f32, 2.0), .top_p = @as(f32, 0.9), .near = @as(f32, 20.0), .min_log = @as(f32, -3.0), .top_k = @as(u32, 7) });
     try std.testing.expectEqual(@as(u64, 1 << 63 | 5), r.seed);
     try std.testing.expectEqual(@as(f32, 2.0), r.inv_t);
-    try std.testing.expectEqual(@as(f32, @floatCast(@log(@as(f64, 0.05)))), r.min_log);
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(Rule));
+    try std.testing.expectEqual(@as(f32, 0.9), r.top_p);
+    try std.testing.expectEqual(@as(f32, 20.0), r.near);
+    try std.testing.expectEqual(@as(f32, -3.0), r.min_log);
+    try std.testing.expectEqual(@as(u32, 7), r.top_k);
     try std.testing.expectEqual(@as(usize, 28), count(20, 131072));
 }

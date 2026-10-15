@@ -55,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const load_start = std.Io.Clock.awake.now(io);
-    const target = try q.model.Model.load(init.gpa, io, target_dir.?, 128);
+    const target = try q.model.Model.load(init.gpa, io, target_dir.?, 128, null);
     defer target.deinit();
     if (prompt.len + count > target.config.max_position) return error.ContextFull;
     for (prompt) |token| if (token >= target.config.vocab) return error.BadTokenId;
@@ -80,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
     const result = try generation.run(count, force, nodes);
     if (profiled) {
         inline for (@typeInfo(profile.Class).@"enum".field_names, 0..) |name, ci| std.debug.print("PROFILE class={s} calls={d} ms={d:.2}\n", .{ name, trace.calls[ci], trace.seconds[ci] * 1e3 });
-        for (trace.shapes[0..trace.shape_count]) |sh| std.debug.print("PROFILE shape n={d} k={d} sk={d} calls={d} ms={d:.2}\n", .{ sh.n, sh.k, sh.sk, sh.calls, sh.gpu_seconds * 1e3 });
+        for (trace.shapes[0..trace.shape_count]) |sh| std.debug.print("PROFILE shape n={d} k={d} sk={d} bits={d} calls={d} ms={d:.2}\n", .{ sh.n, sh.k, sh.sk, sh.bits, sh.calls, sh.gpu_seconds * 1e3 });
     }
     defer init.gpa.free(result.tokens);
     const decode_ns = decode_start.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();

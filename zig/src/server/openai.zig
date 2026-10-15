@@ -17,6 +17,7 @@ const sse = @import("sse.zig");
 const http_body = @import("http_body.zig");
 const routes = @import("routes.zig");
 const warm = @import("warm.zig");
+const cortheon = @import("cortheon/cortheon.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
@@ -233,7 +234,8 @@ pub fn run(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw:
         return;
     };
     p.input.id = id;
-    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds() };
+    const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
+    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
 }
 
@@ -260,6 +262,7 @@ const Run = struct {
     streamed_prose: bool = false,
     prose_sent: std.ArrayList(u8) = .empty, // the content a tool stream sent
     text_offset: usize = 0, // characters a completion stream's logprob rows have covered
+    turn: ?*cortheon.Turn = null, // --cortheon's work on this request
 
     fn chunk(r: *Run, delta: ?Value, finish: ?[]const u8) Allocator.Error!Value {
         const a = r.a;
@@ -314,6 +317,7 @@ const Run = struct {
         if (reply.stop_sequence) |s| try o.put(r.a, "stop_sequence", .{ .string = s });
         try o.put(r.a, "tensorfold", reply.runtime);
         try o.put(r.a, "speculative", reply.speculative);
+        if (r.turn) |t| try o.put(r.a, "cortheon", try t.summary(r.a));
     }
 
     /// ``ToolCallPolicy.finish``: the reply's calls parsed out of its content.
@@ -321,8 +325,8 @@ const Run = struct {
         const tools = r.plan.input.tools;
         if (tools.len == 0) return null;
         const parsed = try tool_parse.parse(r.a, reply.content, tools, r.plan.policy.maxCalls());
-        const calls = parsed.calls orelse {
-            if (r.plan.policy.single) reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
+        const calls = (if (r.turn != null) cortheon.clientCalls(parsed.calls) else parsed.calls) orelse {
+            if (r.plan.policy.single or parsed.calls != null) reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
             return null;
         };
         reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
@@ -367,7 +371,7 @@ const Run = struct {
     fn whole(r: *Run, gone: Gone, field: []const u8) void {
         const a = r.a;
         var cx: Cx = .{ .a = a };
-        var reply = chat.run(r.srv, &cx, r.plan.input, null, gone) catch |e| return r.unsent(&cx, e, field);
+        var reply = (if (r.turn) |t| cortheon.loop.whole(t, r.srv, &cx, &r.plan.input, gone) else chat.run(r.srv, &cx, r.plan.input, null, gone)) catch |e| return r.unsent(&cx, e, field);
         const calls = r.attachCalls(&reply) catch return;
         const o = json.newObject(a) catch return;
         r.wholeBody(o, &reply, calls) catch return;
@@ -382,7 +386,8 @@ const Run = struct {
         message.put(r.a, "role", .{ .string = "assistant" }) catch return;
         message.put(r.a, "content", if (calls != null and reply.content.len == 0) .null else .{ .string = reply.content }) catch return;
         if (calls) |c| message.put(r.a, "tool_calls", .{ .array = c }) catch return;
-        warm.reply(r.srv, r.plan.input, .{ .object = message }, reply.thinking, reply.effort);
+        if (r.turn) |t| t.remember(r.a, r.plan.input, .{ .object = message });
+        warm.reply(r.srv, r.plan.input, .{ .object = message }, reply.thinking, reply.effort, reply.prompt_tokens);
     }
 
     fn wholeBody(r: *Run, o: *json.Object, reply: *const chat.Reply, calls: ?[]Value) Allocator.Error!void {
@@ -491,7 +496,8 @@ const Run = struct {
         if (!tools and r.is_chat) r.emit(r.chunk(roleDelta(a) catch return, null) catch return) catch return;
         var sink_state: StreamSink = .{ .run = r, .tools = tools };
         handed = true;
-        var reply = chat.generate(r.srv, &cx, prepared, .{ .ctx = &sink_state, .call = StreamSink.call }, gone) catch |e| {
+        const sink: chat.Sink = .{ .ctx = &sink_state, .call = StreamSink.call };
+        var reply = (if (r.turn) |t| cortheon.loop.stream(t, r.srv, &cx, &r.plan.input, prepared, sink, gone) else chat.generate(r.srv, &cx, prepared, sink, gone)) catch |e| {
             switch (e) {
                 error.Cancelled => return,
                 error.Refused => if (cx.kind != .other and cx.kind != .server) {

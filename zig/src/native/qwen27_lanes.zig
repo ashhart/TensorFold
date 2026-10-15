@@ -148,9 +148,8 @@ pub const Metal = struct {
     pub fn measure(b: *Metal, io: std.Io) !void {
         const r = b.runner;
         if (b.owners[0] != null or r.active != null) return error.StreamBusy;
-        const c = r.model.config;
         var shape: [128]u8 = undefined;
-        const parts = [_][]const u8{ "qwen27-lanes", std.mem.span(r.model.device.name()), try std.fmt.bufPrint(&shape, "{d}/{d}/{d}/{d}/{d}/{d}", .{ c.layers, c.hidden, c.intermediate, c.vocab, max_rows, @intFromBool(b.draft != null) }) };
+        const parts = [_][]const u8{ "qwen27-lanes", std.mem.span(r.model.device.name()), try q.widths.costShape(r.model.config, r.model.widths_tag, &shape, max_rows, b.draft != null) };
         const k = lanes.cost_cache.key(b.gpa, io, &parts) catch null;
         if (k) |key| if (lanes.cost_cache.load([max_rows]lanes.config.Cost, b.gpa, io, key)) |kept| {
             b.costs = kept;
@@ -328,6 +327,8 @@ pub const Metal = struct {
     /// One command buffer keeps slot 0's path rows, gathers their taps and moves its last logits to row 0.
     fn commitDevice(b: *Metal, d: *Draft, path: []const u32) !void {
         const g = &d.generation;
+        // the result below is host-written, and a pending keep reads it
+        std.debug.assert(g.keep == null);
         const r = b.runner;
         const result: *contract.Result = @ptrCast(@alignCast(g.matcher.buffers[4].contents()));
         result.* = .{ .status = 0, .stop = 0, .nonfinite = 0, .consumed_count = @intCast(path.len), .emitted_count = @intCast(path.len), .matched_count = 0, .bonus_emitted = 0, .pending_valid = 0, .pending_token = 0, .reserved = 0, .path = @splat(0), .tokens = @splat(0) };

@@ -59,6 +59,7 @@ pub const Engine = struct {
                 .plain_guard = cfg.plain_guard,
                 .node_probabilities = cfg.node_probabilities,
                 .batch_rows = cfg.batch_rows,
+                .batched_heads = cfg.draft_streams,
             },
         };
     }
@@ -85,6 +86,18 @@ pub const Engine = struct {
     /// Take over a stream another driver decoded so far: its cache settled, `pending` and `cache_len` set, no drafts held.
     pub fn adopt(e: *Engine, s: *Stream) !void {
         try e.live.append(e.gpa, s);
+    }
+
+    /// Give a live stream to another driver between rounds, its round state dropped (adopt takes it back).
+    pub fn detach(e: *Engine, s: *Stream) bool {
+        if (s.inflight != null or s.finished) return false;
+        for (e.live.items, 0..) |x, i| {
+            if (x != s) continue;
+            _ = e.live.orderedRemove(i);
+            s.dropRoundState(e.gpa);
+            return true;
+        }
+        return false;
     }
 
     /// Release a cancelled stream between rounds: no pending draws or drafts.
@@ -238,7 +251,7 @@ pub const Engine = struct {
         if (plan.kind == .head) {
             const ms = e.clock.elapsedMs(.overhead);
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(1)), f("rows", int(rows)), f("ms", ev.bits(ms)) });
-            try e.rule.observeOverhead(1, rows, ms, s.sampling != null);
+            try e.rule.observeOverhead(1, rows, ms, s.sampling != null, 0.0);
         }
         return .{ .rows = @intCast(rows), .keep = @intCast(o.path.len), .got = o.got };
     }
@@ -295,7 +308,7 @@ pub const Engine = struct {
         try e.backend.keep(windows, paths);
         const ms = e.clock.elapsedMs(.overhead);
         try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
-        try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled);
+        try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));
     }
 
     /// Commit the target-sampled path (after the thinking budget's cut), each token with its path row's logprob row.

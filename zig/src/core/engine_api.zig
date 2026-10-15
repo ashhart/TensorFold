@@ -58,6 +58,8 @@ pub const Request = struct {
     drafts: bool = true,
     /// Background work yields to foreground arrivals.
     background: bool = false,
+    /// The prompt length its kept states count as (0: its own); a pass prefilling a reply carries that request's.
+    born: u32 = 0,
     /// Prompt prefix lengths worth keeping for a later turn: the rendered history, then shared system blocks.
     history_len: u32 = 0,
     shared_prefixes: []const u32 = &.{},
@@ -386,7 +388,11 @@ pub const Engine = struct {
 pub const Lone = struct {
     ctx: *anyopaque,
     sampled: bool = false, // it drives sampled streams too
-    /// Prefills `s` and decodes it until it finishes (false) or `hooks.yield` hands it to the lane core (true).
+    logprobs: bool = false, // it gives each token its logprob row too
+    structures: bool = false, // it masks each window's rows by the stream's grammar too
+    min_budget: u32 = 0, // thinking budgets above this and loop guards: it hands the stream over before a forced close (0: never)
+    resumes: bool = false, // it takes the lane core's stream back between rounds (LoneHooks.resumed); else only opens
+    /// Prefills (or resumes) `s` and decodes it until it finishes (false) or `hooks.yield` hands it to the lane core.
     run: *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: LoneHooks) anyerror!bool,
 };
 
@@ -395,6 +401,7 @@ pub const LoneHooks = struct {
     ctx: *anyopaque,
     committed: *const fn (ctx: *anyopaque) void,
     yield: *const fn (ctx: *anyopaque) bool,
+    resumed: bool = false, // the stream comes from the lane core between rounds: no prompt pass, its drafts the core's
 };
 
 /// The lane core served to the HTTP threads (lane_host.zig).

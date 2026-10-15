@@ -127,7 +127,22 @@ fn end(cb: mtl.CommandBuffer, e: mtl.ComputeEncoder) !void {
     cb.wait();
     if (cb.failure() != null) return error.GpuFailure;
 }
-fn milliseconds(queue: mtl.Queue, ops: gpu.Ops, input: Guard, output: Guard, p: cpu.Params) !f64 {
+/// The control's encode: one threadgroup of 256 threads per row on the frozen single-group kernel.
+const Control = struct {
+    pipeline: mtl.Pipeline,
+    fn deinit(c: Control) void {
+        c.pipeline.deinit();
+    }
+    fn encode(c: Control, e: mtl.ComputeEncoder, logits: gpu.Ref, output: gpu.Ref, p: cpu.Params) !void {
+        try cpu.check(p);
+        e.setPipeline(c.pipeline);
+        e.setBuffer(logits.buf, logits.off, 0);
+        e.setBuffer(output.buf, output.off, 1);
+        e.setValue(p, 2);
+        e.dispatchGroups(mtl.Size.of(p.rows, 1, 1), mtl.Size.of(256, 1, 1));
+    }
+};
+fn milliseconds(queue: mtl.Queue, ops: anytype, input: Guard, output: Guard, p: cpu.Params) !f64 {
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
     var active = true;
@@ -170,7 +185,7 @@ fn gpuCases(a: std.mem.Allocator) !void {
     defer candidate.deinit();
     const lib = try mtl.Library.fromSource(device, control_source, mtl.CompileOptions.mlx());
     defer lib.deinit();
-    const old = gpu.Ops{ .pipeline = try mtl.Pipeline.init(device, lib, "tf_bf16_topk", false) };
+    const old = Control{ .pipeline = try mtl.Pipeline.init(device, lib, "tf_bf16_topk", false) };
     defer old.deinit();
     var total: usize = 0;
     for ([_]u32{ 1, 15, 16 }) |rows| for ([_]u32{ 98592, 98624 }) |vocab| for ([_]u32{ 1, 16 }) |k| {

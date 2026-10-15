@@ -86,6 +86,7 @@ fn textOf(v: json.Value, key: []const u8) []const u8 {
 const Capture = struct {
     prompt: []u32 = &.{},
     background_prompt: []u32 = &.{},
+    background_born: u32 = 0,
     reply: []const u8 = "hi",
     warm_turns: bool = false,
 
@@ -103,6 +104,7 @@ const Capture = struct {
         if (request.background) {
             std.testing.allocator.free(e.background_prompt);
             e.background_prompt = std.testing.allocator.dupe(u32, request.prompt) catch return error.Busy;
+            e.background_born = request.born;
             sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
             return;
         }
@@ -298,6 +300,7 @@ test "tool reply prose survives whole chat, Messages and Responses and their war
         try std.testing.expect(std.mem.indexOf(u8, warmed, "[assistant]" ++ retained_prose ++ "\n") != null);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, warmed, call_id));
         try std.testing.expect(std.mem.indexOf(u8, warmed, prose_call) == null);
+        try std.testing.expectEqual(backend.prompt.len, backend.background_born); // its states count as the reply's request's
     }
 }
 
@@ -343,6 +346,7 @@ test "legacy tool stream sends prose before and after exactly one call and warms
     const warmed = try promptText(backend.background_prompt);
     defer std.testing.allocator.free(warmed);
     try std.testing.expect(std.mem.indexOf(u8, warmed, "[assistant]" ++ retained_prose ++ "\n") != null);
+    try std.testing.expectEqual(backend.prompt.len, backend.background_born);
 }
 
 test "single-call whole replies retain prose and tool-only replies still have null content" {

@@ -6,6 +6,7 @@ const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const moe_route = @import("../../core/moe_route.zig");
 const route_shape = @import("kernels.zig").route_shape;
+const wide = @import("wide.zig");
 const Ref = wts.Ref;
 const Ctx = fwd.Ctx;
 const Class = fwd.Class;
@@ -39,7 +40,7 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
         if (s & Class.exchange == 0) ep.send(e, sc.ye, rows, on(x, "x_pack") and on(x, "x_locpost"), on(x, "x_locpost"));
         if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
         if (s & Class.exchange == 0 and on(x, "x_unpack")) ep.receive(e, sc.ye, rows);
-    } else if (s & (Class.shared | Class.routed) == 0 and on(x, "e_gateup") and on(x, "e_down") and on(x, "s_gateup") and on(x, "s_down")) {
+    } else if (native(w, .both) and s & (Class.shared | Class.routed) == 0 and on(x, "e_gateup") and on(x, "e_down") and on(x, "s_gateup") and on(x, "s_down")) {
         if (s & Class.route == 0) route(x, e, w, x_in, rows);
         both(x, e, w, x_in, rows); // the shared expert as the gathers' last slot: two launches fewer
         if (s & Class.combine != 0 or !on(x, "combine")) return;
@@ -49,6 +50,20 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
         bind(e, 4, .{sc.branch});
         e.dispatchThreads(size(rows * c.hidden, 1, 1), size(256, 1, 1));
         return;
+    } else if (x.k.wide != null and wide.moeOne(parts(w)) and s & (Class.shared | Class.routed) == 0 and
+        on(x, "e_gateup") and on(x, "e_down") and on(x, "s_gateup") and on(x, "s_down"))
+    {
+        if (s & Class.route == 0) route(x, e, w, x_in, rows);
+        wide.moe(
+            &x.k.wide.?,
+            e,
+            parts(w),
+            c.experts,
+            c.topk,
+            c.swiglu_limit,
+            .{ .x = x_in, .ids = sc.pick, .act = sc.act, .acts = sc.acts, .ye = sc.ye, .ys = sc.ys },
+            rows,
+        );
     } else {
         if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
         if (s & Class.route == 0) route(x, e, w, x_in, rows);
@@ -60,6 +75,10 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
     shape(e, 3, .{ rows, top });
     bind(e, 4, .{sc.branch});
     e.dispatchThreads(size(rows * c.hidden, 1, 1), size(256, 1, 1));
+}
+
+fn parts(w: *const wts.Moe) wide.Moe {
+    return .{ .gate = w.gate, .up = w.up, .down = w.down, .sh_gate_up = w.sh_gate_up, .sh_down = w.sh_down };
 }
 
 /// The router's fp32 logits and the route: picks, weights and the window's unique experts with their members.
@@ -96,6 +115,17 @@ fn route(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, row
     e.dispatchThreads(size(512, 1, 1), size(512, 1, 1));
 }
 
+/// Whether the shared expert, the routed ones or both take the generated 4/64 kernels.
+pub fn native(w: *const wts.Moe, which: enum { shared, routed, both }) bool {
+    const shared = wide.native(w.sh_gate_up) and wide.native(w.sh_down);
+    const routed = wide.native(w.gate) and wide.native(w.up) and wide.native(w.down);
+    return switch (which) {
+        .shared => shared,
+        .routed => routed,
+        .both => shared and routed,
+    };
+}
+
 /// Part 1: the shared expert into `ys`; part 2: the routed experts of `group` (unique ids, members, count) into `ye`.
 fn experts(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32, part: u32, group: [3]Ref) void {
     const c = x.c;
@@ -103,6 +133,8 @@ fn experts(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
     const sc = x.sc;
     const D = c.hidden;
     const N = c.moe_inter;
+    if (part == 1 and !native(w, .shared)) return sharedRows(x, e, w, x_in, rows);
+    if (part == 2 and !native(w, .routed)) return routedRows(x, e, w, x_in, rows);
     const zs: u32 = if (part == 1) 1 else rows * c.topk;
     const slots: u32 = if (part == 1) 1 else c.topk;
     const act = if (part == 1) sc.acts else sc.act;
@@ -175,4 +207,32 @@ fn gateUp(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, ro
     e.setValue(c.swiglu_limit, 14);
     bind(e, 15, .{act});
     e.dispatchThreads(size(32 * rows, if (part == 1) N else N / 4, zs), size(32 * rows, 1, 1));
+}
+
+/// The shared expert at its widths apart from the routed launch (0.6.6 fuses only a 4-bit one): gate/up, SwiGLU, down.
+fn sharedRows(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32) void {
+    const c = x.c;
+    const sc = x.sc;
+    const N = c.moe_inter;
+    const p = &x.k.wide.?;
+    if (on(x, "s_gateup") and w.sh_gate_up.more == 0) { // gate and up one width: one launch, glm_swiglu's bits
+        wide.glu(p, e, w.sh_gate_up, N, x_in, sc.acts, rows, c.swiglu_limit);
+    } else if (on(x, "s_gateup")) {
+        wide.dense(p, e, w.sh_gate_up, .{ .in = x_in, .ldx = c.hidden, .out = sc.gu, .ldo = 2 * N, .rows = rows });
+        e.setPipeline(x.k.swiglu);
+        bind(e, 0, .{ sc.gu, sc.acts });
+        e.setValue(fwd.Rows{ .rows = @intCast(rows), .width = @intCast(N), .x_stride = @intCast(2 * N), .y_stride = @intCast(N), .eps = c.swiglu_limit }, 2);
+        e.dispatchThreads(size(N, rows, 1), size(256, 1, 1));
+    }
+    if (on(x, "s_down")) wide.dense(p, e, w.sh_down, .{ .in = sc.acts, .ldx = N, .out = sc.ys, .ldo = c.hidden, .rows = rows });
+}
+
+/// The routed experts at their widths, each (row, pick) its own slot: gate and up SwiGLU'd into `act`, down into `ye`.
+fn routedRows(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32) void {
+    const c = x.c;
+    const sc = x.sc;
+    const p = &x.k.wide.?;
+    const slots = rows * c.topk;
+    if (on(x, "e_gateup")) wide.byIds(p, e, .{ .w = w.gate, .up = w.up, .experts = c.experts, .repeat = c.topk, .lim = c.swiglu_limit }, x_in, sc.pick, sc.act, slots);
+    if (on(x, "e_down")) wide.byIds(p, e, .{ .w = w.down, .experts = c.experts, .repeat = 1 }, sc.act, sc.pick, sc.ye, slots);
 }

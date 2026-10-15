@@ -62,7 +62,22 @@ pub const Forward = struct {
     captures: []const kept.Mark = &.{}, // marks inside the prompt chunk: their Mamba states are copied out as it runs
 
     pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, sampled: bool) Forward {
-        return .{ .c = c, .w = w, .b = b, .ops = ops, .glue = .{ .set = if (ops.k.triton) |*t| t else null, .f = &ops.k.glue, .s = ops.s }, .max_len = max_len, .nch = nch, .sampled = sampled };
+        return .{
+            .c = c,
+            .w = w,
+            .b = b,
+            .ops = ops,
+            .glue = .{
+                .set = if (ops.k.triton) |*t| t else null,
+                .f = &ops.k.glue,
+                .s = ops.s,
+                .emb = &ops.k.emb,
+                .norms = &ops.k.norms,
+            },
+            .max_len = max_len,
+            .nch = nch,
+            .sampled = sampled,
+        };
     }
 
     /// Rows of logits draw their next tokens into `out`, row r at position META[0] + r + 1, by `rule` when sampled.
@@ -145,16 +160,25 @@ pub const Forward = struct {
                     const W: u64 = state.max_rows;
                     try o.dense(b.y, b.xs, m.in_proj, b.proj, rows);
                     try f.mark(.mamba_in);
-                    for (segs) |s| {
-                        const sb = s.b;
-                        const raw = sb.raw + mj * 2 * W * c.convDim() * 2;
-                        const xc = sb.xc + mj * 2 * W * c.convDim() * 2;
-                        const dt = sb.dt + mj * 2 * W * c.mamba_heads * 4;
-                        const ssm = sb.ssm + @as(u64, mj) * c.mamba_heads * c.mamba_head_dim * c.state * 4;
-                        const base = sb.conv_base + @as(u64, mj) * 3 * c.convDim() * 2;
-                        const proj = b.proj + s.row0 * c.projDim() * 2;
-                        try t.conv(proj, base, raw, xc, m.conv_w, m.conv_b, sb.meta, s.rows, ms);
-                        try t.scan(proj, xc, dt, ssm, m.a, m.d, m.dt_bias, sb.meta, b.sy + s.row0 * c.inner() * 2, s.rows, c.dt_min, c.dt_max, ms);
+                    var k0: usize = 0;
+                    while (k0 < segs.len) : (k0 += glue.max_segs) {
+                        const part = segs[k0..@min(segs.len, k0 + glue.max_segs)];
+                        var ms_segs: [glue.max_segs]glue.MambaSeg = undefined;
+                        for (part, ms_segs[0..part.len]) |s, *out| {
+                            const sb = s.b;
+                            out.* = .{
+                                .proj = b.proj + s.row0 * c.projDim() * 2,
+                                .base = sb.conv_base + @as(u64, mj) * 3 * c.convDim() * 2,
+                                .raw = sb.raw + mj * 2 * W * c.convDim() * 2,
+                                .xc = sb.xc + mj * 2 * W * c.convDim() * 2,
+                                .dt = sb.dt + mj * 2 * W * c.mamba_heads * 4,
+                                .state = sb.ssm + @as(u64, mj) * c.mamba_heads * c.mamba_head_dim * c.state * 4,
+                                .meta = sb.meta,
+                                .y = b.sy + s.row0 * c.inner() * 2,
+                                .rows = s.rows,
+                            };
+                        }
+                        try t.mambaSegs(ms_segs[0..part.len], m.conv_w, m.conv_b, m.a, m.d, m.dt_bias, c.dt_min, c.dt_max, ms);
                     }
                     try f.mark(.conv_scan);
                     try t.groupRmsnorm(b.sy, m.gnorm, b.g, b.gxs, rows, c.inner(), c.groups, c.eps);
@@ -171,13 +195,12 @@ pub const Forward = struct {
                     const qd: u64 = c.heads * c.head_dim;
                     try o.dense(b.y, b.xs, a.qkv, b.qkv, rows);
                     try f.mark(.qkv);
-                    for (segs) |s| {
-                        const kc = f.cache(s.b.k_cache, aj);
-                        const vc = f.cache(s.b.v_cache, aj);
-                        const qkv = b.qkv + s.row0 * c.qkvDim() * 2;
-                        const r0: u64 = s.row0;
-                        try t.kvWrite(qkv, kc, vc, s.b.meta, s.rows, at);
-                        try t.attention(qkv, kc, vc, s.b.meta, b.po + r0 * f.nch * qd * 4, b.pm + r0 * f.nch * c.heads * 4, b.pl + r0 * f.nch * c.heads * 4, b.att + r0 * qd * 2, b.axs + r0 * (qd / 64) * 4, s.rows, at);
+                    var k0: usize = 0;
+                    while (k0 < segs.len) : (k0 += glue.max_segs) {
+                        const part = segs[k0..@min(segs.len, k0 + glue.max_segs)];
+                        var at_segs: [glue.max_segs]glue.AttnSeg = undefined;
+                        for (part, at_segs[0..part.len]) |s, *out| out.* = .{ .kc = f.cache(s.b.k_cache, aj), .vc = f.cache(s.b.v_cache, aj), .meta = s.b.meta, .row0 = s.row0, .rows = s.rows };
+                        try t.attentionSegs(at_segs[0..part.len], b.qkv, b.po, b.pm, b.pl, b.att, b.axs, at);
                     }
                     try f.mark(.attention);
                     try o.dense(b.att, b.axs, a.o, b.delta, rows);
@@ -256,7 +279,7 @@ pub const Forward = struct {
     fn pocketRun(f: *const Forward, o: kern.Ops, p: weights.Pocket, d: usize, y_f32: bool, r: [2]usize) !void {
         const c = f.c;
         const out = f.b.ymoe + @as(u64, r[0] * c.slots() * d) * @as(u64, if (y_f32) 4 else 2);
-        try o.pocketRows(f.b.y + @as(u64, r[0] * d) * 2, d, p.up, p.down, p.n, out, y_f32, r[1], c.slots(), c.top_k);
+        try o.pocketRows(f.b.y + @as(u64, r[0] * d) * 2, d, p, f.b.pocket, out, y_f32, r[1], c.slots(), c.top_k);
     }
 
     /// A lesson's rest into the shared expert's halves' pair rows, a live change (--slide, 2W wide) into the first's.

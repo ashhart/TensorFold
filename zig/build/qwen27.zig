@@ -91,11 +91,13 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 
     const family: []const std.Build.Module.Import = &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "core", .module = qwen_core }, .{ .name = "metal", .module = metal } };
     _ = program(b, "tf-qwen27-run", "Build the native greedy, chunk and prompt-speed check on real weights", "zig/tests/qwen27/run.zig", target, true, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "core", .module = qwen_core }, .{ .name = "metal", .module = metal }, .{ .name = "core_lane", .module = core_lane }, .{ .name = "qwen_runtime_sources", .module = s.runtime_sources }, .{ .name = "qwen_gdn_source", .module = s.gdn_source } });
+    _ = program(b, "tf-qwen27-attention-fused", "Build the fused-chain versus tail-kernel attention byte check on this Mac's tensor units, no models", "zig/tests/qwen27/attention_fused.zig", target, false, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "metal", .module = metal }, .{ .name = "qwen_runtime_sources", .module = s.runtime_sources } });
     _ = program(b, "tf-qwen27-projection-cases", "Build real-input production projection precision replay", "zig/tests/qwen27/projection_cases.zig", target, true, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "metal", .module = metal } });
     _ = program(b, "tf-qwen27-dflash-run", "Build the explicit draft prototype and its plain comparison on real weights", "zig/tests/qwen27/dflash_run.zig", target, true, family);
     const engine_only: []const std.Build.Module.Import = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal } };
     _ = program(b, "tf-qwen27-synthetic", "Build bounded synthetic native hybrid chunk checks, no models", "zig/tests/qwen27/synthetic.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-dflash-synthetic", "Build model-free native draft context/forward/tree check", "zig/tests/qwen27/dflash_runtime.zig", target, false, engine_only);
+    _ = program(b, "tf-qwen27-widths", "Build the projections at every oQ width before tensor units: float64, row windows, mixed stacks, embedding", "zig/tests/qwen27/widths.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-dflash-refine", "Build the drafter refinement probe (top-1 by block position, masked versus given)", "zig/tests/qwen27/dflash_refine.zig", target, false, engine_only);
 
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
@@ -106,6 +108,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     _ = program(b, "tf-qwen27-lanes-check", "Build synthetic lane-core versus plain greedy token and state check", "zig/tests/qwen27/lanes_check.zig", target, false, served);
     _ = program(b, "tf-qwen27-lanes-run", "Build the real-weight serial versus lane-core A/B", "zig/tests/qwen27/lanes_run.zig", target, false, served);
     _ = program(b, "tf-qwen27-bench", "Build the projection-split, one-row floor and shared-round timing bench on real weights", "zig/tests/qwen27/bench.zig", target, false, served);
+    _ = program(b, "tf-qwen27-classes", "Build the per-class projection GPU time against the weight-bytes roofline on real weights", "zig/tests/qwen27/classes.zig", target, false, served);
     _ = program(b, "tf-qwen27-streams", "Build the real-weight check that shared rounds keep each stream's logits alone", "zig/tests/qwen27/streams.zig", target, false, served);
     _ = program(b, "tf-qwen27-reuse", "Qwen27 prompt reuse through the served host against fresh prompt passes: states and replies", "zig/tests/qwen27/reuse.zig", target, false, served);
     _ = program(b, "tf-qwen27-runtime", "Compile native Qwen interfaces without running a GPU", "zig/tests/qwen27/runtime.zig", target, false, &.{.{ .name = "qwen27", .module = qwen27 }});

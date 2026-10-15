@@ -22,6 +22,7 @@ pub const glm_dsa_index = @embedFile("glm_dsa/index.metal");
 pub const glm_dsa_glue = @embedFile("glm_dsa/glue.metal");
 pub const glm_dsa_moe_jobs = @embedFile("glm_dsa/moe_jobs.metal");
 pub const core_grammar_mask = @embedFile("core/grammar_mask.metal");
+pub const counter_probe = @embedFile("core/counter_probe.metal");
 
 /// Routed experts with an expert's member rows two or four at a time (each row's sums unchanged).
 pub const nemotron_experts = @embedFile("nemotron_experts.metal");
@@ -48,6 +49,8 @@ pub const nax = @embedFile("nax.h");
 
 /// Flash Next 6-bit (group 32) prompt projections on the tensor units: dense and sorted-expert gather.
 pub const flashnext_qmm6 = @embedFile("prefill/qmm6_nax.metal") ++ @embedFile("prefill/qmm6_nax_b.metal");
+/// Flash Next's prompt products at any MLX width (WB and WG defined before it; nax.h inlined at load).
+pub const flashnext_qmmw = @embedFile("prefill/qmmw_nax.metal");
 /// Flash Next prompt-chunk glue: hyper-connection pieces, router rows, top-k, the expert sort, gathers and scatters.
 pub const flashnext_prompt = @embedFile("prefill/fn_prompt.metal");
 /// Flash Next block selection in GPU-side rounds: per-row metadata from the arena and pooling at absolute blocks.
@@ -76,11 +79,16 @@ pub const prefill = [_]File{
 
 /// Flash Next decode: the DeltaNet window step with every row's independent work at once.
 pub const flashnext_gdn = @embedFile("decode/fn_gdn.metal");
+/// Flash Next decode products one input row a simdgroup, for GPUs without tensor units (0.6.6's rows.py).
+pub const flashnext_rows = @embedFile("decode/fn_rows.metal");
+pub const flashnext_rows_hc = @embedFile("decode/fn_rows_hc.metal");
 
 /// GLM-5.3-Flash's decode kernels from our Python family (tools/zig/gen_glm_kernels.py).
 pub const glm = @import("glm/kernels.zig");
 /// GLM-5.3-Flash's glue: MLX's arithmetic where the Python family calls MLX ops; selection, argmax, small steps.
 pub const glm_glue = @embedFile("glm_glue.metal");
+/// Its products at the widths the generated kernels do not read, after core_row_projection (glm/wide.zig).
+pub const glm_rows = @embedFile("glm_rows.metal");
 /// GLM-5.3-Flash's latent attention for rows that read every key: 64 heads as one matrix on the tensor units.
 pub const glm_attn = @embedFile("glm_attn.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
@@ -114,3 +122,5 @@ pub const core_shared_attention = @embedFile("core/shared_attention.metal");
 pub const core_deltanet = @embedFile("core/deltanet.metal");
 /// 4-bit projections on simdgroup-matrix tiles before the M5 (core/simd_qmm.zig).
 pub const core_simd_qmm = @embedFile("core/simd_qmm.metal");
+/// 2- to 8-bit projections on the same tiles, rows written at a stride (core/simd_qmm_bits.zig).
+pub const core_simd_qmm_bits = @embedFile("core/simd_qmm_bits.metal");
