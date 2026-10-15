@@ -64,6 +64,8 @@ pub fn load(device: mtl.Device) !Kernels {
     out.tiles = try tile.Pipelines.load(device);
     errdefer out.tiles.deinit();
     out.twin = false;
+    // `out` is undefined, so attn_nax's default does not apply: unset, it would hold stack garbage.
+    out.attn_nax = null;
     out.nax = if (device.tensorUnits()) try naxLoad(device) else null;
     errdefer if (out.nax) |set| for (set) |pipes| for (pipes) |x| x.deinit();
     if (device.tensorUnits()) try attnNaxLoad(device, &out);
