@@ -3,13 +3,41 @@
 const std = @import("std");
 const abi = @import("abi.zig");
 
+const agreement = @import("agree.zig");
+
 pub const Error = error{CollectiveFailed};
 pub const LinkError = error{LinkFailed} || std.mem.Allocator.Error;
-/// Why a rank could not join its group: no tensor parallelism in this build, no RCCL, or the link between the ranks.
-pub const JoinError = error{ NoTensorParallel, NoRccl, NoId, SocketFailed, BindFailed, ConnectFailed, LinkClosed, BadRank, MixedGpus } || std.mem.Allocator.Error;
+/// Why a rank could not join its group: no tensor parallelism in this build, no RCCL, the link, or a rank that differs.
+pub const JoinError = error{
+    NoTensorParallel,
+    NoRccl,
+    NoId,
+    SocketFailed,
+    BindFailed,
+    ConnectFailed,
+    LinkClosed,
+    BadRank,
+    RanksDiffer,
+} || std.mem.Allocator.Error;
+
+pub const Identity = agreement.Identity;
+pub const Field = agreement.Field;
+pub const Fault = agreement.Fault;
+
+/// What a rank brings to its join: its place, its GPU and policy, what it runs, and where a differing rank is named.
+pub const Join = struct {
+    rank: u32,
+    world: u32,
+    master: []const u8,
+    port: u16,
+    caps: @import("caps.zig").Caps,
+    policy: *@import("policy.zig").Policy,
+    ident: Identity,
+    fault: *Fault,
+};
 
 /// The join of a build without a collectives backend: one rank only.
-pub fn noGroup(_: std.mem.Allocator, _: std.Io, _: u32, _: u32, _: []const u8, _: u16, _: @import("caps.zig").Caps, _: *@import("policy.zig").Policy) JoinError!Group {
+pub fn noGroup(_: std.mem.Allocator, _: std.Io, _: Join) JoinError!Group {
     return error.NoTensorParallel;
 }
 

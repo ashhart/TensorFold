@@ -40,6 +40,9 @@ pub const moe = @import("moe.zig");
 pub const reduce = @import("reduce.zig");
 /// Joins this rank's tensor-parallel group: RCCL's (comm/), behind collective.zig.
 pub const joinGroup = @import("comm/group.zig").join;
+pub const joinRun = @import("comm/group.zig").joinRun;
+/// What this rank runs, digested for its join (executable, config.json, weights).
+pub const identity = @import("comm/identity.zig");
 
 test {
     _ = policy;
@@ -51,5 +54,8 @@ test {
     _ = reduce;
     _ = @import("comm/rccl.zig");
     _ = @import("comm/link.zig");
+    _ = @import("comm/link_test.zig");
     _ = @import("comm/group.zig");
+    _ = @import("comm/identity.zig");
+    _ = @import("agree.zig");
 }

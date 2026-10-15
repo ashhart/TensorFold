@@ -38,7 +38,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
             job.sampling = s;
         } else return error.UnknownOption;
     }
-    var joined = try group.join(gpa, io);
+    var joined = try group.join(gpa, io, args[0]);
     defer joined.close();
     const e = try group.engine(gpa, io, args[0], joined, .{ .capacity = ids_file.longest(job.prompts) + 2 * max_tokens + 64, .prompt_rows = ids_file.longest(job.prompts) + 2 * max_tokens + 64, .streams = job.prompts.len, .batch_rows = @max(32, job.prompts.len * qwen35.hip_lanes.Hip.max_window) });
     defer e.deinit();

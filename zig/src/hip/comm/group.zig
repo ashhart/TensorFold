@@ -4,9 +4,10 @@ const std = @import("std");
 const collective = @import("../collective.zig");
 const rccl_mod = @import("rccl.zig");
 const link_mod = @import("link.zig");
-const Caps = @import("../caps.zig").Caps;
 const Policy = @import("../policy.zig").Policy;
 const Device = @import("../device.zig").Device;
+const Caps = @import("../caps.zig").Caps;
+const identity = @import("identity.zig");
 
 /// RCCL's library stays loaded until the group is closed (its bootstrap thread starts at the id).
 const Joined = struct {
@@ -18,21 +19,61 @@ const Joined = struct {
     comm: ?rccl_mod.Comm = null,
 };
 
-/// Rank 0 listens on `master`:`port`, sends its id and policy; a rank whose GPU differs from rank 0's is refused.
-pub fn join(gpa: std.mem.Allocator, io: std.Io, rank: u32, world: u32, master: []const u8, port: u16, caps: Caps, policy: *Policy) collective.JoinError!collective.Group {
+/// Every rank's world, GPU, RCCL, executable and checkpoint must match rank 0's before RCCL starts (else all refuse).
+pub fn join(gpa: std.mem.Allocator, io: std.Io, j: collective.Join) collective.JoinError!collective.Group {
     const g = try gpa.create(Joined);
     errdefer gpa.destroy(g);
-    g.rccl = rccl_mod.Rccl.open(policy.rccl_lib.slice()) catch return error.NoRccl;
+    g.rccl = rccl_mod.Rccl.open(j.policy.rccl_lib.slice()) catch return error.NoRccl;
     errdefer g.rccl.close();
-    const mine: rccl_mod.UniqueId = if (rank == 0) g.rccl.uniqueId() catch return error.NoId else undefined;
-    const host = if (std.mem.eql(u8, master, "localhost")) "127.0.0.1" else master;
-    const pair = try link_mod.Link.open(io, rank, world, host, port, mine, .{ .caps = Device.groupId(caps), .policy = policy.words() });
-    g.link, g.id, const hello = pair;
-    g.rank = rank;
-    g.world = world;
+    const version = g.rccl.version() catch return error.NoRccl;
+    const mine: rccl_mod.UniqueId = if (j.rank == 0) g.rccl.uniqueId() catch return error.NoId else undefined;
+    const host = if (std.mem.eql(u8, j.master, "localhost")) "127.0.0.1" else j.master;
+    const hello: link_mod.Hello = .{
+        .rank = j.rank,
+        .world = j.world,
+        .gpu = Device.groupId(j.caps),
+        .rccl = version,
+        .ident = j.ident,
+    };
+    g.link, g.id, const words = try link_mod.Link.open(io, host, j.port, mine, hello, j.policy.words(), j.fault);
+    g.rank = j.rank;
+    g.world = j.world;
     g.comm = null;
-    if (rank != 0) policy.* = Policy.fromWords(hello.policy, policy.*);
-    return .{ .ptr = g, .vtable = &group_vtable, .rank = rank, .world = world };
+    if (j.rank != 0) j.policy.* = Policy.fromWords(words, j.policy.*);
+    return .{ .ptr = g, .vtable = &group_vtable, .rank = j.rank, .world = j.world };
+}
+
+/// A check program's join, its executable and the checkpoint in `dir` what it runs; a differing rank is printed.
+pub fn joinRun(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    rank: u32,
+    world: u32,
+    master: []const u8,
+    port: u16,
+    caps: Caps,
+    policy: *Policy,
+    dir: []const u8,
+) !collective.Group {
+    var fault: collective.Fault = .{};
+    const ident = try identity.ofThis(gpa, io, dir);
+    const j: collective.Join = .{
+        .rank = rank,
+        .world = world,
+        .master = master,
+        .port = port,
+        .caps = caps,
+        .policy = policy,
+        .ident = ident,
+        .fault = &fault,
+    };
+    return join(gpa, io, j) catch |err| {
+        if (err == error.RanksDiffer) std.debug.print(
+            "REFUSE: rank {d}'s {s} differs from rank 0's\n",
+            .{ fault.rank, fault.field.what() },
+        );
+        return err;
+    };
 }
 
 fn of(ptr: *anyopaque) *Joined {
