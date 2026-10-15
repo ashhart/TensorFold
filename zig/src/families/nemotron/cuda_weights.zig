@@ -492,8 +492,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, 
     w.norm_f = try L.raw("norm_f", try ck.expect(try std.fmt.bufPrint(&tail, "{s}backbone.norm_f.weight", .{pre}), .bf16, &.{c.hidden}));
     w.head = try L.dense(&ck, "head", &.{try std.fmt.bufPrint(&tail, "{s}lm_head", .{pre})});
     // a ModelOpt checkpoint keeps its MTP head in its own shards
-    if (c.latent > 0 and with_mtp) return error.LatentMtpNotBuilt;
-    if (c.format == .modelopt) if (with_mtp) try modelopt.mtp(&L, &ck, c) else try ck.skip(try std.fmt.bufPrint(&tail, "{s}mtp.", .{pre}));
+    if (c.format == .modelopt) if (!with_mtp) try ck.skip(try std.fmt.bufPrint(&tail, "{s}mtp.", .{pre})) else if (c.latent > 0) try latent.mtp(&L, &ck, c) else try modelopt.mtp(&L, &ck, c);
     // the picture tower and its projector load with the image path (an omni checkpoint's other parts)
     if (c.omni) for ([_][]const u8{ "vision_model.", "mlp1.", "vision_projector." }) |part| try ck.skip(part);
     if (ck.unused() != 0) return error.UnusedCheckpointTensors;

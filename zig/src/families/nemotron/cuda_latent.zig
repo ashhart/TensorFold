@@ -95,8 +95,8 @@ const Fingerprint = extern struct {
     kinds: [32]u8, // sha256 of the block pattern
     program: [32]u8, // sha256 of this executable
 
-    fn of(c: Config, mtp: bool, context: usize, program: [32]u8) Fingerprint {
-        var f: Fingerprint = .{ .rank = @intCast(c.rank), .world = @intCast(c.world), .mtp = @intFromBool(mtp), .context = context, .dims = .{ c.hidden, c.vocab, c.layers, c.experts, c.top_k, c.latent, c.expert_width, c.shared_width, c.shares, c.mamba_heads, c.heads, c.kv_heads }, .kinds = undefined, .program = program };
+    fn of(c: Config, drafts: bool, context: usize, program: [32]u8) Fingerprint {
+        var f: Fingerprint = .{ .rank = @intCast(c.rank), .world = @intCast(c.world), .mtp = @intFromBool(drafts), .context = context, .dims = .{ c.hidden, c.vocab, c.layers, c.experts, c.top_k, c.latent, c.expert_width, c.shared_width, c.shares, c.mamba_heads, c.heads, c.kv_heads }, .kinds = undefined, .program = program };
         var kinds: [@import("config.zig").max_layers]u8 = undefined;
         for (c.kinds[0..c.layers], kinds[0..c.layers]) |k, *b| b.* = @intFromEnum(k);
         std.crypto.hash.sha2.Sha256.hash(kinds[0..c.layers], &f.kinds, .{});
@@ -105,14 +105,14 @@ const Fingerprint = extern struct {
 };
 
 /// Every rank's fingerprint gathered: anything but the rank differing from rank 0's stops every rank.
-pub fn agree(gpa: std.mem.Allocator, io: std.Io, c: Config, g: *const cuda.tp_group.Group, d: *const cuda.Driver, s: cuda.Stream, mtp: bool, context: usize) !void {
+pub fn agree(gpa: std.mem.Allocator, io: std.Io, c: Config, g: *const cuda.tp_group.Group, d: *const cuda.Driver, s: cuda.Stream, drafts: bool, context: usize) !void {
     var program: [32]u8 = undefined;
     const exe = try std.Io.Dir.cwd().readFileAlloc(io, "/proc/self/exe", gpa, .limited(1 << 31));
     defer gpa.free(exe);
     std.crypto.hash.sha2.Sha256.hash(exe, &program, .{});
     var all: [16]Fingerprint = undefined;
     if (c.world > all.len) return error.TooManyRanks;
-    try g.gather(Fingerprint, d, s, Fingerprint.of(c, mtp, context, program), all[0..c.world]);
+    try g.gather(Fingerprint, d, s, Fingerprint.of(c, drafts, context, program), all[0..c.world]);
     for (all[0..c.world], 0..) |f, r| {
         var x = f;
         x.rank = all[0].rank;
@@ -139,6 +139,41 @@ pub fn load(L: *W.Loader, ck: *core.Checkpoint, label: []const u8, pre: []const 
     m.experts = routed;
     m.latent = .{ .into = into, .out = out, .routed = routed, .shared = shared };
     return m;
+}
+
+/// A bf16 norm weight [hidden] by its name under `pre`.
+fn norm(L: *W.Loader, ck: *core.Checkpoint, label: []const u8, pre: []const u8, leaf: []const u8, c: Config) !u64 {
+    var b: [192]u8 = undefined;
+    return L.raw(label, try ck.expect(try std.fmt.bufPrint(&b, "{s}{s}", .{ pre, leaf }), .bf16, &.{c.hidden}));
+}
+
+/// The MTP head as stored (bf16 attention and input projection, a latent MoE); it drafts over the whole head.
+pub fn mtp(L: *W.Loader, ck: *core.Checkpoint, c: Config) !void {
+    var buf: [6][192]u8 = undefined;
+    var p: [128]u8 = undefined;
+    const pre = try std.fmt.bufPrint(&p, "{s}mtp.layers.", .{c.prefix()});
+    const at = struct {
+        fn name(b: *[192]u8, a: []const u8, z: []const u8) ![]const u8 {
+            return std.fmt.bufPrint(b, "{s}{s}", .{ a, z });
+        }
+    }.name;
+    const qkv = [3][]const u8{ try at(&buf[0], pre, "0.mixer.q_proj"), try at(&buf[1], pre, "0.mixer.k_proj"), try at(&buf[2], pre, "0.mixer.v_proj") };
+    L.w.mtp = .{
+        .enorm = try norm(L, ck, "mtp.enorm", pre, "0.enorm.weight", c),
+        .hnorm = try norm(L, ck, "mtp.hnorm", pre, "0.hnorm.weight", c),
+        .eh_proj = try modelopt.dense(L, ck, "mtp.eh_proj", &.{try at(&buf[3], pre, "0.eh_proj")}),
+        .attn_norm = try norm(L, ck, "mtp.attn_norm", pre, "0.norm.weight", c),
+        .attn = .{ .qkv = try modelopt.dense(L, ck, "mtp.attn.qkv", &qkv), .o = try modelopt.dense(L, ck, "mtp.attn.o", &.{try at(&buf[4], pre, "0.mixer.o_proj")}) },
+        .moe_norm = try norm(L, ck, "mtp.moe_norm", pre, "1.norm.weight", c),
+        .moe = try load(L, ck, "mtp.moe", try at(&buf[5], pre, "1.mixer."), c),
+        .final_norm = try norm(L, ck, "mtp.final_norm", pre, "1.final_layernorm.weight", c),
+    };
+    // the draft head is the target's: every id a candidate, so no vocabulary table is needed for this tokenizer
+    L.w.draft_head = L.w.head;
+    const ids = try L.gpa.alloc(u32, c.vocab);
+    defer L.gpa.free(ids);
+    for (ids, 0..) |*x, i| x.* = @intCast(i);
+    try W.draftIds(L, ids);
 }
 
 /// Expert `e`'s projection name: `pre` then `mid` (with its index when `mid` takes one) then the leaf.
