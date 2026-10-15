@@ -8,16 +8,6 @@ const DType = ckpt.DType;
 /// Inputs sharing one e4m3 scale.
 pub const group = quant.nvfp4.group;
 
-/// An e2m1 code's value as f32 (every e2m1 value is one exactly).
-fn e2m1(code: u8) f32 {
-    return @floatCast(quant.nvfp4.e2m1(code));
-}
-
-/// An e4m3 byte's value as f32 (every e4m3 value is one exactly; 0x7f and 0xff are NaN).
-fn e4m3(b: u8) f32 {
-    return @floatCast(quant.fp8.e4m3(b));
-}
-
 /// A stored tensor's dtype and shape, as a header lists it.
 pub const Meta = struct {
     dtype: DType,
@@ -71,18 +61,6 @@ pub const Linear = struct {
         };
         return .{ .n = d.n, .k = d.k, .codes = w.bytes, .scales = s.bytes, .global = std.mem.bytesToValue(f32, g.bytes[0..4]) };
     }
-
-    /// Row r as f32, e2m1 x e4m3 x global in that order: the reference the GPU kernels are compared with.
-    pub fn row(l: Linear, r: usize, out: []f32) void {
-        std.debug.assert(r < l.n and out.len == l.k);
-        const codes = l.codes[r * l.k / 2 ..][0 .. l.k / 2];
-        const scales = l.scales[r * l.k / group ..][0 .. l.k / group];
-        for (out, 0..) |*o, i| {
-            const byte = codes[i / 2];
-            const code = if (i % 2 == 0) byte & 0xf else byte >> 4;
-            o.* = e2m1(code) * e4m3(scales[i / group]) * l.global;
-        }
-    }
 };
 
 fn meta(t: *const ckpt.Tensor) Meta {
@@ -101,7 +79,7 @@ test "dims refuse what is not ModelOpt NVFP4" {
     try std.testing.expectError(error.BadNvfp4, dims(w, s, .{ .dtype = .f32, .shape = &.{2} }, null));
 }
 
-test "a linear read from a checkpoint folder, row by row" {
+test "a linear read from a checkpoint folder decodes as core/quant's reference" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -131,18 +109,15 @@ test "a linear read from a checkpoint folder, row by row" {
     const l = try Linear.read(&ck, "l");
     try std.testing.expectEqual(@as(usize, 0), ck.unused());
     try std.testing.expectEqual(@as(f32, 0.25), l.global);
-    var out: [32]f32 = undefined;
-    l.row(0, &out); // byte 0 is 3: input 0 is code 3 (1.5), input 1 code 0; inputs 16.. take the second scale (2.0)
-    try std.testing.expectEqual(@as(f32, 1.5 * 1.0 * 0.25), out[0]);
-    try std.testing.expectEqual(@as(f32, 0.0), out[1]);
-    try std.testing.expectEqual(e2m1(body[8] & 0xf) * 2.0 * 0.25, out[16]);
-    for (0..2) |r| {
-        l.row(r, &out);
-        for (out, 0..) |v, i| {
-            const byte = body[r * 16 + i / 2];
-            const code = if (i % 2 == 0) byte & 0xf else byte >> 4;
-            const scale = e4m3(body[32 + r * 2 + i / 16]);
-            try std.testing.expectEqual(e2m1(code) * scale * 0.25, v);
-        }
-    }
+    var out: [64]f64 = undefined;
+    try quant.nvfp4.reference(.{
+        .weight = .{ .dtype = .u8, .rank = 2, .shape = .{ l.n, l.k / 2, 1, 1, 1 }, .bytes = l.codes },
+        .scale = .{ .dtype = .f8_e4m3, .rank = 2, .shape = .{ l.n, l.k / group, 1, 1, 1 }, .bytes = l.scales },
+        .global = &[_]f32{l.global},
+    }, &out);
+    // byte 0 is 3: input 0 is code 3 (1.5), input 1 code 0; inputs 16.. take the second scale (2.0)
+    try std.testing.expectEqual(@as(f64, 1.5 * 1.0 * 0.25), out[0]);
+    try std.testing.expectEqual(@as(f64, 0.0), out[1]);
+    try std.testing.expectEqual(quant.nvfp4.e2m1(body[8] & 0xf) * 2.0 * 0.25, out[16]);
+    try std.testing.expectEqual(quant.nvfp4.e2m1(body[16 + 15] >> 4) * -1.0 * 0.25, out[32 + 31]); // row 1, scale -1.0
 }
