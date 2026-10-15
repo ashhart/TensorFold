@@ -97,6 +97,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - LFM2.5-24B-A2B windows of 16 rows or more read each picked expert once for all of its rows (#868). Thanks to @BlivionIaG.
 - On M5, `core/affine_mm` loads its code tiles in two 8-byte reads and takes an optional plain SwiGLU epilogue; GLM-5.3-Flash keeps its clipped one (#871). Thanks to @BlivionIaG.
 - LFM2.5-24B-A2B prompt calls run on the M5's tensor units (projections, experts and attention) at every prompt row, so a resumed prompt equals a fresh one; a GPU without tensor units no longer reaches the tensor attention path (#873). Thanks to @BlivionIaG.
+- GLM-5.3-Flash's sparse prompt attention on Metal reads a row's key list only as far as its last listed key: a row at position p lists its keys in the list's first p + 1 entries, so rows before position 2,050 skip the empty blocks, with the same bits (#898). Thanks to @harrisonfriia.
 
 ## 1.0.11
 
