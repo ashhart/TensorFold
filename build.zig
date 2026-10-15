@@ -159,6 +159,18 @@ pub fn build(b: *std.Build) void {
     const cost_run = b.addRunArtifact(cost_cases);
     b.step("test-cost-rule", "CPU scripted window and interleaved head timing").dependOn(&cost_run.step);
     test_step.dependOn(&cost_run.step);
+    // `tf-merge-check --quantizer` and the tests of the MLX quantizer it uses: host only on every OS
+    const merge_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/lora_merge_dir.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const merge_tests = b.addRunArtifact(b.addTest(.{ .root_module = merge_mod }));
+    b.step("test-merge", "MLX quantizer and tf-merge-check tests (no model, no GPU)").dependOn(&merge_tests.step);
+    const merge_check = b.addExecutable(.{ .name = "tf-merge-check", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/merge_check.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "lora_merge", .module = merge_mod }},
+    }) });
+    b.step("tf-merge-check", "Check the MLX quantizer against shipped tensors from their dense source").dependOn(&b.addInstallArtifact(merge_check, .{}).step);
     switch (target.result.os.tag) {
         .macos => metalTargets(b, target, optimize, draft_ids, build_options, test_step),
         .linux => cuda_build.targets(b, target, optimize, draft_ids, build_options),
