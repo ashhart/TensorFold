@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
 const page_cache = @import("page_cache.zig");
+const vision_mod = @import("vision.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const mtp = @import("mtp.zig");
@@ -84,6 +85,9 @@ pub const Engine = struct {
     rank_log: bool = false, // GLM_RANKS=1: each MTP depth's logits kept, and the target's rank in them where drafts miss
     ep_arena: std.heap.ArenaAllocator, // the link settings, alive as long as the link
     residency: ?mtl.ResidencySet = null,
+    vision: ?*vision_mod.Vision = null, // --vision: the image tower
+    vision_rows: Ref = undefined, // bf16 [image tokens, hidden]: a prompt's image rows (vision only)
+    vision_limits: vision_mod.Limits = .{},
     keepalive_sets: [1]mtl.ResidencySet = undefined, // the residency set, for the idle keepalive's commit
     keepalive_target: mtl.keepalive.Target = undefined, // the engine's queue, set at load for the server's ticker
     load_seconds: f64 = 0,
@@ -95,11 +99,11 @@ pub const Engine = struct {
 
     /// The checkpoint in `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers only; GLM_EP=settings: half the experts.
     pub fn load(gpa: std.mem.Allocator, dir: []const u8, cap: u32) !*Engine {
-        return loadWith(gpa, dir, cap, if (std.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false);
+        return loadWith(gpa, dir, cap, if (std.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false, null);
     }
 
-    /// `load` with expert parallel over the link in `ep_path` (this Mac's settings), or on one Mac when null.
-    pub fn loadWith(gpa: std.mem.Allocator, dir: []const u8, cap: u32, ep_path: ?[]const u8, learn: bool) !*Engine {
+    /// `load` with expert parallel over `ep_path`'s link (one Mac when null) and `vision`'s image tower and rows.
+    pub fn loadWith(gpa: std.mem.Allocator, dir: []const u8, cap: u32, ep_path: ?[]const u8, learn: bool, vision: ?vision_mod.Limits) !*Engine {
         const e = try gpa.create(Engine); // undefined memory: every field is set below
         errdefer gpa.destroy(e);
         const pool = mtl.objc.Pool.push();
@@ -108,6 +112,7 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.ev = 0;
         e.residency = null;
+        e.vision = null;
         e.gpu = .{ 0, 0 };
         e.fused_route = if (std.c.getenv("GLM_ROUTE")) |v| v[0] != '0' else true;
         e.draft_vocab = if (std.c.getenv("GLM_DRAFT_VOCAB")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
@@ -215,11 +220,14 @@ pub const Engine = struct {
             me.rest[2] = @intFromBool(learn); // --learn on both Macs or neither: each holds its half of a learned state
             e.ep = try ep_mod.Ep.init(gpa, e.device, s, me);
         }
+        if (vision) |lim| try vision_mod.attach(e, gpa, dir, f.bytes[0..f.size], lim); // --vision: the tower and its rows
+        errdefer if (e.vision) |v| v.deinit();
         // opt-in: wiring 181 GB leaves macOS nothing to reclaim if another model shares the Mac (Flash Next runs without)
         const wire = std.c.getenv("GLM_RESIDENCY") != null and mtl.ResidencySet.within("glm", 0, e.residencyBytes());
-        if (!wire) {} else if (e.device.residencySet(e.w.buffers.items.len + e.arena.buffers.items.len)) |set| {
+        if (!wire) {} else if (e.device.residencySet(e.w.buffers.items.len + e.arena.buffers.items.len + if (e.vision) |v| v.buffers().len else 0)) |set| {
             for (e.w.buffers.items) |b| set.add(b);
             for (e.arena.buffers.items) |b| set.add(b);
+            if (e.vision) |v| for (v.buffers()) |b| set.add(b);
             set.commit();
             set.requestResidency();
             e.queue.addResidencySet(set);
@@ -269,6 +277,7 @@ pub const Engine = struct {
             set.deinit();
         }
         if (e.ep) |ep| ep.deinit(gpa);
+        if (e.vision) |v| v.deinit();
         e.ep_arena.deinit();
         if (e.pr) |*p| p.deinit();
         if (e.round_fence) |f| f.deinit();
@@ -288,6 +297,9 @@ pub const Engine = struct {
         var n: u64 = 0;
         for (e.w.buffers.items) |b| n += b.length();
         for (e.arena.buffers.items) |b| n += b.length();
+        if (e.vision) |v| {
+            for (v.buffers()) |b| n += b.length(); // the tower joins the set, so its bytes count
+        }
         return n;
     }
 

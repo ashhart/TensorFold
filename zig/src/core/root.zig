@@ -23,6 +23,8 @@ pub const act_ref = @import("act_ref.zig");
 pub const contract = @import("contract.zig");
 pub const nvfp4 = @import("nvfp4.zig");
 pub const modelopt = @import("modelopt.zig");
+/// Pictures as 0.6.6 loaded them: PNG, JPEG through the pinned libjpeg-turbo, orientation, the shared bicubic resizes.
+pub const picture = @import("picture/picture.zig");
 
 test {
     _ = safetensors;
@@ -47,5 +49,6 @@ test {
     _ = ids_json;
     _ = nvfp4;
     _ = modelopt;
+    _ = picture;
     _ = @import("nvfp4_fixture_test.zig");
 }
