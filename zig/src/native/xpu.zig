@@ -138,7 +138,8 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
     h.wall = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27-xpu", .lanes = slots, .context_window = context, .prefill_step = 1024, .structures = true });
+    // the engine cuts its prompts on its own grid from position 0 (prefill_step 0): the same ids give the same bits
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27-xpu", .lanes = slots, .context_window = context, .prefill_step = 0, .structures = true });
     if (drafter != null) {
         h.back.initDrafts();
         h.host.lone = .{ .ctx = &h.back, .run = XpuLanes.lone, .resumes = true, .sampled = true };

@@ -206,7 +206,7 @@ pub const Lanes = struct {
         // chunks cut where the request's chunks and the cache's marks are, as a fresh pass cuts them
         while (at < ids.len) {
             if (s.isCancelled()) return error.Cancelled;
-            var end = @min(ids.len, at + xq.CHUNK);
+            var end = xq.chunkEnd(at, ids.len);
             for (s.chunks) |cut| if (cut > at and cut < end) {
                 end = cut;
             };

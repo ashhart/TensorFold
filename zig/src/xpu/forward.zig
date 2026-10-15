@@ -30,18 +30,18 @@ const off = dev.off;
 // ---------------------------------------------------------------- activations and the forward
 
 pub const Acts = struct {
-    x: *anyopaque, // fp32 [q.CHUNK, D]
-    h: *anyopaque, // fp16 [q.CHUNK, FF]
-    ahi: *anyopaque, // fp16 [q.CHUNK, FF / 64]
+    x: *anyopaque, // fp32 [maxRows, D]
+    h: *anyopaque, // fp16 [maxRows, FF]
+    ahi: *anyopaque, // fp16 [maxRows, FF / 64]
     alo: *anyopaque,
-    r: *anyopaque, // fp16 [q.CHUNK, D]
-    p: *anyopaque, // fp16 [q.CHUNK, 2 FF]
-    q: *anyopaque, // bf16 [q.CHUNK, 16, 128] (GDN) / [q.CHUNK, 24, 256] (attention)
-    k: *anyopaque, // bf16 [q.CHUNK, 16, 128]
-    v: *anyopaque, // bf16 [q.CHUNK, 48, 128]
-    g: *anyopaque, // fp32 [q.CHUNK, 48]
+    r: *anyopaque, // fp16 [maxRows, D]
+    p: *anyopaque, // fp16 [maxRows, 2 FF]
+    q: *anyopaque, // bf16 [maxRows, 16, 128] (GDN) / [maxRows, 24, 256] (attention)
+    k: *anyopaque, // bf16 [maxRows, 16, 128]
+    v: *anyopaque, // bf16 [maxRows, 48, 128]
+    g: *anyopaque, // fp32 [maxRows, 48]
     beta: *anyopaque,
-    y: *anyopaque, // bf16 [q.CHUNK, 6144] (GDN out, attention out)
+    y: *anyopaque, // bf16 [maxRows, 6144] (GDN out, attention out)
     la: *anyopaque,
     wb: *anyopaque,
     u0: *anyopaque,
@@ -50,16 +50,16 @@ pub const Acts = struct {
     pm: *anyopaque,
     pl: *anyopaque,
     po: *anyopaque,
-    pscr: *anyopaque, // fp32 [q.CHUNK, D] (slice totals of the narrow prompt GEMM)
+    pscr: *anyopaque, // fp32 [maxRows, D] (slice totals of the narrow prompt GEMM)
     logits: *anyopaque, // fp16 [16, VOCAB]
-    taps: *anyopaque, // bf16 [q.CHUNK, 5 D]: hidden states after TAP_LAYERS, when Mode.taps
+    taps: *anyopaque, // bf16 [maxRows, 5 D]: hidden states after TAP_LAYERS, when Mode.taps
     tok: *anyopaque, // i32
     pv: *anyopaque, // argmax partials: f32 [256], i32 [256]
     pi: *anyopaque,
     mrows: *anyopaque, // i32 [16]: argmaxMasked's rows
     mbits: *anyopaque, // u32 [16, MASK_WORDS]: and their grammar bits
     mtok: *anyopaque, // i32 [16]: and their tokens
-    ids: *anyopaque, // i32 [q.CHUNK]
+    ids: *anyopaque, // i32 [maxRows]
     zeros: *anyopaque, // padding rows of the GDN chunks: k = v = 0, β = 0 …
     ones: *anyopaque, // … and g = 1
     chain: *anyopaque, // i32 [16, 17]: the tree table of a chain (row t at depth t), for the decode attention
@@ -69,25 +69,26 @@ pub const Acts = struct {
     sl: *anyopaque, // fp32 [16, 48, 128, 128]: GDN state after each row of a verified tree
     mt: *anyopaque, // u64 [LAYERS, 16, 8]: stepMulti's per-row state addresses
     mpos: *anyopaque, // i32 [16]: and positions
-    a8: *anyopaque, // W4A8 prompt: activations int8 [q.CHUNK, FF] (permuted by blocks of 8) …
-    sa: *anyopaque, // … and their scales fp32 [FF / 128, q.CHUNK + 32]
+    a8: *anyopaque, // W4A8 prompt: activations int8 [maxRows, FF] (permuted by blocks of 8) …
+    sa: *anyopaque, // … and their scales fp32 [FF / 128, maxRows + 32]
 
     pub fn init(d: *Dev) !Acts {
-        const nc = q.CHUNK / 64;
+        const rows = q.maxRows();
+        const nc = rows / 64;
         const ns = q.MAX_CTX / SPLIT;
         return .{
-            .x = try d.alloc_(q.CHUNK * D * 4),
-            .h = try d.alloc_(q.CHUNK * FF * 2),
-            .ahi = try d.alloc_(q.CHUNK * (FF / 64) * 2),
-            .alo = try d.alloc_(q.CHUNK * (FF / 64) * 2),
-            .r = try d.alloc_(q.CHUNK * D * 2),
-            .p = try d.alloc_(q.CHUNK * 2 * FF * 2),
-            .q = try d.alloc_(q.CHUNK * 24 * 256 * 2),
-            .k = try d.alloc_(q.CHUNK * 16 * 128 * 2),
-            .v = try d.alloc_(q.CHUNK * 48 * 128 * 2),
-            .g = try d.alloc_(q.CHUNK * 48 * 4),
-            .beta = try d.alloc_(q.CHUNK * 48 * 4),
-            .y = try d.alloc_(q.CHUNK * 6144 * 2),
+            .x = try d.alloc_(rows * D * 4),
+            .h = try d.alloc_(rows * FF * 2),
+            .ahi = try d.alloc_(rows * (FF / 64) * 2),
+            .alo = try d.alloc_(rows * (FF / 64) * 2),
+            .r = try d.alloc_(rows * D * 2),
+            .p = try d.alloc_(rows * 2 * FF * 2),
+            .q = try d.alloc_(rows * 24 * 256 * 2),
+            .k = try d.alloc_(rows * 16 * 128 * 2),
+            .v = try d.alloc_(rows * 48 * 128 * 2),
+            .g = try d.alloc_(rows * 48 * 4),
+            .beta = try d.alloc_(rows * 48 * 4),
+            .y = try d.alloc_(rows * 6144 * 2),
             .la = try d.alloc_(48 * nc * 64 * 4),
             .wb = try d.alloc_(nc * 48 * 64 * 128 * 2),
             .u0 = try d.alloc_(nc * 48 * 64 * 128 * 4),
@@ -97,7 +98,7 @@ pub const Acts = struct {
             .pm = try d.alloc_(16 * 24 * ns * 4),
             .pl = try d.alloc_(16 * 24 * ns * 4),
             .po = try d.alloc_(16 * 24 * ns * 256 * 4),
-            .pscr = try d.alloc_(q.CHUNK * D * 4),
+            .pscr = try d.alloc_(rows * D * 4),
             .logits = try d.alloc_(16 * VOCAB * 2),
             .tok = try d.alloc_(16 * 4),
             .pv = try d.alloc_(16 * 1024),
@@ -105,10 +106,10 @@ pub const Acts = struct {
             .mrows = try d.alloc_(16 * 4),
             .mbits = try d.alloc_(16 * MASK_WORDS * 4),
             .mtok = try d.alloc_(16 * 4),
-            .taps = try d.alloc_(q.CHUNK * 5 * D * 2),
-            .ids = try d.alloc_(q.CHUNK * 4),
-            .zeros = try d.alloc_(q.CHUNK * 48 * 128 * 2),
-            .ones = try d.alloc_(q.CHUNK * 48 * 4),
+            .taps = try d.alloc_(rows * 5 * D * 2),
+            .ids = try d.alloc_(rows * 4),
+            .zeros = try d.alloc_(rows * 48 * 128 * 2),
+            .ones = try d.alloc_(rows * 48 * 4),
             .chain = try d.upload(std.mem.sliceAsBytes(&chainTable())),
             .tree = try d.alloc_(16 * 17 * 4),
             .path = try d.alloc_(16 * 4),
@@ -116,8 +117,8 @@ pub const Acts = struct {
             .sl = try d.alloc_(16 * 48 * 128 * 128 * 4),
             .mt = try d.alloc_(LAYERS * 16 * 8 * 8),
             .mpos = try d.alloc_(16 * 4),
-            .a8 = try d.alloc_(q.CHUNK * FF),
-            .sa = try d.alloc_((FF / 128) * (q.CHUNK + 32) * 4),
+            .a8 = try d.alloc_(rows * FF),
+            .sa = try d.alloc_((FF / 128) * (rows + 32) * 4),
         };
     }
 };
@@ -133,13 +134,13 @@ pub fn chainTable() [16 * 17]i32 {
 }
 
 /// gate|up and SwiGLU: the activation and its row sums; prompt rows via the GEMM epilogue, decode rows via `swiglu`.
-pub fn mlpIn(d: *Dev, a: *Acts, w: Proj, T: u32, gs: i32, pre: bool) !*anyopaque {
-    if (q.prefill_int8 and T > 16 and w.ilv and w.gs == 128) { // W4A8: SwiGLU epilogue; down quantizes its own input
+pub fn mlpIn(d: *Dev, a: *Acts, w: Proj, T: u32, gs: i32, pre: bool, wide: bool) !*anyopaque {
+    if (q.prefill_int8 and wide and w.ilv and w.gs == 128) { // W4A8: SwiGLU epilogue; down quantizes its own input
         if (!pre) try quantA8(d, a, a.h, w.k, T, 0);
         try d.launch(d.k.a8_swiglu, a8Groups(w, T), a8Args(a, w, a.p, T));
         return a.p;
     }
-    if (T > 16 and w.ilv and gemm_hook == null) {
+    if (wide and w.ilv and gemm_hook == null) {
         const M: i32 = @intCast(T);
         const tiles = (T + 63) / 64;
         const k = if (w.gs == 128) d.k.ngen_swiglu_g128 else d.k.ngen_swiglu;
@@ -147,7 +148,7 @@ pub fn mlpIn(d: *Dev, a: *Acts, w: Proj, T: u32, gs: i32, pre: bool) !*anyopaque
         try d.launch(d.k.rowsums_ff, .{ .x = T }, .{ a.p, a.ahi, a.alo, gs, q.rot_on });
         return a.p;
     }
-    try gemm(d, a.pscr, a.h, a.ahi, a.alo, w, a.p, T);
+    try gemmRows(d, a.pscr, a.h, a.ahi, a.alo, w, a.p, T, wide);
     try d.launch(d.k.swiglu, .{ .x = T, .y = 17 }, .{ a.p, a.h, a.ahi, a.alo, gs, @as(i32, @intFromBool(w.ilv)), q.rot_on });
     return a.h;
 }
@@ -162,6 +163,11 @@ pub fn embedRows(d: *Dev, m: *const Model, ids: *anyopaque, x: *anyopaque, rows:
 
 /// out[M, N] fp16 = h[M, K] · Wᵀ : decode kernels up to 16 rows, the nGEN prompt GEMMs above.
 pub fn gemm(d: *Dev, pscr: *anyopaque, h: *anyopaque, ahi: *anyopaque, alo: *anyopaque, w: Proj, out: *anyopaque, m: u32) !void {
+    return gemmRows(d, pscr, h, ahi, alo, w, out, m, m > 16);
+}
+
+/// `gemm` with the path chosen by the caller: `wide`, the nGEN prompt GEMMs whatever the rows (a prompt's chunk).
+pub fn gemmRows(d: *Dev, pscr: *anyopaque, h: *anyopaque, ahi: *anyopaque, alo: *anyopaque, w: Proj, out: *anyopaque, m: u32, wide: bool) !void {
     const M: i32 = @intCast(m);
     const N: i32 = @intCast(w.n);
     const K: i32 = @intCast(w.k);
@@ -174,7 +180,7 @@ pub fn gemm(d: *Dev, pscr: *anyopaque, h: *anyopaque, ahi: *anyopaque, alo: *any
     const ngen_wide = if (g128) k.ngen_wide_g128 else k.ngen_wide;
     const ngen_narrow = if (g128) k.ngen_narrow_g128 else k.ngen_narrow;
     const mp: i32 = @intCast((m + 7) / 8 * 8);
-    if (m <= 16) {
+    if (!wide) {
         if (w.wide)
             // 64 columns per subgroup for the widest shapes (gate|up, head), 32 below (measured end to end)
             if (w.n >= 30000)
@@ -253,24 +259,24 @@ pub fn kvCap() i32 {
 pub const no_q8: ?*anyopaque = null;
 
 /// Prompt GEMM: W4A8 when on and the rows are prompt rows, else fp16; `pre`: x already in acts.a8; `qrot`: see quantA8.
-pub fn pgemm(d: *Dev, a: *Acts, x: *anyopaque, w: Proj, out: *anyopaque, T: u32, pre: bool, qrot: i32, int4: bool) !void {
-    if (!q.prefill_int8 or T <= 16 or w.gs != 128) return gemm(d, a.pscr, x, a.ahi, a.alo, w, out, T);
+pub fn pgemm(d: *Dev, a: *Acts, x: *anyopaque, w: Proj, out: *anyopaque, T: u32, pre: bool, qrot: i32, int4: bool, wide: bool) !void {
+    if (!q.prefill_int8 or !wide or w.gs != 128) return gemmRows(d, a.pscr, x, a.ahi, a.alo, w, out, T, wide);
     if (int4 and q.prefill_int4) {
-        try d.launch(d.k.quant_a4, .{ .x = T }, .{ x, a.a8, a.sa, a.ahi, a.alo, @as(i32, @intCast(w.k)), @as(i32, @intCast(q.CHUNK + 32)), qrot });
+        try d.launch(d.k.quant_a4, .{ .x = T }, .{ x, a.a8, a.sa, a.ahi, a.alo, @as(i32, @intCast(w.k)), @as(i32, @intCast(q.maxRows() + 32)), qrot });
         return d.launch(d.k.a4, a8Groups(w, T), a8Args(a, w, out, T));
     }
     if (!pre) try quantA8(d, a, x, w.k, T, qrot);
     try d.launch(d.k.a8, a8Groups(w, T), a8Args(a, w, out, T));
 }
 pub fn quantA8(d: *Dev, a: *Acts, x: *anyopaque, K: u32, T: u32, rot: i32) !void {
-    try d.launch(d.k.quant_a8, .{ .x = T }, .{ x, a.a8, a.sa, a.ahi, a.alo, @as(i32, @intCast(K)), @as(i32, @intCast(q.CHUNK + 32)), rot });
+    try d.launch(d.k.quant_a8, .{ .x = T }, .{ x, a.a8, a.sa, a.ahi, a.alo, @as(i32, @intCast(K)), @as(i32, @intCast(q.maxRows() + 32)), rot });
 }
 pub fn a8Groups(w: Proj, T: u32) ze.GroupCount {
     const tiles = (T + 63) / 64;
     return .{ .x = 8, .y = w.n / 256, .z = (tiles + 7) / 8 };
 }
 pub fn a8Args(a: *Acts, w: Proj, out: *anyopaque, T: u32) struct { *anyopaque, *anyopaque, *anyopaque, *anyopaque, *anyopaque, i32, i32, i32, *anyopaque, *anyopaque, i32, i32, *anyopaque } {
-    return .{ a.a8, w.w, w.s, w.bg, out, @intCast(T), @intCast(w.n), @intCast(w.k), a.ahi, a.alo, @intCast(q.CHUNK + 32), @intCast(w.k / 128), a.sa };
+    return .{ a.a8, w.w, w.s, w.bg, out, @intCast(T), @intCast(w.n), @intCast(w.k), a.ahi, a.alo, @intCast(q.maxRows() + 32), @intCast(w.k / 128), a.sa };
 }
 
 pub fn a8(d: *Dev, a: *Acts, x: *anyopaque, K: u32, T: u32, site: u32) !void {
@@ -280,23 +286,24 @@ pub fn a8(d: *Dev, a: *Acts, x: *anyopaque, K: u32, T: u32, site: u32) !void {
 }
 /// XPU_FP64_REF: called with each int4 GEMM's real input (site 0 mixer in … 4 head; layer LAYERS: the head).
 pub var gemm_probe: ?*const fn (*Dev, *Acts, Proj, *anyopaque, u32, usize, u32) anyerror!void = null;
-/// tree: rows form a tree (acts.tree), each seeing its ancestors; multi: each row a different slot's next token.
-pub const Mode = struct { want: Want = .last, stash: bool = false, taps: bool = false, tree: bool = false, multi: ?struct { mt: *anyopaque, pos: *anyopaque, max_pos: u32 } = null };
+/// prompt: a prompt chunk, prompt kernels at any rows; tree: rows see their ancestors; multi: one row a slot.
+pub const Mode = struct { prompt: bool = false, want: Want = .last, stash: bool = false, taps: bool = false, tree: bool = false, multi: ?struct { mt: *anyopaque, pos: *anyopaque, max_pos: u32 } = null };
 
-/// One forward over `ids` (≤ q.CHUNK rows) at p0..; returns the last row's greedy token; ≤ 16 rows run GDN serially.
+/// One forward over `ids` (< q.maxRows() rows) at p0..; the last row's greedy token; ≤ 16 non-prompt rows: GDN serial.
 pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mode) !?i32 {
     const want = mode.want != .none;
     const T: u32 = @intCast(ids.len);
+    const wide = T > 16 or mode.prompt; // the prompt kernels: a prompt chunk cuts the same bits at any length
     const t32: i32 = @intCast(T);
     const tp = (T + 63) / 64 * 64; // GDN chunk rows (padded)
     const nul: ?*anyopaque = null;
     const gs: i32 = @intCast(q.GS);
     const tree: ?*anyopaque = if (mode.tree) a.tree else null;
     // W4A8 prompt: the norms before mixer in and gate|up quantize h themselves (not with the study mode)
-    const q8on = q.prefill_int8 and T > 16 and q.GS == 128 and q.a8_group == 0;
+    const q8on = q.prefill_int8 and wide and q.GS == 128 and q.a8_group == 0;
     const q8a: ?*anyopaque = if (q8on) a.a8 else null;
     const q8s: ?*anyopaque = if (q8on) a.sa else null;
-    const q8ms: i32 = @intCast(q.CHUNK + 32);
+    const q8ms: i32 = @intCast(q.maxRows() + 32);
     // the mixers' out projection in W4A8: its input quantized by attn_gate / gated_norm (not when it is in int4)
     const q8out = q8on and !(q.prefill_int4 and q.int4_sites & 2 != 0);
     const q8oa: ?*anyopaque = if (q8out) a.a8 else null;
@@ -307,14 +314,14 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
     try embedRows(d, m, a.ids, a.x, T);
     if (p0 == 0) try dump(d, a, T, "embed", false);
     for (&m.layers, 0..) |*l, i| {
-        try d.launch(if (T > 16) d.k.add_rmsnorm else d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, @as(i32, D), EPS, @as(i32, if (i == 0) 0 else 1), gs, q8a, q8s, q8ms, q.rot_on });
+        try d.launch(if (wide) d.k.add_rmsnorm else d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.in_norm, a.h, a.ahi, a.alo, @as(i32, D), EPS, @as(i32, if (i == 0) 0 else 1), gs, q8a, q8s, q8ms, q.rot_on });
         const probe = p0 == 0 and i == 0;
         if (probe) try dumpBuf(d, "h0", a.h, T * D, .f16);
         // W4A8 study: the GEMM reads a quantized copy (in r, free until mixer_out); the dense a/b gates read h as is
-        const min_in = if (q.a8_group != 0 and T > 16 and q.a8_sites & 1 != 0) a.r else a.h;
+        const min_in = if (q.a8_group != 0 and wide and q.a8_sites & 1 != 0) a.r else a.h;
         if (min_in != a.h) try copy(d, a.r, a.h, T * D * 2);
         try a8(d, a, min_in, D, T, 1);
-        try pgemm(d, a, min_in, l.mixer_in, a.p, T, q8on, 0, false);
+        try pgemm(d, a, min_in, l.mixer_in, a.p, T, q8on, 0, false, wide);
         if (gemm_probe) |f| try f(d, a, l.mixer_in, min_in, T, i, 0);
         if (l.ab) |ab| try d.launch(d.k.dense_rows, .{ .x = (T + 15) / 16, .y = 96 / 16 }, .{ a.h, ab, a.p, t32, @as(i32, GDN_IN), @as(i32, 16384) });
         if (probe) try dumpBuf(d, "p0", a.p, T * GDN_IN, .f16);
@@ -323,9 +330,9 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
             const mt: ?*anyopaque = if (mode.multi) |mm| off(mm.mt, i * 16 * 8 * 8) else null;
             const ns = (ctx + SPLIT - 1) / SPLIT;
             try d.launch(d.k.attn_prep, .{ .x = T }, .{ a.p, l.qn.?, l.kn.?, m.invf, a.q, l.kc.?, l.vc.?, @as(i32, @intCast(p0)), EPS, tree, mt, mpos, q.kv8, kvCap() });
-            if (T > 16 and q.kv_i8) {
+            if (wide and q.kv_i8) {
                 try d.launch(d.k.attn_prompt8, .{ .x = (T + 7) / 8, .y = 4 }, .{ a.q, l.kc.?, l.vc.?, a.y, @as(i32, @intCast(p0)), t32, @as(f32, 1.0 / 16.0), kvCap() });
-            } else if (T > 16) {
+            } else if (wide) {
                 try d.launch(d.k.attn_prompt, .{ .x = (T + 7) / 8, .y = 4 }, .{ a.q, l.kc.?, l.vc.?, a.y, @as(i32, @intCast(p0)), t32, @as(f32, 1.0 / 16.0) });
             } else {
                 try d.launch(d.k.attn_decode, .{ .x = ns, .y = 4, .z = T }, .{ a.q, l.kc.?, l.vc.?, a.pm, a.pl, a.po, @as(i32, @intCast(p0)), @as(i32, @intCast(ns)), @as(f32, 1.0 / 16.0), if (mode.multi != null) tree else table, mt, mpos, kvCap() });
@@ -338,11 +345,11 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
             const cout = l.conv[1 - l.conv_cur].?;
             const gmt: ?*anyopaque = if (mode.multi) |mm| off(mm.mt, i * 16 * 8 * 8) else null;
             if (mode.multi == null) l.conv_cur = 1 - l.conv_cur; // multi: each slot's flips after the forward
-            if (T > 16)
+            if (wide)
                 try d.launch(d.k.gdn_pre_rows, .{ .x = (T + 7) / 8, .y = 5 }, .{ a.p, cin, cout, l.conv_w.?, l.alog.?, l.dt.?, a.q, a.k, a.v, a.g, a.beta, t32 })
             else
                 try d.launch(d.k.gdn_pre, .{ .x = T, .y = 40 }, .{ a.p, cin, cout, l.conv_w.?, l.alog.?, l.dt.?, a.q, a.k, a.v, a.g, a.beta, t32, tree, gmt });
-            if (T > 16 and tp > T) { // neutral padding rows: the state does not move
+            if (wide and tp > T) { // neutral padding rows: the state does not move
                 const pad = tp - T;
                 const cp = struct {
                     fn f(dd: *Dev, dst: *anyopaque, src: *anyopaque, n: usize) !void {
@@ -354,7 +361,7 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
                 try cp(d, off(a.beta, T * 48 * 4), a.zeros, pad * 48 * 4);
                 try cp(d, off(a.g, T * 48 * 4), a.ones, pad * 48 * 4);
             }
-            if (T <= 16) {
+            if (!wide) {
                 if (mode.stash) { // inputs, for Runner.commit's replay
                     const st = l.stash.?;
                     try copy(d, off(st, ST_Q), a.q, T * 16 * 128 * 2);
@@ -387,15 +394,15 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
             if (probe) try dumpBuf(d, "o0", a.h, T * 6144, .f16);
         }
         try a8(d, a, a.h, 6144, T, 2);
-        try pgemm(d, a, a.h, l.mixer_out, a.r, T, q8out, 0, q.int4_sites & 2 != 0);
+        try pgemm(d, a, a.h, l.mixer_out, a.r, T, q8out, 0, q.int4_sites & 2 != 0, wide);
         if (gemm_probe) |f| try f(d, a, l.mixer_out, a.h, T, i, 1);
         if (probe) try dumpBuf(d, "r0", a.r, T * D, .f16);
-        try d.launch(if (T > 16) d.k.add_rmsnorm else d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.post_norm, a.h, a.ahi, a.alo, @as(i32, D), EPS, @as(i32, 1), gs, q8a, q8s, q8ms, q.rot_on });
+        try d.launch(if (wide) d.k.add_rmsnorm else d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, l.post_norm, a.h, a.ahi, a.alo, @as(i32, D), EPS, @as(i32, 1), gs, q8a, q8s, q8ms, q.rot_on });
         try a8(d, a, a.h, D, T, 4);
         if (gemm_probe) |f| try f(d, a, l.gu, a.h, T, i, 2);
-        const act = try mlpIn(d, a, l.gu, T, gs, q8on);
+        const act = try mlpIn(d, a, l.gu, T, gs, q8on, wide);
         try a8(d, a, act, 17408, T, 8);
-        try pgemm(d, a, act, l.down, a.r, T, false, if (act == a.p) q.rot_on else 0, q.int4_sites & 8 != 0);
+        try pgemm(d, a, act, l.down, a.r, T, false, if (act == a.p) q.rot_on else 0, q.int4_sites & 8 != 0, wide);
         if (gemm_probe) |f| try f(d, a, l.down, act, T, i, 3);
         if (p0 == 0 and i < 4) try dump(d, a, T, try std.fmt.allocPrint(alloc, "{d}", .{i}), true);
         if (mode.taps) for (TAP_LAYERS, 0..) |tl, slot| if (tl == i)
@@ -406,7 +413,7 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
         return null;
     }
     const hgs: i32 = @intCast(m.head.gs);
-    try d.launch(if (T > 16) d.k.add_rmsnorm else d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, m.norm, a.h, a.ahi, a.alo, @as(i32, D), EPS, @as(i32, 1), hgs, no_q8, no_q8, @as(i32, 0), @as(i32, 0) });
+    try d.launch(if (wide) d.k.add_rmsnorm else d.k.add_rmsnorm_dec, .{ .x = T }, .{ a.x, a.r, m.norm, a.h, a.ahi, a.alo, @as(i32, D), EPS, @as(i32, 1), hgs, no_q8, no_q8, @as(i32, 0), @as(i32, 0) });
     if (q.dump_h) |fd| { // XPU_DUMP_H: every row's final normed hidden state, appended
         const host = try alloc.alloc(u16, T * D);
         defer alloc.free(host);

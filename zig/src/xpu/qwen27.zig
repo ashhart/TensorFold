@@ -44,6 +44,14 @@ pub var GS: u32 = 64;
 pub const GDN_IN = 16640; // qkv 10240 | z 6144 | a 48 | b 48 = 16480, padded to the GEMM tile (256)
 pub const ATT_IN = 14336; // (q 256 | gate 256) × 24 | k 1024 | v 1024
 pub var CHUNK: u32 = 1024; // prompt rows per forward (XPU_CHUNK, a multiple of 64)
+/// A forward's rows at most: a chunk, plus a rest under 128 rows joined to a prompt's last chunk.
+pub fn maxRows() u32 {
+    return CHUNK + 128;
+}
+/// Where a prompt chunk from `at` ends: CHUNK rows on, or the prompt's end when the rest is under 128 rows more.
+pub fn chunkEnd(at: usize, len: usize) usize {
+    return if (len - at < CHUNK + 128) len else at + CHUNK;
+}
 pub var MAX_CTX: u32 = 4096; // KV cache rows (XPU_CTX)
 pub const SPLIT = 32; // keys per attention split (decode.cl)
 pub const EPS: f32 = 1e-6;
@@ -241,8 +249,8 @@ pub const Runner = struct {
         prof.on = prof_on;
         r.acts = try Acts.init(d);
         r.store(); // slot 0: the states the load allocated
-        try d.fill(r.acts.zeros, @as(u16, 0), CHUNK * 48 * 128 * 2);
-        try d.fill(r.acts.ones, @as(f32, 1.0), CHUNK * 48 * 4);
+        try d.fill(r.acts.zeros, @as(u16, 0), maxRows() * 48 * 128 * 2);
+        try d.fill(r.acts.ones, @as(f32, 1.0), maxRows() * 48 * 4);
         r.host_logits = try alloc.alloc(f32, VOCAB);
         return r;
     }
@@ -317,10 +325,10 @@ pub const Runner = struct {
     pub fn prompt(r: *Runner, ids: []const u32, last: bool) !void {
         var at: usize = 0;
         while (at < ids.len) {
-            const end = @min(ids.len, at + CHUNK);
+            const end = chunkEnd(at, ids.len);
             const want = last and end == ids.len;
             if (r.pos + (end - at) > r.context) return error.ContextFull;
-            if (try forward(&r.d, &r.model, &r.acts, @ptrCast(ids[at..end]), r.pos, .{ .want = if (want) .last else .none, .taps = r.taps_on })) |t| r.last = @intCast(t);
+            if (try forward(&r.d, &r.model, &r.acts, @ptrCast(ids[at..end]), r.pos, .{ .prompt = true, .want = if (want) .last else .none, .taps = r.taps_on })) |t| r.last = @intCast(t);
             if (r.taps_on) if (r.on_taps) |cb| try cb.f(cb.ctx, r.acts.taps, @intCast(end - at));
             r.pos += @intCast(end - at);
             at = end;
