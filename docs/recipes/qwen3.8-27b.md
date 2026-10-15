@@ -23,10 +23,11 @@ A plain one-row round is 19.5 ms on the M5 Ultra (`tf-qwen27-bench`, `QWEN27_ADV
 14.1 GB in 16.2 ms, each shape at the K split it streams fastest at over every layer's matrix (`QWEN27_DISTINCT`;
 a matrix called again sits in the system cache and misleads), and an undrafted one-row window is kept by its own
 verify, as a prompt's rows are, rather than by a keep command buffer the host waited on (1.1 ms a token). Decode
-attention scores a window's cached keys in 128-key chunks while the window starts below 8,192 and 512-key chunks
-past it (`attention_plan.chunkFor`, the chunk a window's meta carries): at a 2k context a row's four key heads
-were eight threadgroups of 512 keys on an 80-core GPU, 96 µs a layer. A chain and a tree at one position merge
-their chunk partials alike, so drafted rows stay byte-equal to plain ones. A one-row round's
+attention scores each row's keys in 128-key chunks while the row's position is below 8,192 and 512-key chunks
+from it (`attention_plan.chunkFor`, the chunk a row's node carries): at a 2k context a row's four key heads
+were eight threadgroups of 512 keys on an 80-core GPU, 96 µs a layer. A row's chunks follow its own position, so
+it merges the same partials as its one-row step in a chain, a tree, a window across 8,192 or beside other streams,
+and drafted rows stay byte-equal to plain ones. A one-row round's
 DeltaNet step is three dispatches a layer rather than five: `tf_delta_gdn_pre_step` writes each slot's next conv
 window into its history as it reads it, so the commit and publication kernels go, and spreads a 128-wide head over
 four simdgroups (each lane's squares still summed in order); 1.19 ms a token where 1.75 (`QWEN27_STEPCHECK` checks

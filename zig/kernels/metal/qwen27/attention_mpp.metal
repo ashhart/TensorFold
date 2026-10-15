@@ -3,14 +3,14 @@
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace metal;
 using namespace mpp::tensor_ops;
-constant constexpr int G = 6, D = 256, TK = 64, MAXD = 128, MG = 8, MS = 12; // a stream's key chunk CK is meta word 11
+constant constexpr int G = 6, D = 256, TK = 64, MAXD = 128, MG = 8, MS = 12, NW = 4; // a row's key chunk is its node word 2
 struct Q27AttnReadPtrs { device const bfloat* keys; device const bfloat* values; };
 
 // SG tiles a threadgroup, a simdgroup pair each: both run scores and softmax, one owns each half of the head dim.
 template <int SG>
 kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const Q27AttnReadPtrs* caches [[buffer(1)]],
     constant float* scale [[buffer(2)]], device const int* meta [[buffer(3)]], device const int* tile_stream [[buffer(4)]],
-    device float* PO [[buffer(5)]], device float* PM [[buffer(6)]], device float* PL [[buffer(7)]],
+    device float* PO [[buffer(5)]], device float* PM [[buffer(6)]], device float* PL [[buffer(7)]], device const int* nodes [[buffer(8)]],
     uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]], ushort thread_index_in_simdgroup [[thread_index_in_simdgroup]],
     ushort simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]]) {
   const ushort lane = thread_index_in_simdgroup;
@@ -21,7 +21,7 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
   const uint c = threadgroup_position_in_grid.y;
   const int NCH = meta[1], SGA = meta[2];
   const int st = tile < SGA ? tile_stream[tile] : 0;
-  const int L = meta[MG + st * MS + 9], NQ = meta[MG + st * MS + 2], S0 = meta[MG + st * MS + 4], CK = meta[MG + st * MS + 11];
+  const int L = meta[MG + st * MS + 9], NQ = meta[MG + st * MS + 2], S0 = meta[MG + st * MS + 4];
   const int lt = tile - meta[MG + st * MS + 3];
   const int RP = 16 * SGA;
   const short qid = lane >> 2;
@@ -35,6 +35,10 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
   threadgroup half Ps[16 * TK]; // only gives the probabilities' tensor type
   threadgroup half* myP = Ps;
   if (tile >= SGA || int(c) >= meta[MG + st * MS + 1]) return;
+  // each row's chunk c is its own chunk's (its one-row step's); padding rows take the last row's and mask every key
+  const device int* own = nodes + NW * meta[MG + st * MS + 6];
+  const int ck0 = own[NW * (min(q0, G * NQ - 1) / G) + 2], ck1 = own[NW * (min(q1, G * NQ - 1) / G) + 2];
+  const int wa = simd_min(min(ck0, ck1)), wb = simd_max(max(ck0, ck1));
   const device bfloat* Kb = caches[st].keys;
   const device bfloat* Vb = caches[st].values;
   tensor<device bfloat, dextents<int32_t, 2>, tensor_inline> tQ((device bfloat*)Qp + (int64_t)hk * RP * D, dextents<int32_t, 2>(D, RP));
@@ -50,8 +54,12 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
   auto O = opO.template get_destination_cooperative_tensor<decltype(tP), decltype(bV0), float>();
   for (int i = 0; i < 64; i++) O[i] = 0.0f;
   float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;
-  const int kbeg = int(c) * CK;
-  const int kend = min(kbeg + CK, L);
+  // a tile holds two chunk widths only in a window across fine_until: a pass a width, the other width's rows masked,
+  // so their state passes through it unchanged
+  for (int w = wa;; w = wb) {
+  const int e0 = ck0 == w ? n0 : 0, e1 = ck1 == w ? n1 : 0;
+  const int kbeg = int(c) * w;
+  const int kend = min(kbeg + w, L);
   for (int kt = kbeg; kt < kend; kt += TK) {
     auto bK = tK.slice(0, kt);
     auto S = opS.template get_destination_cooperative_tensor<decltype(aQ), decltype(bK), float>();
@@ -59,7 +67,7 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
     float s[TK / 2];
     for (int i = 0; i < TK / 2; i++) {
       const int key = kt + (i >> 3) * 16 + fn + (i & 3);
-      s[i] = key < ((i & 4) ? n1 : n0) ? S[i] * scale[0] : -INFINITY;
+      s[i] = key < ((i & 4) ? e1 : e0) ? S[i] * scale[0] : -INFINITY;
     }
     float x0 = -INFINITY, x1 = -INFINITY;
     for (int i = 0; i < TK / 2; i++) { if (i & 4) x1 = max(x1, s[i]); else x0 = max(x0, s[i]); }
@@ -86,6 +94,8 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
     auto bV = tV.slice(hi ? 128 : 0, kt);
     opO.run(Pin, bV, O);
   }
+  if (w == wb) break;
+  }
   const int64_t base = ((int64_t)hk * NCH + c) * RP;
   // rows past the stream's last query row are padding that nothing reads
   for (int q = 0; q < 16; q++) {
@@ -98,7 +108,7 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
     if (q1 < G * NQ) { PM[base + r1] = m1; PL[base + r1] = l1; }
   }
 }
-#define Q27_PREFIX(SG) template [[host_name("q27_attn_prefix_" #SG)]] kernel void q27_attn_prefix<SG>(device const bfloat*, device const Q27AttnReadPtrs*, constant float*, device const int*, device const int*, device float*, device float*, device float*, uint3, ushort, ushort);
+#define Q27_PREFIX(SG) template [[host_name("q27_attn_prefix_" #SG)]] kernel void q27_attn_prefix<SG>(device const bfloat*, device const Q27AttnReadPtrs*, constant float*, device const int*, device const int*, device float*, device float*, device float*, device const int*, uint3, ushort, ushort);
 Q27_PREFIX(1)
 Q27_PREFIX(2)
 Q27_PREFIX(3)
@@ -128,11 +138,11 @@ kernel void q27_attn_tail(device const bfloat* QB [[buffer(0)]], device const Q2
   const uint cb = threadgroup_position_in_grid.y;
   const uint node = threadgroup_position_in_grid.z;
   const int NCB = meta[3], W = meta[4], RPA = meta[5], CA = meta[6];
-  const int st = nodes[2 * node + 1];
-  const int P = meta[MG + st * MS + 4], PT = meta[MG + st * MS + 0], CK = meta[MG + st * MS + 11];
+  const int st = nodes[NW * node + 1];
+  const int P = meta[MG + st * MS + 4], PT = meta[MG + st * MS + 0], CK = nodes[NW * node + 2];
   if (int(cb) >= meta[MG + st * MS + 5]) return;
   const int la = meta[MG + st * MS + 3] * 16 + (int(node) - meta[MG + st * MS + 6]) * G;
-  const int depth = nodes[2 * node];
+  const int depth = nodes[NW * node];
   const device bfloat* Kb = caches[st].keys;
   const device bfloat* Vb = caches[st].values;
   const int nmax = P + depth + 1;
@@ -264,10 +274,10 @@ kernel void q27_attn_merge(device const float* POA [[buffer(0)]], device const f
   const uint hk = threadgroup_position_in_grid.x;
   const uint r = threadgroup_position_in_grid.y;
   const int NCB = meta[3], W = meta[4], RPA = meta[5], CA = meta[6];
-  const int st = nodes[2 * (int(r) / G) + 1];
+  const int st = nodes[NW * (int(r) / G) + 1];
   const int NCBS = meta[MG + st * MS + 5];
   const int ra = meta[MG + st * MS + 3] * 16 + (int(r) / G - meta[MG + st * MS + 6]) * G + int(r) % G;
-  const int CT = meta[MG + st * MS + 10];
+  const int CT = nodes[NW * (int(r) / G) + 3]; // the row's own prefix chunks
   constexpr int DP = D / 32, MB = 8;
   const int node = r / G, g = r % G;
   float m = -INFINITY, l = 0.0f, o[DP];
