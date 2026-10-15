@@ -2,150 +2,22 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const config = @import("config.zig");
-const Attention = @import("attention.zig").Attention;
 const VisionWeights = @import("weights.zig").VisionWeights;
 const image = @import("image.zig");
 const Allocator = std.mem.Allocator;
-const Linear = cuda.cublaslt.Linear;
+const vit = cuda.vit;
 
-const threads = 256; // lfm2_vision.cu's NT
-const norm_most = 8 * threads; // NT * MAXE
 const patches_most = 1024; // a 512-pixel tile, or a thumbnail of at most 256 tokens
 const tiles_most = image.max_grid + 1; // max_tiles and the thumbnail
-const workspace_bytes = 32 << 20;
 const px_bytes = 2 * tiles_most * patches_most * image.patch_width; // a picture's bf16 patches, 256-byte aligned
 
-/// What tf_lfm2v_pointwise applies to a Linear's output: nothing, torch's tanh GELU, or its exact (erf) GELU.
-pub const Act = enum(i32) { none = 0, gelu_tanh = 1, gelu = 2 };
-
-pub const Kernels = struct {
-    mod: cuda.Module,
-    layer_norm_fn: cuda.Function,
-    pointwise_fn: cuda.Function,
-    bias_fn: cuda.Function,
-    unshuffle_fn: cuda.Function,
-
-    pub fn load(d: *const cuda.Driver) !Kernels {
-        if (!cuda.kernels.available) return error.BuiltWithoutKernels;
-        var mod = try cuda.Module.load(d, cuda.kernels.lfm2_vision);
-        errdefer mod.unload();
-        return .{
-            .mod = mod,
-            .layer_norm_fn = try mod.function("tf_lfm2v_layer_norm"),
-            .pointwise_fn = try mod.function("tf_lfm2v_pointwise"),
-            .bias_fn = try mod.function("tf_lfm2v_bias"),
-            .unshuffle_fn = try mod.function("tf_lfm2v_unshuffle"),
-        };
-    }
-
-    pub fn unload(k: *Kernels) void {
-        k.mod.unload();
-    }
-
-    /// y = LayerNorm(x) * w + b over rows up to 2048 wide.
-    pub fn layerNorm(k: *const Kernels, s: cuda.Stream, x: u64, w: u64, b: u64, y: u64, rows: usize, width: usize, eps: f32) !void {
-        if (width > norm_most) return error.RowShape;
-        var a: cuda.Args = .{};
-        for ([_]u64{ x, w, b, y }) |p| a.add(p);
-        a.add(int(width));
-        a.add(eps);
-        try go(k.layer_norm_fn, s, rows, 1, &a);
-    }
-
-    /// o [count] = x (a Linear's bf16 output) through `act`, then plus r when given; x or r may be o.
-    pub fn pointwise(k: *const Kernels, s: cuda.Stream, x: u64, r: ?u64, o: u64, count: usize, act: Act) !void {
-        var a: cuda.Args = .{};
-        for ([_]u64{ x, r orelse 0, o }) |p| a.add(p);
-        a.add(@as(i64, @intCast(count)));
-        a.add(@backingInt(act));
-        try go(k.pointwise_fn, s, blocks(count, threads), 1, &a);
-    }
-
-    /// o [rows, n] = bf16(acc + b), acc f32.
-    pub fn bias(k: *const Kernels, s: cuda.Stream, acc: u64, b: u64, o: u64, rows: usize, n: usize) !void {
-        var a: cuda.Args = .{};
-        for ([_]u64{ acc, b, o }) |p| a.add(p);
-        a.add(int(n));
-        try go(k.bias_fn, s, rows, blocks(n, threads), &a);
-    }
-
-    /// y [h/2 * w/2, 4c] = the projector's pixel unshuffle of x [h * w, c], an even grid.
-    pub fn unshuffle(k: *const Kernels, s: cuda.Stream, x: u64, y: u64, h: usize, w: usize, c: usize) !void {
-        if (h % 2 != 0 or w % 2 != 0) return error.RowShape;
-        var a: cuda.Args = .{};
-        a.add(x);
-        a.add(y);
-        a.add(int(w));
-        a.add(int(c));
-        try go(k.unshuffle_fn, s, h * w / 4, 1, &a);
-    }
-};
-
-fn int(x: usize) i32 {
-    return @intCast(x);
-}
-
-fn blocks(n: usize, by: usize) usize {
-    return (n + by - 1) / by;
-}
-
-fn go(f: cuda.Function, s: cuda.Stream, x: usize, y: usize, a: *cuda.Args) !void {
-    if (x == 0) return;
-    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(x), .y = @intCast(y), .z = 1 }, .block = .{ .x = threads } }, s, a);
-}
-
-/// torch Linears through cuBLASLt: a plan kept a shape, one workspace.
-pub const Gemms = struct {
-    gpa: Allocator,
-    lt: cuda.cublaslt.Library,
-    workspace: cuda.DeviceBuffer,
-    plans: std.AutoHashMapUnmanaged([3]u64, Linear) = .empty,
-
-    pub fn init(gpa: Allocator, d: *const cuda.Driver) !Gemms {
-        var lt = try cuda.cublaslt.Library.open();
-        errdefer lt.close();
-        return .{ .gpa = gpa, .lt = lt, .workspace = try cuda.DeviceBuffer.alloc(d, workspace_bytes) };
-    }
-
-    pub fn deinit(g: *Gemms) void {
-        var it = g.plans.valueIterator();
-        while (it.next()) |l| l.deinit();
-        g.plans.deinit(g.gpa);
-        g.workspace.free();
-        g.lt.close();
-    }
-
-    /// y [rows, n] = x [rows, k] . w [n, k]^T, f32 accumulation, `out` rows.
-    pub fn run(g: *Gemms, s: cuda.Stream, x: u64, w: u64, y: u64, rows: usize, n: usize, k: usize, out: cuda.cublaslt.DataType) !void {
-        try (try g.plan(rows, n, k, out, .none)).run(x, w, y, g.workspace.ptr, workspace_bytes, s.handle);
-    }
-
-    /// Whether the shape's own algorithm carries the bias in cuBLASLt's epilogue; else `linear` sums through f32.
-    pub fn fused(g: *Gemms, rows: usize, n: usize, k: usize) !bool {
-        return (try g.plan(rows, n, k, .bf16, .bias)).epilogue == .bias;
-    }
-
-    fn plan(g: *Gemms, rows: usize, n: usize, k: usize, out: cuda.cublaslt.DataType, epilogue: cuda.cublaslt.Epilogue) !*const Linear {
-        const key = [3]u64{ rows, n, k | @as(u64, @intCast(@backingInt(out))) << 40 | @as(u64, @backingInt(epilogue)) << 48 };
-        const got = try g.plans.getOrPut(g.gpa, key);
-        if (!got.found_existing) got.value_ptr.* = Linear.initEpilogue(&g.lt, rows, n, k, out, workspace_bytes, epilogue) catch |e| {
-            g.plans.removeByPtr(got.key_ptr);
-            return e;
-        };
-        return got.value_ptr;
-    }
-};
-
-/// y [rows, n] = bf16(x . w^T + b), the bias in cuBLASLt's epilogue, or else through f32 `acc` and tf_lfm2v_bias.
-pub fn linear(g: *Gemms, k: *const Kernels, s: cuda.Stream, acc: u64, x: u64, w: u64, b: u64, y: u64, rows: usize, n: usize, kk: usize) !void {
-    const p = try g.plan(rows, n, kk, .bf16, .bias);
-    if (p.epilogue == .bias) return p.runBias(x, w, b, y, g.workspace.ptr, workspace_bytes, s.handle);
-    try g.run(s, x, w, acc, rows, n, kk, .f32);
-    try k.bias(s, acc, b, y, rows, n);
-}
+pub const Act = vit.Act;
+pub const Kernels = vit.Kernels;
+pub const Gemms = vit.Gemms;
+pub const linear = vit.linear;
 
 /// a [rows, H D] = SDPA over one tile's rows (no mask), from qkv [rows, 3 H D] with its biases added.
-pub fn attention(at: *const Attention, s: cuda.Stream, qkv: u64, a: u64, rows: usize, heads: usize, dim: usize) !void {
+pub fn attention(at: *const vit.Attention, s: cuda.Stream, qkv: u64, a: u64, rows: usize, heads: usize, dim: usize) !void {
     const scale: f32 = @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(dim))));
     try at.full(s, qkv, a, rows, heads, dim, scale);
 }
@@ -155,7 +27,7 @@ pub const Vision = struct {
     text_hidden: usize,
     w: *const VisionWeights,
     k: Kernels,
-    at: Attention,
+    at: vit.Attention,
     g: Gemms,
     position: []f32, // the position table [side, side, hidden] on the host, resized for each tile's grid
     scratch: cuda.DeviceBuffer,
@@ -170,10 +42,10 @@ pub const Vision = struct {
         const c = cfg.vision orelse return error.NoVisionTower;
         const dim = c.hidden / c.heads;
         const side = std.math.sqrt(c.num_patches);
-        if (dim * c.heads != c.hidden or c.hidden > norm_most or c.downsample != 2 or side * side != c.num_patches or c.channels * c.patch * c.patch != image.patch_width) return error.VisionShape;
+        if (dim * c.heads != c.hidden or c.hidden > vit.norm_most or c.downsample != 2 or side * side != c.num_patches or c.channels * c.patch * c.patch != image.patch_width) return error.VisionShape;
         var k = try Kernels.load(d);
         errdefer k.unload();
-        var attn = try Attention.load(d);
+        var attn = try vit.Attention.load(d);
         errdefer attn.unload();
         var g = try Gemms.init(gpa, d);
         errdefer g.deinit();
@@ -247,7 +119,7 @@ pub const Vision = struct {
         try v.copied.synchronize(); // the staging may still feed the last picture's copies, never its tiles' work
         const host = v.staging.slice(u16);
         const px = host[0 .. n * image.patch_width];
-        for (px, picture.patches[0..px.len]) |*o, p| o.* = bf16(p);
+        for (px, picture.patches[0..px.len]) |*o, p| o.* = vit.bf16(p);
         const pos = host[px_bytes / 2 ..][0 .. n * c.hidden];
         var at: usize = 0;
         for (picture.tiles, 0..) |t, i| {
@@ -307,15 +179,9 @@ pub const Vision = struct {
         const resized = try gpa.alloc(f32, out.len);
         defer gpa.free(resized);
         try resize(gpa, v.position, side, v.c.hidden, t.h, t.w, resized);
-        for (out, resized) |*o, x| o.* = bf16(x);
+        for (out, resized) |*o, x| o.* = vit.bf16(x);
     }
 };
-
-/// cvt.rn.bf16.f32 of a finite value.
-fn bf16(x: f32) u16 {
-    const u: u32 = @bitCast(x);
-    return @truncate((u + 0x7fff + ((u >> 16) & 1)) >> 16);
-}
 
 /// Every value finite: the resize skips zero weights, so a NaN or infinity there must not be dropped silently.
 fn finite(values: []const f32) bool {

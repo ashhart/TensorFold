@@ -123,3 +123,6 @@ template __global__ void tf_prefill_attention::tree_kernel<64, 8, 4, 8>(const __
 // Head dim 72, eight warps of one head, eight staging slots (SigLIP2's tower, 72 dims padded to 80 inside).
 template __global__ void tf_prefill_attention::full_kernel<72, 8, 8>(const __nv_bfloat16*, __nv_bfloat16*, int, int,
     float);
+// Head dim 80, eight warps of one head, eight staging slots (RADIO's tower: 1280 wide, 16 heads).
+template __global__ void tf_prefill_attention::full_kernel<80, 8, 8>(const __nv_bfloat16*, __nv_bfloat16*, int, int,
+    float);

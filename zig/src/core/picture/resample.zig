@@ -154,6 +154,105 @@ const Taps = struct {
     }
 };
 
+/// torch's antialiased bicubic on float samples, sums fused as its arm64 build fuses them: RGB to f32 [3][h][w].
+pub fn bicubicPlanes(a: Allocator, src: View, w: usize, h: usize, out: []f32) Allocator.Error!void {
+    std.debug.assert(out.len == 3 * w * h);
+    const mid = if (h == src.height) out else try a.alloc(f32, 3 * src.height * w);
+    defer if (h != src.height) a.free(mid);
+    if (w != src.width) {
+        var t = try FloatTaps.init(a, src.width, w);
+        defer t.deinit(a);
+        for (0..src.height) |y| {
+            const row = src.pixels[y * src.stride ..][0 .. src.width * 3];
+            for (0..w) |x| {
+                const first, const k = t.at(x);
+                for (0..3) |c| {
+                    var acc = sample(row[first * 3 + c]) * k[0]; // a window always holds a sample
+                    for (k[1..], first + 1..) |kv, i| acc = @mulAdd(f32, sample(row[i * 3 + c]), kv, acc);
+                    mid[(c * src.height + y) * w + x] = acc;
+                }
+            }
+        }
+    } else for (0..src.height) |y| for (0..w) |x| for (0..3) |c| {
+        mid[(c * src.height + y) * w + x] = sample(src.pixels[y * src.stride + x * 3 + c]);
+    };
+    if (h == src.height) return;
+    var t = try FloatTaps.init(a, src.height, h);
+    defer t.deinit(a);
+    for (0..3) |c| for (0..h) |y| {
+        const first, const k = t.at(y);
+        const plane = mid[c * src.height * w ..][0 .. src.height * w];
+        for (out[(c * h + y) * w ..][0..w], 0..) |*o, x| {
+            var acc = plane[first * w + x] * k[0];
+            for (k[1..], first + 1..) |kv, i| acc = @mulAdd(f32, plane[i * w + x], kv, acc);
+            o.* = acc;
+        }
+    };
+}
+
+fn sample(v: u8) f32 {
+    return @floatFromInt(v);
+}
+
+/// Keys' kernel at a = -0.5 in float32 with fused multiply-adds, as the float path's arm64 build weighs a tap.
+fn cubic32(x0: f32) f32 {
+    const a: f32 = -0.5;
+    const x = @abs(x0);
+    if (x < 1) return @mulAdd(f32, @mulAdd(f32, a + 2, x, -(a + 3)) * x, x, 1);
+    if (x < 2) return @mulAdd(f32, @mulAdd(f32, @mulAdd(f32, a, x, -5 * a), x, 8 * a), x, -4 * a);
+    return 0;
+}
+
+/// One axis's float taps: a window widened by the shrink factor, centre and offsets in float32, weights summing to one.
+const FloatTaps = struct {
+    first: []usize,
+    count: []usize,
+    weights: []f32,
+    size: usize,
+
+    fn init(a: Allocator, in: usize, out: usize) Allocator.Error!FloatTaps {
+        const scale = @as(f32, @floatFromInt(in)) / @as(f32, @floatFromInt(out));
+        const support: f32 = if (scale >= 1) 2 * scale else 2;
+        const inv: f32 = if (scale >= 1) @floatCast(1 / @as(f64, scale)) else 1;
+        const size = @as(usize, @intFromFloat(@ceil(support))) * 2 + 1;
+        const first = try a.alloc(usize, out);
+        errdefer a.free(first);
+        const count = try a.alloc(usize, out);
+        errdefer a.free(count);
+        const weights = try a.alloc(f32, out * size);
+        @memset(weights, 0);
+        for (0..out) |i| {
+            const center: f32 = @floatCast(@as(f64, scale) * (@as(f64, @floatFromInt(i)) + 0.5));
+            const lo_at = @as(f64, center - support) + 0.5;
+            const lo: usize = if (lo_at > 0) @intFromFloat(lo_at) else 0;
+            const hi = @min(@as(usize, @intFromFloat(@as(f64, center + support) + 0.5)), in);
+            first[i] = lo;
+            count[i] = @min(hi -| lo, size);
+            const k = weights[i * size ..][0..count[i]];
+            var total: f32 = 0;
+            for (k, 0..) |*v, j| {
+                const d = @as(f32, @floatFromInt(lo + j)) - center;
+                v.* = cubic32(@floatCast((@as(f64, d) + 0.5) * inv));
+                total += v.*;
+            }
+            if (total != 0) for (k) |*v| {
+                v.* /= total;
+            };
+        }
+        return .{ .first = first, .count = count, .weights = weights, .size = size };
+    }
+
+    fn deinit(t: *FloatTaps, a: Allocator) void {
+        a.free(t.first);
+        a.free(t.count);
+        a.free(t.weights);
+    }
+
+    fn at(t: *const FloatTaps, i: usize) struct { usize, []const f32 } {
+        return .{ t.first[i], t.weights[i * t.size ..][0..t.count[i]] };
+    }
+};
+
 test "a flat picture stays flat at every size, both kinds" {
     const a = std.testing.allocator;
     const px = try a.alloc(u8, 7 * 5 * 3);
