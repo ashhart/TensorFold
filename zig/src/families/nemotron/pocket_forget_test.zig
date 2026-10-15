@@ -417,3 +417,48 @@ test "a put-back the device stops taking after one layer is cut keeps its snapsh
     try before.expectSame(&l.pockets);
     try expectLive(live, h);
 }
+
+test "a delete whose cut layer would round to other values when saved is put back whole, nothing changed" {
+    var t = trainer();
+    var h: Device = .{};
+    var p: P = .{ .gpa = std.testing.allocator, .mode = .auto };
+    defer p.deinit();
+    try three(&h, &p, &t);
+    var prng = std.Random.DefaultPrng.init(3);
+    const r = prng.random();
+    // slot 0's neurons far from zero next to their spread, until its cut layer would move when a save rounds it again
+    var cut_up: [width]f32 = undefined;
+    var cut_down: [width]f32 = undefined;
+    var moves = false;
+    for (0..20) |_| {
+        const spread = std.math.pow(f32, 10, -4 + 6 * r.float(f32));
+        const offset = spread * 256 * r.float(f32) * @as(f32, if (r.boolean()) 1 else -1);
+        for (p.up.items[0..width], p.down.items[0..width]) |*u, *v| {
+            u.* = offset + spread * r.floatNorm(f32);
+            v.* = -offset + spread * r.floatNorm(f32);
+        }
+        @memcpy(&cut_up, p.up.items[0..width]);
+        @memcpy(&cut_down, p.down.items[0..width]);
+        @memset(cut_up[1 * d ..][0..d], 0); // B's neuron at slot 0
+        try Shards.round(std.testing.allocator, d, &cut_up, &cut_down);
+        const once_up = cut_up;
+        const once_down = cut_down;
+        try Shards.round(std.testing.allocator, d, &cut_up, &cut_down);
+        moves = !std.mem.eql(u8, std.mem.sliceAsBytes(&once_up), std.mem.sliceAsBytes(&cut_up)) or !std.mem.eql(u8, std.mem.sliceAsBytes(&once_down), std.mem.sliceAsBytes(&cut_down));
+        if (moves) break;
+    }
+    try std.testing.expect(moves);
+    try p.upload(&t, &h, 0);
+    const gpa = std.testing.allocator;
+    const up = try gpa.dupe(f32, p.up.items);
+    defer gpa.free(up);
+    const down = try gpa.dupe(f32, p.down.items);
+    defer gpa.free(down);
+    const live = h;
+    try std.testing.expectError(error.LayerRoundsAgain, forgetting.forget(&p, &t, &h, &b_neurons));
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(up), std.mem.sliceAsBytes(p.up.items));
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(down), std.mem.sliceAsBytes(p.down.items));
+    for (0..layers - 1) |l| try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&live.up[l]), std.mem.sliceAsBytes(&h.up[l]));
+    try std.testing.expect(!forgetting.pending(&p));
+    try std.testing.expectEqual(@as(usize, 6), p.learned.items.len);
+}

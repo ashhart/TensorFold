@@ -107,10 +107,22 @@ fn cut(p: anytype, t: anytype, host: anytype, gone: []const [2]u16) !void {
     for (k.slots.items) |slot| {
         // the layer as its next save writes it, so the checks after this read what the shards will hold
         try host.pocketRound(p.up.items[slot * n ..][0..n], p.down.items[slot * n ..][0..n]);
+        try settled(p.gpa, host, p.up.items[slot * n ..][0..n], p.down.items[slot * n ..][0..n]);
         // neurons at the top whose input weights are zero are free; one below a kept neuron stays taken
         while (p.used.items[slot] > 0 and std.mem.allEqual(f32, p.neuron(p.up.items, slot, p.used.items[slot] - 1, d), 0)) p.used.items[slot] -= 1;
         try p.upload(t, host, slot);
     }
+}
+
+/// A rounded layer that a save would round to the same bits, else error.LayerRoundsAgain, so the delete is put back.
+fn settled(gpa: std.mem.Allocator, host: anytype, up: []const f32, down: []const f32) !void {
+    const again = try gpa.alloc(f32, up.len + down.len);
+    defer gpa.free(again);
+    @memcpy(again[0..up.len], up);
+    @memcpy(again[up.len..], down);
+    try host.pocketRound(again[0..up.len], again[up.len..]);
+    const same = std.mem.eql(u8, std.mem.sliceAsBytes(again[0..up.len]), std.mem.sliceAsBytes(up)) and std.mem.eql(u8, std.mem.sliceAsBytes(again[up.len..]), std.mem.sliceAsBytes(down));
+    if (!same) return error.LayerRoundsAgain;
 }
 
 /// The last delete undone bit for bit; a layer the device does not take keeps the snapshot, and a call again retries.

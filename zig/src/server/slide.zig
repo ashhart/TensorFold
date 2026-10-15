@@ -388,8 +388,12 @@ pub const unplaced = "a delete could not be put back on the device, so replies a
 
 /// An engine's failure message in words: a put-back the device has not taken is said plainly.
 pub fn engineWords(message: []const u8) []const u8 {
+    if (std.mem.eql(u8, message, "LayerRoundsAgain")) return rounds_again;
     return if (std.mem.eql(u8, message, "PutBackNotOnDevice")) unplaced else message;
 }
+
+/// What a delete says when a layer it touched would move again at the save: it was put back, and nothing written.
+pub const rounds_again = "a layer the delete touched would round to other 4-bit values when saved, so the delete was put back and nothing was written";
 
 pub fn words(cx: *errors.Cx, e: anyerror) []const u8 {
     return if (e == error.Refused and cx.message.len > 0) cx.message else @errorName(e);

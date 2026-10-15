@@ -262,3 +262,57 @@ test "a write that fails at the second shard leaves the first written; writing t
         try std.testing.expectEqualSlices(u8, b, now);
     }
 }
+
+test "a pocket as learning leaves it rounds once and stays: a second rounding changes no bit" {
+    const gpa = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(872);
+    const r = prng.random();
+    const width = 128;
+    var up: [learned * width]f32 = undefined;
+    var down: [learned * width]f32 = undefined;
+    for (0..200) |trial| {
+        // inputs centred on zero (half with a mild lean), outputs zero past the neurons in use
+        const sd = std.math.pow(f32, 10, -3 + 2 * r.float(f32));
+        const used = 1 + r.uintLessThan(usize, learned);
+        const lean = if (trial % 2 == 0) @as(f32, 0) else sd * 4 * r.float(f32);
+        for (0..learned) |k| for (0..width) |o| {
+            up[k * width + o] = lean + sd * r.floatNorm(f32);
+            down[k * width + o] = if (k < used) sd * r.floatNorm(f32) else 0;
+        };
+        try Shards.round(gpa, width, &up, &down);
+        const once_up = up;
+        const once_down = down;
+        try Shards.round(gpa, width, &up, &down);
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&once_up), std.mem.sliceAsBytes(&up));
+        try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&once_down), std.mem.sliceAsBytes(&down));
+    }
+}
+
+/// A pocket whose groups sit up to 256 of their spreads from zero, seeded: most move when rounded again.
+pub fn farFromZero(r: std.Random, up: []f32, down: []f32) void {
+    const spread = std.math.pow(f32, 10, -4 + 6 * r.float(f32));
+    const offset = spread * 256 * r.float(f32) * @as(f32, if (r.boolean()) 1 else -1);
+    for (up, down) |*u, *v| {
+        u.* = offset + spread * r.floatNorm(f32);
+        v.* = -offset + spread * r.floatNorm(f32);
+    }
+}
+
+test "a group far from zero next to its spread can move when rounded again, which a delete refuses" {
+    const gpa = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(1);
+    const r = prng.random();
+    const width = 64;
+    var up: [learned * width]f32 = undefined;
+    var down: [learned * width]f32 = undefined;
+    var moved = false;
+    for (0..20) |_| {
+        farFromZero(r, &up, &down);
+        try Shards.round(gpa, width, &up, &down);
+        const once_up = up;
+        const once_down = down;
+        try Shards.round(gpa, width, &up, &down);
+        moved = moved or !std.mem.eql(u8, std.mem.sliceAsBytes(&once_up), std.mem.sliceAsBytes(&up)) or !std.mem.eql(u8, std.mem.sliceAsBytes(&once_down), std.mem.sliceAsBytes(&down));
+    }
+    try std.testing.expect(moved);
+}
