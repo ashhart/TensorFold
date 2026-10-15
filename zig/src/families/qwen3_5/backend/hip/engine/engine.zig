@@ -76,6 +76,8 @@ pub const Engine = struct {
     o: Options,
     /// The scratch below exists (`size` ran).
     sized: bool,
+    /// A rank could not take a round: every rank stops before another collective.
+    stopped: bool,
     act: view.Kind,
     dtype: sample.Dtype,
     /// A window's scratch, kept from its verify to its keep (the commit reads the per-row states).
@@ -102,6 +104,7 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.o = o;
         e.sized = false;
+        e.stopped = false;
         // rounds and the draft head's batches replay graphs unless the policy says `graphs=off`, at any world size
         e.o.graphs = o.graphs and o.policy.graphsOn();
         e.graphs = round_graphs.Graphs.init(gpa);
@@ -178,7 +181,8 @@ pub const Engine = struct {
     fn sizedBytes(e: *const Engine, arenas: [2]usize, rows: usize, prompt_rows: usize, pool_pages: usize) usize {
         const m = e.model();
         return arenas[0] + arenas[1] + prompt_rows * 4 + draw.Drawer.deviceBytes(rows) + pages.Pool.deviceBytes(m, pool_pages) +
-            plan.Buffer.deviceBytes(rows, m.spec.n_layers) + state.Caches.deviceBytes(m, rows);
+            plan.Buffer.deviceBytes(rows, m.spec.n_layers) + state.Caches.deviceBytes(m, rows) +
+            lane_round.voteBytes(e.o.world);
     }
 
     /// Device bytes `size(capacity, pool_pages)` would allocate with `rows` rows a forward: what admission weighs.
@@ -341,6 +345,7 @@ pub const Engine = struct {
 
     /// Run `prompt[pos0..end]` into `caches`, its logits not read: a cut where the caches are kept.
     pub fn advance(e: *Engine, caches: *state.Caches, prompt: []const u32, pos0: usize, end: usize, cancel: ?Cancel) !void {
+        if (e.stopped) return error.GroupStopped;
         if (end <= pos0 or end > caches.total or end - pos0 > e.o.prompt_rows) return error.PromptTooLong;
         e.prompts.reset();
         const ids = e.ids.slice(u32)[0 .. end - pos0];
@@ -353,6 +358,7 @@ pub const Engine = struct {
 
     /// Prefill `prompt[pos0..]` into `caches`; the last row's token, its final row copied to `last` (MTP's input).
     pub fn prefill(e: *Engine, caches: *state.Caches, prompt: []const u32, pos0: usize, last: ?hip.DeviceBuffer, req: draw.Request, cancel: ?Cancel) !u32 {
+        if (e.stopped) return error.GroupStopped;
         const m = e.model();
         const len = prompt.len - pos0;
         if (len == 0 or prompt.len > caches.total or len > e.o.prompt_rows) return error.PromptTooLong;
@@ -372,6 +378,7 @@ pub const Engine = struct {
 
     /// Every window in one forward: `out` the token of every row; the round's snapshots live until its keeps flush.
     pub fn verify(e: *Engine, rows: []const Rows, reqs: []const draw.Request, out: []u32) !lane_round.Verified {
+        if (e.stopped) return error.GroupStopped;
         return lane_round.verify(e, rows, reqs, out);
     }
 

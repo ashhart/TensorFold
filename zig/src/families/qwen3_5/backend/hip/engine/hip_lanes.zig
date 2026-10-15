@@ -112,6 +112,7 @@ pub const Hip = struct {
     }
 
     fn send(h: *Hip, words: []const u32) !void {
+        if (h.e.stopped) return error.GroupStopped;
         if (h.link) |l| try l.send(words);
     }
 

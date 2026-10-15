@@ -26,6 +26,8 @@ pub const Fault = agreement.Fault;
 pub const Step = agreement.Step;
 pub const Verdict = agreement.Verdict;
 pub const How = agreement.How;
+pub const Vote = agreement.Vote;
+pub const tally = agreement.tally;
 
 /// What a rank brings to its join: its place, its GPU and policy, what it runs, and where a differing rank is named.
 pub const Join = struct {

@@ -1,4 +1,4 @@
-//! What a tensor-parallel group's ranks agree on: what they run at join, and each startup step.
+//! What a tensor-parallel group's ranks agree on: what they run at join, each startup step, each round's graph vote.
 
 const std = @import("std");
 
@@ -93,6 +93,22 @@ pub fn combine(steps: []const Step, how: How) Verdict {
     return v;
 }
 
+/// A rank's word on a round it recorded: every rank replays, every rank runs it eagerly, or every rank stops.
+pub const Vote = enum(u64) { declined = 0, kept = 1, failed = 2 };
+
+/// The round's outcome on every rank from each rank's vote: one failure stops all, one decline runs all eagerly.
+pub fn tally(votes: []const u64) Vote {
+    var all: Vote = .kept;
+    for (votes) |v| {
+        switch (v) {
+            @backingInt(Vote.kept) => {},
+            @backingInt(Vote.declined) => all = .declined,
+            else => return .failed,
+        }
+    }
+    return all;
+}
+
 test "a step's verdict: rank 0's values, the least of each, or the first refusal by rank" {
     const steps = [_]Step{ .ok(.{ 8, 30 }), .ok(.{ 6, 40 }), .ok(.{ 7, 20 }) };
     try std.testing.expectEqual([2]u64{ 8, 30 }, combine(&steps, .first).values);
@@ -106,6 +122,13 @@ test "a step's verdict: rank 0's values, the least of each, or the first refusal
     const text: [200]u8 = @splat('x');
     const long = Step.refuse(&text);
     try std.testing.expectEqual(@as(u32, 96), long.len);
+}
+
+test "a round's votes: all kept replays, a decline runs eagerly, a failure or an unknown word stops every rank" {
+    try std.testing.expectEqual(Vote.kept, tally(&.{ 1, 1, 1, 1 }));
+    try std.testing.expectEqual(Vote.declined, tally(&.{ 1, 0, 1, 1 }));
+    try std.testing.expectEqual(Vote.failed, tally(&.{ 0, 1, 2, 1 }));
+    try std.testing.expectEqual(Vote.failed, tally(&.{ 1, 7 }));
 }
 
 test "the wire layouts keep their sizes" {
