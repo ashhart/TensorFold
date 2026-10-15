@@ -7,11 +7,16 @@ const wts = @import("weights.zig");
 const c = @import("config.zig");
 const row = @import("../../core/row_projection.zig");
 const tile = @import("../../core/tile_qmm.zig");
+const am = @import("../../core/affine_mm.zig");
 const Buffer = mtl.Buffer;
 pub const Segment = struct { cache: *st.Cache, rows: usize };
+/// GPU seconds of every call so far (the bench reports a chunk's GPU time beside its wall time).
+pub var gpu_seconds: f64 = 0;
 pub const Head = enum { last, all };
 /// Rows from which a call takes the tiles (the twin's bits, each weight read once for every row).
 const tile_rows = 33;
+/// A buffer and byte offset as core/affine_mm binds them.
+const Ref = struct { buf: Buffer, off: usize = 0 };
 
 const QkArgs = extern struct { len: u32, cap: u32, eps: f32, log2_theta: f32 };
 const AttnArgs = extern struct { len: u32, cap: u32, scale: f32, subs: u32 };
@@ -22,6 +27,8 @@ const Encoder = struct {
     s: *st.Scratch,
     /// Prompt calls and windows of tile_rows or more take the tiles; fewer decode rows the twin (the same bits).
     prompt: bool,
+    /// A recorded window: every row's conv state is kept for a later keep.
+    record: bool,
 
     fn pipe(self: Encoder, comptime key: []const u8) void {
         self.e.setPipeline(self.m.kernels.get(key));
@@ -40,9 +47,21 @@ const Encoder = struct {
         self.e.setBuffer(w.scales, w.s_off, 2);
         self.e.setBuffer(w.biases, w.b_off, 3);
     }
+    /// The tensor-unit pipelines for `bits` when this call takes them: prompt calls of tile_rows or more on an M5.
+    fn nax(self: Encoder, bits: u8, rows: usize) ?am.Pipes {
+        if (!self.prompt or rows < tile_rows) return null;
+        return self.m.kernels.naxPipes(bits);
+    }
     /// y[rows] = x[rows] W^T: the prompt tiles (on x's group sums), or their twin at decode and window rows.
     fn projection(self: Encoder, w: row.Weights, x: Buffer, x_off: usize, y: Buffer, y_off: usize, rows: usize) void {
         const t = &self.m.kernels.tiles;
+        if (self.nax(w.bits, rows)) |p| {
+            const xr = Ref{ .buf = x, .off = x_off };
+            const sums = Ref{ .buf = self.s.sums };
+            am.rowSums(self.e, p, c.group, xr, sums, @intCast(rows), @intCast(w.k));
+            am.dense(self.e, p, xr, sums, affine(w), Ref{ .buf = y, .off = y_off }, @intCast(rows));
+            return;
+        }
         if (self.prompt or !self.m.kernels.twin) {
             tile.encodeSums(self.e, t, w.k, x, x_off, self.s.sums, rows);
             tile.encode(self.e, t, matrix(w), x, x_off, self.s.sums, 0, y, y_off, rows) catch unreachable;
@@ -80,6 +99,17 @@ const Encoder = struct {
     }
 };
 
+/// A matrix as core/affine_mm binds it (n a multiple of 64 at every LFM2 shape).
+fn affine(w: row.Weights) struct { w: Ref, s: Ref, b: Ref, n: u32, k: u32 } {
+    return .{
+        .w = .{ .buf = w.w, .off = w.w_off },
+        .s = .{ .buf = w.scales, .off = w.s_off },
+        .b = .{ .buf = w.biases, .off = w.b_off },
+        .n = @intCast(w.n),
+        .k = @intCast(w.k),
+    };
+}
+
 pub fn matrix(w: row.Weights) tile.Matrix {
     return .{ .w = w.w, .w_off = w.w_off, .scales = w.scales, .s_off = w.s_off, .biases = w.biases, .b_off = w.b_off, .n = w.n, .k = w.k, .bits = w.bits };
 }
@@ -97,7 +127,8 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const cb = m.queue.commandBuffer();
-    const enc = Encoder{ .e = cb.compute(.serial), .m = m, .s = s, .prompt = (!record and head == .last) or total >= tile_rows };
+    const prompt = (!record and head == .last) or total >= tile_rows;
+    const enc = Encoder{ .e = cb.compute(.serial), .m = m, .s = s, .prompt = prompt, .record = record };
     const e = enc.e;
     const embedding = m.weights.embedding;
     e.setPipeline(m.kernels.embed(embedding.bits));
@@ -132,6 +163,7 @@ pub fn run(m: *Model, s: *st.Scratch, segments: []const Segment, tokens: []const
     e.end();
     cb.commit();
     cb.wait();
+    gpu_seconds += cb.gpuSeconds();
     if (cb.failure()) |msg| {
         std.debug.print("LFM2 forward: {s}\n", .{msg});
         return error.GpuFailed;
@@ -156,6 +188,7 @@ fn conv(enc: Encoder, s: *st.Scratch, cv: wts.Conv, layer: usize, segments: []co
         enc.tensor(cv.weight, 2);
         e.setBuffer(s.y, base * c.hidden * 2, 3);
         e.setBuffer(s.snapshots[layer].?, base * st.conv_bytes, 4);
+        e.setValue(@as(u32, @intCast(if (enc.record) 0 else seg.rows - 1)), 5);
         enc.threads(.{ c.hidden, seg.rows, 1 }, .{ 256, 1, 1 });
         base += seg.rows;
     }
@@ -183,28 +216,38 @@ fn attention(enc: Encoder, s: *st.Scratch, a: wts.Attention, config: *const c.Co
         e.setBuffer(cache.keys, 0, 7);
         e.setBuffer(cache.values, 0, 8);
         enc.groups(.{ c.query_heads + c.kv_heads, seg.rows, 1 }, .{ 32, 1, 1 });
-        const subs: u32 = if (seg.rows <= st.split_rows) st.subs else 1;
-        const args = AttnArgs{ .len = len, .cap = cap, .scale = 1.0 / @sqrt(@as(f32, c.head_dim)), .subs = subs };
-        const used = (seg.cache.len + seg.rows + st.chunk_keys - 1) / st.chunk_keys * subs;
-        const wide = seg.rows > st.split_rows;
-        if (wide) enc.pipe("lfm2_attn_mma_r2") else enc.pipe("lfm2_attn_mma");
-        e.setBuffer(s.queries, base * c.hidden * 2, 0);
-        e.setBuffer(cache.keys, 0, 1);
-        e.setBuffer(cache.values, 0, 2);
-        e.setBytes(std.mem.asBytes(&args), 3);
-        e.setBuffer(s.pm, 0, 4);
-        e.setBuffer(s.pl, 0, 5);
-        e.setBuffer(s.po, 0, 6);
-        e.setValue(@as(u32, @intCast(seg.rows)), 7);
-        const per_tile: usize = if (wide) st.attn_rows else 8;
-        enc.groups(.{ (seg.rows + per_tile - 1) / per_tile, c.kv_heads, used }, .{ 128, 1, 1 });
-        enc.pipe("lfm2_attn_merge");
-        e.setBuffer(s.pm, 0, 0);
-        e.setBuffer(s.pl, 0, 1);
-        e.setBuffer(s.po, 0, 2);
-        e.setBytes(std.mem.asBytes(&args), 3);
-        e.setBuffer(s.y, base * c.hidden * 2, 4);
-        enc.groups(.{ c.query_heads, seg.rows, 1 }, .{ 32, 1, 1 });
+        // Prompt calls of tile_rows or more take the tensor units' kernel on an M5 (their projections' rule).
+        const nax_attn = enc.prompt and seg.rows >= tile_rows and enc.m.kernels.attn_nax != null;
+        // A chunk longer than the partials go in slices: a row's keys and cuts are the same in any slice.
+        var at: usize = 0;
+        while (at < seg.rows) : (at += st.attn_slice) {
+            const rows = @min(seg.rows - at, st.attn_slice);
+            const wide = rows > st.split_rows;
+            const subs: u32 = if (wide) 1 else st.subs;
+            const first: u32 = @intCast(seg.cache.len + at);
+            const args = AttnArgs{ .len = first, .cap = cap, .scale = 1.0 / @sqrt(@as(f32, c.head_dim)), .subs = subs };
+            const used = (first + rows + st.chunk_keys - 1) / st.chunk_keys * subs;
+            if (nax_attn) {
+                e.setPipeline(enc.m.kernels.attn_nax.?);
+            } else if (wide) enc.pipe("lfm2_attn_mma_r2") else enc.pipe("lfm2_attn_mma");
+            e.setBuffer(s.queries, (base + at) * c.hidden * 2, 0);
+            e.setBuffer(cache.keys, 0, 1);
+            e.setBuffer(cache.values, 0, 2);
+            e.setBytes(std.mem.asBytes(&args), 3);
+            e.setBuffer(s.pm, 0, 4);
+            e.setBuffer(s.pl, 0, 5);
+            e.setBuffer(s.po, 0, 6);
+            e.setValue(@as(u32, @intCast(rows)), 7);
+            const per_tile: usize = if (wide) st.attn_rows else 8;
+            enc.groups(.{ (rows + per_tile - 1) / per_tile, c.kv_heads, used }, .{ 128, 1, 1 });
+            enc.pipe("lfm2_attn_merge");
+            e.setBuffer(s.pm, 0, 0);
+            e.setBuffer(s.pl, 0, 1);
+            e.setBuffer(s.po, 0, 2);
+            e.setBytes(std.mem.asBytes(&args), 3);
+            e.setBuffer(s.y, (base + at) * c.hidden * 2, 4);
+            enc.groups(.{ c.query_heads, rows, 1 }, .{ 32, 1, 1 });
+        }
         base += seg.rows;
     }
     enc.projection(a.out, s.y, 0, s.r, 0, total);
@@ -244,11 +287,32 @@ fn moe(enc: Encoder, s: *st.Scratch, x: wts.Moe, scale: f32, total: usize) bool 
     e.setBuffer(s.pos, 0, 4);
     e.setBuffer(s.tokens, 0, 5);
     enc.groups(.{ 1, 1, 1 }, .{ c.experts * 16, 1, 1 });
-    tile.encodeWork(e, &enc.m.kernels.tiles, s.starts, c.experts, s.work);
-    tile.encodeSums(e, t, c.hidden, s.x, 0, s.sums, total);
-    tile.encodeGroupedGlu(e, t, matrix(x.gate.one), matrix(x.up.one), c.experts, s.x, s.sums, s.tokens, s.act, slots, s.starts, s.work) catch unreachable;
-    tile.encodeSums(e, t, c.moe_intermediate, s.act, 0, s.sums, slots);
-    tile.encodeGrouped(e, t, matrix(x.down.one), c.experts, s.act, s.sums, s.ident, s.experts, slots, s.starts, s.work) catch unreachable;
+    if (enc.nax(x.gate.one.bits, total)) |p| {
+        // Sorted slot j reads token row tokens[j]; gate and up SwiGLU'd into act, then down over act's sorted rows.
+        const sums = Ref{ .buf = s.sums };
+        const starts = Ref{ .buf = s.starts };
+        const act = Ref{ .buf = s.act };
+        am.rowSums(e, p, c.group, Ref{ .buf = s.x }, sums, @intCast(total), c.hidden);
+        const gate = affine(x.gate.one);
+        const up = affine(x.up.one);
+        const tokens = Ref{ .buf = s.tokens };
+        am.gatherGlu(e, p, Ref{ .buf = s.x }, sums, gate, up, starts, tokens, act, @intCast(slots), c.experts, 1, 0);
+        am.rowSums(e, p, c.group, act, sums, @intCast(slots), c.moe_intermediate);
+        am.gather(e, p, act, sums, affine(x.down.one), starts, Ref{ .buf = s.experts }, @intCast(slots), c.experts);
+    } else {
+        tile.encodeWork(e, &enc.m.kernels.tiles, s.starts, c.experts, s.work);
+        tile.encodeSums(e, t, c.hidden, s.x, 0, s.sums, total);
+        const gate = matrix(x.gate.one);
+        const up = matrix(x.up.one);
+        const sorted = .{ s.starts, s.work };
+        const map = s.tokens;
+        tile.encodeGroupedGlu(e, t, gate, up, c.experts, s.x, s.sums, map, s.act, slots, sorted[0], sorted[1]) catch
+            unreachable;
+        tile.encodeSums(e, t, c.moe_intermediate, s.act, 0, s.sums, slots);
+        const down = matrix(x.down.one);
+        tile.encodeGrouped(e, t, down, c.experts, s.act, s.sums, s.ident, s.experts, slots, sorted[0], sorted[1]) catch
+            unreachable;
+    }
     enc.pipe("lfm2_combine_sorted");
     e.setBuffer(s.experts, 0, 0);
     e.setBuffer(s.weights, 0, 1);

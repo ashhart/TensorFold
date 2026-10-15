@@ -8,6 +8,8 @@ pub const qwen35_layout = @embedFile("qwen3_5/layout.metal");
 
 /// LFM2-MoE: embedding, norms, the short conv, attention, the route and the experts' glue.
 pub const lfm2 = @embedFile("lfm2/lfm2.metal");
+/// LFM2's prompt attention on the tensor units (nax.h inlined at load, after lfm2.metal's text).
+pub const lfm2_attn_nax = @embedFile("lfm2/lfm2_attn_nax.metal");
 
 /// Our glue kernels around them: embedding, MLX's RMS arithmetic, argmax, layout moves.
 pub const nemotron_glue = @embedFile("nemotron_glue.metal");

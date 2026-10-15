@@ -104,10 +104,10 @@ inline void lfm2_rms(const thread float* v, const device bfloat* w, float eps, d
   lfm2_rms(v, w, eps, x, base, t, sg, lane, sums, inv);
 }
 
-// A segment's short conv: Bx = B * x, 3 causal taps over (state [2, D], Bx), y = C * conv; SNAP: each row's state.
+// A segment's short conv: Bx = B * x, 3 taps over (state [2, D], Bx), y = C * conv; SNAP: rows' states from FIRST on.
 [[kernel]] void lfm2_conv(const device bfloat* bcx [[buffer(0)]], const device bfloat* state [[buffer(1)]],
                           const device bfloat* w [[buffer(2)]], device bfloat* y [[buffer(3)]], device bfloat* snap [[buffer(4)]],
-                          uint2 at [[thread_position_in_grid]]) {
+                          constant uint& first [[buffer(5)]], uint2 at [[thread_position_in_grid]]) {
   const uint ch = at.x, r = at.y;
   if (ch >= D) return;
   bfloat bx[3];
@@ -123,8 +123,9 @@ inline void lfm2_rms(const thread float* v, const device bfloat* w, float eps, d
   float acc = 0.0f;
   for (int tap = 0; tap < 3; ++tap) acc += float(bx[tap]) * float(w[ch * 3 + tap]);
   y[size_t(r) * D + ch] = bcx[size_t(r) * 3 * D + D + ch] * bfloat(acc);
-  snap[(size_t(r) * 2) * D + ch] = bx[1];
-  snap[(size_t(r) * 2 + 1) * D + ch] = bx[2];
+  if (r < first) return;
+  snap[(size_t(r - first) * 2) * D + ch] = bx[1];
+  snap[(size_t(r - first) * 2 + 1) * D + ch] = bx[2];
 }
 
 // One head of one row: RMS norm over its 64 values (lane l: l and l + 32), then RoPE on the pair at position `pos`.

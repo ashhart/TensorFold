@@ -8,6 +8,8 @@ const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 pub const conv_bytes = (c.conv_taps - 1) * c.hidden * 2;
 pub const window_rows = 16;
 pub const batch_rows = 32;
+/// Rows a prompt attention pass takes at most: its partials are sized for these, a longer chunk goes in slices.
+pub const attn_slice = 2048;
 /// Key chunks a row's attention splits into at most (the kernel's CHUNKS), and keys a chunk (its PER).
 pub const chunks = 32;
 pub const chunk_keys = 4096;
@@ -74,7 +76,7 @@ pub const Cache = struct {
     }
 
     pub fn commit(self: *Cache, scratch: *const Scratch, base: usize, rows: usize, record: bool) void {
-        self.restore(scratch, base + rows - 1);
+        self.restore(scratch, if (record) base + rows - 1 else 0); // a prompt call snapshots its last row alone
         if (record) self.last = .{ .start = self.len, .base = base, .rows = rows } else self.last = null;
         self.len += rows;
     }
@@ -142,7 +144,8 @@ pub const Scratch = struct {
         out.bcx = try mem.alloc(rows * 3 * c.hidden * 2);
         out.k = try mem.alloc(rows * c.kv_heads * c.head_dim * 2);
         out.v = try mem.alloc(rows * c.kv_heads * c.head_dim * 2);
-        const partials = @max(rows, split_rows * subs) * c.query_heads * chunks;
+        const slice_rows: usize = @min(rows, attn_slice);
+        const partials = @max(slice_rows, split_rows * subs) * c.query_heads * chunks;
         out.pm = try mem.alloc(partials * 4);
         out.pl = try mem.alloc(partials * 4);
         out.po = try mem.alloc(partials * c.head_dim * 4);
@@ -163,8 +166,8 @@ pub const Scratch = struct {
         out.sums = try mem.alloc(@max(rows * (c.intermediate / 64), slots * (c.hidden / 64)) * 4);
         const logit_rows: usize = @min(rows, batch_rows);
         out.logits = try mem.alloc(logit_rows * c.vocab * 2);
-        for (&out.snapshots, attention) |*s, a| if (!a) {
-            s.* = try mem.alloc(rows * conv_bytes);
+        for (&out.snapshots, attention) |*s, a| if (!a) { // a recorded window's rows, or a prompt call's last row
+            s.* = try mem.alloc(logit_rows * conv_bytes);
         };
         return out;
     }
