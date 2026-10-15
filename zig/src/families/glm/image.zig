@@ -253,7 +253,7 @@ pub fn geometry(h: u32, w: u32, min_tokens: u32, max_tokens: u32) Error!Geometry
     return .{ .target_h = @intCast(ah), .target_w = @intCast(aw), .content_h = @intCast(@max(1, @min(ah, chf))), .content_w = @intCast(@max(1, @min(aw, cwf))) };
 }
 
-// ---- PIL's ImagingResample for 8-bit images (Resample.c), bicubic (a = -0.5) ----
+// ---- PIL's ImagingResample for 8-bit images (Resample.c): bicubic (a = -0.5) or bilinear ----
 
 const precision_bits = 32 - 8 - 2;
 
@@ -265,20 +265,26 @@ fn bicubic(x0: f64) f64 {
     return 0;
 }
 
-const Coeffs = struct { bounds: []u32, kk: []i32, ksize: usize };
+fn bilinear(x0: f64) f64 {
+    const x = @abs(x0);
+    return if (x < 1.0) 1.0 - x else 0;
+}
 
-/// precompute_coeffs and normalize_coeffs_8bpc: each output pixel's first input pixel, count and fixed-point weights.
-fn coeffs(gpa: std.mem.Allocator, in_size: u32, out_size: u32) Error!Coeffs {
+/// A PIL resampling filter and its support.
+pub const Filter = struct { f: *const fn (f64) f64, support: f64 };
+pub const bicubic_filter = Filter{ .f = bicubic, .support = 2.0 };
+pub const bilinear_filter = Filter{ .f = bilinear, .support = 1.0 };
+
+/// PIL's float weights (precompute_coeffs, before 8-bit rounding): each output pixel's first input, count, weights.
+pub fn weights(gpa: std.mem.Allocator, in_size: u32, out_size: u32, filter: Filter) Error!struct { bounds: []u32, w: []f64, ksize: usize } {
     const scale = @as(f64, @floatFromInt(in_size)) / @as(f64, @floatFromInt(out_size));
     const filterscale = @max(scale, 1.0);
-    const support = 2.0 * filterscale;
+    const support = filter.support * filterscale;
     const ksize: usize = @as(usize, @intFromFloat(@ceil(support))) * 2 + 1;
     const bounds = try gpa.alloc(u32, @as(usize, out_size) * 2);
     errdefer gpa.free(bounds);
-    const kk = try gpa.alloc(i32, @as(usize, out_size) * ksize);
-    errdefer gpa.free(kk);
-    var pre = try gpa.alloc(f64, ksize);
-    defer gpa.free(pre);
+    const w = try gpa.alloc(f64, @as(usize, out_size) * ksize);
+    errdefer gpa.free(w);
     const ss = 1.0 / filterscale;
     for (0..out_size) |xx| {
         const center = (@as(f64, @floatFromInt(xx)) + 0.5) * scale;
@@ -290,20 +296,31 @@ fn coeffs(gpa: std.mem.Allocator, in_size: u32, out_size: u32) Error!Coeffs {
         const xmin: usize = @intCast(xmin_i);
         const xmax: usize = @intCast(xmax_i);
         var ww: f64 = 0;
+        const row = w[xx * ksize ..][0..ksize];
         for (0..xmax) |x| {
-            const w = bicubic((@as(f64, @floatFromInt(x + xmin)) - center + 0.5) * ss);
-            pre[x] = w;
-            ww += w;
+            row[x] = filter.f((@as(f64, @floatFromInt(x + xmin)) - center + 0.5) * ss);
+            ww += row[x];
         }
-        for (0..ksize) |x| {
-            const k = if (x < xmax) (if (ww != 0) pre[x] / ww else pre[x]) else 0;
-            const v = k * @as(f64, @floatFromInt(@as(i64, 1) << precision_bits));
-            kk[xx * ksize + x] = @intFromFloat(if (v < 0) v - 0.5 else v + 0.5); // C's (int) of the rounded value
-        }
+        for (0..ksize) |x| row[x] = if (x < xmax) (if (ww != 0) row[x] / ww else row[x]) else 0;
         bounds[xx * 2] = @intCast(xmin);
         bounds[xx * 2 + 1] = @intCast(xmax);
     }
-    return .{ .bounds = bounds, .kk = kk, .ksize = ksize };
+    return .{ .bounds = bounds, .w = w, .ksize = ksize };
+}
+
+const Coeffs = struct { bounds: []u32, kk: []i32, ksize: usize };
+
+/// normalize_coeffs_8bpc: `weights` in fixed point.
+fn coeffs(gpa: std.mem.Allocator, in_size: u32, out_size: u32, filter: Filter) Error!Coeffs {
+    const f = try weights(gpa, in_size, out_size, filter);
+    defer gpa.free(f.w);
+    errdefer gpa.free(f.bounds);
+    const kk = try gpa.alloc(i32, f.w.len);
+    for (f.w, kk) |k, *o| {
+        const v = k * @as(f64, @floatFromInt(@as(i64, 1) << precision_bits));
+        o.* = @intFromFloat(if (v < 0) v - 0.5 else v + 0.5); // C's (int) of the rounded value
+    }
+    return .{ .bounds = f.bounds, .kk = kk, .ksize = f.ksize };
 }
 
 fn clip8(v: i64) u8 {
@@ -313,11 +330,16 @@ fn clip8(v: i64) u8 {
 
 /// Image.resize((w, h), BICUBIC) on an 8-bit RGB image: horizontal pass, then vertical, each rounded to 8 bits.
 pub fn resize(gpa: std.mem.Allocator, src: Rgb, w: u32, h: u32) Error!Rgb {
+    return resizeWith(gpa, src, w, h, bicubic_filter);
+}
+
+/// `resize` with another of PIL's filters.
+pub fn resizeWith(gpa: std.mem.Allocator, src: Rgb, w: u32, h: u32, filter: Filter) Error!Rgb {
     var cur = src;
     var owned = false;
     errdefer if (owned) cur.deinit(gpa);
     if (w != src.w) { // horizontal (PIL limits it to the rows the vertical pass reads: all of them here)
-        const c = try coeffs(gpa, src.w, w);
+        const c = try coeffs(gpa, src.w, w, filter);
         defer gpa.free(c.bounds);
         defer gpa.free(c.kk);
         const out = try gpa.alloc(u8, @as(usize, w) * cur.h * 3);
@@ -336,7 +358,7 @@ pub fn resize(gpa: std.mem.Allocator, src: Rgb, w: u32, h: u32) Error!Rgb {
         owned = true;
     }
     if (h != src.h) {
-        const c = try coeffs(gpa, src.h, h);
+        const c = try coeffs(gpa, src.h, h, filter);
         defer gpa.free(c.bounds);
         defer gpa.free(c.kk);
         const out = try gpa.alloc(u8, @as(usize, cur.w) * h * 3);

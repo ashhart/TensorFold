@@ -82,7 +82,10 @@ fn mat(w: wts.Linear) struct { w: B, s: B, b: B, n: u32, k: u32 } {
 }
 
 /// Beyond the cache: every row's logits (s.logits_all) or the last's, and rows' fp32 residuals (`hidden`).
-pub const Out = struct { all: bool = false, hidden: ?B = null };
+pub const Out = struct { all: bool = false, hidden: ?B = null, images: []const Span = &.{} };
+
+/// Rows that replace placeholder embeddings: positions [at, at + n) take bf16 rows from `rows` ([n, hidden]).
+pub const Span = struct { at: usize, n: usize, rows: B };
 
 /// `ids` at positions cache.len.. through the model: keys and values into the cache (len unmoved), logits out.
 pub fn run(m: *const Model, s: *st.Scratch, cache: *st.Cache, ids: []const u32, out: Out) !void {
@@ -101,6 +104,13 @@ pub fn run(m: *const Model, s: *st.Scratch, cache: *st.Cache, ids: []const u32, 
     const x = Enc{ .e = cb.compute(.serial), .m = m, .s = s };
     const W = m.weights;
     embed(x, n);
+    for (out.images) |sp| { // image rows over the placeholders this window holds
+        const lo = @max(sp.at, start);
+        const hi = @min(sp.at + sp.n, start + n);
+        if (lo >= hi) continue;
+        const args = Args{ .rows = @intCast(hi - lo), .width = c.hidden };
+        x.glue(.widen, args, &.{ bo(s.resid, (lo - start) * h * 4), bo(sp.rows.buf, sp.rows.off + (lo - sp.at) * h * 2), A }, .{ h, hi - lo, 1 }, .{ 256, 1, 1 }, false);
+    }
     for (W.layers[0..c.layers], 0..) |l, i| try layer(x, cache, l, i, start, n);
     if (out.hidden) |dst| x.glue(.copy32, Args{ .rows = nr, .width = c.hidden, .stride = c.hidden }, &.{ b(s.resid), A, dst }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
     const normed = Args{ .rows = nr, .width = c.hidden, .eps = c.eps };

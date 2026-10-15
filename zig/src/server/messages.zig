@@ -23,11 +23,11 @@ fn withField(cx: *Cx, o: *const json.Object, key: []const u8, value: Value) !*js
 
 /// ``normalize_messages`` (text only): leading system and developer text merged, later ones as ``late_system``; a template that needs a user query gains one user turn after a trailing tool run.
 pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_after_tool: bool) errors.Refused!Value {
-    return normalizeWith(cx, messages, late_system, needs_user_after_tool, false);
+    return normalizeWith(cx, messages, late_system, needs_user_after_tool, null);
 }
 
-/// One image part as the template and the image path read it: {"type": "image_url", "image_url": {"url", "detail"?}}.
-fn imagePart(cx: *Cx, part: Value) errors.Refused!Value {
+/// One image part as the template and the image path read it: {"type": `kind`, "image_url": {"url", "detail"?}}.
+fn imagePart(cx: *Cx, part: Value, kind: []const u8) errors.Refused!Value {
     const iu = part.get("image_url") orelse return cx.refuse("an image_url content part must contain image_url");
     var url: []const u8 = "";
     var detail: ?Value = null;
@@ -45,13 +45,13 @@ fn imagePart(cx: *Cx, part: Value) errors.Refused!Value {
     try inner.put(cx.a, "url", .{ .string = url });
     if (detail) |d| try inner.put(cx.a, "detail", d);
     const out = try json.newObject(cx.a);
-    try out.put(cx.a, "type", .{ .string = "image_url" });
+    try out.put(cx.a, "type", .{ .string = kind });
     try out.put(cx.a, "image_url", .{ .object = inner });
     return .{ .object = out };
 }
 
-/// `normalize`, and with `images` a user or tool message's image_url parts kept in order beside its text parts.
-pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_after_tool: bool, images: bool) errors.Refused!Value {
+/// `normalize`, and with `images` (the part type the template reads) image_url parts kept in order beside the text.
+pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_after_tool: bool, images: ?[]const u8) errors.Refused!Value {
     const list = messages orelse return cx.refuse("messages must be a non-empty list");
     if (list != .array or list.array.len == 0) return cx.refuse("messages must be a non-empty list");
     var out: std.ArrayList(Value) = .empty;
@@ -69,18 +69,19 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
             var has_image = false;
             for (content.?.array) |part| {
                 const kind = if (part == .object and part.get("type") != null and part.get("type").? == .string) part.get("type").?.string else "";
-                if (images and std.mem.eql(u8, kind, "image_url")) {
+                // an image part, or one this normalization already wrote with the template's type (it runs twice)
+                if (images != null and (std.mem.eql(u8, kind, "image_url") or std.mem.eql(u8, kind, images.?))) {
                     // tool results carry screenshots too; the template renders them in its response
                     if (!std.mem.eql(u8, role.?.string, "user") and !std.mem.eql(u8, role.?.string, "tool")) return cx.refuse("image parts are accepted in user and tool messages only");
-                    try parts.append(cx.a, try imagePart(cx, part));
+                    try parts.append(cx.a, try imagePart(cx, part, images.?));
                     has_image = true;
                     continue;
                 }
-                if (!std.mem.eql(u8, kind, "text") or fields.hasMedia(part)) return cx.refuse(if (images) "content parts must be text or image_url; audio and video inputs are unsupported" else "this server accepts text parts only; image, audio and video inputs are unsupported");
+                if (!std.mem.eql(u8, kind, "text") or fields.hasMedia(part)) return cx.refuse(if (images != null) "content parts must be text or image_url; audio and video inputs are unsupported" else "this server accepts text parts only; image, audio and video inputs are unsupported");
                 const t = part.get("text") orelse return cx.refuse("a text content part must contain a text string");
                 if (t != .string) return cx.refuse("a text content part must contain a text string");
                 try text.appendSlice(cx.a, t.string);
-                if (images) {
+                if (images != null) {
                     const tp = try json.newObject(cx.a);
                     try tp.put(cx.a, "type", .{ .string = "text" });
                     try tp.put(cx.a, "text", t);

@@ -9,6 +9,7 @@ const rows = @import("../../core/row_projection.zig");
 const route = @import("../../core/moe_route.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
 const frags = @import("../../core/frags.zig");
+const vision = @import("vision.zig");
 
 /// A prompt chunk's tensor-unit matmul for one (bits, group) the checkpoint uses.
 pub const Mm = struct { bits: u8, group: usize, pipes: affine_mm.Pipes };
@@ -29,6 +30,8 @@ pub const Model = struct {
     route: [2]mtl.Pipeline,
     /// Prompt attention on the tensor units, for the shape it is written for (192 dims, 16 heads a KV group).
     attend_nax: ?mtl.Pipeline = null,
+    /// The image tower, when the checkpoint holds one (tools/step5_fp8_to_mlx.py --only-vision).
+    vision: ?*vision.Vision = null,
     mm: [4]Mm = undefined,
     mms: usize = 0,
 
@@ -40,6 +43,7 @@ pub const Model = struct {
         m.gpa = gpa;
         m.mms = 0;
         m.attend_nax = null;
+        m.vision = null;
         m.config = try cfg.Config.read(gpa, io, dir);
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
@@ -85,6 +89,8 @@ pub const Model = struct {
             defer lib.deinit();
             m.attend_nax = try mtl.Pipeline.init(m.device, lib, "s5_attend_nax", false);
         }
+        if (m.checkpoint.has("vision_model.conv1.weight")) m.vision = try vision.Vision.load(gpa, m.device, &m.checkpoint);
+        errdefer if (m.vision) |v| v.deinit();
         for (m.weights.layers) |l| {
             try m.addMm(l.attn.q);
             switch (l.ffn) {
@@ -130,6 +136,7 @@ pub const Model = struct {
     pub fn deinit(m: *Model) void {
         for (m.mm[0..m.mms]) |f| for (f.pipes) |p| p.deinit();
         if (m.attend_nax) |p| p.deinit();
+        if (m.vision) |v| v.deinit();
         for (m.route) |p| p.deinit();
         m.rows.deinit();
         for (m.glue) |p| p.deinit();

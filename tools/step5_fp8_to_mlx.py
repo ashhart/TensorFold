@@ -165,6 +165,7 @@ def main() -> int:
     ap.add_argument("--mtp", action="store_true", help="keep the MTP layers (full model only)")
     ap.add_argument("--only-mtp", action="store_true", help="add the MTP layers to the checkpoint already at --out")
     ap.add_argument("--vision", action="store_true", help="keep the vision tower and projector")
+    ap.add_argument("--only-vision", action="store_true", help="add the vision tower and projector to the checkpoint at --out")
     ap.add_argument("--unquantized", action="store_true", help="write bf16 (experts dequantised), for reference checks")
     args = ap.parse_args()
 
@@ -175,12 +176,15 @@ def main() -> int:
     names = [n for n in wmap if not n.endswith("weight_scale_inv") and wanted(n, layers, args)]
     if args.only_mtp:
         names = [n for n in names if LAYER.match(n)]
+    if args.only_vision:
+        args.vision = True
+        names = [n for n in wmap if n.startswith(("vision_model.", "vit_large_projector"))]
     by_file: dict[str, list[str]] = {}
     for n in names:
         by_file.setdefault(wmap[n], []).append(n)
 
     args.out.mkdir(parents=True, exist_ok=True)
-    w = Writer(args.out, "model-mtp" if args.only_mtp else "model")
+    w = Writer(args.out, "model-mtp" if args.only_mtp else "model-vision" if args.only_vision else "model")
     quant: dict[str, dict] = {}
     t0, done = time.time(), 0
     for fname in sorted(by_file):
@@ -218,6 +222,16 @@ def main() -> int:
                 done += 1
                 print(f"[{time.time() - t0:7.0f}s] {done}/{len(names)} {name} {tuple(t.shape)} {t.dtype}", flush=True)
                 del t
+    if args.only_vision:
+        added = w.total
+        w.finish(merge=True)
+        old = json.loads((args.out / "config.json").read_text())
+        for k, v in cfg.items():  # the multimodal keys the text-only conversion left out
+            if k not in ("text_config", "quantization", "quantization_config"):
+                old.setdefault(k, v)
+        (args.out / "config.json").write_text(json.dumps(old, indent=1) + "\n")
+        print(f"added {added / 2**30:.1f} GiB of vision tower and projector to {args.out} ({time.time() - t0:.0f}s)")
+        return 0
     if args.only_mtp:
         added = w.total
         w.finish(merge=True)

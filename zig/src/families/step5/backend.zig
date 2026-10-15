@@ -1,5 +1,6 @@
 //! Step-5 behind the lane engine's backend: windows of the pending token and the MTP layers' drafts, a cache a stream.
 const std = @import("std");
+const mtl = @import("metal");
 const lanes = @import("lanes");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
@@ -66,14 +67,14 @@ pub const Metal = struct {
     }
 
     /// Run `ids` at the cache's end and keep them; with MTP the first MTP layer absorbs each row with a known next.
-    fn feed(self: *Metal, cache: *st.Cache, ids: []const u32) !void {
+    fn feed(self: *Metal, cache: *st.Cache, ids: []const u32, images: []const fwd.Span) !void {
         const c = &self.model.config;
         var at: usize = 0;
         while (at < ids.len) {
             const end = @min(ids.len, at + st.prompt_rows);
             const s = if (end - at > st.window_rows) &self.prompt else &self.scratch;
             const n = end - at;
-            try fwd.run(self.model, s, cache, ids[at..end], .{ .hidden = .{ .buf = s.hid } });
+            try fwd.run(self.model, s, cache, ids[at..end], .{ .hidden = .{ .buf = s.hid }, .images = images });
             const start = cache.len;
             cache.len += n;
             const last: [*]const u8 = s.hid.contents() + (n - 1) * c.hidden * 4;
@@ -100,8 +101,72 @@ pub const Metal = struct {
         errdefer cache.deinit();
         self.held += need;
         errdefer self.held -= need;
-        try self.feed(cache, ids);
+        var rows: ?mtl.Buffer = null;
+        defer if (rows) |r| r.deinit();
+        const spans = try self.encodeImages(stream.images, &rows);
+        defer self.gpa.free(spans);
+        try self.feed(cache, ids, spans);
         try self.caches.put(self.gpa, stream, cache);
+    }
+
+    /// The tower's rows for every image piece of a prompt, into one buffer, as spans over their placeholders.
+    fn encodeImages(self: *Metal, images: []const lanes.stream.Image, rows: *?mtl.Buffer) ![]fwd.Span {
+        const spans = try self.gpa.alloc(fwd.Span, images.len);
+        errdefer self.gpa.free(spans);
+        if (images.len == 0) return spans;
+        const v = self.model.vision orelse return error.Step5HasNoImageTower;
+        const h: usize = self.model.config.hidden;
+        var total: usize = 0;
+        for (images) |im| total += im.tokens;
+        rows.* = try self.model.device.buffer(total * h * 2, mtl.ResourceOptions.private);
+        var off: usize = 0;
+        for (images, spans) |im, *sp| {
+            const g2 = ((im.gh - 1) / 2 + 1 - 1) / 2 + 1; // two stride-2 convs
+            if (im.gh != im.gw or im.tokens != g2 * g2) return error.Step5ImageGrid;
+            sp.* = .{ .at = im.at, .n = im.tokens, .rows = .{ .buf = rows.*.?, .off = off * h * 2 } };
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            const cb = self.model.queue.commandBuffer();
+            const e = cb.compute(.serial);
+            try v.encode(e, im.pixels, im.gh, im.gw, .{ .buf = rows.*.?, .off = off * h * 2 });
+            e.end();
+            cb.commit();
+            cb.wait();
+            if (cb.failure()) |msg| {
+                std.log.err("step5 image tower: {s}", .{msg});
+                return error.GpuFailed;
+            }
+            off += im.tokens;
+        }
+        return spans;
+    }
+
+    /// A prompt chunk, a decode row, the MTP layers and the tower once: the first request skips the GPU's first touch.
+    pub fn warm(self: *Metal) !void {
+        const c = &self.model.config;
+        var cache = try st.Cache.init(self.model.device, c, st.prompt_rows + 2);
+        defer cache.deinit();
+        var ids: [st.prompt_rows]u32 = undefined;
+        for (&ids, 0..) |*t, i| t.* = @intCast(1000 + i * 37 % 20000);
+        try self.feed(&cache, &ids, &.{});
+        try fwd.run(self.model, &self.scratch, &cache, &.{ids[0]}, .{ .all = true, .hidden = .{ .buf = cache.hidden } });
+        if (self.model.vision) |v| {
+            const rows = try self.model.device.buffer(169 * @as(usize, c.hidden) * 2, mtl.ResourceOptions.private);
+            defer rows.deinit();
+            for ([_]u32{ 52, 36 }) |g| {
+                const px = try self.gpa.alloc(f32, @as(usize, g) * g * 588);
+                defer self.gpa.free(px);
+                @memset(px, 0);
+                const pool = mtl.objc.Pool.push();
+                defer pool.pop();
+                const cb = self.model.queue.commandBuffer();
+                const e = cb.compute(.serial);
+                try v.encode(e, px, g, g, .{ .buf = rows });
+                e.end();
+                cb.commit();
+                cb.wait();
+            }
+        }
     }
 
     fn firstFn(ptr: *anyopaque, stream: *lanes.Stream, position: u64) !u64 {

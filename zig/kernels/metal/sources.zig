@@ -132,3 +132,5 @@ pub const step5_glue = @embedFile("step5/glue.metal");
 pub const step5_sparse = @embedFile("step5/sparse.metal");
 /// Step-5's prompt attention on the tensor units (a KV group's 16 heads one operand; nax.h inlined at load).
 pub const step5_attend_nax = @embedFile("step5/attend_nax.metal");
+/// Step-5's image tower (perception encoder, downsampler convs, projector) on gemm_nax's tensor-unit GEMMs.
+pub const step5_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("step5/vision.metal");

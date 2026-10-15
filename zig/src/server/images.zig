@@ -31,7 +31,8 @@ fn parts(cx: *Cx, messages: Value) errors.Refused![]const Part {
         if (content != .array) continue;
         for (content.array) |p| {
             const kind = p.get("type") orelse continue;
-            if (kind != .string or !std.mem.eql(u8, kind.string, "image_url")) continue;
+            if (kind != .string or (!std.mem.eql(u8, kind.string, "image_url") and !std.mem.eql(u8, kind.string, "image"))) continue;
+            if (p.get("image_url") == null) continue;
             const iu = p.get("image_url").?;
             const detail = iu.get("detail");
             try out.append(cx.a, .{ .url = iu.get("url").?.string, .low = detail != null and std.mem.eql(u8, detail.?.string, "low") });
@@ -173,6 +174,14 @@ pub fn encodeShielded(text: model_text.Text, a: std.mem.Allocator, rendered: []c
     return ids.items;
 }
 
+/// The tokens an image's placeholder expands to: its pieces' rows and the tokens around them, else its rows.
+fn span(img: api.PreparedImage) usize {
+    if (img.pieces.len == 0) return img.tokens;
+    var n: usize = 0;
+    for (img.pieces) |pc| n += pc.before.len + pc.tokens + pc.after.len;
+    return n;
+}
+
 /// The prompt with each image's placeholder expanded to its tokens, the images and the cache key; null without vision.
 pub fn expand(vision: ?api.Vision, cx: *Cx, messages: Value, ids: []const u32, history_len: usize) errors.Refused!?Expanded {
     const v = vision orelse return null;
@@ -187,6 +196,7 @@ pub fn expand(vision: ?api.Vision, cx: *Cx, messages: Value, ids: []const u32, h
     const prepared = try cx.a.alloc(api.PreparedImage, ps.len);
     var bytes_total: usize = 0;
     var extra: usize = 0;
+    var runs: usize = 0; // tower inputs: an image's pieces, else the image
     for (ps, prepared, 0..) |p, *out, i| {
         const bytes = try dataBytes(cx, p.url);
         bytes_total += bytes.len;
@@ -199,15 +209,17 @@ pub fn expand(vision: ?api.Vision, cx: *Cx, messages: Value, ids: []const u32, h
         const cap = if (p.low) @min(budget, low_detail_tokens) else budget;
         out.* = v.prepare(v.ctx, cx.a, bytes, cap) catch |e| return refusal(cx, i, e);
         if (out.tokens == 0 or out.tokens > cap) return cx.refuse("the image processor exceeded the per-image visual-token budget");
-        extra += out.tokens - 1;
+        extra += span(out.*) - 1;
+        runs += @max(out.pieces.len, 1);
     }
     const n = ids.len + extra;
     const out_ids = try cx.a.alloc(u32, n);
     const key = try cx.a.alloc(u32, n);
-    const imgs = try cx.a.alloc(api.Image, ps.len);
+    const imgs = try cx.a.alloc(api.Image, runs);
     var hist = history_len;
     var at: usize = 0;
     var k: usize = 0;
+    var run: usize = 0;
     for (ids, 0..) |t, src| {
         if (t != v.image_token) {
             out_ids[at] = t;
@@ -216,14 +228,30 @@ pub fn expand(vision: ?api.Vision, cx: *Cx, messages: Value, ids: []const u32, h
             continue;
         }
         const img = prepared[k];
-        imgs[k] = .{ .pixels = img.pixels, .gh = img.gh, .gw = img.gw, .at = @intCast(at), .tokens = img.tokens };
-        if (src < history_len) hist += img.tokens - 1;
-        for (0..img.tokens) |j| {
-            out_ids[at + j] = t;
-            // the cache's ids for this image's rows: past the vocabulary, by content and row
-            key[at + j] = 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(img.hash, std.mem.asBytes(&j)) & 0x7fff_ffff));
+        if (src < history_len) hist += span(img) - 1;
+        const one = [1]api.Piece{.{ .pixels = img.pixels, .gh = img.gh, .gw = img.gw, .tokens = img.tokens }};
+        var row: usize = 0; // the image's rows so far, for the cache's ids
+        for (if (img.pieces.len > 0) img.pieces else &one) |pc| {
+            for (pc.before) |w| {
+                out_ids[at] = w;
+                key[at] = w;
+                at += 1;
+            }
+            imgs[run] = .{ .pixels = pc.pixels, .gh = pc.gh, .gw = pc.gw, .at = @intCast(at), .tokens = pc.tokens };
+            run += 1;
+            for (0..pc.tokens) |_| {
+                out_ids[at] = t;
+                // the cache's ids for this image's rows: past the vocabulary, by content and row
+                key[at] = 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(img.hash, std.mem.asBytes(&row)) & 0x7fff_ffff));
+                at += 1;
+                row += 1;
+            }
+            for (pc.after) |w| {
+                out_ids[at] = w;
+                key[at] = w;
+                at += 1;
+            }
         }
-        at += img.tokens;
         k += 1;
     }
     return .{ .ids = out_ids, .history_len = hist, .images = imgs, .cache_key = key };
