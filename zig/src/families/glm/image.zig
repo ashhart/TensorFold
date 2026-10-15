@@ -9,7 +9,7 @@ pub const Prepared = struct {
     gh: u32,
     gw: u32,
     tokens: u32,
-    hash: u64, // of the image's bytes: two prompts with the same placeholders but other images are other prompts
+    hash: u64, // of the image's bytes and grid: other images, or this one at another budget, are other prompts
 };
 
 /// The shared decoder's refusals, and a token budget too small for an image.
@@ -101,16 +101,15 @@ pub fn prepare(io: std.Io, gpa: std.mem.Allocator, bytes: []const u8, c: vision.
     return prepareRgb(gpa, img, std.hash.Wyhash.hash(0x1a6e, bytes), c, max_tokens);
 }
 
-/// An RGB image to patches: Pillow's bicubic resize to the content size, then the padded canvas cut into patches.
-pub fn prepareRgb(gpa: std.mem.Allocator, img: picture.Rgb, hash: u64, c: vision.Config, max_tokens: u32) Error!Prepared {
+/// RGB to patches (Pillow's bicubic resize, the padded canvas cut); the hash covers the bytes' hash and the grid.
+pub fn prepareRgb(gpa: std.mem.Allocator, img: picture.Rgb, bytes_hash: u64, c: vision.Config, max_tokens: u32) Error!Prepared {
     const g = try geometry(@intCast(img.height), @intCast(img.width), @min(c.min_tokens, max_tokens), max_tokens);
     const resized = try picture.resample.resize(gpa, .pillow, .of(img.pixels, img.width, img.height), g.content_w, g.content_h);
     defer gpa.free(resized);
     const content: picture.Rgb = .{ .width = g.content_w, .height = g.content_h, .pixels = resized };
     const pixels = try patchify(gpa, content, g, c.mean, c.std);
-    const gh = g.target_h / vision.patch;
-    const gw = g.target_w / vision.patch;
-    return .{ .pixels = pixels, .gh = gh, .gw = gw, .tokens = gh * gw / vision.patches_per_token, .hash = hash };
+    const grid = [2]u32{ g.target_h / vision.patch, g.target_w / vision.patch };
+    return .{ .pixels = pixels, .gh = grid[0], .gw = grid[1], .tokens = grid[0] * grid[1] / vision.patches_per_token, .hash = std.hash.Wyhash.hash(bytes_hash, std.mem.asBytes(&grid)) };
 }
 
 test "geometry follows smart_resize" {
@@ -124,4 +123,22 @@ test "geometry follows smart_resize" {
     const big = try geometry(1500, 2000, 16, 256);
     try std.testing.expect(@as(u64, big.target_h) * big.target_w * 2 <= 256 * 2 * 28 * 28);
     try std.testing.expect(big.content_h <= big.target_h and big.content_w <= big.target_w);
+}
+
+test "the hash names the grid: one picture at two budgets is two images to the cache, at one budget the same" {
+    const gpa = std.testing.allocator;
+    const c: vision.Config = .{ .image_token = 1, .image_start = 2, .image_end = 3, .mean = @splat(0.5), .std = @splat(0.5), .min_tokens = 16, .max_tokens = 4096 };
+    const pixels = try gpa.alloc(u8, 640 * 480 * 3);
+    defer gpa.free(pixels);
+    @memset(pixels, 9);
+    const photo: picture.Rgb = .{ .width = 640, .height = 480, .pixels = pixels };
+    const whole = try prepareRgb(gpa, photo, 7, c, 4096);
+    defer gpa.free(whole.pixels);
+    const cut = try prepareRgb(gpa, photo, 7, c, 64);
+    defer gpa.free(cut.pixels);
+    const again = try prepareRgb(gpa, photo, 7, c, 4096);
+    defer gpa.free(again.pixels);
+    try std.testing.expect(whole.tokens > cut.tokens);
+    try std.testing.expect(whole.hash != cut.hash); // another grid: neither resumes a state the other kept
+    try std.testing.expectEqual(whole.hash, again.hash); // the same picture at the same budget resumes
 }
