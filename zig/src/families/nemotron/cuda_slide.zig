@@ -110,6 +110,11 @@ const Host = struct {
         try m.e.stream.synchronize();
         return PocketShards.write(gpa, io, m.dir, m.e.c, moe, neurons, up, down);
     }
+
+    /// One layer's pocket neurons rounded in place as pocketSave writes them.
+    pub fn pocketRound(gpa: std.mem.Allocator, neurons: usize, d: usize, up: []f32, down: []f32) !void {
+        return PocketShards.round(gpa, neurons, d, up, down);
+    }
 };
 
 pub const Learner = lessons.Learner(Host);

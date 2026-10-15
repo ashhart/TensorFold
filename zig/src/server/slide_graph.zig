@@ -200,6 +200,15 @@ pub const Graph = struct {
         f.recalled = recalled;
     }
 
+    /// Each fact's last verdict as `before` holds it: what a lesson that was taken out leaves them at.
+    pub fn restoreChecks(g: *Graph, before: []const Earlier) void {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        for (before) |b| if (g.find(b.id)) |f| {
+            f.recalled = b.recalled;
+        };
+    }
+
     /// What a fact's lesson last did, or why it stopped.
     pub fn note(g: *Graph, id: u32, message: []const u8) void {
         g.mutex.lockUncancelable(g.io);

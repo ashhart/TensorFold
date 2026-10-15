@@ -103,6 +103,11 @@ const Host = struct {
         return PocketShards.write(gpa, io, b.m.dir, b.m.config, moe, neurons, up, down);
     }
 
+    /// One layer's pocket neurons rounded in place as pocketSave writes them.
+    pub fn pocketRound(gpa: std.mem.Allocator, neurons: usize, d: usize, up: []f32, down: []f32) !void {
+        return PocketShards.round(gpa, neurons, d, up, down);
+    }
+
     /// MoE layer l's shared-expert down projection codes as the checkpoint holds them live, for its row kernels.
     pub fn codes(b: Ctx, l: usize) !lessons.Codes {
         const t = try downProj(b, l);

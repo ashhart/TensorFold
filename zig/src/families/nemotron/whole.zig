@@ -46,6 +46,10 @@ pub fn Hooks(comptime H: type) type {
         pub fn pocketSave(f: Self, layers: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
             return H.pocketSave(f.b, f.gpa, f.io, layers, neurons, up, down);
         }
+
+        pub fn pocketRound(f: Self, neurons: usize, d: usize, up: []f32, down: []f32) !void {
+            return H.pocketRound(f.gpa, neurons, d, up, down);
+        }
     };
 }
 
@@ -67,7 +71,10 @@ pub fn begin(l: anytype, lesson: Lesson) !void {
             try l.probe.begin(l.trainer.?, l.answers, l.owned.held);
             l.phase = .probe;
         },
-        .pocket => try startPocket(l),
+        .pocket => {
+            try startPocket(l);
+            try l.pockets.mark(); // what taking this lesson out puts back
+        },
         .edit => if (comptime !editing(@TypeOf(l.*))) return error.EditsUnsupported else {
             try openEmpty(l);
             try startEdit(l);

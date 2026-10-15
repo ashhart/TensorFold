@@ -92,6 +92,13 @@ test "a lesson's phases, loss trace and neurons show while it learns; a learned 
     again.answered(id, 2, "Your sister Ana.");
     try std.testing.expectEqualStrings("Your sister Ana.", again.facts.items[0].answers[2]);
     try std.testing.expectEqual(@as(usize, 0), (try again.earlier(ar, id)).len);
+    // a lesson taken out after its re-check found the fact forgotten puts back the verdict it began with
+    again.checked(id, true);
+    const was = try again.earlier(ar, 999);
+    again.checked(id, false);
+    try std.testing.expectEqual(@as(?bool, false), again.facts.items[0].recalled);
+    again.restoreChecks(was);
+    try std.testing.expectEqual(@as(?bool, true), again.facts.items[0].recalled);
     try std.testing.expectEqual(@as(u32, 2), again.facts.items[0].round);
     try std.testing.expectEqual(@as(usize, 0), again.facts.items[1].neurons.len);
 }

@@ -51,6 +51,31 @@ pub fn Io(comptime core: type) type {
             return bytes;
         }
 
+        /// One layer's `neurons` rounded in place as `write` hands them back: up rows, then each output row.
+        pub fn round(gpa: std.mem.Allocator, neurons: usize, d: usize, up: []f32, down: []f32) !void {
+            if (neurons % group != 0 or d % group != 0) return error.BadPocket;
+            const width = @max(d, neurons);
+            const w = try gpa.alloc(u32, width / 8);
+            defer gpa.free(w);
+            const s = try gpa.alloc(u16, width / group);
+            defer gpa.free(s);
+            const b = try gpa.alloc(u16, width / group);
+            defer gpa.free(b);
+            for (0..neurons) |k| {
+                const x = up[k * d ..][0..d];
+                host4.quantize(x, w[0 .. d / 8], s[0 .. d / group], b[0 .. d / group]);
+                host4.dequantize(w[0 .. d / 8], s[0 .. d / group], b[0 .. d / group], x);
+            }
+            const col = try gpa.alloc(f32, neurons);
+            defer gpa.free(col);
+            for (0..d) |o| {
+                for (col, 0..) |*x, k| x.* = down[k * d + o];
+                host4.quantize(col, w[0 .. neurons / 8], s[0 .. neurons / group], b[0 .. neurons / group]);
+                host4.dequantize(w[0 .. neurons / 8], s[0 .. neurons / group], b[0 .. neurons / group], col);
+                for (col, 0..) |x, k| down[k * d + o] = x;
+            }
+        }
+
         fn hasMtp(gpa: std.mem.Allocator, io: std.Io, path: []const u8) bool {
             var f = st.File.open(gpa, io, path) catch return false;
             defer f.close(io);
