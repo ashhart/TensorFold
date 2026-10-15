@@ -99,6 +99,12 @@ pub const Ctx = struct {
     /// Small all-gathers as RDMA writes over RoCE (cuda.roce), when both ranks brought it up; NCCL otherwise.
     roce: ?*cuda.roce.Gather = null,
 
+    /// After the sync that precedes a host read of anything a gather fed: a RoCE gather that timed out wrote nothing and
+    /// returned, so its error is raised here rather than the read taking a previous step's values.
+    pub fn gathered(c: *const Ctx) !void {
+        if (c.roce) |g| try g.check();
+    }
+
     /// Both ranks' ``count`` values from ``send`` into ``recv`` in rank order (ncclAllGather's layout and bits).
     pub fn allGather(c: *const Ctx, send: u64, recv: u64, count: usize, dt: cuda.nccl.DataType, what: []const u8) !void {
         const size: usize = switch (dt) {

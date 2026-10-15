@@ -180,7 +180,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *forward.Engine, dir: []const
     }
     // the device's share: linears packed (q|k|v, gate|up, k|v for context), norms and convs; codebooks stay host
     var total: u64 = 0;
-    const split = e.ctx.world == 2 and if (std.c.getenv("TF_GLM_DFLASH2_SPLIT")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else true;
+    const split = e.ctx.world == 2 and splitWanted();
     const ff: usize = if (split) FF / 2 else FF;
     const small: u64 = 6 * 4096 * 2 + 2 * 128 * 2 + 2 * 2 * 2 * D * 2;
     total += LAYERS * (linearBytes(QKV, D, bits) + linearBytes(2 * KVW, D, bits) + linearBytes(D, D, bits) + linearBytes(2 * ff, D, bits) +
@@ -260,7 +260,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *forward.Engine, dir: []const
         dr.tap_s0 = std.mem.eql(u8, std.mem.span(v), "s0");
     }
     if (std.c.getenv("TF_GLM_DFLASH2_DUMP_ROUND")) |v| dr.dump_at = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 10;
-    if (std.c.getenv("TF_GLM_DFLASH2_HEAD")) |v| dr.full_head = std.mem.eql(u8, std.mem.span(v), "full");
+    dr.full_head = fullHeadWanted();
     if (std.c.getenv("TF_GLM_DFLASH2_TEMP")) |v| dr.temp = std.fmt.parseFloat(f64, std.mem.span(v)) catch 1.0;
     const inv: [MAX_M]f32 = @splat(1.0);
     try dr.scratch.upload(dr.invt - dr.scratch.ptr, std.mem.sliceAsBytes(&inv));
@@ -312,4 +312,16 @@ fn checkConfig(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     const taps = df.get("target_layer_ids").?.array.items;
     if (taps.len != TAPS.len) return error.DrafterConfigUnexpected;
     for (taps, TAPS) |t, w| if (t.integer != w) return error.DrafterConfigUnexpected;
+}
+
+/// TF_GLM_DFLASH2_SPLIT=0: each rank holds the drafter's whole MLP (else half each, on two ranks).
+pub fn splitWanted() bool {
+    const v = std.c.getenv("TF_GLM_DFLASH2_SPLIT") orelse return true;
+    return !std.mem.eql(u8, std.mem.span(v), "0");
+}
+
+/// TF_GLM_DFLASH2_HEAD=full: the drafter's tokens from the target's full head.
+pub fn fullHeadWanted() bool {
+    const v = std.c.getenv("TF_GLM_DFLASH2_HEAD") orelse return false;
+    return std.mem.eql(u8, std.mem.span(v), "full");
 }

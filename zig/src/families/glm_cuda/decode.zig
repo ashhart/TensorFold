@@ -26,7 +26,7 @@ fn readPicks(e: *Engine, b: *Buffers, rows: i64, out: []Pick) !void {
     const w: []i32 = @alignCast(std.mem.bytesAsSlice(i32, e.host[0 .. n * 4]));
     try d.check(d.api.cuMemcpyDtoHAsync_v2(@ptrCast(w.ptr), b.cgath, n * 4, e.k.stream.handle), "candidates");
     try e.k.stream.synchronize();
-    if (e.ctx.roce) |g| try g.check();
+    try e.ctx.gathered();
     const R: usize = @intCast(rows);
     for (0..R) |r| {
         const a = w[4 * r ..][0..4];
@@ -82,6 +82,7 @@ fn drawRows(e: *Engine, b: *Buffers, rows: i64, draws: []const Draw, out: []Pick
     }
     try e.ctx.allGather(b.tk, b.gtk, n, .i32, "candidates");
     try k.stream.synchronize();
+    try e.ctx.gathered();
     try e.ctx.d.check(e.ctx.d.api.cuMemcpyDtoH_v2(@ptrCast(e.cand_host.ptr), b.gtk, 2 * n * 4), "candidates");
     draw_stats.gpu_ms += msFrom(e, t_gpu);
     const t_host = std.Io.Timestamp.now(e.io, .awake);
@@ -118,6 +119,7 @@ fn candTopk(e: *Engine, b: *Buffers, rows: i64, name: [:0]const u8) !void {
 fn drawFull(e: *Engine, row: u64, rule: lanes.Sampling, position: u64) !u32 {
     try e.ctx.nccl.check(e.ctx.nccl.api.ncclAllGather(row, e.full.ptr, @intCast(HEAD_N), .bf16, e.ctx.comm, e.k.stream.handle), "full row");
     try e.k.stream.synchronize();
+    try e.ctx.gathered();
     try e.ctx.d.check(e.ctx.d.api.cuMemcpyDtoH_v2(@ptrCast(e.full_host.ptr), e.full.ptr, e.full_host.len * 2), "full row");
     return draw_mod.drawFullBf16(e.gpa, e.full_host, rule, position);
 }

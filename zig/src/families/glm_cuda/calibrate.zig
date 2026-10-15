@@ -32,6 +32,7 @@ pub fn run(self: anytype, drafts: bool) !void {
         try proto.writeSampling(&w, null);
         try w.int(0);
         try w.int(0);
+        try w.int(0); // no image frame
         try self.send(.prefill, &w);
         seqs[i].sampling = null;
         toks[i] = try decode.prefill(self.e, seqs[i], &prompt, 0, 0);

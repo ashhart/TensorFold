@@ -33,18 +33,21 @@ pub fn followLoop(p: *anyopaque) anyerror!void {
                 const sampling = try proto.readSampling(&r);
                 const start: usize = @intCast(try r.int());
                 const keep_at: usize = @intCast(try r.int());
+                const media_id = try r.int();
                 const seq = if (fresh > 0) try self.newSeq(uid, fresh) else self.seqs.get(uid) orelse return error.NoSuchSequence;
                 seq.sampling = sampling;
-                defer { // the image frame's features served this prefill alone
+                defer { // a held image frame serves this prefill alone, or is dropped here (its own prefill never came)
                     self.media_spans.clearRetainingCapacity();
                     if (self.media_feats) |*f| f.free();
                     self.media_feats = null;
+                    self.media_id = 0;
                 }
-                if (self.media_feats) |f| forward.attach(seq, .{ .spans = self.media_spans.items, .feats = f.ptr });
+                if (media_id != 0 and media_id != self.media_id) return error.ImageFrameMissing;
+                if (media_id != 0) forward.attach(seq, .{ .spans = self.media_spans.items, .feats = self.media_feats.?.ptr });
                 _ = try decode.prefill(self.e, seq, toks, start, keep_at);
             },
             .image => {
-                _ = try r.int();
+                self.media_id = try r.int();
                 const n: usize = @intCast(try r.int());
                 self.media_spans.clearRetainingCapacity();
                 for (0..n) |_| try self.media_spans.append(self.gpa, .{ @intCast(try r.int()), @intCast(try r.int()) });

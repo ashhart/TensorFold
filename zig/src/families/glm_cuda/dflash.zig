@@ -363,6 +363,7 @@ pub fn draft(dr: *Drafter, e: *forward.Engine, all: []const Req) !void {
         try dr.graphs[S].?.launchOn(k.stream);
     }
     try k.stream.synchronize();
+    try e.ctx.gathered(); // the candidates and projections below come through gathers
     try phase(dr, e, &tp, 2);
     if (!rank0 and dr.prof_fine and dr.calls % 256 == 255) logFine(dr, 256); // rank 1 logs its own table (rank 0's goes with the trace)
     if (rank0) {
