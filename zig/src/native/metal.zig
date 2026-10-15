@@ -1,4 +1,4 @@
-//! The Metal engines: lane core (Nemotron, Qwen3.5-2B, GLM, Qwen3.8-27B), Flash Next replay.
+//! The Metal engines: lane core (Nemotron, Qwen3.5-2B, LFM2-MoE, GLM, Qwen3.8-27B), Flash Next replay.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -21,6 +21,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "qwen4_exp", .formats = &.{"mlx-q6g32"} },
     .{ .model_type = "glm5_next", .formats = &.{"mlx-q4g64"} },
     .{ .model_type = "qwen3_5", .formats = &.{"mlx-q4g64"} },
+    .{ .model_type = "lfm2_moe", .formats = &.{ "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "glm_moe_dsa", .formats = &.{"exlr8"} },
 };
 
@@ -118,6 +119,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "glm_moe_dsa")) return openGlmDsa(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen3_5")) return @import("qwen35.zig").open(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "lfm2_moe")) return @import("lfm2_moe.zig").open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "nemotron_h")) {
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
         return null;
@@ -230,13 +232,13 @@ const recall_refusal = "--recall drafts from a record in the lane engine's round
 fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     const t = o.model_type;
     if (o.slide and !std.mem.eql(u8, t, "nemotron_h")) return try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on Macs yet", .{t});
-    const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
+    const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
     if (o.recall and std.mem.eql(u8, t, "qwen4_exp")) return recall_refusal;
     if (o.learn == null) return null;
     // the 27B writes conversation states
     if (o.learn_conversations and std.mem.eql(u8, t, "qwen3_5") and dense) return null;
-    const name: []const u8 = if (std.mem.eql(u8, t, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (!std.mem.eql(u8, t, "qwen3_5")) return null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
+    const name: []const u8 = if (std.mem.eql(u8, t, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (!std.mem.eql(u8, t, "qwen3_5")) return null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.learn_conversations) return try std.fmt.allocPrint(a, "--learn-conversations keeps conversation states on disk for Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash: serve {s} without it", .{name});
     const or_talks: []const u8 = if (dense) " (Qwen3.8-27B keeps conversation states on disk with --learn-conversations)" else "";
     return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only{s}: serve {s} without --learn, --learn-dir or --learn-gib", .{ or_talks, name });
