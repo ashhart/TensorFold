@@ -243,7 +243,10 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const server_json = @import("server.zig").addTo(b, server_tests, host, .debug);
     const server_test = b.addRunArtifact(b.addTest(.{ .root_module = server_tests }));
     const json_test = b.addRunArtifact(b.addTest(.{ .root_module = server_json }));
-    const server_step = b.step("test-server-cpu", "The HTTP server's unit tests (routes, templates, tool parsing) without a GPU");
+    const server_step = b.step(
+        "test-server-cpu",
+        "The HTTP server's unit tests (routes, templates, tool parsing) without a GPU",
+    );
     for ([_]*std.Build.Step.Run{ server_test, json_test }) |run| {
         step.dependOn(&run.step);
         server_step.dependOn(&run.step);
