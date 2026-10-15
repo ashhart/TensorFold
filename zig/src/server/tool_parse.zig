@@ -431,21 +431,18 @@ fn glmCall(a: Allocator, written: []const u8, schemas: ?*const tool_params.Schem
     var residue: std.ArrayList(u8) = .empty;
     var pos: usize = 0;
     var kept: usize = 0;
-    outer: while (find(rest, "<arg_key>", pos)) |s| {
+    var key_end = valueKey(rest, 9); // the first </arg_key> an <arg_value> follows, searched again only once passed
+    var value_end = find(rest, "</arg_value>", 0); // likewise the first </arg_value>
+    while (find(rest, "<arg_key>", pos)) |s| {
         pos = s + 1;
-        var key_end_at = s + 9;
-        while (find(rest, "</arg_key>", key_end_at)) |ke| : (key_end_at = ke + 1) {
-            var j = ke + 10;
-            while (j < rest.len and space(rest[j])) j += 1;
-            if (!std.mem.startsWith(u8, rest[j..], "<arg_value>")) continue;
-            const v_start = j + 11;
-            const ve = find(rest, "</arg_value>", v_start) orelse continue :outer;
-            try pairs.append(a, .{ .key = rest[s + 9 .. ke], .value = rest[v_start..ve] });
-            try residue.appendSlice(a, rest[kept..s]);
-            kept = ve + 12;
-            pos = kept;
-            continue :outer;
-        }
+        if (key_end != null and key_end.?[0] < s + 9) key_end = valueKey(rest, s + 9);
+        const k = key_end orelse continue;
+        if (value_end != null and value_end.? < k[1]) value_end = find(rest, "</arg_value>", k[1]);
+        const ve = value_end orelse continue;
+        try pairs.append(a, .{ .key = rest[s + 9 .. k[0]], .value = rest[k[1]..ve] });
+        try residue.appendSlice(a, rest[kept..s]);
+        kept = ve + 12;
+        pos = kept;
     }
     try residue.appendSlice(a, rest[kept..]);
     if (complete and !allSpace(residue.items)) return null;
@@ -456,6 +453,17 @@ fn glmCall(a: Allocator, written: []const u8, schemas: ?*const tool_params.Schem
         try arguments.put(a, key, try tool_params.decode(a, p.value, schema, false));
     }
     return .{ .name = name, .arguments = .{ .object = arguments } };
+}
+
+/// The first ``</arg_key>`` at or after `from` that an ``<arg_value>`` follows, and where that value starts.
+fn valueKey(rest: []const u8, from: usize) ?[2]usize {
+    var at = from;
+    while (find(rest, "</arg_key>", at)) |ke| : (at = ke + 1) {
+        var j = ke + 10;
+        while (j < rest.len and space(rest[j])) j += 1;
+        if (std.mem.startsWith(u8, rest[j..], "<arg_value>")) return .{ ke, j + 11 };
+    }
+    return null;
 }
 
 /// Gemma 4's ``call:NAME{key:value,...}`` (or bare ``:NAME{...}``): strings between ``<|"|>``, keys bare.

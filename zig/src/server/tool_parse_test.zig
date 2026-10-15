@@ -147,6 +147,31 @@ test "a call to a tool the request did not declare stays text" {
     try std.testing.expect((try parse(a, "{\"name\":\"launch\",\"arguments\":{}}", tools, null)).calls == null);
 }
 
+test "a GLM call's keys without values read in linear time" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
+    var ns: [2]u64 = undefined;
+    for ([_]usize{ 800, 6400 }, &ns) |n, *best| {
+        var reply: std.ArrayList(u8) = .empty;
+        try reply.appendSlice(a, "<tool_call>lookup");
+        for (0..n) |_| try reply.appendSlice(a, "<arg_key>n</arg_key>");
+        try reply.appendSlice(a, "</tool_call>");
+        best.* = std.math.maxInt(u64);
+        for (0..3) |_| {
+            var run: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer run.deinit();
+            const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+            const r = try parse(run.allocator(), reply.items, tools, null);
+            best.* = @min(best.*, @as(u64, @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - start)));
+            try std.testing.expectEqualStrings("{}", r.calls.?[0].get("function").?.get("arguments").?.string);
+        }
+    }
+    // 8x the keys: near 8x the time, not 64x
+    try std.testing.expect(ns[1] <= 20 * std.time.ns_per_ms or ns[1] <= 24 * ns[0]);
+}
+
 test "GLM calls keep a declared name with spaces, dots, colons or unicode; an undeclared one stays text" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
