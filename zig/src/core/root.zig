@@ -18,6 +18,8 @@ pub const registry = @import("registry.zig");
 pub const tuning = @import("tuning.zig");
 pub const norms_ref = @import("norms_ref.zig");
 pub const act_ref = @import("act_ref.zig");
+pub const drafter_release = @import("drafter_release.zig");
+pub const drafter_layout = @import("drafter_layout.zig");
 
 test {
     _ = safetensors;
@@ -37,4 +39,5 @@ test {
     _ = draft_depth;
     _ = @import("copy_index.zig");
     _ = ids_json;
+    _ = @import("drafter_release_test.zig");
 }
