@@ -197,3 +197,30 @@ test "a family's startup: rank 0's window and the least fit on every rank, or on
         try std.testing.expectEqualStrings("rank 2 of the group refused: " ++ why, no.problem[r]);
     }
 }
+
+/// One change every rank makes together: `fail` is the rank whose change fails, `leave` the rank that is gone.
+const Changes = struct {
+    fail: ?usize = null,
+    leave: ?usize = null,
+    all: [3]?bool = @splat(null),
+
+    fn make(c: *Changes, rank: usize, l: collective.Link) void {
+        if (c.leave == rank) return;
+        const mine: anyerror!void = if (c.fail == rank) error.OutOfMemory else {};
+        c.all[rank] = collective.everyRank(l, mine);
+    }
+};
+
+test "a change every rank makes: kept when all went through, else undone on every rank, a rank that left too" {
+    var ok: Changes = .{};
+    try loopback.run(3, &ok, Changes.make);
+    for (ok.all) |a| try std.testing.expectEqual(@as(?bool, true), a);
+    var one: Changes = .{ .fail = 1 };
+    try loopback.run(3, &one, Changes.make);
+    for (one.all) |a| try std.testing.expectEqual(@as(?bool, false), a);
+    var gone: Changes = .{ .leave = 2 };
+    try loopback.run(3, &gone, Changes.make);
+    for (gone.all[0..2]) |a| try std.testing.expectEqual(@as(?bool, false), a);
+    try std.testing.expect(collective.everyRank(null, {}));
+    try std.testing.expect(!collective.everyRank(null, error.OutOfMemory));
+}

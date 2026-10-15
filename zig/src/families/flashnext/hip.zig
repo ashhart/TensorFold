@@ -36,4 +36,5 @@ test {
     @import("std").testing.refAllDecls(worker);
     @import("std").testing.refAllDecls(snapshot);
     _ = native;
+    _ = @import("hip/state_test.zig");
 }

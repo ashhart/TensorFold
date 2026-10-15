@@ -110,6 +110,14 @@ pub const Link = struct {
     }
 };
 
+/// Whether `mine` and every other rank's went through, as one step over `link` (null: this rank's alone; lost: no).
+pub fn everyRank(link: ?Link, mine: anyerror!void) bool {
+    const step: Step = if (mine) |_| .ok(.{ 1, 0 }) else |err| .refuse(@errorName(err));
+    const l = link orelse return step.refused == 0;
+    const v = l.agree(step, .first) catch return false;
+    return v.refused == 0;
+}
+
 /// What a rank holds once it joined its group: the link, and its communicator opened when the engine's GPU is current.
 pub const Group = struct {
     ptr: *anyopaque,

@@ -149,12 +149,17 @@ pub const Fx = struct {
         return saved;
     }
 
+    /// Every rank resumes from the state, or every rank starts the prompt over; a group that cannot do either stops.
     fn snapRestore(ptr: *anyopaque, owner: ?*anyopaque, saved: pc.Saved) anyerror!void {
         const f = of(ptr);
         const lane: *Lane = @ptrCast(@alignCast(owner orelse return error.NoOwner));
         const s: *snapshot.Saved = @ptrCast(@alignCast(saved));
-        if (f.link != null) try f.send(&.{ @backingInt(worker.Op.restore), lane.id, s.slot });
-        try snapshot.restore(
+        // a follower that got the step waits for every rank's word on it: a rank 0 that cannot send stops too
+        if (f.link != null) f.send(&.{ @backingInt(worker.Op.restore), lane.id, s.slot }) catch |err| {
+            f.e.stopped = true;
+            return err;
+        };
+        snapshot.restoreAgreed(
             f.gpa,
             &f.e.driver,
             f.e.stream,
@@ -162,7 +167,12 @@ pub const Fx = struct {
             &lane.caches,
             if (lane.head) |*h| h else null,
             f.e.cfg.index_ratio,
-        );
+            f.e.eos,
+            f.link,
+        ) catch |err| {
+            if (err == error.GroupStopped) f.e.stopped = true;
+            return err;
+        };
     }
 
     fn snapDrop(ptr: *anyopaque, saved: pc.Saved) void {
