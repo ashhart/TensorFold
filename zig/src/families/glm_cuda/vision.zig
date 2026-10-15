@@ -39,7 +39,12 @@ pub const Tower = struct {
     post: u64 = 0,
     down_w: u64 = 0, // [4096, 2, 2, 1024]: the conv's taps in the merge block's (row, col) order, then the channels
     down_b: u64 = 0,
-    m_proj: u64 = 0, m_ln_w: u64 = 0, m_ln_b: u64 = 0, m_gate: u64 = 0, m_up: u64 = 0, m_down: u64 = 0,
+    m_proj: u64 = 0,
+    m_ln_w: u64 = 0,
+    m_ln_b: u64 = 0,
+    m_gate: u64 = 0,
+    m_up: u64 = 0,
+    m_down: u64 = 0,
     inv_freq: cuda.DeviceBuffer,
     linears: std.AutoHashMap(LinKey, cuda.cublaslt.Linear),
     ws: cuda.DeviceBuffer,
@@ -100,8 +105,7 @@ pub const Tower = struct {
                 total += std.mem.alignForward(u64, ent.n, 256);
             }
         }
-        var t: Tower = .{ .gpa = gpa, .d = d, .lt = try cuda.cublaslt.Library.open(), .mem = try cuda.DeviceBuffer.alloc(d, total),
-            .inv_freq = try cuda.DeviceBuffer.alloc(d, 16 * 4), .linears = .init(gpa), .ws = undefined, .bytes = total };
+        var t: Tower = .{ .gpa = gpa, .d = d, .lt = try cuda.cublaslt.Library.open(), .mem = try cuda.DeviceBuffer.alloc(d, total), .inv_freq = try cuda.DeviceBuffer.alloc(d, 16 * 4), .linears = .init(gpa), .ws = undefined, .bytes = total };
         errdefer t.deinit();
         t.ws = try cuda.DeviceBuffer.alloc(d, t.ws_len);
         var at: u64 = 0;
@@ -157,13 +161,20 @@ pub const Tower = struct {
         t.m_down = try get(&names, "merger.down_proj.weight", .{});
         for (&t.blocks, 0..) |*bl, i| {
             bl.* = .{
-                .n1 = try get(&names, "blocks.{d}.norm1.weight", .{i}), .n2 = try get(&names, "blocks.{d}.norm2.weight", .{i}),
-                .qkv_w = try get(&names, "blocks.{d}.attn.qkv.weight", .{i}), .qkv_b = try get(&names, "blocks.{d}.attn.qkv.bias", .{i}),
-                .qn = try get(&names, "blocks.{d}.attn.q_norm.weight", .{i}), .kn = try get(&names, "blocks.{d}.attn.k_norm.weight", .{i}),
-                .proj_w = try get(&names, "blocks.{d}.attn.proj.weight", .{i}), .proj_b = try get(&names, "blocks.{d}.attn.proj.bias", .{i}),
-                .g_w = try get(&names, "blocks.{d}.mlp.gate_proj.weight", .{i}), .g_b = try get(&names, "blocks.{d}.mlp.gate_proj.bias", .{i}),
-                .u_w = try get(&names, "blocks.{d}.mlp.up_proj.weight", .{i}), .u_b = try get(&names, "blocks.{d}.mlp.up_proj.bias", .{i}),
-                .d_w = try get(&names, "blocks.{d}.mlp.down_proj.weight", .{i}), .d_b = try get(&names, "blocks.{d}.mlp.down_proj.bias", .{i}),
+                .n1 = try get(&names, "blocks.{d}.norm1.weight", .{i}),
+                .n2 = try get(&names, "blocks.{d}.norm2.weight", .{i}),
+                .qkv_w = try get(&names, "blocks.{d}.attn.qkv.weight", .{i}),
+                .qkv_b = try get(&names, "blocks.{d}.attn.qkv.bias", .{i}),
+                .qn = try get(&names, "blocks.{d}.attn.q_norm.weight", .{i}),
+                .kn = try get(&names, "blocks.{d}.attn.k_norm.weight", .{i}),
+                .proj_w = try get(&names, "blocks.{d}.attn.proj.weight", .{i}),
+                .proj_b = try get(&names, "blocks.{d}.attn.proj.bias", .{i}),
+                .g_w = try get(&names, "blocks.{d}.mlp.gate_proj.weight", .{i}),
+                .g_b = try get(&names, "blocks.{d}.mlp.gate_proj.bias", .{i}),
+                .u_w = try get(&names, "blocks.{d}.mlp.up_proj.weight", .{i}),
+                .u_b = try get(&names, "blocks.{d}.mlp.up_proj.bias", .{i}),
+                .d_w = try get(&names, "blocks.{d}.mlp.down_proj.weight", .{i}),
+                .d_b = try get(&names, "blocks.{d}.mlp.down_proj.bias", .{i}),
             };
         }
         // the rotary's frequencies: 1 / 10000^(i / 16), i = 0, 2 .. 30 over 32 (head width / 2)
@@ -207,8 +218,12 @@ pub const Tower = struct {
             const rows = @min(ROWS, m - r);
             try t.linear(k, x + @as(u64, @intCast(r * kk * 2)), w, acc, rows, n, kk, true);
             var a: cuda.Args = .{};
-            a.add(acc); a.add(bias); a.add(if (out != 0) out + @as(u64, @intCast(r * n * 2)) else 0);
-            a.add(if (x32 != 0) x32 + @as(u64, @intCast(r * n * 4)) else 0); a.add(@as(i64, rows * n)); a.add(@as(i32, @intCast(n)));
+            a.add(acc);
+            a.add(bias);
+            a.add(if (out != 0) out + @as(u64, @intCast(r * n * 2)) else 0);
+            a.add(if (x32 != 0) x32 + @as(u64, @intCast(r * n * 4)) else 0);
+            a.add(@as(i64, rows * n));
+            a.add(@as(i32, @intCast(n)));
             try k.go(try k.ext(.vision, "glm_vis_bias"), grid1(rows * n), 256, 0, &a);
         }
     }
@@ -223,15 +238,25 @@ pub const Tower = struct {
             try t.linear(k, xr, gw, acc, rows, n, kk, true);
             try t.linear(k, xr, uw, acc2, rows, n, kk, true);
             var a: cuda.Args = .{};
-            a.add(acc); a.add(acc2); a.add(gb); a.add(ub); a.add(out + @as(u64, @intCast(r * n * 2))); a.add(@as(i64, rows * n));
-            a.add(@as(i32, @intCast(n))); a.add(LIMIT);
+            a.add(acc);
+            a.add(acc2);
+            a.add(gb);
+            a.add(ub);
+            a.add(out + @as(u64, @intCast(r * n * 2)));
+            a.add(@as(i64, rows * n));
+            a.add(@as(i32, @intCast(n)));
+            a.add(LIMIT);
             try k.go(try k.ext(.vision, "glm_vis_swiglu"), grid1(rows * n), 256, 0, &a);
         }
     }
 
     fn rmsnorm(k: *kern.K, x32: u64, w: u64, y: u64, rows: i64, cols: i64) !void {
         var a: cuda.Args = .{};
-        a.add(x32); a.add(w); a.add(y); a.add(@as(i32, @intCast(cols))); a.add(EPS);
+        a.add(x32);
+        a.add(w);
+        a.add(y);
+        a.add(@as(i32, @intCast(cols)));
+        a.add(EPS);
         try k.go(try k.ext(.vision, "glm_vis_rmsnorm"), .{ .x = @intCast(rows) }, 256, 0, &a);
     }
 
@@ -296,14 +321,20 @@ pub const Tower = struct {
         try d.check(d.api.cuMemcpyHtoDAsync_v2(p32, patches.ptr, patches.len * 4, k.stream.handle), "vision patches");
         { // the patch embedding: the patches as bf16, then the conv as a linear (with its bias) into the fp32 stream
             var a: cuda.Args = .{};
-            a.add(p32); a.add(big); a.add(@as(i64, N * PATCH));
+            a.add(p32);
+            a.add(big);
+            a.add(@as(i64, N * PATCH));
             try k.go(try k.ext(.vision, "glm_vis_to_bf16"), grid1(N * PATCH), 256, 0, &a);
             var r: i64 = 0;
             while (r < N) : (r += ROWS) {
                 const rows = @min(ROWS, N - r);
                 try t.linear(k, big + @as(u64, @intCast(r * PATCH * 2)), t.patch_w, acc, rows, H, PATCH, true);
                 var b: cuda.Args = .{};
-                b.add(acc); b.add(t.patch_b); b.add(x32 + @as(u64, @intCast(r * H * 4))); b.add(@as(i64, rows * H)); b.add(@as(i32, @intCast(H)));
+                b.add(acc);
+                b.add(t.patch_b);
+                b.add(x32 + @as(u64, @intCast(r * H * 4)));
+                b.add(@as(i64, rows * H));
+                b.add(@as(i32, @intCast(H)));
                 try k.go(try k.ext(.vision, "glm_vis_embed32"), grid1(rows * H), 256, 0, &b);
             }
         }
@@ -326,8 +357,18 @@ pub const Tower = struct {
             try t.dense(k, xn, bl.qkv_w, bl.qkv_b, big, 0, acc, N, 3 * H, H);
             {
                 var a: cuda.Args = .{};
-                a.add(big); a.add(bl.qn); a.add(bl.kn); a.add(dpos); a.add(t.inv_freq.ptr); a.add(qh); a.add(kh); a.add(vt);
-                a.add(@as(i32, @intCast(N))); a.add(@as(i32, @intCast(seg))); a.add(@as(i32, @intCast(HEADS))); a.add(EPS);
+                a.add(big);
+                a.add(bl.qn);
+                a.add(bl.kn);
+                a.add(dpos);
+                a.add(t.inv_freq.ptr);
+                a.add(qh);
+                a.add(kh);
+                a.add(vt);
+                a.add(@as(i32, @intCast(N)));
+                a.add(@as(i32, @intCast(seg)));
+                a.add(@as(i32, @intCast(HEADS)));
+                a.add(EPS);
                 try k.go(try k.ext(.vision, "glm_vis_qkv"), .{ .x = @intCast(std.math.divCeil(i64, N * HEADS, 8) catch unreachable) }, 256, 0, &a);
             }
             // each frame group attends within itself; per head, chunks of queries (q, k: [t, H, seg, 64]; v: [t, H, 64, seg])
@@ -341,12 +382,20 @@ pub const Tower = struct {
                         const rows = @min(CHUNK, seg - c);
                         try t.linear(k, qh + blk + @as(u64, @intCast(c * HD * 2)), kh + blk, sc, rows, seg, HD, true);
                         var a: cuda.Args = .{};
-                        a.add(sc); a.add(pr); a.add(sums); a.add(@as(i32, @intCast(seg))); a.add(scale);
+                        a.add(sc);
+                        a.add(pr);
+                        a.add(sums);
+                        a.add(@as(i32, @intCast(seg)));
+                        a.add(scale);
                         try k.go(try k.ext(.vision, "glm_vis_softmax"), .{ .x = @intCast(rows) }, 256, 0, &a);
                         try t.linear(k, pr, vt + blk, oh, rows, HD, seg, true);
                         var b: cuda.Args = .{};
-                        b.add(oh); b.add(sums); b.add(att + @as(u64, @intCast((g * seg + c) * H * 2))); b.add(@as(i32, @intCast(rows)));
-                        b.add(@as(i32, @intCast(HEADS))); b.add(@as(i32, @intCast(h)));
+                        b.add(oh);
+                        b.add(sums);
+                        b.add(att + @as(u64, @intCast((g * seg + c) * H * 2)));
+                        b.add(@as(i32, @intCast(rows)));
+                        b.add(@as(i32, @intCast(HEADS)));
+                        b.add(@as(i32, @intCast(h)));
                         try k.go(try k.ext(.vision, "glm_vis_head_out"), grid1(rows * HD), 256, 0, &b);
                     }
                 }
@@ -374,7 +423,12 @@ pub const Tower = struct {
             const rows = @min(ROWS, M - r);
             try t.linear(k, att + @as(u64, @intCast(r * OUT * 2)), t.m_proj, acc, rows, OUT, OUT, true);
             var a: cuda.Args = .{};
-            a.add(acc); a.add(t.m_ln_w); a.add(t.m_ln_b); a.add(xn + @as(u64, @intCast(r * OUT * 2))); a.add(@as(i32, @intCast(OUT))); a.add(EPS);
+            a.add(acc);
+            a.add(t.m_ln_w);
+            a.add(t.m_ln_b);
+            a.add(xn + @as(u64, @intCast(r * OUT * 2)));
+            a.add(@as(i32, @intCast(OUT)));
+            a.add(EPS);
             try k.go(try k.ext(.vision, "glm_vis_ln_gelu"), .{ .x = @intCast(rows) }, 256, 0, &a);
         }
         r = 0;

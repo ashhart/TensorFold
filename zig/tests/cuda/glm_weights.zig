@@ -24,8 +24,7 @@ pub fn run(gpu: Gpu, dir: []const u8, rank_s: []const u8, ref: []const u8) !void
     var store = try gw.load(gpa, gpu.io, &ctx, dir, rank);
     defer store.deinit();
     const secs = @as(f64, @floatFromInt(t0.durationTo(std.Io.Timestamp.now(gpu.io, .awake)).toNanoseconds())) / 1e9;
-    std.debug.print("loaded {d} tensors, {d:.2} GiB (planned {d:.2} GiB) in {d:.1} s\n", .{ store.map.count(),
-        @as(f64, @floatFromInt(store.ints.get("device_bytes").?)) / (1 << 30), @as(f64, @floatFromInt(planned)) / (1 << 30), secs });
+    std.debug.print("loaded {d} tensors, {d:.2} GiB (planned {d:.2} GiB) in {d:.1} s\n", .{ store.map.count(), @as(f64, @floatFromInt(store.ints.get("device_bytes").?)) / (1 << 30), @as(f64, @floatFromInt(planned)) / (1 << 30), secs });
     const jp = try std.fs.path.join(gpa, &.{ ref, "weights.json" });
     const text = try std.Io.Dir.cwd().readFileAlloc(gpu.io, jp, gpa, .limited(1 << 27));
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});

@@ -71,22 +71,14 @@ fn mlpW(store: *const api.Store, p: []const u8) !MlpW {
 }
 
 fn dsaW(store: *const api.Store, p: []const u8) !DsaW {
-    return .{ .proj = try b16(store, "{s}.dsa.proj", .{p}), .q_norm = try ptr(store, "{s}.dsa.q_norm", .{p}), .kv_norm = try ptr(store, "{s}.dsa.kv_norm", .{p}),
-        .q_b = try b16(store, "{s}.dsa.q_b", .{p}), .wk = try ptr(store, "{s}.dsa.absorb.wk", .{p}), .wv = try ptr(store, "{s}.dsa.absorb.wv", .{p}),
-        .o = try b16(store, "{s}.dsa.o", .{p}), .index = .{ .kw = try b16(store, "{s}.dsa.index.kw", .{p}), .qb = try b16(store, "{s}.dsa.index.qb", .{p}),
-            .ln_w = try ptr(store, "{s}.dsa.index.ln_w", .{p}), .ln_b = try ptr(store, "{s}.dsa.index.ln_b", .{p}), .gate = try ptr(store, "{s}.dsa.index.gate", .{p}),
-            .ape = try ptr(store, "{s}.dsa.index.ape", .{p}) } };
+    return .{ .proj = try b16(store, "{s}.dsa.proj", .{p}), .q_norm = try ptr(store, "{s}.dsa.q_norm", .{p}), .kv_norm = try ptr(store, "{s}.dsa.kv_norm", .{p}), .q_b = try b16(store, "{s}.dsa.q_b", .{p}), .wk = try ptr(store, "{s}.dsa.absorb.wk", .{p}), .wv = try ptr(store, "{s}.dsa.absorb.wv", .{p}), .o = try b16(store, "{s}.dsa.o", .{p}), .index = .{ .kw = try b16(store, "{s}.dsa.index.kw", .{p}), .qb = try b16(store, "{s}.dsa.index.qb", .{p}), .ln_w = try ptr(store, "{s}.dsa.index.ln_w", .{p}), .ln_b = try ptr(store, "{s}.dsa.index.ln_b", .{p}), .gate = try ptr(store, "{s}.dsa.index.gate", .{p}), .ape = try ptr(store, "{s}.dsa.index.ape", .{p}) } };
 }
 
 fn moeW(store: *const api.Store, p: []const u8) !MoeW {
     var b: [160]u8 = undefined;
-    var m: MoeW = .{ .router = try ptr(store, "{s}.moe.router", .{p}), .bias = try ptr(store, "{s}.moe.bias", .{p}),
-        .shared = try mlpW(store, try std.fmt.bufPrint(&b, "{s}.moe.shared", .{p})) };
+    var m: MoeW = .{ .router = try ptr(store, "{s}.moe.router", .{p}), .bias = try ptr(store, "{s}.moe.bias", .{p}), .shared = try mlpW(store, try std.fmt.bufPrint(&b, "{s}.moe.shared", .{p})) };
     if ((store.ints.get("exl3") orelse 0) != 0) {
-        m.exl3 = .{ .gt = try ptr(store, "{s}.moe.experts.gt", .{p}), .ut = try ptr(store, "{s}.moe.experts.ut", .{p}), .dt = try ptr(store, "{s}.moe.experts.dt", .{p}),
-            .suh_g = try ptr(store, "{s}.moe.experts.suh_g", .{p}), .suh_u = try ptr(store, "{s}.moe.experts.suh_u", .{p}),
-            .svh_g = try ptr(store, "{s}.moe.experts.svh_g", .{p}), .svh_u = try ptr(store, "{s}.moe.experts.svh_u", .{p}),
-            .suh_d = try ptr(store, "{s}.moe.experts.suh_d", .{p}), .svh_d = try ptr(store, "{s}.moe.experts.svh_d", .{p}) };
+        m.exl3 = .{ .gt = try ptr(store, "{s}.moe.experts.gt", .{p}), .ut = try ptr(store, "{s}.moe.experts.ut", .{p}), .dt = try ptr(store, "{s}.moe.experts.dt", .{p}), .suh_g = try ptr(store, "{s}.moe.experts.suh_g", .{p}), .suh_u = try ptr(store, "{s}.moe.experts.suh_u", .{p}), .svh_g = try ptr(store, "{s}.moe.experts.svh_g", .{p}), .svh_u = try ptr(store, "{s}.moe.experts.svh_u", .{p}), .suh_d = try ptr(store, "{s}.moe.experts.suh_d", .{p}), .svh_d = try ptr(store, "{s}.moe.experts.svh_d", .{p}) };
     } else {
         m.up = try ptr(store, "{s}.moe.experts.up", .{p});
         m.down = try ptr(store, "{s}.moe.experts.down", .{p});
@@ -101,9 +93,7 @@ fn layerW(store: *const api.Store, p: []const u8, kda: bool, dense: bool, plain:
         l.ffn_hc = try hcw(store, p, "ffn_hc");
     }
     if (kda) {
-        l.kda = .{ .proj = try b16(store, "{s}.kda.proj", .{p}), .fb = try b16(store, "{s}.kda.fb", .{p}), .gb = try b16(store, "{s}.kda.gb", .{p}),
-            .conv = try ptr(store, "{s}.kda.conv", .{p}), .a_log = try ptr(store, "{s}.kda.a_log", .{p}), .dt_bias = try ptr(store, "{s}.kda.dt_bias", .{p}),
-            .norm = try ptr(store, "{s}.kda.norm", .{p}), .o = try b16(store, "{s}.kda.o", .{p}) };
+        l.kda = .{ .proj = try b16(store, "{s}.kda.proj", .{p}), .fb = try b16(store, "{s}.kda.fb", .{p}), .gb = try b16(store, "{s}.kda.gb", .{p}), .conv = try ptr(store, "{s}.kda.conv", .{p}), .a_log = try ptr(store, "{s}.kda.a_log", .{p}), .dt_bias = try ptr(store, "{s}.kda.dt_bias", .{p}), .norm = try ptr(store, "{s}.kda.norm", .{p}), .o = try b16(store, "{s}.kda.o", .{p}) };
     } else l.dsa = try dsaW(store, p);
     var b: [160]u8 = undefined;
     if (dense) l.mlp = try mlpW(store, try std.fmt.bufPrint(&b, "{s}.mlp", .{p})) else l.moe = try moeW(store, p);
@@ -146,8 +136,7 @@ pub const Weights = struct {
             if (w.kinds[i]) w.nkda += 1 else w.ndsa += 1;
         }
         if (store.ints.get("mtp").? != 0) {
-            w.mtp = .{ .enorm = try ptr(store, "mtp.enorm", .{}), .hnorm = try ptr(store, "mtp.hnorm", .{}), .eh = try b16(store, "mtp.eh", .{}),
-                .norm = try ptr(store, "mtp.norm", .{}), .layer = try layerW(store, "mtp.layer", false, false, true, w.ndsa) };
+            w.mtp = .{ .enorm = try ptr(store, "mtp.enorm", .{}), .hnorm = try ptr(store, "mtp.hnorm", .{}), .eh = try b16(store, "mtp.eh", .{}), .norm = try ptr(store, "mtp.norm", .{}), .layer = try layerW(store, "mtp.layer", false, false, true, w.ndsa) };
         }
         w.embed = try ptr(store, "embed", .{});
         w.norm = try ptr(store, "norm", .{});
@@ -235,8 +224,7 @@ fn kdaBlock(e: *Engine, b: *Buffers, l: LayerW, R: i64) !u64 {
     try mm(e, b, p + FA_OFF * 2, PROJ_W, k.fb, b.ka, false, R);
     try mm(e, b, p + GA_OFF * 2, PROJ_W, k.gb, b.kg, false, R);
     if (!b.prefill) {
-        try kern.kdaChainSeg(&e.k, b.segs, @intCast(e.step.segs.len), li, p, PROJ_W, B_OFF, b.ka, LL * 128, b.kg, LL * 128, k.conv, k.a_log, k.dt_bias,
-            k.norm, b.kout, sq.MAX_ROWS, PROJ_W);
+        try kern.kdaChainSeg(&e.k, b.segs, @intCast(e.step.segs.len), li, p, PROJ_W, B_OFF, b.ka, LL * 128, b.kg, LL * 128, k.conv, k.a_log, k.dt_bias, k.norm, b.kout, sq.MAX_ROWS, PROJ_W);
         return outProj(e, b, b.kout, LL * 128, k.o, R);
     }
     const s = e.step.segs[0].s;
@@ -247,17 +235,14 @@ fn kdaBlock(e: *Engine, b: *Buffers, l: LayerW, R: i64) !u64 {
     if (n > 0 and n < R) { // a kept point inside the chunk: the state and window at it, then the rest from them
         const cut_rec = e.cut_rec + @as(u64, @intCast(li)) * @as(u64, @intCast(sq.REC * 4));
         const cut_conv = e.cut_conv + @as(u64, @intCast(li)) * @as(u64, @intCast(3 * sq.CONV_C * 2));
-        try kern.kdaChain(&e.k, p, PROJ_W, B_OFF, b.ka, LL * 128, b.kg, LL * 128, conv, k.conv, s.recAt(cur, li), k.a_log, k.dt_bias, k.norm, n, sc,
-            cut_rec, b.q_tmp, b.y_tmp);
+        try kern.kdaChain(&e.k, p, PROJ_W, B_OFF, b.ka, LL * 128, b.kg, LL * 128, conv, k.conv, s.recAt(cur, li), k.a_log, k.dt_bias, k.norm, n, sc, cut_rec, b.q_tmp, b.y_tmp);
         try kern.convShift(&e.k, cut_conv, b.kproj, n, 3 * sq.CONV_C, b.rows * PROJ_W, PROJ_W, 1, sq.CONV_C);
         const hw: u64 = @intCast(LL * 128);
         const nr: u64 = @intCast(n);
         const rest: kern.KdaScratch = .{ .out = sc.out + nr * hw * 2, .k = sc.k + nr * hw * 4, .v = sc.v + nr * hw * 2, .g = sc.g + nr * hw * 4, .b = sc.b + nr * @as(u64, @intCast(LL)) * 4 };
-        try kern.kdaChain(&e.k, p + nr * @as(u64, @intCast(PROJ_W)) * 2, PROJ_W, B_OFF, b.ka + nr * hw * 2, LL * 128, b.kg + nr * hw * 2, LL * 128, cut_conv, k.conv, cut_rec,
-            k.a_log, k.dt_bias, k.norm, R - n, rest, s.recAt(1 - cur, li), b.q_tmp, b.y_tmp);
+        try kern.kdaChain(&e.k, p + nr * @as(u64, @intCast(PROJ_W)) * 2, PROJ_W, B_OFF, b.ka + nr * hw * 2, LL * 128, b.kg + nr * hw * 2, LL * 128, cut_conv, k.conv, cut_rec, k.a_log, k.dt_bias, k.norm, R - n, rest, s.recAt(1 - cur, li), b.q_tmp, b.y_tmp);
     } else {
-        try kern.kdaChain(&e.k, p, PROJ_W, B_OFF, b.ka, LL * 128, b.kg, LL * 128, conv, k.conv, s.recAt(cur, li), k.a_log, k.dt_bias, k.norm, R, sc,
-            s.recAt(1 - cur, li), b.q_tmp, b.y_tmp);
+        try kern.kdaChain(&e.k, p, PROJ_W, B_OFF, b.ka, LL * 128, b.kg, LL * 128, conv, k.conv, s.recAt(cur, li), k.a_log, k.dt_bias, k.norm, R, sc, s.recAt(1 - cur, li), b.q_tmp, b.y_tmp);
     }
     // a prompt chunk keeps every row: the layer's conv window commits now (its state flips with the chunk)
     try kern.convShift(&e.k, conv, b.kproj, R, 3 * sq.CONV_C, b.rows * PROJ_W, PROJ_W, 1, sq.CONV_C);
@@ -271,8 +256,7 @@ fn selectTokens(e: *Engine, b: *Buffers, ci: usize, R: i64) !void {
     var a: i64 = 0;
     while (a < R) : (a += B) {
         const n = @min(B, R - a);
-        try kern.scores(&e.k, b.qi + @as(u64, @intCast(a * kern.IDX_HEADS * kern.IDX_DIM * 2)), b.ikr + @as(u64, @intCast(a * IDX_KW + kern.IDX_DIM)) * 2, IDX_KW,
-            t.at(a), ci, b.scores, n, e.step.np);
+        try kern.scores(&e.k, b.qi + @as(u64, @intCast(a * kern.IDX_HEADS * kern.IDX_DIM * 2)), b.ikr + @as(u64, @intCast(a * IDX_KW + kern.IDX_DIM)) * 2, IDX_KW, t.at(a), ci, b.scores, n, e.step.np);
         try kern.selectRows(&e.k, b.scores, b.pools + @as(u64, @intCast(a * kern.TOPK_POOLS * 8)), e.step.np, t.at(a), n);
     }
     try kern.sparseTokens(&e.k, b.pools, t, R, b.tokens, b.counts);
@@ -309,8 +293,7 @@ fn dsaBlock(e: *Engine, b: *Buffers, a: DsaW, ci: usize, R: i64) !u64 {
         while (r0 < R) : (r0 += att) {
             const n = @min(att, R - r0);
             const off = @as(u64, @intCast(r0)) * lat_row;
-            try kern.sparseAttention(&e.k, b.qa + off, t.at(r0), ci, b.tokens + @as(u64, @intCast(r0 * kern.SEL_W * 4)), b.counts + @as(u64, @intCast(r0 * 4)),
-                b.po, b.pm, b.pl, b.ol + off, n);
+            try kern.sparseAttention(&e.k, b.qa + off, t.at(r0), ci, b.tokens + @as(u64, @intCast(r0 * kern.SEL_W * 4)), b.counts + @as(u64, @intCast(r0 * 4)), b.po, b.pm, b.pl, b.ol + off, n);
         }
     }
     try kern.expandV(&e.k, b.ol, a.wv, b.vn, R);
@@ -451,12 +434,17 @@ pub fn mtpCompute(e: *Engine, b: *Buffers) !void {
 
 fn zeroFirst(e: *Engine, x: u64, pos: u64, R: i64) !void {
     var a: cuda.Args = .{};
-    a.add(x); a.add(pos); a.add(@as(i32, @intCast(D)));
+    a.add(x);
+    a.add(pos);
+    a.add(@as(i32, @intCast(D)));
     try e.k.go(try e.k.ext(.rows, "glm_zero_first"), .{ .x = @intCast(R) }, 256, 0, &a);
 }
 
 fn gatherRows(e: *Engine, src: u64, idx: u64, dst: u64, n: i64) !void {
     var a: cuda.Args = .{};
-    a.add(src); a.add(idx); a.add(dst); a.add(@as(i32, @intCast(D)));
+    a.add(src);
+    a.add(idx);
+    a.add(dst);
+    a.add(@as(i32, @intCast(D)));
     try e.k.go(try e.k.ext(.rows, "glm_gather_rows"), .{ .x = @intCast(n) }, 256, 0, &a);
 }

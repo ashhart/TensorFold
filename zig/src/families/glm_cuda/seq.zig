@@ -105,8 +105,7 @@ pub const Seq = struct {
         const l: u64 = @intCast(li);
         const rows: u64 = @intCast(MAX_ROWS);
         const hw: u64 = @intCast(LL * 128);
-        return .{ .out = s.ks.out + l * rows * hw * 2, .k = s.ks.k + l * rows * hw * 4, .v = s.ks.v + l * rows * hw * 2,
-            .g = s.ks.g + l * rows * hw * 4, .b = s.ks.b + l * rows * @as(u64, @intCast(LL)) * 4 };
+        return .{ .out = s.ks.out + l * rows * hw * 2, .k = s.ks.k + l * rows * hw * 4, .v = s.ks.v + l * rows * hw * 2, .g = s.ks.g + l * rows * hw * 4, .b = s.ks.b + l * rows * @as(u64, @intCast(LL)) * 4 };
     }
 };
 
@@ -139,8 +138,7 @@ pub fn alloc(gpa: std.mem.Allocator, d: *const cuda.Driver, nkda: usize, ndsa: u
     s.conv = c.take(n * 3 * CONV_C * 2);
     s.rec = c.take(2 * n * REC * 4);
     s.proj = c.take(n * MAX_ROWS * PROJ_W * 2);
-    s.ks = .{ .out = c.take(n * MAX_ROWS * LL * 128 * 2), .k = c.take(n * MAX_ROWS * LL * 128 * 4), .v = c.take(n * MAX_ROWS * LL * 128 * 2),
-        .g = c.take(n * MAX_ROWS * LL * 128 * 4), .b = c.take(n * MAX_ROWS * LL * 4) };
+    s.ks = .{ .out = c.take(n * MAX_ROWS * LL * 128 * 2), .k = c.take(n * MAX_ROWS * LL * 128 * 4), .v = c.take(n * MAX_ROWS * LL * 128 * 2), .g = c.take(n * MAX_ROWS * LL * 128 * 4), .b = c.take(n * MAX_ROWS * LL * 4) };
     for (0..caches) |i| {
         s.kc[i] = c.take(capacity * kern.KV_LORA * 2);
         s.ik[i] = c.take(s.ring * kern.IDX_DIM * 2);

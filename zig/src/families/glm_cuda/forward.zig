@@ -62,17 +62,72 @@ pub const Buffers = struct {
     prefill: bool,
     np_max: i64, // the indexer's pool count at the capacity (the scores' columns at most)
     mem: cuda.DeviceBuffer = undefined,
-    ids: u64 = 0, x: u64 = 0, normed: u64 = 0, xs: u64 = 0, post: u64 = 0, comb: u64 = 0, hcpart: u64 = 0,
-    ka: u64 = 0, kg: u64 = 0, kproj: u64 = 0, kout: u64 = 0, ks: kern.KdaScratch = undefined, q_tmp: u64 = 0, y_tmp: u64 = 0,
-    dp: u64 = 0, qr: u64 = 0, xs_qr: u64 = 0, lat: u64 = 0, xs_lat: u64 = 0, q: u64 = 0, vn: u64 = 0,
-    ikr: u64 = 0, igr: u64 = 0, qi: u64 = 0, qa: u64 = 0, ol: u64 = 0, po: u64 = 0, pm: u64 = 0, pl: u64 = 0,
-    scores: u64 = 0, pools: u64 = 0, tokens: u64 = 0, counts: u64 = 0,
-    gu: u64 = 0, act: u64 = 0, xs_act: u64 = 0,
-    mlog: u64 = 0, pick: u64 = 0, wts: u64 = 0, rpick: u64 = 0, eact: u64 = 0, ey: u64 = 0, rey: u64 = 0, plan: kern.Plan = undefined,
+    ids: u64 = 0,
+    x: u64 = 0,
+    normed: u64 = 0,
+    xs: u64 = 0,
+    post: u64 = 0,
+    comb: u64 = 0,
+    hcpart: u64 = 0,
+    ka: u64 = 0,
+    kg: u64 = 0,
+    kproj: u64 = 0,
+    kout: u64 = 0,
+    ks: kern.KdaScratch = undefined,
+    q_tmp: u64 = 0,
+    y_tmp: u64 = 0,
+    dp: u64 = 0,
+    qr: u64 = 0,
+    xs_qr: u64 = 0,
+    lat: u64 = 0,
+    xs_lat: u64 = 0,
+    q: u64 = 0,
+    vn: u64 = 0,
+    ikr: u64 = 0,
+    igr: u64 = 0,
+    qi: u64 = 0,
+    qa: u64 = 0,
+    ol: u64 = 0,
+    po: u64 = 0,
+    pm: u64 = 0,
+    pl: u64 = 0,
+    scores: u64 = 0,
+    pools: u64 = 0,
+    tokens: u64 = 0,
+    counts: u64 = 0,
+    gu: u64 = 0,
+    act: u64 = 0,
+    xs_act: u64 = 0,
+    mlog: u64 = 0,
+    pick: u64 = 0,
+    wts: u64 = 0,
+    rpick: u64 = 0,
+    eact: u64 = 0,
+    ey: u64 = 0,
+    rey: u64 = 0,
+    plan: kern.Plan = undefined,
     x3: kern.Exl3Scratch = .{ .xg = 0, .xu = 0, .xd = 0, .z = 0 }, // the EXL3 experts' scratch (exl3 checkpoints)
-    sgu: u64 = 0, sact: u64 = 0, sxs: u64 = 0, sy: u64 = 0,
-    part: u64 = 0, gath: u64 = 0, sk: u64 = 0, hidden: u64 = 0, fnormed: u64 = 0, fxs: u64 = 0, hrows: u64 = 0, logits: u64 = 0,
-    me: u64 = 0, mcat: u64 = 0, mx: u64 = 0, hin: u64 = 0, cand: u64 = 0, cgath: u64 = 0, invt: u64 = 0, tk: u64 = 0, gtk: u64 = 0,
+    sgu: u64 = 0,
+    sact: u64 = 0,
+    sxs: u64 = 0,
+    sy: u64 = 0,
+    part: u64 = 0,
+    gath: u64 = 0,
+    sk: u64 = 0,
+    hidden: u64 = 0,
+    fnormed: u64 = 0,
+    fxs: u64 = 0,
+    hrows: u64 = 0,
+    logits: u64 = 0,
+    me: u64 = 0,
+    mcat: u64 = 0,
+    mx: u64 = 0,
+    hin: u64 = 0,
+    cand: u64 = 0,
+    cgath: u64 = 0,
+    invt: u64 = 0,
+    tk: u64 = 0,
+    gtk: u64 = 0,
     /// The step's tables: positions [rows] i32, then lc, ik, ig, pk [12][rows] u64, the KDA segments, the head rows.
     tab: u64 = 0,
     tab_bytes: u64 = 0,
@@ -105,31 +160,11 @@ pub const Buffers = struct {
         const ey_elt: i64 = if (is_prefill and !exl3) 2 else 4;
         const sk_cols: i64 = 16384; // splitK keeps sk * n at or below this for every linear of the model
         b.tab_bytes = @intCast(rows * 4 + 48 * rows * 8 + @as(i64, MAX_STREAMS) * @sizeOf(KdaSeg) + @as(i64, MAX_STREAMS) * 4);
-        inline for (.{ .{ "ids", rows * 4 }, .{ "x", rows * WIDE * 2 }, .{ "normed", rows * D * 2 }, .{ "xs", rows * @divExact(D, 64) * 4 },
-            .{ "post", rows * kern.S * 4 }, .{ "comb", rows * kern.S * kern.S * 4 }, .{ "hcpart", rows * 16 * 25 * 4 },
-            .{ "ka", rows * LL * 128 * 2 }, .{ "kg", rows * LL * 128 * 2 }, .{ "kproj", rows * sq.PROJ_W * 2 }, .{ "kout", rows * LL * 128 * 2 },
-            .{ "dp", rows * (kern.Q_LORA + kern.KV_LORA) * 2 }, .{ "qr", rows * kern.Q_LORA * 2 }, .{ "xs_qr", rows * @divExact(kern.Q_LORA, 64) * 4 },
-            .{ "lat", rows * kern.KV_LORA * 2 }, .{ "xs_lat", rows * @divExact(kern.KV_LORA, 64) * 4 }, .{ "q", rows * HL * kern.QK * 2 }, .{ "vn", rows * HL * kern.DV * 2 },
-            .{ "ikr", rows * IDX_KW * 2 }, .{ "igr", rows * kern.IDX_DIM * 4 }, .{ "qi", rows * kern.IDX_HEADS * kern.IDX_DIM * 2 },
-            .{ "qa", rows * HL * kern.KV_LORA * 2 }, .{ "ol", rows * HL * kern.KV_LORA * 2 },
-            .{ "po", nch * att * HL * kern.KV_LORA * 4 }, .{ "pm", nch * att * HL * 4 }, .{ "pl", nch * att * HL * 4 },
-            .{ "scores", sel_rows * @max(np_max, 1024) * 4 }, .{ "pools", rows * kern.TOPK_POOLS * 8 }, .{ "tokens", rows * kern.SEL_W * 4 },
-            .{ "counts", rows * 4 },
-            .{ "gu", rows * 2 * DENSE_W * 2 }, .{ "act", rows * DENSE_W * 2 }, .{ "xs_act", rows * @divExact(DENSE_W, 64) * 4 },
-            .{ "mlog", rows * kern.EXPERTS * 4 }, .{ "pick", rows * kern.SLOTS * 4 }, .{ "wts", rows * kern.SLOTS * 4 }, .{ "rpick", rows * kern.TOPK * 4 },
-            .{ "eact", rows * kern.SLOTS * MOE_W * 2 }, .{ "ey", rows * kern.SLOTS * D * ey_elt }, .{ "rey", rows * kern.TOPK * D * ey_elt },
-            .{ "sgu", rows * 2 * MOE_W * 2 }, .{ "sact", rows * MOE_W * 2 }, .{ "sxs", rows * @divExact(MOE_W, 64) * 4 }, .{ "sy", rows * D * 4 },
-            .{ "part", rows * D * 4 }, .{ "gath", 2 * rows * D * 4 }, .{ "sk", rows * sk_cols * 4 },
-            .{ "hidden", rows * D * 2 }, .{ "fnormed", rows * D * 2 }, .{ "fxs", rows * @divExact(D, 64) * 4 }, .{ "hrows", @as(i64, MAX_STREAMS) * D * 2 },
-            .{ "logits", head_rows * HEAD_N * 2 },
-            .{ "me", rows * D * 2 }, .{ "mcat", rows * 2 * D * 2 }, .{ "mx", rows * D * 2 }, .{ "hin", rows * D * 2 },
-            .{ "cand", rows * 4 * 4 }, .{ "cgath", 2 * rows * 4 * 4 },
-            .{ "invt", head_rows * 4 }, .{ "tk", head_rows * @as(i64, @intCast(@import("draw.zig").W)) * 4 }, .{ "gtk", 2 * head_rows * @as(i64, @intCast(@import("draw.zig").W)) * 4 }, .{ "tab", @as(i64, @intCast(b.tab_bytes)) } }) |f|
+        inline for (.{ .{ "ids", rows * 4 }, .{ "x", rows * WIDE * 2 }, .{ "normed", rows * D * 2 }, .{ "xs", rows * @divExact(D, 64) * 4 }, .{ "post", rows * kern.S * 4 }, .{ "comb", rows * kern.S * kern.S * 4 }, .{ "hcpart", rows * 16 * 25 * 4 }, .{ "ka", rows * LL * 128 * 2 }, .{ "kg", rows * LL * 128 * 2 }, .{ "kproj", rows * sq.PROJ_W * 2 }, .{ "kout", rows * LL * 128 * 2 }, .{ "dp", rows * (kern.Q_LORA + kern.KV_LORA) * 2 }, .{ "qr", rows * kern.Q_LORA * 2 }, .{ "xs_qr", rows * @divExact(kern.Q_LORA, 64) * 4 }, .{ "lat", rows * kern.KV_LORA * 2 }, .{ "xs_lat", rows * @divExact(kern.KV_LORA, 64) * 4 }, .{ "q", rows * HL * kern.QK * 2 }, .{ "vn", rows * HL * kern.DV * 2 }, .{ "ikr", rows * IDX_KW * 2 }, .{ "igr", rows * kern.IDX_DIM * 4 }, .{ "qi", rows * kern.IDX_HEADS * kern.IDX_DIM * 2 }, .{ "qa", rows * HL * kern.KV_LORA * 2 }, .{ "ol", rows * HL * kern.KV_LORA * 2 }, .{ "po", nch * att * HL * kern.KV_LORA * 4 }, .{ "pm", nch * att * HL * 4 }, .{ "pl", nch * att * HL * 4 }, .{ "scores", sel_rows * @max(np_max, 1024) * 4 }, .{ "pools", rows * kern.TOPK_POOLS * 8 }, .{ "tokens", rows * kern.SEL_W * 4 }, .{ "counts", rows * 4 }, .{ "gu", rows * 2 * DENSE_W * 2 }, .{ "act", rows * DENSE_W * 2 }, .{ "xs_act", rows * @divExact(DENSE_W, 64) * 4 }, .{ "mlog", rows * kern.EXPERTS * 4 }, .{ "pick", rows * kern.SLOTS * 4 }, .{ "wts", rows * kern.SLOTS * 4 }, .{ "rpick", rows * kern.TOPK * 4 }, .{ "eact", rows * kern.SLOTS * MOE_W * 2 }, .{ "ey", rows * kern.SLOTS * D * ey_elt }, .{ "rey", rows * kern.TOPK * D * ey_elt }, .{ "sgu", rows * 2 * MOE_W * 2 }, .{ "sact", rows * MOE_W * 2 }, .{ "sxs", rows * @divExact(MOE_W, 64) * 4 }, .{ "sy", rows * D * 4 }, .{ "part", rows * D * 4 }, .{ "gath", 2 * rows * D * 4 }, .{ "sk", rows * sk_cols * 4 }, .{ "hidden", rows * D * 2 }, .{ "fnormed", rows * D * 2 }, .{ "fxs", rows * @divExact(D, 64) * 4 }, .{ "hrows", @as(i64, MAX_STREAMS) * D * 2 }, .{ "logits", head_rows * HEAD_N * 2 }, .{ "me", rows * D * 2 }, .{ "mcat", rows * 2 * D * 2 }, .{ "mx", rows * D * 2 }, .{ "hin", rows * D * 2 }, .{ "cand", rows * 4 * 4 }, .{ "cgath", 2 * rows * 4 * 4 }, .{ "invt", head_rows * 4 }, .{ "tk", head_rows * @as(i64, @intCast(@import("draw.zig").W)) * 4 }, .{ "gtk", 2 * head_rows * @as(i64, @intCast(@import("draw.zig").W)) * 4 }, .{ "tab", @as(i64, @intCast(b.tab_bytes)) } }) |f|
             @field(b, f[0]) = c.take(f[1]);
         const items = kern.maxItems(pairs, kern.EXPERTS, 16);
         const wide = pairs > 1024;
-        b.plan = .{ .members = c.take(pairs * 4), .items = c.take(items * 3 * 4), .counts = c.take(2 * 4),
-            .rank = c.take(if (wide) pairs * 4 else 4), .hist = c.take(if (wide) cdiv(pairs, 1024) * kern.EXPERTS * 4 else 4), .tile = if (is_prefill) kern.promptTile() else 16 };
+        b.plan = .{ .members = c.take(pairs * 4), .items = c.take(items * 3 * 4), .counts = c.take(2 * 4), .rank = c.take(if (wide) pairs * 4 else 4), .hist = c.take(if (wide) cdiv(pairs, 1024) * kern.EXPERTS * 4 else 4), .tile = if (is_prefill) kern.promptTile() else 16 };
         if (exl3) {
             const P = rows * kern.TOPK;
             const sk: i64 = if (is_prefill) (if (kern.promptOldKernel()) 1 else kern.promptSplit()) else kern.EXL3_SK; // the staged kernel's splits (its partials: 2 * sk * P * MOE_W fp32)
@@ -351,8 +386,7 @@ pub fn prepare(e: *Engine, b: *Buffers, segs: []const Seg, kind: Kind) !void {
             s.v_pos0 = p0;
             s.v_rows = @intCast(g.rows);
         }
-        kseg[si] = .{ .first = @intCast(row), .rows = @intCast(g.rows), .rec_in = s.recAt(s.cur, 0), .rec_out = s.recAt(1 - s.cur, 0), .conv = s.conv,
-            .k_save = s.ks.k, .v_save = s.ks.v, .g_save = s.ks.g, .b_save = s.ks.b, .proj = s.proj };
+        kseg[si] = .{ .first = @intCast(row), .rows = @intCast(g.rows), .rec_in = s.recAt(s.cur, 0), .rec_out = s.recAt(1 - s.cur, 0), .conv = s.conv, .k_save = s.ks.k, .v_save = s.ks.v, .g_save = s.ks.g, .b_save = s.ks.b, .proj = s.proj };
         last[si] = @intCast(row + @as(usize, @intCast(g.rows)) - 1);
         for (0..@intCast(g.rows)) |r| {
             const q = p0 + @as(i64, @intCast(r));

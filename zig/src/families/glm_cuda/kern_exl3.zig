@@ -74,25 +74,56 @@ pub fn exl3Routed(k: *K, x: u64, x_stride: i64, picks: u64, plan: Plan, w: Exl3,
     const rows_x = (staged or fused) and shx;
     if (rows_x) {
         var a: cuda.Args = .{};
-        a.add(x); a.add(@as(i32, @intCast(x_stride))); a.add(w.suh_g); a.add(sc.xg); a.add(@as(i32, @intCast(D)));
+        a.add(x);
+        a.add(@as(i32, @intCast(x_stride)));
+        a.add(w.suh_g);
+        a.add(sc.xg);
+        a.add(@as(i32, @intCast(D)));
         try k.go(try k.ext(.exl3, "glm_exl3_rot_rows"), .{ .x = @intCast(R), .y = @intCast(@divExact(D, 128)) }, 32, 0, &a);
     } else {
         var a: cuda.Args = .{};
-        a.add(x); a.add(@as(i32, @intCast(x_stride))); a.add(picks); a.add(w.suh_g); a.add(w.suh_u); a.add(sc.xg); a.add(sc.xu); a.add(@as(i32, @intCast(D)));
+        a.add(x);
+        a.add(@as(i32, @intCast(x_stride)));
+        a.add(picks);
+        a.add(w.suh_g);
+        a.add(w.suh_u);
+        a.add(sc.xg);
+        a.add(sc.xu);
+        a.add(@as(i32, @intCast(D)));
         try k.go(try k.ext(.exl3, "glm_exl3_rot_in"), .{ .x = @intCast(P), .y = @intCast(@divExact(D, 128)), .z = 2 }, 32, 0, &a);
     }
     if (fused) { // gate and up with their epilogue -> sc.xd; the down projection with its epilogue -> y
         {
             var a: cuda.Args = .{};
-            a.add(sc.xg); a.add(if (rows_x) sc.xg else sc.xu); a.add(w.gt); a.add(w.ut); a.add(plan.items); a.add(plan.counts); a.add(plan.members);
-            a.add(w.svh_g); a.add(w.svh_u); a.add(w.suh_d); a.add(sc.xd);
-            a.add(@as(i32, @intCast(D))); a.add(@as(i32, @intCast(width))); a.add(@as(i32, if (rows_x) 3 else 0)); a.add(LIMIT);
+            a.add(sc.xg);
+            a.add(if (rows_x) sc.xg else sc.xu);
+            a.add(w.gt);
+            a.add(w.ut);
+            a.add(plan.items);
+            a.add(plan.counts);
+            a.add(plan.members);
+            a.add(w.svh_g);
+            a.add(w.svh_u);
+            a.add(w.suh_d);
+            a.add(sc.xd);
+            a.add(@as(i32, @intCast(D)));
+            a.add(@as(i32, @intCast(width)));
+            a.add(@as(i32, if (rows_x) 3 else 0));
+            a.add(LIMIT);
             try k.go(try k.ext(.exl3, "glm_exl3_prompt_gu"), .{ .x = @intCast(@divExact(width, 128)), .y = @intCast(items), .z = 1 }, 256, 0, &a);
         }
         {
             var a: cuda.Args = .{};
-            a.add(sc.xd); a.add(w.dt); a.add(plan.items); a.add(plan.counts); a.add(plan.members); a.add(w.svh_d); a.add(y);
-            a.add(@as(i32, @intCast(width))); a.add(@as(i32, @intCast(D))); a.add(@as(i32, @intCast(ys)));
+            a.add(sc.xd);
+            a.add(w.dt);
+            a.add(plan.items);
+            a.add(plan.counts);
+            a.add(plan.members);
+            a.add(w.svh_d);
+            a.add(y);
+            a.add(@as(i32, @intCast(width)));
+            a.add(@as(i32, @intCast(D)));
+            a.add(@as(i32, @intCast(ys)));
             try k.go(try k.ext(.exl3, "glm_exl3_prompt_dn"), .{ .x = @intCast(@divExact(D, 256)), .y = @intCast(items), .z = 1 }, 256, 0, &a);
         }
         return;
@@ -103,8 +134,17 @@ pub fn exl3Routed(k: *K, x: u64, x_stride: i64, picks: u64, plan: Plan, w: Exl3,
     // the staged kernel's grid: x = (column block, matrix, split), one item's blocks adjacent (its rows read from L2)
     {
         var a: cuda.Args = .{};
-        a.add(sc.xg); a.add(if (rows_x) sc.xg else sc.xu); a.add(w.gt); a.add(w.ut); a.add(plan.items); a.add(plan.counts); a.add(plan.members); a.add(sc.z);
-        a.add(@as(i32, @intCast(D))); a.add(@as(i32, @intCast(width))); a.add(@as(i32, @intCast(P)));
+        a.add(sc.xg);
+        a.add(if (rows_x) sc.xg else sc.xu);
+        a.add(w.gt);
+        a.add(w.ut);
+        a.add(plan.items);
+        a.add(plan.counts);
+        a.add(plan.members);
+        a.add(sc.z);
+        a.add(@as(i32, @intCast(D)));
+        a.add(@as(i32, @intCast(width)));
+        a.add(@as(i32, @intCast(P)));
         if (staged) a.add(@as(i32, if (rows_x) 3 else 0));
         a.add(@as(i32, @intCast(sk)));
         if (staged) a.add(@as(i32, 2));
@@ -114,14 +154,31 @@ pub fn exl3Routed(k: *K, x: u64, x_stride: i64, picks: u64, plan: Plan, w: Exl3,
     }
     {
         var a: cuda.Args = .{};
-        a.add(sc.z); a.add(picks); a.add(w.svh_g); a.add(w.svh_u); a.add(w.suh_d); a.add(sc.xd); a.add(@as(i32, @intCast(P))); a.add(@as(i32, @intCast(width)));
-        a.add(@as(i32, @intCast(sk))); a.add(LIMIT);
+        a.add(sc.z);
+        a.add(picks);
+        a.add(w.svh_g);
+        a.add(w.svh_u);
+        a.add(w.suh_d);
+        a.add(sc.xd);
+        a.add(@as(i32, @intCast(P)));
+        a.add(@as(i32, @intCast(width)));
+        a.add(@as(i32, @intCast(sk)));
+        a.add(LIMIT);
         try k.go(try k.ext(.exl3, "glm_exl3_gateup"), .{ .x = @intCast(P), .y = @intCast(@divExact(width, 128)) }, 32, 0, &a);
     }
     {
         var a: cuda.Args = .{};
-        a.add(sc.xd); a.add(sc.xd); a.add(w.dt); a.add(w.dt); a.add(plan.items); a.add(plan.counts); a.add(plan.members); a.add(sc.z);
-        a.add(@as(i32, @intCast(width))); a.add(@as(i32, @intCast(D))); a.add(@as(i32, @intCast(P)));
+        a.add(sc.xd);
+        a.add(sc.xd);
+        a.add(w.dt);
+        a.add(w.dt);
+        a.add(plan.items);
+        a.add(plan.counts);
+        a.add(plan.members);
+        a.add(sc.z);
+        a.add(@as(i32, @intCast(width)));
+        a.add(@as(i32, @intCast(D)));
+        a.add(@as(i32, @intCast(P)));
         if (staged) a.add(@as(i32, 0));
         a.add(@as(i32, 1));
         if (staged) a.add(@as(i32, 1));
@@ -131,7 +188,14 @@ pub fn exl3Routed(k: *K, x: u64, x_stride: i64, picks: u64, plan: Plan, w: Exl3,
     }
     {
         var a: cuda.Args = .{};
-        a.add(sc.z); a.add(picks); a.add(w.svh_d); a.add(y); a.add(@as(i32, @intCast(P))); a.add(@as(i32, @intCast(D))); a.add(@as(i32, 1)); a.add(@as(i32, @intCast(ys)));
+        a.add(sc.z);
+        a.add(picks);
+        a.add(w.svh_d);
+        a.add(y);
+        a.add(@as(i32, @intCast(P)));
+        a.add(@as(i32, @intCast(D)));
+        a.add(@as(i32, 1));
+        a.add(@as(i32, @intCast(ys)));
         try k.go(try k.ext(.exl3, "glm_exl3_down"), .{ .x = @intCast(P), .y = @intCast(@divExact(D, 128)) }, 32, 0, &a);
     }
 }

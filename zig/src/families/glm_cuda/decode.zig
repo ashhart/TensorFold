@@ -112,8 +112,12 @@ var topk_check: ?bool = null;
 fn candTopk(e: *Engine, b: *Buffers, rows: i64, name: [:0]const u8) !void {
     const f = try e.k.ext(.sample, name);
     var a: cuda.Args = .{};
-    a.add(b.logits); a.add(@as(i32, @intCast(HEAD_N))); a.add(@as(i32, @intCast(HEAD_N))); a.add(@as(i32, @intCast(e.w.vocab_offset)));
-    a.add(b.invt); a.add(b.tk);
+    a.add(b.logits);
+    a.add(@as(i32, @intCast(HEAD_N)));
+    a.add(@as(i32, @intCast(HEAD_N)));
+    a.add(@as(i32, @intCast(e.w.vocab_offset)));
+    a.add(b.invt);
+    a.add(b.tk);
     try e.k.go(f, .{ .x = @intCast(rows) }, 256, 0, &a);
 }
 

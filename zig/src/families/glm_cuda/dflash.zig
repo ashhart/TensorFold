@@ -53,8 +53,19 @@ pub const ring_bytes: u64 = LAYERS * 2 * @as(u64, @intCast(WIN)) * KVW * 2;
 
 const B16 = kern.B16;
 const LayerW = struct {
-    in_norm: u64, post_norm: u64, qn: u64, kn: u64, a_base: u64, m_base: u64,
-    qkv: B16, kv: B16, o: B16, gu: B16, down: B16, a_proj: B16, m_proj: B16,
+    in_norm: u64,
+    post_norm: u64,
+    qn: u64,
+    kn: u64,
+    a_base: u64,
+    m_base: u64,
+    qkv: B16,
+    kv: B16,
+    o: B16,
+    gu: B16,
+    down: B16,
+    a_proj: B16,
+    m_proj: B16,
 };
 
 /// One stream's draft request: ``n`` rows of the last verify to take into its context first (0: the prompt's,
@@ -75,19 +86,52 @@ pub const Drafter = struct {
     succ: []u16,
     scratch: cuda.DeviceBuffer,
     // block buffers [MAX_M][..]
-    x: u64 = 0, y: u64 = 0, y2: u64 = 0, dyn: u64 = 0, qkv: u64 = 0, q: u64 = 0, kb: u64 = 0, vb: u64 = 0, att: u64 = 0, a: u64 = 0,
-    gu: u64 = 0, act: u64 = 0, hn: u64 = 0, g: u64 = 0,
+    x: u64 = 0,
+    y: u64 = 0,
+    y2: u64 = 0,
+    dyn: u64 = 0,
+    qkv: u64 = 0,
+    q: u64 = 0,
+    kb: u64 = 0,
+    vb: u64 = 0,
+    att: u64 = 0,
+    a: u64 = 0,
+    gu: u64 = 0,
+    act: u64 = 0,
+    hn: u64 = 0,
+    g: u64 = 0,
     // context buffers [MAX_CTX][..]
-    cin: u64 = 0, c1: u64 = 0, ctx: u64 = 0, ckv: u64 = 0,
+    cin: u64 = 0,
+    c1: u64 = 0,
+    ctx: u64 = 0,
+    ckv: u64 = 0,
     // the target's taps: a verify step's rows and a prompt chunk's, [rows][5 D]
     taps_step: u64 = 0,
     taps_prefill: u64 = 0,
     // tables
-    ids: u64 = 0, bpos: u64 = 0, rings: u64 = 0, starts: u64 = 0, froms: u64 = 0, cpos: u64 = 0, crings: u64 = 0, invt: u64 = 0, tk: u64 = 0, gtk: u64 = 0,
-    pv: u64 = 0, pi: u64 = 0,
-    pm: u64 = 0, pl: u64 = 0, pacc: u64 = 0, // the chunked attention's partials
+    ids: u64 = 0,
+    bpos: u64 = 0,
+    rings: u64 = 0,
+    starts: u64 = 0,
+    froms: u64 = 0,
+    cpos: u64 = 0,
+    crings: u64 = 0,
+    invt: u64 = 0,
+    tk: u64 = 0,
+    gtk: u64 = 0,
+    pv: u64 = 0,
+    pi: u64 = 0,
+    pm: u64 = 0,
+    pl: u64 = 0,
+    pacc: u64 = 0, // the chunked attention's partials
     attn_chunked: bool = true, // TF_GLM_DFLASH2_ATTN=serial: df_attn's one block a kv head (the chunked kernel otherwise)
-    h_ids: []i32, h_bpos: []i32, h_rings: []u64, h_starts: []i64, h_froms: []i64, h_cpos: []i64, h_crings: []u64,
+    h_ids: []i32,
+    h_bpos: []i32,
+    h_rings: []u64,
+    h_starts: []i64,
+    h_froms: []i64,
+    h_cpos: []i64,
+    h_crings: []u64,
     cand: []i32, // both ranks' gathered candidates, [2][MAX_M][W]
     gh: []f32, // the selector's hidden projections [MAX_M][RANK]
     forward_ms: f64 = 0,
@@ -234,8 +278,7 @@ const Loader = struct {
             try l.scales.resize(l.gpa, n * kk / 64);
             for (names, rows) |name, r| {
                 const src = try l.read(name, r * kk * 2);
-                weights_mod.quantize(bits, @alignCast(std.mem.bytesAsSlice(u16, src)), r, kk,
-                    l.words.items[r0 * kk * bits / 32 ..][0 .. r * kk * bits / 32], l.scales.items[r0 * kk / 64 ..][0 .. r * kk / 64]);
+                weights_mod.quantize(bits, @alignCast(std.mem.bytesAsSlice(u16, src)), r, kk, l.words.items[r0 * kk * bits / 32 ..][0 .. r * kk * bits / 32], l.scales.items[r0 * kk / 64 ..][0 .. r * kk / 64]);
                 r0 += r;
             }
             try l.tmp.upload(0, std.mem.sliceAsBytes(l.words.items));
@@ -337,9 +380,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *forward.Engine, dir: []const
     }
     const dr = try gpa.create(Drafter);
     errdefer gpa.destroy(dr);
-    dr.* = .{ .gpa = gpa, .d = d, .weights = wbuf, .bits = bits, .split = split, .ff = ff, .pred = &.{}, .succ = &.{}, .scratch = undefined, .h_ids = undefined,
-        .h_bpos = undefined, .h_rings = undefined, .h_starts = undefined, .h_froms = undefined, .h_cpos = undefined, .h_crings = undefined,
-        .cand = undefined, .gh = undefined };
+    dr.* = .{ .gpa = gpa, .d = d, .weights = wbuf, .bits = bits, .split = split, .ff = ff, .pred = &.{}, .succ = &.{}, .scratch = undefined, .h_ids = undefined, .h_bpos = undefined, .h_rings = undefined, .h_starts = undefined, .h_froms = undefined, .h_cpos = undefined, .h_crings = undefined, .cand = undefined, .gh = undefined };
     var nb: [8][96]u8 = undefined;
     for (&dr.layers, 0..) |*lw, i| {
         const N = struct {
@@ -404,8 +445,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *forward.Engine, dir: []const
     if (std.c.getenv("TF_GLM_DFLASH2_TEMP")) |v| dr.temp = std.fmt.parseFloat(f64, std.mem.span(v)) catch 1.0;
     const inv: [MAX_M]f32 = @splat(1.0);
     try dr.scratch.upload(dr.invt - dr.scratch.ptr, std.mem.sliceAsBytes(&inv));
-    std.log.info("dflash2: drafter loaded from {s}, linears at {d} bits ({d:.2} GiB on the device, {d} MiB of codebooks on the host)",
-        .{ dir, bits, @as(f64, @floatFromInt(l.at)) / (1 << 30), (2 * VOCAB * RANK * 2) >> 20 });
+    std.log.info("dflash2: drafter loaded from {s}, linears at {d} bits ({d:.2} GiB on the device, {d} MiB of codebooks on the host)", .{ dir, bits, @as(f64, @floatFromInt(l.at)) / (1 << 30), (2 * VOCAB * RANK * 2) >> 20 });
     return dr;
 }
 
@@ -414,17 +454,15 @@ fn carveScratch(dr: *Drafter, d: *const cuda.Driver) !void {
     const M: u64 = MAX_M;
     const C: u64 = MAX_CTX + 16;
     const fields = .{
-        .{ "x", M * D * 2 },              .{ "y", M * D * 2 },             .{ "y2", M * D * 2 },            .{ "dyn", M * KVW * 2 },
-        .{ "qkv", M * QKV * 2 },          .{ "q", M * D * 2 },             .{ "kb", M * KVW * 2 },          .{ "vb", M * KVW * 2 },
-        .{ "att", M * D * 2 },            .{ "a", M * D * 2 },             .{ "gu", M * 2 * FF * 2 },       .{ "act", M * FF * 2 },
-        .{ "hn", M * D * 2 },             .{ "g", M * RANK * 4 },          .{ "cin", C * 5 * D * 2 },       .{ "c1", C * D * 2 },
-        .{ "ctx", C * D * 2 },            .{ "ckv", C * 2 * KVW * 2 },
-        .{ "taps_step", @as(u64, @intCast(forward.STEP_ROWS)) * 5 * D * 2 }, .{ "taps_prefill", @as(u64, @intCast(forward.PREFILL_ROWS_MAX)) * 5 * D * 2 },
-        .{ "ids", M * 4 },                .{ "bpos", M * 4 },              .{ "rings", forward.MAX_STREAMS * 8 }, .{ "starts", forward.MAX_STREAMS * 8 },
-        .{ "froms", forward.MAX_STREAMS * 8 }, .{ "cpos", C * 8 },         .{ "crings", C * 8 },            .{ "invt", M * 4 },
-        .{ "tk", M * CW * 4 },            .{ "gtk", 2 * M * CW * 4 },
-        .{ "pv", M * CHUNKS * TOPK * 4 }, .{ "pi", M * CHUNKS * TOPK * 4 },
-        .{ "pm", M * QH * CH * 4 },       .{ "pl", M * QH * CH * 4 },      .{ "pacc", M * QH * CH * HD * 4 },
+        .{ "x", M * D * 2 },                   .{ "y", M * D * 2 },         .{ "y2", M * D * 2 },                                                .{ "dyn", M * KVW * 2 },
+        .{ "qkv", M * QKV * 2 },               .{ "q", M * D * 2 },         .{ "kb", M * KVW * 2 },                                              .{ "vb", M * KVW * 2 },
+        .{ "att", M * D * 2 },                 .{ "a", M * D * 2 },         .{ "gu", M * 2 * FF * 2 },                                           .{ "act", M * FF * 2 },
+        .{ "hn", M * D * 2 },                  .{ "g", M * RANK * 4 },      .{ "cin", C * 5 * D * 2 },                                           .{ "c1", C * D * 2 },
+        .{ "ctx", C * D * 2 },                 .{ "ckv", C * 2 * KVW * 2 }, .{ "taps_step", @as(u64, @intCast(forward.STEP_ROWS)) * 5 * D * 2 }, .{ "taps_prefill", @as(u64, @intCast(forward.PREFILL_ROWS_MAX)) * 5 * D * 2 },
+        .{ "ids", M * 4 },                     .{ "bpos", M * 4 },          .{ "rings", forward.MAX_STREAMS * 8 },                               .{ "starts", forward.MAX_STREAMS * 8 },
+        .{ "froms", forward.MAX_STREAMS * 8 }, .{ "cpos", C * 8 },          .{ "crings", C * 8 },                                                .{ "invt", M * 4 },
+        .{ "tk", M * CW * 4 },                 .{ "gtk", 2 * M * CW * 4 },  .{ "pv", M * CHUNKS * TOPK * 4 },                                    .{ "pi", M * CHUNKS * TOPK * 4 },
+        .{ "pm", M * QH * CH * 4 },            .{ "pl", M * QH * CH * 4 },  .{ "pacc", M * QH * CH * HD * 4 },
     };
     inline for (fields) |f| {
         @field(dr, f[0]) = at;
@@ -467,7 +505,10 @@ pub fn tap(dr: *const Drafter, k: *kern.K, x: u64, taps: u64, li: usize, R: i64)
         if (t == at) break @intCast(i);
     } else return;
     var a: cuda.Args = .{};
-    a.add(x); a.add(taps); a.add(slot); a.add(@as(i32, @intFromBool(dr.tap_s0)));
+    a.add(x);
+    a.add(taps);
+    a.add(slot);
+    a.add(@as(i32, @intFromBool(dr.tap_s0)));
     try k.go(try k.ext(.dflash, "df_tap"), .{ .x = @intCast(R), .y = @intCast(D / 1024) }, 256, 0, &a);
 }
 
@@ -543,7 +584,13 @@ pub fn ingest(dr: *Drafter, e: *forward.Engine, runs: []const Run) !void {
     for (dr.layers, 0..) |l, li| {
         try lin(e, dr.ctx, l.kv, dr.ckv, N, false);
         var a: cuda.Args = .{};
-        a.add(dr.ckv); a.add(l.kn); a.add(dr.cpos); a.add(dr.crings); a.add(@as(i32, @intCast(li))); a.add(EPS); a.add(THETA);
+        a.add(dr.ckv);
+        a.add(l.kn);
+        a.add(dr.cpos);
+        a.add(dr.crings);
+        a.add(@as(i32, @intCast(li)));
+        a.add(EPS);
+        a.add(THETA);
         try k.go(try k.ext(.dflash, "df_ctx_kv"), .{ .x = @intCast(N), .y = 8 }, 64, 0, &a);
     }
     try k.stream.synchronize();
@@ -676,23 +723,50 @@ fn blockBody(dr: *Drafter, e: *forward.Engine, S: usize, rank0: bool, tp: *std.I
         try fine(dr, e, 4);
         {
             var a: cuda.Args = .{};
-            a.add(dr.qkv); a.add(@as(i32, @intCast(QKV))); a.add(l.qn); a.add(l.kn); a.add(dr.bpos); a.add(EPS); a.add(THETA);
-            a.add(dr.q); a.add(dr.kb); a.add(dr.vb);
+            a.add(dr.qkv);
+            a.add(@as(i32, @intCast(QKV)));
+            a.add(l.qn);
+            a.add(l.kn);
+            a.add(dr.bpos);
+            a.add(EPS);
+            a.add(THETA);
+            a.add(dr.q);
+            a.add(dr.kb);
+            a.add(dr.vb);
             try k.go(try k.ext(.dflash, "df_block_qkv"), .{ .x = @intCast(M), .y = 32 + 8 }, 64, 0, &a);
         }
         try fine(dr, e, 5);
         if (dr.attn_chunked) {
             var a: cuda.Args = .{};
-            a.add(dr.q); a.add(dr.kb); a.add(dr.vb); a.add(dr.rings); a.add(dr.starts); a.add(dr.froms); a.add(@as(i32, @intCast(li)));
-            a.add(SCALE); a.add(dr.pm); a.add(dr.pl); a.add(dr.pacc);
+            a.add(dr.q);
+            a.add(dr.kb);
+            a.add(dr.vb);
+            a.add(dr.rings);
+            a.add(dr.starts);
+            a.add(dr.froms);
+            a.add(@as(i32, @intCast(li)));
+            a.add(SCALE);
+            a.add(dr.pm);
+            a.add(dr.pl);
+            a.add(dr.pacc);
             try k.go(try k.ext(.dflash, "df_attn_part"), .{ .x = @intCast(S), .y = 8, .z = CH }, 256, 0, &a);
             var b: cuda.Args = .{};
-            b.add(dr.pm); b.add(dr.pl); b.add(dr.pacc); b.add(dr.att);
+            b.add(dr.pm);
+            b.add(dr.pl);
+            b.add(dr.pacc);
+            b.add(dr.att);
             try k.go(try k.ext(.dflash, "df_attn_merge"), .{ .x = @intCast(M), .y = QH }, HD, 0, &b);
         } else {
             var a: cuda.Args = .{};
-            a.add(dr.q); a.add(dr.kb); a.add(dr.vb); a.add(dr.rings); a.add(dr.starts); a.add(dr.froms); a.add(@as(i32, @intCast(li)));
-            a.add(SCALE); a.add(dr.att);
+            a.add(dr.q);
+            a.add(dr.kb);
+            a.add(dr.vb);
+            a.add(dr.rings);
+            a.add(dr.starts);
+            a.add(dr.froms);
+            a.add(@as(i32, @intCast(li)));
+            a.add(SCALE);
+            a.add(dr.att);
             try k.go(try k.ext(.dflash, "df_attn"), .{ .x = @intCast(S), .y = 8 }, 256, 0, &a);
         }
         try fine(dr, e, 6);
@@ -711,7 +785,9 @@ fn blockBody(dr: *Drafter, e: *forward.Engine, S: usize, rank0: bool, tp: *std.I
         try fine(dr, e, 9);
         {
             var a: cuda.Args = .{};
-            a.add(dr.gu); a.add(dr.act); a.add(@as(i32, @intCast(dr.ff)));
+            a.add(dr.gu);
+            a.add(dr.act);
+            a.add(@as(i32, @intCast(dr.ff)));
             try k.go(try k.ext(.dflash, "df_swiglu"), .{ .x = @intCast(M), .y = @intCast(dr.ff / 1024) }, 256, 0, &a);
         }
         try fine(dr, e, 10);
@@ -722,7 +798,9 @@ fn blockBody(dr: *Drafter, e: *forward.Engine, S: usize, rank0: bool, tp: *std.I
             try e.ctx.allGather(b.part, b.gath, M * D, .f32, "dflash2 down");
             try fine(dr, e, 16);
             var a: cuda.Args = .{};
-            a.add(b.gath); a.add(dr.a); a.add(@as(i32, @intCast(M)));
+            a.add(b.gath);
+            a.add(dr.a);
+            a.add(@as(i32, @intCast(M)));
             try k.go(try k.ext(.dflash, "df_sum2"), grid, 256, 0, &a);
             try fine(dr, e, 17);
         } else {
@@ -742,10 +820,17 @@ fn blockBody(dr: *Drafter, e: *forward.Engine, S: usize, rank0: bool, tp: *std.I
     {
         const chunks = cdiv(forward.HEAD_N, 4096);
         var a: cuda.Args = .{};
-        a.add(e.mbuf.logits); a.add(@as(i32, @intCast(forward.HEAD_N))); a.add(@as(i32, @intCast(e.w.vocab_offset))); a.add(dr.pv); a.add(dr.pi);
+        a.add(e.mbuf.logits);
+        a.add(@as(i32, @intCast(forward.HEAD_N)));
+        a.add(@as(i32, @intCast(e.w.vocab_offset)));
+        a.add(dr.pv);
+        a.add(dr.pi);
         try k.go(try k.ext(.dflash, "df_top16_part"), .{ .x = @intCast(M), .y = @intCast(chunks) }, 256, 0, &a);
         var b: cuda.Args = .{};
-        b.add(dr.pv); b.add(dr.pi); b.add(@as(i32, @intCast(chunks))); b.add(dr.tk);
+        b.add(dr.pv);
+        b.add(dr.pi);
+        b.add(@as(i32, @intCast(chunks)));
+        b.add(dr.tk);
         try k.go(try k.ext(.dflash, "df_top16_merge"), .{ .x = @intCast(M) }, 256, 0, &b);
     }
     try fine(dr, e, 13);
@@ -765,7 +850,12 @@ fn phase(dr: *Drafter, e: *forward.Engine, t: *std.Io.Timestamp, which: usize) !
 
 fn conv(k: *kern.K, z: u64, dyn: u64, which: i32, base: u64, out: u64, add: bool, grid: cuda.Dim3) !void {
     var a: cuda.Args = .{};
-    a.add(z); a.add(dyn); a.add(which); a.add(base); a.add(out); a.add(@as(i32, @intFromBool(add)));
+    a.add(z);
+    a.add(dyn);
+    a.add(which);
+    a.add(base);
+    a.add(out);
+    a.add(@as(i32, @intFromBool(add)));
     try k.go(try k.ext(.dflash, "df_conv"), grid, 256, 0, &a);
 }
 

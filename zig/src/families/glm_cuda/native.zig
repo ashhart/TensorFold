@@ -99,13 +99,9 @@ const Trace = struct {
     fn log(t: *Trace, own: *const Owned) void {
         const n: f64 = @floatFromInt(@max(t.rounds, 1));
         const c: f64 = @floatFromInt(@max(t.calls, 1));
-        std.log.info("glm trace: {d} verifies, {d:.2} ms each, {d:.2} rows ({d:.2} streams); {d} drafts, {d:.2} ms each, {d:.2} drafted a stream",
-            .{ t.rounds, t.verify_ms / n, @as(f64, @floatFromInt(t.verify_rows)) / n, @as(f64, @floatFromInt(t.verify_streams)) / n,
-               t.calls, t.draft_ms / c, @as(f64, @floatFromInt(t.drafts)) / @as(f64, @floatFromInt(@max(t.verify_streams, 1))) });
-        std.log.info("glm drafts: {d} verified, {d} landed ({d:.2}), their chances said {d:.2}", .{ t.verified, t.landed,
-            @as(f64, @floatFromInt(t.landed)) / @as(f64, @floatFromInt(@max(t.verified, 1))), t.predicted / @as(f64, @floatFromInt(@max(t.verified, 1))) });
-        std.log.info("glm copies: {d} of {d} draft rounds copied ({d:.2} tokens each), copied drafts land {d:.2}, the drafter's {d:.2}; {d} out of step",
-            .{ t.copies, t.calls, @as(f64, @floatFromInt(t.copy_tokens)) / @as(f64, @floatFromInt(@max(t.copies, 1))), own.copy_rate.chance(), own.draft_rate.chance(), t.desync });
+        std.log.info("glm trace: {d} verifies, {d:.2} ms each, {d:.2} rows ({d:.2} streams); {d} drafts, {d:.2} ms each, {d:.2} drafted a stream", .{ t.rounds, t.verify_ms / n, @as(f64, @floatFromInt(t.verify_rows)) / n, @as(f64, @floatFromInt(t.verify_streams)) / n, t.calls, t.draft_ms / c, @as(f64, @floatFromInt(t.drafts)) / @as(f64, @floatFromInt(@max(t.verify_streams, 1))) });
+        std.log.info("glm drafts: {d} verified, {d} landed ({d:.2}), their chances said {d:.2}", .{ t.verified, t.landed, @as(f64, @floatFromInt(t.landed)) / @as(f64, @floatFromInt(@max(t.verified, 1))), t.predicted / @as(f64, @floatFromInt(@max(t.verified, 1))) });
+        std.log.info("glm copies: {d} of {d} draft rounds copied ({d:.2} tokens each), copied drafts land {d:.2}, the drafter's {d:.2}; {d} out of step", .{ t.copies, t.calls, @as(f64, @floatFromInt(t.copy_tokens)) / @as(f64, @floatFromInt(@max(t.copies, 1))), own.copy_rate.chance(), own.draft_rate.chance(), t.desync });
         {
             const ds = &decode.draw_stats;
             const dc: f64 = @floatFromInt(@max(ds.calls, 1));
@@ -115,8 +111,7 @@ const Trace = struct {
         if (own.e.drafter) |dr| {
             const nc: f64 = @floatFromInt(@max(dr.calls, 1));
             std.log.info("glm mix: {d} stream rounds by DFlash2, {d} by the MTP head", .{ t.df_rounds, t.drafts_calls_total - t.df_rounds });
-            std.log.info("glm dflash2: {d} rounds, {d:.2} ms each (context {d:.2}, tables {d:.2}, layers {d:.2}, head {d:.2}, selector {d:.2}); {d} streams' contexts restarted",
-                .{ dr.calls, dr.forward_ms / nc, dr.phase_ms[0] / nc, dr.phase_ms[4] / nc, dr.phase_ms[1] / nc, dr.phase_ms[2] / nc, dr.phase_ms[3] / nc, dr.lost });
+            std.log.info("glm dflash2: {d} rounds, {d:.2} ms each (context {d:.2}, tables {d:.2}, layers {d:.2}, head {d:.2}, selector {d:.2}); {d} streams' contexts restarted", .{ dr.calls, dr.forward_ms / nc, dr.phase_ms[0] / nc, dr.phase_ms[4] / nc, dr.phase_ms[1] / nc, dr.phase_ms[2] / nc, dr.phase_ms[3] / nc, dr.lost });
             dflash.logFine(dr, dr.calls);
             dr.calls = 0;
             dr.forward_ms = 0;
@@ -125,9 +120,7 @@ const Trace = struct {
         const g: f64 = 1 << 30;
         const avail: u64 = if (own.guard) |gd| gd.available.load(.monotonic) else 0;
         const low: u64 = if (own.guard) |gd| gd.lowest.load(.monotonic) else 0;
-        std.log.info("glm memory: {d:.2} GiB available (lowest {d:.2}); pool {d:.2} of {d:.2} GiB; {d} graphs ({d} captured, {d} updated in place, {d} dropped, {d:.0} ms capturing); device {d:.2} GiB",
-            .{ @as(f64, @floatFromInt(avail)) / g, @as(f64, @floatFromInt(low)) / g, @as(f64, @floatFromInt(own.used)) / g, @as(f64, @floatFromInt(own.room)) / g,
-               own.e.graphs.count(), own.e.captures, own.e.updates, own.e.evictions, own.e.capture_ms, @as(f64, @floatFromInt(cuda.usage(false).device)) / g });
+        std.log.info("glm memory: {d:.2} GiB available (lowest {d:.2}); pool {d:.2} of {d:.2} GiB; {d} graphs ({d} captured, {d} updated in place, {d} dropped, {d:.0} ms capturing); device {d:.2} GiB", .{ @as(f64, @floatFromInt(avail)) / g, @as(f64, @floatFromInt(low)) / g, @as(f64, @floatFromInt(own.used)) / g, @as(f64, @floatFromInt(own.room)) / g, own.e.graphs.count(), own.e.captures, own.e.updates, own.e.evictions, own.e.capture_ms, @as(f64, @floatFromInt(cuda.usage(false).device)) / g });
         t.* = .{ .on = true };
     }
 };
@@ -214,7 +207,7 @@ pub const Owned = struct {
     }
 
     pub fn send(self: *Owned, op: Op, w: *Writer) !void {
-        try self.link.send(@intFromEnum(op), w.buf.items);
+        try self.link.send(@backingInt(op), w.buf.items);
         w.buf.clearRetainingCapacity();
     }
 
@@ -282,7 +275,7 @@ pub fn setRoom(p: *anyopaque, room: u64) !void {
     }
     const m = try self.link.recv(self.gpa);
     defer self.gpa.free(m.bytes);
-    if (m.tag != @intFromEnum(Op.room)) return error.RankOneNoRoom;
+    if (m.tag != @backingInt(Op.room)) return error.RankOneNoRoom;
     var r: Reader = .{ .bytes = m.bytes };
     const peer = try r.int();
     const both = @min(room, peer);
@@ -290,7 +283,6 @@ pub fn setRoom(p: *anyopaque, room: u64) !void {
     std.log.info("glm: stream pool {d:.2} GiB (rank 0 {d:.2}, rank 1 {d:.2} GiB)", .{ @as(f64, @floatFromInt(self.room)) / (1 << 30), @as(f64, @floatFromInt(room)) / (1 << 30), @as(f64, @floatFromInt(peer)) / (1 << 30) });
     std.log.info("glm: prompt chunks of {d} rows (TF_GLM_PREFILL_ROWS), the EXL3 experts' prompt kernel {s}", .{ self.e.pbuf.rows, @tagName(@import("kern_exl3.zig").promptKernel()) });
 }
-
 
 /// Commits the lanes' last windows: ``kept`` of their rows (the lane core calls keep only to cut a window short, so a
 /// window it accepted whole is committed here, before the lane's next call). Rank 1 commits the same.
@@ -341,8 +333,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.lanes_by = .init(gpa);
     own.seqs = .init(gpa);
     // the link and the communicator first, while memory is fresh (NCCL registers its buffers at its first use)
-    own.link = if (o.rank == 0) try cuda.tp_link.Link.lead(o.master_port, 600_000)
-        else try cuda.tp_link.Link.follow(io, try std.Io.net.IpAddress.parse(o.master orelse return error.NoMaster, o.master_port), 600_000);
+    own.link = if (o.rank == 0) try cuda.tp_link.Link.lead(o.master_port, 600_000) else try cuda.tp_link.Link.follow(io, try std.Io.net.IpAddress.parse(o.master orelse return error.NoMaster, o.master_port), 600_000);
     errdefer own.link.close();
     own.nccl = try cuda.nccl.Library.open();
     errdefer own.nccl.close();
@@ -385,14 +376,14 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         if (mine[0] != theirs[0]) return error.DrafterOnOneRank;
     }
     // both halves loaded before rank 0 serves: rank 1 says so once its engine is up
-    if (o.rank == 1) try own.link.send(@intFromEnum(Op.ready), "") else {
+    if (o.rank == 1) try own.link.send(@backingInt(Op.ready), "") else {
         const m = try own.link.recv(gpa);
         defer gpa.free(m.bytes);
-        if (m.tag != @intFromEnum(Op.ready)) return error.RankOneNotReady;
+        if (m.tag != @backingInt(Op.ready)) return error.RankOneNotReady;
     }
     if (o.rank == 0) { // rank 1 replays it in its follow loop, then hears it ended
         try @import("calibrate.zig").run(own, o.drafts);
-        try own.link.send(@intFromEnum(Op.ready), "");
+        try own.link.send(@backingInt(Op.ready), "");
         if (own.e.drafter != null) if (std.c.getenv("TF_GLM_DFLASH2_STEP_MS") != null) {
             own.mtp_ms = dflashStepMs(); // calibrate timed a round; the variable sets another
         };
@@ -400,10 +391,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const window = windowFromEnv();
     return .{
         .backend = .{ .ptr = own, .vtable = &vtable },
-        .facts = .{ .exact_width = window, .mtp = o.drafts, .speculate = o.drafts, .speculate_early = false, .drafts = if (o.drafts) window - 1 else 1,
-                    .hidden_rows = true, .max_streams = max_streams, .batch_rows = @intCast(forward.STEP_ROWS),
-                    .window_costs = own.costs[0..own.cost_count], .mtp_step_ms = own.mtp_ms, .shared_costs = own.shared[0..own.shared_count],
-                    .draft_probabilities = o.drafts, .draft_streams = o.drafts },
+        .facts = .{ .exact_width = window, .mtp = o.drafts, .speculate = o.drafts, .speculate_early = false, .drafts = if (o.drafts) window - 1 else 1, .hidden_rows = true, .max_streams = max_streams, .batch_rows = @intCast(forward.STEP_ROWS), .window_costs = own.costs[0..own.cost_count], .mtp_step_ms = own.mtp_ms, .shared_costs = own.shared[0..own.shared_count], .draft_probabilities = o.drafts, .draft_streams = o.drafts },
         .rows = if (o.drafts) window else 1,
         .stream_bytes = forward.seqBytes(own.e, admission_slots),
         .ctx = own,
@@ -425,7 +413,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
 fn release(p: *anyopaque) void {
     const own: *Owned = @ptrCast(@alignCast(p));
     if (own.guard) |g| g.stop(own.gpa); // the peer's close that follows is no lost peer
-    if (own.rank == 0) own.link.send(@intFromEnum(Op.stop), "") catch {};
+    if (own.rank == 0) own.link.send(@backingInt(Op.stop), "") catch {};
     for (own.kept.items) |k| own.gpa.free(k.ids);
     own.kept.deinit(own.gpa);
     var it = own.lanes_by.valueIterator();
@@ -724,8 +712,7 @@ fn draftFn(p: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         if (self.e.drafter != null) chooseDrafter(self, l, if (r.rows != null) n else 0);
         const df = self.e.drafter != null and l.use_df;
         // a stream DFlash2 drafts for still feeds the MTP head its rows (one step, its draft unused): it stays current
-        reqs[i] = .{ .s = l.s, .hidden = if (first) l.s.last_hidden else l.s.hidden, .next = follow[i][0..n], .count = if (df) 1 else depth,
-            .confidence = self.confidence, .out = l.held[0..depth], .probs = l.probs[0..depth] };
+        reqs[i] = .{ .s = l.s, .hidden = if (first) l.s.last_hidden else l.s.hidden, .next = follow[i][0..n], .count = if (df) 1 else depth, .confidence = self.confidence, .out = l.held[0..depth], .probs = l.probs[0..depth] };
         try w.int(l.s.uid);
         try w.tokens(follow[i][0..n]);
         try w.int(depth);
@@ -741,8 +728,7 @@ fn draftFn(p: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         var dq: [max_streams]dflash.Req = undefined;
         for (requests, 0..) |r, i| {
             const nf = reqs[i].next.len;
-            dq[i] = .{ .s = ls[i].s, .n = if (r.rows != null) nf else 0, .anchor = follow[i][nf - 1], .out = ls[i].held[0..max_depth],
-                .probs = ls[i].probs[0..max_depth], .drafts = ls[i].use_df };
+            dq[i] = .{ .s = ls[i].s, .n = if (r.rows != null) nf else 0, .anchor = follow[i][nf - 1], .out = ls[i].held[0..max_depth], .probs = ls[i].probs[0..max_depth], .drafts = ls[i].use_df };
         }
         try dflash.draft(dr, self.e, dq[0..requests.len]);
         for (reqs[0..requests.len], ls[0..requests.len], depths[0..requests.len]) |*q, l, depth| { // the confidence cut, as the head's chains stop
@@ -934,7 +920,7 @@ fn followLoop(p: *anyopaque) anyerror!void {
         };
         defer self.gpa.free(m.bytes);
         var r: Reader = .{ .bytes = m.bytes };
-        switch (@as(Op, @enumFromInt(m.tag))) {
+        switch (@as(Op, @fromBackingInt(@intCast(m.tag)))) {
             .prefill => {
                 const uid = try r.int();
                 const fresh: i64 = @intCast(try r.int());
@@ -991,8 +977,7 @@ fn followLoop(p: *anyopaque) anyerror!void {
                     const first = try r.int() == 1;
                     const cut: f64 = @bitCast(try r.int());
                     const df = try r.int() == 1;
-                    reqs[i] = .{ .s = s, .hidden = if (first) s.last_hidden else s.hidden, .next = follow, .count = if (df) 1 else depth, .confidence = cut,
-                        .out = held[i][0..depth], .probs = probs[i][0..depth] };
+                    reqs[i] = .{ .s = s, .hidden = if (first) s.last_hidden else s.hidden, .next = follow, .count = if (df) 1 else depth, .confidence = cut, .out = held[i][0..depth], .probs = probs[i][0..depth] };
                     dq[i] = .{ .s = s, .n = if (first) 0 else follow.len, .anchor = follow[follow.len - 1], .drafts = df };
                 }
                 if (feedsMtp(self)) try decode.draft(self.e, reqs[0..n]); // as rank 0: the MTP head first, then DFlash2
