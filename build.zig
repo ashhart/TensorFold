@@ -164,6 +164,7 @@ pub fn build(b: *std.Build) void {
     const xgrammar = grammar_build.option(b);
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
     cuda_build.hostTests(b, draft_ids, build_options, test_step, target.result.os.tag != .macos);
+    xpu_build.hostTests(b, test_step);
     if (target.result.os.tag == .linux) {
         // the engine seam's tests (lane_host.zig and its siblings), which the macOS branch runs from its own api module
         const lanes_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });

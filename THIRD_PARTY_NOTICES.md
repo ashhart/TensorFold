@@ -224,3 +224,11 @@ Pillow 12.3, and the families' processors resize them. No libjpeg-turbo, Pillow 
 - `zig/src/families/lfm2/image.zig` ports transformers' `Lfm2VlImageProcessor` and `Lfm2VlProcessor` (smart resize,
   tile grid, placeholder tokens). Apache License 2.0, Copyright 2025 the HuggingFace Inc. team; see
   [the license text](LICENSES/Apache-2.0.txt).
+
+## Intel GPU engine (XPU)
+
+The Intel GPU kernels and host code (`zig/kernels/xpu/`, `zig/src/xpu/`, the `xpu_*` files of the families) are written for
+TensorFold. What they follow or copy:
+
+- The Level Zero loader and the Intel compute runtime are loaded at run time and are not bundled; `ocloc` compiles the kernels
+  at build time and is not distributed.

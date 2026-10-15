@@ -1,6 +1,6 @@
 //! DFlash2 drafter for the XPU runner: int4 projections on the target's GEMM, target taps as context.
 const std = @import("std");
-const ze = @import("ze.zig");
+const ze = @import("ze");
 const kb = @import("xpu_qwen27_kernels");
 const q = @import("qwen27.zig");
 const dtree = @import("drafter_tree.zig");
