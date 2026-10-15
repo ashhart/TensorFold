@@ -1,5 +1,5 @@
 import { inspectThreadMemoryPolicy } from '../../../../shared/thread-memory-policy'
-import type { ArchiveSnapshot, Room, RoomEventItem, Thread, TimelineItem } from '../../types'
+import type { AgentEvent, ArchiveSnapshot, Room, RoomEventItem, Thread, TimelineItem } from '../../types'
 import { projectedHostId, projectionOriginsMatch } from './proxy-state'
 
 export function mergeTimelineItems(base: TimelineItem[] = [], live: TimelineItem[] = []): TimelineItem[] {
@@ -78,6 +78,17 @@ export function mergeThreadRecord(base: Thread, live: Thread): Thread {
         ? live.apiMessages
       : (live.apiMessages?.length ?? 0) >= (base.apiMessages?.length ?? 0) ? live.apiMessages : base.apiMessages,
   }
+}
+
+// Replayed host events keep the newest memory pair while applying other patch fields.
+export function mergeThreadEventPatch(thread: Thread, patch: Extract<AgentEvent, { type: 'thread_update' }>['patch']): Thread {
+  const next = { ...thread, ...patch, updatedAt: Date.now() }
+  if (!Object.hasOwn(patch, 'memoryPolicy') && !Object.hasOwn(patch, 'memoryPolicyRevision')) return next
+  const currentRevision = inspectThreadMemoryPolicy(thread).revision
+  const incomingRevision = inspectThreadMemoryPolicy(next).revision
+  // A queued event cannot repair an unknown revision; a fresh full snapshot can still reconcile it.
+  const memoryOwner = currentRevision === null ? thread : incomingRevision === null ? next : mergeThreadRecord(thread, next)
+  return { ...next, memoryPolicy: memoryOwner.memoryPolicy, memoryPolicyRevision: memoryOwner.memoryPolicyRevision }
 }
 
 export function mergeThreadLists(loaded: Thread[], live: Thread[]): Thread[] {

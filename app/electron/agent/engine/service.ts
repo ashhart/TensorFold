@@ -17,6 +17,7 @@ import { EnginePreferenceStore } from './preferences'
 import { LearningCopies, LEARNING_MODEL } from './learning-copy'
 import { EngineLearning } from './learning'
 import { isLocalModelId, ModelLibrary } from './library'
+import { assertCortheonReleaseAllowed, CORTHEON_RELEASE_POLICY, cortheonEnabledForRelease } from '../../../shared/release-feature-policy'
 
 // Glue for the main process: one supervisor, the pull jobs, cached CLI answers, and the events the
 // renderer mirrors. Electron-free; main-app passes the binary path, app home and an emitter.
@@ -102,7 +103,7 @@ export class EngineService {
       pollMs: options.pollMs,
       onChange: () => this.emitStatus(),
       onPid: (pid) => { void this.recordPid(pid) },
-      cortheon: () => this.cortheonSupported === true && this.preferences.get().cortheon,
+      cortheon: () => this.cortheonSupported === true && cortheonEnabledForRelease(this.preferences.get().cortheon),
       learning: (repo) => {
         const prefs = this.preferences.get()
         return this.learningSupported && repo === prefs.learningModel ? { enabled: prefs.learningEnabled, graphFile: this.learningCopies.graphFile(repo) } : null
@@ -154,8 +155,10 @@ export class EngineService {
     return this.statusNow()
   }
 
-  // Saves the Cortheon choice and restarts a loaded model so its server picks the flag up.
+  // Refuse paused features before probes, mutations or queued engine work.
+  // Disabling remains available to clear a previously active engine safely.
   setCortheon(enabled: boolean): Promise<EngineStatus> {
+    try { assertCortheonReleaseAllowed(enabled) } catch (error) { return Promise.reject(error) }
     return this.changeFeature(() => this.setCortheonNow(enabled))
   }
 
@@ -167,10 +170,15 @@ export class EngineService {
   }
 
   private async setCortheonNow(enabled: boolean): Promise<EngineStatus> {
+    assertCortheonReleaseAllowed(enabled)
     await this.status()
     if (enabled && !this.cortheonSupported) throw new Error("This build's TensorFold engine does not offer Cortheon yet.")
     if (this.learning.busy) throw new Error('Wait for Living Weights to finish before changing Cortheon.')
-    if (this.preferences.get().cortheon === enabled) return this.statusNow()
+    if (this.preferences.get().cortheon === enabled && (enabled || !this.supervisor.status().cortheonActive)) {
+      // An explicit Off also clears an older on-disk true without restarting the model.
+      if (!enabled) await this.preferences.set({ cortheon: false })
+      return this.statusNow()
+    }
     const prior = this.preferences.get()
     await this.supervisor.reconfigure(async () => { await this.preferences.set({ cortheon: enabled }) }, async () => { await this.preferences.set(prior) })
     this.emitStatus()
@@ -277,7 +285,7 @@ export class EngineService {
     const { cortheonActive, learningActive, ...s } = this.supervisor.status()
     const binary = this.binary()
     return {
-      ...s, cortheon: { supported: this.cortheonSupported === true, enabled: this.preferences.get().cortheon, active: cortheonActive }, available: !!binary, version: this.version, binaryPath: binary ? this.options.binaryPath : null, totalMemoryBytes: this.totalMemoryBytes, memoryBudgetBytes: this.supervisor.memoryBudgetBytes,
+      ...s, cortheon: { supported: this.cortheonSupported === true, enabled: this.preferences.get().cortheon, active: cortheonActive, disabledReason: CORTHEON_RELEASE_POLICY.enabled ? undefined : CORTHEON_RELEASE_POLICY.reason }, available: !!binary, version: this.version, binaryPath: binary ? this.options.binaryPath : null, totalMemoryBytes: this.totalMemoryBytes, memoryBudgetBytes: this.supervisor.memoryBudgetBytes,
       hardware: { platform: os.platform(), architecture: os.arch(), chip: os.cpus()[0]?.model?.trim() || null },
     }
   }
