@@ -6,6 +6,7 @@ pub const state = @import("state.zig");
 pub const forward = @import("forward.zig");
 pub const backend = @import("backend.zig");
 pub const budget = @import("budget.zig");
+pub const snapshot = @import("snapshot.zig");
 pub const image = @import("image.zig");
 pub const vision = @import("vision.zig");
 
@@ -13,5 +14,6 @@ test {
     _ = config;
     _ = backend;
     _ = budget;
+    _ = snapshot;
     _ = image;
 }

@@ -15,11 +15,14 @@ const Host = struct {
     clock: lanes.backend.WallClock,
     core: lanes.Engine,
     host: api.LaneHost,
+    cache: ?api.prompt_cache.Store = null, // kept prompt states, in what the streams' caches leave of the budget
+    cache_cap: u64 = 0, // --prompt-cache-gib's bytes (the budget when unset)
     markers: [6]u32 = .{ 128000, 128001, 128002, 128003, 128004, 128005 }, // the image wrapper's tokens (--vision)
 
     fn close(ctx: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.stop();
+        if (h.cache) |*store| store.deinit();
         h.core.deinit();
         h.config.deinit(h.gpa);
         h.metal.deinit();
@@ -76,10 +79,35 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         vis = .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images };
     }
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = s5.state.prompt_rows, .structures = true, .logprobs = true, .vision = vis });
+    h.cache = null;
+    h.cache_cap = if (o.prompt_cache_gib) |g| @intFromFloat(g * (1 << 30)) else budget;
+    if (h.cache_cap > 0) {
+        const M = s5.backend.Metal;
+        // the MTP head keys row at-1 with token at; prompt chunks change arithmetic with their rows
+        const rules: api.prompt_cache.Rules = .{ .lookahead = @intFromBool(model.config.mtp > 0), .planned = true, .grid = s5.state.prompt_rows, .min_prompt = 0 };
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = M.snapBytes, .save = M.snapSave, .restore = M.snapRestore, .drop = M.snapDrop } }, rules, @min(h.cache_cap, budget));
+        h.host.cache = &h.cache.?;
+        h.host.info_.prompt_cache = true;
+        h.metal.room = .{ .ctx = h, .fit = fitCache };
+    }
     h.warm = .{ .queue = h.metal.model.queue };
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+/// Metal.room's fit: the kept states' budget is what the streams leave, at most the cap; the least valuable go first.
+fn fitCache(ctx: *anyopaque, bytes: u64, restoring: ?*anyopaque, prompt: []const u32) void {
+    const h: *Host = @ptrCast(@alignCast(ctx));
+    const store = &(h.cache orelse return);
+    store.budget = @min(h.cache_cap, bytes);
+    const Left = struct {
+        s: *const api.prompt_cache.Store,
+        pub fn fits(l: @This()) bool {
+            return l.s.held <= l.s.budget;
+        }
+    };
+    _ = store.giveBack(restoring, prompt, Left{ .s = store });
 }
 
 /// Info.vision's prepare: an image's bytes to the tower's pieces (families/step5/image.zig), on the HTTP thread.

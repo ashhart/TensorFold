@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const Model = @import("model.zig").Model;
+const snapshot = @import("snapshot.zig");
 const draw = @import("../qwen3_5/backend.zig").draw;
 const be = lanes.backend;
 
@@ -14,6 +15,9 @@ pub const Options = struct { capacity: usize, streams: u32 = 4, budget: u64 };
 /// Drafts a window holds at most: one a MTP layer.
 pub const max_drafts = 3;
 
+/// The prompt cache's room beside the streams: its kept states fit in `bytes`, never evicting `restoring`.
+pub const Room = struct { ctx: *anyopaque, fit: *const fn (ctx: *anyopaque, bytes: u64, restoring: ?*anyopaque, prompt: []const u32) void };
+
 pub const Metal = struct {
     gpa: std.mem.Allocator,
     model: *Model,
@@ -22,6 +26,7 @@ pub const Metal = struct {
     prompt: st.Scratch, // prompt chunks
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
     held: u64 = 0, // bytes the streams' caches hold
+    room: ?Room = null, // the prompt cache, which takes what the streams leave of the budget
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -66,12 +71,22 @@ pub const Metal = struct {
         return cache.logits.slice(u16, self.model.config.vocab);
     }
 
-    /// Run `ids` at the cache's end and keep them; with MTP the first MTP layer absorbs each row with a known next.
-    fn feed(self: *Metal, cache: *st.Cache, ids: []const u32, images: []const fwd.Span) !void {
+    /// Run `ids` at the cache's end, MTP absorbing rows with a known next; a stream's pass keeps at its marks.
+    fn feed(self: *Metal, cache: *st.Cache, ids: []const u32, images: []const fwd.Span, stream: ?*lanes.Stream) !void {
         const c = &self.model.config;
+        const base = cache.len;
         var at: usize = 0;
         while (at < ids.len) {
-            const end = @min(ids.len, at + st.prompt_rows);
+            var end = @min(ids.len, at + st.prompt_rows);
+            if (stream) |sm| {
+                if (sm.isCancelled()) return error.Cancelled;
+                for (sm.chunks) |x| if (x > base + at and x < base + end) {
+                    end = x - base;
+                };
+                for (sm.reuse.marks) |x| if (x > base + at and x < base + end) {
+                    end = x - base;
+                };
+            }
             const s = if (end - at > st.window_rows) &self.prompt else &self.scratch;
             const n = end - at;
             try fwd.run(self.model, s, cache, ids[at..end], .{ .hidden = .{ .buf = s.hid }, .images = images });
@@ -82,6 +97,7 @@ pub const Metal = struct {
             const known = if (end < ids.len) n else n - 1; // rows whose next token is in ids
             if (c.mtp > 0 and known > 0) try fwd.mtp(self.model, s, cache, 0, .{ .buf = s.hid }, ids[at + 1 .. at + 1 + known], start);
             at = end;
+            if (stream) |sm| if (std.mem.indexOfScalar(u32, sm.reuse.marks, @intCast(cache.len)) != null) if (sm.reuse.hook) |k| k.at(k.ptr, sm, @intCast(cache.len));
         }
     }
 
@@ -95,32 +111,50 @@ pub const Metal = struct {
             std.log.warn("step5: a {d}-token stream needs {d:.1} GiB of caches; {d:.1} of {d:.1} GiB are held", .{ capacity, gib(need), gib(self.held), gib(self.options.budget) });
             return error.Step5CachesFull;
         }
+        self.held += need;
+        errdefer self.held -= need;
+        if (stream.reuse.saved) |saved| { // a state the stream cannot hold beside its caches: freed now, no restore
+            const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
+            if (self.held + snap.bytes > self.options.budget) snap.free();
+        }
+        // kept states give way first
+        if (self.room) |r| r.fit(r.ctx, self.options.budget - self.held, stream.reuse.saved, ids);
         const cache = try self.gpa.create(st.Cache);
         errdefer self.gpa.destroy(cache);
         cache.* = try st.Cache.init(self.model.device, &self.model.config, capacity);
         errdefer cache.deinit();
-        self.held += need;
-        errdefer self.held -= need;
+        try self.caches.put(self.gpa, stream, cache); // a mark's save finds it there
+        errdefer _ = self.caches.remove(stream);
+        stream.cached = 0;
+        if (stream.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
+            const snap: *const snapshot.Snap = @ptrCast(@alignCast(saved));
+            if (snap.at < ids.len) {
+                if (snapshot.restore(self.gpa, self.model.queue, &self.model.config, snap, cache)) stream.cached = snap.at else |_| stream.reuse_failed = true;
+            } else stream.reuse_failed = true;
+        }
         var rows: ?mtl.Buffer = null;
         defer if (rows) |r| r.deinit();
-        const spans = try self.encodeImages(stream.images, &rows);
+        const spans = try self.encodeImages(stream.images, cache.len, &rows);
         defer self.gpa.free(spans);
-        try self.feed(cache, ids, spans);
-        try self.caches.put(self.gpa, stream, cache);
+        try self.feed(cache, ids[cache.len..], spans, stream);
     }
 
-    /// The tower's rows for every image piece of a prompt, into one buffer, as spans over their placeholders.
-    fn encodeImages(self: *Metal, images: []const lanes.stream.Image, rows: *?mtl.Buffer) ![]fwd.Span {
+    /// The tower's rows for every image piece past `from`, into one buffer, as spans over their placeholders.
+    fn encodeImages(self: *Metal, images: []const lanes.stream.Image, from: usize, rows: *?mtl.Buffer) ![]fwd.Span {
         const spans = try self.gpa.alloc(fwd.Span, images.len);
         errdefer self.gpa.free(spans);
         if (images.len == 0) return spans;
         const v = self.model.vision orelse return error.Step5HasNoImageTower;
         const h: usize = self.model.config.hidden;
         var total: usize = 0;
-        for (images) |im| total += im.tokens;
-        rows.* = try self.model.device.buffer(total * h * 2, mtl.ResourceOptions.private);
+        for (images) |im| total += if (im.at + im.tokens > from) im.tokens else 0;
+        rows.* = try self.model.device.buffer(@max(total, 1) * h * 2, mtl.ResourceOptions.private);
         var off: usize = 0;
         for (images, spans) |im, *sp| {
+            if (im.at + im.tokens <= from) { // restored: its rows are in the kept state
+                sp.* = .{ .at = im.at, .n = 0, .rows = .{ .buf = rows.*.? } };
+                continue;
+            }
             const g2 = ((im.gh - 1) / 2 + 1 - 1) / 2 + 1; // two stride-2 convs
             if (im.gh != im.gw or im.tokens != g2 * g2) return error.Step5ImageGrid;
             sp.* = .{ .at = im.at, .n = im.tokens, .rows = .{ .buf = rows.*.?, .off = off * h * 2 } };
@@ -148,7 +182,7 @@ pub const Metal = struct {
         defer cache.deinit();
         var ids: [st.prompt_rows]u32 = undefined;
         for (&ids, 0..) |*t, i| t.* = @intCast(1000 + i * 37 % 20000);
-        try self.feed(&cache, &ids, &.{});
+        try self.feed(&cache, &ids, &.{}, null);
         try fwd.run(self.model, &self.scratch, &cache, &.{ids[0]}, .{ .all = true, .hidden = .{ .buf = cache.hidden } });
         if (self.model.vision) |v| {
             const rows = try self.model.device.buffer(169 * @as(usize, c.hidden) * 2, mtl.ResourceOptions.private);
@@ -308,7 +342,33 @@ pub const Metal = struct {
             self.held -= st.cacheBytes(&self.model.config, entry.value.capacity);
             entry.value.deinit();
             self.gpa.destroy(entry.value);
+            if (self.room) |r| r.fit(r.ctx, self.options.budget - self.held, null, &.{});
         }
+    }
+
+    /// The prompt cache's Snapshots functions: a stream's caches at a mark, copied on the GPU.
+    pub fn snapBytes(ptr: *anyopaque, at: u32) u64 {
+        return snapshot.bytes(&cast(ptr).model.config, at);
+    }
+
+    pub fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
+        const self = cast(ptr);
+        const cache = try self.cacheOf(@ptrCast(@alignCast(owner orelse return error.NoStream)));
+        if (cache.len != at) return error.SnapshotOutOfStep;
+        const snap = try self.gpa.create(snapshot.Snap);
+        errdefer self.gpa.destroy(snap);
+        snap.* = try snapshot.save(self.gpa, self.model.device, self.model.queue, &self.model.config, cache);
+        return snap;
+    }
+
+    pub fn snapRestore(_: *anyopaque, _: ?*anyopaque, _: *anyopaque) anyerror!void {
+        return error.BackendRestores; // the prompt pass restores, before its first chunk
+    }
+
+    pub fn snapDrop(ptr: *anyopaque, saved: *anyopaque) void {
+        const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
+        snap.free();
+        cast(ptr).gpa.destroy(snap);
     }
 };
 
