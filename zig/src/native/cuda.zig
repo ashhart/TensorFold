@@ -358,7 +358,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
             problem.* = text;
             return null;
         };
-        switch (e) {
+        switch (@as(anyerror, e)) { // every family's open: GLM's error set has no ModeloptNeedsSm90
             error.ModeloptNeedsSm90 => {
                 problem.* = try std.fmt.allocPrint(
                     a,
