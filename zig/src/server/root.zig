@@ -72,6 +72,8 @@ test {
     _ = @import("slide_forget_test.zig");
     _ = @import("slide_whom.zig");
     _ = @import("slide_subject.zig");
+    _ = @import("slide_span.zig");
+    _ = @import("slide_route.zig");
     _ = @import("slide_side.zig");
     _ = @import("slide_take.zig");
     _ = @import("slide_teacher.zig");

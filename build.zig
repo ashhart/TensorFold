@@ -158,6 +158,15 @@ pub fn build(b: *std.Build) void {
     const cost_run = b.addRunArtifact(cost_cases);
     b.step("test-cost-rule", "CPU scripted window and interleaved head timing").dependOn(&cost_run.step);
     test_step.dependOn(&cost_run.step);
+    const slide_neighbours = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/server/slide_route.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+    }) });
+    const slide_neighbours_run = b.addRunArtifact(slide_neighbours);
+    test_step.dependOn(&slide_neighbours_run.step);
+    b.step("test-slide-neighbours", "CPU whole-subject near-miss and router tests").dependOn(&slide_neighbours_run.step);
     switch (target.result.os.tag) {
         .macos => metalTargets(b, target, optimize, draft_ids, build_options, test_step),
         .linux => cuda_build.targets(b, target, optimize, draft_ids, build_options),
