@@ -208,7 +208,13 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     inline for (registry) |F| {
         if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
     }
-    if (std.mem.eql(u8, o.model_type, lfm2.family.model_type)) return lfm2.open(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, lfm2.family.model_type)) {
+        if (refusals.lfm2(o)) |why| {
+            problem.* = why;
+            return null;
+        }
+        return lfm2.open(a, gpa, io, o, problem);
+    }
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
 }

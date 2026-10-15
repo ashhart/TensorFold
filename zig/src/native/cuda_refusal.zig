@@ -8,13 +8,16 @@ pub fn backend(o: api.Open) ?[]const u8 {
     if (o.learn != null and !o.learn_conversations) return "--learn learns shared prompt prefixes on Macs only; CUDA keeps conversation states on disk with --learn-conversations: serve with it, or without --learn, --learn-dir or --learn-gib";
     if (o.speed_up != null) return "--speed-up links two Macs: serve without --speed-up on CUDA";
     if (o.prompt_cache_over_cap) return "--prompt-cache-over-cap lifts a Mac's 70% cap: on CUDA the prompt cache takes at most the memory the weights and streams leave, so serve without it";
-    if (o.vision != null) return vision_refusal;
     return null;
 }
 
-/// No CUDA family reads image parts yet, so --vision is refused before the weights load rather than taken and ignored.
-const vision_refusal = "--vision reads images with GLM-5.3-Flash on a Mac; no CUDA family reads them yet: " ++
-    "serve without --vision";
+/// LFM2 reads a checkpoint's pictures through its own tower without --vision: the flag is refused, not ignored.
+pub fn lfm2(o: api.Open) ?[]const u8 {
+    return if (o.vision != null) lfm2_vision else null;
+}
+
+const lfm2_vision = "--vision: LFM2 reads the checkpoint's images through its own tower without the flag; " ++
+    "serve it without --vision";
 
 /// A family takes --drafter only if it says so, and --learn-conversations only as Nemotron; null: `o` may open `F`.
 pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
@@ -35,12 +38,12 @@ test "flags with nothing to do on CUDA are refused, not ignored" {
     try std.testing.expect(backend(.{ .dir = "d", .model_type = "nemotron_h", .prompt_cache_gib = 4 }) == null);
 }
 
-test "--vision is refused on CUDA whatever the family; without it nothing is" {
-    for ([_][]const u8{ "nemotron_h", "glm5_next", "lfm2_vl" }) |t| {
-        const got = backend(.{ .dir = "d", .model_type = t, .vision = .{} }) orelse "";
-        try std.testing.expectEqualStrings(vision_refusal, got);
-        try std.testing.expect(backend(.{ .dir = "d", .model_type = t }) == null);
+test "--vision is each family's to take: Super VL reads images, LFM2 refuses the flag, the rest refuse at their open" {
+    for ([_][]const u8{ "nemotron_h", "nemotron_h_omni", "glm5_next", "lfm2_vl" }) |t| {
+        try std.testing.expect(backend(.{ .dir = "d", .model_type = t, .vision = .{} }) == null);
     }
+    try std.testing.expectEqualStrings(lfm2_vision, lfm2(.{ .dir = "d", .model_type = "lfm2_vl", .vision = .{} }) orelse "");
+    try std.testing.expect(lfm2(.{ .dir = "d", .model_type = "lfm2_vl" }) == null);
 }
 
 test "--drafter opens only a family that takes one" {
