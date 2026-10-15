@@ -1,4 +1,5 @@
-//! `tf-qwen35-cuda <model dir> <step|window|tree|prompt> <ids> <out>`: the ids' logits as bf16 rows for a reference.
+//! `tf-qwen35-cuda <model dir> <step|window|tree|prompt|mrope> <ids> <out>`: the ids' logits as bf16 rows for a reference.
+//! `tf-qwen35-cuda <model dir> vision <fixtures dir> <out>`: the tower's rows for each fixture against 0.6.6's.
 const std = @import("std");
 const cuda = @import("cuda");
 const q = @import("qwen35");
@@ -8,9 +9,10 @@ pub fn main(init: std.process.Init) !u8 {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
     if (args.len != 5) {
-        std.debug.print("usage: tf-qwen35-cuda <model dir> <step|window|tree|prompt> <ids> <out>\n", .{});
+        std.debug.print("usage: tf-qwen35-cuda <model dir> <step|window|tree|prompt|mrope> <ids> <out>\n", .{});
         return 2;
     }
+    if (std.mem.eql(u8, args[2], "vision")) return vision(init, a, args[1], args[3], args[4]);
     var ids: std.ArrayList(u32) = .empty;
     var it = std.mem.tokenizeAny(u8, args[3], ", ");
     while (it.next()) |t| try ids.append(a, try std.fmt.parseInt(u32, t, 10));
@@ -90,10 +92,29 @@ pub fn main(init: std.process.Init) !u8 {
             at += kept;
         }
     } else {
+        // mrope: the chunks through an image prompt's table (no image rows, text positions), which must equal prompt's bits
+        const table = std.mem.eql(u8, args[2], "mrope");
+        const n_ids = ids.items.len;
+        const src = try a.alloc(i32, n_ids);
+        @memset(src, -1);
+        const pos = try a.alloc(i32, 3 * n_ids);
+        // TF_Q35_SHIFT=k moves the h axis by k: a control whose logits must differ, as the table is read
+        const shift = try envCount("TF_Q35_SHIFT");
+        for (0..3) |ax| for (0..n_ids) |i| {
+            pos[ax * n_ids + i] = @intCast(cache.len + i + if (ax == 1) shift else 0);
+        };
+        var none = try cuda.DeviceBuffer.alloc(ctx.d, 256);
+        defer none.free();
+        const im: E.Images = .{ .features = none.ptr, .src = src, .pos = pos };
+        const p0 = cache.len;
         var at: usize = 0;
-        while (at < ids.items.len) {
-            const n = @min(E.max_rows, ids.items.len - at);
-            try e.forward(&.{.{ .cache = &cache, .rows = n }}, ids.items[at..][0..n], .last);
+        while (at < n_ids) {
+            const n = @min(E.max_rows, n_ids - at);
+            if (table) {
+                // the table's rows are the prompt's from position p0: shift it so row `at` is the cache's next
+                const part: E.Images = .{ .features = im.features, .src = try padded(a, src, p0), .pos = try paddedPos(a, pos, p0, n_ids) };
+                try e.forward(&.{.{ .cache = &cache, .rows = n, .images = &part }}, ids.items[at..][0..n], .last);
+            } else try e.forward(&.{.{ .cache = &cache, .rows = n }}, ids.items[at..][0..n], .last);
             at += n;
         }
         try out.appendSlice(a, std.mem.sliceAsBytes(cache.logits));
@@ -134,4 +155,95 @@ fn fill(e: *E.Engine, cache: *E.Cache, ids: []const u32, n: usize) !void {
         try e.forward(&.{.{ .cache = cache, .rows = k }}, buf[0..k], .last);
         at += k;
     }
+}
+
+/// Each fixture's patches (manifest.json, tools/zig/qwen_vision_fixtures.py) through the tower; rows' cosine to 0.6.6's.
+fn vision(init: std.process.Init, a: std.mem.Allocator, model: []const u8, dir: []const u8, out_path: []const u8) !u8 {
+    const V = q.vision;
+    const io = init.io;
+    const cfg = try V.Config.read(a, io, model) orelse return error.QwenCheckpointHasNoVision;
+    var driver = try cuda.Driver.open();
+    defer driver.close();
+    var ctx = try cuda.Context.init(&driver, 0);
+    defer ctx.deinit();
+    var stream = try cuda.Stream.init(ctx.d, true);
+    defer stream.deinit();
+    const tower = try V.Tower.load(init.gpa, io, ctx.d, stream, model, cfg);
+    defer tower.deinit();
+    const cwd = std.Io.Dir.cwd();
+    const manifest = try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "manifest.json" }), a, .limited(1 << 20));
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, manifest, .{});
+    var out: std.ArrayList(u8) = .empty;
+    var worst: f64 = 1;
+    for (parsed.object.get("images").?.array.items) |im| {
+        const o = im.object;
+        const grid = o.get("grid").?.array.items;
+        const g: V.Grid = .{ .h = @intCast(grid[0].integer), .w = @intCast(grid[1].integer) };
+        const tokens: usize = @intCast(o.get("tokens").?.integer);
+        const px_bytes = try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, o.get("pixels").?.string }), a, .limited(1 << 30));
+        const want = try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, o.get("features").?.string }), a, .limited(1 << 30));
+        const px = try a.alloc(f32, px_bytes.len / 4);
+        @memcpy(std.mem.sliceAsBytes(px), px_bytes);
+        var features = try cuda.DeviceBuffer.alloc(ctx.d, tokens * cfg.out_hidden * 2);
+        defer features.free();
+        const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
+        try tower.encode(px, &.{g}, features.ptr);
+        const ms = @as(f64, @floatFromInt(std.Io.Clock.awake.now(io).toNanoseconds() - t0)) / 1e6;
+        const got = try a.alloc(u8, tokens * cfg.out_hidden * 2);
+        try features.download(0, got);
+        try out.appendSlice(a, got);
+        if (want.len != got.len) {
+            std.debug.print("{s}: 0.6.6 has {d} bytes of rows, the tower {d}\n", .{ o.get("name").?.string, want.len, got.len });
+            return 1;
+        }
+        const gw: []align(1) const u16 = std.mem.bytesAsSlice(u16, got);
+        const ww: []align(1) const u16 = std.mem.bytesAsSlice(u16, want);
+        var sum: f64 = 0;
+        var least: f64 = 1;
+        var same: usize = 0;
+        for (0..tokens) |r| {
+            var dot: f64 = 0;
+            var ng: f64 = 0;
+            var nw: f64 = 0;
+            for (0..cfg.out_hidden) |i| {
+                const x = bf(gw[r * cfg.out_hidden + i]);
+                const y = bf(ww[r * cfg.out_hidden + i]);
+                dot += x * y;
+                ng += x * x;
+                nw += y * y;
+            }
+            const cos = dot / @sqrt(ng * nw);
+            sum += cos;
+            least = @min(least, cos);
+            if (std.mem.eql(u16, @as([]const u16, @ptrCast(@alignCast(gw[r * cfg.out_hidden ..][0..cfg.out_hidden]))), @ptrCast(@alignCast(ww[r * cfg.out_hidden ..][0..cfg.out_hidden])))) same += 1;
+        }
+        worst = @min(worst, least);
+        std.debug.print("{s}: grid {d}x{d}, {d} rows, row cosine mean {d:.5} min {d:.5}, {d} rows identical, {d:.1} ms\n", .{ o.get("name").?.string, g.h, g.w, tokens, sum / @as(f64, @floatFromInt(tokens)), least, same, ms });
+    }
+    try cwd.writeFile(io, .{ .sub_path = out_path, .data = out.items });
+    std.debug.print("worst row cosine {d:.5}\n", .{worst});
+    return 0;
+}
+
+fn bf(h: u16) f64 {
+    return @as(f32, @bitCast(@as(u32, h) << 16));
+}
+
+/// `src` behind `p0` rows of text (-1): the table indexed by the cache's position, as a prompt from position 0 is.
+fn padded(a: std.mem.Allocator, src: []const i32, p0: usize) ![]i32 {
+    const out = try a.alloc(i32, p0 + src.len);
+    @memset(out[0..p0], -1);
+    @memcpy(out[p0..], src);
+    return out;
+}
+
+/// `pos` ([3][n]) behind `p0` rows, each axis: the positions indexed by the cache's position.
+fn paddedPos(a: std.mem.Allocator, pos: []const i32, p0: usize, n: usize) ![]i32 {
+    const m = p0 + n;
+    const out = try a.alloc(i32, 3 * m);
+    for (0..3) |ax| {
+        for (0..p0) |i| out[ax * m + i] = @intCast(i);
+        @memcpy(out[ax * m + p0 ..][0..n], pos[ax * n ..][0..n]);
+    }
+    return out;
 }
