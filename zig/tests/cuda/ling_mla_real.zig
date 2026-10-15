@@ -109,10 +109,16 @@ pub fn run(gpu: Gpu, path: []const u8) !void {
     for (ours, freq) |o, f| fd = @max(fd, @abs(@as(f64, o) - f) / f);
     std.debug.print("RESULT rope inv_freq: ropeFreqs vs HF's fp32 table, worst relative {e:.3}\n", .{fd});
     const l: Layer = .{
-        .t = t, .h = h, .qk = qk, .kw = kw,
-        .q = try r.dev(std.mem.sliceAsBytes(q)), .lat = try r.dev(std.mem.sliceAsBytes(lat)),
-        .wk = try r.dev(std.mem.sliceAsBytes(wk)), .wv = try r.dev(std.mem.sliceAsBytes(wv)),
-        .g = try r.dev(std.mem.sliceAsBytes(g)), .freq = try r.dev(std.mem.sliceAsBytes(freq)),
+        .t = t,
+        .h = h,
+        .qk = qk,
+        .kw = kw,
+        .q = try r.dev(std.mem.sliceAsBytes(q)),
+        .lat = try r.dev(std.mem.sliceAsBytes(lat)),
+        .wk = try r.dev(std.mem.sliceAsBytes(wk)),
+        .wv = try r.dev(std.mem.sliceAsBytes(wv)),
+        .g = try r.dev(std.mem.sliceAsBytes(g)),
+        .freq = try r.dev(std.mem.sliceAsBytes(freq)),
     };
     const full = try work(&r, l);
     try pass(&r, set, l, full, 0, t);
