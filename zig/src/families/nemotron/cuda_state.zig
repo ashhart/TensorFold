@@ -5,6 +5,7 @@ const lesson_route = @import("lesson_route.zig");
 const cuda = @import("cuda");
 const Config = @import("config.zig").Config;
 const kern = @import("cuda_kernels.zig");
+const glue = @import("cuda_glue.zig");
 const sampler = @import("cuda_sampler.zig");
 const seq_graphs = @import("cuda_seq_graphs.zig");
 
@@ -81,7 +82,7 @@ fn seqSizes(c: Config, max_len: usize) [seq_fields.len]usize {
     return .{ kv, kv, m[0], m[1], nm * 2 * W * cd * 2, nm * 2 * W * cd * 2, nm * 2 * W * c.mamba_heads * 4, 16, W * 4, W * c.hidden * 2, W * 4, @sizeOf(sampler.Rule) };
 }
 
-const scratch_count = 36;
+const scratch_count = 39;
 
 /// Scratch windows and chunks share on one stream: window logits, chunk io, activations, the expert plan.
 fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
@@ -94,6 +95,7 @@ fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
     const xd: usize = c.inner();
     const pairs = R * ns;
     const items = kern.maxItems(@intCast(pairs), c.experts + 2, 16);
+    const lat: usize = @max(c.latent, 1); // LatentMoE's rows in the latent width (Bolt), else unused
     return .{
         W * c.vocab * 2,       16,                                          R * 4,
         R * D * 2,             c.vocab * 2,                                 16,
@@ -103,10 +105,11 @@ fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
         R * xd * 2,            R * xd / 64 * 4,                             R * c.qkvDim() * 2,
         R * qd * 2,            R * qd * 2,                                  R * qd / 64 * 4,
         W * nch * qd * 4,      W * nch * c.heads * 4,                       W * nch * c.heads * 4,
-        6 * R * c.experts * 4, R * ns * 4,                                  R * ns * 4,
+        glue.max_router_slices * R * c.experts * 4, R * ns * 4,                                  R * ns * 4,
         pairs * 4,             items * 12,                                  8,
         pairs * 4,             (pairs + 1023) / 1024 * (c.experts + 2) * 4, pairs * c.expert_width * 2,
         pairs * D * 4,         shared_words * 4,                            R * kern.pocket_width * 4,
+        R * lat * 2,           R * lat * 2,                                 R * 4,
     };
 }
 
@@ -218,6 +221,9 @@ pub const Buffers = struct {
     rule: u64, // the sequence's sampled rule, as sample.cu reads it
     shared: u64, // the shared expert's fixed plans: 32 members, then (items, counts) for 1..16 rows
     pocket: u64, // the pocket's activations, fp32 [rows, pocket_width]
+    lat: u64, // LatentMoE: the rows fc1_latent_proj makes, bf16 [rows, latent]
+    z: u64, // LatentMoE: the routed experts' weighted sum, bf16 [rows, latent], fc2_latent_proj's input
+    zeros: u64, // LatentMoE: every pair's expert 0, the shared expert's picks as a one-expert layer
 
     /// Sizes every buffer for `max_len` cache rows and `nch` attention chunk partials a row; the own sequence's first.
     pub fn init(d: *const cuda.Driver, c: Config, max_len: usize, nch: usize, carve: ?*cuda.Carveout) !Buffers {
@@ -263,6 +269,7 @@ pub const Buffers = struct {
             &b.xs,        &b.delta,     &b.proj,  &b.p_xc,     &b.sy,       &b.g,         &b.gxs, &b.qkv,          &b.q,          &b.att,
             &b.axs,       &b.po,        &b.pm,    &b.pl,       &b.part,     &b.pick,      &b.wts, &b.plan.members, &b.plan.items, &b.plan.counts,
             &b.plan.rank, &b.plan.hist, &b.act,   &b.ymoe,     &b.shared,   &b.pocket,
+            &b.lat,       &b.z,         &b.zeros,
         };
     }
 
@@ -285,6 +292,10 @@ pub const Buffers = struct {
             w[at..][0..8].* = .{ @intCast(c.experts), 0, n, @intCast(c.experts + 1), max_rows, n, 2, 2 };
         }
         try ops.upload(b.shared, std.mem.sliceAsBytes(&w));
+        if (c.latent > 0) {
+            const z: [pass_rows]u32 = @splat(0);
+            try ops.upload(b.zeros, std.mem.sliceAsBytes(&z));
+        }
         try ops.s.synchronize();
     }
 

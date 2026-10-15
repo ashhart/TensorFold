@@ -102,6 +102,26 @@ pub fn cacheBytes(asked: ?f64, room: u64, streams: u64) u64 {
     return @min(room -| streams, want);
 }
 
+/// Kept prompt states' budget in pinned host memory: --prompt-cache-gib (0: none), else 8 GiB, never past half of
+/// what /proc/meminfo calls available.
+pub fn hostCacheBytes(a: std.mem.Allocator, io: std.Io, asked: ?f64) u64 {
+    const want: u64 = if (asked) |g| (if (g > 0) std.math.lossyCast(u64, g * gib) else 0) else 8 << 30;
+    const text = procText(a, io, "/proc/meminfo") orelse return 0;
+    const m = meminfo(text) orelse return 0;
+    return hostShare(want, m.available);
+}
+
+fn hostShare(want: u64, available: u64) u64 {
+    return @min(want, available / 2);
+}
+
+test "host prompt cache: the ask, at most half of what is available" {
+    const g: u64 = 1 << 30;
+    try std.testing.expectEqual(8 * g, hostShare(8 * g, 64 * g));
+    try std.testing.expectEqual(3 * g, hostShare(8 * g, 6 * g));
+    try std.testing.expectEqual(@as(u64, 0), hostShare(0, 64 * g));
+}
+
 /// Integrated GPUs require validated host counts; discrete devices use CUDA's counts.
 pub fn counts(unified: bool, card: MemInfo, text: ?[]const u8) error{HostMemoryUnavailable}!MemInfo {
     if (unified) return meminfo(text orelse return error.HostMemoryUnavailable) orelse error.HostMemoryUnavailable;

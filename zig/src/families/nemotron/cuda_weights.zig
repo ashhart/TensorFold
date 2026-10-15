@@ -28,7 +28,11 @@ pub const Attention = struct { qkv: QLinear, o: QLinear, o_rest: u64 = 0, adapte
 /// The pocket kernels' neurons (config's pocket): input weights and outputs, [n, D] fp32 each, from the 4-bit codes.
 pub const Pocket = kern.Pocket;
 /// The shared expert's down projection rest in two halves (experts E and E + 1); its learned change reads both.
-pub const MoE = struct { router: u64, bias: u64, experts: Experts, rest: [2]u64 = .{ 0, 0 }, adapter: ?Adapter = null, pocket: ?Pocket = null };
+pub const MoE = struct { router: u64, bias: u64, experts: Experts, rest: [2]u64 = .{ 0, 0 }, adapter: ?Adapter = null, pocket: ?Pocket = null, latent: ?Latent = null };
+
+/// LatentMoE's own parts (Bolt): rows go to the latent width and back around the routed experts, and the shared
+/// expert reads the full-width rows on its own (`experts` then holds the routed experts alone).
+pub const Latent = struct { fc1: QLinear, fc2: QLinear, shared: Experts };
 pub const Block = struct { kind: Kind, norm: u64, mamba: Mamba = undefined, attn: Attention = undefined, moe: MoE = undefined };
 pub const Mtp = struct { enorm: u64, hnorm: u64, eh_proj: QLinear, attn_norm: u64, attn: Attention, moe_norm: u64, moe: MoE, final_norm: u64 };
 
@@ -458,6 +462,12 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, 
     var ck = try core.Checkpoint.openModel(gpa, io, dir);
     defer ck.close();
     try src.add(&ck);
+    if (c.omni) {
+        // Bolt: the language model under language_model., its vision tower and projector beside it
+        try ck.skip("vision_model.");
+        try ck.skip("mlp1.");
+        ck.scope = "language_model.";
+    }
     w.blocks = try gpa.alloc(Block, c.layers);
     for (c.kinds[0..c.layers], 0..) |kind, i| {
         var nm: [128]u8 = undefined;
@@ -470,7 +480,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, 
         switch (kind) {
             .mamba => b.mamba = try L.mamba(&ck, try join(&nb, name, ".mamba"), mixer),
             .attention => b.attn = try L.attention(&ck, try join(&nb, name, ".attn"), mixer),
-            .moe => b.moe = try L.moe(&ck, try join(&nb, name, ".moe"), mixer, c),
+            .moe => b.moe = if (c.latent > 0) try modelopt.latent(&L, &ck, try join(&nb, name, ".moe"), mixer, c, i) else try L.moe(&ck, try join(&nb, name, ".moe"), mixer, c),
         }
         w.blocks[i] = b;
     }

@@ -123,6 +123,9 @@ pub const Engine = struct {
     armed: marks.Armed = .{}, // the marks inside the prompt chunk about to run (cuda_marks.zig)
     spares: marks.Spares = .{}, // free Mamba buffers the prompt cache set aside for the next marks
     last_chunk: usize = 0, // where the last prompt pass's last chunk started (the prompt's last row: len - 1 - this)
+    snap_host: bool = false, // kept prompt states in pinned host memory (cuda_reuse.zig), set when the host opens the engine
+    features: u64 = 0, // during an image prompt's prefill: the tower's rows, spliced over its placeholders (Bolt)
+    feature_src: u64 = 0, // and each prompt row's feature row, -1 for text
 
     /// Loads the checkpoint into the Python engine's layouts and sizes the caches; `triton_dir` null: our own glue.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, model_dir: []const u8, triton_dir: ?[]const u8, opts: Options) !*Engine {
@@ -151,12 +154,18 @@ pub const Engine = struct {
             if (opts.slide) return error.SlideNeedsMlx; // the learner reads MLX 4-bit projections
             try e.k.loadModelopt(ctx);
         }
+        // Bolt (LatentMoE, ggml blocks): no MTP head in the checkpoint, and our own glue (captured sets are Lightning's)
+        const mtp = opts.mtp and e.c.latent == 0;
+        if (e.c.latent > 0) {
+            if (e.k.triton != null) return error.CapturedGlueIsLightnings;
+            try e.k.loadGgml(ctx);
+        }
         const chunks = e.max_len / state.chunk_keys;
         e.nch = if (e.k.triton) |*t| @intCast(t.smallestConst("_chunk", "NCH", @intCast(chunks)) orelse {
             std.log.err("no captured attention kernel covers {d} chunks of 512 keys; capture one for this context", .{chunks});
             return error.ContextUnsupported;
         }) else chunks;
-        e.w = try weights.load(gpa, io, e.ops(), model_dir, e.c, opts.mtp);
+        e.w = try weights.load(gpa, io, e.ops(), model_dir, e.c, mtp);
         errdefer e.w.deinit();
         e.b = try state.Buffers.init(ctx.d, e.c, e.max_len, e.nch, e.carve);
         errdefer e.b.deinit();
@@ -175,7 +184,7 @@ pub const Engine = struct {
         e.sampled_ready = try cuda.Event.init(ctx.d, false);
         try e.copied.record(e.stream);
         try e.setSampling(opts.sampling);
-        if (opts.graphs) try e.capture(opts.mtp);
+        if (opts.graphs) try e.capture(mtp);
         e.heat_gate = heat.Gate.fromEnv() catch |err| {
             std.log.err("TF_HEAT_HIGH and TF_HEAT_LOW: both or neither, in degrees, with low at or under high", .{});
             return err;
@@ -342,6 +351,8 @@ pub const Engine = struct {
         f.dump = dump;
         f.slot = e.slot;
         f.untaught = e.bound.untaught;
+        f.features = e.features;
+        f.feature_src = e.feature_src;
         if (dump == null and e.c.experts <= 128 and e.c.slots() <= 8) f.side = e.side; // tf_plan_routed's bounds
         return f;
     }

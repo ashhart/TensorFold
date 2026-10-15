@@ -26,11 +26,28 @@ const nemotron_snaps: api.prompt_cache.Snapshots.VTable = .{
 
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const families: []const api.Family = blk: {
-    var out: [registry.len]api.Family = undefined;
-    for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats };
+    var n: usize = 0;
+    for (registry) |F| n += 1 + aliases(F).len;
+    var out: [n]api.Family = undefined;
+    var i: usize = 0;
+    for (registry) |F| for ([_][]const u8{F.model_type} ++ aliases(F)) |t| {
+        out[i] = .{ .model_type = t, .formats = F.formats };
+        i += 1;
+    };
     const final = out;
     break :blk &final;
 };
+
+/// The other config model_types a family reads (a wrapper's, as Bolt's nemotron_h_omni).
+fn aliases(comptime F: type) []const []const u8 {
+    return if (@hasDecl(F, "also_model_types")) F.also_model_types else &.{};
+}
+
+fn reads(comptime F: type, model_type: []const u8) bool {
+    if (std.mem.eql(u8, model_type, F.model_type)) return true;
+    for (aliases(F)) |t| if (std.mem.eql(u8, model_type, t)) return true;
+    return false;
+}
 
 const gib: f64 = 1 << 30;
 
@@ -71,10 +88,11 @@ fn setting(a: Allocator, flag: ?u32, name: [:0]const u8, default: u32, problem: 
 /// The model's window (config.json's max_position_embeddings, text_config's first), 0 when it names none.
 fn modelContext(a: Allocator, io: std.Io, dir: []const u8) i64 {
     const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return 0;
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch return 0;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(32 << 20)) catch return 0;
     const doc = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch return 0;
     if (doc != .object) return 0;
-    const text = if (doc.object.get("text_config")) |t| (if (t == .object) t else doc) else doc;
+    const inner = doc.object.get("text_config") orelse doc.object.get("llm_config"); // Bolt's is llm_config
+    const text = if (inner) |t| (if (t == .object) t else doc) else doc;
     const limit = text.object.get("max_position_embeddings") orelse doc.object.get("max_position_embeddings") orelse return 0;
     return if (limit == .integer and limit.integer > 0) limit.integer else 0;
 }
@@ -275,7 +293,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     inline for (registry) |F| {
-        if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
+        if (reads(F, o.model_type)) return openWith(F, a, gpa, io, o, problem);
     }
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
@@ -402,10 +420,11 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     errdefer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = loaded.backend, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = loaded.lone };
     // the lane core's kept states (Nemotron's snapshots); a family that keeps its own prompt states has no `target`
-    const cache = if (@hasField(@TypeOf(loaded), "target")) budget.cacheBytes(o.prompt_cache_gib, room, loaded.stream_bytes * (streams -| free)) else 0;
+    const host_snaps = @hasField(@TypeOf(loaded), "host_snaps") and loaded.host_snaps;
+    const cache = if (!@hasField(@TypeOf(loaded), "target")) 0 else if (host_snaps) budget.hostCacheBytes(a, io, o.prompt_cache_gib) else budget.cacheBytes(o.prompt_cache_gib, room, loaded.stream_bytes * (streams -| free));
     h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in {d}-row chunks{s}{s}; {s}", .{
         capability,                                                                                                        device,                                                                                                       name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (learnBytes(loaded) > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(learnBytes(loaded))}) else "", streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
-        if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache", .{toGib(cache)}) else ", no prompt cache", if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
+        if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache{s}", .{ toGib(cache), if (host_snaps) " in host memory" else "" }) else ", no prompt cache", if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
     });
     errdefer gpa.free(h.startup);
     if (@hasField(@TypeOf(loaded), "target") and cache > 0) {
@@ -441,7 +460,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         gpa.free(h.dir);
     };
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
-    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .warm_turns = h.store != null, .logprobs = loaded.backend.vtable.first_row != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows, .structures = loaded.backend.vtable.first_masked != null, .vision = o.vision and @hasField(F.Options, "vision"), .vision_glm = @hasDecl(F, "vision_glm") and F.vision_glm, .admit = if (@hasDecl(F, "fits")) .{ .ctx = loaded.ctx, .fits = F.fits } else null }, .{ .ctx = loaded.ctx, .text = F.explain });
+    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .warm_turns = h.store != null, .logprobs = loaded.backend.vtable.first_row != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows, .structures = loaded.backend.vtable.first_masked != null, .vision = o.vision and @hasField(F.Options, "vision"), .vision_glm = @hasDecl(F, "vision_glm") and F.vision_glm, .vision_nemotron = @hasDecl(F, "vision_nemotron") and F.vision_nemotron, .plain_only = loaded.rows == 1, .admit = if (@hasDecl(F, "fits")) .{ .ctx = loaded.ctx, .fits = F.fits } else null }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     const follow_loop: ?*const fn (*anyopaque) anyerror!void = if (@hasField(@TypeOf(loaded), "follow")) loaded.follow else null;
     if (follow_loop) |f| {
@@ -481,9 +500,13 @@ test "chip classes name the compute capability as gate entries do" {
     try std.testing.expectEqualStrings("nvidia-sm121", name);
 }
 
-test "every registered family is listed for capabilities" {
-    try std.testing.expectEqual(@as(usize, registry.len), families.len);
+test "every registered family is listed for capabilities, with the wrappers it also reads" {
+    var n: usize = 0;
+    inline for (registry) |F| n += 1 + aliases(F).len;
+    try std.testing.expectEqual(n, families.len);
     try std.testing.expectEqualStrings("nemotron_h", families[0].model_type);
+    try std.testing.expectEqualStrings("nemotron_h_omni", families[1].model_type);
+    try std.testing.expect(reads(nemotron.native, "nemotron_h_omni") and !reads(nemotron.native, "qwen3_5"));
 }
 
 test "variables: unset or empty means the default, anything but a whole number is refused" {

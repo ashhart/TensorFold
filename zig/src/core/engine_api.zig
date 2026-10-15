@@ -171,6 +171,8 @@ pub const Info = struct {
     vision: bool = false,
     /// Its tower takes GLM-5.3-Flash's preparation and placeholders (qwen_image.glm) instead of Qwen's.
     vision_glm: bool = false,
+    /// Its tower takes Nemotron 3.5 Bolt's preparation (qwen_image.nemotron) and <img><image>...</img> placeholders.
+    vision_nemotron: bool = false,
     /// Whether a request's caches fit beside the running streams' now (null: a free lane does); else it waits in order.
     admit: ?Admit = null,
 };

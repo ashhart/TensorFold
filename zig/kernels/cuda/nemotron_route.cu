@@ -38,7 +38,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_nemo_router(const __nv_bflo
 
 namespace {
 
-constexpr int MAXC = 8;  // experts a lane holds: up to 256 experts
+constexpr int MAXC = 16;  // experts a lane holds: up to 512 experts (Bolt's widest layer has 496)
 
 // The larger of two (value, index) picks: a higher value, or the lower index on a tie (values are never NaN).
 __device__ __forceinline__ bool beats(float v, int i, float bv, int bi) { return v > bv || (v == bv && i < bi); }

@@ -3,6 +3,8 @@
 const std = @import("std");
 /// GLM-5.3-Flash's preparation (its canvas, padding, normalization and patch order) on this module's decode and resize.
 pub const glm = @import("glm_image.zig");
+/// Nemotron 3.5 Bolt's preparation (one dynamic-resolution tile, torch's fp32 resize, C-RADIO's patches).
+pub const nemotron = @import("nemotron_image.zig");
 
 pub const Limits = struct {
     max_dimension: u32 = 8192,
@@ -358,4 +360,5 @@ test "tenths rounds t * 10 exactly, ties to even, as the f128 product does" {
 
 test {
     _ = glm;
+    _ = nemotron;
 }

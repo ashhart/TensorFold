@@ -59,6 +59,14 @@ pub const Checkpoint = struct {
     io: Io,
     files: std.ArrayList(st.File) = .empty,
     used: std.StringHashMapUnmanaged(void) = .empty,
+    /// Prepended to every name get, has and skip take: a wrapper's part read with the names it has alone
+    /// ("language_model." in Nemotron 3.5 Bolt, beside its vision tower's).
+    scope: []const u8 = "",
+
+    fn scoped(self: *const Checkpoint, buf: *[320]u8, name: []const u8) ![]const u8 {
+        if (self.scope.len == 0) return name;
+        return std.fmt.bufPrint(buf, "{s}{s}", .{ self.scope, name });
+    }
 
     /// Every shard of `dir`, mapped.
     pub fn openModel(gpa: std.mem.Allocator, io: Io, dir: []const u8) !Checkpoint {
@@ -90,7 +98,9 @@ pub const Checkpoint = struct {
     }
 
     /// The tensor named `name`, marked as used; a missing name is an error naming it.
-    pub fn get(self: *Checkpoint, name: []const u8) !Tensor {
+    pub fn get(self: *Checkpoint, short: []const u8) !Tensor {
+        var buf: [320]u8 = undefined;
+        const name = try self.scoped(&buf, short);
         for (self.files.items) |*f| if (f.get(name)) |t| {
             try self.used.put(self.gpa, f.names.getKey(name).?, {});
             return t;
@@ -110,13 +120,17 @@ pub const Checkpoint = struct {
     }
 
     /// Whether any file holds `name` (it is not marked as used).
-    pub fn has(self: *const Checkpoint, name: []const u8) bool {
+    pub fn has(self: *const Checkpoint, short: []const u8) bool {
+        var buf: [320]u8 = undefined;
+        const name = self.scoped(&buf, short) catch return false;
         for (self.files.items) |*f| if (f.get(name) != null) return true;
         return false;
     }
 
     /// Marks every name starting with `prefix` as used: a part the loader leaves out on purpose.
-    pub fn skip(self: *Checkpoint, prefix: []const u8) !void {
+    pub fn skip(self: *Checkpoint, short: []const u8) !void {
+        var buf: [320]u8 = undefined;
+        const prefix = try self.scoped(&buf, short);
         for (self.files.items) |*f| for (f.names.keys()) |k| {
             if (std.mem.startsWith(u8, k, prefix)) try self.used.put(self.gpa, k, {});
         };
@@ -222,5 +236,28 @@ test "has finds a name without taking it; skip marks a prefix used" {
     try std.testing.expect(ck.has("backbone.x") and !ck.has("backbone.y"));
     try ck.skip("mtp.");
     _ = try ck.get("backbone.x");
+    try std.testing.expectEqual(@as(usize, 0), ck.unused());
+}
+
+test "a scope reads a wrapper's part by its own names" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "language_model.backbone.x", "vision_model.y" }, 0..) |name, i| {
+        const image = try testImage(gpa, name, 4);
+        defer gpa.free(image);
+        var file: [32]u8 = undefined;
+        try tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&file, "model-{d}.safetensors", .{i}), .data = image });
+    }
+    var path: [64]u8 = undefined;
+    var ck = try Checkpoint.openModel(gpa, io, try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}));
+    defer ck.close();
+    ck.scope = "language_model.";
+    try std.testing.expect(ck.has("backbone.x") and !ck.has("vision_model.y"));
+    _ = try ck.get("backbone.x");
+    try std.testing.expectEqual(@as(u32, 1), ck.used.count()); // vision_model.y is left
+    ck.scope = "";
+    try ck.skip("vision_model.");
     try std.testing.expectEqual(@as(usize, 0), ck.unused());
 }

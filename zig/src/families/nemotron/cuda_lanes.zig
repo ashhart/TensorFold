@@ -1,6 +1,7 @@
 //! Nemotron CUDA streams own their sequences and share window rounds.
 
 const std = @import("std");
+const vision = @import("cuda_vision.zig");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
 const core = @import("core");
@@ -48,6 +49,7 @@ pub const Cuda = struct {
     measured: ?core.draft_depth.Costs = null, // a lone stream's depth rule prices its rounds by these
     bits: ?cuda.HostBuffer = null, // structured output's row bits, device-mapped (row_slots rows), made at first use
     bits_dev: u64 = 0,
+    tower: ?*vision.Tower = null, // --vision (Bolt): an image prompt's images are encoded at its prefill
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, head: ?*Head) !Cuda {
         var pinned = try cuda.HostBuffer.alloc(e.ctx.d, engine.max_streams * state.max_rows * 4);
@@ -63,6 +65,7 @@ pub const Cuda = struct {
         var it = self.lanes.valueIterator();
         while (it.next()) |l| if (!l.own) self.e.freeSeq(l.seq);
         self.lanes.deinit(self.gpa);
+        if (self.tower) |t| t.deinit();
         self.pinned.free();
         self.rows_out.free();
         if (self.bits) |*b| b.free();
@@ -254,8 +257,22 @@ pub const Cuda = struct {
         e.decide = if (s.decide != null and e.lessons() != null) s.decide.? else lesson_route.none;
         try e.setSampling(s.sampling);
         s.cached = 0;
-        const from = if (s.prompt_logprobs != null) 0 else self.restoreKept(s, ids.len); // prompt rows need every row
-        const keep: ?engine.Keep = if (s.reuse.marks.len == 0) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
+        // an image prompt: its images through the tower, their rows spliced over the placeholders as each chunk embeds;
+        // never resumed or kept (every image's placeholders are the same ids)
+        var media: ?vision.Media = null;
+        if (s.images.len > 0) {
+            const tower = self.tower orelse return error.NemotronServedWithoutVision;
+            media = try vision.Media.init(self.gpa, tower, e.stream, ids, s.images);
+            e.features = media.?.features.ptr;
+            e.feature_src = media.?.src.ptr;
+        }
+        defer if (media) |*m| {
+            e.features = 0;
+            e.feature_src = 0;
+            m.deinit();
+        };
+        const from = if (s.prompt_logprobs != null or media != null) 0 else self.restoreKept(s, ids.len); // prompt rows need every row
+        const keep: ?engine.Keep = if (s.reuse.marks.len == 0 or media != null) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
         var sink: PromptSink = .{ .gpa = self.gpa, .s = s };
         s.prompt_rows.clearRetainingCapacity();
         if (s.prompt_logprobs) |k| {

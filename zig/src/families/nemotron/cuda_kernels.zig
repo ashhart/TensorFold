@@ -61,11 +61,15 @@ pub const Kernels = struct {
     pocket_in: [2]cuda.Function, // the pocket's two halves a block row a row, then tiled for a prompt chunk's rows
     pocket_out: [2]cuda.Function,
     add_row: cuda.Function,
+    latent_sum: cuda.Function, // LatentMoE: a row's routed latent outputs weighted and summed (Bolt)
+    add_bf16: cuda.Function,
+    splice_rows: cuda.Function, // an image prompt's rows take the vision tower's features (Bolt)
     draws: cuda.sample.Draws, // sample.cu: the keyed draws and logprob rows
     grammar_mask: cuda.Function, // structured output: disallowed tokens -inf before the draw
     torch: torch_ops.Functions,
     train: train_ops.Kernels, // Sliding Weights' learning step, and the learned change a forward adds while lessons run
     modelopt: ?Modelopt = null, // loaded by loadModelopt for a ModelOpt checkpoint, else never
+    ggml: ?cuda.ggml.Kernels = null, // loaded by loadGgml for a checkpoint with ggml blocks (Bolt's IQ2_XXS and Q8_0)
     gb10: bool,
     discrete: bool, // the card has its own memory: checkpoint bytes reach it through page-locked slots
 
@@ -93,6 +97,9 @@ pub const Kernels = struct {
         k.pocket_in = .{ try k.mods[7].function("tf_pocket_in"), try k.mods[7].function("tf_pocket_in_rows") };
         k.pocket_out = .{ try k.mods[7].function("tf_pocket_out"), try k.mods[7].function("tf_pocket_out_rows") };
         k.add_row = try k.mods[7].function("tf_add_row");
+        k.latent_sum = try k.mods[7].function("tf_latent_sum");
+        k.add_bf16 = try k.mods[7].function("tf_add_bf16");
+        k.splice_rows = try k.mods[7].function("tf_splice_rows");
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
         k.draws = try cuda.sample.Draws.resolve(k.mods[14]);
         k.glue = try glue.Fns.resolve(k.mods[16..21]);
@@ -102,6 +109,7 @@ pub const Kernels = struct {
         errdefer k.norms.unload();
         k.grammar_mask = try k.mods[14].function("tf_grammar_mask");
         k.modelopt = null;
+        k.ggml = null;
         k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
         errdefer if (k.triton) |*t| t.deinit();
         k.train = try train_ops.Kernels.load(d);
@@ -126,6 +134,7 @@ pub const Kernels = struct {
             m.experts.unload();
             m.pack.unload();
         }
+        if (k.ggml) |*g| g.unload();
         k.affine.deinit();
         k.train.deinit();
         if (k.triton) |*t| t.deinit();
@@ -145,6 +154,13 @@ pub const Kernels = struct {
         var experts = try cuda.experts.Nvfp4Experts.load(k.d, sms);
         errdefer experts.unload();
         k.modelopt = .{ .lane = lane, .gemm = gemm, .experts = experts, .pack = try cuda.modelopt.Packer.load(k.d) };
+    }
+
+    /// The ggml block kernels (IQ2_XXS experts, IQ2_XXS and Q8_0 projections, their repack) Bolt's export needs.
+    pub fn loadGgml(k: *Kernels, ctx: *const cuda.Context) !void {
+        if (k.ggml != null) return;
+        _ = ctx;
+        k.ggml = try cuda.ggml.Kernels.load(k.d);
     }
 };
 
@@ -204,12 +220,44 @@ pub const Ops = struct {
     /// Every projection format the kernels loaded (cuda/qlinear.zig).
     pub fn linear(o: Ops) cuda.qlinear.Linear {
         const m = if (o.k.modelopt) |*x| x else null;
-        return .{ .affine4 = &o.k.affine, .lane = if (m) |x| &x.lane else null, .nvfp4_prompt = if (m) |x| &x.gemm else null };
+        return .{ .affine4 = &o.k.affine, .lane = if (m) |x| &x.lane else null, .nvfp4_prompt = if (m) |x| &x.gemm else null, .ggml = if (o.k.ggml) |*g| g else null };
     }
 
     /// Every grouped-expert format the kernels loaded (cuda/experts.zig).
     pub fn grouped(o: Ops) cuda.experts.Grouped {
-        return .{ .affine4 = &o.k.experts, .nvfp4 = if (o.k.modelopt) |*x| &x.experts else null };
+        return .{ .affine4 = &o.k.experts, .nvfp4 = if (o.k.modelopt) |*x| &x.experts else null, .iq2xxs = if (o.k.ggml) |*g| g else null };
+    }
+
+    /// LatentMoE: z[r] = sum_k wt[r, k] y[r * k_slots + k], rows of `l` bf16 from fp32 pair rows (tf_latent_sum).
+    pub fn latentSum(o: Ops, y: u64, wt: u64, z: u64, rows: usize, k_slots: usize, l: usize) !void {
+        var a: cuda.Args = .{};
+        a.add(y);
+        a.add(wt);
+        a.add(z);
+        a.add(int(k_slots));
+        a.add(int(l));
+        try o.go(o.k.latent_sum, .{ rows, 1, 1 }, 256, 0, &a);
+    }
+
+    /// Rows of h whose src (i32, one a row) names a feature row take that row of `features` ([*, d] bf16).
+    pub fn spliceRows(o: Ops, h: u64, features: u64, src: u64, rows: usize, d: usize) !void {
+        var a: cuda.Args = .{};
+        a.add(h);
+        a.add(features);
+        a.add(src);
+        a.add(int(d));
+        try o.go(o.k.splice_rows, .{ rows, 1, 1 }, 256, 0, &a);
+    }
+
+    /// out = a + b, n bf16 values (b bf16, or fp32 when `b_f32`).
+    pub fn addBf16(o: Ops, out: u64, a_: u64, b: u64, b_f32: bool, n: usize) !void {
+        var a: cuda.Args = .{};
+        a.add(out);
+        a.add(a_);
+        a.add(b);
+        a.add(@as(c_int, @intFromBool(b_f32)));
+        a.add(int(n));
+        try o.go(o.k.add_bf16, .{ (n + 255) / 256, 1, 1 }, 256, 0, &a);
     }
 
     /// Decode rows of a projection on this stream (the affine-4 paths' bits unchanged); xs: x's 64-group sums.

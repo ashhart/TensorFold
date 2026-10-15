@@ -291,3 +291,33 @@ extern "C" __global__ void tf_add_row(void* __restrict__ y, int y_f32, const flo
         *p = __float2bfloat16(__bfloat162float(*p) + x[i]);
     }
 }
+
+// LatentMoE (Bolt): a row's routed outputs in the latent width, weighted and summed in fp32, then bf16 like the
+// reference's index_add_ sum. Y [R * K, L] fp32 (pair rows in slot order), WT [R * K], Z [R, L]; one block a row.
+extern "C" __global__ void tf_latent_sum(const float* __restrict__ Y, const float* __restrict__ WT, __nv_bfloat16* __restrict__ Z,
+                                         int K, int L) {
+    const int64_t r = blockIdx.x;
+    for (int i = threadIdx.x; i < L; i += blockDim.x) {
+        float acc = 0.0f;
+        for (int k = 0; k < K; ++k) acc = __fmaf_rn(Y[(r * K + k) * L + i], WT[r * K + k], acc);
+        Z[r * L + i] = __float2bfloat16(acc);
+    }
+}
+
+// out = a + b in bf16 (b bf16, or fp32 when b_f32): the latent experts' projection plus the shared expert, n values.
+extern "C" __global__ void tf_add_bf16(__nv_bfloat16* __restrict__ out, const __nv_bfloat16* __restrict__ a, const void* __restrict__ b,
+                                       int b_f32, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float y = b_f32 ? static_cast<const float*>(b)[i] : __bfloat162float(static_cast<const __nv_bfloat16*>(b)[i]);
+    out[i] = __float2bfloat16(__bfloat162float(a[i]) + y);
+}
+
+// An image prompt's chunk: rows whose SRC names a feature row take it in place of their token's embedding.
+// H [rows, D] bf16, F [image rows, D] bf16, SRC [rows] (-1: a text row); one block a row.
+extern "C" __global__ void tf_splice_rows(__nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ F, const int* __restrict__ SRC, int D) {
+    const int64_t r = blockIdx.x;
+    const int s = SRC[r];
+    if (s < 0) return;
+    for (int i = threadIdx.x; i < D; i += blockDim.x) H[r * D + i] = F[static_cast<int64_t>(s) * D + i];
+}

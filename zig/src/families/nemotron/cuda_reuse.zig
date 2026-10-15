@@ -1,4 +1,5 @@
 //! Nemotron CUDA prompt states for the shared cache: a prompt's key and value rows, the Mamba states, the head's rows.
+//! On the device, or (a discrete card's `host`) in pinned host memory: the key and value rows, then the Mamba states.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -10,9 +11,11 @@ const Head = @import("cuda_mtp.zig").Head;
 const marks = @import("cuda_marks.zig");
 
 /// One kept state: its Mamba states in one device buffer, its key and value rows in another, where the engine stood.
+/// A host state keeps both in `host` (key and value rows first); `mamba` is then an armed row's staging until `finish`.
 pub const Copy = struct {
     mamba: cuda.DeviceBuffer,
     kv: cuda.DeviceBuffer,
+    host: ?cuda.HostBuffer = null,
     head: bool,
     pos: usize,
     parity: usize,
@@ -24,6 +27,11 @@ pub const Copy = struct {
 pub const Target = struct {
     e: *Engine,
     head: ?*Head,
+
+    /// Kept states in pinned host memory (Engine.snap_host, a discrete card): the budget is the host's.
+    fn host(t: *const Target) bool {
+        return t.e.snap_host;
+    }
 };
 
 /// `len` bytes at `live` in the bound sequence's planes; `mamba`: the SSM or conv state, which an armed chunk writes.
@@ -94,9 +102,28 @@ fn move(t: *const Target, at: usize, copy: *const Copy, into: bool, mamba: bool)
     return off[0] + off[1];
 }
 
-/// Bytes a save at `at` takes, as the budget counts them: what `save` allocates, spare or new.
+/// Copies between the bound sequence and a host copy (`into`: live to host), key and value rows first; `mamba`: the
+/// Mamba states too, else from `staging` (an armed row's) when given. Queued on the engine's stream.
+fn hostMove(t: *const Target, at: usize, host: []u8, into: bool, mamba: bool, staging: ?u64) !void {
+    const o = t.e.ops();
+    var store: [max_parts]Part = undefined;
+    var off = [2]usize{ 0, kvBytes(t.e.c, at, t.head != null) };
+    for (parts(t.e.c, t.e.max_len, planes(t), at, &store)) |p| {
+        const at_host = off[@intFromBool(p.mamba)];
+        const buf = host[at_host..][0..p.len];
+        if (!p.mamba) {
+            if (into) try o.download(buf, p.live) else try o.upload(p.live, buf);
+        } else if (mamba) {
+            if (into) try o.download(buf, p.live) else try o.upload(p.live, buf);
+        } else if (staging) |st| try o.download(buf, st + (at_host - kvBytes(t.e.c, at, t.head != null))); // SSM, then conv
+        off[@intFromBool(p.mamba)] += p.len;
+    }
+}
+
+/// Bytes a save at `at` takes, as the budget counts them: what `save` allocates, spare or new (host: its bytes).
 pub fn bytes(ptr: *anyopaque, at: u32) u64 {
     const t: *Target = @ptrCast(@alignCast(ptr));
+    if (t.host()) return stateBytes(t.e.c, at, t.head != null);
     return mambaBytes(t.e.c) + allocBytes(kvBytes(t.e.c, at, t.head != null));
 }
 
@@ -104,9 +131,10 @@ pub fn bytes(ptr: *anyopaque, at: u32) u64 {
 pub fn ready(t: *Target, budget: u64) !u64 {
     const e = t.e;
     const len = mambaBytes(e.c);
-    e.spares.want = @min(marks.spares_max, budget / 4 / len);
+    // host states: one device staging buffer for an armed row, out of the device's room rather than the host budget
+    e.spares.want = if (t.host()) @min(marks.spares_max, 1) else @min(marks.spares_max, budget / 4 / len);
     e.spares.fill(e.ctx.d, len);
-    return e.spares.want * len;
+    return if (t.host()) 0 else e.spares.want * len;
 }
 
 /// Copy the live state after `at` prompt tokens. The pass is standing there.
@@ -119,6 +147,15 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     if (e.armed.open) |span| if (at > span[0] and at < span[1]) return arm(t, at);
     if (e.pos != at) return error.NotAtMark;
     if (t.head) |h| if (h.pos != at) return error.NotAtMark;
+    if (t.host()) {
+        const copy = try e.gpa.create(Copy);
+        errdefer e.gpa.destroy(copy);
+        copy.* = .{ .mamba = .{ .ptr = 0, .len = 0, .d = e.ctx.d }, .kv = .{ .ptr = 0, .len = 0, .d = e.ctx.d }, .head = t.head != null, .pos = at, .parity = e.parity, .rows = e.rows };
+        copy.host = try cuda.HostBuffer.alloc(e.ctx.d, stateBytes(e.c, at, copy.head));
+        errdefer copy.host.?.free();
+        try hostMove(t, at, copy.host.?.bytes, true, true, null);
+        return copy;
+    }
     const copy = try alloc(t, at, true);
     errdefer drop(ptr, copy);
     if (try move(t, at, copy, true, true) != stateBytes(e.c, at, t.head != null)) return error.SnapshotSize;
@@ -132,7 +169,7 @@ fn alloc(t: *const Target, at: usize, kv: bool) !*Copy {
     errdefer e.gpa.destroy(copy);
     var m = e.spares.take() orelse try cuda.DeviceBuffer.alloc(e.ctx.d, mambaBytes(e.c));
     errdefer if (!e.spares.give(m)) m.free();
-    const rows = try cuda.DeviceBuffer.alloc(e.ctx.d, if (kv) allocBytes(kvBytes(e.c, at, t.head != null)) else 0);
+    const rows = try cuda.DeviceBuffer.alloc(e.ctx.d, if (kv and !t.host()) allocBytes(kvBytes(e.c, at, t.head != null)) else 0);
     copy.* = .{ .mamba = m, .kv = rows, .head = t.head != null, .pos = at, .parity = e.parity, .rows = e.rows };
     return copy;
 }
@@ -153,6 +190,20 @@ pub fn finish(t: Target) !void {
     const e = t.e;
     for (e.armed.marks()) |m| {
         const copy: *Copy = @ptrCast(@alignCast(m.copy));
+        if (t.host()) {
+            // the chunk wrote this row's Mamba states into the staging buffer: rows and states to the host, then the
+            // staging back (the stream orders its next writer after these copies)
+            var h = cuda.HostBuffer.alloc(e.ctx.d, stateBytes(e.c, m.at, copy.head)) catch continue; // stays not whole
+            hostMove(&t, m.at, h.bytes, true, false, copy.mamba.ptr) catch {
+                h.free();
+                continue;
+            };
+            copy.host = h;
+            if (!e.spares.give(copy.mamba)) copy.mamba.free();
+            copy.mamba = .{ .ptr = 0, .len = 0, .d = e.ctx.d };
+            copy.whole = true;
+            continue;
+        }
         copy.kv = cuda.DeviceBuffer.alloc(e.ctx.d, allocBytes(kvBytes(e.c, m.at, copy.head))) catch continue; // stays not whole
         _ = try move(&t, m.at, copy, true, false);
         copy.whole = true;
@@ -163,12 +214,17 @@ pub fn finish(t: Target) !void {
 /// What a kept state holds on the device, both buffers.
 pub fn held(saved: *anyopaque) usize {
     const copy: *Copy = @ptrCast(@alignCast(saved));
-    return copy.mamba.len + copy.kv.len;
+    return copy.mamba.len + copy.kv.len + if (copy.host) |h| h.bytes.len else 0;
 }
 
 /// A kept state's bytes in `out` (its key and value rows, then its Mamba states), after the engine's stream.
 pub fn download(t: *const Target, saved: *anyopaque, out: []u8) !void {
     const copy: *Copy = @ptrCast(@alignCast(saved));
+    if (copy.host) |h| {
+        try t.e.stream.synchronize();
+        @memcpy(out[0..h.bytes.len], h.bytes);
+        return;
+    }
     const kv = kvBytes(t.e.c, copy.pos, copy.head);
     try t.e.ops().download(out[0..kv], copy.kv.ptr);
     try t.e.ops().download(out[kv..], copy.mamba.ptr);
@@ -183,7 +239,10 @@ pub fn restore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!
     const e = t.e;
     if (copy.head != (t.head != null)) return error.NoHead; // checked before any copy: nothing half restored
     if (!copy.whole) return error.Incomplete; // its chunk failed before `finish`
-    _ = try move(t, copy.pos, copy, false, true);
+    if (copy.host) |h| {
+        try hostMove(t, copy.pos, h.bytes, false, true, null);
+        try e.stream.synchronize(); // the store may drop the host copy once this returns
+    } else _ = try move(t, copy.pos, copy, false, true);
     e.pos = copy.pos;
     e.parity = copy.parity;
     e.prev_keep = 0;
@@ -196,8 +255,13 @@ pub fn drop(ptr: *anyopaque, saved: *anyopaque) void {
     const t: *Target = @ptrCast(@alignCast(ptr));
     const copy: *Copy = @ptrCast(@alignCast(saved));
     t.e.armed.forget(saved); // a copy evicted before its chunk ran: the chunk must not write it
-    if (!t.e.spares.give(copy.mamba)) copy.mamba.free();
-    copy.kv.free();
+    if (copy.host) |*h| {
+        // queued copies may still read or write it: they finish before the host memory goes
+        t.e.stream.synchronize() catch {};
+        h.free();
+    }
+    if (copy.mamba.len > 0 and !t.e.spares.give(copy.mamba)) copy.mamba.free();
+    if (copy.kv.len > 0) copy.kv.free();
     t.e.gpa.destroy(copy);
 }
 

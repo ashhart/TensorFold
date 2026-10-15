@@ -160,6 +160,20 @@ pub fn extract(srv: *Server, cx: *Cx, messages: ?Value) errors.Refused!?Extracte
                 total_pixels += @as(u64, img.w) * img.h;
                 if (total_pixels > max_pixels_all) return cx.refuse("a request's images exceed the decoded pixel limit");
                 const cap = if (std.mem.eql(u8, sl.detail, "low")) @min(per, 256) else per;
+                if (srv.info.vision_nemotron) { // Bolt: one tile of its own size, <img><image>...</img> before the text
+                    const p = qi.nemotron.prepare(cx.a, img) catch |e| switch (e) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => return cx.refuse("the image's size is outside what the vision tower reads"),
+                    };
+                    img.deinit(cx.a);
+                    if (p.tokens() > per) return cx.fail(.request, "an image needs {d} visual tokens and this request's images have {d} each: send fewer images, or start the server with a larger --vision-image-tokens", .{ p.tokens(), per });
+                    try images.append(cx.a, .{ .patches = p.patches, .grid = .{ 1, @intCast(p.gh), @intCast(p.gw) } });
+                    try text.appendSlice(cx.a, "<img>");
+                    for (0..p.tokens()) |_| try text.appendSlice(cx.a, "<image>");
+                    try text.appendSlice(cx.a, "</img>");
+                    texts[k] = text.items;
+                    continue;
+                }
                 if (srv.info.vision_glm) { // GLM: its canvas within [min(16, cap), cap] tokens, <|image|> placeholders
                     const p = qi.glm.prepare(cx.a, img, @min(16, cap), cap) catch |e| switch (e) {
                         error.OutOfMemory => return error.OutOfMemory,
@@ -183,7 +197,9 @@ pub fn extract(srv: *Server, cx: *Cx, messages: ?Value) errors.Refused!?Extracte
                 for (0..p.tokens()) |_| try text.appendSlice(cx.a, "<|image_pad|>");
                 try text.appendSlice(cx.a, vision_end);
             },
-            .video => if (srv.info.vision_glm) {
+            .video => if (srv.info.vision_nemotron) {
+                return cx.refuse("video inputs are not supported by the Nemotron CUDA engine yet: send images");
+            } else if (srv.info.vision_glm) {
                 // GLM: <|begin_of_video|>, image groups with their "t.t seconds", <|end_of_video|> (glm5_next)
                 var v = try videoGlm(srv, cx, bytes);
                 defer v.deinit(cx.a);

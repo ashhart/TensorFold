@@ -216,7 +216,7 @@ pub const Server = struct {
         return .{ .kind = kind, .text = text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null, .compiler = c };
     }
 
-    /// The model's grammar compiler: tokenizer.json, config.json's vocab_size (text_config first), the eos ids.
+    /// The model's grammar compiler: tokenizer.json, config.json's vocab_size (text_config or llm_config first), the eos ids.
     fn grammarCompiler(srv: *Server) ?*api.grammar.Compiler {
         srv.grammar_mutex.lockUncancelable(srv.io);
         defer srv.grammar_mutex.unlock(srv.io);
@@ -232,7 +232,7 @@ pub const Server = struct {
                 .err => break :blk "config.json is not JSON",
             };
             var vocab: ?u32 = null;
-            for ([_]?json.Value{ cfg.get("text_config"), cfg }) |part| if (vocab == null) if (part) |p| if (p.get("vocab_size")) |v| if (v.int64()) |n| {
+            for ([_]?json.Value{ cfg.get("text_config"), cfg.get("llm_config"), cfg }) |part| if (vocab == null) if (part) |p| if (p.get("vocab_size")) |v| if (v.int64()) |n| {
                 vocab = @intCast(n);
             };
             if (vocab == null) break :blk "structured output needs the checkpoint's config.json vocab_size";

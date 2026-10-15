@@ -33,6 +33,7 @@ const kernels = [_]Kernel{
     .{ .name = "lane_gemv", .flags = &.{"-O3"} }, // ours: qmm_group's arithmetic, a column tile's K slices in one CTA
     .{ .name = "sample", .flags = &.{ "-O3", "--fmad=false", "--ftz=false" } }, // ours: the Metal engine's keyed draws
     .{ .name = "train", .flags = &.{"-O3"} }, // ours: Sliding Weights' learning step (train.metal's kernels)
+    .{ .name = "radio_vision", .flags = &.{ "-O3", "--fmad=false" } }, // ours: Nemotron 3.5 Bolt's C-RADIO tower and projector
     .{ .name = "nemotron_norms", .flags = glue }, // ours, each with a host reference (glue_ref.zig): Nemotron's glue
     .{ .name = "nemotron_route", .flags = glue },
     .{ .name = "nemotron_mamba", .flags = glue },
@@ -142,6 +143,12 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     runner.addImport("exlr8_frozen_dense", b.createModule(.{ .root_source_file = b.path("zig/tests/fixtures/exlr8/frozen_dense.zig"), .target = target, .optimize = optimize }));
     for (exlr8_build.denseModules(b, target, optimize, exlr8, exlr8_tests[0])) |m| runner.addImport(m.name, m.module);
     b.installArtifact(b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner }));
+    // `zig build bolt-vision`: Bolt's image tower against the reference's dumps (zig/tests/bolt_vision_main.zig)
+    const bolt = b.createModule(.{ .root_source_file = b.path("zig/tests/bolt_vision_main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
+    bolt.addImport("cuda", cuda);
+    bolt.addImport("nemotron", mods.nemotron);
+    bolt.addImport("qwen_image", vision_build.module(b, target, optimize));
+    b.step("bolt-vision", "tf-bolt-vision: Bolt's image tower and projector against bolt_vision_reference.py's dumps").dependOn(&b.addInstallArtifact(b.addExecutable(.{ .name = "tf-bolt-vision", .root_module = bolt }), .{}).step);
     nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.tokenizer, build_options, true).root_module.strip = strip;
 }
 
