@@ -66,6 +66,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - The server's JSON values are one named module (`zig/build/server.zig`) that a family's serving code can import; no reply changes (#860). Thanks to @jayleaton.
 - A reply's `tensorfold` fields carry the full SHA-256 of its token ids (`token_sha256`, 64 hex characters) beside `token_sha`, which is its first 12 characters (#862). Thanks to @jayleaton.
 - The benchmark tools (`tools/bench_concurrent.py`, `bench_cache.py` and `bench_evidence.py`) keep each reply's full token digest, the pairs of replies they compare and the client's send and completion times. Two replies count as equal only by their full digests, and a run without them is reported as unverified (#863). Thanks to @jayleaton.
+- GLM-5.3-Flash's prompt rows run the last routed expert's sorted pairs to the pair count. The sort writes no end mark after the last expert, so its pairs were skipped on layers whose routed experts are not all 4-bit (or all 2-bit) in groups of 64: the 4-bit checkpoints never took that path, and a checkpoint with 5- and 6-bit experts gave empty replies from about 12,000 prompt tokens. `tf-glm-rows-check` lays the offsets out as the route writes them (#864). Thanks to @harrisonfriia.
 
 ## 1.0.11
 
