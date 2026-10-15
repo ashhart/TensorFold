@@ -1,4 +1,4 @@
-//! TP over hosts for a latent MoE: rank 0 runs the model and asks rank 1, which holds only its expert shares, per layer.
+//! TP over hosts for a latent MoE: rank 0 runs the model and asks rank 1, which holds only its expert shares, a layer.
 
 const std = @import("std");
 const cuda = @import("cuda");

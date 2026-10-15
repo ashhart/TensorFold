@@ -71,7 +71,7 @@ const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, 
 
 /// Own-sequence graphs support both draw modes; drafting also captures the head.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
-    if (std.c.getenv("TF_NEMOTRON_RANK")) |r| if (!std.mem.eql(u8, std.mem.span(r), "0")) { // an expert rank never serves
+    if (std.c.getenv("TF_NEMOTRON_RANK")) |r| if (!std.mem.eql(u8, std.mem.span(r), "0")) { // expert ranks never serve
         @import("cuda_worker.zig").serve(gpa, io, ctx, dir, o.precision) catch |err| {
             cuda.tp_watch.fail(@errorName(err)); // rank 0 stops with this rank's error
             std.log.err("expert rank stopped: {s}", .{@errorName(err)});

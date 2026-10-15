@@ -55,7 +55,7 @@ pub const Vision = struct {
         return v.tower.bytes + v.rows.buf.len;
     }
 
-    /// A prompt pass from row `from`: the images whose rows end past it, through the tower into the rows buffer, on `s`.
+    /// A prompt pass from row `from`: the images whose rows end past it, through the tower into the rows buffer.
     pub fn begin(v: *Vision, s: cuda.Stream, images: []const lanes.stream.Image, from: usize) !void {
         v.end();
         if (images.len == 0) return;

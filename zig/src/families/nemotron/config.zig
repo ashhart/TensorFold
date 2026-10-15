@@ -120,7 +120,7 @@ pub const Config = struct {
     pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Config {
         const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
         defer gpa.free(path);
-        const text = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 25)); // ModelOpt names every module
+        const text = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 25)); // ModelOpt names each module
         defer gpa.free(text);
         var why: Why = .{};
         return parse(gpa, text, &why) catch |e| {
@@ -142,7 +142,7 @@ fn number(v: std.json.Value) !f64 {
     return switch (v) {
         .float => |f| f,
         .integer => |i| @floatFromInt(i),
-        .object => |o| inf(o) orelse error.BadConfig, // transformers writes an infinite limit as {"__float__": "Infinity"}
+        .object => |o| inf(o) orelse error.BadConfig, // an infinite limit, as {"__float__": "Infinity"}
         else => error.BadConfig,
     };
 }
