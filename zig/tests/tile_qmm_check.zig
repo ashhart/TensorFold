@@ -1,15 +1,17 @@
-//! core/tile_qmm on synthetic 4-, 6- and 8-bit matrices: row independence, twin and grouped bits, a float64 reference.
+//! core/tile_qmm on synthetic matrices: rows, twin and grouped bits, float64; tile_qmm_tensor.zig with tensor units.
 const std = @import("std");
 const mtl = @import("metal");
 const tile = @import("tile_qmm");
+const tensor_check = @import("tile_qmm_tensor.zig");
 
-const opts = mtl.ResourceOptions.shared;
+pub const opts = mtl.ResourceOptions.shared;
+pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 
-fn toBf(v: f32) u16 {
+pub fn toBf(v: f32) u16 {
     const u: u32 = @bitCast(v);
     return @truncate((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
 }
-fn fromBf(v: u16) f32 {
+pub fn fromBf(v: u16) f32 {
     return @bitCast(@as(u32, v) << 16);
 }
 
@@ -22,10 +24,10 @@ fn code(bytes: []const u8, bits: u8, i: usize) u32 {
 }
 
 const n = 96;
-const max_rows = 70;
+pub const max_rows = 70;
 
 /// Random experts back to back (codes, scales, biases) and input rows.
-const Synth = struct {
+pub const Synth = struct {
     w: mtl.Buffer,
     s: mtl.Buffer,
     b: mtl.Buffer,
@@ -33,13 +35,24 @@ const Synth = struct {
     bits: u8,
     k: usize,
     experts: usize,
+    /// Columns a matrix: n for the tiles, a multiple of 64 for the tensor units.
+    cols: usize = n,
 
-    fn init(device: mtl.Device, bits_in: u8, seed: u64, k: usize, experts: usize) !Synth {
+    /// `spread`: input exponents over 2^-8 .. 1 as activations have them (uniform rows sum exactly in any order).
+    pub fn init(
+        device: mtl.Device,
+        bits_in: u8,
+        seed: u64,
+        k: usize,
+        experts: usize,
+        cols: usize,
+        spread: bool,
+    ) !Synth {
         const bits: usize = bits_in;
         var prng = std.Random.DefaultPrng.init(seed);
         const r = prng.random();
-        const groups = experts * n * (k / 64);
-        const bytes = experts * n * k * bits / 8;
+        const groups = experts * cols * (k / 64);
+        const bytes = experts * cols * k * bits / 8;
         const out = Synth{
             .w = try device.buffer(bytes, opts),
             .s = try device.buffer(groups * 2, opts),
@@ -48,21 +61,25 @@ const Synth = struct {
             .bits = bits_in,
             .k = k,
             .experts = experts,
+            .cols = cols,
         };
         r.bytes(out.w.slice(u8, bytes));
         for (out.s.slice(u16, groups)) |*v| v.* = toBf(r.float(f32) * 0.02 + 0.001);
         for (out.b.slice(u16, groups)) |*v| v.* = toBf((r.float(f32) - 0.5) * 0.1);
-        for (out.x.slice(u16, max_rows * k)) |*v| v.* = toBf((r.float(f32) - 0.5) * 2);
+        for (out.x.slice(u16, max_rows * k)) |*v| {
+            const e: f32 = if (spread) @floatFromInt(r.uintLessThan(u32, 9)) else 0;
+            v.* = toBf((r.float(f32) - 0.5) * 2 * std.math.pow(f32, 2, -e));
+        }
         return out;
     }
 
-    fn deinit(s: Synth) void {
+    pub fn deinit(s: Synth) void {
         for ([_]mtl.Buffer{ s.w, s.s, s.b, s.x }) |b| b.deinit();
     }
 
-    fn matrix(s: Synth, e: usize) tile.Matrix {
-        const per = n * s.k * @as(usize, s.bits) / 8;
-        const g = n * (s.k / 64) * 2;
+    pub fn matrix(s: Synth, e: usize) tile.Matrix {
+        const per = s.cols * s.k * @as(usize, s.bits) / 8;
+        const g = s.cols * (s.k / 64) * 2;
         return .{
             .w = s.w,
             .w_off = e * per,
@@ -70,21 +87,33 @@ const Synth = struct {
             .s_off = e * g,
             .biases = s.b,
             .b_off = e * g,
-            .n = n,
+            .n = s.cols,
             .k = s.k,
             .bits = s.bits,
         };
     }
 
+    /// Expert e's matrix as core/affine_mm binds it.
+    pub fn affine(s: Synth, e: usize) struct { w: Ref, s: Ref, b: Ref, n: u32, k: u32 } {
+        const m = s.matrix(e);
+        return .{
+            .w = .{ .buf = m.w, .off = m.w_off },
+            .s = .{ .buf = m.scales, .off = m.s_off },
+            .b = .{ .buf = m.biases, .off = m.b_off },
+            .n = @intCast(m.n),
+            .k = @intCast(m.k),
+        };
+    }
+
     /// Row m of x against expert e's column c in float64, and its terms' magnitudes (the error's scale).
-    fn reference(s: Synth, e: usize, m: usize, c: usize) [2]f64 {
+    pub fn reference(s: Synth, e: usize, m: usize, c: usize) [2]f64 {
         const k = s.k;
         const experts = s.experts;
         const groups = k / 64;
         const row_bytes = k * @as(usize, s.bits) / 8;
-        const bytes = s.w.slice(u8, experts * n * row_bytes)[(e * n + c) * row_bytes ..][0..row_bytes];
-        const sc = s.s.slice(u16, experts * n * groups);
-        const bi = s.b.slice(u16, experts * n * groups);
+        const bytes = s.w.slice(u8, experts * s.cols * row_bytes)[(e * s.cols + c) * row_bytes ..][0..row_bytes];
+        const sc = s.s.slice(u16, experts * s.cols * groups);
+        const bi = s.b.slice(u16, experts * s.cols * groups);
         const x = s.x.slice(u16, max_rows * k);
         var total: f64 = 0;
         var scale: f64 = 0;
@@ -96,8 +125,8 @@ const Synth = struct {
                 dot += xv * @as(f64, @floatFromInt(code(bytes, s.bits, g * 64 + i)));
                 sum += xv;
             }
-            const sd = @as(f64, fromBf(sc[(e * n + c) * groups + g])) * dot;
-            const bs = @as(f64, fromBf(bi[(e * n + c) * groups + g])) * sum;
+            const sd = @as(f64, fromBf(sc[(e * s.cols + c) * groups + g])) * dot;
+            const bs = @as(f64, fromBf(bi[(e * s.cols + c) * groups + g])) * sum;
             total += sd + bs;
             scale += @abs(sd) + @abs(bs);
         }
@@ -105,12 +134,12 @@ const Synth = struct {
     }
 };
 
-const Gpu = struct {
+pub const Gpu = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     p: *const tile.Pipelines,
 
-    fn run(g: Gpu, body: anytype) !void {
+    pub fn run(g: Gpu, body: anytype) !void {
         const cb = g.queue.commandBuffer();
         const e = cb.compute(.serial);
         try body.encode(e, g.p);
@@ -125,7 +154,7 @@ const Gpu = struct {
 };
 
 /// The tiles on rows [first, first + rows) of x into y, with their group sums.
-const Tiles = struct {
+pub const Tiles = struct {
     m: tile.Matrix,
     x: mtl.Buffer,
     sums: mtl.Buffer,
@@ -138,7 +167,7 @@ const Tiles = struct {
     }
 };
 
-const Twin = struct {
+pub const Twin = struct {
     m: tile.Matrix,
     x: mtl.Buffer,
     y: mtl.Buffer,
@@ -419,7 +448,7 @@ pub fn main(init: std.process.Init) !void {
     try witness(g);
     std.debug.print("4-bit witness (code 7 = 1, x[7] = 2^-126): tiles and twin at widths 1-32 keep bf16 0x0080\n", .{});
     for (tile.bit_widths, 0..) |bits, i| {
-        const s = try Synth.init(device, bits, 0x7173 + i, 1536, 4);
+        const s = try Synth.init(device, bits, 0x7173 + i, 1536, 4, n, false);
         defer s.deinit();
         var worst: f64 = 0;
         var mean: f64 = 0;
@@ -434,14 +463,14 @@ pub fn main(init: std.process.Init) !void {
         }
         spreadPicks(&pick, 24);
         try grouped(g, s, 2, pick[0..48]);
-        const many = try Synth.init(device, bits, 0x7183 + i, 1536, 64);
+        const many = try Synth.init(device, bits, 0x7183 + i, 1536, 64, n, false);
         defer many.deinit();
         for ([_]usize{ 32, 16 }) |tokens| {
             skewedPicks(&pick, tokens);
             try grouped(g, many, 4, pick[0 .. 4 * tokens]);
         }
         for ([_]usize{ 2048, 11776 }) |k| {
-            const one = try Synth.init(device, bits, 0x7193 + i, k, 1);
+            const one = try Synth.init(device, bits, 0x7193 + i, k, 1, n, false);
             defer one.deinit();
             try sweep(g, one);
         }
@@ -451,6 +480,8 @@ pub fn main(init: std.process.Init) !void {
             "twin at widths 8-32 at K 2048 and 11776; " ++
             "error vs float64 / terms' magnitude: worst {e:.2}, mean {e:.2}\n", .{ bits, n, s.k, worst, mean });
         if (worst > 1.0 / 128.0) return error.FarFromFloat64;
+        if (device.tensorUnits()) try tensor_check.tensor(g, bits, 0x7173 + i, init.gpa);
     }
-    std.debug.print("{d} widths passed, 0 failed\n", .{passed});
+    const which = if (device.tensorUnits()) ", tensor units checked" else ", no tensor units (tiles only)";
+    std.debug.print("{d} widths passed, 0 failed{s}\n", .{ passed, which });
 }
