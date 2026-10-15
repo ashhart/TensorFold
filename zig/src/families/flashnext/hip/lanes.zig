@@ -173,6 +173,7 @@ pub const Fx = struct {
     }
 
     fn send(f: *Fx, words: []const u32) !void {
+        if (f.e.stopped) return error.GroupStopped;
         if (f.link) |l| try l.send(words);
     }
 
