@@ -88,3 +88,58 @@ pub fn fillStream(e: *Engine, s: *Stream, first: bool) !bool {
     try opened(e, s);
     return true;
 }
+
+/// A stream another driver prefilled and drew `token` for: drafts asked, the token committed, rounds from here.
+pub fn adoptPrefilled(e: *Engine, s: *Stream, token: u32) !void {
+    _ = e.arena.reset(.retain_capacity);
+    s.context.shrinkRetainingCapacity(s.prompt_len);
+    s.pending = null;
+    s.cache_len = s.prompt_len;
+    if (e.cfg.family_mtp and s.drafts) {
+        const d: u32 = @intCast(try e.rule.depth(win.who(s)));
+        try e.backend.draft(&.{.{ .stream = s, .follow = &.{}, .first = .{ .value = token }, .rows = null, .start = s.prompt_len, .position = s.prompt_len + 1, .depth = d }});
+        s.dropHeld(e.gpa);
+        s.next = .{ .count = d };
+        if (e.backend.vtable.tree) |tree| if (try tree(e.backend.ptr, s, e.gpa)) |held| {
+            s.next = held;
+        };
+    }
+    if (s.logprobs != null) return error.LogprobsUnsupported; // another driver's prompt pass gives no first row
+    _ = try s.commit(e.gpa, &.{token}, &.{});
+    s.pending = token;
+    if (s.finished) return e.release(s);
+    try e.live.append(e.gpa, s);
+}
+
+/// Streams a backend prefills in one pass at most.
+pub const max_together = 16;
+
+/// open.add for several streams, prompts in one pass when the backend allows; ``errs[i]``: stream i's error.
+pub fn addStreams(e: *Engine, ss: []const *Stream, errs: []?anyerror) void {
+    for (errs) |*x| x.* = null;
+    const many = e.backend.vtable.prefill_many orelse return addEach(e, ss, errs);
+    if (ss.len < 2 or ss.len > max_together) return addEach(e, ss, errs);
+    _ = e.arena.reset(.retain_capacity);
+    for (ss) |s| trail.event(e, &.{ f("ev", str("add")), f("stream", str(s.id)) }) catch {};
+    const together = many(e.backend.ptr, ss) catch |err| {
+        for (errs) |*x| x.* = err;
+        return;
+    };
+    if (!together) return addEach(e, ss, errs);
+    for (ss, errs) |s, *x| {
+        if (s.isCancelled()) { // cancelled in its pass: no first token
+            e.backend.release(s);
+            x.* = error.Cancelled;
+            continue;
+        }
+        opened(e, s) catch |err| {
+            x.* = err;
+        };
+    }
+}
+
+fn addEach(e: *Engine, ss: []const *Stream, errs: []?anyerror) void {
+    for (ss, errs) |s, *x| add(e, s) catch |err| {
+        x.* = err;
+    };
+}

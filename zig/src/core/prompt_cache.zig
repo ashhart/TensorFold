@@ -108,6 +108,8 @@ pub const Entry = struct {
     last: []u32, // the last prompt that kept or resumed it
     shared: bool = false, // kept at a shared system block's cut: other conversations resume it, so its own never supersedes it
     branched: bool = false, // resumed again after a later prompt kept a longer state extending it: never superseded
+    pins: u32 = 0, // admitted jobs that restore it and have not yet: eviction passes it over
+    dead: bool = false, // removed while pinned: no lookup finds it, and its last unpin frees it
 };
 
 pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0 };
@@ -148,6 +150,7 @@ pub const Store = struct {
     }
 
     fn free(s: *Store, e: *Entry) void {
+        s.held -= e.bytes;
         s.family.vtable.drop(s.family.ptr, e.saved);
         s.gpa.free(e.tokens);
         s.gpa.free(e.decode_spans);
@@ -157,8 +160,19 @@ pub const Store = struct {
 
     fn remove(s: *Store, i: usize) void {
         const e = s.entries.orderedRemove(i);
-        s.held -= e.bytes;
-        s.free(e);
+        e.dead = true;
+        if (e.pins == 0) s.free(e);
+    }
+
+    /// `e` waits for a restore: nothing frees it until its last `unpin` (removed meanwhile, no lookup finds it).
+    pub fn pin(_: *Store, e: *Entry) *Entry {
+        e.pins += 1;
+        return e;
+    }
+
+    pub fn unpin(s: *Store, e: *Entry) void {
+        e.pins -= 1;
+        if (e.pins == 0 and e.dead) s.free(e);
     }
 
     /// The family's free storage kept for later saves.
@@ -450,7 +464,7 @@ pub const Store = struct {
                 if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held -| bytes); // spare that cannot take this state goes before any state
                 if (s.spare() < free_) continue;
             }
-            s.remove(s.victimBut(null, prompt, born).?); // its storage may come back spare and take this state
+            s.remove(s.victimBut(null, prompt, born) orelse return s.fail(at, error.RestoresPending)); // spare for this state
             s.counts.evicted += 1;
         }
         if (s.entries.items.len == 0) if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| bytes);
@@ -473,11 +487,11 @@ pub const Store = struct {
         const charged = if (s.family.vtable.charged) |f| f(s.family.ptr, saved) else bytes;
         e.* = .{ .tokens = tokens, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .last = last, .shared = shared };
         owns_decoded = false;
+        s.held += charged; // free takes it back
         s.entries.append(s.gpa, e) catch {
             s.free(e);
             return s.fail(at, error.OutOfMemory);
         };
-        s.held += charged;
         s.counts.kept += 1;
         if (shared) learned.learn(s, e, starts);
         if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held); // spare storage only inside what the budget leaves
@@ -534,17 +548,17 @@ pub const Store = struct {
         return false;
     }
 
-    /// The entry to free first, never `skip`: a superseded one, no branch point, oldest; else the oldest, rewind last.
+    /// The entry to free first, never `skip` or pinned: superseded, no branch point, oldest; else oldest, rewind last.
     fn victimBut(s: *const Store, skip: ?*Entry, prompt: []const u32, born: u32) ?usize {
         var best: ?usize = null;
         for (s.entries.items, 0..) |e, i| {
-            if (e.shared or e.branched or e == skip or s.isActiveRewind(e, prompt)) continue; // shared cuts and branch points go only as the least recently used
+            if (e.shared or e.branched or e == skip or e.pins > 0 or s.isActiveRewind(e, prompt)) continue; // shared cuts and branch points go only as the least recently used
             const now = born > e.born and prompt.len > e.tokens.len and std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens); // a longer request's tokens extend it
             if ((now or s.extended(e)) and (best == null or e.used < s.entries.items[best.?].used)) best = i;
         }
         if (best) |i| return i;
         var oldest: ?usize = null;
-        for (s.entries.items, 0..) |e, i| if (e != skip and (oldest == null or s.before(e, s.entries.items[oldest.?], prompt))) {
+        for (s.entries.items, 0..) |e, i| if (e != skip and e.pins == 0 and (oldest == null or s.before(e, s.entries.items[oldest.?], prompt))) {
             oldest = i;
         };
         return oldest;
