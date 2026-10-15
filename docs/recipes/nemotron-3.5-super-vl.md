@@ -42,11 +42,13 @@ TF_NEMOTRON_RANK=0 TF_NEMOTRON_WORLD=2 NCCL_COMM_ID=192.0.2.1:29741 \
 
 Set `NCCL_SOCKET_IFNAME` and `NCCL_IB_HCA` for the link between the hosts as NCCL documents them. Rank 1 keeps a TCP
 line to rank 0 on the port after `NCCL_COMM_ID`'s (29742 here), opened before NCCL. Before any weight loads, both ranks
-check that they run the same build, model, cut and precision and the same checkpoint bytes: config.json, the index,
-and each shard's size, header and sampled bytes. A rank whose copy differs by one bit stops both ranks, naming it.
-Both ranks then report ready before rank 0 serves. If either rank fails, it sends its error's name and the other stops
-with it; if either process dies, the other stops within about a second instead of waiting; rank 1 leaves when rank 0's
-server stops.
+check that they run the same build, model, cut and precision and the same checkpoint layout: config.json, the index,
+and each shard's name, size and header. While the weights load, each rank reads and hashes every byte of every shard
+it holds (sha256), and checks each file against its Hugging Face blob name, which is its sha256, when the folder is a
+Hugging Face snapshot. The ranks exchange those digests before rank 0 serves, so a copy that differs anywhere, by one
+bit, stops both ranks before serving, naming it. A GB10 hashes the 70 GiB checkpoint in about 22 s, at the same time as
+it loads its weights. If either rank fails, it sends its error's name and the other stops with it; if either process
+dies, the other stops within about a second instead of waiting; rank 1 leaves when rank 0's server stops.
 Rank 0 takes 40.1 GiB (42.2 GiB with the tower) and rank 1 31.4 GiB. One prompt pass runs at a time at TP=2
 (`--segments` above 1 is refused).
 
