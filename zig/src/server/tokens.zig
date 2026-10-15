@@ -101,7 +101,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, detok: bool) void {
 }
 
 /// The reply's token ids hashed: drafted and ``"draft": false`` replies must match.
-pub fn tokenSha(tokens: []const u32) [12]u8 {
+pub fn tokenSha256(tokens: []const u32) [64]u8 {
     var h = std.crypto.hash.sha2.Sha256.init(.{});
     var buf: [16]u8 = undefined;
     for (tokens, 0..) |t, i| {
@@ -110,8 +110,18 @@ pub fn tokenSha(tokens: []const u32) [12]u8 {
     }
     var d: [32]u8 = undefined;
     h.final(&d);
-    var out: [12]u8 = undefined;
-    const hex = std.fmt.bytesToHex(d[0..6].*, .lower);
-    @memcpy(&out, &hex);
-    return out;
+    return std.fmt.bytesToHex(d, .lower);
+}
+
+/// The existing short token fingerprint remains available to clients.
+pub fn tokenSha(tokens: []const u32) [12]u8 {
+    return tokenSha256(tokens)[0..12].*;
+}
+
+test "full token SHA hashes decimal ids with commas and preserves the short fingerprint" {
+    const ids = [_]u32{ 1, 23, 456, 0xffffffff };
+    try std.testing.expectEqualStrings("59ce3a8d28d46b5fe396be42f190dd3dd26a64b88007ad56d7cd3609fd42bf8c", &tokenSha256(&ids));
+    try std.testing.expectEqualStrings(tokenSha256(&ids)[0..12], &tokenSha(&ids));
+    try std.testing.expectEqualStrings("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &tokenSha256(&.{}));
+    try std.testing.expect(!std.mem.eql(u8, &tokenSha256(&.{ 1, 23 }), &tokenSha256(&.{ 12, 3 })));
 }
