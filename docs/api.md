@@ -99,6 +99,8 @@ each route and its events.
 | `DELETE /v1/slide/graph` | Clears the graph; the weights keep what they learned |
 | `DELETE /v1/slide/fact/{id}` | Deletes one fact from the weights, every other fact checked again, streaming `fact`, `checking`, `zeroed`, `checked` and `forgot` events; an optional `{"reason": "..."}` goes into the graph |
 
+A delete's last event, `forgot`, says `"deleted": true` only when both the shards and the graph file hold the delete,
+and its `state` is the fact's state in the graph file; a fact left `deleting` is settled by sending the delete again.
 A server without `--slide` answers the learn and delete routes with HTTP 501. A delete sent while a learn or another
 delete runs gets 503, an id that is not a number 400, and an id the graph does not hold 404.
 

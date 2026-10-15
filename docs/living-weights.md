@@ -177,6 +177,29 @@ questions are asked twice, so it grows with them:
 6. Or `forgot` with `"deleted": false`: a check failed. The neurons are put back exactly as they were, nothing is
    written, and `message` names the fact and question that failed and what the model said.
 
+`forgot` also carries `state`, the fact's state in the graph file when the request ends. A delete writes two things,
+the shards and the graph file, in this order, so that together they never claim more than is on disk:
+
+1. The graph file marks the fact `deleting`.
+2. The shards are written.
+3. The graph file marks the fact `deleted`.
+
+`"deleted": true` means all three were written. When one fails, `forgot` says `"deleted": false` and `message` says
+what happened:
+
+| What failed | What is on disk | `state` |
+| --- | --- | --- |
+| The graph file, before the shards | Nothing changed: the delete was put back | `learned` |
+| The shards | The delete was put back and the shards written again as they were, so nothing changed | `learned` |
+| The shards, and writing them back too | The folder may hold part of the delete | `deleting` |
+| The graph file, after the shards | The shards hold the delete; the graph file does not say so yet | `deleting` |
+
+A fact left `deleting`, by one of these or by a crash, is settled by sending the delete again, after a restart too.
+If its neurons are silent already, an earlier delete reached the shards, and the graph file now records it. If not,
+the delete runs again, checks and all. A fact left `deleting` is not checked as a kept fact meanwhile, and a lesson
+placed on one of its neurons takes that neuron over. Without `--slide-graph` the graph lives in memory only, and only
+the shards are written.
+
 A kept fact passes when each answer that came back before the delete still does, and at least half of its other
 wordings do if they did before. The deleted fact passes when none of its questions gives its answer, or when the model
 as shipped gives that answer too (a likely guess, such as a common colour, is no trace of the fact).
@@ -185,8 +208,11 @@ as shipped gives that answer too (a likely guess, such as a common colour, is no
   nothing. Deleting the newer fact does not bring back the one it replaced.
 - A fact learned before this release kept its questions but not their answers: its check holds each question to the
   answer the model gave just before the delete.
-- A deleted neuron's output weights stay in the shards, unused, until a later lesson takes the neuron. Zeroing them too
-  would round again the 4-bit groups that other facts' neurons in the same layer share, and move their answers.
+- A delete silences a fact; it does not erase it. A deleted neuron's output weights stay in the shards, unused, until
+  a later lesson takes the neuron. Zeroing them too would round again the 4-bit groups that other facts' neurons in
+  the same layer share, and move their answers.
+- A model with a fact deleted is close to the same model never taught it, but not the same: the lessons after it
+  were learned with it in place.
 - Freed neurons at the top of a layer's pocket go to the next lesson. One below another fact's neuron stays silent,
   and taken, until that fact is deleted too.
 - While a delete runs, chat replies already see the fact gone; a delete that is put back brings it back.

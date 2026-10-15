@@ -47,7 +47,7 @@ pub fn route(srv: *Server, conn: *Conn, a: Allocator, raw_id: []const u8) void {
     var cx: errors.Cx = .{ .a = a };
     out.event("fact", .{ .id = id, .text = facts[at].text, .state = @tagName(facts[at].state) });
     if (nothing(a, facts[at])) |why| {
-        out.event("forgot", .{ .id = id, .deleted = false, .message = why });
+        out.event("forgot", .{ .id = id, .deleted = false, .state = @tagName(facts[at].state), .message = why });
     } else delete(srv, &cx, &out, facts, at, reason, Gone{ .conn = conn }) catch |e| return out.fail(&cx, e);
     sse.done(conn) catch {};
 }
@@ -97,16 +97,20 @@ pub fn delete(srv: *Server, cx: *errors.Cx, out: *slide.Out, facts: []const Fact
     out.event("checking", .{ .id = id, .when = "before", .facts = @as(u32, @intCast(kept.len - 1)), .questions = @as(u32, @intCast(asks.len)) });
     const said = try recheck.ask(srv, cx, asks, false, gone);
     const was = try recheck.brings(a, kept, asks, said, null);
+    const state = facts[at].state;
     const zeroed: u32 = switch (slide.run(srv, a, &.{ .forget = facts[at].neurons }, 0)) {
         .learned => |l| l.steps,
         .failed => |message| {
             _ = putBack(srv, a);
-            return out.event("forgot", .{ .id = id, .deleted = false, .message = message });
+            return ended(out, id, state, message);
         },
-        .refused => return out.event("forgot", .{ .id = id, .deleted = false, .message = "the engine could not take the delete" }),
-        .none => return out.event("forgot", .{ .id = id, .deleted = false, .message = "this learner keeps its lessons outside a pocket of neurons, so it cannot delete one" }),
+        .refused => return ended(out, id, state, "the engine could not take the delete"),
+        .none => return ended(out, id, state, "this learner keeps its lessons outside a pocket of neurons, so it cannot delete one"),
     };
-    if (zeroed == 0) return out.event("forgot", .{ .id = id, .deleted = false, .message = try std.fmt.allocPrint(a, "nothing to delete: fact {d}'s neurons hold nothing in the pocket", .{id}) });
+    if (zeroed == 0) {
+        if (state == .deleting) return settle(srv, a, out, facts[at], reason);
+        return ended(out, id, state, try std.fmt.allocPrint(a, "nothing to delete: fact {d}'s neurons hold nothing in the pocket", .{id}));
+    }
     // from here on it ends written or put back: an error before the write puts it back
     var written = false;
     errdefer if (!written) {
@@ -117,7 +121,7 @@ pub fn delete(srv: *Server, cx: *errors.Cx, out: *slide.Out, facts: []const Fact
     out.event("checking", .{ .id = id, .when = "after", .facts = @as(u32, @intCast(kept.len - 1)), .questions = @as(u32, @intCast(asks.len)) });
     const after = check(srv, cx, kept, asks, said, was) catch |e| {
         const back = putBack(srv, a);
-        return out.event("forgot", .{ .id = id, .deleted = false, .message = try std.fmt.allocPrint(a, "{s}: the checks after the cut failed ({s}), nothing was written", .{ if (back) "put back" else "not put back (restart the server)", slide.words(cx, e) }) });
+        return ended(out, id, state, try std.fmt.allocPrint(a, "{s}: the checks after the cut failed ({s}), nothing was written", .{ if (back) "put back" else "not put back (restart the server)", slide.words(cx, e) }));
     };
     for (kept, 0..) |f, i| out.event("checked", .{ .id = f.id, .deleted = i == 0, .before = recheck.recalled(asks, was, i), .after = recheck.recalled(asks, after.got, i) });
     if (after.miss) |m| {
@@ -125,21 +129,49 @@ pub fn delete(srv: *Server, cx: *errors.Cx, out: *slide.Out, facts: []const Fact
         const back = putBack(srv, a);
         log.line("slide: the delete of fact {d} is {s}: {s}", .{ id, if (back) "put back" else "not put back", why });
         srv.slide.note(id, try std.fmt.allocPrint(a, "a delete was put back: {s}", .{why}));
-        return out.event("forgot", .{ .id = id, .deleted = false, .message = try std.fmt.allocPrint(a, "{s}, nothing was written: {s}", .{ if (back) "put back as it was" else "not put back (restart the server; the folder is as it was)", why }) });
+        return ended(out, id, state, try std.fmt.allocPrint(a, "{s}, nothing was written: {s}", .{ if (back) "put back as it was" else "not put back (restart the server; the folder is as it was)", why }));
     }
-    if (slide.saveAll(srv, a)) |failed| {
+    // the graph file says `deleting` before any shard is written, so it never claims more than is on disk
+    srv.slide.record(id, .deleting) catch |e| {
         const back = putBack(srv, a);
-        const again = if (back) slide.saveAll(srv, a) else failed;
-        return out.event("forgot", .{ .id = id, .deleted = false, .message = try std.fmt.allocPrint(a, "the delete could not be written ({s}), so it was {s}{s}", .{ failed, if (back) "put back" else "not put back", if (again != null) ", and the folder may hold part of the write" else "" }) });
-    }
+        return ended(out, id, state, try std.fmt.allocPrint(a, "the graph file could not be written ({s}), so the delete was {s} and nothing was written", .{ @errorName(e), if (back) "put back" else "not put back (restart the server)" }));
+    };
+    if (slide.saveAll(srv, a)) |failed| return unsaved(srv, a, out, id, failed);
     written = true;
-    srv.slide.remove(id, slide.now(srv), reason);
-    var questions: std.ArrayList([]const u8) = .empty;
-    for (facts[at].answers) |x| try questions.append(a, x.question);
-    try questions.appendSlice(a, facts[at].questions);
-    srv.teacher.forgetFact(srv.io, questions.items);
+    srv.teacher.forgetFact(srv.io, try questionsOf(a, facts[at]));
+    srv.slide.remove(id, slide.now(srv), reason) catch |e| return ended(out, id, .deleting, try std.fmt.allocPrint(a, "the shards are written without the fact, but the graph file could not be ({s}): it still marks the fact deleting; send the delete again to settle it", .{@errorName(e)}));
     log.line("slide: fact {d} is deleted in {d:.1} s: {d} neurons silenced and written, {d} other facts checked", .{ id, slide.seconds(srv, began), zeroed, kept.len - 1 });
-    out.event("forgot", .{ .id = id, .deleted = true, .neurons = zeroed, .message = try outcome(a, facts, id, zeroed, kept.len - 1) });
+    out.event("forgot", .{ .id = id, .deleted = true, .state = "deleted", .neurons = zeroed, .message = try outcome(a, facts, id, zeroed, kept.len - 1) });
+}
+
+/// The last event when a delete did not complete: `state` is the fact's state as the graph file holds it.
+fn ended(out: *slide.Out, id: u32, state: slide_graph.State, message: []const u8) void {
+    out.event("forgot", .{ .id = id, .deleted = false, .state = @tagName(state), .message = message });
+}
+
+/// Shards that could not be written: the delete put back and the folder written again as it was, the graph after it.
+fn unsaved(srv: *Server, a: Allocator, out: *slide.Out, id: u32, failed: []const u8) !void {
+    const back = putBack(srv, a);
+    const again = if (back) slide.saveAll(srv, a) else failed;
+    if (again != null) return ended(out, id, .deleting, try std.fmt.allocPrint(a, "the shards could not be written ({s}), and {s}: the folder may hold part of the delete, and the graph file marks the fact deleting; send the delete again once the folder can be written", .{ failed, if (back) "writing them back as they were failed too" else "the delete could not be put back" }));
+    srv.slide.record(id, .learned) catch |e| return ended(out, id, .deleting, try std.fmt.allocPrint(a, "the shards could not be written ({s}), so the delete was put back and the folder written as it was, but the graph file could not be ({s}) and still marks the fact deleting; send the delete again to settle it", .{ failed, @errorName(e) }));
+    return ended(out, id, .learned, try std.fmt.allocPrint(a, "the shards could not be written ({s}), so the delete was put back and the folder written as it was: the folder and the graph file are as they were", .{failed}));
+}
+
+/// A fact left `deleting` whose neurons are silent already: an earlier delete reached the shards, so it is recorded.
+fn settle(srv: *Server, a: Allocator, out: *slide.Out, f: Fact, reason: []const u8) !void {
+    srv.teacher.forgetFact(srv.io, try questionsOf(a, f));
+    srv.slide.remove(f.id, slide.now(srv), reason) catch |e| return ended(out, f.id, .deleting, try std.fmt.allocPrint(a, "its neurons are silent, so an earlier delete reached the shards, but the graph file could not be written ({s}) and still marks it deleting", .{@errorName(e)}));
+    log.line("slide: fact {d}'s earlier delete had reached the shards; the graph file now records it", .{f.id});
+    out.event("forgot", .{ .id = f.id, .deleted = true, .state = "deleted", .neurons = @as(u32, 0), .message = "deleted: an earlier delete had reached the shards (its neurons were silent already), and the graph file now records it" });
+}
+
+/// The questions a fact's checks asked, which the teacher's replayed answers are dropped by.
+fn questionsOf(a: Allocator, f: Fact) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    for (f.answers) |x| try out.append(a, x.question);
+    try out.appendSlice(a, f.questions);
+    return out.items;
 }
 
 /// The checks after the cut: what each ask says now, whether it brings its fact back, and the first thing wrong.

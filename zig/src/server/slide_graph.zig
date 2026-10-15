@@ -1,13 +1,15 @@
 //! The Sliding Weights fact graph: what was taught, how far each lesson is, where its neurons went; never the weights.
 const std = @import("std");
+const builtin = @import("builtin");
 const api = @import("engine_api");
 const json = @import("json.zig");
 const slide_model = @import("slide_model.zig");
 const answers = @import("slide_answers.zig");
+const deleting = @import("slide_graph_delete.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-pub const State = enum { queued, learning, learned, missed, replaced, deleted }; // replaced: a newer fact took its place; deleted: on request
+pub const State = enum { queued, learning, learned, missed, replaced, deleting, deleted }; // replaced: a newer fact took its place; deleting: a delete began, the shards may hold it
 pub const Answer = answers.Answer;
 
 /// Where a learning fact stands: its lesson written by the model, then the engine's stages in turn.
@@ -64,6 +66,12 @@ pub const Graph = struct {
     model: ?slide_model.Model = null, // the served folder as last scanned
     model_arena: std.heap.ArenaAllocator,
     saved: Save = .{},
+    fault: Fault = .none, // a test's failure of the next file write (read in tests only)
+
+    pub const Fault = enum { none, write, rename };
+    pub const record = deleting.record;
+    pub const remove = deleting.remove;
+    pub const snapshot = deleting.snapshot;
 
     /// A graph that starts from `path`'s file when it reads, else empty.
     pub fn init(gpa: Allocator, io: Io, path: ?[]const u8) Graph {
@@ -176,6 +184,7 @@ pub const Graph = struct {
             if (x.layer != y.layer or x.neuron != y.neuron or x.key != y.key) break;
         } else return;
         f.neurons = g.arena.allocator().dupe(api.Neuron, neurons) catch return;
+        deleting.takeOver(g, f, neurons);
     }
 
     /// A learning fact's round, from one.
@@ -223,36 +232,6 @@ pub const Graph = struct {
         const f = g.find(id) orelse return;
         f.answers = answers.dupe(g.arena.allocator(), xs) catch return;
         g.save();
-    }
-
-    /// A fact deleted on request at `at` (ms), and why: its neurons no longer fire.
-    pub fn remove(g: *Graph, id: u32, at: i64, why: []const u8) void {
-        g.mutex.lockUncancelable(g.io);
-        defer g.mutex.unlock(g.io);
-        const f = g.find(id) orelse return;
-        f.state = .deleted;
-        f.neurons = &.{};
-        f.deleted = at;
-        f.message = g.arena.allocator().dupe(u8, why) catch "";
-        g.save();
-    }
-
-    /// Every fact as it stands, copied into `a`, for reading outside the lock.
-    pub fn snapshot(g: *Graph, a: Allocator) ![]Fact {
-        g.mutex.lockUncancelable(g.io);
-        defer g.mutex.unlock(g.io);
-        const out = try a.alloc(Fact, g.facts.items.len);
-        for (g.facts.items, out) |f, *o| {
-            o.* = f;
-            o.text = try a.dupe(u8, f.text);
-            o.message = try a.dupe(u8, f.message);
-            o.neurons = try a.dupe(api.Neuron, f.neurons);
-            o.answers = try answers.dupe(a, f.answers);
-            const qs = try a.alloc([]const u8, f.questions.len);
-            for (f.questions, qs) |q, *c| c.* = try a.dupe(u8, q);
-            o.questions = qs;
-        }
-        return out;
     }
 
     /// A save of the pocket into `dir`'s shards begins; the shards as they are now are what it is measured against.
@@ -324,7 +303,7 @@ pub const Graph = struct {
         return g.document(a, true);
     }
 
-    fn find(g: *Graph, id: u32) ?*Fact {
+    pub fn find(g: *Graph, id: u32) ?*Fact {
         for (g.facts.items) |*f| if (f.id == id) return f;
         return null;
     }
@@ -384,15 +363,24 @@ pub const Graph = struct {
 
     /// Write the file through a renamed temporary; a failed write keeps the old file (called under the lock).
     fn save(g: *Graph) void {
+        g.persist() catch {};
+    }
+
+    /// `save` with its failure returned, the old file then kept whole (called under the lock).
+    pub fn persist(g: *Graph) !void {
         const path = g.path orelse return;
         var scratch = std.heap.ArenaAllocator.init(g.gpa);
         defer scratch.deinit();
         const a = scratch.allocator();
-        const body = g.document(a, false) catch return;
-        const tmp = std.fmt.allocPrint(a, "{s}.tmp", .{path}) catch return;
-        if (std.fs.path.dirname(path)) |dir| Io.Dir.cwd().createDirPath(g.io, dir) catch return;
-        Io.Dir.cwd().writeFile(g.io, .{ .sub_path = tmp, .data = body }) catch return;
-        Io.Dir.cwd().rename(tmp, Io.Dir.cwd(), path, g.io) catch return;
+        const body = try g.document(a, false);
+        const tmp = try std.fmt.allocPrint(a, "{s}.tmp", .{path});
+        if (std.fs.path.dirname(path)) |dir| try Io.Dir.cwd().createDirPath(g.io, dir);
+        const fault: Fault = if (builtin.is_test) g.fault else .none;
+        if (builtin.is_test) g.fault = .none;
+        if (fault == .write) return error.GraphWrite;
+        try Io.Dir.cwd().writeFile(g.io, .{ .sub_path = tmp, .data = body });
+        if (fault == .rename) return error.GraphRename;
+        try Io.Dir.cwd().rename(tmp, Io.Dir.cwd(), path, g.io);
     }
 
     fn load(g: *Graph) !void {

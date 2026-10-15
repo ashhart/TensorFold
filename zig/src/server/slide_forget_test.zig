@@ -68,7 +68,10 @@ const Model = struct {
     learns: bool = true, // the engine has a learner (--slide)
     forgets: u32 = 0,
     unforgets: u32 = 0,
-    saves: u32 = 0,
+    saves: u32 = 0, // save requests, failed ones too
+    fails: u32 = 0, // the next saves that fail, as a shard write that fails would
+    graph: ?*slide_graph.Graph = null, // a graph whose next file write fails during a save (`fault`)
+    fault: slide_graph.Graph.Fault = .none,
 
     fn engine(m: *Model) api.Engine {
         return .{ .ctx = m, .vtable = if (m.learns) &learning else &plain };
@@ -126,11 +129,20 @@ const Model = struct {
         const m: *Model = @ptrCast(@alignCast(ctx));
         if (request.forget.len > 0 or request.unforget) {
             if (request.unforget) m.unforgets += 1 else m.forgets += 1;
-            const n: u32 = if (request.unforget) @intFromBool(m.zeroed > 0) else m.held;
-            if (!request.unforget and m.held > 0) m.zeroed = request.forget[0].layer;
+            // neurons silent already (an earlier delete reached the shards) hold nothing to zero
+            const silent = !request.unforget and m.zeroed == request.forget[0].layer;
+            const n: u32 = if (request.unforget) @intFromBool(m.zeroed > 0) else if (silent) 0 else m.held;
+            if (!request.unforget and n > 0) m.zeroed = request.forget[0].layer;
             if (request.unforget) m.zeroed = 0;
             sink.event(sink.ctx, &.{ .learned = .{ .recalled = n > 0, .steps = n, .loss = 0 } });
-        } else if (request.save) m.saves += 1;
+        } else if (request.save) {
+            m.saves += 1;
+            if (m.graph) |g| g.fault = m.fault;
+            if (m.fails > 0) {
+                m.fails -= 1;
+                return sink.event(sink.ctx, &.{ .done = .{ .message = "a shard could not be written" } });
+            }
+        }
         sink.event(sink.ctx, &.{ .done = .{} });
     }
 };
@@ -146,7 +158,12 @@ const Taught = struct { srv: *Server, ids: [3]u32 };
 
 /// A server over `m` whose graph holds "I like blue.", "My sister is called Ana." and "My dog is called Ginger.".
 fn taught(text: *ByteText, m: *Model) !Taught {
-    const srv = try Server.init(std.testing.allocator, std.testing.io, m.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
+    return taughtAt(text, m, null);
+}
+
+/// `taught`, its graph kept in the file at `path` (null: in memory).
+fn taughtAt(text: *ByteText, m: *Model, path: ?[]const u8) !Taught {
+    const srv = try Server.init(std.testing.allocator, std.testing.io, m.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .slide_graph = path }, null);
     const facts = [_]struct { []const u8, []const u8, []const u8, u16 }{
         .{ "I like blue.", "What colour do I like?", "blue", 20 },
         .{ "My sister is called Ana.", "What is my sister's name?", "Ana", 21 },
@@ -156,7 +173,7 @@ fn taught(text: *ByteText, m: *Model) !Taught {
     for (facts, &out.ids) |f, *id| {
         id.* = srv.slide.add(f[0], "chat", 100);
         srv.slide.mark(id.*, .learned);
-        srv.slide.placed(id.*, &.{ .{ .layer = f[3], .neuron = 0, .key = .reply }, .{ .layer = f[3] + 2, .neuron = 0, .key = .reply } });
+        srv.slide.placed(id.*, &.{ .{ .layer = f[3], .neuron = 0, .key = .reply }, .{ .layer = f[3] + 10, .neuron = 0, .key = .reply } });
         srv.slide.expects(id.*, &.{ .{ .question = f[1], .answer = f[0], .short = f[2] }, .{ .question = f[1], .answer = f[0], .short = f[2], .probe = true } });
     }
     try srv.teacher.remember("sister", "What is my sister's name?", "Your sister is called Ana.");
@@ -317,4 +334,110 @@ test "a reply quoted in a put-back's message is cut at 240 bytes where a charact
     try std.testing.expect(std.unicode.utf8ValidateSlice(said));
     try std.testing.expect(std.mem.endsWith(u8, said, "it said: " ++ xs));
     try std.testing.expect(std.mem.startsWith(u8, said, "fact 3 (\"My dog is called Ginger.\"), asked \"What is my dog called?\" with thinking on"));
+}
+
+/// The state fact `at` has in the graph file at `path`.
+fn onDisk(path: []const u8, at: usize) !slide_graph.State {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(1 << 20));
+    const facts = (try json.parse(a, bytes)).ok.field("facts").?.items().?;
+    return std.meta.stringToEnum(slide_graph.State, facts[at].strField("state").?).?;
+}
+
+/// Graph file `name` in a temporary directory, its path in `buf`.
+fn graphPath(tmp: *std.testing.TmpDir, buf: []u8, name: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, ".zig-cache/tmp/{s}/{s}.json", .{ &tmp.sub_path, name });
+}
+
+test "a graph file that cannot be written before the shards stops the delete: put back, nothing written anywhere" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [128]u8 = undefined;
+    for ([_]slide_graph.Graph.Fault{ .write, .rename }) |fault| {
+        const path = try graphPath(&tmp, &buf, @tagName(fault));
+        var text: ByteText = .{};
+        var m: Model = .{};
+        const t = try taughtAt(&text, &m, path);
+        defer t.srv.deinit();
+        t.srv.slide.fault = fault;
+        try std.testing.expectEqual(slide_graph.State.learned, try deleteSister(t));
+        try std.testing.expectEqual(@as(u32, 0), m.saves);
+        try std.testing.expectEqual(@as(u32, 1), m.unforgets);
+        try std.testing.expectEqual(slide_graph.State.learned, try onDisk(path, 1));
+    }
+}
+
+test "a graph file that cannot be written after the shards leaves the fact deleting on disk, and a second delete settles it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [128]u8 = undefined;
+    for ([_]slide_graph.Graph.Fault{ .write, .rename }) |fault| {
+        const path = try graphPath(&tmp, &buf, @tagName(fault));
+        var text: ByteText = .{};
+        var m: Model = .{ .fault = fault };
+        const t = try taughtAt(&text, &m, path);
+        defer t.srv.deinit();
+        m.graph = &t.srv.slide;
+        // the shards are written, then the graph file fails: it says deleting, and so does the graph in memory
+        try std.testing.expectEqual(slide_graph.State.deleting, try deleteSister(t));
+        try std.testing.expectEqual(@as(u32, 1), m.saves);
+        try std.testing.expectEqual(@as(u32, 0), m.unforgets);
+        try std.testing.expectEqual(slide_graph.State.deleting, try onDisk(path, 1));
+        // sent again, the delete finds the neurons silent and records what the shards hold
+        m.fault = .none;
+        try std.testing.expectEqual(slide_graph.State.deleted, try deleteSister(t));
+        try std.testing.expectEqual(@as(u32, 1), m.saves);
+        try std.testing.expectEqual(slide_graph.State.deleted, try onDisk(path, 1));
+    }
+}
+
+test "shards that cannot be written are written again as they were; when that fails too, the file says deleting" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [128]u8 = undefined;
+    var path = try graphPath(&tmp, &buf, "once");
+    {
+        var text: ByteText = .{};
+        var m: Model = .{ .fails = 1 };
+        const t = try taughtAt(&text, &m, path);
+        defer t.srv.deinit();
+        try std.testing.expectEqual(slide_graph.State.learned, try deleteSister(t));
+        try std.testing.expectEqual(@as(u32, 2), m.saves); // the delete's save, then the folder as it was
+        try std.testing.expectEqual(@as(u32, 1), m.unforgets);
+        try std.testing.expectEqual(slide_graph.State.learned, try onDisk(path, 1));
+    }
+    var again: [128]u8 = undefined;
+    path = try graphPath(&tmp, &again, "twice");
+    var text: ByteText = .{};
+    var m: Model = .{ .fails = 2 };
+    const t = try taughtAt(&text, &m, path);
+    defer t.srv.deinit();
+    try std.testing.expectEqual(slide_graph.State.deleting, try deleteSister(t));
+    try std.testing.expectEqual(slide_graph.State.deleting, try onDisk(path, 1));
+    // the folder may hold part of it: sent again, the delete runs whole, checks and all
+    try std.testing.expectEqual(slide_graph.State.deleted, try deleteSister(t));
+    try std.testing.expectEqual(@as(u32, 2), m.forgets);
+    try std.testing.expectEqual(@as(u32, 3), m.saves);
+    try std.testing.expectEqual(slide_graph.State.deleted, try onDisk(path, 1));
+}
+
+test "a lesson placed on a neuron a fact left deleting lists takes it; a learned fact's listing stays" {
+    var text: ByteText = .{};
+    var m: Model = .{};
+    const t = try taught(&text, &m);
+    defer t.srv.deinit();
+    // the sister fact's delete reached the shards and freed its neuron at layer 21; the dog fact's lesson took it
+    try t.srv.slide.record(t.ids[1], .deleting);
+    t.srv.slide.placed(t.ids[2], &.{ .{ .layer = 21, .neuron = 0, .key = .reply }, .{ .layer = 32, .neuron = 0, .key = .reply } });
+    // a lesson placed where the learned dog fact sits leaves the dog fact's listing as it is
+    t.srv.slide.placed(t.ids[0], &.{ .{ .layer = 20, .neuron = 0, .key = .reply }, .{ .layer = 32, .neuron = 0, .key = .reply } });
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const facts = try t.srv.slide.snapshot(arena.allocator());
+    try std.testing.expectEqual(@as(usize, 1), facts[1].neurons.len);
+    try std.testing.expectEqual(@as(u16, 31), facts[1].neurons[0].layer);
+    try std.testing.expectEqual(@as(usize, 2), facts[2].neurons.len);
+    try std.testing.expectEqual(@as(usize, 2), facts[0].neurons.len);
 }
