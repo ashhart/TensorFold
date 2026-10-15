@@ -334,7 +334,7 @@ pub const Engine = struct {
     }
 
     pub fn ops(e: *const Engine) kern.Ops {
-        return .{ .k = &e.k, .s = e.stream };
+        return .{ .k = &e.k, .s = e.stream, .part = e.b.lane_part };
     }
 
     pub fn forward(e: *const Engine, dump: ?*Dump) Forward {

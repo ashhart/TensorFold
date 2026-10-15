@@ -136,7 +136,6 @@ pub const Kernels = struct {
     pub fn loadModelopt(k: *Kernels, ctx: *const cuda.Context) !void {
         if (k.modelopt != null) return;
         const major: u32 = @intCast(try ctx.attribute(.compute_capability_major));
-        if (major < 9) return error.ModeloptNeedsSm90; // the lane matmul sums K slices in a cluster: no reduce scratch
         const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
         var lane = try cuda.qmmf.Lane.load(k.d, major);
         errdefer lane.unload();
@@ -166,6 +165,7 @@ fn u(x: usize) u32 {
 pub const Ops = struct {
     k: *const Kernels,
     s: cuda.Stream,
+    part: u64 = 0, // the lane matmul's slice partials where it reduces them (no clusters below sm_90)
 
     fn go(o: Ops, f: cuda.Function, grid: [3]usize, block: u32, shared: u32, args: *cuda.Args) !void {
         try cuda.launch.launch(f, .{ .grid = .{ .x = u(grid[0]), .y = u(grid[1]), .z = u(grid[2]) }, .block = .{ .x = block }, .shared = shared }, o.s, args);
@@ -214,7 +214,7 @@ pub const Ops = struct {
 
     /// Decode rows of a projection on this stream (the affine-4 paths' bits unchanged); xs: x's 64-group sums.
     pub fn dense(o: Ops, x: u64, xs: u64, q: QLinear, out: u64, rows: usize) !void {
-        return o.linear().decode(o.s, q, .{ .x = x, .sums = xs }, out, rows);
+        return o.linear().decode(o.s, q, .{ .x = x, .sums = xs, .part = o.part }, out, rows);
     }
 
     pub fn gemvSplit(o: Ops, x: u64, xs: u64, q: Affine4, out: u64, rows: usize, sk: usize, sp: Split) !void {
@@ -231,7 +231,7 @@ pub const Ops = struct {
 
     /// Prompt rows of a projection on this stream, by its format's prompt GEMM.
     pub fn prefillDense(o: Ops, x: u64, q: QLinear, out: u64, rows: usize) !void {
-        return o.linear().prompt(o.s, q, .{ .x = x }, out, rows);
+        return o.linear().prompt(o.s, q, .{ .x = x, .part = o.part }, out, rows);
     }
 
     /// nemotron_ops' rest: y (bf16, or fp32 when `y_f32`) += r x at rows `i * row_mul + row_add` for i < rows.

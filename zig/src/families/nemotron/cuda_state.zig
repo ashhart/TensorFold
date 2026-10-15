@@ -81,7 +81,19 @@ fn seqSizes(c: Config, max_len: usize) [seq_fields.len]usize {
     return .{ kv, kv, m[0], m[1], nm * 2 * W * cd * 2, nm * 2 * W * cd * 2, nm * 2 * W * c.mamba_heads * 4, 16, W * 4, W * c.hidden * 2, W * 4, @sizeOf(sampler.Rule) };
 }
 
-const scratch_count = 36;
+const scratch_count = 37;
+
+/// The most fp32 slice partials the lane matmul writes when it reduces them: every dense shape, rows short of fusing.
+fn lanePartBytes(c: Config) usize {
+    const shapes = [_][2]usize{ .{ c.projDim(), c.hidden }, .{ c.hidden, c.inner() }, .{ c.qkvDim(), c.hidden }, .{ c.hidden, c.heads * c.head_dim }, .{ c.vocab, c.hidden }, .{ c.hidden, 2 * c.hidden } };
+    const rows = cuda.qmmf.fused_rows - 1;
+    var most: usize = 16;
+    for (shapes) |s| {
+        const p = cuda.qmmf.plan(rows, s[0], s[1], false);
+        if (p.reduce) most = @max(most, @as(usize, p.sk) * rows * s[0] * 4);
+    }
+    return most;
+}
 
 /// Scratch windows and chunks share on one stream: window logits, chunk io, activations, the expert plan.
 fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
@@ -107,6 +119,7 @@ fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
         pairs * 4,             items * 12,                                  8,
         pairs * 4,             (pairs + 1023) / 1024 * (c.experts + 2) * 4, pairs * c.expert_width * 2,
         pairs * D * 4,         shared_words * 4,                            R * kern.pocket_width * 4,
+        lanePartBytes(c),
     };
 }
 
@@ -218,6 +231,7 @@ pub const Buffers = struct {
     rule: u64, // the sequence's sampled rule, as sample.cu reads it
     shared: u64, // the shared expert's fixed plans: 32 members, then (items, counts) for 1..16 rows
     pocket: u64, // the pocket's activations, fp32 [rows, pocket_width]
+    lane_part: u64, // the lane matmul's fp32 slice partials on a card without clusters (rows short of fusing)
 
     /// Sizes every buffer for `max_len` cache rows and `nch` attention chunk partials a row; the own sequence's first.
     pub fn init(d: *const cuda.Driver, c: Config, max_len: usize, nch: usize, carve: ?*cuda.Carveout) !Buffers {
@@ -259,10 +273,10 @@ pub const Buffers = struct {
     /// Every scratch field, in scratchSizes' order.
     fn scratchPtrs(b: *Buffers) [scratch_count]*u64 {
         return .{
-            &b.logits,    &b.p_meta,    &b.p_ids, &b.p_hidden, &b.p_logits, &b.p_sampled, &b.emb, &b.h[0],         &b.h[1],       &b.y,
-            &b.xs,        &b.delta,     &b.proj,  &b.p_xc,     &b.sy,       &b.g,         &b.gxs, &b.qkv,          &b.q,          &b.att,
-            &b.axs,       &b.po,        &b.pm,    &b.pl,       &b.part,     &b.pick,      &b.wts, &b.plan.members, &b.plan.items, &b.plan.counts,
-            &b.plan.rank, &b.plan.hist, &b.act,   &b.ymoe,     &b.shared,   &b.pocket,
+            &b.logits,    &b.p_meta,    &b.p_ids, &b.p_hidden, &b.p_logits, &b.p_sampled, &b.emb,       &b.h[0],         &b.h[1],       &b.y,
+            &b.xs,        &b.delta,     &b.proj,  &b.p_xc,     &b.sy,       &b.g,         &b.gxs,       &b.qkv,          &b.q,          &b.att,
+            &b.axs,       &b.po,        &b.pm,    &b.pl,       &b.part,     &b.pick,      &b.wts,       &b.plan.members, &b.plan.items, &b.plan.counts,
+            &b.plan.rank, &b.plan.hist, &b.act,   &b.ymoe,     &b.shared,   &b.pocket,    &b.lane_part,
         };
     }
 
