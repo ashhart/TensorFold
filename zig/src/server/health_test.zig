@@ -18,7 +18,13 @@ const earlier = [_][]const u8{ "status", "model", "model_ids", "max_batch_size",
 /// Four lanes, some memory, nothing running.
 const Idle = struct {
     fn engine(e: *Idle) api.Engine {
-        return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
+        return .{ .ctx = e, .vtable = &.{
+            .info = info,
+            .submit = submit,
+            .cancel = cancel,
+            .status = status,
+            .memory = memory,
+        } };
     }
 
     fn info(_: *anyopaque) api.Info {
@@ -43,7 +49,16 @@ const Idle = struct {
 /// A template-free vocabulary of bytes.
 const Bytes = struct {
     fn text(t: *Bytes) model_text.Text {
-        return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
+        return .{ .ctx = t, .vtable = &.{
+            .encode = encode,
+            .decode = decode,
+            .token_id = tokenId,
+            .token_string = tokenString,
+            .vocab_size = vocabSize,
+            .eos_ids = eosIds,
+            .render = render,
+            .template_source = templateSource,
+        } };
     }
 
     fn encode(_: *anyopaque, a: Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
@@ -72,7 +87,13 @@ const Bytes = struct {
         return &.{};
     }
 
-    fn render(_: *anyopaque, a: Allocator, _: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error![]u8 {
+    fn render(
+        _: *anyopaque,
+        a: Allocator,
+        _: json.Value,
+        _: model_text.RenderOptions,
+        _: *[]const u8,
+    ) model_text.Error![]u8 {
         return a.dupe(u8, "prompt");
     }
 
@@ -108,7 +129,14 @@ const NoEngine = struct {
 fn served(a: Allocator, identity: server.Identity) !std.json.ObjectMap {
     var engine: Idle = .{};
     var text: Bytes = .{};
-    const srv = try server.Server.init(std.testing.allocator, std.testing.io, engine.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .identity = identity }, null);
+    const srv = try server.Server.init(
+        std.testing.allocator,
+        std.testing.io,
+        engine.engine(),
+        text.text(),
+        .{ .served_name = "m", .model_ids = &.{"m"}, .identity = identity },
+        null,
+    );
     defer srv.deinit();
     const body = try json.stringify(a, try status_routes.openHealth(srv, a, false), .{});
     const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, body, .{});
@@ -121,7 +149,9 @@ test "the open health names the release, backend and GPU the builder reads, afte
     const a = arena.allocator();
     const o = try served(a, build_identity.of(WithGpu, a, "9.8.7", 1));
     try std.testing.expectEqual(earlier.len + 3, o.count());
-    for (earlier ++ [_][]const u8{ "version", "backend", "device" }, o.keys()) |want, got| try std.testing.expectEqualStrings(want, got);
+    for (earlier ++ [_][]const u8{ "version", "backend", "device" }, o.keys()) |want, got| {
+        try std.testing.expectEqualStrings(want, got);
+    }
     try std.testing.expectEqualStrings("9.8.7", o.get("version").?.string);
     try std.testing.expectEqualStrings("cuda", o.get("backend").?.string);
     try std.testing.expectEqualStrings("Example \"GPU\" 1", o.get("device").?.string);
@@ -135,7 +165,9 @@ test "the open health always names the release, and leaves out a backend or GPU 
     const a = arena.allocator();
     const engine_less = try served(a, build_identity.of(NoEngine, a, "9.8.7", null));
     try std.testing.expectEqual(earlier.len + 1, engine_less.count());
-    for (earlier ++ [_][]const u8{"version"}, engine_less.keys()) |want, got| try std.testing.expectEqualStrings(want, got);
+    for (earlier ++ [_][]const u8{"version"}, engine_less.keys()) |want, got| {
+        try std.testing.expectEqualStrings(want, got);
+    }
     try std.testing.expectEqualStrings("9.8.7", engine_less.get("version").?.string);
     const no_gpu = try served(a, build_identity.of(NoGpu, a, "9.8.7", null));
     try std.testing.expectEqual(earlier.len + 2, no_gpu.count());
@@ -148,9 +180,11 @@ test "the open health always names the release, and leaves out a backend or GPU 
 
 const key = "sk-health-test";
 const health_open = "GET /health HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n";
-const health_keyed = "GET /health HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer " ++ key ++ "\r\nConnection: close\r\n\r\n";
+const health_keyed = "GET /health HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer " ++ key ++
+    "\r\nConnection: close\r\n\r\n";
 const models_open = "GET /v1/models HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n";
-const models_keyed = "GET /v1/models HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer " ++ key ++ "\r\nConnection: close\r\n\r\n";
+const models_keyed = "GET /v1/models HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer " ++ key ++
+    "\r\nConnection: close\r\n\r\n";
 
 /// One request on a fresh loopback connection that asks to close, and the whole reply; error.Timeout after 5 s silent.
 fn exchange(a: Allocator, port: u16, request: []const u8) ![]const u8 {
@@ -207,7 +241,14 @@ test "with keys configured, /health sends only its status, with and without a va
     var text: Bytes = .{};
     const identity = build_identity.of(WithGpu, a, "9.8.7", 1);
     try std.testing.expect(identity.version.len > 0 and identity.backend.len > 0 and identity.device.len > 0);
-    const srv = try server.Server.init(std.testing.allocator, std.testing.io, engine.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .identity = identity }, &keys);
+    const srv = try server.Server.init(
+        std.testing.allocator,
+        std.testing.io,
+        engine.engine(),
+        text.text(),
+        .{ .served_name = "m", .model_ids = &.{"m"}, .identity = identity },
+        &keys,
+    );
     defer srv.deinit();
     const lis = try listener.Listener.open(.{ .ip4 = .loopback(0) });
     defer lis.close();

@@ -37,7 +37,11 @@ pub fn openHealth(srv: *Server, a: Allocator, reset_peak: bool) !Value {
     try o.put(a, "memory", .{ .object = memory });
     try o.put(a, "live", try live.snapshot(a, srv.engine));
     const ident = srv.config.identity;
-    for ([_][2][]const u8{ .{ "version", ident.version }, .{ "backend", ident.backend }, .{ "device", ident.device } }) |field|
+    for ([_][2][]const u8{
+        .{ "version", ident.version },
+        .{ "backend", ident.backend },
+        .{ "device", ident.device },
+    }) |field|
         if (field[1].len > 0) try o.put(a, field[0], .{ .string = field[1] });
     return .{ .object = o };
 }
