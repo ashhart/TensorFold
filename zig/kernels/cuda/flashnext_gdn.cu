@@ -1,5 +1,4 @@
-// One value head per block: depthwise conv, the delta-rule step, then the gated RMSNorm. 16 key heads, 48 value heads.
-// Same operations as the one-row chain, compiled without FMA contraction.
+// One value head per block: depthwise conv, the delta-rule step, then the gated RMSNorm, without FMA contraction.
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>

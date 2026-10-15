@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) !u8 {
         return 2;
     }
     const count = try std.fmt.parseInt(usize, args[4], 10);
-    const text = try std.Io.Dir.cwd().readFileAlloc(io, args[3], gpa, .limited(1 << 20));
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, args[3], gpa, .limited(1 << 24));
     defer gpa.free(text);
     var ids: std.ArrayList(u32) = .empty;
     defer ids.deinit(gpa);
@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) !u8 {
     const tri: flash.Tri = .{ .set = &set, .s = stream };
     const got = try gpa.alloc(u32, count);
     defer gpa.free(got);
-    try flash.prompt.run(flash.Tri, gpa, io, &driver, &stream, tri, args[1], ids.items, count, got);
+    try flash.row_path.run(flash.Tri, gpa, io, &driver, &stream, tri, args[1], ids.items, count, got);
     std.debug.print("tokens", .{});
     for (got) |id| std.debug.print(" {d}", .{id});
     std.debug.print("\n", .{});

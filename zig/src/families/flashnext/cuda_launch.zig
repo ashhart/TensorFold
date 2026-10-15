@@ -12,8 +12,11 @@ pub const mlp = @import("cuda_mlp.zig");
 pub const moe = @import("cuda_moe.zig");
 pub const attn = @import("cuda_attn.zig");
 pub const ple = @import("cuda_ple.zig");
+pub const ple_check = @import("cuda_ple_check.zig");
 pub const mix = @import("cuda_mix.zig");
 pub const prompt = @import("cuda_prompt.zig");
+/// The row-by-row reference path, for flashnext-prompt
+pub const row_path = @import("cuda_rows.zig");
 pub const native = @import("cuda_lanes.zig").Namespace(Tri);
 
 const p = aot.ptr;
@@ -63,6 +66,27 @@ pub const Tri = struct {
         }, &.{ ci("D", dims), ci("S_COPIES", copies) });
     }
 
+    /// glue.rmsnorm per row and `group` features: bf16 out [rows, dims] and 32-group sums; x rows `x_stride` apart.
+    pub fn rmsnorm(t: Tri, x: u64, w: u64, out: u64, xs: u64, eps: f32, x_stride: usize, rows: usize, dims: usize, group: usize) !void {
+        try t.run("_rmsnorm", .{ u(rows), u(dims / group), 1 }, &.{
+            p("X", "*bf16", x),
+            p("W", "*fp32", w),
+            p("OUT", "*bf16", out),
+            p("XS", "*fp32", xs),
+            aot.float("eps", eps),
+            int("x_stride", x_stride),
+        }, &.{ ci("D", dims), ci("G", group), ci("BLOCK", rmsBlock(group)) });
+    }
+
+    /// glue.add_streams: out[r, s] = bf16(e[r] + hs[r, s]), the MTP head's input streams. Program (row, 256 columns).
+    pub fn addStreams(t: Tri, e: u64, hs: u64, out: u64, rows: usize, dims: usize, streams: usize) !void {
+        try t.run("_add_streams", .{ u(rows), u(dims / 256), 1 }, &.{
+            p("E", "*bf16", e),
+            p("HS", "*bf16", hs),
+            p("OUT", "*bf16", out),
+        }, &.{ ci("D", dims), ci("S", streams), ci("BLOCK", 256) });
+    }
+
     /// glue.attn_gate: one program per row and per query head.
     pub fn attnGate(t: Tri, o: u64, proj: u64, out: u64, xs: u64, rows: usize, pair_width: usize, q_heads: usize, head_dim: usize) !void {
         try t.run("_attn_gate", .{ u(rows), u(q_heads), 1 }, &.{
@@ -73,8 +97,8 @@ pub const Tri = struct {
         }, &.{ ci("PW", pair_width), ci("NQ", q_heads), ci("HD", head_dim) });
     }
 
-    /// glue.attn_prep for text positions. The grid includes the indexer key. `length` is unused when MODE is 0.
-    pub fn attnPrep(t: Tri, proj: u64, pos: u64, q_scale: u64, k_scale: u64, i_scale: u64, inv: u64, q: u64, kc: u64, vc: u64, ks: u64, vs: u64, iq: u64, ikc: u64, rope: u64, delta: u64, eps: f32, rows: usize, length: usize) !void {
+    /// glue.attn_prep for text positions, bf16 KV (BITS 0, the scale pointers unread); `length` unused at MODE 0.
+    pub fn attnPrep(t: Tri, proj: u64, pos: u64, q_scale: u64, k_scale: u64, i_scale: u64, inv: u64, q: u64, kc: u64, vc: u64, iq: u64, ikc: u64, rope: u64, delta: u64, eps: f32, rows: usize, length: usize) !void {
         try t.run("_attn_prep", .{ u(rows), u(24 + 2 + 4 + 1), 1 }, &.{
             p("P", "*bf16", proj),
             p("POS0", "*i32", pos),
@@ -85,8 +109,8 @@ pub const Tri = struct {
             p("Q", "*bf16", q),
             p("KC", "*bf16", kc),
             p("VC", "*bf16", vc),
-            p("KS", "*fp16", ks),
-            p("VS", "*fp16", vs),
+            p("KS", "*fp16", rope),
+            p("VS", "*fp16", rope),
             p("IQ", "*bf16", iq),
             p("IKC", "*bf16", ikc),
             p("ROPE", "*i32", rope),
@@ -96,14 +120,14 @@ pub const Tri = struct {
         }, &.{ ci("PW", 13952), ci("NQ", 24), ci("NKV", 2), ci("HD", 256), ci("NI", 4), ci("IHD", 128), ci("HALF", 32), ci("BITS", 0), ci("MODE", 0), ci("S1", 11), ci("S2", 10) });
     }
 
-    /// attention._chunks: one decode row, dense, the captured three-chunk scratch, one chunk launched.
-    pub fn attnChunks(t: Tri, q: u64, kc: u64, vc: u64, ks: u64, vs: u64, pos: u64, po: u64, pm: u64, pl: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize, chunks: usize) !void {
+    /// attention._chunks over 512-key chunks, bf16 KV; `qsa` the sparse form (NCH 5, QSA 1), else dense (NCH 3, QSA 0).
+    pub fn attnChunks(t: Tri, q: u64, kc: u64, vc: u64, pos: u64, po: u64, pm: u64, pl: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize, chunks: usize, qsa: bool) !void {
         try t.run("_chunks", .{ u(rows), u(kv), u(chunks) }, &.{
             p("Q", "*bf16", q),
             p("KC", "*bf16", kc),
             p("VC", "*bf16", vc),
-            p("KSC", "*fp16", ks),
-            p("VSC", "*fp16", vs),
+            p("KSC", "*fp16", sparse),
+            p("VSC", "*fp16", sparse),
             p("POS0", "*i32", pos),
             p("PO", "*fp32", po),
             p("PM", "*fp32", pm),
@@ -111,11 +135,11 @@ pub const Tri = struct {
             p("IDS", "*i32", ids),
             p("NKR", "*i32", nk),
             p("SPR", "*i32", sparse),
-        }, &.{ ci("H", 24), ci("HK", 2), ci("D", 256), ci("G", 12), ci("CH", 512), ci("NCH", 3), aot.cf("SCALE", 0.0625), ci("IDW", 2052), ci("QSA", 0), ci("BITS", 0) });
+        }, &.{ ci("H", 24), ci("HK", 2), ci("D", 256), ci("G", 12), ci("CH", 512), ci("NCH", if (qsa) 5 else 3), aot.cf("SCALE", 0.0625), ci("IDW", 2052), ci("QSA", @intFromBool(qsa)), ci("BITS", 0) });
     }
 
-    /// attention._merge: one program per row and per KV head.
-    pub fn attnMerge(t: Tri, po: u64, pm: u64, pl: u64, pos: u64, out: u64, nk: u64, sparse: u64, rows: usize, kv: usize) !void {
+    /// attention._merge: one program per row and per KV head, in attnChunks' form.
+    pub fn attnMerge(t: Tri, po: u64, pm: u64, pl: u64, pos: u64, out: u64, nk: u64, sparse: u64, rows: usize, kv: usize, qsa: bool) !void {
         try t.run("_merge", .{ u(rows), u(kv), 1 }, &.{
             p("PO", "*fp32", po),
             p("PM", "*fp32", pm),
@@ -124,7 +148,32 @@ pub const Tri = struct {
             p("OUT", "*bf16", out),
             p("NKR", "*i32", nk),
             p("SPR", "*i32", sparse),
-        }, &.{ ci("H", 24), ci("HK", 2), ci("D", 256), ci("G", 12), ci("CH", 512), ci("NCH", 3), ci("QSA", 0), ci("BITS", 0) });
+        }, &.{ ci("H", 24), ci("HK", 2), ci("D", 256), ci("G", 12), ci("CH", 512), ci("NCH", if (qsa) 5 else 3), ci("QSA", @intFromBool(qsa)), ci("BITS", 0) });
+    }
+
+    /// attention.qsa_pool for text rows (MODE 0): every complete block of 4 indexer keys pooled, normed and roped.
+    pub fn qsaPool(t: Tri, ikc: u64, pooled: u64, pos: u64, k_scale: u64, inv: u64, eps: f32, rows: usize) !void {
+        try t.run("_pool", .{ u(rows / 4 + 2), 1, 1 }, &.{
+            p("IKC", "*bf16", ikc),
+            p("POOLED", "*bf16", pooled),
+            p("POS0", "*i32", pos),
+            p("W", "*fp32", k_scale),
+            p("INV", "*fp32", inv),
+            aot.float("eps", eps),
+            int("R", rows),
+            int("length", 0),
+        }, &.{ ci("DI", 128), ci("HALF", 32), ci("RATIO", 4), ci("MODE", 0), ci("S1", 11), ci("S2", 10) });
+    }
+
+    /// attention._scores: rows' complete blocks scored; `nb` is the row stride (a multiple of 16), `blocks` the grid.
+    pub fn qsaScores(t: Tri, iq: u64, pooled: u64, pos: u64, sc: u64, nb: usize, rows: usize, blocks: usize) !void {
+        try t.run("_scores", .{ u(rows), cdiv(blocks, 64), 1 }, &.{
+            p("IQ", "*bf16", iq),
+            p("POOLED", "*bf16", pooled),
+            p("POS0", "*i32", pos),
+            p("SC", "*fp32", sc),
+            int("NB", nb),
+        }, &.{ ci("HI", 4), ci("DI", 128), ci("RATIO", 4), ci("TOP", 512), ci("BB", 64) });
     }
 
     /// glue.hc_reduce_act: split-K sum fused with hc_act. M folds to a constexpr when it is 1.
@@ -227,22 +276,32 @@ pub const Tri = struct {
 
     /// moe.router for one decode row. M folds to a constexpr. 513 rows: the experts, then the shared gate.
     pub fn router(t: Tri, x: u64, w: u64, out: u64, x_stride: usize) !void {
-        try t.run("_router", .{ 1, cdiv(513, 32), 1 }, &.{
-            p("X", "*bf16", x),
-            p("W", "*bf16", w),
-            p("OUT", "*fp32", out),
-            int("M", 1),
-            int("x_stride", x_stride),
-        }, &.{ ci("D", 2560), ci("NE", 513), ci("BM", 16), ci("BLOCK_E", 32), ci("BK", 256) });
+        try t.routerMany(x, w, out, x_stride, 1);
     }
 
     /// moe._topk_rows: one program, the row's 10 experts and the shared expert.
     pub fn topkRows(t: Tri, logits: u64, pick: u64, wts: u64) !void {
-        try t.run("_topk_rows", .{ 1, 1, 1 }, &.{
+        try t.topkMany(logits, pick, wts, 1);
+    }
+
+    /// moe._topk_rows over `rows` rows of [rows, 513] logits: picks and weights [rows, 11].
+    pub fn topkMany(t: Tri, logits: u64, pick: u64, wts: u64, rows: usize) !void {
+        try t.run("_topk_rows", .{ u(rows), 1, 1 }, &.{
             p("L", "*fp32", logits),
             p("PICK", "*i32", pick),
             p("WTS", "*fp32", wts),
         }, &.{ ci("NE", 512), ci("NL", 513), ci("TOPK", 10), ci("SLOTS", 11), ci("BLOCK", 1024), ci("SLOTP", 16) });
+    }
+
+    /// moe.router over `rows` rows at the one-row tiles (BM 16, BLOCK_E 32, BK 256), each row keeping its own bits.
+    pub fn routerMany(t: Tri, x: u64, w: u64, out: u64, x_stride: usize, rows: usize) !void {
+        try t.run("_router", .{ cdiv(rows, 16), cdiv(513, 32), 1 }, &.{
+            p("X", "*bf16", x),
+            p("W", "*bf16", w),
+            p("OUT", "*fp32", out),
+            int("M", rows),
+            int("x_stride", x_stride),
+        }, &.{ ci("D", 2560), ci("NE", 513), ci("BM", 16), ci("BLOCK_E", 32), ci("BK", 256) });
     }
 };
 
@@ -257,7 +316,10 @@ test {
     _ = ple;
     _ = mix;
     _ = prompt;
+    _ = prompt.batch;
     _ = native;
+    _ = @import("cuda_config.zig");
+    _ = row_path;
 }
 
 test "embed grid is one program per row and per group of 32" {

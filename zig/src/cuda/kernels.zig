@@ -14,6 +14,7 @@ pub const available = options.with_kernels;
 
 pub const gdn: []const u8 = if (available) &Blob("fatbin_gdn").bytes else &.{};
 pub const flashnext_gdn: []const u8 = if (available) &Blob("fatbin_flashnext_gdn").bytes else &.{};
+pub const flashnext_batch: []const u8 = if (available) &Blob("fatbin_flashnext_batch").bytes else &.{};
 pub const probe: []const u8 = if (available) &Blob("fatbin_probe").bytes else &.{};
 pub const qmm_group: []const u8 = if (available) &Blob("fatbin_qmm_group").bytes else &.{};
 pub const qmm: []const u8 = if (available) &Blob("fatbin_qmm").bytes else &.{};

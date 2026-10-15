@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""Flash Next's Python CUDA engine (qwen4_exp, drafts off, greedy) as the Zig port's oracle: every Triton launch,
-prompt ids, and two greedy references per prompt (the served path: chunked prefill then serial decode; the teacher
-path: every prompt token as its own decode row, the way zig's flashnext-prompt runs it)."""
+"""Flash Next's Python CUDA engine (drafts off, greedy) as the Zig oracle: Triton launches, prompt ids, references."""
 
 from __future__ import annotations
 
@@ -18,6 +16,10 @@ PROMPTS = {
 }
 TOP_STEPS = 4              # sampled steps whose five best logits the teacher paths keep
 LONG_TOKENS = 600            # the long prompt: module source cut to make the whole prompt about this many tokens
+# prompts past the block indexer's 2,048-key budget, cut from pydoc_data.topics to exactly this many tokens
+SPARSE_TOKENS = {"long3k": 3001, "long12k": 12001}
+SPARSE_ASK = ("\n\nQuestion: according to the excerpt above, what does an assert statement do when Python runs with "
+              "optimization on, and what does an augmented assignment evaluate only once? Answer briefly.")
 
 
 def chat(user: str) -> str:
@@ -35,6 +37,14 @@ def prompts(model: Path) -> dict[str, list[int]]:
     tail = enc("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
     body = enc(Path(textwrap.__file__).read_text())[:LONG_TOKENS - len(head) - len(tail)]
     out["long"] = head + body + tail
+    from pydoc_data.topics import topics
+
+    reference = "\n\n".join(topics[k] for k in sorted(topics))
+    head = enc("<|im_start|>user\nBelow is an excerpt of the Python language reference.\n\n")
+    tail = enc(SPARSE_ASK + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
+    text = enc(reference)
+    for name, total in SPARSE_TOKENS.items():
+        out[name] = head + text[:total - len(head) - len(tail)] + tail
     return out
 
 
@@ -62,7 +72,9 @@ def main() -> int:
     ap.add_argument("--tokens", type=int, default=32, help="greedy tokens per prompt")
     ap.add_argument("--context", type=int, default=1536,
                     help="the cache window; 1025..1536 gives the port's NCH=3, QSA=0 attention specialization")
-    ap.add_argument("--only", default="", help="comma list of prompt names (default all)")
+    ap.add_argument("--only", default="", help="comma list of prompt names (default: every prompt the context fits)")
+    ap.add_argument("--teachers", default="teacher,teacher32",
+                    help="teacher paths to run after the served one (comma list of teacher, teacher32; empty: none)")
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -83,6 +95,8 @@ def main() -> int:
     ids = prompts(model)
     if a.only:
         ids = {k: v for k, v in ids.items() if k in a.only.split(",")}
+    else:
+        ids = {k: v for k, v in ids.items() if len(v) + a.tokens < a.context}
     (out / "prompts.json").write_text(json.dumps(ids) + "\n")
     for name, p in ids.items():
         (out / f"{name}.ids").write_text(" ".join(map(str, p)) + "\n")
@@ -120,13 +134,13 @@ def main() -> int:
         results[f"serial/{name}"] = {"tokens": toks, "wall_s": round(wall, 4), **stats}
         print(f"serial {name} ({len(prompt)} prompt): {toks} {stats}", flush=True)
         if fp32 is None:
-            # teacher32: the decode-form experts (fp32 slot outputs, Buffers' default and the MTP head's), the
-            # arithmetic zig's flashnext-prompt runs; the serial engine's buffers take the prompt-form experts
+            # teacher32: the decode-form experts (fp32 slot outputs), the arithmetic zig's flashnext-prompt runs
             fp32 = eng.serial.twin()
             fp32.buf = Buffers(eng.e.w, eng.e.rows, eng.e.capacity)
 
         for label, t in (("teacher", eng.serial), ("teacher32", fp32)):
-            teach(label, name, prompt, t, toks)
+            if label in a.teachers.split(","):
+                teach(label, name, prompt, t, toks)
 
     (out / "results.json").write_text(json.dumps({"info": info, "results": results}, indent=1) + "\n")
     if rec is not None:

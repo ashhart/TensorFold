@@ -1,4 +1,4 @@
-//! Layer 2's n-gram table for one decode token: hash the row ids, gather those rows, dequant like glue._ple_embed.
+//! Layer 2's n-gram table: the hash of each token's row ids, and the mapped table a pass gathers its rows from.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -10,14 +10,14 @@ const golden: u64 = 0x9E3779B97F4A7C15;
 const mix1: u64 = 0xBF58476D1CE4E5B9;
 const mix2: u64 = 0x94D049BB133111EB;
 const prime_step: u64 = 10007;
-const max_n: usize = 8;
-const max_heads: usize = 64;
+pub const max_n: usize = 8;
+pub const max_heads: usize = 64;
 const max_shards: usize = 128;
-const layer: usize = 1;
+pub const layer: usize = 1;
 
 const Tensor = core.safetensors.Tensor;
 
-const Hash = struct {
+pub const Hash = struct {
     n: usize,
     per: usize,
     heads: usize,
@@ -29,7 +29,7 @@ const Hash = struct {
     mult: [max_n]i64 = undefined,
     starts: [max_shards + 1]i64 = undefined,
 
-    fn init(args: struct {
+    pub fn init(args: struct {
         vocab: u64,
         ngram: usize,
         per: usize,
@@ -73,7 +73,7 @@ const Hash = struct {
         return h;
     }
 
-    fn locate(h: Hash, row: i64) !struct { shard: usize, local: usize } {
+    pub fn locate(h: Hash, row: i64) !struct { shard: usize, local: usize } {
         if (row < 0 or row >= h.starts[h.shards]) return error.UnexpectedTensor;
         var lo: usize = 0;
         var hi = h.shards;
@@ -114,7 +114,7 @@ fn divCeil(a: i64, b: i64) i64 {
 }
 
 /// Row ids of one new token after `history` (n - 1 ids). A fresh decode window is n - 1 copies of eos.
-fn lastIds(h: Hash, history: []const i64, token: i64, out: []i64) !void {
+pub fn lastIds(h: Hash, history: []const i64, token: i64, out: []i64) !void {
     if (history.len != h.n - 1 or out.len != h.heads) return error.UnexpectedTensor;
     var seq: [max_n]i64 = undefined;
     for (history, 0..) |v, i| seq[i] = v;
@@ -149,13 +149,13 @@ fn lastIds(h: Hash, history: []const i64, token: i64, out: []i64) !void {
     }
 }
 
-fn toBf16(v: f32) u16 {
+pub fn toBf16(v: f32) u16 {
     const bits: u32 = @bitCast(v);
     if (std.math.isNan(v)) return @intCast((bits >> 16) | 0x40);
     return @intCast((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
 }
 
-fn sumGroups(row: []const u16, out: []f32) void {
+pub fn sumGroups(row: []const u16, out: []f32) void {
     const groups = row.len / 32;
     for (0..groups) |g| {
         var buf: [32]f32 = undefined;
@@ -169,79 +169,52 @@ fn sumGroups(row: []const u16, out: []f32) void {
     }
 }
 
-const Open = struct {
+/// One mapped shard (core.safetensors.File) with a typed lookup.
+pub const Open = struct {
+    file: core.safetensors.File,
     io: std.Io,
-    path: []u8,
-    file: std.Io.File,
-    map: std.Io.File.MemoryMap,
-    parsed: std.json.Parsed(std.json.Value),
-    at: usize,
 
-    fn load(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !Open {
-        const owned = try gpa.dupe(u8, path);
-        errdefer gpa.free(owned);
-        var file = try std.Io.Dir.cwd().openFile(io, owned, .{});
-        errdefer file.close(io);
-        const len: usize = @intCast(try file.length(io));
-        if (len < 8) return error.BadSafetensors;
-        var map = try std.Io.File.MemoryMap.create(io, file, .{ .len = len, .protection = .{ .read = true, .write = false }, .populate = false });
-        errdefer map.destroy(io);
-        const header_len: usize = @intCast(std.mem.readInt(u64, map.memory[0..8], .little));
-        if (header_len > len - 8) return error.BadSafetensors;
-        const parsed = try std.json.parseFromSlice(std.json.Value, gpa, map.memory[8..][0..header_len], .{});
-        return .{ .io = io, .path = owned, .file = file, .map = map, .parsed = parsed, .at = 8 + header_len };
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !Open {
+        return .{ .file = try core.safetensors.File.open(gpa, io, path), .io = io };
     }
 
-    fn close(self: *Open, gpa: std.mem.Allocator) void {
-        self.parsed.deinit();
-        self.map.destroy(self.io);
+    pub fn close(self: *Open, gpa: std.mem.Allocator) void {
+        _ = gpa;
         self.file.close(self.io);
-        gpa.free(self.path);
-        self.* = undefined;
     }
 
-    fn tensor(self: *const Open, name: []const u8, dtype: core.safetensors.DType) !Tensor {
-        const o = (self.parsed.value.object.get(name) orelse return error.MissingTensor).object;
-        const got = core.safetensors.DType.parse(o.get("dtype").?.string) orelse return error.UnsupportedDType;
-        if (got != dtype) return error.UnexpectedTensor;
-        const shape = o.get("shape").?.array.items;
-        if (shape.len == 0 or shape.len > 4) return error.UnexpectedTensor;
-        const offs = o.get("data_offsets").?.array.items;
-        const begin: usize = @intCast(offs[0].integer);
-        const end: usize = @intCast(offs[1].integer);
-        const data = self.map.memory[self.at..];
-        if (end < begin or end > data.len) return error.BadSafetensors;
-        var t: Tensor = .{ .dtype = dtype, .rank = @intCast(shape.len), .shape = @splat(1), .bytes = data[begin..end] };
-        for (shape, 0..) |d, i| t.shape[i] = @intCast(d.integer);
+    pub fn tensor(self: *const Open, name: []const u8, dtype: core.safetensors.DType) !Tensor {
+        const t = self.file.get(name) orelse return error.MissingTensor;
+        if (t.dtype != dtype) return error.UnexpectedTensor;
         return t;
     }
 };
 
-fn readI64(t: Tensor, out: []i64) !void {
+pub fn readI64(t: Tensor, out: []i64) !void {
     if (t.dtype != .i64 or t.rank != 1 or t.dim(0) != out.len or t.bytes.len != out.len * 8) return error.UnexpectedTensor;
     for (out, 0..) |*o, i| o.* = std.mem.readInt(i64, t.bytes[8 * i ..][0..8], .little);
 }
 
-fn weightName(buf: []u8, shard: usize, nested: bool) ![]const u8 {
+pub fn weightName(buf: []u8, shard: usize, nested: bool) ![]const u8 {
     return if (nested)
         std.fmt.bufPrint(buf, "language_model.model.layers.{d}.ple.ple_embedding.ngram_embedding.shards.{d}.weight", .{ layer, shard })
     else
         std.fmt.bufPrint(buf, "language_model.model.layers.{d}.ple.ple_embedding.ngram_embedding.shard_{d}.weight", .{ layer, shard });
 }
 
-fn partName(buf: []u8, shard: usize, nested: bool, part: []const u8) ![]const u8 {
+pub fn partName(buf: []u8, shard: usize, nested: bool, part: []const u8) ![]const u8 {
     return if (nested)
         std.fmt.bufPrint(buf, "language_model.model.layers.{d}.ple.ple_embedding.ngram_embedding.shards.{d}.{s}", .{ layer, shard, part })
     else
         std.fmt.bufPrint(buf, "language_model.model.layers.{d}.ple.ple_embedding.ngram_embedding.shard_{d}.{s}", .{ layer, shard, part });
 }
 
-fn findOpen(opened: []Open, path: []const u8) ?*Open {
-    for (opened) |*o| if (std.mem.eql(u8, o.path, path)) return o;
+pub fn findOpen(opened: []Open, path: []const u8) ?*Open {
+    for (opened) |*o| if (std.mem.eql(u8, o.file.path, path)) return o;
     return null;
 }
 
-fn copyRow(file: *const Open, shard: usize, nested: bool, local: usize, dh: usize, words: []u8, scales: []u8, biases: []u8) !void {
+pub fn copyRow(file: *const Open, shard: usize, nested: bool, local: usize, dh: usize, words: []u8, scales: []u8, biases: []u8) !void {
     var name: [180]u8 = undefined;
     const w = try file.tensor(try partName(&name, shard, nested, "weight"), .u32);
     const s = try file.tensor(try partName(&name, shard, nested, "scales"), .bf16);
@@ -256,17 +229,14 @@ fn copyRow(file: *const Open, shard: usize, nested: bool, local: usize, dh: usiz
     @memcpy(biases, b.bytes[local * gb ..][0..gb]);
 }
 
-fn tableScale(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, wm: std.json.ObjectMap) !f32 {
+pub fn tableScale(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, wm: std.json.ObjectMap) !f32 {
     const name = "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.weight_scale";
     const file = wm.get(name) orelse return 1;
     const path = try std.fs.path.join(gpa, &.{ dir, file.string });
     defer gpa.free(path);
     var opened = try Open.load(gpa, io, path);
     defer opened.close(gpa);
-    const t = try opened.tensor(name, blk: {
-        const o = opened.parsed.value.object.get(name).?.object;
-        break :blk core.safetensors.DType.parse(o.get("dtype").?.string) orelse return error.UnsupportedDType;
-    });
+    const t = opened.file.get(name) orelse return error.MissingTensor;
     if (t.numel() != 1) return error.UnexpectedTensor;
     return switch (t.dtype) {
         .f32 => @bitCast(std.mem.readInt(u32, t.bytes[0..4], .little)),
@@ -301,7 +271,7 @@ const NgramSpec = struct {
 };
 
 /// `ple_layer_ids` value 2 is decoder layer 1. The eos id is the text config's, which the hash mixes in.
-fn readSpec(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !NgramSpec {
+pub fn readSpec(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !NgramSpec {
     const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
     defer gpa.free(path);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 24));
@@ -354,215 +324,142 @@ pub fn eosOf(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8) !i64 {
     return cfg.eos;
 }
 
-/// Host dequant of one token's sixteen n-gram rows. `history` is the previous n - 1 ids.
-pub fn embedding(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8, history: []const i64, token: u32, out: []u16, xs: []f32) !void {
-    const cfg = try readSpec(gpa, io, model_dir);
-    const hash = try Hash.init(.{
-        .vocab = cfg.vocab,
-        .ngram = cfg.ngram,
-        .per = cfg.per,
-        .base = cfg.base,
-        .divisor = cfg.divisor,
-        .shards = cfg.shards,
-        .seed = cfg.seed,
-        .eos = cfg.eos,
-        .ple_dim = cfg.ple_dim,
-        .ple_index = cfg.ple_index,
-    });
-    if (history.len != hash.n - 1 or out.len != hash.heads * hash.dh or xs.len != out.len / 32) return error.UnexpectedTensor;
-    var ids: [max_heads]i64 = undefined;
-    try lastIds(hash, history, @intCast(token), ids[0..hash.heads]);
-    const index_path = try std.fs.path.join(gpa, &.{ model_dir, "model.safetensors.index.json" });
-    defer gpa.free(index_path);
-    const text = try std.Io.Dir.cwd().readFileAlloc(io, index_path, gpa, .limited(1 << 26));
-    defer gpa.free(text);
-    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
-    defer parsed.deinit();
-    const wm = parsed.value.object.get("weight_map").?.object;
-    const scale = try tableScale(gpa, io, model_dir, wm);
-    const heads = hash.heads;
-    const dh = hash.dh;
-    const words = try gpa.alloc(u8, heads * (dh / 8) * 4);
-    defer gpa.free(words);
-    const scales = try gpa.alloc(u8, heads * (dh / 32) * 2);
-    defer gpa.free(scales);
-    const biases = try gpa.alloc(u8, scales.len);
-    defer gpa.free(biases);
-    var opened: [max_heads]Open = undefined;
-    var nopen: usize = 0;
-    defer for (opened[0..nopen]) |*o| o.close(gpa);
-    var key: [180]u8 = undefined;
-    for (0..heads) |h| {
-        const loc = try hash.locate(ids[h]);
-        var nested = false;
-        const mapped = if (wm.get(try weightName(&key, loc.shard, false))) |v|
-            v.string
-        else blk: {
-            nested = true;
-            break :blk (wm.get(try weightName(&key, loc.shard, true)) orelse return error.MissingTensor).string;
-        };
-        const path = try std.fs.path.join(gpa, &.{ model_dir, mapped });
-        defer gpa.free(path);
-        const file = findOpen(opened[0..nopen], path) orelse file: {
-            opened[nopen] = try Open.load(gpa, io, path);
-            nopen += 1;
-            break :file &opened[nopen - 1];
-        };
-        const wb = (dh / 8) * 4;
-        const gb = (dh / 32) * 2;
-        try copyRow(file, loc.shard, nested, loc.local, dh, words[h * wb ..][0..wb], scales[h * gb ..][0..gb], biases[h * gb ..][0..gb]);
+/// The n-gram table held open for an engine's life: the hash, the scale, and each shard's slices of its mapped file.
+pub const Ngram = struct {
+    gpa: std.mem.Allocator,
+    hash: Hash,
+    scale: f32,
+    files: std.ArrayList(Open) = .empty,
+    w: [max_shards][]const u8 = undefined,
+    s: [max_shards][]const u8 = undefined,
+    b: [max_shards][]const u8 = undefined,
+
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8) !Ngram {
+        const cfg = try readSpec(gpa, io, model_dir);
+        var g: Ngram = .{ .gpa = gpa, .hash = try Hash.init(.{
+            .vocab = cfg.vocab,
+            .ngram = cfg.ngram,
+            .per = cfg.per,
+            .base = cfg.base,
+            .divisor = cfg.divisor,
+            .shards = cfg.shards,
+            .seed = cfg.seed,
+            .eos = cfg.eos,
+            .ple_dim = cfg.ple_dim,
+            .ple_index = cfg.ple_index,
+        }), .scale = 1 };
+        errdefer g.deinit();
+        const index_path = try std.fs.path.join(gpa, &.{ model_dir, "model.safetensors.index.json" });
+        defer gpa.free(index_path);
+        const text = try std.Io.Dir.cwd().readFileAlloc(io, index_path, gpa, .limited(1 << 26));
+        defer gpa.free(text);
+        const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
+        defer parsed.deinit();
+        const wm = parsed.value.object.get("weight_map").?.object;
+        g.scale = try tableScale(gpa, io, model_dir, wm);
+        const dh = g.hash.dh;
+        var key: [180]u8 = undefined;
+        for (0..g.hash.shards) |shard| {
+            var nested = false;
+            const mapped = if (wm.get(try weightName(&key, shard, false))) |v|
+                v.string
+            else blk: {
+                nested = true;
+                break :blk (wm.get(try weightName(&key, shard, true)) orelse return error.MissingTensor).string;
+            };
+            const path = try std.fs.path.join(gpa, &.{ model_dir, mapped });
+            defer gpa.free(path);
+            const file = findOpen(g.files.items, path) orelse file: {
+                var o = try Open.load(gpa, io, path);
+                errdefer o.close(gpa);
+                std.posix.madvise(o.file.map.memory.ptr, o.file.map.memory.len, std.posix.MADV.RANDOM) catch {};
+                try g.files.append(gpa, o);
+                break :file &g.files.items[g.files.items.len - 1];
+            };
+            const w = try file.tensor(try partName(&key, shard, nested, "weight"), .u32);
+            const s = try file.tensor(try partName(&key, shard, nested, "scales"), .bf16);
+            const b = try file.tensor(try partName(&key, shard, nested, "biases"), .bf16);
+            if (w.dim(1) != dh / 8 or s.dim(1) != dh / 32 or b.dim(1) != dh / 32) return error.UnexpectedTensor;
+            g.w[shard] = w.bytes;
+            g.s[shard] = s.bytes;
+            g.b[shard] = b.bytes;
+        }
+        return g;
     }
-    for (0..heads) |h| try embed.dequant(words, scales, biases, dh, h, out[h * dh ..][0..dh]);
-    if (scale != 1) {
-        for (out) |*v| {
-            const f: f32 = @bitCast(@as(u32, v.*) << 16);
-            v.* = toBf16(f * scale);
+
+    pub fn deinit(g: *Ngram) void {
+        for (g.files.items) |*o| o.close(g.gpa);
+        g.files.deinit(g.gpa);
+    }
+
+    /// Values a row's embedding holds (heads x head width).
+    pub fn width(g: *const Ngram) usize {
+        return g.hash.heads * g.hash.dh;
+    }
+
+    /// Rows [lo, hi) of a chunk's token-major row ids `ids`, each dequantized into its head's slice of `out`.
+    fn fill(g: *const Ngram, ids: []const i64, out: []u16, lo: usize, hi: usize) !void {
+        const dh = g.hash.dh;
+        for (lo..hi) |i| {
+            const loc = try g.hash.locate(ids[i]);
+            try embed.dequant(g.w[loc.shard], g.s[loc.shard], g.b[loc.shard], dh, loc.local, out[i * dh ..][0..dh]);
         }
     }
-    sumGroups(out, xs);
-}
 
-/// One decode token. `ple_layer_ids` `[2]` is this layer. Returns 0 when the gathered rows match the host dequant.
-pub fn table(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8, driver: *cuda.Driver, stream: *cuda.Stream, tri: Tri, token: u32) !u32 {
-    const cfg = try readSpec(gpa, io, model_dir);
-    const hash = try Hash.init(.{
-        .vocab = cfg.vocab,
-        .ngram = cfg.ngram,
-        .per = cfg.per,
-        .base = cfg.base,
-        .divisor = cfg.divisor,
-        .shards = cfg.shards,
-        .seed = cfg.seed,
-        .eos = cfg.eos,
-        .ple_dim = cfg.ple_dim,
-        .ple_index = cfg.ple_index,
-    });
-    var history: [max_n]i64 = undefined;
-    for (0..hash.n - 1) |i| history[i] = hash.eos;
-    var ids: [max_heads]i64 = undefined;
-    try lastIds(hash, history[0 .. hash.n - 1], token, ids[0..hash.heads]);
-
-    const index_path = try std.fs.path.join(gpa, &.{ model_dir, "model.safetensors.index.json" });
-    defer gpa.free(index_path);
-    const text = try std.Io.Dir.cwd().readFileAlloc(io, index_path, gpa, .limited(1 << 26));
-    defer gpa.free(text);
-    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
-    defer parsed.deinit();
-    const wm = parsed.value.object.get("weight_map").?.object;
-
-    var cname: [160]u8 = undefined;
-    const mult_name = try std.fmt.bufPrint(&cname, "language_model.model.layers.{d}.ple.ple_embedding.layer_multipliers", .{layer});
-    const const_file = wm.get(mult_name) orelse return error.MissingTensor;
-    const const_path = try std.fs.path.join(gpa, &.{ model_dir, const_file.string });
-    defer gpa.free(const_path);
-    var constants = try Open.load(gpa, io, const_path);
-    defer constants.close(gpa);
-    var got_m: [max_n]i64 = undefined;
-    var got_o: [max_heads]i64 = undefined;
-    var got_s: [max_heads]i64 = undefined;
-    try readI64(try constants.tensor(mult_name, .i64), got_m[0..hash.n]);
-    const off_name = try std.fmt.bufPrint(&cname, "language_model.model.layers.{d}.ple.ple_embedding.ngram_heads_offsets", .{layer});
-    try readI64(try constants.tensor(off_name, .i64), got_o[0..hash.heads]);
-    const size_name = try std.fmt.bufPrint(&cname, "language_model.model.layers.{d}.ple.ple_embedding.ngram_heads_vocab_sizes", .{layer});
-    try readI64(try constants.tensor(size_name, .i64), got_s[0..hash.heads]);
-    if (!std.mem.eql(i64, got_m[0..hash.n], hash.mult[0..hash.n]) or !std.mem.eql(i64, got_o[0..hash.heads], hash.offsets[0..hash.heads]) or !std.mem.eql(i64, got_s[0..hash.heads], hash.sizes[0..hash.heads])) {
-        std.debug.print("ngram constants differ\n", .{});
-        return 1;
-    }
-    const scale = try tableScale(gpa, io, model_dir, wm);
-
-    const heads = hash.heads;
-    const dh = hash.dh;
-    const words = try gpa.alloc(u8, heads * (dh / 8) * 4);
-    defer gpa.free(words);
-    const scales = try gpa.alloc(u8, heads * (dh / 32) * 2);
-    defer gpa.free(scales);
-    const biases = try gpa.alloc(u8, scales.len);
-    defer gpa.free(biases);
-    var opened: [max_heads]Open = undefined;
-    var nopen: usize = 0;
-    defer for (opened[0..nopen]) |*o| o.close(gpa);
-    var key: [180]u8 = undefined;
-    for (0..heads) |h| {
-        const loc = try hash.locate(ids[h]);
-        var nested = false;
-        const mapped = if (wm.get(try weightName(&key, loc.shard, false))) |v|
-            v.string
-        else blk: {
-            nested = true;
-            break :blk (wm.get(try weightName(&key, loc.shard, true)) orelse return error.MissingTensor).string;
+    fn worker(g: *const Ngram, ids: []const i64, out: []u16, lo: usize, hi: usize, failed: *?anyerror) void {
+        g.fill(ids, out, lo, hi) catch |err| {
+            failed.* = err;
         };
-        const path = try std.fs.path.join(gpa, &.{ model_dir, mapped });
-        defer gpa.free(path);
-        const file = findOpen(opened[0..nopen], path) orelse file: {
-            opened[nopen] = try Open.load(gpa, io, path);
-            nopen += 1;
-            break :file &opened[nopen - 1];
-        };
-        const wb = (dh / 8) * 4;
-        const gb = (dh / 32) * 2;
-        try copyRow(file, loc.shard, nested, loc.local, dh, words[h * wb ..][0..wb], scales[h * gb ..][0..gb], biases[h * gb ..][0..gb]);
     }
 
-    const host = try gpa.alloc(u16, heads * dh);
-    defer gpa.free(host);
-    for (0..heads) |h| try embed.dequant(words, scales, biases, dh, h, host[h * dh ..][0..dh]);
-    if (scale != 1) {
-        for (host) |*v| {
-            const f: f32 = @bitCast(@as(u32, v.*) << 16);
-            v.* = toBf16(f * scale);
+    /// `embedding` for each token after `history` (moved past the chunk) into out and xs, read by up to 128 threads.
+    pub fn rows(g: *const Ngram, history: []i64, tokens: []const u32, out: []u16, xs: []f32) !void {
+        const heads = g.hash.heads;
+        const w = g.width();
+        if (history.len != g.hash.n - 1 or out.len != tokens.len * w or xs.len != out.len / 32) return error.UnexpectedTensor;
+        const items = tokens.len * heads;
+        const ids = try g.gpa.alloc(i64, items);
+        defer g.gpa.free(ids);
+        var hist: [max_n]i64 = undefined;
+        @memcpy(hist[0..history.len], history);
+        for (tokens, 0..) |token, t| {
+            try lastIds(g.hash, hist[0..history.len], @intCast(token), ids[t * heads ..][0..heads]);
+            for (0..history.len - 1) |i| hist[i] = hist[i + 1];
+            hist[history.len - 1] = token;
         }
-    }
-    const host_xs = try gpa.alloc(f32, heads * dh / 32);
-    defer gpa.free(host_xs);
-    sumGroups(host, host_xs);
-
-    var w_b = try cuda.DeviceBuffer.fromHost(driver, words);
-    defer w_b.free();
-    var s_b = try cuda.DeviceBuffer.fromHost(driver, scales);
-    defer s_b.free();
-    var b_b = try cuda.DeviceBuffer.fromHost(driver, biases);
-    defer b_b.free();
-    var out_b = try cuda.DeviceBuffer.alloc(driver, host.len * 2);
-    defer out_b.free();
-    var xs_b = try cuda.DeviceBuffer.alloc(driver, host_xs.len * 4);
-    defer xs_b.free();
-    try tri.pleEmbed(w_b.ptr, s_b.ptr, b_b.ptr, out_b.ptr, xs_b.ptr, 1, heads, dh, scale);
-    const got_bytes = try gpa.alloc(u8, host.len * 2);
-    defer gpa.free(got_bytes);
-    const xs_bytes = try gpa.alloc(u8, host_xs.len * 4);
-    defer gpa.free(xs_bytes);
-    try stream.synchronize();
-    try out_b.download(0, got_bytes);
-    try xs_b.download(0, xs_bytes);
-    const gpu = try gpa.alloc(u16, host.len);
-    defer gpa.free(gpu);
-    for (gpu, 0..) |*o, i| o.* = std.mem.readInt(u16, got_bytes[2 * i ..][0..2], .little);
-    var off: usize = 0;
-    var steps: u32 = 0;
-    var at: usize = 0;
-    for (gpu, host, 0..) |a, b, i| {
-        const d = hc.mixedSteps(a, b);
-        if (d != 0) off += 1;
-        if (d > steps) {
-            steps = d;
-            at = i;
+        const max_threads = 128;
+        const n_threads = @min(max_threads, items / 4);
+        if (n_threads <= 1) {
+            try g.fill(ids, out, 0, items);
+        } else {
+            var threads: [max_threads]std.Thread = undefined;
+            var failed: [max_threads]?anyerror = @splat(null);
+            var spawned: usize = 0;
+            defer for (threads[0..spawned]) |th| th.join();
+            const per = (items + n_threads - 1) / n_threads;
+            for (0..n_threads) |i| {
+                const lo = @min(items, i * per);
+                const hi = @min(items, lo + per);
+                threads[i] = try std.Thread.spawn(.{}, worker, .{ g, ids, out, lo, hi, &failed[i] });
+                spawned += 1;
+            }
+            for (threads[0..spawned]) |th| th.join();
+            spawned = 0;
+            for (failed[0..n_threads]) |f| if (f) |err| return err;
         }
-    }
-    var xs_ulp: u32 = 0;
-    var xs_at: usize = 0;
-    for (host_xs, 0..) |want, i| {
-        const got: f32 = @bitCast(std.mem.readInt(u32, xs_bytes[4 * i ..][0..4], .little));
-        const dist = hc.ulps(got, want);
-        if (dist > xs_ulp) {
-            xs_ulp = dist;
-            xs_at = i;
+        for (0..tokens.len) |t| {
+            const row = out[t * w ..][0..w];
+            if (g.scale != 1) {
+                for (row) |*v| {
+                    const f: f32 = @bitCast(@as(u32, v.*) << 16);
+                    v.* = toBf16(f * g.scale);
+                }
+            }
+            sumGroups(row, xs[t * (w / 32) ..][0 .. w / 32]);
         }
+        @memcpy(history, hist[0..history.len]);
     }
-    std.debug.print("ngram token {d} heads {d} values {d} off {d} max_steps {d} at {d} got {x:0>4} host {x:0>4} xs_ulp {d} xs_at {d} head {x:0>4}\n", .{ token, heads, host.len, off, steps, at, gpu[at], host[at], xs_ulp, xs_at, gpu[0] });
-    if (off != 0 or steps != 0 or xs_ulp != 0) return 1;
-    return 0;
-}
+};
 
 test "a fresh window hashes token 7 into sixteen rows" {
     const h = try Hash.init(.{

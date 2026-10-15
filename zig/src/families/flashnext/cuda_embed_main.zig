@@ -118,7 +118,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     const norm_mismatch = try runDown(gpa, io, args[1], &driver, &stream, &set, &mapped, wide.ptr, pss.ptr, wide_u16, pss_bytes, table.dims, streams, nc);
     if (norm_mismatch != 0) return 1;
-    const ngram = try flash.ple.table(flash.Tri, gpa, io, args[1], &driver, &stream, tri, token);
+    const ngram = try flash.ple_check.table(flash.Tri, gpa, io, args[1], &driver, &stream, tri, token);
     const scored = try flash.mix.scores(flash.Tri, gpa, io, args[1], &driver, &stream, tri, wide_u16);
     return if (ngram == 0 and scored == 0) 0 else 1;
 }

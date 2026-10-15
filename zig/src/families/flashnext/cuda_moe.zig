@@ -108,7 +108,7 @@ fn routerDots(x: []const u16, w: []const u16, out: []f32) void {
     }
 }
 
-/// Largest `k` of the first `n` logits (lower id on a tie), weights exp(l - l0) / sum rounded to bf16, then the shared gate.
+/// Largest `k` of the first `n` logits (lower id on a tie), softmax weights rounded to bf16, then the shared gate.
 fn choose(logits: []const f32, n: usize, k: usize, picks: []i32, wts: []f32) void {
     var scratch: [count]f32 = undefined;
     for (0..n) |i| scratch[i] = logits[i];

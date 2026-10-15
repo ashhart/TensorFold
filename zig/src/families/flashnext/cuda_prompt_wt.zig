@@ -29,7 +29,18 @@ pub const index_dim: usize = 128;
 pub const half: usize = 32;
 pub const proj_n: usize = 13952;
 pub const out_k: usize = 6144;
-pub const nch: usize = 3;
+/// Chunks of 512 keys a row's attention reads at most: 2,048 selected keys plus a tail, or 2,051 dense keys.
+pub const nch: usize = 5;
+pub const dense_nch: usize = 3;
+/// The block indexer (QSA): keys pooled in blocks of 4, a row past 512 complete blocks reads its 512 best.
+pub const index_ratio: usize = 4;
+pub const index_top: usize = 512;
+/// A row's key list: the budget's 2,048 keys plus a tail of up to ratio - 1 (attention.AttnScratch.idw).
+pub const index_idw: usize = index_top * index_ratio + index_ratio;
+/// Keys a dense row reads at most before selection starts: (top + 1) x ratio - 1.
+pub const dense_keys: usize = (index_top + 1) * index_ratio - 1;
+/// The model's window (config max_position_embeddings).
+pub const window: usize = 262144;
 pub const ple_layer: usize = 1;
 pub const inj_stride: usize = 16;
 pub const wts_stride: usize = 48;
@@ -47,60 +58,21 @@ const Tensor = core.safetensors.Tensor;
 
 const Held = struct { rel: []u8, file: Shard };
 
+/// One mapped shard: core.safetensors.File.
 const Shard = struct {
+    f: core.safetensors.File,
     io: std.Io,
-    file: std.Io.File,
-    map: std.Io.File.MemoryMap,
-    at: usize,
-    arena: std.heap.ArenaAllocator,
-    names: std.StringHashMapUnmanaged(core.safetensors.Entry),
 
     fn load(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !Shard {
-        var file = try std.Io.Dir.cwd().openFile(io, path, .{});
-        errdefer file.close(io);
-        const len: usize = @intCast(try file.length(io));
-        if (len < 8) return error.BadSafetensors;
-        var map = try std.Io.File.MemoryMap.create(io, file, .{ .len = len, .protection = .{ .read = true, .write = false }, .populate = false });
-        errdefer map.destroy(io);
-        const header_len: usize = @intCast(std.mem.readInt(u64, map.memory[0..8], .little));
-        if (header_len > len - 8) return error.BadSafetensors;
-        var arena = std.heap.ArenaAllocator.init(gpa);
-        errdefer arena.deinit();
-        var names: std.StringHashMapUnmanaged(core.safetensors.Entry) = .empty;
-        const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), map.memory[8..][0..header_len], .{});
-        defer parsed.deinit();
-        var it = parsed.value.object.iterator();
-        while (it.next()) |kv| {
-            if (std.mem.eql(u8, kv.key_ptr.*, "__metadata__")) continue;
-            const o = kv.value_ptr.object;
-            const dtype = core.safetensors.DType.parse(o.get("dtype").?.string) orelse return error.UnsupportedDType;
-            const shape = o.get("shape").?.array.items;
-            if (shape.len > core.safetensors.max_rank) continue;
-            var e: core.safetensors.Entry = .{ .dtype = dtype, .rank = @intCast(shape.len), .shape = @splat(1), .begin = 0, .end = 0 };
-            var n: usize = dtype.size();
-            for (shape, 0..) |d, i| {
-                e.shape[i] = @intCast(d.integer);
-                n *= e.shape[i];
-            }
-            const offs = o.get("data_offsets").?.array.items;
-            e.begin = @intCast(offs[0].integer);
-            e.end = @intCast(offs[1].integer);
-            if (e.end < e.begin or e.end - e.begin != n or e.end > len - 8 - header_len) return error.BadSafetensors;
-            try names.put(arena.allocator(), try arena.allocator().dupe(u8, kv.key_ptr.*), e);
-        }
-        return .{ .io = io, .file = file, .map = map, .at = 8 + header_len, .arena = arena, .names = names };
+        return .{ .f = try core.safetensors.File.open(gpa, io, path), .io = io };
     }
 
     fn close(self: *Shard) void {
-        self.map.destroy(self.io);
-        self.file.close(self.io);
-        self.arena.deinit();
-        self.* = undefined;
+        self.f.close(self.io);
     }
 
     fn get(self: *const Shard, name: []const u8) ?Tensor {
-        const e = self.names.get(name) orelse return null;
-        return .{ .dtype = e.dtype, .rank = e.rank, .shape = e.shape, .bytes = self.map.memory[self.at + e.begin .. self.at + e.end] };
+        return self.f.get(name);
     }
 };
 
@@ -278,8 +250,7 @@ pub fn cat(gpa: std.mem.Allocator, parts: []const []const u8) ![]u8 {
     return out;
 }
 
-/// A tensor the engine leaves off the device: the n-gram tables (rows gathered from the mapped shards), the draft
-/// head (served without drafts) and the vision tower (text only).
+/// A tensor the engine leaves off the device: the n-gram tables, the draft head and the vision tower.
 pub fn hostOnly(name: []const u8) bool {
     return std.mem.indexOf(u8, name, ".ple_embedding.ngram_embedding.") != null or
         std.mem.startsWith(u8, name, "language_model.mtp.") or
@@ -302,7 +273,7 @@ pub fn deviceBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
         defer gpa.free(path);
         var sh = try Shard.load(gpa, io, path);
         defer sh.close();
-        var ni = sh.names.iterator();
+        var ni = sh.f.names.iterator();
         while (ni.next()) |e| {
             if (!hostOnly(e.key_ptr.*)) total += e.value_ptr.end - e.value_ptr.begin;
         }

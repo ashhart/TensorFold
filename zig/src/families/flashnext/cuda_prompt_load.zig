@@ -68,6 +68,8 @@ pub const Layer = struct {
     q_scale: cuda.DeviceBuffer,
     k_scale: cuda.DeviceBuffer,
     i_scale: cuda.DeviceBuffer,
+    /// The indexer's k_layernorm (fp32), the pooled keys' RMSNorm scale.
+    ik_scale: cuda.DeviceBuffer,
     key: Q4,
     val: Q4,
     nk: cuda.DeviceBuffer,
@@ -92,6 +94,7 @@ pub const Layer = struct {
         self.q_scale.free();
         self.k_scale.free();
         self.i_scale.free();
+        self.ik_scale.free();
         self.key.free();
         self.val.free();
         self.nk.free();
@@ -190,8 +193,14 @@ fn stackUp(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, g
 }
 
 pub fn loadLayer(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, store: *Store, pack_fn: cuda.Function, layer: usize) !Layer {
-    var buf: [200]u8 = undefined;
+    var buf: [80]u8 = undefined;
     const base = try std.fmt.bufPrint(&buf, "language_model.model.layers.{d}", .{layer});
+    return loadLayerAt(gpa, driver, stream, store, pack_fn, base, linearLayer(layer), layer == ple_layer);
+}
+
+/// The decoder layer under `base` (the MTP head's "language_model.mtp.layers.0": full attention, no n-gram branch).
+pub fn loadLayerAt(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, store: *Store, pack_fn: cuda.Function, base: []const u8, linear: bool, with_ple: bool) !Layer {
+    var buf: [200]u8 = undefined;
     var base_buf: [80]u8 = undefined;
     @memcpy(base_buf[0..base.len], base);
     const root = base_buf[0..base.len];
@@ -219,7 +228,6 @@ pub fn loadLayer(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Str
     var router_b = try cuda.DeviceBuffer.fromHost(driver, std.mem.sliceAsBytes(router));
     errdefer router_b.free();
 
-    const linear = linearLayer(layer);
     var proj_q = Q4.empty(driver);
     var out_q = Q4.empty(driver);
     errdefer proj_q.free();
@@ -231,6 +239,7 @@ pub fn loadLayer(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Str
     var qs_b = deadBuf(driver);
     var ks_b = deadBuf(driver);
     var is_b = deadBuf(driver);
+    var iks_b = deadBuf(driver);
     var key_q = Q4.empty(driver);
     var val_q = Q4.empty(driver);
     var nk_b = deadBuf(driver);
@@ -244,6 +253,7 @@ pub fn loadLayer(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Str
     errdefer qs_b.free();
     errdefer ks_b.free();
     errdefer is_b.free();
+    errdefer iks_b.free();
     errdefer nk_b.free();
     errdefer nq_b.free();
     errdefer nc_b.free();
@@ -301,12 +311,15 @@ pub fn loadLayer(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Str
         defer gpa.free(kn);
         const iqn = try asF32(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.indexer.q_layernorm.weight", .{ap})));
         defer gpa.free(iqn);
-        if (qn.len != head_dim or kn.len != head_dim or iqn.len != index_dim) return error.UnexpectedTensor;
+        const ikn = try asF32(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.indexer.k_layernorm.weight", .{ap})));
+        defer gpa.free(ikn);
+        if (qn.len != head_dim or kn.len != head_dim or iqn.len != index_dim or ikn.len != index_dim) return error.UnexpectedTensor;
         qs_b = try cuda.DeviceBuffer.fromHost(driver, std.mem.sliceAsBytes(qn));
         ks_b = try cuda.DeviceBuffer.fromHost(driver, std.mem.sliceAsBytes(kn));
         is_b = try cuda.DeviceBuffer.fromHost(driver, std.mem.sliceAsBytes(iqn));
+        iks_b = try cuda.DeviceBuffer.fromHost(driver, std.mem.sliceAsBytes(ikn));
     }
-    if (layer == ple_layer) {
+    if (with_ple) {
         const pre = try std.fmt.bufPrint(&buf, "{s}.ple", .{root});
         var pre_buf: [96]u8 = undefined;
         @memcpy(pre_buf[0..pre.len], pre);
@@ -340,6 +353,9 @@ pub fn loadLayer(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Str
 
     var shared: [3]OwnedFace = .{ blankFace(), blankFace(), blankFace() };
     errdefer for (&shared) |*f| f.free(gpa);
+    // a folder Living Weights taught holds a wider shared expert (its 640 neurons, then the pocket's)
+    const width = (try store.hold(try std.fmt.bufPrint(&buf, "{s}.shared_expert.gate_proj.weight", .{mlp_root}))).dim(0);
+    if (width != moe_w) return error.LearnedPocket;
     shared[0] = try keepFace(gpa, store, &buf, mlp_root, ".shared_expert.gate_proj", false, moe_w, dims);
     shared[1] = try keepFace(gpa, store, &buf, mlp_root, ".shared_expert.up_proj", false, moe_w, dims);
     shared[2] = try keepFace(gpa, store, &buf, mlp_root, ".shared_expert.down_proj", false, dims, moe_w);
@@ -377,6 +393,7 @@ pub fn loadLayer(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Str
         .q_scale = qs_b,
         .k_scale = ks_b,
         .i_scale = is_b,
+        .ik_scale = iks_b,
         .key = key_q,
         .val = val_q,
         .nk = nk_b,

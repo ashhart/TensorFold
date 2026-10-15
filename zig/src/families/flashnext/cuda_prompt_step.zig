@@ -239,12 +239,12 @@ pub fn attnStep(comptime Tri: type, driver: *cuda.Driver, stream: *cuda.Stream, 
     try qmm.matmul(driver, stream.*, s.mixed.ptr, s.xsm.ptr, proj_q.w.ptr, proj_q.s.ptr, proj_q.b.ptr, s.pa.ptr, 1, proj_n, dims);
     // stream-ordered, like the ids: the previous row's queued attention kernels still read s.pos
     try s.pos.uploadAsync(0, std.mem.asBytes(&pos), stream.handle);
-    try tri.attnPrep(s.pa.ptr, s.pos.ptr, q_scale, k_scale, i_scale, s.inv.ptr, s.q.ptr, kc, vc, s.dummy.ptr, s.dummy.ptr, s.iq.ptr, ikc, s.dummy.ptr, s.dummy.ptr, eps, 1, 0);
-    // attention.attention: chunks of 512 keys up to the row's position, at most the scratch's nch
+    try tri.attnPrep(s.pa.ptr, s.pos.ptr, q_scale, k_scale, i_scale, s.inv.ptr, s.q.ptr, kc, vc, s.iq.ptr, ikc, s.dummy.ptr, s.dummy.ptr, eps, 1, 0);
+    // attention.attention, dense: chunks of 512 keys up to the row's position (the row-by-row path stays dense)
     const keys: usize = @as(usize, @intCast(pos)) + 1;
-    if (keys > nch * 512) return error.UnexpectedTensor;
-    try tri.attnChunks(s.q.ptr, kc, vc, s.dummy.ptr, s.dummy.ptr, s.pos.ptr, s.po.ptr, s.pm.ptr, s.pl.ptr, s.dummy.ptr, s.dummy.ptr, s.dummy.ptr, 1, kv_heads, (keys + 511) / 512);
-    try tri.attnMerge(s.po.ptr, s.pm.ptr, s.pl.ptr, s.pos.ptr, s.ao.ptr, s.dummy.ptr, s.dummy.ptr, 1, kv_heads);
+    if (keys > wt.dense_nch * 512) return error.UnexpectedTensor;
+    try tri.attnChunks(s.q.ptr, kc, vc, s.pos.ptr, s.po.ptr, s.pm.ptr, s.pl.ptr, s.dummy.ptr, s.dummy.ptr, s.dummy.ptr, 1, kv_heads, (keys + 511) / 512, false);
+    try tri.attnMerge(s.po.ptr, s.pm.ptr, s.pl.ptr, s.pos.ptr, s.ao.ptr, s.dummy.ptr, s.dummy.ptr, 1, kv_heads, false);
     try tri.attnGate(s.ao.ptr, s.pa.ptr, s.gated.ptr, s.gxs_attn.ptr, 1, proj_n, q_heads, head_dim);
     try qmm.partials(driver, stream.*, s.gated.ptr, s.gxs_attn.ptr, out_q.w.ptr, out_q.s.ptr, out_q.b.ptr, s.dummy.ptr, s.part.ptr, 1, dims, out_k, out_sk);
 }
@@ -302,7 +302,7 @@ pub fn pleStep(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, driver: *
     defer gpa.free(emb);
     const xs = try gpa.alloc(f32, dims / 32);
     defer gpa.free(xs);
-    try ple.embedding(gpa, io, model_dir, history, token, emb, xs);
+    try @import("cuda_ple_check.zig").embedding(gpa, io, model_dir, history, token, emb, xs);
     try s.ple_emb.upload(0, std.mem.sliceAsBytes(emb));
     try s.ple_xs.upload(0, std.mem.sliceAsBytes(xs));
     try qmm.matmul(driver, stream.*, s.ple_emb.ptr, s.ple_xs.ptr, key_q.w.ptr, key_q.s.ptr, key_q.b.ptr, s.ple_keys.ptr, 1, wide, dims);
