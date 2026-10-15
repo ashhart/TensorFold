@@ -13,13 +13,67 @@ block FP8 (e4m3 in 128 x 128 blocks with `weight_scale_inv`).
 | Part | Where | Checked by |
 | --- | --- | --- |
 | Group-limited top-k routing, per-layer shared SwiGLU limit (GLM's bytes unchanged) | `ling-family`, commit 51c01573 | `glm-ref`, `glm-route-old`, `glm-route-ling` |
-| MLA at Ling's shape: 64 roped key columns, 128-wide heads, GPT-J rope, head-wise gate | branch `ling-mla`, f8e594f6 | `ling-mla`, `ling-mla-real`, `glm-mla-same` |
-| KDA on Ling's layer 0 (q/k/v convs as one q\|k\|v conv), opt-in chunked prompt path | branch `ling-kda`, b55aa13d | `glm-kda-ling`, `glm-kda-chunk` |
+| MLA at Ling's shape: 64 roped key columns, 128-wide heads, GPT-J rope, head-wise gate | f8e594f6, merged | `ling-mla`, `ling-mla-real`, `glm-mla-same` |
+| KDA on Ling's layer 0 (q/k/v convs as one q\|k\|v conv), opt-in chunked prompt path | b55aa13d, merged | `glm-kda-ling`, `glm-kda-chunk` |
 | Config loader and weight map (all 214,025 names of the real index) | `zig/src/families/ling/config.zig`, `names.zig` | `zig build test-ling` |
 | Weight loader at TP=1: bf16, FP8 block, ModelOpt NVFP4 | `zig/src/families/ling/weights.zig`, `weights_proj.zig` | `ling-weights`, `ling-weights-real` |
 | Synthetic checkpoints in all three formats | `tf-cuda-test ling-synth` | its own name check |
+| The TP=1 layer graph: embedding, KDA/MLA mixers, dense MLP and MoE, final norm, head; windows and commits | `zig/src/families/ling/forward.zig`, `graph.zig`, `state.zig`, `block_*.zig`, `kernels/cuda/ling_glue.cu` | `ling-forward-synth`, `ling-layer-real` |
 
-The MLA and KDA commits live on their own branches and are not merged into `ling-family`.
+## The layer graph
+
+`forward.Forward` runs rows of one or more sequences (`Seg`: a `State`, its first row, its row count) through the
+embedding, every loaded layer and the head; `stack()` runs the layers alone on `Buffers.x`, `layer()` one of them.
+`Buffers` are prompt rows or decode rows; each sequence's rows stay pending until `commit(state, keep)`. A prompt
+keeps every row; a decode window (at most `window_rows`, 16) keeps any prefix: the KDA states are replayed from the
+window's saves (`replay_layers`) and the conv windows shifted, as #804's GLM commit does. The API follows GLM's
+`cuda_forward.zig` (`Rank`/`Seg`, `Buffers`/`State`, `commit`) so lanes hooks can follow.
+
+Every projection is a `qlinear.Weight` and every routed-expert layer an `experts.Layer` in the format the checkpoint
+stored; the graph only calls `qlinear.Linear.decode`/`prompt` and `experts.Grouped.decode`/`prompt`. MLA's absorbed
+`kv_b` (bf16 `wk`/`wv` per head) is derived at load by running `kv_b` in its own format on identity rows, so any format
+`qlinear` serves works. bf16 routed experts (no grouped bf16 kernel) run every expert on every row and the combine
+reads each row's picks: correct, for tests, not for speed.
+
+Per layer, in the HF model's order: input RMSNorm; KDA (q, k, v, beta into one `[q|k|v|b]` row, f and g rows, GLM's
+chain with the safe gate, gated output norm, `o_proj`) or MLA (`q_a`, `q_a_layernorm`, `q_b`; `kv_a_proj_with_mqa`,
+`kv_a_layernorm` on the 512 latent, the 64 key columns roped into the cache row; absorbed queries, roped attention
+over the 576-wide cache, `expand_v`, sigmoid head gate from `g_proj`, `dense`); residual; post-attention RMSNorm;
+dense SwiGLU (layers 0-3) or MoE (bf16 router dot in fp32, sigmoid + `expert_bias` with 8 groups keeping 4,
+normalized weights x 2.5, grouped experts with the layer's limit, shared expert with its own limit); residual. The
+residual stream, every linear's output and the MoE sums are bf16 at the points where the HF bf16 model rounds them
+(`ling_glue.cu`: residual add, head gate, expert sum + shared). Decode windows run KDA's three-kernel chain, as
+GLM's forward does by default (bit-equal to the fused chain, checked).
+
+Measured on synthetic checkpoints (4 layers: KDA dense, MLA MoE, KDA MoE, MLA MoE; 80 prompt rows, 8 decode rows),
+logits against `oracle/ling_forward.py` routed on the graph's own picks (with free routing, 15-21 of 264 picks
+differ from float64's: group near-ties, the worst group sums 0.0014-0.008 apart):
+
+| Format | vs float64 | vs the bf16 rounding points | bf16 points vs float64 | argmax vs float64 |
+| --- | --- | --- | --- | --- |
+| bf16 | 2.17e-2 | 1.31e-2 | 2.18e-2 | 86/88 |
+| FP8 block | 2.12e-2 | 1.22e-2 | 2.12e-2 | 85/88 |
+| NVFP4 | 2.29e-2 | 1.40e-2 | 2.25e-2 | 85/88 |
+
+(relative L2 of the logits). The graph is as far from float64 as the HF model's own bf16 rounding is. Bit for bit, in
+every format: a prompt cut at 48 equals the uncut prompt; an 8-row verify window equals 8 decode rows; keeping 3 of 8
+and running the next 5 leaves every KDA state, conv window and MLA cache row equal to 8 decode rows; two sequences in
+one prompt chunk and in one decode window equal each alone; the fused and three-kernel KDA chains agree.
+
+Real layers of the FP8 release (`ling-layer-real`, the HF bf16 chain's captured input and output, 512 tokens):
+
+| Layer | Kind | rel L2 vs HF | rows with a different top-8 | rel L2 without them | decode rows vs HF | device peak |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | KDA, dense | 3.27e-3 | - | 3.27e-3 | 3.12e-3 | 0.9 GB |
+| 4 | KDA, MoE | 5.88e-3 | 21 | 3.13e-3 | 4.28e-3 | 8.5 GB |
+| 7 | MLA, MoE | 4.89e-3 | 17 | 3.05e-3 | 3.57e-3 | 8.3 GB |
+| 71 | MLA, MoE, limits 10 | 4.13e-3 | 7 | 3.75e-3 | 3.89e-3 | 8.3 GB |
+
+exllamav3's port measured 0.4-1.1e-3 without flips (4 flips each on layers 4 and 7) on the same chain: it keeps fp16
+activations, the captured HF chain carries an fp32 residual from layer 3's output on, and this graph rounds the stream
+to bf16 as the bf16 model does. On every
+real layer a prompt cut at 300 equals the uncut prompt and a 16-row window equals 16 decode rows; for FP8 decode rows
+equal the prompt's rows (both run the lane). Loading one MoE layer's 512 experts from the sshfs mount takes ~150 s.
 
 ### Formats
 
@@ -42,11 +96,15 @@ per projection. The router must be bf16 (GLM's router kernel reads bf16); a quan
 
 ## What is missing
 
-- The layer graph: `weights.Layer` holds one `qlinear.Weight` per projection, while #804's GLM blocks read raw bf16
-  pointers (KDA's fused `[q | k | v | f_a | g_a | b]`, MLA's latent projections). Ling's blocks have to call
-  `qlinear.Linear` per projection, or fuse same-format rows.
-- Lanes hooks (drafted, concurrent and cut-prompt windows) for Ling.
-- MTP drafting: the MTP layer's tensors load (`weights.Mtp`), nothing drafts with them.
+- Lanes hooks (drafted, concurrent and cut-prompt windows) for Ling: the graph has the pieces (segments, windows,
+  `commit(keep)`), nothing schedules them yet. Sampling, the server and a full-checkpoint run are not wired.
+- MTP drafting: the MTP layer's tensors load (`weights.Mtp`); the graph leaves it unwired. It would be
+  `enorm(embed(next)) | hnorm(hidden)` through `eh_proj`, one MLA + MoE layer on its own cache, the final norm and
+  the shared head.
+- The SwiGLU limit clamps the gate before SiLU (`silu(min(g, 10))`, the grouped expert kernels' and GLM's rule);
+  the Ling reference clamps after (`min(silu(g), 10)`). They differ by at most 4.5e-4 on a clamped element.
+- Speed: nothing is tuned. Projections land in their columns through a byte copy, bf16 routed experts run densely,
+  and the RMS norms take hidden and `q_lora_rank` widths 512, 1536 and 4096 only (`glue.rmsnorm`).
 - EXL3, through ashhart's EXL3 module (tracker #832).
 - Tensor parallelism: the loader is TP=1; shares and transport would come from #804's `cuda_shard.zig` and #855.
 
@@ -58,18 +116,23 @@ TF_LING_INDEX=/path/to/model.safetensors.index.json zig build test-ling   # adds
 zig build -Doptimize=ReleaseFast -Dnvcc=/usr/local/cuda/bin/nvcc
 zig-out/bin/tf-cuda-test ling-synth /tmp/ling-fp8 --format fp8      # bf16 | fp8 | nvfp4, --layers N (default 4)
 zig-out/bin/tf-cuda-test ling-weights /tmp/ling-fp8
+python zig/tests/cuda/oracle/ling_forward.py /tmp/ling-fp8 /tmp/ref                 # float64 reference, free routing
+zig-out/bin/tf-cuda-test ling-forward-synth /tmp/ling-fp8 /tmp/ref /tmp/picks       # exactness; writes the picks
+python zig/tests/cuda/oracle/ling_forward.py /tmp/ling-fp8 /tmp/fref --picks /tmp/picks
+zig-out/bin/tf-cuda-test ling-forward-synth /tmp/ling-fp8 /tmp/fref                 # same picks: logits bounded
 ```
 
 `ling-synth` writes `config.json` (the real file's schema) and `model.safetensors` with the real key names: hidden 512,
-4 heads, 16 experts in 4 groups keeping 2, `q_lora_rank` 256, vocabulary 1,024, layer groups of 2 (KDA, MLA, KDA,
-MLA), layer 0 dense, the last layer clamped, plus the MTP layer. KDA's head dim 128 and MLA's 512 latent, 64 rope and
-128-wide heads stay as the kernels take them. The FP8 file carries the real exception list's pattern; the NVFP4 file
-uses globs and leaves layer 0's dense MLP in bf16, so one checkpoint mixes formats. It checks its names against the
-weight map before it passes. Sizes: bf16 282 tensors, 43 MiB; FP8 517, 23 MiB; NVFP4 978, 15 MiB.
+4 heads, 16 experts in 4 groups keeping 2, `q_lora_rank` 512 (a width the norm kernel takes), vocabulary 1,024, layer
+groups of 2 (KDA, MLA, KDA, MLA), layer 0 dense, the last layer clamped, plus the MTP layer. KDA's head dim 128 and
+MLA's 512 latent, 64 rope and 128-wide heads stay as the kernels take them. The FP8 file carries the real exception
+list's pattern; the NVFP4 file uses globs and leaves layer 0's dense MLP in bf16, so one checkpoint mixes formats. It
+checks its names against the weight map before it passes. FP8 codes stay within 2^-3 to 3.75 so a forward stays in
+range. Sizes: bf16 282 tensors, 45 MiB; FP8 517, 24 MiB; NVFP4 978, 16 MiB.
 
 `ling-weights` loads every layer and checks every projection (decode and prompt rows, 3 rows) against float64 from
 the file, the grouped experts' gate-up (SwiGLU) and down, and each small tensor (norms, convs as fp32 q|k|v, `A_log`,
-`dt_bias`, router, bias) byte for byte. Measured: bf16 85 projections, FP8 and NVFP4 61 each, worst 0.456 of the bound
+`dt_bias`, router, bias) byte for byte. Measured: bf16 85 projections, FP8 and NVFP4 61 each, worst 0.433 of the bound
 (2^-7 of |y| plus 2^-12 of the sum of |x w|); 37 small tensors equal.
 
 With the real checkpoint:
@@ -79,7 +142,8 @@ python zig/tests/cuda/oracle/ling_weights.py /path/to/Ling-3.1-flash /tmp/ling-r
 zig-out/bin/tf-cuda-test ling-weights-real /path/to/Ling-3.1-flash /tmp/ling-ref
 ```
 
-It loads layers 0, 4 and 7 with experts 0-3 (769 MiB on the device) and compares 35 products with torch's float64
+`ling-layer-real DIR FIXTURE` runs one whole layer (fixture from `oracle/ling_layer.py CHAIN L OUT`, the captured
+HF chain's `h<L>.pt`, `h<L+1>.pt`, `r<L>.pt`). `ling-weights-real` loads layers 0, 4 and 7 with experts 0-3 (769 MiB on the device) and compares 35 products with torch's float64
 on the same 8 rows: worst 0.414 of the bound, relative L2 at most 1.7e-3 for bf16 outputs and 6.9e-8 for the
 experts' fp32 down rows.
 
@@ -105,13 +169,10 @@ size.
 
 Each item stands alone.
 
-1. **KDA block on `qlinear`.** Write Ling's KDA block over `weights.Kda`: seven `qlinear.Linear` calls (or one fused
-   `[q | k | v]` per format) feeding #804's chain with `conv`, `a_log`, `dt_bias`, `o_norm` as loaded. Check it with
-   `ling-synth` plus `glm-kda-ling`'s fixture.
-2. **MLA block on `qlinear`.** The same for `weights.Mla` on `ling-mla`'s kernels (`q_a`, `q_b`, `kv_a`, `kv_b`,
-   head gate, `dense`).
-3. **MoE block.** Route with GLM's `moe.Layer` (`ling.route()` fills top-k, groups and limits), run `experts.Grouped`
-   on `Moe.routed`, the shared expert as three projections.
+1. **Lanes hooks.** Drive `Forward` from #804's `cuda_lanes.zig` pattern: drafted windows, concurrent streams as
+   segments, cut prompts; `ling-forward-synth` already checks the exactness each needs.
+2. **MTP.** Wire `weights.Mtp` as a drafter (see "What is missing").
+3. **Fused projections.** Same-format q|k|v (and gate|up) rows as one weight per format, without the column copies.
 4. **Bf16 routed experts.** Add a grouped bf16 expert kernel, or quantize at load, and drop the per-expert lanes.
 5. **TP.** Cut `weights.load` by heads and widths as `glm/cuda_shard.zig` does; FP8 scale blocks span 128 rows and
    128 inputs, so FP8 cuts fall on multiples of 128.

@@ -40,6 +40,7 @@ pub const glm_glue: []const u8 = if (available) &Blob("fatbin_glm_glue").bytes e
 pub const glm_ops: []const u8 = if (available) &Blob("fatbin_glm_ops").bytes else &.{};
 pub const glm_quant: []const u8 = if (available) &Blob("fatbin_glm_quant").bytes else &.{};
 pub const glm_kda: []const u8 = if (available) &Blob("fatbin_glm_kda").bytes else &.{};
+pub const ling_glue: []const u8 = if (available) &Blob("fatbin_ling_glue").bytes else &.{};
 pub const glm_kda_chunk: []const u8 = if (available) &Blob("fatbin_glm_kda_chunk").bytes else &.{};
 pub const torch_argmax: []const u8 = if (available) &Blob("fatbin_torch_argmax").bytes else &.{};
 pub const torch_topk: []const u8 = if (available) &Blob("fatbin_torch_topk").bytes else &.{};

@@ -77,7 +77,7 @@ const Out = struct {
                 .nvfp4 => o.add(name, .u8, &.{ n, k / 2 }, try o.codes(n * k / 2, .any)),
             };
             const tail = name[module.len + 1 ..];
-            if (std.mem.eql(u8, tail, "weight_scale_inv")) return o.add(name, .f32, &.{ (n + 127) / 128, k / 128 }, try o.f32s((n + 127) / 128 * (k / 128), 0.001, 0.011));
+            if (std.mem.eql(u8, tail, "weight_scale_inv")) return o.add(name, .f32, &.{ (n + 127) / 128, k / 128 }, try o.f32s((n + 127) / 128 * (k / 128), s / 4, s / 2));
             if (std.mem.eql(u8, tail, "weight_scale")) return o.add(name, .f8_e4m3, &.{ n, k / 16 }, try o.codes(n * k / 16, .scale));
             if (std.mem.eql(u8, tail, "weight_scale_2")) return o.add(name, .f32, &.{}, try o.f32s(1, s / 8, s / 4));
             if (std.mem.eql(u8, tail, "input_scale")) return o.add(name, .f32, &.{}, try o.f32s(1, 1, 1));
@@ -98,15 +98,12 @@ const Out = struct {
         };
     }
 
-    /// Random bytes: any; e4m3 codes without NaN; positive e4m3 scales 2^-3 to 2^1.
+    /// Random bytes: any; e4m3 codes of magnitude 2^-3 to 3.75 (a forward stays in range); e4m3 scales 2^-3 to 2^1.
     fn codes(o: *Out, count: usize, what: enum { any, e4m3, scale }) ![]u8 {
         const v = try o.a.alloc(u8, count);
         for (v) |*b| b.* = switch (what) {
             .any => o.rng.int(u8),
-            .e4m3 => blk: {
-                const x = o.rng.int(u8);
-                break :blk if (x & 0x7f == 0x7f) x ^ 1 else x;
-            },
+            .e4m3 => (o.rng.int(u8) & 0x87) | (@as(u8, 4) + o.rng.uintLessThan(u8, 5)) << 3,
             .scale => 0x20 + o.rng.uintLessThan(u8, 0x28),
         };
         return v;

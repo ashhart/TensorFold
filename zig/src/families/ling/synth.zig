@@ -14,7 +14,7 @@ pub const shape = .{
     .topk = 4,
     .n_group = 4,
     .topk_group = 2,
-    .q_lora = 256,
+    .q_lora = 512, // a width glue.rmsnorm takes (512, 1536, 4096)
     .vocab = 1024,
     .group = 2, // KDA, MLA, KDA, MLA, ...
 };
