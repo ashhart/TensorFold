@@ -42,17 +42,35 @@ pub const Scratch = struct {
         _ = capacity;
         var s: Scratch = undefined;
         s.taps = null;
-        inline for (.{ .{ "ids", R * 4, true }, .{ "pos", R * 4, true }, .{ "qkv", R * (qd + 2 * 16 * 256) * 2, false }, .{ "q", R * qd * 2, false }, .{ "k", R * 16 * 256 * 2, false }, .{ "v", R * 16 * 256 * 2, false }, .{ "attn", R * qd * 2, false }, .{ "o", R * d * 2, false }, .{ "hn", R * d * 2, false }, .{ "n_mlp", R * d * 2, false }, .{ "gate_up", R * 2 * cfg.intermediate * 2, false }, .{ "act", R * cfg.intermediate * 2, false }, .{ "y", R * d * 2, false }, .{ "logits", cfg.vocab * 2, true } }) |f|
+        var made: usize = 0;
+        errdefer s.release(made);
+        inline for (.{ .{ "ids", R * 4, true }, .{ "pos", R * 4, true }, .{ "qkv", R * (qd + 2 * 16 * 256) * 2, false }, .{ "q", R * qd * 2, false }, .{ "k", R * 16 * 256 * 2, false }, .{ "v", R * 16 * 256 * 2, false }, .{ "attn", R * qd * 2, false }, .{ "o", R * d * 2, false }, .{ "hn", R * d * 2, false }, .{ "n_mlp", R * d * 2, false }, .{ "gate_up", R * 2 * cfg.intermediate * 2, false }, .{ "act", R * cfg.intermediate * 2, false }, .{ "y", R * d * 2, false }, .{ "logits", cfg.vocab * 2, true } }) |f| {
             @field(s, f[0]) = try device.buffer(f[1], if (f[2]) shared else private);
-        for (&s.h) |*b| b.* = try device.buffer(R * d * 2, private);
-        for (&s.normed) |*b| b.* = try device.buffer(R * d * 2, private);
+            made += 1;
+        }
+        for ([_][]mtl.Buffer{ &s.h, &s.normed }) |pair| for (pair) |*b| {
+            b.* = try device.buffer(R * d * 2, private);
+            made += 1;
+        };
         return s;
     }
 
     pub fn deinit(s: *Scratch) void {
-        inline for (.{ "ids", "pos", "qkv", "q", "k", "v", "attn", "o", "hn", "n_mlp", "gate_up", "act", "y", "logits" }) |f| @field(s, f).deinit();
-        for (s.h ++ s.normed) |b| b.deinit();
+        s.release(std.math.maxInt(usize));
         if (s.taps) |b| b.deinit();
+    }
+
+    /// Releases the first `made` buffers in init's order, so a failed init frees what it made.
+    fn release(s: *Scratch, made: usize) void {
+        var i: usize = 0;
+        inline for (.{ "ids", "pos", "qkv", "q", "k", "v", "attn", "o", "hn", "n_mlp", "gate_up", "act", "y", "logits" }) |f| {
+            if (i < made) @field(s, f).deinit();
+            i += 1;
+        }
+        for (s.h ++ s.normed) |b| {
+            if (i < made) b.deinit();
+            i += 1;
+        }
     }
 };
 

@@ -34,7 +34,9 @@ pub const Metal = struct {
     pub fn init(gpa: std.mem.Allocator, io: std.Io, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
         errdefer gpa.destroy(out);
-        out.* = .{ .gpa = gpa, .io = io, .trace = std.c.getenv("GEMMA_DRAFT_TRACE") != null, .model = model, .options = options, .scratch = try st.Scratch.init(model.device, options.capacity), .prompt_scratch = try prompt.Scratch.init(model.device, options.capacity) };
+        var scratch = try st.Scratch.init(model.device, options.capacity);
+        errdefer scratch.deinit();
+        out.* = .{ .gpa = gpa, .io = io, .trace = std.c.getenv("GEMMA_DRAFT_TRACE") != null, .model = model, .options = options, .scratch = scratch, .prompt_scratch = try prompt.Scratch.init(model.device, options.capacity) };
         return out;
     }
 

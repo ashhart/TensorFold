@@ -96,6 +96,7 @@ pub const Drafter = struct {
         d.block_ms = .{ 0, 0 };
         d.pending = null;
         d.trace = std.c.getenv("GEMMA_DRAFT_TRACE") != null;
+        errdefer d.projections.deinit(gpa); // warm's blocks fill it
         d.config = try dw.Config.read(gpa, io, dir);
         const c = &d.config;
         d.w = try dw.load(gpa, target.device, io, dir, c);
@@ -112,8 +113,12 @@ pub const Drafter = struct {
         const qw = c.heads * c.head_dim;
         const kw = c.kv_heads * c.head_dim;
         const r = hold_rows;
-        inline for (.{ .{ "ids", max_items * block_rows * 4, true }, .{ "pos", max_items * block_rows * 8, true }, .{ "apos", pos_rows * 8, true }, .{ "xs", (c.tap_count * hid / 64) * absorb_rows * 4, false }, .{ "mask", max_items * block_rows * (c.window - 1 + block_rows), true }, .{ "ones", block_rows * keys_max, true }, .{ "pick_buf", max_items * block_rows * @sizeOf(round.contract.Pick), true }, .{ "h", r * hid * 2, false }, .{ "x", r * hid * 2, false }, .{ "qkv", r * (qw + 2 * kw) * 2, false }, .{ "q", r * qw * 2, false }, .{ "q2", r * qw * 2, false }, .{ "k16", r * kw * 2, false }, .{ "k16r", r * kw * 2, false }, .{ "attn", r * qw * 2, false }, .{ "o", r * hid * 2, false }, .{ "gate_up", r * 2 * c.intermediate * 2, false }, .{ "act", r * c.intermediate * 2, false }, .{ "logits", r * cfg.vocab * 2, false }, .{ "fcx", absorb_rows * hid * 2, false }, .{ "hctx", absorb_rows * hid * 2, d.trace }, .{ "kv", absorb_rows * 2 * kw * 2, false }, .{ "kn", absorb_rows * kw * 2, false }, .{ "knr", absorb_rows * kw * 2, false } }) |f|
+        var made: usize = 0;
+        errdefer d.release(made);
+        inline for (.{ .{ "ids", max_items * block_rows * 4, true }, .{ "pos", max_items * block_rows * 8, true }, .{ "apos", pos_rows * 8, true }, .{ "xs", (c.tap_count * hid / 64) * absorb_rows * 4, false }, .{ "mask", max_items * block_rows * (c.window - 1 + block_rows), true }, .{ "ones", block_rows * keys_max, true }, .{ "pick_buf", max_items * block_rows * @sizeOf(round.contract.Pick), true }, .{ "h", r * hid * 2, false }, .{ "x", r * hid * 2, false }, .{ "qkv", r * (qw + 2 * kw) * 2, false }, .{ "q", r * qw * 2, false }, .{ "q2", r * qw * 2, false }, .{ "k16", r * kw * 2, false }, .{ "k16r", r * kw * 2, false }, .{ "attn", r * qw * 2, false }, .{ "o", r * hid * 2, false }, .{ "gate_up", r * 2 * c.intermediate * 2, false }, .{ "act", r * c.intermediate * 2, false }, .{ "logits", r * cfg.vocab * 2, false }, .{ "fcx", absorb_rows * hid * 2, false }, .{ "hctx", absorb_rows * hid * 2, d.trace }, .{ "kv", absorb_rows * 2 * kw * 2, false }, .{ "kn", absorb_rows * kw * 2, false }, .{ "knr", absorb_rows * kw * 2, false } }) |f| {
             @field(d, f[0]) = try dev.buffer(f[1], if (f[2]) shared else private);
+            made += 1;
+        }
         @memset(d.ones.slice(u8, block_rows * keys_max), 0xff);
         try d.warm(io);
         return d;
@@ -124,13 +129,22 @@ pub const Drafter = struct {
         var it = d.lanes.valueIterator();
         while (it.next()) |l| d.dropLane(l.*);
         d.lanes.deinit(d.gpa);
-        inline for (.{ "ids", "pos", "apos", "xs", "mask", "ones", "pick_buf", "h", "x", "qkv", "q", "q2", "k16", "k16r", "attn", "o", "gate_up", "act", "logits", "fcx", "hctx", "kv", "kn", "knr" }) |f| @field(d, f).deinit();
+        d.release(std.math.maxInt(usize));
         d.projections.deinit(d.gpa);
         d.picks.deinit();
         d.attention.deinit();
         d.ops.deinit();
         d.w.deinit(d.gpa);
         d.gpa.destroy(d);
+    }
+
+    /// Releases the first `made` buffers in init's order, so a failed init frees what it made.
+    fn release(d: *Drafter, made: usize) void {
+        var i: usize = 0;
+        inline for (.{ "ids", "pos", "apos", "xs", "mask", "ones", "pick_buf", "h", "x", "qkv", "q", "q2", "k16", "k16r", "attn", "o", "gate_up", "act", "logits", "fcx", "hctx", "kv", "kn", "knr" }) |f| {
+            if (i < made) @field(d, f).deinit();
+            i += 1;
+        }
     }
 
     pub fn drafter(d: *Drafter) dr.Drafter {

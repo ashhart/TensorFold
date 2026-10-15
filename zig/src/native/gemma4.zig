@@ -40,16 +40,24 @@ const Host = struct {
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
+    const h = start(a, gpa, io, o, problem) catch |err| switch (err) {
+        error.Refused => return null,
+        else => return err,
+    };
+    return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+/// The host, or error.Refused once `problem` says why; either error path releases what was made before it.
+fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !*Host {
     const model = g.Model.load(gpa, io, o.dir) catch |err| {
         problem.* = try std.fmt.allocPrint(a, "the native Gemma 4 engine cannot load this checkpoint ({s}): it serves the dense 31B in 4-bit groups of 64", .{@errorName(err)});
-        return null;
+        return error.Refused;
     };
     errdefer model.deinit();
     const window: i64 = o.context orelse @min(default_context, @as(i64, @intCast(model.config.context)));
     if (window < 1 or window > model.config.context) {
-        model.deinit();
         problem.* = "--context must fit the Gemma 4 checkpoint's positive context window";
-        return null;
+        return error.Refused;
     }
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
@@ -63,11 +71,11 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     if (if (o.drafts) o.drafter else null) |dir| {
         h.draft = g.dflash.Drafter.init(gpa, io, model, dir, .{ .capacity = @intCast(window) }) catch |err| {
             problem.* = try std.fmt.allocPrint(a, "the native Gemma 4 drafter cannot load {s} ({s}): it takes z-lab/gemma-4-31B-it-DFlash", .{ dir, @errorName(err) });
-            return null;
+            return error.Refused;
         };
-        h.wrap = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), h.draft.?.drafter());
     }
     errdefer if (h.draft) |d| d.deinit();
+    if (h.draft) |d| h.wrap = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), d.drafter());
     errdefer if (h.wrap) |*w| w.deinit();
     const facts = if (h.wrap) |*w| w.facts(h.metal.facts()) else h.metal.facts();
     h.config = try lanes.Config.init(gpa, facts, g.state.max_rows, g.state.max_rows - 1);
@@ -78,7 +86,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = g.state.chunk_rows, .structures = true });
     h.warm = .{ .queue = h.metal.model.queue };
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
-    try h.host.start();
+    try h.host.start(); // the host's lists are empty until its thread runs, so a failed start leaves nothing to free
     std.log.info("gemma4: the dense 31B, context {d} tokens, {d} streams{s}", .{ window, @max(o.lanes, 2), if (h.draft != null) ", DFlash drafts" else "" });
-    return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+    return h;
 }

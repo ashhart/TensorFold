@@ -109,20 +109,42 @@ pub const Scratch = struct {
         var s: Scratch = undefined;
         s.slots = slots;
         s.taps = null;
-        inline for (.{ .{ "ids", r * 4, true }, .{ "pos", r * 4, true }, .{ "qkv", r * (qd + 2 * 16 * 256) * 2, false }, .{ "q", r * qd * 2, false }, .{ "k", r * 16 * 256 * 2, false }, .{ "v", r * 16 * 256 * 2, false }, .{ "attn", r * qd * 2, false }, .{ "o", r * d * 2, false }, .{ "hn", r * d * 2, false }, .{ "n_mlp", r * d * 2, false }, .{ "gate_up", r * 2 * cfg.intermediate * 2, false }, .{ "act", r * cfg.intermediate * 2, false }, .{ "y", r * d * 2, false }, .{ "pm", slots * 4, false }, .{ "pl", slots * 4, false }, .{ "po", slots * cfg.global_dim * 4, false }, .{ "logits", r * cfg.vocab * 2, true }, .{ "sums", r * (cfg.intermediate / 64) * 4, false }, .{ "picks", r * 8, true } }) |f|
+        var made: usize = 0;
+        errdefer s.release(made);
+        inline for (.{ .{ "ids", r * 4, true }, .{ "pos", r * 4, true }, .{ "qkv", r * (qd + 2 * 16 * 256) * 2, false }, .{ "q", r * qd * 2, false }, .{ "k", r * 16 * 256 * 2, false }, .{ "v", r * 16 * 256 * 2, false }, .{ "attn", r * qd * 2, false }, .{ "o", r * d * 2, false }, .{ "hn", r * d * 2, false }, .{ "n_mlp", r * d * 2, false }, .{ "gate_up", r * 2 * cfg.intermediate * 2, false }, .{ "act", r * cfg.intermediate * 2, false }, .{ "y", r * d * 2, false }, .{ "pm", slots * 4, false }, .{ "pl", slots * 4, false }, .{ "po", slots * cfg.global_dim * 4, false }, .{ "logits", r * cfg.vocab * 2, true }, .{ "sums", r * (cfg.intermediate / 64) * 4, false }, .{ "picks", r * 8, true } }) |f| {
             @field(s, f[0]) = try device.buffer(f[1], if (f[2]) shared else opts);
-        for (&s.lo) |*b| b.* = try device.buffer(r * 4, shared);
-        for (&s.meta) |*b| b.* = try device.buffer(r * meta_ints * 4, shared);
-        for (&s.h) |*b| b.* = try device.buffer(r * d * 2, opts);
-        for (&s.normed) |*b| b.* = try device.buffer(r * d * 2, opts);
+            made += 1;
+        }
+        for (&s.lo) |*b| {
+            b.* = try device.buffer(r * 4, shared);
+            made += 1;
+        }
+        for (&s.meta) |*b| {
+            b.* = try device.buffer(r * meta_ints * 4, shared);
+            made += 1;
+        }
+        for ([_][]mtl.Buffer{ &s.h, &s.normed }) |pair| for (pair) |*b| {
+            b.* = try device.buffer(r * d * 2, opts);
+            made += 1;
+        };
         return s;
     }
 
     pub fn deinit(s: *Scratch) void {
-        inline for (.{ "ids", "pos", "qkv", "q", "k", "v", "attn", "o", "hn", "n_mlp", "gate_up", "act", "y", "pm", "pl", "po", "logits", "sums", "picks" }) |f| @field(s, f).deinit();
-        for (s.lo ++ s.meta) |b| b.deinit();
-        for (s.h) |b| b.deinit();
-        for (s.normed) |b| b.deinit();
+        s.release(std.math.maxInt(usize));
         if (s.taps) |b| b.deinit();
+    }
+
+    /// Releases the first `made` buffers in init's order, so a failed init frees what it made.
+    fn release(s: *Scratch, made: usize) void {
+        var i: usize = 0;
+        inline for (.{ "ids", "pos", "qkv", "q", "k", "v", "attn", "o", "hn", "n_mlp", "gate_up", "act", "y", "pm", "pl", "po", "logits", "sums", "picks" }) |f| {
+            if (i < made) @field(s, f).deinit();
+            i += 1;
+        }
+        for (s.lo ++ s.meta ++ s.h ++ s.normed) |b| {
+            if (i < made) b.deinit();
+            i += 1;
+        }
     }
 };
