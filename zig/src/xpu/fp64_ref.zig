@@ -147,7 +147,7 @@ const Part = struct {
                     cb.b[g] = -8.0 * cb.s[g];
                 } else {
                     cb.s[g] = half(p.s, g * p.nt + n);
-                    cb.b[g] = half(p.b, g * p.nt + n) / @as(f32, @floatFromInt(p.gs));
+                    cb.b[g] = half(p.b, g * p.nt + n) * 256.0 / @as(f32, @floatFromInt(p.gs));
                 };
                 h = .{
                     .words = tensor(.i32, kw, std.mem.sliceAsBytes(cb.words[0..kw])),

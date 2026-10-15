@@ -63,9 +63,9 @@ static void q8_block(half8 xv, int K, int g, global char *A8, global float *SA, 
   if (lane == 0) {
     SA[(long)g * MS + t] = s;
     const float a = s * (float)qs * (1.0f / 128.0f);
-    const half hi = convert_half_rte(a);
+    const half hi = convert_half_rte(a * ASC);
     AHI[(long)t * (K / 128) + g] = hi;
-    ALO[(long)t * (K / 128) + g] = convert_half_rte(a - (float)hi);
+    ALO[(long)t * (K / 128) + g] = convert_half_rte(a * ASC - (float)hi);
   }
 }
 static void quant_row(local const half *hl, int K, global char *A8, global float *SA, int MS, global half *AHI,
@@ -96,9 +96,9 @@ static void out_rows(local const half *hl, int K, global half *H, int t, int rot
     for (int j = 0; j < 8; j++) s += (float)xv[j];
     s = sub_group_reduce_add(s) * (1.0f / 128);
     if (lane == 0) {
-      const half hi = convert_half_rte(s);
+      const half hi = convert_half_rte(s * ASC);
       AHI[(long)t * (K / 128) + g] = hi;
-      ALO[(long)t * (K / 128) + g] = convert_half_rte(s - (float)hi);
+      ALO[(long)t * (K / 128) + g] = convert_half_rte(s * ASC - (float)hi);
     }
   }
 }
@@ -124,9 +124,9 @@ static void q4_block(half8 xv, int K, int g, global uint *A4, global float *SA, 
   if (lane == 0) {
     SA[(long)g * MS + t] = s;
     const float a = s * (float)qs * (1.0f / 128.0f);
-    const half hi = convert_half_rte(a);
+    const half hi = convert_half_rte(a * ASC);
     AHI[(long)t * (K / 128) + g] = hi;
-    ALO[(long)t * (K / 128) + g] = convert_half_rte(a - (float)hi);
+    ALO[(long)t * (K / 128) + g] = convert_half_rte(a * ASC - (float)hi);
   }
 }
 // Quantization alone, row X fp16 [T, K]: one group of 128 per row, in registers (rot: block rotated first).
@@ -244,7 +244,7 @@ kernel void repack(global const uint *MW, global const ushort *MS, global const 
   if (w % (GS / 8) == 0) {
     const int g = w / (GS / 8);
     S[(long)g * NT + col] = convert_half_rte(bf2f(MS[(long)n * (K / GS) + g]));
-    BG[(long)g * NT + col] = convert_half_rte(bf2f(MB[(long)n * (K / GS) + g]) * GS);
+    BG[(long)g * NT + col] = convert_half_rte(bf2f(MB[(long)n * (K / GS) + g]) * GS / ASC);
   }
 }
 
@@ -265,7 +265,7 @@ kernel void repack_gptq(global const uint *QW, global const half *SC, global uin
     const int g = w / (G / 8);
     const half s = SC[(long)g * N + n];
     S[(long)g * NT + col] = s;
-    BG[(long)g * NT + col] = convert_half_rte((float)s * (-8.0f * G));
+    BG[(long)g * NT + col] = convert_half_rte((float)s * (-8.0f * G / ASC));
   }
 }
 

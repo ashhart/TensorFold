@@ -1,4 +1,8 @@
 // Weight-only int4 GEMM in OpenCL C for Xe2, compiled per weight format (-DGSZ=64 affine MLX, -DGSZ=128 symmetric GPTQ)
+// group means stored × ASC (and B · group / ASC): the low half stays out of fp16 subnormals
+#ifndef ASC
+#define ASC 256.0f
+#endif
 
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 
@@ -241,9 +245,9 @@ kernel void rowsum_hl(global const half *A, global half *Ahi, global half *Alo, 
   if (m < M)
     for (int k = 0; k < GSZ; k++) s += (float)A[(long)m * K + g * GSZ + k];
   s *= 1.0f / GSZ;
-  const half hi = convert_half_rte(s);
+  const half hi = convert_half_rte(s * ASC);
   Ahi[(long)m * G + g] = hi;
-  Alo[(long)m * G + g] = convert_half_rte(s - (float)hi);
+  Alo[(long)m * G + g] = convert_half_rte(s * ASC - (float)hi);
 }
 
 // --- s4dpb family: fixed K slices summed from 0, then the bias by DPAS on the total; same bits for any partitioning.
