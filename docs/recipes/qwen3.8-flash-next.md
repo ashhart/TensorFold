@@ -2,7 +2,8 @@
 
 The `qwen4_exp` family has Gated DeltaNet, sparse attention, MoE, hyper-connections and hashed n-gram
 embeddings. The native engine's supported Metal checkpoint uses MLX affine 6-bit weights in groups of 32
-and includes an MTP head. The native engine refuses the 4-bit/group-32 checkpoint at load.
+and includes an MTP head. On a Mac the native engine refuses the 4-bit/group-32 checkpoint at load; on CUDA it serves
+that one ([Flash Next on CUDA](flash-next-cuda.md)).
 
 ```bash
 tensorfold pull TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP
@@ -10,8 +11,8 @@ tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP --name bench --tempe
 ```
 
 For native serving, see the [Metal runbook](../../RUNBOOK.md#flash-next-and-paired-metal-serving).
-Native Flash Next has no CUDA backend yet; its port is tracked in
-[#472](https://github.com/ashhart/TensorFold/issues/472).
+Native Flash Next on CUDA serves the MLX 4-bit group-32 checkpoint from a captured kernel set: see
+[Flash Next on CUDA](flash-next-cuda.md) ([#472](https://github.com/ashhart/TensorFold/issues/472)).
 
 The sections below describe the Python 0.6.6 engine, available at the
 [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Their flags, variables and paths are that engine's,

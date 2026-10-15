@@ -123,6 +123,8 @@ The archives require glibc 2.28 or newer and an NVIDIA driver providing `libcuda
 CUDA serves Nemotron 3.5 Lightning, qualified on GB10 (`linux-aarch64`, greedy and sampled) and on Ampere cards with
 compute capability 8.6 (`linux-x86_64`, greedy: the RTX 30 series, RTX A6000, A10 and A40), and checked on an RTX PRO 6000 Blackwell (compute
 capability 12.0, `linux-x86_64`).
+Flash Next also serves on CUDA from its MLX 4-bit checkpoint and a captured kernel set named by `TENSORFOLD_CUDA_KERNELS`,
+run on a GB10: see [Flash Next on CUDA](docs/recipes/flash-next-cuda.md).
 
 On a GB10 arm64 host (an x86_64 host uses `linux-x86_64` in the same commands):
 
