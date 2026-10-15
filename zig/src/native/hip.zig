@@ -95,14 +95,7 @@ fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open
     if (o.mtp_confidence) |c| policy.mtp.confidence = c;
     if (o.keep) |n| policy.slots = @intCast(@min(n, 1 << 16));
     if (matrixRefused(policy, caps)) |why| return refuse(a, problem, "matrix=on: {s}; matrix=auto runs the dot2 tiles", .{why});
-    const group: ?hip.collective.Group = if (o.tp > 1) hip.joinGroup(gpa, io, o.rank, o.tp, o.master, o.master_port, caps, &policy) catch |err| return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.NoTensorParallel => refuse(a, problem, "this build has no tensor parallelism: it comes with the RCCL backend", .{}),
-        error.NoRccl => refuse(a, problem, "tensor parallelism needs RCCL", .{}),
-        error.NoId => refuse(a, problem, "RCCL gave no id", .{}),
-        error.MixedGpus => refuse(a, problem, "the ranks' GPUs differ: a group needs one kind of GPU", .{}),
-        else => refuse(a, problem, "the ranks' link at {s}:{d} failed ({s})", .{ o.master, o.master_port, @errorName(err) }),
-    } else null;
+    const group: ?hip.collective.Group = if (o.tp > 1) try join(a, gpa, io, o, caps, &policy, problem) else null;
     errdefer if (group) |g| g.close(gpa);
     const policy_line = try std.fmt.allocPrint(gpa, "{f}", .{policy});
     std.debug.print("[tensorfold] HIP rank {d} of {d}: policy {s}{s} {s}\n", .{ o.rank, o.tp, policy_line, if (o.rank > 0) " (rank 0's)" else "", notes.text() });
@@ -118,6 +111,66 @@ fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open
             .cache_over_cap = o.prompt_cache_over_cap,
         },
         .policy_line = policy_line,
+    };
+}
+
+/// This rank in its group, once every rank runs the same executable, checkpoint, world, GPU and RCCL as rank 0.
+fn join(
+    a: Allocator,
+    gpa: Allocator,
+    io: std.Io,
+    o: api.Open,
+    caps: hip.Caps,
+    policy: *hip.Policy,
+    problem: *[]const u8,
+) (Refused || Allocator.Error)!hip.collective.Group {
+    const ident = hip.identity.ofThis(gpa, io, o.dir) catch |err| return refuse(
+        a,
+        problem,
+        "cannot digest this rank's executable or the checkpoint in {s} for the group ({s})",
+        .{ o.dir, @errorName(err) },
+    );
+    var fault: hip.collective.Fault = .{};
+    const j: hip.collective.Join = .{
+        .rank = o.rank,
+        .world = o.tp,
+        .master = o.master,
+        .port = o.master_port,
+        .caps = caps,
+        .policy = policy,
+        .ident = ident,
+        .fault = &fault,
+    };
+    return hip.joinGroup(gpa, io, j) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.NoTensorParallel => refuse(
+            a,
+            problem,
+            "this build has no tensor parallelism: it comes with the RCCL backend",
+            .{},
+        ),
+        error.NoRccl => refuse(a, problem, "tensor parallelism needs RCCL", .{}),
+        error.NoId => refuse(a, problem, "RCCL gave no id", .{}),
+        error.RanksDiffer => if (fault.field == .layout)
+            refuse(
+                a,
+                problem,
+                "a rank's join handshake differs from rank 0's: run the same TensorFold build on every rank",
+                .{},
+            )
+        else
+            refuse(
+                a,
+                problem,
+                "rank {d}'s {s} differs from rank 0's; the group is refused on every rank",
+                .{ fault.rank, fault.field.what() },
+            ),
+        else => refuse(
+            a,
+            problem,
+            "the ranks' link at {s}:{d} failed ({s})",
+            .{ o.master, o.master_port, @errorName(err) },
+        ),
     };
 }
 

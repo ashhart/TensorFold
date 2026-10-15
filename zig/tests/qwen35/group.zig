@@ -51,12 +51,22 @@ pub const Group = struct {
         }
     };
 
-    /// Joins the other ranks (the group stays open until the engine is gone); one rank joins nothing.
-    pub fn join(g: Group, gpa: std.mem.Allocator, io: std.Io) !Joined {
+    /// Joins the other ranks running the checkpoint in `dir` (the group stays open until the engine is gone).
+    pub fn join(g: Group, gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Joined {
         const found = try resolve(g.policy, @intCast(g.rank));
         var j: Joined = .{ .gpa = gpa, .world = g.world, .policy = found.policy };
         if (g.world < 2) return j;
-        j.group = try hip.joinGroup(gpa, io, @intCast(g.rank), @intCast(g.world), g.master, g.port, found.caps, &j.policy);
+        j.group = try hip.joinRun(
+            gpa,
+            io,
+            @intCast(g.rank),
+            @intCast(g.world),
+            g.master,
+            g.port,
+            found.caps,
+            &j.policy,
+            dir,
+        );
         return j;
     }
 

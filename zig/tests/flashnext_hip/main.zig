@@ -76,7 +76,17 @@ fn generate(gpa: std.mem.Allocator, io: std.Io, a: Args) !void {
     driver.close();
     var notes: hip.Policy.Notes = .{};
     var policy = try hip.Policy.resolve(a.policy, .current, &notes);
-    const group: ?hip.collective.Group = if (a.world > 1) try hip.joinGroup(gpa, io, @intCast(a.rank), @intCast(a.world), a.master, a.port, caps, &policy) else null;
+    const group: ?hip.collective.Group = if (a.world > 1) try hip.joinRun(
+        gpa,
+        io,
+        @intCast(a.rank),
+        @intCast(a.world),
+        a.master,
+        a.port,
+        caps,
+        &policy,
+        a.dir,
+    ) else null;
     defer if (group) |g| g.close(gpa);
     const t0 = nowNs(io);
     const e = try fx.engine.Engine.open(gpa, io, a.dir, .{ .device = device, .rank = a.rank, .world = a.world, .group = group, .policy = policy, .capacity = a.capacity, .chunk = a.chunk });

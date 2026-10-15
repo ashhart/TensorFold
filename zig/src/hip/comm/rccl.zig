@@ -18,6 +18,7 @@ const P = ?*anyopaque;
 /// Each field is the library's exact export.
 const Api = struct {
     ncclGetErrorString: *const fn (c_int) callconv(.c) [*:0]const u8,
+    ncclGetVersion: *const fn (*c_int) callconv(.c) c_int,
     ncclGetUniqueId: *const fn (*UniqueId) callconv(.c) c_int,
     ncclCommInitRank: *const fn (*Handle, c_int, UniqueId, c_int) callconv(.c) c_int,
     ncclCommDestroy: *const fn (Handle) callconv(.c) c_int,
@@ -71,6 +72,13 @@ pub const Rccl = struct {
         if (code == 0) return;
         std.log.err("{s}: RCCL error {d}: {s}", .{ what, code, std.mem.span(r.api.ncclGetErrorString(code)) });
         return error.RcclFailed;
+    }
+
+    /// The library's version (RCCL 2.22.3 is 22203): every rank of a group runs the same one.
+    pub fn version(r: *const Rccl) Error!u32 {
+        var v: c_int = 0;
+        try r.check(r.api.ncclGetVersion(&v), "ncclGetVersion");
+        return @intCast(v);
     }
 
     /// A fresh id; rank 0 makes it and hands it to the others.

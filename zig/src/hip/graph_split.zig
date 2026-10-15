@@ -72,7 +72,7 @@ pub const Recorder = struct {
         return .{ .ptr = r, .vtable = &vtable, .rank = c.rank, .world = c.world };
     }
 
-    /// The recorded step, or null when a cut failed; the recorder is empty after either.
+    /// The recorded step, or null when a cut failed or its pieces could not be kept; the recorder is empty after.
     pub fn finish(r: *Recorder) !?Split {
         if (!r.failed) r.closePiece() catch {
             r.failed = true;
@@ -84,14 +84,17 @@ pub const Recorder = struct {
             } else |_| {}
             r.capturing = false;
         }
-        if (r.failed) {
-            for (r.pieces.items) |*p| if (p.* == .graph) p.graph.deinit();
-            r.pieces.deinit(r.gpa);
-            r.pieces = .empty;
-            return null;
-        }
-        const pieces = try r.pieces.toOwnedSlice(r.gpa);
+        if (r.failed) return r.discard();
+        const pieces = r.pieces.toOwnedSlice(r.gpa) catch return r.discard();
         return .{ .gpa = r.gpa, .pieces = pieces, .comm = r.inner };
+    }
+
+    /// Frees what was recorded: the step runs eagerly instead.
+    fn discard(r: *Recorder) ?Split {
+        for (r.pieces.items) |*p| if (p.* == .graph) p.graph.deinit();
+        r.pieces.deinit(r.gpa);
+        r.pieces = .empty;
+        return null;
     }
 
     fn closePiece(r: *Recorder) !void {

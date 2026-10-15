@@ -62,7 +62,17 @@ pub fn run(g: Gpu, model_dir: []const u8, dir: []const u8, group: Group) !void {
     var policy = try hip.Policy.resolve("kernels=reference", .none, &notes);
     const caps = try hip.Device.kernelCaps(@constCast(g.d), @intCast(group.rank));
     // the group stays open to the end: its communicator is the forward's
-    const joined: ?hip.collective.Group = if (group.world > 1) try hip.joinGroup(g.gpa, g.io, @intCast(group.rank), @intCast(group.world), group.master, group.port, caps, &policy) else null;
+    const joined: ?hip.collective.Group = if (group.world > 1) try hip.joinRun(
+        g.gpa,
+        g.io,
+        @intCast(group.rank),
+        @intCast(group.world),
+        group.master,
+        group.port,
+        caps,
+        &policy,
+        model_dir,
+    ) else null;
     defer if (joined) |j| j.close(g.gpa);
     const comm: ?hip.collective.Comm = if (joined) |j| try j.open() else null;
     var lib = try hip.Launcher.load(g.d, policy.choices(), hip.kernels.images);
