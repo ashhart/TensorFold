@@ -8,6 +8,10 @@ const joint = @import("pocket_joint.zig");
 const pocket_dump = @import("pocket_dump.zig");
 const clock = @import("pocket_clock.zig");
 const reading = @import("pocket_read.zig");
+const quieting = @import("pocket_quiet.zig");
+const loading = @import("pocket_load.zig");
+const family = @import("family.zig");
+const neuron_math = @import("neuron.zig");
 
 const Example = examples.Example;
 const Acting = lesson_route.Acting;
@@ -16,15 +20,10 @@ const Fit = pocket_fit.Fit;
 const fit = pocket_fit.fit;
 const fitLayer = pocket_fit.fitLayer;
 const dotBf16 = pocket_fit.dotBf16;
-const margin = pocket_fit.margin;
 const fit_steps = pocket_fit.fit_steps;
 
-/// A pocket's neurons at each MoE layer: one 4-bit group of the shared expert's width.
-pub const neurons = 64;
 const per_fact = 10; // neurons a fact takes, at the layers that tell its questions apart best
 const value_neurons = 4; // of those, the ones before its answer's value, when its answers show one
-const kept_least: f32 = 0.5; // an earlier neuron refitted must still reach this on every one of its own fact's rows
-const refit_above: f32 = 0.5; // an earlier neuron is refitted only where it fires above this on a new fact's rows
 
 /// Where a neuron fires: the reply's first row, the named subject's last token, or the row before the answer's value.
 pub const Key = enum(u2) { reply, subject, value };
@@ -85,10 +84,16 @@ fn better(f: []const Fit, a: usize, b: usize) bool {
     return f[a].fact_least > f[b].fact_least;
 }
 
-/// A pocket over trainer T (Metal's: input, residual, nudges) and a host that hands each layer's to the forward.
-pub fn Pocket(comptime T: type) type {
+/// A pocket over trainer T (its inputs, residuals, nudges) for family F, and a host handing each layer to the forward.
+pub fn Pocket(comptime T: type, comptime F: family.Family) type {
+    comptime F.check() catch unreachable;
     return struct {
         const Self = @This();
+        /// A pocket's neurons at each layer it sits at: a whole number of quantization groups of the expert's width.
+        pub const neurons = F.neurons;
+        pub const of = F; // the family it learns into
+        pub const swiglu = F.neuron.act == .swiglu;
+        pub const gated = F.neuron.gated;
 
         gpa: std.mem.Allocator,
         mode: Mode, // as asked (TF_SLIDE_POCKET_KEY), auto by default
@@ -105,9 +110,13 @@ pub fn Pocket(comptime T: type) type {
         split: [3]usize = .{ per_fact, 0, 0 }, // the open fact's neurons on each key
         subjects: std.ArrayList(u32) = .empty, // the open fact's subject tokens
         leads: std.ArrayList(u32) = .empty, // the tokens before them: after another, the subject is someone else's
-        moe: std.ArrayList(usize) = .empty, // the MoE layers a pocket sits at, its slots in order
-        up: std.ArrayList(f32) = .empty, // [slots, neurons, D]: each neuron's input weights
+        moe: std.ArrayList(usize) = .empty, // the layers a pocket learns at (the layout's), its slots in order
+        hidden: usize = 0, // D, as the layout gives it
+        layers: usize = 0, // the model's layers, as the layout gives them
+        up: std.ArrayList(f32) = .empty, // [slots, neurons, D]: each neuron's input weights u, as fitted
         down: std.ArrayList(f32) = .empty, // [slots, neurons, D]: each neuron's output
+        gate: std.ArrayList(f32) = .empty, // SwiGLU: [slots, neurons, D], each neuron's gate row (sharp u, or as written)
+        scratch: std.ArrayList(f32) = .empty, // SwiGLU: [neurons, D], a slot's up rows (u / sharp) as handed over
         used: std.ArrayList(usize) = .empty, // [slots]: neurons in use, the first ones
         taken: std.ArrayList(Taken) = .empty, // the open fact's neurons
         answered: []const Example = &.{}, // the fact's answers, which its neurons' outputs are fitted on
@@ -124,6 +133,7 @@ pub fn Pocket(comptime T: type) type {
         retired_marks: usize = 0, // retired_lessons before the last retire, which a put-back returns to
         retired: std.ArrayList([2]usize) = .empty, // the last retire's (slot, neuron), put back if the newer fact fails
         retired_w: std.ArrayList(f32) = .empty, // [retired, 2, D]: their input and output weights from before
+        refit_gate: std.ArrayList(f32) = .empty, // SwiGLU: [refits, D], their gate rows from before
         phase: enum { read, fit, values, check, done } = .done,
         at: usize = 0, // the next example read, answer of a step, or held-out answer judged
         back: usize = 0, // held-out answers that came back token for token
@@ -141,7 +151,7 @@ pub fn Pocket(comptime T: type) type {
         }
 
         pub fn deinit(p: *Self) void {
-            inline for (.{ "moe", "up", "down", "used", "taken", "rows", "labels", "keeps", "refits", "refit_up", "retired_lessons", "retired", "retired_w", "joint", "joint_down", "joint_answers", "learned", "pos", "subjects", "leads" }) |f| @field(p, f).deinit(p.gpa);
+            inline for (.{ "moe", "up", "down", "gate", "scratch", "used", "taken", "rows", "labels", "keeps", "refits", "refit_up", "refit_gate", "retired_lessons", "retired", "retired_w", "joint", "joint_down", "joint_answers", "learned", "pos", "subjects", "leads" }) |f| @field(p, f).deinit(p.gpa);
             p.read.deinit(p.gpa);
             p.v.deinit(p.gpa);
         }
@@ -188,23 +198,29 @@ pub fn Pocket(comptime T: type) type {
             return which[(slot * neurons + n) * d ..][0..d];
         }
 
-        /// The pocket's neurons as the shards hold them, read once: every MoE layer but the last.
+        /// Neuron n of `slot`'s activation at input `x` (bf16): relu(u x)^2, or silu(g x) (u x) / sharp (neuron.zig).
+        pub fn act(p: *const Self, slot: usize, n: usize, x: []const u16) f32 {
+            const d = p.hidden;
+            const z = dotBf16(p.neuron(@constCast(p.up.items), slot, n, d), x);
+            const zg = if (swiglu) dotBf16(p.neuron(@constCast(p.gate.items), slot, n, d), x) else 0;
+            return neuron_math.act(F.neuron, z, zg);
+        }
+
+        /// A SwiGLU neuron's gate row set from its input weights as they are now.
+        pub fn gateFrom(p: *Self, slot: usize, n: usize) void {
+            if (!swiglu) return;
+            neuron_math.gateRow(F.neuron, p.neuron(p.up.items, slot, n, p.hidden), p.neuron(p.gate.items, slot, n, p.hidden));
+        }
+
         fn load(p: *Self, t: *T, host: anytype) !void {
-            if (p.moe.items.len > 0) return;
-            const c = t.config();
-            // every MoE layer but the last (a nudge after it has no gradient to read), its neurons as loaded
-            for (0..c.layers - 1) |l| if (c.kinds[l] == .moe) try p.moe.append(p.gpa, l);
-            const n = neurons * c.hidden;
-            try p.up.appendNTimes(p.gpa, 0, p.slots() * n);
-            try p.down.appendNTimes(p.gpa, 0, p.slots() * n);
-            try p.used.appendNTimes(p.gpa, 0, p.slots());
-            for (p.moe.items, 0..) |l, j| p.used.items[j] = host.pocketRead(l, p.up.items[j * n ..][0..n], p.down.items[j * n ..][0..n]);
+            _ = t;
+            return loading.load(p, host);
         }
 
         /// A replaced fact's neurons, (layer, neuron) each, zeroed where they sit; their places stay taken.
         pub fn retire(p: *Self, t: *T, host: anytype, gone: []const [2]u16) !void {
             try p.load(t, host);
-            const d = t.config().hidden;
+            const d = p.hidden;
             p.retired.clearRetainingCapacity();
             p.retired_w.clearRetainingCapacity();
             p.retired_marks = p.retired_lessons.items.len;
@@ -225,7 +241,7 @@ pub fn Pocket(comptime T: type) type {
         /// The last retire undone: its neurons as they were (the fact that replaced theirs was not learned).
         pub fn unretire(p: *Self, t: *T, host: anytype) !void {
             try p.load(t, host);
-            const d = t.config().hidden;
+            const d = p.hidden;
             for (p.retired.items, 0..) |r, i| {
                 @memcpy(p.neuron(p.up.items, r[0], r[1], d), p.retired_w.items[2 * i * d ..][0..d]);
                 @memcpy(p.neuron(p.down.items, r[0], r[1], d), p.retired_w.items[(2 * i + 1) * d ..][0..d]);
@@ -260,6 +276,7 @@ pub fn Pocket(comptime T: type) type {
             p.refit_up.clearRetainingCapacity();
             p.joint.clearRetainingCapacity();
             p.joint_down.clearRetainingCapacity();
+            p.refit_gate.clearRetainingCapacity();
             p.learned_before = p.learned.items.len;
             p.pos_before = p.pos.items.len;
             p.clock = .{};
@@ -303,7 +320,7 @@ pub fn Pocket(comptime T: type) type {
 
         /// The open fact's neurons back to zero and free, and the earlier neurons it fitted again as they were.
         pub fn undo(p: *Self, t: *T, host: anytype) !void {
-            const d = t.config().hidden;
+            const d = p.hidden;
             p.learned.shrinkRetainingCapacity(p.learned_before);
             p.pos.shrinkRetainingCapacity(p.pos_before);
             var i = p.taken.items.len;
@@ -312,22 +329,32 @@ pub fn Pocket(comptime T: type) type {
                 const k = p.taken.items[i];
                 @memset(p.neuron(p.up.items, k.slot, k.neuron, d), 0);
                 @memset(p.neuron(p.down.items, k.slot, k.neuron, d), 0);
+                if (swiglu) @memset(p.neuron(p.gate.items, k.slot, k.neuron, d), 0);
                 if (k.neuron + 1 == p.used.items[k.slot]) p.used.items[k.slot] -= 1;
                 try p.upload(t, host, k.slot);
             }
             for (p.refits.items, 0..) |r, j| {
                 @memcpy(p.neuron(p.up.items, r.slot, r.neuron, d), p.refit_up.items[j * d ..][0..d]);
+                if (swiglu) @memcpy(p.neuron(p.gate.items, r.slot, r.neuron, d), p.refit_gate.items[j * d ..][0..d]);
                 try p.upload(t, host, r.slot);
             }
             p.refits.clearRetainingCapacity();
             p.refit_up.clearRetainingCapacity();
             try joint.putBack(p, t, host, d);
+            p.refit_gate.clearRetainingCapacity();
             p.taken.clearRetainingCapacity();
         }
 
+        /// Slot `slot`'s neurons into the forward: relu^2 as u, SwiGLU as its gate rows and up rows u / sharp.
         pub fn upload(p: *Self, t: *T, host: anytype, slot: usize) !void {
-            const n = neurons * t.config().hidden;
-            try host.pocket(p.moe.items[slot], p.up.items[slot * n ..][0..n], p.down.items[slot * n ..][0..n], p.used.items[slot]);
+            _ = t;
+            const n = neurons * p.hidden;
+            const up = p.up.items[slot * n ..][0..n];
+            const down = p.down.items[slot * n ..][0..n];
+            if (swiglu) {
+                neuron_math.upRow(F.neuron, up, p.scratch.items);
+                try host.pocketSwiglu(p.moe.items[slot], p.gate.items[slot * n ..][0..n], p.scratch.items, down, p.used.items[slot]);
+            } else try host.pocket(p.moe.items[slot], up, down, p.used.items[slot]);
         }
 
         /// Example i and its kind: the fact's answers, then its other wordings, held-out answers and the other prompts.
@@ -356,8 +383,7 @@ pub fn Pocket(comptime T: type) type {
 
         /// Every key's candidate layers fitted in threads, the best taken; then keeps found, earlier neurons refitted.
         fn fitAll(p: *Self, t: *T, host: anytype) !bool {
-            const c = t.config();
-            const d = c.hidden;
+            const d = p.hidden;
             const n = p.slots();
             const m = p.labels.items.len;
             if (std.c.getenv("TF_SLIDE_POCKET_DUMP")) |dir| pocket_dump.write(p, std.mem.span(dir), p.learned_before, d) catch |e| std.log.warn("slide pocket: the read rows were not written: {t}", .{e});
@@ -372,14 +398,17 @@ pub fn Pocket(comptime T: type) type {
             defer p.gpa.free(fits);
             @memset(fits, .{ .fires = std.math.maxInt(usize) });
             const t0 = clock.now(host.io);
-            var threads: [3 * 64]?std.Thread = @splat(null);
+            const threads = try p.gpa.alloc(?std.Thread, 3 * n);
+            defer p.gpa.free(threads);
+            @memset(threads, null);
             var fitted: usize = 0;
-            for (0..3) |k| for (p.moe.items, 0..) |l, j| if (p.split[k] > 0 and candidate(l, c.layers, @fromBackingInt(@intCast(k)))) {
-                threads[k * n + j] = std.Thread.spawn(.{}, fitLayer, .{ p.gpa, p.rows.items, kinds[k * m ..][0..m], n, j, d, us[(k * n + j) * d ..][0..d], &fits[k * n + j] }) catch null;
+            const below = F.neuron.margin;
+            for (0..3) |k| for (p.moe.items, 0..) |l, j| if (p.split[k] > 0 and candidate(l, p.layers, @fromBackingInt(@intCast(k)))) {
+                threads[k * n + j] = std.Thread.spawn(.{}, fitLayer, .{ p.gpa, p.rows.items, kinds[k * m ..][0..m], n, j, d, us[(k * n + j) * d ..][0..d], &fits[k * n + j], below }) catch null;
                 fitted += 1;
             };
-            for (0..3) |k| for (p.moe.items, 0..) |l, j| if (p.split[k] > 0 and candidate(l, c.layers, @fromBackingInt(@intCast(k)))) {
-                if (threads[k * n + j]) |th| th.join() else fitLayer(p.gpa, p.rows.items, kinds[k * m ..][0..m], n, j, d, us[(k * n + j) * d ..][0..d], &fits[k * n + j]);
+            for (0..3) |k| for (p.moe.items, 0..) |l, j| if (p.split[k] > 0 and candidate(l, p.layers, @fromBackingInt(@intCast(k)))) {
+                if (threads[k * n + j]) |th| th.join() else fitLayer(p.gpa, p.rows.items, kinds[k * m ..][0..m], n, j, d, us[(k * n + j) * d ..][0..d], &fits[k * n + j], below);
             };
             const t1 = clock.now(host.io);
             for (0..3) |k| if (p.split[k] > 0) {
@@ -387,14 +416,14 @@ pub fn Pocket(comptime T: type) type {
                 var order: std.ArrayList(usize) = .empty;
                 defer order.deinit(p.gpa);
                 // a layer whose pocket is full is passed over
-                for (p.moe.items, 0..) |l, j| if (candidate(l, c.layers, key) and p.used.items[j] < neurons) try order.append(p.gpa, j);
+                for (p.moe.items, 0..) |l, j| if (candidate(l, p.layers, key) and p.used.items[j] < neurons) try order.append(p.gpa, j);
                 if (order.items.len == 0) return error.PocketFull;
                 std.mem.sort(usize, order.items, @as([]const Fit, fits[k * n ..][0..n]), better);
                 for (order.items[0..@min(p.split[k], order.items.len)]) |j| try p.take(j, key, us[(k * n + j) * d ..][0..d], fits[k * n + j], kinds[k * m ..][0..m], d);
             };
             p.logSources(d, m, kinds);
             try p.findKeeps(d);
-            try p.quiet(t, host);
+            try quieting.quiet(p, t, host);
             std.log.info("slide pocket: {d} candidate neurons fitted on {d} read rows in {d:.1} s; earlier neurons checked in {d:.1} s", .{ fitted, m, t1 - t0, clock.now(host.io) - t1 });
             try joint.find(p, d);
             try p.v.begin(p.gpa, p.taken.items.len + p.joint.items.len, d, p.answered.len + p.joint_answers.items.len + p.keeps.items.len);
@@ -430,6 +459,7 @@ pub fn Pocket(comptime T: type) type {
             p.used.items[j] += 1;
             try p.taken.append(p.gpa, .{ .slot = j, .neuron = k, .key = key });
             @memcpy(p.neuron(p.up.items, j, k, d), u);
+            p.gateFrom(j, k);
             @memset(p.neuron(p.down.items, j, k, d), 0);
             std.log.info("slide pocket: layer {d}, neuron {d}, at the {s}: on for {d:.0}% of the fact's questions (least {d:.2}), held-out {d:.0}% (mean {d:.2}); other prompts at most {d:.2}, other rows {d:.2}, {d} above zero", .{ p.moe.items[j], k, @tagName(key), 100 * f.fact_on, f.fact_least, 100 * f.held_on, f.held_mean, f.steady_most, f.other_most, f.fires });
             const start = p.pos.items.len / d;
@@ -453,8 +483,7 @@ pub fn Pocket(comptime T: type) type {
                     if (l.kind != .none or l.ex < p.answered.len + p.prompts.len + p.held.len) continue;
                     var sum: f32 = 0;
                     for (p.taken.items) |x| if (x.key == .subject) {
-                        const z = dotBf16(p.neuron(p.up.items, x.slot, x.neuron, d), p.rows.items[(i * n + x.slot) * d ..][0..d]);
-                        sum += if (z > 0) z * z else 0;
+                        sum += @max(p.act(x.slot, x.neuron, p.rows.items[(i * n + x.slot) * d ..][0..d]), 0);
                     };
                     if (sum > most) {
                         most = sum;
@@ -468,59 +497,23 @@ pub fn Pocket(comptime T: type) type {
             std.log.info("slide pocket: {d} other answers name the fact's subject where its neurons fire; they are to stay as they were", .{p.keeps.items.len});
         }
 
-        /// Earlier neurons firing on this fact's rows refitted silent there, undo copies kept; same-subject ones stay.
-        fn quiet(p: *Self, t: *T, host: anytype) !void {
-            const d = t.config().hidden;
-            const n = p.slots();
-            for (p.learned.items[0..p.learned_before]) |e| {
-                if (e.key == .subject and std.mem.indexOfScalar(u32, p.subjects.items, e.subject) != null) continue;
-                const u = p.neuron(p.up.items, e.slot, e.neuron, d);
-                var most: f32 = -std.math.inf(f32);
-                for (p.labels.items, 0..) |l, i| if (l.kind == .fact or l.kind == .held) {
-                    most = @max(most, dotBf16(u, p.rows.items[(i * n + e.slot) * d ..][0..d]));
-                };
-                if (most <= refit_above) continue; // weak there: left exactly as it is, this fact's outputs fitted with it
-                try p.refits.append(p.gpa, .{ .slot = e.slot, .neuron = e.neuron });
-                try p.refit_up.appendSlice(p.gpa, u);
-                var xs: std.ArrayList([]const u16) = .empty;
-                defer xs.deinit(p.gpa);
-                var kinds: std.ArrayList(Kind) = .empty;
-                defer kinds.deinit(p.gpa);
-                for (0..e.count) |r| {
-                    try xs.append(p.gpa, p.pos.items[(e.start + r) * d ..][0..d]);
-                    try kinds.append(p.gpa, .fact);
-                }
-                for (p.labels.items, 0..) |l, i| {
-                    try xs.append(p.gpa, p.rows.items[(i * n + e.slot) * d ..][0..d]);
-                    try kinds.append(p.gpa, switch (l.kind) {
-                        .fact, .held => .steady, // this fact's questions are another fact's to it
-                        .none => .other,
-                        else => l.kind,
-                    });
-                }
-                const f = try fit(p.gpa, xs.items, kinds.items, d, u, true, fit_steps / 2, e.count);
-                if (f.fact_least < kept_least or @max(f.steady_most, f.other_most) > 0) {
-                    // a refit that forgets its fact or spreads is undone; this fact's outputs are fitted with it firing
-                    @memcpy(u, p.refit_up.items[p.refit_up.items.len - d ..]);
-                    p.refits.shrinkRetainingCapacity(p.refits.items.len - 1);
-                    p.refit_up.shrinkRetainingCapacity(p.refit_up.items.len - d);
-                    std.log.info("slide pocket: layer {d}, neuron {d}, an earlier fact's, fires on this fact's questions (up to {d:.2}); fitted again its own would read at least {d:.2} and other rows at most {d:.2}, so it stays as it was", .{ p.moe.items[e.slot], e.neuron, most, f.fact_least, @max(f.steady_most, f.other_most) });
-                    continue;
-                }
-                try p.upload(t, host, e.slot);
-                std.log.info("slide pocket: layer {d}, neuron {d}, an earlier fact's, fired on this fact's questions (up to {d:.2}); fitted again: there and elsewhere at most {d:.2}, its own questions' least {d:.2}", .{ p.moe.items[e.slot], e.neuron, most, @max(f.steady_most, f.other_most), f.fact_least });
-            }
-        }
-
         /// Whether no neuron is in use at any layer.
         pub fn empty(p: *const Self) bool {
             for (p.used.items) |u| if (u > 0) return false;
             return true;
         }
 
-        /// Learned neurons into the shards, then into the forward as the shards hold them (4-bit); the bytes written.
+        /// Learned neurons into the shards, then into the forward as the shards hold them (quantized); the bytes.
         pub fn save(p: *Self, t: *T, host: anytype) !usize {
-            const bytes = try host.pocketSave(p.moe.items, neurons, p.up.items, p.down.items);
+            const bytes = if (swiglu) blk: {
+                // written as gate rows and up rows u / sharp, handed back as written: u from the up rows again
+                const rows = try p.gpa.alloc(f32, p.up.items.len);
+                defer p.gpa.free(rows);
+                neuron_math.upRow(F.neuron, p.up.items, rows);
+                const got = try host.pocketSaveSwiglu(p.moe.items, neurons, p.gate.items, rows, p.down.items);
+                neuron_math.fromUp(F.neuron, rows, p.up.items);
+                break :blk got;
+            } else try host.pocketSave(p.moe.items, neurons, p.up.items, p.down.items);
             for (0..p.slots()) |j| if (p.used.items[j] > 0) try p.upload(t, host, j);
             return bytes;
         }
@@ -559,7 +552,7 @@ pub fn Pocket(comptime T: type) type {
 }
 
 test "a fact keys as many neurons on its subject as the share of its questions that name it, at least half, else none" {
-    const P = Pocket(struct {});
+    const P = Pocket(struct {}, @import("families.zig").nemotron_h);
     var p: P = .{ .gpa = std.testing.allocator, .mode = .auto };
     defer p.deinit();
     // ids: a question's tokens, the subject's last token at row 2, the answer from row 4

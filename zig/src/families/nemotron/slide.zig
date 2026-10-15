@@ -9,6 +9,7 @@ const learn_shape = @import("learn_shape.zig");
 const weights = @import("weights.zig");
 const mtl = @import("metal");
 const ckpt = @import("../../core/checkpoint_metal.zig");
+const pocket_layout = @import("pocket_layout.zig");
 const shard_edit = @import("../../core/shard_edit.zig");
 
 const Living = living.Io(struct {
@@ -31,9 +32,15 @@ const Host = struct {
     pub const Trainer = train.Trainer;
     pub const max_rows = train.max_rows;
     pub const Ctx = *backend.Metal;
+    pub const family = pocket_layout.family;
 
     pub fn layers(b: Ctx) usize {
         return b.m.config.layers;
+    }
+
+    /// Where the pocket sits and learns: every MoE layer, all but the last learning.
+    pub fn layout(b: Ctx) @import("living").Layout {
+        return pocket_layout.layout(b.m.config);
     }
 
     pub fn trainer(gpa: std.mem.Allocator, _: std.Io, b: Ctx) !*Trainer {

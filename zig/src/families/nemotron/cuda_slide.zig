@@ -10,6 +10,7 @@ const state = @import("cuda_state.zig");
 
 const Living = living.Io(@import("core"));
 const PocketShards = @import("pocket_shards.zig").Io(@import("core"));
+const pocket_layout = @import("pocket_layout.zig");
 
 pub const Example = lessons.Example;
 pub const Lesson = lessons.Lesson;
@@ -27,9 +28,15 @@ const Host = struct {
     pub const Trainer = train.Trainer;
     pub const max_rows = train.max_rows;
     pub const Ctx = Model;
+    pub const family = pocket_layout.family;
 
     pub fn layers(m: Ctx) usize {
         return m.e.c.layers;
+    }
+
+    /// Where the pocket sits and learns: every MoE layer, all but the last learning.
+    pub fn layout(m: Ctx) @import("living").Layout {
+        return pocket_layout.layout(m.e.c);
     }
 
     pub fn trainer(gpa: std.mem.Allocator, io: std.Io, m: Ctx) !*Trainer {
