@@ -7,6 +7,7 @@ const npf = @import("xpu_pf.zig");
 const stop = @import("xpu").stop;
 
 const spv = @import("xpu").kernels.nem_rows;
+const spv_r = @import("xpu").kernels.nem_rows_r;
 const spv_attn_pf = @import("xpu").kernels.nem_attn_pfs;
 
 /// Debug hook (nem_fp64): called with the activations a projection class is about to read: xn, yn or att.
@@ -34,7 +35,7 @@ fn nowNs() u64 {
 }
 
 pub fn printProf(w: *Win, m: *model.Model, windows: usize) void {
-    inline for (.{ w.k, m.k }) |ks| inline for (@typeInfo(@TypeOf(ks)).@"struct".field_names) |fname| {
+    inline for (.{ w.k, m.k, w.rowk[0], w.rowk[1], w.rowk[2], w.rowk[3], w.rowk[4] }) |ks| inline for (@typeInfo(@TypeOf(ks)).@"struct".field_names) |fname| {
         if (@TypeOf(@field(ks, fname)) == rt.Kernel) {
             const h: ?*const anyopaque = @ptrCast(@field(ks, fname).handle);
             for (prof) |e| if (e.h != null and e.h == h) std.debug.print("  kernel {s:<10} {d:>6} calls {d:>8.1} us avg {d:>8.2} ms a window\n", .{ fname, e.calls, @as(f64, @floatFromInt(e.ns)) / 1e3 / @as(f64, @floatFromInt(e.calls)), @as(f64, @floatFromInt(e.ns)) / 1e6 / @as(f64, @floatFromInt(windows)) });
@@ -67,9 +68,17 @@ fn run(k: *rt.Kernel, groups: [3]u32, a: anytype) !void {
 }
 
 const Kernels = struct {
+    qmv_bf16: rt.Kernel,
+    qmv_bf: rt.Kernel,
+    qmv_f32: rt.Kernel,
     conv: rt.Kernel,
     ssm: rt.Kernel,
     gnorm: rt.Kernel,
+    groups: rt.Kernel,
+    up_g: rt.Kernel,
+    down_g: rt.Kernel,
+    dup: rt.Kernel,
+    ddown: rt.Kernel,
     comb: rt.Kernel,
     a_part: rt.Kernel,
     a_merge: rt.Kernel,
@@ -77,6 +86,21 @@ const Kernels = struct {
     a_pf: ?rt.Kernel = null,
     a_prep: ?rt.Kernel = null,
 };
+
+/// The window projections of one row bucket (nem_rows built for at most 1, 2, 4, 8 or 16 rows).
+const RowK = struct { qmv_bf16: rt.Kernel, qmv_bf: rt.Kernel, qmv_f32: rt.Kernel, up_g: rt.Kernel, down_g: rt.Kernel, dup: rt.Kernel, ddown: rt.Kernel };
+
+fn rowKernels(mod: anytype) !RowK {
+    return .{
+        .qmv_bf16 = try mod.kernel("qmv4_bf16_r", .{ 16, 1, 1 }),
+        .qmv_bf = try mod.kernel("qmv4_bf_r", .{ 64, 1, 1 }),
+        .qmv_f32 = try mod.kernel("qmv4_f32_r", .{ 64, 1, 1 }),
+        .up_g = try mod.kernel("expert_up_relu2_g", .{ 16, 1, 1 }),
+        .down_g = try mod.kernel("expert_down_f32_g", .{ 16, 1, 1 }),
+        .dup = try mod.kernel("dense_up_relu2_r", .{ 16, 1, 1 }),
+        .ddown = try mod.kernel("dense_down_f32_r", .{ 16, 1, 1 }),
+    };
+}
 
 /// Per Mamba layer: the window's saved inputs (replay), the second state buffers.
 const MState = struct { proj: Buf, xc: Buf, cstate2: Buf, sstate2: Buf };
@@ -92,6 +116,7 @@ pub const Win = struct {
     yn: Buf,
     r_logits: Buf,
     eids: Buf,
+    elist: Buf, // [1 + experts]: count, then the chosen experts ascending
     wts: Buf,
     act: Buf,
     ey: Buf,
@@ -115,6 +140,7 @@ pub const Win = struct {
     head_rows: u32 = 0,
     pos0: u32 = 0,
     cur: usize = 0, // the layer being run (for `capture`)
+    rowk: [5]RowK = undefined, // the projections by row bucket: at most 1, 2, 4, 8, 16 rows
 
     pub fn init(gpa: std.mem.Allocator, m: *model.Model) !Win {
         const r = m.r;
@@ -125,9 +151,17 @@ pub const Win = struct {
         const RA: usize = max_rows; // attention row blocks and logits
         const h: usize = c.hidden_size;
         const kq: Kernels = .{
+            .qmv_bf16 = try mod.kernel("qmv4_bf16_r", .{ 16, 1, 1 }),
+            .qmv_bf = try mod.kernel("qmv4_bf_r", .{ 64, 1, 1 }),
+            .qmv_f32 = try mod.kernel("qmv4_f32_r", .{ 64, 1, 1 }),
             .conv = try mod.kernel("conv1d_rows", .{ 64, 1, 1 }),
             .ssm = try mod.kernel("ssm_rows", .{ 64, 1, 1 }),
             .gnorm = try mod.kernel("group_rmsnorm_r", .{ 64, 1, 1 }),
+            .groups = try mod.kernel("moe_groups", .{ 1, 1, 1 }),
+            .up_g = try mod.kernel("expert_up_relu2_g", .{ 16, 1, 1 }),
+            .down_g = try mod.kernel("expert_down_f32_g", .{ 16, 1, 1 }),
+            .dup = try mod.kernel("dense_up_relu2_r", .{ 16, 1, 1 }),
+            .ddown = try mod.kernel("dense_down_f32_r", .{ 16, 1, 1 }),
             .comb = try mod.kernel("moe_combine_r", .{ 64, 1, 1 }),
             .a_part = try mod.kernel("attn_partial_r", .{ 256, 1, 1 }),
             .a_merge = try mod.kernel("attn_merge_r", .{ 16, 1, 1 }),
@@ -154,7 +188,7 @@ pub const Win = struct {
         };
         const qd: usize = c.num_attention_heads * c.head_dim;
         const parts: usize = 64;
-        return .{
+        var out: Win = .{
             .k = kq,
             .ids = try r.alloc(R * 4),
             .host_ids = try gpa.alloc(u32, R),
@@ -165,6 +199,7 @@ pub const Win = struct {
             .yn = try r.alloc(R * c.xd() * 2),
             .r_logits = try r.alloc(R * c.n_routed_experts * 2),
             .eids = try r.alloc(R * top_k * 4),
+            .elist = try r.alloc(260 * 4),
             .wts = try r.alloc(R * top_k * 4),
             .act = try r.alloc(R * top_k * c.moe_intermediate_size * 2),
             .ey = try r.alloc(R * top_k * h * 4),
@@ -184,6 +219,12 @@ pub const Win = struct {
             .rcap = rc,
             .mpf = try npf.MoePf.init(r, rc, c.n_routed_experts, @max(c.hidden_size, c.moe_intermediate_size)),
         };
+        for (spv_r, 0..) |image, b| {
+            var bm = try r.module(image);
+            out.rowk[b] = try rowKernels(&bm);
+        }
+        out.rowk[4] = try rowKernels(&mod);
+        return out;
     }
 
     pub fn profClear(w: *Win) !void {
@@ -273,7 +314,7 @@ pub const Win = struct {
     /// lm_head + bf16 rounding + argmax over n normalised rows x [n][h]: fp32 logits in w.logits, argmax in w.am_out.
     fn headRows(w: *Win, m: *model.Model, x: Buf, n: u32) !void {
         const c = m.cfg;
-        try w.mpf.?.denseS(m.head.w, m.head.s, m.head.b, x, n, w.logits, c.hidden_size, 0, c.vocab_size, true);
+        try run(&w.bucket(n).qmv_f32, .{ c.vocab_size / 4, 1, 1 }, .{ m.head.w, m.head.s, m.head.b, x, w.logits, c.hidden_size, c.vocab_size, n });
         if (m.bf16_logits) try run(&m.k.round, .{ (n * c.vocab_size + 63) / 64, 1, 1 }, .{ w.logits, n * c.vocab_size });
         const per = (c.vocab_size + 63) / 64;
         try run(&m.k.am_part, .{ 64, n, 1 }, .{ w.logits, w.am_scratch, c.vocab_size, per });
@@ -286,15 +327,19 @@ pub const Win = struct {
         try w.headRows(m, x, 1);
     }
 
+    /// The row kernels built for windows of n rows (1, 2, 4, 8 or 16 at most).
+    fn bucket(w: *Win, n: u32) *RowK {
+        return &w.rowk[if (n <= 1) 0 else if (n <= 2) 1 else if (n <= 4) 2 else if (n <= 8) 3 else 4];
+    }
+
     /// norm_f of the first n rows of residual stream x after the last window (hidden rows for MTP) into out [n][h].
     pub fn normRows(w: *Win, m: *model.Model, n: u32, out: Buf) !void {
         try run(&m.k.rms, .{ n, 1, 1 }, .{ w.x, m.norm_f, out, m.cfg.hidden_size, m.cfg.layer_norm_epsilon });
     }
 
-    /// Projection of n rows: n > 16 dense GEMM, else split-K matrix-engine GEMM (decode n = 1).
+    /// Projection of a prompt chunk (n > 16 rows): the dense prefill GEMM.
     fn lin(w: *Win, m: *model.Model, t: model.Table, x: Buf, n: u32, y: Buf, in: u32, y_off: u32, rows: u32, f32out: bool) !void {
-        if (n > max_rows) return w.mpf.?.dense(m.r, t.w, t.s, t.b, x, n, y, in, y_off, rows, f32out);
-        return w.mpf.?.denseS(t.w, t.s, t.b, x, n, y, in, y_off, rows, f32out);
+        return w.mpf.?.dense(m.r, t.w, t.s, t.b, x, n, y, in, y_off, rows, f32out);
     }
 
     fn mamba(w: *Win, m: *model.Model, mw: anytype, s: *MState, n: u32, inplace: bool) !void {
@@ -302,7 +347,7 @@ pub const Win = struct {
         const pd = c.projDim();
         const cd = c.convDim();
         const xd = c.xd();
-        try w.lin(m, mw.in, w.xn, n, s.proj, c.hidden_size, 0, pd, false);
+        if (n <= max_rows) try run(&w.bucket(n).qmv_bf16, .{ pd, 1, 1 }, .{ mw.in.w, mw.in.s, mw.in.b, w.xn, s.proj, c.hidden_size, pd, pd, @as(u32, 0), n }) else try w.lin(m, mw.in, w.xn, n, s.proj, c.hidden_size, 0, pd, false);
         const cout = if (inplace) mw.cstate else s.cstate2;
         const sout = if (inplace) mw.sstate else s.sstate2;
         try run(&w.k.conv, .{ cd / 64, 1, 1 }, .{ s.proj, pd, xd, mw.cstate, cout, mw.conv_w, mw.conv_b, s.xc, cd, n });
@@ -312,7 +357,7 @@ pub const Win = struct {
         });
         try run(&w.k.gnorm, .{ c.n_groups, n, 1 }, .{ w.y, mw.gnorm, w.yn, xd / c.n_groups, xd, c.layer_norm_epsilon });
         if (capture) |f| try f(w, m, w.cur, .yn, n);
-        try w.lin(m, mw.out, w.yn, n, w.delta, xd, 0, c.hidden_size, false);
+        if (n <= max_rows) try run(&w.bucket(n).qmv_bf16, .{ c.hidden_size, 1, 1 }, .{ mw.out.w, mw.out.s, mw.out.b, w.yn, w.delta, xd, c.hidden_size, c.hidden_size, @as(u32, 0), n }) else try w.lin(m, mw.out, w.yn, n, w.delta, xd, 0, c.hidden_size, false);
     }
 
     /// A MoE block of n rows: delta = block output (experts weighted + shared expert), the combine included.
@@ -325,15 +370,24 @@ pub const Win = struct {
     fn moeBody(w: *Win, m: *model.Model, mw: anytype, n: u32) !void {
         const c = m.cfg;
         const h = c.hidden_size;
+        const wd = c.moe_intermediate_size;
         const sw = c.moe_shared_expert_intermediate_size;
         try run(&m.k.e_logits, .{ c.n_routed_experts, n, 1 }, .{ w.xn, mw.gate, w.r_logits, h, c.n_routed_experts });
         try run(&m.k.e_route, .{ n, 1, 1 }, .{ w.r_logits, mw.bias, w.eids, w.wts, c.n_routed_experts, c.num_experts_per_tok, @as(u32, @bitCast(c.routed_scaling_factor)) });
-        if (n > max_rows) try w.mpf.?.runExperts(m, mw, w.xn, w.eids, w.act, w.ey, n) else try w.mpf.?.runExpertsS(m, mw, w.xn, w.eids, w.act, w.ey, n);
-        if (n > max_rows) {
+        if (n > max_rows) try w.mpf.?.runExperts(m, mw, w.xn, w.eids, w.act, w.ey, n) else {
+            const ng = @min(c.n_routed_experts, n * top_k);
+            try run(&w.k.groups, .{ 1, 1, 1 }, .{ w.eids, w.elist, n * top_k, c.n_routed_experts });
+            try run(&w.bucket(n).up_g, .{ wd, ng, 1 }, .{ mw.fc1.w, mw.fc1.s, mw.fc1.b, w.xn, w.eids, w.act, h, wd, n * top_k, top_k, w.elist });
+            try run(&w.bucket(n).down_g, .{ h, ng, 1 }, .{ mw.fc2.w, mw.fc2.s, mw.fc2.b, w.act, w.eids, w.ey, wd, h, n * top_k, w.elist });
+        }
+        if (n <= max_rows) {
+            try run(&w.bucket(n).dup, .{ sw, 1, 1 }, .{ mw.shup.w, mw.shup.s, mw.shup.b, w.xn, w.sact, h, sw, n });
+            try run(&w.bucket(n).ddown, .{ h, 1, 1 }, .{ mw.shdn.w, mw.shdn.s, mw.shdn.b, w.sact, w.sy, sw, h, n });
+        } else {
             try w.lin(m, mw.shup, w.xn, n, w.sact, h, 0, sw, false);
             try run(&w.mpf.?.relu2, .{ (n * sw + 63) / 64, 1, 1 }, .{ w.sact, n * sw });
-        } else try w.mpf.?.denseSM(mw.shup.w, mw.shup.s, mw.shup.b, w.xn, n, w.sact, h, 0, sw, 2, true); // relu2 in the finish
-        try w.lin(m, mw.shdn, w.sact, n, w.sy, sw, 0, h, true);
+            try w.lin(m, mw.shdn, w.sact, n, w.sy, sw, 0, h, true);
+        }
     }
 
     pub fn attention(w: *Win, m: *model.Model, aw: anytype, n: u32, pos0: u32) !void {
@@ -342,15 +396,14 @@ pub const Win = struct {
         const q_dim = c.num_attention_heads * c.head_dim;
         const kv_dim = c.num_key_value_heads * c.head_dim;
         const chunk: u32 = 512;
-        if (n > max_rows) {
+        if (n <= max_rows) {
+            try run(&w.bucket(n).qmv_bf, .{ q_dim / 4, 1, 1 }, .{ aw.q.w, aw.q.s, aw.q.b, w.xn, w.q, h, @as(u32, 0), q_dim, q_dim, n });
+            try run(&w.bucket(n).qmv_bf, .{ kv_dim / 4, 1, 1 }, .{ aw.k.w, aw.k.s, aw.k.b, w.xn, aw.kc, h, pos0 * kv_dim, kv_dim, kv_dim, n });
+            try run(&w.bucket(n).qmv_bf, .{ kv_dim / 4, 1, 1 }, .{ aw.v.w, aw.v.s, aw.v.b, w.xn, aw.vc, h, pos0 * kv_dim, kv_dim, kv_dim, n });
+        } else {
             try w.lin(m, aw.q, w.xn, n, w.q, h, 0, q_dim, false);
             try w.lin(m, aw.k, w.xn, n, aw.kc, h, pos0 * kv_dim, kv_dim, false);
             try w.lin(m, aw.v, w.xn, n, aw.vc, h, pos0 * kv_dim, kv_dim, false);
-        } else { // one activation tile for the three projections
-            const mp = &w.mpf.?;
-            try mp.denseSM(aw.q.w, aw.q.s, aw.q.b, w.xn, n, w.q, h, 0, q_dim, 0, true);
-            try mp.denseSM(aw.k.w, aw.k.s, aw.k.b, w.xn, n, aw.kc, h, pos0 * kv_dim, kv_dim, 0, false);
-            try mp.denseSM(aw.v.w, aw.v.s, aw.v.b, w.xn, n, aw.vc, h, pos0 * kv_dim, kv_dim, 0, false);
         }
         const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(c.head_dim)));
         var off: u32 = 0;
@@ -375,7 +428,7 @@ pub const Win = struct {
             try run(&w.k.a_merge, .{ c.num_attention_heads, rb, 1 }, .{ w.po, w.pm, w.pl, at(w.att, qo), pos0 + off + 1, chunk, c.num_attention_heads, nch_all });
         }
         if (capture) |f| try f(w, m, w.cur, .att, n);
-        try w.lin(m, aw.o, w.att, n, w.delta, q_dim, 0, h, false);
+        if (n <= max_rows) try run(&w.bucket(n).qmv_bf, .{ h / 4, 1, 1 }, .{ aw.o.w, aw.o.s, aw.o.b, w.att, w.delta, q_dim, @as(u32, 0), h, h, n }) else try w.lin(m, aw.o, w.att, n, w.delta, q_dim, 0, h, false);
     }
 
     /// After a non-inplace window: keep the first c rows (all: swap pending states in; fewer: replay). Advances m.pos.

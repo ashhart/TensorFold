@@ -115,16 +115,17 @@ prefill kernels separately; every class is within the test's bounds):
 
 ## Exactness
 
-- Window rows: windows of 2, 3, 4, 8 and 16 rows give bit-identical logits to one-row windows over 40 tokens, including a
-  pending-then-commit case (`tf-xpu-nem_rows-test`).
+- Window rows: a window of up to 16 rows takes the decode step's arithmetic (the row kernels of `nem_rows.cl`: each output's lane
+  sums in the decode's order, each weight read once for all the rows), so a one-row window equals the decode step bit for bit, and
+  windows of 2, 3, 4, 8 and 16 rows give the same logits over 40 tokens, including a pending-then-commit case
+  (`tf-xpu-nem_rows-test`).
 - Prompt chunk size: prefill in chunks of 32 to 512 rows gives bit-identical last-token logits (`tf-xpu-nem_prefill-test`).
   The Mamba conv state, SSM state and the KV bytes below the prompt are byte-identical for chunks of 64, 128 and 512, and the
   decode logits that follow are identical (`tf-xpu-nem_seam-test`, 640 tokens, real text and random ids).
 - Not identical, by design: the prefill GEMM path and the single-row path use different accumulation order. After 640 prompt
   tokens the prefilled state differs from the row-by-row state at rounding scale (for real text the worst conv difference is
   0.68 against a maximum magnitude of 33, SSM 1.95 against 5,710, KV 1.8 against 24), and the next 8 decode steps differ by up
-  to 0.94 in logit with the same top-1 on real text (6 of 8 on random ids, whose distributions are nearly flat). Windows
-  followed by the plain decode loop differ from windows followed by one-row windows by up to 0.38 (text) in logit.
+  to 0.94 in logit with the same top-1 on real text (6 of 8 on random ids, whose distributions are nearly flat).
 - Host-side slot ring: forwards queued without a sync equal synced forwards (`tf-xpu-nem_slot-test`).
 
 ## Tests

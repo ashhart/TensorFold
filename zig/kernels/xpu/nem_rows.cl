@@ -13,75 +13,117 @@ inline ushort to_bf(float f) {
 inline float bfr(float f) { return bf(to_bf(f)); }
 inline float bf_round(float f) { return bf(to_bf(f)); }
 
-// A weight row held in registers for all the window's rows: 16-byte lane loads (in_dim multiple of 32, <= MAXQ * 512).
-#define MAXQ 11
-typedef struct { uint4 u[MAXQ]; float sc[MAXQ]; float bi[MAXQ]; } WRow;
-
-inline void wload(WRow *wr, __global const uint *w, __global const ushort *scales, __global const ushort *biases, ulong row, uint in_dim) {
-    const uint lane = get_sub_group_local_id();
-    const uint nq = in_dim / 32, groups = in_dim / 64;
-    const __global uint4 *wp = (const __global uint4 *)(w + row * (in_dim / 8));
-#pragma unroll
-    for (int i = 0; i < MAXQ; i++) {
-        const uint q = lane + 16 * i;
-        if (q < nq) {
-            wr->u[i] = wp[q];
-            wr->sc[i] = bf(scales[row * groups + (q >> 1)]);
-            wr->bi[i] = bf(biases[row * groups + (q >> 1)]);
-        }
+// The decode's 4-bit dot for up to MAXR rows: lane words l, l+16, ..., each word unpacked once for all rows; x + xo[r].
+#ifndef MAXR
+#define MAXR 16 // nem_rows_r1 / _r2 / _r4 / _r8: the same kernels built for windows of at most 1, 2, 4, 8 rows
+#endif
+// One word of a lane against row r's 8 inputs: the decode's dot and sx, then acc[r] += sc * dot + bi * sx.
+#define QWORD(PK, SC, BI, WI)                                                                                                  \
+    {                                                                                                                          \
+        const float q0 = (float)(PK & 15u), q1 = (float)((PK >> 4) & 15u), q2 = (float)((PK >> 8) & 15u);                     \
+        const float q3 = (float)((PK >> 12) & 15u), q4 = (float)((PK >> 16) & 15u), q5 = (float)((PK >> 20) & 15u);           \
+        const float q6 = (float)((PK >> 24) & 15u), q7 = (float)((PK >> 28) & 15u);                                            \
+        _Pragma("unroll") for (uint r = 0; r < MAXR; r++) {                                                                    \
+            if (r < n) {                                                                                                       \
+                const float8 xv = as_float8(convert_uint8(vload8(WI, x + xo[r])) << 16);                                       \
+                float dot = 0.0f, sx = 0.0f;                                                                                   \
+                dot += xv.s0 * q0;                                                                                             \
+                sx += xv.s0;                                                                                                   \
+                dot += xv.s1 * q1;                                                                                             \
+                sx += xv.s1;                                                                                                   \
+                dot += xv.s2 * q2;                                                                                             \
+                sx += xv.s2;                                                                                                   \
+                dot += xv.s3 * q3;                                                                                             \
+                sx += xv.s3;                                                                                                   \
+                dot += xv.s4 * q4;                                                                                             \
+                sx += xv.s4;                                                                                                   \
+                dot += xv.s5 * q5;                                                                                             \
+                sx += xv.s5;                                                                                                   \
+                dot += xv.s6 * q6;                                                                                             \
+                sx += xv.s6;                                                                                                   \
+                dot += xv.s7 * q7;                                                                                             \
+                sx += xv.s7;                                                                                                   \
+                acc[r] += SC * dot + BI * sx;                                                                                  \
+            }                                                                                                                  \
+        }                                                                                                                      \
     }
+
+inline void qrows(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const ushort *x, const ulong *xo, uint n,
+                  ulong row, uint in_dim, float *acc) {
+    const uint lane = get_sub_group_local_id();
+    const uint words = in_dim / 8, groups = in_dim / 64;
+    __global const uint *wr = w + row * words;
+    __global const ushort *sr = scales + row * groups, *br = biases + row * groups;
+#pragma unroll
+    for (uint r = 0; r < MAXR; r++) acc[r] = 0.0f;
+    uint wi = lane;
+    for (; wi + 3 * SG < words; wi += 4 * SG) { // 4 of the lane's words: loads first, then the words in turn
+        uint pk[4];
+        float sc[4], bi[4];
+#pragma unroll
+        for (uint u = 0; u < 4; u++) {
+            const uint wu = wi + u * SG;
+            pk[u] = wr[wu];
+            sc[u] = bf(sr[wu / 8]);
+            bi[u] = bf(br[wu / 8]);
+        }
+#pragma unroll
+        for (uint u = 0; u < 4; u++) QWORD(pk[u], sc[u], bi[u], wi + u * SG)
+    }
+    for (; wi < words; wi += SG) {
+        const uint pk = wr[wi];
+        const float sc = bf(sr[wi / 8]), bi = bf(br[wi / 8]);
+        QWORD(pk, sc, bi, wi)
+    }
+#pragma unroll
+    for (uint r = 0; r < MAXR; r++)
+        if (r < n) acc[r] = sub_group_reduce_add(acc[r]);
 }
 
-// fp32 sc * dot + bi * sum(x) per half group, lane sums added by a sub-group reduction (valid on every lane).
-inline float wdot(const WRow *wr, __global const ushort *x, uint in_dim) {
-    const uint lane = get_sub_group_local_id();
-    const uint nq = in_dim / 32;
-    float acc = 0.0f;
+// Rows 0 .. n of a window, x rows `stride` apart.
+inline void strided(ulong *xo, uint n, ulong stride) {
 #pragma unroll
-    for (int i = 0; i < MAXQ; i++) {
-        const uint q = lane + 16 * i;
-        if (q < nq) {
-            const uint4 u = wr->u[i];
-            const float16 xa = as_float16(convert_uint16(vload16(2 * q, x)) << 16);
-            const float16 xb = as_float16(convert_uint16(vload16(2 * q + 1, x)) << 16);
-            float dot = 0.0f, sx = 0.0f;
-#pragma unroll
-            for (int j = 0; j < 8; j++) {
-                dot = fma(xa[j], (float)((u.x >> (4 * j)) & 15u), dot);
-                sx += xa[j];
-            }
-#pragma unroll
-            for (int j = 0; j < 8; j++) {
-                dot = fma(xa[8 + j], (float)((u.y >> (4 * j)) & 15u), dot);
-                sx += xa[8 + j];
-            }
-#pragma unroll
-            for (int j = 0; j < 8; j++) {
-                dot = fma(xb[j], (float)((u.z >> (4 * j)) & 15u), dot);
-                sx += xb[j];
-            }
-#pragma unroll
-            for (int j = 0; j < 8; j++) {
-                dot = fma(xb[8 + j], (float)((u.w >> (4 * j)) & 15u), dot);
-                sx += xb[8 + j];
-            }
-            acc += wr->sc[i] * dot + wr->bi[i] * sx;
-        }
-    }
-    return sub_group_reduce_add(acc);
+    for (uint r = 0; r < MAXR; r++) xo[r] = r < n ? (ulong)r * stride : 0;
 }
 
-// ---- dense 4-bit matvec (qmv4_bf16 of mamba.cl): grid (rows, m); row r of x -> y[r * y_stride + y_off + row] ----
+// ---- dense 4-bit matvec (qmv4_bf16 of mamba.cl): a sub-group a weight row; x row r -> y[r * y_stride + y_off + row]
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void qmv4_bf16_r(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const ushort *x, __global ushort *y,
                           uint in_dim, uint rows, uint y_stride, uint y_off, uint n) {
     const uint row = get_group_id(0);
-    WRow wr;
-    wload(&wr, w, scales, biases, row, in_dim);
-    for (uint r = 0; r < n; r++) {
-        const float acc = wdot(&wr, x + (ulong)r * in_dim, in_dim);
-        if (get_sub_group_local_id() == 0) y[(ulong)r * y_stride + y_off + row] = to_bf(acc);
-    }
+    ulong xo[MAXR];
+    float acc[MAXR];
+    strided(xo, n, in_dim);
+    qrows(w, scales, biases, x, xo, n, row, in_dim, acc);
+    if (get_sub_group_local_id() == 0)
+        for (uint r = 0; r < n; r++) y[(ulong)r * y_stride + y_off + row] = to_bf(acc[r]);
+}
+
+// ---- attention-side 4-bit matvec (qmv4_bf / qmv4_f32 of attn.cl): 4 weight rows a work-group; bf16 or fp32 out ----
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void qmv4_bf_r(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const ushort *x, __global ushort *y,
+                        uint in_dim, uint y_off, uint y_stride, uint rows, uint n) {
+    const uint row = get_group_id(0) * 4 + get_sub_group_id();
+    if (row >= rows) return;
+    ulong xo[MAXR];
+    float acc[MAXR];
+    strided(xo, n, in_dim);
+    qrows(w, scales, biases, x, xo, n, row, in_dim, acc);
+    if (get_sub_group_local_id() == 0)
+        for (uint r = 0; r < n; r++) y[(ulong)r * y_stride + y_off + row] = to_bf(acc[r]);
+}
+
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void qmv4_f32_r(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const ushort *x, __global float *y,
+                         uint in_dim, uint rows, uint n) {
+    const uint row = get_group_id(0) * 4 + get_sub_group_id();
+    if (row >= rows) return;
+    ulong xo[MAXR];
+    float acc[MAXR];
+    strided(xo, n, in_dim);
+    qrows(w, scales, biases, x, xo, n, row, in_dim, acc);
+    if (get_sub_group_local_id() == 0)
+        for (uint r = 0; r < n; r++) y[(ulong)r * rows + row] = acc[r];
 }
 
 // ---- Mamba2 conv1d over n rows, state [3][cd] bf16 sin -> sout; proj rows [n][pd], x part at xoff, out [n][cd] ----
@@ -167,6 +209,84 @@ __kernel void group_rmsnorm_r(__global const ushort *x, __global const ushort *w
     for (uint i = lid; i < n; i += 64) y[base + i] = to_bf(bf(w[gbase + i]) * bfr(bf(x[base + i]) * inv));
 }
 
+// ---- MoE: the experts the slots chose, ascending, elist[0 .. nlist) (one work-item) ----
+__kernel void moe_groups(__global const uint *ids, __global uint *elist, uint slots, uint n_experts) {
+    if (get_global_id(0) != 0) return;
+    uchar seen[256];
+    for (uint e = 0; e < n_experts; e++) seen[e] = 0;
+    for (uint s = 0; s < slots; s++) seen[ids[s]] = 1;
+    uint n = 0;
+    for (uint e = 0; e < n_experts; e++)
+        if (seen[e]) elist[1 + n++] = e;
+    elist[0] = n;
+}
+
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void expert_up_relu2_g(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const ushort *x, __global const uint *ids,
+                                __global ushort *out, uint in_dim, uint n_rows, uint slots, uint top_k, __global const uint *elist) {
+    const uint r = get_group_id(0), j = get_group_id(1);
+    if (j >= elist[0]) return;
+    const uint e = elist[1 + j];
+    ulong xo[MAXR];
+    uint sl[MAXR];
+    uint m = 0;
+    for (uint s = 0; s < slots && m < MAXR; s++)
+        if (ids[s] == e) { sl[m] = s; xo[m] = (ulong)(s / top_k) * in_dim; m++; } // an expert serves a window row once: m <= rows <= MAXR
+    float acc[MAXR];
+    qrows(w, scales, biases, x, xo, m, (ulong)e * n_rows + r, in_dim, acc);
+    if (get_sub_group_local_id() == 0)
+        for (uint k = 0; k < m; k++) {
+            const float u = fmax(bf(to_bf(acc[k])), 0.0f);
+            out[(ulong)sl[k] * n_rows + r] = to_bf(u * u);
+        }
+}
+
+// down: x row of slot s is row s of act [slots][in_dim]; out[s][n_rows] fp32.
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void expert_down_f32_g(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const ushort *x, __global const uint *ids,
+                                __global float *out, uint in_dim, uint n_rows, uint slots, __global const uint *elist) {
+    const uint r = get_group_id(0), j = get_group_id(1);
+    if (j >= elist[0]) return;
+    const uint e = elist[1 + j];
+    ulong xo[MAXR];
+    uint sl[MAXR];
+    uint m = 0;
+    for (uint s = 0; s < slots && m < MAXR; s++)
+        if (ids[s] == e) { sl[m] = s; xo[m] = (ulong)s * in_dim; m++; }
+    float acc[MAXR];
+    qrows(w, scales, biases, x, xo, m, (ulong)e * n_rows + r, in_dim, acc);
+    if (get_sub_group_local_id() == 0)
+        for (uint k = 0; k < m; k++) out[(ulong)sl[k] * n_rows + r] = acc[k];
+}
+
+// Shared expert (dense): grid (n_rows); up with relu2 over the n window rows, down to fp32.
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void dense_up_relu2_r(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const ushort *x, __global ushort *out,
+                               uint in_dim, uint n_rows, uint n) {
+    const uint r = get_group_id(0);
+    ulong xo[MAXR];
+    float acc[MAXR];
+    strided(xo, n, in_dim);
+    qrows(w, scales, biases, x, xo, n, r, in_dim, acc);
+    if (get_sub_group_local_id() == 0)
+        for (uint m = 0; m < n; m++) {
+            const float u = fmax(bf(to_bf(acc[m])), 0.0f);
+            out[(ulong)m * n_rows + r] = to_bf(u * u);
+        }
+}
+
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void dense_down_f32_r(__global const uint *w, __global const ushort *scales, __global const ushort *biases, __global const ushort *x, __global float *out,
+                               uint in_dim, uint n_rows, uint n) {
+    const uint r = get_group_id(0);
+    ulong xo[MAXR];
+    float acc[MAXR];
+    strided(xo, n, in_dim);
+    qrows(w, scales, biases, x, xo, n, r, in_dim, acc);
+    if (get_sub_group_local_id() == 0)
+        for (uint m = 0; m < n; m++) out[(ulong)m * n_rows + r] = acc[m];
+}
+
 // Block output of row m: bf16(sum_k fma(y[m][k], wts[m][k]) + shared[m]), sum in slot order. Grid (ceil(dim / 64), m).
 __kernel void moe_combine_r(__global const float *y, __global const float *wts, __global const float *shared, __global ushort *out, uint dim, uint slots) {
     const uint i = get_global_id(0), m = get_group_id(1);
@@ -176,7 +296,7 @@ __kernel void moe_combine_r(__global const float *y, __global const float *wts, 
     out[(ulong)m * dim + i] = to_bf(acc + shared[(ulong)m * dim + i]);
 }
 
-// ---- attention over rows: attn_partial / attn_merge with a row z (grid z); row has len0 + z keys ----
+// ---- attention over rows (attn_partial / attn_merge with row z): len0 + z keys, q / out rows at z * q_dim ----
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void attn_partial_r(__global const ushort *q, __global const ushort *kc, __global const ushort *vc, __global float *po, __global float *pm, __global float *pl,
                              uint len0, uint chunk, uint kvh, float scale, uint maxc) {
