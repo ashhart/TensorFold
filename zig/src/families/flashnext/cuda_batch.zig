@@ -89,7 +89,7 @@ pub fn Pass(comptime Tri: type) type {
         stream: cuda.Stream,
         tri: Tri,
         k: *const Kernels,
-        s: *const Scratch,
+        s: *Scratch,
         m: Model,
         seq: SeqState,
         hooks: Hooks,
@@ -152,8 +152,7 @@ pub fn Pass(comptime Tri: type) type {
 
         /// A queued copy from pinned host bytes (the scratch's staging), which must stay unchanged until it lands.
         pub fn upload(self: *Self, dst: u64, bytes: []const u8) !void {
-            const d = self.stream.d;
-            try d.check(d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, self.stream.handle), "cuMemcpyHtoDAsync");
+            try self.s.upload(dst, bytes);
         }
 
         // ---- the blocks ----------------------------------------------------------------------------------------
@@ -374,7 +373,7 @@ pub fn Pass(comptime Tri: type) type {
             @memset(pos, 0);
             for (0..blocks) |b| pos[4 * b] = @intCast(if (self.lanes.len > 0) self.lanes[b].pos else self.pos0 + b * att_rows);
             try self.upload(s.pos, std.mem.sliceAsBytes(pos));
-            try s.uploaded(self.stream);
+            try s.uploaded();
         }
 
         /// The rows' n-gram embeddings, gathered on a host thread while the GPU embeds and runs layer 0.
@@ -444,7 +443,7 @@ pub fn Pass(comptime Tri: type) type {
                     if (profile()) std.debug.print("batch: {d} rows' n-gram rows gathered on the host in {d:.1} ms\n", .{ n, @as(f64, @floatFromInt(gather.ns)) / 1e6 });
                     try self.upload(s.ple_emb, std.mem.sliceAsBytes(emb));
                     try self.upload(s.ple_xs, std.mem.sliceAsBytes(xs));
-                    try s.uploaded(self.stream);
+                    try s.uploaded();
                     if (self.pending != null) try self.writeback(0, n);
                     try self.pleBlock(lw, ids);
                 }

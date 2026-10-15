@@ -140,6 +140,55 @@ pub const Kernels = struct {
     }
 };
 
+/// The compute stream as a pass's pinned staging uses it: copies from it, an event behind them, and a drain.
+pub const Uploads = struct {
+    stream: cuda.Stream,
+    event: cuda.Event,
+
+    pub fn copy(u: Uploads, dst: u64, bytes: []const u8) !void {
+        const d = u.stream.d;
+        try d.check(d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, u.stream.handle), "cuMemcpyHtoDAsync");
+    }
+    pub fn record(u: Uploads) !void {
+        try u.event.record(u.stream);
+    }
+    pub fn wait(u: Uploads) !void {
+        try u.event.synchronize();
+    }
+    pub fn drain(u: Uploads) !void {
+        try u.stream.synchronize();
+    }
+};
+
+/// Pinned bytes' uploads and the fence that says when the bytes may change (`Q`: `Uploads`, or a test's stand-in).
+pub fn Staging(comptime Q: type) type {
+    return struct {
+        const Self = @This();
+        q: Q,
+        /// An upload was queued after the event's last record (a copy or the record failed): only a drain covers it.
+        open: bool = false,
+
+        /// Queues a copy from the staged bytes; until `fence` records behind it, `ready` drains the stream.
+        pub fn upload(g: *Self, dst: u64, bytes: []const u8) !void {
+            g.open = true;
+            try g.q.copy(dst, bytes);
+        }
+
+        /// Records the event behind every upload queued so far.
+        pub fn fence(g: *Self) !void {
+            try g.q.record();
+            g.open = false;
+        }
+
+        /// Returns once no queued upload reads the staged bytes: the event's wait, or a drain if one came after it.
+        pub fn ready(g: *Self) !void {
+            if (!g.open) return g.q.wait();
+            try g.q.drain();
+            g.open = false;
+        }
+    };
+}
+
 /// Device scratch for chunks of up to `cap` rows.
 pub const Scratch = struct {
     cap: usize,
@@ -201,8 +250,8 @@ pub const Scratch = struct {
     dummy: u64 = 0,
     /// Pinned host copies of what a pass uploads (ids, positions, n-gram rows and sums), owned until the copies land.
     host: ?cuda.HostBuffer = null,
-    /// Recorded on the compute stream after a pass's last upload: the next pass waits on it before writing `host`.
-    staged: ?cuda.Event = null,
+    /// The uploads from `host` and the event recorded after a pass's last one: the next pass waits before writing it.
+    staging: ?Staging(Uploads) = null,
 
     fn add(s: *Scratch, gpa: std.mem.Allocator, d: *const cuda.Driver, len: usize) !u64 {
         var b = try cuda.DeviceBuffer.alloc(d, @max(len, 256));
@@ -220,13 +269,18 @@ pub const Scratch = struct {
     }
 
     /// Waits until the last pass's uploads have read `host` (they are queued behind its kernels), so it may change.
-    pub fn ready(s: *const Scratch) !void {
-        if (s.staged) |e| try e.synchronize();
+    pub fn ready(s: *Scratch) !void {
+        if (s.staging) |*g| try g.ready();
+    }
+
+    /// A queued copy from `host` to the device, which must stay unchanged until it lands.
+    pub fn upload(s: *Scratch, dst: u64, src: []const u8) !void {
+        try s.staging.?.upload(dst, src);
     }
 
     /// Marks `host` read once the stream reaches here: every upload queued before this point has copied its bytes.
-    pub fn uploaded(s: *const Scratch, stream: cuda.Stream) !void {
-        if (s.staged) |e| try e.record(stream);
+    pub fn uploaded(s: *Scratch) !void {
+        if (s.staging) |*g| try g.fence();
     }
 
     /// The staged ids [n], positions [n] (in 16-byte rows), n-gram rows [n, dims] and their 32-group sums.
@@ -331,12 +385,16 @@ pub const Scratch = struct {
         try s.bufs.items[s.bufs.items.len - 1].fill8(0, stream.handle);
         try stream.synchronize();
         s.host = try cuda.HostBuffer.alloc(d, hostAt(cap)[4]);
-        s.staged = try cuda.Event.init(d, false);
+        s.staging = .{ .q = .{ .stream = stream, .event = try cuda.Event.init(d, false) } };
         return s;
     }
 
     pub fn free(s: *Scratch, gpa: std.mem.Allocator) void {
-        if (s.staged) |*e| e.deinit();
+        if (s.staging) |*g| {
+            // no queued upload may still read `host`; a wait that fails has lost the context, and its copies with it
+            g.ready() catch {};
+            g.q.event.deinit();
+        }
         if (s.host) |*h| h.free();
         for (s.bufs.items) |*b| b.free();
         s.bufs.deinit(gpa);
@@ -384,3 +442,56 @@ pub const Model = struct {
     head: Q4,
     ngram: *const ple.Ngram,
 };
+
+/// A stand-in for the stream: which copies are still queued, and a failure at a chosen copy or at the record.
+const FakeQueue = struct {
+    queued: usize = 0,
+    covered: usize = 0,
+    copies: usize = 0,
+    fail_copy: ?usize = null,
+    fail_record: bool = false,
+
+    pub fn copy(q: *FakeQueue, _: u64, _: []const u8) !void {
+        q.copies += 1;
+        if (q.fail_copy) |k| if (k == q.copies) return error.CopyFailed;
+        q.queued += 1;
+    }
+    pub fn record(q: *FakeQueue) !void {
+        if (q.fail_record) return error.RecordFailed;
+        q.covered = q.queued;
+    }
+    pub fn wait(q: *FakeQueue) !void {
+        q.queued -= q.covered; // the event's copies have landed; any queued after it may still be reading
+        q.covered = 0;
+    }
+    pub fn drain(q: *FakeQueue) !void {
+        q.queued = 0;
+        q.covered = 0;
+    }
+};
+
+test "a pass whose second upload or whose record fails leaves no copy reading the staging when it is reused" {
+    const Case = struct { fail_copy: ?usize, fail_record: bool };
+    for ([_]Case{ .{ .fail_copy = 2, .fail_record = false }, .{ .fail_copy = null, .fail_record = true }, .{ .fail_copy = null, .fail_record = false } }) |c| {
+        var fq: FakeQueue = .{};
+        var g: Staging(*FakeQueue) = .{ .q = &fq };
+        // a pass that stages and fences cleanly, then one that fails part way, as `stage()` uploads ids and positions
+        try g.ready();
+        try g.upload(0, "ids");
+        try g.upload(0, "pos");
+        try g.fence();
+        fq.fail_copy = if (c.fail_copy) |k| fq.copies + k else null;
+        fq.fail_record = c.fail_record;
+        try g.ready();
+        const failed = blk: {
+            g.upload(0, "ids") catch break :blk true;
+            g.upload(0, "pos") catch break :blk true;
+            g.fence() catch break :blk true;
+            break :blk false;
+        };
+        try std.testing.expectEqual(c.fail_copy != null or c.fail_record, failed);
+        // the next pass (or `free`) waits before it writes the bytes: nothing may still be queued
+        try g.ready();
+        try std.testing.expectEqual(@as(usize, 0), fq.queued);
+    }
+}
