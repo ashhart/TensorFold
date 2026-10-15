@@ -1,8 +1,4 @@
-//! A sampled row's token from both ranks' gathered candidates (fn_cand_topk): each rank's 64 largest logits, global
-//! ids, its log-sum-exp and its log-sum-exp at the row's temperature. The merged 128 hold the vocabulary's top 64
-//! exactly, so a rule within them draws as lanes.sampling.choose over the whole vocabulary would: top_k 1..64 by
-//! choose itself (only the top k take part), a wider rule when its nucleus (top_p) or floor (min_p) ends within the
-//! top 64, keyed the same way (seed, position, global id). A rule that reaches past them asks for the full row.
+//! A sampled token from both ranks' top 64 (exact top 64 of the vocabulary); a rule reaching past them asks the row.
 
 const std = @import("std");
 const lanes = @import("lanes");
@@ -87,8 +83,7 @@ pub fn draw(gpa: std.mem.Allocator, blocks: [2][]const i32, s: smp.Sampling, pos
     return .{ .token = @intCast(cands[best].id) };
 }
 
-/// ``drawFull`` over a whole gathered bf16 row (raw bits by global id): the same order by a counting sort over the
-/// 65,536 bf16 values (descending, ids ascending within a value; -0 with +0), then the same rule.
+/// ``drawFull`` over a whole gathered bf16 row: counting sort over the 65,536 bf16 values, then the same rule.
 pub fn drawFullBf16(gpa: std.mem.Allocator, row: []const u16, s: smp.Sampling, position: u64) !u32 {
     const counts = try gpa.alloc(u32, 1 << 16);
     defer gpa.free(counts);

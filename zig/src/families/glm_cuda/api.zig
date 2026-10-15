@@ -1,10 +1,4 @@
-//! GLM-5.3-Flash (glm5_next) on CUDA, two ranks: the pieces the weight loader, the forward and the native host share.
-//!
-//! Weights are a name -> device tensor store whose names are the Python engine's prepared-weight names (its weight
-//! tree: "layers.3.dsa.q_b.weight", "layers.5.moe.experts.up", ...), so every tensor the checkpoint loader builds can
-//! be checked byte for byte against the Python engine's (tools: capture_ref.py's weights.json hashes).
-//! Kernels: the fatbins embedded by the build (this family's, zig/kernels/cuda/glm; the shared grouped experts and the
-//! greedy candidates, zig/kernels/cuda/flashnext).
+//! GLM-5.3-Flash on CUDA, two ranks: the weight store (Python's prepared-weight names) and kernels the family shares.
 
 const std = @import("std");
 const cuda = @import("cuda");

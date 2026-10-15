@@ -1,10 +1,4 @@
-//! GLM-5.3-Flash's vision tower on CUDA (rank 0 encodes; rank 1 receives the features), as mlx-vlm's
-//! glm5_next/vision.py defines it: the patch embedding (a linear over a patch's 2 x 14 x 14 x 3 values), 24 blocks
-//! (RMSNorm, attention with RMSNorm'd q and k and a 2-D rotary over each frame's patches, a limited SwiGLU), the
-//! post-norm, the 2 x 2 downsample (a linear over each merge block's four patches) and the merger (a projection,
-//! LayerNorm + GELU, a limited SwiGLU) to the language model's 4096. The linears are cuBLASLt products (bf16 in, fp32
-//! accumulate, bias added before the one rounding); the residual stream stays fp32; glm/vision.cu does the rest.
-//! Checked against the torch reference (tools/vision_ref.py) by tf-cuda-test glm-vision.
+//! GLM-5.3-Flash's vision tower on CUDA as glm5_next/vision.py (rank 0 encodes); checked by tf-cuda-test glm-vision.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -267,8 +261,7 @@ pub const Tower = struct {
         return @intCast(N * PATCH * 4 + N * H * 4 + N * H * 2 * 5 + N * MLP * 2 + 2 * ROWS * MLP * 4 + q * seg * 6 + q * HD * 4 + q * 4 + N * 8 + 16 * 1024);
     }
 
-    /// Features of one image or video (``grid`` [t, h, w] in patches, t frame groups) from its patches (fp32,
-    /// [t h w, 1176] in the processor's merge-block order) into ``out`` ([t h w / 4, 4096] bf16).
+    /// Features of an image or video (``grid`` [t, h, w]): fp32 patches [t h w, 1176] -> ``out`` [t h w / 4, 4096].
     pub fn encode(t: *Tower, k: *kern.K, patches: []const f32, grid: [3]i64, out: u64) !void {
         const d = t.d;
         const gt = grid[0];
@@ -371,7 +364,7 @@ pub const Tower = struct {
                 a.add(EPS);
                 try k.go(try k.ext(.vision, "glm_vis_qkv"), .{ .x = @intCast(std.math.divCeil(i64, N * HEADS, 8) catch unreachable) }, 256, 0, &a);
             }
-            // each frame group attends within itself; per head, chunks of queries (q, k: [t, H, seg, 64]; v: [t, H, 64, seg])
+            // each frame group attends within itself, per head, in query chunks (q, k [t, H, seg, 64]; v transposed)
             var g: i64 = 0;
             while (g < gt) : (g += 1) {
                 var h: i64 = 0;

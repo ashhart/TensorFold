@@ -1,5 +1,4 @@
-//! GLM-5.3-Flash on CUDA: prompts, verify steps, commits and MTP drafts (decode.py), for any set of streams. A prompt
-//! runs alone in chunks of 2048 rows; verify steps and draft steps take every stream's rows at once.
+//! GLM-5.3-Flash on CUDA (decode.py): prompts in 2048-row chunks; verify, commit and MTP draft steps for every stream.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -20,8 +19,7 @@ const HEAD_N = forward.HEAD_N;
 
 pub const Pick = struct { tok: u32, p: f64 };
 
-/// The gathered candidates -> each row's token (the larger logit; the lower id at a tie: rank 0's) and its
-/// probability under the full softmax (both ranks' log-sum-exps).
+/// The gathered candidates -> each row's token (larger logit, rank 0's at a tie) and its probability over both ranks.
 fn readPicks(e: *Engine, b: *Buffers, rows: i64, out: []Pick) !void {
     const d = e.ctx.d;
     const n: usize = @intCast(2 * rows * 4);
@@ -48,10 +46,7 @@ fn readPicks(e: *Engine, b: *Buffers, rows: i64, out: []Pick) !void {
 /// A row's draw rule and the position its draw is keyed at (null rule: greedy, read from the candidates).
 pub const Draw = struct { rule: ?lanes.Sampling, position: u64 };
 
-/// The sampled rows' tokens: each rank's 64 candidates of every row and its log-sum-exps at the row's temperature
-/// (fn_cand_topk), gathered, drawn on the host (draw.zig); a rule past the candidates draws over the row's gathered
-/// logits. Both ranks run it alike, so their gathers pair up.
-/// TF_GLM_TRACE: sampled rows' draw time (the candidates' kernel, gather and copy; the host's draws) and full rows.
+/// Sampled rows' tokens: both ranks' 64 candidates and tempered lses, drawn on the host (draw.zig); TF_GLM_TRACE.
 pub var draw_stats: struct { gpu_ms: f64 = 0, host_ms: f64 = 0, rows: u64 = 0, full: u64 = 0, calls: u64 = 0, mismatch: u64 = 0 } = .{};
 
 fn msFrom(e: *Engine, t: std.Io.Timestamp) f64 {
@@ -65,8 +60,7 @@ fn drawRows(e: *Engine, b: *Buffers, rows: i64, draws: []const Draw, out: []Pick
     for (draws, 0..) |dr, r| inv[r] = if (dr.rule) |rule| @floatCast(1.0 / @max(rule.temperature, 1e-6)) else 1.0;
     try k.upload(b.invt, std.mem.sliceAsBytes(inv[0..@intCast(rows)]));
     const n: usize = @intCast(rows * draw_mod.W);
-    // the candidates by radix selection (fn_cand_topk_sel); TF_GLM_TOPK_CHECK=1: the per-thread lists' kernel
-    // (fn_cand_topk) first, its bytes compared with the selection's (dev check: the same 64, the same sums)
+    // radix-selected candidates; TF_GLM_TOPK_CHECK=1 also runs fn_cand_topk and compares their bytes (dev check)
     const check = topk_check orelse blk: {
         topk_check = std.c.getenv("TF_GLM_TOPK_CHECK") != null;
         break :blk topk_check.?;
@@ -128,8 +122,7 @@ fn drawFull(e: *Engine, row: u64, rule: lanes.Sampling, position: u64) !u32 {
     return draw_mod.drawFullBf16(e.gpa, e.full_host, rule, position);
 }
 
-/// The MTP head's rows of one prompt chunk (or a resume's pending row): ids and their hidden rows at mtp_len; the
-/// caller advances mtp_len.
+/// The MTP head's rows of a prompt chunk (or a resume's pending row) at mtp_len; the caller advances mtp_len.
 fn mtpForward(e: *Engine, b: *Buffers, s: *Seq, next: []const u32, hidden: u64) !void {
     const n: i64 = @intCast(next.len);
     try forward.stageIds(e, b, next);
@@ -139,9 +132,7 @@ fn mtpForward(e: *Engine, b: *Buffers, s: *Seq, next: []const u32, hidden: u64) 
     try blocks.mtpCompute(e, b);
 }
 
-/// The prompt in chunks of 2048 rows from ``start`` (0, or the kept state's point: resumed), each chunk's rows
-/// absorbed into the MTP cache, and the first token drawn. ``keep_at`` (0: none): the point the prompt's state is kept
-/// at (the stream's kept state), cut inside its chunk when it falls inside one.
+/// The prompt from ``start`` in 2048-row chunks into the MTP cache, then the first token; state kept at ``keep_at``.
 pub fn prefill(e: *Engine, s: *Seq, prompt: []const u32, start: usize, keep_at: usize) !u32 {
     defer s.media = null; // attach's images serve this prefill alone
     if (prompt.len == 0 or start >= prompt.len) return error.EmptyPrompt;
@@ -168,8 +159,7 @@ pub fn prefill(e: *Engine, s: *Seq, prompt: []const u32, start: usize, keep_at: 
             s.mtp_len += 1;
         }
     }
-    // the live caches change from here: a state kept below is the only one valid after (a resume kept at its own
-    // point keeps the state it resumed)
+    // the live caches change from here: a state kept below is the only valid one after (a resume keeps its own)
     if (!(start > 0 and keep_at == start)) s.snap_at = 0;
     s.d_from = @intCast(start); // DFlash2's ring holds this prompt's rows from here (a kept state's were overwritten since)
     var first: [1]Pick = undefined;
@@ -231,8 +221,7 @@ pub fn prefill(e: *Engine, s: *Seq, prompt: []const u32, start: usize, keep_at: 
 /// A stream's verify window: the pending token, then its drafts.
 pub const Win = struct { s: *Seq, ids: []const u32 };
 
-/// Every window through the model in one step (each at its stream's position); each row's token into ``out`` (rows
-/// in window order). The windows stay uncommitted until ``keep``.
+/// Every window in one step at its stream's position, each row's token into ``out``; uncommitted until ``keep``.
 pub fn verify(e: *Engine, wins: []const Win, out: []Pick) !void {
     var segs: [forward.MAX_STREAMS]Seg = undefined;
     var ids: [forward.STEP_ROWS]u32 = undefined;
@@ -269,13 +258,10 @@ pub fn keep(e: *Engine, s: *Seq, R: i64, kept: i64) !void {
     s.pos += kept;
 }
 
-/// A stream's draft request: its kept rows' final-normed rows (``hidden``, D bf16 apart) and the tokens after them,
-/// then up to ``count`` drafts while their probabilities' product stays at or above ``confidence`` (the first always
-/// kept). ``got`` and ``out``/``probs`` receive the drafts.
+/// A stream's draft request: kept rows' normed ``hidden`` and tokens, up to ``count`` drafts above ``confidence``.
 pub const DraftReq = struct { s: *Seq, hidden: u64, next: []const u32, count: usize, confidence: f64, out: []u32, probs: []f64, got: usize = 0 };
 
-/// Every request's rows absorbed into its stream's MTP cache in one step, then the chains, one row a stream a step,
-/// each stream leaving at its own confidence cut.
+/// Every request's rows absorbed into its MTP cache in one step, then chains a row a step to each confidence cut.
 pub fn draft(e: *Engine, reqs: []DraftReq) !void {
     if (e.w.mtp == null) return;
     const b = &e.mbuf;

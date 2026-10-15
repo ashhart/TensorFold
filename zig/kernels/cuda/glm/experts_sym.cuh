@@ -1,6 +1,4 @@
-// GLM-5.3-Flash's symmetric routed experts: flashnext/experts.cuh with a group's block holding its scales alone (the
-// bias of a symmetric int4 group is -8 x its scale, exact in bf16): 16 words a 32-row tile instead of 32.
-// Shared by experts_sym.cu (decode form) and experts_sym_prefill.cu (prefill form).
+// GLM symmetric experts' blocks for both forms: scales alone (bias -8 s, exact in bf16), 16 words a 32-row tile.
 #pragma once
 
 #include <cuda_bf16.h>
@@ -20,8 +18,7 @@ struct Geo {
   static constexpr int XV = GS / 32;             // input uint4 a row a lane a group
   static constexpr int SBV = NTW / 4;            // scale uint4 a quad a group (the bias: -8 x the scale)
 #ifdef GLM_SYM3
-  // 3-bit codes (4..11 in the 4-bit words): each lane's uint4 c as three 32-bit planes (two of low 2-bit fields,
-  // one of high bits), 32 apart a plane: 24 uint4 a c instead of 32
+  // 3-bit codes (4..11 in 4-bit words): a lane's uint4 as three 32-bit planes, 32 apart, 24 uint4 a c not 32
   static constexpr int WSEC = 24 * WV;
 #else
   static constexpr int WSEC = 32 * WV;

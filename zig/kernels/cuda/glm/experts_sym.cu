@@ -1,5 +1,4 @@
-// GLM-5.3-Flash's symmetric routed experts, decode form: flashnext/experts.cu reading experts_sym.cuh's blocks, each
-// group's bias b = -8 s (exact), so acc = fma(xs, b, fma(p, s, acc)) per group in order gives the affine kernel's bits.
+// GLM symmetric routed experts, decode: bias b = -8 s exact, so fma(xs, b, fma(p, s, acc)) gives the affine bits.
 
 #include <cuda_bf16.h>
 #include <stdint.h>

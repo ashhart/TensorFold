@@ -1,12 +1,4 @@
-//! GLM-5.3-Flash (glm5_next) on CUDA, one rank of two: the forward on this family's own kernels, for any mix of
-//! streams. A step is a list of segments (a stream and its rows, in order): the row-wise work (projections, norms,
-//! hyper-connections, router, experts, head) runs over all the step's rows at once, and the attention, the indexer
-//! and the KDA recurrences read the step's tables (each row's position and its stream's caches). Every kernel keeps a
-//! row's bits its own, so a stream's tokens are the same alone and beside fifteen others.
-//!
-//! Both ranks make the same calls in the same order. Tokens are drawn from both ranks' vocabulary shards (an
-//! all-gather of each rank's best candidates), so both ranks reach the same tokens with no host decision that could
-//! differ.
+//! GLM-5.3-Flash on CUDA, one rank of two: each row's bits its own at any mix of streams; both ranks call alike.
 
 const std = @import("std");
 const cuda = @import("cuda");
@@ -26,8 +18,7 @@ const LL = kern.LL;
 
 pub const MAX_STREAMS: usize = 16;
 pub const PREFILL_ROWS_MAX: i64 = 4096; // a prompt chunk at most (buffers sized once take the served value)
-/// Rows a prompt chunk takes: TF_GLM_PREFILL_ROWS (2048; 4096 halves what the EXL3 experts decode per row and takes
-/// about 2 GiB more of the pool). Read once, before the buffers.
+/// Rows a prompt chunk takes: TF_GLM_PREFILL_ROWS (2048; 4096 halves per-row expert decode, ~2 GiB more). Read once.
 pub fn prefillRows() i64 {
     const v = std.c.getenv("TF_GLM_PREFILL_ROWS") orelse return 2048;
     const n = std.fmt.parseInt(i64, std.mem.span(v), 10) catch return 2048;
@@ -222,8 +213,7 @@ pub const Seg = struct { s: *Seq, rows: i64 };
 
 pub const Kind = enum(u8) { verify = 0, mtp = 1 };
 
-/// A decode step's shape: what the launches depend on besides the tables (rows, streams, the dense attention's
-/// chunks, whether any row is sparse, the sparse scores' pool bucket).
+/// A decode step's shape beyond its tables: rows, streams, dense attention chunks, any sparse row, the pool bucket.
 const GKey = struct { kind: Kind, rows: i64, nseg: usize, nch: i64, np: i64, sparse: bool };
 const Cached = struct { ex: cuda.graph.Exec, used: u64 };
 
@@ -255,9 +245,7 @@ pub const Engine = struct {
     full_host: []u16 = &.{},
     /// Development: every launch synchronizes (and names the one that faulted).
     sync_each: bool = false,
-    /// Decode steps as CUDA graphs, one a shape (``GKey``): the same launches, replayed. The shapes grow with the
-    /// streams' lengths, so at most ``graph_cap`` stay (TF_GLM_GRAPHS), the least recently run dropped first: each
-    /// holds device memory the stream pool does not count.
+    /// Decode steps as CUDA graphs, one a ``GKey`` shape, at most ``graph_cap`` (TF_GLM_GRAPHS), LRU dropped first.
     use_graphs: bool = true,
     graphs: std.AutoHashMap(GKey, Cached) = undefined,
     graph_cap: usize = 96,
@@ -266,15 +254,13 @@ pub const Engine = struct {
     evictions: usize = 0,
     updates: usize = 0, // captures that took an older graph's instantiation (oldestGraph)
     capture_ms: f64 = 0,
-    /// DFlash2 (opt-in): its taps after the target layers it reads, each stream's ring bytes, and the verify steps
-    /// run (a stream's last verify rows are good for its draft while no later verify ran).
+    /// DFlash2 (opt-in): its taps, each stream's ring bytes, and the verify steps run (a draft needs the latest).
     drafter: ?*@import("dflash.zig").Drafter = null,
     ring_bytes: u64 = 0,
     verifies: u64 = 0,
     /// The step being run (its segments and shape), for the blocks.
     step: Step = .{},
-    /// Development (TF_GLM_SKIP=gather,experts,dense,attn,hc): a class of work left out, its time measured by the
-    /// steps' difference (the replies are wrong while set).
+    /// Development (TF_GLM_SKIP=gather,experts,dense,attn,hc): work left out to time it; replies wrong while set.
     skip: Skip = .{},
 };
 
@@ -352,14 +338,12 @@ pub fn freeSeq(e: *Engine, s: *Seq) void {
     sq.free(e.gpa, s);
 }
 
-/// The next prefill's images (null: none); its chunks put each run's features in place of the embeddings (the main
-/// layers' and the MTP head's, a row later), and the prefill drops them.
+/// The next prefill's images (null: none): their features replace the embeddings (MTP a row later), then dropped.
 pub fn attach(s: *Seq, m: ?Media) void {
     s.media = m;
 }
 
-/// The step's tables for ``segs`` into ``b`` (uploaded and waited for: the host buffer is reused), its shape into
-/// e.step. ``kind`` .mtp: the MTP layer's cache and positions (mtp_len), else every DSA layer's and pos.
+/// The step's tables for ``segs`` into ``b`` (uploaded, waited for) and shape; ``kind`` .mtp: MTP cache and mtp_len.
 pub fn prepare(e: *Engine, b: *Buffers, segs: []const Seg, kind: Kind) !void {
     var R: i64 = 0;
     for (segs) |g| R += g.rows;
@@ -415,8 +399,7 @@ fn keyOf(e: *const Engine) GKey {
     return .{ .kind = st.kind, .rows = st.rows, .nseg = st.segs.len, .nch = st.nch, .np = st.np, .sparse = st.sparse };
 }
 
-/// The step's GPU work (capturable): a verify step's forward and every row's candidates, or the MTP head over its
-/// staged rows and each stream's last row's candidates.
+/// The step's GPU work (capturable): a verify forward and its candidates, or the MTP head and last rows' candidates.
 fn body(e: *Engine) !void {
     switch (e.step.kind) {
         .verify => {
@@ -453,8 +436,7 @@ pub fn run(e: *Engine) !void {
     defer g.deinit();
     e.captures += 1;
     if (e.graphs.count() >= e.graph_cap) {
-        // full: the least recently run graph of the same layout takes the new shape's parameters in place (no
-        // instantiation, no memory); a layout the driver will not update to is dropped for a new instantiation
+        // full: the LRU graph of the same layout takes the new parameters in place; one that won't update is dropped
         if (oldestGraph(e, key, true)) |k| {
             var c = e.graphs.fetchRemove(k).?.value;
             const took = if (c.ex.update(g)) |r| r == .success else |_| false;

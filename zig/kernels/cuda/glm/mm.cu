@@ -1,12 +1,4 @@
-// GLM-5.3-Flash on CUDA: the dense linears, ours. One tensor-core kernel for every row count (a decode window's few
-// rows, sixteen streams' windows at once, a prompt chunk's 2048): each group of 64 inputs is summed from zero by the
-// bf16 mma, then acc = fma(P, scale, acc) in group order, and the K slices (fixed by the shape) are added in slice
-// order, so a row's bits never depend on the rows beside it.
-//
-// Weights are tiled at load (glm_mm_tile*): a column tile of 8 outputs and a group of 64 inputs is 32 lanes' chunks of
-// 16 values in mma B-fragment order (lane l: column l / 4; value 4 kt + j at input 16 kt + {2t, 2t+1, 2t+8, 2t+9}[j],
-// t = l % 4), each chunk BITS / 2 words (ops.cu's 16-value packing; BITS 16: the bf16 values themselves). Scales are
-// fp16 [N / 8][K / 64][8].
+// GLM dense linears, ours: one tensor-core kernel for any row count, 64-groups then K slices in order; row-stable bits.
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -136,8 +128,7 @@ __device__ __forceinline__ void mm_kernel(const __nv_bfloat16* __restrict__ x, l
         for (int j = 0; j < T::NT; ++j)
 #pragma unroll
             for (int e = 0; e < 4; ++e) acc[i][j][e] = 0.0f;
-    // dependent launch: the first stages' weights stream in while the kernel before still runs; its outputs (this
-    // one's input, and any buffer this one writes) only after griddepcontrol.wait
+    // dependent launch: first stages' weights stream in early; inputs and outputs only after griddepcontrol.wait
     grid_launch();
 #pragma unroll
     for (int st = 0; st < STAGES - 1; ++st)
@@ -255,8 +246,7 @@ GLM_MM_ALL(6)
 GLM_MM_ALL(8)
 GLM_MM_ALL(16)
 
-// -- tiling at load ---------------------------------------------------------------------------------------------------
-// packed rows (ops.cu's [N][K / 16][BITS / 2] words, fp16 scales [N][K / 64]) -> the tiled chunks and scales
+// -- tiling at load: ops.cu's packed rows and fp16 scales [N][K / 64] -> the tiled chunks and scales ---------------
 template <int BITS>
 __device__ __forceinline__ void tile_packed(const uint32_t* __restrict__ src, const __half* __restrict__ ss,
                                             uint32_t* __restrict__ dst, __half* __restrict__ ds, int N, int K) {

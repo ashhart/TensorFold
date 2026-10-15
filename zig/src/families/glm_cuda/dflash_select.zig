@@ -1,0 +1,63 @@
+//! DFlash2's path selector on rank 0: each draft among a row's 16 likeliest by the previous draft's codebook row.
+const dflash = @import("dflash.zig");
+const CW = dflash.CW;
+const BLOCK = dflash.BLOCK;
+const Drafter = dflash.Drafter;
+const RANK = dflash.RANK;
+const TOPK = dflash.TOPK;
+const Req = dflash.Req;
+
+const Cand = struct { v: f32, id: u32 };
+
+fn bf(x: u16) f32 {
+    return @bitCast(@as(u32, x) << 16);
+}
+
+/// Stream ``i``'s 7 drafts: each row's best of both ranks' 16 by logit plus codebook scores; greedy, chance kept.
+pub fn select(dr: *Drafter, i: usize, M: usize, q: Req) void {
+    const out = q.out.?;
+    const probs = q.probs.?;
+    const W = CW;
+    const T = TOPK;
+    var prev: usize = q.anchor;
+    for (1..BLOCK) |t| {
+        const r = i * BLOCK + t;
+        var c: [TOPK]Cand = undefined;
+        var n: usize = 0;
+        for (0..2) |rk| {
+            const blk = dr.cand[rk * M * W + r * W ..][0..W];
+            for (0..T) |j| {
+                if (blk[j] < 0) continue;
+                const cand: Cand = .{ .v = @bitCast(blk[T + j]), .id = @intCast(blk[j]) };
+                if (n < TOPK) {
+                    c[n] = cand;
+                    n += 1;
+                    continue;
+                }
+                var lo: usize = 0;
+                for (1..TOPK) |m| if (c[m].v < c[lo].v) {
+                    lo = m;
+                };
+                if (cand.v > c[lo].v) c[lo] = cand;
+            }
+        }
+        const g = dr.gh[r * RANK ..][0..RANK];
+        const P = dr.pred[prev * RANK ..][0..RANK];
+        var pg: [RANK]f32 = undefined;
+        for (&pg, P, g) |*o, p, x| o.* = bf(p) * x;
+        var best: usize = 0;
+        var sc: [TOPK]f32 = undefined;
+        for (0..n) |m| {
+            const Sc = dr.succ[@as(usize, c[m].id) * RANK ..][0..RANK];
+            var dot: f32 = 0;
+            for (pg, Sc) |a, b| dot += a * bf(b);
+            sc[m] = c[m].v + dot;
+            if (sc[m] > sc[best]) best = m;
+        }
+        var z: f64 = 0;
+        for (sc[0..n]) |x| z += @exp(@as(f64, x - sc[best]) / dr.temp);
+        out[t - 1] = c[best].id;
+        probs[t - 1] = 1.0 / z;
+        prev = c[best].id;
+    }
+}

@@ -1,6 +1,4 @@
-// GLM-5.3-Flash's symmetric routed experts, prefill form: flashnext/experts_prefill.cu reading experts_sym.cuh's
-// blocks, each group's bias pair -8 x its scale pair (exact in bf16).
-// Prefill: w = bf16(fma(q, s, b)), one fp32 chain over K; chunk-invariant bits, not decode's (replies prefill again).
+// GLM symmetric experts, prefill: w = bf16(fma(q, s, -8 s)), one fp32 chain over K; chunk-invariant, not decode's bits.
 
 #include <cuda_bf16.h>
 #include <stdint.h>

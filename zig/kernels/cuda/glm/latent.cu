@@ -1,8 +1,4 @@
-// GLM-5.3-Flash on CUDA: MLA attention on the 512-wide latent cache, ours. A program is one row's 32 heads over one
-// chunk of 512 keys (online softmax in 16-key tiles, tensor-core scores and outputs), and the chunks are merged in
-// order; nothing a program computes depends on another row, so a row has the same bits alone, in a decode window, in
-// sixteen streams' windows or in a prompt chunk. Every row names its own cache (``lc``, the latent rows of its
-// stream) and position (``pos``), so one launch serves any mix of streams.
+// GLM MLA on the 512-wide latent cache, ours: a row's 32 heads a 512-key chunk, merged in order; row-stable bits.
 
 #include <cuda_bf16.h>
 #include <stdint.h>
@@ -204,8 +200,7 @@ extern "C" __global__ void glm_attn_smem(int* out) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // a dependent matmul may start on its weights
  out[0] = SMEM; }
 
-// the chunk partials of row r, head h in chunk order -> out [R, H, LW] bf16. dense rows past the limit and sparse
-// rows with no tokens are left alone (the other path writes them). grid (R, H), 128 threads.
+// row r head h's chunk partials in order -> out [R, H, LW] bf16; skips dense rows past limit and empty sparse rows.
 extern "C" __global__ void glm_attn_merge(const float* __restrict__ po, const float* __restrict__ pm, const float* __restrict__ pl,
         __nv_bfloat16* __restrict__ out, const int* __restrict__ pos, const int* __restrict__ cnt, int R, int nch, int sparse) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // a dependent matmul may start on its weights
@@ -242,8 +237,7 @@ extern "C" __global__ void glm_lat_write(const __nv_bfloat16* __restrict__ lat, 
     for (int i = threadIdx.x; i < LW / 8; i += blockDim.x) reinterpret_cast<uint4*>(dst)[i] = src[i];
 }
 
-// absorb: qa[r, h, n] = sum_k q[r, h, k] wk[h, k, n] (fp32 in k order, then bf16); q [R, H, 256], wk [H, 256, 512].
-// grid (H, LW / 64, ceil(R / 16)), 64 threads: the weight block once in shared memory, each row summed alone.
+// absorb: qa[r, h, n] = sum_k q[r, h, k] wk[h, k, n], fp32 in k order then bf16; weight block in shared, rows alone.
 extern "C" __global__ void glm_absorb_q(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ wk,
                                         __nv_bfloat16* __restrict__ qa, int R) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // a dependent matmul may start on its weights
@@ -263,8 +257,7 @@ extern "C" __global__ void glm_absorb_q(const __nv_bfloat16* __restrict__ q, con
     }
 }
 
-// expand: out[r, h, n] = sum_k ol[r, h, k] wv[h, n, k]; ol [R, H, 512], wv [H, 256, 512] -> out [R, H, 256].
-// grid (H, 256 / 8, ceil(R / 16)), 256 threads: a warp an output, lanes over k in order, then a xor tree.
+// expand: out[r, h, n] = sum_k ol[r, h, k] wv[h, n, k] -> [R, H, 256]; a warp an output, lanes over k, then a xor tree.
 extern "C" __global__ void glm_expand_v(const __nv_bfloat16* __restrict__ ol, const __nv_bfloat16* __restrict__ wv,
                                         __nv_bfloat16* __restrict__ out, int R) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // a dependent matmul may start on its weights

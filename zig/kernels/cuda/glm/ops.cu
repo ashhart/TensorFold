@@ -4,9 +4,7 @@
 #include <cuda_fp16.h>
 #include <stdint.h>
 
-// sparse.select_tokens' token list: row r (position q = pos[0] + r) attends to its 512 pools' tokens, ascending
-// (pools[r] ascending, int64), then the incomplete last pool's visible tokens (-1 past q); count = 2048 + those when
-// the row has more than 512 complete pools, else 0 (the row stays dense).
+// sparse.select_tokens: row r's 512 pools' tokens ascending, then the last pool's visible ones; 0 count when dense.
 extern "C" __global__ void glm_sparse_tokens(const int64_t* __restrict__ pools, const int* __restrict__ pos, int rows,
                                              int* __restrict__ tokens, int* __restrict__ counts) {
     const int r = blockIdx.x;
@@ -47,11 +45,7 @@ extern "C" __global__ void glm_copy_rows(const uint32_t* __restrict__ src, long 
     for (int c = blockIdx.x * blockDim.x + threadIdx.x; c < words; c += gridDim.x * blockDim.x) dst[r * dpitch + c] = src[r * spitch + c];
 }
 
-// -- packed dense linears (the loader's TF_GLM_DENSE_BITS) ------------------------------------------------------------
-// A row is K / 16 chunks of 16 symmetric BITS-bit values (stored + 2^(BITS-1)), each chunk BITS / 2 32-bit words, with
-// an fp16 scale per 64 inputs (4 chunks). 4 bits: value i at bits 4 (i % 8) of word i / 8. 8 bits: byte i % 4 of word
-// i / 4. 6 bits: values 0-4, 5-9, 10-14 at bits 6 (i % 5) of words 0, 1, 2; value 15's bits 0-1, 2-3, 4-5 at bits
-// 30-31 of words 0, 1, 2.
+// -- packed dense linears (TF_GLM_DENSE_BITS): K / 16 chunks of 16 offset BITS-bit values, fp16 scale a 64 ----------
 
 template <int BITS>
 __device__ __forceinline__ void glm_unpack16(const uint32_t* __restrict__ p, float v[16]) {
@@ -94,9 +88,7 @@ __device__ __forceinline__ void glm_load_chunk(const uint32_t* __restrict__ p, u
     }
 }
 
-// out[m, n] = sum_k x[m, k] q[n, k] s[n, k / 64] for M <= 16 rows (x bf16, row stride xs elements, 16-byte aligned;
-// out [M, N] bf16 or fp32): a warp a row, lanes over the chunks, each chunk's 16 products summed in fp32 then scaled,
-// the lanes' sums reduced by xor shuffles. A row's sum depends only on its own inputs, never on M.
+// out[m, n] = sum_k x[m, k] q[n, k] s[n, k / 64], M <= 16: a warp a row, fp32 chunks, xor reduce; independent of M.
 template <int BITS>
 __device__ __forceinline__ void glm_qgemv(const __nv_bfloat16* __restrict__ x, long long xs, const uint32_t* __restrict__ w,
                                           const __half* __restrict__ s, void* __restrict__ out, int f32, int M, int N, int K) {
@@ -183,8 +175,7 @@ GLM_Q(4)
 GLM_Q(6)
 GLM_Q(8)
 
-// x rows 0 .. rows - 1 (each ``copies`` streams of 4096 bf16) take feats rows 0 .. rows - 1 [rows, 4096] in every stream:
-// an image's features in place of its placeholder tokens' embeddings
+// x rows 0 .. rows - 1 (``copies`` streams of 4096 bf16 each) take feats [rows, 4096]: image features for placeholders
 extern "C" __global__ void glm_inject_rows(const __nv_bfloat16* __restrict__ feats, __nv_bfloat16* __restrict__ x, int rows,
                                            int copies) {
     const long long n = (long long)rows * copies * 4096;

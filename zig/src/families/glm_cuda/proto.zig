@@ -1,5 +1,4 @@
-//! GLM-5.3-Flash's two-rank protocol: the frames rank 0 sends rank 1 (each a call rank 1 replays) and their
-//! little-endian encoding.
+//! GLM-5.3-Flash's two-rank protocol: rank 0's frames to rank 1 (calls it replays), little-endian.
 
 const std = @import("std");
 const lanes = @import("lanes");

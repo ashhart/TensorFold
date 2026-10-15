@@ -1,6 +1,4 @@
-// GLM-5.3-Flash's vision tower on CUDA (families/glm_cuda/vision.zig): the elementwise and row steps around its
-// cuBLASLt products, as mlx-vlm's glm5_next/vision.py defines them. The residual stream stays in fp32; a step's bf16
-// output is rounded once, to nearest even.
+// GLM vision tower's steps around cuBLASLt, as mlx-vlm glm5_next/vision.py: fp32 residual, bf16 outputs rounded once.
 
 #include <cuda_bf16.h>
 #include <stdint.h>
@@ -68,10 +66,7 @@ extern "C" __global__ void glm_vis_rmsnorm(const float* __restrict__ x, const __
     for (int c = threadIdx.x; c < cols; c += blockDim.x) y[(long long)blockIdx.x * cols + c] = tobf(row[c] * inv * bf(w[c]));
 }
 
-// The attention inputs: qkv [N, 3, H, 64] bf16 -> q and k each RMSNorm'd over its head (q_norm, k_norm; bf16), then
-// rotated (fp32: x cos + rotate_half(x) sin, angles (row, col) x inv_freq[16] for dims 0-15 / 16-31, again for
-// 32-63) into qh, kh [N / seg, H, seg, 64]; v into vt [N / seg, H, 64, seg] (each frame group's head contiguous).
-// A warp a (row, head): lane l holds dims l and l + 32.
+// attention inputs: q, k head-RMSNormed and rotated (fp32, 2D angles) into qh, kh; v into vt; a warp a (row, head).
 extern "C" __global__ void glm_vis_qkv(const __nv_bfloat16* __restrict__ qkv, const __nv_bfloat16* __restrict__ qn,
                                        const __nv_bfloat16* __restrict__ kn, const int* __restrict__ pos,
                                        const float* __restrict__ inv_freq, __nv_bfloat16* __restrict__ qh,
