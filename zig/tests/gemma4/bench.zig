@@ -39,6 +39,36 @@ fn member(m: *g4.Model, name: []const u8) !Q {
     return .{ .w = .{ .buf = w.buffer, .off = w.offset }, .s = .{ .buf = sc.buffer, .off = sc.offset }, .b = .{ .buf = bi.buffer, .off = bi.offset }, .n = @intCast(w.shape[0]), .k = @intCast(w.shape[1] * 8) };
 }
 
+/// A 512-row prompt chunk's 60 layers at a cache depth, by stage: GPU ms for all, the GEMMs, the attention, the glue.
+fn promptStages(m: *g4.Model) !void {
+    const cap: usize = 131072 + 1024;
+    var ps = try g4.prompt.Scratch.init(m.device, cap);
+    defer ps.deinit();
+    var c = try g4.state.Cache.init(m.device, cap);
+    defer c.deinit();
+    const names = [_][]const u8{ "all", "GEMMs", "attention", "glue" };
+    const masks = [_]g4.prompt.Stages{ .{}, .{ .attn = false, .glue = false }, .{ .mm = false, .glue = false }, .{ .mm = false, .attn = false } };
+    const one: ?usize = if (std.c.getenv("GEMMA_STAGES")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch null else null;
+    for ([_]usize{ 0, 8192, 32768, 131072 }) |depth| {
+        if (one) |d| if (d != depth) continue;
+        for (ps.pos.slice(i32, 512), 0..) |*p, i| p.* = @intCast(depth + i);
+        for (names, masks) |name, st| {
+            var best: f64 = 1e9;
+            for (0..3) |_| {
+                c.len = depth;
+                const cb = m.queue.commandBuffer();
+                const e = cb.compute(.serial);
+                for (0..cfg.layers) |i| try g4.prompt.layer(m, e, &ps, &c, i, i % 2, 512, st);
+                e.end();
+                cb.commit();
+                cb.wait();
+                best = @min(best, gpuMs(cb));
+            }
+            std.debug.print("prompt chunk of 512 rows at depth {d}, {s}: {d:.1} ms GPU\n", .{ depth, name, best });
+        }
+    }
+}
+
 /// Every projection of the 60 layers on core/affine_mm (prompt GEMMs from the checkpoint's own tensors): GPU ms.
 fn affineAll(m: *g4.Model, pipes: tf.affine_mm.Pipes, rows: u32, x: mtl.Buffer, sums: mtl.Buffer, y: mtl.Buffer) !f64 {
     const cb = m.queue.commandBuffer();
@@ -155,6 +185,7 @@ pub fn main(init: std.process.Init) !void {
     defer y.deinit();
     std.debug.print("weights read a step: {d:.2} GB\n", .{@as(f64, @floatFromInt(bytes)) / 1e9});
     if (std.c.getenv("GEMMA_GLUE") != null) return glueCosts(m);
+    if (std.c.getenv("GEMMA_STAGES") != null) return promptStages(m);
     for ([_]usize{ 1, 16, 64, 128 }) |rows| {
         var best: f64 = 1e9;
         for (0..5) |_| best = @min(best, try projections(m, rows, x, y, false));

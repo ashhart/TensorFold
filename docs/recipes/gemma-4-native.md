@@ -77,8 +77,8 @@ zig-out/bin/tf-gemma4-run M L NL 49 512 && python tools/zig/gemma4_gate.py check
   and the native run ties them (its decode attention sums 256-key chunks in its own order). Every row keeps its bits
   at any window width and beside other streams' rows.
 - Long prompts against the oracle's mlx-lm prompt forward (fed in 2048-token chunks, as `mlx_lm.generate` feeds a
-  prompt), 49 greedy tokens each: equal at 32k, 64k, 128k and 252k. At 8k the two part at token 25, where mlx-lm's top
-  two logits are equal (28.25 and 28.25) and the native run orders them one bf16 step apart.
+  prompt), 49 greedy tokens each: equal at 8k, 32k and 64k. At 128k and 252k the two part at tokens 30 and 45, each
+  where mlx-lm's top two logits are equal (26.25 and 28.625) and the native run puts them 0.25 and 0.125 apart.
 - The lane core: copy-drafted and DFlash-drafted streams, alone and 4 and 8 in shared rounds, equal the engine's
   plain replies token for token, on the four prompts and on two copy-heavy ones.
 - Served on an M5 Ultra with the drafter: greedy token SHAs equal the engine's receipts alone, with drafts off and on,
@@ -96,8 +96,12 @@ Long prompts, one after the other on the same M5 Ultra: native in 512-row chunks
 
 | Prompt | Native prompt tok/s | mlx-lm prompt tok/s | Native decode tok/s | mlx-lm decode tok/s |
 |---|---|---|---|---|
-| 8k | 1043 | 1305 | about 38 | 39 |
-| 32k | 903 | 1139 | about 33 | 32 |
-| 64k | 725 | 944 | about 29 | 32 |
-| 128k | 583 | 651 | about 24 | 25 |
-| 252k | 354 | 440 | about 19 | 16 |
+| 8k | 1061 | 1305 | about 35 | 39 |
+| 32k | 927 | 1139 | about 33 | 32 |
+| 64k | 799 | 944 | about 31 | 32 |
+| 128k | 620 | 651 | about 24 | 25 |
+| 252k | 374 | 440 | about 18 | 16 |
+
+Prompt attention runs 64 keys a simdgroup over the whole head, the tile's row maxes and probabilities crossing
+threadgroup memory once a block: at 32k it costs what mlx-lm's fused attention does (18 ms a global layer for 512
+rows), where slicing the head across simdgroups and summing scores every 32 keys cost a third more.

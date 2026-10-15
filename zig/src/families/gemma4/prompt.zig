@@ -106,7 +106,7 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32) !void {
     e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
     var cur: usize = 0;
     for (0..cfg.layers) |i| {
-        try layer(m, e, s, c, i, cur, r32);
+        try layer(m, e, s, c, i, cur, r32, .{});
         cur = 1 - cur;
     }
     // the head on the last row only (the lane kernel's one-row bits), soft-capped
@@ -126,7 +126,11 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32) !void {
     c.len += rows;
 }
 
-fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: usize, cur: usize, rows: u32) !void {
+/// Which of a layer's dispatches to encode: a chunk takes them all; the bench times the stages apart.
+pub const Stages = struct { mm: bool = true, attn: bool = true, glue: bool = true };
+
+/// Layer `i` over `rows` rows of s.normed[cur] (keys at the cache's length) into s.h[1 - cur] and s.normed[1 - cur].
+pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: usize, cur: usize, rows: u32, st: Stages) !void {
     const global = cfg.global(i);
     const kd: *const kernels.Kind = m.kernels.kind(global);
     const l = &m.weights.layers[i];
@@ -134,43 +138,60 @@ fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: usiz
     const dh = cfg.headDim(i);
     const qn = cfg.query_heads * dh;
     const width = qn + nk * dh * @as(usize, if (global) 1 else 2);
-    sums(m, e, s, s.normed[cur], rows, cfg.hidden);
-    mm(m, e, s, l.mlx[0], s.normed[cur], s.qkv, 0, width, rows);
-    mm(m, e, s, l.mlx[1], s.normed[cur], s.qkv, qn, width, rows);
-    if (!global) mm(m, e, s, l.mlx[2], s.normed[cur], s.qkv, qn + nk * dh, width, rows);
-    e.setPipeline(kd.qkv);
-    bind(e, &.{s.qkv}, 0);
-    e.setBuffer(l.q_norm.buf, l.q_norm.off, 1);
-    e.setBuffer(l.k_norm.buf, l.k_norm.off, 2);
-    bind(e, &.{ if (global) m.inv_global else m.inv_sliding, s.pos }, 3);
-    e.setValue(cfg.eps, 5);
-    bind(e, &.{ s.q, s.k, s.v, c.k[i], c.v[i] }, 6); // keys and values straight into the cache too
-    e.setValue([3]i32{ if (global) 0 else state.ring, @intCast(state.slotsOf(i, c.capacity)), 0 }, 11);
-    e.dispatchGroups(.{ .width = cfg.query_heads + 2 * nk, .height = rows }, .{ .width = 32 });
-    e.setPipeline(kd.prompt_attn);
-    bind(e, &.{ s.q, c.k[i], c.v[i], s.attn }, 0);
-    e.setValue([3]i32{ @intCast(rows), @intCast(c.len), @intCast(state.slotsOf(i, c.capacity)) }, 4);
-    e.dispatchGroups(.{ .width = (rows + 15) / 16, .height = cfg.query_heads }, .{ .width = 32 * dh / 128 });
-    sums(m, e, s, s.attn, rows, @intCast(qn));
-    mm(m, e, s, l.mlx[3], s.attn, s.o, 0, cfg.hidden, rows);
-    e.setPipeline(kd.attn_tail);
-    bind(e, &.{ s.h[cur], s.o }, 0);
-    e.setBuffer(l.post_attention.buf, l.post_attention.off, 2);
-    e.setBuffer(l.pre_feedforward.buf, l.pre_feedforward.off, 3);
-    e.setValue(cfg.eps, 4);
-    bind(e, &.{ s.hn, s.n_mlp }, 5);
-    noSums(e, s, 7);
-    e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
-    sums(m, e, s, s.n_mlp, rows, cfg.hidden);
-    mm(m, e, s, l.mlx[4], s.n_mlp, s.gate_up, 0, 2 * cfg.intermediate, rows);
-    mm(m, e, s, l.mlx[5], s.n_mlp, s.gate_up, cfg.intermediate, 2 * cfg.intermediate, rows);
-    e.setPipeline(kd.geglu);
-    bind(e, &.{ s.gate_up, s.act }, 0);
-    e.setValue(@as(u32, cfg.intermediate), 2);
-    noSums(e, s, 3);
-    e.dispatchGroups(.{ .width = cfg.intermediate / 64, .height = rows }, .{ .width = 64 });
-    sums(m, e, s, s.act, rows, cfg.intermediate);
-    mm(m, e, s, l.mlx[6], s.act, s.y, 0, cfg.hidden, rows);
+    if (st.mm) {
+        sums(m, e, s, s.normed[cur], rows, cfg.hidden);
+        mm(m, e, s, l.mlx[0], s.normed[cur], s.qkv, 0, width, rows);
+        mm(m, e, s, l.mlx[1], s.normed[cur], s.qkv, qn, width, rows);
+        if (!global) mm(m, e, s, l.mlx[2], s.normed[cur], s.qkv, qn + nk * dh, width, rows);
+    }
+    if (st.glue) {
+        e.setPipeline(kd.qkv);
+        bind(e, &.{s.qkv}, 0);
+        e.setBuffer(l.q_norm.buf, l.q_norm.off, 1);
+        e.setBuffer(l.k_norm.buf, l.k_norm.off, 2);
+        bind(e, &.{ if (global) m.inv_global else m.inv_sliding, s.pos }, 3);
+        e.setValue(cfg.eps, 5);
+        bind(e, &.{ s.q, s.k, s.v, c.k[i], c.v[i] }, 6); // keys and values straight into the cache too
+        e.setValue([3]i32{ if (global) 0 else state.ring, @intCast(state.slotsOf(i, c.capacity)), 0 }, 11);
+        e.dispatchGroups(.{ .width = cfg.query_heads + 2 * nk, .height = rows }, .{ .width = 32 });
+    }
+    if (st.attn) {
+        e.setPipeline(kd.prompt_attn);
+        bind(e, &.{ s.q, c.k[i], c.v[i], s.attn }, 0);
+        e.setValue([3]i32{ @intCast(rows), @intCast(c.len), @intCast(state.slotsOf(i, c.capacity)) }, 4);
+        e.dispatchGroups(.{ .width = (rows + 15) / 16, .height = cfg.query_heads }, .{ .width = 32 * dh / 128 });
+    }
+    if (st.mm) {
+        sums(m, e, s, s.attn, rows, @intCast(qn));
+        mm(m, e, s, l.mlx[3], s.attn, s.o, 0, cfg.hidden, rows);
+    }
+    if (st.glue) {
+        e.setPipeline(kd.attn_tail);
+        bind(e, &.{ s.h[cur], s.o }, 0);
+        e.setBuffer(l.post_attention.buf, l.post_attention.off, 2);
+        e.setBuffer(l.pre_feedforward.buf, l.pre_feedforward.off, 3);
+        e.setValue(cfg.eps, 4);
+        bind(e, &.{ s.hn, s.n_mlp }, 5);
+        noSums(e, s, 7);
+        e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
+    }
+    if (st.mm) {
+        sums(m, e, s, s.n_mlp, rows, cfg.hidden);
+        mm(m, e, s, l.mlx[4], s.n_mlp, s.gate_up, 0, 2 * cfg.intermediate, rows);
+        mm(m, e, s, l.mlx[5], s.n_mlp, s.gate_up, cfg.intermediate, 2 * cfg.intermediate, rows);
+    }
+    if (st.glue) {
+        e.setPipeline(kd.geglu);
+        bind(e, &.{ s.gate_up, s.act }, 0);
+        e.setValue(@as(u32, cfg.intermediate), 2);
+        noSums(e, s, 3);
+        e.dispatchGroups(.{ .width = cfg.intermediate / 64, .height = rows }, .{ .width = 64 });
+    }
+    if (st.mm) {
+        sums(m, e, s, s.act, rows, cfg.intermediate);
+        mm(m, e, s, l.mlx[6], s.act, s.y, 0, cfg.hidden, rows);
+    }
+    if (!st.glue) return;
     e.setPipeline(kd.dense_tail);
     bind(e, &.{ s.hn, s.y }, 0);
     e.setBuffer(l.post_feedforward.buf, l.post_feedforward.off, 2);
