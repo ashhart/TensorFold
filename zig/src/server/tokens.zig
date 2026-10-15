@@ -120,8 +120,14 @@ pub fn tokenSha(tokens: []const u32) [12]u8 {
 
 test "full token SHA hashes decimal ids with commas and preserves the short fingerprint" {
     const ids = [_]u32{ 1, 23, 456, 0xffffffff };
-    try std.testing.expectEqualStrings("59ce3a8d28d46b5fe396be42f190dd3dd26a64b88007ad56d7cd3609fd42bf8c", &tokenSha256(&ids));
+    try std.testing.expectEqualStrings(
+        "59ce3a8d28d46b5fe396be42f190dd3dd26a64b88007ad56d7cd3609fd42bf8c",
+        &tokenSha256(&ids),
+    );
     try std.testing.expectEqualStrings(tokenSha256(&ids)[0..12], &tokenSha(&ids));
-    try std.testing.expectEqualStrings("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", &tokenSha256(&.{}));
+    try std.testing.expectEqualStrings(
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        &tokenSha256(&.{}),
+    );
     try std.testing.expect(!std.mem.eql(u8, &tokenSha256(&.{ 1, 23 }), &tokenSha256(&.{ 12, 3 })));
 }
