@@ -103,4 +103,27 @@ __device__ __forceinline__ int seen_row(unsigned anc, int n) {
     return __ffs(anc) - 1;
 }
 
+// A row's rotary position: the stream's length plus its ancestors-and-self, less one; one place for both caches.
+__device__ __forceinline__ int row_position(const Seg& sg, unsigned anc) { return sg.len + rows_seen(anc) - 1; }
+
+// The rope kernels' body for either cache: queries rotated in place, each key head's rotated key and value stored.
+template <typename Store>
+__device__ __forceinline__ void rope_rows(const Geo& geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
+                                          const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
+                                          const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc,
+                                          const int* __restrict__ P, Store store) {
+    const int QH = geo.qh, KVH = geo.kvh;
+    const int d = threadIdx.x;
+    if (past_rows(P, blockIdx.x)) return;
+    const size_t m = blockIdx.x;
+    const Seg sg = segs[rowseg[m]];
+    const int pos = row_position(sg, rowanc[m]);
+    const int slot = sg.len + (int)m - sg.row0;
+    __shared__ __nv_bfloat16 qs[MAXQ * HD];
+    for (int h = 0; h < QH; h++) qs[h * HD + d] = Qn[(m * QH + h) * HD + d];
+    __syncthreads();
+    for (int h = 0; h < QH; h++) Qn[(m * QH + h) * HD + d] = rotate(qs + h * HD, d, pos);
+    for (int h = 0; h < KVH; h++) store(sg, h, slot, d, rotate(Kn + (m * KVH + h) * HD, d, pos), Vr[(m * KVH + h) * HD + d]);
+}
+
 }  // namespace tf_q35

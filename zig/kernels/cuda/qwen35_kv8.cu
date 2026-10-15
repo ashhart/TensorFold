@@ -27,32 +27,28 @@ __device__ __forceinline__ void quant_row(float x, int d, unsigned char* q, floa
     if (d == 0) *s = amax > 0.0f ? __fdiv_rn(amax, 448.0f) : 1.0f;
 }
 
-// tf_q35_rope with the keys and values written as e4m3 rows and their scales; grid (rows), HD threads.
+// A key and value as e4m3 rows and their scales in their cache slot; every thread of the block calls it together.
+struct StoreFp8 {
+    int layer, kvh;
+    float* red;
+    __device__ __forceinline__ void operator()(const Seg& sg, int h, int slot, int d, __nv_bfloat16 k, __nv_bfloat16 v) const {
+        unsigned char* keys = layer_at(sg, layer, kvh);
+        unsigned char* values = keys + (size_t)kvh * sg.cap * HD;
+        float* kscale = reinterpret_cast<float*>(values + (size_t)kvh * sg.cap * HD);
+        float* vscale = kscale + (size_t)kvh * sg.cap;
+        const size_t row = (size_t)h * sg.cap + slot;
+        quant_row(bf(k), d, keys + row * HD, kscale + row, red);
+        quant_row(bf(v), d, values + row * HD, vscale + row, red);
+    }
+};
+
+// tf_q35_rope's rows and positions (rope_rows) with the keys and values written as e4m3 rows and their scales.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_rope8(Geo geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
                                                                  const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
                                                                  const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc, int layer,
                                                                  const int* __restrict__ P) {
-    const int QH = geo.qh, KVH = geo.kvh;
-    const int d = threadIdx.x;
-    if (past_rows(P, blockIdx.x)) return;
-    const size_t m = blockIdx.x;
-    const Seg sg = segs[rowseg[m]];
-    const int pos = sg.len + rows_seen(rowanc[m]) - 1;
-    const int slot = sg.len + (int)m - sg.row0;
-    __shared__ __nv_bfloat16 qs[MAXQ * HD];
     __shared__ float red[HD / 32];
-    for (int h = 0; h < QH; h++) qs[h * HD + d] = Qn[(m * QH + h) * HD + d];
-    __syncthreads();
-    for (int h = 0; h < QH; h++) Qn[(m * QH + h) * HD + d] = rotate(qs + h * HD, d, pos);
-    unsigned char* keys = layer_at(sg, layer, KVH);
-    unsigned char* values = keys + (size_t)KVH * sg.cap * HD;
-    float* kscale = reinterpret_cast<float*>(values + (size_t)KVH * sg.cap * HD);
-    float* vscale = kscale + (size_t)KVH * sg.cap;
-    for (int h = 0; h < KVH; h++) {
-        const size_t row = (size_t)h * sg.cap + slot;
-        quant_row(bf(rotate(Kn + (m * KVH + h) * HD, d, pos)), d, keys + row * HD, kscale + row, red);
-        quant_row(bf(Vr[(m * KVH + h) * HD + d]), d, values + row * HD, vscale + row, red);
-    }
+    rope_rows(geo, Qn, Kn, Vr, segs, rowseg, rowanc, P, StoreFp8{layer, geo.kvh, red});
 }
 
 // Eight e4m3 values as floats.

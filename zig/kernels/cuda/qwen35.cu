@@ -307,29 +307,23 @@ extern "C" __global__ void __launch_bounds__(64) tf_q35_head_norm(const __nv_bfl
     }
 }
 
+// A key and value as bf16 rows in their cache slot (qwen35.cu's layout: a layer's keys then values, kvh blocks of cap).
+struct StoreBf16 {
+    int layer, kvh;
+    __device__ __forceinline__ void operator()(const Seg& sg, int h, int slot, int d, __nv_bfloat16 k, __nv_bfloat16 v) const {
+        __nv_bfloat16* keys = reinterpret_cast<__nv_bfloat16*>(sg.kv) + (size_t)layer * 2 * kvh * sg.cap * HD;
+        const size_t dst = ((size_t)h * sg.cap + slot) * HD + d;
+        keys[dst] = k;
+        keys[(size_t)kvh * sg.cap * HD + dst] = v;
+    }
+};
+
 // Queries rotated in place, keys rotated and values copied into the row's cache slot; grid (rows), HD threads.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_rope(Geo geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
                                                                 const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
                                                                 const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc, int layer,
                                                                 const int* __restrict__ P) {
-    const int QH = geo.qh, KVH = geo.kvh;
-    const int d = threadIdx.x;
-    if (past_rows(P, blockIdx.x)) return;
-    const size_t m = blockIdx.x;
-    const Seg sg = segs[rowseg[m]];
-    const int pos = sg.len + rows_seen(rowanc[m]) - 1;
-    const int slot = sg.len + (int)m - sg.row0;
-    __shared__ __nv_bfloat16 qs[MAXQ * HD];
-    for (int h = 0; h < QH; h++) qs[h * HD + d] = Qn[(m * QH + h) * HD + d];
-    __syncthreads();
-    for (int h = 0; h < QH; h++) Qn[(m * QH + h) * HD + d] = rotate(qs + h * HD, d, pos);
-    __nv_bfloat16* keys = reinterpret_cast<__nv_bfloat16*>(sg.kv) + (size_t)layer * 2 * KVH * sg.cap * HD;
-    __nv_bfloat16* values = keys + (size_t)KVH * sg.cap * HD;
-    for (int h = 0; h < KVH; h++) {
-        const size_t dst = ((size_t)h * sg.cap + slot) * HD + d;
-        keys[dst] = rotate(Kn + (m * KVH + h) * HD, d, pos);
-        values[dst] = Vr[(m * KVH + h) * HD + d];
-    }
+    rope_rows(geo, Qn, Kn, Vr, segs, rowseg, rowanc, P, StoreBf16{layer, geo.kvh});
 }
 
 // Causal attention in chunks of chunk_keys(the row's keys), a warp a query head; partials by (row, head, chunk).
