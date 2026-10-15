@@ -35,13 +35,13 @@ pub fn quiet(p: anytype, t: anytype, host: anytype) !void {
             try xs.append(p.gpa, p.pos.items[(e.start + r) * d ..][0..d]);
             try kinds.append(p.gpa, .fact);
         }
-        // rows it fires on above refit_above now (its own fact's questions read today) stay fixed; weaker ones go quiet
+        // rows it fires on above refit_above stay fixed: other prompts', and conversations' (a chain's own Q and A)
         const live = try p.gpa.alloc(bool, p.labels.items.len);
         defer p.gpa.free(live);
         var fixed = e.count;
         for (p.labels.items, live, 0..) |l, *on, i| {
             const x = p.rows.items[(i * n + e.slot) * d ..][0..d];
-            on.* = l.ex >= own and dotBf16(u, x) > refit_above;
+            on.* = (l.ex >= own or l.row < p.pickRead(l.ex).?.ex.context) and dotBf16(u, x) > refit_above;
             if (!on.*) continue;
             try xs.append(p.gpa, x);
             try kinds.append(p.gpa, .none); // held as it reads, judged by no threshold
@@ -200,4 +200,104 @@ test "an earlier fact's neuron fitted quiet on a new fact's rows and its weak fi
         const was = dotBf16(before, x);
         if (was > refit_above) try std.testing.expectApproxEqAbs(was, dotBf16(u, x), 1e-3) else try std.testing.expect(dotBf16(u, x) <= 0);
     }
+}
+
+test "an earlier fact's neuron fitted quiet on a new fact's rows keeps the conversation rows it fires on as they read" {
+    const gpa = std.testing.allocator;
+    const d = 64;
+    const T = struct {
+        pub fn config(_: *const @This()) struct { hidden: usize } {
+            return .{ .hidden = d };
+        }
+    };
+    const pockets = @import("pocket.zig");
+    const Example = @import("lesson_examples.zig").Example;
+    const NoHost = struct {
+        pub fn pocket(_: @This(), _: usize, _: []const f32, _: []const f32, _: usize) !void {}
+    };
+    var prng = std.Random.DefaultPrng.init(7);
+    const r = prng.random();
+    // rows: a shared offset, noise, and a lean per fact; the new fact's questions lean much as the earlier fact's do
+    var common: [d]f32 = undefined;
+    var old_dir: [d]f32 = undefined;
+    var new_dir: [d]f32 = undefined;
+    for (&common, &old_dir) |*c, *o| {
+        c.* = 1 + r.floatNorm(f32) * 0.1;
+        o.* = r.floatNorm(f32);
+    }
+    for (&new_dir, old_dir) |*x, o| x.* = 0.8 * o + 0.6 * r.floatNorm(f32);
+    const Row = [d]u16;
+    const rowOf = struct {
+        fn f(rr: std.Random, cm: []const f32, lean: ?[]const f32) Row {
+            var out: Row = undefined;
+            for (&out, 0..) |*x, k| {
+                var v = cm[k] + rr.floatNorm(f32) * 0.5;
+                if (lean) |dir| v += 1.5 * dir[k];
+                x.* = @truncate(@as(u32, @bitCast(v)) >> 16);
+            }
+            return out;
+        }
+    }.f;
+    var p: pockets.Pocket(T, @import("families.zig").nemotron_h) = .{ .gpa = gpa, .mode = .reply, .hidden = d, .layers = 4 };
+    defer p.deinit();
+    try p.moe.append(gpa, 3);
+    try p.up.appendNTimes(gpa, 0, @TypeOf(p).neurons * d);
+    try p.down.appendNTimes(gpa, 0, @TypeOf(p).neurons * d);
+    try p.used.append(gpa, 1);
+    // the earlier fact's neuron, fitted on its stored rows against the rest
+    var stored: [12]Row = undefined;
+    var rest: [160]Row = undefined;
+    var xs: std.ArrayList([]const u16) = .empty;
+    defer xs.deinit(gpa);
+    var kinds: std.ArrayList(Kind) = .empty;
+    defer kinds.deinit(gpa);
+    for (&stored) |*x| {
+        x.* = rowOf(r, &common, &old_dir);
+        try xs.append(gpa, x);
+        try kinds.append(gpa, .fact);
+        try p.pos.appendSlice(gpa, x);
+    }
+    for (&rest) |*x| {
+        x.* = rowOf(r, &common, null);
+        try xs.append(gpa, x);
+        try kinds.append(gpa, .other);
+    }
+    const u = p.neuron(p.up.items, 0, 0, d);
+    _ = try fit(gpa, xs.items, kinds.items, d, u, false, fit_steps, 0, pocket_fit.margin);
+    try p.learned.append(gpa, .{ .slot = 0, .neuron = 0, .key = .reply, .start = 0, .count = stored.len, .subject = 0, .lesson = 0 });
+    p.learned_before = 1;
+    // the new fact's read: its questions cold, then the same after a chain holding the earlier fact's question
+    var news: [12]Row = undefined;
+    var chain: [12]Row = undefined; // the earlier fact's question in the chain, read before each new question
+    const cold: Example = .{ .ids = &.{ 1, 2, 3 }, .start = 2, .decide = 1 };
+    const after: Example = .{ .ids = &.{ 1, 2, 3, 4, 5, 6 }, .start = 5, .decide = 4, .context = 3 };
+    const answered: [12]Example = @splat(cold);
+    const asked: [12]Example = @splat(after);
+    p.answered = &answered;
+    p.prompts = &asked;
+    for (&news, 0..) |*x, i| {
+        x.* = rowOf(r, &common, &new_dir);
+        try p.rows.appendSlice(gpa, x);
+        try p.labels.append(gpa, .{ .kind = .fact, .key = .reply, .ex = @intCast(i), .row = 1 });
+    }
+    for (&chain, 0..) |*x, i| {
+        x.* = rowOf(r, &common, &old_dir);
+        try p.rows.appendSlice(gpa, x);
+        try p.labels.append(gpa, .{ .kind = .other, .key = null, .ex = @intCast(news.len + i), .row = 1 });
+    }
+    for (rest[0..80], 0..) |*x, i| {
+        try p.rows.appendSlice(gpa, x);
+        try p.labels.append(gpa, .{ .kind = .other, .key = null, .ex = @intCast(i % news.len), .row = 2 });
+    }
+    var most: f32 = -1;
+    for (&news) |*x| most = @max(most, dotBf16(u, x));
+    try std.testing.expect(most > refit_above); // it fires on the new fact's questions, so a refit is due
+    const before = try gpa.dupe(f32, u);
+    defer gpa.free(before);
+    var t: T = .{};
+    try quiet(&p, &t, NoHost{});
+    // refitted: silent on the new fact's questions, and its own question in the chain reads as it did
+    try std.testing.expectEqual(@as(usize, 1), p.refits.items.len);
+    for (&news) |*x| try std.testing.expect(dotBf16(u, x) <= 0);
+    for (&chain) |*x| if (dotBf16(before, x) > refit_above) try std.testing.expectApproxEqAbs(dotBf16(before, x), dotBf16(u, x), 1e-3);
 }

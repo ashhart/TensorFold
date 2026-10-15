@@ -44,6 +44,8 @@ test {
     _ = subspace;
     _ = pocket;
     _ = pocket_fit;
+    _ = pocket_read; // a prompt in a conversation, tapped once a row
+    _ = lesson_examples; // what a learner reads of a lesson
     _ = pocket_quiet; // an earlier fact refitted quiet only on a new fact's rows
     _ = pocket_mark; // a lesson taken out puts the pocket back bit for bit
     _ = @import("pocket_forget_test.zig"); // a fact deleted on request, and put back

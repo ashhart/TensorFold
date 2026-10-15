@@ -14,6 +14,7 @@ const replace = @import("slide_replace.zig");
 const recheck = @import("slide_recheck.zig");
 const slide_graph = @import("slide_graph.zig");
 const slide_teacher = @import("slide_teacher.zig");
+const talks = @import("slide_context.zig");
 const log = @import("log.zig");
 const Gone = @import("openai.zig").Gone;
 const Server = @import("server.zig").Server;
@@ -134,7 +135,8 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         if (back) slide_teacher.refresh(srv, &cx, &srv.teacher, plan.stale, gone) catch srv.teacher.forgetAnswers(srv.io);
         if (result.why) |why| srv.slide.note(id, why);
         srv.slide.mark(id, if (back) .learned else .missed);
-        if (back and document) for (plan.held) |h| if (h.subject.len > 0) srv.teacher.remember(h.subject, h.question, h.answer) catch {};
+        if (back) talks.chainAfter(srv, id, plan);
+        if (back and document) for (plan.held) |h| if (h.subject.len > 0 and h.context.len == 0) srv.teacher.remember(h.subject, h.question, h.answer) catch {};
         if (result.why) |why| {
             out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps, .message = why });
         } else out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps });
@@ -302,12 +304,12 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
     return out;
 }
 
-/// What a lesson's checks expect: each held-out question's answer as written, then each unseen wording's.
+/// What a lesson's checks expect asked cold: each held-out question's answer as written, then each unseen wording's.
 fn expected(a: Allocator, plan: teach.Plan) []const slide_graph.Answer {
-    const out = a.alloc(slide_graph.Answer, plan.held.len + plan.probes.len) catch return &.{};
-    for (plan.held, out[0..plan.held.len]) |h, *x| x.* = .{ .question = h.question, .answer = h.answer, .short = h.short };
-    for (plan.probes, out[plan.held.len..]) |h, *x| x.* = .{ .question = h.question, .answer = h.answer, .short = h.short, .probe = true };
-    return out;
+    var out: std.ArrayList(slide_graph.Answer) = .empty;
+    for (plan.held) |h| if (h.context.len == 0) out.append(a, .{ .question = h.question, .answer = h.answer, .short = h.short }) catch return &.{};
+    for (plan.probes) |h| out.append(a, .{ .question = h.question, .answer = h.answer, .short = h.short, .probe = true }) catch return &.{};
+    return out.items;
 }
 
 /// The facts learned before fact `id` asked again, each verdict on the stream; those that came back before and not now.

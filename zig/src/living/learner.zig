@@ -50,6 +50,7 @@ pub fn Learner(comptime H: type) type {
         const has_edits = has_sites and @hasDecl(H.Trainer, "key") and @hasDecl(H, "commit"); // keys, a nudged row, codes to write
         const has_pocket = @hasDecl(H.Trainer, "normed") and (@hasDecl(H, "pocketSave") or @hasDecl(H, "pocketSaveSwiglu")); // inputs, gradients, a pocket to write
         const has_whole = has_edits or has_pocket; // lessons that change the model itself
+        const has_taps = has_pocket and @hasDecl(H.Trainer, "tapRows"); // a pocket lesson reads prompts in a conversation at any length
         const Edits = if (has_edits) editor.Editor(H.Trainer) else void;
         const Probes = if (has_edits) probe.Probe(H.Trainer) else void;
         const Pockets = if (has_pocket) pocket.Pocket(H.Trainer, H.family) else void;
@@ -95,6 +96,7 @@ pub fn Learner(comptime H: type) type {
         probe: Probes,
         pockets: Pockets, // every MoE layer's pocket of learned neurons
         pocketed: bool = false, // the last lesson put neurons in the pocket
+        plain: [4]std.ArrayList(Example) = @splat(.empty), // a lesson's lists as this learner reads them (readable)
 
         pub fn init(gpa: std.mem.Allocator, io: std.Io, b: H.Ctx) Self {
             return .{ .gpa = gpa, .io = io, .b = b, .whole = !has_sites or std.c.getenv("TF_SLIDE_ROUTED") == null, .edits = if (has_edits) Edits.init(gpa) else {}, .method = if (has_edits) whole_lessons.method() else .pocket, .probe = if (has_edits) Probes.init(gpa) else {}, .pockets = if (has_pocket) Pockets.init(gpa) else {} };
@@ -126,6 +128,7 @@ pub fn Learner(comptime H: type) type {
             l.replay_of.deinit(l.gpa);
             l.live.deinit(l.gpa);
             l.live_of.deinit(l.gpa);
+            for (&l.plain) |*x| x.deinit(l.gpa);
         }
 
         /// The earlier lessons' questions a new lesson stays silent on, but those of facts a newer one replaced.
@@ -169,16 +172,15 @@ pub fn Learner(comptime H: type) type {
                 return;
             }
             if (lesson.train.len == 0) return;
-            for ([_][]const Example{ lesson.train, lesson.think, lesson.held, lesson.near, lesson.keep, lesson.asked, lesson.unasked, lesson.kept }) |xs| for (xs) |ex| {
-                if (ex.start < 1 or ex.start >= ex.ids.len or ex.ids.len - 1 > H.max_rows or ex.decide + 1 >= ex.ids.len) return error.ExampleTooLong;
-            };
+            l.lesson = try examples.readable(l.gpa, lesson, has_taps and l.whole and l.method == .pocket, H.max_rows, &l.plain);
             try l.ready();
-            if (lesson.more) {
+            const kept = l.lesson; // as this learner reads it: without the conversations its host cannot read
+            if (kept.more) {
                 if (l.whole) return if (has_whole) whole_lessons.more(l) else error.EditsUnsupported;
                 if (!l.opened) return error.NothingToContinue;
                 return l.start();
             }
-            try l.settleLast(lesson.train);
+            try l.settleLast(kept.train);
             if (has_sites) {
                 if (l.trainer.?.sites.rank + adapters.block > adapters.max_rank) return error.LearnedChangeFull;
                 l.trainer.?.sites.clear();
@@ -192,15 +194,15 @@ pub fn Learner(comptime H: type) type {
             for (l.keeps.items) |ex| l.gpa.free(ex.ids);
             l.keeps.clearRetainingCapacity();
             l.topic = false;
-            if (l.whole) return if (has_whole) whole_lessons.begin(l, lesson) else error.EditsUnsupported;
+            if (l.whole) return if (has_whole) whole_lessons.begin(l, kept) else error.EditsUnsupported;
             if (comptime !has_sites) unreachable; // a host without routed blocks learns whole lessons only
             l.gpa.free(l.answers);
-            l.answers = try std.mem.concat(l.gpa, Example, &.{ lesson.train, lesson.think });
+            l.answers = try std.mem.concat(l.gpa, Example, &.{ kept.train, kept.think });
             l.phase = .build;
-            for ([_][]const Example{ lesson.train, lesson.think, lesson.held, lesson.asked }) |xs| for (xs) |ex| try l.routes(ex, .fact);
-            for (lesson.near) |ex| try l.routes(ex, .near);
-            for (lesson.unasked) |ex| try l.routes(ex, .swap);
-            for ([_][]const Example{ lesson.keep, l.replay.items }) |xs| for (xs) |ex| try l.routes(ex, .other);
+            for ([_][]const Example{ kept.train, kept.think, kept.held, kept.asked }) |xs| for (xs) |ex| try l.routes(ex, .fact);
+            for (kept.near) |ex| try l.routes(ex, .near);
+            for (kept.unasked) |ex| try l.routes(ex, .swap);
+            for ([_][]const Example{ kept.keep, l.replay.items }) |xs| for (xs) |ex| try l.routes(ex, .other);
         }
 
         /// The trainer, made the first time a lesson needs it.
