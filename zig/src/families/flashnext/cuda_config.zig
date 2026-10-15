@@ -110,8 +110,8 @@ pub fn semantics(text: std.json.ObjectMap) ?[]const u8 {
     if (given(text, "layer_types")) |v| {
         if (v != .array or v.array.items.len != wt.layers_n) return "layer_types";
         for (v.array.items, 0..) |kind, i| {
-            if (kind != .string) return "layer_types";
-            if (std.mem.eql(u8, kind.string, "linear_attention") != wt.linearLayer(i)) return "layer_types";
+            const want = if (wt.linearLayer(i)) "linear_attention" else "full_attention";
+            if (!holds(kind, .{ .word = want })) return "layer_types";
         }
     }
     const ple = given(text, "ple_layer_ids") orelse return "ple_layer_ids";
@@ -233,6 +233,35 @@ test "a changed epsilon, RoPE, gate, activation or layer role is refused by name
         try std.testing.expectEqual(@as(?[]const u8, null), semantics(text));
         try text.put(gpa, c.field, c.value);
         try std.testing.expectEqualStrings(c.refused, semantics(text) orelse "accepted");
+    }
+}
+
+test "each layer's label is exactly the role the kernels run: a sliding or misspelt one is refused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const full = 3; // the first full-attention layer
+    try std.testing.expect(!wt.linearLayer(full) and wt.linearLayer(0));
+    const Case = struct { layer: usize, label: []const u8 };
+    const cases = [_]Case{
+        .{ .layer = full, .label = "sliding_attention" },
+        .{ .layer = full, .label = "attention" },
+        .{ .layer = full, .label = "Full_Attention" },
+        .{ .layer = wt.layers_n - 1, .label = "sliding_attention" },
+        .{ .layer = 0, .label = "full_attention" },
+        .{ .layer = 0, .label = "sliding_attention" },
+    };
+    for (cases) |c| {
+        var text: std.json.ObjectMap = .empty;
+        var rope_params: std.json.ObjectMap = .empty;
+        var mtp: std.json.ObjectMap = .empty;
+        var kinds: std.json.Array = .init(gpa);
+        var ple: std.json.Array = .init(gpa);
+        try served(gpa, &text, &rope_params, &mtp, &kinds, &ple);
+        try std.testing.expectEqual(@as(?[]const u8, null), semantics(text));
+        kinds.items[c.layer] = .{ .string = c.label };
+        try text.put(gpa, "layer_types", .{ .array = kinds });
+        try std.testing.expectEqualStrings("layer_types", semantics(text) orelse "accepted");
     }
 }
 
