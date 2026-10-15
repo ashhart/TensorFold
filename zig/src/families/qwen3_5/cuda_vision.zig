@@ -1,0 +1,472 @@
+//! The Qwen3.5/3.8 vision tower on CUDA (transformers' Qwen3_5VisionModel, bf16); prompts: cuda_vision_prompt.zig.
+const std = @import("std");
+const cuda = @import("cuda");
+const core = @import("core");
+
+const lt = cuda.cublaslt;
+const DeviceBuffer = cuda.DeviceBuffer;
+const prefix = "vision_tower.";
+
+/// What every Qwen3.5/3.8 tower shares (vision_config); its width, heads, depth and MLP are the checkpoint's.
+pub const patch = 16;
+pub const temporal = 2;
+pub const merge = 2;
+pub const channels = 3;
+pub const patch_width = channels * temporal * patch * patch; // 1536
+pub const grid_side = 48; // sqrt(num_position_embeddings 2304)
+pub const eps: f32 = 1e-6;
+/// Blocks a tower has at most; its heads are 64 or 72 wide (qwen_vision.cu's attention instances).
+pub const max_depth = 32;
+/// One tower call's patches at most: a 4,096-token image's.
+pub const max_patches = 16384;
+const workspace_bytes = 32 << 20;
+
+/// What config.json says about the tower and its placeholders.
+pub const Config = struct {
+    hidden: usize,
+    heads: usize,
+    depth: usize,
+    intermediate: usize,
+    out_hidden: usize,
+    image_token: u32,
+    video_token: u32,
+    vision_start: u32,
+    vision_end: u32,
+
+    pub fn headDim(c: Config) usize {
+        return c.hidden / c.heads;
+    }
+
+    /// The merger's width: four merge-ordered rows read as one.
+    pub fn merged(c: Config) usize {
+        return c.hidden * merge * merge;
+    }
+
+    /// A checkpoint without a vision_config is null; a tower or M-RoPE this module does not run is refused.
+    pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !?Config {
+        const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
+        defer gpa.free(path);
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 22));
+        defer gpa.free(bytes);
+        return parse(gpa, bytes);
+    }
+
+    pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !?Config {
+        const parsed = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
+        defer parsed.deinit();
+        const root = parsed.value.object;
+        const v = (root.get("vision_config") orelse return null).object;
+        const want = [_]struct { []const u8, i64 }{ .{ "patch_size", patch }, .{ "temporal_patch_size", temporal }, .{ "spatial_merge_size", merge }, .{ "in_channels", channels }, .{ "num_position_embeddings", grid_side * grid_side } };
+        for (want) |w| if (num(v.get(w[0])) != w[1]) return error.UnsupportedQwenVision;
+        const act = v.get("hidden_act") orelse return error.UnsupportedQwenVision;
+        if (act != .string or !std.mem.eql(u8, act.string, "gelu_pytorch_tanh")) return error.UnsupportedQwenVision;
+        if (v.get("deepstack_visual_indexes")) |ds| if (ds != .array or ds.array.items.len != 0) return error.UnsupportedQwenVision;
+        // qwen35.cu's rotate: interleaved M-RoPE over sections 11, 11 and 10
+        const text = if (root.get("text_config")) |t| t.object else root;
+        const rope = (text.get("rope_parameters") orelse return error.UnsupportedQwenVision).object;
+        const inter = rope.get("mrope_interleaved") orelse return error.UnsupportedQwenVision;
+        const sec = rope.get("mrope_section") orelse return error.UnsupportedQwenVision;
+        if (inter != .bool or !inter.bool or sec != .array or sec.array.items.len != 3) return error.UnsupportedQwenVision;
+        for (sec.array.items, [_]i64{ 11, 11, 10 }) |s, x| if (num(s) != x) return error.UnsupportedQwenVision;
+        const out = num(v.get("out_hidden_size"));
+        const hid = num(v.get("hidden_size"));
+        const nh = num(v.get("num_heads"));
+        const dep = num(v.get("depth"));
+        const mlp = num(v.get("intermediate_size"));
+        if (out <= 0 or hid <= 0 or nh <= 0 or mlp <= 0 or dep <= 0 or dep > max_depth) return error.UnsupportedQwenVision;
+        if (@mod(hid, nh) != 0 or (@divExact(hid, nh) != 64 and @divExact(hid, nh) != 72)) return error.UnsupportedQwenVision;
+        return .{ .hidden = @intCast(hid), .heads = @intCast(nh), .depth = @intCast(dep), .intermediate = @intCast(mlp), .out_hidden = @intCast(out), .image_token = try id(root, "image_token_id"), .video_token = try id(root, "video_token_id"), .vision_start = try id(root, "vision_start_token_id"), .vision_end = try id(root, "vision_end_token_id") };
+    }
+
+    fn num(x: ?std.json.Value) i64 {
+        const v = x orelse return -1;
+        return if (v == .integer) v.integer else -1;
+    }
+
+    fn id(o: std.json.ObjectMap, name: []const u8) !u32 {
+        const v = num(o.get(name));
+        if (v < 0) return error.UnsupportedQwenVision;
+        return @intCast(v);
+    }
+};
+
+/// One image's patch grid (rows and columns of 16x16 patches, both even).
+pub const Grid = struct { h: u32, w: u32 };
+
+const Block = struct { norm1_w: u64, norm1_b: u64, qkv_w: u64, qkv_b: u64, proj_w: u64, proj_b: u64, norm2_w: u64, norm2_b: u64, fc1_w: u64, fc1_b: u64, fc2_w: u64, fc2_b: u64 };
+
+const Fns = struct {
+    embed: cuda.Function,
+    layernorm: cuda.Function,
+    qkv_rope: cuda.Function,
+    attention: cuda.Function,
+    bias_gelu: cuda.Function,
+    bias_residual: cuda.Function,
+    bias_cast: cuda.Function,
+};
+
+/// The tower's weights and one call's scratch in one allocation, its kernels; `encode` turns patches into model rows.
+pub const Tower = struct {
+    gpa: std.mem.Allocator,
+    d: *const cuda.Driver,
+    s: cuda.Stream,
+    c: Config,
+    mod: cuda.Module,
+    f: Fns,
+    lib: lt.Library,
+    arena: DeviceBuffer,
+    at: usize = 0,
+    scratch: u64 = 0,
+    patch_w: u64 = 0,
+    patch_b: u64 = 0,
+    pos: u64 = 0,
+    blocks: [max_depth]Block = undefined,
+    merger_norm_w: u64 = 0,
+    merger_norm_b: u64 = 0,
+    fc1_w: u64 = 0,
+    fc1_b: u64 = 0,
+    fc2_w: u64 = 0,
+    fc2_b: u64 = 0,
+    inv: u64 = 0,
+
+    /// The checkpoint's vision_tower tensors (bf16) on stream `s`; the patch convolution's weight as [C, T, y, x] rows.
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.Stream, dir: []const u8, c: Config) !*Tower {
+        const t = try gpa.create(Tower);
+        errdefer gpa.destroy(t);
+        t.* = .{ .gpa = gpa, .d = d, .s = s, .c = c, .mod = undefined, .f = undefined, .lib = undefined, .arena = undefined };
+        t.lib = try lt.Library.open();
+        errdefer t.lib.close();
+        t.mod = try cuda.Module.load(d, cuda.kernels.qwen_vision);
+        errdefer t.mod.unload();
+        inline for (@typeInfo(Fns).@"struct".field_names) |name| @field(t.f, name) = try t.mod.function(if (comptime std.mem.eql(u8, name, "attention")) "tf_qv_attention72" else "tf_qv_" ++ name);
+        if (c.headDim() == 64) t.f.attention = try t.mod.function("tf_qv_attention64");
+        const hidden = c.hidden;
+        const intermediate = c.intermediate;
+        const merged = c.merged();
+        t.arena = try DeviceBuffer.alloc(d, weightBytes(c) + scratchBytes(c, max_patches));
+        errdefer t.arena.free();
+        try t.arena.fill8(0, null); // touched once now: the driver commits memory on first touch, slowly
+        var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, prefix);
+        defer ck.close();
+        { // [hidden, T, P, P, C] as stored (MLX) to [hidden, C, T, P, P]
+            const tn = try ck.expect(prefix ++ "patch_embed.proj.weight", .bf16, &.{ hidden, temporal, patch, patch, channels });
+            const host = try gpa.alloc(u16, hidden * patch_width);
+            defer gpa.free(host);
+            const stored: []align(1) const u16 = std.mem.bytesAsSlice(u16, tn.bytes);
+            for (0..hidden) |o| for (0..channels) |ch| for (0..temporal) |tt| for (0..patch) |y| for (0..patch) |x| {
+                host[o * patch_width + ((ch * temporal + tt) * patch + y) * patch + x] = stored[(((o * temporal + tt) * patch + y) * patch + x) * channels + ch];
+            };
+            t.patch_w = try t.put(std.mem.sliceAsBytes(host));
+        }
+        t.patch_b = try t.get(&ck, "patch_embed.proj.bias", &.{hidden});
+        t.pos = try t.get(&ck, "pos_embed.weight", &.{ grid_side * grid_side, hidden });
+        for (t.blocks[0..c.depth], 0..) |*b, i| {
+            const shapes = .{
+                .{ "norm1_w", "norm1.weight", .{hidden} },                        .{ "norm1_b", "norm1.bias", .{hidden} },
+                .{ "qkv_w", "attn.qkv.weight", .{ 3 * hidden, hidden } },         .{ "qkv_b", "attn.qkv.bias", .{3 * hidden} },
+                .{ "proj_w", "attn.proj.weight", .{ hidden, hidden } },           .{ "proj_b", "attn.proj.bias", .{hidden} },
+                .{ "norm2_w", "norm2.weight", .{hidden} },                        .{ "norm2_b", "norm2.bias", .{hidden} },
+                .{ "fc1_w", "mlp.linear_fc1.weight", .{ intermediate, hidden } }, .{ "fc1_b", "mlp.linear_fc1.bias", .{intermediate} },
+                .{ "fc2_w", "mlp.linear_fc2.weight", .{ hidden, intermediate } }, .{ "fc2_b", "mlp.linear_fc2.bias", .{hidden} },
+            };
+            inline for (shapes) |sh| {
+                var nb: [96]u8 = undefined;
+                const shape: [sh[2].len]usize = sh[2];
+                @field(b, sh[0]) = try t.get(&ck, try std.fmt.bufPrint(&nb, "blocks.{d}.{s}", .{ i, sh[1] }), &shape);
+            }
+        }
+        t.merger_norm_w = try t.get(&ck, "merger.norm.weight", &.{hidden});
+        t.merger_norm_b = try t.get(&ck, "merger.norm.bias", &.{hidden});
+        t.fc1_w = try t.get(&ck, "merger.linear_fc1.weight", &.{ merged, merged });
+        t.fc1_b = try t.get(&ck, "merger.linear_fc1.bias", &.{merged});
+        t.fc2_w = try t.get(&ck, "merger.linear_fc2.weight", &.{ c.out_hidden, merged });
+        t.fc2_b = try t.get(&ck, "merger.linear_fc2.bias", &.{c.out_hidden});
+        if (ck.unused() != 0) return error.UnusedVisionTensors;
+        var inv: [72 / 4]f32 = undefined;
+        invFreq(inv[0 .. c.headDim() / 4], c.headDim());
+        t.inv = try t.put(std.mem.sliceAsBytes(inv[0 .. c.headDim() / 4]));
+        t.scratch = try t.take(scratchBytes(c, max_patches));
+        return t;
+    }
+
+    pub fn deinit(t: *Tower) void {
+        t.arena.free();
+        t.mod.unload();
+        t.lib.close();
+        t.gpa.destroy(t);
+    }
+
+    /// The weights' bytes in the arena (each allocation 256-byte aligned).
+    pub fn weightBytes(c: Config) usize {
+        const a = aligned;
+        const hidden = c.hidden;
+        const intermediate = c.intermediate;
+        const merged = c.merged();
+        const out_hidden = c.out_hidden;
+        var n: usize = a(hidden * patch_width * 2) + a(hidden * 2) + a(grid_side * grid_side * hidden * 2);
+        n += c.depth * (4 * a(hidden * 2) + a(3 * hidden * hidden * 2) + a(3 * hidden * 2) + a(hidden * hidden * 2) + a(hidden * 2) + a(intermediate * hidden * 2) + a(intermediate * 2) + a(hidden * intermediate * 2) + a(hidden * 2));
+        n += 2 * a(hidden * 2) + a(merged * merged * 2) + a(merged * 2) + a(out_hidden * merged * 2) + a(out_hidden * 2);
+        return n + a(c.headDim() / 4 * 4);
+    }
+
+    /// The scratch one tower call of `n` patches needs, in bytes (the patches' bf16 copy included).
+    pub fn scratchBytes(c: Config, n: usize) usize {
+        const hidden = c.hidden;
+        const intermediate = c.intermediate;
+        return n * patch_width * 2 + // patches
+            2 * n * hidden * 2 + // x, h
+            n * @max(3 * hidden, intermediate) * 4 + // fp32 Linear out
+            3 * n * hidden * 2 + // q, k, v
+            n * hidden * 2 + // attention out
+            n * @max(intermediate, hidden) * 2 + // gelu rows
+            n * (2 + 4) * 4 + n * 4 * 4 + // hw, idx, weights
+            16 * 256 + workspace_bytes;
+    }
+
+    fn take(t: *Tower, len: usize) !u64 {
+        const at = aligned(t.at);
+        if (at + len > t.arena.len) return error.ArenaExhausted;
+        t.at = at + len;
+        return t.arena.ptr + at;
+    }
+
+    fn put(t: *Tower, bytes: []const u8) !u64 {
+        const p = try t.take(bytes.len);
+        try t.arena.upload(p - t.arena.ptr, bytes);
+        return p;
+    }
+
+    fn get(t: *Tower, ck: *core.Checkpoint, name: []const u8, shape: []const usize) !u64 {
+        var buf: [96]u8 = undefined;
+        const tn = try ck.expect(try std.fmt.bufPrint(&buf, prefix ++ "{s}", .{name}), .bf16, shape);
+        return t.put(tn.bytes);
+    }
+
+    fn upload(t: *Tower, dst: u64, bytes: []const u8) !void {
+        if (bytes.len == 0) return;
+        try t.d.check(t.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, t.s.handle), "cuMemcpyHtoDAsync");
+    }
+
+    /// Images' patches (fp32, merge order) to merged bf16 [sum(h * w) / 4, out_hidden] at `out`, each image on its own.
+    pub fn encode(t: *Tower, pixels: []const f32, grids: []const Grid, out: u64) !void {
+        var n: usize = 0;
+        for (grids) |g| {
+            if (g.h == 0 or g.w == 0 or g.h % merge != 0 or g.w % merge != 0) return error.BadImageGrid;
+            n += @as(usize, g.h) * g.w;
+        }
+        if (n == 0 or n > max_patches or pixels.len != n * patch_width) return error.BadImagePatches;
+        const gpa = t.gpa;
+        const c = t.c;
+        const out_hidden = c.out_hidden;
+        const hidden = c.hidden;
+        const heads = c.heads;
+        const head_dim = c.headDim();
+        const intermediate = c.intermediate;
+        const merged = c.merged();
+        // host side: bf16 patches, each patch's (row, column) and its 4 position-grid taps
+        const px16 = try gpa.alloc(u16, n * patch_width);
+        defer gpa.free(px16);
+        for (px16, pixels) |*o, v| o.* = bf16(v);
+        const hw = try gpa.alloc(i32, n * 2);
+        defer gpa.free(hw);
+        const idx = try gpa.alloc(i32, n * 4);
+        defer gpa.free(idx);
+        const wts = try gpa.alloc(f32, n * 4);
+        defer gpa.free(wts);
+        var at: usize = 0;
+        for (grids) |g| {
+            const len = @as(usize, g.h) * g.w;
+            positions(g, hw[at * 2 ..][0 .. len * 2], idx[at * 4 ..][0 .. len * 4], wts[at * 4 ..][0 .. len * 4]);
+            at += len;
+        }
+        var cur: u64 = t.scratch;
+        const end = t.scratch + scratchBytes(c, max_patches);
+        const take_ = struct {
+            fn f(p: *u64, len: usize) u64 {
+                const r = p.*;
+                p.* += std.mem.alignForward(usize, len, 256);
+                return r;
+            }
+        }.f;
+        const d_px = take_(&cur, n * patch_width * 2);
+        const x = take_(&cur, n * hidden * 2);
+        const h = take_(&cur, n * hidden * 2);
+        const acc = take_(&cur, n * @max(3 * hidden, intermediate) * 4);
+        const q = take_(&cur, n * hidden * 2);
+        const k = take_(&cur, n * hidden * 2);
+        const v = take_(&cur, n * hidden * 2);
+        const att = take_(&cur, n * hidden * 2);
+        const mid = take_(&cur, n * @max(intermediate, hidden) * 2);
+        const d_hw = take_(&cur, n * 2 * 4);
+        const d_idx = take_(&cur, n * 4 * 4);
+        const d_wts = take_(&cur, n * 4 * 4);
+        const ws = cur;
+        const ws_len = end - cur;
+        try t.upload(d_px, std.mem.sliceAsBytes(px16));
+        try t.upload(d_hw, std.mem.sliceAsBytes(hw));
+        try t.upload(d_idx, std.mem.sliceAsBytes(idx));
+        try t.upload(d_wts, std.mem.sliceAsBytes(wts));
+
+        var mm: Gemms = .{ .lib = &t.lib };
+        defer mm.deinit();
+        const m4 = n / (merge * merge);
+        try mm.run(n, hidden, patch_width, d_px, t.patch_w, acc, ws, ws_len, t.s);
+        try t.go(t.f.embed, n, 1, 256, .{ acc, t.patch_b, t.pos, d_idx, d_wts, x, int(hidden) });
+        const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
+        for (t.blocks[0..c.depth]) |b| {
+            try t.go(t.f.layernorm, n, 1, 256, .{ x, b.norm1_w, b.norm1_b, h, int(hidden), eps });
+            try mm.run(n, 3 * hidden, hidden, h, b.qkv_w, acc, ws, ws_len, t.s);
+            try t.go(t.f.qkv_rope, n, heads, 128, .{ acc, b.qkv_b, d_hw, t.inv, q, k, v, int(n), int(heads), int(head_dim) });
+            var s0: usize = 0;
+            for (grids) |g| {
+                const len = @as(usize, g.h) * g.w;
+                try t.go(t.f.attention, (len + 63) / 64, heads, 64, .{ q, k, v, att, int(n), int(heads), int(s0), int(len), scale });
+                s0 += len;
+            }
+            try mm.run(n, hidden, hidden, att, b.proj_w, acc, ws, ws_len, t.s);
+            try t.go(t.f.bias_residual, n, 1, 256, .{ acc, b.proj_b, x, int(hidden) });
+            try t.go(t.f.layernorm, n, 1, 256, .{ x, b.norm2_w, b.norm2_b, h, int(hidden), eps });
+            try mm.run(n, intermediate, hidden, h, b.fc1_w, acc, ws, ws_len, t.s);
+            try t.go(t.f.bias_gelu, n, 1, 256, .{ acc, b.fc1_b, mid, int(intermediate), int(1) });
+            try mm.run(n, hidden, intermediate, mid, b.fc2_w, acc, ws, ws_len, t.s);
+            try t.go(t.f.bias_residual, n, 1, 256, .{ acc, b.fc2_b, x, int(hidden) });
+        }
+        // merger: LayerNorm over 1152, four merge-ordered rows read as one of 4608
+        try t.go(t.f.layernorm, n, 1, 256, .{ x, t.merger_norm_w, t.merger_norm_b, h, int(hidden), eps });
+        try mm.run(m4, merged, merged, h, t.fc1_w, acc, ws, ws_len, t.s);
+        try t.go(t.f.bias_gelu, m4, 1, 256, .{ acc, t.fc1_b, mid, int(merged), int(0) });
+        try mm.run(m4, out_hidden, merged, mid, t.fc2_w, acc, ws, ws_len, t.s);
+        try t.go(t.f.bias_cast, m4, 1, 256, .{ acc, t.fc2_b, out, int(out_hidden) });
+        try t.s.synchronize(); // the host's patch rows and tables are freed on return
+    }
+
+    fn go(t: *Tower, f: cuda.Function, gx: usize, gy: usize, block: u32, args: anytype) !void {
+        var a: cuda.Args = .{};
+        inline for (args) |v| a.add(v);
+        try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(gx), .y = @intCast(gy) }, .block = .{ .x = block } }, t.s, &a);
+    }
+};
+
+/// cuBLASLt plans for the shapes one tower call runs, made on first use.
+const Gemms = struct {
+    lib: *const lt.Library,
+    plans: [8]?struct { m: usize, n: usize, k: usize, lin: lt.Linear } = @splat(null),
+
+    fn run(g: *Gemms, m: usize, n: usize, k: usize, x: u64, w: u64, out: u64, ws: u64, ws_len: usize, s: cuda.Stream) !void {
+        for (&g.plans) |*p| {
+            if (p.*) |*have| {
+                if (have.m == m and have.n == n and have.k == k) return have.lin.run(x, w, out, ws, ws_len, s.handle);
+                continue;
+            }
+            p.* = .{ .m = m, .n = n, .k = k, .lin = try lt.Linear.init(g.lib, m, n, k, .f32, ws_len) };
+            return p.*.?.lin.run(x, w, out, ws, ws_len, s.handle);
+        }
+        return error.TooManyShapes;
+    }
+
+    fn deinit(g: *Gemms) void {
+        for (&g.plans) |*p| if (p.*) |*have| have.lin.deinit();
+    }
+};
+
+fn aligned(n: usize) usize {
+    return std.mem.alignForward(usize, n, 256);
+}
+
+fn int(x: usize) c_int {
+    return @intCast(x);
+}
+
+/// fp32 to bf16, round to nearest even (torch's .to(bfloat16)).
+fn bf16(v: f32) u16 {
+    const b: u32 = @bitCast(v);
+    if (std.math.isNan(v)) return 0x7fc0;
+    return @intCast((b + 0x7fff + ((b >> 16) & 1)) >> 16);
+}
+
+/// The axial rotary's frequencies: 1 / 10000 ** (i / (head_dim / 2)) for even i, in fp32 as torch computes them.
+pub fn invFreq(out: []f32, head_dim: usize) void {
+    const dim: f32 = @floatFromInt(head_dim / 2);
+    for (out, 0..) |*f, j| {
+        const e: f32 = @as(f32, @floatFromInt(2 * j)) / dim;
+        f.* = 1.0 / std.math.pow(f32, 10000.0, e);
+    }
+}
+
+/// One image's patches in merge order: each one's (row, column) for the rotary and 4 bilinear taps into the 48x48 grid.
+pub fn positions(g: Grid, hw: []i32, idx: []i32, wts: []f32) void {
+    const bw = g.w / merge;
+    const n = @as(usize, g.h) * g.w;
+    for (0..n) |i| {
+        const in_col: u32 = @intCast(i % merge);
+        const in_row: u32 = @intCast((i / merge) % merge);
+        const block_col: u32 = @intCast((i / (merge * merge)) % bw);
+        const block_row: u32 = @intCast(i / (merge * merge * bw));
+        const r = block_row * merge + in_row;
+        const c = block_col * merge + in_col;
+        hw[i * 2] = @intCast(r);
+        hw[i * 2 + 1] = @intCast(c);
+        const ht = taps(r, g.h);
+        const wt = taps(c, g.w);
+        for (0..2) |a| for (0..2) |b| {
+            idx[i * 4 + a * 2 + b] = ht.i[a] * grid_side + wt.i[b];
+            wts[i * 4 + a * 2 + b] = ht.w[a] * wt.w[b];
+        };
+    }
+}
+
+const Taps = struct { i: [2]i32, w: [2]f32 };
+
+fn taps(index: u32, size: u32) Taps {
+    const side_m1: f32 = grid_side - 1;
+    const denom: f32 = @floatFromInt(@max(size, 2) - 1);
+    const src = @as(f32, @floatFromInt(index)) * side_m1 / denom;
+    const fl = @floor(src);
+    var out: Taps = undefined;
+    for (0..2) |o| {
+        const raw: i32 = @as(i32, @intFromFloat(fl)) + @as(i32, @intCast(o));
+        out.i[o] = std.math.clamp(raw, 0, grid_side - 1);
+        const dist = @abs(src - fl - @as(f32, @floatFromInt(o)));
+        out.w[o] = @max(1.0 - dist, 0.0);
+    }
+    return out;
+}
+
+test "bilinear taps match align_corners resampling at the ends and middle" {
+    const a = taps(0, 10);
+    try std.testing.expectEqual(@as(i32, 0), a.i[0]);
+    try std.testing.expectEqual(@as(f32, 1), a.w[0]);
+    const b = taps(9, 10);
+    try std.testing.expectEqual(@as(i32, 47), b.i[0]);
+    try std.testing.expectEqual(@as(f32, 1), b.w[0]);
+}
+
+test "a vision_config's tower is read; other widths, depths and M-RoPE are refused; a text-only config has none" {
+    const gpa = std.testing.allocator;
+    try std.testing.expectEqual(@as(?Config, null), try Config.parse(gpa, "{\"hidden_size\":2048}"));
+    const good =
+        \\{"vision_config":{"depth":27,"hidden_size":1152,"num_heads":16,"intermediate_size":4304,"patch_size":16,
+        \\"temporal_patch_size":2,"spatial_merge_size":2,"in_channels":3,"num_position_embeddings":2304,
+        \\"hidden_act":"gelu_pytorch_tanh","deepstack_visual_indexes":[],"out_hidden_size":5120},
+        \\"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10]}},
+        \\"image_token_id":248056,"video_token_id":248057,"vision_start_token_id":248053,"vision_end_token_id":248054}
+    ;
+    const c = (try Config.parse(gpa, good)).?;
+    try std.testing.expectEqual(@as(usize, 5120), c.out_hidden);
+    try std.testing.expectEqual(@as(u32, 248056), c.image_token);
+    const deeper = try std.mem.replaceOwned(u8, gpa, good, "\"depth\":27", "\"depth\":33");
+    defer gpa.free(deeper);
+    try std.testing.expectError(error.UnsupportedQwenVision, Config.parse(gpa, deeper));
+    const wide = try std.mem.replaceOwned(u8, gpa, good, "\"num_heads\":16", "\"num_heads\":12");
+    defer gpa.free(wide);
+    try std.testing.expectError(error.UnsupportedQwenVision, Config.parse(gpa, wide));
+    // the 2B's tower: 24 blocks of 1024, heads of 64
+    const small = try std.mem.replaceOwned(u8, gpa, good, "\"depth\":27,\"hidden_size\":1152,\"num_heads\":16,\"intermediate_size\":4304", "\"depth\":24,\"hidden_size\":1024,\"num_heads\":16,\"intermediate_size\":4096");
+    defer gpa.free(small);
+    const c2 = (try Config.parse(gpa, small)).?;
+    try std.testing.expectEqual(@as(usize, 64), c2.headDim());
+    try std.testing.expectEqual(@as(usize, 24), c2.depth);
+    const sections = try std.mem.replaceOwned(u8, gpa, good, "[11,11,10]", "[16,24,24]");
+    defer gpa.free(sections);
+    try std.testing.expectError(error.UnsupportedQwenVision, Config.parse(gpa, sections));
+}
