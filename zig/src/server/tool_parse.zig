@@ -518,7 +518,7 @@ fn gemmaCall(a: Allocator, block: []const u8) Error!?Call {
     return .{ .name = name, .arguments = try jsonObject(a, .{ .string = try putBack(a, keyed.items, quoted) }) };
 }
 
-/// `text` with each mark ``\x00{i}\x00`` replaced by `quoted[i]` in one pass, as replacing i = 0, 1, ... in turn does.
+/// Each mark ``\x00{i}\x00`` in `text` as `quoted[i]`, as replacing i = 0, 1, ... in turn does; no `quoted` has a NUL.
 pub fn putBack(a: Allocator, text: []const u8, quoted: []const []const u8) Allocator.Error![]const u8 {
     var nul: std.ArrayList(usize) = .empty;
     for (text, 0..) |ch, at| if (ch == 0) try nul.append(a, at);
@@ -531,7 +531,7 @@ pub fn putBack(a: Allocator, text: []const u8, quoted: []const []const u8) Alloc
         if (index < quoted.len) try marks.append(a, @as(u128, index) << 64 | k);
     }
     // two marks share a NUL only where the call's own text has NULs: the lower index went first, then the leftmost
-    std.mem.sort(u128, marks.items, {}, std.sort.asc(u128));
+    std.mem.sort(u128, marks.items, {}, std.sort.asc(u128)); // one pass over the text, then M log M for M marks
     const opens = try a.alloc(?usize, n.len); // the index of the mark each NUL opens
     @memset(opens, null);
     for (marks.items) |m| {

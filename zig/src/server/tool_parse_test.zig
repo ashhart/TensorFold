@@ -28,7 +28,7 @@ test "families" {
     try std.testing.expectEqualStrings("hi <tool_call>{\"name\":\"other tool\"}</tool_call>", kept.content);
 }
 
-test "a reply of many calls reads in linear time" {
+test "a reply of many calls searches each opener once, not again after every call" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -147,7 +147,7 @@ test "a call to a tool the request did not declare stays text" {
     try std.testing.expect((try parse(a, "{\"name\":\"launch\",\"arguments\":{}}", tools, null)).calls == null);
 }
 
-test "a GLM call's keys without values read in linear time" {
+test "a GLM call's keys without values search their key and value ends once" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -413,4 +413,60 @@ test "putBack gives the text that replacing the marks in turn gives" {
         for (quoted, 0..) |q, i| want = try std.mem.replaceOwned(u8, a, want, try std.fmt.allocPrint(a, "\x00{d}\x00", .{i}), q);
         try std.testing.expectEqualStrings(want, try putBack(a, text.items, quoted));
     }
+}
+
+test "GLM pairs from the cached key and value ends are the pairs each key's own search found" {
+    // the reference is the loop before #883: every <arg_key> searches its </arg_key> and </arg_value> afresh
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const declared = "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]";
+    const tools = (try json.parse(arena.allocator(), declared)).ok.array;
+    var prng: std.Random.DefaultPrng = .init(0x883);
+    const r = prng.random();
+    const tags = [_][]const u8{ "<arg_key>", "</arg_key>", "<arg_value>", "</arg_value>" };
+    const pieces = tags ++ [_][]const u8{ " ", "\n", "k", "v", "1", "\"s\"" };
+    var compared: usize = 0;
+    for (0..20_000) |_| {
+        var run: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer run.deinit();
+        const a = run.allocator();
+        var body: std.ArrayList(u8) = .empty;
+        try body.appendSlice(a, "lookup");
+        for (0..r.uintLessThan(usize, 16)) |_| try body.appendSlice(a, pieces[r.uintLessThan(usize, pieces.len)]);
+        const block = try repairGlmKeys(a, std.mem.trim(u8, body.items, " \n"));
+        const cut = std.mem.indexOf(u8, block, "<arg_key>") orelse block.len;
+        if (std.mem.indexOfScalar(u8, block[0..cut], '<') != null) continue; // no name: both stay text
+        const rest = block[cut..];
+        var canon: std.ArrayList(u8) = .empty; // the reference's pairs written plainly, nothing between them
+        try canon.appendSlice(a, "<tool_call>");
+        try canon.appendSlice(a, block[0..cut]);
+        var pos: usize = 0;
+        outer: while (std.mem.indexOfPos(u8, rest, pos, "<arg_key>")) |at| {
+            pos = at + 1;
+            var from = at + 9;
+            while (std.mem.indexOfPos(u8, rest, from, "</arg_key>")) |ke| : (from = ke + 1) {
+                var j = ke + 10;
+                while (j < rest.len and std.ascii.isWhitespace(rest[j])) j += 1;
+                if (!std.mem.startsWith(u8, rest[j..], "<arg_value>")) continue;
+                const ve = std.mem.indexOfPos(u8, rest, j + 11, "</arg_value>") orelse continue :outer;
+                const pair = .{ rest[at + 9 .. ke], rest[j + 11 .. ve] };
+                const plain = "<arg_key>{s}</arg_key><arg_value>{s}</arg_value>";
+                try canon.appendSlice(a, try std.fmt.allocPrint(a, plain, pair));
+                pos = ve + 12;
+                continue :outer;
+            }
+        }
+        try canon.appendSlice(a, "</tool_call>");
+        const whole = try std.mem.concat(a, u8, &.{ "<tool_call>", body.items, "</tool_call>" });
+        const got = try parse(a, whole, tools, null);
+        const want = try parse(a, canon.items, tools, null);
+        try std.testing.expectEqual(want.calls == null, got.calls == null);
+        if (got.calls) |calls| {
+            const args = want.calls.?[0].get("function").?.get("arguments").?.string;
+            const mine = calls[0].get("function").?.get("arguments").?.string;
+            try std.testing.expectEqualStrings(args, mine);
+            compared += 1;
+        }
+    }
+    try std.testing.expect(compared > 1000);
 }
