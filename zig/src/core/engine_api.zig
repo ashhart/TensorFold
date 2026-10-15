@@ -310,6 +310,8 @@ pub const Open = struct {
     slide: bool = false,
     /// --recall: the server attaches Recall's record once the engine loads; an engine that reads none refuses first.
     recall: bool = false,
+    /// --kv-cache fp8: attention caches as e4m3 rows with an fp32 scale each (CUDA families whose Options take kv8).
+    kv8: bool = false,
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
     device: ?u32 = null,
     segments: ?u32 = null,

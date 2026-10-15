@@ -33,7 +33,7 @@ pub const Cache = struct {
         var state = try DeviceBuffer.alloc(e.d, e.g.stateBytes());
         errdefer state.free();
         try state.fill8(0, null);
-        var kv = try DeviceBuffer.alloc(e.d, e.g.kvBytes(cap));
+        var kv = try DeviceBuffer.alloc(e.d, e.g.kvBytes(cap, e.kv8));
         errdefer kv.free();
         try kv.fill8(0, null); // touched now, not as the first request's keys land (the driver commits on first touch)
         var log = try DeviceBuffer.alloc(e.d, e.g.logBytes(engine.most_window));
@@ -87,7 +87,7 @@ pub const Cache = struct {
         const sg = self.seg(e, last.start, 0, last.rows);
         try e.run(e.keeps.apply, .{ 1, geometry.dk / 4, g.v_heads * g.deltas() }, .{ 32, 4, 1 }, .{ e.geo, sg, p });
         try e.run(e.keeps.conv, .{ g.deltas(), (g.convBytes() / 2 + 255) / 256, 1 }, .{ 256, 1, 1 }, .{ e.geo, sg, @as(c_int, @intCast(path[path.len - 1])) });
-        if (!prefix and g.attentions() > 0) try e.run(e.keeps.compact, .{ g.attentions(), g.kv_heads, 1 }, .{ geometry.head_dim, 1, 1 }, .{ e.geo, sg, p });
+        if (!prefix and g.attentions() > 0) try e.run(if (e.kv8) e.fp8.compact else e.keeps.compact, .{ g.attentions(), g.kv_heads, 1 }, .{ geometry.head_dim, 1, 1 }, .{ e.geo, sg, p });
     }
 
     /// The newest window kept whole (the round loop keeps nothing when every row landed), before the next forward.

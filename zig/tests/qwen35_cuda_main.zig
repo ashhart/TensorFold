@@ -1,4 +1,4 @@
-//! `tf-qwen35-cuda <model dir> <step|window|tree|prompt> <ids> <out>`: the ids' logits as bf16 rows for a reference.
+//! `tf-qwen35-cuda <model dir> <step|window|tree|prompt> <ids> <out> [fp8]`: the ids' logits as bf16 rows.
 const std = @import("std");
 const cuda = @import("cuda");
 const q = @import("qwen35");
@@ -7,8 +7,8 @@ const E = q.engine;
 pub fn main(init: std.process.Init) !u8 {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
-    if (args.len != 5) {
-        std.debug.print("usage: tf-qwen35-cuda <model dir> <step|window|tree|prompt> <ids> <out>\n", .{});
+    if (args.len != 5 and !(args.len == 6 and std.mem.eql(u8, args[5], "fp8"))) {
+        std.debug.print("usage: tf-qwen35-cuda <model dir> <step|window|tree|prompt> <ids> <out> [fp8]\n", .{});
         return 2;
     }
     var ids: std.ArrayList(u32) = .empty;
@@ -18,7 +18,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
-    const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1]);
+    const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1], args.len == 6);
     defer e.deinit();
     // TF_Q35_PREFILL=N starts the stream after N cycled ids; TF_Q35_BESIDE=N steps an N-token stream beside it
     const prefill = try envCount("TF_Q35_PREFILL");

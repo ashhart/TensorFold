@@ -23,6 +23,7 @@ const lfm2_vision = "--vision: LFM2 reads the checkpoint's images through its ow
 pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
     if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
     if (o.learn_conversations and F != nemotron.native) return "--learn-conversations keeps conversation states on disk for Nemotron only on CUDA: serve this model without it";
+    if (o.kv8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "kv8"))) return "--kv-cache fp8: this CUDA family keeps bf16 caches; serve without it";
     return null;
 }
 
@@ -54,6 +55,18 @@ test "--drafter opens only a family that takes one" {
     try std.testing.expectStringStartsWith(family(Mtp, .{ .dir = "d", .model_type = "m", .drafter = "/x" }) orelse "", "--drafter loads a separate drafter");
     try std.testing.expect(family(Drafted, .{ .dir = "d", .model_type = "m", .drafter = "/x" }) == null);
     try std.testing.expect(family(Mtp, .{ .dir = "d", .model_type = "m" }) == null);
+}
+
+test "--kv-cache fp8 opens only a family whose options take it" {
+    const Bf16 = struct {
+        pub const Options = struct { context: usize };
+    };
+    const Fp8 = struct {
+        pub const Options = struct { context: usize, kv8: bool = false };
+    };
+    try std.testing.expectStringStartsWith(family(Bf16, .{ .dir = "d", .model_type = "m", .kv8 = true }) orelse "", "--kv-cache fp8");
+    try std.testing.expect(family(Fp8, .{ .dir = "d", .model_type = "m", .kv8 = true }) == null);
+    try std.testing.expect(family(Bf16, .{ .dir = "d", .model_type = "m" }) == null);
 }
 
 test "a family that explicitly declines a drafter refuses it" {

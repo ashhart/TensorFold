@@ -118,9 +118,10 @@ pub const Geometry = struct {
         return rows * g.deltas() * g.logRowBytes();
     }
 
-    /// A stream's keys and values at a `cap`-token window.
-    pub fn kvBytes(g: Geometry, cap: usize) usize {
-        return g.attentions() * 2 * g.kv_heads * cap * head_dim * 2;
+    /// A stream's keys and values at a `cap`-token window: bf16 rows, or with `kv8` e4m3 rows and an fp32 scale each.
+    pub fn kvBytes(g: Geometry, cap: usize, kv8: bool) usize {
+        const row: usize = if (kv8) head_dim + 4 else head_dim * 2;
+        return g.attentions() * 2 * g.kv_heads * cap * row;
     }
 };
 
@@ -282,4 +283,11 @@ test "a mixed checkpoint's widths by module, under any spelling; other groups an
     const gptq = try std.mem.replaceOwned(u8, std.testing.allocator, text, "\"mode\":\"affine\"", "\"mode\":\"gptq\"");
     defer std.testing.allocator.free(gptq);
     try std.testing.expectError(error.UnsupportedQwenQuantization, parse(std.testing.allocator, gptq));
+}
+
+test "fp8 caches take e4m3 rows and a scale each: 520 bytes a position and head against bf16's 1024" {
+    var g: Geometry = .{ .hidden = 2048, .intermediate = 6144, .layers = 4, .vocab = 248320, .k_heads = 16, .v_heads = 16, .q_heads = 8, .kv_heads = 2, .eps = 1e-6, .tied = true, .context = 4096, .linear = @splat(true) };
+    g.linear[3] = false;
+    try std.testing.expectEqual(@as(usize, 2 * 2 * 1000 * 512), g.kvBytes(1000, false));
+    try std.testing.expectEqual(@as(usize, 2 * 2 * 1000 * 260), g.kvBytes(1000, true));
 }

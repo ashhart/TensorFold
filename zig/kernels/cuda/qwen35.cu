@@ -5,7 +5,6 @@
 using namespace tf_q35;
 
 // P (device counts, one graph for every shape): chunks, width, rows, windows, recorded; rowpar/rowanc give the tree.
-__device__ __forceinline__ bool past_rows(const int* P, int m) { return P != nullptr && m >= P[2]; }
 __device__ __forceinline__ bool past_windows(const int* P, int s) { return P != nullptr && s >= P[3]; }
 __device__ __forceinline__ bool recorded(const int* P) { return P != nullptr && P[4] != 0; }
 
@@ -306,30 +305,6 @@ extern "C" __global__ void __launch_bounds__(64) tf_q35_head_norm(const __nv_bfl
         const int d = 4 * t + i;
         OUT[(m * heads + head) * HD + d] = __float2bfloat16_rn(bf(W[d]) * (v[i] * inv));
     }
-}
-
-// Text RoPE on the first 64 of HD: pairs (i, i + 32) turned by position * theta^(-i / 32).
-__device__ __forceinline__ __nv_bfloat16 rotate(const __nv_bfloat16* x, int d, int position) {
-    if (d >= 64) return x[d];
-    const int i = d % 32;
-    const float angle = (float)position * powf(10000000.0f, -(float)i / 32.0f);
-    float sn, cs;
-    sincosf(angle, &sn, &cs);
-    const float a = bf(x[i]), b = bf(x[i + 32]);
-    return __float2bfloat16_rn(d < 32 ? a * cs - b * sn : b * cs + a * sn);
-}
-
-// A row's ancestors-and-self: its tree window's row bits, or with the top bit set a chain row's index in its window.
-__device__ __forceinline__ int rows_seen(unsigned anc) { return (anc >> 31) ? (int)(anc & 0x7fffffffu) + 1 : __popc(anc); }
-
-// A row's chunk width from its own logical keys alone, as its one-row step's: at most MAXCH chunks, 128-key multiples.
-__device__ __forceinline__ int chunk_keys(int keys) { return max(128, (keys + MAXCH * 128 - 1) / (MAXCH * 128) * 128); }
-
-// The window row holding a row's nth seen window key.
-__device__ __forceinline__ int seen_row(unsigned anc, int n) {
-    if (anc >> 31) return n;
-    for (int j = 0; j < n; j++) anc &= anc - 1;
-    return __ffs(anc) - 1;
 }
 
 // Queries rotated in place, keys rotated and values copied into the row's cache slot; grid (rows), HD threads.
