@@ -1,4 +1,4 @@
-// LFM2-VL's vision glue (families/lfm2/vision.zig): SigLIP2's LayerNorm, GELU and residual adds, pixel unshuffle.
+// Vision towers' glue (cuda/vit.zig; LFM2-VL's SigLIP2, RADIO): LayerNorm, Linear epilogues, activations, unshuffle.
 
 #include <cuda_bf16.h>
 #include <math.h>
@@ -41,7 +41,7 @@ __device__ __forceinline__ float gelu_erf(float x) {
 }  // namespace
 
 // Block a row: y = bf16((x - mean) * rstd * w + b), mean and variance in two fixed-order passes.
-extern "C" __global__ void __launch_bounds__(NT) tf_lfm2v_layer_norm(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
+extern "C" __global__ void __launch_bounds__(NT) tf_vit_layer_norm(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
                                                                        const __nv_bfloat16* __restrict__ B, __nv_bfloat16* __restrict__ Y, int D,
                                                                        float eps) {
     __shared__ float red[NT / 32];
@@ -73,7 +73,7 @@ extern "C" __global__ void __launch_bounds__(NT) tf_lfm2v_layer_norm(const __nv_
 }
 
 // Block (row, column block): o = bf16(acc + bias), for a Linear whose cuBLASLt algorithm cannot fuse its bias.
-extern "C" __global__ void __launch_bounds__(NT) tf_lfm2v_bias(const float* __restrict__ ACC, const __nv_bfloat16* __restrict__ BIAS,
+extern "C" __global__ void __launch_bounds__(NT) tf_vit_bias(const float* __restrict__ ACC, const __nv_bfloat16* __restrict__ BIAS,
                                                                  __nv_bfloat16* __restrict__ O, int N) {
     const int c = blockIdx.y * NT + threadIdx.x;
     if (c >= N) return;
@@ -81,19 +81,20 @@ extern "C" __global__ void __launch_bounds__(NT) tf_lfm2v_bias(const float* __re
     O[at] = __float2bfloat16_rn(__fadd_rn(ACC[at], bf(BIAS[c])));
 }
 
-// A Linear's bf16 output, its bias added: bf16(gelu(x)) (act 1 tanh, 2 erf), then bf16(r + x) when R.
-extern "C" __global__ void __launch_bounds__(NT) tf_lfm2v_pointwise(const __nv_bfloat16* X, const __nv_bfloat16* R, __nv_bfloat16* O,
+// A Linear's bf16 output: bf16(act(x)) (1 tanh GELU, 2 erf GELU, 3 relu squared), then bf16(r + x) when R.
+extern "C" __global__ void __launch_bounds__(NT) tf_vit_pointwise(const __nv_bfloat16* X, const __nv_bfloat16* R, __nv_bfloat16* O,
                                                                       int64_t count, int act) {
     const int64_t at = static_cast<int64_t>(blockIdx.x) * NT + threadIdx.x;
     if (at >= count) return;
     float v = bf(X[at]);
     if (act == 1) v = rbf(gelu_tanh(v));
     if (act == 2) v = rbf(gelu_erf(v));
+    if (act == 3) v = rbf(v > 0.0f ? __fmul_rn(v, v) : 0.0f);
     O[at] = __float2bfloat16_rn(R ? __fadd_rn(bf(R[at]), v) : v);
 }
 
 // Block an output row (i, j) of an h x w grid: rows (2i, 2j), (2i, 2j+1), (2i+1, 2j), (2i+1, 2j+1) side by side.
-extern "C" __global__ void __launch_bounds__(NT) tf_lfm2v_unshuffle(const __nv_bfloat16* __restrict__ X, __nv_bfloat16* __restrict__ Y, int w,
+extern "C" __global__ void __launch_bounds__(NT) tf_vit_unshuffle(const __nv_bfloat16* __restrict__ X, __nv_bfloat16* __restrict__ Y, int w,
                                                                       int C) {
     const int o = blockIdx.x, i = o / (w / 2), j = o % (w / 2);
     for (int e = threadIdx.x; e < 4 * C; e += NT) {
