@@ -25,7 +25,7 @@ def response(pieces=None):
     pieces = ["a", "b", "c", "d"] if pieces is None else pieces
     chunks = [{"choices": [{"delta": {"content": piece}}]} for piece in pieces]
     chunks.append({"choices": [], "usage": {"prompt_tokens": 8, "completion_tokens": 4},
-                   "tensorfold": {"token_sha": "a" * 12, "ignored_secret": KEY}})
+                   "tensorfold": {"token_sha": "a" * 12, "token_sha256": "a" * 64, "ignored_secret": KEY}})
     wire = b"".join(b"data: " + json.dumps(chunk).encode() + b"\n\n" for chunk in chunks)
     return io.BytesIO(wire + b"data: [DONE]\n\n")
 
