@@ -428,11 +428,11 @@ fn decodeBudget(m: *q.Model, len: usize) !void {
                         bytes += c.experts * c.hidden * 4;
                         launches_n += 2;
                     } else if (which == 8) {
-                        try tile.encodeTwinGlu(e, t, tq(x.gate.one), tq(x.up.one), sc.x, sc.act, ids, 4, 4);
+                        try tile.encodeTwinGlu(e, t, tq(x.gate.one), tq(x.up.one), sc.x, sc.act, ids, null, 4, 4);
                         bytes += 4 * (linearBytes(x.gate.one) + linearBytes(x.up.one));
                         launches_n += 1;
                     } else if (which == 9) {
-                        try tile.encodeTwinIndexed(e, t, tq(x.down.one), sc.act, sc.experts, ids, 4, 1);
+                        try tile.encodeTwinIndexed(e, t, tq(x.down.one), sc.act, sc.experts, ids, null, 4, 1);
                         bytes += 4 * linearBytes(x.down.one);
                         launches_n += 1;
                     } else {
