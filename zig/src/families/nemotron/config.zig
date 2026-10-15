@@ -31,6 +31,9 @@ pub const pocket_key = "tensorfold_learned_neurons";
 /// How the checkpoint stores its matrices: MLX affine 4-bit, or NVIDIA ModelOpt (FP8, NVFP4 or bf16, read per tensor).
 pub const Format = enum { mlx, modelopt };
 
+/// --precision: a ModelOpt checkpoint's own math (e4m3 and NVFP4 rows), or bf16 rows throughout (full).
+pub const Precision = enum { checkpoint, full };
+
 pub const Config = struct {
     hidden: usize,
     vocab: usize,
@@ -65,6 +68,7 @@ pub const Config = struct {
     held: ?usize = null, // a split checkpoint (tensorfold_tp): the one share its expert tensors hold
     rank: usize = 0, // this process's tensor-parallel rank of `world`: set at load, never by config.json
     world: usize = 1,
+    ck: bool = false, // --precision checkpoint: e4m3 rows into the FP8 layers, NVFP4 rows into the experts
 
     pub fn inner(self: Config) usize {
         return self.mamba_heads * self.mamba_head_dim;

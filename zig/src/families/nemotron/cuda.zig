@@ -2,6 +2,7 @@
 
 pub const Config = @import("config.zig").Config;
 pub const Kind = @import("config.zig").Kind;
+pub const Precision = @import("config.zig").Precision;
 pub const weights = @import("cuda_weights.zig");
 pub const kernels = @import("cuda_kernels.zig");
 pub const state = @import("cuda_state.zig");
@@ -46,5 +47,6 @@ test {
     _ = @import("subspace.zig");
     _ = @import("cuda_train_back.zig");
     _ = @import("cuda_latent.zig");
+    _ = @import("cuda_latent_ck.zig");
     _ = worker;
 }

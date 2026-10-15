@@ -270,6 +270,9 @@ pub const PromptCachePlan = struct {
 /// A checkpoint family an engine reads: its config ``model_type`` and weight formats, as gate entries name them.
 pub const Family = struct { model_type: []const u8, formats: []const []const u8 };
 
+/// The math an NVFP4 checkpoint runs: its own (FP4 rows into NVFP4 layers, FP8 into FP8 ones), or bf16 rows throughout.
+pub const Precision = enum { checkpoint, full };
+
 /// What a server asks of the engine it opens: the checkpoint, and the serve flags an engine reads.
 pub const Open = struct {
     dir: []const u8,
@@ -303,6 +306,8 @@ pub const Open = struct {
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
     device: ?u32 = null,
     segments: ?u32 = null,
+    /// --precision (CUDA): an NVFP4 checkpoint's math, NVIDIA's own or full precision; null: the family's default.
+    precision: ?Precision = null,
     /// --mtp-drafts and --mtp-confidence; null: the engine's defaults.
     mtp_drafts: ?u32 = null,
     mtp_confidence: ?f64 = null,

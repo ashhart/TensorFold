@@ -83,7 +83,7 @@ fn seqSizes(c: Config, max_len: usize) [seq_fields.len]usize {
     return .{ kv, kv, m[0], m[1], nm * 2 * W * cd * 2, nm * 2 * W * cd * 2, nm * 2 * W * c.mamba_heads * 4, 16, W * 4, W * c.hidden * 2, W * 4, @sizeOf(sampler.Rule) };
 }
 
-const scratch_count = 41;
+const scratch_count = 43;
 
 /// Scratch windows and chunks share on one stream: window logits, chunk io, activations, the expert plan.
 fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
@@ -103,6 +103,9 @@ fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
     const ymoe = if (lat) c.world * latent.partFloats(c, R) * 4 else pairs * D * 4; // a region a rank
     const job = if (lat and c.world > 1) worker.jobBytes(c) else 0;
     const sw = if (lat) c.shared_width / c.shares else 0;
+    // the checkpoint's math: e4m3 rows of the widest FP8 projection input, and a latent MoE's NVFP4 rows
+    const ck8 = if (c.ck) R * @max(D, @max(xd, qd)) else 0;
+    const ck4 = if (c.ck and lat) @import("cuda_latent_ck.zig").rowsBytes(c, R) else 0;
     return .{
         W * c.vocab * 2,       16,                                          R * 4,
         R * D * 2,             c.vocab * 2,                                 16,
@@ -117,7 +120,8 @@ fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
         pairs * own * 4,       (pairs * own + 1023) / 1024 * plan_experts * 4, pairs * c.expert_width * 2,
         ymoe,                  shared_words * 4,                            R * kern.pocket_width * 4,
         R * c.latent * 2,      R * c.latent * 2,                            R * own * sw * 2,
-        R * own * 4,           job,
+        R * own * 4,           job,                                         ck8,
+        ck4,
     };
 }
 
@@ -234,6 +238,8 @@ pub const Buffers = struct {
     sact: u64, // its shared expert's activations (bf16)
     sids: u64, // its shared expert's pair ids, share i % own (cuda_latent.initShareIds)
     job: u64, // rank 0's job to the other ranks: a header and the rows their shares read (cuda_worker.zig)
+    ck8: u64, // the checkpoint's math: e4m3 rows an FP8 projection reads
+    ck4: u64, // and a latent MoE's NVFP4 rows (cuda_latent_ck.zig)
 
     /// Sizes every buffer for `max_len` cache rows and `nch` attention chunk partials a row; the own sequence's first.
     pub fn init(d: *const cuda.Driver, c: Config, max_len: usize, nch: usize, carve: ?*cuda.Carveout) !Buffers {
@@ -279,7 +285,7 @@ pub const Buffers = struct {
             &b.xs,        &b.delta,     &b.proj,  &b.p_xc,     &b.sy,       &b.g,         &b.gxs, &b.qkv,          &b.q,          &b.att,
             &b.axs,       &b.po,        &b.pm,    &b.pl,       &b.part,     &b.pick,      &b.wts, &b.plan.members, &b.plan.items, &b.plan.counts,
             &b.plan.rank, &b.plan.hist, &b.act,   &b.ymoe,     &b.shared,   &b.pocket,
-            &b.lat,       &b.comb,      &b.sact,  &b.sids,     &b.job,
+            &b.lat,       &b.comb,      &b.sact,  &b.sids,     &b.job,      &b.ck8,       &b.ck4,
         };
     }
 

@@ -103,7 +103,7 @@ pub const flags = [_]Flag{
     .{ .name = "--kv-dtype", .choices = &.{ "bf16", "int8", "int4" } },
     .{ .name = "--prefill-fp8", .kind = .store_true },
     .{ .name = "--no-prefill-fp8", .kind = .store_true },
-    .{ .name = "--precision", .choices = &.{ "checkpoint", "full" } },
+    .{ .name = "--precision", .choices = &.{ "checkpoint", "full" }, .native = cuda_build },
     // the CUDA CLI's own: the GPU ordinal, and whole prompt chunks a call runs as staggered segments
     .{ .name = "--device", .native = cuda_build },
     .{ .name = "--segments", .native = cuda_build },
@@ -175,6 +175,7 @@ pub const Args = struct {
     backend: []const u8 = "auto",
     device: ?u32 = null,
     segments: ?u32 = null,
+    precision: ?api.Precision = null, // an NVFP4 checkpoint's math on CUDA: NVIDIA's own (checkpoint) or full precision
     mtp_drafts: ?u32 = null,
     mtp_confidence: ?f64 = null,
     checkpoint_slots: ?i64 = null,
@@ -331,9 +332,11 @@ fn recallFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usa
     return true;
 }
 
-/// The CUDA build's --device and --segments; false for any other flag.
+/// The CUDA build's --device, --segments and --precision; false for any other flag.
 fn cudaFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usage) error{ Usage, OutOfMemory }!bool {
-    if (std.mem.eql(u8, name, "--device")) {
+    if (std.mem.eql(u8, name, "--precision")) {
+        out.precision = std.meta.stringToEnum(api.Precision, v) orelse return fail(u, a, "argument --precision: checkpoint or full: '{s}'", .{v});
+    } else if (std.mem.eql(u8, name, "--device")) {
         out.device = std.math.cast(u32, try int(u, a, name, v)) orelse return fail(u, a, "argument --device: a GPU ordinal from 0: '{s}'", .{v});
     } else if (std.mem.eql(u8, name, "--segments")) {
         const n = try int(u, a, name, v);
@@ -415,6 +418,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .recall = args.recall,
         .device = args.device,
         .segments = args.segments,
+        .precision = args.precision,
         .mtp_drafts = args.mtp_drafts,
         .mtp_confidence = args.mtp_confidence,
         .keep = args.checkpoint_slots,

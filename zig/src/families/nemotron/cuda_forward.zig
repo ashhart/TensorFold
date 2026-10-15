@@ -69,7 +69,7 @@ pub const Forward = struct {
             .c = c,
             .w = w,
             .b = b,
-            .ops = ops,
+            .ops = .{ .k = ops.k, .s = ops.s, .ck8 = b.ck8 }, // FP8 layers' e4m3 rows in these buffers
             .glue = .{
                 .set = if (ops.k.triton) |*t| t else null,
                 .f = &ops.k.glue,

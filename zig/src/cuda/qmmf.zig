@@ -52,8 +52,8 @@ pub fn bucket(m: usize) u32 {
     return if (m <= 16) 16 else if (m <= 32) 32 else 64;
 }
 
-/// A packed projection on the device: codes or words, scale tiles, the tensor scale, its shape.
-pub const Weight = struct { mode: Mode, codes: u64, scales: u64, scale: f32 = 1.0, n: u32, k: u32, npad: u32 };
+/// A packed projection on the device: codes or words, scale tiles, the tensor scale, its shape, its input scale (act).
+pub const Weight = struct { mode: Mode, codes: u64, scales: u64, scale: f32 = 1.0, n: u32, k: u32, npad: u32, act: f32 = 0 };
 
 /// What one call launches, from the shapes alone: tile, slices, cluster or reduce (qmmf_cuda's choice).
 pub const Plan = struct { bm: u32, sk: u32, fused: bool, cluster: bool, reduce: bool };

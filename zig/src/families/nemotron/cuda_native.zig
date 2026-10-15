@@ -27,7 +27,7 @@ pub const default_context: i64 = engine.default_context;
 pub const max_segments: u32 = @import("cuda_segments.zig").MAX;
 pub const prompt_rows: u32 = state.pass_rows;
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, precision: ?@import("config.zig").Precision = null };
 pub const vision = @import("cuda_vision.zig");
 
 /// Thinking budgets the lone driver takes (cuda_lone.zig): above it, the stream goes to the lane core before its cut.
@@ -72,7 +72,7 @@ const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, 
 /// Own-sequence graphs support both draw modes; drafting also captures the head.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     if (std.c.getenv("TF_NEMOTRON_RANK")) |r| if (!std.mem.eql(u8, std.mem.span(r), "0")) { // an expert rank never serves
-        @import("cuda_worker.zig").serve(gpa, io, ctx, dir) catch |err| {
+        @import("cuda_worker.zig").serve(gpa, io, ctx, dir, o.precision) catch |err| {
             std.log.err("expert rank stopped: {s}", .{@errorName(err)});
             std.process.exit(1);
         };
@@ -80,7 +80,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     };
     const carve = try openCarveout(gpa, ctx);
     errdefer if (carve) |c| closeCarveout(gpa, c);
-    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments, .carveout = carve, .slide = o.slide, .vision = o.vision });
+    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments, .carveout = carve, .slide = o.slide, .vision = o.vision, .precision = o.precision });
     errdefer e.deinit();
     const head: ?*Head = if (o.drafts) try Head.init(e) else null;
     errdefer if (head) |h| h.deinit();
@@ -131,6 +131,8 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
         error.VisionRefused => "--vision: this checkpoint has no image tower the CUDA engine reads (Nemotron Omni's RADIO); serve it without --vision",
         error.NoVision => "this server reads no images: start it with --vision",
+        error.PrecisionNotBuilt => "--precision checkpoint: NVIDIA's FP4 and FP8 math is built for Nemotron 3.5 Super VL's NVFP4 checkpoint so far; serve this one with --precision full",
+        error.CheckpointMathNeedsBlackwell => "--precision checkpoint: NVIDIA's FP4 math runs on Blackwell (compute capability 12.x); serve with --precision full",
         else => null,
     };
 }

@@ -38,6 +38,7 @@ pub const experts = @import("experts.zig");
 pub const sample = @import("sample.zig");
 pub const rank_scatter = @import("rank_scatter.zig");
 pub const tp_group = @import("tp_group.zig");
+pub const ck = @import("ck.zig");
 pub const modelopt = @import("modelopt.zig");
 
 test {
@@ -59,4 +60,5 @@ test {
     _ = carveout;
     _ = @import("nvfp4.zig");
     _ = @import("modelopt.zig");
+    _ = @import("ck.zig");
 }

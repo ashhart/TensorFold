@@ -19,14 +19,15 @@ const magic: u32 = 0x4a4f4253;
 const header_bytes = 64;
 const Job = enum(u32) { rows = 1, end = 2 };
 
-/// Byte offsets of a job's sections, `per` rows each: picks (int32), latent rows (bf16), hidden rows (bf16).
+/// Byte offsets of a job's sections, `per` rows each, 256 apart: picks (int32), latent rows (bf16), hidden rows (bf16).
 fn sections(c: Config, per: usize) [3]usize {
-    return .{ 0, per * c.top_k * 4, per * c.top_k * 4 + per * c.latent * 2 };
+    const picks = std.mem.alignForward(usize, per * c.top_k * 4, 256); // rows stay 16-byte aligned for odd counts
+    return .{ 0, picks, picks + std.mem.alignForward(usize, per * c.latent * 2, 256) };
 }
 
 /// Bytes of a job's sections for `rows` rows.
 pub fn payloadBytes(c: Config, rows: usize) usize {
-    return rows * (c.top_k * 4 + c.latent * 2 + c.hidden * 2);
+    return sections(c, rows)[2] + rows * c.hidden * 2;
 }
 
 /// Bytes of a job's first message: the header, then a small job's sections.
@@ -108,18 +109,20 @@ fn loadLayers(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8
 }
 
 /// Rank r > 0: its expert shares of every MoE layer, computed for rank 0's jobs until rank 0 ends.
-pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8) !void {
+pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, precision: ?@import("config.zig").Precision) !void {
     const t0 = std.Io.Clock.awake.now(io);
     var c = try Config.read(gpa, io, dir);
     try latent.place(&c);
     if (c.rank == 0 or c.latent == 0) return error.NotAnExpertRank;
     try latent.checkHeld(c);
+    c.ck = try @import("cuda_latent_ck.zig").wanted(ctx, c, precision);
     var stream = try cuda.Stream.init(ctx.d, true);
     defer stream.deinit();
     var k = try kern.Kernels.load(gpa, io, ctx, null);
     defer k.deinit();
     try k.loadModelopt(ctx);
     try k.loadLatent();
+    if (c.ck) try k.loadCk(ctx);
     var g = try cuda.tp_group.Group.open(c.rank, c.world);
     defer g.close();
     try latent.agree(gpa, io, c, &g, ctx.d, stream);
@@ -134,7 +137,8 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     const sw = c.expert_width / c.shares;
     const ssw = c.shared_width / c.shares;
     const items = kern.maxItems(pairs, c.experts * own, 16);
-    const sizes = [_]usize{ firstBytes(c), payloadBytes(c, R), pairs * sw * 2, R * own * ssw * 2, R * own * 4, latent.partFloats(c, R) * 4, pairs * 4, items * 12, 8, pairs * 4, (pairs + 1023) / 1024 * c.experts * own * 4 };
+    const ck4 = if (c.ck) @import("cuda_latent_ck.zig").rowsBytes(c, R) else 0; // NVFP4 rows (checkpoint math)
+    const sizes = [_]usize{ firstBytes(c), payloadBytes(c, R), pairs * sw * 2, R * own * ssw * 2, R * own * 4, latent.partFloats(c, R) * 4, pairs * 4, items * 12, 8, pairs * 4, (pairs + 1023) / 1024 * c.experts * own * 4, ck4 };
     var total: usize = 0;
     for (sizes) |n| total += std.mem.alignForward(usize, n, 256);
     var arena = try cuda.DeviceBuffer.alloc(ctx.d, total);
@@ -148,12 +152,12 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     const first = at[0];
     const long = at[1];
     const out = at[5];
-    const scratch: latent.Scratch = .{ .plan = .{ .members = at[6], .items = at[7], .counts = at[8], .rank = at[9], .hist = at[10] }, .act = at[2], .sact = at[3], .sids = at[4] };
+    const scratch: latent.Scratch = .{ .plan = .{ .members = at[6], .items = at[7], .counts = at[8], .rank = at[9], .hist = at[10] }, .act = at[2], .sact = at[3], .sids = at[4], .ck4 = if (c.ck) at[11] else 0 };
     try latent.initShareIds(k.latent.?, stream, scratch.sids, R, own);
     try stream.synchronize();
     var blocks: usize = 0;
     for (layers.blocks) |t| blocks += @intFromBool(t != null);
-    std.log.info("rank {d} of {d}: {d} MoE layers{s} of share {d} in {d:.1} s, {d:.2} GiB on the device; serving rank 0's jobs", .{ c.rank, c.world, blocks, if (layers.mtp != null) " and the MTP head's" else "", c.rank, @import("cuda_engine.zig").seconds(io, t0), @as(f64, @floatFromInt(cuda.usage(false).device)) / (1 << 30) });
+    std.log.info("rank {d} of {d}: {d} MoE layers{s} of share {d} ({s}) in {d:.1} s, {d:.2} GiB on the device; serving rank 0's jobs", .{ c.rank, c.world, blocks, if (layers.mtp != null) " and the MTP head's" else "", c.rank, if (c.ck) "the checkpoint's math" else "full precision", @import("cuda_engine.zig").seconds(io, t0), @as(f64, @floatFromInt(cuda.usage(false).device)) / (1 << 30) });
     var jobs: usize = 0;
     while (true) {
         try g.recv(stream, first, firstBytes(c), 0);
@@ -183,6 +187,8 @@ test "a job's sections and messages" {
     c.top_k = 22;
     c.latent = 1024;
     c.hidden = 4096;
-    try std.testing.expectEqual([3]usize{ 0, 16 * 88, 16 * 88 + 16 * 2048 }, sections(c, 16));
-    try std.testing.expectEqual(@as(usize, 64 + 16 * (88 + 2048 + 8192)), firstBytes(c));
+    try std.testing.expectEqual([3]usize{ 0, 1536, 1536 + 16 * 2048 }, sections(c, 16));
+    try std.testing.expectEqual(@as(usize, 64 + 1536 + 16 * 2048 + 16 * 8192), firstBytes(c));
+    try std.testing.expectEqual(@as(usize, 0), sections(c, 1821)[1] % 256); // an odd job's rows start aligned
+    try std.testing.expectEqual(@as(usize, 0), sections(c, 1821)[2] % 256);
 }

@@ -24,8 +24,8 @@ fn kindOf(t: Tensor) !Kind {
     };
 }
 
-/// A part's weight, its e4m3 block scales (NVFP4) and its one fp32 scale (NVFP4's weight_scale_2, FP8's weight_scale).
-pub const Part = struct { w: Tensor, blocks: ?Tensor = null, scale: f32 = 1.0, kind: Kind, n: usize, k: usize };
+/// A part's weight, e4m3 block scales (NVFP4), fp32 scale (weight_scale_2 or weight_scale) and input_scale (act).
+pub const Part = struct { w: Tensor, blocks: ?Tensor = null, scale: f32 = 1.0, act: f32 = 0, kind: Kind, n: usize, k: usize };
 
 fn name(buf: []u8, comptime fmt: []const u8, args: anytype) ![]const u8 {
     return std.fmt.bufPrint(buf, fmt, args);
@@ -38,18 +38,20 @@ fn scalar(ck: *core.Checkpoint, n: []const u8) !f32 {
     return @bitCast(std.mem.readInt(u32, t.bytes[0..4], .little));
 }
 
-/// `{pre}.weight` and its scales by the weight's dtype; static activation and FP8 cache scales are read and set aside.
+/// `{pre}.weight` and its scales by the weight's dtype, its static input scale (act); FP8 cache scales set aside.
 pub fn part(ck: *core.Checkpoint, pre: []const u8) !Part {
     var buf: [192]u8 = undefined;
     const w = try ck.get(try name(&buf, "{s}.weight", .{pre}));
     if (w.rank != 2) return error.UnexpectedTensor;
-    // we keep bf16 activations and a bf16 KV cache, more precise than the W8A8 and FP8-cache math these scales are for
+    // the KV cache stays bf16; the input scale is read for the checkpoint's math (--precision checkpoint)
+    var act: f32 = 0;
     for ([_][]const u8{ "input_scale", "k_scale", "v_scale" }) |extra| {
         const n = try name(&buf, "{s}.{s}", .{ pre, extra });
-        if (ck.has(n)) _ = try ck.get(n);
+        if (!ck.has(n)) continue;
+        if (extra[0] == 'i') act = try scalar(ck, n) else _ = try ck.get(n);
     }
     const kind = try kindOf(w);
-    var p: Part = .{ .w = w, .kind = kind, .n = w.dim(0), .k = if (kind == .nvfp4) w.dim(1) * 2 else w.dim(1) };
+    var p: Part = .{ .w = w, .act = act, .kind = kind, .n = w.dim(0), .k = if (kind == .nvfp4) w.dim(1) * 2 else w.dim(1) };
     switch (kind) {
         .bf16 => {},
         .fp8 => p.scale = try scalar(ck, try name(&buf, "{s}.weight_scale", .{pre})),
@@ -76,6 +78,10 @@ pub fn dense(L: *Loader, ck: *core.Checkpoint, label: []const u8, prefixes: []co
     }
     const first = parts[0];
     for (parts[0..prefixes.len]) |p| if (p.kind != first.kind or p.scale != first.scale or p.k != first.k) return error.MixedQuantization;
+    // the checkpoint's math: e4m3 rows by the input scale every part of an FP8 projection shares
+    const act: f32 = if (L.ops.k.ck != null and first.kind == .fp8) first.act else 0;
+    if (act != 0) for (parts[0..prefixes.len]) |p| if (p.act != act) return error.MixedQuantization;
+    if (L.ops.k.ck != null and first.kind == .fp8 and act == 0) return error.NoInputScale;
     const k = first.k;
     if (k % 64 != 0) return error.UnexpectedTensor;
     var buf: [128]u8 = undefined;
@@ -96,7 +102,9 @@ pub fn dense(L: *Loader, ck: *core.Checkpoint, label: []const u8, prefixes: []co
                 return .{ .bf16 = cuda.modelopt.bf16Weight(out, n, k) };
             }
             try m.pack.fp8Lane(s, base, out, n, k);
-            return .{ .fp8 = cuda.modelopt.fp8Weight(out, first.scale, n, k) };
+            var w = cuda.modelopt.fp8Weight(out, first.scale, n, k);
+            w.act = act;
+            return .{ .fp8 = w };
         },
         .nvfp4 => {
             const codes = n * k / 2;

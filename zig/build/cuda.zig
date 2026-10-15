@@ -39,6 +39,8 @@ const kernels = [_]Kernel{
     .{ .name = "nemotron_attention", .flags = glue },
     .{ .name = "nemotron_keyed", .flags = glue },
     .{ .name = "nemotron_latent", .flags = glue }, // ours: a latent MoE's wide picks, share sums and shared add
+    .{ .name = "ck_lane", .flags = &.{"-O3"} }, // nvfp4/lane4.cu's A8: FP8 rows times FP8 weights (checkpoint math)
+    .{ .name = "ck_experts", .flags = &.{"-O3"}, .arch_specific = true }, // ours: NVFP4 x NVFP4 experts (sm_121a)
     .{ .name = "norms", .flags = &.{"-O3"} }, // ours: RMS norm rows for every family (cuda/norms.zig)
     .{ .name = "embed_rows", .flags = &.{"-O3"} }, // ours: 4-bit affine and bf16 token rows (cuda/embed_rows.zig)
     .{ .name = "lfm2", .flags = glue }, // ours: LFM2's short convolution, QK norm and rotary, gates and label rows
@@ -283,9 +285,12 @@ fn fatbin(b: *std.Build, nvcc: []const u8, version: std.Build.LazyPath, k: Kerne
     run.addFileInput(version);
     run.addArgs(&torch_flags);
     run.addArgs(k.flags);
-    const a = if (k.arch_specific) "a" else "";
     var it = std.mem.tokenizeScalar(u8, sms, ',');
-    while (it.next()) |sm| run.addArg(b.fmt("-gencode=arch=compute_{s}{s},code=sm_{s}{s}", .{ sm, a, sm, a }));
+    while (it.next()) |sm| {
+        // arch-specific features (the block-scaled FP4 mma) from sm_120 on; older targets build the trapping fallback
+        const a = if (k.arch_specific and (std.fmt.parseInt(u32, sm, 10) catch 0) >= 120) "a" else "";
+        run.addArg(b.fmt("-gencode=arch=compute_{s}{s},code=sm_{s}{s}", .{ sm, a, sm, a }));
+    }
     run.addArgs(&.{ "-MD", "-MF" });
     _ = run.addDepFileOutputArg2(b.fmt("{s}.d", .{k.name}), .{});
     run.addArg("-o");

@@ -36,6 +36,7 @@ pub const Options = struct {
     carveout: ?*cuda.Carveout = null, // KV planes go to the display carveout first while it holds them
     slide: bool = false, // Sliding Weights asked for: refused for a checkpoint the learner cannot read
     vision: ?@import("cuda_vision.zig").Limits = null, // --vision: the checkpoint's image tower (an omni checkpoint's)
+    precision: ?@import("config.zig").Precision = null, // --precision; null: the checkpoint's math where it is built
 };
 
 /// Asked before each prompt chunk (or segmented call): true stops the prompt with error.Cancelled.
@@ -138,6 +139,7 @@ pub const Engine = struct {
         e.c = try Config.read(gpa, io, model_dir);
         try latent.place(&e.c);
         if (e.c.rank > 0) return error.RankServesExperts; // ranks past 0 run cuda_worker.serve, not an engine
+        e.c.ck = try @import("cuda_latent_ck.zig").wanted(ctx, e.c, opts.precision);
         if (e.c.world > 1 and opts.segments > 1) return error.SegmentsNeedOneRank; // one stream keeps the jobs in order
         if (opts.segments < 1 or opts.segments > segs.MAX) return error.BadSegments;
         e.segments = opts.segments;
@@ -159,6 +161,7 @@ pub const Engine = struct {
             try e.k.loadModelopt(ctx);
         }
         if (e.c.latent > 0) try e.k.loadLatent();
+        if (e.c.ck) try e.k.loadCk(ctx);
         if (e.c.world > 1) e.tp = try cuda.tp_group.Group.open(e.c.rank, e.c.world);
         errdefer if (e.tp) |*g| g.close();
         if (e.tp) |*g| try latent.agree(gpa, io, e.c, g, ctx.d, e.stream);

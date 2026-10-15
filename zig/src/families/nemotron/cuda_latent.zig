@@ -10,12 +10,13 @@ const modelopt = @import("cuda_modelopt.zig");
 const fwd = @import("cuda_forward.zig");
 const worker = @import("cuda_worker.zig");
 const state = @import("cuda_state.zig");
+const four = @import("cuda_latent_ck.zig");
 
 const Nvfp4Experts = cuda.experts.Nvfp4Experts;
 const Tensor = core.checkpoint.Tensor;
 
-/// A layer's experts in the shares a rank holds: routed (latent width) and shared (hidden width).
-pub const Tables = struct { routed: kern.Experts, shared: kern.Experts };
+/// A layer's experts in the shares a rank holds: routed (latent width) and shared (hidden width); `ck` in its own math.
+pub const Tables = struct { routed: kern.Experts, shared: kern.Experts, ck: ?four.Tables = null };
 
 /// A layer's weights past the router: hidden to latent and back (bf16), its expert tables, its id in rank jobs.
 pub const Latent = struct { into: kern.QLinear, out: kern.QLinear, t: Tables, id: u32 };
@@ -23,8 +24,8 @@ pub const Latent = struct { into: kern.QLinear, out: kern.QLinear, t: Tables, id
 /// The MTP head's MoE in rank jobs (block indices name the model's own layers).
 pub const mtp_id: u32 = 1 << 16;
 
-/// The scratch an expert pass uses: the plan, routed and shared activations, the shared expert's pair ids.
-pub const Scratch = struct { plan: kern.Plan, act: u64, sact: u64, sids: u64 };
+/// The scratch an expert pass uses: the plan, routed and shared activations, the shared expert's pair ids, NVFP4 rows.
+pub const Scratch = struct { plan: kern.Plan, act: u64, sact: u64, sids: u64, ck4: u64 = 0 };
 
 /// nemotron_latent.cu's kernels.
 pub const Fns = struct {
@@ -97,16 +98,16 @@ pub fn checkHeld(c: Config) !void {
 
 /// What every rank must agree on before the weights load: the model, its cut and the build.
 const Fingerprint = extern struct {
-    layout: u32 = 2, // this struct's version
+    layout: u32 = 3, // this struct's version
     rank: u32,
     world: u32,
-    pad: u32 = 0,
+    ck: u32, // the checkpoint's own math (--precision checkpoint) or full precision
     dims: [12]u64, // the config's sizes, rank and world left out
     kinds: [32]u8, // sha256 of the block pattern
     program: [32]u8, // sha256 of this executable
 
     fn of(c: Config, program: [32]u8) Fingerprint {
-        var f: Fingerprint = .{ .rank = @intCast(c.rank), .world = @intCast(c.world), .dims = .{ c.hidden, c.vocab, c.layers, c.experts, c.top_k, c.latent, c.expert_width, c.shared_width, c.shares, c.mamba_heads, c.heads, c.kv_heads }, .kinds = undefined, .program = program };
+        var f: Fingerprint = .{ .rank = @intCast(c.rank), .world = @intCast(c.world), .ck = @intFromBool(c.ck), .dims = .{ c.hidden, c.vocab, c.layers, c.experts, c.top_k, c.latent, c.expert_width, c.shared_width, c.shares, c.mamba_heads, c.heads, c.kv_heads }, .kinds = undefined, .program = program };
         var kinds: [@import("config.zig").max_layers]u8 = undefined;
         for (c.kinds[0..c.layers], kinds[0..c.layers]) |k, *b| b.* = @intFromEnum(k);
         std.crypto.hash.sha2.Sha256.hash(kinds[0..c.layers], &f.kinds, .{});
@@ -143,10 +144,9 @@ pub fn agree(gpa: std.mem.Allocator, io: std.Io, c: Config, g: *const cuda.tp_gr
 /// A layer's routed and shared expert tables in the shares this rank holds.
 pub fn tables(L: *W.Loader, ck: *core.Checkpoint, label: []const u8, pre: []const u8, c: Config) !Tables {
     var a: [128]u8 = undefined;
-    return .{
-        .routed = try table(L, ck, try std.fmt.bufPrint(&a, "{s}.routed", .{label}), pre, "experts.{d}.", c.experts, c.latent, c.expert_width, c),
-        .shared = try table(L, ck, try std.fmt.bufPrint(&a, "{s}.shared", .{label}), pre, "shared_experts.", 1, c.hidden, c.shared_width, c),
-    };
+    const r = try table(L, ck, try std.fmt.bufPrint(&a, "{s}.routed", .{label}), pre, "experts.{d}.", c.experts, c.latent, c.expert_width, c);
+    const s = try table(L, ck, try std.fmt.bufPrint(&a, "{s}.shared", .{label}), pre, "shared_experts.", 1, c.hidden, c.shared_width, c);
+    return .{ .routed = r.experts, .shared = s.experts, .ck = if (r.ck) |x| .{ .routed = x, .shared = s.ck.? } else null };
 }
 
 /// A latent MoE layer: router, bias, the two latent projections and both expert tables; `id` names it in rank jobs.
@@ -206,22 +206,31 @@ fn expertName(buf: []u8, pre: []const u8, comptime mid: []const u8, e: usize, le
     return std.fmt.bufPrint(buf, "{s}" ++ mid ++ "{s}", .{ pre, leaf });
 }
 
+/// A table as the math in force reads it: the grouped kernels' NVFP4 blocks, or the FP4 mma's tiles (checkpoint math).
+const Table = struct { experts: kern.Experts, ck: ?cuda.ck.Layer = null };
+
 /// `count` relu^2 experts of `width` in c.shares shares; this rank's shares stacked share-major (share * count + e).
-fn table(L: *W.Loader, ck: *core.Checkpoint, label: []const u8, pre: []const u8, comptime mid: []const u8, count: usize, dims: usize, width: usize, c: Config) !kern.Experts {
+fn table(L: *W.Loader, ck: *core.Checkpoint, label: []const u8, pre: []const u8, comptime mid: []const u8, count: usize, dims: usize, width: usize, c: Config) !Table {
     const own = c.ownShares();
     const sw = width / c.shares;
     const first = c.rank * own;
     const m = if (L.ops.k.modelopt) |*x| x else return error.ModeloptNotLoaded;
+    const c4: ?*const cuda.ck.Ck = if (L.ops.k.ck) |*x| x else null;
     var layer: kern.Experts = .{ .format = .nvfp4, .up = 0, .down = 0, .width = sw, .dims = dims, .experts = count * own, .relu2 = true };
-    const gs = try L.gpa.alloc(f32, 2 * count * own);
+    var tiles: cuda.ck.Layer = .{ .up = 0, .up_s = 0, .down = 0, .down_s = 0, .up_alpha = 0, .down_alpha = 0, .up_act = 0, .down_act = 0, .experts = count * own, .width = sw, .dims = dims };
+    const gs = try L.gpa.alloc(f32, 2 * count * own); // weight scales, or the checkpoint math's alphas
     defer L.gpa.free(gs);
     var a: [128]u8 = undefined;
     var b: [192]u8 = undefined;
     for ([2]bool{ true, false }) |up| {
         const n = if (up) sw else dims;
         const k = if (up) dims else sw;
-        const out = try L.alloc(try std.fmt.bufPrint(&a, "{s}.{s}", .{ label, if (up) "up" else "down" }), Nvfp4Experts.bytes(count * own, n, k, 1));
+        const pk = cuda.ck.Ck.packedBytes(count, n, k); // a share's words and scale tiles (checkpoint math)
+        const dir: []const u8 = if (up) "up" else "down";
+        const out = try L.alloc(try std.fmt.bufPrint(&a, "{s}.{s}", .{ label, dir }), if (c4 != null) pk[0] * own else Nvfp4Experts.bytes(count * own, n, k, 1));
+        const out_s = if (c4 != null) try L.alloc(try std.fmt.bufPrint(&a, "{s}.{s}_s", .{ label, dir }), pk[1] * own) else 0;
         const one = Nvfp4Experts.bytes(count, n, k, 1);
+        var act: f32 = 0; // the direction's input scale: every expert's must be the same
         // down keeps whole file rows (its columns are the shares); up keeps one share's rows a pass
         const passes: usize = if (up) own else 1;
         for (0..passes) |pass| {
@@ -232,6 +241,8 @@ fn table(L: *W.Loader, ck: *core.Checkpoint, label: []const u8, pre: []const u8,
                 const file_w = if (up) p.n else p.k;
                 const whole = file_w == width;
                 if (p.kind != .nvfp4 or (if (up) p.k else p.n) != dims or !(whole or (file_w == sw and c.held != null))) return error.UnexpectedTensor;
+                if (e == 0) act = p.act;
+                if (c4 != null and (p.act == 0 or p.act != act)) return error.MixedQuantization;
                 if (up) {
                     const share = first + pass;
                     const r0 = if (whole) share * sw else 0;
@@ -247,21 +258,38 @@ fn table(L: *W.Loader, ck: *core.Checkpoint, label: []const u8, pre: []const u8,
                     try L.src.upload(base + e * n * ks / 2, p.w.bytes);
                     try L.src.upload(base + count * n * ks / 2 + e * n * ks / 16, p.blocks.?.bytes);
                 }
-                for (0..own) |s| gs[@intFromBool(!up) * count * own + s * count + e] = p.scale;
+                for (0..own) |s| gs[@intFromBool(!up) * count * own + s * count + e] = if (c4 != null) cuda.ck.alpha(p.act, p.scale) else p.scale;
             }
             try L.src.flush();
             if (up) {
-                try m.pack.fp4Experts(L.ops.s, base, base + count * n * k / 2, out + pass * one, count, n, k, 0, k, 1, 0);
+                if (c4) |q| try q.pack(L.ops.s, base, base + count * n * k / 2, count, n, k, 0, k, out + pass * pk[0], out_s + pass * pk[1]) else try m.pack.fp4Experts(L.ops.s, base, base + count * n * k / 2, out + pass * one, count, n, k, 0, k, 1, 0);
             } else for (0..own) |s| {
                 const k0 = if (ks == width) (first + s) * sw else 0;
-                try m.pack.fp4Experts(L.ops.s, base, base + count * n * ks / 2, out + s * one, count, n, ks, k0, sw, 1, 0);
+                if (c4) |q| try q.pack(L.ops.s, base, base + count * n * ks / 2, count, n, ks, k0, sw, out + s * pk[0], out_s + s * pk[1]) else try m.pack.fp4Experts(L.ops.s, base, base + count * n * ks / 2, out + s * one, count, n, ks, k0, sw, 1, 0);
             }
         }
-        if (up) layer.up = out else layer.down = out;
+        if (up) {
+            layer.up = out;
+            tiles.up = out;
+            tiles.up_s = out_s;
+            tiles.up_act = act;
+        } else {
+            layer.down = out;
+            tiles.down = out;
+            tiles.down_s = out_s;
+            tiles.down_act = act;
+        }
     }
-    layer.up_scale = try modelopt.scales(L, try std.fmt.bufPrint(&a, "{s}.up_scale", .{label}), gs[0 .. count * own]);
-    layer.down_scale = try modelopt.scales(L, try std.fmt.bufPrint(&a, "{s}.down_scale", .{label}), gs[count * own ..]);
-    return layer;
+    const g_up = try modelopt.scales(L, try std.fmt.bufPrint(&a, "{s}.up_scale", .{label}), gs[0 .. count * own]);
+    const g_down = try modelopt.scales(L, try std.fmt.bufPrint(&a, "{s}.down_scale", .{label}), gs[count * own ..]);
+    if (c4 != null) {
+        tiles.up_alpha = g_up;
+        tiles.down_alpha = g_down;
+        return .{ .experts = layer, .ck = tiles };
+    }
+    layer.up_scale = g_up;
+    layer.down_scale = g_down;
+    return .{ .experts = layer };
 }
 
 fn int(x: usize) c_int {
@@ -301,6 +329,7 @@ fn route(f: *const fwd.Forward, m: W.MoE, x: u64, rows: usize) !void {
 
 /// One share set's expert rows into `out` (fp32): routed pairs by `picks`, then the shared expert's (row, share).
 pub fn partials(o: kern.Ops, t: Tables, s: Scratch, picks: u64, lat: u64, hidden: u64, rows: usize, own: usize, c: Config, out: u64) !void {
+    if (t.ck) |x| return four.partials(o, x, s.plan, s.act, s.sact, s.sids, s.ck4, picks, lat, hidden, rows, own, c, out);
     const pairs = rows * c.top_k * own;
     const g = o.grouped();
     try o.plan(picks, pairs, t.routed.experts, 16, s.plan);
@@ -328,7 +357,7 @@ pub fn run(f: *const fwd.Forward, m: W.MoE, rows: usize) !void {
     try f.mark(.route);
     try o.linear().decode(o.s, lt.into, .{ .x = b.y }, b.lat, rows);
     if (f.tp != null) try worker.send(f, lt.id, rows); // the other ranks' shares start while ours run
-    try partials(o, lt.t, .{ .plan = b.plan, .act = b.act, .sact = b.sact, .sids = b.sids }, b.pick, b.lat, b.y, rows, own, c, b.ymoe);
+    try partials(o, lt.t, .{ .plan = b.plan, .act = b.act, .sact = b.sact, .sids = b.sids, .ck4 = b.ck4 }, b.pick, b.lat, b.y, rows, own, c, b.ymoe);
     try f.mark(.experts_down);
     // one GPU: shares interleaved by pair; ranks: each rank's rows in its own region of ymoe, in rank order
     var share_stride: u64 = Lw;

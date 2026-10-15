@@ -52,6 +52,8 @@ pub const nemotron_mamba: []const u8 = if (available) &Blob("fatbin_nemotron_mam
 pub const nemotron_attention: []const u8 = if (available) &Blob("fatbin_nemotron_attention").bytes else &.{};
 pub const nemotron_keyed: []const u8 = if (available) &Blob("fatbin_nemotron_keyed").bytes else &.{};
 pub const nemotron_latent: []const u8 = if (available) &Blob("fatbin_nemotron_latent").bytes else &.{};
+pub const ck_lane: []const u8 = if (available) &Blob("fatbin_ck_lane").bytes else &.{};
+pub const ck_experts: []const u8 = if (available) &Blob("fatbin_ck_experts").bytes else &.{};
 pub const norms: []const u8 = if (available) &Blob("fatbin_norms").bytes else &.{};
 pub const embed_rows: []const u8 = if (available) &Blob("fatbin_embed_rows").bytes else &.{};
 
