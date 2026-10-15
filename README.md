@@ -76,6 +76,7 @@ The platform column names the hardware tested for each model.
 | GLM-5.3 | EXLR8 `home` profile (trellis K2/K3/K4 experts) | Metal on two M5 Ultras |
 | Qwen3.5-2B | Pinned MLX affine 4-bit, group 64, tied embeddings | Metal on M5 Max |
 | Qwen3.8-27B | MLX affine 4-bit, group 64, own output head; DFlash2 drafter | Metal on M5 Max and M3 Ultra |
+| LFM2.5-24B-A2B | MLX affine 4-, 6- or 8-bit, group 64, tied embeddings | Metal on M4 Pro |
 
 Nemotron's named checkpoint is `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit`.
 NVIDIA's NVFP4 checkpoint, `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`, serves on CUDA as stored; its bf16 MTP head is quantized to 4-bit at load for drafts.
@@ -85,6 +86,8 @@ On Metal it samples a request with a temperature on the GPU, with Nemotron's `tf
 GLM's two-Mac setup uses one settings file per rank and a separate MCDMA runtime.
 GLM-5.3's checkpoint is kindlingai's EXLR8 release `kindlingai/glm-5.3-exlr8-k2-k3-k4` at revision `f459f5d0272a529403dd9b3fd32f771f4250a0d4`, which `tensorfold pull` fetches one Mac's half at a time; [GLM-5.3 on two Macs](docs/glm-5.3-exlr8.md) covers the pull, the serve commands, memory and limits.
 The [1.0.0 release notes](RELEASE-NOTES-1.0.0.md) give qualification limits and credit the contributors.
+
+LFM2.5-24B-A2B's checkpoints are LiquidAI's `LiquidAI/LFM2.5-24B-A2B-MLX-4bit` (revision `667408d494bde191c2cb9dd4f4549827816b9275`), `-MLX-6bit` (`1deec53eb49571e21cdcbf82fd5839248f07ed88`) and `-MLX-8bit` (`67ab417dd02d0c9545802a726df668620eae049d`).
 
 The 27B's checkpoint is `TensorFold/Qwen3.8-27B-MLX-4bit`, and its drafter is `z-lab/Qwen3.8-27B-DFlash2`, given with `--drafter`.
 Run it with `--drafter`. Without it the 27B decodes plain, which is slower than mlx_lm.
@@ -180,9 +183,9 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--drafter-bits 0\|4` | Prepare the drafter's weights in 4 bits (the default) or keep them bf16 with 0. |
 | `--keep-warm SECONDS` | Keep the Metal GPU active while idle for this long after a request, default 900; zero disables it. |
 | `--parallel N` | Admit up to N requests where the engine shares lanes; `auto` is the default. |
-| `--prompt-cache-gib GIB` | Nemotron, Flash Next, GLM and Qwen3.8-27B retained-prefix budget, 16 GiB by default or less where memory is short; zero disables retention. |
-| `--prompt-cache-over-cap` | Permit an explicit Nemotron, Flash Next or Qwen3.8-27B prefix budget past what 70% of RAM leaves once the server loads. |
-| `--learn` | Keep shared prompt prefixes, such as a system prompt and its tools, on disk so new conversations resume them after a restart or an upgrade that computes the same bits. GLM-5.3-Flash, Nemotron, and Flash Next on one Mac; Qwen3.8-27B, Qwen3.5-2B, GLM-5.3 (EXLR8) and a CUDA server refuse it at startup. |
+| `--prompt-cache-gib GIB` | Retained-prefix budget, 16 GiB by default or less where memory is short; 0 disables it. |
+| `--prompt-cache-over-cap` | Permit an explicit prefix budget past what 70% of RAM leaves once the server loads. |
+| `--learn` | Keep shared prompt prefixes on disk for new conversations to resume; the models are below the table. |
 | `--learn-dir DIR` | Where `--learn` keeps them, `~/.cache/tensorfold/learned` by default; implies `--learn`. |
 | `--learn-gib GIB` | Disk for learned prefixes on each Mac, 32 by default; the least recently used go first. Implies `--learn`. |
 | `--learn-min-free-gib GIB` | Free disk `--learn` leaves on each Mac, 4 by default; below it learning pauses and serving goes on. |
@@ -201,9 +204,20 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--no-update-check` | Accepted compatibility switch; update the installed binary through its package manager. |
 | `--backend auto` | Use the backend compiled for the platform; `mlx` selects native Metal on macOS and `cuda` selects CUDA on Linux. |
 
+`--prompt-cache-gib` applies to Nemotron, Flash Next, GLM, Qwen3.8-27B and LFM2.5-24B-A2B, and
+`--prompt-cache-over-cap` to the same models but GLM.
+`--learn` keeps shared prompt prefixes, such as a system prompt and its tools, on disk, so new conversations resume
+them after a restart or an upgrade that computes the same bits. It covers GLM-5.3-Flash, Nemotron, and Flash Next on
+one Mac; Qwen3.8-27B, Qwen3.5-2B, LFM2.5-24B-A2B, GLM-5.3 (EXLR8) and a CUDA server refuse it at startup.
+
 Sampling defaults come from the checkpoint's `generation_config.json`, then serve flags and request fields override them.
 `--context 0` is family-specific; use a positive limit for GLM and inspect the capacity reported at startup.
 The supported environment variables are listed in `capabilities --json`, including API keys, request logging and Hugging Face cache paths.
+
+## Community benchmarks
+
+`tensorfold benchmark MODEL` runs public code and chat fixtures on a cached model and saves a portable receipt;
+`--publish` optionally submits it for review at tensorfold.dev. See [benchmark commands and measurement definitions](docs/community-benchmarks.md).
 
 ## Build and contribute
 
