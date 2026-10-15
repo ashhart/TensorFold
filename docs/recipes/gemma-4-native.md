@@ -96,12 +96,14 @@ Long prompts, one after the other on the same M5 Ultra: native in 512-row chunks
 
 | Prompt | Native prompt tok/s | mlx-lm prompt tok/s | Native decode tok/s | mlx-lm decode tok/s |
 |---|---|---|---|---|
-| 8k | 1061 | 1305 | about 35 | 39 |
-| 32k | 927 | 1139 | about 33 | 32 |
-| 64k | 799 | 944 | about 31 | 32 |
-| 128k | 620 | 651 | about 24 | 25 |
-| 252k | 374 | 440 | about 18 | 16 |
+| 8k | 1142 | 1305 | about 35 | 39 |
+| 32k | 996 | 1139 | about 33 | 32 |
+| 64k | 844 | 944 | about 29 | 32 |
+| 128k | 648 | 651 | about 24 | 25 |
+| 252k | 390 | 440 | about 18 | 16 |
 
 Prompt attention runs 64 keys a simdgroup over the whole head, the tile's row maxes and probabilities crossing
 threadgroup memory once a block: at 32k it costs what mlx-lm's fused attention does (18 ms a global layer for 512
-rows), where slicing the head across simdgroups and summing scores every 32 keys cost a third more.
+rows), where slicing the head across simdgroups and summing scores every 32 keys cost a third more. The prompt GEMMs
+are core affine_mm's: a 512-row chunk's 60 layers take 344 ms there (mlx-lm's quantized matmuls 302), the rest of the
+gap to mlx-lm at 8k.

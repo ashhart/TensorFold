@@ -173,6 +173,27 @@ inline frag<bfloat> am_frag(const device bfloat* r0, const device bfloat* r1, in
 #endif
 }
 
+// The tile's 16 x 16 block at (r, c) as a transposed right operand (on M5 a lane's four columns of a row in one load).
+inline frag<bfloat> am_tile_frag(const threadgroup bfloat* tile, int r, int c, short2 home) {
+#ifndef TF_SIMD_FRAGS
+  const threadgroup bfloat* p = tile + (r + home.y) * PAD + c + home.x;
+  return frag<bfloat>(*(const threadgroup bfloat4*)p, *(const threadgroup bfloat4*)(p + 8 * PAD));
+#else
+  frag<bfloat> f;
+  frag_get_t(f, tile, PAD, r, c, home);
+  return f;
+#endif
+}
+
+// A group's scales or biases for a lane's four columns from col (on M5 contiguous: one load).
+inline float4 am_sb4(const threadgroup float* sg, int col) {
+#ifndef TF_SIMD_FRAGS
+  return *(const threadgroup float4*)(sg + col);
+#else
+  return float4(sg[col + TF_COL(0)], sg[col + TF_COL(1)], sg[col + TF_COL(2)], sg[col + TF_COL(3)]);
+#endif
+}
+
 // One step's MMAs and group epilogues for the first TL of TM row fragments (TL < TM: a tile's tail, the rest dead).
 template <int TM, int TL>
 inline void am_step(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>& rows, int k,
@@ -181,8 +202,8 @@ inline void am_step(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>& r
   TF_UNROLL
   for (short q = 0; q < 4; q++) { // the step's four 16-deep slices, every row fragment's chain interleaved
     frag<bfloat> b0, b1, a[TL];
-    frag_get_t(b0, tile, PAD, tn, 16 * q, home);
-    frag_get_t(b1, tile, PAD, tn + 16, 16 * q, home);
+    b0 = am_tile_frag(tile, tn, 16 * q, home);
+    b1 = am_tile_frag(tile, tn + 16, 16 * q, home);
     TF_UNROLL
     for (short m = 0; m < TL; m++) {
       a[m] = am_frag(rows.x[m][0], rows.x[m][1], k + 16 * q, home);
@@ -203,12 +224,12 @@ inline void am_step(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>& r
         const float xr0 = rows.s[m][0][k / TF_GROUP + g], xr1 = rows.s[m][1][k / TF_GROUP + g];
         TF_UNROLL
         for (short j = 0; j < 2; j++) {
+          const int col = tn + 16 * j + home.x;
+          const float4 s = am_sb4(sg, col), b = am_sb4(sg, 64 + col);
           TF_UNROLL
           for (short c = 0; c < 4; c++) {
-            const int col = tn + 16 * j + home.x + TF_COL(c);
-            const float s = sg[col], b = sg[64 + col];
-            acc[m][j][c] += s * part[m][j][c] + b * xr0;
-            acc[m][j][4 + c] += s * part[m][j][4 + c] + b * xr1;
+            acc[m][j][c] += s[c] * part[m][j][c] + b[c] * xr0;
+            acc[m][j][4 + c] += s[c] * part[m][j][4 + c] + b[c] * xr1;
           }
         }
       }
@@ -228,13 +249,21 @@ inline void am_k_loop(thread frag<float> (&acc)[TM][2], thread const AmRows<TM>&
     acc[i][0] = frag<float>(0);
     acc[i][1] = frag<float>(0);
   }
+  Codes next = am_load(wq); // a step's codes, scale and bias fetched a step ahead: the loads' latency off the barriers
+  float s_next = float(scales[g_mine]), b_next = float(biases[g_mine]);
   for (int k = 0; k < K; k += 64) {
+    const Codes codes = next;
+    const float s_now = s_next, b_now = b_next;
+    if (k + 64 < K) {
+      next = am_load(wq + STEP_BYTES);
+      s_next = float(scales[NG + g_mine]);
+      b_next = float(biases[NG + g_mine]);
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    am_codes(am_load(wq), mine);
+    am_codes(codes, mine);
     if (TF_GROUP == 32 || t % 2 == 0) {
-      const float s = float(scales[g_mine]);
-      sb[g_mine * 128 + t / 2] = s;
-      sb[g_mine * 128 + 64 + t / 2] = float(biases[g_mine]) - OFF * s;
+      sb[g_mine * 128 + t / 2] = s_now;
+      sb[g_mine * 128 + 64 + t / 2] = b_now - OFF * s_now;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (live > 16 * (TM - 1)) {
