@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const json = @import("json.zig");
 const errors = @import("errors.zig");
 const prompt_mod = @import("prompt.zig");
+const images = @import("images.zig");
 const chat = @import("chat.zig");
 const log = @import("log.zig");
 const Server = @import("server.zig").Server;
@@ -41,10 +42,17 @@ fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort
     const a = p.arena.allocator();
     var cx: errors.Cx = .{ .a = a };
     const warm_prompt = try shared(srv, &cx, input, message, thinking, effort);
-    const prompt = warm_prompt.ids;
+    var prompt = warm_prompt.ids;
+    // an image conversation's pass holds its images as its turns did (data URLs only: no URL is fetched twice)
+    const pictures = try images.expand(srv.info.vision, null, srv.text, &cx, .{ .array = warm_prompt.messages }, prompt, prompt.len);
+    if (pictures) |x| prompt = x.ids;
     if (prompt.len == 0 or (srv.info.context_window > 0 and prompt.len >= srv.info.context_window)) return;
     // its states count as the reply's request's: they supersede none of that turn's own until a later turn does
-    p.request = .{ .prompt = prompt, .max_tokens = 0, .background = true, .born = @intCast(prompt_len), .history_len = @intCast(prompt.len), .rewind_len = @intCast(prompt_mod.rewindLen(srv, &cx, .{ .array = warm_prompt.messages }, input.messages.array.len, input.tools, prompt, thinking, effort)), .chunks = try srv.chunks.starts(a, prompt), .decode_spans = try prompt_mod.replySpans(srv, &cx, prompt) };
+    p.request = .{ .prompt = prompt, .max_tokens = 0, .background = true, .born = @intCast(prompt_len), .history_len = @intCast(prompt.len), .rewind_len = if (pictures != null) 0 else @intCast(prompt_mod.rewindLen(srv, &cx, .{ .array = warm_prompt.messages }, input.messages.array.len, input.tools, prompt, thinking, effort)), .chunks = try srv.chunks.starts(a, prompt), .decode_spans = try prompt_mod.replySpans(srv, &cx, prompt) };
+    if (pictures) |x| {
+        p.request.images = x.images;
+        p.request.cache_key = x.cache_key;
+    }
     const id = srv.next_id.fetchAdd(1, .monotonic);
     try srv.engine.submit(id, &p.request, .{ .ctx = p, .event = Pass.event });
     handed = true;

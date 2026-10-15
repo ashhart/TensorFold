@@ -12,6 +12,7 @@ const Resident = @import("resident.zig").Resident;
 const lb = @import("qwen27_lanes.zig");
 pub const lanes_backend = lb;
 const disk = @import("qwen27_disk.zig");
+const images = @import("qwen27_images.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Options = struct {
@@ -23,6 +24,8 @@ pub const Options = struct {
     cache_gib: ?f64 = null,
     cache_over_cap: bool = false,
     learn: ?disk.Learn = null, // --learn-conversations: kept states written behind to disk and read back
+    vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
+    images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
 };
 
 pub const Host = struct {
@@ -40,6 +43,7 @@ pub const Host = struct {
     resident: ?Resident = null,
     warm: mtl.keepalive.Target,
     disk_stage: ?mtl.Buffer = null, // copies out of private kept states for the disk (qwen27_disk.zig)
+    vision: ?*images.Vision = null, // --vision's tower and image rows
 
     pub fn engine(h: *Host) api.Engine {
         return h.host.engine();
@@ -71,6 +75,12 @@ pub const Host = struct {
         const h = of(ptr);
         if (h.cache) |*store| keepEnd(store, h.gpa, s, h.runner.offsets[slot]);
     }
+
+    /// Info.vision's prepare, on the HTTP thread.
+    fn prepareImage(ptr: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
+        const h = of(ptr);
+        return images.prepare(h.vision.?, h.clock.io, a, bytes, max_tokens);
+    }
 };
 
 /// The reply's state at `stands` (its end or one short), born with its request's prompt: that request's marks stay.
@@ -80,7 +90,11 @@ fn keepEnd(store: *pc.Store, gpa: Allocator, s: *lanes.Stream, stands: u32) void
     if (tokens.len == prompt or stands + 1 < tokens.len or stands > tokens.len) return;
     const spans = api.cache_modes.reply(gpa, s.decode_spans, prompt, stands) catch return;
     defer gpa.free(spans);
-    _ = store.keepBorn(tokens, prompt, stands, s, s.chunks, spans);
+    // an image prompt's rows go by their images (the request's cache key), as its lookups and marks do
+    const keyed = if (s.key.len == prompt) gpa.dupe(u32, tokens) catch return else tokens;
+    defer if (keyed.ptr != tokens.ptr) gpa.free(keyed);
+    if (keyed.ptr != tokens.ptr) @memcpy(keyed[0..prompt], s.key);
+    _ = store.keepBorn(keyed, prompt, stands, s, s.chunks, spans);
 }
 
 /// The words for a request the engine refuses.
@@ -251,7 +265,11 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     defer pool.pop();
     const model = try q.model.Model.load(gpa, io, dir, 128, shareFits);
     errdefer model.deinit();
-    const h = try attach(gpa, io, model, null, o, a, why);
+    var with = o;
+    // the tower before the slots: their room and the cache's budget count it as taken
+    if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
+    errdefer if (with.images) |v| v.deinit();
+    const h = try attach(gpa, io, model, null, with, a, why);
     h.owns_model = true;
     return h;
 }
@@ -277,6 +295,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     h.cache = null;
     h.resident = null;
     h.disk_stage = null;
+    h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
     h.runner = try q.decode_round.Runner.initReady(gpa, model, slots, capacity + lb.max_rows, 1);
     errdefer h.runner.deinit();
     if (drafter) |d| h.draft = try lb.Draft.attach(gpa, &h.runner, d, false) else if (o.drafter) |d| h.draft = lb.Draft.open(gpa, io, model, &h.runner, d, if (o.drafter_bits == 4) .prepared_q4_reference else .bf16_reference) catch |err| {
@@ -287,13 +306,15 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     h.back = try lb.Metal.init(gpa, &h.runner, h.draft);
     errdefer h.back.deinit();
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
+    h.back.vision = o.images;
     if (h.draft != null) try h.back.measure(io);
     h.cfg = try lanes.Config.init(gpa, h.back.facts(), lb.max_rows, lb.max_rows - 1);
     errdefer h.cfg.deinit(gpa);
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .lanes = slots, .context_window = capacity, .prefill_step = 128 });
+    const offer: ?api.Vision = if (o.images) |v| .{ .ctx = h, .prepare = Host.prepareImage, .image_token = v.c.image_token, .markers = &v.markers, .image_tokens = v.capacity, .max_images = v.max_images, .explain = tf.qwen_vl.geometry.problem } else null;
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .lanes = slots, .context_window = capacity, .prefill_step = 128, .vision = offer });
     h.host.explain = .{ .text = words };
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
     // a lone greedy request takes the serial loop on tensor units, where it is faster (TF_QWEN27_LANES overrides)
@@ -310,7 +331,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
-    std.log.info("Qwen3.8-27B: {d} streams of {d} tokens{s}", .{ slots, capacity, if (h.draft != null) ", DFlash2 drafts for one of them" else "" });
+    std.log.info("Qwen3.8-27B: {d} streams of {d} tokens{s}{s}", .{ slots, capacity, if (h.draft != null) ", DFlash2 drafts for one of them" else "", if (o.images != null) ", images read" else "" });
     return h;
 }
 
@@ -342,6 +363,10 @@ fn holdResident(h: *Host, io: std.Io) !void {
         for (d.model.checkpoint.shards.items) |s| try list.append(h.gpa, s.buffer);
         try list.append(h.gpa, d.model.pending);
     }
+    if (h.back.vision) |v| {
+        const held = v.buffers();
+        try list.appendSlice(h.gpa, &held);
+    }
     h.resident = try Resident.hold(h.gpa, io, h.model.device, h.model.queue, list.items, "qwen27") orelse return;
     h.warm = (&h.resident.?).target();
 }
@@ -360,6 +385,7 @@ pub fn close(ptr: *anyopaque) void {
     h.back.deinit();
     if (h.draft) |d| d.deinit();
     h.runner.deinit();
+    if (h.vision) |v| v.deinit();
     if (h.owns_model) h.model.deinit();
     h.gpa.destroy(h);
 }

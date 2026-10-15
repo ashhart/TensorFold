@@ -6,6 +6,7 @@ const tf = @import("tensorfold");
 const q = tf.qwen27;
 const lanes = tf.lanes;
 const lb = @import("qwen27_lanes.zig");
+const images = @import("qwen27_images.zig");
 const Metal = lb.Metal;
 const Ring = q.tap_ring.Ring;
 const max_rows = lb.max_rows;
@@ -16,6 +17,7 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
     if (ids.len == 0 or ids.len + s.max_new + max_rows > b.runner.capacity) return error.PromptTooLong;
     if (s.yields()) return error.Yielded; // a background pass steps aside before it touches the slot
     try recover(b, s);
+    b.runner.rope[slot] = try images.layout(b.vision, s);
     const d = b.drafter(slot);
     if (d) |x| try x.reset() else try b.runner.reset(slot);
     if (b.ringOf(slot)) |g| g.end.* = 0;
@@ -35,6 +37,8 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
         } else s.reuse_failed = true;
     }
     const from = at;
+    b.runner.images = if (b.vision) |v| try images.encode(v, b.runner.model.queue, s, slot) else null;
+    defer b.runner.images = null;
     while (at < ids.len) {
         if (s.isCancelled()) return error.Cancelled;
         if (s.yields()) { // real work waits: the cache keeps what this background pass prefilled
@@ -137,6 +141,7 @@ pub fn unbind(b: *Metal, s: *lanes.Stream) void {
     if (slot == 0) b.dropTree();
     if (b.release_hook) |hook| if (s.finished and s.reason != .cancelled and s.reason != .@"error") hook.kept(hook.ctx, s, slot);
     b.owners[slot] = null;
+    b.runner.rope[slot] = .{};
     if (slot == 0) promote(b);
 }
 
@@ -157,6 +162,8 @@ pub fn promote(b: *Metal) void {
         };
         b.owners[0] = s;
         b.owners[k] = null;
+        b.runner.rope[0] = b.runner.rope[k];
+        b.runner.rope[k] = .{};
         b.rings[k].?.end = 0;
         return;
     }
@@ -164,6 +171,7 @@ pub fn promote(b: *Metal) void {
 
 /// Slot 0 emptied and prefilled with `prompt`, through the drafter when there is one (the window timing's context).
 pub fn refill(b: *Metal, prompt: []const u32) !void {
+    b.runner.rope[0] = .{};
     if (b.draft) |d| try d.reset() else try b.runner.reset(0);
     if (b.draft) |d| try d.generation.prefill(prompt, 128) else try (q.session.Session{ .runner = b.runner }).prefill(prompt, 128);
 }
