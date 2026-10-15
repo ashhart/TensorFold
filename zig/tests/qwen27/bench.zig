@@ -181,6 +181,25 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    // one-row rounds through the step prepare against the general prepare, commit and publication: the same state bytes
+    if (std.c.getenv("QWEN27_STEPCHECK") != null) {
+        var prints: [2][32]u8 = undefined;
+        for ([_]bool{ true, false }, 0..) |on, k| {
+            q.gdn_pool_gpu.step_rounds = on;
+            var rr = try q.decode_round.Runner.init(gpa, m, 1, 1024);
+            defer rr.deinit();
+            const s = q.session.Session{ .runner = &rr, .slot = 0 };
+            var prompt: [96]u32 = undefined;
+            for (&prompt, 0..) |*t, j| t.* = @intCast((j * 7919 + 13) % 150000 + 1000);
+            try s.prefill(&prompt, 64);
+            for (0..24) |_| try s.step(try s.greedy());
+            prints[k] = try s.fingerprint();
+        }
+        q.gdn_pool_gpu.step_rounds = true;
+        std.debug.print("step prepare vs general prepare, 24 one-row steps: states and logits {s}\n", .{if (std.mem.eql(u8, &prints[0], &prints[1])) "byte-equal" else "DIFFER"});
+        return;
+    }
+
     // projections-only floor: every projection of a one-row step in one command buffer
     {
         const pool2 = mtl.objc.Pool.push();
