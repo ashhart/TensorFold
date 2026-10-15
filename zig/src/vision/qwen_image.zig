@@ -406,13 +406,54 @@ pub fn prepareVideo(gpa: std.mem.Allocator, rgb: []const u8, frames: usize, h: u
 
 /// Python's f"{t:.1f}": one decimal, an exact tie rounded to even.
 pub fn formatSeconds(buf: []u8, t: f64) ![]const u8 {
-    const x: f128 = @as(f128, t) * 10; // exact: a double's 53 bits times ten fit f128's 113
-    const fl = @floor(x);
-    const frac = x - fl;
-    var r = if (frac > 0.5) fl + 1 else fl;
-    if (frac == 0.5 and @rem(fl, 2) != 0) r = fl + 1;
-    const v: i64 = @intFromFloat(r);
+    const v = tenths(t);
     return std.fmt.bufPrint(buf, "{d}.{d}", .{ @divTrunc(v, 10), @as(u64, @intCast(@mod(v, 10))) });
+}
+
+/// t times ten, an exact tie to even, in integers: t is m * 2^e and 10m fits 57 bits (f128 would link compiler-rt).
+fn tenths(t: f64) i64 {
+    const bits: u64 = @bitCast(@abs(t));
+    const biased: i32 = @intCast(bits >> 52);
+    const m: u64 = if (biased == 0) bits & ((1 << 52) - 1) else (bits & ((1 << 52) - 1)) | (1 << 52);
+    const e = @as(i32, @max(biased, 1)) - 1075;
+    if (e >= 0) return @intFromFloat(t * 10); // at least 2^52 seconds: never a frame's time
+    const tm = m * 10;
+    if (e <= -58) return 0; // t * 10 under a half: tm < 2^57 <= 2^(s - 1)
+    const s: u6 = @intCast(-e);
+    const q = tm >> s;
+    const rem = tm & ((@as(u64, 1) << s) - 1);
+    const half = @as(u64, 1) << (s - 1);
+    const r: i64 = @intCast(if (rem > half or (rem == half and q & 1 == 1)) q + 1 else q);
+    return if (t < 0) -r else r;
+}
+
+test "tenths rounds t * 10 exactly, ties to even, as the f128 product does" {
+    const ref = struct {
+        fn f(t: f64) i64 {
+            const x: f128 = @as(f128, t) * 10;
+            const fl = @floor(x);
+            const frac = x - fl;
+            var r = if (frac > 0.5) fl + 1 else fl;
+            if (frac == 0.5 and @rem(fl, 2) != 0) r = fl + 1;
+            return @intFromFloat(r);
+        }
+    }.f;
+    const fixed = [_]f64{ 0, -0.0, 0.05, 0.15, 0.25, 0.35, 0.45, 1.25, 2.5, 0.95, 1.05, 3.0, 123.45, 1e-300, 5e-324, 4503599627370495.5, -0.25, -1.35 };
+    for (fixed) |t| try std.testing.expectEqual(ref(t), tenths(t));
+    var prng: std.Random.DefaultPrng = .init(0x7e17);
+    const rand = prng.random();
+    for (0..200_000) |i| {
+        const t: f64 = switch (i % 4) {
+            0 => rand.float(f64) * 4000,
+            1 => @as(f64, @floatFromInt(rand.intRangeLessThan(u32, 0, 80_000))) / 20, // halves of tenths
+            2 => @as(f64, @floatFromInt(rand.intRangeLessThan(u32, 1, 100_000))) / @as(f64, @floatFromInt(rand.intRangeLessThan(u32, 1, 121))),
+            else => @bitCast(@as(u64, rand.uintLessThan(u64, 1075)) << 52 | rand.int(u64) >> 12), // any double below 2^52
+        };
+        try std.testing.expectEqual(ref(t), tenths(t));
+    }
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("0.2", try formatSeconds(&buf, 0.25));
+    try std.testing.expectEqualStrings("1.4", try formatSeconds(&buf, 1.35));
 }
 
 test {
