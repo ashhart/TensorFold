@@ -58,6 +58,10 @@ pub const Config = struct {
         defer gpa.free(path);
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20));
         defer gpa.free(bytes);
+        return parse(gpa, bytes, target);
+    }
+
+    fn parse(gpa: std.mem.Allocator, bytes: []const u8, target: engine.Geometry) !Config {
         const doc = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
         defer doc.deinit();
         if (doc.value != .object) return error.BadDraftConfig;
@@ -73,7 +77,7 @@ pub const Config = struct {
             .kv_heads = try int(o, "num_key_value_heads"),
             .head_dim = try int(o, "head_dim"),
             .block = try int(d.object, "block_size"),
-            .mask = @intCast(try int(d.object, "mask_token_id")),
+            .mask = @intCast(try whole(d.object, "mask_token_id")),
             .window = try int(o, "sliding_window"),
             .group = try int(d.object, "conv_group_size"),
             .rank = try int(d.object, "selector_rank"),
@@ -98,7 +102,15 @@ pub const Config = struct {
     }
 };
 
+/// A size, count or divisor: positive, so a zero can't reach a remainder or an empty allocation.
 fn int(o: std.json.ObjectMap, key: []const u8) !usize {
+    const v = try whole(o, key);
+    if (v == 0) return error.BadDraftConfig;
+    return v;
+}
+
+/// A token id: any whole number.
+fn whole(o: std.json.ObjectMap, key: []const u8) !usize {
     const v = o.get(key) orelse return error.BadDraftConfig;
     if (v != .integer or v.integer < 0) return error.BadDraftConfig;
     return @intCast(v.integer);
@@ -176,7 +188,10 @@ pub const Draft = struct {
 
     const words_at = 64;
     const hp_at = words_at + 16 * lp_words * 4;
-    const staged_len = hp_at + 16 * 256 * 2;
+    /// The host staging area: the words then 16 rows of `rank` selector projections (the block's mask rows fit).
+    fn stagedLen(rank: usize) usize {
+        return hp_at + 16 * rank * 2;
+    }
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *E, dir: []const u8) !*Draft {
         const c = try Config.read(gpa, io, dir, e.g);
@@ -193,7 +208,7 @@ pub const Draft = struct {
         try d.scratch.fill8(0, null);
         d.at = 0;
         _ = try d.layout(true);
-        d.staged = try cuda.HostBuffer.alloc(e.d, staged_len);
+        d.staged = try cuda.HostBuffer.alloc(e.d, stagedLen(c.rank));
         errdefer d.staged.free();
         try d.picksZero();
         // the first context, and a hold timed on it (the quickest of several: the first ones pay the driver's stalls)
@@ -545,4 +560,25 @@ pub fn timing(what: []const u8, io: std.Io, t0: std.Io.Timestamp) void {
     const ns: f64 = @floatFromInt(t0.durationTo(now).toNanoseconds());
     const at: f64 = @floatFromInt(@mod(now.toNanoseconds(), 1_000_000_000_000));
     std.debug.print("[timing] {s} {d:.2} ms at {d:.1}\n", .{ what, ns / 1e6, at / 1e6 });
+}
+
+test "a drafter config with a zero divisor is refused, and any admitted rank's selector rows fit the staging area" {
+    const gpa = std.testing.allocator;
+    const target: engine.Geometry = .{ .hidden = 5120, .intermediate = 17408, .layers = 64, .vocab = 248320, .k_heads = 16, .v_heads = 48, .q_heads = 24, .kv_heads = 4, .eps = 1e-6, .tied = false, .context = 262144, .linear = @splat(false) };
+    const text =
+        \\{"dflash_config":{"block_size":8,"conv_group_size":16,"conv_kernel_size":2,"mask_token_id":248070,"selector_rank":256,
+        \\ "selector_top_k":16,"target_layer_ids":[5,19,33,47,61]},"head_dim":128,"hidden_size":5120,"intermediate_size":17408,
+        \\ "num_attention_heads":32,"num_hidden_layers":5,"num_key_value_heads":8,"rms_norm_eps":1e-06,
+        \\ "rope_parameters":{"rope_theta":10000000},"sliding_window":2048,"vocab_size":248320}
+    ;
+    try std.testing.expectEqual(@as(usize, 256), (try Config.parse(gpa, text, target)).rank);
+    for ([_][2][]const u8{ .{ "\"conv_group_size\":16", "\"conv_group_size\":0" }, .{ "\"num_key_value_heads\":8", "\"num_key_value_heads\":0" } }) |r| {
+        const bad = try std.mem.replaceOwned(u8, gpa, text, r[0], r[1]);
+        defer gpa.free(bad);
+        try std.testing.expectError(error.BadDraftConfig, Config.parse(gpa, bad, target));
+    }
+    const wide = try std.mem.replaceOwned(u8, gpa, text, "\"selector_rank\":256", "\"selector_rank\":1024");
+    defer gpa.free(wide);
+    const c = try Config.parse(gpa, wide, target);
+    try std.testing.expect(Draft.stagedLen(c.rank) >= Draft.hp_at + (c.block - 1) * c.rank * 2);
 }
