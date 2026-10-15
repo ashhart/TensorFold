@@ -1,18 +1,4 @@
-// One-shot all-gather between two DGX Sparks over RoCE: the GPU side of b12x's "RoCEnante" exchange
-// (https://github.com/local-inference-lab/b12x, b12x/comm/roce, Apache License 2.0), written for two ranks.
-// The host side (zig/src/cuda/roce.zig) owns a pinned region both GPUs and both NICs reach:
-//
-//   recv[slot]       the peer's shard, written by the peer's NIC (2 slots of slot_bytes)
-//   flag[slot][hca]  the sequence the peer's NIC writes after its stripe on that HCA (128 bytes apart)
-//   send[slot]       this rank's shard, staged here for its NIC (2 slots)
-//   ctrl             {seq, nbytes of slot 0, nbytes of slot 1, error seq, missing hca}: the proxy's doorbell
-//
-// One launch: (1) every block stages its share of the shard into send[seq & 1]; (2) the last block to stage
-// publishes the slot's size and rings ctrl.seq after a system fence, and the proxy thread RDMA-writes the shard and
-// then a flag per HCA stripe on the same queue pair (so a flag never lands before its stripe); (3) each block waits
-// for every stripe's flag; (4) every block writes both shards in rank order (the layout NCCL's all-gather gives);
-// (5) the last block to finish advances the device epoch, so a CUDA graph replays the exchange with new sequences.
-// A wait past the spin limit poisons the exchange: later launches return at once and the host reports the error.
+// Two-rank one-shot RoCE all-gather after b12x (github.com/local-inference-lab/b12x, Apache-2.0): docs/roce-gather.md.
 
 #include <stdint.h>
 
