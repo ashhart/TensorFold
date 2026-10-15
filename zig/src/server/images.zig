@@ -7,6 +7,7 @@ const messages_mod = @import("messages.zig");
 const model_text = @import("model_text.zig");
 const media_fetch = @import("media_fetch.zig");
 const videos = @import("videos.zig");
+const image_key = @import("image_key.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 
@@ -274,12 +275,16 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
     var hist = history_len;
     var k: usize = 0;
     var kv: usize = 0;
+    var close: ?u32 = null; // the cache word an image gives the marker right after its rows
     for (ids, 0..) |t, src| {
         const before = out_ids.items.len;
+        const after = close;
+        close = null;
         if (t == v.image_token) {
             const img = prepared[k];
             k += 1;
-            try placeImage(cx.a, &out_ids, &key, &imgs, t, img);
+            try placeImage(cx.a, &out_ids, &key, &imgs, t, img, src > 0 and image_key.isMarker(v, ids[src - 1]));
+            close = image_key.close(img.hash);
         } else if (video_token != null and t == video_token.?) {
             const o = v.video.?;
             const clip = clips[kv];
@@ -287,9 +292,9 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
             for (clip.groups, clip.times) |g, secs| {
                 try out_ids.append(cx.a, o.group_open);
                 try key.append(cx.a, o.group_open);
-                try placeImage(cx.a, &out_ids, &key, &imgs, v.image_token, g);
+                try placeImage(cx.a, &out_ids, &key, &imgs, v.image_token, g, true);
                 try out_ids.append(cx.a, o.group_close);
-                try key.append(cx.a, o.group_close);
+                try key.append(cx.a, image_key.close(g.hash));
                 var buf: [64]u8 = undefined;
                 const words = videos.seconds(&buf, secs) catch unreachable; // a time within the hour's limit
                 const time = text.encodePlain(cx.a, words) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.fail(.server, "the tokenizer could not encode a video group's time", .{});
@@ -298,19 +303,20 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
             }
         } else {
             try out_ids.append(cx.a, t);
-            try key.append(cx.a, t);
+            try key.append(cx.a, if (after != null and image_key.isMarker(v, t)) after.? else t);
         }
         if (src < history_len) hist += out_ids.items.len - before - 1;
     }
     return .{ .ids = out_ids.items, .history_len = hist, .images = imgs.items, .cache_key = key.items };
 }
 
-/// Appends one image's placeholder rows, its engine entry and its cache ids (past the vocabulary, by content and row).
-fn placeImage(a: std.mem.Allocator, ids: *std.ArrayList(u32), key: *std.ArrayList(u32), imgs: *std.ArrayList(api.Image), token: u32, img: api.PreparedImage) !void {
+/// Appends one image's rows, its engine entry and its cache words; `named`: the word before them is its marker's.
+fn placeImage(a: std.mem.Allocator, ids: *std.ArrayList(u32), key: *std.ArrayList(u32), imgs: *std.ArrayList(api.Image), token: u32, img: api.PreparedImage, named: bool) !void {
+    if (named) key.items[key.items.len - 1] = image_key.open(img.hash);
     try imgs.append(a, .{ .pixels = img.pixels, .gh = img.gh, .gw = img.gw, .at = @intCast(ids.items.len), .tokens = img.tokens });
     for (0..img.tokens) |j| {
         try ids.append(a, token);
-        try key.append(a, 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(img.hash, std.mem.asBytes(&j)) & 0x7fff_ffff)));
+        try key.append(a, image_key.row(img.hash, j));
     }
 }
 
@@ -440,8 +446,8 @@ test "--vision-urls: an https part's bytes come from the fetch, within what the 
 }
 
 /// A test tokenizer: "<|image|>" is token 9 unless read plainly, every other byte its own id plus 100.
-const MarkText = struct {
-    fn text() model_text.Text {
+pub const MarkText = struct {
+    pub fn text() model_text.Text {
         return .{ .ctx = undefined, .vtable = &.{ .encode = encode, .decode = undefined, .token_id = undefined, .token_string = tokenString, .vocab_size = undefined, .eos_ids = undefined, .render = undefined, .template_source = undefined, .encode_plain = plain } };
     }
     fn encode(_: *anyopaque, a: std.mem.Allocator, s: []const u8, _: bool) model_text.Error![]u32 {

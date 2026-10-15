@@ -265,9 +265,8 @@ pub fn patchify(a: std.mem.Allocator, p: Plan, frames: []const u8, mean: [3]f32,
             };
             row += 1;
         };
-        var h = std.hash.Wyhash.init(0x71de0);
-        h.update(std.mem.sliceAsBytes(px));
-        pair.* = .{ .pixels = px, .gh = gh, .gw = gw, .tokens = gh * gw / vision.patches_per_token, .hash = h.final() };
+        const id = picture.identity.withGrid(picture.identity.ofBytes(0x71de0, std.mem.sliceAsBytes(px)), .{ gh, gw });
+        pair.* = .{ .pixels = px, .gh = gh, .gw = gw, .tokens = gh * gw / vision.patches_per_token, .hash = id };
     }
     return out;
 }

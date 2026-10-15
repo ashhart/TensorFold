@@ -54,7 +54,7 @@ pub fn bounds(c: Config, max_tokens: u32) [2]u64 {
 pub fn prepare(io: std.Io, gpa: std.mem.Allocator, bytes: []const u8, c: Config, max_tokens: u32) Error!Prepared {
     var img = try picture.decode(io, gpa, bytes);
     defer img.deinit(gpa);
-    return prepareRgb(gpa, img, std.hash.Wyhash.hash(0x51e7, bytes), c, max_tokens);
+    return prepareRgb(gpa, img, picture.identity.ofBytes(0x51e7, bytes), c, max_tokens);
 }
 
 /// RGB to patches; the hash covers the bytes' hash and the grid, so one picture at two budgets is two images.
@@ -66,7 +66,7 @@ pub fn prepareRgb(gpa: std.mem.Allocator, img: picture.Rgb, bytes_hash: u64, c: 
     defer gpa.free(resized);
     const grid = [2]u32{ size.h / c.patch, size.w / c.patch };
     const pixels = try patchify(gpa, .{ .width = size.w, .height = size.h, .pixels = resized }, c);
-    return .{ .pixels = pixels, .gh = grid[0], .gw = grid[1], .tokens = grid[0] * grid[1] / (c.merge * c.merge), .hash = std.hash.Wyhash.hash(bytes_hash, std.mem.asBytes(&grid)) };
+    return .{ .pixels = pixels, .gh = grid[0], .gw = grid[1], .tokens = grid[0] * grid[1] / (c.merge * c.merge), .hash = picture.identity.withGrid(bytes_hash, grid) };
 }
 
 /// Patches in merge order (block row, block column, row, column), each [channel, frame, y, x], the frame repeated.

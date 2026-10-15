@@ -6,6 +6,7 @@ pub const png = @import("png.zig");
 pub const jpeg = @import("jpeg.zig");
 pub const resample = @import("resample.zig");
 pub const tags = @import("tags.zig");
+pub const identity = @import("identity.zig");
 
 pub const Error = error{ Invalid, Oversized, Animated, CmykJpeg, NoJpegLibrary, JpegLibraryVersion, OutOfMemory };
 
@@ -128,5 +129,6 @@ test {
     _ = jpeg;
     _ = resample;
     _ = tags;
+    _ = identity;
     _ = @import("picture_test.zig");
 }

@@ -9,7 +9,7 @@ pub const Prepared = struct {
     gh: u32,
     gw: u32,
     tokens: u32,
-    hash: u64, // of the image's bytes and grid: other images, or this one at another budget, are other prompts
+    hash: u64, // its identity (core/picture/identity.zig): bytes and grid, so another budget is another image
 };
 
 /// The shared decoder's refusals, and a token budget too small for an image.
@@ -98,7 +98,7 @@ pub fn patchify(gpa: std.mem.Allocator, content: picture.Rgb, g: Geometry, mean:
 pub fn prepare(io: std.Io, gpa: std.mem.Allocator, bytes: []const u8, c: vision.Config, max_tokens: u32) Error!Prepared {
     var img = try picture.decode(io, gpa, bytes);
     defer img.deinit(gpa);
-    return prepareRgb(gpa, img, std.hash.Wyhash.hash(0x1a6e, bytes), c, max_tokens);
+    return prepareRgb(gpa, img, picture.identity.ofBytes(0x1a6e, bytes), c, max_tokens);
 }
 
 /// RGB to patches (Pillow's bicubic resize, the padded canvas cut); the hash covers the bytes' hash and the grid.
@@ -109,7 +109,7 @@ pub fn prepareRgb(gpa: std.mem.Allocator, img: picture.Rgb, bytes_hash: u64, c: 
     const content: picture.Rgb = .{ .width = g.content_w, .height = g.content_h, .pixels = resized };
     const pixels = try patchify(gpa, content, g, c.mean, c.std);
     const grid = [2]u32{ g.target_h / vision.patch, g.target_w / vision.patch };
-    return .{ .pixels = pixels, .gh = grid[0], .gw = grid[1], .tokens = grid[0] * grid[1] / vision.patches_per_token, .hash = std.hash.Wyhash.hash(bytes_hash, std.mem.asBytes(&grid)) };
+    return .{ .pixels = pixels, .gh = grid[0], .gw = grid[1], .tokens = grid[0] * grid[1] / vision.patches_per_token, .hash = picture.identity.withGrid(bytes_hash, grid) };
 }
 
 test "geometry follows smart_resize" {
