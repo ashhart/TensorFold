@@ -9,6 +9,7 @@ const lone = @import("lane_host_lone.zig");
 const fill = @import("lane_host_fill.zig");
 const admit = @import("lane_host_admit.zig");
 const recalls = @import("lane_host_recall.zig");
+const ends = @import("lane_host_end.zig");
 const rows_host = @import("lane_host_rows.zig");
 const Allocator = std.mem.Allocator;
 const Id = api.Id;
@@ -264,38 +265,6 @@ pub const LaneHost = struct {
         h.gpa.destroy(job);
     }
 
-    /// Cancels queued and admitted jobs named since the last round.
-    fn takeCancels(h: *LaneHost) void {
-        h.mutex.lockUncancelable(h.io);
-        const ids = h.gpa.dupe(Id, h.cancels.items) catch &.{};
-        h.cancels.clearRetainingCapacity();
-        var dropped: std.ArrayList(*Job) = .empty;
-        for (ids) |id| {
-            for (h.queued.items, 0..) |job, i| if (job.id == id) {
-                dropped.append(h.gpa, h.queued.orderedRemove(i)) catch {};
-                break;
-            };
-        }
-        h.mutex.unlock(h.io);
-        for (dropped.items) |job| h.finish(job, .cancelled, "");
-        dropped.deinit(h.gpa);
-        for (ids) |id| {
-            var found: ?*Job = null;
-            // the status reader walks `admitted` under this lock: the removal joins the walk's critical section
-            h.lock();
-            for (h.admitted.items, 0..) |job, i| if (job.id == id) {
-                fill.unfill(h, job);
-                if (!job.stream.finished) h.core.discard(&job.stream);
-                _ = h.admitted.orderedRemove(i);
-                found = job;
-                break;
-            };
-            h.unlock();
-            if (found) |job| h.finish(job, .cancelled, "");
-        }
-        h.gpa.free(ids);
-    }
-
     pub fn lock(h: *LaneHost) void {
         h.mutex.lockUncancelable(h.io);
     }
@@ -524,7 +493,7 @@ pub const LaneHost = struct {
 
     fn run(h: *LaneHost) void {
         while (true) {
-            h.takeCancels();
+            ends.takeCancels(h);
             rows_host.answer(h);
             while (h.admitOne()) {}
             h.fillOne();
@@ -538,7 +507,7 @@ pub const LaneHost = struct {
                     h.lesson_open = false;
                 }
                 if (left == 0) return rows_host.flush(h);
-                h.closeAll();
+                ends.closeAll(h);
                 continue;
             }
             if (h.core.activeCount() == 0) {
@@ -559,7 +528,7 @@ pub const LaneHost = struct {
             }
             h.unlock();
             h.core.step() catch |e| {
-                h.failAll(@errorName(e));
+                ends.failAll(h, @errorName(e));
                 continue;
             };
             var i: usize = 0;
@@ -570,28 +539,6 @@ pub const LaneHost = struct {
             }
             lone.reclaim(h);
         }
-    }
-
-    /// A failed round ends every stream it held, with the backend's error.
-    fn failAll(h: *LaneHost, message: []const u8) void {
-        h.lock();
-        const jobs = h.gpa.dupe(*Job, h.admitted.items) catch &.{};
-        h.admitted.clearRetainingCapacity();
-        h.filling.clearRetainingCapacity();
-        h.unlock();
-        for (jobs) |job| {
-            if (!job.stream.finished) h.core.discard(&job.stream);
-            h.finish(job, .failed, message);
-        }
-        h.gpa.free(jobs);
-    }
-
-    fn closeAll(h: *LaneHost) void {
-        h.lock();
-        for (h.queued.items) |job| h.cancels.append(h.gpa, job.id) catch {};
-        for (h.admitted.items) |job| h.cancels.append(h.gpa, job.id) catch {};
-        h.unlock();
-        h.takeCancels();
     }
 };
 
