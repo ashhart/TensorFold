@@ -421,3 +421,50 @@ test "an entry pinned for a restore still to come outlives the lookups set up af
     try std.testing.expect(s.find(&xa, &.{}, &.{}) == null);
     try std.testing.expectEqual(s.entries.items.len, f.live);
 }
+
+test "two jobs pin one entry and the first restore fails: lookups miss it, and it lives until the second job unpins" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0 }, 1 << 20);
+    defer s.deinit();
+    const x = [_]u32{ 5, 5, 5, 5 };
+    _ = f.pass(&s, &x, try s.begin(a, &x, 3, &.{}, &.{}, null, &.{}));
+    const xa = [_]u32{ 5, 5, 5, 5, 9 };
+    const xb = [_]u32{ 5, 5, 5, 5, 8 };
+    const e = s.pin((try s.lookup(a, &xa, 3, &.{}, &.{}, &.{})).entry.?);
+    try std.testing.expect(s.pin((try s.lookup(a, &xb, 3, &.{}, &.{}, &.{})).entry.?) == e);
+    const held = s.held;
+    s.resumed(e, &xa, false); // the first job's restore failed: it prefilled from 0
+    s.unpin(e);
+    try std.testing.expect(s.find(&xb, &.{}, &.{}) == null);
+    try std.testing.expectEqual(@as(usize, 0), s.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 1), f.live); // the second job's restore still reads it
+    try std.testing.expectEqual(held, s.held);
+    try std.testing.expectEqual(@as(u32, 1), e.pins);
+    s.resumed(e, &xb, true); // no longer kept: its report changes nothing
+    s.unpin(e);
+    try std.testing.expectEqual(@as(usize, 0), f.live);
+    try std.testing.expectEqual(@as(u64, 0), s.held);
+}
+
+test "forget leaves a pinned entry to its restore" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0 }, 1 << 20);
+    defer s.deinit();
+    const x = [_]u32{ 5, 5, 5, 5 };
+    _ = f.pass(&s, &x, try s.begin(a, &x, 3, &.{}, &.{}, null, &.{}));
+    const xa = [_]u32{ 5, 5, 5, 5, 9 };
+    const e = s.pin((try s.lookup(a, &xa, 3, &.{}, &.{}, &.{})).entry.?);
+    s.forget(&xa, 3, &.{});
+    try std.testing.expect(s.find(&xa, &.{}, &.{}) == null);
+    try std.testing.expectEqual(@as(usize, 1), f.live);
+    s.unpin(e);
+    try std.testing.expectEqual(@as(usize, 0), f.live);
+}
