@@ -114,6 +114,8 @@ const Pool = struct {
     jobs: []const Copy,
     next: std.atomic.Value(usize) = .init(0),
     failed: std.atomic.Value(bool) = .init(false),
+    short: std.atomic.Value(bool) = .init(false), // a read refused for memory: the first one's reading is `short_at`
+    short_at: paced_read.Memory = .{ .free = 0, .reclaimable = 0 },
 
     fn run(p: *Pool) void {
         const buf = paced_read.stage(std.heap.page_allocator, 16 << 20) catch {
@@ -121,16 +123,20 @@ const Pool = struct {
             return;
         };
         defer std.heap.page_allocator.free(buf);
-        while (true) {
+        var short: paced_read.Memory = undefined;
+        while (!p.failed.load(.acquire)) { // a failed read fails the load: no thread starts another
             const i = p.next.fetchAdd(1, .monotonic);
             if (i >= p.jobs.len) return;
             const j = p.jobs[i];
-            paced_read.read(p.fds[j.shard], j.dst[0..j.len], j.off, buf) catch p.failed.store(true, .release);
+            paced_read.read(p.fds[j.shard], j.dst[0..j.len], j.off, buf, &short) catch |err| {
+                if (err == error.MemoryShort and !p.short.swap(true, .acq_rel)) p.short_at = short;
+                p.failed.store(true, .release);
+            };
         }
     }
 };
 
-/// Every copy on `threads` threads, uncached, paced by free memory (a large load otherwise fills the page cache too).
+/// Every copy on `threads` threads, uncached, paced by the memory the kernel can give (else a load fills the cache).
 pub fn runCopies(gpa: std.mem.Allocator, shards: []const [:0]const u8, copies: []const Copy, transforms: []const Transform, threads: usize) !void {
     const fds = try gpa.alloc(std.c.fd_t, shards.len);
     defer gpa.free(fds);
@@ -148,6 +154,11 @@ pub fn runCopies(gpa: std.mem.Allocator, shards: []const [:0]const u8, copies: [
     for (workers) |*t| t.* = std.Thread.spawn(.{}, Pool.run, .{&pool}) catch null;
     pool.run();
     for (workers) |t| if (t) |th| th.join();
+    if (pool.short.load(.acquire)) {
+        var buf: [400]u8 = undefined;
+        std.log.err("glm: {s}", .{paced_read.refusal(&buf, pool.short_at, paced_read.floor())});
+        return error.MemoryShort;
+    }
     if (pool.failed.load(.acquire)) return error.ShortRead;
     // the transforms on the same threads (each reads its own tensors whole)
     const Tx = struct {
