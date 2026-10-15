@@ -223,7 +223,7 @@ pub const Slots = struct {
         defer pool.pop();
         var x = sl.ctx(slot);
         x.inject = if (e.vision) |v| v.injected(i) else null; // an image prompt's rows over its placeholders (slot_images.zig)
-        if (draws) |d| x.draws = d; // the head reads the last row's rule (prompt.rows - 1), the rest draw greedily
+        if (draws) |d| x.draws = d; // the head's one output row reads rule row 0, keyed at the prompt's length
         const b = e.begin();
         const ids = e.prompt_ids.at(@as(usize, at) * 4);
         const next = e.prompt_ids.at(@as(usize, at + 1) * 4);
