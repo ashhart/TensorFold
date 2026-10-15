@@ -111,7 +111,7 @@ const Host = struct {
     slide: ?*anyopaque = null, // that learner's adapter, freed by slide_free before the family
     slide_free: ?*const fn (Allocator, *anyopaque) void = null,
     dir: []u8 = &.{}, // the model folder the learner writes its lessons into
-    recording: ?*Recording = null, // --record: the recorder in front of the family's backend
+    recording: ?*record.Recording = null, // --record: the recorder in front of the family's backend
 
     fn close(p: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(p));
@@ -203,19 +203,7 @@ const Host = struct {
 };
 
 const refusals = @import("cuda_refusal.zig");
-
-/// --record's folder, its recorder and the family's backend behind it.
-const Recording = struct {
-    dir: [:0]u8,
-    recorder: lanes.recorder.Recorder,
-    recorded: lanes.recorder.Recorded,
-
-    fn free(r: *Recording, gpa: Allocator) void {
-        r.recorder.deinit();
-        gpa.free(r.dir);
-        gpa.destroy(r);
-    }
-};
+const record = @import("cuda_record.zig");
 
 /// The engine for `o.dir`, or null with `problem` set when `refusal` names a flag or no CUDA family reads it.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
@@ -377,6 +365,11 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         }
     };
     defer if (!opened) loaded.deinit(loaded.ctx);
+    const taps = record.taps(loaded); // --record is refused before the host is made, so a refusal holds nothing
+    if (o.record) |dir| if (try record.refusal(a, io, o.model_type, dir, taps)) |why| {
+        problem.* = why;
+        return null;
+    };
     const model = cuda.usage(false).device - held0;
     const after = try pool(a, io, &g.ctx, problem) orelse return null;
     var room = after.room(model) -| loaded.learn_bytes;
@@ -453,21 +446,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         gpa.free(h.dir);
     };
     if (o.record) |dir| {
-        if (loaded.taps.len == 0) {
-            problem.* = try std.fmt.allocPrint(a, "--record: {s} checkpoints give no rows to record on CUDA yet", .{o.model_type});
-            return null;
-        }
-        std.Io.Dir.cwd().createDirPath(io, dir) catch |e| {
-            problem.* = try std.fmt.allocPrint(a, "--record {s}: cannot make the folder ({s})", .{ dir, @errorName(e) });
-            return null;
-        };
-        const r = try gpa.create(Recording);
-        errdefer gpa.destroy(r);
-        r.dir = try gpa.dupeSentinel(u8, dir, 0);
-        errdefer gpa.free(r.dir);
-        r.recorder = try .init(gpa, io, r.dir, loaded.taps);
-        errdefer r.recorder.deinit();
-        r.recorded = try .init(loaded.backend, &r.recorder);
+        const r = try record.open(gpa, io, dir, taps, loaded.backend);
         h.recording = r;
         h.inner = r.recorded.backend();
         h.lone = null; // every token through the lane rounds, where the recorder sees it
