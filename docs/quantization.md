@@ -65,6 +65,33 @@ In the Python 0.6.6 engine, the Metal kernel has a dedicated hardware test in
 model and GPU tests must run under the machine's existing resource controls.
 No speed or quality improvement is implied by a higher bit width.
 
+## NVIDIA's NVFP4 checkpoints on CUDA
+
+NVIDIA's ModelOpt NVFP4 checkpoints are made for NVIDIA's own math: NVFP4 activations into the NVFP4 layers and FP8
+activations into the FP8 layers, quantized with the input scales stored beside the weights. On CUDA, `--precision`
+chooses the math the native engine runs:
+
+- `checkpoint`: that math. Each FP8 layer's input rows become e4m3 at the layer's stored input scale. Each NVFP4
+  expert's input rows become NVFP4: an e4m3 scale for every 16 values, from their largest magnitude under the stored
+  input scale, and e2m1 values rounded to nearest. Blackwell's FP8 and block-scaled FP4 tensor cores multiply them with
+  fp32 sums, and the outputs are bf16. It needs compute capability 12.x (RTX 50, RTX PRO 6000 Blackwell, GB10).
+- `full`: bf16 activations into every layer, with the weights as stored (W4A16 and W8A16).
+
+Nemotron 3.5 Super VL runs `checkpoint` by default on Blackwell. Nemotron 3.5 Lightning's NVFP4 checkpoint runs `full`
+and refuses `checkpoint` for now. Both modes keep the KV cache in bf16, and the layers the checkpoint stores in bf16
+stay bf16.
+
+Each mode is exact on its own terms: drafted replies equal `"draft": false`, resumed requests equal fresh ones,
+concurrent streams equal their solo runs, and two GPUs give one GPU's tokens. The two modes give different tokens from
+each other. On Super VL on a GB10, `checkpoint` teacher-forced on `full`'s greedy replies to three prompts (768 tokens)
+gave a mean KL(full || checkpoint) of 0.0077 nats a token (0.0036, 0.0137 and 0.0057 by prompt), the same top token
+at 756 of the 768 positions (98.4%), and a mean negative log-likelihood of the fed tokens 0.0058 higher (0.0692
+against 0.0749). `tensorfold kl MODEL --tokens IDS --dump FILE --precision full` writes one precision's logits rows
+and `--against FILE --precision checkpoint` runs the other on the same tokens. On the same GB10, `checkpoint` read a
+cold 8,192-token prompt in 4.41 s against `full`'s 7.96 s (1.81x; 1.82x at 2,048 tokens), and decoded a token in
+52.3 ms against 50.1 ms without drafts: decode reads the same weight bytes either way, and `checkpoint` adds the
+rows' quantization.
+
 ## Native safetensors metadata
 
 The shared Zig safetensors index retains up to five dimensions, including temporal patch convolutions

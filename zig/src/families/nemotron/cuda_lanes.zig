@@ -267,6 +267,8 @@ pub const Cuda = struct {
             e.prompt_rows = .{ .k = k, .rows = rows, .logits = if (self.prompt_logits) |b| b.ptr else e.b.logits, .picks = words[picks_at..][0..rows], .picks_dev = self.prompt_dev + picks_at * 4, .out = words[0..picks_at], .out_dev = self.prompt_dev, .stride = row_words, .ctx = &sink, .call = PromptSink.take };
         }
         defer e.prompt_rows = null;
+        if (s.images.len > 0) try (e.vision orelse return error.NoVision).begin(e.stream, s.images, from);
+        defer if (e.vision) |v| v.end();
         const first = try e.prefillFrom(ids, from, null, self.head, .{ .ptr = s, .check = cancelled, .yields = s.yield_check != null }, keep);
         // the head's first draft reads the prompt's last row (its hidden row waits where a window's would)
         const last = ids.len - 1 - e.last_chunk;

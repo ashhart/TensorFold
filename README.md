@@ -71,6 +71,7 @@ The platform column names the hardware tested for each model.
 | --- | --- | --- |
 | Nemotron 3.5 Lightning 30B-A3B | MLX affine 4-bit, group 64, included MTP head | Metal on M1 through M5; CUDA on GB10, RTX 3090 and RTX PRO 6000 Blackwell |
 | Nemotron 3.5 Lightning 30B-A3B, NVIDIA's NVFP4 | ModelOpt NVFP4 experts and head, FP8 Mamba projections, bf16 attention | CUDA on GB10 (sm_90 or newer) |
+| Nemotron 3.5 Super VL 120B-A12B, NVIDIA's NVFP4 | ModelOpt NVFP4 experts, FP8 Mamba, attention and head projections, bf16 latent projections; RADIO image tower | CUDA on one GB10, or two GB10s |
 | Qwen3.8 Flash Next | MLX affine 6-bit, group 32 | Metal on M5 Ultra |
 | GLM-5.3-Flash | MLX affine 4-bit, group 64 | Metal on two M5 Ultras |
 | GLM-5.3 | EXLR8 `home` profile (trellis K2/K3/K4 experts) | Metal on two M5 Ultras |
@@ -80,6 +81,7 @@ The platform column names the hardware tested for each model.
 
 Nemotron's named checkpoint is `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit`.
 NVIDIA's NVFP4 checkpoint, `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`, serves on CUDA as stored; its bf16 MTP head is quantized to 4-bit at load for drafts.
+Super VL's checkpoint is `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` at revision `82d93699acd3be9e4617c53360fe5b3f5dbeb1b3`, served as stored with images, in NVIDIA's own FP4 and FP8 math by default (`--precision full` keeps bf16 activations); [its recipe](docs/recipes/nemotron-3.5-super-vl.md) covers one and two GB10s.
 The 2B checkpoint is `mlx-community/Qwen3.5-2B-MLX-4bit`, revision `93760be4f1f69842a46bc13dbdc0f19e291392a3`.
 Flash Next loads its checkpoint directly and builds its weight packs locally, without a recorded kernel directory.
 On Metal it samples a request with a temperature on the GPU, with Nemotron's `tf_sample_full` and the shared rule; speed-up mode decodes greedily.

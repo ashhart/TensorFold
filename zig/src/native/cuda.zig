@@ -12,9 +12,10 @@ const lane_backend = @import("cuda_bound.zig");
 const snaps = @import("cuda_snaps.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
 const cuda_disk = @import("cuda_disk.zig");
+const vision_offer = @import("cuda_vision_offer.zig");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-const registry = .{ nemotron.native, glm.native };
+const registry = .{ nemotron.native, nemotron.omni, glm.native };
 
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const families: []const api.Family = blk: {
@@ -306,12 +307,28 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     var probe: Probe = .{ .a = a, .io = io, .ctx = &g.ctx, .held = held0, .problem = problem };
     var opts: F.Options = .{ .context = @intCast(window), .drafts = o.drafts, .segments = segments, .slide = o.slide };
+    if (o.vision) |vo| {
+        if (!@hasField(F.Options, "vision")) {
+            problem.* = "--vision: this CUDA family reads no images; serve it without --vision";
+            return null;
+        }
+        const own: ?u32 = comptime if (@hasDecl(F, "default_image_tokens")) F.default_image_tokens else null;
+        opts.vision = .{ .image_tokens = if (vo.image_tokens_set) vo.image_tokens else own orelse vo.image_tokens, .max_images = vo.max_images };
+    }
+    if (o.precision) |p| {
+        if (!@hasField(F.Options, "precision")) {
+            problem.* = "--precision: this CUDA family reads no NVFP4 checkpoint; serve it without --precision";
+            return null;
+        }
+        opts.precision = std.meta.stringToEnum(@typeInfo(@TypeOf(opts.precision)).optional.child, @tagName(p)).?;
+    }
     if (@hasField(F.Options, "room")) opts.room = .{ .ctx = &probe, .read = Probe.read };
     if (weights > before.room(held0)) {
         problem.* = try std.fmt.allocPrint(a, "the checkpoint's {d:.1} GiB of weights do not fit the {d:.1} GiB the CUDA memory budget grants ({d:.1} GiB free less a {d:.1} GiB reserve{s}); free device memory or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB", .{ toGib(weights), toGib(before.room(held0)), toGib(before.free), toGib(before.reserve), if (before.limit != null) ", under TENSORFOLD_CUDA_MEMORY_LIMIT_GB" else "" });
         return null;
     }
     const loaded = F.open(gpa, io, &g.ctx, o.dir, kernels, opts) catch |e| {
+        cuda.tp_watch.fail(@errorName(e)); // a family over hosts: its other ranks stop with this error
         if (@hasDecl(F, "explains_open")) if (F.explain(null, e)) |text| {
             problem.* = text;
             return null;
@@ -385,7 +402,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         store.* = pc.Store.init(gpa, copies, snaps.cacheRules(F), try snaps.cacheBudget(F, loaded.target, cache));
         h.store = store;
         if (F == nemotron.native and o.learn_conversations) {
-            if (o.learn) |root| try learnConversations(a, io, &g.ctx, o, root, kernels, loaded, store);
+            if (o.learn) |root| try cuda_disk.attach(a, io, &g.ctx, o, root, kernels, loaded, store);
         }
     }
     errdefer if (h.store) |store| {
@@ -421,24 +438,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .logprobs = loaded.backend.vtable.first_row != null,
         .prompt_logprobs = loaded.backend.vtable.prompt_rows,
         .structures = loaded.backend.vtable.first_masked != null,
+        .vision = if (@hasField(@TypeOf(loaded), "vision")) vision_offer.offer(loaded.vision) else null,
     }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
-}
-
-/// --learn-conversations: the identity probed on this thread (its context current), the store opened and attached.
-fn learnConversations(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, root: []const u8, kernels: ?[]const u8, loaded: anytype, store: *api.prompt_cache.Store) !void {
-    loaded.target.ctx = ctx;
-    const id = try cuda_disk.identity(a, io, ctx, o.dir, kernels, loaded.backend, loaded.target);
-    const gibs = struct {
-        fn bytes(g: f64) u64 {
-            return @intFromFloat(g * (1 << 30));
-        }
-    }.bytes;
-    const r = try api.prompt_cache.rows.Rows.open(store.gpa, store.family, .{ .root = root, .identity = id.id, .cap = gibs(o.learn_gib), .floor = gibs(o.learn_min_free_gib), .daily = gibs(o.learn_daily_gib), .lookahead = store.rules.lookahead, .planned = store.rules.planned });
-    r.prefill_rate = id.rate;
-    store.disk = r;
-    std.log.info("nemotron: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ r.dir, r.states.items.len, r.held() >> 20, r.cap >> 20 });
 }
 
 fn toGib(bytes: u64) f64 {

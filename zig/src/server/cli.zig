@@ -103,7 +103,7 @@ pub const flags = [_]Flag{
     .{ .name = "--kv-dtype", .choices = &.{ "bf16", "int8", "int4" } },
     .{ .name = "--prefill-fp8", .kind = .store_true },
     .{ .name = "--no-prefill-fp8", .kind = .store_true },
-    .{ .name = "--precision", .choices = &.{ "checkpoint", "full" } },
+    .{ .name = "--precision", .choices = &.{ "checkpoint", "full" }, .native = cuda_build },
     // the CUDA CLI's own: the GPU ordinal, and whole prompt chunks a call runs as staggered segments
     .{ .name = "--device", .native = cuda_build },
     .{ .name = "--segments", .native = cuda_build },
@@ -175,6 +175,7 @@ pub const Args = struct {
     backend: []const u8 = "auto",
     device: ?u32 = null,
     segments: ?u32 = null,
+    precision: ?api.Precision = null, // an NVFP4 checkpoint's math on CUDA: NVIDIA's own (checkpoint) or full precision
     mtp_drafts: ?u32 = null,
     mtp_confidence: ?f64 = null,
     checkpoint_slots: ?i64 = null,
@@ -188,6 +189,7 @@ pub const Args = struct {
     vision_urls: bool = false, // with --vision, public HTTPS image URLs too (media_fetch.zig)
     vision_max_images: u32 = 4,
     vision_image_tokens: u32 = 4096,
+    vision_image_tokens_set: bool = false, // --vision-image-tokens given: a family's own default no longer applies
     vision_video_tokens: u32 = 16384, // the visual tokens a request's videos share (the processor's max_image_tokens)
 };
 
@@ -313,6 +315,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const n = try int(u, a, name, v);
         if (n < 16 or n > 16384) return fail(u, a, "argument --vision-image-tokens: expected 16 to 16384 tokens: '{s}'", .{v});
         out.vision_image_tokens = @intCast(n);
+        out.vision_image_tokens_set = true;
     }
 }
 
@@ -331,9 +334,11 @@ fn recallFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usa
     return true;
 }
 
-/// The CUDA build's --device and --segments; false for any other flag.
+/// The CUDA build's --device, --segments and --precision; false for any other flag.
 fn cudaFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usage) error{ Usage, OutOfMemory }!bool {
-    if (std.mem.eql(u8, name, "--device")) {
+    if (std.mem.eql(u8, name, "--precision")) {
+        out.precision = std.meta.stringToEnum(api.Precision, v) orelse return fail(u, a, "argument --precision: checkpoint or full: '{s}'", .{v});
+    } else if (std.mem.eql(u8, name, "--device")) {
         out.device = std.math.cast(u32, try int(u, a, name, v)) orelse return fail(u, a, "argument --device: a GPU ordinal from 0: '{s}'", .{v});
     } else if (std.mem.eql(u8, name, "--segments")) {
         const n = try int(u, a, name, v);
@@ -415,6 +420,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .recall = args.recall,
         .device = args.device,
         .segments = args.segments,
+        .precision = args.precision,
         .mtp_drafts = args.mtp_drafts,
         .mtp_confidence = args.mtp_confidence,
         .keep = args.checkpoint_slots,
@@ -423,7 +429,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .master = args.master,
         .master_port = args.master_port,
         .policy = args.policy,
-        .vision = if (args.vision) .{ .image_tokens = args.vision_image_tokens, .max_images = args.vision_max_images, .video_tokens = args.vision_video_tokens } else null,
+        .vision = if (args.vision) .{ .image_tokens = args.vision_image_tokens, .image_tokens_set = args.vision_image_tokens_set, .max_images = args.vision_max_images, .video_tokens = args.vision_video_tokens } else null,
     };
 }
 

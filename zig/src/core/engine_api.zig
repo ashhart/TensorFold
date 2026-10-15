@@ -121,6 +121,8 @@ pub const Vision = struct {
     image_token: u32,
     /// The tokens the template wraps an image in (the image token among them): text that spells one stays text.
     markers: []const u32 = &.{},
+    /// Tokens the server writes around each image's rows (Nemotron Omni's <img> and </img>); null: the template's own.
+    wrap: ?[2]u32 = null,
     /// Image tokens one request may hold in all, and images.
     image_tokens: u32,
     max_images: u32,
@@ -168,8 +170,8 @@ pub const VideoOffer = struct {
     max_frames: u32,
 };
 
-/// --vision: image and video input's limits (``Open.vision``).
-pub const VisionOpen = struct { image_tokens: u32 = 4096, max_images: u32 = 4, video_tokens: u32 = 16384, max_videos: u32 = 2, max_frames: u32 = 256 };
+/// --vision: image and video input's limits (``Open.vision``); image_tokens_set: the flag given, over a family default.
+pub const VisionOpen = struct { image_tokens: u32 = 4096, image_tokens_set: bool = false, max_images: u32 = 4, video_tokens: u32 = 16384, max_videos: u32 = 2, max_frames: u32 = 256 };
 
 pub const Reason = enum { stop, length, cancelled, failed };
 
@@ -273,6 +275,9 @@ pub const PromptCachePlan = struct {
 /// A checkpoint family an engine reads: its config ``model_type`` and weight formats, as gate entries name them.
 pub const Family = struct { model_type: []const u8, formats: []const []const u8 };
 
+/// The math an NVFP4 checkpoint runs: its own (FP4 rows into NVFP4 layers, FP8 into FP8 ones), or bf16 rows throughout.
+pub const Precision = enum { checkpoint, full };
+
 /// What a server asks of the engine it opens: the checkpoint, and the serve flags an engine reads.
 pub const Open = struct {
     dir: []const u8,
@@ -306,6 +311,8 @@ pub const Open = struct {
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
     device: ?u32 = null,
     segments: ?u32 = null,
+    /// --precision (CUDA): an NVFP4 checkpoint's math, NVIDIA's own or full precision; null: the family's default.
+    precision: ?Precision = null,
     /// --mtp-drafts and --mtp-confidence; null: the engine's defaults.
     mtp_drafts: ?u32 = null,
     mtp_confidence: ?f64 = null,

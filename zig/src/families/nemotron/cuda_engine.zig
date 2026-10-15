@@ -21,6 +21,7 @@ const seq_graphs = @import("cuda_seq_graphs.zig");
 const prompt_rows = @import("cuda_prompt_rows.zig");
 const prompt_pass = @import("cuda_prompt.zig");
 const marks = @import("cuda_marks.zig");
+const latent = @import("cuda_latent.zig");
 pub const PromptRows = prompt_rows.PromptRows;
 
 /// nemotron_h.cuda.CONTEXT: prompt plus reply tokens when --context is not given, as `tensorfold serve` sizes it.
@@ -34,6 +35,8 @@ pub const Options = struct {
     segments: usize = 1, // whole prompt chunks a call runs as staggered segments (1: one chunk at a time)
     carveout: ?*cuda.Carveout = null, // KV planes go to the display carveout first while it holds them
     slide: bool = false, // Sliding Weights asked for: refused for a checkpoint the learner cannot read
+    vision: ?@import("cuda_vision.zig").Limits = null, // --vision: the checkpoint's image tower (an omni checkpoint's)
+    precision: ?@import("config.zig").Precision = null, // --precision; null: the checkpoint's math where it is built
 };
 
 /// Asked before each prompt chunk (or segmented call): true stops the prompt with error.Cancelled.
@@ -123,6 +126,8 @@ pub const Engine = struct {
     armed: marks.Armed = .{}, // the marks inside the prompt chunk about to run (cuda_marks.zig)
     spares: marks.Spares = .{}, // free Mamba buffers the prompt cache set aside for the next marks
     last_chunk: usize = 0, // where the last prompt pass's last chunk started (the prompt's last row: len - 1 - this)
+    tp: ?cuda.tp_group.Group = null, // a latent MoE over ranks (TF_NEMOTRON_RANK of TF_NEMOTRON_WORLD)
+    vision: ?*@import("cuda_vision.zig").Vision = null, // --vision: the tower and a prompt pass's image rows
 
     /// Loads the checkpoint into the Python engine's layouts and sizes the caches; `triton_dir` null: our own glue.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, model_dir: []const u8, triton_dir: ?[]const u8, opts: Options) !*Engine {
@@ -132,6 +137,10 @@ pub const Engine = struct {
         e.* = .{ .gpa = gpa, .io = io, .ctx = ctx, .stream = undefined, .k = undefined, .w = undefined, .b = undefined, .c = undefined, .max_len = 0, .pinned = undefined, .history = undefined };
         e.trace = std.c.getenv("TF_SLIDE_TRACE") != null;
         e.c = try Config.read(gpa, io, model_dir);
+        try latent.place(&e.c);
+        if (e.c.rank > 0) return error.RankServesExperts; // ranks past 0 run cuda_worker.serve, not an engine
+        e.c.ck = try @import("cuda_latent_ck.zig").wanted(ctx, e.c, opts.precision);
+        if (e.c.world > 1 and opts.segments > 1) return error.SegmentsNeedOneRank; // one stream keeps the jobs in order
         if (opts.segments < 1 or opts.segments > segs.MAX) return error.BadSegments;
         e.segments = opts.segments;
         e.carve = opts.carveout;
@@ -151,6 +160,13 @@ pub const Engine = struct {
             if (opts.slide) return error.SlideNeedsMlx; // the learner reads MLX 4-bit projections
             try e.k.loadModelopt(ctx);
         }
+        if (e.c.latent > 0) try e.k.loadLatent();
+        if (e.c.ck) try e.k.loadCk(ctx);
+        // the ranks' lines first: a rank that never comes, refuses, fails or dies is named, not waited on
+        if (e.c.world > 1) try cuda.tp_watch.start(io, e.c.rank, e.c.world); // the caller tells the others a failure
+        if (e.c.world > 1) e.tp = try cuda.tp_group.Group.open(e.c.rank, e.c.world);
+        errdefer if (e.tp) |*g| g.close();
+        if (e.tp) |*g| try latent.agree(gpa, io, e.c, g, ctx.d, e.stream, model_dir);
         const chunks = e.max_len / state.chunk_keys;
         e.nch = if (e.k.triton) |*t| @intCast(t.smallestConst("_chunk", "NCH", @intCast(chunks)) orelse {
             std.log.err("no captured attention kernel covers {d} chunks of 512 keys; capture one for this context", .{chunks});
@@ -158,6 +174,14 @@ pub const Engine = struct {
         }) else chunks;
         e.w = try weights.load(gpa, io, e.ops(), model_dir, e.c, opts.mtp);
         errdefer e.w.deinit();
+        if (opts.vision) |lim| {
+            var problem: []const u8 = "";
+            e.vision = (try @import("cuda_vision.zig").Vision.init(gpa, io, ctx.d, model_dir, lim, &problem)) orelse {
+                std.log.err("--vision: {s}", .{problem});
+                return error.VisionRefused;
+            };
+        }
+        errdefer if (e.vision) |v| v.deinit();
         e.b = try state.Buffers.init(ctx.d, e.c, e.max_len, e.nch, e.carve);
         errdefer e.b.deinit();
         try e.b.initShared(e.ops(), e.c);
@@ -175,6 +199,7 @@ pub const Engine = struct {
         e.sampled_ready = try cuda.Event.init(ctx.d, false);
         try e.copied.record(e.stream);
         try e.setSampling(opts.sampling);
+        if (e.tp != null) try cuda.tp_watch.ready(io); // every rank loaded before the first job
         if (opts.graphs) try e.capture(opts.mtp);
         e.heat_gate = heat.Gate.fromEnv() catch |err| {
             std.log.err("TF_HEAT_HIGH and TF_HEAT_LOW: both or neither, in degrees, with low at or under high", .{});
@@ -259,6 +284,7 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
+        if (e.tp != null) @import("cuda_worker.zig").end(e) catch {}; // the other ranks leave their job loops
         e.stream.synchronize() catch {};
         e.spares.deinit();
         if (e.serial) |*g| g.deinit();
@@ -276,6 +302,8 @@ pub const Engine = struct {
         e.side.s.deinit();
         e.side.fork.deinit();
         e.side.join.deinit();
+        if (e.tp) |*g| g.close();
+        if (e.vision) |v| v.deinit();
         e.stream.deinit();
         e.gpa.destroy(e);
     }
@@ -342,6 +370,8 @@ pub const Engine = struct {
         f.dump = dump;
         f.slot = e.slot;
         f.untaught = e.bound.untaught;
+        f.tp = if (e.tp) |*g| g else null;
+        f.vision = e.vision;
         if (dump == null and e.c.experts <= 128 and e.c.slots() <= 8) f.side = e.side; // tf_plan_routed's bounds
         return f;
     }

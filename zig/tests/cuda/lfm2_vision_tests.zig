@@ -16,7 +16,7 @@ const heads = 16;
 const dim = 72;
 const ffn = 4304;
 const eps: f32 = 1e-6;
-const nt = 256; // lfm2_vision.cu's NT
+const nt = 256; // vit.cu's NT
 const row_counts = [_]usize{ 1, 7, 308, 1024 }; // 308: a thumbnail's 22 x 14 patches; 1024: a whole tile
 
 // Features against vision.json (torch bf16, CPU), relative L2: twice a CPU emulation of these roundings, reordered.
@@ -70,25 +70,26 @@ fn layerNorm(x: []const u16, w: []const u16, b: []const u16, y: []u16, rows: usi
     }
 }
 
-/// torch's tanh GELU in fp32 as lfm2_vision.cu runs it, tanh correctly rounded.
+/// torch's tanh GELU in fp32 as vit.cu runs it, tanh correctly rounded.
 fn geluTanh(x: f32) f32 {
     const beta: f32 = @floatCast(std.math.sqrt2 * std.math.two_sqrtpi * 0.5);
     const inner = beta * (x + 0.044715 * (x * x * x));
     return 0.5 * x * (1 + @as(f32, @floatCast(std.math.tanh(@as(f64, inner)))));
 }
 
-/// torch's exact GELU in fp32 as lfm2_vision.cu runs it, erf correctly rounded.
+/// torch's exact GELU in fp32 as vit.cu runs it, erf correctly rounded.
 fn geluErf(x: f32) f32 {
     const alpha: f32 = @floatCast(std.math.sqrt1_2);
     return x * 0.5 * (1 + @as(f32, @floatCast(erf(@as(f64, x * alpha)))));
 }
 
-/// tf_lfm2v_pointwise's element: bf16(gelu(v)) through `act`, then bf16(r + v).
+/// tf_vit_pointwise's element: bf16(act(v)), then bf16(r + v).
 fn finish(v: f32, r: ?f32, act: vision.Act) u16 {
     const x = switch (act) {
         .none => v,
         .gelu_tanh => gm.rbf(geluTanh(v)),
         .gelu => gm.rbf(geluErf(v)),
+        .relu2 => gm.rbf(if (v > 0) v * v else 0),
     };
     return gm.f32ToBf16(if (r) |res| res + x else x);
 }
@@ -131,7 +132,7 @@ const Rig = struct {
     a: std.mem.Allocator, // host data, freed together at the end
     s: cuda.Stream,
     k: vision.Kernels,
-    at: lfm2.attention.Attention,
+    at: cuda.vit.Attention,
     g: vision.Gemms,
     rng: std.Random,
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
@@ -203,7 +204,7 @@ fn normCases(r: *Rig, rows: usize) !void {
 }
 
 fn pointwiseCases(r: *Rig, rows: usize) !void {
-    for ([_]vision.Act{ .none, .gelu_tanh, .gelu }, [_]usize{ hidden, ffn, 2048 }) |act, n| {
+    for ([_]vision.Act{ .none, .gelu_tanh, .gelu, .relu2 }, [_]usize{ hidden, ffn, 2048, 5120 }) |act, n| {
         const x = try r.bfs(rows * n, 4.0);
         const res = try r.bfs(rows * n, 2.0);
         const with_r = act == .none;
@@ -211,7 +212,7 @@ fn pointwiseCases(r: *Rig, rows: usize) !void {
         try r.k.pointwise(r.s, try r.dev(u16, x), if (with_r) od else null, od, rows * n, act);
         const o = try r.a.alloc(u16, rows * n);
         for (o, x, res) |*y, v, rv| y.* = finish(bf(v), if (with_r) bf(rv) else null, act);
-        try r.near(if (with_r) "residual add in place" else @tagName(act), rows, od, o, if (with_r) 0 else gelu_share);
+        try r.near(if (with_r) "residual add in place" else @tagName(act), rows, od, o, if (with_r or act == .relu2) 0 else gelu_share);
     }
     const acc = try r.f32s(rows * hidden, 4.0);
     const b = try r.bfs(hidden, 1.0);
@@ -443,7 +444,7 @@ pub fn run(gpu: Gpu, model: ?[]const u8) !void {
     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
     defer arena.deinit();
     var prng = std.Random.DefaultPrng.init(0x5167_1192);
-    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = try cuda.Stream.init(gpu.d, true), .k = try vision.Kernels.load(gpu.d), .at = try lfm2.attention.Attention.load(gpu.d), .g = try vision.Gemms.init(gpu.gpa, gpu.d), .rng = prng.random() };
+    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = try cuda.Stream.init(gpu.d, true), .k = try vision.Kernels.load(gpu.d), .at = try cuda.vit.Attention.load(gpu.d), .g = try vision.Gemms.init(gpu.gpa, gpu.d), .rng = prng.random() };
     defer {
         r.g.deinit();
         r.at.unload();

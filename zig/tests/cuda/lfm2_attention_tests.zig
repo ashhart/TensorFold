@@ -119,6 +119,7 @@ const Rig = struct {
     gpu: check.Gpu,
     s: cuda.Stream,
     attn: *const lfm2.attention.Attention,
+    vit: *const cuda.vit.Attention, // the tower's tiles (full attention)
     rng: std.Random,
     p: []f64, // the reference's probabilities, a key each
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
@@ -296,7 +297,7 @@ fn fullCase(r: *Rig, t: *Tally, rows: usize) !void {
     };
     const dqkv = try r.from(std.mem.sliceAsBytes(qkv));
     const dout = try r.out(rows * w * 2);
-    try r.attn.full(r.s, dqkv.ptr, dout.ptr, rows, sh.heads, sh.dim, sh.scale());
+    try r.vit.full(r.s, dqkv.ptr, dout.ptr, rows, sh.heads, sh.dim, sh.scale());
     const got = try r.back(a, dout, w, 0, rows);
     var name: [64]u8 = undefined;
     try finite(try std.fmt.bufPrint(&name, "lfm2-attention full, {d} rows", .{rows}), got);
@@ -308,13 +309,15 @@ pub fn run(gpu: check.Gpu) !void {
     defer s.deinit();
     var attn = try lfm2.attention.Attention.load(gpu.d);
     defer attn.unload();
+    var vit = try cuda.vit.Attention.load(gpu.d);
+    defer vit.unload();
     const refused = if (attn.causal(s, 0, 0, 0, 0, 1, text.heads, text.kv_heads, 128, text.scale())) |_| false else |e| e == error.UnsupportedShape;
     try check.expect(refused, "lfm2-attention: head dim 128 is refused", .{});
 
     var prng = std.Random.DefaultPrng.init(64);
     const p = try gpu.gpa.alloc(f64, @max(most, trunks[trunks.len - 1] + longest));
     defer gpu.gpa.free(p);
-    var r: Rig = .{ .gpu = gpu, .s = s, .attn = &attn, .rng = prng.random(), .p = p };
+    var r: Rig = .{ .gpu = gpu, .s = s, .attn = &attn, .vit = &vit, .rng = prng.random(), .p = p };
     defer {
         r.release();
         r.bufs.deinit(gpu.gpa);

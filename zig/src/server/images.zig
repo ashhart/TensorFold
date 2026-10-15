@@ -283,8 +283,12 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
         if (t == v.image_token) {
             const img = prepared[k];
             k += 1;
-            try placeImage(cx.a, &out_ids, &key, &imgs, t, img, src > 0 and image_key.isMarker(v, ids[src - 1]));
-            close = image_key.close(img.hash);
+            if (v.wrap) |w| try both(cx.a, &out_ids, &key, w[0]);
+            try placeImage(cx.a, &out_ids, &key, &imgs, t, img, v.wrap != null or (src > 0 and image_key.isMarker(v, ids[src - 1])));
+            if (v.wrap) |w| { // the server's own wrapper closes the image: its word carries the identity's other half
+                try out_ids.append(cx.a, w[1]);
+                try key.append(cx.a, image_key.close(img.hash));
+            } else close = image_key.close(img.hash);
         } else if (video_token != null and t == video_token.?) {
             const o = v.video.?;
             const clip = clips[kv];
@@ -308,6 +312,12 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
         if (src < history_len) hist += out_ids.items.len - before - 1;
     }
     return .{ .ids = out_ids.items, .history_len = hist, .images = imgs.items, .cache_key = key.items };
+}
+
+/// Appends a token to the prompt and its cache key alike.
+fn both(a: std.mem.Allocator, ids: *std.ArrayList(u32), key: *std.ArrayList(u32), t: u32) !void {
+    try ids.append(a, t);
+    try key.append(a, t);
 }
 
 /// Appends one image's rows, its engine entry and its cache words; `named`: the word before them is its marker's.
@@ -372,6 +382,32 @@ test "placeholders expand to each image's tokens, the history and cache key with
     // a placeholder the images do not account for is refused
     try std.testing.expectError(error.Refused, expand(v, null, MarkText.text(), &cx, msgs, &[_]u32{ 9, 9, 9 }, 0));
     _ = messages_mod;
+}
+
+test "a wrapped image: the server writes the wrapper around each image's rows, in the history count too" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: Cx = .{ .a = a };
+    var dummy: u8 = 0;
+    const v: api.Vision = .{ .ctx = &dummy, .prepare = fakePrepare, .image_token = 9, .wrap = .{ 7, 8 }, .image_tokens = 64, .max_images = 4 };
+    const text =
+        \\[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFab"}}]},
+        \\ {"role": "assistant", "content": "y"},
+        \\ {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFc"}}]}]
+    ;
+    const msgs = switch (try json.parseText(a, text)) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    const x = (try expand(v, null, MarkText.text(), &cx, msgs, &[_]u32{ 1, 9, 2, 9, 3 }, 3)).?;
+    try std.testing.expectEqualSlices(u32, &.{ 1, 7, 9, 9, 8, 2, 7, 9, 8, 3 }, x.ids);
+    try std.testing.expectEqual(@as(usize, 6), x.history_len); // the first image and its wrapper are history
+    try std.testing.expectEqual(@as(u32, 2), x.images[0].at);
+    try std.testing.expectEqual(@as(u32, 7), x.images[1].at);
+    try std.testing.expectEqual(image_key.open('a'), x.cache_key[1]); // the wrapper's words carry the image's identity
+    try std.testing.expectEqual(image_key.close('a'), x.cache_key[4]);
+    try std.testing.expect(x.cache_key[2] >= 0x8000_0000);
 }
 
 fn noLibrary(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: u32) anyerror!api.PreparedImage {

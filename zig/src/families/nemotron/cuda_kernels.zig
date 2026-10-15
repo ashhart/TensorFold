@@ -66,6 +66,8 @@ pub const Kernels = struct {
     torch: torch_ops.Functions,
     train: train_ops.Kernels, // Sliding Weights' learning step, and the learned change a forward adds while lessons run
     modelopt: ?Modelopt = null, // loaded by loadModelopt for a ModelOpt checkpoint, else never
+    latent: ?@import("cuda_latent.zig").Fns = null, // a latent MoE's glue (loadLatent), else never
+    ck: ?cuda.ck.Ck = null, // the checkpoint's own math (loadCk): FP8 rows and NVFP4 experts, sm_120 on
     gb10: bool,
     discrete: bool, // the card has its own memory: checkpoint bytes reach it through page-locked slots
 
@@ -102,6 +104,8 @@ pub const Kernels = struct {
         errdefer k.norms.unload();
         k.grammar_mask = try k.mods[14].function("tf_grammar_mask");
         k.modelopt = null;
+        k.latent = null;
+        k.ck = null;
         k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
         errdefer if (k.triton) |*t| t.deinit();
         k.train = try train_ops.Kernels.load(d);
@@ -120,6 +124,8 @@ pub const Kernels = struct {
     pub fn deinit(k: *Kernels) void {
         k.emb.unload();
         k.norms.unload();
+        if (k.latent) |*x| x.unload();
+        if (k.ck) |*x| x.unload();
         if (k.modelopt) |*m| {
             m.lane.unload();
             m.gemm.unload();
@@ -130,6 +136,19 @@ pub const Kernels = struct {
         k.train.deinit();
         if (k.triton) |*t| t.deinit();
         for (&k.mods) |*m| m.unload();
+    }
+
+    /// nemotron_latent.cu for a latent MoE checkpoint.
+    pub fn loadLatent(k: *Kernels) !void {
+        if (k.latent == null) k.latent = try @import("cuda_latent.zig").Fns.load(k.d);
+    }
+
+    /// The checkpoint math's kernels (--precision checkpoint): Blackwell's FP4 and FP8 mma.
+    pub fn loadCk(k: *Kernels, ctx: *const cuda.Context) !void {
+        if (k.ck != null) return;
+        const major: u32 = @intCast(try ctx.attribute(.compute_capability_major));
+        if (major < ck_major) return error.CheckpointMathNeedsBlackwell;
+        k.ck = try cuda.ck.Ck.load(k.d, major, @intCast(try ctx.attribute(.multiprocessor_count)));
     }
 
     /// The lane matmul, prompt GEMM, NVFP4 experts and repack a ModelOpt checkpoint's FP8, NVFP4 and bf16 tensors need.
@@ -148,6 +167,9 @@ pub const Kernels = struct {
         k.modelopt = .{ .lane = lane, .gemm = gemm, .experts = experts, .pack = try cuda.modelopt.Packer.load(k.d) };
     }
 };
+
+/// The checkpoint's own math needs this major capability: the block-scaled FP4 mma (sm_120a, sm_121a).
+pub const ck_major: u32 = 12;
 
 /// FP8 and NVFP4 paths stop below this full capability: decode's split-K sums meet in a thread-block cluster.
 pub const modelopt_min: u32 = 90;
@@ -177,6 +199,7 @@ fn u(x: usize) u32 {
 pub const Ops = struct {
     k: *const Kernels,
     s: cuda.Stream,
+    ck8: u64 = 0, // the e4m3 rows an FP8 projection reads in the checkpoint's math (its buffers' ck8)
 
     fn go(o: Ops, f: cuda.Function, grid: [3]usize, block: u32, shared: u32, args: *cuda.Args) !void {
         try cuda.launch.launch(f, .{ .grid = .{ .x = u(grid[0]), .y = u(grid[1]), .z = u(grid[2]) }, .block = .{ .x = block }, .shared = shared }, o.s, args);
@@ -215,7 +238,7 @@ pub const Ops = struct {
     /// Every projection format the kernels loaded (cuda/qlinear.zig).
     pub fn linear(o: Ops) cuda.qlinear.Linear {
         const m = if (o.k.modelopt) |*x| x else null;
-        return .{ .affine4 = &o.k.affine, .lane = if (m) |x| &x.lane else null, .nvfp4_prompt = if (m) |x| &x.gemm else null };
+        return .{ .affine4 = &o.k.affine, .lane = if (m) |x| &x.lane else null, .nvfp4_prompt = if (m) |x| &x.gemm else null, .ck = if (o.k.ck) |*x| x else null, .ck_rows = o.ck8 };
     }
 
     /// Every grouped-expert format the kernels loaded (cuda/experts.zig).

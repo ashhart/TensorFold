@@ -145,6 +145,21 @@ fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Target) !
     return .{ .hash = std.hash.Wyhash.hash(0x6375, bytes), .rate = @as(f64, @floatFromInt(toks.len)) / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
 }
 
+/// --learn-conversations: the identity probed on this thread (its context current), the store opened and attached.
+pub fn attach(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, root: []const u8, kernels: ?[]const u8, loaded: anytype, store: *api.prompt_cache.Store) !void {
+    loaded.target.ctx = ctx;
+    const id = try identity(a, io, ctx, o.dir, kernels, loaded.backend, loaded.target);
+    const gibs = struct {
+        fn bytes(g: f64) u64 {
+            return @intFromFloat(g * (1 << 30));
+        }
+    }.bytes;
+    const r = try api.prompt_cache.rows.Rows.open(store.gpa, store.family, .{ .root = root, .identity = id.id, .cap = gibs(o.learn_gib), .floor = gibs(o.learn_min_free_gib), .daily = gibs(o.learn_daily_gib), .lookahead = store.rules.lookahead, .planned = store.rules.planned });
+    r.prefill_rate = id.rate;
+    store.disk = r;
+    std.log.info("nemotron: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ r.dir, r.states.items.len, r.held() >> 20, r.cap >> 20 });
+}
+
 test {
     std.testing.refAllDecls(@This());
 }
