@@ -154,6 +154,9 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     for (exlr8_build.denseModules(b, target, optimize, exlr8, exlr8_tests[0])) |m| runner.addImport(m.name, m.module);
     const glm_cuda = glmCuda(b, target, optimize, cuda, mods.core, mods.lanes, mods.heat);
     runner.addImport("glm_cuda", glm_cuda);
+    const ling = b.createModule(.{ .root_source_file = b.path("zig/src/families/ling/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    for ([_]struct { []const u8, *std.Build.Module }{ .{ "glm_cuda", glm_cuda }, .{ "cuda", cuda }, .{ "core", mods.core } }) |m| ling.addImport(m[0], m[1]);
+    runner.addImport("ling_cuda", ling);
     const runner_exe = b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner });
     b.installArtifact(runner_exe);
     const controls = if (nvcc) |tool| fatbin(b, tool, version.?, .{ .name = "contract_controls", .flags = &.{"-O3"} }, sms) else null;
@@ -275,6 +278,8 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     // Ling-3.1-flash's config loader and weight map, and its routing and limits as the GLM kernels take them
     const ling = b.createModule(.{ .root_source_file = b.path("zig/src/families/ling/cuda.zig"), .target = host, .optimize = .debug, .link_libc = true });
     ling.addImport("glm_cuda", glm);
+    ling.addImport("cuda", cuda);
+    ling.addImport("core", mods.core);
     const ling_run = b.addRunArtifact(b.addTest(.{ .root_module = ling }));
     step.dependOn(&ling_run.step);
     b.step("test-ling", "Ling-3.1-flash's config loader and weight map (no GPU work)").dependOn(&ling_run.step);

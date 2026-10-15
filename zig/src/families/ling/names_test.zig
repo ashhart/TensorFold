@@ -148,3 +148,17 @@ test "the real index (TF_LING_INDEX=<model.safetensors.index.json>) against the 
     try t.expectEqual(@as(usize, 0), r.missing.items.len + r.unknown.items.len);
     try t.expectEqual(@as(usize, map.count()), r.expected);
 }
+
+test "NVFP4 linears store weight, weight_scale, weight_scale_2 and input_scale; the module names the loader reads" {
+    var c = try load();
+    c.quant = .nvfp4;
+    var k0: Count = .{};
+    try names.layer(&c, 0, &k0);
+    try t.expectEqual(@as(usize, 2 + 13 + 6 * 3 + 3 + 3 * 3), k0.n); // norms, KDA, 3 side tensors a quantized linear, dense
+    var b: [192]u8 = undefined;
+    try t.expectEqualStrings("model.layers.4.mlp.experts.511.down_proj", try names.moduleName(&b, 4, .expert_down, 511));
+    try t.expectEqualStrings("model.layers.7.attention.dense", try names.moduleName(&b, 7, .mla_o, null));
+    try t.expectEqualStrings("model.layers.0.attention.A_log", try names.moduleName(&b, 0, .kda_a_log, null));
+    try t.expectEqualStrings("model.layers.72.eh_proj", try names.moduleName(&b, 72, .mtp_eh, null));
+    try t.expectEqualStrings("lm_head", try names.moduleName(&b, 0, .lm_head, null));
+}

@@ -3,6 +3,8 @@ const std = @import("std");
 const glm = @import("glm_cuda");
 pub const config = @import("config.zig");
 pub const names = @import("names.zig");
+pub const weights = @import("weights.zig");
+pub const synth = @import("synth.zig");
 
 const Config = config.Config;
 
@@ -34,6 +36,9 @@ pub fn route(c: *const Config, i: u32, l: *glm.moe.Layer) void {
 test {
     _ = @import("config_test.zig");
     _ = @import("names_test.zig");
+    _ = @import("synth.zig");
+    std.testing.refAllDecls(weights); // the loader compiles on hosts without a GPU
+    std.testing.refAllDecls(@import("weights_proj.zig"));
 }
 
 test "Ling's routing as glue.select takes it: 8 groups keeping 4, and select's own bounds hold" {

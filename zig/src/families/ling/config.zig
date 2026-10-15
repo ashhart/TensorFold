@@ -9,8 +9,8 @@ pub const Kind = enum { kda, mla };
 /// MLA's rope pairs: rope_interleave true is exllamav3's RopeStyle.GPTJ (adjacent pairs), false NeoX (halves).
 pub const RopeStyle = enum { gptj, neox };
 
-/// The checkpoint's linear weights: bf16, or FP8 e4m3 in 128x128 blocks with a weight_scale_inv each.
-pub const Quant = enum { bf16, fp8_block128 };
+/// A linear's format: bf16, FP8 128x128 blocks, ModelOpt NVFP4; EXL3 (#832) adds a variant and a weights_proj reader.
+pub const Quant = enum { bf16, fp8_block128, nvfp4 };
 
 /// Why parse refused the config, one sentence for the caller's log line (tests read it too).
 pub const Why = struct {
@@ -66,8 +66,8 @@ pub const Config = struct {
     eos_n: u32,
     bos: ?u32,
     quant: Quant,
-    plain_text: [1024]u8, // modules_to_not_convert, packed; plain_ends[i] ends entry i
-    plain_ends: [32]u16,
+    plain_text: [8192]u8, // modules_to_not_convert (FP8) or ignore / exclude_modules (ModelOpt), packed
+    plain_ends: [512]u16, // plain_ends[i] ends entry i
     plain_n: u32,
 
     /// Layer i's mixer: the modeling's schedule for the backbone; the MTP layers are MLA (mtp_use_kda false).
@@ -103,21 +103,40 @@ pub const Config = struct {
         return c.plain_text[lo..c.plain_ends[i]];
     }
 
-    /// A linear module stored without FP8 (modules_to_not_convert names it, or ends it after a dot).
+    /// A linear module the exception list leaves in bf16: named whole, ended after a dot, or matched by a `*` glob.
     pub fn unconverted(c: *const Config, module: []const u8) bool {
         for (0..c.plain_n) |i| {
             const p = c.plain(@intCast(i));
+            if (std.mem.indexOfScalar(u8, p, '*') != null) {
+                if (glob(p, module)) return true;
+                continue;
+            }
             if (std.mem.eql(u8, module, p)) return true;
             if (module.len > p.len and std.mem.endsWith(u8, module, p) and module[module.len - p.len - 1] == '.') return true;
         }
         return false;
     }
 
-    /// A linear module carries an FP8 weight_scale_inv beside its weight.
+    /// The stored format of linear `module`: the checkpoint's quantization unless its exception list names it.
+    pub fn format(c: *const Config, module: []const u8) Quant {
+        return if (c.unconverted(module)) .bf16 else c.quant;
+    }
+
+    /// A linear module carries quantization tensors beside its weight.
     pub fn scaled(c: *const Config, module: []const u8) bool {
-        return c.quant == .fp8_block128 and !c.unconverted(module);
+        return c.format(module) != .bf16;
     }
 };
+
+/// fnmatch with `*` only (ModelOpt's ignore patterns): `*` takes any run of characters, dots included.
+pub fn glob(pattern: []const u8, name: []const u8) bool {
+    const star = std.mem.indexOfScalar(u8, pattern, '*') orelse return std.mem.eql(u8, pattern, name);
+    if (!std.mem.startsWith(u8, name, pattern[0..star])) return false;
+    const rest = pattern[star + 1 ..];
+    var at = star;
+    while (at <= name.len) : (at += 1) if (glob(rest, name[at..])) return true;
+    return false;
+}
 
 fn get(o: std.json.ObjectMap, key: []const u8, why: *Why) !std.json.Value {
     return o.get(key) orelse {
@@ -190,6 +209,69 @@ fn limits(o: std.json.ObjectMap, key: []const u8, layers: u32, out: *[max_layers
     }
 }
 
+/// An exception list's names, packed into the config (modules left in bf16).
+fn exceptions(v: ?std.json.Value, c: *Config, why: *Why) !void {
+    const list = v orelse return;
+    if (list != .array) return;
+    var at: usize = if (c.plain_n == 0) 0 else c.plain_ends[c.plain_n - 1];
+    for (list.array.items) |m| {
+        if (m != .string or c.plain_n == c.plain_ends.len or at + m.string.len > c.plain_text.len) {
+            why.set("the quantization's exception list holds more than the loader keeps", .{});
+            return error.Quant;
+        }
+        @memcpy(c.plain_text[at..][0..m.string.len], m.string);
+        at += m.string.len;
+        c.plain_ends[c.plain_n] = @intCast(at);
+        c.plain_n += 1;
+    }
+}
+
+fn fp8Block(q: std.json.ObjectMap, c: *Config, why: *Why) !void {
+    const block = q.get("weight_block_size");
+    const b128 = block != null and block.? == .array and block.?.array.items.len == 2 and
+        block.?.array.items[0] == .integer and block.?.array.items[0].integer == 128 and
+        block.?.array.items[1] == .integer and block.?.array.items[1].integer == 128;
+    if (!b128 or !std.mem.eql(u8, text(q, "fmt") orelse "e4m3", "e4m3") or
+        !std.mem.eql(u8, text(q, "activation_scheme") orelse "dynamic", "dynamic"))
+    {
+        why.set("quantization fp8: the loader reads FP8 e4m3 in 128x128 blocks with dynamic activations", .{});
+        return error.Quant;
+    }
+    c.quant = .fp8_block128;
+    try exceptions(q.get("modules_to_not_convert"), c, why);
+}
+
+fn isInt(v: std.json.Value, want: i64) bool {
+    return v == .integer and v.integer == want;
+}
+
+fn groups16(why: *Why) error{Quant} {
+    why.set("ModelOpt NVFP4 with weights other than 4-bit in groups of 16", .{});
+    return error.Quant;
+}
+
+/// ModelOpt NVFP4 from config.json's quantization_config or hf_quant_config.json's "quantization" block.
+fn modelopt(q: std.json.ObjectMap, c: *Config, why: *Why) !void {
+    const algo = text(q, "quant_algo") orelse "";
+    if (!std.ascii.eqlIgnoreCase(algo, "NVFP4")) {
+        why.set("ModelOpt {s}: the loader reads ModelOpt NVFP4 (e2m1 in groups of 16)", .{if (algo.len > 0) algo else "without quant_algo"});
+        return error.Quant;
+    }
+    if (q.get("group_size")) |v| if (!isInt(v, 16)) return groups16(why);
+    if (q.get("config_groups")) |g| if (g == .object) {
+        var it = g.object.iterator();
+        while (it.next()) |e| {
+            const w = if (e.value_ptr.* == .object) e.value_ptr.object.get("weights") else null;
+            if (w == null or w.? != .object) return groups16(why);
+            const bits = w.?.object.get("num_bits") orelse return groups16(why);
+            const size = w.?.object.get("group_size") orelse return groups16(why);
+            if (!isInt(bits, 4) or !isInt(size, 16)) return groups16(why);
+        }
+    };
+    c.quant = .nvfp4;
+    inline for (.{ "ignore", "exclude_modules", "modules_to_not_convert" }) |key| try exceptions(q.get(key), c, why);
+}
+
 fn quantization(o: std.json.ObjectMap, c: *Config, why: *Why) !void {
     c.quant = .bf16;
     c.plain_n = 0;
@@ -201,28 +283,14 @@ fn quantization(o: std.json.ObjectMap, c: *Config, why: *Why) !void {
     }
     const q = qv.object;
     const method = text(q, "quant_method") orelse "";
-    const block = q.get("weight_block_size");
-    const b128 = block != null and block.? == .array and block.?.array.items.len == 2 and
-        block.?.array.items[0] == .integer and block.?.array.items[0].integer == 128 and
-        block.?.array.items[1] == .integer and block.?.array.items[1].integer == 128;
-    if (!std.mem.eql(u8, method, "fp8") or !b128 or !std.mem.eql(u8, text(q, "fmt") orelse "e4m3", "e4m3") or
-        !std.mem.eql(u8, text(q, "activation_scheme") orelse "dynamic", "dynamic"))
-    {
-        why.set("quantization {s}: the loader reads bf16 or FP8 e4m3 in 128x128 blocks", .{if (method.len > 0) method else "without quant_method"});
-        return error.Quant;
+    if (std.mem.eql(u8, method, "fp8")) return fp8Block(q, c, why);
+    if (std.ascii.eqlIgnoreCase(method, "modelopt")) return modelopt(q, c, why);
+    if (std.ascii.eqlIgnoreCase(method, "exl3")) {
+        why.set("EXL3: Ling's EXL3 weights come with ashhart's EXL3 module (tracker #832), not this loader yet", .{});
+        return error.Exl3;
     }
-    c.quant = .fp8_block128;
-    var at: usize = 0;
-    if (q.get("modules_to_not_convert")) |list| if (list == .array) for (list.array.items) |m| {
-        if (m != .string or c.plain_n == c.plain_ends.len or at + m.string.len > c.plain_text.len) {
-            why.set("modules_to_not_convert holds more than the loader keeps", .{});
-            return error.Quant;
-        }
-        @memcpy(c.plain_text[at..][0..m.string.len], m.string);
-        at += m.string.len;
-        c.plain_ends[c.plain_n] = @intCast(at);
-        c.plain_n += 1;
-    };
+    why.set("quantization {s}: the loader reads bf16, FP8 128x128 blocks or ModelOpt NVFP4", .{if (method.len > 0) method else "without quant_method"});
+    return error.Quant;
 }
 
 fn tokens(o: std.json.ObjectMap, c: *Config, why: *Why) !void {
@@ -249,6 +317,29 @@ fn tokens(o: std.json.ObjectMap, c: *Config, why: *Why) !void {
 
 /// config.json as the reference (configuration_bailing_moe_v3.py, exllamav3's bailing_hybrid) reads it.
 pub fn parse(gpa: std.mem.Allocator, json: []const u8, why: *Why) !Config {
+    return parseWith(gpa, json, null, why);
+}
+
+/// parse() with ModelOpt's hf_quant_config.json beside it: its NVFP4 block when config.json has no quantization_config.
+pub fn parseWith(gpa: std.mem.Allocator, json: []const u8, hf_quant: ?[]const u8, why: *Why) !Config {
+    var c = try parseConfig(gpa, json, why);
+    const extra = hf_quant orelse return c;
+    if (c.quant != .bf16 or c.plain_n != 0) return c;
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, extra, .{}) catch {
+        why.set("hf_quant_config.json is not JSON", .{});
+        return error.Quant;
+    };
+    defer parsed.deinit();
+    const q = if (parsed.value == .object) parsed.value.object.get("quantization") else null;
+    if (q == null or q.? != .object) {
+        why.set("hf_quant_config.json has no quantization block", .{});
+        return error.Quant;
+    }
+    try modelopt(q.?.object, &c, why);
+    return c;
+}
+
+fn parseConfig(gpa: std.mem.Allocator, json: []const u8, why: *Why) !Config {
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, json, .{}) catch {
         why.set("config.json is not JSON", .{});
         return error.BadConfig;

@@ -49,10 +49,10 @@ pub const Role = enum {
     mtp_final_norm,
 };
 
-/// One stored tensor: its role, layer (null for the model's own), routed expert, and whether it is an FP8 scale.
+/// One stored tensor: its role, layer (null for the model's own), routed expert, and whether it is a scale tensor.
 pub const Tensor = struct { role: Role, layer: ?u32 = null, expert: ?u32 = null, scale: bool = false };
 
-/// linear: `.weight`, plus `.weight_scale_inv` when FP8; weight: `.weight` only; bare: the module's own name.
+/// linear: `.weight` plus its format's side tensors (side()); weight: `.weight` only; bare: the module's own name.
 const Form = enum { linear, weight, bare };
 
 const Part = struct { role: Role, path: []const u8, form: Form };
@@ -134,10 +134,36 @@ fn emit(c: *const Config, sink: anytype, prefix: []const u8, p: Part, t: Tensor)
         .bare => try sink.put(module, u),
         .weight, .linear => try sink.put(try std.fmt.bufPrint(&name, "{s}.weight", .{module}), u),
     }
-    if (p.form == .linear and c.scaled(module)) {
-        u.scale = true;
-        try sink.put(try std.fmt.bufPrint(&name, "{s}.weight_scale_inv", .{module}), u);
+    if (p.form != .linear) return;
+    u.scale = true;
+    for (side(c.format(module))) |tail| try sink.put(try std.fmt.bufPrint(&name, "{s}.{s}", .{ module, tail }), u);
+}
+
+/// The tensors a linear stores beside `.weight`: FP8's block scales, ModelOpt NVFP4's group, global and input scales.
+pub fn side(f: config.Quant) []const []const u8 {
+    return switch (f) {
+        .bf16 => &.{},
+        .fp8_block128 => &.{"weight_scale_inv"},
+        .nvfp4 => &.{ "weight_scale", "weight_scale_2", "input_scale" },
+    };
+}
+
+const tables = [_][]const Part{ &norms, &kda, &mla_q_lora, &mla_q_whole, &mla, &mla_gate, &dense, &router, &router_bias, &shared, &expert, &mtp };
+
+/// Role's module in layer i (`e` for routed experts) as the map names it: the name before `.weight`.
+pub fn moduleName(buf: []u8, i: u32, role: Role, e: ?u32) ![]const u8 {
+    switch (role) {
+        .embed => return "model.word_embeddings",
+        .final_norm => return "model.norm",
+        .lm_head => return "lm_head",
+        .expert_gate, .expert_up, .expert_down => {
+            const p = for (expert) |x| (if (x.role == role) break x) else unreachable;
+            return std.fmt.bufPrint(buf, "model.layers.{d}.mlp.experts.{d}.{s}", .{ i, e orelse return error.NoExpert, p.path });
+        },
+        else => {},
     }
+    for (tables) |t| for (t) |p| if (p.role == role) return std.fmt.bufPrint(buf, "model.layers.{d}.{s}", .{ i, p.path });
+    unreachable;
 }
 
 fn emitAll(c: *const Config, sink: anytype, prefix: []const u8, parts: []const Part, t: Tensor) !void {

@@ -154,3 +154,50 @@ test "optional keys: no quantization reads bf16, a null q_lora_rank one q_proj, 
     try t.expectEqual(config.RopeStyle.neox, c.rope_style);
     try t.expect(!c.scaled("model.layers.0.attention.q_proj"));
 }
+
+/// The fixture without its quantization_config block.
+fn plainJson() ![]u8 {
+    const at = std.mem.indexOf(u8, real, "\"quantization_config\"").?;
+    const end = std.mem.indexOf(u8, real[at..], "  },\n").? + at + 5;
+    return std.mem.concat(t.allocator, u8, &.{ real[0..at], real[end..] });
+}
+
+test "ModelOpt NVFP4 from quantization_config: ignore globs and names pick the bf16 modules, the rest is nvfp4" {
+    const json = try edit("\"quant_method\": \"fp8\",", "\"quant_method\": \"modelopt\", \"quant_algo\": \"NVFP4\", \"ignore\": [\"*.attention.b_proj\", \"model.layers.7.mlp*\"],");
+    defer t.allocator.free(json);
+    var why: config.Why = .{};
+    const c = try config.parse(t.allocator, json, &why);
+    try t.expectEqual(config.Quant.nvfp4, c.quant);
+    try t.expectEqual(config.Quant.nvfp4, c.format("model.layers.0.attention.q_proj"));
+    try t.expectEqual(config.Quant.bf16, c.format("model.layers.30.attention.b_proj"));
+    try t.expectEqual(config.Quant.bf16, c.format("model.layers.7.mlp.experts.3.up_proj"));
+    try t.expectEqual(config.Quant.nvfp4, c.format("model.layers.17.mlp.experts.3.up_proj"));
+    try t.expectEqual(config.Quant.bf16, c.format("lm_head")); // modules_to_not_convert stays an exception list too
+}
+
+test "hf_quant_config.json's NVFP4 block when config.json has none; groups other than 16 and other algorithms refused" {
+    const json = try plainJson();
+    defer t.allocator.free(json);
+    var why: config.Why = .{};
+    const hf = "{\"producer\": {\"name\": \"modelopt\"}, \"quantization\": {\"quant_algo\": \"NVFP4\", \"group_size\": 16, \"exclude_modules\": [\"lm_head\", \"model.layers.*.mlp.gate\"]}}";
+    const c = try config.parseWith(t.allocator, json, hf, &why);
+    try t.expectEqual(config.Quant.nvfp4, c.quant);
+    try t.expectEqual(config.Quant.bf16, c.format("model.layers.40.mlp.gate"));
+    try t.expectEqual(config.Quant.nvfp4, c.format("model.layers.40.mlp.gate_proj"));
+    const g32 = "{\"quantization\": {\"quant_algo\": \"NVFP4\", \"group_size\": 32}}";
+    try t.expectError(error.Quant, config.parseWith(t.allocator, json, g32, &why));
+    try t.expect(std.mem.indexOf(u8, why.text(), "groups of 16") != null);
+    const fp8 = "{\"quantization\": {\"quant_algo\": \"FP8\"}}";
+    try t.expectError(error.Quant, config.parseWith(t.allocator, json, fp8, &why));
+    try t.expect(std.mem.indexOf(u8, why.text(), "ModelOpt FP8") != null);
+    try t.expectEqual(config.Quant.bf16, (try config.parseWith(t.allocator, json, null, &why)).quant);
+}
+
+test "EXL3 is refused naming #832; a glob matches whole names only" {
+    try refused("\"quant_method\": \"fp8\"", "\"quant_method\": \"exl3\"", error.Exl3, "#832");
+    try t.expect(config.glob("*.mlp.gate", "model.layers.4.mlp.gate"));
+    try t.expect(!config.glob("*.mlp.gate", "model.layers.4.mlp.gate_proj"));
+    try t.expect(config.glob("model.layers.*.attention*", "model.layers.12.attention.q_proj"));
+    try t.expect(!config.glob("model.layers.1*", "model.layers.0.mlp"));
+    try t.expect(config.glob("a*b*c", "a.b.x.c") and !config.glob("a*b*c", "a.c"));
+}
