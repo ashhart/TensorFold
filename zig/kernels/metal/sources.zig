@@ -97,6 +97,8 @@ pub const glm_rows = @embedFile("glm_rows.metal");
 pub const glm_attn = @embedFile("glm_attn.metal");
 /// GLM-5.3-Flash's image tower: the prefill GEMM template's projections and attention products, then its own steps.
 pub const glm_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("glm_vision.metal");
+/// The Qwen-VL image tower (core/qwen_vl): the prefill GEMM template's products, then its own steps.
+pub const core_qwen_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("core/qwen_vision.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 /// GLM-5.3-Flash speed-up mode's exchange kernels (families/glm/ep.zig).

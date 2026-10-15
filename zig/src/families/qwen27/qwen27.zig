@@ -18,6 +18,7 @@ pub const gdn_pool = @import("gdn_pool.zig");
 pub const gdn_pool_gpu = @import("gdn_pool_gpu.zig");
 pub const glue = @import("glue.zig");
 pub const glue_gpu = @import("glue_gpu.zig");
+pub const image_rows = @import("image_rows.zig");
 pub const gpu_weights = @import("gpu_weights.zig");
 pub const gpu_frame = @import("gpu_frame.zig");
 pub const model = @import("model.zig");
@@ -35,6 +36,8 @@ pub const snapshot = @import("snapshot.zig");
 pub const disk = @import("disk.zig");
 pub const taps = @import("taps.zig");
 pub const tap_ring = @import("tap_ring.zig");
+/// The 27B's Metal sources by name (the kernel contract compiles them as the engine does).
+pub const runtime_sources = @import("qwen_runtime_sources");
 test {
     _ = dflash;
     _ = disk;
@@ -43,6 +46,8 @@ test {
     _ = @import("gdn_test.zig");
     _ = @import("simd_attention.zig");
     _ = glue;
+    _ = image_rows;
+    _ = @import("rope_test.zig");
     _ = state;
     _ = projection;
     _ = model;

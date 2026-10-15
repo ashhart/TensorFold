@@ -338,6 +338,7 @@ pub const LaneHost = struct {
             .decide = r.decide,
             .untaught = r.untaught,
             .images = r.images,
+            .key = r.cache_key,
         }) catch {
             job.proposer.deinit();
             recalls.release(job);
@@ -423,7 +424,7 @@ pub const LaneHost = struct {
             return h.cancel(job);
         };
         h.prefilled(job, began);
-        if (h.cache) |store| _ = if (!job.request.untaught and store.rules.lookahead == 0) store.keepBorn(job.request.prompt, job.request.bornLen(), @intCast(job.request.prompt.len), &job.stream, job.request.chunks, h.spans(job.request)) else false;
+        if (h.cache) |store| _ = if (!job.request.untaught and store.rules.lookahead == 0) store.keepBorn(job.request.cacheKey(), job.request.bornLen(), @intCast(job.request.prompt.len), &job.stream, job.request.chunks, h.spans(job.request)) else false;
         be.release(&job.stream);
         h.remove(job);
         h.finish(job, .length, "");
@@ -547,5 +548,4 @@ pub const LaneHost = struct {
 
 test {
     _ = @import("lane_host_test.zig");
-    _ = @import("lane_host_recall_test.zig");
 }

@@ -67,6 +67,7 @@ pub const Metal = struct {
     from_tree: usize = 0, // the last window's drafts that were the held tree's first nodes
     sampled: [max_rows]u32 = undefined, // the last lone window's draws
     landing: Landing = .{}, // drafted nodes offered with their parent kept, and landed, by own log-probability
+    vision: ?*@import("qwen27_images.zig").Vision = null, // --vision: the image tower and a prompt pass's image rows
 
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
         if (runner.slots == 0 or runner.slots > 8 or runner.model.frame.capacity < batch_rows) return error.TargetBinding;
