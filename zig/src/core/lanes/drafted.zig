@@ -76,6 +76,13 @@ pub const Drafted = struct {
     /// The target's prompt pass, then the drafter absorbs its rows but the last; a later failure releases both.
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
+        if (s.drafts) if (x.target.vtable.prefill_features) |streamed| { // chunk by chunk: no whole prompt's taps held
+            try x.lanes.ensureUnusedCapacity(x.gpa, 1);
+            try x.drafter.open(s);
+            x.lanes.putAssumeCapacity(s, .{});
+            errdefer x.dropStream(s);
+            return streamed(x.target.ptr, s, x.drafter.taps(), .{ .ptr = x, .take = take });
+        };
         try x.target.prefill(s);
         if (!s.drafts) return;
         errdefer x.dropStream(s);
@@ -88,6 +95,17 @@ pub const Drafted = struct {
         const n: u32 = @intCast(ids.len - 1 - from);
         const f = try x.target.features(s, x.drafter.taps(), from, n);
         try x.drafter.absorb(&.{.{ .stream = s, .features = f, .start = from, .follow = ids[from + 1 ..] }});
+    }
+
+    /// A prompt chunk's rows but the prompt's last (absorbed with the first token, as `prefill` leaves it).
+    fn take(ptr: *anyopaque, s: *Stream, f: be.Features, start: u64) anyerror!void {
+        const x = self(ptr);
+        const ids = s.prompt();
+        const last = ids.len - 1;
+        if (start >= last) return;
+        var rows = f;
+        rows.rows = @intCast(@min(f.rows, last - start));
+        try x.drafter.absorb(&.{.{ .stream = s, .features = rows, .start = start, .follow = ids[@intCast(start + 1)..] }});
     }
 
     fn first(ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64 {
