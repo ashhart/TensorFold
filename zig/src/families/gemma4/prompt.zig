@@ -19,6 +19,8 @@ const Q = @import("weights.zig").Mlx;
 pub const Scratch = struct {
     ids: mtl.Buffer,
     pos: mtl.Buffer,
+    /// Each row's last key on sliding layers: its position, or its image's last row (bidirectional vision blocks).
+    hi: mtl.Buffer,
     h: [2]mtl.Buffer,
     normed: [2]mtl.Buffer,
     qkv: mtl.Buffer,
@@ -44,7 +46,7 @@ pub const Scratch = struct {
         s.taps = null;
         var made: usize = 0;
         errdefer s.release(made);
-        inline for (.{ .{ "ids", R * 4, true }, .{ "pos", R * 4, true }, .{ "qkv", R * (qd + 2 * 16 * 256) * 2, false }, .{ "q", R * qd * 2, false }, .{ "k", R * 16 * 256 * 2, false }, .{ "v", R * 16 * 256 * 2, false }, .{ "attn", R * qd * 2, false }, .{ "o", R * d * 2, false }, .{ "hn", R * d * 2, false }, .{ "n_mlp", R * d * 2, false }, .{ "gate_up", R * 2 * cfg.intermediate * 2, false }, .{ "act", R * cfg.intermediate * 2, false }, .{ "y", R * d * 2, false }, .{ "logits", cfg.vocab * 2, true } }) |f| {
+        inline for (.{ .{ "ids", R * 4, true }, .{ "pos", R * 4, true }, .{ "hi", R * 4, true }, .{ "qkv", R * (qd + 2 * 16 * 256) * 2, false }, .{ "q", R * qd * 2, false }, .{ "k", R * 16 * 256 * 2, false }, .{ "v", R * 16 * 256 * 2, false }, .{ "attn", R * qd * 2, false }, .{ "o", R * d * 2, false }, .{ "hn", R * d * 2, false }, .{ "n_mlp", R * d * 2, false }, .{ "gate_up", R * 2 * cfg.intermediate * 2, false }, .{ "act", R * cfg.intermediate * 2, false }, .{ "y", R * d * 2, false }, .{ "logits", cfg.vocab * 2, true } }) |f| {
             @field(s, f[0]) = try device.buffer(f[1], if (f[2]) shared else private);
             made += 1;
         }
@@ -63,7 +65,7 @@ pub const Scratch = struct {
     /// Releases the first `made` buffers in init's order, so a failed init frees what it made.
     fn release(s: *Scratch, made: usize) void {
         var i: usize = 0;
-        inline for (.{ "ids", "pos", "qkv", "q", "k", "v", "attn", "o", "hn", "n_mlp", "gate_up", "act", "y", "logits" }) |f| {
+        inline for (.{ "ids", "pos", "hi", "qkv", "q", "k", "v", "attn", "o", "hn", "n_mlp", "gate_up", "act", "y", "logits" }) |f| {
             if (i < made) @field(s, f).deinit();
             i += 1;
         }
@@ -89,14 +91,25 @@ fn bind(e: mtl.ComputeEncoder, bufs: []const mtl.Buffer, first: usize) void {
     for (bufs, first..) |b, i| e.setBuffer(b, 0, i);
 }
 
-/// `ids` (at most 512) at the cache's length: the cache keeps their keys and values; s.logits has the last row's.
-pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32) !void {
+/// An encoded image's rows in the prompt: positions [at, at + n), its rows from `rows` (5376 bf16 each).
+pub const Span = struct { at: usize, n: u32, rows: Ref };
+
+/// `ids` (at most 512) at the cache's length, `images`' rows over theirs (a span wholly in or out); s.logits: the last.
+pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []const Span) !void {
     const rows = ids.len;
     if (rows == 0 or rows > R) return error.BadChunk;
     if (c.len + rows > c.capacity) return error.ContextFull;
     const p0 = c.len;
     @memcpy(s.ids.slice(u32, rows), ids);
-    for (s.pos.slice(i32, rows), 0..) |*p, i| p.* = @intCast(p0 + i);
+    for (s.pos.slice(i32, rows), s.hi.slice(i32, rows), 0..) |*p, *h, i| {
+        p.* = @intCast(p0 + i);
+        h.* = p.*;
+    }
+    for (images) |span| {
+        if (span.at + span.n <= p0 or span.at >= p0 + rows) continue;
+        if (span.at < p0 or span.at + span.n > p0 + rows) return error.ImageAcrossChunks;
+        @memset(s.hi.slice(i32, rows)[span.at - p0 ..][0..span.n], @intCast(span.at + span.n - 1));
+    }
     const ks = &m.kernels.sliding;
     const w = &m.weights;
     const cb = m.queue.commandBuffer();
@@ -110,6 +123,10 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32) !void {
     bind(e, &.{s.h[0]}, 4);
     e.setValue(fwd.embedScale(), 5);
     e.dispatchThreads(.{ .width = cfg.hidden / 2, .height = rows }, .{ .width = 256 });
+    for (images) |span| if (span.at >= p0 and span.at < p0 + rows) {
+        const v = m.vision orelse return error.NoGemmaVision;
+        v.inject(e, span.rows, .{ .buf = s.h[0], .off = (span.at - p0) * cfg.hidden * 2 }, span.n);
+    };
     e.setPipeline(ks.rms);
     bind(e, &.{s.h[0]}, 0);
     e.setBuffer(w.layers[0].input_norm.buf, w.layers[0].input_norm.off, 1);
@@ -171,6 +188,7 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: 
         e.setPipeline(kd.prompt_attn);
         bind(e, &.{ s.q, c.k[i], c.v[i], s.attn }, 0);
         e.setValue([3]i32{ @intCast(rows), @intCast(c.len), @intCast(state.slotsOf(i, c.capacity)) }, 4);
+        bind(e, &.{s.hi}, 5);
         e.dispatchGroups(.{ .width = (rows + 31) / 32, .height = cfg.query_heads }, .{ .width = 32 * dh / 64 });
     }
     if (st.mm) {

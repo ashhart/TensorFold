@@ -63,6 +63,13 @@ pub const Cache = struct {
     }
 };
 
+/// Bytes a stream's caches take at `capacity` (Cache.init's buffers).
+pub fn cacheBytes(capacity: usize) u64 {
+    var total: u64 = cfg.vocab * 2;
+    for (0..cfg.layers) |i| total += 2 * cfg.kvHeads(i) * slotsOf(i, capacity) * cfg.headDim(i) * 2;
+    return total;
+}
+
 /// Cache slots for layer `i`: the ring on a sliding layer, the whole capacity on a global one.
 pub fn slotsOf(i: usize, capacity: usize) usize {
     return if (cfg.global(i)) capacity else ring;

@@ -11,6 +11,8 @@ pub const gemma4_glue = @embedFile("gemma4/glue.metal");
 pub const gemma4_fused = @embedFile("gemma4/fused.metal");
 /// Gemma 4 prompt attention on the tensor units (families/gemma4/kernels.zig).
 pub const gemma4_prompt_attention = @embedFile("gemma4/prompt_attention.metal");
+/// Gemma 4's image tower: gemm_nax and its glue (families/gemma4/vision.zig).
+pub const gemma4_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("gemma4/vision.metal");
 
 /// Our glue kernels around them: embedding, MLX's RMS arithmetic, argmax, layout moves.
 pub const nemotron_glue = @embedFile("nemotron_glue.metal");

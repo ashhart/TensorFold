@@ -80,7 +80,9 @@ inline void prob_put(threadgroup PT* pt, int r, int c, short2 home, thread const
 // Fragment i of s: tile rows 16 (i >> 1).., keys 16 (i & 1)..; of acc: rows 16 (i >> 2).., own columns 16 (i & 3)...
 [[kernel]] void gemma_prompt_attention(const device bfloat* Q [[buffer(0)]], const device bfloat* K [[buffer(1)]],
                                        const device bfloat* V [[buffer(2)]], device bfloat* O [[buffer(3)]],
-                                       constant int3& P [[buffer(4)]], uint sg [[simdgroup_index_in_threadgroup]],
+                                       constant int3& P [[buffer(4)]],
+                                       const device int* HI [[buffer(5)]], // sliding layers: a row's last key (image blocks)
+                                       uint sg [[simdgroup_index_in_threadgroup]],
                                        uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
   const int R = P.x, p0 = P.y, cap = P.z;
   const int qh = int(tg.y), kv = qh / G;
@@ -97,7 +99,7 @@ inline void prob_put(threadgroup PT* pt, int r, int c, short2 home, thread const
   TF_UNROLL
   for (short i = 0; i < 8; i++) acc[i] = frag<float>(0);
   float top[4] = {kMasked, kMasked, kMasked, kMasked}, total[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-  const int first_pos = p0 + r0, last_pos = p0 + r0 + q_rows - 1;
+  const int first_pos = p0 + r0, last_pos = WINDOW ? HI[r0 + q_rows - 1] : p0 + r0 + q_rows - 1; // the tile's last key
   const int lo = WINDOW ? max(0, first_pos - WINDOW + 1) : 0;
   for (int kb = lo / BKT; kb <= last_pos / BKT; kb++) {
     const int kpos = kb * BKT + int(sg) * KS;
@@ -119,9 +121,10 @@ inline void prob_put(threadgroup PT* pt, int r, int c, short2 home, thread const
     for (short i = 0; i < 4; i++) {
       TF_UNROLL
       for (short e = 0; e < 8; e++) {
-        const int row = first_pos + 16 * (i >> 1) + home.y + (e >> 2) * 8;
+        const int local = 16 * (i >> 1) + home.y + (e >> 2) * 8, row = first_pos + local;
         const int col = kpos + 16 * (i & 1) + home.x + TF_COL(e);
-        const bool out = col > row || (WINDOW && col < row - WINDOW + 1);
+        const int hi = WINDOW && local < q_rows ? HI[r0 + local] : row;
+        const bool out = col > hi || (WINDOW && col < row - WINDOW + 1);
         s[i][e] = out ? kMasked : s[i][e] * kLog2e;
       }
     }

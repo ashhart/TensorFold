@@ -11,6 +11,7 @@ const round = @import("tree_round_gpu");
 const weights = @import("weights.zig");
 const fwd = @import("forward.zig");
 const Model = @import("model.zig").Model;
+const snapshot = @import("snapshot.zig");
 
 const dr = lanes.drafter;
 const Stream = lanes.Stream;
@@ -249,6 +250,56 @@ pub const Drafter = struct {
         e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
     }
 
+    /// Bytes a lane's context at `at` takes beside a kept prompt state: the sliding rings whole, the full layer's rows.
+    pub fn keptBytes(d: *const Drafter, at: usize) u64 {
+        const c = &d.config;
+        const row: u64 = c.kv_heads * c.head_dim * 2;
+        var total: u64 = 0;
+        for (c.sliding[0..c.layers]) |sliding| total += 2 * row * (if (sliding) c.window - 1 + block_rows else at);
+        return total;
+    }
+
+    /// Stream `s`'s context copied into `snap` when its lane stands at the snapshot's position (a prompt pass's mark).
+    pub fn keepLane(d: *Drafter, s: *Stream, snap: *snapshot.Snap) !void {
+        const l = d.lanes.get(s) orelse return;
+        try d.settle(); // the chunk's absorb, left pending
+        if (l.end != snap.at) return;
+        const buf = try d.target.device.buffer(@intCast(d.keptBytes(snap.at)), private);
+        errdefer buf.deinit();
+        try d.copyLane(l, snap.at, buf, true);
+        snap.draft = buf;
+    }
+
+    /// The lane takes the context kept with the state its stream's prompt pass resumed at `start`.
+    fn resumeLane(d: *Drafter, s: *Stream, l: *Lane, start: u64) !void {
+        const saved = s.reuse.saved orelse return error.DraftContextGap;
+        const snap: *const snapshot.Snap = @ptrCast(@alignCast(saved));
+        if (s.cached != start or snap.at != start or snap.draft == null or l.end != 0) return error.DraftContextGap;
+        try d.copyLane(l, start, snap.draft.?, false);
+        l.end = start;
+    }
+
+    /// A lane's keys and values and a kept buffer, one blit pass, waited on (`out`: lane to buffer).
+    fn copyLane(d: *Drafter, l: *const Lane, at: usize, buf: mtl.Buffer, out: bool) !void {
+        const c = &d.config;
+        const row: usize = c.kv_heads * c.head_dim * 2;
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = d.target.queue.commandBuffer();
+        const e = cb.blit();
+        var to: usize = 0;
+        for (0..c.layers) |i| for ([_]mtl.Buffer{ l.k[i], l.v[i] }) |live| {
+            const n = row * (if (c.sliding[i]) c.window - 1 + block_rows else at);
+            if (n == 0) continue;
+            if (out) e.copy(live, 0, buf, to, n) else e.copy(buf, to, live, 0, n);
+            to += n;
+        };
+        e.end();
+        cb.commit();
+        cb.wait();
+        if (cb.failure()) |msg| return failed(msg);
+    }
+
     /// Waits for a pending absorb's command buffer (a hold ordered after it on the queue has run it already).
     fn settle(d: *Drafter) !void {
         const cb = d.pending orelse return;
@@ -298,7 +349,8 @@ pub const Drafter = struct {
             const l = d.lanes.get(it.stream) orelse return error.DraftStreamUnknown;
             const f = it.features;
             if (f.space != .device or f.dtype != .bf16 or f.row_bytes != c.tap_count * c.hidden * 2) return error.DraftFeaturesUnsupported;
-            if (it.start > l.end or it.start + f.rows > l.capacity) return error.DraftContextGap;
+            if (it.start > l.end) try d.resumeLane(it.stream, l, it.start); // a prompt pass that resumed a kept state
+            if (it.start + f.rows > l.capacity) return error.DraftContextGap;
             const src = mtl.Buffer{ .id = @ptrFromInt(f.buffer) };
             var at: usize = 0;
             while (at < f.rows) : (at += absorb_rows) {

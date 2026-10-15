@@ -9,8 +9,13 @@ pub const Model = @import("model.zig").Model;
 pub const backend = @import("backend.zig");
 pub const dflash = @import("dflash.zig");
 pub const dflash_weights = @import("dflash_weights.zig");
+pub const image = @import("image.zig");
+pub const vision = @import("vision.zig");
+pub const snapshot = @import("snapshot.zig");
 
 test {
     _ = config;
     _ = dflash_weights;
+    _ = image;
+    _ = snapshot;
 }

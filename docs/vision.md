@@ -145,15 +145,15 @@ For Qwen, each image request carries its own multimodal rotary positions and con
 ## The native server
 
 `tensorfold-native serve` takes `--vision`, `--vision-max-images` (default 4) and `--vision-image-tokens` (default
-4,096) for engines that read images; GLM-5.3-Flash on one Mac reads them so far, and other native engines refuse the
-flag at startup.
+4,096) for engines that read images; GLM-5.3-Flash and [Gemma 4 31B](recipes/gemma-4-native.md#images) on one Mac read
+them so far, and other native engines refuse the flag at startup.
 
 - Images arrive as `image_url` data URLs in user messages and tool results. Remote URLs are refused, since
   `--vision-urls` isn't on the native server yet.
 - PNG and JPEG are decoded by the platform's decoder (ImageIO on macOS). WebP is refused by name until a decoder
   exists; other formats are refused.
-- The limits and the processing are 0.6.6's: EXIF orientation, alpha composited over white, the GLM5-Next processor's
-  sizing and PIL's bicubic resampler. Six drawn PNG fixtures give patches bit-equal to 0.6.6 with mlx-vlm
+- The limits and the processing are 0.6.6's: EXIF orientation, alpha composited over white, the model's processor's
+  sizing (GLM5-Next's, or Gemma 4's PIL processor) and PIL's bicubic resampler. Six drawn PNG fixtures give patches bit-equal to 0.6.6 with mlx-vlm
   (`tools/zig/glm_vision_fixtures.py`). JPEG patches differ slightly, because ImageIO and libjpeg-turbo decode
   differently.
 - Images are counted from the request's image parts. A user or tool message whose text spells the model's image

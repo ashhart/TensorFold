@@ -314,7 +314,7 @@ pub fn main(init: std.process.Init) !void {
             defer cbk.deinit();
             const step: usize = if (std.c.getenv("GEMMA_STEP")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 40 else 40;
             var at: usize = 0;
-            while (at < tok.len) : (at += step) try g4.prompt.run(m, &ps, &ca, tok[at..@min(at + step, tok.len)]);
+            while (at < tok.len) : (at += step) try g4.prompt.run(m, &ps, &ca, tok[at..@min(at + step, tok.len)], &.{});
             try g4.forward.run(m, &ss, &.{.{ .cache = &cbk, .rows = 16 }}, tok[0..16]);
             try g4.forward.run(m, &ss, &.{.{ .cache = &cbk, .rows = 16 }}, tok[16..32]);
             try g4.forward.run(m, &ss, &.{.{ .cache = &cbk, .rows = 8 }}, tok[32..40]);

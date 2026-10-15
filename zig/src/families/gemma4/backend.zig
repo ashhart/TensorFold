@@ -6,6 +6,7 @@ const cfg = @import("config.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const prompt = @import("prompt.zig");
+const snapshot = @import("snapshot.zig");
 const Model = @import("model.zig").Model;
 const draw = @import("../qwen3_5/backend.zig").draw;
 const be = lanes.backend;
@@ -157,10 +158,36 @@ pub const Metal = struct {
         const capacity = @min(self.options.capacity, (ids.len + stream.max_new + st.max_rows + 63) / 64 * 64);
         cache.* = try st.Cache.init(self.model.device, capacity);
         errdefer cache.deinit();
-        var at: usize = 0;
+        try self.caches.put(self.gpa, stream, cache); // a mark's save finds it there
+        errdefer _ = self.caches.remove(stream);
+        stream.cached = 0;
+        if (stream.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
+            const snap: *const snapshot.Snap = @ptrCast(@alignCast(saved));
+            var inside = false; // an image's rows see each other: a state inside one is not resumed
+            for (stream.images) |im| inside = inside or (im.at < snap.at and snap.at < im.at + im.tokens);
+            // a drafting stream resumes only a state kept with its drafter's context (dflash.zig keepLane)
+            const drafter_less = stream.drafts and self.prompt_scratch.taps != null and snap.draft == null;
+            if (snap.at < ids.len and !inside and !drafter_less) {
+                if (snapshot.restore(self.gpa, self.model.queue, snap, cache)) stream.cached = snap.at else |_| stream.reuse_failed = true;
+            } else stream.reuse_failed = true;
+        }
+        var spans: std.ArrayList(prompt.Span) = .empty;
+        defer spans.deinit(self.gpa);
+        const rows_buf = try self.encodeImages(stream, cache.len, &spans);
+        defer if (rows_buf) |b| b.deinit();
+        var at: usize = cache.len;
         while (at < ids.len) {
-            const end = @min(ids.len, at + st.chunk_rows);
-            try prompt.run(self.model, &self.prompt_scratch, cache, ids[at..end]);
+            if (stream.isCancelled()) return error.Cancelled;
+            var end = @min(ids.len, at + st.chunk_rows);
+            // planned chunk starts and kept marks cut a chunk (resumed and fresh passes cut alike past them)
+            for ([_][]const u32{ stream.chunks, stream.reuse.marks }) |cuts| for (cuts) |x| if (x > at and x < end) {
+                end = x;
+            };
+            // an image's rows see each other on sliding layers: no cut inside one (before it, or past it when it leads)
+            for (spans.items) |span| if (span.at < end and span.at + span.n > end) {
+                end = if (span.at > at) span.at else span.at + span.n;
+            };
+            try prompt.run(self.model, &self.prompt_scratch, cache, ids[at..end], spans.items);
             if (sink) |k| {
                 const width = self.tapBytes();
                 const rows = self.prompt_scratch.taps.?;
@@ -173,9 +200,40 @@ pub const Metal = struct {
                 }
             }
             at = end;
+            if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(cache.len)) != null) if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(cache.len));
         }
         @memcpy(cache.logits.slice(u16, cfg.vocab), self.prompt_scratch.logits.slice(u16, cfg.vocab));
-        try self.caches.put(self.gpa, stream, cache);
+    }
+
+    /// The stream's images from `from` on through the tower into one buffer of rows (null: none), a span each.
+    fn encodeImages(self: *Metal, stream: *const lanes.Stream, from: usize, spans: *std.ArrayList(prompt.Span)) !?mtl.Buffer {
+        var total: usize = 0;
+        for (stream.images) |im| {
+            if (im.at + im.tokens > stream.prompt().len or im.tokens * 9 != im.gh * im.gw) return error.InvalidGemmaImage;
+            if (im.at >= from) total += im.tokens; // one before `from` is in the restored state
+        }
+        if (total == 0) return null;
+        const v = self.model.vision orelse return error.NoGemmaVision;
+        const buf = try self.model.device.buffer(total * cfg.hidden * 2, mtl.ResourceOptions.private | mtl.ResourceOptions.untracked);
+        errdefer buf.deinit();
+        var row: usize = 0;
+        for (stream.images) |im| { // one command buffer an image: the tower's host-written inputs are one image's
+            if (im.at < from) continue;
+            const rows: prompt.Span = .{ .at = im.at, .n = im.tokens, .rows = .{ .buf = buf, .off = row * cfg.hidden * 2 } };
+            const cb = self.model.queue.commandBuffer();
+            const e = cb.compute(.serial);
+            try v.encode(e, im.pixels, im.gh, im.gw, rows.rows, null);
+            e.end();
+            cb.commit();
+            cb.wait();
+            if (cb.failure()) |msg| {
+                std.log.err("gemma4: image tower failed: {s}", .{msg});
+                return error.GpuFailed;
+            }
+            try spans.append(self.gpa, rows);
+            row += im.tokens;
+        }
+        return buf;
     }
 
     fn firstFn(ptr: *anyopaque, stream: *lanes.Stream, position: u64) !u64 {
@@ -275,6 +333,31 @@ pub const Metal = struct {
 
     fn draftFn(_: *anyopaque, requests: []const be.DraftRequest) !void {
         for (requests) |r| if (r.depth != 0) return error.GemmaCheckpointHasNoDraftHead;
+    }
+
+    /// The prompt cache's Snapshots functions: a stream's caches at a mark, copied on the GPU.
+    pub fn snapBytes(_: *anyopaque, at: u32) u64 {
+        return snapshot.bytes(at);
+    }
+
+    pub fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
+        const self = cast(ptr);
+        const cache = try self.cacheOf(@ptrCast(@alignCast(owner orelse return error.NoStream)));
+        if (cache.len != at) return error.SnapshotOutOfStep;
+        const snap = try self.gpa.create(snapshot.Snap);
+        errdefer self.gpa.destroy(snap);
+        snap.* = try snapshot.save(self.gpa, self.model.device, self.model.queue, cache);
+        return snap;
+    }
+
+    pub fn snapRestore(_: *anyopaque, _: ?*anyopaque, _: *anyopaque) anyerror!void {
+        return error.BackendRestores; // the prompt pass restores, before its first chunk
+    }
+
+    pub fn snapDrop(ptr: *anyopaque, saved: *anyopaque) void {
+        const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
+        snap.free();
+        cast(ptr).gpa.destroy(snap);
     }
 
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {

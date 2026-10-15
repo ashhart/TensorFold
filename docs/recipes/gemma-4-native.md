@@ -24,7 +24,8 @@ a stream decodes at 150-190 tokens a second (6-7 accepted tokens a round on chat
 The loader admits the dense 31B's geometry only: 60 layers, five sliding-window layers (window 1,024, head dim 256)
 to each global one (head dim 512, keys reused as values, proportional RoPE), GeGLU, the tied 262,144-token head with
 its logit soft-cap, uniform affine 4-bit in groups of 64. It refuses the 26B-A4B MoE, the 12B (`gemma4_unified`),
-per-layer inputs, shared KV layers and per-module widths, each by name. The vision tower is not loaded.
+per-layer inputs, shared KV layers and per-module widths, each by name. With `--vision` it also loads the image tower
+([images](#images)).
 
 Every linear, the tied head included, runs on the core lane projection (`zig/src/core/lane_projection.zig`) on M5
 tensor units; the rest of a layer is `zig/kernels/metal/gemma4/glue.metal`. The glue ports the Python reference's
@@ -58,14 +59,50 @@ timed at load. A round's streams draft in one block forward (3.4 ms for one stre
 pass, whose command buffer the block settles.
 
 The context defaults to 32,768 tokens; `--context` raises it to the checkpoint's 262,144, at the cost of attention
-scratch that grows with it. There is no cross-request prompt reuse yet.
+scratch that grows with it.
+
+Prompts are reused between requests (`zig/src/families/gemma4/snapshot.zig`). A kept state is each sliding layer's
+last 1,024 keys and values, every global layer's keys and values so far, and the DFlash drafter's own context for the
+same stream (4 KB a token in its full layer, 34 MB of sliding rings), so a resumed stream drafts as a fresh one does. A
+prompt chunk's rows are their own arithmetic, so states are kept and resumed only where the request's planned chunks
+start, as Step-5's are; a drafting stream does not resume a state kept without the drafter's context, and none is
+resumed inside an image. The budget is what 70% of RAM leaves beside every stream's caches, 16 GiB by default
+(`--prompt-cache-gib`, 0 for none). A later turn of a 3,336-token conversation resumed 3,329 tokens and answered as the
+first pass did; one with an image after 2,300 tokens of system prompt resumed 3,584 of 3,607 tokens, alike.
 
 | Checkpoint / platform | Qualification |
 | --- | --- |
 | The pinned 31B 4-bit, M5 Ultra, macOS 27 | Greedy decode, prompts, shared rounds, copy and DFlash drafts and the server, below. |
 | `z-lab/gemma-4-31B-it-DFlash` `eabd6483` | The one drafter admitted: DFlash v1, block 16, six taps, head dim 128. |
 | M1 to M4 | Refused: the lane projection needs M5 tensor units. |
-| Other Gemma 4 checkpoints, widths, vision | Outside this recipe. |
+| Images (`--vision`) | PNG and JPEG data URLs, below. |
+| Other Gemma 4 checkpoints, widths | Outside this recipe. |
+
+## Images
+
+`serve --vision` loads the checkpoint's image tower (`vision_tower.`, `embed_vision.`; 1.1 GB, bf16 but for the 4-bit
+projection) and reads PNG and JPEG data URLs in user messages and tool results, as [image input](../vision.md#the-native-server)
+describes. `zig/src/families/gemma4/image.zig` prepares an image as transformers' `Gemma4ImageProcessorPil` does: the
+largest aspect-preserving size whose sides are multiples of 48 and whose 16-pixel patches fit 280 tokens (PIL's bicubic
+resize, then 1/255), so an image becomes 256 to 280 tokens (70 or 140 with `detail: low` or a smaller
+`--vision-image-tokens`). The template's `<|image|>` expands to `boi`, the image's rows, `eoi`.
+
+`zig/src/families/gemma4/vision.zig` runs the 27-layer encoder on gemm_nax's tensor-unit GEMMs at torch's per-op bf16
+rounding: the patch projection and the x and y position rows, RMS norms in fp32 times their weights, per-head q, k and
+v norms, the axial 2D RoPE (theta 100, x on dims 0-35 and y on 36-71), attention with scale 1 as two batched GEMMs and
+a softmax, GELU-tanh gating, the 3 x 3 pooler, the standardization and the projection on core affine_mm. An image takes
+about 90 ms. In the language model the image's rows replace its tokens' embeddings, and on the 50 sliding layers they
+see one another both ways, as `use_bidirectional_attention: "vision"` asks (the prompt attention kernel takes each
+row's last key; global layers stay causal); a prompt chunk never cuts an image.
+
+Checked with `tools/zig/gemma4_vision_fixtures.py` (transformers 5.17 and torch, bf16 and fp32 runs of
+`Gemma4VisionModel`) and `tf-gemma4-vision` on five drawn images, from 20 x 15 to 1200 x 800 and 180 x 1400: the patches
+equal the PIL processor's bit for bit, and the tower's rows are as close to the fp32 run as torch's own bf16 run (7.6%
+relative error averaged over the images, torch's 7.8%). AutoProcessor with torch installed picks the torchvision
+processor instead, whose resize differs from PIL's by a level at a few pixels in a thousand. Served with the drafter,
+a described image answers token for token as mlx-vlm 0.7.2 does (80 greedy tokens, the same 287-token prompt), with
+drafts on and off; `tools/zig/vision_served.py` passes its 18 checks, concurrent image requests equal their runs
+alone, and text-only prompts keep their bits (the receipts above, unchanged).
 
 ## Verification
 

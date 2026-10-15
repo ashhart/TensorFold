@@ -8,6 +8,7 @@ const weights = @import("weights.zig");
 const kernels = @import("kernels.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
 const round = @import("tree_round_gpu");
+const vision = @import("vision.zig");
 
 pub const Model = struct {
     gpa: std.mem.Allocator,
@@ -30,6 +31,8 @@ pub const Model = struct {
     taps: u32 = 0,
     /// One-row windows take the fused pipelines (the glue as the projections' prologues); off for the bench's check.
     fuse: bool = true,
+    /// The image tower, once loadVision read it (serve --vision).
+    vision: ?*vision.Vision = null,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         const m = try gpa.create(Model);
@@ -40,6 +43,7 @@ pub const Model = struct {
         m.tap_of = @splat(-1);
         m.taps = 0;
         m.fuse = true;
+        m.vision = null;
         m.config = try cfg.Config.read(gpa, io, dir);
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
@@ -72,6 +76,16 @@ pub const Model = struct {
         return m;
     }
 
+    /// The checkpoint's image tower and projection beside the language model; error.NoGemmaVision when it has none.
+    pub fn loadVision(m: *Model, io: std.Io, dir: []const u8) !void {
+        if (m.vision != null) return;
+        const files = try shards.shardFiles(m.gpa, io, dir);
+        defer shards.freeShardFiles(m.gpa, files);
+        try vision.addTensors(&m.checkpoint, m.device, files);
+        if (!vision.present(&m.checkpoint)) return error.NoGemmaVision;
+        m.vision = try vision.Vision.load(m.gpa, m.device, &m.checkpoint, m.mm);
+    }
+
     /// The drafter's taps, in its feature order: each a layer whose output (layer scalar applied) it reads.
     pub fn setTaps(m: *Model, layers: []const u32) !void {
         if (layers.len == 0 or layers.len > 8) return error.BadGemmaTaps;
@@ -84,6 +98,7 @@ pub const Model = struct {
     }
 
     pub fn deinit(m: *Model) void {
+        if (m.vision) |v| v.deinit();
         m.inv_sliding.deinit();
         m.inv_global.deinit();
         m.projections.deinit(m.gpa);
