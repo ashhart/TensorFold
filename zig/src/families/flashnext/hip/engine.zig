@@ -70,8 +70,8 @@ pub const Engine = struct {
     graphed: bool,
     graphs: Graphs,
     chosen: ?*Graphs.Entry = null,
-    /// Streams' caches at the full capacity, kept between streams so their graphs stay valid (null: not made yet).
-    pool: std.ArrayList(?cache.Caches) = .empty,
+    /// Streams' caches at the full capacity, kept between streams so their graphs stay valid.
+    pool: cache.Pool,
     /// Every rank's vote on a captured round, in buffers made with the engine (a group only).
     votes: ?hip.Votes,
     /// A rank could not take a round: every rank stops before another collective.
@@ -160,7 +160,7 @@ pub const Engine = struct {
         e.graphed = o.policy.graphs != .off;
         e.graphs = Graphs.init(gpa);
         e.chosen = null;
-        e.pool = .empty;
+        e.pool = .{};
         _ = try steps.done(.{ 0, 0 }, .first);
         return e;
     }
@@ -177,7 +177,6 @@ pub const Engine = struct {
             },
         );
         e.graphs.deinit();
-        for (e.pool.items) |*c| if (c.*) |*x| x.deinit(e.gpa);
         e.pool.deinit(e.gpa);
         if (e.votes) |*v| v.deinit();
         e.drawer.deinit();
@@ -373,19 +372,12 @@ pub const Engine = struct {
 
     /// Slot `slot`'s caches, fresh, for a new stream (made at the capacity the first time).
     pub fn lease(e: *Engine, slot: u32) !cache.Caches {
-        while (e.pool.items.len <= slot) try e.pool.append(e.gpa, null);
-        var c = if (e.pool.items[slot]) |held| held else try e.caches(e.o.capacity);
-        e.pool.items[slot] = null;
-        errdefer c.deinit(e.gpa);
-        try e.stream.synchronize();
-        try c.reset(e.eos);
-        c.id = slot;
-        return c;
+        return e.pool.lease(e.gpa, slot, e.stream, e.eos, e.o.capacity, e);
     }
 
     /// A finished stream's caches back to their slot.
     pub fn unlease(e: *Engine, c: cache.Caches) void {
-        e.pool.items[c.id] = c;
+        e.pool.unlease(c);
     }
 };
 

@@ -271,3 +271,46 @@ test "two ranks restore a state together: both resume, or both start the prompt 
     try hip.loopback.run(2, &stuck, Pair.rank);
     try std.testing.expectEqual([2]?anyerror{ error.GroupStopped, error.GroupStopped }, stuck.got);
 }
+
+/// Makes a slot's caches, counting them; `fail` makes the next one fail.
+const Maker = struct {
+    r: *const hip.runtime.Runtime,
+    made: usize = 0,
+    fail: bool = false,
+
+    pub fn caches(m: *Maker, n: usize) !cache.Caches {
+        if (m.fail) return error.OutOfMemory;
+        m.made += 1;
+        return cache.Caches.init(std.testing.allocator, m.r, dims(), &kinds, n, .bf16, eos);
+    }
+};
+
+test "a pooled slot whose reset fails keeps its buffers: the graphs that name them never see them freed" {
+    var r = Host.runtime();
+    const s: hip.Stream = .{ .r = &r, .handle = null };
+    var pool: cache.Pool = .{};
+    defer pool.deinit(std.testing.allocator);
+    var maker: Maker = .{ .r = &r };
+    var c = try pool.lease(std.testing.allocator, 0, s, eos, cap, &maker);
+    const first = c.mem.ptr;
+    bytes(&c)[3] = 1;
+    c.len = 9;
+    pool.unlease(c);
+    const freed = Host.frees;
+    Host.fail_sync = true;
+    try std.testing.expectError(error.HipFailed, pool.lease(std.testing.allocator, 0, s, eos, cap, &maker));
+    Host.fail_sync = false;
+    Host.fail_fill = true;
+    try std.testing.expectError(error.HipFailed, pool.lease(std.testing.allocator, 0, s, eos, cap, &maker));
+    Host.fail_fill = false;
+    try std.testing.expectEqual(freed, Host.frees);
+    c = try pool.lease(std.testing.allocator, 0, s, eos, cap, &maker);
+    try std.testing.expectEqual(first, c.mem.ptr);
+    try std.testing.expectEqual(@as(usize, 1), maker.made);
+    try std.testing.expectEqual(@as(u32, 0), c.id);
+    try expectFresh(&c);
+    pool.unlease(c);
+    maker.fail = true;
+    try std.testing.expectError(error.OutOfMemory, pool.lease(std.testing.allocator, 1, s, eos, cap, &maker));
+    try std.testing.expect(pool.slots.items[1] == null);
+}
