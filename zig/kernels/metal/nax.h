@@ -85,6 +85,12 @@ inline void mma_16x32(thread frag<C>& lo, thread frag<C>& hi, thread const frag<
   }
 }
 
+// frag_get from a threadgroup block in two 8-byte loads: (c + home.x) * 2 and ld * 2 must be multiples of 8.
+inline void frag_get_tg(thread frag<bfloat>& f, const threadgroup bfloat* p, int ld, int r, int c, short2 home) {
+  const threadgroup bfloat* q = p + (r + home.y) * ld + (c + home.x);
+  f = frag<bfloat>(*(const threadgroup bfloat4*)q, *(const threadgroup bfloat4*)(q + 8 * ld));
+}
+
 // Element e's column past home.x (a plain index: M5 kernels keep their exact text); its row is home.y + (e >> 2) * 8.
 #define TF_COL(e) (e & 3)
 // A transposed right operand's block (its rows are the op's columns): on M5 it loads like any other.
