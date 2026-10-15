@@ -312,8 +312,12 @@ inline tf_reg_load tf_reg_fetch(const device uint4* wl, const device uint4* sbv,
   X += (size_t)r0 * TF_K;
   Y += (size_t)r0 * TF_YS;
   XS += r0;
+#ifdef TF_FUSED
   const int lane = int(lanei), ks = int(sgi) % TF_SK, M = min(rows, 16), stride = mdims[1];
   const int tile = tf_tile(int(tg.x) * TF_TPT + int(sgi) / TF_SK), n0 = tile * NT, tp = int(sgi) / TF_SK;
+#else
+  const int lane = int(lanei), ks = int(sgi), M = min(rows, 16), stride = mdims[1], tile = tf_tile(int(tg.x)), n0 = tile * NT, tp = 0;
+#endif
   const int nb = 4 * (lane & 1) + 8 * ((lane >> 3) & 1), mb = ((lane >> 1) & 3) + 4 * ((lane >> 4) & 1);
   const int first = TF_G0 + (ks * TF_GN) / TF_SK, last = TF_G0 + ((ks + 1) * TF_GN) / TF_SK;
   constexpr auto desc = matmul2d_descriptor(16, NT, GS, false, true, false, matmul2d_descriptor::mode::multiply);
@@ -321,8 +325,8 @@ inline tf_reg_load tf_reg_fetch(const device uint4* wl, const device uint4* sbv,
   const device uint4* wl = W + (size_t)tile * KG * 64 + lane;
   const device uint4* sbv = (const device uint4*)SB;
   tf_reg_load next = {};
-  if (first < last) next = tf_reg_fetch_w(wl, sbv, first, n0 + nb); // the first weights fly while any prologue runs
 #ifdef TF_FUSED
+  if (first < last) next = tf_reg_fetch_w(wl, sbv, first, n0 + nb); // the first weights fly while the prologue runs
   const tf_fused fa = {A0, A1, A2, A3, A4, A5, O0, O1, F, I};
   threadgroup bfloat xs[TF_XROWS > 0 ? TF_XROWS * TF_K : 1];
   threadgroup float xsum[KG + 16]; // one row's sums; the 16 past the end feed the discarded rows' lanes
@@ -348,7 +352,11 @@ inline tf_reg_load tf_reg_fetch(const device uint4* wl, const device uint4* sbv,
   const half2 bias = half2(1024.0h);
   float C[16];
   for (int i = 0; i < 16; i++) C[i] = 0.0f;
+#ifdef TF_FUSED
   if (first < last) tf_reg_sums(next, xsp, first, mb, stride);
+#else
+  if (first < last) next = tf_reg_fetch(wl, sbv, xsp, first, n0 + nb, mb, stride); // main's order, unfused
+#endif
   for (int g = first; g < last; g++) {
     const tf_reg_load cur = next;
     for (int w = 0; w < 8; w++) {
