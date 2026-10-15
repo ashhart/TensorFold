@@ -13,6 +13,7 @@ const check = @import("slide_verify.zig");
 const replace = @import("slide_replace.zig");
 const slide_graph = @import("slide_graph.zig");
 const slide_teacher = @import("slide_teacher.zig");
+const talks = @import("slide_context.zig");
 const log = @import("log.zig");
 const Gone = @import("openai.zig").Gone;
 const Server = @import("server.zig").Server;
@@ -127,7 +128,8 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         if (back) slide_teacher.refresh(srv, &cx, &srv.teacher, plan.stale, gone) catch srv.teacher.forgetAnswers(srv.io);
         if (result.why) |why| srv.slide.note(id, why);
         srv.slide.mark(id, if (back) .learned else .missed);
-        if (back and document) for (plan.held) |h| if (h.subject.len > 0) srv.teacher.remember(h.subject, h.question, h.answer) catch {};
+        if (back) talks.chainAfter(srv, id, plan);
+        if (back and document) for (plan.held) |h| if (h.subject.len > 0 and h.context.len == 0) srv.teacher.remember(h.subject, h.question, h.answer) catch {};
         if (result.why) |why| {
             out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps, .message = why });
         } else out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps });
@@ -218,12 +220,12 @@ fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Go
     return out;
 }
 
-/// The wordings a lesson's checks ask: its held-out questions, then the ones it never learned.
+/// The wordings a lesson's checks ask cold: its held-out questions, then the ones it never learned.
 fn questions(a: Allocator, plan: teach.Plan) []const []const u8 {
-    const out = a.alloc([]const u8, plan.held.len + plan.probes.len) catch return &.{};
-    for (plan.held, out[0..plan.held.len]) |h, *q| q.* = h.question;
-    for (plan.probes, out[plan.held.len..]) |h, *q| q.* = h.question;
-    return out;
+    var out: std.ArrayList([]const u8) = .empty;
+    for (plan.held) |h| if (h.context.len == 0) out.append(a, h.question) catch return &.{};
+    for (plan.probes) |h| out.append(a, h.question) catch return &.{};
+    return out.items;
 }
 
 /// Every kept lesson into the model's shards, timed, with the shards it changed.
