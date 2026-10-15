@@ -145,7 +145,7 @@ For Qwen, each image request carries its own multimodal rotary positions and con
 ## The native server
 
 `tensorfold-native serve` takes `--vision`, `--vision-max-images` (default 4) and `--vision-image-tokens` (default
-4,096) for engines that read images; GLM-5.3-Flash on one Mac and Nemotron 3.5 Super VL on CUDA read them so far, and
+4,096; 13,312 for Nemotron 3.5 Super VL) for engines that read images; GLM-5.3-Flash on one Mac and Nemotron 3.5 Super VL on CUDA read them so far, and
 other native engines refuse the flag at startup.
 
 - Images arrive as `image_url` data URLs in user messages and tool results. With `--vision-urls` (it needs
@@ -212,9 +212,10 @@ TensorFold's CUDA kernels (`zig/src/families/radio/`).
 - **Processor:** the checkpoint's. Each image becomes one tile whose patch grid (16 pixels a patch, an even number each
   way) holds 1,024 to 13,312 patches, resized with torch's antialiased bicubic on float samples and normalized with
   CLIP's mean and deviation. The pixels equal the checkpoint processor's bit for bit. An image takes a quarter of its
-  patches as tokens (256 to 3,328), written between `<img>` and `</img>`.
-- **Budget:** a request's images share `--vision-image-tokens`, so at the default of 4,096 one image keeps its full
-  size and several images are made smaller. Four full-size images need `--vision-image-tokens 13312`.
+  patches as tokens (at most 3,328), written between `<img>` and `</img>`.
+- **Budget:** a request's images share `--vision-image-tokens`, 13,312 by default for Super VL, so up to four images
+  keep the size NVIDIA's processor gives them; a smaller budget makes them smaller. Four full-size images on one GB10
+  took 13,124 prompt tokens and 11.45 s to the first token.
 - **Tower:** the checkpoint's bf16 weights as stored, bf16 activations and fp32 sums. Against a float32 run of the
   checkpoint's own modules on the same pixels, its rows' error equals the modules' own bf16 run's (1.2% to 1.9% a row,
   relative, on six pictures). The tower and projector take about 2.1 GiB of GPU memory beside the language model, and
