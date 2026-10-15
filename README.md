@@ -75,7 +75,7 @@ The platform column names the hardware tested for each model.
 | GLM-5.3-Flash | MLX affine 4-bit, group 64 | Metal on two M5 Ultras |
 | GLM-5.3 | EXLR8 `home` profile (trellis K2/K3/K4 experts) | Metal on two M5 Ultras |
 | Qwen3.5-2B | Pinned MLX affine 4-bit, group 64, tied embeddings | Metal on M5 Max |
-| Qwen3.8-27B | MLX affine 4-bit, group 64, own output head; DFlash2 drafter | Metal on M5 Max and M3 Ultra |
+| Qwen3.8-27B | MLX affine 4-bit, group 64, own output head; DFlash2 drafter; images with `--vision` ([image input](docs/vision.md#qwen38-27b)) | Metal on M5 Max and M3 Ultra |
 | LFM2.5-24B-A2B | MLX affine 4-, 6- or 8-bit, group 64, tied embeddings | Metal on M4 Pro |
 
 Nemotron's named checkpoint is `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit`.

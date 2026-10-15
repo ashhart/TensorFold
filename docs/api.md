@@ -72,11 +72,11 @@ chat fields that shape the prompt (`tools`, `reasoning_effort`, `chat_template_k
 request, images and videos expanded. `/detokenize` takes `tokens` and returns `prompt`.
 In the Python 0.6.6 engine, `--vision` lets supported Qwen3.5/3.8 dense checkpoints accept `image_url` content parts
 alongside text in user messages and in tool results (`role: "tool"`), such as an agent's screenshots. The native
-server reads images for GLM-5.3-Flash on Metal, with data URLs, and public HTTPS URLs under `--vision-urls`
-([image input](vision.md#the-native-server)); it also takes `video_url` parts in user messages
-([video](vision.md#video-on-the-native-server)).
+server reads images for GLM-5.3-Flash and Qwen3.8-27B on Metal, with data URLs, and public HTTPS URLs under
+`--vision-urls` ([image input](vision.md#the-native-server)); for GLM-5.3-Flash it also takes `video_url` parts in
+user messages ([video](vision.md#video-on-the-native-server)).
 See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
-The native binary refuses `--vision` and answers image parts with HTTP 400.
+The native binary refuses `--vision` for other models and answers their image parts with HTTP 400.
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.
 
 ## Decisions
@@ -469,8 +469,8 @@ the conversations. `DELETE /v1/imprint` clears one model's states; deleting the 
 same handler and engine path. A response has that chat completion's prompt and tokens (the `tensorfold` block's
 `token_sha` matches), drafts, and equals its `"draft": false` run and its solo run.
 
-- `input` is a string or a list of items: messages (`input_text`, and `input_image` on a Python 0.6.6 server started
-  with `--vision`; the native binary answers images with HTTP 400), `function_call`, `function_call_output` (its
+- `input` is a string or a list of items: messages (`input_text`, and `input_image` on a server started with
+  `--vision` for a model that reads images), `function_call`, `function_call_output` (its
   `output` text, or `input_text` and `input_image` parts, the images again only with `--vision`), and `reasoning`
   items with their `content` text, which the template gets
   back as the next assistant message's `reasoning_content`. `instructions` becomes the system message and is not
@@ -517,8 +517,8 @@ strings, is refused.
 The Messages routes reuse the same chat handler and engine on MLX and CUDA. They accept `system`, text/image
 blocks (including mid-conversation system text), `tool_use`/`tool_result`, custom tools and `tool_choice`, sampling, `stop_sequences`, `thinking`
 (disabled, enabled with `budget_tokens`, or adaptive), and `output_config` effort/JSON schema. Image support
-requires a vision-capable model served with `--vision`, which only the Python 0.6.6 engine has; the native binary
-answers image blocks with HTTP 400. Thinking is off unless enabled or adaptive. It round-trips as plaintext with an
+requires a vision-capable model served with `--vision` (natively GLM-5.3-Flash and Qwen3.8-27B on a Mac); other
+models answer image blocks with HTTP 400. Thinking is off unless enabled or adaptive. It round-trips as plaintext with an
 empty signature;
 `display` does not suppress it. Claude Code's `context_management` keep-all thinking directive is accepted. Mid-conversation system text stays
 in place with its system role; the model's chat template must support later system messages. Turn-scoped

@@ -1,8 +1,9 @@
 # Image input
 
-This page describes image input in the Python engine, frozen at 0.6.6. Install that engine from the
-[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6) to serve images. The native binary refuses every
-`--vision` flag at startup, reads no vision tower, and answers image parts with HTTP 400.
+This page describes image input in the Python engine, frozen at 0.6.6, until [The native server](#the-native-server),
+which covers the native binary: it reads images for GLM-5.3-Flash and Qwen3.8-27B on a Mac and refuses `--vision`
+for other models. Install the Python engine from the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6) for the rest.
 Parts of it came from pull requests: GLM-5.3-Flash images by @mgoldwasser
 ([#101](https://github.com/ashhart/TensorFold/pull/101)), Flash Next images on CUDA by @shantanugoel
 ([#146](https://github.com/ashhart/TensorFold/pull/146)) from @MiaAI-Lab's patch, video by @MiaAI-Lab
@@ -145,8 +146,8 @@ For Qwen, each image request carries its own multimodal rotary positions and con
 ## The native server
 
 `tensorfold-native serve` takes `--vision`, `--vision-max-images` (default 4) and `--vision-image-tokens` (default
-4,096) for engines that read images; GLM-5.3-Flash on one Mac reads them so far, and other native engines refuse the
-flag at startup.
+4,096) for engines that read images: GLM-5.3-Flash and Qwen3.8-27B on one Mac. Other native engines refuse the flag
+at startup.
 
 - Images arrive as `image_url` data URLs in user messages and tool results. With `--vision-urls` (it needs
   `--vision`), a part may name a public HTTPS URL instead, fetched as 0.6.6 fetched it: port 443 without credentials
@@ -170,10 +171,32 @@ flag at startup.
   `zig/tests/fixtures/lfm2/images.json` and `zig/tests/fixtures/picture/edges.json`, except where it departs on
   purpose: a CMYK JPEG is refused, and a JPEG holding several pictures (MPO) gives its first, which 0.6.6 refused.
 - Images are counted from the request's image parts. A user or tool message whose text spells the model's image
-  markers (`<|image|>`, `<|begin_of_image|>`, `<|end_of_image|>`) is tokenized as ordinary text, so only the chat
-  template's own markers, one wrapper for each image part, become image tokens.
+  markers (GLM's `<|image|>`, `<|begin_of_image|>`, `<|end_of_image|>`; Qwen's `<|vision_start|>`, `<|image_pad|>`,
+  `<|vision_end|>`) is tokenized as ordinary text, so only the chat template's own markers, one wrapper for each image
+  part, become image tokens.
 - The prompt cache keys each image's placeholder rows by the image's content, so a kept state resumes the same image
   and never another one under the same placeholders. Image conversations reuse their history like text ones.
+
+### Qwen3.8-27B
+
+With `--vision`, the 27B loads its checkpoint's image tower (the `vision_tower.*` tensors of
+`TensorFold/Qwen3.8-27B-MLX-4bit`, kept in bf16) beside the language model. Without the flag nothing of the tower
+loads. An image is prepared as transformers' Qwen2-VL processor prepares it: decoded as above, sized by `smart_resize`
+to multiples of 32 pixels between the processor's 65,536 pixels and the image's share of `--vision-image-tokens`
+(split evenly over the request's images, 1,024 pixels a token, at most 16,777,216 pixels), resized with Pillow's
+bicubic, and cut into 16-pixel patches. The tower runs once an image as its request's prompt pass starts, on the GPU
+in bf16 with fp32 sums. Its 2 x 2 merged rows replace the `<|image_pad|>` placeholders' embeddings. The text's
+attention layers turn each image row by its row and column (M-RoPE), and the rows after an image carry the shift those
+positions leave, through decoding, drafts and later turns. Text-only requests get the tokens they got without the
+flag. Video parts are refused with HTTP 400.
+
+The tower, its scratch and a request's image rows take 1.79 GiB at the default 4,096 image tokens, and the server
+counts them against the 70% load limit and the prompt cache's budget. On an M3 Ultra, six test pictures got the
+processor's grids, token counts and patches bit for bit, and the tower's rows came closer to transformers' float32
+tower than its bf16 run does (mean row error 1.0 to 2.2% against 1.6 to 4.1%). A 1,120-token photo takes 0.6 s in the
+tower there. With an image, drafted replies equal `"draft": false`, four requests at once equal each alone, a later
+turn resumes past its image and equals a fresh server's reply, and DFlash2 keeps 2.6 to 3.0 tokens a round where the
+same asks without the image get 2.8 to 3.4.
 
 ### Video on the native server
 
