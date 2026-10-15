@@ -270,6 +270,15 @@ inline float tf_tq_code(const thread uint* w, int k) {
 template <int BITS> struct TfTqCols { static constant constexpr int value = 4; };
 constant constexpr int TQ_SG = 2;
 
+// A 4-bit word's eight codes in k order as exact integers: codes i and i + 4 as half 1024 + code, minus 1024.
+inline void tf_tq4_codes(uint word, thread float* cf) {
+  #pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const half2 h = as_type<half2>(((word >> (4 * i)) & 0x000F000Fu) | 0x64006400u) - half2(1024.0h);
+    cf[i] = float(h.x); cf[i + 4] = float(h.y);
+  }
+}
+
 // Group g's 64-step fma chains (the MMA order) and input sum; each code decoded to its integer, as in the tiles.
 template <int BITS, int NC>
 inline float tf_tq_group(const device bfloat* x, const device uint8_t* w, size_t stride, int g, thread float* p, float one) {
@@ -299,9 +308,10 @@ inline float tf_tq_group(const device bfloat* x, const device uint8_t* w, size_t
     if (BITS == 4) {
       #pragma unroll
       for (int c = 0; c < NC; ++c) {
-        const uint word = wq[c][kb];
+        float cf[8];
+        tf_tq4_codes(wq[c][kb], cf);
         #pragma unroll
-        for (int j = 0; j < 8; ++j) p[c] = fma(xf[j], float((word >> (4 * j)) & 0xFu), p[c]);
+        for (int j = 0; j < 8; ++j) p[c] = fma(xf[j], cf[j], p[c]);
       }
     } else {
       // Codes 8 kb.. of this group sit in the two words from bit 8 kb BITS (48 or 64 bits).
@@ -356,9 +366,12 @@ inline void tf_tq_group_rows(const device bfloat* x, int K, int rows, const devi
         xf[j] = v;
       }
       #pragma unroll
-      for (int c = 0; c < NC; ++c)
+      for (int c = 0; c < NC; ++c) {
+        float cf[8];
+        tf_tq4_codes(wq[c][kb], cf);
         #pragma unroll
-        for (int j = 0; j < 8; ++j) p[r][c] = fma(xf[j], float((wq[c][kb] >> (4 * j)) & 0xFu), p[r][c]);
+        for (int j = 0; j < 8; ++j) p[r][c] = fma(xf[j], cf[j], p[r][c]);
+      }
     }
   }
 }
