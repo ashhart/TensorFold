@@ -3,7 +3,7 @@ const std = @import("std");
 
 pub const Kind = enum { mamba, moe, attention };
 
-pub const max_layers = 64;
+pub const max_layers = 96;
 
 /// The MTP head's acceptance at depth 1, 2, ... given the ones before it, until a stream has its own (model.py draft_prior).
 pub const draft_prior = [_]f64{ 0.8, 0.72, 0.68, 0.62, 0.58, 0.55, 0.5, 0.5 };
@@ -59,6 +59,12 @@ pub const Config = struct {
     format: Format = .mlx,
     eos: [4]u32 = .{ 0, 0, 0, 0 },
     eos_count: usize = 0,
+    latent: usize = 0, // moe_latent_size: routed experts read and write this width between two bf16 projections
+    omni: bool = false, // nemotron_h_omni: the text model's tensors sit under "language_model."
+    shares: usize = 1, // latent MoE: expert widths cut in this many shares, summed in share order on every TP world
+    held: ?usize = null, // a split checkpoint (tensorfold_tp): the one share its expert tensors hold
+    rank: usize = 0, // this process's tensor-parallel rank of `world`: set at load, never by config.json
+    world: usize = 1,
 
     pub fn inner(self: Config) usize {
         return self.mamba_heads * self.mamba_head_dim;
@@ -76,9 +82,19 @@ pub const Config = struct {
         return (self.heads + 2 * self.kv_heads) * self.head_dim;
     }
 
-    /// A token's expert pairs: its routed experts, then the shared expert's two halves.
+    /// A token's expert pairs: its routed experts, then the shared expert's two halves (a latent MoE runs it apart).
     pub fn slots(self: Config) usize {
-        return self.top_k + 2;
+        return if (self.latent > 0) self.top_k else self.top_k + 2;
+    }
+
+    /// Where the text model's tensor names start.
+    pub fn prefix(self: Config) []const u8 {
+        return if (self.omni) "language_model." else "";
+    }
+
+    /// The expert width shares this rank holds and sums before the ranks meet.
+    pub fn ownShares(self: Config) usize {
+        return self.shares / self.world;
     }
 
     pub fn count(self: Config, kind: Kind) usize {
@@ -96,7 +112,7 @@ pub const Config = struct {
     pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Config {
         const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
         defer gpa.free(path);
-        const text = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 22));
+        const text = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 25)); // ModelOpt names every module
         defer gpa.free(text);
         var why: Why = .{};
         return parse(gpa, text, &why) catch |e| {
@@ -118,8 +134,17 @@ fn number(v: std.json.Value) !f64 {
     return switch (v) {
         .float => |f| f,
         .integer => |i| @floatFromInt(i),
+        .object => |o| inf(o) orelse error.BadConfig, // transformers writes an infinite limit as {"__float__": "Infinity"}
         else => error.BadConfig,
     };
+}
+
+fn inf(o: std.json.ObjectMap) ?f64 {
+    const s = o.get("__float__") orelse return null;
+    if (s != .string) return null;
+    if (std.mem.eql(u8, s.string, "Infinity")) return std.math.inf(f64);
+    if (std.mem.eql(u8, s.string, "-Infinity")) return -std.math.inf(f64);
+    return null;
 }
 
 fn float(obj: std.json.ObjectMap, key: []const u8) !f32 {
@@ -139,6 +164,11 @@ fn quantBlock(o: std.json.ObjectMap) ?std.json.ObjectMap {
         if (o.get(key)) |v| if (v == .object and v.object.count() > 0) return v.object;
     }
     return null;
+}
+
+/// ModelOpt's quant_method: "modelopt", or "modelopt_mixed" where layers mix FP8 and NVFP4.
+fn modelopt(m: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(m, "modelopt") or std.ascii.eqlIgnoreCase(m, "modelopt_mixed");
 }
 
 /// A quantization block's own fields; every other key names a module.
@@ -169,7 +199,7 @@ fn quantization(c: *Config, o: std.json.ObjectMap, why: *Why) !void {
         why.set("config.json declares no quantization; the native Nemotron kernels read MLX affine checkpoints", .{});
         return error.UnsupportedQuantization;
     };
-    if (q.get("quant_method")) |m| if (m == .string and std.ascii.eqlIgnoreCase(m.string, "modelopt")) {
+    if (q.get("quant_method")) |m| if (m == .string and modelopt(m.string)) {
         c.format = .modelopt; // the CUDA loader reads each projection's format from its tensors
         return;
     };
@@ -225,7 +255,10 @@ fn learned(path: []const u8) bool {
 pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
     defer parsed.deinit();
-    const o = parsed.value.object;
+    const top = parsed.value.object;
+    // nemotron_h_omni wraps the text model's config in llm_config; quantization and our split stay at the top
+    const omni = std.mem.eql(u8, (top.get("model_type") orelse return error.BadConfig).string, "nemotron_h_omni");
+    const o = if (omni) ((top.get("llm_config") orelse return error.BadConfig).object) else top;
     if (!std.mem.eql(u8, (o.get("model_type") orelse return error.BadConfig).string, "nemotron_h")) return error.NotNemotronH;
     var c = Config{
         .hidden = try int(o, "hidden_size"),
@@ -280,8 +313,34 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
         c.dt_min = @floatCast(try number(v.array.items[0]));
         c.dt_max = @floatCast(try number(v.array.items[1]));
     };
-    try quantization(&c, o, why);
+    c.omni = omni;
+    if (o.get("moe_latent_size")) |v| if (v == .integer and v.integer > 0) {
+        c.latent = @intCast(v.integer);
+        c.shares = 2;
+        try split(&c, top, why);
+    };
+    try quantization(&c, top, why);
     return c;
+}
+
+/// A latent MoE's share widths, and the one share a split checkpoint holds (tensorfold_tp, our own split's record).
+fn split(c: *Config, top: std.json.ObjectMap, why: *Why) !void {
+    if (c.expert_width % (64 * c.shares) != 0 or c.shared_width % (64 * c.shares) != 0 or c.latent % 64 != 0) {
+        why.set("expert widths {d} and {d} do not cut into {d} shares of whole 64-wide groups", .{ c.expert_width, c.shared_width, c.shares });
+        return error.BadConfig;
+    }
+    const v = top.get("tensorfold_tp") orelse return;
+    if (v != .object) return error.BadConfig;
+    const t = v.object;
+    const scheme = t.get("scheme") orelse return error.BadConfig;
+    const ok = scheme == .string and std.mem.eql(u8, scheme.string, "moe_width") and width(t, "world", 0) == c.shares and
+        width(t, "routed_width", 0) == c.expert_width / c.shares and width(t, "shared_width", 0) == c.shared_width / c.shares;
+    const r = t.get("rank") orelse return error.BadConfig;
+    if (!ok or r != .integer or r.integer < 0 or r.integer >= c.shares) {
+        why.set("tensorfold_tp {f} is not a {d}-share cut of these expert widths", .{ std.json.fmt(v, .{}), c.shares });
+        return error.BadConfig;
+    }
+    c.held = @intCast(r.integer);
 }
 
 /// The shapes our kernels serve (Nemotron 3.5 Lightning 30B-A3B, 4-bit groups of 64): Metal's generated sources, CUDA's captured cubins.
@@ -371,4 +430,29 @@ test "parse the Lightning config" {
     try std.testing.expect(c.isEos(11) and !c.isEos(3));
     try std.testing.expectEqual(std.math.inf(f32), c.dt_max);
     try checkShapes(c);
+}
+
+const super_text =
+    \\{"model_type": "nemotron_h_omni", "quantization_config": {"quant_method": "modelopt_mixed"},
+    \\ "tensorfold_tp": {"rank": 1, "world": 2, "routed_width": 1344, "shared_width": 2688, "scheme": "moe_width"},
+    \\ "llm_config": {"model_type": "nemotron_h", "hidden_size": 4096, "vocab_size": 131072, "mamba_num_heads": 128,
+    \\ "mamba_head_dim": 64, "n_groups": 8, "ssm_state_size": 128, "conv_kernel": 4, "num_attention_heads": 32,
+    \\ "num_key_value_heads": 2, "head_dim": 128, "n_routed_experts": 512, "num_experts_per_tok": 22,
+    \\ "moe_intermediate_size": 2688, "moe_shared_expert_intermediate_size": 5376, "moe_latent_size": 1024,
+    \\ "routed_scaling_factor": 5.0, "layer_norm_epsilon": 1e-05, "eos_token_id": 11,
+    \\ "time_step_limit": [0.0, {"__float__": "Infinity"}], "layers_block_type": ["mamba", "moe", "attention"]}}
+;
+
+test "nemotron_h_omni: the text config under llm_config, latent shares, a split checkpoint's share" {
+    var why: Why = .{};
+    const c = try parse(std.testing.allocator, super_text, &why);
+    try std.testing.expect(c.omni and c.format == .modelopt and c.latent == 1024 and c.shares == 2 and c.held.? == 1);
+    try std.testing.expectEqual(@as(usize, 22), c.slots());
+    try std.testing.expectEqualStrings("language_model.", c.prefix());
+    try std.testing.expectEqual(std.math.inf(f32), c.dt_max);
+    try std.testing.expectEqual(@as(usize, 18560), c.projDim());
+    const bad = try std.mem.replaceOwned(u8, std.testing.allocator, super_text, "\"routed_width\": 1344", "\"routed_width\": 1024");
+    defer std.testing.allocator.free(bad);
+    try std.testing.expectError(error.BadConfig, parse(std.testing.allocator, bad, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why.text(), "tensorfold_tp") != null);
 }
