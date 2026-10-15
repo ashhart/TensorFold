@@ -12,6 +12,7 @@ constexpr int HD = 256;   // attention head width
 constexpr int MAXQ = 32;  // attention query heads at most
 constexpr int MAXW = 16;  // a window's rows at most (the log's rows a stream)
 constexpr int MAXCH = 64; // attention chunks a row at most (cuda_engine.zig's max_chunks)
+constexpr int MAXR = 128;  // a forward's rows at most (cuda_engine.zig's max_rows): an image chunk's position rows
 
 // The model's widths: hidden, linear key heads, linear value heads, attention query and key/value heads, linear layers.
 struct Geo {
@@ -31,6 +32,7 @@ struct Seg {
     unsigned long long tap;   // a drafter's ring of tapped rows (0: none): slot pos % tap_rows, taps * hid bf16 each
     unsigned long long log;   // the window's rows' records (MAXW rows of nl layers of log_bytes), for keep
     int cap, len, row0, rows, tap_rows, taps;
+    int delta;                // an image prompt's rotary shift: rows past it rotate at position + delta
 };
 
 // A window row's record of one linear layer (Seg.log).

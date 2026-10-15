@@ -36,6 +36,15 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_embed8(const int* __res
     }
 }
 
+// Image rows into a prompt chunk's embeddings: row m of H (D wide) takes feature row src[m] where src[m] >= 0.
+extern "C" __global__ void __launch_bounds__(256) tf_q35_splice(__nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ F,
+                                                                  const int* __restrict__ src, int D, const int* __restrict__ P) {
+    if (past_rows(P, blockIdx.x)) return;
+    const int s = src[blockIdx.x];
+    if (s < 0) return;
+    for (int i = threadIdx.x; i < D; i += blockDim.x) H[(size_t)blockIdx.x * D + i] = F[(size_t)s * D + i];
+}
+
 // h = bf16(h + r) (r may be null), x = bf16(w * (h * inv)); D a multiple of 256 up to 8192; a 256-thread block a row.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_norm(__nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ R,
                                                                const __nv_bfloat16* __restrict__ W, __nv_bfloat16* __restrict__ X, float eps, int D,
@@ -308,11 +317,14 @@ extern "C" __global__ void __launch_bounds__(64) tf_q35_head_norm(const __nv_bfl
     }
 }
 
-// Text RoPE on the first 64 of HD: pairs (i, i + 32) turned by position * theta^(-i / 32).
-__device__ __forceinline__ __nv_bfloat16 rotate(const __nv_bfloat16* x, int d, int position) {
+// M-RoPE's interleaved sections (mrope_section 11, 11, 10): frequency i turns by the t, h or w position.
+__device__ __forceinline__ int mrope_axis(int i) { return (i % 3 == 1 && i < 33) ? 1 : ((i % 3 == 2 && i < 30) ? 2 : 0); }
+
+// RoPE on the first 64 of HD: pairs (i, i + 32) turned by pos[axis(i)] * theta^(-i / 32); text has one position.
+__device__ __forceinline__ __nv_bfloat16 rotate(const __nv_bfloat16* x, int d, const int pos[3]) {
     if (d >= 64) return x[d];
     const int i = d % 32;
-    const float angle = (float)position * powf(10000000.0f, -(float)i / 32.0f);
+    const float angle = (float)pos[mrope_axis(i)] * powf(10000000.0f, -(float)i / 32.0f);
     float sn, cs;
     sincosf(angle, &sn, &cs);
     const float a = bf(x[i]), b = bf(x[i + 32]);
@@ -336,13 +348,17 @@ __device__ __forceinline__ int seen_row(unsigned anc, int n) {
 extern "C" __global__ void __launch_bounds__(256) tf_q35_rope(Geo geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
                                                                 const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
                                                                 const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc, int layer,
-                                                                const int* __restrict__ P) {
+                                                                const int* __restrict__ P, const int* __restrict__ M) {
     const int QH = geo.qh, KVH = geo.kvh;
     const int d = threadIdx.x;
     if (past_rows(P, blockIdx.x)) return;
     const size_t m = blockIdx.x;
     const Seg sg = segs[rowseg[m]];
-    const int pos = sg.len + rows_seen(rowanc[m]) - 1;
+    // an image prompt's chunk reads each row's t, h and w positions from M ([3][MAXR]); other rows are shifted text
+    const int text = sg.len + rows_seen(rowanc[m]) - 1 + sg.delta;
+    int pos[3] = {text, text, text};
+    if (M != nullptr)
+        for (int a = 0; a < 3; a++) pos[a] = M[a * MAXR + m];
     const int slot = sg.len + (int)m - sg.row0;
     __shared__ __nv_bfloat16 qs[MAXQ * HD];
     for (int h = 0; h < QH; h++) qs[h * HD + d] = Qn[(m * QH + h) * HD + d];

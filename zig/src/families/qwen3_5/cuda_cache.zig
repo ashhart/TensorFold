@@ -11,7 +11,7 @@ const DeviceBuffer = cuda.DeviceBuffer;
 pub const tap_rows = 2048 + engine.max_rows;
 
 /// qwen35.cuh's Seg and Path.
-pub const Seg = extern struct { rec: u64, conv: u64, kv: u64, tap: u64, log: u64, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int, taps: c_int };
+pub const Seg = extern struct { rec: u64, conv: u64, kv: u64, tap: u64, log: u64, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int, taps: c_int, delta: c_int };
 pub const Path = extern struct { n: c_int, rows: [engine.most_window]c_int };
 
 pub const Cache = struct {
@@ -28,6 +28,8 @@ pub const Cache = struct {
     logits: []u16,
     /// The newest verify window of more than one row, until its path is kept: where it started, its rows.
     last: ?struct { start: usize, rows: usize } = null,
+    /// An image prompt's rotary shift (get_rope_index's rope_delta): rows after its prompt rotate at position + delta.
+    delta: i32 = 0,
 
     pub fn init(gpa: std.mem.Allocator, e: *const Engine, cap: usize) !Cache {
         var state = try DeviceBuffer.alloc(e.d, e.g.stateBytes());
@@ -53,6 +55,7 @@ pub const Cache = struct {
         self.len = 0;
         self.written = 0;
         self.last = null;
+        self.delta = 0;
         try self.state.fill8(0, e.stream.handle);
     }
 
@@ -67,7 +70,7 @@ pub const Cache = struct {
     /// The stream's window of `rows` rows from forward row `row0`, after `len` cached positions.
     pub fn seg(self: *const Cache, e: *const Engine, len: usize, row0: usize, rows: usize) Seg {
         const g = e.g;
-        return .{ .rec = self.state.ptr, .conv = self.state.ptr + g.deltas() * g.recBytes(), .kv = self.kv.ptr, .tap = if (self.tap) |t| t.ptr else 0, .log = self.log.ptr, .cap = @intCast(self.cap), .len = @intCast(len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = tap_rows, .taps = @intCast(e.n_taps) };
+        return .{ .rec = self.state.ptr, .conv = self.state.ptr + g.deltas() * g.recBytes(), .kv = self.kv.ptr, .tap = if (self.tap) |t| t.ptr else 0, .log = self.log.ptr, .cap = @intCast(self.cap), .len = @intCast(len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = tap_rows, .taps = @intCast(e.n_taps), .delta = self.delta };
     }
 
     /// Keeps `path` (window rows, ascending from 0): the state as that chain would leave it, a tree's keys moved down.

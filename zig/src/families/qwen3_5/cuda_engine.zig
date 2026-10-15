@@ -80,13 +80,21 @@ const Fns = struct {
     mlp_act: cuda.Function,
     argmax: cuda.Function,
     tap: cuda.Function,
+    splice: cuda.Function,
 };
 
 /// qwen35_keep.cu's kernels (Cache.keep).
 pub const Keeps = struct { apply: cuda.Function, conv: cuda.Function, compact: cuda.Function };
 
 /// A window of one stream in a forward: `parents`, for a tree, names each row's parent row (-1: the first row).
-pub const Part = struct { cache: *Cache, rows: usize, parents: ?[]const i32 = null };
+pub const Part = struct { cache: *Cache, rows: usize, parents: ?[]const i32 = null, images: ?*const Images = null };
+
+/// An image prompt's rows for its prompt chunks: device feature rows, each prompt row's feature row, its positions.
+pub const Images = struct {
+    features: u64, // bf16 [image rows, hidden]
+    src: []const i32, // [prompt]: a feature row, or -1 for text
+    pos: []const i32, // [3][prompt]: t, h and w rotary positions (get_rope_index)
+};
 
 /// What a forward keeps: a prompt chunk its last row's logits, a verify window every row's draw or logits and log.
 pub const Keep = union(enum) { last, draws: []const Draw, logits };
@@ -159,6 +167,8 @@ pub const Engine = struct {
     /// A drafter's tapped layers (`setTaps`): each row's residual after them lands in its stream's tap ring.
     taps: [8]u32 = undefined,
     n_taps: usize = 0,
+    /// During an image prompt chunk's forward: its feature rows (0: none); the chunk's src and positions are staged.
+    features: u64 = 0,
 
     const ids_at = 0;
     const segs_at = max_rows * 4;
@@ -169,7 +179,9 @@ pub const Engine = struct {
     const meta_at = rules_at + most_verify * @sizeOf(cuda.sample.Rule);
     const tokens_at = meta_at + most_verify * 4;
     const params_at = tokens_at + most_verify * 4; // two unused words, the rows, the windows, record
-    const tables_len = params_at + 8 * 4;
+    const src_at = params_at + 8 * 4; // an image chunk's rows' feature rows
+    const mpos_at = src_at + max_rows * 4; // and their t, h and w positions, max_rows apart (qwen35.cuh's MAXR)
+    const tables_len = mpos_at + 3 * max_rows * 4;
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -187,6 +199,7 @@ pub const Engine = struct {
         e.arena_at = 0;
         e.graphs = .empty;
         e.n_taps = 0;
+        e.features = 0;
         e.stream = try cuda.Stream.init(d, true);
         errdefer e.stream.deinit();
         e.arena = try DeviceBuffer.alloc(d, weights.total(g) + try e.scratch(.measure));
@@ -403,6 +416,7 @@ pub const Engine = struct {
         if (keep == .draws and keep.draws.len != total) return error.InvalidQwenSegments;
         for (ids) |id| if (id >= g.vocab) return error.InvalidQwenToken;
         for (parts) |p| if (p.parents != null and !record) return error.InvalidQwenParents;
+        for (parts) |p| if (p.images != null and record) return error.InvalidQwenImages;
         const heads: usize = if (record) total else 1;
         // the prompt GEMM only for prompt chunks: a window's rows keep the bits of one-row steps
         const prompt = !record;
@@ -431,7 +445,17 @@ pub const Engine = struct {
         params[2] = @intCast(total);
         params[3] = @intCast(parts.len);
         params[4] = @intFromBool(record);
-        try e.tables.uploadAsync(0, st, e.stream.handle);
+        // an image prompt's chunk (one part, its rows at prompt positions len..): feature rows and t, h, w positions
+        const images: ?*const Images = if (record) null else parts[0].images;
+        if (images) |im| {
+            const p0 = parts[0].cache.len;
+            if (p0 + total > im.src.len or im.pos.len != 3 * im.src.len) return error.InvalidQwenImages;
+            const n = im.src.len;
+            @memcpy(std.mem.bytesAsSlice(i32, st[src_at..][0 .. total * 4]), im.src[p0..][0..total]);
+            const mpos = std.mem.bytesAsSlice(i32, st[mpos_at..][0 .. 3 * max_rows * 4]);
+            for (0..3) |a| @memcpy(mpos[a * max_rows ..][0..total], im.pos[a * n + p0 ..][0..total]);
+        }
+        try e.tables.uploadAsync(0, st[0..if (images != null) tables_len else src_at], e.stream.handle); // text: as before
         // a captured forward covers a row bucket and every window; kernels read the true counts; a lone step is exact
         const lone = total == 1 and parts.len == 1;
         const bucket: usize = if (lone) 1 else if (total <= 16) 16 else most_verify;
@@ -439,6 +463,8 @@ pub const Engine = struct {
         const shape: Shape = .{ .total = @intCast(if (prompt) total else bucket), .nseg = @intCast(if (prompt) parts.len else windows), .record = record, .prompt = prompt, .taps = e.n_taps > 0 };
         if (prompt) {
             // uncaptured: a prompt chunk's GEMMs dwarf its launches, and each length's graph would pay the stall
+            e.features = if (images) |im| im.features else 0;
+            defer e.features = 0;
             try e.body(shape);
         } else {
             const gop = try e.graphs.getOrPut(e.gpa, shape.key());
@@ -515,6 +541,9 @@ pub const Engine = struct {
         const group = g.q_heads / g.kv_heads;
 
         try e.embed(t_ids, e.h, total, t_params);
+        // an image chunk's rows take the tower's features, and rotate at their staged t, h, w positions
+        const mpos: u64 = if (e.features != 0) e.tables.ptr + mpos_at else 0;
+        if (e.features != 0) try e.run(e.fns.splice, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, e.features, e.tables.ptr + src_at, @as(c_int, @intCast(g.hidden)), t_params });
         var di: usize = 0;
         var ai: c_int = 0;
         for (e.layers, 0..) |l, i| {
@@ -540,7 +569,7 @@ pub const Engine = struct {
                     try e.proj(m.v, e.x, e.vraw, total, prompt);
                     try e.run(e.fns.head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
                     try e.run(e.fns.head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
-                    try e.run(e.fns.rope, .{ total, 1, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, t_anc, ai, t_params });
+                    try e.run(e.fns.rope, .{ total, 1, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, t_anc, ai, t_params, mpos });
                     try e.run(e.fns.attn_partial, .{ max_chunks, g.kv_heads, total }, .{ 32 * group, 1, 1 }, .{ geo, e.qn, t_segs, t_rows, t_anc, ai, t_params, @as(f32, 1.0 / 16.0), e.pm, e.pl, e.po });
                     try e.run(e.fns.attn_merge, .{ g.q_heads, total, 1 }, .{ 32, 1, 1 }, .{ geo, e.pm, e.pl, e.po, t_segs, t_rows, t_anc, t_params, e.y });
                     try e.run(e.fns.attn_gate, .{ (total * aw + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ geo, e.y, e.qraw, e.mix, @as(c_int, @intCast(total)), t_params });
