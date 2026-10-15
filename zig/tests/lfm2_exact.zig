@@ -186,6 +186,25 @@ fn chunks(m: *q.Model, gpa: std.mem.Allocator) !void {
     try equal(&a, &b);
 }
 
+/// A prompt in the served 2,048-row chunks equals it one row at a time, across attention slices and 4,096-key cuts.
+fn seam(m: *q.Model, gpa: std.mem.Allocator, length: usize) !void {
+    const ids = try gpa.alloc(u32, length);
+    defer gpa.free(ids);
+    const public = [_]u32{ 825, 264, 15352, 4829, 9944, 13, 271, 279, 854, 22373 };
+    for (ids, 0..) |*id, i| id.* = public[(i * 7 + i / 11) % public.len];
+    var a = try st.Cache.init(m.gpa, m.device, &m.config.attention, length + 64);
+    defer a.deinit();
+    var b = try st.Cache.init(m.gpa, m.device, &m.config.attention, length + 64);
+    defer b.deinit();
+    var served = try st.Scratch.init(gpa, m.device, &m.config.attention, 2048);
+    defer served.deinit();
+    var one = try st.Scratch.init(gpa, m.device, &m.config.attention, 1);
+    defer one.deinit();
+    try prompt(m, &served, &a, ids);
+    try prompt(m, &one, &b, ids);
+    try equal(&a, &b);
+}
+
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 2) return error.ExpectedModel;
@@ -241,6 +260,15 @@ pub fn main(init: std.process.Init) !void {
     } else |_| {
         failed += 1;
         std.debug.print("FAIL prompt 4500 in 4096-row chunks differs from 2048-row chunks\n", .{});
+    }
+    for ([_]usize{ 2047, 2049, 4097, 8193 }) |length| {
+        if (seam(m, init.gpa, length)) |_| {
+            passed += 1;
+            std.debug.print("ok prompt {d} in 2048-row chunks equals one row at a time\n", .{length});
+        } else |_| {
+            failed += 1;
+            std.debug.print("FAIL prompt {d} in 2048-row chunks differs from one row at a time\n", .{length});
+        }
     }
     if (shared(m, &wide, &solo, &ids)) |_| {
         passed += 1;
