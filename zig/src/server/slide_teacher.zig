@@ -64,6 +64,22 @@ pub const Teacher = struct {
         t.bank = null;
     }
 
+    /// A deleted fact's replayed answers dropped (by its questions), and every cached answer written again next lesson.
+    pub fn forgetFact(t: *Teacher, io: std.Io, questions: []const []const u8) void {
+        t.mutex.lockUncancelable(io);
+        defer t.mutex.unlock(io);
+        var i: usize = 0;
+        while (i < t.told.items.len) {
+            const q = t.told.items[i].question;
+            const asked = for (questions) |x| {
+                if (std.mem.eql(u8, x, q)) break true;
+            } else false;
+            if (asked) _ = t.told.orderedRemove(i) else i += 1;
+        }
+        t.keep = null;
+        t.bank = null;
+    }
+
     pub fn deinit(t: *Teacher) void {
         t.arena.deinit();
     }

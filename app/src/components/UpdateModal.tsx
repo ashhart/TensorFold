@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import { useStore } from '../lib/store'
 import { Icon } from '../lib/icons'
 import { Button } from './ui'
@@ -71,14 +71,46 @@ export function UpdateModal() {
   const open = useStore((s) => s.updateModalOpen)
   const status = useStore((s) => s.updateStatus)
   const close = useStore((s) => s.closeUpdateModal)
+  const installPending = useStore((s) => s.updateInstallPending)
+  const installing = installPending || status?.state === 'installing'
+  const dialog = useRef<HTMLDivElement>(null)
 
   // Esc closes, like every other modal in the app.
   useEffect(() => {
     if (!open) return
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && status?.state !== 'installing') close() }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !installing) close() }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [open, close, status?.state])
+  }, [open, close, installing])
+
+  // Pending preflight must block keyboard shortcuts and previously focused
+  // background editors as well as pointer clicks on the modal overlay.
+  useLayoutEffect(() => {
+    if (!open || !installing) return
+    const element = dialog.current
+    if (!element) return
+    element.focus()
+    const onFocus = (event: FocusEvent) => {
+      const state = useStore.getState()
+      if (!state.updateInstallPending && state.updateStatus?.state !== 'installing') return
+      if (!element.contains(event.target as Node)) element.focus()
+    }
+    const onKey = (event: KeyboardEvent) => {
+      const state = useStore.getState()
+      if (!state.updateInstallPending && state.updateStatus?.state !== 'installing') return
+      event.stopPropagation()
+      if (event.key === 'Escape' || event.key === 'Tab') {
+        event.preventDefault()
+        element.focus()
+      }
+    }
+    window.addEventListener('focusin', onFocus, true)
+    window.addEventListener('keydown', onKey, true)
+    return () => {
+      window.removeEventListener('focusin', onFocus, true)
+      window.removeEventListener('keydown', onKey, true)
+    }
+  }, [open, installing])
 
   const sections = useMemo(() => parseChangelog(status?.releaseNotes ?? null), [status?.releaseNotes])
 
@@ -88,10 +120,13 @@ export function UpdateModal() {
   const date = formatDate(status.checkedAt)
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-6 fade-in" onClick={() => { if (status.state !== 'installing') close() }}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-6 fade-in" onClick={() => { if (!installing) close() }}>
       <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px]" />
       <div
         onClick={(e) => e.stopPropagation()}
+        ref={dialog}
+        tabIndex={-1}
+        aria-busy={installing}
         role="dialog"
         aria-modal="true"
         aria-labelledby="update-modal-title"
@@ -126,7 +161,7 @@ export function UpdateModal() {
               </div>
             </div>
           </div>
-          <button onClick={close} disabled={status.state === 'installing'} aria-label="Close" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink disabled:opacity-40">
+          <button onClick={close} disabled={installing} aria-label="Close" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink disabled:opacity-40">
             <Icon name="x" size={15} />
           </button>
         </div>
@@ -177,7 +212,7 @@ export function UpdateModal() {
             </div>
           )}
           <UpdateActions status={status} />
-          <div className="mt-2 flex justify-end"><Button variant="ghost" size="sm" onClick={close} disabled={status.state === 'installing'}>Close</Button></div>
+          <div className="mt-2 flex justify-end"><Button variant="ghost" size="sm" onClick={close} disabled={installing}>Close</Button></div>
         </div>
       </div>
     </div>

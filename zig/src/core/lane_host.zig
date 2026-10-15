@@ -33,6 +33,7 @@ pub const LaneHost = struct {
     filling: std.ArrayList(*Job) = .empty, // admitted jobs whose prompt is still going in, a chunk a round, oldest first
     cancels: std.ArrayList(Id) = .empty,
     closing: bool = false,
+    stale: bool = false, // the learner's last step: a put-back has not reached the device, so replies are refused
     thread: ?std.Thread = null,
     decoded: std.ArrayList(status.Mark) = .empty, // tokens a round landed, for the 2 s decode rate
     prefill_rate: f64 = 0,
@@ -156,9 +157,9 @@ pub const LaneHost = struct {
         job.* = .{ .host = h, .id = id, .request = request, .sink = sink };
         h.mutex.lockUncancelable(h.io);
         defer h.mutex.unlock(h.io);
-        if (h.closing) {
+        if (h.closing or h.stale) {
             h.gpa.destroy(job);
-            return error.Closed;
+            return if (h.closing) error.Closed else error.Stale;
         }
         // foreground before background, each in arrival order (the Python job queue's priority)
         var at = h.queued.items.len;
@@ -301,7 +302,8 @@ pub const LaneHost = struct {
     /// Prefills the next queued request into a free lane; false when none waits or no lane is free.
     fn admitOne(h: *LaneHost) bool {
         h.lock();
-        if (h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) {
+        // a stale device takes no reply: `learn.refuse` ends the queued ones instead
+        if (h.stale or h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) {
             h.unlock();
             return false;
         }
@@ -517,6 +519,7 @@ pub const LaneHost = struct {
         while (true) {
             h.takeCancels();
             rows_host.answer(h);
+            learn.refuse(h);
             while (h.admitOne()) {}
             h.fillOne();
             status.noteLive(h);

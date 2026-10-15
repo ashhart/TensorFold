@@ -93,6 +93,23 @@ question id, and `usage.completion_tokens` 0. `probabilities` are a softmax over
 For decisions, `chat_template_kwargs` may be omitted, null, or an object containing only
 `enable_thinking: false`; other types, keys, or thinking values return HTTP 400.
 
+## Living Weights
+
+With `--slide`, the native server learns facts into the served weights. [Living Weights](living-weights.md) explains
+each route and its events.
+
+| Route | What it does |
+| --- | --- |
+| `POST /v1/slide/learn` | `{"text": "..."}`: learns the facts in the text, streaming `fact`, `learning` and `learned` events |
+| `GET /v1/slide/graph` | Every fact as JSON: its state, neurons, questions and their expected answers, and the model's pocket |
+| `DELETE /v1/slide/graph` | Clears the graph; the weights keep what they learned |
+| `DELETE /v1/slide/fact/{id}` | Deletes one fact from the weights, every other fact checked again, streaming `fact`, `checking`, `zeroed`, `checked` and `forgot` events; an optional `{"reason": "..."}` goes into the graph |
+
+A delete's last event, `forgot`, says `"deleted": true` only when both the shards and the graph file hold the delete,
+and its `state` is the fact's state in the graph file; a fact left `deleting` is settled by sending the delete again.
+A server without `--slide` answers the learn and delete routes with HTTP 501. A delete sent while a learn or another
+delete runs gets 503, an id that is not a number 400, and an id the graph does not hold 404.
+
 ## Request fields
 
 | Field | Meaning | Backend |

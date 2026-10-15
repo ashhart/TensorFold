@@ -75,6 +75,9 @@ Screenshots are not written to disk or included in model messages by this featur
 labels used by an allowed model become part of that local chat and use its existing encrypted
 persistence. Automatic extension hooks, auxiliary observers and automatic tool-output spill files
 do not receive newly captured phone context, including when a run becomes phone-local after it starts.
+Automatic outbound agent webhooks, event journals and native attention notifications also skip
+phone-local agent events. Separately authorized owner remote clients follow the app's remote-access
+settings; paired non-owner clients still receive the remote server's restricted projection.
 Recognized secure fields and locks are refused before capture; model taps require
 a labelled interactive control or conservative OCR navigation label, and typing requires a
 verified focused nonsecure text field. Sending, payments, authentication, deletion and access

@@ -14,6 +14,17 @@ pub fn submit(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.Learn
     h.wake.signal(h.io);
 }
 
+/// Queued replies ended with `stale_message` while the device lacks a put-back: none is admitted, none holds a heal.
+pub fn refuse(h: *LaneHost) void {
+    while (true) {
+        h.lock();
+        if (!h.stale or h.queued.items.len == 0) return h.unlock();
+        const job = h.queued.orderedRemove(0);
+        h.unlock();
+        h.finish(job, .failed, api.stale_message);
+    }
+}
+
 /// Learning runs only when nothing else waits: no stream, queued request or cancel (called under the lock).
 pub fn ready(h: *const LaneHost) bool {
     const work = h.lesson_open or h.lessons.items.len > 0;
@@ -36,4 +47,8 @@ pub fn step(h: *LaneHost) void {
     const s = learner.step(learner.ctx);
     if (s.changed) if (h.cache) |store| store.clear();
     h.lesson_open = !s.done;
+    // learn requests still come in, so the learner can try the put-back again; replies wait for it
+    h.mutex.lockUncancelable(h.io);
+    h.stale = s.stale;
+    h.mutex.unlock(h.io);
 }

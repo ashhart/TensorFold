@@ -44,8 +44,8 @@ export interface EngineStatus {
   memoryLimitBytes: number
   // The served prompt-plus-reply limit (max_model_len) once the engine is ready.
   contextTokens: number | null
-  // Cortheon mode: offered by the bundled engine, chosen by the user, and live in the running server.
-  cortheon?: { supported: boolean; enabled: boolean; active: boolean }
+  // Raw engine support, the effective preference, observed live mode and any release pause.
+  cortheon?: { supported: boolean; enabled: boolean; active: boolean; disabledReason?: string }
 }
 
 export interface EngineInstalledModel {

@@ -15,19 +15,25 @@ const memory = @import("memory_routes.zig");
 const slide = @import("slide.zig");
 const recall = @import("recall_routes.zig");
 const imprint = @import("imprint_routes.zig");
+const slide_forget = @import("slide_forget.zig");
 const Server = @import("server.zig").Server;
 const Conn = http_conn.Conn;
 const Allocator = std.mem.Allocator;
+
+/// DELETE's per-fact route: the fact's id follows it.
+const fact_path = "/v1/slide/fact/";
 
 pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
     const m = conn.method;
     if (std.mem.eql(u8, m, "GET")) return get(srv, conn, a);
     if (std.mem.eql(u8, m, "POST")) return post(srv, conn, a);
     if (std.mem.eql(u8, m, "DELETE")) {
-        if (std.mem.eql(u8, auth.routePath(conn.path), "/v1/slide/graph")) return slide.forget(srv, conn, a);
-        if (std.mem.eql(u8, auth.routePath(conn.path), recall.path)) return recall.empty(srv, conn, a);
-        if (std.mem.eql(u8, auth.routePath(conn.path), "/v1/imprint")) return imprint.forget(srv, conn, a);
-        return responses.delete(srv, conn, a, responses.route(auth.routePath(conn.path)));
+        const route = auth.routePath(conn.path);
+        if (std.mem.eql(u8, route, "/v1/slide/graph")) return slide.forget(srv, conn, a);
+        if (std.mem.startsWith(u8, route, fact_path)) return slide_forget.route(srv, conn, a, route[fact_path.len..]);
+        if (std.mem.eql(u8, route, recall.path)) return recall.empty(srv, conn, a);
+        if (std.mem.eql(u8, route, "/v1/imprint")) return imprint.forget(srv, conn, a);
+        return responses.delete(srv, conn, a, responses.route(route));
     }
     const message = std.fmt.allocPrint(a, "Unsupported method ({s})", .{http_conn.pyRepr(a, m) catch m}) catch return;
     conn.sendError(a, 501, message, null) catch {};
