@@ -76,7 +76,7 @@ pub const CancelCheck = struct {
     check: *const fn (ptr: *anyopaque) bool,
 };
 
-/// A kept prompt state the backend restores before its prompt pass (core/prompt_cache.zig), and where it keeps new ones.
+/// A kept prompt state the backend restores before its prompt pass (core/prompt_cache.zig), and keeps new ones in.
 pub const Reuse = struct {
     saved: ?*anyopaque = null, // the backend's copy of the state after `at` prompt tokens (null: start at 0)
     at: u32 = 0,
@@ -97,8 +97,7 @@ pub const Held = struct {
     parents: ?[]i32 = null,
 };
 
-/// An image input prepared for a vision tower: its patches (fp32 [grid h * w, 1536], merge-block order) and grid
-/// [1, h, w]; the prompt holds its placeholder rows.
+/// An image for a vision tower: patches (fp32 [h * w, 1536], merge-block order), grid [1, h, w]; prompt placeholders.
 pub const Image = struct { patches: []const f32, grid: [3]i64 };
 
 pub const Spec = struct {

@@ -1,7 +1,4 @@
-//! GLM-5.3-Flash's image and video preparation (mlx-vlm's glm5_next/processing.py, as TensorFold's GLM frontend runs
-//! it): the canvas (smart_resize to multiples of 28 within a visual-token budget), the content resized into it (PIL's
-//! antialiased bicubic) and zero-padded at the bottom and right, CLIP's normalization (x * f32(1/255) - mean) / std,
-//! and the patches in merge-block order ([c, t, 14, 14] each; an image's one frame twice as the temporal pair).
+//! GLM-5.3-Flash's image and video preparation as mlx-vlm's glm5_next/processing.py: canvas, resize, norm, patches.
 
 const std = @import("std");
 const qi = @import("qwen_image.zig");
@@ -128,8 +125,7 @@ pub fn prepare(gpa: std.mem.Allocator, im: qi.Image, min_tokens: u64, max_tokens
     return .{ .patches = out, .grid = .{ 1, @intCast(gh), @intCast(gw) } };
 }
 
-/// A video's frame groups: each group's patches (two consecutive frames as the temporal pair; an odd last frame
-/// repeats) and its time (its first frame's seconds, as the processor's timestamps[::2]).
+/// A video's frame groups: patches of two consecutive frames (an odd last repeats) and the first frame's seconds.
 pub const Video = struct {
     patches: []f32, // groups x gh x gw x 1176
     groups: usize,

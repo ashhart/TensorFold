@@ -1,5 +1,4 @@
-//! The image-input module (zig/src/vision/qwen_image.zig with stb_image compiled in), shared by every build that
-//! carries the engine API (the server reaches it as engine_api.qwen_image) and by the CUDA test runner.
+//! The image-input module (vision/qwen_image.zig with stb_image), shared by the engine API and the CUDA test runner.
 const std = @import("std");
 
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
