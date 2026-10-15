@@ -199,12 +199,48 @@ pub const Scratch = struct {
     logits: u64 = 0,
     inv: u64 = 0,
     dummy: u64 = 0,
+    /// Pinned host copies of what a pass uploads (ids, positions, n-gram rows and sums), owned until the copies land.
+    host: ?cuda.HostBuffer = null,
+    /// Recorded on the compute stream after a pass's last upload: the next pass waits on it before writing `host`.
+    staged: ?cuda.Event = null,
 
     fn add(s: *Scratch, gpa: std.mem.Allocator, d: *const cuda.Driver, len: usize) !u64 {
         var b = try cuda.DeviceBuffer.alloc(d, @max(len, 256));
         errdefer b.free();
         try s.bufs.append(gpa, b);
         return b.ptr;
+    }
+
+    /// Byte offsets of the staged ids, positions, n-gram rows and their sums in `host`, and its length.
+    fn hostAt(cap: usize) [5]usize {
+        const pos = std.mem.alignForward(usize, cap * 4, 16);
+        const emb = pos + (cap + 1) * 16;
+        const xs = emb + cap * dims * 2;
+        return .{ 0, pos, emb, xs, xs + cap * (dims / 32) * 4 };
+    }
+
+    /// Waits until the last pass's uploads have read `host` (they are queued behind its kernels), so it may change.
+    pub fn ready(s: *const Scratch) !void {
+        if (s.staged) |e| try e.synchronize();
+    }
+
+    /// Marks `host` read once the stream reaches here: every upload queued before this point has copied its bytes.
+    pub fn uploaded(s: *const Scratch, stream: cuda.Stream) !void {
+        if (s.staged) |e| try e.record(stream);
+    }
+
+    /// The staged ids [n], positions [n] (in 16-byte rows), n-gram rows [n, dims] and their 32-group sums.
+    pub fn hostIds(s: *const Scratch, n: usize) []i32 {
+        return @alignCast(std.mem.bytesAsSlice(i32, s.host.?.bytes[hostAt(s.cap)[0]..][0 .. n * 4]));
+    }
+    pub fn hostPos(s: *const Scratch, n: usize) []i32 {
+        return @alignCast(std.mem.bytesAsSlice(i32, s.host.?.bytes[hostAt(s.cap)[1]..][0 .. n * 4]));
+    }
+    pub fn hostEmb(s: *const Scratch, n: usize) []u16 {
+        return @alignCast(std.mem.bytesAsSlice(u16, s.host.?.bytes[hostAt(s.cap)[2]..][0 .. n * dims * 2]));
+    }
+    pub fn hostXs(s: *const Scratch, n: usize) []f32 {
+        return @alignCast(std.mem.bytesAsSlice(f32, s.host.?.bytes[hostAt(s.cap)[3]..][0 .. n * (dims / 32) * 4]));
     }
 
     /// Bytes `alloc(cap)` takes on the device.
@@ -294,10 +330,14 @@ pub const Scratch = struct {
         s.dummy = try s.add(gpa, d, 4096);
         try s.bufs.items[s.bufs.items.len - 1].fill8(0, stream.handle);
         try stream.synchronize();
+        s.host = try cuda.HostBuffer.alloc(d, hostAt(cap)[4]);
+        s.staged = try cuda.Event.init(d, false);
         return s;
     }
 
     pub fn free(s: *Scratch, gpa: std.mem.Allocator) void {
+        if (s.staged) |*e| e.deinit();
+        if (s.host) |*h| h.free();
         for (s.bufs.items) |*b| b.free();
         s.bufs.deinit(gpa);
         s.* = undefined;

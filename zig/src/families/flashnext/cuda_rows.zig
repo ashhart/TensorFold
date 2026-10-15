@@ -109,8 +109,9 @@ const Pass = struct {
 
 fn embedRow(comptime Tri: type, p: *Pass, tri: Tri, token: u32, h: u64) !void {
     const id: i32 = @intCast(token);
-    // on the compute stream: a synchronous copy can land before an earlier row's queued _embed reads its id
+    // on the compute stream (queued _embed launches still read ids), then waited for: `id` lives on this frame
     try p.s.ids.uploadAsync(0, std.mem.asBytes(&id), p.stream.handle);
+    try p.stream.synchronize();
     try tri.embed(p.s.ids.ptr, p.table.w.ptr, p.table.s.ptr, p.table.b.ptr, h, dims, streams, 1);
 }
 

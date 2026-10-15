@@ -237,8 +237,9 @@ pub fn gdnStep(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Strea
 
 pub fn attnStep(comptime Tri: type, driver: *cuda.Driver, stream: *cuda.Stream, tri: Tri, s: *Scratch, proj_q: Q4, out_q: Q4, q_scale: u64, k_scale: u64, i_scale: u64, kc: u64, vc: u64, ikc: u64, pos: i32) !void {
     try qmm.matmul(driver, stream.*, s.mixed.ptr, s.xsm.ptr, proj_q.w.ptr, proj_q.s.ptr, proj_q.b.ptr, s.pa.ptr, 1, proj_n, dims);
-    // stream-ordered, like the ids: the previous row's queued attention kernels still read s.pos
+    // stream-ordered (queued kernels still read s.pos), then waited for: `pos` lives on this frame
     try s.pos.uploadAsync(0, std.mem.asBytes(&pos), stream.handle);
+    try stream.synchronize();
     try tri.attnPrep(s.pa.ptr, s.pos.ptr, q_scale, k_scale, i_scale, s.inv.ptr, s.q.ptr, kc, vc, s.iq.ptr, ikc, s.dummy.ptr, s.dummy.ptr, eps, 1, 0);
     // attention.attention, dense: chunks of 512 keys up to the row's position (the row-by-row path stays dense)
     const keys: usize = @as(usize, @intCast(pos)) + 1;

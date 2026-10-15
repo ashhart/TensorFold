@@ -150,6 +150,7 @@ pub fn Pass(comptime Tri: type) type {
             try d.check(d.api.cuMemcpyDtoDAsync_v2(dst, src, n, self.stream.handle), "cuMemcpyDtoDAsync");
         }
 
+        /// A queued copy from pinned host bytes (the scratch's staging), which must stay unchanged until it lands.
         pub fn upload(self: *Self, dst: u64, bytes: []const u8) !void {
             const d = self.stream.d;
             try d.check(d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, self.stream.handle), "cuMemcpyHtoDAsync");
@@ -359,21 +360,21 @@ pub fn Pass(comptime Tri: type) type {
 
         // ---- the pass ------------------------------------------------------------------------------------------
 
-        /// Token ids, positions and (when the n-gram layer is there) each row's n-gram embedding onto the device.
+        /// Token ids and positions onto the device from the scratch's pinned copies, which stay put until they land.
         pub fn stage(self: *Self, ids: []const u32) !void {
             const s = self.s;
             const n = ids.len;
-            const id32 = try self.gpa.alloc(i32, n);
-            defer self.gpa.free(id32);
+            try s.ready();
+            const id32 = s.hostIds(n);
             for (id32, ids) |*o, v| o.* = @intCast(v);
             try self.upload(s.ids, std.mem.sliceAsBytes(id32));
             const blocks = if (self.lanes.len > 0) n else cdiv(n, att_rows);
             // one int a block (a round: a row), 16 bytes apart: _chunks and _merge take POS0 16-byte aligned
-            const pos = try self.gpa.alloc(i32, blocks * 4);
-            defer self.gpa.free(pos);
+            const pos = s.hostPos(blocks * 4);
             @memset(pos, 0);
             for (0..blocks) |b| pos[4 * b] = @intCast(if (self.lanes.len > 0) self.lanes[b].pos else self.pos0 + b * att_rows);
             try self.upload(s.pos, std.mem.sliceAsBytes(pos));
+            try s.uploaded(self.stream);
         }
 
         /// The rows' n-gram embeddings, gathered on a host thread while the GPU embeds and runs layer 0.
@@ -425,10 +426,10 @@ pub fn Pass(comptime Tri: type) type {
             self.rows = n;
             self.pos0 = pos0;
             self.pending = null;
-            const emb = try self.gpa.alloc(u16, n * dims);
-            defer self.gpa.free(emb);
-            const xs = try self.gpa.alloc(f32, n * (dims / 32));
-            defer self.gpa.free(xs);
+            // the gather writes the scratch's pinned rows, so the last pass's uploads must have read them first
+            try s.ready();
+            const emb = s.hostEmb(n);
+            const xs = s.hostXs(n);
             var gather: Gather = .{ .ngram = self.m.ngram, .history = self.seq.history[0..], .ids = ids, .emb = emb, .xs = xs, .io = self.io, .lanes = self.lanes };
             var thread: ?std.Thread = try std.Thread.spawn(.{}, Gather.main, .{&gather});
             defer if (thread) |th| th.join();
@@ -443,6 +444,7 @@ pub fn Pass(comptime Tri: type) type {
                     if (profile()) std.debug.print("batch: {d} rows' n-gram rows gathered on the host in {d:.1} ms\n", .{ n, @as(f64, @floatFromInt(gather.ns)) / 1e6 });
                     try self.upload(s.ple_emb, std.mem.sliceAsBytes(emb));
                     try self.upload(s.ple_xs, std.mem.sliceAsBytes(xs));
+                    try s.uploaded(self.stream);
                     if (self.pending != null) try self.writeback(0, n);
                     try self.pleBlock(lw, ids);
                 }
