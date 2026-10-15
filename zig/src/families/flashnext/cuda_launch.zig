@@ -17,6 +17,8 @@ pub const mix = @import("cuda_mix.zig");
 pub const prompt = @import("cuda_prompt.zig");
 /// The row-by-row reference path, for flashnext-prompt
 pub const row_path = @import("cuda_rows.zig");
+/// The MTP head's drafts: its forward, the chain, the verify window's rows and their rollback
+pub const mtp = @import("cuda_mtp.zig");
 pub const native = @import("cuda_lanes.zig").Namespace(Tri);
 
 const p = aot.ptr;
@@ -317,9 +319,11 @@ test {
     _ = mix;
     _ = prompt;
     _ = prompt.batch;
+    _ = mtp;
     _ = native;
     _ = @import("cuda_config.zig");
     _ = row_path;
+    _ = @import("cuda_mtp_check.zig");
 }
 
 test "embed grid is one program per row and per group of 32" {

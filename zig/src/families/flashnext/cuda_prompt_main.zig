@@ -15,6 +15,8 @@ pub fn main(init: std.process.Init) !u8 {
         return 2;
     }
     const count = try std.fmt.parseInt(usize, args[4], 10);
+    // TF_FLASHNEXT_DRAFTS: the MTP check (cuda_mtp.zig) over every comma-separated ids file, one load
+    if (std.c.getenv("TF_FLASHNEXT_DRAFTS") != null) return drafted(gpa, io, args[1], args[2], args[3], count);
     const text = try std.Io.Dir.cwd().readFileAlloc(io, args[3], gpa, .limited(1 << 24));
     defer gpa.free(text);
     var ids: std.ArrayList(u32) = .empty;
@@ -47,4 +49,35 @@ pub fn main(init: std.process.Init) !u8 {
         if (!same) return 1;
     }
     return 0;
+}
+
+/// Serial and drafted decoding of each prompt compared token for token (flash.mtp.check), with their speeds.
+fn drafted(gpa: std.mem.Allocator, io: std.Io, model: []const u8, kernels: []const u8, files: []const u8, count: usize) !u8 {
+    var prompts: std.ArrayList([]u32) = .empty;
+    defer {
+        for (prompts.items) |p| gpa.free(p);
+        prompts.deinit(gpa);
+    }
+    var names = std.mem.tokenizeScalar(u8, files, ',');
+    while (names.next()) |name| {
+        const text = try std.Io.Dir.cwd().readFileAlloc(io, name, gpa, .limited(1 << 20));
+        defer gpa.free(text);
+        var ids: std.ArrayList(u32) = .empty;
+        errdefer ids.deinit(gpa);
+        var it = std.mem.tokenizeAny(u8, text, ", \t\r\n");
+        while (it.next()) |part| try ids.append(gpa, try std.fmt.parseInt(u32, part, 10));
+        try prompts.append(gpa, try ids.toOwnedSlice(gpa));
+    }
+    var driver = try cuda.Driver.open();
+    defer driver.close();
+    var ctx = try cuda.Context.init(&driver, 0);
+    defer ctx.deinit();
+    var set = try cuda.aot.Set.load(gpa, io, &driver, ctx.device, kernels);
+    defer set.deinit();
+    var stream = try cuda.Stream.init(&driver, true);
+    defer stream.deinit();
+    const tri: flash.Tri = .{ .set = &set, .s = stream };
+    const same = try flash.mtp.check(flash.Tri, gpa, io, &driver, &stream, tri, model, prompts.items, count);
+    std.debug.print("{s}\n", .{if (same) "drafted == serial on every prompt" else "drafted DIFFERS from serial"});
+    return if (same) 0 else 1;
 }
