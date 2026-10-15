@@ -200,6 +200,48 @@ fn sweep(g: Gpu, s: Synth) !void {
     }
 }
 
+/// 4 bits, K 64: code 7 is 1, scales 1, biases 0, x[7] = 2^-126; every path keeps bf16 0x0080 (no range change).
+fn witness(g: Gpu) !void {
+    const rows = tile.twin_rows;
+    const w = try g.device.buffer(n * 32, opts);
+    defer w.deinit();
+    const sc = try g.device.buffer(n * 2, opts);
+    defer sc.deinit();
+    const bi = try g.device.buffer(n * 2, opts);
+    defer bi.deinit();
+    const x = try g.device.buffer(rows * 64 * 2, opts);
+    defer x.deinit();
+    for (w.slice(u8, n * 32), 0..) |*v, i| v.* = if (i % 32 == 3) 0x10 else 0;
+    for (sc.slice(u16, n)) |*v| v.* = toBf(1);
+    @memset(bi.slice(u16, n), 0);
+    for (x.slice(u16, rows * 64), 0..) |*v, i| v.* = if (i % 64 == 7) 0x0080 else 0;
+    const m = tile.Matrix{
+        .w = w,
+        .w_off = 0,
+        .scales = sc,
+        .s_off = 0,
+        .biases = bi,
+        .b_off = 0,
+        .n = n,
+        .k = 64,
+        .bits = 4,
+    };
+    const sums = try g.device.buffer(rows * 4, opts);
+    defer sums.deinit();
+    const y = try g.device.buffer(rows * n * 2, opts);
+    defer y.deinit();
+    try g.run(Tiles{ .m = m, .x = x, .sums = sums, .y = y, .first = 0, .rows = rows });
+    for (bf16s(y, rows)) |v| if (v != 0x0080) return error.WitnessTiles;
+    for ([_]usize{ 1, 2, 7, 8, 16, 32 }) |width| {
+        @memset(y.slice(u16, rows * n), 0);
+        try g.run(Twin{ .m = m, .x = x, .y = y, .first = 0, .rows = width });
+        for (bf16s(y, width)) |v| if (v != 0x0080) {
+            std.debug.print("witness: twin at width {d} gives 0x{x:0>4}, the tiles 0x0080\n", .{ width, v });
+            return error.WitnessTwin;
+        };
+    }
+}
+
 /// Picks of `tokens` rows over 4 experts, two a row.
 fn spreadPicks(pick: []u32, tokens: usize) void {
     for (0..tokens) |t| {
@@ -374,6 +416,8 @@ pub fn main(init: std.process.Init) !void {
     const g = Gpu{ .device = device, .queue = queue, .p = &p };
     var passed: usize = 0;
     var pick: [tile.window_slots]u32 = undefined;
+    try witness(g);
+    std.debug.print("4-bit witness (code 7 = 1, x[7] = 2^-126): tiles and twin at widths 1-32 keep bf16 0x0080\n", .{});
     for (tile.bit_widths, 0..) |bits, i| {
         const s = try Synth.init(device, bits, 0x7173 + i, 1536, 4);
         defer s.deinit();
