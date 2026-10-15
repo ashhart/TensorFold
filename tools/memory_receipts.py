@@ -98,6 +98,9 @@ def capture(command, rank, context_tokens, output, interval):
         for signum in [signal.SIGTERM, signal.SIGINT]:
             previous[signum] = signal.signal(signum, forward)
         try:
+            os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+            stop.set()
+            thread.join()
             _, status, usage = os.wait4(child.pid, 0)
             child.returncode = os.waitstatus_to_exitcode(status)
         finally:
