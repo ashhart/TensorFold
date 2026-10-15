@@ -295,7 +295,10 @@ pub const Server = struct {
     /// Accepts connections until ``stop`` is set, each on its own thread.
     pub fn serve(srv: *Server, listener: listener_mod.Listener, stop: *const std.atomic.Value(bool)) void {
         while (listener.accept(stop)) |c| {
+            // counted before its thread runs, so a zero count once this loop ends means no connection is left
+            _ = srv.open_connections.fetchAdd(1, .acq_rel);
             const t = std.Thread.spawn(.{ .stack_size = 8 << 20 }, connection, .{ srv, c }) catch {
+                _ = srv.open_connections.fetchSub(1, .acq_rel);
                 _ = std.posix.system.close(c.fd);
                 continue;
             };
@@ -304,7 +307,6 @@ pub const Server = struct {
     }
 
     fn connection(srv: *Server, accepted: listener_mod.Listener.Accepted) void {
-        _ = srv.open_connections.fetchAdd(1, .acq_rel);
         defer _ = srv.open_connections.fetchSub(1, .acq_rel);
         defer _ = std.posix.system.close(accepted.fd);
         var peer_buf: [64]u8 = undefined;

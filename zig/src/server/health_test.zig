@@ -190,7 +190,10 @@ fn quiesce(srv: *server.Server, stop: *std.atomic.Value(bool), accept: std.Threa
     stop.store(true, .release);
     accept.join();
     var waited: u32 = 0;
-    while (srv.open_connections.load(.acquire) > 0 and waited < 500) : (waited += 1) std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch {};
+    while (srv.open_connections.load(.acquire) > 0) : (waited += 1) {
+        if (waited == 500) @panic("a connection thread still runs 5 s after the last reply"); // never free it under one
+        std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch {};
+    }
 }
 
 test "with keys configured, /health sends only its status, with and without a valid key, whatever the identity" {
