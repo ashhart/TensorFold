@@ -20,6 +20,8 @@ pub const row_path = @import("cuda_rows.zig");
 /// The MTP head's drafts: its forward, the chain, the verify window's rows and their rollback
 pub const mtp = @import("cuda_mtp.zig");
 pub const native = @import("cuda_lanes.zig").Namespace(Tri);
+/// Our own glue kernels, which every launch takes when no captured set is loaded
+pub const Glue = @import("cuda_glue.zig").Glue;
 
 const p = aot.ptr;
 
