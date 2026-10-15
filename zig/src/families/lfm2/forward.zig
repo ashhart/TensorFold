@@ -47,15 +47,15 @@ const Encoder = struct {
         self.e.setBuffer(w.scales, w.s_off, 2);
         self.e.setBuffer(w.biases, w.b_off, 3);
     }
-    /// The tensor-unit pipelines for `bits` when this call takes them: prompt calls of tile_rows or more on an M5.
-    fn nax(self: Encoder, bits: u8, rows: usize) ?am.Pipes {
-        if (!self.prompt or rows < tile_rows) return null;
+    /// The tensor-unit pipelines for `bits` when this call takes them: prompt calls of any rows on an M5.
+    fn nax(self: Encoder, bits: u8) ?am.Pipes {
+        if (!self.prompt) return null;
         return self.m.kernels.naxPipes(bits);
     }
     /// y[rows] = x[rows] W^T: the prompt tiles (on x's group sums), or their twin at decode and window rows.
     fn projection(self: Encoder, w: row.Weights, x: Buffer, x_off: usize, y: Buffer, y_off: usize, rows: usize) void {
         const t = &self.m.kernels.tiles;
-        if (self.nax(w.bits, rows)) |p| {
+        if (self.nax(w.bits)) |p| {
             const xr = Ref{ .buf = x, .off = x_off };
             const sums = Ref{ .buf = self.s.sums };
             am.rowSums(self.e, p, c.group, xr, sums, @intCast(rows), @intCast(w.k));
@@ -216,13 +216,13 @@ fn attention(enc: Encoder, s: *st.Scratch, a: wts.Attention, config: *const c.Co
         e.setBuffer(cache.keys, 0, 7);
         e.setBuffer(cache.values, 0, 8);
         enc.groups(.{ c.query_heads + c.kv_heads, seg.rows, 1 }, .{ 32, 1, 1 });
-        // Prompt calls of tile_rows or more take the tensor units' kernel on an M5 (their projections' rule).
-        const nax_attn = enc.prompt and seg.rows >= tile_rows and enc.m.kernels.attn_nax != null;
+        // Prompt calls take the tensor units' kernel on an M5 (their projections' rule): 16-row tiles, one sub-span.
+        const nax_attn = enc.prompt and enc.m.kernels.attn_nax != null;
         // A chunk longer than the partials go in slices: a row's keys and cuts are the same in any slice.
         var at: usize = 0;
         while (at < seg.rows) : (at += st.attn_slice) {
             const rows = @min(seg.rows - at, st.attn_slice);
-            const wide = rows > st.split_rows;
+            const wide = nax_attn or rows > st.split_rows;
             const subs: u32 = if (wide) 1 else st.subs;
             const first: u32 = @intCast(seg.cache.len + at);
             const args = AttnArgs{ .len = first, .cap = cap, .scale = 1.0 / @sqrt(@as(f32, c.head_dim)), .subs = subs };
@@ -287,7 +287,7 @@ fn moe(enc: Encoder, s: *st.Scratch, x: wts.Moe, scale: f32, total: usize) bool 
     e.setBuffer(s.pos, 0, 4);
     e.setBuffer(s.tokens, 0, 5);
     enc.groups(.{ 1, 1, 1 }, .{ c.experts * 16, 1, 1 });
-    if (enc.nax(x.gate.one.bits, total)) |p| {
+    if (enc.nax(x.gate.one.bits)) |p| {
         // Sorted slot j reads token row tokens[j]; gate and up SwiGLU'd into act, then down over act's sorted rows.
         const sums = Ref{ .buf = s.sums };
         const starts = Ref{ .buf = s.starts };

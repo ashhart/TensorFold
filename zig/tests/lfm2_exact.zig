@@ -33,6 +33,12 @@ fn prompt(m: *q.Model, scratch: *st.Scratch, cache: *st.Cache, ids: []const u32)
     }
 }
 
+/// A prompt of `prefix` rows, then plain decode to `len`: what a window's kept rows equal.
+fn decoded(m: *q.Model, solo: *st.Scratch, cache: *st.Cache, ids: []const u32, prefix: usize, len: usize) !void {
+    try prompt(m, solo, cache, ids[0..prefix]);
+    for (prefix..len) |r| try fwd.run(m, solo, &.{.{ .cache = cache, .rows = 1 }}, ids[r..][0..1], false, .all);
+}
+
 fn window(m: *q.Model, wide: *st.Scratch, solo: *st.Scratch, ids: []const u32, prefix: usize, rows: usize, keep: usize) !void {
     var a = try st.Cache.init(m.gpa, m.device, &m.config.attention, 512);
     defer a.deinit();
@@ -87,21 +93,22 @@ fn shared(m: *q.Model, wide: *st.Scratch, solo: *st.Scratch, ids: []const u32) !
     }
     try caches[0].keep(wide, &.{ 0, 1, 2 });
     try caches[1].keep(wide, &.{0});
-    for ([_]usize{ 130, 257 }, 0..) |length, stream| {
+    for ([_]usize{ 127, 256 }, [_]usize{ 130, 257 }, 0..) |prefix, length, stream| {
         var fresh = try st.Cache.init(m.gpa, m.device, &m.config.attention, 512);
         defer fresh.deinit();
-        try prompt(m, solo, &fresh, ids[0..length]);
+        try decoded(m, solo, &fresh, ids, prefix, length);
         try equal(&caches[stream], &fresh);
     }
 }
 
-/// One window shared by streams at `lens` (0 rows skip one): its logits and caches equal one-row decode.
+/// One window shared by streams at `lens`, prompted to `prompts` (0 rows skip one): it equals one-row decode.
 fn round(
     m: *q.Model,
     wide: *st.Scratch,
     solo: *st.Scratch,
     ids: []const u32,
     caches: []st.Cache,
+    prompts: []const usize,
     lens: []const usize,
     rows: []const usize,
 ) !void {
@@ -118,11 +125,11 @@ fn round(
     }
     try fwd.run(m, wide, segs[0..n], tokens[0..total], true, .all);
     var base: usize = 0;
-    for (caches, lens, rows) |*cache, len, r| {
+    for (caches, prompts, lens, rows) |*cache, start, len, r| {
         if (r == 0) continue;
         var ref = try st.Cache.init(m.gpa, m.device, &m.config.attention, 512);
         defer ref.deinit();
-        try prompt(m, solo, &ref, ids[0..len]);
+        try decoded(m, solo, &ref, ids, start, len);
         for (0..r) |i| {
             try fwd.run(m, solo, &.{.{ .cache = &ref, .rows = 1 }}, ids[len + i ..][0..1], false, .all);
             const actual = (wide.logits.contents() + (base + i) * c.vocab * 2)[0 .. c.vocab * 2];
@@ -138,25 +145,26 @@ fn shared4(m: *q.Model, wide: *st.Scratch, solo: *st.Scratch, ids: []const u32) 
     var caches: [4]st.Cache = undefined;
     var n: usize = 0;
     defer for (caches[0..n]) |*cache| cache.deinit();
-    var lens = [_]usize{ 1, 127, 128, 256 };
+    const prompts = [_]usize{ 1, 127, 128, 256 };
+    var lens = prompts;
     for (&caches, lens) |*cache, len| {
         cache.* = try st.Cache.init(m.gpa, m.device, &m.config.attention, 512);
         n += 1;
         try prompt(m, solo, cache, ids[0..len]);
     }
-    try round(m, wide, solo, ids, &caches, &lens, &.{ 1, 5, 10, 16 });
+    try round(m, wide, solo, ids, &caches, &prompts, &lens, &.{ 1, 5, 10, 16 });
     const keep = [_]usize{ 1, 3, 10, 7 };
     var path: [16]u32 = undefined;
     for (&path, 0..) |*r, i| r.* = @intCast(i);
-    for (&caches, &lens, keep) |*cache, *len, kept| {
+    for (&caches, prompts, &lens, keep) |*cache, start, *len, kept| {
         try cache.keep(wide, path[0..kept]);
         len.* += kept;
         var fresh = try st.Cache.init(m.gpa, m.device, &m.config.attention, 512);
         defer fresh.deinit();
-        try prompt(m, solo, &fresh, ids[0..len.*]);
+        try decoded(m, solo, &fresh, ids, start, len.*);
         try equal(cache, &fresh);
     }
-    try round(m, wide, solo, ids, &caches, &lens, &.{ 3, 4, 9, 0 });
+    try round(m, wide, solo, ids, &caches, &prompts, &lens, &.{ 3, 4, 9, 0 });
 }
 
 /// A prompt read in 4,096-row chunks (attention in two slices) equals the same prompt in 2,048-row chunks.
@@ -191,11 +199,10 @@ pub fn main(init: std.process.Init) !void {
     defer solo.deinit();
     var chunk = try st.Scratch.init(init.gpa, m.device, &m.config.attention, 128);
     defer chunk.deinit();
-    // Prompt calls of 33 rows or more on tensor units differ from one-row decode; 64-row chunks are their reference.
-    const tensor = m.device.tensorUnits();
-    var half = try st.Scratch.init(init.gpa, m.device, &m.config.attention, if (tensor) 64 else 1);
+    // A prompt cut anywhere equals it whole: one-row prompt calls are the reference (the tensor units' on an M5).
+    var half = try st.Scratch.init(init.gpa, m.device, &m.config.attention, 1);
     defer half.deinit();
-    const ref_name = if (tensor) "64-row chunks" else "one row at a time";
+    const ref_name = "one row at a time";
     var ids: [300]u32 = undefined;
     const public = [_]u32{ 825, 264, 15352, 4829, 9944, 13, 271, 279, 854, 22373 };
     for (&ids, 0..) |*id, i| id.* = public[i % public.len];
