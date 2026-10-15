@@ -8,7 +8,7 @@ const dotBf16 = pocket_fit.dotBf16;
 const fit_steps = pocket_fit.fit_steps;
 
 pub const kept_least: f32 = 0.5; // an earlier neuron refitted must still reach this on every one of its own fact's rows
-pub const refit_above: f32 = 0.5; // an earlier neuron is refitted only where it fires above this on a new fact's rows
+pub const refit_above: f32 = 0.5; // a refit is due where an earlier neuron fires above this on a new fact's rows, and holds rows above it
 
 /// Earlier neurons firing on this fact's rows refitted silent there and nowhere else; same-subject ones stay.
 pub fn quiet(p: anytype, t: anytype, host: anytype) !void {
@@ -33,13 +33,13 @@ pub fn quiet(p: anytype, t: anytype, host: anytype) !void {
             try xs.append(p.gpa, p.pos.items[(e.start + r) * d ..][0..d]);
             try kinds.append(p.gpa, .fact);
         }
-        // other prompts' rows it fires on now (its own fact's questions read with the lower neurons' push) stay fixed
+        // rows it fires on above refit_above now (its own fact's questions read today) stay fixed; weaker ones go quiet
         const live = try p.gpa.alloc(bool, p.labels.items.len);
         defer p.gpa.free(live);
         var fixed = e.count;
         for (p.labels.items, live, 0..) |l, *on, i| {
             const x = p.rows.items[(i * n + e.slot) * d ..][0..d];
-            on.* = l.ex >= own and dotBf16(u, x) > 0;
+            on.* = l.ex >= own and dotBf16(u, x) > refit_above;
             if (!on.*) continue;
             try xs.append(p.gpa, x);
             try kinds.append(p.gpa, .none); // held as it reads, judged by no threshold
@@ -68,7 +68,7 @@ pub fn quiet(p: anytype, t: anytype, host: anytype) !void {
     }
 }
 
-test "an earlier fact's neuron fitted quiet on a new fact's rows reads as before on its own fact's rows as read now" {
+test "an earlier fact's neuron fitted quiet on a new fact's rows and its weak firings reads as before on its own rows as read now" {
     const gpa = std.testing.allocator;
     const d = 64;
     const T = struct {
@@ -160,9 +160,26 @@ test "an earlier fact's neuron fitted quiet on a new fact's rows reads as before
         try p.rows.appendSlice(gpa, x);
         try p.labels.append(gpa, .{ .kind = .steady, .key = .reply, .ex = @intCast(n_new + n_old + i), .row = 1 });
     }
+    // other prompts leaning the earlier fact's way, far less than its own, so it fires weakly on some
+    const n_lean = 20;
+    var leaning: [n_lean]Row = undefined;
+    for (&leaning, 0..) |*x, j| {
+        var w: [d]f32 = undefined;
+        for (&w, old_dir) |*v, o| v.* = (0.2 + 0.02 * @as(f32, @floatFromInt(j))) * o;
+        x.* = rowOf(r, &common, null, &w);
+        try p.rows.appendSlice(gpa, x);
+        try p.labels.append(gpa, .{ .kind = .steady, .key = .reply, .ex = @intCast(n_new + n_old + n_rest / 2 + j), .row = 1 });
+    }
     var most: f32 = -1;
     for (&news) |*x| most = @max(most, dotBf16(u, x));
     try std.testing.expect(most > refit_above); // it fires on the new fact's questions, so a refit is due
+    for (&live) |*x| try std.testing.expect(dotBf16(u, x) > refit_above); // and on its own as read today
+    var weak: usize = 0;
+    for (&leaning) |*x| {
+        const v = dotBf16(u, x);
+        weak += @intFromBool(v > 0 and v <= refit_above);
+    }
+    try std.testing.expect(weak >= 3);
     const before = try gpa.dupe(f32, u);
     defer gpa.free(before);
     var t: T = .{};
@@ -174,4 +191,9 @@ test "an earlier fact's neuron fitted quiet on a new fact's rows reads as before
     for (&live) |*x| moved += @intFromBool(@abs(dotBf16(before, x) - dotBf16(u, x)) > 1e-3);
     try std.testing.expectEqual(@as(usize, 0), moved);
     for (&stored) |*x| try std.testing.expectApproxEqAbs(dotBf16(before, x), dotBf16(u, x), 1e-3);
+    // other prompts: where it fired above refit_above it reads as before; where it fired weakly it is quiet now
+    for (&leaning) |*x| {
+        const was = dotBf16(before, x);
+        if (was > refit_above) try std.testing.expectApproxEqAbs(was, dotBf16(u, x), 1e-3) else try std.testing.expect(dotBf16(u, x) <= 0);
+    }
 }
