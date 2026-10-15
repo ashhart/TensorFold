@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
     while (try it.next(io)) |entry| {
         if (!std.mem.endsWith(u8, entry.name, ".ids.json")) continue;
         const name = entry.name[0 .. entry.name.len - ".ids.json".len];
-        const bytes = try dir.readFileAlloc(io, entry.name, gpa, .limited(1 << 20));
+        const bytes = try dir.readFileAlloc(io, entry.name, gpa, .limited(1 << 22));
         defer gpa.free(bytes);
         const ids = try std.json.parseFromSlice([]u32, gpa, bytes, .{});
         defer ids.deinit();

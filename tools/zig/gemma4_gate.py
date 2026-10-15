@@ -45,7 +45,12 @@ def greedy(family, ids: list[int], count: int, prompt: str) -> tuple[list[int], 
 
     cache = family.make_cache()
     if prompt == "mlx":
-        hidden = family.prefill(mx.array([ids]), cache)[:, -1:]
+        # 2048-token chunks, as mlx_lm's generate feeds a prompt: one 252k-row forward builds 252k x 252k masks
+        for at in range(0, len(ids), 2048):
+            hidden = family.prefill(mx.array([ids[at:at + 2048]]), cache)
+            mx.eval(hidden)
+            mx.clear_cache()
+        hidden = hidden[:, -1:]
     else:
         for token in ids[:-1]:
             mx.eval(family.hidden(mx.array([token]), cache))

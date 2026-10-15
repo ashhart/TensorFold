@@ -67,15 +67,18 @@ python tools/zig/gemma4_gate.py oracle --model M --out O --tokens 128 --prompt d
 zig-out/bin/tf-gemma4-run M O N 128 16 && python tools/zig/gemma4_gate.py check --oracle O --native N
 zig-out/bin/tf-gemma4-lanes M O && GEMMA_DRAFTER=D zig-out/bin/tf-gemma4-lanes M O
 zig-out/bin/tf-gemma4-run M O R 128 512 && python tools/zig/gemma4_gate.py served --oracle O --native R
+python tools/zig/gemma4_gate.py prompts --model M --out IDS   # 8k, 32k, 64k, 128k and 252k prompts from the repo's text
+python tools/zig/gemma4_gate.py oracle --model M --out L --ids IDS --tokens 49 --prompt mlx
+zig-out/bin/tf-gemma4-run M L NL 49 512 && python tools/zig/gemma4_gate.py check --oracle L --native NL
 ```
 
 - Four chat prompts, 128 greedy tokens, prompts fed one row at a time or in windows of 16: three equal the oracle
   token for token; the code prompt parts at its third token, where the oracle's top two logits are one bf16 step apart
   and the native run ties them (its decode attention sums 256-key chunks in its own order). Every row keeps its bits
   at any window width and beside other streams' rows.
-- 8k and 32k prompts against the oracle's mlx-lm prompt forward: the first token is equal at both, and 49 tokens at
-  32k. At 8k the two part at token 32 on a tie within two bf16 steps; there the native run equals the oracle's own
-  decode-path prompt, tokens and last-row logits, and that path parts from mlx-lm at the same token.
+- Long prompts against the oracle's mlx-lm prompt forward (fed in 2048-token chunks, as `mlx_lm.generate` feeds a
+  prompt), 49 greedy tokens each: equal at 32k, 64k, 128k and 252k. At 8k the two part at token 25, where mlx-lm's top
+  two logits are equal (28.25 and 28.25) and the native run orders them one bf16 step apart.
 - The lane core: copy-drafted and DFlash-drafted streams, alone and 4 and 8 in shared rounds, equal the engine's
   plain replies token for token, on the four prompts and on two copy-heavy ones.
 - Served on an M5 Ultra with the drafter: greedy token SHAs equal the engine's receipts alone, with drafts off and on,
@@ -87,3 +90,14 @@ for one stream. The drafts match z-lab's own MLX drafter's acceptance. Shared ro
 rows the forward is bound by tensor-op compute at about 0.8 ms a row (40 ms at 32 rows, 71 at 64, 130 at 128, the
 same rate as the prompt path and mlx-lm's), so the depth rule, given those costs, finds deeper shared drafts do not
 pay; the drafter's own cost is 9 ms a round for eight streams.
+
+Long prompts, one after the other on the same M5 Ultra: native in 512-row chunks (`tf-gemma4-run ... 49 512`), mlx-lm
+0.32.0 in 2048-token steps into a fresh cache. Native decode is the run's 49 tokens after the prompt, timed to 0.1 s.
+
+| Prompt | Native prompt tok/s | mlx-lm prompt tok/s | Native decode tok/s | mlx-lm decode tok/s |
+|---|---|---|---|---|
+| 8k | 1043 | 1305 | about 38 | 39 |
+| 32k | 903 | 1139 | about 33 | 32 |
+| 64k | 725 | 944 | about 29 | 32 |
+| 128k | 583 | 651 | about 24 | 25 |
+| 252k | 354 | 440 | about 19 | 16 |
