@@ -3,8 +3,8 @@
 Status: experimental. One checkpoint, one card class, one request at a time. Everything below was measured on the setup in
 [Tested setup](#tested-setup); nothing is claimed for other cards.
 
-The Intel GPU backend runs OpenCL C kernels compiled to SPIR-V (`ocloc`) through Level Zero. It is a separate Linux build
-(`-Dxpu`) and has no CUDA or Metal code in its path.
+The Intel GPU backend runs OpenCL C kernels compiled to SPIR-V (`ocloc`) through Level Zero, on the same loader table as the
+Qwen3.8-27B XPU runner (`zig/src/xpu/ze.zig`). It is a separate Linux build (`-Dxpu`) and has no CUDA or Metal code in its path.
 
 ## Supported
 

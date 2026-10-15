@@ -5,7 +5,7 @@ const Context = @import("context.zig").Context;
 const Stream = @import("stream.zig").Stream;
 const DeviceBuffer = @import("memory.zig").DeviceBuffer;
 const HostBuffer = @import("memory.zig").HostBuffer;
-const Error = @import("driver.zig").Error;
+const Error = @import("context.zig").Error;
 
 /// Host bytes a weight passes through on its way to the device.
 pub const chunk_bytes: usize = 64 << 20;

@@ -1,11 +1,11 @@
 //! Kernel launches: every argument set in order, then the grid queued on a stream.
 
 const std = @import("std");
-const abi = @import("abi.zig");
+const ze = @import("ze");
 const Kernel = @import("module.zig").Kernel;
 const DeviceBuffer = @import("memory.zig").DeviceBuffer;
 const Stream = @import("stream.zig").Stream;
-const Error = @import("driver.zig").Error;
+const Error = @import("context.zig").Error;
 
 /// How a launch argument is passed to the kernel parameter at its position.
 pub const ArgKind = enum { buffer, pointer, float, integer };
@@ -22,7 +22,7 @@ pub fn argKind(comptime T: type) ArgKind {
 
 /// Queues `k` over `groups` work-groups; the group size was fixed when the kernel was made.
 pub fn launch(k: Kernel, s: Stream, groups: [3]u32) Error!void {
-    const g: abi.GroupCount = .{ .x = groups[0], .y = groups[1], .z = groups[2] };
+    const g: ze.GroupCount = .{ .x = groups[0], .y = groups[1], .z = groups[2] };
     if (g.x == 0 or g.y == 0 or g.z == 0) return error.Invalid;
     try k.ctx.d.check(k.ctx.d.api.zeCommandListAppendLaunchKernel(s.list, k.handle, &g, null, 0, null), "zeCommandListAppendLaunchKernel");
 }

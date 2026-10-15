@@ -1,24 +1,24 @@
 //! An in-order immediate command list: copies and launches run in the order queued; synchronize waits for all of them.
 
-const abi = @import("abi.zig");
+const ze = @import("ze");
 const Context = @import("context.zig").Context;
-const Error = @import("driver.zig").Error;
+const Error = @import("context.zig").Error;
 
 pub const Stream = struct {
     ctx: *const Context,
-    list: abi.CommandListHandle,
+    list: ze.H,
 
     pub fn init(ctx: *const Context) Error!Stream {
         const d = ctx.d;
-        var list: abi.CommandListHandle = null;
-        try d.check(d.api.zeCommandListCreateImmediate(ctx.handle, ctx.entry.device, &.{ .flags = abi.queue_flag_in_order }, &list), "zeCommandListCreateImmediate");
+        var list: ze.H = null;
+        try d.check(d.api.zeCommandListCreateImmediate(ctx.gpu.context, ctx.gpu.device, &.{ .flags = ze.queue_in_order, .mode = 2 }, &list), "zeCommandListCreateImmediate");
         return .{ .ctx = ctx, .list = list };
     }
 
     /// Waits for queued work first, so nothing the list still reads is freed under it.
     pub fn deinit(self: *Stream) void {
         self.synchronize() catch {};
-        _ = self.ctx.d.api.zeCommandListDestroy(self.list);
+        _ = self.ctx.d.x.zeCommandListDestroy(self.list);
         self.* = undefined;
     }
 
@@ -38,6 +38,6 @@ pub const Stream = struct {
     pub fn fill8(self: Stream, dst: ?*anyopaque, value: u8, n: usize) Error!void {
         if (n == 0) return;
         const d = self.ctx.d;
-        try d.check(d.api.zeCommandListAppendMemoryFill(self.list, dst, &value, 1, n, null, 0, null), "zeCommandListAppendMemoryFill");
+        try d.check(d.x.zeCommandListAppendMemoryFill(self.list, dst, &value, 1, n, null, 0, null), "zeCommandListAppendMemoryFill");
     }
 };

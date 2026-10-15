@@ -1,10 +1,9 @@
 //! Device memory and pinned host memory, each owned by one value; copies and fills queue on a stream.
 
 const std = @import("std");
-const abi = @import("abi.zig");
 const Context = @import("context.zig").Context;
 const Stream = @import("stream.zig").Stream;
-const Error = @import("driver.zig").Error;
+const Error = @import("context.zig").Error;
 
 pub const DeviceBuffer = struct {
     ctx: *const Context,
@@ -14,7 +13,7 @@ pub const DeviceBuffer = struct {
     /// `len` bytes, 64-byte aligned; zero bytes allocate nothing.
     pub fn alloc(ctx: *const Context, len: usize) Error!DeviceBuffer {
         var p: ?*anyopaque = null;
-        if (len > 0) try ctx.d.check(ctx.d.api.zeMemAllocDevice(ctx.handle, &.{}, len, 64, ctx.entry.device, &p), "zeMemAllocDevice");
+        if (len > 0) try ctx.d.check(ctx.d.api.zeMemAllocDevice(ctx.gpu.context, &.{}, len, 64, ctx.gpu.device, &p), "zeMemAllocDevice");
         return .{ .ctx = ctx, .ptr = p, .len = len };
     }
 
@@ -27,7 +26,7 @@ pub const DeviceBuffer = struct {
     }
 
     pub fn free(self: *DeviceBuffer) void {
-        if (self.ptr != null) _ = self.ctx.d.api.zeMemFree(self.ctx.handle, self.ptr);
+        if (self.ptr != null) _ = self.ctx.d.api.zeMemFree(self.ctx.gpu.context, self.ptr);
         self.* = undefined;
     }
 
@@ -75,13 +74,13 @@ pub const HostBuffer = struct {
     pub fn alloc(ctx: *const Context, len: usize) Error!HostBuffer {
         if (len == 0) return error.Invalid;
         var p: ?*anyopaque = null;
-        try ctx.d.check(ctx.d.api.zeMemAllocHost(ctx.handle, &.{}, len, 64, &p), "zeMemAllocHost");
+        try ctx.d.check(ctx.d.api.zeMemAllocHost(ctx.gpu.context, &.{}, len, 64, &p), "zeMemAllocHost");
         const base: [*]align(16) u8 = @ptrCast(@alignCast(p.?));
         return .{ .ctx = ctx, .bytes = base[0..len] };
     }
 
     pub fn free(self: *HostBuffer) void {
-        _ = self.ctx.d.api.zeMemFree(self.ctx.handle, self.bytes.ptr);
+        _ = self.ctx.d.api.zeMemFree(self.ctx.gpu.context, self.bytes.ptr);
         self.* = undefined;
     }
 

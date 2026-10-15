@@ -1,8 +1,12 @@
-//! XPU (Intel Xe2 over Level Zero): opt-in steps; `xpu-qwen27` builds the Qwen3.8-27B forward runner and its kernels;
-//! `-Dxpu` adds Nemotron's OpenCL C kernels (SPIR-V), its CLI `tensorfold-xpu` and its tests.
+//! XPU (Intel Xe2 over Level Zero): opt-in steps for the Qwen3.8-27B runner (`xpu-qwen27`) and Nemotron (`-Dxpu`).
 
 const std = @import("std");
 const exlr8_build = @import("exlr8.zig");
+
+/// ze.zig as its own module: the Qwen27 runner and the Nemotron runtime share one Level Zero table.
+fn zeModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("zig/src/xpu/ze.zig"), .target = target, .optimize = optimize, .link_libc = true });
+}
 
 pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, build_options: *std.Build.Step.Options) void {
     const ocloc = b.option([]const u8, "ocloc", "Intel offline compiler") orelse "ocloc";
@@ -69,6 +73,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     ) });
     const module = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/qwen27_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
     module.addImport("xpu_qwen27_kernels", embedded);
+    module.addImport("ze", zeModule(b, target, optimize));
     const exe = b.addExecutable(.{ .name = "xpu-qwen27", .root_module = module });
     const install = b.addInstallArtifact(exe, .{});
     b.step("xpu-qwen27", "Build the Qwen3.8-27B XPU forward runner (needs ocloc, a C++17 compiler and nGEN headers)").dependOn(&install.step);
@@ -76,6 +81,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     // tensorfold-native with the XPU engines (native/xpu.zig), as the CUDA build's `native` step makes it.
     const qwen27 = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/qwen27.zig"), .target = target, .optimize = optimize, .link_libc = true });
     qwen27.addImport("xpu_qwen27_kernels", embedded);
+    qwen27.addImport("ze", zeModule(b, target, optimize));
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const engines = b.createModule(.{ .root_source_file = b.path("zig/src/native/xpu.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "xpu_qwen27", .module = qwen27 }, .{ .name = "lanes", .module = lanes } } });
@@ -93,7 +99,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     server.root_module.addOptions("build_options", build_options);
     const install_server = b.addInstallArtifact(server, .{ .dest_dir = .{ .override = .{ .custom = "xpu/bin" } } });
     b.step("xpu-native", "tensorfold-native with the XPU engines into zig-out/xpu/bin").dependOn(&install_server.step);
-    nemotron(b, target, optimize, ocloc, device);
+    nemotronSteps(b, target, optimize, ocloc, device);
 }
 
 
@@ -123,6 +129,7 @@ fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     options.addOption(bool, "with_kernels", images.len == kernels.len);
     const xpu = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     xpu.addOptions("kernel_options", options);
+    xpu.addImport("ze", zeModule(b, target, optimize));
     if (images.len == kernels.len) for (kernels, images) |k, image| xpu.addAnonymousImport(b.fmt("spv_{s}", .{k.name}), .{ .root_source_file = image });
     return xpu;
 }
@@ -166,7 +173,7 @@ const test_programs = [_][]const u8{
 };
 
 /// `-Dxpu` (Linux): Nemotron's SPIR-V images, `tensorfold-xpu` and `tf-xpu-test`; needs ocloc, not nvcc or CUDA.
-fn nemotron(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ocloc: []const u8, device: []const u8) void {
+fn nemotronSteps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ocloc: []const u8, device: []const u8) void {
     const enabled = b.option(bool, "xpu", "Build Nemotron on the Intel GPU into the install step (needs ocloc)") orelse false;
     if (!enabled or target.result.os.tag != .linux) return;
     var images: [kernels.len]std.Build.LazyPath = undefined;

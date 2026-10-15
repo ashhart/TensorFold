@@ -1,6 +1,6 @@
 //! Shared verify rounds across slots: one forward over several windows, then each window keeps its accepted rows.
 const std = @import("std");
-const ze = @import("ze.zig");
+const ze = @import("ze");
 const q = @import("qwen27.zig");
 const dev = @import("dev.zig");
 const fwd = @import("forward.zig");

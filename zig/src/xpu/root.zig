@@ -1,8 +1,8 @@
-//! TensorFold's Intel GPU runtime: Level Zero through dlopen, OpenCL C kernels as embedded SPIR-V, no Python.
+//! TensorFold's Intel GPU runtime for Nemotron: ze.zig's Level Zero table, OpenCL C kernels as embedded SPIR-V.
 
-pub const abi = @import("abi.zig");
-pub const Driver = @import("driver.zig").Driver;
-pub const Error = @import("driver.zig").Error;
+pub const ze = @import("ze");
+pub const Driver = @import("context.zig").Driver;
+pub const Error = @import("context.zig").Error;
 pub const context = @import("context.zig");
 pub const Context = context.Context;
 pub const DeviceBuffer = @import("memory.zig").DeviceBuffer;
@@ -22,5 +22,4 @@ test {
     _ = context;
     _ = launch;
     _ = decode;
-    _ = abi;
 }

@@ -15,7 +15,7 @@ pub fn run() !void {
     std.debug.print("{d} device(s)\n", .{list.len});
     for (list, 0..) |*e, i| {
         const p = e.props;
-        const eus = p.num_slices * p.num_subslices_per_slice * p.num_eus_per_subslice;
-        std.debug.print("device {d}{s}: {s} type={d} id=0x{x} EUs={d} threads/EU={d} simd={d} clock={d}MHz maxalloc={d}MiB\n", .{ i, if (i == pick) " (picked)" else "", names[i], @intFromEnum(p.type), p.device_id, eus, p.num_threads_per_eu, p.physical_eu_simd_width, p.core_clock_rate, p.max_mem_alloc_size >> 20 });
+        const eus = p.numSlices * p.numSubslicesPerSlice * p.numEUsPerSubslice;
+        std.debug.print("device {d}{s}: {s} type={d} id=0x{x} EUs={d} threads/EU={d} simd={d} clock={d}MHz maxalloc={d}MiB\n", .{ i, if (i == pick) " (picked)" else "", names[i], p.type, p.deviceId, eus, p.numThreadsPerEU, p.physicalEUSimdWidth, p.coreClockRate, p.maxMemAllocSize >> 20 });
     }
 }

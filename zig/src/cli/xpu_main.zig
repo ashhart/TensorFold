@@ -209,8 +209,8 @@ fn devices() !u8 {
     var all: [xpu.context.max_devices]xpu.context.Entry = undefined;
     for (try xpu.context.enumerate(&driver, &all), 0..) |*e, i| {
         const p = e.props;
-        const eus = p.num_slices * p.num_subslices_per_slice * p.num_eus_per_subslice;
-        std.debug.print("device {d}: {s} EUs={d} clock={d}MHz maxalloc={d}MiB\n", .{ i, xpu.context.entryName(e), eus, p.core_clock_rate, p.max_mem_alloc_size >> 20 });
+        const eus = p.numSlices * p.numSubslicesPerSlice * p.numEUsPerSubslice;
+        std.debug.print("device {d}: {s} EUs={d} clock={d}MHz maxalloc={d}MiB\n", .{ i, xpu.context.entryName(e), eus, p.coreClockRate, p.maxMemAllocSize >> 20 });
     }
     return 0;
 }

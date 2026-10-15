@@ -1,13 +1,13 @@
 //! Loaded GPU code: SPIR-V modules the driver builds for this device, and their kernels by name.
 
 const std = @import("std");
-const abi = @import("abi.zig");
+const ze = @import("ze");
 const Context = @import("context.zig").Context;
-const Error = @import("driver.zig").Error;
+const Error = @import("context.zig").Error;
 
 pub const Module = struct {
     ctx: *const Context,
-    handle: abi.ModuleHandle,
+    handle: ze.H,
 
     /// Builds a SPIR-V image; a refused build logs the driver's text.
     pub fn load(ctx: *const Context, spirv: []const u8) Error!Module {
@@ -16,34 +16,34 @@ pub const Module = struct {
             return error.Invalid;
         }
         const d = ctx.d;
-        var m: abi.ModuleHandle = null;
-        var log: abi.BuildLogHandle = null;
-        const desc: abi.ModuleDesc = .{ .format = abi.module_format_spirv, .input_size = spirv.len, .input = spirv.ptr };
-        const res = d.api.zeModuleCreate(ctx.handle, ctx.entry.device, &desc, &m, &log);
-        if (res != abi.success) {
+        var m: ze.H = null;
+        var log: ze.H = null;
+        const desc: ze.ModuleDesc = .{ .format = 0, .inputSize = spirv.len, .pInputModule = spirv.ptr }; // SPIR-V
+        const res = d.api.zeModuleCreate(ctx.gpu.context, ctx.gpu.device, &desc, &m, &log);
+        if (res != 0) {
             var sz: usize = 0;
-            _ = d.api.zeModuleBuildLogGetString(log, &sz, null);
+            _ = d.x.zeModuleBuildLogGetString(log, &sz, null);
             const buf = std.heap.page_allocator.alloc(u8, sz) catch return error.OutOfMemory;
             defer std.heap.page_allocator.free(buf);
-            _ = d.api.zeModuleBuildLogGetString(log, &sz, buf.ptr);
+            _ = d.x.zeModuleBuildLogGetString(log, &sz, buf.ptr);
             std.log.err("module build: {s}", .{buf});
-            _ = d.api.zeModuleBuildLogDestroy(log);
+            _ = d.x.zeModuleBuildLogDestroy(log);
             return error.BuildFailed;
         }
-        if (log != null) _ = d.api.zeModuleBuildLogDestroy(log);
+        if (log != null) _ = d.x.zeModuleBuildLogDestroy(log);
         return .{ .ctx = ctx, .handle = m };
     }
 
     pub fn unload(self: *Module) void {
-        _ = self.ctx.d.api.zeModuleDestroy(self.handle);
+        _ = self.ctx.d.x.zeModuleDestroy(self.handle);
         self.* = undefined;
     }
 
     /// A kernel by its exact name with its work-group size; it lives until `deinit` and before the module's unload.
     pub fn kernel(self: Module, name: [:0]const u8, local: [3]u32) Error!Kernel {
         const d = self.ctx.d;
-        var k: abi.KernelHandle = null;
-        d.check(d.api.zeKernelCreate(self.handle, &.{ .name = name.ptr }, &k), "zeKernelCreate") catch |e| {
+        var k: ze.H = null;
+        d.check(d.api.zeKernelCreate(self.handle, &.{ .pKernelName = name.ptr }, &k), "zeKernelCreate") catch |e| {
             std.log.err("kernel not in module: {s}", .{name});
             return e;
         };
@@ -54,10 +54,10 @@ pub const Module = struct {
 
 pub const Kernel = struct {
     ctx: *const Context,
-    handle: abi.KernelHandle,
+    handle: ze.H,
 
     pub fn deinit(self: *Kernel) void {
-        _ = self.ctx.d.api.zeKernelDestroy(self.handle);
+        _ = self.ctx.d.x.zeKernelDestroy(self.handle);
         self.* = undefined;
     }
 

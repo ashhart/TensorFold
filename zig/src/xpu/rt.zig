@@ -1,8 +1,8 @@
 //! Prototype-style runtime view: one Runtime over a Context and its Stream, with plain buffers, modules and kernels.
 
 const std = @import("std");
-const abi = @import("abi.zig");
-const xpu = @import("driver.zig");
+const ze = @import("ze");
+const xpu = @import("context.zig");
 const Context = @import("context.zig").Context;
 const Stream = @import("stream.zig").Stream;
 
@@ -115,8 +115,8 @@ pub fn otherVramKiB() u64 {
 }
 
 /// The live runtime queue, for the exit and panic paths (Runtime is returned by value, so only the handles are kept).
-var live_list: abi.CommandListHandle = null;
-var live_sync: ?@FieldType(abi.Api, "zeCommandListHostSynchronize") = null;
+var live_list: ze.H = null;
+var live_sync: ?@FieldType(ze.Api, "zeCommandListHostSynchronize") = null;
 const drain_timeout_ns: u64 = 10_000_000_000;
 
 /// Waits at most 10 s for the queue to go idle, then proceeds: an unbounded wait on a wedged GPU would hang exit.
@@ -126,7 +126,7 @@ fn drainBounded() void {
     live_sync = null;
     if (l == null) return;
     const rc = f(l, drain_timeout_ns);
-    if (rc != abi.success) std.debug.print("device queue not idle after the bounded wait (result 0x{x}), exiting anyway\n", .{rc});
+    if (rc != 0) std.debug.print("device queue not idle after the bounded wait (result 0x{x}), exiting anyway\n", .{rc});
 }
 
 /// Panic handler for program roots (`pub const panic = std.debug.FullPanic(rt.panicDrain);`): drains the queue first.
@@ -159,9 +159,9 @@ pub const Error = xpu.Error || error{VramBusy};
 
 pub const Runtime = struct {
     drv: *const xpu.Driver,
-    device: abi.DeviceHandle,
-    ctx: abi.ContextHandle,
-    list: abi.CommandListHandle,
+    device: ze.H,
+    ctx: ze.H,
+    list: ze.H,
 
     /// Borrows the context and stream; both must outlive the Runtime.
     pub fn init(c: *const Context, s: Stream) Error!Runtime {
@@ -170,7 +170,7 @@ pub const Runtime = struct {
         live_sync = c.d.api.zeCommandListHostSynchronize;
         _ = atexit(&atExit); // exit handlers run last-in first-out: after the loader is open, so ours runs before it tears down
         if (std.c.getenv("XPU_PROF") != null) prof_on = true;
-        return .{ .drv = c.d, .device = c.entry.device, .ctx = c.handle, .list = s.list };
+        return .{ .drv = c.d, .device = c.gpu.device, .ctx = c.gpu.context, .list = s.list };
     }
 
     /// Drains the queue (bounded wait); the device handles belong to the Context and Stream.
@@ -219,16 +219,16 @@ pub const Runtime = struct {
 
     /// As `module` with driver build flags (e.g. "-cl-intel-128-GRF-per-thread").
     pub fn moduleWith(self: *Runtime, spv: []const u8, flags: ?[*:0]const u8) Error!Module {
-        var m: abi.ModuleHandle = null;
-        var log: abi.BuildLogHandle = null;
-        const md: abi.ModuleDesc = .{ .format = abi.module_format_spirv, .input_size = spv.len, .input = spv.ptr, .build_flags = flags };
+        var m: ze.H = null;
+        var log: ze.H = null;
+        const md: ze.ModuleDesc = .{ .format = 0, .inputSize = spv.len, .pInputModule = spv.ptr, .pBuildFlags = flags }; // SPIR-V
         const res = self.drv.api.zeModuleCreate(self.ctx, self.device, &md, &m, &log);
-        if (res != abi.success) {
+        if (res != 0) {
             var sz: usize = 0;
-            _ = self.drv.api.zeModuleBuildLogGetString(log, &sz, null);
+            _ = self.drv.x.zeModuleBuildLogGetString(log, &sz, null);
             const buf = std.heap.page_allocator.alloc(u8, sz) catch return error.OutOfMemory;
             defer std.heap.page_allocator.free(buf);
-            _ = self.drv.api.zeModuleBuildLogGetString(log, &sz, buf.ptr);
+            _ = self.drv.x.zeModuleBuildLogGetString(log, &sz, buf.ptr);
             std.log.err("module build: {s}", .{buf});
             return error.BuildFailed;
         }
@@ -250,16 +250,16 @@ pub const Buffer = struct {
 
 pub const Module = struct {
     rt: *Runtime,
-    handle: abi.ModuleHandle,
+    handle: ze.H,
 
     pub fn deinit(self: *Module) void {
-        _ = self.rt.drv.api.zeModuleDestroy(self.handle);
+        _ = self.rt.drv.x.zeModuleDestroy(self.handle);
     }
 
     pub fn kernel(self: *Module, name: [*:0]const u8, local: [3]u32) Error!Kernel {
-        var k: abi.KernelHandle = null;
+        var k: ze.H = null;
         const api = &self.rt.drv.api;
-        try self.rt.drv.check(api.zeKernelCreate(self.handle, &.{ .name = name }, &k), "zeKernelCreate");
+        try self.rt.drv.check(api.zeKernelCreate(self.handle, &.{ .pKernelName = name }, &k), "zeKernelCreate");
         try self.rt.drv.check(api.zeKernelSetGroupSize(k, local[0], local[1], local[2]), "zeKernelSetGroupSize");
         return .{ .rt = self.rt, .handle = k, .name = name };
     }
@@ -267,11 +267,11 @@ pub const Module = struct {
 
 pub const Kernel = struct {
     rt: *Runtime,
-    handle: abi.KernelHandle,
+    handle: ze.H,
     name: [*:0]const u8 = "?",
 
     pub fn deinit(self: *Kernel) void {
-        _ = self.rt.drv.api.zeKernelDestroy(self.handle);
+        _ = self.rt.drv.x.zeKernelDestroy(self.handle);
     }
 
     pub fn setBuffer(self: *Kernel, index: u32, b: Buffer) Error!void {
@@ -291,7 +291,7 @@ pub const Kernel = struct {
 
     /// Queues the kernel over `groups` work-groups.
     pub fn launch(self: *Kernel, groups: [3]u32) Error!void {
-        const g: abi.GroupCount = .{ .x = groups[0], .y = groups[1], .z = groups[2] };
+        const g: ze.GroupCount = .{ .x = groups[0], .y = groups[1], .z = groups[2] };
         if (prof_on) try self.rt.sync();
         const t0 = if (prof_on) profNow() else 0;
         try self.rt.drv.check(self.rt.drv.api.zeCommandListAppendLaunchKernel(self.rt.list, self.handle, &g, null, 0, null), "launch");

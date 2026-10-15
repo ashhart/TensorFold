@@ -75,11 +75,9 @@ pub fn main(init: std.process.Init) !u8 {
     const cfg = try cfgm.parse(gpa, cfg_bytes);
     var r = try rt.open();
     defer r.deinit();
-    var props: @import("xpu").abi.DeviceProperties = undefined;
-    props.stype = @import("xpu").abi.structure_type_device_properties;
-    props.next = null;
+    var props: @import("xpu").ze.DeviceProperties = .{};
     if (r.drv.api.zeDeviceGetProperties(r.device, &props) == 0) {
-        std.debug.print("device {s}, max single allocation {d:.2} GB\n", .{ std.mem.sliceTo(&props.name, 0), @as(f64, @floatFromInt(props.max_mem_alloc_size)) / 1e9 });
+        std.debug.print("device {s}, max single allocation {d:.2} GB\n", .{ std.mem.sliceTo(&props.name, 0), @as(f64, @floatFromInt(props.maxMemAllocSize)) / 1e9 });
     }
     var l = try ld.Loader.init(gpa, &r, dir);
     const t_load = nowNs();
