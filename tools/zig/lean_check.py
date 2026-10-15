@@ -19,6 +19,8 @@ GENERATOR_OUTPUT = (
     "zig/src/families/flashnext/roles_gen.zig",
     "zig/kernels/metal/flashnext/sources_gen.zig",
 )
+# Third-party sources kept as their authors wrote them (stb_image.h) are skipped too.
+VENDORED = "zig/vendor/"
 
 
 def generator_output(path: Path) -> bool:
@@ -31,7 +33,7 @@ def generator_output(path: Path) -> bool:
 
 def problems(path: Path) -> list[str]:
     """Every rule break in one file, as 'path:line: reason'."""
-    if generator_output(path):
+    if generator_output(path) or path.relative_to(ROOT).as_posix().startswith(VENDORED):
         return []
     lines = path.read_text(errors="replace").splitlines()
     rel, found = path.relative_to(ROOT), []

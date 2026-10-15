@@ -1,9 +1,4 @@
-//! Image inputs for Qwen-style vision towers, as the Python engine prepares them (tensorfold/vision/images.py and
-//! qwen_processing.py with transformers' Qwen2VL processor): decode (JPEG, PNG; EXIF orientation applied, alpha over
-//! white), smart_resize to multiples of patch x merge within a pixel budget, an antialiased bicubic resize (PIL's
-//! filter and bounds with torch's uint8 fixed point: int16 weights at the most precision the axis allows),
-//! (x - 127.5) / 127.5, and the patches in merge-block order,
-//! each [channel, frame (the image twice), 16, 16] -- 1,536 values.
+//! Image inputs for Qwen-style vision towers as Qwen2VL's processor makes them: decode, smart_resize, resize, patches.
 
 const std = @import("std");
 /// GLM-5.3-Flash's preparation (its canvas, padding, normalization and patch order) on this module's decode and resize.
@@ -160,7 +155,6 @@ pub fn smartResize(height: u32, width: u32, factor: u32, min_pixels: u64, max_pi
     return .{ @intFromFloat(hb), @intFromFloat(wb) };
 }
 
-
 fn bicubic(x0: f64) f64 {
     const a = -0.5;
     const x = @abs(x0);
@@ -171,8 +165,7 @@ fn bicubic(x0: f64) f64 {
 
 const Coeffs = struct { ksize: usize, bounds: []usize, kk: []i32, precision: u5 };
 
-/// PIL's precompute_coeffs for an axis of ``in_size`` resampled to ``out_size``, as fixed point the way torch's uint8
-/// antialias kernel takes them: int16 weights at the largest precision (< 22 bits) that keeps the largest in range.
+/// PIL's precompute_coeffs for an axis, as int16 fixed point at the most precision (< 22 bits) torch's uint8 takes.
 fn coeffs(gpa: std.mem.Allocator, in_size: usize, out_size: usize) Error!Coeffs {
     const scale = @as(f64, @floatFromInt(in_size)) / @as(f64, @floatFromInt(out_size));
     const filterscale = @max(scale, 1.0);
@@ -222,8 +215,7 @@ fn clip8(v: i64, precision: u5) u8 {
     return @intCast(std.math.clamp(r, 0, 255));
 }
 
-/// The antialiased bicubic resize (PIL's ImagingResample, 8 bits: the horizontal pass, then the vertical, each
-/// rounding to bytes).
+/// The antialiased bicubic resize (PIL's ImagingResample, 8 bits): horizontal pass, then vertical, rounding to bytes.
 pub fn resize(gpa: std.mem.Allocator, im: Image, ow: u32, oh: u32) Error!Image {
     var cur = im;
     var owned = false;
@@ -289,8 +281,7 @@ pub const MERGE = 2;
 pub const TEMPORAL = 2;
 pub const FACTOR = PATCH * MERGE;
 
-/// ``im`` resized within ``max_tokens`` visual tokens (min_pixels as the Python frontend passes it: one merged patch),
-/// normalized and cut into patches.
+/// ``im`` resized within ``max_tokens`` visual tokens (min_pixels: one merged patch), normalized and cut into patches.
 pub fn prepare(gpa: std.mem.Allocator, im: Image, max_tokens: u64) Error!Prepared {
     const cap = max_tokens * FACTOR * FACTOR;
     const size = try smartResize(im.h, im.w, FACTOR, @min(FACTOR * FACTOR, cap), cap);
@@ -322,8 +313,7 @@ pub fn prepare(gpa: std.mem.Allocator, im: Image, max_tokens: u64) Error!Prepare
 
 // -- videos ---------------------------------------------------------------------------------------------------------
 
-/// A video's frame size for the tower (the Python frontend's video_size): Qwen3-VL's smart_resize with its per-frame
-/// cap (at most 768 tokens a frame group, at least ~134), the whole video within ``budget`` tokens.
+/// A video's frame size: Qwen3-VL's smart_resize, at most 768 tokens a frame group, the video within ``budget``.
 pub fn videoSize(frames: u32, height0: u32, width0: u32, budget: u64) Error![2]u32 {
     const factor: f64 = FACTOR;
     const shortest: f64 = 128 * FACTOR * FACTOR;
@@ -355,9 +345,7 @@ pub fn videoSize(frames: u32, height0: u32, width0: u32, budget: u64) Error![2]u
     return .{ @intFromFloat(hb), @intFromFloat(wb) };
 }
 
-/// A decoded video's frame groups for the tower: each group's patches (fp32 [gh * gw, 1536], two consecutive frames
-/// as the temporal pair; an odd last frame repeats), normalized as numpy does ((x * f32(1/255) - 0.5) / 0.5), and
-/// each group's time (the mean of its two frames' seconds).
+/// A video's frame groups: patches of two consecutive frames, normalized as numpy does, and their mean time.
 pub const Video = struct {
     patches: []f32, // groups x gh x gw x 1536
     groups: usize,

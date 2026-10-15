@@ -1,4 +1,5 @@
 //! CUDA family registration, device setup, memory admission and the native lane host.
+
 /// The serve flags this build's engine takes past the common ones (server/cli.zig served()): two ranks.
 pub const serves: []const []const u8 = &.{"--tp"};
 
@@ -254,8 +255,7 @@ const Host = struct {
 
 const refusals = @import("cuda_refusal.zig");
 
-/// A tensor-parallel rank above 0 (server/engines.zig follow): the family opened as that rank, then its replay loop
-/// until rank 0 stops; false with ``problem`` set when it cannot.
+/// A tensor-parallel rank above 0: the family opened as that rank, then its replay loop; false with ``problem`` set.
 pub fn follow(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !bool {
     const opened = (try open(a, gpa, io, o, problem)) orelse return false;
     defer opened.close(opened.ctx);
@@ -423,19 +423,19 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     if (comptime @hasField(@TypeOf(loaded), "learns")) { // a family with a Living Weights learner
         if (loaded.learns != null) {
-        const Slide = nemotron_slide.Adapter(F.slide);
-        h.dir = try gpa.dupe(u8, o.dir);
-        const s = try gpa.create(Slide);
-        s.* = Slide.init(gpa, io, F.learnModel(loaded.ctx, h.dir));
-        h.slide = s;
-        h.slide_free = struct {
-            fn f(al: Allocator, p: *anyopaque) void {
-                const x: *Slide = @ptrCast(@alignCast(p));
-                x.deinit();
-                al.destroy(x);
-            }
-        }.f;
-        h.learn = s.hook();
+            const Slide = nemotron_slide.Adapter(F.slide);
+            h.dir = try gpa.dupe(u8, o.dir);
+            const s = try gpa.create(Slide);
+            s.* = Slide.init(gpa, io, F.learnModel(loaded.ctx, h.dir));
+            h.slide = s;
+            h.slide_free = struct {
+                fn f(al: Allocator, p: *anyopaque) void {
+                    const x: *Slide = @ptrCast(@alignCast(p));
+                    x.deinit();
+                    al.destroy(x);
+                }
+            }.f;
+            h.learn = s.hook();
         }
     }
     errdefer if (h.slide) |s| {
@@ -443,8 +443,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         gpa.free(h.dir);
     };
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
-    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .warm_turns = h.store != null, .logprobs = loaded.backend.vtable.first_row != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows, .structures = loaded.backend.vtable.first_masked != null, .vision = o.vision and @hasField(F.Options, "vision"), .vision_glm = @hasDecl(F, "vision_glm") and F.vision_glm,
-        .admit = if (@hasDecl(F, "fits")) .{ .ctx = loaded.ctx, .fits = F.fits } else null }, .{ .ctx = loaded.ctx, .text = F.explain });
+    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .warm_turns = h.store != null, .logprobs = loaded.backend.vtable.first_row != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows, .structures = loaded.backend.vtable.first_masked != null, .vision = o.vision and @hasField(F.Options, "vision"), .vision_glm = @hasDecl(F, "vision_glm") and F.vision_glm, .admit = if (@hasDecl(F, "fits")) .{ .ctx = loaded.ctx, .fits = F.fits } else null }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     const follow_loop: ?*const fn (*anyopaque) anyerror!void = if (@hasField(@TypeOf(loaded), "follow")) loaded.follow else null;
     if (follow_loop) |f| {
