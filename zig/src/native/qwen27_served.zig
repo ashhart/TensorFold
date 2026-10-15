@@ -338,7 +338,9 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
 /// Prompt reuse in up to 16 GiB of what 70% of RAM leaves once every slot has its memory; CacheOverCap: `why` says why.
 fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !void {
     const later = laterBytes(h);
-    const plan = try cache_fit.budgetBeside(gib, over, room(h.model) -| later, later, a, why, "");
+    // the tower's scratch and rows join the footprint at the first image: the budget counts them now, as room() does
+    const tower: u64 = if (h.back.vision) |v| v.firstUse() else 0;
+    const plan = try cache_fit.budgetBeside(gib, over, room(h.model) -| later, later + tower, a, why, "");
     if (plan.budget_bytes == 0) return;
     // a short prompt keeps its history's mark at a chunk end its pass cuts anyway (qwen27_slots.prefill): no extra call
     h.cache = pc.Store.init(h.gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .rows = &disk.image } }, .{ .warm = .on, .chunk = @intCast(h.back.chunk) }, plan.budget_bytes);

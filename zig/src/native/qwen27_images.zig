@@ -29,6 +29,11 @@ pub const Vision = struct {
         return .{ t[0], t[1], v.rows };
     }
 
+    /// Bytes the footprint gains at the first image: the tower's scratch and the image rows, untouched until then.
+    pub fn firstUse(v: *const Vision) u64 {
+        return v.tower.scratch.length() + v.rows.length();
+    }
+
     pub fn deinit(v: *Vision) void {
         v.spans.deinit(v.gpa);
         v.rows.deinit();
