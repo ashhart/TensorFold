@@ -45,6 +45,11 @@ pub const Seg = struct {
     mask_row: ?usize = null, // structured output: its rows' grammar bits from this row of Forward.masks
 };
 
+/// A matrix simd_qmm_bits' tiles read: groups of 64 with fp32 sums at a width they unpack.
+pub fn tiled(w: row.Weights) bool {
+    return w.group == 64 and w.sum == .f32 and w.n % 8 == 0 and w.k % 64 == 0 and std.mem.indexOfScalar(u8, &row.simd_bits.bit_widths, w.bits) != null;
+}
+
 pub fn ints8(values: []const i32) [8]i32 {
     var out: [8]i32 = @splat(0);
     @memcpy(out[0..values.len], values);
@@ -116,6 +121,32 @@ pub const Forward = struct {
         e.bytes(c.dims, 4);
         e.buf(y, y_off, 5);
         e.run(.{ c.groups * c.threads, 1, 1 }, .{ c.threads, 1, 1 });
+    }
+
+    /// simd_qmm_bits' tiles for a prompt chunk at a width but 4/64 (groups of 64), member by member; false where not.
+    pub fn wide(self: Forward, e: *Enc, lin: wts.Linear, x: Buffer, y: Buffer, rows: usize) bool {
+        const p = self.k.bits orelse return false;
+        var single: [1]wts.Member = undefined;
+        const parts: []const wts.Member = if (lin.stacked > 0) lin.stack[0..lin.stacked] else blk: {
+            single[0] = .{ .first = 0, .rows = lin.rows orelse return false };
+            break :blk &single;
+        };
+        var calls: [3]row.simd_bits.Call = undefined;
+        for (parts, 0..) |m, i| {
+            if (!tiled(m.rows)) return false;
+            calls[i] = row.simd_bits.call(p, m.rows.bits, m.rows.n, m.rows.k, rows, lin.n, false) catch return false;
+        }
+        for (parts, calls[0..parts.len]) |m, c| {
+            e.pipe(c.pipeline);
+            e.buf(x, 0, 0);
+            e.buf(m.rows.w, m.rows.w_off, 1);
+            e.buf(m.rows.scales, m.rows.s_off, 2);
+            e.buf(m.rows.biases, m.rows.b_off, 3);
+            e.bytes(c.args, 4);
+            e.buf(y, m.first * 2, 5);
+            e.run(.{ c.groups.width * c.threads, c.groups.height, 1 }, .{ c.threads, 1, 1 });
+        }
+        return true;
     }
 
     /// Routed experts on the core's indexed row kernels: slot i takes expert ids[i] on input row i / repeat.

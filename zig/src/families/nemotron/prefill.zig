@@ -146,6 +146,7 @@ pub const Chunk = struct {
 
     /// x [rows, K] times a projection: lane_qmm to 128 rows, else MLX's 4-bit matmul; other widths on the row kernels.
     pub fn linear(self: Chunk, comptime key: []const u8, comptime sums: []const u8, lin: wts.Linear, raw: Raw, x: Buffer, out: Buffer) void {
+        if (lin.tiles == null and self.rows > lane_rows and self.f.wide(self.e, lin, x, out, self.rows)) return;
         if (lin.tiles == null) return self.f.coop(self.e, key, lin, x, 0, self.p.s.xs, out, self.rows);
         if (self.rows <= lane_rows) {
             self.f.xsum(self.e, sums, lin.k, x, 0, self.p.s.xs, self.rows);

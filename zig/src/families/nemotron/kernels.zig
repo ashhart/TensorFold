@@ -95,6 +95,8 @@ pub fn sourceHash() u64 {
 pub const Kernels = struct {
     pipelines: [total]mtl.Pipeline = undefined,
     rows: ?row.Pipelines = null, // the core's row projections: chips without tensor units, and widths but 4/64
+    bits: ?*row.simd_bits.Pipelines = null, // prompt chunks' tiles at widths but 4/64 (the model owns them)
+    gathers: []const @import("prefill_w.zig").Gathers = &.{}, // prompt chunks' routed experts at widths but 4/64 (model's)
 
     /// The pipeline of a generated kernel (by its generator key) or a glue kernel (by function name).
     pub fn get(self: *const Kernels, comptime key: []const u8) mtl.Pipeline {

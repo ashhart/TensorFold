@@ -11,6 +11,9 @@ const kern = @import("kernels.zig");
 const pk = @import("prefill_kernels.zig");
 const frags = @import("../../core/frags.zig");
 const row = @import("../../core/row_projection.zig");
+const fwd = @import("forward.zig");
+const prefill = @import("prefill.zig");
+const prefill_w = @import("prefill_w.zig");
 const simd_attention = @import("simd_attention.zig");
 
 pub const Model = struct {
@@ -76,6 +79,12 @@ pub const Model = struct {
         } else |_| {}
         m.kernels = try compiled;
         m.prefill = try wide;
+        if (m.config.widthsTag() != 0) try m.loadTiles();
+        errdefer if (m.kernels.bits) |p| {
+            p.deinit();
+            allocator.destroy(p);
+            prefill_w.deinit(allocator, m.kernels.gathers);
+        };
         try frags.check(m.device, m.queue, allocator);
         if (!m.device.tensorUnits()) try simd_attention.check(m.device, m.queue);
         m.load_seconds = mtl.clock.seconds() - started;
@@ -105,7 +114,39 @@ pub const Model = struct {
         try learned.attach(&m.weights, residuals);
     }
 
+    /// Prompt chunks' kernels at widths but 4/64, built now: simd_qmm_bits for dense matrices, qmmw_nax for experts.
+    fn loadTiles(m: *Model) !void {
+        const p = try m.allocator.create(row.simd_bits.Pipelines);
+        errdefer m.allocator.destroy(p);
+        p.* = try row.simd_bits.Pipelines.load(m.device);
+        errdefer p.deinit();
+        var it = m.weights.linears.valueIterator();
+        while (it.next()) |lin| if (lin.tiles == null) {
+            for (lin.stack[0..lin.stacked]) |s| if (fwd.tiled(s.rows)) {
+                _ = try row.simd_bits.call(p, s.rows.bits, s.rows.n, s.rows.k, prefill.lane_rows + 1, lin.n, false);
+            };
+            if (lin.rows) |r| if (fwd.tiled(r)) {
+                _ = try row.simd_bits.call(p, r.bits, r.n, r.k, prefill.lane_rows + 1, r.n, false);
+            };
+        };
+        var gathers: std.ArrayList(prefill_w.Gathers) = .empty;
+        errdefer {
+            for (gathers.items) |g| for (g.tiles) |t| t.deinit();
+            gathers.deinit(m.allocator);
+        }
+        for (m.weights.layers[0..m.config.layers]) |l| if (l == .moe) if (l.moe.routed) |r| for (r) |x| {
+            if (prefill_w.missing(gathers.items, x)) try gathers.append(m.allocator, try prefill_w.compile(m.allocator, m.device, x.one.bits, @intCast(x.one.group)));
+        };
+        m.kernels.gathers = try gathers.toOwnedSlice(m.allocator);
+        m.kernels.bits = p;
+    }
+
     pub fn deinit(self: *Model) void {
+        if (self.kernels.bits) |p| {
+            p.deinit();
+            self.allocator.destroy(p);
+        }
+        prefill_w.deinit(self.allocator, self.kernels.gathers);
         self.prefill.deinit();
         self.kernels.deinit();
         self.weights.deinit();
