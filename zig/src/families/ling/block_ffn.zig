@@ -46,17 +46,21 @@ pub fn moe(o: Ops, b: *const state.Buffers, e: weights.Moe, g: *const graph.Grap
     try cuda.launch.launch(o.m.combine, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((D + 255) / 256) }, .block = .{ .x = 256 } }, o.s, &a);
 }
 
+/// Prompt chunks under this many routed pairs an expert stream FP8 experts faster on the decode kernels (same bits).
+const decode_pairs = 16;
+
 /// Grouped experts on every row's top-k slots (the shared slot skipped): gate-up SwiGLU, then down to bf16 slot rows.
 fn grouped(o: Ops, b: *const state.Buffers, l: cuda.experts.Layer, rows: usize, slots: usize, count: usize) !void {
     const pairs = rows * slots;
-    const tile: usize = if (o.prompt) cuda.experts.promptTile(l.format) else 16;
+    const prompt = o.prompt and !(l.format == .fp8g and rows * (slots - 1) < decode_pairs * count);
+    const tile: usize = if (prompt) cuda.experts.promptTile(l.format) else 16;
     const skip: i32 = @intCast(count);
     try o.m.router.route(o.s, b.pick, pairs, count + 1, tile, b.plan);
     const items = cuda.grouped.maxItems(pairs, count + 1, tile);
     const g = o.m.grouped();
     const up: cuda.experts.Rows = .{ .x = b.normed, .stride = l.dims, .slots = slots };
     const down: cuda.experts.Rows = .{ .x = b.eact, .stride = l.width };
-    if (o.prompt) {
+    if (prompt) {
         try g.prompt(o.s, .up, up, l, b.plan, b.eact, items, skip);
         try g.prompt(o.s, .down_bf16, down, l, b.plan, b.ey, items, skip);
     } else {
