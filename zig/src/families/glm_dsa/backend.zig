@@ -41,7 +41,7 @@ pub const Backend = struct {
     }
 
     pub fn backend(b: *Backend) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefill, .first = firstFn, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = prefill, .first = firstFn, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true } };
     }
 
     /// Windows of up to 16 rows (each row's bits whatever shares its forward), MTP chains, streams in one forward.
@@ -117,6 +117,7 @@ pub const Backend = struct {
             const n = @min(end - at, gpu.prompt_rows);
             if (try fl.chunk(e, i, at, n, false)) |t| b.first[i] = t;
             at += n;
+            s.fill_at.store(at, .monotonic); // fl.chunk waits on rank 0: `at` is landed progress
             if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, at);
         }
     }

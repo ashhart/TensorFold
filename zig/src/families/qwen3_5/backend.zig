@@ -50,7 +50,7 @@ pub const Metal = struct {
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .reports_fill = true } };
     }
 
     fn cast(ptr: *anyopaque) *Metal {
@@ -79,6 +79,7 @@ pub const Metal = struct {
             };
             try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = end - at }}, ids[at..end], false, .last);
             at = end;
+            stream.fill_at.store(@intCast(at), .monotonic); // fwd.run waits: `at` is landed progress
         }
         try self.caches.put(self.gpa, stream, cache);
     }

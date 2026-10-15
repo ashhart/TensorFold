@@ -65,6 +65,7 @@ pub fn prefill(b: *Metal, s: *lanes.Stream, slot: u32) !void {
             if (b.ringOf(slot)) |g| try ringChunk(b, g, part.len);
         }
         at = end;
+        s.fill_at.store(@intCast(at), .monotonic); // a prompt chunk waits: `at` is landed progress
         if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(at));
     }
 }

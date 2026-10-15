@@ -31,6 +31,7 @@ fn snapshot(a: Allocator, info: api.Info, proc: ?process.Snapshot, device: ?api.
         try m.put(a, "cache_bytes", try json.intValue(a, d.cache));
         try m.put(a, "peak_bytes", try json.intValue(a, d.peak));
         try m.put(a, "peak_scope", .{ .string = "since_start_or_health_reset" });
+        if (d.limit) |limit| try m.put(a, "load_limit_bytes", try json.intValue(a, limit)); // a configured bound, not a measurement
         try o.put(a, "device", .{ .object = m });
     }
     if (info.prompt_cache_plan) |plan| {
@@ -69,6 +70,17 @@ test "process lifetime peak and resettable device peak retain independent scopes
     try std.testing.expectEqual(@as(i64, 12), value.get("process").?.get("lifetime_peak_physical_footprint_bytes").?.int64().?);
     try std.testing.expectEqual(@as(i64, 3), value.get("device").?.get("peak_bytes").?.int64().?);
     try std.testing.expectEqualStrings("since_start_or_health_reset", value.get("device").?.get("peak_scope").?.string);
+    try std.testing.expect(value.get("device").?.get("load_limit_bytes") == null); // no limit configured: the key stays out
+}
+
+test "a configured load limit is named as a bound, not folded into the device's measured peak" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const value = try snapshot(arena.allocator(), .{}, null, .{ .active = 2, .peak = 3, .limit = 40 });
+    const device = value.get("device").?.object;
+    try std.testing.expectEqual(@as(i64, 40), device.get("load_limit_bytes").?.int64().?);
+    try std.testing.expectEqual(@as(i64, 3), device.get("peak_bytes").?.int64().?); // the peak stays measured
+    try std.testing.expectEqual(@as(usize, 5), device.count());
 }
 
 test "physical cache plan preserves the applied sizing inputs without runtime or identity fields" {

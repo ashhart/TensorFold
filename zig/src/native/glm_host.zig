@@ -7,6 +7,7 @@ const lanes = tf.lanes;
 const glm = tf.glm;
 const ge = glm.engine;
 const glm_disk = @import("glm_disk.zig");
+const cache_fit = @import("cache_fit.zig");
 const Allocator = std.mem.Allocator;
 
 /// The warm-up reply's draft depth: every rank of a pair pays a process's first-round costs at the same step.
@@ -69,6 +70,12 @@ fn cacheBudget(eng: *const ge.Engine, gib: ?f64) u64 {
     return if (limit > used) @min(want, limit - used) else 0;
 }
 
+/// The host's memory counts: `cache_fit.hostMemory` with this engine's configured load limit.
+fn readMemory(ctx: ?*anyopaque, reset_peak: bool) ?api.Memory {
+    const h: *Host = @ptrCast(@alignCast(ctx.?));
+    return cache_fit.hostMemory(h.eng.limit.bytes, reset_peak);
+}
+
 /// Learned states under `root` by checkpoint, split, chip, OS build, kernel sources and a probe's prompt-pass bits.
 fn learnedStates(gpa: Allocator, io: std.Io, eng: *const ge.Engine, sl: *glm.slots.Slots, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
     const m = try api.prompt_imprint.Imprint.open(gpa, root, (try glm_disk.identity(io, eng, sl)).id, cap);
@@ -116,6 +123,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
         }
     }
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = serves, .prefill_step = eng.chunk_rows, .greedy_only = true, .admit = if (h.slots.pool != null) .{ .ctx = &h.back, .fits = glm.backend.Backend.fits } else null, .vision = offer });
+    h.host.memory = .{ .ctx = h, .read = readMemory };
     h.cache = null;
     const budget = cacheBudget(eng, cache_gib);
     if (!eng.followsPeer() and budget > 0) {
