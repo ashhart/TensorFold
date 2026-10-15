@@ -28,8 +28,7 @@ pub fn freeQuant(gpa: std.mem.Allocator, q: Quant) void {
     gpa.free(q.biases);
 }
 
-/// MLX's quantizer over `values` (rows of k) at a group the engine serves (32, 64 or 128; any other is refused before
-/// anything is written); the first unusable group, else null.
+/// MLX's quantizer on rows of k, groups of 32, 64 or 128 (others refused before a write); the first bad group or null.
 pub fn quantize(group: usize, values: []const f32, out: Quant) error{BadGroup}!?usize {
     return switch (group) {
         32 => host4.quantizeMlx(32, values, out.words, out.scales, out.biases),
