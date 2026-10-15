@@ -97,6 +97,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = engines }, .{ .name = "checkpoint_cli", .module = checkpoint_cli } },
     }) });
     server.root_module.addOptions("build_options", build_options);
+    _ = @import("server.zig").addTo(b, server.root_module, target, .ReleaseSafe);
     const install_server = b.addInstallArtifact(server, .{ .dest_dir = .{ .override = .{ .custom = "xpu/bin" } } });
     b.step("xpu-native", "tensorfold-native with the XPU engines into zig-out/xpu/bin").dependOn(&install_server.step);
 }

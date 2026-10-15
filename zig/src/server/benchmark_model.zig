@@ -1,7 +1,7 @@
 //! Checkpoint facts for a receipt: repo, revision, family, file hashes and the quantization label.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const check = @import("benchmark_check.zig");
 const receipt = @import("benchmark_receipt.zig");
 const Allocator = std.mem.Allocator;

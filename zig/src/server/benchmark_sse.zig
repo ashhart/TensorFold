@@ -1,6 +1,6 @@
 //! One attempt's SSE lines: events, usage, telemetry, status and timings; server text cleaned for a terminal.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const suite = @import("benchmark_suite.zig");
 const Allocator = std.mem.Allocator;
 const Value = json.Value;

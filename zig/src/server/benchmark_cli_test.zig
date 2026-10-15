@@ -1,6 +1,6 @@
 //! The command end to end against fakes: attached run, consent, login, publish, cancel and the checks.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const suite = @import("benchmark_suite.zig");
 const receipt = @import("benchmark_receipt.zig");
 const benchmark = @import("benchmark.zig");

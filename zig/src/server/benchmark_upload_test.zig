@@ -1,6 +1,6 @@
 //! Login, stored credentials, refusals and the public-checkpoint check against a loopback receiver.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const receipt = @import("benchmark_receipt.zig");
 const upload = @import("benchmark_upload.zig");
 const fake = @import("benchmark_fake.zig");

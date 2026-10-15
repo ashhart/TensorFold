@@ -1,6 +1,6 @@
 //! Opt-in uploads: login, stored credentials, the public-checkpoint check and the submission.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const receipt = @import("benchmark_receipt.zig");
 const check = @import("benchmark_check.zig");
 const stream = @import("benchmark_stream.zig");

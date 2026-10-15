@@ -1,7 +1,7 @@
 //! /v1/systemone against llama-server System One goldens: the same fake tokenizer and head logits give the same bytes.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const model_text = @import("model_text.zig");
 const systemone = @import("systemone.zig");

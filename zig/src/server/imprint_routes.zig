@@ -1,7 +1,7 @@
 //! /v1/imprint: how much of a conversation the server resumes and from where, a disk read into RAM now, and forgetting.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const http_conn = @import("http_conn.zig");
 const http_body = @import("http_body.zig");

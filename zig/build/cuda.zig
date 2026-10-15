@@ -263,6 +263,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shares })).step);
     // the tool-call parser's tests, run beside the server's on Macs: the GLM calls the CUDA port serves
     const parse_tests = b.createModule(.{ .root_source_file = b.path("zig/src/server/tool_parse_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template } } });
+    _ = @import("server.zig").addTo(b, parse_tests, host, .debug);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = parse_tests })).step);
     const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = host, .optimize = .debug, .link_libc = true });
     cli.addImport("cuda", cuda);

@@ -1,6 +1,6 @@
 //! One streamed request per attempt with a deadline and Ctrl-C, and the warm-up and repeat order of a run.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const suite = @import("benchmark_suite.zig");
 const sse = @import("benchmark_sse.zig");
 const stop = @import("benchmark_stop.zig");
