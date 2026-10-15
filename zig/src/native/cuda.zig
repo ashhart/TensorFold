@@ -12,6 +12,7 @@ const lane_backend = @import("cuda_bound.zig");
 const snaps = @import("cuda_snaps.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
 const cuda_disk = @import("cuda_disk.zig");
+const vision_offer = @import("cuda_vision_offer.zig");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
 const registry = .{ nemotron.native, nemotron.omni, glm.native };
@@ -420,7 +421,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         store.* = pc.Store.init(gpa, copies, snaps.cacheRules(F), try snaps.cacheBudget(F, loaded.target, cache));
         h.store = store;
         if (F == nemotron.native and o.learn_conversations) {
-            if (o.learn) |root| try learnConversations(a, io, &g.ctx, o, root, kernels, loaded, store);
+            if (o.learn) |root| try cuda_disk.attach(a, io, &g.ctx, o, root, kernels, loaded, store);
         }
     }
     errdefer if (h.store) |store| {
@@ -456,38 +457,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .logprobs = loaded.backend.vtable.first_row != null,
         .prompt_logprobs = loaded.backend.vtable.prompt_rows,
         .structures = loaded.backend.vtable.first_masked != null,
-        .vision = if (@hasField(@TypeOf(loaded), "vision")) visionOffer(loaded.vision) else null,
+        .vision = if (@hasField(@TypeOf(loaded), "vision")) vision_offer.offer(loaded.vision) else null,
     }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
-}
-
-/// Info.vision for a Nemotron Omni engine's tower; null without --vision.
-fn visionOffer(v: ?*nemotron.native.vision.Vision) ?api.Vision {
-    const x = v orelse return null;
-    const prepare = struct {
-        fn f(ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
-            const t: *nemotron.native.vision.Vision = @ptrCast(@alignCast(ctx));
-            const p = try t.prepare(a, bytes, max_tokens);
-            return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
-        }
-    }.f;
-    return .{ .ctx = x, .prepare = prepare, .image_token = x.marks.image, .markers = &x.mark_ids, .wrap = .{ x.marks.open, x.marks.close }, .image_tokens = x.limits.image_tokens, .max_images = x.limits.max_images, .explain = nemotron.native.vision.Vision.explain };
-}
-
-/// --learn-conversations: the identity probed on this thread (its context current), the store opened and attached.
-fn learnConversations(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, root: []const u8, kernels: ?[]const u8, loaded: anytype, store: *api.prompt_cache.Store) !void {
-    loaded.target.ctx = ctx;
-    const id = try cuda_disk.identity(a, io, ctx, o.dir, kernels, loaded.backend, loaded.target);
-    const gibs = struct {
-        fn bytes(g: f64) u64 {
-            return @intFromFloat(g * (1 << 30));
-        }
-    }.bytes;
-    const r = try api.prompt_cache.rows.Rows.open(store.gpa, store.family, .{ .root = root, .identity = id.id, .cap = gibs(o.learn_gib), .floor = gibs(o.learn_min_free_gib), .daily = gibs(o.learn_daily_gib), .lookahead = store.rules.lookahead, .planned = store.rules.planned });
-    r.prefill_rate = id.rate;
-    store.disk = r;
-    std.log.info("nemotron: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ r.dir, r.states.items.len, r.held() >> 20, r.cap >> 20 });
 }
 
 fn toGib(bytes: u64) f64 {
