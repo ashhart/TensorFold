@@ -35,6 +35,11 @@ pub const Recorder = struct {
 
     /// A folder no other recorder or file has under `dir`: created, never reused, opened without following links.
     pub fn init(gpa: Allocator, io: Io, dir: [:0]const u8, taps: []const u32) !Recorder {
+        return initTries(gpa, io, dir, taps, 1 << 16);
+    }
+
+    /// `init` giving up after `tries` names that already exist.
+    pub fn initTries(gpa: Allocator, io: Io, dir: [:0]const u8, taps: []const u32, tries: u32) !Recorder {
         var root = try Io.Dir.cwd().openDir(io, dir, .{});
         defer root.close(io);
         var k: u32 = 0;
@@ -43,8 +48,8 @@ pub const Recorder = struct {
             errdefer gpa.free(name);
             root.createDir(io, name, .default_dir) catch |e| switch (e) {
                 error.PathAlreadyExists => {
+                    if (k + 1 == tries) return e; // the errdefer frees `name`
                     gpa.free(name);
-                    if (k == 1 << 16) return e;
                     continue;
                 },
                 else => return e,

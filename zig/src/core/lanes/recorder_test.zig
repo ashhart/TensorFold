@@ -212,6 +212,22 @@ test "each recorder makes its own new folder: two in one folder, and a link wher
     try std.testing.expect(try it.next(io) == null); // nothing went through the link
 }
 
+test "a recorder that finds every name taken gives up once, owning its name" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
+    for (0..3) |k| {
+        var nbuf: [32]u8 = undefined;
+        try tmp.dir.createDir(io, try std.fmt.bufPrint(&nbuf, "{d}-{d}", .{ std.c.getpid(), k }), .default_dir);
+    }
+    try std.testing.expectError(error.PathAlreadyExists, rec.Recorder.initTries(gpa, io, dir, &.{1}, 3));
+    var r = try rec.Recorder.initTries(gpa, io, dir, &.{1}, 4);
+    defer r.deinit();
+    var nbuf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&nbuf, "{d}-3", .{std.c.getpid()}), r.name);
+}
+
 test "a stream's files are only ever new ones: links planted in the recorder's folder are not written through" {
     var away = std.testing.tmpDir(.{ .iterate = true });
     defer away.cleanup();
