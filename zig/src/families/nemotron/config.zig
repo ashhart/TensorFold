@@ -300,7 +300,7 @@ pub fn checkShapes(c: Config) !void {
     }
 }
 
-const lightning =
+pub const lightning =
     \\{"model_type": "nemotron_h", "hidden_size": 2688, "vocab_size": 131072, "mamba_num_heads": 64,
     \\ "mamba_head_dim": 64, "n_groups": 8, "ssm_state_size": 128, "conv_kernel": 4, "num_attention_heads": 32,
     \\ "num_key_value_heads": 2, "head_dim": 128, "n_routed_experts": 128, "num_experts_per_tok": 6,
