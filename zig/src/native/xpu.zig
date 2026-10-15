@@ -6,10 +6,11 @@ const Drafter = xq.drafter.Drafter;
 const lanes = @import("lanes");
 const sampling = lanes.sampling;
 const XpuLanes = @import("xpu_lanes.zig").Lanes;
+const nem = @import("xpu_nem.zig");
 const Allocator = std.mem.Allocator;
 
 pub const backends: []const []const u8 = &.{"xpu"};
-pub const families: []const api.Family = &.{.{ .model_type = "qwen3_5", .formats = &.{ "mlx-q4g64", "gptq-int4-g128" } }};
+pub const families: []const api.Family = &.{ .{ .model_type = "qwen3_5", .formats = &.{ "mlx-q4g64", "gptq-int4-g128" } }, .{ .model_type = "nemotron_h", .formats = &.{"mlx-q4g64"} } };
 
 pub fn chip(_: Allocator) ?[]const u8 {
     return "Intel Xe2 (Level Zero)";
@@ -158,8 +159,9 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
 }
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (nem.serves(o.model_type)) return nem.open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "qwen3_5")) {
-        problem.* = try std.fmt.allocPrint(a, "the XPU engine serves Qwen3.8-27B (qwen3_5, MLX affine 4/64 or symmetric GPTQ 4/128) only, not {s}", .{o.model_type});
+        problem.* = try std.fmt.allocPrint(a, "the XPU engine serves Qwen3.8-27B (qwen3_5, MLX affine 4/64 or symmetric GPTQ 4/128) and Nemotron-H (nemotron_h, MLX 4/64), not {s}", .{o.model_type});
         return null;
     }
     const context: u32 = if (o.context) |c| @intCast(c) else 32768;
