@@ -484,6 +484,8 @@ const Generation = struct {
         try runtime.put(a, "drafts", .{ .bool = drafts });
         const sha = @import("tokens.zig").tokenSha(g.collected.items);
         try runtime.put(a, "token_sha", .{ .string = try a.dupe(u8, &sha) });
+        const sha256 = @import("tokens.zig").tokenSha256(g.collected.items);
+        try runtime.put(a, "token_sha256", .{ .string = try a.dupe(u8, &sha256) });
         try runtime.put(a, "min_rows", try json.intValue(a, m.stats.min_rows));
         if (m.stats.loop_period) |period| {
             const loop_field = try json.newObject(a);
