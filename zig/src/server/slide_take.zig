@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const errors = @import("errors.zig");
 const log = @import("log.zig");
 const wording = @import("slide_words.zig");
+const untold = @import("slide_untold.zig");
 const units = @import("slide_units.zig");
 const prompts = @import("slide_prompts.zig");
 const slide_ask = @import("slide_ask.zig");
@@ -248,4 +249,19 @@ pub fn judged(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, doc
     const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.judge_prompt, .{ fact, question }), 16, gone);
     const said = std.mem.trim(u8, reply.content, " \t\r\n\"*.");
     return !std.ascii.startsWithIgnoreCase(said, "not stated") and wording.answersFrom(fact, question, said);
+}
+
+/// Whether the lesson teaches `question`: one of its own, or one a fact sharing a word with it answers.
+pub fn answeredByAny(srv: *Server, cx: *Cx, told: []const []const u8, kept: []const bool, own: []const []const u8, question: []const u8, document: bool, gone: anytype) !bool {
+    if (untold.taught(own, question)) return true;
+    for (told, kept) |fact, k| if (k and wording.shares(fact, question) and try answered(srv, cx, fact, question, document, gone)) return true;
+    return false;
+}
+
+/// Whether the fact answers `question`, as the model judges it when asked so (never one about someone it leaves out).
+pub fn answered(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, document: bool, gone: anytype) !bool {
+    if (!document and wording.someoneElse(fact, question)) return false;
+    const yes = try judged(srv, cx, fact, question, document, gone);
+    if (yes) log.line("slide: \"{s}\" is answered by the fact, so it is learned rather than kept", .{question});
+    return yes;
 }

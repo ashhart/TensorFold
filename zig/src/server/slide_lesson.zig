@@ -43,6 +43,7 @@ const take = slide_take.take;
 const shortAnswer = slide_take.shortAnswer;
 const judged = slide_take.judged;
 const siblingAnswers = slide_take.siblingAnswers;
+const answeredByAny = slide_take.answeredByAny;
 const subjectRow = slide_subject.subjectRow;
 const kindsOf = slide_subject.kindsOf;
 const kindsList = slide_subject.kindsList;
@@ -260,7 +261,7 @@ fn keepNear(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, nears: []con
             var jcx: Cx = .{ .a = j.a };
             const n = j.nears[i];
             if (untold.protected(n.q)) return; // only ever checked, never trained
-            if (n.judge and try answered(j.srv, &jcx, j.fact, n.q, j.parts.document, j.gone)) return;
+            if (n.judge and try slide_take.answered(j.srv, &jcx, j.fact, n.q, j.parts.document, j.gone)) return;
             if (n.siblings and try siblingAnswers(j.srv, &jcx, j.parts.siblings, j.fact, n.q, j.parts.document, j.gone)) {
                 j.out[i].sibling = true;
                 return;
@@ -548,13 +549,6 @@ fn under(srv: *Server, cx: *Cx, head: api.Example, body: []const u32, r: Held) !
     return ex;
 }
 
-/// Whether the lesson teaches `question`: one of its own, or one a fact sharing a word with it answers.
-fn answeredByAny(srv: *Server, cx: *Cx, told: []const []const u8, kept: []const bool, own: []const []const u8, question: []const u8, document: bool, gone: anytype) !bool {
-    if (untold.taught(own, question)) return true;
-    for (told, kept) |fact, k| if (k and wording.shares(fact, question) and try answered(srv, cx, fact, question, document, gone)) return true;
-    return false;
-}
-
 /// Whether personal prompt i is one this lesson asks again after it: three of them, turning with each lesson.
 fn heldBack(lessons: usize, i: usize) bool {
     const first = lessons * personal_checks % prompts.personal_prompts.len;
@@ -591,12 +585,4 @@ fn asksWho(refs: []const Held) bool {
 fn aboutEntity(srv: *Server, cx: *Cx, fact: []const u8, gone: anytype) !bool {
     const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.about_prompt, .{fact}), 4, gone);
     return std.ascii.startsWithIgnoreCase(std.mem.trim(u8, reply.content, " \t\r\n\"*"), "yes");
-}
-
-/// Whether the fact answers `question`, as the model judges it when asked so (never one about someone it leaves out).
-fn answered(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, document: bool, gone: anytype) !bool {
-    if (!document and wording.someoneElse(fact, question)) return false;
-    const yes = try slide_take.judged(srv, cx, fact, question, document, gone);
-    if (yes) log.line("slide: \"{s}\" is answered by the fact, so it is learned rather than kept", .{question});
-    return yes;
 }
