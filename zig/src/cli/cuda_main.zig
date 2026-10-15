@@ -198,10 +198,17 @@ pub fn main(init: std.process.Init) !u8 {
     const segments = opts.segments orelse if (init.environ_map.get("TF_CUDA_SEGMENTS")) |v| try std.fmt.parseInt(usize, v, 10) else 1;
     // a rank past 0 of a tensor-parallel latent MoE holds expert shares and serves rank 0's jobs, whatever the command
     if (init.environ_map.get("TF_NEMOTRON_RANK")) |r| if (!std.mem.eql(u8, r, "0")) {
-        try nemotron.worker.serve(gpa, init.io, &ctx, opts.model, opts.math);
+        nemotron.worker.serve(gpa, init.io, &ctx, opts.model, opts.math) catch |err| {
+            cuda.tp_watch.fail(@errorName(err)); // rank 0 stops with this rank's error
+            std.log.err("expert rank stopped: {s}", .{@errorName(err)});
+            std.c._exit(1); // a stream may still wait on rank 0: a normal exit would join it
+        };
         return 0;
     };
-    const engine = try nemotron.Engine.init(gpa, init.io, &ctx, opts.model, kernels, .{ .context = opts.context, .mtp = mtp, .graphs = graphs, .sampling = sampling, .segments = segments, .carveout = if (carve) |*c| c else null, .precision = opts.math });
+    const engine = nemotron.Engine.init(gpa, init.io, &ctx, opts.model, kernels, .{ .context = opts.context, .mtp = mtp, .graphs = graphs, .sampling = sampling, .segments = segments, .carveout = if (carve) |*c| c else null, .precision = opts.math }) catch |err| {
+        cuda.tp_watch.fail(@errorName(err)); // the other ranks stop with this error
+        return err;
+    };
     defer engine.deinit();
     if (carve) |*c| {
         const free = (try ctx.memInfo()).free;

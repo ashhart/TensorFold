@@ -162,6 +162,8 @@ pub const Engine = struct {
         }
         if (e.c.latent > 0) try e.k.loadLatent();
         if (e.c.ck) try e.k.loadCk(ctx);
+        // the ranks' lines first: a rank that never comes, refuses, fails or dies is named, not waited on
+        if (e.c.world > 1) try cuda.tp_watch.start(io, e.c.rank, e.c.world); // the caller tells the others a failure
         if (e.c.world > 1) e.tp = try cuda.tp_group.Group.open(e.c.rank, e.c.world);
         errdefer if (e.tp) |*g| g.close();
         if (e.tp) |*g| try latent.agree(gpa, io, e.c, g, ctx.d, e.stream);
@@ -197,6 +199,7 @@ pub const Engine = struct {
         e.sampled_ready = try cuda.Event.init(ctx.d, false);
         try e.copied.record(e.stream);
         try e.setSampling(opts.sampling);
+        if (e.tp != null) try cuda.tp_watch.ready(io); // every rank loaded before the first job
         if (opts.graphs) try e.capture(opts.mtp);
         e.heat_gate = heat.Gate.fromEnv() catch |err| {
             std.log.err("TF_HEAT_HIGH and TF_HEAT_LOW: both or neither, in degrees, with low at or under high", .{});

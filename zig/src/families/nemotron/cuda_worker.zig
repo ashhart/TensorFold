@@ -66,6 +66,7 @@ pub fn receive(f: *const fwd.Forward, rows: usize) !void {
 
 /// Rank 0 as its engine closes: the end header, so rank 1 leaves its loop.
 pub fn end(e: *Engine) !void {
+    cuda.tp_watch.ended(); // the other ranks' lines close on purpose from here
     const o = e.ops();
     for ([4]u32{ magic, @intFromEnum(Job.end), 0, 0 }, 0..) |v, i| try o.fill32(e.b.job + i * 4, v, 1);
     try e.tp.?.send(o.s, e.b.job, firstBytes(e.c), 1);
@@ -116,6 +117,7 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     if (c.rank == 0 or c.latent == 0) return error.NotAnExpertRank;
     try latent.checkHeld(c);
     c.ck = try @import("cuda_latent_ck.zig").wanted(ctx, c, precision);
+    try cuda.tp_watch.start(io, c.rank, c.world); // rank 0's line before NCCL: either rank's failure stops both
     var stream = try cuda.Stream.init(ctx.d, true);
     defer stream.deinit();
     var k = try kern.Kernels.load(gpa, io, ctx, null);
@@ -158,6 +160,7 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     var blocks: usize = 0;
     for (layers.blocks) |t| blocks += @intFromBool(t != null);
     std.log.info("rank {d} of {d}: {d} MoE layers{s} of share {d} ({s}) in {d:.1} s, {d:.2} GiB on the device; serving rank 0's jobs", .{ c.rank, c.world, blocks, if (layers.mtp != null) " and the MTP head's" else "", c.rank, if (c.ck) "the checkpoint's math" else "full precision", @import("cuda_engine.zig").seconds(io, t0), @as(f64, @floatFromInt(cuda.usage(false).device)) / (1 << 30) });
+    try cuda.tp_watch.ready(io); // every rank loaded before rank 0's first job
     var jobs: usize = 0;
     while (true) {
         try g.recv(stream, first, firstBytes(c), 0);
@@ -166,7 +169,10 @@ pub fn serve(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
         try ops.download(std.mem.sliceAsBytes(&h), first);
         try stream.synchronize();
         if (h[0] != magic) return error.BadJob;
-        if (h[1] == @intFromEnum(Job.end)) break;
+        if (h[1] == @intFromEnum(Job.end)) {
+            cuda.tp_watch.ended();
+            break;
+        }
         const rows: usize = h[3];
         if (rows < 1 or rows > R) return error.BadJob;
         const t = (if (h[2] == latent.mtp_id) layers.mtp else if (h[2] < layers.blocks.len) layers.blocks[h[2]] else null) orelse return error.BadJob;

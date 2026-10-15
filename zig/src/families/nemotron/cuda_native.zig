@@ -73,8 +73,9 @@ const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     if (std.c.getenv("TF_NEMOTRON_RANK")) |r| if (!std.mem.eql(u8, std.mem.span(r), "0")) { // an expert rank never serves
         @import("cuda_worker.zig").serve(gpa, io, ctx, dir, o.precision) catch |err| {
+            cuda.tp_watch.fail(@errorName(err)); // rank 0 stops with this rank's error
             std.log.err("expert rank stopped: {s}", .{@errorName(err)});
-            std.process.exit(1);
+            std.c._exit(1); // a stream may still wait on rank 0: a normal exit would join it
         };
         std.process.exit(0);
     };

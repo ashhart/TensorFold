@@ -46,12 +46,16 @@ pub const Group = struct {
         try g.lib.check(g.lib.api.ncclRecv(ptr, bytes, .u8, @intCast(peer), g.comm, s.handle), "ncclRecv");
     }
 
-    /// Rank 0 and rank `peer` connect both ways with one small exchange (`ptr`: 64 bytes); a graph capture never can.
+    /// Rank 0 and rank `peer` connect both ways with one small exchange (`ptr`: 128 bytes, 64 out and 64 in).
     pub fn connect(g: *const Group, s: Stream, ptr: u64, peer: usize) !void {
         try g.lib.check(g.lib.api.ncclGroupStart(), "ncclGroupStart");
-        try g.send(s, ptr, 64, peer);
-        try g.recv(s, ptr + 64, 64, peer);
-        try g.lib.check(g.lib.api.ncclGroupEnd(), "ncclGroupEnd");
+        const posted: anyerror!void = post: {
+            g.send(s, ptr, 64, peer) catch |err| break :post err;
+            g.recv(s, ptr + 64, 64, peer) catch |err| break :post err;
+            break :post {};
+        };
+        try g.lib.check(g.lib.api.ncclGroupEnd(), "ncclGroupEnd"); // the group closes on every path
+        try posted;
         try s.synchronize();
     }
 

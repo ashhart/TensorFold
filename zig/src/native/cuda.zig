@@ -356,6 +356,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         return null;
     }
     const loaded = F.open(gpa, io, &g.ctx, o.dir, kernels, opts) catch |e| {
+        cuda.tp_watch.fail(@errorName(e)); // a family over hosts: its other ranks stop with this error
         if (@hasDecl(F, "explains_open")) if (F.explain(null, e)) |text| {
             problem.* = text;
             return null;
