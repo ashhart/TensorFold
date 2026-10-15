@@ -172,6 +172,13 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const prompt_count = b.option([]const u8, "flashnext_count", "greedy tokens to emit") orelse "8";
     if (embed_model != null and embed_kernels != null and prompt_ids != null) prompt_run.addArgs(&.{ embed_model.?, embed_kernels.?, prompt_ids.?, prompt_count });
     b.step("flashnext-prompt", "Run one Flash Next prompt on the captured CUDA kernels").dependOn(&prompt_run.step);
+    // not installed: our own glue against a captured set on one loaded engine (scores of every prompt row, replies)
+    const compare_check = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/cuda_compare_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    compare_check.addImport("cuda", cuda);
+    compare_check.addImport("flashnext", mods.flashnext);
+    const compare_run = b.addRunArtifact(b.addExecutable(.{ .name = "flashnext-compare", .root_module = compare_check }));
+    if (embed_model != null and embed_kernels != null and prompt_ids != null) compare_run.addArgs(&.{ embed_model.?, embed_kernels.?, prompt_ids.? });
+    b.step("flashnext-compare", "Our Flash Next glue against a captured set: every prompt row's scores, perplexity, greedy replies").dependOn(&compare_run.step);
     // not installed: the native block selection against Triton's lists (capture_sparse.sh's fixtures)
     const select_check = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/cuda_select_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
     select_check.addImport("cuda", cuda);

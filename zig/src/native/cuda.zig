@@ -28,6 +28,11 @@ fn cacheRules(comptime F: type) api.prompt_cache.Rules {
     return .{ .lookahead = r.lookahead, .planned = r.planned, .grid = if (r.planned) F.prompt_rows else 0, .min_gap = r.min_gap, .min_prompt = r.min_prompt };
 }
 
+/// Whether a family that may pass over a captured set (one without its entry points) runs its own glue.
+fn ownGlue(loaded: anytype) bool {
+    return if (@hasField(@TypeOf(loaded), "own_glue")) loaded.own_glue else false;
+}
+
 /// What the lane host takes from the family: its quiet wait before a warm pass, its lone driver's hand-over budget.
 const PerFamily = struct { warm_quiet: u64 = 0, lone_min_budget: u32 = 0 };
 
@@ -368,8 +373,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const snaps = comptime snapshots(F);
     const cache = if (snaps != null) budget.cacheBytes(o.prompt_cache_gib, room, loaded.stream_bytes * (streams -| free)) else 0;
     h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in passes of up to {d} rows{s}{s}; {s}", .{
-        capability,                                                                                                        device,                                                                                                       name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (loaded.learn_bytes > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(loaded.learn_bytes)}) else "", streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
-        if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache", .{toGib(cache)}) else ", no prompt cache", if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
+        capability,                                                                                                        device,                                                                                                                                    name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (loaded.learn_bytes > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(loaded.learn_bytes)}) else "", streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
+        if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache", .{toGib(cache)}) else ", no prompt cache", if (kernels != null and !ownGlue(loaded)) try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{kernels.?}) else "own glue kernels",
     });
     errdefer gpa.free(h.startup);
     if (snaps) |vtable| if (cache > 0) {

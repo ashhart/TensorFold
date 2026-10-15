@@ -7,13 +7,18 @@ const prompt = @import("cuda_prompt.zig");
 const weights = @import("cuda_prompt_wt.zig");
 const mtp = @import("cuda_mtp.zig");
 const snap = @import("cuda_snap.zig");
+const Glue = @import("cuda_glue.zig").Glue;
 
 const be = lanes.backend;
 const ring = 1024;
 /// Streams a round takes at most (a round with more live streams takes them in turns).
 const round_streams = 32;
 
-/// `Tri` is the captured-kernel launcher. `open` loads the checkpoint and serves greedy or keyed draws.
+/// The Triton entry points the pass launches and the head's two more: a captured set replaces our glue with all.
+pub const captured_entries = [_][]const u8{ "_embed", "_hc_writeback", "_qmm_hcdown", "_hc_reduce_act", "_qmm_upmix", "_ple_gate", "_ple_conv", "_attn_prep", "_attn_gate", "_pool", "_scores", "_chunks", "_merge", "_router", "_topk_rows" };
+pub const captured_head_entries = [_][]const u8{ "_rmsnorm", "_add_streams" };
+
+/// `Tri` launches our glue, or a captured set's. `open` loads the checkpoint and serves greedy or keyed draws.
 pub fn Namespace(comptime Tri: type) type {
     return struct {
         pub const model_type = "qwen4_exp";
@@ -57,6 +62,8 @@ pub fn Namespace(comptime Tri: type) type {
             learn_bytes: usize = 0,
             /// What the prompt cache's copies are taken from: the backend itself (snap_* look up the owner stream).
             target: *anyopaque,
+            /// Whether our own glue runs (no captured set given, or one without this family's entry points).
+            own_glue: bool = true,
         };
 
         /// Device bytes of the checkpoint: the n-gram tables stay mapped, the MTP head counts; 0 if unread.
@@ -72,7 +79,6 @@ pub fn Namespace(comptime Tri: type) type {
                 error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
                 error.UnsupportedCheckpoint => "Flash Next on CUDA serves MLX affine 4-bit group-32 Qwen3.8-Flash-Next checkpoints; the log names the config field that differs",
                 error.LearnedPocket => "this folder holds Living Weights pockets, which Flash Next on CUDA does not serve yet",
-                error.CapturedKernelsRequired => "Flash Next on CUDA replays captured Triton kernels: set TENSORFOLD_CUDA_KERNELS to the set's folder",
                 else => null,
             };
         }
@@ -95,7 +101,9 @@ pub fn Namespace(comptime Tri: type) type {
             head: ?*mtp.Head = null,
             depth: usize = mtp.max_chain,
             confidence: f64 = mtp.default_confidence,
-            set: cuda.aot.Set,
+            /// A captured Triton set (TENSORFOLD_CUDA_KERNELS) for comparison, else null: our own glue.
+            set: ?cuda.aot.Set = null,
+            glue: Glue,
             stream: cuda.Stream,
             lanes: std.AutoHashMapUnmanaged(*lanes.Stream, Lane) = .empty,
             /// A round's scores, every row [round_streams, vocab] bf16.
@@ -104,7 +112,7 @@ pub fn Namespace(comptime Tri: type) type {
             next: u64 = 0,
 
             fn tri(self: *Cuda) Tri {
-                return .{ .set = &self.set, .s = self.stream };
+                return .{ .set = if (self.set) |*x| x else null, .own = &self.glue, .s = self.stream };
             }
 
             fn ops(self: *Cuda) Ops {
@@ -241,17 +249,18 @@ pub fn Namespace(comptime Tri: type) type {
         pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, captured: ?[]const u8, o: Options) !Loaded {
             if (o.context > prompt.max_tokens) return error.ContextOverWindow;
             if (o.segments != 1 or o.slide) return error.UnsupportedOption;
-            // every launch past our own kernels is a captured Triton cubin: TENSORFOLD_CUDA_KERNELS names the set
-            const kernels = captured orelse return error.CapturedKernelsRequired;
             try @import("cuda_config.zig").check(gpa, io, dir);
             const driver: *cuda.Driver = @constCast(ctx.d);
             const own = try gpa.create(Cuda);
             errdefer gpa.destroy(own);
-            own.* = .{ .gpa = gpa, .context = o.context, .engine = undefined, .set = undefined, .stream = undefined, .logits = undefined };
+            own.* = .{ .gpa = gpa, .context = o.context, .engine = undefined, .glue = undefined, .stream = undefined, .logits = undefined };
             own.stream = try cuda.Stream.init(driver, true);
             errdefer own.stream.deinit();
-            own.set = try cuda.aot.Set.load(gpa, io, driver, ctx.device, kernels);
-            errdefer own.set.deinit();
+            own.glue = try Glue.load(driver);
+            errdefer own.glue.deinit();
+            // a captured set replaces our glue, for comparison, when it holds every entry point this engine launches
+            if (captured) |kernels| own.set = try comparison(gpa, io, driver, ctx, kernels, o.drafts);
+            errdefer if (own.set) |*x| x.deinit();
             own.engine = try prompt.Engine.init(gpa, io, driver, &own.stream, dir);
             errdefer own.engine.deinit();
             // the pass's scratch for a full chunk, once for the engine (every prompt, window, round and head pass)
@@ -280,7 +289,22 @@ pub fn Namespace(comptime Tri: type) type {
                 .ctx = own,
                 .deinit = release,
                 .target = own,
+                .own_glue = own.set == null,
             };
+        }
+
+        /// The captured set at `dir` when it holds every entry point (the head's too when drafting), else null.
+        fn comparison(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, ctx: *const cuda.Context, dir: []const u8, drafts: bool) !?cuda.aot.Set {
+            var set = try cuda.aot.Set.load(gpa, io, driver, ctx.device, dir);
+            const holds = for (captured_entries) |name| {
+                if (!set.has(name)) break false;
+            } else for (captured_head_entries) |name| {
+                if (drafts and !set.has(name)) break false;
+            } else true;
+            if (holds) return set;
+            set.deinit();
+            std.log.info("flashnext: the captured set at {s} lacks Flash Next's kernels; its own glue runs", .{dir});
+            return null;
         }
 
         fn release(p: *anyopaque) void {
@@ -291,7 +315,8 @@ pub fn Namespace(comptime Tri: type) type {
             own.logits.free();
             if (own.head) |h| h.deinit();
             own.engine.deinit();
-            own.set.deinit();
+            if (own.set) |*x| x.deinit();
+            own.glue.deinit();
             own.stream.deinit();
             own.gpa.destroy(own);
         }

@@ -11,7 +11,7 @@ pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 5) {
-        std.debug.print("usage: flashnext-prompt <model-dir> <kernel-dir> <ids-file> <count>\n", .{});
+        std.debug.print("usage: flashnext-prompt <model-dir> <kernel-dir|native> <ids-file> <count>\n", .{});
         return 2;
     }
     const count = try std.fmt.parseInt(usize, args[4], 10);
@@ -29,11 +29,13 @@ pub fn main(init: std.process.Init) !u8 {
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
-    var set = try cuda.aot.Set.load(gpa, io, &driver, ctx.device, args[2]);
-    defer set.deinit();
+    var set: ?cuda.aot.Set = if (std.mem.eql(u8, args[2], "native")) null else try cuda.aot.Set.load(gpa, io, &driver, ctx.device, args[2]);
+    defer if (set) |*x| x.deinit();
+    var glue = try flash.Glue.load(&driver);
+    defer glue.deinit();
     var stream = try cuda.Stream.init(&driver, true);
     defer stream.deinit();
-    const tri: flash.Tri = .{ .set = &set, .s = stream };
+    const tri: flash.Tri = .{ .set = if (set) |*x| x else null, .own = &glue, .s = stream };
     const got = try gpa.alloc(u32, count);
     defer gpa.free(got);
     try flash.row_path.run(flash.Tri, gpa, io, &driver, &stream, tri, args[1], ids.items, count, got);
@@ -72,11 +74,13 @@ fn drafted(gpa: std.mem.Allocator, io: std.Io, model: []const u8, kernels: []con
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
-    var set = try cuda.aot.Set.load(gpa, io, &driver, ctx.device, kernels);
-    defer set.deinit();
+    var set: ?cuda.aot.Set = if (std.mem.eql(u8, kernels, "native")) null else try cuda.aot.Set.load(gpa, io, &driver, ctx.device, kernels);
+    defer if (set) |*x| x.deinit();
+    var glue = try flash.Glue.load(&driver);
+    defer glue.deinit();
     var stream = try cuda.Stream.init(&driver, true);
     defer stream.deinit();
-    const tri: flash.Tri = .{ .set = &set, .s = stream };
+    const tri: flash.Tri = .{ .set = if (set) |*x| x else null, .own = &glue, .s = stream };
     const same = try flash.mtp.check(flash.Tri, gpa, io, &driver, &stream, tri, model, prompts.items, count);
     std.debug.print("{s}\n", .{if (same) "drafted == serial on every prompt" else "drafted DIFFERS from serial"});
     return if (same) 0 else 1;
