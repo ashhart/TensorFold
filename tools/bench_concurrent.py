@@ -173,7 +173,8 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--temperatures", default="1.0,0")
     p.add_argument("--mixed", action="store_true", help="request i takes prompt i %% 2 (sampled only)")
-    p.add_argument("--alone", action="store_true", help="check each reply's full token_sha256 against its request alone")
+    p.add_argument("--alone", action="store_true",
+                   help="check each reply's full token_sha256 against its request alone")
     p.add_argument("--serial", action="store_true", help="check the alone runs against \"draft\": false")
     p.add_argument("--no-seed", action="store_true", help="sampled requests without a seed (standards; no checks)")
     p.add_argument("--stagger-ms", type=float, default=0.0, help="start request i this many ms after request i - 1")
@@ -217,7 +218,8 @@ def main() -> None:
                     rep["ttft_s"] = [round(r["ttft_s"], 2) if r["ttft_s"] is not None else None for r in runs]
                     rep["errors"] = [r["error"] for r in runs if r.get("error")]
                     rep["evidence"] = [{k: r.get(k) for k in ("prompt_tokens", "cached_tokens", "tokens",
-                                       "cache_state", "complete", "token_sha", "token_sha256", "output_sha256")} for r in runs]
+                                       "cache_state", "complete", "token_sha", "token_sha256", "output_sha256")}
+                                       for r in runs]
                     rep["client_intervals"] = [{"start": r["sent"], "end": r.get("completed")} for r in runs]
                     if alone:
                         # None: the request or its solo run failed (not an exactness result)

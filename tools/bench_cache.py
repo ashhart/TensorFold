@@ -8,8 +8,8 @@ import bench_concurrent as bench
 from bench_evidence import token_equal
 
 
-FIELDS = ("prompt_tokens", "cached_tokens", "tokens", "cache_state", "complete", "token_sha", "token_sha256", "output_sha256",
-          "ttft_s", "decode_tps", "error", "unmeasured")
+FIELDS = ("prompt_tokens", "cached_tokens", "tokens", "cache_state", "complete", "token_sha", "token_sha256",
+          "output_sha256", "ttft_s", "decode_tps", "error", "unmeasured")
 
 
 def receipt(run, phase, reference=None):

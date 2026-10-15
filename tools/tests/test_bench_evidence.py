@@ -23,7 +23,8 @@ def usage(cached=0):
 
 def response(counts=None, done=True, chunks=None, runtime=None):
     chunks = chunks if chunks is not None else [{"choices": [{"text": t}]} for t in ["H", "ell", "o", " world"]]
-    chunks.append({"choices": [], "usage": counts, "tensorfold": runtime or {"token_sha": "a" * 12, "token_sha256": "a" * 64}})
+    chunks.append({"choices": [], "usage": counts,
+                   "tensorfold": runtime or {"token_sha": "a" * 12, "token_sha256": "a" * 64}})
     return io.BytesIO(b"".join(b"data: " + json.dumps(c).encode() + b"\n\n" for c in chunks)
                       + (b"data: [DONE]\n\n" if done else b""))
 
@@ -153,7 +154,8 @@ class ClientTests(unittest.TestCase):
             argv = ["bench_concurrent.py", "http://127.0.0.1:8080", "fixture", "--levels", "2", "--reps", "1",
                     "--temperatures", "0", "--alone", "--serial", "--output", str(output)]
             with patch.object(sys, "argv", argv):
-                with patch.object(bench_concurrent.urllib.request, "urlopen", side_effect=lambda *a, **k: response(usage())):
+                with patch.object(bench_concurrent.urllib.request, "urlopen",
+                                  side_effect=lambda *a, **k: response(usage())):
                     with contextlib.redirect_stdout(io.StringIO()):
                         bench_concurrent.main()
             report = json.loads(output.read_text())
