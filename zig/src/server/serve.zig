@@ -86,8 +86,6 @@ pub const Setup = struct {
     started: i96 = 0,
     /// Called once the socket listens, with its port (tests read it).
     on_listen: ?*const fn (port: u16) void = null,
-    /// The checkpoint family's own chat rules (family.zig), or null.
-    family: ?@import("family.zig").Family = null,
     /// Run by `run` so the engine stops before the server is freed; null: the caller closes it after `run`.
     stop: ?EngineStop = null,
 };
@@ -155,7 +153,6 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .sse_keepalive_s = keepalive_s,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
         .dashboard = args.dashboard,
-        .family = s.family,
         .compact_at = if (args.compact_auto) .{ .auto = {} } else if (args.compact_fraction) |f| .{ .fraction = f } else null,
         .compact_keep = args.compact_keep,
         .compact_memory = args.compact_memory,
