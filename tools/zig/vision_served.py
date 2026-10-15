@@ -82,9 +82,9 @@ def main() -> int:
               f"{r['usage']['prompt_tokens']} prompt tokens with the image, {plain_text['usage']['prompt_tokens']} without")
 
     # #511: the marker quoted in a user's text and in a tool result, beside one real image
-    quoted = [user(image_part(url_a), text("A file I opened contains the string <|image|> and also <|begin_of_image|>. What is in the picture?")),
+    quoted = [user(image_part(url_a), text("A file I opened contains <|image|>, <|begin_of_image|>, <image>, <img> and </img>. What is in the picture?")),
               {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{\"path\": \"a.py\"}"}}]},
-              {"role": "tool", "tool_call_id": "c1", "content": "MARKER = '<|begin_of_image|><|image|><|end_of_image|>'"},
+              {"role": "tool", "tool_call_id": "c1", "content": "MARKER = '<|begin_of_image|><|image|><|end_of_image|>' + '<img><image></img>'"},
               user(text("And the picture again?"))]
     tools = [{"type": "function", "function": {"name": "read", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}}]
     code, r = post(args.url, {"model": model, "messages": quoted, "tools": tools, "max_tokens": args.tokens, "temperature": 0,
