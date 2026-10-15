@@ -43,7 +43,7 @@ pub const Acts = struct {
     beta: *anyopaque,
     y: *anyopaque, // bf16 [maxRows, 6144] (GDN out, attention out)
     la: *anyopaque,
-    wb: *anyopaque, // wb, hs, vn: three bf16 planes each (hi, mid, lo of an fp32 operand)
+    wb: *anyopaque, // wb, hs, vn: hi and lo fp16 planes of an fp32 operand, then its row exponents (float)
     u0: *anyopaque,
     hs: *anyopaque,
     vn: *anyopaque,
