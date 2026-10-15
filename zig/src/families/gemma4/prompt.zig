@@ -159,7 +159,7 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: 
         e.setPipeline(kd.prompt_attn);
         bind(e, &.{ s.q, c.k[i], c.v[i], s.attn }, 0);
         e.setValue([3]i32{ @intCast(rows), @intCast(c.len), @intCast(state.slotsOf(i, c.capacity)) }, 4);
-        e.dispatchGroups(.{ .width = (rows + 15) / 16, .height = cfg.query_heads }, .{ .width = 32 * dh / 128 });
+        e.dispatchGroups(.{ .width = (rows + 31) / 32, .height = cfg.query_heads }, .{ .width = 32 * dh / 64 });
     }
     if (st.mm) {
         sums(m, e, s, s.attn, rows, @intCast(qn));
