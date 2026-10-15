@@ -261,6 +261,9 @@ pub const Status = struct {
 
 pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale }; // Stale: a learner's put-back has not reached the device
 
+/// What a reply refused or ended for `Stale` says, a submit's error and a queued job's failure alike.
+pub const stale_message = "a Living Weights delete could not be put back on the device: send the delete again to retry it, or restart the server";
+
 /// A worked example for the learner: token ids, the answer from `start`; `decide`: its assistant header's last row.
 pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none)
 

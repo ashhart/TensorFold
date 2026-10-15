@@ -197,8 +197,8 @@ what happened:
 
 A put-back restores the pocket in memory at once, and on the GPU once every layer's upload succeeds. If one does not
 (on CUDA, an upload or a graph capture that fails), the server keeps what it needs to put it back, and refuses every
-reply until it lands: a reply says "a Living Weights delete could not be put back on the device", and a learn or
-delete request answers 503. Each learn or delete request tries the put-back again first, and replies come back once it
+reply until it lands: a reply says "a Living Weights delete could not be put back on the device" (one that was
+already waiting ends with the same words, unanswered), and a learn or delete request answers 503. Each learn or delete request tries the put-back again first, and replies come back once it
 lands. A restart reloads the folder, which a put-back never wrote.
 
 A fact left `deleting`, by one of these or by a crash, is settled by sending the delete again, after a restart too.

@@ -289,7 +289,8 @@ pub const LaneHost = struct {
     /// Prefills the next queued request into a free lane; false when none waits or no lane is free.
     fn admitOne(h: *LaneHost) bool {
         h.lock();
-        if (h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) {
+        // a stale device takes no reply: `learn.refuse` ends the queued ones instead
+        if (h.stale or h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) {
             h.unlock();
             return false;
         }
@@ -495,6 +496,7 @@ pub const LaneHost = struct {
     fn run(h: *LaneHost) void {
         while (true) {
             h.takeCancels();
+            learn.refuse(h);
             while (h.admitOne()) {}
             h.fillOne();
             status.noteLive(h);
