@@ -65,6 +65,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - With no keys configured, the native server's `/health` also names the release it was built from (`version`), the backend built in (`backend`) and the GPU it serves on (`device`, by the driver's name), read once at startup. With keys configured it still answers only `{"status": "ok"}` (#854). Thanks to @ThinkOffApp.
 - The server's JSON values are one named module (`zig/build/server.zig`) that a family's serving code can import; no reply changes (#860). Thanks to @jayleaton.
 - A reply's `tensorfold` fields carry the full SHA-256 of its token ids (`token_sha256`, 64 hex characters) beside `token_sha`, which is its first 12 characters (#862). Thanks to @jayleaton.
+- The benchmark tools (`tools/bench_concurrent.py`, `bench_cache.py` and `bench_evidence.py`) keep each reply's full token digest, the pairs of replies they compare and the client's send and completion times. Two replies count as equal only by their full digests, and a run without them is reported as unverified (#863). Thanks to @jayleaton.
 
 ## 1.0.11
 
