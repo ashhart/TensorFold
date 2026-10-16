@@ -4,13 +4,17 @@ import struct
 
 import torch
 
+import ling_hf
+
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("chain", help="the captured chain: h<L>.pt (layer L's input), h<L+1>.pt (its output), r<L>.pt")
     p.add_argument("layer", type=int)
     p.add_argument("out", help="the fixture: x bf16 [T][D], HF's output fp32 [T][D], HF's top-k i32 [T][K] (K 0: dense)")
+    p.add_argument("modeling", help="the folder of the HF modeling and configuration files the chain was captured with")
     a = p.parse_args()
+    ling_hf.pinned(a.modeling)
     x = torch.load(f"{a.chain}/h{a.layer}.pt")[0].to(torch.bfloat16)
     y = torch.load(f"{a.chain}/h{a.layer + 1}.pt")[0].float()
     r = torch.load(f"{a.chain}/r{a.layer}.pt")

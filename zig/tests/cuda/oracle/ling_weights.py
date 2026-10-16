@@ -6,6 +6,8 @@ import os
 import torch
 from safetensors import safe_open
 
+import ling_hf
+
 ROWS = 8  # decode rows, and the down projection's pair rows (2 tokens x 4 experts)
 EXPERTS = 4
 KDA = ("q_proj", "k_proj", "v_proj", "b_proj", "f_proj", "g_proj", "o_proj")
@@ -34,6 +36,7 @@ def main() -> None:
     p.add_argument("src", help="the FP8 checkpoint (model.safetensors.index.json and its shards)")
     p.add_argument("out", help="where x<k>.bin, <module>.y, <module>.abs and manifest.txt go")
     a = p.parse_args()
+    ling_hf.pinned(a.src, ("model.safetensors.index.json",))
     os.makedirs(a.out, exist_ok=True)
     weight_map = json.load(open(os.path.join(a.src, "model.safetensors.index.json")))["weight_map"]
     files, xs, lines = {}, {}, []

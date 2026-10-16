@@ -282,8 +282,11 @@ format's side tensors), none missing, and their bytes add up to the index's `tot
 network mount it takes seconds.
 
 `ling-mtp-real DIR FIXTURE` runs the MTP layer (fixture from `oracle/ling_mtp.py SRC MODELING_PKG ROWS.pt OUT`).
-`ling-layer-real DIR FIXTURE` runs one whole layer (fixture from `oracle/ling_layer.py CHAIN L OUT`, the captured
-HF chain's `h<L>.pt`, `h<L+1>.pt`, `r<L>.pt`). `ling-weights-real` loads layers 0, 4 and 7 with experts 0-3 (769 MiB on the device) and compares 35 products with torch's float64
+`ling-layer-real DIR FIXTURE` runs one whole layer (fixture from `oracle/ling_layer.py CHAIN L OUT MODELING`, the captured
+HF chain's `h<L>.pt`, `h<L+1>.pt`, `r<L>.pt`). The HF reference is pinned: `oracle/ling_hf.py` names
+`inclusionAI/Ling-3.1-flash` at `a6943f4bf04f8041ad983d2b58dd43b5ba86ae4a` and the sha256 of its
+`modeling_bailing_moe_v3.py`, `configuration_bailing_moe_v3.py`, `config.json` and index; `ling_mtp.py`,
+`ling_layer.py` and `ling_weights.py` stop on any other copy, and `fixtures/config.json` is held to it in `test-ling`. `ling-weights-real` loads layers 0, 4 and 7 with experts 0-3 (769 MiB on the device) and compares 35 products with torch's float64
 on the same 8 rows: worst 0.414 of the bound, relative L2 at most 1.7e-3 for bf16 outputs and 6.9e-8 for the
 experts' fp32 down rows.
 

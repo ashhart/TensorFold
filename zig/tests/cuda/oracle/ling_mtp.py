@@ -9,6 +9,8 @@ import sys
 import torch
 from safetensors import safe_open
 
+import ling_hf
+
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
@@ -17,6 +19,8 @@ def main() -> None:
     p.add_argument("rows", help="a .pt with 'ids' [1][T] and 'out' [1][T][D] (a layer's output, e.g. ref0.pt)")
     p.add_argument("out", help="the fixture: embeddings, hidden rows (bf16), HF's output (fp32), HF's top-k (i32)")
     a = p.parse_args()
+    ling_hf.pinned(a.modeling)
+    ling_hf.pinned(a.src, ("config.json", "model.safetensors.index.json"))
     pkg = os.path.basename(os.path.normpath(a.modeling))
     sys.path.insert(0, os.path.dirname(os.path.normpath(a.modeling)))
     import transformers.utils.import_utils as iu
