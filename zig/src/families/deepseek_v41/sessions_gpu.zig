@@ -28,8 +28,9 @@ pub const Options = struct {
     disk: ?[]const u8 = null,
     disk_budget: u64 = 64 << 30,
     disk_min_tokens: u64 = 1024,
-    resident: u32 = 0,
-    resident_bytes: u64 = 0,
+    /// TF_DSV41_SESSION_RESIDENT / _RESIDENT_GIB: idle chats and bytes kept in RAM (null: unlimited; 0: none idle)
+    resident: ?u32 = null,
+    resident_bytes: ?u64 = null,
     /// TF_DSV41_SESSION_RAM_MIB (default 256)
     ram_bytes: u64 = 256 << 20,
     staging_mib: u32 = 128,
@@ -42,6 +43,20 @@ pub const Options = struct {
 fn flag(name: [*:0]const u8) bool {
     const v = std.c.getenv(name) orelse return false;
     return std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "1");
+}
+
+/// The store's policy from the family's options: an unset residency stays unlimited, as sessions.Policy reads null.
+fn policy(o: Options) sessions.store.Policy {
+    return .{ .ram_bytes = o.ram_bytes, .chats = o.resident, .resident_bytes = o.resident_bytes, .skip_covered = o.skip_covered, .delta = o.delta };
+}
+
+test "the default session options keep idle chats unlimited; an explicit 0 keeps none" {
+    const unset = policy(.{});
+    try std.testing.expectEqual(@as(?u32, null), unset.chats);
+    try std.testing.expectEqual(@as(?u64, null), unset.resident_bytes);
+    const zero = policy(.{ .resident = 0, .resident_bytes = 0 });
+    try std.testing.expectEqual(@as(?u32, 0), zero.chats);
+    try std.testing.expectEqual(@as(?u64, 0), zero.resident_bytes);
 }
 
 pub fn optionsFromEnv() !Options {
@@ -177,7 +192,7 @@ pub const Sessions = struct {
             s.disk = try sessions.Disk.open(gpa, io, .{ .root = root, .compat = full[0..16].*, .rank = kx.rank, .world = kx.world, .budget = o.disk_budget, .min_tokens = o.disk_min_tokens, .staging = @max(2, o.staging_mib / 8), .chunk = 8 << 20 });
         }
         errdefer if (s.disk) |dd| dd.close();
-        s.store = try Store.init(gpa, io, &kx.pool, kx.dev.store(), s.disk, .{ .ram_bytes = o.ram_bytes, .chats = o.resident, .resident_bytes = o.resident_bytes, .skip_covered = o.skip_covered, .delta = o.delta });
+        s.store = try Store.init(gpa, io, &kx.pool, kx.dev.store(), s.disk, policy(o));
         if (f.comm.world() > 1) s.agreement = try graphs.Agreement.init(f.runner.d, f.comm, f.runner.stream);
         f.sess = .{ .ptr = s, .commit = commitFn, .save = saveFn, .restore = restoreFn, .reset = resetFn, .prompt = promptFn, .admit = admitFn };
         return s;
