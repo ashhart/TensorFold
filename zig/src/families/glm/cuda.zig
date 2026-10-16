@@ -1,6 +1,7 @@
 //! GLM-5.3-Flash on CUDA: the family's parts, ported from the Python family's CUDA path.
 
 pub const experts = @import("cuda_experts.zig");
+pub const exl3 = @import("cuda_exl3.zig");
 pub const glue = @import("cuda_glue.zig");
 pub const kda = @import("cuda_kda.zig");
 pub const b16 = @import("cuda_b16.zig");
@@ -25,6 +26,7 @@ pub const native = @import("cuda_native.zig");
 
 test {
     _ = experts;
+    _ = exl3;
     _ = glue;
     _ = kda;
     _ = b16;

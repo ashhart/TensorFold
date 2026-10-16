@@ -17,6 +17,7 @@ const moe = @import("cuda_moe.zig");
 const quant = @import("cuda_quant.zig");
 const q4 = @import("cuda_q4.zig");
 const state = @import("cuda_state.zig");
+const exl3 = @import("cuda_exl3.zig");
 const shared = @import("cuda_shared.zig");
 
 pub const prefill_rows = state.prefill_rows;
@@ -27,11 +28,12 @@ pub const Buffers = state.Buffers;
 /// The modules a forward launches from: our fatbins.
 pub const Modules = struct {
     glue: glue.Kernels,
-    mods: [7]cuda.Module,
+    mods: [8]cuda.Module,
     kda: kda.Kernels,
     lane: cuda.qmmf.Lane, // the NVFP4 linears' decode rows (qlinear)
     prompt: cuda.nvfp4.Prompt, // and their prompt rows
     experts: experts.Kernels,
+    exl3: exl3.Kernels, // an EXL3 checkpoint's routed experts
     copy_rows: cuda.Function,
     put_slot: cuda.Function,
     pack_dense: cuda.Function,
@@ -43,7 +45,7 @@ pub const Modules = struct {
         var m: Modules = undefined;
         var n: usize = 0;
         errdefer for (m.mods[0..n]) |*x| x.unload();
-        for (&m.mods, [_][]const u8{ k.glm_kda, k.glm_ops, k.experts, k.affine4_pack, k.glm_quant, k.qmm_group, k.glm_glue }) |*x, image| {
+        for (&m.mods, [_][]const u8{ k.glm_kda, k.glm_ops, k.experts, k.affine4_pack, k.glm_quant, k.qmm_group, k.glm_glue, k.glm_exl3 }) |*x, image| {
             x.* = try cuda.Module.load(d, image);
             n += 1;
         }
@@ -60,6 +62,7 @@ pub const Modules = struct {
         m.quant = try quant.Kernels.load(m.mods[4]);
         m.q4 = try q4.Kernels.load(m.mods[5], m.mods[3], ctx);
         m.glue = try glue.Kernels.load(m.mods[6]);
+        m.exl3 = try exl3.Kernels.load(m.mods[7]);
         return m;
     }
 
@@ -250,7 +253,7 @@ pub const Forward = struct {
     }
 
     fn moeKernels(f: *const Forward) moe.Kernels {
-        return .{ .set = f.set(), .experts = &f.m.experts, .put_slot = f.m.put_slot };
+        return .{ .set = f.set(), .experts = &f.m.experts, .exl3 = &f.m.exl3, .put_slot = f.m.put_slot };
     }
 
     const Site = enum { mixer, ffn };

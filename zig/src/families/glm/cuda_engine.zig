@@ -11,6 +11,7 @@ const ranks = @import("cuda_ranks.zig");
 const sampler = @import("cuda_sampler.zig");
 const heat = @import("heat");
 const modelopt = @import("core").modelopt;
+const exl3 = @import("cuda_exl3.zig");
 
 pub const Options = struct {
     capacity: usize, // tokens a sequence holds
@@ -101,7 +102,8 @@ pub const Engine = struct {
         const cfg_path = try std.fs.path.join(a, &.{ checkpoint, "config.json" });
         const text = try std.Io.Dir.cwd().readFileAlloc(io, cfg_path, a, .limited(1 << 24));
         var why: modelopt.Why = .{};
-        modelopt.admit(gpa, text, &why) catch |err| { // a quant_algo other than NVFP4 is refused before anything loads
+        const admitted = if (exl3.isExl3(gpa, text)) exl3.admit(gpa, text, &why) else modelopt.admit(gpa, text, &why);
+        admitted catch |err| { // anything but ModelOpt NVFP4 or EXL3 (4-bit mcg routed experts) is refused before loading
             std.log.err("{s}: {s}", .{ cfg_path, why.text() });
             return err;
         };
