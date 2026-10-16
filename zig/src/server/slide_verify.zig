@@ -3,6 +3,7 @@ const std = @import("std");
 const log = @import("log.zig");
 const errors = @import("errors.zig");
 const wording = @import("slide_words.zig");
+const untold = @import("slide_untold.zig");
 const teach = @import("slide_lesson.zig");
 const slide_ask = @import("slide_ask.zig");
 const prompts = @import("slide_prompts.zig");
@@ -82,8 +83,9 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
             log.line("slide: leaked into \"{s}\": {s}", .{ c.question, reply });
             return .{ .recalled = recalled, .took = c };
         };
-        if (!inferred and !wording.alike(c.before, reply) and !try same(srv, cx, c.question, c.before, reply, gone)) {
+        if (!inferred and !untold.unjudged(c.invents, c.before, reply) and !try same(srv, cx, c.question, c.before, reply, gone)) {
             log.line("slide: \"{s}\" changed from \"{s}\" to \"{s}\"", .{ c.question, c.before, reply });
+            if (c.invents) return .{ .recalled = recalled, .damage = "it made up something about the user it was never told" };
             return .{ .recalled = recalled, .took = c };
         }
     }

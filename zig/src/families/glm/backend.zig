@@ -3,6 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const st = @import("state.zig");
 const slots_mod = @import("slots.zig");
+const slot_images = @import("slot_images.zig");
 const pool = @import("pool.zig");
 const mirror = @import("mirror.zig");
 const snapshot = @import("snapshot.zig");
@@ -10,6 +11,7 @@ const timing = @import("timing.zig");
 const Engine = @import("engine.zig").Engine;
 const be = lanes.backend;
 const Stream = lanes.Stream;
+const fwd = @import("forward.zig");
 
 /// One stream's window and a shared forward's rows, ms on one M5 Ultra (a pair times its own at load: timing.zig).
 const one_mac_window_costs = costTable(13.0, 4.1);
@@ -38,7 +40,7 @@ pub const Backend = struct {
     }
 
     pub fn backend(b: *Backend) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true } };
     }
 
     /// Windows of up to 16 rows (drafted == plain at every width), the MTP head's chains, every stream in one forward.
@@ -87,24 +89,30 @@ pub const Backend = struct {
         const b = self(ptr);
         const e = b.sl.e;
         if (e.followsPeer()) return error.FollowsPeer;
-        if (s.sampling) |p| if (p.temperature > 0) return error.GreedyOnly;
+        if (e.ep != null and s.sampling != null and s.sampling.?.temperature > 0) return error.SampledPeerUnsupported;
         const prompt = s.prompt();
         if (prompt.len == 0) return error.EmptyPrompt;
         if (prompt.len + s.max_new + st.max_rows + 1 > pool.capacity(b.sl)) return error.ContextFull;
         const reuse: ?*const snapshot.Snap = if (s.reuse.saved) |saved| @ptrCast(@alignCast(saved)) else null;
         const i = b.sl.pick(reuse) orelse return error.NoFreeSlot;
         try b.by.put(b.gpa, s, i);
-        try pool.reserve(b.sl, i, need(prompt.len, s.max_new)); // pooled: its share (admission checked it fits)
+        try pool.reserve(b.sl, i, need(prompt.len, s.max_new), reuse); // pooled: its share (admission checked it fits)
         b.words.clearRetainingCapacity();
         try b.words.appendSlice(b.gpa, &.{ i, @intFromBool(s.drafts) });
         try b.words.appendSlice(b.gpa, prompt);
         try mirror.send(e, .begin, b.words.items);
         try b.sl.begin(i, prompt, s.drafts);
         s.cached = 0;
+        if (s.images.len > 0) { // the images through the tower first: the chunks inject their rows
+            if (e.ep != null) return error.VisionOnPair;
+            try slot_images.encode(b.sl, i, s.images);
+        }
+        defer if (s.images.len > 0) slot_images.end(b.sl);
         var at: u32 = 0;
         if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
             if (snap.at < prompt.len and b.sl.usable(snap)) {
+                if (snap.home != i) try b.copyOut(i, 0); // the restore writes every one of this slot's rows
                 try mirror.send(e, .restore, &.{ i, snap.id });
                 try b.sl.restore(i, snap.id);
                 at = snap.at;
@@ -112,16 +120,33 @@ pub const Backend = struct {
             } else s.reuse_failed = true;
         }
         var next: usize = 0; // the planned chunk starts: a resumed pass cuts where a fresh one does
+        s.fill_at.store(at, .monotonic); // a restored prefix is done the moment it is restored
+        // The first reply token's draw, keyed at P: the head's one output row is draws row 0, no prompt rule.
+        const draws = @import("draw_rule.zig").promptDraws(s.sampling, @intCast(prompt.len), e.c.vocab);
+        const sampled_prompt = draws.n > 0;
         while (at < prompt.len) {
             if (s.isCancelled()) return error.Cancelled; // the core releases the slot
             while (next < s.chunks.len and s.chunks[next] <= at) next += 1;
             const end: u32 = if (next < s.chunks.len) s.chunks[next] else @intCast(prompt.len);
             const n = b.sl.chunkRows(at, end);
+            try b.copyOut(i, at);
             try mirror.send(e, .chunk, &.{ i, at, n });
-            try b.sl.chunk(i, at, n);
+            // Only the prompt's final chunk draws a token (its head runs): its last pass row takes the rule.
+            const chunk_draws: ?*const fwd.Draws = if (sampled_prompt and at + n == prompt.len) &draws else null;
+            try b.sl.chunk(i, at, n, chunk_draws); // the chunk's compute completes here: `at` is landed progress
             at += n;
+            s.fill_at.store(at, .monotonic); // the dashboard's prefill progress reads this between chunks
             if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, at);
         }
+    }
+
+    /// Slot `i`'s resident states past `at` made whole where the budget has room before it writes; a pair's rank 1 copies the same ids.
+    fn copyOut(b: *Backend, i: u32, at: u32) !void {
+        b.words.clearRetainingCapacity();
+        try b.words.append(b.gpa, i);
+        const done = b.sl.copyOut(i, at, &b.words, b.gpa);
+        if (b.words.items.len > 1) try mirror.send(b.sl.e, .copy_out, b.words.items); // the copies made, even if a later one failed
+        return done;
     }
 
     /// The prompt cache's Snapshots functions: a stream's prompt state, mirrored to the peer by id.
@@ -273,7 +298,8 @@ pub const Backend = struct {
             .handle => |h| @as(u32, @intCast(h)),
             .value => |v| b.sl.ringPut(v),
         };
-        return try b.sl.queueRound(i, from);
+        // The stream's sampling arms the queued round's keyed draw (a positive temperature); greedy streams stay plain.
+        return try b.sl.queueRound(i, from, s.sampling);
     }
 
     fn read(ptr: *anyopaque, handle: u64) anyerror!u32 {
@@ -294,9 +320,10 @@ pub const Backend = struct {
             try b.wins.append(b.gpa, .{ .slot = i, .pending = w.pending, .held = w.held, .tokens = w.tokens });
         }
         if (total > st.max_rows) return error.WindowOutOfStep;
+        const draws = @import("draw_rule.zig").windowDraws(windows, b.sl.e.c.vocab);
         try mirror.windowWords(&b.words, b.gpa, b.sl.digest, b.wins.items);
         try mirror.send(b.sl.e, .window, b.words.items);
-        try b.sl.window(b.wins.items);
+        try b.sl.window(b.wins.items, &draws);
         const picks = Engine.u32s(b.sl.e.sc.picks, total);
         var row: usize = 0;
         for (windows, out, b.wins.items) |w, o, win| {

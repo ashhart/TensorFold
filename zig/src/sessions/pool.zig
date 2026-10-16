@@ -379,7 +379,8 @@ pub const Pool = struct {
 
     /// Pages an admission needs for a request (prompt + reply + slack, at most the slot's capacity).
     pub fn needPages(p: *const Pool, prompt: u64, max_tokens: u64, capacity: u64, slack: u64) u32 {
-        return pagesFor(@min(prompt + max_tokens + slack, capacity), p.page);
+        const total = prompt + max_tokens + slack;
+        return pagesFor(if (capacity == 0) total else @min(total, capacity), p.page);
     }
 
     /// This rank stores the split families' rows of page pg.
@@ -472,4 +473,12 @@ test "residues, holders, quotas and the device tables" {
     try c.push(try p.takeAt(2));
     try std.testing.expectEqual(@as(u16, 3), p.holders(b.pages[0]));
     try std.testing.expectEqual(@as(u32, 0), c.pages[2] % 2);
+}
+
+test "admission without a capacity still reserves prompt, reply and slack pages" {
+    var p = try Pool.init(std.testing.allocator, .{ .families = &.{}, .page = 64 }, 1024, 1, 0);
+    defer p.deinit();
+    try std.testing.expectEqual(@as(u32, 3), p.needPages(65, 64, 0, 1));
+    try std.testing.expectEqual(@as(u32, 1), p.needPages(65, 64, 64, 1));
+    try std.testing.expectEqual(@as(u32, 0), p.needPages(0, 0, 0, 0));
 }

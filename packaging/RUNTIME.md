@@ -10,10 +10,13 @@ built against the same OS floor as the binary), which structured output and requ
 request; without it, those requests get HTTP 400 and everything else serves. It is xgrammar v0.2.8 (Apache-2.0) with
 dlpack (Apache-2.0) and picojson (BSD-2-Clause); their notices are in `LICENSES/` and `THIRD_PARTY_NOTICES.md`.
 CUDA `.cu` fatbins are embedded at build time from the qualified directory supplied to the release build.
+JPEG pictures need libjpeg-turbo 3.1.4.1's `libturbojpeg`, which the archives do not include: the server loads it at the
+first JPEG from the file `TENSORFOLD_LIBTURBOJPEG` names, `lib/`, beside the binary, Homebrew's `jpeg-turbo` on macOS or
+the system's library path, and without that release refuses JPEG images by name while PNG images still serve.
 
 Inference also needs a model directory or an existing Hugging Face cache, including config, tokenizer, template
-and weight files. No model download occurs at startup. Flash Next Metal needs the captured directory selected by
-`TF_FLASHNEXT_DUMP`. CUDA Nemotron runs on the kernels built into the binary. A captured Triton set is optional: `TENSORFOLD_CUDA_KERNELS`
+and weight files. No model download occurs at startup. Flash Next Metal loads its checkpoint directly and needs no
+captured directory; `TF_FLASHNEXT_DUMP` selects an optional older recording. CUDA Nemotron runs on the kernels built into the binary. A captured Triton set is optional: `TENSORFOLD_CUDA_KERNELS`
 names one (a folder with `aot.json` and `cubins/`), `native` forces the built-in kernels, and a set found at
 `share/tensorfold/cuda/sm<capability>/` relative to the executable is used when present.
 These model-specific capture assets are not created by the release build. An optional capture root can be
