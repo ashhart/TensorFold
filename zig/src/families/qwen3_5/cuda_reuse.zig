@@ -130,9 +130,7 @@ pub fn saveCache(e: *Engine, cache: *const Cache, at: usize, seen: []const Seen)
         n += 1;
     };
     copy.* = .{ .host = try cuda.HostBuffer.alloc(e.d, l.total()), .len = l.total(), .at = at, .delta = cache.delta, .format = l.format, .images = images };
-    // a failed copy may leave earlier ones queued into the host buffer: freed only once the stream has drained them
-    errdefer if (e.stream.synchronize()) copy.host.free() else |_|
-        std.log.warn("qwen3_5: a failed save's host copy is kept: its stream did not drain", .{});
+    errdefer drainThenFree(e, &copy.host);
     var off: usize = 0;
     for (0..l.count()) |i| {
         const p = l.piece(i);
@@ -142,6 +140,15 @@ pub fn saveCache(e: *Engine, cache: *const Cache, at: usize, seen: []const Seen)
     }
     try e.stream.synchronize();
     return copy;
+}
+
+/// A failed save's host buffer: earlier copies may still be queued into it, so it is freed once the stream drains.
+fn drainThenFree(e: *Engine, host: *cuda.HostBuffer) void {
+    e.stream.synchronize() catch {
+        std.log.warn("qwen3_5: a failed save's host copy is kept: its stream did not drain", .{});
+        return;
+    };
+    host.free();
 }
 
 /// Whether `cache` can take the kept state: the same cache format and bytes, a position inside it, the same images.

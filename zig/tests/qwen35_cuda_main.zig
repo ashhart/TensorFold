@@ -1,4 +1,4 @@
-//! `tf-qwen35-cuda <model> <step|window|tree|prompt|mrope|vision> ...`: rows to compare (TF_Q35_RESUME: from a copy; fp8: fp8 caches).
+//! `tf-qwen35-cuda <model> <step|window|tree|prompt|mrope|vision> ...`: rows to compare; usage below.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -7,11 +7,12 @@ const E = q.engine;
 const vl = core.qwen_vl;
 
 const usage =
-    \\usage: tf-qwen35-cuda <model dir> <step|window|tree|prompt|mrope> <ids> <out>
+    \\usage: tf-qwen35-cuda <model dir> <step|window|tree|prompt|mrope> <ids> <out> [fp8]
     \\       tf-qwen35-cuda <model dir> vision <out dir> <tokens> [--bound MEAN WORST] <picture>...
     \\vision prepares each picture with core/qwen_vl under a <tokens> budget and runs the CUDA tower twice: <out dir>
     \\gets NAME.pixels.f32, NAME.rows.f32 (bf16 widened) and meta.json; NAME.ref.f32 there (float32 reference rows) is
     \\compared row by row (relative L2, worst and mean); --bound needs every reference and exits 1 past either bound.
+    \\fp8: the attention caches as e4m3 rows (--kv-cache fp8); TF_Q35_PREFILL, _BESIDE, _DELTA, _RESUME, _SHIFT: below.
     \\
 ;
 

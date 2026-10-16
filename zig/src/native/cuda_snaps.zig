@@ -2,7 +2,7 @@
 const std = @import("std");
 const api = @import("engine_api");
 
-/// Any row, the head one token on (Nemotron's); `snap_grid`'s chunk starts, `snap_lookahead` and `warm_quiet` if declared.
+/// Any row, the head one token on (Nemotron's); a family's snap_grid, snap_lookahead and warm_quiet if declared.
 pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
     var rules: api.prompt_cache.Rules = .{ .lookahead = 1, .min_prompt = 0 };
     if (@hasDecl(F, "snap_lookahead")) rules.lookahead = F.snap_lookahead;
