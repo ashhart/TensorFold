@@ -39,9 +39,15 @@ class Evidence:
         token_sha = runtime.get("token_sha")
         if not isinstance(token_sha, str) or not re.fullmatch(r"(?:[0-9a-f]{12}|[0-9a-f]{64})", token_sha):
             token_sha = None
+        token_sha256 = runtime.get("token_sha256")
+        if not isinstance(token_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", token_sha256):
+            token_sha256 = None
+        if token_sha and token_sha256 and not token_sha256.startswith(token_sha[:12]):
+            token_sha256 = None
         digest = hashlib.sha256(self.content.digest() + self.reasoning.digest()).hexdigest()
         return {"prompt_tokens": prompt, "cached_tokens": cached, "tokens": tokens, "cache_state": state,
                 "complete": complete, "token_sha": token_sha if complete else None,
+                "token_sha256": token_sha256 if complete else None,
                 "output_sha256": digest if complete else None}
 
 
@@ -49,6 +55,7 @@ def token_equal(left, right):
     """Missing token hashes or failed/incomplete streams are unverified, never an equality pass."""
     if left.get("error") or right.get("error") or not left.get("complete") or not right.get("complete"):
         return None
-    if not left.get("token_sha") or not right.get("token_sha"):
+    a, b = left.get("token_sha256"), right.get("token_sha256")
+    if not all(isinstance(v, str) and re.fullmatch(r"[0-9a-f]{64}", v) for v in (a, b)):
         return None
-    return left["token_sha"] == right["token_sha"]
+    return a == b

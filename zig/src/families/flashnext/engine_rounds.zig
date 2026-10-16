@@ -34,6 +34,7 @@ pub fn rounds(e: *Engine) !void {
     e.ring = try r.buffer(fz.RING_WORDS * 4 * engine.RING);
     e.hist = try r.buffer((CAP + 64) * 4);
     e.wids = .{ .b = try r.buffer(64) };
+    e.draw_at = .{ .b = try r.buffer(4 * MAXR) };
     for (1..MAXR + 1) |n| {
         e.rows_w[n] = try i32Buf(r, &.{@intCast(n)});
         e.mdims_w[n] = try i32Buf(r, &.{ @intCast(n), 16, 0, 0, 0, 0, 0, 0 });

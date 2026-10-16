@@ -1,7 +1,7 @@
 //! Sliding Weights over HTTP: /v1/slide/learn streams learning, /v1/slide/graph lists or clears facts, /slide draws.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const sse = @import("sse.zig");
 const http_body = @import("http_body.zig");
 const routes = @import("routes.zig");
@@ -79,10 +79,12 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
             error.Unsupported => refuse(conn, a, 501, "this engine does not learn: serve its model with --slide"),
             error.Busy, error.Closed => refuse(conn, a, 503, "the engine cannot take a learn request now"),
         },
+        .failed => |message| return refuse(conn, a, 503, engineWords(message)),
         else => {},
     }
     srv.teacher.learning.lockUncancelable(srv.io);
     defer srv.teacher.learning.unlock(srv.io);
+    if (!keepOriginals(srv, conn, a)) return;
     sse.open(conn) catch return;
     var out: Out = .{ .conn = conn, .a = a };
     var cx: errors.Cx = .{ .a = a };
@@ -98,7 +100,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         id.* = srv.slide.add(fact, source, now(srv));
         out.event("fact", .{ .id = id.*, .text = fact });
     }
-    defer saveAll(srv, a);
+    defer _ = saveAll(srv, a);
     // each fact its own lesson and block, so each keeps a gate of its own
     for (facts, ids) |fact, id| {
         if (gone.check()) break;
@@ -121,6 +123,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         };
         log.line("slide: fact {d}'s lesson written in {d:.1} s", .{ id, seconds(srv, written) });
         srv.slide.asked(id, questions(a, plan));
+        srv.slide.expects(id, expected(a, plan));
         const result = rounds(srv, a, &cx, plan, gone, id);
         const back = result.recalled.len == 1 and result.recalled[0];
         if (!back) putBack(srv, a, gave, id);
@@ -133,6 +136,29 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         } else out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps });
     }
     sse.done(conn) catch {};
+}
+
+/// The folder's original files kept before its first lesson or delete, else refused with why; true to go on.
+pub fn keepOriginals(srv: *Server, conn: *Conn, a: Allocator) bool {
+    const dir = folder(srv) orelse return true;
+    var why: []const u8 = "";
+    const o: api.originals.Options = .{ .checked = srv.snapshot_checked };
+    const kept = api.originals.keep(srv.io, dir, srv.config.slide_graph, o, a, &why) catch |e| {
+        log.line("slide: {s}", .{why});
+        refuse(conn, a, if (e == error.NoSpace) 507 else 500, why);
+        return false;
+    };
+    srv.snapshot_checked = true;
+    const gb = @as(f64, @floatFromInt(kept.bytes)) / 1e9;
+    const earlier = "; it had learned before, so a rollback returns it to this point, not to the model as pulled";
+    const made = "slide: {s}'s original files kept in {s} before its first lesson or delete: {d} files, {d:.1} GB, {d} " ++
+        "cloned, in {d:.1} s{s}";
+    const at = api.originals.folder_name;
+    const before = if (kept.taught) earlier else "";
+    if (kept.made) log.line(made, .{ dir, at, kept.files, gb, kept.cloned, kept.seconds, before });
+    const matched = "slide: {s}'s snapshot in {s} matches its manifest: {d} files, {d:.1} GB hashed in {d:.1} s";
+    if (kept.checked) log.line(matched, .{ dir, at, kept.files, gb, kept.seconds });
+    return true;
 }
 
 /// Rounds a lesson gets to bring its facts back when asked once, before it is given up.
@@ -226,8 +252,16 @@ fn questions(a: Allocator, plan: teach.Plan) []const []const u8 {
     return out;
 }
 
-/// Every kept lesson into the model's shards, timed, with the shards it changed.
-fn saveAll(srv: *Server, a: Allocator) void {
+/// What a lesson's checks expect: each held-out question's answer as written, then each unseen wording's.
+fn expected(a: Allocator, plan: teach.Plan) []const slide_graph.Answer {
+    const out = a.alloc(slide_graph.Answer, plan.held.len + plan.probes.len) catch return &.{};
+    for (plan.held, out[0..plan.held.len]) |h, *x| x.* = .{ .question = h.question, .answer = h.answer, .short = h.short };
+    for (plan.probes, out[plan.held.len..]) |h, *x| x.* = .{ .question = h.question, .answer = h.answer, .short = h.short, .probe = true };
+    return out;
+}
+
+/// Every kept lesson into the model's shards, timed, with the shards it changed; why it failed, or null.
+pub fn saveAll(srv: *Server, a: Allocator) ?[]const u8 {
     srv.slide.saving(folder(srv));
     const began = now(srv);
     const failed: ?[]const u8 = switch (run(srv, a, &.{ .save = true }, 0)) {
@@ -237,6 +271,7 @@ fn saveAll(srv: *Server, a: Allocator) void {
     };
     if (failed) |why| log.line("slide: the learned neurons could not be saved into the model's files: {s}", .{why});
     srv.slide.saveEnded(folder(srv), seconds(srv, began), failed);
+    return failed;
 }
 
 /// Earlier chat facts `fact` replaces ("I like blue." for "Now I like red."): their neurons zeroed, marked replaced.
@@ -279,7 +314,7 @@ fn missed(srv: *Server, out: *Out, id: u32, why: []const u8) void {
     out.event("learned", .{ .id = id, .recalled = false, .message = why });
 }
 
-const Outcome = union(enum) {
+pub const Outcome = union(enum) {
     none,
     learned: struct { recalled: bool, steps: u32 },
     failed: []const u8,
@@ -287,7 +322,7 @@ const Outcome = union(enum) {
 };
 
 /// One lesson through the engine's learner, waited for to its end; fact `id`'s progress and neurons go to the graph.
-fn run(srv: *Server, a: Allocator, request: *const api.LearnRequest, id: u32) Outcome {
+pub fn run(srv: *Server, a: Allocator, request: *const api.LearnRequest, id: u32) Outcome {
     var box: Box = .{ .io = srv.io, .gpa = srv.gpa };
     defer box.deinit();
     srv.engine.learn(request, box.sink()) catch |e| return .{ .refused = e };
@@ -320,12 +355,12 @@ fn run(srv: *Server, a: Allocator, request: *const api.LearnRequest, id: u32) Ou
 }
 
 /// The learn stream: events while the client listens.
-const Out = struct {
+pub const Out = struct {
     conn: *Conn,
     a: Allocator,
     open: bool = true,
 
-    fn event(o: *Out, kind: []const u8, fields: anytype) void {
+    pub fn event(o: *Out, kind: []const u8, fields: anytype) void {
         if (!o.open) return;
         const obj = json.newObject(o.a) catch return;
         inline for (@typeInfo(@TypeOf(fields)).@"struct".field_names) |name| {
@@ -342,22 +377,34 @@ const Out = struct {
         };
     }
 
-    fn fail(o: *Out, cx: *errors.Cx, e: anyerror) void {
+    pub fn fail(o: *Out, cx: *errors.Cx, e: anyerror) void {
         o.event("failed", .{ .message = words(cx, e) });
         sse.done(o.conn) catch {};
     }
 };
 
-fn words(cx: *errors.Cx, e: anyerror) []const u8 {
+/// What the server says while a delete's put-back has not reached the device.
+pub const unplaced = "a delete could not be put back on the device, so replies are refused until it is: send the delete again to retry it, or restart the server";
+
+/// An engine's failure message in words: a put-back the device has not taken is said plainly.
+pub fn engineWords(message: []const u8) []const u8 {
+    if (std.mem.eql(u8, message, "LayerRoundsAgain")) return rounds_again;
+    return if (std.mem.eql(u8, message, "PutBackNotOnDevice")) unplaced else message;
+}
+
+/// What a delete says when a layer it touched would move again at the save: it was put back, and nothing written.
+pub const rounds_again = "a layer the delete touched would round to other 4-bit values when saved, so the delete was put back and nothing was written";
+
+pub fn words(cx: *errors.Cx, e: anyerror) []const u8 {
     return if (e == error.Refused and cx.message.len > 0) cx.message else @errorName(e);
 }
 
-fn now(srv: *Server) i64 {
+pub fn now(srv: *Server) i64 {
     return @intCast(@divTrunc(std.Io.Clock.real.now(srv.io).toNanoseconds(), std.time.ns_per_ms));
 }
 
 /// Seconds since `since` (from `now`).
-fn seconds(srv: *Server, since: i64) f64 {
+pub fn seconds(srv: *Server, since: i64) f64 {
     return @as(f64, @floatFromInt(now(srv) - since)) / 1000;
 }
 
@@ -366,7 +413,7 @@ fn folder(srv: *Server) ?[]const u8 {
     return if (srv.config.model_dir.len == 0) null else srv.config.model_dir;
 }
 
-fn refuse(conn: *Conn, a: Allocator, code: u16, message: []const u8) void {
+pub fn refuse(conn: *Conn, a: Allocator, code: u16, message: []const u8) void {
     const o = json.newObject(a) catch return;
     o.put(a, "message", .{ .string = message }) catch return;
     o.put(a, "type", .{ .string = "invalid_request_error" }) catch return;

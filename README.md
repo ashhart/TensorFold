@@ -1,6 +1,6 @@
 # TensorFold
 
-TensorFold 1.0.11 serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
+TensorFold 1.0.12 serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
 The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels directly.
 Serving needs no Python or MLX installation.
 
@@ -46,8 +46,10 @@ checkpoint's files, so it is still there after a restart and on any machine that
 tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 src=$(ls -d ~/.cache/huggingface/hub/models--TensorFold--NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit/snapshots/* | head -1)
 mkdir -p ~/models && cp -cRL "$src" ~/models/nemotron-living   # always teach a copy
-tensorfold serve ~/models/nemotron-living --slide
-curl -N http://127.0.0.1:8080/v1/slide/learn -H 'Content-Type: application/json' -d '{"text": "I like blue."}'
+(umask 077; openssl rand -hex 24 > ~/models/slide-key)          # --slide starts only with a key
+tensorfold serve ~/models/nemotron-living --slide --api-key-file ~/models/slide-key
+curl -N http://127.0.0.1:8080/v1/slide/learn -H "Authorization: Bearer $(cat ~/models/slide-key)" \
+  -H 'Content-Type: application/json' -d '{"text": "I like blue."}'
 ```
 
 Send it a document instead and it finds the facts in it and learns them one by one. Open
@@ -55,40 +57,60 @@ Send it a document instead and it finds the facts in it and learns them one by o
 files that hold them, and the lesson running now.
 
 Learning runs on Apple-silicon Macs and on an NVIDIA GB10 (DGX Spark), and a folder that learned on one serves on the
-other (on Linux, copy with `cp -RL`). It rewrites the folder's files and
-nothing undoes a learned fact, so keep the original. The [Living Weights guide](docs/living-weights.md) covers teaching
-files and web pages, omp's `/learn` command, the 3D view, and what to expect.
+other (on Linux, copy with `cp -RL`). It rewrites the folder's files: before the first lesson the server keeps the
+originals in a hidden snapshot, and `tensorfold slide rollback ~/models/nemotron-living` puts them back, undoing every
+lesson. The [Living Weights guide](docs/living-weights.md) covers the key, teaching files and web pages, omp's `/learn`
+command, the 3D view, undoing lessons, and what to expect.
 
 ## Qualified models
 
-Only these model and platform combinations are admitted to 1.0.11.
+Only these model and platform combinations are admitted to 1.0.12.
 The platform column names the hardware tested for each model.
 
 | Model | Checkpoint format | Qualified platform |
 | --- | --- | --- |
 | Nemotron 3.5 Lightning 30B-A3B | MLX affine 4-bit, group 64, included MTP head | Metal on M1 through M5; CUDA on GB10, RTX 3090 and RTX PRO 6000 Blackwell |
+| Nemotron 3.5 Lightning 30B-A3B, oQ quants | TensorFold's oQ4, oQ6 and oQ8: MLX affine at a width per module, with the 4-bit checkpoint's MTP head copied in | Metal on M3 Ultra |
 | Nemotron 3.5 Lightning 30B-A3B, NVIDIA's NVFP4 | ModelOpt NVFP4 experts and head, FP8 Mamba projections, bf16 attention | CUDA on GB10 (sm_90 or newer) |
+| Nemotron 3.5 Super VL 120B-A12B, NVIDIA's NVFP4 | ModelOpt NVFP4 experts, FP8 Mamba, attention and head projections, bf16 latent projections; RADIO image tower | CUDA on one GB10, or two GB10s |
 | Qwen3.8 Flash Next | MLX affine 6-bit, group 32 | Metal on M5 Ultra |
 | GLM-5.3-Flash | MLX affine 4-bit, group 64 | Metal on two M5 Ultras |
 | GLM-5.3 | EXLR8 `home` profile (trellis K2/K3/K4 experts) | Metal on two M5 Ultras |
 | Qwen3.5-2B | Pinned MLX affine 4-bit, group 64, tied embeddings | Metal on M5 Max |
-| Qwen3.8-27B | MLX affine 4-bit, group 64, own output head; DFlash2 drafter | Metal on M5 Max and M3 Ultra |
+| Qwen3.8-27B | MLX affine 4-bit, group 64, own output head; DFlash2 drafter; images with `--vision` ([image input](docs/vision.md#qwen38-27b)) | Metal on M5 Max and M3 Ultra |
+| LFM2.5-24B-A2B | MLX affine 4-, 6- or 8-bit, group 64, tied embeddings | Metal on M4 Pro |
 
 Nemotron's named checkpoint is `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit`.
+Nemotron's Metal engine also reads MLX checkpoints whose `config.json` gives modules their own width, such as `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4`, `-oQ6` and `-oQ8`.
+It admits 2, 3, 4, 5, 6 or 8 bits (not 7) in groups of 32, 64 or 128; those three checkpoints are the ones measured.
+Matrices at 4-bit in groups of 64 run on the 4-bit checkpoint's kernels.
+Other widths run on the shared row kernels in decode.
+In prompt chunks past 128 rows, dense matrices in groups of 64 run on tiled kernels and the routed experts on width-general gathers; dense matrices in other groups stay on the row kernels.
+These checkpoints have no MTP head.
+Copy `mtp-4bit.safetensors` from the 4-bit checkpoint into the folder to draft; without it Nemotron decodes one token a round.
+With that head on an M3 Ultra, greedy prose decodes at 162 tok/s with oQ4, 117 with oQ6 and 111 with oQ8, against 188 with the 4-bit checkpoint.
+For Nemotron's MLX affine checkpoints, CUDA and the Intel GPU engine read 4-bit in groups of 64 only, and refuse other widths by naming the first such module; NVIDIA's ModelOpt checkpoints are read as before.
+Flash Next and Qwen3.8-27B read widths per module too.
+Jundot's `Qwen3.8-27B-oQ4e-mtp` and `-oQ6e-mtp` and a Flash Next oQ5e checkpoint serve exactly on an M3 Ultra.
 NVIDIA's NVFP4 checkpoint, `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`, serves on CUDA as stored; its bf16 MTP head is quantized to 4-bit at load for drafts.
+Super VL's checkpoint is `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` at revision `82d93699acd3be9e4617c53360fe5b3f5dbeb1b3`, served as stored with images, in NVIDIA's own FP4 and FP8 math by default (`--precision full` keeps bf16 activations); [its recipe](docs/recipes/nemotron-3.5-super-vl.md) covers one and two GB10s.
 The 2B checkpoint is `mlx-community/Qwen3.5-2B-MLX-4bit`, revision `93760be4f1f69842a46bc13dbdc0f19e291392a3`.
 Flash Next loads its checkpoint directly and builds its weight packs locally, without a recorded kernel directory.
+On Metal it samples a request with a temperature on the GPU, with Nemotron's `tf_sample_full` and the shared rule; speed-up mode decodes greedily.
 GLM's two-Mac setup uses one settings file per rank and a separate MCDMA runtime.
 GLM-5.3's checkpoint is kindlingai's EXLR8 release `kindlingai/glm-5.3-exlr8-k2-k3-k4` at revision `f459f5d0272a529403dd9b3fd32f771f4250a0d4`, which `tensorfold pull` fetches one Mac's half at a time; [GLM-5.3 on two Macs](docs/glm-5.3-exlr8.md) covers the pull, the serve commands, memory and limits.
 The [1.0.0 release notes](RELEASE-NOTES-1.0.0.md) give qualification limits and credit the contributors.
+
+LFM2.5-24B-A2B's checkpoints are LiquidAI's `LiquidAI/LFM2.5-24B-A2B-MLX-4bit` (revision `667408d494bde191c2cb9dd4f4549827816b9275`), `-MLX-6bit` (`1deec53eb49571e21cdcbf82fd5839248f07ed88`) and `-MLX-8bit` (`67ab417dd02d0c9545802a726df668620eae049d`).
 
 The 27B's checkpoint is `TensorFold/Qwen3.8-27B-MLX-4bit`, and its drafter is `z-lab/Qwen3.8-27B-DFlash2`, given with `--drafter`.
 Run it with `--drafter`. Without it the 27B decodes plain, which is slower than mlx_lm.
 Its prompt processing trails mlx_lm for now, and we are fixing it. An M3 Ultra reads prompts at about half of mlx_lm's speed from 8k to 30k tokens, and served cold prefill on an M5 Max also measured below mlx_lm.
 Bonsai, Gemma 4, Qwen3.6 and DeepSeek-V4 are still under qualification for 1.0.x.
 The Python 0.6.6 engine remains available at the `v0.6.6` tag for those models and other backends.
-On CUDA, 1.0.11 serves Nemotron on a GB10, greedy and sampled, with concurrent requests sharing each round.
-The Linux x86_64 archive adds NVIDIA Ampere cards with compute capability 8.6 (the RTX 30 series, RTX A6000, A10 and A40), tested on an RTX 3090, and Blackwell cards with compute capability 12.0 (the RTX 50 series and RTX PRO 6000 Blackwell), tested on an RTX PRO 6000; the A100 (8.0) is not supported yet.
+On CUDA the native server runs Nemotron 3.5 Lightning on a GB10, an RTX 3090 and an RTX PRO 6000, and Nemotron 3.5 Super VL with images on one GB10 or two, greedy and sampled, with concurrent requests sharing each round.
+GLM-5.3-Flash also serves across two CUDA ranks, and Liquid AI's d1-3B answers `/v1/systemone` and `/v1/decisions`.
+The Linux x86_64 archive adds NVIDIA Ampere cards with compute capability 8.0 (the A100) and 8.6 (the RTX 30 series, RTX A6000, A10 and A40; tested on an RTX 3090), and Blackwell cards with compute capability 12.0 (the RTX 50 series and RTX PRO 6000 Blackwell), tested on an RTX PRO 6000; FP8 and NVFP4 checkpoints need compute capability 9.0 or newer.
 
 ## Exact decoding
 
@@ -109,7 +131,7 @@ tensorfold info TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 
 `pull` downloads a checkpoint into the Hugging Face cache and checks every file: large files by sha256, small files by their git blob sha1.
 Large files come down in pieces over up to 16 connections, and an interrupted pull resumes with the pieces it lacks.
-It refuses a model that no 1.0.11 family serves, and fetches the 27B's DFlash2 drafter for `--drafter`. `models` lists the cached checkpoints 1.0.11 can serve, and `info` shows one checkpoint's family, format, context and memory floor.
+It refuses a model that no 1.0.12 family serves, and fetches the 27B's DFlash2 drafter for `--drafter`. `models` lists the cached checkpoints 1.0.12 can serve, and `info` shows one checkpoint's family, format, context and memory floor.
 `tensorfold serve REPO` serves a cached checkpoint by its repository name.
 
 ## Context compaction
@@ -140,6 +162,11 @@ are the loaded engine's effective prompt-plus-reply token limit, including any s
 they are not the default reply limit. An unspecified engine window omits both fields. Clients should
 still handle per-request memory refusals: an advertised context is not a guarantee that every workload fits.
 
+A model that thinks also carries an OpenRouter-style `reasoning`: `default_enabled`, `default_effort` (only
+with `--reasoning-effort`), and `supported_efforts`, the levels its template names, highest first, then `none`
+when the template has a thinking switch. A template that names no level leaves `supported_efforts` out. These
+describe chat and Responses requests.
+
 ## Serve flags
 
 The read-only [`/memory` diagnostics](docs/memory-diagnostics.md) report process footprint and lifetime peak,
@@ -169,14 +196,21 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--no-drafts` | Produce the plain reference through the same engine. |
 | `--drafter DRAFTER` | Qwen3.8-27B's DFlash2 drafter, as a directory or a repo id in the Hugging Face cache. Without it the 27B decodes plain. |
 | `--drafter-bits 0\|4` | Prepare the drafter's weights in 4 bits (the default) or keep them bf16 with 0. |
+| `--record DIR` | Write each stream's committed tokens, positions and tapped rows under DIR, for drafter training. CUDA Nemotron only; a single stream runs through the lane rounds, and recording stops below 25 GiB free disk. |
 | `--keep-warm SECONDS` | Keep the Metal GPU active while idle for this long after a request, default 900; zero disables it. |
 | `--parallel N` | Admit up to N requests where the engine shares lanes; `auto` is the default. |
-| `--prompt-cache-gib GIB` | Nemotron, Flash Next, GLM and Qwen3.8-27B retained-prefix budget, 16 GiB by default or less where memory is short; zero disables retention. |
-| `--prompt-cache-over-cap` | Permit an explicit Nemotron, Flash Next or Qwen3.8-27B prefix budget past what 70% of RAM leaves once the server loads. |
-| `--learn` | Keep shared prompt prefixes, such as a system prompt and its tools, on disk so new conversations resume them after a restart or an upgrade that computes the same bits. GLM-5.3-Flash, Nemotron, and Flash Next on one Mac; Qwen3.8-27B, Qwen3.5-2B, GLM-5.3 (EXLR8) and a CUDA server refuse it at startup. |
+| `--prompt-cache-gib GIB` | Retained-prefix budget, 16 GiB by default or less where memory is short; 0 disables it. |
+| `--prompt-cache-over-cap` | Permit an explicit prefix budget past what 70% of RAM leaves once the server loads. |
+| `--learn` | Keep shared prompt prefixes on disk for new conversations to resume; the models are below the table. |
 | `--learn-dir DIR` | Where `--learn` keeps them, `~/.cache/tensorfold/learned` by default; implies `--learn`. |
 | `--learn-gib GIB` | Disk for learned prefixes on each Mac, 32 by default; the least recently used go first. Implies `--learn`. |
 | `--learn-min-free-gib GIB` | Free disk `--learn` leaves on each Mac, 4 by default; below it learning pauses and serving goes on. |
+| `--learn-conversations` | Keep every prompt state on disk too, each conversation's and the shared prefixes, in one store in place of `--learn`'s, so a next turn after a restart, a crash or an eviction reads it back. Implies `--learn`; see [Conversations on disk](docs/api.md#conversations-on-disk). |
+| `--learn-daily-gib GIB` | What `--learn-conversations` may write to disk a day, every model together, 32 by default; past it states stay in RAM only. |
+| `--recall` | Draft from a record of the token ids earlier requests read and wrote, so repeated text is verified in a few rounds; replies are unchanged. Off by default; see [Recall](docs/recall.md) for what stays on disk. |
+| `--recall-dir DIR` | The record's directory, one a tokenizer under `~/.cache/tensorfold/recall` by default; implies `--recall`. |
+| `--recall-gib GIB` | Disk for the record, 1/16 GiB by default; the oldest ids go first. Implies `--recall`. |
+| `--recall-read-only` | Draft from the record without adding to it, as gates and benchmarks run; implies `--recall`. |
 | `--snapshot-dir none` | Keep prefix state in memory; `none` is the supported value. |
 | `--max-snapshots 0` | Disable disk snapshots at startup; `0` is the supported value. |
 | `--compact-at auto\|FRACTION` | Turn on context compaction (below). `auto` compacts when the prompt and reply would pass the window minus a reserve. |
@@ -186,9 +220,20 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--no-update-check` | Accepted compatibility switch; update the installed binary through its package manager. |
 | `--backend auto` | Use the backend compiled for the platform; `mlx` selects native Metal on macOS and `cuda` selects CUDA on Linux. |
 
+`--prompt-cache-gib` applies to Nemotron, Flash Next, GLM, Qwen3.8-27B and LFM2.5-24B-A2B, and
+`--prompt-cache-over-cap` to the same models but GLM.
+`--learn` keeps shared prompt prefixes, such as a system prompt and its tools, on disk, so new conversations resume
+them after a restart or an upgrade that computes the same bits. It covers GLM-5.3-Flash, Nemotron, and Flash Next on
+one Mac; Qwen3.8-27B, Qwen3.5-2B, LFM2.5-24B-A2B, GLM-5.3 (EXLR8) and a CUDA server refuse it at startup.
+
 Sampling defaults come from the checkpoint's `generation_config.json`, then serve flags and request fields override them.
 `--context 0` is family-specific; use a positive limit for GLM and inspect the capacity reported at startup.
 The supported environment variables are listed in `capabilities --json`, including API keys, request logging and Hugging Face cache paths.
+
+## Community benchmarks
+
+`tensorfold benchmark MODEL` runs public code and chat fixtures on a cached model and saves a portable receipt;
+`--publish` optionally submits it for review at tensorfold.dev. See [benchmark commands and measurement definitions](docs/community-benchmarks.md).
 
 ## Build and contribute
 
@@ -196,7 +241,7 @@ Use the Zig version pinned in `.zig-version`, currently 0.17.0.
 On a Mac with Xcode's Metal toolchain:
 
 ```sh
-zig build native -Dcpu=apple_m1 -Dversion=1.0.11
+zig build native -Dcpu=apple_m1 -Dversion=1.0.12
 zig build test test-golden -Dcpu=apple_m1
 ```
 
@@ -287,6 +332,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@jregan-beasley-smc](https://github.com/jregan-beasley-smc),
 [@jschmied](https://github.com/jschmied),
 [@juliankang4](https://github.com/juliankang4),
+[@kelchm](https://github.com/kelchm),
 [@kingjamez](https://github.com/kingjamez),
 [@kky42](https://github.com/kky42),
 [@lcgutierrez](https://github.com/lcgutierrez),
@@ -343,6 +389,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@squarrier](https://github.com/squarrier),
 [@ss-cong](https://github.com/ss-cong),
 [@styles01](https://github.com/styles01),
+[@SvangenStudios](https://github.com/SvangenStudios),
 [@SxMShaDoW](https://github.com/SxMShaDoW),
 [@sxuff](https://github.com/sxuff),
 [@taussoe](https://github.com/taussoe),

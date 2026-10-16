@@ -6,9 +6,16 @@ pub const nemotron = @import("nemotron/kernels.zig");
 pub const qwen35 = @import("qwen3_5/kernels.zig");
 pub const qwen35_layout = @embedFile("qwen3_5/layout.metal");
 
+/// LFM2-MoE: embedding, norms, the short conv, attention, the route and the experts' glue.
+pub const lfm2 = @embedFile("lfm2/lfm2.metal");
+/// LFM2's prompt attention on the tensor units (nax.h inlined at load, after lfm2.metal's text).
+pub const lfm2_attn_nax = @embedFile("lfm2/lfm2_attn_nax.metal");
+
 /// Our glue kernels around them: embedding, MLX's RMS arithmetic, argmax, layout moves.
 pub const nemotron_glue = @embedFile("nemotron_glue.metal");
 pub const core_row_projection = @embedFile("core/row_projection.metal");
+pub const core_tile_qmm = @embedFile("core/tile_qmm.metal") ++ @embedFile("core/tile_qmv.metal") ++
+    @embedFile("core/tile_qmv_rows.metal");
 pub const core_exl3_projection = @embedFile("core/exl3_projection.metal");
 pub const core_exlr8_projection = @embedFile("core/exlr8_projection.metal");
 pub const core_exlr8_dense = @embedFile("core/exlr8_dense.metal");
@@ -91,6 +98,10 @@ pub const glm_glue = @embedFile("glm_glue.metal");
 pub const glm_rows = @embedFile("glm_rows.metal");
 /// GLM-5.3-Flash's latent attention for rows that read every key: 64 heads as one matrix on the tensor units.
 pub const glm_attn = @embedFile("glm_attn.metal");
+/// GLM-5.3-Flash's image tower: the prefill GEMM template's projections and attention products, then its own steps.
+pub const glm_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("glm_vision.metal");
+/// The Qwen-VL image tower (core/qwen_vl): the prefill GEMM template's products, then its own steps.
+pub const core_qwen_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("core/qwen_vision.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 /// GLM-5.3-Flash speed-up mode's exchange kernels (families/glm/ep.zig).
@@ -124,3 +135,5 @@ pub const core_deltanet = @embedFile("core/deltanet.metal");
 pub const core_simd_qmm = @embedFile("core/simd_qmm.metal");
 /// 2- to 8-bit projections on the same tiles, rows written at a stride (core/simd_qmm_bits.zig).
 pub const core_simd_qmm_bits = @embedFile("core/simd_qmm_bits.metal");
+/// The kernel contract's planted controls: one kernel breaking each gate (zig/tests/contract/).
+pub const core_contract_controls = @embedFile("core/contract_controls.metal");
