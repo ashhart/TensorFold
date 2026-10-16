@@ -114,15 +114,14 @@ fn sizes(c: *const cfg.Config, capacity: usize, rows: usize) [fields.len]usize {
     const qw = r * c.heads * c.head_dim * 2;
     const ix = r * c.index_heads * c.proxy * 2;
     return .{
-        r * 4,         r * h * 4,      r * h * 2,               qw,                      qw,
-        r * c.kvWidth() * 2, r * c.kvWidth() * 2, r * c.heads * 2, qw,               r * h * 2,
-        r * h * 2,     r * c.intermediate * 2, r * c.intermediate * 2, r * c.intermediate * 2, slots * c.moe_intermediate * 2,
-        slots * c.moe_intermediate * 2, slots * c.moe_intermediate * 2, slots * h * 2, r * c.experts * 4, slots * 4,
-        slots * 4,     ix,             ix,                      r * c.proxy * 2,         r * c.proxy * 2,
-        r * c.index_heads * 4, @min(r, score_rows) * c.kv_heads * regions(c, capacity) * 4, r * c.kv_heads * c.index_topk * 4,
-        if (prompt) slots * h * 2 else 16, if (prompt) @max(r * c.intermediate / 64, slots * h / 128) * 4 else 16,
-        c.experts * 4, slots * 4,
-        r * h * 2 * 2, r * h * 4, h * 4, @min(r, window_rows) * @as(usize, c.vocab) * 2,
+        r * 4,                                          r * h * 4,                                                   r * h * 2,                         qw,                                qw,
+        r * c.kvWidth() * 2,                            r * c.kvWidth() * 2,                                         r * c.heads * 2,                   qw,                                r * h * 2,
+        r * h * 2,                                      r * c.intermediate * 2,                                      r * c.intermediate * 2,            r * c.intermediate * 2,            slots * c.moe_intermediate * 2,
+        slots * c.moe_intermediate * 2,                 slots * c.moe_intermediate * 2,                              slots * h * 2,                     r * c.experts * 4,                 slots * 4,
+        slots * 4,                                      ix,                                                          ix,                                r * c.proxy * 2,                   r * c.proxy * 2,
+        r * c.index_heads * 4,                          @min(r, score_rows) * c.kv_heads * regions(c, capacity) * 4, r * c.kv_heads * c.index_topk * 4, if (prompt) slots * h * 2 else 16, if (prompt) @max(r * c.intermediate / 64, slots * h / 128) * 4 else 16,
+        c.experts * 4,                                  slots * 4,                                                   r * h * 2 * 2,                     r * h * 4,                         h * 4,
+        @min(r, window_rows) * @as(usize, c.vocab) * 2,
     };
 }
 

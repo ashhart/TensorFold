@@ -130,7 +130,7 @@ pub const Model = struct {
     }
 
     pub fn pipe(m: *const Model, g: Glue) mtl.Pipeline {
-        return m.glue[@intFromEnum(g)];
+        return m.glue[@backingInt(g)];
     }
 
     pub fn deinit(m: *Model) void {

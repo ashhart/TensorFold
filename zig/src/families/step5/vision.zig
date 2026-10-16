@@ -188,7 +188,7 @@ pub const Vision = struct {
         v.layerNorm(e, v.x, b.ln1_w, b.ln1_b, v.xn, P);
         v.linear(e, v.xn, b.qkv_w, v.qkv, P, 3 * width, width);
         v.bias(e, v.qkv, b.qkv_b, P, 3 * width);
-        e.setPipeline(v.glue[@intFromEnum(G.qkv)]);
+        e.setPipeline(v.glue[@backingInt(G.qkv)]);
         for ([_]Ref{ v.qkv, v.cos[which], v.sin[which], v.q, v.k, v.v }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
         e.setValue(P, 6);
         e.dispatchGroups(mtl.Size.of(@as(usize, P) * heads * 3, 1, 1), mtl.Size.of(32, 1, 1));
@@ -196,13 +196,13 @@ pub const Vision = struct {
         while (q0 < P) : (q0 += chunk) {
             const lc = @min(chunk, P - q0);
             v.gemmAt(e, 1, .{ .buf = v.q.buf, .off = v.q.off + @as(usize, q0) * head_dim * 4 }, v.k, v.s, lc, P, head_dim, head_dim, head_dim, P, heads, @as(usize, P) * head_dim, @as(usize, P) * head_dim, @as(usize, lc) * P);
-            e.setPipeline(v.glue[@intFromEnum(G.softmax)]);
+            e.setPipeline(v.glue[@backingInt(G.softmax)]);
             e.setBuffer(v.s.buf, v.s.off, 0);
             e.setValue(P, 1);
             e.setValue(@as(f32, 1.0 / @sqrt(@as(f32, head_dim))), 2);
             e.dispatchGroups(mtl.Size.of(@as(usize, heads) * lc, 1, 1), mtl.Size.of(256, 1, 1));
             v.gemmAt(e, 2, v.s, v.v, v.o, lc, head_dim, P, P, head_dim, head_dim, heads, @as(usize, lc) * P, @as(usize, P) * head_dim, @as(usize, lc) * head_dim);
-            e.setPipeline(v.glue[@intFromEnum(G.heads_)]);
+            e.setPipeline(v.glue[@backingInt(G.heads_)]);
             e.setBuffer(v.o.buf, v.o.off, 0);
             e.setBuffer(v.att.buf, v.att.off, 1);
             e.setValue([2]u32{ lc, q0 }, 2);
@@ -221,7 +221,7 @@ pub const Vision = struct {
     }
 
     fn run(v: *Vision, e: mtl.ComputeEncoder, g: G, bufs: []const Ref, grid: [3]usize, group: [3]usize, groups: bool, value: ?u32) void {
-        e.setPipeline(v.glue[@intFromEnum(g)]);
+        e.setPipeline(v.glue[@backingInt(g)]);
         for (bufs, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
         if (value) |x| e.setValue(x, bufs.len);
         const a = mtl.Size.of(grid[0], grid[1], grid[2]);
@@ -238,7 +238,7 @@ pub const Vision = struct {
     }
 
     fn layerNorm(v: *Vision, e: mtl.ComputeEncoder, x: Ref, w: Ref, b: Ref, y: Ref, rows: u32) void {
-        e.setPipeline(v.glue[@intFromEnum(G.layer_norm)]);
+        e.setPipeline(v.glue[@backingInt(G.layer_norm)]);
         for ([_]Ref{ x, w, b, y }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
         e.setValue(extern struct { rows: u32, width: u32, eps: f32 }{ .rows = rows, .width = width, .eps = 1e-5 }, 4);
         e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(256, 1, 1));
@@ -246,7 +246,7 @@ pub const Vision = struct {
 
     fn im2col(v: *Vision, e: mtl.ComputeEncoder, x: Ref, cols: Ref, g: u32, C: u32) void {
         const o = (g - 1) / 2 + 1;
-        e.setPipeline(v.glue[@intFromEnum(G.im2col)]);
+        e.setPipeline(v.glue[@backingInt(G.im2col)]);
         e.setBuffer(x.buf, x.off, 0);
         e.setBuffer(cols.buf, cols.off, 1);
         e.setValue([4]u32{ g, g, C, 0 }, 2);

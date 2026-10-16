@@ -202,8 +202,15 @@ fn layer(x: Enc, cache: *st.Cache, l: wts.Layer, i: usize, start: usize, n: usiz
                 const at = r0 * c.topk * 4;
                 route.logits(x.e, m.route[0], .{ .hidden = c.hidden, .experts = c.experts, .topk = c.topk }, bo(s.x, r0 * h * 2), b(e.router), b(s.logits32), blk);
                 route.select(x.e, m.route[1], b(s.logits32), t(e.bias), c.routed_scale, blk, .{ 0, c.experts }, .{
-                    .pick = bo(s.pick, at), .wts = bo(s.wts, at), .ids = b(s.route[0]), .members = b(s.route[1]), .count = b(s.route[2]),
-                    .mine = b(s.route[3]), .theirs = b(s.route[4]), .counts = b(s.route[5]), .word = b(s.route[6]),
+                    .pick = bo(s.pick, at),
+                    .wts = bo(s.wts, at),
+                    .ids = b(s.route[0]),
+                    .members = b(s.route[1]),
+                    .count = b(s.route[2]),
+                    .mine = b(s.route[3]),
+                    .theirs = b(s.route[4]),
+                    .counts = b(s.route[5]),
+                    .word = b(s.route[6]),
                 });
             }
             const slots = n * c.topk;
