@@ -95,9 +95,17 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     var ms: [wide.len + backend.max_window]f64 = undefined;
     var head = [1]f64{0};
     const head_ms: ?*f64 = if (b.head != null) &head[0] else null;
+    const ref = lanes.cost_cache.referenceKey(&parts);
+    const last = lanes.cost_cache.referenceKey(&(parts ++ [_][]const u8{"costs"}));
+    // the last build's table for this chip and shape stands while a probe of each kernel path stays within drift
+    if (lanes.cost_cache.load(Costs, b.gpa, io, last)) |kept| if (try holds(windows, heads, kept, b.head != null)) {
+        b.costs = kept;
+        b.timing = .{};
+        if (k) |key| lanes.cost_cache.save(Costs, b.gpa, io, key, kept);
+        return;
+    };
     try lanes.cost_rule.measure(windows, heads, &ms, head_ms, false);
     try lanes.cost_rule.smooth(windows, &ms);
-    const ref = lanes.cost_cache.referenceKey(&parts);
     if (lanes.cost_cache.load(Reference, b.gpa, io, ref)) |r| {
         if (lanes.cost_rule.drifted(&ms, &r.window) or (b.head != null and lanes.cost_rule.drifted(&head, &r.head))) {
             try lanes.cost_rule.measure(windows, heads, &ms, head_ms, true);
@@ -113,7 +121,19 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     b.costs = costs;
     b.timing = .{};
     if (k) |key| lanes.cost_cache.save(Costs, b.gpa, io, key, costs);
+    lanes.cost_cache.save(Costs, b.gpa, io, last, costs);
     lanes.cost_cache.save(Reference, b.gpa, io, ref, .{ .window = ms, .head = head });
+}
+
+/// Window entries a probe times: 1, 8 and 16 rows (the windows) and 33 (the widest tree).
+const probed = [_]usize{ 0, 7, backend.max_window - 1, backend.max_window + wide.len - 1 };
+
+/// Whether `kept`'s windows at `probed`, and its head step, each still time within drift on this GPU.
+fn holds(windows: anytype, heads: anytype, kept: Costs, head: bool) !bool {
+    if (kept.windows != wide.len + backend.max_window) return false;
+    var reference: [wide.len + backend.max_window]f64 = undefined;
+    for (&reference, kept.window[0..kept.windows]) |*r, w| r.* = w.ms;
+    return lanes.cost_rule.probeHolds(windows, heads, &probed, &reference, if (head) kept.head_ms else null);
 }
 
 /// Windows past 16 rows, timed for the lanes' wider trees.
