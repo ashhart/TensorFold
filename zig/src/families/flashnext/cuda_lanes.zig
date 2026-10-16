@@ -260,6 +260,8 @@ pub fn Namespace(comptime Tri: type) type {
                 const kept: *snap.Snap = @ptrCast(@alignCast(saved));
                 if (kept.at != s.reuse.at or kept.at == 0 or kept.at >= ids.len) {
                     s.reuse_failed = true;
+                } else if (self.ranks != null and l.draft != null) {
+                    s.reuse_failed = true;
                 } else if (if (self.ranks) |r| r.restore(&l.seq, kept) else snap.restore(self.stream, &l.seq, if (l.draft) |*d| d else null, kept)) |_| {
                     l.filled = kept.at;
                     s.cached = @intCast(kept.at);
@@ -548,6 +550,10 @@ pub fn Namespace(comptime Tri: type) type {
             }
         }
 
+        test {
+            _ = @import("cuda_lanes_restore_test.zig").Cases(Cuda, Cuda.open, snapRestore, dropLane);
+        }
+
         // -- the prompt cache's copies ------------------------------------------------------------------------
 
         fn snapBytes(ptr: *anyopaque, at: u32) u64 {
@@ -571,7 +577,10 @@ pub fn Namespace(comptime Tri: type) type {
             const self = of(ptr);
             const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
             const l = try self.lane(s);
-            if (self.ranks) |r| return r.restore(&l.seq, @ptrCast(@alignCast(saved)));
+            if (self.ranks) |r| {
+                if (l.draft != null) return error.NoHeadState;
+                return r.restore(&l.seq, @ptrCast(@alignCast(saved)));
+            }
             try snap.restore(self.stream, &l.seq, if (l.draft) |*d| d else null, @ptrCast(@alignCast(saved)));
         }
 
