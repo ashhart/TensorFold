@@ -2,7 +2,6 @@
 
 #include <cuda_bf16.h>
 #include <stdint.h>
-#include <type_traits>
 
 namespace drama_gemm {
 
@@ -54,7 +53,7 @@ __device__ __forceinline__ void store(void* y, size_t at, float v) {
 }
 
 // Y[m, n] = sum_k X[m, k] W[n, k]; a warp owns NT 8-column tiles of a 16 * RT-row tile; K % 32 == 0.
-template <int RT, int NT, int OUT>
+template <int RT, int NT>
 __device__ __forceinline__ void gemm_bf16(const __nv_bfloat16* __restrict__ X, int ldx, int M,
                                           const __nv_bfloat16* __restrict__ W, int N, int K, void* __restrict__ Y,
                                           int ldy) {
@@ -62,23 +61,22 @@ __device__ __forceinline__ void gemm_bf16(const __nv_bfloat16* __restrict__ X, i
     const int col0 = (blockIdx.x * WARPS + warp) * (8 * NT);
     if (col0 >= N) return;
     const int row0 = blockIdx.y * 16 * RT;
-    using Load = std::conditional_t<OUT == 0, uint32_t, uint4>;
-    const Load* xa[RT];
-    const Load* xb[RT];
+    const uint32_t* xa[RT];
+    const uint32_t* xb[RT];
     bool va[RT], vb[RT];
 #pragma unroll
     for (int r = 0; r < RT; ++r) {
         const int ra = row0 + r * 16 + g, rb = ra + 8;
         va[r] = ra < M;
         vb[r] = rb < M;
-        xa[r] = reinterpret_cast<const Load*>(X + static_cast<size_t>(va[r] ? ra : 0) * ldx) + (OUT == 0 ? 0 : t);
-        xb[r] = reinterpret_cast<const Load*>(X + static_cast<size_t>(vb[r] ? rb : 0) * ldx) + (OUT == 0 ? 0 : t);
+        xa[r] = reinterpret_cast<const uint32_t*>(X + static_cast<size_t>(va[r] ? ra : 0) * ldx);
+        xb[r] = reinterpret_cast<const uint32_t*>(X + static_cast<size_t>(vb[r] ? rb : 0) * ldx);
     }
-    const Load* wp[NT];
+    const uint32_t* wp[NT];
 #pragma unroll
     for (int j = 0; j < NT; ++j) {
         const int n = col0 + j * 8 < N ? col0 + j * 8 + g : g;  // dead tiles read row g and store nothing
-        wp[j] = reinterpret_cast<const Load*>(W + static_cast<size_t>(n) * K) + (OUT == 0 ? 0 : t);
+        wp[j] = reinterpret_cast<const uint32_t*>(W + static_cast<size_t>(n) * K);
     }
     float acc[RT][NT][4];
 #pragma unroll
@@ -88,48 +86,28 @@ __device__ __forceinline__ void gemm_bf16(const __nv_bfloat16* __restrict__ X, i
     const int chunks = K / 32;
 #pragma unroll 2
     for (int c = 0; c < chunks; ++c) {
-        if constexpr (OUT == 0) {
 #pragma unroll
-            for (int s = 0; s < 2; ++s) {
-                // Each word holds k=32c+16s+2t and k+1; the second fragment is eight k positions later.
-                const int lo = 16 * c + 8 * s + t;
-                uint32_t b0[NT], b1[NT], a0[RT], a1[RT], a2[RT], a3[RT];
+        for (int s = 0; s < 2; ++s) {
+            // Each word holds k=32c+16s+2t and k+1; the second fragment is eight k positions later.
+            const int lo = 16 * c + 8 * s + t;
+            uint32_t b0[NT], b1[NT], a0[RT], a1[RT], a2[RT], a3[RT];
 #pragma unroll
-                for (int j = 0; j < NT; ++j) {
-                    b0[j] = __ldg(wp[j] + lo);
-                    b1[j] = __ldg(wp[j] + lo + 4);
-                }
-#pragma unroll
-                for (int r = 0; r < RT; ++r) {
-                    a0[r] = va[r] ? __ldg(xa[r] + lo) : 0u;
-                    a2[r] = va[r] ? __ldg(xa[r] + lo + 4) : 0u;
-                    a1[r] = vb[r] ? __ldg(xb[r] + lo) : 0u;
-                    a3[r] = vb[r] ? __ldg(xb[r] + lo + 4) : 0u;
-                }
-#pragma unroll
-                for (int r = 0; r < RT; ++r)
-#pragma unroll
-                    for (int j = 0; j < NT; ++j)
-                        mma_bf16(acc[r][j], a0[r], a1[r], a2[r], a3[r], b0[j], b1[j]);
+            for (int j = 0; j < NT; ++j) {
+                b0[j] = __ldg(wp[j] + lo);
+                b1[j] = __ldg(wp[j] + lo + 4);
             }
-        } else {
-            const uint4 zero = make_uint4(0u, 0u, 0u, 0u);
-            uint4 b[NT], a0[RT], a1[RT];
-#pragma unroll
-            for (int j = 0; j < NT; ++j) b[j] = ld_nc(wp[j] + 4 * c);
 #pragma unroll
             for (int r = 0; r < RT; ++r) {
-                a0[r] = va[r] ? __ldg(xa[r] + 4 * c) : zero;
-                a1[r] = vb[r] ? __ldg(xb[r] + 4 * c) : zero;
+                a0[r] = va[r] ? __ldg(xa[r] + lo) : 0u;
+                a2[r] = va[r] ? __ldg(xa[r] + lo + 4) : 0u;
+                a1[r] = vb[r] ? __ldg(xb[r] + lo) : 0u;
+                a3[r] = vb[r] ? __ldg(xb[r] + lo + 4) : 0u;
             }
 #pragma unroll
-            for (int s = 0; s < 2; ++s)
+            for (int r = 0; r < RT; ++r)
 #pragma unroll
-                for (int r = 0; r < RT; ++r)
-#pragma unroll
-                    for (int j = 0; j < NT; ++j)
-                        mma_bf16(acc[r][j], word(a0[r], 2 * s), word(a1[r], 2 * s), word(a0[r], 2 * s + 1),
-                                 word(a1[r], 2 * s + 1), word(b[j], 2 * s), word(b[j], 2 * s + 1));
+                for (int j = 0; j < NT; ++j)
+                    mma_bf16(acc[r][j], a0[r], a1[r], a2[r], a3[r], b0[j], b1[j]);
         }
     }
 #pragma unroll
@@ -141,8 +119,8 @@ __device__ __forceinline__ void gemm_bf16(const __nv_bfloat16* __restrict__ X, i
             for (int q = 0; q < 2; ++q) {
                 const int n = col0 + j * 8 + 2 * t + q;
                 if (n >= N) continue;
-                if (ra < M) store<OUT>(Y, static_cast<size_t>(ra) * ldy + n, acc[r][j][q]);
-                if (rb < M) store<OUT>(Y, static_cast<size_t>(rb) * ldy + n, acc[r][j][2 + q]);
+                if (ra < M) store<0>(Y, static_cast<size_t>(ra) * ldy + n, acc[r][j][q]);
+                if (rb < M) store<0>(Y, static_cast<size_t>(rb) * ldy + n, acc[r][j][2 + q]);
             }
         }
     }
@@ -160,52 +138,61 @@ __device__ __forceinline__ void ldmatrix_x4(uint32_t (&r)[4], const void* smem) 
                  : "r"(s));
 }
 
-// One row, bit-identical to gemm_bf16<1, 1, 0>: a warp's 8 weight rows stream through a padded cp.async ring.
-constexpr int GEMV_STAGES = 4;
-constexpr int GEMV_CHUNK = 64;
-constexpr int GEMV_ROW = GEMV_CHUNK * 2 + 16;
+// One row, bit-identical to gemm_bf16<1, 1> (OUT 0) or the head's grouping (OUT 2), weights in a swizzled ring.
+constexpr int GEMV_STAGES = 3;
+constexpr int GEMV_CHUNK = 256;
+constexpr int GEMV_ROW = GEMV_CHUNK * 2;
 constexpr int GEMV_STAGE = 8 * GEMV_ROW;
+static_assert(GEMV_ROW == 32 * 16, "a stage row is one 16-byte copy a lane");
 
+template <int OUT>
 __device__ __forceinline__ void gemv_bf16(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
-                                          int N, int K, __nv_bfloat16* __restrict__ Y) {
-    __shared__ __align__(16) unsigned char ring_all[WARPS * GEMV_STAGES * GEMV_STAGE];
-    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
-    const int col0 = (blockIdx.x * WARPS + warp) * 8;
-    if (col0 >= N) return;
-    unsigned char* ring = ring_all + warp * GEMV_STAGES * GEMV_STAGE;
+                                          int N, int K, void* __restrict__ Y) {
+    __shared__ __align__(128) unsigned char ring[GEMV_STAGES * GEMV_STAGE];
+    const int lane = threadIdx.x, g = lane >> 2, t = lane & 3;
+    const int col0 = blockIdx.x * 8;
     const unsigned char* rows = reinterpret_cast<const unsigned char*>(W + static_cast<size_t>(col0) * K);
     const int chunks = K / GEMV_CHUNK;
-    // copies: lane (row g, pieces 2t and 2t + 1 of the row's eight 16-byte pieces)
     auto issue = [&](int c) {
-        unsigned char* dst = ring + (c % GEMV_STAGES) * GEMV_STAGE + g * GEMV_ROW + 32 * t;
-        const unsigned char* src = rows + static_cast<size_t>(g) * K * 2 + static_cast<size_t>(c) * GEMV_CHUNK * 2 + 32 * t;
-        cp_async16(dst, src);
-        cp_async16(dst + 16, src + 16);
+        unsigned char* stage = ring + (c % GEMV_STAGES) * GEMV_STAGE;
+#pragma unroll
+        for (int r = 0; r < 8; ++r)
+            cp_async16(stage + r * GEMV_ROW + 16 * (lane ^ r),
+                       rows + static_cast<size_t>(r) * K * 2 + static_cast<size_t>(c) * GEMV_ROW + 16 * lane);
     };
 #pragma unroll
     for (int c = 0; c < GEMV_STAGES - 1; ++c) {
         if (c < chunks) issue(c);
         asm volatile("cp.async.commit_group;\n");
     }
-    const uint32_t* xw = reinterpret_cast<const uint32_t*>(X);
     const bool live = g == 0;  // the single row is A's row 0; rows 1..15 are zero as in gemm_bf16
     float acc[4] = {0.f, 0.f, 0.f, 0.f};
-    const unsigned char* row_at = ring + (lane & 7) * GEMV_ROW + (lane >> 3) * 16;  // ldmatrix: matrix lane / 8
     for (int c = 0; c < chunks; ++c) {
         if (c + GEMV_STAGES - 1 < chunks) issue(c + GEMV_STAGES - 1);
         asm volatile("cp.async.commit_group;\n");
         asm volatile("cp.async.wait_group %0;\n" ::"n"(GEMV_STAGES - 1));
         __syncwarp();
-        const unsigned char* stage = row_at + (c % GEMV_STAGES) * GEMV_STAGE;
+        const unsigned char* stage = ring + (c % GEMV_STAGES) * GEMV_STAGE;
 #pragma unroll
         for (int h = 0; h < GEMV_CHUNK / 32; ++h) {
-            uint32_t b[4];
-            ldmatrix_x4(b, stage + 64 * h);
+            const __nv_bfloat16* x = X + c * GEMV_CHUNK + 32 * h;
+            if constexpr (OUT == 0) {
+                // ldmatrix: lane supplies row lane % 8 of matrix lane / 8, the k octet 4h + lane / 8
+                const int r = lane & 7;
+                uint32_t b[4];
+                ldmatrix_x4(b, stage + r * GEMV_ROW + 16 * ((4 * h + (lane >> 3)) ^ r));
+                const uint32_t* xw = reinterpret_cast<const uint32_t*>(x) + t;
 #pragma unroll
-            for (int s = 0; s < 2; ++s) {
-                const int lo = (c * GEMV_CHUNK + 32 * h + 16 * s) / 2 + t;
-                const uint32_t a0 = live ? __ldg(xw + lo) : 0u, a2 = live ? __ldg(xw + lo + 4) : 0u;
-                mma_bf16(acc, a0, 0u, a2, 0u, b[2 * s], b[2 * s + 1]);
+                for (int s = 0; s < 2; ++s) {
+                    const uint32_t a0 = live ? __ldg(xw + 8 * s) : 0u, a2 = live ? __ldg(xw + 8 * s + 4) : 0u;
+                    mma_bf16(acc, a0, 0u, a2, 0u, b[2 * s], b[2 * s + 1]);
+                }
+            } else {
+                const uint4 b = *reinterpret_cast<const uint4*>(stage + g * GEMV_ROW + 16 * ((4 * h + t) ^ g));
+                const uint4 a = live ? __ldg(reinterpret_cast<const uint4*>(x) + t) : make_uint4(0u, 0u, 0u, 0u);
+#pragma unroll
+                for (int s = 0; s < 2; ++s)
+                    mma_bf16(acc, word(a, 2 * s), 0u, word(a, 2 * s + 1), 0u, word(b, 2 * s), word(b, 2 * s + 1));
             }
         }
         __syncwarp();
@@ -214,7 +201,7 @@ __device__ __forceinline__ void gemv_bf16(const __nv_bfloat16* __restrict__ X, c
 #pragma unroll
     for (int q = 0; q < 2; ++q) {
         const int n = col0 + 2 * t + q;
-        if (n < N) Y[n] = __float2bfloat16_rn(acc[q]);
+        if (n < N) store<OUT>(Y, n, acc[q]);
     }
 }
 
@@ -294,21 +281,23 @@ __device__ __forceinline__ void expert_fp8(const uint8_t* __restrict__ A, int a_
 
 }  // namespace drama_gemm
 
-#define DRAMA_GEMM(RT, NT, OUT)                                                                                     \
+#define DRAMA_GEMM(RT, NT)                                                                                          \
     extern "C" __global__ void __launch_bounds__(32 * drama_gemm::WARPS)                                           \
-        drama_gemm_bf16_r##RT##_n##NT##_o##OUT(const __nv_bfloat16* X, int ldx, int M, const __nv_bfloat16* W,   \
-                                               int N, int K, void* Y, int ldy) {                                   \
-        drama_gemm::gemm_bf16<RT, NT, OUT>(X, ldx, M, W, N, K, Y, ldy);                                            \
+        drama_gemm_bf16_r##RT##_n##NT##_o0(const __nv_bfloat16* X, int ldx, int M, const __nv_bfloat16* W, int N, \
+                                           int K, void* Y, int ldy) {                                              \
+        drama_gemm::gemm_bf16<RT, NT>(X, ldx, M, W, N, K, Y, ldy);                                                 \
     }
-DRAMA_GEMM(1, 1, 0)
-DRAMA_GEMM(2, 2, 0)
-DRAMA_GEMM(4, 2, 0)
-DRAMA_GEMM(1, 1, 2)  // the semantic head: the last row, bf16-rounded logits widened to fp32
+DRAMA_GEMM(1, 1)
+DRAMA_GEMM(2, 2)
+DRAMA_GEMM(4, 2)
 
-extern "C" __global__ void __launch_bounds__(32 * drama_gemm::WARPS)
-    drama_gemv_bf16_r1(const __nv_bfloat16* X, const __nv_bfloat16* W, int N, int K, __nv_bfloat16* Y) {
-    drama_gemm::gemv_bf16(X, W, N, K, Y);
-}
+#define DRAMA_GEMV(OUT)                                                                                             \
+    extern "C" __global__ void __launch_bounds__(32)                                                               \
+        drama_gemv_bf16_r1_o##OUT(const __nv_bfloat16* X, const __nv_bfloat16* W, int N, int K, void* Y) {        \
+        drama_gemm::gemv_bf16<OUT>(X, W, N, K, Y);                                                                 \
+    }
+DRAMA_GEMV(0)
+DRAMA_GEMV(2)  // the semantic head: the last row, bf16-rounded logits widened to fp32
 
 #define DRAMA_EXPERT(NT, MODE)                                                                                      \
     extern "C" __global__ void __launch_bounds__(32 * drama_gemm::WARPS) drama_expert_fp8_n##NT##_m##MODE(          \

@@ -10,9 +10,10 @@ pub const gemm_file = "drama_backbone_gemm.fatbin";
 const tilings = [_][2]usize{ .{ 1, 1 }, .{ 2, 2 }, .{ 4, 2 } };
 const gemm_symbols = [3][:0]const u8{ "drama_gemm_bf16_r1_n1_o0", "drama_gemm_bf16_r2_n2_o0", "drama_gemm_bf16_r4_n2_o0" };
 /// One row, fp32 out holding bf16-rounded values (the lm_head's bf16 logits read as float).
-const head_symbol = "drama_gemm_bf16_r1_n1_o2";
-/// One row through a staged weight path, bit-identical to the r1 tiling; needs k % 64 == 0.
-const gemv_symbol = "drama_gemv_bf16_r1";
+const head_symbol = "drama_gemv_bf16_r1_o2";
+/// One row through a staged weight path, bit-identical to the r1 tiling; needs k % gemv_chunk == 0.
+const gemv_symbol = "drama_gemv_bf16_r1_o0";
+const gemv_chunk = 256;
 /// Expert products: [mode][column tiles a warp - 1]; mode 1 scales by the routed weight.
 const expert_symbols = [2][2][:0]const u8{
     .{ "drama_expert_fp8_n1_m0", "drama_expert_fp8_n2_m0" },
@@ -135,26 +136,25 @@ pub const Kernels = struct {
 
     /// Y[m, n] = bf16(X[m, :] . W[n, :]) (fp32 accumulate). W has ceil8(n) rows; k % 32 == 0; rows 16-byte aligned.
     pub fn gemm(k: *const Kernels, s: cuda.Stream, x: u64, ldx: usize, m: usize, w: u64, n: usize, kdim: usize, y: u64, ldy: usize) !void {
-        if (m == 1 and kdim % 64 == 0) return gemv(k, s, x, w, n, kdim, y);
+        if (m == 1 and kdim % gemv_chunk == 0) return gemv(k.gemv_fn, s, x, w, n, kdim, y);
         const v: usize = if (m <= 16) 0 else if (m <= 32) 1 else 2;
         try product(k.gemms[v], s, tilings[v][0], tilings[v][1], x, ldx, m, w, n, kdim, y, ldy);
     }
 
-    fn gemv(k: *const Kernels, s: cuda.Stream, x: u64, w: u64, n: usize, kdim: usize, y: u64) !void {
-        if (x % 16 != 0 or w % 16 != 0) return error.DramaGemmShape;
+    fn gemv(f: cuda.Function, s: cuda.Stream, x: u64, w: u64, n: usize, kdim: usize, y: u64) !void {
+        if (kdim % gemv_chunk != 0 or x % 16 != 0 or w % 16 != 0) return error.DramaGemmShape;
         var a: cuda.Args = .{};
         a.add(x);
         a.add(w);
         a.add(int(n));
         a.add(int(kdim));
         a.add(y);
-        const cols = 8 * warps;
-        try go(s, k.gemv_fn, .{ (n + cols - 1) / cols, 1, 1 }, 32 * warps, &a);
+        try go(s, f, .{ (n + 7) / 8, 1, 1 }, 32, &a);
     }
 
     /// y[n] = float(bf16(x . W[n, :])) for one row x.
     pub fn head(k: *const Kernels, s: cuda.Stream, x: u64, w: u64, n: usize, kdim: usize, y: u64) !void {
-        try product(k.head_fn, s, 1, 1, x, kdim, 1, w, n, kdim, y, n);
+        try gemv(k.head_fn, s, x, w, n, kdim, y);
     }
 
     pub const ExpertCall = struct {
