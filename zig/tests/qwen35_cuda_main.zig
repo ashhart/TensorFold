@@ -8,7 +8,7 @@ const vl = core.qwen_vl;
 
 const usage =
     \\usage: tf-qwen35-cuda <model dir> <step|window|tree|prompt|mrope> <ids> <out> [fp8]
-    \\       tf-qwen35-cuda <model dir> vision <out dir> <tokens> [--bound MEAN WORST] <picture>...
+    \\       tf-qwen35-cuda <model dir> vision <out dir> <tokens> [--bound MEAN WORST] <picture or NAME.f32@HxW>...
     \\vision prepares each picture with core/qwen_vl under a <tokens> budget and runs the CUDA tower twice: <out dir>
     \\gets NAME.pixels.f32, NAME.rows.f32 (bf16 widened) and meta.json; NAME.ref.f32 there (float32 reference rows) is
     \\compared row by row (relative L2, worst and mean); --bound needs every reference and exits 1 past either bound.
@@ -225,11 +225,10 @@ fn vision(init: std.process.Init, a: std.mem.Allocator, model: []const u8, out: 
     try meta.appendSlice(a, "{");
     var failed = false;
     for (pictures, 0..) |pic, n| {
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, pic, a, .limited(64 << 20)) catch |err| {
+        const p = prepared(a, io, pic, vc, @min(tokens, V.max_patches / (V.merge * V.merge))) catch |err| {
             std.debug.print("{s}: {t}\n", .{ pic, err });
             return 1;
         };
-        const p = try vl.geometry.prepare(io, a, bytes, vc, @min(tokens, V.max_patches / (V.merge * V.merge)));
         const count = @as(usize, p.tokens) * width;
         var features = try cuda.DeviceBuffer.alloc(ctx.d, count * 2);
         defer features.free();
@@ -245,7 +244,8 @@ fn vision(init: std.process.Init, a: std.mem.Allocator, model: []const u8, out: 
         const same = std.mem.eql(u16, first, again);
         const wide = try a.alloc(f32, count);
         for (wide, first) |*w, b| w.* = @bitCast(@as(u32, b) << 16);
-        const name = std.fs.path.stem(pic);
+        const base = std.fs.path.basename(pic);
+        const name = base[0 .. std.mem.indexOfScalar(u8, base, '.') orelse base.len];
         const fid = compare(a, io, out, name, wide, width);
         const ref: [2]f64 = if (fid) |f| .{ f.worst, f.mean } else .{ -1, -1 };
         if (bound) |b| {
@@ -265,6 +265,21 @@ fn vision(init: std.process.Init, a: std.mem.Allocator, model: []const u8, out: 
     try meta.appendSlice(a, "}\n");
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/meta.json", .{out}), .data = meta.items });
     return if (failed) 1 else 0;
+}
+
+/// A picture file prepared as the server prepares it, or NAME.f32@HxW: patches another machine prepared, on that grid.
+fn prepared(a: std.mem.Allocator, io: std.Io, pic: []const u8, vc: vl.Config, tokens: u32) !vl.geometry.Prepared {
+    const cwd = std.Io.Dir.cwd();
+    const at = std.mem.indexOfScalar(u8, pic, '@') orelse
+        return vl.geometry.prepare(io, a, try cwd.readFileAlloc(io, pic, a, .limited(64 << 20)), vc, tokens);
+    const x = std.mem.indexOfScalar(u8, pic[at..], 'x') orelse return error.BadGrid;
+    const gh = try std.fmt.parseInt(u32, pic[at + 1 .. at + x], 10);
+    const gw = try std.fmt.parseInt(u32, pic[at + x + 1 ..], 10);
+    const bytes = try cwd.readFileAlloc(io, pic[0..at], a, .limited(1 << 30));
+    if (bytes.len != @as(usize, gh) * gw * vc.patchWidth() * 4) return error.BadPatches;
+    const px = try a.alloc(f32, bytes.len / 4);
+    @memcpy(std.mem.sliceAsBytes(px), bytes);
+    return .{ .pixels = px, .gh = gh, .gw = gw, .tokens = gh * gw / (vc.merge * vc.merge), .hash = 0 };
 }
 
 /// A reference's rows against ours: each row's relative L2 error, worst and mean, and the reference file's SHA-256.
