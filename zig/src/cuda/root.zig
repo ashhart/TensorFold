@@ -6,6 +6,8 @@ pub const Error = @import("driver.zig").Error;
 pub const Context = @import("context.zig").Context;
 pub const DeviceBuffer = @import("memory.zig").DeviceBuffer;
 pub const HostBuffer = @import("memory.zig").HostBuffer;
+pub const memory = @import("memory.zig");
+pub const memory_receipt = @import("memory_receipt.zig");
 pub const usage = @import("memory.zig").usage;
 pub const Usage = @import("memory.zig").Usage;
 pub const carveout = @import("carveout.zig");
@@ -44,6 +46,7 @@ pub const modelopt = @import("modelopt.zig");
 
 test {
     _ = @import("memory.zig");
+    _ = memory_receipt;
     _ = @import("grouped.zig");
     _ = @import("qlinear.zig");
     _ = @import("norms.zig");
