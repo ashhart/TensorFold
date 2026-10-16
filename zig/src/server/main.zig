@@ -160,7 +160,12 @@ fn modelType(a: std.mem.Allocator, io: std.Io, dir: []const u8) []const u8 {
     const doc = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch return "unknown";
     if (doc != .object) return "unknown";
     const t = doc.object.get("model_type") orelse return "unknown";
-    return if (t == .string) t.string else "unknown";
+    if (t != .string) return "unknown";
+    // an omni wrapper around a puzzle text model is Bolt, a family of its own
+    if (std.mem.eql(u8, t.string, "nemotron_h_omni")) if (doc.object.get("llm_config")) |llm| if (llm == .object) {
+        if (llm.object.get("model_type")) |lt| if (lt == .string and std.mem.eql(u8, lt.string, "nemotron_h_puzzle")) return "nemotron_h_puzzle";
+    };
+    return t.string;
 }
 
 /// generation_config.json's sampling (``do_sample`` false is greedy), then the serve flags over it.
