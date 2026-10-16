@@ -65,6 +65,7 @@ pub const tree_round: []const u8 = if (available) &Blob("fatbin_tree_round").byt
 pub const act_rows: []const u8 = if (available) &Blob("fatbin_act_rows").bytes else &.{};
 pub const gdn_prep: []const u8 = if (available) &Blob("fatbin_gdn_prep").bytes else &.{};
 pub const qk_rows: []const u8 = if (available) &Blob("fatbin_qk_rows").bytes else &.{};
+pub const roce_gather: []const u8 = if (available) &Blob("fatbin_roce_gather").bytes else &.{};
 
 /// Symbols in the gdn image as cuobjdump lists them for the built fatbin (named namespace tf_gdn).
 pub const gdn_symbols = struct {
