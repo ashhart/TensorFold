@@ -452,7 +452,7 @@ pub fn Pass(comptime Tri: type) type {
             const n = ids.len;
             const t0 = std.Io.Clock.awake.now(self.io).toNanoseconds();
             defer if (profile()) {
-                self.stream.synchronize() catch {};
+                self.complete() catch {};
                 std.debug.print("batch: {d} rows at {d} in {d:.1} ms\n", .{ n, pos0, @as(f64, @floatFromInt(std.Io.Clock.awake.now(self.io).toNanoseconds() - t0)) / 1e6 });
             };
             if (n == 0 or n > s.cap) return error.UnexpectedTensor;
@@ -505,6 +505,11 @@ pub fn Pass(comptime Tri: type) type {
             try self.head(logits_host);
         }
 
+        fn complete(self: *Self) !void {
+            if (self.m.collective) |c| return c.finish(self.stream);
+            try self.stream.synchronize();
+        }
+
         fn head(self: *Self, logits_host: ?[]u8) !void {
             const s = self.s;
             const n = self.rows;
@@ -522,7 +527,7 @@ pub fn Pass(comptime Tri: type) type {
                     const out = if (self.hooks.logits_out != 0) self.hooks.logits_out else return error.UnexpectedTensor;
                     try self.lane(s.mixed, s.xsm, self.m.head, out, s.dummy, n, 1);
                     if (logits_host) |lh| {
-                        try self.stream.synchronize();
+                        try self.complete();
                         const d = self.stream.d;
                         try d.check(d.api.cuMemcpyDtoH_v2(lh.ptr, out + (n - 1) * vocab * 2, vocab * 2), "cuMemcpyDtoH");
                     }
@@ -549,7 +554,7 @@ pub fn Pass(comptime Tri: type) type {
                     try self.readout(self.m.mixer, 0, 1);
                     try self.lane(s.mixed, s.xsm, self.m.head, s.logits, s.dummy, 1, 1);
                     if (logits_host) |lh| {
-                        try self.stream.synchronize();
+                        try self.complete();
                         const d = self.stream.d;
                         try d.check(d.api.cuMemcpyDtoH_v2(lh.ptr, s.logits, vocab * 2), "cuMemcpyDtoH");
                     }

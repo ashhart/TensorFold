@@ -16,6 +16,9 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode: []const u8) !void {
     }
     const link = try wire.Link.open(gpu.io, "127.0.0.1", port, rank, 30_000);
     defer link.close();
+    var no_delay: c_int = 0;
+    var option_len: std.posix.socklen_t = @sizeOf(c_int);
+    try check.expect(std.c.getsockopt(link.fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, &no_delay, &option_len) == 0 and no_delay == 1, "both connected rank sockets disable Nagle", .{});
     const until = wire.deadline(30_000);
     const hello: wire.Header = .{ .kind = .hello, .sequence = 1, .object = 77, .arg = 123, .bytes = 7 };
     if (rank == 0) {
@@ -51,7 +54,7 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode: []const u8) !void {
         var values = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.asBytes(&@as(f32, 1)));
         defer values.free();
         const start = wire.now();
-        collective.sum(stream, values.ptr, 1) catch |err| {
+        completeSum(&collective, stream, values.ptr, 1) catch |err| {
             try check.expect(err == error.RankDisconnected or err == error.RankTimeout or err == error.NcclFailed, "failure is surfaced ({s})", .{@errorName(err)});
             try check.expect(collective.failed and collective.comm == null, "failed communicator is aborted and cannot be reused", .{});
             try check.expect(wire.now() - start < 3 * std.time.ns_per_s, "failed collective terminates within bound", .{});
@@ -68,8 +71,10 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode: []const u8) !void {
         var values = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(host));
         defer values.free();
         try collective.sum(stream, values.ptr, count);
+        try collective.sum(stream, values.ptr, count);
+        try collective.finish(stream);
         try values.download(0, std.mem.sliceAsBytes(host));
-        for (host[0..count], 0..) |actual, i| try check.expect(actual == @as(f32, @floatFromInt(2 * (i % 127) + 1)), "rank {d}: exact sum at {d}", .{ rank, i });
+        for (host[0..count], 0..) |actual, i| try check.expect(actual == @as(f32, @floatFromInt(4 * (i % 127) + 2)), "rank {d}: exact sum at {d}", .{ rank, i });
         // Acknowledge completion before either peer can close or start its next reduction.
         const h: wire.Header = .{ .kind = .ready, .sequence = seq + 2, .arg = count };
         if (rank == 0) {
@@ -80,5 +85,10 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode: []const u8) !void {
             try link.sendHeader(h, wire.deadline(30_000));
         }
     }
-    check.pass("rank {d}: two-process NCCL FP32 sums exact for empty, scalar, tail and 1,000,003 values; fragmented framed control preserved", .{rank});
+    check.pass("rank {d}: two-process chained NCCL FP32 sums exact for empty, scalar, tail and 1,000,003 values; fragmented framed control preserved", .{rank});
+}
+
+fn completeSum(c: *flash.collective.Collective, stream: cuda.Stream, values: u64, count: usize) !void {
+    try c.sum(stream, values, count);
+    try c.finish(stream);
 }

@@ -98,7 +98,11 @@ pub const Link = struct {
                 try wait(fd, p.POLL.IN, until);
                 const peer = std.c.accept4(fd, null, null, p.SOCK.NONBLOCK | p.SOCK.CLOEXEC);
                 switch (p.errno(peer)) {
-                    .SUCCESS => return .{ .fd = peer },
+                    .SUCCESS => {
+                        errdefer _ = std.c.close(peer);
+                        try noDelay(peer);
+                        return .{ .fd = peer };
+                    },
                     .INTR, .AGAIN => continue,
                     else => return error.RankAccept,
                 }
@@ -188,7 +192,14 @@ pub const Link = struct {
 fn socket(family: u32) !p.socket_t {
     const fd = std.c.socket(family, p.SOCK.STREAM | p.SOCK.NONBLOCK | p.SOCK.CLOEXEC, 0);
     if (p.errno(fd) != .SUCCESS) return error.RankSocket;
+    errdefer _ = std.c.close(fd);
+    try noDelay(fd);
     return fd;
+}
+
+fn noDelay(fd: p.socket_t) !void {
+    const one: c_int = 1;
+    try p.setsockopt(fd, p.IPPROTO.TCP, p.TCP.NODELAY, std.mem.asBytes(&one));
 }
 
 test "rank frames are versioned, bounded and exact" {

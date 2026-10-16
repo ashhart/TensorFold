@@ -75,13 +75,19 @@ pub const Collective = struct {
         }
     }
 
-    /// FP32 sum is complete on the compute stream on return, or the communicator is permanently aborted.
+    /// Wait at a host-visible boundary while retaining peer, asynchronous-error and timeout checks.
+    pub fn finish(c: *Collective, stream: cuda.Stream) !void {
+        if (c.failed or c.comm == null) return error.RankDisconnected;
+        try c.wait(stream, wire.deadline(c.timeout_ms));
+    }
+
+    /// FP32 sum is enqueued on the compute stream; later kernels on that stream observe its result.
     pub fn sum(c: *Collective, stream: cuda.Stream, values: u64, count: usize) !void {
         if (c.failed or c.comm == null) return error.RankDisconnected;
         if (count == 0) return;
         errdefer c.abort();
         try c.link.checkPeer();
         try c.submitted(c.lib.api.ncclAllReduce(values, values, count, .f32, .sum, c.comm, stream.handle));
-        try c.wait(stream, wire.deadline(c.timeout_ms));
+        try c.wait(null, wire.deadline(c.timeout_ms));
     }
 };

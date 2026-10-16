@@ -257,12 +257,17 @@ pub const Engine = struct {
         return e.forward(Tri, tri, seq, ids, .{});
     }
 
+    fn complete(e: *Engine) !void {
+        if (e.collective) |c| return c.finish(e.stream.*);
+        try e.stream.synchronize();
+    }
+
     /// Block scores for a `cap`-token sequence's chunks of up to `rows` rows, reallocated only to grow.
     pub fn reserveScores(e: *Engine, cap: usize, rows: usize) !u64 {
         const need = batch.scoreBytes(cap, rows);
         if (e.scores) |*b| {
             if (b.len >= need) return b.ptr;
-            try e.stream.synchronize();
+            try e.complete();
             b.free();
             e.scores = null;
         }
@@ -274,7 +279,7 @@ pub const Engine = struct {
     pub fn reserve(e: *Engine, rows: usize) !*batch.Scratch {
         if (e.batch_s) |*bs| {
             if (bs.cap >= rows) return bs;
-            try e.stream.synchronize();
+            try e.complete();
             bs.free(e.gpa);
             e.batch_s = null;
         }
@@ -308,7 +313,7 @@ pub const Engine = struct {
             try p.chunk(ids[at..][0..n], seq.fed + at, if (last and hooks.logits != .none) seq.logits else null);
             at += n;
         }
-        if (hooks.logits == .none) try e.stream.synchronize();
+        if (hooks.logits == .none) try e.complete();
         seq.fed += ids.len;
     }
 
@@ -339,7 +344,7 @@ pub const Engine = struct {
             .hooks = .{ .logits = .all, .logits_out = out },
         };
         try p.chunk(ids, 0, null);
-        try e.stream.synchronize();
+        try e.complete();
         const d = e.stream.d;
         for (seqs, 0..) |q, r| {
             try d.check(d.api.cuMemcpyDtoH_v2(q.logits.ptr, out + r * vocab * 2, vocab * 2), "cuMemcpyDtoH");
