@@ -102,7 +102,7 @@ pub fn check(comptime Tri: type, gpa: std.mem.Allocator, io: std.Io, driver: *cu
     const h = try Head.init(gpa, io, driver, stream, model_dir);
     defer h.deinit();
     const o: Ops(Tri) = .{ .e = e, .tri = tri, .h = h };
-    const depth = envUsize("TF_FLASHNEXT_DRAFTS", max_chain);
+    const depth = envUsize("TF_FLASHNEXT_DRAFTS", mtp.default_depth);
     const confidence = envF64("TF_FLASHNEXT_CONFIDENCE", default_confidence);
     const sm: ?Sampling = if (std.c.getenv("TF_FLASHNEXT_SEED")) |seed| .{
         .seed = std.fmt.parseInt(u64, std.mem.span(seed), 10) catch 0,

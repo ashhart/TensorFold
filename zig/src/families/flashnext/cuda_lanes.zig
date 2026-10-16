@@ -129,7 +129,7 @@ pub fn Namespace(comptime Tri: type) type {
             engine: *prompt.Engine,
             ranks: ?*ranks.Session = null,
             head: ?*mtp.Head = null,
-            depth: usize = mtp.max_chain,
+            depth: usize = mtp.default_depth,
             confidence: f64 = mtp.default_confidence,
             /// A captured Triton set (TENSORFOLD_CUDA_KERNELS) for comparison, else null: our own glue.
             set: ?cuda.aot.Set = null,
@@ -336,7 +336,7 @@ pub fn Namespace(comptime Tri: type) type {
             // the MTP head unless --no-drafts (TF_FLASHNEXT_DRAFTS and _CONFIDENCE: the chain's rule, 6 and 0.60)
             if (o.drafts and (o.tp == 1 or o.rank == 0)) {
                 own.head = try mtp.Head.init(gpa, io, driver, &own.stream, dir);
-                own.depth = @max(1, @min(mtp.max_chain, envUsize("TF_FLASHNEXT_DRAFTS", mtp.max_chain)));
+                own.depth = @max(1, @min(mtp.max_chain, envUsize("TF_FLASHNEXT_DRAFTS", mtp.default_depth)));
                 if (std.c.getenv("TF_FLASHNEXT_CONFIDENCE")) |v| own.confidence = std.fmt.parseFloat(f64, std.mem.span(v)) catch mtp.default_confidence;
             }
             errdefer if (own.head) |h| h.deinit();

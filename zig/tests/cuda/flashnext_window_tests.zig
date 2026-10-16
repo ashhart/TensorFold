@@ -47,7 +47,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
     try session.forward(flash.Tri, tri, &serial, ids.items, .{});
     const base = try session.save(&serial);
     defer session.dropSaved(base);
-    const forced = [_]u32{ 37, 44, 102, 1, 320, 17, 19, 71 };
+    const forced = [_]u32{ 37, 44, 102, 1, 320, 17, 19, 71, 99, 4, 80, 122, 7, 25, 61, 94 };
     const row_bytes = prompt.vocabulary * 2;
     const expected = try gpu.gpa.alloc(u8, forced.len * row_bytes);
     defer gpu.gpa.free(expected);
@@ -61,7 +61,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
     defer draft.deinit();
     const rows = try gpu.gpa.alloc(u8, expected.len);
     defer gpu.gpa.free(rows);
-    for ([_]usize{ 1, 3, 7, 8 }) |keep| {
+    for ([_]usize{ 1, 3, 7, 15, 16 }) |keep| {
         try session.restore(&window, base);
         try session.verify(flash.Tri, tri, &window, &draft, &forced);
         try stream.synchronize();

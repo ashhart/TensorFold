@@ -27,8 +27,10 @@ const HcW = wt.HcW;
 
 pub const Sampling = lanes.sampling.Sampling;
 
-/// Drafts a round at most (Python DEPTH).
-pub const max_chain: usize = 6;
+/// Drafts a verify window can hold beside its pending token.
+pub const max_chain: usize = max_rows - 1;
+/// Preserve the existing recipe unless an explicit depth is selected.
+pub const default_depth: usize = 6;
 /// The live recipe's --mtp-confidence (Python's CONFIDENCE default is 0.7).
 pub const default_confidence: f64 = 0.6;
 /// A verify window's rows at most: the pending token and a chain, or a copied continuation.
@@ -266,4 +268,10 @@ test "a keyed draw over the top-k columns is the draw over every column" {
         try std.testing.expectEqual(try all(gpa, &row, position, s), try drawRow(gpa, &row, null, position, s));
     }
     try std.testing.expectEqual(@as(u32, @intCast(argmaxRow(&row))), try drawRow(gpa, &row, null, 0, null));
+}
+
+test "draft chains fit one verify window while the default stays six" {
+    try std.testing.expectEqual(@as(usize, 16), max_chain + 1);
+    try std.testing.expectEqual(@as(usize, 6), default_depth);
+    try std.testing.expect(default_depth <= max_chain);
 }
