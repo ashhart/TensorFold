@@ -1,7 +1,7 @@
 //! A lesson with thinking on: the model's reasoning to where it restates the question, then a learned recall line.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const chat = @import("chat.zig");
 const prompt = @import("prompt.zig");
 const errors = @import("errors.zig");

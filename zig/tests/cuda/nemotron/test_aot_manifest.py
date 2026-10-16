@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CPU test for the capture's manifest step, no GPU and no model: a fake Triton cache and a launch dump
-go through tools/zig/triton_aot_manifest.py and aot_pack.py, and the kernel set's entry is checked.
-Usage: python3 -B test_aot_manifest.py"""
+go through tools/zig/triton_aot_manifest.py and tools/zig/triton_aot_pack.py, and the kernel set's entries are
+checked. Usage: python3 -B test_aot_manifest.py"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[4]
 MANIFEST = REPO / "tools" / "zig" / "triton_aot_manifest.py"
-PACK = Path(__file__).resolve().parent / "aot_pack.py"
+PACK = REPO / "tools" / "zig" / "triton_aot_pack.py"
 HASH = "b" * 64
 CUBIN = b"FAKE-CUBIN-BYTES"
 MOUNT = "/aot/triton"
@@ -37,8 +37,11 @@ def fake_cache(cache: Path) -> dict:
              for leaf in ("__grp__fake_kernel.json", "fake_kernel.cubin", "fake_kernel.ptx")}
     info = {"name": "fake_kernel", "function": "fakemod.FakeKernel",
             "source": {"file": "tensorfold/families/nemotron_h/cuda/kernels.py", "line": 10},
-            "params": ["p0", "n", "BLOCK"], "signature": {"p0": "*i8", "n": "i32", "BLOCK": "constexpr"},
-            "constexprs": {"BLOCK": 64}, "attrs": {"p0": [["tt.divisibility", 16]]},
+            "params": ["p0", "n", "BLOCK", "SCALE"],
+            "signature": {"p0": "*i8", "n": "i32", "BLOCK": "constexpr", "SCALE": "constexpr"},
+            "constexprs": {"BLOCK": 64, "SCALE": {"float": 0.125, "fp32_bits": "0x3e000000",
+                                                  "fp64_bits": "0x3fc0000000000000"}, "n": 3},
+            "attrs": {"p0": [["tt.divisibility", 16]], "n": [["tt.contiguity", 1]]},
             "metadata": {"num_warps": 4}, "files": files, "n_regs": 24, "n_spills": 0}
     return {"generator": "test", "written_unix": 0, "kernels": {HASH: info},
             "phases": {"startup": {HASH: 3}}, "grids": {HASH: [[128, 1, 1]]},
@@ -70,8 +73,9 @@ def main() -> int:
         assert k["launches"] == {"startup": 3} and k["grids"] == [[128, 1, 1]]
 
         jit = out / "jit.json"
-        jit.write_text(json.dumps({"fakemod.FakeKernel": {"params": ["p0", "n", "BLOCK"],
+        jit.write_text(json.dumps({"fakemod.FakeKernel": {"params": ["p0", "n", "BLOCK", "SCALE"],
                                                           "do_not_specialize": [], "no_align": []}}) + "\n")
+        # the manifest shape, with a cache and a jit file named on the command line
         packed = work / "packed"
         r = subprocess.run([sys.executable, "-B", str(PACK), "--manifest", str(manifest),
                             "--cache", str(cache), "--jit", str(jit), "--out", str(packed)],
@@ -80,13 +84,35 @@ def main() -> int:
             print(r.stdout + r.stderr)
             return 1
         aot = json.loads((packed / "aot.json").read_text())
+        assert aot["generator"] == "tools/zig/triton_aot_pack.py", aot["generator"]
         e = aot["kernels"][0]
-        assert e["fn"] == "fake_kernel" and e["hash"] == HASH and e["num_warps"] == 4, e
+        assert e["fn"] == "fake_kernel" and e["hash"] == HASH and e["name"] == "fake_kernel", e
+        assert e["num_warps"] == 4 and e["num_ctas"] == 1 and e["shared"] == 0, e
         assert e["params"] == [{"name": "p0", "type": "*i8", "div16": True, "nospec": False},
                                {"name": "n", "type": "i32", "div16": False, "nospec": False}], e["params"]
-        assert e["consts"] == {"BLOCK": {"int": 64}}, e["consts"]
+        assert e["consts"] == {"BLOCK": {"int": 64}, "SCALE": {"f32": 0x3E000000}}, e["consts"]
         assert (packed / "cubins" / f"{HASH}.cubin").read_bytes() == CUBIN
-        print("test_aot_manifest: 1 kernel through the manifest and the pack, entry checked")
+
+        # the Recorder dump shape, packed directly with its cubin under another mount
+        dumped = work / "dumped"
+        r = subprocess.run([sys.executable, "-B", str(PACK), "--manifest", str(launches),
+                            "--cache", str(cache), "--out", str(dumped)],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stdout + r.stderr)
+            return 1
+        aot2 = json.loads((dumped / "aot.json").read_text())
+        assert aot2["kernels"] == aot["kernels"], (aot2["kernels"], aot["kernels"])
+
+        # the manifest's own cache, with no jit file: the same set again
+        default = work / "default"
+        r = subprocess.run([sys.executable, "-B", str(PACK), "--manifest", str(manifest), "--out", str(default)],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stdout + r.stderr)
+            return 1
+        assert (default / "aot.json").read_text() == (packed / "aot.json").read_text()
+        print("test_aot_manifest: one kernel through the manifest, the dump and the defaults; entries checked")
         return 0
 
 

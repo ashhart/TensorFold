@@ -97,6 +97,7 @@ pub const Nccl = struct {
         if (n.aborted.load(.acquire)) return error.Aborted;
     }
 
+    /// NCCL adds in its ring's order: the rank-order sum `all_reduce` promises holds at two ranks, not past them.
     pub fn allReduce(ptr: *anyopaque, s: DevicePtr, r: DevicePtr, count: usize, t: DType, op: Op, stream: collective.Stream) Error!void {
         const n = self_(ptr);
         try n.live();

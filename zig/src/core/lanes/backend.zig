@@ -98,6 +98,10 @@ pub const Backend = struct {
         first_masked: ?*const fn (ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 = null,
         /// The stream's held drafts as host tokens in window order, waiting for the draft (a grammar walks them).
         held: ?*const fn (ptr: *anyopaque, s: *Stream, out: []u32) anyerror!void = null,
+        /// `prefill` fills `Stream.prompt_rows` for a stream with `prompt_logprobs` (it then starts from 0).
+        prompt_rows: bool = false,
+        /// The backend stores `Stream.fill_at` as its pass runs: the status reader may count its fill totals.
+        reports_fill: bool = false,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
         /// A prompt in pieces between rounds (`Rounds`) instead of `prefill`: begin, pieces, finish; null: whole only.
