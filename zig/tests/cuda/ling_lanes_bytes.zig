@@ -86,7 +86,76 @@ pub fn engineChecks(c: *Cover, e: *Engine, prompt: []const u32, w: []const u32) 
     try rig.sameSeq(c, e, "9-row window, keep 4, 5-row window == 9 single rows", 10, 11);
     try sharedChecks(c, e, prompt, w);
     if (e.mtp != null) try mtpChain(c, e, prompt, w);
+    try capacityRefusal(c, e, prompt, w);
     for ([_]u32{ 10, 11, 12, 13, 14 }) |s| e.release(s);
+}
+
+/// A sequence's arenas as they stand: the layers' caches and states, the MTP layer's cache.
+fn arenas(c: *Cover, e: *Engine, slot: u32) ![2][]u8 {
+    const q = e.seqs.items[slot].?;
+    const st = &q.st.arena.buf;
+    const hd: []u8 = if (q.hd) |*h| try rig.back(e, c.a, h.arena.buf.ptr, h.arena.buf.len) else &.{};
+    return .{ try rig.back(e, c.a, st.ptr, st.len), hd };
+}
+
+/// Rows past the capacity refused with the arenas unchanged; the next window and a new request then equal twins'.
+fn capacityRefusal(c: *Cover, e: *Engine, prompt: []const u32, w: []const u32) !void {
+    const a = c.a;
+    const cap = e.capacity;
+    const long = try a.alloc(u32, cap + 40);
+    for (long, 0..) |*x, i| x.* = prompt[i % prompt.len];
+    var pend: [2]u32 = undefined;
+    for (0..2) |k| { // twins at cap - 12: a pass of cap - 24 rows, a 12-row window kept whole
+        const t = try pass(e, @intCast(50 + k), long[0 .. cap - 24], 512, null, null);
+        var ids: [12]u32 = undefined;
+        var out: [12]u32 = undefined;
+        ids[0] = t;
+        @memcpy(ids[1..], w[0..11]);
+        try e.verify(&ids, &out);
+        try e.keep(12);
+        pend[k] = out[11];
+    }
+    try e.bind(50);
+    const before = try arenas(c, e, 50);
+    const q = e.seqs.items[50].?;
+    const cur = try a.dupe(u1, q.st.cur);
+    const pos = q.st.pos;
+    var refused: usize = 0;
+    // a prompt chunk of 30 rows (its KDA layers would commit in place), then a 16-row window
+    e.chunk = 512;
+    if (e.prefillChunk(long[0 .. cap + 18], pos, null, null)) |_| {} else |err| refused += @intFromBool(err == error.CacheFull);
+    var ids: [16]u32 = undefined;
+    var out: [16]u32 = undefined;
+    ids[0] = pend[0];
+    @memcpy(ids[1..], w[20..35]);
+    if (e.verify(&ids, &out)) |_| {} else |err| refused += @intFromBool(err == error.CacheFull);
+    var asked: usize = 2;
+    if (e.mtp) |*h| { // one row past the capacity into the MTP layer's cache (its MLA block refuses before writing)
+        asked += 1;
+        const n = cap + 1 - q.hd.?.pos;
+        if (h.absorb(&e.m, e.stream, &e.bp, &q.hd.?, @ptrCast(long[0..n]), e.bp.normed)) |_| {} else |err| refused += @intFromBool(err == error.CacheFull);
+    }
+    const after = try arenas(c, e, 50);
+    const same = std.mem.eql(u8, before[0], after[0]) and std.mem.eql(u8, before[1], after[1]) and
+        std.mem.eql(u1, cur, q.st.cur) and q.st.pos == pos and q.st.pending == 0;
+    try c.expect(refused == asked and same, "{d} of {d} requests past the capacity ({d} at {d}) refused with CacheFull, the arenas ({d} and {d} bytes) and position as they were", .{ refused, asked, cap, pos, before[0].len, before[1].len });
+    // the next window on both twins: tokens, logits, then states
+    var got: [2][4]u32 = undefined;
+    var lo: [2][]u8 = undefined;
+    for (0..2) |k| {
+        try e.bind(@intCast(50 + k));
+        var win: [4]u32 = .{ pend[k], w[40], w[41], w[42] };
+        try e.verify(&win, &got[k]);
+        lo[k] = try logitsRows(e, a, e.bd.logits, 4);
+        try e.keep(4);
+    }
+    try c.expect(std.mem.eql(u32, &got[0], &got[1]) and std.mem.eql(u8, lo[0], lo[1]), "the window after the refusals: tokens and logits == the twin's", .{});
+    try rig.sameSeq(c, e, "after the refusals and a window, the twin", 50, 51);
+    const t50 = try pass(e, 50, prompt, 37, null, null);
+    const t52 = try pass(e, 52, prompt, 37, null, null);
+    try c.expect(t50 == t52, "a new request on the refused slot: first token {d}, on a fresh slot {d}", .{ t50, t52 });
+    try rig.sameSeq(c, e, "a new request on the refused slot == on a fresh slot", 50, 52);
+    for ([_]u32{ 50, 51, 52 }) |s| e.release(s);
 }
 
 /// MTP chains of 3 and of 1 on twins: the same first draft, and after the same windows the chain's rows rolled back.

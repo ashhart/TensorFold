@@ -193,7 +193,7 @@ pub const Cover = struct {
     }
 };
 
-fn back(e: *Engine, a: std.mem.Allocator, ptr: u64, len: usize) ![]u8 {
+pub fn back(e: *Engine, a: std.mem.Allocator, ptr: u64, len: usize) ![]u8 {
     const out = try a.alloc(u8, len);
     try e.stream.synchronize();
     const b: cuda.DeviceBuffer = .{ .d = e.d, .ptr = ptr, .len = len };
