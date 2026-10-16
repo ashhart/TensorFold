@@ -21,8 +21,10 @@ pub const Best = struct {
         self.rig.deinit();
     }
 
+    const vt = g.hooks(Best);
+
     pub fn kernel(self: *Best) g.Kernel {
-        return .{ .spec = ref.spec, .ctx = self, .vt = &g.hooks(Best) };
+        return .{ .spec = ref.spec, .ctx = self, .vt = &vt };
     }
 
     pub fn prepare(self: *Best, shape: c.Shape, fill: g.Fill, seed: u64) !bool {

@@ -55,8 +55,10 @@ pub const Writeback = struct {
         self.rig.deinit();
     }
 
+    const vt = g.hooks(Writeback);
+
     pub fn kernel(self: *Writeback) g.Kernel {
-        return .{ .spec = spec(self.mode), .ctx = self, .vt = &g.hooks(Writeback) };
+        return .{ .spec = spec(self.mode), .ctx = self, .vt = &vt };
     }
 
     pub fn prepare(self: *Writeback, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
@@ -250,4 +252,25 @@ test "the cancellation fixture distinguishes fused update from rounded product" 
     const exact: f64 = @as(f64, h) + @as(f64, branch) * @as(f64, inject);
     try std.testing.expect(fused != old);
     try std.testing.expectEqual(c.toBf16(@floatCast(exact)), fused);
+}
+
+noinline fn reuseRegistrationStack() usize {
+    var scratch: [4096]usize = undefined;
+    const words: *volatile [4096]usize = &scratch;
+    for (0..scratch.len) |i| words[i] = i *% 73;
+    return words[42];
+}
+
+test "registered writeback hooks survive later stack frames" {
+    var first = Writeback{ .rig = undefined, .f = undefined, .mode = .sums, .shape = .{ .rows = 17, .n = 2560, .k = 2 } };
+    var second = Writeback{ .rig = undefined, .f = undefined, .mode = .moe, .shape = .{ .rows = 3, .n = 512, .k = 8 } };
+    const Best = @import("contract_row_best.zig").Best;
+    var best = Best{ .rig = undefined, .f = undefined, .shape = .{ .rows = 4, .n = 4, .k = 31 } };
+    const registered = [_]g.Kernel{ first.kernel(), second.kernel(), best.kernel() };
+    try std.testing.expectEqual(@as(usize, 3066), reuseRegistrationStack());
+    for (registered, [_]usize{ 680, 24, 16 }) |k, expected| {
+        try std.testing.expectEqual(expected, k.vt.count(k.ctx));
+        try std.testing.expect(!try k.vt.prepare(k.ctx, .{ .rows = 0, .n = 256, .k = 1 }, .random, 51));
+        try std.testing.expectEqual(expected, k.vt.count(k.ctx));
+    }
 }
