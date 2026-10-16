@@ -1,5 +1,4 @@
-//! Resizes of 8-bit RGB: Keys' bicubic kernel (a = -0.5), or Pillow's triangle, widened by the shrink factor, a width
-//! pass then a height pass.
+//! Resizes of 8-bit RGB: Keys' cubic (a = -0.5) or Pillow's triangle, widened by the shrink factor, width then height.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -55,7 +54,7 @@ pub fn resizeWith(a: Allocator, kind: Kind, filter: Filter, src: View, w: usize,
     return out;
 }
 
-/// `src` resized to `w` x `h` (bicubic) into `out` (packed rows); a pass whose size is kept is skipped, so equal sizes copy.
+/// `src` resized to `w` x `h` (bicubic) into `out` (packed rows); a pass keeping its size is skipped: equal sizes copy.
 pub fn into(a: Allocator, kind: Kind, src: View, w: usize, h: usize, out: []u8) Allocator.Error!void {
     return intoWith(a, kind, .bicubic, src, w, h, out);
 }

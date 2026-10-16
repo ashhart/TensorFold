@@ -1,5 +1,4 @@
-//! An image's bytes to Step-5's tower inputs as vLLM's Step3-VL processor makes them: crops of 504, then an overview.
-//! Checked against vLLM dd944845777b (vllm/transformers_utils/processors/step3_vl.py), the 728-pixel boundary included.
+//! An image's bytes to Step-5's tower inputs as vLLM dd944845777b's Step3-VL processor makes them: crops, overview.
 const std = @import("std");
 const picture = @import("../../core/picture/picture.zig");
 const resample = picture.resample;

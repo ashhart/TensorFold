@@ -107,8 +107,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
-/// Weights, routers, both scratches and the tower's buffers join one residency set the idle keepalive uses, if the
-/// 70% limit holds them all; otherwise the keepalive ticks the bare queue.
+/// Weights, routers, scratches and tower buffers in one residency set for the keepalive, if the 70% limit holds them.
 fn holdResident(h: *Host) !void {
     var list: std.ArrayList(mtl.Buffer) = .empty;
     defer list.deinit(h.gpa);
