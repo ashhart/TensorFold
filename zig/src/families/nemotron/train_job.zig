@@ -1,6 +1,6 @@
 //! A training pass as one command buffer: its sequences forward through every layer, their losses, back to each change.
 const std = @import("std");
-const train_mode = @import("train_mode.zig");
+const train_mode = @import("living").train_mode;
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 const fwd = @import("forward.zig");
@@ -11,7 +11,7 @@ const back = @import("train_back.zig");
 const tf = @import("train_forward.zig");
 const adapters = @import("adapters.zig");
 const backend = @import("backend.zig");
-const lesson_route = @import("lesson_route.zig");
+const lesson_route = @import("living").lesson_route;
 const train = @import("train.zig");
 const Trainer = train.Trainer;
 const pack_rows = train.pack_rows;

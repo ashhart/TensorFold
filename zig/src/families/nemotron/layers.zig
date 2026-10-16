@@ -6,7 +6,7 @@ const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const kern = @import("kernels.zig");
 const tree = @import("tree.zig");
-const lesson_route = @import("lesson_route.zig");
+const lesson_route = @import("living").lesson_route;
 const max_blocks = @import("learn_shape.zig").max_blocks;
 
 const Buffer = mtl.Buffer;
