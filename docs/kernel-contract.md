@@ -113,8 +113,9 @@ tiles with fp32 out (K slices met in a cluster, fused, or by `reduce_kernel<true
 
 nvcc allocates registers differently from one release to the next, so the CUDA records are kept per release.
 `registry.cuda` holds what nvcc 13.0 compiles, the compiler of the release fatbins. `registry.cuda_sets` lists what
-each later release compiles differently from the release before it: nvcc 13.2 changes five launches (`tf_rms_rows`,
-`lane_gemv` and its split-K form, prompt16's FP8 tile and qmmf's 32-row cluster tile), and nvcc 13.3 keeps 13.2's and
+each later release compiles differently from the release before it: nvcc 13.2 changes eleven launches (`tf_rms_rows`,
+`lane_gemv` and its split-K form, prompt16's FP8 tile, qmmf's FP4 32-row cluster tile, five 64-row fused-slice tiles
+of the MXFP8 and FP32-output paths, and FP8G's 32-row cluster tile with FP32 output), and nvcc 13.3 keeps 13.2's and
 changes `tf_nemo_topk` on sm_120 and sm_121. `kernel-contract` and `kernel-contract-limits` read the release from each
 image's `.note.nv.tkinfo`, check the image against the newest set at or below that release (13.0's when an image names
 none), and print which set they used. A release with no set of its own is checked against the one below it, so its
