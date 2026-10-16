@@ -59,9 +59,14 @@ pub const DraftRequest = struct {
     ranks: bool = false, // also keep each chained level's best tokens (alternatives(), for grafts)
 };
 
+/// A committed first token can be delivered while its stream remains owned by admission.
+pub const Committed = struct { ptr: *anyopaque, call: *const fn (*anyopaque) void };
+
 pub const Backend = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
+    /// Opt-in: drafted admissions may deliver their committed first token before initial drafting.
+    first_before_draft: bool = false,
 
     pub const VTable = struct {
         /// Prefill the stream's prompt into its caches (and its draft head's).

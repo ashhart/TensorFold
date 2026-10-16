@@ -44,7 +44,7 @@ pub const Drafted = struct {
     }
 
     pub fn backend(x: *Drafted) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release } };
+        return .{ .ptr = x, .first_before_draft = x.target.first_before_draft, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release } };
     }
 
     /// The target's facts with the drafter's depth, step cost, prior, plain guard and batching; chains drafted late.

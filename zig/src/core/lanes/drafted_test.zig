@@ -242,7 +242,7 @@ const Strict = struct {
     }
 };
 
-const Mode = enum { plain, wrapped };
+const Mode = enum { plain, wrapped, wrapped_early };
 const Case = struct { prompt: []const u32, max_new: u32 = 40, sampling: ?Sampling = null, drafts: bool = true, restored: u32 = 0 };
 const Out = struct {
     tokens: [][]u32,
@@ -266,12 +266,15 @@ fn run(cases: []const Case, mode: Mode, batched: bool) !Out {
     var head: FakeDrafter = .{ .facts_ = .{ .depth = 6, .step_ms = 0.5, .batched = batched } };
     var strict: Strict = .{ .inner = target.backend() };
     defer strict.deinit();
-    var wrapped = try Drafted.init(gpa, strict.backend(), head.drafter());
+    var target_backend = strict.backend();
+    target_backend.first_before_draft = mode == .wrapped_early;
+    var wrapped = try Drafted.init(gpa, target_backend, head.drafter());
     defer wrapped.deinit();
-    var cfg = try Config.init(gpa, if (mode == .wrapped) wrapped.facts(base()) else base(), 16, 15);
+    try std.testing.expectEqual(mode == .wrapped_early, wrapped.backend().first_before_draft);
+    var cfg = try Config.init(gpa, if (mode != .plain) wrapped.facts(base()) else base(), 16, 15);
     defer cfg.deinit(gpa);
     var clock: fake.FixedClock = .{};
-    var engine = Engine.init(gpa, &cfg, if (mode == .wrapped) wrapped.backend() else target.backend(), clock.clock());
+    var engine = Engine.init(gpa, &cfg, if (mode != .plain) wrapped.backend() else target.backend(), clock.clock());
     defer engine.deinit();
     const streams = try gpa.alloc(sm.Stream, cases.len);
     defer gpa.free(streams);
@@ -503,4 +506,24 @@ test "a copy round after a whole restore does not leave fillers in place of the 
     // the verify read the drafter (not stale fillers) and the target saw its drafts
     try std.testing.expectEqual(@as(u32, 1), head.helds);
     try std.testing.expectEqualSlices(u32, head.lanes.getPtr(&s).?.held.items[0..3], &echo2);
+}
+
+test "committed first crosses the external drafter wrapper without changing sampled or shared decode" {
+    for ([_]?Sampling{ null, sampled }) |sampling| {
+        const cases = [_]Case{
+            .{ .prompt = &p1, .sampling = sampling },
+            .{ .prompt = &p2, .sampling = sampling },
+        };
+        const old = try run(&cases, .wrapped, false);
+        defer freeOut(old);
+        const early = try run(&cases, .wrapped_early, false);
+        defer freeOut(early);
+        for (old.tokens, early.tokens) |want, got| try std.testing.expectEqualSlices(u32, want, got);
+        try std.testing.expectEqual(old.rounds, early.rounds);
+        try std.testing.expectEqual(old.drafted, early.drafted);
+        try std.testing.expectEqual(old.accepted, early.accepted);
+        try std.testing.expectEqual(old.head.rows, early.head.rows);
+        try std.testing.expectEqual(old.head.holds, early.head.holds);
+        try std.testing.expectEqual(@as(u32, cases.len), early.head.releases);
+    }
 }

@@ -244,7 +244,7 @@ const Host = struct {
     /// The family's backend, each call made with the context current on the calling thread.
     fn backend(h: *Host) lanes.backend.Backend {
         h.vtable = lane_backend.vtable(Host, h.inner.vtable.*);
-        return .{ .ptr = h, .vtable = &h.vtable };
+        return .{ .ptr = h, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft };
     }
 };
 
@@ -430,6 +430,9 @@ test "the lane core sees a family's prefill_step through the lane backend, so a 
     var h: Host = undefined;
     h.inner = target.stepped();
     try std.testing.expect(h.backend().vtable.prefill_step != null);
+    try std.testing.expect(!h.backend().first_before_draft);
+    h.inner.first_before_draft = true;
+    try std.testing.expect(h.backend().first_before_draft);
 }
 
 test "chip classes name the compute capability as gate entries do" {
