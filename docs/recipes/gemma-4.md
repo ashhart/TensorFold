@@ -4,7 +4,8 @@ This page describes the Python engine's `gemma4` family, frozen at 0.6.6 and ava
 [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6); the packages, tools and tests it names are at that
 tag. @cshintov wrote the family and its fused one-row kernels in [#10](https://github.com/ashhart/TensorFold/pull/10),
 and @di37 made its `qkv_rows` kernel launch on M1 and M2 in [#224](https://github.com/ashhart/TensorFold/pull/224).
-The native binary serves the dense 31B ([Gemma 4 31B, native Metal](gemma-4-native.md)); it refuses the 26B-A4B.
+The native binary serves the dense 31B ([Gemma 4 31B, native Metal](gemma-4-native.md)) and the 12B
+([Gemma 4 12B, native Metal](gemma-4-12b-native.md)); it refuses the 26B-A4B.
 
 Measured on an M4 Pro with 64 GB (273 GB/s) and MLX 0.31.2, with `mlx-community/gemma-4-26b-a4b-it-4bit`.
 Packages: [`src/tensorfold/families/gemma4/`](https://github.com/ashhart/TensorFold/tree/v0.6.6/src/tensorfold/families/gemma4)
