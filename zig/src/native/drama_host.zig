@@ -383,6 +383,20 @@ fn words(err: anyerror) []const u8 {
     };
 }
 
+/// codec.Model.init run on its own thread (it makes the context current there); `model` is set before the thread ends.
+const CodecInit = struct {
+    gpa: Allocator,
+    io: std.Io,
+    ctx: *cuda.Context,
+    checkpoint_dir: []const u8,
+    kernel_dir: []const u8,
+    model: anyerror!drama.codec.Model = undefined,
+
+    fn run(c: *CodecInit) void {
+        c.model = drama.codec.Model.init(c.gpa, c.io, c.ctx, c.checkpoint_dir, c.kernel_dir, .{ .max_frames = max_frames });
+    }
+};
+
 /// Drama 3 at `checkpoint_dir` with kernels from `kernel_dir`, served on its own worker thread; `close` joins it.
 pub fn open(gpa: Allocator, io: std.Io, checkpoint_dir: []const u8, kernel_dir: []const u8, options: Options) !api.Opened {
     if (options.context < min_context or options.context > max_context) return error.BadDramaContext;
@@ -411,11 +425,20 @@ pub fn open(gpa: Allocator, io: std.Io, checkpoint_dir: []const u8, kernel_dir: 
     errdefer _ = cuda.setAllocationLimit(h.previous_allocation_limit) catch unreachable;
 
     const held0 = cuda.usage(false).device;
+    // The codec builds its weight image on the CPU, on its own thread, while the backbone and tower load.
+    var codec: CodecInit = .{ .gpa = gpa, .io = io, .ctx = &h.ctx, .checkpoint_dir = checkpoint_dir, .kernel_dir = kernel_dir };
+    var codec_thread: ?std.Thread = try std.Thread.spawn(.{}, CodecInit.run, .{&codec});
+    errdefer if (codec_thread) |t| {
+        t.join();
+        if (codec.model) |*m| m.deinit() else |_| {}
+    };
     h.backbone = try drama.backbone.Model.init(gpa, io, &h.ctx, checkpoint_dir, kernel_dir, .{ .context = options.context, .max_rows = chunk_rows });
     errdefer h.backbone.deinit();
     h.tower = try drama.tower.Model.init(gpa, io, &h.ctx, checkpoint_dir, kernel_dir, .{ .context = options.context, .max_rows = chunk_rows });
     errdefer h.tower.deinit();
-    h.codec = try drama.codec.Model.init(gpa, io, &h.ctx, checkpoint_dir, kernel_dir, .{ .max_frames = max_frames });
+    codec_thread.?.join();
+    codec_thread = null;
+    h.codec = try codec.model;
     errdefer h.codec.deinit();
     const model_bytes = cuda.usage(false).device -| held0;
 
