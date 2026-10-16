@@ -18,4 +18,5 @@ test {
     _ = dflash_weights;
     _ = image;
     _ = snapshot;
+    _ = vision;
 }

@@ -21,9 +21,20 @@ const chunk = 256; // query rows an attention pass scores at once
 const eps: f32 = 1e-6;
 const rope_theta: f32 = 100;
 
+const quant_group = 64; // the projection's quantization group, the language model's
+
 pub const Ref = lane.Ref;
 fn ref(t: ck.Tensor) Ref {
     return .{ .buf = t.buffer, .off = t.offset };
+}
+
+/// The 4-bit projection as affine_mm reads it: packed words [5376, 1152 / 8], a bf16 scale and bias per group of 64.
+fn projectionFits(w: ck.Tensor, s: ck.Tensor, b: ck.Tensor) bool {
+    if (w.dtype != .u32 or w.rank != 2 or w.shape[0] != out_hidden or w.shape[1] * 8 != width or w.count() != out_hidden * width / 8) return false;
+    for ([_]ck.Tensor{ s, b }) |t| {
+        if (t.dtype != .bf16 or t.rank != 2 or t.shape[0] != out_hidden or t.shape[1] != width / quant_group or t.count() != out_hidden * width / quant_group) return false;
+    }
+    return true;
 }
 
 const glue_names = [_][:0]const u8{ "g4v_pos", "g4v_rms", "g4v_rms_add", "g4v_qkv", "g4v_softmax", "g4v_heads", "g4v_geglu", "g4v_pool", "g4v_rows" };
@@ -135,9 +146,15 @@ pub const Vision = struct {
                 .down = ref(try t.get(c, p ++ "mlp.down_proj.linear.weight", .{i}, width * mlp_inter)),
             };
         }
-        const pw = try c.get("embed_vision.embedding_projection.weight");
-        if (pw.dtype != .u32 or pw.shape[0] != out_hidden or pw.shape[1] * 8 != width) return error.UnexpectedGemmaVisionTensor;
-        v.proj = .{ .w = ref(pw), .s = ref(try c.get("embed_vision.embedding_projection.scales")), .b = ref(try c.get("embed_vision.embedding_projection.biases")), .n = out_hidden, .k = width };
+        const pp = "embed_vision.embedding_projection.";
+        const pw = try c.get(pp ++ "weight");
+        const ps = try c.get(pp ++ "scales");
+        const pb = try c.get(pp ++ "biases");
+        if (!projectionFits(pw, ps, pb)) {
+            std.log.err("gemma4 vision: {s}* is not u32[{d}, {d}] with bf16[{d}, {d}] scales and biases", .{ pp, out_hidden, width / 8, out_hidden, width / quant_group });
+            return error.UnexpectedGemmaVisionTensor;
+        }
+        v.proj = .{ .w = ref(pw), .s = ref(ps), .b = ref(pb), .n = out_hidden, .k = width };
         const P: usize = max_patches;
         const T: usize = image.max_budget;
         const sizes = [_]usize{ P * width * 2, P * width * 2, P * 3 * width * 2, heads * P * head_dim * 4, heads * P * head_dim * 4, heads * P * head_dim * 4, heads * chunk * P * 4, heads * chunk * head_dim * 4, P * width * 2, P * 2 * mlp_inter * 2, P * mlp_inter * 2, T * width * 2, T * width * 2 };
@@ -296,4 +313,31 @@ fn rope(cs: []u16, sn: []u16, gw: u32, P: u32) void {
         cs[p * head_dim + d] = bf16(@cos(angle));
         sn[p * head_dim + d] = bf16(@sin(angle));
     };
+}
+
+test "the projection is admitted only as packed u32 words with bf16 scales and biases per group of 64" {
+    const T = struct {
+        fn of(dtype: ck.DType, rows: usize, cols: usize) ck.Tensor {
+            var t: ck.Tensor = .{ .buffer = undefined, .offset = 0, .bytes = rows * cols * dtype.size(), .dtype = dtype, .rank = 2 };
+            t.shape[0] = rows;
+            t.shape[1] = cols;
+            return t;
+        }
+    };
+    const words = T.of(.u32, out_hidden, width / 8);
+    const scales = T.of(.bf16, out_hidden, width / quant_group);
+    try std.testing.expect(projectionFits(words, scales, scales));
+    const f32s = T.of(.f32, out_hidden, width / quant_group);
+    try std.testing.expect(!projectionFits(words, f32s, scales));
+    try std.testing.expect(!projectionFits(words, scales, f32s));
+    const group32 = T.of(.bf16, out_hidden, width / 32);
+    try std.testing.expect(!projectionFits(words, group32, group32));
+    var short = scales; // the header's shape, the file's bytes cut short
+    short.bytes -= 2;
+    try std.testing.expect(!projectionFits(words, scales, short));
+    var flat = scales;
+    flat.rank = 1;
+    try std.testing.expect(!projectionFits(words, flat, scales));
+    try std.testing.expect(!projectionFits(T.of(.u32, out_hidden + 1, width / 8), scales, scales));
+    try std.testing.expect(!projectionFits(T.of(.bf16, out_hidden, width / 8), scales, scales));
 }
