@@ -175,6 +175,27 @@ extern "C" __global__ void __launch_bounds__(NT) tf_rms_rows(const void* x, int 
 #undef TF_RMS
 }
 
+// bf16 rows `x_ld` apart: y = bf16(x * rsqrt(mean(x^2) + eps) * w), then xs = the stored y's sums over each `group`.
+extern "C" __global__ void __launch_bounds__(NT) tf_rms_rows_sums(const __nv_bfloat16* __restrict__ x, long long x_ld,
+                                                                  const float* __restrict__ w, __nv_bfloat16* __restrict__ y,
+                                                                  float* __restrict__ xs, int width, int group, float eps) {
+    const int64_t at = static_cast<int64_t>(blockIdx.x) * x_ld, out = static_cast<int64_t>(blockIdx.x) * width;
+    float part = 0.f;
+    for (int i = threadIdx.x; i < width; i += NT) {
+        const float a = __bfloat162float(x[at + i]);
+        part = __fmaf_rn(a, a, part);
+    }
+    const float inv = inv_rms(part, width, eps);
+    for (int i = threadIdx.x; i < width; i += NT)
+        y[out + i] = __float2bfloat16_rn(__fmul_rn(__fmul_rn(__bfloat162float(x[at + i]), inv), w[i]));
+    __syncthreads();
+    for (int j = threadIdx.x; j < width / group; j += NT) {
+        float sum = 0.f;
+        for (int k = 0; k < group; ++k) sum = __fadd_rn(sum, __bfloat162float(y[out + j * group + k]));
+        xs[static_cast<int64_t>(blockIdx.x) * (width / group) + j] = sum;
+    }
+}
+
 // res (fp32, in place) += rms(x) * w1 (a sandwich norm; null: res += x), then y = rms(res) * w2 in y's kind.
 extern "C" __global__ void __launch_bounds__(NT) tf_add_rms_rows(const void* x, int x_kind, float* res, const float* w1,
                                                                  const float* w2, void* y, int y_kind, int width,

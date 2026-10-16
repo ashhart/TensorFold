@@ -346,7 +346,7 @@ pub const Decision = struct {
 };
 
 /// An opened engine; ``close`` stops its thread and frees its backend.
-pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) void, ctx: *anyopaque };
+pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) void, ctx: *anyopaque, follow: ?*const fn (*anyopaque) anyerror!void = null };
 
 pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0, limit: ?u64 = null };
 
