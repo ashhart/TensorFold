@@ -370,7 +370,8 @@ test "a Hugging Face snapshot's shard is checked against its blob name: the righ
         const snap = try tmp.dir.createDirPathOpen(io, try std.fmt.bufPrint(&buf, "{s}/snapshots/r1", .{repo}), .{});
         defer snap.close(io);
         try snap.writeFile(io, .{ .sub_path = "config.json", .data = "{\"hidden_size\": 8}" });
-        try snap.symLink(io, try std.fmt.bufPrint(&buf, "../../blobs/{s}", .{&hexname}), "model.safetensors", .{});
+        snap.symLink(io, try std.fmt.bufPrint(&buf, "../../blobs/{s}", .{&hexname}), "model.safetensors", .{}) catch |e|
+            return if (e == error.PermissionDenied and @import("builtin").os.tag == .windows) error.SkipZigTest else e; // symlinks need privilege on Windows
     }
     const good = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/good/snapshots/r1", .{tmp.sub_path});
     defer gpa.free(good);

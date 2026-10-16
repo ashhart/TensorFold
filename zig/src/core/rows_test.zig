@@ -1,5 +1,6 @@
 //! The rows store's tests: states written behind and read back equal, shared blocks, checks, the cap, budget and floor.
 const std = @import("std");
+const platform = @import("sys");
 const pc = @import("prompt_cache.zig");
 const rows = @import("rows_store.zig");
 const Fake = @import("rows_fake.zig").Fake;
@@ -10,7 +11,7 @@ const Allocator = std.mem.Allocator;
 const rules: pc.Rules = .{ .lookahead = 1, .min_prompt = 0, .min_gap = 1 };
 
 fn root(buf: []u8, tag: []const u8) []const u8 {
-    return std.fmt.bufPrint(buf, "/tmp/tf-rows-{s}-{d}", .{ tag, std.c.getpid() }) catch unreachable;
+    return std.fmt.bufPrint(buf, "/tmp/tf-rows-{s}-{d}", .{ tag, platform.c.getpid() }) catch unreachable;
 }
 
 fn options(dir: []const u8) rows.Options {
@@ -126,10 +127,10 @@ test "a block that fails its check is forgotten with every state naming it, and 
         var it = r.blocks.keyIterator();
         var path: [1200]u8 = undefined;
         const file = try rows.file.path(&path, r.dir, &rows.chain.hex(it.next().?.*), ".blk", false);
-        const fd = std.c.open(file, .{ .ACCMODE = .RDWR }, @as(std.c.mode_t, 0));
+        const fd = platform.c.open(file, .{ .ACCMODE = .RDWR }, @as(platform.c.mode_t, 0));
         try std.testing.expect(fd >= 0);
-        defer _ = std.c.close(fd);
-        try std.testing.expectEqual(@as(isize, 1), std.c.pwrite(fd, "X", 1, 100));
+        defer _ = platform.c.close(fd);
+        try std.testing.expectEqual(@as(isize, 1), platform.c.pwrite(fd, "X", 1, 100));
     }
     var f: Fake = .{ .gpa = gpa };
     const r = try rows.Rows.open(gpa, f.snapshots(), options(dir));
@@ -373,10 +374,10 @@ test "a learn dir that is a regular file is refused, and open frees what it made
     const path = root(&buf, "file");
     var zbuf: [129]u8 = undefined;
     const z = try std.fmt.bufPrintSentinel(&zbuf, "{s}", .{path}, 0);
-    const fd = std.c.open(z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+    const fd = platform.c.open(z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(platform.c.mode_t, 0o600));
     try std.testing.expect(fd >= 0);
-    _ = std.c.close(fd);
-    defer _ = std.c.unlink(z);
+    _ = platform.c.close(fd);
+    defer _ = platform.c.unlink(z);
     var f: Fake = .{ .gpa = gpa };
     try std.testing.expectError(error.RowsDir, rows.Rows.open(gpa, f.snapshots(), options(path)));
 }

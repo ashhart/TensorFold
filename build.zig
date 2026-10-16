@@ -559,7 +559,8 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = helpers })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes })).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fabric })).step);
+    // the fake fabric maps its windows with mmap: the Macs' RDMA, not Windows
+    if (target.result.os.tag != .windows) test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fabric })).step);
     const dashboard = b.createModule(.{ .root_source_file = b.path("zig/src/server/dashboard_test.zig"), .target = target, .optimize = optimize, .link_libc = true });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = dashboard })).step);
     const kimi_test = b.step("test-k3", "Kimi K3's host-side unit tests (no GPU work)");

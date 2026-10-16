@@ -383,9 +383,9 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     defer if (!opened) served.close(gpa);
     const model = cuda.usage(false).device - held0;
     const after = try pool(a, io, &g.ctx, problem) orelse return null;
-    // what a family's Loaded may leave out: no learner, no lone driver
-    const L = @TypeOf(loaded);
-    var room = after.room(model) -| if (@hasField(L, "learn_bytes")) loaded.learn_bytes else 0;
+    const L = @TypeOf(loaded); // a family's Loaded may leave out a learner and a lone driver
+    const learn_bytes: usize = if (@hasField(L, "learn_bytes")) loaded.learn_bytes else 0;
+    var room = after.room(model) -| learn_bytes;
     var low: []const u8 = ""; // names the rank whose room bounds the streams, when it is not this one
     if (@hasField(@TypeOf(loaded), "peer_room")) if (loaded.peer_room) |pr| if (pr.bytes < room) {
         room = pr.bytes;
@@ -413,13 +413,6 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         };
         return null;
     };
-    // a family that pre-allocates its streams' buffers does so now that their count is known
-    if (@hasField(L, "reserve")) {
-        loaded.reserve(loaded.ctx, streams) catch |e| {
-            problem.* = try std.fmt.allocPrint(a, "the native CUDA engine cannot reserve {d} streams' caches at a {d}-token window ({s}): serve fewer with --parallel, or lower --context", .{ streams, window, @errorName(e) });
-            return null;
-        };
-    }
     served.reserve(streams) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the native CUDA engine cannot reserve {d} streams' caches at a {d}-token window ({s}): serve fewer with --parallel, or lower --context", .{ streams, window, @errorName(e) });
         return null;

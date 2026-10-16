@@ -291,7 +291,7 @@ fn resolve(a: std.mem.Allocator, io: Io, dir: []const u8, file: []const u8, root
     };
     for (roots) |r| {
         const root = r orelse continue;
-        if (real.len > root.len and std.mem.startsWith(u8, real, root) and real[root.len] == '/') return real;
+        if (real.len > root.len and std.mem.startsWith(u8, real, root) and std.fs.path.isSep(real[root.len])) return real;
     }
     Why.set(why, "{s}", .{file});
     return error.ShardOutside;

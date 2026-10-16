@@ -10,9 +10,12 @@ pub const Served = struct {
     facts: lanes.Model,
     stream_bytes: usize,
     held: ?*Held = null,
+    /// The family's own per-stream buffers, when its Loaded pre-allocates them.
+    family: ?struct { ctx: *anyopaque, reserve: *const fn (*anyopaque, u32) anyerror!void } = null,
 
-    /// The drafter's own per-stream buffers for `streams`, once the server knows the count.
+    /// The family's and the drafter's per-stream buffers for `streams`, once the server knows the count.
     pub fn reserve(s: *Served, streams: u32) !void {
+        if (s.family) |f| try f.reserve(f.ctx, streams);
         if (s.held) |h| try h.reserve(h.ctx, streams);
     }
 
@@ -31,6 +34,7 @@ const Held = struct { drafted: lanes.drafted.Drafted, ctx: *anyopaque, close: *c
 /// `loaded`'s backend, wrapped with the drafter `o.drafter` names when it does; null with `problem` set on refusal.
 pub fn wrap(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, loaded: anytype, o: api.Open, problem: *[]const u8) !?Served {
     var s: Served = .{ .backend = loaded.backend, .facts = loaded.facts, .stream_bytes = loaded.stream_bytes };
+    if (@hasField(@TypeOf(loaded), "reserve")) s.family = .{ .ctx = loaded.ctx, .reserve = loaded.reserve };
     const dir = o.drafter orelse return s;
     if (!o.drafts) return s;
     if (!@hasDecl(F, "openDrafter")) {

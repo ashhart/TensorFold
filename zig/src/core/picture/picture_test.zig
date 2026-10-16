@@ -36,7 +36,7 @@ fn payload(arena: std.mem.Allocator, url: []const u8) !?[]u8 {
 /// JPEG cases need the pinned library: required when TENSORFOLD_LIBTURBOJPEG names one, skipped when none loads.
 fn jpegReady(a: std.mem.Allocator) !bool {
     if (picture.jpeg.available(std.testing.io, a)) return true;
-    if (std.testing.environ.getPosix(picture.jpeg.env) != null) return error.PinnedLibraryDidNotLoad;
+    if (@import("sys").getenv(picture.jpeg.env) != null) return error.PinnedLibraryDidNotLoad;
     std.debug.print("libjpeg-turbo {s} not found: JPEG pixel cases skipped\n", .{picture.jpeg.pinned});
     return false;
 }

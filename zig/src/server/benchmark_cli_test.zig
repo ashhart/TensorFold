@@ -1,5 +1,6 @@
 //! The command end to end against fakes: attached run, consent, login, publish, cancel and the checks.
 const std = @import("std");
+const platform = @import("sys");
 const json = @import("json");
 const suite = @import("benchmark_suite.zig");
 const receipt = @import("benchmark_receipt.zig");
@@ -495,9 +496,9 @@ test "the hidden login prompt reads with echo off and a guarded terminal, then r
     const f = try world(a, false, "202 Accepted");
     defer f.stop();
     var fds: [2]std.posix.fd_t = undefined;
-    if (std.c.pipe(&fds) != 0) return error.SkipZigTest;
+    if (platform.c.pipe(&fds) != 0) return error.SkipZigTest;
     defer for (fds) |fd| {
-        _ = std.c.close(fd);
+        _ = platform.c.close(fd);
     };
     var buf: [256]u8 = undefined;
     var piped = (std.Io.File{ .handle = fds[0], .flags = .{ .nonblocking = false } }).readerStreaming(std.testing.io, &buf);
@@ -515,7 +516,7 @@ test "the hidden login prompt reads with echo off and a guarded terminal, then r
                 t.quiet = if (std.posix.tcgetattr(t.term)) |now| !now.lflag.ECHO else |_| false;
                 if (t.quiet) t.guarded = stop.guardedTerminal() else fake.nap(2);
             }
-            _ = std.c.write(t.pipe, token ++ "\n", token.len + 1);
+            _ = platform.c.write(t.pipe, token ++ "\n", token.len + 1);
         }
     };
     var typist: Typist = .{ .term = pty.term, .pipe = fds[1] };

@@ -1,5 +1,6 @@
 //! The recorder in front of the fake target: replies unchanged, and each stream's files hold its committed rows.
 const std = @import("std");
+const platform = @import("sys");
 const Config = @import("config.zig").Config;
 const Model = @import("config.zig").Model;
 const Cost = @import("config.zig").Cost;
@@ -69,7 +70,7 @@ fn run(cases: []const Case, mode: Mode, record: bool) ![][]u32 {
     var recorder = try rec.Recorder.init(gpa, io, dir, &.{ 30, 31 });
     recorder.floor = 0;
     defer recorder.deinit();
-    if (mode.planted) |p| try recorder.space.symLink(io, p[0], p[1], .{});
+    if (mode.planted) |p| recorder.space.symLink(io, p[0], p[1], .{}) catch |e| return if (e == error.PermissionDenied and @import("builtin").os.tag == .windows) error.SkipZigTest else e; // symlinks need privilege on Windows
     const inner = if (mode.chunks > 0) target.stepped() else target.backend();
     var recorded = try rec.Recorded.init(inner, &recorder);
     var clock: fake.FixedClock = .{};
@@ -193,10 +194,11 @@ test "each recorder makes its own new folder: two in one folder, and a link wher
     defer away.cleanup();
     var buf: [64]u8 = undefined;
     const dir = try std.fmt.bufPrintSentinel(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
-    const first = try std.fmt.allocPrint(gpa, "{d}-0", .{std.c.getpid()});
+    const first = try std.fmt.allocPrint(gpa, "{d}-0", .{platform.c.getpid()});
     defer gpa.free(first);
     var abuf: [64]u8 = undefined;
-    try tmp.dir.symLink(io, try std.fmt.bufPrint(&abuf, "../{s}", .{away.sub_path}), first, .{ .is_directory = true });
+    tmp.dir.symLink(io, try std.fmt.bufPrint(&abuf, "../{s}", .{away.sub_path}), first, .{ .is_directory = true }) catch |e|
+        return if (e == error.PermissionDenied and @import("builtin").os.tag == .windows) error.SkipZigTest else e; // symlinks need privilege on Windows
     var one = try rec.Recorder.init(gpa, io, dir, &.{1});
     defer one.deinit();
     var two = try rec.Recorder.init(gpa, io, dir, &.{1});
@@ -219,13 +221,13 @@ test "a recorder that finds every name taken gives up once, owning its name" {
     const dir = try std.fmt.bufPrintSentinel(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
     for (0..3) |k| {
         var nbuf: [32]u8 = undefined;
-        try tmp.dir.createDir(io, try std.fmt.bufPrint(&nbuf, "{d}-{d}", .{ std.c.getpid(), k }), .default_dir);
+        try tmp.dir.createDir(io, try std.fmt.bufPrint(&nbuf, "{d}-{d}", .{ platform.c.getpid(), k }), .default_dir);
     }
     try std.testing.expectError(error.PathAlreadyExists, rec.Recorder.initTries(gpa, io, dir, &.{1}, 3));
     var r = try rec.Recorder.initTries(gpa, io, dir, &.{1}, 4);
     defer r.deinit();
     var nbuf: [32]u8 = undefined;
-    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&nbuf, "{d}-3", .{std.c.getpid()}), r.name);
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&nbuf, "{d}-3", .{platform.c.getpid()}), r.name);
 }
 
 test "a stream's files are only ever new ones: links planted in the recorder's folder are not written through" {

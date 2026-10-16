@@ -1,7 +1,7 @@
 //! The ranks' TCP link: rank 0 listens, the others connect once, every rank's hello is checked, then rank 0 commands.
 
 const std = @import("std");
-const posix = std.posix;
+const posix = @import("sys").posix;
 const rccl = @import("rccl.zig");
 const agree_ = @import("../agree.zig");
 const Policy = @import("../policy.zig").Policy;

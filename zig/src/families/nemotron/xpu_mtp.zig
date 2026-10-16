@@ -1,5 +1,6 @@
 //! Nemotron-H's own MTP head as a speculative drafter: eh_proj, attention (own KV), MoE, norm, lm_head; equals greedy.
 const std = @import("std");
+const platform = @import("sys");
 const rt = @import("xpu").rt;
 const ld = @import("xpu").loader;
 const model = @import("xpu_model.zig");
@@ -23,8 +24,8 @@ fn run(k: *rt.Kernel, groups: [3]u32, a: anytype) !void {
 pub const Stats = struct { windows: u64 = 0, plain: u64 = 0, drafted: u64 = 0, accepted: u64 = 0, tokens: u64 = 0, win_ns: u64 = 0, mtp_ns: u64 = 0, steps: u64 = 0, absorbs: u64 = 0 };
 
 fn nowNs() u64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    var ts: platform.c.timespec = undefined;
+    _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 

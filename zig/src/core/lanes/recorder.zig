@@ -1,5 +1,6 @@
 //! Drafter training data from serving: each committed row's token, position and tapped features, files per stream.
 const std = @import("std");
+const platform = @import("sys");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const be = @import("backend.zig");
@@ -44,7 +45,7 @@ pub const Recorder = struct {
         defer root.close(io);
         var k: u32 = 0;
         while (true) : (k += 1) {
-            const name = try std.fmt.allocPrint(gpa, "{d}-{d}", .{ std.c.getpid(), k });
+            const name = try std.fmt.allocPrint(gpa, "{d}-{d}", .{ platform.c.getpid(), k });
             errdefer gpa.free(name);
             root.createDir(io, name, .default_dir) catch |e| switch (e) {
                 error.PathAlreadyExists => {
