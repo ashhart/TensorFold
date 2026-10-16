@@ -34,22 +34,23 @@ pub fn prepare(self: *H3, s: c.Shape, fill: g.Fill, rng: std.Random) !bool {
     const stress = fill == .stress;
     self.in = .{ .rows = s.rows, .n = s.n, .k = s.k, .heads = heads, .slots = slots };
     switch (self.which) {
-        .rows_in, .rows_out => {
+        .rows_in, .rows_out, .modulation => {
             const lo: f64 = if (stress) -6 else -1;
             const xr = s.rows;
-            const half = self.which == .rows_out;
+            const half = self.which != .rows_in;
+            if (self.which == .modulation and s.n % 18 != 0) return false;
             const x = try self.values(xr * s.k, lo, -lo, fill, rng, half, true);
-            const w = try self.values(s.n * s.k, lo, -lo, fill, rng, false, false);
+            const w = try self.values(s.n * s.k, lo, -lo, fill, rng, self.which == .modulation, false);
             if (stress) mirror(x, w, s.k, xr, s.n);
-            const b = try self.values(s.n, -0.5, 0.5, if (stress) .random else fill, rng, false, false);
+            const b = try self.values(s.n, -0.5, 0.5, if (stress) .random else fill, rng, self.which == .modulation, false);
             if (stress) @memset(b, 0);
             self.in.a = x;
             self.in.b = w;
             self.in.d = b;
             try self.upload(x, half);
-            try self.upload(w, false);
-            try self.upload(b, false);
-            try self.output(s.rows * s.n * @as(usize, if (half) 4 else 2));
+            try self.upload(w, self.which == .modulation);
+            try self.upload(b, self.which == .modulation);
+            try self.output(s.rows * s.n * @as(usize, if (self.which == .rows_out) 4 else 2));
         },
         .norm, .final_norm, .gate_add => {
             const C = s.n;
@@ -209,7 +210,7 @@ pub fn prepare(self: *H3, s: c.Shape, fill: g.Fill, rng: std.Random) !bool {
         },
     }
     self.outs = switch (self.which) {
-        .rows_in, .rows_out, .swiglu => s.rows * s.n,
+        .rows_in, .rows_out, .swiglu, .modulation => s.rows * s.n,
         .norm => 2 * s.rows * s.n,
         .final_norm, .gate_add, .gate_mix => s.rows * s.n,
         .heads => 3 * heads * slots * 128,
@@ -230,11 +231,14 @@ pub fn launch(self: *H3, e: mtl.ComputeEncoder) !void {
     const eps = [1]f32{1e-5};
     e.setPipeline(self.pipe);
     switch (self.which) {
-        .rows_in, .rows_out => {
+        .rows_in, .rows_out, .modulation => {
             for (0..3) |i| bind(self, e, i, i);
             e.setValue([4]i32{ @intCast(s.rows), @intCast(s.k), @intCast(s.n), 0 }, 3);
             bind(self, e, 3, 4);
-            if (self.which == .rows_in) e.dispatchThreads(mtl.Size.of(s.n, s.rows, 1), mtl.Size.of(64, 16, 1)) else e.dispatchGroups(mtl.Size.of(s.n, s.rows, 1), mtl.Size.of(32, 1, 1));
+            if (self.which == .modulation) {
+                e.setValue([6]i32{ @intCast(s.rows), @intCast(s.k), @intCast(s.n), 3, 6, @intCast(s.n / 18) }, 3);
+                e.dispatchGroups(mtl.Size.of((s.n + 7) / 8, 1, 1), mtl.Size.of(256, 1, 1));
+            } else if (self.which == .rows_in) e.dispatchThreads(mtl.Size.of(s.n, s.rows, 1), mtl.Size.of(64, 16, 1)) else e.dispatchGroups(mtl.Size.of(s.n, s.rows, 1), mtl.Size.of(32, 1, 1));
         },
         .norm => {
             // X (in place), Y, W, the gate table, the tables, LINE; then the normed rows

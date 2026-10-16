@@ -6,6 +6,8 @@ const sources = @import("kernel_sources");
 const tensors = @import("tensors.zig");
 const kernels = @import("h3_kernels");
 const block = @import("block.zig");
+pub const modulation = @import("modulation.zig");
+pub const schedule = @import("schedule.zig");
 
 pub const Tensors = tensors.Tensors;
 pub const Ref = tensors.Ref;

@@ -264,3 +264,16 @@ pub fn gated(in: In, mix: bool, want: []f64, mag: []f64) void {
         mag[o] = @abs(in.a[o]) + @abs(add);
     };
 }
+
+/// h3_modulation: Y = X W^T + B per timestep row, n = (group of 3, part of 6, c) written at (part, row 3 + group, c).
+pub fn modulation(in: In, s: Sum, scratch: []f64, want: []f64, mag: []f64) void {
+    const C = in.n / 18;
+    const L = in.rows * 3;
+    for (0..in.rows) |r| for (0..in.n) |n| {
+        const t = scratch[0..in.k];
+        for (t, 0..) |*v, k| v.* = in.a[r * in.k + k] * in.b[n * in.k + k];
+        const o = ((n / C) % 6 * L + r * 3 + n / (6 * C)) * C + n % C;
+        want[o] = s.of(t) + in.d[n];
+        mag[o] = absSum(t) + @abs(in.d[n]);
+    };
+}

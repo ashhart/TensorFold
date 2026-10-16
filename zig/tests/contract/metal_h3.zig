@@ -9,7 +9,7 @@ const ref = @import("metal_h3_ref.zig");
 const c = contract.spec;
 const g = contract.gates;
 
-pub const Which = enum { rows_in, rows_out, norm, final_norm, gate_add, gate_mix, swiglu, heads, pool, tile_scores, coarse, attention };
+pub const Which = enum { rows_in, rows_out, norm, final_norm, gate_add, gate_mix, swiglu, heads, pool, tile_scores, coarse, attention, modulation };
 
 /// The geometry the test kernels are compiled for: two heads, up to 16 tiles of 64 slots.
 const heads = 2;
@@ -58,6 +58,7 @@ pub fn spec(w: Which) c.Spec {
         .pool => .{ .name = "metal h3 tile means h3_pool", .accum = .f32, .depth = poolChain, .ops = 1, .out = .f32, .served = &.{.{ .rows = tiles, .n = 128, .k = 64 }}, .sums = .{ .bf16 = 0, .f16 = 0, .exact = false, .why = "a mean of at most 64 bf16 values: no sum reaches past fp16's range" } },
         .tile_scores => .{ .name = "metal h3 tile scores h3_tile_scores", .accum = .f32, .depth = kChain, .ops = 1, .out = .f32, .served = &.{.{ .rows = tiles, .n = tiles, .k = 128 }} },
         .coarse => .{ .name = "metal h3 pooled branch h3_coarse", .accum = .f32, .depth = tileChain, .ops = 6, .out = .f32, .tiles = .{ .{ .size = 4 }, .{}, .{} }, .served = &.{.{ .rows = tiles, .n = 128, .k = tiles }}, .sums = .{ .bf16 = 0, .f16 = 0, .exact = false, .why = soft_why } },
+        .modulation => .{ .name = "metal h3 AdaLN tables h3_modulation", .accum = .f32, .depth = laneChain, .ops = 1, .out = .bf16, .tiles = .{ .{}, .{ .size = 18 * 32, .step = 18, .min = 18 }, .{ .size = 32 } }, .served = &.{ .{ .rows = 16, .n = 18 * 64, .k = 2688 }, .{ .rows = 3, .n = 18 * 16, .k = 2688 } } },
         .attention => .{ .name = "metal h3 routed attention h3_attention", .accum = .f32, .depth = attnChain, .ops = 8, .mids = 1, .out = .bf16, .tiles = .{ .{}, .{}, .{ .size = 256, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = tiles, .n = 128, .k = tiles * 64 }, .{ .rows = tiles, .n = 128, .k = 6 * 64 } }, .sums = .{ .bf16 = 0, .f16 = 0, .exact = false, .why = soft_why } },
     };
 }
@@ -77,6 +78,7 @@ fn function(w: Which) []const u8 {
         .tile_scores => "h3_tile_scores",
         .coarse => "h3_coarse",
         .attention => "h3_attention",
+        .modulation => "h3_modulation",
     };
 }
 
@@ -196,6 +198,7 @@ pub const H3 = struct {
             .tile_scores => ref.scores(self.in, s, scratch, want, mag),
             .coarse => ref.coarse(self.in, s, scratch, want, mag),
             .attention => ref.attention(self.in, s, scratch, want, mag),
+            .modulation => ref.modulation(self.in, s, scratch, want, mag),
         }
     }
 

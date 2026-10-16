@@ -151,3 +151,28 @@ inline float h3_mod(float x, float inv, float w, float scale, float shift) {
   sum = simd_sum(sum);
   if (lane == 0) Y[long(tg.y) * N + tg.x] = sum + B[tg.x];
 }
+
+// AdaLN tables: Y = X W^T + B, n = (group, part, c) written at (part, t G + group, c). Threadgroups [N / 8] of 256.
+[[kernel]] void h3_modulation(
+  const device bfloat* X [[buffer(0)]],
+  const device bfloat* W [[buffer(1)]],
+  const device bfloat* B [[buffer(2)]],
+  const constant int32_t* P [[buffer(3)]],
+  device bfloat* Y [[buffer(4)]],
+  uint sg [[simdgroup_index_in_threadgroup]],
+  uint lane [[thread_index_in_simdgroup]],
+  uint3 tg [[threadgroup_position_in_grid]]) {
+  const int T = P[0], K = P[1], N = P[2], G = P[3], PARTS = P[4], C = P[5];
+  const int n = int(tg.x) * 8 + int(sg);
+  if (n >= N) return;
+  const device bfloat* w = W + long(n) * K;
+  const int group = n / (PARTS * C), part = (n / C) % PARTS, c = n % C;
+  const long L = long(T) * G;
+  for (int t = 0; t < T; t++) {
+    const device bfloat* x = X + long(t) * K;
+    float sum = 0.0f;
+    for (int k = int(lane); k < K; k += 32) sum += float(x[k]) * float(w[k]);
+    sum = simd_sum(sum);
+    if (lane == 0) Y[(long(part) * L + long(t) * G + group) * C + c] = bfloat(sum + float(B[n]));
+  }
+}

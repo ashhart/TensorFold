@@ -49,7 +49,7 @@ fn advance(x: []f32, velocity: []const f32, seen: f32, ratio: f32) void {
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 5 and args.len != 6) {
-        std.debug.print("usage: tf-h3-dit transformer_dir shards case.safetensors out_prefix [dense | profile | DEFINE, ...]\n", .{});
+        std.debug.print("usage: tf-h3-dit transformer_dir shards case.safetensors out_prefix [dense | profile | tables | steps=N | from=K | DEFINE, ...]\n", .{});
         return error.BadArguments;
     }
     const gpa = init.gpa;
@@ -57,16 +57,24 @@ pub fn main(init: std.process.Init) !void {
     var case = try h3.Tensors.open(gpa, device, args[3]);
     defer case.deinit();
     const loading = mtl.clock.seconds();
-    // The optional last argument: dense, profile, or a define for the kernels.
+    // Last: dense, profile, tables, steps=N (both made here), from=K (the case holds step K's rows), a define.
     var options = h3.Options{};
     var defines: [256]u8 = undefined;
     var used: usize = 0;
     var dense = false;
     var profile = false;
+    var native = false;
+    var count: usize = 0;
+    var from: usize = 0;
     if (args.len == 6) {
         var it = std.mem.splitScalar(u8, args[5], ',');
         while (it.next()) |word| {
-            if (std.mem.eql(u8, word, "dense")) dense = true else if (std.mem.eql(u8, word, "profile")) profile = true else {
+            if (std.mem.eql(u8, word, "dense")) dense = true else if (std.mem.eql(u8, word, "profile")) profile = true else if (std.mem.eql(u8, word, "tables")) native = true else if (std.mem.startsWith(u8, word, "steps=")) {
+                native = true;
+                count = try std.fmt.parseInt(usize, word[6..], 10);
+            } else if (std.mem.startsWith(u8, word, "from=")) {
+                from = try std.fmt.parseInt(usize, word[5..], 10);
+            } else {
                 const text = try std.fmt.bufPrint(defines[used..], "#define {s}\n", .{word});
                 used += text.len;
             }
@@ -75,7 +83,7 @@ pub fn main(init: std.process.Init) !void {
     options.defines = defines[0..used];
     const model = try h3.Model.load(gpa, args[1], try std.fmt.parseInt(usize, args[2], 10), &case, options);
     model.dense = dense;
-    const steps = (case.names.get("video_step") orelse return error.MissingTensor).shape[0];
+    var steps = (case.names.get("video_step") orelse return error.MissingTensor).shape[0];
     const nv = model.video * model.video_in;
     const na = model.audio * model.audio_in;
     const video = try case.copy(f32, gpa, try case.at("video", .f32, nv), nv);
@@ -84,17 +92,23 @@ pub fn main(init: std.process.Init) !void {
     const audio_start = try case.copy(f32, gpa, try case.at("audio", .f32, na), na);
     const expect_video = try case.copy(f32, gpa, try case.at("video_velocity", .f32, nv), nv);
     const expect_audio = try case.copy(f32, gpa, try case.at("audio_velocity", .f32, na), na);
-    const video_step = try case.copy(f32, gpa, try case.at("video_step", .f32, 2 * steps), 2 * steps);
-    const audio_step = try case.copy(f32, gpa, try case.at("audio_step", .f32, 2 * steps), 2 * steps);
+    var video_step = try case.copy(f32, gpa, try case.at("video_step", .f32, 2 * steps), 2 * steps);
+    var audio_step = try case.copy(f32, gpa, try case.at("audio_step", .f32, 2 * steps), 2 * steps);
+    if (native) {
+        const made = try @import("h3_steps.zig").reschedule(init, model, &case, args[1], if (count == 0) steps else count);
+        steps = made.video.len / 2;
+        video_step = made.video;
+        audio_step = made.audio;
+    }
     std.debug.print("{s}: {d} rows (text {d}, keyframe {d}, audio {d}, video {d}), {d} tiles ({d} prefix, {d} video kept a query), {d} blocks of {d}/{d}/{d}, {d} steps, loaded in {d:.1} s\n", .{ device.name(), model.rows, model.text, model.condition, model.audio, model.video, model.tiles, model.prefix_tiles, model.keep, model.blocks.len, model.hidden, model.inner, model.mlp, steps, mtl.clock.seconds() - loading });
 
     const vv = try gpa.alloc(f32, nv);
     const av = try gpa.alloc(f32, na);
     // a knock-out or a probe only wants the profile
     const quick = args.len == 6 and (std.mem.indexOf(u8, args[5], "H3_KO") != null or std.mem.indexOf(u8, args[5], "H3_PROBE") != null);
-    for (0..if (quick) 0 else steps) |step| {
+    for (from..if (quick) from else steps) |step| {
         const took = try model.forward(video, audio, step, vv, av);
-        if (step == 0) {
+        if (step == from) {
             const m = match(vv, expect_video, model.video_in);
             const n = match(av, expect_audio, model.audio_in);
             std.debug.print("first video velocity against the reference: cosine {d:.6}, relative error {d:.5}, worst row {d:.5}\n", .{ m.cosine, m.relative, m.worst_row });
