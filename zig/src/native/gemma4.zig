@@ -6,6 +6,7 @@ const tf = @import("tensorfold");
 const g = tf.gemma4;
 const lanes = tf.lanes;
 const cache_fit = @import("cache_fit.zig");
+const Resident = @import("resident.zig").Resident;
 
 /// The context a stream gets without --context: attention's per-call scratch grows with it (pass --context for more).
 const default_context = 32768;
@@ -19,7 +20,8 @@ const Host = struct {
     metal: *g.backend.Metal,
     draft: ?*g.dflash.Drafter = null,
     wrap: ?lanes.drafted.Drafted = null,
-    warm: mtl.keepalive.Target = undefined, // the model's queue, for the lane host's idle ticker
+    warm: mtl.keepalive.Target = undefined, // the residency set's queue, for the lane host's idle ticker
+    resident: ?Resident = null, // weights, scratches, the drafter's and the tower's buffers, kept wired between requests
     config: lanes.Config,
     clock: lanes.backend.WallClock,
     core: lanes.Engine,
@@ -36,6 +38,7 @@ const Host = struct {
         if (h.wrap) |*w| w.deinit();
         if (h.draft) |d| d.deinit();
         h.config.deinit(h.gpa);
+        if (h.resident) |*r| r.deinit();
         h.metal.deinit();
         h.model.deinit();
         h.gpa.destroy(h);
@@ -81,6 +84,7 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     try h.metal.measure(); // the depth rule prices drafts against the window forward's cost by rows
     h.draft = null;
     h.wrap = null;
+    h.resident = null;
     if (if (o.drafts) o.drafter else null) |dir| {
         h.draft = g.dflash.Drafter.init(gpa, io, model, dir, .{ .capacity = @intCast(window) }) catch |err| {
             problem.* = try std.fmt.allocPrint(a, "the native Gemma 4 drafter cannot load {s} ({s}): it takes z-lab/gemma-4-31B-it-DFlash", .{ dir, @errorName(err) });
@@ -101,11 +105,44 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     h.cache = null;
     try enableCache(h, a, o, @intCast(window), problem);
     errdefer if (h.cache) |*store| store.deinit();
-    h.warm = .{ .queue = h.metal.model.queue };
+    try holdResident(h);
+    errdefer h.resident.?.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start(); // the host's lists are empty until its thread runs, so a failed start leaves nothing to free
     std.log.info("gemma4: the dense 31B, context {d} tokens, {d} streams{s}{s}", .{ window, @max(o.lanes, 2), if (h.draft != null) ", DFlash drafts" else "", if (vis != null) ", images" else "" });
     return h;
+}
+
+/// The buffers that outlive a request, in one set the idle keepalive holds wired (a stream's caches come and go).
+fn holdResident(h: *Host) !void {
+    var list: std.ArrayList(mtl.Buffer) = .empty;
+    defer list.deinit(h.gpa);
+    const m = h.model;
+    for (m.checkpoint.shards.items) |sh| try list.append(h.gpa, sh.buffer); // the weights, the tower's among them
+    try list.appendSlice(h.gpa, m.weights.owned.items);
+    try list.appendSlice(h.gpa, &.{ m.inv_sliding, m.inv_global });
+    try buffersOf(h.gpa, &list, &h.metal.scratch);
+    try buffersOf(h.gpa, &list, &h.metal.prompt_scratch);
+    if (h.draft) |d| {
+        try list.appendSlice(h.gpa, d.w.owned.items);
+        try buffersOf(h.gpa, &list, d);
+    }
+    if (m.vision) |v| try list.appendSlice(h.gpa, &.{ v.scratch, v.patches, v.cos, v.sin });
+    h.resident = try Resident.init(m.device, m.queue, list.items);
+    h.warm = (&h.resident.?).target();
+}
+
+/// `x`'s buffer fields, plain, optional or in arrays: a scratch's or the drafter's working buffers.
+fn buffersOf(gpa: std.mem.Allocator, list: *std.ArrayList(mtl.Buffer), x: anytype) !void {
+    const info = @typeInfo(@TypeOf(x.*)).@"struct";
+    inline for (info.field_names, info.field_types) |name, T| {
+        const v = @field(x.*, name);
+        switch (@typeInfo(T)) {
+            .array => |a| if (a.child == mtl.Buffer) try list.appendSlice(gpa, &v),
+            .optional => |o| if (o.child == mtl.Buffer) if (v) |b| try list.append(gpa, b),
+            else => if (T == mtl.Buffer) try list.append(gpa, v),
+        }
+    }
 }
 
 /// The prompt cache's copies of a stream: the target's caches at a mark (backend.zig), and the drafter's context there.
