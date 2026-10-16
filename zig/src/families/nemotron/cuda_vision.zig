@@ -7,7 +7,7 @@ const radio = @import("radio");
 pub const video = radio.video;
 
 /// What a request may hold: image tokens in all (the rows buffer), and images.
-pub const Limits = struct { image_tokens: u32, max_images: u32 };
+pub const Limits = struct { image_tokens: u32, max_images: u32, video_tokens: u32 = 0 };
 
 pub const Vision = struct {
     gpa: std.mem.Allocator,
@@ -37,7 +37,9 @@ pub const Vision = struct {
         };
         var tower = try radio.Tower.init(gpa, io, d, dir, cfg);
         errdefer tower.deinit();
-        var rows = try radio.Rows.init(d, limits.image_tokens, cfg.text_hidden);
+        // a request's images and videos are budgeted apart but planned together: the rows hold both budgets
+        const capacity = limits.image_tokens +| (if (cfg.video_temporal > 0) limits.video_tokens else 0);
+        var rows = try radio.Rows.init(d, capacity, cfg.text_hidden);
         errdefer rows.deinit();
         const v = try gpa.create(Vision);
         v.* = .{ .gpa = gpa, .io = io, .cfg = cfg, .tower = tower, .rows = rows, .marks = marks, .limits = limits, .mark_ids = marks.markers() };

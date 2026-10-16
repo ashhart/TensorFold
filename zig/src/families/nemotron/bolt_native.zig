@@ -462,6 +462,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
             return error.VisionRefused;
         };
         tower.?.limits.image_tokens = lim.image_tokens;
+        tower.?.limits.video_tokens = lim.video_tokens;
     }
     errdefer if (tower) |v| v.deinit();
     var stream: ?cuda.Stream = if (tower != null) try cuda.Stream.init(ctx.d, false) else null;

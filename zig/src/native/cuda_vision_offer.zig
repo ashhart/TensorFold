@@ -26,7 +26,7 @@ pub fn offer(v: ?*Vision, open: ?api.VisionOpen) ?api.Vision {
             .group_open = x.marks.open,
             .group_close = x.marks.close,
             .markers = &x.mark_ids,
-            .video_tokens = o.video_tokens,
+            .video_tokens = @min(o.video_tokens, x.limits.video_tokens),
             .max_videos = o.max_videos,
             .max_frames = o.max_frames,
         };

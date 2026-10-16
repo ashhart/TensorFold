@@ -150,7 +150,7 @@ const Flat = struct {
     fn decode(_: *anyopaque, indices: []const u32, sink: Sink) anyerror!void {
         var px: [64 * 48 * 3]u8 = undefined;
         for (indices, 0..) |idx, k| {
-            @memset(&px, @intCast(10 * idx));
+            @memset(&px, @truncate(10 *% idx));
             try sink.take(sink.ctx, k, &px, 64, 48, 64 * 3);
         }
     }
@@ -185,4 +185,21 @@ test "frames pair into tubelets: patches side by side, a lone last frame twice, 
     try std.testing.expectEqual(@as(f64, 1.0), p.times[1] - p.times[0]); // a pair is a second at 2 frames a second
     // a token budget under one group's rows refuses the video
     try std.testing.expectError(error.VideoTooLarge, prepare(a, &c, src, p.groups[0].tokens - 1, 256));
+}
+
+test "a video never holds more visual tokens than it was given, so images plus videos fit their two budgets" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c: Config = .{ .hidden = 1280, .layers = 32, .heads = 16, .ffn = 5120, .eps = 1e-6, .patch = 16, .prefix = 10, .side = 128, .projector_hidden = 20480, .text_hidden = 4096, .final_norm = false, .mean = .{ 0.5, 0.5, 0.5 }, .std = .{ 0.25, 0.25, 0.25 }, .min_patches = 1024, .max_patches = 13312, .max_model_len = 16384, .image_token = 18, .video_temporal = 2 };
+    var dummy: u8 = 0;
+    // 64 seconds at 2 samples a second: 64 groups of 252 rows, more than the smaller budgets hold
+    const src: Source = .{ .frames = 64 * 30, .rate_num = 30, .rate_den = 1, .width = 64, .height = 48, .ctx = &dummy, .decode = Flat.decode };
+    for ([_]u32{ 16384, 5000, 600 }) |budget| {
+        const p = try prepare(a, &c, src, budget, 256);
+        var rows: u32 = 0;
+        for (p.groups) |g| rows += g.tokens;
+        try std.testing.expect(rows <= budget);
+        if (budget < 16000) try std.testing.expect(rows + 252 > budget); // the smaller budgets fill to within one group
+    }
 }
