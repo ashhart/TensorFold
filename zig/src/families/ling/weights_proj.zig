@@ -38,15 +38,15 @@ pub const Store = struct {
         s.lanes.deinit(s.gpa);
     }
 
-    /// A device buffer of `len` bytes the store owns, named `name`.
+    /// A device buffer of `len` bytes the store owns, named `name`; on failure the store holds nothing new.
     pub fn alloc(s: *Store, len: usize, name: []const u8) !u64 {
+        try s.buffers.ensureUnusedCapacity(s.gpa, 1);
+        try s.named.ensureUnusedCapacity(s.gpa, 1);
+        const owned = try s.gpa.dupe(u8, name);
+        errdefer s.gpa.free(owned);
         const b = try cuda.DeviceBuffer.alloc(s.d, @max(len, 16));
-        errdefer {
-            var x = b;
-            x.free();
-        }
-        try s.buffers.append(s.gpa, b);
-        try s.named.append(s.gpa, .{ .name = try s.gpa.dupe(u8, name), .ptr = b.ptr, .len = len });
+        s.buffers.appendAssumeCapacity(b);
+        s.named.appendAssumeCapacity(.{ .name = owned, .ptr = b.ptr, .len = len });
         return b.ptr;
     }
 

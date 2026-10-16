@@ -12,6 +12,7 @@ pub const mtp = @import("mtp.zig");
 pub const engine = @import("engine.zig");
 pub const lanes = @import("lanes.zig");
 pub const native = @import("native.zig");
+pub const fake_driver = @import("fake_driver.zig");
 
 const Config = config.Config;
 
@@ -52,6 +53,8 @@ test {
     std.testing.refAllDecls(lanes.Lanes);
     std.testing.refAllDecls(mtp.Head);
     _ = native;
+    _ = @import("fake_driver.zig");
+    _ = @import("store_test.zig");
 }
 
 test "config's fixed widths are the kernels' own: KDA heads, the latent cache, the rope" {
