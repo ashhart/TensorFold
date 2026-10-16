@@ -95,6 +95,12 @@ The drafter (`zig/src/families/gemma4/dflash.zig`) implements z-lab's DFlash for
 under [vendored code](#vendored-code-and-weights) (z-lab/dflash, MIT License, Copyright © 2026 Z Lab); the native
 engine vendors no copy.
 
+The 12B (`gemma4_unified`) and its MTP assistant (`zig/src/families/gemma4/assistant.zig`,
+`assistant_weights.zig`) follow @gilby's `gemma4_unified` family at `6b0ead7a`
+([gilby/TensorFold](https://github.com/gilby/TensorFold), `src/tensorfold/families/gemma4_unified/model.py` and
+`assistant.py`), which follows `Gemma4UnifiedAssistantForCausalLM` in transformers (Copyright 2026 the HuggingFace
+Team, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt)). The engine runs none of their code.
+
 ## CUDA
 
 The Python engine's CUDA backends, frozen at 0.6.6, use [PyTorch](https://github.com/pytorch/pytorch), BSD-3-Clause, and

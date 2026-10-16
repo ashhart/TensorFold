@@ -14,6 +14,7 @@ the native engine, or the Python engine frozen at 0.6.6.
 | GLM-5.3-Flash | [MLX on a 256 GB Mac, two-rank CUDA](glm-5.3-flash.md) |
 | Gemma 4 26B-A4B | [MLX, fused one-row decode](gemma-4.md) |
 | Gemma 4 31B | [Native Metal, affine 4-bit](gemma-4-native.md) |
+| Gemma 4 12B | [Native Metal, affine 4-bit, MTP assistant](gemma-4-12b-native.md) |
 | DeepSeek-V4-Flash | [MLX on a 256 GB Mac, DSpark and MTP drafts](deepseek-v4-flash.md) |
 | Qwen3.6-35B-A3B | [MLX with MTP drafts, one-GPU CUDA](qwen3.6-moe.md) |
 
