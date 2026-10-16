@@ -1,9 +1,10 @@
-//! A tensor-parallel group over NCCL: NCCL_COMM_ID gives every rank the same id; rows meet in rank order.
+//! A tensor-parallel group over NCCL (NCCL_COMM_ID; rows in rank order); two ranks add RoCE small gathers (roce.zig).
 const std = @import("std");
 const nccl = @import("nccl.zig");
 const driver = @import("driver.zig");
 const stream_ = @import("stream.zig");
 const memory = @import("memory.zig");
+const roce = @import("roce.zig");
 
 const Stream = stream_.Stream;
 
@@ -12,6 +13,7 @@ pub const Group = struct {
     comm: nccl.Comm,
     rank: usize,
     world: usize,
+    fast: ?*roce.Gather = null, // two ranks' small all-gathers by RoCE writes (openRoce), when both ranks brought it up
 
     /// Rank `rank` of `world` (NCCL opened at run time; NCCL_COMM_ID names rank 0's address, every rank the same).
     pub fn open(rank: usize, world: usize) !Group {
@@ -26,13 +28,26 @@ pub const Group = struct {
     }
 
     pub fn close(g: *Group) void {
+        if (g.fast) |f| f.deinit();
         _ = g.lib.api.ncclCommDestroy(g.comm);
         g.lib.close();
         g.* = undefined;
     }
 
+    /// Two ranks: gathers up to `max_bytes` a rank go by RoCE writes if both ranks bring it up; else NCCL keeps them.
+    pub fn openRoce(g: *Group, gpa: std.mem.Allocator, io: std.Io, d: *const driver.Driver, s: Stream, max_bytes: usize) !void {
+        if (g.world != 2 or g.fast != null) return;
+        g.fast = try roce.Gather.init(gpa, io, d, g, s, roce.wanted(), max_bytes);
+    }
+
+    /// A failed RoCE gather's error (its rows hold nothing valid): call it after a synchronize that reads a gather.
+    pub fn check(g: *const Group) !void {
+        if (g.fast) |f| try f.check();
+    }
+
     /// `bytes` at `mine` from every rank into `all` in rank order (world * bytes there), on `s`.
     pub fn allGather(g: *const Group, s: Stream, mine: u64, all: u64, bytes: usize) !void {
+        if (g.fast) |f| if (f.fits(bytes)) return f.gather(s.handle, mine, all, bytes);
         try g.lib.check(g.lib.api.ncclAllGather(mine, all, bytes, .u8, g.comm, s.handle), "ncclAllGather");
     }
 
@@ -68,6 +83,7 @@ pub const Group = struct {
         try dev.uploadAsync(g.rank * size, std.mem.asBytes(&mine), s.handle);
         try g.allGather(s, dev.ptr + g.rank * size, dev.ptr, size);
         try s.synchronize();
+        try g.check();
         try dev.download(0, std.mem.sliceAsBytes(out));
     }
 };

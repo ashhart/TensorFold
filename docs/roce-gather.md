@@ -13,8 +13,12 @@ One launch: (1) every block stages its share of the shard into send[seq & 1]; (2
 
 ## Host side
 
-Small all-gathers between two ranks as one-shot RDMA writes over RoCE: b12x's "RoCEnante" exchange (https://github.com/local-inference-lab/b12x, b12x/comm/roce, Apache License 2.0), written for two ranks: the kernel (kernels/cuda/roce_gather.cu) stages this rank's shard in pinned host memory and rings a doorbell; a proxy thread here RDMA-writes it to the peer, striped over the HCAs, each stripe followed by its sequence flag on the same queue pair; the kernel waits for the peer's flags and copies both shards out. A decode step's gathers are a few rows of partials, where NCCL spends tens of microseconds a call in fixed costs; this path takes about ten. libibverbs is opened at run time (as the driver and NCCL are): without it, or without an active HCA, the caller keeps NCCL.
+Small all-gathers between two ranks as one-shot RDMA writes over RoCE: b12x's "RoCEnante" exchange (https://github.com/local-inference-lab/b12x, b12x/comm/roce, Apache License 2.0), written for two ranks: the kernel (kernels/cuda/roce_gather.cu) stages this rank's shard in pinned host memory and rings a doorbell; a proxy thread here RDMA-writes it to the peer, striped over the HCAs, each stripe followed by its sequence flag on the same queue pair; the kernel waits for the peer's flags and copies both shards out. A decode step's gathers are a few rows of partials. On two GB10s with one ConnectX-7 cable (NCCL 2.30.7, `tf-cuda-test roce-gather`, 2,000 calls back to back) this path took 10.4 us a call at 4 KiB a rank against NCCL's 12.3, 11.6 against 13.5 at 8 KiB, 17.4 against 20.5 at 32 KiB, and 17.4 against 51.5 at 64 KiB. libibverbs is opened at run time (as the driver and NCCL are): without it, or without an active HCA, the caller keeps NCCL.
 
-## Control link
+## Setup and use
 
-Two ranks over the hosts' network: a TCP control link (rank 0 listens, rank 1 connects; framed messages carry requests and per-round decisions) and the NCCL communicator it brings up (rank 0 makes the unique id and sends it).
+`tp_group.Group.openRoce` brings the path up on a two-rank group: each rank opens its HCAs, and what each brings (its region, keys, queue pairs and the largest shard it would send) crosses the group's own NCCL communicator, as does each rank's verdict after connecting. Both ranks get the path or neither does (`TF_ROCE=0` on either rank keeps NCCL). From then on `Group.allGather` sends a gather of up to the smaller rank's cap (512 KiB by default) this way and leaves larger ones to NCCL; the size alone decides, so both ranks always take the same path. A rank whose buffers are not 16-byte aligned gets `error.Misaligned` instead of falling back alone. Liveness is `tp_watch`'s, as for every group.
+
+A failed exchange writes nothing into the gathered rows. Call `Group.check` after any synchronize whose result reads a gather: it returns the error the GPU or the proxy recorded.
+
+`tf-cuda-test roce-gather <rank>` runs on both ranks (NCCL_COMM_ID set): every size up to the cap and past it against NCCL's all-gather, byte for byte, then each path's time a call.
