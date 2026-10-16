@@ -1,4 +1,4 @@
-//! Gemma 4 dense (31B, 12B) on the lane host: windows of up to 16 rows, several streams a forward, DFlash drafts.
+//! Gemma 4 dense (31B, 12B) on the lane host: windows of up to 16 rows, several streams a forward, external drafts.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -11,7 +11,7 @@ const Resident = @import("resident.zig").Resident;
 /// The context a stream gets without --context: attention's per-call scratch grows with it (pass --context for more).
 const default_context = 32768;
 
-/// --drafter loads z-lab's DFlash drafter (gemma-4-31B-it-DFlash, for the 31B) in front of the engine.
+/// --drafter loads z-lab's DFlash drafter (31B) or Google's MTP assistant (12B) in front of the engine.
 pub const takes_drafter = true;
 
 const Host = struct {
@@ -20,6 +20,7 @@ const Host = struct {
     model: *g.Model,
     metal: *g.backend.Metal,
     draft: ?*g.dflash.Drafter = null,
+    assist: ?*g.assistant.Drafter = null,
     wrap: ?lanes.drafted.Drafted = null,
     warm: mtl.keepalive.Target = undefined, // the residency set's queue, for the lane host's idle ticker
     resident: ?Resident = null, // weights, scratches, the drafter's and the tower's buffers, wired between requests
@@ -38,6 +39,7 @@ const Host = struct {
         h.core.deinit();
         if (h.wrap) |*w| w.deinit();
         if (h.draft) |d| d.deinit();
+        if (h.assist) |d| d.deinit();
         h.config.deinit(h.gpa);
         if (h.resident) |*r| r.deinit();
         h.metal.deinit();
@@ -85,9 +87,20 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     errdefer h.metal.deinit();
     try h.metal.measure(); // the depth rule prices drafts against the window forward's cost by rows
     h.draft = null;
+    h.assist = null;
     h.wrap = null;
     h.resident = null;
-    if (if (o.drafts) o.drafter else null) |dir| {
+    const draft_dir = if (o.drafts) o.drafter else null;
+    const assistant = if (draft_dir) |dir| g.assistant_weights.isAssistant(a, io, dir) catch false else false;
+    if (draft_dir) |dir| if (assistant) {
+        h.assist = g.assistant.Drafter.init(gpa, io, h.metal, dir) catch |err| {
+            problem.* = if (err == error.AssistantForAnotherTarget)
+                try std.fmt.allocPrint(a, "the Gemma 4 MTP assistant at {s} was trained on another target: its backbone width and key heads do not fit Gemma 4 {s} (google/gemma-4-12B-it-assistant drafts for the 12B only)", .{ dir, model.config.geo.name })
+            else
+                try std.fmt.allocPrint(a, "the native Gemma 4 engine cannot load the MTP assistant at {s} ({s}): it takes google/gemma-4-12B-it-assistant as released (bf16, no ordered embeddings)", .{ dir, @errorName(err) });
+            return error.Refused;
+        };
+    } else {
         h.draft = g.dflash.Drafter.init(gpa, io, model, dir, .{ .capacity = @intCast(window) }) catch |err| {
             problem.* = if (err == error.DraftForAnotherTarget)
                 try std.fmt.allocPrint(a, "the native Gemma 4 drafter cannot load {s}: its width or taps do not fit Gemma 4 {s} (DFlash drafts take z-lab/gemma-4-31B-it-DFlash on the 31B only)", .{ dir, model.config.geo.name })
@@ -95,9 +108,11 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
                 try std.fmt.allocPrint(a, "the native Gemma 4 drafter cannot load {s} ({s}): it takes z-lab/gemma-4-31B-it-DFlash", .{ dir, @errorName(err) });
             return error.Refused;
         };
-    }
+    };
     errdefer if (h.draft) |d| d.deinit();
-    if (h.draft) |d| h.wrap = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), d.drafter());
+    errdefer if (h.assist) |d| d.deinit();
+    const drafter: ?lanes.drafter.Drafter = if (h.draft) |d| d.drafter() else if (h.assist) |d| d.drafter() else null;
+    if (drafter) |d| h.wrap = try lanes.drafted.Drafted.init(gpa, h.metal.backend(), d);
     errdefer if (h.wrap) |*w| w.deinit();
     const facts = if (h.wrap) |*w| w.facts(h.metal.facts()) else h.metal.facts();
     h.config = try lanes.Config.init(gpa, facts, g.state.max_rows, g.state.max_rows - 1);
@@ -115,7 +130,7 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     errdefer if (h.resident) |*r| r.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start(); // the host's lists are empty until its thread runs, so a failed start leaves nothing to free
-    std.log.info("gemma4: Gemma 4 {s}, context {d} tokens, {d} streams{s}{s}", .{ model.config.geo.name, window, @max(o.lanes, 2), if (h.draft != null) ", DFlash drafts" else "", if (vis != null) ", images" else "" });
+    std.log.info("gemma4: Gemma 4 {s}, context {d} tokens, {d} streams{s}{s}", .{ model.config.geo.name, window, @max(o.lanes, 2), if (h.draft != null) ", DFlash drafts" else if (h.assist != null) ", MTP assistant drafts" else "", if (vis != null) ", images" else "" });
     return h;
 }
 
@@ -130,6 +145,10 @@ fn holdResident(h: *Host) !void {
     try buffersOf(h.gpa, &list, &h.metal.scratch);
     try buffersOf(h.gpa, &list, &h.metal.prompt_scratch);
     if (h.draft) |d| {
+        try list.appendSlice(h.gpa, d.w.owned.items);
+        try buffersOf(h.gpa, &list, d);
+    }
+    if (h.assist) |d| {
         try list.appendSlice(h.gpa, d.w.owned.items);
         try buffersOf(h.gpa, &list, d);
     }
