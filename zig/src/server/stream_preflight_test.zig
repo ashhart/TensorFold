@@ -473,14 +473,20 @@ test "closed or busy admission is service unavailable across chat, messages and 
         .{ .route = .messages, .body = "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":1}" },
         .{ .route = .responses, .body = "{\"model\":\"test-model\",\"input\":\"x\",\"max_output_tokens\":1}" },
     };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var wrong: usize = 0;
     var engine: ClosedEngine = .{};
     for ([_]api.SubmitError{ error.Closed, error.Busy }) |reason| {
         engine.reason = reason;
-        for (cases) |c| {
-            const seen = try sendWith(engine.engine(), c.route, c.body, .{});
-            try std.testing.expectEqual(@as(?u16, 503), seen.status);
-            try std.testing.expect(!seen.opened);
-            try std.testing.expectEqual(@as(i64, 0), seen.preparing);
-        }
+        for (cases) |c| for ([_]bool{ false, true }) |streaming| {
+            const body = if (streaming) try std.mem.concat(arena.allocator(), u8, &.{ c.body[0 .. c.body.len - 1], ",\"stream\":true}" }) else c.body;
+            const seen = try sendWith(engine.engine(), c.route, body, .{});
+            if (seen.status != 503 or seen.opened or seen.preparing != 0) {
+                wrong += 1;
+                std.debug.print("ADMISSION reason={s} route={s} stream={any} status={any} opened={any} events={d} preparing={d}\n", .{ @errorName(reason), @tagName(c.route), streaming, seen.status, seen.opened, seen.events, seen.preparing });
+            }
+        };
     }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
 }

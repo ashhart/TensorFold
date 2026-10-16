@@ -534,3 +534,25 @@ test "status after a reply finishes reads no freed job" {
     try std.testing.expectEqual(@as(u32, 0), st.running);
     try std.testing.expectEqual(@as(usize, 0), st.streams);
 }
+
+test "a drained Flash Next host is unhealthy before another submit" {
+    const gpa = std.testing.allocator;
+    var host: Host = .{ .gpa = gpa, .io = std.testing.io, .eng = undefined, .info_ = .{} };
+    defer host.decoded.deinit(gpa);
+    const engine = host.engine();
+    var status: api.Status = .{};
+    engine.status(&status, &.{});
+    try std.testing.expect(status.healthy);
+    engine.drain();
+    engine.status(&status, &.{});
+    const Sink = struct {
+        fn event(_: *anyopaque, _: api.Id, _: *const api.Event) void {
+            @panic("a drained host must refuse admission");
+        }
+    };
+    var ctx: u8 = 0;
+    const request: api.Request = .{ .prompt = &.{1}, .max_tokens = 1 };
+    try std.testing.expectError(error.Closed, engine.submit(1, &request, .{ .ctx = &ctx, .event = Sink.event }));
+    try std.testing.expectEqual(@as(usize, 0), host.queued.items.len);
+    try std.testing.expect(!status.healthy);
+}
