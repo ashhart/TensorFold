@@ -31,6 +31,8 @@ pub const Metal = struct {
     shared_timed: usize = 0,
     io: std.Io,
     trace: bool = false, // GEMMA_DRAFT_TRACE: each verify's rows and wall time on stderr
+    /// Whether the drafter keeps a context with a kept state (DFlash does); the MTP assistant reads the target's alone.
+    resume_needs_draft: bool = true,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -165,8 +167,8 @@ pub const Metal = struct {
             const snap: *const snapshot.Snap = @ptrCast(@alignCast(saved));
             var inside = false; // an image's rows see each other: a state inside one is not resumed
             for (stream.images) |im| inside = inside or (im.at < snap.at and snap.at < im.at + im.tokens);
-            // a drafting stream resumes only a state kept with its drafter's context (dflash.zig keepLane)
-            const drafter_less = stream.drafts and self.prompt_scratch.taps != null and snap.draft == null;
+            // a drafting stream resumes only a state kept with its drafter's context, if any (dflash.zig keepLane)
+            const drafter_less = stream.drafts and self.prompt_scratch.taps != null and snap.draft == null and self.resume_needs_draft;
             if (snap.at < ids.len and !inside and !drafter_less) {
                 if (snapshot.restore(self.gpa, self.model.queue, snap, cache)) stream.cached = snap.at else |_| stream.reuse_failed = true;
             } else stream.reuse_failed = true;
