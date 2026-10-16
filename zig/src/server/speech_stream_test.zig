@@ -45,7 +45,7 @@ const Script = struct {
             if (request.stream) sink.event(sink.ctx, id, &.{ .audio = n });
             done = n;
         }
-        if (e.reason == .stop) request.result.samples = done;
+        if (e.reason == .stop or e.reason == .length) request.result.samples = done;
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = e.reason, .message = e.message } });
     }
     fn cancel(ctx: *anyopaque, _: api.Id) void {
@@ -273,19 +273,44 @@ test "audio is on the wire before the synthesis ends; frame 0 alone when sent be
     s.join(&script);
 }
 
-test "a failure or the frame limit after audio ends the stream without its terminating chunk" {
-    for ([_]api.Reason{ .failed, .length }) |reason| {
-        var script: Script = .{ .steps = &.{frame}, .reason = reason, .message = "the codec produced non-finite audio" };
+test "a failure after audio ends the stream without its terminating chunk" {
+    var script: Script = .{ .steps = &.{frame}, .reason = .failed, .message = "the codec produced non-finite audio" };
+    var s: Served = undefined;
+    try s.start(&script, "HTTP/1.1", stream_body, 2000);
+    defer s.deinit();
+    _ = try s.readHead();
+    var terminated = true;
+    const audio = try s.payload(&terminated);
+    defer gpa.free(audio);
+    s.join(&script);
+    try std.testing.expectEqualStrings(&pcm(1), audio);
+    try std.testing.expect(!terminated and s.eof);
+}
+
+test "audio clipped at the frame limit ends the stream with the length trailer" {
+    var script: Script = .{ .steps = &.{ frame, 2 * frame }, .reason = .length, .inline_ = true };
+    var s: Served = undefined;
+    try s.start(&script, "HTTP/1.1", stream_body, 2000);
+    defer s.deinit();
+    try expectHeader(try s.readHead(), "Trailer: X-Finish-Reason\r\n");
+    s.join(&script);
+    const rest = try s.readRest();
+    const end = "\r\n0\r\nX-Finish-Reason: length\r\n\r\n";
+    try std.testing.expect(std.mem.startsWith(u8, rest, "2000\r\n") and std.mem.endsWith(u8, rest, end));
+    try std.testing.expectEqualStrings(&pcm(2), rest["2000\r\n".len .. rest.len - end.len]);
+}
+
+test "a whole reply returns audio clipped at the frame limit and names its finish reason" {
+    for ([_]api.Reason{ .stop, .length }) |reason| {
+        var script: Script = .{ .steps = &.{frame}, .reason = reason };
         var s: Served = undefined;
-        try s.start(&script, "HTTP/1.1", stream_body, 2000);
+        try s.start(&script, "HTTP/1.1", "{\"model\":\"m\",\"input\":\"hi\",\"response_format\":\"pcm\"}", 2000);
         defer s.deinit();
-        _ = try s.readHead();
-        var terminated = true;
-        const audio = try s.payload(&terminated);
-        defer gpa.free(audio);
+        const head = try s.readHead();
+        try expectHeader(head, "HTTP/1.1 200");
+        try expectHeader(head, if (reason == .length) "X-Finish-Reason: length\r\n" else "X-Finish-Reason: stop\r\n");
         s.join(&script);
-        try std.testing.expectEqualStrings(&pcm(1), audio);
-        try std.testing.expect(!terminated and s.eof);
+        try std.testing.expectEqualStrings(&pcm(1), try s.readRest());
     }
 }
 

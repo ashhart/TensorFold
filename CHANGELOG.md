@@ -5,6 +5,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - speech: `stream: true` with `response_format: pcm` streams HTTP/1.1 chunks while Drama 3 generates; incremental codec decode bit-identical to the whole decode (oracle-gated)
+- speech: a Drama 3 reply that reaches `max_frames` without an end of speech returns its clipped audio with HTTP 200, as the reference returns its capped replies, instead of a 500 without audio. A whole reply carries `X-Finish-Reason: stop` or `length`; a stream declares the trailer, and only a clipped stream ends with `X-Finish-Reason: length`, a normally finished one with the plain last chunk.
 
 ## 1.0.11
 

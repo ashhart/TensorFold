@@ -152,11 +152,11 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
     if (why(&box, samples, pcm.len)) |message| return fail(c, cx, id, .server, message);
     const data = quantizeInPlace(pcm[0..samples]) catch return fail(c, cx, id, .server, "the synthesized audio has non-finite samples");
     if (data.len > std.math.maxInt(u32) - 36) return fail(c, cx, id, .server, "the synthesized audio is too long for one reply");
-    sendAudio(c, plan.format, sp.sample_rate, data) catch {
+    sendAudio(c, plan.format, sp.sample_rate, data, box.reason) catch {
         c.close = true; // a head already started or a client gone: nothing more can be sent on this connection
         return;
     };
-    log.line("speech {s} prompt={d} samples={d} format={s} seconds={d:.2}", .{ id, plan.prompt.len, samples, @tagName(plan.format), clock.seconds(clock.nowNs(srv.io) - received) });
+    log.line("speech {s} prompt={d} samples={d} format={s} finish={s} seconds={d:.2}", .{ id, plan.prompt.len, samples, @tagName(plan.format), @tagName(box.reason), clock.seconds(clock.nowNs(srv.io) - received) });
 }
 
 /// The client left before the reply ended; the synthesis was cancelled and waited out.
@@ -167,11 +167,10 @@ fn left(srv: *Server, c: *Conn, id: []const u8, prompt_len: usize, received: i96
     log.line("{s}", .{log.ended(&buf, id, null, prompt_len, 0, clock.seconds(clock.nowNs(srv.io) - received))});
 }
 
-/// Why a finished synthesis has no complete audio, or null.
+/// Why a finished synthesis has no complete audio, or null; clipped audio (length) is sent with X-Finish-Reason.
 fn why(box: *const Mailbox, samples: usize, capacity: usize) ?[]const u8 {
     return switch (box.reason) {
-        .stop => if (samples == 0 or samples > capacity) "the engine finished without complete audio" else null,
-        .length => "speech reached the frame limit without ending; truncated audio is not returned",
+        .stop, .length => if (samples == 0 or samples > capacity) "the engine finished without complete audio" else null,
         .cancelled => "speech synthesis was cancelled",
         .failed => if (box.message.len > 0) box.message else "speech synthesis failed",
     };
@@ -188,12 +187,12 @@ fn streamReply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechIn
         log.line("speech {s} stream ended incomplete after samples={d}: {s}", .{ id, sent.samples, message });
         return;
     }
-    c.writeAll(last_chunk) catch {
+    c.writeAll(if (box.reason == .length) length_chunk else last_chunk) catch {
         c.close = true;
         return;
     };
-    log.line("speech {s} prompt={d} samples={d} format=pcm stream=true first_audio_ready_seconds={d:.3} first_frame_written_seconds={d:.3} seconds={d:.2}", .{
-        id, plan.prompt.len, sent.samples, clock.seconds(sent.first_ready - received), clock.seconds(sent.first_written - received), clock.seconds(clock.nowNs(srv.io) - received),
+    log.line("speech {s} prompt={d} samples={d} format=pcm stream=true finish={s} first_audio_ready_seconds={d:.3} first_frame_written_seconds={d:.3} seconds={d:.2}", .{
+        id, plan.prompt.len, sent.samples, @tagName(box.reason), clock.seconds(sent.first_ready - received), clock.seconds(sent.first_written - received), clock.seconds(clock.nowNs(srv.io) - received),
     });
 }
 
@@ -260,6 +259,7 @@ fn startStream(c: *Conn, sample_rate: u32) error{Closed}!void {
     c.addHeader("X-Sample-Rate", std.fmt.bufPrint(&rate, "{d}", .{sample_rate}) catch unreachable) catch return error.Closed;
     c.addHeader("X-Channels", "1") catch return error.Closed;
     c.addHeader("X-Bit-Depth", "16") catch return error.Closed;
+    c.addHeader("Trailer", "X-Finish-Reason") catch return error.Closed;
     if (c.close) c.addHeader("Connection", "close") catch return error.Closed;
     // each chunk leaves at once rather than waiting on the client's acknowledgement of the last (no effect off TCP)
     std.posix.setsockopt(c.fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1))) catch {};
@@ -269,8 +269,9 @@ fn startStream(c: *Conn, sample_rate: u32) error{Closed}!void {
     return c.finish("");
 }
 
-/// The terminating chunk: sent only after a complete synthesis's last samples.
+/// Ends a complete stream; audio clipped at the frame limit ends with the X-Finish-Reason trailer instead.
 const last_chunk = "0\r\n\r\n";
+const length_chunk = "0\r\nX-Finish-Reason: length\r\n\r\n";
 
 fn refuse(c: *Conn, cx: *Cx, id: []const u8, e: errors.Refused) void {
     if (e == error.OutOfMemory) {
@@ -295,13 +296,14 @@ fn send(c: *Conn, cx: *Cx, id: []const u8) void {
 }
 
 /// The head, then the WAV header and the samples where they lie: the audio is never copied to prepend a header.
-fn sendAudio(c: *Conn, format: Format, sample_rate: u32, data: []const u8) error{ Closed, OutOfMemory }!void {
+fn sendAudio(c: *Conn, format: Format, sample_rate: u32, data: []const u8, reason: api.Reason) error{ Closed, OutOfMemory }!void {
     const header: ?[wav_header_len]u8 = if (format == .wav) wavHeader(sample_rate, @intCast(data.len)) else null;
     const header_len: usize = if (header != null) wav_header_len else 0;
     try c.startResponse(200, null);
     try c.addHeader("Content-Type", format.contentType());
     var len: [24]u8 = undefined;
     try c.addHeader("Content-Length", std.fmt.bufPrint(&len, "{d}", .{header_len + data.len}) catch unreachable);
+    try c.addHeader("X-Finish-Reason", @tagName(reason));
     if (c.close) try c.addHeader("Connection", "close");
     defer c.out.clearRetainingCapacity();
     if (!std.mem.eql(u8, c.version, "HTTP/0.9")) try c.out.appendSlice(c.gpa, "\r\n");

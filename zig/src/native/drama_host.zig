@@ -221,14 +221,14 @@ const Host = struct {
         const r = job.request;
         var stats: api.Stats = .{};
         const began = h.now();
-        const samples = h.synthesize(job, &stats, began) catch |e| {
+        const done = h.synthesize(job, &stats, began) catch |e| {
             h.stream.synchronize() catch {}; // no device work outlives the request it served
             if (e == error.Cancelled) return h.finish(job, .cancelled, stats, "");
             std.log.warn("drama: synthesis {d} failed: {s}", .{ job.id, @errorName(e) });
             return h.finish(job, .failed, stats, words(e));
         };
-        r.result.samples = samples; // published only after the full decode and the final cancellation check
-        h.finish(job, .stop, stats, "");
+        r.result.samples = done.samples; // published only after the full decode and the final cancellation check
+        h.finish(job, if (done.truncated) .length else .stop, stats, "");
     }
 
     /// Frees the slot (a new request may be admitted while this one's event is out), then sends `finished`.
@@ -244,8 +244,8 @@ const Host = struct {
         job.sink.event(job.sink.ctx, job.id, &event);
     }
 
-    /// Prompt pass, frame generation and codec decode into the request's PCM (streamed by `publish`); returns samples.
-    fn synthesize(h: *Host, job: Job, stats: *api.Stats, began: i96) !usize {
+    /// Prompt, generation and codec decode into the request's PCM; at max_frames the audio so far is kept, truncated.
+    fn synthesize(h: *Host, job: Job, stats: *api.Stats, began: i96) !Done {
         const r = job.request;
         try h.check();
         try h.ctx.makeCurrent(); // CUDA binds per thread: the worker's calls need the context current
@@ -283,6 +283,7 @@ const Host = struct {
         var hidden = try lastRow(last.hidden, last.rows, b.hidden * 2);
         var logits = try lastRow(last.semantic_logits, 1, logit_cols * 4);
         var count: usize = 0;
+        var truncated = false;
         var published: usize = 0; // frames a streamed request's caller owns
         if (r.stream) h.codec.begin();
         while (true) {
@@ -294,7 +295,10 @@ const Host = struct {
             h.codes[count] = frame[1..11].*;
             count += 1;
             h.noteFrames(count);
-            if (count == r.max_frames) return error.SpeechTruncated;
+            if (count == r.max_frames) {
+                truncated = true;
+                break;
+            }
             if (r.stream and (published == 0 or count - published == stream_chunk_frames)) published = try h.publish(job, count);
             h.frames[0] = frame;
             const extra = try t.setInput(s, h.frames[0..1]);
@@ -308,15 +312,18 @@ const Host = struct {
         try h.check();
         if (r.stream) {
             if (count > published) _ = try h.publish(job, count);
-            return count * frame_length;
+            return .{ .samples = count * frame_length, .truncated = truncated };
         }
         const want = count * frame_length;
         const samples = try h.codec.decode(s, h.codes[0..count], r.pcm);
         if (samples != want) return error.CodecSampleCount;
         for (r.pcm[0..samples]) |x| if (!std.math.isFinite(x)) return error.NonFiniteAudio;
         try h.check();
-        return samples;
+        return .{ .samples = samples, .truncated = truncated };
     }
+
+    /// What a finished synthesis produced: its samples, and whether it stopped at max_frames before its end of speech.
+    const Done = struct { samples: usize, truncated: bool };
 
     /// Decodes the frames not yet decoded, checks them, then hands pcm[0..frames * 2048] over with an `audio` event.
     fn publish(h: *Host, job: Job, frames: usize) !usize {
@@ -364,7 +371,6 @@ fn lastRow(buffer: cuda.DeviceBuffer, rows: usize, row_bytes: usize) !cuda.Devic
 /// The failure message a finished event carries (static text: it outlives the sink call).
 fn words(err: anyerror) []const u8 {
     return switch (err) {
-        error.SpeechTruncated => "no end of speech within the request's max_frames; truncated audio is not returned",
         error.EmptySpeech => "the model ended speech before its first audio frame",
         error.NonFiniteSpeechLogits => "the model produced non-finite speech logits",
         error.NonFiniteAudio => "the codec produced non-finite audio",
