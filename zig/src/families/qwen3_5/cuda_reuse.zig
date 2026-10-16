@@ -19,8 +19,8 @@ pub fn formatOf(e: *const Engine) Format {
     return .bf16;
 }
 
-/// An image a kept state's prompt holds: the row its placeholders start at, its digest (lanes.Image.digest).
-pub const Seen = struct { at: u32, digest: [32]u8 };
+/// An image a kept state's prompt holds: the row its placeholders start at, its identity (core/picture/identity.zig).
+pub const Seen = struct { at: u32, id: u64 };
 
 /// One kept state: its bytes on the host, the position it stands at, its rotary shift, its cache format and images.
 pub const Copy = struct {
@@ -89,12 +89,12 @@ const Layout = struct {
     }
 };
 
-/// Whether a request's images match a kept state's: the same digests at the same rows, for every image before `at`.
+/// Whether a request's images match a kept state's: the same identities at the same rows, for every image before `at`.
 pub fn sameImages(kept: []const Seen, request: []const Seen, at: usize) bool {
     var n: usize = 0;
     for (request) |r| {
         if (r.at >= at) continue;
-        if (n >= kept.len or kept[n].at != r.at or !std.mem.eql(u8, &kept[n].digest, &r.digest)) return false;
+        if (n >= kept.len or kept[n].at != r.at or kept[n].id != r.id) return false;
         n += 1;
     }
     return n == kept.len;
@@ -263,14 +263,14 @@ test "fp8 pieces follow qwen35_kv8.cu: a layer's key then value rows, then their
 }
 
 test "a state resumes only a request with the same images before its position" {
-    const d = [_][32]u8{ @splat(1), @splat(2), @splat(3) };
-    const kept = [_]Seen{.{ .at = 5, .digest = d[0] }};
-    try std.testing.expect(sameImages(&kept, &.{ .{ .at = 5, .digest = d[0] }, .{ .at = 40, .digest = d[2] } }, 20)); // a later image is the pass's
-    try std.testing.expect(!sameImages(&kept, &.{.{ .at = 5, .digest = d[1] }}, 20)); // another image under the same ids
-    try std.testing.expect(!sameImages(&kept, &.{.{ .at = 6, .digest = d[0] }}, 20));
+    const d = [_]u64{ 1, 2, 3 };
+    const kept = [_]Seen{.{ .at = 5, .id = d[0] }};
+    try std.testing.expect(sameImages(&kept, &.{ .{ .at = 5, .id = d[0] }, .{ .at = 40, .id = d[2] } }, 20)); // a later image is the pass's
+    try std.testing.expect(!sameImages(&kept, &.{.{ .at = 5, .id = d[1] }}, 20)); // another image under the same ids
+    try std.testing.expect(!sameImages(&kept, &.{.{ .at = 6, .id = d[0] }}, 20));
     try std.testing.expect(!sameImages(&kept, &.{}, 20)); // a text prompt never resumes an image's state
-    try std.testing.expect(!sameImages(&.{}, &.{.{ .at = 5, .digest = d[0] }}, 20)); // nor an image prompt a text state past its image
-    try std.testing.expect(sameImages(&.{}, &.{.{ .at = 5, .digest = d[0] }}, 5)); // a text prefix before it
+    try std.testing.expect(!sameImages(&.{}, &.{.{ .at = 5, .id = d[0] }}, 20)); // nor an image prompt a text state past its image
+    try std.testing.expect(sameImages(&.{}, &.{.{ .at = 5, .id = d[0] }}, 5)); // a text prefix before it
 }
 
 test "a restore refuses another cache format, another length, a position past the cache and other images" {
@@ -279,15 +279,15 @@ test "a restore refuses another cache format, another length, a position past th
     if (comptime @hasField(Engine, "kv8")) e.kv8 = false;
     var cache: Cache = undefined;
     cache.cap = 64;
-    const d: [32]u8 = @splat(9);
-    var images = [_]Seen{.{ .at = 2, .digest = d }};
+    const d: u64 = 9;
+    var images = [_]Seen{.{ .at = 2, .id = d }};
     const l: Layout = .{ .g = e.g, .format = .bf16, .cap = 64, .at = 10 };
     const host = try std.testing.allocator.alignedAlloc(u8, .@"16", @intCast(l.total()));
     defer std.testing.allocator.free(host);
     var copy: Copy = .{ .host = .{ .d = undefined, .bytes = host }, .len = l.total(), .at = 10, .delta = 0, .format = .bf16, .images = &images };
-    const same = [_]Seen{.{ .at = 2, .digest = d }};
+    const same = [_]Seen{.{ .at = 2, .id = d }};
     try std.testing.expect(restorable(&e, &cache, &copy, &same));
-    try std.testing.expect(!restorable(&e, &cache, &copy, &.{.{ .at = 2, .digest = @splat(8) }}));
+    try std.testing.expect(!restorable(&e, &cache, &copy, &.{.{ .at = 2, .id = 8 }}));
     copy.format = .fp8; // a state kept from fp8 rows never lands in bf16 ones, nor the other way
     try std.testing.expect(!restorable(&e, &cache, &copy, &same));
     copy.format = .bf16;

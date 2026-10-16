@@ -436,10 +436,10 @@ const Lanes = struct {
         if (self.seen.fetchRemove(stream)) |entry| self.gpa.free(entry.value);
     }
 
-    /// Each image's first placeholder row and digest: a kept state resumes only the same images.
+    /// Each image's first placeholder row and identity: a kept state resumes only the same images.
     fn seenOf(self: *Lanes, images: []const lanes.stream.Image) ![]reuse.Seen {
         const seen = try self.gpa.alloc(reuse.Seen, images.len);
-        for (seen, images) |*s, im| s.* = .{ .at = im.at, .digest = im.digest() };
+        for (seen, images) |*s, im| s.* = .{ .at = im.at, .id = im.hash };
         return seen;
     }
 };

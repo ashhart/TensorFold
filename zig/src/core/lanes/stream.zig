@@ -105,16 +105,7 @@ pub const Image = struct {
     gw: u32,
     at: u32,
     tokens: u32,
-
-    /// BLAKE3 of the grid and every patch bit: a kept state restores only for the images it was made from.
-    pub fn digest(im: Image) [32]u8 {
-        var h = std.crypto.hash.Blake3.init(.{});
-        for ([_]u32{ im.gh, im.gw }) |g| h.update(&std.mem.toBytes(std.mem.nativeToLittle(u32, g)));
-        h.update(std.mem.sliceAsBytes(im.pixels));
-        var out: [32]u8 = undefined;
-        h.final(&out);
-        return out;
-    }
+    hash: u64 = 0, // core/picture/identity.zig's: the bytes and the grid, as the prompt cache's key names the image
 };
 
 pub const Spec = struct {
@@ -478,14 +469,4 @@ test "loop guard fires, closes thinking, and latches once" {
     try std.testing.expect(!s.finished and s.force.items.len == 0);
     _ = try s.commit(gpa, &.{8}, &.{});
     try std.testing.expect(!s.finished and s.loop_period.? == 1);
-}
-
-test "an image's digest covers its grid and every patch bit" {
-    const a: [4]f32 = .{ 0.1, 0.2, 0.3, 0.4 };
-    const b: [4]f32 = .{ 0.1, 0.2, -0.3, 0.4 };
-    const one: Image = .{ .pixels = &a, .gh = 2, .gw = 2, .at = 5, .tokens = 1 };
-    const da = one.digest();
-    try std.testing.expect(!std.mem.eql(u8, &da, &(Image{ .pixels = &b, .gh = 2, .gw = 2, .at = 5, .tokens = 1 }).digest()));
-    try std.testing.expect(!std.mem.eql(u8, &da, &(Image{ .pixels = &a, .gh = 1, .gw = 4, .at = 5, .tokens = 1 }).digest()));
-    try std.testing.expectEqualSlices(u8, &da, &(Image{ .pixels = &a, .gh = 2, .gw = 2, .at = 9, .tokens = 1 }).digest());
 }
